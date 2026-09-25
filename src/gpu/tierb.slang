@@ -125,10 +125,14 @@ C cload(StructuredBuffer<CVal> b, uint i) { return b[i]; }
 static const uint STGW = CH * WG;
 groupshared uint stg[STGW * PPG];
 static uint _stgBase;
-void stgPut(uint i, C v)
-{ stg[_stgBase+i] = (f32tof16(float(v.x)) & 0xFFFFu) | (f32tof16(float(v.y)) << 16); }
-C stgGet(uint i)
-{ uint p = stg[_stgBase+i]; return C(CS(f16tof32(p & 0xFFFFu)), CS(f16tof32(p >> 16))); }
+//: Pure bitcast, no conversion. C is already half2 and the slot is 32
+//: bits, so packing is a reinterpret. The previous form went
+//: half -> float -> half-bits via f32tof16/f16tof32 on every stage access,
+//: and the exchange touches every register twice per level: that round
+//: trip was 196 v_cvt_f32_f16 in the disassembly, converting data that
+//: was already in the right format.
+void stgPut(uint i, C v) { stg[_stgBase+i] = bit_cast<uint>(v); }
+C stgGet(uint i) { return bit_cast<C>(stg[_stgBase+i]); }
 #else
 static const uint STGW = CH * WG * 2;
 groupshared uint stg[STGW * PPG];
@@ -613,15 +617,12 @@ void peakLane(uint pair, uint tid, uint lane, H magv[16], H re[16], H im[16],
     if (tid == 0) stg[_stgBase] = thrBits;
     GroupMemoryBarrierWithGroupSync();
 
-    uint myMag[16];
-    uint bestBits = thrBits;
-    [unroll] for (uint i = 0; i < R; ++i) {
-        uint idx = slotToIndex(tid * R + i);
-        bool live = (idx >= winStart && idx < winEnd);
-        float m = float(lane == 0u ? magv[i].x : magv[i].y);
-        myMag[i] = live ? asuint(m) : 0u;
-        bestBits = max(bestBits, myMag[i]);
-    }
+    // Reduce PACKED: one v_pk_max_f16 per register gives both lanes'
+    // running maximum. The previous form extracted a lane per element --
+    // 16 v_mov_b16 per pair -- to do the same work at half rate.
+    H bestH = H(0.0f);
+    [unroll] for (uint i = 0; i < R; ++i) bestH = max(bestH, magv[i]);
+    uint bestBits = max(thrBits, asuint(float(lane == 0u ? bestH.x : bestH.y)));
 #if PPG == 1
     uint wm = WaveActiveMax(bestBits);
     if (WaveIsFirstLane() && wm > thrBits) InterlockedMax(stg[_stgBase], wm);
@@ -631,7 +632,8 @@ void peakLane(uint pair, uint tid, uint lane, H magv[16], H re[16], H im[16],
     GroupMemoryBarrierWithGroupSync();
 
     [unroll] for (uint i = 0; i < R; ++i) {
-        if (myMag[i] > thrBits && stg[_stgBase] == myMag[i]) {
+        uint mi = asuint(float(lane == 0u ? magv[i].x : magv[i].y));
+        if (mi > thrBits && stg[_stgBase] == mi) {
             peakIdx[pair] = int(slotToIndex(tid * R + i));
             peakVal[pair] = float2(float(lane == 0u ? re[i].x : re[i].y),
                                    float(lane == 0u ? im[i].x : im[i].y));
@@ -692,8 +694,15 @@ void filterTwo(uint pairA, uint pairB, uint tA, uint tB, uint tid,
 
     // |v|^2 for BOTH pairs in one packed multiply-add; the AoS path
     // promoted to fp32 here (128 v_cvt_f32_f16 in the dump).
+    // |v|^2 masked by the window, both lanes at once. `live` depends on the
+    // element index, which is shared by the two transforms, so the select
+    // is packed and no lane is extracted here.
     H magv[16];
-    [unroll] for (uint i = 0; i < R; ++i) magv[i] = mag2s(re[i], im[i]);
+    [unroll] for (uint i = 0; i < R; ++i) {
+        uint idx = slotToIndex(tid * R + i);
+        bool live = (idx >= winStart && idx < winEnd);
+        magv[i] = live ? mag2s(re[i], im[i]) : H(0.0f);
+    }
 
     peakLane(pairA, tid, 0u, magv, re, im, peakIdx, peakVal, winStart, winEnd, thrBits);
     peakLane(pairB, tid, 1u, magv, re, im, peakIdx, peakVal, winStart, winEnd, thrBits);
