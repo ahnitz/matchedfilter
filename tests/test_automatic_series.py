@@ -97,7 +97,8 @@ def test_peak_filters_derive_same_blocks_and_pad_last_bins(klass):
 
 def test_automatic_series_validation():
     n = 1024
-    for valid in ((-1, 10), (1, 1), (0, n + 1)):
+    for valid in ((-1, 10), (1, 1), (0, n + 1), (0.5, 700),
+                  (0, 700.9), ('0', 700)):
         with pytest.raises(ValueError, match='valid'):
             CorrelationFilter(n, valid=valid)
     f = CorrelationFilter(n, valid=(50, 700))
@@ -107,6 +108,32 @@ def test_automatic_series_validation():
         f.run_series(series, out=np.empty((1, 1700), np.complex128))
     with pytest.raises(ValueError, match='valid'):
         CorrelationFilter(n).run_series(series)
+
+
+@pytest.mark.parametrize('device', ['cpu', 'gpu'])
+def test_continuous_output_against_independent_fft(device):
+    if device == 'gpu':
+        device = usable_gpu()
+        if device is None:
+            pytest.skip('no usable GPU')
+    n, valid, length = 2048, (173, 1729), 4321
+    series = _spectra((length,), 171)
+    templates = _spectra((2, n), 172)
+    f = CorrelationFilter(n, ntemplates=2, device=device, valid=valid)
+    f.set_templates(templates)
+    actual = f.run_series(series)
+    expected = np.zeros((2, length), np.complex64)
+    lo, hi = valid
+    for start in range(0, length - lo, hi - lo):
+        block = np.zeros(n, np.complex64)
+        count = min(n, length - start)
+        block[:count] = series[start:start + count]
+        spectrum = np.fft.fft(block)
+        corr = np.fft.ifft(spectrum[None] * templates.conj(), axis=-1)
+        end = min(hi, length - start)
+        expected[:, start + lo:start + end] = corr[:, lo:end]
+    scale = max(float(np.max(np.abs(expected))), 1.0)
+    assert float(np.max(np.abs(actual - expected))) / scale < 1e-5
 
 
 def test_automatic_layout_accepts_host_dlpack_without_len():

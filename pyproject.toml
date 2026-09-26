@@ -11,16 +11,17 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "matchedfilter"
 version = "0.1.0a2"
-description = "Fast single-threaded batched matched filter with peak-only output (x86-64)"
+description = "Batched CPU and GPU matched filtering with peak or full correlation output"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
 license-files = ["LICENSE"]
 dependencies = ["numpy>=1.20"]
-keywords = ["matched-filter", "correlation", "fft", "avx512", "signal-processing"]
+keywords = ["matched-filter", "correlation", "fft", "gpu", "signal-processing"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Operating System :: POSIX :: Linux",
+  "Operating System :: MacOS",
   "Environment :: Console",
   "Intended Audience :: Science/Research",
   "Programming Language :: C",
