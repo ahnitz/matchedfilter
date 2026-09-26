@@ -86,6 +86,8 @@ class _ObjC:
     """
 
     def __init__(self):
+        self._selectors = {}
+        self._senders = {}
         self.objc = ctypes.CDLL("/usr/lib/libobjc.dylib")
         self.metal = ctypes.CDLL(
             "/System/Library/Frameworks/Metal.framework/Metal")
@@ -111,14 +113,18 @@ class _ObjC:
             pop(pool)
 
     def sel(self, name):
-        return self.objc.sel_registerName(name)
+        if name not in self._selectors:
+            self._selectors[name] = self.objc.sel_registerName(name)
+        return self._selectors[name]
 
     def send(self, restype, argtypes):
         """A correctly-typed objc_msgSend for one signature."""
-        fn = ctypes.cast(self.objc.objc_msgSend,
-                         ctypes.CFUNCTYPE(restype, ctypes.c_void_p,
-                                          ctypes.c_void_p, *argtypes))
-        return fn
+        key = (restype, tuple(argtypes))
+        if key not in self._senders:
+            self._senders[key] = ctypes.cast(
+                self.objc.objc_msgSend,
+                ctypes.CFUNCTYPE(restype, ctypes.c_void_p, ctypes.c_void_p, *argtypes))
+        return self._senders[key]
 
     def call(self, obj, selector, restype=ctypes.c_void_p, args=(),
              argtypes=()):
@@ -214,6 +220,8 @@ def _autoreleased(method):
 
 class Context(InputUploads):
     """One Metal device, its queue, and the pipelines built on it."""
+
+    max_grouped_bins = _MAX_BINS
 
     def __init__(self, index=0):
         if sys.platform != "darwin":
@@ -403,11 +411,15 @@ class Context(InputUploads):
                                     restype=ctypes.c_ulong))
 
     @_autoreleased
-    def pipeline(self, n, entry="fusedTierB"):
-        key = (n, entry)
+    def pipeline(self, n, entry="fusedTierB", one_bin=False):
+        single = (_manifest().get("modules", {}).get(str(n), {}).get("metal", {})
+                  .get(entry, {}).get("one_bin")) if one_bin else None
+        if single and single["lds_bytes"] > self.max_shared_memory:
+            single = None
+        key = (n, entry, True) if single else (n, entry)
         if key in self._pipelines:
             return self._pipelines[key]
-        stem = self._stem(n, entry)
+        stem = pathlib.Path(single["msl"]).stem if single else self._stem(n, entry)
         lib = self._library(stem)
         fn = pso = None
         try:
@@ -577,7 +589,7 @@ class Context(InputUploads):
 
     @_autoreleased
     def peaks(self, n, data, tmpl, binsize=None, threshold=0.0, window=None,
-              upload_data=True, upload_tmpl=True):
+              upload_data=True, upload_tmpl=True, _groups=None):
         """Peak index and complex value per (data, template, bin).
 
         The same contract as the Vulkan path: bins counted from `start`, a
@@ -635,30 +647,32 @@ class Context(InputUploads):
             write_input(b_tmpl, tmpl)
             self._uploaded["tmpl"][key] = tsig
 
-        pso = self.pipeline(n)
+        pso = self.pipeline(n, "fusedTierB", nbins == 1)
         cmd = self._command_buffer()
         enc = self.o.call(cmd, b"computeCommandEncoder")
         self.o.call(enc, b"setComputePipelineState:", restype=None,
                     args=(pso,), argtypes=(ctypes.c_void_p,))
 
-        # Index 0 is the uniform block; the storage buffers follow.
-        params = (ctypes.c_uint32 * 7)(
-            nt, lo, hi, binsize, shift & 0xFFFFFFFF, nbins,
-            int(np.float32(t2).view(np.uint32)))
-        self.o.call(enc, b"setBytes:length:atIndex:", restype=None,
-                    args=(ctypes.byref(params), ctypes.sizeof(params), 0),
-                    argtypes=(ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong))
-        for slot, buf in enumerate((b_data, b_tmpl, b_idx, b_val), start=1):
-            self.o.call(enc, b"setBuffer:offset:atIndex:", restype=None,
-                        args=(buf.handle, 0, slot),
-                        argtypes=(ctypes.c_void_p, ctypes.c_ulong,
-                                  ctypes.c_ulong))
-
-        grid = _MTLSize(nd * nt, 1, 1)
-        group = _MTLSize(n // _radix(n), 1, 1)
-        self.o.call(enc, b"dispatchThreadgroups:threadsPerThreadgroup:",
-                    restype=None, args=(grid, group),
-                    argtypes=(_MTLSize, _MTLSize))
+        # Flat and mixed-window calls use the same kernels and encoding path.
+        # Metal buffer offsets let each dispatch address its rows and output
+        # directly, so no padded intermediates or host-side scatter are needed.
+        for w0, w1, first, last in (_groups or ((lo, hi, 0, nd),)):
+            params = (ctypes.c_uint32 * 7)(
+                nt, w0, w1, binsize, shift & 0xFFFFFFFF, nbins,
+                int(np.float32(t2).view(np.uint32)))
+            self.o.call(enc, b"setBytes:length:atIndex:", restype=None,
+                        args=(ctypes.byref(params), ctypes.sizeof(params), 0),
+                        argtypes=(ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong))
+            offsets = (first*n*8, 0, first*nt*nbins*4, first*nt*nbins*8)
+            for slot, (buf, offset) in enumerate(zip(batch, offsets), start=1):
+                self.o.call(enc, b"setBuffer:offset:atIndex:", restype=None,
+                            args=(buf.handle, offset, slot),
+                            argtypes=(ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong))
+            self.o.call(enc, b"dispatchThreadgroups:threadsPerThreadgroup:",
+                        restype=None,
+                        args=(_MTLSize((last-first)*nt, 1, 1),
+                              _MTLSize(n // _radix(n), 1, 1)),
+                        argtypes=(_MTLSize, _MTLSize))
         self.o.call(enc, b"endEncoding", restype=None)
         self.o.call(cmd, b"commit", restype=None)
         self.o.call(cmd, b"waitUntilCompleted", restype=None)
@@ -671,6 +685,14 @@ class Context(InputUploads):
         val = b_val.read(np.float32, out * 2).view(
             np.complex64).reshape(nd, nt, nbins)
         return idx, val
+
+    def peaks_grouped(self, n, data, tmpl, groups, binsize, threshold, *, upload_tmpl=True):
+        """Submit shared FFT rows with distinct flat windows in one command buffer."""
+        if shared_buffer(data, self) is None:
+            raise ValueError("grouped spectra must belong to this GPU context")
+        return self.peaks(n, data, tmpl, binsize=binsize, threshold=threshold,
+                          window=groups[0][:2], upload_data=False,
+                          upload_tmpl=upload_tmpl, _groups=groups)
 
     @_autoreleased
     def _full_tile(self, n, data, tmpl, out, upload_data, upload_tmpl):
@@ -718,6 +740,7 @@ class Context(InputUploads):
         self.o.call(cmd, b'commit', restype=None)
         self.o.call(cmd, b'waitUntilCompleted', restype=None)
         self._check_completed(cmd)
+        self._record_gpu_time(cmd)
         if shared_buffer(out, self) is None:
             out[:] = bo.read(np.float32, out.size*2).view(np.complex64).reshape(out.shape)
 
@@ -759,6 +782,7 @@ class Context(InputUploads):
         self.o.call(cmd, b'commit', restype=None)
         self.o.call(cmd, b'waitUntilCompleted', restype=None)
         self._check_completed(cmd)
+        self._record_gpu_time(cmd)
         if shared_buffer(out, self) is None:
             out[:] = bo.read(np.float32, out.size*2).view(np.complex64).reshape(out.shape)
 
@@ -831,6 +855,7 @@ class Context(InputUploads):
         self.o.call(cmd, b'commit', restype=None)
         self.o.call(cmd, b'waitUntilCompleted', restype=None)
         self._check_completed(cmd)
+        self._record_gpu_time(cmd)
 
     def correlate(self, n, data, tmpl, out, *, upload_data=True, upload_tmpl=True):
         nd, nt = data.shape[0], tmpl.shape[0]
@@ -937,7 +962,7 @@ class Context(InputUploads):
 
         coarse = self.pipeline(band)
         compact = self.pipeline(n, "compactPairs")
-        refine = self.pipeline(n, "refineListed")
+        refine = self.pipeline(n, "refineListed", nbins == 1)
 
         # Pairs that do not survive are never visited, so their -1 has to be
         # there already. Metal has no fill on a compute encoder, and writing
