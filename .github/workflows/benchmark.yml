@@ -121,6 +121,7 @@ jobs:
             [ -e "$f" ] || continue
             { echo "## $(basename "$f" .txt)"; echo
               echo '```'; cat "$f"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          done
 
       - uses: actions/upload-artifact@v4
         with:
