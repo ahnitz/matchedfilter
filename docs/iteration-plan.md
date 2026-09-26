@@ -49,7 +49,7 @@ absence cost something.
 | environment | how | what it has caught |
 |---|---|---|
 | Linux + discrete GPU | `pytest -q` | the baseline |
-| macOS + Metal | `ssh empire`, see `docs/macos-test-machine.md` | threadgroup limits, kernel selection |
+| macOS + Metal | [physical-device testing](macos-test-machine.md) | threadgroup limits, kernel selection |
 | NumPy 1.x | venv with `numpy<2` | `uint64 + int` promoting to float64 |
 | low descriptor limit | `bash -c "ulimit -n 256; pytest -q"` | the Vulkan context leak |
 
