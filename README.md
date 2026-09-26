@@ -193,8 +193,10 @@ pytest
 
 GPU kernels are written in Slang. Rebuild the shipped SPIR-V and Metal sources
 with `python tools/build_spirv.py --slangc /path/to/slangc`.
-The [tooling map](tools/README.md) identifies benchmark, calibration and
+The [tooling map](https://github.com/ahnitz/matchedfilter/blob/main/tools/README.md) identifies benchmark, calibration and
 historical research scripts.
+The [performance checks](https://github.com/ahnitz/matchedfilter/blob/main/docs/testing-coverage.md#performance-regression-checks)
+include opt-in timing gates and comparison with a saved baseline.
 
 ## License
 

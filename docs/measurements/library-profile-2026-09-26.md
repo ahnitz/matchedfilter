@@ -38,14 +38,44 @@ number of output bins; only the number of distinct valid windows changed.
 | 16 | 1.55 | 1.174 |
 | 128 | 3.24 | 7.975 |
 
-The GPU series executor submits each window group separately. The 128-window
-case is roughly 34 times the one-window GPU time; Python validation itself
-was only about 0.01–0.015 ms. This does not affect automatic overlap-save,
-which has one repeated window and possibly a clipped final block. It matters
-for callers that request many distinct per-block windows. A per-block-window
-kernel or a larger mixed-window dispatch should be considered only if that
-layout is a real workload; kernel complexity would otherwise grow for a rare
-case.
+The original GPU series executor submitted each window group separately. The
+128-window case was roughly 34 times the one-window GPU time; Python validation
+itself was only about 0.01–0.015 ms.
+
+The flat Vulkan path now records distinct window dispatches together. Each
+bounded batch performs one forward FFT dispatch, followed by the correlation
+dispatches, in one submission. It uses the existing kernels and descriptor
+offsets; it adds no shader variants or asynchronous public API. Uniform windows,
+Metal, hierarchical filtering, and requests above the kernel's bin capacity use
+the existing paths. Cache eviction can require an earlier forward submission;
+correctness does not depend on retaining a cache entry.
+
+Warm alternating comparisons on the same Radeon 8060S, with 128 blocks and 32
+templates, gave the following whole-call medians (milliseconds):
+
+| n | Distinct windows | Separate submissions | Grouped submission |
+|---:|---:|---:|---:|
+| 1,024 | 128 | 9.109 | 0.429 |
+| 2,048 | 2 | 0.415 | 0.347 |
+| 2,048 | 16 | 1.390 | 0.373 |
+| 2,048 | 128 | 9.782 | 0.515 |
+| 4,096 | 2 | 0.650 | 0.592 |
+| 4,096 | 16 | 1.729 | 0.609 |
+| 4,096 | 128 | 10.111 | 0.750 |
+| 8,192 | 128 | 11.595 | 1.678 |
+
+These improvements apply to irregular explicit blocks (`run_blocks` and its
+compatible `run_series` form). Automatic overlap-save already uses repeated
+windows, so these ratios do not describe an improvement to that workload.
+Single-window calls execute the same code as before; their alternating timings
+also show how short GPU measurements vary with clocks and load.
+
+Reproduce with `tools/audit_class_execution.py --device gpu --suite submissions
+--rounds 7 --json .local/submissions.json` after creating `.local/`. The driver
+checks indices and complex values before timing. Tests cover changed input and
+templates, shared template memory, selected template ranges, caller order,
+zero-padded tails, small memory budgets, cache eviction, and the warm submission
+count.
 
 ## Full output: storage choice dominates CPU access
 
@@ -93,10 +123,17 @@ pairs, a full-output call took 0.672 ms while peak-only took 0.796 ms. At
 stores is not always enough to pay for the peak scan at small transforms.
 This is a candidate for kernel profiling if small CPU batches matter.
 
+A follow-up tried an unconditional vector select in the 2,048-point single-peak
+scan. Clean baseline/candidate builds produced identical outputs and some
+zero-threshold wins, but the high-threshold workload slowed by about 3–6%
+across AVX-512, AVX2, and SSE4 in pinned, alternating measurements. The candidate
+was rejected; no CPU kernel or dispatch change is enabled. The saved-baseline
+performance tests now cover both flat and hierarchical calls in this size range.
+
 ## Next measurements
 
-1. Measure per-dispatch GPU timestamps and host copy time for irregular
-   windows before designing a mixed-window kernel.
+1. Measure whether hierarchical and Metal irregular-window workloads justify
+   extending command batching to those executors.
 2. Profile the 2,048-point CPU peak scan against full output with hardware
    counters and varied bin counts. The difference changes with bank shape.
 3. Benchmark full-output storage with the caller's actual consumption pattern;

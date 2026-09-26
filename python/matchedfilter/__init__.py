@@ -722,6 +722,28 @@ class MatchedFilter:
         if not single:
             idx = np.empty((nblk, nt, nb), dtype=np.int64)
             val = np.empty((nblk, nt, nb), dtype=np.complex64)
+        # Irregular flat windows share one forward FFT dispatch and submission per
+        # bounded batch. Hierarchical and other backends keep their executor.
+        grouped = (len(layout.groups) > 1 and type(self) is MatchedFilter
+                   and nb <= getattr(self._gpu, "max_grouped_bins", 0)
+                   and nt <= self._gpu_pair_limit())
+        if grouped:
+            for begin in range(0, nblk, batch):
+                end = min(begin + batch, nblk)
+                count = end - begin
+                groups = [(lo, hi, max(a, begin)-begin, min(b, end)-begin)
+                          for lo, hi, a, b in layout.groups if a < end and b > begin]
+                starts[:count] = np.minimum(layout.starts[begin:end], ser.size)
+                spec = spectra[:count]
+                self._gpu.forward(n, source, starts[:count], spec, defer=True)
+                try:
+                    gi, gv = self._gpu.peaks_grouped(
+                        n, spec, H, groups, binsize, threshold, upload_tmpl=self._tdirty)
+                    self._tdirty = False
+                    idx[begin:end], val[begin:end] = gi, gv
+                finally:
+                    self._gpu.cancel_forward()
+            return _format_result(idx, val, raw=raw, order=layout.order)
         for w0, w1, a, b in layout.groups:
             for begin in range(a, b, batch):
                 end = min(begin + batch, b)

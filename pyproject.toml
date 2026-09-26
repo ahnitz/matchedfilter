@@ -69,6 +69,7 @@ matchedfilter = ["*.h", "*.txt", "spirv/*.spv", "spirv/manifest.json",
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
+markers = ["performance: opt-in warm-call performance regression checks"]
 
 # Wheels are built only for the platforms CI actually exercises.  Linux
 # aarch64 is deliberately absent: it builds and passes there, but producing

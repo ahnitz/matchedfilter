@@ -20,6 +20,16 @@ For a quick CPU/GPU overlap-save comparison with output validation:
 python tools/bench_series_workloads.py --quick --reps 5 --json series.json
 ```
 
+To measure the effect of batching distinct Vulkan windows, with output equality
+checked before timing:
+
+```bash
+python tools/audit_class_execution.py --device gpu --suite submissions --rounds 7 --json .local/submissions.json
+```
+
+Create `.local/` first. This alternates separate and grouped submissions using
+the same kernels at 1,024–8,192 points and includes the uniform-window control.
+
 The other `bench_*.py`, `audit_*.py`, `gpu_*.py`, `coarse_*.py`, `int8/`,
 `narrow_cpu/`, and experimental data files are focused investigations. Their
 docstrings and the linked design notes describe the question they answered.

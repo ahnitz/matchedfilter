@@ -1,7 +1,7 @@
 """Test-session setup.
 
-The only thing here is an import-order workaround, and it needs the
-explanation more than the code does.
+GPU capability probes and performance-test options live here, along with
+an import-order workaround for optional development tooling.
 
 slangpy must be imported before numpy. Importing numpy first makes Vulkan
 device creation fail with "No adapters found" -- a symbol clash between
@@ -160,3 +160,24 @@ def vulkan_runs():
 def pytest_addoption(parser):
     parser.addoption('--require-coarse-gpu', action='store_true', default=False,
                      help='Fail rather than skip missing coarse-calibration GPU coverage')
+
+    parser.addoption('--run-performance', action='store_true', default=False,
+                     help='Run opt-in performance regression checks on an idle machine')
+    parser.addoption('--performance-baseline', help='Compare timings with a saved same-host JSON baseline')
+    parser.addoption('--performance-record', help='Save timings after a successful performance run')
+
+
+def pytest_collection_modifyitems(config, items):
+    baseline = config.getoption('--performance-baseline')
+    output = config.getoption('--performance-record')
+    if baseline and output:
+        from pathlib import Path
+        if Path(baseline).resolve() == Path(output).resolve():
+            raise pytest.UsageError('Compare and record paths must differ; preserve the trusted baseline')
+    if not config.getoption('--run-performance'):
+        if config.getoption('--performance-baseline') or config.getoption('--performance-record'):
+            raise pytest.UsageError('Performance baseline/record options require --run-performance')
+        skip = pytest.mark.skip(reason='opt-in timing test; use --run-performance on an idle machine')
+        for item in items:
+            if 'performance' in item.keywords:
+                item.add_marker(skip)

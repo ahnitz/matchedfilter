@@ -309,6 +309,8 @@ class _Buffer:
 class Context(InputUploads):
     """One Vulkan device, its compute queue, and the pipelines built on it."""
 
+    max_grouped_bins = _MAX_BINS
+
     def __init__(self, index=0):
         vk, err = _vulkan._load()
         if vk is None:
@@ -625,7 +627,7 @@ class Context(InputUploads):
         self.last_refinements = int(bufs["args"].read(np.uint32, 1)[0])
         return idx, val
 
-    def _descriptor_set(self, set_layout, bufs):
+    def _descriptor_set(self, set_layout, bufs, offsets=None):
         vk = self.vk
         nbind = len(bufs)
         sizes = (_PoolSize * 1)(_PoolSize(_DESC_STORAGE_BUFFER, nbind))
@@ -643,7 +645,8 @@ class Context(InputUploads):
                                            ctypes.byref(dset)),
                "vkAllocateDescriptorSets")
         infos = (_DescBufferInfo * nbind)(
-            *[_DescBufferInfo(b.handle, 0, _WHOLE_SIZE) for b in bufs])
+            *[_DescBufferInfo(b.handle, offset, b.nbytes - offset)
+              for b, offset in zip(bufs, offsets or [0] * nbind)])
         writes = (_WriteDescSet * nbind)(*[
             _WriteDescSet(35, None, dset, i, 0, 1, _DESC_STORAGE_BUFFER, None,
                           ctypes.pointer(infos[i]), None) for i in range(nbind)])
@@ -1122,6 +1125,88 @@ class Context(InputUploads):
         idx = b_idx.read(np.int32, out).reshape(nd, nt, nbins)
         val = b_val.read(np.float32, out * 2).view(
             np.complex64).reshape(nd, nt, nbins)
+        return idx, val
+
+    def peaks_grouped(self, n, data, tmpl, groups, binsize, threshold, *, upload_tmpl=True):
+        """Run distinct flat search windows in one synchronous submission.
+
+        Data is a shared forward-FFT batch. Descriptor offsets select each
+        group's rows; padded output offsets satisfy Vulkan's storage-buffer
+        alignment without changing the existing correlation kernels.
+        """
+        nd, nt = data.shape[0], tmpl.shape[0]
+        nb = (groups[0][1] - groups[0][0] - 1) // binsize + 1
+        if nb > _MAX_BINS:
+            raise ValueError("grouped dispatch exceeds the kernel bin limit")
+        groups = tuple(groups)
+        shift = binsize.bit_length() - 1 if binsize & (binsize - 1) == 0 else -1
+        t2 = np.float32(float(threshold) ** 2 if threshold > 0 else 0).view(np.uint32)
+        key = ("grouped", n, nd, nt, binsize, int(t2), groups,
+               shared_key(data, self), shared_key(tmpl, self))
+        if key[-2] is None:
+            raise ValueError("grouped spectra must belong to this GPU context")
+        # 64 indices occupy 256 bytes, meeting Vulkan storage-offset alignment.
+        offsets, size = [], 0
+        for _, _, a, b in groups:
+            offsets.append(size)
+            size += ((b - a) * nt * nb + 63) // 64 * 64
+        _, upload_tmpl, _, tsig = self._input_uploads(
+            key, data, tmpl, False, upload_tmpl)
+        batch = self._batches.get(key)
+        if batch is None:
+            incoming = [shared_buffer(data, self)]
+            if shared_buffer(tmpl, self) is not None:
+                incoming.append(shared_buffer(tmpl, self))
+            self._cache_room(size * 12 + (0 if len(incoming) == 2 else tmpl.nbytes),
+                             incoming=incoming, keep_storage=key)
+            pool_start = len(getattr(self, '_pools', []))
+            bufs = (shared_buffer(data, self),
+                    shared_buffer(tmpl, self) or _Buffer(self, tmpl.nbytes),
+                    _Buffer(self, size * 4, readback=True),
+                    _Buffer(self, size * 8, readback=True))
+            self._storage[key] = bufs
+            filename = self._peak_file(n, nb)
+            pipe, layout, sl = self._build_pipeline(
+                ("peaks", filename), filename, _NBIND, _PUSH_BYTES)
+            cmd = _vp()
+            info = _CmdBufAlloc(40, None, self.command_pool, 0, 1)
+            vk = self.vk
+            _check(vk.vkAllocateCommandBuffers(self.device, ctypes.byref(info),
+                                              ctypes.byref(cmd)), "allocate grouped peaks")
+            begin = _CmdBufBegin(42, None, 0, None)
+            _check(vk.vkBeginCommandBuffer(cmd, ctypes.byref(begin)), "begin grouped peaks")
+            vk.vkCmdBindPipeline(cmd, _BIND_POINT_COMPUTE, pipe)
+            for (lo, hi, a, b), offset in zip(groups, offsets):
+                ds = self._descriptor_set(sl, bufs, (a*n*8, 0, offset*4, offset*8))
+                sets = (_vp * 1)(ds)
+                vk.vkCmdBindDescriptorSets(cmd, _BIND_POINT_COMPUTE, layout,
+                                          0, 1, sets, 0, None)
+                pc = (_u32 * 7)(nt, lo, hi, binsize, shift & 0xffffffff, nb, int(t2))
+                vk.vkCmdPushConstants(cmd, layout, _STAGE_COMPUTE, 0,
+                                      _PUSH_BYTES, ctypes.byref(pc))
+                vk.vkCmdDispatch(cmd, (b-a)*nt, 1, 1)
+            barrier = _MemBarrier(46, None, _ACCESS_SHADER_WRITE, 0x2000)
+            vk.vkCmdPipelineBarrier(cmd, _STAGE_COMPUTE_BIT, 0x4000, 0,
+                                    1, ctypes.byref(barrier), 0, None, 0, None)
+            _check(vk.vkEndCommandBuffer(cmd), "end grouped peaks")
+            batch = (*bufs, cmd)
+            self._batches[key] = batch
+            self._register_record('flat', key, key, pool_start)
+            upload_tmpl = True
+        self._cache_touch('flat', key)
+        _, b_tmpl, b_idx, b_val, cmd = batch
+        if upload_tmpl:
+            write_input(b_tmpl, tmpl)
+            self._uploaded["tmpl"][key] = tsig
+        self._submit(cmd)
+        indices = b_idx.read(np.int32, size)
+        values = b_val.read(np.complex64, size)
+        idx = np.empty((nd, nt, nb), np.int32)
+        val = np.empty((nd, nt, nb), np.complex64)
+        for (_, _, a, b), offset in zip(groups, offsets):
+            count = (b-a)*nt*nb
+            idx[a:b] = indices[offset:offset+count].reshape(b-a, nt, nb)
+            val[a:b] = values[offset:offset+count].reshape(b-a, nt, nb)
         return idx, val
 
     def _full_tile(self, n, data, tmpl, out, upload_data, upload_tmpl):
