@@ -72,6 +72,24 @@ def test_every_tier_b_size_is_present(manifest):
     assert sorted(int(k) for k in manifest["modules"]) == sorted(TIER_B)
 
 
+def test_full_output_artifacts_cover_the_public_sizes(manifest):
+    metal_dir = SPIRV_DIR.parent / 'metal'
+    for n in sorted(matchedfilter.CorrelationFilter._gpu_sizes):
+        if n <= 65536:
+            info = manifest['modules'][str(n)]
+            assert (SPIRV_DIR / info['full']['file']).is_file()
+            files = info['metal']['fullCorrelation']
+            assert (metal_dir / files['msl']).is_file()
+            if info['metal_lds_bytes'] > 32768:
+                assert (metal_dir / files['portable']['msl']).is_file()
+        else:
+            info = manifest['full_tierc'][str(n)]
+            assert info['n1'] * info['n2'] == n
+            for role in ('corr1', 'corr2', 'fwd1', 'fwd2'):
+                assert (SPIRV_DIR / info[role]['file']).is_file()
+                assert (metal_dir / info[role]['metal']).is_file()
+
+
 @pytest.mark.parametrize("n", [1024, 2048, 4096, 8192, 16384])
 def test_blob_is_valid_spirv(manifest, n):
     blob = (SPIRV_DIR / manifest["modules"][str(n)]["file"]).read_bytes()

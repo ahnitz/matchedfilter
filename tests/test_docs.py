@@ -163,7 +163,7 @@ def test_readme_banner_renders_once_with_working_image_paths():
     assert parser.sources.count('assets/teaser.svg') == 1
     assert 'docs/assets/teaser.svg' not in page
     assert '&lt;p align=' not in page
-    assert 'Batched matched filtering' in page
+    assert 'Batched correlation' in page
     assert page.index('Quick start') < page.index('assets/teaser.svg')
     assert page.count('<h1>') == 1
 

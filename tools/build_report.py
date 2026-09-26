@@ -1429,6 +1429,8 @@ def bench_flat_raw(runs, engines):
 NOTES = [("docs/hierarchical.md", "The hierarchical filter",
           "The cheap low-band pass, and how the tuning tables choose its "
           "coarse parameters from your reference and calibration."),
+         ("docs/full-correlation.md", "Full correlation output",
+          "The full-lag path and the work saved by asking for peaks or screening pairs."),
          ("docs/design.md", "Batched matched filter design",
           "The four-step transform, the split layout, and the fused peak scan."),
          ("docs/simd.md", "The SIMD layer",

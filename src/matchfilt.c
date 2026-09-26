@@ -61,6 +61,7 @@ struct ap_mf_plan {
   int ntpad;                  /* template rows, rounded up to a multiple of pb */
   float *ebr,*ebi;            /* fallback lane-expanded data */
   float *tsr,*tsi;            /* [n][pb] gathered template group, when needed  */
+  float *corrbuf;             /* [pb][n] full-output staging for pair batches */
   ap_peak *pkbuf;             /* [pb][nb] dense results, before placement      */
   size_t pkcap;
   /* Optional second layout, created only when an actual call can use it.
@@ -145,6 +146,7 @@ void ap_mf_destroy(ap_mf_plan *p){
   free(p->pr);free(p->pi);free(p->scratch);
   free(p->sfwd);free(p->sspec);
   free(p->ebr);free(p->ebi);free(p->tsr);free(p->tsi);free(p->pkbuf);
+  free(p->corrbuf);
   free(p);
 }
 
@@ -417,6 +419,107 @@ int ap_mf_run(ap_mf_plan *p, int d0, int nd, int t0, int nt,
   if(start>=end) return 0;
   return run_pairs(p,d0,nd,t0,nt,NULL,nt,binsize,threshold,
                    peaks,counts,start,end);
+}
+
+int ap_mf_correlate(ap_mf_plan *p,int d0,int nd,int t0,int nt,float *out){
+  if(!p||!out||d0<0||nd<1||d0+nd>p->nd||t0<0||nt<1||t0+nt>p->nt)
+    return -1;
+  if(p->pb){
+    const size_t n=p->n; const int W=p->pb;
+    if(!p->corrbuf){
+      p->corrbuf=ap_alloc64(2*(size_t)W*n*sizeof(float));
+      if(!p->corrbuf) return -1;
+    }
+    for(int d=0;d<nd;d++){
+      const float *Dr=p->dre+(size_t)(d0+d)*n, *Di=p->dim+(size_t)(d0+d)*n;
+      if(p->ebr){
+        for(size_t k=0;k<n;k++){
+          const float a=Dr[k],b=Di[k];
+          for(int l=0;l<W;l++){
+            p->ebr[k*W+l]=a; p->ebi[k*W+l]=b;
+          }
+        }
+        Dr=p->ebr; Di=p->ebi;
+      }
+      for(int tt=0;tt<nt;tt+=W){
+        const int cnt=nt-tt<W?nt-tt:W;
+        const int base=t0+tt;
+        const float *Tr,*Ti;
+        if(base%W==0){
+          Tr=p->tre+(size_t)(base/W)*n*W;
+          Ti=p->tim+(size_t)(base/W)*n*W;
+        } else {
+          memset(p->tsr,0,n*(size_t)W*sizeof(float));
+          memset(p->tsi,0,n*(size_t)W*sizeof(float));
+          for(int l=0;l<cnt;l++){
+            const int t=base+l;
+            const float *sr=p->tre+(size_t)(t/W)*n*W+(size_t)(t%W);
+            const float *si=p->tim+(size_t)(t/W)*n*W+(size_t)(t%W);
+            for(size_t k=0;k<n;k++){
+              p->tsr[k*W+l]=sr[k*W]; p->tsi[k*W+l]=si[k*W];
+            }
+          }
+          Tr=p->tsr; Ti=p->tsi;
+        }
+        if(ap_corr_prod_batch(p->fft,Dr,Di,Tr,Ti,cnt,p->corrbuf)) return -1;
+        memcpy(out+2*((size_t)d*nt+tt)*n,p->corrbuf,2*(size_t)cnt*n*sizeof(float));
+      }
+    }
+    return 0;
+  }
+  const size_t n=p->n;
+  const int tile=p->tile;
+  for(int dt=0;dt<nd;dt+=tile) for(int tt=0;tt<nt;tt+=tile){
+    const int dend=(nd-dt<tile)?nd:dt+tile;
+    const int tend=(nt-tt<tile)?nt:tt+tile;
+    for(int d=dt;d<dend;d++){
+      const float *dr=p->dre+(size_t)(d0+d)*n;
+      const float *di=p->dim+(size_t)(d0+d)*n;
+      for(int t=tt;t<tend;t++){
+        const float *tr=p->tre+(size_t)(t0+t)*n;
+        const float *ti=p->tim+(size_t)(t0+t)*n;
+        float *dst=out+2*((size_t)d*nt+t)*n;
+        if(p->gmajor){
+          if(ap_corr_prod(p->fft,dr,di,tr,ti,dst)) return -1;
+        } else {
+          mulspec(dr,di,tr,ti,p->pr,p->pi,n);
+          if(ap_corr_split(p->fft,p->pr,p->pi,dst)) return -1;
+        }
+      }
+    }
+  }
+  return 0;
+}
+
+int ap_mf_correlate_series(ap_mf_plan *p,const float *series,size_t nseries,
+                           const size_t *starts,int nblocks,int t0,int nt,float *out){
+  if(!p||!series||!starts||!out||nblocks<1||t0<0||nt<1||t0+nt>p->nt)
+    return -1;
+  const size_t n=p->n;
+  if(!p->sfwd){
+    p->sfwd=ap_alloc64(2*n*sizeof(float));
+    p->sspec=ap_alloc64(2*n*sizeof(float));
+    if(!p->sfwd||!p->sspec) return -1;
+  }
+  const float inv=1.0f/(float)n;
+  for(int b0=0;b0<nblocks;){
+    const int g=nblocks-b0<p->nd?nblocks-b0:p->nd;
+    for(int j=0;j<g;j++){
+      size_t start=starts[b0+j];
+      size_t have=start<nseries?nseries-start:0;
+      if(have>n) have=n;
+      if(have){
+        const float *src=series+2*start;
+        for(size_t k=0;k<2*have;k++) p->sfwd[k]=src[k]*inv;
+      }
+      if(have<n) memset(p->sfwd+2*have,0,2*(n-have)*sizeof(float));
+      ap_fft(p->fft,p->sfwd,p->sspec,AP_FORWARD);
+      if(ap_mf_set_data(p,j,p->sspec)) return -1;
+    }
+    if(ap_mf_correlate(p,0,g,t0,nt,out+2*(size_t)b0*nt*n)) return -1;
+    b0+=g;
+  }
+  return 0;
 }
 
 /* Filter a time series over a caller-supplied block layout.

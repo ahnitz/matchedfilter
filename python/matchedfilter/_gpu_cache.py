@@ -36,13 +36,24 @@ class InputUploads:
         if storage is not None:
             for buffers in storage.values():
                 yield from (buffers.values() if isinstance(buffers, dict) else buffers)
+            for batch in getattr(self, '_full_batches', {}).values():
+                yield from batch[:3]
+            for batch in getattr(self, '_tierc_batches', {}).values():
+                yield from batch[:4]
         else:
             for batch in self._batches.values():
+                yield from batch
+            for batch in getattr(self, '_full_batches', {}).values():
+                yield from batch
+            for batch in getattr(self, '_tierc_batches', {}).values():
                 yield from batch
             for batch in self._hier.values():
                 yield from batch.values()
         for batch in getattr(self, '_forwards', {}).values():
-            yield from batch[:-1]
+            if isinstance(batch, tuple):
+                yield from batch[:-1]
+            else:
+                yield batch
 
     def _cache_bytes(self, incoming=()):
         allocations = {}

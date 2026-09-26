@@ -145,6 +145,56 @@ static PyObject *MF_run(MFObject *self,PyObject *args){
   if(tot<0){ PyErr_SetString(PyExc_RuntimeError,"matchedfilter: matched filter failed"); return NULL; }
   return PyLong_FromLong(tot);
 }
+static PyObject *MF_correlate(MFObject *self,PyObject *args){
+  int d0,nd,t0,nt; Py_buffer out;
+  if(!PyArg_ParseTuple(args,"iiiiw*",&d0,&nd,&t0,&nt,&out)) return NULL;
+  int valid=d0>=0&&nd>0&&nd<=self->nd&&d0<=self->nd-nd
+    &&t0>=0&&nt>0&&nt<=self->nt&&t0<=self->nt-nt
+    &&(size_t)nd<=SIZE_MAX/(size_t)nt
+    &&(size_t)nd*(size_t)nt<=SIZE_MAX/((size_t)self->n*8)
+    &&(size_t)out.len>=((size_t)nd*(size_t)nt*(size_t)self->n*8);
+  if(!valid){ PyBuffer_Release(&out);
+    PyErr_SetString(PyExc_ValueError,"invalid correlation output shape or subrange"); return NULL; }
+  int r;
+  Py_BEGIN_ALLOW_THREADS
+  r=ap_mf_correlate(self->p,d0,nd,t0,nt,(float*)out.buf);
+  Py_END_ALLOW_THREADS
+  PyBuffer_Release(&out);
+  if(r){ PyErr_SetString(PyExc_RuntimeError,"correlation failed"); return NULL; }
+  Py_RETURN_NONE;
+}
+static PyObject *MF_correlate_series(MFObject *self,PyObject *args){
+  Py_buffer ser,starts,out;
+  int t0,nt;
+  if(!PyArg_ParseTuple(args,"y*y*iiw*",&ser,&starts,&t0,&nt,&out)) return NULL;
+  const size_t rowbytes=(size_t)self->n*8;
+  int valid=ser.len%8==0 && starts.len%sizeof(size_t)==0
+    && starts.len/sizeof(size_t)>0 && starts.len/sizeof(size_t)<=INT_MAX
+    && t0>=0 && nt>0 && nt<=self->nt && t0<=self->nt-nt;
+  size_t blocks=(size_t)starts.len/sizeof(size_t);
+  if(valid){
+    valid=blocks<=SIZE_MAX/(size_t)nt
+      && blocks*(size_t)nt<=SIZE_MAX/rowbytes
+      && (size_t)out.len>=blocks*(size_t)nt*rowbytes;
+  }
+  if(valid){
+    const size_t *st=(const size_t*)starts.buf;
+    for(size_t i=0;i<blocks;i++) if(st[i]>SIZE_MAX-(size_t)self->n){valid=0;break;}
+  }
+  if(!valid){
+    PyBuffer_Release(&ser);PyBuffer_Release(&starts);PyBuffer_Release(&out);
+    PyErr_SetString(PyExc_ValueError,"invalid series, starts, templates or full output shape");
+    return NULL;
+  }
+  int r;
+  Py_BEGIN_ALLOW_THREADS
+  r=ap_mf_correlate_series(self->p,(const float*)ser.buf,(size_t)ser.len/8,
+                           (const size_t*)starts.buf,(int)blocks,t0,nt,(float*)out.buf);
+  Py_END_ALLOW_THREADS
+  PyBuffer_Release(&ser);PyBuffer_Release(&starts);PyBuffer_Release(&out);
+  if(r){ PyErr_SetString(PyExc_RuntimeError,"full series correlation failed");return NULL; }
+  Py_RETURN_NONE;
+}
 /* run_series(series, starts, wstart, wend, t0, nt, binsize, thr, idx,val,mag,cnt) */
 static PyObject *MF_run_series(MFObject *self,PyObject *args){
   Py_buffer bs,bst,bws,bwe,bidx,bval,bmag,bcnt;
@@ -193,6 +243,8 @@ static PyMethodDef MF_methods[]={
   {"set_data",(PyCFunction)MF_set_data,METH_VARARGS,"set_data(i, buffer)"},
   {"set_template",(PyCFunction)MF_set_template,METH_VARARGS,"set_template(i, buffer)"},
   {"run",(PyCFunction)MF_run,METH_VARARGS,"run(...) -> total crossings"},
+  {"correlate",(PyCFunction)MF_correlate,METH_VARARGS,"correlate(...) -> full correlation"},
+  {"correlate_series",(PyCFunction)MF_correlate_series,METH_VARARGS,"correlate_series(...) -> full correlation"},
   {"run_series",(PyCFunction)MF_run_series,METH_VARARGS,"run_series(...)"},
   {"nbins",(PyCFunction)MF_nbins,METH_VARARGS,"nbins(binsize, start, end)"},
   {NULL}

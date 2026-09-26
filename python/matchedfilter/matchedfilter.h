@@ -1,12 +1,11 @@
-/* matchedfilter - single-threaded batched matched filter with peak-only output.
+/* matchedfilter - single-threaded batched filtering and full correlation.
  *
  * Correlate D data segments against T templates and get back, for each pair, the
- * loudest sample in each bin of a search window.  The full correlation output is
- * never formed.
+ * loudest sample in each bin of a search window, or every correlation lag.
  *
  * Inputs are FREQUENCY DOMAIN: the unnormalised forward transform of each
- * segment, natural order, interleaved complex float32.  Lengths supported are
- * 1024 and the powers of two from 4096 to 2^20.
+ * segment, natural order, interleaved complex float32.  CPU peak filtering
+ * supports powers of two from 64 to 2^20; full output supports 2^10 to 2^22.
  *
  * Correlation is circular; zero-pad before ingest for linear.  The inverse is
  * unnormalised, matching FFTW and MKL, so a perfect match returns n * energy.
@@ -69,6 +68,15 @@ int ap_mf_set_template(ap_mf_plan *p, int t, const float *spec);
 int ap_mf_run(ap_mf_plan *p, int d0, int nd, int t0, int nt,
               size_t binsize, float threshold,
               ap_peak *peaks, int *counts, size_t start, size_t end);
+/* Full unnormalised circular correlation, interleaved complex float32 in
+   natural lag order. out has nd*nt*n complex samples. */
+int ap_mf_correlate(ap_mf_plan *p, int d0, int nd, int t0, int nt, float *out);
+/* Gather and zero-pad each series block, then correlate it with the selected
+   templates. out has nblocks*nt*n complex samples. */
+int ap_mf_correlate_series(ap_mf_plan *p,
+                           const float *series, size_t nseries,
+                           const size_t *starts, int nblocks,
+                           int t0, int nt, float *out);
 
 /* Same, but for a scattered set of templates: tsel[0..nsel) are local indices
    into [0,nt).  Rows are still addressed by the local index, so the skipped
