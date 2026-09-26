@@ -154,18 +154,19 @@ def _cpu_name():
 
 
 def retune_cost(source, out, trials=4000, jobs=None, verbose=True):
-    """Remeasure costs on synthetic references spanning an existing cost file.
+    """Remeasure legacy fd=.001 costs on synthetic reference anchors.
 
-    The source provides reference anchors, not accuracy. Interleaved timing
-    compares all candidates on each reference, using the current model gate.
+    The source may be a legacy or FDR-aware cost file. It provides reference
+    anchors, not accuracy. For a budget-aware CPU table use regen/cost_cpu.py.
     """
     cells = set()
     for line in open(source):
         f = line.split()
         if not f or f[0].startswith('#'):
             continue
-        if f[0] == 'COST' and len(f) == 9:
-            cells.add((int(f[1]), int(f[2]), float(f[5]), float(f[6]), float(f[7])))
+        if f[0] == 'COST' and len(f) in (9, 10, 11):
+            cells.add((int(f[1]), int(f[2]), float(f[5]),
+                       float(f[-3]), float(f[-2])))
     if not cells:
         raise ValueError('cost file contains no supported cost rows')
     with open(out, 'w') as fh:

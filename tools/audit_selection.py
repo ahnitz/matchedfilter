@@ -34,7 +34,7 @@ def audit(n=4096, snr=6., fd=1e-3, nd=8, nt=32, device='cpu', reps=7):
     flat = mf.MatchedFilter(n, nd, nt, device=device)
     tuning = mf._load_tuning() if flat.device.kind == 'cpu' else mf._load_tuning_for(flat.device)
     coverage = candidate_coverage(power, n, snr, fd, tuning)
-    pick = mf.choose_config(power, n, snr, fd, tuning=tuning)
+    pick = mf.choose_config(power, n, snr, fd, tuning=tuning, pairs=nd*nt)
     h = (np.sqrt(power)*np.exp(1j*rng.uniform(0, 2*np.pi, (nt,n)))).astype(np.complex64)
     h /= np.linalg.norm(h, axis=1)[:, None]
     d = (rng.normal(size=(nd,n))+1j*rng.normal(size=(nd,n))).astype(np.complex64)
@@ -87,8 +87,7 @@ def export_cost(result, path):
              (result['n'], result['data'], result['templates'], result['device']),
              "# Existing cost-covered bands only; new-band accuracy is not established.",
              "# Do not replace broad default coverage with this narrow measurement."]
-    if str(result['device']).startswith('gpu'):
-        lines.append('# format cost-fd-pairs-v1')
+    lines.append('# format cost-fd-pairs-v1')
     header_lines = len(lines)
     for row in result['candidates']:
         if 'seconds' not in row or not row['cost_rows']:
@@ -97,9 +96,8 @@ def export_cost(result, path):
         for taps in (4, 8):
             prefix = "COST %d %d 2 %d %.2f" % (
                 result['n'], row['band'], taps, result['snr'])
-            if str(result['device']).startswith('gpu'):
-                prefix += " %.9g %d" % (result['fd'],
-                                          result['data']*result['templates'])
+            prefix += " %.9g %d" % (result['fd'],
+                                      result['data']*result['templates'])
             lines.append("%s %.9g %.9g %.9g" %
                          (prefix, row['fraction'], row['beff'],
                           row['seconds']/result['flat_seconds']))

@@ -11,7 +11,8 @@ The GPU table has `# format cost-fd-pairs-v1` and rows of the form
 COST n band U K snr fd pairs f beff relative_cost
 ```
 
-CPU and older custom cost files retain their nine-field form. The explicit
+Older custom cost files retain their nine-field form. The current CPU table
+also uses this FDR-and-pairs format. The explicit
 format marker prevents an old ten-field gate-scale row from being mistaken
 for a budget-aware row. Configuration selection uses the closest measured
 SNR, log FDR, and log pair count, then interpolates relative cost in

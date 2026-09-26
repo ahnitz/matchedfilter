@@ -29,7 +29,7 @@ def test_autotuning_refuses_outside_its_measured_coverage():
     # test must keep testing refusal rather than quietly starting to pass for
     # the wrong reason.
     t = mf._load_tuning()
-    covered = {r[0] for r in t["cost"]}
+    covered = {r[0] for r in t["cost_fd_pairs"]}
     n = next(v for v in (3072, 6144, 12288, 24576) if v not in covered)
     power = inspiral_power(n)
     hf = mf.HierarchicalFilter(n, ndata=1, ntemplates=2, snr=5.0, fd=1e-3)
@@ -154,6 +154,24 @@ def test_cost_override_does_not_poison_other_devices_or_default(monkeypatch, tmp
     assert mf._load_tuning()['cost'] == explicit['cost']
     monkeypatch.delenv('MF_COST')
     assert mf._load_tuning()['cost'] == default['cost']
+
+
+def test_shipped_cpu_cost_ranking_changes_with_fdr():
+    """The CPU table must not silently collapse back to one budget."""
+    power = inspiral_power(4096)
+    table = mf._load_tuning()
+    assert table['cost_fd_pairs'] and not table['cost']
+    keys = table['cost_fd_pairs']
+    assert {key[0] for key in keys} == {1024, 2048, 4096, 8192, 16384,
+                                       32768, 65536, 131072, 262144}
+    assert {key[5] for key in keys} == {.01, .001, .0001}
+    assert {key[6] for key in keys if key[0] == 4096} == {512, 16384}
+    for n in (8192, 32768):
+        assert {key[6] for key in keys if key[0] == n} == {512, 1024}
+    loose = mf._cost_candidates(power, 4096, 5.5, table, .01, 16384)
+    strict = mf._cost_candidates(power, 4096, 5.5, table, .0001, 16384)
+    assert loose[0]['band'] == 512
+    assert strict[0]['band'] == 1024
 
 
 def test_budget_aware_gpu_costs_change_only_configuration(tmp_path, monkeypatch):
