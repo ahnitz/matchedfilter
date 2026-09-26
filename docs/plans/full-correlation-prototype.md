@@ -30,6 +30,32 @@ A separate 8192 GPU measurement isolated ~0.29 ms for submit/completion and
 ~2.0 ms for copying the 32 MiB mapped output to NumPy. That points to output
 movement, rather than the fused transform, as the largest remaining cost.
 
+## Kernel-level comparison without a host copy
+
+The table above is appropriate for an API returning a fresh, independently
+owned NumPy array. It is not a fair measure of the GPU transform itself. The
+Radeon 8060S is integrated: the prototype writes to host-visible mapped
+memory, and `bout.read()` makes an additional CPU `memmove` into a new NumPy
+array. A NumPy view of that mapped allocation sees the correct result without
+the copy (maximum relative error below 1.5e-6 in this run).
+
+With spectra resident in both plans, reusable output storage, and no host
+read or copy in the timed call, the same 16×32 workload measured:
+
+| n | CPU transform + output | GPU transform + output write | CPU/GPU |
+|---:|---:|---:|---:|
+| 2048 | 0.674 ms | 0.052 ms | 12.9× |
+| 4096 | 1.674 ms | 0.096 ms | 17.3× |
+| 8192 | 4.458 ms | 0.299 ms | 14.9× |
+
+The GPU figure includes queue submit and completion, and the kernel still
+writes every complex output value in natural lag order. It excludes copying
+or scanning that output on the CPU. If a caller needs a fresh host-owned array,
+the cost in the first table remains real; if it can consume a mapped view or
+keep results on the GPU, the transform and output write are much faster than
+the CPU path. A mapped-view API would need explicit lifetime and overwrite
+rules before it is public.
+
 `tests/test_full_correlation_prototype.py` checks CPU and Radeon Vulkan
 against NumPy's independent complex inverse FFT at 2048, 4096 and 8192;
 all six tests pass. The maximum relative errors in the timed batches were
