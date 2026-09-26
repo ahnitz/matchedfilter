@@ -56,7 +56,8 @@ keep results on the GPU, the transform and output write are much faster than
 the CPU path. A mapped-view API would need explicit lifetime and overwrite
 rules before it is public.
 
-`tests/test_full_correlation_prototype.py` checks CPU and Radeon Vulkan
+The original prototype test (superseded by `tests/test_full_correlation.py`)
+checked CPU and Radeon Vulkan
 against NumPy's independent complex inverse FFT at 2048, 4096 and 8192;
 all six tests pass. The maximum relative errors in the timed batches were
 below 2e-7 on CPU and 1.3e-6 on GPU. The prototype only builds GPU kernels

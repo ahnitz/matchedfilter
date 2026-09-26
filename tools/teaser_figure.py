@@ -1,7 +1,8 @@
-"""Measure the teaser on this machine, including all three FDR budgets.
+"""Measure the cost of successively narrower output requirements.
 
-Matchedfilter times warm public run() calls, including GPU synchronization,
-readback and result assembly. All filter bars use the same Gaussian-noise
+Matchedfilter times warm public run() calls, including GPU synchronization.
+Full output reuses caller-owned storage; peak results include their normal
+readback and assembly. All filter bars use the same Gaussian-noise
 input and a bank whose power profile matches the reference. FFTW and rocFFT
 are full-batch inverse-transform-only baselines: they do less computation
 but materialize the correlation. Plan creation and input upload are excluded.
@@ -22,7 +23,7 @@ import numpy as np
 import matchedfilter as mf
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tests'))
-N, ND, NT = 4096, 16, 1024
+N, ND, NT = 4096, 16, 512
 PAIRS = ND * NT
 BUDGETS = (1e-2, 1e-3, 1e-4)
 _DETAILS = {}
@@ -81,7 +82,9 @@ def fftw_ms(reps=7):
 
 def _filter_ms(kind, device, reps, fd):
     d, h = _case()
-    if kind == 'flat':
+    if kind == 'full':
+        f = mf.CorrelationFilter(N, ND, NT, device=device)
+    elif kind == 'flat':
         f = mf.MatchedFilter(N, ND, NT, device=device)
     else:
         ref, h = _reference()
@@ -89,7 +92,11 @@ def _filter_ms(kind, device, reps, fd):
         f.set_reference(ref)
     f.set_data(d); f.set_templates(h)
     try:
-        ms = _timed(lambda: f.run(binsize=N, threshold=5.5), reps)
+        if kind == 'full':
+            output = f.empty_shared((ND, NT, N))
+            ms = _timed(lambda: f.run(out=output), reps)
+        else:
+            ms = _timed(lambda: f.run(binsize=N, threshold=5.5), reps)
         if kind == 'hier' and hasattr(f, 'config'):
             _DETAILS[(device, fd)] = {'band': f.config[0], 'taps': f.config[1],
                                       'refine_rate': f.refine_rate}
@@ -187,10 +194,10 @@ def plot(report, out):
     plt.rcParams.update({'font.family': 'DejaVu Sans', 'font.size': 10,
                          'svg.fonttype': 'none'})
     bg, fg, muted = '#0b0f19', '#e8eef7', '#adb9ca'
-    colors = ['#94a3b8', '#4facfe', '#38ef7d', '#28c4a7', '#50a798']
+    colors = ['#94a3b8', '#818cf8', '#4facfe', '#38ef7d', '#28c4a7', '#50a798']
     fig, axes = plt.subplots(1, 2, figsize=(12, 5.8), facecolor=bg)
     fig.subplots_adjust(left=.06, right=.98, top=.73, bottom=.29, wspace=.22)
-    fig.text(.04, .95, '16,384 correlations × 4,096 points', color=fg, size=18, weight='bold')
+    fig.text(.04, .95, f'{PAIRS:,} correlations × {N:,} points', color=fg, size=18, weight='bold')
     fig.text(.04, .90, 'Throughput · higher is better · CPU and GPU use different scales', color=muted, size=11)
     fig.text(.04, .852, 'Same matched-profile bank and Gaussian noise · SNR 5.5 · full lag window', color=muted, size=10)
     for ax, device, name in zip(axes, ['cpu','gpu'], [report['cpu'],report['gpu']]):
@@ -199,24 +206,24 @@ def plot(report, out):
         throughput = [PAIRS / (r['ms'] / 1000) for r in rows]
         # Overlay from largest to smallest, all measured from zero. The
         # visible segments are increments, not independent throughputs.
-        for i, (row, value) in enumerate(zip(rows[:2], throughput[:2])):
+        for i, (row, value) in enumerate(zip(rows[:3], throughput[:3])):
             ax.bar(i, value, color=colors[i], width=.65, zorder=3)
-            inside = (i == 1 and min(throughput[2:]) - value < max(throughput)*.18)
+            inside = (i == 2 and min(throughput[3:]) - value < max(throughput)*.18)
             ax.text(i, value*.5 if inside else value,
                     f"{value/1e6:.2f}M/s\n{row['ms']:.2f} ms", ha='center',
                     va='center' if inside else 'bottom', color=bg if inside else fg,
                     size=9 if inside else 10, linespacing=1.4)
-        hierarchical = sorted(zip(rows[2:], throughput[2:], colors[2:]),
+        hierarchical = sorted(zip(rows[3:], throughput[3:], colors[3:]),
                               key=lambda item: item[1], reverse=True)
         for row, value, color in hierarchical:
-            ax.bar(2.2, value, color=color, width=.8, zorder=3)
-            ax.plot([1.64, 1.8], [value, value], color=color, lw=1, zorder=4)
+            ax.bar(3.2, value, color=color, width=.8, zorder=3)
+            ax.plot([2.64, 2.8], [value, value], color=color, lw=1, zorder=4)
             budget = {1e-2:'10⁻²', 1e-3:'10⁻³', 1e-4:'10⁻⁴'}[row['fd']]
-            ax.text(1.58, value, f"{budget}  {value/1e6:.2f}M/s · {row['ms']:.2f} ms",
+            ax.text(2.58, value, f"{budget}  {value/1e6:.2f}M/s · {row['ms']:.2f} ms",
                     ha='right', va='center', color=fg, size=9)
-        ax.set_xlim(-.55, 2.95)
+        ax.set_xlim(-.55, 3.95)
         ax.set_ylim(0, max(throughput)*1.27)
-        ax.set_xticks([0, 1, 2.2], [rows[0]['label'], 'Flat', 'Hierarchical'],
+        ax.set_xticks([0, 1, 2, 3.2], [rows[0]['label'], 'Full output', 'Peak only', 'Hierarchical'],
                       color=fg, size=10)
         ax.tick_params(axis='x', length=0, pad=8)
         ax.tick_params(axis='y', colors=muted, labelsize=9)
@@ -226,11 +233,11 @@ def plot(report, out):
         for spine in ax.spines.values(): spine.set_visible(False)
         ax.set_title(device.upper() + '  ·  ' + name.split(' w/')[0].replace('AMD ',''),
                      color=fg, size=11, loc='left', pad=16)
-    fig.text(.04, .15, 'Hierarchical boundaries show total throughput at each FDR budget, not additive rates. FDR is requested, not measured here.',
+    fig.text(.04, .15, 'Each step restricts the result: all lags → one peak per pair → a screened subset. Hierarchical FDR is requested, not measured here.',
              color=muted, size=10)
-    fig.text(.04, .105, 'FFTW / rocFFT: inverse FFT only. Matchedfilter: product + inverse FFT + peak; warm public API.',
+    fig.text(.04, .105, 'FFTW / rocFFT: inverse FFT only. Full: product + inverse FFT + all lags. Peak: product + inverse FFT + maximum.',
              color=muted, size=10)
-    fig.text(.04, .06, 'Setup excluded; FFTW PATIENT planning capped at 15 s. GPU filter includes sync, readback and result assembly.',
+    fig.text(.04, .06, 'Setup excluded; FFTW PATIENT planning capped at 15 s. Full output reuses caller storage; GPU timing includes synchronization.',
              color=muted, size=9)
     fig.text(.04, .023, report['date'] + ' · single CPU thread · live measurements on Ryzen AI MAX+ 395 / Radeon 8060S',
              color=muted, size=9)
@@ -253,7 +260,7 @@ def main(argv=None):
     for device, baseline, fn, measure in [('cpu','FFTW',fftw_ms,cpu_ms),
                                           ('gpu','rocFFT',rocfft_ms,gpu_ms)]:
         for label, kind, fd in [(baseline+'\nFFT only','baseline',None),
-                                ('Flat','flat',None)] + [
+                                ('Full','full',None), ('Peak','flat',None)] + [
                                 ('Hier.\n'+{.01:'10⁻²', .001:'10⁻³', .0001:'10⁻⁴'}[fd],'hier',fd) for fd in BUDGETS]:
             ms = fn() if kind=='baseline' else measure(kind, fd=fd or .01)
             row = dict(device=device,label=label,kind=kind,fd=fd,ms=ms,

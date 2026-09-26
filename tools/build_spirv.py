@@ -157,7 +157,55 @@ COARSE_TILE_T = {128: 2, 256: 2, 512: 4, 1024: 2}
 #: Artifact prefix per entry point. Two entries used to be distinguished by
 #: `entry == ENTRY`, which silently collides the moment there is a third.
 STEMS = {"fusedTierB": "tierb",
-         "compactPairs": "compact", "refineListed": "refine"}
+         "compactPairs": "compact", "refineListed": "refine",
+         "fullCorrelation": "full"}
+
+FULL_TIER_C = tuple(1 << k for k in range(17, 23))
+TIER_C_ENTRIES = (("corr1", "tcStage1"), ("corr2", "tcFullStage3"),
+                  ("fwd1", "tcForwardStage1"), ("fwd2", "tcForwardStage3"))
+
+
+def tierc_split(n):
+    n2 = 1
+    while n2 * n2 * 2 <= n:
+        n2 *= 2
+    return n // n2, n2
+
+
+def build_full_tierc(slangc):
+    """Two inverse stages, and the same stages for normalized series FFTs."""
+    entries = {}
+    for n in FULL_TIER_C:
+        n1, n2 = tierc_split(n)
+        info = {'n1': n1, 'n2': n2}
+        for role, entry in TIER_C_ENTRIES:
+            sub = n2 if role.endswith('1') else n1
+            cap = LDS_CAP[sub]
+            source = (f'#define NLEN {sub}\n#define TC_N {n}\n'
+                      f'#define LDS_CAP {cap}\n' + KERNEL.read_text())
+            files = {}
+            for target, folder, ext in (('spirv', OUT, 'spv'),
+                                         ('metal', MSL, 'metal')):
+                src = folder / f'tc_{role}_{n}.slang'
+                dst = folder / f'tc_{role}_{n}.{ext}'
+                src.write_text(source)
+                proc = subprocess.run(
+                    [slangc, str(src), '-I', str(KERNEL.parent), '-target', target,
+                     '-entry', entry, '-stage', 'compute', '-O3', '-o', str(dst)],
+                    capture_output=True, text=True)
+                src.unlink()
+                if proc.returncode:
+                    raise RuntimeError(f'slangc {target} {entry} n={n}:\n{proc.stderr}')
+                if target == 'metal':
+                    dst.write_text(dst.read_text().rstrip() + '\n')
+                files[target] = dst.name
+                if target == 'metal':
+                    compile_metallib(dst)
+            info[role] = dict(file=files['spirv'], metal=files['metal'],
+                              local_size=reflect((OUT / files['spirv']).read_bytes())['local_size'])
+        entries[str(n)] = info
+        print(f'  full Tier C n={n} split={n1}x{n2}', flush=True)
+    return entries
 
 _STORAGE_CLASS = {2: "Uniform", 9: "PushConstant", 12: "StorageBuffer"}
 
@@ -252,6 +300,7 @@ def compile_metal(slangc, n, cap, entry, outdir, suffix="", coarse16=0, ppg=1):
     if proc.returncode != 0:
         raise RuntimeError("slangc -target metal failed for n=%d %s:\n%s"
                            % (n, entry, proc.stderr))
+    msl.write_text(msl.read_text().rstrip() + '\n')
     return msl, compile_metallib(msl)
 
 
@@ -372,6 +421,13 @@ def main(argv=None):
         info = reflect(spv.read_bytes())
         info["file"] = spv.name
         info["bytes"] = spv.stat().st_size
+        if n >= 1024:
+            full = compile_one(slangc, n, OUT, "fullCorrelation")
+            info["full"] = dict(file=full.name)
+            if lds_bytes(n, LDS_CAP[n]) > lds_bytes(n, PORTABLE_CAP):
+                portable = compile_one(slangc, n, OUT, "fullCorrelation",
+                                       cap=PORTABLE_CAP, suffix="_lds32")
+                info["full"]["portable"] = dict(file=portable.name)
         # Compaction: gather the pairs that passed the coarse threshold and
         # refine only those. The refine used to launch a workgroup per pair
         # to have it exit -- 57% of the hierarchical call at 512x512 -- and
@@ -450,7 +506,7 @@ def main(argv=None):
                                        % ("p%d" % _p if _p > 1 else "", _t))
             compile_metal(slangc, n, mcap, centry, MSL, suffix="_c16", coarse16=1)
 
-        for entry in ENTRIES:
+        for entry in ENTRIES + (("fullCorrelation",) if n >= 1024 else ()):
             m, lib = compile_metal(slangc, n, mcap, entry, MSL)
             metal[entry] = dict(msl=m.name,
                                 metallib=lib.name if lib else None)
@@ -487,6 +543,7 @@ def main(argv=None):
     # both so a normal rebuild cannot leave one direction stale.
     import build_forward
     manifest.update(build_forward.build_kernels(slangc, sys.modules[__name__]))
+    manifest['full_tierc'] = build_full_tierc(slangc)
     manifest["source_hashes"] = source_hashes()
     (OUT / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     print("wrote %s" % (OUT / "manifest.json"))

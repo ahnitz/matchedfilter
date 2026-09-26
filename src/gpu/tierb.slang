@@ -969,7 +969,7 @@ void fusedTierB(uint3 gid: SV_GroupID, uint3 lid: SV_GroupThreadID,
 }
 
 // Full circular correlation in natural lag order. The same fused spectral
-// product and transform as the peak path, with one coalesced output write per
+// product and transform as the peak path, with one ordered output write per
 // transformed sample and no peak table or reduction.
 [shader("compute")][numthreads(WG,1,1)]
 void fullCorrelation(uint3 gid: SV_GroupID, uint3 lid: SV_GroupThreadID,
@@ -1103,7 +1103,7 @@ void tcStage1(uint3 gid: SV_GroupID, uint3 lid: SV_GroupThreadID,
     }
     transform(r, tid);
 
-    //: n1*k2 < N1*N2 = n <= 2^20, so the product is exact in float32 and the
+    //: n1*k2 < N1*N2 = n <= 2^22, so the product is exact in float32 and the
     //: angle stays inside one turn. Folding it any other way costs accuracy
     //: for nothing.
     [unroll] for (uint i = 0; i < R; ++i) {
@@ -1167,6 +1167,76 @@ void tcStage3(uint3 gid: SV_GroupID, uint3 lid: SV_GroupThreadID,
             candIdx[slot] = int(idx);
             candVal[slot] = float2(float(r[i].x), float(r[i].y));
         }
+    }
+}
+
+// Full-output Stage 3 has no inter-workgroup peak reduction. It writes one
+// complete natural-order lag per register to the caller's output allocation.
+[shader("compute")][numthreads(WG, 1, 1)]
+void tcFullStage3(uint3 gid: SV_GroupID, uint3 lid: SV_GroupThreadID,
+                  StructuredBuffer<float2> scratch,
+                  RWStructuredBuffer<float2> output)
+{
+    uint pair = gid.x / TC_OTHER, k2 = gid.x % TC_OTHER;
+    uint tid = lid.x;
+    _tid = tid;
+    _stgBase = 0;
+    C r[RADIX];
+    [unroll] for (uint m = 0; m < R; ++m)
+        r[m] = scratch[pair * TC_N + k2 * NLEN + tid + WG*m];
+    transform(r, tid);
+    [unroll] for (uint i = 0; i < R; ++i) {
+        uint k1 = slotToIndex(tid * R + i);
+        output[pair * TC_N + k1 * TC_OTHER + k2] = float2(r[i].x, r[i].y);
+    }
+}
+
+// FFT(series)/n = conj(IFFT(conj(series)/n)). The same inverse butterflies,
+// twiddle and scratch layout therefore serve the time-series forward pass.
+[shader("compute")][numthreads(WG, 1, 1)]
+void tcForwardStage1(uint3 gid: SV_GroupID, uint3 lid: SV_GroupThreadID,
+                      StructuredBuffer<float2> series,
+                      StructuredBuffer<uint> starts,
+                      RWStructuredBuffer<float2> scratch,
+                      uniform uint seriesLength)
+{
+    uint block = gid.x / TC_OTHER, n1 = gid.x % TC_OTHER;
+    uint tid = lid.x;
+    uint start = starts[block];
+    _tid = tid;
+    _stgBase = 0;
+    C r[RADIX];
+    [unroll] for (uint m = 0; m < R; ++m) {
+        uint j = n1 + TC_OTHER * (tid + WG*m);
+        float2 x = float2(0, 0);
+        if (start < seriesLength && j < seriesLength - start)
+            x = series[start+j];
+        r[m] = C(x.x/float(TC_N), -x.y/float(TC_N));
+    }
+    transform(r, tid);
+    [unroll] for (uint i = 0; i < R; ++i) {
+        uint k2 = slotToIndex(tid * R + i);
+        float a = 2.0f * PI * float(n1 * k2) / float(TC_N);
+        scratch[block * TC_N + k2 * TC_OTHER + n1] = cmul(r[i], C(cos(a), sin(a)));
+    }
+}
+
+[shader("compute")][numthreads(WG, 1, 1)]
+void tcForwardStage3(uint3 gid: SV_GroupID, uint3 lid: SV_GroupThreadID,
+                      StructuredBuffer<float2> scratch,
+                      RWStructuredBuffer<float2> spectra)
+{
+    uint block = gid.x / TC_OTHER, k2 = gid.x % TC_OTHER;
+    uint tid = lid.x;
+    _tid = tid;
+    _stgBase = 0;
+    C r[RADIX];
+    [unroll] for (uint m = 0; m < R; ++m)
+        r[m] = scratch[block * TC_N + k2 * NLEN + tid + WG*m];
+    transform(r, tid);
+    [unroll] for (uint i = 0; i < R; ++i) {
+        uint k1 = slotToIndex(tid * R + i);
+        spectra[block * TC_N + k1 * TC_OTHER + k2] = float2(r[i].x, -r[i].y);
     }
 }
 #endif

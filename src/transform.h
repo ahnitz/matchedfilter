@@ -74,5 +74,8 @@ int ap_binmax_prod(ap_plan *p, const float *dr, const float *di,
                    int sign, size_t start, size_t end);
 int ap_corr_prod(ap_plan *p, const float *dr, const float *di,
                  const float *tr, const float *ti, float *out);
+int ap_corr_split(ap_plan *p, const float *re, const float *im, float *out);
+int ap_corr_prod_batch(ap_plan *p, const float *dr, const float *di,
+                       const float *tr, const float *ti, int nlane, float *out);
 
 #endif

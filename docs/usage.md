@@ -1,6 +1,6 @@
 # Using matchedfilter
 
-This guide covers inputs, output bins, device selection and hierarchical
+This guide covers inputs, full correlations, output bins, device selection and hierarchical
 calibration. The examples execute during the documentation build. Run them
 locally with `python -m matchedfilter.tutorial`.
 
@@ -49,6 +49,44 @@ used in these SNR examples. Other input normalizations change the scale of
 
 `threshold` applies to the peak magnitude. Dismissed bins keep their place
 in the output, so `peaks[d, t, j]` always refers to bin `j`.
+
+## Keeping every lag
+
+`CorrelationFilter` accepts the same spectra and bank dimensions as
+`MatchedFilter`. Its `run()` returns a `complex64` array shaped
+`(ndata, ntemplates, n)` in natural lag order. It computes the unnormalised
+inverse of `data * conj(template)`, with no threshold or peak search:
+
+```python
+import numpy as np
+import matchedfilter as mf
+
+n = 1024
+template = np.zeros(n, np.float32)
+template[0] = 1
+data = np.roll(template, 37)
+full = mf.CorrelationFilter(n)
+full.set_data(np.fft.fft(data).astype(np.complex64)[None, :])
+full.set_templates(np.fft.fft(template).astype(np.complex64)[None, :])
+values = full.run()                  # shape (1, 1, 1024)
+print(np.argmax(np.abs(values[0, 0])))  # 37
+```
+
+For larger banks, `run(data=(start, count), templates=(start, count))`
+selects a rectangular subrange.
+
+`run_series(series, starts, templates=None, out=None)` gathers and zero-pads
+blocks, computes their forward transforms, and returns all lags for each block
+and selected template. It consumes the data slots, just like the peak-only
+series method. Supply a writable, C-contiguous `complex64` array as `out` to
+reuse output storage; the returned object is that same array. On GPU,
+`empty_shared(shape)` permits direct writes to GPU-accessible host memory.
+A plain NumPy array or memmap also works through bounded staging.
+
+Full results can be large. A single 2^22 correlation is 32 MiB; a 128×512
+bank at that length is 2 TiB. Without `out`, the class raises before allocating
+more than 512 MiB. Select a bank subrange or provide storage to process larger
+results in batches.
 
 [[example:Thresholding]]
 
@@ -118,7 +156,8 @@ uses Metal. GPU execution requires a compatible driver.
 
 | Capability | CPU | GPU |
 |---|---|---|
-| Transform sizes | powers of two, 64–1,048,576 | powers of two, 64–65,536; device limits apply |
+| Peak-only transform sizes | powers of two, 64–1,048,576 | powers of two, 64–65,536; device limits apply |
+| Full-output transform sizes | powers of two, 1,024–4,194,304 | powers of two, 1,024–4,194,304; device limits apply |
 | Flat / hierarchical filtering | yes | yes |
 | `run_series()` | yes | yes |
 | Input spectra / output values | complex64 | complex64 |

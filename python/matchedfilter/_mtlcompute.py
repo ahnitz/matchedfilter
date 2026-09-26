@@ -32,9 +32,8 @@ _manifest_cache = None
 def _manifest():
     """The build manifest, shared with the SPIR-V backend.
 
-    Both backends are generated from the same Slang source with the same
-    staging cap, so the recorded threadgroup-memory figure is the same
-    number for either -- there is no second manifest to keep in step.
+    Both backends are generated from the same Slang source. The manifest
+    records the Metal staging cap separately from Vulkan's.
     """
     global _manifest_cache
     if _manifest_cache is None:
@@ -223,6 +222,9 @@ class Context(InputUploads):
         self.device = self.queue = None
         self._pipelines = {}
         self._batches = {}
+        self._full_batches = {}
+        self._tierc_batches = {}
+        self._forwards = {}
         self._hier = {}
         try:
             self._initialize(index)
@@ -322,9 +324,14 @@ class Context(InputUploads):
             return "pack_coarse"
         if entry == "seriesForward":
             return "forward_%d" % n
+        tierc = {"tcStage1": "corr1", "tcFullStage3": "corr2",
+                 "tcForwardStage1": "fwd1", "tcForwardStage3": "fwd2"}
+        if entry in tierc:
+            return "tc_%s_%d" % (tierc[entry], n)
         base = "%s_%d" % ({"fusedTierB": "tierb",
                            "compactPairs": "compact",
-                           "refineListed": "refine"}[entry], n)
+                           "refineListed": "refine",
+                           "fullCorrelation": "full"}[entry], n)
         info = _manifest().get("modules", {}).get(str(n), {})
         # The Metal column. Metal is built against its own staging cap
         # -- Apple and the Radeon want opposite answers -- so reading
@@ -407,7 +414,10 @@ class Context(InputUploads):
                              argtypes=(ctypes.c_void_p,))
             if not fn:
                 raise MetalError("no function %r in %s" % (entry, stem))
-            want = n // _radix(n)
+            roles = {"tcStage1": "corr1", "tcFullStage3": "corr2",
+                     "tcForwardStage1": "fwd1", "tcForwardStage3": "fwd2"}
+            want = (_manifest()['full_tierc'][str(n)][roles[entry]]['local_size'][0]
+                    if entry in roles else n // _radix(n))
             err = ctypes.c_void_p()
             pso = self.o.call(self.device,
                               b"newComputePipelineStateWithFunction:error:",
@@ -459,6 +469,8 @@ class Context(InputUploads):
 
     @_autoreleased
     def forward(self, n, series, starts, spectra, *, defer=False):
+        if n > 65536:
+            return self._forward_tierc(n, series, starts, spectra, defer=defer)
         pso = self.pipeline(n, "seriesForward")
         buffers = [shared_buffer(a, self) for a in (series, starts, spectra)]
         if any(b is None for b in buffers):
@@ -486,6 +498,61 @@ class Context(InputUploads):
             return
         self.o.call(cmd, b"commit", restype=None)
         self.o.call(cmd, b"waitUntilCompleted", restype=None)
+        self._check_completed(cmd)
+
+    def _encode_tierc(self, cmd, n, role, buffers, groups, uniform=None):
+        entries = {'corr1': 'tcStage1', 'corr2': 'tcFullStage3',
+                   'fwd1': 'tcForwardStage1', 'fwd2': 'tcForwardStage3'}
+        enc = self.o.call(cmd, b'computeCommandEncoder')
+        self.o.call(enc, b'setComputePipelineState:', restype=None,
+                    args=(self.pipeline(n, entries[role]),),
+                    argtypes=(ctypes.c_void_p,))
+        slot = 0
+        if uniform is not None:
+            value = ctypes.c_uint32(uniform)
+            self.o.call(enc, b'setBytes:length:atIndex:', restype=None,
+                        args=(ctypes.byref(value), 4, 0),
+                        argtypes=(ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong))
+            slot = 1
+        for buf in buffers:
+            self.o.call(enc, b'setBuffer:offset:atIndex:', restype=None,
+                        args=(buf.handle, 0, slot),
+                        argtypes=(ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong))
+            slot += 1
+        width = _manifest()['full_tierc'][str(n)][role]['local_size'][0]
+        self.o.call(enc, b'dispatchThreadgroups:threadsPerThreadgroup:',
+                    restype=None,
+                    args=(_MTLSize(groups, 1, 1), _MTLSize(width, 1, 1)),
+                    argtypes=(_MTLSize, _MTLSize))
+        self.o.call(enc, b'endEncoding', restype=None)
+
+    @_autoreleased
+    def _forward_tierc(self, n, series, starts, spectra, *, defer=False):
+        geometry = _manifest().get('full_tierc', {}).get(str(n))
+        if geometry is None:
+            raise UnsupportedSize('no two-stage series FFT for n=%d' % n)
+        buffers = [shared_buffer(a, self) for a in (series, starts, spectra)]
+        if any(b is None for b in buffers):
+            raise ValueError('two-stage forward buffers must belong to this GPU context')
+        key = (n, series.size, spectra.shape[0],
+               *(a.ctypes.data for a in (series, starts, spectra)))
+        scratch = self._forwards.get(key)
+        if scratch is None:
+            self._cache_room(spectra.nbytes, incoming=buffers)
+            scratch = _Buffer(self, spectra.nbytes)
+            self._forwards[key] = scratch
+        self._cache_touch('forward', key)
+        cmd = self.o.call(self.queue, b'commandBuffer')
+        self._encode_tierc(cmd, n, 'fwd1', (buffers[0], buffers[1], scratch),
+                           spectra.shape[0]*geometry['n1'], series.size)
+        self._encode_tierc(cmd, n, 'fwd2', (scratch, buffers[2]),
+                           spectra.shape[0]*geometry['n2'])
+        if defer:
+            self.o.call(cmd, b'retain')
+            self._pending_metal = (cmd, (*buffers, scratch))
+            return
+        self.o.call(cmd, b'commit', restype=None)
+        self.o.call(cmd, b'waitUntilCompleted', restype=None)
         self._check_completed(cmd)
 
     def _command_buffer(self):
@@ -599,6 +666,118 @@ class Context(InputUploads):
         val = b_val.read(np.float32, out * 2).view(
             np.complex64).reshape(nd, nt, nbins)
         return idx, val
+
+    @_autoreleased
+    def _full_tile(self, n, data, tmpl, out, upload_data, upload_tmpl):
+        nd, nt = data.shape[0], tmpl.shape[0]
+        key = (n, nd, nt, shared_key(data, self), shared_key(tmpl, self),
+               shared_key(out, self))
+        uploads = self._input_uploads(key, data, tmpl, upload_data, upload_tmpl)
+        batch = self._full_batches.get(key)
+        if batch is None:
+            self._cache_room(sum(a.nbytes for a in (data, tmpl, out)
+                                 if shared_buffer(a, self) is None),
+                             incoming=[b for a in (data, tmpl, out)
+                                       if (b := shared_buffer(a, self)) is not None])
+            batch = (shared_buffer(data, self) or _Buffer(self, data.nbytes),
+                     shared_buffer(tmpl, self) or _Buffer(self, tmpl.nbytes),
+                     shared_buffer(out, self) or _Buffer(self, out.nbytes))
+            self._full_batches[key] = batch
+            uploads = (True, True, *uploads[2:])
+        self._cache_touch('full', key)
+        bd, bt, bo = batch
+        if uploads[0]:
+            write_input(bd, data)
+            self._uploaded['data'][key] = uploads[2]
+        if uploads[1]:
+            write_input(bt, tmpl)
+            self._uploaded['tmpl'][key] = uploads[3]
+        pso = self.pipeline(n, 'fullCorrelation')
+        cmd = self._command_buffer()
+        enc = self.o.call(cmd, b'computeCommandEncoder')
+        self.o.call(enc, b'setComputePipelineState:', restype=None,
+                    args=(pso,), argtypes=(ctypes.c_void_p,))
+        params = ctypes.c_uint32(nt)
+        self.o.call(enc, b'setBytes:length:atIndex:', restype=None,
+                    args=(ctypes.byref(params), 4, 0),
+                    argtypes=(ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong))
+        for slot, buf in enumerate(batch, start=1):
+            self.o.call(enc, b'setBuffer:offset:atIndex:', restype=None,
+                        args=(buf.handle, 0, slot),
+                        argtypes=(ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong))
+        self.o.call(enc, b'dispatchThreadgroups:threadsPerThreadgroup:',
+                    restype=None, args=(_MTLSize(nd*nt, 1, 1),
+                                        _MTLSize(n//_radix(n), 1, 1)),
+                    argtypes=(_MTLSize, _MTLSize))
+        self.o.call(enc, b'endEncoding', restype=None)
+        self.o.call(cmd, b'commit', restype=None)
+        self.o.call(cmd, b'waitUntilCompleted', restype=None)
+        self._check_completed(cmd)
+        if shared_buffer(out, self) is None:
+            out[:] = bo.read(np.float32, out.size*2).view(np.complex64).reshape(out.shape)
+
+    @_autoreleased
+    def _tierc_tile(self, n, data, tmpl, out, upload_data, upload_tmpl):
+        nd, nt = data.shape[0], tmpl.shape[0]
+        geometry = _manifest().get('full_tierc', {}).get(str(n))
+        if geometry is None:
+            raise UnsupportedSize('no two-stage full-correlation kernel for n=%d' % n)
+        key = (n, nd, nt, shared_key(data, self), shared_key(tmpl, self),
+               shared_key(out, self))
+        uploads = self._input_uploads(key, data, tmpl, upload_data, upload_tmpl)
+        batch = self._tierc_batches.get(key)
+        if batch is None:
+            external = [b for a in (data, tmpl, out)
+                        if (b := shared_buffer(a, self)) is not None]
+            estimate = nd*nt*n*8 + sum(a.nbytes for a in (data, tmpl, out)
+                                       if shared_buffer(a, self) is None)
+            self._cache_room(estimate, incoming=external)
+            batch = (shared_buffer(data, self) or _Buffer(self, data.nbytes),
+                     shared_buffer(tmpl, self) or _Buffer(self, tmpl.nbytes),
+                     _Buffer(self, nd*nt*n*8),
+                     shared_buffer(out, self) or _Buffer(self, out.nbytes))
+            self._tierc_batches[key] = batch
+            uploads = (True, True, *uploads[2:])
+        self._cache_touch('tierc', key)
+        bd, bt, scratch, bo = batch
+        if uploads[0]:
+            write_input(bd, data)
+            self._uploaded['data'][key] = uploads[2]
+        if uploads[1]:
+            write_input(bt, tmpl)
+            self._uploaded['tmpl'][key] = uploads[3]
+        cmd = self._command_buffer()
+        self._encode_tierc(cmd, n, 'corr1', (bd, bt, scratch),
+                           nd*nt*geometry['n1'], nt)
+        self._encode_tierc(cmd, n, 'corr2', (scratch, bo),
+                           nd*nt*geometry['n2'])
+        self.o.call(cmd, b'commit', restype=None)
+        self.o.call(cmd, b'waitUntilCompleted', restype=None)
+        self._check_completed(cmd)
+        if shared_buffer(out, self) is None:
+            out[:] = bo.read(np.float32, out.size*2).view(np.complex64).reshape(out.shape)
+
+    def correlate(self, n, data, tmpl, out, *, upload_data=True, upload_tmpl=True):
+        nd, nt = data.shape[0], tmpl.shape[0]
+        if out.shape != (nd, nt, n):
+            raise ValueError('full output shape does not match the banks')
+        geometry = _manifest().get('full_tierc', {}).get(str(n)) if n > 65536 else None
+        if n > 65536 and geometry is None:
+            raise UnsupportedSize('no two-stage full-correlation kernel for n=%d' % n)
+        fn = self._tierc_tile if geometry else self._full_tile
+        per_pair = 8*n*(2 if geometry else 1)
+        budget = 64*1024*1024
+        direct = shared_buffer(out, self) is not None
+        working_bytes = nd*nt*8*n*((1 if direct else 2) if geometry else (0 if direct else 1))
+        if working_bytes <= budget:
+            fn(n, data, tmpl, out, upload_data, upload_tmpl)
+            return
+        tile = min(nt, max(1, budget//per_pair))
+        for d in range(nd):
+            for t0 in range(0, nt, tile):
+                t1 = min(t0+tile, nt)
+                fn(n, data[d:d+1], tmpl[t0:t1], out[d:d+1,t0:t1],
+                   upload_data, upload_tmpl)
 
     # ---- hierarchical -----------------------------------------------------
     @_autoreleased
@@ -789,22 +968,54 @@ class Context(InputUploads):
                             else "no error object"))
 
     def _evict_record(self, kind, key, keep_storage=None):
-        cache = self._batches if kind == 'flat' else self._hier
+        if kind == 'forward':
+            pending = getattr(self, '_pending_metal', None)
+            if pending is not None and self._forwards[key] in pending[1]:
+                # A bounded correlation allocation can evict the prepared
+                # forward scratch. Finish that command before releasing it;
+                # the resulting spectra remain valid for the next command.
+                self._pending_metal = None
+                cmd = pending[0]
+                self.o.call(cmd, b'commit', restype=None)
+                self.o.call(cmd, b'waitUntilCompleted', restype=None)
+                try:
+                    self._check_completed(cmd)
+                finally:
+                    self.o.call(cmd, b'release', restype=None)
+        cache = {'flat': self._batches, 'hier': self._hier,
+                 'full': self._full_batches, 'tierc': self._tierc_batches,
+                 'forward': self._forwards}[kind]
         batch = cache.pop(key)
-        for buf in (batch.values() if isinstance(batch, dict) else batch):
+        for buf in (batch.values() if isinstance(batch, dict) else
+                    batch if isinstance(batch, tuple) else (batch,)):
             buf.destroy()
         for resident in self._uploaded.values():
             resident.pop(key, None)
 
     def clear_cache(self):
+        self.cancel_forward()
         for batch in self._batches.values():
             for buf in batch:
                 buf.destroy()
         for bufs in self._hier.values():
             for buf in bufs.values():
                 buf.destroy()
+        for batch in getattr(self, '_full_batches', {}).values():
+            for buf in batch:
+                buf.destroy()
+        for batch in getattr(self, '_tierc_batches', {}).values():
+            for buf in batch:
+                buf.destroy()
+        for buf in getattr(self, '_forwards', {}).values():
+            buf.destroy()
         self._batches.clear()
         self._hier.clear()
+        if hasattr(self, '_full_batches'):
+            self._full_batches.clear()
+        if hasattr(self, '_tierc_batches'):
+            self._tierc_batches.clear()
+        if hasattr(self, '_forwards'):
+            self._forwards.clear()
         self._uploaded = {"data": {}, "tmpl": {}}
         self._cache_order = {}
 

@@ -1,4 +1,4 @@
-"""matchedfilter - single-threaded batched matched filter with peak-only output.
+"""matchedfilter - batched correlation with full or peak-only output.
 
 Correlate D data segments against T templates and report, for each pair, the
 loudest sample in each bin of a search window:
@@ -19,9 +19,9 @@ in natural order.  Ingest only rearranges - templates are conjugated and both
 sides are stored in the layout the correlation loop walks - which measures at
 2-4% of total and shrinks as the number of templates grows.
 
-CPU lengths are powers of two from 64 to 1048576. GPU lengths are powers
-of two from 64 to 65536, subject to device limits. Hierarchical calibration
-coverage is separate from transform support.
+Peak-only lengths are powers of two from 64 to 1048576 on CPU and 64 to 65536
+on GPU. Full-output lengths are 1024 to 4194304 on either device, subject to
+device limits. Hierarchical calibration coverage is separate from transform support.
 """
 import math
 import os
@@ -58,7 +58,7 @@ PEAK_DTYPE = np.dtype([("index", "<i8"), ("value", "<c8")])
 _GPU_SIZES = frozenset((64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384,
                         32768, 65536))
 
-__all__ = ["MatchedFilter", "HierarchicalFilter", "PEAK_DTYPE", "backend",
+__all__ = ["MatchedFilter", "CorrelationFilter", "HierarchicalFilter", "PEAK_DTYPE", "backend",
            "targets", "set_target", "devices", "Device", "__version__"]
 
 
@@ -189,6 +189,8 @@ class MatchedFilter:
     #: Class-level so subclasses with their own __init__ -- HierarchicalFilter
     #: -- inherit the CPU default instead of raising on first use.
     _gpu = None
+    _gpu_sizes = _GPU_SIZES
+    _cpu_max_n = 1 << 20
 
     def __init__(self, n, ndata=1, ntemplates=1, device=None):
         from .device import parse as _parse_device
@@ -198,6 +200,9 @@ class MatchedFilter:
         self.ntemplates = int(ntemplates)
         if self.ndata < 1 or self.ntemplates < 1:
             raise ValueError("ndata and ntemplates must be >= 1")
+        if self.device.kind == 'cpu' and self.n > self._cpu_max_n:
+            raise ValueError("CPU transform size %d exceeds this filter's limit of %d"
+                             % (self.n, self._cpu_max_n))
         self._init_state()
         if self.device.kind == "gpu":
             self._start_gpu()
@@ -240,12 +245,10 @@ class MatchedFilter:
         # with its own copy of the tail, the hierarchical version's early
         # return skipped the _gcal it was supposed to set, and every Metal
         # call died in _gpu_calibration on a missing attribute.
-        if self.n not in _GPU_SIZES:
+        if self.n not in self._gpu_sizes:
             raise ValueError(
-                "device='gpu' supports n in %s; got %d. Larger transforms need "
-                "more than 1024 threads and are not implemented yet, so they "
-                "would have to be split across dispatches."
-                % (sorted(_GPU_SIZES), self.n))
+                "device='gpu' supports n in %s for this filter; got %d."
+                % (sorted(self._gpu_sizes), self.n))
         self._gpu = self._backend().Context(self.device.index)
         self._gdata = None  # series execution uses its own workspace
         self._gtmpl = None
@@ -289,6 +292,17 @@ class MatchedFilter:
     def _require_templates(self, start, count):
         if self._missing("template", start, count):
             raise ValueError("no templates for requested rows: call set_templates() first")
+
+    def _pair_range(self, data, templates):
+        d0, nd = (0, self.ndata) if data is None else (int(data[0]), int(data[1]))
+        t0, nt = (0, self.ntemplates) if templates is None else (int(templates[0]), int(templates[1]))
+        if nd < 1 or nt < 1 or d0 < 0 or t0 < 0 \
+           or d0 + nd > self.ndata or t0 + nt > self.ntemplates:
+            raise ValueError("data/templates sub-range out of bounds")
+        if not self._dataset or self._missing("data", d0, nd):
+            raise ValueError("no data: call set_data() before run()")
+        self._require_templates(t0, nt)
+        return d0, nd, t0, nt
 
     def _gpu_set(self, store, spectra, index, what):
         if what == "data":
@@ -474,18 +488,7 @@ class MatchedFilter:
         if binsize < 1:
             raise ValueError("binsize must be >= 1")
         start, end = self._window(window)
-        d0, nd = (0, self.ndata) if data is None else (int(data[0]), int(data[1]))
-        t0, nt = (0, self.ntemplates) if templates is None else (int(templates[0]), int(templates[1]))
-        if nd < 1 or nt < 1 or d0 < 0 or t0 < 0 \
-           or d0 + nd > self.ndata or t0 + nt > self.ntemplates:
-            raise ValueError("data/templates sub-range out of bounds")
-        if not self._dataset or self._missing("data", d0, nd):
-            raise ValueError(
-                "no data: call set_data() before run(). The plan stores the "
-                "caller's spectrum pointer and the hierarchical refine path "
-                "is the first thing to dereference it, so this used to be a "
-                "segfault, and only once a pair fired.")
-        self._require_templates(t0, nt)
+        d0, nd, t0, nt = self._pair_range(data, templates)
         if self._gpu is not None:
             idx, val = self._gpu_window(
                 self._gdata[d0:d0 + nd], self._gtmpl[t0:t0 + nt],
@@ -684,6 +687,90 @@ class MatchedFilter:
             self._gpu.clear_cache()
             self._series_workspace = None
             self._ddirty = self._tdirty = True
+
+
+class CorrelationFilter(MatchedFilter):
+    """Return every complex lag for each data/template pair.
+
+    Spectra, device selection and pair selectors follow :class:`MatchedFilter`.
+    ``run`` returns ``(ndata, ntemplates, n)`` complex64 samples in natural
+    lag order. No peak threshold or binning is applied.
+    """
+
+    _gpu_sizes = frozenset(1 << k for k in range(10, 23))
+    _cpu_max_n = 1 << 22
+    _max_auto_output_bytes = 512 * 1024 * 1024
+
+    def _full_output(self, shape, out):
+        nbytes = math.prod(shape) * np.dtype(np.complex64).itemsize
+        if out is None:
+            if nbytes > self._max_auto_output_bytes:
+                raise ValueError(
+                    "full correlation needs %d bytes of output; select smaller "
+                    "data/templates ranges or pass a preallocated out array" % nbytes)
+            return self.empty_shared(shape)
+        if not isinstance(out, np.ndarray) or out.dtype != np.complex64 \
+           or out.shape != shape or not out.flags.c_contiguous \
+           or not out.flags.writeable:
+            raise ValueError("out must be a writable C-contiguous complex64 array of shape %s" % (shape,))
+        return out
+
+    def run(self, data=None, templates=None, out=None):
+        """Return the full unnormalised circular correlation for each pair."""
+        d0, nd, t0, nt = self._pair_range(data, templates)
+        result = self._full_output((nd, nt, self.n), out)
+        if self._gpu is None:
+            self._execution_plan().correlate(d0, nd, t0, nt, result)
+        else:
+            self._gpu.correlate(self.n, self._gdata[d0:d0 + nd],
+                                self._gtmpl[t0:t0 + nt], result,
+                                upload_data=self._ddirty,
+                                upload_tmpl=self._tdirty)
+            self._ddirty = self._tdirty = False
+        return result
+
+    def run_series(self, series, starts, templates=None, out=None):
+        """Forward-transform padded blocks, then return every correlation lag."""
+        ser = np.ascontiguousarray(_from_any(series), dtype=np.complex64)
+        st = np.ascontiguousarray(_from_any(starts), dtype=np.uintp)
+        if ser.ndim != 1 or st.ndim != 1 or st.size < 1:
+            raise ValueError("series and nonempty starts must be one-dimensional")
+        if np.any(st > np.iinfo(np.intp).max - self.n):
+            raise ValueError("starts must be nonnegative and fit the sample index range")
+        t0, nt = (0, self.ntemplates) if templates is None else (int(templates[0]), int(templates[1]))
+        if nt < 1 or t0 < 0 or t0 + nt > self.ntemplates:
+            raise ValueError("templates sub-range out of bounds")
+        self._require_templates(t0, nt)
+        if self._gpu is not None and ser.size > np.iinfo(np.uint32).max:
+            raise ValueError("GPU series exceeds the 32-bit sample address range")
+        result = self._full_output((st.size, nt, self.n), out)
+        self._dataset = False
+        self._data_ready = set()
+        if self._gpu is None:
+            self._execution_plan().correlate_series(ser, st, t0, nt, result)
+            return result
+        from ._shared import shared_buffer
+        source = ser if shared_buffer(ser, self._gpu) is not None else self.empty_shared(ser.shape)
+        if source is not ser:
+            source[:] = ser
+        budget = getattr(self, "_series_batch_bytes", 64 * 1024 * 1024)
+        batch = max(1, min(st.size, self._gpu_pair_limit() // nt,
+                           budget // max(8 * self.n * (1 + nt), 1)))
+        spec = self.empty_shared((batch, self.n))
+        offsets = self.empty_shared(batch, np.uint32)
+        for b0 in range(0, st.size, batch):
+            b1 = min(b0 + batch, st.size)
+            count = b1 - b0
+            offsets[:count] = np.minimum(st[b0:b1], ser.size)
+            self._gpu.forward(self.n, source, offsets[:count], spec[:count], defer=True)
+            try:
+                self._gpu.correlate(self.n, spec[:count], self._gtmpl[t0:t0 + nt],
+                                    result[b0:b1], upload_data=True,
+                                    upload_tmpl=self._tdirty)
+            finally:
+                self._gpu.cancel_forward()
+            self._tdirty = False
+        return result
 
 
 
@@ -1090,6 +1177,9 @@ class HierarchicalFilter(MatchedFilter):
         self.ntemplates = int(ntemplates)
         if self.ndata < 1 or self.ntemplates < 1:
             raise ValueError("ndata and ntemplates must be >= 1")
+        if self.device.kind == 'cpu' and self.n > self._cpu_max_n:
+            raise ValueError("CPU transform size %d exceeds this filter's limit of %d"
+                             % (self.n, self._cpu_max_n))
         if band is not None:
             band = int(band)
             if band < 64 or band >= self.n or band & (band - 1):

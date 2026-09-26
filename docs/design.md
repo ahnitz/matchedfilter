@@ -6,8 +6,11 @@ output is
 
     z_dt[k] = IFFT( D_d[f] * conj(H_t[f]) )[k]
 
-reported as a binned maximum over a search window, with a detection floor.
-D and T are arbitrary.
+returned either as every complex lag or as a binned maximum over a search
+window with a detection floor. D and T are arbitrary. The peak-only path
+never writes the full correlation; `CorrelationFilter` keeps the same fused
+spectral product but writes every lag. See [full correlation](full-correlation.md)
+for the output and memory tradeoff.
 
 ## Where the time goes
 

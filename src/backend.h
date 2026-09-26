@@ -32,6 +32,7 @@ typedef struct {
                        float thr, ap_peak *out, int conj, size_t start, size_t end);
   int   (*corr_prod)(void *, const float *dr, const float *di,
                      const float *tr, const float *ti, float *out);
+  int   (*corr_split)(void *, const float *re, const float *im, float *out);
   /* Keep the output series in a plan-owned buffer, laid out [k][re lanes][im
      lanes] as the scan writes it, so a caller can look at lags the peak scan
      discards.  NULL turns it off; returns the buffer. */
@@ -52,6 +53,9 @@ typedef struct {
                              const float *tr, const float *ti, int nlane,
                              size_t binsize, float thr, ap_peak *out, int conj,
                              size_t start, size_t end);
+  int   (*corr_prod_batch)(void *, const float *dr, const float *di,
+                           const float *tr, const float *ti, int nlane,
+                           float *out);
   void *(*create_pairbatch)(size_t N);
   int (*broadcast_data)(void *);
 } ap_backend;

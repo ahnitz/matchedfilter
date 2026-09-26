@@ -324,6 +324,8 @@ class Context(InputUploads):
                                              ctypes.c_uint64]
         self._pipelines = {}
         self._batches = {}
+        self._full_batches = {}
+        self._tierc_batches = {}
         self._storage = {}
         self._storage_users = {}
         self._record_storage = {}
@@ -513,7 +515,8 @@ class Context(InputUploads):
         push = _PushRange(_STAGE_COMPUTE, 0, push_bytes)
         layouts = (_vp * 1)(set_layout)
         pl_info = _PipelineLayoutCreate(30, None, 0, 1, ctypes.cast(layouts, _vp),
-                                        1, ctypes.pointer(push))
+                                        1 if push_bytes else 0,
+                                        ctypes.pointer(push) if push_bytes else None)
         layout = _vp()
         _check(vk.vkCreatePipelineLayout(self.device, ctypes.byref(pl_info), None,
                                          ctypes.byref(layout)),
@@ -854,6 +857,8 @@ class Context(InputUploads):
 
     def forward(self, n, series, starts, spectra, *, defer=False):
         """Gather and normalize forward FFTs directly into shared spectra."""
+        if n > 65536:
+            return self._forward_tierc(n, series, starts, spectra, defer=defer)
         vk = self.vk
         pipe, layout, sl = self._build_pipeline(
             ("forward", n), "forward_%d.spv" % n, 3, 4)
@@ -893,6 +898,64 @@ class Context(InputUploads):
                                     0, 1, ctypes.byref(mb), 0, None, 0, None)
             _check(vk.vkEndCommandBuffer(cmd), "end forward")
             batch = (*buffers, cmd)
+            forwards[key] = batch
+            self._register_record('forward', key, None, pool_start)
+        self._cache_touch('forward', key)
+        cmd = batch[-1]
+        if defer:
+            self._pending_forward = cmd
+        else:
+            self._submit(cmd)
+
+    def _forward_tierc(self, n, series, starts, spectra, *, defer=False):
+        info = _manifest().get('full_tierc', {}).get(str(n))
+        if info is None:
+            raise UnsupportedSize('no two-stage series FFT for n=%d' % n)
+        buffers = [shared_buffer(a, self) for a in (series, starts, spectra)]
+        if any(b is None for b in buffers):
+            raise ValueError('two-stage forward buffers must belong to this GPU context')
+        key = ('tierc', n, series.size, spectra.shape[0],
+               *(a.ctypes.data for a in (series, starts, spectra)))
+        forwards = getattr(self, '_forwards', None)
+        if forwards is None:
+            forwards = self._forwards = {}
+        batch = forwards.get(key)
+        if batch is None:
+            p1, l1, sl1 = self._build_pipeline(('tc-fwd1', n), info['fwd1']['file'], 3, 4)
+            p2, l2, sl2 = self._build_pipeline(('tc-fwd2', n), info['fwd2']['file'], 2, 0)
+            self._cache_room(spectra.nbytes, incoming=buffers)
+            pool_start = len(getattr(self, '_pools', []))
+            scratch = _Buffer(self, spectra.nbytes)
+            ds1 = self._descriptor_set(sl1, (buffers[0], buffers[1], scratch))
+            ds2 = self._descriptor_set(sl2, (scratch, buffers[2]))
+            cmd = _vp()
+            ci = _CmdBufAlloc(40, None, self.command_pool, 0, 1)
+            _check(self.vk.vkAllocateCommandBuffers(self.device, ctypes.byref(ci),
+                                                    ctypes.byref(cmd)), 'two-stage forward allocate')
+            _check(self.vk.vkBeginCommandBuffer(cmd, ctypes.byref(
+                _CmdBufBegin(42, None, 0, None))), 'two-stage forward begin')
+            self.vk.vkCmdBindPipeline(cmd, _BIND_POINT_COMPUTE, p1)
+            sets = (_vp * 1)(ds1)
+            self.vk.vkCmdBindDescriptorSets(cmd, _BIND_POINT_COMPUTE, l1,
+                                            0, 1, sets, 0, None)
+            pc = ctypes.c_uint32(series.size)
+            self.vk.vkCmdPushConstants(cmd, l1, _STAGE_COMPUTE, 0, 4,
+                                        ctypes.byref(pc))
+            self.vk.vkCmdDispatch(cmd, spectra.shape[0]*info['n1'], 1, 1)
+            barrier = _MemBarrier(46, None, _ACCESS_SHADER_WRITE, _ACCESS_SHADER_READ)
+            self.vk.vkCmdPipelineBarrier(cmd, _STAGE_COMPUTE_BIT, _STAGE_COMPUTE_BIT,
+                                         0, 1, ctypes.byref(barrier), 0, None, 0, None)
+            self.vk.vkCmdBindPipeline(cmd, _BIND_POINT_COMPUTE, p2)
+            sets = (_vp * 1)(ds2)
+            self.vk.vkCmdBindDescriptorSets(cmd, _BIND_POINT_COMPUTE, l2,
+                                            0, 1, sets, 0, None)
+            self.vk.vkCmdDispatch(cmd, spectra.shape[0]*info['n2'], 1, 1)
+            barrier = _MemBarrier(46, None, _ACCESS_SHADER_WRITE, _ACCESS_SHADER_READ | 0x2000)
+            self.vk.vkCmdPipelineBarrier(cmd, _STAGE_COMPUTE_BIT,
+                                         _STAGE_COMPUTE_BIT | 0x4000,
+                                         0, 1, ctypes.byref(barrier), 0, None, 0, None)
+            _check(self.vk.vkEndCommandBuffer(cmd), 'two-stage forward end')
+            batch = (*buffers, scratch, cmd)
             forwards[key] = batch
             self._register_record('forward', key, None, pool_start)
         self._cache_touch('forward', key)
@@ -1060,18 +1123,32 @@ class Context(InputUploads):
             np.complex64).reshape(nd, nt, nbins)
         return idx, val
 
-    def _full_probe(self, n, data, tmpl):
+    def _full_tile(self, n, data, tmpl, out, upload_data, upload_tmpl):
         nd, nt = data.shape[0], tmpl.shape[0]
-        key = (n, nd, nt)
-        cache = getattr(self, '_full_probe_batches', None)
-        if cache is None:
-            cache = self._full_probe_batches = {}
-        batch = cache.get(key)
+        keys = (shared_key(data, self), shared_key(tmpl, self),
+                shared_key(out, self))
+        key = (n, nd, nt, *keys)
+        uploads = self._input_uploads(key, data, tmpl, upload_data, upload_tmpl)
+        batch = self._full_batches.get(key)
         if batch is None:
-            pipe, layout, sl = self._build_pipeline(
-                ('full', n), 'full_%d.spv' % n, 3, 4)
-            bufs = (_Buffer(self, nd*n*8), _Buffer(self, nt*n*8),
-                    _Buffer(self, nd*nt*n*8, readback=True))
+            info = (_manifest().get('modules', {}).get(str(n)) or {}).get('full')
+            if info is None:
+                raise UnsupportedSize('no full-correlation GPU kernel for n=%d' % n)
+            filename = (info.get('portable') or {}).get('file') \
+                if _manifest()['modules'][str(n)].get('lds_bytes', 0) > self.max_shared_memory \
+                else info['file']
+            if not filename:
+                raise UnsupportedSize('no portable full-correlation GPU kernel for n=%d' % n)
+            pipe, layout, sl = self._build_pipeline(('full', filename), filename, 3, 4)
+            external = [b for a in (data, tmpl, out)
+                        if (b := shared_buffer(a, self)) is not None]
+            estimate = sum(a.nbytes for a in (data, tmpl, out)
+                           if shared_buffer(a, self) is None)
+            self._cache_room(estimate, incoming=external)
+            pool_start = len(getattr(self, '_pools', []))
+            bufs = (shared_buffer(data, self) or _Buffer(self, data.nbytes),
+                    shared_buffer(tmpl, self) or _Buffer(self, tmpl.nbytes),
+                    shared_buffer(out, self) or _Buffer(self, out.nbytes, readback=True))
             ds = self._descriptor_set(sl, bufs)
             cmd = _vp()
             info = _CmdBufAlloc(40, None, self.command_pool, 0, 1)
@@ -1086,15 +1163,116 @@ class Context(InputUploads):
             pc = ctypes.c_uint32(nt)
             self.vk.vkCmdPushConstants(cmd, layout, _STAGE_COMPUTE, 0, 4,
                                         ctypes.byref(pc))
-            self.vk.vkCmdDispatch(cmd, nd*nt, 1, 1)
+            self.vk.vkCmdDispatch(cmd, nd * nt, 1, 1)
             _check(self.vk.vkEndCommandBuffer(cmd), 'full end')
             batch = (*bufs, cmd)
-            cache[key] = batch
+            self._full_batches[key] = batch
+            self._register_record('full', key, None, pool_start)
+            uploads = (True, True, *uploads[2:])
+        self._cache_touch('full', key)
         bdata, btmpl, bout, cmd = batch
-        write_input(bdata, data)
-        write_input(btmpl, tmpl)
+        if uploads[0]:
+            write_input(bdata, data)
+            self._uploaded['data'][key] = uploads[2]
+        if uploads[1]:
+            write_input(btmpl, tmpl)
+            self._uploaded['tmpl'][key] = uploads[3]
         self._submit(cmd)
-        return bout.read(np.float32, nd*nt*n*2).view(np.complex64).reshape(nd,nt,n)
+        if shared_buffer(out, self) is None:
+            out[:] = bout.read(np.float32, out.size*2).view(np.complex64).reshape(out.shape)
+
+    def _tierc_tile(self, n, data, tmpl, out, upload_data, upload_tmpl):
+        nd, nt = data.shape[0], tmpl.shape[0]
+        info = _manifest().get('full_tierc', {}).get(str(n))
+        if info is None:
+            raise UnsupportedSize('no two-stage full-correlation kernel for n=%d' % n)
+        key = (n, nd, nt, shared_key(data, self), shared_key(tmpl, self),
+               shared_key(out, self))
+        uploads = self._input_uploads(key, data, tmpl, upload_data, upload_tmpl)
+        batch = self._tierc_batches.get(key)
+        if batch is None:
+            p1, l1, sl1 = self._build_pipeline(('tc-corr1', n), info['corr1']['file'], 3, 4)
+            p2, l2, sl2 = self._build_pipeline(('tc-corr2', n), info['corr2']['file'], 2, 0)
+            external = [b for a in (data, tmpl, out)
+                        if (b := shared_buffer(a, self)) is not None]
+            estimate = nd*nt*n*8 + sum(a.nbytes for a in (data, tmpl, out)
+                                       if shared_buffer(a, self) is None)
+            self._cache_room(estimate, incoming=external)
+            pool_start = len(getattr(self, '_pools', []))
+            bd = shared_buffer(data, self) or _Buffer(self, data.nbytes)
+            bt = shared_buffer(tmpl, self) or _Buffer(self, tmpl.nbytes)
+            scratch = _Buffer(self, nd*nt*n*8)
+            bo = shared_buffer(out, self) or _Buffer(self, out.nbytes, readback=True)
+            ds1 = self._descriptor_set(sl1, (bd, bt, scratch))
+            ds2 = self._descriptor_set(sl2, (scratch, bo))
+            cmd = _vp()
+            ci = _CmdBufAlloc(40, None, self.command_pool, 0, 1)
+            _check(self.vk.vkAllocateCommandBuffers(self.device, ctypes.byref(ci),
+                                                    ctypes.byref(cmd)), 'two-stage allocate')
+            _check(self.vk.vkBeginCommandBuffer(cmd, ctypes.byref(
+                _CmdBufBegin(42, None, 0, None))), 'two-stage begin')
+            self.vk.vkCmdBindPipeline(cmd, _BIND_POINT_COMPUTE, p1)
+            sets = (_vp * 1)(ds1)
+            self.vk.vkCmdBindDescriptorSets(cmd, _BIND_POINT_COMPUTE, l1,
+                                            0, 1, sets, 0, None)
+            pc = ctypes.c_uint32(nt)
+            self.vk.vkCmdPushConstants(cmd, l1, _STAGE_COMPUTE, 0, 4,
+                                        ctypes.byref(pc))
+            self.vk.vkCmdDispatch(cmd, nd*nt*info['n1'], 1, 1)
+            barrier = _MemBarrier(46, None, _ACCESS_SHADER_WRITE, _ACCESS_SHADER_READ)
+            self.vk.vkCmdPipelineBarrier(cmd, _STAGE_COMPUTE_BIT, _STAGE_COMPUTE_BIT,
+                                         0, 1, ctypes.byref(barrier), 0, None, 0, None)
+            self.vk.vkCmdBindPipeline(cmd, _BIND_POINT_COMPUTE, p2)
+            sets = (_vp * 1)(ds2)
+            self.vk.vkCmdBindDescriptorSets(cmd, _BIND_POINT_COMPUTE, l2,
+                                            0, 1, sets, 0, None)
+            self.vk.vkCmdDispatch(cmd, nd*nt*info['n2'], 1, 1)
+            _check(self.vk.vkEndCommandBuffer(cmd), 'two-stage end')
+            batch = (bd, bt, scratch, bo, cmd)
+            self._tierc_batches[key] = batch
+            self._register_record('tierc', key, None, pool_start)
+            uploads = (True, True, *uploads[2:])
+        self._cache_touch('tierc', key)
+        bd, bt, scratch, bo, cmd = batch
+        if uploads[0]:
+            write_input(bd, data)
+            self._uploaded['data'][key] = uploads[2]
+        if uploads[1]:
+            write_input(bt, tmpl)
+            self._uploaded['tmpl'][key] = uploads[3]
+        self._submit(cmd)
+        if shared_buffer(out, self) is None:
+            out[:] = bo.read(np.float32, out.size*2).view(np.complex64).reshape(out.shape)
+
+    def correlate(self, n, data, tmpl, out, *, upload_data=True, upload_tmpl=True):
+        """Write full correlations to caller storage with bounded GPU batches."""
+        nd, nt = data.shape[0], tmpl.shape[0]
+        if out.shape != (nd, nt, n):
+            raise ValueError('full output shape does not match the banks')
+        budget = 64 * 1024 * 1024
+        per_pair = 8 * n
+        tierc = n > 65536
+        geom = _manifest().get('full_tierc', {}).get(str(n)) if tierc else None
+        if tierc and geom is None:
+            raise UnsupportedSize('no two-stage full-correlation kernel for n=%d' % n)
+        groups = max(geom['n1'], geom['n2']) if tierc else 1
+        fn = self._tierc_tile if tierc else self._full_tile
+        direct = shared_buffer(out, self) is not None
+        # Tier B writes directly to caller-owned shared output. Its size is
+        # not a temporary staging budget; splitting it forces host copies of
+        # every later row and defeats the point of shared output.
+        working_bytes = nd*nt*per_pair*((1 if direct else 2) if tierc else (0 if direct else 1))
+        if (working_bytes <= budget
+                and nd * nt * groups <= self.max_dispatch_x):
+            fn(n, data, tmpl, out, upload_data, upload_tmpl)
+            return
+        tile = min(nt, max(1, budget // (per_pair*(2 if tierc else 1))),
+                   max(1, self.max_dispatch_x // groups))
+        for d in range(nd):
+            for t0 in range(0, nt, tile):
+                t1 = min(t0 + tile, nt)
+                fn(n, data[d:d+1], tmpl[t0:t1], out[d:d+1,t0:t1],
+                   upload_data, upload_tmpl)
 
     cache_limit_recordings = 256
 
@@ -1116,7 +1294,9 @@ class Context(InputUploads):
     def _evict_record(self, kind, key, keep_storage=None):
         token = (kind, key)
         cache = {'flat': self._batches, 'hier': self._hier,
-                 'forward': getattr(self, '_forwards', {})}[kind]
+                 'forward': getattr(self, '_forwards', {}),
+                 'full': getattr(self, '_full_batches', {}),
+                 'tierc': getattr(self, '_tierc_batches', {})}[kind]
         batch = cache.pop(key)
         cmd = batch[-1]
         if getattr(self, '_pending_forward', None) is cmd:
@@ -1124,6 +1304,10 @@ class Context(InputUploads):
         commands = (_vp * 1)(cmd)
         self.vk.vkFreeCommandBuffers.argtypes = [_vp, _vp, _u32, ctypes.POINTER(_vp)]
         self.vk.vkFreeCommandBuffers(self.device, self.command_pool, 1, commands)
+        if kind in ('full', 'tierc', 'forward'):
+            for buf in batch[:-1]:
+                if not hasattr(buf, 'owner'):
+                    buf.destroy()
         pools = self._record_pools.pop(token, [])
         for pool in pools:
             self.vk.vkDestroyDescriptorPool(self.device, pool, None)
@@ -1140,14 +1324,9 @@ class Context(InputUploads):
         """Release records and owned storage, preserving external shared arrays."""
         self._submit(None)
         self.vk.vkFreeCommandBuffers.argtypes = [_vp, _vp, _u32, ctypes.POINTER(_vp)]
-        for batch in getattr(self, '_full_probe_batches', {}).values():
-            cmd = (_vp * 1)(batch[-1])
-            self.vk.vkFreeCommandBuffers(self.device, self.command_pool, 1, cmd)
-            for buf in batch[:-1]:
-                buf.destroy()
-        if hasattr(self, '_full_probe_batches'):
-            self._full_probe_batches.clear()
         for kind, cache in (('flat', self._batches), ('hier', self._hier),
+                            ('full', getattr(self, '_full_batches', {})),
+                            ('tierc', getattr(self, '_tierc_batches', {})),
                             ('forward', getattr(self, '_forwards', {}))):
             for key in list(cache):
                 self._evict_record(kind, key)
