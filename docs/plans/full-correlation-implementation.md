@@ -1,5 +1,10 @@
 # Full-correlation mode: implementation plan
 
+Implemented on the `prototype/full-correlation-output` branch in September
+2026. The current API and measured tradeoffs are in
+[the full-correlation note](../full-correlation.md); this plan records the
+original scope and validation gates.
+
 The prototype establishes that emitting all lags is worthwhile. This plan is
 for a production flat mode covering every power of two from 2^10 through
 2^22 on CPU and GPU. It does not change the supported sizes, results, or

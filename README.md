@@ -1,10 +1,10 @@
 # matchedfilter
 
-Batched matched filtering with peak-only output, on CPU or GPU.
+Batched correlation with a choice of full or peak-only output, on CPU or GPU.
 
 `matchedfilter` correlates data segments against a template bank and returns
-the strongest sample in each output bin. It accepts `complex64` spectra or
-time-series blocks through `run_series()`.
+the full complex correlation or the strongest sample in each output bin. It
+accepts `complex64` spectra or time-series blocks through `run_series()`.
 
 [Documentation](https://ahnitz.github.io/matchedfilter/) ·
 [Usage guide](https://ahnitz.github.io/matchedfilter/using-it.html) ·
@@ -44,11 +44,27 @@ reuse storage: copy any result you need to retain across calls.
 See the [usage guide](https://ahnitz.github.io/matchedfilter/using-it.html)
 for normalization, thresholds, search windows and time-series input.
 
+Use `CorrelationFilter` when downstream code needs every lag:
+
+```python
+full = mf.CorrelationFilter(n, ndata=1, ntemplates=1)
+full.set_templates(np.fft.fft(template).astype(np.complex64)[None, :])
+full.set_data(np.fft.fft(data).astype(np.complex64)[None, :])
+correlation = full.run()  # complex64, shape (1, 1, n); peak at lag 37
+```
+
+It uses the same spectral inputs, bank dimensions, selectors and device choice
+as `MatchedFilter`. The full-output mode keeps the fused spectral product and
+batched transforms, but writes all lags. Peak-only filtering avoids those
+stores; hierarchical filtering also avoids full transforms for pairs dismissed
+by its coarse gate.
+
 ## Supported capabilities
 
 | | CPU | GPU |
 |---|---|---|
-| Transform sizes | powers of two, 64–1,048,576 | powers of two, 64–65,536; device limits apply |
+| Peak-only transform sizes | powers of two, 64–1,048,576 | powers of two, 64–65,536; device limits apply |
+| Full-output transform sizes | powers of two, 1,024–4,194,304 | powers of two, 1,024–4,194,304; device limits apply |
 | Flat and hierarchical filtering | yes | yes |
 | Time-series input with `run_series()` | yes | yes |
 | Input spectra and returned values | `complex64` | `complex64` |
@@ -99,20 +115,23 @@ for profile assumptions, sampling precision and validation.
 
 ## Performance
 
-The implementation fuses the frequency-domain product and peak scan into the
-transform stages, avoiding a separate full correlation output. Performance
-depends on transform length, batch shape, device and the fraction of pairs
-that require refinement.
+The implementation fuses the frequency-domain product into the inverse
+transform. Full-output mode writes every lag; peak-only mode scans inside
+the transform and avoids those writes. Hierarchical mode screens pairs before
+the full transform. Performance depends on length, bank shape, device and the
+fraction of pairs requiring refinement.
 
 ![CPU and GPU matched-filter measurements at 4096 points](docs/assets/teaser.svg)
 
 Measured on a Ryzen AI MAX+ 395 / Radeon 8060S, 2026-09-26: 16 data segments ×
-1,024 templates, 4,096 points. The matchedfilter bars time warm `run()` calls,
-including result assembly and GPU readback. FFTW and rocFFT time the inverse
-transform only. All filter bars use the same matched-profile bank, and the
-hierarchical bars show requested FDR budgets 1e-2, 1e-3 and 1e-4. These
-noise-only timings do not measure FDR. The two panels use separate scales; compare their printed
-values. These measurements are a workload example, not a speed guarantee.
+512 templates, 4,096 points. The bars move from a general inverse FFT to
+fused full output, peak-only output and hierarchical screening. FFTW and
+rocFFT time only the inverse transform, so they do less work than the filter
+bars. Full output reuses a caller-supplied result array; GPU timings include
+synchronization. Hierarchical bars show requested FDR budgets 1e-2, 1e-3 and
+1e-4; these noise-only timings do not measure FDR. The two panels use separate
+scales; compare their printed values. This is a workload example, not a speed
+guarantee.
 
 The [flat](https://ahnitz.github.io/matchedfilter/benchmarks.html) and
 [hierarchical](https://ahnitz.github.io/matchedfilter/hierarchical-benchmarks.html)
