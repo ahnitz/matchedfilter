@@ -491,10 +491,8 @@ int ap_mf_correlate(ap_mf_plan *p,int d0,int nd,int t0,int nt,float *out){
   return 0;
 }
 
-int ap_mf_correlate_series(ap_mf_plan *p,const float *series,size_t nseries,
-                           const size_t *starts,int nblocks,int t0,int nt,float *out){
-  if(!p||!series||!starts||!out||nblocks<1||t0<0||nt<1||t0+nt>p->nt)
-    return -1;
+static int series_spectra(ap_mf_plan *p,const float *series,size_t nseries,
+                          const size_t *starts,int count){
   const size_t n=p->n;
   if(!p->sfwd){
     p->sfwd=ap_alloc64(2*n*sizeof(float));
@@ -502,21 +500,103 @@ int ap_mf_correlate_series(ap_mf_plan *p,const float *series,size_t nseries,
     if(!p->sfwd||!p->sspec) return -1;
   }
   const float inv=1.0f/(float)n;
+  for(int j=0;j<count;j++){
+    size_t start=starts[j];
+    size_t have=start<nseries?nseries-start:0;
+    if(have>n) have=n;
+    if(have){
+      const float *src=series+2*start;
+      for(size_t k=0;k<2*have;k++) p->sfwd[k]=src[k]*inv;
+    }
+    if(have<n) memset(p->sfwd+2*have,0,2*(n-have)*sizeof(float));
+    ap_fft(p->fft,p->sfwd,p->sspec,AP_FORWARD);
+    if(ap_mf_set_data(p,j,p->sspec)) return -1;
+  }
+  return 0;
+}
+
+int ap_mf_correlate_series(ap_mf_plan *p,const float *series,size_t nseries,
+                           const size_t *starts,int nblocks,int t0,int nt,float *out){
+  if(!p||!series||!starts||!out||nblocks<1||t0<0||nt<1||t0+nt>p->nt)
+    return -1;
+  const size_t n=p->n;
   for(int b0=0;b0<nblocks;){
     const int g=nblocks-b0<p->nd?nblocks-b0:p->nd;
-    for(int j=0;j<g;j++){
-      size_t start=starts[b0+j];
-      size_t have=start<nseries?nseries-start:0;
-      if(have>n) have=n;
-      if(have){
-        const float *src=series+2*start;
-        for(size_t k=0;k<2*have;k++) p->sfwd[k]=src[k]*inv;
-      }
-      if(have<n) memset(p->sfwd+2*have,0,2*(n-have)*sizeof(float));
-      ap_fft(p->fft,p->sfwd,p->sspec,AP_FORWARD);
-      if(ap_mf_set_data(p,j,p->sspec)) return -1;
-    }
+    if(series_spectra(p,series,nseries,starts+b0,g)) return -1;
     if(ap_mf_correlate(p,0,g,t0,nt,out+2*(size_t)b0*nt*n)) return -1;
+    b0+=g;
+  }
+  return 0;
+}
+
+int ap_mf_correlate_series_continuous(ap_mf_plan *p,const float *series,
+                                      size_t nseries,const size_t *starts,
+                                      int nblocks,size_t lo,size_t hi,
+                                      int t0,int nt,float *out){
+  if(!p||!series||!starts||!out||nblocks<1||t0<0||nt<1||t0+nt>p->nt
+     ||lo>=hi||hi>p->n) return -1;
+  const size_t n=p->n;
+  const int W=p->pb;
+  if(W && !p->corrbuf){
+    p->corrbuf=ap_alloc64(2*(size_t)W*n*sizeof(float));
+    if(!p->corrbuf) return -1;
+  }
+  for(int b0=0;b0<nblocks;){
+    const int g=nblocks-b0<p->nd?nblocks-b0:p->nd;
+    if(series_spectra(p,series,nseries,starts+b0,g)) return -1;
+    for(int d=0;d<g;d++){
+      const size_t start=starts[b0+d];
+      if(start>=nseries||lo>=nseries-start) continue;
+      const size_t end=hi<nseries-start?hi:nseries-start;
+      const size_t bytes=2*(end-lo)*sizeof(float);
+      const float *Dr=p->dre+(size_t)d*n, *Di=p->dim+(size_t)d*n;
+      if(W){
+        if(p->ebr){
+          for(size_t k=0;k<n;k++){
+            const float a=Dr[k],b=Di[k];
+            for(int l=0;l<W;l++){p->ebr[k*W+l]=a;p->ebi[k*W+l]=b;}
+          }
+          Dr=p->ebr; Di=p->ebi;
+        }
+        for(int tt=0;tt<nt;tt+=W){
+          const int cnt=nt-tt<W?nt-tt:W;
+          const int base=t0+tt;
+          const float *Tr,*Ti;
+          if(base%W==0){
+            Tr=p->tre+(size_t)(base/W)*n*W;
+            Ti=p->tim+(size_t)(base/W)*n*W;
+          }else{
+            memset(p->tsr,0,n*(size_t)W*sizeof(float));
+            memset(p->tsi,0,n*(size_t)W*sizeof(float));
+            for(int l=0;l<cnt;l++){
+              const int t=base+l;
+              const float *sr=p->tre+(size_t)(t/W)*n*W+(size_t)(t%W);
+              const float *si=p->tim+(size_t)(t/W)*n*W+(size_t)(t%W);
+              for(size_t k=0;k<n;k++){
+                p->tsr[k*W+l]=sr[k*W]; p->tsi[k*W+l]=si[k*W];
+              }
+            }
+            Tr=p->tsr; Ti=p->tsi;
+          }
+          if(ap_corr_prod_batch(p->fft,Dr,Di,Tr,Ti,cnt,p->corrbuf)) return -1;
+          for(int t=0;t<cnt;t++)
+            memcpy(out+2*((size_t)(tt+t)*nseries+start+lo),
+                   p->corrbuf+2*((size_t)t*n+lo),bytes);
+        }
+      }else{
+        for(int t=0;t<nt;t++){
+          const float *tr=p->tre+(size_t)(t0+t)*n;
+          const float *ti=p->tim+(size_t)(t0+t)*n;
+          if(p->gmajor){
+            if(ap_corr_prod(p->fft,Dr,Di,tr,ti,p->scratch)) return -1;
+          }else{
+            mulspec(Dr,Di,tr,ti,p->pr,p->pi,n);
+            if(ap_corr_split(p->fft,p->pr,p->pi,p->scratch)) return -1;
+          }
+          memcpy(out+2*((size_t)t*nseries+start+lo),p->scratch+2*lo,bytes);
+        }
+      }
+    }
     b0+=g;
   }
   return 0;

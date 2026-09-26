@@ -75,13 +75,22 @@ print(np.argmax(np.abs(values[0, 0])))  # 37
 For larger banks, `run(data=(start, count), templates=(start, count))`
 selects a rectangular subrange.
 
-`run_series(series, starts, templates=None, out=None)` gathers and zero-pads
-blocks, computes their forward transforms, and returns all lags for each block
-and selected template. It consumes the data slots, just like the peak-only
-series method. Supply a writable, C-contiguous `complex64` array as `out` to
-reuse output storage; the returned object is that same array. On GPU,
-`empty_shared(shape)` permits direct writes to GPU-accessible host memory.
-A plain NumPy array or memmap also works through bounded staging.
+For overlap-save output, construct the filter with `valid=(lo, hi)`, the
+half-open lag interval valid in each FFT block. `run_series(series)` then uses
+starts `0, hi-lo, 2*(hi-lo), ...`, zero-pads the final input block, and returns
+one continuous `complex64` array shaped `(selected_templates, len(series))`.
+The first `lo` samples start at zero; subsequent calls overwrite every valid
+sample and leave that invalid prefix untouched. The filter owns and reuses the
+result, so copy it if it must outlive the next call. CPU and GPU write valid
+lags into this result during correlation, without assembling a block-output
+cube. The GPU result uses host-cached shared storage for direct GPU writes and
+practical NumPy access.
+
+`run_series(series, starts, templates=None, out=None)` remains available for
+explicit block layouts. It gathers and zero-pads the named blocks and returns
+all lags as `(blocks, selected_templates, n)`. For that form, a writable,
+C-contiguous `complex64` `out` can reuse caller storage. Both forms consume
+the data slots, so a later `run()` needs another `set_data()` call.
 
 Full results can be large. A single 2^22 correlation is 32 MiB; a 128×512
 bank at that length is 2 TiB. Without `out`, the class raises before allocating
@@ -104,11 +113,19 @@ next filtering call. `raw=True` returns separate index and value arrays.
 
 ## Filtering a time series
 
-`run_series(series, starts, win_start, win_end)` accepts a time series and a
-block layout. `starts` contains each block's starting sample; `win_start` and
-`win_end` specify its valid output window. The caller supplies the overlap
-layout. The library gathers and pads blocks, computes forward FFTs, and
-filters them on the selected device.
+Flat and hierarchical peak filters use the same automatic layout:
+`MatchedFilter(n, valid=(lo, hi))` or `HierarchicalFilter(n, valid=(lo, hi))`,
+then `run_series(series, ...)`. Each block searches only its valid lag window;
+the final window clips at the end of the series. The result remains block-major
+peaks, with unused bins in the clipped final block dismissed (`index=-1`).
+Peak-only output has no continuous sample series to assemble.
+Automatic peak indices are absolute positions in the supplied series;
+explicit-block calls retain their block-local lag indices.
+
+The existing `run_series(series, starts, win_start, win_end, ...)` form remains
+for irregular block layouts and per-block windows. `starts` gives each block's
+input position; `win_start` and `win_end` give its lag window. Both forms gather
+and pad blocks, compute forward FFTs, and filter on the selected device.
 
 Templates must be set first. A later `run()` requires another `set_data()`
 call because series execution reuses the data slots. GPU execution is

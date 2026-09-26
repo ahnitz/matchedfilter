@@ -990,6 +990,32 @@ void fullCorrelation(uint3 gid: SV_GroupID, uint3 lid: SV_GroupThreadID,
         output[pair*N + slotToIndex(tid*R + i)] = float2(float(r[i].x), float(r[i].y));
 }
 
+// The same transform, with its valid lags written at absolute series offsets.
+// params = (template count, output length, valid start, valid end).
+[shader("compute")][numthreads(WG,1,1)]
+void fullCorrelationSeries(uint3 gid: SV_GroupID, uint3 lid: SV_GroupThreadID,
+                           StructuredBuffer<CVal> data, StructuredBuffer<CVal> tmpl,
+                           StructuredBuffer<uint> starts,
+                           RWStructuredBuffer<float2> output, uniform uint4 params)
+{
+    uint pair = gid.x, tid = lid.x;
+    uint d = pair / params.x, t = pair % params.x;
+    uint start = starts[d];
+    _tid = tid;
+    _stgBase = 0;
+    C r[RADIX];
+    [unroll] for (uint i = 0; i < R; ++i) {
+        uint idx = tid + WG * i;
+        r[i] = cmulConj(cload(data, d*N + idx), cload(tmpl, t*N + idx));
+    }
+    transform(r, tid);
+    [unroll] for (uint i = 0; i < R; ++i) {
+        uint lag = slotToIndex(tid*R + i);
+        if (lag >= params.z && lag < params.w && lag < params.y - start)
+            output[t*params.y + start + lag] = float2(float(r[i].x), float(r[i].y));
+    }
+}
+
 //: Compaction. One THREAD per pair, not one workgroup.
 //:
 //: The refine used to launch a workgroup for every pair so that each could
@@ -1188,6 +1214,29 @@ void tcFullStage3(uint3 gid: SV_GroupID, uint3 lid: SV_GroupThreadID,
     [unroll] for (uint i = 0; i < R; ++i) {
         uint k1 = slotToIndex(tid * R + i);
         output[pair * TC_N + k1 * TC_OTHER + k2] = float2(r[i].x, r[i].y);
+    }
+}
+
+[shader("compute")][numthreads(WG, 1, 1)]
+void tcFullSeriesStage3(uint3 gid: SV_GroupID, uint3 lid: SV_GroupThreadID,
+                        StructuredBuffer<float2> scratch,
+                        StructuredBuffer<uint> starts,
+                        RWStructuredBuffer<float2> output, uniform uint4 params)
+{
+    uint pair = gid.x / TC_OTHER, k2 = gid.x % TC_OTHER;
+    uint d = pair / params.x, t = pair % params.x;
+    uint start = starts[d];
+    uint tid = lid.x;
+    _tid = tid;
+    _stgBase = 0;
+    C r[RADIX];
+    [unroll] for (uint m = 0; m < R; ++m)
+        r[m] = scratch[pair * TC_N + k2 * NLEN + tid + WG*m];
+    transform(r, tid);
+    [unroll] for (uint i = 0; i < R; ++i) {
+        uint lag = slotToIndex(tid * R + i) * TC_OTHER + k2;
+        if (lag >= params.z && lag < params.w && lag < params.y - start)
+            output[t * params.y + start + lag] = float2(r[i].x, r[i].y);
     }
 }
 

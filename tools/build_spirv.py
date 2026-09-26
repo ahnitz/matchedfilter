@@ -158,10 +158,11 @@ COARSE_TILE_T = {128: 2, 256: 2, 512: 4, 1024: 2}
 #: `entry == ENTRY`, which silently collides the moment there is a third.
 STEMS = {"fusedTierB": "tierb",
          "compactPairs": "compact", "refineListed": "refine",
-         "fullCorrelation": "full"}
+         "fullCorrelation": "full", "fullCorrelationSeries": "full_series"}
 
 FULL_TIER_C = tuple(1 << k for k in range(17, 23))
 TIER_C_ENTRIES = (("corr1", "tcStage1"), ("corr2", "tcFullStage3"),
+                  ("corr_series2", "tcFullSeriesStage3"),
                   ("fwd1", "tcForwardStage1"), ("fwd2", "tcForwardStage3"))
 
 
@@ -424,10 +425,15 @@ def main(argv=None):
         if n >= 1024:
             full = compile_one(slangc, n, OUT, "fullCorrelation")
             info["full"] = dict(file=full.name)
+            full_series = compile_one(slangc, n, OUT, "fullCorrelationSeries")
+            info["full_series"] = dict(file=full_series.name)
             if lds_bytes(n, LDS_CAP[n]) > lds_bytes(n, PORTABLE_CAP):
                 portable = compile_one(slangc, n, OUT, "fullCorrelation",
                                        cap=PORTABLE_CAP, suffix="_lds32")
                 info["full"]["portable"] = dict(file=portable.name)
+                portable_series = compile_one(slangc, n, OUT, "fullCorrelationSeries",
+                                              cap=PORTABLE_CAP, suffix="_lds32")
+                info["full_series"]["portable"] = dict(file=portable_series.name)
         # Compaction: gather the pairs that passed the coarse threshold and
         # refine only those. The refine used to launch a workgroup per pair
         # to have it exit -- 57% of the hierarchical call at 512x512 -- and
@@ -506,7 +512,7 @@ def main(argv=None):
                                        % ("p%d" % _p if _p > 1 else "", _t))
             compile_metal(slangc, n, mcap, centry, MSL, suffix="_c16", coarse16=1)
 
-        for entry in ENTRIES + (("fullCorrelation",) if n >= 1024 else ()):
+        for entry in ENTRIES + (("fullCorrelation", "fullCorrelationSeries") if n >= 1024 else ()):
             m, lib = compile_metal(slangc, n, mcap, entry, MSL)
             metal[entry] = dict(msl=m.name,
                                 metallib=lib.name if lib else None)

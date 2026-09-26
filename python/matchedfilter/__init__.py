@@ -173,6 +173,37 @@ def _format_result(idx, val, *, raw=False, counts=None, out=None, order=None):
     return (result, counts) if counts is not None and counts is not False else result
 
 
+def _valid_series_window(n, valid):
+    if valid is None:
+        return None
+    try:
+        lo, hi = map(int, valid)
+    except (TypeError, ValueError) as exc:
+        raise ValueError('valid must be a (start, end) lag interval') from exc
+    if lo < 0 or lo >= hi or hi > n:
+        raise ValueError('valid must satisfy 0 <= start < end <= n')
+    return lo, hi
+
+
+def _automatic_series_layout(length, valid):
+    if valid is None:
+        raise ValueError('automatic run_series requires valid=(start, end) on the filter')
+    lo, hi = valid
+    if length <= lo:
+        raise ValueError('series ends before the first valid output sample')
+    starts = np.arange(0, length - lo, hi - lo, dtype=np.uintp)
+    return starts, np.full(starts.size, lo, np.uintp), np.minimum(
+        hi, length - starts).astype(np.uintp)
+
+
+def _absolute_peak_indices(result, starts, raw):
+    """Automatic series calls report positions in the supplied series."""
+    index = result[0] if raw else result['index']
+    np.add(index, starts.astype(np.int64)[:, None, None], out=index,
+           where=index >= 0)
+    return result
+
+
 class MatchedFilter:
     """Correlate a set of data segments against a set of templates.
 
@@ -192,10 +223,11 @@ class MatchedFilter:
     _gpu_sizes = _GPU_SIZES
     _cpu_max_n = 1 << 20
 
-    def __init__(self, n, ndata=1, ntemplates=1, device=None):
+    def __init__(self, n, ndata=1, ntemplates=1, device=None, *, valid=None):
         from .device import parse as _parse_device
         self.device = _parse_device(device)
         self.n = int(n)
+        self.valid = _valid_series_window(self.n, valid)
         self.ndata = int(ndata)
         self.ntemplates = int(ntemplates)
         if self.ndata < 1 or self.ntemplates < 1:
@@ -545,7 +577,7 @@ class MatchedFilter:
         layout = SeriesLayout(self.n, st, ws, we, binsize)
         return ser, layout, binsize, t0, nt
 
-    def run_series(self, series, starts, win_start, win_end,
+    def run_series(self, series, starts=None, win_start=None, win_end=None,
                    binsize=None, threshold=0.0, templates=None, raw=False):
         """Filter a time series over a caller-supplied block layout.
 
@@ -561,6 +593,8 @@ class MatchedFilter:
         arrays ``(index, value)`` of that shape.
 
         Equal-window blocks are grouped internally; output retains caller order.
+        With automatic layout (no ``starts``), indices are absolute positions
+        in ``series``. Explicit-block calls retain block-local lag indices.
         Flat CPU batches use up to ``ndata`` slots. Hierarchical CPU batches
         use a bounded internal group (normally eight). GPU batches follow the
         series memory budget independently of ``ndata``.
@@ -569,6 +603,55 @@ class MatchedFilter:
         A later run() requires set_data() again because series execution
         uses the plan's data slots. This rule applies on both devices.
         """
+        if starts is None:
+            if win_start is not None or win_end is not None:
+                raise ValueError('win_start and win_end require explicit starts')
+            ser = np.ascontiguousarray(_from_any(series), dtype=np.complex64)
+            if ser.ndim != 1:
+                raise ValueError('series must be one-dimensional')
+            st, ws, we = _automatic_series_layout(ser.size, self.valid)
+            # The final clipped block can have fewer bins than the rest.
+            # Keep its result in the same rectangular return shape, with
+            # dismissed bins in the unused slots.
+            bs = self.n if binsize is None else int(binsize)
+            if bs < 1:
+                raise ValueError('binsize must be >= 1')
+            counts = 1 + (we - ws - 1) // bs
+            if np.all(counts == counts[0]):
+                result = self.run_series(ser, st, ws, we, binsize=bs,
+                                         threshold=threshold, templates=templates,
+                                         raw=raw)
+                return _absolute_peak_indices(result, st, raw)
+            main = self.run_series(ser, st[:-1], ws[:-1], we[:-1],
+                                   binsize=bs, threshold=threshold,
+                                   templates=templates, raw=raw) if st.size > 1 else None
+            if main is not None:
+                main = tuple(a.copy() for a in main) if raw else main.copy()
+            tail = self.run_series(ser, st[-1:], ws[-1:], we[-1:],
+                                   binsize=bs, threshold=threshold,
+                                   templates=templates, raw=raw)
+            if raw:
+                ti, tv = tail
+                nt = ti.shape[1]
+                nb = int(max(counts))
+                idx = np.full((st.size, nt, nb), -1, np.int64)
+                val = np.zeros((st.size, nt, nb), np.complex64)
+                if main is not None:
+                    idx[:-1], val[:-1] = main
+                idx[-1, :, :ti.shape[-1]] = ti[0]
+                val[-1, :, :tv.shape[-1]] = tv[0]
+                return _absolute_peak_indices((idx, val), st, True)
+            nt = tail.shape[1]
+            nb = int(max(counts))
+            result = np.empty((st.size, nt, nb), PEAK_DTYPE)
+            result['index'] = -1
+            result['value'] = 0
+            if main is not None:
+                result[:-1] = main
+            result[-1, :, :tail.shape[-1]] = tail[0]
+            return _absolute_peak_indices(result, st, False)
+        if win_start is None or win_end is None:
+            raise ValueError('explicit starts require win_start and win_end')
         ser, layout, binsize, t0, nt = self._series_layout(
             series, starts, win_start, win_end, binsize, templates)
         if self._gpu is not None or self.ndata > 1 or isinstance(self, HierarchicalFilter):
@@ -686,6 +769,7 @@ class MatchedFilter:
         if self._gpu is not None:
             self._gpu.clear_cache()
             self._series_workspace = None
+            self._continuous_workspace = None
             self._ddirty = self._tdirty = True
 
 
@@ -700,6 +784,41 @@ class CorrelationFilter(MatchedFilter):
     _gpu_sizes = frozenset(1 << k for k in range(10, 23))
     _cpu_max_n = 1 << 22
     _max_auto_output_bytes = 512 * 1024 * 1024
+
+    def _continuous_gpu(self, ser, starts, t0, nt, out):
+        """Forward-transform bounded block batches into continuous GPU output."""
+        from ._shared import shared_buffer
+        if ser.size > np.iinfo(np.uint32).max or nt * ser.size > np.iinfo(np.uint32).max:
+            raise ValueError("GPU series exceeds the 32-bit sample address range")
+        budget = getattr(self, '_series_batch_bytes', 64 * 1024 * 1024)
+        per_block = 8 * self.n * ((1 + nt) if self.n > 65536 else 1)
+        batch = max(1, min(starts.size, self._gpu_pair_limit() // nt,
+                           budget // per_block))
+        key = (batch, nt, self.n, ser.size)
+        work = getattr(self, '_continuous_workspace', None)
+        if work is None or work[0] != key:
+            work = (key, self.empty_shared(ser.shape),
+                    self.empty_shared((batch, self.n)),
+                    self.empty_shared(batch, np.uint32))
+            self._continuous_workspace = work
+        _, staging, spec, offsets = work
+        source = ser if shared_buffer(ser, self._gpu) is not None else staging
+        if source is staging:
+            source[:] = ser
+        lo, hi = self.valid
+        for b0 in range(0, starts.size, batch):
+            b1 = min(b0 + batch, starts.size)
+            count = b1 - b0
+            offsets[:count] = np.minimum(starts[b0:b1], ser.size)
+            self._gpu.forward(self.n, source, offsets[:count], spec[:count], defer=True)
+            try:
+                self._gpu.correlate_continuous(
+                    self.n, spec[:count], self._gtmpl[t0:t0 + nt],
+                    offsets[:count], out, lo, hi,
+                    upload_data=True, upload_tmpl=self._tdirty)
+            finally:
+                self._gpu.cancel_forward()
+            self._tdirty = False
 
     def _full_output(self, shape, out):
         nbytes = math.prod(shape) * np.dtype(np.complex64).itemsize
@@ -729,12 +848,45 @@ class CorrelationFilter(MatchedFilter):
             self._ddirty = self._tdirty = False
         return result
 
-    def run_series(self, series, starts, templates=None, out=None):
-        """Forward-transform padded blocks, then return every correlation lag."""
+    def run_series(self, series, starts=None, templates=None, out=None):
+        """Correlate a series into continuous output over the configured valid window.
+
+        With explicit ``starts``, preserve the block-major full-output form.
+        """
         ser = np.ascontiguousarray(_from_any(series), dtype=np.complex64)
+        if ser.ndim != 1:
+            raise ValueError("series must be one-dimensional")
+        if starts is None:
+            if out is not None:
+                raise ValueError('automatic run_series owns its output; omit out')
+            st, _, _ = _automatic_series_layout(ser.size, self.valid)
+            t0, nt = (0, self.ntemplates) if templates is None else (
+                int(templates[0]), int(templates[1]))
+            if nt < 1 or t0 < 0 or t0 + nt > self.ntemplates:
+                raise ValueError("templates sub-range out of bounds")
+            self._require_templates(t0, nt)
+            shape = (nt, ser.size)
+            result = getattr(self, '_continuous_output', None)
+            if result is None or result.shape != shape:
+                nbytes = math.prod(shape) * np.dtype(np.complex64).itemsize
+                if nbytes > self._max_auto_output_bytes:
+                    raise ValueError("continuous correlation needs %d bytes of output; "
+                                     "select fewer templates or a shorter series" % nbytes)
+                result = (self._gpu.empty_shared(shape, readback=True)
+                          if self._gpu is not None else self.empty_shared(shape))
+                result[:, :self.valid[0]] = 0
+                self._continuous_output = result
+            self._dataset = False
+            self._data_ready = set()
+            if self._gpu is not None:
+                self._continuous_gpu(ser, st, t0, nt, result)
+                return result
+            self._execution_plan().correlate_series_continuous(
+                ser, st, self.valid[0], self.valid[1], t0, nt, result)
+            return result
         st = np.ascontiguousarray(_from_any(starts), dtype=np.uintp)
-        if ser.ndim != 1 or st.ndim != 1 or st.size < 1:
-            raise ValueError("series and nonempty starts must be one-dimensional")
+        if st.ndim != 1 or st.size < 1:
+            raise ValueError("starts must be a nonempty one-dimensional array")
         if np.any(st > np.iinfo(np.intp).max - self.n):
             raise ValueError("starts must be nonnegative and fit the sample index range")
         t0, nt = (0, self.ntemplates) if templates is None else (int(templates[0]), int(templates[1]))
@@ -1169,10 +1321,11 @@ class HierarchicalFilter(MatchedFilter):
     """
 
     def __init__(self, n, ndata=1, ntemplates=1, snr=5.5, fd=1e-2,
-                 band=None, taps=None, device=None):
+                 band=None, taps=None, device=None, *, valid=None):
         from .device import parse as _parse_device
         self.device = _parse_device(device)
         self.n = int(n)
+        self.valid = _valid_series_window(self.n, valid)
         self.ndata = int(ndata)
         self.ntemplates = int(ntemplates)
         if self.ndata < 1 or self.ntemplates < 1:

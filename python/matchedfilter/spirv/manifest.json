@@ -288,6 +288,9 @@
       "full": {
         "file": "full_1024.spv"
       },
+      "full_series": {
+        "file": "full_series_1024.spv"
+      },
       "compact": {
         "file": "compact.spv",
         "descriptors": 5
@@ -311,6 +314,10 @@
         },
         "fullCorrelation": {
           "msl": "full_1024.metal",
+          "metallib": null
+        },
+        "fullCorrelationSeries": {
+          "msl": "full_series_1024.metal",
           "metallib": null
         }
       },
@@ -357,6 +364,9 @@
       "full": {
         "file": "full_2048.spv"
       },
+      "full_series": {
+        "file": "full_series_2048.spv"
+      },
       "compact": {
         "file": "compact.spv",
         "descriptors": 5
@@ -380,6 +390,10 @@
         },
         "fullCorrelation": {
           "msl": "full_2048.metal",
+          "metallib": null
+        },
+        "fullCorrelationSeries": {
+          "msl": "full_series_2048.metal",
           "metallib": null
         }
       },
@@ -426,6 +440,9 @@
       "full": {
         "file": "full_4096.spv"
       },
+      "full_series": {
+        "file": "full_series_4096.spv"
+      },
       "compact": {
         "file": "compact.spv",
         "descriptors": 5
@@ -449,6 +466,10 @@
         },
         "fullCorrelation": {
           "msl": "full_4096.metal",
+          "metallib": null
+        },
+        "fullCorrelationSeries": {
+          "msl": "full_series_4096.metal",
           "metallib": null
         }
       },
@@ -498,6 +519,12 @@
           "file": "full_8192_lds32.spv"
         }
       },
+      "full_series": {
+        "file": "full_series_8192.spv",
+        "portable": {
+          "file": "full_series_8192_lds32.spv"
+        }
+      },
       "compact": {
         "file": "compact.spv",
         "descriptors": 5
@@ -543,6 +570,15 @@
           "metallib": null,
           "portable": {
             "msl": "full_8192_lds32.metal",
+            "metallib": null,
+            "lds_bytes": 32768
+          }
+        },
+        "fullCorrelationSeries": {
+          "msl": "full_series_8192.metal",
+          "metallib": null,
+          "portable": {
+            "msl": "full_series_8192_lds32.metal",
             "metallib": null,
             "lds_bytes": 32768
           }
@@ -596,6 +632,12 @@
         "file": "full_16384.spv",
         "portable": {
           "file": "full_16384_lds32.spv"
+        }
+      },
+      "full_series": {
+        "file": "full_series_16384.spv",
+        "portable": {
+          "file": "full_series_16384_lds32.spv"
         }
       },
       "compact": {
@@ -658,6 +700,15 @@
             "metallib": null,
             "lds_bytes": 32768
           }
+        },
+        "fullCorrelationSeries": {
+          "msl": "full_series_16384.metal",
+          "metallib": null,
+          "portable": {
+            "msl": "full_series_16384_lds32.metal",
+            "metallib": null,
+            "lds_bytes": 32768
+          }
         }
       },
       "metal_lds_cap": 8192,
@@ -708,6 +759,12 @@
         "file": "full_32768.spv",
         "portable": {
           "file": "full_32768_lds32.spv"
+        }
+      },
+      "full_series": {
+        "file": "full_series_32768.spv",
+        "portable": {
+          "file": "full_series_32768_lds32.spv"
         }
       },
       "compact": {
@@ -770,6 +827,15 @@
             "metallib": null,
             "lds_bytes": 32768
           }
+        },
+        "fullCorrelationSeries": {
+          "msl": "full_series_32768.metal",
+          "metallib": null,
+          "portable": {
+            "msl": "full_series_32768_lds32.metal",
+            "metallib": null,
+            "lds_bytes": 32768
+          }
         }
       },
       "metal_lds_cap": 8192,
@@ -820,6 +886,12 @@
         "file": "full_65536.spv",
         "portable": {
           "file": "full_65536_lds32.spv"
+        }
+      },
+      "full_series": {
+        "file": "full_series_65536.spv",
+        "portable": {
+          "file": "full_series_65536_lds32.spv"
         }
       },
       "compact": {
@@ -879,6 +951,15 @@
           "metallib": null,
           "portable": {
             "msl": "full_65536_lds32.metal",
+            "metallib": null,
+            "lds_bytes": 32768
+          }
+        },
+        "fullCorrelationSeries": {
+          "msl": "full_series_65536.metal",
+          "metallib": null,
+          "portable": {
+            "msl": "full_series_65536_lds32.metal",
             "metallib": null,
             "lds_bytes": 32768
           }
@@ -1032,6 +1113,15 @@
           1
         ]
       },
+      "corr_series2": {
+        "file": "tc_corr_series2_131072.spv",
+        "metal": "tc_corr_series2_131072.metal",
+        "local_size": [
+          16,
+          1,
+          1
+        ]
+      },
       "fwd1": {
         "file": "tc_fwd1_131072.spv",
         "metal": "tc_fwd1_131072.metal",
@@ -1066,6 +1156,15 @@
       "corr2": {
         "file": "tc_corr2_262144.spv",
         "metal": "tc_corr2_262144.metal",
+        "local_size": [
+          32,
+          1,
+          1
+        ]
+      },
+      "corr_series2": {
+        "file": "tc_corr_series2_262144.spv",
+        "metal": "tc_corr_series2_262144.metal",
         "local_size": [
           32,
           1,
@@ -1112,6 +1211,15 @@
           1
         ]
       },
+      "corr_series2": {
+        "file": "tc_corr_series2_524288.spv",
+        "metal": "tc_corr_series2_524288.metal",
+        "local_size": [
+          32,
+          1,
+          1
+        ]
+      },
       "fwd1": {
         "file": "tc_fwd1_524288.spv",
         "metal": "tc_fwd1_524288.metal",
@@ -1146,6 +1254,15 @@
       "corr2": {
         "file": "tc_corr2_1048576.spv",
         "metal": "tc_corr2_1048576.metal",
+        "local_size": [
+          64,
+          1,
+          1
+        ]
+      },
+      "corr_series2": {
+        "file": "tc_corr_series2_1048576.spv",
+        "metal": "tc_corr_series2_1048576.metal",
         "local_size": [
           64,
           1,
@@ -1192,6 +1309,15 @@
           1
         ]
       },
+      "corr_series2": {
+        "file": "tc_corr_series2_2097152.spv",
+        "metal": "tc_corr_series2_2097152.metal",
+        "local_size": [
+          64,
+          1,
+          1
+        ]
+      },
       "fwd1": {
         "file": "tc_fwd1_2097152.spv",
         "metal": "tc_fwd1_2097152.metal",
@@ -1232,6 +1358,15 @@
           1
         ]
       },
+      "corr_series2": {
+        "file": "tc_corr_series2_4194304.spv",
+        "metal": "tc_corr_series2_4194304.metal",
+        "local_size": [
+          128,
+          1,
+          1
+        ]
+      },
       "fwd1": {
         "file": "tc_fwd1_4194304.spv",
         "metal": "tc_fwd1_4194304.metal",
@@ -1253,7 +1388,7 @@
     }
   },
   "source_hashes": {
-    "tierb.slang": "e3bc3c91fbd97d498b072c8ef49959a8b3c3a04f4cebccf859d4562d8227e629",
+    "tierb.slang": "23da5e238f3730a377258e6c27312c485db3d0a96ff9049bd4305ebd67ea7841",
     "fft_transform.slang": "7cdbdab1dac4e36ce0c0ae483fb170a210057cea205bb846425d04e2693e617e",
     "coarse_tile.slang": "e63fc4b013211c57f1f561dad822420665f9c69764815c96148e8f37cfa218e8",
     "series_forward.slang": "1ed347cedae7d1f7543ccfbfd6a4ea1971f6be1eb4fdd504c9e6b0a17b849ee5",
