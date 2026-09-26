@@ -102,7 +102,7 @@ static inline int pairbatch_size(size_t N){
 }
 
 int supported(size_t N){
-  /* Powers of two from 64 to 2^20.  The lower bound used to be 4096, which was
+  /* Powers of two from 64 to 2^22.  The lower bound used to be 4096, which was
      arbitrary - what actually constrains the BALANCED path is that both halves
      of the split must be at least one vector wide.  The hierarchical filter
      needs the small sizes: its coarse pass is an N/R-point transform, and
@@ -117,7 +117,7 @@ int supported(size_t N){
      and neither stage needs a full vector of its own.  See create_small().
      The supported set is still identical across back ends, which is what
      keeps it from depending on which one the CPU happens to select. */
-  if((N&(N-1))||N<64u||N>(1u<<20)) return 0;
+  if((N&(N-1))||N<64u||N>(1u<<22)) return 0;
   if(pairbatch_size(N)) return esupported((int)N);
   int m=0; while(((size_t)1<<m)<N) m++;
   int n1=1<<((m+1)/2), n2=1<<(m/2);
@@ -1099,6 +1099,26 @@ int binmax_prod_batch(void *vp,const float*dr,const float*di,
   return 0;
 }
 
+int corr_prod_batch(void *vp,const float *dr,const float *di,
+                    const float *tr,const float *ti,int nlane,float *out){
+  BP *p=(BP*)vp;
+  if(!p->small||nlane<1||nlane>AP_W) return -1;
+  if(broadcast_data(p))
+    efft_prod_broadcast((int)p->N,dr,di,tr,ti,p->bR,p->bI,p->sR,p->sI,p->w1r,p->w1i);
+  else
+    efft_prod((int)p->N,dr,di,tr,ti,p->bR,p->bI,p->sR,p->sI,p->w1r,p->w1i);
+  for(size_t k=0;k<p->N;k++){
+    const int e=eidx(&p->ea,(int)k);
+    float r[AP_W],i[AP_W];
+    V_STOREU(r,p->bR[e]); V_STOREU(i,p->bI[e]);
+    for(int l=0;l<nlane;l++){
+      out[2*((size_t)l*p->N+k)]=r[l];
+      out[2*((size_t)l*p->N+k)+1]=-i[l];
+    }
+  }
+  return 0;
+}
+
 int binmax_prod(void *vp,const float*dr,const float*di,
                     const float*tr,const float*ti,size_t binsize,
                     float thr,ap_peak*out,int conj,size_t ws,size_t we){
@@ -1109,6 +1129,36 @@ int binmax_prod(void *vp,const float*dr,const float*di,
   if(p->gmajor) stageA_prod_gm(p,dr,di,tr,ti);
   else          stageA_prod(p,dr,di,tr,ti);
   binmax_core(p,binsize,thr,out,conj,ws,we);
+  return 0;
+}
+
+static void corr_store(BP *p,float *out){
+  const int N1=p->N1,N2=p->N2;
+  const vf sg=V_SIGNMASK();
+  for(int b=0;b<N2/AP_W;b++){
+    vf *RR,*RI; stageB(p,b,&RR,&RI,1);
+    for(int k1=0;k1<N1;k1++){
+      const int e=eidx(&p->ea,k1);
+      v_inter(out+2*((size_t)k1*N2+AP_W*b),RR[e],V_XOR(RI[e],sg));
+    }
+  }
+}
+
+int corr_prod(void *vp,const float*dr,const float*di,
+              const float*tr,const float*ti,float*out){
+  BP *p=(BP*)vp;
+  if(p->small) return -1;
+  if(p->gmajor) stageA_prod_gm(p,dr,di,tr,ti);
+  else          stageA_prod(p,dr,di,tr,ti);
+  corr_store(p,out);
+  return 0;
+}
+
+int corr_split(void *vp,const float *re,const float *im,float *out){
+  BP *p=(BP*)vp;
+  if(p->small) return -1;
+  stageA_split(p,re,im,0);
+  corr_store(p,out);
   return 0;
 }
 
@@ -1133,8 +1183,8 @@ const ap_backend *Backend(void){
   static const ap_backend be = {
     hwy::TargetName(HWY_TARGET), AP_W,
     create, destroy, fft, supported,
-    binmax, binmax_split, has_prod, split, binmax_prod, series_buf, series_stride, interp_max,
-    pairbatch, binmax_prod_batch, create_small, broadcast_data
+    binmax, binmax_split, has_prod, split, binmax_prod, corr_prod, corr_split, series_buf, series_stride, interp_max,
+    pairbatch, binmax_prod_batch, corr_prod_batch, create_small, broadcast_data
   };
   return &be;
 }
