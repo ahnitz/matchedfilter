@@ -3,6 +3,54 @@
 September 26, 2026. Builds on `gpu-cache-correctness.md`. Existing CPU
 tuning work in the shared tree was preserved.
 
+## Performance regression checks
+
+Normal CI checks correctness and structural costs, including upload reuse,
+cache bounds, and one warm Vulkan submission for distinct flat windows. Timing
+benchmarks on shared runners remain advisory. GPU-specific checks run when
+that backend is available.
+
+Run the opt-in timing suite on an otherwise idle machine:
+
+```bash
+python -m pytest tests/test_performance.py --run-performance -q
+```
+
+It covers CPU and available GPU devices:
+
+- Flat and hierarchical cached `run()` at 2,048, 4,096, and 8,192 points with
+  16 data rows × 128 templates, plus 128 × 512 at 4,096 points. The peak
+  threshold is 5.5; hierarchical runs use explicit band 256 and coarse
+  threshold 4.0.
+- Automatic peak `run_series()` at those three lengths, with 43 blocks and
+  128 templates. It may cost at most 1.5 times the explicit-block reference.
+- Continuous full output at 32,768 points, six templates and a 1,048,576-sample
+  series. It may cost at most 1.5 times explicit blocks plus assembly.
+- Vulkan irregular windows at 4,096 points, 128 blocks and 32 templates.
+  Grouped submission must take at most half the separate-submission time.
+
+Warm calls exclude setup, check results before timing, and alternate compared
+paths. The relative limits allow noise while catching substantial overhead.
+They cannot catch a slowdown shared by both paths. For that, record a baseline
+on the known-good revision and compare the candidate in the same environment:
+
+```bash
+python -m pytest tests/test_performance.py --run-performance \
+  --performance-record=.local/performance-baseline.json -q
+python -m pytest tests/test_performance.py --run-performance \
+  --performance-baseline=.local/performance-baseline.json -q
+```
+
+The comparison fails if any measured workload is over 25% slower. Host, device,
+ISA, Python, and NumPy identities must match; missing workload baselines fail
+instead of being silently ignored. Recording writes only after a successful
+run, and refuses to overwrite the baseline used for comparison. Keep baselines in ignored local storage or CI artifacts, and refresh them
+only after reviewing a deliberate change. A baseline should come from the
+known-good revision, not be recreated automatically for each candidate.
+Unavailable GPU cases skip explicitly. These tests are opt-in because shared
+CI load and GPU clocks can overwhelm small improvements; a dedicated idle
+runner can use the saved-baseline command as a blocking check.
+
 ## Gaps covered
 
 `tests/test_vk_upload_cache.py` now exercises the actual Vulkan and Metal

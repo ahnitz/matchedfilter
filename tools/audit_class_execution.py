@@ -276,10 +276,38 @@ def reorder_cpu(rounds):
     return rows
 
 
+def submissions(device, rounds):
+    """Compare window-at-a-time and grouped submission using identical kernels."""
+    if device != 'gpu':
+        raise SystemExit('The submissions suite requires --device gpu')
+    rows = []
+    for n in (1024, 2048, 4096, 8192):
+        for groups in (1, 2, 16, 128):
+            series, starts, low, high, h = inputs(n, 128, 32, groups)
+            f = plan(n, 32, 32, device, 'flat', h)
+            maximum = getattr(f._gpu, 'max_grouped_bins', 0)
+            if not maximum:
+                raise SystemExit('This backend has no grouped submission path')
+            def call(limit):
+                f._gpu.max_grouped_bins = limit
+                return f.run_blocks(series, starts, low, high)
+            try:
+                validate(call(0).copy(), call(maximum))
+                row = dict(suite='submissions', device=device, n=n,
+                           blocks=128, templates=32, window_groups=groups,
+                           results=times({'separate': lambda: call(0),
+                                          'grouped': lambda: call(maximum)}, rounds))
+            finally:
+                f._gpu.max_grouped_bins = maximum
+            rows.append(row)
+            print(json.dumps(row), flush=True)
+    return rows
+
+
 def main():
     ap=argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--device',choices=['cpu','gpu'],default='cpu')
-    ap.add_argument('--suite',choices=['batching','layout','cache','cache_limits','caller_chunks','vector_validation','reorder_cpu'],required=True)
+    ap.add_argument('--suite',choices=['batching','layout','cache','cache_limits','caller_chunks','vector_validation','reorder_cpu','submissions'],required=True)
     ap.add_argument('--rounds',type=int,default=7)
     ap.add_argument('--json',required=True)
     a=ap.parse_args()
