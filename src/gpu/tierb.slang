@@ -968,6 +968,28 @@ void fusedTierB(uint3 gid: SV_GroupID, uint3 lid: SV_GroupThreadID,
                winStart, winEnd, binsize, binShift, nbins, thrBits);
 }
 
+// Full circular correlation in natural lag order. The same fused spectral
+// product and transform as the peak path, with one coalesced output write per
+// transformed sample and no peak table or reduction.
+[shader("compute")][numthreads(WG,1,1)]
+void fullCorrelation(uint3 gid: SV_GroupID, uint3 lid: SV_GroupThreadID,
+                     StructuredBuffer<CVal> data, StructuredBuffer<CVal> tmpl,
+                     RWStructuredBuffer<float2> output, uniform uint ntmpl)
+{
+    uint pair = gid.x, tid = lid.x;
+    uint d = pair / ntmpl, t = pair % ntmpl;
+    _tid = tid;
+    _stgBase = 0;
+    C r[RADIX];
+    [unroll] for (uint i = 0; i < R; ++i) {
+        uint idx = tid + WG * i;
+        r[i] = cmulConj(cload(data, d*N + idx), cload(tmpl, t*N + idx));
+    }
+    transform(r, tid);
+    [unroll] for (uint i = 0; i < R; ++i)
+        output[pair*N + slotToIndex(tid*R + i)] = float2(float(r[i].x), float(r[i].y));
+}
+
 //: Compaction. One THREAD per pair, not one workgroup.
 //:
 //: The refine used to launch a workgroup for every pair so that each could

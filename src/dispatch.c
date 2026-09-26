@@ -139,6 +139,12 @@ int ap_binmax_prod(ap_plan *p,const float *dr,const float *di,
   return c;
 }
 
+int ap_corr_prod(ap_plan *p,const float *dr,const float *di,
+                 const float *tr,const float *ti,float *out){
+  if(!p||!p->be->corr_prod) return -1;
+  return p->be->corr_prod(p->h,dr,di,tr,ti,out);
+}
+
 float ap_interp_max(ap_plan *p,size_t ws,size_t we,float evmax,
                     const float *hlo,const float *hhi,int K,int ncand,float frac){
   if(!p||!p->be->interp) return evmax;

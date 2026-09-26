@@ -1112,6 +1112,24 @@ int binmax_prod(void *vp,const float*dr,const float*di,
   return 0;
 }
 
+int corr_prod(void *vp,const float*dr,const float*di,
+              const float*tr,const float*ti,float*out){
+  BP *p=(BP*)vp;
+  if(p->small) return -1;
+  if(p->gmajor) stageA_prod_gm(p,dr,di,tr,ti);
+  else          stageA_prod(p,dr,di,tr,ti);
+  const int N1=p->N1,N2=p->N2;
+  const vf sg=V_SIGNMASK();
+  for(int b=0;b<N2/AP_W;b++){
+    vf *RR,*RI; stageB(p,b,&RR,&RI,1);
+    for(int k1=0;k1<N1;k1++){
+      const int e=eidx(&p->ea,k1);
+      v_inter(out+2*((size_t)k1*N2+AP_W*b),RR[e],V_XOR(RI[e],sg));
+    }
+  }
+  return 0;
+}
+
 int binmax_split(void *vp,const float*inr,const float*ini,size_t binsize,
                      float thr,ap_peak*out,int conj,size_t ws,size_t we){
   BP *p=(BP*)vp;
@@ -1133,7 +1151,7 @@ const ap_backend *Backend(void){
   static const ap_backend be = {
     hwy::TargetName(HWY_TARGET), AP_W,
     create, destroy, fft, supported,
-    binmax, binmax_split, has_prod, split, binmax_prod, series_buf, series_stride, interp_max,
+    binmax, binmax_split, has_prod, split, binmax_prod, corr_prod, series_buf, series_stride, interp_max,
     pairbatch, binmax_prod_batch, create_small, broadcast_data
   };
   return &be;
