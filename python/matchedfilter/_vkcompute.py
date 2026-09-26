@@ -1060,6 +1060,42 @@ class Context(InputUploads):
             np.complex64).reshape(nd, nt, nbins)
         return idx, val
 
+    def _full_probe(self, n, data, tmpl):
+        nd, nt = data.shape[0], tmpl.shape[0]
+        key = (n, nd, nt)
+        cache = getattr(self, '_full_probe_batches', None)
+        if cache is None:
+            cache = self._full_probe_batches = {}
+        batch = cache.get(key)
+        if batch is None:
+            pipe, layout, sl = self._build_pipeline(
+                ('full', n), 'full_%d.spv' % n, 3, 4)
+            bufs = (_Buffer(self, nd*n*8), _Buffer(self, nt*n*8),
+                    _Buffer(self, nd*nt*n*8, readback=True))
+            ds = self._descriptor_set(sl, bufs)
+            cmd = _vp()
+            info = _CmdBufAlloc(40, None, self.command_pool, 0, 1)
+            _check(self.vk.vkAllocateCommandBuffers(self.device, ctypes.byref(info),
+                                                    ctypes.byref(cmd)), 'full allocate')
+            _check(self.vk.vkBeginCommandBuffer(cmd, ctypes.byref(
+                _CmdBufBegin(42, None, 0, None))), 'full begin')
+            self.vk.vkCmdBindPipeline(cmd, _BIND_POINT_COMPUTE, pipe)
+            sets = (_vp * 1)(ds)
+            self.vk.vkCmdBindDescriptorSets(cmd, _BIND_POINT_COMPUTE, layout,
+                                            0, 1, sets, 0, None)
+            pc = ctypes.c_uint32(nt)
+            self.vk.vkCmdPushConstants(cmd, layout, _STAGE_COMPUTE, 0, 4,
+                                        ctypes.byref(pc))
+            self.vk.vkCmdDispatch(cmd, nd*nt, 1, 1)
+            _check(self.vk.vkEndCommandBuffer(cmd), 'full end')
+            batch = (*bufs, cmd)
+            cache[key] = batch
+        bdata, btmpl, bout, cmd = batch
+        write_input(bdata, data)
+        write_input(btmpl, tmpl)
+        self._submit(cmd)
+        return bout.read(np.float32, nd*nt*n*2).view(np.complex64).reshape(nd,nt,n)
+
     cache_limit_recordings = 256
 
     def _register_record(self, kind, key, storage, pool_start):
@@ -1103,6 +1139,14 @@ class Context(InputUploads):
     def clear_cache(self):
         """Release records and owned storage, preserving external shared arrays."""
         self._submit(None)
+        self.vk.vkFreeCommandBuffers.argtypes = [_vp, _vp, _u32, ctypes.POINTER(_vp)]
+        for batch in getattr(self, '_full_probe_batches', {}).values():
+            cmd = (_vp * 1)(batch[-1])
+            self.vk.vkFreeCommandBuffers(self.device, self.command_pool, 1, cmd)
+            for buf in batch[:-1]:
+                buf.destroy()
+        if hasattr(self, '_full_probe_batches'):
+            self._full_probe_batches.clear()
         for kind, cache in (('flat', self._batches), ('hier', self._hier),
                             ('forward', getattr(self, '_forwards', {}))):
             for key in list(cache):

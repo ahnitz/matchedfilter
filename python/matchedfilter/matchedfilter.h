@@ -69,6 +69,7 @@ int ap_mf_set_template(ap_mf_plan *p, int t, const float *spec);
 int ap_mf_run(ap_mf_plan *p, int d0, int nd, int t0, int nt,
               size_t binsize, float threshold,
               ap_peak *peaks, int *counts, size_t start, size_t end);
+int ap_mf_correlate(ap_mf_plan *p, int d0, int nd, int t0, int nt, float *out);
 
 /* Same, but for a scattered set of templates: tsel[0..nsel) are local indices
    into [0,nt).  Rows are still addressed by the local index, so the skipped

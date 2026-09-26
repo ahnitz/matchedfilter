@@ -419,6 +419,28 @@ int ap_mf_run(ap_mf_plan *p, int d0, int nd, int t0, int nt,
                    peaks,counts,start,end);
 }
 
+int ap_mf_correlate(ap_mf_plan *p,int d0,int nd,int t0,int nt,float *out){
+  if(!p||!out||d0<0||nd<1||d0+nd>p->nd||t0<0||nt<1||t0+nt>p->nt)
+    return -1;
+  if(!p->gmajor) return -1;
+  const size_t n=p->n;
+  const int tile=p->tile;
+  for(int dt=0;dt<nd;dt+=tile) for(int tt=0;tt<nt;tt+=tile){
+    const int dend=(nd-dt<tile)?nd:dt+tile;
+    const int tend=(nt-tt<tile)?nt:tt+tile;
+    for(int d=dt;d<dend;d++){
+      const float *dr=p->dre+(size_t)(d0+d)*n;
+      const float *di=p->dim+(size_t)(d0+d)*n;
+      for(int t=tt;t<tend;t++){
+        const float *tr=p->tre+(size_t)(t0+t)*n;
+        const float *ti=p->tim+(size_t)(t0+t)*n;
+        if(ap_corr_prod(p->fft,dr,di,tr,ti,out+2*((size_t)d*nt+t)*n)) return -1;
+      }
+    }
+  }
+  return 0;
+}
+
 /* Filter a time series over a caller-supplied block layout.
  *
  * The flat twin of ap_hmf_run_series, and it exists for the same reason: one

@@ -72,5 +72,7 @@ int ap_binmax_prod(ap_plan *p, const float *dr, const float *di,
                    const float *tr, const float *ti,
                    size_t binsize, float threshold, ap_peak *peaks, int *count,
                    int sign, size_t start, size_t end);
+int ap_corr_prod(ap_plan *p, const float *dr, const float *di,
+                 const float *tr, const float *ti, float *out);
 
 #endif
