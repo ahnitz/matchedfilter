@@ -96,6 +96,19 @@ jobs:
             echo "::endgroup::"
           done
 
+      - name: Measure automatic overlap-save workloads
+        run: |
+          export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
+          python tools/bench_series_workloads.py --quick --reps 5 \
+            --json "series-${{ matrix.label }}.json" \
+            | tee "series-${{ matrix.label }}.txt"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: series-${{ matrix.label }}
+          path: series-${{ matrix.label }}.json
+          if-no-files-found: error
+
       - name: Publish to the run summary
         if: always()
         run: |
@@ -104,6 +117,10 @@ jobs:
             { echo "## $(basename "$f" .txt | sed 's/^bench-//')"; echo
               echo '```'; cat "$f"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           done
+          for f in series-${{ matrix.label }}*.txt; do
+            [ -e "$f" ] || continue
+            { echo "## $(basename "$f" .txt)"; echo
+              echo '```'; cat "$f"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@v4
         with:

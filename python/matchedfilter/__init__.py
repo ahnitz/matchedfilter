@@ -24,6 +24,7 @@ on GPU. Full-output lengths are 1024 to 4194304 on either device, subject to
 device limits. Hierarchical calibration coverage is separate from transform support.
 """
 import math
+import operator
 import os
 import warnings
 
@@ -177,9 +178,9 @@ def _valid_series_window(n, valid):
     if valid is None:
         return None
     try:
-        lo, hi = map(int, valid)
+        lo, hi = map(operator.index, valid)
     except (TypeError, ValueError) as exc:
-        raise ValueError('valid must be a (start, end) lag interval') from exc
+        raise ValueError('valid must be a (start, end) integer lag interval') from exc
     if lo < 0 or lo >= hi or hi > n:
         raise ValueError('valid must satisfy 0 <= start < end <= n')
     return lo, hi

@@ -148,6 +148,12 @@ The default sweep covers all 15 CPU sizes, with GPU timings where supported.
 Batch sizes shrink at large lengths to bound memory use. `--n` selects a subset.
 Missing hierarchical calibration is reported explicitly.
 
+To measure warm overlap-save calls, including automatic peak output at
+2,048–8,192 points and continuous full output at 32,768 points, run
+`python tools/bench_series_workloads.py`. It checks the output before timing
+and compares automatic layout with explicit blocks. Use `--quick` for a
+shorter continuous series; CI records that version on each benchmark host.
+
 Install `mkl-fft` and `mkl` for an optional MKL reference where supported.
 NumPy provides the correctness reference. Without FFTW or MKL, library timings
 and correctness checks still run. Reference timing covers the inverse FFT;
