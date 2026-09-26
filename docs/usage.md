@@ -86,11 +86,12 @@ lags into this result during correlation, without assembling a block-output
 cube. The GPU result uses host-cached shared storage for direct GPU writes and
 practical NumPy access.
 
-`run_series(series, starts, templates=None, out=None)` remains available for
-explicit block layouts. It gathers and zero-pads the named blocks and returns
+Use `run_blocks(series, starts, templates=None, out=None)` for explicit block
+layouts. It gathers and zero-pads the named blocks and returns
 all lags as `(blocks, selected_templates, n)`. For that form, a writable,
 C-contiguous `complex64` `out` can reuse caller storage. Both forms consume
 the data slots, so a later `run()` needs another `set_data()` call.
+The older `run_series(series, starts, ...)` spelling remains supported.
 
 Full results can be large. A single 2^22 correlation is 32 MiB; a 128×512
 bank at that length is 2 TiB. Without `out`, the class raises before allocating
@@ -122,10 +123,12 @@ Peak-only output has no continuous sample series to assemble.
 Automatic peak indices are absolute positions in the supplied series;
 explicit-block calls retain their block-local lag indices.
 
-The existing `run_series(series, starts, win_start, win_end, ...)` form remains
-for irregular block layouts and per-block windows. `starts` gives each block's
+Use `run_blocks(series, starts, win_start, win_end, ...)` for irregular block
+layouts and per-block windows. `starts` gives each block's
 input position; `win_start` and `win_end` give its lag window. Both forms gather
 and pad blocks, compute forward FFTs, and filter on the selected device.
+The older `run_series(series, starts, win_start, win_end, ...)` spelling remains
+supported with the same block-local indices.
 
 Templates must be set first. A later `run()` requires another `set_data()`
 call because series execution reuses the data slots. GPU execution is
@@ -197,6 +200,14 @@ is independent of hierarchical calibration coverage.
 storage for GPU filters. Suitable contiguous `complex64` banks can bind without
 an extra input copy. Call the setter again after changing a shared bank so
 cached coarse templates are refreshed.
+
+For a full-correlation result that NumPy will read or scale, allocate
+`out = filter.empty_shared((ndata, ntemplates, n), readback=True)` and pass it
+to `CorrelationFilter.run(out=out)`. On Vulkan, the default shared allocation
+favors GPU writes and can be slow for CPU reads. `readback=True` favors cached
+CPU access; ordinary NumPy `out` is another choice when a separate copy is
+acceptable. Metal uses shared storage for both settings. Automatic continuous
+`run_series(series)` already owns a readback-friendly result.
 
 Host DLPack arrays are supported. Arbitrary CUDA or ROCm device allocations
 are not imported through this interface. Finish producer writes before

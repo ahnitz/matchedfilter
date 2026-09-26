@@ -38,8 +38,10 @@ tests had primarily compared it with the explicit-block implementation.
    (`valid` configured on the filter) and legacy explicit blocks. Both are
    useful, but the index coordinate convention differs: automatic peak calls
    return absolute series positions, explicit calls return block-local lags.
-   This is documented and tested. A future breaking release could give the
-   explicit form its own name and keep one index convention per method.
+   This is documented and tested. The explicit form now also has the
+   `run_blocks` name, so each preferred method has one index convention.
+   A future breaking release could remove explicit arguments from
+   `run_series` after callers migrate.
 3. **Research tooling.** `tools/` contains calibration generators, scoring
    scripts, benchmark drivers and historical experiments. Most are referenced
    by design notes but not by CI. Reference counts alone do not establish
@@ -56,3 +58,6 @@ The benchmark suite now measures the common spectrum and overlap-save entry
 points. It does not enforce a universal speed ratio: batch shape, cache state,
 GPU transfer mode, and calibration-dependent refine rate make one ratio
 misleading. Review the saved per-workload results when tuning those paths.
+The [path profile](../measurements/library-profile-2026-09-26.md) records the
+first cross-path measurements and identifies output memory and irregular GPU
+window dispatches as workload-sensitive costs.

@@ -580,22 +580,18 @@ class MatchedFilter:
 
     def run_series(self, series, starts=None, win_start=None, win_end=None,
                    binsize=None, threshold=0.0, templates=None, raw=False):
-        """Filter a time series over a caller-supplied block layout.
+        """Filter a series using this filter's ``valid`` overlap-save window.
 
-        The caller keeps the overlap-save arithmetic -- where each block starts
-        and which span of its output is valid.  matchedfilter only executes
-        that plan, which removes the per-block round trip: no separately
-        planned forward FFT, no spectrum passed back and forth, and one call
-        per segment rather than one per block.
+        ``run_series(series)`` derives contiguous blocks and returns peak
+        indices in series coordinates. ``run_blocks`` accepts explicit block
+        starts and windows, returning block-local lag indices. Passing those
+        arguments here remains supported for existing callers.
 
-        Windows are per block, so the ragged ones at a segment's edges need no
-        grouping.  Returns a structured array of shape
+        Returns a structured array of shape
         ``(nblocks, ntemplates, nbins)``, or with ``raw=True`` the two plain
         arrays ``(index, value)`` of that shape.
 
         Equal-window blocks are grouped internally; output retains caller order.
-        With automatic layout (no ``starts``), indices are absolute positions
-        in ``series``. Explicit-block calls retain block-local lag indices.
         Flat CPU batches use up to ``ndata`` slots. Hierarchical CPU batches
         use a bounded internal group (normally eight). GPU batches follow the
         series memory budget independently of ``ndata``.
@@ -680,6 +676,17 @@ class MatchedFilter:
         return _format_result(idx.reshape(nblk, nt, nb), val.reshape(nblk, nt, nb),
                               raw=raw, order=layout.order)
 
+    def run_blocks(self, series, starts, win_start, win_end,
+                   binsize=None, threshold=0.0, templates=None, raw=False):
+        """Filter explicit blocks; peak indices are block-local lag positions.
+
+        ``starts``, ``win_start`` and ``win_end`` contain one entry per block.
+        This form supports irregular overlap-save layouts and per-block windows.
+        """
+        return self.run_series(series, starts, win_start, win_end,
+                               binsize=binsize, threshold=threshold,
+                               templates=templates, raw=raw)
+
     def _series_window(self, spec, H, binsize, threshold, w0, w1):
         # Each group has fresh spectra, even when it reuses an allocation.
         self._ddirty = True
@@ -731,11 +738,14 @@ class MatchedFilter:
                 idx[begin:end], val[begin:end] = gi, gv
         return _format_result(idx, val, raw=raw, order=layout.order)
 
-    def empty_shared(self, shape, dtype=np.complex64):
+    def empty_shared(self, shape, dtype=np.complex64, *, readback=False):
         """Allocate a NumPy array backed by this filter's GPU shared memory.
 
         CPU filters return ordinary NumPy storage. On GPU, contiguous full
         banks passed to the setters bind directly without an input copy.
+        Set ``readback=True`` for an output that NumPy will read or modify
+        after GPU execution. Vulkan then prefers host-cached memory instead
+        of the faster GPU-write, uncached CPU-read memory used by default.
         Keep mutations outside run/run_series calls; call the setter again
         after editing a bank to invalidate hierarchical coarse caches.
         NumPy views and CPU DLPack consumers retain the allocation's lifetime.
@@ -743,7 +753,7 @@ class MatchedFilter:
         """
         if self._gpu is None:
             return np.empty(shape, dtype=dtype)
-        return self._gpu.empty_shared(shape, dtype)
+        return self._gpu.empty_shared(shape, dtype, readback=readback)
 
     def set_memory_limits(self, *, cache_bytes=None, series_bytes=None):
         """Set GPU dispatch-cache and series-temporary budgets in bytes.
@@ -924,6 +934,14 @@ class CorrelationFilter(MatchedFilter):
                 self._gpu.cancel_forward()
             self._tdirty = False
         return result
+
+    def run_blocks(self, series, starts, templates=None, out=None):
+        """Return every lag for explicit blocks as ``(blocks, templates, n)``.
+
+        Unlike ``run_series(series)``, this form has block-major output and
+        accepts a caller-owned ``out`` buffer for reuse.
+        """
+        return self.run_series(series, starts, templates=templates, out=out)
 
 
 

@@ -148,6 +148,39 @@ def test_automatic_layout_accepts_host_dlpack_without_len():
         np.testing.assert_array_equal(result, expected)
 
 
+@pytest.mark.parametrize('klass', [MatchedFilter, HierarchicalFilter])
+def test_run_blocks_names_the_block_local_peak_contract(klass):
+    n, lo, hi = 1024, 71, 800
+    kwargs = {'band': 128} if klass is HierarchicalFilter else {}
+    f = klass(n, ntemplates=2, valid=(lo, hi), **kwargs)
+    if klass is HierarchicalFilter:
+        f.set_coarse_threshold(0)
+    f.set_templates(_spectra((2, n), 52))
+    series = _spectra((1600,), 53)
+    starts = np.array([0, hi - lo], dtype=np.uintp)
+    low = np.full(2, lo)
+    high = np.full(2, hi)
+    legacy = f.run_series(series, starts, low, high, binsize=n).copy()
+    blocks = f.run_blocks(series, starts, low, high, binsize=n)
+    np.testing.assert_array_equal(blocks, legacy)
+    automatic = f.run_series(series)
+    np.testing.assert_array_equal(automatic['index'][:2],
+                                  blocks['index'] + starts[:, None, None])
+
+
+def test_run_blocks_names_the_block_major_full_output_contract():
+    n = 1024
+    f = CorrelationFilter(n, ntemplates=2, valid=(71, 800))
+    f.set_templates(_spectra((2, n), 54))
+    series = _spectra((1600,), 55)
+    starts = np.array([0, 729], dtype=np.uintp)
+    out = np.empty((2, 2, n), np.complex64)
+    assert f.run_blocks(series, starts, out=out) is out
+    expected = f.run_series(series, starts).copy()
+    np.testing.assert_array_equal(out, expected)
+    assert f.run_series(series).shape == (2, 1600)
+
+
 def test_continuous_forced_pair_batch_and_fir_bank(monkeypatch):
     monkeypatch.setenv('MF_PBMAX', '1024')
     n, length, valid = 1024, 2813, (61, 819)

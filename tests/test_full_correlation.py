@@ -175,6 +175,9 @@ def test_gpu_shared_output_and_changed_banks():
     _agrees(f.run(out=out), _reference(data, tmpl))
     f.clear_cache()
     _agrees(f.run(out=out), _reference(data, tmpl))
+    readback = f.empty_shared((2, 3, n), readback=True)
+    assert f.run(out=readback) is readback
+    _agrees(readback, _reference(data, tmpl))
 
 
 def test_gpu_memmap_output(tmp_path):
