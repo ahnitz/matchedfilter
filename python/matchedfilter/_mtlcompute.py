@@ -325,13 +325,15 @@ class Context(InputUploads):
         if entry == "seriesForward":
             return "forward_%d" % n
         tierc = {"tcStage1": "corr1", "tcFullStage3": "corr2",
+                 "tcFullSeriesStage3": "corr_series2",
                  "tcForwardStage1": "fwd1", "tcForwardStage3": "fwd2"}
         if entry in tierc:
             return "tc_%s_%d" % (tierc[entry], n)
         base = "%s_%d" % ({"fusedTierB": "tierb",
                            "compactPairs": "compact",
                            "refineListed": "refine",
-                           "fullCorrelation": "full"}[entry], n)
+                           "fullCorrelation": "full",
+                           "fullCorrelationSeries": "full_series"}[entry], n)
         info = _manifest().get("modules", {}).get(str(n), {})
         # The Metal column. Metal is built against its own staging cap
         # -- Apple and the Radeon want opposite answers -- so reading
@@ -415,6 +417,7 @@ class Context(InputUploads):
             if not fn:
                 raise MetalError("no function %r in %s" % (entry, stem))
             roles = {"tcStage1": "corr1", "tcFullStage3": "corr2",
+                     "tcFullSeriesStage3": "corr_series2",
                      "tcForwardStage1": "fwd1", "tcForwardStage3": "fwd2"}
             want = (_manifest()['full_tierc'][str(n)][roles[entry]]['local_size'][0]
                     if entry in roles else n // _radix(n))
@@ -464,7 +467,7 @@ class Context(InputUploads):
         t1 = self.o.call(cmd, b"GPUEndTime", restype=ctypes.c_double)
         self.last_gpu_time = float(t1) - float(t0)
 
-    def empty_shared(self, shape, dtype=np.complex64):
+    def empty_shared(self, shape, dtype=np.complex64, *, readback=False):
         return empty_shared(self, _Buffer, shape, dtype)
 
     @_autoreleased
@@ -502,6 +505,7 @@ class Context(InputUploads):
 
     def _encode_tierc(self, cmd, n, role, buffers, groups, uniform=None):
         entries = {'corr1': 'tcStage1', 'corr2': 'tcFullStage3',
+                   'corr_series2': 'tcFullSeriesStage3',
                    'fwd1': 'tcForwardStage1', 'fwd2': 'tcForwardStage3'}
         enc = self.o.call(cmd, b'computeCommandEncoder')
         self.o.call(enc, b'setComputePipelineState:', restype=None,
@@ -509,9 +513,10 @@ class Context(InputUploads):
                     argtypes=(ctypes.c_void_p,))
         slot = 0
         if uniform is not None:
-            value = ctypes.c_uint32(uniform)
+            value = ((ctypes.c_uint32 * len(uniform))(*uniform)
+                     if isinstance(uniform, tuple) else ctypes.c_uint32(uniform))
             self.o.call(enc, b'setBytes:length:atIndex:', restype=None,
-                        args=(ctypes.byref(value), 4, 0),
+                        args=(ctypes.byref(value), ctypes.sizeof(value), 0),
                         argtypes=(ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong))
             slot = 1
         for buf in buffers:
@@ -756,6 +761,76 @@ class Context(InputUploads):
         self._check_completed(cmd)
         if shared_buffer(out, self) is None:
             out[:] = bo.read(np.float32, out.size*2).view(np.complex64).reshape(out.shape)
+
+    @_autoreleased
+    def correlate_continuous(self, n, data, tmpl, starts, out, lo, hi,
+                             *, upload_data=True, upload_tmpl=True):
+        """Write valid lags directly to a filter-owned continuous GPU buffer."""
+        nd, nt = data.shape[0], tmpl.shape[0]
+        length = out.shape[1]
+        bs, bo = shared_buffer(starts, self), shared_buffer(out, self)
+        if bs is None or bo is None or starts.shape != (nd,) or out.shape[0] != nt:
+            raise ValueError('continuous output and starts must be shared GPU buffers')
+        geometry = _manifest().get('full_tierc', {}).get(str(n)) if n > 65536 else None
+        if n > 65536 and geometry is None:
+            raise UnsupportedSize('no two-stage continuous kernel for n=%d' % n)
+        key = ('series', n, nd, nt, length, lo, hi,
+               shared_key(data, self), shared_key(tmpl, self),
+               shared_key(starts, self), shared_key(out, self))
+        uploads = self._input_uploads(key, data, tmpl, upload_data, upload_tmpl)
+        cache = self._tierc_batches if geometry else self._full_batches
+        batch = cache.get(key)
+        if batch is None:
+            external = [b for a in (data, tmpl, starts, out)
+                        if (b := shared_buffer(a, self)) is not None]
+            estimate = (nd*nt*n*8 if geometry else 0) + sum(
+                a.nbytes for a in (data, tmpl) if shared_buffer(a, self) is None)
+            self._cache_room(estimate, incoming=external)
+            bd = shared_buffer(data, self) or _Buffer(self, data.nbytes)
+            bt = shared_buffer(tmpl, self) or _Buffer(self, tmpl.nbytes)
+            if geometry:
+                scratch = _Buffer(self, nd*nt*n*8)
+                batch = (bd, bt, scratch, bs, bo)
+            else:
+                batch = (bd, bt, bs, bo)
+            cache[key] = batch
+            uploads = (True, True, *uploads[2:])
+        self._cache_touch('tierc' if geometry else 'full', key)
+        bd, bt = batch[:2]
+        if uploads[0]:
+            write_input(bd, data)
+            self._uploaded['data'][key] = uploads[2]
+        if uploads[1]:
+            write_input(bt, tmpl)
+            self._uploaded['tmpl'][key] = uploads[3]
+        cmd = self._command_buffer()
+        params = (nt, length, lo, hi)
+        if geometry:
+            self._encode_tierc(cmd, n, 'corr1', (bd, bt, batch[2]),
+                               nd*nt*geometry['n1'], nt)
+            self._encode_tierc(cmd, n, 'corr_series2', batch[2:],
+                               nd*nt*geometry['n2'], params)
+        else:
+            enc = self.o.call(cmd, b'computeCommandEncoder')
+            self.o.call(enc, b'setComputePipelineState:', restype=None,
+                        args=(self.pipeline(n, 'fullCorrelationSeries'),),
+                        argtypes=(ctypes.c_void_p,))
+            value = (ctypes.c_uint32 * 4)(*params)
+            self.o.call(enc, b'setBytes:length:atIndex:', restype=None,
+                        args=(ctypes.byref(value), ctypes.sizeof(value), 0),
+                        argtypes=(ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong))
+            for slot, buf in enumerate(batch, start=1):
+                self.o.call(enc, b'setBuffer:offset:atIndex:', restype=None,
+                            args=(buf.handle, 0, slot),
+                            argtypes=(ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong))
+            self.o.call(enc, b'dispatchThreadgroups:threadsPerThreadgroup:',
+                        restype=None,
+                        args=(_MTLSize(nd*nt, 1, 1), _MTLSize(n//_radix(n), 1, 1)),
+                        argtypes=(_MTLSize, _MTLSize))
+            self.o.call(enc, b'endEncoding', restype=None)
+        self.o.call(cmd, b'commit', restype=None)
+        self.o.call(cmd, b'waitUntilCompleted', restype=None)
+        self._check_completed(cmd)
 
     def correlate(self, n, data, tmpl, out, *, upload_data=True, upload_tmpl=True):
         nd, nt = data.shape[0], tmpl.shape[0]

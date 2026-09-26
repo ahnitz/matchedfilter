@@ -13,6 +13,14 @@ Hierarchical filtering extracts/converts the coarse band on the GPU too.
 Vulkan reuses forward command recordings and submits forward plus correlation
 with one completion wait. Metal encodes both into one command buffer.
 The source segment is uploaded once per call unless it is already shared.
+For `CorrelationFilter(valid=(lo, hi))`, automatic `run_series(series)` owns a
+reused continuous output allocation. The fused full-correlation kernel writes
+valid lags directly at their final series offsets; Tier C uses its existing
+first stage and a continuous-output second stage. The output is host-cached
+shared memory on Vulkan, so a CPU consumer can read or scale it without the
+very slow uncached reads of a write-combined GPU buffer. Metal uses shared
+storage. Explicit-start `run_series(series, starts, ...)` retains its existing
+block-major output and batching path.
 The series batch budget covers spectra, start offsets and result scratch;
 it excludes the source upload and the final returned result. `clear_cache()`
 releases the reusable series workspace along with dispatch buffers. Window

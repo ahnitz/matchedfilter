@@ -78,16 +78,36 @@ def test_full_output_artifacts_cover_the_public_sizes(manifest):
         if n <= 65536:
             info = manifest['modules'][str(n)]
             assert (SPIRV_DIR / info['full']['file']).is_file()
+            assert (SPIRV_DIR / info['full_series']['file']).is_file()
             files = info['metal']['fullCorrelation']
             assert (metal_dir / files['msl']).is_file()
+            series_files = info['metal']['fullCorrelationSeries']
+            assert (metal_dir / series_files['msl']).is_file()
             if info['metal_lds_bytes'] > 32768:
                 assert (metal_dir / files['portable']['msl']).is_file()
+                assert (metal_dir / series_files['portable']['msl']).is_file()
         else:
             info = manifest['full_tierc'][str(n)]
             assert info['n1'] * info['n2'] == n
-            for role in ('corr1', 'corr2', 'fwd1', 'fwd2'):
+            for role in ('corr1', 'corr2', 'corr_series2', 'fwd1', 'fwd2'):
                 assert (SPIRV_DIR / info[role]['file']).is_file()
                 assert (metal_dir / info[role]['metal']).is_file()
+
+
+def test_continuous_output_gpu_binding_contract(manifest):
+    import sys
+    tools = _tools_dir()
+    if tools is None:
+        pytest.skip('tools/ is not beside the tests')
+    sys.path.insert(0, str(tools))
+    from build_spirv import reflect
+    for filename, bindings in (
+        (manifest['modules']['4096']['full_series']['file'], 4),
+        (manifest['full_tierc']['131072']['corr_series2']['file'], 3),
+    ):
+        info = reflect((SPIRV_DIR / filename).read_bytes())
+        assert [d['binding'] for d in info['descriptors']] == list(range(bindings))
+        assert info['push_constant'] is True
 
 
 @pytest.mark.parametrize("n", [1024, 2048, 4096, 8192, 16384])

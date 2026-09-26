@@ -852,8 +852,9 @@ class Context(InputUploads):
         _check(vk.vkEndCommandBuffer(cmd), "vkEndCommandBuffer")
         return b, cmd
 
-    def empty_shared(self, shape, dtype=np.complex64):
-        return empty_shared(self, _Buffer, shape, dtype)
+    def empty_shared(self, shape, dtype=np.complex64, *, readback=False):
+        factory = (lambda ctx, size: _Buffer(ctx, size, readback=True)) if readback else _Buffer
+        return empty_shared(self, factory, shape, dtype)
 
     def forward(self, n, series, starts, spectra, *, defer=False):
         """Gather and normalize forward FFTs directly into shared spectra."""
@@ -1243,6 +1244,94 @@ class Context(InputUploads):
         self._submit(cmd)
         if shared_buffer(out, self) is None:
             out[:] = bo.read(np.float32, out.size*2).view(np.complex64).reshape(out.shape)
+
+    def correlate_continuous(self, n, data, tmpl, starts, out, lo, hi,
+                             *, upload_data=True, upload_tmpl=True):
+        """Write valid lags into template-major shared output on the GPU."""
+        nd, nt = data.shape[0], tmpl.shape[0]
+        length = out.shape[1]
+        bs, bo = shared_buffer(starts, self), shared_buffer(out, self)
+        if bs is None or bo is None or starts.shape != (nd,) or out.shape[0] != nt:
+            raise ValueError('continuous output and starts must be shared GPU buffers')
+        geometry = _manifest().get('full_tierc', {}).get(str(n)) if n > 65536 else None
+        if n > 65536 and geometry is None:
+            raise UnsupportedSize('no two-stage continuous kernel for n=%d' % n)
+        key = ('series', n, nd, nt, length, lo, hi,
+               shared_key(data, self), shared_key(tmpl, self),
+               shared_key(starts, self), shared_key(out, self))
+        uploads = self._input_uploads(key, data, tmpl, upload_data, upload_tmpl)
+        cache = self._tierc_batches if geometry else self._full_batches
+        batch = cache.get(key)
+        if batch is None:
+            external = [b for a in (data, tmpl, starts, out)
+                        if (b := shared_buffer(a, self)) is not None]
+            estimate = (nd*nt*n*8 if geometry else 0) + sum(
+                a.nbytes for a in (data, tmpl) if shared_buffer(a, self) is None)
+            self._cache_room(estimate, incoming=external)
+            pool_start = len(getattr(self, '_pools', []))
+            bd = shared_buffer(data, self) or _Buffer(self, data.nbytes)
+            bt = shared_buffer(tmpl, self) or _Buffer(self, tmpl.nbytes)
+            if geometry:
+                p1, l1, sl1 = self._build_pipeline(('tc-corr1', n),
+                                                   geometry['corr1']['file'], 3, 4)
+                p2, l2, sl2 = self._build_pipeline(('tc-corr-series2', n),
+                                                   geometry['corr_series2']['file'], 3, 16)
+                scratch = _Buffer(self, nd*nt*n*8)
+                ds1 = self._descriptor_set(sl1, (bd, bt, scratch))
+                ds2 = self._descriptor_set(sl2, (scratch, bs, bo))
+            else:
+                info = _manifest()['modules'][str(n)]
+                entry = info['full_series']
+                filename = ((entry.get('portable') or {}).get('file')
+                            if info.get('lds_bytes', 0) > self.max_shared_memory
+                            else entry['file'])
+                if filename is None:
+                    raise UnsupportedSize('no portable continuous kernel for n=%d' % n)
+                pipe, layout, sl = self._build_pipeline(('full-series', filename),
+                                                         filename, 4, 16)
+                ds = self._descriptor_set(sl, (bd, bt, bs, bo))
+            cmd = _vp()
+            ci = _CmdBufAlloc(40, None, self.command_pool, 0, 1)
+            _check(self.vk.vkAllocateCommandBuffers(self.device, ctypes.byref(ci),
+                                                    ctypes.byref(cmd)), 'continuous allocate')
+            _check(self.vk.vkBeginCommandBuffer(cmd, ctypes.byref(
+                _CmdBufBegin(42, None, 0, None))), 'continuous begin')
+            params = (_u32 * 4)(nt, length, lo, hi)
+            if geometry:
+                self.vk.vkCmdBindPipeline(cmd, _BIND_POINT_COMPUTE, p1)
+                sets = (_vp * 1)(ds1)
+                self.vk.vkCmdBindDescriptorSets(cmd, _BIND_POINT_COMPUTE, l1,
+                                                0, 1, sets, 0, None)
+                count = _u32(nt)
+                self.vk.vkCmdPushConstants(cmd, l1, _STAGE_COMPUTE, 0, 4,
+                                            ctypes.byref(count))
+                self.vk.vkCmdDispatch(cmd, nd*nt*geometry['n1'], 1, 1)
+                barrier = _MemBarrier(46, None, _ACCESS_SHADER_WRITE, _ACCESS_SHADER_READ)
+                self.vk.vkCmdPipelineBarrier(cmd, _STAGE_COMPUTE_BIT, _STAGE_COMPUTE_BIT,
+                                             0, 1, ctypes.byref(barrier), 0, None, 0, None)
+                pipe, layout, ds = p2, l2, ds2
+            self.vk.vkCmdBindPipeline(cmd, _BIND_POINT_COMPUTE, pipe)
+            sets = (_vp * 1)(ds)
+            self.vk.vkCmdBindDescriptorSets(cmd, _BIND_POINT_COMPUTE, layout,
+                                            0, 1, sets, 0, None)
+            self.vk.vkCmdPushConstants(cmd, layout, _STAGE_COMPUTE, 0, 16,
+                                        ctypes.byref(params))
+            self.vk.vkCmdDispatch(cmd, nd*nt*(geometry['n2'] if geometry else 1), 1, 1)
+            _check(self.vk.vkEndCommandBuffer(cmd), 'continuous end')
+            batch = ((bd, bt, scratch, bs, bo, cmd) if geometry
+                     else (bd, bt, bs, bo, cmd))
+            cache[key] = batch
+            self._register_record('tierc' if geometry else 'full', key, None, pool_start)
+            uploads = (True, True, *uploads[2:])
+        self._cache_touch('tierc' if geometry else 'full', key)
+        bd, bt = batch[:2]
+        if uploads[0]:
+            write_input(bd, data)
+            self._uploaded['data'][key] = uploads[2]
+        if uploads[1]:
+            write_input(bt, tmpl)
+            self._uploaded['tmpl'][key] = uploads[3]
+        self._submit(batch[-1])
 
     def correlate(self, n, data, tmpl, out, *, upload_data=True, upload_tmpl=True):
         """Write full correlations to caller storage with bounded GPU batches."""
