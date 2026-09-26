@@ -105,15 +105,16 @@ COST n band U K snr f beff relative_cost
 ```
 
 Old ten-field cost files are rejected with a regeneration instruction.
-The GPU retune documented below uses an explicit
-`# format cost-fd-pairs-v1` header and places `fd` and `pairs` between
-`snr` and `f`; this distinguishes its eleven-field rows from the obsolete
-scale rows. CPU files keep nine fields.
+Current CPU and GPU retunes use an explicit
+`# format cost-fd-pairs-v1` header and place `fd` and `pairs` between
+`snr` and `f`; this distinguishes eleven-field rows from the obsolete
+scale rows. Older custom cost files can keep nine fields.
 Cost SNR coverage is resolved per configuration, so a sparsely measured SNR
 cannot hide competing bands. Costs only rank bands; they never change a gate.
-At this migration the cost table was an approximate ranking without a budget
-or batch-shape axis. Retuning for a workload remains useful; this migration does not
-claim globally optimal band selection.
+At the gate-model migration the cost table was an approximate ranking without
+a budget or batch-shape axis. Both shipped retunes now measure those axes.
+Retuning for a workload remains useful; neither table claims globally optimal
+band selection.
 
 Interleaved 8×32 timing on the same native build selected the same bands in
 five checked cases. The comparison separates a changed gate from changed

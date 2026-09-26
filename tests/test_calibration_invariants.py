@@ -85,9 +85,10 @@ def test_threshold_lookup_is_independent_of_cost_and_reference_amplitude():
 
 def test_shipped_cost_rows_are_finite_and_cannot_set_accuracy():
     tuning = mf._load_tuning()
-    assert tuning['cost']
+    assert tuning['cost_fd_pairs']
     assert not ({'thr', 'acc2', 'acc2r', 'fdr'} & tuning.keys())
-    for key, rows in tuning['cost'].items():
-        assert len(key) == 5
+    for key, rows in tuning['cost_fd_pairs'].items():
+        assert len(key) == 7
+        assert 0 < key[5] < 1 and key[6] > 0
         assert np.isfinite(rows).all()
         assert all(cost > 0 for _, _, cost in rows)

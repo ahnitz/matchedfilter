@@ -42,6 +42,21 @@ def test_retune_rejects_empty_source_without_overwriting(tmp_path):
     assert out.read_text()=='existing'
 
 
+def test_legacy_retune_accepts_current_cost_file_as_anchor_source(tmp_path, monkeypatch):
+    tuner = load_tuner()
+    source = tmp_path/'source.txt'
+    source.write_text('# format cost-fd-pairs-v1\n'
+                      'COST 4096 256 2 8 6 .0001 512 .99 16 1\n')
+    seen = []
+    def sweep(n, power, snr, configs):
+        seen.append((n, snr, tuner._feat(power, 256)))
+        return {configs[0]: 1.}, 0.
+    monkeypatch.setattr(tuner, 'cost_sweep_one_reference', sweep)
+    tuner.retune_cost(source, tmp_path/'out.txt', verbose=False)
+    assert seen and seen[0][0:2] == (4096, 6.)
+    assert seen[0][2][0] == pytest.approx(.99, abs=.01)
+
+
 def test_hier_bench_cli_uses_current_raw_results(tmp_path):
     import subprocess
     import sys

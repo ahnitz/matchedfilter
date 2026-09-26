@@ -73,6 +73,9 @@ Cost is approximately coarse work plus the fraction of pairs refined times
 full-filter work. `refine_rate` reports this fraction over the plan's lifetime.
 Cost files rank alternatives but are not runtime predictions: hardware,
 batch shape, input population, window and budget affect the best choice.
-Remeasure with `tools/hmf_tune.py --retune-cost --out mycost.txt` or use
-`tools/audit_selection.py` to inspect the actual workload. Retuning uses
-serial, interleaved measurements and the current model at fd=.001.
+Remeasure the CPU table with `tools/regen/cost_cpu.py --out mycost.txt` or
+use `tools/audit_selection.py` to inspect the actual workload. The CPU sweep
+uses serial, rotated measurements at fd=.01, .001 and .0001, with the model
+gate recomputed for each configuration and budget. The older
+`tools/hmf_tune.py --retune-cost` command still produces a nine-field table
+measured only at fd=.001.
