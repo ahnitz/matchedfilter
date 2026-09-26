@@ -2,11 +2,11 @@
 > [the current gate model](gate-model.md) for the execution contract. Table
 > and margin discussions below record historical measurements.
 
-# GPU work: state and next steps
+# Historical GPU implementation findings
 
-Written at the end of a long optimisation session. `main` is clean and
-green: **425 passed, 3 skipped, 1 xfailed**. Everything below is measured
-unless it says otherwise.
+This is an earlier investigation, retained for its kernel layout measurements.
+Bug status, proposed fixes, and test counts below describe that snapshot, not
+the current release. See [CPU/GPU parity](cpu-gpu-parity.md) for current behavior.
 
 ## 1. BLOCKING BUG: tile baked into the kernel vs the host's dispatch
 

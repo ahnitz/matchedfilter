@@ -2,24 +2,14 @@
 > [the current gate model](gate-model.md) for the execution contract. Table
 > and margin discussions below record historical measurements.
 
-# CPU work: state and next steps
+# Historical CPU optimization results
 
-Written as a handoff. Everything here is measured or read from the code;
-where something is a design rather than a result it says so.
+These measurements describe an earlier implementation. For the current API
+and calibration contract, see [usage](usage.md) and [the gate model](gate-model.md).
+The recorded timings explain the layout and dispatch decisions; they are not
+current performance claims.
 
-## State
-
-`main` is green: 427 passed, 3 skipped, 0 failed, GPU included. The GPU
-failures recorded here earlier were the other agent's uncommitted `.spv`
-files mid-rebuild and have since landed. A transient `test_spirv.py`
-failure during a run means that rebuild is in flight again -- do not "fix"
-it and do not `git checkout` those paths.
-
-**Coordination hazard.** Two agents share this working tree. `git add -A`
-cross-contaminates commits -- one of my changes already landed under an
-unrelated commit message that way. Commit explicit paths.
-
-## Shipped this session (CPU)
+## Coarse transform and layout changes
 
 Cumulative, interleaved old/new so drift cancels:
 

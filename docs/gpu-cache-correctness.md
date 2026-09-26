@@ -1,8 +1,8 @@
 # Vulkan cached inputs: stale data across windows
 
-Follow-up to `notes-for-mf-reporter.md`, September 26, 2026.
+Resolved cache invalidation defect, September 26, 2026.
 
-The synthetic single-input comparisons missed a host-side cache lifetime
+Initial synthetic single-input comparisons missed a host-side cache lifetime
 bug. Each Vulkan dispatch key (window, threshold, shape, etc.) owns private
 data and template buffers. The public filter clears its dirty flags after
 one dispatch. Updating inputs through window A therefore left an already
@@ -34,17 +34,8 @@ Validation:
   passed all 87 tests on the 8060S.
 - The full suite, including the public API regression, passed: **438 passed,
   3 skipped**, in 42.82 seconds on the same host.
-- Replayed `/tmp/mfcap2/hier-00.npz` through `hier-11.npz` using flat CPU and
-  GPU `run_series`, reusing plans across captures: all 842 detected peaks
-  agreed in index, and values agreed at rtol=atol=1e-5. These are saved
-  37-template captures, not the report's full 483-template search. The
-  diagnostic script is `/tmp/mf_replay_cache.py`.
+- Replayed twelve saved 37-template captures through flat CPU and GPU
+  `run_series`, reusing plans across captures: all 842 detected peaks agreed
+  in index, and values agreed at rtol=atol=1e-5.
 
-The complete original PyCBC search and its hierarchical false-dismissal
-budget still need separate validation. No changes were made to the concurrent
-CPU tuning edits or PyCBC integration file.
-
-Environment: the sandbox hides `/dev/dri`. Outside it, Conda's libstdc++
-initially prevented Mesa from loading. Tests ran with host device access and
-`LD_PRELOAD=/usr/lib64/libstdc++.so.6`, using
-`/home/ahnitz/miniconda3/bin/python -m pytest`.
+The full downstream search requires separate integration validation.
