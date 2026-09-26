@@ -9,6 +9,7 @@ The JSON file is written after each group so an interrupted sweep can resume.
 """
 import argparse
 import json
+import platform
 from pathlib import Path
 import subprocess
 import sys
@@ -26,6 +27,24 @@ from hmf_tune import bands_for  # noqa: E402
 
 def _values(value, typ):
     return [typ(part) for part in value.split(',')]
+
+
+def _cpu_name():
+    try:
+        for line in Path('/proc/cpuinfo').read_text().splitlines():
+            if line.startswith('model name'):
+                return line.split(':', 1)[1].strip()
+    except OSError:
+        pass
+    if sys.platform == 'darwin':
+        for key in ('machdep.cpu.brand_string', 'hw.model'):
+            try:
+                name = subprocess.check_output(['sysctl', '-n', key], text=True).strip()
+            except (OSError, subprocess.CalledProcessError):
+                continue
+            if name:
+                return name
+    return platform.processor() or platform.machine() or 'unknown'
 
 
 def _power(n, profile):
@@ -138,8 +157,7 @@ def main(argv=None):
     teaser_shape = tuple(map(int, args.teaser_shape.split('x')))
     if args.rounds < 3 or any(v < 1 for v in shape + teaser_shape):
         ap.error('need at least three rounds and positive shape dimensions')
-    cpu = next((line.split(':', 1)[1].strip() for line in Path('/proc/cpuinfo').read_text().splitlines()
-                if line.startswith('model name')), 'unknown')
+    cpu = _cpu_name()
     commit = subprocess.check_output(['git', 'rev-parse', '--short', 'HEAD'],
                                      cwd=ROOT, text=True).strip()
     records = []

@@ -4,11 +4,32 @@ import json
 from pathlib import Path
 
 
-def test_targeted_repair_keeps_other_measured_groups(tmp_path):
+def _module():
     path = Path(__file__).resolve().parents[1] / 'tools/regen/cost_cpu.py'
     spec = importlib.util.spec_from_file_location('cost_cpu_under_test', path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    return module
+
+
+def test_cpu_name_without_proc_cpuinfo(monkeypatch):
+    module = _module()
+    original = Path.read_text
+
+    def read_text(path, *args, **kwargs):
+        if str(path) == '/proc/cpuinfo':
+            raise FileNotFoundError('/proc/cpuinfo')
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, 'read_text', read_text)
+    monkeypatch.setattr(module.sys, 'platform', 'darwin')
+    monkeypatch.setattr(module.subprocess, 'check_output',
+                        lambda args, **kwargs: 'Apple M-series\n')
+    assert module._cpu_name() == 'Apple M-series'
+
+
+def test_targeted_repair_keeps_other_measured_groups(tmp_path):
+    module = _module()
     def row(n, blocks):
         return dict(n=n, snr=5., fd=.001, profile='-2', ndata=1,
                     ntemplates=1, band=256, ms=1., blocks_ms=blocks,
