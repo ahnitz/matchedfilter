@@ -58,6 +58,14 @@ when passed through a host DLPack consumer. The ndarray/base/capsule ownership
 chain keeps the allocation and context alive after cache eviction or deletion
 of the filter. CPU filters return ordinary NumPy allocations.
 
+For full-output calls followed by NumPy processing, pass
+`out=f.empty_shared((ndata, ntemplates, n), readback=True)` to
+`CorrelationFilter.run()`. Vulkan then prefers host-cached memory. The default
+shared allocation favors GPU writes but can make CPU reads very slow;
+`readback=True` does not change Metal's shared-storage mode. For peak results,
+which are small, the filter manages readback itself. Automatic continuous
+`CorrelationFilter.run_series(series)` owns a host-cached result already.
+
 Host DLPack-only producers are accepted consistently by indexed and bulk
 setters, series data/layout arrays, and hierarchical reference power.
 NumPy arrays also support the ordinary array and buffer protocols.
