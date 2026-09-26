@@ -20,7 +20,7 @@ For a quick CPU/GPU overlap-save comparison with output validation:
 python tools/bench_series_workloads.py --quick --reps 5 --json series.json
 ```
 
-To measure the effect of batching distinct Vulkan windows, with output equality
+To measure the effect of batching distinct Vulkan or Metal windows, with output equality
 checked before timing:
 
 ```bash

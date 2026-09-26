@@ -26,6 +26,20 @@ version, chip, reported GPU device, and any unsupported pipeline sizes.
 The [tooling map](../tools/README.md) describes the Metal kernel probe and
 benchmark entry points. Exclude compilation and plan setup from warm timings.
 
+Run the opt-in performance checks on an idle physical machine:
+
+```bash
+python -m pytest tests/test_performance.py --run-performance -q \
+  --performance-record=.local/metal-performance.json
+```
+
+For subsequent changes, pass `--performance-baseline=.local/metal-performance.json`
+instead. Keep the hardware and Python/NumPy environment unchanged. The suite
+also compares grouped windows against separate submissions and Metal's
+single-bin specialization against the general kernel within the same run.
+See the [M2 optimization measurements](measurements/metal-2026-09-26.md)
+for workloads, results, and remaining limitations.
+
 Test runtime source compilation on a system without the Metal compiler as
 well as precompiled libraries where available. A machine with Command Line
 Tools but no full Xcode can exercise that fallback.

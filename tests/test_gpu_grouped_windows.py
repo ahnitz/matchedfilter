@@ -14,7 +14,7 @@ def test_grouped_windows_match_cpu_after_updates_and_eviction(n, binsize, shared
         pytest.skip('no usable GPU')
     gpu = mf.MatchedFilter(n, 2, 5, device=device)
     if not hasattr(gpu._gpu, 'peaks_grouped'):
-        pytest.skip('Vulkan grouped submission optimization')
+        pytest.skip('backend has no grouped submission optimization')
     cpu = mf.MatchedFilter(n, 2, 5, device='cpu')
     rng = np.random.default_rng(n)
     series = (rng.normal(size=3*n) + 1j*rng.normal(size=3*n)).astype('complex64')
@@ -50,7 +50,7 @@ def test_irregular_windows_share_one_submission(monkeypatch):
         pytest.skip('no usable GPU')
     f = mf.MatchedFilter(1024, 1, 3, device=device)
     if not hasattr(f._gpu, 'peaks_grouped'):
-        pytest.skip('Vulkan grouped submission optimization')
+        pytest.skip('backend has no grouped submission optimization')
     rng = np.random.default_rng(123)
     f.set_templates((rng.normal(size=(3,1024))+1j*rng.normal(size=(3,1024))).astype('complex64'))
     series = (rng.normal(size=4096)+1j*rng.normal(size=4096)).astype('complex64')
@@ -58,15 +58,23 @@ def test_irregular_windows_share_one_submission(monkeypatch):
     low = np.arange(16, dtype=np.uintp)
     f.run_blocks(series, starts, low, low+512)
     calls = []
-    original = f._gpu._submit
-    def submit(cmd):
-        calls.append(cmd)
-        return original(cmd)
-    monkeypatch.setattr(f._gpu, '_submit', submit)
+    if hasattr(f._gpu, '_submit'):
+        original = f._gpu._submit
+        def submit(cmd):
+            calls.append(cmd)
+            return original(cmd)
+        monkeypatch.setattr(f._gpu, '_submit', submit)
+    else:
+        original = f._gpu.o.call
+        def message(obj, selector, **kwargs):
+            if selector == b'commit':
+                calls.append(obj)
+            return original(obj, selector, **kwargs)
+        monkeypatch.setattr(f._gpu.o, 'call', message)
     grouped = f.run_blocks(series, starts, low, low+512).copy()
     assert len(calls) == 1
     # A template bank larger than the dispatch limit still uses template tiling.
-    monkeypatch.setattr(f._gpu, 'max_dispatch_x', 2)
+    monkeypatch.setattr(f._gpu, 'max_dispatch_x', 2, raising=False)
     tiled = f.run_blocks(series, starts, low, low+512)
     np.testing.assert_array_equal(tiled['index'], grouped['index'])
     np.testing.assert_allclose(tiled['value'], grouped['value'], rtol=3e-5, atol=3e-5)

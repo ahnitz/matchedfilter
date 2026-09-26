@@ -66,6 +66,46 @@ def test_the_coarse_kernel_has_metal():
     assert (METAL_DIR / "coarse_256.metal").is_file()
 
 
+@pytest.mark.parametrize("n", [2048, 4096, 8192])
+def test_single_bin_artifacts(manifest, n):
+    for entry in ("fusedTierB", "refineListed"):
+        info = manifest["modules"][str(n)]["metal"][entry]["one_bin"]
+        assert info["lds_bytes"] <= 32768
+        assert (METAL_DIR / info["msl"]).stat().st_size > 1000
+        if info["metallib"] is not None:
+            assert (METAL_DIR / info["metallib"]).is_file()
+
+
+@pytest.mark.parametrize("n", [2048, 4096, 8192])
+@pytest.mark.parametrize("hierarchical", [False, True])
+def test_single_bin_and_general_pipeline_agree(n, hierarchical, monkeypatch):
+    """Changing bin counts on a reused plan must select the right kernel."""
+    import numpy as np
+    _metal_or_skip()
+    rng = np.random.default_rng(n)
+    bank = (rng.normal(size=(7, n)) + 1j*rng.normal(size=(7, n))).astype('complex64')
+    data = (rng.normal(size=(3, n)) + 1j*rng.normal(size=(3, n))).astype('complex64')
+    bank /= np.linalg.norm(bank, axis=1, keepdims=True)
+    if hierarchical:
+        f = matchedfilter.HierarchicalFilter(n, 3, 7, band=256, device='gpu')
+        f.set_coarse_threshold(0.)  # all pairs refine
+    else:
+        f = matchedfilter.MatchedFilter(n, 3, 7, device='gpu')
+    f.set_templates(bank)
+    f.set_data(data)
+    pipeline = f._gpu.pipeline
+    for threshold in (0., 5.5):
+        for window in ((0, n), (7, n-3), (17, 18)):
+            for binsize in (n, 257, n):
+                monkeypatch.setattr(f._gpu, 'pipeline', pipeline)
+                got = f.run(window=window, binsize=binsize, threshold=threshold).copy()
+                monkeypatch.setattr(f._gpu, 'pipeline',
+                    lambda size, entry='fusedTierB', one_bin=False: pipeline(size, entry))
+                ref = f.run(window=window, binsize=binsize, threshold=threshold)
+                np.testing.assert_array_equal(got['index'], ref['index'])
+                np.testing.assert_allclose(got['value'], ref['value'], rtol=3e-5, atol=3e-5)
+
+
 def test_metallib_presence_is_recorded(manifest):
     """Whether a compiled library shipped is a fact about the BUILD.
 

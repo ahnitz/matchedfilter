@@ -91,7 +91,7 @@ def test_irregular_gpu_submission_gain(audit, timing_gate):
     f = audit.plan(4096, 32, 32, gpu, 'flat', h)
     maximum = getattr(f._gpu, 'max_grouped_bins', 0)
     if not maximum:
-        pytest.skip('grouped submission is Vulkan-specific')
+        pytest.skip('backend has no grouped submission path')
     def call(limit):
         f._gpu.max_grouped_bins = limit
         return f.run_blocks(series, starts, low, high)
@@ -105,6 +105,30 @@ def test_irregular_gpu_submission_gain(audit, timing_gate):
     new = results['grouped']['median_ms']
     assert new <= old * 0.5, results
     timing_gate(f'{gpu}/blocks/irregular/4096/128x32', new)
+
+
+@pytest.mark.parametrize('n', [2048, 4096, 8192])
+def test_metal_single_bin_specialization(n, audit, monkeypatch):
+    import sys
+    if sys.platform != 'darwin' or usable_gpu() is None:
+        pytest.skip('requires a physical Metal GPU')
+    rng = np.random.default_rng(n)
+    bank = (rng.normal(size=(128, n)) + 1j*rng.normal(size=(128, n))).astype('complex64')
+    bank /= np.linalg.norm(bank, axis=1, keepdims=True)
+    data = (rng.normal(size=(16, n)) + 1j*rng.normal(size=(16, n))).astype('complex64')
+    f = audit.plan(n, 16, 128, 'gpu', 'flat', bank)
+    f.set_data(data)
+    pipeline = f._gpu.pipeline
+    def run(specialized):
+        monkeypatch.setattr(f._gpu, 'pipeline',
+            lambda size, entry='fusedTierB', one_bin=False:
+                pipeline(size, entry, one_bin and specialized))
+        return f.run(binsize=n, threshold=5.5)
+    audit.validate(run(False).copy(), run(True))
+    results = audit.times({'general': lambda: run(False),
+                           'specialized': lambda: run(True)}, 9)
+    # Catch a harmful compiler/device change without demanding an exact speedup.
+    assert results['specialized']['median_ms'] <= results['general']['median_ms'] * 1.15, results
 
 
 @pytest.mark.parametrize('n,nd,nt', [(2048,16,128), (4096,16,128),

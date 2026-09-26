@@ -38,6 +38,10 @@ native Metal on Apple silicon.
 
 ### Performance
 
+- Metal shares the single-bin flat/refinement specialization with Vulkan at
+  2048–8192 points. Distinct flat `run_blocks()` windows share a submission,
+  and Objective-C selector/signature wrappers are cached. See the
+  [M2 measurements](docs/measurements/metal-2026-09-26.md).
 - Flat GPU filter: **44-61x** a CPU core, after fixing per-call churn and
   the exchange staging.
 - Metal gets its own threadgroup-staging column: **2.01x at n=4096** on an

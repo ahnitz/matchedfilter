@@ -378,7 +378,12 @@
       "metal": {
         "fusedTierB": {
           "msl": "tierb_2048.metal",
-          "metallib": null
+          "metallib": null,
+          "one_bin": {
+            "msl": "tierb_2048_onebin.metal",
+            "metallib": null,
+            "lds_bytes": 16384
+          }
         },
         "compactPairs": {
           "msl": "compact_2048.metal",
@@ -386,7 +391,12 @@
         },
         "refineListed": {
           "msl": "refine_2048.metal",
-          "metallib": null
+          "metallib": null,
+          "one_bin": {
+            "msl": "refine_2048_onebin.metal",
+            "metallib": null,
+            "lds_bytes": 16384
+          }
         },
         "fullCorrelation": {
           "msl": "full_2048.metal",
@@ -454,7 +464,12 @@
       "metal": {
         "fusedTierB": {
           "msl": "tierb_4096.metal",
-          "metallib": null
+          "metallib": null,
+          "one_bin": {
+            "msl": "tierb_4096_onebin.metal",
+            "metallib": null,
+            "lds_bytes": 32768
+          }
         },
         "compactPairs": {
           "msl": "compact_4096.metal",
@@ -462,7 +477,12 @@
         },
         "refineListed": {
           "msl": "refine_4096.metal",
-          "metallib": null
+          "metallib": null,
+          "one_bin": {
+            "msl": "refine_4096_onebin.metal",
+            "metallib": null,
+            "lds_bytes": 32768
+          }
         },
         "fullCorrelation": {
           "msl": "full_4096.metal",
@@ -545,6 +565,11 @@
             "msl": "tierb_8192_lds32.metal",
             "metallib": null,
             "lds_bytes": 32768
+          },
+          "one_bin": {
+            "msl": "tierb_8192_onebin.metal",
+            "metallib": null,
+            "lds_bytes": 32768
           }
         },
         "compactPairs": {
@@ -561,6 +586,11 @@
           "metallib": null,
           "portable": {
             "msl": "refine_8192_lds32.metal",
+            "metallib": null,
+            "lds_bytes": 32768
+          },
+          "one_bin": {
+            "msl": "refine_8192_onebin.metal",
             "metallib": null,
             "lds_bytes": 32768
           }

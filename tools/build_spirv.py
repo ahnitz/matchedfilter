@@ -16,6 +16,7 @@ import argparse
 import hashlib
 import json
 import pathlib
+import re
 import shutil
 import struct
 import subprocess
@@ -110,6 +111,9 @@ LDS_CAP = {
 #: exactly 32 KB, which is precisely Apple's per-threadgroup limit, so it
 #: needs no portable variant.
 METAL_CAP = {1024: 1024, 2048: 2048, 4096: 4096}
+# Shared SINGLE_BIN specialization, measured on M2 for flat and refinement.
+# Smaller staging increased barriers and lost; 8192 must fit Apple's 32 KiB.
+METAL_SINGLE_BIN_CAP = {2048: 2048, 4096: 4096, 8192: 4096}
 
 
 def metal_cap(n):
@@ -274,7 +278,7 @@ def reflect(blob):
                 push_constant=push_constant)
 
 
-def compile_metal(slangc, n, cap, entry, outdir, suffix="", coarse16=0, ppg=1):
+def compile_metal(slangc, n, cap, entry, outdir, suffix="", coarse16=0, ppg=1, single_bin=0):
     """Emit Metal Shading Language, and a .metallib when one can be built.
 
     The MSL is generated anywhere -- it is Slang's own output and needs no
@@ -289,8 +293,8 @@ def compile_metal(slangc, n, cap, entry, outdir, suffix="", coarse16=0, ppg=1):
     """
     src = outdir / ("mm_%d_%s%s.slang" % (n, entry, suffix))
     src.write_text("#define NLEN %d\n#define LDS_CAP %d\n#define COARSE16 %d\n"
-                   "#define PPG %d\n#define RADIX %d\n"
-                   % (n, cap, coarse16, ppg, RADIX.get(n, 16)) + KERNEL.read_text())
+                   "#define PPG %d\n#define RADIX %d\n#define SINGLE_BIN %d\n"
+                   % (n, cap, coarse16, ppg, RADIX.get(n, 16), single_bin) + KERNEL.read_text())
     stem = "%s_%d%s" % (STEMS[entry], n, suffix)
     msl = outdir / (stem + ".metal")
     proc = subprocess.run(
@@ -301,7 +305,10 @@ def compile_metal(slangc, n, cap, entry, outdir, suffix="", coarse16=0, ppg=1):
     if proc.returncode != 0:
         raise RuntimeError("slangc -target metal failed for n=%d %s:\n%s"
                            % (n, entry, proc.stderr))
-    msl.write_text(msl.read_text().rstrip() + '\n')
+    # Keep generated diagnostics useful without embedding build-machine paths.
+    source = re.sub(r'(?m)^(#line\s+\d+\s+)"[^"\n]*/([^/"\n]+)"',
+                    r'\1"\2"', msl.read_text())
+    msl.write_text(source.rstrip() + '\n')
     return msl, compile_metallib(msl)
 
 
@@ -528,6 +535,14 @@ def main(argv=None):
                     lds_bytes=lds_bytes(n, PORTABLE_CAP))
                 print("  n=%-6d %-24s portable Metal variant, staging %d KB"
                       % (n, sm.name, lds_bytes(n, PORTABLE_CAP) // 1024))
+        if n in METAL_SINGLE_BIN_CAP:
+            for entry in ("fusedTierB", "refineListed"):
+                cap = METAL_SINGLE_BIN_CAP[n]
+                one, lib = compile_metal(slangc, n, cap, entry, MSL,
+                                         suffix="_onebin", single_bin=1)
+                metal[entry]["one_bin"] = dict(
+                    msl=one.name, metallib=lib.name if lib else None,
+                    lds_bytes=lds_bytes(n, cap))
         info["metal"] = metal
         # Kept beside, not inside, "metal": the consumers of that key
         # iterate it as entry -> files and a scalar sibling would break
