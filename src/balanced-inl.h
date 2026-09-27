@@ -98,7 +98,7 @@ typedef struct {
  * measurements and the dispatch rule. MF_PBMAX remains an explicit override. */
 static inline int pairbatch_size(size_t N){
   if(N>1024u||!esupported((int)N)) return 0;
-  size_t lim=128u;
+  size_t lim = (AP_W >= 16) ? 1024u : 128u;
   { const char *e=getenv("MF_PBMAX"); if(e) lim=(size_t)atol(e); }
   return N<=lim;
 }
@@ -1008,10 +1008,24 @@ static HWY_NOINLINE MF_PEAK_SECTION void binmax_fused32(BP*p,float thr,ap_peak*o
   vf am = V_SET1(t2), arr = V_ZERO(), aii = V_ZERO();
   vi axx = VI_SET1(-1);
 
+  if (__builtin_expect(ws >= we, 0)) {
+    out->index = -1; out->re = 0.f; out->im = 0.f; out->magnitude = 0.f;
+    return;
+  }
+  unsigned qmask = 0;
+  if (ws < 256 && we > 0) qmask |= 1u;
+  if (ws < 512 && we > 256) qmask |= 2u;
+  if (ws < 768 && we > 512) qmask |= 4u;
+  if (ws < 1024 && we > 768) qmask |= 8u;
+  if (__builtin_expect(qmask == 0, 0)) {
+    out->index = -1; out->re = 0.f; out->im = 0.f; out->magnitude = 0.f;
+    return;
+  }
+
   for(int b=0;b<32/AP_W;b++){
     const float *ar=p->ire+(size_t)b*32*AP_W;
     const float *ai=p->iim+(size_t)b*32*AP_W;
-    fftsr32_unit_sink(ar,ai,p->sR,p->sI,1,[&](int k1,vf rr,vf ii){
+    fftsr32_unit_sink(ar,ai,p->sR,p->sI,1,qmask,[&](int k1,vf rr,vf ii){
       const long k=(long)k1*32+b*AP_W;
       if(k>=(long)we || k+AP_W<=(long)ws) return;
       vf m = V_FMADD(rr,rr,V_MUL(ii,ii));
