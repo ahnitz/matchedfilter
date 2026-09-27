@@ -589,6 +589,26 @@ static void stageA_split(BP*p,const float*inr,const float*ini,int conj){
    as the codelet strides. Other shapes retain the generic stage below. */
 static void stageA_prod_32(BP*p,const float*dr,const float*di,
                             const float*tr,const float*ti){
+  /* The precomputed-vector path assumes the unit-stride intermediate.  The
+     alternate layout uses eidx() in stageA_tail to permute its input. */
+  if constexpr (AP_W != 8) {
+    vf TR[AP_W],TI[AP_W],OR[AP_W],OI[AP_W];
+    for(int g=0;g<32/AP_W;g++){
+      const size_t gb=(size_t)g*32*AP_W;
+      fftsr32_prod_unit(dr+gb,di+gb,tr+gb,ti+gb,p->bR,p->bI,p->sR,p->sI,1,AP_W);
+      stageA_tail<32>(p,g,TR,TI,OR,OI,p->bR,p->bI);
+    }
+    return;
+  }
+  if(!p->ilay){
+    vf TR[AP_W],TI[AP_W],OR[AP_W],OI[AP_W];
+    for(int g=0;g<32/AP_W;g++){
+      const size_t gb=(size_t)g*32*AP_W;
+      fftsr32_prod_unit(dr+gb,di+gb,tr+gb,ti+gb,p->bR,p->bI,p->sR,p->sI,1,AP_W);
+      stageA_tail<32>(p,g,TR,TI,OR,OI,p->bR,p->bI);
+    }
+    return;
+  }
   vf TR[8],TI[8],OR[8],OI[8];
   vf *restrict RR=p->bR, *restrict RI=p->bI;
   for(int g=0;g<4;g++){
