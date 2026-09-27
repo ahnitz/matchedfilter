@@ -761,8 +761,35 @@ static void small_scan(BP*p,size_t binsize,float thr,ap_peak*out,size_t ostride,
                        int conj,size_t ws,size_t we,int nlane){
   const size_t nb=(we-ws+binsize-1)/binsize;
   const float t2 = thr>0.f ? thr*thr : 0.f;
-  vf *const bmx=p->bmx,*const bre=p->bre,*const bim=p->bim; vi *const bix=p->bix;
   const vf seed=V_SET1(t2), zero=V_ZERO(); const vi nix=VI_SET1(-1);
+
+  if(nb==1){
+    vf bmx0=seed, bre0=zero, bim0=zero; vi bix0=nix;
+    for(size_t k=ws;k<we;k++){
+      const int e=eidx(&p->ea,(int)k);
+      const vf xr=p->bR[e], xi=p->bI[e];
+      const vf m2=V_FMADD(xr,xr,V_MUL(xi,xi));
+      const vm g=V_CMP_GT(m2,bmx0);
+      if(__builtin_expect(V_MASK_ANY(g),0)){
+        bmx0=V_SEL(g,bmx0,m2);
+        bre0=V_SEL(g,bre0,xr);
+        bim0=V_SEL(g,bim0,xi);
+        bix0=VI_SEL(g,bix0,VI_SET1((int)k));
+      }
+    }
+    float mv[AP_W],rv[AP_W],iv[AP_W]; int xv[AP_W];
+    V_STOREU(mv,bmx0); V_STOREU(rv,bre0); V_STOREU(iv,bim0);
+    VI_STOREU(xv,bix0);
+    for(int l=0;l<nlane;l++){
+      ap_peak *o=out+(size_t)l*ostride;
+      if(xv[l]<0){ o->index=-1; o->re=0.f; o->im=0.f; o->magnitude=0.f; }
+      else { o->index=xv[l]; o->re=rv[l];
+             o->im=conj?-iv[l]:iv[l]; o->magnitude=sqrtf(mv[l]); }
+    }
+    return;
+  }
+
+  vf *const bmx=p->bmx,*const bre=p->bre,*const bim=p->bim; vi *const bix=p->bix;
   for(size_t j=0;j<nb;j++){ bmx[j]=seed; bre[j]=zero; bim[j]=zero; bix[j]=nix; }
   const int bpow=(binsize&(binsize-1))?-1:(int)__builtin_ctzl(binsize);
   for(size_t k=ws;k<we;k++){
