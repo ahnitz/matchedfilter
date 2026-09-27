@@ -302,7 +302,10 @@ jobs:
           assert same, "the Metal kernel disagreed with the CPU"
           EOF
 
+      # Bounded advisory measurements on a shared VM. The full default sweep
+      # can exhaust this job's budget after the complete suite has passed.
       - name: Benchmark what runs
         run: |
-          python -m matchedfilter.benchmark || true
-          python tools/scoreboard.py || true
+          python -m matchedfilter.benchmark --n 1024 4096 16384 65536 \
+            --data 8 --templates 16 --reps 3 --fftw-plan measure || true
+          python tools/scoreboard.py --pairs 128 || true
