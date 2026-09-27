@@ -69,7 +69,8 @@ typedef struct {
   float *hr,*hi,*lr,*li;
   float *ser; size_t serstride; int nostore;
   float *scg;          /* [g][k2] scalar part of the stage-A twiddle, precomputed */
-  int fuse;     /* fused product in stage A; resolved once at plan build,
+  int fuse;     /* 0 = staged, 1 = generic fused, 2 = unit-stride 32x32 product.
+                   Resolved once at plan build,
                    never per transform -- getenv in stageA_prod_gm cost a
                    library call on every pair. */
   unsigned nmask;
@@ -363,6 +364,9 @@ void *create(size_t N){
     p->ser=NULL;   /* set by series_buf() when a caller wants it */
     p->fuse = eprod_ok(p->N2);
     { const char *e=getenv("MF_FUSE"); if(e) p->fuse = atoi(e) ? eprod_ok(p->N2) : 0; }
+    if constexpr (AP_W == 8) {
+      if(p->fuse && n1==32 && n2==32 && ap_srprod()) p->fuse=2;
+    }
   }
   { size_t nhi=(N/AP_W)/256; if(nhi<1) nhi=1; double Nq=(double)(N/AP_W);
     p->hr=ap_alloc64(nhi*4+64); p->hi=ap_alloc64(nhi*4+64);
@@ -446,10 +450,12 @@ static void *create_small(size_t N){
    C++/Highway build declined to, leaving a real call in the hot path: the
    stage functions fell from ~1000 instructions to ~250 with a shared 914
    instruction tail, and cost several percent.  `inline` is only a hint. */
+template<int FIXED=0>
 static AP_ALWAYS_INLINE void stageA_tail(BP*p,int g,vf*restrict TR,vf*restrict TI,
                                vf*restrict OR,vf*restrict OI,
                                vf*restrict bR,vf*restrict bI){
-  const int N2=p->N2; const int N1=p->N1; (void)N1;
+  const int N2=FIXED ? FIXED : p->N2;
+  const int N1=FIXED ? FIXED : p->N1; (void)N1;
   vf *restrict RR=bR,*restrict RI=bI;
   for(int b=0;b<N2/AP_W;b++){
     {
@@ -459,7 +465,7 @@ static AP_ALWAYS_INLINE void stageA_tail(BP*p,int g,vf*restrict TR,vf*restrict T
         vf SR=V_SET1(sc[2*t]),SI=V_SET1(sc[2*t+1]);
         vf tr=V_FMSUB(SR,p->TLr[k2],V_MUL(SI,p->TLi[k2]));
         vf ti=V_FMADD(SR,p->TLi[k2],V_MUL(SI,p->TLr[k2]));
-        int eb=eidx(&p->eb,k2);
+        int eb=FIXED ? k2 : eidx(&p->eb,k2);
         vf xr=RR[eb],xi=RI[eb];
         TR[t]=V_FMSUB(xr,tr,V_MUL(xi,ti));
         TI[t]=V_FMADD(xr,ti,V_MUL(xi,tr));
@@ -545,8 +551,23 @@ static void stageA_split(BP*p,const float*inr,const float*ini,int conj){
  * group's entire pass is one sequential run of N2*AP_W floats.
  *
  * Layout: spec[g*N2*AP_W + n2*AP_W + l], n1 = g*AP_W + l. */
+/* The measured 32x32 path fixes the twiddle and corner-turn addresses as well
+   as the codelet strides. Other shapes retain the generic stage below. */
+static void stageA_prod_32(BP*p,const float*dr,const float*di,
+                            const float*tr,const float*ti){
+  vf TR[AP_W],TI[AP_W],OR[AP_W],OI[AP_W];
+  for(int g=0;g<32/AP_W;g++){
+    const size_t gb=(size_t)g*32*AP_W;
+    fftsr32_prod_unit(dr+gb,di+gb,tr+gb,ti+gb,p->bR,p->bI,p->sR,p->sI,1,AP_W);
+    stageA_tail<32>(p,g,TR,TI,OR,OI,p->bR,p->bI);
+  }
+}
+
 static void stageA_prod_gm(BP*p,const float*dr,const float*di,
                            const float*tr,const float*ti){
+  if constexpr (AP_W==8) {
+    if(p->fuse==2) return stageA_prod_32(p,dr,di,tr,ti);
+  }
   const int N1=p->N1,N2=p->N2,NG=N1/AP_W;
   const int fuse=p->fuse;
   vf TR[AP_W],TI[AP_W],OR[AP_W],OI[AP_W];
@@ -555,7 +576,9 @@ static void stageA_prod_gm(BP*p,const float*dr,const float*di,
     /* The product is formed inside the first butterfly rather than written to a
        staging buffer this loop would immediately read back - one round trip
        through L1 per group, removed. */
-    if(fuse){
+    if(AP_W==8 && fuse==2){
+      fftsr32_prod_unit(dr+gb,di+gb,tr+gb,ti+gb,p->bR,p->bI,p->sR,p->sI,1,AP_W);
+    } else if(fuse){
       efft_prod(N2,dr+gb,di+gb,tr+gb,ti+gb,p->bR,p->bI,p->sR,p->sI,p->w2r,p->w2i);
     } else {
       /* form the product into the staging buffer, then transform it */

@@ -3,6 +3,42 @@
 Work started 2026-09-26 and continued 2026-09-27. This is exploratory work on
 `codex/haswell-cpu-optimization`, not a change merged into main.
 
+## Current validated checkpoint
+
+The branch retains the shared scheduling policy plus AVX2 32x32 coarse-kernel
+specializations: constant codelet strides, earlier final-result stores, and
+constant twiddle/corner-turn addressing. No int16 path is enabled.
+
+The final full-search ABBA comparison, excluding setup and segment zero:
+
+| Run | Steady loop | Throughput, template-seconds/s |
+|---|---:|---:|
+| Baseline 1 | 38.692 s | 228,679 |
+| Candidate 1 | 28.776 s | 307,476 |
+| Candidate 2 | 28.844 s | 306,752 |
+| Baseline 2 | 38.845 s | 227,775 |
+
+This is **1.346x throughput / 25.7% less steady-loop time**, using the ratio
+of mean loop times. All four runs retain exactly the same **4,386 template/time
+trigger identities**. Maximum candidate SNR difference is 2.3842e-6, the same
+maximum seen between the repeated baselines. Other field differences are
+recorded in `kernel-full-trigger-validation.json`.
+
+On the captured call, scheduling plus unit-stride/earlier-store codelets reduced
+86.010 to 56.813 ms (1.513x paired, 39/41 wins); the fixed-address stage then
+improved 56.779 to 54.913 ms (1.028x paired, 28/31 wins). The latter is the
+version used in the full-search table above. Separate measurements must not
+be multiplied and presented as one measured speedup.
+
+Final CPU accuracy selection: **77 passed, 9 GPU skips per ISA** on local
+AVX2, AVX-512 and SSE4; **36 passed, 9 GPU skips on Haswell**. Final pinned
+Ryzen AVX2 performance checks improve the measured 1024-point cases by
+10–12%; 4096-point cases are within about 1.1% of baseline.
+
+**The requested 80% hardware-peak target remains unmet.** See the bottom-up
+measurement and its limits below; this checkpoint is not a declaration that
+kernel optimization is exhausted.
+
 ## Measured finding
 
 The og-node-169 real-data fixture spends 92% of its recorded native regions
@@ -155,8 +191,8 @@ experiments without altering the production codelets.
 ## Unit-stride codelet checkpoint
 
 The branch now generates separate AVX2 32-point split-radix codelets with
-constant element stride one and constant product stride eight. Dispatch
-checks those strides; strided product calls and other SIMD widths retain
+constant element stride one and constant product stride eight. Product dispatch
+is limited to the balanced 32x32 geometry; other product shapes and SIMD widths retain
 their prior implementation. The generated source remains reproducible from
 `src/gen.py`. This specialization removes runtime addressing from a large
 DAG without forcing it inline into every caller.
@@ -170,12 +206,17 @@ Validation: 63 CPU tests passed locally under AVX2, with 6 GPU skips;
 36 passed on Haswell with 9 GPU skips. This includes coarse FDR transfer,
 layout/partial-group cases, adversarial inputs, and series filtering.
 A local Ryzen AVX2 screen improved all measured 512/1024-point balanced cases
-(1.016–1.116x). Unaffected 4096-point cases varied from 0.970–1.004x; repeat
-measurements are needed before interpreting those small differences.
+(1.016–1.116x). The initial 4096-point cases varied from 0.970–1.004x, and a repeat found
+0.954x at 37 templates. Contrary to the initial assumption, those transforms
+also use a 32-point product codelet (their split is 128x32). The product route
+was therefore narrowed to 32x32 geometry. Final pinned repeats are within
+about 1.1% of baseline at 4096.
 
 An earlier-store experiment reduced live output temporaries and measured
 1.027x over the broader constant-stride prototype (28/31 wins). It remains
-isolated pending measurement against the narrowed branch implementation.
+retained after a 1.032x repeat against the narrowed implementation (28/31
+wins). Fixing the surrounding stage-A addresses adds 1.028x on Haswell.
+A 4x8 Stockham-factorization experiment was slower (0.986x, 5/31 wins).
 
 ## Bottom-up throughput target
 
@@ -217,6 +258,35 @@ addressing/stack operands in the generated codelets; those are static counts,
 not proof that every operand is a register spill. Constant-stride codelet
 specialization is the next experiment, alongside scrutiny of dependencies
 and the load/shuffle/add execution limits.
+
+## Native controls and rejected int16 candidates
+
+A same-process native comparison interleaves the original kernel and the
+unit-stride/early-store kernel across five simultaneously held scratch-buffer
+layouts. Median times are 3.452 and 2.986 microseconds per pair; paired speedup
+is 1.160x, with every layout between 1.149 and 1.167x. The approximate 52,200
+FLOP count gives 17.5 GFLOP/s, about 22% of the separately measured raw FMA
+peak. This control uses a zero threshold and a cache-resident synthetic pair;
+it is not a retired-operation count or an end-to-end throughput metric.
+Unpaired microbenchmarks varied enough to require this paired control.
+
+The Haswell int16 screen found a 1.257x reuse-only gain for prequantized block
+floating point (1.234x including data ingestion), while ordinary Q15/SWAR
+variants mostly lost. On the real captured coarse spectra, generated with
+matchedfilter's own forward FFT and the same normalization/window rules, the
+candidate is only 1.141x faster including ingestion for the main window.
+It also changes admission: baseline **337**, candidate **332**, including
+**6 rejected baseline admissions** and one extra admission, with maximum
+relative magnitude error **0.896%**. It is not enabled.
+
+A rounded-shift experiment still rejects **9 baseline admissions**, admits one
+extra pair, and retains the same worst error. It did not reject any of this
+fixture's 28 final peaks, which does not establish calibration safety.
+Both variants pass the seeded synthetic 0.01/0.001 transfer screen. This is a
+concrete example of why that test is a paired guard rather than a population
+certification: real spectral distributions expose errors absent from its
+synthetic profiles. No calibration threshold was adjusted to conceal these
+changes, and no new calibration fallback was introduced.
 
 ## Reproduction
 

@@ -1,0 +1,235 @@
+{
+  "band": 1024,
+  "detected": 17524,
+  "trials": 32768,
+  "modes": {
+    "q15-radix2": {
+      "0.01": {
+        "threshold": 4.348151683807373,
+        "reference_dismissed": 175,
+        "candidate_dismissed": 173,
+        "paired_disagreements": 4,
+        "budget": 22,
+        "passes": true
+      },
+      "0.001": {
+        "threshold": 3.9393906593322754,
+        "reference_dismissed": 18,
+        "candidate_dismissed": 18,
+        "paired_disagreements": 0,
+        "budget": 3,
+        "passes": true
+      },
+      "max_relative_error": 0.01228863000869751
+    },
+    "q15-radix4": {
+      "0.01": {
+        "threshold": 4.348151683807373,
+        "reference_dismissed": 175,
+        "candidate_dismissed": 173,
+        "paired_disagreements": 4,
+        "budget": 22,
+        "passes": true
+      },
+      "0.001": {
+        "threshold": 3.9393906593322754,
+        "reference_dismissed": 18,
+        "candidate_dismissed": 18,
+        "paired_disagreements": 0,
+        "budget": 3,
+        "passes": true
+      },
+      "max_relative_error": 0.01228863000869751
+    },
+    "q15-swar": {
+      "0.01": {
+        "threshold": 4.348151683807373,
+        "reference_dismissed": 175,
+        "candidate_dismissed": 173,
+        "paired_disagreements": 4,
+        "budget": 22,
+        "passes": true
+      },
+      "0.001": {
+        "threshold": 3.9393906593322754,
+        "reference_dismissed": 18,
+        "candidate_dismissed": 18,
+        "paired_disagreements": 0,
+        "budget": 3,
+        "passes": true
+      },
+      "max_relative_error": 0.01228863000869751
+    },
+    "q15-madd": {
+      "0.01": {
+        "threshold": 4.348151683807373,
+        "reference_dismissed": 175,
+        "candidate_dismissed": 173,
+        "paired_disagreements": 6,
+        "budget": 22,
+        "passes": true
+      },
+      "0.001": {
+        "threshold": 3.9393906593322754,
+        "reference_dismissed": 18,
+        "candidate_dismissed": 20,
+        "paired_disagreements": 2,
+        "budget": 3,
+        "passes": true
+      },
+      "max_relative_error": 0.01697009801864624
+    },
+    "q15-prequant": {
+      "0.01": {
+        "threshold": 4.348151683807373,
+        "reference_dismissed": 175,
+        "candidate_dismissed": 175,
+        "paired_disagreements": 18,
+        "budget": 22,
+        "passes": true
+      },
+      "0.001": {
+        "threshold": 3.9393906593322754,
+        "reference_dismissed": 18,
+        "candidate_dismissed": 18,
+        "paired_disagreements": 4,
+        "budget": 3,
+        "passes": false
+      },
+      "max_relative_error": 0.04967808723449707
+    },
+    "float-radix4": {
+      "0.01": {
+        "threshold": 4.348151683807373,
+        "reference_dismissed": 175,
+        "candidate_dismissed": 175,
+        "paired_disagreements": 0,
+        "budget": 22,
+        "passes": true
+      },
+      "0.001": {
+        "threshold": 3.9393906593322754,
+        "reference_dismissed": 18,
+        "candidate_dismissed": 18,
+        "paired_disagreements": 0,
+        "budget": 3,
+        "passes": true
+      },
+      "max_relative_error": 2.980232238769531e-07
+    },
+    "q15-bfp": {
+      "0.01": {
+        "threshold": 4.348151683807373,
+        "reference_dismissed": 175,
+        "candidate_dismissed": 175,
+        "paired_disagreements": 0,
+        "budget": 22,
+        "passes": true
+      },
+      "0.001": {
+        "threshold": 3.9393906593322754,
+        "reference_dismissed": 18,
+        "candidate_dismissed": 18,
+        "paired_disagreements": 0,
+        "budget": 3,
+        "passes": true
+      },
+      "max_relative_error": 0.003973603248596191
+    },
+    "q15-bfp-swar": {
+      "0.01": {
+        "threshold": 4.348151683807373,
+        "reference_dismissed": 175,
+        "candidate_dismissed": 175,
+        "paired_disagreements": 0,
+        "budget": 22,
+        "passes": true
+      },
+      "0.001": {
+        "threshold": 3.9393906593322754,
+        "reference_dismissed": 18,
+        "candidate_dismissed": 18,
+        "paired_disagreements": 0,
+        "budget": 3,
+        "passes": true
+      },
+      "max_relative_error": 0.003973603248596191
+    },
+    "q15-bfp-madd": {
+      "0.01": {
+        "threshold": 4.348151683807373,
+        "reference_dismissed": 175,
+        "candidate_dismissed": 175,
+        "paired_disagreements": 0,
+        "budget": 22,
+        "passes": true
+      },
+      "0.001": {
+        "threshold": 3.9393906593322754,
+        "reference_dismissed": 18,
+        "candidate_dismissed": 18,
+        "paired_disagreements": 0,
+        "budget": 3,
+        "passes": true
+      },
+      "max_relative_error": 0.003973603248596191
+    },
+    "q15-bfp-prequant": {
+      "0.01": {
+        "threshold": 4.348151683807373,
+        "reference_dismissed": 175,
+        "candidate_dismissed": 175,
+        "paired_disagreements": 0,
+        "budget": 22,
+        "passes": true
+      },
+      "0.001": {
+        "threshold": 3.9393906593322754,
+        "reference_dismissed": 18,
+        "candidate_dismissed": 18,
+        "paired_disagreements": 0,
+        "budget": 3,
+        "passes": true
+      },
+      "max_relative_error": 0.0023908615112304688
+    }
+  },
+  "negative_control": {
+    "0.01": {
+      "threshold": 4.348151683807373,
+      "reference_dismissed": 175,
+      "candidate_dismissed": 189,
+      "paired_disagreements": 14,
+      "budget": 22,
+      "passes": true
+    },
+    "0.001": {
+      "threshold": 3.9393906593322754,
+      "reference_dismissed": 18,
+      "candidate_dismissed": 20,
+      "paired_disagreements": 2,
+      "budget": 3,
+      "passes": true
+    },
+    "max_relative_error": 0.004000067710876465
+  },
+  "strong_negative_control": {
+    "0.01": {
+      "threshold": 4.348151683807373,
+      "reference_dismissed": 175,
+      "candidate_dismissed": 226,
+      "paired_disagreements": 51,
+      "budget": 22,
+      "passes": false
+    },
+    "0.001": {
+      "threshold": 3.9393906593322754,
+      "reference_dismissed": 18,
+      "candidate_dismissed": 26,
+      "paired_disagreements": 8,
+      "budget": 3,
+      "passes": false
+    },
+    "max_relative_error": 0.020000040531158447
+  }
+}
