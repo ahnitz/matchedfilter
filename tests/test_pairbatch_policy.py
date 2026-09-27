@@ -138,3 +138,51 @@ def test_series_grouping_preserves_ragged_blocks_and_refinement(nt, monkeypatch)
         for got in results[1:]:
             np.testing.assert_array_equal(got['index'], results[0]['index'])
             np.testing.assert_allclose(got['value'], results[0]['value'], rtol=2e-5, atol=1e-4)
+
+
+@pytest.mark.parametrize('window', [(576, 918), (105, 918), (576, 1024), (0, 918)])
+@pytest.mark.parametrize('thr', [0.0, 4.61751, 8.0])
+def test_haswell_coarse_windows(window, thr):
+    """PyCBC real Haswell workloads use partial coarse windows like (576, 918).
+
+    Verifies that the vectorised fused 32×32 binmax agrees with a numpy
+    fp64 reference on the *maximum magnitude* within the given window.
+    Index tie-breaks may differ between fp32 and fp64, so we only check
+    the magnitude at the chosen index matches the true maximum.
+    """
+    n, nd, nt = 1024, 8, 64
+    rng = np.random.default_rng(576918)
+    def noise(shape):
+        return (rng.normal(size=shape) + 1j*rng.normal(size=shape)).astype(np.complex64)
+    data, templates = noise((nd, n)), noise((nt, n))
+
+    f = mf.MatchedFilter(n, nd, nt)
+    f.set_data(data)
+    f.set_templates(templates)
+
+    got = f.run(binsize=n, window=window, threshold=thr)
+
+    # Reference computation using direct IFFT at fp64
+    lo, hi = window
+    ref_full = np.fft.ifft(data[:, None, :].astype(np.complex128)
+                           * templates[None, :, :].conj().astype(np.complex128),
+                           axis=-1) * n
+    ref_sub = ref_full[:, :, lo:hi]  # (nd, nt, hi-lo)
+    ref_m2 = (ref_sub.real**2 + ref_sub.imag**2).astype(np.float32)
+    ref_max_m2 = ref_m2.max(axis=2)  # (nd, nt)
+
+    for d in range(nd):
+        for t in range(nt):
+            idx = int(got['index'][d, t, 0])
+            val = got['value'][d, t, 0]
+            if thr > 0 and np.sqrt(ref_max_m2[d, t]) < thr:
+                # Below threshold: kernel should report -1
+                assert idx == -1, f"d={d} t={t}: expected -1, got {idx}"
+            else:
+                # Kernel should pick a lag within the window
+                assert lo <= idx < hi, f"d={d} t={t}: idx {idx} outside [{lo},{hi})"
+                # The magnitude at the chosen index should match the reference max
+                got_m2 = val.real**2 + val.imag**2
+                np.testing.assert_allclose(got_m2, ref_max_m2[d, t],
+                                           rtol=5e-5, atol=1e-6)
+
