@@ -98,7 +98,9 @@ static inline int codelet_tw(int m,vf*restrict ar,vf*restrict ai,vf*restrict br,
   switch(m){
     case  8: return fft8_tw (ar,ai,br,bi,S,twr,twi);
     case 16: return fftsr16_tw(ar,ai,br,bi,S,twr,twi);
-    case 32: return fftsr32_tw(ar,ai,br,bi,S,twr,twi);
+    case 32:
+      if constexpr (AP_W >= 16) return fftsr32_tw(ar,ai,br,bi,S,twr,twi);
+      else                      return fft32_tw  (ar,ai,br,bi,S,twr,twi);
     default:
       if constexpr (AP_W >= 16) return fftsr64_tw(ar,ai,br,bi,S,twr,twi);
       else                      return fft64_tw  (ar,ai,br,bi,S,twr,twi);
