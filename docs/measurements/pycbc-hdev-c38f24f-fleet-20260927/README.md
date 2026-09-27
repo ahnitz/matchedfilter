@@ -33,6 +33,12 @@ by startup drift and should not be attributed to this kernel.
 
 ![Complete-search change versus alpha6 and prior hdev](chart.svg)
 
+![Steady-loop lower and upper cost by host](cost-breakdown.svg)
+
+The stacked bars use the same clean runs as the throughput table. They show
+where wall time is spent without the overhead of diagnostic instrumentation.
+The detailed Haswell phase profile below was collected separately.
+
 ## Which path Haswell actually executes
 
 The captured Haswell workload reports AVX2, coarse band 1024, and 64
@@ -77,3 +83,6 @@ consistent with no default-path performance cost.
 contains the raw paired logs, representative HDF outputs, the Haswell
 profile, fixture measurement, diagnostic trace, and local test logs.
 [RUNBOOK.md](RUNBOOK.md) records build identity, paths, and rerun commands.
+For a standalone, step-by-step handoff to a human or another agent, start
+with [REPRODUCE.md](REPRODUCE.md). The analyzer and log parser in this folder
+rebuild all three charts and the JSON without files from adjacent handoffs.
