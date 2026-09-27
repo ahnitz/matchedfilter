@@ -236,7 +236,9 @@ class SRGen(Gen):
             X[k+3*q]  = s.sub(U[k+q], mdf)
         return X
 
-def build_sr(n,name,tw=False,prod=False,unit=False):
+def build_sr(n,name,tw=False,prod=False,unit=False,inplace=False):
+    if inplace and (not unit or prod or tw):
+        raise ValueError("in-place float buffers require a plain unit-stride codelet")
     g=SRGen(n,name,tw,False,prod)
     X=g.rec(list(range(n)))
     for k in range(n):
@@ -266,6 +268,16 @@ def build_sr(n,name,tw=False,prod=False,unit=False):
         args="vf*restrict ar,vf*restrict ai,vf*restrict br,vf*restrict bi,const long S,const float*restrict twr,const float*restrict twi"
     else:
         args="vf*restrict ar,vf*restrict ai,vf*restrict br,vf*restrict bi,const long S"
+    if inplace:
+        # Stage B can consume its contiguous float intermediate directly.
+        # Explicit loads/stores keep this interface independent of vf's type.
+        import re
+        args=args.replace("vf*restrict ar,vf*restrict ai",
+                          "float*restrict ar,float*restrict ai")
+        body=re.sub(r"(ar|ai)\[S\*(\d+)\]=(\w+);",
+                    lambda m: "V_STOREU(%s+AP_W*%s,%s);" % m.groups(), body)
+        body=re.sub(r"(ar|ai)\[S\*(\d+)\]",
+                    lambda m: "V_LOADU(%s+AP_W*%s)" % m.groups(), body)
     if unit:
         # A separate function lets the compiler fold element addresses without
         # forcing the large generic DAG into every caller. Keep the signature
@@ -273,6 +285,7 @@ def build_sr(n,name,tw=False,prod=False,unit=False):
         args=args.replace("const long S", "const long unused_S")
         args=args.replace("const long DS", "const long unused_DS")
         body=("  (void)unused_S; const long S=1;\n" +
+              ("  (void)S;\n" if inplace else "") +
               ("  (void)unused_DS; const long DS=AP_W;\n" if prod else "") + body)
     return ("static inline int %s(%s){\n  (void)br;(void)bi;\n  const vf Z=V_ZERO();\n%s\n%s\n  return 0;\n}\n"
             )%(name,args,cdefs,body)
@@ -329,6 +342,7 @@ if __name__=="__main__":
     # layouts. Dispatch keeps other widths on their established implementation.
     out.append(build_sr(32,"fftsr32_unit",unit=True))
     out.append(build_sr(32,"fftsr32_prod_unit",prod=True,unit=True))
+    out.append(build_sr(32,"fftsr32_unit_inplace",unit=True,inplace=True))
     out += ["}  // namespace HWY_NAMESPACE", "}  // namespace ap",
             "HWY_AFTER_NAMESPACE();", "", "#endif"]
     open("codelets-inl.h","w").write("\n".join(out))

@@ -669,16 +669,18 @@ static void stageA(BP*p,const float*in,int conj){
 static void stageB_load_many(BP*p,int b0,int bb){
   const int N1=p->N1;
   const int M1=p->ea.single?N1:p->a1, M2=p->ea.single?1:p->a2, st=p->ea.st;
+  const size_t step=p->ilay ? AP_W : p->istr;
+  const size_t blockstep=p->ilay ? (size_t)N1*AP_W : AP_W;
   for(int e2=0;e2<M2;e2++){
-    const float *sr=p->ire+(size_t)e2*M1*p->istr+AP_W*b0;
-    const float *si=p->iim+(size_t)e2*M1*p->istr+AP_W*b0;
+    const float *sr=p->ire+(size_t)e2*M1*step+(size_t)b0*blockstep;
+    const float *si=p->iim+(size_t)e2*M1*step+(size_t)b0*blockstep;
     for(int e1=0;e1<M1;e1++){
       for(int j=0;j<bb;j++){
         vf *dR=p->bR+(size_t)j*p->bstride+(size_t)e2*st;
         vf *dI=p->bI+(size_t)j*p->bstride+(size_t)e2*st;
-        dR[e1]=V_LOADU(sr+(size_t)j*AP_W); dI[e1]=V_LOADU(si+(size_t)j*AP_W);
+        dR[e1]=V_LOADU(sr+(size_t)j*blockstep); dI[e1]=V_LOADU(si+(size_t)j*blockstep);
       }
-      sr+=p->istr; si+=p->istr;
+      sr+=step; si+=step;
     }
   }
 }
@@ -690,7 +692,15 @@ static void stageB_run(BP*p,int j,vf**RR,vf**RI){
   *RR=bR; *RI=bI;
 }
 
-static void stageB(BP*p,int b,vf**RR,vf**RI,int exact){
+/* Keep the specialized DAG out of the generic stage-B stack frame. */
+static HWY_NOINLINE void stageB_inplace32(BP*p,int b,vf**RR,vf**RI){
+  float *ar=p->ire+(size_t)b*32*AP_W;
+  float *ai=p->iim+(size_t)b*32*AP_W;
+  fftsr32_unit_inplace(ar,ai,p->sR,p->sI,1);
+  *RR=(vf*)ar; *RI=(vf*)ai;
+}
+
+static HWY_NOINLINE void stageB_generic(BP*p,int b,vf**RR,vf**RI,int exact){
   const int N1=p->N1; (void)p->N2; (void)exact;
   const int M1=p->ea.single?N1:p->a1, M2=p->ea.single?1:p->a2, st=p->ea.st;
   const size_t step = p->ilay ? (size_t)AP_W : p->istr;
@@ -707,6 +717,15 @@ static void stageB(BP*p,int b,vf**RR,vf**RI,int exact){
   efft(N1,p->bR,p->bI,p->sR,p->sI,p->w1r,p->w1i);
   *RR=p->bR; *RI=p->bI;
 
+}
+
+template <bool INPLACE=true>
+static inline void stageB(BP*p,int b,vf**RR,vf**RI,int exact){
+  if constexpr (AP_W==8 && INPLACE) {
+    /* Stage A refills these independent contiguous blocks before every FFT. */
+    if(p->fuse==2 && p->ilay) return stageB_inplace32(p,b,RR,RI);
+  }
+  stageB_generic(p,b,RR,RI,exact);
 }
 
 /* ---- small-N kernel: one element transform, lanes across pairs -----------
@@ -824,7 +843,7 @@ static int bins_reserve(BP*p,size_t nb){
 }
 
 
-template <bool STORE>
+template <bool STORE, bool INPLACE=false>
 static void binmax_one(BP*p,float thr,ap_peak*out,int conj,size_t ws,size_t we){
   const int N1=p->N1,N2=p->N2;
   /* Seeded at 0, not -1: a maximum of exactly zero is not a peak. With -1
@@ -852,7 +871,8 @@ static void binmax_one(BP*p,float thr,ap_peak*out,int conj,size_t ws,size_t we){
       if(hi>N1-1) hi=N1-1;
       if(lo>hi) continue;
       vf *RR,*RI;
-      if(bbn>1) stageB_run(p,jj,&RR,&RI); else stageB(p,b,&RR,&RI,1);
+      if(bbn>1) stageB_run(p,jj,&RR,&RI); else if constexpr (INPLACE) stageB_inplace32(p,b,&RR,&RI);
+      else stageB_generic(p,b,&RR,&RI,1);
       for(long k1=lo;k1<=hi;k1++){
         int e=eidx(&p->ea,(int)k1);
         long k0=k1*N2+base;
@@ -918,8 +938,15 @@ static void binmax_core(BP*p,size_t binsize,float thr,ap_peak*out,int conj,
   /* One bin over the whole window is the common case at the small sizes, and then
      the accumulators live in registers. */
   if(nb==1){
+    if constexpr (AP_W==8) {
+      if(p->fuse==2 && p->ilay) {
+        if(p->ser && !p->nostore) binmax_one<true,true>(p,thr,out,conj,ws,we);
+        else                    binmax_one<false,true>(p,thr,out,conj,ws,we);
+        return;
+      }
+    }
     if(p->ser && !p->nostore) binmax_one<true>(p,thr,out,conj,ws,we);
-    else                      binmax_one<false>(p,thr,out,conj,ws,we);
+    else                    binmax_one<false>(p,thr,out,conj,ws,we);
     return;
   }
   if(0){ }

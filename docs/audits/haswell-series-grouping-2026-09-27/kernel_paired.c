@@ -7,7 +7,8 @@
 #include "backend.h"
 static double now(void){struct timespec t;clock_gettime(CLOCK_MONOTONIC_RAW,&t);return t.tv_sec+1e-9*t.tv_nsec;}
 int main(int argc,char **argv){
- if(argc!=3 && argc!=4)return 2; float threshold=argc==4 ? strtof(argv[3],NULL) : 0;
+ if(argc!=3 && argc!=4)return 2;
+ float threshold=argc==4 ? strtof(argv[3],NULL) : 0;
  const ap_backend *b[2];void *handle[2],*p[5][2];
  for(int j=0;j<2;j++){handle[j]=dlopen(argv[j+1],RTLD_NOW|RTLD_LOCAL);if(!handle[j]){fprintf(stderr,"%s\n",dlerror());return 3;}const ap_backend *(*active)(void)=dlsym(handle[j],"ap_backend_active");if(!active)return 4;b[j]=active();}
  for(int l=0;l<5;l++)for(int k=0;k<2;k++){int j=k^(l&1);p[l][j]=b[j]->create(1024);if(!p[l][j])return 5;}
