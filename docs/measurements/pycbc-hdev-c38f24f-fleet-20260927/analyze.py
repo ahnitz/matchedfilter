@@ -3,17 +3,13 @@
 
 Usage: python analyze.py /path/to/unpacked/fleet
 """
-import importlib.util
 import json
 import statistics
 import sys
 from pathlib import Path
+from log_parser import DENOMINATOR, summarize
 
 HERE = Path(__file__).resolve().parent
-BASE = HERE.parent / "pycbc-alpha6-fleet-20260927" / "analyze.py"
-spec = importlib.util.spec_from_file_location("alpha6_log_parser", BASE)
-parser = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(parser)
 HOSTS = ("dev1", "dev2", "dev3", "dev4", "su2", "haswell")
 ROOT = Path(sys.argv[1])
 
@@ -23,18 +19,18 @@ def measure(folder):
     b = sorted(folder.glob("paired-B*.log"))
     if len(a) != len(b) or len(a) < 2:
         raise ValueError(f"incomplete A/B log set: {folder}")
-    left = [parser.summarize(p) for p in a]
-    right = [parser.summarize(p) for p in b]
+    left = [summarize(p) for p in a]
+    right = [summarize(p) for p in b]
     ma = statistics.mean(x["loop_s"] for x in left)
     mb = statistics.mean(x["loop_s"] for x in right)
     return {
         "A_runs": left, "B_runs": right,
-        "A_rate": parser.DENOMINATOR / ma,
-        "B_rate": parser.DENOMINATOR / mb,
+        "A_rate": DENOMINATOR / ma,
+        "B_rate": DENOMINATOR / mb,
         "speedup": ma / mb,
         "pair_speedups": [x["loop_s"] / y["loop_s"] for x, y in zip(left, right)],
-        "A_lower_rate": parser.DENOMINATOR / statistics.mean(x["lower_s"] for x in left),
-        "B_lower_rate": parser.DENOMINATOR / statistics.mean(x["lower_s"] for x in right),
+        "A_lower_rate": DENOMINATOR / statistics.mean(x["lower_s"] for x in left),
+        "B_lower_rate": DENOMINATOR / statistics.mean(x["lower_s"] for x in right),
         "A_lower_s": statistics.mean(x["lower_s"] for x in left),
         "B_lower_s": statistics.mean(x["lower_s"] for x in right),
         "A_upper_s": statistics.mean(x["upper_s"] for x in left),
@@ -95,6 +91,30 @@ for i, h in enumerate(HOSTS):
               f'<text x="{sx(p)+(9 if p>=0 else -9):.1f}" y="{y+4}" text-anchor="{"start" if p>=0 else "end"}" font-family="sans-serif" font-size="12">{p:+.1f}%</text>']
 alpha += ['<text x="24" y="375" font-family="sans-serif" font-size="11">Whiskers show the range of interleaved A/B pair ratios.</text>', '</svg>']
 (HERE / "alpha6-chart.svg").write_text("\n".join(alpha) + "\n")
+
+# Paired clean runs report lower and upper time separately. Show their
+# contribution without mixing in the separately instrumented profile.
+cost = ['<svg xmlns="http://www.w3.org/2000/svg" width="1020" height="390" viewBox="0 0 1020 390">',
+        '<rect width="1020" height="390" fill="white"/>',
+        '<text x="24" y="32" font-family="sans-serif" font-size="19" font-weight="bold">Updated hdev: complete-search steady-loop cost</text>',
+        '<text x="24" y="52" font-family="sans-serif" font-size="12">Mean of clean paired new-build runs; four measured segments; seconds</text>']
+scale = 20
+for tick in range(0, 36, 5):
+    x = 240 + tick * scale
+    cost += [f'<line x1="{x}" y1="70" x2="{x}" y2="344" stroke="#dce3e8"/>',
+             f'<text x="{x}" y="364" text-anchor="middle" font-family="sans-serif" font-size="12">{tick}</text>']
+for i, h in enumerate(HOSTS):
+    row = out[h]["vs_alpha6"]
+    lower, upper = row["B_lower_s"], row["B_upper_s"]
+    y = 79 + i * 44
+    name = "sugwg-login2" if h == "su2" else "Haswell" if h == "haswell" else h
+    cost += [f'<text x="220" y="{y+15}" text-anchor="end" font-family="sans-serif" font-size="13">{name}</text>',
+             f'<rect x="240" y="{y}" width="{lower*scale:.1f}" height="20" fill="#2878b5"/>',
+             f'<rect x="{240+lower*scale:.1f}" y="{y}" width="{upper*scale:.1f}" height="20" fill="#e89531"/>',
+             f'<text x="{247+(lower+upper)*scale:.1f}" y="{y+15}" font-family="sans-serif" font-size="12">{lower:.1f} + {upper:.1f} s</text>']
+cost += ['<text x="240" y="384" font-family="sans-serif" font-size="12" fill="#2878b5">■ Lower filter</text>',
+         '<text x="390" y="384" font-family="sans-serif" font-size="12" fill="#e89531">■ Upper stage</text>', '</svg>']
+(HERE / "cost-breakdown.svg").write_text("\n".join(cost) + "\n")
 
 for h in HOSTS:
     a, b = out[h]["vs_alpha6"], out[h]["vs_old_hdev"]
