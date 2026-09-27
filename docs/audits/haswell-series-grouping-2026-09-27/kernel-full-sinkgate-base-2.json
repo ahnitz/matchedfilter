@@ -1,0 +1,37 @@
+{
+  "aggregate_rate": 225069.52389399748,
+  "configs": {},
+  "groups": [
+    68,
+    68,
+    68,
+    68,
+    68
+  ],
+  "loop_s": 39.31243931616089,
+  "lower_s": 35.87873531616089,
+  "path": "/home/ahnitz/pycbc-wider-cpu-benchmark-20260926/hosts/og-node-169/results/kernel-full-sinkgate-base-2.log",
+  "profile": {
+    "nonkernel_lower_s": 35.87873531616089
+  },
+  "segment_rates": [
+    226385.0397314039,
+    228429.02825541675,
+    228687.04157445338,
+    217178.0134977606
+  ],
+  "templates": [
+    5883,
+    5883,
+    5883,
+    5883,
+    5883
+  ],
+  "upper_parts": {
+    "upper_direct_s": 0.37583300000000003,
+    "upper_library_s": 2.686109,
+    "upper_norms_s": 0.081508,
+    "upper_scale_s": 0.286583
+  },
+  "upper_s": 3.433704
+}

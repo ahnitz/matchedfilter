@@ -843,6 +843,46 @@ static int bins_reserve(BP*p,size_t nb){
 }
 
 
+/* Keep optional consumers out of the existing kernels' text section. Adding
+   their large generated bodies otherwise perturbs unrelated hot-code layout. */
+#if defined(__ELF__) && (defined(__GNUC__) || defined(__clang__))
+#define MF_PEAK_SECTION __attribute__((section(".text.mf_peak")))
+#else
+#define MF_PEAK_SECTION
+#endif
+
+/* The common coarse pass needs only a peak. Consume the final FFT values
+   directly; preserve the materializing path for callers requesting a series. */
+static HWY_NOINLINE MF_PEAK_SECTION void peak_update32(vf rr,vf ii,vf m,long k,
+                                      size_t ws,size_t we,int conj,ap_peak*out){
+  float mv[AP_W],rv[AP_W],iv[AP_W];
+  V_STOREU(mv,m); V_STOREU(rv,rr); V_STOREU(iv,ii);
+  for(int l=0;l<AP_W;l++) if(k+l>=(long)ws && k+l<(long)we && mv[l]>out->magnitude){
+    out->index=k+l; out->re=rv[l]; out->im=conj?-iv[l]:iv[l];
+    out->magnitude=mv[l];
+  }
+}
+
+static HWY_NOINLINE MF_PEAK_SECTION void stageB_peak32(BP*p,int b,ap_peak*out,
+                                      int conj,size_t ws,size_t we){
+  const float *ar=p->ire+(size_t)b*32*AP_W;
+  const float *ai=p->iim+(size_t)b*32*AP_W;
+  fftsr32_unit_sink(ar,ai,p->sR,p->sI,1,[=](int k1,vf rr,vf ii){
+    const long k=(long)k1*32+b*AP_W;
+    if(k>=(long)we || k+AP_W<=(long)ws) return;
+    const vf m=V_FMADD(rr,rr,V_MUL(ii,ii));
+    if(__builtin_expect(V_MASK_ANY(V_CMP_GT(m,V_SET1(out->magnitude))),0))
+      peak_update32(rr,ii,m,k,ws,we,conj,out);
+  });
+}
+
+static HWY_NOINLINE MF_PEAK_SECTION void binmax_fused32(BP*p,float thr,ap_peak*out,int conj,size_t ws,size_t we){
+  out->index=-1; out->re=0.f; out->im=0.f;
+  out->magnitude=thr>0.f ? thr*thr : 0.f;
+  for(int b=0;b<32/AP_W;b++) stageB_peak32(p,b,out,conj,ws,we);
+  out->magnitude=out->index>=0 ? sqrtf(out->magnitude) : 0.f;
+}
+
 template <bool STORE, bool INPLACE=false>
 static void binmax_one(BP*p,float thr,ap_peak*out,int conj,size_t ws,size_t we){
   const int N1=p->N1,N2=p->N2;
@@ -1182,6 +1222,30 @@ int binmax_prod(void *vp,const float*dr,const float*di,
   return 0;
 }
 
+static HWY_NOINLINE MF_PEAK_SECTION int binmax_prod_threshold(void *vp,const float*dr,const float*di,
+                    const float*tr,const float*ti,size_t binsize,
+                    float thr,ap_peak*out,int conj,size_t ws,size_t we){
+  BP *p=(BP*)vp;
+  if(p->small) return -1;        /* use binmax_prod_batch */
+  size_t nb=(we-ws+binsize-1)/binsize;
+  if(bins_reserve(p,nb)) return -1;
+  if(p->gmajor) stageA_prod_gm(p,dr,di,tr,ti);
+  else          stageA_prod(p,dr,di,tr,ti);
+  if constexpr (AP_W==8) {
+    /* Keep this dispatch outside the generic scan so its code generation
+       and unthresholded behavior remain independent of the fused consumer. */
+    if(thr>0.f && nb==1 && p->fuse==2 && p->ilay && p->bblk==1
+       && !(p->ser && !p->nostore)) {
+      binmax_fused32(p,thr,out,conj,ws,we);
+      return 0;
+    }
+  }
+  binmax_core(p,binsize,thr,out,conj,ws,we);
+  return 0;
+}
+
+#undef MF_PEAK_SECTION
+
 static void corr_store(BP *p,float *out){
   const int N1=p->N1,N2=p->N2;
   const vf sg=V_SIGNMASK();
@@ -1234,7 +1298,7 @@ const ap_backend *Backend(void){
     hwy::TargetName(HWY_TARGET), AP_W,
     create, destroy, fft, supported,
     binmax, binmax_split, has_prod, split, binmax_prod, corr_prod, corr_split, series_buf, series_stride, interp_max,
-    pairbatch, binmax_prod_batch, corr_prod_batch, create_small, broadcast_data
+    pairbatch, binmax_prod_batch, corr_prod_batch, create_small, broadcast_data, AP_W==8 ? binmax_prod_threshold : nullptr
   };
   return &be;
 }

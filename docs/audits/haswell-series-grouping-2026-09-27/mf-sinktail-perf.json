@@ -1,0 +1,323 @@
+[
+  {
+    "isa": "AVX2",
+    "band": 1024,
+    "templates": 37,
+    "kind": "flat",
+    "cutoff": 128,
+    "ingest": false,
+    "window_fraction": 1.0,
+    "bin_size": 0,
+    "threshold": 0.0,
+    "admitted": [
+      1.0
+    ],
+    "samples": [
+      [
+        0.00017816390027292073,
+        0.00018020211020484568,
+        0.00017894205055199564,
+        0.00017844111076556146,
+        0.00017663853941485286,
+        0.0001790091802831739,
+        0.0001767345203552395,
+        0.00018178557977080345,
+        0.0001780138094909489,
+        0.0001818834594450891,
+        0.00017636192031204702,
+        0.00017905876971781255,
+        0.000176615200471133,
+        0.00017910215072333813,
+        0.00017636673059314489,
+        0.00017896558973006904,
+        0.00017607678077183664,
+        0.00017818222986534237,
+        0.00017720610019750894,
+        0.00018046871060505509,
+        0.00017718235962092875
+      ],
+      [
+        0.00018706697039306164,
+        0.00018467970076017082,
+        0.00018784982967190444,
+        0.00018430288997478783,
+        0.00018937640008516608,
+        0.0001867148105520755,
+        0.00018871234962716699,
+        0.00018664869014173747,
+        0.00018946095020510255,
+        0.00018517652992159129,
+        0.00018746301997452975,
+        0.00018687511095777154,
+        0.000188007130054757,
+        0.0001863621501252055,
+        0.00018965472001582383,
+        0.00018549291999079288,
+        0.0001884391391649842,
+        0.0001857089309487492,
+        0.00019058967009186745,
+        0.00018701607012189925,
+        0.00018708270043134688
+      ]
+    ],
+    "counters": [
+      [
+        {
+          "cycles": 882834.21,
+          "instructions": 4310766.89,
+          "branch_misses": 361.59,
+          "cache_misses": 111.49
+        },
+        {
+          "cycles": 890484.78,
+          "instructions": 4310806.97,
+          "branch_misses": 435.42,
+          "cache_misses": 131.11
+        },
+        {
+          "cycles": 885150.8,
+          "instructions": 4310772.83,
+          "branch_misses": 211.16,
+          "cache_misses": 166.22
+        },
+        {
+          "cycles": 881650.66,
+          "instructions": 4310701.12,
+          "branch_misses": 372.49,
+          "cache_misses": 39.96
+        },
+        {
+          "cycles": 873090.01,
+          "instructions": 4310697.94,
+          "branch_misses": 176.36,
+          "cache_misses": 32.36
+        },
+        {
+          "cycles": 884022.57,
+          "instructions": 4310716.09,
+          "branch_misses": 396.21,
+          "cache_misses": 43.71
+        },
+        {
+          "cycles": 871735.5,
+          "instructions": 4310713.17,
+          "branch_misses": 183.6,
+          "cache_misses": 26.63
+        },
+        {
+          "cycles": 896272.65,
+          "instructions": 4310716.36,
+          "branch_misses": 447.69,
+          "cache_misses": 135.08
+        },
+        {
+          "cycles": 877618.99,
+          "instructions": 4310771.85,
+          "branch_misses": 203.93,
+          "cache_misses": 74.68
+        },
+        {
+          "cycles": 896884.67,
+          "instructions": 4310763.53,
+          "branch_misses": 368.98,
+          "cache_misses": 159.17
+        },
+        {
+          "cycles": 870831.73,
+          "instructions": 4310776.59,
+          "branch_misses": 169.78,
+          "cache_misses": 30.36
+        },
+        {
+          "cycles": 881539.57,
+          "instructions": 4310772.32,
+          "branch_misses": 381.06,
+          "cache_misses": 49.4
+        },
+        {
+          "cycles": 870847.42,
+          "instructions": 4310773.0,
+          "branch_misses": 181.49,
+          "cache_misses": 38.9
+        },
+        {
+          "cycles": 883292.92,
+          "instructions": 4310772.24,
+          "branch_misses": 389.57,
+          "cache_misses": 37.93
+        },
+        {
+          "cycles": 870657.38,
+          "instructions": 4310779.67,
+          "branch_misses": 186.33,
+          "cache_misses": 33.49
+        },
+        {
+          "cycles": 882115.43,
+          "instructions": 4310783.21,
+          "branch_misses": 365.56,
+          "cache_misses": 39.88
+        },
+        {
+          "cycles": 869746.29,
+          "instructions": 4310731.51,
+          "branch_misses": 174.34,
+          "cache_misses": 27.21
+        },
+        {
+          "cycles": 880623.65,
+          "instructions": 4310716.48,
+          "branch_misses": 359.73,
+          "cache_misses": 33.88
+        },
+        {
+          "cycles": 870722.29,
+          "instructions": 4310712.43,
+          "branch_misses": 183.77,
+          "cache_misses": 32.38
+        },
+        {
+          "cycles": 884294.35,
+          "instructions": 4310771.05,
+          "branch_misses": 386.24,
+          "cache_misses": 64.71
+        },
+        {
+          "cycles": 871625.11,
+          "instructions": 4310776.99,
+          "branch_misses": 181.62,
+          "cache_misses": 64.92
+        }
+      ],
+      [
+        {
+          "cycles": 926132.75,
+          "instructions": 4315995.56,
+          "branch_misses": 325.58,
+          "cache_misses": 115.69
+        },
+        {
+          "cycles": 924286.96,
+          "instructions": 4316041.81,
+          "branch_misses": 302.64,
+          "cache_misses": 54.74
+        },
+        {
+          "cycles": 928374.43,
+          "instructions": 4316012.49,
+          "branch_misses": 383.38,
+          "cache_misses": 55.94
+        },
+        {
+          "cycles": 912466.76,
+          "instructions": 4315995.28,
+          "branch_misses": 293.04,
+          "cache_misses": 32.6
+        },
+        {
+          "cycles": 936530.4,
+          "instructions": 4316027.27,
+          "branch_misses": 452.38,
+          "cache_misses": 66.33
+        },
+        {
+          "cycles": 921989.99,
+          "instructions": 4315937.89,
+          "branch_misses": 222.49,
+          "cache_misses": 62.72
+        },
+        {
+          "cycles": 933207.75,
+          "instructions": 4315936.38,
+          "branch_misses": 399.17,
+          "cache_misses": 35.57
+        },
+        {
+          "cycles": 923961.49,
+          "instructions": 4315991.26,
+          "branch_misses": 225.95,
+          "cache_misses": 34.32
+        },
+        {
+          "cycles": 933559.67,
+          "instructions": 4315936.42,
+          "branch_misses": 411.23,
+          "cache_misses": 76.98
+        },
+        {
+          "cycles": 915797.8,
+          "instructions": 4315936.28,
+          "branch_misses": 184.95,
+          "cache_misses": 31.49
+        },
+        {
+          "cycles": 926634.32,
+          "instructions": 4315940.92,
+          "branch_misses": 370.27,
+          "cache_misses": 40.25
+        },
+        {
+          "cycles": 924009.72,
+          "instructions": 4315973.58,
+          "branch_misses": 195.19,
+          "cache_misses": 78.57
+        },
+        {
+          "cycles": 928922.49,
+          "instructions": 4316013.96,
+          "branch_misses": 394.13,
+          "cache_misses": 37.69
+        },
+        {
+          "cycles": 917904.13,
+          "instructions": 4316037.69,
+          "branch_misses": 201.47,
+          "cache_misses": 46.13
+        },
+        {
+          "cycles": 935134.47,
+          "instructions": 4316023.17,
+          "branch_misses": 396.52,
+          "cache_misses": 85.58
+        },
+        {
+          "cycles": 916958.11,
+          "instructions": 4315952.76,
+          "branch_misses": 202.74,
+          "cache_misses": 33.64
+        },
+        {
+          "cycles": 931143.55,
+          "instructions": 4316013.11,
+          "branch_misses": 383.69,
+          "cache_misses": 39.51
+        },
+        {
+          "cycles": 919753.23,
+          "instructions": 4316015.34,
+          "branch_misses": 206.6,
+          "cache_misses": 25.42
+        },
+        {
+          "cycles": 939097.98,
+          "instructions": 4315967.31,
+          "branch_misses": 404.35,
+          "cache_misses": 207.86
+        },
+        {
+          "cycles": 923168.48,
+          "instructions": 4316023.32,
+          "branch_misses": 338.39,
+          "cache_misses": 34.14
+        },
+        {
+          "cycles": 923666.1,
+          "instructions": 4316028.84,
+          "branch_misses": 369.84,
+          "cache_misses": 31.35
+        }
+      ]
+    ],
+    "speedup": 0.9525803183560667
+  }
+]

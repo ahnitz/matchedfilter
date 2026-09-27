@@ -139,6 +139,16 @@ int ap_binmax_prod(ap_plan *p,const float *dr,const float *di,
   return c;
 }
 
+ap_prod_kernel ap_plan_prod_kernel(const ap_plan *p,float threshold){
+  ap_prod_kernel k={NULL,NULL};
+  if(p){
+    k.context=p->h;
+    k.run=threshold>0.f && p->be->binmax_prod_threshold
+        ? p->be->binmax_prod_threshold : p->be->binmax_prod;
+  }
+  return k;
+}
+
 int ap_corr_prod(ap_plan *p,const float *dr,const float *di,
                  const float *tr,const float *ti,float *out){
   if(!p||!p->be->corr_prod) return -1;

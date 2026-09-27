@@ -374,6 +374,7 @@ static int run_pairs(ap_mf_plan *p, int d0, int nd, int t0, int nt,
 
      Measured at 16x16: 2^12 3.40 -> 2.98 (tile 8), 2^14 12.96 -> 12.34, 2^16
      within noise once two spectra fill L2.  8 is never worse, so take it. */
+  const ap_prod_kernel prod=ap_plan_prod_kernel(p->fft,threshold);
   const int tile = p->tile;
   int total=0;
   for(int dt=0;dt<nd;dt+=tile) for(int tt=0;tt<nsel;tt+=tile){
@@ -385,12 +386,12 @@ static int run_pairs(ap_mf_plan *p, int d0, int nd, int t0, int nt,
       const float *Hr=p->tre+(size_t)(t0+t)*n, *Hi=p->tim+(size_t)(t0+t)*n;
       size_t row=(size_t)d*nt+t;
       int c=0;
-      /* fused path where the back end has one; otherwise form the product and
-         hand it over, which is what N=1024 does - 8 KiB in L1 is not worth a
-         second specialised kernel */
-      int r = p->gmajor ? ap_binmax_prod(p->fft,Dr,Di,Hr,Hi,binsize,threshold,
-                                         peaks+row*nb,&c,AP_BACKWARD,start,end)
-                        : -1;
+      /* Fuse the product into the transform where supported; otherwise use
+         the materialized-product path. The bank selects its consumer once. */
+      int r = p->gmajor && prod.run
+          ? prod.run(prod.context,Dr,Di,Hr,Hi,binsize,threshold,
+                     peaks+row*nb,1,start,end) : -1;
+      if(r>=0) for(size_t b=0;b<nb;b++) if(peaks[row*nb+b].index>=0) c++;
       if(r<0){
         mulspec(Dr,Di,Hr,Hi,p->pr,p->pi,n);
         r = ap_binmax_split(p->fft,p->pr,p->pi,binsize,threshold,

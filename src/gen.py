@@ -236,7 +236,9 @@ class SRGen(Gen):
             X[k+3*q]  = s.sub(U[k+q], mdf)
         return X
 
-def build_sr(n,name,tw=False,prod=False,unit=False,inplace=False):
+def build_sr(n,name,tw=False,prod=False,unit=False,inplace=False,sink=False):
+    if sink and not inplace:
+        raise ValueError("an output sink requires plain unit-stride float input")
     if inplace and (not unit or prod or tw):
         raise ValueError("in-place float buffers require a plain unit-stride codelet")
     g=SRGen(n,name,tw,False,prod)
@@ -278,6 +280,15 @@ def build_sr(n,name,tw=False,prod=False,unit=False,inplace=False):
                     lambda m: "V_STOREU(%s+AP_W*%s,%s);" % m.groups(), body)
         body=re.sub(r"(ar|ai)\[S\*(\d+)\]",
                     lambda m: "V_LOADU(%s+AP_W*%s)" % m.groups(), body)
+    if sink:
+        # Keep the FFT independent of its output consumer. Peak-only callers
+        # can reduce each result directly instead of materializing a series.
+        args=args.replace("float*restrict ar,float*restrict ai",
+                          "const float*restrict ar,const float*restrict ai")
+        args += ",Sink sink"
+        body,count=re.subn(r"V_STOREU\(ar\+AP_W\*(\d+),(\w+)\); V_STOREU\(ai\+AP_W\*\1,(\w+)\);",
+                           lambda m: "sink(%s,%s,%s);" % m.groups(), body)
+        assert count == n
     if unit:
         # A separate function lets the compiler fold element addresses without
         # forcing the large generic DAG into every caller. Keep the signature
@@ -292,8 +303,9 @@ def build_sr(n,name,tw=False,prod=False,unit=False,inplace=False):
               ("  (void)S;\n" if inplace else "") +
               ("  (void)unused_DS; const long DS=AP_W;\n" if prod else "") + body)
     zero_decl = "" if unit else "  const vf Z=V_ZERO();\n"
-    return ("static inline int %s(%s){\n  (void)br;(void)bi;\n%s%s\n%s\n  return 0;\n}\n"
-            )%(name,args,zero_decl,cdefs,body)
+    prefix = "template <class Sink>\n" if sink else ""
+    return prefix + ("static inline int %s(%s){\n  (void)br;(void)bi;\n%s%s\n%s\n  return 0;\n}\n"
+                     )%(name,args,zero_decl,cdefs,body)
 
 
 def broadcast_codelet(source):
@@ -348,6 +360,7 @@ if __name__=="__main__":
     out.append(build_sr(32,"fftsr32_unit",unit=True))
     out.append(build_sr(32,"fftsr32_prod_unit",prod=True,unit=True))
     out.append(build_sr(32,"fftsr32_unit_inplace",unit=True,inplace=True))
+    out.append(build_sr(32,"fftsr32_unit_sink",unit=True,inplace=True,sink=True))
     out += ["}  // namespace HWY_NAMESPACE", "}  // namespace ap",
             "HWY_AFTER_NAMESPACE();", "", "#endif"]
     open("codelets-inl.h","w").write("\n".join(out))

@@ -58,6 +58,10 @@ typedef struct {
                            float *out);
   void *(*create_pairbatch)(size_t N);
   int (*broadcast_data)(void *);
+  /* Optional positive-threshold peak consumer; other calls retain binmax_prod. */
+  int (*binmax_prod_threshold)(void *, const float *, const float *,
+                              const float *, const float *, size_t,
+                              float, ap_peak *, int, size_t, size_t);
 } ap_backend;
 
 /* The kernel for the target Highway's runtime dispatch selected, or NULL if
