@@ -143,6 +143,27 @@ static HWY_ATTR HWY_INLINE void v_transpose(const vf *in, vf *out) {
     out[i + 4] = hn::ConcatUpperUpper(AP_D, u[i + 4], u[i]);
   }
 }
+
+static HWY_ATTR HWY_INLINE void v_transpose_store(const vf *in, float *out) {
+  const hn::Repartition<uint64_t, ap_tag> d64;
+  vf t[8], u[8];
+  for (int i = 0; i < 8; i += 2) {
+    t[i]     = hn::InterleaveLower(AP_D, in[i], in[i + 1]);
+    t[i + 1] = hn::InterleaveUpper(AP_D, in[i], in[i + 1]);
+  }
+  for (int i = 0; i < 4; i++) {
+    const int a = (i & 1) + ((i & 2) << 1);      /* 0,1,4,5 */
+    const int b = a + 2;
+    u[2 * i]     = hn::BitCast(AP_D, hn::InterleaveLower(
+                     d64, hn::BitCast(d64, t[a]), hn::BitCast(d64, t[b])));
+    u[2 * i + 1] = hn::BitCast(AP_D, hn::InterleaveUpper(
+                     d64, hn::BitCast(d64, t[a]), hn::BitCast(d64, t[b])));
+  }
+  for (int i = 0; i < 4; i++) {
+    V_STOREU(out + (size_t)i * AP_W, hn::ConcatLowerLower(AP_D, u[i + 4], u[i]));
+    V_STOREU(out + (size_t)(i + 4) * AP_W, hn::ConcatUpperUpper(AP_D, u[i + 4], u[i]));
+  }
+}
 #else
 static HWY_ATTR HWY_INLINE void v_transpose(const vf *in, vf *out) {
   for (int m = AP_W / 2; m >= 1; m >>= 1) {
@@ -154,6 +175,14 @@ static HWY_ATTR HWY_INLINE void v_transpose(const vf *in, vf *out) {
       out[i] = hn::InterleaveWholeLower(AP_D, a, b);
       out[j] = hn::InterleaveWholeUpper(AP_D, a, b);
     }
+  }
+}
+
+static HWY_ATTR HWY_INLINE void v_transpose_store(const vf *in, float *out) {
+  vf tmp[AP_W];
+  v_transpose(in, tmp);
+  for (int i = 0; i < AP_W; i++) {
+    V_STOREU(out + (size_t)i * AP_W, tmp[i]);
   }
 }
 #endif

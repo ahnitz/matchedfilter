@@ -609,7 +609,7 @@ static void stageA_prod_32(BP*p,const float*dr,const float*di,
     }
     return;
   }
-  vf TR[8],TI[8],OR[8],OI[8];
+  vf TR[8],TI[8];
   vf *restrict RR=p->bR, *restrict RI=p->bI;
   for(int g=0;g<4;g++){
     const size_t gb=(size_t)g*32*8;
@@ -647,12 +647,10 @@ static void stageA_prod_32(BP*p,const float*dr,const float*di,
           TI[t+1]=V_FMADD(xr1,ti1,V_MUL(xi1,tr1));
         }
       }
-      V_TRANSPOSE(TR,OR); V_TRANSPOSE(TI,OI);
       float *er=p->ire+(size_t)b*32*8+(size_t)8*g*8;
       float *ei=p->iim+(size_t)b*32*8+(size_t)8*g*8;
-      for(int i=0;i<8;i++){
-        V_STOREU(er+(size_t)i*8,OR[i]); V_STOREU(ei+(size_t)i*8,OI[i]);
-      }
+      v_transpose_store(TR, er);
+      v_transpose_store(TI, ei);
     }
   }
 }
