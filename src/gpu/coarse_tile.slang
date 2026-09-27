@@ -1,3 +1,4 @@
+#include "twiddle.slang"
 // Coarse pass, TILE pairs per workgroup.
 //
 // The coarse transform is short -- band is 256 to 2048 -- so one pair per
@@ -110,7 +111,7 @@ void dft32(inout float2 r[32])
     dft16(o);
     [unroll] for (uint k=0;k<16;++k) {
         float ang = 2.0f*PI*float(k)/32.0f;
-        float2 w  = cmul(o[k], float2(cos(ang), sin(ang)));
+        float2 w  = cmul(o[k], mfTwiddle(ang));
         r[k]    = e[k] + w;
         r[k+16] = e[k] - w;
     }
@@ -172,7 +173,7 @@ void coarseTile(uint3 gid: SV_GroupID, uint3 lid: SV_GroupThreadID,
     dftR(r);
     [unroll] for (uint k2=0;k2<R;++k2) {
         float ang = 2.0f*PI*float(lane*k2)/float(BAND);
-        r[k2] = cmul(r[k2], float2(cos(ang), sin(ang)));
+        r[k2] = cmul(r[k2], mfTwiddle(ang));
     }
     // Transpose through the tile's own slice of shared memory.
     GroupMemoryBarrierWithGroupSync();

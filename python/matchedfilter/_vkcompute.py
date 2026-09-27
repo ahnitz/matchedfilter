@@ -122,6 +122,7 @@ _COARSE_TILE = {}
 _QUEUE_COMPUTE = 0x2
 _BUF_STORAGE = 0x20
 _BUF_INDIRECT = 0x100   # an indirect dispatch reads its group count from a buffer
+_BUF_TRANSFER_DST = 0x2
 _MEM_DEVICE_LOCAL, _MEM_HOST_VISIBLE, _MEM_HOST_COHERENT = 0x1, 0x2, 0x4
 #: HOST_CACHED. The CPU reads the two output buffers and nothing else,
 #: and reading uncached device-visible memory runs at about 240 MB/s --
@@ -132,7 +133,9 @@ _STAGE_COMPUTE = 0x20
 _BIND_POINT_COMPUTE = 1
 _ONE_TIME_SUBMIT = 0x1
 _STAGE_COMPUTE_BIT = 0x800
+_STAGE_DRAW_INDIRECT_BIT, _STAGE_TRANSFER_BIT, _STAGE_HOST_BIT = 0x2, 0x1000, 0x4000
 _ACCESS_SHADER_READ, _ACCESS_SHADER_WRITE = 0x20, 0x40
+_ACCESS_INDIRECT_READ, _ACCESS_TRANSFER_WRITE, _ACCESS_HOST_READ = 0x1, 0x1000, 0x2000
 _WHOLE_SIZE = 0xFFFFFFFFFFFFFFFF
 
 _u32, _u64, _vp = ctypes.c_uint32, ctypes.c_uint64, ctypes.c_void_p
@@ -200,6 +203,13 @@ _StageCreate = _struct("VkPipelineShaderStageCreateInfo",
                        ("sType", _u32), ("pNext", _vp), ("flags", _u32),
                        ("stage", _u32), ("module", _vp),
                        ("pName", ctypes.c_char_p), ("pSpecializationInfo", _vp))
+_SpecializationEntry = _struct("VkSpecializationMapEntry",
+                              ("constantID", _u32), ("offset", _u32),
+                              ("size", ctypes.c_size_t))
+_SpecializationInfo = _struct("VkSpecializationInfo",
+                             ("mapEntryCount", _u32),
+                             ("pMapEntries", ctypes.POINTER(_SpecializationEntry)),
+                             ("dataSize", ctypes.c_size_t), ("pData", _vp))
 _ComputePipelineCreate = _struct("VkComputePipelineCreateInfo",
                                  ("sType", _u32), ("pNext", _vp), ("flags", _u32),
                                  ("stage", _StageCreate), ("layout", _vp),
@@ -369,6 +379,11 @@ class Context(InputUploads):
         # 32 KB and runs a 64 KB kernel regardless.
         props = (ctypes.c_ubyte * 2048)()
         vk.vkGetPhysicalDeviceProperties(self.physical, ctypes.byref(props))
+        # vendorID is the third uint32 in VkPhysicalDeviceProperties.
+        # Intel's native trig loses accuracy in repeated FFT rotations.
+        # A pipeline specialization selects accurate twiddles without adding
+        # a runtime branch or changing arithmetic on other vendors.
+        self._accurate_trig = ctypes.cast(props, ctypes.POINTER(_u32))[2] == 0x8086
         self.max_shared_memory = int(ctypes.cast(
             ctypes.byref(props, _OFF_SHARED_MEMORY),
             ctypes.POINTER(_u32))[0])
@@ -524,8 +539,16 @@ class Context(InputUploads):
                                          ctypes.byref(layout)),
                "vkCreatePipelineLayout")
 
+        special = None
+        if self._accurate_trig:
+            trig_value = _u32(1)
+            trig_entry = _SpecializationEntry(73, 0, ctypes.sizeof(trig_value))
+            trig_info = _SpecializationInfo(1, ctypes.pointer(trig_entry),
+                                            ctypes.sizeof(trig_value),
+                                            ctypes.cast(ctypes.pointer(trig_value), _vp))
+            special = ctypes.cast(ctypes.pointer(trig_info), _vp)
         stage = _StageCreate(18, None, 0, _STAGE_COMPUTE, module,
-                             b"main", None)
+                             b"main", special)
         cp_info = _ComputePipelineCreate(29, None, 0, stage, layout, None, 0)
         pipe = _vp()
         _check(vk.vkCreateComputePipelines(self.device, None, 1,
@@ -732,7 +755,7 @@ class Context(InputUploads):
                 # [0], so the count never has to reach the host and this
                 # stays one recorded command buffer.
                 "surv":  _Buffer(self, pairs * 4),
-                "args":  _Buffer(self, 12, usage=_BUF_STORAGE | _BUF_INDIRECT),
+                "args":  _Buffer(self, 12, usage=_BUF_STORAGE | _BUF_INDIRECT | _BUF_TRANSFER_DST),
                 "idx":   _Buffer(self, nd * nt * nbins * 4, readback=True),
                 "val":   _Buffer(self, nd * nt * nbins * 8, readback=True),
             }
@@ -800,9 +823,10 @@ class Context(InputUploads):
                 # while this dispatched for tile 1.
                 vk.vkCmdDispatch(cmd, pairs // (_ppg * _tile), 1, 1)
 
-        def barrier():
-            mb = _MemBarrier(46, None, _ACCESS_SHADER_WRITE, _ACCESS_SHADER_READ)
-            vk.vkCmdPipelineBarrier(cmd, _STAGE_COMPUTE_BIT, _STAGE_COMPUTE_BIT,
+        def barrier(src_stage=_STAGE_COMPUTE_BIT, dst_stage=_STAGE_COMPUTE_BIT,
+                    src_access=_ACCESS_SHADER_WRITE, dst_access=_ACCESS_SHADER_READ):
+            mb = _MemBarrier(46, None, src_access, dst_access)
+            vk.vkCmdPipelineBarrier(cmd, src_stage, dst_stage,
                                     0, 1, ctypes.byref(mb), 0, None, 0, None)
 
         # Pairs that do not survive are never visited now, so their -1 has
@@ -814,7 +838,12 @@ class Context(InputUploads):
         # slots the refine is about to fill anyway.
         vk.vkCmdFillBuffer(cmd, b["args"].handle, 0, 4, 0)   # count starts at 0
         vk.vkCmdFillBuffer(cmd, b["args"].handle, 4, 8, 1)   # y = z = 1
-        barrier()
+        # Compaction atomically updates the filled count, and indirect fetch
+        # reads all three words. With zero survivors, even the count remains
+        # a transfer-only write: the later shader-write barrier cannot cover it.
+        barrier(src_stage=_STAGE_TRANSFER_BIT, src_access=_ACCESS_TRANSFER_WRITE,
+                dst_stage=_STAGE_COMPUTE_BIT | _STAGE_DRAW_INDIRECT_BIT,
+                dst_access=_ACCESS_SHADER_READ | _ACCESS_SHADER_WRITE | _ACCESS_INDIRECT_READ)
 
         if shared_data:
             vk.vkCmdBindPipeline(cmd, _BIND_POINT_COMPUTE, ppipe)
@@ -840,7 +869,11 @@ class Context(InputUploads):
         vk.vkCmdPushConstants(cmd, klayout, _STAGE_COMPUTE, 0, 12,
                               ctypes.byref(kpc))
         vk.vkCmdDispatch(cmd, (pairs + 255) // 256, 1, 1)
-        barrier()
+        # The count is consumed by indirect-command fetch, not by a shader.
+        # Missing this dependency made Intel use the previous dispatch count
+        # (zero on first use), even while the host read the new count later.
+        barrier(dst_stage=_STAGE_COMPUTE_BIT | _STAGE_DRAW_INDIRECT_BIT,
+                dst_access=_ACCESS_SHADER_READ | _ACCESS_SHADER_WRITE | _ACCESS_INDIRECT_READ)
 
         vk.vkCmdBindPipeline(cmd, _BIND_POINT_COMPUTE, rpipe)
         sets = (_vp * 1)(ds_listed)
@@ -852,6 +885,7 @@ class Context(InputUploads):
         vk.vkCmdPushConstants(cmd, rlayout, _STAGE_COMPUTE, 0,
                               _PUSH_BYTES, ctypes.byref(pc))
         vk.vkCmdDispatchIndirect(cmd, b["args"].handle, 0)
+        barrier(dst_stage=_STAGE_HOST_BIT, dst_access=_ACCESS_HOST_READ)
         _check(vk.vkEndCommandBuffer(cmd), "vkEndCommandBuffer")
         return b, cmd
 

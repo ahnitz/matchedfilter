@@ -196,7 +196,7 @@ def build_full_tierc(slangc):
                 src.write_text(source)
                 proc = subprocess.run(
                     [slangc, str(src), '-I', str(KERNEL.parent), '-target', target,
-                     '-entry', entry, '-stage', 'compute', '-O3', '-o', str(dst)],
+                     '-entry', entry, '-stage', 'compute', '-O3', *(['-DMF_VULKAN=1'] if target == 'spirv' else []), '-o', str(dst)],
                     capture_output=True, text=True)
                 src.unlink()
                 if proc.returncode:
@@ -358,7 +358,7 @@ def compile_one(slangc, n, outdir, entry=ENTRY, cap=None, suffix="", coarse16=0,
     spv = outdir / name
     proc = subprocess.run(
         [slangc, str(src), "-I", str(KERNEL.parent), "-target", "spirv", "-entry", entry,
-         "-stage", "compute", "-O3", "-o", str(spv)],
+         "-stage", "compute", "-O3", "-DMF_VULKAN=1", "-o", str(spv)],
         capture_output=True, text=True)
     if proc.returncode != 0:
         raise RuntimeError("slangc failed for n=%d %s:\n%s"
@@ -370,7 +370,7 @@ def compile_one(slangc, n, outdir, entry=ENTRY, cap=None, suffix="", coarse16=0,
 def source_hashes():
     """Fingerprint all production shader dependencies for freshness checks."""
     names = ('tierb.slang', 'fft_transform.slang', 'coarse_tile.slang',
-             'series_forward.slang', 'pack_coarse.slang')
+             'series_forward.slang', 'pack_coarse.slang', 'twiddle.slang')
     return {name: hashlib.sha256((KERNEL.parent / name).read_bytes()).hexdigest()
             for name in names}
 
@@ -397,7 +397,7 @@ def main(argv=None):
         spv = OUT / ("coarse_%d.spv" % band)
         proc = subprocess.run(
             [slangc, str(src), "-I", str(KERNEL.parent), "-target", "spirv", "-entry", "coarseTile",
-             "-stage", "compute", "-O3", "-o", str(spv)],
+             "-stage", "compute", "-O3", "-DMF_VULKAN=1", "-o", str(spv)],
             capture_output=True, text=True)
         if proc.returncode != 0:
             raise RuntimeError("slangc failed for coarse band=%d:\n%s"
@@ -408,7 +408,7 @@ def main(argv=None):
         csrc.write_text("#define NBAND %d\n#define RPT %d\n" % (band, rpt)
                         + COARSE_KERNEL.read_text())
         cm = MSL / ("coarse_%d.metal" % band)
-        r = subprocess.run([slangc, str(csrc), "-target", "metal",
+        r = subprocess.run([slangc, str(csrc), "-I", str(KERNEL.parent), "-target", "metal",
                             "-entry", "coarseTile", "-stage", "compute",
                             "-O3", "-o", str(cm)],
                            capture_output=True, text=True)
