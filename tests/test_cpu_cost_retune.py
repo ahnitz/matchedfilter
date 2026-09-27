@@ -1,6 +1,9 @@
 """CPU cost regeneration must preserve cells outside a targeted repair."""
 import importlib.util
 import json
+import subprocess
+
+import pytest
 from pathlib import Path
 
 
@@ -44,3 +47,24 @@ def test_targeted_repair_keeps_other_measured_groups(tmp_path):
                  '--repair-outliers'])
     assert {int(line.split()[1]) for line in output.read_text().splitlines()
             if line.startswith('COST ')} == {1024, 2048}
+
+
+def test_archive_does_not_use_ancestor_git_metadata(tmp_path, monkeypatch):
+    module = _module()
+    monkeypatch.setattr(module, 'ROOT', tmp_path)
+    def unexpected(*args, **kwargs):
+        pytest.fail('an archive must not query an ancestor repository')
+    monkeypatch.setattr(module.subprocess, 'check_output', unexpected)
+    assert module._commit() == 'unknown'
+
+
+@pytest.mark.parametrize('error', [FileNotFoundError('git'),
+                                  subprocess.CalledProcessError(128, 'git')])
+def test_commit_metadata_is_optional(tmp_path, monkeypatch, error):
+    module = _module()
+    (tmp_path / '.git').mkdir()
+    monkeypatch.setattr(module, 'ROOT', tmp_path)
+    def unavailable(*args, **kwargs):
+        raise error
+    monkeypatch.setattr(module.subprocess, 'check_output', unavailable)
+    assert module._commit() == 'unknown'

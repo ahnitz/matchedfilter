@@ -239,3 +239,10 @@ larger GPU kernels were committed; it was not a support limit. Separate stale
 README/usage paragraphs also retained the earlier range after size support
 expanded. The overview, API introduction and usage table now agree with the
 implemented CPU 64–1048576 and GPU 64–65536 ranges.
+
+Version 0.1.0a5 also makes Git provenance optional in CPU cost regeneration.
+Source archives have no `.git` metadata; measurements record `unknown` rather
+than failing or using an unrelated ancestor checkout. Regression tests cover
+archives, missing Git executables, and failing Git commands. Local release
+validation must extract into a temporary directory outside any Git checkout,
+matching CI; extracting under the repository can hide this dependency.
