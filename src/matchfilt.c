@@ -329,8 +329,8 @@ static int run_pairs_pb(ap_mf_plan *p, int d0, int nd, int t0, int nt,
         }
         Tr=p->tsr; Ti=p->tsi;
       }
-      if(ap_binmax_prod_batch(p->fft,Dr,Di,Tr,Ti,cnt,binsize,threshold,
-                              p->pkbuf,NULL,AP_BACKWARD,start,end)<0) return -1;
+      if(ap_binmax_prod_batch_peaks(p->fft,Dr,Di,Tr,Ti,cnt,binsize,threshold,
+                              p->pkbuf,AP_BACKWARD,start,end)<0) return -1;
       for(int l=0;l<cnt;l++){
         const int t = tsel ? tsel[tt+l] : (tt+l);
         const size_t row=(size_t)d*nt+t;

@@ -63,10 +63,11 @@ float ap_interp_max(ap_plan *p, size_t ws, size_t we, float evmax,
 int ap_plan_pairbatch(const ap_plan *p);
 /* Data is scalar [element] iff ap_plan_broadcast_data; otherwise lane-expanded. */
 int ap_plan_broadcast_data(const ap_plan *p);
-int ap_binmax_prod_batch(ap_plan *p, const float *dr, const float *di,
+/* Peak-only batch: 0 on success, -1 on error; the bank owns crossing counts. */
+int ap_binmax_prod_batch_peaks(ap_plan *p, const float *dr, const float *di,
                          const float *tr, const float *ti, int nlane,
                          size_t binsize, float threshold, ap_peak *peaks,
-                         int *counts, int sign, size_t start, size_t end);
+                         int sign, size_t start, size_t end);
 
 int ap_binmax_prod(ap_plan *p, const float *dr, const float *di,
                    const float *tr, const float *ti,
