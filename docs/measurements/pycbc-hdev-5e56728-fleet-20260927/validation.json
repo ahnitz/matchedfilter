@@ -1,0 +1,32 @@
+{
+  "dev1": {
+    "trigger_count": 4386,
+    "identities_equal": true,
+    "max_abs_snr_delta": 2.384185791015625e-06
+  },
+  "dev2": {
+    "trigger_count": 4386,
+    "identities_equal": true,
+    "max_abs_snr_delta": 1.9073486328125e-06
+  },
+  "dev3": {
+    "trigger_count": 4386,
+    "identities_equal": true,
+    "max_abs_snr_delta": 2.384185791015625e-06
+  },
+  "dev4": {
+    "trigger_count": 4386,
+    "identities_equal": true,
+    "max_abs_snr_delta": 2.384185791015625e-06
+  },
+  "su2": {
+    "trigger_count": 4386,
+    "identities_equal": true,
+    "max_abs_snr_delta": 2.384185791015625e-06
+  },
+  "haswell": {
+    "trigger_count": 4386,
+    "identities_equal": true,
+    "max_abs_snr_delta": 2.384185791015625e-06
+  }
+}
