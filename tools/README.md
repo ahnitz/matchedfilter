@@ -44,3 +44,15 @@ peak lengths by default, and reports FFTW/MKL references when installed. The
 series workload driver complements it with automatic peak and continuous
 output. Shared CI runner timing is recorded for comparison over time, not
 used as a pass/fail speed threshold.
+
+The teaser driver also runs on macOS, using FFTW and MLX as FFT-only references.
+Use a NEON-enabled FFTW build for the M2 comparison; the driver records the
+library's SIMD build tags. To compare two saved teaser runs on common axes:
+
+```bash
+python tools/teaser_figure.py --compare m2.json amd.json --out comparison.svg
+```
+
+See [the M2/Zen 5 work accounting](../docs/measurements/m2-teaser-headroom.md)
+for measured timings, arithmetic and memory estimates, and observed selection
+costs that leave room for improvement.
