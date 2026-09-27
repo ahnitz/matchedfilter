@@ -236,7 +236,7 @@ class SRGen(Gen):
             X[k+3*q]  = s.sub(U[k+q], mdf)
         return X
 
-def build_sr(n,name,tw=False,prod=False):
+def build_sr(n,name,tw=False,prod=False,unit=False):
     g=SRGen(n,name,tw,False,prod)
     X=g.rec(list(range(n)))
     for k in range(n):
@@ -252,6 +252,14 @@ def build_sr(n,name,tw=False,prod=False):
         args="vf*restrict ar,vf*restrict ai,vf*restrict br,vf*restrict bi,const long S,const float*restrict twr,const float*restrict twi"
     else:
         args="vf*restrict ar,vf*restrict ai,vf*restrict br,vf*restrict bi,const long S"
+    if unit:
+        # A separate function lets the compiler fold element addresses without
+        # forcing the large generic DAG into every caller. Keep the signature
+        # shared with the generic codelet; dispatch verifies these strides.
+        args=args.replace("const long S", "const long unused_S")
+        args=args.replace("const long DS", "const long unused_DS")
+        body=("  (void)unused_S; const long S=1;\n" +
+              ("  (void)unused_DS; const long DS=AP_W;\n" if prod else "") + body)
     return ("static inline int %s(%s){\n  (void)br;(void)bi;\n  const vf Z=V_ZERO();\n%s\n%s\n  return 0;\n}\n"
             )%(name,args,cdefs,body)
 
@@ -303,6 +311,11 @@ if __name__=="__main__":
         out.append(broadcast_codelet(build(nn,rr,"fft%d_prod_broadcast"%nn,prod=True)))
     for nn in (16,32,64):
         out.append(broadcast_codelet(build_sr(nn,"fftsr%d_prod_broadcast"%nn,prod=True)))
+    # Unit-stride AVX2 codelets are measured separately from strided/broadcast
+    # layouts. Dispatch keeps other widths on their established implementation.
+    out.append(build_sr(32,"fftsr32_unit",unit=True))
+    out.append(build_sr(32,"fftsr32_prod_unit",prod=True,unit=True))
+    out.append(broadcast_codelet(build_sr(32,"fftsr32_prod_unit_broadcast",prod=True,unit=True)))
     out += ["}  // namespace HWY_NAMESPACE", "}  // namespace ap",
             "HWY_AFTER_NAMESPACE();", "", "#endif"]
     open("codelets-inl.h","w").write("\n".join(out))
