@@ -2,7 +2,10 @@
 
 Alpha releases may change the API. Pin a version for reproducible work.
 
-## 0.1.0a2 (unreleased)
+## 0.1.0a3
+
+The earlier `v0.1.0a2` tag was not published to PyPI; this release includes
+those changes and the subsequent fixes below.
 
 This alpha adds Vulkan and Metal GPU execution, full correlation output,
 and consistent overlap-save interfaces alongside the existing CPU peak filters.
