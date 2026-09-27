@@ -486,3 +486,30 @@ GPU checks, repeated cross-ISA timing controls and hosted CI are being recorded
 before declaring the branch ready to merge. The previously measured intermediate
 bank-selection build also improves the doubled-amplitude capture (high survivor
 fraction) by 3.0%; that measurement is retained with its own binary hash.
+
+### Final small-bank cleanup
+
+The pair-batched bank already counts crossings while scattering its scratch
+peaks. Its internal transform wrapper redundantly counted the same peaks, and
+the sole caller discarded that total and passed a null counts pointer. Replace
+that unused internal count interface with a peak-only status interface. Public
+`MatchedFilter` counts still come from the bank's existing scatter loop. This
+avoids adding another per-bank binding or keeping a second count pass alive.
+
+A production-flag local comparison against current `main` covers SSE4, AVX2 and
+AVX-512 at lengths 64 and 256, with 1, 37 and 128 templates. The formerly slower
+SSE4/64/37 case now measures 1.002x; AVX2/64/128 and AVX-512/64/128 improve by
+4.4% and 4.5%. All 18 cases lie between 0.985x and 1.045x. The 45-case whole-branch
+screen against main spans 64 through 4096 and those same SIMD widths/bank sizes;
+longer repeats remove the initially larger AVX-512 slowdowns. The hierarchical
+1024/128 AVX-512 outlier repeats at 1.009x rather than the initial 0.892x.
+These are measured controls, not a guarantee of identical timing on all CPUs.
+
+Compiler flags must match: Python 3.13 builds here use `-fno-strict-overflow`,
+while Python 3.11 on Haswell uses `-fwrapv`. Quick manually compiled C-only probes
+without those flags showed misleading differences and are not acceptance data.
+`mf-build-pbscan-exact.py` replays the local build flags; `mf-build-merge.py`
+uses the Haswell interpreter's production `CFLAGS`. Intermediate `sinkfinal`
+and `sinkbound` remote C-only builds omitted that flag; their results are
+historical experiments, superseded by the final `merge` build. Earlier
+`sinkgate` full-search measurements retained the original production C objects.

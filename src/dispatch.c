@@ -102,25 +102,17 @@ int ap_plan_broadcast_data(const ap_plan *p){
   return p && p->be->broadcast_data && p->be->broadcast_data(p->h);
 }
 
-int ap_binmax_prod_batch(ap_plan *p,const float *dr,const float *di,
+int ap_binmax_prod_batch_peaks(ap_plan *p,const float *dr,const float *di,
                          const float *tr,const float *ti,int nlane,
                          size_t binsize,float threshold,ap_peak *peaks,
-                         int *counts,int sign,size_t start,size_t end){
+                         int sign,size_t start,size_t end){
   if(!p||!binsize||nlane<1) return -1;
   if(end>p->n) end=p->n;
   if(start>=end) return 0;
   if(!p->be->binmax_prod_batch) return -1;
-  const size_t nb=(end-start+binsize-1)/binsize;
-  if(p->be->binmax_prod_batch(p->h,dr,di,tr,ti,nlane,binsize,threshold,peaks,
-                              sign==AP_BACKWARD,start,end)<0) return -1;
-  int total=0;
-  for(int l=0;l<nlane;l++){
-    int c=0;
-    for(size_t j=0;j<nb;j++) if(peaks[(size_t)l*nb+j].index>=0) c++;
-    if(counts) counts[l]=c;
-    total+=c;
-  }
-  return total;
+  /* The bank counts while scattering these peaks; do not scan them twice. */
+  return p->be->binmax_prod_batch(p->h,dr,di,tr,ti,nlane,binsize,threshold,
+                                 peaks,sign==AP_BACKWARD,start,end);
 }
 
 int ap_binmax_prod(ap_plan *p,const float *dr,const float *di,
