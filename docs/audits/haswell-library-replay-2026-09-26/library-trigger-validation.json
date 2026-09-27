@@ -1,0 +1,246 @@
+{
+  "triggers-pinned-1.hdf": {
+    "count": 4386,
+    "fields": {
+      "bank_chisq": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "bank_chisq_dof": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "chisq": {
+        "exact": false,
+        "max_abs_difference": 9.1552734375e-05
+      },
+      "chisq_dof": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "coa_phase": {
+        "exact": false,
+        "max_abs_difference": 4.76837158203125e-07
+      },
+      "cont_chisq": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "cont_chisq_dof": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "end_time": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "psd_var_val": {
+        "exact": false,
+        "max_abs_difference": 0.10289287567138672
+      },
+      "sg_chisq": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "sigmasq": {
+        "exact": false,
+        "max_abs_difference": 3.0
+      },
+      "snr": {
+        "exact": false,
+        "max_abs_difference": 2.384185791015625e-06
+      },
+      "template_duration": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "template_hash": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      }
+    }
+  },
+  "triggers-pinned-2.hdf": {
+    "count": 4386,
+    "fields": {
+      "bank_chisq": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "bank_chisq_dof": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "chisq": {
+        "exact": false,
+        "max_abs_difference": 8.392333984375e-05
+      },
+      "chisq_dof": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "coa_phase": {
+        "exact": false,
+        "max_abs_difference": 4.76837158203125e-07
+      },
+      "cont_chisq": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "cont_chisq_dof": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "end_time": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "psd_var_val": {
+        "exact": false,
+        "max_abs_difference": 0.14767146110534668
+      },
+      "sg_chisq": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "sigmasq": {
+        "exact": false,
+        "max_abs_difference": 3.0
+      },
+      "snr": {
+        "exact": false,
+        "max_abs_difference": 3.337860107421875e-06
+      },
+      "template_duration": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "template_hash": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      }
+    }
+  },
+  "triggers-pinned-3.hdf": {
+    "count": 4386,
+    "fields": {
+      "bank_chisq": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "bank_chisq_dof": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "chisq": {
+        "exact": false,
+        "max_abs_difference": 9.1552734375e-05
+      },
+      "chisq_dof": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "coa_phase": {
+        "exact": false,
+        "max_abs_difference": 4.76837158203125e-07
+      },
+      "cont_chisq": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "cont_chisq_dof": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "end_time": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "psd_var_val": {
+        "exact": false,
+        "max_abs_difference": 0.14767146110534668
+      },
+      "sg_chisq": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "sigmasq": {
+        "exact": false,
+        "max_abs_difference": 3.0
+      },
+      "snr": {
+        "exact": false,
+        "max_abs_difference": 2.384185791015625e-06
+      },
+      "template_duration": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "template_hash": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      }
+    }
+  },
+  "triggers-profile.hdf": {
+    "count": 4386,
+    "fields": {
+      "bank_chisq": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "bank_chisq_dof": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "chisq": {
+        "exact": false,
+        "max_abs_difference": 9.918212890625e-05
+      },
+      "chisq_dof": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "coa_phase": {
+        "exact": false,
+        "max_abs_difference": 4.76837158203125e-07
+      },
+      "cont_chisq": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "cont_chisq_dof": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "end_time": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "psd_var_val": {
+        "exact": false,
+        "max_abs_difference": 0.14767146110534668
+      },
+      "sg_chisq": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "sigmasq": {
+        "exact": false,
+        "max_abs_difference": 1.0
+      },
+      "snr": {
+        "exact": false,
+        "max_abs_difference": 2.384185791015625e-06
+      },
+      "template_duration": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "template_hash": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      }
+    }
+  }
+}
