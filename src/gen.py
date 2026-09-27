@@ -282,13 +282,18 @@ def build_sr(n,name,tw=False,prod=False,unit=False,inplace=False):
         # A separate function lets the compiler fold element addresses without
         # forcing the large generic DAG into every caller. Keep the signature
         # shared with the generic codelet; dispatch verifies these strides.
+        # Unary negation does not need Haswell's add/subtract pipeline. The
+        # numeric contract does not distinguish the sign of a zero result.
+        body=re.sub(r"V_SUB\(Z,(\w+)\)", r"V_XOR(\1,V_SIGNMASK())", body)
+        assert not re.search(r"\bZ\b", body)
         args=args.replace("const long S", "const long unused_S")
         args=args.replace("const long DS", "const long unused_DS")
         body=("  (void)unused_S; const long S=1;\n" +
               ("  (void)S;\n" if inplace else "") +
               ("  (void)unused_DS; const long DS=AP_W;\n" if prod else "") + body)
-    return ("static inline int %s(%s){\n  (void)br;(void)bi;\n  const vf Z=V_ZERO();\n%s\n%s\n  return 0;\n}\n"
-            )%(name,args,cdefs,body)
+    zero_decl = "" if unit else "  const vf Z=V_ZERO();\n"
+    return ("static inline int %s(%s){\n  (void)br;(void)bi;\n%s%s\n%s\n  return 0;\n}\n"
+            )%(name,args,zero_decl,cdefs,body)
 
 
 def broadcast_codelet(source):
