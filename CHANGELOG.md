@@ -2,6 +2,22 @@
 
 Alpha releases may change the API. Pin a version for reproducible work.
 
+## 0.1.0a6
+
+- Optimize the Haswell hierarchical coarse path with specialized FFT32
+  codelets, reduced intermediate traffic, and fused thresholded peak reduction.
+  The measured complete search reaches about 349,000 template-seconds/s/core,
+  roughly 1.56x the neighboring original baseline. These are workload-specific
+  measurements; see [the evidence and controls](docs/haswell-series-grouping.md).
+- Add a shared measured execution-policy table for CPU/GPU scheduling. The
+  initial rule selects a smaller series group for the measured Haswell workload;
+  uncovered devices retain their existing scheduling defaults.
+- Bind balanced product kernels once per bank and avoid counting pair-batched
+  peaks twice. Calibration tables and thresholds are unchanged.
+- Fix blocked stage-B intermediate indexing and test reused plans, partial
+  windows, signed zero, full output, peak counts, and CPU calibration transfer.
+  The coarse FDR guard explicitly exercises AVX2 on wider CPU hosts.
+
 ## 0.1.0a3
 
 The earlier `v0.1.0a2` tag was not published to PyPI; this release includes
