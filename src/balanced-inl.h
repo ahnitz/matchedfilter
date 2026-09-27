@@ -460,7 +460,26 @@ static AP_ALWAYS_INLINE void stageA_tail(BP*p,int g,vf*restrict TR,vf*restrict T
   for(int b=0;b<N2/AP_W;b++){
     {
       const float *sc=p->scg+2*((size_t)g*N2+AP_W*b);
-      for(int t=0;t<AP_W;t++){
+      int t=0;
+      for(;t+1<AP_W;t+=2){
+        int k2_0=AP_W*b+t;
+        int k2_1=AP_W*b+t+1;
+        vf SR0=V_SET1(sc[2*t]), SI0=V_SET1(sc[2*t+1]);
+        vf SR1=V_SET1(sc[2*t+2]), SI1=V_SET1(sc[2*t+3]);
+        vf tr0=V_FMSUB(SR0,p->TLr[k2_0],V_MUL(SI0,p->TLi[k2_0]));
+        vf ti0=V_FMADD(SR0,p->TLi[k2_0],V_MUL(SI0,p->TLr[k2_0]));
+        vf tr1=V_FMSUB(SR1,p->TLr[k2_1],V_MUL(SI1,p->TLi[k2_1]));
+        vf ti1=V_FMADD(SR1,p->TLi[k2_1],V_MUL(SI1,p->TLr[k2_1]));
+        int eb0=FIXED ? k2_0 : eidx(&p->eb,k2_0);
+        int eb1=FIXED ? k2_1 : eidx(&p->eb,k2_1);
+        vf xr0=RR[eb0], xi0=RI[eb0];
+        vf xr1=RR[eb1], xi1=RI[eb1];
+        TR[t]=V_FMSUB(xr0,tr0,V_MUL(xi0,ti0));
+        TI[t]=V_FMADD(xr0,ti0,V_MUL(xi0,tr0));
+        TR[t+1]=V_FMSUB(xr1,tr1,V_MUL(xi1,ti1));
+        TI[t+1]=V_FMADD(xr1,ti1,V_MUL(xi1,tr1));
+      }
+      for(;t<AP_W;t++){
         int k2=AP_W*b+t;
         vf SR=V_SET1(sc[2*t]),SI=V_SET1(sc[2*t+1]);
         vf tr=V_FMSUB(SR,p->TLr[k2],V_MUL(SI,p->TLi[k2]));
@@ -587,7 +606,17 @@ static void stageA_prod_gm(BP*p,const float*dr,const float*di,
         const size_t o0=gb+(size_t)e2*M1*AP_W;
         const float *ar=dr+o0,*ai=di+o0,*br=tr+o0,*bi=ti+o0;
         vf *dR=p->bR+(size_t)e2*st, *dI=p->bI+(size_t)e2*st;
-        for(int e1=0;e1<M1;e1++){
+        int e1=0;
+        for(;e1+1<M1;e1+=2){
+          vf x0=V_LOADU(ar), y0=V_LOADU(ai), u0=V_LOADU(br), v0=V_LOADU(bi);
+          vf x1=V_LOADU(ar+AP_W), y1=V_LOADU(ai+AP_W), u1=V_LOADU(br+AP_W), v1=V_LOADU(bi+AP_W);
+          dR[e1]=V_FMSUB(x0,u0,V_MUL(y0,v0));
+          dI[e1]=V_FNMSUB(x0,v0,V_MUL(y0,u0));
+          dR[e1+1]=V_FMSUB(x1,u1,V_MUL(y1,v1));
+          dI[e1+1]=V_FNMSUB(x1,v1,V_MUL(y1,u1));
+          ar+=2*AP_W; ai+=2*AP_W; br+=2*AP_W; bi+=2*AP_W;
+        }
+        for(;e1<M1;e1++){
           vf x=V_LOADU(ar), y=V_LOADU(ai), u=V_LOADU(br), v=V_LOADU(bi);
           dR[e1]=V_FMSUB(x,u,V_MUL(y,v));
           dI[e1]=V_FNMSUB(x,v,V_MUL(y,u));
@@ -765,7 +794,30 @@ static void small_scan(BP*p,size_t binsize,float thr,ap_peak*out,size_t ostride,
 
   if(nb==1){
     vf bmx0=seed, bre0=zero, bim0=zero; vi bix0=nix;
-    for(size_t k=ws;k<we;k++){
+    size_t k=ws;
+    for(;k+1<we;k+=2){
+      const int e0=eidx(&p->ea,(int)k);
+      const int e1=eidx(&p->ea,(int)(k+1));
+      const vf xr0=p->bR[e0], xi0=p->bI[e0];
+      const vf xr1=p->bR[e1], xi1=p->bI[e1];
+      const vf m2_0=V_FMADD(xr0,xr0,V_MUL(xi0,xi0));
+      const vf m2_1=V_FMADD(xr1,xr1,V_MUL(xi1,xi1));
+      const vm g0=V_CMP_GT(m2_0,bmx0);
+      if(__builtin_expect(V_MASK_ANY(g0),0)){
+        bmx0=V_SEL(g0,bmx0,m2_0);
+        bre0=V_SEL(g0,bre0,xr0);
+        bim0=V_SEL(g0,bim0,xi0);
+        bix0=VI_SEL(g0,bix0,VI_SET1((int)k));
+      }
+      const vm g1=V_CMP_GT(m2_1,bmx0);
+      if(__builtin_expect(V_MASK_ANY(g1),0)){
+        bmx0=V_SEL(g1,bmx0,m2_1);
+        bre0=V_SEL(g1,bre0,xr1);
+        bim0=V_SEL(g1,bim0,xi1);
+        bix0=VI_SEL(g1,bix0,VI_SET1((int)(k+1)));
+      }
+    }
+    for(;k<we;k++){
       const int e=eidx(&p->ea,(int)k);
       const vf xr=p->bR[e], xi=p->bI[e];
       const vf m2=V_FMADD(xr,xr,V_MUL(xi,xi));
@@ -878,36 +930,50 @@ static int bins_reserve(BP*p,size_t nb){
 #define MF_PEAK_SECTION
 #endif
 
-/* The common coarse pass needs only a peak. Consume the final FFT values
-   directly; preserve the materializing path for callers requesting a series. */
-static HWY_NOINLINE MF_PEAK_SECTION void peak_update32(vf rr,vf ii,vf m,long k,
-                                      size_t ws,size_t we,int conj,ap_peak*out){
-  float mv[AP_W],rv[AP_W],iv[AP_W];
-  V_STOREU(mv,m); V_STOREU(rv,rr); V_STOREU(iv,ii);
-  for(int l=0;l<AP_W;l++) if(k+l>=(long)ws && k+l<(long)we && mv[l]>out->magnitude){
-    out->index=k+l; out->re=rv[l]; out->im=conj?-iv[l]:iv[l];
-    out->magnitude=mv[l];
-  }
-}
-
-static HWY_NOINLINE MF_PEAK_SECTION void stageB_peak32(BP*p,int b,ap_peak*out,
-                                      int conj,size_t ws,size_t we){
-  const float *ar=p->ire+(size_t)b*32*AP_W;
-  const float *ai=p->iim+(size_t)b*32*AP_W;
-  fftsr32_unit_sink(ar,ai,p->sR,p->sI,1,[=](int k1,vf rr,vf ii){
-    const long k=(long)k1*32+b*AP_W;
-    if(k>=(long)we || k+AP_W<=(long)ws) return;
-    const vf m=V_FMADD(rr,rr,V_MUL(ii,ii));
-    if(__builtin_expect(V_MASK_ANY(V_CMP_GT(m,V_SET1(out->magnitude))),0))
-      peak_update32(rr,ii,m,k,ws,we,conj,out);
-  });
-}
-
 static HWY_NOINLINE MF_PEAK_SECTION void binmax_fused32(BP*p,float thr,ap_peak*out,int conj,size_t ws,size_t we){
-  out->index=-1; out->re=0.f; out->im=0.f;
-  out->magnitude=thr>0.f ? thr*thr : 0.f;
-  for(int b=0;b<32/AP_W;b++) stageB_peak32(p,b,out,conj,ws,we);
-  out->magnitude=out->index>=0 ? sqrtf(out->magnitude) : 0.f;
+  const float t2 = thr>0.f ? thr*thr : 0.f;
+  vf am = V_SET1(t2), arr = V_ZERO(), aii = V_ZERO();
+  vi axx = VI_SET1(-1);
+  const unsigned allm = (unsigned)((1ull<<AP_W)-1ull);
+
+  for(int b=0;b<32/AP_W;b++){
+    const float *ar=p->ire+(size_t)b*32*AP_W;
+    const float *ai=p->iim+(size_t)b*32*AP_W;
+    fftsr32_unit_sink(ar,ai,p->sR,p->sI,1,[&](int k1,vf rr,vf ii){
+      const long k=(long)k1*32+b*AP_W;
+      if(k>=(long)we || k+AP_W<=(long)ws) return;
+      unsigned inw = allm;
+      if(k<(long)ws || k+AP_W>(long)we){
+        inw = 0;
+        for(int l=0;l<AP_W;l++){ long kk=k+l; if(kk>=(long)ws && kk<(long)we) inw|=1u<<l; }
+        if(!inw) return;
+      }
+      vf m = V_FMADD(rr,rr,V_MUL(ii,ii));
+      if(inw!=allm) m = V_SEL(V_MASK_FROM_BITS(inw),V_SET1(-1.f),m);
+      vm g = V_CMP_GT(m, am);
+      if(__builtin_expect(V_MASK_ANY(g),0)){
+        am = V_SEL(g, am, m);
+        arr = V_SEL(g, arr, rr);
+        aii = V_SEL(g, aii, ii);
+        axx = VI_SEL(g, axx, VI_SET1((int)k));
+      }
+    });
+  }
+
+  float mv[AP_W], rv[AP_W], iv[AP_W]; int xv[AP_W];
+  V_STOREU(mv, am); V_STOREU(rv, arr); V_STOREU(iv, aii); VI_STOREU(xv, axx);
+  int bl = -1;
+  for(int l=0;l<AP_W;l++){
+    if(xv[l]>=0 && (bl<0 || mv[l]>mv[bl])) bl = l;
+  }
+  if(bl<0){
+    out->index = -1; out->re = 0.f; out->im = 0.f; out->magnitude = 0.f;
+  } else {
+    out->index = (long)xv[bl] + bl;
+    out->re = rv[bl];
+    out->im = conj ? -iv[bl] : iv[bl];
+    out->magnitude = sqrtf(mv[bl]);
+  }
 }
 
 template <bool STORE, bool INPLACE=false>
