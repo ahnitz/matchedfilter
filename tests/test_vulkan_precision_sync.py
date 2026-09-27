@@ -45,9 +45,13 @@ def test_first_dispatch_and_changing_survivor_counts(binsize):
         want = flat.run(binsize=binsize).copy()
         # First use, then zero -> all -> zero -> all survivors on reused
         # storage. Stats alone can be right while indirect execution is stale.
+        total, refined = 0, 0
         for coarse in (0., 1e10, 0., 1e10, 0.):
             hier.set_coarse_threshold(coarse)
             got = hier.run(binsize=binsize)
+            total += 6
+            refined += 0 if coarse else 6
+            assert hier.stats == (total, refined)
             if coarse:
                 assert (got['index'] == -1).all()
                 assert (got['value'] == 0).all()
