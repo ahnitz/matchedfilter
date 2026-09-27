@@ -58,8 +58,21 @@ Optimizing bookkeeping around the lower call cannot remove more than its
 Inside the lower kernel, coarse transforms and their peak reduction take
 about 90% of cycles on five hosts. An improvement there has broad leverage.
 Dev2 is different: its AVX3 coarse path is faster relative to refinement,
-making refinement 18.1% of native cycles. A refinement change should be
-measured on dev2 as well as Haswell before generalizing it. These percentages
+making refinement 18.1% of native cycles.
+
+**AVX3 alone does not account for it**, and the table contains the
+counter-example: sugwg-login2 is also AVX3 and shows the ordinary 9.6%. The
+likely discriminator is not the instruction set but the clock it runs at.
+Zen 5 sustains 512-bit work at full frequency; the Cascade Lake part in
+sugwg-login2 downclocks substantially under AVX-512, giving back much of
+the coarse path's advantage and leaving its cycle split looking like the
+AVX2 hosts'. That is consistent with every row here and is NOT measured --
+the achieved frequency was not recorded.
+
+So a refinement change wants measuring on dev2 as well as Haswell, and the
+reason is narrower than "one AVX3 host and one AVX2 host": dev2 is the only
+host in the fleet where the AVX-512 coarse path runs at full rate, so it is
+the only one whose refinement share reflects what that path can do. These percentages
 are cycle shares from instrumented code; they do not imply equal wall-time
 fractions under different CPU clocks or across hosts.
 
@@ -71,6 +84,14 @@ host transfers and dispatches that the library's isolated GPU benchmark
 excludes. Keep the same bank, false-dismissal target, SNR threshold, trigger
 identity check, and steady-segment denominator. Dev1 exposes only a software
 Vulkan renderer; sugwg-login2 and Haswell expose no hardware GPU.
+
+Neither results.json nor the archived logs record the SIMD target the
+library selected, or the frequency it achieved. Both belong in a future
+run: `matchedfilter.backend()` reports the target in one line, and without
+the clock the downclocking reading of sugwg-login2 above stays a hypothesis
+that happens to fit. Two AVX3 hosts differing by a factor of two in
+refinement share is the kind of observation that should be checkable
+against the run's own record.
 
 All searches used the same 5,883-template bank, FFTW, false-dismissal target
 0.001, SNR threshold 5.5, and GPS interval 1000000000–1000002000. The bank
