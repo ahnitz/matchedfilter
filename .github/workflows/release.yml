@@ -52,9 +52,11 @@ jobs:
             xcrun -sdk macosx metallib "${m%.metal}.air" -o "${m%.metal}.metallib"
           done
           rm -f *.air
-          ls -la *.metallib | head -5
+          ls -la *.metallib
           echo "built $(ls *.metallib | wc -l) metallib files"
-      - uses: pypa/cibuildwheel@v2.21.3
+      - uses: pypa/cibuildwheel@v3.4.1
+      - name: Check every promised Python wheel is present
+        run: python3 tools/check_wheels.py wheelhouse --platform ${{ matrix.label }}
       - uses: actions/upload-artifact@v4
         with:
           # One artifact per platform; the publish job merges them.

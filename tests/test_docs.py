@@ -15,6 +15,35 @@ sys.path.insert(0, os.path.join(ROOT, "tools"))
 build_report = pytest.importorskip("build_report")
 
 
+def test_hardware_comparison_has_independent_device_choices(tmp_path):
+    import json
+    import re
+    from teaser_web import fleet_comparison
+    records = []
+    for device in ('cpu', 'gpu'):
+        records.append(dict(host='private-host', cpu='13th Gen Intel(R) Core(TM) i5-13500H',
+                            gpu='Intel(R) Iris(R) Xe Graphics (RPL-P)', device=device,
+                            rows=[dict(kind='full', ms=1, fd=None)], errors=[]))
+    path = tmp_path/'docs/measurements/teaser-fleet-20260926.json'
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps(dict(reports=records)))
+    page = fleet_comparison(tmp_path)
+    choices = re.findall(r'name="fleet-hardware" value="([^"]+)" checked> ([^<]+)', page)
+    assert choices == [('private-host:cpu', 'Core i5-13500H (CPU)'),
+                       ('private-host:gpu', 'Iris Xe Graphics (GPU)')]
+    assert 'id="fleet-scale"' in page and 'id="fleet-shared"' in page
+    assert 'value="linear"' in page and 'value="log"' in page
+    assert any(p[0] == 'comparison.html' for p in build_report.PAGES)
+
+    # Embedded metadata must not terminate its script element.
+    records[0]['cpu'] = '</script><script>alert(1)</script>'
+    path.write_text(json.dumps(dict(reports=records)))
+    page = fleet_comparison(tmp_path)
+    data = re.search(r'id="fleet-records">(.*?)</script>', page, re.S)[1]
+    assert '<' not in data
+    assert json.loads(data)[0]['cpu'] == records[0]['cpu']
+
+
 @pytest.mark.parametrize("line", [
     "|P|^2 -- the energy family, and nothing beats it",   # the real one
     "| not a table either",
