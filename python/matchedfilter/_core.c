@@ -299,8 +299,8 @@ typedef struct { PyObject_HEAD ap_hmf_plan *p; Py_ssize_t n; int nd,nt; ap_peak 
 
 static int HMF_init(HMFObject *self,PyObject *args,PyObject *kw){
   Py_ssize_t n; int nd,nt; double snr,fd; (void)kw;
-  Py_ssize_t band=0; int u=0,k=0;
-  if(!PyArg_ParseTuple(args,"niidd|nii",&n,&nd,&nt,&snr,&fd,&band,&u,&k)) return -1;
+  Py_ssize_t band=0; int u=0,k=0,group=8;
+  if(!PyArg_ParseTuple(args,"niidd|niii",&n,&nd,&nt,&snr,&fd,&band,&u,&k,&group)) return -1;
   /* band and taps are required: the choice belongs to the measured tuning
      tables, which the Python class reads and which refuse rather than guess
      outside their coverage. `u` is accepted and ignored -- the oversample is
@@ -309,7 +309,7 @@ static int HMF_init(HMFObject *self,PyObject *args,PyObject *kw){
   if(!band){ PyErr_SetString(PyExc_ValueError,
       "band and taps are required; HierarchicalFilter picks them "
       "from the tuning tables"); return -1; }
-  self->p = ap_hmf_create_ex((size_t)n,nd,nt,(float)snr,(float)fd,(size_t)band,k);
+  self->p = ap_hmf_create_grouped((size_t)n,nd,nt,(float)snr,(float)fd,(size_t)band,k,group);
   if(!self->p){ PyErr_Format(PyExc_ValueError,
       "no hierarchical plan for n=%zd band=%zd u=%d k=%d",n,band,u,k); return -1; }
   self->n=n; self->nd=nd; self->nt=nt; return 0;
@@ -459,7 +459,12 @@ static PyObject *HMF_set_first_stage(HMFObject *self,PyObject *args){
   Py_RETURN_NONE;
 }
 
+static PyObject *HMF_series_group(HMFObject *self,PyObject *unused){
+  (void)unused; return PyLong_FromLong(ap_hmf_series_group(self->p));
+}
+
 static PyMethodDef HMF_methods[]={
+  {"series_group",(PyCFunction)HMF_series_group,METH_NOARGS,"actual series block group"},
   {"set_data",(PyCFunction)HMF_set_data,METH_VARARGS,"set_data(i, buffer)"},
   {"set_template",(PyCFunction)HMF_set_template,METH_VARARGS,"set_template(i, buffer)"},
   {"set_reference",(PyCFunction)HMF_set_reference,METH_VARARGS,"set_reference(buffer|None)"},

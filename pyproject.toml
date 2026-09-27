@@ -63,7 +63,7 @@ packages = ["matchedfilter"]
 #                  compiler exists; the .metal source travels so a device
 #                  whose library is absent can compile at load time rather
 #                  than refuse.
-matchedfilter = ["*.h", "*.txt", "spirv/*.spv", "spirv/manifest.json",
+matchedfilter = ["*.h", "*.txt", "execution-policy.json", "spirv/*.spv", "spirv/manifest.json",
                  "metal/*.metal", "metal/*.metallib"]
 
 [tool.pytest.ini_options]

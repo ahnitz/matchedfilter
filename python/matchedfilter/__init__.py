@@ -430,6 +430,10 @@ class MatchedFilter:
             limit = min(limit, (1 << 29) // self.n)
         return limit
 
+    def _series_policy(self, operation, band, templates):
+        from ._execution_policy import select
+        return select(self.device, operation, self.n, band, templates)
+
     def _gpu_window(self, D, H, binsize, threshold, start, end):
         nd, nt = D.shape[0], H.shape[0]
         limit = self._gpu_pair_limit()
@@ -702,6 +706,14 @@ class MatchedFilter:
         budget = getattr(self, "_series_batch_bytes", 64 * 1024 * 1024)
         batch = min(nblk, 65535, max(1, self._gpu_pair_limit() // nt),
                     max(1, budget // (8*n + 4 + 12*nt*nb)))
+        if isinstance(self, HierarchicalFilter):
+            band = self._gpu_calibration(threshold)[0]
+            operation = 'hierarchical_series'
+        else:
+            band, operation = 0, 'flat_series'
+        policy = self._series_policy(operation, band, nt)
+        if policy:
+            batch = min(batch, policy['series_group'])
         source_shared = shared_buffer(ser, self._gpu) is not None
         workspace = getattr(self, "_series_workspace", None)
         if workspace is None or workspace[0] != (batch, n):
@@ -827,6 +839,9 @@ class CorrelationFilter(MatchedFilter):
         per_block = 8 * self.n * ((1 + nt) if self.n > 65536 else 1)
         batch = max(1, min(starts.size, self._gpu_pair_limit() // nt,
                            budget // per_block))
+        policy = self._series_policy('correlation_series', 0, nt)
+        if policy:
+            batch = min(batch, policy['series_group'])
         key = (batch, nt, self.n, ser.size)
         work = getattr(self, '_continuous_workspace', None)
         if work is None or work[0] != key:
@@ -1416,10 +1431,14 @@ class HierarchicalFilter(MatchedFilter):
         else:
             self._defer = False
             self._pinned = (int(band), int(taps or 8))
-            self._mf = _core.HMF(self.n, self.ndata, self.ntemplates, self.snr,
-                                 self.fd, self._pinned[0], 1, self._pinned[1])
+            self._mf = self._new_cpu_plan(*self._pinned)
             if self._cal_thr is not None:
                 self._mf.set_threshold(self._cal_thr)
+
+    def _new_cpu_plan(self, band, taps):
+        self._execution_policy = self._series_policy('hierarchical_series', band, self.ntemplates)
+        return _core.HMF(self.n, self.ndata, self.ntemplates, self.snr, self.fd,
+                         int(band), 1, int(taps), self._execution_policy.get('series_group', 8))
 
     def _ensure(self):
         """Build the plan, choosing its configuration if that was deferred.
@@ -1479,8 +1498,7 @@ class HierarchicalFilter(MatchedFilter):
                         % (self.n, _BEFF_MIN))
             raise ValueError(_uncovered_message(self.n, self.snr, self.fd))
         b, k = cfg
-        self._mf = _core.HMF(self.n, self.ndata, self.ntemplates,
-                             self.snr, self.fd, int(b), 1, int(k))
+        self._mf = self._new_cpu_plan(b, k)
         tv = self._coarse_value(b, required=False)
         if tv is not None:
             self._mf.set_threshold(tv)

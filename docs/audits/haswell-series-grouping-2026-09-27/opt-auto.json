@@ -1,0 +1,88 @@
+{
+  "fixture": "/home/ahnitz/pycbc-wider-cpu-benchmark-20260926/hosts/og-node-169/capture/hier-00.npz",
+  "fixture_sha256": "525c471a333578647da340e37a3425b7ed38da0849611eda5daddd274541b202",
+  "package": "/home/ahnitz/pycbc-wider-cpu-benchmark-20260926/venv/lib/python3.11/site-packages/matchedfilter/__init__.py",
+  "version": "0.1.0a3",
+  "backend": "AVX2",
+  "core_sha256": "2d2769116d48e09eca57889d4e01c44592293d77f35116cb5c1c9dc20b960981",
+  "environment": {},
+  "affinity": [
+    3
+  ],
+  "profile": false,
+  "n": 4096,
+  "templates": 64,
+  "blocks": 236,
+  "config": [
+    1024,
+    8
+  ],
+  "threshold": 5.5,
+  "fd": 0.0010000000474974513,
+  "stats": [
+    166144,
+    3707
+  ],
+  "validation": {
+    "capture_peaks": 28,
+    "hier_peaks": 28,
+    "flat_peaks": 28,
+    "capture_index_differences": 0,
+    "capture_values_match": true,
+    "flat_misses": 0,
+    "flat_fired_index_differences": 0,
+    "flat_fired_values_match": true
+  },
+  "samples_ms": {
+    "hier": [
+      82.459544,
+      83.531943,
+      83.384343,
+      83.065643,
+      97.091817,
+      126.360162,
+      125.670363,
+      84.78434,
+      84.330241
+    ],
+    "flat": [
+      236.355354,
+      345.333549,
+      238.41175,
+      237.118953,
+      284.454764,
+      256.980916,
+      368.791805,
+      239.957848,
+      238.340651
+    ]
+  },
+  "thread_cpu_ms": {
+    "hier": [
+      82.476341,
+      83.538549,
+      83.39225,
+      83.065942,
+      97.100819,
+      126.372159,
+      125.671766,
+      84.756734,
+      84.339342
+    ],
+    "flat": [
+      236.360555,
+      345.328744,
+      238.419647,
+      237.127155,
+      284.486857,
+      256.994717,
+      368.793207,
+      239.966747,
+      238.349655
+    ]
+  },
+  "median_ms": {
+    "hier": 84.330241,
+    "flat": 239.957848
+  }
+}

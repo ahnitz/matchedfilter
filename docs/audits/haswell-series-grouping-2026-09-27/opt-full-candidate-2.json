@@ -1,0 +1,37 @@
+{
+  "aggregate_rate": 258982.84338992147,
+  "configs": {},
+  "groups": [
+    68,
+    68,
+    68,
+    68,
+    68
+  ],
+  "loop_s": 34.16454883337005,
+  "lower_s": 30.76180383337005,
+  "path": "/home/ahnitz/pycbc-wider-cpu-benchmark-20260926/hosts/og-node-169/results/opt-full-candidate-2.log",
+  "profile": {
+    "nonkernel_lower_s": 30.76180383337005
+  },
+  "segment_rates": [
+    267467.6281561032,
+    271404.60308866063,
+    267895.9096279523,
+    233157.8776994955
+  ],
+  "templates": [
+    5883,
+    5883,
+    5883,
+    5883,
+    5883
+  ],
+  "upper_parts": {
+    "upper_direct_s": 0.382919,
+    "upper_library_s": 2.654286,
+    "upper_norms_s": 0.07861,
+    "upper_scale_s": 0.28299500000000005
+  },
+  "upper_s": 3.402745
+}

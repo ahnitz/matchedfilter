@@ -67,7 +67,7 @@ class Device:
         self.name = name
         self.backend = backend
         self.is_software = bool(is_software)
-        #: Cost-table keys to try, most specific first.  Empty for a CPU.
+        #: Measured-table keys to try, most specific first.
         self.arch = tuple(arch)
 
     def __str__(self):
@@ -98,17 +98,23 @@ class Device:
 def _cpu_device():
     from . import backend as _backend
     import platform
+    fields = {}
     try:
-        name = None
         with open("/proc/cpuinfo") as fh:
             for line in fh:
-                if line.startswith("model name"):
-                    name = line.split(":", 1)[1].strip()
+                if not line.strip():
                     break
+                if ':' in line:
+                    key, value = line.split(':', 1)
+                    fields[key.strip()] = value.strip()
     except OSError:
-        name = None
-    return Device("cpu", 0, name or platform.processor() or "CPU",
-                  _backend())
+        pass
+    arch = ()
+    if all(fields.get(k) for k in ('vendor_id', 'cpu family', 'model')):
+        arch = ('%s-family%s-model%s' % (fields['vendor_id'].lower(),
+                                       fields['cpu family'], fields['model']),)
+    return Device("cpu", 0, fields.get('model name') or platform.processor() or "CPU",
+                  _backend(), arch=arch)
 
 
 def devices():
