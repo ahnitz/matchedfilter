@@ -1009,48 +1009,29 @@ static HWY_NOINLINE MF_PEAK_SECTION void binmax_fused32(BP*p,float thr,ap_peak*o
   const float t2 = thr>0.f ? thr*thr : 0.f;
   vf am = V_SET1(t2), arr = V_ZERO(), aii = V_ZERO();
   vi axx = VI_SET1(-1);
-  const unsigned allm = (unsigned)((1ull<<AP_W)-1ull);
 
-  if(ws==0 && we>=1024){
-    for(int b=0;b<32/AP_W;b++){
-      const float *ar=p->ire+(size_t)b*32*AP_W;
-      const float *ai=p->iim+(size_t)b*32*AP_W;
-      fftsr32_unit_sink(ar,ai,p->sR,p->sI,1,[&](int k1,vf rr,vf ii){
-        const long k=(long)k1*32+b*AP_W;
-        vf m = V_FMADD(rr,rr,V_MUL(ii,ii));
-        vm g = V_CMP_GT(m, am);
-        if(__builtin_expect(V_MASK_ANY(g),0)){
-          am = V_SEL(g, am, m);
-          arr = V_SEL(g, arr, rr);
-          aii = V_SEL(g, aii, ii);
-          axx = VI_SEL(g, axx, VI_SET1((int)k));
-        }
-      });
-    }
-  } else {
-    for(int b=0;b<32/AP_W;b++){
-      const float *ar=p->ire+(size_t)b*32*AP_W;
-      const float *ai=p->iim+(size_t)b*32*AP_W;
-      fftsr32_unit_sink(ar,ai,p->sR,p->sI,1,[&](int k1,vf rr,vf ii){
-        const long k=(long)k1*32+b*AP_W;
-        if(k>=(long)we || k+AP_W<=(long)ws) return;
-        unsigned inw = allm;
-        if(k<(long)ws || k+AP_W>(long)we){
-          inw = 0;
-          for(int l=0;l<AP_W;l++){ long kk=k+l; if(kk>=(long)ws && kk<(long)we) inw|=1u<<l; }
-          if(!inw) return;
-        }
-        vf m = V_FMADD(rr,rr,V_MUL(ii,ii));
-        if(inw!=allm) m = V_SEL(V_MASK_FROM_BITS(inw),V_SET1(-1.f),m);
-        vm g = V_CMP_GT(m, am);
-        if(__builtin_expect(V_MASK_ANY(g),0)){
-          am = V_SEL(g, am, m);
-          arr = V_SEL(g, arr, rr);
-          aii = V_SEL(g, aii, ii);
-          axx = VI_SEL(g, axx, VI_SET1((int)k));
-        }
-      });
-    }
+  for(int b=0;b<32/AP_W;b++){
+    const float *ar=p->ire+(size_t)b*32*AP_W;
+    const float *ai=p->iim+(size_t)b*32*AP_W;
+    fftsr32_unit_sink(ar,ai,p->sR,p->sI,1,[&](int k1,vf rr,vf ii){
+      const long k=(long)k1*32+b*AP_W;
+      if(k>=(long)we || k+AP_W<=(long)ws) return;
+      vf m = V_FMADD(rr,rr,V_MUL(ii,ii));
+      if(__builtin_expect(k<(long)ws || k+AP_W>(long)we, 0)){
+        long l0 = (long)ws - k; if(l0 < 0) l0 = 0;
+        long l1 = (long)we - k; if(l1 > AP_W) l1 = AP_W;
+        if(l0 >= l1) return;
+        unsigned inw = ((1u << l1) - 1u) & ~((1u << l0) - 1u);
+        m = V_SEL(V_MASK_FROM_BITS(inw), V_SET1(-1.f), m);
+      }
+      vm g = V_CMP_GT(m, am);
+      if(__builtin_expect(V_MASK_ANY(g),0)){
+        am = V_SEL(g, am, m);
+        arr = V_SEL(g, arr, rr);
+        aii = V_SEL(g, aii, ii);
+        axx = VI_SEL(g, axx, VI_SET1((int)k));
+      }
+    });
   }
 
   float mv[AP_W], rv[AP_W], iv[AP_W]; int xv[AP_W];
