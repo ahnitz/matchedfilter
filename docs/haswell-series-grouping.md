@@ -152,6 +152,31 @@ Both are rejected. Multiplication by one in the second experiment must not
 be counted as useful additional FLOPs. Reproduction scripts preserve the
 experiments without altering the production codelets.
 
+## Unit-stride codelet checkpoint
+
+The branch now generates separate AVX2 32-point split-radix codelets with
+constant element stride one and constant product stride eight. Dispatch
+checks those strides; strided product calls and other SIMD widths retain
+their prior implementation. The generated source remains reproducible from
+`src/gen.py`. This specialization removes runtime addressing from a large
+DAG without forcing it inline into every caller.
+
+The actual narrowed branch implementation versus the policy-only package:
+**64.627 to 59.539 ms**, paired median **1.094x**, **41/41 wins**. An earlier
+broader prototype was 1.060x faster than the split-radix-only candidate.
+These are different comparisons, not speedups to multiply mechanically.
+
+Validation: 63 CPU tests passed locally under AVX2, with 6 GPU skips;
+36 passed on Haswell with 9 GPU skips. This includes coarse FDR transfer,
+layout/partial-group cases, adversarial inputs, and series filtering.
+A local Ryzen AVX2 screen improved all measured 512/1024-point balanced cases
+(1.016–1.116x). Unaffected 4096-point cases varied from 0.970–1.004x; repeat
+measurements are needed before interpreting those small differences.
+
+An earlier-store experiment reduced live output temporaries and measured
+1.027x over the broader constant-stride prototype (28/31 wins). It remains
+isolated pending measurement against the narrowed branch implementation.
+
 ## Bottom-up throughput target
 
 The user requests continued optimization toward at least 80% of the hardware

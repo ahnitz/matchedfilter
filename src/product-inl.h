@@ -6,6 +6,10 @@ static inline int AP_PROD_FN(codelet_prod)(int m,const float*restrict dr,const f
                                const float*restrict tr,const float*restrict ti,
                                vf*restrict ar,vf*restrict ai,vf*restrict br,vf*restrict bi,
                                long S,long DS){
+  if constexpr (AP_W == 8) {
+    if(m==32 && S==1 && DS==AP_W && ap_srprod())
+      return AP_PROD_FN(fftsr32_prod_unit)(dr,di,tr,ti,ar,ai,br,bi,S,DS);
+  }
   if(ap_srprod()) switch(m){
     /* 8 has no split-radix form and needs no scratch either: one radix-8 pass
        writes straight to ar. */
@@ -13,7 +17,8 @@ static inline int AP_PROD_FN(codelet_prod)(int m,const float*restrict dr,const f
     /* 16 wins at every width. */
     case 16: return AP_PROD_FN(fftsr16_prod)(dr,di,tr,ti,ar,ai,br,bi,S,DS);
     default:
-      /* 32 and 64 only at 16 lanes -- the same register-file argument that
+      /* Outside the unit-stride AVX2 case above, 32 and 64 only at 16 lanes --
+         the same register-file argument that
          gates fftsr64 in codelet(), and the product form is worse off than
          the plain one because it holds four more vectors per input while it
          loads.  Measured, paired and interleaved, split-radix against
@@ -59,4 +64,3 @@ static void AP_PROD_FN(efft_prod)(int M,const float*restrict dr,const float*rest
     codelet_tw(M1,X+st*k2p,Xi+st*k2p,S+st*k2p,Si+st*k2p,1,
                itwr+(size_t)k2p*M1, itwi+(size_t)k2p*M1);
 }
-
