@@ -3,6 +3,18 @@
 September 26, 2026. Builds on `gpu-cache-correctness.md`. Existing CPU
 tuning work in the shared tree was preserved.
 
+## Source distribution checks
+
+Normal CI and release CI both build the source archive, install it, and run
+its bundled tests from an extracted directory outside the checkout. This
+checks that test fixtures and native build inputs survive packaging.
+
+The 0.1.0a3 release built its Linux and macOS wheels successfully, but publishing
+was blocked because the source archive omitted `tests/data/reference_profile_pycbc.npy`.
+Version 0.1.0a4 includes this 16,512-byte reference spectrum. It remains a NumPy
+file to preserve the measured values used by the reference-profile, gate-model,
+and inert-taps tests; it is test data in the source archive, not wheel payload.
+
 ## Performance regression checks
 
 Normal CI checks correctness and structural costs, including upload reuse,
@@ -227,3 +239,10 @@ larger GPU kernels were committed; it was not a support limit. Separate stale
 README/usage paragraphs also retained the earlier range after size support
 expanded. The overview, API introduction and usage table now agree with the
 implemented CPU 64–1048576 and GPU 64–65536 ranges.
+
+Version 0.1.0a5 also makes Git provenance optional in CPU cost regeneration.
+Source archives have no `.git` metadata; measurements record `unknown` rather
+than failing or using an unrelated ancestor checkout. Regression tests cover
+archives, missing Git executables, and failing Git commands. Local release
+validation must extract into a temporary directory outside any Git checkout,
+matching CI; extracting under the repository can hide this dependency.

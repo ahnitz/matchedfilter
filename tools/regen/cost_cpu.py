@@ -47,6 +47,19 @@ def _cpu_name():
     return platform.processor() or platform.machine() or 'unknown'
 
 
+def _commit():
+    # An extracted archive may sit inside an unrelated checkout. Do not
+    # attribute its measurements to that ancestor repository.
+    if not (ROOT / '.git').exists():
+        return 'unknown'
+    try:
+        return subprocess.check_output(
+            ['git', 'rev-parse', '--short', 'HEAD'], cwd=ROOT,
+            text=True, stderr=subprocess.DEVNULL).strip() or 'unknown'
+    except (OSError, subprocess.CalledProcessError):
+        return 'unknown'
+
+
 def _power(n, profile):
     if profile == 'pycbc':
         if n != 4096:
@@ -158,8 +171,7 @@ def main(argv=None):
     if args.rounds < 3 or any(v < 1 for v in shape + teaser_shape):
         ap.error('need at least three rounds and positive shape dimensions')
     cpu = _cpu_name()
-    commit = subprocess.check_output(['git', 'rev-parse', '--short', 'HEAD'],
-                                     cwd=ROOT, text=True).strip()
+    commit = _commit()
     records = []
     if args.measurements.exists():
         records = json.loads(args.measurements.read_text())['records']
