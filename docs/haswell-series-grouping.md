@@ -513,3 +513,32 @@ uses the Haswell interpreter's production `CFLAGS`. Intermediate `sinkfinal`
 and `sinkbound` remote C-only builds omitted that flag; their results are
 historical experiments, superseded by the final `merge` build. Earlier
 `sinkgate` full-search measurements retained the original production C objects.
+
+### Production-build acceptance for alpha 6
+
+With matching production C flags, the final native module SHA-256 is
+`983bd72e5204b57f3818720ce8d3c9420e3cd84c499e7c3328f57a85e243fd62` on Haswell.
+The capture comparison is **52.536 -> 45.604 ms, 1.1501x**, 38/41 paired wins
+against `0ff72cc`. The complete search takes **25.356 s**, or **348,958
+template-seconds/s/core**. All 4,386 template/time identities match the original
+reference; maximum SNR difference is 2.3842e-6. The small difference from the
+preceding 351k–353k runs is within the observed whole-search variation on this
+shared host; the new number belongs to the exact production-flag final build.
+
+Final local validation: 691 passed / 328 skipped for the complete CPU suite;
+80 passed for the physical CPU/GPU correlation, calibration and count selection.
+Haswell's focused selection: 97 passed / 28 GPU skips. A freshly built alpha-6
+sdist produces a wheel, reports version 0.1.0a6 from a separate installation,
+and passes 52 correlation/calibration/count tests with 28 GPU skips. Hosted CI run 36329114431 passed all 11 jobs. For the final source change
+(`c72951f`), run 36329970439 has passed all CPU/Python 3.10–3.14, wheel,
+source-distribution, generated-file and benchmark jobs; Metal's complete suite
+and GPU kernel checks also passed. Its advisory benchmark remains running at
+merge time. Run 36330778706 checks the subsequent CI-only change that bounds
+that advisory workload; it remains in progress. No correctness failure is
+pending. Mainline will run CI again after the push.
+
+The installed alpha-6 wheel's 18-case control covers SSE4, AVX2 and AVX-512,
+lengths 64/1024 and banks of 1/37/128 templates. Ratios against main range
+from 0.975x to 1.291x; these controls do not establish zero regression on every
+machine. The raw FP32 peak target remains unmet; the measured end-to-end gain
+and preserved correctness justify integrating this improvement.

@@ -1,0 +1,10 @@
+WARNING: The directory '/home/ahnitz/.cache/pip' or its parent directory is not owned or is not writable by the current user. The cache has been disabled. Check the permissions and owner of that directory. If executing pip with sudo, you should use sudo's -H flag.
+Processing /tmp/mf-alpha6-dist/matchedfilter-0.1.0a6.tar.gz
+  Preparing metadata (pyproject.toml): started
+  Preparing metadata (pyproject.toml): finished with status 'done'
+Building wheels for collected packages: matchedfilter
+  Building wheel for matchedfilter (pyproject.toml): started
+  Building wheel for matchedfilter (pyproject.toml): finished with status 'done'
+  Created wheel for matchedfilter: filename=matchedfilter-0.1.0a6-cp313-cp313-linux_x86_64.whl size=2349288 sha256=b62817bd86d5b5a0c50c16fcaf70c715caa26a1fe2069bca6b6555370fba3c69
+  Stored in directory: /tmp/pip-ephem-wheel-cache-0g687gno/wheels/25/00/1c/da378af3f3ce7f759196adffaa8f7b23c5a7e6a1c06b85ab66
+Successfully built matchedfilter
