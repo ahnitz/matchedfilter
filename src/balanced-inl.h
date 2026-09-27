@@ -1167,7 +1167,9 @@ int pairbatch(void *vp){ return ((BP*)vp)->small ? AP_W : 0; }
    the mixed AVX2 implementation regresses its length-64 fallback. */
 static inline int broadcast_data(void *vp){
   BP *p=(BP*)vp;
-  return p->small && AP_W>=16;
+  if(!p->small) return 0;
+  if(AP_W>=16) return 1;
+  return AP_W==8 && p->N>=256;
 }
 
 /* nlane pairs in one call. dr/di are scalar when broadcast_data() is true;
