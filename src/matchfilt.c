@@ -137,6 +137,10 @@ ap_mf_plan *ap_mf_create(size_t n, int ndata, int ntmpl){
   return create_mf(n,ndata,ntmpl,0);
 }
 
+ap_mf_plan *ap_mf_create_pairbatch(size_t n, int ndata, int ntmpl){
+  return create_mf(n,ndata,ntmpl,1);
+}
+
 void ap_mf_destroy(ap_mf_plan *p){
   if(!p) return;
   if(p->fft) ap_destroy(p->fft);
