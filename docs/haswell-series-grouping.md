@@ -404,3 +404,85 @@ because it reduces elapsed time, not because it inflates a FLOP-rate metric.
 The initially slowest Ryzen case (4096, 128 templates, 0.985x in the screen)
 repeated at **1.007x** over 41 paired rounds with 150 calls per sample, so that
 small regression did not reproduce.
+
+## DIF dataflow experiments
+
+Two split-radix decimation-in-frequency variants were checked independently
+against scalar DFT indexing, then against the 12 standard layout/reuse/zero
+cases on Haswell. Both pass correctness but lose to `0ff72cc`:
+
+| Changed stages | Baseline | Candidate | Paired speedup | Wins |
+|---|---:|---:|---:|---:|
+| B only | 52.239 ms | 54.417 ms | 0.956x | 3/31 |
+| A and B | 51.582 ms | 54.697 ms | 0.947x | 1/31 |
+
+Neither dataflow is enabled. The dominant captured lag window is [425,3671)
+for 234 of 236 blocks. After conservative coarse mapping, the stage-B scan
+still requires most of its 32 outputs, limiting simple output-pruning gains.
+
+## Fused output consumption and integration checks
+
+The next optimization consumes each stage-B FFT output in a generated callback.
+The peak-only consumer computes squared magnitude and updates the thresholded
+maximum directly, avoiding output stores followed by a separate scan. It applies
+to the measured 32x32, eight-lane geometry, a positive threshold, one bin,
+contiguous intermediates and stage-B blocking 1. Series capture and other
+geometries retain their existing consumers. The generator remains independent
+of peak-selection logic, and no calibration threshold or table changes.
+
+The first outlined-consumer Haswell capture comparison was 52.755 -> 46.519 ms,
+**1.134x**, 38/41 paired wins against `0ff72cc`. Against the original capture
+baseline it was 84.451 -> 46.317 ms, **1.817x**, 41/41 wins. Two complete search
+runs measured 25.085 and 25.227 s, or **352,728 and 350,741 template-seconds per
+wall second on one physical core**. Neighboring original-baseline runs measured
+39.809 and 39.312 s (222,264 and 225,070 template-seconds/s). These exclude setup
+and segment zero. All 4,386 template/time trigger identities match; maximum SNR
+difference against the original reference is 2.3842e-6. These full-search results
+precede the final bank-binding dispatch cleanup, so they are not mislabeled as
+measurements of that later binary.
+
+### Why the first implementation was not integration-ready
+
+Adding the helper initially regressed an unthresholded Ryzen AVX2 bank by 5–7%,
+even though that call did not use the fused FFT. An identical-build two-worker
+control differed by only 0.3%. User-space hardware counters found about 5% more
+cycles with only 0.12% more instructions, fewer branch misses and no corresponding
+increase in L1 data or instruction misses. Five-layout native controls were
+closer to 1%; they did not justify dismissing the Python bank regression.
+
+Two changes address this sensitivity without a CPU-model exception:
+
+* On ELF targets, optional peak-consumer helpers live in a separate text section.
+  The measured original AVX2 scan, product loader and entry-point addresses are
+  then preserved. Instruction comparisons also match after relocation operands
+  are normalized. Unused consumers on other SIMD widths are static and omitted.
+* A bank binds the backend's native product kernel once, after its existing
+  argument validation. The pair loop calls that binding directly and counts
+  returned peak indices. Ordinary internal transform calls retain their checked
+  API. This avoids adding selection and repeated argument checks per pair.
+
+The binding is valid only for the life of its transform plan; kernels retain
+backend ownership and no public ABI changes. The optional threshold consumer
+falls back for multi-bin, stored-series and unsupported layouts. The initial
+per-pair dispatch and tail-wrapper variants are rejected; their negative control
+results remain in the audit directory.
+
+Tests now compare positive-threshold peak-only output against an independent
+full FFT at vector/window boundaries on every available CPU target. The FDR
+transfer test explicitly creates an AVX2 plan when available, even on AVX-512
+hosts, and compares the positive-threshold consumer at the existing empirical
+0.01 and 0.001 rates. The low execution threshold avoids censoring the sampled
+magnitudes. This is a paired calibration-transfer check, not a population-rate
+certification. GPU-less CI still runs the CPU/reference part.
+
+The raw-FMA 80% target remains unmet. These optimizations reduce elapsed time by
+avoiding data movement and dispatch work; raw peak arithmetic utilization is
+not an appropriate substitute for the measured search throughput.
+
+The bank-bound final candidate passes the complete local CPU suite: **691 passed,
+328 skipped**. The Haswell capture measures 52.053 -> 45.463 ms against
+`0ff72cc`, **1.1483x**, 41/41 paired wins. Final complete-search confirmation,
+GPU checks, repeated cross-ISA timing controls and hosted CI are being recorded
+before declaring the branch ready to merge. The previously measured intermediate
+bank-selection build also improves the doubled-amplitude capture (high survivor
+fraction) by 3.0%; that measurement is retained with its own binary hash.

@@ -72,6 +72,14 @@ int ap_binmax_prod(ap_plan *p, const float *dr, const float *di,
                    const float *tr, const float *ti,
                    size_t binsize, float threshold, ap_peak *peaks, int *count,
                    int sign, size_t start, size_t end);
+/* Bind once after bank-level argument validation. run returns 0 on success;
+   the caller counts nonnegative peak indices. Valid only while the plan lives. */
+typedef struct {
+  void *context;
+  int (*run)(void *,const float *,const float *,const float *,const float *,
+             size_t,float,ap_peak *,int,size_t,size_t);
+} ap_prod_kernel;
+ap_prod_kernel ap_plan_prod_kernel(const ap_plan *,float threshold);
 int ap_corr_prod(ap_plan *p, const float *dr, const float *di,
                  const float *tr, const float *ti, float *out);
 int ap_corr_split(ap_plan *p, const float *re, const float *im, float *out);

@@ -94,6 +94,34 @@ def test_reused_coarse_geometry_preserves_full_output_and_binned_peaks(n, blocki
         mf.set_target(restore)
 
 
+@pytest.mark.parametrize('window', [(0, 1024), (31, 33), (105, 918), (1023, 1024)])
+def test_thresholded_peak_only_fft_matches_full_output(window, monkeypatch):
+    monkeypatch.setenv('MF_PBMAX', '128')
+    n = 1024
+    data, tmpl = _spectra((2, n), 169), _spectra((3, n), 270)
+    import matchedfilter as mf
+    restore = mf.backend()
+    expected = _reference(data, tmpl)
+    lo, hi = window
+    idx = abs(expected[..., lo:hi]).argmax(axis=-1) + lo
+    val = np.take_along_axis(expected, idx[..., None], axis=-1)[..., 0]
+    mid = float(np.median(abs(val)))
+    try:
+        mf.set_target(None)
+        for target in mf.targets():
+            mf.set_target(target)
+            peak = MatchedFilter(n, 2, 3, device='cpu')
+            peak.set_data(data)
+            peak.set_templates(tmpl)
+            for threshold in (1e-6, mid, 1e9):
+                got = peak.run(window=window, binsize=n, threshold=threshold)
+                accepted = abs(val) > threshold
+                np.testing.assert_array_equal(got['index'][..., 0], np.where(accepted, idx, -1))
+                _agrees(got['value'][..., 0], np.where(accepted, val, 0))
+    finally:
+        mf.set_target(restore)
+
+
 @pytest.mark.parametrize('device', ['cpu', 'gpu'])
 @pytest.mark.parametrize('n', SIZES)
 def test_every_supported_length(n, device):

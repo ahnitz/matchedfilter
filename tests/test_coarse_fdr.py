@@ -110,9 +110,27 @@ def test_coarse_kernel_fdr_transfer(band, backend, record_property, request, mon
     kernels = []
     gpu = None
     pair_cpu = None
+    threshold_cpu = None
     try:
         if backend == 'cpu-reference':
             kernels = [('NumPy independent reference', None)]
+            if band == 1024:
+                # A positive threshold selects the fused FFT/peak consumer.
+                # Keep it below the sampled tail so FDR comparisons still
+                # observe magnitudes rather than censored/missing peaks.
+                # Exercise AVX2 even on hosts whose default is AVX-512.
+                # Existing plans retain their target when dispatch is restored.
+                restore = mf.backend()
+                try:
+                    mf.set_target(None)
+                    if 'AVX2' in mf.targets():
+                        mf.set_target('AVX2')
+                    with monkeypatch.context() as patch:
+                        patch.setenv('MF_PBMAX', '128')
+                        threshold_cpu = mf.MatchedFilter(band, BATCH, 4, device='cpu')
+                finally:
+                    mf.set_target(restore)
+                kernels.append(('CPU positive-threshold', None))
             if band <= 1024:
                 # Four templates do not normally select pair batching at
                 # these lengths. Exercise its different data layout explicitly
@@ -142,6 +160,8 @@ def test_coarse_kernel_fdr_transfer(band, backend, record_property, request, mon
         templates = (np.sqrt(power) * np.exp(1j*rng.uniform(-np.pi, np.pi,
                                                           (4, band)))).astype(np.complex64)
         cpu.set_templates(templates)
+        if threshold_cpu is not None:
+            threshold_cpu.set_templates(templates)
         if pair_cpu is not None:
             pair_cpu.set_templates(templates)
         if gpu is not None:
@@ -166,6 +186,11 @@ def test_coarse_kernel_fdr_transfer(band, backend, record_property, request, mon
             a = np.abs(cpu.run()['value']).reshape(BATCH, 4)
             reference.append(a[np.arange(BATCH), matched][detected])
             for name, kernel in kernels:
+                if name == 'CPU positive-threshold':
+                    threshold_cpu.set_data(data)
+                    b = np.abs(threshold_cpu.run(threshold=1e-6)['value']).reshape(BATCH, 4)
+                    observed[name].append(b[np.arange(BATCH), matched][detected])
+                    continue
                 if name == 'CPU pair-batched':
                     pair_cpu.set_data(data)
                     b = np.abs(pair_cpu.run()['value']).reshape(BATCH, 4)

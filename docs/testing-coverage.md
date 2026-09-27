@@ -246,3 +246,13 @@ than failing or using an unrelated ancestor checkout. Regression tests cover
 archives, missing Git executables, and failing Git commands. Local release
 validation must extract into a temporary directory outside any Git checkout,
 matching CI; extracting under the repository can hide this dependency.
+
+The Haswell coarse-consumer tests also exercise positive thresholds on every
+available CPU SIMD target, including partial-vector windows and absent peaks.
+The 1024-point FDR transfer guard explicitly selects AVX2 when available, rather
+than accidentally testing only AVX-512 on a wider host. It compares thresholded
+peak-only magnitudes against the ordinary CPU path at empirical dismissal rates
+0.01 and 0.001; GPU coverage remains conditional on actual hardware. Bank-level
+kernel binding is also covered by the existing selector, multi-bin and crossing
+count tests. Performance evidence and rejected dispatch variants are recorded
+in `docs/haswell-series-grouping.md` and its dated audit directory.
