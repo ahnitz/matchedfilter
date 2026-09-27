@@ -3,6 +3,18 @@
 September 26, 2026. Builds on `gpu-cache-correctness.md`. Existing CPU
 tuning work in the shared tree was preserved.
 
+## Source distribution checks
+
+Normal CI and release CI both build the source archive, install it, and run
+its bundled tests from an extracted directory outside the checkout. This
+checks that test fixtures and native build inputs survive packaging.
+
+The 0.1.0a3 release built its Linux and macOS wheels successfully, but publishing
+was blocked because the source archive omitted `tests/data/reference_profile_pycbc.npy`.
+Version 0.1.0a4 includes this 16,512-byte reference spectrum. It remains a NumPy
+file to preserve the measured values used by the reference-profile, gate-model,
+and inert-taps tests; it is test data in the source archive, not wheel payload.
+
 ## Performance regression checks
 
 Normal CI checks correctness and structural costs, including upload reuse,

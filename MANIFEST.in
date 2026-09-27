@@ -5,6 +5,8 @@ include README.md LICENSE
 recursive-include src *.c *.cc *.h *.py
 recursive-include python *.c *.h
 recursive-include tests *.c *.h *.py
+# Reference spectra used by the tests shipped in the source archive.
+recursive-include tests/data *.npy
 recursive-include tools *.py
 recursive-include docs *.md
 # Highway is vendored as a submodule, and the build needs it: an sdist without
