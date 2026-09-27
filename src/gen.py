@@ -250,14 +250,26 @@ def build_sr(n,name,tw=False,prod=False,unit=False,inplace=False,sink=False):
         # Store each final result at its definition instead of keeping all
         # 2*n output vectors live until the end of the DAG.
         import re
-        stores={X[k][1]: g.L[-n+k] for k in range(n)}
+        stores={X[k][1]: (k, g.L[-n+k]) for k in range(n)}
         scheduled=[]
         for line in g.L[:-n]:
-            scheduled.append(line)
-            for var,store in stores.items():
+            matched = None
+            for var, (k, store) in stores.items():
                 if re.search(r"\b"+var+r"=", line):
-                    scheduled.append(store)
-        assert len(scheduled)==len(g.L)
+                    matched = (k, store)
+                    break
+            if matched is not None and sink:
+                k, store = matched
+                quad = k // (n // 4)
+                scheduled.append("  if(qmask & %du){"%(1 << quad))
+                scheduled.append("  "+line)
+                scheduled.append("  "+store)
+                scheduled.append("  }")
+            elif matched is not None:
+                scheduled.append(line)
+                scheduled.append(matched[1])
+            else:
+                scheduled.append(line)
         g.L=scheduled
     body="\n".join(g.L)
     cdefs="\n".join("  const vf %s=V_SET1(%sf);"%(v,k) for k,v in g.consts.items())
@@ -285,7 +297,7 @@ def build_sr(n,name,tw=False,prod=False,unit=False,inplace=False,sink=False):
         # can reduce each result directly instead of materializing a series.
         args=args.replace("float*restrict ar,float*restrict ai",
                           "const float*restrict ar,const float*restrict ai")
-        args += ",Sink sink"
+        args += ",unsigned qmask,Sink sink"
         body,count=re.subn(r"V_STOREU\(ar\+AP_W\*(\d+),(\w+)\); V_STOREU\(ai\+AP_W\*\1,(\w+)\);",
                            lambda m: "sink(%s,%s,%s);" % m.groups(), body)
         assert count == n
