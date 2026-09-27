@@ -1,0 +1,11 @@
+{"hardware_cycles_available":false,"perf_error":"Permission denied","iterations":100000000,"vector_fmas_per_iteration":12,"lanes":8,"samples":[
+{"seconds":0.263390101,"thread_seconds":0.263363288,"gflops":72.895678,"tsc_ticks":605091734,"core_cycles":0,"check":12.050558},
+{"seconds":0.244441800,"thread_seconds":0.244444611,"gflops":78.546304,"tsc_ticks":561561643,"core_cycles":0,"check":12.050558},
+{"seconds":0.244021799,"thread_seconds":0.244015012,"gflops":78.681495,"tsc_ticks":560597130,"core_cycles":0,"check":12.050558},
+{"seconds":0.244090600,"thread_seconds":0.244084011,"gflops":78.659318,"tsc_ticks":560754571,"core_cycles":0,"check":12.050558},
+{"seconds":0.244371899,"thread_seconds":0.244374611,"gflops":78.568772,"tsc_ticks":561400328,"core_cycles":0,"check":12.050558},
+{"seconds":0.245640100,"thread_seconds":0.245643006,"gflops":78.163134,"tsc_ticks":564313689,"core_cycles":0,"check":12.050558},
+{"seconds":0.245286700,"thread_seconds":0.245277612,"gflops":78.275748,"tsc_ticks":563502828,"core_cycles":0,"check":12.050558},
+{"seconds":0.244865300,"thread_seconds":0.244866711,"gflops":78.410457,"tsc_ticks":562536688,"core_cycles":0,"check":12.050558},
+{"seconds":0.244798199,"thread_seconds":0.244793311,"gflops":78.431949,"tsc_ticks":562382553,"core_cycles":0,"check":12.050558}
+]}

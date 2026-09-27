@@ -146,6 +146,11 @@ typedef struct ap_hmf_plan ap_hmf_plan;
 
 ap_hmf_plan *ap_hmf_create_ex(size_t n, int ndata, int ntmpl, float snr, float fd,
                               size_t band, int taps);
+/* Execution grouping only; calibration and the mathematical filter are unchanged.
+ * The engine bounds the requested group by its working-memory limit. */
+ap_hmf_plan *ap_hmf_create_grouped(size_t n, int ndata, int ntmpl, float snr, float fd,
+                                  size_t band, int taps, int series_group);
+int ap_hmf_series_group(const ap_hmf_plan *p);
 void         ap_hmf_destroy(ap_hmf_plan *p);
 
 size_t ap_hmf_nbins(const ap_hmf_plan *p, size_t binsize, size_t start, size_t end);

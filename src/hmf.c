@@ -32,14 +32,21 @@ struct ap_hmf_plan {
 
 ap_hmf_plan *ap_hmf_create_ex(size_t n,int ndata,int ntmpl,float snr,float fd,
                               size_t band,int taps){
+  return ap_hmf_create_grouped(n,ndata,ntmpl,snr,fd,band,taps,8);
+}
+
+int ap_hmf_series_group(const ap_hmf_plan *p){ return p ? p->dgroup : 0; }
+
+ap_hmf_plan *ap_hmf_create_grouped(size_t n,int ndata,int ntmpl,float snr,float fd,
+                                  size_t band,int taps,int series_group){
   (void)snr; (void)fd;
-  if(ndata<1||ntmpl<1||!ap_supported(n)||!ap_supported(band)||band>=n
+  if(series_group<1||series_group>65535||ndata<1||ntmpl<1||!ap_supported(n)||!ap_supported(band)||band>=n
      ||taps<2||taps>64||(taps&1)) return NULL;
   ap_hmf_plan *p=calloc(1,sizeof(*p));
   if(!p) return NULL;
   p->n=n; p->m=band; p->nt=ntmpl; p->K=taps;
-  /* Preserve the measured series grouping; the environment is diagnostic. */
-  int grp = 8;
+  /* Execution policy belongs to the caller; the environment is diagnostic. */
+  int grp = series_group;
   { const char *e=getenv("MF_DGROUP"); if(e){ int v=atoi(e); if(v>0) grp=v; } }
   /* bounded by what the held spectra cost, which is what bites at long n */
   while(grp>1 && (size_t)grp*2*n*sizeof(float) > (size_t)4*1024*1024) grp>>=1;

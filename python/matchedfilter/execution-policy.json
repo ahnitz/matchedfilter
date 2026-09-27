@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "haswell-ep-hierarchical-4096-1024",
+      "kind": "cpu",
+      "device": "genuineintel-family6-model63",
+      "backend": "AVX2",
+      "operation": "hierarchical_series",
+      "n": 4096,
+      "band": 1024,
+      "templates_min": 32,
+      "templates_max": 64,
+      "series_group": 4,
+      "evidence": "docs/haswell-series-grouping.md"
+    }
+  ]
+}
