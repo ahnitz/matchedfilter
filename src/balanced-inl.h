@@ -69,6 +69,7 @@ typedef struct {
   float *hr,*hi,*lr,*li;
   float *ser; size_t serstride; int nostore;
   float *scg;          /* [g][k2] scalar part of the stage-A twiddle, precomputed */
+  vf *tw32r, *tw32i;   /* [g][k2] full vector twiddles for 32x32 path */
   int fuse;     /* 0 = staged, 1 = generic fused, 2 = unit-stride 32x32 product.
                    Resolved once at plan build,
                    never per transform -- getenv in stageA_prod_gm cost a
@@ -386,6 +387,20 @@ void *create(size_t N){
       p->scg[2*idx]=sr; p->scg[2*idx+1]=si;
     }
   }
+  if constexpr (AP_W==8) {
+    if(n1==32 && n2==32){
+      p->tw32r = (vf*)ap_alloc64(4 * 32 * sizeof(vf));
+      p->tw32i = (vf*)ap_alloc64(4 * 32 * sizeof(vf));
+      if(p->tw32r && p->tw32i){
+        for(int g=0; g<4; g++) for(int k2=0; k2<32; k2++){
+          size_t idx = (size_t)g*32 + k2;
+          vf SR = V_SET1(p->scg[2*idx]), SI = V_SET1(p->scg[2*idx+1]);
+          p->tw32r[idx] = V_FMSUB(SR, p->TLr[k2], V_MUL(SI, p->TLi[k2]));
+          p->tw32i[idx] = V_FMADD(SR, p->TLi[k2], V_MUL(SI, p->TLr[k2]));
+        }
+      }
+    }
+  }
   return p;
 }
 
@@ -395,7 +410,7 @@ void destroy(void *vp){
   free(p->ire);free(p->iim);free(p->bR);free(p->bI);free(p->sR);free(p->sI);
   free(p->TLr);free(p->TLi);free(p->w1r);free(p->w1i);free(p->w2r);free(p->w2i);
   free(p->hr);free(p->hi);free(p->lr);free(p->li);
-  free(p->ser);free(p->scg);free(p);
+  free(p->ser);free(p->scg);free(p->tw32r);free(p->tw32i);free(p);
 }
 
 /* ---- the small sizes: lanes are PAIRS, not frequencies -------------------
@@ -574,11 +589,51 @@ static void stageA_split(BP*p,const float*inr,const float*ini,int conj){
    as the codelet strides. Other shapes retain the generic stage below. */
 static void stageA_prod_32(BP*p,const float*dr,const float*di,
                             const float*tr,const float*ti){
-  vf TR[AP_W],TI[AP_W],OR[AP_W],OI[AP_W];
-  for(int g=0;g<32/AP_W;g++){
-    const size_t gb=(size_t)g*32*AP_W;
-    fftsr32_prod_unit(dr+gb,di+gb,tr+gb,ti+gb,p->bR,p->bI,p->sR,p->sI,1,AP_W);
-    stageA_tail<32>(p,g,TR,TI,OR,OI,p->bR,p->bI);
+  vf TR[8],TI[8],OR[8],OI[8];
+  vf *restrict RR=p->bR, *restrict RI=p->bI;
+  for(int g=0;g<4;g++){
+    const size_t gb=(size_t)g*32*8;
+    fftsr32_prod_unit(dr+gb,di+gb,tr+gb,ti+gb,p->bR,p->bI,p->sR,p->sI,1,8);
+    for(int b=0;b<4;b++){
+      const vf *restrict twr = p->tw32r ? p->tw32r + ((size_t)g*32 + b*8) : nullptr;
+      const vf *restrict twi = p->tw32i ? p->tw32i + ((size_t)g*32 + b*8) : nullptr;
+      if(twr && twi){
+        for(int t=0;t<8;t+=2){
+          int k2_0=8*b+t, k2_1=8*b+t+1;
+          vf tr0=twr[t], ti0=twi[t];
+          vf tr1=twr[t+1], ti1=twi[t+1];
+          vf xr0=RR[k2_0], xi0=RI[k2_0];
+          vf xr1=RR[k2_1], xi1=RI[k2_1];
+          TR[t]=V_FMSUB(xr0,tr0,V_MUL(xi0,ti0));
+          TI[t]=V_FMADD(xr0,ti0,V_MUL(xi0,tr0));
+          TR[t+1]=V_FMSUB(xr1,tr1,V_MUL(xi1,ti1));
+          TI[t+1]=V_FMADD(xr1,ti1,V_MUL(xi1,tr1));
+        }
+      } else {
+        const float *sc=p->scg+2*((size_t)g*32+8*b);
+        for(int t=0;t<8;t+=2){
+          int k2_0=8*b+t, k2_1=8*b+t+1;
+          vf SR0=V_SET1(sc[2*t]), SI0=V_SET1(sc[2*t+1]);
+          vf SR1=V_SET1(sc[2*t+2]), SI1=V_SET1(sc[2*t+3]);
+          vf tr0=V_FMSUB(SR0,p->TLr[k2_0],V_MUL(SI0,p->TLi[k2_0]));
+          vf ti0=V_FMADD(SR0,p->TLi[k2_0],V_MUL(SI0,p->TLr[k2_0]));
+          vf tr1=V_FMSUB(SR1,p->TLr[k2_1],V_MUL(SI1,p->TLi[k2_1]));
+          vf ti1=V_FMADD(SR1,p->TLi[k2_1],V_MUL(SI1,p->TLr[k2_1]));
+          vf xr0=RR[k2_0], xi0=RI[k2_0];
+          vf xr1=RR[k2_1], xi1=RI[k2_1];
+          TR[t]=V_FMSUB(xr0,tr0,V_MUL(xi0,ti0));
+          TI[t]=V_FMADD(xr0,ti0,V_MUL(xi0,tr0));
+          TR[t+1]=V_FMSUB(xr1,tr1,V_MUL(xi1,ti1));
+          TI[t+1]=V_FMADD(xr1,ti1,V_MUL(xi1,tr1));
+        }
+      }
+      V_TRANSPOSE(TR,OR); V_TRANSPOSE(TI,OI);
+      float *er=p->ire+(size_t)b*32*8+(size_t)8*g*8;
+      float *ei=p->iim+(size_t)b*32*8+(size_t)8*g*8;
+      for(int i=0;i<8;i++){
+        V_STOREU(er+(size_t)i*8,OR[i]); V_STOREU(ei+(size_t)i*8,OI[i]);
+      }
+    }
   }
 }
 
@@ -936,28 +991,46 @@ static HWY_NOINLINE MF_PEAK_SECTION void binmax_fused32(BP*p,float thr,ap_peak*o
   vi axx = VI_SET1(-1);
   const unsigned allm = (unsigned)((1ull<<AP_W)-1ull);
 
-  for(int b=0;b<32/AP_W;b++){
-    const float *ar=p->ire+(size_t)b*32*AP_W;
-    const float *ai=p->iim+(size_t)b*32*AP_W;
-    fftsr32_unit_sink(ar,ai,p->sR,p->sI,1,[&](int k1,vf rr,vf ii){
-      const long k=(long)k1*32+b*AP_W;
-      if(k>=(long)we || k+AP_W<=(long)ws) return;
-      unsigned inw = allm;
-      if(k<(long)ws || k+AP_W>(long)we){
-        inw = 0;
-        for(int l=0;l<AP_W;l++){ long kk=k+l; if(kk>=(long)ws && kk<(long)we) inw|=1u<<l; }
-        if(!inw) return;
-      }
-      vf m = V_FMADD(rr,rr,V_MUL(ii,ii));
-      if(inw!=allm) m = V_SEL(V_MASK_FROM_BITS(inw),V_SET1(-1.f),m);
-      vm g = V_CMP_GT(m, am);
-      if(__builtin_expect(V_MASK_ANY(g),0)){
-        am = V_SEL(g, am, m);
-        arr = V_SEL(g, arr, rr);
-        aii = V_SEL(g, aii, ii);
-        axx = VI_SEL(g, axx, VI_SET1((int)k));
-      }
-    });
+  if(ws==0 && we>=1024){
+    for(int b=0;b<32/AP_W;b++){
+      const float *ar=p->ire+(size_t)b*32*AP_W;
+      const float *ai=p->iim+(size_t)b*32*AP_W;
+      fftsr32_unit_sink(ar,ai,p->sR,p->sI,1,[&](int k1,vf rr,vf ii){
+        const long k=(long)k1*32+b*AP_W;
+        vf m = V_FMADD(rr,rr,V_MUL(ii,ii));
+        vm g = V_CMP_GT(m, am);
+        if(__builtin_expect(V_MASK_ANY(g),0)){
+          am = V_SEL(g, am, m);
+          arr = V_SEL(g, arr, rr);
+          aii = V_SEL(g, aii, ii);
+          axx = VI_SEL(g, axx, VI_SET1((int)k));
+        }
+      });
+    }
+  } else {
+    for(int b=0;b<32/AP_W;b++){
+      const float *ar=p->ire+(size_t)b*32*AP_W;
+      const float *ai=p->iim+(size_t)b*32*AP_W;
+      fftsr32_unit_sink(ar,ai,p->sR,p->sI,1,[&](int k1,vf rr,vf ii){
+        const long k=(long)k1*32+b*AP_W;
+        if(k>=(long)we || k+AP_W<=(long)ws) return;
+        unsigned inw = allm;
+        if(k<(long)ws || k+AP_W>(long)we){
+          inw = 0;
+          for(int l=0;l<AP_W;l++){ long kk=k+l; if(kk>=(long)ws && kk<(long)we) inw|=1u<<l; }
+          if(!inw) return;
+        }
+        vf m = V_FMADD(rr,rr,V_MUL(ii,ii));
+        if(inw!=allm) m = V_SEL(V_MASK_FROM_BITS(inw),V_SET1(-1.f),m);
+        vm g = V_CMP_GT(m, am);
+        if(__builtin_expect(V_MASK_ANY(g),0)){
+          am = V_SEL(g, am, m);
+          arr = V_SEL(g, arr, rr);
+          aii = V_SEL(g, aii, ii);
+          axx = VI_SEL(g, axx, VI_SET1((int)k));
+        }
+      });
+    }
   }
 
   float mv[AP_W], rv[AP_W], iv[AP_W]; int xv[AP_W];
