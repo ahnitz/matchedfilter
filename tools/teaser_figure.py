@@ -9,12 +9,14 @@ but materialize the correlation. Plan creation and input upload are excluded.
 
 Run: python tools/teaser_figure.py --out docs/assets/teaser.svg
 Writes SVG, PNG and the underlying JSON measurements. Requires pyfftw,
-matplotlib and the AMD rocFFT/HIP runtime for the external baselines.
+matplotlib and either AMD rocFFT/HIP or MLX (on macOS) for the GPU baseline.
 """
 import argparse
 import ctypes
 import json
 import os
+import platform
+import subprocess
 from pathlib import Path
 import sys
 import time
@@ -72,12 +74,77 @@ def _timed(fn, reps):
 def fftw_ms(reps=7):
     """Full batch, one CPU thread, PATIENT; no inverse-normalization pass."""
     import pyfftw
+    # pyFFTW's alignment flag can be 4 even with NEON. Inspect FFTW's own
+    # build string where its symbol is available instead of inferring SIMD.
+    build = None
+    try:
+        lib = ctypes.CDLL(pyfftw.pyfftw.__file__)
+        build = ctypes.string_at(ctypes.addressof(
+            ctypes.c_char.in_dll(lib, 'fftwf_version'))).decode()
+    except (OSError, ValueError, AttributeError):
+        pass
+    _DETAILS['fftw'] = dict(version=pyfftw.fftw_version, build=build,
+                             simd_alignment=pyfftw.simd_alignment, compiler=pyfftw.fftw_cc)
+    if build and not any(tag in build.lower() for tag in ('neon', 'sse', 'avx', 'vsx', 'altivec', 'simd')):
+        print('WARNING: FFTW build has no SIMD tag; check it before comparing speeds',
+              file=sys.stderr)
+    if sys.platform == 'darwin' and build:
+        # pyFFTW 0.15.1 detects x86 SIMD only and forces FFTW_UNALIGNED on
+        # ARM, even for aligned arrays and a NEON-enabled library. Use the
+        # same library's C API so its planner can actually select NEON.
+        return _fftw_native_ms(lib, reps)
     a = pyfftw.empty_aligned((PAIRS, N), dtype='complex64')
     b = pyfftw.empty_aligned((PAIRS, N), dtype='complex64')
     plan = pyfftw.FFTW(a, b, axes=(1,), direction='FFTW_BACKWARD',
                        flags=('FFTW_PATIENT',), threads=1, planning_timelimit=15.0)
     a[:] = _case()[0][0]
     return _timed(plan.execute, reps)
+
+
+def _fftw_native_ms(lib, reps):
+    vp, integer, ip = ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(ctypes.c_int)
+    signatures = {
+        'fftwf_malloc': (vp, [ctypes.c_size_t]),
+        'fftwf_free': (None, [vp]),
+        'fftwf_set_timelimit': (None, [ctypes.c_double]),
+        'fftwf_plan_many_dft': (vp, [integer, ip, integer, vp, ip, integer, integer,
+                                    vp, ip, integer, integer, integer, ctypes.c_uint]),
+        'fftwf_execute': (None, [vp]),
+        'fftwf_destroy_plan': (None, [vp]),
+    }
+    for name, (result, args) in signatures.items():
+        function = getattr(lib, name)
+        function.restype, function.argtypes = result, args
+    if hasattr(lib, 'fftwf_init_threads') and hasattr(lib, 'fftwf_plan_with_nthreads'):
+        lib.fftwf_init_threads.argtypes, lib.fftwf_init_threads.restype = [], integer
+        lib.fftwf_plan_with_nthreads.argtypes, lib.fftwf_plan_with_nthreads.restype = [integer], None
+        if not lib.fftwf_init_threads():
+            raise RuntimeError('FFTW thread initialization failed')
+        lib.fftwf_plan_with_nthreads(1)
+    a = b = plan = None
+    try:
+        a, b = lib.fftwf_malloc(PAIRS*N*8), lib.fftwf_malloc(PAIRS*N*8)
+        if not a or not b:
+            raise MemoryError('FFTW benchmark allocation failed')
+        lib.fftwf_set_timelimit(15.)
+        length = (integer*1)(N)
+        # FFTW_BACKWARD=+1, FFTW_PATIENT=32. No normalization or UNALIGNED.
+        plan = lib.fftwf_plan_many_dft(1, length, PAIRS, a, None, 1, N,
+                                      b, None, 1, N, 1, 32)
+        if not plan:
+            raise RuntimeError('FFTW could not plan the aligned batch')
+        values = np.ctypeslib.as_array((ctypes.c_float*(2*PAIRS*N)).from_address(a))
+        values.view(np.complex64).reshape(PAIRS,N)[:] = _case()[0][0]
+        lib.fftwf_execute(plan)
+        first = np.ctypeslib.as_array((ctypes.c_float*(2*N)).from_address(b)).view(np.complex64)
+        np.testing.assert_allclose(first, np.fft.ifft(_case()[0][0].astype(np.complex128))*N,
+                                   rtol=3e-5, atol=3e-5)
+        _DETAILS['fftw']['interface'] = 'aligned C API; single thread'
+        return _timed(lambda: lib.fftwf_execute(plan), reps)
+    finally:
+        if plan: lib.fftwf_destroy_plan(plan)
+        if a: lib.fftwf_free(a)
+        if b: lib.fftwf_free(b)
 
 
 def _filter_ms(kind, device, reps, fd):
@@ -97,6 +164,18 @@ def _filter_ms(kind, device, reps, fd):
             ms = _timed(lambda: f.run(out=output), reps)
         else:
             ms = _timed(lambda: f.run(binsize=N, threshold=5.5), reps)
+        details = {}
+        ctx = getattr(f, '_gpu', None)
+        if ctx is not None and hasattr(ctx, 'last_gpu_time'):
+            durations = []
+            for _ in range(9):
+                if kind == 'full':
+                    f.run(out=output)
+                else:
+                    f.run(binsize=N, threshold=5.5)
+                durations.append(ctx.last_gpu_time * 1000)
+            details['device_ms'] = float(np.median(durations))
+        _DETAILS[(device, kind, fd)] = details
         if kind == 'hier' and hasattr(f, 'config'):
             _DETAILS[(device, fd)] = {'band': f.config[0], 'taps': f.config[1],
                                       'refine_rate': f.refine_rate}
@@ -169,7 +248,29 @@ def rocfft_ms(reps=7):
         roc.rocfft_cleanup()
 
 
+def mlx_ms(reps=7):
+    """Resident full-batch IFFT; eight queued executions per synchronization.
+
+    MLX owns its result allocations. No product, peak scan or NumPy copy is
+    timed, matching the operation scope of the rocFFT reference.
+    """
+    import mlx.core as mx
+    mx.set_default_device(mx.gpu)
+    a = mx.zeros((PAIRS, N), dtype=mx.complex64)
+    mx.eval(a)
+    def batch():
+        results = []
+        for _ in range(8):
+            value = mx.fft.ifft(a, axis=-1, norm='forward')
+            mx.async_eval(value)
+            results.append(value)
+        mx.synchronize()
+    return _timed(batch, reps) / 8
+
+
 def _cpu_name():
+    if sys.platform == 'darwin':
+        return subprocess.check_output(['sysctl', '-n', 'machdep.cpu.brand_string'], text=True).strip()
     try:
         for line in Path('/proc/cpuinfo').read_text().splitlines():
             if line.startswith('model name'):
@@ -235,11 +336,12 @@ def plot(report, out):
                      color=fg, size=11, loc='left', pad=16)
     fig.text(.04, .15, 'Each step restricts the result: all lags → one peak per pair → a screened subset. Hierarchical FDR is requested, not measured here.',
              color=muted, size=10)
-    fig.text(.04, .105, 'FFTW / rocFFT: inverse FFT only. Full: product + inverse FFT + all lags. Peak: product + inverse FFT + maximum.',
+    baseline = report.get('gpu_baseline', 'rocFFT')
+    fig.text(.04, .105, f'FFTW / {baseline}: inverse FFT only. Full: product + inverse FFT + all lags. Peak: product + inverse FFT + maximum.',
              color=muted, size=10)
     fig.text(.04, .06, 'Setup excluded; FFTW PATIENT planning capped at 15 s. Full output reuses caller storage; GPU timing includes synchronization.',
              color=muted, size=9)
-    fig.text(.04, .023, report['date'] + ' · single CPU thread · live measurements on Ryzen AI MAX+ 395 / Radeon 8060S',
+    fig.text(.04, .023, report['date'] + ' · single CPU thread · ' + report['cpu'].split(' w/')[0] + ' / ' + report['gpu'],
              color=muted, size=9)
     out = Path(out)
     fig.savefig(out, facecolor=bg)
@@ -249,16 +351,77 @@ def plot(report, out):
     plt.close(fig)
 
 
+def plot_comparison(reports, out):
+    """Compare two saved teaser runs on common axes within each device panel."""
+    shape = lambda r: (r['n'], r['data'], r['templates'], r['snr'])
+    if shape(reports[0]) != shape(reports[1]):
+        raise ValueError('teaser comparisons require the same workload shape and SNR')
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    from matplotlib.ticker import FuncFormatter
+    pairs = reports[0]['data'] * reports[0]['templates']
+    bg, fg, muted = '#0b0f19', '#e8eef7', '#adb9ca'
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6.6), facecolor=bg)
+    fig.subplots_adjust(left=.06, right=.98, top=.78, bottom=.27, wspace=.22)
+    fig.text(.04, .94, 'Same teaser workload · CPU and GPU comparison', color=fg, size=19, weight='bold')
+    fig.text(.04, .88, f"{pairs:,} correlations × {reports[0]['n']:,} points · single CPU thread · warm public calls",
+             color=muted, size=12)
+    fig.text(.04, .83, 'Throughput: higher is better. Log scales; CPU and GPU panels have different ranges.',
+             color=muted, size=10)
+    for ax, device in zip(axes, ('cpu', 'gpu')):
+        ax.set_facecolor(bg)
+        first = [r for r in reports[0]['rows'] if r['device'] == device]
+        keys = [(r['kind'], r['fd']) for r in first]
+        for offset, report, color in zip((-.19, .19), reports, ('#4facfe', '#f3b65b')):
+            by_key = {(r['kind'], r['fd']): r for r in report['rows'] if r['device'] == device}
+            if set(by_key) != set(keys):
+                raise ValueError('teaser comparisons require the same output modes and budgets')
+            rows = [by_key[k] for k in keys]
+            values = [pairs / r['ms'] / 1000 for r in rows]
+            label = report.get('comparison_label', report[device].split(' w/')[0])
+            bars = ax.bar(np.arange(len(rows))+offset, values, width=.36, color=color, label=label, zorder=3)
+            for bar, row in zip(bars, rows):
+                ax.text(bar.get_x()+bar.get_width()/2, bar.get_height()*1.07,
+                        f"{row['ms']:.2f} ms", ha='center', va='bottom', color=fg, size=8, rotation=35)
+        ax.set_yscale('log')
+        ax.set_xticks(range(len(first)), ['FFT only*' if r['kind'] == 'baseline' else r['label'] for r in first], color=fg)
+        ax.tick_params(axis='y', colors=muted)
+        ax.yaxis.set_major_formatter(FuncFormatter(lambda v, p: f'{v:g}M/s'))
+        ax.set_ylim(top=ax.get_ylim()[1]*2)
+        ax.grid(axis='y', which='both', alpha=.22, color=muted, zorder=0)
+        for spine in ax.spines.values():
+            spine.set_visible(False)
+        ax.set_title(device.upper(), color=fg, loc='left', weight='bold')
+        ax.legend(frameon=False, labelcolor=fg, fontsize=9, loc='upper left')
+    fig.text(.04, .16, 'Full → peak avoids writing every lag. Hierarchical additionally skips most full FFTs.', color=fg, size=11)
+    fig.text(.04, .11, 'FFT-only references may use different engines. Compare the matchedfilter bars directly.', color=muted, size=10)
+    fig.text(.04, .065, 'Hierarchical bars use automatic per-device choices; requested dismissal budgets are not measured here.', color=muted, size=10)
+    fig.text(.04, .025, 'Sources: ' + ' / '.join(r.get('comparison_note', r['date']) for r in reports), color=muted, size=10)
+    out = Path(out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out, facecolor=bg)
+    fig.savefig(out.with_suffix('.png'), facecolor=bg, dpi=150)
+    plt.close(fig)
+
+
 def main(argv=None):
     from datetime import date
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--out', default='docs/assets/teaser.svg')
+    ap.add_argument('--compare', nargs=2, metavar='JSON', help='plot two existing teaser reports without benchmarking')
     args = ap.parse_args(argv)
+    if args.compare:
+        plot_comparison([json.loads(Path(p).read_text()) for p in args.compare], args.out)
+        return 0
+    baseline, gpu_reference = ('MLX', mlx_ms) if sys.platform == 'darwin' else ('rocFFT', rocfft_ms)
     report = dict(n=N, data=ND, templates=NT, snr=5.5, date=date.today().isoformat(),
                   cpu=_cpu_name(), gpu=_gpu_name(), fftw_planning_limit_seconds=15,
+                  gpu_baseline=baseline, cpu_backend=mf.backend(), python=platform.python_version(),
+                  numpy=np.__version__, load_average=os.getloadavg() if hasattr(os, 'getloadavg') else None,
                   timing='0.5 s warmup, median of >=50 ms blocks; public API', rows=[])
     for device, baseline, fn, measure in [('cpu','FFTW',fftw_ms,cpu_ms),
-                                          ('gpu','rocFFT',rocfft_ms,gpu_ms)]:
+                                          ('gpu',baseline,gpu_reference,gpu_ms)]:
         for label, kind, fd in [(baseline+'\nFFT only','baseline',None),
                                 ('Full','full',None), ('Peak','flat',None)] + [
                                 ('Hier.\n'+{.01:'10⁻²', .001:'10⁻³', .0001:'10⁻⁴'}[fd],'hier',fd) for fd in BUDGETS]:
@@ -266,11 +429,14 @@ def main(argv=None):
             row = dict(device=device,label=label,kind=kind,fd=fd,ms=ms,
                        timing=dict(_timed.details))
             if device == 'gpu' and kind == 'baseline':
-                # Each rocFFT timed call executes eight transforms batches.
+                # Each GPU reference call executes eight transform batches.
                 row['timing']['executions_per_call'] = 8
+            if device == 'cpu' and kind == 'baseline':
+                row['fftw'] = _DETAILS.get('fftw', {})
             if row['timing']['max_ms'] > 1.25 * row['timing']['min_ms']:
                 print('WARNING: >25% timing spread; check competing workloads', file=sys.stderr)
             if kind=='hier': row.update(_DETAILS[(device,fd)])
+            if kind != 'baseline': row.update(_DETAILS.get((device,kind,fd or .01), {}))
             report['rows'].append(row)
             print(json.dumps(row), flush=True)
     out = Path(args.out)
