@@ -103,7 +103,8 @@ static ap_mf_plan *create_mf(size_t n, int ndata, int ntmpl, int pair){
   /* Only the measured x86 targets opt in. MF_PBMAX remains a way to force
      either implementation in one build, without changing process state here. */
   const char *isa=ap_plan_backend(p->fft);
-  p->allow_pair_alt = !pair && !p->pb && n>=256 && n<=1024 && ntmpl>=16
+  const size_t alt_max_n = (!strcmp(isa,"AVX3")) ? 1024u : 512u;
+  p->allow_pair_alt = !pair && !p->pb && n>=256 && n<=alt_max_n && ntmpl>=16
     && !getenv("MF_PBMAX")
     && (!strcmp(isa,"AVX3") || !strcmp(isa,"AVX2") || !strcmp(isa,"SSE4"));
   p->ntpad = p->pb ? ((ntmpl + p->pb - 1)/p->pb)*p->pb : ntmpl;
