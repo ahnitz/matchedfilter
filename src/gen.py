@@ -241,6 +241,20 @@ def build_sr(n,name,tw=False,prod=False,unit=False):
     X=g.rec(list(range(n)))
     for k in range(n):
         g.emit("ar[S*%d]=%s; ai[S*%d]=%s;"%(k,X[k][0],k,X[k][1]))
+    if unit:
+        # The top-level combine starts after every input has been consumed.
+        # Store each final result at its definition instead of keeping all
+        # 2*n output vectors live until the end of the DAG.
+        import re
+        stores={X[k][1]: g.L[-n+k] for k in range(n)}
+        scheduled=[]
+        for line in g.L[:-n]:
+            scheduled.append(line)
+            for var,store in stores.items():
+                if re.search(r"\b"+var+r"=", line):
+                    scheduled.append(store)
+        assert len(scheduled)==len(g.L)
+        g.L=scheduled
     body="\n".join(g.L)
     cdefs="\n".join("  const vf %s=V_SET1(%sf);"%(v,k) for k,v in g.consts.items())
     if prod:
@@ -315,7 +329,6 @@ if __name__=="__main__":
     # layouts. Dispatch keeps other widths on their established implementation.
     out.append(build_sr(32,"fftsr32_unit",unit=True))
     out.append(build_sr(32,"fftsr32_prod_unit",prod=True,unit=True))
-    out.append(broadcast_codelet(build_sr(32,"fftsr32_prod_unit_broadcast",prod=True,unit=True)))
     out += ["}  // namespace HWY_NAMESPACE", "}  // namespace ap",
             "HWY_AFTER_NAMESPACE();", "", "#endif"]
     open("codelets-inl.h","w").write("\n".join(out))
