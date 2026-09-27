@@ -78,6 +78,18 @@ def test_reused_coarse_geometry_preserves_full_output_and_binned_peaks(n, blocki
                         val = np.take_along_axis(expected, idx[..., None], axis=-1)[..., 0]
                         np.testing.assert_array_equal(got['index'][..., b], idx)
                         _agrees(got['value'][..., b], val)
+            # Unary sign-bit negation may change zero signs, but must neither
+            # leave stale in-place results nor turn a zero into a reported peak.
+            data.fill(0)
+            data.real[..., ::2] = -0.0
+            data.imag[..., 1::2] = -0.0
+            for plan in (full, peak):
+                plan.set_data(data)
+            assert np.all(full.run() == 0)
+            for binsize in (17, n):
+                got = peak.run(window=(101, 919), binsize=binsize, threshold=0.)
+                assert np.all(got['index'] == -1)
+                assert np.all(got['value'] == 0)
     finally:
         mf.set_target(restore)
 

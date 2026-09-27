@@ -372,3 +372,35 @@ The final isolated-dispatch full-search confirmation took **27.823 s** for
 ABBA experiment. All 4,386 template/time trigger identities matched; maximum SNR
 difference was 2.3842e-6. Full field comparisons, including non-identical ancillary
 fields, are saved in `kernel-isolated-trigger-validation.json`.
+
+
+## Arithmetic-port and factorization follow-up
+
+After `c51ef50`, a targeted experiment replaces 23 unary `0-x` operations in
+each specialized 32-point codelet with sign-bit XOR. This leaves numerical
+magnitudes unchanged, including zero, but zero sign bits may differ. The first
+Haswell capture comparison is 52.820 -> 51.977 ms, **1.013x**, 35/41 paired wins.
+Local AVX2 checks range from 0.985x to 1.019x across the measured 1024/4096 cases.
+The local numerical selections pass 53 tests (28 skips) and 55 adversarial,
+peak and series tests (3 skips). Final remote confirmation is recorded below.
+
+The separate 4x8 Stockham stage-B-only factorization is rejected: 52.751 ->
+54.413 ms, **0.972x**, 0/31 wins. This is distinct from the earlier experiment
+that changed both stage-A and stage-B codelets. Its correctness check passes;
+the extra arithmetic and scratch traffic do not pay off in this implementation.
+
+The 8x4 stage-B-only factorization is also rejected: 52.987 -> 54.192 ms,
+**0.977x**, 2/31 wins, after passing the same numerical checks. The retained
+split-radix formulation remains faster for both tested orderings.
+
+The exact final branch build repeats the sign-negation gain: 53.405 ->
+52.395 ms, **1.0137x**, 38/41 wins against `c51ef50`'s isolated-dispatch build.
+Haswell's broader selection passes 67 tests with 31 GPU skips. The standard
+reused-buffer test now additionally mixes positive and negative zero in the
+input and checks both full correlation and absent peaks at threshold zero;
+all 12 layout/geometry cases pass on all available local and Haswell backends.
+The 80%-of-raw-FMA target is still unmet. The arithmetic change is retained
+because it reduces elapsed time, not because it inflates a FLOP-rate metric.
+The initially slowest Ryzen case (4096, 128 templates, 0.985x in the screen)
+repeated at **1.007x** over 41 paired rounds with 150 calls per sample, so that
+small regression did not reproduce.
