@@ -53,7 +53,7 @@ ap_hmf_plan *ap_hmf_create_grouped(size_t n,int ndata,int ntmpl,float snr,float 
   p->dgroup=grp; p->nd=ndata>grp ? ndata : grp;
   p->full=ap_mf_create(n,p->nd,ntmpl);
   { const char *pbmax=getenv("MF_PBMAX");
-    size_t pblim = pbmax ? (size_t)atol(pbmax) : 1024u;
+    size_t pblim = pbmax ? (size_t)atol(pbmax) : (ap_lane_width() >= 16 ? 1024u : 512u);
     if(ntmpl>=16 && band<=pblim){
       p->coarse=ap_mf_create_pairbatch(band,p->nd,ntmpl);
     }
