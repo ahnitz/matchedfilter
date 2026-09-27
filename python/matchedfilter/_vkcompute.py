@@ -885,7 +885,11 @@ class Context(InputUploads):
         vk.vkCmdPushConstants(cmd, rlayout, _STAGE_COMPUTE, 0,
                               _PUSH_BYTES, ctypes.byref(pc))
         vk.vkCmdDispatchIndirect(cmd, b["args"].handle, 0)
-        barrier(dst_stage=_STAGE_HOST_BIT, dst_access=_ACCESS_HOST_READ)
+        # Host readback includes the survivor count, which remains a fill
+        # write when no pair survives, as well as shader-written peaks.
+        barrier(src_stage=_STAGE_COMPUTE_BIT | _STAGE_TRANSFER_BIT,
+                src_access=_ACCESS_SHADER_WRITE | _ACCESS_TRANSFER_WRITE,
+                dst_stage=_STAGE_HOST_BIT, dst_access=_ACCESS_HOST_READ)
         _check(vk.vkEndCommandBuffer(cmd), "vkEndCommandBuffer")
         return b, cmd
 
