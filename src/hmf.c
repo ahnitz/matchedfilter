@@ -52,7 +52,15 @@ ap_hmf_plan *ap_hmf_create_grouped(size_t n,int ndata,int ntmpl,float snr,float 
   while(grp>1 && (size_t)grp*2*n*sizeof(float) > (size_t)4*1024*1024) grp>>=1;
   p->dgroup=grp; p->nd=ndata>grp ? ndata : grp;
   p->full=ap_mf_create(n,p->nd,ntmpl);
-  p->coarse=ap_mf_create(band,p->nd,ntmpl);
+  { const char *pbmax=getenv("MF_PBMAX");
+    size_t pblim = pbmax ? (size_t)atol(pbmax) : 1024u;
+    if(ntmpl>=16 && band<=pblim){
+      p->coarse=ap_mf_create_pairbatch(band,p->nd,ntmpl);
+    }
+  }
+  if(!p->coarse){
+    p->coarse=ap_mf_create(band,p->nd,ntmpl);
+  }
   p->full_fft=ap_create(n);
   p->fwd=ap_alloc64(2*n*sizeof(float));
   p->spec=ap_alloc64((size_t)grp*2*n*sizeof(float));
