@@ -349,7 +349,7 @@ if __name__=="__main__":
         out.append(build_sr(nn,"fftsr%d_prod"%nn,prod=True))
     # Twiddle-fused: only the sizes elemfft.h falls through to.  16 and 32
     # go to the split-radix variants, so fft16_tw and fft32_tw were dead.
-    for (nn,rr) in ((8,[8]),(64,[8,8])):
+    for (nn,rr) in ((8,[8]),(32,[8,4]),(64,[8,8])):
         out.append(build(nn,rr,"fft%d_tw"%nn,tw=True))
     for nn,rr in ((8,[8]),(16,[8,2]),(32,[8,4]),(64,[8,8])):
         out.append(broadcast_codelet(build(nn,rr,"fft%d_prod_broadcast"%nn,prod=True)))
