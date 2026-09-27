@@ -9,6 +9,13 @@ large Haswell improvement and regresses dev4. The package version string is
 
 ![Paired complete-search throughput change](chart.svg)
 
+On sugwg-login2, the lower-stage batch rate rose from **561k** to
+**713k template-seconds/s** (+27.1%). Complete-search throughput rose from
+**477k** to **581k template-seconds/s** (+22.0%); the upper stage remained
+about 2.81 seconds in both builds.
+
+![sugwg-login2 lower and upper stage cost](login2-breakdown.svg)
+
 | CPU host | alpha6 k template-s/s | `hdev` k template-s/s | change | paired A/B range |
 |---|---:|---:|---:|---:|
 | dev1 | 989.8 | 1039.6 | +5.0% | +4.6 to +5.5% |
