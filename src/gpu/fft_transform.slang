@@ -25,7 +25,8 @@
         // so leaving it here would have confined the saving to one band.
         {
             float a1 = 2.0f * PI * float(lane) / float(len);
-            float wr = cos(a1), wi = sin(a1);
+            float2 tw = mfTwiddle(a1);
+            float wr = tw.x, wi = tw.y;
             float cr = 1.0f, ci = 0.0f;
             [unroll] for (uint k2 = 0; k2 < R; ++k2) {
                 r[k2] = cmul(r[k2], C(CS(cr), CS(ci)));

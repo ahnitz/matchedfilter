@@ -1,3 +1,4 @@
+#include "twiddle.slang"
 // Tier B: every transform length one workgroup can carry.
 //
 // L = TB*16 with TB threads holding 16 points each: a 16-point DFT per
@@ -250,7 +251,8 @@ void dft8s(inout H re[16], inout H im[16], uint o)
             uint k = j & (s-1), base = (j-k) << 1;
             float ang = PI * float(k) / float(s);
             H vr = re[o+j+4], vi = im[o+j+4];
-            cmulw(vr, vi, CS(cos(ang)), CS(sin(ang)));
+            float2 tw = mfTwiddle(ang);
+            cmulw(vr, vi, CS(tw.x), CS(tw.y));
             H ur = re[o+j], ui = im[o+j];
             br[base+k]   = ur + vr; bi[base+k]   = ui + vi;
             br[base+k+s] = ur - vr; bi[base+k+s] = ui - vi;
@@ -359,7 +361,7 @@ void dft8(inout C r[RADIX], uint o)
         [unroll] for (uint j = 0; j < 4; ++j) {
             uint k = j & (s-1), base = (j-k) << 1;
             float ang = PI * float(k) / float(s);
-            C w = C(CS(cos(ang)), CS(sin(ang)));
+            C w = C(mfTwiddle(ang));
             C u = r[o+j], v = r[o+j+4], t = cmul(w, v);
             b[base+k] = u+t; b[base+k+s] = u-t;
         }
@@ -419,7 +421,7 @@ void dft32(inout C r[RADIX])
         C a = r[j], b = r[j + 16];
         u[j] = a + b;
         float ang = 2.0f * PI * float(j) / 32.0f;
-        v[j] = cmul(a - b, C(CS(cos(ang)), CS(sin(ang))));
+        v[j] = cmul(a - b, C(mfTwiddle(ang)));
     }
     dft16(u);
     dft16(v);
@@ -441,7 +443,7 @@ void dft64(inout C r[RADIX])
         C b[16];
         [unroll] for (uint j = 0; j < 16; ++j) {
             float ang = 2.0f * PI * float(pp * j) / 64.0f;
-            b[j] = cmul(r[pp * 16 + j], C(CS(cos(ang)), CS(sin(ang))));
+            b[j] = cmul(r[pp * 16 + j], C(mfTwiddle(ang)));
         }
         dft16(b);
         [unroll] for (uint k = 0; k < 16; ++k) o[4 * k + pp] = b[k];
@@ -863,7 +865,8 @@ void filterTwo(uint pairA, uint pairB, uint tA, uint tB, uint tid,
         // twiddle is stored in anyway.
         {
             float a1 = 2.0f * PI * float(lane) / float(len);
-            float wr = cos(a1), wi = sin(a1);
+            float2 tw = mfTwiddle(a1);
+            float wr = tw.x, wi = tw.y;
             float cr = 1.0f, ci = 0.0f;
             [unroll] for (uint k2 = 0; k2 < R; ++k2) {
                 cmulw(re[k2], im[k2], CS(cr), CS(ci));
@@ -1135,7 +1138,7 @@ void tcStage1(uint3 gid: SV_GroupID, uint3 lid: SV_GroupThreadID,
     [unroll] for (uint i = 0; i < R; ++i) {
         uint k2 = slotToIndex(tid * R + i);
         float a = 2.0f * PI * float(n1 * k2) / float(TC_N);
-        scratch[pair * TC_N + k2 * TC_OTHER + n1] = cmul(r[i], C(cos(a), sin(a)));
+        scratch[pair * TC_N + k2 * TC_OTHER + n1] = cmul(r[i], C(mfTwiddle(a)));
     }
 }
 
@@ -1266,7 +1269,7 @@ void tcForwardStage1(uint3 gid: SV_GroupID, uint3 lid: SV_GroupThreadID,
     [unroll] for (uint i = 0; i < R; ++i) {
         uint k2 = slotToIndex(tid * R + i);
         float a = 2.0f * PI * float(n1 * k2) / float(TC_N);
-        scratch[block * TC_N + k2 * TC_OTHER + n1] = cmul(r[i], C(cos(a), sin(a)));
+        scratch[block * TC_N + k2 * TC_OTHER + n1] = cmul(r[i], C(mfTwiddle(a)));
     }
 }
 

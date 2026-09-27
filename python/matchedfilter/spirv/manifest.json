@@ -36,7 +36,7 @@
       ],
       "push_constant": true,
       "file": "tierb_64.spv",
-      "bytes": 18852,
+      "bytes": 20312,
       "compact": {
         "file": "compact.spv",
         "descriptors": 5
@@ -98,7 +98,7 @@
       ],
       "push_constant": true,
       "file": "tierb_128.spv",
-      "bytes": 19360,
+      "bytes": 21976,
       "compact": {
         "file": "compact.spv",
         "descriptors": 5
@@ -160,7 +160,7 @@
       ],
       "push_constant": true,
       "file": "tierb_256.spv",
-      "bytes": 21296,
+      "bytes": 22756,
       "compact": {
         "file": "compact.spv",
         "descriptors": 5
@@ -222,7 +222,7 @@
       ],
       "push_constant": true,
       "file": "tierb_512.spv",
-      "bytes": 25372,
+      "bytes": 27988,
       "compact": {
         "file": "compact.spv",
         "descriptors": 5
@@ -284,7 +284,7 @@
       ],
       "push_constant": true,
       "file": "tierb_1024.spv",
-      "bytes": 26064,
+      "bytes": 28680,
       "full": {
         "file": "full_1024.spv"
       },
@@ -360,7 +360,7 @@
       ],
       "push_constant": true,
       "file": "tierb_2048.spv",
-      "bytes": 26572,
+      "bytes": 30344,
       "full": {
         "file": "full_2048.spv"
       },
@@ -446,7 +446,7 @@
       ],
       "push_constant": true,
       "file": "tierb_4096.spv",
-      "bytes": 28508,
+      "bytes": 31124,
       "full": {
         "file": "full_4096.spv"
       },
@@ -532,7 +532,7 @@
       ],
       "push_constant": true,
       "file": "tierb_8192.spv",
-      "bytes": 32584,
+      "bytes": 36356,
       "full": {
         "file": "full_8192.spv",
         "portable": {
@@ -657,7 +657,7 @@
       ],
       "push_constant": true,
       "file": "tierb_16384.spv",
-      "bytes": 33276,
+      "bytes": 37048,
       "full": {
         "file": "full_16384.spv",
         "portable": {
@@ -784,7 +784,7 @@
       ],
       "push_constant": true,
       "file": "tierb_32768.spv",
-      "bytes": 43760,
+      "bytes": 49812,
       "full": {
         "file": "full_32768.spv",
         "portable": {
@@ -911,7 +911,7 @@
       ],
       "push_constant": true,
       "file": "tierb_65536.spv",
-      "bytes": 34180,
+      "bytes": 39092,
       "full": {
         "file": "full_65536.spv",
         "portable": {
@@ -1418,10 +1418,11 @@
     }
   },
   "source_hashes": {
-    "tierb.slang": "23da5e238f3730a377258e6c27312c485db3d0a96ff9049bd4305ebd67ea7841",
-    "fft_transform.slang": "7cdbdab1dac4e36ce0c0ae483fb170a210057cea205bb846425d04e2693e617e",
-    "coarse_tile.slang": "e63fc4b013211c57f1f561dad822420665f9c69764815c96148e8f37cfa218e8",
+    "tierb.slang": "bf401ff4eeecdf9f7c5f048b55935b624ea8becaee44bdacf28b97e7df5ba64b",
+    "fft_transform.slang": "ac5b1596ea9830655a64e5832e2db7246de6664d1de4269005319ef8725cfefd",
+    "coarse_tile.slang": "033c70ad9dea1aaeb0ffcbcb65404c19fa4515374a5dac0aa4097784bedb78bc",
     "series_forward.slang": "1ed347cedae7d1f7543ccfbfd6a4ea1971f6be1eb4fdd504c9e6b0a17b849ee5",
-    "pack_coarse.slang": "6599e775732a3d54ef2517a469aaa311a38028b41a92a87e166fce94ef3076c2"
+    "pack_coarse.slang": "6599e775732a3d54ef2517a469aaa311a38028b41a92a87e166fce94ef3076c2",
+    "twiddle.slang": "741026607e8f3d91cba1c6ed34033a418aec1591aada24cb21cb55f4c473d1d9"
   }
 }

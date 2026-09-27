@@ -15,7 +15,7 @@ def build_kernels(compiler, build_module=build):
         out = build.ROOT / 'python/matchedfilter' / folder / f'pack_coarse.{suffix}'
         subprocess.run([compiler, str(build.ROOT / 'src/gpu/pack_coarse.slang'),
                         '-target', target, '-entry', 'packCoarse', '-stage',
-                        'compute', '-O3', '-o', str(out)], check=True)
+                        'compute', '-O3', *(['-DMF_VULKAN=1'] if target == 'spirv' else []), '-o', str(out)], check=True)
     source = build.KERNEL.read_text() + '\n' + (
         build.ROOT / 'src/gpu/series_forward.slang').read_text()
     for n in build.TIER_B:
@@ -32,7 +32,7 @@ def build_kernels(compiler, build_module=build):
                 out = build.ROOT / 'python/matchedfilter' / folder / f'forward_{n}.{suffix}'
                 subprocess.run([compiler, str(src), '-I', str(build.KERNEL.parent), '-target', target,
                                 '-entry', 'seriesForward', '-stage', 'compute',
-                                '-O3', '-o', str(out)], check=True)
+                                '-O3', *(['-DMF_VULKAN=1'] if target == 'spirv' else []), '-o', str(out)], check=True)
         blob = build.ROOT / 'python/matchedfilter/spirv' / f'forward_{n}.spv'
         info = build.reflect(blob.read_bytes())
         entries[str(n)] = dict(file=blob.name, metal=f'forward_{n}.metal',
