@@ -1012,22 +1012,21 @@ static HWY_NOINLINE MF_PEAK_SECTION void binmax_fused32(BP*p,float thr,ap_peak*o
     out->index = -1; out->re = 0.f; out->im = 0.f; out->magnitude = 0.f;
     return;
   }
-  unsigned qmask = 0;
-  if (ws < 256 && we > 0) qmask |= 1u;
-  if (ws < 512 && we > 256) qmask |= 2u;
-  if (ws < 768 && we > 512) qmask |= 4u;
-  if (ws < 1024 && we > 768) qmask |= 8u;
-  if (__builtin_expect(qmask == 0, 0)) {
-    out->index = -1; out->re = 0.f; out->im = 0.f; out->magnitude = 0.f;
-    return;
-  }
+  if (we > 1024) we = 1024;
 
   for(int b=0;b<32/AP_W;b++){
+    long b_off = (long)(b * AP_W);
+    int k1_lo = (long)ws > b_off + (AP_W - 1) ? (int)(((long)ws - b_off - (AP_W - 1) + 31) / 32) : 0;
+    int k1_hi = (long)we > b_off ? (int)(((long)we - b_off - 1) / 32) : -1;
+    if (k1_lo < 0) k1_lo = 0;
+    if (k1_hi > 31) k1_hi = 31;
+    if (k1_lo > k1_hi) continue;
+    uint32_t kmask = (uint32_t)(((1ULL << (k1_hi - k1_lo + 1)) - 1ULL) << k1_lo);
+
     const float *ar=p->ire+(size_t)b*32*AP_W;
     const float *ai=p->iim+(size_t)b*32*AP_W;
-    fftsr32_unit_sink(ar,ai,p->sR,p->sI,1,qmask,[&](int k1,vf rr,vf ii){
+    fftsr32_unit_sink(ar,ai,p->sR,p->sI,1,kmask,[&](int k1,vf rr,vf ii){
       const long k=(long)k1*32+b*AP_W;
-      if(k>=(long)we || k+AP_W<=(long)ws) return;
       vf m = V_FMADD(rr,rr,V_MUL(ii,ii));
       if(__builtin_expect(k<(long)ws || k+AP_W>(long)we, 0)){
         long l0 = (long)ws - k; if(l0 < 0) l0 = 0;

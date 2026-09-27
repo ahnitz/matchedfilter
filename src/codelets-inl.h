@@ -14006,7 +14006,7 @@ static inline int fftsr32_unit_inplace(float*restrict ar,float*restrict ai,vf*re
 }
 
 template <class Sink>
-static inline int fftsr32_unit_sink(const float*restrict ar,const float*restrict ai,vf*restrict br,vf*restrict bi,const long unused_S,unsigned qmask,Sink sink){
+static inline int fftsr32_unit_sink(const float*restrict ar,const float*restrict ai,vf*restrict br,vf*restrict bi,const long unused_S,uint32_t kmask,Sink sink){
   (void)br;(void)bi;
   const vf c0=V_SET1(0.70710678118654757f);
   const vf c1=V_SET1(0.70710678118654746f);
@@ -14230,20 +14230,20 @@ static inline int fftsr32_unit_sink(const float*restrict ar,const float*restrict
   vf t158_r=u143_r, t158_i=u143_i;
   vf u159_r=V_ADD(t157_r,t158_r), u159_i=V_ADD(t157_i,t158_i);
   vf u160_r=V_SUB(t157_r,t158_r), u160_i=V_SUB(t157_i,t158_i);
-  if(qmask & 1u){
+  if(kmask & (1u << 0)){
     vf u161_r=V_ADD(u59_r,u159_r), u161_i=V_ADD(u59_i,u159_i);
     sink(0,u161_r,u161_i);
   }
-  if(qmask & 4u){
+  if(kmask & (1u << 16)){
     vf u162_r=V_SUB(u59_r,u159_r), u162_i=V_SUB(u59_i,u159_i);
     sink(16,u162_r,u162_i);
   }
   vf u163_r=u160_i, u163_i=V_XOR(u160_r,V_SIGNMASK());
-  if(qmask & 2u){
+  if(kmask & (1u << 8)){
     vf u164_r=V_ADD(u60_r,u163_r), u164_i=V_ADD(u60_i,u163_i);
     sink(8,u164_r,u164_i);
   }
-  if(qmask & 8u){
+  if(kmask & (1u << 24)){
     vf u165_r=V_SUB(u60_r,u163_r), u165_i=V_SUB(u60_i,u163_i);
     sink(24,u165_r,u165_i);
   }
@@ -14253,20 +14253,20 @@ static inline int fftsr32_unit_sink(const float*restrict ar,const float*restrict
   vf t167_i=V_FNMADD(u152_r,c10,V_MUL(u152_i,c9));
   vf u168_r=V_ADD(t166_r,t167_r), u168_i=V_ADD(t166_i,t167_i);
   vf u169_r=V_SUB(t166_r,t167_r), u169_i=V_SUB(t166_i,t167_i);
-  if(qmask & 1u){
+  if(kmask & (1u << 1)){
     vf u170_r=V_ADD(u68_r,u168_r), u170_i=V_ADD(u68_i,u168_i);
     sink(1,u170_r,u170_i);
   }
-  if(qmask & 4u){
+  if(kmask & (1u << 17)){
     vf u171_r=V_SUB(u68_r,u168_r), u171_i=V_SUB(u68_i,u168_i);
     sink(17,u171_r,u171_i);
   }
   vf u172_r=u169_i, u172_i=V_XOR(u169_r,V_SIGNMASK());
-  if(qmask & 2u){
+  if(kmask & (1u << 9)){
     vf u173_r=V_ADD(u69_r,u172_r), u173_i=V_ADD(u69_i,u172_i);
     sink(9,u173_r,u173_i);
   }
-  if(qmask & 8u){
+  if(kmask & (1u << 25)){
     vf u174_r=V_SUB(u69_r,u172_r), u174_i=V_SUB(u69_i,u172_i);
     sink(25,u174_r,u174_i);
   }
@@ -14276,20 +14276,20 @@ static inline int fftsr32_unit_sink(const float*restrict ar,const float*restrict
   vf t176_i=V_FNMADD(u146_r,c2,V_MUL(u146_i,c4));
   vf u177_r=V_ADD(t175_r,t176_r), u177_i=V_ADD(t175_i,t176_i);
   vf u178_r=V_SUB(t175_r,t176_r), u178_i=V_SUB(t175_i,t176_i);
-  if(qmask & 1u){
+  if(kmask & (1u << 2)){
     vf u179_r=V_ADD(u77_r,u177_r), u179_i=V_ADD(u77_i,u177_i);
     sink(2,u179_r,u179_i);
   }
-  if(qmask & 4u){
+  if(kmask & (1u << 18)){
     vf u180_r=V_SUB(u77_r,u177_r), u180_i=V_SUB(u77_i,u177_i);
     sink(18,u180_r,u180_i);
   }
   vf u181_r=u178_i, u181_i=V_XOR(u178_r,V_SIGNMASK());
-  if(qmask & 2u){
+  if(kmask & (1u << 10)){
     vf u182_r=V_ADD(u78_r,u181_r), u182_i=V_ADD(u78_i,u181_i);
     sink(10,u182_r,u182_i);
   }
-  if(qmask & 8u){
+  if(kmask & (1u << 26)){
     vf u183_r=V_SUB(u78_r,u181_r), u183_i=V_SUB(u78_i,u181_i);
     sink(26,u183_r,u183_i);
   }
@@ -14299,20 +14299,20 @@ static inline int fftsr32_unit_sink(const float*restrict ar,const float*restrict
   vf t185_i=V_FNMSUB(u155_r,c7,V_MUL(u155_i,c11));
   vf u186_r=V_ADD(t184_r,t185_r), u186_i=V_ADD(t184_i,t185_i);
   vf u187_r=V_SUB(t184_r,t185_r), u187_i=V_SUB(t184_i,t185_i);
-  if(qmask & 1u){
+  if(kmask & (1u << 3)){
     vf u188_r=V_ADD(u86_r,u186_r), u188_i=V_ADD(u86_i,u186_i);
     sink(3,u188_r,u188_i);
   }
-  if(qmask & 4u){
+  if(kmask & (1u << 19)){
     vf u189_r=V_SUB(u86_r,u186_r), u189_i=V_SUB(u86_i,u186_i);
     sink(19,u189_r,u189_i);
   }
   vf u190_r=u187_i, u190_i=V_XOR(u187_r,V_SIGNMASK());
-  if(qmask & 2u){
+  if(kmask & (1u << 11)){
     vf u191_r=V_ADD(u87_r,u190_r), u191_i=V_ADD(u87_i,u190_i);
     sink(11,u191_r,u191_i);
   }
-  if(qmask & 8u){
+  if(kmask & (1u << 27)){
     vf u192_r=V_SUB(u87_r,u190_r), u192_i=V_SUB(u87_i,u190_i);
     sink(27,u192_r,u192_i);
   }
@@ -14322,20 +14322,20 @@ static inline int fftsr32_unit_sink(const float*restrict ar,const float*restrict
   vf t194_i=V_FNMSUB(u144_r,c0,V_MUL(u144_i,c1));
   vf u195_r=V_ADD(t193_r,t194_r), u195_i=V_ADD(t193_i,t194_i);
   vf u196_r=V_SUB(t193_r,t194_r), u196_i=V_SUB(t193_i,t194_i);
-  if(qmask & 1u){
+  if(kmask & (1u << 4)){
     vf u197_r=V_ADD(u62_r,u195_r), u197_i=V_ADD(u62_i,u195_i);
     sink(4,u197_r,u197_i);
   }
-  if(qmask & 4u){
+  if(kmask & (1u << 20)){
     vf u198_r=V_SUB(u62_r,u195_r), u198_i=V_SUB(u62_i,u195_i);
     sink(20,u198_r,u198_i);
   }
   vf u199_r=u196_i, u199_i=V_XOR(u196_r,V_SIGNMASK());
-  if(qmask & 2u){
+  if(kmask & (1u << 12)){
     vf u200_r=V_ADD(u63_r,u199_r), u200_i=V_ADD(u63_i,u199_i);
     sink(12,u200_r,u200_i);
   }
-  if(qmask & 8u){
+  if(kmask & (1u << 28)){
     vf u201_r=V_SUB(u63_r,u199_r), u201_i=V_SUB(u63_i,u199_i);
     sink(28,u201_r,u201_i);
   }
@@ -14345,20 +14345,20 @@ static inline int fftsr32_unit_sink(const float*restrict ar,const float*restrict
   vf t203_i=V_FNMSUB(u153_r,c13,V_MUL(u153_i,c7));
   vf u204_r=V_ADD(t202_r,t203_r), u204_i=V_ADD(t202_i,t203_i);
   vf u205_r=V_SUB(t202_r,t203_r), u205_i=V_SUB(t202_i,t203_i);
-  if(qmask & 1u){
+  if(kmask & (1u << 5)){
     vf u206_r=V_ADD(u71_r,u204_r), u206_i=V_ADD(u71_i,u204_i);
     sink(5,u206_r,u206_i);
   }
-  if(qmask & 4u){
+  if(kmask & (1u << 21)){
     vf u207_r=V_SUB(u71_r,u204_r), u207_i=V_SUB(u71_i,u204_i);
     sink(21,u207_r,u207_i);
   }
   vf u208_r=u205_i, u208_i=V_XOR(u205_r,V_SIGNMASK());
-  if(qmask & 2u){
+  if(kmask & (1u << 13)){
     vf u209_r=V_ADD(u72_r,u208_r), u209_i=V_ADD(u72_i,u208_i);
     sink(13,u209_r,u209_i);
   }
-  if(qmask & 8u){
+  if(kmask & (1u << 29)){
     vf u210_r=V_SUB(u72_r,u208_r), u210_i=V_SUB(u72_i,u208_i);
     sink(29,u210_r,u210_i);
   }
@@ -14368,20 +14368,20 @@ static inline int fftsr32_unit_sink(const float*restrict ar,const float*restrict
   vf t212_i=V_FMSUB(u147_r,c6,V_MUL(u147_i,c5));
   vf u213_r=V_ADD(t211_r,t212_r), u213_i=V_ADD(t211_i,t212_i);
   vf u214_r=V_SUB(t211_r,t212_r), u214_i=V_SUB(t211_i,t212_i);
-  if(qmask & 1u){
+  if(kmask & (1u << 6)){
     vf u215_r=V_ADD(u80_r,u213_r), u215_i=V_ADD(u80_i,u213_i);
     sink(6,u215_r,u215_i);
   }
-  if(qmask & 4u){
+  if(kmask & (1u << 22)){
     vf u216_r=V_SUB(u80_r,u213_r), u216_i=V_SUB(u80_i,u213_i);
     sink(22,u216_r,u216_i);
   }
   vf u217_r=u214_i, u217_i=V_XOR(u214_r,V_SIGNMASK());
-  if(qmask & 2u){
+  if(kmask & (1u << 14)){
     vf u218_r=V_ADD(u81_r,u217_r), u218_i=V_ADD(u81_i,u217_i);
     sink(14,u218_r,u218_i);
   }
-  if(qmask & 8u){
+  if(kmask & (1u << 30)){
     vf u219_r=V_SUB(u81_r,u217_r), u219_i=V_SUB(u81_i,u217_i);
     sink(30,u219_r,u219_i);
   }
@@ -14391,20 +14391,20 @@ static inline int fftsr32_unit_sink(const float*restrict ar,const float*restrict
   vf t221_i=V_FMSUB(u156_r,c9,V_MUL(u156_i,c10));
   vf u222_r=V_ADD(t220_r,t221_r), u222_i=V_ADD(t220_i,t221_i);
   vf u223_r=V_SUB(t220_r,t221_r), u223_i=V_SUB(t220_i,t221_i);
-  if(qmask & 1u){
+  if(kmask & (1u << 7)){
     vf u224_r=V_ADD(u89_r,u222_r), u224_i=V_ADD(u89_i,u222_i);
     sink(7,u224_r,u224_i);
   }
-  if(qmask & 4u){
+  if(kmask & (1u << 23)){
     vf u225_r=V_SUB(u89_r,u222_r), u225_i=V_SUB(u89_i,u222_i);
     sink(23,u225_r,u225_i);
   }
   vf u226_r=u223_i, u226_i=V_XOR(u223_r,V_SIGNMASK());
-  if(qmask & 2u){
+  if(kmask & (1u << 15)){
     vf u227_r=V_ADD(u90_r,u226_r), u227_i=V_ADD(u90_i,u226_i);
     sink(15,u227_r,u227_i);
   }
-  if(qmask & 8u){
+  if(kmask & (1u << 31)){
     vf u228_r=V_SUB(u90_r,u226_r), u228_i=V_SUB(u90_i,u226_i);
     sink(31,u228_r,u228_i);
   }
