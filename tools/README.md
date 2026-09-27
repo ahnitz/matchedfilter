@@ -56,3 +56,14 @@ python tools/teaser_figure.py --compare m2.json amd.json --out comparison.svg
 See [the M2/Zen 5 work accounting](../docs/measurements/m2-teaser-headroom.md)
 for measured timings, arithmetic and memory estimates, and observed selection
 costs that leave room for improvement.
+
+For comparisons across more machines, `teaser_fleet.py` records CPU and GPU
+separately, checks correlation values and peaks before timing, and represents
+missing devices explicitly. It also draws the saved
+[six-machine comparison](../docs/measurements/teaser-fleet-20260926.md):
+
+```bash
+python tools/teaser_fleet.py --device cpu --out cpu.json
+python tools/teaser_fleet.py --device gpu --out gpu.json
+python tools/teaser_fleet.py --compare docs/measurements/teaser-fleet-20260926.json --out comparison.svg
+```
