@@ -95,16 +95,23 @@ jobs:
             >> "$GITHUB_STEP_SUMMARY"
 
   wheel:
-    # The same cibuildwheel path release.yml uses, on one interpreter so it
-    # stays a few minutes rather than twenty.  A wheel that only builds on
-    # release day is a wheel nobody has tested.
-    runs-on: ubuntu-latest
+    # Exercise the newest supported interpreter on both release platforms.
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: ubuntu-latest, build: cp314-manylinux_x86_64, label: linux}
+          - {os: macos-14, build: cp314-macosx_arm64, label: macos}
     steps:
       - uses: actions/checkout@v4
         with: { submodules: true }   # third_party/highway
-      - uses: pypa/cibuildwheel@v2.21.3
+      - uses: pypa/cibuildwheel@v3.4.1
         env:
-          CIBW_BUILD: cp312-manylinux_x86_64
+          CIBW_BUILD: ${{ matrix.build }}
+
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.14" }
 
       - name: The shipped header must compile on its own
         run: |
@@ -114,7 +121,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: wheel
+          name: wheel-${{ matrix.label }}
           path: wheelhouse/*.whl
           if-no-files-found: error
 

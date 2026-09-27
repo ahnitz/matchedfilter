@@ -76,12 +76,7 @@ markers = ["performance: opt-in warm-call performance regression checks"]
 # those wheels needs QEMU and is slow enough to want its own decision.  Users
 # on it get the sdist, which compiles.
 [tool.cibuildwheel]
-# 3.14 included: the extension uses only stable C API -- PyModule_Create,
-# PyArg_ParseTuple, Py_buffer, PyType_Ready -- and nothing removed in 3.12,
-# 3.13 or 3.14, so there was never a reason for it to stop at 3.13 beyond
-# 3.14 not existing when this list was written. CI is what verifies it;
-# there are no 3.14 headers on the development machine.
-#
+# Standard CPython builds; CI exercises 3.14 wheels on both platforms.
 # Free-threaded builds (cp313t, cp314t) are deliberately NOT here. The
 # extension releases the GIL around the filter and would need its plan
 # state auditing for concurrent use before claiming to support them.

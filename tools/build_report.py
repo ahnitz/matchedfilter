@@ -3,9 +3,8 @@
 
     python tools/build_report.py results/ --out site/index.html
 
-Charts are inline SVG.  No JavaScript and no external assets, so the page
-renders from a file:// URL, inside a PR comment, or on GitHub Pages without
-anything else being fetched.
+Charts are inline SVG. The recorded machine comparison has local JavaScript
+controls and a static fallback; no external service or CDN is required.
 """
 import argparse
 import glob
@@ -1455,6 +1454,7 @@ PAGES = [("index.html", "Overview", "overview", None, "Start here"),
          ("demo.html", "See it work", "demo", None, "Validation"),
          ("precision.html", "Numerical accuracy", "precision", None,
           "Validation"),
+         ("comparison.html", "Hardware comparison", "bench-comparison", None, "Benchmarks"),
          ("benchmarks.html", "Matched filter", "bench-flat", None, "Benchmarks"),
          ("hierarchical-benchmarks.html", "Hierarchical filter", "bench-hier",
           None, "Benchmarks"),
@@ -1711,11 +1711,18 @@ def build(runs, root=".", require_demo=False):
                     parts.append("<h2>%s</h2>" % html.escape(key))
                 parts.append(md(text))
             body = "".join(parts)
+        elif kind == "bench-comparison":
+            from teaser_web import fleet_comparison
+            body = '<h1>Hardware comparison</h1>' + fleet_comparison(root)
         elif kind == "bench-flat":
             body = ("<h1>Benchmarks: the matched filter</h1>"
+                    '<p><a href="comparison.html">Compare processors and output modes</a> '
+                    'with selectable hardware and linear or logarithmic axes.</p>'
                     + filter_benchmarks_page(runs))
         elif kind == "bench-hier":
             body = ("<h1>Benchmarks: the hierarchical filter</h1>"
+                    '<p><a href="comparison.html">Compare processors and output modes</a>, '
+                    'including the recorded full, peak-only and hierarchical results.</p>'
                     + hier_benchmarks_page(runs))
         elif kind == "file":
             body = md(read(os.path.join(root, arg)))
@@ -1792,6 +1799,9 @@ def main():
         for f in sorted(os.listdir(src)):
             if f.endswith(".svg"):
                 shutil.copyfile(os.path.join(src, f), os.path.join(dst, f))
+        fleet = os.path.join(a.root, 'docs', 'measurements', 'teaser-fleet-20260926.json')
+        if os.path.isfile(fleet):
+            shutil.copyfile(fleet, os.path.join(dst, os.path.basename(fleet)))
     print("wrote %d pages to %s/ from %d run(s): %s"
           % (len(pages), outdir, len(runs),
              ", ".join(r["host"]["label"] for r in runs)))

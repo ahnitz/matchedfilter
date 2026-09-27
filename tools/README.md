@@ -9,7 +9,7 @@ some calibration tools need separately captured data.
 | Purpose | Maintained entry points | Where they run |
 |---|---|---|
 | Shipped kernels | `build_spirv.py`, `build_forward.py`, `metal_probe.py` | CI checks generated SPIR-V/Metal sources and probes Metal binaries |
-| Website and figure | `build_report.py`, `teaser_figure.py` | Benchmark workflow builds the site; figure is regenerated deliberately |
+| Website and figure | `build_report.py`, `teaser_figure.py`, `teaser_fleet.py` | Benchmark workflow builds the site; figure is regenerated deliberately |
 | Public performance | `python -m matchedfilter.benchmark`, `bench_series_workloads.py`, `bench_device_paths.py` | Spectral and series benchmarks; `bench_series_workloads.py --quick` runs in benchmark CI |
 | Targeted diagnosis | `audit_class_execution.py`, `bench_class_changes.py`, `bench_pairbatch.py`, `bench_stages.py`, `audit_kernel_binaries.py` | Run when investigating a specific scheduling or kernel cost |
 | Calibration and validation | `hmf_tune.py`, `regen/cost_cpu.py`, `regen/cost_gpu.py`, `audit_gate_model.py`, `audit_selection.py`, `audit_threshold.py`, `score_*.py` | Regenerate or check measured coarse-gate tables; not part of normal installation |
@@ -67,3 +67,8 @@ python tools/teaser_fleet.py --device cpu --out cpu.json
 python tools/teaser_fleet.py --device gpu --out gpu.json
 python tools/teaser_fleet.py --compare docs/measurements/teaser-fleet-20260926.json --out comparison.svg
 ```
+
+`teaser_web.py` and `teaser_labels.py` render the Hardware comparison page
+from recorded results, with independent CPU/GPU choices and linear/log axes.
+`check_wheels.py` gates release uploads on a complete CPython 3.10–3.14
+wheel set for each release platform.

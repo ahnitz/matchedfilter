@@ -13,6 +13,7 @@ import sys
 
 import numpy as np
 import teaser_figure as teaser
+from teaser_labels import cpu_label
 
 
 MODES = [('Full output', 'full', None), ('Peak only', 'flat', None)] + [
@@ -162,7 +163,10 @@ def compare(paths, out):
             report = next((r for r in reports if r['host'] == host and r['device'] == device), None)
             rows = {} if report is None else {(r['kind'], r['fd']): r for r in report['rows']}
             name = report.get(device, '') if report else ''
-            ticks.append(host+'\n'+name.replace('AMD ', '').replace('Intel(R) ', '').replace('(TM)', '').replace(' w/ Radeon 8060S', '').replace(' with Radeon Graphics', ''))
+            processor = cpu_label(report['cpu']) if report else host
+            if report and report.get('virtualized'):
+                processor += ' (VM)'
+            ticks.append(processor if device == 'cpu' else name.replace('AMD ', '').replace('Intel(R) ', '').replace('(TM)', ''))
             for ki, key in enumerate(keys):
                 row = rows.get(key)
                 if row is None:
@@ -185,7 +189,7 @@ def compare(paths, out):
                           else 'No physical GPU exposed' if device == 'gpu' else 'Unavailable')
                 ax.text(.03, hi, reason, transform=ax.get_yaxis_transform(),
                         color=muted, va='center', fontsize=9)
-        ax.set_yticks(range(len(hosts)), ticks if device == 'cpu' else [t.split('\n',1)[1] for t in ticks], color=fg, fontsize=9)
+        ax.set_yticks(range(len(hosts)), ticks, color=fg, fontsize=9)
         ax.set_ylim(len(hosts)-.5, -.6)
         ax.set_xscale('log')
         ax.set_xlim(.01, 160)

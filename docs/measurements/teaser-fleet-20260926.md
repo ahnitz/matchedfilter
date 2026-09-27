@@ -1,8 +1,8 @@
 # Six-machine teaser comparison
 
 Measured September 26, 2026 (September 27 UTC), using library revision
-`fe7371d`. All results here are fresh measurements. The older saved teaser
-is not mixed into this comparison.
+`fe7371d`, with Intel GPU results rerun after the twiddle and indirect-dispatch
+fixes in `8ae8c79` described below. All timing blocks are preserved in the recorded JSON.
 
 ![CPU and GPU throughput on six machines](../assets/teaser-fleet.svg)
 
@@ -42,14 +42,14 @@ gravity-dev3; its filter measurements are still valid.
 
 Milliseconds per batch; smaller is faster.
 
-| Machine / CPU | FFTW | Full | Peak | Hier. 0.01 | Hier. 0.001 | Hier. 0.0001 |
+| CPU | FFTW | Full | Peak | Hier. 0.01 | Hier. 0.001 | Hier. 0.0001 |
 |---|---:|---:|---:|---:|---:|---:|
-| gravity-dev1 / Ryzen 9 5950X | 63.87 | 51.43 | 36.48 | 3.36 | 4.17 | 7.99 |
-| gravity-dev2 / Ryzen AI Max+ 395 | 78.32 | 36.37 | 24.68 | 1.88 | 3.01 | 4.64 |
-| gravity-dev3 / Ryzen 5 5500U | 88.12 | 73.98 | 51.78 | 5.10 | 6.56 | 15.55 |
-| gravity-dev4 / Core i5-13500H | 44.36 | 54.95 | 34.27 | 3.33 | 4.13 | 8.28 |
-| empire / Apple M2 | 252.09 | 69.19 | 60.83 | 6.95 | 8.26 | 14.27 |
-| sugwg-login2 / Xeon Platinum 8260 guest | 149.55 | 124.31 | 79.36 | 5.48 | 7.33 | 12.52 |
+| Ryzen 9 5950X | 63.87 | 51.43 | 36.48 | 3.36 | 4.17 | 7.99 |
+| Ryzen AI Max+ 395 | 78.32 | 36.37 | 24.68 | 1.88 | 3.01 | 4.64 |
+| Ryzen 5 5500U | 88.12 | 73.98 | 51.78 | 5.10 | 6.56 | 15.55 |
+| Core i5-13500H | 44.36 | 54.95 | 34.27 | 3.33 | 4.13 | 8.28 |
+| Apple M2 | 252.09 | 69.19 | 60.83 | 6.95 | 8.26 | 14.27 |
+| Xeon Platinum 8260 guest | 149.55 | 124.31 | 79.36 | 5.48 | 7.33 | 12.52 |
 
 The Xeon is exposed through a virtual machine. Its CPU topology and cache
 inventory do not describe an isolated physical core; these numbers measure
@@ -58,24 +58,54 @@ No frequency governor or system configuration was changed.
 
 ## GPU timings
 
-| Machine / GPU | FFT only | Full | Peak | Hier. 0.01 | Hier. 0.001 | Hier. 0.0001 |
+| GPU | FFT only | Full | Peak | Hier. 0.01 | Hier. 0.001 | Hier. 0.0001 |
 |---|---:|---:|---:|---:|---:|---:|
-| gravity-dev2 / Radeon 8060S | 2.62 | 1.587 | 0.770 | 0.132 | 0.167 | 0.206 |
-| gravity-dev3 / Radeon integrated graphics, 5500U | unavailable | 15.954 | 10.168 | 1.958 | 2.147 | 1.744 |
-| empire / M2, 10 GPU cores | 11.72 | 6.314 | 3.928 | 0.855 | 1.378 | 2.302 |
+| Radeon 8060S | 2.62 | 1.587 | 0.770 | 0.132 | 0.167 | 0.206 |
+| Radeon integrated graphics, 5500U | unavailable | 15.954 | 10.168 | 1.958 | 2.147 | 1.744 |
+| Iris Xe, Core i5-13500H | unavailable | 23.916 | 9.732 | 6.382 | 5.588 | 23.045 |
+| M2, 10 GPU cores | 11.72 | 6.314 | 3.928 | 0.855 | 1.378 | 2.302 |
 
-gravity-dev1 and sugwg-login2 expose no physical GPU. Software rendering is
-excluded. **gravity-dev4's Iris Xe fails numerical validation**, so its
-GPU timings are withheld. This is not a claim that its GPU is unavailable.
+The Ryzen 9 5950X and Xeon guest expose no physical GPU. Software rendering
+is excluded. Iris Xe now passes numerical validation without relaxing the
+existing `1e-5` tolerance. Its rerun measured full-output error `1.46e-7`
+and peak/refinement error `6.07e-8` against the independent reference.
+No FFT-only reference was available on that device.
 
-The independent check found relative full-output error `1.685e-5` against
-the existing `1e-5` tolerance. Existing tests independently reproduce the
-problem at 4096 points and in the 2048-point bank/peak-parity test; the
-latter reaches about `7.06e-5`. CPU checks pass. Investigation of Intel
-Vulkan arithmetic is a follow-up; no tolerance was relaxed and no kernel
-was changed to obtain this chart.
+### Intel corrections
+
+The first Iris Xe run failed full-output validation at `1.685e-5`; an
+independent peak test reached `7.06e-5`. Twiddle recurrences amplified the
+native sine/cosine approximation error. A Vulkan specialization selects
+range-reduced polynomial twiddles on Intel; other vendors and Metal retain
+native trigonometry. Full correlation correctness was checked at every
+supported power of two from 1,024 through 4,194,304.
+
+A separate synchronization error made hierarchical indirect dispatch read a
+stale survivor count. The argument buffer now declares transfer-destination
+usage, and barriers cover both transfer fills and compute writes before
+indirect-command reads. Covering the transfer fill matters even after
+compaction: when no pairs survive, the zero count has no shader write.
+Regression tests alternate all and zero survivors with reused plans and
+several bin sizes. The Intel full-output/parity/regression run passed 116
+tests. The original failed validation remains recorded in the JSON history.
+
+### Performance checks after the fixes
+
+Warm full-output, peak, and hierarchical calls were compared before/after at
+2,048, 4,096, and 8,192 points, retaining the 16 × 512 batch. M2 medians
+changed by under 0.4% in seven of nine cases; 2,048-point full output was
+4.2% slower and hierarchy 1.4% faster in this single comparison. Radeon
+showed run-to-run variation, including a 10% difference in 4,096-point full
+output. Repeating in reversed order put all nine changes between 2.5%
+faster and 2.6% slower, with no consistent broad slowdown. These checks
+exclude setup and do not establish a sub-percent regression bound.
 
 ## Interpretation
+
+- Iris Xe now has valid full and peak results, but hierarchy remains a
+  performance target: the `fd=0.0001` automatic configuration takes
+  23.04 ms, versus 9.73 ms for flat peaks. This release corrects accuracy
+  and dispatch behavior; it does not claim optimal Intel GPU tuning.
 
 - The Ryzen AI Max+ CPU peak path is about **2.47× faster than M2** in this
   fresh run. The 5950X and i5-13500H also beat M2 on that path, while M2
