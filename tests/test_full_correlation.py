@@ -41,6 +41,47 @@ def _full_tol(f):
     return 3e-5 if f.n == 65536 and f.device.backend == 'metal' else 1e-5
 
 
+@pytest.mark.parametrize('n', [1024, 4096])
+@pytest.mark.parametrize('blocking,layout', [(1, 1), (2, 1), (3, 1), (4, 1), (1, 0), (2, 0)])
+def test_reused_coarse_geometry_preserves_full_output_and_binned_peaks(n, blocking, layout, monkeypatch):
+    """Consuming an intermediate in place must preserve every public output."""
+    import os
+    import matchedfilter as mf
+    monkeypatch.setenv('MF_BBLK', str(blocking))
+    monkeypatch.setenv('MF_ILAY', str(layout))
+    monkeypatch.setenv('MF_PBMAX', '128')
+    mf.backend()  # Apply the process's ISA environment before overriding it.
+    restore = os.environ.get('MF_ISA') or None
+    try:
+        mf.set_target(None)
+        targets = mf.targets()
+        for target in targets:
+            mf.set_target(target)
+            data, tmpl = _spectra((2, n), 169), _spectra((3, n), 270)
+            full = CorrelationFilter(n, 2, 3, device='cpu')
+            peak = MatchedFilter(n, 2, 3, device='cpu')
+            for iteration in range(3):
+                if iteration == 2:
+                    data[1] *= np.complex64(.5 + .75j)
+                    tmpl[2] *= np.complex64(-.25 + 1j)
+                for plan in (full, peak):
+                    if iteration != 1:
+                        plan.set_data(data)
+                        plan.set_templates(tmpl)
+                expected = _reference(data, tmpl)
+                _agrees(full.run(), expected)
+                for binsize in (17, n):
+                    got = peak.run(window=(101, 919), binsize=binsize)
+                    for b, start in enumerate(range(101, 919, binsize)):
+                        end = min(919, start + binsize)
+                        idx = abs(expected[..., start:end]).argmax(axis=-1) + start
+                        val = np.take_along_axis(expected, idx[..., None], axis=-1)[..., 0]
+                        np.testing.assert_array_equal(got['index'][..., b], idx)
+                        _agrees(got['value'][..., b], val)
+    finally:
+        mf.set_target(restore)
+
+
 @pytest.mark.parametrize('device', ['cpu', 'gpu'])
 @pytest.mark.parametrize('n', SIZES)
 def test_every_supported_length(n, device):

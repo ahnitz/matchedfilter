@@ -1,0 +1,106 @@
+.FF.                                                                     [100%]
+=================================== FAILURES ===================================
+___ test_reused_coarse_geometry_preserves_full_output_and_binned_peaks[2-1] ____
+
+blocking = 2, layout = 1
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7fa9845808a0>
+
+    @pytest.mark.parametrize('blocking,layout', [(1, 1), (2, 1), (4, 1), (1, 0)])
+    def test_reused_coarse_geometry_preserves_full_output_and_binned_peaks(blocking, layout, monkeypatch):
+        """Consuming an intermediate in place must preserve every public output."""
+        import matchedfilter as mf
+        monkeypatch.setenv('MF_BBLK', str(blocking))
+        monkeypatch.setenv('MF_ILAY', str(layout))
+        monkeypatch.setenv('MF_PBMAX', '128')
+        n = 1024
+        previous = mf.backend()
+        targets = mf.targets()
+        try:
+            for target in targets:
+                mf.set_target(target)
+                data, tmpl = _spectra((2, n), 169), _spectra((3, n), 270)
+                full = CorrelationFilter(n, 2, 3, device='cpu')
+                peak = MatchedFilter(n, 2, 3, device='cpu')
+                for iteration in range(3):
+                    if iteration == 2:
+                        data[1] *= np.complex64(.5 + .75j)
+                        tmpl[2] *= np.complex64(-.25 + 1j)
+                    for plan in (full, peak):
+                        if iteration != 1:
+                            plan.set_data(data)
+                            plan.set_templates(tmpl)
+                    expected = _reference(data, tmpl)
+                    _agrees(full.run(), expected)
+                    for binsize in (17, n):
+                        got = peak.run(window=(101, 919), binsize=binsize)
+                        for b, start in enumerate(range(101, 919, binsize)):
+                            end = min(919, start + binsize)
+                            idx = abs(expected[..., start:end]).argmax(axis=-1) + start
+                            val = np.take_along_axis(expected, idx[..., None], axis=-1)[..., 0]
+>                           np.testing.assert_array_equal(got['index'][..., b], idx)
+E                           AssertionError: 
+E                           Arrays are not equal
+E                           
+E                           Mismatched elements: 6 / 6 (100%)
+E                           Max absolute difference among violations: 14
+E                           Max relative difference among violations: 0.1372549
+E                            ACTUAL: array([[102, 114, 113],
+E                                  [101, 116, 112]])
+E                            DESIRED: array([[116, 104, 112],
+E                                  [104, 102, 107]])
+
+tests/test_full_correlation.py:76: AssertionError
+___ test_reused_coarse_geometry_preserves_full_output_and_binned_peaks[4-1] ____
+
+blocking = 4, layout = 1
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7fa9845395b0>
+
+    @pytest.mark.parametrize('blocking,layout', [(1, 1), (2, 1), (4, 1), (1, 0)])
+    def test_reused_coarse_geometry_preserves_full_output_and_binned_peaks(blocking, layout, monkeypatch):
+        """Consuming an intermediate in place must preserve every public output."""
+        import matchedfilter as mf
+        monkeypatch.setenv('MF_BBLK', str(blocking))
+        monkeypatch.setenv('MF_ILAY', str(layout))
+        monkeypatch.setenv('MF_PBMAX', '128')
+        n = 1024
+        previous = mf.backend()
+        targets = mf.targets()
+        try:
+            for target in targets:
+                mf.set_target(target)
+                data, tmpl = _spectra((2, n), 169), _spectra((3, n), 270)
+                full = CorrelationFilter(n, 2, 3, device='cpu')
+                peak = MatchedFilter(n, 2, 3, device='cpu')
+                for iteration in range(3):
+                    if iteration == 2:
+                        data[1] *= np.complex64(.5 + .75j)
+                        tmpl[2] *= np.complex64(-.25 + 1j)
+                    for plan in (full, peak):
+                        if iteration != 1:
+                            plan.set_data(data)
+                            plan.set_templates(tmpl)
+                    expected = _reference(data, tmpl)
+                    _agrees(full.run(), expected)
+                    for binsize in (17, n):
+                        got = peak.run(window=(101, 919), binsize=binsize)
+                        for b, start in enumerate(range(101, 919, binsize)):
+                            end = min(919, start + binsize)
+                            idx = abs(expected[..., start:end]).argmax(axis=-1) + start
+                            val = np.take_along_axis(expected, idx[..., None], axis=-1)[..., 0]
+>                           np.testing.assert_array_equal(got['index'][..., b], idx)
+E                           AssertionError: 
+E                           Arrays are not equal
+E                           
+E                           Mismatched elements: 6 / 6 (100%)
+E                           Max absolute difference among violations: 14
+E                           Max relative difference among violations: 0.1372549
+E                            ACTUAL: array([[102, 114, 113],
+E                                  [101, 116, 112]])
+E                            DESIRED: array([[116, 104, 112],
+E                                  [104, 102, 107]])
+
+tests/test_full_correlation.py:76: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_full_correlation.py::test_reused_coarse_geometry_preserves_full_output_and_binned_peaks[2-1]
+FAILED tests/test_full_correlation.py::test_reused_coarse_geometry_preserves_full_output_and_binned_peaks[4-1]
+2 failed, 2 passed, 41 deselected in 0.14s

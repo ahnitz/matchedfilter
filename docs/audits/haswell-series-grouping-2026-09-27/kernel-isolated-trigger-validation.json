@@ -1,0 +1,551 @@
+{
+  "kernel-full-baseline-1.hdf": {
+    "count": 4386,
+    "fields": {
+      "bank_chisq": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "bank_chisq_dof": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "chisq": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "chisq_dof": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "coa_phase": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "cont_chisq": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "cont_chisq_dof": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "end_time": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "psd_var_val": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "sg_chisq": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "sigmasq": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "snr": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "template_duration": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "template_hash": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      }
+    }
+  },
+  "kernel-full-baseline-2.hdf": {
+    "count": 4386,
+    "fields": {
+      "bank_chisq": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "bank_chisq_dof": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "chisq": {
+        "exact": false,
+        "max_abs_difference": 0.0001068115234375
+      },
+      "chisq_dof": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "coa_phase": {
+        "exact": false,
+        "max_abs_difference": 4.76837158203125e-07
+      },
+      "cont_chisq": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "cont_chisq_dof": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "end_time": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "psd_var_val": {
+        "exact": false,
+        "max_abs_difference": 0.05366086959838867
+      },
+      "sg_chisq": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "sigmasq": {
+        "exact": false,
+        "max_abs_difference": 1.0
+      },
+      "snr": {
+        "exact": false,
+        "max_abs_difference": 2.384185791015625e-06
+      },
+      "template_duration": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "template_hash": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      }
+    }
+  },
+  "kernel-full-fixed-1.hdf": {
+    "count": 4386,
+    "fields": {
+      "bank_chisq": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "bank_chisq_dof": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "chisq": {
+        "exact": false,
+        "max_abs_difference": 0.0001068115234375
+      },
+      "chisq_dof": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "coa_phase": {
+        "exact": false,
+        "max_abs_difference": 4.76837158203125e-07
+      },
+      "cont_chisq": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "cont_chisq_dof": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "end_time": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "psd_var_val": {
+        "exact": false,
+        "max_abs_difference": 0.05366086959838867
+      },
+      "sg_chisq": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "sigmasq": {
+        "exact": false,
+        "max_abs_difference": 1.0
+      },
+      "snr": {
+        "exact": false,
+        "max_abs_difference": 2.384185791015625e-06
+      },
+      "template_duration": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "template_hash": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      }
+    }
+  },
+  "kernel-full-fixed-2.hdf": {
+    "count": 4386,
+    "fields": {
+      "bank_chisq": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "bank_chisq_dof": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "chisq": {
+        "exact": false,
+        "max_abs_difference": 0.00011444091796875
+      },
+      "chisq_dof": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "coa_phase": {
+        "exact": false,
+        "max_abs_difference": 4.76837158203125e-07
+      },
+      "cont_chisq": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "cont_chisq_dof": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "end_time": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "psd_var_val": {
+        "exact": false,
+        "max_abs_difference": 0.03464794158935547
+      },
+      "sg_chisq": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "sigmasq": {
+        "exact": false,
+        "max_abs_difference": 1.0
+      },
+      "snr": {
+        "exact": false,
+        "max_abs_difference": 2.384185791015625e-06
+      },
+      "template_duration": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "template_hash": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      }
+    }
+  },
+  "kernel-full-isolated-1.hdf": {
+    "count": 4386,
+    "fields": {
+      "bank_chisq": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "bank_chisq_dof": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "chisq": {
+        "exact": false,
+        "max_abs_difference": 0.00011444091796875
+      },
+      "chisq_dof": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "coa_phase": {
+        "exact": false,
+        "max_abs_difference": 4.76837158203125e-07
+      },
+      "cont_chisq": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "cont_chisq_dof": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "end_time": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "psd_var_val": {
+        "exact": false,
+        "max_abs_difference": 0.03464794158935547
+      },
+      "sg_chisq": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "sigmasq": {
+        "exact": false,
+        "max_abs_difference": 1.0
+      },
+      "snr": {
+        "exact": false,
+        "max_abs_difference": 2.384185791015625e-06
+      },
+      "template_duration": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "template_hash": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      }
+    }
+  },
+  "kernel-full-retained-1.hdf": {
+    "count": 4386,
+    "fields": {
+      "bank_chisq": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "bank_chisq_dof": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "chisq": {
+        "exact": false,
+        "max_abs_difference": 9.1552734375e-05
+      },
+      "chisq_dof": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "coa_phase": {
+        "exact": false,
+        "max_abs_difference": 2.980232238769531e-07
+      },
+      "cont_chisq": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "cont_chisq_dof": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "end_time": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "psd_var_val": {
+        "exact": false,
+        "max_abs_difference": 0.0424656867980957
+      },
+      "sg_chisq": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "sigmasq": {
+        "exact": false,
+        "max_abs_difference": 1.0
+      },
+      "snr": {
+        "exact": false,
+        "max_abs_difference": 2.384185791015625e-06
+      },
+      "template_duration": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "template_hash": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      }
+    }
+  },
+  "kernel-full-retained-2.hdf": {
+    "count": 4386,
+    "fields": {
+      "bank_chisq": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "bank_chisq_dof": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "chisq": {
+        "exact": false,
+        "max_abs_difference": 0.0001220703125
+      },
+      "chisq_dof": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "coa_phase": {
+        "exact": false,
+        "max_abs_difference": 4.76837158203125e-07
+      },
+      "cont_chisq": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "cont_chisq_dof": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "end_time": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "psd_var_val": {
+        "exact": false,
+        "max_abs_difference": 0.0424809455871582
+      },
+      "sg_chisq": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "sigmasq": {
+        "exact": false,
+        "max_abs_difference": 1.0
+      },
+      "snr": {
+        "exact": false,
+        "max_abs_difference": 2.384185791015625e-06
+      },
+      "template_duration": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "template_hash": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      }
+    }
+  },
+  "kernel-full-retained-base-1.hdf": {
+    "count": 4386,
+    "fields": {
+      "bank_chisq": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "bank_chisq_dof": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "chisq": {
+        "exact": false,
+        "max_abs_difference": 9.1552734375e-05
+      },
+      "chisq_dof": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "coa_phase": {
+        "exact": false,
+        "max_abs_difference": 2.980232238769531e-07
+      },
+      "cont_chisq": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "cont_chisq_dof": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "end_time": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "psd_var_val": {
+        "exact": false,
+        "max_abs_difference": 0.08931350708007812
+      },
+      "sg_chisq": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "sigmasq": {
+        "exact": false,
+        "max_abs_difference": 1.0
+      },
+      "snr": {
+        "exact": false,
+        "max_abs_difference": 2.384185791015625e-06
+      },
+      "template_duration": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "template_hash": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      }
+    }
+  },
+  "kernel-full-retained-base-2.hdf": {
+    "count": 4386,
+    "fields": {
+      "bank_chisq": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "bank_chisq_dof": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "chisq": {
+        "exact": false,
+        "max_abs_difference": 9.1552734375e-05
+      },
+      "chisq_dof": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "coa_phase": {
+        "exact": false,
+        "max_abs_difference": 4.76837158203125e-07
+      },
+      "cont_chisq": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "cont_chisq_dof": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "end_time": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "psd_var_val": {
+        "exact": false,
+        "max_abs_difference": 0.030790090560913086
+      },
+      "sg_chisq": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "sigmasq": {
+        "exact": false,
+        "max_abs_difference": 1.0
+      },
+      "snr": {
+        "exact": false,
+        "max_abs_difference": 2.384185791015625e-06
+      },
+      "template_duration": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      },
+      "template_hash": {
+        "exact": true,
+        "max_abs_difference": 0.0
+      }
+    }
+  }
+}

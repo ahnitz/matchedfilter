@@ -3,7 +3,7 @@
 Work started 2026-09-26 and continued 2026-09-27. This is exploratory work on
 `codex/haswell-cpu-optimization`, not a change merged into main.
 
-## Current validated checkpoint
+## Previous full-search checkpoint (`bd66606`)
 
 The branch retains the shared scheduling policy plus AVX2 32x32 coarse-kernel
 specializations: constant codelet strides, earlier final-result stores, and
@@ -38,6 +38,62 @@ Ryzen AVX2 performance checks improve the measured 1024-point cases by
 **The requested 80% hardware-peak target remains unmet.** See the bottom-up
 measurement and its limits below; this checkpoint is not a declaration that
 kernel optimization is exhausted.
+
+## In-place stage B and blocked-layout correction
+
+The next experiment consumes the contiguous 32x32 stage-B intermediate directly,
+removing its copy into another FFT buffer. Stage A refills that intermediate on
+every call. The arithmetic and calibration thresholds are unchanged.
+
+The first exact build (`retained-candidate`) measured **84.809 -> 52.886 ms** on
+the captured call (**1.602x**, 41/41 paired wins). Against `bd66606`, it measured
+54.798 -> 53.257 ms (**1.029x**, 30/31 wins). Its full-search ABBA times were
+38.843 / 27.864 / 29.798 / 38.747 seconds: 1.346x from the ratio of mean times.
+The second candidate run was visibly noisier; these results do not establish an
+additional full-search gain over the previous checkpoint. All 4,386 trigger
+identities matched, and maximum SNR difference remained 2.3842e-6.
+
+Cross-CPU testing rejected the first code organization: it regressed Ryzen AVX2
+4096-point transforms by about 6%, despite specializing only 1024. Assembly showed
+the generic stage-B frame growing from 32 bytes to 2 KiB. Outlining the new FFT
+reduced but did not remove that regression. The final arrangement isolates both
+stage-B bodies and selects the one-bin scan specialization outside its loop.
+The final local paired AVX2 checks against `bd66606` improve 1024 by 14–25%;
+4096 is unchanged to 1.2% faster. AVX-512/SSE4 checks are within 2% of the
+previous build. Intermediate rejected measurements are retained
+in the audit directory, rather than discarded.
+
+Testing also exposed a pre-existing correctness defect: `stageB_load_many`
+assumed the strided intermediate layout even when `MF_ILAY=1`. Thus diagnostic
+`MF_BBLK=2/4` settings could report incorrect peaks in the baseline. It now uses
+the appropriate element and block strides. The default block-one path did not
+have this defect.
+
+With correctness restored, block sizes 2/3/4 were measured against the final
+block-one implementation on the capture: 0.922x / 0.941x / 0.919x respectively.
+They remain diagnostic options; no new scheduling row enables them.
+
+The standard test suite now covers both intermediate layouts, block sizes 1, 2,
+3 and 4 (including a partial final group), every available CPU backend, full
+correlation, arbitrary peak bins, repeated execution, and updated input spectra.
+Local final-build selection: 85 passed, 33 skips. Neither
+this optimization nor the new tests changes calibration acceptance criteria.
+
+Final isolated-dispatch Haswell build: **85.399 -> 52.863 ms**, paired
+**1.622x**, 41/41 wins, with 67 tests passing and 31 GPU skips. The direct native
+benchmark holds five independent plan allocations and interleaves 21 rounds:
+
+| Threshold pattern | Original | Candidate | Paired speedup |
+|---|---:|---:|---:|
+| Zero threshold | 3.410 us | 2.670 us | 1.275x |
+| Reject all | 3.405 us | 2.646 us | 1.283x |
+
+Using the same approximate 52,200 useful FLOPs/pair as below, this is
+19.55–19.73 GFLOP/s, **24.9–25.2% of the measured FMA peak**, not 80%.
+These are cache-resident synthetic inputs and source/assembly operation estimates;
+they are not hardware retired-FLOP counters or end-to-end capture throughput.
+The first pattern admits a peak; the second avoids peak updates, representing
+the common coarse-rejection behavior without claiming to duplicate the fixture.
 
 ## Measured finding
 
@@ -309,3 +365,10 @@ For kernel probes, compare policy-candidate with itself and supply a candidate-o
 diagnostic option, e.g. `--candidate-env MF_N1=64`. The comparison tool also
 supports `--templates` and `--scale` workload variants. Scaled variants compare
 the builds against each other, not against the original capture's trigger set.
+
+The final isolated-dispatch full-search confirmation took **27.823 s** for
+318,007 template-seconds/s, versus the neighboring baseline runs at 38.843 and
+38.747 s (about 1.39x). This is one final-build confirmation, not an additional
+ABBA experiment. All 4,386 template/time trigger identities matched; maximum SNR
+difference was 2.3842e-6. Full field comparisons, including non-identical ancillary
+fields, are saved in `kernel-isolated-trigger-validation.json`.
