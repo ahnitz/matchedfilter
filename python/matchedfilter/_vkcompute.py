@@ -248,6 +248,8 @@ _SubmitInfo = _struct("VkSubmitInfo",
                       ("commandBufferCount", _u32),
                       ("pCommandBuffers", ctypes.POINTER(_vp)),
                       ("signalSemaphoreCount", _u32), ("pSignalSemaphores", _vp))
+_FenceCreate = _struct("VkFenceCreateInfo",
+                       ("sType", _u32), ("pNext", _vp), ("flags", _u32))
 
 
 _MemBarrier = _struct("VkMemoryBarrier",
@@ -355,6 +357,9 @@ class Context(InputUploads):
         self._record_storage = {}
         self._record_pools = {}
         self._hier = {}
+        self._hier_cascade = {}
+        self._fences = {}
+        self._pending_forward = {}
         self._uploaded = {"data": {}, "tmpl": {}}
 
         app = _vulkan._AppInfo(0, None, b"matchedfilter", 1, b"matchedfilter", 1,
@@ -439,6 +444,24 @@ class Context(InputUploads):
             if fam.queueFlags & _QUEUE_COMPUTE:
                 return i
         raise VulkanError("device exposes no compute queue")
+
+    def _get_fence(self, slot=0):
+        if slot is None:
+            slot = 0
+        fence = self._fences.get(slot)
+        if fence is None:
+            fc = _FenceCreate(8, None, 0)
+            fence = _vp()
+            _check(self.vk.vkCreateFence(self.device, ctypes.byref(fc), None,
+                                         ctypes.byref(fence)), "vkCreateFence")
+            self._fences[slot] = fence
+        return fence
+
+    def _wait_fence(self, fence):
+        fences = (_vp * 1)(fence)
+        _check(self.vk.vkWaitForFences(self.device, 1, fences, 1, 0xFFFFFFFFFFFFFFFF),
+               "vkWaitForFences")
+        _check(self.vk.vkResetFences(self.device, 1, fences), "vkResetFences")
 
     def memory_type(self, allowed_bits, readback=False):
         """A memory type for this buffer; host-visible either way.
@@ -573,13 +596,24 @@ class Context(InputUploads):
 
     def hier_peaks(self, n, band, data, tmpl, ct0, raw_thr,
                    binsize=None, threshold=0.0, window=None,
-                   upload_data=True, upload_tmpl=True):
+                   upload_data=True, upload_tmpl=True,
+                   cascade_band=None, ct1=None, raw_thr1=None,
+                   slot=None, async_submit=False):
         """The whole hierarchical filter in ONE command buffer.
 
         Coarse correlation, survivor compaction, then listed refinement.
-        Shared input uses a preceding GPU coarse-band extraction dispatch.
-        The survivor count stays on the device through indirect dispatch.
+        Supports single-tier or two-tier cascade indirect execution.
         """
+        if isinstance(band, (tuple, list)):
+            cascade_band = band[0]
+            band = band[1]
+        if isinstance(ct0, (tuple, list)):
+            ct1 = ct0[1]
+            ct0 = ct0[0]
+        if isinstance(raw_thr, (tuple, list)):
+            raw_thr1 = raw_thr[1]
+            raw_thr = raw_thr[0]
+
         vk = self.vk
         nd, nt = data.shape[0], tmpl.shape[0]
         lo, hi = (0, n) if window is None else (int(window[0]), int(window[1]))
@@ -589,8 +623,6 @@ class Context(InputUploads):
         binsize = n if binsize is None else int(binsize)
         nbins = -(-(hi - lo) // binsize)
         if nbins > _MAX_BINS:
-            # Same split as peaks(): bins are contiguous in the window, so
-            # cutting the window on a bin boundary cuts the bins exactly.
             span = _MAX_BINS * binsize
             pi, pv = [], []
             for a in range(lo, hi, span):
@@ -598,14 +630,80 @@ class Context(InputUploads):
                 i2, v2 = self.hier_peaks(n, band, data, tmpl, ct0, raw_thr, binsize=binsize,
                                          threshold=threshold, window=(a, bnd),
                                          upload_data=upload_data,
-                                         upload_tmpl=upload_tmpl)
+                                         upload_tmpl=upload_tmpl,
+                                         cascade_band=cascade_band, ct1=ct1, raw_thr1=raw_thr1,
+                                         slot=slot, async_submit=False)
                 pi.append(i2); pv.append(v2)
-                # The first piece invalidated all old resident copies. Do not
-                # invalidate its fresh upload again on the remaining pieces.
                 upload_data = upload_tmpl = False
             return np.concatenate(pi, axis=2), np.concatenate(pv, axis=2)
         shift = (binsize.bit_length() - 1) if binsize & (binsize - 1) == 0 else -1
         t2 = float(threshold) ** 2 if threshold > 0 else 0.0
+
+        if cascade_band is not None:
+            band0 = int(cascade_band)
+            band1 = int(band)
+            thr0 = float(raw_thr)
+            thr1 = float(raw_thr1)
+            key = ("hier_cascade", n, band0, band1, nd, nt, nbins, binsize, shift, lo, hi,
+                   int(np.float32(t2).view(np.uint32)),
+                   thr0, thr1)
+            key += (shared_key(data, self), shared_key(tmpl, self))
+            storage_key = ("hier_cascade", n, band0, band1, nd, nt, nbins, *key[-2:])
+            upload_data, upload_tmpl, dsig, tsig = self._input_uploads(
+                storage_key, data, tmpl, upload_data, upload_tmpl)
+            batch = self._hier_cascade.get(key)
+            if batch is None:
+                incoming = [b for b in (shared_buffer(data, self), shared_buffer(tmpl, self)) if b is not None]
+                estimate = (8*n*(nd+nt) + 4*band0*(nd+nt) + 8*band1*(nd+nt) + nd*nt*(24+12*nbins) + 24
+                            - (nd*n*8 if shared_buffer(data, self) else 0)
+                            - (nt*n*8 if shared_buffer(tmpl, self) else 0))
+                if storage_key in self._storage:
+                    estimate = 0
+                self._cache_room(estimate, incoming=incoming, keep_storage=storage_key)
+                fresh = storage_key not in self._storage
+                pool_start = len(getattr(self, '_pools', []))
+                batch = self._make_hier_cascade(storage_key, n, band0, band1, nd, nt, nbins, binsize,
+                                                shift, lo, hi, t2, thr0, thr1, data, tmpl)
+                self._hier_cascade[key] = batch
+                self._register_record('hier_cascade', key, storage_key, pool_start)
+                if fresh:
+                    upload_data = upload_tmpl = True
+            self._cache_touch('hier_cascade', key)
+            bufs, cmd = batch
+            if upload_data:
+                write_input(bufs["data"], data)
+                if shared_buffer(data, self) is not None:
+                    pass
+                else:
+                    bufs["cdata0"].write(_pack_half2(data[:, :band0]))
+                    bufs["cdata1"].write(np.ascontiguousarray(data[:, :band1], np.complex64))
+                self._uploaded["data"][storage_key] = dsig
+            if upload_tmpl:
+                write_input(bufs["tmpl"], tmpl)
+                bufs["ct0"].write(_pack_half2(ct0))
+                bufs["ct1"].write(np.ascontiguousarray(ct1, np.complex64))
+                self._uploaded["tmpl"][storage_key] = tsig
+
+            fence = self._get_fence(slot) if (async_submit and slot is not None) else None
+            self._submit(cmd, fence=fence, wait=not async_submit, slot=slot)
+
+            out = nd * nt * nbins
+            if async_submit:
+                def readback():
+                    if fence is not None:
+                        self._wait_fence(fence)
+                    idx = bufs["idx"].read(np.int32, out).reshape(nd, nt, nbins)
+                    val = bufs["val"].read(np.complex64, out).reshape(nd, nt, nbins)
+                    self.last_refinements = int(bufs["args_refine"].read(np.uint32, 1)[0])
+                    self.last_tier1_survivors = int(bufs["args_tier1"].read(np.uint32, 1)[0])
+                    return idx, val
+                return readback
+
+            idx = bufs["idx"].read(np.int32, out).reshape(nd, nt, nbins)
+            val = bufs["val"].read(np.complex64, out).reshape(nd, nt, nbins)
+            self.last_refinements = int(bufs["args_refine"].read(np.uint32, 1)[0])
+            self.last_tier1_survivors = int(bufs["args_tier1"].read(np.uint32, 1)[0])
+            return idx, val
 
         key = ("hier", n, band, nd, nt, nbins, binsize, shift, lo, hi,
                int(np.float32(t2).view(np.uint32)),
@@ -633,13 +731,10 @@ class Context(InputUploads):
                 upload_data = upload_tmpl = True
         self._cache_touch('hier', key)
         bufs, cmd = batch
-        # Upload only what changed. A template bank is 67 MB at n=16384 with
-        # 512 templates, and re-sending it on every call dwarfed the
-        # filtering it was feeding.
         if upload_data:
             write_input(bufs["data"], data)
             if shared_buffer(data, self) is not None:
-                pass  # device band extraction is recorded before the coarse FFT
+                pass
             elif _use_c16(band) and not _COARSE_TILE.get(band):
                 bufs["cdata"].write(_pack_half2(data[:, :band]))
             else:
@@ -653,9 +748,20 @@ class Context(InputUploads):
                 bufs["ct0"].write(np.ascontiguousarray(ct0, np.complex64))
             self._uploaded["tmpl"][storage_key] = tsig
 
-        self._submit(cmd)
+        fence = self._get_fence(slot) if (async_submit and slot is not None) else None
+        self._submit(cmd, fence=fence, wait=not async_submit, slot=slot)
 
         out = nd * nt * nbins
+        if async_submit:
+            def readback():
+                if fence is not None:
+                    self._wait_fence(fence)
+                idx = bufs["idx"].read(np.int32, out).reshape(nd, nt, nbins)
+                val = bufs["val"].read(np.complex64, out).reshape(nd, nt, nbins)
+                self.last_refinements = int(bufs["args"].read(np.uint32, 1)[0])
+                return idx, val
+            return readback
+
         idx = bufs["idx"].read(np.int32, out).reshape(nd, nt, nbins)
         val = bufs["val"].read(np.complex64, out).reshape(nd, nt, nbins)
         self.last_refinements = int(bufs["args"].read(np.uint32, 1)[0])
@@ -915,14 +1021,198 @@ class Context(InputUploads):
         _check(vk.vkEndCommandBuffer(cmd), "vkEndCommandBuffer")
         return b, cmd
 
+    def _make_hier_cascade(self, key, n, band0, band1, nd, nt, nbins, binsize, shift, lo, hi,
+                           t2, raw_thr0, raw_thr1, data=None, tmpl=None):
+        vk = self.vk
+        _ppg0 = max(1, min(4, 512 // band0))
+        if (nd * nt) % _ppg0:
+            _ppg0 = 1
+        _tile0 = _COARSE_TILE_T.get(band0, 1)
+        if _tile0 > 1 and (nt % _tile0 or (nd * nt) % (_ppg0 * _tile0)):
+            _tile0 = 1
+
+        cpipe0, clayout0, cset_layout0 = self._build_pipeline(
+            ("coarse16", band0, _ppg0, _tile0),
+            "tierb_%d_c16%s%s.spv" % (band0,
+                "p%d" % _ppg0 if _ppg0 > 1 else "",
+                "t%d" % _tile0 if _tile0 > 1 else ""),
+            _NBIND, _PUSH_BYTES)
+
+        kpipe, klayout, kset_layout = self._build_pipeline(
+            "compact", "compact.spv", 5, 12)
+
+        refine_file1 = self._peak_file(band1, 1, refine=True)
+        cpipe1, clayout1, cset_layout1 = self._build_pipeline(
+            ("refine", refine_file1), refine_file1, 5, _PUSH_BYTES)
+
+        refine_file = self._peak_file(n, nbins, refine=True)
+        rpipe, rlayout, rset_layout = self._build_pipeline(
+            ("refine", refine_file), refine_file, 5, _PUSH_BYTES)
+
+        pairs = nd * nt
+        b = self._storage.get(key)
+        if b is None:
+            b = {
+                "data":        shared_buffer(data, self) or _Buffer(self, nd * n * 8),
+                "tmpl":        shared_buffer(tmpl, self) or _Buffer(self, nt * n * 8),
+                "cdata0":      _Buffer(self, nd * band0 * 4),
+                "ct0":         _Buffer(self, nt * band0 * 4),
+                "cidx0":       _Buffer(self, pairs * 4),
+                "cval0":       _Buffer(self, pairs * 8),
+                "surv0":       _Buffer(self, pairs * 4),
+                "args_tier1":  _Buffer(self, 12, usage=_BUF_STORAGE | _BUF_INDIRECT | _BUF_TRANSFER_DST),
+                "cdata1":      _Buffer(self, nd * band1 * 8),
+                "ct1":         _Buffer(self, nt * band1 * 8),
+                "cidx1":       _Buffer(self, pairs * 4),
+                "cval1":       _Buffer(self, pairs * 8, usage=_BUF_STORAGE | _BUF_TRANSFER_DST),
+                "surv1":       _Buffer(self, pairs * 4),
+                "args_refine": _Buffer(self, 12, usage=_BUF_STORAGE | _BUF_INDIRECT | _BUF_TRANSFER_DST),
+                "idx":         _Buffer(self, nd * nt * nbins * 4, readback=True),
+                "val":         _Buffer(self, nd * nt * nbins * 8, readback=True),
+            }
+            self._storage[key] = b
+
+        ds_coarse0 = self._descriptor_set(
+            cset_layout0, [b["cdata0"], b["ct0"], b["cidx0"], b["cval0"]])
+        ds_compact0 = self._descriptor_set(
+            kset_layout, [b["cval0"], b["surv0"], b["args_tier1"], b["idx"], b["val"]])
+        ds_tier1 = self._descriptor_set(
+            cset_layout1, [b["cdata1"], b["ct1"], b["cidx1"], b["cval1"], b["surv0"]])
+        ds_compact1 = self._descriptor_set(
+            kset_layout, [b["cval1"], b["surv1"], b["args_refine"], b["idx"], b["val"]])
+        ds_listed = self._descriptor_set(
+            rset_layout, [b["data"], b["tmpl"], b["idx"], b["val"], b["surv1"]])
+
+        shared_data = shared_buffer(data, self) is not None
+        if shared_data:
+            ppipe, playout, psl = self._build_pipeline(
+                "pack_coarse", "pack_coarse.spv", 2, 16)
+            ds_pack0 = self._descriptor_set(psl, [b["data"], b["cdata0"]])
+            ds_pack1 = self._descriptor_set(psl, [b["data"], b["cdata1"]])
+
+        cb = _CmdBufAlloc(40, None, self.command_pool, 0, 1)
+        cmd = _vp()
+        _check(vk.vkAllocateCommandBuffers(self.device, ctypes.byref(cb),
+                                           ctypes.byref(cmd)),
+               "vkAllocateCommandBuffers")
+        _check(vk.vkBeginCommandBuffer(cmd, ctypes.byref(
+            _CmdBufBegin(42, None, 0, None))), "vkBeginCommandBuffer")
+
+        def barrier(src_stage=_STAGE_COMPUTE_BIT, dst_stage=_STAGE_COMPUTE_BIT,
+                    src_access=_ACCESS_SHADER_WRITE, dst_access=_ACCESS_SHADER_READ):
+            mb = _MemBarrier(46, None, src_access, dst_access)
+            vk.vkCmdPipelineBarrier(cmd, src_stage, dst_stage,
+                                    0, 1, ctypes.byref(mb), 0, None, 0, None)
+
+        # 1. Clear indirect args and intermediate peak values
+        vk.vkCmdFillBuffer(cmd, b["args_tier1"].handle, 0, 4, 0)
+        vk.vkCmdFillBuffer(cmd, b["args_tier1"].handle, 4, 8, 1)
+        vk.vkCmdFillBuffer(cmd, b["args_refine"].handle, 0, 4, 0)
+        vk.vkCmdFillBuffer(cmd, b["args_refine"].handle, 4, 8, 1)
+        vk.vkCmdFillBuffer(cmd, b["cval1"].handle, 0, pairs * 8, 0)
+        barrier(src_stage=_STAGE_TRANSFER_BIT, src_access=_ACCESS_TRANSFER_WRITE,
+                dst_stage=_STAGE_COMPUTE_BIT | _STAGE_DRAW_INDIRECT_BIT,
+                dst_access=_ACCESS_SHADER_READ | _ACCESS_SHADER_WRITE | _ACCESS_INDIRECT_READ)
+
+        # 2. Extract coarse bands if shared
+        if shared_data:
+            vk.vkCmdBindPipeline(cmd, _BIND_POINT_COMPUTE, ppipe)
+            sets = (_vp * 1)(ds_pack0)
+            vk.vkCmdBindDescriptorSets(cmd, _BIND_POINT_COMPUTE, playout, 0, 1, sets, 0, None)
+            pc0 = (ctypes.c_uint32 * 4)(n, band0, nd * band0, 1)
+            vk.vkCmdPushConstants(cmd, playout, _STAGE_COMPUTE, 0, 16, ctypes.byref(pc0))
+            vk.vkCmdDispatch(cmd, (nd * band0 + 255) // 256, 1, 1)
+
+            sets = (_vp * 1)(ds_pack1)
+            vk.vkCmdBindDescriptorSets(cmd, _BIND_POINT_COMPUTE, playout, 0, 1, sets, 0, None)
+            pc1 = (ctypes.c_uint32 * 4)(n, band1, nd * band1, 0)
+            vk.vkCmdPushConstants(cmd, playout, _STAGE_COMPUTE, 0, 16, ctypes.byref(pc1))
+            vk.vkCmdDispatch(cmd, (nd * band1 + 255) // 256, 1, 1)
+            barrier()
+
+        # 3. Stage 1: Tier 0 Coarse (all pairs)
+        vk.vkCmdBindPipeline(cmd, _BIND_POINT_COMPUTE, cpipe0)
+        sets = (_vp * 1)(ds_coarse0)
+        vk.vkCmdBindDescriptorSets(cmd, _BIND_POINT_COMPUTE, clayout0, 0, 1, sets, 0, None)
+        R_coarse0 = n // band0
+        cstart0 = lo // R_coarse0
+        cend0 = (hi + R_coarse0 - 1) // R_coarse0
+        if cend0 > band0:
+            cend0 = band0
+        if cstart0 > 0:
+            cstart0 -= 1
+        cend0 = max(cstart0 + 1, cend0)
+        cspan0 = max(1, cend0 - cstart0)
+        shift_c0 = (cspan0.bit_length() - 1) if cspan0 & (cspan0 - 1) == 0 else -1
+        pc0 = (ctypes.c_uint32 * 7)(nt, cstart0, cend0, cspan0, shift_c0 & 0xFFFFFFFF, 1, 0)
+        vk.vkCmdPushConstants(cmd, clayout0, _STAGE_COMPUTE, 0, _PUSH_BYTES, ctypes.byref(pc0))
+        vk.vkCmdDispatch(cmd, pairs // (_ppg0 * _tile0), 1, 1)
+        barrier()
+
+        # 4. Stage 2: Compact 0
+        vk.vkCmdBindPipeline(cmd, _BIND_POINT_COMPUTE, kpipe)
+        sets = (_vp * 1)(ds_compact0)
+        vk.vkCmdBindDescriptorSets(cmd, _BIND_POINT_COMPUTE, klayout, 0, 1, sets, 0, None)
+        kpc0 = (ctypes.c_uint32 * 3)(pairs, int(np.float32(raw_thr0).view(np.uint32)), nbins)
+        vk.vkCmdPushConstants(cmd, klayout, _STAGE_COMPUTE, 0, 12, ctypes.byref(kpc0))
+        vk.vkCmdDispatch(cmd, (pairs + 255) // 256, 1, 1)
+        barrier(dst_stage=_STAGE_COMPUTE_BIT | _STAGE_DRAW_INDIRECT_BIT,
+                dst_access=_ACCESS_SHADER_READ | _ACCESS_SHADER_WRITE | _ACCESS_INDIRECT_READ)
+
+        # 5. Stage 3: Tier 1 Coarse (Indirect on survivors0)
+        vk.vkCmdBindPipeline(cmd, _BIND_POINT_COMPUTE, cpipe1)
+        sets = (_vp * 1)(ds_tier1)
+        vk.vkCmdBindDescriptorSets(cmd, _BIND_POINT_COMPUTE, clayout1, 0, 1, sets, 0, None)
+        R_coarse1 = n // band1
+        cstart1 = lo // R_coarse1
+        cend1 = (hi + R_coarse1 - 1) // R_coarse1
+        if cend1 > band1:
+            cend1 = band1
+        if cstart1 > 0:
+            cstart1 -= 1
+        cend1 = max(cstart1 + 1, cend1)
+        cspan1 = max(1, cend1 - cstart1)
+        shift_c1 = (cspan1.bit_length() - 1) if cspan1 & (cspan1 - 1) == 0 else -1
+        pc1 = (ctypes.c_uint32 * 7)(nt, cstart1, cend1, cspan1, shift_c1 & 0xFFFFFFFF, 1, 0)
+        vk.vkCmdPushConstants(cmd, clayout1, _STAGE_COMPUTE, 0, _PUSH_BYTES, ctypes.byref(pc1))
+        vk.vkCmdDispatchIndirect(cmd, b["args_tier1"].handle, 0)
+        barrier()
+
+        # 6. Stage 4: Compact 1
+        vk.vkCmdBindPipeline(cmd, _BIND_POINT_COMPUTE, kpipe)
+        sets = (_vp * 1)(ds_compact1)
+        vk.vkCmdBindDescriptorSets(cmd, _BIND_POINT_COMPUTE, klayout, 0, 1, sets, 0, None)
+        kpc1 = (ctypes.c_uint32 * 3)(pairs, int(np.float32(raw_thr1).view(np.uint32)), nbins)
+        vk.vkCmdPushConstants(cmd, klayout, _STAGE_COMPUTE, 0, 12, ctypes.byref(kpc1))
+        vk.vkCmdDispatch(cmd, (pairs + 255) // 256, 1, 1)
+        barrier(dst_stage=_STAGE_COMPUTE_BIT | _STAGE_DRAW_INDIRECT_BIT,
+                dst_access=_ACCESS_SHADER_READ | _ACCESS_SHADER_WRITE | _ACCESS_INDIRECT_READ)
+
+        # 7. Stage 5: Refine (Indirect on survivors1)
+        vk.vkCmdBindPipeline(cmd, _BIND_POINT_COMPUTE, rpipe)
+        sets = (_vp * 1)(ds_listed)
+        vk.vkCmdBindDescriptorSets(cmd, _BIND_POINT_COMPUTE, rlayout, 0, 1, sets, 0, None)
+        pc = (ctypes.c_uint32 * 7)(
+            nt, lo, hi, binsize, shift & 0xFFFFFFFF, nbins,
+            int(np.float32(t2).view(np.uint32)))
+        vk.vkCmdPushConstants(cmd, rlayout, _STAGE_COMPUTE, 0, _PUSH_BYTES, ctypes.byref(pc))
+        vk.vkCmdDispatchIndirect(cmd, b["args_refine"].handle, 0)
+
+        # 8. Host read barrier
+        barrier(src_stage=_STAGE_COMPUTE_BIT | _STAGE_TRANSFER_BIT,
+                src_access=_ACCESS_SHADER_WRITE | _ACCESS_TRANSFER_WRITE,
+                dst_stage=_STAGE_HOST_BIT, dst_access=_ACCESS_HOST_READ)
+        _check(vk.vkEndCommandBuffer(cmd), "vkEndCommandBuffer")
+        return b, cmd
+
     def empty_shared(self, shape, dtype=np.complex64, *, readback=False):
         factory = (lambda ctx, size: _Buffer(ctx, size, readback=True)) if readback else _Buffer
         return empty_shared(self, factory, shape, dtype)
 
-    def forward(self, n, series, starts, spectra, *, defer=False):
+    def forward(self, n, series, starts, spectra, *, defer=False, slot=None):
         """Gather and normalize forward FFTs directly into shared spectra."""
         if n > 65536:
-            return self._forward_tierc(n, series, starts, spectra, defer=defer)
+            return self._forward_tierc(n, series, starts, spectra, defer=defer, slot=slot)
         vk = self.vk
         pipe, layout, sl = self._build_pipeline(
             ("forward", n), "forward_%d.spv" % n, 3, 4)
@@ -967,11 +1257,13 @@ class Context(InputUploads):
         self._cache_touch('forward', key)
         cmd = batch[-1]
         if defer:
-            self._pending_forward = cmd
+            if not isinstance(getattr(self, "_pending_forward", None), dict):
+                self._pending_forward = {}
+            self._pending_forward[slot] = cmd
         else:
-            self._submit(cmd)
+            self._submit(cmd, slot=slot)
 
-    def _forward_tierc(self, n, series, starts, spectra, *, defer=False):
+    def _forward_tierc(self, n, series, starts, spectra, *, defer=False, slot=None):
         info = _manifest().get('full_tierc', {}).get(str(n))
         if info is None:
             raise UnsupportedSize('no two-stage series FFT for n=%d' % n)
@@ -1030,27 +1322,47 @@ class Context(InputUploads):
         self._cache_touch('forward', key)
         cmd = batch[-1]
         if defer:
-            self._pending_forward = cmd
+            if not isinstance(getattr(self, "_pending_forward", None), dict):
+                self._pending_forward = {}
+            self._pending_forward[slot] = cmd
         else:
-            self._submit(cmd)
+            self._submit(cmd, slot=slot)
 
-    def cancel_forward(self):
-        self._pending_forward = None
+    def cancel_forward(self, slot=None):
+        if isinstance(getattr(self, "_pending_forward", None), dict):
+            if slot is None:
+                self._pending_forward.clear()
+            else:
+                self._pending_forward.pop(slot, None)
+        else:
+            self._pending_forward = None
 
-    def _submit(self, cmd):
+    def _submit(self, cmd, fence=None, wait=True, slot=None):
         """Forward and correlation share one submit and completion wait."""
-        pending = getattr(self, "_pending_forward", None)
+        pending = None
+        if isinstance(getattr(self, "_pending_forward", None), dict):
+            if slot is not None:
+                pending = self._pending_forward.pop(slot, None)
+            elif len(self._pending_forward) == 1:
+                pending = next(iter(self._pending_forward.values()))
+                self._pending_forward.clear()
+        else:
+            pending = getattr(self, "_pending_forward", None)
+            self._pending_forward = None
         commands = ([pending] if pending is not None else [])
         if cmd is not None:
             commands.append(cmd)
-        self._pending_forward = None
         if not commands:
             return
         cmds = (_vp * len(commands))(*commands)
         submit = _SubmitInfo(4, None, 0, None, None, len(commands), cmds, 0, None)
-        _check(self.vk.vkQueueSubmit(self.queue, 1, ctypes.byref(submit), None),
+        _check(self.vk.vkQueueSubmit(self.queue, 1, ctypes.byref(submit), fence),
                "vkQueueSubmit")
-        _check(self.vk.vkQueueWaitIdle(self.queue), "vkQueueWaitIdle")
+        if wait:
+            if fence is not None:
+                self._wait_fence(fence)
+            else:
+                _check(self.vk.vkQueueWaitIdle(self.queue), "vkQueueWaitIdle")
 
     def _make_batch(self, key, n, nd, nt, nbins, binsize, shift, lo, hi, t2, data=None, tmpl=None):
         """Buffers, descriptor set and a recorded command buffer for one shape."""
@@ -1092,7 +1404,7 @@ class Context(InputUploads):
         return (b_data, b_tmpl, b_idx, b_val, cmd)
 
     def peaks(self, n, data, tmpl, binsize=None, threshold=0.0, window=None,
-              upload_data=True, upload_tmpl=True):
+              upload_data=True, upload_tmpl=True, slot=None, async_submit=False):
         """Peak index and complex value per (data, template, bin).
 
         Mirrors MatchedFilter.run: bins are ``ceil((end-start)/binsize)``
@@ -1124,7 +1436,8 @@ class Context(InputUploads):
                 pi, pv = self.peaks(n, data, tmpl, binsize=binsize,
                                     threshold=threshold, window=(start, stop),
                                     upload_data=upload_data,
-                                    upload_tmpl=upload_tmpl)
+                                    upload_tmpl=upload_tmpl,
+                                    slot=slot, async_submit=False)
                 parts_i.append(pi)
                 parts_v.append(pv)
                 upload_data = upload_tmpl = False
@@ -1178,9 +1491,19 @@ class Context(InputUploads):
             write_input(b_tmpl, tmpl)
             self._uploaded["tmpl"][storage_key] = tsig
 
-        self._submit(cmd)
+        fence = self._get_fence(slot) if (async_submit and slot is not None) else None
+        self._submit(cmd, fence=fence, wait=not async_submit, slot=slot)
 
         out = nd * nt * nbins
+        if async_submit:
+            def readback():
+                if fence is not None:
+                    self._wait_fence(fence)
+                idx = b_idx.read(np.int32, out).reshape(nd, nt, nbins)
+                val = b_val.read(np.complex64, out).reshape(nd, nt, nbins)
+                return idx, val
+            return readback
+
         # int32 as the kernel wrote it. The caller's PEAK_DTYPE index is
         # int64, and assigning int32 into that field widens it during the
         # strided write that has to happen anyway -- so converting here
@@ -1191,7 +1514,8 @@ class Context(InputUploads):
         val = b_val.read(np.complex64, out).reshape(nd, nt, nbins)
         return idx, val
 
-    def peaks_grouped(self, n, data, tmpl, groups, binsize, threshold, *, upload_tmpl=True):
+    def peaks_grouped(self, n, data, tmpl, groups, binsize, threshold, *, upload_tmpl=True,
+                      slot=None, async_submit=False):
         """Run distinct flat search windows in one synchronous submission.
 
         Data is a shared forward-FFT batch. Descriptor offsets select each
@@ -1269,7 +1593,22 @@ class Context(InputUploads):
         if upload_tmpl:
             write_input(b_tmpl, tmpl)
             self._uploaded["tmpl"][key] = tsig
-        self._submit(cmd)
+        fence = self._get_fence(slot) if (async_submit and slot is not None) else None
+        self._submit(cmd, fence=fence, wait=not async_submit, slot=slot)
+        if async_submit:
+            def readback():
+                if fence is not None:
+                    self._wait_fence(fence)
+                indices = b_idx.read(np.int32, size)
+                values = b_val.read(np.complex64, size)
+                idx = np.empty((nd, nt, nb), np.int32)
+                val = np.empty((nd, nt, nb), np.complex64)
+                for (_, _, a, b), offset in zip(groups, offsets):
+                    count = (b-a)*nt*nb
+                    idx[a:b] = indices[offset:offset+count].reshape(b-a, nt, nb)
+                    val[a:b] = values[offset:offset+count].reshape(b-a, nt, nb)
+                return idx, val
+            return readback
         indices = b_idx.read(np.int32, size)
         values = b_val.read(np.complex64, size)
         idx = np.empty((nd, nt, nb), np.int32)
@@ -1543,6 +1882,7 @@ class Context(InputUploads):
     def _evict_record(self, kind, key, keep_storage=None):
         token = (kind, key)
         cache = {'flat': self._batches, 'hier': self._hier,
+                 'hier_cascade': getattr(self, '_hier_cascade', {}),
                  'forward': getattr(self, '_forwards', {}),
                  'full': getattr(self, '_full_batches', {}),
                  'tierc': getattr(self, '_tierc_batches', {})}[kind]
@@ -1572,8 +1912,10 @@ class Context(InputUploads):
     def clear_cache(self):
         """Release records and owned storage, preserving external shared arrays."""
         self._submit(None)
+        _check(self.vk.vkQueueWaitIdle(self.queue), "vkQueueWaitIdle")
         self.vk.vkFreeCommandBuffers.argtypes = [_vp, _vp, _u32, ctypes.POINTER(_vp)]
         for kind, cache in (('flat', self._batches), ('hier', self._hier),
+                            ('hier_cascade', getattr(self, '_hier_cascade', {})),
                             ('full', getattr(self, '_full_batches', {})),
                             ('tierc', getattr(self, '_tierc_batches', {})),
                             ('forward', getattr(self, '_forwards', {}))):
@@ -1593,6 +1935,9 @@ class Context(InputUploads):
             return
         self.clear_cache()
         vk = self.vk
+        for fence in getattr(self, "_fences", {}).values():
+            vk.vkDestroyFence(self.device, fence, None)
+        self._fences.clear()
         for pipe, layout, set_layout in self._pipelines.values():
             vk.vkDestroyPipeline(self.device, pipe, None)
             vk.vkDestroyPipelineLayout(self.device, layout, None)

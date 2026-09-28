@@ -455,11 +455,11 @@ class MatchedFilter:
         from ._execution_policy import select
         return select(self.device, operation, self.n, band, templates)
 
-    def _gpu_window(self, D, H, binsize, threshold, start, end):
+    def _gpu_window(self, D, H, binsize, threshold, start, end, slot=None, async_submit=False):
         nd, nt = D.shape[0], H.shape[0]
         limit = self._gpu_pair_limit()
         if nd * nt <= limit:
-            return self._gpu_dispatch(D, H, binsize, threshold, start, end)
+            return self._gpu_dispatch(D, H, binsize, threshold, start, end, slot=slot, async_submit=async_submit)
         nb = 1 + (end - start - 1) // binsize
         idx = np.empty((nd, nt, nb), np.int32)
         val = np.empty((nd, nt, nb), np.complex64)
@@ -473,13 +473,11 @@ class MatchedFilter:
                 idx[d0:d1, t0:t1], val[d0:d1, t0:t1] = gi, gv
         return idx, val
 
-    def _gpu_dispatch(self, D, H, binsize, threshold, start, end):
-        idx, val = self._gpu.peaks(
+    def _gpu_dispatch(self, D, H, binsize, threshold, start, end, slot=None, async_submit=False):
+        return self._gpu.peaks(
             self.n, D, H, binsize=binsize, threshold=threshold,
             window=(start, end), upload_data=self._ddirty,
-            upload_tmpl=self._tdirty)
-        self._ddirty = self._tdirty = False
-        return idx, val
+            upload_tmpl=self._tdirty, slot=slot, async_submit=async_submit)
 
     # ---- run ----------------------------------------------------------------
     def _execution_plan(self):
@@ -744,10 +742,10 @@ class MatchedFilter:
                                binsize=binsize, threshold=threshold,
                                templates=templates, raw=raw)
 
-    def _series_window(self, spec, H, binsize, threshold, w0, w1):
+    def _series_window(self, spec, H, binsize, threshold, w0, w1, slot=None, async_submit=False):
         # Each group has fresh spectra, even when it reuses an allocation.
         self._ddirty = True
-        return self._gpu_window(spec, H, binsize, threshold, w0, w1)
+        return self._gpu_window(spec, H, binsize, threshold, w0, w1, slot=slot, async_submit=async_submit)
 
     def _run_series_gpu(self, ser, layout, binsize, threshold, t0, nt, raw):
         """Execute shared layout groups with bounded FFT/gather storage."""
@@ -760,27 +758,31 @@ class MatchedFilter:
         batch = min(nblk, 65535, max(1, self._gpu_pair_limit() // nt),
                     max(1, budget // (8*n + 4 + 12*nt*nb)))
         if isinstance(self, HierarchicalFilter):
-            band = self._gpu_calibration(threshold)[0]
+            cal_band = self._gpu_calibration(threshold)[0]
+            band = cal_band[1] if isinstance(cal_band, tuple) else cal_band
             operation = 'hierarchical_series'
         else:
             band, operation = 0, 'flat_series'
         policy = self._series_policy(operation, band, nt)
         if policy:
             batch = min(batch, policy['series_group'])
+        pipelined = hasattr(self._gpu, "_get_fence")
+        K = 4 if pipelined else 1
         source_shared = shared_buffer(ser, self._gpu) is not None
         workspace = getattr(self, "_series_workspace", None)
-        if workspace is None or workspace[0] != (batch, n):
-            workspace = ((batch, n), None, self._gpu.empty_shared((batch, n)),
-                         self._gpu.empty_shared(batch, np.uint32))
-        _, source, spectra, starts = workspace
+        if workspace is None or workspace[0] != (batch, n, K):
+            spectra_pool = [self._gpu.empty_shared((batch, n)) for _ in range(K)]
+            starts_pool = [self._gpu.empty_shared(batch, np.uint32) for _ in range(K)]
+            workspace = ((batch, n, K), None, spectra_pool, starts_pool)
+        _, source, spectra_pool, starts_pool = workspace
         if source_shared:
             source = ser
-            self._series_workspace = (workspace[0], None, spectra, starts)
+            self._series_workspace = (workspace[0], None, spectra_pool, starts_pool)
         else:
             if source is None or source.size < ser.size:
                 source = self._gpu.empty_shared(ser.shape)
             source[:ser.size] = ser
-            self._series_workspace = (workspace[0], source, spectra, starts)
+            self._series_workspace = (workspace[0], source, spectra_pool, starts_pool)
             source = source[:ser.size]
         # A single group needs no aggregate buffers or scatter.
         single = len(layout.groups) == 1 and nblk <= batch
@@ -804,50 +806,94 @@ class MatchedFilter:
                    and nb <= getattr(self._gpu, "max_grouped_bins", 0)
                    and nt <= self._gpu_pair_limit())
         if grouped:
+            in_flight = []
+            slot_idx = 0
             for begin in range(0, nblk, batch):
                 end = min(begin + batch, nblk)
                 count = end - begin
                 groups = [(lo, hi, max(a, begin)-begin, min(b, end)-begin)
                           for lo, hi, a, b in layout.groups if a < end and b > begin]
+                slot = slot_idx % K
+                slot_idx += 1
+                starts = starts_pool[slot]
+                spec = spectra_pool[slot][:count]
                 starts[:count] = np.minimum(layout.starts[begin:end], ser.size)
-                spec = spectra[:count]
-                self._gpu.forward(n, source, starts[:count], spec, defer=True)
+                self._gpu.forward(n, source, starts[:count], spec, defer=True, slot=slot)
                 try:
-                    gi, gv = self._gpu.peaks_grouped(
-                        n, spec, H, groups, binsize, threshold, upload_tmpl=self._tdirty)
+                    res = self._gpu.peaks_grouped(
+                        n, spec, H, groups, binsize, threshold, upload_tmpl=self._tdirty,
+                        slot=slot, async_submit=pipelined)
                     self._tdirty = False
+                except Exception:
+                    self._gpu.cancel_forward(slot=slot)
+                    raise
+                in_flight.append((begin, end, res))
+                if len(in_flight) >= K:
+                    b_start, b_end, item = in_flight.pop(0)
+                    gi, gv = item() if pipelined else item
                     if raw:
-                        idx[begin:end], val[begin:end] = gi, gv
+                        idx[b_start:b_end], val[b_start:b_end] = gi, gv
                     else:
-                        _core.pack_peaks(peaks[begin:end], gi, gv)
-                finally:
-                    self._gpu.cancel_forward()
+                        _core.pack_peaks(peaks[b_start:b_end], gi, gv)
+            while in_flight:
+                b_start, b_end, item = in_flight.pop(0)
+                gi, gv = item() if pipelined else item
+                if raw:
+                    idx[b_start:b_end], val[b_start:b_end] = gi, gv
+                else:
+                    _core.pack_peaks(peaks[b_start:b_end], gi, gv)
             if raw:
                 return _format_result(idx, val, raw=True, order=layout.order)
             return _format_result(None, None, raw=False, order=layout.order, out=peaks)
+        in_flight = []
+        slot_idx = 0
         for w0, w1, a, b in layout.groups:
             for begin in range(a, b, batch):
                 end = min(begin + batch, b)
                 count = end - begin
+                slot = slot_idx % K
+                slot_idx += 1
+                starts = starts_pool[slot]
+                spec = spectra_pool[slot][:count]
                 starts[:count] = np.minimum(layout.starts[begin:end], ser.size)
-                spec = spectra[:count]
-                self._gpu.forward(n, source, starts[:count], spec, defer=True)
+                self._gpu.forward(n, source, starts[:count], spec, defer=True, slot=slot)
                 try:
-                    gi, gv = self._series_window(spec, H, binsize, threshold, w0, w1)
-                finally:
-                    self._gpu.cancel_forward()
-                if single:
+                    res = self._series_window(spec, H, binsize, threshold, w0, w1,
+                                              slot=slot, async_submit=pipelined)
+                except Exception:
+                    self._gpu.cancel_forward(slot=slot)
+                    raise
+                in_flight.append((begin, end, res))
+                if len(in_flight) >= K:
+                    b_start, b_end, item = in_flight.pop(0)
+                    gi, gv = item() if pipelined else item
+                    if single:
+                        if raw:
+                            return _format_result(gi, gv, raw=True)
+                        spbuf = getattr(self, '_spbuf', None)
+                        if spbuf is None or spbuf[0] != shape:
+                            spbuf = self._spbuf = (shape, np.empty(shape, dtype=PEAK_DTYPE))
+                        _, peaks = spbuf
+                        return _format_result(gi, gv, raw=False, out=peaks)
                     if raw:
-                        return _format_result(gi, gv, raw=True)
-                    spbuf = getattr(self, '_spbuf', None)
-                    if spbuf is None or spbuf[0] != shape:
-                        spbuf = self._spbuf = (shape, np.empty(shape, dtype=PEAK_DTYPE))
-                    _, peaks = spbuf
-                    return _format_result(gi, gv, raw=False, out=peaks)
+                        idx[b_start:b_end], val[b_start:b_end] = gi, gv
+                    else:
+                        _core.pack_peaks(peaks[b_start:b_end], gi, gv)
+        while in_flight:
+            b_start, b_end, item = in_flight.pop(0)
+            gi, gv = item() if pipelined else item
+            if single:
                 if raw:
-                    idx[begin:end], val[begin:end] = gi, gv
-                else:
-                    _core.pack_peaks(peaks[begin:end], gi, gv)
+                    return _format_result(gi, gv, raw=True)
+                spbuf = getattr(self, '_spbuf', None)
+                if spbuf is None or spbuf[0] != shape:
+                    spbuf = self._spbuf = (shape, np.empty(shape, dtype=PEAK_DTYPE))
+                _, peaks = spbuf
+                return _format_result(gi, gv, raw=False, out=peaks)
+            if raw:
+                idx[b_start:b_end], val[b_start:b_end] = gi, gv
+            else:
+                _core.pack_peaks(peaks[b_start:b_end], gi, gv)
         if raw:
             return _format_result(idx, val, raw=True, order=layout.order)
         return _format_result(None, None, raw=False, order=layout.order, out=peaks)
@@ -1498,6 +1544,17 @@ class HierarchicalFilter(MatchedFilter):
         self.valid = _valid_series_window(self.n, valid)
         self.ndata = int(ndata)
         self.ntemplates = int(ntemplates)
+        if isinstance(band, (tuple, list)):
+            if len(band) == 3:
+                cascade_band = band[0]
+                band_val = band[1]
+                taps = band[2]
+            elif len(band) == 2:
+                cascade_band = band[0]
+                band_val = band[1]
+            else:
+                raise ValueError("tuple band must have 2 or 3 elements (b0, b1[, taps])")
+            band = band_val
         self.cascade_band = int(cascade_band) if cascade_band is not None else None
         if self.cascade_band is not None:
             if self.cascade_band < 64 or self.cascade_band >= self.n or self.cascade_band & (self.cascade_band - 1):
@@ -1525,32 +1582,26 @@ class HierarchicalFilter(MatchedFilter):
         self._pinned = None
         self._fs_snr = None
         if self.device.kind == "gpu":
-            # HierarchicalFilter overrides __init__, so it does NOT inherit
-            # MatchedFilter's call to _start_gpu. Omitting this left device=
-            # accepted, self.device reporting "gpu:0", and every run quietly
-            # going to the CPU -- which looked like a working port.
-            #
-            # The pinned configuration is recorded BEFORE returning. Returning
-            # first skipped the band handling below, so a caller who pinned a
-            # configuration got the table's choice instead and config()
-            # reported the substitute rather than what was asked for.
             if band is not None:
-                self._pinned = (int(band), int(taps or 8))
+                if self.cascade_band is not None:
+                    self._pinned = (int(self.cascade_band), int(band), int(taps or 8))
+                else:
+                    self._pinned = (int(band), int(taps or 8))
             self._start_gpu()
             self._defer = True
             self._mf = None
             return
         if band is None:
-            # Defer: the band should be chosen from the reference, and the
-            # reference arrives after construction in every caller we have.
-            # Building the plan on first use instead of here means the choice
-            # can see it, with no rebuild and no re-ingest of templates.
             self._mf = None
             self._defer = True
         else:
             self._defer = False
-            self._pinned = (int(band), int(taps or 8))
-            self._mf = self._new_cpu_plan(*self._pinned)
+            if self.cascade_band is not None:
+                self._pinned = (int(self.cascade_band), int(band), int(taps or 8))
+                self._mf = self._new_cpu_plan(int(band), int(taps or 8), cascade_band=self.cascade_band)
+            else:
+                self._pinned = (int(band), int(taps or 8))
+                self._mf = self._new_cpu_plan(*self._pinned)
             if self._cal_thr is not None:
                 if isinstance(self._cal_thr, (tuple, list)):
                     self._mf.set_threshold(*self._cal_thr)
@@ -1728,57 +1779,127 @@ class HierarchicalFilter(MatchedFilter):
             _, self._cost_key = cost_table_for(self.device)
             cfg = choose_config(self._pending_ref, self.n, self.snr, self.fd,
                                 tuning=_load_tuning_for(self.device),
-                                pairs=self.ndata * self.ntemplates)
+                                pairs=self.ndata * self.ntemplates,
+                                cascade=self.cascade)
         if cfg is None:
             raise ValueError(_uncovered_message(self.n, self.snr, self.fd))
-        band, taps = cfg
-        tv = self._coarse_value(band)
-        f = None
-        if self._pending_ref is not None:
-            ref = np.asarray(self._pending_ref, dtype=np.float64)
-            f = float(ref[:band].sum() / ref.sum())
-        self._gcfg = (int(band), int(taps))
-        out = (int(band), f, tv)
+        if len(cfg) == 3:
+            b0, b1, taps = cfg
+            self.cascade_band = b0
+            tv = self._coarse_value(b1)
+            f = None
+            if self._pending_ref is not None:
+                ref = np.asarray(self._pending_ref, dtype=np.float64)
+                ref_sum = ref.sum()
+                f0 = float(ref[:b0].sum() / ref_sum) if ref_sum > 0 else 0.0
+                f1 = float(ref[:b1].sum() / ref_sum) if ref_sum > 0 else 0.0
+                f = (f0, f1)
+            self._gcfg = (int(b0), int(b1), int(taps))
+            out = ((int(b0), int(b1)), f, tv)
+        else:
+            band, taps = cfg
+            tv = self._coarse_value(band)
+            f = None
+            if self._pending_ref is not None:
+                ref = np.asarray(self._pending_ref, dtype=np.float64)
+                f = float(ref[:band].sum() / ref.sum())
+            self._gcfg = (int(band), int(taps))
+            out = (int(band), f, tv)
         self._gcal = (key, out)
         return out
 
-    def _gpu_dispatch(self, D, H, binsize, threshold, start, end):
+    def _gpu_dispatch(self, D, H, binsize, threshold, start, end, slot=None, async_submit=False):
         """Run coarse filtering and refinement without host survivor readback."""
         band, f, thr = self._gpu_calibration(threshold)
-        # Fresh views can share an address; view identity is not a cache key.
-        # Template/reference changes set _tdirty, even for in-place updates.
-        ck = (band, f, H.ctypes.data, H.shape)
-        if getattr(self, "_ckey", None) != ck or self._tdirty:
-            if f is None:
-                hr = H.real
-                hi = H.imag
-                power = hr * hr + hi * hi
-                total = power.sum(axis=1, dtype=np.float64)
-                band_power = power[:, :band].sum(axis=1, dtype=np.float64)
-                fraction = np.divide(band_power, total,
-                                     out=np.zeros_like(total), where=total > 0)
-                sc = np.divide(1.0, np.sqrt(fraction),
-                               out=np.zeros_like(fraction), where=fraction > 0)[:, None].astype(np.float32)
-                ct0 = H[:, :band] * sc
-            else:
-                sc = np.float32(1.0 / np.sqrt(f)) if f > 0 else np.float32(0.0)
-                ct0 = H[:, :band] * sc
-            self._ct = ct0
-            self._ckey = ck
-        ct0 = self._ct
+        if isinstance(band, tuple):
+            b0, b1 = band
+            f0, f1 = (None, None) if f is None else f
+            thr0, thr1 = thr
+            ck = (band, f, H.ctypes.data, H.shape)
+            if getattr(self, "_ckey", None) != ck or self._tdirty:
+                if f0 is None or f1 is None:
+                    hr = H.real
+                    hi = H.imag
+                    power = hr * hr + hi * hi
+                    total = power.sum(axis=1, dtype=np.float64)
+                    bp0 = power[:, :b0].sum(axis=1, dtype=np.float64)
+                    frac0 = np.divide(bp0, total, out=np.zeros_like(total), where=total > 0)
+                    sc0 = np.divide(1.0, np.sqrt(frac0), out=np.zeros_like(frac0), where=frac0 > 0)[:, None].astype(np.float32)
+                    ct0 = H[:, :b0] * sc0
 
-        idx, val = self._gpu.hier_peaks(
-            self.n, band, D, H, ct0, thr,
-            binsize=binsize, threshold=threshold, window=(start, end),
-            upload_data=self._ddirty, upload_tmpl=self._tdirty)
-        self._ddirty = self._tdirty = False
+                    bp1 = power[:, :b1].sum(axis=1, dtype=np.float64)
+                    frac1 = np.divide(bp1, total, out=np.zeros_like(total), where=total > 0)
+                    sc1 = np.divide(1.0, np.sqrt(frac1), out=np.zeros_like(frac1), where=frac1 > 0)[:, None].astype(np.float32)
+                    ct1 = H[:, :b1] * sc1
+                else:
+                    sc0 = np.float32(1.0 / np.sqrt(f0)) if f0 > 0 else np.float32(0.0)
+                    ct0 = H[:, :b0] * sc0
+                    sc1 = np.float32(1.0 / np.sqrt(f1)) if f1 > 0 else np.float32(0.0)
+                    ct1 = H[:, :b1] * sc1
+                self._ct = (ct0, ct1)
+                self._ckey = ck
+            ct0, ct1 = self._ct
 
-        # The indirect dispatch count records actual coarse survivors, including
-        # refinements that yield no final detection. Read after completion;
-        # no extra submission or host decision is needed.
-        self._gpairs += idx.shape[0] * idx.shape[1]
-        self._gtrig += self._gpu.last_refinements
-        return idx, val
+            res = self._gpu.hier_peaks(
+                self.n, b1, D, H, ct0, thr0,
+                binsize=binsize, threshold=threshold, window=(start, end),
+                upload_data=self._ddirty, upload_tmpl=self._tdirty,
+                cascade_band=b0, ct1=ct1, raw_thr1=thr1,
+                slot=slot, async_submit=async_submit)
+            self._ddirty = self._tdirty = False
+
+            if async_submit:
+                def readback():
+                    idx, val = res()
+                    self._gpairs += idx.shape[0] * idx.shape[1]
+                    self._gtrig += self._gpu.last_refinements
+                    return idx, val
+                return readback
+
+            idx, val = res
+            self._gpairs += idx.shape[0] * idx.shape[1]
+            self._gtrig += self._gpu.last_refinements
+            return idx, val
+        else:
+            ck = (band, f, H.ctypes.data, H.shape)
+            if getattr(self, "_ckey", None) != ck or self._tdirty:
+                if f is None:
+                    hr = H.real
+                    hi = H.imag
+                    power = hr * hr + hi * hi
+                    total = power.sum(axis=1, dtype=np.float64)
+                    band_power = power[:, :band].sum(axis=1, dtype=np.float64)
+                    fraction = np.divide(band_power, total,
+                                         out=np.zeros_like(total), where=total > 0)
+                    sc = np.divide(1.0, np.sqrt(fraction),
+                                   out=np.zeros_like(fraction), where=fraction > 0)[:, None].astype(np.float32)
+                    ct0 = H[:, :band] * sc
+                else:
+                    sc = np.float32(1.0 / np.sqrt(f)) if f > 0 else np.float32(0.0)
+                    ct0 = H[:, :band] * sc
+                self._ct = ct0
+                self._ckey = ck
+            ct0 = self._ct
+
+            res = self._gpu.hier_peaks(
+                self.n, band, D, H, ct0, thr,
+                binsize=binsize, threshold=threshold, window=(start, end),
+                upload_data=self._ddirty, upload_tmpl=self._tdirty,
+                slot=slot, async_submit=async_submit)
+            self._ddirty = self._tdirty = False
+
+            if async_submit:
+                def readback():
+                    idx, val = res()
+                    self._gpairs += idx.shape[0] * idx.shape[1]
+                    self._gtrig += self._gpu.last_refinements
+                    return idx, val
+                return readback
+
+            idx, val = res
+            self._gpairs += idx.shape[0] * idx.shape[1]
+            self._gtrig += self._gpu.last_refinements
+            return idx, val
 
     def set_coarse_threshold(self, value):
         """Set the coarse threshold directly, bypassing the model.
@@ -1887,13 +2008,17 @@ class HierarchicalFilter(MatchedFilter):
 
     @property
     def config(self):
-        """Selected or explicitly pinned ``(band, taps)``."""
+        """Selected or explicitly pinned ``(band, taps)`` or ``(b0, b1, taps)``."""
         if self._pinned is not None:
             return self._pinned
         if self._gpu is not None:
             self._gpu_calibration(self.snr)
             return self._gcfg
-        band, _u, k = self._ensure().config()
+        cfg = self._ensure().config()
+        if len(cfg) == 4:
+            b0, b1, _u, k = cfg
+            return b0, b1, k
+        band, _u, k = cfg
         return band, k
 
     @property
