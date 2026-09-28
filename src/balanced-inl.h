@@ -1492,12 +1492,27 @@ int corr_prod_batch(void *vp,const float *dr,const float *di,
     efft_prod_broadcast((int)p->N,dr,di,tr,ti,p->bR,p->bI,p->sR,p->sI,p->w1r,p->w1i);
   else
     efft_prod((int)p->N,dr,di,tr,ti,p->bR,p->bI,p->sR,p->sI,p->w1r,p->w1i);
-  for(size_t k=0;k<p->N;k++){
+  size_t k=0;
+  for(;k+1<p->N;k+=2){
+    const int e0=eidx(&p->ea,(int)k);
+    const int e1=eidx(&p->ea,(int)(k+1));
+    float r0[AP_W],i0[AP_W],r1[AP_W],i1[AP_W];
+    V_STOREU(r0,p->bR[e0]); V_STOREU(i0,p->bI[e0]);
+    V_STOREU(r1,p->bR[e1]); V_STOREU(i1,p->bI[e1]);
+    for(int l=0;l<nlane;l++){
+      size_t base=2*((size_t)l*p->N+k);
+      out[base]  =r0[l];
+      out[base+1]=-i0[l];
+      out[base+2]=r1[l];
+      out[base+3]=-i1[l];
+    }
+  }
+  if(k<p->N){
     const int e=eidx(&p->ea,(int)k);
     float r[AP_W],i[AP_W];
     V_STOREU(r,p->bR[e]); V_STOREU(i,p->bI[e]);
     for(int l=0;l<nlane;l++){
-      out[2*((size_t)l*p->N+k)]=r[l];
+      out[2*((size_t)l*p->N+k)]  =r[l];
       out[2*((size_t)l*p->N+k)+1]=-i[l];
     }
   }
