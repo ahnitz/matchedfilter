@@ -60,12 +60,12 @@ costs that leave room for improvement.
 For comparisons across more machines, `teaser_fleet.py` records CPU and GPU
 separately, checks correlation values and peaks before timing, and represents
 missing devices explicitly. It also draws the saved
-[six-machine comparison](../docs/measurements/teaser-fleet-20260927.md):
+[six-machine comparison](../docs/measurements/teaser-fleet-20260928.md):
 
 ```bash
 python tools/teaser_fleet.py --device cpu --out cpu.json
 python tools/teaser_fleet.py --device gpu --out gpu.json
-python tools/teaser_fleet.py --compare docs/measurements/teaser-fleet-20260927.json --out comparison.svg
+python tools/teaser_fleet.py --compare docs/measurements/teaser-fleet-20260928.json --out comparison.svg
 ```
 
 `teaser_web.py` and `teaser_labels.py` render the Hardware comparison page

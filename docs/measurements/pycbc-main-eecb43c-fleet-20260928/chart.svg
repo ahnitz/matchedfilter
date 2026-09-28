@@ -1,0 +1,93 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1180" height="506" viewBox="0 0 1180 506">
+<rect width="1180" height="506" fill="white"/>
+<text x="26" y="34" font-family="sans-serif" font-size="20" font-weight="bold">PyCBC fleet: new hdev head c38f24f, paired complete search</text>
+<text x="26" y="56" font-family="sans-serif" font-size="12.5" fill="#444">Teal = versus contemporaneous alpha6. Orange = versus prior head c38f24f, the comparison that isolates these three commits.</text>
+<text x="26" y="74" font-family="sans-serif" font-size="12.5" fill="#444">Grey caret = the c38f24f re-run measured earlier today (its own vs-prior result). Whiskers span the interleaved pair ratios.</text>
+<line x1="386.5" y1="90" x2="386.5" y2="406" stroke="#e0e6ea"/>
+<text x="386.5" y="424" text-anchor="middle" font-family="sans-serif" font-size="11.5" fill="#555">-10%</text>
+<line x1="457.0" y1="90" x2="457.0" y2="406" stroke="#e0e6ea"/>
+<text x="457.0" y="424" text-anchor="middle" font-family="sans-serif" font-size="11.5" fill="#555">-5%</text>
+<line x1="527.6" y1="90" x2="527.6" y2="406" stroke="#e0e6ea"/>
+<text x="527.6" y="424" text-anchor="middle" font-family="sans-serif" font-size="11.5" fill="#555">+0%</text>
+<line x1="598.2" y1="90" x2="598.2" y2="406" stroke="#e0e6ea"/>
+<text x="598.2" y="424" text-anchor="middle" font-family="sans-serif" font-size="11.5" fill="#555">+5%</text>
+<line x1="668.7" y1="90" x2="668.7" y2="406" stroke="#e0e6ea"/>
+<text x="668.7" y="424" text-anchor="middle" font-family="sans-serif" font-size="11.5" fill="#555">+10%</text>
+<line x1="739.3" y1="90" x2="739.3" y2="406" stroke="#e0e6ea"/>
+<text x="739.3" y="424" text-anchor="middle" font-family="sans-serif" font-size="11.5" fill="#555">+15%</text>
+<line x1="809.8" y1="90" x2="809.8" y2="406" stroke="#e0e6ea"/>
+<text x="809.8" y="424" text-anchor="middle" font-family="sans-serif" font-size="11.5" fill="#555">+20%</text>
+<line x1="880.4" y1="90" x2="880.4" y2="406" stroke="#e0e6ea"/>
+<text x="880.4" y="424" text-anchor="middle" font-family="sans-serif" font-size="11.5" fill="#555">+25%</text>
+<line x1="951.0" y1="90" x2="951.0" y2="406" stroke="#e0e6ea"/>
+<text x="951.0" y="424" text-anchor="middle" font-family="sans-serif" font-size="11.5" fill="#555">+30%</text>
+<line x1="1021.5" y1="90" x2="1021.5" y2="406" stroke="#e0e6ea"/>
+<text x="1021.5" y="424" text-anchor="middle" font-family="sans-serif" font-size="11.5" fill="#555">+35%</text>
+<line x1="1092.1" y1="90" x2="1092.1" y2="406" stroke="#e0e6ea"/>
+<text x="1092.1" y="424" text-anchor="middle" font-family="sans-serif" font-size="11.5" fill="#555">+40%</text>
+<line x1="527.6" y1="90" x2="527.6" y2="406" stroke="#9aa5ad" stroke-width="1.5"/>
+<text x="222" y="109" text-anchor="end" font-family="sans-serif" font-size="13.5" font-weight="600">dev1</text>
+<text x="222" y="124" text-anchor="end" font-family="sans-serif" font-size="10.5" fill="#777">Ryzen 9 5950X</text>
+<rect x="527.6" y="93" width="252.7" height="12" fill="#16877a"/>
+<text x="787.3" y="103" text-anchor="start" font-family="sans-serif" font-size="11.5">+17.9%</text>
+<rect x="527.6" y="109" width="32.6" height="12" fill="#c98c43"/>
+<text x="567.2" y="119" text-anchor="start" font-family="sans-serif" font-size="11.5">+2.3%</text>
+<line x1="551.2" y1="115" x2="576.0" y2="115" stroke="#202b3a"/>
+<line x1="551.2" y1="111" x2="551.2" y2="119" stroke="#202b3a"/>
+<line x1="576.0" y1="111" x2="576.0" y2="119" stroke="#202b3a"/>
+<path d="M 510.1 126 l -5 7 l 10 0 z" fill="#8d97a0"/>
+<text x="222" y="161" text-anchor="end" font-family="sans-serif" font-size="13.5" font-weight="600">dev2</text>
+<text x="222" y="176" text-anchor="end" font-family="sans-serif" font-size="10.5" fill="#777">Ryzen AI MAX+ 395</text>
+<rect x="527.6" y="145" width="133.0" height="12" fill="#16877a"/>
+<text x="667.6" y="155" text-anchor="start" font-family="sans-serif" font-size="11.5">+9.4%</text>
+<rect x="504.9" y="161" width="22.7" height="12" fill="#c4514b"/>
+<text x="497.9" y="171" text-anchor="end" font-family="sans-serif" font-size="11.5">-1.6%</text>
+<line x1="450.5" y1="167" x2="557.3" y2="167" stroke="#202b3a"/>
+<line x1="450.5" y1="163" x2="450.5" y2="171" stroke="#202b3a"/>
+<line x1="557.3" y1="163" x2="557.3" y2="171" stroke="#202b3a"/>
+<path d="M 543.3 178 l -5 7 l 10 0 z" fill="#8d97a0"/>
+<text x="222" y="213" text-anchor="end" font-family="sans-serif" font-size="13.5" font-weight="600">dev3</text>
+<text x="222" y="228" text-anchor="end" font-family="sans-serif" font-size="10.5" fill="#777">Ryzen 5 5500U</text>
+<rect x="527.6" y="197" width="311.7" height="12" fill="#16877a"/>
+<text x="846.3" y="207" text-anchor="start" font-family="sans-serif" font-size="11.5">+22.1%</text>
+<rect x="527.6" y="213" width="104.4" height="12" fill="#c98c43"/>
+<text x="638.9" y="223" text-anchor="start" font-family="sans-serif" font-size="11.5">+7.4%</text>
+<line x1="626.8" y1="219" x2="637.8" y2="219" stroke="#202b3a"/>
+<line x1="626.8" y1="215" x2="626.8" y2="223" stroke="#202b3a"/>
+<line x1="637.8" y1="215" x2="637.8" y2="223" stroke="#202b3a"/>
+<path d="M 573.9 230 l -5 7 l 10 0 z" fill="#8d97a0"/>
+<text x="222" y="265" text-anchor="end" font-family="sans-serif" font-size="13.5" font-weight="600">dev4</text>
+<text x="222" y="280" text-anchor="end" font-family="sans-serif" font-size="10.5" fill="#777">Core i5-13500H</text>
+<rect x="527.6" y="249" width="469.5" height="12" fill="#16877a"/>
+<text x="1004.1" y="259" text-anchor="start" font-family="sans-serif" font-size="11.5">+33.3%</text>
+<rect x="524.2" y="265" width="3.4" height="12" fill="#c4514b"/>
+<text x="517.2" y="275" text-anchor="end" font-family="sans-serif" font-size="11.5">-0.2%</text>
+<line x1="520.0" y1="271" x2="531.8" y2="271" stroke="#202b3a"/>
+<line x1="520.0" y1="267" x2="520.0" y2="275" stroke="#202b3a"/>
+<line x1="531.8" y1="267" x2="531.8" y2="275" stroke="#202b3a"/>
+<path d="M 586.0 282 l -5 7 l 10 0 z" fill="#8d97a0"/>
+<text x="222" y="317" text-anchor="end" font-family="sans-serif" font-size="13.5" font-weight="600">sugwg-login2</text>
+<text x="222" y="332" text-anchor="end" font-family="sans-serif" font-size="10.5" fill="#777">Xeon Platinum 8260</text>
+<rect x="527.6" y="301" width="324.0" height="12" fill="#16877a"/>
+<text x="858.6" y="311" text-anchor="start" font-family="sans-serif" font-size="11.5">+23.0%</text>
+<rect x="527.6" y="317" width="2.9" height="12" fill="#c98c43"/>
+<text x="537.4" y="327" text-anchor="start" font-family="sans-serif" font-size="11.5">+0.2%</text>
+<line x1="521.1" y1="323" x2="545.8" y2="323" stroke="#202b3a"/>
+<line x1="521.1" y1="319" x2="521.1" y2="327" stroke="#202b3a"/>
+<line x1="545.8" y1="319" x2="545.8" y2="327" stroke="#202b3a"/>
+<path d="M 525.1 334 l -5 7 l 10 0 z" fill="#8d97a0"/>
+<text x="222" y="369" text-anchor="end" font-family="sans-serif" font-size="13.5" font-weight="600">Haswell</text>
+<text x="222" y="384" text-anchor="end" font-family="sans-serif" font-size="10.5" fill="#777">Xeon E5-2698 v3</text>
+<rect x="527.6" y="353" width="172.8" height="12" fill="#16877a"/>
+<text x="707.3" y="363" text-anchor="start" font-family="sans-serif" font-size="11.5">+12.2%</text>
+<rect x="524.7" y="369" width="2.9" height="12" fill="#c4514b"/>
+<text x="517.7" y="379" text-anchor="end" font-family="sans-serif" font-size="11.5">-0.2%</text>
+<line x1="506.4" y1="375" x2="541.8" y2="375" stroke="#202b3a"/>
+<line x1="506.4" y1="371" x2="506.4" y2="379" stroke="#202b3a"/>
+<line x1="541.8" y1="371" x2="541.8" y2="379" stroke="#202b3a"/>
+<path d="M 603.0 386 l -5 7 l 10 0 z" fill="#8d97a0"/>
+<text x="26" y="480" font-family="sans-serif" font-size="11.5" fill="#16877a">■ vs alpha6</text>
+<text x="126" y="480" font-family="sans-serif" font-size="11.5" fill="#c98c43">■ vs prior head c38f24f</text>
+<text x="256" y="480" font-family="sans-serif" font-size="11.5" fill="#8d97a0">▲ published vs prior hdev</text>
+<text x="26" y="497" font-family="sans-serif" font-size="11" fill="#777">Host-to-host rates are descriptive, not a pooled benchmark. Each bar is the mean of interleaved paired runs on one pinned CPU.</text>
+</svg>

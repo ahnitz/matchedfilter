@@ -6,7 +6,7 @@ from teaser_labels import hardware_label
 
 
 def fleet_comparison(root):
-    path = Path(root)/'docs/measurements/teaser-fleet-20260927.json'
+    path = Path(root)/'docs/measurements/teaser-fleet-20260928.json'
     if not path.is_file():
         return ''
     reports = json.loads(path.read_text())['reports']
@@ -65,7 +65,7 @@ Whiskers show timing-block 10th–90th percentiles, not confidence intervals.</p
 <p>FFT-only references: FFTW on CPU, rocFFT on Radeon 8060S, MLX on M2.
 Missing references and failed checks are shown explicitly; software GPUs are excluded.
 The Xeon result is from a virtual machine. All timing samples and configuration details are in the
-<a href="assets/teaser-fleet-20260927.json" download>recorded JSON</a>.</p>
+<a href="assets/teaser-fleet-20260928.json" download>recorded JSON</a>.</p>
 <details><summary>Selected timings and availability</summary><div id="fleet-table"></div></details>
 <style>
 #machine-comparison .fleet-controls{display:grid;gap:.6rem}

@@ -4,6 +4,19 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ## Unreleased
 
+- Re-measure both fleet benchmarks at `main` `eecb43c` (twenty-five
+  optimization passes). PyCBC complete search against the previous head
+  `ce9c828`: dev3 +7.4%, dev1 +2.3%, dev4/sugwg-login2/Haswell flat. The
+  largest gain lands on the smallest, most cache-constrained host. Six-machine
+  comparison at `eecb43c`: peak-only improves 2.6-5.9% on every uncontended
+  CPU, full output is flat, hierarchical mode is mixed (M2 +9.6%, Xeon +8.9%,
+  others flat), and the GPU is unchanged within about 1%. See
+  [pycbc-main-eecb43c-fleet-20260928](docs/measurements/pycbc-main-eecb43c-fleet-20260928/README.md)
+  and [teaser-fleet-20260928](docs/measurements/teaser-fleet-20260928.md).
+  gravity-dev2 was under load 38 throughout and both its rows are labelled;
+  the README teaser, which can only be measured on that host, is left at
+  `ce9c828` rather than republished three times slow.
+
 - Draw the teaser and fleet banks from the captured PyCBC reference profile
   (`tests/data/reference_profile_pycbc.npy`) instead of the synthetic
   inspiral curve. The synthetic curve is narrower than a real reference
