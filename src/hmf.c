@@ -12,18 +12,18 @@
 #include "transform.h"
 
 struct ap_hmf_plan {
-  size_t n,m;
+  size_t n,m,m0;
   int nd,nt,K,dgroup;
-  ap_mf_plan *full,*coarse;
+  ap_mf_plan *full,*coarse,*coarse0;
   ap_plan *full_fft;
   float *fwd,*spec;
   const float **dspec;
   char *dready,*tready;
-  float *ct0,*scratch,*fpow;
+  float *ct0,*ct0_0,*scratch,*scratch0,*fpow,*fpow0;
   int ref_on;
-  float ref_f,cal_thr;
-  ap_peak *cebuf;
-  int *firebuf;
+  float ref_f,ref_f0,cal_thr,cal_thr0;
+  ap_peak *cebuf,*cebuf0;
+  int *firebuf,*firebuf0;
   long pairs,trig;
   unsigned long long c_even,c_odd,c_ref,c_fill;
   int prof,trace;
@@ -32,19 +32,25 @@ struct ap_hmf_plan {
 
 ap_hmf_plan *ap_hmf_create_ex(size_t n,int ndata,int ntmpl,float snr,float fd,
                               size_t band,int taps){
-  return ap_hmf_create_grouped(n,ndata,ntmpl,snr,fd,band,taps,8);
+  return ap_hmf_create_cascade(n,ndata,ntmpl,snr,fd,0,band,taps,8);
 }
 
 int ap_hmf_series_group(const ap_hmf_plan *p){ return p ? p->dgroup : 0; }
 
 ap_hmf_plan *ap_hmf_create_grouped(size_t n,int ndata,int ntmpl,float snr,float fd,
-                                  size_t band,int taps,int series_group){
+                                   size_t band,int taps,int series_group){
+  return ap_hmf_create_cascade(n,ndata,ntmpl,snr,fd,0,band,taps,series_group);
+}
+
+ap_hmf_plan *ap_hmf_create_cascade(size_t n,int ndata,int ntmpl,float snr,float fd,
+                                   size_t band0,size_t band,int taps,int series_group){
   (void)snr; (void)fd;
   if(series_group<1||series_group>65535||ndata<1||ntmpl<1||!ap_supported(n)||!ap_supported(band)||band>=n
      ||taps<2||taps>64||(taps&1)) return NULL;
+  if(band0>0 && (!ap_supported(band0) || band0>=band)) return NULL;
   ap_hmf_plan *p=calloc(1,sizeof(*p));
   if(!p) return NULL;
-  p->n=n; p->m=band; p->nt=ntmpl; p->K=taps;
+  p->n=n; p->m=band; p->m0=band0; p->nt=ntmpl; p->K=taps;
   /* Execution policy belongs to the caller; the environment is diagnostic. */
   int grp = series_group;
   { const char *e=getenv("MF_DGROUP"); if(e){ int v=atoi(e); if(v>0) grp=v; } }
@@ -57,9 +63,15 @@ ap_hmf_plan *ap_hmf_create_grouped(size_t n,int ndata,int ntmpl,float snr,float 
     if(ntmpl>=16 && band<=pblim){
       p->coarse=ap_mf_create_pairbatch(band,p->nd,ntmpl);
     }
+    if(band0>0 && ntmpl>=16 && band0<=pblim){
+      p->coarse0=ap_mf_create_pairbatch(band0,p->nd,ntmpl);
+    }
   }
   if(!p->coarse){
     p->coarse=ap_mf_create(band,p->nd,ntmpl);
+  }
+  if(band0>0 && !p->coarse0){
+    p->coarse0=ap_mf_create(band0,p->nd,ntmpl);
   }
   p->full_fft=ap_create(n);
   p->fwd=ap_alloc64(2*n*sizeof(float));
@@ -73,6 +85,19 @@ ap_hmf_plan *ap_hmf_create_grouped(size_t n,int ndata,int ntmpl,float snr,float 
   p->cebuf=calloc((size_t)p->nd*ntmpl,sizeof(ap_peak));
   p->firebuf=calloc((size_t)ntmpl,sizeof(int));
   p->cal_thr=-1;
+  p->cal_thr0=-1;
+
+  if(band0>0){
+    p->ct0_0=ap_alloc64((size_t)ntmpl*2*band0*sizeof(float));
+    p->scratch0=ap_alloc64(2*band0*sizeof(float));
+    p->fpow0=calloc((size_t)ntmpl,sizeof(float));
+    p->cebuf0=calloc((size_t)p->nd*ntmpl,sizeof(ap_peak));
+    p->firebuf0=calloc((size_t)ntmpl,sizeof(int));
+    if(!p->coarse0||!p->ct0_0||!p->scratch0||!p->fpow0||!p->cebuf0||!p->firebuf0){
+      ap_hmf_destroy(p); return NULL;
+    }
+  }
+
   if(!p->full||!p->coarse||!p->full_fft||!p->fwd||!p->spec||!p->dspec
      ||!p->dready||!p->tready||!p->ct0||!p->scratch||!p->fpow||!p->cebuf||!p->firebuf){
     ap_hmf_destroy(p); return NULL;
@@ -86,9 +111,16 @@ ap_hmf_plan *ap_hmf_create_grouped(size_t n,int ndata,int ntmpl,float snr,float 
 
 void ap_hmf_destroy(ap_hmf_plan *p){
   if(!p) return;
-  ap_mf_destroy(p->full); ap_mf_destroy(p->coarse); ap_destroy(p->full_fft);
+  ap_mf_destroy(p->full); ap_mf_destroy(p->coarse);
+  if(p->coarse0) ap_mf_destroy(p->coarse0);
+  ap_destroy(p->full_fft);
   free(p->fwd); free(p->spec); free(p->dspec); free(p->dready); free(p->tready);
   free(p->ct0); free(p->scratch); free(p->fpow); free(p->cebuf); free(p->firebuf);
+  if(p->ct0_0) free(p->ct0_0);
+  if(p->scratch0) free(p->scratch0);
+  if(p->fpow0) free(p->fpow0);
+  if(p->cebuf0) free(p->cebuf0);
+  if(p->firebuf0) free(p->firebuf0);
   if(p->dump) fclose(p->dump);
   free(p);
 }
@@ -120,14 +152,30 @@ void ap_hmf_config(const ap_hmf_plan *p,size_t *band,int *taps){
   if(band) *band=p->m;
   if(taps) *taps=p->K;
 }
+void ap_hmf_config_cascade(const ap_hmf_plan *p,size_t *band0,size_t *band1,int *taps){
+  if(!p) return;
+  if(band0) *band0=p->m0;
+  if(band1) *band1=p->m;
+  if(taps) *taps=p->K;
+}
 int ap_hmf_set_threshold(ap_hmf_plan *p,float value){
   if(!p || !isfinite(value)) return -1;
   p->cal_thr=value; return 0; /* negative explicitly marks unconfigured */
+}
+int ap_hmf_set_cascade_thresholds(ap_hmf_plan *p,float thr0,float thr1){
+  if(!p || !isfinite(thr1)) return -1;
+  p->cal_thr=thr1;
+  if(p->m0>0){
+    if(!isfinite(thr0)) return -1;
+    p->cal_thr0=thr0;
+  }
+  return 0;
 }
 int ap_hmf_set_first_stage(ap_hmf_plan *p,float snr){
   (void)snr;
   if(!p) return -1;
   p->cal_thr=-1; /* caller must supply the recalibrated threshold */
+  p->cal_thr0=-1;
   return 0;
 }
 static int refresh_template(ap_hmf_plan *p,int t){
@@ -135,18 +183,30 @@ static int refresh_template(ap_hmf_plan *p,int t){
   double scale=f>0 ? 1/sqrt(f) : 0;
   const float *original=p->ct0+(size_t)t*2*p->m;
   for(size_t k=0;k<2*p->m;k++) p->scratch[k]=(float)(original[k]*scale);
-  return ap_mf_set_template(p->coarse,t,p->scratch);
+  if(ap_mf_set_template(p->coarse,t,p->scratch)) return -1;
+  if(p->m0>0 && p->coarse0){
+    double f0=p->ref_on ? p->ref_f0 : p->fpow0[t];
+    double scale0=f0>0 ? 1/sqrt(f0) : 0;
+    const float *original0=p->ct0_0+(size_t)t*2*p->m0;
+    for(size_t k=0;k<2*p->m0;k++) p->scratch0[k]=(float)(original0[k]*scale0);
+    if(ap_mf_set_template(p->coarse0,t,p->scratch0)) return -1;
+  }
+  return 0;
 }
 int ap_hmf_set_reference(ap_hmf_plan *p,const float *power){
   if(!p) return -1;
   if(power){
-    double total=0,low=0;
+    double total=0,low=0,low0=0;
     for(size_t k=0;k<p->n;k++){
       if(!isfinite(power[k]) || power[k]<0) return -1;
-      total+=power[k]; if(k<p->m) low+=power[k];
+      total+=power[k];
+      if(k<p->m) low+=power[k];
+      if(p->m0>0 && k<p->m0) low0+=power[k];
     }
     if(total<=0) return -1;
-    p->ref_f=(float)(low/total); p->ref_on=1;
+    p->ref_f=(float)(low/total);
+    if(p->m0>0) p->ref_f0=(float)(low0/total);
+    p->ref_on=1;
   } else p->ref_on=0;
   for(int t=0;t<p->nt;t++) if(p->tready[t] && refresh_template(p,t)) return -1;
   return 0;
@@ -154,18 +214,26 @@ int ap_hmf_set_reference(ap_hmf_plan *p,const float *power){
 int ap_hmf_set_data(ap_hmf_plan *p,int d,const float *spec){
   if(!p||d<0||d>=p->nd||!spec) return -1;
   p->dspec[d]=spec; p->dready[d]=0;
-  return ap_mf_set_data(p->coarse,d,spec);
+  if(ap_mf_set_data(p->coarse,d,spec)) return -1;
+  if(p->m0>0 && p->coarse0 && ap_mf_set_data(p->coarse0,d,spec)) return -1;
+  return 0;
 }
 int ap_hmf_set_template(ap_hmf_plan *p,int t,const float *spec){
   if(!p||t<0||t>=p->nt||!spec) return -1;
   if(ap_mf_set_template(p->full,t,spec)) return -1;
-  double total=0,low=0;
+  double total=0,low=0,low0=0;
   for(size_t k=0;k<p->n;k++){
     double re=spec[2*k],im=spec[2*k+1],power=re*re+im*im;
-    total+=power; if(k<p->m) low+=power;
+    total+=power;
+    if(k<p->m) low+=power;
+    if(p->m0>0 && k<p->m0) low0+=power;
   }
   p->fpow[t]=total>0 ? (float)(low/total) : 0;
   memcpy(p->ct0+(size_t)t*2*p->m,spec,2*p->m*sizeof(float));
+  if(p->m0>0 && p->coarse0){
+    p->fpow0[t]=total>0 ? (float)(low0/total) : 0;
+    memcpy(p->ct0_0+(size_t)t*2*p->m0,spec,2*p->m0*sizeof(float));
+  }
   p->tready[t]=1;
   return refresh_template(p,t);
 }
@@ -261,6 +329,89 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
      a lower threshold only ever reports MORE peaks. */
   const float minev=p->cal_thr;
   int total=0;
+
+  if(p->m0>0 && p->coarse0 && isfinite(p->cal_thr0) && p->cal_thr0>=0){
+    const size_t m0 = p->m0;
+    const size_t R0 = n / m0;
+    size_t cstart0 = start / R0;
+    size_t cend0   = (end + R0 - 1) / R0; if(cend0 > m0) cend0 = m0;
+    if(cstart0 > 0) cstart0--;
+    const size_t cspan0 = cend0 > cstart0 ? cend0 - cstart0 : 1;
+    const float minev0 = p->cal_thr0;
+
+    unsigned long long _eb0 = p->prof ? ap_ticks() : 0;
+    if(ap_mf_run(p->coarse0, d0, nd, t0, nt, cspan0, minev0, p->cebuf0, NULL,
+                 cstart0, cend0) < 0) return -1;
+    if(p->prof) p->c_even += ap_ticks() - _eb0;
+
+    for(int d = 0; d < nd; d++){
+      int nfire0 = 0;
+      for(int t = 0; t < nt; t++){
+        p->pairs++;
+        ap_peak ce0 = p->cebuf0[(size_t)d * nt + t];
+        if(ce0.index >= 0 && ce0.magnitude >= p->cal_thr0){
+          p->firebuf0[nfire0++] = t;
+        } else {
+          const size_t row = (size_t)d * nt + t;
+          if(nb == 1){
+            peaks[row].index = -1;
+            peaks[row].re = peaks[row].im = peaks[row].magnitude = 0.f;
+          } else {
+            const ap_peak empty_peak = {-1, 0.f, 0.f, 0.f};
+            ap_peak * restrict dst = peaks + row * nb;
+            for(size_t b = 0; b < nb; b++) dst[b] = empty_peak;
+          }
+          if(counts) counts[row] = 0;
+        }
+      }
+      if(!nfire0) continue;
+
+      /* Tier 1 coarse execution ONLY on templates surviving Tier 0 */
+      unsigned long long _t1 = p->prof ? ap_ticks() : 0;
+      if(ap_mf_run_sel(p->coarse, d0 + d, 1, t0, nt, p->firebuf0, nfire0,
+                       cspan, minev, p->cebuf, NULL, cstart, cend) < 0) return -1;
+      if(p->prof) p->c_odd += ap_ticks() - _t1;
+
+      int nfire = 0;
+      for(int j = 0; j < nfire0; j++){
+        int t = p->firebuf0[j];
+        const size_t row = (size_t)d * nt + t;
+        ap_peak ce = p->cebuf[t];
+        if(ce.index >= 0 && ce.magnitude >= p->cal_thr){
+          p->trig++;
+          p->firebuf[nfire++] = t;
+        } else {
+          if(nb == 1){
+            peaks[row].index = -1;
+            peaks[row].re = peaks[row].im = peaks[row].magnitude = 0.f;
+          } else {
+            const ap_peak empty_peak = {-1, 0.f, 0.f, 0.f};
+            ap_peak * restrict dst = peaks + row * nb;
+            for(size_t b = 0; b < nb; b++) dst[b] = empty_peak;
+          }
+          if(counts) counts[row] = 0;
+        }
+      }
+
+      if(nfire){
+        if(!p->dready[d0 + d]){
+          if(!p->dspec[d0 + d]) return -1;
+          if(ap_mf_set_data(p->full, d0 + d, p->dspec[d0 + d])) return -1;
+          p->dready[d0 + d] = 1;
+        }
+        unsigned long long r0 = p->prof ? ap_ticks() : 0;
+        int r = ap_mf_run_sel(p->full, d0 + d, 1, t0, nt, p->firebuf, nfire,
+                              binsize, threshold,
+                              peaks + (size_t)d * nt * nb, counts ? counts + (size_t)d * nt : NULL,
+                              start, end);
+        if(p->prof) p->c_ref += ap_ticks() - r0;
+        if(r < 0) return -1;
+        total += r;
+      }
+    }
+    return total;
+  }
+
   { unsigned long long _eb = p->prof ? ap_ticks() : 0;
     if(ap_mf_run(p->coarse,d0,nd,t0,nt,cspan,minev,p->cebuf,NULL,
                  cstart,cend)<0) return -1;

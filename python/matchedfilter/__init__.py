@@ -1458,13 +1458,17 @@ class HierarchicalFilter(MatchedFilter):
     """
 
     def __init__(self, n, ndata=1, ntemplates=1, snr=5.5, fd=1e-2,
-                 band=None, taps=None, device=None, *, valid=None):
+                 band=None, taps=None, device=None, *, valid=None, cascade_band=None):
         from .device import parse as _parse_device
         self.device = _parse_device(device)
         self.n = int(n)
         self.valid = _valid_series_window(self.n, valid)
         self.ndata = int(ndata)
         self.ntemplates = int(ntemplates)
+        self.cascade_band = int(cascade_band) if cascade_band is not None else None
+        if self.cascade_band is not None:
+            if self.cascade_band < 64 or self.cascade_band >= self.n or self.cascade_band & (self.cascade_band - 1):
+                raise ValueError("cascade_band must be a power of two, >= 64 and < n")
         if self.ndata < 1 or self.ntemplates < 1:
             raise ValueError("ndata and ntemplates must be >= 1")
         if self.device.kind == 'cpu' and self.n > self._cpu_max_n:
@@ -1514,12 +1518,20 @@ class HierarchicalFilter(MatchedFilter):
             self._pinned = (int(band), int(taps or 8))
             self._mf = self._new_cpu_plan(*self._pinned)
             if self._cal_thr is not None:
-                self._mf.set_threshold(self._cal_thr)
+                if isinstance(self._cal_thr, (tuple, list)):
+                    self._mf.set_threshold(*self._cal_thr)
+                else:
+                    self._mf.set_threshold(self._cal_thr)
 
-    def _new_cpu_plan(self, band, taps):
+    def _new_cpu_plan(self, band, taps, cascade_band=None):
         self._execution_policy = self._series_policy('hierarchical_series', band, self.ntemplates)
+        cband = cascade_band if cascade_band is not None else getattr(self, 'cascade_band', None)
+        grp = self._execution_policy.get('series_group', 8)
+        if cband is not None and cband > 0:
+            return _core.HMF(self.n, self.ndata, self.ntemplates, self.snr, self.fd,
+                             int(band), 1, int(taps), grp, int(cband))
         return _core.HMF(self.n, self.ndata, self.ntemplates, self.snr, self.fd,
-                         int(band), 1, int(taps), self._execution_policy.get('series_group', 8))
+                         int(band), 1, int(taps), grp)
 
     def _ensure(self):
         """Build the plan, choosing its configuration if that was deferred.
@@ -1531,9 +1543,13 @@ class HierarchicalFilter(MatchedFilter):
         """
         if self._mf is not None:
             if not self._thr_applied:
-                tv = self._coarse_value(self._mf.config()[0], required=False)
+                cfg_b = self._mf.config()[1] if len(self._mf.config()) == 4 else self._mf.config()[0]
+                tv = self._coarse_value(cfg_b, required=False)
                 if tv is not None:
-                    self._mf.set_threshold(tv)
+                    if isinstance(tv, (tuple, list)):
+                        self._mf.set_threshold(*tv)
+                    else:
+                        self._mf.set_threshold(tv)
                     self._thr_applied = True
             return self._mf
         cfg = None
@@ -1638,7 +1654,12 @@ class HierarchicalFilter(MatchedFilter):
     def _execution_plan(self):
         plan = self._ensure()
         if not self._thr_applied:
-            plan.set_threshold(self._coarse_value(plan.config()[0]))
+            cfg_b = plan.config()[1] if len(plan.config()) == 4 else plan.config()[0]
+            tv = self._coarse_value(cfg_b)
+            if isinstance(tv, (tuple, list)):
+                plan.set_threshold(*tv)
+            else:
+                plan.set_threshold(tv)
             self._thr_applied = True
         return plan
 
@@ -1728,6 +1749,15 @@ class HierarchicalFilter(MatchedFilter):
             self._thr_applied = False
             if self._mf is not None:
                 self._mf.set_threshold(-1.0)
+            return
+        if isinstance(value, (tuple, list)):
+            if len(value) != 2:
+                raise ValueError("expected 2 thresholds for cascade (thr0, thr1)")
+            t0, t1 = float(value[0]), float(value[1])
+            self._cal_thr = (t0, t1)
+            self._thr_applied = True
+            if self._mf is not None:
+                self._mf.set_threshold(t0, t1)
             return
         value = float(value)
         if not np.isfinite(value) or value < 0 or value > float(np.finfo(np.float32).max):

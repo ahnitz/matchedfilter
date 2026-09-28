@@ -151,6 +151,10 @@ ap_hmf_plan *ap_hmf_create_ex(size_t n, int ndata, int ntmpl, float snr, float f
  * The engine bounds the requested group by its working-memory limit. */
 ap_hmf_plan *ap_hmf_create_grouped(size_t n, int ndata, int ntmpl, float snr, float fd,
                                   size_t band, int taps, int series_group);
+ap_hmf_plan *ap_hmf_create_cascade(size_t n, int ndata, int ntmpl, float snr, float fd,
+                                   size_t band0, size_t band, int taps, int series_group);
+int ap_hmf_set_cascade_thresholds(ap_hmf_plan *p, float thr0, float thr1);
+void ap_hmf_config_cascade(const ap_hmf_plan *p, size_t *band0, size_t *band1, int *taps);
 int ap_hmf_series_group(const ap_hmf_plan *p);
 void         ap_hmf_destroy(ap_hmf_plan *p);
 

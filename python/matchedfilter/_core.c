@@ -377,7 +377,8 @@ typedef struct { PyObject_HEAD ap_hmf_plan *p; Py_ssize_t n; int nd,nt; ap_peak 
 static int HMF_init(HMFObject *self,PyObject *args,PyObject *kw){
   Py_ssize_t n; int nd,nt; double snr,fd; (void)kw;
   Py_ssize_t band=0; int u=0,k=0,group=8;
-  if(!PyArg_ParseTuple(args,"niidd|niii",&n,&nd,&nt,&snr,&fd,&band,&u,&k,&group)) return -1;
+  Py_ssize_t band0=0;
+  if(!PyArg_ParseTuple(args,"niidd|niiin",&n,&nd,&nt,&snr,&fd,&band,&u,&k,&group,&band0)) return -1;
   /* band and taps are required: the choice belongs to the measured tuning
      tables, which the Python class reads and which refuse rather than guess
      outside their coverage. `u` is accepted and ignored -- the oversample is
@@ -386,7 +387,11 @@ static int HMF_init(HMFObject *self,PyObject *args,PyObject *kw){
   if(!band){ PyErr_SetString(PyExc_ValueError,
       "band and taps are required; HierarchicalFilter picks them "
       "from the tuning tables"); return -1; }
-  self->p = ap_hmf_create_grouped((size_t)n,nd,nt,(float)snr,(float)fd,(size_t)band,k,group);
+  if(band0>0){
+    self->p = ap_hmf_create_cascade((size_t)n,nd,nt,(float)snr,(float)fd,(size_t)band0,(size_t)band,k,group);
+  } else {
+    self->p = ap_hmf_create_grouped((size_t)n,nd,nt,(float)snr,(float)fd,(size_t)band,k,group);
+  }
   if(!self->p){ PyErr_Format(PyExc_ValueError,
       "no hierarchical plan for n=%zd band=%zd u=%d k=%d",n,band,u,k); return -1; }
   self->n=n; self->nd=nd; self->nt=nt; return 0;
@@ -576,12 +581,21 @@ static PyObject *HMF_coarse_threshold(HMFObject *self,PyObject *args){
   return PyFloat_FromDouble((double)out);
 }
 static PyObject *HMF_config(HMFObject *self,PyObject *a){
-  size_t band=0; int k=0; (void)a; ap_hmf_config(self->p,&band,&k);
-  /* Three values still, so the Python side is unchanged; the middle one is
-     a constant 1 where the oversample used to be. */
+  size_t band0=0,band=0; int k=0; (void)a;
+  ap_hmf_config_cascade(self->p,&band0,&band,&k);
+  if(band0>0){
+    return Py_BuildValue("(nnii)",(Py_ssize_t)band0,(Py_ssize_t)band,1,k);
+  }
   return Py_BuildValue("(nii)",(Py_ssize_t)band,1,k);
 }
 static PyObject *HMF_set_threshold(HMFObject *self,PyObject *args){
+  double t0=0,t1=0;
+  if(PyArg_ParseTuple(args,"dd",&t0,&t1)){
+    if(ap_hmf_set_cascade_thresholds(self->p,(float)t0,(float)t1)<0){
+      PyErr_SetString(PyExc_RuntimeError,"set_threshold failed"); return NULL; }
+    Py_RETURN_NONE;
+  }
+  PyErr_Clear();
   double t; if(!PyArg_ParseTuple(args,"d",&t)) return NULL;
   if(ap_hmf_set_threshold(self->p,(float)t)<0){
     PyErr_SetString(PyExc_RuntimeError,"set_threshold failed"); return NULL; }
