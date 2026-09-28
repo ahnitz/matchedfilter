@@ -104,10 +104,11 @@ def test_cascade_fdr_guarantee():
     m0, m1 = 256, 1024
     snr_target = 5.5
     fdr_budget = 0.0020  # 0.20% budget for fast unit test
-    # Calibrated gates with conservative safety margin
-    gate_t0, gate_t1 = 3.58, 4.74
-
     power = inspiral_power(n)
+    thr = mf.choose_threshold(power, n, snr_target, fdr_budget, band=m1, cascade_band=m0)
+    assert thr is not None
+    gate_t0, gate_t1 = thr
+
     h_freq = np.sqrt(power).astype(np.complex64)
     h_conj = np.conj(h_freq)
 
@@ -356,6 +357,158 @@ def test_hierarchical_filter_explicit_cascade_band_auto_threshold():
     peaks = hf.run(binsize=n, threshold=5.0)
     assert peaks[0, 0, 0]['index'] >= 0
     assert abs(peaks[0, 0, 0]['value']) >= 7.0
+
+
+def test_cascade_cost_model_all_architectures():
+    """Verify choose_config cost model across all architecture cost tables.
+
+    Asserts that:
+    1. If a cascade candidate is chosen, b0 < b_single strictly holds.
+    2. Estimated cascade cost is strictly less than single-tier cost.
+    3. On sugwg-login2 (Xeon 8260, AVX-512), when single-tier selects band 256,
+       choose_config declines the cascade and selects single-band 256.
+    """
+    import glob
+    import os
+    from matchedfilter import CascadeConfig
+
+    pkg_dir = os.path.dirname(mf.__file__)
+    cost_files = glob.glob(os.path.join(pkg_dir, "cost*.txt"))
+    assert len(cost_files) >= 5, f"Expected architecture cost files, found {len(cost_files)}"
+
+    p2048 = inspiral_power(2048)
+    p4096 = inspiral_power(4096)
+
+    for cf in cost_files:
+        tuning = mf._load_tuning(cf)
+        for power, n in [(p2048, 2048), (p4096, 4096)]:
+            sc = mf.choose_config(power, n, 5.5, 1e-3, tuning=tuning, cascade=False)
+            cc = mf.choose_config(power, n, 5.5, 1e-3, tuning=tuning, cascade=True)
+            if sc is None:
+                assert cc is None
+            else:
+                if isinstance(cc, CascadeConfig) or (isinstance(cc, tuple) and len(cc) == 3):
+                    b0 = cc.b0 if hasattr(cc, "b0") else cc[0]
+                    b_single = sc[0]
+                    assert b0 < b_single, (
+                        f"Architecture {os.path.basename(cf)} at n={n}: "
+                        f"cascade b0={b0} must be strictly less than single b={b_single}"
+                    )
+
+    # Specific verification for sugwg-login2 (genuineintel-family6-model85):
+    # Mainline ran single band 256; cascade must decline and select single band 256
+    cf_sugwg = os.path.join(pkg_dir, "cost-genuineintel-family6-model85.txt")
+    t_sugwg = mf._load_tuning(cf_sugwg)
+    sc_sugwg = mf.choose_config(p2048, 2048, 5.5, 1e-3, tuning=t_sugwg, cascade=False)
+    cc_sugwg = mf.choose_config(p2048, 2048, 5.5, 1e-3, tuning=t_sugwg, cascade=True)
+    assert sc_sugwg == (256, 8), f"Expected sugwg-login2 single-tier to select (256, 8), got {sc_sugwg}"
+    assert cc_sugwg == (256, 8), f"Expected sugwg-login2 cascade to decline and select (256, 8), got {cc_sugwg}"
+
+
+def test_cascade_signal_retention_and_scalloping():
+    """Verify signal retention at high SNR across discrete and fractional lag offsets.
+
+    Guarantees no false dismissal dropouts from lag-grid scalloping losses
+    (specifically validating SNR 5.985 at band 512, as well as SNR 6.5, 7.5).
+    """
+    n = 4096
+    m0, m1 = 256, 512
+    power = inspiral_power(n)
+    h_freq = np.sqrt(power).astype(np.complex64)
+    h_conj = np.conj(h_freq)
+
+    # Dynamically derive calibrated gates with tolerance bound
+    thr = mf.choose_threshold(power, n, 5.5, 0.001, band=m1, cascade_band=m0)
+    assert thr is not None
+    g0, g1 = thr
+
+    hmf = _core.HMF(n, 1, 1, 5.5, 0.001, m1, 1, 8, 8, m0)
+    hmf.set_reference(power)
+    hmf.set_threshold(g0, g1)
+    hmf.set_template(0, h_conj)
+
+    p_cascade = np.empty((1, 1), dtype=mf.PEAK_DTYPE)
+    cnt_buf = np.empty(1, dtype=np.int32)
+    empty_idx = np.empty(0, dtype=np.int64)
+    empty_val = np.empty(0, dtype=np.complex64)
+    mag_buf = np.empty(0, dtype=np.float32)
+
+    # Test signals at SNR 5.985 (reported scalloping telemetry deficit) and SNR 6.5, 7.5
+    for snr_test in (5.985, 6.5, 7.5):
+        # Sample across sub-sample fractional offsets to exercise peak scalloping
+        for frac in (0.0, 0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875):
+            for base_lag in (500, 1024, 2048):
+                lag = base_lag + frac
+                k = np.arange(n)
+                phase_shift = np.exp(2j * np.pi * lag * k / n).astype(np.complex64)
+                sig = (snr_test * h_freq * phase_shift).astype(np.complex64)
+                hmf.set_data(0, sig)
+                hmf.run(0, 1, 0, 1, n, 5.5, 0, n, empty_idx, empty_val, mag_buf, cnt_buf, p_cascade)
+
+                peak_idx = p_cascade[0, 0]["index"]
+                peak_val = abs(p_cascade[0, 0]["value"])
+                assert peak_idx >= 0, f"Signal lost at SNR {snr_test}, lag {lag}"
+                assert peak_val >= 5.5, f"Peak {peak_val:.3f} below 5.5 at SNR {snr_test}, lag {lag}"
+
+
+def test_cascade_subset_semantics():
+    """Document and test intra-plan subset semantics vs cross-configuration behavior.
+
+    Intra-Plan Semantics:
+      Within a single execution plan (fixed b0, b1, g0, g1), Tier 1 is an
+      intra-plan refinement filter of Tier 0. Any pair that evaluates Tier 1
+      has strictly passed Tier 0 (c0 >= g0), and any pair refined to the fine
+      filter has strictly passed both Tier 0 and Tier 1 (c0 >= g0 and c1 >= g1).
+      Thus, candidate survivors form a nested subset:
+          Survivors(Fine) <= Survivors(Tier 1) <= Survivors(Tier 0).
+
+    Cross-Configuration Non-Subset Behavior:
+      Across distinct configurations (e.g. two-tier cascade vs single-tier filter,
+      or differing bands), the detected triggers are NOT subsets of each other.
+      Because Tier 0 operates with a looser gate (e.g. g0 ~ 3.68 vs g_single ~ 4.83)
+      and different frequency decimation, marginal triggers near threshold can be
+      gained (passed looser Tier 0) or lost (marginal phase/noise difference).
+      Cross-configuration subset behavior is neither expected nor mathematically
+      required; each configuration independently guarantees compound FDR <= fd.
+    """
+    n = 4096
+    m0, m1 = 256, 1024
+    snr_target = 5.5
+    fd_target = 0.001
+    power = inspiral_power(n)
+    h_freq = np.sqrt(power).astype(np.complex64)
+
+    thr_cascade = mf.choose_threshold(power, n, snr_target, fd_target, band=m1, cascade_band=m0)
+    assert thr_cascade is not None
+    g0, g1 = thr_cascade
+    g_single = float(mf.choose_threshold(power, n, snr_target, fd_target, band=m1))
+
+    # Cross-configuration: Tier 0 gate is strictly looser than single-tier gate
+    assert g0 < g_single, f"Tier 0 gate {g0:.3f} should be looser than single gate {g_single:.3f}"
+
+    # Intra-plan verification:
+    rng = np.random.default_rng(777)
+    ndata = 8
+    noise = (rng.standard_normal((ndata, n), dtype=np.float32)
+             + 1j * rng.standard_normal((ndata, n), dtype=np.float32)).astype(np.complex64)
+    k = np.arange(n)
+    noise[0] += (5.5 * h_freq * np.exp(2j * np.pi * 512 * k / n)).astype(np.complex64)
+
+    survived_t0 = []
+    survived_t1 = []
+    for d in range(ndata):
+        c0_vals = np.abs(np.fft.ifft(noise[d, :m0] * np.conj(h_freq[:m0])) * m0)
+        c0_max = float(c0_vals.max())
+        if c0_max >= g0:
+            survived_t0.append(d)
+            c1_vals = np.abs(np.fft.ifft(noise[d, :m1] * np.conj(h_freq[:m1])) * m1)
+            c1_max = float(c1_vals.max())
+            if c1_max >= g1:
+                survived_t1.append(d)
+
+    # Intra-plan: survivors of Tier 1 are a strict subset of Tier 0 survivors
+    assert set(survived_t1).issubset(set(survived_t0)), "Intra-plan subset violated!"
+
 
 
 

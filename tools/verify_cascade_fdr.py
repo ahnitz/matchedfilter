@@ -39,10 +39,12 @@ def verify_fdr(n=4096, m0=256, m1=1024, snr_target=5.5, fdr_target=0.0010,
     if gates is not None:
         gate_single, gate_t0, gate_t1 = gates
     else:
-        # Conservative calibration with safety margin for FDR <= 0.10%
-        gate_single = 4.760
-        gate_t0 = 3.580
-        gate_t1 = 4.740
+        # Dynamically compute calibrated gates from reference profile
+        gate_single = float(mf.choose_threshold(power, n, snr_target, fdr_target, band=m1))
+        thr_cascade = mf.choose_threshold(power, n, snr_target, fdr_target, band=m1, cascade_band=m0)
+        if thr_cascade is None:
+            raise ValueError(f"Could not calibrate cascade gates for n={n}, m0={m0}, m1={m1}")
+        gate_t0, gate_t1 = map(float, thr_cascade)
 
     print(f"Calibrated Gates:")
     print(f"  Single-tier (m1={m1}):          gate = {gate_single:.3f}")
@@ -145,6 +147,7 @@ def verify_fdr(n=4096, m0=256, m1=1024, snr_target=5.5, fdr_target=0.0010,
     print("-" * 80)
 
     # 95% Wilson score confidence interval for cascade FDR
+    # Standard 2-sided 95% interval uses z = 1.96; 1-sided 95% upper bound uses z = 1.645
     z = 1.96
     p_hat = fdr_cascade
     denom = 1 + z**2 / n_fine_detections
@@ -152,10 +155,23 @@ def verify_fdr(n=4096, m0=256, m1=1024, snr_target=5.5, fdr_target=0.0010,
     half_width = z * np.sqrt((p_hat * (1 - p_hat) + z**2 / (4 * n_fine_detections)) / n_fine_detections) / denom
     ci_low = max(0.0, center - half_width)
     ci_high = center + half_width
-    print(f"Cascade 95% Confidence Interval:         [{ci_low*100:.4f}%, {ci_high*100:.4f}%]")
 
-    assert fdr_cascade <= fdr_target * 1.25, (
-        f"Cascade FDR violation! Measured {fdr_cascade*100:.3f}% > target {fdr_target*100:.3f}%"
+    z_onesided = 1.645
+    denom_1 = 1 + z_onesided**2 / n_fine_detections
+    center_1 = (p_hat + z_onesided**2 / (2 * n_fine_detections)) / denom_1
+    half_width_1 = z_onesided * np.sqrt((p_hat * (1 - p_hat) + z_onesided**2 / (4 * n_fine_detections)) / n_fine_detections) / denom_1
+    ub_95 = center_1 + half_width_1
+
+    print(f"Cascade 95% Two-Sided CI:                [{ci_low*100:.4f}%, {ci_high*100:.4f}%]")
+    print(f"Cascade 95% One-Sided Upper Bound:       {ub_95*100:.4f}%")
+
+    assert fdr_cascade <= fdr_target, (
+        f"Cascade FDR violation! Point estimate {fdr_cascade*100:.4f}% > target {fdr_target*100:.4f}%"
+    )
+    # Upper confidence bound respects the budget within finite-sample statistical tolerance
+    max_statistical_ub = fdr_target + 1.96 * np.sqrt(fdr_target * (1.0 - fdr_target) / n_fine_detections)
+    assert ci_high <= max_statistical_ub * 1.05, (
+        f"Cascade FDR 95% upper bound violation! Upper bound {ci_high*100:.4f}% > allowable {max_statistical_ub*100:.4f}%"
     )
     print(f"\n>>> VERIFICATION SUCCESS: Two-Tier Cascade strictly maintains FDR <= {fdr_target*100:.2f}% target! <<<")
 
