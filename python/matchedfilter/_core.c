@@ -13,15 +13,31 @@
 
 /* Validate the extension boundary independently of the Python convenience API.
    Divide byte capacities instead of multiplying untrusted sizes. */
+typedef struct {
+  int64_t index;
+  float re, im;
+} ap_structured_peak;
+
 static int output_shape(Py_ssize_t rows,size_t nb,Py_buffer *ix,Py_buffer *val,
-                        Py_buffer *mag,Py_buffer *cnt,Py_ssize_t *need){
+                        Py_buffer *mag,Py_buffer *cnt,Py_buffer *spk,Py_ssize_t *need){
   if(rows<1 || nb<1 || nb>(size_t)PY_SSIZE_T_MAX/(size_t)rows){
     PyErr_SetString(PyExc_ValueError,"invalid or overflowing output shape"); return 0;
   }
   *need=rows*(Py_ssize_t)nb;
-  if(*need>PY_SSIZE_T_MAX/(Py_ssize_t)sizeof(ap_peak)
-     || ix->len/8<*need || val->len/8<*need
-     || (mag->len && mag->len/4<*need) || cnt->len/4<rows){
+  if(*need>PY_SSIZE_T_MAX/(Py_ssize_t)sizeof(ap_peak)){
+    PyErr_SetString(PyExc_ValueError,"output arrays too small or output shape overflows"); return 0;
+  }
+  int have_spk = (spk && spk->buf && spk->len);
+  if(have_spk){
+    if(spk->len/16 < *need){
+      PyErr_SetString(PyExc_ValueError,"output arrays too small or output shape overflows"); return 0;
+    }
+  } else {
+    if(ix->len/8<*need || val->len/8<*need){
+      PyErr_SetString(PyExc_ValueError,"output arrays too small or output shape overflows"); return 0;
+    }
+  }
+  if((mag->len && mag->len/4<*need) || cnt->len/4<rows){
     PyErr_SetString(PyExc_ValueError,"output arrays too small or output shape overflows"); return 0;
   }
   return 1;
@@ -115,33 +131,48 @@ static PyObject *MF_set(MFObject *self,PyObject *args,int is_data){
 static PyObject *MF_set_data(MFObject *s,PyObject *a){ return MF_set(s,a,1); }
 static PyObject *MF_set_template(MFObject *s,PyObject *a){ return MF_set(s,a,0); }
 
-/* run(d0,nd,t0,nt,binsize,threshold,start,end, idx,val,mag,counts) -> total */
+/* run(d0,nd,t0,nt,binsize,threshold,start,end, idx,val,mag,counts [, peaks]) -> total */
 static PyObject *MF_run(MFObject *self,PyObject *args){
   int d0,nd,t0,nt; Py_ssize_t binsize,start,end; double thr;
-  Py_buffer bidx,bval,bmag,bcnt;
-  if(!PyArg_ParseTuple(args,"iiiindnnw*w*w*w*",&d0,&nd,&t0,&nt,&binsize,&thr,
-                       &start,&end,&bidx,&bval,&bmag,&bcnt)) return NULL;
+  Py_buffer bidx,bval,bmag,bcnt,bpk = {0};
+  if(!PyArg_ParseTuple(args,"iiiindnnw*w*w*w*|w*",&d0,&nd,&t0,&nt,&binsize,&thr,
+                       &start,&end,&bidx,&bval,&bmag,&bcnt,&bpk)) return NULL;
   size_t nb; Py_ssize_t rows,need;
   if(!run_shape(self->n,self->nd,self->nt,d0,nd,t0,nt,binsize,start,end,&nb,&rows)
-     || !output_shape(rows,nb,&bidx,&bval,&bmag,&bcnt,&need)){
+     || !output_shape(rows,nb,&bidx,&bval,&bmag,&bcnt,&bpk,&need)){
     PyBuffer_Release(&bidx);PyBuffer_Release(&bval);
-    PyBuffer_Release(&bmag);PyBuffer_Release(&bcnt); return NULL;
+    PyBuffer_Release(&bmag);PyBuffer_Release(&bcnt);
+    if(bpk.buf) PyBuffer_Release(&bpk);
+    return NULL;
   }
   ap_peak *pk=reserve_peaks(&self->peaks,&self->peak_capacity,need);
   if(!pk){ PyBuffer_Release(&bidx);PyBuffer_Release(&bval);
-           PyBuffer_Release(&bmag);PyBuffer_Release(&bcnt); return NULL; }
+           PyBuffer_Release(&bmag);PyBuffer_Release(&bcnt);
+           if(bpk.buf) PyBuffer_Release(&bpk);
+           return NULL; }
   int tot;
   Py_BEGIN_ALLOW_THREADS
   tot=ap_mf_run(self->p,d0,nd,t0,nt,(size_t)binsize,(float)thr,pk,(int*)bcnt.buf,
                 (size_t)start,(size_t)end);
   Py_END_ALLOW_THREADS
   if(tot>=0){
-    long long *ix=(long long*)bidx.buf; float *vl=(float*)bval.buf,*mg=bmag.len ? (float*)bmag.buf : NULL;
-    for(Py_ssize_t a=0;a<need;a++){
-      ix[a]=(long long)pk[a].index; vl[2*a]=pk[a].re; vl[2*a+1]=pk[a].im; if(mg) mg[a]=pk[a].magnitude;
+    if(bpk.buf && bpk.len>=need*(Py_ssize_t)sizeof(ap_structured_peak)){
+      ap_structured_peak *s=(ap_structured_peak*)bpk.buf;
+      for(Py_ssize_t a=0;a<need;a++){
+        s[a].index=(int64_t)pk[a].index;
+        s[a].re=pk[a].re;
+        s[a].im=pk[a].im;
+      }
+    }
+    if(bidx.buf && bidx.len>=need*8 && bval.buf && bval.len>=need*8){
+      long long *ix=(long long*)bidx.buf; float *vl=(float*)bval.buf,*mg=bmag.len ? (float*)bmag.buf : NULL;
+      for(Py_ssize_t a=0;a<need;a++){
+        ix[a]=(long long)pk[a].index; vl[2*a]=pk[a].re; vl[2*a+1]=pk[a].im; if(mg) mg[a]=pk[a].magnitude;
+      }
     }
   }
   PyBuffer_Release(&bidx);PyBuffer_Release(&bval);PyBuffer_Release(&bmag);PyBuffer_Release(&bcnt);
+  if(bpk.buf) PyBuffer_Release(&bpk);
   if(tot<0){ PyErr_SetString(PyExc_RuntimeError,"matchedfilter: matched filter failed"); return NULL; }
   return PyLong_FromLong(tot);
 }
@@ -226,26 +257,30 @@ static PyObject *MF_correlate_series_continuous(MFObject *self,PyObject *args){
   if(r){PyErr_SetString(PyExc_RuntimeError,"continuous series correlation failed");return NULL;}
   Py_RETURN_NONE;
 }
-/* run_series(series, starts, wstart, wend, t0, nt, binsize, thr, idx,val,mag,cnt) */
+/* run_series(series, starts, wstart, wend, t0, nt, binsize, thr, idx,val,mag,cnt [, peaks]) */
 static PyObject *MF_run_series(MFObject *self,PyObject *args){
-  Py_buffer bs,bst,bws,bwe,bidx,bval,bmag,bcnt;
+  Py_buffer bs,bst,bws,bwe,bidx,bval,bmag,bcnt,bpk = {0};
   int t0,nt; Py_ssize_t binsize; double thr;
-  if(!PyArg_ParseTuple(args,"y*y*y*y*iindw*w*w*w*",&bs,&bst,&bws,&bwe,
-                       &t0,&nt,&binsize,&thr,&bidx,&bval,&bmag,&bcnt)) return NULL;
+  if(!PyArg_ParseTuple(args,"y*y*y*y*iindw*w*w*w*|w*",&bs,&bst,&bws,&bwe,
+                       &t0,&nt,&binsize,&thr,&bidx,&bval,&bmag,&bcnt,&bpk)) return NULL;
   int nblocks; size_t nb;
   Py_ssize_t rows,need;
   if(!series_shape(self->n,self->nt,t0,nt,binsize,&bs,&bst,&bws,&bwe,
                    &nblocks,&nb,&rows)
-     || !output_shape(rows,nb,&bidx,&bval,&bmag,&bcnt,&need)){
+     || !output_shape(rows,nb,&bidx,&bval,&bmag,&bcnt,&bpk,&need)){
     PyBuffer_Release(&bs);PyBuffer_Release(&bst);PyBuffer_Release(&bws);
     PyBuffer_Release(&bwe);PyBuffer_Release(&bidx);PyBuffer_Release(&bval);
-    PyBuffer_Release(&bmag);PyBuffer_Release(&bcnt); return NULL;
+    PyBuffer_Release(&bmag);PyBuffer_Release(&bcnt);
+    if(bpk.buf) PyBuffer_Release(&bpk);
+    return NULL;
   }
   size_t nseries=(size_t)(bs.len/8);
   ap_peak *pk=reserve_peaks(&self->peaks,&self->peak_capacity,need);
   if(!pk){ PyBuffer_Release(&bs);PyBuffer_Release(&bst);PyBuffer_Release(&bws);
            PyBuffer_Release(&bwe);PyBuffer_Release(&bidx);PyBuffer_Release(&bval);
-           PyBuffer_Release(&bmag);PyBuffer_Release(&bcnt); return NULL; }
+           PyBuffer_Release(&bmag);PyBuffer_Release(&bcnt);
+           if(bpk.buf) PyBuffer_Release(&bpk);
+           return NULL; }
   int tot;
   Py_BEGIN_ALLOW_THREADS
   tot=ap_mf_run_series(self->p,(const float*)bs.buf,nseries,
@@ -254,14 +289,25 @@ static PyObject *MF_run_series(MFObject *self,PyObject *args){
                        (float)thr,pk,(int*)bcnt.buf);
   Py_END_ALLOW_THREADS
   if(tot>=0){
-    long long *ix=(long long*)bidx.buf; float *vl=(float*)bval.buf,*mg=bmag.len ? (float*)bmag.buf : NULL;
-    for(Py_ssize_t a=0;a<need;a++){
-      ix[a]=(long long)pk[a].index; vl[2*a]=pk[a].re; vl[2*a+1]=pk[a].im; if(mg) mg[a]=pk[a].magnitude;
+    if(bpk.buf && bpk.len>=need*(Py_ssize_t)sizeof(ap_structured_peak)){
+      ap_structured_peak *s=(ap_structured_peak*)bpk.buf;
+      for(Py_ssize_t a=0;a<need;a++){
+        s[a].index=(int64_t)pk[a].index;
+        s[a].re=pk[a].re;
+        s[a].im=pk[a].im;
+      }
+    }
+    if(bidx.buf && bidx.len>=need*8 && bval.buf && bval.len>=need*8){
+      long long *ix=(long long*)bidx.buf; float *vl=(float*)bval.buf,*mg=bmag.len ? (float*)bmag.buf : NULL;
+      for(Py_ssize_t a=0;a<need;a++){
+        ix[a]=(long long)pk[a].index; vl[2*a]=pk[a].re; vl[2*a+1]=pk[a].im; if(mg) mg[a]=pk[a].magnitude;
+      }
     }
   }
   PyBuffer_Release(&bs);PyBuffer_Release(&bst);PyBuffer_Release(&bws);
   PyBuffer_Release(&bwe);PyBuffer_Release(&bidx);PyBuffer_Release(&bval);
   PyBuffer_Release(&bmag);PyBuffer_Release(&bcnt);
+  if(bpk.buf) PyBuffer_Release(&bpk);
   if(tot<0){ PyErr_SetString(PyExc_RuntimeError,"matchedfilter: run_series failed"); return NULL; }
   return PyLong_FromLong(tot);
 }
@@ -357,53 +403,72 @@ static PyObject *HMF_set_template(HMFObject *s,PyObject *a){ return HMF_set(s,a,
 
 static PyObject *HMF_run(HMFObject *self,PyObject *args){
   int d0,nd,t0,nt; Py_ssize_t binsize,start,end; double thr;
-  Py_buffer bidx,bval,bmag,bcnt;
-  if(!PyArg_ParseTuple(args,"iiiindnnw*w*w*w*",&d0,&nd,&t0,&nt,&binsize,&thr,
-                       &start,&end,&bidx,&bval,&bmag,&bcnt)) return NULL;
+  Py_buffer bidx,bval,bmag,bcnt,bpk = {0};
+  if(!PyArg_ParseTuple(args,"iiiindnnw*w*w*w*|w*",&d0,&nd,&t0,&nt,&binsize,&thr,
+                       &start,&end,&bidx,&bval,&bmag,&bcnt,&bpk)) return NULL;
   size_t nb; Py_ssize_t rows,need;
   if(!run_shape(self->n,self->nd,self->nt,d0,nd,t0,nt,binsize,start,end,&nb,&rows)
-     || !output_shape(rows,nb,&bidx,&bval,&bmag,&bcnt,&need)){
+     || !output_shape(rows,nb,&bidx,&bval,&bmag,&bcnt,&bpk,&need)){
     PyBuffer_Release(&bidx);PyBuffer_Release(&bval);
-    PyBuffer_Release(&bmag);PyBuffer_Release(&bcnt); return NULL;
+    PyBuffer_Release(&bmag);PyBuffer_Release(&bcnt);
+    if(bpk.buf) PyBuffer_Release(&bpk);
+    return NULL;
   }
   ap_peak *pk=reserve_peaks(&self->peaks,&self->peak_capacity,need);
   if(!pk){ PyBuffer_Release(&bidx);PyBuffer_Release(&bval);
-           PyBuffer_Release(&bmag);PyBuffer_Release(&bcnt); return NULL; }
+           PyBuffer_Release(&bmag);PyBuffer_Release(&bcnt);
+           if(bpk.buf) PyBuffer_Release(&bpk);
+           return NULL; }
   int tot;
   Py_BEGIN_ALLOW_THREADS
   tot=ap_hmf_run(self->p,d0,nd,t0,nt,(size_t)binsize,(float)thr,pk,(int*)bcnt.buf,
                  (size_t)start,(size_t)end);
   Py_END_ALLOW_THREADS
   if(tot>=0){
-    long long *ix=(long long*)bidx.buf; float *vl=(float*)bval.buf,*mg=bmag.len ? (float*)bmag.buf : NULL;
-    for(Py_ssize_t a=0;a<need;a++){
-      ix[a]=(long long)pk[a].index; vl[2*a]=pk[a].re; vl[2*a+1]=pk[a].im; if(mg) mg[a]=pk[a].magnitude;
+    if(bpk.buf && bpk.len>=need*(Py_ssize_t)sizeof(ap_structured_peak)){
+      ap_structured_peak *s=(ap_structured_peak*)bpk.buf;
+      for(Py_ssize_t a=0;a<need;a++){
+        s[a].index=(int64_t)pk[a].index;
+        s[a].re=pk[a].re;
+        s[a].im=pk[a].im;
+      }
+    }
+    if(bidx.buf && bidx.len>=need*8 && bval.buf && bval.len>=need*8){
+      long long *ix=(long long*)bidx.buf; float *vl=(float*)bval.buf,*mg=bmag.len ? (float*)bmag.buf : NULL;
+      for(Py_ssize_t a=0;a<need;a++){
+        ix[a]=(long long)pk[a].index; vl[2*a]=pk[a].re; vl[2*a+1]=pk[a].im; if(mg) mg[a]=pk[a].magnitude;
+      }
     }
   }
   PyBuffer_Release(&bidx);PyBuffer_Release(&bval);PyBuffer_Release(&bmag);PyBuffer_Release(&bcnt);
+  if(bpk.buf) PyBuffer_Release(&bpk);
   if(tot<0){ PyErr_SetString(PyExc_RuntimeError,"matchedfilter: hierarchical filter failed"); return NULL; }
   return PyLong_FromLong(tot);
 }
-/* run_series(series, starts, wstart, wend, t0, nt, binsize, thr, idx,val,mag,cnt) */
+/* run_series(series, starts, wstart, wend, t0, nt, binsize, thr, idx,val,mag,cnt [, peaks]) */
 static PyObject *HMF_run_series(HMFObject *self,PyObject *args){
-  Py_buffer bs,bst,bws,bwe,bidx,bval,bmag,bcnt;
+  Py_buffer bs,bst,bws,bwe,bidx,bval,bmag,bcnt,bpk = {0};
   int t0,nt; Py_ssize_t binsize; double thr;
-  if(!PyArg_ParseTuple(args,"y*y*y*y*iindw*w*w*w*",&bs,&bst,&bws,&bwe,
-                       &t0,&nt,&binsize,&thr,&bidx,&bval,&bmag,&bcnt)) return NULL;
+  if(!PyArg_ParseTuple(args,"y*y*y*y*iindw*w*w*w*|w*",&bs,&bst,&bws,&bwe,
+                       &t0,&nt,&binsize,&thr,&bidx,&bval,&bmag,&bcnt,&bpk)) return NULL;
   int nblocks; size_t nb;
   Py_ssize_t rows,need;
   if(!series_shape(self->n,self->nt,t0,nt,binsize,&bs,&bst,&bws,&bwe,
                    &nblocks,&nb,&rows)
-     || !output_shape(rows,nb,&bidx,&bval,&bmag,&bcnt,&need)){
+     || !output_shape(rows,nb,&bidx,&bval,&bmag,&bcnt,&bpk,&need)){
     PyBuffer_Release(&bs);PyBuffer_Release(&bst);PyBuffer_Release(&bws);
     PyBuffer_Release(&bwe);PyBuffer_Release(&bidx);PyBuffer_Release(&bval);
-    PyBuffer_Release(&bmag);PyBuffer_Release(&bcnt); return NULL;
+    PyBuffer_Release(&bmag);PyBuffer_Release(&bcnt);
+    if(bpk.buf) PyBuffer_Release(&bpk);
+    return NULL;
   }
   size_t nseries=(size_t)(bs.len/8);
   ap_peak *pk=reserve_peaks(&self->peaks,&self->peak_capacity,need);
   if(!pk){ PyBuffer_Release(&bs);PyBuffer_Release(&bst);PyBuffer_Release(&bws);
            PyBuffer_Release(&bwe);PyBuffer_Release(&bidx);PyBuffer_Release(&bval);
-           PyBuffer_Release(&bmag);PyBuffer_Release(&bcnt); return NULL; }
+           PyBuffer_Release(&bmag);PyBuffer_Release(&bcnt);
+           if(bpk.buf) PyBuffer_Release(&bpk);
+           return NULL; }
   int tot;
   Py_BEGIN_ALLOW_THREADS
   tot=ap_hmf_run_series(self->p,(const float*)bs.buf,nseries,
@@ -412,14 +477,25 @@ static PyObject *HMF_run_series(HMFObject *self,PyObject *args){
                         (float)thr,pk,(int*)bcnt.buf);
   Py_END_ALLOW_THREADS
   if(tot>=0){
-    long long *ix=(long long*)bidx.buf; float *vl=(float*)bval.buf,*mg=bmag.len ? (float*)bmag.buf : NULL;
-    for(Py_ssize_t a=0;a<need;a++){
-      ix[a]=(long long)pk[a].index; vl[2*a]=pk[a].re; vl[2*a+1]=pk[a].im; if(mg) mg[a]=pk[a].magnitude;
+    if(bpk.buf && bpk.len>=need*(Py_ssize_t)sizeof(ap_structured_peak)){
+      ap_structured_peak *s=(ap_structured_peak*)bpk.buf;
+      for(Py_ssize_t a=0;a<need;a++){
+        s[a].index=(int64_t)pk[a].index;
+        s[a].re=pk[a].re;
+        s[a].im=pk[a].im;
+      }
+    }
+    if(bidx.buf && bidx.len>=need*8 && bval.buf && bval.len>=need*8){
+      long long *ix=(long long*)bidx.buf; float *vl=(float*)bval.buf,*mg=bmag.len ? (float*)bmag.buf : NULL;
+      for(Py_ssize_t a=0;a<need;a++){
+        ix[a]=(long long)pk[a].index; vl[2*a]=pk[a].re; vl[2*a+1]=pk[a].im; if(mg) mg[a]=pk[a].magnitude;
+      }
     }
   }
   PyBuffer_Release(&bs);PyBuffer_Release(&bst);PyBuffer_Release(&bws);
   PyBuffer_Release(&bwe);PyBuffer_Release(&bidx);PyBuffer_Release(&bval);
   PyBuffer_Release(&bmag);PyBuffer_Release(&bcnt);
+  if(bpk.buf) PyBuffer_Release(&bpk);
   if(tot<0){ PyErr_SetString(PyExc_RuntimeError,"matchedfilter: run_series failed"); return NULL; }
   return PyLong_FromLong(tot);
 }

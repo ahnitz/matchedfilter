@@ -108,8 +108,8 @@ SOURCES = (
     [("src/kernel.cc", CXX + ARCH, DEFS)]
     + [(s, CXX + ARCH, DEFS) for s in HWY_SRC]   # same baseline, or the
                                                  # dispatch tables disagree
-    + [(s, BASE, []) for s in ("src/matchfilt.c", "src/hmf.c", "src/dispatch.c",
-                               "python/matchedfilter/_core.c")]
+    + [(s, BASE + ARCH, []) for s in ("src/matchfilt.c", "src/hmf.c", "src/dispatch.c",
+                                      "python/matchedfilter/_core.c")]
 )
 
 

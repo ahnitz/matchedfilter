@@ -156,7 +156,7 @@ from ._errors import UnsupportedSize      # noqa: E402
 def _format_result(idx, val, *, raw=False, counts=None, out=None, order=None):
     """Assemble the public dtype once, or return separate raw arrays."""
     if counts is True:
-        counts = (idx >= 0).sum(axis=2).astype(np.int32)
+        counts = ((idx >= 0) if idx is not None else (out["index"] >= 0)).sum(axis=2).astype(np.int32)
     if raw:
         if order is None:
             result = (idx.astype(np.int64, copy=False), val)
@@ -166,11 +166,18 @@ def _format_result(idx, val, *, raw=False, counts=None, out=None, order=None):
             ri[order], rv[order] = idx, val
             result = ri, rv
     else:
-        result = np.empty(idx.shape, PEAK_DTYPE) if out is None else out
-        if order is None:
-            result["index"], result["value"] = idx, val
+        if idx is not None:
+            result = np.empty(idx.shape, PEAK_DTYPE) if out is None else out
+            if order is None:
+                result["index"], result["value"] = idx, val
+            else:
+                result["index"][order], result["value"][order] = idx, val
         else:
-            result["index"][order], result["value"][order] = idx, val
+            if order is None:
+                result = out
+            else:
+                result = np.empty(out.shape, PEAK_DTYPE)
+                result[order] = out
     return (result, counts) if counts is not None and counts is not False else result
 
 
@@ -427,7 +434,7 @@ class MatchedFilter:
         # whole bank runs at once. Bound worst-case work, including a fully
         # admitted hierarchical batch, independently of storage capacity.
         if self.n >= 32768:
-            limit = min(limit, (1 << 29) // self.n)
+            limit = min(limit, (1 << 28) // self.n)
         return limit
 
     def _series_policy(self, operation, band, templates):
@@ -533,24 +540,33 @@ class MatchedFilter:
             return _format_result(idx, val, raw=raw, counts=bool(counts))
         nb = self._ensure().nbins(binsize, start, end)
         rows = nd * nt
-        # Reuse the output buffers.  Six allocations per call is nothing beside
-        # a 2^20 transform, but a caller driving small batches in a tight loop
-        # pays it every time: at 37 templates it was 15 of the 21 us a call
-        # took, swamping the work itself.
-        buf = self._buf
-        if buf is None or buf[0] != (rows, nb):
-            idx = np.empty(rows * nb, dtype=np.int64)
-            val = np.empty(rows * nb, dtype=np.complex64)
-            mag = np.empty(0, dtype=np.float32)
+        shape = (nd, nt, nb)
+        need = rows * nb
+        if raw:
+            buf = self._buf
+            if buf is None or buf[0] != (rows, nb):
+                idx = np.empty(need, dtype=np.int64)
+                val = np.empty(need, dtype=np.complex64)
+                mag = np.empty(0, dtype=np.float32)
+                cnt = np.empty(rows, dtype=np.int32)
+                buf = self._buf = ((rows, nb), idx, val, mag, cnt)
+            _, idx, val, mag, cnt = buf
+            self._execution_plan().run(d0, nd, t0, nt, binsize, float(threshold), start, end,
+                                       idx, val, mag, cnt)
+            return _format_result(idx.reshape(shape), val.reshape(shape),
+                                  raw=True, counts=cnt.reshape(nd, nt) if counts else None)
+        pbuf = getattr(self, '_pbuf', None)
+        if pbuf is None or pbuf[0] != shape:
+            peaks = np.empty(shape, dtype=PEAK_DTYPE)
             cnt = np.empty(rows, dtype=np.int32)
-            peaks = np.empty((nd, nt, nb), dtype=PEAK_DTYPE)
-            buf = self._buf = ((rows, nb), idx, val, mag, cnt, peaks)
-        _, idx, val, mag, cnt, peaks = buf
-        peaks = peaks.reshape(nd, nt, nb)
+            mag = np.empty(0, dtype=np.float32)
+            empty_idx = np.empty(0, dtype=np.int64)
+            empty_val = np.empty(0, dtype=np.complex64)
+            pbuf = self._pbuf = (shape, peaks, cnt, mag, empty_idx, empty_val)
+        _, peaks, cnt, mag, empty_idx, empty_val = pbuf
         self._execution_plan().run(d0, nd, t0, nt, binsize, float(threshold), start, end,
-                     idx, val, mag, cnt)
-        return _format_result(idx.reshape(nd, nt, nb), val.reshape(nd, nt, nb),
-                              raw=raw, counts=cnt.reshape(nd, nt) if counts else None,
+                                   empty_idx, empty_val, mag, cnt, peaks)
+        return _format_result(None, None, raw=False, counts=cnt.reshape(nd, nt) if counts else None,
                               out=peaks)
 
 
@@ -667,18 +683,32 @@ class MatchedFilter:
             return self._run_series_gpu(ser, layout, binsize, threshold, t0, nt, raw)
         nb = layout.nbins
         need = nblk * nt * nb
-        sb = self._sbuf
-        if sb is None or sb[0] != (nblk, nt, nb):
-            sb = self._sbuf = ((nblk, nt, nb),
-                               np.empty(need, dtype=np.int64),
-                               np.empty(need, dtype=np.complex64),
-                               np.empty(0, dtype=np.float32),
-                               np.empty(nblk * nt, dtype=np.int32))
-        _, idx, val, mag, cnt = sb
+        shape = (nblk, nt, nb)
+        if raw:
+            sb = self._sbuf
+            if sb is None or sb[0] != shape:
+                sb = self._sbuf = (shape,
+                                   np.empty(need, dtype=np.int64),
+                                   np.empty(need, dtype=np.complex64),
+                                   np.empty(0, dtype=np.float32),
+                                   np.empty(nblk * nt, dtype=np.int32))
+            _, idx, val, mag, cnt = sb
+            self._execution_plan().run_series(ser, st, ws, we, t0, nt, binsize,
+                                              float(threshold), idx, val, mag, cnt)
+            return _format_result(idx.reshape(shape), val.reshape(shape),
+                                  raw=True, order=layout.order)
+        spbuf = getattr(self, '_spbuf', None)
+        if spbuf is None or spbuf[0] != shape:
+            spbuf = self._spbuf = (shape,
+                                   np.empty(shape, dtype=PEAK_DTYPE),
+                                   np.empty(0, dtype=np.int64),
+                                   np.empty(0, dtype=np.complex64),
+                                   np.empty(0, dtype=np.float32),
+                                   np.empty(nblk * nt, dtype=np.int32))
+        _, peaks, empty_idx, empty_val, mag, cnt = spbuf
         self._execution_plan().run_series(ser, st, ws, we, t0, nt, binsize,
-                                  float(threshold), idx, val, mag, cnt)
-        return _format_result(idx.reshape(nblk, nt, nb), val.reshape(nblk, nt, nb),
-                              raw=raw, order=layout.order)
+                                          float(threshold), empty_idx, empty_val, mag, cnt, peaks)
+        return _format_result(None, None, raw=False, order=layout.order, out=peaks)
 
     def run_blocks(self, series, starts, win_start, win_end,
                    binsize=None, threshold=0.0, templates=None, raw=False):
@@ -732,8 +762,11 @@ class MatchedFilter:
         # A single group needs no aggregate buffers or scatter.
         single = len(layout.groups) == 1 and nblk <= batch
         if not single:
-            idx = np.empty((nblk, nt, nb), dtype=np.int64)
-            val = np.empty((nblk, nt, nb), dtype=np.complex64)
+            if raw:
+                idx = np.empty((nblk, nt, nb), dtype=np.int64)
+                val = np.empty((nblk, nt, nb), dtype=np.complex64)
+            else:
+                peaks = np.empty((nblk, nt, nb), dtype=PEAK_DTYPE)
         # Irregular flat windows share one forward FFT dispatch and submission per
         # bounded batch. Hierarchical and other backends keep their executor.
         grouped = (len(layout.groups) > 1 and type(self) is MatchedFilter
@@ -752,10 +785,15 @@ class MatchedFilter:
                     gi, gv = self._gpu.peaks_grouped(
                         n, spec, H, groups, binsize, threshold, upload_tmpl=self._tdirty)
                     self._tdirty = False
-                    idx[begin:end], val[begin:end] = gi, gv
+                    if raw:
+                        idx[begin:end], val[begin:end] = gi, gv
+                    else:
+                        peaks["index"][begin:end], peaks["value"][begin:end] = gi, gv
                 finally:
                     self._gpu.cancel_forward()
-            return _format_result(idx, val, raw=raw, order=layout.order)
+            if raw:
+                return _format_result(idx, val, raw=True, order=layout.order)
+            return _format_result(None, None, raw=False, order=layout.order, out=peaks)
         for w0, w1, a, b in layout.groups:
             for begin in range(a, b, batch):
                 end = min(begin + batch, b)
@@ -769,8 +807,13 @@ class MatchedFilter:
                     self._gpu.cancel_forward()
                 if single:
                     return _format_result(gi, gv, raw=raw)
-                idx[begin:end], val[begin:end] = gi, gv
-        return _format_result(idx, val, raw=raw, order=layout.order)
+                if raw:
+                    idx[begin:end], val[begin:end] = gi, gv
+                else:
+                    peaks["index"][begin:end], peaks["value"][begin:end] = gi, gv
+        if raw:
+            return _format_result(idx, val, raw=True, order=layout.order)
+        return _format_result(None, None, raw=False, order=layout.order, out=peaks)
 
     def empty_shared(self, shape, dtype=np.complex64, *, readback=False):
         """Allocate a NumPy array backed by this filter's GPU shared memory.
