@@ -98,6 +98,63 @@ def test_cascade_signal_at_threshold():
     assert abs(slot0_t0_peak['index'] - lag) <= 2
 
 
+def test_cascade_fdr_guarantee():
+    """Verify that Two-Tier Cascade strictly maintains FDR <= target budget across signal injections."""
+    n = 4096
+    m0, m1 = 256, 1024
+    snr_target = 5.5
+    fdr_budget = 0.0020  # 0.20% budget for fast unit test
+    # Calibrated gates with conservative safety margin
+    gate_t0, gate_t1 = 3.58, 4.74
+
+    power = inspiral_power(n)
+    h_freq = np.sqrt(power).astype(np.complex64)
+    h_conj = np.conj(h_freq)
+
+    mf_full = mf.MatchedFilter(n, ndata=1, ntemplates=1)
+    mf_full.set_templates(h_conj[None, :])
+
+    hmf_cascade = _core.HMF(n, 1, 1, snr_target, fdr_budget, m1, 1, 8, 8, m0)
+    hmf_cascade.set_reference(power)
+    hmf_cascade.set_threshold(gate_t0, gate_t1)
+    hmf_cascade.set_template(0, h_conj)
+
+    p_single = np.empty((1, 1), dtype=mf.PEAK_DTYPE)
+    cnt_buf = np.empty(1, dtype=np.int32)
+    empty_idx = np.empty(0, dtype=np.int64)
+    empty_val = np.empty(0, dtype=np.complex64)
+    mag_buf = np.empty(0, dtype=np.float32)
+
+    rng = np.random.default_rng(2026)
+    n_trials = 4000
+    n_fine_detections = 0
+    missed_cascade = 0
+
+    for _ in range(n_trials):
+        lag = rng.integers(n // 4, 3 * n // 4)
+        k = np.arange(n)
+        phase_shift = np.exp(2j * np.pi * lag * k / n).astype(np.complex64)
+        sig = (snr_target * h_freq * phase_shift).astype(np.complex64)
+        noise = (rng.standard_normal(n, dtype=np.float32) + 1j * rng.standard_normal(n, dtype=np.float32))
+        d = sig + noise
+
+        mf_full.set_data(d[None, :])
+        res_full = mf_full.run(binsize=n, threshold=snr_target)
+        if abs(res_full['value'][0, 0, 0]) < snr_target:
+            continue
+
+        n_fine_detections += 1
+        hmf_cascade.set_data(0, d)
+        hmf_cascade.run(0, 1, 0, 1, n, snr_target, 0, n, empty_idx, empty_val, mag_buf, cnt_buf, p_single)
+        if p_single[0, 0]['index'] < 0 or abs(p_single[0, 0]['value']) < snr_target:
+            missed_cascade += 1
+
+    measured_fdr = missed_cascade / n_fine_detections
+    assert measured_fdr <= fdr_budget, (
+        f"Measured FDR {measured_fdr*100:.3f}% exceeded budget {fdr_budget*100:.3f}%"
+    )
+
+
 def test_cascade_run_series():
     """Verify that ap_hmf_run_series functions correctly with a two-tier cascade."""
     n = 4096
