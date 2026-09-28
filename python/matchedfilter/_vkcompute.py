@@ -359,7 +359,7 @@ class Context(InputUploads):
         self._hier = {}
         self._hier_cascade = {}
         self._fences = {}
-        self._pending_forward = {}
+        self._pending_forward = None
         self._uploaded = {"data": {}, "tmpl": {}}
 
         app = _vulkan._AppInfo(0, None, b"matchedfilter", 1, b"matchedfilter", 1,
@@ -1334,6 +1334,8 @@ class Context(InputUploads):
                 self._pending_forward.clear()
             else:
                 self._pending_forward.pop(slot, None)
+            if not self._pending_forward:
+                self._pending_forward = None
         else:
             self._pending_forward = None
 
@@ -1346,6 +1348,8 @@ class Context(InputUploads):
             elif len(self._pending_forward) == 1:
                 pending = next(iter(self._pending_forward.values()))
                 self._pending_forward.clear()
+            if not self._pending_forward:
+                self._pending_forward = None
         else:
             pending = getattr(self, "_pending_forward", None)
             self._pending_forward = None
@@ -1888,8 +1892,19 @@ class Context(InputUploads):
                  'tierc': getattr(self, '_tierc_batches', {})}[kind]
         batch = cache.pop(key)
         cmd = batch[-1]
-        if getattr(self, '_pending_forward', None) is cmd:
-            self._submit(None)
+        pf = getattr(self, '_pending_forward', None)
+        cmd_val = getattr(cmd, 'value', cmd)
+        if isinstance(pf, dict):
+            for s, pcmd in list(pf.items()):
+                if getattr(pcmd, 'value', pcmd) == cmd_val:
+                    del pf[s]
+                    self._submit(cmd, slot=s)
+            if not pf:
+                self._pending_forward = None
+        elif pf is not None and getattr(pf, 'value', pf) == cmd_val:
+            self._pending_forward = None
+            self._submit(cmd)
+        _check(self.vk.vkQueueWaitIdle(self.queue), "vkQueueWaitIdle")
         commands = (_vp * 1)(cmd)
         self.vk.vkFreeCommandBuffers.argtypes = [_vp, _vp, _u32, ctypes.POINTER(_vp)]
         self.vk.vkFreeCommandBuffers(self.device, self.command_pool, 1, commands)
