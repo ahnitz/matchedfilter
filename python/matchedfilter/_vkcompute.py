@@ -647,8 +647,8 @@ class Context(InputUploads):
             key = ("hier_cascade", n, band0, band1, nd, nt, nbins, binsize, shift, lo, hi,
                    int(np.float32(t2).view(np.uint32)),
                    thr0, thr1)
-            key += (shared_key(data, self), shared_key(tmpl, self))
-            storage_key = ("hier_cascade", n, band0, band1, nd, nt, nbins, *key[-2:])
+            key += (shared_key(data, self), shared_key(tmpl, self), slot)
+            storage_key = ("hier_cascade", n, band0, band1, nd, nt, nbins, *key[-3:])
             upload_data, upload_tmpl, dsig, tsig = self._input_uploads(
                 storage_key, data, tmpl, upload_data, upload_tmpl)
             batch = self._hier_cascade.get(key)
@@ -708,8 +708,8 @@ class Context(InputUploads):
         key = ("hier", n, band, nd, nt, nbins, binsize, shift, lo, hi,
                int(np.float32(t2).view(np.uint32)),
                float(raw_thr))
-        key += (shared_key(data, self), shared_key(tmpl, self))
-        storage_key = ("hier", n, band, nd, nt, nbins, *key[-2:])
+        key += (shared_key(data, self), shared_key(tmpl, self), slot)
+        storage_key = ("hier", n, band, nd, nt, nbins, *key[-3:])
         upload_data, upload_tmpl, dsig, tsig = self._input_uploads(
             storage_key, data, tmpl, upload_data, upload_tmpl)
         batch = self._hier.get(key)
@@ -1460,8 +1460,8 @@ class Context(InputUploads):
         # one, which would be wrong rather than slow.
         key = (n, nd, nt, nbins, binsize, shift, lo, hi,
                int(np.float32(t2).view(np.uint32)))
-        key += (shared_key(data, self), shared_key(tmpl, self))
-        storage_key = ("flat", n, nd, nt, nbins, *key[-2:])
+        key += (shared_key(data, self), shared_key(tmpl, self), slot)
+        storage_key = ("flat", n, nd, nt, nbins, *key[-3:])
         upload_data, upload_tmpl, dsig, tsig = self._input_uploads(
             storage_key, data, tmpl, upload_data, upload_tmpl)
         batch = self._batches.get(key)
@@ -1530,8 +1530,8 @@ class Context(InputUploads):
         shift = binsize.bit_length() - 1 if binsize & (binsize - 1) == 0 else -1
         t2 = np.float32(float(threshold) ** 2 if threshold > 0 else 0).view(np.uint32)
         key = ("grouped", n, nd, nt, binsize, int(t2), groups,
-               shared_key(data, self), shared_key(tmpl, self))
-        if key[-2] is None:
+               shared_key(data, self), shared_key(tmpl, self), slot)
+        if key[-3] is None:
             raise ValueError("grouped spectra must belong to this GPU context")
         # 64 indices occupy 256 bytes, meeting Vulkan storage-offset alignment.
         offsets, size = [], 0
