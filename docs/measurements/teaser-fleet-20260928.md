@@ -161,17 +161,43 @@ but was never part of the hardware comparison, which is an odd gap given it
 is the oldest and most register-starved x86 target in the fleet and the one
 the coarse-kernel work is weighted towards. It is included from this page on.
 
-It was measured at load about 40 of 64 cores, and three repeated CPU runs
-show which of its rows survive that:
+It was measured under real contention -- the report records
+`load_before [41.8, 40.5, 38.6]` rising to `load_after [44.2, 40.8, 38.8]` on
+64 cores, where every clean host in this table recorded 2.6 or less. Three
+repeated CPU runs show which of its rows survive that:
 
-    FFTW  1.3%    Peak only  2.5%    Hier. 1e-4  9.3%
-    Full output  20.7%        Hier. 1e-2  48.1%    Hier. 1e-3  64.1%
+    mode           run 1    run 2    run 3 (published)   range
+    FFTW          179.25   176.89              178.90     1.3%
+    Peak only     131.14   134.40              132.75     2.5%
+    Full output   251.28   253.69              303.35    20.7%
+    Hier. 1e-3     43.79    41.74               68.50    64.1%
+                                        Hier. 1e-2 48.1%, Hier. 1e-4 9.3%
 
 So its **FFTW and peak-only rows are trustworthy** and its **full-output and
-hierarchical rows are indicative only**. Note that the whiskers on the chart
-show within-run block percentiles and therefore *understate* the uncertainty
-on those rows: the between-run variation is much larger than the
-within-run spread. A quiet measurement of this host is still owed.
+hierarchical rows are indicative only**; the published run happens to be the
+high end of the three for both. The whiskers on the chart show within-run
+block percentiles and therefore *understate* the uncertainty on those rows,
+because the between-run variation is far larger than the within-run spread.
+
+**Its SNR sweep is visibly non-monotone**, and that is worth explaining
+rather than leaving for a reader to trip over. Cost should fall as the
+threshold rises, since a higher threshold admits a higher coarse gate and
+fewer pairs survive to refinement. Haswell reads 55.01, 68.50, 66.26, 13.52,
+18.02 ms across SNR 5.0 to 6.5 -- up where it should go down, in two places.
+All six other hosts are strictly monotone.
+
+It is not a selection or modelling fault: the gate chooses the **identical
+configuration** on Haswell as on gravity-dev1 at every threshold -- band
+1024/1024/1024/512/512, eight taps throughout, and refinement fractions
+10.83%, 1.70%, 0.54%, 1.94%, 0.29%. Those fractions are properties of the
+data and the gate, not of the host, and they are what determine how much work
+there is to do. Identical work with non-monotone timings on the one contended
+host is measurement noise. (The large step between SNR 5.75 and 6.0 is
+structural and appears on every host: that is where the selected band drops
+from 1024 to 512.)
+
+A quiet measurement of this host is still owed, and it is what would make
+these rows quotable.
 
 **‡ sugwg-login2 is a virtualized guest.** Its FFTW baseline moved 2.3% here,
 which is within tolerance, but it has moved as much as 32% across longer
