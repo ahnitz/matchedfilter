@@ -766,7 +766,8 @@ class MatchedFilter:
         policy = self._series_policy(operation, band, nt)
         if policy:
             batch = min(batch, policy['series_group'])
-        pipelined = hasattr(self._gpu, "_get_fence")
+        single = len(layout.groups) == 1 and nblk <= batch
+        pipelined = hasattr(self._gpu, "_get_fence") and getattr(self._gpu, "cache_limit_bytes", 10**9) > 1024 * 1024 and not single
         K = 4 if pipelined else 1
         source_shared = shared_buffer(ser, self._gpu) is not None
         workspace = getattr(self, "_series_workspace", None)
