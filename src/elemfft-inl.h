@@ -156,10 +156,12 @@ static void efft(int M,vf*restrict X,vf*restrict Xi,vf*restrict S,vf*restrict Si
   int M1,M2; efactor(M,&M1,&M2);
   if(M2==1){ codelet(M,X,Xi,S,Si,1); return; }
   const int st=ESTRIDE(M1);
-  for(int e1=0;e1<M1;e1++) codelet(M2,X+e1,Xi+e1,S+e1,Si+e1,st);
-  for(int k2p=0;k2p<M2;k2p++)
-    codelet_tw(M1,X+st*k2p,Xi+st*k2p,S+st*k2p,Si+st*k2p,1,
-               itwr+(size_t)k2p*M1, itwi+(size_t)k2p*M1);
+  vf *x1=X, *xi1=Xi, *s1=S, *si1=Si;
+  for(int e1=0;e1<M1;e1++, x1++, xi1++, s1++, si1++) codelet(M2,x1,xi1,s1,si1,st);
+  vf *x2=X, *xi2=Xi, *s2=S, *si2=Si;
+  const float *tw_r=itwr, *tw_i=itwi;
+  for(int k2p=0;k2p<M2;k2p++, x2+=st, xi2+=st, s2+=st, si2+=st, tw_r+=M1, tw_i+=M1)
+    codelet_tw(M1,x2,xi2,s2,si2,1,tw_r,tw_i);
 }
 
 }  // namespace HWY_NAMESPACE

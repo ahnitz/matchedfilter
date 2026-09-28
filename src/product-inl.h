@@ -51,11 +51,14 @@ static void AP_PROD_FN(efft_prod)(int M,const float*restrict dr,const float*rest
   const int st=ESTRIDE(M1);
   /* element (e2,e1) of the group is at (e2*M1 + e1)*AP_W, so at fixed e1 the
      inner codelet walks e2 with stride M1*AP_W */
-  for(int e1=0;e1<M1;e1++)
-    AP_PROD_FN(codelet_prod)(M2,dr+(size_t)e1*AP_PROD_DATA_WIDTH,di+(size_t)e1*AP_PROD_DATA_WIDTH,
-                 tr+(size_t)e1*AP_W,ti+(size_t)e1*AP_W,
-                 X+e1,Xi+e1,S+e1,Si+e1,st,(long)M1*AP_W);
-  for(int k2p=0;k2p<M2;k2p++)
-    codelet_tw(M1,X+st*k2p,Xi+st*k2p,S+st*k2p,Si+st*k2p,1,
-               itwr+(size_t)k2p*M1, itwi+(size_t)k2p*M1);
+  const float *dr_p=dr, *di_p=di, *tr_p=tr, *ti_p=ti;
+  vf *x1=X, *xi1=Xi, *s1=S, *si1=Si;
+  for(int e1=0;e1<M1;e1++, dr_p+=AP_PROD_DATA_WIDTH, di_p+=AP_PROD_DATA_WIDTH,
+                           tr_p+=AP_W, ti_p+=AP_W,
+                           x1++, xi1++, s1++, si1++)
+    AP_PROD_FN(codelet_prod)(M2,dr_p,di_p,tr_p,ti_p,x1,xi1,s1,si1,st,(long)M1*AP_W);
+  vf *x2=X, *xi2=Xi, *s2=S, *si2=Si;
+  const float *tw_r=itwr, *tw_i=itwi;
+  for(int k2p=0;k2p<M2;k2p++, x2+=st, xi2+=st, s2+=st, si2+=st, tw_r+=M1, tw_i+=M1)
+    codelet_tw(M1,x2,xi2,s2,si2,1,tw_r,tw_i);
 }
