@@ -65,6 +65,7 @@ typedef decltype(hn::Gt(hn::Zero(AP_D), hn::Zero(AP_D))) vm;
 #define V_FNMSUB(a,b,c) hn::NegMulSub((a), (b), (c))       /* -a*b - c */
 
 #define VI_SET1(x)      hn::Set(AP_DI, (int32_t)(x))
+#define VI_LOADU(p)     hn::LoadU(AP_DI, (const int32_t *)(p))
 #define VI_STOREU(p, v) hn::StoreU((v), AP_DI, (int32_t *)(p))
 
 /* Sign flip by xor, as the callers expect: they build a sign mask and xor it
@@ -86,6 +87,13 @@ static HWY_ATTR HWY_INLINE vm ap_mask_from_bits(unsigned bits) {
   return hn::LoadMaskBits(AP_D, (const uint8_t *)&b);
 }
 #define V_MASK_FROM_BITS(u) ap_mask_from_bits((unsigned)(u))
+
+static HWY_ATTR HWY_INLINE unsigned ap_bits_from_mask(vm m) {
+  uint64_t b = 0;
+  hn::StoreMaskBits(AP_D, m, (uint8_t *)&b);
+  return (unsigned)b;
+}
+#define V_BITS_FROM_MASK(m) ap_bits_from_mask(m)
 
 static HWY_ATTR HWY_INLINE float v_reduce_max(vf v) {
   return hn::ReduceMax(AP_D, v);

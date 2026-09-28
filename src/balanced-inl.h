@@ -1007,16 +1007,7 @@ static HWY_NOINLINE MF_PEAK_SECTION void binmax_fused32(BP*p,float thr,ap_peak*o
   vf am = V_SET1(t2), arr = V_ZERO(), aii = V_ZERO();
   vi axx = VI_SET1(-1);
 
-  if (__builtin_expect(ws >= we, 0)) {
-    out->index = -1; out->re = 0.f; out->im = 0.f; out->magnitude = 0.f;
-    return;
-  }
-  unsigned qmask = 0;
-  if (ws < 256 && we > 0) qmask |= 1u;
-  if (ws < 512 && we > 256) qmask |= 2u;
-  if (ws < 768 && we > 512) qmask |= 4u;
-  if (ws < 1024 && we > 768) qmask |= 8u;
-  if (__builtin_expect(qmask == 0, 0)) {
+  if (__builtin_expect(ws >= we || ws >= 1024 || we <= 0, 0)) {
     out->index = -1; out->re = 0.f; out->im = 0.f; out->magnitude = 0.f;
     return;
   }
@@ -1032,13 +1023,7 @@ static HWY_NOINLINE MF_PEAK_SECTION void binmax_fused32(BP*p,float thr,ap_peak*o
     const int chi = hi > 31 ? 31 : hi;
     if (clo > chi) continue;
 
-    unsigned block_qmask = 0;
-    if (clo <= 7 && chi >= 0) block_qmask |= 1u;
-    if (clo <= 15 && chi >= 8) block_qmask |= 2u;
-    if (clo <= 23 && chi >= 16) block_qmask |= 4u;
-    if (clo <= 31 && chi >= 24) block_qmask |= 8u;
-    block_qmask &= qmask;
-    if (!block_qmask) continue;
+    const uint32_t rowmask = (chi - clo >= 31) ? ~0u : (((1u << (chi - clo + 1)) - 1u) << clo);
 
     const long k_clo = (long)clo * 32 + base;
     const long k_chi = (long)chi * 32 + base;
@@ -1062,8 +1047,7 @@ static HWY_NOINLINE MF_PEAK_SECTION void binmax_fused32(BP*p,float thr,ap_peak*o
 
     const float *ar=p->ire+(size_t)b*32*AP_W;
     const float *ai=p->iim+(size_t)b*32*AP_W;
-    fftsr32_unit_sink(ar,ai,p->sR,p->sI,1,block_qmask,[&](int k1,vf rr,vf ii){
-      if ((unsigned)(k1 - clo) > (unsigned)(chi - clo)) return;
+    fftsr32_unit_sink(ar,ai,p->sR,p->sI,1,rowmask,[&](int k1,vf rr,vf ii){
       vf m = V_FMADD(rr,rr,V_MUL(ii,ii));
       if(__builtin_expect(k1 == clo && need_mask_clo, 0)){
         m = V_SEL(vmask_clo, V_SET1(-1.f), m);
@@ -1073,11 +1057,11 @@ static HWY_NOINLINE MF_PEAK_SECTION void binmax_fused32(BP*p,float thr,ap_peak*o
       }
       vm g = V_CMP_GT(m, am);
       if(__builtin_expect(V_MASK_ANY(g),0)){
-        const long k=(long)k1*32+base;
+        const int k = k1 * 32 + base;
         am = V_SEL(g, am, m);
         arr = V_SEL(g, arr, rr);
         aii = V_SEL(g, aii, ii);
-        axx = VI_SEL(g, axx, VI_SET1((int)k));
+        axx = VI_SEL(g, axx, VI_SET1(k));
       }
     });
   }
@@ -1443,20 +1427,19 @@ static HWY_NOINLINE MF_PEAK_SECTION int binmax_prod_threshold(void *vp,const flo
                     const float*tr,const float*ti,size_t binsize,
                     float thr,ap_peak*out,int conj,size_t ws,size_t we){
   BP *p=(BP*)vp;
+  if constexpr (AP_W==8) {
+    if(__builtin_expect(thr>0.f && (we-ws)<=binsize && p->fuse==2 && p->ilay && p->bblk==1 && p->gmajor
+       && !(p->ser && !p->nostore), 1)) {
+      stageA_prod_32(p,dr,di,tr,ti);
+      binmax_fused32(p,thr,out,conj,ws,we);
+      return 0;
+    }
+  }
   if(p->small) return -1;        /* use binmax_prod_batch */
   size_t nb=(we-ws+binsize-1)/binsize;
   if(bins_reserve(p,nb)) return -1;
   if(p->gmajor) stageA_prod_gm(p,dr,di,tr,ti);
   else          stageA_prod(p,dr,di,tr,ti);
-  if constexpr (AP_W==8) {
-    /* Keep this dispatch outside the generic scan so its code generation
-       and unthresholded behavior remain independent of the fused consumer. */
-    if(thr>0.f && nb==1 && p->fuse==2 && p->ilay && p->bblk==1
-       && !(p->ser && !p->nostore)) {
-      binmax_fused32(p,thr,out,conj,ws,we);
-      return 0;
-    }
-  }
   binmax_core(p,binsize,thr,out,conj,ws,we);
   return 0;
 }
