@@ -808,10 +808,21 @@ class Context(InputUploads):
                                       ctypes.byref(pc))
                 vk.vkCmdDispatch(cmd, (pairs + tile - 1) // tile, 1, 1)
             else:
-                # One bin over the whole coarse span: the reported peak IS
-                # the maximum, which is what the gate needs.
-                pc = (ctypes.c_uint32 * 7)(nt, 0, band, band,
-                                           band.bit_length() - 1, 1, 0)
+                # One bin over the coarse window span: the reported peak IS
+                # the maximum, which is what the gate needs. Widen by one coarse
+                # sample so rounding the caller's window remains conservative.
+                R_coarse = n // band
+                cstart = lo // R_coarse
+                cend = (hi + R_coarse - 1) // R_coarse
+                if cend > band:
+                    cend = band
+                if cstart > 0:
+                    cstart -= 1
+                cend = max(cstart + 1, cend)
+                cspan = max(1, cend - cstart)
+                shift_c = (cspan.bit_length() - 1) if cspan & (cspan - 1) == 0 else -1
+                pc = (ctypes.c_uint32 * 7)(nt, cstart, cend, cspan,
+                                           shift_c & 0xFFFFFFFF, 1, 0)
                 vk.vkCmdPushConstants(cmd, clayout, _STAGE_COMPUTE, 0,
                                       _PUSH_BYTES, ctypes.byref(pc))
                 # PPG pairs per workgroup and TILE_T templates per pair,

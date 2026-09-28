@@ -1013,15 +1013,26 @@ class Context(InputUploads):
         def bits(x):
             return int(np.float32(x).view(np.uint32))
 
-        # Coarse even: ONE bin over the whole coarse span, so the reported
-        # peak IS the maximum -- which is all the gate needs.
+        # Coarse even: ONE bin over the coarse window span, so the reported
+        # peak IS the maximum -- which is all the gate needs. Widen by one coarse
+        # sample so rounding the caller's window remains conservative.
         if shared_buffer(data, self) is not None:
             dispatch(self.pipeline(4096, "packCoarse"),
                      (n, band, nd*band, 0), ("data", "cdata"), 4096,
                      groups=(nd*band + 255)//256, tg=256)
 
+        R_coarse = n // band
+        cstart = lo // R_coarse
+        cend = (hi + R_coarse - 1) // R_coarse
+        if cend > band:
+            cend = band
+        if cstart > 0:
+            cstart -= 1
+        cend = max(cstart + 1, cend)
+        cspan = max(1, cend - cstart)
+        shift_c = (cspan.bit_length() - 1) if cspan & (cspan - 1) == 0 else -1
         dispatch(coarse,
-                 (nt, 0, band, band, band.bit_length() - 1, 1, 0),
+                 (nt, cstart, cend, cspan, shift_c & 0xFFFFFFFF, 1, 0),
                  ("cdata", "ct0", "cidx", "cval"), band)
 
         # Compaction: one THREAD per pair, gathering the survivors and
