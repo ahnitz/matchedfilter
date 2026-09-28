@@ -8,9 +8,12 @@ Alpha releases may change the API. Pin a version for reproducible work.
   been in the PyCBC fleet benchmark from the start but never the hardware
   comparison, which is an odd gap for the oldest and most register-starved
   x86 target in the fleet. It exposes no GPU, and as a shared cluster node at
-  load ~40/64 only its FFTW (1.3%) and peak-only (2.5%) rows reproduce across
-  three runs; full output (20.7%) and hierarchical (9-64%) are indicative
-  only.
+  load 41.8-44.2 of 64 cores only its FFTW (1.3%) and peak-only (2.5%) rows
+  reproduce across three runs; full output (20.7%) and hierarchical (9-64%)
+  are indicative only. Its SNR sweep is non-monotone where all six other
+  hosts are monotone; the gate selects the identical band, taps and
+  refinement fraction as gravity-dev1 at every threshold, so that is
+  measurement noise on a contended host, not a selection fault.
 - Re-measure both fleet benchmarks at `main` `eecb43c` (twenty-five
   optimization passes). PyCBC complete search against the previous head
   `ce9c828`: dev3 +7.4%, dev1 +2.3%, dev4/sugwg-login2/Haswell flat. The
