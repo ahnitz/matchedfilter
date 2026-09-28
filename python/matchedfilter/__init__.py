@@ -1660,15 +1660,18 @@ class HierarchicalFilter(MatchedFilter):
         ck = (band, f, H.ctypes.data, H.shape)
         if getattr(self, "_ckey", None) != ck or self._tdirty:
             if f is None:
-                power = np.abs(H.astype(np.complex128)) ** 2
+                hr = H.real.astype(np.float64)
+                hi = H.imag.astype(np.float64)
+                power = hr * hr + hi * hi
                 total = power.sum(axis=1)
                 fraction = np.divide(power[:, :band].sum(axis=1), total,
                                      out=np.zeros_like(total), where=total > 0)
                 sc = np.divide(1.0, np.sqrt(fraction),
-                               out=np.zeros_like(fraction), where=fraction > 0)[:, None]
+                               out=np.zeros_like(fraction), where=fraction > 0)[:, None].astype(np.float32)
+                ct0 = H[:, :band] * sc
             else:
-                sc = 1.0 / np.sqrt(f) if f > 0 else 0.0
-            ct0 = (H[:, :band] * sc).astype(np.complex64)
+                sc = np.float32(1.0 / np.sqrt(f)) if f > 0 else np.float32(0.0)
+                ct0 = H[:, :band] * sc
             self._ct = ct0
             self._ckey = ck
         ct0 = self._ct
