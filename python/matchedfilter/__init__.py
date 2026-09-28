@@ -1606,8 +1606,20 @@ def choose_config(power, n, snr, fd, tuning=None, pairs=None, device=None, casca
     fine_ratio = (n * math.log2(n)) / (b1 * math.log2(b1))
     b0_pool = [b for b in [128, 256, 512, 1024, 2048] if min_b0 <= b < b_single and (b & (b - 1)) == 0]
 
+    is_gpu = False
+    if device is not None:
+        if getattr(device, "kind", None) == "gpu" or (isinstance(device, str) and device.lower().startswith("gpu")):
+            is_gpu = True
+    if tuning is not None:
+        paths = " ".join(tuning.get("paths", []))
+        if "vulkan" in paths or "metal" in paths or "gpu" in paths:
+            is_gpu = True
+
+    # Cascade introduces multi-stage dispatch, synchronization, and compaction overhead.
+    # Require a physical savings margin to avoid churning on marginal boundaries.
+    margin = 0.85 if is_gpu else 0.95
     best_cascade = None
-    min_cascade_cost = best_cost
+    min_cascade_cost = margin * best_cost
 
     for b0 in b0_pool:
         coarse_ratio = (b0 * math.log2(b0)) / (b1 * math.log2(b1))
