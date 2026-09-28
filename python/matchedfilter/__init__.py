@@ -167,11 +167,14 @@ def _format_result(idx, val, *, raw=False, counts=None, out=None, order=None):
             result = ri, rv
     else:
         if idx is not None:
-            result = np.empty(idx.shape, PEAK_DTYPE) if out is None else out
             if order is None:
-                result["index"], result["value"] = idx, val
+                result = np.empty(idx.shape, PEAK_DTYPE) if out is None else out
+                _core.pack_peaks(result, idx, val)
             else:
-                result["index"][order], result["value"][order] = idx, val
+                result = np.empty(idx.shape, PEAK_DTYPE) if out is None else out
+                tmp = np.empty(idx.shape, PEAK_DTYPE)
+                _core.pack_peaks(tmp, idx, val)
+                result[order] = tmp
         else:
             if order is None:
                 result = out
@@ -788,7 +791,7 @@ class MatchedFilter:
                     if raw:
                         idx[begin:end], val[begin:end] = gi, gv
                     else:
-                        peaks["index"][begin:end], peaks["value"][begin:end] = gi, gv
+                        _core.pack_peaks(peaks[begin:end], gi, gv)
                 finally:
                     self._gpu.cancel_forward()
             if raw:
@@ -810,7 +813,7 @@ class MatchedFilter:
                 if raw:
                     idx[begin:end], val[begin:end] = gi, gv
                 else:
-                    peaks["index"][begin:end], peaks["value"][begin:end] = gi, gv
+                    _core.pack_peaks(peaks[begin:end], gi, gv)
         if raw:
             return _format_result(idx, val, raw=True, order=layout.order)
         return _format_result(None, None, raw=False, order=layout.order, out=peaks)

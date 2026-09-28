@@ -588,10 +588,49 @@ static PyObject *M_set_target(PyObject *self,PyObject *args){
   }
   Py_RETURN_NONE;
 }
+static PyObject *M_pack_peaks(PyObject *self,PyObject *args){
+  (void)self;
+  Py_buffer bpk,bidx,bval;
+  if(!PyArg_ParseTuple(args,"w*y*y*",&bpk,&bidx,&bval)) return NULL;
+  Py_ssize_t count=bpk.len/(Py_ssize_t)sizeof(ap_structured_peak);
+  if(count==0){
+    PyBuffer_Release(&bpk);PyBuffer_Release(&bidx);PyBuffer_Release(&bval);
+    Py_RETURN_NONE;
+  }
+  if(bpk.len!=count*(Py_ssize_t)sizeof(ap_structured_peak) || bval.len<count*8){
+    PyBuffer_Release(&bpk);PyBuffer_Release(&bidx);PyBuffer_Release(&bval);
+    PyErr_SetString(PyExc_ValueError,"mismatched buffer sizes in pack_peaks");
+    return NULL;
+  }
+  ap_structured_peak * restrict dst=(ap_structured_peak*)bpk.buf;
+  const float * restrict vl=(const float*)bval.buf;
+  if(bidx.len>=count*4 && bidx.len<count*8){
+    const int32_t * restrict ix32=(const int32_t*)bidx.buf;
+    for(Py_ssize_t i=0;i<count;i++){
+      dst[i].index=(int64_t)ix32[i];
+      dst[i].re=vl[2*i];
+      dst[i].im=vl[2*i+1];
+    }
+  } else if(bidx.len>=count*8){
+    const int64_t * restrict ix64=(const int64_t*)bidx.buf;
+    for(Py_ssize_t i=0;i<count;i++){
+      dst[i].index=ix64[i];
+      dst[i].re=vl[2*i];
+      dst[i].im=vl[2*i+1];
+    }
+  } else {
+    PyBuffer_Release(&bpk);PyBuffer_Release(&bidx);PyBuffer_Release(&bval);
+    PyErr_SetString(PyExc_ValueError,"idx buffer too small in pack_peaks");
+    return NULL;
+  }
+  PyBuffer_Release(&bpk);PyBuffer_Release(&bidx);PyBuffer_Release(&bval);
+  Py_RETURN_NONE;
+}
 static PyMethodDef methods[]={
   {"backend",M_backend,METH_NOARGS,"backend() -> name of the selected kernel"},
   {"targets",M_targets,METH_NOARGS,"targets() -> names this build can run here"},
   {"set_target",M_set_target,METH_VARARGS,"set_target(name|None) -> narrow the choice"},
+  {"pack_peaks",M_pack_peaks,METH_VARARGS,"pack_peaks(peaks, idx, val) -> copy into structured peaks"},
   {NULL,NULL,0,NULL}};
 static struct PyModuleDef mod={PyModuleDef_HEAD_INIT,"matchedfilter._core",NULL,-1,methods};
 PyMODINIT_FUNC PyInit__core(void){
