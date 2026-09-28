@@ -382,6 +382,27 @@ static int run_pairs(ap_mf_plan *p, int d0, int nd, int t0, int nt,
   const ap_prod_kernel prod=ap_plan_prod_kernel(p->fft,threshold);
   const int tile = p->tile;
   int total=0;
+
+  if(p->gmajor && prod.run && !tsel && nb == 1){
+    for(int dt=0;dt<nd;dt+=tile) for(int tt=0;tt<nsel;tt+=tile){
+      const int dend=(nd-dt<tile)?nd:dt+tile, tend=(nsel-tt<tile)?nsel:tt+tile;
+      for(int d=dt;d<dend;d++){
+        const float *Dr=p->dre+(size_t)(d0+d)*n, *Di=p->dim+(size_t)(d0+d)*n;
+        ap_peak *pk_row = peaks + (size_t)d * nt + tt;
+        int *cnt_row = counts ? (counts + (size_t)d * nt + tt) : NULL;
+        for(int j=tt;j<tend;j++, pk_row++){
+          const float *Hr=p->tre+(size_t)(t0+j)*n, *Hi=p->tim+(size_t)(t0+j)*n;
+          int r = prod.run(prod.context,Dr,Di,Hr,Hi,binsize,threshold,pk_row,1,start,end);
+          if(__builtin_expect(r<0, 0)) return -1;
+          int c = (pk_row->index >= 0);
+          if(cnt_row) *cnt_row++ = c;
+          total += c;
+        }
+      }
+    }
+    return total;
+  }
+
   for(int dt=0;dt<nd;dt+=tile) for(int tt=0;tt<nsel;tt+=tile){
    const int dend=(nd-dt<tile)?nd:dt+tile, tend=(nsel-tt<tile)?nsel:tt+tile;
    for(int d=dt;d<dend;d++){
