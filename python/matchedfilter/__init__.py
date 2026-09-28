@@ -204,13 +204,14 @@ def _automatic_series_layout(length, valid):
         raise ValueError('series ends before the first valid output sample')
     starts = np.arange(0, length - lo, hi - lo, dtype=np.uintp)
     return starts, np.full(starts.size, lo, np.uintp), np.minimum(
-        hi, length - starts).astype(np.uintp)
+        hi, length - starts)
 
 
 def _absolute_peak_indices(result, starts, raw):
     """Automatic series calls report positions in the supplied series."""
     index = result[0] if raw else result['index']
-    np.add(index, starts.astype(np.int64)[:, None, None], out=index,
+    st = starts.view(np.int64) if starts.dtype != np.int64 else starts
+    np.add(index, st[:, None, None], out=index,
            where=index >= 0)
     return result
 
