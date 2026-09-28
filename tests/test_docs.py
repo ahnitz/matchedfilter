@@ -21,9 +21,13 @@ def test_hardware_comparison_has_independent_device_choices(tmp_path):
     from teaser_web import fleet_comparison
     records = []
     for device in ('cpu', 'gpu'):
+        rows = [dict(kind='full', ms=1, fd=None, snr=None)]
+        # Hierarchical rows exist per (budget, SNR); the page must offer a
+        # threshold control built from the SNRs actually measured.
+        rows += [dict(kind='hier', ms=2, fd=1e-3, snr=snr) for snr in (5.0, 5.5, 6.5)]
         records.append(dict(host='private-host', cpu='13th Gen Intel(R) Core(TM) i5-13500H',
                             gpu='Intel(R) Iris(R) Xe Graphics (RPL-P)', device=device,
-                            rows=[dict(kind='full', ms=1, fd=None)], errors=[]))
+                            rows=rows, errors=[]))
     path = tmp_path/'docs/measurements/teaser-fleet-20260927.json'
     path.parent.mkdir(parents=True)
     path.write_text(json.dumps(dict(reports=records)))
@@ -33,6 +37,10 @@ def test_hardware_comparison_has_independent_device_choices(tmp_path):
                        ('private-host:gpu', 'Iris Xe Graphics (GPU)')]
     assert 'id="fleet-scale"' in page and 'id="fleet-shared"' in page
     assert 'value="linear"' in page and 'value="log"' in page
+    # Only measured thresholds are offered, and 5.5 is preselected.
+    snr = re.findall(r'name="fleet-snr" value="([^"]+)"( checked)?', page)
+    assert [v for v, _ in snr] == ['5', '5.5', '6.5'], snr
+    assert [v for v, c in snr if c] == ['5.5'], snr
     assert any(p[0] == 'comparison.html' for p in build_report.PAGES)
 
     # Embedded metadata must not terminate its script element.

@@ -4,13 +4,25 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ## Unreleased
 
+- Draw the teaser and fleet banks from the captured PyCBC reference profile
+  (`tests/data/reference_profile_pycbc.npy`) instead of the synthetic
+  inspiral curve. The synthetic curve is narrower than a real reference
+  (`B_eff` 180.8 against 232.7 at band 512), and the hierarchy's cost follows
+  from that width, so it flattered the gate. Hierarchical timings are slower
+  and are not comparable to earlier pages.
+- Record hierarchical rows at SNR thresholds 5.0, 5.5, 5.75, 6.0 and 6.5, and
+  let the hardware comparison page select among them. The threshold spans a
+  factor of 2.5-4 at `fd=1e-3` and can change the band the gate selects.
 - Recalculate both fleet measurements at `main` `ce9c828`. The six-machine
   hardware comparison moves to
   [teaser-fleet-20260927](docs/measurements/teaser-fleet-20260927.md); the
   September 26 page is kept for history. Fixed FFTW/rocFFT references
-  reproduce within 0.8% on the four uncontended machines, and the change is
-  concentrated in hierarchical mode at tight budgets: `fd=1e-4` CPU improves
-  15-38% on those hosts. Full-output and peak-only are flat within noise.
+  reproduce within 0.8% on the four uncontended machines, and full-output and
+  peak-only are flat within noise. A like-for-like run on the synthetic
+  profile, before the reference change above, put the revision's gain in
+  hierarchical mode at tight budgets (`fd=1e-4` CPU 15-38%); the published
+  page now carries captured-profile numbers, which are slower in absolute
+  terms and not comparable across the two profiles.
 - Record the PyCBC complete-search fleet benchmark for `ce9c828` in
   [pycbc-main-ce9c828-fleet-20260927](docs/measurements/pycbc-main-ce9c828-fleet-20260927/README.md).
   Against the previously documented head `c38f24f`: Haswell +5.3%, dev4 +4.1%,
