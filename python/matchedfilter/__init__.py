@@ -1547,18 +1547,23 @@ class CascadeConfig(tuple):
 
 
 def _min_band_for(device=None, tuning=None):
-    """Determine minimum viable coarse band based on SIMD register width."""
-    if device is not None and getattr(device, "kind", None) == "gpu":
-        return 128
+    """Determine minimum viable coarse band based on microarchitecture / SIMD width."""
+    if device is not None:
+        if getattr(device, "kind", None) == "gpu":
+            return 128
+        if isinstance(device, str) and device.lower().startswith("gpu"):
+            return 128
+    if tuning is not None:
+        paths = " ".join(tuning.get("paths", []))
+        meta = tuning.get("meta", {})
+        cpu = meta.get("cpu", "")
+        if "vulkan" in paths or "metal" in paths:
+            return 128
+        if "model85" in paths or "Xeon(R) Platinum" in cpu or "Xeon(R) Gold" in cpu:
+            return 256
     b = (backend() or "").upper()
     if "AVX3" in b or "AVX512" in b:
         return 256
-    if tuning is not None:
-        meta = tuning.get("meta", {})
-        cpu = meta.get("cpu", "")
-        paths = " ".join(tuning.get("paths", []))
-        if "model85" in paths or "Xeon(R) Platinum" in cpu or "Xeon(R) Gold" in cpu:
-            return 256
     return 128
 
 
@@ -1780,6 +1785,7 @@ class HierarchicalFilter(MatchedFilter):
             cfg = choose_config(self._pending_ref, self.n, self.snr, self.fd,
                                 tuning=tuning,
                                 pairs=self.ndata * self.ntemplates,
+                                device=self.device,
                                 cascade=self.cascade)
         if cfg is None:
             # Autotuning is a promise, so it refuses rather than guesses.
@@ -1907,6 +1913,7 @@ class HierarchicalFilter(MatchedFilter):
             cfg = choose_config(self._pending_ref, self.n, self.snr, self.fd,
                                 tuning=_load_tuning_for(self.device),
                                 pairs=self.ndata * self.ntemplates,
+                                device=self.device,
                                 cascade=self.cascade)
         if cfg is None:
             raise ValueError(_uncovered_message(self.n, self.snr, self.fd))
