@@ -128,8 +128,37 @@ static PyObject *MF_set(MFObject *self,PyObject *args,int is_data){
   if(r<0) return PyErr_Format(PyExc_IndexError,"index %d out of range",i);
   Py_RETURN_NONE;
 }
+static PyObject *MF_set_batch(MFObject *self,PyObject *args,int is_data){
+  int i0; Py_buffer b;
+  if(!PyArg_ParseTuple(args,"iy*",&i0,&b)) return NULL;
+  Py_ssize_t rowbytes = self->n*2*(Py_ssize_t)sizeof(float);
+  if(rowbytes <= 0 || b.len < rowbytes || b.len % rowbytes != 0){
+    PyBuffer_Release(&b);
+    return PyErr_Format(PyExc_ValueError,"buffer size must be a positive multiple of row size (%zd bytes)",rowbytes);
+  }
+  int count = (int)(b.len / rowbytes);
+  int limit = is_data ? self->nd : self->nt;
+  if(i0 < 0 || i0 + count > limit){
+    PyBuffer_Release(&b);
+    return PyErr_Format(PyExc_IndexError,"range [%d, %d) exceeds limit %d",i0,i0+count,limit);
+  }
+  const float *ptr = (const float*)b.buf;
+  int r = 0;
+  Py_BEGIN_ALLOW_THREADS
+  for(int k=0;k<count;k++){
+    r = is_data ? ap_mf_set_data(self->p,i0+k,ptr+(size_t)k*self->n*2)
+                : ap_mf_set_template(self->p,i0+k,ptr+(size_t)k*self->n*2);
+    if(r < 0) break;
+  }
+  Py_END_ALLOW_THREADS
+  PyBuffer_Release(&b);
+  if(r<0) return PyErr_Format(PyExc_RuntimeError,"failed setting spectrum at index %d",r);
+  Py_RETURN_NONE;
+}
 static PyObject *MF_set_data(MFObject *s,PyObject *a){ return MF_set(s,a,1); }
 static PyObject *MF_set_template(MFObject *s,PyObject *a){ return MF_set(s,a,0); }
+static PyObject *MF_set_data_batch(MFObject *s,PyObject *a){ return MF_set_batch(s,a,1); }
+static PyObject *MF_set_template_batch(MFObject *s,PyObject *a){ return MF_set_batch(s,a,0); }
 
 /* run(d0,nd,t0,nt,binsize,threshold,start,end, idx,val,mag,counts [, peaks]) -> total */
 static PyObject *MF_run(MFObject *self,PyObject *args){
@@ -319,6 +348,8 @@ static PyObject *MF_nbins(MFObject *self,PyObject *args){
 static PyMethodDef MF_methods[]={
   {"set_data",(PyCFunction)MF_set_data,METH_VARARGS,"set_data(i, buffer)"},
   {"set_template",(PyCFunction)MF_set_template,METH_VARARGS,"set_template(i, buffer)"},
+  {"set_data_batch",(PyCFunction)MF_set_data_batch,METH_VARARGS,"set_data_batch(i0, buffer)"},
+  {"set_template_batch",(PyCFunction)MF_set_template_batch,METH_VARARGS,"set_template_batch(i0, buffer)"},
   {"run",(PyCFunction)MF_run,METH_VARARGS,"run(...) -> total crossings"},
   {"correlate",(PyCFunction)MF_correlate,METH_VARARGS,"correlate(...) -> full correlation"},
   {"correlate_series",(PyCFunction)MF_correlate_series,METH_VARARGS,"correlate_series(...) -> full correlation"},
@@ -398,8 +429,37 @@ static PyObject *HMF_set_reference(HMFObject *self,PyObject *args){
   if(r<0){ PyErr_SetString(PyExc_ValueError,"matchedfilter: bad reference"); return NULL; }
   Py_RETURN_NONE;
 }
+static PyObject *HMF_set_batch(HMFObject *self,PyObject *args,int is_data){
+  int i0; Py_buffer b;
+  if(!PyArg_ParseTuple(args,"iy*",&i0,&b)) return NULL;
+  Py_ssize_t rowbytes = self->n*2*(Py_ssize_t)sizeof(float);
+  if(rowbytes <= 0 || b.len < rowbytes || b.len % rowbytes != 0){
+    PyBuffer_Release(&b);
+    return PyErr_Format(PyExc_ValueError,"buffer size must be a positive multiple of row size (%zd bytes)",rowbytes);
+  }
+  int count = (int)(b.len / rowbytes);
+  int limit = is_data ? self->nd : self->nt;
+  if(i0 < 0 || i0 + count > limit){
+    PyBuffer_Release(&b);
+    return PyErr_Format(PyExc_IndexError,"range [%d, %d) exceeds limit %d",i0,i0+count,limit);
+  }
+  const float *ptr = (const float*)b.buf;
+  int r = 0;
+  Py_BEGIN_ALLOW_THREADS
+  for(int k=0;k<count;k++){
+    r = is_data ? ap_hmf_set_data(self->p,i0+k,ptr+(size_t)k*self->n*2)
+                : ap_hmf_set_template(self->p,i0+k,ptr+(size_t)k*self->n*2);
+    if(r < 0) break;
+  }
+  Py_END_ALLOW_THREADS
+  PyBuffer_Release(&b);
+  if(r<0) return PyErr_Format(PyExc_RuntimeError,"failed setting spectrum at index %d",r);
+  Py_RETURN_NONE;
+}
 static PyObject *HMF_set_data(HMFObject *s,PyObject *a){ return HMF_set(s,a,1); }
 static PyObject *HMF_set_template(HMFObject *s,PyObject *a){ return HMF_set(s,a,0); }
+static PyObject *HMF_set_data_batch(HMFObject *s,PyObject *a){ return HMF_set_batch(s,a,1); }
+static PyObject *HMF_set_template_batch(HMFObject *s,PyObject *a){ return HMF_set_batch(s,a,0); }
 
 static PyObject *HMF_run(HMFObject *self,PyObject *args){
   int d0,nd,t0,nt; Py_ssize_t binsize,start,end; double thr;
@@ -543,6 +603,8 @@ static PyMethodDef HMF_methods[]={
   {"series_group",(PyCFunction)HMF_series_group,METH_NOARGS,"actual series block group"},
   {"set_data",(PyCFunction)HMF_set_data,METH_VARARGS,"set_data(i, buffer)"},
   {"set_template",(PyCFunction)HMF_set_template,METH_VARARGS,"set_template(i, buffer)"},
+  {"set_data_batch",(PyCFunction)HMF_set_data_batch,METH_VARARGS,"set_data_batch(i0, buffer)"},
+  {"set_template_batch",(PyCFunction)HMF_set_template_batch,METH_VARARGS,"set_template_batch(i0, buffer)"},
   {"set_reference",(PyCFunction)HMF_set_reference,METH_VARARGS,"set_reference(buffer|None)"},
   {"set_first_stage",(PyCFunction)HMF_set_first_stage,METH_VARARGS,"set_first_stage(snr)"},
   {"set_threshold",(PyCFunction)HMF_set_threshold,METH_VARARGS,"set_threshold(t)"},

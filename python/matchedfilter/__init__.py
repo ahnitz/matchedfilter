@@ -405,9 +405,12 @@ class MatchedFilter:
             raise ValueError(f"expected shape ({self.ndata}, {self.n}), got {a.shape}")
         self._held[-1] = a                      # see the note above
         plan = self._ensure()
-        set_data_fn = plan.set_data
-        for i in range(self.ndata):
-            set_data_fn(i, a[i])
+        if hasattr(plan, 'set_data_batch'):
+            plan.set_data_batch(0, a)
+        else:
+            set_data_fn = plan.set_data
+            for i in range(self.ndata):
+                set_data_fn(i, a[i])
         self._held = {-1: a}
         self._dataset = True
         self._mark_ready("data", None)
@@ -430,9 +433,12 @@ class MatchedFilter:
         if a.ndim != 2 or a.shape != (self.ntemplates, self.n):
             raise ValueError(f"expected shape ({self.ntemplates}, {self.n}), got {a.shape}")
         plan = self._ensure()
-        set_tmpl_fn = plan.set_template
-        for i in range(self.ntemplates):
-            set_tmpl_fn(i, a[i])
+        if hasattr(plan, 'set_template_batch'):
+            plan.set_template_batch(0, a)
+        else:
+            set_tmpl_fn = plan.set_template
+            for i in range(self.ntemplates):
+                set_tmpl_fn(i, a[i])
         self._mark_ready("template", None)
 
 
