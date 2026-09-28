@@ -306,9 +306,13 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
         p->firebuf[nfire++]=t;   /* reconstructed together, after this loop */
       }else{
         unsigned long long f0 = p->prof ? ap_ticks() : 0;
-        for(size_t b=0;b<nb;b++){
-          peaks[row*nb+b].index=-1;
-          peaks[row*nb+b].re=peaks[row*nb+b].im=peaks[row*nb+b].magnitude=0.f;
+        if(nb==1){
+          peaks[row].index=-1;
+          peaks[row].re=peaks[row].im=peaks[row].magnitude=0.f;
+        }else{
+          const ap_peak empty_peak = {-1, 0.f, 0.f, 0.f};
+          ap_peak * restrict dst = peaks + row*nb;
+          for(size_t b=0;b<nb;b++) dst[b] = empty_peak;
         }
         if(counts) counts[row]=0;
         if(p->prof) p->c_fill += ap_ticks()-f0;
