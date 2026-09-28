@@ -453,10 +453,6 @@ int ap_mf_correlate(ap_mf_plan *p,int d0,int nd,int t0,int nt,float *out){
     return -1;
   if(p->pb){
     const size_t n=p->n; const int W=p->pb;
-    if(!p->corrbuf){
-      p->corrbuf=ap_alloc64(2*(size_t)W*n*sizeof(float));
-      if(!p->corrbuf) return -1;
-    }
     for(int d=0;d<nd;d++){
       const float *Dr=p->dre+(size_t)(d0+d)*n, *Di=p->dim+(size_t)(d0+d)*n;
       if(p->ebr){
@@ -488,8 +484,8 @@ int ap_mf_correlate(ap_mf_plan *p,int d0,int nd,int t0,int nt,float *out){
           }
           Tr=p->tsr; Ti=p->tsi;
         }
-        if(ap_corr_prod_batch(p->fft,Dr,Di,Tr,Ti,cnt,p->corrbuf)) return -1;
-        memcpy(out+2*((size_t)d*nt+tt)*n,p->corrbuf,2*(size_t)cnt*n*sizeof(float));
+        float *dst=out+2*((size_t)d*nt+tt)*n;
+        if(ap_corr_prod_batch(p->fft,Dr,Di,Tr,Ti,cnt,dst)) return -1;
       }
     }
     return 0;
