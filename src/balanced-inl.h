@@ -721,7 +721,19 @@ static void stageA_prod(BP*p,const float*dr,const float*di,
         const float * restrict br=tr+off0,* restrict bi=ti+off0;
         vf * restrict dR=p->bR+(size_t)e2*st;
         vf * restrict dI=p->bI+(size_t)e2*st;
-        for(int e1=0;e1<M1;e1++){
+        int e1=0;
+        for(;e1+1<M1;e1+=2){
+          vf x0=V_LOADU(ar), y0=V_LOADU(ai);
+          vf u0=V_LOADU(br), v0=V_LOADU(bi);
+          vf x1=V_LOADU(ar+N1), y1=V_LOADU(ai+N1);
+          vf u1=V_LOADU(br+N1), v1=V_LOADU(bi+N1);
+          dR[e1]   = V_FMSUB(x0,u0,V_MUL(y0,v0));
+          dI[e1]   = V_FNMSUB(x0,v0,V_MUL(y0,u0));
+          dR[e1+1] = V_FMSUB(x1,u1,V_MUL(y1,v1));
+          dI[e1+1] = V_FNMSUB(x1,v1,V_MUL(y1,u1));
+          ar+=2*N1; ai+=2*N1; br+=2*N1; bi+=2*N1;
+        }
+        for(;e1<M1;e1++){
           vf x=V_LOADU(ar), y=V_LOADU(ai);
           vf u=V_LOADU(br), v=V_LOADU(bi);
           dR[e1]=V_FMSUB(x,u,V_MUL(y,v));
@@ -762,6 +774,20 @@ static void stageA(BP*p,const float*in,int conj){
   const int M1=p->eb.single?N2:p->b1, M2=p->eb.single?1:p->b2, st=p->eb.st;
   for(int g0=0;g0<NG;g0+=G){
     const int GG = (NG-g0<G)?NG-g0:G;
+    if(GG==1){
+      for(int e2=0;e2<M2;e2++){
+        const float *sp=in+2*(size_t)AP_W*g0+(size_t)e2*M1*2*N1;
+        vf * restrict dR=p->bR+(size_t)e2*st;
+        vf * restrict dI=p->bI+(size_t)e2*st;
+        for(int e1=0;e1<M1;e1++){
+          vf r,i; v_deint(sp,&r,&i);
+          dR[e1]=r; dI[e1]=V_XOR(i,sg);
+          sp+=2*N1;
+        }
+      }
+      stageA_body(p,g0,TR,TI,OR,OI,p->bR,p->bI);
+      continue;
+    }
     /* one pass over the rows, filling GG group buffers from each row while the
        line is resident - this is the whole point of the blocking */
     for(int e2=0;e2<M2;e2++){
