@@ -714,6 +714,24 @@ static void stageA_prod(BP*p,const float*dr,const float*di,
   const int M1=p->eb.single?N2:p->b1, M2=p->eb.single?1:p->b2, st=p->eb.st;
   for(int g0=0;g0<NG;g0+=G){
     const int GG = (NG-g0<G)?NG-g0:G;
+    if(GG==1){
+      for(int e2=0;e2<M2;e2++){
+        const size_t off0=(size_t)AP_W*g0+(size_t)e2*M1*N1;
+        const float * restrict ar=dr+off0,* restrict ai=di+off0;
+        const float * restrict br=tr+off0,* restrict bi=ti+off0;
+        vf * restrict dR=p->bR+(size_t)e2*st;
+        vf * restrict dI=p->bI+(size_t)e2*st;
+        for(int e1=0;e1<M1;e1++){
+          vf x=V_LOADU(ar), y=V_LOADU(ai);
+          vf u=V_LOADU(br), v=V_LOADU(bi);
+          dR[e1]=V_FMSUB(x,u,V_MUL(y,v));
+          dI[e1]=V_FNMSUB(x,v,V_MUL(y,u));
+          ar+=N1; ai+=N1; br+=N1; bi+=N1;
+        }
+      }
+      stageA_body(p,g0,TR,TI,OR,OI,p->bR,p->bI);
+      continue;
+    }
     for(int e2=0;e2<M2;e2++){
       const size_t off0=(size_t)AP_W*g0+(size_t)e2*M1*N1;
       const float *ar=dr+off0,*ai=di+off0,*br=tr+off0,*bi=ti+off0;
