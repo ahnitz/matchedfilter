@@ -42,6 +42,26 @@ def _load(path):
     return data['rules']
 
 
+@lru_cache(maxsize=128)
+def _select_cached(path, device_kind, device_backend, device_name, device_arch, operation, n, band, templates):
+    keys = (device_name, *device_arch, '*')
+    found = []
+    for row in _load(path):
+        if (row['kind'] == device_kind and row['backend'] == device_backend
+                and row['operation'] == operation and row['n'] == n
+                and row['band'] == band and row['templates_min'] <= templates <= row['templates_max']
+                and row['device'] in keys):
+            found.append((keys.index(row['device']), row))
+    if not found:
+        return ()
+    best = min(rank for rank, row in found)
+    matches = [row for rank, row in found if rank == best]
+    if len(matches) != 1:
+        raise ValueError('ambiguous execution policy rows for this workload')
+    row = matches[0]
+    return (row['id'], row['series_group'])
+
+
 def select(device, operation, n, band, templates):
     """Return a measured override; exact device names precede architecture keys.
 
@@ -50,19 +70,8 @@ def select(device, operation, n, band, templates):
     Equally specific overlapping rows are errors, not order-dependent choices.
     """
     path = os.environ.get('MF_EXECUTION_POLICY') or str(Path(__file__).with_name('execution-policy.json'))
-    keys = (device.name, *device.arch, '*')
-    found = []
-    for row in _load(path):
-        if (row['kind'] == device.kind and row['backend'] == device.backend
-                and row['operation'] == operation and row['n'] == n
-                and row['band'] == band and row['templates_min'] <= templates <= row['templates_max']
-                and row['device'] in keys):
-            found.append((keys.index(row['device']), row))
-    if not found:
+    res = _select_cached(path, device.kind, device.backend, device.name, device.arch,
+                         operation, int(n), int(band), int(templates))
+    if not res:
         return {}
-    best = min(rank for rank, row in found)
-    matches = [row for rank, row in found if rank == best]
-    if len(matches) != 1:
-        raise ValueError('ambiguous execution policy rows for this workload')
-    row = matches[0]
-    return {'id': row['id'], 'series_group': row['series_group']}
+    return {'id': res[0], 'series_group': res[1]}
