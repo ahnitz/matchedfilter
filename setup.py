@@ -54,7 +54,8 @@ DISABLED = ["HWY_SCALAR", "HWY_SVE", "HWY_SVE2", "HWY_SVE_256", "HWY_SVE2_128",
 # build is x86 alone -- a universal2 arm64 slice cannot be given -msse4.2, so
 # there SSE2 has to stay enabled to remain a valid baseline.
 if X86_ONLY and platform.machine().lower() in _X86:
-    ARCH = ["-msse4.2", "-maes", "-mpclmul"]
+    ARCH = ["-msse4.2", "-maes", "-mpclmul",
+            "-mno-avx256-split-unaligned-load", "-mno-avx256-split-unaligned-store"]
     DISABLED += ["HWY_SSE2", "HWY_SSSE3"]
 else:
     ARCH = []
