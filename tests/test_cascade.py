@@ -267,3 +267,95 @@ def test_hierarchical_filter_cascade_python_api():
     assert hf.refine_rate >= 0.0
 
 
+def test_cascade_automated_gate_derivation():
+    """Verify that choose_threshold and gate_for_cascade derive valid compound thresholds."""
+    n = 4096
+    power = inspiral_power(n)
+    thr = mf.choose_threshold(power, n, 5.5, 1e-3, band=1024, cascade_band=256)
+    assert isinstance(thr, tuple)
+    assert len(thr) == 2
+    g0, g1 = thr
+    assert 2.5 <= g0 <= 4.5
+    assert 4.0 <= g1 <= 5.5
+
+    # Check argument validation
+    from matchedfilter.gatemodel import gate_for_cascade
+    with pytest.raises(ValueError, match="strictly less"):
+        gate_for_cascade(power, n, 1024, 256, 5.5, 1e-3)
+
+    with pytest.raises(ValueError, match="strictly less"):
+        gate_for_cascade(power, n, 512, 512, 5.5, 1e-3)
+
+    with pytest.raises(ValueError, match="positive"):
+        gate_for_cascade(power, n, 256, 1024, -1.0, 1e-3)
+
+    with pytest.raises(ValueError, match="between zero and one"):
+        gate_for_cascade(power, n, 256, 1024, 5.5, 1.5)
+
+
+def test_cascade_choose_config():
+    """Verify that choose_config evaluates cascade candidates when requested."""
+    n = 4096
+    power = inspiral_power(n)
+    tuning = mf._load_tuning()
+
+    # Default is single-tier for backward compatibility
+    cfg_single = mf.choose_config(power, n, 5.5, 1e-3, tuning=tuning, cascade=False)
+    assert len(cfg_single) == 2
+    assert cfg_single[0] in (256, 512, 1024, 2048)
+
+    # When cascade=True, a cascade pair (band0, band1, K) can be chosen
+    cfg_cascade = mf.choose_config(power, n, 5.5, 1e-3, tuning=tuning, cascade=True)
+    if len(cfg_cascade) == 3:
+        b0, b1, k = cfg_cascade
+        assert b0 < b1
+        assert b0 >= 64
+        assert b1 <= n
+
+
+def test_hierarchical_filter_auto_cascade():
+    """Verify HierarchicalFilter with cascade=True chooses cascade configuration and derives thresholds."""
+    n = 4096
+    power = inspiral_power(n)
+    h = np.sqrt(power).astype(np.complex64)
+
+    hf = mf.HierarchicalFilter(n, 2, 4, snr=5.5, fd=1e-3, cascade=True)
+    hf.set_reference(power)
+    hf.set_templates(np.repeat(np.conj(h)[None, :], 4, axis=0))
+
+    rng = np.random.default_rng(99)
+    noise = (rng.standard_normal((2, n)) + 1j * rng.standard_normal((2, n))).astype(np.complex64)
+    # Add strong injection in pair (0, 0)
+    noise[0] += (8.0 * h).astype(np.complex64)
+    hf.set_data(noise)
+
+    peaks = hf.run(binsize=n, threshold=5.0)
+    assert peaks.shape == (2, 4, 1)
+    # Strong signal should be detected
+    assert peaks[0, 0, 0]['index'] >= 0
+    assert abs(peaks[0, 0, 0]['value']) >= 7.0
+    assert hf.refine_rate >= 0.0
+
+
+def test_hierarchical_filter_explicit_cascade_band_auto_threshold():
+    """Verify HierarchicalFilter with explicit cascade_band derives dual thresholds automatically from reference."""
+    n = 4096
+    power = inspiral_power(n)
+    h = np.sqrt(power).astype(np.complex64)
+
+    # band=1024, cascade_band=256, no set_coarse_threshold call
+    hf = mf.HierarchicalFilter(n, 1, 2, snr=5.5, fd=1e-3, band=1024, cascade_band=256)
+    hf.set_reference(power)
+    hf.set_templates(np.repeat(np.conj(h)[None, :], 2, axis=0))
+
+    rng = np.random.default_rng(101)
+    noise = (rng.standard_normal((1, n)) + 1j * rng.standard_normal((1, n))).astype(np.complex64)
+    noise[0] += (9.0 * h).astype(np.complex64)
+    hf.set_data(noise)
+
+    peaks = hf.run(binsize=n, threshold=5.0)
+    assert peaks[0, 0, 0]['index'] >= 0
+    assert abs(peaks[0, 0, 0]['value']) >= 7.0
+
+
+
