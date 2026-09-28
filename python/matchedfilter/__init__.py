@@ -403,8 +403,10 @@ class MatchedFilter:
         if a.ndim != 2 or a.shape != (self.ndata, self.n):
             raise ValueError(f"expected shape ({self.ndata}, {self.n}), got {a.shape}")
         self._held[-1] = a                      # see the note above
+        plan = self._ensure()
+        set_data_fn = plan.set_data
         for i in range(self.ndata):
-            self._ensure().set_data(i, a[i])
+            set_data_fn(i, a[i])
         self._held = {-1: a}
         self._dataset = True
         self._mark_ready("data", None)
@@ -426,8 +428,10 @@ class MatchedFilter:
         a = np.ascontiguousarray(_from_any(spectra), dtype=np.complex64)
         if a.ndim != 2 or a.shape != (self.ntemplates, self.n):
             raise ValueError(f"expected shape ({self.ntemplates}, {self.n}), got {a.shape}")
+        plan = self._ensure()
+        set_tmpl_fn = plan.set_template
         for i in range(self.ntemplates):
-            self._ensure().set_template(i, a[i])
+            set_tmpl_fn(i, a[i])
         self._mark_ready("template", None)
 
 
