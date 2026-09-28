@@ -146,23 +146,32 @@ static HWY_ATTR HWY_INLINE void v_transpose(const vf *in, vf *out) {
 
 static HWY_ATTR HWY_INLINE void v_transpose_store(const vf *in, float *out) {
   const hn::Repartition<uint64_t, ap_tag> d64;
-  vf t[8], u[8];
-  for (int i = 0; i < 8; i += 2) {
-    t[i]     = hn::InterleaveLower(AP_D, in[i], in[i + 1]);
-    t[i + 1] = hn::InterleaveUpper(AP_D, in[i], in[i + 1]);
-  }
-  for (int i = 0; i < 4; i++) {
-    const int a = (i & 1) + ((i & 2) << 1);      /* 0,1,4,5 */
-    const int b = a + 2;
-    u[2 * i]     = hn::BitCast(AP_D, hn::InterleaveLower(
-                     d64, hn::BitCast(d64, t[a]), hn::BitCast(d64, t[b])));
-    u[2 * i + 1] = hn::BitCast(AP_D, hn::InterleaveUpper(
-                     d64, hn::BitCast(d64, t[a]), hn::BitCast(d64, t[b])));
-  }
-  for (int i = 0; i < 4; i++) {
-    V_STOREU(out + (size_t)i * AP_W, hn::ConcatLowerLower(AP_D, u[i + 4], u[i]));
-    V_STOREU(out + (size_t)(i + 4) * AP_W, hn::ConcatUpperUpper(AP_D, u[i + 4], u[i]));
-  }
+  const vf t0 = hn::InterleaveLower(AP_D, in[0], in[1]);
+  const vf t1 = hn::InterleaveUpper(AP_D, in[0], in[1]);
+  const vf t2 = hn::InterleaveLower(AP_D, in[2], in[3]);
+  const vf t3 = hn::InterleaveUpper(AP_D, in[2], in[3]);
+  const vf t4 = hn::InterleaveLower(AP_D, in[4], in[5]);
+  const vf t5 = hn::InterleaveUpper(AP_D, in[4], in[5]);
+  const vf t6 = hn::InterleaveLower(AP_D, in[6], in[7]);
+  const vf t7 = hn::InterleaveUpper(AP_D, in[6], in[7]);
+
+  const vf u0 = hn::BitCast(AP_D, hn::InterleaveLower(d64, hn::BitCast(d64, t0), hn::BitCast(d64, t2)));
+  const vf u1 = hn::BitCast(AP_D, hn::InterleaveUpper(d64, hn::BitCast(d64, t0), hn::BitCast(d64, t2)));
+  const vf u2 = hn::BitCast(AP_D, hn::InterleaveLower(d64, hn::BitCast(d64, t1), hn::BitCast(d64, t3)));
+  const vf u3 = hn::BitCast(AP_D, hn::InterleaveUpper(d64, hn::BitCast(d64, t1), hn::BitCast(d64, t3)));
+  const vf u4 = hn::BitCast(AP_D, hn::InterleaveLower(d64, hn::BitCast(d64, t4), hn::BitCast(d64, t6)));
+  const vf u5 = hn::BitCast(AP_D, hn::InterleaveUpper(d64, hn::BitCast(d64, t4), hn::BitCast(d64, t6)));
+  const vf u6 = hn::BitCast(AP_D, hn::InterleaveLower(d64, hn::BitCast(d64, t5), hn::BitCast(d64, t7)));
+  const vf u7 = hn::BitCast(AP_D, hn::InterleaveUpper(d64, hn::BitCast(d64, t5), hn::BitCast(d64, t7)));
+
+  V_STOREU(out + 0 * AP_W, hn::ConcatLowerLower(AP_D, u4, u0));
+  V_STOREU(out + 4 * AP_W, hn::ConcatUpperUpper(AP_D, u4, u0));
+  V_STOREU(out + 1 * AP_W, hn::ConcatLowerLower(AP_D, u5, u1));
+  V_STOREU(out + 5 * AP_W, hn::ConcatUpperUpper(AP_D, u5, u1));
+  V_STOREU(out + 2 * AP_W, hn::ConcatLowerLower(AP_D, u6, u2));
+  V_STOREU(out + 6 * AP_W, hn::ConcatUpperUpper(AP_D, u6, u2));
+  V_STOREU(out + 3 * AP_W, hn::ConcatLowerLower(AP_D, u7, u3));
+  V_STOREU(out + 7 * AP_W, hn::ConcatUpperUpper(AP_D, u7, u3));
 }
 #else
 static HWY_ATTR HWY_INLINE void v_transpose(const vf *in, vf *out) {

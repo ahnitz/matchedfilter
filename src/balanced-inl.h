@@ -609,43 +609,42 @@ static void stageA_prod_32(BP*p,const float*dr,const float*di,
     }
     return;
   }
+  if (__builtin_expect(p->tw32r && p->tw32i != nullptr, 1)) {
+    for(int g=0;g<4;g++){
+      const size_t gb=(size_t)g*32*8;
+      const vf *restrict twr = p->tw32r + ((size_t)g*32);
+      const vf *restrict twi = p->tw32i + ((size_t)g*32);
+      fftsr32_prod_unit_tw(dr+gb,di+gb,tr+gb,ti+gb,p->bR,p->bI,p->sR,p->sI,1,8,twr,twi);
+      for(int b=0;b<4;b++){
+        float *er=p->ire+(size_t)b*32*8+(size_t)8*g*8;
+        float *ei=p->iim+(size_t)b*32*8+(size_t)8*g*8;
+        v_transpose_store(p->bR + (size_t)b*8, er);
+        v_transpose_store(p->bI + (size_t)b*8, ei);
+      }
+    }
+    return;
+  }
   vf TR[8],TI[8];
   vf *restrict RR=p->bR, *restrict RI=p->bI;
   for(int g=0;g<4;g++){
     const size_t gb=(size_t)g*32*8;
     fftsr32_prod_unit(dr+gb,di+gb,tr+gb,ti+gb,p->bR,p->bI,p->sR,p->sI,1,8);
     for(int b=0;b<4;b++){
-      const vf *restrict twr = p->tw32r ? p->tw32r + ((size_t)g*32 + b*8) : nullptr;
-      const vf *restrict twi = p->tw32i ? p->tw32i + ((size_t)g*32 + b*8) : nullptr;
-      if(twr && twi){
-        for(int t=0;t<8;t+=2){
-          int k2_0=8*b+t, k2_1=8*b+t+1;
-          vf tr0=twr[t], ti0=twi[t];
-          vf tr1=twr[t+1], ti1=twi[t+1];
-          vf xr0=RR[k2_0], xi0=RI[k2_0];
-          vf xr1=RR[k2_1], xi1=RI[k2_1];
-          TR[t]=V_FMSUB(xr0,tr0,V_MUL(xi0,ti0));
-          TI[t]=V_FMADD(xr0,ti0,V_MUL(xi0,tr0));
-          TR[t+1]=V_FMSUB(xr1,tr1,V_MUL(xi1,ti1));
-          TI[t+1]=V_FMADD(xr1,ti1,V_MUL(xi1,tr1));
-        }
-      } else {
-        const float *sc=p->scg+2*((size_t)g*32+8*b);
-        for(int t=0;t<8;t+=2){
-          int k2_0=8*b+t, k2_1=8*b+t+1;
-          vf SR0=V_SET1(sc[2*t]), SI0=V_SET1(sc[2*t+1]);
-          vf SR1=V_SET1(sc[2*t+2]), SI1=V_SET1(sc[2*t+3]);
-          vf tr0=V_FMSUB(SR0,p->TLr[k2_0],V_MUL(SI0,p->TLi[k2_0]));
-          vf ti0=V_FMADD(SR0,p->TLi[k2_0],V_MUL(SI0,p->TLr[k2_0]));
-          vf tr1=V_FMSUB(SR1,p->TLr[k2_1],V_MUL(SI1,p->TLi[k2_1]));
-          vf ti1=V_FMADD(SR1,p->TLi[k2_1],V_MUL(SI1,p->TLr[k2_1]));
-          vf xr0=RR[k2_0], xi0=RI[k2_0];
-          vf xr1=RR[k2_1], xi1=RI[k2_1];
-          TR[t]=V_FMSUB(xr0,tr0,V_MUL(xi0,ti0));
-          TI[t]=V_FMADD(xr0,ti0,V_MUL(xi0,tr0));
-          TR[t+1]=V_FMSUB(xr1,tr1,V_MUL(xi1,ti1));
-          TI[t+1]=V_FMADD(xr1,ti1,V_MUL(xi1,tr1));
-        }
+      const float *sc=p->scg+2*((size_t)g*32+8*b);
+      for(int t=0;t<8;t+=2){
+        int k2_0=8*b+t, k2_1=8*b+t+1;
+        vf SR0=V_SET1(sc[2*t]), SI0=V_SET1(sc[2*t+1]);
+        vf SR1=V_SET1(sc[2*t+2]), SI1=V_SET1(sc[2*t+3]);
+        vf tr0=V_FMSUB(SR0,p->TLr[k2_0],V_MUL(SI0,p->TLi[k2_0]));
+        vf ti0=V_FMADD(SR0,p->TLi[k2_0],V_MUL(SI0,p->TLr[k2_0]));
+        vf tr1=V_FMSUB(SR1,p->TLr[k2_1],V_MUL(SI1,p->TLi[k2_1]));
+        vf ti1=V_FMADD(SR1,p->TLi[k2_1],V_MUL(SI1,p->TLr[k2_1]));
+        vf xr0=RR[k2_0], xi0=RI[k2_0];
+        vf xr1=RR[k2_1], xi1=RI[k2_1];
+        TR[t]=V_FMSUB(xr0,tr0,V_MUL(xi0,ti0));
+        TI[t]=V_FMADD(xr0,ti0,V_MUL(xi0,tr0));
+        TR[t+1]=V_FMSUB(xr1,tr1,V_MUL(xi1,ti1));
+        TI[t+1]=V_FMADD(xr1,ti1,V_MUL(xi1,tr1));
       }
       float *er=p->ire+(size_t)b*32*8+(size_t)8*g*8;
       float *ei=p->iim+(size_t)b*32*8+(size_t)8*g*8;
@@ -1023,21 +1022,58 @@ static HWY_NOINLINE MF_PEAK_SECTION void binmax_fused32(BP*p,float thr,ap_peak*o
   }
 
   for(int b=0;b<32/AP_W;b++){
+    const int base = b * AP_W;
+    const long num_lo = (long)ws - base - AP_W + 1;
+    const int lo = num_lo > 0 ? (int)((num_lo + 31) / 32) : 0;
+    const long num_hi = (long)we - 1 - base;
+    const int hi = num_hi >= 0 ? (int)(num_hi / 32) : -1;
+    if (lo > hi || lo > 31 || hi < 0) continue;
+    const int clo = lo < 0 ? 0 : lo;
+    const int chi = hi > 31 ? 31 : hi;
+    if (clo > chi) continue;
+
+    unsigned block_qmask = 0;
+    if (clo <= 7 && chi >= 0) block_qmask |= 1u;
+    if (clo <= 15 && chi >= 8) block_qmask |= 2u;
+    if (clo <= 23 && chi >= 16) block_qmask |= 4u;
+    if (clo <= 31 && chi >= 24) block_qmask |= 8u;
+    block_qmask &= qmask;
+    if (!block_qmask) continue;
+
+    const long k_clo = (long)clo * 32 + base;
+    const long k_chi = (long)chi * 32 + base;
+    const bool need_mask_clo = (k_clo < (long)ws);
+    const bool need_mask_chi = (k_chi + AP_W > (long)we);
+
+    unsigned inw_clo = ~0u;
+    if (need_mask_clo) {
+      long l0 = (long)ws - k_clo; if (l0 < 0) l0 = 0;
+      long l1 = (long)we - k_clo; if (l1 > AP_W) l1 = AP_W;
+      inw_clo = (l0 < l1) ? (((1u << l1) - 1u) & ~((1u << l0) - 1u)) : 0u;
+    }
+    unsigned inw_chi = ~0u;
+    if (need_mask_chi) {
+      long l0 = (long)ws - k_chi; if (l0 < 0) l0 = 0;
+      long l1 = (long)we - k_chi; if (l1 > AP_W) l1 = AP_W;
+      inw_chi = (l0 < l1) ? (((1u << l1) - 1u) & ~((1u << l0) - 1u)) : 0u;
+    }
+    const vm vmask_clo = V_MASK_FROM_BITS(inw_clo);
+    const vm vmask_chi = V_MASK_FROM_BITS(inw_chi);
+
     const float *ar=p->ire+(size_t)b*32*AP_W;
     const float *ai=p->iim+(size_t)b*32*AP_W;
-    fftsr32_unit_sink(ar,ai,p->sR,p->sI,1,qmask,[&](int k1,vf rr,vf ii){
-      const long k=(long)k1*32+b*AP_W;
-      if(k>=(long)we || k+AP_W<=(long)ws) return;
+    fftsr32_unit_sink(ar,ai,p->sR,p->sI,1,block_qmask,[&](int k1,vf rr,vf ii){
+      if ((unsigned)(k1 - clo) > (unsigned)(chi - clo)) return;
       vf m = V_FMADD(rr,rr,V_MUL(ii,ii));
-      if(__builtin_expect(k<(long)ws || k+AP_W>(long)we, 0)){
-        long l0 = (long)ws - k; if(l0 < 0) l0 = 0;
-        long l1 = (long)we - k; if(l1 > AP_W) l1 = AP_W;
-        if(l0 >= l1) return;
-        unsigned inw = ((1u << l1) - 1u) & ~((1u << l0) - 1u);
-        m = V_SEL(V_MASK_FROM_BITS(inw), V_SET1(-1.f), m);
+      if(__builtin_expect(k1 == clo && need_mask_clo, 0)){
+        m = V_SEL(vmask_clo, V_SET1(-1.f), m);
+      }
+      if(__builtin_expect(k1 == chi && need_mask_chi, 0)){
+        m = V_SEL(vmask_chi, V_SET1(-1.f), m);
       }
       vm g = V_CMP_GT(m, am);
       if(__builtin_expect(V_MASK_ANY(g),0)){
+        const long k=(long)k1*32+base;
         am = V_SEL(g, am, m);
         arr = V_SEL(g, arr, rr);
         aii = V_SEL(g, aii, ii);

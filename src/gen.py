@@ -236,15 +236,20 @@ class SRGen(Gen):
             X[k+3*q]  = s.sub(U[k+q], mdf)
         return X
 
-def build_sr(n,name,tw=False,prod=False,unit=False,inplace=False,sink=False):
+def build_sr(n,name,tw=False,prod=False,unit=False,inplace=False,sink=False,out_tw=False):
     if sink and not inplace:
         raise ValueError("an output sink requires plain unit-stride float input")
     if inplace and (not unit or prod or tw):
         raise ValueError("in-place float buffers require a plain unit-stride codelet")
     g=SRGen(n,name,tw,False,prod)
     X=g.rec(list(range(n)))
-    for k in range(n):
-        g.emit("ar[S*%d]=%s; ai[S*%d]=%s;"%(k,X[k][0],k,X[k][1]))
+    if out_tw:
+        for k in range(n):
+            g.emit("ar[S*%d]=V_FMSUB(%s,twr[%d],V_MUL(%s,twi[%d])); ai[S*%d]=V_FMADD(%s,twi[%d],V_MUL(%s,twr[%d]));"%(
+                k,X[k][0],k,X[k][1],k, k,X[k][0],k,X[k][1],k))
+    else:
+        for k in range(n):
+            g.emit("ar[S*%d]=%s; ai[S*%d]=%s;"%(k,X[k][0],k,X[k][1]))
     if unit:
         # The top-level combine starts after every input has been consumed.
         # Store each final result at its definition instead of keeping all
@@ -278,6 +283,8 @@ def build_sr(n,name,tw=False,prod=False,unit=False,inplace=False,sink=False):
               "const float*restrict tr,const float*restrict ti,"
               "vf*restrict ar,vf*restrict ai,vf*restrict br,vf*restrict bi,"
               "const long S,const long DS")
+        if out_tw:
+            args += ",const vf*restrict twr,const vf*restrict twi"
     elif tw:
         args="vf*restrict ar,vf*restrict ai,vf*restrict br,vf*restrict bi,const long S,const float*restrict twr,const float*restrict twi"
     else:
@@ -371,6 +378,7 @@ if __name__=="__main__":
     # layouts. Dispatch keeps other widths on their established implementation.
     out.append(build_sr(32,"fftsr32_unit",unit=True))
     out.append(build_sr(32,"fftsr32_prod_unit",prod=True,unit=True))
+    out.append(build_sr(32,"fftsr32_prod_unit_tw",prod=True,unit=True,out_tw=True))
     out.append(build_sr(32,"fftsr32_unit_inplace",unit=True,inplace=True))
     out.append(build_sr(32,"fftsr32_unit_sink",unit=True,inplace=True,sink=True))
     out += ["}  // namespace HWY_NAMESPACE", "}  // namespace ap",
