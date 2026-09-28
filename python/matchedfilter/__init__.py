@@ -1512,7 +1512,7 @@ def _cost_candidates(power, n, snr, t, fd=1e-3, pairs=None):
     return sorted(candidates, key=lambda c: (c["cost"], c["band"], c["K"]))
 
 
-def choose_config(power, n, snr, fd, tuning=None, pairs=None, device=None, cascade=False):
+def choose_config(power, n, snr, fd, tuning=None, pairs=None, device=None, cascade="auto"):
     """Cheapest measured configuration whose model gate resolves the budget.
 
     Only costs come from files. The model uses the complete reference at
@@ -1530,7 +1530,7 @@ def choose_config(power, n, snr, fd, tuning=None, pairs=None, device=None, casca
             single_choice = (band, candidate["K"])
             best_cost = candidate["cost"]
             break
-    if not cascade:
+    if cascade is False:
         return single_choice
 
     best_cascade = None
@@ -1588,7 +1588,7 @@ class HierarchicalFilter(MatchedFilter):
 
     def __init__(self, n, ndata=1, ntemplates=1, snr=5.5, fd=1e-2,
                  band=None, taps=None, device=None, *, valid=None, cascade_band=None,
-                 cascade=False):
+                 cascade="auto"):
         from .device import parse as _parse_device
         self.device = _parse_device(device)
         self.n = int(n)
@@ -1610,7 +1610,12 @@ class HierarchicalFilter(MatchedFilter):
         if self.cascade_band is not None:
             if self.cascade_band < 64 or self.cascade_band >= self.n or self.cascade_band & (self.cascade_band - 1):
                 raise ValueError("cascade_band must be a power of two, >= 64 and < n")
-        self.cascade = bool(cascade or self.cascade_band is not None)
+        if cascade is False:
+            self.cascade = False
+        elif cascade is True or self.cascade_band is not None:
+            self.cascade = True
+        else:
+            self.cascade = True if band is None else False
         if self.ndata < 1 or self.ntemplates < 1:
             raise ValueError("ndata and ntemplates must be >= 1")
         if self.device.kind == 'cpu' and self.n > self._cpu_max_n:
