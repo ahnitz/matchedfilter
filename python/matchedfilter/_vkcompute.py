@@ -254,6 +254,13 @@ _MemBarrier = _struct("VkMemoryBarrier",
                       ("sType", _u32), ("pNext", _vp),
                       ("srcAccessMask", _u32), ("dstAccessMask", _u32))
 
+_QUEUE_FAMILY_IGNORED = 0xFFFFFFFF
+_BufMemBarrier = _struct("VkBufferMemoryBarrier",
+                         ("sType", _u32), ("pNext", _vp),
+                         ("srcAccessMask", _u32), ("dstAccessMask", _u32),
+                         ("srcQueueFamilyIndex", _u32), ("dstQueueFamilyIndex", _u32),
+                         ("buffer", _vp), ("offset", _u64), ("size", _u64))
+
 
 from ._errors import UnsupportedSize      # noqa: F401  (re-export)
 from ._gpu_cache import InputUploads
@@ -1000,9 +1007,11 @@ class Context(InputUploads):
             self.vk.vkCmdPushConstants(cmd, l1, _STAGE_COMPUTE, 0, 4,
                                         ctypes.byref(pc))
             self.vk.vkCmdDispatch(cmd, spectra.shape[0]*info['n1'], 1, 1)
-            barrier = _MemBarrier(46, None, _ACCESS_SHADER_WRITE, _ACCESS_SHADER_READ)
+            bmb = _BufMemBarrier(44, None, _ACCESS_SHADER_WRITE, _ACCESS_SHADER_READ,
+                                 _QUEUE_FAMILY_IGNORED, _QUEUE_FAMILY_IGNORED,
+                                 scratch.handle, 0, _WHOLE_SIZE)
             self.vk.vkCmdPipelineBarrier(cmd, _STAGE_COMPUTE_BIT, _STAGE_COMPUTE_BIT,
-                                         0, 1, ctypes.byref(barrier), 0, None, 0, None)
+                                         0, 0, None, 1, ctypes.byref(bmb), 0, None)
             self.vk.vkCmdBindPipeline(cmd, _BIND_POINT_COMPUTE, p2)
             sets = (_vp * 1)(ds2)
             self.vk.vkCmdBindDescriptorSets(cmd, _BIND_POINT_COMPUTE, l2,
@@ -1359,9 +1368,11 @@ class Context(InputUploads):
             self.vk.vkCmdPushConstants(cmd, l1, _STAGE_COMPUTE, 0, 4,
                                         ctypes.byref(pc))
             self.vk.vkCmdDispatch(cmd, nd*nt*info['n1'], 1, 1)
-            barrier = _MemBarrier(46, None, _ACCESS_SHADER_WRITE, _ACCESS_SHADER_READ)
+            bmb = _BufMemBarrier(44, None, _ACCESS_SHADER_WRITE, _ACCESS_SHADER_READ,
+                                 _QUEUE_FAMILY_IGNORED, _QUEUE_FAMILY_IGNORED,
+                                 scratch.handle, 0, _WHOLE_SIZE)
             self.vk.vkCmdPipelineBarrier(cmd, _STAGE_COMPUTE_BIT, _STAGE_COMPUTE_BIT,
-                                         0, 1, ctypes.byref(barrier), 0, None, 0, None)
+                                         0, 0, None, 1, ctypes.byref(bmb), 0, None)
             self.vk.vkCmdBindPipeline(cmd, _BIND_POINT_COMPUTE, p2)
             sets = (_vp * 1)(ds2)
             self.vk.vkCmdBindDescriptorSets(cmd, _BIND_POINT_COMPUTE, l2,
@@ -1445,9 +1456,11 @@ class Context(InputUploads):
                 self.vk.vkCmdPushConstants(cmd, l1, _STAGE_COMPUTE, 0, 4,
                                             ctypes.byref(count))
                 self.vk.vkCmdDispatch(cmd, nd*nt*geometry['n1'], 1, 1)
-                barrier = _MemBarrier(46, None, _ACCESS_SHADER_WRITE, _ACCESS_SHADER_READ)
+                bmb = _BufMemBarrier(44, None, _ACCESS_SHADER_WRITE, _ACCESS_SHADER_READ,
+                                     _QUEUE_FAMILY_IGNORED, _QUEUE_FAMILY_IGNORED,
+                                     scratch.handle, 0, _WHOLE_SIZE)
                 self.vk.vkCmdPipelineBarrier(cmd, _STAGE_COMPUTE_BIT, _STAGE_COMPUTE_BIT,
-                                             0, 1, ctypes.byref(barrier), 0, None, 0, None)
+                                             0, 0, None, 1, ctypes.byref(bmb), 0, None)
                 pipe, layout, ds = p2, l2, ds2
             self.vk.vkCmdBindPipeline(cmd, _BIND_POINT_COMPUTE, pipe)
             sets = (_vp * 1)(ds)
