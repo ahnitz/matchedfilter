@@ -1,0 +1,103 @@
+"""Multi-shape False Dismissal Rate (FDR) test suite for the Two-Tier Cascade.
+
+Verifies that the cascade filter maintains empirical False Dismissal Rate
+within the target budget (FDR <= 0.10%) across diverse, non-inverse spectral shapes:
+1. inspiral_canonical: Standard f^(-7/3) power law with knee.
+2. aligo_o4_inspiral: Inspiral weighted by realistic analytic aLIGO noise curve (seismic wall, bucket, shot noise).
+3. notched_lines: Realistic detector noise curve with 60 Hz mains and violin mode line notches.
+4. bimodal_resonance: Inspiral combined with a high-frequency Lorentzian merger/ringdown resonance.
+5. bandpass_plateau: Non-power-law flat bandpass plateau with Tukey cosine rolloff.
+6. skewed_edge: Power concentrated towards the coarse decimation edge rather than near DC.
+"""
+import os
+import sys
+from pathlib import Path
+import pytest
+import numpy as np
+
+# Ensure repository root is on sys.path
+repo_root = str(Path(__file__).resolve().parent.parent)
+if repo_root not in sys.path:
+    sys.path.insert(0, repo_root)
+
+import matchedfilter as mf
+import matchedfilter._core as _core
+from tests.spectral_profiles import make_spectral_profile, SHAPE_NAMES
+from scipy.stats import binomtest
+
+
+@pytest.mark.parametrize("shape_name", SHAPE_NAMES)
+def test_cascade_fdr_multi_shape(shape_name):
+    """Verify that two-tier cascade FDR <= fdr_target on each distinct spectral shape."""
+    n = 4096
+    m0, m1 = 256, 512
+    snr_target = 5.5
+    fdr_target = 0.0010
+
+    # In fast CI/local test mode, use 1,500 injections per shape (~900 detections).
+    # In full verification mode, use FDR_INJECTIONS env var (e.g. 10,000 or 20,000).
+    n_injections = int(os.environ.get("FDR_INJECTIONS", "1500"))
+
+    power = make_spectral_profile(shape_name, n)
+    h_freq = np.sqrt(power).astype(np.complex64)
+    h_conj = np.conj(h_freq)
+
+    thr_cascade = mf.choose_threshold(power, n, snr_target, fdr_target, band=m1, cascade_band=m0)
+    assert thr_cascade is not None, f"Could not calibrate cascade gates for shape {shape_name}"
+    g0, g1 = map(float, thr_cascade)
+
+    mf_full = mf.MatchedFilter(n, ndata=1, ntemplates=1)
+    mf_full.set_templates(h_conj[None, :])
+
+    hmf_cascade = _core.HMF(n, 1, 1, snr_target, fdr_target, m1, 1, 8, 8, m0)
+    hmf_cascade.set_reference(power)
+    hmf_cascade.set_threshold(g0, g1)
+    hmf_cascade.set_template(0, h_conj)
+
+    p_cascade = np.empty((1, 1), dtype=mf.PEAK_DTYPE)
+    cnt_buf = np.empty(1, dtype=np.int32)
+    empty_idx = np.empty(0, dtype=np.int64)
+    empty_val = np.empty(0, dtype=np.complex64)
+    mag_buf = np.empty(0, dtype=np.float32)
+
+    rng = np.random.default_rng(1234 + hash(shape_name) % 10000)
+
+    n_fine_detections = 0
+    missed_cascade = 0
+
+    for _ in range(n_injections):
+        lag = rng.uniform(n // 4, 3 * n // 4)
+        k = np.arange(n)
+        phase_shift = np.exp(2j * np.pi * lag * k / n).astype(np.complex64)
+
+        sig = (snr_target * h_freq * phase_shift).astype(np.complex64)
+        noise = (rng.standard_normal(n, dtype=np.float32) + 1j * rng.standard_normal(n, dtype=np.float32))
+        d = sig + noise
+
+        # Ground truth check
+        mf_full.set_data(d[None, :])
+        res_full = mf_full.run(binsize=n, threshold=snr_target)
+        if abs(res_full['value'][0, 0, 0]) < snr_target:
+            continue
+
+        n_fine_detections += 1
+
+        hmf_cascade.set_data(0, d)
+        hmf_cascade.run(0, 1, 0, 1, n, snr_target, 0, n, empty_idx, empty_val, mag_buf, cnt_buf, p_cascade)
+        if p_cascade[0, 0]['index'] < 0 or abs(p_cascade[0, 0]['value']) < snr_target:
+            missed_cascade += 1
+
+    assert n_fine_detections >= int(0.50 * n_injections), (
+        f"Expected >= 50% detection rate for SNR {snr_target}, got {n_fine_detections}/{n_injections}"
+    )
+
+    # Statistical test: One-sided binomial test asserting FDR <= fdr_target at alpha=0.05
+    b_test = binomtest(missed_cascade, n_fine_detections, p=fdr_target, alternative='greater')
+    p_val = b_test.pvalue
+    fdr_empirical = missed_cascade / n_fine_detections
+
+    assert p_val >= 0.05, (
+        f"FDR violation for shape '{shape_name}'! "
+        f"Missed: {missed_cascade} / {n_fine_detections} (FDR={fdr_empirical*100:.3f}%), "
+        f"Binomial p-value={p_val:.4e} < 0.05"
+    )
