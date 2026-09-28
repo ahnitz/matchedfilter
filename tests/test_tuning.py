@@ -240,3 +240,34 @@ def test_invalid_cost_query_is_rejected_before_logarithms():
         mf._cost_candidates(power,1024,5.5,tuning,fd=0)
     with pytest.raises(ValueError, match='pairs must'):
         mf._cost_candidates(power,1024,5.5,tuning,pairs=0)
+
+
+def test_shipped_cpu_architecture_cost_tables_valid():
+    """All shipped CPU architecture tables must parse cleanly and cover required sizes."""
+    import glob
+    from pathlib import Path
+    here = Path(mf.__file__).parent
+    arch_tables = sorted(here.glob("cost-*-family*-model*.txt"))
+    assert len(arch_tables) >= 7, "expected at least 7 architecture tables"
+    expected_sizes = {1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144}
+    for table_path in arch_tables:
+        t = mf._load_tuning(str(table_path))
+        assert "cost_fd_pairs" in t and len(t["cost_fd_pairs"]) > 0
+        covered = {k[0] for k in t["cost_fd_pairs"]}
+        assert expected_sizes.issubset(covered), f"{table_path.name} missing expected sizes: {expected_sizes - covered}"
+
+
+def test_hierarchical_filter_uses_cpu_architecture_cost_table():
+    """HierarchicalFilter on an arch-matched CPU device must consult its specific table."""
+    from matchedfilter.device import Device
+    arch = "authenticamd-family26-model112"
+    dev = Device("cpu", 0, "Zen 5", "cpu", arch=(arch,))
+    table_path, key = mf.cost_table_for(dev)
+    assert key == arch
+    p = inspiral_power(4096, exponent=-5/3.0)
+    hf = mf.HierarchicalFilter(4096, ndata=16, ntemplates=1024, snr=6.5, fd=0.001, device=dev)
+    hf.set_reference(p)
+    assert hf.cost_table == arch
+    # On Zen 5, arch table chooses band 512 whereas generic cost.txt chooses 1024
+    assert hf.config == (512, 8)
+

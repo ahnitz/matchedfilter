@@ -48,7 +48,7 @@ class SeriesLayout:
         sort = np.lexsort((windows[:, 1], windows[:, 0]))
         ordered = windows[sort]
         if np.any(np.all(ordered[1:] == ordered[:-1], axis=1)):
-            self.order = np.lexsort((high, low))
+            self.order = np.lexsort((self.starts, high, low))
             self.starts = self.starts[self.order]
             low = self.low = low[self.order]
             high = self.high = high[self.order]
