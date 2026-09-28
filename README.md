@@ -123,15 +123,26 @@ fraction of pairs requiring refinement.
 
 ![CPU and GPU matched-filter measurements at 4096 points](docs/assets/teaser.svg)
 
-Measured on a Ryzen AI MAX+ 395 / Radeon 8060S, 2026-09-26: 16 data segments ×
-512 templates, 4,096 points. The bars move from a general inverse FFT to
+Measured on a Ryzen AI MAX+ 395 / Radeon 8060S, 2026-09-27: 16 data segments ×
+512 templates, 4,096 points, with the bank drawn from the captured PyCBC
+reference profile. The bars move from a general inverse FFT to
 fused full output, peak-only output and hierarchical screening. FFTW and
 rocFFT time only the inverse transform, so they do less work than the filter
 bars. Full output reuses a caller-supplied result array; GPU timings include
 synchronization. Hierarchical bars show requested FDR budgets 1e-2, 1e-3 and
-1e-4; these noise-only timings do not measure FDR. The two panels use separate
-scales; compare their printed values. This is a workload example, not a speed
-guarantee.
+1e-4 at SNR threshold 5.5; these noise-only timings do not measure FDR. The
+two panels use separate scales; compare their printed values. This is a
+workload example, not a speed guarantee.
+
+**The CPU panel was measured on a loaded host and understates this hardware.**
+An unrelated workload was saturating memory bandwidth: the FFTW reference,
+which contains no matchedfilter code, took 108.9 ms against 70.5 ms on the
+same idle machine, so the CPU bars are roughly a third slow and the CPU
+hierarchy bars are noisy besides. The GPU panel is unaffected — rocFFT
+reproduces to 0.5%, since the Radeon has its own memory. For a comparison
+measured across six machines with the fixed references used as controls, see
+the [hardware comparison](docs/measurements/teaser-fleet-20260927.md), where
+the threshold and output mode are both selectable.
 
 The [flat](https://ahnitz.github.io/matchedfilter/benchmarks.html) and
 [hierarchical](https://ahnitz.github.io/matchedfilter/hierarchical-benchmarks.html)
