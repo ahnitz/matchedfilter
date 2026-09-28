@@ -1532,6 +1532,8 @@ def choose_config(power, n, snr, fd, tuning=None, pairs=None, device=None, casca
             continue
         for c1 in band_cands[i + 1:]:
             b1 = c1["band"]
+            if b1 <= b0:
+                continue
             est_cost = 0.15 * c0["cost"] + 0.25 * c1["cost"]
             if est_cost < min_cascade_cost:
                 thr = choose_threshold(power, n, snr, fd, b1, cascade_band=b0)
