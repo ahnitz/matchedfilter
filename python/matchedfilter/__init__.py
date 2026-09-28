@@ -1571,21 +1571,20 @@ def choose_config(power, n, snr, fd, tuning=None, pairs=None, device=None, casca
     min_cascade_cost = best_cost
 
     band_cands = sorted([c for c in cands if c["band"] < n], key=lambda c: c["band"])
-    for i, c0 in enumerate(band_cands):
-        b0 = c0["band"]
-        if b0 >= b_single:
-            continue
-        if c0["f"] < 0.50:
-            continue
-        for c1 in band_cands[i + 1:]:
-            b1 = c1["band"]
-            if b1 <= b0:
+    b0_pool = sorted(set([c["band"] for c in band_cands] + [64, 128, 256, 512, 1024, 2048]))
+    b0_pool = [b for b in b0_pool if 64 <= b < n and (b & (b - 1)) == 0]
+
+    for c1 in band_cands:
+        b1 = c1["band"]
+        for b0 in b0_pool:
+            if b0 >= b1 or b0 >= b_single:
                 continue
             thr = choose_threshold(power, n, snr, fd, b1, cascade_band=b0)
             if thr is not None:
                 g0, g1 = thr
                 p0 = max(0.0, min(1.0, 1.0 - (1.0 - math.exp(-0.5 * g0 * g0)) ** b0))
-                est_cost = c0["cost"] + p0 * c1["cost"]
+                coarse_ratio = (b0 * math.log2(b0)) / (b1 * math.log2(b1))
+                est_cost = c1["cost"] * (coarse_ratio + p0)
                 if est_cost < min_cascade_cost:
                     min_cascade_cost = est_cost
                     best_cascade = CascadeConfig(b0, b1, c1["K"])
