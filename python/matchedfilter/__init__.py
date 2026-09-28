@@ -540,7 +540,16 @@ class MatchedFilter:
             idx, val = self._gpu_window(
                 self._gdata[d0:d0 + nd], self._gtmpl[t0:t0 + nt],
                 binsize, threshold, start, end)
-            return _format_result(idx, val, raw=raw, counts=bool(counts))
+            if raw:
+                return _format_result(idx, val, raw=True, counts=bool(counts))
+            nb = idx.shape[-1]
+            shape = (nd, nt, nb)
+            pbuf = getattr(self, '_pbuf', None)
+            if pbuf is None or pbuf[0] != shape:
+                peaks = np.empty(shape, dtype=PEAK_DTYPE)
+                pbuf = self._pbuf = (shape, peaks)
+            _, peaks = pbuf
+            return _format_result(idx, val, raw=False, counts=bool(counts), out=peaks)
         nb = self._ensure().nbins(binsize, start, end)
         rows = nd * nt
         shape = (nd, nt, nb)
@@ -764,12 +773,20 @@ class MatchedFilter:
             source = source[:ser.size]
         # A single group needs no aggregate buffers or scatter.
         single = len(layout.groups) == 1 and nblk <= batch
+        shape = (nblk, nt, nb)
         if not single:
             if raw:
-                idx = np.empty((nblk, nt, nb), dtype=np.int64)
-                val = np.empty((nblk, nt, nb), dtype=np.complex64)
+                sb = getattr(self, "_sbuf", None)
+                if sb is None or sb[0] != shape:
+                    sb = self._sbuf = (shape,
+                                       np.empty(shape, dtype=np.int64),
+                                       np.empty(shape, dtype=np.complex64))
+                _, idx, val = sb
             else:
-                peaks = np.empty((nblk, nt, nb), dtype=PEAK_DTYPE)
+                spbuf = getattr(self, "_spbuf", None)
+                if spbuf is None or spbuf[0] != shape:
+                    spbuf = self._spbuf = (shape, np.empty(shape, dtype=PEAK_DTYPE))
+                _, peaks = spbuf
         # Irregular flat windows share one forward FFT dispatch and submission per
         # bounded batch. Hierarchical and other backends keep their executor.
         grouped = (len(layout.groups) > 1 and type(self) is MatchedFilter
@@ -809,7 +826,13 @@ class MatchedFilter:
                 finally:
                     self._gpu.cancel_forward()
                 if single:
-                    return _format_result(gi, gv, raw=raw)
+                    if raw:
+                        return _format_result(gi, gv, raw=True)
+                    spbuf = getattr(self, '_spbuf', None)
+                    if spbuf is None or spbuf[0] != shape:
+                        spbuf = self._spbuf = (shape, np.empty(shape, dtype=PEAK_DTYPE))
+                    _, peaks = spbuf
+                    return _format_result(gi, gv, raw=False, out=peaks)
                 if raw:
                     idx[begin:end], val[begin:end] = gi, gv
                 else:
