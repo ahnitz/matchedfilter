@@ -776,9 +776,9 @@ class MatchedFilter:
         policy = self._series_policy(operation, band, nt)
         if policy:
             batch = min(batch, policy['series_group'])
-        single = len(layout.groups) == 1 and nblk <= batch
         pipelined = hasattr(self._gpu, "_get_fence") and getattr(self._gpu, "cache_limit_bytes", 10**9) > 1024 * 1024 and not single
-        K = 4 if pipelined else 1
+        queue_ahead = int(os.environ.get("MF_GPU_QUEUE_AHEAD", "8"))
+        K = max(1, queue_ahead) if pipelined else 1
         source_shared = shared_buffer(ser, self._gpu) is not None
         workspace = getattr(self, "_series_workspace", None)
         if workspace is None or workspace[0] != (batch, n, K):
@@ -1212,10 +1212,10 @@ def _cache_path(paths):
     key = hashlib.sha1(("cost-v6|" + "|".join(
         "%s:%d:%d" % (q, os.stat(q).st_mtime_ns, os.path.getsize(q)) for q in paths
         if os.path.exists(q))).encode()).hexdigest()[:16]
-    here = os.path.dirname(os.path.abspath(__file__))
-    for base in (here, os.path.join(
-            os.environ.get("XDG_CACHE_HOME",
-                           os.path.expanduser("~/.cache")), "matchedfilter")):
+    xdg_cache = os.path.join(
+        os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache")), "matchedfilter")
+    package_cache = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cache")
+    for base in (xdg_cache, package_cache):
         try:
             os.makedirs(base, exist_ok=True)
             if os.access(base, os.W_OK):
