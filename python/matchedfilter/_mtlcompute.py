@@ -687,8 +687,7 @@ class Context(InputUploads):
 
         out = nd * nt * nbins
         idx = b_idx.read(np.int32, out).reshape(nd, nt, nbins)
-        val = b_val.read(np.float32, out * 2).view(
-            np.complex64).reshape(nd, nt, nbins)
+        val = b_val.read(np.complex64, out).reshape(nd, nt, nbins)
         return idx, val
 
     def peaks_grouped(self, n, data, tmpl, groups, binsize, threshold, *, upload_tmpl=True):
@@ -1062,8 +1061,7 @@ class Context(InputUploads):
 
         out = nd * nt * nbins
         idx = bufs["idx"].read(np.int32, out).reshape(nd, nt, nbins)
-        val = bufs["val"].read(np.float32, out * 2).view(
-            np.complex64).reshape(nd, nt, nbins)
+        val = bufs["val"].read(np.complex64, out).reshape(nd, nt, nbins)
         self.last_refinements = int(bufs["args"].read(np.uint32, 1)[0])
         return idx, val
 
