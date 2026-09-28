@@ -685,7 +685,14 @@ class Context(InputUploads):
                 self._uploaded["tmpl"][storage_key] = tsig
 
             fence = self._get_fence(slot) if (async_submit and slot is not None) else None
-            self._submit(cmd, fence=fence, wait=not async_submit, slot=slot)
+            if async_submit and slot is not None:
+                try:
+                    self._submit(cmd, fence=fence, wait=False, slot=slot)
+                except TypeError:
+                    self._submit(cmd)
+                    fence = None
+            else:
+                self._submit(cmd)
 
             out = nd * nt * nbins
             if async_submit:
@@ -749,7 +756,14 @@ class Context(InputUploads):
             self._uploaded["tmpl"][storage_key] = tsig
 
         fence = self._get_fence(slot) if (async_submit and slot is not None) else None
-        self._submit(cmd, fence=fence, wait=not async_submit, slot=slot)
+        if async_submit and slot is not None:
+            try:
+                self._submit(cmd, fence=fence, wait=False, slot=slot)
+            except TypeError:
+                self._submit(cmd)
+                fence = None
+        else:
+            self._submit(cmd)
 
         out = nd * nt * nbins
         if async_submit:
@@ -1496,7 +1510,14 @@ class Context(InputUploads):
             self._uploaded["tmpl"][storage_key] = tsig
 
         fence = self._get_fence(slot) if (async_submit and slot is not None) else None
-        self._submit(cmd, fence=fence, wait=not async_submit, slot=slot)
+        if async_submit and slot is not None:
+            try:
+                self._submit(cmd, fence=fence, wait=False, slot=slot)
+            except TypeError:
+                self._submit(cmd)
+                fence = None
+        else:
+            self._submit(cmd)
 
         out = nd * nt * nbins
         if async_submit:
@@ -1598,7 +1619,14 @@ class Context(InputUploads):
             write_input(b_tmpl, tmpl)
             self._uploaded["tmpl"][key] = tsig
         fence = self._get_fence(slot) if (async_submit and slot is not None) else None
-        self._submit(cmd, fence=fence, wait=not async_submit, slot=slot)
+        if async_submit and slot is not None:
+            try:
+                self._submit(cmd, fence=fence, wait=False, slot=slot)
+            except TypeError:
+                self._submit(cmd)
+                fence = None
+        else:
+            self._submit(cmd)
         if async_submit:
             def readback():
                 if fence is not None:
