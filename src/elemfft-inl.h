@@ -41,8 +41,8 @@ typedef struct { int st, m2mask, m2shift, m1mask, m1shift, single; } emap;
 static inline emap emake(int M1,int M2){
   emap e; e.single=(M2==1); e.st=ESTRIDE(M1);
   e.m2mask=M2-1; e.m1mask=M1-1;
-  e.m2shift=0; while((1<<e.m2shift)<M2) e.m2shift++;
-  e.m1shift=0; while((1<<e.m1shift)<M1) e.m1shift++;
+  e.m2shift = M2 > 1 ? __builtin_ctz(M2) : 0;
+  e.m1shift = M1 > 1 ? __builtin_ctz(M1) : 0;
   return e;
 }
 static inline int eidx(const emap *e,int k){        /* slot holding output element k */
