@@ -200,8 +200,9 @@ int ap_hmf_run_series(ap_hmf_plan *p,
          linear: scaling before is bit-for-bit the same as scaling after, which
          the fixtures check by reproducing pycbc's SNRs to 0.0e+00. */
       { const float inv=1.0f/(float)n;
-        const float *src=have ? series+2*s0 : series;
-        for(size_t k=0;k<2*have;k++) p->fwd[k]=src[k]*inv; }
+        const float * restrict src=have ? series+2*s0 : series;
+        float * restrict dst=p->fwd;
+        for(size_t k=0;k<2*have;k++) dst[k]=src[k]*inv; }
       if(have<n) memset(p->fwd+2*have,0,2*(n-have)*sizeof(float));
       float *const sp=p->spec+(size_t)j*2*n;
       ap_fft(p->full_fft,p->fwd,sp,AP_FORWARD);

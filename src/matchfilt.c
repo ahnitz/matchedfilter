@@ -674,8 +674,9 @@ int ap_mf_run_series(ap_mf_plan *p,
          happen anyway. n is a power of two, so 1/n is exact and the transform
          is linear: scaling before is bit-for-bit scaling after. */
       { const float inv=1.0f/(float)n;
-        const float *src=series+2*s0;
-        for(size_t k=0;k<2*have;k++) p->sfwd[k]=src[k]*inv; }
+        const float * restrict src=series+2*s0;
+        float * restrict dst=p->sfwd;
+        for(size_t k=0;k<2*have;k++) dst[k]=src[k]*inv; }
       if(have<n) memset(p->sfwd+2*have,0,2*(n-have)*sizeof(float));
       ap_fft(p->fft,p->sfwd,p->sspec,AP_FORWARD);
       if(ap_mf_set_data(p,j,p->sspec)) return -1;
