@@ -380,8 +380,10 @@ def gate_for_cascade(power, n, band0, band1, snr, fd):
         return None
     c0_k, c1_k = got
     M = len(c0_k)
-    K = int(np.floor(float(fd) * M))
-    if K < 8 or M < 16:
+    # One-sided 95% statistical binomial tolerance bound on finite Monte Carlo draws:
+    # K = floor(M * fd - 1.645 * sqrt(M * fd * (1 - fd)))
+    K = int(np.floor(float(fd) * M - 1.645 * np.sqrt(M * float(fd) * (1.0 - float(fd)))))
+    if K < 1 or M < 16:
         return None
 
     best = None
