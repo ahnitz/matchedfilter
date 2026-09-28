@@ -2,6 +2,22 @@
 
 Alpha releases may change the API. Pin a version for reproducible work.
 
+## Unreleased
+
+- Recalculate both fleet measurements at `main` `ce9c828`. The six-machine
+  hardware comparison moves to
+  [teaser-fleet-20260927](docs/measurements/teaser-fleet-20260927.md); the
+  September 26 page is kept for history. Fixed FFTW/rocFFT references
+  reproduce within 0.8% on the four uncontended machines, and the change is
+  concentrated in hierarchical mode at tight budgets: `fd=1e-4` CPU improves
+  15-38% on those hosts. Full-output and peak-only are flat within noise.
+- Record the PyCBC complete-search fleet benchmark for `ce9c828` in
+  [pycbc-main-ce9c828-fleet-20260927](docs/measurements/pycbc-main-ce9c828-fleet-20260927/README.md).
+  Against the previously documented head `c38f24f`: Haswell +5.3%, dev4 +4.1%,
+  dev3 +3.3%, dev2 +1.1%, sugwg-login2 -0.2%, dev1 -1.2%. The Haswell gain is
+  the first measured on that host in this line of work. Correctness for this
+  revision is not yet established; the numbers are timing only.
+
 ## 0.1.0a6
 
 - Optimize the Haswell hierarchical coarse path with specialized FFT32
