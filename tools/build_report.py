@@ -1799,7 +1799,7 @@ def main():
         for f in sorted(os.listdir(src)):
             if f.endswith(".svg"):
                 shutil.copyfile(os.path.join(src, f), os.path.join(dst, f))
-        fleet = os.path.join(a.root, 'docs', 'measurements', 'teaser-fleet-20260927.json')
+        fleet = os.path.join(a.root, 'docs', 'measurements', 'teaser-fleet-20260928.json')
         if os.path.isfile(fleet):
             shutil.copyfile(fleet, os.path.join(dst, os.path.basename(fleet)))
     print("wrote %d pages to %s/ from %d run(s): %s"

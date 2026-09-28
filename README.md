@@ -134,6 +134,13 @@ synchronization. Hierarchical bars show requested FDR budgets 1e-2, 1e-3 and
 two panels use separate scales; compare their printed values. This is a
 workload example, not a speed guarantee.
 
+This figure is from revision `ce9c828`; the current revision is not plotted
+here because the only host with this GPU has been under heavy unrelated load
+since (a re-measurement put its fixed FFTW reference at 200 ms against 70 ms
+idle, so it would be three times slow rather than merely noisy). For current
+numbers on six machines, measured with the fixed references as controls, see
+the [hardware comparison](docs/measurements/teaser-fleet-20260928.md).
+
 **The CPU panel was measured on a loaded host and understates this hardware.**
 An unrelated workload was saturating memory bandwidth: the FFTW reference,
 which contains no matchedfilter code, took 108.9 ms against 70.5 ms on the
@@ -141,7 +148,7 @@ same idle machine, so the CPU bars are roughly a third slow and the CPU
 hierarchy bars are noisy besides. The GPU panel is unaffected — rocFFT
 reproduces to 0.5%, since the Radeon has its own memory. For a comparison
 measured across six machines with the fixed references used as controls, see
-the [hardware comparison](docs/measurements/teaser-fleet-20260927.md), where
+the [hardware comparison](docs/measurements/teaser-fleet-20260928.md), where
 the threshold and output mode are both selectable.
 
 The [flat](https://ahnitz.github.io/matchedfilter/benchmarks.html) and
