@@ -176,6 +176,11 @@ class _Buffer:
         ctypes.memmove(out.ctypes.data, self.ptr, out.nbytes)
         return out
 
+    def read_into(self, out):
+        """Zero-copy direct read into caller-provided contiguous array."""
+        ctypes.memmove(out.ctypes.data, self.ptr, min(self.nbytes, out.nbytes))
+        return out
+
     def destroy(self):
         if self.handle:
             self.ctx.o.call(self.handle, b"release")
@@ -742,7 +747,7 @@ class Context(InputUploads):
         self._check_completed(cmd)
         self._record_gpu_time(cmd)
         if shared_buffer(out, self) is None:
-            out[:] = bo.read(np.float32, out.size*2).view(np.complex64).reshape(out.shape)
+            bo.read_into(out)
 
     @_autoreleased
     def _tierc_tile(self, n, data, tmpl, out, upload_data, upload_tmpl):
@@ -784,7 +789,7 @@ class Context(InputUploads):
         self._check_completed(cmd)
         self._record_gpu_time(cmd)
         if shared_buffer(out, self) is None:
-            out[:] = bo.read(np.float32, out.size*2).view(np.complex64).reshape(out.shape)
+            bo.read_into(out)
 
     @_autoreleased
     def correlate_continuous(self, n, data, tmpl, starts, out, lo, hi,
