@@ -450,6 +450,41 @@ def test_cascade_signal_retention_and_scalloping():
                 assert peak_idx >= 0, f"Signal lost at SNR {snr_test}, lag {lag}"
                 assert peak_val >= 5.5, f"Peak {peak_val:.3f} below 5.5 at SNR {snr_test}, lag {lag}"
 
+    # Explicit reproduction test under noise:
+    # A signal at SNR 5.985 at the worst-case scalloping trough (offset = 4.0 samples on m1=512)
+    # suffers a 0.711 SNR scalloping loss (noiseless peak drops from 5.736 to 5.025).
+    # Under old hardcoded/unmargined gate (g1=4.740), negative noise fluctuations caused
+    # a 3.2% - 3.6% false dismissal rate on signals detected by the full un-decimated filter.
+    # We verify that under the calibrated gate (g1=4.202), 0 misses occur across noisy trials.
+    worst_lag = 1024 + 4.0
+    phase_shift = np.exp(2j * np.pi * worst_lag * k / n).astype(np.complex64)
+    sig_scallop = (5.985 * h_freq * phase_shift).astype(np.complex64)
+
+    mf_full = mf.MatchedFilter(n, ndata=1, ntemplates=1)
+    mf_full.set_templates(h_conj[None, :])
+
+    rng = np.random.default_rng(42)
+    detected_full = 0
+    missed_cascade = 0
+    for _ in range(150):
+        noise = (rng.standard_normal(n, dtype=np.float32) + 1j * rng.standard_normal(n, dtype=np.float32))
+        d = sig_scallop + noise
+        mf_full.set_data(d[None, :])
+        res = mf_full.run(binsize=n, threshold=5.5)
+        if abs(res['value'][0, 0, 0]) < 5.5:
+            continue
+        detected_full += 1
+
+        hmf.set_data(0, d)
+        hmf.run(0, 1, 0, 1, n, 5.5, 0, n, empty_idx, empty_val, mag_buf, cnt_buf, p_cascade)
+        if p_cascade[0, 0]['index'] < 0 or abs(p_cascade[0, 0]['value']) < 5.5:
+            missed_cascade += 1
+
+    assert detected_full >= 100, f"Expected >= 100 detections, got {detected_full}"
+    assert missed_cascade == 0, (
+        f"Cascade missed {missed_cascade} / {detected_full} detections at worst-case scalloping trough"
+    )
+
 
 def test_cascade_subset_semantics():
     """Document and test intra-plan subset semantics vs cross-configuration behavior.
