@@ -776,6 +776,7 @@ class MatchedFilter:
         policy = self._series_policy(operation, band, nt)
         if policy:
             batch = min(batch, policy['series_group'])
+        single = len(layout.groups) == 1 and nblk <= batch
         pipelined = hasattr(self._gpu, "_get_fence") and getattr(self._gpu, "cache_limit_bytes", 10**9) > 1024 * 1024 and not single
         queue_ahead = int(os.environ.get("MF_GPU_QUEUE_AHEAD", "8"))
         K = max(1, queue_ahead) if pipelined else 1
