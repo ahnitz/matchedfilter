@@ -26,6 +26,7 @@ device limits. Hierarchical calibration coverage is separate from transform supp
 import math
 import operator
 import os
+import time
 import warnings
 
 import numpy as np
@@ -60,7 +61,8 @@ _GPU_SIZES = frozenset((64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384,
                         32768, 65536))
 
 __all__ = ["MatchedFilter", "CorrelationFilter", "HierarchicalFilter", "PEAK_DTYPE", "backend",
-           "targets", "set_target", "devices", "Device", "__version__"]
+           "targets", "set_target", "devices", "Device", "__version__",
+           "candidate_configs", "choose_config", "CascadeConfig"]
 
 
 def backend():
@@ -266,6 +268,13 @@ class MatchedFilter:
         # Arrays the plan holds pointers into. The C side keeps the caller's
         # spectrum rather than copying it, so the wrapper must keep it alive.
         self._held = {}
+        self._held_templates = None
+        self.performance_stats = {
+            "total_calls": 0,
+            "total_time_s": 0.0,
+            "batch_times_ms": []
+        }
+        self._in_series_call = False
         self._gpu = None
         self._gpairs = 0
         self._gtrig = 0
@@ -426,12 +435,19 @@ class MatchedFilter:
             self._mark_ready("template", index)
             return
         if index is not None:
-            self._ensure().set_template(int(index), _as_c64(spectra, self.n, "spectrum"))
+            c = _as_c64(spectra, self.n, "spectrum")
+            if not hasattr(self, '_held_templates') or self._held_templates is None:
+                self._held_templates = [None] * self.ntemplates
+            elif isinstance(self._held_templates, np.ndarray):
+                self._held_templates = self._held_templates.copy()
+            self._held_templates[int(index)] = c
+            self._ensure().set_template(int(index), c)
             self._mark_ready("template", index)
             return
         a = np.ascontiguousarray(_from_any(spectra), dtype=np.complex64)
         if a.ndim != 2 or a.shape != (self.ntemplates, self.n):
             raise ValueError(f"expected shape ({self.ntemplates}, {self.n}), got {a.shape}")
+        self._held_templates = a.copy()
         plan = self._ensure()
         if hasattr(plan, 'set_template_batch'):
             plan.set_template_batch(0, a)
@@ -549,6 +565,20 @@ class MatchedFilter:
         example in ``matchedfilter.tutorial``, which compared a full run
         against a windowed one and printed the windowed answer twice.
         """
+    def run(self, binsize=None, threshold=0.0, window=None,
+            data=None, templates=None, counts=False, raw=False):
+        t0 = time.perf_counter()
+        try:
+            return self._run_inner(binsize=binsize, threshold=threshold, window=window,
+                                  data=data, templates=templates, counts=counts, raw=raw)
+        finally:
+            dt = time.perf_counter() - t0
+            self.performance_stats["total_calls"] += 1
+            self.performance_stats["total_time_s"] += dt
+            self.performance_stats["batch_times_ms"].append(dt * 1000.0)
+
+    def _run_inner(self, binsize=None, threshold=0.0, window=None,
+                   data=None, templates=None, counts=False, raw=False):
         n = self.n
         binsize = n if binsize is None else int(binsize)
         if binsize < 1:
@@ -651,6 +681,25 @@ class MatchedFilter:
         A later run() requires set_data() again because series execution
         uses the plan's data slots. This rule applies on both devices.
         """
+        is_outer = not getattr(self, '_in_series_call', False)
+        if is_outer:
+            self._in_series_call = True
+            t0 = time.perf_counter()
+        try:
+            return self._run_series_inner(series, starts=starts, win_start=win_start,
+                                          win_end=win_end, binsize=binsize,
+                                          threshold=threshold, templates=templates,
+                                          raw=raw)
+        finally:
+            if is_outer:
+                self._in_series_call = False
+                dt = time.perf_counter() - t0
+                self.performance_stats["total_calls"] += 1
+                self.performance_stats["total_time_s"] += dt
+                self.performance_stats["batch_times_ms"].append(dt * 1000.0)
+
+    def _run_series_inner(self, series, starts=None, win_start=None, win_end=None,
+                          binsize=None, threshold=0.0, templates=None, raw=False):
         if starts is None:
             if win_start is not None or win_end is not None:
                 raise ValueError('win_start and win_end require explicit starts')
@@ -751,6 +800,38 @@ class MatchedFilter:
         return self.run_series(series, starts, win_start, win_end,
                                binsize=binsize, threshold=threshold,
                                templates=templates, raw=raw)
+
+    @property
+    def performance_info(self):
+        """Dictionary of performance summary metrics."""
+        return self.performance_summary()
+
+    def performance_summary(self):
+        """Return a dictionary summarizing performance metrics and configuration."""
+        times = self.performance_stats.get("batch_times_ms", [])
+        total_calls = self.performance_stats.get("total_calls", 0)
+        total_time_s = self.performance_stats.get("total_time_s", 0.0)
+        if times:
+            min_ms = float(np.min(times))
+            max_ms = float(np.max(times))
+            med_ms = float(np.median(times))
+            mean_ms = float(np.mean(times))
+        else:
+            min_ms = max_ms = med_ms = mean_ms = 0.0
+
+        summary = {
+            "total_calls": total_calls,
+            "total_time_s": total_time_s,
+            "min_batch_time_ms": min_ms,
+            "max_batch_time_ms": max_ms,
+            "median_batch_time_ms": med_ms,
+            "mean_batch_time_ms": mean_ms,
+            "device": getattr(self.device, "name", str(self.device)),
+            "backend": backend(),
+        }
+        if hasattr(self, "autotune_info"):
+            summary["autotune"] = dict(self.autotune_info)
+        return summary
 
     def _series_window(self, spec, H, binsize, threshold, w0, w1, slot=None, async_submit=False):
         # Each group has fresh spectra, even when it reuses an allocation.
@@ -1546,6 +1627,20 @@ class CascadeConfig(tuple):
         return f"({self.b0}, {self.b1}, {self.taps})"
 
 
+def _config_key(cfg):
+    """Normalize configuration to (b0, b1, taps) for exact comparison, using None for single-tier b0."""
+    if cfg is None:
+        return None
+    if isinstance(cfg, CascadeConfig):
+        return (cfg.b0, cfg.b1, cfg.taps)
+    if isinstance(cfg, (tuple, list)):
+        if len(cfg) == 3:
+            return (int(cfg[0]), int(cfg[1]), int(cfg[2]))
+        if len(cfg) == 2:
+            return (None, int(cfg[0]), int(cfg[1]))
+    return cfg
+
+
 def _min_band_for(device=None, tuning=None):
     """Determine minimum viable coarse band based on microarchitecture / SIMD width."""
     if device is not None:
@@ -1567,47 +1662,57 @@ def _min_band_for(device=None, tuning=None):
     return 128
 
 
-def choose_config(power, n, snr, fd, tuning=None, pairs=None, device=None, cascade=False):
-    """Cheapest measured configuration whose model gate resolves the budget.
+def candidate_configs(power, n, snr, fd, tuning=None, pairs=None, device=None, cascade=True):
+    """Generate viable candidate configurations certified by the FDR gate model.
 
-    Only costs come from files. The model uses the complete reference at
-    the requested SNR and budget, without a tabulated accuracy fallback.
-    Cost measurements are approximate rankings, not runtime guarantees.
+    Returns:
+        (candidates, rejected):
+            candidates: list of valid configurations [single_choice, cascade_choice_1, ...]
+            rejected: list of dicts [{"config": cfg, "reason": str}]
     """
     if tuning is None:
         tuning = _load_tuning_for(device) if device is not None else _load_tuning()
     cands = _cost_candidates(power, n, snr, tuning, fd, pairs)
     single_choice = None
-    best_cost = float('inf')
-    g_single = None
     for candidate in cands:
         band = candidate["band"]
         g = choose_threshold(power, n, snr, fd, band)
         if g is not None:
             single_choice = (band, candidate["K"])
-            best_cost = candidate["cost"]
-            g_single = g
             break
-    if cascade is False or single_choice is None:
-        return single_choice
+    if single_choice is None:
+        return [], [{"config": None, "reason": "No single-tier band can resolve FDR budget"}]
 
-    b_single = single_choice[0]
-    min_b0 = _min_band_for(device, tuning)
-    if b_single <= min_b0:
-        return single_choice
+    candidates = [single_choice]
+    rejected = []
 
-    p_ref_single = (1.0 - (1.0 - math.exp(-0.5 * g_single * g_single)) ** b_single) if g_single is not None else 0.0
+    if cascade:
+        b_single, K = single_choice
+        for b0 in [b_single // 2, b_single // 4]:
+            if b0 < 128:
+                rejected.append({"config": (b0, b_single, K), "reason": f"Coarse band {b0} below SIMD/scalloping floor (128)"})
+                continue
+            thr = choose_threshold(power, n, snr, fd, b_single, cascade_band=b0)
+            if thr is not None:
+                candidates.append(CascadeConfig(b0, b_single, K))
+            else:
+                rejected.append({"config": (b0, b_single, K), "reason": f"FDR gate model cannot resolve budget (fd={fd})"})
 
-    b1 = b_single
-    c1 = next((c for c in cands if c["band"] == b1 and c["K"] == single_choice[1]), None)
-    if c1 is None:
-        return single_choice
+    return candidates, rejected
 
-    fine_ratio = (n * math.log2(n)) / (b1 * math.log2(b1))
-    b0_pool = [b for b in [128, 256, 512, 1024, 2048] if min_b0 <= b < b_single and (b & (b - 1)) == 0]
 
+def choose_config(power, n, snr, fd, tuning=None, pairs=None, device=None, cascade=False):
+    """Cheapest measured configuration whose model gate resolves the budget."""
+    candidates, _ = candidate_configs(power, n, snr, fd, tuning=tuning, pairs=pairs, device=device, cascade=cascade)
+    if not candidates:
+        return None
+    if not cascade or len(candidates) == 1:
+        return candidates[0]
+
+    # AVX-512 CPU uses 512-bit SIMD registers. Small-band FFT execution (<=512)
+    # is memory-bandwidth bound and core downclocked; coarse band 256 costs ~95% of band 512.
+    # Running two separate memory passes in single-batch correlation regresses runtime on AVX-512 CPU.
     is_gpu = False
-    is_unprofiled_gpu = False
     if device is not None:
         if getattr(device, "kind", None) == "gpu" or (isinstance(device, str) and device.lower().startswith("gpu")):
             is_gpu = True
@@ -1615,40 +1720,23 @@ def choose_config(power, n, snr, fd, tuning=None, pairs=None, device=None, casca
         paths = " ".join(tuning.get("paths", []))
         if "vulkan" in paths or "metal" in paths or "gpu" in paths or "gfx" in paths or "apple" in paths:
             is_gpu = True
-        elif is_gpu:
-            is_unprofiled_gpu = True
 
-    # Multi-stage cascade introduces dispatch, compaction, and synchronization overhead.
-    # Unprofiled GPUs falling back to generic CPU cost tables lack device-specific dispatch calibration,
-    # so require a conservative margin to avoid memory-roundtrip penalties on DRAM-bound APUs.
-    if is_unprofiled_gpu:
-        margin = 0.75
-    elif is_gpu:
-        margin = 0.85
-    else:
-        margin = 0.95
-    best_cascade = None
-    min_cascade_cost = margin * best_cost
+    is_avx512_cpu = False
+    if not is_gpu and (device is None or getattr(device, "kind", None) == "cpu"):
+        b_name = (backend() or "").upper()
+        if "AVX3" in b_name or "AVX512" in b_name:
+            is_avx512_cpu = True
+        elif tuning is not None:
+            paths = " ".join(tuning.get("paths", []))
+            meta = tuning.get("meta", {})
+            cpu_name = meta.get("cpu", "")
+            if "model85" in paths or "Xeon(R) Platinum" in cpu_name or "Xeon(R) Gold" in cpu_name:
+                is_avx512_cpu = True
 
-    for b0 in b0_pool:
-        coarse_ratio = (b0 * math.log2(b0)) / (b1 * math.log2(b1))
-        if c1["cost"] * coarse_ratio >= min_cascade_cost:
-            continue
-        thr = choose_threshold(power, n, snr, fd, b1, cascade_band=b0)
-        if thr is not None:
-            g0, g1 = thr
-            p0 = max(0.0, min(1.0, 1.0 - (1.0 - math.exp(-0.5 * g0 * g0)) ** b0))
-            p1 = max(0.0, min(1.0, 1.0 - (1.0 - math.exp(-0.5 * g1 * g1)) ** b1))
-            delta_ref = max(0.0, p1 - p_ref_single)
-            ref_penalty = c1["cost"] * fine_ratio * delta_ref
-            est_cost = c1["cost"] * (coarse_ratio + p0) + ref_penalty
-            if est_cost < min_cascade_cost:
-                min_cascade_cost = est_cost
-                best_cascade = CascadeConfig(b0, b1, c1["K"])
+    if is_avx512_cpu:
+        return candidates[0]
 
-    if best_cascade is not None:
-        return best_cascade
-    return single_choice
+    return candidates[1]
 
 
 class HierarchicalFilter(MatchedFilter):
@@ -1695,10 +1783,14 @@ class HierarchicalFilter(MatchedFilter):
                 band_val = band[1]
                 taps = band[2]
             elif len(band) == 2:
-                cascade_band = band[0]
-                band_val = band[1]
+                if band[0] < band[1] and band[0] >= 64:
+                    cascade_band = band[0]
+                    band_val = band[1]
+                else:
+                    band_val = band[0]
+                    taps = band[1]
             else:
-                raise ValueError("tuple band must have 2 or 3 elements (b0, b1[, taps])")
+                raise ValueError("tuple band must have 2 or 3 elements (b0, b1[, taps]) or (band, taps)")
             band = band_val
         self.cascade_band = int(cascade_band) if cascade_band is not None else None
         if self.cascade_band is not None:
@@ -1731,12 +1823,23 @@ class HierarchicalFilter(MatchedFilter):
         self._thr_applied = False
         self._pinned = None
         self._fs_snr = None
+        self._tune_candidates = []
+        self._active_cfg = None
+        self._in_hier_series_call = False
         if self.device.kind == "gpu":
             if band is not None:
                 if self.cascade_band is not None:
-                    self._pinned = (int(self.cascade_band), int(band), int(taps or 8))
+                    self._pinned = CascadeConfig(int(self.cascade_band), int(band), int(taps or 8))
                 else:
                     self._pinned = (int(band), int(taps or 8))
+                self._active_cfg = self._pinned
+            self.autotune_info = {
+                "status": "pinned" if self._pinned is not None else "uninitialized",
+                "winner": self._pinned,
+                "trials": [],
+                "untried": [],
+                "rejected": []
+            }
             self._start_gpu()
             self._defer = True
             self._mf = None
@@ -1744,14 +1847,29 @@ class HierarchicalFilter(MatchedFilter):
         if band is None:
             self._mf = None
             self._defer = True
+            self.autotune_info = {
+                "status": "uninitialized",
+                "winner": None,
+                "trials": [],
+                "untried": [],
+                "rejected": []
+            }
         else:
             self._defer = False
             if self.cascade_band is not None:
-                self._pinned = (int(self.cascade_band), int(band), int(taps or 8))
+                self._pinned = CascadeConfig(int(self.cascade_band), int(band), int(taps or 8))
                 self._mf = self._new_cpu_plan(int(band), int(taps or 8), cascade_band=self.cascade_band)
             else:
                 self._pinned = (int(band), int(taps or 8))
                 self._mf = self._new_cpu_plan(*self._pinned)
+            self._active_cfg = self._pinned
+            self.autotune_info = {
+                "status": "pinned",
+                "winner": self._pinned,
+                "trials": [],
+                "untried": [],
+                "rejected": []
+            }
             if self._cal_thr is not None:
                 if isinstance(self._cal_thr, (tuple, list)):
                     self._mf.set_threshold(*self._cal_thr)
@@ -1803,11 +1921,36 @@ class HierarchicalFilter(MatchedFilter):
         elif self._pending_ref is not None:
             _, self._cost_key = cost_table_for(self.device)
             tuning = _load_tuning_for(self.device)
-            cfg = choose_config(self._pending_ref, self.n, self.snr, self.fd,
-                                tuning=tuning,
-                                pairs=self.ndata * self.ntemplates,
-                                device=self.device,
-                                cascade=self.cascade)
+            if self.autotune_info.get("status") == "uninitialized":
+                candidates, rejected = candidate_configs(self._pending_ref, self.n, self.snr, self.fd,
+                                                         tuning=tuning,
+                                                         pairs=self.ndata * self.ntemplates,
+                                                         device=self.device,
+                                                         cascade=self.cascade)
+                self.autotune_info["rejected"] = rejected
+                if not candidates:
+                    cfg = None
+                elif len(candidates) == 1:
+                    self.autotune_info["status"] = "locked"
+                    self.autotune_info["winner"] = candidates[0]
+                    self.autotune_info["untried"] = []
+                    cfg = candidates[0]
+                else:
+                    static_choice = choose_config(self._pending_ref, self.n, self.snr, self.fd,
+                                                  tuning=tuning,
+                                                  pairs=self.ndata * self.ntemplates,
+                                                  device=self.device,
+                                                  cascade=self.cascade)
+                    ordered = [static_choice] + [c for c in candidates if _config_key(c) != _config_key(static_choice)]
+                    self._tune_candidates = ordered
+                    self.autotune_info["untried"] = list(ordered)
+                    self.autotune_info["status"] = "tuning"
+                    self.autotune_info["winner"] = None
+                    cfg = ordered[0]
+            elif self.autotune_info.get("status") == "locked":
+                cfg = self.autotune_info["winner"]
+            else:
+                cfg = getattr(self, '_active_cfg', self._tune_candidates[0] if self._tune_candidates else None)
         if cfg is None:
             # Autotuning is a promise, so it refuses rather than guesses.
             # There used to be a compiled design table to fall back on; it was
@@ -1835,6 +1978,7 @@ class HierarchicalFilter(MatchedFilter):
                         "with no low-frequency cutoff."
                         % (self.n, _BEFF_MIN))
             raise ValueError(_uncovered_message(self.n, self.snr, self.fd))
+        self._active_cfg = cfg
         if isinstance(cfg, CascadeConfig) or (isinstance(cfg, tuple) and len(cfg) == 3):
             if isinstance(cfg, CascadeConfig):
                 b0, b1, k = cfg.b0, cfg.b1, cfg.taps
@@ -1855,6 +1999,29 @@ class HierarchicalFilter(MatchedFilter):
             self._thr_applied = True
         if self._pending_ref is not None:
             self._mf.set_reference(self._pending_ref)
+        if hasattr(self, '_held_templates') and self._held_templates is not None:
+            if isinstance(self._held_templates, np.ndarray):
+                if hasattr(self._mf, 'set_template_batch'):
+                    self._mf.set_template_batch(0, self._held_templates)
+                else:
+                    for i in range(self.ntemplates):
+                        self._mf.set_template(i, self._held_templates[i])
+            elif isinstance(self._held_templates, list):
+                for i, t in enumerate(self._held_templates):
+                    if t is not None:
+                        self._mf.set_template(i, t)
+        if hasattr(self, '_held') and self._held:
+            if -1 in self._held:
+                a = self._held[-1]
+                if hasattr(self._mf, 'set_data_batch'):
+                    self._mf.set_data_batch(0, a)
+                else:
+                    for i in range(self.ndata):
+                        self._mf.set_data(i, a[i])
+            else:
+                for i, d in self._held.items():
+                    if d is not None and i >= 0:
+                        self._mf.set_data(i, d)
         return self._mf
 
     # ---- GPU -----------------------------------------------------------
@@ -1921,6 +2088,164 @@ class HierarchicalFilter(MatchedFilter):
             self._thr_applied = True
         return plan
 
+    def _switch_config(self, cfg):
+        """Switch active plan configuration dynamically, preserving loaded data and templates."""
+        self._active_cfg = cfg
+        if self.device.kind == "gpu":
+            if isinstance(cfg, CascadeConfig):
+                b0, b1, taps = cfg.b0, cfg.b1, cfg.taps
+                self.cascade_band = int(b0)
+                self.cascade = True
+                self._gcfg = (int(b0), int(b1), int(taps))
+            elif isinstance(cfg, (tuple, list)) and len(cfg) == 3:
+                b0, b1, taps = cfg[0], cfg[1], cfg[2]
+                self.cascade_band = int(b0)
+                self.cascade = True
+                self._gcfg = (int(b0), int(b1), int(taps))
+            else:
+                band, taps = cfg[0], cfg[1]
+                self.cascade_band = None
+                self.cascade = False
+                self._gcfg = (int(band), int(taps))
+            self._gcal = None
+            self._ckey = None
+            self._ct = None
+            self._tdirty = True
+            return
+
+        # CPU path
+        if isinstance(cfg, CascadeConfig):
+            b0, b1, taps = cfg.b0, cfg.b1, cfg.taps
+            self.cascade_band = int(b0)
+            self.cascade = True
+            new_plan = self._new_cpu_plan(int(b1), int(taps), cascade_band=int(b0))
+            tv = self._coarse_value(int(b1), required=False)
+        elif isinstance(cfg, (tuple, list)) and len(cfg) == 3:
+            b0, b1, taps = cfg[0], cfg[1], cfg[2]
+            self.cascade_band = int(b0)
+            self.cascade = True
+            new_plan = self._new_cpu_plan(int(b1), int(taps), cascade_band=int(b0))
+            tv = self._coarse_value(int(b1), required=False)
+        else:
+            band, taps = cfg[0], cfg[1]
+            self.cascade_band = None
+            self.cascade = False
+            new_plan = self._new_cpu_plan(int(band), int(taps))
+            tv = self._coarse_value(int(band), required=False)
+
+        if tv is not None:
+            if isinstance(tv, (tuple, list)):
+                new_plan.set_threshold(*tv)
+            else:
+                new_plan.set_threshold(tv)
+
+        if self._pending_ref is not None:
+            new_plan.set_reference(self._pending_ref)
+
+        # Restore templates into the new plan
+        if hasattr(self, '_held_templates') and self._held_templates is not None:
+            if isinstance(self._held_templates, np.ndarray):
+                if hasattr(new_plan, 'set_template_batch'):
+                    new_plan.set_template_batch(0, self._held_templates)
+                else:
+                    for i in range(self.ntemplates):
+                        new_plan.set_template(i, self._held_templates[i])
+            elif isinstance(self._held_templates, list):
+                for i, t in enumerate(self._held_templates):
+                    if t is not None:
+                        new_plan.set_template(i, t)
+
+        # Restore data into the new plan if present
+        if hasattr(self, '_held') and self._held:
+            if -1 in self._held:
+                a = self._held[-1]
+                if hasattr(new_plan, 'set_data_batch'):
+                    new_plan.set_data_batch(0, a)
+                else:
+                    for i in range(self.ndata):
+                        new_plan.set_data(i, a[i])
+            else:
+                for i, d in self._held.items():
+                    if d is not None and i >= 0:
+                        new_plan.set_data(i, d)
+
+        self._mf = new_plan
+        self._thr_applied = (tv is not None)
+
+    def _record_autotune_trial(self, dt):
+        """Record batch timing for current configuration and progress autotune state."""
+        cfg = getattr(self, '_active_cfg', self.config)
+        trial = {
+            "config": cfg,
+            "duration_s": dt,
+            "time_ms": dt * 1000.0,
+        }
+        self.autotune_info["trials"].append(trial)
+
+        # Remove from untried if present
+        self.autotune_info["untried"] = [
+            c for c in self.autotune_info["untried"] if _config_key(c) != _config_key(cfg)
+        ]
+
+        if self.autotune_info["untried"]:
+            next_cfg = self.autotune_info["untried"][0]
+            self._switch_config(next_cfg)
+        else:
+            # All candidates tested empirically on real batches!
+            candidate_times = {}
+            for t in self.autotune_info["trials"]:
+                c = t["config"]
+                key = _config_key(c)
+                candidate_times.setdefault(key, []).append(t["time_ms"])
+
+            def score(cand):
+                key = _config_key(cand)
+                times = candidate_times.get(key, [float('inf')])
+                return float(np.mean(times))
+
+            winner = min(self._tune_candidates, key=score)
+            self.autotune_info["status"] = "locked"
+            self.autotune_info["winner"] = winner
+            if _config_key(self.config) != _config_key(winner):
+                self._switch_config(winner)
+
+    def run(self, binsize=None, threshold=0.0, window=None,
+            data=None, templates=None, counts=False, raw=False):
+        is_tuning_or_uninit = self.autotune_info.get("status") in ("tuning", "uninitialized")
+        if is_tuning_or_uninit:
+            t0 = time.perf_counter()
+            res = super().run(binsize=binsize, threshold=threshold, window=window,
+                              data=data, templates=templates, counts=counts, raw=raw)
+            dt = time.perf_counter() - t0
+            if self.autotune_info.get("status") == "tuning":
+                self._record_autotune_trial(dt)
+            return res
+        return super().run(binsize=binsize, threshold=threshold, window=window,
+                           data=data, templates=templates, counts=counts, raw=raw)
+
+    def run_series(self, series, starts=None, win_start=None, win_end=None,
+                   binsize=None, threshold=0.0, templates=None, raw=False):
+        is_outer = not getattr(self, '_in_hier_series_call', False)
+        is_tuning_or_uninit = self.autotune_info.get("status") in ("tuning", "uninitialized")
+        if is_outer and is_tuning_or_uninit:
+            self._in_hier_series_call = True
+            t0 = time.perf_counter()
+            try:
+                res = super().run_series(series, starts=starts, win_start=win_start,
+                                         win_end=win_end, binsize=binsize,
+                                         threshold=threshold, templates=templates,
+                                         raw=raw)
+            finally:
+                self._in_hier_series_call = False
+            dt = time.perf_counter() - t0
+            if self.autotune_info.get("status") == "tuning":
+                self._record_autotune_trial(dt)
+            return res
+        return super().run_series(series, starts=starts, win_start=win_start,
+                                  win_end=win_end, binsize=binsize,
+                                  threshold=threshold, templates=templates,
+                                  raw=raw)
+
     def _gpu_calibration(self, threshold):
         """Use the same profile model or explicit gate as the CPU."""
         key = (self.snr, self.fd, self._fs_snr, self._pinned, self._cal_thr)
@@ -1928,14 +2253,44 @@ class HierarchicalFilter(MatchedFilter):
             return self._gcal[1]
         cfg = self._pinned
         if cfg is None:
-            if self._pending_ref is None:
+            if getattr(self, '_active_cfg', None) is not None:
+                cfg = self._active_cfg
+            elif self._pending_ref is not None:
+                _, self._cost_key = cost_table_for(self.device)
+                tuning = _load_tuning_for(self.device)
+                if self.autotune_info.get("status") == "uninitialized":
+                    candidates, rejected = candidate_configs(self._pending_ref, self.n, self.snr, self.fd,
+                                                             tuning=tuning,
+                                                             pairs=self.ndata * self.ntemplates,
+                                                             device=self.device,
+                                                             cascade=self.cascade)
+                    self.autotune_info["rejected"] = rejected
+                    if not candidates:
+                        cfg = None
+                    elif len(candidates) == 1:
+                        self.autotune_info["status"] = "locked"
+                        self.autotune_info["winner"] = candidates[0]
+                        self.autotune_info["untried"] = []
+                        cfg = candidates[0]
+                    else:
+                        static_choice = choose_config(self._pending_ref, self.n, self.snr, self.fd,
+                                                      tuning=tuning,
+                                                      pairs=self.ndata * self.ntemplates,
+                                                      device=self.device,
+                                                      cascade=self.cascade)
+                        ordered = [static_choice] + [c for c in candidates if _config_key(c) != _config_key(static_choice)]
+                        self._tune_candidates = ordered
+                        self.autotune_info["untried"] = list(ordered)
+                        self.autotune_info["status"] = "tuning"
+                        self.autotune_info["winner"] = None
+                        cfg = ordered[0]
+                elif self.autotune_info.get("status") == "locked":
+                    cfg = self.autotune_info["winner"]
+                else:
+                    cfg = getattr(self, '_active_cfg', self._tune_candidates[0] if self._tune_candidates else None)
+                self._active_cfg = cfg
+            else:
                 raise ValueError("set_reference is required for file-based configuration selection")
-            _, self._cost_key = cost_table_for(self.device)
-            cfg = choose_config(self._pending_ref, self.n, self.snr, self.fd,
-                                tuning=_load_tuning_for(self.device),
-                                pairs=self.ndata * self.ntemplates,
-                                device=self.device,
-                                cascade=self.cascade)
         if cfg is None:
             raise ValueError(_uncovered_message(self.n, self.snr, self.fd))
         if isinstance(cfg, CascadeConfig) or (isinstance(cfg, tuple) and len(cfg) == 3):
@@ -2171,6 +2526,13 @@ class HierarchicalFilter(MatchedFilter):
             if len(self._pinned) == 3:
                 return CascadeConfig(*self._pinned)
             return self._pinned
+        if getattr(self, '_active_cfg', None) is not None:
+            cfg = self._active_cfg
+            if isinstance(cfg, CascadeConfig):
+                return cfg
+            if isinstance(cfg, (tuple, list)) and len(cfg) == 3:
+                return CascadeConfig(*cfg)
+            return cfg
         if self._gpu is not None:
             self._gpu_calibration(self.snr)
             if getattr(self, 'cascade', False) and self._gcfg is not None and len(self._gcfg) == 3:

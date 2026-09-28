@@ -584,5 +584,189 @@ def test_cascade_simd_width_floor():
         assert _min_band_for(None, avx2_tuning) == 128
 
 
+def test_candidate_configs_viable_and_rejected():
+    """Verify candidate_configs returns viable candidates and detailed rejection reasons."""
+    n = 4096
+    power = inspiral_power(n)
+    candidates, rejected = mf.candidate_configs(power, n, 5.5, 1e-3, cascade=True)
+
+    assert len(candidates) >= 1
+    # First candidate is always the single-tier baseline
+    single_choice = candidates[0]
+    assert len(single_choice) == 2
+    assert single_choice[0] in (256, 512, 1024, 2048)
+
+    # Subsequent candidates are cascade configs
+    for c in candidates[1:]:
+        assert hasattr(c, "b0") and hasattr(c, "b1")
+        assert c.b0 < c.b1
+        assert c.b0 >= 128
+
+    # Rejection list structure validation
+    for r in rejected:
+        assert "config" in r
+        assert "reason" in r
+        assert isinstance(r["reason"], str)
+
+    # When cascade=False, only single-tier is returned
+    c_single, r_single = mf.candidate_configs(power, n, 5.5, 1e-3, cascade=False)
+    assert len(c_single) == 1
+    assert c_single[0] == single_choice
+    assert len(r_single) == 0
+
+
+def test_hierarchical_runtime_autotuning_over_batches():
+    """Verify runtime autotuning executes real work, evaluates candidate pool, and locks winner."""
+    n = 4096
+    power = inspiral_power(n)
+    h = np.sqrt(power).astype(np.complex64)
+    h_conj = np.conj(h)
+
+    nd, nt = 2, 4
+    hf = mf.HierarchicalFilter(n, nd, nt, snr=5.5, fd=1e-3, cascade=True)
+    assert hf.autotune_info["status"] == "uninitialized"
+    assert hf.autotune_info["winner"] is None
+
+    hf.set_reference(power)
+    hf.set_templates(np.repeat(h_conj[None, :], nt, axis=0))
+
+    rng = np.random.default_rng(2026)
+    noise = (rng.standard_normal((nd, n)) + 1j * rng.standard_normal((nd, n))).astype(np.complex64)
+    # Inject signal in (0, 0)
+    noise[0] += (7.5 * h).astype(np.complex64)
+    hf.set_data(noise)
+
+    # Candidate pool count
+    cands, _ = mf.candidate_configs(power, n, 5.5, 1e-3, device=hf.device, cascade=True)
+
+    # If only 1 candidate, it locks immediately
+    if len(cands) == 1:
+        peaks = hf.run(binsize=n, threshold=5.0)
+        assert hf.autotune_info["status"] == "locked"
+        assert hf.autotune_info["winner"] == cands[0]
+        assert peaks[0, 0, 0]["index"] >= 0
+        return
+
+    # Multiple candidates: run batches to trigger trials and winner selection
+    assert len(cands) > 1
+
+    # Batch 1
+    res1 = hf.run(binsize=n, threshold=5.0)
+    assert res1[0, 0, 0]["index"] >= 0
+    assert len(hf.autotune_info["trials"]) == 1
+    assert hf.autotune_info["status"] in ("tuning", "locked")
+
+    # Run remaining trials to finish tuning
+    n_batches = len(cands) + 2
+    for b in range(2, n_batches + 1):
+        noise = (rng.standard_normal((nd, n)) + 1j * rng.standard_normal((nd, n))).astype(np.complex64)
+        noise[0] += (7.5 * h).astype(np.complex64)
+        hf.set_data(noise)
+        res = hf.run(binsize=n, threshold=5.0)
+        assert res[0, 0, 0]["index"] >= 0
+
+    # After evaluating all candidates, status must be locked
+    assert hf.autotune_info["status"] == "locked"
+    assert hf.autotune_info["winner"] in cands
+    assert len(hf.autotune_info["untried"]) == 0
+    assert len(hf.autotune_info["trials"]) >= len(cands)
+
+    # Run another batch: status remains locked
+    winner = hf.autotune_info["winner"]
+    hf.set_data(noise)
+    hf.run(binsize=n, threshold=5.0)
+    assert hf.autotune_info["status"] == "locked"
+    assert hf.autotune_info["winner"] == winner
+    assert hf.config == winner
+
+
+def test_hierarchical_runtime_autotuning_series():
+    """Verify runtime autotuning functions seamlessly with run_series batches."""
+    n = 4096
+    power = inspiral_power(n)
+    h = np.sqrt(power).astype(np.complex64)
+    h_conj = np.conj(h)
+
+    nt = 4
+    hf = mf.HierarchicalFilter(n, 1, nt, snr=5.5, fd=1e-3, cascade=True, valid=(0, n))
+    hf.set_reference(power)
+    hf.set_templates(np.repeat(h_conj[None, :], nt, axis=0))
+
+    rng = np.random.default_rng(42)
+    series_len = n * 4
+    series = (rng.standard_normal(series_len) + 1j * rng.standard_normal(series_len)).astype(np.complex64)
+
+    # Filter 3 separate series batches
+    for _ in range(4):
+        res = hf.run_series(series, binsize=n, threshold=5.0)
+        assert res.shape[0] > 0
+
+    assert hf.performance_stats["total_calls"] >= 4
+    assert len(hf.performance_stats["batch_times_ms"]) >= 4
+    assert hf.autotune_info["status"] in ("tuning", "locked")
+
+
+def test_performance_tracking_and_summary():
+    """Verify lightweight performance self-tracking and performance_summary() output."""
+    n = 2048
+    f = mf.MatchedFilter(n, ndata=2, ntemplates=2)
+    assert f.performance_stats["total_calls"] == 0
+    assert f.performance_stats["total_time_s"] == 0.0
+
+    d = np.zeros((2, n), dtype=np.complex64)
+    h = np.zeros((2, n), dtype=np.complex64)
+    f.set_data(d)
+    f.set_templates(h)
+
+    f.run(threshold=0.0)
+    f.run(threshold=0.0)
+
+    summary = f.performance_summary()
+    assert summary["total_calls"] == 2
+    assert summary["total_time_s"] > 0.0
+    assert summary["min_batch_time_ms"] > 0.0
+    assert summary["max_batch_time_ms"] >= summary["min_batch_time_ms"]
+    assert summary["median_batch_time_ms"] >= summary["min_batch_time_ms"]
+    assert summary["mean_batch_time_ms"] >= summary["min_batch_time_ms"]
+    assert "device" in summary
+    assert "backend" in summary
+    assert f.performance_info == summary
+
+
+def test_hierarchical_pinned_configuration_reproducibility():
+    """Verify pinning configuration via band=(b0, b1, taps) guarantees exact reproducibility without tuning."""
+    n = 4096
+    power = inspiral_power(n)
+    h = np.sqrt(power).astype(np.complex64)
+
+    # Pin explicitly to (256, 1024, 8)
+    hf = mf.HierarchicalFilter(n, 1, 2, snr=5.5, fd=1e-3, band=(256, 1024, 8))
+    assert hf.autotune_info["status"] == "pinned"
+    assert hf.autotune_info["winner"] == (256, 1024, 8)
+    assert hf.autotune_info["untried"] == []
+    assert hf.cascade_config == (256, 1024, 8)
+    assert hf.band == (256, 1024)
+
+    hf.set_reference(power)
+    hf.set_templates(np.repeat(np.conj(h)[None, :], 2, axis=0))
+
+    rng = np.random.default_rng(88)
+    d = (rng.standard_normal((1, n)) + 1j * rng.standard_normal((1, n))).astype(np.complex64)
+    hf.set_data(d)
+
+    res = hf.run(binsize=n, threshold=5.0)
+    assert res.shape == (1, 2, 1)
+
+    # Status must stay pinned, no autotune trials triggered
+    assert hf.autotune_info["status"] == "pinned"
+    assert len(hf.autotune_info["trials"]) == 0
+
+    summary = hf.performance_summary()
+    assert summary["total_calls"] == 1
+    assert summary["autotune"]["status"] == "pinned"
+    assert summary["autotune"]["winner"] == (256, 1024, 8)
+
+
+
 
 
