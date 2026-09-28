@@ -953,13 +953,13 @@ class Context(InputUploads):
             vk.vkCmdPushConstants(cmd, layout, _STAGE_COMPUTE, 0, 4,
                                   ctypes.byref(params))
             vk.vkCmdDispatch(cmd, spectra.shape[0], 1, 1)
-            # Publish FFT stores to later compute dispatches and mapped host
-            # readers. Queue completion alone is not a shader memory barrier.
-            mb = _MemBarrier(46, None, _ACCESS_SHADER_WRITE,
-                             _ACCESS_SHADER_READ | 0x2000)  # HOST_READ
+            barrier = _BufMemBarrier(44, None, _ACCESS_SHADER_WRITE,
+                                     _ACCESS_SHADER_READ | 0x2000,
+                                     _QUEUE_FAMILY_IGNORED, _QUEUE_FAMILY_IGNORED,
+                                     buffers[2].handle, 0, _WHOLE_SIZE)
             vk.vkCmdPipelineBarrier(cmd, _STAGE_COMPUTE_BIT,
                                     _STAGE_COMPUTE_BIT | 0x4000,  # HOST
-                                    0, 1, ctypes.byref(mb), 0, None, 0, None)
+                                    0, 0, None, 1, ctypes.byref(barrier), 0, None)
             _check(vk.vkEndCommandBuffer(cmd), "end forward")
             batch = (*buffers, cmd)
             forwards[key] = batch
@@ -1016,10 +1016,13 @@ class Context(InputUploads):
             self.vk.vkCmdBindDescriptorSets(cmd, _BIND_POINT_COMPUTE, l2,
                                             0, 1, sets, 0, None)
             self.vk.vkCmdDispatch(cmd, spectra.shape[0]*info['n2'], 1, 1)
-            barrier = _MemBarrier(46, None, _ACCESS_SHADER_WRITE, _ACCESS_SHADER_READ | 0x2000)
+            barrier = _BufMemBarrier(44, None, _ACCESS_SHADER_WRITE,
+                                     _ACCESS_SHADER_READ | 0x2000,
+                                     _QUEUE_FAMILY_IGNORED, _QUEUE_FAMILY_IGNORED,
+                                     buffers[2].handle, 0, _WHOLE_SIZE)
             self.vk.vkCmdPipelineBarrier(cmd, _STAGE_COMPUTE_BIT,
                                          _STAGE_COMPUTE_BIT | 0x4000,
-                                         0, 1, ctypes.byref(barrier), 0, None, 0, None)
+                                         0, 0, None, 1, ctypes.byref(barrier), 0, None)
             _check(self.vk.vkEndCommandBuffer(cmd), 'two-stage forward end')
             batch = (*buffers, scratch, cmd)
             forwards[key] = batch
@@ -1246,9 +1249,16 @@ class Context(InputUploads):
                 vk.vkCmdPushConstants(cmd, layout, _STAGE_COMPUTE, 0,
                                       _PUSH_BYTES, ctypes.byref(pc))
                 vk.vkCmdDispatch(cmd, (b-a)*nt, 1, 1)
-            barrier = _MemBarrier(46, None, _ACCESS_SHADER_WRITE, 0x2000)
+            barriers = (_BufMemBarrier * 2)(
+                _BufMemBarrier(44, None, _ACCESS_SHADER_WRITE, 0x2000,
+                               _QUEUE_FAMILY_IGNORED, _QUEUE_FAMILY_IGNORED,
+                               bufs[2].handle, 0, _WHOLE_SIZE),
+                _BufMemBarrier(44, None, _ACCESS_SHADER_WRITE, 0x2000,
+                               _QUEUE_FAMILY_IGNORED, _QUEUE_FAMILY_IGNORED,
+                               bufs[3].handle, 0, _WHOLE_SIZE)
+            )
             vk.vkCmdPipelineBarrier(cmd, _STAGE_COMPUTE_BIT, 0x4000, 0,
-                                    1, ctypes.byref(barrier), 0, None, 0, None)
+                                    0, None, 2, ctypes.cast(barriers, _vp), 0, None)
             _check(vk.vkEndCommandBuffer(cmd), "end grouped peaks")
             batch = (*bufs, cmd)
             self._batches[key] = batch
