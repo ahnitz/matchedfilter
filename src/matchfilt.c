@@ -166,21 +166,38 @@ size_t ap_mf_nbins(const ap_mf_plan *p, size_t binsize, size_t start, size_t end
    from the natural x[n2*N1 + n1].  This is a transpose, paid once per segment at
    ingest, so that every one of the D*T pair transforms reads sequentially.  It is
    the whole reason preprocessing being free matters. */
-static void split_store(const float *inter,float *re,float *im,size_t n,int conj,
+static void split_store(const float * restrict inter,float * restrict re,float * restrict im,size_t n,int conj,
                         int n1,int n2,int w){
   if(n1<=0||n2<=0||w<=0||(size_t)n1*n2!=n){
-    for(size_t k=0;k<n;k++){ re[k]=inter[2*k]; im[k]=conj?-inter[2*k+1]:inter[2*k+1]; }
+    if(conj){
+      for(size_t k=0;k<n;k++){ re[k]=inter[2*k]; im[k]=-inter[2*k+1]; }
+    } else {
+      for(size_t k=0;k<n;k++){ re[k]=inter[2*k]; im[k]=inter[2*k+1]; }
+    }
     return;
   }
   const int ng=n1/w;
-  for(int g=0;g<ng;g++)
-    for(int b=0;b<n2;b++)
-      for(int l=0;l<w;l++){
-        size_t src=(size_t)b*n1+(size_t)g*w+l;      /* x[n2*N1 + n1] */
-        size_t dst=(size_t)g*n2*w+(size_t)b*w+l;
-        re[dst]=inter[2*src];
-        im[dst]=conj?-inter[2*src+1]:inter[2*src+1];
+  if(conj){
+    for(int g=0;g<ng;g++)
+      for(int b=0;b<n2;b++){
+        size_t src=(size_t)b*n1+(size_t)g*w;
+        size_t dst=(size_t)g*n2*w+(size_t)b*w;
+        for(int l=0;l<w;l++){
+          re[dst+l]=inter[2*(src+l)];
+          im[dst+l]=-inter[2*(src+l)+1];
+        }
       }
+  } else {
+    for(int g=0;g<ng;g++)
+      for(int b=0;b<n2;b++){
+        size_t src=(size_t)b*n1+(size_t)g*w;
+        size_t dst=(size_t)g*n2*w+(size_t)b*w;
+        for(int l=0;l<w;l++){
+          re[dst+l]=inter[2*(src+l)];
+          im[dst+l]=inter[2*(src+l)+1];
+        }
+      }
+  }
 }
 
 int ap_mf_set_data(ap_mf_plan *p, int d, const float *spec){
