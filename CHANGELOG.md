@@ -10,9 +10,11 @@ Alpha releases may change the API. Pin a version for reproducible work.
   (`B_eff` 180.8 against 232.7 at band 512), and the hierarchy's cost follows
   from that width, so it flattered the gate. Hierarchical timings are slower
   and are not comparable to earlier pages.
-- Record hierarchical rows at SNR thresholds 5.0, 5.5, 5.75, 6.0 and 6.5, and
-  let the hardware comparison page select among them. The threshold spans a
-  factor of 2.5-4 at `fd=1e-3` and can change the band the gate selects.
+- Record hierarchical rows at SNR thresholds 5.0, 5.5, 5.75, 6.0 and 6.5. The
+  threshold spans a factor of 2.5-4 at `fd=1e-3` and can change the band the
+  gate selects. On the hardware comparison page the threshold and the FDR
+  budget share one Hierarchical screening box and both are multi-select, so a
+  series is one (budget, threshold) pair and several can be compared at once.
 - Recalculate both fleet measurements at `main` `ce9c828`. The six-machine
   hardware comparison moves to
   [teaser-fleet-20260927](docs/measurements/teaser-fleet-20260927.md); the
