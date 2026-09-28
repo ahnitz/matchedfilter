@@ -178,25 +178,35 @@ static void split_store(const float * restrict inter,float * restrict re,float *
   }
   const int ng=n1/w;
   if(conj){
-    for(int g=0;g<ng;g++)
+    for(int g=0;g<ng;g++){
+      const float * restrict s_ptr = inter + 2*(size_t)g*w;
+      float * restrict r_ptr = re + (size_t)g*n2*w;
+      float * restrict i_ptr = im + (size_t)g*n2*w;
       for(int b=0;b<n2;b++){
-        size_t src=(size_t)b*n1+(size_t)g*w;
-        size_t dst=(size_t)g*n2*w+(size_t)b*w;
         for(int l=0;l<w;l++){
-          re[dst+l]=inter[2*(src+l)];
-          im[dst+l]=-inter[2*(src+l)+1];
+          r_ptr[l]=s_ptr[2*l];
+          i_ptr[l]=-s_ptr[2*l+1];
         }
+        s_ptr += 2*n1;
+        r_ptr += w;
+        i_ptr += w;
       }
+    }
   } else {
-    for(int g=0;g<ng;g++)
+    for(int g=0;g<ng;g++){
+      const float * restrict s_ptr = inter + 2*(size_t)g*w;
+      float * restrict r_ptr = re + (size_t)g*n2*w;
+      float * restrict i_ptr = im + (size_t)g*n2*w;
       for(int b=0;b<n2;b++){
-        size_t src=(size_t)b*n1+(size_t)g*w;
-        size_t dst=(size_t)g*n2*w+(size_t)b*w;
         for(int l=0;l<w;l++){
-          re[dst+l]=inter[2*(src+l)];
-          im[dst+l]=inter[2*(src+l)+1];
+          r_ptr[l]=s_ptr[2*l];
+          i_ptr[l]=s_ptr[2*l+1];
         }
+        s_ptr += 2*n1;
+        r_ptr += w;
+        i_ptr += w;
       }
+    }
   }
 }
 
