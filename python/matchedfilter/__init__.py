@@ -156,7 +156,7 @@ from ._errors import UnsupportedSize      # noqa: E402
 def _format_result(idx, val, *, raw=False, counts=None, out=None, order=None):
     """Assemble the public dtype once, or return separate raw arrays."""
     if counts is True:
-        counts = ((idx >= 0) if idx is not None else (out["index"] >= 0)).sum(axis=2).astype(np.int32)
+        counts = ((idx >= 0) if idx is not None else (out["index"] >= 0)).sum(axis=2, dtype=np.int32)
     if raw:
         if order is None:
             result = (idx.astype(np.int64, copy=False), val)
