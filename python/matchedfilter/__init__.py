@@ -1593,34 +1593,32 @@ def choose_config(power, n, snr, fd, tuning=None, pairs=None, device=None, casca
 
     p_ref_single = (1.0 - (1.0 - math.exp(-0.5 * g_single * g_single)) ** b_single) if g_single is not None else 0.0
 
+    b1 = b_single
+    c1 = next((c for c in cands if c["band"] == b1 and c["K"] == single_choice[1]), None)
+    if c1 is None:
+        return single_choice
+
+    fine_ratio = (n * math.log2(n)) / (b1 * math.log2(b1))
+    b0_pool = [b for b in [128, 256, 512, 1024, 2048] if min_b0 <= b < b_single and (b & (b - 1)) == 0]
+
     best_cascade = None
     min_cascade_cost = best_cost
 
-    band_cands = sorted([c for c in cands if min_b0 <= c["band"] < n], key=lambda c: c["band"])
-    b0_pool = sorted(set([c["band"] for c in band_cands] + [128, 256, 512, 1024, 2048]))
-    b0_pool = [b for b in b0_pool if min_b0 <= b < n and (b & (b - 1)) == 0]
-
-    for c1 in band_cands:
-        b1 = c1["band"]
-        fine_ratio = (n * math.log2(n)) / (b1 * math.log2(b1))
-        for b0 in b0_pool:
-            if b0 >= b1 or b0 >= b_single:
-                continue
-            coarse_ratio = (b0 * math.log2(b0)) / (b1 * math.log2(b1))
-            if c1["cost"] * coarse_ratio >= min_cascade_cost:
-                continue
-            thr = choose_threshold(power, n, snr, fd, b1, cascade_band=b0)
-            if thr is not None:
-                g0, g1 = thr
-                p0 = max(0.0, min(1.0, 1.0 - (1.0 - math.exp(-0.5 * g0 * g0)) ** b0))
-                p1 = max(0.0, min(1.0, 1.0 - (1.0 - math.exp(-0.5 * g1 * g1)) ** b1))
-                p_ref_casc = p0 * p1
-                delta_ref = max(0.0, p_ref_casc - p_ref_single)
-                ref_penalty = c1["cost"] * fine_ratio * delta_ref
-                est_cost = c1["cost"] * (coarse_ratio + p0) + ref_penalty
-                if est_cost < min_cascade_cost:
-                    min_cascade_cost = est_cost
-                    best_cascade = CascadeConfig(b0, b1, c1["K"])
+    for b0 in b0_pool:
+        coarse_ratio = (b0 * math.log2(b0)) / (b1 * math.log2(b1))
+        if c1["cost"] * coarse_ratio >= min_cascade_cost:
+            continue
+        thr = choose_threshold(power, n, snr, fd, b1, cascade_band=b0)
+        if thr is not None:
+            g0, g1 = thr
+            p0 = max(0.0, min(1.0, 1.0 - (1.0 - math.exp(-0.5 * g0 * g0)) ** b0))
+            p1 = max(0.0, min(1.0, 1.0 - (1.0 - math.exp(-0.5 * g1 * g1)) ** b1))
+            delta_ref = max(0.0, p1 - p_ref_single)
+            ref_penalty = c1["cost"] * fine_ratio * delta_ref
+            est_cost = c1["cost"] * (coarse_ratio + p0) + ref_penalty
+            if est_cost < min_cascade_cost:
+                min_cascade_cost = est_cost
+                best_cascade = CascadeConfig(b0, b1, c1["K"])
 
     if best_cascade is not None:
         return best_cascade
