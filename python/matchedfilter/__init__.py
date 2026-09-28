@@ -818,14 +818,34 @@ class MatchedFilter:
                 starts = starts_pool[slot]
                 spec = spectra_pool[slot][:count]
                 starts[:count] = np.minimum(layout.starts[begin:end], ser.size)
-                self._gpu.forward(n, source, starts[:count], spec, defer=True, slot=slot)
                 try:
+                    if pipelined:
+                        self._gpu.forward(n, source, starts[:count], spec, defer=True, slot=slot)
+                    else:
+                        self._gpu.forward(n, source, starts[:count], spec, defer=True)
+                except TypeError:
+                    self._gpu.forward(n, source, starts[:count], spec, defer=True)
+                try:
+                    if pipelined:
+                        res = self._gpu.peaks_grouped(
+                            n, spec, H, groups, binsize, threshold, upload_tmpl=self._tdirty,
+                            slot=slot, async_submit=True)
+                    else:
+                        res = self._gpu.peaks_grouped(
+                            n, spec, H, groups, binsize, threshold, upload_tmpl=self._tdirty)
+                    self._tdirty = False
+                except TypeError:
                     res = self._gpu.peaks_grouped(
-                        n, spec, H, groups, binsize, threshold, upload_tmpl=self._tdirty,
-                        slot=slot, async_submit=pipelined)
+                        n, spec, H, groups, binsize, threshold, upload_tmpl=self._tdirty)
                     self._tdirty = False
                 except Exception:
-                    self._gpu.cancel_forward(slot=slot)
+                    try:
+                        if pipelined:
+                            self._gpu.cancel_forward(slot=slot)
+                        else:
+                            self._gpu.cancel_forward()
+                    except TypeError:
+                        self._gpu.cancel_forward()
                     raise
                 in_flight.append((begin, end, res))
                 if len(in_flight) >= K:
@@ -856,12 +876,29 @@ class MatchedFilter:
                 starts = starts_pool[slot]
                 spec = spectra_pool[slot][:count]
                 starts[:count] = np.minimum(layout.starts[begin:end], ser.size)
-                self._gpu.forward(n, source, starts[:count], spec, defer=True, slot=slot)
                 try:
-                    res = self._series_window(spec, H, binsize, threshold, w0, w1,
-                                              slot=slot, async_submit=pipelined)
+                    if pipelined:
+                        self._gpu.forward(n, source, starts[:count], spec, defer=True, slot=slot)
+                    else:
+                        self._gpu.forward(n, source, starts[:count], spec, defer=True)
+                except TypeError:
+                    self._gpu.forward(n, source, starts[:count], spec, defer=True)
+                try:
+                    if pipelined:
+                        res = self._series_window(spec, H, binsize, threshold, w0, w1,
+                                                  slot=slot, async_submit=True)
+                    else:
+                        res = self._series_window(spec, H, binsize, threshold, w0, w1)
+                except TypeError:
+                    res = self._series_window(spec, H, binsize, threshold, w0, w1)
                 except Exception:
-                    self._gpu.cancel_forward(slot=slot)
+                    try:
+                        if pipelined:
+                            self._gpu.cancel_forward(slot=slot)
+                        else:
+                            self._gpu.cancel_forward()
+                    except TypeError:
+                        self._gpu.cancel_forward()
                     raise
                 in_flight.append((begin, end, res))
                 if len(in_flight) >= K:
