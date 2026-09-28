@@ -1195,11 +1195,14 @@ static void binmax_core(BP*p,size_t binsize,float thr,ap_peak*out,int conj,
      loads and made this slower than the top-K scan it replaces.  A scalar costs
      4 bytes, and the horizontal reduction needed to update it only runs when a
      block actually beats the bin's best, which the detection floor makes rare. */
-  float *bmax=(float*)p->bmx;
-  for(size_t j=0;j<nb;j++){
-    bmax[j]=t2;
-    out[j].index=-1; out[j].re=0.f; out[j].im=0.f; out[j].magnitude=0.f;
-  }
+  float * restrict bmax=(float*)p->bmx;
+  const vf vt2=V_SET1(t2);
+  size_t j=0;
+  for(;j+AP_W<=nb;j+=AP_W) V_STOREU(bmax+j, vt2);
+  for(;j<nb;j++) bmax[j]=t2;
+  const ap_peak empty_peak = {-1, 0.f, 0.f, 0.f};
+  ap_peak * restrict out_p = out;
+  for(size_t i=0;i<nb;i++) out_p[i] = empty_peak;
   const int NBK2=N2/AP_W, BB2=p->bblk;
   for(int b0=0;b0<NBK2;b0+=BB2){
    const int bbn=(NBK2-b0<BB2)?NBK2-b0:BB2;
