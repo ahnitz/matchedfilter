@@ -16,8 +16,16 @@ import teaser_figure as teaser
 from teaser_labels import cpu_label
 
 
-MODES = [('Full output', 'full', None), ('Peak only', 'flat', None)] + [
-    (f'Hierarchical {fd:g}', 'hier', fd) for fd in teaser.BUDGETS]
+# The hierarchy's cost depends on the detection threshold as well as the
+# budget: a higher SNR threshold admits a higher coarse gate, so fewer pairs
+# survive to refinement. Recording several lets the comparison page select
+# one instead of fixing 5.5 for every reader.
+SNRS = (5.0, 5.5, 5.75, 6.0, 6.5)
+DEFAULT_SNR = 5.5
+
+MODES = [('Full output', 'full', None, None), ('Peak only', 'flat', None, None)] + [
+    (f'Hierarchical {fd:g} @ SNR {snr:g}', 'hier', fd, snr)
+    for snr in SNRS for fd in teaser.BUDGETS]
 
 
 def validate(device):
@@ -75,7 +83,8 @@ def collect(args):
     devices = teaser.mf.devices()
     report = dict(host=args.host or platform.node().split('.')[0],
                   date=datetime.now(timezone.utc).isoformat(), revision=args.revision,
-                  n=teaser.N, data=teaser.ND, templates=teaser.NT, snr=5.5,
+                  n=teaser.N, data=teaser.ND, templates=teaser.NT, snr=DEFAULT_SNR,
+                  snrs=list(SNRS), reference_profile=teaser.REFERENCE_PROFILE,
                   cpu=teaser._cpu_name(), gpu=teaser._gpu_name(),
                   cpu_backend=teaser.mf.backend(), python=platform.python_version(),
                   numpy=np.__version__, platform=platform.platform(),
@@ -99,14 +108,15 @@ def collect(args):
         save()
         raise
     baseline = 'FFTW' if args.device == 'cpu' else ('MLX' if sys.platform == 'darwin' else 'rocFFT')
-    for label, kind, fd in [(baseline, 'baseline', None)] + MODES:
+    for label, kind, fd, snr in [(baseline, 'baseline', None, None)] + MODES:
         try:
             if kind == 'baseline':
                 fn = {'FFTW': teaser.fftw_ms, 'MLX': teaser.mlx_ms, 'rocFFT': teaser.rocfft_ms}[baseline]
                 ms = fn()
             else:
-                ms = teaser._filter_ms(kind, args.device, args.reps, fd or .01)
-            row = dict(device=args.device, label=label, kind=kind, fd=fd, ms=ms,
+                ms = teaser._filter_ms(kind, args.device, args.reps, fd or .01,
+                                       snr if snr is not None else DEFAULT_SNR)
+            row = dict(device=args.device, label=label, kind=kind, fd=fd, snr=snr, ms=ms,
                        timing=dict(teaser._timed.details))
             if kind == 'hier':
                 row.update(teaser._DETAILS[(args.device, fd)])
@@ -147,7 +157,9 @@ def compare(paths, out):
         raise ValueError('provide only one report per host and device')
     n, nd, nt, _ = next(iter(shapes))
     colors = ['#a8b6c9', '#ad9aff', '#55b7ff', '#64e6ac', '#25b995', '#efbb64']
-    keys = [('baseline', None)] + [(k, fd) for _, k, fd in MODES]
+    # The static chart shows one SNR; the interactive page selects others.
+    keys = [('baseline', None)] + [(k, fd) for _, k, fd, snr in MODES
+            if snr is None or snr == DEFAULT_SNR]
     labels = ['FFT only', 'Full output', 'Peak only', 'Hier. 10⁻²', 'Hier. 10⁻³', 'Hier. 10⁻⁴']
     bg, fg, muted = '#0b0f19', '#e8eef7', '#aebccf'
     fig, axes = plt.subplots(1, 2, figsize=(17, 9), facecolor=bg)
@@ -161,7 +173,9 @@ def compare(paths, out):
         ticks = []
         for hi, host in enumerate(hosts):
             report = next((r for r in reports if r['host'] == host and r['device'] == device), None)
-            rows = {} if report is None else {(r['kind'], r['fd']): r for r in report['rows']}
+            rows = {} if report is None else {
+            (r['kind'], r['fd']): r for r in report['rows']
+            if r.get('snr') in (None, DEFAULT_SNR)}
             name = report.get(device, '') if report else ''
             processor = cpu_label(report['cpu']) if report else host
             if report and report.get('virtualized'):

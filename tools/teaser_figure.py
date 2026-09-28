@@ -31,9 +31,25 @@ BUDGETS = (1e-2, 1e-3, 1e-4)
 _DETAILS = {}
 
 
+REFERENCE_PROFILE = 'tests/data/reference_profile_pycbc.npy'
+
+
 def _reference():
-    from test_api import inspiral_power
-    ref = inspiral_power(N)
+    """Bank drawn from the CAPTURED PyCBC reference, not a synthetic curve.
+
+    The synthetic `inspiral_power` is narrower than a real reference --
+    B_eff 180.8 against 232.7 at band 512, ratio 2.83 against 2.20 -- and
+    the hierarchy's cost depends on exactly that width, because the band
+    it selects and the fraction of pairs it refines both follow from it.
+    Timing a profile the search never sees overstates how well the gate
+    does. This is the same file the reference tests use.
+    """
+    root = Path(__file__).resolve().parent.parent
+    ref = np.load(root / REFERENCE_PROFILE).astype(np.float32)
+    if ref.shape[0] != N:                       # only 4096 is recorded
+        from test_api import inspiral_power
+        ref = inspiral_power(N)
+    ref = ref / ref.sum()
     rng = np.random.default_rng(19)
     h = (np.sqrt(ref) * np.exp(2j*np.pi*rng.random((NT, N)))).astype(np.complex64)
     h /= np.linalg.norm(h, axis=1, keepdims=True)
@@ -147,7 +163,7 @@ def _fftw_native_ms(lib, reps):
         if b: lib.fftwf_free(b)
 
 
-def _filter_ms(kind, device, reps, fd):
+def _filter_ms(kind, device, reps, fd, snr=5.5):
     d, h = _case()
     if kind == 'full':
         f = mf.CorrelationFilter(N, ND, NT, device=device)
@@ -155,7 +171,7 @@ def _filter_ms(kind, device, reps, fd):
         f = mf.MatchedFilter(N, ND, NT, device=device)
     else:
         ref, h = _reference()
-        f = mf.HierarchicalFilter(N, ND, NT, snr=5.5, fd=fd, device=device)
+        f = mf.HierarchicalFilter(N, ND, NT, snr=snr, fd=fd, device=device)
         f.set_reference(ref)
     f.set_data(d); f.set_templates(h)
     try:
@@ -163,7 +179,7 @@ def _filter_ms(kind, device, reps, fd):
             output = f.empty_shared((ND, NT, N))
             ms = _timed(lambda: f.run(out=output), reps)
         else:
-            ms = _timed(lambda: f.run(binsize=N, threshold=5.5), reps)
+            ms = _timed(lambda: f.run(binsize=N, threshold=snr), reps)
         details = {}
         ctx = getattr(f, '_gpu', None)
         if ctx is not None and hasattr(ctx, 'last_gpu_time'):
@@ -172,7 +188,7 @@ def _filter_ms(kind, device, reps, fd):
                 if kind == 'full':
                     f.run(out=output)
                 else:
-                    f.run(binsize=N, threshold=5.5)
+                    f.run(binsize=N, threshold=snr)
                 durations.append(ctx.last_gpu_time * 1000)
             details['device_ms'] = float(np.median(durations))
         _DETAILS[(device, kind, fd)] = details
@@ -186,12 +202,12 @@ def _filter_ms(kind, device, reps, fd):
             ctx.destroy()
 
 
-def cpu_ms(kind, reps=7, fd=1e-2):
-    return _filter_ms(kind, 'cpu', reps, fd)
+def cpu_ms(kind, reps=7, fd=1e-2, snr=5.5):
+    return _filter_ms(kind, 'cpu', reps, fd, snr)
 
 
-def gpu_ms(kind, reps=15, fd=1e-2):
-    return _filter_ms(kind, 'gpu', reps, fd)
+def gpu_ms(kind, reps=15, fd=1e-2, snr=5.5):
+    return _filter_ms(kind, 'gpu', reps, fd, snr)
 
 
 def rocfft_ms(reps=7):
