@@ -11,11 +11,13 @@ whose candidate regressed two hosts.
 | CPU host | CPU | Alpha6 k template-s/s | `ce9c828` k template-s/s | vs alpha6 | vs `c38f24f` |
 |---|---|---:|---:|---:|---:|
 | dev1 | Ryzen 9 5950X | 993.2 | 1136.7 | +14.4% | −1.2% |
-| dev2 | Ryzen AI MAX+ 395 | 1355.2 | 1418.4 | +4.7% | +1.1% |
+| dev2 † | Ryzen AI MAX+ 395 | 1355.2 | 1418.4 | +4.7% | +1.1% |
 | dev3 | Ryzen 5 5500U | 643.8 | 733.2 | +13.9% | +3.3% |
 | dev4 | Core i5-13500H | 960.0 | 1302.0 | +35.6% | +4.1% |
 | sugwg-login2 | Xeon Platinum 8260 | 459.6 | 567.6 | +23.5% | −0.2% |
 | Haswell | Xeon E5-2698 v3 | 346.0 | 368.9 | +6.6% | **+5.3%** |
+
+† dev2's host was loaded throughout; see below.
 
 The comparison that isolates the five commits since `c38f24f` is the last
 column. Four hosts gain, sugwg-login2 is flat, and dev1 loses 1.2%.
@@ -34,6 +36,11 @@ least to gain from spill removal. It is the one result here arguing for a
 target-conditional gate.
 
 ## Contamination and what was excluded
+
+dev2 ran throughout with an unrelated eight-process workload on the host, so
+its absolute rates are for a loaded machine. Its A/B ratio is the usable
+number there: pairs are interleaved on the same host, so steady load largely
+cancels, and its three pairs span a tight 0.984-1.031.
 
 dev1's first attempt at this measurement was discarded: a teaser-workload run
 pinned to the same CPU 0 overlapped it. It was re-run alone and only the
