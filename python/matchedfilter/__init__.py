@@ -1546,6 +1546,22 @@ class CascadeConfig(tuple):
         return f"({self.b0}, {self.b1}, {self.taps})"
 
 
+def _min_band_for(device=None, tuning=None):
+    """Determine minimum viable coarse band based on SIMD register width."""
+    if device is not None and getattr(device, "kind", None) == "gpu":
+        return 128
+    b = (backend() or "").upper()
+    if "AVX3" in b or "AVX512" in b:
+        return 256
+    if tuning is not None:
+        meta = tuning.get("meta", {})
+        cpu = meta.get("cpu", "")
+        paths = " ".join(tuning.get("paths", []))
+        if "model85" in paths or "Xeon(R) Platinum" in cpu or "Xeon(R) Gold" in cpu:
+            return 256
+    return 128
+
+
 def choose_config(power, n, snr, fd, tuning=None, pairs=None, device=None, cascade=False):
     """Cheapest measured configuration whose model gate resolves the budget.
 
@@ -1558,34 +1574,50 @@ def choose_config(power, n, snr, fd, tuning=None, pairs=None, device=None, casca
     cands = _cost_candidates(power, n, snr, tuning, fd, pairs)
     single_choice = None
     best_cost = float('inf')
+    g_single = None
     for candidate in cands:
         band = candidate["band"]
-        if choose_threshold(power, n, snr, fd, band) is not None:
+        g = choose_threshold(power, n, snr, fd, band)
+        if g is not None:
             single_choice = (band, candidate["K"])
             best_cost = candidate["cost"]
+            g_single = g
             break
     if cascade is False or single_choice is None:
         return single_choice
 
     b_single = single_choice[0]
+    min_b0 = _min_band_for(device, tuning)
+    if b_single <= min_b0:
+        return single_choice
+
+    p_ref_single = (1.0 - (1.0 - math.exp(-0.5 * g_single * g_single)) ** b_single) if g_single is not None else 0.0
+
     best_cascade = None
     min_cascade_cost = best_cost
 
-    band_cands = sorted([c for c in cands if c["band"] < n], key=lambda c: c["band"])
-    b0_pool = sorted(set([c["band"] for c in band_cands] + [64, 128, 256, 512, 1024, 2048]))
-    b0_pool = [b for b in b0_pool if 64 <= b < n and (b & (b - 1)) == 0]
+    band_cands = sorted([c for c in cands if min_b0 <= c["band"] < n], key=lambda c: c["band"])
+    b0_pool = sorted(set([c["band"] for c in band_cands] + [128, 256, 512, 1024, 2048]))
+    b0_pool = [b for b in b0_pool if min_b0 <= b < n and (b & (b - 1)) == 0]
 
     for c1 in band_cands:
         b1 = c1["band"]
+        fine_ratio = (n * math.log2(n)) / (b1 * math.log2(b1))
         for b0 in b0_pool:
             if b0 >= b1 or b0 >= b_single:
+                continue
+            coarse_ratio = (b0 * math.log2(b0)) / (b1 * math.log2(b1))
+            if c1["cost"] * coarse_ratio >= min_cascade_cost:
                 continue
             thr = choose_threshold(power, n, snr, fd, b1, cascade_band=b0)
             if thr is not None:
                 g0, g1 = thr
                 p0 = max(0.0, min(1.0, 1.0 - (1.0 - math.exp(-0.5 * g0 * g0)) ** b0))
-                coarse_ratio = (b0 * math.log2(b0)) / (b1 * math.log2(b1))
-                est_cost = c1["cost"] * (coarse_ratio + p0)
+                p1 = max(0.0, min(1.0, 1.0 - (1.0 - math.exp(-0.5 * g1 * g1)) ** b1))
+                p_ref_casc = p0 * p1
+                delta_ref = max(0.0, p_ref_casc - p_ref_single)
+                ref_penalty = c1["cost"] * fine_ratio * delta_ref
+                est_cost = c1["cost"] * (coarse_ratio + p0) + ref_penalty
                 if est_cost < min_cascade_cost:
                     min_cascade_cost = est_cost
                     best_cascade = CascadeConfig(b0, b1, c1["K"])
