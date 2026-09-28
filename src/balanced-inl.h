@@ -916,7 +916,32 @@ static void small_scan(BP*p,size_t binsize,float thr,ap_peak*out,size_t ostride,
   vf *const bmx=p->bmx,*const bre=p->bre,*const bim=p->bim; vi *const bix=p->bix;
   for(size_t j=0;j<nb;j++){ bmx[j]=seed; bre[j]=zero; bim[j]=zero; bix[j]=nix; }
   const int bpow=(binsize&(binsize-1))?-1:(int)__builtin_ctzl(binsize);
-  for(size_t k=ws;k<we;k++){
+  size_t k=ws;
+  for(;k+1<we;k+=2){
+    const size_t j0 = bpow>=0 ? ((k-ws)>>bpow) : ((k-ws)/binsize);
+    const size_t j1 = bpow>=0 ? ((k+1-ws)>>bpow) : ((k+1-ws)/binsize);
+    const int e0=eidx(&p->ea,(int)k);
+    const int e1=eidx(&p->ea,(int)(k+1));
+    const vf xr0=p->bR[e0], xi0=p->bI[e0];
+    const vf xr1=p->bR[e1], xi1=p->bI[e1];
+    const vf m2_0=V_FMADD(xr0,xr0,V_MUL(xi0,xi0));
+    const vf m2_1=V_FMADD(xr1,xr1,V_MUL(xi1,xi1));
+    const vm g0=V_CMP_GT(m2_0,bmx[j0]);
+    if(__builtin_expect(V_MASK_ANY(g0),0)){
+      bmx[j0]=V_SEL(g0,bmx[j0],m2_0);
+      bre[j0]=V_SEL(g0,bre[j0],xr0);
+      bim[j0]=V_SEL(g0,bim[j0],xi0);
+      bix[j0]=VI_SEL(g0,bix[j0],VI_SET1((int)k));
+    }
+    const vm g1=V_CMP_GT(m2_1,bmx[j1]);
+    if(__builtin_expect(V_MASK_ANY(g1),0)){
+      bmx[j1]=V_SEL(g1,bmx[j1],m2_1);
+      bre[j1]=V_SEL(g1,bre[j1],xr1);
+      bim[j1]=V_SEL(g1,bim[j1],xi1);
+      bix[j1]=VI_SEL(g1,bix[j1],VI_SET1((int)(k+1)));
+    }
+  }
+  for(;k<we;k++){
     const size_t j = bpow>=0 ? ((k-ws)>>bpow) : ((k-ws)/binsize);
     const int e=eidx(&p->ea,(int)k);
     const vf xr=p->bR[e], xi=p->bI[e];
