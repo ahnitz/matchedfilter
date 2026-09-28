@@ -1333,16 +1333,18 @@ static void binmax_core(BP*p,size_t binsize,float thr,ap_peak*out,int conj,
     if(lo>hi) continue;
     vf *RR,*RI;
     if(bbn>1) stageB_run(p,jj,&RR,&RI); else stageB(p,b,&RR,&RI,1);
-    for(long k1=lo;k1<=hi;k1++){
-      int e=eidx(&p->ea,(int)k1);
+    long lo_in = ((long)ws > base) ? (((long)ws - base + N2 - 1) / N2) : 0;
+    long hi_in = ((long)we >= base + AP_W) ? (((long)we - base - AP_W) / N2) : -1;
+    if(lo_in < lo) lo_in = lo;
+    if(hi_in > hi) hi_in = hi;
+
+    auto process_boundary = [&](long k1){
       long k0=k1*N2+base;
-      unsigned inw=allm;
-      if(k0<(long)ws || k0+AP_W>(long)we){
-        inw=0;
-        for(int l=0;l<AP_W;l++){ long k=k0+l;
-          if(k>=(long)ws && k<(long)we) inw|=1u<<l; }
-        if(!inw) continue;
-      }
+      unsigned inw=0;
+      for(int l=0;l<AP_W;l++){ long k=k0+l;
+        if(k>=(long)ws && k<(long)we) inw|=1u<<l; }
+      if(!inw) return;
+      int e=eidx(&p->ea,(int)k1);
       long j0=BINOF(k0), j1=BINOF(k0+AP_W-1);
       vf m2=V_FMADD(RR[e],RR[e],V_MUL(RI[e],RI[e]));
       if(inw!=allm) m2=V_SEL(V_MASK_FROM_BITS(inw),NEG,m2);
@@ -1369,6 +1371,41 @@ static void binmax_core(BP*p,size_t binsize,float thr,ap_peak*out,int conj,
           }
         }
       }
+    };
+
+    if(lo_in <= hi_in){
+      for(long k1=lo; k1<lo_in; k1++) process_boundary(k1);
+      for(long k1=lo_in; k1<=hi_in; k1++){
+        int e=eidx(&p->ea,(int)k1);
+        long k0=k1*N2+base;
+        long j0=BINOF(k0), j1=BINOF(k0+AP_W-1);
+        vf m2=V_FMADD(RR[e],RR[e],V_MUL(RI[e],RI[e]));
+        if(j0==j1){
+          if(__builtin_expect(V_MASK_ANY(V_CMP_GT(m2,V_SET1(bmax[j0]))),0)){
+            float mv[AP_W],rv[AP_W],iv[AP_W];
+            V_STOREU(mv,m2); V_STOREU(rv,RR[e]); V_STOREU(iv,RI[e]);
+            for(int l=0;l<AP_W;l++) if(mv[l]>bmax[j0]){
+              bmax[j0]=mv[l];
+              out[j0].index=k0+l; out[j0].re=rv[l];
+              out[j0].im=conj?-iv[l]:iv[l]; out[j0].magnitude=mv[l];
+            }
+          }
+        } else {
+          float mv[AP_W],rv[AP_W],iv[AP_W];
+          V_STOREU(mv,m2); V_STOREU(rv,RR[e]); V_STOREU(iv,RI[e]);
+          for(int l=0;l<AP_W;l++){
+            long j=BINOF(k0+l);
+            if(mv[l]>bmax[j]){
+              bmax[j]=mv[l];
+              out[j].index=k0+l; out[j].re=rv[l];
+              out[j].im=conj?-iv[l]:iv[l]; out[j].magnitude=mv[l];
+            }
+          }
+        }
+      }
+      for(long k1=hi_in+1; k1<=hi; k1++) process_boundary(k1);
+    } else {
+      for(long k1=lo; k1<=hi; k1++) process_boundary(k1);
     }
    }
   }
