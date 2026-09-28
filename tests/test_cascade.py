@@ -545,5 +545,44 @@ def test_cascade_subset_semantics():
     assert set(survived_t1).issubset(set(survived_t0)), "Intra-plan subset violated!"
 
 
+def test_cascade_refinement_growth_declination_snr6():
+    """Verify choose_config declines cascade when refinement growth penalty outweighs coarse savings."""
+    from pathlib import Path
+    ref_path = Path(__file__).parent / "data" / "reference_profile_pycbc.npy"
+    if not ref_path.exists():
+        pytest.skip("reference_profile_pycbc.npy fixture not available")
+    ref = np.load(ref_path).astype(np.float32)
+    ref = ref / ref.sum()
+
+    n = 4096
+    snr = 6.0
+    fd = 1e-3
+
+    single_cfg = mf.choose_config(ref, n, snr, fd, cascade=False)
+    casc_cfg = mf.choose_config(ref, n, snr, fd, cascade=True)
+
+    assert single_cfg == (512, 8), f"Expected single-tier (512, 8), got {single_cfg}"
+    assert casc_cfg == (512, 8), (
+        f"Expected cascade to be declined at SNR 6.00 and select single-tier (512, 8), got {casc_cfg}"
+    )
+
+
+def test_cascade_simd_width_floor():
+    """Verify _min_band_for correctly enforces vector register width floors."""
+    from matchedfilter import _min_band_for
+
+    # Mock AVX-512 tuning metadata
+    avx512_tuning = {"meta": {"cpu": "Intel(R) Xeon(R) Platinum 8260 CPU @ 2.40GHz"}}
+    assert _min_band_for(None, avx512_tuning) == 256
+
+    avx512_path_tuning = {"paths": ["/path/to/cost-genuineintel-family6-model85.txt"]}
+    assert _min_band_for(None, avx512_path_tuning) == 256
+
+    # Generic / AVX2 tuning
+    avx2_tuning = {"meta": {"cpu": "AMD Ryzen 9 5950X 16-Core Processor"}}
+    if "AVX3" not in (mf.backend() or "").upper():
+        assert _min_band_for(None, avx2_tuning) == 128
+
+
 
 
