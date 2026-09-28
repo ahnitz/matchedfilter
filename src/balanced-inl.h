@@ -1155,29 +1155,22 @@ static void binmax_one(BP*p,float thr,ap_peak*out,int conj,size_t ws,size_t we){
       vf *RR,*RI;
       if(bbn>1) stageB_run(p,jj,&RR,&RI); else if constexpr (INPLACE) stageB_inplace32(p,b,&RR,&RI);
       else stageB_generic(p,b,&RR,&RI,1);
-      for(long k1=lo;k1<=hi;k1++){
-        int e=eidx(&p->ea,(int)k1);
+      long lo_in = ((long)ws > base) ? (((long)ws - base + N2 - 1) / N2) : 0;
+      long hi_in = ((long)we >= base + AP_W) ? (((long)we - base - AP_W) / N2) : -1;
+      if(lo_in < lo) lo_in = lo;
+      if(hi_in > hi) hi_in = hi;
+
+      auto process_boundary = [&](long k1){
         long k0=k1*N2+base;
-        unsigned inw=allm;
-        if(k0<(long)ws || k0+AP_W>(long)we){
-          inw=0;
-          for(int l=0;l<AP_W;l++){ long k=k0+l;
-            if(k>=(long)ws && k<(long)we) inw|=1u<<l; }
-          if(!inw) continue;
-        }
+        unsigned inw=0;
+        for(int l=0;l<AP_W;l++){ long k=k0+l;
+          if(k>=(long)ws && k<(long)we) inw|=1u<<l; }
+        if(!inw) return;
+        int e=eidx(&p->ea,(int)k1);
         vf m2=V_FMADD(RR[e],RR[e],V_MUL(RI[e],RI[e]));
-        /* Keep the series, split and contiguous in the lag index, so a
-           consumer indexes it as ser[k] and ser[serstride+k].
-           STORE is a template parameter, not a test: as a branch on a plan
-           field inside this loop it cost 6950 cycles a pair for 128 stores,
-           because it stopped the compiler scheduling the loop rather than
-           because the stores are expensive. */
         if(STORE){ V_STOREU(ser+(size_t)k0,RR[e]);
                    V_STOREU(ser+sstr+(size_t)k0,RI[e]); }
         if(inw!=allm) m2=V_SEL(V_MASK_FROM_BITS(inw),NEG,m2);
-        /* Compare once, select four times, never materialising a bitmask.
-           On AVX-512 the mask register was already free; portably the round
-           trip through bits and back was the whole cost of this loop. */
         vm g=V_CMP_GT(m2,am);
         if(__builtin_expect(V_MASK_ANY(g),0)){
           am =V_SEL(g,am,m2);
@@ -1185,6 +1178,61 @@ static void binmax_one(BP*p,float thr,ap_peak*out,int conj,size_t ws,size_t we){
           aii=V_SEL(g,aii,RI[e]);
           axx=VI_SEL(g,axx,VI_SET1((int)k0));
         }
+      };
+
+      if(lo_in <= hi_in){
+        for(long k1=lo; k1<lo_in; k1++) process_boundary(k1);
+        long k1=lo_in;
+        for(; k1+1<=hi_in; k1+=2){
+          int e0=eidx(&p->ea,(int)k1);
+          int e1=eidx(&p->ea,(int)(k1+1));
+          long k0_0=k1*N2+base;
+          long k0_1=(k1+1)*N2+base;
+          vf rr0=RR[e0], ri0=RI[e0];
+          vf rr1=RR[e1], ri1=RI[e1];
+          vf m2_0=V_FMADD(rr0,rr0,V_MUL(ri0,ri0));
+          vf m2_1=V_FMADD(rr1,rr1,V_MUL(ri1,ri1));
+          if(STORE){
+            V_STOREU(ser+(size_t)k0_0,rr0);
+            V_STOREU(ser+sstr+(size_t)k0_0,ri0);
+            V_STOREU(ser+(size_t)k0_1,rr1);
+            V_STOREU(ser+sstr+(size_t)k0_1,ri1);
+          }
+          vm g0=V_CMP_GT(m2_0,am);
+          if(__builtin_expect(V_MASK_ANY(g0),0)){
+            am =V_SEL(g0,am,m2_0);
+            arr=V_SEL(g0,arr,rr0);
+            aii=V_SEL(g0,aii,ri0);
+            axx=VI_SEL(g0,axx,VI_SET1((int)k0_0));
+          }
+          vm g1=V_CMP_GT(m2_1,am);
+          if(__builtin_expect(V_MASK_ANY(g1),0)){
+            am =V_SEL(g1,am,m2_1);
+            arr=V_SEL(g1,arr,rr1);
+            aii=V_SEL(g1,aii,ri1);
+            axx=VI_SEL(g1,axx,VI_SET1((int)k0_1));
+          }
+        }
+        if(k1<=hi_in){
+          int e=eidx(&p->ea,(int)k1);
+          long k0=k1*N2+base;
+          vf rr=RR[e], ri=RI[e];
+          vf m2=V_FMADD(rr,rr,V_MUL(ri,ri));
+          if(STORE){
+            V_STOREU(ser+(size_t)k0,rr);
+            V_STOREU(ser+sstr+(size_t)k0,ri);
+          }
+          vm g=V_CMP_GT(m2,am);
+          if(__builtin_expect(V_MASK_ANY(g),0)){
+            am =V_SEL(g,am,m2);
+            arr=V_SEL(g,arr,rr);
+            aii=V_SEL(g,aii,ri);
+            axx=VI_SEL(g,axx,VI_SET1((int)k0));
+          }
+        }
+        for(long k1=hi_in+1; k1<=hi; k1++) process_boundary(k1);
+      } else {
+        for(long k1=lo; k1<=hi; k1++) process_boundary(k1);
       }
      }
     }
