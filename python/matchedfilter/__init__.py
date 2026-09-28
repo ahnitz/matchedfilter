@@ -2104,7 +2104,7 @@ class HierarchicalFilter(MatchedFilter):
             return self._pinned
         if self._gpu is not None:
             self._gpu_calibration(self.snr)
-            if self._cascade and self._gcfg is not None and len(self._gcfg) == 3:
+            if getattr(self, 'cascade', False) and self._gcfg is not None and len(self._gcfg) == 3:
                 return CascadeConfig(*self._gcfg)
             return self._gcfg
         cfg = self._ensure().config()
