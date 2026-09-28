@@ -1341,7 +1341,7 @@ def _idw(rows, f, be, k=4, power=2.0, log=False, floor=1e-12):
     return sum(w * v for w, v in ws) / sum(w for w, _ in ws)
 
 
-def choose_threshold(power, n, snr, fd, band, tuning=None):
+def choose_threshold(power, n, snr, fd, band, tuning=None, cascade_band=None):
     """Compute the gate from the complete reference profile.
 
     ``tuning`` remains accepted for source compatibility but cannot affect
@@ -1353,6 +1353,11 @@ def choose_threshold(power, n, snr, fd, band, tuning=None):
         if os.environ.get(obsolete):
             raise ValueError("%s is retired: use the reference gate model, or set "
                              "an explicit band and coarse threshold" % obsolete)
+    if cascade_band is not None:
+        b0 = min(int(cascade_band), int(band))
+        b1 = max(int(cascade_band), int(band))
+        from .gatemodel import gate_for_cascade
+        return gate_for_cascade(power, n, b0, b1, snr, fd)
     from .gatemodel import gate_for
     return gate_for(power, n, band, snr, fd)
 
@@ -1412,8 +1417,8 @@ def _cost_candidates(power, n, snr, t, fd=1e-3, pairs=None):
     return sorted(candidates, key=lambda c: (c["cost"], c["band"], c["K"]))
 
 
-def choose_config(power, n, snr, fd, tuning=None, pairs=None, device=None):
-    """Cheapest measured (band, taps) whose model gate resolves the budget.
+def choose_config(power, n, snr, fd, tuning=None, pairs=None, device=None, cascade=False):
+    """Cheapest measured configuration whose model gate resolves the budget.
 
     Only costs come from files. The model uses the complete reference at
     the requested SNR and budget, without a tabulated accuracy fallback.
@@ -1421,11 +1426,38 @@ def choose_config(power, n, snr, fd, tuning=None, pairs=None, device=None):
     """
     if tuning is None:
         tuning = _load_tuning_for(device) if device is not None else _load_tuning()
-    for candidate in _cost_candidates(power, n, snr, tuning, fd, pairs):
+    cands = _cost_candidates(power, n, snr, tuning, fd, pairs)
+    single_choice = None
+    best_cost = float('inf')
+    for candidate in cands:
         band = candidate["band"]
         if choose_threshold(power, n, snr, fd, band) is not None:
-            return band, candidate["K"]
-    return None
+            single_choice = (band, candidate["K"])
+            best_cost = candidate["cost"]
+            break
+    if not cascade:
+        return single_choice
+
+    best_cascade = None
+    min_cascade_cost = best_cost if single_choice is not None else float('inf')
+
+    band_cands = sorted([c for c in cands if c["band"] < n], key=lambda c: c["band"])
+    for i, c0 in enumerate(band_cands):
+        b0 = c0["band"]
+        if c0["f"] < 0.50:
+            continue
+        for c1 in band_cands[i + 1:]:
+            b1 = c1["band"]
+            est_cost = 0.15 * c0["cost"] + 0.25 * c1["cost"]
+            if est_cost < min_cascade_cost:
+                thr = choose_threshold(power, n, snr, fd, b1, cascade_band=b0)
+                if thr is not None:
+                    min_cascade_cost = est_cost
+                    best_cascade = (b0, b1, c1["K"])
+
+    if best_cascade is not None:
+        return best_cascade
+    return single_choice
 
 
 class HierarchicalFilter(MatchedFilter):
@@ -1458,7 +1490,8 @@ class HierarchicalFilter(MatchedFilter):
     """
 
     def __init__(self, n, ndata=1, ntemplates=1, snr=5.5, fd=1e-2,
-                 band=None, taps=None, device=None, *, valid=None, cascade_band=None):
+                 band=None, taps=None, device=None, *, valid=None, cascade_band=None,
+                 cascade=False):
         from .device import parse as _parse_device
         self.device = _parse_device(device)
         self.n = int(n)
@@ -1469,6 +1502,7 @@ class HierarchicalFilter(MatchedFilter):
         if self.cascade_band is not None:
             if self.cascade_band < 64 or self.cascade_band >= self.n or self.cascade_band & (self.cascade_band - 1):
                 raise ValueError("cascade_band must be a power of two, >= 64 and < n")
+        self.cascade = bool(cascade or self.cascade_band is not None)
         if self.ndata < 1 or self.ntemplates < 1:
             raise ValueError("ndata and ntemplates must be >= 1")
         if self.device.kind == 'cpu' and self.n > self._cpu_max_n:
@@ -1570,7 +1604,8 @@ class HierarchicalFilter(MatchedFilter):
             tuning = _load_tuning_for(self.device)
             cfg = choose_config(self._pending_ref, self.n, self.snr, self.fd,
                                 tuning=tuning,
-                                pairs=self.ndata * self.ntemplates)
+                                pairs=self.ndata * self.ntemplates,
+                                cascade=self.cascade)
         if cfg is None:
             # Autotuning is a promise, so it refuses rather than guesses.
             # There used to be a compiled design table to fall back on; it was
@@ -1598,11 +1633,20 @@ class HierarchicalFilter(MatchedFilter):
                         "with no low-frequency cutoff."
                         % (self.n, _BEFF_MIN))
             raise ValueError(_uncovered_message(self.n, self.snr, self.fd))
-        b, k = cfg
-        self._mf = self._new_cpu_plan(b, k)
-        tv = self._coarse_value(b, required=False)
+        if len(cfg) == 3:
+            b0, b1, k = cfg
+            self.cascade_band = b0
+            self._mf = self._new_cpu_plan(b1, k, cascade_band=b0)
+            tv = self._coarse_value(b1, required=False)
+        else:
+            b, k = cfg
+            self._mf = self._new_cpu_plan(b, k)
+            tv = self._coarse_value(b, required=False)
         if tv is not None:
-            self._mf.set_threshold(tv)
+            if isinstance(tv, (tuple, list)):
+                self._mf.set_threshold(*tv)
+            else:
+                self._mf.set_threshold(tv)
             self._thr_applied = True
         if self._pending_ref is not None:
             self._mf.set_reference(self._pending_ref)
@@ -1636,20 +1680,29 @@ class HierarchicalFilter(MatchedFilter):
         if self._cal_thr is not None:
             if self._pinned is None:
                 raise ValueError("an explicit coarse threshold requires an explicit band")
-            return float(self._cal_thr)
+            return self._cal_thr
         value = None
         if self._pending_ref is not None:
-            value = choose_threshold(self._pending_ref, self.n,
-                                     self._fs_snr or self.snr, self.fd, int(band))
+            cband = getattr(self, 'cascade_band', None)
+            if cband is not None and cband > 0:
+                value = choose_threshold(self._pending_ref, self.n,
+                                         self._fs_snr or self.snr, self.fd, int(band),
+                                         cascade_band=int(cband))
+            else:
+                value = choose_threshold(self._pending_ref, self.n,
+                                         self._fs_snr or self.snr, self.fd, int(band))
         if value is None and required:
             raise ValueError(
                 "no calibrated coarse threshold for n=%d band=%d: provide a "
                 "reference and a resolvable budget, or set both band and coarse threshold"
                 % (self.n, band))
-        if value is not None and (not np.isfinite(value) or value < 0
-                                  or value > float(np.finfo(np.float32).max)):
-            raise ValueError("calibrated coarse threshold must be finite, nonnegative float32")
-        return None if value is None else float(value)
+        if value is not None:
+            if isinstance(value, (tuple, list)):
+                return (float(value[0]), float(value[1]))
+            if not np.isfinite(value) or value < 0 or value > float(np.finfo(np.float32).max):
+                raise ValueError("calibrated coarse threshold must be finite, nonnegative float32")
+            return float(value)
+        return None
 
     def _execution_plan(self):
         plan = self._ensure()
