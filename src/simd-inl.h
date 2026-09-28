@@ -204,8 +204,9 @@ static HWY_ATTR HWY_INLINE void v_transpose(const vf *in, vf *out) {
 static HWY_ATTR HWY_INLINE void v_transpose_store(const vf *in, float *out) {
   vf tmp[AP_W];
   v_transpose(in, tmp);
-  for (int i = 0; i < AP_W; i++) {
-    V_STOREU(out + (size_t)i * AP_W, tmp[i]);
+  float *ptr = out;
+  for (int i = 0; i < AP_W; i++, ptr += AP_W) {
+    V_STOREU(ptr, tmp[i]);
   }
 }
 #endif

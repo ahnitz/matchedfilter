@@ -557,7 +557,14 @@ static int series_spectra(ap_mf_plan *p,const float *series,size_t nseries,
     if(have){
       const float * restrict src=series+2*start;
       float * restrict dst=p->sfwd;
-      for(size_t k=0;k<2*have;k++) dst[k]=src[k]*inv;
+      size_t k=0, len=2*have;
+      for(;k+3<len;k+=4){
+        dst[k]   = src[k]   * inv;
+        dst[k+1] = src[k+1] * inv;
+        dst[k+2] = src[k+2] * inv;
+        dst[k+3] = src[k+3] * inv;
+      }
+      for(;k<len;k++) dst[k]=src[k]*inv;
     }
     if(have<n) memset(p->sfwd+2*have,0,2*(n-have)*sizeof(float));
     ap_fft(p->fft,p->sfwd,p->sspec,AP_FORWARD);
