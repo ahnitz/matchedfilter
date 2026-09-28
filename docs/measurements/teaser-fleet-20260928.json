@@ -1,5 +1,5 @@
 {
- "method": "Warm public run calls; single CPU thread; 0.5 s warmup then >=50 ms timing blocks; median of all collected blocks, including repeats; setup and upload excluded; GPU synchronization included. GPU FFT-only baseline queues eight batches per synchronization. The template bank is drawn from the CAPTURED PyCBC reference profile (tests/data/reference_profile_pycbc.npy). Hierarchical rows are recorded at SNR thresholds 5.0, 5.5, 5.75, 6.0 and 6.5; the static chart shows 5.5 and the comparison page selects among them. BOTH gravity-dev2 rows were measured while an unrelated workload held the host at load 38 of 32 cores: its CPU FFTW baseline is 188.67 ms against 78.32 ms idle, and although its rocFFT baseline looks stable (it amortises eight batches per synchronization) its GPU filter rows show timing spreads of 2.4x and 3.0x against about 1.0x everywhere else, so they are dispatch-starved rather than slow. Neither dev2 row characterises that hardware.",
+ "method": "Warm public run calls; single CPU thread; 0.5 s warmup then >=50 ms timing blocks; median of all collected blocks, including repeats; setup and upload excluded; GPU synchronization included. GPU FFT-only baseline queues eight batches per synchronization. The template bank is drawn from the CAPTURED PyCBC reference profile (tests/data/reference_profile_pycbc.npy). Hierarchical rows are recorded at SNR thresholds 5.0, 5.5, 5.75, 6.0 and 6.5; the static chart shows 5.5 and the comparison page selects among them. BOTH gravity-dev2 rows were measured while an unrelated workload held the host at load 38 of 32 cores: its CPU FFTW baseline is 188.67 ms against 78.32 ms idle, and although its rocFFT baseline looks stable (it amortises eight batches per synchronization) its GPU filter rows show timing spreads of 2.4x and 3.0x against about 1.0x elsewhere, so they are dispatch-starved. haswell is a SHARED cluster node measured at load about 40 of 64 cores: across three repeated CPU runs its FFTW baseline reproduced to 1.3% and peak-only to 2.5%, but full output varied 20.7% and the hierarchical rows 9-64% between runs, so its full-output and hierarchical rows are indicative only and the whiskers, which show within-run blocks, understate their uncertainty. Neither dev2 row characterises that hardware.",
  "reports": [
   {
    "host": "gravity-dev1",
@@ -7109,6 +7109,757 @@
     4.77,
     2.04,
     1.21
+   ]
+  },
+  {
+   "host": "haswell",
+   "date": "2026-09-28T14:52:51.964184+00:00",
+   "revision": "eecb43c",
+   "n": 4096,
+   "data": 16,
+   "templates": 512,
+   "snr": 5.5,
+   "snrs": [
+    5.0,
+    5.5,
+    5.75,
+    6.0,
+    6.5
+   ],
+   "reference_profile": "tests/data/reference_profile_pycbc.npy",
+   "cpu": "Intel(R) Xeon(R) CPU E5-2698 v3 @ 2.30GHz",
+   "gpu": "GPU",
+   "cpu_backend": "AVX2",
+   "python": "3.11.0",
+   "numpy": "2.4.2",
+   "platform": "Linux-5.4.0-135-generic-x86_64-with-glibc2.31",
+   "affinity": [
+    3
+   ],
+   "load_before": [
+    41.8,
+    40.52,
+    38.6
+   ],
+   "devices": [
+    "Device('cpu:0', 'Intel(R) Xeon(R) CPU E5-2698 v3 @ 2.30GHz', backend='AVX2')"
+   ],
+   "rows": [
+    {
+     "device": "cpu",
+     "label": "FFTW",
+     "kind": "baseline",
+     "fd": null,
+     "snr": null,
+     "ms": 178.90334781259298,
+     "timing": {
+      "block_ms": [
+       180.22304959595203,
+       180.8818494901061,
+       178.79904806613922,
+       179.31604757905006,
+       178.90334781259298,
+       178.43984719365835,
+       178.746547549963
+      ],
+      "calls_per_block": [
+       1,
+       1,
+       1,
+       1,
+       1,
+       1,
+       1
+      ],
+      "min_ms": 178.43984719365835,
+      "max_ms": 180.8818494901061
+     },
+     "fftw": {
+      "version": "3.3.5",
+      "build": "fftw-3.3.5-sse2-avx",
+      "simd_alignment": 32,
+      "compiler": "gcc -O2 -g -pipe -Wall -Werror=format-security -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fexceptions -fstack-protector-strong -grecord-gcc-switches -specs=/usr/lib/rpm/redhat/redhat-hardened-cc1 -specs=/usr/lib/rpm/redhat/redhat-annobin-cc1 -m64 -mtune=generic -fasynchronous-unwind-tables -fstack-clash-protection -fcf-protection"
+     }
+    },
+    {
+     "device": "cpu",
+     "label": "Full output",
+     "kind": "full",
+     "fd": null,
+     "snr": null,
+     "ms": 303.3509459346533,
+     "timing": {
+      "block_ms": [
+       215.94237722456455,
+       252.4094069376588,
+       313.78845777362585,
+       304.1095482185483,
+       299.94384571909904,
+       304.2881488800049,
+       302.936146967113,
+       303.5563472658396,
+       303.3509459346533
+      ],
+      "calls_per_block": [
+       1,
+       1,
+       1,
+       1,
+       1,
+       1,
+       1,
+       1,
+       1
+      ],
+      "min_ms": 215.94237722456455,
+      "max_ms": 313.78845777362585
+     }
+    },
+    {
+     "device": "cpu",
+     "label": "Peak only",
+     "kind": "flat",
+     "fd": null,
+     "snr": null,
+     "ms": 132.74860754609108,
+     "timing": {
+      "block_ms": [
+       142.30271615087986,
+       139.26401175558567,
+       165.1833327487111,
+       133.40140786021948,
+       132.74860754609108,
+       132.5579071417451,
+       132.58890714496374,
+       132.12730642408133,
+       131.32590614259243
+      ],
+      "calls_per_block": [
+       1,
+       1,
+       1,
+       1,
+       1,
+       1,
+       1,
+       1,
+       1
+      ],
+      "min_ms": 131.32590614259243,
+      "max_ms": 165.1833327487111
+     }
+    },
+    {
+     "device": "cpu",
+     "label": "Hierarchical 0.01 @ SNR 5",
+     "kind": "hier",
+     "fd": 0.01,
+     "snr": 5.0,
+     "ms": 44.64663518592715,
+     "timing": {
+      "block_ms": [
+       43.722434900701046,
+       45.53648643195629,
+       45.17338611185551,
+       44.64663518592715,
+       43.29633433371782,
+       47.142387833446264,
+       40.72843212634325,
+       46.754037495702505,
+       43.65638457238674
+      ],
+      "calls_per_block": [
+       2,
+       2,
+       2,
+       2,
+       2,
+       2,
+       2,
+       2,
+       2
+      ],
+      "min_ms": 40.72843212634325,
+      "max_ms": 47.142387833446264
+     },
+     "band": 1024,
+     "taps": 8,
+     "refine_rate": 0.031982421875
+    },
+    {
+     "device": "cpu",
+     "label": "Hierarchical 0.001 @ SNR 5",
+     "kind": "hier",
+     "fd": 0.001,
+     "snr": 5.0,
+     "ms": 55.014943704009056,
+     "timing": {
+      "block_ms": [
+       54.163942113518715,
+       50.2971401438117,
+       56.23154528439045,
+       55.014943704009056,
+       52.91374213993549,
+       58.299447409808636,
+       56.190744042396545,
+       51.483591087162495,
+       57.71654471755028
+      ],
+      "calls_per_block": [
+       1,
+       1,
+       1,
+       1,
+       1,
+       1,
+       1,
+       2,
+       1
+      ],
+      "min_ms": 50.2971401438117,
+      "max_ms": 58.299447409808636
+     },
+     "band": 1024,
+     "taps": 8,
+     "refine_rate": 0.1082763671875
+    },
+    {
+     "device": "cpu",
+     "label": "Hierarchical 0.0001 @ SNR 5",
+     "kind": "hier",
+     "fd": 0.0001,
+     "snr": 5.0,
+     "ms": 70.6077553331852,
+     "timing": {
+      "block_ms": [
+       69.50435414910316,
+       70.6077553331852,
+       69.11685410887003,
+       70.76795492321253,
+       70.99055498838425,
+       69.03235428035259,
+       71.89745642244816,
+       68.4097521007061,
+       71.20505440980196
+      ],
+      "calls_per_block": [
+       1,
+       1,
+       1,
+       1,
+       1,
+       1,
+       1,
+       1,
+       1
+      ],
+      "min_ms": 68.4097521007061,
+      "max_ms": 71.89745642244816
+     },
+     "band": 2048,
+     "taps": 8,
+     "refine_rate": 0.036865234375
+    },
+    {
+     "device": "cpu",
+     "label": "Hierarchical 0.01 @ SNR 5.5",
+     "kind": "hier",
+     "fd": 0.01,
+     "snr": 5.5,
+     "ms": 14.472711132839322,
+     "timing": {
+      "block_ms": [
+       14.310735976323485,
+       14.839736511930823,
+       14.472711132839322,
+       14.330136124044657,
+       14.96806158684194,
+       14.151060720905662,
+       14.727061381563544,
+       15.345611842349172,
+       14.210436027497053
+      ],
+      "calls_per_block": [
+       4,
+       4,
+       4,
+       4,
+       4,
+       4,
+       4,
+       4,
+       4
+      ],
+      "min_ms": 14.151060720905662,
+      "max_ms": 15.345611842349172
+     },
+     "band": 512,
+     "taps": 8,
+     "refine_rate": 0.0244140625
+    },
+    {
+     "device": "cpu",
+     "label": "Hierarchical 0.001 @ SNR 5.5",
+     "kind": "hier",
+     "fd": 0.001,
+     "snr": 5.5,
+     "ms": 68.50435212254524,
+     "timing": {
+      "block_ms": [
+       70.73305360972881,
+       62.75604758411646,
+       68.50435212254524,
+       69.80845332145691,
+       66.57695025205612,
+       72.3906559869647,
+       69.76735312491655,
+       62.993247993290424,
+       67.20115151256323
+      ],
+      "calls_per_block": [
+       1,
+       1,
+       1,
+       1,
+       1,
+       1,
+       1,
+       1,
+       1
+      ],
+      "min_ms": 62.75604758411646,
+      "max_ms": 72.3906559869647
+     },
+     "band": 1024,
+     "taps": 8,
+     "refine_rate": 0.0169677734375
+    },
+    {
+     "device": "cpu",
+     "label": "Hierarchical 0.0001 @ SNR 5.5",
+     "kind": "hier",
+     "fd": 0.0001,
+     "snr": 5.5,
+     "ms": 47.750585712492466,
+     "timing": {
+      "block_ms": [
+       45.08483316749334,
+       46.59343510866165,
+       47.750585712492466,
+       43.34068205207586,
+       47.89233533665538,
+       46.15738429129124,
+       60.438244603574276,
+       75.13055484741926,
+       76.21565647423267
+      ],
+      "calls_per_block": [
+       2,
+       2,
+       2,
+       2,
+       2,
+       2,
+       1,
+       1,
+       1
+      ],
+      "min_ms": 43.34068205207586,
+      "max_ms": 76.21565647423267
+     },
+     "band": 1024,
+     "taps": 8,
+     "refine_rate": 0.0438232421875
+    },
+    {
+     "device": "cpu",
+     "label": "Hierarchical 0.01 @ SNR 5.75",
+     "kind": "hier",
+     "fd": 0.01,
+     "snr": 5.75,
+     "ms": 12.684934074059129,
+     "timing": {
+      "block_ms": [
+       12.256688997149467,
+       11.524848453700542,
+       12.684934074059129,
+       12.11690902709961,
+       12.767869420349598,
+       18.349880042175453,
+       17.924446612596512,
+       12.228108942508698,
+       14.081410598009825
+      ],
+      "calls_per_block": [
+       5,
+       5,
+       4,
+       5,
+       5,
+       3,
+       3,
+       5,
+       4
+      ],
+      "min_ms": 11.524848453700542,
+      "max_ms": 18.349880042175453
+     },
+     "band": 512,
+     "taps": 8,
+     "refine_rate": 0.0091552734375
+    },
+    {
+     "device": "cpu",
+     "label": "Hierarchical 0.001 @ SNR 5.75",
+     "kind": "hier",
+     "fd": 0.001,
+     "snr": 5.75,
+     "ms": 66.26034807413816,
+     "timing": {
+      "block_ms": [
+       66.26034807413816,
+       68.01114976406097,
+       68.9239501953125,
+       67.8682504221797,
+       68.64525005221367,
+       44.657382648438215,
+       44.631832744926214,
+       42.86063136532903,
+       43.07573102414608
+      ],
+      "calls_per_block": [
+       1,
+       1,
+       1,
+       1,
+       1,
+       2,
+       2,
+       2,
+       2
+      ],
+      "min_ms": 42.86063136532903,
+      "max_ms": 68.9239501953125
+     },
+     "band": 1024,
+     "taps": 8,
+     "refine_rate": 0.00537109375
+    },
+    {
+     "device": "cpu",
+     "label": "Hierarchical 0.0001 @ SNR 5.75",
+     "kind": "hier",
+     "fd": 0.0001,
+     "snr": 5.75,
+     "ms": 65.12664631009102,
+     "timing": {
+      "block_ms": [
+       59.62564144283533,
+       63.2147453725338,
+       68.97504907101393,
+       65.12664631009102,
+       64.59844578057528,
+       67.98894889652729,
+       66.52264669537544,
+       58.87544248253107,
+       67.98014789819717
+      ],
+      "calls_per_block": [
+       1,
+       1,
+       1,
+       1,
+       1,
+       1,
+       1,
+       1,
+       1
+      ],
+      "min_ms": 58.87544248253107,
+      "max_ms": 68.97504907101393
+     },
+     "band": 1024,
+     "taps": 8,
+     "refine_rate": 0.0179443359375
+    },
+    {
+     "device": "cpu",
+     "label": "Hierarchical 0.01 @ SNR 6",
+     "kind": "hier",
+     "fd": 0.01,
+     "snr": 6.0,
+     "ms": 11.20382808148861,
+     "timing": {
+      "block_ms": [
+       10.92308759689331,
+       12.806729041039944,
+       21.653348580002785,
+       12.756634037941694,
+       11.148707754909992,
+       11.20382808148861,
+       10.886247642338276,
+       11.355887912213802,
+       10.580867528915405
+      ],
+      "calls_per_block": [
+       5,
+       5,
+       3,
+       4,
+       5,
+       5,
+       5,
+       5,
+       5
+      ],
+      "min_ms": 10.580867528915405,
+      "max_ms": 21.653348580002785
+     },
+     "band": 512,
+     "taps": 8,
+     "refine_rate": 0.0035400390625
+    },
+    {
+     "device": "cpu",
+     "label": "Hierarchical 0.001 @ SNR 6",
+     "kind": "hier",
+     "fd": 0.001,
+     "snr": 6.0,
+     "ms": 13.521784450858831,
+     "timing": {
+      "block_ms": [
+       14.011209830641747,
+       13.519034488126636,
+       13.660784577950835,
+       13.385359197854996,
+       13.521784450858831,
+       13.854509452357888,
+       13.357934542000294,
+       13.33180908113718,
+       14.176134718582034
+      ],
+      "calls_per_block": [
+       4,
+       4,
+       4,
+       4,
+       4,
+       4,
+       4,
+       4,
+       4
+      ],
+      "min_ms": 13.33180908113718,
+      "max_ms": 14.176134718582034
+     },
+     "band": 512,
+     "taps": 8,
+     "refine_rate": 0.0194091796875
+    },
+    {
+     "device": "cpu",
+     "label": "Hierarchical 0.0001 @ SNR 6",
+     "kind": "hier",
+     "fd": 0.0001,
+     "snr": 6.0,
+     "ms": 39.441626984626055,
+     "timing": {
+      "block_ms": [
+       40.20227678120136,
+       37.76497580111027,
+       40.28392722830176,
+       39.66497676447034,
+       39.055726025253534,
+       39.441626984626055,
+       38.747875951230526,
+       39.694076869636774,
+       35.76472355052829
+      ],
+      "calls_per_block": [
+       2,
+       2,
+       2,
+       2,
+       2,
+       2,
+       2,
+       2,
+       2
+      ],
+      "min_ms": 35.76472355052829,
+      "max_ms": 40.28392722830176
+     },
+     "band": 1024,
+     "taps": 8,
+     "refine_rate": 0.0057373046875
+    },
+    {
+     "device": "cpu",
+     "label": "Hierarchical 0.01 @ SNR 6.5",
+     "kind": "hier",
+     "fd": 0.01,
+     "snr": 6.5,
+     "ms": 10.97886748611927,
+     "timing": {
+      "block_ms": [
+       11.208067648112774,
+       10.924947261810303,
+       11.138967424631119,
+       10.913867503404617,
+       10.82150712609291,
+       10.97886748611927,
+       11.240867525339127,
+       11.201427690684795,
+       10.738287307322025
+      ],
+      "calls_per_block": [
+       5,
+       5,
+       5,
+       5,
+       5,
+       5,
+       5,
+       5,
+       5
+      ],
+      "min_ms": 10.738287307322025,
+      "max_ms": 11.240867525339127
+     },
+     "band": 256,
+     "taps": 8,
+     "refine_rate": 0.00927734375
+    },
+    {
+     "device": "cpu",
+     "label": "Hierarchical 0.001 @ SNR 6.5",
+     "kind": "hier",
+     "fd": 0.001,
+     "snr": 6.5,
+     "ms": 18.020144974191982,
+     "timing": {
+      "block_ms": [
+       18.32534559071064,
+       18.612978979945183,
+       18.461712325612705,
+       18.020144974191982,
+       19.665846911569435,
+       11.918987892568111,
+       11.73050794750452,
+       12.6845333725214,
+       13.257833663374186
+      ],
+      "calls_per_block": [
+       3,
+       3,
+       3,
+       3,
+       3,
+       5,
+       5,
+       4,
+       4
+      ],
+      "min_ms": 11.73050794750452,
+      "max_ms": 19.665846911569435
+     },
+     "band": 512,
+     "taps": 8,
+     "refine_rate": 0.0029296875
+    },
+    {
+     "device": "cpu",
+     "label": "Hierarchical 0.0001 @ SNR 6.5",
+     "kind": "hier",
+     "fd": 0.0001,
+     "snr": 6.5,
+     "ms": 12.580783339217305,
+     "timing": {
+      "block_ms": [
+       12.580783339217305,
+       12.845033314079046,
+       12.312968075275421,
+       12.979158200323582,
+       12.538457987830043,
+       12.482388317584991,
+       12.949183350428939,
+       12.294867634773254,
+       12.682583183050156
+      ],
+      "calls_per_block": [
+       4,
+       4,
+       5,
+       4,
+       4,
+       5,
+       4,
+       5,
+       4
+      ],
+      "min_ms": 12.294867634773254,
+      "max_ms": 12.979158200323582
+     },
+     "band": 512,
+     "taps": 8,
+     "refine_rate": 0.0120849609375
+    }
+   ],
+   "errors": [],
+   "device": "cpu",
+   "load_after": [
+    44.2,
+    40.83,
+    38.81
+   ],
+   "validation": {
+    "full": 8.453095560586055e-08,
+    "flat": 8.453095560586055e-08,
+    "hier": 8.453095560586055e-08
+   }
+  },
+  {
+   "host": "haswell",
+   "date": "2026-09-28T14:54:04.964357+00:00",
+   "revision": "eecb43c",
+   "n": 4096,
+   "data": 16,
+   "templates": 512,
+   "snr": 5.5,
+   "snrs": [
+    5.0,
+    5.5,
+    5.75,
+    6.0,
+    6.5
+   ],
+   "reference_profile": "tests/data/reference_profile_pycbc.npy",
+   "cpu": "Intel(R) Xeon(R) CPU E5-2698 v3 @ 2.30GHz",
+   "gpu": "GPU",
+   "cpu_backend": "AVX2",
+   "python": "3.11.0",
+   "numpy": "2.4.2",
+   "platform": "Linux-5.4.0-135-generic-x86_64-with-glibc2.31",
+   "affinity": [
+    3
+   ],
+   "load_before": [
+    43.31,
+    40.7,
+    38.78
+   ],
+   "devices": [
+    "Device('cpu:0', 'Intel(R) Xeon(R) CPU E5-2698 v3 @ 2.30GHz', backend='AVX2')"
+   ],
+   "rows": [],
+   "errors": [
+    "No physical GPU exposed; software rendering excluded"
+   ],
+   "device": "gpu",
+   "load_after": [
+    43.31,
+    40.7,
+    38.78
    ]
   }
  ]

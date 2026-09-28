@@ -4,6 +4,13 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ## Unreleased
 
+- Add the Haswell node (Xeon E5-2698 v3) to the hardware comparison. It had
+  been in the PyCBC fleet benchmark from the start but never the hardware
+  comparison, which is an odd gap for the oldest and most register-starved
+  x86 target in the fleet. It exposes no GPU, and as a shared cluster node at
+  load ~40/64 only its FFTW (1.3%) and peak-only (2.5%) rows reproduce across
+  three runs; full output (20.7%) and hierarchical (9-64%) are indicative
+  only.
 - Re-measure both fleet benchmarks at `main` `eecb43c` (twenty-five
   optimization passes). PyCBC complete search against the previous head
   `ce9c828`: dev3 +7.4%, dev1 +2.3%, dev4/sugwg-login2/Haswell flat. The

@@ -1,4 +1,4 @@
-# Six-machine teaser comparison
+# Seven-machine teaser comparison
 
 Measured September 28, 2026, at library revision `eecb43c` (current `main`),
 which adds twenty-five optimization passes over `ce9c828`. This recalculates
@@ -55,6 +55,7 @@ Milliseconds per batch; smaller is faster.
 | Core i5-13500H | 44.96 | 56.24 | 35.49 | 4.69 | 6.13 | 7.15 |
 | Apple M2 | 252.55 | 68.75 | 57.84 | 6.28 | 13.17 | 14.73 |
 | Xeon Platinum 8260 (VM) ‡ | 219.57 | 155.19 | 79.18 | 6.24 | 10.66 | 13.90 |
+| Xeon E5-2698 v3 (Haswell) § | 178.90 | 303.35 | 132.75 | 14.47 | 68.50 | 47.75 |
 
 Hierarchical columns are at SNR 5.5. At `fd=1e-3`, varying the threshold:
 
@@ -66,6 +67,7 @@ Hierarchical columns are at SNR 5.5. At `fd=1e-3`, varying the threshold:
 | Core i5-13500H | 9.56 | 6.13 | 5.81 | 4.52 | 3.30 |
 | Apple M2 | 18.46 | 13.17 | 12.48 | 5.98 | 5.03 |
 | Xeon Platinum 8260 (VM) ‡ | 19.01 | 10.66 | 10.53 | 5.86 | 4.52 |
+| Xeon E5-2698 v3 (Haswell) § | 55.01 | 68.50 | 66.26 | 13.52 | 18.02 |
 
 A factor of 2.5-4 across the range on every machine. The band the gate
 selects can change with it as well: on this reference `fd=1e-3` moves from
@@ -84,8 +86,8 @@ Unlike the September 27 run, gravity-dev2's **GPU** rows are contended too;
 see the note below. The other three GPUs reproduce their September 27 values
 to within about 1%.
 
-The Ryzen 9 5950X and the Xeon guest expose no physical GPU; software
-rendering is excluded. rocFFT is unavailable on gravity-dev3, and no FFT-only
+The Ryzen 9 5950X, the Xeon guest and the Haswell node expose no physical
+GPU; software rendering is excluded. rocFFT is unavailable on gravity-dev3, and no FFT-only
 reference is available on Iris Xe. Those gaps are the same as on September 26.
 
 ## What changed since `ce9c828`
@@ -123,15 +125,53 @@ unrelated workload held that host at load 38 on 32 cores. The CPU case is
 obvious: FFTW reads 188.67 ms against 78.32 ms idle, so those rows are about
 2.4x slow.
 
-Its **GPU** case is subtler and is the reason to check spreads rather than
-medians. Its rocFFT baseline looks fine, only 1.6% off, because that baseline
-queues eight batches per synchronization and so amortises dispatch. The filter
-rows do not: they are small, dispatch-latency bound kernels that need the CPU
-promptly, and they show timing spreads of **2.4x and 3.0x within a single
-run** against about 1.0x on every other GPU. Read as a revision-to-revision
-change they would look like a 3-10x regression; they are a starved dispatcher.
-The September 27 run, taken at load 9, did not show this — dev2's GPU was
-clean then and is not now.
+Its **GPU** case is subtler and is worth spelling out, because read naively
+it looks like a 3-10x GPU regression. It is not. Ranked by how often a mode
+must return to the CPU between GPU calls:
+
+    dev2 GPU mode      calls/block   now/prev   within-run spread
+    rocFFT baseline              3      1.02x               1.03x
+    full output                 13      2.93x               1.31x
+    peak only                   30      5.00x               2.40x
+    hier. 1e-2                  90      6.55x               2.47x
+    hier. 1e-3                  74     10.63x               3.00x
+
+The degradation is monotone in dispatch rate, and the within-run spread grows
+with it. The rocFFT baseline is nearly unaffected because it queues eight
+batches per synchronization and so amortises dispatch away. That is the
+signature of a **starved dispatcher on an oversubscribed host** -- load 38
+against 32 hardware threads, so no core is free, and the CPU cannot feed the
+GPU promptly.
+
+The decisive control is the other GPUs. A genuine regression in small GPU
+dispatches would show up wherever dispatches are frequent, and it does not:
+empire at 36 calls/block and gravity-dev3 at 31 both reproduce to within 1%
+with spread 1.01-1.15x, as does Iris Xe. Only the loaded host moves. The
+September 27 run of this same GPU, taken at load 9, was clean.
+
+One residual caveat, stated because the controls cannot close it: dev2 is the
+fleet's only RADV GFX1151, so a regression specific to that one driver/GPU
+pair would not be caught by the other three. The dispatch-rate gradient
+argues strongly against it, but a quiet re-measurement of this host is what
+would settle it.
+
+**§ Haswell is new to this comparison, and it is a shared cluster node.**
+It has been benchmarked here for the PyCBC complete search since the start
+but was never part of the hardware comparison, which is an odd gap given it
+is the oldest and most register-starved x86 target in the fleet and the one
+the coarse-kernel work is weighted towards. It is included from this page on.
+
+It was measured at load about 40 of 64 cores, and three repeated CPU runs
+show which of its rows survive that:
+
+    FFTW  1.3%    Peak only  2.5%    Hier. 1e-4  9.3%
+    Full output  20.7%        Hier. 1e-2  48.1%    Hier. 1e-3  64.1%
+
+So its **FFTW and peak-only rows are trustworthy** and its **full-output and
+hierarchical rows are indicative only**. Note that the whiskers on the chart
+show within-run block percentiles and therefore *understate* the uncertainty
+on those rows: the between-run variation is much larger than the
+within-run spread. A quiet measurement of this host is still owed.
 
 **‡ sugwg-login2 is a virtualized guest.** Its FFTW baseline moved 2.3% here,
 which is within tolerance, but it has moved as much as 32% across longer
