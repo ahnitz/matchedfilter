@@ -1412,15 +1412,16 @@ def _cost_candidates(power, n, snr, t, fd=1e-3, pairs=None):
     return sorted(candidates, key=lambda c: (c["cost"], c["band"], c["K"]))
 
 
-def choose_config(power, n, snr, fd, tuning=None, pairs=None):
+def choose_config(power, n, snr, fd, tuning=None, pairs=None, device=None):
     """Cheapest measured (band, taps) whose model gate resolves the budget.
 
     Only costs come from files. The model uses the complete reference at
     the requested SNR and budget, without a tabulated accuracy fallback.
     Cost measurements are approximate rankings, not runtime guarantees.
     """
-    t = _load_tuning() if tuning is None else tuning
-    for candidate in _cost_candidates(power, n, snr, t, fd, pairs):
+    if tuning is None:
+        tuning = _load_tuning_for(device) if device is not None else _load_tuning()
+    for candidate in _cost_candidates(power, n, snr, tuning, fd, pairs):
         band = candidate["band"]
         if choose_threshold(power, n, snr, fd, band) is not None:
             return band, candidate["K"]
@@ -1549,7 +1550,11 @@ class HierarchicalFilter(MatchedFilter):
             # every cell.
             cfg = self._pinned
         elif self._pending_ref is not None:
-            cfg = choose_config(self._pending_ref, self.n, self.snr, self.fd)
+            _, self._cost_key = cost_table_for(self.device)
+            tuning = _load_tuning_for(self.device)
+            cfg = choose_config(self._pending_ref, self.n, self.snr, self.fd,
+                                tuning=tuning,
+                                pairs=self.ndata * self.ntemplates)
         if cfg is None:
             # Autotuning is a promise, so it refuses rather than guesses.
             # There used to be a compiled design table to fall back on; it was
@@ -1560,7 +1565,7 @@ class HierarchicalFilter(MatchedFilter):
             if self._pending_ref is not None:
                 try:
                     bad_ref = _uncovered_reference(self._pending_ref, self.n,
-                                                   _load_tuning())
+                                                   _load_tuning_for(self.device))
                 except Exception:
                     bad_ref = False
                 if bad_ref:
@@ -1816,9 +1821,10 @@ class HierarchicalFilter(MatchedFilter):
         falls back to a CPU's, which is a real difference in what was
         chosen, and it should not be something a user has to infer.
         """
-        if self._gpu is None:
-            return None
-        self._gpu_calibration(self.snr)
+        if self._gpu is not None:
+            self._gpu_calibration(self.snr)
+            return getattr(self, "_cost_key", None)
+        self._ensure()
         return getattr(self, "_cost_key", None)
 
     @property

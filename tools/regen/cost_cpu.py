@@ -19,10 +19,16 @@ import numpy as np
 import matchedfilter as mf
 
 ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT / 'tests'))
-sys.path.insert(0, str(ROOT / 'tools'))
-from test_api import inspiral_power  # noqa: E402
-from hmf_tune import bands_for  # noqa: E402
+def bands_for(n, count=6):
+    return sorted([n >> k for k in range(1, count + 1) if (n >> k) >= 256],
+                  reverse=True)
+
+
+def inspiral_power(n, exponent=-7 / 3.0, knee_frac=0.0150):
+    p = np.zeros(n, dtype=np.float32)
+    k = np.arange(1, n // 2).astype(np.float64)
+    p[1:n // 2] = (k ** exponent / ((knee_frac * n / k) ** 4 + 1.0)).astype(np.float32)
+    return p / p.sum()
 
 
 def _values(value, typ):
