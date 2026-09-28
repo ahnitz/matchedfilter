@@ -24,7 +24,9 @@ class Gen:
         s.prod=prod
     def emit(s,l): s.L.append("  "+l)
     def const(s,c,v):
-        key=("%.17g"%v)
+        import struct
+        fval = struct.unpack('f', struct.pack('f', v))[0]
+        key = ("%.9g" % fval)
         if key not in s.consts:
             nm="c%d"%len(s.consts); s.consts[key]=nm
         return s.consts[key]
@@ -265,8 +267,7 @@ def build_sr(n,name,tw=False,prod=False,unit=False,inplace=False,sink=False,out_
                     break
             if matched is not None and sink:
                 k, store = matched
-                quad = k // (n // 4)
-                scheduled.append("  if(qmask & %du){"%(1 << quad))
+                scheduled.append("  if(rowmask & (1u << %d)){" % k)
                 scheduled.append("  "+line)
                 scheduled.append("  "+store)
                 scheduled.append("  }")
@@ -304,7 +305,7 @@ def build_sr(n,name,tw=False,prod=False,unit=False,inplace=False,sink=False,out_
         # can reduce each result directly instead of materializing a series.
         args=args.replace("float*restrict ar,float*restrict ai",
                           "const float*restrict ar,const float*restrict ai")
-        args += ",unsigned qmask,Sink sink"
+        args += ",uint32_t rowmask,Sink sink"
         body,count=re.subn(r"V_STOREU\(ar\+AP_W\*(\d+),(\w+)\); V_STOREU\(ai\+AP_W\*\1,(\w+)\);",
                            lambda m: "sink(%s,%s,%s);" % m.groups(), body)
         assert count == n
@@ -383,5 +384,7 @@ if __name__=="__main__":
     out.append(build_sr(32,"fftsr32_unit_sink",unit=True,inplace=True,sink=True))
     out += ["}  // namespace HWY_NAMESPACE", "}  // namespace ap",
             "HWY_AFTER_NAMESPACE();", "", "#endif"]
-    open("codelets-inl.h","w").write("\n".join(out))
-    print("generated codelets-inl.h")
+    import os
+    out_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "codelets-inl.h")
+    open(out_path,"w").write("\n".join(out))
+    print("generated", out_path)
