@@ -1773,8 +1773,11 @@ class HierarchicalFilter(MatchedFilter):
                         "with no low-frequency cutoff."
                         % (self.n, _BEFF_MIN))
             raise ValueError(_uncovered_message(self.n, self.snr, self.fd))
-        if len(cfg) == 3:
-            b0, b1, k = cfg
+        if isinstance(cfg, CascadeConfig) or (isinstance(cfg, tuple) and len(cfg) == 3):
+            if isinstance(cfg, CascadeConfig):
+                b0, b1, k = cfg.b0, cfg.b1, cfg.taps
+            else:
+                b0, b1, k = cfg
             self.cascade_band = b0
             self._mf = self._new_cpu_plan(b1, k, cascade_band=b0)
             tv = self._coarse_value(b1, required=False)
@@ -1872,8 +1875,11 @@ class HierarchicalFilter(MatchedFilter):
                                 cascade=self.cascade)
         if cfg is None:
             raise ValueError(_uncovered_message(self.n, self.snr, self.fd))
-        if len(cfg) == 3:
-            b0, b1, taps = cfg
+        if isinstance(cfg, CascadeConfig) or (isinstance(cfg, tuple) and len(cfg) == 3):
+            if isinstance(cfg, CascadeConfig):
+                b0, b1, taps = cfg.b0, cfg.b1, cfg.taps
+            else:
+                b0, b1, taps = cfg
             self.cascade_band = b0
             tv = self._coarse_value(b1)
             f = None
