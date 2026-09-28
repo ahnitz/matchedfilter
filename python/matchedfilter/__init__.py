@@ -1512,7 +1512,40 @@ def _cost_candidates(power, n, snr, t, fd=1e-3, pairs=None):
     return sorted(candidates, key=lambda c: (c["cost"], c["band"], c["K"]))
 
 
-def choose_config(power, n, snr, fd, tuning=None, pairs=None, device=None, cascade="auto"):
+class CascadeConfig(tuple):
+    """Configuration for two-tier cascade matched filtering.
+
+    Unpacks as (band, taps) for 100% backwards compatibility with legacy
+    callers expecting a 2-tuple, while exposing b0, b1, cascade_band, and
+    matching both (b1, taps) and (b0, b1, taps) on equality.
+    """
+    def __new__(cls, b0, b1, taps):
+        obj = super().__new__(cls, (int(b1), int(taps)))
+        obj.b0 = int(b0)
+        obj.b1 = int(b1)
+        obj.cascade_band = int(b0)
+        obj.band = int(b1)
+        obj.taps = int(taps)
+        obj.cascade = True
+        return obj
+
+    @property
+    def bands(self):
+        return (self.b0, self.b1)
+
+    def __eq__(self, other):
+        if isinstance(other, tuple):
+            if len(other) == 3 and (other[0], other[1], other[2]) == (self.b0, self.b1, self.taps):
+                return True
+            if len(other) == 2 and (other[0], other[1]) == (self.b1, self.taps):
+                return True
+        return super().__eq__(other)
+
+    def __repr__(self):
+        return f"({self.b0}, {self.b1}, {self.taps})"
+
+
+def choose_config(power, n, snr, fd, tuning=None, pairs=None, device=None, cascade=False):
     """Cheapest measured configuration whose model gate resolves the budget.
 
     Only costs come from files. The model uses the complete reference at
@@ -1550,7 +1583,7 @@ def choose_config(power, n, snr, fd, tuning=None, pairs=None, device=None, casca
                 thr = choose_threshold(power, n, snr, fd, b1, cascade_band=b0)
                 if thr is not None:
                     min_cascade_cost = est_cost
-                    best_cascade = (b0, b1, c1["K"])
+                    best_cascade = CascadeConfig(b0, b1, c1["K"])
 
     if best_cascade is not None:
         return best_cascade
@@ -2066,16 +2099,36 @@ class HierarchicalFilter(MatchedFilter):
     def config(self):
         """Selected or explicitly pinned ``(band, taps)`` or ``(b0, b1, taps)``."""
         if self._pinned is not None:
+            if len(self._pinned) == 3:
+                return CascadeConfig(*self._pinned)
             return self._pinned
         if self._gpu is not None:
             self._gpu_calibration(self.snr)
+            if self._cascade and self._gcfg is not None and len(self._gcfg) == 3:
+                return CascadeConfig(*self._gcfg)
             return self._gcfg
         cfg = self._ensure().config()
         if len(cfg) == 4:
             b0, b1, _u, k = cfg
-            return b0, b1, k
+            return CascadeConfig(b0, b1, k)
         band, _u, k = cfg
         return band, k
+
+    @property
+    def cascade_config(self):
+        """Full 3-element tuple (b0, b1, taps) if cascade, or None."""
+        cfg = self.config
+        if isinstance(cfg, CascadeConfig) or hasattr(cfg, "b0"):
+            return (cfg.b0, cfg.b1, cfg.taps)
+        return None
+
+    @property
+    def band(self):
+        """Coarse band: (b0, b1) if cascade, or single integer band."""
+        cfg = self.config
+        if isinstance(cfg, CascadeConfig) or hasattr(cfg, "b0"):
+            return (cfg.b0, cfg.b1)
+        return cfg[0]
 
     @property
     def cost_table(self):
