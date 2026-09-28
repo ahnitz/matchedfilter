@@ -41,6 +41,21 @@ def test_hardware_comparison_has_independent_device_choices(tmp_path):
     snr = re.findall(r'name="fleet-snr" value="([^"]+)"( checked)?', page)
     assert [v for v, _ in snr] == ['5', '5.5', '6.5'], snr
     assert [v for v, c in snr if c] == ['5.5'], snr
+    # Thresholds are multi-select: several can be compared at once.
+    assert 'type="checkbox" name="fleet-snr"' in page
+    assert 'type="radio" name="fleet-snr"' not in page
+    # The budget and the threshold are both properties of the hierarchy, so
+    # they share one box; Outputs keeps only the reference and flat modes.
+    hier = re.search(r'<legend>Hierarchical screening</legend>(.*?)</fieldset>',
+                     page, re.S).group(1)
+    assert re.findall(r'value="(hier:[^"]+)"', hier) == \
+        ['hier:0.01', 'hier:0.001', 'hier:0.0001'], hier
+    assert 'fleet-snr' in hier
+    outputs = re.search(r'<legend>Outputs</legend>(.*?)</fieldset>',
+                        page, re.S).group(1)
+    assert 'hier:' not in outputs and 'fleet-snr' not in outputs, outputs
+    # Series are keyed by (budget, threshold), not by budget alone.
+    assert 'seriesFor' in page and 'MEASURED_SNRS' in page
     assert any(p[0] == 'comparison.html' for p in build_report.PAGES)
 
     # Embedded metadata must not terminate its script element.

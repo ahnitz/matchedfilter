@@ -29,10 +29,13 @@ sees flatters the gate, so the hierarchical columns here are **slower than,
 and not comparable to, the September 26 page**.
 
 **Hierarchical rows are recorded at five SNR thresholds** -- 5.0, 5.5, 5.75,
-6.0 and 6.5. The static chart above shows 5.5; the interactive
+6.0 and 6.5. The static chart above shows 5.5. On the interactive
 [hardware comparison page](https://ahnitz.github.io/matchedfilter/comparison.html)
-selects among them. The threshold is not a detail: a higher one admits a
-higher coarse gate, so fewer pairs survive to refinement. These are warm
+the threshold and the FDR budget sit together in one Hierarchical screening
+box, and both are multi-select: a series there is one (budget, threshold)
+pair, so several thresholds can be compared side by side, shaded within each
+budget's colour. The threshold is not a detail: a higher one admits a higher
+coarse gate, so fewer pairs survive to refinement. These are warm
 public `run()` calls, not `run_series()` or isolated kernel times. CPU calls
 use one thread. Linux processes are pinned to CPU 0, except gravity-dev2 uses
 CPU 2; macOS schedules its thread. Setup, calibration, template preparation,
