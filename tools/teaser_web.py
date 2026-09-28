@@ -47,7 +47,8 @@ def fleet_comparison(root):
 <h2 id="fleet-title">Compare hardware and output modes</h2>
 <p>8,192 correlations × 4,096 points: 16 data spectra and 512 templates.
 Warm public <code>run()</code> calls, one CPU thread, setup and upload excluded;
-GPU synchronization included. Recorded September 26, 2026.</p>
+GPU synchronization included. Hierarchical rows use the captured PyCBC reference
+profile and are recorded at several SNR thresholds. Recorded September 28, 2026.</p>
 <div class="fleet-controls">
 <fieldset><legend>CPUs and GPUs</legend>''' + machines + '''</fieldset>
 <fieldset><legend>Outputs</legend>''' + choices + '''</fieldset>''' + hier_fieldset + '''
