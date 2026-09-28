@@ -79,9 +79,7 @@ static inline int codelet(int m,vf*restrict ar,vf*restrict ai,vf*restrict br,vf*
     case  8: return fft8_42 (ar,ai,br,bi,S);
     case 16: return fftsr16 (ar,ai,br,bi,S);
     case 32:
-      if constexpr (AP_W == 8) {
-        if(S==1) return fftsr32_unit(ar,ai,br,bi,S);
-      }
+      if(S==1) return fftsr32_unit(ar,ai,br,bi,S);
       return fftsr32 (ar,ai,br,bi,S);
     default:
       /* At 64 it depends on the register file: AVX-512 has 32 zmm and the
