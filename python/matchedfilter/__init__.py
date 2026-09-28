@@ -459,7 +459,13 @@ class MatchedFilter:
         nd, nt = D.shape[0], H.shape[0]
         limit = self._gpu_pair_limit()
         if nd * nt <= limit:
-            return self._gpu_dispatch(D, H, binsize, threshold, start, end, slot=slot, async_submit=async_submit)
+            if slot is not None or async_submit:
+                try:
+                    return self._gpu_dispatch(D, H, binsize, threshold, start, end, slot=slot, async_submit=async_submit)
+                except TypeError:
+                    res = self._gpu_dispatch(D, H, binsize, threshold, start, end)
+                    return (lambda: res) if async_submit else res
+            return self._gpu_dispatch(D, H, binsize, threshold, start, end)
         nb = 1 + (end - start - 1) // binsize
         idx = np.empty((nd, nt, nb), np.int32)
         val = np.empty((nd, nt, nb), np.complex64)
@@ -471,13 +477,17 @@ class MatchedFilter:
                 gi, gv = self._gpu_dispatch(D[d0:d1], H[t0:t1], binsize,
                                            threshold, start, end)
                 idx[d0:d1, t0:t1], val[d0:d1, t0:t1] = gi, gv
+        if async_submit:
+            return lambda: (idx, val)
         return idx, val
 
     def _gpu_dispatch(self, D, H, binsize, threshold, start, end, slot=None, async_submit=False):
-        return self._gpu.peaks(
+        res = self._gpu.peaks(
             self.n, D, H, binsize=binsize, threshold=threshold,
             window=(start, end), upload_data=self._ddirty,
             upload_tmpl=self._tdirty, slot=slot, async_submit=async_submit)
+        self._tdirty = False
+        return res
 
     # ---- run ----------------------------------------------------------------
     def _execution_plan(self):
@@ -851,14 +861,14 @@ class MatchedFilter:
                 in_flight.append((begin, end, res))
                 if len(in_flight) >= K:
                     b_start, b_end, item = in_flight.pop(0)
-                    gi, gv = item() if pipelined else item
+                    gi, gv = item() if callable(item) else item
                     if raw:
                         idx[b_start:b_end], val[b_start:b_end] = gi, gv
                     else:
                         _core.pack_peaks(peaks[b_start:b_end], gi, gv)
             while in_flight:
                 b_start, b_end, item = in_flight.pop(0)
-                gi, gv = item() if pipelined else item
+                gi, gv = item() if callable(item) else item
                 if raw:
                     idx[b_start:b_end], val[b_start:b_end] = gi, gv
                 else:
@@ -901,10 +911,11 @@ class MatchedFilter:
                     except TypeError:
                         self._gpu.cancel_forward()
                     raise
+                self._ddirty = self._tdirty = False
                 in_flight.append((begin, end, res))
                 if len(in_flight) >= K:
                     b_start, b_end, item = in_flight.pop(0)
-                    gi, gv = item() if pipelined else item
+                    gi, gv = item() if callable(item) else item
                     if single:
                         if raw:
                             return _format_result(gi, gv, raw=True)
@@ -919,7 +930,7 @@ class MatchedFilter:
                         _core.pack_peaks(peaks[b_start:b_end], gi, gv)
         while in_flight:
             b_start, b_end, item = in_flight.pop(0)
-            gi, gv = item() if pipelined else item
+            gi, gv = item() if callable(item) else item
             if single:
                 if raw:
                     return _format_result(gi, gv, raw=True)
