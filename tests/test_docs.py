@@ -24,7 +24,7 @@ def test_hardware_comparison_has_independent_device_choices(tmp_path):
         records.append(dict(host='private-host', cpu='13th Gen Intel(R) Core(TM) i5-13500H',
                             gpu='Intel(R) Iris(R) Xe Graphics (RPL-P)', device=device,
                             rows=[dict(kind='full', ms=1, fd=None)], errors=[]))
-    path = tmp_path/'docs/measurements/teaser-fleet-20260926.json'
+    path = tmp_path/'docs/measurements/teaser-fleet-20260927.json'
     path.parent.mkdir(parents=True)
     path.write_text(json.dumps(dict(reports=records)))
     page = fleet_comparison(tmp_path)

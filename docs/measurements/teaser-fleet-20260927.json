@@ -1,0 +1,2509 @@
+{
+ "method": "Warm public run calls; single CPU thread; 0.5 s warmup then >=50 ms timing blocks; median of all collected blocks, including repeats; setup and upload excluded; GPU synchronization included. GPU FFT-only baseline queues eight batches per synchronization. gravity-dev2 was measured while an unrelated eight-process workload saturated the host; its FFTW baseline is 28% slower than the 2026-09-26 record, so its row reflects memory-bandwidth contention rather than this revision.",
+ "reports": [
+  {
+   "host": "gravity-dev1",
+   "date": "2026-09-28T02:24:30.487388+00:00",
+   "revision": "ce9c828",
+   "n": 4096,
+   "data": 16,
+   "templates": 512,
+   "snr": 5.5,
+   "cpu": "AMD Ryzen 9 5950X 16-Core Processor",
+   "gpu": "GPU",
+   "cpu_backend": "AVX2",
+   "python": "3.12.0",
+   "numpy": "2.5.3",
+   "platform": "Linux-6.15.9-201.fc42.x86_64-x86_64-with-glibc2.41",
+   "affinity": [
+    0
+   ],
+   "load_before": [
+    0.974609375,
+    0.7177734375,
+    0.48046875
+   ],
+   "devices": [
+    "Device('cpu:0', 'AMD Ryzen 9 5950X 16-Core Processor', backend='AVX2')"
+   ],
+   "rows": [
+    {
+     "device": "cpu",
+     "label": "FFTW",
+     "kind": "baseline",
+     "fd": null,
+     "ms": 64.0073549002409,
+     "timing": {
+      "block_ms": [
+       63.69040720164776,
+       63.609084114432335,
+       63.62670846283436,
+       64.79101628065109,
+       64.0073549002409,
+       64.16400335729122,
+       64.09200839698315
+      ],
+      "calls_per_block": [
+       1,
+       1,
+       1,
+       1,
+       1,
+       1,
+       1
+      ],
+      "min_ms": 63.609084114432335,
+      "max_ms": 64.79101628065109
+     },
+     "fftw": {
+      "version": "3.3.5",
+      "build": "fftw-3.3.5-sse2-avx",
+      "simd_alignment": 32,
+      "compiler": "gcc -O2 -g -pipe -Wall -Werror=format-security -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fexceptions -fstack-protector-strong -grecord-gcc-switches -specs=/usr/lib/rpm/redhat/redhat-hardened-cc1 -specs=/usr/lib/rpm/redhat/redhat-annobin-cc1 -m64 -mtune=generic -fasynchronous-unwind-tables -fstack-clash-protection -fcf-protection"
+     }
+    },
+    {
+     "device": "cpu",
+     "label": "Full output",
+     "kind": "full",
+     "fd": null,
+     "ms": 51.91846191883087,
+     "timing": {
+      "block_ms": [
+       51.59771628677845,
+       51.645126193761826,
+       52.67038196325302,
+       55.51902949810028,
+       51.91846191883087,
+       51.78521014750004,
+       52.634142339229584,
+       52.18935385346413,
+       51.48249864578247
+      ],
+      "calls_per_block": [
+       1,
+       1,
+       1,
+       1,
+       1,
+       1,
+       1,
+       1,
+       1
+      ],
+      "min_ms": 51.48249864578247,
+      "max_ms": 55.51902949810028
+     }
+    },
+    {
+     "device": "cpu",
+     "label": "Peak only",
+     "kind": "flat",
+     "fd": null,
+     "ms": 36.741466261446476,
+     "timing": {
+      "block_ms": [
+       36.96760535240173,
+       37.000996991992,
+       36.88433766365051,
+       36.72530222684145,
+       36.624821834266186,
+       37.225170992314816,
+       36.741466261446476,
+       36.647952161729336,
+       36.68537735939026
+      ],
+      "calls_per_block": [
+       2,
+       2,
+       2,
+       2,
+       2,
+       2,
+       2,
+       2,
+       2
+      ],
+      "min_ms": 36.624821834266186,
+      "max_ms": 37.225170992314816
+     }
+    },
+    {
+     "device": "cpu",
+     "label": "Hierarchical 0.01",
+     "kind": "hier",
+     "fd": 0.01,
+     "ms": 3.3076981781050563,
+     "timing": {
+      "block_ms": [
+       3.3076981781050563,
+       3.3256186870858073,
+       3.3167764777317643,
+       3.31671629101038,
+       3.29266837798059,
+       3.2983392011374235,
+       3.2937334617599845,
+       3.3157195430248976,
+       3.292551380582154
+      ],
+      "calls_per_block": [
+       16,
+       16,
+       16,
+       16,
+       16,
+       16,
+       16,
+       16,
+       16
+      ],
+      "min_ms": 3.292551380582154,
+      "max_ms": 3.3256186870858073
+     },
+     "band": 512,
+     "taps": 8,
+     "refine_rate": 0.008544921875
+    },
+    {
+     "device": "cpu",
+     "label": "Hierarchical 0.001",
+     "kind": "hier",
+     "fd": 0.001,
+     "ms": 4.175842273980379,
+     "timing": {
+      "block_ms": [
+       4.190242073188226,
+       4.157698928163602,
+       4.175932612270117,
+       4.1822753846645355,
+       4.175842273980379,
+       4.17917516703407,
+       4.150388189233267,
+       4.170016385614872,
+       4.160255480271119
+      ],
+      "calls_per_block": [
+       12,
+       13,
+       12,
+       12,
+       12,
+       12,
+       13,
+       12,
+       13
+      ],
+      "min_ms": 4.150388189233267,
+      "max_ms": 4.190242073188226
+     },
+     "band": 512,
+     "taps": 8,
+     "refine_rate": 0.0299072265625
+    },
+    {
+     "device": "cpu",
+     "label": "Hierarchical 0.0001",
+     "kind": "hier",
+     "fd": 0.0001,
+     "ms": 6.963011110201478,
+     "timing": {
+      "block_ms": [
+       7.070685736835003,
+       6.942539010196924,
+       6.938900565728545,
+       6.963772466406226,
+       6.963011110201478,
+       7.563863481794085,
+       6.970820715650916,
+       6.9461853709071875,
+       6.934267934411764
+      ],
+      "calls_per_block": [
+       8,
+       8,
+       8,
+       8,
+       8,
+       7,
+       8,
+       8,
+       8
+      ],
+      "min_ms": 6.934267934411764,
+      "max_ms": 7.563863481794085
+     },
+     "band": 1024,
+     "taps": 8,
+     "refine_rate": 0.015380859375
+    }
+   ],
+   "errors": [],
+   "device": "cpu",
+   "load_after": [
+    0.984375,
+    0.74169921875,
+    0.4951171875
+   ],
+   "validation": {
+    "full": 6.845126327018066e-08,
+    "flat": 2.5985925293317687e-08,
+    "hier": 2.5985925293317687e-08
+   }
+  },
+  {
+   "host": "gravity-dev1",
+   "date": "2026-09-28T02:24:59.149044+00:00",
+   "revision": "ce9c828",
+   "n": 4096,
+   "data": 16,
+   "templates": 512,
+   "snr": 5.5,
+   "cpu": "AMD Ryzen 9 5950X 16-Core Processor",
+   "gpu": "GPU",
+   "cpu_backend": "AVX2",
+   "python": "3.12.0",
+   "numpy": "2.5.3",
+   "platform": "Linux-6.15.9-201.fc42.x86_64-x86_64-with-glibc2.41",
+   "affinity": [
+    0
+   ],
+   "load_before": [
+    0.984375,
+    0.74169921875,
+    0.4951171875
+   ],
+   "devices": [
+    "Device('cpu:0', 'AMD Ryzen 9 5950X 16-Core Processor', backend='AVX2')"
+   ],
+   "rows": [],
+   "errors": [
+    "No physical GPU exposed; software rendering excluded"
+   ],
+   "device": "gpu",
+   "load_after": [
+    0.984375,
+    0.74169921875,
+    0.4951171875
+   ]
+  },
+  {
+   "host": "gravity-dev2",
+   "date": "2026-09-28T02:25:42.208667+00:00",
+   "revision": "ce9c828",
+   "n": 4096,
+   "data": 16,
+   "templates": 512,
+   "snr": 5.5,
+   "cpu": "AMD RYZEN AI MAX+ 395 w/ Radeon 8060S",
+   "gpu": "AMD Radeon 8060S Graphics (RADV GFX1151)",
+   "cpu_backend": "AVX3",
+   "python": "3.11.16",
+   "numpy": "2.4.6",
+   "platform": "Linux-7.1.13-100.fc43.x86_64-x86_64-with-glibc2.42",
+   "affinity": [
+    2
+   ],
+   "load_before": [
+    8.78125,
+    8.87646484375,
+    8.74560546875
+   ],
+   "devices": [
+    "Device('cpu:0', 'AMD RYZEN AI MAX+ 395 w/ Radeon 8060S', backend='AVX3')",
+    "Device('gpu:0', 'AMD Radeon 8060S Graphics (RADV GFX1151)', backend='vulkan')",
+    "Device('gpu:1', 'llvmpipe (LLVM 21.1.8, 256 bits)', backend='vulkan', software=True)"
+   ],
+   "rows": [
+    {
+     "device": "cpu",
+     "label": "FFTW",
+     "kind": "baseline",
+     "fd": null,
+     "ms": 118.61034401226789,
+     "timing": {
+      "block_ms": [
+       118.32154099829495,
+       118.32414602395147,
+       120.25531998369843,
+       118.7572788912803,
+       118.42099810019135,
+       118.61034401226789,
+       118.68770804721862
+      ],
+      "calls_per_block": [
+       1,
+       1,
+       1,
+       1,
+       1,
+       1,
+       1
+      ],
+      "min_ms": 118.32154099829495,
+      "max_ms": 120.25531998369843
+     },
+     "fftw": {
+      "version": "3.3.5",
+      "build": "fftw-3.3.5-sse2-avx",
+      "simd_alignment": 32,
+      "compiler": "gcc -O2 -g -pipe -Wall -Werror=format-security -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fexceptions -fstack-protector-strong -grecord-gcc-switches -specs=/usr/lib/rpm/redhat/redhat-hardened-cc1 -specs=/usr/lib/rpm/redhat/redhat-annobin-cc1 -m64 -mtune=generic -fasynchronous-unwind-tables -fstack-clash-protection -fcf-protection"
+     }
+    },
+    {
+     "device": "cpu",
+     "label": "Full output",
+     "kind": "full",
+     "fd": null,
+     "ms": 59.076317003928125,
+     "timing": {
+      "block_ms": [
+       59.196292073465884,
+       58.74826095532626,
+       58.96950699388981,
+       59.076317003928125,
+       59.25666599068791,
+       59.08107594586909,
+       59.00990206282586,
+       59.34521195013076,
+       59.045540052466094
+      ],
+      "calls_per_block": [
+       1,
+       1,
+       1,
+       1,
+       1,
+       1,
+       1,
+       1,
+       1
+      ],
+      "min_ms": 58.74826095532626,
+      "max_ms": 59.34521195013076
+     }
+    },
+    {
+     "device": "cpu",
+     "label": "Peak only",
+     "kind": "flat",
+     "fd": null,
+     "ms": 26.33027354022488,
+     "timing": {
+      "block_ms": [
+       26.616230490617454,
+       26.35721949627623,
+       26.329652464482933,
+       26.275590993463993,
+       26.337983494158834,
+       26.269083959050477,
+       26.264120009727776,
+       26.33027354022488,
+       26.61115600494668
+      ],
+      "calls_per_block": [
+       2,
+       2,
+       2,
+       2,
+       2,
+       2,
+       2,
+       2,
+       2
+      ],
+      "min_ms": 26.264120009727776,
+      "max_ms": 26.616230490617454
+     }
+    },
+    {
+     "device": "cpu",
+     "label": "Hierarchical 0.01",
+     "kind": "hier",
+     "fd": 0.01,
+     "ms": 2.1364482042069235,
+     "timing": {
+      "block_ms": [
+       2.037219242192805,
+       2.023393716663122,
+       2.058108039200306,
+       2.1100570399236553,
+       2.2008241731268554,
+       2.1458847040776163,
+       2.2249520887904195,
+       2.2422293069488974,
+       2.1364482042069235
+      ],
+      "calls_per_block": [
+       25,
+       25,
+       25,
+       24,
+       23,
+       24,
+       23,
+       23,
+       24
+      ],
+      "min_ms": 2.023393716663122,
+      "max_ms": 2.2422293069488974
+     },
+     "band": 512,
+     "taps": 8,
+     "refine_rate": 0.008544921875
+    },
+    {
+     "device": "cpu",
+     "label": "Hierarchical 0.001",
+     "kind": "hier",
+     "fd": 0.001,
+     "ms": 3.85381245555786,
+     "timing": {
+      "block_ms": [
+       3.8542949254266343,
+       3.7579904975635663,
+       3.8736411549437504,
+       3.843572497966566,
+       3.8336896437353323,
+       3.85381245555786,
+       3.8701470027892637,
+       3.890012695382421,
+       3.8233581414845372
+      ],
+      "calls_per_block": [
+       13,
+       14,
+       13,
+       14,
+       14,
+       13,
+       13,
+       13,
+       14
+      ],
+      "min_ms": 3.7579904975635663,
+      "max_ms": 3.890012695382421
+     },
+     "band": 512,
+     "taps": 8,
+     "refine_rate": 0.0299072265625
+    },
+    {
+     "device": "cpu",
+     "label": "Hierarchical 0.0001",
+     "kind": "hier",
+     "fd": 0.0001,
+     "ms": 10.12318282543371,
+     "timing": {
+      "block_ms": [
+       7.320726130274124,
+       9.638570171470443,
+       8.674875716678798,
+       10.31718640588224,
+       10.772853682283312,
+       12.158042611554265,
+       10.12318282543371,
+       10.374083823990077,
+       9.806540348411849
+      ],
+      "calls_per_block": [
+       8,
+       6,
+       7,
+       5,
+       6,
+       5,
+       6,
+       6,
+       6
+      ],
+      "min_ms": 7.320726130274124,
+      "max_ms": 12.158042611554265
+     },
+     "band": 1024,
+     "taps": 8,
+     "refine_rate": 0.015380859375
+    }
+   ],
+   "errors": [],
+   "device": "cpu",
+   "load_after": [
+    9.1337890625,
+    8.9521484375,
+    8.7744140625
+   ],
+   "validation": {
+    "full": 1.1318305492837116e-07,
+    "flat": 2.2684367036522166e-08,
+    "hier": 2.2684367036522166e-08
+   }
+  },
+  {
+   "host": "gravity-dev2",
+   "date": "2026-09-28T02:22:35.430645+00:00",
+   "revision": "ce9c828",
+   "n": 4096,
+   "data": 16,
+   "templates": 512,
+   "snr": 5.5,
+   "cpu": "AMD RYZEN AI MAX+ 395 w/ Radeon 8060S",
+   "gpu": "AMD Radeon 8060S Graphics (RADV GFX1151)",
+   "cpu_backend": "AVX3",
+   "python": "3.11.16",
+   "numpy": "2.4.6",
+   "platform": "Linux-7.1.13-100.fc43.x86_64-x86_64-with-glibc2.42",
+   "affinity": [
+    2
+   ],
+   "load_before": [
+    9.2607421875,
+    8.9697265625,
+    8.74462890625
+   ],
+   "devices": [
+    "Device('cpu:0', 'AMD RYZEN AI MAX+ 395 w/ Radeon 8060S', backend='AVX3')",
+    "Device('gpu:0', 'AMD Radeon 8060S Graphics (RADV GFX1151)', backend='vulkan')",
+    "Device('gpu:1', 'llvmpipe (LLVM 21.1.8, 256 bits)', backend='vulkan', software=True)"
+   ],
+   "rows": [
+    {
+     "device": "gpu",
+     "label": "rocFFT",
+     "kind": "baseline",
+     "fd": null,
+     "ms": 2.824237206368707,
+     "timing": {
+      "block_ms": [
+       2.824237206368707,
+       2.828963585974028,
+       2.8211359992080056,
+       2.8190700007447353,
+       2.8304000394806885,
+       2.8417241701390594,
+       2.8092294572464502
+      ],
+      "calls_per_block": [
+       3,
+       3,
+       3,
+       3,
+       3,
+       3,
+       3
+      ],
+      "min_ms": 2.8092294572464502,
+      "max_ms": 2.8417241701390594,
+      "executions_per_call": 8,
+      "block_ms_scope": "per transform batch"
+     }
+    },
+    {
+     "device": "gpu",
+     "label": "Full output",
+     "kind": "full",
+     "fd": null,
+     "ms": 1.821551750513858,
+     "timing": {
+      "block_ms": [
+       1.821551750513858,
+       1.9245161847383887,
+       1.8751264799869172,
+       1.7872573599951076,
+       1.9666419606297636,
+       1.755672446773227,
+       1.71950333363687,
+       1.787349714764527,
+       1.9024937430879585
+      ],
+      "calls_per_block": [
+       28,
+       27,
+       27,
+       28,
+       26,
+       29,
+       30,
+       28,
+       27
+      ],
+      "min_ms": 1.71950333363687,
+      "max_ms": 1.9666419606297636
+     }
+    },
+    {
+     "device": "gpu",
+     "label": "Peak only",
+     "kind": "flat",
+     "fd": null,
+     "ms": 1.000624061562121,
+     "timing": {
+      "block_ms": [
+       1.0260709404603254,
+       1.0064736614003778,
+       0.9806782746797099,
+       1.000624061562121,
+       0.9516261118235734,
+       0.9946635486010242,
+       1.0351144485365675,
+       0.9951552549632741,
+       1.0053241020068526
+      ],
+      "calls_per_block": [
+       49,
+       50,
+       51,
+       50,
+       53,
+       51,
+       49,
+       51,
+       50
+      ],
+      "min_ms": 0.9516261118235734,
+      "max_ms": 1.0351144485365675
+     }
+    },
+    {
+     "device": "gpu",
+     "label": "Hierarchical 0.01",
+     "kind": "hier",
+     "fd": 0.01,
+     "ms": 0.23122250707605468,
+     "timing": {
+      "block_ms": [
+       0.23122250707605468,
+       0.24435820012557796,
+       0.22422416592977373,
+       0.22699482363914203,
+       0.2491464826801968,
+       0.22034824206309173,
+       0.25879155145958066,
+       0.2489429655304151,
+       0.22937105957914247
+      ],
+      "calls_per_block": [
+       217,
+       205,
+       223,
+       221,
+       201,
+       227,
+       194,
+       201,
+       218
+      ],
+      "min_ms": 0.22034824206309173,
+      "max_ms": 0.25879155145958066
+     },
+     "band": 512,
+     "taps": 4,
+     "refine_rate": 0.0086669921875
+    },
+    {
+     "device": "gpu",
+     "label": "Hierarchical 0.001",
+     "kind": "hier",
+     "fd": 0.001,
+     "ms": 0.25258832811048687,
+     "timing": {
+      "block_ms": [
+       0.2551922350124057,
+       0.21792354780937667,
+       0.22439659633694609,
+       0.25258832811048687,
+       0.25804639138646196,
+       0.2407316877417123,
+       0.24877867165637846,
+       0.2639659680426121,
+       0.28119106743193373
+      ],
+      "calls_per_block": [
+       196,
+       230,
+       223,
+       198,
+       194,
+       208,
+       201,
+       190,
+       179
+      ],
+      "min_ms": 0.21792354780937667,
+      "max_ms": 0.28119106743193373
+     },
+     "band": 512,
+     "taps": 4,
+     "refine_rate": 0.0299072265625
+    },
+    {
+     "device": "gpu",
+     "label": "Hierarchical 0.0001",
+     "kind": "hier",
+     "fd": 0.0001,
+     "ms": 0.2881344253914538,
+     "timing": {
+      "block_ms": [
+       0.29144299942133733,
+       0.2942233392696457,
+       0.29417424604340253,
+       0.2861413486035807,
+       0.2881344253914538,
+       0.2652314126925178,
+       0.26823125685002397,
+       0.2893661216138243,
+       0.28495073903203855
+      ],
+      "calls_per_block": [
+       172,
+       171,
+       171,
+       175,
+       174,
+       189,
+       187,
+       173,
+       176
+      ],
+      "min_ms": 0.2652314126925178,
+      "max_ms": 0.2942233392696457
+     },
+     "band": 1024,
+     "taps": 4,
+     "refine_rate": 0.015380859375
+    }
+   ],
+   "errors": [],
+   "device": "gpu",
+   "load_after": [
+    9.12890625,
+    8.955078125,
+    8.7431640625
+   ],
+   "validation": {
+    "full": 4.6933672479440644e-07,
+    "flat": 3.2007293993261033e-07,
+    "hier": 3.2007293993261033e-07
+   }
+  },
+  {
+   "host": "gravity-dev3",
+   "date": "2026-09-28T02:19:02.441173+00:00",
+   "revision": "ce9c828",
+   "n": 4096,
+   "data": 16,
+   "templates": 512,
+   "snr": 5.5,
+   "cpu": "AMD Ryzen 5 5500U with Radeon Graphics",
+   "gpu": "AMD Radeon Graphics (RADV RENOIR)",
+   "cpu_backend": "AVX2",
+   "python": "3.13.15",
+   "numpy": "2.5.3",
+   "platform": "Linux-7.1.8-200.fc44.x86_64-x86_64-with-glibc2.43",
+   "affinity": [
+    0
+   ],
+   "load_before": [
+    0.1474609375,
+    0.4140625,
+    0.29833984375
+   ],
+   "devices": [
+    "Device('cpu:0', 'AMD Ryzen 5 5500U with Radeon Graphics', backend='AVX2')",
+    "Device('gpu:0', 'AMD Radeon Graphics (RADV RENOIR)', backend='vulkan')",
+    "Device('gpu:1', 'llvmpipe (LLVM 22.1.8, 256 bits)', backend='vulkan', software=True)"
+   ],
+   "rows": [
+    {
+     "device": "cpu",
+     "label": "FFTW",
+     "kind": "baseline",
+     "fd": null,
+     "ms": 87.50623697414994,
+     "timing": {
+      "block_ms": [
+       87.50106813386083,
+       87.57328987121582,
+       87.58244011551142,
+       87.50623697414994,
+       87.63866685330868,
+       87.45168568566442,
+       87.31429697945714
+      ],
+      "calls_per_block": [
+       1,
+       1,
+       1,
+       1,
+       1,
+       1,
+       1
+      ],
+      "min_ms": 87.31429697945714,
+      "max_ms": 87.63866685330868
+     },
+     "fftw": {
+      "version": "3.3.5",
+      "build": "fftw-3.3.5-sse2-avx",
+      "simd_alignment": 32,
+      "compiler": "gcc -O2 -g -pipe -Wall -Werror=format-security -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fexceptions -fstack-protector-strong -grecord-gcc-switches -specs=/usr/lib/rpm/redhat/redhat-hardened-cc1 -specs=/usr/lib/rpm/redhat/redhat-annobin-cc1 -m64 -mtune=generic -fasynchronous-unwind-tables -fstack-clash-protection -fcf-protection"
+     }
+    },
+    {
+     "device": "cpu",
+     "label": "Full output",
+     "kind": "full",
+     "fd": null,
+     "ms": 74.98649694025517,
+     "timing": {
+      "block_ms": [
+       75.01283008605242,
+       74.96847677975893,
+       74.9692446552217,
+       74.99948889017105,
+       75.04614582285285,
+       74.91504400968552,
+       74.96233005076647,
+       74.98649694025517,
+       75.06228098645806
+      ],
+      "calls_per_block": [
+       1,
+       1,
+       1,
+       1,
+       1,
+       1,
+       1,
+       1,
+       1
+      ],
+      "min_ms": 74.91504400968552,
+      "max_ms": 75.06228098645806
+     }
+    },
+    {
+     "device": "cpu",
+     "label": "Peak only",
+     "kind": "flat",
+     "fd": null,
+     "ms": 52.72560380399227,
+     "timing": {
+      "block_ms": [
+       52.72560380399227,
+       52.682788111269474,
+       52.75040026754141,
+       52.666513714939356,
+       52.66316095367074,
+       52.73803696036339,
+       52.75934096425772,
+       52.72455606609583,
+       52.7471168898046
+      ],
+      "calls_per_block": [
+       1,
+       1,
+       1,
+       1,
+       1,
+       1,
+       1,
+       1,
+       1
+      ],
+      "min_ms": 52.66316095367074,
+      "max_ms": 52.75934096425772
+     }
+    },
+    {
+     "device": "cpu",
+     "label": "Hierarchical 0.01",
+     "kind": "hier",
+     "fd": 0.01,
+     "ms": 4.937286827374589,
+     "timing": {
+      "block_ms": [
+       4.951853093437173,
+       4.937102637169036,
+       4.941471386700869,
+       4.937286827374589,
+       4.931603812358596,
+       4.940645811571316,
+       4.927292381497947,
+       4.953859627924182,
+       4.936353345824913
+      ],
+      "calls_per_block": [
+       11,
+       11,
+       11,
+       11,
+       11,
+       11,
+       11,
+       11,
+       11
+      ],
+      "min_ms": 4.927292381497947,
+      "max_ms": 4.953859627924182
+     },
+     "band": 512,
+     "taps": 8,
+     "refine_rate": 0.008544921875
+    },
+    {
+     "device": "cpu",
+     "label": "Hierarchical 0.001",
+     "kind": "hier",
+     "fd": 0.001,
+     "ms": 6.49901747237891,
+     "timing": {
+      "block_ms": [
+       6.521560717374086,
+       6.500231102108955,
+       6.497489637695253,
+       6.49901747237891,
+       6.484733719844371,
+       6.521359842736274,
+       6.492190004792064,
+       6.488173792604357,
+       6.508542865049094
+      ],
+      "calls_per_block": [
+       8,
+       8,
+       8,
+       8,
+       8,
+       8,
+       8,
+       8,
+       8
+      ],
+      "min_ms": 6.484733719844371,
+      "max_ms": 6.521560717374086
+     },
+     "band": 512,
+     "taps": 8,
+     "refine_rate": 0.0299072265625
+    },
+    {
+     "device": "cpu",
+     "label": "Hierarchical 0.0001",
+     "kind": "hier",
+     "fd": 0.0001,
+     "ms": 12.059545423835516,
+     "timing": {
+      "block_ms": [
+       12.05161064863205,
+       12.053943611681461,
+       12.045128736644983,
+       12.06884877756238,
+       12.059545423835516,
+       12.02522236853838,
+       12.092443276196718,
+       12.067996803671122,
+       12.074953597038984
+      ],
+      "calls_per_block": [
+       5,
+       5,
+       5,
+       5,
+       5,
+       5,
+       5,
+       5,
+       5
+      ],
+      "min_ms": 12.02522236853838,
+      "max_ms": 12.092443276196718
+     },
+     "band": 1024,
+     "taps": 8,
+     "refine_rate": 0.015380859375
+    }
+   ],
+   "errors": [],
+   "device": "cpu",
+   "load_after": [
+    0.439453125,
+    0.4619140625,
+    0.31787109375
+   ],
+   "validation": {
+    "full": 6.845126327018066e-08,
+    "flat": 2.5985925293317687e-08,
+    "hier": 2.5985925293317687e-08
+   }
+  },
+  {
+   "host": "gravity-dev3",
+   "date": "2026-09-28T02:19:28.297948+00:00",
+   "revision": "ce9c828",
+   "n": 4096,
+   "data": 16,
+   "templates": 512,
+   "snr": 5.5,
+   "cpu": "AMD Ryzen 5 5500U with Radeon Graphics",
+   "gpu": "AMD Radeon Graphics (RADV RENOIR)",
+   "cpu_backend": "AVX2",
+   "python": "3.13.15",
+   "numpy": "2.5.3",
+   "platform": "Linux-7.1.8-200.fc44.x86_64-x86_64-with-glibc2.43",
+   "affinity": [
+    0
+   ],
+   "load_before": [
+    0.439453125,
+    0.4619140625,
+    0.31787109375
+   ],
+   "devices": [
+    "Device('cpu:0', 'AMD Ryzen 5 5500U with Radeon Graphics', backend='AVX2')",
+    "Device('gpu:0', 'AMD Radeon Graphics (RADV RENOIR)', backend='vulkan')",
+    "Device('gpu:1', 'llvmpipe (LLVM 22.1.8, 256 bits)', backend='vulkan', software=True)"
+   ],
+   "rows": [
+    {
+     "device": "gpu",
+     "label": "Full output",
+     "kind": "full",
+     "fd": null,
+     "ms": 15.985272242687643,
+     "timing": {
+      "block_ms": [
+       16.016546287573874,
+       15.971721964888275,
+       15.974201494827867,
+       15.985272242687643,
+       15.997059061191976,
+       16.010382445529103,
+       15.992920729331672,
+       15.92337025795132,
+       15.896130003966391
+      ],
+      "calls_per_block": [
+       4,
+       4,
+       4,
+       4,
+       4,
+       4,
+       4,
+       4,
+       4
+      ],
+      "min_ms": 15.896130003966391,
+      "max_ms": 16.016546287573874
+     }
+    },
+    {
+     "device": "gpu",
+     "label": "Peak only",
+     "kind": "flat",
+     "fd": null,
+     "ms": 10.172151401638985,
+     "timing": {
+      "block_ms": [
+       10.22890917956829,
+       10.195745807141066,
+       10.172151401638985,
+       10.099985357373953,
+       10.104064457118511,
+       10.200509242713451,
+       10.07224228233099,
+       10.095096006989479,
+       10.22083479911089
+      ],
+      "calls_per_block": [
+       5,
+       5,
+       5,
+       5,
+       5,
+       5,
+       5,
+       5,
+       5
+      ],
+      "min_ms": 10.07224228233099,
+      "max_ms": 10.22890917956829
+     }
+    },
+    {
+     "device": "gpu",
+     "label": "Hierarchical 0.01",
+     "kind": "hier",
+     "fd": 0.01,
+     "ms": 1.926833727898506,
+     "timing": {
+      "block_ms": [
+       1.9376788718196063,
+       1.8487698731145688,
+       1.926833727898506,
+       1.8016006464936904,
+       1.9134995182631191,
+       1.9716916856570885,
+       1.925023111443107,
+       1.9320749606077487,
+       2.003183513879776
+      ],
+      "calls_per_block": [
+       26,
+       28,
+       26,
+       28,
+       27,
+       26,
+       26,
+       26,
+       25
+      ],
+      "min_ms": 1.8016006464936904,
+      "max_ms": 2.003183513879776
+     },
+     "band": 512,
+     "taps": 8,
+     "refine_rate": 0.0086669921875
+    },
+    {
+     "device": "gpu",
+     "label": "Hierarchical 0.001",
+     "kind": "hier",
+     "fd": 0.001,
+     "ms": 2.1479053733249507,
+     "timing": {
+      "block_ms": [
+       2.249148816032254,
+       2.0767800137400627,
+       2.0390150882303715,
+       2.2135116564838784,
+       2.2181792225202788,
+       2.0273338444530964,
+       2.114020831262072,
+       2.180777652108151,
+       2.1479053733249507
+      ],
+      "calls_per_block": [
+       23,
+       25,
+       25,
+       23,
+       23,
+       25,
+       24,
+       23,
+       24
+      ],
+      "min_ms": 2.0273338444530964,
+      "max_ms": 2.249148816032254
+     },
+     "band": 512,
+     "taps": 8,
+     "refine_rate": 0.0299072265625
+    },
+    {
+     "device": "gpu",
+     "label": "Hierarchical 0.0001",
+     "kind": "hier",
+     "fd": 0.0001,
+     "ms": 1.707474747672677,
+     "timing": {
+      "block_ms": [
+       2.2173835693494133,
+       1.7324580714620392,
+       1.6365531351297133,
+       1.6157409296401086,
+       1.6120771470014006,
+       1.707474747672677,
+       1.7246375791728497,
+       1.6702159773558378,
+       2.003460116684437
+      ],
+      "calls_per_block": [
+       23,
+       29,
+       31,
+       31,
+       32,
+       30,
+       29,
+       30,
+       25
+      ],
+      "min_ms": 1.6120771470014006,
+      "max_ms": 2.2173835693494133
+     },
+     "band": 1024,
+     "taps": 8,
+     "refine_rate": 0.0155029296875
+    }
+   ],
+   "errors": [
+    "rocFFT: OSError: libamdhip64.so: cannot open shared object file: No such file or directory"
+   ],
+   "device": "gpu",
+   "load_after": [
+    0.45166015625,
+    0.46337890625,
+    0.31982421875
+   ],
+   "validation": {
+    "full": 5.040555503033667e-07,
+    "flat": 3.20085608581723e-07,
+    "hier": 3.20085608581723e-07
+   }
+  },
+  {
+   "host": "gravity-dev4",
+   "date": "2026-09-28T02:19:02.530822+00:00",
+   "revision": "ce9c828",
+   "n": 4096,
+   "data": 16,
+   "templates": 512,
+   "snr": 5.5,
+   "cpu": "13th Gen Intel(R) Core(TM) i5-13500H",
+   "gpu": "Intel(R) Iris(R) Xe Graphics (RPL-P)",
+   "cpu_backend": "AVX2",
+   "python": "3.13.15",
+   "numpy": "2.5.3",
+   "platform": "Linux-7.1.10-200.fc44.x86_64-x86_64-with-glibc2.43",
+   "affinity": [
+    0
+   ],
+   "load_before": [
+    0.2119140625,
+    0.21435546875,
+    0.14794921875
+   ],
+   "devices": [
+    "Device('cpu:0', '13th Gen Intel(R) Core(TM) i5-13500H', backend='AVX2')",
+    "Device('gpu:0', 'Intel(R) Iris(R) Xe Graphics (RPL-P)', backend='vulkan')",
+    "Device('gpu:1', 'llvmpipe (LLVM 22.1.8, 256 bits)', backend='vulkan', software=True)"
+   ],
+   "rows": [
+    {
+     "device": "cpu",
+     "label": "FFTW",
+     "kind": "baseline",
+     "fd": null,
+     "ms": 44.72730844281614,
+     "timing": {
+      "block_ms": [
+       44.86620705574751,
+       44.6113646030426,
+       44.630850898101926,
+       44.88628637045622,
+       44.72730844281614,
+       44.67491456307471,
+       44.89466198720038
+      ],
+      "calls_per_block": [
+       2,
+       2,
+       2,
+       2,
+       2,
+       2,
+       2
+      ],
+      "min_ms": 44.6113646030426,
+      "max_ms": 44.89466198720038
+     },
+     "fftw": {
+      "version": "3.3.5",
+      "build": "fftw-3.3.5-sse2-avx",
+      "simd_alignment": 32,
+      "compiler": "gcc -O2 -g -pipe -Wall -Werror=format-security -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fexceptions -fstack-protector-strong -grecord-gcc-switches -specs=/usr/lib/rpm/redhat/redhat-hardened-cc1 -specs=/usr/lib/rpm/redhat/redhat-annobin-cc1 -m64 -mtune=generic -fasynchronous-unwind-tables -fstack-clash-protection -fcf-protection"
+     }
+    },
+    {
+     "device": "cpu",
+     "label": "Full output",
+     "kind": "full",
+     "fd": null,
+     "ms": 55.959677789360285,
+     "timing": {
+      "block_ms": [
+       55.89726008474827,
+       55.84227619692683,
+       56.21873401105404,
+       55.959677789360285,
+       56.288233026862144,
+       55.87586713954806,
+       55.20159099251032,
+       56.00243993103504,
+       56.37042596936226
+      ],
+      "calls_per_block": [
+       1,
+       1,
+       1,
+       1,
+       1,
+       1,
+       1,
+       1,
+       1
+      ],
+      "min_ms": 55.20159099251032,
+      "max_ms": 56.37042596936226
+     }
+    },
+    {
+     "device": "cpu",
+     "label": "Peak only",
+     "kind": "flat",
+     "fd": null,
+     "ms": 36.67375841178,
+     "timing": {
+      "block_ms": [
+       36.45828552544117,
+       36.67375841178,
+       36.85741848312318,
+       36.737644812092185,
+       36.51222703047097,
+       37.23669005557895,
+       36.984514677897096,
+       36.65756294503808,
+       36.61247785203159
+      ],
+      "calls_per_block": [
+       2,
+       2,
+       2,
+       2,
+       2,
+       2,
+       2,
+       2,
+       2
+      ],
+      "min_ms": 36.45828552544117,
+      "max_ms": 37.23669005557895
+     }
+    },
+    {
+     "device": "cpu",
+     "label": "Hierarchical 0.01",
+     "kind": "hier",
+     "fd": 0.01,
+     "ms": 4.029725391704303,
+     "timing": {
+      "block_ms": [
+       4.029725391704303,
+       4.022557897349963,
+       4.0417619837591285,
+       4.030213368913302,
+       4.019923078326078,
+       4.018175630615308,
+       4.046080598177818,
+       4.028633702546358,
+       4.03027877641412
+      ],
+      "calls_per_block": [
+       13,
+       13,
+       13,
+       13,
+       13,
+       13,
+       13,
+       13,
+       13
+      ],
+      "min_ms": 4.018175630615308,
+      "max_ms": 4.046080598177818
+     },
+     "band": 512,
+     "taps": 8,
+     "refine_rate": 0.008544921875
+    },
+    {
+     "device": "cpu",
+     "label": "Hierarchical 0.001",
+     "kind": "hier",
+     "fd": 0.001,
+     "ms": 4.94149856438691,
+     "timing": {
+      "block_ms": [
+       4.949461753395471,
+       4.9598666161976075,
+       4.922669888897375,
+       4.941973454234275,
+       4.936819345774976,
+       4.978349517014894,
+       4.94149856438691,
+       4.922481804070148,
+       4.901260010559451
+      ],
+      "calls_per_block": [
+       11,
+       11,
+       11,
+       11,
+       11,
+       11,
+       11,
+       11,
+       11
+      ],
+      "min_ms": 4.901260010559451,
+      "max_ms": 4.978349517014894
+     },
+     "band": 512,
+     "taps": 8,
+     "refine_rate": 0.0299072265625
+    },
+    {
+     "device": "cpu",
+     "label": "Hierarchical 0.0001",
+     "kind": "hier",
+     "fd": 0.0001,
+     "ms": 6.003436218533251,
+     "timing": {
+      "block_ms": [
+       6.016865010476774,
+       5.9989788052108555,
+       6.003436218533251,
+       6.016559795373016,
+       5.999760184850958,
+       5.99822433044513,
+       6.010305446883042,
+       5.974534174634351,
+       6.008244326545133
+      ],
+      "calls_per_block": [
+       9,
+       9,
+       9,
+       9,
+       9,
+       9,
+       9,
+       9,
+       9
+      ],
+      "min_ms": 5.974534174634351,
+      "max_ms": 6.016865010476774
+     },
+     "band": 1024,
+     "taps": 8,
+     "refine_rate": 0.015380859375
+    }
+   ],
+   "errors": [],
+   "device": "cpu",
+   "load_after": [
+    0.48193359375,
+    0.2783203125,
+    0.17236328125
+   ],
+   "validation": {
+    "full": 6.845126327018066e-08,
+    "flat": 2.5985925293317687e-08,
+    "hier": 2.5985925293317687e-08
+   }
+  },
+  {
+   "host": "gravity-dev4",
+   "date": "2026-09-28T02:19:27.050693+00:00",
+   "revision": "ce9c828",
+   "n": 4096,
+   "data": 16,
+   "templates": 512,
+   "snr": 5.5,
+   "cpu": "13th Gen Intel(R) Core(TM) i5-13500H",
+   "gpu": "Intel(R) Iris(R) Xe Graphics (RPL-P)",
+   "cpu_backend": "AVX2",
+   "python": "3.13.15",
+   "numpy": "2.5.3",
+   "platform": "Linux-7.1.10-200.fc44.x86_64-x86_64-with-glibc2.43",
+   "affinity": [
+    0
+   ],
+   "load_before": [
+    0.48193359375,
+    0.2783203125,
+    0.17236328125
+   ],
+   "devices": [
+    "Device('cpu:0', '13th Gen Intel(R) Core(TM) i5-13500H', backend='AVX2')",
+    "Device('gpu:0', 'Intel(R) Iris(R) Xe Graphics (RPL-P)', backend='vulkan')",
+    "Device('gpu:1', 'llvmpipe (LLVM 22.1.8, 256 bits)', backend='vulkan', software=True)"
+   ],
+   "rows": [
+    {
+     "device": "gpu",
+     "label": "Full output",
+     "kind": "full",
+     "fd": null,
+     "ms": 23.872650383661192,
+     "timing": {
+      "block_ms": [
+       24.07194534316659,
+       23.868614962945383,
+       23.872650383661192,
+       23.768976020316284,
+       23.81730591878295,
+       23.806307464838028,
+       23.98170903325081,
+       23.878831416368484,
+       23.87351046005885
+      ],
+      "calls_per_block": [
+       3,
+       3,
+       3,
+       3,
+       3,
+       3,
+       3,
+       3,
+       3
+      ],
+      "min_ms": 23.768976020316284,
+      "max_ms": 24.07194534316659
+     }
+    },
+    {
+     "device": "gpu",
+     "label": "Peak only",
+     "kind": "flat",
+     "fd": null,
+     "ms": 9.6946662136664,
+     "timing": {
+      "block_ms": [
+       9.701054155205687,
+       9.691968016947309,
+       9.69527467774848,
+       9.679631485293308,
+       9.683534347762665,
+       9.6946662136664,
+       9.670946514233947,
+       9.754985803738236,
+       9.710679994896054
+      ],
+      "calls_per_block": [
+       6,
+       6,
+       6,
+       6,
+       6,
+       6,
+       6,
+       6,
+       6
+      ],
+      "min_ms": 9.670946514233947,
+      "max_ms": 9.754985803738236
+     }
+    },
+    {
+     "device": "gpu",
+     "label": "Hierarchical 0.01",
+     "kind": "hier",
+     "fd": 0.01,
+     "ms": 5.350456293672323,
+     "timing": {
+      "block_ms": [
+       5.350456293672323,
+       5.377620086073875,
+       5.337224714457989,
+       5.343242781236768,
+       5.355133069679141,
+       5.370317306369543,
+       5.343896523118019,
+       5.349594494327903,
+       5.372347170487046
+      ],
+      "calls_per_block": [
+       10,
+       10,
+       10,
+       10,
+       10,
+       10,
+       10,
+       10,
+       10
+      ],
+      "min_ms": 5.337224714457989,
+      "max_ms": 5.377620086073875
+     },
+     "band": 512,
+     "taps": 8,
+     "refine_rate": 0.008544921875
+    },
+    {
+     "device": "gpu",
+     "label": "Hierarchical 0.001",
+     "kind": "hier",
+     "fd": 0.001,
+     "ms": 5.563142864654462,
+     "timing": {
+      "block_ms": [
+       5.555735590557258,
+       5.563142864654462,
+       5.553997913375497,
+       5.584623561137253,
+       5.560906552192238,
+       5.568605330255297,
+       5.560304762588607,
+       5.577711440208885,
+       5.603339574817154
+      ],
+      "calls_per_block": [
+       9,
+       9,
+       10,
+       9,
+       9,
+       9,
+       9,
+       9,
+       9
+      ],
+      "min_ms": 5.553997913375497,
+      "max_ms": 5.603339574817154
+     },
+     "band": 512,
+     "taps": 8,
+     "refine_rate": 0.0299072265625
+    },
+    {
+     "device": "gpu",
+     "label": "Hierarchical 0.0001",
+     "kind": "hier",
+     "fd": 0.0001,
+     "ms": 25.380969513207674,
+     "timing": {
+      "block_ms": [
+       62.785052228718996,
+       60.532908886671066,
+       48.6019195523113,
+       28.697896981611848,
+       25.380969513207674,
+       23.367482082297403,
+       23.243964028855164,
+       23.194595705717802,
+       23.281673435121775
+      ],
+      "calls_per_block": [
+       1,
+       1,
+       2,
+       2,
+       2,
+       3,
+       3,
+       3,
+       3
+      ],
+      "min_ms": 23.194595705717802,
+      "max_ms": 62.785052228718996
+     },
+     "band": 1024,
+     "taps": 8,
+     "refine_rate": 0.0155029296875
+    }
+   ],
+   "errors": [
+    "rocFFT: OSError: libamdhip64.so: cannot open shared object file: No such file or directory"
+   ],
+   "device": "gpu",
+   "load_after": [
+    0.5234375,
+    0.29052734375,
+    0.17724609375
+   ],
+   "validation": {
+    "full": 1.4585393179215328e-07,
+    "flat": 6.069494576206728e-08,
+    "hier": 6.069494576206728e-08
+   }
+  },
+  {
+   "host": "empire",
+   "date": "2026-09-28T02:23:50.472175+00:00",
+   "revision": "ce9c828",
+   "n": 4096,
+   "data": 16,
+   "templates": 512,
+   "snr": 5.5,
+   "cpu": "Apple M2",
+   "gpu": "Apple M2",
+   "cpu_backend": "NEON_BF16",
+   "python": "3.13.3",
+   "numpy": "2.5.3",
+   "platform": "macOS-26.5.2-arm64-arm-64bit-Mach-O",
+   "affinity": null,
+   "load_before": [
+    2.5205078125,
+    3.357421875,
+    2.90869140625
+   ],
+   "devices": [
+    "Device('cpu:0', 'arm', backend='NEON_BF16')",
+    "Device('gpu:0', 'Apple M2', backend='metal')"
+   ],
+   "rows": [
+    {
+     "device": "cpu",
+     "label": "FFTW",
+     "kind": "baseline",
+     "fd": null,
+     "ms": 252.3347083479166,
+     "timing": {
+      "block_ms": [
+       252.17012502253056,
+       252.382209058851,
+       252.1844576112926,
+       252.3467089049518,
+       252.3347083479166,
+       252.5497921742499,
+       252.21741618588567
+      ],
+      "calls_per_block": [
+       1,
+       1,
+       1,
+       1,
+       1,
+       1,
+       1
+      ],
+      "min_ms": 252.17012502253056,
+      "max_ms": 252.5497921742499
+     },
+     "fftw": {
+      "version": "",
+      "build": "fftw-3.3.10-neon",
+      "simd_alignment": 4,
+      "compiler": "",
+      "interface": "aligned C API; single thread"
+     }
+    },
+    {
+     "device": "cpu",
+     "label": "Full output",
+     "kind": "full",
+     "fd": null,
+     "ms": 68.89525009319186,
+     "timing": {
+      "block_ms": [
+       68.88308376073837,
+       68.91304207965732,
+       68.89979168772697,
+       68.87083360925317,
+       68.89525009319186,
+       68.91808332875371,
+       68.92887502908707,
+       68.82770778611302,
+       68.86949995532632
+      ],
+      "calls_per_block": [
+       1,
+       1,
+       1,
+       1,
+       1,
+       1,
+       1,
+       1,
+       1
+      ],
+      "min_ms": 68.82770778611302,
+      "max_ms": 68.92887502908707
+     }
+    },
+    {
+     "device": "cpu",
+     "label": "Peak only",
+     "kind": "flat",
+     "fd": null,
+     "ms": 60.52149971947074,
+     "timing": {
+      "block_ms": [
+       60.501832980662584,
+       60.51504099741578,
+       60.52149971947074,
+       60.544374864548445,
+       60.49520801752806,
+       60.553041752427816,
+       60.568582732230425,
+       60.55941712111235,
+       60.489500407129526
+      ],
+      "calls_per_block": [
+       1,
+       1,
+       1,
+       1,
+       1,
+       1,
+       1,
+       1,
+       1
+      ],
+      "min_ms": 60.489500407129526,
+      "max_ms": 60.568582732230425
+     }
+    },
+    {
+     "device": "cpu",
+     "label": "Hierarchical 0.01",
+     "kind": "hier",
+     "fd": 0.01,
+     "ms": 5.392920784652233,
+     "timing": {
+      "block_ms": [
+       5.391845898702741,
+       5.39407916367054,
+       5.396570824086666,
+       5.401408299803734,
+       5.392920784652233,
+       5.387383420020342,
+       5.394183285534382,
+       5.388370901346207,
+       5.387804191559553
+      ],
+      "calls_per_block": [
+       10,
+       10,
+       10,
+       10,
+       10,
+       10,
+       10,
+       10,
+       10
+      ],
+      "min_ms": 5.387383420020342,
+      "max_ms": 5.401408299803734
+     },
+     "band": 512,
+     "taps": 8,
+     "refine_rate": 0.008544921875
+    },
+    {
+     "device": "cpu",
+     "label": "Hierarchical 0.001",
+     "kind": "hier",
+     "fd": 0.001,
+     "ms": 6.681630271486938,
+     "timing": {
+      "block_ms": [
+       6.681630271486938,
+       6.682114617433399,
+       6.6795520833693445,
+       6.676520744804293,
+       6.682458217255771,
+       6.68578123440966,
+       6.678749981801957,
+       6.6797134932130575,
+       6.683874991722405
+      ],
+      "calls_per_block": [
+       8,
+       8,
+       8,
+       8,
+       8,
+       8,
+       8,
+       8,
+       8
+      ],
+      "min_ms": 6.676520744804293,
+      "max_ms": 6.68578123440966
+     },
+     "band": 512,
+     "taps": 8,
+     "refine_rate": 0.0299072265625
+    },
+    {
+     "device": "cpu",
+     "label": "Hierarchical 0.0001",
+     "kind": "hier",
+     "fd": 0.0001,
+     "ms": 14.320708229206502,
+     "timing": {
+      "block_ms": [
+       14.24904156010598,
+       14.314552070572972,
+       14.355489518493414,
+       14.300968730822206,
+       14.307781355455518,
+       15.052895760163665,
+       14.384791837073863,
+       14.336458290927112,
+       14.320708229206502
+      ],
+      "calls_per_block": [
+       4,
+       4,
+       4,
+       4,
+       4,
+       4,
+       4,
+       4,
+       4
+      ],
+      "min_ms": 14.24904156010598,
+      "max_ms": 15.052895760163665
+     },
+     "band": 1024,
+     "taps": 8,
+     "refine_rate": 0.015380859375
+    }
+   ],
+   "errors": [],
+   "device": "cpu",
+   "load_after": [
+    2.35986328125,
+    3.29541015625,
+    2.89208984375
+   ],
+   "validation": {
+    "full": 1.1318305492837118e-07,
+    "flat": 3.292564205794586e-08,
+    "hier": 3.292564205794586e-08
+   }
+  },
+  {
+   "host": "empire",
+   "date": "2026-09-28T02:24:00.384176+00:00",
+   "revision": "ce9c828",
+   "n": 4096,
+   "data": 16,
+   "templates": 512,
+   "snr": 5.5,
+   "cpu": "Apple M2",
+   "gpu": "Apple M2",
+   "cpu_backend": "NEON_BF16",
+   "python": "3.13.3",
+   "numpy": "2.5.3",
+   "platform": "macOS-26.5.2-arm64-arm-64bit-Mach-O",
+   "affinity": null,
+   "load_before": [
+    2.35986328125,
+    3.29541015625,
+    2.89208984375
+   ],
+   "devices": [
+    "Device('cpu:0', 'arm', backend='NEON_BF16')",
+    "Device('gpu:0', 'Apple M2', backend='metal')"
+   ],
+   "rows": [
+    {
+     "device": "gpu",
+     "label": "MLX",
+     "kind": "baseline",
+     "fd": null,
+     "ms": 11.739927111193538,
+     "timing": {
+      "block_ms": [
+       11.739927111193538,
+       11.917984345927835,
+       11.705974000506103,
+       11.794984398875386,
+       11.70626562088728,
+       11.751593730878085,
+       11.713734362274408
+      ],
+      "calls_per_block": [
+       1,
+       1,
+       1,
+       1,
+       1,
+       1,
+       1
+      ],
+      "min_ms": 11.705974000506103,
+      "max_ms": 11.917984345927835,
+      "executions_per_call": 8,
+      "block_ms_scope": "per transform batch"
+     }
+    },
+    {
+     "device": "gpu",
+     "label": "Full output",
+     "kind": "full",
+     "fd": null,
+     "ms": 6.3106666202656925,
+     "timing": {
+      "block_ms": [
+       6.3106666202656925,
+       6.305317743681371,
+       6.309708289336413,
+       6.311671866569668,
+       6.3147395849227905,
+       6.322520901449025,
+       6.299239641521126,
+       6.302541587501764,
+       6.311609351541847
+      ],
+      "calls_per_block": [
+       8,
+       8,
+       8,
+       8,
+       8,
+       8,
+       8,
+       8,
+       8
+      ],
+      "min_ms": 6.299239641521126,
+      "max_ms": 6.322520901449025
+     },
+     "device_ms": 5.961375311017036
+    },
+    {
+     "device": "gpu",
+     "label": "Peak only",
+     "kind": "flat",
+     "fd": null,
+     "ms": 3.9321122189553885,
+     "timing": {
+      "block_ms": [
+       3.9321122189553885,
+       3.9406153731621227,
+       3.936721155276665,
+       3.9306955340390024,
+       3.93205125314685,
+       3.9306570632526507,
+       3.935355764742081,
+       3.93309616125547,
+       3.9262339974252076
+      ],
+      "calls_per_block": [
+       13,
+       13,
+       13,
+       13,
+       13,
+       13,
+       13,
+       13,
+       13
+      ],
+      "min_ms": 3.9262339974252076,
+      "max_ms": 3.9406153731621227
+     },
+     "device_ms": 3.58337489888072
+    },
+    {
+     "device": "gpu",
+     "label": "Hierarchical 0.01",
+     "kind": "hier",
+     "fd": 0.01,
+     "ms": 0.8594117174714299,
+     "timing": {
+      "block_ms": [
+       0.8585586102079537,
+       0.8584399849681531,
+       0.8624095895911678,
+       0.8647234163022247,
+       0.8545303717255592,
+       0.8594117174714299,
+       0.8697083203828541,
+       0.8612613004269236,
+       0.8592966123152588
+      ],
+      "calls_per_block": [
+       59,
+       59,
+       59,
+       58,
+       59,
+       59,
+       58,
+       59,
+       59
+      ],
+      "min_ms": 0.8545303717255592,
+      "max_ms": 0.8697083203828541
+     },
+     "band": 256,
+     "taps": 4,
+     "refine_rate": 0.047119140625,
+     "device_ms": 0.5179587751626968
+    },
+    {
+     "device": "gpu",
+     "label": "Hierarchical 0.001",
+     "kind": "hier",
+     "fd": 0.001,
+     "ms": 1.372620475956717,
+     "timing": {
+      "block_ms": [
+       1.380913274211658,
+       1.373465110019252,
+       1.3724955025355559,
+       1.381663278349348,
+       1.372620475956717,
+       1.347771956046161,
+       1.3584628373988576,
+       1.3531216269207966,
+       1.3746790512389429
+      ],
+      "calls_per_block": [
+       37,
+       37,
+       37,
+       37,
+       37,
+       38,
+       37,
+       37,
+       37
+      ],
+      "min_ms": 1.347771956046161,
+      "max_ms": 1.381663278349348
+     },
+     "band": 256,
+     "taps": 4,
+     "refine_rate": 0.189453125,
+     "device_ms": 1.023625023663044
+    },
+    {
+     "device": "gpu",
+     "label": "Hierarchical 0.0001",
+     "kind": "hier",
+     "fd": 0.0001,
+     "ms": 2.3066003764556213,
+     "timing": {
+      "block_ms": [
+       2.4847202446489107,
+       2.3065340832214463,
+       2.3066003764556213,
+       2.300255677916787,
+       2.3086382795802574,
+       2.3055340967733753,
+       2.303670456802303,
+       2.3104412777518686,
+       2.307507548142563
+      ],
+      "calls_per_block": [
+       21,
+       22,
+       22,
+       22,
+       22,
+       22,
+       22,
+       22,
+       22
+      ],
+      "min_ms": 2.300255677916787,
+      "max_ms": 2.4847202446489107
+     },
+     "band": 256,
+     "taps": 4,
+     "refine_rate": 0.4468994140625,
+     "device_ms": 1.9327085465192795
+    }
+   ],
+   "errors": [],
+   "device": "gpu",
+   "load_after": [
+    3.04052734375,
+    3.41552734375,
+    2.939453125
+   ],
+   "validation": {
+    "full": 1.0910016055750124e-06,
+    "flat": 5.604940217953759e-07,
+    "hier": 5.604940217953759e-07
+   }
+  },
+  {
+   "host": "sugwg-login2",
+   "date": "2026-09-28T02:20:47.800096+00:00",
+   "revision": "ce9c828",
+   "n": 4096,
+   "data": 16,
+   "templates": 512,
+   "snr": 5.5,
+   "cpu": "Intel(R) Xeon(R) Platinum 8260 CPU @ 2.40GHz",
+   "gpu": "GPU",
+   "cpu_backend": "AVX3",
+   "python": "3.11.0",
+   "numpy": "2.4.6",
+   "platform": "Linux-5.4.0-65-generic-x86_64-with-glibc2.31",
+   "affinity": [
+    0
+   ],
+   "load_before": [
+    0.45,
+    0.75,
+    0.82
+   ],
+   "devices": [
+    "Device('cpu:0', 'Intel(R) Xeon(R) Platinum 8260 CPU @ 2.40GHz', backend='AVX3')"
+   ],
+   "rows": [
+    {
+     "device": "cpu",
+     "label": "FFTW",
+     "kind": "baseline",
+     "fd": null,
+     "ms": 220.26840969920158,
+     "timing": {
+      "block_ms": [
+       224.29674863815308,
+       220.26840969920158,
+       219.84822303056717,
+       219.67332437634468,
+       220.01135349273682,
+       221.57597914338112,
+       224.01095554232597
+      ],
+      "calls_per_block": [
+       1,
+       1,
+       1,
+       1,
+       1,
+       1,
+       1
+      ],
+      "min_ms": 219.67332437634468,
+      "max_ms": 224.29674863815308
+     },
+     "fftw": {
+      "version": "3.3.5",
+      "build": "fftw-3.3.5-sse2-avx",
+      "simd_alignment": 32,
+      "compiler": "gcc -O2 -g -pipe -Wall -Werror=format-security -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fexceptions -fstack-protector-strong -grecord-gcc-switches -specs=/usr/lib/rpm/redhat/redhat-hardened-cc1 -specs=/usr/lib/rpm/redhat/redhat-annobin-cc1 -m64 -mtune=generic -fasynchronous-unwind-tables -fstack-clash-protection -fcf-protection"
+     }
+    },
+    {
+     "device": "cpu",
+     "label": "Full output",
+     "kind": "full",
+     "fd": null,
+     "ms": 142.45238527655602,
+     "timing": {
+      "block_ms": [
+       141.9486440718174,
+       141.2336528301239,
+       140.898909419775,
+       140.4264010488987,
+       143.318310379982,
+       143.20707321166992,
+       143.02482083439827,
+       142.45238527655602,
+       143.0380567908287
+      ],
+      "calls_per_block": [
+       1,
+       1,
+       1,
+       1,
+       1,
+       1,
+       1,
+       1,
+       1
+      ],
+      "min_ms": 140.4264010488987,
+      "max_ms": 143.318310379982
+     }
+    },
+    {
+     "device": "cpu",
+     "label": "Peak only",
+     "kind": "flat",
+     "fd": null,
+     "ms": 76.05132088065147,
+     "timing": {
+      "block_ms": [
+       79.1168175637722,
+       77.43426039814949,
+       76.02594047784805,
+       75.1589834690094,
+       75.25469735264778,
+       75.81860572099686,
+       76.87555626034737,
+       77.9479406774044,
+       76.05132088065147
+      ],
+      "calls_per_block": [
+       1,
+       1,
+       1,
+       1,
+       1,
+       1,
+       1,
+       1,
+       1
+      ],
+      "min_ms": 75.1589834690094,
+      "max_ms": 79.1168175637722
+     }
+    },
+    {
+     "device": "cpu",
+     "label": "Hierarchical 0.01",
+     "kind": "hier",
+     "fd": 0.01,
+     "ms": 5.127028003334999,
+     "timing": {
+      "block_ms": [
+       5.133580043911934,
+       5.102834478020668,
+       5.1342301070690155,
+       5.109544470906258,
+       5.131611600518227,
+       5.114681273698807,
+       5.1144227385520935,
+       5.143870413303375,
+       5.127028003334999
+      ],
+      "calls_per_block": [
+       10,
+       10,
+       10,
+       10,
+       10,
+       10,
+       10,
+       10,
+       10
+      ],
+      "min_ms": 5.102834478020668,
+      "max_ms": 5.143870413303375
+     },
+     "band": 512,
+     "taps": 8,
+     "refine_rate": 0.008544921875
+    },
+    {
+     "device": "cpu",
+     "label": "Hierarchical 0.001",
+     "kind": "hier",
+     "fd": 0.001,
+     "ms": 6.8884240463376045,
+     "timing": {
+      "block_ms": [
+       6.874551065266132,
+       6.901209708303213,
+       6.9042700342834,
+       6.885221693664789,
+       6.889132782816887,
+       6.938154809176922,
+       6.8830689415335655,
+       6.856028456240892,
+       6.8884240463376045
+      ],
+      "calls_per_block": [
+       8,
+       8,
+       8,
+       8,
+       8,
+       8,
+       8,
+       8,
+       8
+      ],
+      "min_ms": 6.856028456240892,
+      "max_ms": 6.938154809176922
+     },
+     "band": 512,
+     "taps": 8,
+     "refine_rate": 0.0299072265625
+    },
+    {
+     "device": "cpu",
+     "label": "Hierarchical 0.0001",
+     "kind": "hier",
+     "fd": 0.0001,
+     "ms": 11.53186410665512,
+     "timing": {
+      "block_ms": [
+       11.697565019130707,
+       11.53186410665512,
+       11.510877311229706,
+       11.374326050281525,
+       11.568447202444077,
+       11.395834386348724,
+       11.453168094158173,
+       11.634129285812378,
+       11.544577032327652
+      ],
+      "calls_per_block": [
+       5,
+       5,
+       5,
+       5,
+       5,
+       5,
+       5,
+       5,
+       5
+      ],
+      "min_ms": 11.374326050281525,
+      "max_ms": 11.697565019130707
+     },
+     "band": 1024,
+     "taps": 8,
+     "refine_rate": 0.015380859375
+    }
+   ],
+   "errors": [],
+   "device": "cpu",
+   "load_after": [
+    0.81,
+    0.81,
+    0.83
+   ],
+   "validation": {
+    "full": 1.1318305492837116e-07,
+    "flat": 2.2684367036522166e-08,
+    "hier": 2.2684367036522166e-08
+   }
+  },
+  {
+   "host": "sugwg-login2",
+   "date": "2026-09-28T02:21:18.852928+00:00",
+   "revision": "ce9c828",
+   "n": 4096,
+   "data": 16,
+   "templates": 512,
+   "snr": 5.5,
+   "cpu": "Intel(R) Xeon(R) Platinum 8260 CPU @ 2.40GHz",
+   "gpu": "GPU",
+   "cpu_backend": "AVX3",
+   "python": "3.11.0",
+   "numpy": "2.4.6",
+   "platform": "Linux-5.4.0-65-generic-x86_64-with-glibc2.31",
+   "affinity": [
+    0
+   ],
+   "load_before": [
+    0.81,
+    0.81,
+    0.83
+   ],
+   "devices": [
+    "Device('cpu:0', 'Intel(R) Xeon(R) Platinum 8260 CPU @ 2.40GHz', backend='AVX3')"
+   ],
+   "rows": [],
+   "errors": [
+    "No physical GPU exposed; software rendering excluded"
+   ],
+   "device": "gpu",
+   "load_after": [
+    0.81,
+    0.81,
+    0.83
+   ]
+  }
+ ]
+}
