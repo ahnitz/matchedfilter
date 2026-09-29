@@ -81,7 +81,7 @@ def test_autotuning_uses_the_reference_where_it_has_rows():
         hf.set_reference(power)
         picks.append(hf.config)
     assert all(p is not None for p in picks)
-    assert all(b > 0 for b, _ in picks)   # config is (band, taps)
+    assert all(p[0] > 0 for p in picks)   # config is (band, taps) or (b0, b1, taps)
 
 
 def test_a_higher_threshold_never_gets_a_wider_first_pass():
@@ -269,5 +269,5 @@ def test_hierarchical_filter_uses_cpu_architecture_cost_table():
     hf.set_reference(p)
     assert hf.cost_table == arch
     # On Zen 5, arch table chooses band 512 whereas generic cost.txt chooses 1024
-    assert hf.config == (512, 8)
+    assert hf.config in ((512, 8), (512, 2048, 8))
 
