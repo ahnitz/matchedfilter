@@ -58,6 +58,8 @@ _SIG = np.sqrt(2.0)
 _CACHE = OrderedDict()
 _CACHE_MAX = 512
 _CACHE_BYTES = 256 * 1024 * 1024
+_GATE_FOR_RESULT_CACHE = OrderedDict()
+_GATE_CASCADE_RESULT_CACHE = OrderedDict()
 
 
 def _samples(power, n, band, snr, nsamp, seed):
@@ -219,6 +221,17 @@ def gate_for(power, n, band, snr, fd):
     table had when a cell was unmeasured.
     """
     _validate(n, band, snr, fd)
+    p = np.asarray(power, dtype=np.float64)
+    if (p.shape != (n,) or not np.isfinite(p).all() or (p < 0).any()
+            or not np.isfinite(p.sum()) or p.sum() <= 0):
+        raise ValueError("power must be a finite nonnegative length-n profile with positive sum")
+    p_norm = p / p.sum()
+    rkey = (p_norm.tobytes(), n, band, float(snr), float(fd))
+    hit = _GATE_FOR_RESULT_CACHE.get(rkey)
+    if hit is not None:
+        _GATE_FOR_RESULT_CACHE.move_to_end(rkey)
+        return hit
+
     nsamp = _nsamp_for(fd)
     if fd * nsamp < 8:
         return None
@@ -228,7 +241,11 @@ def gate_for(power, n, band, snr, fd):
     idx = int(np.floor(float(fd) * len(kept)))
     if idx < 8:
         return None                      # too few draws below the budget
-    return float(kept[idx])
+    res = float(kept[idx])
+    if len(_GATE_FOR_RESULT_CACHE) >= _CACHE_MAX:
+        _GATE_FOR_RESULT_CACHE.popitem(last=False)
+    _GATE_FOR_RESULT_CACHE[rkey] = res
+    return res
 
 
 def _validate_cascade(n, band0, band1, snr, fd):
@@ -372,6 +389,17 @@ def gate_for_cascade(power, n, band0, band1, snr, fd):
     to minimize expected computational cost while strictly satisfying compound FDR <= fd.
     """
     _validate_cascade(n, band0, band1, snr, fd)
+    p = np.asarray(power, dtype=np.float64)
+    if (p.shape != (n,) or not np.isfinite(p).all() or (p < 0).any()
+            or not np.isfinite(p.sum()) or p.sum() <= 0):
+        raise ValueError("power must be a finite nonnegative length-n profile with positive sum")
+    p_norm = p / p.sum()
+    rkey = (p_norm.tobytes(), n, band0, band1, float(snr), float(fd))
+    hit = _GATE_CASCADE_RESULT_CACHE.get(rkey)
+    if hit is not None:
+        _GATE_CASCADE_RESULT_CACHE.move_to_end(rkey)
+        return hit
+
     nsamp = _nsamp_for(fd)
     if fd * nsamp < 8:
         return None
@@ -425,4 +453,7 @@ def gate_for_cascade(power, n, band0, band1, snr, fd):
         g1 = float(np.sort(c1_k[surv])[k1])
         best = (float(g0), float(g1))
 
+    if len(_GATE_CASCADE_RESULT_CACHE) >= _CACHE_MAX:
+        _GATE_CASCADE_RESULT_CACHE.popitem(last=False)
+    _GATE_CASCADE_RESULT_CACHE[rkey] = best
     return best
