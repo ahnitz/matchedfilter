@@ -767,6 +767,139 @@ def test_hierarchical_pinned_configuration_reproducibility():
     assert summary["autotune"]["winner"] == (256, 1024, 8)
 
 
+def test_hierarchical_global_winner_cache_sharing():
+    """Verify process-level winner cache shares autotuned results across HierarchicalFilter instances."""
+    mf._clear_autotune_cache()
+    assert mf.get_autotune_cache() == {}
+
+    n = 4096
+    power = inspiral_power(n)
+    h = np.sqrt(power).astype(np.complex64)
+    h_conj = np.conj(h)
+
+    nd, nt = 2, 4
+    hf1 = mf.HierarchicalFilter(n, nd, nt, snr=5.5, fd=1e-3, cascade=True)
+    hf1.set_reference(power)
+    hf1.set_templates(np.repeat(h_conj[None, :], nt, axis=0))
+
+    rng = np.random.default_rng(42)
+    cands, _ = mf.candidate_configs(power, n, 5.5, 1e-3, device=hf1.device, cascade=True)
+
+    # Filter 1 tunes across batches to completion
+    for b in range(len(cands) + 2):
+        noise = (rng.standard_normal((nd, n)) + 1j * rng.standard_normal((nd, n))).astype(np.complex64)
+        noise[0] += (7.5 * h).astype(np.complex64)
+        hf1.set_data(noise)
+        hf1.run(binsize=n, threshold=5.0)
+
+    assert hf1.autotune_info["status"] == "locked"
+    winner = hf1.autotune_info["winner"]
+    assert winner in cands
+
+    cache = mf.get_autotune_cache()
+    assert len(cache) == 1
+    cache_key = list(cache.keys())[0]
+    assert cache[cache_key] == winner
+
+    # Filter 2 created with identical parameters
+    hf2 = mf.HierarchicalFilter(n, nd, nt, snr=5.5, fd=1e-3, cascade=True)
+    hf2.set_reference(power)
+    hf2.set_templates(np.repeat(h_conj[None, :], nt, axis=0))
+
+    # Before run(), accessing config triggers _ensure()
+    assert hf2.config == winner
+    assert hf2.autotune_info["status"] == "locked"
+    assert hf2.autotune_info["winner"] == winner
+    assert len(hf2.autotune_info["trials"]) == 0
+    assert len(hf2.autotune_info["untried"]) == 0
+
+    # Filter 2 runs without triggering autotuning trials
+    noise = (rng.standard_normal((nd, n)) + 1j * rng.standard_normal((nd, n))).astype(np.complex64)
+    noise[0] += (7.5 * h).astype(np.complex64)
+    hf2.set_data(noise)
+    res2 = hf2.run(binsize=n, threshold=5.0)
+    assert res2[0, 0, 0]["index"] >= 0
+    assert hf2.autotune_info["status"] == "locked"
+    assert len(hf2.autotune_info["trials"]) == 0
+
+    # Pinned filter does not modify or corrupt the cache
+    pinned_cfg = (512, 8)
+    hf_pinned = mf.HierarchicalFilter(n, nd, nt, snr=5.5, fd=1e-3, band=pinned_cfg)
+    hf_pinned.set_reference(power)
+    hf_pinned.set_templates(np.repeat(h_conj[None, :], nt, axis=0))
+    hf_pinned.set_data(noise)
+    hf_pinned.run(binsize=n, threshold=5.0)
+
+    assert hf_pinned.autotune_info["status"] == "pinned"
+    assert mf.get_autotune_cache() == cache
+    assert mf.get_autotune_cache()[cache_key] == winner
+
+    # Clear cache empties the cache
+    mf._clear_autotune_cache()
+    assert mf.get_autotune_cache() == {}
+
+
+def test_hierarchical_global_winner_cache_collaborative_sharing():
+    """Verify multiple filter instances collaboratively evaluate candidates and lock without redundant trials."""
+    mf._clear_autotune_cache()
+    assert mf.get_autotune_cache() == {}
+
+    n = 4096
+    power = inspiral_power(n)
+    h = np.sqrt(power).astype(np.complex64)
+    h_conj = np.conj(h)
+    nd, nt = 1, 4
+
+    cands, _ = mf.candidate_configs(power, n, 5.5, 1e-3, cascade=True)
+    assert len(cands) >= 3
+
+    rng = np.random.default_rng(99)
+    noise = (rng.standard_normal((nd, n)) + 1j * rng.standard_normal((nd, n))).astype(np.complex64)
+    noise[0] += (7.5 * h).astype(np.complex64)
+
+    # Instantiate filters sequentially, simulating multi-group architecture in Segment 0
+    filters = []
+    configs_tested = []
+    for i in range(len(cands)):
+        f = mf.HierarchicalFilter(n, nd, nt, snr=5.5, fd=1e-3, cascade=True)
+        f.set_reference(power)
+        f.set_templates(np.repeat(h_conj[None, :], nt, axis=0))
+        f.set_data(noise)
+        cfg_before = f.config
+        configs_tested.append(cfg_before)
+        f.run(binsize=n, threshold=5.0)
+        filters.append(f)
+
+    # Each filter in the initial set should have evaluated a distinct candidate
+    assert len({mf._config_key(c) for c in configs_tested}) == len(cands)
+
+    # After len(cands) trials, winner cache must be populated
+    cache = mf.get_autotune_cache()
+    assert len(cache) == 1
+    winner = list(cache.values())[0]
+    assert winner in cands
+
+    # Subsequent filter created after trials complete locks immediately with 0 trials
+    f_next = mf.HierarchicalFilter(n, nd, nt, snr=5.5, fd=1e-3, cascade=True)
+    f_next.set_reference(power)
+    f_next.set_templates(np.repeat(h_conj[None, :], nt, axis=0))
+    f_next.set_data(noise)
+    assert f_next.config == winner
+    assert f_next.autotune_info["status"] == "locked"
+    assert len(f_next.autotune_info["trials"]) == 0
+    f_next.run(binsize=n, threshold=5.0)
+    assert f_next.autotune_info["status"] == "locked"
+    assert len(f_next.autotune_info["trials"]) == 0
+
+    # Initial filters on their second call (simulating Segment 1) immediately lock on the winner
+    for f in filters:
+        f.run(binsize=n, threshold=5.0)
+        assert f.autotune_info["status"] == "locked"
+        assert f.autotune_info["winner"] == winner
+        assert f.config == winner
+
+
+
 
 
 
