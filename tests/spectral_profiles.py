@@ -8,6 +8,7 @@ Provides diverse, non-inverse spectral shapes:
 5. bandpass_plateau: Non-power-law flat bandpass plateau with Tukey cosine rolloff.
 6. skewed_edge: Power concentrated towards the coarse decimation edge rather than near DC.
 """
+import math
 import numpy as np
 
 
@@ -88,3 +89,149 @@ def make_spectral_profile(shape_name, n):
     if tot <= 0:
         raise ValueError(f"Profile {shape_name} has non-positive sum: {tot}")
     return p / tot
+
+
+class BinomTestResult:
+    """Result of a binomial test."""
+    def __init__(self, k, n, alternative, statistic, pvalue):
+        self.k = k
+        self.n = n
+        self.alternative = alternative
+        self.statistic = statistic
+        self.pvalue = pvalue
+
+    def __repr__(self):
+        return (f"BinomTestResult(k={self.k}, n={self.n}, "
+                f"alternative={self.alternative!r}, statistic={self.statistic}, "
+                f"pvalue={self.pvalue})")
+
+
+def _binom_log_pmf(k, n, p):
+    return (math.lgamma(n + 1) - math.lgamma(k + 1) - math.lgamma(n - k + 1)
+            + k * math.log(p) + (n - k) * math.log1p(-p))
+
+
+def _binom_sf(k, n, p):
+    """P(X >= k) for X ~ Binomial(n, p)."""
+    if k <= 0:
+        return 1.0
+    if k > n:
+        return 0.0
+    if p == 0.0:
+        return 1.0 if k == 0 else 0.0
+    if p == 1.0:
+        return 1.0
+
+    if k > (n + 1) * p:
+        log_pk = _binom_log_pmf(k, n, p)
+        cur = math.exp(log_pk)
+        total = cur
+        ratio = p / (1.0 - p)
+        for j in range(k, n):
+            cur = cur * (n - j) / (j + 1) * ratio
+            total += cur
+            if cur < total * 1e-16:
+                break
+        return min(1.0, max(0.0, total))
+    else:
+        log_pk = _binom_log_pmf(k - 1, n, p)
+        cur = math.exp(log_pk)
+        total = cur
+        ratio = (1.0 - p) / p
+        for j in range(k - 1, 0, -1):
+            cur = cur * j / (n - j + 1) * ratio
+            total += cur
+            if cur < total * 1e-16:
+                break
+        return min(1.0, max(0.0, 1.0 - total))
+
+
+def _binom_cdf(k, n, p):
+    """P(X <= k) for X ~ Binomial(n, p)."""
+    if k < 0:
+        return 0.0
+    if k >= n:
+        return 1.0
+    return 1.0 - _binom_sf(k + 1, n, p)
+
+
+def binomtest(k, n, p=0.5, alternative='two-sided'):
+    """Perform a binomial test without requiring scipy.
+
+    Matches scipy.stats.binomtest interface and returns a BinomTestResult
+    with .pvalue attribute.
+    """
+    try:
+        from scipy.stats import binomtest as _scipy_binomtest
+        return _scipy_binomtest(k, n, p=p, alternative=alternative)
+    except (ImportError, AttributeError):
+        pass
+
+    if not (0 <= k <= n):
+        raise ValueError('k must be an integer between 0 and n')
+    if not (0.0 <= p <= 1.0):
+        raise ValueError('p must be between 0 and 1')
+    if alternative not in ('two-sided', 'greater', 'less'):
+        raise ValueError(f"alternative must be 'two-sided', 'greater', or 'less', got '{alternative}'")
+
+    stat = k / n if n > 0 else 0.0
+
+    if p == 0.0:
+        if alternative == 'greater':
+            pval = 1.0 if k == 0 else 0.0
+        elif alternative == 'less':
+            pval = 1.0
+        else:
+            pval = 1.0 if k == 0 else 0.0
+        return BinomTestResult(k, n, alternative, stat, pval)
+    if p == 1.0:
+        if alternative == 'greater':
+            pval = 1.0
+        elif alternative == 'less':
+            pval = 1.0 if k == n else 0.0
+        else:
+            pval = 1.0 if k == n else 0.0
+        return BinomTestResult(k, n, alternative, stat, pval)
+
+    if alternative == 'greater':
+        pval = _binom_sf(k, n, p)
+    elif alternative == 'less':
+        pval = _binom_cdf(k, n, p)
+    elif alternative == 'two-sided':
+        if p == 0.5:
+            pval = min(1.0, 2.0 * min(_binom_cdf(k, n, p), _binom_sf(k, n, p)))
+        else:
+            log_pk = _binom_log_pmf(k, n, p)
+            mode = int((n + 1) * p)
+            if k == mode:
+                pval = 1.0
+            elif k < mode:
+                pval = _binom_cdf(k, n, p)
+                low, high = mode, n
+                target_j = n + 1
+                while low <= high:
+                    mid = (low + high) // 2
+                    if _binom_log_pmf(mid, n, p) <= log_pk + 1e-12:
+                        target_j = mid
+                        high = mid - 1
+                    else:
+                        low = mid + 1
+                if target_j <= n:
+                    pval += _binom_sf(target_j, n, p)
+            else:
+                pval = _binom_sf(k, n, p)
+                low, high = 0, mode
+                target_j = -1
+                while low <= high:
+                    mid = (low + high) // 2
+                    if _binom_log_pmf(mid, n, p) <= log_pk + 1e-12:
+                        target_j = mid
+                        low = mid + 1
+                    else:
+                        high = mid - 1
+                if target_j >= 0:
+                    pval += _binom_cdf(target_j, n, p)
+        pval = min(1.0, pval)
+
+    return BinomTestResult(k, n, alternative, stat, pval)
+

@@ -30,7 +30,7 @@ if repo_root not in sys.path:
 
 import matchedfilter as mf
 import matchedfilter._core as _core
-from tests.spectral_profiles import make_spectral_profile, SHAPE_NAMES
+from tests.spectral_profiles import make_spectral_profile, SHAPE_NAMES, binomtest
 
 
 def verify_fdr(shape_name='aligo_o4_inspiral', n=4096, m0=256, m1=512,
@@ -160,7 +160,6 @@ def verify_fdr(shape_name='aligo_o4_inspiral', n=4096, m0=256, m1=512,
     half_width_1 = z_onesided * np.sqrt((p_hat * (1 - p_hat) + z_onesided**2 / (4 * n_fine_detections)) / n_fine_detections) / denom_1
     ub_95 = center_1 + half_width_1
 
-    from scipy.stats import binomtest
     b_test = binomtest(missed_cascade, n_fine_detections, p=fdr_target, alternative='greater')
     p_value = b_test.pvalue
 
