@@ -594,7 +594,8 @@ class Context(InputUploads):
 
     @_autoreleased
     def peaks(self, n, data, tmpl, binsize=None, threshold=0.0, window=None,
-              upload_data=True, upload_tmpl=True, _groups=None):
+              upload_data=True, upload_tmpl=True, _groups=None,
+              slot=None, async_submit=False):
         """Peak index and complex value per (data, template, bin).
 
         The same contract as the Vulkan path: bins counted from `start`, a
@@ -617,11 +618,16 @@ class Context(InputUploads):
                                     threshold=threshold,
                                     window=(a, min(a + span, hi)),
                                     upload_data=upload_data,
-                                    upload_tmpl=upload_tmpl)
+                                    upload_tmpl=upload_tmpl,
+                                    slot=slot, async_submit=False)
                 pi.append(i2)
                 pv.append(v2)
                 upload_data = upload_tmpl = False    # already on the device
-            return np.concatenate(pi, axis=2), np.concatenate(pv, axis=2)
+            idx_all = np.concatenate(pi, axis=2)
+            val_all = np.concatenate(pv, axis=2)
+            if async_submit:
+                return lambda: (idx_all, val_all)
+            return idx_all, val_all
         shift = (binsize.bit_length() - 1) if binsize & (binsize - 1) == 0 else -1
         t2 = float(threshold) ** 2 if threshold > 0 else 0.0
 
@@ -688,15 +694,19 @@ class Context(InputUploads):
         out = nd * nt * nbins
         idx = b_idx.read(np.int32, out).reshape(nd, nt, nbins)
         val = b_val.read(np.complex64, out).reshape(nd, nt, nbins)
+        if async_submit:
+            return lambda: (idx, val)
         return idx, val
 
-    def peaks_grouped(self, n, data, tmpl, groups, binsize, threshold, *, upload_tmpl=True):
+    def peaks_grouped(self, n, data, tmpl, groups, binsize, threshold, *, upload_tmpl=True,
+                      slot=None, async_submit=False):
         """Submit shared FFT rows with distinct flat windows in one command buffer."""
         if shared_buffer(data, self) is None:
             raise ValueError("grouped spectra must belong to this GPU context")
         return self.peaks(n, data, tmpl, binsize=binsize, threshold=threshold,
                           window=groups[0][:2], upload_data=False,
-                          upload_tmpl=upload_tmpl, _groups=groups)
+                          upload_tmpl=upload_tmpl, _groups=groups,
+                          slot=slot, async_submit=async_submit)
 
     @_autoreleased
     def _full_tile(self, n, data, tmpl, out, upload_data, upload_tmpl):
@@ -887,13 +897,32 @@ class Context(InputUploads):
     @_autoreleased
     def hier_peaks(self, n, band, data, tmpl, ct0, raw_thr,
                    binsize=None, threshold=0.0, window=None,
-                   upload_data=True, upload_tmpl=True):
+                   upload_data=True, upload_tmpl=True,
+                   cascade_band=None, ct1=None, raw_thr1=None,
+                   slot=None, async_submit=False):
         """The whole hierarchical filter in ONE command buffer.
 
         Coarse correlation, survivor compaction, then listed refinement.
         Shared input uses a preceding GPU coarse-band extraction dispatch.
         The survivor count stays on the device through indirect dispatch.
         """
+        if isinstance(band, (tuple, list)):
+            cascade_band = band[0]
+            band = band[1]
+        if isinstance(ct0, (tuple, list)):
+            ct1 = ct0[1]
+            ct0 = ct0[0]
+        if isinstance(raw_thr, (tuple, list)):
+            raw_thr1 = raw_thr[1]
+            raw_thr = raw_thr[0]
+
+        if cascade_band is not None and ct1 is not None and raw_thr1 is not None:
+            # Single-tier fallback on Metal
+            if ct1 is not None:
+                ct0 = ct1
+            if raw_thr1 is not None:
+                raw_thr = raw_thr1
+
         nd, nt = data.shape[0], tmpl.shape[0]
         pairs = nd * nt
         lo, hi = (0, n) if window is None else (int(window[0]), int(window[1]))
@@ -910,11 +939,17 @@ class Context(InputUploads):
                                          threshold=threshold,
                                          window=(a, min(a + span, hi)),
                                          upload_data=upload_data,
-                                         upload_tmpl=upload_tmpl)
+                                         upload_tmpl=upload_tmpl,
+                                         cascade_band=cascade_band, ct1=ct1, raw_thr1=raw_thr1,
+                                         slot=slot, async_submit=False)
                 pi.append(i2)
                 pv.append(v2)
                 upload_data = upload_tmpl = False     # already on the device
-            return np.concatenate(pi, axis=2), np.concatenate(pv, axis=2)
+            idx_all = np.concatenate(pi, axis=2)
+            val_all = np.concatenate(pv, axis=2)
+            if async_submit:
+                return lambda: (idx_all, val_all)
+            return idx_all, val_all
         shift = (binsize.bit_length() - 1) if binsize & (binsize - 1) == 0 else -1
         t2 = float(threshold) ** 2 if threshold > 0 else 0.0
 
@@ -1063,6 +1098,8 @@ class Context(InputUploads):
         idx = bufs["idx"].read(np.int32, out).reshape(nd, nt, nbins)
         val = bufs["val"].read(np.complex64, out).reshape(nd, nt, nbins)
         self.last_refinements = int(bufs["args"].read(np.uint32, 1)[0])
+        if async_submit:
+            return lambda: (idx, val)
         return idx, val
 
     def _check_completed(self, cmd):

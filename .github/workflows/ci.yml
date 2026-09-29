@@ -88,6 +88,22 @@ jobs:
           diff -u /tmp/committed.h src/codelets-inl.h \
             || { echo "::error::src/codelets-inl.h is stale; re-run 'python3 src/gen.py'"; exit 1; }
 
+  fdr-verification:
+    name: Multi-shape False Dismissal Rate (FDR) verification
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { submodules: true }
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip build
+          python -m pip install .[test]
+      - name: Run multi-shape FDR verification
+        run: |
+          python tools/verify_cascade_fdr.py --injections 5000 --shapes all
+
   benchmark:
     # Advisory only.  A shared runner's timings are too noisy to margin a merge
     # on; this is here so the numbers stay visible and an order-of-magnitude

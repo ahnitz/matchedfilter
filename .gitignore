@@ -14,6 +14,8 @@ __pycache__/
 
 # parsed-table cache, built on first use from the shipped .txt
 python/matchedfilter/tuning-*.pkl
+python/matchedfilter/.cache/
+.cache/
 
 # Local investigation notes and test caches
 .local/

@@ -29,6 +29,21 @@ except Exception:
 import pytest                                          # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _clean_autotune_cache():
+    try:
+        import matchedfilter as mf
+        mf._clear_autotune_cache()
+    except Exception:
+        pass
+    yield
+    try:
+        import matchedfilter as mf
+        mf._clear_autotune_cache()
+    except Exception:
+        pass
+
+
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_makereport(item, call):
     """Turn UnsupportedSize into a skip, and nothing else.

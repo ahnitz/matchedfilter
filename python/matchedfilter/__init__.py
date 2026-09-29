@@ -23,9 +23,12 @@ Peak-only lengths are powers of two from 64 to 1048576 on CPU and 64 to 65536
 on GPU. Full-output lengths are 1024 to 4194304 on either device, subject to
 device limits. Hierarchical calibration coverage is separate from transform support.
 """
+import hashlib
 import math
 import operator
 import os
+import threading
+import time
 import warnings
 
 import numpy as np
@@ -60,7 +63,9 @@ _GPU_SIZES = frozenset((64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384,
                         32768, 65536))
 
 __all__ = ["MatchedFilter", "CorrelationFilter", "HierarchicalFilter", "PEAK_DTYPE", "backend",
-           "targets", "set_target", "devices", "Device", "__version__"]
+           "targets", "set_target", "devices", "Device", "__version__",
+           "candidate_configs", "choose_config", "CascadeConfig",
+           "get_autotune_cache", "_clear_autotune_cache", "clear_autotune_cache"]
 
 
 def backend():
@@ -266,6 +271,13 @@ class MatchedFilter:
         # Arrays the plan holds pointers into. The C side keeps the caller's
         # spectrum rather than copying it, so the wrapper must keep it alive.
         self._held = {}
+        self._held_templates = None
+        self.performance_stats = {
+            "total_calls": 0,
+            "total_time_s": 0.0,
+            "batch_times_ms": []
+        }
+        self._in_series_call = False
         self._gpu = None
         self._gpairs = 0
         self._gtrig = 0
@@ -426,12 +438,19 @@ class MatchedFilter:
             self._mark_ready("template", index)
             return
         if index is not None:
-            self._ensure().set_template(int(index), _as_c64(spectra, self.n, "spectrum"))
+            c = _as_c64(spectra, self.n, "spectrum")
+            if not hasattr(self, '_held_templates') or self._held_templates is None:
+                self._held_templates = [None] * self.ntemplates
+            elif isinstance(self._held_templates, np.ndarray):
+                self._held_templates = self._held_templates.copy()
+            self._held_templates[int(index)] = c
+            self._ensure().set_template(int(index), c)
             self._mark_ready("template", index)
             return
         a = np.ascontiguousarray(_from_any(spectra), dtype=np.complex64)
         if a.ndim != 2 or a.shape != (self.ntemplates, self.n):
             raise ValueError(f"expected shape ({self.ntemplates}, {self.n}), got {a.shape}")
+        self._held_templates = a.copy()
         plan = self._ensure()
         if hasattr(plan, 'set_template_batch'):
             plan.set_template_batch(0, a)
@@ -455,10 +474,16 @@ class MatchedFilter:
         from ._execution_policy import select
         return select(self.device, operation, self.n, band, templates)
 
-    def _gpu_window(self, D, H, binsize, threshold, start, end):
+    def _gpu_window(self, D, H, binsize, threshold, start, end, slot=None, async_submit=False):
         nd, nt = D.shape[0], H.shape[0]
         limit = self._gpu_pair_limit()
         if nd * nt <= limit:
+            if slot is not None or async_submit:
+                try:
+                    return self._gpu_dispatch(D, H, binsize, threshold, start, end, slot=slot, async_submit=async_submit)
+                except TypeError:
+                    res = self._gpu_dispatch(D, H, binsize, threshold, start, end)
+                    return (lambda: res) if async_submit else res
             return self._gpu_dispatch(D, H, binsize, threshold, start, end)
         nb = 1 + (end - start - 1) // binsize
         idx = np.empty((nd, nt, nb), np.int32)
@@ -471,15 +496,17 @@ class MatchedFilter:
                 gi, gv = self._gpu_dispatch(D[d0:d1], H[t0:t1], binsize,
                                            threshold, start, end)
                 idx[d0:d1, t0:t1], val[d0:d1, t0:t1] = gi, gv
+        if async_submit:
+            return lambda: (idx, val)
         return idx, val
 
-    def _gpu_dispatch(self, D, H, binsize, threshold, start, end):
-        idx, val = self._gpu.peaks(
+    def _gpu_dispatch(self, D, H, binsize, threshold, start, end, slot=None, async_submit=False):
+        res = self._gpu.peaks(
             self.n, D, H, binsize=binsize, threshold=threshold,
             window=(start, end), upload_data=self._ddirty,
-            upload_tmpl=self._tdirty)
-        self._ddirty = self._tdirty = False
-        return idx, val
+            upload_tmpl=self._tdirty, slot=slot, async_submit=async_submit)
+        self._tdirty = False
+        return res
 
     # ---- run ----------------------------------------------------------------
     def _execution_plan(self):
@@ -541,6 +568,20 @@ class MatchedFilter:
         example in ``matchedfilter.tutorial``, which compared a full run
         against a windowed one and printed the windowed answer twice.
         """
+    def run(self, binsize=None, threshold=0.0, window=None,
+            data=None, templates=None, counts=False, raw=False):
+        t0 = time.perf_counter()
+        try:
+            return self._run_inner(binsize=binsize, threshold=threshold, window=window,
+                                  data=data, templates=templates, counts=counts, raw=raw)
+        finally:
+            dt = time.perf_counter() - t0
+            self.performance_stats["total_calls"] += 1
+            self.performance_stats["total_time_s"] += dt
+            self.performance_stats["batch_times_ms"].append(dt * 1000.0)
+
+    def _run_inner(self, binsize=None, threshold=0.0, window=None,
+                   data=None, templates=None, counts=False, raw=False):
         n = self.n
         binsize = n if binsize is None else int(binsize)
         if binsize < 1:
@@ -643,6 +684,25 @@ class MatchedFilter:
         A later run() requires set_data() again because series execution
         uses the plan's data slots. This rule applies on both devices.
         """
+        is_outer = not getattr(self, '_in_series_call', False)
+        if is_outer:
+            self._in_series_call = True
+            t0 = time.perf_counter()
+        try:
+            return self._run_series_inner(series, starts=starts, win_start=win_start,
+                                          win_end=win_end, binsize=binsize,
+                                          threshold=threshold, templates=templates,
+                                          raw=raw)
+        finally:
+            if is_outer:
+                self._in_series_call = False
+                dt = time.perf_counter() - t0
+                self.performance_stats["total_calls"] += 1
+                self.performance_stats["total_time_s"] += dt
+                self.performance_stats["batch_times_ms"].append(dt * 1000.0)
+
+    def _run_series_inner(self, series, starts=None, win_start=None, win_end=None,
+                          binsize=None, threshold=0.0, templates=None, raw=False):
         if starts is None:
             if win_start is not None or win_end is not None:
                 raise ValueError('win_start and win_end require explicit starts')
@@ -744,10 +804,42 @@ class MatchedFilter:
                                binsize=binsize, threshold=threshold,
                                templates=templates, raw=raw)
 
-    def _series_window(self, spec, H, binsize, threshold, w0, w1):
+    @property
+    def performance_info(self):
+        """Dictionary of performance summary metrics."""
+        return self.performance_summary()
+
+    def performance_summary(self):
+        """Return a dictionary summarizing performance metrics and configuration."""
+        times = self.performance_stats.get("batch_times_ms", [])
+        total_calls = self.performance_stats.get("total_calls", 0)
+        total_time_s = self.performance_stats.get("total_time_s", 0.0)
+        if times:
+            min_ms = float(np.min(times))
+            max_ms = float(np.max(times))
+            med_ms = float(np.median(times))
+            mean_ms = float(np.mean(times))
+        else:
+            min_ms = max_ms = med_ms = mean_ms = 0.0
+
+        summary = {
+            "total_calls": total_calls,
+            "total_time_s": total_time_s,
+            "min_batch_time_ms": min_ms,
+            "max_batch_time_ms": max_ms,
+            "median_batch_time_ms": med_ms,
+            "mean_batch_time_ms": mean_ms,
+            "device": getattr(self.device, "name", str(self.device)),
+            "backend": backend(),
+        }
+        if hasattr(self, "autotune_info"):
+            summary["autotune"] = dict(self.autotune_info)
+        return summary
+
+    def _series_window(self, spec, H, binsize, threshold, w0, w1, slot=None, async_submit=False):
         # Each group has fresh spectra, even when it reuses an allocation.
         self._ddirty = True
-        return self._gpu_window(spec, H, binsize, threshold, w0, w1)
+        return self._gpu_window(spec, H, binsize, threshold, w0, w1, slot=slot, async_submit=async_submit)
 
     def _run_series_gpu(self, ser, layout, binsize, threshold, t0, nt, raw):
         """Execute shared layout groups with bounded FFT/gather storage."""
@@ -760,27 +852,33 @@ class MatchedFilter:
         batch = min(nblk, 65535, max(1, self._gpu_pair_limit() // nt),
                     max(1, budget // (8*n + 4 + 12*nt*nb)))
         if isinstance(self, HierarchicalFilter):
-            band = self._gpu_calibration(threshold)[0]
+            cal_band = self._gpu_calibration(threshold)[0]
+            band = cal_band[1] if isinstance(cal_band, tuple) else cal_band
             operation = 'hierarchical_series'
         else:
             band, operation = 0, 'flat_series'
         policy = self._series_policy(operation, band, nt)
         if policy:
             batch = min(batch, policy['series_group'])
+        single = len(layout.groups) == 1 and nblk <= batch
+        pipelined = hasattr(self._gpu, "_get_fence") and getattr(self._gpu, "cache_limit_bytes", 10**9) > 1024 * 1024 and not single
+        queue_ahead = int(os.environ.get("MF_GPU_QUEUE_AHEAD", "8"))
+        K = max(1, queue_ahead) if pipelined else 1
         source_shared = shared_buffer(ser, self._gpu) is not None
         workspace = getattr(self, "_series_workspace", None)
-        if workspace is None or workspace[0] != (batch, n):
-            workspace = ((batch, n), None, self._gpu.empty_shared((batch, n)),
-                         self._gpu.empty_shared(batch, np.uint32))
-        _, source, spectra, starts = workspace
+        if workspace is None or workspace[0] != (batch, n, K):
+            spectra_pool = [self._gpu.empty_shared((batch, n)) for _ in range(K)]
+            starts_pool = [self._gpu.empty_shared(batch, np.uint32) for _ in range(K)]
+            workspace = ((batch, n, K), None, spectra_pool, starts_pool)
+        _, source, spectra_pool, starts_pool = workspace
         if source_shared:
             source = ser
-            self._series_workspace = (workspace[0], None, spectra, starts)
+            self._series_workspace = (workspace[0], None, spectra_pool, starts_pool)
         else:
             if source is None or source.size < ser.size:
                 source = self._gpu.empty_shared(ser.shape)
             source[:ser.size] = ser
-            self._series_workspace = (workspace[0], source, spectra, starts)
+            self._series_workspace = (workspace[0], source, spectra_pool, starts_pool)
             source = source[:ser.size]
         # A single group needs no aggregate buffers or scatter.
         single = len(layout.groups) == 1 and nblk <= batch
@@ -804,50 +902,132 @@ class MatchedFilter:
                    and nb <= getattr(self._gpu, "max_grouped_bins", 0)
                    and nt <= self._gpu_pair_limit())
         if grouped:
+            in_flight = []
+            slot_idx = 0
             for begin in range(0, nblk, batch):
                 end = min(begin + batch, nblk)
                 count = end - begin
                 groups = [(lo, hi, max(a, begin)-begin, min(b, end)-begin)
                           for lo, hi, a, b in layout.groups if a < end and b > begin]
+                slot = slot_idx % K
+                slot_idx += 1
+                starts = starts_pool[slot]
+                spec = spectra_pool[slot][:count]
                 starts[:count] = np.minimum(layout.starts[begin:end], ser.size)
-                spec = spectra[:count]
-                self._gpu.forward(n, source, starts[:count], spec, defer=True)
                 try:
-                    gi, gv = self._gpu.peaks_grouped(
+                    if pipelined:
+                        self._gpu.forward(n, source, starts[:count], spec, defer=True, slot=slot)
+                    else:
+                        self._gpu.forward(n, source, starts[:count], spec, defer=True)
+                except TypeError:
+                    self._gpu.forward(n, source, starts[:count], spec, defer=True)
+                try:
+                    if pipelined:
+                        res = self._gpu.peaks_grouped(
+                            n, spec, H, groups, binsize, threshold, upload_tmpl=self._tdirty,
+                            slot=slot, async_submit=True)
+                    else:
+                        res = self._gpu.peaks_grouped(
+                            n, spec, H, groups, binsize, threshold, upload_tmpl=self._tdirty)
+                    self._tdirty = False
+                except TypeError:
+                    res = self._gpu.peaks_grouped(
                         n, spec, H, groups, binsize, threshold, upload_tmpl=self._tdirty)
                     self._tdirty = False
+                except Exception:
+                    try:
+                        if pipelined:
+                            self._gpu.cancel_forward(slot=slot)
+                        else:
+                            self._gpu.cancel_forward()
+                    except TypeError:
+                        self._gpu.cancel_forward()
+                    raise
+                in_flight.append((begin, end, res))
+                if len(in_flight) >= K:
+                    b_start, b_end, item = in_flight.pop(0)
+                    gi, gv = item() if callable(item) else item
                     if raw:
-                        idx[begin:end], val[begin:end] = gi, gv
+                        idx[b_start:b_end], val[b_start:b_end] = gi, gv
                     else:
-                        _core.pack_peaks(peaks[begin:end], gi, gv)
-                finally:
-                    self._gpu.cancel_forward()
+                        _core.pack_peaks(peaks[b_start:b_end], gi, gv)
+            while in_flight:
+                b_start, b_end, item = in_flight.pop(0)
+                gi, gv = item() if callable(item) else item
+                if raw:
+                    idx[b_start:b_end], val[b_start:b_end] = gi, gv
+                else:
+                    _core.pack_peaks(peaks[b_start:b_end], gi, gv)
             if raw:
                 return _format_result(idx, val, raw=True, order=layout.order)
             return _format_result(None, None, raw=False, order=layout.order, out=peaks)
+        in_flight = []
+        slot_idx = 0
         for w0, w1, a, b in layout.groups:
             for begin in range(a, b, batch):
                 end = min(begin + batch, b)
                 count = end - begin
+                slot = slot_idx % K
+                slot_idx += 1
+                starts = starts_pool[slot]
+                spec = spectra_pool[slot][:count]
                 starts[:count] = np.minimum(layout.starts[begin:end], ser.size)
-                spec = spectra[:count]
-                self._gpu.forward(n, source, starts[:count], spec, defer=True)
                 try:
-                    gi, gv = self._series_window(spec, H, binsize, threshold, w0, w1)
-                finally:
-                    self._gpu.cancel_forward()
-                if single:
+                    if pipelined:
+                        self._gpu.forward(n, source, starts[:count], spec, defer=True, slot=slot)
+                    else:
+                        self._gpu.forward(n, source, starts[:count], spec, defer=True)
+                except TypeError:
+                    self._gpu.forward(n, source, starts[:count], spec, defer=True)
+                try:
+                    if pipelined:
+                        res = self._series_window(spec, H, binsize, threshold, w0, w1,
+                                                  slot=slot, async_submit=True)
+                    else:
+                        res = self._series_window(spec, H, binsize, threshold, w0, w1)
+                except TypeError:
+                    res = self._series_window(spec, H, binsize, threshold, w0, w1)
+                except Exception:
+                    try:
+                        if pipelined:
+                            self._gpu.cancel_forward(slot=slot)
+                        else:
+                            self._gpu.cancel_forward()
+                    except TypeError:
+                        self._gpu.cancel_forward()
+                    raise
+                self._ddirty = self._tdirty = False
+                in_flight.append((begin, end, res))
+                if len(in_flight) >= K:
+                    b_start, b_end, item = in_flight.pop(0)
+                    gi, gv = item() if callable(item) else item
+                    if single:
+                        if raw:
+                            return _format_result(gi, gv, raw=True)
+                        spbuf = getattr(self, '_spbuf', None)
+                        if spbuf is None or spbuf[0] != shape:
+                            spbuf = self._spbuf = (shape, np.empty(shape, dtype=PEAK_DTYPE))
+                        _, peaks = spbuf
+                        return _format_result(gi, gv, raw=False, out=peaks)
                     if raw:
-                        return _format_result(gi, gv, raw=True)
-                    spbuf = getattr(self, '_spbuf', None)
-                    if spbuf is None or spbuf[0] != shape:
-                        spbuf = self._spbuf = (shape, np.empty(shape, dtype=PEAK_DTYPE))
-                    _, peaks = spbuf
-                    return _format_result(gi, gv, raw=False, out=peaks)
+                        idx[b_start:b_end], val[b_start:b_end] = gi, gv
+                    else:
+                        _core.pack_peaks(peaks[b_start:b_end], gi, gv)
+        while in_flight:
+            b_start, b_end, item = in_flight.pop(0)
+            gi, gv = item() if callable(item) else item
+            if single:
                 if raw:
-                    idx[begin:end], val[begin:end] = gi, gv
-                else:
-                    _core.pack_peaks(peaks[begin:end], gi, gv)
+                    return _format_result(gi, gv, raw=True)
+                spbuf = getattr(self, '_spbuf', None)
+                if spbuf is None or spbuf[0] != shape:
+                    spbuf = self._spbuf = (shape, np.empty(shape, dtype=PEAK_DTYPE))
+                _, peaks = spbuf
+                return _format_result(gi, gv, raw=False, out=peaks)
+            if raw:
+                idx[b_start:b_end], val[b_start:b_end] = gi, gv
+            else:
+                _core.pack_peaks(peaks[b_start:b_end], gi, gv)
         if raw:
             return _format_result(idx, val, raw=True, order=layout.order)
         return _format_result(None, None, raw=False, order=layout.order, out=peaks)
@@ -1117,10 +1297,10 @@ def _cache_path(paths):
     key = hashlib.sha1(("cost-v6|" + "|".join(
         "%s:%d:%d" % (q, os.stat(q).st_mtime_ns, os.path.getsize(q)) for q in paths
         if os.path.exists(q))).encode()).hexdigest()[:16]
-    here = os.path.dirname(os.path.abspath(__file__))
-    for base in (here, os.path.join(
-            os.environ.get("XDG_CACHE_HOME",
-                           os.path.expanduser("~/.cache")), "matchedfilter")):
+    xdg_cache = os.path.join(
+        os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache")), "matchedfilter")
+    package_cache = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cache")
+    for base in (xdg_cache, package_cache):
         try:
             os.makedirs(base, exist_ok=True)
             if os.access(base, os.W_OK):
@@ -1341,7 +1521,7 @@ def _idw(rows, f, be, k=4, power=2.0, log=False, floor=1e-12):
     return sum(w * v for w, v in ws) / sum(w for w, _ in ws)
 
 
-def choose_threshold(power, n, snr, fd, band, tuning=None):
+def choose_threshold(power, n, snr, fd, band, tuning=None, cascade_band=None):
     """Compute the gate from the complete reference profile.
 
     ``tuning`` remains accepted for source compatibility but cannot affect
@@ -1353,6 +1533,11 @@ def choose_threshold(power, n, snr, fd, band, tuning=None):
         if os.environ.get(obsolete):
             raise ValueError("%s is retired: use the reference gate model, or set "
                              "an explicit band and coarse threshold" % obsolete)
+    if cascade_band is not None:
+        b0 = min(int(cascade_band), int(band))
+        b1 = max(int(cascade_band), int(band))
+        from .gatemodel import gate_for_cascade
+        return gate_for_cascade(power, n, b0, b1, snr, fd)
     from .gatemodel import gate_for
     return gate_for(power, n, band, snr, fd)
 
@@ -1412,20 +1597,190 @@ def _cost_candidates(power, n, snr, t, fd=1e-3, pairs=None):
     return sorted(candidates, key=lambda c: (c["cost"], c["band"], c["K"]))
 
 
-def choose_config(power, n, snr, fd, tuning=None, pairs=None, device=None):
-    """Cheapest measured (band, taps) whose model gate resolves the budget.
+class CascadeConfig(tuple):
+    """Configuration for two-tier cascade matched filtering.
 
-    Only costs come from files. The model uses the complete reference at
-    the requested SNR and budget, without a tabulated accuracy fallback.
-    Cost measurements are approximate rankings, not runtime guarantees.
+    Unpacks as (band, taps) for 100% backwards compatibility with legacy
+    callers expecting a 2-tuple, while exposing b0, b1, cascade_band, and
+    matching both (b1, taps) and (b0, b1, taps) on equality.
+    """
+    def __new__(cls, b0, b1, taps):
+        obj = super().__new__(cls, (int(b1), int(taps)))
+        obj.b0 = int(b0)
+        obj.b1 = int(b1)
+        obj.cascade_band = int(b0)
+        obj.band = int(b1)
+        obj.taps = int(taps)
+        obj.cascade = True
+        return obj
+
+    @property
+    def bands(self):
+        return (self.b0, self.b1)
+
+    def __eq__(self, other):
+        if isinstance(other, tuple):
+            if len(other) == 3 and (other[0], other[1], other[2]) == (self.b0, self.b1, self.taps):
+                return True
+            if len(other) == 2 and (other[0], other[1]) == (self.b1, self.taps):
+                return True
+        return super().__eq__(other)
+
+    def __repr__(self):
+        return f"({self.b0}, {self.b1}, {self.taps})"
+
+
+def _config_key(cfg):
+    """Normalize configuration to (b0, b1, taps) for exact comparison, using None for single-tier b0."""
+    if cfg is None:
+        return None
+    if isinstance(cfg, CascadeConfig):
+        return (cfg.b0, cfg.b1, cfg.taps)
+    if isinstance(cfg, (tuple, list)):
+        if len(cfg) == 3:
+            return (int(cfg[0]), int(cfg[1]), int(cfg[2]))
+        if len(cfg) == 2:
+            return (None, int(cfg[0]), int(cfg[1]))
+    return cfg
+
+
+def _min_band_for(device=None, tuning=None):
+    """Determine minimum viable coarse band based on microarchitecture / SIMD width."""
+    if device is not None:
+        if getattr(device, "kind", None) == "gpu":
+            return 128
+        if isinstance(device, str) and device.lower().startswith("gpu"):
+            return 128
+    if tuning is not None:
+        paths = " ".join(tuning.get("paths", []))
+        meta = tuning.get("meta", {})
+        cpu = meta.get("cpu", "")
+        if "vulkan" in paths or "metal" in paths:
+            return 128
+        if "model85" in paths or "Xeon(R) Platinum" in cpu or "Xeon(R) Gold" in cpu:
+            return 256
+    b = (backend() or "").upper()
+    if "AVX3" in b or "AVX512" in b:
+        return 256
+    return 128
+
+
+def candidate_configs(power, n, snr, fd, tuning=None, pairs=None, device=None, cascade=True):
+    """Generate viable candidate configurations certified by the FDR gate model.
+
+    Returns:
+        (candidates, rejected):
+            candidates: list of valid configurations [single_choice, cascade_choice_1, ...]
+            rejected: list of dicts [{"config": cfg, "reason": str}]
     """
     if tuning is None:
         tuning = _load_tuning_for(device) if device is not None else _load_tuning()
-    for candidate in _cost_candidates(power, n, snr, tuning, fd, pairs):
+    cands = _cost_candidates(power, n, snr, tuning, fd, pairs)
+    single_choice = None
+    for candidate in cands:
         band = candidate["band"]
-        if choose_threshold(power, n, snr, fd, band) is not None:
-            return band, candidate["K"]
-    return None
+        g = choose_threshold(power, n, snr, fd, band)
+        if g is not None:
+            single_choice = (band, candidate["K"])
+            break
+    if single_choice is None:
+        return [], [{"config": None, "reason": "No single-tier band can resolve FDR budget"}]
+
+    candidates = [single_choice]
+    rejected = []
+
+    if cascade:
+        b_single, K = single_choice
+        for b0 in [b_single // 2, b_single // 4]:
+            if b0 < 128:
+                rejected.append({"config": (b0, b_single, K), "reason": f"Coarse band {b0} below SIMD/scalloping floor (128)"})
+                continue
+            thr = choose_threshold(power, n, snr, fd, b_single, cascade_band=b0)
+            if thr is not None:
+                candidates.append(CascadeConfig(b0, b_single, K))
+            else:
+                rejected.append({"config": (b0, b_single, K), "reason": f"FDR gate model cannot resolve budget (fd={fd})"})
+
+    return candidates, rejected
+
+
+def choose_config(power, n, snr, fd, tuning=None, pairs=None, device=None, cascade=False):
+    """Cheapest measured configuration whose model gate resolves the budget."""
+    candidates, _ = candidate_configs(power, n, snr, fd, tuning=tuning, pairs=pairs, device=device, cascade=cascade)
+    if not candidates:
+        return None
+    if not cascade or len(candidates) == 1:
+        return candidates[0]
+
+    # AVX-512 CPU uses 512-bit SIMD registers. Small-band FFT execution (<=512)
+    # is memory-bandwidth bound and core downclocked; coarse band 256 costs ~95% of band 512.
+    # Running two separate memory passes in single-batch correlation regresses runtime on AVX-512 CPU.
+    is_gpu = False
+    if device is not None:
+        if getattr(device, "kind", None) == "gpu" or (isinstance(device, str) and device.lower().startswith("gpu")):
+            is_gpu = True
+    if tuning is not None:
+        paths = " ".join(tuning.get("paths", []))
+        if "vulkan" in paths or "metal" in paths or "gpu" in paths or "gfx" in paths or "apple" in paths:
+            is_gpu = True
+
+    is_avx512_cpu = False
+    if not is_gpu and (device is None or getattr(device, "kind", None) == "cpu"):
+        b_name = (backend() or "").upper()
+        if "AVX3" in b_name or "AVX512" in b_name:
+            is_avx512_cpu = True
+        elif tuning is not None:
+            paths = " ".join(tuning.get("paths", []))
+            meta = tuning.get("meta", {})
+            cpu_name = meta.get("cpu", "")
+            if "model85" in paths or "Xeon(R) Platinum" in cpu_name or "Xeon(R) Gold" in cpu_name:
+                is_avx512_cpu = True
+
+    if is_avx512_cpu:
+        return candidates[0]
+
+    return candidates[1]
+
+
+_AUTOTUNE_LOCK = threading.Lock()
+_GLOBAL_AUTOTUNE_CACHE = {}
+_GLOBAL_AUTOTUNE_TRIALS = {}
+
+
+def _reference_hash(power):
+    """Compute a SHA-256 hex digest for a reference spectrum profile."""
+    if power is None:
+        return None
+    p = np.ascontiguousarray(_from_any(power), dtype=np.float32)
+    tot = float(np.sum(p, dtype=np.float64))
+    if tot > 0 and abs(tot - 1.0) > 1e-5:
+        p = (p / tot).astype(np.float32)
+    return hashlib.sha256(p.tobytes()).hexdigest()
+
+
+def _autotune_cache_key(device, n, snr, fd, ref, cascade=True):
+    """Compute canonical process-level cache key for autotuned winner configurations."""
+    dev_kind = getattr(device, "kind", str(device)) if device is not None else "cpu"
+    ref_hash = _reference_hash(ref)
+    return (str(dev_kind), int(n), float(snr), float(fd), bool(cascade), ref_hash)
+
+
+def get_autotune_cache():
+    """Return a shallow copy of the process-level autotune winner cache."""
+    with _AUTOTUNE_LOCK:
+        return dict(_GLOBAL_AUTOTUNE_CACHE)
+
+
+def _clear_autotune_cache():
+    """Clear all entries in the process-level autotune cache and in-flight trials."""
+    with _AUTOTUNE_LOCK:
+        _GLOBAL_AUTOTUNE_CACHE.clear()
+        _GLOBAL_AUTOTUNE_TRIALS.clear()
+
+
+def clear_autotune_cache():
+    """Public alias for _clear_autotune_cache()."""
+    _clear_autotune_cache()
 
 
 class HierarchicalFilter(MatchedFilter):
@@ -1458,13 +1813,39 @@ class HierarchicalFilter(MatchedFilter):
     """
 
     def __init__(self, n, ndata=1, ntemplates=1, snr=5.5, fd=1e-2,
-                 band=None, taps=None, device=None, *, valid=None):
+                 band=None, taps=None, device=None, *, valid=None, cascade_band=None,
+                 cascade="auto"):
         from .device import parse as _parse_device
         self.device = _parse_device(device)
         self.n = int(n)
         self.valid = _valid_series_window(self.n, valid)
         self.ndata = int(ndata)
         self.ntemplates = int(ntemplates)
+        if isinstance(band, (tuple, list)):
+            if len(band) == 3:
+                cascade_band = band[0]
+                band_val = band[1]
+                taps = band[2]
+            elif len(band) == 2:
+                if band[0] < band[1] and band[0] >= 64:
+                    cascade_band = band[0]
+                    band_val = band[1]
+                else:
+                    band_val = band[0]
+                    taps = band[1]
+            else:
+                raise ValueError("tuple band must have 2 or 3 elements (b0, b1[, taps]) or (band, taps)")
+            band = band_val
+        self.cascade_band = int(cascade_band) if cascade_band is not None else None
+        if self.cascade_band is not None:
+            if self.cascade_band < 64 or self.cascade_band >= self.n or self.cascade_band & (self.cascade_band - 1):
+                raise ValueError("cascade_band must be a power of two, >= 64 and < n")
+        if cascade is False:
+            self.cascade = False
+        elif cascade is True or self.cascade_band is not None:
+            self.cascade = True
+        else:
+            self.cascade = True if band is None else False
         if self.ndata < 1 or self.ntemplates < 1:
             raise ValueError("ndata and ntemplates must be >= 1")
         if self.device.kind == 'cpu' and self.n > self._cpu_max_n:
@@ -1486,40 +1867,74 @@ class HierarchicalFilter(MatchedFilter):
         self._thr_applied = False
         self._pinned = None
         self._fs_snr = None
+        self._tune_candidates = []
+        self._active_cfg = None
+        self._in_hier_series_call = False
         if self.device.kind == "gpu":
-            # HierarchicalFilter overrides __init__, so it does NOT inherit
-            # MatchedFilter's call to _start_gpu. Omitting this left device=
-            # accepted, self.device reporting "gpu:0", and every run quietly
-            # going to the CPU -- which looked like a working port.
-            #
-            # The pinned configuration is recorded BEFORE returning. Returning
-            # first skipped the band handling below, so a caller who pinned a
-            # configuration got the table's choice instead and config()
-            # reported the substitute rather than what was asked for.
             if band is not None:
-                self._pinned = (int(band), int(taps or 8))
+                if self.cascade_band is not None:
+                    self._pinned = CascadeConfig(int(self.cascade_band), int(band), int(taps or 8))
+                else:
+                    self._pinned = (int(band), int(taps or 8))
+                self._active_cfg = self._pinned
+            self.autotune_info = {
+                "status": "pinned" if self._pinned is not None else "uninitialized",
+                "winner": self._pinned,
+                "trials": [],
+                "untried": [],
+                "rejected": []
+            }
             self._start_gpu()
             self._defer = True
             self._mf = None
             return
         if band is None:
-            # Defer: the band should be chosen from the reference, and the
-            # reference arrives after construction in every caller we have.
-            # Building the plan on first use instead of here means the choice
-            # can see it, with no rebuild and no re-ingest of templates.
             self._mf = None
             self._defer = True
+            self.autotune_info = {
+                "status": "uninitialized",
+                "winner": None,
+                "trials": [],
+                "untried": [],
+                "rejected": []
+            }
         else:
             self._defer = False
-            self._pinned = (int(band), int(taps or 8))
-            self._mf = self._new_cpu_plan(*self._pinned)
+            if self.cascade_band is not None:
+                self._pinned = CascadeConfig(int(self.cascade_band), int(band), int(taps or 8))
+                self._mf = self._new_cpu_plan(int(band), int(taps or 8), cascade_band=self.cascade_band)
+            else:
+                self._pinned = (int(band), int(taps or 8))
+                self._mf = self._new_cpu_plan(*self._pinned)
+            self._active_cfg = self._pinned
+            self.autotune_info = {
+                "status": "pinned",
+                "winner": self._pinned,
+                "trials": [],
+                "untried": [],
+                "rejected": []
+            }
             if self._cal_thr is not None:
-                self._mf.set_threshold(self._cal_thr)
+                if isinstance(self._cal_thr, (tuple, list)):
+                    self._mf.set_threshold(*self._cal_thr)
+                else:
+                    self._mf.set_threshold(self._cal_thr)
 
-    def _new_cpu_plan(self, band, taps):
+    def _autotune_cache_key(self):
+        if getattr(self, '_pending_ref', None) is None:
+            return None
+        return _autotune_cache_key(self.device, self.n, self.snr, self.fd,
+                                  self._pending_ref, cascade=self.cascade)
+
+    def _new_cpu_plan(self, band, taps, cascade_band=None):
         self._execution_policy = self._series_policy('hierarchical_series', band, self.ntemplates)
+        cband = cascade_band if cascade_band is not None else getattr(self, 'cascade_band', None)
+        grp = self._execution_policy.get('series_group', 8)
+        if cband is not None and cband > 0:
+            return _core.HMF(self.n, self.ndata, self.ntemplates, self.snr, self.fd,
+                             int(band), 1, int(taps), grp, int(cband))
         return _core.HMF(self.n, self.ndata, self.ntemplates, self.snr, self.fd,
-                         int(band), 1, int(taps), self._execution_policy.get('series_group', 8))
+                         int(band), 1, int(taps), grp)
 
     def _ensure(self):
         """Build the plan, choosing its configuration if that was deferred.
@@ -1531,9 +1946,13 @@ class HierarchicalFilter(MatchedFilter):
         """
         if self._mf is not None:
             if not self._thr_applied:
-                tv = self._coarse_value(self._mf.config()[0], required=False)
+                cfg_b = self._mf.config()[1] if len(self._mf.config()) == 4 else self._mf.config()[0]
+                tv = self._coarse_value(cfg_b, required=False)
                 if tv is not None:
-                    self._mf.set_threshold(tv)
+                    if isinstance(tv, (tuple, list)):
+                        self._mf.set_threshold(*tv)
+                    else:
+                        self._mf.set_threshold(tv)
                     self._thr_applied = True
             return self._mf
         cfg = None
@@ -1550,11 +1969,90 @@ class HierarchicalFilter(MatchedFilter):
             # every cell.
             cfg = self._pinned
         elif self._pending_ref is not None:
-            _, self._cost_key = cost_table_for(self.device)
-            tuning = _load_tuning_for(self.device)
-            cfg = choose_config(self._pending_ref, self.n, self.snr, self.fd,
-                                tuning=tuning,
-                                pairs=self.ndata * self.ntemplates)
+            cache_key = self._autotune_cache_key()
+            cached_winner = None
+            if cache_key is not None:
+                with _AUTOTUNE_LOCK:
+                    cached_winner = _GLOBAL_AUTOTUNE_CACHE.get(cache_key)
+            if cached_winner is not None:
+                self.autotune_info["status"] = "locked"
+                self.autotune_info["winner"] = cached_winner
+                self.autotune_info["untried"] = []
+                self._tune_candidates = [cached_winner]
+                cfg = cached_winner
+            elif self.autotune_info.get("status") == "uninitialized":
+                _, self._cost_key = cost_table_for(self.device)
+                tuning = _load_tuning_for(self.device)
+                candidates, rejected = candidate_configs(self._pending_ref, self.n, self.snr, self.fd,
+                                                         tuning=tuning,
+                                                         pairs=self.ndata * self.ntemplates,
+                                                         device=self.device,
+                                                         cascade=self.cascade)
+                self.autotune_info["rejected"] = rejected
+                if not candidates:
+                    cfg = None
+                elif len(candidates) == 1:
+                    winner = candidates[0]
+                    self.autotune_info["status"] = "locked"
+                    self.autotune_info["winner"] = winner
+                    self.autotune_info["untried"] = []
+                    self._tune_candidates = [winner]
+                    if cache_key is not None:
+                        with _AUTOTUNE_LOCK:
+                            _GLOBAL_AUTOTUNE_CACHE[cache_key] = winner
+                    cfg = winner
+                else:
+                    static_choice = choose_config(self._pending_ref, self.n, self.snr, self.fd,
+                                                  tuning=tuning,
+                                                  pairs=self.ndata * self.ntemplates,
+                                                  device=self.device,
+                                                  cascade=self.cascade)
+                    ordered = [static_choice] + [c for c in candidates if _config_key(c) != _config_key(static_choice)]
+                    self._tune_candidates = ordered
+
+                    if cache_key is not None:
+                        with _AUTOTUNE_LOCK:
+                            if cache_key in _GLOBAL_AUTOTUNE_CACHE:
+                                winner = _GLOBAL_AUTOTUNE_CACHE[cache_key]
+                                self.autotune_info["status"] = "locked"
+                                self.autotune_info["winner"] = winner
+                                self.autotune_info["untried"] = []
+                                cfg = winner
+                            else:
+                                shared = _GLOBAL_AUTOTUNE_TRIALS.setdefault(cache_key, {
+                                    "trials": [],
+                                    "candidates": ordered,
+                                    "assigned": set(),
+                                })
+                                tested_keys = {_config_key(t["config"]) for t in shared["trials"]}
+                                assigned_keys = set(shared.get("assigned", set()))
+                                untested_unassigned = [c for c in shared["candidates"]
+                                                       if _config_key(c) not in tested_keys and _config_key(c) not in assigned_keys]
+                                if untested_unassigned:
+                                    next_cfg = untested_unassigned[0]
+                                else:
+                                    untested = [c for c in shared["candidates"] if _config_key(c) not in tested_keys]
+                                    if untested:
+                                        next_cfg = untested[0]
+                                    else:
+                                        next_cfg = ordered[0]
+
+                                shared.setdefault("assigned", set()).add(_config_key(next_cfg))
+                                self._assigned_candidate_key = _config_key(next_cfg)
+                                untested_all = [c for c in shared["candidates"] if _config_key(c) not in tested_keys]
+                                self.autotune_info["untried"] = [c for c in untested_all if _config_key(c) != _config_key(next_cfg)]
+                                self.autotune_info["status"] = "tuning"
+                                self.autotune_info["winner"] = None
+                                cfg = next_cfg
+                    else:
+                        self.autotune_info["untried"] = list(ordered[1:])
+                        self.autotune_info["status"] = "tuning"
+                        self.autotune_info["winner"] = None
+                        cfg = ordered[0]
+            elif self.autotune_info.get("status") == "locked":
+                cfg = self.autotune_info["winner"]
+            else:
+                cfg = getattr(self, '_active_cfg', self._tune_candidates[0] if self._tune_candidates else None)
         if cfg is None:
             # Autotuning is a promise, so it refuses rather than guesses.
             # There used to be a compiled design table to fall back on; it was
@@ -1582,14 +2080,50 @@ class HierarchicalFilter(MatchedFilter):
                         "with no low-frequency cutoff."
                         % (self.n, _BEFF_MIN))
             raise ValueError(_uncovered_message(self.n, self.snr, self.fd))
-        b, k = cfg
-        self._mf = self._new_cpu_plan(b, k)
-        tv = self._coarse_value(b, required=False)
+        self._active_cfg = cfg
+        if isinstance(cfg, CascadeConfig) or (isinstance(cfg, tuple) and len(cfg) == 3):
+            if isinstance(cfg, CascadeConfig):
+                b0, b1, k = cfg.b0, cfg.b1, cfg.taps
+            else:
+                b0, b1, k = cfg
+            self.cascade_band = b0
+            self._mf = self._new_cpu_plan(b1, k, cascade_band=b0)
+            tv = self._coarse_value(b1, required=False)
+        else:
+            b, k = cfg
+            self._mf = self._new_cpu_plan(b, k)
+            tv = self._coarse_value(b, required=False)
         if tv is not None:
-            self._mf.set_threshold(tv)
+            if isinstance(tv, (tuple, list)):
+                self._mf.set_threshold(*tv)
+            else:
+                self._mf.set_threshold(tv)
             self._thr_applied = True
         if self._pending_ref is not None:
             self._mf.set_reference(self._pending_ref)
+        if hasattr(self, '_held_templates') and self._held_templates is not None:
+            if isinstance(self._held_templates, np.ndarray):
+                if hasattr(self._mf, 'set_template_batch'):
+                    self._mf.set_template_batch(0, self._held_templates)
+                else:
+                    for i in range(self.ntemplates):
+                        self._mf.set_template(i, self._held_templates[i])
+            elif isinstance(self._held_templates, list):
+                for i, t in enumerate(self._held_templates):
+                    if t is not None:
+                        self._mf.set_template(i, t)
+        if hasattr(self, '_held') and self._held:
+            if -1 in self._held:
+                a = self._held[-1]
+                if hasattr(self._mf, 'set_data_batch'):
+                    self._mf.set_data_batch(0, a)
+                else:
+                    for i in range(self.ndata):
+                        self._mf.set_data(i, a[i])
+            else:
+                for i, d in self._held.items():
+                    if d is not None and i >= 0:
+                        self._mf.set_data(i, d)
         return self._mf
 
     # ---- GPU -----------------------------------------------------------
@@ -1620,27 +2154,296 @@ class HierarchicalFilter(MatchedFilter):
         if self._cal_thr is not None:
             if self._pinned is None:
                 raise ValueError("an explicit coarse threshold requires an explicit band")
-            return float(self._cal_thr)
+            return self._cal_thr
         value = None
         if self._pending_ref is not None:
-            value = choose_threshold(self._pending_ref, self.n,
-                                     self._fs_snr or self.snr, self.fd, int(band))
+            cband = getattr(self, 'cascade_band', None)
+            if cband is not None and cband > 0:
+                value = choose_threshold(self._pending_ref, self.n,
+                                         self._fs_snr or self.snr, self.fd, int(band),
+                                         cascade_band=int(cband))
+            else:
+                value = choose_threshold(self._pending_ref, self.n,
+                                         self._fs_snr or self.snr, self.fd, int(band))
         if value is None and required:
             raise ValueError(
                 "no calibrated coarse threshold for n=%d band=%d: provide a "
                 "reference and a resolvable budget, or set both band and coarse threshold"
                 % (self.n, band))
-        if value is not None and (not np.isfinite(value) or value < 0
-                                  or value > float(np.finfo(np.float32).max)):
-            raise ValueError("calibrated coarse threshold must be finite, nonnegative float32")
-        return None if value is None else float(value)
+        if value is not None:
+            if isinstance(value, (tuple, list)):
+                return (float(value[0]), float(value[1]))
+            if not np.isfinite(value) or value < 0 or value > float(np.finfo(np.float32).max):
+                raise ValueError("calibrated coarse threshold must be finite, nonnegative float32")
+            return float(value)
+        return None
 
     def _execution_plan(self):
         plan = self._ensure()
         if not self._thr_applied:
-            plan.set_threshold(self._coarse_value(plan.config()[0]))
+            cfg_b = plan.config()[1] if len(plan.config()) == 4 else plan.config()[0]
+            tv = self._coarse_value(cfg_b)
+            if isinstance(tv, (tuple, list)):
+                plan.set_threshold(*tv)
+            else:
+                plan.set_threshold(tv)
             self._thr_applied = True
         return plan
+
+    def _switch_config(self, cfg):
+        """Switch active plan configuration dynamically, preserving loaded data and templates."""
+        self._active_cfg = cfg
+        if self.device.kind == "gpu":
+            if isinstance(cfg, CascadeConfig):
+                b0, b1, taps = cfg.b0, cfg.b1, cfg.taps
+                self.cascade_band = int(b0)
+                self.cascade = True
+                self._gcfg = (int(b0), int(b1), int(taps))
+            elif isinstance(cfg, (tuple, list)) and len(cfg) == 3:
+                b0, b1, taps = cfg[0], cfg[1], cfg[2]
+                self.cascade_band = int(b0)
+                self.cascade = True
+                self._gcfg = (int(b0), int(b1), int(taps))
+            else:
+                band, taps = cfg[0], cfg[1]
+                self.cascade_band = None
+                self.cascade = False
+                self._gcfg = (int(band), int(taps))
+            self._gcal = None
+            self._ckey = None
+            self._ct = None
+            self._tdirty = True
+            return
+
+        # CPU path
+        if isinstance(cfg, CascadeConfig):
+            b0, b1, taps = cfg.b0, cfg.b1, cfg.taps
+            self.cascade_band = int(b0)
+            self.cascade = True
+            new_plan = self._new_cpu_plan(int(b1), int(taps), cascade_band=int(b0))
+            tv = self._coarse_value(int(b1), required=False)
+        elif isinstance(cfg, (tuple, list)) and len(cfg) == 3:
+            b0, b1, taps = cfg[0], cfg[1], cfg[2]
+            self.cascade_band = int(b0)
+            self.cascade = True
+            new_plan = self._new_cpu_plan(int(b1), int(taps), cascade_band=int(b0))
+            tv = self._coarse_value(int(b1), required=False)
+        else:
+            band, taps = cfg[0], cfg[1]
+            self.cascade_band = None
+            self.cascade = False
+            new_plan = self._new_cpu_plan(int(band), int(taps))
+            tv = self._coarse_value(int(band), required=False)
+
+        if tv is not None:
+            if isinstance(tv, (tuple, list)):
+                new_plan.set_threshold(*tv)
+            else:
+                new_plan.set_threshold(tv)
+
+        if self._pending_ref is not None:
+            new_plan.set_reference(self._pending_ref)
+
+        # Restore templates into the new plan
+        if hasattr(self, '_held_templates') and self._held_templates is not None:
+            if isinstance(self._held_templates, np.ndarray):
+                if hasattr(new_plan, 'set_template_batch'):
+                    new_plan.set_template_batch(0, self._held_templates)
+                else:
+                    for i in range(self.ntemplates):
+                        new_plan.set_template(i, self._held_templates[i])
+            elif isinstance(self._held_templates, list):
+                for i, t in enumerate(self._held_templates):
+                    if t is not None:
+                        new_plan.set_template(i, t)
+
+        # Restore data into the new plan if present
+        if hasattr(self, '_held') and self._held:
+            if -1 in self._held:
+                a = self._held[-1]
+                if hasattr(new_plan, 'set_data_batch'):
+                    new_plan.set_data_batch(0, a)
+                else:
+                    for i in range(self.ndata):
+                        new_plan.set_data(i, a[i])
+            else:
+                for i, d in self._held.items():
+                    if d is not None and i >= 0:
+                        new_plan.set_data(i, d)
+
+        self._mf = new_plan
+        self._thr_applied = (tv is not None)
+
+    def _record_autotune_trial(self, dt):
+        """Record batch timing for current configuration and progress autotune state."""
+        cfg = getattr(self, '_active_cfg', self.config)
+        trial = {
+            "config": cfg,
+            "duration_s": dt,
+            "time_ms": dt * 1000.0,
+        }
+        self.autotune_info["trials"].append(trial)
+
+        # Remove from local untried if present
+        self.autotune_info["untried"] = [
+            c for c in self.autotune_info["untried"] if _config_key(c) != _config_key(cfg)
+        ]
+
+        cache_key = self._autotune_cache_key() if getattr(self, '_pending_ref', None) is not None else None
+
+        with _AUTOTUNE_LOCK:
+            if cache_key is not None and cache_key in _GLOBAL_AUTOTUNE_CACHE:
+                winner = _GLOBAL_AUTOTUNE_CACHE[cache_key]
+                if hasattr(self, '_assigned_candidate_key') and cache_key in _GLOBAL_AUTOTUNE_TRIALS:
+                    _GLOBAL_AUTOTUNE_TRIALS[cache_key].get("assigned", set()).discard(self._assigned_candidate_key)
+                    self._assigned_candidate_key = None
+                self.autotune_info["status"] = "locked"
+                self.autotune_info["winner"] = winner
+                self.autotune_info["untried"] = []
+                if _config_key(self.config) != _config_key(winner):
+                    self._switch_config(winner)
+                return
+
+            shared = _GLOBAL_AUTOTUNE_TRIALS.get(cache_key) if cache_key is not None else None
+            if shared is not None:
+                if hasattr(self, '_assigned_candidate_key'):
+                    shared.get("assigned", set()).discard(self._assigned_candidate_key)
+                    self._assigned_candidate_key = None
+
+                norm_factor = float(self.ndata * self.ntemplates)
+                shared["trials"].append({
+                    "config": cfg,
+                    "duration_s": dt,
+                    "time_ms": dt * 1000.0,
+                    "time_per_pair": (dt * 1000.0) / norm_factor,
+                })
+                tested_keys = {_config_key(t["config"]) for t in shared["trials"]}
+                all_candidate_keys = {_config_key(c) for c in shared["candidates"]}
+
+                if all_candidate_keys.issubset(tested_keys):
+                    candidate_times = {}
+                    for t in shared["trials"]:
+                        c = t["config"]
+                        k = _config_key(c)
+                        candidate_times.setdefault(k, []).append(t.get("time_per_pair", t["time_ms"]))
+
+                    def score(cand):
+                        k = _config_key(cand)
+                        times = candidate_times.get(k, [float('inf')])
+                        return float(np.mean(times))
+
+                    winner = min(shared["candidates"], key=score)
+                    _GLOBAL_AUTOTUNE_CACHE[cache_key] = winner
+                    self.autotune_info["status"] = "locked"
+                    self.autotune_info["winner"] = winner
+                    self.autotune_info["untried"] = []
+                    if _config_key(self.config) != _config_key(winner):
+                        self._switch_config(winner)
+                    return
+
+                untested = [c for c in shared["candidates"] if _config_key(c) not in tested_keys]
+                assigned_keys = set(shared.get("assigned", set()))
+                untested_unassigned = [c for c in untested if _config_key(c) not in assigned_keys]
+                if untested_unassigned:
+                    next_cfg = untested_unassigned[0]
+                elif untested:
+                    next_cfg = untested[0]
+                else:
+                    next_cfg = shared["candidates"][0]
+
+                self.autotune_info["untried"] = [c for c in untested if _config_key(c) != _config_key(next_cfg)]
+                self._switch_config(next_cfg)
+                return
+
+        if self.autotune_info["untried"]:
+            next_cfg = self.autotune_info["untried"][0]
+            self._switch_config(next_cfg)
+        else:
+            # All candidates tested empirically on real batches!
+            candidate_times = {}
+            for t in self.autotune_info["trials"]:
+                c = t["config"]
+                key = _config_key(c)
+                candidate_times.setdefault(key, []).append(t["time_ms"])
+
+            def score(cand):
+                key = _config_key(cand)
+                times = candidate_times.get(key, [float('inf')])
+                return float(np.mean(times))
+
+            winner = min(self._tune_candidates, key=score)
+            self.autotune_info["status"] = "locked"
+            self.autotune_info["winner"] = winner
+            if _config_key(self.config) != _config_key(winner):
+                self._switch_config(winner)
+            if cache_key is not None:
+                with _AUTOTUNE_LOCK:
+                    _GLOBAL_AUTOTUNE_CACHE[cache_key] = winner
+
+    def run(self, binsize=None, threshold=0.0, window=None,
+            data=None, templates=None, counts=False, raw=False):
+        if self.autotune_info.get("status") == "tuning":
+            cache_key = self._autotune_cache_key() if getattr(self, '_pending_ref', None) is not None else None
+            if cache_key is not None:
+                with _AUTOTUNE_LOCK:
+                    if cache_key in _GLOBAL_AUTOTUNE_CACHE:
+                        winner = _GLOBAL_AUTOTUNE_CACHE[cache_key]
+                        if hasattr(self, '_assigned_candidate_key') and cache_key in _GLOBAL_AUTOTUNE_TRIALS:
+                            _GLOBAL_AUTOTUNE_TRIALS[cache_key].get("assigned", set()).discard(self._assigned_candidate_key)
+                            self._assigned_candidate_key = None
+                        self.autotune_info["status"] = "locked"
+                        self.autotune_info["winner"] = winner
+                        self.autotune_info["untried"] = []
+                        if _config_key(self.config) != _config_key(winner):
+                            self._switch_config(winner)
+        is_tuning_or_uninit = self.autotune_info.get("status") in ("tuning", "uninitialized")
+        if is_tuning_or_uninit:
+            t0 = time.perf_counter()
+            res = super().run(binsize=binsize, threshold=threshold, window=window,
+                              data=data, templates=templates, counts=counts, raw=raw)
+            dt = time.perf_counter() - t0
+            if self.autotune_info.get("status") == "tuning":
+                self._record_autotune_trial(dt)
+            return res
+        return super().run(binsize=binsize, threshold=threshold, window=window,
+                           data=data, templates=templates, counts=counts, raw=raw)
+
+    def run_series(self, series, starts=None, win_start=None, win_end=None,
+                   binsize=None, threshold=0.0, templates=None, raw=False):
+        is_outer = not getattr(self, '_in_hier_series_call', False)
+        if is_outer and self.autotune_info.get("status") == "tuning":
+            cache_key = self._autotune_cache_key() if getattr(self, '_pending_ref', None) is not None else None
+            if cache_key is not None:
+                with _AUTOTUNE_LOCK:
+                    if cache_key in _GLOBAL_AUTOTUNE_CACHE:
+                        winner = _GLOBAL_AUTOTUNE_CACHE[cache_key]
+                        if hasattr(self, '_assigned_candidate_key') and cache_key in _GLOBAL_AUTOTUNE_TRIALS:
+                            _GLOBAL_AUTOTUNE_TRIALS[cache_key].get("assigned", set()).discard(self._assigned_candidate_key)
+                            self._assigned_candidate_key = None
+                        self.autotune_info["status"] = "locked"
+                        self.autotune_info["winner"] = winner
+                        self.autotune_info["untried"] = []
+                        if _config_key(self.config) != _config_key(winner):
+                            self._switch_config(winner)
+        is_tuning_or_uninit = self.autotune_info.get("status") in ("tuning", "uninitialized")
+        if is_outer and is_tuning_or_uninit:
+            self._in_hier_series_call = True
+            t0 = time.perf_counter()
+            try:
+                res = super().run_series(series, starts=starts, win_start=win_start,
+                                         win_end=win_end, binsize=binsize,
+                                         threshold=threshold, templates=templates,
+                                         raw=raw)
+            finally:
+                self._in_hier_series_call = False
+            dt = time.perf_counter() - t0
+            if self.autotune_info.get("status") == "tuning":
+                self._record_autotune_trial(dt)
+            return res
+        return super().run_series(series, starts=starts, win_start=win_start,
+                                  win_end=win_end, binsize=binsize,
+                                  threshold=threshold, templates=templates,
+                                  raw=raw)
 
     def _gpu_calibration(self, threshold):
         """Use the same profile model or explicit gate as the CPU."""
@@ -1649,62 +2452,218 @@ class HierarchicalFilter(MatchedFilter):
             return self._gcal[1]
         cfg = self._pinned
         if cfg is None:
-            if self._pending_ref is None:
+            if getattr(self, '_active_cfg', None) is not None:
+                cfg = self._active_cfg
+            elif self._pending_ref is not None:
+                cache_key = self._autotune_cache_key()
+                cached_winner = None
+                if cache_key is not None:
+                    with _AUTOTUNE_LOCK:
+                        cached_winner = _GLOBAL_AUTOTUNE_CACHE.get(cache_key)
+                if cached_winner is not None:
+                    self.autotune_info["status"] = "locked"
+                    self.autotune_info["winner"] = cached_winner
+                    self.autotune_info["untried"] = []
+                    self._tune_candidates = [cached_winner]
+                    cfg = cached_winner
+                elif self.autotune_info.get("status") == "uninitialized":
+                    _, self._cost_key = cost_table_for(self.device)
+                    tuning = _load_tuning_for(self.device)
+                    candidates, rejected = candidate_configs(self._pending_ref, self.n, self.snr, self.fd,
+                                                             tuning=tuning,
+                                                             pairs=self.ndata * self.ntemplates,
+                                                             device=self.device,
+                                                             cascade=self.cascade)
+                    self.autotune_info["rejected"] = rejected
+                    if not candidates:
+                        cfg = None
+                    elif len(candidates) == 1:
+                        winner = candidates[0]
+                        self.autotune_info["status"] = "locked"
+                        self.autotune_info["winner"] = winner
+                        self.autotune_info["untried"] = []
+                        self._tune_candidates = [winner]
+                        if cache_key is not None:
+                            with _AUTOTUNE_LOCK:
+                                _GLOBAL_AUTOTUNE_CACHE[cache_key] = winner
+                        cfg = winner
+                    else:
+                        static_choice = choose_config(self._pending_ref, self.n, self.snr, self.fd,
+                                                      tuning=tuning,
+                                                      pairs=self.ndata * self.ntemplates,
+                                                      device=self.device,
+                                                      cascade=self.cascade)
+                        ordered = [static_choice] + [c for c in candidates if _config_key(c) != _config_key(static_choice)]
+                        self._tune_candidates = ordered
+
+                        if cache_key is not None:
+                            with _AUTOTUNE_LOCK:
+                                if cache_key in _GLOBAL_AUTOTUNE_CACHE:
+                                    winner = _GLOBAL_AUTOTUNE_CACHE[cache_key]
+                                    self.autotune_info["status"] = "locked"
+                                    self.autotune_info["winner"] = winner
+                                    self.autotune_info["untried"] = []
+                                    cfg = winner
+                                else:
+                                    shared = _GLOBAL_AUTOTUNE_TRIALS.setdefault(cache_key, {
+                                        "trials": [],
+                                        "candidates": ordered,
+                                        "assigned": set(),
+                                    })
+                                    tested_keys = {_config_key(t["config"]) for t in shared["trials"]}
+                                    assigned_keys = set(shared.get("assigned", set()))
+                                    untested_unassigned = [c for c in shared["candidates"]
+                                                           if _config_key(c) not in tested_keys and _config_key(c) not in assigned_keys]
+                                    if untested_unassigned:
+                                        next_cfg = untested_unassigned[0]
+                                    else:
+                                        untested = [c for c in shared["candidates"] if _config_key(c) not in tested_keys]
+                                        if untested:
+                                            next_cfg = untested[0]
+                                        else:
+                                            next_cfg = ordered[0]
+
+                                    shared.setdefault("assigned", set()).add(_config_key(next_cfg))
+                                    self._assigned_candidate_key = _config_key(next_cfg)
+                                    untested_all = [c for c in shared["candidates"] if _config_key(c) not in tested_keys]
+                                    self.autotune_info["untried"] = [c for c in untested_all if _config_key(c) != _config_key(next_cfg)]
+                                    self.autotune_info["status"] = "tuning"
+                                    self.autotune_info["winner"] = None
+                                    cfg = next_cfg
+                        else:
+                            self.autotune_info["untried"] = list(ordered[1:])
+                            self.autotune_info["status"] = "tuning"
+                            self.autotune_info["winner"] = None
+                            cfg = ordered[0]
+                elif self.autotune_info.get("status") == "locked":
+                    cfg = self.autotune_info["winner"]
+                else:
+                    cfg = getattr(self, '_active_cfg', self._tune_candidates[0] if self._tune_candidates else None)
+                self._active_cfg = cfg
+            else:
                 raise ValueError("set_reference is required for file-based configuration selection")
-            _, self._cost_key = cost_table_for(self.device)
-            cfg = choose_config(self._pending_ref, self.n, self.snr, self.fd,
-                                tuning=_load_tuning_for(self.device),
-                                pairs=self.ndata * self.ntemplates)
         if cfg is None:
             raise ValueError(_uncovered_message(self.n, self.snr, self.fd))
-        band, taps = cfg
-        tv = self._coarse_value(band)
-        f = None
-        if self._pending_ref is not None:
-            ref = np.asarray(self._pending_ref, dtype=np.float64)
-            f = float(ref[:band].sum() / ref.sum())
-        self._gcfg = (int(band), int(taps))
-        out = (int(band), f, tv)
+        if isinstance(cfg, CascadeConfig) or (isinstance(cfg, tuple) and len(cfg) == 3):
+            if isinstance(cfg, CascadeConfig):
+                b0, b1, taps = cfg.b0, cfg.b1, cfg.taps
+            else:
+                b0, b1, taps = cfg
+            self.cascade_band = b0
+            tv = self._coarse_value(b1)
+            f = None
+            if self._pending_ref is not None:
+                ref = np.asarray(self._pending_ref, dtype=np.float64)
+                ref_sum = ref.sum()
+                f0 = float(ref[:b0].sum() / ref_sum) if ref_sum > 0 else 0.0
+                f1 = float(ref[:b1].sum() / ref_sum) if ref_sum > 0 else 0.0
+                f = (f0, f1)
+            self._gcfg = (int(b0), int(b1), int(taps))
+            out = ((int(b0), int(b1)), f, tv)
+        else:
+            band, taps = cfg
+            tv = self._coarse_value(band)
+            f = None
+            if self._pending_ref is not None:
+                ref = np.asarray(self._pending_ref, dtype=np.float64)
+                f = float(ref[:band].sum() / ref.sum())
+            self._gcfg = (int(band), int(taps))
+            out = (int(band), f, tv)
         self._gcal = (key, out)
         return out
 
-    def _gpu_dispatch(self, D, H, binsize, threshold, start, end):
+    def _gpu_dispatch(self, D, H, binsize, threshold, start, end, slot=None, async_submit=False):
         """Run coarse filtering and refinement without host survivor readback."""
         band, f, thr = self._gpu_calibration(threshold)
-        # Fresh views can share an address; view identity is not a cache key.
-        # Template/reference changes set _tdirty, even for in-place updates.
-        ck = (band, f, H.ctypes.data, H.shape)
-        if getattr(self, "_ckey", None) != ck or self._tdirty:
-            if f is None:
-                hr = H.real
-                hi = H.imag
-                power = hr * hr + hi * hi
-                total = power.sum(axis=1, dtype=np.float64)
-                band_power = power[:, :band].sum(axis=1, dtype=np.float64)
-                fraction = np.divide(band_power, total,
-                                     out=np.zeros_like(total), where=total > 0)
-                sc = np.divide(1.0, np.sqrt(fraction),
-                               out=np.zeros_like(fraction), where=fraction > 0)[:, None].astype(np.float32)
-                ct0 = H[:, :band] * sc
-            else:
-                sc = np.float32(1.0 / np.sqrt(f)) if f > 0 else np.float32(0.0)
-                ct0 = H[:, :band] * sc
-            self._ct = ct0
-            self._ckey = ck
-        ct0 = self._ct
+        if isinstance(band, tuple):
+            b0, b1 = band
+            f0, f1 = (None, None) if f is None else f
+            thr0, thr1 = thr
+            ck = (band, f, H.ctypes.data, H.shape)
+            if getattr(self, "_ckey", None) != ck or self._tdirty:
+                if f0 is None or f1 is None:
+                    hr = H.real
+                    hi = H.imag
+                    power = hr * hr + hi * hi
+                    total = power.sum(axis=1, dtype=np.float64)
+                    bp0 = power[:, :b0].sum(axis=1, dtype=np.float64)
+                    frac0 = np.divide(bp0, total, out=np.zeros_like(total), where=total > 0)
+                    sc0 = np.divide(1.0, np.sqrt(frac0), out=np.zeros_like(frac0), where=frac0 > 0)[:, None].astype(np.float32)
+                    ct0 = H[:, :b0] * sc0
 
-        idx, val = self._gpu.hier_peaks(
-            self.n, band, D, H, ct0, thr,
-            binsize=binsize, threshold=threshold, window=(start, end),
-            upload_data=self._ddirty, upload_tmpl=self._tdirty)
-        self._ddirty = self._tdirty = False
+                    bp1 = power[:, :b1].sum(axis=1, dtype=np.float64)
+                    frac1 = np.divide(bp1, total, out=np.zeros_like(total), where=total > 0)
+                    sc1 = np.divide(1.0, np.sqrt(frac1), out=np.zeros_like(frac1), where=frac1 > 0)[:, None].astype(np.float32)
+                    ct1 = H[:, :b1] * sc1
+                else:
+                    sc0 = np.float32(1.0 / np.sqrt(f0)) if f0 > 0 else np.float32(0.0)
+                    ct0 = H[:, :b0] * sc0
+                    sc1 = np.float32(1.0 / np.sqrt(f1)) if f1 > 0 else np.float32(0.0)
+                    ct1 = H[:, :b1] * sc1
+                self._ct = (ct0, ct1)
+                self._ckey = ck
+            ct0, ct1 = self._ct
 
-        # The indirect dispatch count records actual coarse survivors, including
-        # refinements that yield no final detection. Read after completion;
-        # no extra submission or host decision is needed.
-        self._gpairs += idx.shape[0] * idx.shape[1]
-        self._gtrig += self._gpu.last_refinements
-        return idx, val
+            res = self._gpu.hier_peaks(
+                self.n, b1, D, H, ct0, thr0,
+                binsize=binsize, threshold=threshold, window=(start, end),
+                upload_data=self._ddirty, upload_tmpl=self._tdirty,
+                cascade_band=b0, ct1=ct1, raw_thr1=thr1,
+                slot=slot, async_submit=async_submit)
+            self._ddirty = self._tdirty = False
+
+            if async_submit:
+                def readback():
+                    idx, val = res()
+                    self._gpairs += idx.shape[0] * idx.shape[1]
+                    self._gtrig += self._gpu.last_refinements
+                    return idx, val
+                return readback
+
+            idx, val = res
+            self._gpairs += idx.shape[0] * idx.shape[1]
+            self._gtrig += self._gpu.last_refinements
+            return idx, val
+        else:
+            ck = (band, f, H.ctypes.data, H.shape)
+            if getattr(self, "_ckey", None) != ck or self._tdirty:
+                if f is None:
+                    hr = H.real
+                    hi = H.imag
+                    power = hr * hr + hi * hi
+                    total = power.sum(axis=1, dtype=np.float64)
+                    band_power = power[:, :band].sum(axis=1, dtype=np.float64)
+                    fraction = np.divide(band_power, total,
+                                         out=np.zeros_like(total), where=total > 0)
+                    sc = np.divide(1.0, np.sqrt(fraction),
+                                   out=np.zeros_like(fraction), where=fraction > 0)[:, None].astype(np.float32)
+                    ct0 = H[:, :band] * sc
+                else:
+                    sc = np.float32(1.0 / np.sqrt(f)) if f > 0 else np.float32(0.0)
+                    ct0 = H[:, :band] * sc
+                self._ct = ct0
+                self._ckey = ck
+            ct0 = self._ct
+
+            res = self._gpu.hier_peaks(
+                self.n, band, D, H, ct0, thr,
+                binsize=binsize, threshold=threshold, window=(start, end),
+                upload_data=self._ddirty, upload_tmpl=self._tdirty,
+                slot=slot, async_submit=async_submit)
+            self._ddirty = self._tdirty = False
+
+            if async_submit:
+                def readback():
+                    idx, val = res()
+                    self._gpairs += idx.shape[0] * idx.shape[1]
+                    self._gtrig += self._gpu.last_refinements
+                    return idx, val
+                return readback
+
+            idx, val = res
+            self._gpairs += idx.shape[0] * idx.shape[1]
+            self._gtrig += self._gpu.last_refinements
+            return idx, val
 
     def set_coarse_threshold(self, value):
         """Set the coarse threshold directly, bypassing the model.
@@ -1728,6 +2687,15 @@ class HierarchicalFilter(MatchedFilter):
             self._thr_applied = False
             if self._mf is not None:
                 self._mf.set_threshold(-1.0)
+            return
+        if isinstance(value, (tuple, list)):
+            if len(value) != 2:
+                raise ValueError("expected 2 thresholds for cascade (thr0, thr1)")
+            t0, t1 = float(value[0]), float(value[1])
+            self._cal_thr = (t0, t1)
+            self._thr_applied = True
+            if self._mf is not None:
+                self._mf.set_threshold(t0, t1)
             return
         value = float(value)
         if not np.isfinite(value) or value < 0 or value > float(np.finfo(np.float32).max):
@@ -1804,14 +2772,45 @@ class HierarchicalFilter(MatchedFilter):
 
     @property
     def config(self):
-        """Selected or explicitly pinned ``(band, taps)``."""
+        """Selected or explicitly pinned ``(band, taps)`` or ``(b0, b1, taps)``."""
         if self._pinned is not None:
+            if len(self._pinned) == 3:
+                return CascadeConfig(*self._pinned)
             return self._pinned
+        if getattr(self, '_active_cfg', None) is not None:
+            cfg = self._active_cfg
+            if isinstance(cfg, CascadeConfig):
+                return cfg
+            if isinstance(cfg, (tuple, list)) and len(cfg) == 3:
+                return CascadeConfig(*cfg)
+            return cfg
         if self._gpu is not None:
             self._gpu_calibration(self.snr)
+            if getattr(self, 'cascade', False) and self._gcfg is not None and len(self._gcfg) == 3:
+                return CascadeConfig(*self._gcfg)
             return self._gcfg
-        band, _u, k = self._ensure().config()
+        cfg = self._ensure().config()
+        if len(cfg) == 4:
+            b0, b1, _u, k = cfg
+            return CascadeConfig(b0, b1, k)
+        band, _u, k = cfg
         return band, k
+
+    @property
+    def cascade_config(self):
+        """Full 3-element tuple (b0, b1, taps) if cascade, or None."""
+        cfg = self.config
+        if isinstance(cfg, CascadeConfig) or hasattr(cfg, "b0"):
+            return (cfg.b0, cfg.b1, cfg.taps)
+        return None
+
+    @property
+    def band(self):
+        """Coarse band: (b0, b1) if cascade, or single integer band."""
+        cfg = self.config
+        if isinstance(cfg, CascadeConfig) or hasattr(cfg, "b0"):
+            return (cfg.b0, cfg.b1)
+        return cfg[0]
 
     @property
     def cost_table(self):

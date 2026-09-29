@@ -132,6 +132,10 @@ def _samples(power, n, band, snr, nsamp, seed):
     return np.concatenate(C_all), np.concatenate(F_all)
 
 
+def _entry_bytes(v):
+    return (v[0].nbytes + v[1].nbytes) if isinstance(v, tuple) else v.nbytes
+
+
 def _conditional(power, n, band, snr, nsamp, seed=13):
     """Coarse maxima for the pairs the fine stage would have kept, sorted.
 
@@ -158,10 +162,10 @@ def _conditional(power, n, band, snr, nsamp, seed=13):
     coarse, fine = got
     kept = np.sort(coarse[fine >= snr])
     size = len(key[0]) + kept.nbytes
-    used = sum(len(k[0]) + v.nbytes for k, v in _CACHE.items())
+    used = sum(len(k[0]) + _entry_bytes(v) for k, v in _CACHE.items())
     while _CACHE and (len(_CACHE) >= _CACHE_MAX or used + size > _CACHE_BYTES):
         oldkey, old = _CACHE.popitem(last=False)
-        used -= len(oldkey[0]) + old.nbytes
+        used -= len(oldkey[0]) + _entry_bytes(old)
     if size <= _CACHE_BYTES:
         _CACHE[key] = kept
     return kept
@@ -225,3 +229,200 @@ def gate_for(power, n, band, snr, fd):
     if idx < 8:
         return None                      # too few draws below the budget
     return float(kept[idx])
+
+
+def _validate_cascade(n, band0, band1, snr, fd):
+    _validate(n, band0, snr, fd)
+    _validate(n, band1, snr, fd)
+    if band0 >= band1:
+        raise ValueError("band0 must be strictly less than band1")
+
+
+def _samples_cascade(power, n, band0, band1, snr, nsamp, seed):
+    """Joint draws of (tier0 max, tier1 max, fine max) for a cascade configuration."""
+    pf = np.asarray(power, dtype=np.float64)
+    tot = pf.sum()
+    if tot <= 0:
+        return None
+    pf = pf / tot
+    f0 = float(pf[:band0].sum())
+    f0 = min(max(f0, 0.0), 1.0)
+    f1 = float(pf[:band1].sum())
+    f1 = min(max(f1, 0.0), 1.0)
+    if f0 <= 0 or f1 <= f0:
+        return None
+
+    df = f1 - f0
+    step0 = n // band0
+    step1 = n // band1
+    q0 = pf[:band0] / f0
+    q1 = pf[:band1] / f1
+
+    def _corr(x):
+        return np.fft.ifft(x) * n
+
+    Af_t = _corr(pf)
+    q0_full = np.zeros(n, dtype=np.float64)
+    q0_full[:band0] = q0
+    A0_t = _corr(q0_full)
+
+    q1_full = np.zeros(n, dtype=np.float64)
+    q1_full[:band1] = q1
+    A1_t = _corr(q1_full)
+
+    Amid_t = ((f1 * A1_t - f0 * A0_t) / df) if df > 1e-9 else None
+    Aout_t = ((Af_t - f1 * A1_t) / (1.0 - f1)) if (1.0 - f1) > 1e-9 else None
+
+    look = lambda tab, d: tab[np.asarray(d) % n]
+    gl0_base = np.arange(-_NB, _NB + 1) * step0
+    gl1_base = np.arange(-_NB, _NB + 1) * step1
+
+    rng = np.random.default_rng(seed)
+    C0_all, C1_all, F_all = [], [], []
+
+    for off in range(step0):
+        fl = np.arange(-_W, _W + 1) + off
+        k1 = (off // step1) * step1
+        gl1 = k1 + gl1_base
+        gl0 = gl0_base
+
+        taus = np.unique(np.concatenate([fl, gl1, gl0]))
+        gi0 = np.searchsorted(taus, gl0)
+        gi1 = np.searchsorted(taus, gl1)
+
+        lag = taus[:, None] - taus[None, :]
+        eye = 1e-9 * np.eye(len(taus))
+
+        C0 = look(A0_t, lag); C0 = (C0 + C0.conj().T) / 2 + eye
+        L0 = np.linalg.cholesky(C0).astype(np.complex64)
+
+        m = max(nsamp // step0, 256)
+        w0 = (rng.standard_normal((m, len(taus)), dtype=np.float32)
+              + 1j * rng.standard_normal((m, len(taus)), dtype=np.float32)) / np.float32(np.sqrt(2))
+        n0 = (w0 @ L0.T) * np.float32(_SIG)
+
+        if Amid_t is not None:
+            Cmid = look(Amid_t, lag); Cmid = (Cmid + Cmid.conj().T) / 2 + eye
+            Lmid = np.linalg.cholesky(Cmid).astype(np.complex64)
+            wmid = (rng.standard_normal((m, len(taus)), dtype=np.float32)
+                    + 1j * rng.standard_normal((m, len(taus)), dtype=np.float32)) / np.float32(np.sqrt(2))
+            nmid = (wmid @ Lmid.T) * np.float32(_SIG)
+        else:
+            nmid = np.float32(0.0)
+
+        if Aout_t is not None:
+            Cout = look(Aout_t, lag); Cout = (Cout + Cout.conj().T) / 2 + eye
+            Lout = np.linalg.cholesky(Cout).astype(np.complex64)
+            wout = (rng.standard_normal((m, len(taus)), dtype=np.float32)
+                    + 1j * rng.standard_normal((m, len(taus)), dtype=np.float32)) / np.float32(np.sqrt(2))
+            nout = (wout @ Lout.T) * np.float32(_SIG)
+        else:
+            nout = np.float32(0.0)
+
+        sf = look(Af_t, taus - off).astype(np.complex64)
+        s0 = look(A0_t, taus - off).astype(np.complex64)
+        s1 = look(A1_t, taus - off).astype(np.complex64)
+
+        n1 = np.float32(np.sqrt(f0 / f1)) * n0 + np.float32(np.sqrt(df / f1)) * nmid
+        nfull = np.float32(np.sqrt(f1)) * n1 + np.float32(np.sqrt(1 - f1)) * nout
+
+        z_fine = np.float32(snr) * sf[None, :] + nfull
+        z1 = np.float32(snr * np.sqrt(f1)) * s1[None, :] + n1
+        z0 = np.float32(snr * np.sqrt(f0)) * s0[None, :] + n0
+
+        F_all.append(np.abs(z_fine).max(1))
+        C1_all.append(np.abs(z1)[:, gi1].max(1))
+        C0_all.append(np.abs(z0)[:, gi0].max(1))
+
+    return np.concatenate(C0_all), np.concatenate(C1_all), np.concatenate(F_all)
+
+
+def _conditional_cascade(power, n, band0, band1, snr, nsamp, seed=13):
+    """Draws of (c0, c1) for pairs that survive the fine detection cut."""
+    p = np.asarray(power, dtype=np.float64)
+    if (p.shape != (n,) or not np.isfinite(p).all() or (p < 0).any()
+            or not np.isfinite(p.sum()) or p.sum() <= 0):
+        raise ValueError("power must be a finite nonnegative length-n profile with positive sum")
+    p = p / p.sum()
+    key = (p.tobytes(), n, band0, band1, float(snr), nsamp, seed)
+    hit = _CACHE.get(key)
+    if hit is not None:
+        _CACHE.move_to_end(key)
+        return hit
+    got = _samples_cascade(p, n, band0, band1, snr, nsamp, seed)
+    if got is None:
+        return None
+    c0, c1, fine = got
+    mask = fine >= snr
+    kept = (c0[mask], c1[mask])
+    size = len(key[0]) + kept[0].nbytes + kept[1].nbytes
+    used = sum(len(k[0]) + _entry_bytes(v) for k, v in _CACHE.items())
+    while _CACHE and (len(_CACHE) >= _CACHE_MAX or used + size > _CACHE_BYTES):
+        oldkey, old = _CACHE.popitem(last=False)
+        used -= len(oldkey[0]) + _entry_bytes(old)
+    if size <= _CACHE_BYTES:
+        _CACHE[key] = kept
+    return kept
+
+
+def gate_for_cascade(power, n, band0, band1, snr, fd):
+    """Derive (gate0, gate1) compound thresholds guaranteeing compound FDR <= fd.
+
+    Optimizes the allocation of false dismissal budget between Tier 0 and Tier 1
+    to minimize expected computational cost while strictly satisfying compound FDR <= fd.
+    """
+    _validate_cascade(n, band0, band1, snr, fd)
+    nsamp = _nsamp_for(fd)
+    if fd * nsamp < 8:
+        return None
+    got = _conditional_cascade(power, n, band0, band1, snr, nsamp)
+    if got is None:
+        return None
+    c0_k, c1_k = got
+    M = len(c0_k)
+    # One-sided 95% statistical binomial tolerance bound on finite Monte Carlo draws:
+    # K = floor(M * fd - 1.645 * sqrt(M * fd * (1 - fd)))
+    K = int(np.floor(float(fd) * M - 1.645 * np.sqrt(M * float(fd) * (1.0 - float(fd)))))
+    if K < 1 or M < 16:
+        return None
+
+    best = None
+    best_cost = float('inf')
+    cost0 = band0 * np.log2(band0)
+    cost1 = band1 * np.log2(band1)
+    cost_fine = n * np.log2(n)
+
+    c0_sort = np.sort(c0_k)
+
+    for alpha in np.linspace(0.10, 0.80, 36):
+        k0 = int(np.floor(alpha * K))
+        if k0 < 1:
+            continue
+        g0 = float(c0_sort[k0])
+        surv = c0_k >= g0
+        d0 = int((c0_k < g0).sum())
+        k1 = K - d0
+        if k1 < 0 or surv.sum() <= k1:
+            continue
+        g1 = float(np.sort(c1_k[surv])[k1])
+        actual_d = int(((c0_k < g0) | (c1_k < g1)).sum())
+        if actual_d > K:
+            continue
+
+        p0 = 1.0 - (1.0 - np.exp(-0.5 * g0**2))**band0
+        p1 = 1.0 - (1.0 - np.exp(-0.5 * g1**2))**band1
+        tot_cost = cost0 + p0 * cost1 + (p0 * p1) * cost_fine
+
+        if tot_cost < best_cost:
+            best_cost = tot_cost
+            best = (float(g0), float(g1))
+
+    if best is None:
+        k0 = max(1, int(np.floor(0.40 * K)))
+        g0 = float(c0_sort[k0])
+        surv = c0_k >= g0
+        k1 = max(0, K - int((c0_k < g0).sum()))
+        g1 = float(np.sort(c1_k[surv])[k1])
+        best = (float(g0), float(g1))
+
+    return best
