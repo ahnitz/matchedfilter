@@ -95,6 +95,9 @@ class Device:
         return hash((self.kind, self.index))
 
 
+import functools
+
+@functools.lru_cache(maxsize=1)
 def _cpu_device():
     from . import backend as _backend
     import platform
@@ -117,12 +120,18 @@ def _cpu_device():
                   _backend(), arch=arch)
 
 
+_DEVICES_CACHE = None
+
 def devices():
     """Every device this build can dispatch to, CPUs first.
 
     Software Vulkan devices are listed -- hiding them would make the CI path
     undiscoverable -- but flagged, and ``"gpu"`` without an index skips them.
     """
+    global _DEVICES_CACHE
+    if _DEVICES_CACHE is not None:
+        return list(_DEVICES_CACHE)
+
     out = [_cpu_device()]
 
     # Metal first, because on macOS it is the only way an Apple GPU can be
@@ -170,6 +179,9 @@ def parse(spec):
         # machine uses is the entire point of "auto".
         text = "gpu" if any(d.kind == "gpu" and not d.is_software
                             for d in devices()) else "cpu"
+
+    if text == "cpu":
+        return _cpu_device()
 
     kind, _, ordinal = text.partition(":")
     if kind not in ("cpu", "gpu"):
