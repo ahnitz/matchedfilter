@@ -119,7 +119,8 @@ def collect(args):
             row = dict(device=args.device, label=label, kind=kind, fd=fd, snr=snr, ms=ms,
                        timing=dict(teaser._timed.details))
             if kind == 'hier':
-                row.update(teaser._DETAILS[(args.device, fd)])
+                hier_info = teaser._DETAILS.get((args.device, fd, snr), teaser._DETAILS.get((args.device, fd), {}))
+                row.update(hier_info)
             row.update(teaser._DETAILS.get((args.device, kind, fd or .01), {}))
             if baseline == 'FFTW' and kind == 'baseline':
                 row['fftw'] = teaser._DETAILS.get('fftw', {})

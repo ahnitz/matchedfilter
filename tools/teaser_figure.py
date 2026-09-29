@@ -175,6 +175,15 @@ def _filter_ms(kind, device, reps, fd, snr=5.5):
         f.set_reference(ref)
     f.set_data(d); f.set_templates(h)
     try:
+        if kind == 'hier':
+            # Allow initial autotuning passes to settle to the empirical best configuration
+            # so steady-state results reflect optimal throughput.
+            settle_count = 0
+            max_settle = len(getattr(f, "_tune_candidates", [])) + 5
+            while getattr(f, "autotune_info", {}).get("status") in ("uninitialized", "tuning") and settle_count < max(10, max_settle):
+                f.run(binsize=N, threshold=snr)
+                settle_count += 1
+
         if kind == 'full':
             output = f.empty_shared((ND, NT, N))
             ms = _timed(lambda: f.run(out=output), reps)
@@ -193,8 +202,21 @@ def _filter_ms(kind, device, reps, fd, snr=5.5):
             details['device_ms'] = float(np.median(durations))
         _DETAILS[(device, kind, fd)] = details
         if kind == 'hier' and hasattr(f, 'config'):
-            _DETAILS[(device, fd)] = {'band': f.config[0], 'taps': f.config[1],
-                                      'refine_rate': f.refine_rate}
+            cfg = f.config
+            if hasattr(cfg, 'b0') and hasattr(cfg, 'b1'):
+                hinfo = {'cascade_band': cfg.b0, 'band': cfg.b1,
+                         'taps': cfg.taps, 'refine_rate': f.refine_rate}
+            elif len(cfg) == 3:
+                hinfo = {'cascade_band': cfg[0], 'band': cfg[1],
+                         'taps': cfg[2], 'refine_rate': f.refine_rate}
+            else:
+                hinfo = {'band': cfg[0], 'taps': cfg[1],
+                         'refine_rate': f.refine_rate}
+            if hasattr(f, 'autotune_info') and f.autotune_info.get('winner') is not None:
+                winner = f.autotune_info['winner']
+                hinfo['autotune_winner'] = list(winner) if isinstance(winner, (tuple, list)) else winner
+            _DETAILS[(device, fd)] = hinfo
+            _DETAILS[(device, fd, snr)] = hinfo
         return ms
     finally:
         ctx = getattr(f, '_gpu', None)

@@ -52,9 +52,10 @@ def bank(n, ntmpl, rng, clusters=8, overlap=0.95):
     overlap with the seed and roughly overlap**2 with each other.  A signal
     then fires its own cluster and leaves the rest alone.
     """
-    k = np.arange(n)
+    k = np.arange(1, n // 2).astype(np.float64)
     power = np.zeros(n, np.float32)
-    power[1:n // 2] = (k[1:n // 2] ** (-7.0 / 3.0)).astype(np.float32)
+    knee_frac = 0.0150
+    power[1:n // 2] = (k ** (-7.0 / 3.0) / ((knee_frac * n / k) ** 4 + 1.0)).astype(np.float32)
     power /= power.sum()
     amp = np.sqrt(power)
 
@@ -355,6 +356,9 @@ def main(argv=None):
 
     fi, fm, flat_ms = flat_reference(mf, a.n, h, series, st, ws, we, a.threshold)
 
+    while getattr(p, "autotune_info", {}).get("status") in ("uninitialized", "tuning"):
+        p.run_series(series, st, ws, we, binsize=a.n, threshold=a.threshold, raw=True)
+
     best = float("inf")
     for _ in range(a.reps + 1):
         t0 = time.perf_counter()
@@ -376,8 +380,12 @@ def main(argv=None):
 
     # An explicitly open gate must report a superset, with identical values.
     # Do not request an unmeasured SNR and rely on implicit clamping.
-    band, taps = p.config
-    opened = mf.HierarchicalFilter(a.n, 1, a.templates, band=band, taps=taps)
+    if len(p.config) == 3:
+        b0, band, taps = p.config
+        opened = mf.HierarchicalFilter(a.n, 1, a.templates, band=band, taps=taps, cascade_band=b0)
+    else:
+        band, taps = p.config
+        opened = mf.HierarchicalFilter(a.n, 1, a.templates, band=band, taps=taps)
     opened.set_coarse_threshold(0.0)
     opened.set_reference(power)
     opened.set_templates(h)

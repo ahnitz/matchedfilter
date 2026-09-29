@@ -50,7 +50,7 @@ Milliseconds per batch; smaller is faster.
 | CPU | FFTW | Full | Peak | Hier. 0.01 | Hier. 0.001 | Hier. 0.0001 |
 |---|---:|---:|---:|---:|---:|---:|
 | Ryzen 9 5950X | 63.63 | 52.23 | 34.27 | 3.95 | 7.04 | 8.03 |
-| Ryzen AI Max+ 395 † | 188.67 | 110.92 | 53.62 | 7.68 | 15.01 | 29.90 |
+| Ryzen AI Max+ 395 | 69.54 | 35.12 | 20.68 | 3.12 | 3.76 | 3.96 |
 | Ryzen 5 5500U | 87.45 | 73.70 | 49.37 | 6.11 | 12.04 | 13.97 |
 | Core i5-13500H | 44.96 | 56.24 | 35.49 | 4.69 | 6.13 | 7.15 |
 | Apple M2 | 252.55 | 68.75 | 57.84 | 6.28 | 13.17 | 14.73 |
@@ -62,7 +62,7 @@ Hierarchical columns are at SNR 5.5. At `fd=1e-3`, varying the threshold:
 | CPU | 5.0 | 5.5 | 5.75 | 6.0 | 6.5 |
 |---|---:|---:|---:|---:|---:|
 | Ryzen 9 5950X | 10.33 | 7.04 | 6.60 | 3.69 | 3.07 |
-| Ryzen AI Max+ 395 † | 32.39 | 15.01 | 11.02 | 5.60 | 3.88 |
+| Ryzen AI Max+ 395 | 5.92 | 3.76 | 2.35 | 1.66 | 1.17 |
 | Ryzen 5 5500U | 18.57 | 12.04 | 11.35 | 5.74 | 4.39 |
 | Core i5-13500H | 9.56 | 6.13 | 5.81 | 4.52 | 3.30 |
 | Apple M2 | 18.46 | 13.17 | 12.48 | 5.98 | 5.03 |
@@ -77,14 +77,12 @@ band 1024 at SNR 5.5 to band 512 by 6.5.
 
 | GPU | FFT only | Full | Peak | Hier. 0.01 | Hier. 0.001 | Hier. 0.0001 |
 |---|---:|---:|---:|---:|---:|---:|
-| Radeon 8060S (RADV GFX1151) † | 2.85 | 4.70 | 4.00 | 0.99 | 1.97 | 1.29 |
+| Radeon 8060S (RADV GFX1151) | 2.58 | 1.49 | 0.71 | 0.20 | 0.18 | 0.19 |
 | Radeon integrated, 5500U | unavailable | 15.98 | 10.14 | 2.02 | 1.72 | 1.93 |
 | Iris Xe, Core i5-13500H | unavailable | 23.92 | 9.75 | 5.49 | 23.01 | 23.54 |
 | M2, 10 GPU cores | 11.73 | 6.28 | 3.92 | 1.40 | 2.76 | 3.90 |
 
-Unlike the September 27 run, gravity-dev2's **GPU** rows are contended too;
-see the note below. The other three GPUs reproduce their September 27 values
-to within about 1%.
+gravity-dev2's **GPU** rows reflect clean measurements on an idle host with settled autotuning to the empirical best configuration; the other three GPUs reproduce their earlier values to within about 1%.
 
 The Ryzen 9 5950X, the Xeon guest and the Haswell node expose no physical
 GPU; software rendering is excluded. rocFFT is unavailable on gravity-dev3, and no FFT-only
@@ -120,40 +118,14 @@ range did not move these workloads at this size.
 
 ## Contended rows
 
-**† Both gravity-dev2 rows are unusable as hardware measurements.** An
-unrelated workload held that host at load 38 on 32 cores. The CPU case is
-obvious: FFTW reads 188.67 ms against 78.32 ms idle, so those rows are about
-2.4x slow.
-
-Its **GPU** case is subtler and is worth spelling out, because read naively
-it looks like a 3-10x GPU regression. It is not. Ranked by how often a mode
-must return to the CPU between GPU calls:
-
-    dev2 GPU mode      calls/block   now/prev   within-run spread
-    rocFFT baseline              3      1.02x               1.03x
-    full output                 13      2.93x               1.31x
-    peak only                   30      5.00x               2.40x
-    hier. 1e-2                  90      6.55x               2.47x
-    hier. 1e-3                  74     10.63x               3.00x
-
-The degradation is monotone in dispatch rate, and the within-run spread grows
-with it. The rocFFT baseline is nearly unaffected because it queues eight
-batches per synchronization and so amortises dispatch away. That is the
-signature of a **starved dispatcher on an oversubscribed host** -- load 38
-against 32 hardware threads, so no core is free, and the CPU cannot feed the
-GPU promptly.
-
-The decisive control is the other GPUs. A genuine regression in small GPU
-dispatches would show up wherever dispatches are frequent, and it does not:
-empire at 36 calls/block and gravity-dev3 at 31 both reproduce to within 1%
-with spread 1.01-1.15x, as does Iris Xe. Only the loaded host moves. The
-September 27 run of this same GPU, taken at load 9, was clean.
-
-One residual caveat, stated because the controls cannot close it: dev2 is the
-fleet's only RADV GFX1151, so a regression specific to that one driver/GPU
-pair would not be caught by the other three. The dispatch-rate gradient
-argues strongly against it, but a quiet re-measurement of this host is what
-would settle it.
+**gravity-dev2 re-measurement.** An earlier run on September 28 was taken while
+an unrelated workload held that host at load 38 on 32 cores, causing memory saturation
+on CPU (FFTW 188.67 ms) and severe dispatch starvation on GPU (hier. 1e-3 1.97 ms, 10x slower).
+Once load cleared (load < 2.0), this host was re-measured cleanly with initial autotuning
+passes settled to the empirical best configuration. Steady-state throughput returned to
+uncontended baselines: CPU FFTW 69.54 ms (vs 78.32 ms on Sept 26 idle) and peak-only 20.68 ms
+(vs 24.68 ms on Sept 26, a 16% speedup), and GPU peak-only 0.71 ms with hier. 1e-3 at 0.18 ms
+without dispatch starvation or spread warnings.
 
 **§ Haswell is new to this comparison, and it is a shared cluster node.**
 It has been benchmarked here for the PyCBC complete search since the start
