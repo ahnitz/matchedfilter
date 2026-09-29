@@ -56,8 +56,8 @@ _W = 3                       # fine integer lags either side
 _SIG = np.sqrt(2.0)
 
 _CACHE = OrderedDict()
-_CACHE_MAX = 64
-_CACHE_BYTES = 64 * 1024 * 1024
+_CACHE_MAX = 512
+_CACHE_BYTES = 256 * 1024 * 1024
 
 
 def _samples(power, n, band, snr, nsamp, seed):
