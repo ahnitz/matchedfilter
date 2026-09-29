@@ -573,6 +573,13 @@ def _bench_hier(n, nd, nt, snr, fd, reps):
     # relying on that is fragile and it is the kind of thing that silently
     # becomes 28% of a measurement when the tables grow.
     hf._ensure()
+    # Settle autotuning so that candidate trials finish and the winner configuration locks
+    # before measuring steady-state throughput.
+    settle_count = 0
+    max_settle = len(getattr(hf, "_tune_candidates", [])) + 5
+    while getattr(hf, "autotune_info", {}).get("status") in ("uninitialized", "tuning") and settle_count < max(10, max_settle):
+        hier_run()
+        settle_count += 1
     flat_run()
     hier_run()
 
@@ -763,17 +770,27 @@ def main(argv=None):
                                       "data": hnd, "templates": hnt,
                                       "uncovered": first})
                     continue
-                band, taps = cfg
-                tag = f"{band}/{taps}"
+                if len(cfg) == 3:
+                    b0, b1, taps = cfg
+                    tag = f"{b0}/{b1}/{taps}"
+                    band = b1
+                    cascade_band = b0
+                else:
+                    band, taps = cfg
+                    tag = f"{band}/{taps}"
+                    cascade_band = None
                 print(f"  {n:>8} {fd:>7.0e} {snr:>5.1f} {tf * 1e3:>10.2f}ms "
                       f"{th * 1e3:>10.2f}ms {speed:>8.2f}x {rate:>9.1%} "
                       f"{tag:>14}")
-                hier_rows.append({"n": n, "snr": snr, "fd": fd,
-                                  "data": hnd, "templates": hnt,
-                                  "flat_ms": tf * 1e3, "hier_ms": th * 1e3,
-                                  "speedup": speed, "refine_rate": rate,
-                                  "band": band,
-                                  "taps": taps})
+                row_dict = {"n": n, "snr": snr, "fd": fd,
+                            "data": hnd, "templates": hnt,
+                            "flat_ms": tf * 1e3, "hier_ms": th * 1e3,
+                            "speedup": speed, "refine_rate": rate,
+                            "band": band,
+                            "taps": taps}
+                if cascade_band is not None:
+                    row_dict["cascade_band"] = cascade_band
+                hier_rows.append(row_dict)
         print("\nThe coarse stage skips a pair when a cheap low-band estimate rules\n"
               "out any sample reaching the threshold, so the speedup grows with\n"
               "the threshold and falls to ~1 on data where everything triggers.\n"

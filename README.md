@@ -123,33 +123,20 @@ fraction of pairs requiring refinement.
 
 ![CPU and GPU matched-filter measurements at 4096 points](docs/assets/teaser.svg)
 
-Measured on a Ryzen AI MAX+ 395 / Radeon 8060S, 2026-09-27: 16 data segments ×
+Measured on a Ryzen AI MAX+ 395 / Radeon 8060S: 16 data segments ×
 512 templates, 4,096 points, with the bank drawn from the captured PyCBC
 reference profile. The bars move from a general inverse FFT to
 fused full output, peak-only output and hierarchical screening. FFTW and
 rocFFT time only the inverse transform, so they do less work than the filter
 bars. Full output reuses a caller-supplied result array; GPU timings include
 synchronization. Hierarchical bars show requested FDR budgets 1e-2, 1e-3 and
-1e-4 at SNR threshold 5.5; these noise-only timings do not measure FDR. The
+1e-4 at SNR threshold 5.5, with initial autotuning passes settled to empirical
+best configurations; these noise-only timings do not measure FDR. The
 two panels use separate scales; compare their printed values. This is a
 workload example, not a speed guarantee.
 
-This figure is from revision `ce9c828`; the current revision is not plotted
-here because the only host with this GPU has been under heavy unrelated load
-since (a re-measurement put its fixed FFTW reference at 200 ms against 70 ms
-idle, so it would be three times slow rather than merely noisy). For current
-numbers on six machines, measured with the fixed references as controls, see
-the [hardware comparison](docs/measurements/teaser-fleet-20260928.md).
-
-**The CPU panel was measured on a loaded host and understates this hardware.**
-An unrelated workload was saturating memory bandwidth: the FFTW reference,
-which contains no matchedfilter code, took 108.9 ms against 70.5 ms on the
-same idle machine, so the CPU bars are roughly a third slow and the CPU
-hierarchy bars are noisy besides. The GPU panel is unaffected — rocFFT
-reproduces to 0.5%, since the Radeon has its own memory. For a comparison
-measured across six machines with the fixed references used as controls, see
-the [hardware comparison](docs/measurements/teaser-fleet-20260928.md), where
-the threshold and output mode are both selectable.
+For comparisons measured across seven machines with selectable thresholds and
+output modes, see the [hardware comparison](docs/measurements/teaser-fleet-20260928.md).
 
 The [flat](https://ahnitz.github.io/matchedfilter/benchmarks.html) and
 [hierarchical](https://ahnitz.github.io/matchedfilter/hierarchical-benchmarks.html)

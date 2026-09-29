@@ -151,7 +151,7 @@ The Xeon result is from a virtual machine. All timing samples and configuration 
     for(const [m,row] of measured){
      const v=value(row);svg.append(svgEl('text',{x:205,y:y+12,'text-anchor':'end','font-size':12},m.label));
      const rect=svgEl('rect',{x:215,y,width:Math.max(0,x(v)-215),height:17,fill:m.color});
-     rect.append(svgEl('title',{},`${r.label}: ${row.ms.toFixed(4)} ms; ${(8192/row.ms/1000).toFixed(3)}M pairs/s${row.band?'; band '+row.band+', refinement '+(100*row.refine_rate).toFixed(2)+'%':''}`));svg.append(rect);
+     rect.append(svgEl('title',{},`${r.label}: ${row.ms.toFixed(4)} ms; ${(8192/row.ms/1000).toFixed(3)}M pairs/s${row.cascade_band?'; cascade '+row.cascade_band+'/'+row.band+', refinement '+(100*row.refine_rate).toFixed(2)+'%':(row.band?'; band '+row.band+', refinement '+(100*row.refine_rate).toFixed(2)+'%':'')}`));svg.append(rect);
      const a=row.timing?.block_ms||[];let label=x(v);
      if(a.length){const lo=pct(a,.1),hi=pct(a,.9),left=time?lo:8192/hi/1000,right=time?hi:8192/lo/1000;svg.append(svgEl('line',{x1:x(left),x2:x(right),y1:y+8,y2:y+8,stroke:'var(--fg)','stroke-width':1.5}));label=Math.max(label,x(right));}
      svg.append(svgEl('text',{x:label+5,y:y+12,'font-size':11},time?row.ms.toFixed(3)+' ms':v.toFixed(3)+'M/s'));
