@@ -1,0 +1,507 @@
+"""TimeDomainFilterBank: Ingest raw time-domain filters, dynamically partition by length,
+automatically select optimal FFT block sizes, and filter continuous series."""
+
+import math
+from typing import Any, NamedTuple, Optional, Sequence, Union, Tuple, List, Dict
+import numpy as np
+
+
+class FilterResults(NamedTuple):
+    template_indices: np.ndarray   # int64: index into original input templates
+    sample_indices: np.ndarray     # int64: sample index in continuous series
+    snr: np.ndarray                # complex64: peak complex SNR
+    block_starts: np.ndarray       # int64: start sample index of the block
+    block_lengths: np.ndarray      # int64: FFT block length used for this template
+
+
+def _partition_templates(
+    counts: np.ndarray,
+    max_batch: int = 64,
+    candidate_ns: Sequence[int] = (4096, 8192, 16384)
+) -> Tuple[List[Tuple[int, int, int, int]], np.ndarray]:
+    """Partition templates sorted by length into homogeneous, balanced sub-batches.
+
+    Avoids over-fragmentation by keeping the number of sub-batches bounded by
+    ceil(M / max_batch). Selects FFT block sizes based on filter length to guarantee
+    numerical accuracy (no circular wrap-around edge leakage) while maximizing L1/L2
+    cache hit rates and SIMD lane utilization.
+
+    Returns:
+        (groups, sort_order)
+        where each group is a tuple: (start_idx, end_idx, chosen_N, max_tap_count).
+    """
+    counts = np.asarray(counts, dtype=np.int64)
+    order = np.argsort(counts)
+    sorted_counts = counts[order]
+    M = len(sorted_counts)
+    if M == 0:
+        return [], order
+
+    def pick_n(max_c: int) -> int:
+        if max_c <= 1100:
+            return 4096
+        elif max_c <= 1900:
+            return 8192
+        else:
+            return 16384
+
+    K = math.ceil(M / max_batch)
+    if K <= 1:
+        chosen_n = pick_n(int(sorted_counts[-1]))
+        return [(0, M, chosen_n, int(sorted_counts[-1]))], order
+
+    groups = []
+    i = 0
+    for k in range(K):
+        rem = K - k
+        target_sz = (M - i) // rem
+        min_j = max(i + 1, min(M - (rem - 1), i + target_sz - 10))
+        max_j = min(M - (rem - 1), i + max_batch, i + target_sz + 10)
+        best_j = min(M - (rem - 1), i + target_sz)
+
+        for cand_j in range(min_j, max_j + 1):
+            if cand_j < M and pick_n(sorted_counts[cand_j - 1]) < pick_n(sorted_counts[cand_j]):
+                best_j = cand_j
+                break
+
+        j = best_j
+        max_c = int(sorted_counts[j - 1])
+        chosen_n = pick_n(max_c)
+        groups.append((i, j, chosen_n, max_c))
+        i = j
+
+    return groups, order
+
+
+_REF_PROFILE_CACHE: Dict[Tuple[int, int, float, float, float], np.ndarray] = {}
+_REF_BINNED_CACHE: Dict[Tuple[int, int, float], np.ndarray] = {}
+
+
+class _TemplateGroup:
+    """Internal container for a homogeneous batch of templates sharing an FFT size."""
+
+    def __init__(self, plan, n, template_indices, c_bad, n_valid, spectra, orig_taps_max):
+        self.plan = plan
+        self.n = int(n)
+        self.template_indices = np.asarray(template_indices, dtype=np.int64)
+        self.c_bad = int(c_bad)
+        self.n_valid = int(n_valid)
+        self.spectra = spectra
+        self.orig_taps_max = int(orig_taps_max)
+        self.templates_loaded = False
+        self._cached_layout: Optional[Tuple[Tuple[int, int, int], np.ndarray, np.ndarray, np.ndarray]] = None
+
+
+class TimeDomainFilterBank:
+    """Filter bank that ingests raw time-domain filters and optimizes blocking dynamically.
+
+    PyCBC passes raw time-domain FIR taps and sample rates.
+    TimeDomainFilterBank clusters templates by length, chooses optimal FFT block sizes
+    per cluster, handles rate conversion (zero-padding or Nyquist truncation), rolls center
+    taps circularly, and executes overlap-save filtering returning trigger coordinates
+    directly in continuous series coordinates.
+    """
+
+    def __init__(
+        self,
+        taps: Union[np.ndarray, Sequence[np.ndarray]],
+        tap_counts: Optional[Sequence[int]] = None,
+        *,
+        tap_sample_rate: float = 2048.0,
+        data_sample_rate: float = 2048.0,
+        engine: str = 'hier',
+        threshold: float = 5.0,
+        false_dismissal: float = 0.001,
+        first_stage_snr: float = 0.0,
+        coarse_band_hz: Optional[float] = None,
+        device: Optional[str] = None,
+        max_batch_size: int = 64,
+        fft_lengths: Optional[Sequence[int]] = None,
+        reference: Optional[Any] = None,
+    ):
+        from . import MatchedFilter, HierarchicalFilter
+
+        self.tap_sample_rate = float(tap_sample_rate)
+        self.data_sample_rate = float(data_sample_rate)
+        self.threshold = float(threshold)
+        self.false_dismissal = float(false_dismissal)
+        self.first_stage_snr = float(first_stage_snr)
+        self.coarse_band_hz = coarse_band_hz
+        self.device = device
+        self.max_batch_size = int(max_batch_size)
+
+        mode = {'pycbc': 'flat', 'matchedfilter': 'flat',
+                'matchedfilter-hierarchical': 'hier'}.get(engine, engine).lower()
+        self.engine = mode
+
+        # Parse inputs
+        if isinstance(taps, (list, tuple)):
+            n_templates = len(taps)
+            if tap_counts is None:
+                tap_counts = np.array([len(t) for t in taps], dtype=np.int64)
+            else:
+                tap_counts = np.asarray(tap_counts, dtype=np.int64)
+            taps_list = [np.asarray(t, dtype=np.float32) for t in taps]
+        elif isinstance(taps, np.ndarray):
+            if taps.ndim == 1:
+                taps = taps[None, :]
+            n_templates = taps.shape[0]
+            if tap_counts is None:
+                tap_counts = np.full(n_templates, taps.shape[1], dtype=np.int64)
+            else:
+                tap_counts = np.asarray(tap_counts, dtype=np.int64)
+            taps_list = [taps[i, :tap_counts[i]].astype(np.float32) for i in range(n_templates)]
+        else:
+            raise TypeError("taps must be a numpy array or sequence of arrays")
+
+        if len(tap_counts) != n_templates:
+            raise ValueError(f"tap_counts length ({len(tap_counts)}) does not match n_templates ({n_templates})")
+
+        self.n_templates = n_templates
+        self.tap_counts = tap_counts
+        self._taps_list = taps_list
+
+        # Multi-rate scaling: ratio of tap sample rate to data sample rate
+        self.rate_ratio = self.tap_sample_rate / self.data_sample_rate
+        # Effective tap length in data samples
+        self.effective_data_counts = np.ceil(self.tap_counts / self.rate_ratio).astype(np.int64)
+
+        if fft_lengths is None:
+            candidate_ns = (1024, 2048, 4096, 8192, 16384, 32768, 65536)
+        else:
+            candidate_ns = tuple(sorted(int(n) for n in fft_lengths))
+
+        # Dynamic partitioning
+        raw_groups, order = _partition_templates(
+            self.effective_data_counts,
+            max_batch=self.max_batch_size,
+            candidate_ns=candidate_ns
+        )
+
+        self._groups: List[_TemplateGroup] = []
+        self._filters_f_list = [None] * n_templates
+        self._block_lengths_arr = np.zeros(n_templates, dtype=np.int64)
+
+        for start_idx, end_idx, chosen_N, _ in raw_groups:
+            tmpl_indices = order[start_idx:end_idx]
+            T = len(tmpl_indices)
+            chosen_N = int(chosen_N)
+
+            orig_taps_max = int(np.max(self.tap_counts[tmpl_indices]))
+            l_data_max = int(np.max(self.effective_data_counts[tmpl_indices]))
+            c_bad = int(np.ceil((orig_taps_max // 2) / self.rate_ratio))
+            n_valid = int(chosen_N - l_data_max + 1)
+
+            # Frequency domain conversion for each template in this group
+            spectra = np.zeros((T, chosen_N), dtype=np.complex64)
+            for row, g_idx in enumerate(tmpl_indices):
+                t_arr = self._taps_list[g_idx]
+                cnt = int(self.tap_counts[g_idx])
+                N_taps = int(round(chosen_N * self.rate_ratio))
+
+                buf = np.zeros(N_taps, dtype=np.float32)
+                buf[:cnt] = t_arr[:cnt]
+                # Center-tap circular roll alignment
+                buf = np.roll(buf, -(cnt // 2))
+
+                spec = np.fft.fft(buf).astype(np.complex64)
+                if N_taps > chosen_N:
+                    # Truncate frequencies above data Nyquist (preserving positive and negative bins)
+                    spec_data = np.zeros(chosen_N, dtype=np.complex64)
+                    spec_data[:chosen_N // 2 + 1] = spec[:chosen_N // 2 + 1]
+                    neg_count = chosen_N - (chosen_N // 2 + 1)
+                    spec_data[chosen_N // 2 + 1:] = spec[N_taps - neg_count:]
+                elif N_taps < chosen_N:
+                    # Zero-pad frequencies above template Nyquist
+                    spec_data = np.zeros(chosen_N, dtype=np.complex64)
+                    half_taps = N_taps // 2
+                    spec_data[:half_taps + 1] = spec[:half_taps + 1]
+                    neg_count = N_taps - (half_taps + 1)
+                    spec_data[chosen_N - neg_count:] = spec[half_taps + 1:]
+                else:
+                    spec_data = spec
+
+                spectra[row] = spec_data
+                self._filters_f_list[g_idx] = np.conj(spec_data)
+                self._block_lengths_arr[g_idx] = chosen_N
+
+            # Create matchedfilter plan
+            if self.engine == 'hier':
+                band_bins = None
+                if self.coarse_band_hz is not None and self.coarse_band_hz > 0:
+                    delta_f = self.data_sample_rate / chosen_N
+                    band_bins = int(round(self.coarse_band_hz / delta_f))
+                plan = HierarchicalFilter(
+                    chosen_N, ndata=1, ntemplates=T,
+                    snr=self.threshold, fd=self.false_dismissal,
+                    band=band_bins, device=self.device
+                )
+                if self.first_stage_snr > 0:
+                    plan.set_first_stage(self.first_stage_snr)
+            else:
+                plan = MatchedFilter(
+                    chosen_N, ndata=1, ntemplates=T,
+                    device=self.device
+                )
+            grp = _TemplateGroup(
+                plan=plan,
+                n=chosen_N,
+                template_indices=tmpl_indices,
+                c_bad=c_bad,
+                n_valid=n_valid,
+                spectra=spectra,
+                orig_taps_max=orig_taps_max
+            )
+            grp.templates_loaded = False
+            if self.engine != 'hier':
+                plan.set_templates(spectra)
+                grp.templates_loaded = True
+            self._groups.append(grp)
+
+        if reference is not None:
+            self.set_reference(reference)
+            for g in self._groups:
+                if not g.templates_loaded:
+                    g.plan.set_templates(g.spectra)
+                    g.templates_loaded = True
+
+    @property
+    def filters_f(self) -> Sequence[np.ndarray]:
+        """Sequence of frequency-domain filters for each template."""
+        return self._filters_f_list
+
+    @property
+    def block_lengths(self) -> np.ndarray:
+        """FFT block length assigned to each template."""
+        return self._block_lengths_arr
+
+    @property
+    def groups(self) -> List[Dict]:
+        """Summary of template partitions."""
+        return [
+            {
+                'n': g.n,
+                'count': len(g.template_indices),
+                'template_indices': g.template_indices,
+                'c_bad': g.c_bad,
+                'n_valid': g.n_valid,
+                'orig_taps_max': g.orig_taps_max,
+                'efficiency': g.n_valid / g.n
+            }
+            for g in self._groups
+        ]
+
+    def get_filter_f(self, template_index: int) -> np.ndarray:
+        """Return the frequency-domain filter for a specific template."""
+        return self._filters_f_list[template_index]
+
+    def get_block_length(self, template_index: int) -> int:
+        """Return the FFT block length for a specific template."""
+        return int(self._block_lengths_arr[template_index])
+
+    def set_reference(
+        self,
+        reference: Union[np.ndarray, Dict[int, np.ndarray]],
+        delta_f: Optional[float] = None
+    ) -> None:
+        """Set reference SNR profile across all hierarchical groups.
+
+        Parameters:
+            reference:
+                - Dict mapping block length N -> 1D reference array of length N, OR
+                - 1D array of power spectrum w(f) on fine grid with frequency spacing delta_f, OR
+                - 1D reference profile if all groups share the same block size.
+            delta_f: Frequency resolution of fine grid (required when reference is w(f)).
+        """
+        if isinstance(reference, dict):
+            for g in self._groups:
+                if hasattr(g.plan, 'set_reference') and g.n in reference:
+                    g.plan.set_reference(reference[g.n])
+            return
+
+        ref_arr = np.asarray(reference, dtype=np.float64)
+        if delta_f is not None and float(delta_f) > 0:
+            for g in self._groups:
+                if hasattr(g.plan, 'set_reference'):
+                    b_key = (id(reference), g.n, float(delta_f))
+                    ref_input = _REF_BINNED_CACHE.get(b_key)
+                    if ref_input is None:
+                        delta_f_engine = self.data_sample_rate / g.n
+                        ratio = int(round(delta_f_engine / float(delta_f)))
+                        if ratio < 1:
+                            ratio = 1
+                        keep = (len(ref_arr) // ratio) * ratio
+                        binned = ref_arr[:keep].reshape(-1, ratio).sum(axis=1)
+                        ref_g = np.zeros(g.n, dtype=np.float64)
+                        k = min(len(binned), g.n // 2 + 1)
+                        ref_g[:k] = binned[:k]
+                        tot = ref_g.sum()
+                        ref_input = (ref_g / tot).astype(np.float32) if tot > 0 else None
+                        if ref_input is not None:
+                            _REF_BINNED_CACHE[b_key] = ref_input
+                    if ref_input is not None:
+                        g.plan.set_reference(ref_input)
+        else:
+            for g in self._groups:
+                if hasattr(g.plan, 'set_reference'):
+                    if len(ref_arr) == g.n:
+                        g.plan.set_reference(ref_arr.astype(np.float32))
+
+        for g in self._groups:
+            if not g.templates_loaded and hasattr(g.plan, 'set_templates'):
+                g.plan.set_templates(g.spectra)
+                g.templates_loaded = True
+
+    def set_reference_from_template(
+        self,
+        stilde,
+        psd,
+        ref_template,
+        f_high: Optional[float] = None
+    ) -> None:
+        """Compute closed-form reference SNR profile and set across all groups."""
+        flo = float(getattr(ref_template, 'f_lower', 0.0) or 0.0)
+        fhi = float(f_high or 0.0)
+        df = float(stilde.delta_f)
+        p_key = (id(ref_template), id(psd), flo, fhi, df)
+        w = _REF_PROFILE_CACHE.get(p_key)
+        if w is None:
+            h = np.asarray(ref_template)
+            S = np.asarray(psd)
+            m = min(len(h), len(S))
+            w = np.zeros(m, dtype=np.float64)
+            good = S[:m] > 0
+            w[good] = (np.abs(h[:m][good]) ** 2) / S[:m][good]
+            f = np.arange(m) * df
+            w[f < flo] = 0.0
+            if fhi > 0:
+                w[f > fhi] = 0.0
+            _REF_PROFILE_CACHE[p_key] = w
+        self.set_reference(w, delta_f=df)
+
+    def filter_series(
+        self,
+        series: np.ndarray,
+        valid_slice: Optional[slice] = None,
+        binsize: Optional[int] = None
+    ) -> FilterResults:
+        """Filter a continuous series across all template groups.
+
+        Parameters:
+            series: Continuous data series (e.g. complex reference SNR).
+            valid_slice: Analysis window slice(start, stop). None analyzes whole series.
+            binsize: Bins per block. Defaults to block size N (1 bin per block).
+
+        Returns:
+            FilterResults namedtuple with:
+                template_indices: index into original input templates
+                sample_indices: sample index in continuous series
+                snr: complex peak SNR value
+                block_starts: start sample of block containing each trigger
+                block_lengths: FFT block length used for each trigger
+        """
+        ser = np.ascontiguousarray(series, dtype=np.complex64)
+        if ser.ndim != 1:
+            raise ValueError("series must be a 1D array")
+        S = len(ser)
+
+        if valid_slice is not None:
+            v_start = 0 if valid_slice.start is None else int(valid_slice.start)
+            v_stop = S if valid_slice.stop is None else int(valid_slice.stop)
+        else:
+            v_start, v_stop = 0, S
+
+        out_template_indices = []
+        out_sample_indices = []
+        out_snrs = []
+        out_tstarts = []
+        out_block_lens = []
+
+        cache_key = (S, v_start, v_stop)
+
+        for g in self._groups:
+            N = g.n
+            layout = g._cached_layout
+            if layout is None or layout[0] != cache_key:
+                c_bad = g.c_bad
+                N_valid = g.n_valid
+                STEP = N_valid
+
+                first_block_idx = max(0, int(np.floor((v_start - c_bad) / STEP)))
+                loop_start = first_block_idx * STEP
+                ts = np.arange(loop_start, S, STEP, dtype=np.int64)
+
+                bvt0 = ts + c_bad
+                keep = (bvt0 < v_stop) & (bvt0 + N_valid > v_start)
+                if keep.any():
+                    last = np.flatnonzero(bvt0 < v_stop)
+                    keep &= np.arange(ts.size) <= last[-1]
+                ts = ts[keep]
+                if not ts.size:
+                    g._cached_layout = (cache_key, np.empty(0, np.int64), np.empty(0, np.int64), np.empty(0, np.int64))
+                    continue
+
+                rs = np.maximum(v_start, bvt0[keep])
+                re = np.minimum(v_stop, bvt0[keep] + N_valid)
+                good = re > rs
+                bstarts = ts[good]
+                bws = (rs - ts)[good]
+                bwe = (re - ts)[good]
+                g._cached_layout = (cache_key, bstarts, bws, bwe)
+            else:
+                _, bstarts, bws, bwe = layout
+
+            if bstarts.size == 0:
+                continue
+
+            # Ensure series buffer extends to cover the last block
+            max_need = int(bstarts[-1] + N)
+            if max_need > len(ser):
+                pad_len = max_need - len(ser)
+                data_in = np.pad(ser, (0, pad_len))
+            else:
+                data_in = ser
+
+            bs = N if binsize is None else int(binsize)
+            aidx, aval = g.plan.run_series(
+                data_in, bstarts, bws, bwe, binsize=bs,
+                threshold=self.threshold, raw=True
+            )
+
+            # aidx has shape (nblocks, ntemplates, nbins)
+            if aidx.ndim == 3 and aidx.shape[2] == 1:
+                ii = aidx[:, :, 0]
+                bi, ti = np.nonzero(ii >= 0)
+                if bi.size:
+                    out_template_indices.append(g.template_indices[ti])
+                    out_sample_indices.append(bstarts[bi] + ii[bi, ti])
+                    out_snrs.append(aval[:, :, 0][bi, ti])
+                    out_tstarts.append(bstarts[bi])
+                    out_block_lens.append(np.full(bi.size, N, dtype=np.int64))
+            else:
+                bi, ti, bini = np.nonzero(aidx >= 0)
+                if bi.size:
+                    out_template_indices.append(g.template_indices[ti])
+                    out_sample_indices.append(bstarts[bi] + aidx[bi, ti, bini])
+                    out_snrs.append(aval[bi, ti, bini])
+                    out_tstarts.append(bstarts[bi])
+                    out_block_lens.append(np.full(bi.size, N, dtype=np.int64))
+
+        if out_template_indices:
+            return FilterResults(
+                template_indices=np.concatenate(out_template_indices).astype(np.int64),
+                sample_indices=np.concatenate(out_sample_indices).astype(np.int64),
+                snr=np.concatenate(out_snrs).astype(np.complex64),
+                block_starts=np.concatenate(out_tstarts).astype(np.int64),
+                block_lengths=np.concatenate(out_block_lens).astype(np.int64),
+            )
+        else:
+            return FilterResults(
+                template_indices=np.empty(0, dtype=np.int64),
+                sample_indices=np.empty(0, dtype=np.int64),
+                snr=np.empty(0, dtype=np.complex64),
+                block_starts=np.empty(0, dtype=np.int64),
+                block_lengths=np.empty(0, dtype=np.int64),
+            )
+
+    process_segment = filter_series

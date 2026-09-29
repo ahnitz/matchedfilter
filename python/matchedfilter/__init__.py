@@ -65,7 +65,10 @@ _GPU_SIZES = frozenset((64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384,
 __all__ = ["MatchedFilter", "CorrelationFilter", "HierarchicalFilter", "PEAK_DTYPE", "backend",
            "targets", "set_target", "devices", "Device", "__version__",
            "candidate_configs", "choose_config", "CascadeConfig",
-           "get_autotune_cache", "_clear_autotune_cache", "clear_autotune_cache"]
+           "get_autotune_cache", "_clear_autotune_cache", "clear_autotune_cache",
+           "TimeDomainFilterBank", "FilterResults"]
+
+from .time_domain import TimeDomainFilterBank, FilterResults
 
 
 def backend():
