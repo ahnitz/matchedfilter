@@ -216,3 +216,17 @@ def test_hierarchical_mode_and_reference():
     assert isinstance(results, FilterResults)
     mask = (results.template_indices == 0) & (results.sample_indices == 25000)
     assert np.any(mask)
+
+
+def test_partition_boundary_no_dropped_templates():
+    """Verify that templates near max_batch boundaries with FFT size changes are not dropped."""
+    from matchedfilter.time_domain import _partition_templates
+    # Simulate group 449: 110 templates with 4096-sized taps and 9 with 8192-sized taps
+    counts = np.array([500] * 110 + [1251] * 9, dtype=np.int64)
+    groups, order = _partition_templates(counts, max_batch=64)
+    total_partitioned = sum(g[1] - g[0] for g in groups)
+    assert total_partitioned == len(counts), f"Expected {len(counts)}, got {total_partitioned}"
+    assert len(order) == len(counts)
+    for g in groups:
+        assert g[1] - g[0] <= 64
+

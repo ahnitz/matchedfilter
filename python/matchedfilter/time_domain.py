@@ -45,30 +45,29 @@ def _partition_templates(
         else:
             return 16384
 
-    K = math.ceil(M / max_batch)
-    if K <= 1:
-        chosen_n = pick_n(int(sorted_counts[-1]))
-        return [(0, M, chosen_n, int(sorted_counts[-1]))], order
-
+    # Partition contiguous runs sharing the same chosen FFT block size,
+    # then split each run into balanced sub-batches <= max_batch.
+    # This guarantees that all M templates are included without dropping any.
     groups = []
-    i = 0
-    for k in range(K):
-        rem = K - k
-        target_sz = (M - i) // rem
-        min_j = max(i + 1, min(M - (rem - 1), i + target_sz - 10))
-        max_j = min(M - (rem - 1), i + max_batch, i + target_sz + 10)
-        best_j = min(M - (rem - 1), i + target_sz)
+    run_start = 0
+    while run_start < M:
+        current_n = pick_n(int(sorted_counts[run_start]))
+        run_end = run_start + 1
+        while run_end < M and pick_n(int(sorted_counts[run_end])) == current_n:
+            run_end += 1
 
-        for cand_j in range(min_j, max_j + 1):
-            if cand_j < M and pick_n(sorted_counts[cand_j - 1]) < pick_n(sorted_counts[cand_j]):
-                best_j = cand_j
-                break
+        run_len = run_end - run_start
+        k_run = math.ceil(run_len / max_batch)
+        sub_i = run_start
+        for k in range(k_run):
+            rem = k_run - k
+            target_sz = (run_end - sub_i + rem - 1) // rem
+            sub_j = min(run_end, sub_i + target_sz)
+            max_c = int(sorted_counts[sub_j - 1])
+            groups.append((sub_i, sub_j, current_n, max_c))
+            sub_i = sub_j
 
-        j = best_j
-        max_c = int(sorted_counts[j - 1])
-        chosen_n = pick_n(max_c)
-        groups.append((i, j, chosen_n, max_c))
-        i = j
+        run_start = run_end
 
     return groups, order
 
