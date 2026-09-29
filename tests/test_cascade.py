@@ -899,6 +899,40 @@ def test_hierarchical_global_winner_cache_collaborative_sharing():
         assert f.config == winner
 
 
+def test_hierarchical_global_winner_cache_single_tier_winner():
+    """Verify that when a single-tier configuration wins with cascade=True, cache key matches across instances."""
+    mf._clear_autotune_cache()
+    n = 4096
+    power = inspiral_power(n)
+    h = np.sqrt(power).astype(np.complex64)
+    h_conj = np.conj(h)
+    nd, nt = 2, 4
+
+    hf1 = mf.HierarchicalFilter(n, nd, nt, snr=5.5, fd=1e-3, cascade=True)
+    hf1.set_reference(power)
+    hf1.set_templates(np.repeat(h_conj[None, :], nt, axis=0))
+
+    # Switch to single-tier configuration (512, 8)
+    single_tier_cfg = (512, 8)
+    hf1._switch_config(single_tier_cfg)
+    assert hf1.cascade is True
+
+    # Lock winner as single-tier
+    with mf._AUTOTUNE_LOCK:
+        mf._GLOBAL_AUTOTUNE_CACHE[hf1._autotune_cache_key()] = single_tier_cfg
+
+    # Filter 2 created with identical parameters must lock immediately
+    hf2 = mf.HierarchicalFilter(n, nd, nt, snr=5.5, fd=1e-3, cascade=True)
+    hf2.set_reference(power)
+    hf2.set_templates(np.repeat(h_conj[None, :], nt, axis=0))
+
+    assert hf2._autotune_cache_key() == hf1._autotune_cache_key()
+    assert hf2.config == single_tier_cfg
+    assert hf2.autotune_info["status"] == "locked"
+    assert hf2.autotune_info["winner"] == single_tier_cfg
+
+
+
 
 
 

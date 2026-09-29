@@ -1849,6 +1849,7 @@ class HierarchicalFilter(MatchedFilter):
             self.cascade = True
         else:
             self.cascade = True if band is None else False
+        self._initial_cascade = bool(self.cascade)
         if self.ndata < 1 or self.ntemplates < 1:
             raise ValueError("ndata and ntemplates must be >= 1")
         if self.device.kind == 'cpu' and self.n > self._cpu_max_n:
@@ -1926,8 +1927,9 @@ class HierarchicalFilter(MatchedFilter):
     def _autotune_cache_key(self):
         if getattr(self, '_pending_ref', None) is None:
             return None
+        cascade_flag = getattr(self, '_initial_cascade', self.cascade)
         return _autotune_cache_key(self.device, self.n, self.snr, self.fd,
-                                  self._pending_ref, cascade=self.cascade)
+                                  self._pending_ref, cascade=cascade_flag)
 
     def _new_cpu_plan(self, band, taps, cascade_band=None):
         self._execution_policy = self._series_policy('hierarchical_series', band, self.ntemplates)
@@ -2196,21 +2198,19 @@ class HierarchicalFilter(MatchedFilter):
     def _switch_config(self, cfg):
         """Switch active plan configuration dynamically, preserving loaded data and templates."""
         self._active_cfg = cfg
+        # GPU path
         if self.device.kind == "gpu":
             if isinstance(cfg, CascadeConfig):
                 b0, b1, taps = cfg.b0, cfg.b1, cfg.taps
                 self.cascade_band = int(b0)
-                self.cascade = True
                 self._gcfg = (int(b0), int(b1), int(taps))
             elif isinstance(cfg, (tuple, list)) and len(cfg) == 3:
                 b0, b1, taps = cfg[0], cfg[1], cfg[2]
                 self.cascade_band = int(b0)
-                self.cascade = True
                 self._gcfg = (int(b0), int(b1), int(taps))
             else:
                 band, taps = cfg[0], cfg[1]
                 self.cascade_band = None
-                self.cascade = False
                 self._gcfg = (int(band), int(taps))
             self._gcal = None
             self._ckey = None
@@ -2222,19 +2222,16 @@ class HierarchicalFilter(MatchedFilter):
         if isinstance(cfg, CascadeConfig):
             b0, b1, taps = cfg.b0, cfg.b1, cfg.taps
             self.cascade_band = int(b0)
-            self.cascade = True
             new_plan = self._new_cpu_plan(int(b1), int(taps), cascade_band=int(b0))
             tv = self._coarse_value(int(b1), required=False)
         elif isinstance(cfg, (tuple, list)) and len(cfg) == 3:
             b0, b1, taps = cfg[0], cfg[1], cfg[2]
             self.cascade_band = int(b0)
-            self.cascade = True
             new_plan = self._new_cpu_plan(int(b1), int(taps), cascade_band=int(b0))
             tv = self._coarse_value(int(b1), required=False)
         else:
             band, taps = cfg[0], cfg[1]
             self.cascade_band = None
-            self.cascade = False
             new_plan = self._new_cpu_plan(int(band), int(taps))
             tv = self._coarse_value(int(band), required=False)
 
