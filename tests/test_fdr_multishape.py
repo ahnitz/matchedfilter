@@ -12,6 +12,7 @@ within the target budget (FDR <= 0.10%) across diverse, non-inverse spectral sha
 import os
 import sys
 from pathlib import Path
+import zlib
 import pytest
 import numpy as np
 
@@ -59,7 +60,8 @@ def test_cascade_fdr_multi_shape(shape_name):
     empty_val = np.empty(0, dtype=np.complex64)
     mag_buf = np.empty(0, dtype=np.float32)
 
-    rng = np.random.default_rng(1234 + hash(shape_name) % 10000)
+    seed = 1234 + (zlib.crc32(shape_name.encode('utf-8')) % 10000)
+    rng = np.random.default_rng(seed)
 
     n_fine_detections = 0
     missed_cascade = 0
@@ -90,15 +92,18 @@ def test_cascade_fdr_multi_shape(shape_name):
         f"Expected >= 50% detection rate for SNR {snr_target}, got {n_fine_detections}/{n_injections}"
     )
 
-    # Statistical test: One-sided binomial test asserting FDR <= fdr_target at alpha=0.05
+    # Statistical test: One-sided binomial test asserting FDR <= fdr_target.
+    # Deterministic seeding via zlib.crc32 ensures reproducibility across Python processes.
+    # With multiple shapes tested concurrently, Bonferroni-corrected alpha bounds family-wise error.
+    alpha = 0.05 / len(SHAPE_NAMES)
     b_test = binomtest(missed_cascade, n_fine_detections, p=fdr_target, alternative='greater')
     p_val = b_test.pvalue
     fdr_empirical = missed_cascade / n_fine_detections
 
-    assert p_val >= 0.05, (
+    assert p_val >= alpha, (
         f"FDR violation for shape '{shape_name}'! "
         f"Missed: {missed_cascade} / {n_fine_detections} (FDR={fdr_empirical*100:.3f}%), "
-        f"Binomial p-value={p_val:.4e} < 0.05"
+        f"Binomial p-value={p_val:.4e} < {alpha:.4f}"
     )
 
 
