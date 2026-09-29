@@ -22,8 +22,7 @@ if repo_root not in sys.path:
 
 import matchedfilter as mf
 import matchedfilter._core as _core
-from tests.spectral_profiles import make_spectral_profile, SHAPE_NAMES
-from scipy.stats import binomtest
+from tests.spectral_profiles import make_spectral_profile, SHAPE_NAMES, binomtest
 
 
 @pytest.mark.parametrize("shape_name", SHAPE_NAMES)
@@ -101,3 +100,22 @@ def test_cascade_fdr_multi_shape(shape_name):
         f"Missed: {missed_cascade} / {n_fine_detections} (FDR={fdr_empirical*100:.3f}%), "
         f"Binomial p-value={p_val:.4e} < 0.05"
     )
+
+
+def test_binomtest_does_not_require_scipy(monkeypatch):
+    """Verify that binomtest computes correct values even when scipy is unavailable."""
+    monkeypatch.setitem(sys.modules, 'scipy', None)
+    monkeypatch.setitem(sys.modules, 'scipy.stats', None)
+
+    # Greater: P(X >= 1) for X ~ Binomial(1000, 0.001) is 1 - 0.999^1000
+    res = binomtest(1, 1000, p=0.001, alternative='greater')
+    expected = 1.0 - (1.0 - 0.001) ** 1000
+    assert abs(res.pvalue - expected) < 1e-12
+
+    # P(X >= 0) is always 1.0
+    assert binomtest(0, 1000, p=0.001, alternative='greater').pvalue == 1.0
+
+    # Symmetric two-sided
+    res2 = binomtest(10, 10, p=0.5, alternative='two-sided')
+    assert abs(res2.pvalue - 2.0 * (0.5 ** 10)) < 1e-12
+
