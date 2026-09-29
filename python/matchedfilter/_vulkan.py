@@ -98,6 +98,8 @@ def _load():
                   + _platform_note())
 
 
+_ENUM_CACHE = None
+
 def enumerate_devices():
     """``(devices, reason)``; devices is a list of dicts, reason explains empty.
 
@@ -105,8 +107,13 @@ def enumerate_devices():
     out whether anything is wrong, so it must not itself be a thing that can go
     wrong.
     """
+    global _ENUM_CACHE
+    if _ENUM_CACHE is not None:
+        return [dict(d) for d in _ENUM_CACHE[0]], _ENUM_CACHE[1]
+
     vk, err = _load()
     if vk is None:
+        _ENUM_CACHE = ([], err)
         return [], err
 
     vk.vkCreateInstance.argtypes = [ctypes.POINTER(_InstInfo), ctypes.c_void_p,
@@ -148,6 +155,7 @@ def enumerate_devices():
                             vendor=int(words[2]),
                             device_id=int(words[3]),
                             kind=_TYPES.get(int(words[4]), "other")))
+        _ENUM_CACHE = (out, None)
         return out, None
     finally:
         vk.vkDestroyInstance(inst, None)
