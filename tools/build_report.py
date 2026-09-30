@@ -1804,7 +1804,7 @@ def main():
             shutil.copyfile(fleet, os.path.join(dst, os.path.basename(fleet)))
     print("wrote %d pages to %s/ from %d run(s): %s"
           % (len(pages), outdir, len(runs),
-             ", ".join(r["host"]["label"] for r in runs)))
+             ", ".join((r["host"]["label"] if isinstance(r.get("host"), dict) else str(r.get("host", ""))) for r in runs)))
 
 
 if __name__ == "__main__":

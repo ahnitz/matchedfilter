@@ -16,9 +16,29 @@ def fleet_comparison(root):
     for record, source in zip(compact, reports):
         record['label'] = hardware_label(source)
     data = json.dumps(compact).replace('<', '\\u003c')
-    machines = ''.join('<label><input type="checkbox" name="fleet-hardware" value="%s" checked> %s</label>'
+    btn_actions = ('<span class="fleet-actions">'
+                   '<button type="button" class="fleet-btn" data-action="all">Select all</button>'
+                   '<button type="button" class="fleet-btn" data-action="none">Unselect all</button>'
+                   '</span>')
+    def hardware_inputs(dev_type):
+        return ''.join('<label><input type="checkbox" name="fleet-hardware" value="%s" checked> %s</label>'
                        % (html.escape(r['host']+':'+r['device'], quote=True), html.escape(r['label']))
-                       for r in compact if r['rows'] or any('check failed' in e for e in r['errors']))
+                       for r in compact if r['device'] == dev_type and (r['rows'] or any('check failed' in e for e in r['errors'])))
+
+    cpu_inputs = hardware_inputs('cpu')
+    gpu_inputs = hardware_inputs('gpu')
+    other_inputs = ''.join('<label><input type="checkbox" name="fleet-hardware" value="%s" checked> %s</label>'
+                          % (html.escape(r['host']+':'+r['device'], quote=True), html.escape(r['label']))
+                          for r in compact if r['device'] not in ('cpu', 'gpu') and (r['rows'] or any('check failed' in e for e in r['errors'])))
+
+    hardware_boxes = []
+    if cpu_inputs:
+        hardware_boxes.append('<fieldset><legend>CPUs ' + btn_actions + '</legend>' + cpu_inputs + '</fieldset>')
+    if gpu_inputs:
+        hardware_boxes.append('<fieldset><legend>GPUs ' + btn_actions + '</legend>' + gpu_inputs + '</fieldset>')
+    if other_inputs:
+        hardware_boxes.append('<fieldset><legend>Other devices ' + btn_actions + '</legend>' + other_inputs + '</fieldset>')
+    hardware_fieldsets = ''.join(hardware_boxes)
     outputs = [('baseline', 'FFT only'), ('full', 'Full output'), ('flat', 'Peak only')]
     budgets = [('hier:0.01', 'FDR 10⁻²'), ('hier:0.001', 'FDR 10⁻³'),
                ('hier:0.0001', 'FDR 10⁻⁴')]
@@ -49,8 +69,7 @@ def fleet_comparison(root):
 Warm public <code>run()</code> calls, one CPU thread, setup and upload excluded;
 GPU synchronization included. Hierarchical rows use the captured PyCBC reference
 profile and are recorded at several SNR thresholds. Recorded September 28, 2026.</p>
-<div class="fleet-controls">
-<fieldset><legend>CPUs and GPUs</legend>''' + machines + '''</fieldset>
+<div class="fleet-controls">''' + hardware_fieldsets + '''
 <fieldset><legend>Outputs</legend>''' + choices + '''</fieldset>''' + hier_fieldset + '''
 <fieldset><legend>Display</legend>
 <label>Axis <select id="fleet-scale"><option value="linear">Linear (equal spacing)</option><option value="log" selected>Logarithmic</option></select></label>
@@ -72,6 +91,10 @@ The Xeon result is from a virtual machine. All timing samples and configuration 
 #machine-comparison .fleet-controls{display:grid;gap:.6rem}
 #machine-comparison fieldset{border:1px solid var(--rule);border-radius:6px;padding:.6rem;display:flex;flex-wrap:wrap;gap:.4rem 1rem}
 #machine-comparison legend{font-weight:600;font-size:.9rem;padding:0 .3rem}
+#machine-comparison .fleet-actions{display:inline-flex;gap:.3rem;margin-left:.6rem;font-weight:normal;vertical-align:middle}
+#machine-comparison .fleet-btn{background:var(--panel);color:var(--fg);border:1px solid var(--rule);border-radius:4px;padding:.1rem .45rem;font:11px/1.4 system-ui,sans-serif;cursor:pointer}
+#machine-comparison .fleet-btn:hover{border-color:var(--accent);color:var(--accent)}
+#machine-comparison .fleet-btn:active{transform:translateY(1px)}
 #machine-comparison label{display:inline-flex;align-items:center;gap:.3rem;font:13px/1.5 system-ui,sans-serif}
 #machine-comparison select{background:var(--bg);color:var(--fg);border:1px solid var(--rule);border-radius:4px;padding:.3rem}
 #fleet-charts{display:grid;gap:1rem}#fleet-charts figure{margin:0;overflow-x:auto}
@@ -165,6 +188,15 @@ The Xeon result is from a virtual machine. All timing samples and configuration 
   root.querySelector('#fleet-table').replaceChildren(table);
  }
  root.querySelector('.fleet-controls').addEventListener('change',render);
+ root.addEventListener('click',e=>{
+  const btn=e.target.closest('.fleet-actions button');
+  if(!btn)return;
+  e.preventDefault();
+  const fieldset=btn.closest('fieldset');
+  const check=btn.dataset.action==='all';
+  fieldset.querySelectorAll('input[type="checkbox"]').forEach(c=>{c.checked=check;});
+  render();
+ });
  render();root.querySelector('#fleet-fallback').hidden=true;
 })();
 </script></section>'''
