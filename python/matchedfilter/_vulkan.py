@@ -129,18 +129,24 @@ def enumerate_devices():
     ci = _InstInfo(1, None, 0, ctypes.pointer(app), 0, None, 0, None)
     inst = ctypes.c_void_p()
     if vk.vkCreateInstance(ctypes.byref(ci), None, ctypes.byref(inst)) != _VK_SUCCESS:
-        return [], "vkCreateInstance failed" + _shadowing_hint()
+        err = "vkCreateInstance failed" + _shadowing_hint()
+        _ENUM_CACHE = ([], err)
+        return [], err
 
     try:
         count = ctypes.c_uint32(0)
         rc = vk.vkEnumeratePhysicalDevices(inst, ctypes.byref(count), None)
         if rc != _VK_SUCCESS or count.value == 0:
-            return [], ("the Vulkan loader found no usable devices"
-                        + _shadowing_hint())
+            err = ("the Vulkan loader found no usable devices"
+                   + _shadowing_hint())
+            _ENUM_CACHE = ([], err)
+            return [], err
         handles = (ctypes.c_void_p * count.value)()
         if vk.vkEnumeratePhysicalDevices(inst, ctypes.byref(count),
                                          handles) != _VK_SUCCESS:
-            return [], "vkEnumeratePhysicalDevices failed"
+            err = "vkEnumeratePhysicalDevices failed"
+            _ENUM_CACHE = ([], err)
+            return [], err
 
         out = []
         buf = (ctypes.c_ubyte * 2048)()   # VkPhysicalDeviceProperties is ~880
