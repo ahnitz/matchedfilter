@@ -35,6 +35,13 @@ def test_hardware_comparison_has_independent_device_choices(tmp_path):
     choices = re.findall(r'name="fleet-hardware" value="([^"]+)" checked> ([^<]+)', page)
     assert choices == [('private-host:cpu', 'Core i5-13500H (CPU)'),
                        ('private-host:gpu', 'Iris Xe Graphics (GPU)')]
+    # CPUs and GPUs are separated into distinct boxes with select/unselect all controls
+    cpu_box = re.search(r'<fieldset><legend>CPUs (.*?)</fieldset>', page, re.S).group(1)
+    gpu_box = re.search(r'<fieldset><legend>GPUs (.*?)</fieldset>', page, re.S).group(1)
+    assert 'private-host:cpu' in cpu_box and 'private-host:gpu' not in cpu_box
+    assert 'private-host:gpu' in gpu_box and 'private-host:cpu' not in gpu_box
+    assert 'data-action="all"' in cpu_box and 'data-action="none"' in cpu_box
+    assert 'data-action="all"' in gpu_box and 'data-action="none"' in gpu_box
     assert 'id="fleet-scale"' in page and 'id="fleet-shared"' in page
     assert 'value="linear"' in page and 'value="log"' in page
     # Only measured thresholds are offered, and 5.5 is preselected.
