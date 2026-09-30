@@ -263,6 +263,7 @@ class TimeDomainFilterBank:
                 if not g.templates_loaded:
                     g.plan.set_templates(g.spectra)
                     g.templates_loaded = True
+        self._taps_list = None
 
     @property
     def filters_f(self) -> Sequence[np.ndarray]:

@@ -95,9 +95,6 @@ class Device:
         return hash((self.kind, self.index))
 
 
-import functools
-
-@functools.lru_cache(maxsize=1)
 def _cpu_device():
     from . import backend as _backend
     import platform
@@ -154,6 +151,7 @@ def devices():
         out.append(Device("gpu", i, name, "vulkan",
                           is_software=d["kind"] == "cpu",
                           arch=arch_keys(d["vendor"], d["name"])))
+    _DEVICES_CACHE = list(out)
     return out
 
 
