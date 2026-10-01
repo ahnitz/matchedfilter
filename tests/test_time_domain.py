@@ -230,3 +230,19 @@ def test_partition_boundary_no_dropped_templates():
     for g in groups:
         assert g[1] - g[0] <= 64
 
+
+def test_filter_series_binsize_ragged_edges():
+    """Verify that filter_series with binsize handles ragged edge blocks without error."""
+    rng = np.random.default_rng(123)
+    counts = [200, 500]
+    taps = [rng.standard_normal(c).astype(np.float32) for c in counts]
+    bank = TimeDomainFilterBank(taps, tap_counts=counts, engine='flat', threshold=5.0)
+
+    data = (rng.standard_normal(65536) + 1j * rng.standard_normal(65536)).astype(np.complex64)
+    # Valid slice with non-aligned boundaries creating ragged edge blocks
+    res = bank.filter_series(data, valid_slice=slice(100, 20000), binsize=200)
+    assert isinstance(res, FilterResults)
+    if len(res.sample_indices) > 0:
+        assert np.all(res.sample_indices >= 100)
+        assert np.all(res.sample_indices < 20000)
+
