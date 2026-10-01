@@ -313,16 +313,6 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
   const size_t n=p->n,m=p->m;
   const size_t nb=ap_mf_nbins(p->full,binsize,start,end);
 
-  if(threshold <= 0.0f){
-    for(int d=0; d<nd; d++){
-      if(!p->dready[d0+d]){
-        if(ap_mf_set_data(p->full, d0+d, p->dspec[d0+d])) return -1;
-        p->dready[d0+d] = 1;
-      }
-    }
-    return ap_mf_run(p->full, d0, nd, t0, nt, binsize, threshold, peaks, counts, start, end);
-  }
-
   if(!isfinite(p->cal_thr) || p->cal_thr < 0) return -1;
   /* Coarse sample j maps to full lag j*R. Widen by one coarse sample
      so rounding the caller's window remains conservative. */
