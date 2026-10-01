@@ -267,3 +267,49 @@ def test_filter_series_single_template_zero_threshold():
     assert np.all(res_zero.sample_indices < 7000)
 
 
+def test_filter_series_template_index_bounds_check():
+    """Verify that filter_series raises IndexError for invalid template_index."""
+    import pytest
+    rng = np.random.default_rng(456)
+    counts = [200, 500]
+    taps = [rng.standard_normal(c).astype(np.float32) for c in counts]
+    bank = TimeDomainFilterBank(taps, tap_counts=counts, engine='flat', threshold=5.0)
+
+    data = (rng.standard_normal(4096) + 1j * rng.standard_normal(4096)).astype(np.complex64)
+    with pytest.raises(IndexError):
+        bank.filter_series(data, template_index=-1)
+    with pytest.raises(IndexError):
+        bank.filter_series(data, template_index=2)
+
+
+def test_filter_series_hierarchical_single_template_zero_threshold():
+    """Verify that hierarchical engine supports un-gated single template filtering with threshold=0.0."""
+    from spectral_profiles import make_spectral_profile
+    rng = np.random.default_rng(888)
+    counts = [200, 400]
+    taps = [rng.standard_normal(c).astype(np.float32) for c in counts]
+    for i in range(len(taps)):
+        taps[i] /= np.linalg.norm(taps[i]) * np.sqrt(2 * 4096)
+
+    bank = TimeDomainFilterBank(
+        taps, tap_counts=counts,
+        engine='hier', threshold=5.5,
+        false_dismissal=0.001,
+        fft_lengths=[4096]
+    )
+    ref = make_spectral_profile('inspiral_canonical', 4096)
+    bank.set_reference(ref)
+
+    data_len = 65536
+    data = (rng.standard_normal(data_len) + 1j * rng.standard_normal(data_len)).astype(np.complex64)
+
+    # Pure noise with default bank threshold=5.5 is dismissed by coarse gating
+    res_default = bank.filter_series(data, template_index=0, binsize=512)
+    assert len(res_default.sample_indices) == 0
+
+    # Overridden threshold=0.0 returns peaks for all bins
+    res_zero = bank.filter_series(data, threshold=0.0, template_index=0, binsize=512)
+    assert len(res_zero.sample_indices) > 0
+    assert np.all(res_zero.template_indices == 0)
+
+
