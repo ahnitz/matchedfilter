@@ -79,7 +79,7 @@ _REF_BINNED_CACHE: Dict[Tuple[int, int, float], np.ndarray] = {}
 class _TemplateGroup:
     """Internal container for a homogeneous batch of templates sharing an FFT size."""
 
-    def __init__(self, plan, n, template_indices, c_bad, n_valid, spectra, orig_taps_max):
+    def __init__(self, plan, n, template_indices, c_bad, n_valid, spectra, orig_taps_max, device=None):
         self.plan = plan
         self.n = int(n)
         self.template_indices = np.asarray(template_indices, dtype=np.int64)
@@ -87,8 +87,23 @@ class _TemplateGroup:
         self.n_valid = int(n_valid)
         self.spectra = spectra
         self.orig_taps_max = int(orig_taps_max)
+        self.device = device
         self.templates_loaded = False
         self._cached_layout: Optional[Tuple[Tuple[int, int, int], np.ndarray, np.ndarray, np.ndarray]] = None
+        self._flat_plan: Optional[Any] = None
+
+    def get_flat_plan(self):
+        from . import MatchedFilter, HierarchicalFilter
+        if not isinstance(self.plan, HierarchicalFilter):
+            return self.plan
+        if self._flat_plan is None:
+            fp = MatchedFilter(
+                self.n, ndata=1, ntemplates=len(self.template_indices),
+                device=self.device
+            )
+            fp.set_templates(self.spectra)
+            self._flat_plan = fp
+        return self._flat_plan
 
 
 class TimeDomainFilterBank:
@@ -249,7 +264,8 @@ class TimeDomainFilterBank:
                 c_bad=c_bad,
                 n_valid=n_valid,
                 spectra=spectra,
-                orig_taps_max=orig_taps_max
+                orig_taps_max=orig_taps_max,
+                device=self.device,
             )
             grp.templates_loaded = False
             if self.engine != 'hier':
@@ -415,6 +431,10 @@ class TimeDomainFilterBank:
         else:
             v_start, v_stop = 0, S
 
+        if template_index is not None:
+            if template_index < 0 or template_index >= self.n_templates:
+                raise IndexError(f"template_index {template_index} out of range [0, {self.n_templates})")
+
         eff_threshold = self.threshold if threshold is None else float(threshold)
 
         out_template_indices = []
@@ -435,6 +455,11 @@ class TimeDomainFilterBank:
             else:
                 tmpl_arg = None
 
+            if self.engine == 'hier' and (eff_threshold < self.threshold or eff_threshold <= 0.0 or tmpl_arg is not None):
+                active_plan = g.get_flat_plan()
+            else:
+                active_plan = g.plan
+
             N = g.n
             layout = g._cached_layout
             if layout is None or layout[0] != cache_key:
@@ -454,6 +479,8 @@ class TimeDomainFilterBank:
                 ts = ts[keep]
                 if not ts.size:
                     g._cached_layout = (cache_key, np.empty(0, np.int64), np.empty(0, np.int64), np.empty(0, np.int64))
+                    if template_index is not None:
+                        break
                     continue
 
                 rs = np.maximum(v_start, bvt0[keep])
@@ -467,6 +494,8 @@ class TimeDomainFilterBank:
                 _, bstarts, bws, bwe = layout
 
             if bstarts.size == 0:
+                if template_index is not None:
+                    break
                 continue
 
             # Ensure series buffer extends to cover the last block
@@ -490,7 +519,7 @@ class TimeDomainFilterBank:
                 sub_bws = bws[mask]
                 sub_bwe = bwe[mask]
 
-                aidx, aval = g.plan.run_series(
+                aidx, aval = active_plan.run_series(
                     data_in, sub_starts, sub_bws, sub_bwe, binsize=bs,
                     threshold=eff_threshold, templates=tmpl_arg, raw=True
                 )
@@ -533,6 +562,9 @@ class TimeDomainFilterBank:
                             out_snrs.append(aval[bi, ti, bini])
                             out_tstarts.append(sub_starts[bi])
                             out_block_lens.append(np.full(bi.size, N, dtype=np.int64))
+
+            if template_index is not None:
+                break
 
         if out_template_indices:
             return FilterResults(
