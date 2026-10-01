@@ -383,14 +383,18 @@ class TimeDomainFilterBank:
         self,
         series: np.ndarray,
         valid_slice: Optional[slice] = None,
-        binsize: Optional[int] = None
+        binsize: Optional[int] = None,
+        threshold: Optional[float] = None,
+        template_index: Optional[int] = None
     ) -> FilterResults:
-        """Filter a continuous series across all template groups.
+        """Filter a continuous series across all template groups (or a specific template).
 
         Parameters:
             series: Continuous data series (e.g. complex reference SNR).
             valid_slice: Analysis window slice(start, stop). None analyzes whole series.
             binsize: Bins per block. Defaults to block size N (1 bin per block).
+            threshold: Optional SNR threshold override. None uses bank threshold.
+            template_index: Optional single template index to filter.
 
         Returns:
             FilterResults namedtuple with:
@@ -411,6 +415,8 @@ class TimeDomainFilterBank:
         else:
             v_start, v_stop = 0, S
 
+        eff_threshold = self.threshold if threshold is None else float(threshold)
+
         out_template_indices = []
         out_sample_indices = []
         out_snrs = []
@@ -420,6 +426,15 @@ class TimeDomainFilterBank:
         cache_key = (S, v_start, v_stop)
 
         for g in self._groups:
+            if template_index is not None:
+                matches = np.where(g.template_indices == template_index)[0]
+                if len(matches) == 0:
+                    continue
+                ti_local = int(matches[0])
+                tmpl_arg = (ti_local, 1)
+            else:
+                tmpl_arg = None
+
             N = g.n
             layout = g._cached_layout
             if layout is None or layout[0] != cache_key:
@@ -477,27 +492,47 @@ class TimeDomainFilterBank:
 
                 aidx, aval = g.plan.run_series(
                     data_in, sub_starts, sub_bws, sub_bwe, binsize=bs,
-                    threshold=self.threshold, raw=True
+                    threshold=eff_threshold, templates=tmpl_arg, raw=True
                 )
 
                 # aidx has shape (nblocks, ntemplates, nbins)
-                if aidx.ndim == 3 and aidx.shape[2] == 1:
-                    ii = aidx[:, :, 0]
-                    bi, ti = np.nonzero(ii >= 0)
-                    if bi.size:
-                        out_template_indices.append(g.template_indices[ti])
-                        out_sample_indices.append(sub_starts[bi] + ii[bi, ti])
-                        out_snrs.append(aval[:, :, 0][bi, ti])
-                        out_tstarts.append(sub_starts[bi])
-                        out_block_lens.append(np.full(bi.size, N, dtype=np.int64))
+                if tmpl_arg is not None:
+                    # Single template filtered (ntemplates == 1)
+                    if aidx.ndim == 3 and aidx.shape[2] == 1:
+                        ii = aidx[:, 0, 0]
+                        bi = np.nonzero(ii >= 0)[0]
+                        if bi.size:
+                            out_template_indices.append(np.full(bi.size, template_index, dtype=np.int64))
+                            out_sample_indices.append(sub_starts[bi] + ii[bi])
+                            out_snrs.append(aval[:, 0, 0][bi])
+                            out_tstarts.append(sub_starts[bi])
+                            out_block_lens.append(np.full(bi.size, N, dtype=np.int64))
+                    else:
+                        bi, _, bini = np.nonzero(aidx >= 0)
+                        if bi.size:
+                            out_template_indices.append(np.full(bi.size, template_index, dtype=np.int64))
+                            out_sample_indices.append(sub_starts[bi] + aidx[bi, 0, bini])
+                            out_snrs.append(aval[bi, 0, bini])
+                            out_tstarts.append(sub_starts[bi])
+                            out_block_lens.append(np.full(bi.size, N, dtype=np.int64))
                 else:
-                    bi, ti, bini = np.nonzero(aidx >= 0)
-                    if bi.size:
-                        out_template_indices.append(g.template_indices[ti])
-                        out_sample_indices.append(sub_starts[bi] + aidx[bi, ti, bini])
-                        out_snrs.append(aval[bi, ti, bini])
-                        out_tstarts.append(sub_starts[bi])
-                        out_block_lens.append(np.full(bi.size, N, dtype=np.int64))
+                    if aidx.ndim == 3 and aidx.shape[2] == 1:
+                        ii = aidx[:, :, 0]
+                        bi, ti = np.nonzero(ii >= 0)
+                        if bi.size:
+                            out_template_indices.append(g.template_indices[ti])
+                            out_sample_indices.append(sub_starts[bi] + ii[bi, ti])
+                            out_snrs.append(aval[:, :, 0][bi, ti])
+                            out_tstarts.append(sub_starts[bi])
+                            out_block_lens.append(np.full(bi.size, N, dtype=np.int64))
+                    else:
+                        bi, ti, bini = np.nonzero(aidx >= 0)
+                        if bi.size:
+                            out_template_indices.append(g.template_indices[ti])
+                            out_sample_indices.append(sub_starts[bi] + aidx[bi, ti, bini])
+                            out_snrs.append(aval[bi, ti, bini])
+                            out_tstarts.append(sub_starts[bi])
+                            out_block_lens.append(np.full(bi.size, N, dtype=np.int64))
 
         if out_template_indices:
             return FilterResults(

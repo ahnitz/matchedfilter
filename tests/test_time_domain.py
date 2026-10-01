@@ -246,3 +246,24 @@ def test_filter_series_binsize_ragged_edges():
         assert np.all(res.sample_indices >= 100)
         assert np.all(res.sample_indices < 20000)
 
+
+def test_filter_series_single_template_zero_threshold():
+    """Verify that filter_series supports filtering a specific template with threshold=0.0."""
+    rng = np.random.default_rng(456)
+    counts = [200, 500, 300]
+    taps = [rng.standard_normal(c).astype(np.float32) for c in counts]
+    bank = TimeDomainFilterBank(taps, tap_counts=counts, engine='flat', threshold=1000.0)
+
+    data = (rng.standard_normal(32768) + 1j * rng.standard_normal(32768)).astype(np.complex64)
+    # With bank threshold=1000.0, nothing triggers.
+    res_none = bank.filter_series(data, template_index=1)
+    assert len(res_none.sample_indices) == 0
+
+    # With threshold=0.0 and binsize=200 over a 2000-sample window, each bin produces a peak
+    res_zero = bank.filter_series(data, valid_slice=slice(5000, 7000), binsize=200, threshold=0.0, template_index=1)
+    assert len(res_zero.sample_indices) > 0
+    assert np.all(res_zero.template_indices == 1)
+    assert np.all(res_zero.sample_indices >= 5000)
+    assert np.all(res_zero.sample_indices < 7000)
+
+
