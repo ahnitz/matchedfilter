@@ -702,11 +702,80 @@ static PyObject *M_pack_peaks(PyObject *self,PyObject *args){
   PyBuffer_Release(&bpk);PyBuffer_Release(&bidx);PyBuffer_Release(&bval);
   Py_RETURN_NONE;
 }
+static PyObject *M_taps_to_spectra(PyObject *self, PyObject *args){
+  Py_buffer btaps, bcnt, bout;
+  Py_ssize_t n, max_taps;
+  if(!PyArg_ParseTuple(args, "y*y*nnw*", &btaps, &bcnt, &n, &max_taps, &bout)) return NULL;
+
+  if(n <= 0 || max_taps <= 0){
+    PyBuffer_Release(&btaps); PyBuffer_Release(&bcnt); PyBuffer_Release(&bout);
+    PyErr_SetString(PyExc_ValueError, "n and max_taps must be positive");
+    return NULL;
+  }
+
+  size_t n_elem_taps = (size_t)(btaps.len / sizeof(float));
+  if(n_elem_taps % (size_t)max_taps != 0){
+    PyBuffer_Release(&btaps); PyBuffer_Release(&bcnt); PyBuffer_Release(&bout);
+    PyErr_SetString(PyExc_ValueError, "invalid taps shape");
+    return NULL;
+  }
+  size_t T = n_elem_taps / (size_t)max_taps;
+  if(bcnt.len < (Py_ssize_t)(T * 4) || bout.len < (Py_ssize_t)(T * (size_t)n * 2 * sizeof(float))){
+    PyBuffer_Release(&btaps); PyBuffer_Release(&bcnt); PyBuffer_Release(&bout);
+    PyErr_SetString(PyExc_ValueError, "counts or output buffer too small");
+    return NULL;
+  }
+
+  ap_plan *plan = ap_create((size_t)n);
+  if(!plan){
+    PyBuffer_Release(&btaps); PyBuffer_Release(&bcnt); PyBuffer_Release(&bout);
+    PyErr_SetString(PyExc_RuntimeError, "failed to create FFT plan");
+    return NULL;
+  }
+
+  float *in_buf = (float*)malloc(2 * (size_t)n * sizeof(float));
+  if(!in_buf){
+    ap_destroy(plan);
+    PyBuffer_Release(&btaps); PyBuffer_Release(&bcnt); PyBuffer_Release(&bout);
+    PyErr_NoMemory();
+    return NULL;
+  }
+
+  const float *taps = (const float*)btaps.buf;
+  float *out = (float*)bout.buf;
+  int is_64 = (bcnt.len >= (Py_ssize_t)(T * 8));
+  const int64_t *cnt64 = is_64 ? (const int64_t*)bcnt.buf : NULL;
+  const int32_t *cnt32 = is_64 ? NULL : (const int32_t*)bcnt.buf;
+
+  Py_BEGIN_ALLOW_THREADS
+  for(size_t t = 0; t < T; t++){
+    size_t count = is_64 ? (size_t)cnt64[t] : (size_t)cnt32[t];
+    if(count > (size_t)max_taps) count = (size_t)max_taps;
+    if(count > (size_t)n) count = (size_t)n;
+    size_t half = count / 2;
+    memset(in_buf, 0, 2 * (size_t)n * sizeof(float));
+    const float *row = taps + t * (size_t)max_taps;
+    for(size_t i = 0; i < count - half; i++){
+      in_buf[2 * i] = row[half + i];
+    }
+    for(size_t i = 0; i < half; i++){
+      in_buf[2 * ((size_t)n - half + i)] = row[i];
+    }
+    ap_fft(plan, in_buf, out + t * 2 * (size_t)n, AP_FORWARD);
+  }
+  Py_END_ALLOW_THREADS
+
+  free(in_buf);
+  ap_destroy(plan);
+  PyBuffer_Release(&btaps); PyBuffer_Release(&bcnt); PyBuffer_Release(&bout);
+  Py_RETURN_NONE;
+}
 static PyMethodDef methods[]={
   {"backend",M_backend,METH_NOARGS,"backend() -> name of the selected kernel"},
   {"targets",M_targets,METH_NOARGS,"targets() -> names this build can run here"},
   {"set_target",M_set_target,METH_VARARGS,"set_target(name|None) -> narrow the choice"},
   {"pack_peaks",M_pack_peaks,METH_VARARGS,"pack_peaks(peaks, idx, val) -> copy into structured peaks"},
+  {"taps_to_spectra",M_taps_to_spectra,METH_VARARGS,"taps_to_spectra(taps, counts, n, max_taps, out_spectra)"},
   {NULL,NULL,0,NULL}};
 static struct PyModuleDef mod={PyModuleDef_HEAD_INIT,"matchedfilter._core",NULL,-1,methods};
 PyMODINIT_FUNC PyInit__core(void){
