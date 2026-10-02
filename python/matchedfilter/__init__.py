@@ -66,9 +66,45 @@ __all__ = ["MatchedFilter", "CorrelationFilter", "HierarchicalFilter", "PEAK_DTY
            "targets", "set_target", "devices", "Device", "__version__",
            "candidate_configs", "choose_config", "CascadeConfig",
            "get_autotune_cache", "_clear_autotune_cache", "clear_autotune_cache",
-           "TimeDomainFilterBank", "FilterResults"]
+           "get_autotune_trials",
+           "TimeDomainFilterBank", "FilterResults", "taps_to_spectra"]
 
 from .time_domain import TimeDomainFilterBank, FilterResults
+
+
+def taps_to_spectra(taps, counts, n, max_taps=None, out=None):
+    """Convert time-domain FIR filter taps to frequency-domain spectra in C.
+
+    Vectorized implementation with AVX-512 SIMD and circular center-tap roll alignment.
+    Releases the Python GIL during transformation.
+
+    Parameters:
+        taps: 2D array of shape (n_templates, max_taps) float32
+        counts: 1D array of tap counts (int64 or int32)
+        n: FFT block size (int)
+        max_taps: Optional maximum taps (defaults to taps.shape[1])
+        out: Optional output array of shape (n_templates, n) complex64
+
+    Returns:
+        Complex64 array of shape (n_templates, n) with forward FFT spectra.
+    """
+    taps_arr = np.ascontiguousarray(taps, dtype=np.float32)
+    if taps_arr.ndim != 2:
+        raise ValueError("taps must be a 2D array of shape (n_templates, max_taps)")
+    n_templates, default_max = taps_arr.shape
+    m_taps = default_max if max_taps is None else int(max_taps)
+    counts_arr = np.ascontiguousarray(counts, dtype=np.int64)
+    if counts_arr.ndim != 1 or len(counts_arr) != n_templates:
+        raise ValueError("counts must be a 1D array matching n_templates")
+    if out is None:
+        out_spec = np.empty((n_templates, int(n)), dtype=np.complex64)
+    else:
+        out_spec = np.ascontiguousarray(out, dtype=np.complex64)
+        if out_spec.shape != (n_templates, int(n)):
+            raise ValueError(f"out shape {out_spec.shape} must match ({n_templates}, {n})")
+
+    _core.taps_to_spectra(taps_arr, counts_arr, int(n), m_taps, out_spec)
+    return out_spec
 
 
 def backend():
@@ -1778,11 +1814,17 @@ def _reference_hash(power):
     return hashlib.sha256(p.tobytes()).hexdigest()
 
 
-def _autotune_cache_key(device, n, snr, fd, ref, cascade=True):
-    """Compute canonical process-level cache key for autotuned winner configurations."""
+def _autotune_cache_key(device, n, snr, fd, ref=None, cascade=True):
+    """Compute canonical process-level cache key for autotuned winner configurations.
+
+    Autotuning measures the hardware execution throughput of candidate configurations
+    for a given device, FFT block size N, SNR threshold, and FDR budget. Caching is
+    hardware- and budget-specific rather than per-waveform, ensuring that all templates
+    sharing the same transform geometry and target reuse the benchmarked winner without
+    repeated runtime trial flapping.
+    """
     dev_kind = getattr(device, "kind", str(device)) if device is not None else "cpu"
-    ref_hash = _reference_hash(ref)
-    return (str(dev_kind), int(n), float(snr), float(fd), bool(cascade), ref_hash)
+    return (str(dev_kind), int(n), float(snr), float(fd), bool(cascade))
 
 
 def get_autotune_cache():
@@ -1801,6 +1843,19 @@ def _clear_autotune_cache():
 def clear_autotune_cache():
     """Public alias for _clear_autotune_cache()."""
     _clear_autotune_cache()
+
+
+def get_autotune_trials(cache_key=None):
+    """Return a snapshot of recorded in-flight autotune trial timings and metadata.
+
+    Parameters:
+        cache_key: Optional cache key tuple to retrieve trials for a specific target.
+                   If None, returns a copy of the entire trial dictionary across all keys.
+    """
+    with _AUTOTUNE_LOCK:
+        if cache_key is not None:
+            return dict(_GLOBAL_AUTOTUNE_TRIALS.get(cache_key, {}))
+        return {k: dict(v) for k, v in _GLOBAL_AUTOTUNE_TRIALS.items()}
 
 
 class HierarchicalFilter(MatchedFilter):
@@ -1865,9 +1920,7 @@ class HierarchicalFilter(MatchedFilter):
         elif cascade is True or self.cascade_band is not None:
             self.cascade = True
         else:
-            b_name = (backend() or "").upper()
-            is_avx512 = (self.device.kind == 'cpu') and ("AVX3" in b_name or "AVX512" in b_name)
-            self.cascade = False if (is_avx512 or band is not None) else True
+            self.cascade = True if band is None else False
         self._initial_cascade = bool(self.cascade)
         if self.ndata < 1 or self.ntemplates < 1:
             raise ValueError("ndata and ntemplates must be >= 1")
@@ -2293,13 +2346,15 @@ class HierarchicalFilter(MatchedFilter):
         self._mf = new_plan
         self._thr_applied = (tv is not None)
 
-    def _record_autotune_trial(self, dt):
+    def _record_autotune_trial(self, dt, pairs=None, triggers=None):
         """Record batch timing for current configuration and progress autotune state."""
         cfg = getattr(self, '_active_cfg', self.config)
         trial = {
             "config": cfg,
             "duration_s": dt,
             "time_ms": dt * 1000.0,
+            "pairs": pairs,
+            "triggers": triggers,
         }
         self.autotune_info["trials"].append(trial)
 
@@ -2335,6 +2390,8 @@ class HierarchicalFilter(MatchedFilter):
                     "duration_s": dt,
                     "time_ms": dt * 1000.0,
                     "time_per_pair": (dt * 1000.0) / norm_factor,
+                    "pairs": pairs,
+                    "triggers": triggers,
                 })
                 tested_keys = {_config_key(t["config"]) for t in shared["trials"]}
                 all_candidate_keys = {_config_key(c) for c in shared["candidates"]}
@@ -2349,7 +2406,13 @@ class HierarchicalFilter(MatchedFilter):
                     def score(cand):
                         k = _config_key(cand)
                         times = candidate_times.get(k, [float('inf')])
-                        return float(np.mean(times))
+                        if len(times) >= 2:
+                            val = float(np.min(times[1:]))
+                        else:
+                            val = float(np.mean(times))
+                        if _config_key(cand) == _config_key(shared["candidates"][0]):
+                            return val
+                        return val / 0.95
 
                     winner = min(shared["candidates"], key=score)
                     _GLOBAL_AUTOTUNE_CACHE[cache_key] = winner
@@ -2388,7 +2451,13 @@ class HierarchicalFilter(MatchedFilter):
             def score(cand):
                 key = _config_key(cand)
                 times = candidate_times.get(key, [float('inf')])
-                return float(np.mean(times))
+                if len(times) >= 2:
+                    val = float(np.min(times[1:]))
+                else:
+                    val = float(np.mean(times))
+                if _config_key(cand) == _config_key(self._tune_candidates[0]):
+                    return val
+                return val / 0.95
 
             winner = min(self._tune_candidates, key=score)
             self.autotune_info["status"] = "locked"
@@ -2422,7 +2491,11 @@ class HierarchicalFilter(MatchedFilter):
                               data=data, templates=templates, counts=counts, raw=raw)
             dt = time.perf_counter() - t0
             if self.autotune_info.get("status") == "tuning":
-                self._record_autotune_trial(dt)
+                try:
+                    p_cnt, t_cnt = self.stats
+                except Exception:
+                    p_cnt, t_cnt = None, None
+                self._record_autotune_trial(dt, pairs=p_cnt, triggers=t_cnt)
             return res
         return super().run(binsize=binsize, threshold=threshold, window=window,
                            data=data, templates=templates, counts=counts, raw=raw)
