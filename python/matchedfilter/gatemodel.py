@@ -40,6 +40,10 @@ profile shapes, bands 512/1024/2048, snr 5.0/5.5/6.0 -- at ratios 0.88 to
 coarse stage (the GPU already runs it in half precision) shows up as a
 calibration change rather than passing quietly. See tests/test_gate_model.py.
 """
+import atexit
+import os
+import pickle
+import tempfile
 from collections import OrderedDict
 
 import numpy as np
@@ -60,6 +64,68 @@ _CACHE_MAX = 512
 _CACHE_BYTES = 256 * 1024 * 1024
 _GATE_FOR_RESULT_CACHE = OrderedDict()
 _GATE_CASCADE_RESULT_CACHE = OrderedDict()
+
+_CACHE_FILE = os.environ.get("MF_GATE_CACHE_FILE") or os.path.expanduser("~/.cache/matchedfilter/gatemodel_cache.pkl")
+_CACHE_DIRTY = False
+
+def _load_disk_cache():
+    if not os.path.exists(_CACHE_FILE):
+        return
+    try:
+        with open(_CACHE_FILE, "rb") as f:
+            data = pickle.load(f)
+        if isinstance(data, dict):
+            single = data.get("single", {})
+            cascade = data.get("cascade", {})
+            for k, v in single.items():
+                _GATE_FOR_RESULT_CACHE[k] = v
+            for k, v in cascade.items():
+                _GATE_CASCADE_RESULT_CACHE[k] = v
+    except Exception:
+        pass
+
+def _save_disk_cache(single_entry=None, cascade_entry=None):
+    global _CACHE_DIRTY
+    if single_entry is not None:
+        k, v = single_entry
+        _GATE_FOR_RESULT_CACHE[k] = v
+        _CACHE_DIRTY = True
+    if cascade_entry is not None:
+        k, v = cascade_entry
+        _GATE_CASCADE_RESULT_CACHE[k] = v
+        _CACHE_DIRTY = True
+
+    if not _CACHE_DIRTY:
+        return
+
+    cache_dir = os.path.dirname(_CACHE_FILE)
+    try:
+        os.makedirs(cache_dir, exist_ok=True)
+        to_save_single = dict(_GATE_FOR_RESULT_CACHE)
+        to_save_cascade = dict(_GATE_CASCADE_RESULT_CACHE)
+        if os.path.exists(_CACHE_FILE):
+            try:
+                with open(_CACHE_FILE, "rb") as f:
+                    existing = pickle.load(f)
+                if isinstance(existing, dict):
+                    if "single" in existing and isinstance(existing["single"], dict):
+                        existing["single"].update(to_save_single)
+                        to_save_single = existing["single"]
+                    if "cascade" in existing and isinstance(existing["cascade"], dict):
+                        existing["cascade"].update(to_save_cascade)
+                        to_save_cascade = existing["cascade"]
+            except Exception:
+                pass
+        with tempfile.NamedTemporaryFile(dir=cache_dir, delete=False, prefix="gatemodel_cache_") as tf:
+            pickle.dump({"single": to_save_single, "cascade": to_save_cascade}, tf, protocol=pickle.HIGHEST_PROTOCOL)
+            temp_name = tf.name
+        os.replace(temp_name, _CACHE_FILE)
+        _CACHE_DIRTY = False
+    except Exception:
+        pass
+
+_load_disk_cache()
+atexit.register(_save_disk_cache)
 
 
 def _samples(power, n, band, snr, nsamp, seed):
@@ -244,7 +310,7 @@ def gate_for(power, n, band, snr, fd):
     res = float(kept[idx])
     if len(_GATE_FOR_RESULT_CACHE) >= _CACHE_MAX:
         _GATE_FOR_RESULT_CACHE.popitem(last=False)
-    _GATE_FOR_RESULT_CACHE[rkey] = res
+    _save_disk_cache(single_entry=(rkey, res))
     return res
 
 
@@ -455,5 +521,5 @@ def gate_for_cascade(power, n, band0, band1, snr, fd):
 
     if len(_GATE_CASCADE_RESULT_CACHE) >= _CACHE_MAX:
         _GATE_CASCADE_RESULT_CACHE.popitem(last=False)
-    _GATE_CASCADE_RESULT_CACHE[rkey] = best
+    _save_disk_cache(cascade_entry=(rkey, best))
     return best
