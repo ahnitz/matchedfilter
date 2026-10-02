@@ -171,3 +171,68 @@ def test_gatemodel_disk_cache(monkeypatch):
         assert key not in _GATE_FOR_RESULT_CACHE
         _load_disk_cache()
         assert _GATE_FOR_RESULT_CACHE.get(key) == val
+
+
+def test_public_taps_to_spectra_api():
+    """Verify that public matchedfilter.taps_to_spectra matches np.fft.fft circularly rolled taps."""
+    rng = np.random.default_rng(999)
+    n = 2048
+    T = 4
+    max_taps = 180
+    taps = rng.standard_normal((T, max_taps)).astype(np.float32)
+    counts = np.array([80, 120, 150, 180], dtype=np.int64)
+
+    # Public API with out=None
+    res1 = mf.taps_to_spectra(taps, counts, n)
+    assert res1.shape == (T, n)
+    assert res1.dtype == np.complex64
+
+    # Public API with preallocated out
+    res2 = np.zeros((T, n), dtype=np.complex64)
+    mf.taps_to_spectra(taps, counts, n, out=res2)
+    assert np.array_equal(res1, res2)
+
+    # Verify against numpy
+    for t in range(T):
+        cnt = int(counts[t])
+        buf = np.zeros(n, dtype=np.float32)
+        buf[:cnt] = taps[t, :cnt]
+        buf = np.roll(buf, -(cnt // 2))
+        np.testing.assert_allclose(res1[t], np.fft.fft(buf), atol=1e-5)
+
+
+def test_time_domain_filter_bank_narrow_slice_and_template_index():
+    """Verify that TimeDomainFilterBank narrow slice O(1) layout matches full segment filtering exactly."""
+    rng = np.random.default_rng(555)
+    counts = [200, 400]
+    taps = [rng.standard_normal(c).astype(np.float32) for c in counts]
+    bank = TimeDomainFilterBank(
+        taps, tap_counts=counts,
+        tap_sample_rate=2048, data_sample_rate=2048,
+        engine='flat', threshold=10.0
+    )
+
+    data_len = 65536
+    data = (rng.standard_normal(data_len) + 1j * rng.standard_normal(data_len)).astype(np.complex64)
+    # Inject template 1 at sample 30000
+    c1 = counts[1]
+    data[30000 - c1 // 2 : 30000 - c1 // 2 + c1] += taps[1] * 20.0
+
+    full_res = bank.filter_series(data)
+    # Target trigger around 30000
+    mask_full = (full_res.template_indices == 1) & (full_res.sample_indices == 30000)
+    assert np.any(mask_full)
+    full_snr = full_res.snr[mask_full][0]
+
+    # Narrow slice follow-up for template 1 around 30000
+    narrow_slice = slice(29500, 30500)
+    narrow_res = bank.filter_series(data, valid_slice=narrow_slice, template_index=1)
+    mask_narrow = (narrow_res.template_indices == 1) & (narrow_res.sample_indices == 30000)
+    assert np.any(mask_narrow)
+    narrow_snr = narrow_res.snr[mask_narrow][0]
+
+    assert np.isclose(full_snr, narrow_snr, atol=1e-5)
+    # All triggers from narrow slice must be within [29500, 30500)
+    assert np.all(narrow_res.sample_indices >= 29500)
+    assert np.all(narrow_res.sample_indices < 30500)
+

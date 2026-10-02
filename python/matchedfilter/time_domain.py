@@ -42,13 +42,19 @@ def _partition_templates(
     if M == 0:
         return [], order
 
+    valid_ns = sorted(int(n) for n in candidate_ns)
+
     def pick_n(max_c: int) -> int:
-        if max_c <= 1100:
-            return 4096
-        elif max_c <= 1900:
-            return 8192
-        else:
-            return 16384
+        for n in valid_ns:
+            if n > max_c and (n - max_c) / n >= 0.70:
+                return n
+        for n in valid_ns:
+            if n > max_c and (n - max_c) / n >= 0.50:
+                return n
+        for n in reversed(valid_ns):
+            if n > max_c:
+                return n
+        return 1 << int(math.ceil(math.log2(max(1024, 2 * max_c))))
 
     # Partition contiguous runs sharing the same chosen FFT block size,
     # then split each run into balanced sub-batches <= max_batch.
@@ -190,7 +196,7 @@ class TimeDomainFilterBank:
         self.effective_data_counts = np.ceil(self.tap_counts / self.rate_ratio).astype(np.int64)
 
         if fft_lengths is None:
-            candidate_ns = (1024, 2048, 4096, 8192, 16384, 32768, 65536)
+            candidate_ns = (2048, 4096, 8192, 16384, 32768, 65536)
         else:
             candidate_ns = tuple(sorted(int(n) for n in fft_lengths))
 
@@ -303,6 +309,11 @@ class TimeDomainFilterBank:
                 plan.set_templates(spectra)
                 grp.templates_loaded = True
             self._groups.append(grp)
+
+        self._template_map = [None] * n_templates
+        for g in self._groups:
+            for ti_local, global_idx in enumerate(g.template_indices):
+                self._template_map[int(global_idx)] = (g, int(ti_local))
 
         if reference is not None:
             self.set_reference(reference)
@@ -477,80 +488,97 @@ class TimeDomainFilterBank:
 
         cache_key = (S, v_start, v_stop)
 
-        for g in self._groups:
-            if template_index is not None:
-                matches = np.where(g.template_indices == template_index)[0]
-                if len(matches) == 0:
-                    continue
-                ti_local = int(matches[0])
-                tmpl_arg = (ti_local, 1)
-            else:
-                tmpl_arg = None
+        if template_index is not None:
+            if template_index < 0 or template_index >= self.n_templates:
+                raise IndexError(f"template_index {template_index} out of range [0, {self.n_templates})")
+            target_g, ti_local = self._template_map[template_index]
+            work_items = [(target_g, (ti_local, 1))]
+        else:
+            work_items = [(g, None) for g in self._groups]
 
+        for g, tmpl_arg in work_items:
             if self.engine == 'hier' and (eff_threshold < self.threshold or eff_threshold <= 0.0 or tmpl_arg is not None):
                 active_plan = g.get_flat_plan()
             else:
                 active_plan = g.plan
 
             N = g.n
-            layout = g._cached_layout
-            if layout is None or layout[0] != cache_key:
-                c_bad = g.c_bad
-                N_valid = g.n_valid
-                STEP = N_valid
+            c_bad = g.c_bad
+            N_valid = g.n_valid
+            STEP = N_valid
 
-                first_block_idx = max(0, int(np.floor((v_start - c_bad) / STEP)))
-                loop_start = first_block_idx * STEP
-                ts = np.arange(loop_start, S, STEP, dtype=np.int64)
-
-                bvt0 = ts + c_bad
-                keep = (bvt0 < v_stop) & (bvt0 + N_valid > v_start)
-                if keep.any():
-                    last = np.flatnonzero(bvt0 < v_stop)
-                    keep &= np.arange(ts.size) <= last[-1]
-                ts = ts[keep]
-                if not ts.size:
-                    g._cached_layout = (cache_key, np.empty(0, np.int64), np.empty(0, np.int64), np.empty(0, np.int64))
-                    if template_index is not None:
-                        break
-                    continue
-
-                rs = np.maximum(v_start, bvt0[keep])
-                re = np.minimum(v_stop, bvt0[keep] + N_valid)
-                good = re > rs
-                bstarts = ts[good]
-                bws = (rs - ts)[good]
-                bwe = (re - ts)[good]
-                g._cached_layout = (cache_key, bstarts, bws, bwe)
+            is_narrow = (template_index is not None) or ((v_stop - v_start) < 4 * N_valid)
+            if is_narrow:
+                first_b = max(0, int((v_start - c_bad) // STEP))
+                last_b = min(max(0, int((S - 1) // STEP)), int((v_stop - 1 - c_bad) // STEP))
+                if last_b < first_b:
+                    bstarts = np.empty(0, np.uintp)
+                    bws = np.empty(0, np.uintp)
+                    bwe = np.empty(0, np.uintp)
+                else:
+                    bstarts_list = []
+                    bws_list = []
+                    bwe_list = []
+                    for b_idx in range(first_b, last_b + 1):
+                        t = b_idx * STEP
+                        if t >= S:
+                            break
+                        bvt0 = t + c_bad
+                        rs = max(v_start, bvt0)
+                        re = min(v_stop, bvt0 + N_valid)
+                        if re > rs:
+                            bstarts_list.append(t)
+                            bws_list.append(rs - t)
+                            bwe_list.append(re - t)
+                    bstarts = np.asarray(bstarts_list, dtype=np.uintp)
+                    bws = np.asarray(bws_list, dtype=np.uintp)
+                    bwe = np.asarray(bwe_list, dtype=np.uintp)
             else:
-                _, bstarts, bws, bwe = layout
+                layout = g._cached_layout
+                if layout is None or layout[0] != cache_key:
+                    first_block_idx = max(0, int(np.floor((v_start - c_bad) / STEP)))
+                    loop_start = first_block_idx * STEP
+                    ts = np.arange(loop_start, S, STEP, dtype=np.uintp)
+
+                    bvt0 = ts + c_bad
+                    keep = (bvt0 < v_stop) & (bvt0 + N_valid > v_start)
+                    if keep.any():
+                        last = np.flatnonzero(bvt0 < v_stop)
+                        keep &= np.arange(ts.size) <= last[-1]
+                    ts = ts[keep]
+                    if not ts.size:
+                        g._cached_layout = (cache_key, np.empty(0, np.uintp), np.empty(0, np.uintp), np.empty(0, np.uintp))
+                        continue
+
+                    rs = np.maximum(v_start, bvt0[keep])
+                    re = np.minimum(v_stop, bvt0[keep] + N_valid)
+                    good = re > rs
+                    bstarts = np.ascontiguousarray(ts[good], dtype=np.uintp)
+                    bws = np.ascontiguousarray((rs - ts)[good], dtype=np.uintp)
+                    bwe = np.ascontiguousarray((re - ts)[good], dtype=np.uintp)
+                    g._cached_layout = (cache_key, bstarts, bws, bwe)
+                else:
+                    _, bstarts, bws, bwe = layout
 
             if bstarts.size == 0:
-                if template_index is not None:
-                    break
                 continue
 
-            # Ensure series buffer extends to cover the last block
-            max_need = int(bstarts[-1] + N)
-            if max_need > len(ser):
-                pad_len = max_need - len(ser)
-                data_in = np.pad(ser, (0, pad_len))
-            else:
-                data_in = ser
+            data_in = ser
 
             bs = N if binsize is None else int(binsize)
-            bin_counts = (
-                np.ones(len(bstarts), dtype=np.int64)
-                if bs >= N
-                else ((bwe - bws + bs - 1) // bs).astype(np.int64)
-            )
+            if bs >= N:
+                groups_bins = [(bstarts, bws, bwe)]
+            else:
+                bin_counts = ((bwe - bws + bs - 1) // bs).astype(np.int64)
+                if len(bstarts) <= 1 or np.all(bin_counts == bin_counts[0]):
+                    groups_bins = [(bstarts, bws, bwe)]
+                else:
+                    groups_bins = []
+                    for u_cnt in np.unique(bin_counts):
+                        mask = (bin_counts == u_cnt)
+                        groups_bins.append((bstarts[mask], bws[mask], bwe[mask]))
 
-            for u_cnt in np.unique(bin_counts):
-                mask = (bin_counts == u_cnt)
-                sub_starts = bstarts[mask]
-                sub_bws = bws[mask]
-                sub_bwe = bwe[mask]
-
+            for sub_starts, sub_bws, sub_bwe in groups_bins:
                 aidx, aval = active_plan.run_series(
                     data_in, sub_starts, sub_bws, sub_bwe, binsize=bs,
                     threshold=eff_threshold, templates=tmpl_arg, raw=True
@@ -595,10 +623,15 @@ class TimeDomainFilterBank:
                             out_tstarts.append(sub_starts[bi])
                             out_block_lens.append(np.full(bi.size, N, dtype=np.int64))
 
-            if template_index is not None:
-                break
-
         if out_template_indices:
+            if len(out_template_indices) == 1:
+                return FilterResults(
+                    template_indices=out_template_indices[0].astype(np.int64, copy=False),
+                    sample_indices=out_sample_indices[0].astype(np.int64, copy=False),
+                    snr=out_snrs[0].astype(np.complex64, copy=False),
+                    block_starts=out_tstarts[0].astype(np.int64, copy=False),
+                    block_lengths=out_block_lens[0].astype(np.int64, copy=False),
+                )
             return FilterResults(
                 template_indices=np.concatenate(out_template_indices).astype(np.int64),
                 sample_indices=np.concatenate(out_sample_indices).astype(np.int64),
