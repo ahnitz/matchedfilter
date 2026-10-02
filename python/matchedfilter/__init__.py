@@ -1159,7 +1159,7 @@ class CorrelationFilter(MatchedFilter):
             self._ddirty = self._tdirty = False
         return result
 
-    def run_series(self, series, starts=None, templates=None, out=None):
+    def run_series(self, series, starts=None, templates=None, out=None, valid_slice=None):
         """Correlate a series into continuous output over the configured valid window.
 
         With explicit ``starts``, preserve the block-major full-output form.
@@ -1171,6 +1171,17 @@ class CorrelationFilter(MatchedFilter):
             if out is not None:
                 raise ValueError('automatic run_series owns its output; omit out')
             st, _, _ = _automatic_series_layout(ser.size, self.valid)
+            if valid_slice is not None:
+                vs = 0 if valid_slice.start is None else int(valid_slice.start)
+                ve = ser.size if valid_slice.stop is None else int(valid_slice.stop)
+                lo, hi = self.valid
+                b_start = st + lo
+                b_end = np.minimum(st + hi, ser.size)
+                keep = (b_start < ve) & (b_end > vs)
+                if keep.any():
+                    st = st[keep]
+                else:
+                    st = np.empty(0, dtype=np.uintp)
             t0, nt = (0, self.ntemplates) if templates is None else (
                 int(templates[0]), int(templates[1]))
             if nt < 1 or t0 < 0 or t0 + nt > self.ntemplates:
@@ -1187,6 +1198,8 @@ class CorrelationFilter(MatchedFilter):
                           if self._gpu is not None else self.empty_shared(shape))
                 result[:, :self.valid[0]] = 0
                 self._continuous_output = result
+            if valid_slice is not None:
+                result.fill(0)
             self._dataset = False
             self._data_ready = set()
             if self._gpu is not None:
@@ -1848,7 +1861,9 @@ class HierarchicalFilter(MatchedFilter):
         elif cascade is True or self.cascade_band is not None:
             self.cascade = True
         else:
-            self.cascade = True if band is None else False
+            b_name = (backend() or "").upper()
+            is_avx512 = (self.device.kind == 'cpu') and ("AVX3" in b_name or "AVX512" in b_name)
+            self.cascade = False if (is_avx512 or band is not None) else True
         self._initial_cascade = bool(self.cascade)
         if self.ndata < 1 or self.ntemplates < 1:
             raise ValueError("ndata and ntemplates must be >= 1")
