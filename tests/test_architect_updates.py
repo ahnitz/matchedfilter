@@ -236,3 +236,51 @@ def test_time_domain_filter_bank_narrow_slice_and_template_index():
     assert np.all(narrow_res.sample_indices >= 29500)
     assert np.all(narrow_res.sample_indices < 30500)
 
+
+def test_hierarchical_run_series_autotune_work_normalization():
+    """Verify that run_series autotuning normalizes by block count and ignores micro sub-template slices."""
+    def inspiral_power(n, exponent=-7 / 3.0, knee_frac=0.0150):
+        p = np.zeros(n, dtype=np.float32)
+        k = np.arange(1, n // 2).astype(np.float64)
+        p[1:n // 2] = (k ** exponent / ((knee_frac * n / k) ** 4 + 1.0)).astype(np.float32)
+        return p / p.sum()
+
+    mf._clear_autotune_cache()
+
+    n = 4096
+    power = inspiral_power(n)
+    h = np.sqrt(power).astype(np.complex64)
+    h_conj = np.conj(h)
+    nt = 4
+
+    hf = mf.HierarchicalFilter(n, 1, nt, snr=5.5, fd=1e-3, cascade=True, valid=(0, n))
+    hf.set_reference(power)
+    hf.set_templates(np.repeat(h_conj[None, :], nt, axis=0))
+
+    rng = np.random.default_rng(77)
+    series_len = n * 8
+    series = (rng.standard_normal(series_len) + 1j * rng.standard_normal(series_len)).astype(np.complex64)
+
+    # 1. Sub-template narrow slice: template_index follow-up (templates=(1, 1), 1 block)
+    # This must NOT record a trial or corrupt autotune statistics
+    hf.run_series(series, starts=np.array([0], dtype=np.uintp),
+                  win_start=np.array([0], dtype=np.uintp),
+                  win_end=np.array([n], dtype=np.uintp),
+                  binsize=n, threshold=5.0, templates=(1, 1))
+    assert len(hf.autotune_info["trials"]) == 0
+
+    # 2. Full segment with 4 blocks: should be timed and normalized by n_blocks=4 and n_templates=4
+    starts = np.array([0, n, 2 * n, 3 * n], dtype=np.uintp)
+    win_start = np.zeros(4, dtype=np.uintp)
+    win_end = np.full(4, n, dtype=np.uintp)
+    hf.run_series(series, starts=starts, win_start=win_start, win_end=win_end,
+                  binsize=n, threshold=5.0)
+
+    assert len(hf.autotune_info["trials"]) == 1
+    trial0 = hf.autotune_info["trials"][0]
+    assert trial0["n_blocks"] == 4
+    assert trial0["n_templates"] == nt
+    expected_norm = float(1 * nt * 4)
+    assert np.isclose(trial0["time_per_pair"], trial0["time_ms"] / expected_norm)
+
+

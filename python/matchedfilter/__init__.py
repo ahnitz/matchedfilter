@@ -2346,13 +2346,21 @@ class HierarchicalFilter(MatchedFilter):
         self._mf = new_plan
         self._thr_applied = (tv is not None)
 
-    def _record_autotune_trial(self, dt, pairs=None, triggers=None):
+    def _record_autotune_trial(self, dt, n_blocks=1, n_templates=None, pairs=None, triggers=None):
         """Record batch timing for current configuration and progress autotune state."""
         cfg = getattr(self, '_active_cfg', self.config)
+        nt = n_templates if n_templates is not None else self.ntemplates
+        nb = max(1, int(n_blocks))
+        norm_factor = float(self.ndata * nt * nb)
+        time_per_pair = (dt * 1000.0) / norm_factor
+
         trial = {
             "config": cfg,
             "duration_s": dt,
             "time_ms": dt * 1000.0,
+            "time_per_pair": time_per_pair,
+            "n_blocks": nb,
+            "n_templates": nt,
             "pairs": pairs,
             "triggers": triggers,
         }
@@ -2384,12 +2392,13 @@ class HierarchicalFilter(MatchedFilter):
                     shared.get("assigned", set()).discard(self._assigned_candidate_key)
                     self._assigned_candidate_key = None
 
-                norm_factor = float(self.ndata * self.ntemplates)
                 shared["trials"].append({
                     "config": cfg,
                     "duration_s": dt,
                     "time_ms": dt * 1000.0,
-                    "time_per_pair": (dt * 1000.0) / norm_factor,
+                    "time_per_pair": time_per_pair,
+                    "n_blocks": nb,
+                    "n_templates": nt,
                     "pairs": pairs,
                     "triggers": triggers,
                 })
@@ -2495,7 +2504,7 @@ class HierarchicalFilter(MatchedFilter):
                     p_cnt, t_cnt = self.stats
                 except Exception:
                     p_cnt, t_cnt = None, None
-                self._record_autotune_trial(dt, pairs=p_cnt, triggers=t_cnt)
+                self._record_autotune_trial(dt, n_blocks=1, n_templates=self.ntemplates, pairs=p_cnt, triggers=t_cnt)
             return res
         return super().run(binsize=binsize, threshold=threshold, window=window,
                            data=data, templates=templates, counts=counts, raw=raw)
@@ -2503,7 +2512,12 @@ class HierarchicalFilter(MatchedFilter):
     def run_series(self, series, starts=None, win_start=None, win_end=None,
                    binsize=None, threshold=0.0, templates=None, raw=False):
         is_outer = not getattr(self, '_in_hier_series_call', False)
-        if is_outer and self.autotune_info.get("status") == "tuning":
+        # Avoid autotuning on sub-template narrow follow-ups or micro-slices
+        is_sub_template = (templates is not None and templates[1] < self.ntemplates)
+        is_tiny_slice = (starts is not None and len(starts) < 2)
+        should_tune = is_outer and not is_sub_template and not is_tiny_slice
+
+        if should_tune and self.autotune_info.get("status") == "tuning":
             cache_key = self._autotune_cache_key() if getattr(self, '_pending_ref', None) is not None else None
             if cache_key is not None:
                 with _AUTOTUNE_LOCK:
@@ -2517,8 +2531,9 @@ class HierarchicalFilter(MatchedFilter):
                         self.autotune_info["untried"] = []
                         if _config_key(self.config) != _config_key(winner):
                             self._switch_config(winner)
+
         is_tuning_or_uninit = self.autotune_info.get("status") in ("tuning", "uninitialized")
-        if is_outer and is_tuning_or_uninit:
+        if should_tune and is_tuning_or_uninit:
             self._in_hier_series_call = True
             t0 = time.perf_counter()
             try:
@@ -2530,7 +2545,13 @@ class HierarchicalFilter(MatchedFilter):
                 self._in_hier_series_call = False
             dt = time.perf_counter() - t0
             if self.autotune_info.get("status") == "tuning":
-                self._record_autotune_trial(dt)
+                n_blocks = len(starts) if starts is not None else 1
+                n_tmpls = int(templates[1]) if templates is not None else self.ntemplates
+                try:
+                    p_cnt, t_cnt = self.stats
+                except Exception:
+                    p_cnt, t_cnt = None, None
+                self._record_autotune_trial(dt, n_blocks=n_blocks, n_templates=n_tmpls, pairs=p_cnt, triggers=t_cnt)
             return res
         return super().run_series(series, starts=starts, win_start=win_start,
                                   win_end=win_end, binsize=binsize,
