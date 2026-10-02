@@ -218,21 +218,27 @@ class TimeDomainFilterBank:
             # Frequency domain conversion for each template in this group
             spectra = np.zeros((T, chosen_N), dtype=np.complex64)
             has_fast_c = (self.rate_ratio == 1.0 and _core is not None and hasattr(_core, 'taps_to_spectra'))
+            used_fast_c = False
             if has_fast_c:
-                if self._raw_taps is not None and self._raw_taps.shape[1] >= orig_taps_max:
-                    group_taps = np.ascontiguousarray(self._raw_taps[tmpl_indices, :orig_taps_max])
-                else:
-                    group_taps = np.zeros((T, orig_taps_max), dtype=np.float32)
-                    for r, g_idx in enumerate(tmpl_indices):
-                        t_arr = self._taps_list[g_idx]
-                        cnt = min(int(self.tap_counts[g_idx]), orig_taps_max)
-                        group_taps[r, :cnt] = t_arr[:cnt]
-                group_counts = np.ascontiguousarray(self.tap_counts[tmpl_indices], dtype=np.int64)
-                _core.taps_to_spectra(group_taps, group_counts, chosen_N, orig_taps_max, spectra)
-                for row, g_idx in enumerate(tmpl_indices):
-                    self._filters_f_list[g_idx] = np.conj(spectra[row])
-                    self._block_lengths_arr[g_idx] = chosen_N
-            else:
+                try:
+                    if self._raw_taps is not None and self._raw_taps.shape[1] >= orig_taps_max:
+                        group_taps = np.ascontiguousarray(self._raw_taps[tmpl_indices, :orig_taps_max])
+                    else:
+                        group_taps = np.zeros((T, orig_taps_max), dtype=np.float32)
+                        for r, g_idx in enumerate(tmpl_indices):
+                            t_arr = self._taps_list[g_idx]
+                            cnt = min(int(self.tap_counts[g_idx]), orig_taps_max)
+                            group_taps[r, :cnt] = t_arr[:cnt]
+                    group_counts = np.ascontiguousarray(self.tap_counts[tmpl_indices], dtype=np.int64)
+                    _core.taps_to_spectra(group_taps, group_counts, chosen_N, orig_taps_max, spectra)
+                    for row, g_idx in enumerate(tmpl_indices):
+                        self._filters_f_list[g_idx] = np.conj(spectra[row])
+                        self._block_lengths_arr[g_idx] = chosen_N
+                    used_fast_c = True
+                except Exception:
+                    used_fast_c = False
+
+            if not used_fast_c:
                 for row, g_idx in enumerate(tmpl_indices):
                     t_arr = self._taps_list[g_idx]
                     cnt = int(self.tap_counts[g_idx])
@@ -305,6 +311,7 @@ class TimeDomainFilterBank:
                     g.plan.set_templates(g.spectra)
                     g.templates_loaded = True
         self._taps_list = None
+        self._raw_taps = None
 
     @property
     def filters_f(self) -> Sequence[np.ndarray]:
