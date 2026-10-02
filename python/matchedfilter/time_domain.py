@@ -4,6 +4,11 @@ automatically select optimal FFT block sizes, and filter continuous series."""
 import math
 from typing import Any, NamedTuple, Optional, Sequence, Union, Tuple, List, Dict
 import numpy as np
+try:
+    from . import _core
+except ImportError:
+    _core = None
+
 
 
 class FilterResults(NamedTuple):
@@ -149,6 +154,7 @@ class TimeDomainFilterBank:
         self.engine = mode
 
         # Parse inputs
+        self._raw_taps = None
         if isinstance(taps, (list, tuple)):
             n_templates = len(taps)
             if tap_counts is None:
@@ -165,7 +171,9 @@ class TimeDomainFilterBank:
             else:
                 tap_counts = np.asarray(tap_counts, dtype=np.int64)
             taps_list = [taps[i, :tap_counts[i]].astype(np.float32) for i in range(n_templates)]
+            self._raw_taps = np.ascontiguousarray(taps, dtype=np.float32)
         else:
+            self._raw_taps = None
             raise TypeError("taps must be a numpy array or sequence of arrays")
 
         if len(tap_counts) != n_templates:
@@ -174,6 +182,7 @@ class TimeDomainFilterBank:
         self.n_templates = n_templates
         self.tap_counts = tap_counts
         self._taps_list = taps_list
+
 
         # Multi-rate scaling: ratio of tap sample rate to data sample rate
         self.rate_ratio = self.tap_sample_rate / self.data_sample_rate
@@ -208,36 +217,52 @@ class TimeDomainFilterBank:
 
             # Frequency domain conversion for each template in this group
             spectra = np.zeros((T, chosen_N), dtype=np.complex64)
-            for row, g_idx in enumerate(tmpl_indices):
-                t_arr = self._taps_list[g_idx]
-                cnt = int(self.tap_counts[g_idx])
-                N_taps = int(round(chosen_N * self.rate_ratio))
-
-                buf = np.zeros(N_taps, dtype=np.float32)
-                buf[:cnt] = t_arr[:cnt]
-                # Center-tap circular roll alignment
-                buf = np.roll(buf, -(cnt // 2))
-
-                spec = np.fft.fft(buf).astype(np.complex64)
-                if N_taps > chosen_N:
-                    # Truncate frequencies above data Nyquist (preserving positive and negative bins)
-                    spec_data = np.zeros(chosen_N, dtype=np.complex64)
-                    spec_data[:chosen_N // 2 + 1] = spec[:chosen_N // 2 + 1]
-                    neg_count = chosen_N - (chosen_N // 2 + 1)
-                    spec_data[chosen_N // 2 + 1:] = spec[N_taps - neg_count:]
-                elif N_taps < chosen_N:
-                    # Zero-pad frequencies above template Nyquist
-                    spec_data = np.zeros(chosen_N, dtype=np.complex64)
-                    half_taps = N_taps // 2
-                    spec_data[:half_taps + 1] = spec[:half_taps + 1]
-                    neg_count = N_taps - (half_taps + 1)
-                    spec_data[chosen_N - neg_count:] = spec[half_taps + 1:]
+            has_fast_c = (self.rate_ratio == 1.0 and _core is not None and hasattr(_core, 'taps_to_spectra'))
+            if has_fast_c:
+                if self._raw_taps is not None and self._raw_taps.shape[1] >= orig_taps_max:
+                    group_taps = np.ascontiguousarray(self._raw_taps[tmpl_indices, :orig_taps_max])
                 else:
-                    spec_data = spec
+                    group_taps = np.zeros((T, orig_taps_max), dtype=np.float32)
+                    for r, g_idx in enumerate(tmpl_indices):
+                        t_arr = self._taps_list[g_idx]
+                        cnt = min(int(self.tap_counts[g_idx]), orig_taps_max)
+                        group_taps[r, :cnt] = t_arr[:cnt]
+                group_counts = np.ascontiguousarray(self.tap_counts[tmpl_indices], dtype=np.int64)
+                _core.taps_to_spectra(group_taps, group_counts, chosen_N, orig_taps_max, spectra)
+                for row, g_idx in enumerate(tmpl_indices):
+                    self._filters_f_list[g_idx] = np.conj(spectra[row])
+                    self._block_lengths_arr[g_idx] = chosen_N
+            else:
+                for row, g_idx in enumerate(tmpl_indices):
+                    t_arr = self._taps_list[g_idx]
+                    cnt = int(self.tap_counts[g_idx])
+                    N_taps = int(round(chosen_N * self.rate_ratio))
 
-                spectra[row] = spec_data
-                self._filters_f_list[g_idx] = np.conj(spec_data)
-                self._block_lengths_arr[g_idx] = chosen_N
+                    buf = np.zeros(N_taps, dtype=np.float32)
+                    buf[:cnt] = t_arr[:cnt]
+                    # Center-tap circular roll alignment
+                    buf = np.roll(buf, -(cnt // 2))
+
+                    spec = np.fft.fft(buf).astype(np.complex64)
+                    if N_taps > chosen_N:
+                        # Truncate frequencies above data Nyquist (preserving positive and negative bins)
+                        spec_data = np.zeros(chosen_N, dtype=np.complex64)
+                        spec_data[:chosen_N // 2 + 1] = spec[:chosen_N // 2 + 1]
+                        neg_count = chosen_N - (chosen_N // 2 + 1)
+                        spec_data[chosen_N // 2 + 1:] = spec[N_taps - neg_count:]
+                    elif N_taps < chosen_N:
+                        # Zero-pad frequencies above template Nyquist
+                        spec_data = np.zeros(chosen_N, dtype=np.complex64)
+                        half_taps = N_taps // 2
+                        spec_data[:half_taps + 1] = spec[:half_taps + 1]
+                        neg_count = N_taps - (half_taps + 1)
+                        spec_data[chosen_N - neg_count:] = spec[half_taps + 1:]
+                    else:
+                        spec_data = spec
+
+                    spectra[row] = spec_data
+                    self._filters_f_list[g_idx] = np.conj(spec_data)
+                    self._block_lengths_arr[g_idx] = chosen_N
 
             # Create matchedfilter plan
             if self.engine == 'hier':
