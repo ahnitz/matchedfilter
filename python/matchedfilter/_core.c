@@ -720,9 +720,20 @@ static PyObject *M_taps_to_spectra(PyObject *self, PyObject *args){
     return NULL;
   }
   size_t T = n_elem_taps / (size_t)max_taps;
-  if(bcnt.len < (Py_ssize_t)(T * 4) || bout.len < (Py_ssize_t)(T * (size_t)n * 2 * sizeof(float))){
+  if(bout.len < (Py_ssize_t)(T * (size_t)n * 2 * sizeof(float))){
     PyBuffer_Release(&btaps); PyBuffer_Release(&bcnt); PyBuffer_Release(&bout);
-    PyErr_SetString(PyExc_ValueError, "counts or output buffer too small");
+    PyErr_SetString(PyExc_ValueError, "output buffer too small");
+    return NULL;
+  }
+
+  int is_64;
+  if(bcnt.len == (Py_ssize_t)(T * sizeof(int64_t))){
+    is_64 = 1;
+  } else if(bcnt.len == (Py_ssize_t)(T * sizeof(int32_t))){
+    is_64 = 0;
+  } else {
+    PyBuffer_Release(&btaps); PyBuffer_Release(&bcnt); PyBuffer_Release(&bout);
+    PyErr_SetString(PyExc_ValueError, "counts buffer size mismatch: expected T int64 or T int32 elements");
     return NULL;
   }
 
@@ -743,13 +754,17 @@ static PyObject *M_taps_to_spectra(PyObject *self, PyObject *args){
 
   const float *taps = (const float*)btaps.buf;
   float *out = (float*)bout.buf;
-  int is_64 = (bcnt.len >= (Py_ssize_t)(T * 8));
   const int64_t *cnt64 = is_64 ? (const int64_t*)bcnt.buf : NULL;
   const int32_t *cnt32 = is_64 ? NULL : (const int32_t*)bcnt.buf;
 
   Py_BEGIN_ALLOW_THREADS
   for(size_t t = 0; t < T; t++){
-    size_t count = is_64 ? (size_t)cnt64[t] : (size_t)cnt32[t];
+    int64_t raw_cnt = is_64 ? cnt64[t] : (int64_t)cnt32[t];
+    if(raw_cnt <= 0){
+      memset(out + t * 2 * (size_t)n, 0, 2 * (size_t)n * sizeof(float));
+      continue;
+    }
+    size_t count = (size_t)raw_cnt;
     if(count > (size_t)max_taps) count = (size_t)max_taps;
     if(count > (size_t)n) count = (size_t)n;
     size_t half = count / 2;

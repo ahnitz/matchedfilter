@@ -1174,6 +1174,10 @@ class CorrelationFilter(MatchedFilter):
             if valid_slice is not None:
                 vs = 0 if valid_slice.start is None else int(valid_slice.start)
                 ve = ser.size if valid_slice.stop is None else int(valid_slice.stop)
+                if vs < 0:
+                    vs = max(0, ser.size + vs)
+                if ve < 0:
+                    ve = max(0, ser.size + ve)
                 lo, hi = self.valid
                 b_start = st + lo
                 b_end = np.minimum(st + hi, ser.size)
