@@ -20,3 +20,4 @@ python/matchedfilter/.cache/
 # Local investigation notes and test caches
 .local/
 .pytest_cache/
+third_party/

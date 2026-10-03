@@ -18,6 +18,7 @@ It is reachable, but only by naming it.
 """
 import os
 
+from . import _cuda
 from . import _metal
 from . import _vulkan
 
@@ -132,17 +133,25 @@ def devices():
     out = [_cpu_device()]
 
     # Metal first, because on macOS it is the only way an Apple GPU can be
-    # seen at all -- there is no Vulkan driver there. Listing it does not
-    # claim it can be used: backend="metal" has no runtime yet and building
-    # a filter on it refuses, which is a better answer than reporting that
-    # a machine with a GPU has none.
+    # seen at all -- there is no Vulkan driver there.
     for i, d in enumerate(_metal.enumerate_devices()[0]):
         out.append(Device("gpu", i, d["name"], "metal",
                           arch=("apple",)))
 
+    # CUDA Driver next for NVIDIA devices: zero-runtime-dependency execution
+    cuda_devs, _ = _cuda.enumerate_devices()
+    base = len(out) - 1
+    for i, d in enumerate(cuda_devs):
+        i += base
+        out.append(Device("gpu", i, d["name"], "cuda",
+                          arch=("nvidia", d.get("cc", "sm_80"))))
+
     found, _ = _vulkan.enumerate_devices()
     base = len(out) - 1
     for i, d in enumerate(found):
+        # If this device is already represented by native CUDA, skip redundant Vulkan entry
+        if cuda_devs and d["vendor"] == 0x10DE:
+            continue
         i += base
         vendor = _VENDORS.get(d["vendor"])
         name = d["name"]
@@ -182,9 +191,11 @@ def parse(spec):
         return _cpu_device()
 
     kind, _, ordinal = text.partition(":")
+    if kind == "cuda":
+        kind = "gpu"
     if kind not in ("cpu", "gpu"):
         raise ValueError(
-            "unknown device %r -- expected 'cpu', 'gpu', 'gpu:<n>' or 'auto'"
+            "unknown device %r -- expected 'cpu', 'gpu', 'cuda', 'gpu:<n>' or 'auto'"
             % spec)
     if ordinal and not ordinal.isdigit():
         raise ValueError("device ordinal must be an integer, got %r" % spec)
