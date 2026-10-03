@@ -386,7 +386,7 @@ class Context(InputUploads):
         alt = base + "_lds32"
         if not any((_METAL_DIR / (alt + ext)).is_file()
                    for ext in (".metallib", ".metal")):
-            raise MetalError(
+            raise UnsupportedSize(
                 "n=%d needs %d KB of threadgroup memory, %s offers %d KB, "
                 "and no portable build was shipped for it"
                 % (n, need // 1024, self.name,
@@ -436,9 +436,9 @@ class Context(InputUploads):
         finally:
             self.o.call(desc, b"release", restype=None)
         if not pso:
-            raise MetalError(
-                "%s needs a %d-thread threadgroup and asking for one failed: "
-                "%s" % (stem, want, self._error(err)))
+            raise UnsupportedSize(
+                "%s needs a %d-thread threadgroup and asking for one failed on %s: "
+                "%s" % (stem, want, self.name, self._error(err)))
         return pso, int(self.o.call(pso, b"maxTotalThreadsPerThreadgroup",
                                     restype=ctypes.c_ulong))
 
@@ -1056,12 +1056,10 @@ class Context(InputUploads):
         compact = self.pipeline(band, "compactPairs")
         refine = self.pipeline(n, "refineListed", nbins == 1)
 
-        # Pairs that do not survive are never visited, so their -1 has to be
-        # there already. Metal has no fill on a compute encoder, and writing
-        # from the host is a 3 MB memcpy per call at 512x512 -- so the
-        # clear rides along in the compaction kernel, which walks every pair
-        # anyway. Only args needs a host write, and it is twelve bytes.
+        out = nd * nt * nbins
         bufs["args"].write(np.array([0, 1, 1], dtype=np.uint32))
+        bufs["idx"].write(np.full(out, -1, dtype=np.int32))
+        bufs["val"].write(np.zeros(out * 2, dtype=np.float32))
 
         cmd = self._command_buffer()
         enc = self.o.call(cmd, b"computeCommandEncoder")
@@ -1127,13 +1125,10 @@ class Context(InputUploads):
                  (nt, cstart, cend, cspan, shift_c & 0xFFFFFFFF, 1, 0),
                  ("cdata", "ct0", "cidx", "cval"), band)
 
-        # Compaction: one THREAD per pair, gathering the survivors and
-        # writing the -1 for everyone else. The refine used to launch a
-        # threadgroup for every pair so that each could read the coarse
-        # value and exit; on Vulkan that was 1.394 ms of a 2.437 ms call.
+        # Compaction: gather survivors
         dispatch(compact,
                  (pairs, bits(raw_thr), nbins),
-                 ("cval", "surv", "args", "idx", "val"), 0,
+                 ("cval", "surv", "args"), 0,
                  groups=(pairs + 255) // 256, tg=256)
 
         # The refine, over the compacted list, sized on the device.
