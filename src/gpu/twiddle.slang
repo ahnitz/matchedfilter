@@ -3,8 +3,10 @@
 // pipeline creation; other devices retain the original native instructions.
 #ifdef MF_VULKAN
 [[vk::constant_id(73)]] const uint mfAccurateTrig = 0;
+[[vk::constant_id(74)]] const uint mfSubgroupSize = 32;
 #else
 static const uint mfAccurateTrig = 0;
+static const uint mfSubgroupSize = 32;
 #endif
 
 float2 mfTwiddle(float angle)

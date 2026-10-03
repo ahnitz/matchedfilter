@@ -210,6 +210,15 @@ _SpecializationInfo = _struct("VkSpecializationInfo",
                              ("mapEntryCount", _u32),
                              ("pMapEntries", ctypes.POINTER(_SpecializationEntry)),
                              ("dataSize", ctypes.c_size_t), ("pData", _vp))
+_SubgroupProperties = _struct("VkPhysicalDeviceSubgroupProperties",
+                             ("sType", _u32), ("pNext", _vp),
+                             ("subgroupSize", _u32),
+                             ("supportedStages", _u32),
+                             ("supportedOperations", _u32),
+                             ("quadOperationsInAllStages", _u32))
+_PhysicalDeviceProperties2 = _struct("VkPhysicalDeviceProperties2",
+                                    ("sType", _u32), ("pNext", _vp),
+                                    ("properties", ctypes.c_ubyte * 2048))
 _ComputePipelineCreate = _struct("VkComputePipelineCreateInfo",
                                  ("sType", _u32), ("pNext", _vp), ("flags", _u32),
                                  ("stage", _StageCreate), ("layout", _vp),
@@ -377,17 +386,22 @@ class Context(InputUploads):
         vk.vkEnumeratePhysicalDevices(self.instance, ctypes.byref(count), handles)
         self.physical = _vp(handles[index])
 
-        self.queue_family = self._compute_queue_family()
-        priority = (ctypes.c_float * 1)(1.0)
-        qci = _QueueCreate(2, None, 0, self.queue_family, 1, priority)
+        self.queue_family, fam_qcount = self._compute_queue_family()
+        q_count = max(1, min(int(fam_qcount), 4))
+        priorities = (ctypes.c_float * q_count)(*(1.0 for _ in range(q_count)))
+        qci = _QueueCreate(2, None, 0, self.queue_family, q_count, priorities)
         dci = _DeviceCreate(3, None, 0, 1, ctypes.pointer(qci),
                             0, None, 0, None, None)
         self.device = _vp()
         _check(vk.vkCreateDevice(self.physical, ctypes.byref(dci), None,
                                  ctypes.byref(self.device)), "vkCreateDevice")
-        self.queue = _vp()
-        vk.vkGetDeviceQueue(self.device, self.queue_family, 0,
-                            ctypes.byref(self.queue))
+        self.queues = []
+        for q_idx in range(q_count):
+            q = _vp()
+            vk.vkGetDeviceQueue(self.device, self.queue_family, q_idx,
+                                ctypes.byref(q))
+            self.queues.append(q)
+        self.queue = self.queues[0]
 
         # What this device will actually give a workgroup. Several kernels
         # are built at 64 KB because that is fastest here, and Apple allows
@@ -416,6 +430,23 @@ class Context(InputUploads):
             ctypes.byref(props, _OFF_MAX_INVOCATIONS - 12),
             ctypes.POINTER(_u32))[0])
 
+        self.subgroup_size = 32
+        try:
+            if hasattr(vk, "vkGetPhysicalDeviceProperties2"):
+                sub_props = _SubgroupProperties(1000094000, None, 0, 0, 0, 0)
+                props2 = _PhysicalDeviceProperties2(
+                    1000059000,
+                    ctypes.cast(ctypes.pointer(sub_props), _vp),
+                    (ctypes.c_ubyte * 2048)()
+                )
+                vk.vkGetPhysicalDeviceProperties2.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+                vk.vkGetPhysicalDeviceProperties2.restype = None
+                vk.vkGetPhysicalDeviceProperties2(self.physical, ctypes.byref(props2))
+                if sub_props.subgroupSize > 0:
+                    self.subgroup_size = int(sub_props.subgroupSize)
+        except Exception:
+            self.subgroup_size = 32
+
         self.mem_props = _MemProps()
         vk.vkGetPhysicalDeviceMemoryProperties(self.physical,
                                                ctypes.byref(self.mem_props))
@@ -427,12 +458,10 @@ class Context(InputUploads):
                "vkCreateCommandPool")
 
     def _compute_queue_family(self):
-        """The first family with COMPUTE.
+        """The queue family with COMPUTE.
 
-        Not necessarily a dedicated compute family: a dedicated one can be
-        faster on discrete hardware, but choosing it is a tuning decision that
-        needs measuring on the device in question, and the universal family
-        is always correct.
+        Prefers dedicated compute queues (COMPUTE without GRAPHICS) when available
+        with multiple hardware queues, falling back to the universal family.
         """
         count = _u32(0)
         self.vk.vkGetPhysicalDeviceQueueFamilyProperties(
@@ -440,9 +469,13 @@ class Context(InputUploads):
         families = (_QueueFamily * count.value)()
         self.vk.vkGetPhysicalDeviceQueueFamilyProperties(
             self.physical, ctypes.byref(count), families)
+        # Dedicated compute queues with multiple hardware queues
+        for i, fam in enumerate(families):
+            if (fam.queueFlags & _QUEUE_COMPUTE) and not (fam.queueFlags & 1):
+                return i, fam.queueCount
         for i, fam in enumerate(families):
             if fam.queueFlags & _QUEUE_COMPUTE:
-                return i
+                return i, fam.queueCount
         raise VulkanError("device exposes no compute queue")
 
     def _get_fence(self, slot=0):
@@ -574,14 +607,27 @@ class Context(InputUploads):
                                          ctypes.byref(layout)),
                "vkCreatePipelineLayout")
 
-        special = None
+        entries = []
+        data_vals = []
+        offset = 0
+
+        # Subgroup specialization (constant ID 74)
+        entries.append(_SpecializationEntry(74, offset, 4))
+        data_vals.append(int(self.subgroup_size))
+        offset += 4
+
+        # Intel accurate trig (constant ID 73)
         if self._accurate_trig:
-            trig_value = _u32(1)
-            trig_entry = _SpecializationEntry(73, 0, ctypes.sizeof(trig_value))
-            trig_info = _SpecializationInfo(1, ctypes.pointer(trig_entry),
-                                            ctypes.sizeof(trig_value),
-                                            ctypes.cast(ctypes.pointer(trig_value), _vp))
-            special = ctypes.cast(ctypes.pointer(trig_info), _vp)
+            entries.append(_SpecializationEntry(73, offset, 4))
+            data_vals.append(1)
+            offset += 4
+
+        c_entries = (_SpecializationEntry * len(entries))(*entries)
+        c_data = (_u32 * len(data_vals))(*data_vals)
+        spec_info = _SpecializationInfo(len(entries), c_entries,
+                                        ctypes.sizeof(c_data),
+                                        ctypes.cast(ctypes.pointer(c_data), _vp))
+        special = ctypes.cast(ctypes.pointer(spec_info), _vp)
         stage = _StageCreate(18, None, 0, _STAGE_COMPUTE, module,
                              b"main", special)
         cp_info = _ComputePipelineCreate(29, None, 0, stage, layout, None, 0)
@@ -699,17 +745,23 @@ class Context(InputUploads):
                 def readback():
                     if fence is not None:
                         self._wait_fence(fence)
+                    surv_count = int(bufs["args_refine"].read(np.uint32, 1)[0])
+                    self.last_refinements = surv_count
+                    self.last_tier1_survivors = int(bufs["args_tier1"].read(np.uint32, 1)[0])
+                    if surv_count == 0:
+                        return np.full((nd, nt, nbins), -1, dtype=np.int32), np.zeros((nd, nt, nbins), dtype=np.complex64)
                     idx = bufs["idx"].read(np.int32, out).reshape(nd, nt, nbins)
                     val = bufs["val"].read(np.complex64, out).reshape(nd, nt, nbins)
-                    self.last_refinements = int(bufs["args_refine"].read(np.uint32, 1)[0])
-                    self.last_tier1_survivors = int(bufs["args_tier1"].read(np.uint32, 1)[0])
                     return idx, val
                 return readback
 
+            surv_count = int(bufs["args_refine"].read(np.uint32, 1)[0])
+            self.last_refinements = surv_count
+            self.last_tier1_survivors = int(bufs["args_tier1"].read(np.uint32, 1)[0])
+            if surv_count == 0:
+                return np.full((nd, nt, nbins), -1, dtype=np.int32), np.zeros((nd, nt, nbins), dtype=np.complex64)
             idx = bufs["idx"].read(np.int32, out).reshape(nd, nt, nbins)
             val = bufs["val"].read(np.complex64, out).reshape(nd, nt, nbins)
-            self.last_refinements = int(bufs["args_refine"].read(np.uint32, 1)[0])
-            self.last_tier1_survivors = int(bufs["args_tier1"].read(np.uint32, 1)[0])
             return idx, val
 
         key = ("hier", n, band, nd, nt, nbins, binsize, shift, lo, hi,
@@ -770,15 +822,21 @@ class Context(InputUploads):
             def readback():
                 if fence is not None:
                     self._wait_fence(fence)
+                surv_count = int(bufs["args"].read(np.uint32, 1)[0])
+                self.last_refinements = surv_count
+                if surv_count == 0:
+                    return np.full((nd, nt, nbins), -1, dtype=np.int32), np.zeros((nd, nt, nbins), dtype=np.complex64)
                 idx = bufs["idx"].read(np.int32, out).reshape(nd, nt, nbins)
                 val = bufs["val"].read(np.complex64, out).reshape(nd, nt, nbins)
-                self.last_refinements = int(bufs["args"].read(np.uint32, 1)[0])
                 return idx, val
             return readback
 
+        surv_count = int(bufs["args"].read(np.uint32, 1)[0])
+        self.last_refinements = surv_count
+        if surv_count == 0:
+            return np.full((nd, nt, nbins), -1, dtype=np.int32), np.zeros((nd, nt, nbins), dtype=np.complex64)
         idx = bufs["idx"].read(np.int32, out).reshape(nd, nt, nbins)
         val = bufs["val"].read(np.complex64, out).reshape(nd, nt, nbins)
-        self.last_refinements = int(bufs["args"].read(np.uint32, 1)[0])
         return idx, val
 
     def _descriptor_set(self, set_layout, bufs, offsets=None):
@@ -867,7 +925,7 @@ class Context(InputUploads):
         # VGPRs with 18 SPILLED and 2304 bytes of scratch: the worst kernel
         # in the build, existing only to be compiled.
         kpipe, klayout, kset_layout = self._build_pipeline(
-            "compact", "compact.spv", 5, 12)
+            "compact", "compact.spv", 3, 12)
         refine_file = self._peak_file(n, nbins, refine=True)
         rpipe, rlayout, rset_layout = self._build_pipeline(
             ("refine", refine_file), refine_file, 5, _PUSH_BYTES)
@@ -887,8 +945,8 @@ class Context(InputUploads):
                 # stays one recorded command buffer.
                 "surv":  _Buffer(self, pairs * 4),
                 "args":  _Buffer(self, 12, usage=_BUF_STORAGE | _BUF_INDIRECT | _BUF_TRANSFER_DST),
-                "idx":   _Buffer(self, nd * nt * nbins * 4, readback=True),
-                "val":   _Buffer(self, nd * nt * nbins * 8, readback=True),
+                "idx":   _Buffer(self, nd * nt * nbins * 4, readback=True, usage=_BUF_STORAGE | _BUF_TRANSFER_DST),
+                "val":   _Buffer(self, nd * nt * nbins * 8, readback=True, usage=_BUF_STORAGE | _BUF_TRANSFER_DST),
             }
             self._storage[key] = b
         # The tiled coarse kernel reports a magnitude per pair and nothing
@@ -900,16 +958,8 @@ class Context(InputUploads):
         else:
             ds_coarse = self._descriptor_set(cset_layout,
                                            [b["cdata"], b["ct0"], b["cidx"], b["cval"]])
-        # The refine reads the EVEN buffer for both coarse inputs. The odd
-        # half is gone -- the coarse grid is critically sampled and the even
-        # series is the whole answer -- so binding eval twice makes the
-        # kernel's `od` equal its `ev`, `best` reduce to `ev`, and its
-        # two-test predicate collapse to one comparison. No kernel rebuild:
-        # the shader already computes exactly this when the two buffers
-        # agree, which is how the odd pass itself was implemented.
         ds_compact = self._descriptor_set(
-            kset_layout, [b["cval"], b["surv"], b["args"],
-                          b["idx"], b["val"]])
+            kset_layout, [b["cval"], b["surv"], b["args"]])
         ds_listed = self._descriptor_set(
             rset_layout,
             [b["data"], b["tmpl"], b["idx"], b["val"], b["surv"]])
@@ -980,6 +1030,8 @@ class Context(InputUploads):
         # slots the refine is about to fill anyway.
         vk.vkCmdFillBuffer(cmd, b["args"].handle, 0, 4, 0)   # count starts at 0
         vk.vkCmdFillBuffer(cmd, b["args"].handle, 4, 8, 1)   # y = z = 1
+        vk.vkCmdFillBuffer(cmd, b["idx"].handle, 0, _WHOLE_SIZE, 0xFFFFFFFF)
+        vk.vkCmdFillBuffer(cmd, b["val"].handle, 0, _WHOLE_SIZE, 0)
         # Compaction atomically updates the filled count, and indirect fetch
         # reads all three words. With zero survivors, even the count remains
         # a transfer-only write: the later shader-write barrier cannot cover it.
@@ -1053,7 +1105,7 @@ class Context(InputUploads):
             _NBIND, _PUSH_BYTES)
 
         kpipe, klayout, kset_layout = self._build_pipeline(
-            "compact", "compact.spv", 5, 12)
+            "compact", "compact.spv", 3, 12)
 
         refine_file1 = self._peak_file(band1, 1, refine=True)
         cpipe1, clayout1, cset_layout1 = self._build_pipeline(
@@ -1081,19 +1133,19 @@ class Context(InputUploads):
                 "cval1":       _Buffer(self, pairs * 8, usage=_BUF_STORAGE | _BUF_TRANSFER_DST),
                 "surv1":       _Buffer(self, pairs * 4),
                 "args_refine": _Buffer(self, 12, usage=_BUF_STORAGE | _BUF_INDIRECT | _BUF_TRANSFER_DST),
-                "idx":         _Buffer(self, nd * nt * nbins * 4, readback=True),
-                "val":         _Buffer(self, nd * nt * nbins * 8, readback=True),
+                "idx":         _Buffer(self, nd * nt * nbins * 4, readback=True, usage=_BUF_STORAGE | _BUF_TRANSFER_DST),
+                "val":         _Buffer(self, nd * nt * nbins * 8, readback=True, usage=_BUF_STORAGE | _BUF_TRANSFER_DST),
             }
             self._storage[key] = b
 
         ds_coarse0 = self._descriptor_set(
             cset_layout0, [b["cdata0"], b["ct0"], b["cidx0"], b["cval0"]])
         ds_compact0 = self._descriptor_set(
-            kset_layout, [b["cval0"], b["surv0"], b["args_tier1"], b["idx"], b["val"]])
+            kset_layout, [b["cval0"], b["surv0"], b["args_tier1"]])
         ds_tier1 = self._descriptor_set(
             cset_layout1, [b["cdata1"], b["ct1"], b["cidx1"], b["cval1"], b["surv0"]])
         ds_compact1 = self._descriptor_set(
-            kset_layout, [b["cval1"], b["surv1"], b["args_refine"], b["idx"], b["val"]])
+            kset_layout, [b["cval1"], b["surv1"], b["args_refine"]])
         ds_listed = self._descriptor_set(
             rset_layout, [b["data"], b["tmpl"], b["idx"], b["val"], b["surv1"]])
 
@@ -1124,6 +1176,8 @@ class Context(InputUploads):
         vk.vkCmdFillBuffer(cmd, b["args_refine"].handle, 0, 4, 0)
         vk.vkCmdFillBuffer(cmd, b["args_refine"].handle, 4, 8, 1)
         vk.vkCmdFillBuffer(cmd, b["cval1"].handle, 0, pairs * 8, 0)
+        vk.vkCmdFillBuffer(cmd, b["idx"].handle, 0, _WHOLE_SIZE, 0xFFFFFFFF)
+        vk.vkCmdFillBuffer(cmd, b["val"].handle, 0, _WHOLE_SIZE, 0)
         barrier(src_stage=_STAGE_TRANSFER_BIT, src_access=_ACCESS_TRANSFER_WRITE,
                 dst_stage=_STAGE_COMPUTE_BIT | _STAGE_DRAW_INDIRECT_BIT,
                 dst_access=_ACCESS_SHADER_READ | _ACCESS_SHADER_WRITE | _ACCESS_INDIRECT_READ)
@@ -1223,17 +1277,21 @@ class Context(InputUploads):
         factory = (lambda ctx, size: _Buffer(ctx, size, readback=True)) if readback else _Buffer
         return empty_shared(self, factory, shape, dtype)
 
-    def forward(self, n, series, starts, spectra, *, defer=False, slot=None):
+    def _forward_fused(self, n, series, starts, spectra, *, defer=False, slot=None):
+        """Dispatch fused forward FFT kernel path."""
+        return self.forward(n, series, starts, spectra, defer=defer, slot=slot, fused=True)
+
+    def forward(self, n, series, starts, spectra, *, defer=False, slot=None, fused=False):
         """Gather and normalize forward FFTs directly into shared spectra."""
         if n > 65536:
-            return self._forward_tierc(n, series, starts, spectra, defer=defer, slot=slot)
+            return self._forward_tierc(n, series, starts, spectra, defer=defer, slot=slot, fused=fused)
         vk = self.vk
         pipe, layout, sl = self._build_pipeline(
             ("forward", n), "forward_%d.spv" % n, 3, 4)
         buffers = [shared_buffer(a, self) for a in (series, starts, spectra)]
         if any(b is None for b in buffers):
             raise ValueError("forward buffers must belong to this GPU context")
-        key = (n, series.size, spectra.shape[0],
+        key = (n, series.size, spectra.shape[0], fused,
                *(a.ctypes.data for a in (series, starts, spectra)))
         forwards = getattr(self, "_forwards", None)
         if forwards is None:
@@ -1277,14 +1335,14 @@ class Context(InputUploads):
         else:
             self._submit(cmd, slot=slot)
 
-    def _forward_tierc(self, n, series, starts, spectra, *, defer=False, slot=None):
+    def _forward_tierc(self, n, series, starts, spectra, *, defer=False, slot=None, fused=False):
         info = _manifest().get('full_tierc', {}).get(str(n))
         if info is None:
             raise UnsupportedSize('no two-stage series FFT for n=%d' % n)
         buffers = [shared_buffer(a, self) for a in (series, starts, spectra)]
         if any(b is None for b in buffers):
             raise ValueError('two-stage forward buffers must belong to this GPU context')
-        key = ('tierc', n, series.size, spectra.shape[0],
+        key = ('tierc', n, series.size, spectra.shape[0], fused, slot,
                *(a.ctypes.data for a in (series, starts, spectra)))
         forwards = getattr(self, '_forwards', None)
         if forwards is None:
@@ -1295,7 +1353,19 @@ class Context(InputUploads):
             p2, l2, sl2 = self._build_pipeline(('tc-fwd2', n), info['fwd2']['file'], 2, 0)
             self._cache_room(spectra.nbytes, incoming=buffers)
             pool_start = len(getattr(self, '_pools', []))
-            scratch = _Buffer(self, spectra.nbytes)
+            slot_key = slot if slot is not None else 0
+            if getattr(self, '_persistent_scratch', None) is None:
+                self._persistent_scratch = {}
+            if spectra.shape[0] * n * 8 <= 64 * 1024 * 1024:
+                scratch_buf = self._persistent_scratch.get(slot_key)
+                if scratch_buf is None or scratch_buf.nbytes < spectra.nbytes:
+                    if scratch_buf is not None:
+                        scratch_buf.destroy()
+                    scratch_buf = _Buffer(self, max(spectra.nbytes, 64 * 1024 * 1024))
+                    self._persistent_scratch[slot_key] = scratch_buf
+                scratch = scratch_buf
+            else:
+                scratch = _Buffer(self, spectra.nbytes)
             ds1 = self._descriptor_set(sl1, (buffers[0], buffers[1], scratch))
             ds2 = self._descriptor_set(sl2, (scratch, buffers[2]))
             cmd = _vp()
@@ -1374,13 +1444,14 @@ class Context(InputUploads):
             return
         cmds = (_vp * len(commands))(*commands)
         submit = _SubmitInfo(4, None, 0, None, None, len(commands), cmds, 0, None)
-        _check(self.vk.vkQueueSubmit(self.queue, 1, ctypes.byref(submit), fence),
+        queue = self.queues[slot % len(self.queues)] if (getattr(self, "queues", None) and slot is not None) else self.queue
+        _check(self.vk.vkQueueSubmit(queue, 1, ctypes.byref(submit), fence),
                "vkQueueSubmit")
         if wait:
             if fence is not None:
                 self._wait_fence(fence)
             else:
-                _check(self.vk.vkQueueWaitIdle(self.queue), "vkQueueWaitIdle")
+                _check(self.vk.vkQueueWaitIdle(queue), "vkQueueWaitIdle")
 
     def _make_batch(self, key, n, nd, nt, nbins, binsize, shift, lo, hi, t2, data=None, tmpl=None):
         """Buffers, descriptor set and a recorded command buffer for one shape."""
@@ -1937,8 +2008,9 @@ class Context(InputUploads):
         self.vk.vkFreeCommandBuffers.argtypes = [_vp, _vp, _u32, ctypes.POINTER(_vp)]
         self.vk.vkFreeCommandBuffers(self.device, self.command_pool, 1, commands)
         if kind in ('full', 'tierc', 'forward'):
+            p_bufs = set(self._persistent_scratch.values()) if isinstance(getattr(self, '_persistent_scratch', None), dict) else set()
             for buf in batch[:-1]:
-                if not hasattr(buf, 'owner'):
+                if buf not in p_bufs and buf is not getattr(self, '_persistent_scratch', None) and not hasattr(buf, 'owner'):
                     buf.destroy()
         pools = self._record_pools.pop(token, [])
         for pool in pools:
@@ -1970,6 +2042,14 @@ class Context(InputUploads):
         for pool in getattr(self, '_pools', []):
             self.vk.vkDestroyDescriptorPool(self.device, pool, None)
         self._pools = []
+        if getattr(self, "_persistent_scratch", None) is not None:
+            if isinstance(self._persistent_scratch, dict):
+                for sbuf in self._persistent_scratch.values():
+                    sbuf.destroy()
+                self._persistent_scratch.clear()
+            else:
+                self._persistent_scratch.destroy()
+                self._persistent_scratch = None
         self._cache_order = {}
         self._uploaded = {"data": {}, "tmpl": {}}
 
