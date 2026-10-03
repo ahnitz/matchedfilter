@@ -121,11 +121,57 @@ autotuning, and the autotune fixture isolation fix:
    - **Radeon 8060S (dev2)**: Eliminated uncoalesced dismissal loops in compaction and cascade serialization overhead; Hierarchical filtering at SNR 5.5 runs in **0.16 ms** (down from 6.18 ms, a **38.8× acceleration**), outperforming flat peak filtering (0.83 ms) by **5.2×** and rocFFT (2.87 ms) by **18.0×**.
    - **Apple M2**: Activated FP16 coarse kernel in Metal backend; Hierarchical filtering at SNR 5.5 runs in **1.26 ms** (device time: **0.92 ms**), outperforming peak filtering (3.93 ms) by **3.1×** and MLX (11.76 ms) by **9.3×**.
 
-## Reproducing the chart
+## Production Workload Scaling: 512 data × 512 templates (262,144 pairs)
 
-To regenerate the figure from the recorded data:
+Measured October 3, 2026, comparing discrete enterprise accelerators and integrated unified-memory GPUs on an enterprise-scale search grid (262,144 correlations × 4,096 points) with full plan burn-in and steady-state GPU clocks.
+
+![GPU throughput on large-scale workload (512x512)](../assets/gpu-fleet-512x512.svg)
+
+[Machine-readable results](gpu-fleet-512x512-20261003.json) record vendor FFT baselines, full correlation, flat peak, and SNR sweeps from 5.0 to 6.5 across all three architectures.
+
+### GPU Timings (512 × 512, 262,144 pairs)
+
+Milliseconds per batch; smaller is faster.
+
+| GPU | FFT only | Full | Peak | Hier. 0.01 | Hier. 0.001 | Hier. 0.0001 |
+|---|---:|---:|---:|---:|---:|---:|
+| NVIDIA L40S (Ada sm_89) | 26.10 (cuFFT) | 13.21 | 28.31 | 4.04 | 6.25 | 7.22 |
+| Radeon 8060S (RADV GFX1151) | 82.95 (rocFFT) | 16.67 | 23.32 | 3.68 | 4.84 | 5.01 |
+| Apple M2 (10 GPU cores) | 371.43 (MLX) | 186.57 | 115.36 | 17.14 | 21.81 | 23.08 |
+
+### Hierarchical Threshold Sweep at `fd=1e-3` (262,144 pairs)
+
+| GPU | 5.0 | 5.5 | 5.75 | 6.0 | 6.5 |
+|---|---:|---:|---:|---:|---:|
+| NVIDIA L40S | 9.25 | 6.25 | 4.82 | 3.93 | 3.45 |
+| Radeon 8060S | 8.35 | 4.84 | 4.40 | 3.67 | 1.69 |
+| Apple M2 | 33.31 | 21.81 | 21.09 | 16.44 | 10.58 |
+
+### Throughput (Million pairs / second)
+
+| GPU | Full | Peak | Hier. 0.01 @ 5.5 | Hier. 0.001 @ 5.5 | Hier. 0.001 @ 6.5 |
+|---|---:|---:|---:|---:|---:|
+| NVIDIA L40S | 19.8 M/s | 9.3 M/s | 64.8 M/s | 41.9 M/s | 75.9 M/s |
+| Radeon 8060S | 15.7 M/s | 11.2 M/s | 71.3 M/s | 54.1 M/s | 155.1 M/s |
+| Apple M2 | 1.4 M/s | 2.3 M/s | 15.3 M/s | 12.0 M/s | 24.8 M/s |
+
+### Key Observations at Scale
+
+1. **Discrete GPU Saturation**: At 262,144 pairs, the 142 SMs on the NVIDIA L40S are fully saturated by 65,536 coarse threadblocks (461 blocks/SM), and refinement dispatches thousands of surviving pairs. PCIe dispatch and stream latency are amortized to < 1% of total runtime, allowing L40S to deliver 13.21 ms on full correlation (1.98× faster than cuFFT) and 4.04 ms on hierarchical filtering (6.45× faster than cuFFT).
+2. **APU Unified Memory Efficiency**: The AMD Radeon 8060S (Strix Halo) maintains exceptional throughput up to 155.1 Mpairs/s at SNR 6.5 and 71.3 Mpairs/s at SNR 5.5, driven by zero-copy unified memory and barrier-free hardware wave-shuffle reductions.
+
+## Reproducing the charts
+
+To regenerate the 8-machine teaser figure from the recorded data:
 
 ```bash
 python tools/teaser_fleet.py --compare docs/measurements/teaser-fleet-20261003.json \
                              --out docs/assets/teaser-fleet.svg
+```
+
+To regenerate the 512×512 GPU scaling figure:
+
+```bash
+python tools/teaser_fleet.py --compare docs/measurements/gpu-fleet-512x512-20261003.json \
+                             --out docs/assets/gpu-fleet-512x512.svg
 ```

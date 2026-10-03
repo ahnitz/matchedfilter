@@ -25,10 +25,23 @@ import numpy as np
 import matchedfilter as mf
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tests'))
-N, ND, NT = 4096, 16, 512
+N = int(os.environ.get('MF_TEASER_N', '4096'))
+ND = int(os.environ.get('MF_TEASER_NDATA', '16'))
+NT = int(os.environ.get('MF_TEASER_NTMPL', '512'))
 PAIRS = ND * NT
 BUDGETS = (1e-2, 1e-3, 1e-4)
 _DETAILS = {}
+
+
+def set_workload(n=None, nd=None, nt=None):
+    global N, ND, NT, PAIRS
+    if n is not None:
+        N = int(n)
+    if nd is not None:
+        ND = int(nd)
+    if nt is not None:
+        NT = int(nt)
+    PAIRS = ND * NT
 
 
 REFERENCE_PROFILE = 'tests/data/reference_profile_pycbc.npy'
@@ -62,22 +75,23 @@ def _case(seed=1):
     return d, _reference()[1]
 
 
-def _timed(fn, reps):
+def _timed(fn, reps, min_warmup=5):
     """Sustained warmup and block medians; preserve variability for review.
 
-    Three calls were insufficient to establish steady GPU clocks. Blocks
-    also avoid giving a microsecond-scale timer sample undue weight. This
-    cannot make a concurrently loaded machine suitable for benchmarking.
+    Ensures both a duration floor (0.5 s) and a call count floor (min_warmup)
+    so steady-state clocks and driver plans burn in across all workload sizes.
     """
     until = time.perf_counter() + .5
-    while time.perf_counter() < until:
+    warmup_count = 0
+    while (time.perf_counter() < until) or (warmup_count < min_warmup):
         fn()
+        warmup_count += 1
     values = []
     counts = []
     for _ in range(reps):
         start = time.perf_counter()
         count = 0
-        while time.perf_counter() - start < .05:
+        while (time.perf_counter() - start < .05) or (count < 1):
             fn()
             count += 1
         values.append((time.perf_counter()-start)*1000/count)
@@ -183,6 +197,9 @@ def _filter_ms(kind, device, reps, fd, snr=5.5):
             while getattr(f, "autotune_info", {}).get("status") in ("uninitialized", "tuning") and settle_count < max(10, max_settle):
                 f.run(binsize=N, threshold=snr)
                 settle_count += 1
+            # Plan burn-in: ensure post-lock steady state with the winning configuration
+            for _ in range(3):
+                f.run(binsize=N, threshold=snr)
 
         if kind == 'full':
             output = f.empty_shared((ND, NT, N))
@@ -273,11 +290,12 @@ def rocfft_ms(reps=7):
             checked(hip.hipMalloc(ctypes.byref(work), size.value), 'work allocation')
             checked(roc.rocfft_execution_info_set_work_buffer(info, work, size), 'work buffer')
         ins = (vp * 1)(buf)
+        n_queued = 1 if (PAIRS * N * 8 >= (512 << 20)) else 8
         def batch():
-            for _ in range(8):
+            for _ in range(n_queued):
                 checked(roc.rocfft_execute(plan, ins, None, info), 'rocfft_execute')
             checked(hip.hipDeviceSynchronize(), 'hipDeviceSynchronize')
-        return _timed(batch, reps) / 8
+        return _timed(batch, reps, min_warmup=2) / n_queued
     finally:
         if info: roc.rocfft_execution_info_destroy(info)
         if plan: roc.rocfft_plan_destroy(plan)
@@ -336,11 +354,12 @@ def cufft_ms(reps=7):
         raise RuntimeError(f"cufftPlan1d failed: {res}")
 
     try:
+        n_queued = 1 if (PAIRS * N * 8 >= (512 << 20)) else 8
         def batch():
-            for _ in range(8):
+            for _ in range(n_queued):
                 cufft.cufftExecC2C(plan, dptr, dptr, 1)  # 1 = CUFFT_INVERSE
             check_cuda(cuda.cuStreamSynchronize(ctx.stream), "cuStreamSynchronize")
-        return _timed(batch, reps) / 8
+        return _timed(batch, reps, min_warmup=2) / n_queued
     finally:
         cufft.cufftDestroy(plan)
         cuda.cuMemFree_v2(dptr)
@@ -348,7 +367,7 @@ def cufft_ms(reps=7):
 
 
 def mlx_ms(reps=7):
-    """Resident full-batch IFFT; eight queued executions per synchronization.
+    """Resident full-batch IFFT; queued executions per synchronization.
 
     MLX owns its result allocations. No product, peak scan or NumPy copy is
     timed, matching the operation scope of the rocFFT reference.
@@ -357,14 +376,15 @@ def mlx_ms(reps=7):
     mx.set_default_device(mx.gpu)
     a = mx.zeros((PAIRS, N), dtype=mx.complex64)
     mx.eval(a)
+    n_queued = 1 if (PAIRS * N * 8 >= (512 << 20)) else 8
     def batch():
         results = []
-        for _ in range(8):
+        for _ in range(n_queued):
             value = mx.fft.ifft(a, axis=-1, norm='forward')
             mx.async_eval(value)
             results.append(value)
         mx.synchronize()
-    return _timed(batch, reps) / 8
+    return _timed(batch, reps, min_warmup=2) / n_queued
 
 
 def _cpu_name():
