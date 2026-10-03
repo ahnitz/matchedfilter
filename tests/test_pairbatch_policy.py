@@ -186,3 +186,30 @@ def test_haswell_coarse_windows(window, thr):
                 np.testing.assert_allclose(got_m2, ref_max_m2[d, t],
                                            rtol=5e-5, atol=1e-6)
 
+
+@pytest.mark.parametrize("n", [256, 512, 1024])
+def test_pairbatch_nd4_matches_balanced(n, monkeypatch):
+    """When nd=4 (typical for Haswell series_group=4), pairbatch must match balanced."""
+    nd, nt = 4, 32
+    rng = np.random.default_rng(42 + n)
+    def noise(shape):
+        return (rng.normal(size=shape) + 1j*rng.normal(size=shape)).astype(np.complex64)
+    data, templates = noise((nd, n)), noise((nt, n))
+
+    monkeypatch.setenv("MF_PBMAX", "128")
+    ref = mf.MatchedFilter(n, nd, nt)
+    ref.set_data(data)
+    ref.set_templates(templates)
+    want, wc = ref.run(binsize=n, threshold=2.0 * np.sqrt(n), counts=True)
+
+    monkeypatch.delenv("MF_PBMAX")
+    got_mf = mf.MatchedFilter(n, nd, nt)
+    got_mf.set_data(data)
+    got_mf.set_templates(templates)
+    got, gc = got_mf.run(binsize=n, threshold=2.0 * np.sqrt(n), counts=True)
+
+    np.testing.assert_array_equal(got["index"], want["index"])
+    np.testing.assert_allclose(got["value"], want["value"], rtol=2e-5, atol=1e-4)
+    np.testing.assert_array_equal(gc, wc)
+
+
