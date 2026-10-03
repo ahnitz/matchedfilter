@@ -1791,7 +1791,9 @@ def candidate_configs(power, n, snr, fd, tuning=None, pairs=None, device=None, c
     candidates = [single_choice]
     rejected = []
 
-    if cascade:
+    is_gpu = getattr(device, "kind", None) == "gpu" or (isinstance(device, str) and device.lower().startswith("gpu"))
+    is_cuda = getattr(device, "backend", None) == "cuda"
+    if cascade and not is_cuda and (not is_gpu or (pairs is not None and pairs >= 16384)):
         b_single, K = single_choice
         min_floor = _min_band_for(device, tuning)
         for b0 in [b_single // 2, b_single // 4]:
@@ -2353,6 +2355,8 @@ class HierarchicalFilter(MatchedFilter):
             self.cascade = True
             b_target = cfg.b1 if isinstance(cfg, CascadeConfig) else cfg[1]
         else:
+            self.cascade = False
+            self.cascade_band = None
             b_target = cfg[0]
         self._target_band = b_target
         # GPU path
@@ -2440,6 +2444,8 @@ class HierarchicalFilter(MatchedFilter):
             effective_blocks = float(valid_samples) / float(self.n)
         else:
             effective_blocks = float(nb)
+        if self._gpu is not None and getattr(self._gpu, "last_gpu_time", 0) > 0:
+            dt = self._gpu.last_gpu_time
         norm_factor = float(self.ndata * nt * effective_blocks)
         time_per_pair = (dt * 1000.0) / max(1e-6, norm_factor)
 

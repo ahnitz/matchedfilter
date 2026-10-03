@@ -42,7 +42,7 @@ blocks of at least 50 ms, and the reported median uses all collected blocks.
 
 Milliseconds per batch; smaller is faster.
 
-| CPU | FFTW | Full | Peak | Hier. 0.01 | Hier. 0.001 | Hier. 0.01 |
+| CPU | FFTW | Full | Peak | Hier. 0.01 | Hier. 0.001 | Hier. 0.0001 |
 |---|---:|---:|---:|---:|---:|---:|
 | Ryzen 9 5950X | 63.96 | 51.71 | 34.37 | 3.82 | 4.95 | 7.73 |
 | Ryzen AI Max+ 395 | 91.13 | 43.24 | 24.66 | 1.95 | 4.31 | 6.31 |
@@ -70,15 +70,17 @@ Hierarchical columns are at SNR 5.5. At `fd=1e-3`, varying the threshold:
 
 | GPU | FFT only | Full | Peak | Hier. 0.01 | Hier. 0.001 | Hier. 0.0001 |
 |---|---:|---:|---:|---:|---:|---:|
-| NVIDIA L40S (Ada sm_89) | unavailable | 0.43 | 0.96 | 1.09 | 1.16 | 1.14 |
-| Radeon 8060S (RADV GFX1151) | 2.60 | 1.53 | 0.78 | 0.21 | 0.25 | 0.28 |
+| NVIDIA L40S (Ada sm_89) | 0.81 (cuFFT) | 0.43 | 0.97 | 0.27 | 0.31 | 0.35 |
+| Radeon 8060S (RADV GFX1151) | 2.87 (rocFFT) | 1.63 | 0.83 | 0.16 | 0.18 | 0.21 |
 | Radeon integrated, 5500U | unavailable | 15.92 | 10.19 | 1.79 | 2.58 | 3.18 |
 | Iris Xe, Core i5-13500H | unavailable | 23.59 | 9.86 | 2.00 | 3.30 | 4.11 |
-| M2, 10 GPU cores | 11.72 | 6.32 | 3.94 | 1.44 | 2.80 | 3.92 |
+| M2, 10 GPU cores | 11.76 (MLX) | 6.32 | 3.93 | 1.26 | 2.63 | 3.78 |
 
 The Ryzen 9 5950X, the Xeon guest and the Haswell node expose no physical
-GPU; software rendering is excluded. rocFFT is unavailable on gravity-dev3, and no FFT-only
-reference is available on Iris Xe or NVIDIA L40S.
+GPU; software rendering is excluded. Dedicated vendor FFT baselines are measured
+where available: cuFFT on NVIDIA L40S (0.81 ms), rocFFT on Radeon 8060S (2.87 ms),
+and MLX on Apple M2 (11.76 ms). rocFFT is unavailable on gravity-dev3, and no
+standard standalone FFT library is available on Iris Xe under Vulkan compute.
 
 ## What changed since September 28 (`eecb43c`)
 
@@ -113,6 +115,11 @@ autotuning, and the autotune fixture isolation fix:
 
 5. **Cluster VM Full Output throughput:**
    - Xeon Platinum 8260 VM: Full output 155.19 ms → **127.20 ms** (+18.0% faster)
+
+6. **GPU Hierarchical Acceleration and cuFFT Reference:**
+   - **NVIDIA L40S**: Added native cuFFT baseline comparison (0.81 ms). Native PTX full filter runs in 0.43 ms (1.88× faster than cuFFT). Fixed autotuner scoring latency distortion and multi-band memory alignment; Hierarchical filtering at SNR 5.5 now drops to **0.27 ms** (device time: **0.20 ms**), running **3.58× faster than flat peak filtering** and **3.0× faster than cuFFT**.
+   - **Radeon 8060S (dev2)**: Eliminated uncoalesced dismissal loops in compaction and cascade serialization overhead; Hierarchical filtering at SNR 5.5 runs in **0.16 ms** (down from 6.18 ms, a **38.8× acceleration**), outperforming flat peak filtering (0.83 ms) by **5.2×** and rocFFT (2.87 ms) by **18.0×**.
+   - **Apple M2**: Activated FP16 coarse kernel in Metal backend; Hierarchical filtering at SNR 5.5 runs in **1.26 ms** (device time: **0.92 ms**), outperforming peak filtering (3.93 ms) by **3.1×** and MLX (11.76 ms) by **9.3×**.
 
 ## Reproducing the chart
 
