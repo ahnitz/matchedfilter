@@ -1770,9 +1770,22 @@ def candidate_configs(power, n, snr, fd, tuning=None, pairs=None, device=None, c
             candidates: list of valid configurations [single_choice, cascade_choice_1, ...]
             rejected: list of dicts [{"config": cfg, "reason": str}]
     """
-    if tuning is None:
+    if tuning is None and os.environ.get("MF_NO_COST_TABLE") != "1":
         tuning = _load_tuning_for(device) if device is not None else _load_tuning()
-    cands = _cost_candidates(power, n, snr, tuning, fd, pairs)
+    use_tables = os.environ.get("MF_NO_COST_TABLE") != "1"
+    cands = _cost_candidates(power, n, snr, tuning, fd, pairs) if (tuning is not None and use_tables) else []
+    if not cands:
+        min_floor = _min_band_for(device, tuning)
+        b = min_floor
+        cand_list = []
+        while b < n:
+            g = choose_threshold(power, n, snr, fd, b)
+            if g is not None:
+                cost = _complexity_cost(power, n, snr, fd, b)
+                if cost is not None:
+                    cand_list.append(dict(band=b, K=8, cost=cost))
+            b *= 2
+        cands = sorted(cand_list, key=lambda c: (c["cost"], c["band"]))
     single_choice = None
     for candidate in cands:
         band = candidate["band"]
@@ -2092,7 +2105,7 @@ class HierarchicalFilter(MatchedFilter):
             else:
                 _, self._cost_key = cost_table_for(self.device)
                 tuning = _load_tuning_for(self.device)
-                if tuning is not None:
+                if tuning is not None and os.environ.get("MF_NO_COST_TABLE") != "1":
                     cov_ns = {k[0] for rows in (tuning["cost"], tuning.get("cost_fd", {}), tuning.get("cost_fd_pairs", {})) for k in rows}
                     if cov_ns and self.n not in cov_ns:
                         raise ValueError(_uncovered_message(self.n, self.snr, self.fd))
