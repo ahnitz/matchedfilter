@@ -123,11 +123,11 @@ autotuning, and the autotune fixture isolation fix:
 
 ## Production Workload Scaling: 512 data × 512 templates (262,144 pairs)
 
-Measured October 3, 2026, comparing discrete enterprise accelerators and integrated unified-memory GPUs on an enterprise-scale search grid (262,144 correlations × 4,096 points) with full plan burn-in and steady-state GPU clocks.
+Measured October 3, 2026, comparing discrete enterprise accelerators (NVIDIA A100 80GB, L40S 48GB, A40 48GB) and integrated unified-memory GPUs (AMD Radeon 8060S, Apple M2) on an enterprise-scale search grid (262,144 correlations × 4,096 points) with full plan burn-in and steady-state GPU clocks.
 
 ![GPU throughput on large-scale workload (512x512)](../assets/gpu-fleet-512x512.svg)
 
-[Machine-readable results](gpu-fleet-512x512-20261003.json) record vendor FFT baselines, full correlation, flat peak, and SNR sweeps from 5.0 to 6.5 across all three architectures.
+[Machine-readable results](gpu-fleet-512x512-20261003.json) record vendor FFT baselines, full correlation, flat peak, and SNR sweeps from 5.0 to 6.5 across all five GPU architectures.
 
 ### GPU Timings (512 × 512, 262,144 pairs)
 
@@ -135,7 +135,9 @@ Milliseconds per batch; smaller is faster.
 
 | GPU | FFT only | Full | Peak | Hier. 0.01 | Hier. 0.001 | Hier. 0.0001 |
 |---|---:|---:|---:|---:|---:|---:|
-| NVIDIA L40S (Ada sm_89) | 26.10 (cuFFT) | 13.21 | 28.31 | 4.04 | 6.25 | 7.22 |
+| NVIDIA A100 80GB (Ampere sm_80) | 10.41 (cuFFT) | 20.11 | 62.32 | 8.89 | 14.95 | 17.15 |
+| NVIDIA L40S 48GB (Ada sm_89) | 26.10 (cuFFT) | 13.21 | 28.31 | 4.04 | 6.25 | 7.22 |
+| NVIDIA A40 48GB (Ampere sm_86) | 30.70 (cuFFT) | 39.75 | 87.82 | 11.60 | 18.60 | 21.58 |
 | Radeon 8060S (RADV GFX1151) | 82.95 (rocFFT) | 16.67 | 23.32 | 3.68 | 4.84 | 5.01 |
 | Apple M2 (10 GPU cores) | 371.43 (MLX) | 186.57 | 115.36 | 17.14 | 21.81 | 23.08 |
 
@@ -143,22 +145,27 @@ Milliseconds per batch; smaller is faster.
 
 | GPU | 5.0 | 5.5 | 5.75 | 6.0 | 6.5 |
 |---|---:|---:|---:|---:|---:|
-| NVIDIA L40S | 9.25 | 6.25 | 4.82 | 3.93 | 3.45 |
-| Radeon 8060S | 8.35 | 4.84 | 4.40 | 3.67 | 1.69 |
-| Apple M2 | 33.31 | 21.81 | 21.09 | 16.44 | 10.58 |
+| NVIDIA A100 80GB (Ampere sm_80) | 21.89 | 14.95 | 10.68 | 8.60 | 7.31 |
+| NVIDIA L40S 48GB (Ada sm_89) | 9.25 | 6.25 | 4.82 | 3.93 | 3.45 |
+| NVIDIA A40 48GB (Ampere sm_86) | 28.03 | 18.60 | 13.54 | 10.62 | 8.81 |
+| Radeon 8060S (RADV GFX1151) | 8.35 | 4.84 | 4.40 | 3.67 | 1.69 |
+| Apple M2 (10 GPU cores) | 33.31 | 21.81 | 21.09 | 16.44 | 10.58 |
 
 ### Throughput (Million pairs / second)
 
 | GPU | Full | Peak | Hier. 0.01 @ 5.5 | Hier. 0.001 @ 5.5 | Hier. 0.001 @ 6.5 |
 |---|---:|---:|---:|---:|---:|
-| NVIDIA L40S | 19.8 M/s | 9.3 M/s | 64.8 M/s | 41.9 M/s | 75.9 M/s |
-| Radeon 8060S | 15.7 M/s | 11.2 M/s | 71.3 M/s | 54.1 M/s | 155.1 M/s |
-| Apple M2 | 1.4 M/s | 2.3 M/s | 15.3 M/s | 12.0 M/s | 24.8 M/s |
+| NVIDIA A100 80GB (Ampere sm_80) | 13.0 M/s | 4.2 M/s | 29.5 M/s | 17.5 M/s | 35.9 M/s |
+| NVIDIA L40S 48GB (Ada sm_89) | 19.8 M/s | 9.3 M/s | 64.8 M/s | 41.9 M/s | 75.9 M/s |
+| NVIDIA A40 48GB (Ampere sm_86) | 6.6 M/s | 3.0 M/s | 22.6 M/s | 14.1 M/s | 29.7 M/s |
+| Radeon 8060S (RADV GFX1151) | 15.7 M/s | 11.2 M/s | 71.3 M/s | 54.1 M/s | 155.1 M/s |
+| Apple M2 (10 GPU cores) | 1.4 M/s | 2.3 M/s | 15.3 M/s | 12.0 M/s | 24.8 M/s |
 
 ### Key Observations at Scale
 
-1. **Discrete GPU Saturation**: At 262,144 pairs, the 142 SMs on the NVIDIA L40S are fully saturated by 65,536 coarse threadblocks (461 blocks/SM), and refinement dispatches thousands of surviving pairs. PCIe dispatch and stream latency are amortized to < 1% of total runtime, allowing L40S to deliver 13.21 ms on full correlation (1.98× faster than cuFFT) and 4.04 ms on hierarchical filtering (6.45× faster than cuFFT).
-2. **APU Unified Memory Efficiency**: The AMD Radeon 8060S (Strix Halo) maintains exceptional throughput up to 155.1 Mpairs/s at SNR 6.5 and 71.3 Mpairs/s at SNR 5.5, driven by zero-copy unified memory and barrier-free hardware wave-shuffle reductions.
+1. **HBM2e vs. GDDR6 Bandwidth (A100 vs. A40)**: The A100’s 1.93 TB/s HBM2e memory gives it nearly 3× faster cuFFT throughput (10.41 ms vs. 30.70 ms) and doubles full output throughput (13.0 M/s vs. 6.6 M/s) compared to the GDDR6-based A40.
+2. **Generational Scaling (Ampere vs. Ada Lovelace)**: The L40S (Ada sm_89) leverages its 48 MB on-chip L2 cache and enhanced FP32 ALUs to significantly outperform the A100 on matched filter pipelines: 1.5× faster on full correlation (13.21 ms vs. 20.11 ms), 2.2× faster on flat peak (28.31 ms vs. 62.32 ms), and 2.4× faster on hierarchical screening (6.25 ms vs. 14.95 ms at SNR 5.5).
+3. **APU Unified Memory Efficiency (Radeon 8060S)**: The AMD Radeon 8060S (Strix Halo) maintains the highest peak and hierarchical throughput across all tested hardware: 155.1 Mpairs/s at SNR 6.5 and 71.3 Mpairs/s at SNR 5.5, driven by its 32 MB Infinity Cache (MALL) and barrier-free hardware Wave32 DPP shuffle reductions.
 
 ## Reproducing the charts
 
