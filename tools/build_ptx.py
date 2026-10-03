@@ -108,16 +108,19 @@ def compile_ptx(slangc, nvrtc, env, src_text, out_path, entry, extra_flags=()):
 
 def compile_tierb(slangc, nvrtc, env, n, outdir, entry=ENTRY, cap=None, suffix="", coarse16=0, ppg=1, tile=1, single_bin=0):
     cap = LDS_CAP[n] if cap is None else cap
+    r = RADIX.get(n, 16)
+    wg = (n // r) * ppg if entry in ("fusedTierB", "refineListed") else (n // r)
+    extra_flags = ["-Xnvrtc", "-maxrregcount=64"] if wg >= 1024 else []
     text = (
         "#define NLEN %d\n#define LDS_CAP %d\n#define COARSE16 %d\n"
         "#define PPG %d\n#define TILE_T %d\n#define RADIX %d\n#define SINGLE_BIN %d\n"
         "#define SLANG_CUDA_STRUCTURED_BUFFER_NO_COUNT 1\n"
-        % (n, cap, coarse16, ppg, tile, RADIX.get(n, 16), single_bin)
+        % (n, cap, coarse16, ppg, tile, r, single_bin)
         + KERNEL.read_text()
     )
     name = "%s_%d%s.ptx" % (STEMS[entry], n, suffix)
     ptx = outdir / name
-    return compile_ptx(slangc, nvrtc, env, text, ptx, entry)
+    return compile_ptx(slangc, nvrtc, env, text, ptx, entry, extra_flags=extra_flags)
 
 
 def main():
@@ -220,7 +223,8 @@ def main():
             + KERNEL.read_text() + "\n" + SERIES_KERNEL.read_text()
         )
         fwd_ptx = OUT / f"forward_{n}.ptx"
-        compile_ptx(slangc, nvrtc, env, fwd_text, fwd_ptx, "seriesForward")
+        extra = ["-Xnvrtc", "-maxrregcount=64"] if wg >= 1024 else []
+        compile_ptx(slangc, nvrtc, env, fwd_text, fwd_ptx, "seriesForward", extra_flags=extra)
 
         manifest["modules"][str(n)] = info
         print("  n=%-6d %-16s %5d bytes  wg=%-4d" % (n, ptx.name, info["bytes"], wg))

@@ -2352,10 +2352,8 @@ class HierarchicalFilter(MatchedFilter):
         self._active_cfg = cfg
         self._warmed_up = False
         if isinstance(cfg, CascadeConfig) or (isinstance(cfg, (tuple, list)) and len(cfg) == 3):
-            self.cascade = True
             b_target = cfg.b1 if isinstance(cfg, CascadeConfig) else cfg[1]
         else:
-            self.cascade = False
             self.cascade_band = None
             b_target = cfg[0]
         self._target_band = b_target

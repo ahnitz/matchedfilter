@@ -81,37 +81,41 @@ class _Buffer:
         self.ptr = self.dptr.value
         self.handle = self.dptr.value
 
-    def write(self, array):
+    def write(self, array, stream=None):
         """Host to device memory copy."""
+        self.ctx._bind()
         array = np.ascontiguousarray(array)
         to_copy = min(self.nbytes, array.nbytes)
+        st = self.ctx.stream if stream is None else stream
         if to_copy > 0:
             check_cuda(
                 self.ctx.cuda.cuMemcpyHtoDAsync_v2(
-                    self.dptr, array.ctypes.data, to_copy, self.ctx.stream
+                    self.dptr, array.ctypes.data, to_copy, st
                 ),
                 "cuMemcpyHtoDAsync",
             )
 
-    def read(self, dtype, count):
+    def read(self, dtype, count, stream=None):
         """Device to host read."""
         out = np.empty(count, dtype=dtype)
-        self.read_into(out)
+        self.read_into(out, stream=stream)
         return out
 
-    def read_into(self, out):
+    def read_into(self, out, stream=None):
         """Direct read into caller-provided array."""
+        self.ctx._bind()
         out = np.ascontiguousarray(out)
         to_copy = min(self.nbytes, out.nbytes)
+        st = self.ctx.stream if stream is None else stream
         if to_copy > 0:
             check_cuda(
                 self.ctx.cuda.cuMemcpyDtoHAsync_v2(
-                    out.ctypes.data, self.dptr, to_copy, self.ctx.stream
+                    out.ctypes.data, self.dptr, to_copy, st
                 ),
                 "cuMemcpyDtoHAsync",
             )
             check_cuda(
-                self.ctx.cuda.cuStreamSynchronize(self.ctx.stream),
+                self.ctx.cuda.cuStreamSynchronize(st),
                 "cuStreamSynchronize",
             )
         return out
@@ -147,16 +151,16 @@ class _HostBuffer:
         self.ptr = self.dptr.value
         self.handle = self.dptr.value
 
-    def write(self, array):
+    def write(self, array, *args, **kwargs):
         flat = np.ascontiguousarray(array)
         ctypes.memmove(self.ptr, flat.ctypes.data, min(self.nbytes, flat.nbytes))
 
-    def read(self, dtype, count):
+    def read(self, dtype, count, *args, **kwargs):
         out = np.empty(count, dtype=dtype)
         ctypes.memmove(out.ctypes.data, self.ptr, min(self.nbytes, out.nbytes))
         return out
 
-    def read_into(self, out):
+    def read_into(self, out, *args, **kwargs):
         flat = np.ascontiguousarray(out)
         ctypes.memmove(flat.ctypes.data, self.ptr, min(self.nbytes, flat.nbytes))
         return out
@@ -171,6 +175,30 @@ class _HostBuffer:
     def __del__(self):
         self.destroy()
 
+
+class _BatchTuple(tuple):
+    """Tuple supporting both dict key access and tuple slicing."""
+    def __new__(cls, data, tmpl, idx, val, *extra):
+        t = super().__new__(cls, (data, tmpl, idx, val, *extra))
+        t._dict = {"data": data, "tmpl": tmpl, "idx": idx, "val": val}
+        return t
+
+    def __getitem__(self, item):
+        if isinstance(item, str):
+            return self._dict[item]
+        return super().__getitem__(item)
+
+    def get(self, key, default=None):
+        return self._dict.get(key, default)
+
+    def values(self):
+        return self._dict.values()
+
+    def items(self):
+        return self._dict.items()
+
+    def keys(self):
+        return self._dict.keys()
 
 
 class Context(InputUploads):
@@ -193,8 +221,25 @@ class Context(InputUploads):
         self.cuda.cuDeviceGetName(name_buf, len(name_buf), self.device.value)
         self.name = name_buf.value.decode("utf-8", "replace").strip()
 
-        check_cuda(self.cuda.cuCtxCreate_v2(ctypes.byref(self.ctx), 0, self.device), "cuCtxCreate")
-        check_cuda(self.cuda.cuStreamCreate(ctypes.byref(self.stream), 0), "cuStreamCreate")
+        if hasattr(self.cuda, "cuDevicePrimaryCtxRetain"):
+            check_cuda(
+                self.cuda.cuDevicePrimaryCtxRetain(ctypes.byref(self.ctx), self.device.value),
+                "cuDevicePrimaryCtxRetain",
+            )
+            self._using_primary_ctx = True
+        else:
+            check_cuda(
+                self.cuda.cuCtxCreate_v2(ctypes.byref(self.ctx), 0, self.device),
+                "cuCtxCreate",
+            )
+            self._using_primary_ctx = False
+        check_cuda(self.cuda.cuCtxSetCurrent(self.ctx), "cuCtxSetCurrent")
+        self.streams = []
+        for _ in range(4):
+            s = ctypes.c_void_p()
+            check_cuda(self.cuda.cuStreamCreate(ctypes.byref(s), 1), "cuStreamCreate")
+            self.streams.append(s)
+        self.stream = self.streams[0]
         check_cuda(self.cuda.cuEventCreate(ctypes.byref(self._start_event), 0), "cuEventCreate")
         check_cuda(self.cuda.cuEventCreate(ctypes.byref(self._stop_event), 0), "cuEventCreate")
 
@@ -209,6 +254,15 @@ class Context(InputUploads):
         self._forwards = {}
         self._hier = {}
         self._uploaded = {"data": {}, "tmpl": {}}
+
+    def _bind(self):
+        if getattr(self, "ctx", None) and self.ctx.value:
+            check_cuda(self.cuda.cuCtxSetCurrent(self.ctx), "cuCtxSetCurrent")
+
+    def get_stream(self, slot=None):
+        if slot is not None and getattr(self, "streams", None):
+            return self.streams[slot % len(self.streams)]
+        return self.stream
 
     def _stem(self, n, entry, one_bin=False, c16=False, ppg=1, tile=1):
         if entry == "packCoarse":
@@ -239,6 +293,13 @@ class Context(InputUploads):
         if key in self._pipelines:
             return self._pipelines[key]
 
+        r = _radix(n)
+        wg = (n // r) * ppg if entry in ("fusedTierB", "refineListed") else (
+            256 if entry == "compactPairs" else (
+                64 if entry == "coarseTile" else (n // r)
+            )
+        )
+
         stem = self._stem(n, entry, one_bin=one_bin, c16=c16, ppg=ppg, tile=tile)
         if stem not in self._modules:
             ptx_file = _PTX_DIR / f"{stem}.ptx"
@@ -254,10 +315,18 @@ class Context(InputUploads):
 
             mod = ctypes.c_void_p()
             ptx_bytes = ptx_file.read_bytes()
-            check_cuda(
-                self.cuda.cuModuleLoadData(ctypes.byref(mod), ptx_bytes),
-                f"cuModuleLoadData({stem})",
-            )
+            if wg >= 1024 and hasattr(self.cuda, "cuModuleLoadDataEx"):
+                options = (ctypes.c_int * 1)(0)  # CU_JIT_MAX_REGISTERS
+                values = (ctypes.c_void_p * 1)(ctypes.c_void_p(64))
+                check_cuda(
+                    self.cuda.cuModuleLoadDataEx(ctypes.byref(mod), ptx_bytes, 1, options, values),
+                    f"cuModuleLoadDataEx({stem})",
+                )
+            else:
+                check_cuda(
+                    self.cuda.cuModuleLoadData(ctypes.byref(mod), ptx_bytes),
+                    f"cuModuleLoadData({stem})",
+                )
             self._modules[stem] = mod
 
         mod = self._modules[stem]
@@ -268,12 +337,6 @@ class Context(InputUploads):
             f"cuModuleGetFunction({fn_name})",
         )
 
-        r = _radix(n)
-        wg = (n // r) * ppg if entry in ("fusedTierB", "refineListed") else (
-            256 if entry == "compactPairs" else (
-                64 if entry == "coarseTile" else (n // r)
-            )
-        )
         res = (hfunc, wg)
         self._pipelines[key] = res
         return res
@@ -281,27 +344,30 @@ class Context(InputUploads):
     def empty_shared(self, shape, dtype=np.complex64, *, readback=False):
         return empty_shared(self, _HostBuffer, shape, dtype)
 
-    def _launch(self, hfunc, grid_dim, block_dim, params, shared_mem=0):
+    def _launch(self, hfunc, grid_dim, block_dim, params, shared_mem=0, stream=None):
+        self._bind()
         param_ptrs = (ctypes.c_void_p * len(params))(
             *[ctypes.c_void_p(ctypes.addressof(p)) for p in params]
         )
         gx, gy, gz = grid_dim if isinstance(grid_dim, tuple) else (grid_dim, 1, 1)
         bx, by, bz = block_dim if isinstance(block_dim, tuple) else (block_dim, 1, 1)
+        st = self.stream if stream is None else stream
         check_cuda(
             self.cuda.cuLaunchKernel(
                 hfunc,
                 gx, gy, gz,
                 bx, by, bz,
                 shared_mem,
-                self.stream,
+                st,
                 param_ptrs,
                 None,
             ),
             "cuLaunchKernel",
         )
 
-    def _sync_and_time(self):
-        check_cuda(self.cuda.cuEventRecord(self._stop_event, self.stream), "cuEventRecord")
+    def _sync_and_time(self, stream=None):
+        st = self.stream if stream is None else stream
+        check_cuda(self.cuda.cuEventRecord(self._stop_event, st), "cuEventRecord")
         check_cuda(self.cuda.cuEventSynchronize(self._stop_event), "cuEventSynchronize")
         ms = ctypes.c_float(0.0)
         check_cuda(
@@ -337,7 +403,8 @@ class Context(InputUploads):
         shift = (binsize.bit_length() - 1) if binsize & (binsize - 1) == 0 else -1
         t2 = float(threshold) ** 2 if threshold > 0 else 0.0
 
-        key = (n, nd, nt, nbins)
+        stream = self.get_stream(slot)
+        key = (n, nd, nt, nbins, slot)
         key += (shared_key(data, self), shared_key(tmpl, self))
         upload_data, upload_tmpl, dsig, tsig = self._input_uploads(
             key, data, tmpl, upload_data, upload_tmpl
@@ -345,12 +412,12 @@ class Context(InputUploads):
 
         bufs = self._batches.get(key)
         if bufs is None:
-            bufs = {
-                "data": shared_buffer(data, self) or _Buffer(self, nd * n * 8),
-                "tmpl": shared_buffer(tmpl, self) or _Buffer(self, nt * n * 8),
-                "idx": _Buffer(self, nd * nt * nbins * 4),
-                "val": _Buffer(self, nd * nt * nbins * 8),
-            }
+            bufs = _BatchTuple(
+                shared_buffer(data, self) or _Buffer(self, nd * n * 8),
+                shared_buffer(tmpl, self) or _Buffer(self, nt * n * 8),
+                _Buffer(self, nd * nt * nbins * 4),
+                _Buffer(self, nd * nt * nbins * 8),
+            )
             self._batches[key] = bufs
             upload_data = upload_tmpl = True
 
@@ -387,12 +454,22 @@ class Context(InputUploads):
             c_thrBits,
         ]
 
-        check_cuda(self.cuda.cuEventRecord(self._start_event, self.stream), "cuEventRecord")
-        self._launch(hfunc, nd * nt, wg, params)
-        self._sync_and_time()
+        check_cuda(self.cuda.cuEventRecord(self._start_event, stream), "cuEventRecord")
+        self._launch(hfunc, nd * nt, wg, params, stream=stream)
 
-        idx = bufs["idx"].read(np.int32, nd * nt * nbins).reshape(nd, nt, nbins)
-        val_raw = bufs["val"].read(np.float32, nd * nt * nbins * 2).reshape(nd, nt, nbins, 2)
+        if async_submit:
+            def readback():
+                self._sync_and_time(stream=stream)
+                idx = bufs["idx"].read(np.int32, nd * nt * nbins, stream=stream).reshape(nd, nt, nbins)
+                val_raw = bufs["val"].read(np.float32, nd * nt * nbins * 2, stream=stream).reshape(nd, nt, nbins, 2)
+                val = (val_raw[..., 0] + 1j * val_raw[..., 1]).astype(np.complex64)
+                return idx, val
+            return readback
+
+        self._sync_and_time(stream=stream)
+
+        idx = bufs["idx"].read(np.int32, nd * nt * nbins, stream=stream).reshape(nd, nt, nbins)
+        val_raw = bufs["val"].read(np.float32, nd * nt * nbins * 2, stream=stream).reshape(nd, nt, nbins, 2)
         val = (val_raw[..., 0] + 1j * val_raw[..., 1]).astype(np.complex64)
         return idx, val
 
@@ -400,12 +477,30 @@ class Context(InputUploads):
                       slot=None, async_submit=False):
         """Dispatch grouped window intervals across pairs."""
         nd, nt = data.shape[0], tmpl.shape[0]
+        if async_submit:
+            callbacks = []
+            for g_idx, (lo, hi) in enumerate(groups):
+                cb = self.peaks(n, data, tmpl, binsize=binsize, threshold=threshold,
+                                window=(lo, hi), upload_data=(g_idx == 0),
+                                upload_tmpl=(upload_tmpl and g_idx == 0),
+                                slot=slot, async_submit=True)
+                callbacks.append((g_idx, cb))
+            def readback_all():
+                idx_all = np.full((nd, nt, len(groups)), -1, dtype=np.int32)
+                val_all = np.zeros((nd, nt, len(groups)), dtype=np.complex64)
+                for g_idx, cb in callbacks:
+                    pi, pv = cb()
+                    idx_all[:, :, g_idx:g_idx+1] = pi
+                    val_all[:, :, g_idx:g_idx+1] = pv
+                return idx_all, val_all
+            return readback_all
         idx_all = np.full((nd, nt, len(groups)), -1, dtype=np.int32)
         val_all = np.zeros((nd, nt, len(groups)), dtype=np.complex64)
         for g_idx, (lo, hi) in enumerate(groups):
             pi, pv = self.peaks(n, data, tmpl, binsize=binsize, threshold=threshold,
                                 window=(lo, hi), upload_data=(g_idx == 0),
-                                upload_tmpl=(upload_tmpl and g_idx == 0))
+                                upload_tmpl=(upload_tmpl and g_idx == 0),
+                                slot=slot, async_submit=False)
             idx_all[:, :, g_idx:g_idx+1] = pi
             val_all[:, :, g_idx:g_idx+1] = pv
         return idx_all, val_all
@@ -520,7 +615,8 @@ class Context(InputUploads):
         shift = (binsize.bit_length() - 1) if binsize & (binsize - 1) == 0 else -1
         t2 = float(threshold) ** 2 if threshold > 0 else 0.0
 
-        key = (n, band, nd, nt, nbins)
+        stream = self.get_stream(slot)
+        key = (n, band, nd, nt, nbins, int(np.float32(t2).view(np.uint32)), float(raw_thr), slot)
         key += (shared_key(data, self), shared_key(tmpl, self))
         upload_data, upload_tmpl, dsig, tsig = self._input_uploads(
             key, data, tmpl, upload_data, upload_tmpl
@@ -549,29 +645,29 @@ class Context(InputUploads):
             write_input(bufs["data"], data)
             if shared_buffer(data, self) is None:
                 if _use_c16(band):
-                    bufs["cdata"].write(_pack_half2(data[:, :band]))
+                    bufs["cdata"].write(_pack_half2(data[:, :band]), stream=stream)
                 else:
-                    bufs["cdata"].write(np.ascontiguousarray(data[:, :band], np.complex64))
+                    bufs["cdata"].write(np.ascontiguousarray(data[:, :band], np.complex64), stream=stream)
             self._uploaded["data"][key] = dsig
         if upload_tmpl:
             write_input(bufs["tmpl"], tmpl)
             if _use_c16(band):
-                bufs["ct0"].write(_pack_half2(ct0))
+                bufs["ct0"].write(_pack_half2(ct0), stream=stream)
             else:
-                bufs["ct0"].write(np.ascontiguousarray(ct0, np.complex64))
+                bufs["ct0"].write(np.ascontiguousarray(ct0, np.complex64), stream=stream)
             self._uploaded["tmpl"][key] = tsig
 
         # Reset survivor counter and pre-clear output arrays on GPU
         if hasattr(self.cuda, "cuMemsetD32Async"):
-            check_cuda(self.cuda.cuMemsetD32Async(bufs["args"].dptr, 0, 4, self.stream), "cuMemsetD32Async")
-            check_cuda(self.cuda.cuMemsetD32Async(bufs["idx"].dptr, 0xFFFFFFFF, nd * nt * nbins, self.stream), "cuMemsetD32Async")
-            check_cuda(self.cuda.cuMemsetD32Async(bufs["val"].dptr, 0, nd * nt * nbins * 2, self.stream), "cuMemsetD32Async")
+            check_cuda(self.cuda.cuMemsetD32Async(bufs["args"].dptr, 0, 4, stream), "cuMemsetD32Async")
+            check_cuda(self.cuda.cuMemsetD32Async(bufs["idx"].dptr, 0xFFFFFFFF, nd * nt * nbins, stream), "cuMemsetD32Async")
+            check_cuda(self.cuda.cuMemsetD32Async(bufs["val"].dptr, 0, nd * nt * nbins * 2, stream), "cuMemsetD32Async")
         else:
             check_cuda(self.cuda.cuMemsetD32_v2(bufs["args"].dptr, 0, 4), "cuMemsetD32")
             check_cuda(self.cuda.cuMemsetD32_v2(bufs["idx"].dptr, 0xFFFFFFFF, nd * nt * nbins), "cuMemsetD32")
             check_cuda(self.cuda.cuMemsetD32_v2(bufs["val"].dptr, 0, nd * nt * nbins * 2), "cuMemsetD32")
 
-        check_cuda(self.cuda.cuEventRecord(self._start_event, self.stream), "cuEventRecord")
+        check_cuda(self.cuda.cuEventRecord(self._start_event, stream), "cuEventRecord")
 
         # 1. Coarse stage
         if shared_buffer(data, self) is not None:
@@ -582,7 +678,8 @@ class Context(InputUploads):
             c_tot = ctypes.c_uint32(nd * band)
             c_c16 = ctypes.c_uint32(int(_use_c16(band)))
             self._launch(pack_fn, (nd * band + 255) // 256, 256,
-                         [bufs["data"].dptr, bufs["cdata"].dptr, c_n, c_b, c_tot, c_c16])
+                         [bufs["data"].dptr, bufs["cdata"].dptr, c_n, c_b, c_tot, c_c16],
+                         stream=stream)
 
         R_coarse = n // band
         cstart = lo // R_coarse
@@ -622,7 +719,7 @@ class Context(InputUploads):
             c_one,
             c_zero,
         ]
-        self._launch(coarse_fn, pairs // (_ppg * _tile), coarse_wg, params_coarse)
+        self._launch(coarse_fn, pairs // (_ppg * _tile), coarse_wg, params_coarse, stream=stream)
 
         # 2. Compact survivors
         compact_fn, compact_wg = self.pipeline(band, "compactPairs")
@@ -638,10 +735,10 @@ class Context(InputUploads):
             c_thr,
             c_nb,
         ]
-        self._launch(compact_fn, (pairs + 255) // 256, 256, params_compact)
+        self._launch(compact_fn, (pairs + 255) // 256, 256, params_compact, stream=stream)
 
         # Read back survivor count
-        surv_count_arr = bufs["args"].read(np.uint32, 1)
+        surv_count_arr = bufs["args"].read(np.uint32, 1, stream=stream)
         surv_count = int(surv_count_arr[0])
 
         # 3. Refine surviving pairs
@@ -669,50 +766,66 @@ class Context(InputUploads):
                 c_nbins,
                 c_thrBits,
             ]
-            self._launch(refine_fn, surv_count, refine_wg, params_refine)
+            self._launch(refine_fn, surv_count, refine_wg, params_refine, stream=stream)
 
-        self._sync_and_time()
+        if async_submit:
+            def readback():
+                self._sync_and_time(stream=stream)
+                self.last_refinements = surv_count
+                if surv_count == 0:
+                    return np.full((nd, nt, nbins), -1, dtype=np.int32), np.zeros((nd, nt, nbins), dtype=np.complex64)
+
+                idx = bufs["idx"].read(np.int32, nd * nt * nbins, stream=stream).reshape(nd, nt, nbins)
+                val_raw = bufs["val"].read(np.float32, nd * nt * nbins * 2, stream=stream).reshape(nd, nt, nbins, 2)
+                val = (val_raw[..., 0] + 1j * val_raw[..., 1]).astype(np.complex64)
+                return idx, val
+            return readback
+
+        self._sync_and_time(stream=stream)
         self.last_refinements = surv_count
         if surv_count == 0:
             return np.full((nd, nt, nbins), -1, dtype=np.int32), np.zeros((nd, nt, nbins), dtype=np.complex64)
 
-        idx = bufs["idx"].read(np.int32, nd * nt * nbins).reshape(nd, nt, nbins)
-        val_raw = bufs["val"].read(np.float32, nd * nt * nbins * 2).reshape(nd, nt, nbins, 2)
+        idx = bufs["idx"].read(np.int32, nd * nt * nbins, stream=stream).reshape(nd, nt, nbins)
+        val_raw = bufs["val"].read(np.float32, nd * nt * nbins * 2, stream=stream).reshape(nd, nt, nbins, 2)
         val = (val_raw[..., 0] + 1j * val_raw[..., 1]).astype(np.complex64)
         return idx, val
 
-    def _forward_fused(self, n, series, starts, spectra, *, defer=False):
+    def _forward_fused(self, n, series, starts, spectra, *, defer=False, slot=None):
         """Dispatch fused forward FFT kernel path."""
-        return self.forward(n, series, starts, spectra, defer=defer, fused=True)
+        return self.forward(n, series, starts, spectra, defer=defer, slot=slot, fused=True)
 
-    def forward(self, n, series, starts, spectra, *, defer=False, fused=False):
+    def forward(self, n, series, starts, spectra, *, defer=False, slot=None, fused=False):
         """Batch forward series FFTs."""
+        stream = self.get_stream(slot)
         hfunc, wg = self.pipeline(n, "seriesForward")
         series_buf = shared_buffer(series, self) or _Buffer(self, series.nbytes)
         starts_buf = shared_buffer(starts, self) or _Buffer(self, starts.nbytes)
         spectra_buf = shared_buffer(spectra, self) or _Buffer(self, spectra.nbytes)
 
         if shared_buffer(series, self) is None:
-            series_buf.write(series)
+            series_buf.write(series, stream=stream)
         if shared_buffer(starts, self) is None:
-            starts_buf.write(starts)
+            starts_buf.write(starts, stream=stream)
 
         c_len = ctypes.c_uint32(series.size)
         params = [series_buf.dptr, starts_buf.dptr, spectra_buf.dptr, c_len]
 
-        check_cuda(self.cuda.cuEventRecord(self._start_event, self.stream), "cuEventRecord")
-        self._launch(hfunc, spectra.shape[0], wg, params)
-        self._sync_and_time()
+        check_cuda(self.cuda.cuEventRecord(self._start_event, stream), "cuEventRecord")
+        self._launch(hfunc, spectra.shape[0], wg, params, stream=stream)
+        if not defer:
+            self._sync_and_time(stream=stream)
+            if shared_buffer(spectra, self) is None:
+                spectra_buf.read_into(spectra, stream=stream)
 
-        if shared_buffer(spectra, self) is None:
-            spectra_buf.read_into(spectra)
-
-    def cancel_forward(self):
+    def cancel_forward(self, slot=None):
         pass
 
     def clear_cache(self):
+        self._bind()
         for b in list(self._batches.values()) + list(self._full_batches.values()) + list(self._hier.values()):
-            for buf in b.values():
+            vals = b.values() if hasattr(b, "values") else b
+            for buf in vals:
                 if isinstance(buf, _Buffer):
                     buf.destroy()
         self._batches.clear()
@@ -721,6 +834,7 @@ class Context(InputUploads):
         self._uploaded = {"data": {}, "tmpl": {}}
 
     def destroy(self):
+        self._bind()
         self.clear_cache()
         for mod in self._modules.values():
             self.cuda.cuModuleUnload(mod)
@@ -732,11 +846,20 @@ class Context(InputUploads):
         if self._stop_event.value:
             self.cuda.cuEventDestroy_v2(self._stop_event)
             self._stop_event.value = 0
-        if self.stream.value:
+        if hasattr(self, "streams"):
+            for s in self.streams:
+                if s.value:
+                    self.cuda.cuStreamDestroy_v2(s)
+                    s.value = 0
+            self.streams.clear()
+        elif self.stream.value:
             self.cuda.cuStreamDestroy_v2(self.stream)
             self.stream.value = 0
         if self.ctx.value:
-            self.cuda.cuCtxDestroy_v2(self.ctx)
+            if getattr(self, "_using_primary_ctx", False):
+                self.cuda.cuDevicePrimaryCtxRelease(self.device.value)
+            else:
+                self.cuda.cuCtxDestroy_v2(self.ctx)
             self.ctx.value = 0
 
     def __del__(self):
