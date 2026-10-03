@@ -107,6 +107,7 @@ def collect(args):
         report['errors'].append(f'Correctness/capability check failed: {type(error).__name__}: {error}')
         save()
         raise
+    teaser.mf.clear_autotune_cache()
     baseline = 'FFTW' if args.device == 'cpu' else ('MLX' if sys.platform == 'darwin' else 'rocFFT')
     for label, kind, fd, snr in [(baseline, 'baseline', None, None)] + MODES:
         try:
