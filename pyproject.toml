@@ -64,6 +64,7 @@ packages = ["matchedfilter"]
 #                  whose library is absent can compile at load time rather
 #                  than refuse.
 matchedfilter = ["*.h", "*.txt", "execution-policy.json", "spirv/*.spv", "spirv/manifest.json",
+                 "ptx/*.ptx", "ptx/manifest.json",
                  "metal/*.metal", "metal/*.metallib"]
 
 [tool.pytest.ini_options]

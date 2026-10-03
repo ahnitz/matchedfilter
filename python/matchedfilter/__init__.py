@@ -350,10 +350,13 @@ class MatchedFilter:
         self._gtmpl = None
 
     def _backend(self):
-        """The compute module for this device: Metal on Apple, else Vulkan."""
+        """The compute module for this device: Metal on Apple, CUDA on NVIDIA, else Vulkan."""
         if getattr(self.device, "backend", None) == "metal":
             from . import _mtlcompute
             return _mtlcompute
+        if getattr(self.device, "backend", None) == "cuda":
+            from . import _cudacompute
+            return _cudacompute
         from . import _vkcompute
         return _vkcompute
 

@@ -1,0 +1,272 @@
+{
+  "entry": "fusedTierB",
+  "kernel": "tierb.slang",
+  "modules": {
+    "64": {
+      "file": "tierb_64.ptx",
+      "bytes": 71035,
+      "local_size": [
+        4,
+        1,
+        1
+      ],
+      "refine": {
+        "file": "refine_64.ptx"
+      }
+    },
+    "128": {
+      "file": "tierb_128.ptx",
+      "bytes": 108010,
+      "local_size": [
+        8,
+        1,
+        1
+      ],
+      "refine": {
+        "file": "refine_128.ptx"
+      }
+    },
+    "256": {
+      "file": "tierb_256.ptx",
+      "bytes": 74426,
+      "local_size": [
+        16,
+        1,
+        1
+      ],
+      "refine": {
+        "file": "refine_256.ptx"
+      }
+    },
+    "512": {
+      "file": "tierb_512.ptx",
+      "bytes": 96940,
+      "local_size": [
+        32,
+        1,
+        1
+      ],
+      "refine": {
+        "file": "refine_512.ptx"
+      }
+    },
+    "1024": {
+      "file": "tierb_1024.ptx",
+      "bytes": 129530,
+      "local_size": [
+        64,
+        1,
+        1
+      ],
+      "full": {
+        "file": "full_1024.ptx"
+      },
+      "full_series": {
+        "file": "full_series_1024.ptx"
+      },
+      "refine": {
+        "file": "refine_1024.ptx"
+      }
+    },
+    "2048": {
+      "file": "tierb_2048.ptx",
+      "bytes": 169054,
+      "local_size": [
+        128,
+        1,
+        1
+      ],
+      "full": {
+        "file": "full_2048.ptx"
+      },
+      "full_series": {
+        "file": "full_series_2048.ptx"
+      },
+      "refine": {
+        "file": "refine_2048.ptx"
+      }
+    },
+    "4096": {
+      "file": "tierb_4096.ptx",
+      "bytes": 129213,
+      "local_size": [
+        256,
+        1,
+        1
+      ],
+      "full": {
+        "file": "full_4096.ptx"
+      },
+      "full_series": {
+        "file": "full_series_4096.ptx"
+      },
+      "refine": {
+        "file": "refine_4096.ptx"
+      }
+    },
+    "8192": {
+      "file": "tierb_8192.ptx",
+      "bytes": 129365,
+      "local_size": [
+        512,
+        1,
+        1
+      ],
+      "portable": {
+        "file": "tierb_8192_lds32.ptx",
+        "lds_bytes": 32768
+      },
+      "full": {
+        "file": "full_8192.ptx",
+        "portable": {
+          "file": "full_8192_lds32.ptx"
+        }
+      },
+      "full_series": {
+        "file": "full_series_8192.ptx",
+        "portable": {
+          "file": "full_series_8192_lds32.ptx"
+        }
+      },
+      "refine": {
+        "file": "refine_8192.ptx",
+        "portable": {
+          "file": "refine_8192_lds32.ptx",
+          "lds_bytes": 32768
+        }
+      }
+    },
+    "16384": {
+      "file": "tierb_16384.ptx",
+      "bytes": 179096,
+      "local_size": [
+        1024,
+        1,
+        1
+      ],
+      "portable": {
+        "file": "tierb_16384_lds32.ptx",
+        "lds_bytes": 32768
+      },
+      "full": {
+        "file": "full_16384.ptx",
+        "portable": {
+          "file": "full_16384_lds32.ptx"
+        }
+      },
+      "full_series": {
+        "file": "full_series_16384.ptx",
+        "portable": {
+          "file": "full_series_16384_lds32.ptx"
+        }
+      },
+      "refine": {
+        "file": "refine_16384.ptx",
+        "portable": {
+          "file": "refine_16384_lds32.ptx",
+          "lds_bytes": 32768
+        },
+        "one_bin": {
+          "file": "refine_16384_onebin.ptx",
+          "portable": {
+            "file": "refine_16384_onebin_lds32.ptx"
+          }
+        }
+      },
+      "one_bin": {
+        "file": "tierb_16384_onebin.ptx",
+        "portable": {
+          "file": "tierb_16384_onebin_lds32.ptx"
+        }
+      }
+    },
+    "32768": {
+      "file": "tierb_32768.ptx",
+      "bytes": 402593,
+      "local_size": [
+        1024,
+        1,
+        1
+      ],
+      "portable": {
+        "file": "tierb_32768_lds32.ptx",
+        "lds_bytes": 32768
+      },
+      "full": {
+        "file": "full_32768.ptx",
+        "portable": {
+          "file": "full_32768_lds32.ptx"
+        }
+      },
+      "full_series": {
+        "file": "full_series_32768.ptx",
+        "portable": {
+          "file": "full_series_32768_lds32.ptx"
+        }
+      },
+      "refine": {
+        "file": "refine_32768.ptx",
+        "portable": {
+          "file": "refine_32768_lds32.ptx",
+          "lds_bytes": 32768
+        },
+        "one_bin": {
+          "file": "refine_32768_onebin.ptx",
+          "portable": {
+            "file": "refine_32768_onebin_lds32.ptx"
+          }
+        }
+      },
+      "one_bin": {
+        "file": "tierb_32768_onebin.ptx",
+        "portable": {
+          "file": "tierb_32768_onebin_lds32.ptx"
+        }
+      }
+    },
+    "65536": {
+      "file": "tierb_65536.ptx",
+      "bytes": 1054871,
+      "local_size": [
+        1024,
+        1,
+        1
+      ],
+      "portable": {
+        "file": "tierb_65536_lds32.ptx",
+        "lds_bytes": 32768
+      },
+      "full": {
+        "file": "full_65536.ptx",
+        "portable": {
+          "file": "full_65536_lds32.ptx"
+        }
+      },
+      "full_series": {
+        "file": "full_series_65536.ptx",
+        "portable": {
+          "file": "full_series_65536_lds32.ptx"
+        }
+      },
+      "refine": {
+        "file": "refine_65536.ptx",
+        "portable": {
+          "file": "refine_65536_lds32.ptx",
+          "lds_bytes": 32768
+        },
+        "one_bin": {
+          "file": "refine_65536_onebin.ptx",
+          "portable": {
+            "file": "refine_65536_onebin_lds32.ptx"
+          }
+        }
+      },
+      "one_bin": {
+        "file": "tierb_65536_onebin.ptx",
+        "portable": {
+          "file": "tierb_65536_onebin_lds32.ptx"
+        }
+      }
+    }
+  }
+}
