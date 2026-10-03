@@ -21,15 +21,16 @@ class FilterResults(NamedTuple):
 
 def _partition_templates(
     counts: np.ndarray,
-    max_batch: int = 64,
-    candidate_ns: Sequence[int] = (4096, 8192, 16384)
+    max_batch: Optional[int] = None,
+    candidate_ns: Sequence[int] = (2048, 4096, 8192, 16384, 32768, 65536)
 ) -> Tuple[List[Tuple[int, int, int, int]], np.ndarray]:
     """Partition templates sorted by length into homogeneous, balanced sub-batches.
 
-    Avoids over-fragmentation by keeping the number of sub-batches bounded by
-    ceil(M / max_batch). Selects FFT block sizes based on filter length to guarantee
-    numerical accuracy (no circular wrap-around edge leakage) while maximizing L1/L2
-    cache hit rates and SIMD lane utilization.
+    Avoids over-fragmentation by keeping sub-batches sized according to the L2 cache
+    budget (up to 256 for N=2048, 128 for N=4096, etc.) when max_batch is None, or
+    bounded by max_batch if explicitly specified. Selects FFT block sizes based on
+    filter length to guarantee numerical accuracy (valid fraction >= 50%) while
+    maximizing L1/L2 cache hit rates and SIMD lane utilization.
 
     Returns:
         (groups, sort_order)
@@ -46,9 +47,6 @@ def _partition_templates(
 
     def pick_n(max_c: int) -> int:
         for n in valid_ns:
-            if n > max_c and (n - max_c) / n >= 0.70:
-                return n
-        for n in valid_ns:
             if n > max_c and (n - max_c) / n >= 0.50:
                 return n
         for n in reversed(valid_ns):
@@ -57,7 +55,7 @@ def _partition_templates(
         return 1 << int(math.ceil(math.log2(max(1024, 2 * max_c))))
 
     # Partition contiguous runs sharing the same chosen FFT block size,
-    # then split each run into balanced sub-batches <= max_batch.
+    # then split each run into balanced sub-batches sized to the cache budget.
     # This guarantees that all M templates are included without dropping any.
     groups = []
     run_start = 0
@@ -67,8 +65,15 @@ def _partition_templates(
         while run_end < M and pick_n(int(sorted_counts[run_end])) == current_n:
             run_end += 1
 
+        if max_batch is None:
+            # Sized to stay resident within 512 KB L2 cache per core:
+            # coarse template memory = b * sizeof(complex64) = (current_n // 8) * 8 bytes = current_n bytes.
+            batch_target = min(256, max(32, 524288 // (max(64, current_n // 8) * 8)))
+        else:
+            batch_target = int(max_batch)
+
         run_len = run_end - run_start
-        k_run = math.ceil(run_len / max_batch)
+        k_run = math.ceil(run_len / batch_target)
         sub_i = run_start
         for k in range(k_run):
             rem = k_run - k
@@ -156,7 +161,7 @@ class TimeDomainFilterBank:
         first_stage_snr: float = 0.0,
         coarse_band_hz: Optional[float] = None,
         device: Optional[str] = None,
-        max_batch_size: int = 64,
+        max_batch_size: Optional[int] = None,
         fft_lengths: Optional[Sequence[int]] = None,
         reference: Optional[Any] = None,
     ):
@@ -169,7 +174,7 @@ class TimeDomainFilterBank:
         self.first_stage_snr = float(first_stage_snr)
         self.coarse_band_hz = coarse_band_hz
         self.device = device
-        self.max_batch_size = int(max_batch_size)
+        self.max_batch_size = int(max_batch_size) if max_batch_size is not None else None
 
         mode = {'pycbc': 'flat', 'matchedfilter': 'flat',
                 'matchedfilter-hierarchical': 'hier',
