@@ -2969,17 +2969,6 @@ class HierarchicalFilter(MatchedFilter):
                 raise ValueError("reference must be a one-dimensional array of length %d" % self.n)
             if not np.isfinite(p).all() or np.any(p < 0) or not np.any(p > 0):
                 raise ValueError("reference must be finite, nonnegative, with positive total power")
-            if getattr(self, '_pending_ref', None) is not None and getattr(self, '_thr_applied', False):
-                p_old = self._pending_ref
-                norm_p = np.linalg.norm(p)
-                norm_old = np.linalg.norm(p_old)
-                if norm_p > 0 and norm_old > 0:
-                    sim = float(np.dot(p, p_old) / (norm_p * norm_old))
-                    if sim >= 0.985:
-                        self._pending_ref = p
-                        if self._mf is not None:
-                            self._mf.set_reference(p)
-                        return
         if self._gpu is not None:
             # Calibration and scaled coarse templates depend on the reference,
             # even when the template spectra themselves have not changed.
