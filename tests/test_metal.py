@@ -66,6 +66,52 @@ def test_the_coarse_kernel_has_metal():
     assert (METAL_DIR / "coarse_256.metal").is_file()
 
 
+@pytest.mark.parametrize("band", [64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384])
+def test_the_fp16_coarse_and_compact_kernels_have_metal(band):
+    assert (METAL_DIR / f"tierb_{band}_c16.metal").is_file()
+    assert (METAL_DIR / f"compact_{band}.metal").is_file()
+
+
+@pytest.mark.parametrize("band", [8192, 16384, 32768, 65536])
+def test_compact_portable_kernels_have_metal(band):
+    assert (METAL_DIR / f"compact_{band}_lds32.metal").is_file()
+
+
+def test_metal_fp16_helpers():
+    import numpy as np
+    from matchedfilter import _mtlcompute as M
+    for band in (64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384):
+        assert M._use_c16(band)
+    assert not M._use_c16(32768)
+    assert not M._use_c16(65536)
+
+    # Values including subnormals, zeros, negative numbers, infinities, boundaries
+    vals = np.array([0.0, -0.0, 1.0, -0.5, 2.0, -2.0, 65504.0, -65504.0, 2**-14], dtype=np.float32)
+    c = (vals + 1j * vals[::-1]).astype(np.complex64)
+    packed = M._pack_half2(c)
+    assert packed.dtype == np.uint32
+    assert packed.shape == c.shape
+    re = packed.view(np.uint16)[0::2].view(np.float16)
+    im = packed.view(np.uint16)[1::2].view(np.float16)
+    np.testing.assert_allclose(re, c.real.astype(np.float16))
+    np.testing.assert_allclose(im, c.imag.astype(np.float16))
+
+
+def test_metal_stem_resolution():
+    from matchedfilter import _mtlcompute as M
+    class FakeContext(M.Context):
+        pass
+    ctx = FakeContext.__new__(FakeContext)
+    ctx.max_shared_memory = 32768
+    ctx.name = "Apple M2"
+    for band in (64, 128, 256, 512, 1024, 2048, 4096):
+        assert ctx._stem(band, "coarse16") == f"tierb_{band}_c16"
+        assert ctx._stem(band, "compactPairs") == f"compact_{band}"
+    # Bands exceeding 32KB on M2 select portable lds32 for compactPairs
+    for band in (8192, 16384, 32768, 65536):
+        assert ctx._stem(band, "compactPairs") == f"compact_{band}_lds32"
+
+
 @pytest.mark.parametrize("n", [2048, 4096, 8192])
 def test_single_bin_artifacts(manifest, n):
     for entry in ("fusedTierB", "refineListed"):

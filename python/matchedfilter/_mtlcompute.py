@@ -72,6 +72,31 @@ def _radix(n):
     return _RADIX.get(n, 16)
 
 
+def _use_c16(band):
+    """Half-width coarse path where the FP16 kernel is available.
+
+    Loads tierb_<band>_c16.metal. Applies at every coarse band where
+    a pre-compiled FP16 kernel exists.
+    """
+    return (_METAL_DIR / ("tierb_%d_c16.metal" % band)).is_file() or \
+           (_METAL_DIR / ("tierb_%d_c16.metallib" % band)).is_file()
+
+
+def _pack_half2(a):
+    """complex64 -> one uint32 per value, real in the low half.
+
+    The coarse stage is bandwidth bound, so its two big inputs ship at half
+    width. Packed into uint32 rather than a half2 buffer so no 16-bit storage
+    extension is needed. Done once on upload.
+    """
+    a = np.ascontiguousarray(a, np.complex64)
+    if np.little_endian:
+        return a.view(np.float32).astype(np.float16).view(np.uint32)
+    re = a.real.astype(np.float16).view(np.uint16).astype(np.uint32)
+    im = a.imag.astype(np.float16).view(np.uint16).astype(np.uint32)
+    return np.ascontiguousarray(re | (im << 16), np.uint32)
+
+
 class MetalError(RuntimeError):
     pass
 
@@ -337,6 +362,8 @@ class Context(InputUploads):
             return "pack_coarse"
         if entry == "seriesForward":
             return "forward_%d" % n
+        if entry == "coarse16":
+            return "tierb_%d_c16" % n
         tierc = {"tcStage1": "corr1", "tcFullStage3": "corr2",
                  "tcFullSeriesStage3": "corr_series2",
                  "tcForwardStage1": "fwd1", "tcForwardStage3": "fwd2"}
@@ -416,28 +443,38 @@ class Context(InputUploads):
                                     restype=ctypes.c_ulong))
 
     @_autoreleased
-    def pipeline(self, n, entry="fusedTierB", one_bin=False):
+    def pipeline(self, n, entry="fusedTierB", one_bin=False, c16=False):
+        if c16 or entry == "coarse16":
+            entry_name = "coarse16"
+            fn_name = "fusedTierB"
+        else:
+            entry_name = entry
+            fn_name = entry
         single = (_manifest().get("modules", {}).get(str(n), {}).get("metal", {})
-                  .get(entry, {}).get("one_bin")) if one_bin else None
+                  .get(entry_name, {}).get("one_bin")) if (one_bin and not c16 and entry != "coarse16") else None
         if single and single["lds_bytes"] > self.max_shared_memory:
             single = None
-        key = (n, entry, True) if single else (n, entry)
+        key = (n, entry_name, True) if single else (n, entry_name)
         if key in self._pipelines:
             return self._pipelines[key]
-        stem = pathlib.Path(single["msl"]).stem if single else self._stem(n, entry)
+        stem = pathlib.Path(single["msl"]).stem if single else self._stem(n, entry_name)
         lib = self._library(stem)
         fn = pso = None
         try:
             fn = self.o.call(lib, b"newFunctionWithName:",
-                             args=(self.o.nsstring(entry),),
+                             args=(self.o.nsstring(fn_name),),
                              argtypes=(ctypes.c_void_p,))
             if not fn:
-                raise MetalError("no function %r in %s" % (entry, stem))
+                raise MetalError("no function %r in %s" % (fn_name, stem))
             roles = {"tcStage1": "corr1", "tcFullStage3": "corr2",
                      "tcFullSeriesStage3": "corr_series2",
                      "tcForwardStage1": "fwd1", "tcForwardStage3": "fwd2"}
-            want = (_manifest()['full_tierc'][str(n)][roles[entry]]['local_size'][0]
-                    if entry in roles else n // _radix(n))
+            if entry_name in roles:
+                want = (_manifest()['full_tierc'][str(n)][roles[entry_name]]['local_size'][0])
+            elif entry_name == "compactPairs":
+                want = 256
+            else:
+                want = n // _radix(n)
             err = ctypes.c_void_p()
             pso = self.o.call(self.device,
                               b"newComputePipelineStateWithFunction:error:",
@@ -961,15 +998,16 @@ class Context(InputUploads):
         if bufs is None:
             incoming = [b for a in (data, tmpl)
                         if (b := shared_buffer(a, self)) is not None]
-            estimate = 8*n*(nd+nt) + 8*band*(nd+nt) + nd*nt*(16+12*nbins) + 12
+            cbytes = 4 if _use_c16(band) else 8
+            estimate = 8*n*(nd+nt) + cbytes*band*(nd+nt) + nd*nt*(16+12*nbins) + 12
             estimate -= sum(a.nbytes for a in (data, tmpl)
                             if shared_buffer(a, self) is not None)
             self._cache_room(estimate, incoming=incoming)
             bufs = {
                 "data":  shared_buffer(data, self) or _Buffer(self, nd * n * 8),
                 "tmpl":  shared_buffer(tmpl, self) or _Buffer(self, nt * n * 8),
-                "cdata": _Buffer(self, nd * band * 8),
-                "ct0":   _Buffer(self, nt * band * 8),
+                "cdata": _Buffer(self, nd * band * cbytes),
+                "ct0":   _Buffer(self, nt * band * cbytes),
                 "cidx":  _Buffer(self, pairs * 4),
                 "cval":  _Buffer(self, pairs * 8),
                 # Compacted survivors and the indirect threadgroup count.
@@ -991,16 +1029,22 @@ class Context(InputUploads):
         if upload_data:
             write_input(bufs["data"], data)
             if shared_buffer(data, self) is None:
-                bufs["cdata"].write(np.ascontiguousarray(data[:, :band],
-                                                         np.complex64))
+                if _use_c16(band):
+                    bufs["cdata"].write(_pack_half2(data[:, :band]))
+                else:
+                    bufs["cdata"].write(np.ascontiguousarray(data[:, :band],
+                                                             np.complex64))
             self._uploaded["data"][key] = dsig
         if upload_tmpl:
             write_input(bufs["tmpl"], tmpl)
-            bufs["ct0"].write(np.ascontiguousarray(ct0, np.complex64))
+            if _use_c16(band):
+                bufs["ct0"].write(_pack_half2(ct0))
+            else:
+                bufs["ct0"].write(np.ascontiguousarray(ct0, np.complex64))
             self._uploaded["tmpl"][key] = tsig
 
-        coarse = self.pipeline(band)
-        compact = self.pipeline(n, "compactPairs")
+        coarse = self.pipeline(band, "coarse16" if _use_c16(band) else "fusedTierB")
+        compact = self.pipeline(band, "compactPairs")
         refine = self.pipeline(n, "refineListed", nbins == 1)
 
         # Pairs that do not survive are never visited, so their -1 has to be
@@ -1057,7 +1101,7 @@ class Context(InputUploads):
         # sample so rounding the caller's window remains conservative.
         if shared_buffer(data, self) is not None:
             dispatch(self.pipeline(4096, "packCoarse"),
-                     (n, band, nd*band, 0), ("data", "cdata"), 4096,
+                     (n, band, nd*band, int(_use_c16(band))), ("data", "cdata"), 4096,
                      groups=(nd*band + 255)//256, tg=256)
 
         R_coarse = n // band
