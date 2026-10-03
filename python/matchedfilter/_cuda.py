@@ -148,6 +148,10 @@ def get_cuda_lib():
     lib.cuMemsetD32_v2.argtypes = [ctypes.c_uint64, ctypes.c_uint, ctypes.c_size_t]
     lib.cuMemsetD32_v2.restype = ctypes.c_int
 
+    if hasattr(lib, "cuMemsetD32Async"):
+        lib.cuMemsetD32Async.argtypes = [ctypes.c_uint64, ctypes.c_uint, ctypes.c_size_t, ctypes.c_void_p]
+        lib.cuMemsetD32Async.restype = ctypes.c_int
+
     # Execution & Streams
     lib.cuLaunchKernel.argtypes = [
         ctypes.c_void_p,                              # f

@@ -37,6 +37,7 @@ def _manifest():
 
 
 _MAX_BINS = 2048
+_COARSE_TILE_T = {128: 2, 256: 2, 512: 4, 1024: 2}
 
 
 def _radix(n):
@@ -500,9 +501,15 @@ class Context(InputUploads):
                 bufs["ct0"].write(np.ascontiguousarray(ct0, np.complex64))
             self._uploaded["tmpl"][key] = tsig
 
-        # Reset survivor counter
-        init_args = np.array([0, 1, 1, 0], dtype=np.uint32)
-        bufs["args"].write(init_args)
+        # Reset survivor counter and pre-clear output arrays on GPU
+        if hasattr(self.cuda, "cuMemsetD32Async"):
+            check_cuda(self.cuda.cuMemsetD32Async(bufs["args"].dptr, 0, 4, self.stream), "cuMemsetD32Async")
+            check_cuda(self.cuda.cuMemsetD32Async(bufs["idx"].dptr, 0xFFFFFFFF, nd * nt * nbins, self.stream), "cuMemsetD32Async")
+            check_cuda(self.cuda.cuMemsetD32Async(bufs["val"].dptr, 0, nd * nt * nbins * 2, self.stream), "cuMemsetD32Async")
+        else:
+            check_cuda(self.cuda.cuMemsetD32_v2(bufs["args"].dptr, 0, 4), "cuMemsetD32")
+            check_cuda(self.cuda.cuMemsetD32_v2(bufs["idx"].dptr, 0xFFFFFFFF, nd * nt * nbins), "cuMemsetD32")
+            check_cuda(self.cuda.cuMemsetD32_v2(bufs["val"].dptr, 0, nd * nt * nbins * 2), "cuMemsetD32")
 
         check_cuda(self.cuda.cuEventRecord(self._start_event, self.stream), "cuEventRecord")
 
@@ -526,7 +533,14 @@ class Context(InputUploads):
         cspan = max(1, cend - cstart)
         shift_c = (cspan.bit_length() - 1) if cspan & (cspan - 1) == 0 else -1
 
-        coarse_fn, coarse_wg = self.pipeline(band, "fusedTierB", c16=_use_c16(band))
+        _ppg = max(1, min(4, 512 // band)) if _use_c16(band) else 1
+        if pairs % _ppg:
+            _ppg = 1
+        _tile = _COARSE_TILE_T.get(band, 1) if _use_c16(band) else 1
+        if _tile > 1 and (nt % _tile or pairs % (_ppg * _tile)):
+            _tile = 1
+
+        coarse_fn, coarse_wg = self.pipeline(band, "fusedTierB", c16=_use_c16(band), ppg=_ppg, tile=_tile)
         c_cntmpl = ctypes.c_uint32(nt)
         c_cstart = ctypes.c_uint32(cstart)
         c_cend = ctypes.c_uint32(cend)
@@ -548,7 +562,7 @@ class Context(InputUploads):
             c_one,
             c_zero,
         ]
-        self._launch(coarse_fn, pairs, coarse_wg, params_coarse)
+        self._launch(coarse_fn, pairs // (_ppg * _tile), coarse_wg, params_coarse)
 
         # 2. Compact survivors
         compact_fn, compact_wg = self.pipeline(band, "compactPairs")
@@ -560,8 +574,6 @@ class Context(InputUploads):
             bufs["cval"].dptr,
             bufs["surv"].dptr,
             bufs["args"].dptr,
-            bufs["idx"].dptr,
-            bufs["val"].dptr,
             c_pairs,
             c_thr,
             c_nb,

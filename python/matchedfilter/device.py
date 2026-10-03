@@ -238,3 +238,6 @@ def _no_gpu_reason():
                        if ok else "no Metal device")
     ok, why = _vulkan.available()
     return why or "unknown"
+
+
+Device.parse = staticmethod(parse)
