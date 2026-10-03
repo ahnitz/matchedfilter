@@ -78,7 +78,7 @@ def validate(device):
 
 
 def collect(args):
-    if args.cpu is not None:
+    if args.cpu is not None and hasattr(os, "sched_setaffinity"):
         os.sched_setaffinity(0, {args.cpu})
     devices = teaser.mf.devices()
     report = dict(host=args.host or platform.node().split('.')[0],
