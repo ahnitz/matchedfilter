@@ -1752,21 +1752,26 @@ def candidate_configs(power, n, snr, fd, tuning=None, pairs=None, device=None, c
     cands = _cost_candidates(power, n, snr, tuning, fd, pairs) if tuning is not None else []
     if not cands:
         min_floor = _min_band_for(device, tuning)
+        is_gpu = getattr(device, "kind", None) == "gpu" or (isinstance(device, str) and device.lower().startswith("gpu"))
+        default_k = 4 if is_gpu else 8
         b_target = max(min_floor, n // 8)
         cand_list = []
         b = b_target
         while b < n:
             g = choose_threshold(power, n, snr, fd, b) if power is not None else -1.0
             if g is not None:
-                cand_list.append(dict(band=b, K=8, cost=float(b * math.log2(b))))
-                break
+                p_trig = max(0.0, min(1.0, 1.0 - (1.0 - math.exp(-0.5 * float(g) * float(g))) ** b)) if g > 0 else 0.0
+                cost = float(b * math.log2(b) + p_trig * n * math.log2(n))
+                cand_list.append(dict(band=b, K=default_k, cost=cost))
             b *= 2
         if not cand_list:
             b = min_floor
             while b < n:
                 g = choose_threshold(power, n, snr, fd, b) if power is not None else -1.0
                 if g is not None:
-                    cand_list.append(dict(band=b, K=8, cost=float(b * math.log2(b))))
+                    p_trig = max(0.0, min(1.0, 1.0 - (1.0 - math.exp(-0.5 * float(g) * float(g))) ** b)) if g > 0 else 0.0
+                    cost = float(b * math.log2(b) + p_trig * n * math.log2(n))
+                    cand_list.append(dict(band=b, K=default_k, cost=cost))
                 b *= 2
         cands = sorted(cand_list, key=lambda c: (c["cost"], c["band"]))
 
