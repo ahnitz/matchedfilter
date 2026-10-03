@@ -3127,4 +3127,7 @@ def __getattr__(name):
     if name == "Device":
         from .device import Device
         return Device
+    if name == "device":
+        from . import device
+        return device
     raise AttributeError(name)

@@ -11,6 +11,7 @@ import pytest
 import numpy as np
 
 import matchedfilter
+from matchedfilter.device import Device
 from matchedfilter import _cuda
 
 PTX_DIR = pathlib.Path(matchedfilter.__file__).resolve().parent / "ptx"
@@ -56,7 +57,7 @@ def test_coarse_and_pack_kernels_shipped(manifest):
 
 @pytest.mark.skipif(not _cuda.enumerate_devices()[0], reason="No NVIDIA CUDA GPU available on host")
 def test_cuda_flat_filter_agrees_with_cpu():
-    dev = matchedfilter.device.parse("cuda:0")
+    dev = Device.parse("cuda:0")
     assert dev.backend == "cuda"
 
     n = 1024
@@ -65,34 +66,43 @@ def test_cuda_flat_filter_agrees_with_cpu():
     tmpl = (np.random.randn(4, n) + 1j * np.random.randn(4, n)).astype(np.complex64)
 
     mf_cpu = matchedfilter.MatchedFilter(n, 2, 4, device="cpu")
-    idx_cpu, val_cpu = mf_cpu.peaks(data, tmpl)
+    mf_cpu.set_data(data)
+    mf_cpu.set_templates(tmpl)
+    res_cpu = mf_cpu.run()
 
     mf_gpu = matchedfilter.MatchedFilter(n, 2, 4, device=dev)
-    idx_gpu, val_gpu = mf_gpu.peaks(data, tmpl)
+    mf_gpu.set_data(data)
+    mf_gpu.set_templates(tmpl)
+    res_gpu = mf_gpu.run()
 
-    np.testing.assert_array_equal(idx_gpu, idx_cpu)
-    np.testing.assert_allclose(val_gpu, val_cpu, rtol=1e-4, atol=1e-4)
+    np.testing.assert_array_equal(res_gpu["index"], res_cpu["index"])
+    np.testing.assert_allclose(res_gpu["value"], res_cpu["value"], rtol=1e-4, atol=1e-4)
 
 
 @pytest.mark.skipif(not _cuda.enumerate_devices()[0], reason="No NVIDIA CUDA GPU available on host")
 def test_cuda_hierarchical_filter_agrees_with_cpu():
-    dev = matchedfilter.device.parse("cuda:0")
+    dev = Device.parse("cuda:0")
     n = 4096
     np.random.seed(5678)
     data = (np.random.randn(2, n) + 1j * np.random.randn(2, n)).astype(np.complex64)
     tmpl = (np.random.randn(4, n) + 1j * np.random.randn(4, n)).astype(np.complex64)
 
     # Add strong injection to trigger survivor
-    inj_idx = 500
     data[0, :] += 15.0 * tmpl[0, :]
 
     hf_cpu = matchedfilter.HierarchicalFilter(n, 2, 4, band=512, device="cpu")
+    hf_cpu.set_reference(np.ones(n, dtype=np.float32))
     hf_cpu.set_coarse_threshold(4.0)
-    idx_cpu, val_cpu = hf_cpu.peaks(data, tmpl, threshold=6.0)
+    hf_cpu.set_data(data)
+    hf_cpu.set_templates(tmpl)
+    res_cpu = hf_cpu.run(threshold=6.0)
 
     hf_gpu = matchedfilter.HierarchicalFilter(n, 2, 4, band=512, device=dev)
+    hf_gpu.set_reference(np.ones(n, dtype=np.float32))
     hf_gpu.set_coarse_threshold(4.0)
-    idx_gpu, val_gpu = hf_gpu.peaks(data, tmpl, threshold=6.0)
+    hf_gpu.set_data(data)
+    hf_gpu.set_templates(tmpl)
+    res_gpu = hf_gpu.run(threshold=6.0)
 
-    np.testing.assert_array_equal(idx_gpu, idx_cpu)
-    np.testing.assert_allclose(val_gpu, val_cpu, rtol=1e-3, atol=1e-3)
+    np.testing.assert_array_equal(res_gpu["index"], res_cpu["index"])
+    np.testing.assert_allclose(res_gpu["value"], res_cpu["value"], rtol=1e-3, atol=1e-3)
