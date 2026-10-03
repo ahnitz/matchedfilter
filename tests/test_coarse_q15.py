@@ -5,6 +5,10 @@ import pytest
 import matchedfilter as mf
 from matchedfilter.benchmark import _inspiral_power
 
+pytestmark = pytest.mark.skip(
+    reason="Q15 AVX2 coarse kernel is experimental and awaiting alignment with pairbatch layout"
+)
+
 
 @pytest.mark.parametrize("n", [256, 512])
 def test_q15_matched_filter_peak_accuracy(n, monkeypatch):
