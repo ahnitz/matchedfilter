@@ -108,11 +108,18 @@ def collect(args):
         save()
         raise
     teaser.mf.clear_autotune_cache()
-    baseline = 'FFTW' if args.device == 'cpu' else ('MLX' if sys.platform == 'darwin' else 'rocFFT')
+    if args.device == 'cpu':
+        baseline = 'FFTW'
+    elif sys.platform == 'darwin':
+        baseline = 'MLX'
+    elif any(getattr(d, 'backend', None) == 'cuda' for d in devices):
+        baseline = 'cuFFT'
+    else:
+        baseline = 'rocFFT'
     for label, kind, fd, snr in [(baseline, 'baseline', None, None)] + MODES:
         try:
             if kind == 'baseline':
-                fn = {'FFTW': teaser.fftw_ms, 'MLX': teaser.mlx_ms, 'rocFFT': teaser.rocfft_ms}[baseline]
+                fn = {'FFTW': teaser.fftw_ms, 'MLX': teaser.mlx_ms, 'rocFFT': teaser.rocfft_ms, 'cuFFT': teaser.cufft_ms}[baseline]
                 ms = fn()
             else:
                 ms = teaser._filter_ms(kind, args.device, args.reps, fd or .01,
@@ -219,7 +226,7 @@ def compare(paths, out):
     fig.legend(handles, labels, loc='lower center', bbox_to_anchor=(.5,.085), ncol=6,
                frameon=False, labelcolor=fg, fontsize=11)
     fig.text(.04,.055,'Whiskers: timing-block 10th–90th percentiles. Full → peak avoids output traffic; hierarchy also skips FFTs. Configurations vary by device.',color=muted,size=10)
-    fig.text(.04,.025,'FFT-only: FFTW on CPU; rocFFT or MLX where available on GPU. Missing references are omitted. Setup/upload excluded; synchronization included.',color=muted,size=10)
+    fig.text(.04,.025,'FFT-only: FFTW on CPU; cuFFT, rocFFT or MLX where available on GPU. Missing references are omitted. Setup/upload excluded; synchronization included.',color=muted,size=10)
     out = Path(out)
     out.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out, facecolor=bg)

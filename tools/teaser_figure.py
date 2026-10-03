@@ -286,6 +286,67 @@ def rocfft_ms(reps=7):
         roc.rocfft_cleanup()
 
 
+def cufft_ms(reps=7):
+    """Full-batch in-place cuFFT, amortized sync, initialized resident data."""
+    import matchedfilter as mf
+    from matchedfilter._cuda import get_cuda_lib, check_cuda
+    cuda = get_cuda_lib()
+    cufft = None
+    for path in ['libcufft.so.11', 'libcufft.so.12', 'libcufft.so',
+                 '/home/ahnitz/mf_bench/env/lib/python3.11/site-packages/nvidia/cufft/lib/libcufft.so.11']:
+        try:
+            cufft = ctypes.CDLL(path)
+            break
+        except OSError:
+            pass
+    if cufft is None:
+        try:
+            import site
+            for sp in site.getsitepackages():
+                p = Path(sp) / 'nvidia' / 'cufft' / 'lib' / 'libcufft.so.11'
+                if p.is_file():
+                    cufft = ctypes.CDLL(str(p))
+                    break
+        except Exception:
+            pass
+    if cufft is None:
+        raise RuntimeError('libcufft not found')
+
+    integer = ctypes.c_int
+    cufft.cufftPlan1d.argtypes = [ctypes.POINTER(ctypes.c_uint), integer, integer, integer]
+    cufft.cufftPlan1d.restype = integer
+    cufft.cufftExecC2C.argtypes = [ctypes.c_uint, ctypes.c_uint64, ctypes.c_uint64, integer]
+    cufft.cufftExecC2C.restype = integer
+    cufft.cufftDestroy.argtypes = [ctypes.c_uint]
+    cufft.cufftDestroy.restype = integer
+
+    dev = [d for d in mf.devices() if d.backend == 'cuda'][0]
+    filt = mf.MatchedFilter(N, 1, 1, device=dev)
+    ctx = filt._gpu
+
+    dptr = ctypes.c_uint64(0)
+    nbytes = PAIRS * N * 8
+    check_cuda(cuda.cuMemAlloc_v2(ctypes.byref(dptr), nbytes), "cufft cuMemAlloc")
+    check_cuda(cuda.cuMemsetD8_v2(dptr, 0, nbytes), "cufft cuMemsetD8")
+
+    plan = ctypes.c_uint(0)
+    res = cufft.cufftPlan1d(ctypes.byref(plan), N, 0x29, PAIRS)
+    if res != 0:
+        cuda.cuMemFree_v2(dptr)
+        raise RuntimeError(f"cufftPlan1d failed: {res}")
+
+    try:
+        def batch():
+            for _ in range(8):
+                cufft.cufftExecC2C(plan, dptr, dptr, 1)  # 1 = CUFFT_INVERSE
+            check_cuda(cuda.cuStreamSynchronize(ctx.stream), "cuStreamSynchronize")
+        return _timed(batch, reps) / 8
+    finally:
+        cufft.cufftDestroy(plan)
+        cuda.cuMemFree_v2(dptr)
+
+
+
 def mlx_ms(reps=7):
     """Resident full-batch IFFT; eight queued executions per synchronization.
 
