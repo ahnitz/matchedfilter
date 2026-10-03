@@ -92,6 +92,13 @@ def get_cuda_lib():
     lib.cuCtxCreate_v2.argtypes = [ctypes.POINTER(ctypes.c_void_p), ctypes.c_uint, ctypes.c_int]
     lib.cuCtxCreate_v2.restype = ctypes.c_int
 
+    if hasattr(lib, "cuDevicePrimaryCtxRetain"):
+        lib.cuDevicePrimaryCtxRetain.argtypes = [ctypes.POINTER(ctypes.c_void_p), ctypes.c_int]
+        lib.cuDevicePrimaryCtxRetain.restype = ctypes.c_int
+    if hasattr(lib, "cuDevicePrimaryCtxRelease"):
+        lib.cuDevicePrimaryCtxRelease.argtypes = [ctypes.c_int]
+        lib.cuDevicePrimaryCtxRelease.restype = ctypes.c_int
+
     lib.cuCtxDestroy_v2.argtypes = [ctypes.c_void_p]
     lib.cuCtxDestroy_v2.restype = ctypes.c_int
 
@@ -107,6 +114,16 @@ def get_cuda_lib():
     # Module & Function
     lib.cuModuleLoadData.argtypes = [ctypes.POINTER(ctypes.c_void_p), ctypes.c_char_p]
     lib.cuModuleLoadData.restype = ctypes.c_int
+
+    if hasattr(lib, "cuModuleLoadDataEx"):
+        lib.cuModuleLoadDataEx.argtypes = [
+            ctypes.POINTER(ctypes.c_void_p),
+            ctypes.c_char_p,
+            ctypes.c_uint,
+            ctypes.POINTER(ctypes.c_int),
+            ctypes.POINTER(ctypes.c_void_p),
+        ]
+        lib.cuModuleLoadDataEx.restype = ctypes.c_int
 
     lib.cuModuleUnload.argtypes = [ctypes.c_void_p]
     lib.cuModuleUnload.restype = ctypes.c_int
