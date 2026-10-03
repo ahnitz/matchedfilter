@@ -16,6 +16,7 @@
  * one contiguous run.
  */
 #include <time.h>
+#include "int16_coarse.h"
 #include "elemfft-inl.h"
 
 #if defined(AP_BALANCED_INL_H_) == defined(HWY_TARGET_TOGGLE)
@@ -1539,6 +1540,14 @@ int binmax_prod_batch(void *vp,const float*dr,const float*di,
   if(!p->small||nlane<1||nlane>AP_W) return -1;
   const size_t nb=(we-ws+binsize-1)/binsize;
   if(bins_reserve(p,nb)) return -1;
+#if HWY_TARGET == HWY_AVX2
+  if(AP_W == 8 && nb == 1 && (p->N == 256 || p->N == 512)) {
+    const char *e_int16 = getenv("MF_COARSE_INT16");
+    if(e_int16 && atoi(e_int16) > 0) {
+      return ap_binmax_prod_batch_q15(dr, di, tr, ti, nlane, p->N, binsize, thr, out, ws, we);
+    }
+  }
+#endif
   if(broadcast_data(p))
     efft_prod_broadcast((int)p->N,dr,di,tr,ti,p->bR,p->bI,p->sR,p->sI,p->w1r,p->w1i);
   else
