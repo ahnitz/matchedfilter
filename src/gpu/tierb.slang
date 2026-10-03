@@ -183,6 +183,12 @@ static const uint NLEVELS = (WG <= R) ? 1 : ((WG <= R * R) ? 2 : 3);
 
 C cmul(C a, C b) { return C(a.x*b.x - a.y*b.y, a.x*b.y + a.y*b.x); }
 C cmulConj(C a, C b) { return C(a.x*b.x + a.y*b.y, a.y*b.x - a.x*b.y); }
+inline uint computeWant(uint d, uint TB, uint len, uint blk, uint lane, uint per, uint TB2, uint len2, uint blk2, uint lane2)
+{
+    uint j = d / max(TB, 1u), m = d % max(TB, 1u);
+    return (TB <= RADIX) ? (blk * len + (lane * per + j) * TB + m)
+                         : (blk2 * len2 + lane2 + TB2 * d);
+}
 
 #if COARSE16
 typedef half2 H;
@@ -291,8 +297,9 @@ H mag2s(H re, H im) { return re * re + im * im; }
 //: Dual exchange. Two passes over the same stage -- re then im -- so the
 //: LDS sizing is untouched. Each stgPut stores one half2, which is the
 //: same element of BOTH transforms, so one pass moves both.
-void exchangeS(inout H re[16], inout H im[16], uint want[RADIX],
-               uint lgLen, uint lgSpan)
+void exchangeS(inout H re[16], inout H im[16],
+               uint lgLen, uint lgSpan,
+               uint TB, uint len, uint blk, uint lane, uint per, uint TB2, uint len2, uint blk2, uint lane2)
 {
     H outr[16], outi[16];
     [unroll] for (uint z = 0; z < R; ++z) { outr[z] = H(0.0f); outi[z] = H(0.0f); }
@@ -303,7 +310,7 @@ void exchangeS(inout H re[16], inout H im[16], uint want[RADIX],
         [unroll] for (uint j = 0; j < CH; ++j) stgPut(j * WG + _tid, re[c * CH + j]);
         GroupMemoryBarrierWithGroupSync();
         [unroll] for (uint d = 0; d < R; ++d) {
-            uint p = want[d];
+            uint p = computeWant(d, TB, len, blk, lane, per, TB2, len2, blk2, lane2);
             uint b = p >> lgLen, rem = p & lenMask;
             uint i = rem >> lgSpan, ln = rem & spanMask;
             if (i >= c * CH && i < (c + 1) * CH)
@@ -313,7 +320,7 @@ void exchangeS(inout H re[16], inout H im[16], uint want[RADIX],
         [unroll] for (uint j = 0; j < CH; ++j) stgPut(j * WG + _tid, im[c * CH + j]);
         GroupMemoryBarrierWithGroupSync();
         [unroll] for (uint d = 0; d < R; ++d) {
-            uint p = want[d];
+            uint p = computeWant(d, TB, len, blk, lane, per, TB2, len2, blk2, lane2);
             uint b = p >> lgLen, rem = p & lenMask;
             uint i = rem >> lgSpan, ln = rem & spanMask;
             if (i >= c * CH && i < (c + 1) * CH)
@@ -493,7 +500,8 @@ void innermost(inout C r[RADIX])
 //   scatter wrote   p = blk*len + i*span + lane
 //   so from p:      blk = p/len, i = (p%len)/span, lane = (p%len)%span
 //                   writer thread = blk*span + lane
-void exchange(inout C r[RADIX], uint want[RADIX], uint lgLen, uint lgSpan)
+void exchange(inout C r[RADIX], uint lgLen, uint lgSpan,
+              uint TB, uint len, uint blk, uint lane, uint per, uint TB2, uint len2, uint blk2, uint lane2)
 {
     // Every divisor here is a power of two, so these are shifts and masks.
     // Written as / and % they were integer divisions -- 16 of them per
@@ -513,7 +521,7 @@ void exchange(inout C r[RADIX], uint want[RADIX], uint lgLen, uint lgSpan)
         [unroll] for (uint j = 0; j < CH; ++j) stgPut(j * WG + _tid, r[c * CH + j]);
         GroupMemoryBarrierWithGroupSync();
         [unroll] for (uint d = 0; d < R; ++d) {
-            uint p = want[d];
+            uint p = computeWant(d, TB, len, blk, lane, per, TB2, len2, blk2, lane2);
             uint b = p >> lgLen, rem = p & lenMask;
             uint i = rem >> lgSpan, ln = rem & spanMask;
             if (i >= c * CH && i < (c + 1) * CH)
@@ -845,8 +853,6 @@ void filterTwo(uint pairA, uint pairB, uint tA, uint tB, uint tid,
     }
 
     [ForceUnroll] for (uint lvl = 0; lvl < NLEVELS; ++lvl) {
-        uint want[RADIX];
-        [unroll] for (uint z = 0; z < R; ++z) want[z] = 0u;
         const uint TB   = WG >> (LGR * lvl);
         const uint len  = N  >> (LGR * lvl);
         const uint lgTB = firstbithigh(TB);
@@ -855,14 +861,6 @@ void filterTwo(uint pairA, uint pairB, uint tA, uint tB, uint tid,
         uint lane = tid & (TB - 1);
 
         dft16s(re, im);
-        // w_k = w_1^k, so ONE cos/sin per level and a recurrence for the
-        // rest. Computing each angle separately cost 16 cos + 16 sin per
-        // level plus their argument reduction: 941 fp32 ops, 12.8% of the
-        // kernel, for values related by a single rotation.
-        //
-        // The recurrence runs in fp32 and narrows per step. Sixteen steps
-        // accumulate ~1e-6 relative, which is far under the fp16 the
-        // twiddle is stored in anyway.
         {
             float a1 = 2.0f * PI * float(lane) / float(len);
             float2 tw = mfTwiddle(a1);
@@ -878,12 +876,7 @@ void filterTwo(uint pairA, uint pairB, uint tA, uint tB, uint tid,
         const uint per  = R / max(TB, 1u);
         const uint TB2  = max(TB >> LGR, 1u), len2 = TB;
         uint blk2 = tid / TB2, lane2 = tid % TB2;
-        [unroll] for (uint dd = 0; dd < R; ++dd) {
-            uint j = dd / max(TB, 1u), m = dd % max(TB, 1u);
-            want[dd] = (TB <= R) ? (blk * len + (lane * per + j) * TB + m)
-                                 : (blk2 * len2 + lane2 + TB2 * dd);
-        }
-        exchangeS(re, im, want, lgLn, lgTB);
+        exchangeS(re, im, lgLn, lgTB, TB, len, blk, lane, per, TB2, len2, blk2, lane2);
     }
     innermostS(re, im);
 
@@ -1039,28 +1032,31 @@ void compactPairs(uint3 gid: SV_DispatchThreadID,
                   StructuredBuffer<float2> coarse,
                   RWStructuredBuffer<uint> survivors,
                   RWStructuredBuffer<uint> args,
-                  RWStructuredBuffer<int> peakIdx,
-                  RWStructuredBuffer<float2> peakVal,
                   uniform uint pairs, uniform float thr, uniform uint nbins)
 {
     uint pair = gid.x;
+#if defined(MF_VULKAN) || defined(MF_CUDA)
+    bool active = (pair < pairs) && (length(coarse[pair]) >= thr);
+    uint waveCount = WaveActiveCountBits(active);
+    uint waveOffset = WavePrefixCountBits(active);
+    uint baseSlot = 0;
+    if (WaveIsFirstLane()) {
+        if (waveCount > 0) {
+            InterlockedAdd(args[0], waveCount, baseSlot);
+        }
+    }
+    baseSlot = WaveReadLaneFirst(baseSlot);
+    if (active) {
+        survivors[baseSlot + waveOffset] = pair;
+    }
+#else
     if (pair >= pairs) return;
     if (length(coarse[pair]) >= thr) {
         uint slot;
         InterlockedAdd(args[0], 1u, slot);
         survivors[slot] = pair;
-        return;
     }
-    // Dismissed, and nothing will visit this pair again -- so its "nothing
-    // here" is written now. This walk is why the output needs no separate
-    // clear: a fill would touch every slot including the survivors' whose
-    // values the refine is about to overwrite, and on Metal there is no
-    // fill on a compute encoder at all.
-    for (uint b = 0; b < nbins; ++b) {
-        uint o = pair * nbins + b;
-        peakIdx[o] = -1;
-        peakVal[o] = float2(0.0f, 0.0f);
-    }
+#endif
 }
 
 //: The refine, over a compacted list. Uses the same filtering body, except that

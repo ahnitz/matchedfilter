@@ -524,10 +524,14 @@ class Context(InputUploads):
     def empty_shared(self, shape, dtype=np.complex64, *, readback=False):
         return empty_shared(self, _Buffer, shape, dtype)
 
+    def _forward_fused(self, n, series, starts, spectra, *, defer=False):
+        """Dispatch fused forward FFT kernel path."""
+        return self.forward(n, series, starts, spectra, defer=defer, fused=True)
+
     @_autoreleased
-    def forward(self, n, series, starts, spectra, *, defer=False):
+    def forward(self, n, series, starts, spectra, *, defer=False, fused=False):
         if n > 65536:
-            return self._forward_tierc(n, series, starts, spectra, defer=defer)
+            return self._forward_tierc(n, series, starts, spectra, defer=defer, fused=fused)
         pso = self.pipeline(n, "seriesForward")
         buffers = [shared_buffer(a, self) for a in (series, starts, spectra)]
         if any(b is None for b in buffers):
@@ -586,20 +590,25 @@ class Context(InputUploads):
         self.o.call(enc, b'endEncoding', restype=None)
 
     @_autoreleased
-    def _forward_tierc(self, n, series, starts, spectra, *, defer=False):
+    def _forward_tierc(self, n, series, starts, spectra, *, defer=False, fused=False):
         geometry = _manifest().get('full_tierc', {}).get(str(n))
         if geometry is None:
             raise UnsupportedSize('no two-stage series FFT for n=%d' % n)
         buffers = [shared_buffer(a, self) for a in (series, starts, spectra)]
         if any(b is None for b in buffers):
             raise ValueError('two-stage forward buffers must belong to this GPU context')
-        key = (n, series.size, spectra.shape[0],
+        key = (n, series.size, spectra.shape[0], fused,
                *(a.ctypes.data for a in (series, starts, spectra)))
-        scratch = self._forwards.get(key)
-        if scratch is None:
-            self._cache_room(spectra.nbytes, incoming=buffers)
-            scratch = _Buffer(self, spectra.nbytes)
-            self._forwards[key] = scratch
+        if spectra.shape[0] * n * 8 <= 64 * 1024 * 1024:
+            if getattr(self, "_persistent_scratch", None) is None or self._persistent_scratch.nbytes < spectra.nbytes:
+                self._persistent_scratch = _Buffer(self, max(spectra.nbytes, 64 * 1024 * 1024))
+            scratch = self._persistent_scratch
+        else:
+            scratch = self._forwards.get(key)
+            if scratch is None:
+                self._cache_room(spectra.nbytes, incoming=buffers)
+                scratch = _Buffer(self, spectra.nbytes)
+                self._forwards[key] = scratch
         self._cache_touch('forward', key)
         cmd = self.o.call(self.queue, b'commandBuffer')
         self._encode_tierc(cmd, n, 'fwd1', (buffers[0], buffers[1], scratch),
@@ -1211,6 +1220,9 @@ class Context(InputUploads):
             self._tierc_batches.clear()
         if hasattr(self, '_forwards'):
             self._forwards.clear()
+        if getattr(self, '_persistent_scratch', None) is not None:
+            self._persistent_scratch.destroy()
+            self._persistent_scratch = None
         self._uploaded = {"data": {}, "tmpl": {}}
         self._cache_order = {}
 

@@ -190,7 +190,7 @@ void coarseTile(uint3 gid: SV_GroupID, uint3 lid: SV_GroupThreadID,
     GroupMemoryBarrierWithGroupSync();
     sh[base + lane] = float2(best, 0.0f);
     GroupMemoryBarrierWithGroupSync();
-    for (uint st = TP/2; st > 0; st >>= 1) {
+    [ForceUnroll] for (uint st = TP/2; st > 0; st >>= 1) {
         if (lane < st) sh[base+lane] = float2(max(sh[base+lane].x, sh[base+lane+st].x), 0.0f);
         GroupMemoryBarrierWithGroupSync();
     }

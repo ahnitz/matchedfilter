@@ -601,13 +601,19 @@ class Context(InputUploads):
 
         self._sync_and_time()
         self.last_refinements = surv_count
+        if surv_count == 0:
+            return np.full((nd, nt, nbins), -1, dtype=np.int32), np.zeros((nd, nt, nbins), dtype=np.complex64)
 
         idx = bufs["idx"].read(np.int32, nd * nt * nbins).reshape(nd, nt, nbins)
         val_raw = bufs["val"].read(np.float32, nd * nt * nbins * 2).reshape(nd, nt, nbins, 2)
         val = (val_raw[..., 0] + 1j * val_raw[..., 1]).astype(np.complex64)
         return idx, val
 
-    def forward(self, n, series, starts, spectra, *, defer=False):
+    def _forward_fused(self, n, series, starts, spectra, *, defer=False):
+        """Dispatch fused forward FFT kernel path."""
+        return self.forward(n, series, starts, spectra, defer=defer, fused=True)
+
+    def forward(self, n, series, starts, spectra, *, defer=False, fused=False):
         """Batch forward series FFTs."""
         hfunc, wg = self.pipeline(n, "seriesForward")
         series_buf = shared_buffer(series, self) or _Buffer(self, series.nbytes)

@@ -1816,6 +1816,10 @@ def choose_config(power, n, snr, fd, tuning=None, pairs=None, device=None, casca
         return candidates[0]
 
     single_choice = candidates[0]
+    is_gpu = getattr(device, "kind", None) == "gpu" or (isinstance(device, str) and device.lower().startswith("gpu"))
+    if is_gpu and pairs is not None and pairs < 16384:
+        return single_choice
+
     b_single = single_choice[0]
     g_single = choose_threshold(power, n, snr, fd, b_single) if power is not None else None
     p_ref_single = (1.0 - (1.0 - math.exp(-0.5 * float(g_single) * float(g_single))) ** b_single) if g_single is not None else 0.0

@@ -3,7 +3,7 @@
 #include <metal_texture>
 using namespace metal;
 
-#line 70 "/home/ahnitz/projects/claude/searchdev/work/mf-main-merge/python/matchedfilter/spirv/ct_256_m.slang"
+#line 70 "/home/ahnitz/projects/claude/searchdev/work/peak-fft/python/matchedfilter/spirv/ct_256_m.slang"
 float2 cmulConj_0(float2 a_0, float2 b_0)
 {
 
@@ -76,12 +76,12 @@ float2 cmul_0(float2 a_2, float2 b_2)
 #line 78
 void dft16_0(array<float2, int(16)> thread* r_0)
 {
-    float2 W1_0 = float2(0.92387950420379639f, 0.38268342614173889f);
-    float2 W2_0 = float2(0.70710676908493042f, 0.70710676908493042f);
-    float2 W3_0 = float2(0.38268342614173889f, 0.92387950420379639f);
-    float2 W4_0 = float2(0.0f, 1.0f);
-    float2 W6_0 = float2(-0.70710676908493042f, 0.70710676908493042f);
-    float2 W9_0 = float2(-0.92387950420379639f, -0.38268342614173889f);
+    float2 W1_0 = float2(0.92387950420379639, 0.38268342614173889);
+    float2 W2_0 = float2(0.70710676908493042, 0.70710676908493042);
+    float2 W3_0 = float2(0.38268342614173889, 0.92387950420379639);
+    float2 W4_0 = float2(0.0, 1.0);
+    float2 W6_0 = float2(-0.70710676908493042, 0.70710676908493042);
+    float2 W9_0 = float2(-0.92387950420379639, -0.38268342614173889);
 
 #line 85
     uint n1_0 = 0U;
@@ -215,7 +215,7 @@ void dftR_0(array<float2, int(16)> thread* r_1)
 }
 
 
-#line 10 "/home/ahnitz/projects/claude/searchdev/work/mf-main-merge/src/gpu/twiddle.slang"
+#line 12 "/home/ahnitz/projects/claude/searchdev/work/peak-fft/src/gpu/twiddle.slang"
 float2 mfTwiddle_0(float angle_0)
 {
 
@@ -223,7 +223,7 @@ float2 mfTwiddle_0(float angle_0)
 }
 
 
-#line 137 "/home/ahnitz/projects/claude/searchdev/work/mf-main-merge/python/matchedfilter/spirv/ct_256_m.slang"
+#line 137 "/home/ahnitz/projects/claude/searchdev/work/peak-fft/python/matchedfilter/spirv/ct_256_m.slang"
 void stage2_0(array<float2, int(16)> thread* r_2)
 {
 
@@ -242,7 +242,7 @@ struct EntryPointParams_0
 };
 
 
-#line 182 "/home/ahnitz/projects/claude/searchdev/work/mf-main-merge/python/matchedfilter/spirv/ct_256_m.slang"
+#line 182 "/home/ahnitz/projects/claude/searchdev/work/peak-fft/python/matchedfilter/spirv/ct_256_m.slang"
 struct KernelContext_0
 {
     EntryPointParams_0 constant* entryPointParams_0;
@@ -348,7 +348,7 @@ struct KernelContext_0
 #line 176
             break;
         }
-        r_3[k2_1] = cmul_0(r_3[k2_1], mfTwiddle_0(6.28318548202514648f * float(lane_0 * k2_1) / 256.0f));
+        r_3[k2_1] = cmul_0(r_3[k2_1], mfTwiddle_0(6.28318548202514648 * float(lane_0 * k2_1) / 256.0));
 
 #line 176
         k2_1 = k2_1 + 1U;
@@ -412,10 +412,10 @@ struct KernelContext_0
     stage2_0(&r_3);
 
 #line 185
-    float best_0 = 0.0f;
+    i_0 = 0U;
 
 #line 185
-    i_0 = 0U;
+    float best_0 = 0.0;
 
 
     for(;;)
@@ -436,13 +436,10 @@ struct KernelContext_0
         float _S12 = max(best_0, r_3[i_0].x * r_3[i_0].x + r_3[i_0].y * r_3[i_0].y);
 
 #line 188
-        uint i_1 = i_0 + 1U;
+        i_0 = i_0 + 1U;
 
 #line 188
         best_0 = _S12;
-
-#line 188
-        i_0 = i_1;
 
 #line 188
     }
@@ -453,48 +450,58 @@ struct KernelContext_0
     uint _S13 = base_0 + lane_0;
 
 #line 193
-    (*(&kernelContext_0)->sh_0)[_S13] = float2(best_0, 0.0f);
+    (*(&kernelContext_0)->sh_0)[_S13] = float2(best_0, 0.0);
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-#line 194
-    uint st_0 = 8U;
-    for(;;)
+    if(lane_0 < 8U)
     {
 
-#line 195
-        if(st_0 > 0U)
-        {
-        }
-        else
-        {
-
-#line 195
-            break;
-        }
+#line 196
+        (*(&kernelContext_0)->sh_0)[_S13] = float2(max((*(&kernelContext_0)->sh_0)[_S13].x, (*(&kernelContext_0)->sh_0)[_S13 + 8U].x), 0.0);
 
 #line 196
-        if(lane_0 < st_0)
-        {
-
-#line 196
-            (*(&kernelContext_0)->sh_0)[_S13] = float2(max((*(&kernelContext_0)->sh_0)[_S13].x, (*(&kernelContext_0)->sh_0)[_S13 + st_0].x), 0.0f);
-
-#line 196
-        }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-
-#line 195
-        st_0 = st_0 >> 1U;
-
-#line 195
     }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+#line 196
+    if(lane_0 < 4U)
+    {
+
+#line 196
+        (*(&kernelContext_0)->sh_0)[_S13] = float2(max((*(&kernelContext_0)->sh_0)[_S13].x, (*(&kernelContext_0)->sh_0)[_S13 + 4U].x), 0.0);
+
+#line 196
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+#line 196
+    if(lane_0 < 2U)
+    {
+
+#line 196
+        (*(&kernelContext_0)->sh_0)[_S13] = float2(max((*(&kernelContext_0)->sh_0)[_S13].x, (*(&kernelContext_0)->sh_0)[_S13 + 2U].x), 0.0);
+
+#line 196
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+#line 196
+    if(lane_0 < 1U)
+    {
+
+#line 196
+        (*(&kernelContext_0)->sh_0)[_S13] = float2(max((*(&kernelContext_0)->sh_0)[_S13].x, (*(&kernelContext_0)->sh_0)[_S13 + 1U].x), 0.0);
+
+#line 196
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
 
 #line 203
     if(lane_0 == 0U)
     {
 
 #line 203
-        *((&kernelContext_0)->entryPointParams_out_0+pair_0) = packed_float2(float2(sqrt((*(&kernelContext_0)->sh_0)[base_0].x), 0.0f)) ;
+        *((&kernelContext_0)->entryPointParams_out_0+pair_0) = packed_float2(float2(sqrt((*(&kernelContext_0)->sh_0)[base_0].x), 0.0)) ;
 
 #line 203
     }
