@@ -16,7 +16,17 @@ from . import _cuda
 from ._cuda import check_cuda
 from ._errors import UnsupportedSize
 from ._gpu_cache import InputUploads
-from ._shared import empty_shared, shared_buffer, shared_key, write_input
+from ._shared import empty_shared, shared_buffer, shared_key, write_input, _Borrowed
+
+if not hasattr(_Borrowed, "dptr"):
+    _Borrowed.dptr = property(
+        lambda self: getattr(
+            self.owner.buffer,
+            "dptr",
+            ctypes.c_uint64(self.handle.value if hasattr(self.handle, "value") else int(self.handle)),
+        )
+    )
+
 
 _HERE = pathlib.Path(__file__).resolve().parent
 _PTX_DIR = _HERE / "ptx"
@@ -68,6 +78,8 @@ class _Buffer:
                 self.ctx.cuda.cuMemAlloc_v2(ctypes.byref(self.dptr), self.nbytes),
                 "cuMemAlloc",
             )
+        self.ptr = self.dptr.value
+        self.handle = self.dptr.value
 
     def write(self, array):
         """Host to device memory copy."""
@@ -108,9 +120,57 @@ class _Buffer:
         if self.dptr.value:
             self.ctx.cuda.cuMemFree_v2(self.dptr)
             self.dptr.value = 0
+            self.ptr = 0
+            self.handle = 0
 
     def __del__(self):
         self.destroy()
+
+
+class _HostBuffer:
+    """Host-visible unified or pinned buffer for empty_shared."""
+
+    def __init__(self, ctx, nbytes):
+        self.ctx = ctx
+        self.nbytes = max(int(nbytes), 4)
+        self.dptr = ctypes.c_uint64(0)
+        if hasattr(self.ctx.cuda, "cuMemAllocManaged"):
+            check_cuda(
+                self.ctx.cuda.cuMemAllocManaged(ctypes.byref(self.dptr), self.nbytes, 1),
+                "cuMemAllocManaged",
+            )
+        else:
+            check_cuda(
+                self.ctx.cuda.cuMemAllocHost_v2(ctypes.byref(self.dptr), self.nbytes),
+                "cuMemAllocHost",
+            )
+        self.ptr = self.dptr.value
+        self.handle = self.dptr.value
+
+    def write(self, array):
+        flat = np.ascontiguousarray(array)
+        ctypes.memmove(self.ptr, flat.ctypes.data, min(self.nbytes, flat.nbytes))
+
+    def read(self, dtype, count):
+        out = np.empty(count, dtype=dtype)
+        ctypes.memmove(out.ctypes.data, self.ptr, min(self.nbytes, out.nbytes))
+        return out
+
+    def read_into(self, out):
+        flat = np.ascontiguousarray(out)
+        ctypes.memmove(flat.ctypes.data, self.ptr, min(self.nbytes, flat.nbytes))
+        return out
+
+    def destroy(self):
+        if self.dptr.value:
+            self.ctx.cuda.cuMemFree_v2(self.dptr)
+            self.dptr.value = 0
+            self.ptr = 0
+            self.handle = 0
+
+    def __del__(self):
+        self.destroy()
+
 
 
 class Context(InputUploads):
@@ -219,7 +279,7 @@ class Context(InputUploads):
         return res
 
     def empty_shared(self, shape, dtype=np.complex64, *, readback=False):
-        return empty_shared(self, _Buffer, shape, dtype)
+        return empty_shared(self, _HostBuffer, shape, dtype)
 
     def _launch(self, hfunc, grid_dim, block_dim, params, shared_mem=0):
         param_ptrs = (ctypes.c_void_p * len(params))(
