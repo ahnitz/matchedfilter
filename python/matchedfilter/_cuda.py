@@ -124,6 +124,10 @@ def get_cuda_lib():
     lib.cuMemAllocHost_v2.argtypes = [ctypes.POINTER(ctypes.c_void_p), ctypes.c_size_t]
     lib.cuMemAllocHost_v2.restype = ctypes.c_int
 
+    if hasattr(lib, "cuMemAllocManaged"):
+        lib.cuMemAllocManaged.argtypes = [ctypes.POINTER(ctypes.c_uint64), ctypes.c_size_t, ctypes.c_uint]
+        lib.cuMemAllocManaged.restype = ctypes.c_int
+
     lib.cuMemFreeHost.argtypes = [ctypes.c_void_p]
     lib.cuMemFreeHost.restype = ctypes.c_int
 

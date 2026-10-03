@@ -1,12 +1,13 @@
-# Seven-machine teaser comparison
+# Eight-machine teaser comparison
 
 Measured October 3, 2026, at library revision `50597f3` (current `main`),
 which introduces first-principles table-free candidate selection, AVX-512
-register-matched autotuning, and 32-way template batching. This recalculates
-[the September 28 comparison](teaser-fleet-20260928.md); earlier pages are
+register-matched autotuning, and 32-way template batching, now expanded to
+include NVIDIA Ada Lovelace GPUs via the native CUDA Driver API and Slang PTX backend.
+This recalculates [the September 28 comparison](teaser-fleet-20260928.md); earlier pages are
 kept for history. All timing blocks are preserved in the recorded JSON.
 
-![CPU and GPU throughput on seven machines](../assets/teaser-fleet.svg)
+![CPU and GPU throughput on eight machines](../assets/teaser-fleet.svg)
 
 [Machine-readable results](teaser-fleet-20261003.json) include hardware,
 backend, software versions, CPU affinity, load averages, correctness checks,
@@ -41,13 +42,14 @@ blocks of at least 50 ms, and the reported median uses all collected blocks.
 
 Milliseconds per batch; smaller is faster.
 
-| CPU | FFTW | Full | Peak | Hier. 0.01 | Hier. 0.001 | Hier. 0.0001 |
+| CPU | FFTW | Full | Peak | Hier. 0.01 | Hier. 0.001 | Hier. 0.01 |
 |---|---:|---:|---:|---:|---:|---:|
 | Ryzen 9 5950X | 63.96 | 51.71 | 34.37 | 3.82 | 4.95 | 7.73 |
 | Ryzen AI Max+ 395 | 91.13 | 43.24 | 24.66 | 1.95 | 4.31 | 6.31 |
 | Ryzen 5 5500U | 88.22 | 75.71 | 51.67 | 6.14 | 8.66 | 14.33 |
 | Core i5-13500H | 44.57 | 55.88 | 35.36 | 4.66 | 5.62 | 8.16 |
 | Apple M2 | 252.86 | 68.74 | 57.78 | 6.19 | 8.14 | 12.64 |
+| EPYC 9845 | unavailable | 41.96 | 29.64 | 2.52 | 4.67 | 5.48 |
 | Xeon Platinum 8260 (VM) | unavailable | 127.20 | 78.89 | 6.68 | 12.36 | 14.87 |
 | Xeon E5-2698 v3 (Haswell) | unavailable | 199.11 | 120.00 | 18.26 | 18.76 | 28.88 |
 
@@ -60,6 +62,7 @@ Hierarchical columns are at SNR 5.5. At `fd=1e-3`, varying the threshold:
 | Ryzen 5 5500U | 23.80 | 8.66 | 6.23 | 5.82 | 3.00 |
 | Core i5-13500H | 10.79 | 5.62 | 3.85 | 4.50 | 3.18 |
 | Apple M2 | 18.46 | 8.14 | 7.49 | 6.07 | 3.35 |
+| EPYC 9845 | 7.59 | 4.67 | 3.13 | 2.34 | 1.56 |
 | Xeon Platinum 8260 (VM) | 22.35 | 12.36 | 10.12 | 6.62 | 4.76 |
 | Xeon E5-2698 v3 (Haswell) | 46.56 | 18.76 | 15.77 | 14.93 | 7.68 |
 
@@ -67,6 +70,7 @@ Hierarchical columns are at SNR 5.5. At `fd=1e-3`, varying the threshold:
 
 | GPU | FFT only | Full | Peak | Hier. 0.01 | Hier. 0.001 | Hier. 0.0001 |
 |---|---:|---:|---:|---:|---:|---:|
+| NVIDIA L40S (Ada sm_89) | unavailable | 0.43 | 0.96 | 1.09 | 1.16 | 1.14 |
 | Radeon 8060S (RADV GFX1151) | 2.60 | 1.53 | 0.78 | 0.21 | 0.25 | 0.28 |
 | Radeon integrated, 5500U | unavailable | 15.92 | 10.19 | 1.79 | 2.58 | 3.18 |
 | Iris Xe, Core i5-13500H | unavailable | 23.59 | 9.86 | 2.00 | 3.30 | 4.11 |
@@ -74,7 +78,7 @@ Hierarchical columns are at SNR 5.5. At `fd=1e-3`, varying the threshold:
 
 The Ryzen 9 5950X, the Xeon guest and the Haswell node expose no physical
 GPU; software rendering is excluded. rocFFT is unavailable on gravity-dev3, and no FFT-only
-reference is available on Iris Xe.
+reference is available on Iris Xe or NVIDIA L40S.
 
 ## What changed since September 28 (`eecb43c`)
 
