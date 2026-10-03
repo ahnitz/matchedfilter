@@ -389,7 +389,7 @@ static int run_pairs(ap_mf_plan *p, int d0, int nd, int t0, int nt,
   /* Lanes span templates, not D*T: 32x1 cannot fill one vector. Require
      >=75% occupancy, aligned contiguous templates, and a broad single bin.
      Unmeasured sparse/multi-bin/narrow-window cases keep the original path. */
-  if(p->allow_pair_alt && !tsel && nd>=8 && nt>=16 && t0%p->w==0
+  if(p->allow_pair_alt && !tsel && nd>=4 && nt>=16 && t0%p->w==0
      && 4*(size_t)nt>=3*((nt+p->w-1)/p->w)*(size_t)p->w
      && end-start>=p->n/2 && binsize>=end-start){
     ap_mf_plan *q=pair_alternate(p,d0,nd,t0,nt);
