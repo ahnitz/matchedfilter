@@ -313,3 +313,136 @@ def test_filter_series_hierarchical_single_template_zero_threshold():
     assert np.all(res_zero.template_indices == 0)
 
 
+def test_correlate_series_engines_and_convolution_parity():
+    """Verify that correlate_series across all engines matches direct time-domain convolution."""
+    rng = np.random.default_rng(42)
+    T = 4
+    counts = [501, 1501, 3001, 6001]
+    max_taps = max(counts)
+    taps = np.zeros((T, max_taps), dtype=np.float32)
+    for i in range(T):
+        taps[i, :counts[i]] = rng.standard_normal(counts[i]).astype(np.float32)
+
+    L_data = 65536
+    data = (rng.standard_normal(L_data) + 1j * rng.standard_normal(L_data)).astype(np.complex64)
+    scales = rng.uniform(0.5, 2.0, size=T).astype(np.float32)
+
+    for engine in ['corr', 'flat', 'hier']:
+        bank = TimeDomainFilterBank(
+            taps, tap_counts=counts,
+            tap_sample_rate=2048, data_sample_rate=2048,
+            engine=engine
+        )
+        res = bank.correlate_series(data, scales=scales)
+        assert res.shape == (T, L_data)
+        assert res.dtype == np.complex64
+
+        for i in range(T):
+            fir = taps[i, :counts[i]]
+            conv = np.convolve(data, fir[::-1], mode='full')
+            m = counts[i] // 2
+            direct = conv[m : m + L_data] * scales[i]
+
+            g, ti_loc = bank._template_map[i]
+            c_bad = g.c_bad
+            valid_sl = slice(c_bad, L_data - c_bad)
+            diff = np.max(np.abs(res[i, valid_sl] - direct[valid_sl]))
+            rel = diff / np.max(np.abs(direct[valid_sl]))
+            assert rel < 1e-4, f"Engine {engine} template {i} diff too high: {rel}"
+
+
+def test_correlate_series_out_and_template_index():
+    """Verify out buffer reuse and template_index single-template correlation."""
+    rng = np.random.default_rng(123)
+    T = 3
+    counts = [501, 3001, 501]
+    max_taps = max(counts)
+    taps = np.zeros((T, max_taps), dtype=np.float32)
+    for i in range(T):
+        taps[i, :counts[i]] = rng.standard_normal(counts[i]).astype(np.float32)
+
+    L_data = 32768
+    data = (rng.standard_normal(L_data) + 1j * rng.standard_normal(L_data)).astype(np.complex64)
+    scales = np.array([1.2, 0.8, 1.5], dtype=np.float32)
+
+    bank = TimeDomainFilterBank(taps, tap_counts=counts, engine='corr')
+
+    # Full output into preallocated buffer
+    out_buf = np.empty((T, L_data), dtype=np.complex64)
+    res = bank.correlate_series(data, scales=scales, out=out_buf)
+    assert res is out_buf
+
+    # Single template correlation with and without out
+    for i in range(T):
+        res_single = bank.correlate_series(data, scales=scales, template_index=i)
+        assert res_single.shape == (L_data,)
+        assert np.allclose(res_single, res[i])
+
+        out_1d = np.empty(L_data, dtype=np.complex64)
+        res_1d = bank.correlate_series(data, scales=scales, template_index=i, out=out_1d)
+        assert res_1d is out_1d
+        assert np.allclose(res_1d, res[i])
+
+    # Out validation
+    with pytest.raises(ValueError):
+        bank.correlate_series(data, out=np.empty((T + 1, L_data), dtype=np.complex64))
+    with pytest.raises(ValueError):
+        bank.correlate_series(data, out=np.empty((T, L_data), dtype=np.complex128))
+    with pytest.raises(IndexError):
+        bank.correlate_series(data, template_index=-1)
+    with pytest.raises(IndexError):
+        bank.correlate_series(data, template_index=T)
+
+
+def test_correlate_series_valid_slice():
+    """Verify valid_slice restricts block computation and matches un-sliced output."""
+    rng = np.random.default_rng(999)
+    T = 2
+    counts = [1001, 3001]
+    taps = rng.standard_normal((T, 3001)).astype(np.float32)
+    L_data = 65536
+    data = (rng.standard_normal(L_data) + 1j * rng.standard_normal(L_data)).astype(np.complex64)
+
+    bank = TimeDomainFilterBank(taps, tap_counts=counts, engine='corr')
+    res_full = bank.correlate_series(data)
+
+    v_slice = slice(20000, 40000)
+    res_slice = bank.correlate_series(data, valid_slice=v_slice)
+
+    # Valid slice window must match full
+    np.testing.assert_allclose(res_slice[:, 20000:40000], res_full[:, 20000:40000], atol=1e-5)
+    # Outside margins must remain zero
+    assert np.all(res_slice[:, :14000] == 0)
+    assert np.all(res_slice[:, 45000:] == 0)
+
+
+def test_correlation_filter_scales_support():
+    """Verify CorrelationFilter.run and run_series scales parameter."""
+    from matchedfilter import CorrelationFilter
+    rng = np.random.default_rng(777)
+    n = 2048
+    T = 3
+    filt = CorrelationFilter(n, ntemplates=T, valid=(100, 1900))
+    tmpl = (rng.standard_normal((T, n)) + 1j * rng.standard_normal((T, n))).astype(np.complex64)
+    filt.set_templates(tmpl)
+
+    data = (rng.standard_normal((1, n)) + 1j * rng.standard_normal((1, n))).astype(np.complex64)
+    filt.set_data(data)
+
+    scales = np.array([0.5, 2.0, 1.5], dtype=np.float32)
+
+    # Circular run
+    res_unscaled = filt.run()
+    res_scaled = filt.run(scales=scales)
+    for i in range(T):
+        np.testing.assert_allclose(res_scaled[0, i], res_unscaled[0, i] * scales[i], rtol=1e-5)
+
+    # Continuous run_series
+    ser = (rng.standard_normal(16384) + 1j * rng.standard_normal(16384)).astype(np.complex64)
+    ser_unscaled = filt.run_series(ser).copy()
+    ser_scaled = filt.run_series(ser, scales=scales)
+    for i in range(T):
+        np.testing.assert_allclose(ser_scaled[i], ser_unscaled[i] * scales[i], rtol=1e-5)
+
+
+
