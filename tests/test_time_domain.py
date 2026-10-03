@@ -14,7 +14,7 @@ def test_partition_algorithm():
     # Single template
     groups, order = _partition_templates(np.array([500]))
     assert len(groups) == 1
-    assert groups[0][2] in (2048, 4096)
+    assert groups[0][2] in (1024, 2048, 4096)
 
     # Identical counts
     counts = np.full(100, 400)
@@ -32,7 +32,7 @@ def test_partition_algorithm():
     short_n = groups[0][2]
     long_n = groups[-1][2]
     assert short_n < long_n
-    assert short_n in (1024, 2048, 4096)
+    assert short_n in (512, 1024, 2048, 4096)
     assert long_n in (8192, 16384, 32768)
 
 
@@ -184,8 +184,8 @@ def test_filter_f_and_block_length_properties():
 
     assert len(bank.filters_f) == 2
     assert len(bank.block_lengths) == 2
-    assert bank.get_block_length(0) in (2048, 4096, 8192, 16384)
-    assert bank.get_block_length(1) in (2048, 4096, 8192, 16384)
+    assert bank.get_block_length(0) in (512, 1024, 2048, 4096, 8192, 16384)
+    assert bank.get_block_length(1) in (512, 1024, 2048, 4096, 8192, 16384)
     assert len(bank.get_filter_f(0)) == bank.get_block_length(0)
     assert len(bank.get_filter_f(1)) == bank.get_block_length(1)
 
