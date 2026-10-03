@@ -1182,7 +1182,7 @@ class CorrelationFilter(MatchedFilter):
             raise ValueError("out must be a writable C-contiguous complex64 array of shape %s" % (shape,))
         return out
 
-    def run(self, data=None, templates=None, out=None):
+    def run(self, data=None, templates=None, out=None, scales=None):
         """Return the full unnormalised circular correlation for each pair."""
         d0, nd, t0, nt = self._pair_range(data, templates)
         result = self._full_output((nd, nt, self.n), out)
@@ -1194,9 +1194,14 @@ class CorrelationFilter(MatchedFilter):
                                 upload_data=self._ddirty,
                                 upload_tmpl=self._tdirty)
             self._ddirty = self._tdirty = False
+        if scales is not None:
+            sc = np.ascontiguousarray(_from_any(scales), dtype=np.float32)
+            if sc.ndim != 1 or sc.size != nt:
+                raise ValueError(f"scales must be a 1D array of length {nt}, got shape {sc.shape}")
+            np.multiply(result, sc[None, :, None], out=result)
         return result
 
-    def run_series(self, series, starts=None, templates=None, out=None, valid_slice=None):
+    def run_series(self, series, starts=None, templates=None, out=None, valid_slice=None, scales=None):
         """Correlate a series into continuous output over the configured valid window.
 
         With explicit ``starts``, preserve the block-major full-output form.
@@ -1245,9 +1250,14 @@ class CorrelationFilter(MatchedFilter):
             self._data_ready = set()
             if self._gpu is not None:
                 self._continuous_gpu(ser, st, t0, nt, result)
-                return result
-            self._execution_plan().correlate_series_continuous(
-                ser, st, self.valid[0], self.valid[1], t0, nt, result)
+            else:
+                self._execution_plan().correlate_series_continuous(
+                    ser, st, self.valid[0], self.valid[1], t0, nt, result)
+            if scales is not None:
+                sc = np.ascontiguousarray(_from_any(scales), dtype=np.float32)
+                if sc.ndim != 1 or sc.size != nt:
+                    raise ValueError(f"scales must be a 1D array of length {nt}, got shape {sc.shape}")
+                np.multiply(result, sc[:, None], out=result)
             return result
         st = np.ascontiguousarray(_from_any(starts), dtype=np.uintp)
         if st.ndim != 1 or st.size < 1:
@@ -1265,28 +1275,33 @@ class CorrelationFilter(MatchedFilter):
         self._data_ready = set()
         if self._gpu is None:
             self._execution_plan().correlate_series(ser, st, t0, nt, result)
-            return result
-        from ._shared import shared_buffer
-        source = ser if shared_buffer(ser, self._gpu) is not None else self.empty_shared(ser.shape)
-        if source is not ser:
-            source[:] = ser
-        budget = getattr(self, "_series_batch_bytes", 64 * 1024 * 1024)
-        batch = max(1, min(st.size, self._gpu_pair_limit() // nt,
-                           budget // max(8 * self.n * (1 + nt), 1)))
-        spec = self.empty_shared((batch, self.n))
-        offsets = self.empty_shared(batch, np.uint32)
-        for b0 in range(0, st.size, batch):
-            b1 = min(b0 + batch, st.size)
-            count = b1 - b0
-            offsets[:count] = np.minimum(st[b0:b1], ser.size)
-            self._gpu.forward(self.n, source, offsets[:count], spec[:count], defer=True)
-            try:
-                self._gpu.correlate(self.n, spec[:count], self._gtmpl[t0:t0 + nt],
-                                    result[b0:b1], upload_data=True,
-                                    upload_tmpl=self._tdirty)
-            finally:
-                self._gpu.cancel_forward()
-            self._tdirty = False
+        else:
+            from ._shared import shared_buffer
+            source = ser if shared_buffer(ser, self._gpu) is not None else self.empty_shared(ser.shape)
+            if source is not ser:
+                source[:] = ser
+            budget = getattr(self, "_series_batch_bytes", 64 * 1024 * 1024)
+            batch = max(1, min(st.size, self._gpu_pair_limit() // nt,
+                               budget // max(8 * self.n * (1 + nt), 1)))
+            spec = self.empty_shared((batch, self.n))
+            offsets = self.empty_shared(batch, np.uint32)
+            for b0 in range(0, st.size, batch):
+                b1 = min(b0 + batch, st.size)
+                count = b1 - b0
+                offsets[:count] = np.minimum(st[b0:b1], ser.size)
+                self._gpu.forward(self.n, source, offsets[:count], spec[:count], defer=True)
+                try:
+                    self._gpu.correlate(self.n, spec[:count], self._gtmpl[t0:t0 + nt],
+                                        result[b0:b1], upload_data=True,
+                                        upload_tmpl=self._tdirty)
+                finally:
+                    self._gpu.cancel_forward()
+                self._tdirty = False
+        if scales is not None:
+            sc = np.ascontiguousarray(_from_any(scales), dtype=np.float32)
+            if sc.ndim != 1 or sc.size != nt:
+                raise ValueError(f"scales must be a 1D array of length {nt}, got shape {sc.shape}")
+            np.multiply(result, sc[None, :, None], out=result)
         return result
 
     def run_blocks(self, series, starts, templates=None, out=None):

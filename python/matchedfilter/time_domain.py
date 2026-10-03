@@ -102,6 +102,7 @@ class _TemplateGroup:
         self.templates_loaded = False
         self._cached_layout: Optional[Tuple[Tuple[int, int, int], np.ndarray, np.ndarray, np.ndarray]] = None
         self._flat_plan: Optional[Any] = None
+        self._corr_plan: Optional[Any] = None
 
     def get_flat_plan(self):
         from . import MatchedFilter, HierarchicalFilter
@@ -115,6 +116,21 @@ class _TemplateGroup:
             fp.set_templates(self.spectra)
             self._flat_plan = fp
         return self._flat_plan
+
+    def get_correlation_plan(self):
+        if self._corr_plan is None:
+            from . import CorrelationFilter
+            if isinstance(self.plan, CorrelationFilter):
+                self._corr_plan = self.plan
+            else:
+                cp = CorrelationFilter(
+                    self.n, ndata=1, ntemplates=len(self.template_indices),
+                    device=self.device, valid=(self.c_bad, self.n - self.c_bad)
+                )
+                cp.set_templates(self.spectra)
+                self._corr_plan = cp
+        return self._corr_plan
+
 
 
 class TimeDomainFilterBank:
@@ -156,7 +172,8 @@ class TimeDomainFilterBank:
         self.max_batch_size = int(max_batch_size)
 
         mode = {'pycbc': 'flat', 'matchedfilter': 'flat',
-                'matchedfilter-hierarchical': 'hier'}.get(engine, engine).lower()
+                'matchedfilter-hierarchical': 'hier',
+                'correlation': 'corr', 'corr': 'corr'}.get(engine, engine).lower()
         self.engine = mode
 
         # Parse inputs
@@ -277,7 +294,13 @@ class TimeDomainFilterBank:
                     self._block_lengths_arr[g_idx] = chosen_N
 
             # Create matchedfilter plan
-            if self.engine == 'hier':
+            if self.engine == 'corr':
+                from . import CorrelationFilter
+                plan = CorrelationFilter(
+                    chosen_N, ndata=1, ntemplates=T,
+                    device=self.device, valid=(c_bad, chosen_N - c_bad)
+                )
+            elif self.engine == 'hier':
                 band_bins = None
                 if self.coarse_band_hz is not None and self.coarse_band_hz > 0:
                     delta_f = self.data_sample_rate / chosen_N
@@ -308,6 +331,8 @@ class TimeDomainFilterBank:
             if self.engine != 'hier':
                 plan.set_templates(spectra)
                 grp.templates_loaded = True
+                if self.engine == 'corr':
+                    grp._corr_plan = plan
             self._groups.append(grp)
 
         self._template_map = [None] * n_templates
@@ -647,5 +672,179 @@ class TimeDomainFilterBank:
                 block_starts=np.empty(0, dtype=np.int64),
                 block_lengths=np.empty(0, dtype=np.int64),
             )
+
+    def correlate_series(
+        self,
+        series: np.ndarray,
+        valid_slice: Optional[slice] = None,
+        scales: Optional[Union[np.ndarray, Sequence[float]]] = None,
+        template_index: Optional[int] = None,
+        out: Optional[np.ndarray] = None,
+    ) -> np.ndarray:
+        """Correlate a continuous series across all templates (or a specific template).
+
+        Templates are filtered using their dynamically partitioned FFT block sizes
+        for optimal cache and SIMD efficiency. Returns continuous correlation series
+        in the original template ordering.
+
+        Parameters:
+            series: Continuous data series (1D complex64).
+            valid_slice: Optional analysis window slice(start, stop). None analyzes whole series.
+            scales: Optional per-template scale factors. Must have length `n_templates`
+                    (or 1 / length matching template if `template_index` is specified).
+            template_index: Optional single template index to filter. If specified,
+                            returns a 1D array of shape `(len(series),)`.
+            out: Optional preallocated output array. If `template_index` is None, shape
+                 must be `(n_templates, len(series))` and dtype `complex64`. If `template_index`
+                 is specified, shape can be `(len(series),)` or `(1, len(series))`.
+                 If None, a new array is allocated.
+
+        Returns:
+            If `template_index` is None: 2D complex64 array of shape `(n_templates, len(series))`.
+            If `template_index` is specified: 1D complex64 array of shape `(len(series),)`.
+        """
+        from . import _from_any, _automatic_series_layout
+
+        ser = np.ascontiguousarray(_from_any(series), dtype=np.complex64)
+        if ser.ndim != 1:
+            raise ValueError("series must be a 1D array")
+        S = ser.size
+        nt = self.n_templates
+
+        if template_index is not None:
+            if template_index < 0 or template_index >= nt:
+                raise IndexError(f"template_index {template_index} out of range [0, {nt})")
+            target_g, ti_local = self._template_map[template_index]
+            cplan = target_g.get_correlation_plan()
+
+            if scales is not None:
+                sc_arr = np.ascontiguousarray(_from_any(scales), dtype=np.float32)
+                if sc_arr.size == nt:
+                    single_scale = sc_arr[template_index:template_index + 1]
+                elif sc_arr.size == 1:
+                    single_scale = sc_arr.ravel()[:1]
+                else:
+                    raise ValueError(f"scales must have length {nt} or 1 for single template")
+            else:
+                single_scale = None
+
+            if out is not None:
+                if not isinstance(out, np.ndarray) or out.dtype != np.complex64 \
+                   or not out.flags.c_contiguous or not out.flags.writeable:
+                    raise ValueError("out must be a writable C-contiguous complex64 array")
+                if out.shape == (S,):
+                    out_2d = out.reshape(1, S)
+                elif out.shape == (1, S):
+                    out_2d = out
+                else:
+                    raise ValueError(f"out shape {out.shape} must match ({S},) or (1, {S})")
+                if valid_slice is not None:
+                    out_2d.fill(0)
+            else:
+                out_2d = np.zeros((1, S), dtype=np.complex64) if valid_slice is not None else np.empty((1, S), dtype=np.complex64)
+
+            st, _, _ = _automatic_series_layout(S, cplan.valid)
+            if valid_slice is not None:
+                vs = 0 if valid_slice.start is None else int(valid_slice.start)
+                ve = S if valid_slice.stop is None else int(valid_slice.stop)
+                if vs < 0:
+                    vs = max(0, S + vs)
+                if ve < 0:
+                    ve = max(0, S + ve)
+                lo, hi = cplan.valid
+                b_start = st + lo
+                b_end = np.minimum(st + hi, S)
+                keep = (b_start < ve) & (b_end > vs)
+                st = st[keep] if keep.any() else np.empty(0, dtype=np.uintp)
+            else:
+                out_2d[:, :cplan.valid[0]] = 0
+                if st.size > 0:
+                    last_end = min(S, st[-1] + cplan.valid[1])
+                    if last_end < S:
+                        out_2d[:, last_end:] = 0
+
+            if cplan._gpu is not None:
+                cplan._continuous_gpu(ser, st, ti_local, 1, out_2d)
+            else:
+                cplan._execution_plan().correlate_series_continuous(
+                    ser, st, cplan.valid[0], cplan.valid[1], ti_local, 1, out_2d
+                )
+
+            if single_scale is not None:
+                np.multiply(out_2d, single_scale[:, None], out=out_2d)
+
+            if out is not None and out.ndim == 1:
+                return out
+            return out_2d[0] if out is None else out_2d
+
+        # Full bank correlation across all groups
+        shape = (nt, S)
+        if scales is not None:
+            scales_arr = np.ascontiguousarray(_from_any(scales), dtype=np.float32)
+            if scales_arr.ndim != 1 or scales_arr.size != nt:
+                raise ValueError(f"scales must be a 1D array of length {nt}, got shape {scales_arr.shape}")
+        else:
+            scales_arr = None
+
+        if out is not None:
+            if not isinstance(out, np.ndarray) or out.dtype != np.complex64 \
+               or out.shape != shape or not out.flags.c_contiguous \
+               or not out.flags.writeable:
+                raise ValueError(f"out must be a writable C-contiguous complex64 array of shape {shape}")
+            result = out
+            if valid_slice is not None:
+                result.fill(0)
+        else:
+            result = np.zeros(shape, dtype=np.complex64) if valid_slice is not None else np.empty(shape, dtype=np.complex64)
+
+        for g in self._groups:
+            cplan = g.get_correlation_plan()
+            g_indices = g.template_indices
+            g_cnt = len(g_indices)
+            if g_cnt == 0:
+                continue
+            g_scales = scales_arr[g_indices] if scales_arr is not None else None
+
+            is_contiguous_slice = (
+                (g_indices[-1] - g_indices[0] + 1 == g_cnt) and
+                np.array_equal(g_indices, np.arange(g_indices[0], g_indices[0] + g_cnt))
+            )
+
+            st, _, _ = _automatic_series_layout(S, cplan.valid)
+            if valid_slice is not None:
+                vs = 0 if valid_slice.start is None else int(valid_slice.start)
+                ve = S if valid_slice.stop is None else int(valid_slice.stop)
+                if vs < 0:
+                    vs = max(0, S + vs)
+                if ve < 0:
+                    ve = max(0, S + ve)
+                lo, hi = cplan.valid
+                b_start = st + lo
+                b_end = np.minimum(st + hi, S)
+                keep = (b_start < ve) & (b_end > vs)
+                st = st[keep] if keep.any() else np.empty(0, dtype=np.uintp)
+
+            if is_contiguous_slice:
+                g_dest = result[g_indices[0] : g_indices[0] + g_cnt]
+                if valid_slice is None:
+                    g_dest[:, :cplan.valid[0]] = 0
+                    if st.size > 0:
+                        last_end = min(S, st[-1] + cplan.valid[1])
+                        if last_end < S:
+                            g_dest[:, last_end:] = 0
+                if cplan._gpu is not None:
+                    cplan._continuous_gpu(ser, st, 0, g_cnt, g_dest)
+                else:
+                    cplan._execution_plan().correlate_series_continuous(
+                        ser, st, cplan.valid[0], cplan.valid[1], 0, g_cnt, g_dest
+                    )
+                if g_scales is not None:
+                    np.multiply(g_dest, g_scales[:, None], out=g_dest)
+            else:
+                # Group templates are interleaved; use cplan's internal buffer or allocate
+                g_tmp = cplan.run_series(ser, valid_slice=valid_slice, scales=g_scales)
+                result[g_indices] = g_tmp
+
+        return result
 
     process_segment = filter_series
