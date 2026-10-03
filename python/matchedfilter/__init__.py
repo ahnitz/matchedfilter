@@ -1863,13 +1863,14 @@ def _reference_hash(power):
     return hashlib.sha256(p.tobytes()).hexdigest()
 
 
-def _autotune_cache_key(device, n, snr, fd, b_target=None, ref=None, cascade=True):
+def _autotune_cache_key(device, n, snr, fd, b_target=None, ref=None, cascade=True, pairs=None):
     """Compute canonical process-level cache key for autotuned winner configurations.
 
     Autotuning measures the hardware execution throughput of candidate configurations
     for a given device, FFT block size N, target band b_target, SNR threshold, and FDR budget.
     Keying on b_target ensures that templates with different bandwidth requirements
-    do not conflate or overwrite each other's tuned plans.
+    do not conflate or overwrite each other's tuned plans. Keying on pairs bounds
+    cross-talk between tiny validation/test fixtures and large batch workloads.
     """
     dev_kind = getattr(device, "kind", str(device)) if device is not None else "cpu"
     if isinstance(b_target, (int, np.integer)):
@@ -1878,7 +1879,8 @@ def _autotune_cache_key(device, n, snr, fd, b_target=None, ref=None, cascade=Tru
         b_val = int(ref)
     else:
         b_val = None
-    return (str(dev_kind), int(n), b_val, float(snr), float(fd), bool(cascade))
+    p_val = int(pairs) if isinstance(pairs, (int, np.integer)) else None
+    return (str(dev_kind), int(n), b_val, float(snr), float(fd), bool(cascade), p_val)
 
 
 def get_autotune_cache():
@@ -2055,8 +2057,9 @@ class HierarchicalFilter(MatchedFilter):
             return None
         cascade_flag = getattr(self, '_initial_cascade', self.cascade)
         bt = b_target if b_target is not None else getattr(self, '_target_band', None)
+        pairs = self.ndata * self.ntemplates if hasattr(self, 'ndata') and hasattr(self, 'ntemplates') else None
         return _autotune_cache_key(self.device, self.n, self.snr, self.fd,
-                                  b_target=bt, cascade=cascade_flag)
+                                  b_target=bt, cascade=cascade_flag, pairs=pairs)
 
     def _new_cpu_plan(self, band, taps, cascade_band=None):
         self._execution_policy = self._series_policy('hierarchical_series', band, self.ntemplates)
