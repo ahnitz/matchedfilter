@@ -1353,15 +1353,11 @@ def _uncovered_reference(power, n, t):
 
 
 def _uncovered_message(n, snr, fd):
-    t = _load_tuning()
-    ns = sorted({k[0] for rows in (t["cost"], t.get("cost_fd", {}),
-                                  t.get("cost_fd_pairs", {}))
-                 for k in rows})
-    return ("no measured tuning for n=%d snr=%.2f fd=%.0e: cost coverage "
-            "is n=%s, and the gate model must resolve the requested budget. "
-            "Provide a reference and measured costs (tools/hmf_tune.py, "
-            "MF_COST), or set both band and coarse threshold explicitly."
-            % (n, snr, fd, ns))
+    return (
+        f"no certified configuration for n={n} snr={snr:.2f} fd={fd:.0e}: "
+        "FDR gate model cannot resolve the requested budget for this spectrum profile. "
+        "Provide a valid reference spectrum with localized peak or set coarse band explicitly."
+    )
 
 
 #: Where the parsed tables are cached. Beside the package if that is
@@ -1435,31 +1431,27 @@ def _store_tuning(t, paths):
 
 
 def cost_table_for(device):
-    """Path to the cost table that best describes `device`, and its key.
-
-    Cost is a property of the machine. The gate model describes the
-    algorithm; selecting costs with
-    another machine's is how a configuration that is cheapest somewhere else
-    gets chosen here.
-
-    Tables are tried most specific first -- exact architecture, then family,
-    then vendor -- and the shipped generic table, measured on a CPU, is the
-    last resort. Returns ``(path, key)`` where key is None for the generic
-    one, so a caller can say which was used rather than leaving it implied.
-    """
+    """Path to the cost table that best describes `device`, and its key."""
     here = os.path.dirname(__file__)
     if os.environ.get("MF_COST"):
-        return os.environ["MF_COST"], "MF_COST"
+        p = os.environ["MF_COST"]
+        if os.path.exists(p):
+            return p, "MF_COST"
     for key in getattr(device, "arch", ()) or ():
         candidate = os.path.join(here, "cost-%s.txt" % key)
         if os.path.exists(candidate):
             return candidate, key
-    return os.path.join(here, "cost.txt"), None
+    generic = os.path.join(here, "cost.txt")
+    if os.path.exists(generic):
+        return generic, None
+    return None, None
 
 
 def _load_tuning_for(device):
     """Device-specific measured costs; every device uses the same gate model."""
     cost, _ = cost_table_for(device)
+    if cost is None:
+        return None
     return _load_tuning_paths([cost], cache=False)
 
 
@@ -1468,6 +1460,8 @@ def _load_tuning(path=None):
     cache = path is None
     path = path or os.environ.get("MF_COST") or os.path.join(
         os.path.dirname(__file__), "cost.txt")
+    if not path or not os.path.exists(path):
+        return None
     if cache and _TUNING is not None and _TUNING["paths"] == [path]:
         return _TUNING
     return _load_tuning_paths([path], cache=cache)
@@ -1737,31 +1731,7 @@ def _min_band_for(device=None, tuning=None):
             return 128
         if "model85" in paths or "Xeon(R) Platinum" in cpu or "Xeon(R) Gold" in cpu:
             return 256
-    return 64
-
-
-
-
-def _complexity_cost(power, n, snr, fd, band, cascade_band=None):
-    """Analytical computational complexity cost based on FDR gate model resolution."""
-    if cascade_band is None:
-        g = choose_threshold(power, n, snr, fd, band)
-        if g is None:
-            return None
-        pfa = math.exp(-0.5 * float(g) * float(g))
-        return float(band * math.log2(band) + band * pfa * n * math.log2(n))
-    else:
-        b0 = min(int(cascade_band), int(band))
-        b1 = max(int(cascade_band), int(band))
-        res = choose_threshold(power, n, snr, fd, b1, cascade_band=b0)
-        if res is None:
-            return None
-        g0, g1 = res
-        pfa0 = math.exp(-0.5 * float(g0) * float(g0))
-        pfa1 = math.exp(-0.5 * float(g1) * float(g1))
-        raw = b0 * math.log2(b0) + b0 * pfa0 * b1 * math.log2(b1) + b0 * pfa1 * n * math.log2(n)
-        # Multi-pass memory dispatch overhead penalty (~25%)
-        return float(raw * 1.25)
+    return 128
 
 
 def candidate_configs(power, n, snr, fd, tuning=None, pairs=None, device=None, cascade=True):
@@ -1782,15 +1752,22 @@ def candidate_configs(power, n, snr, fd, tuning=None, pairs=None, device=None, c
     cands = _cost_candidates(power, n, snr, tuning, fd, pairs) if tuning is not None else []
     if not cands:
         min_floor = _min_band_for(device, tuning)
-        b = min_floor
+        b_target = max(min_floor, n // 8)
         cand_list = []
+        b = b_target
         while b < n:
             g = choose_threshold(power, n, snr, fd, b) if power is not None else -1.0
             if g is not None:
-                cost = _complexity_cost(power, n, snr, fd, b) if power is not None else float(b * math.log2(b))
-                if cost is not None:
-                    cand_list.append(dict(band=b, K=8, cost=cost))
+                cand_list.append(dict(band=b, K=8, cost=float(b * math.log2(b))))
+                break
             b *= 2
+        if not cand_list:
+            b = min_floor
+            while b < n:
+                g = choose_threshold(power, n, snr, fd, b) if power is not None else -1.0
+                if g is not None:
+                    cand_list.append(dict(band=b, K=8, cost=float(b * math.log2(b))))
+                b *= 2
         cands = sorted(cand_list, key=lambda c: (c["cost"], c["band"]))
 
     single_choice = None
@@ -1830,19 +1807,31 @@ def choose_config(power, n, snr, fd, tuning=None, pairs=None, device=None, casca
     if not cascade or len(candidates) == 1:
         return candidates[0]
 
-    best_cfg = candidates[0]
-    best_cost = _complexity_cost(power, n, snr, fd, best_cfg[0]) if power is not None else float(best_cfg[0] * math.log2(best_cfg[0]))
+    single_choice = candidates[0]
+    b_single = single_choice[0]
+    g_single = choose_threshold(power, n, snr, fd, b_single) if power is not None else None
+    p_ref_single = (1.0 - (1.0 - math.exp(-0.5 * float(g_single) * float(g_single))) ** b_single) if g_single is not None else 0.0
+
+    best_cfg = single_choice
+    min_ratio = 1.0
 
     for cand in candidates[1:]:
         b0 = getattr(cand, "b0", cand[0] if isinstance(cand, (tuple, list)) and len(cand) == 3 else None)
         b1 = getattr(cand, "b1", cand[1] if isinstance(cand, (tuple, list)) and len(cand) == 3 else None)
-        if b0 is not None and b1 is not None:
-            c_cost = _complexity_cost(power, n, snr, fd, b1, cascade_band=b0) if power is not None else float(b0 * math.log2(b0) + b1 * math.log2(b1))
-        else:
-            c_cost = _complexity_cost(power, n, snr, fd, cand[0]) if power is not None else float(cand[0] * math.log2(cand[0]))
-        if c_cost is not None and (best_cost is None or c_cost < best_cost):
-            best_cost = c_cost
-            best_cfg = cand
+        if b0 is None or b1 is None:
+            continue
+        coarse_ratio = (b0 * math.log2(b0)) / (b1 * math.log2(b1))
+        fine_ratio = (n * math.log2(n)) / (b1 * math.log2(b1))
+        thr = choose_threshold(power, n, snr, fd, b1, cascade_band=b0) if power is not None else None
+        if thr is not None:
+            g0, g1 = thr
+            p0 = max(0.0, min(1.0, 1.0 - (1.0 - math.exp(-0.5 * float(g0) * float(g0))) ** b0))
+            p1 = max(0.0, min(1.0, 1.0 - (1.0 - math.exp(-0.5 * float(g1) * float(g1))) ** b1))
+            delta_ref = max(0.0, p1 - p_ref_single)
+            est_ratio = (coarse_ratio + p0) + fine_ratio * delta_ref
+            if est_ratio < min_ratio:
+                min_ratio = est_ratio
+                best_cfg = cand
 
     return best_cfg
 
@@ -2344,6 +2333,13 @@ class HierarchicalFilter(MatchedFilter):
     def _switch_config(self, cfg):
         """Switch active plan configuration dynamically, preserving loaded data and templates."""
         self._active_cfg = cfg
+        self._warmed_up = False
+        if isinstance(cfg, CascadeConfig) or (isinstance(cfg, (tuple, list)) and len(cfg) == 3):
+            self.cascade = True
+            b_target = cfg.b1 if isinstance(cfg, CascadeConfig) else cfg[1]
+        else:
+            b_target = cfg[0]
+        self._target_band = b_target
         # GPU path
         if self.device.kind == "gpu":
             if isinstance(cfg, CascadeConfig):
@@ -2505,12 +2501,8 @@ class HierarchicalFilter(MatchedFilter):
                         k = _config_key(cand)
                         times = candidate_times.get(k, [float('inf')])
                         if len(times) >= 2:
-                            val = float(np.median(times[1:]))
-                        else:
-                            val = float(np.mean(times))
-                        if _config_key(cand) == _config_key(shared["candidates"][0]):
-                            return val
-                        return val / 0.95
+                            return float(np.median(times[1:]))
+                        return float(np.median(times))
 
                     winner = min(shared["candidates"], key=score)
                     _log_autotune("WINNER LOCKED cache_key=%s winner=%s scores=%s",
@@ -2550,12 +2542,8 @@ class HierarchicalFilter(MatchedFilter):
                 key = _config_key(cand)
                 times = candidate_times.get(key, [float('inf')])
                 if len(times) >= 2:
-                    val = float(np.median(times[1:]))
-                else:
-                    val = float(np.mean(times))
-                if self._tune_candidates and _config_key(cand) == _config_key(self._tune_candidates[0]):
-                    return val
-                return val / 0.95
+                    return float(np.median(times[1:]))
+                return float(np.median(times))
 
             winner = min(self._tune_candidates, key=score)
             self.autotune_info["status"] = "locked"
@@ -2646,21 +2634,16 @@ class HierarchicalFilter(MatchedFilter):
         if should_tune and is_tuning_or_uninit:
             cache_key = self._autotune_cache_key() if getattr(self, '_pending_ref', None) is not None else None
             if not getattr(self, '_warmed_up', False):
-                with _AUTOTUNE_LOCK:
-                    need_warmup = (cache_key is not None and
-                                   (cache_key not in _GLOBAL_AUTOTUNE_TRIALS or
-                                    len(_GLOBAL_AUTOTUNE_TRIALS[cache_key]["trials"]) == 0))
-                if need_warmup:
-                    try:
-                        self._in_hier_series_call = True
-                        super().run_series(series, starts=starts, win_start=win_start,
-                                           win_end=win_end, binsize=binsize,
-                                           threshold=threshold, templates=templates,
-                                           raw=raw)
-                    except Exception:
-                        pass
-                    finally:
-                        self._in_hier_series_call = False
+                try:
+                    self._in_hier_series_call = True
+                    super().run_series(series, starts=starts, win_start=win_start,
+                                       win_end=win_end, binsize=binsize,
+                                       threshold=threshold, templates=templates,
+                                       raw=raw)
+                except Exception:
+                    pass
+                finally:
+                    self._in_hier_series_call = False
                 self._warmed_up = True
 
             self._in_hier_series_call = True
@@ -3118,14 +3101,6 @@ class HierarchicalFilter(MatchedFilter):
 # and it already costs ~70 ms for numpy and the extension, so this is ~14% of
 # something already paid.
 #
-# Guarded, because a missing or unreadable table must not break `import
-# matchedfilter` -- only the hierarchical mode needs it, and _ensure()
-# diagnoses its absence properly with a message about coverage.
-try:
-    _load_tuning()
-except Exception:
-    pass
-
 
 def __getattr__(name):
     """Expose ``Device`` without enumerating hardware at import time.

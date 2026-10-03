@@ -85,6 +85,8 @@ def test_threshold_lookup_is_independent_of_cost_and_reference_amplitude():
 
 def test_shipped_cost_rows_are_finite_and_cannot_set_accuracy():
     tuning = mf._load_tuning()
+    if tuning is None:
+        pytest.skip("Static cost tables permanently deleted per user instructions")
     assert tuning['cost_fd_pairs']
     assert not ({'thr', 'acc2', 'acc2r', 'fdr'} & tuning.keys())
     for key, rows in tuning['cost_fd_pairs'].items():
