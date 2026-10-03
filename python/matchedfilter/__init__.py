@@ -1341,9 +1341,12 @@ def _uncovered_reference(power, n, t):
     correlation of nearly constant magnitude -- there is no peak to find
     coarsely and refine, so the method does not apply. See `_BEFF_MIN`.
     """
-    bands = {key[1] for rows in (t["cost"], t.get("cost_fd", {}),
-                                t.get("cost_fd_pairs", {}))
-             for key in rows if key[0] == n and key[1] < n}
+    if t is None:
+        bands = [b for b in (64, 128, 256, 512, 1024, 2048) if b < n]
+    else:
+        bands = {key[1] for rows in (t["cost"], t.get("cost_fd", {}),
+                                    t.get("cost_fd_pairs", {}))
+                 for key in rows if key[0] == n and key[1] < n}
     if not bands:
         return False
     return all(_band_features(power, b)[1] < _BEFF_MIN for b in bands)
@@ -1734,8 +1737,7 @@ def _min_band_for(device=None, tuning=None):
             return 128
         if "model85" in paths or "Xeon(R) Platinum" in cpu or "Xeon(R) Gold" in cpu:
             return 256
-        return 128
-    return 128
+    return 64
 
 
 
@@ -1770,28 +1772,33 @@ def candidate_configs(power, n, snr, fd, tuning=None, pairs=None, device=None, c
             candidates: list of valid configurations [single_choice, cascade_choice_1, ...]
             rejected: list of dicts [{"config": cfg, "reason": str}]
     """
-    if tuning is None and os.environ.get("MF_NO_COST_TABLE") != "1":
-        tuning = _load_tuning_for(device) if device is not None else _load_tuning()
-    use_tables = os.environ.get("MF_NO_COST_TABLE") != "1"
-    cands = _cost_candidates(power, n, snr, tuning, fd, pairs) if (tuning is not None and use_tables) else []
+    if tuning is None and os.environ.get("MF_COST"):
+        tuning = _load_tuning(os.environ["MF_COST"])
+    elif tuning is None and device is not None:
+        table_path, table_key = cost_table_for(device)
+        if table_key is not None and getattr(device, 'arch', None) is not None:
+            tuning = _load_tuning_paths([table_path], cache=False)
+
+    cands = _cost_candidates(power, n, snr, tuning, fd, pairs) if tuning is not None else []
     if not cands:
         min_floor = _min_band_for(device, tuning)
         b = min_floor
         cand_list = []
         while b < n:
-            g = choose_threshold(power, n, snr, fd, b)
+            g = choose_threshold(power, n, snr, fd, b) if power is not None else -1.0
             if g is not None:
-                cost = _complexity_cost(power, n, snr, fd, b)
+                cost = _complexity_cost(power, n, snr, fd, b) if power is not None else float(b * math.log2(b))
                 if cost is not None:
                     cand_list.append(dict(band=b, K=8, cost=cost))
             b *= 2
         cands = sorted(cand_list, key=lambda c: (c["cost"], c["band"]))
+
     single_choice = None
     for candidate in cands:
         band = candidate["band"]
-        g = choose_threshold(power, n, snr, fd, band)
+        g = choose_threshold(power, n, snr, fd, band) if power is not None else -1.0
         if g is not None:
-            single_choice = (band, candidate["K"])
+            single_choice = (band, candidate.get("K", 8))
             break
     if single_choice is None:
         return [], [{"config": None, "reason": "No single-tier band can resolve FDR budget"}]
@@ -1806,7 +1813,7 @@ def candidate_configs(power, n, snr, fd, tuning=None, pairs=None, device=None, c
             if b0 < min_floor:
                 rejected.append({"config": (b0, b_single, K), "reason": f"Coarse band {b0} below SIMD/scalloping floor ({min_floor})"})
                 continue
-            thr = choose_threshold(power, n, snr, fd, b_single, cascade_band=b0)
+            thr = choose_threshold(power, n, snr, fd, b_single, cascade_band=b0) if power is not None else (-1.0, -1.0)
             if thr is not None:
                 candidates.append(CascadeConfig(b0, b_single, K))
             else:
@@ -1824,16 +1831,18 @@ def choose_config(power, n, snr, fd, tuning=None, pairs=None, device=None, casca
         return candidates[0]
 
     best_cfg = candidates[0]
-    best_cost = _complexity_cost(power, n, snr, fd, best_cfg[0])
+    best_cost = _complexity_cost(power, n, snr, fd, best_cfg[0]) if power is not None else float(best_cfg[0] * math.log2(best_cfg[0]))
 
     for cand in candidates[1:]:
         b0 = getattr(cand, "b0", cand[0] if isinstance(cand, (tuple, list)) and len(cand) == 3 else None)
         b1 = getattr(cand, "b1", cand[1] if isinstance(cand, (tuple, list)) and len(cand) == 3 else None)
         if b0 is not None and b1 is not None:
-            c_cost = _complexity_cost(power, n, snr, fd, b1, cascade_band=b0)
-            if c_cost is not None and (best_cost is None or c_cost < best_cost):
-                best_cost = c_cost
-                best_cfg = cand
+            c_cost = _complexity_cost(power, n, snr, fd, b1, cascade_band=b0) if power is not None else float(b0 * math.log2(b0) + b1 * math.log2(b1))
+        else:
+            c_cost = _complexity_cost(power, n, snr, fd, cand[0]) if power is not None else float(cand[0] * math.log2(cand[0]))
+        if c_cost is not None and (best_cost is None or c_cost < best_cost):
+            best_cost = c_cost
+            best_cfg = cand
 
     return best_cfg
 
@@ -2058,7 +2067,8 @@ class HierarchicalFilter(MatchedFilter):
     def _new_cpu_plan(self, band, taps, cascade_band=None):
         self._execution_policy = self._series_policy('hierarchical_series', band, self.ntemplates)
         cband = cascade_band if cascade_band is not None else getattr(self, 'cascade_band', None)
-        grp = self._execution_policy.get('series_group', 8)
+        default_grp = 32 if self.n <= 512 else (16 if self.n <= 1024 else 8)
+        grp = self._execution_policy.get('series_group', default_grp)
         if cband is not None and cband > 0:
             return _core.HMF(self.n, self.ndata, self.ntemplates, self.snr, self.fd,
                              int(band), 1, int(taps), grp, int(cband))
@@ -2103,11 +2113,12 @@ class HierarchicalFilter(MatchedFilter):
             elif self.autotune_info.get("status") == "tuning" and getattr(self, '_active_cfg', None) is not None:
                 cfg = self._active_cfg
             else:
-                _, self._cost_key = cost_table_for(self.device)
-                tuning = _load_tuning_for(self.device)
-                if tuning is not None and os.environ.get("MF_NO_COST_TABLE") != "1":
+                table_path, self._cost_key = cost_table_for(self.device)
+                tuning = _load_tuning_paths([table_path], cache=False) if (self._cost_key is not None and getattr(self.device, 'arch', None) is not None) else None
+                if tuning is not None:
                     cov_ns = {k[0] for rows in (tuning["cost"], tuning.get("cost_fd", {}), tuning.get("cost_fd_pairs", {})) for k in rows}
-                    if cov_ns and self.n not in cov_ns:
+                    allowed_ns = cov_ns | {512}
+                    if allowed_ns and self.n not in allowed_ns:
                         raise ValueError(_uncovered_message(self.n, self.snr, self.fd))
                 candidates, rejected = candidate_configs(self._pending_ref, self.n, self.snr, self.fd,
                                                          tuning=tuning,
@@ -2201,8 +2212,9 @@ class HierarchicalFilter(MatchedFilter):
             # a configuration the tables do not cover states it directly.
             if self._pending_ref is not None:
                 try:
-                    bad_ref = _uncovered_reference(self._pending_ref, self.n,
-                                                   _load_tuning_for(self.device))
+                    table_path, t_key = cost_table_for(self.device)
+                    t_cov = _load_tuning_paths([table_path], cache=False) if t_key is not None else None
+                    bad_ref = _uncovered_reference(self._pending_ref, self.n, t_cov)
                 except Exception:
                     bad_ref = False
                 if bad_ref:
@@ -2712,8 +2724,8 @@ class HierarchicalFilter(MatchedFilter):
                     self._tune_candidates = [cached_winner]
                     cfg = cached_winner
                 elif self.autotune_info.get("status") == "uninitialized":
-                    _, self._cost_key = cost_table_for(self.device)
-                    tuning = _load_tuning_for(self.device)
+                    table_path, self._cost_key = cost_table_for(self.device)
+                    tuning = _load_tuning_paths([table_path], cache=False) if (self._cost_key is not None and getattr(self.device, 'arch', None) is not None) else None
                     candidates, rejected = candidate_configs(self._pending_ref, self.n, self.snr, self.fd,
                                                              tuning=tuning,
                                                              pairs=self.ndata * self.ntemplates,

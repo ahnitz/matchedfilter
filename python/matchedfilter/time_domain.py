@@ -2,6 +2,8 @@
 automatically select optimal FFT block sizes, and filter continuous series."""
 
 import math
+import os
+import time
 from typing import Any, NamedTuple, Optional, Sequence, Union, Tuple, List, Dict
 import numpy as np
 try:
@@ -19,18 +21,94 @@ class FilterResults(NamedTuple):
     block_lengths: np.ndarray      # int64: FFT block length used for this template
 
 
+_GLOBAL_N_TUNING_CACHE: Dict[Tuple[str, str, int, Tuple[int, ...]], int] = {}
+
+
+def _score_n_candidate(n: int, max_c: int, engine: str = 'hier') -> float:
+    """Analytical throughput score (valid samples filtered per microsecond)."""
+    valid = n - max_c + 1
+    if valid <= 0:
+        return 0.0
+    valid_frac = valid / n
+    if valid_frac < 0.50:
+        return 0.0
+
+    c_py = 25.0
+    log2_n = math.log2(n)
+    c_fft = 0.0006 * n * log2_n
+
+    if engine == 'hier':
+        # Coarse band scales with N to preserve FDR gate resolution
+        b = max(64, n // 8)
+        log2_b = math.log2(b)
+        # Coarse FFT + vector memory bandwidth overhead scales with b and working set
+        c_coarse = 0.0035 * b * log2_b * 48.0
+        cache_pen = 1.0 + 0.85 * max(0.0, log2_n - 11.0)
+        cost = (c_py + c_fft + c_coarse) * cache_pen
+    else:
+        # flat or corr
+        cost = c_py + 0.0025 * n * log2_n * 48.0
+        cache_pen = 1.0 + 0.50 * max(0.0, log2_n - 12.0)
+        cost *= cache_pen
+
+    return (valid / cost) * (valid_frac ** 0.5)
+
+
+def _tune_n_empirical(eligible: Sequence[int], max_c: int, engine: str = 'hier', device: Optional[str] = None) -> int:
+    """Empirically select optimal FFT block size N among top candidate sizes."""
+    if len(eligible) == 1:
+        return eligible[0]
+
+    scored = sorted(eligible, key=lambda n: _score_n_candidate(n, max_c, engine), reverse=True)
+    best_score = _score_n_candidate(scored[0], max_c, engine)
+    top_cands = [n for n in scored if _score_n_candidate(n, max_c, engine) >= 0.75 * best_score]
+    if len(top_cands) <= 1:
+        return scored[0]
+
+    best_n = top_cands[0]
+    best_rate = -1.0
+    for n in top_cands:
+        valid_samples = 4 * (n - max_c + 1)
+        b = max(64, n // 8)
+        T = min(64, max(16, 524288 // (b * 8)))
+        try:
+            taps = np.zeros((T, max_c), dtype=np.float32)
+            taps[:, 0] = 1.0
+            bank = TimeDomainFilterBank(taps, engine=engine, fft_lengths=[n], device=device)
+            ref = np.ones(n, dtype=np.float64)
+            bank.set_reference(ref)
+            S = 4 * n
+            ser = (np.random.randn(S) + 1j * np.random.randn(S)).astype(np.complex64)
+            bank.filter_series(ser)
+            t0 = time.perf_counter()
+            n_reps = 3
+            for _ in range(n_reps):
+                bank.filter_series(ser)
+            t1 = time.perf_counter()
+            dt = (t1 - t0) / n_reps
+            rate = (T * valid_samples) / max(dt, 1e-9)
+        except Exception:
+            rate = _score_n_candidate(n, max_c, engine)
+        if rate > best_rate:
+            best_rate = rate
+            best_n = n
+    return best_n
+
+
 def _partition_templates(
     counts: np.ndarray,
     max_batch: Optional[int] = None,
-    candidate_ns: Sequence[int] = (2048, 4096, 8192, 16384, 32768, 65536)
+    candidate_ns: Sequence[int] = (512, 1024, 2048, 4096, 8192, 16384, 32768, 65536),
+    engine: str = 'hier',
+    device: Optional[str] = None,
 ) -> Tuple[List[Tuple[int, int, int, int]], np.ndarray]:
     """Partition templates sorted by length into homogeneous, balanced sub-batches.
 
     Avoids over-fragmentation by keeping sub-batches sized according to the L2 cache
-    budget (up to 256 for N=2048, 128 for N=4096, etc.) when max_batch is None, or
-    bounded by max_batch if explicitly specified. Selects FFT block sizes based on
-    filter length to guarantee numerical accuracy (valid fraction >= 50%) while
-    maximizing L1/L2 cache hit rates and SIMD lane utilization.
+    budget (up to 256 templates fitting inside 1 MB L2 cache) when max_batch is None, or
+    bounded by max_batch if explicitly specified. Selects FFT block sizes to guarantee
+    high efficiency (valid fraction >= 50%) while maximizing L1/L2 cache hit rates
+    and SIMD lane utilization.
 
     Returns:
         (groups, sort_order)
@@ -46,13 +124,20 @@ def _partition_templates(
     valid_ns = sorted(int(n) for n in candidate_ns)
 
     def pick_n(max_c: int) -> int:
-        for n in valid_ns:
-            if n > max_c and (n - max_c) / n >= 0.50:
-                return n
+        cache_key = (str(device), str(engine), int(max_c), tuple(valid_ns))
+        if cache_key in _GLOBAL_N_TUNING_CACHE:
+            return _GLOBAL_N_TUNING_CACHE[cache_key]
+
+        eligible = [n for n in valid_ns if n > max_c and (n - max_c) / n >= 0.50]
+        if eligible:
+            best_n = _tune_n_empirical(eligible, max_c, engine, device)
+            _GLOBAL_N_TUNING_CACHE[cache_key] = best_n
+            return best_n
+
         for n in reversed(valid_ns):
             if n > max_c:
                 return n
-        return 1 << int(math.ceil(math.log2(max(1024, 2 * max_c))))
+        return 1 << int(math.ceil(math.log2(max(512, 2 * max_c))))
 
     # Partition contiguous runs sharing the same chosen FFT block size,
     # then split each run into balanced sub-batches sized to the cache budget.
@@ -66,9 +151,9 @@ def _partition_templates(
             run_end += 1
 
         if max_batch is None:
-            # Sized to stay resident within 512 KB L2 cache per core:
+            # Sized to stay resident within 1 MB L2 cache per core:
             # coarse template memory = b * sizeof(complex64) = (current_n // 8) * 8 bytes = current_n bytes.
-            batch_target = min(256, max(32, 524288 // (max(64, current_n // 8) * 8)))
+            batch_target = min(256, max(32, 1048576 // (max(64, current_n // 8) * 8)))
         else:
             batch_target = int(max_batch)
 
@@ -84,7 +169,6 @@ def _partition_templates(
             sub_i = sub_j
 
         run_start = run_end
-
     return groups, order
 
 
@@ -218,7 +302,11 @@ class TimeDomainFilterBank:
         self.effective_data_counts = np.ceil(self.tap_counts / self.rate_ratio).astype(np.int64)
 
         if fft_lengths is None:
-            candidate_ns = (2048, 4096, 8192, 16384, 32768, 65536)
+            env_lengths = os.environ.get('PYCBC_RATIO_FFT_LENGTH')
+            if env_lengths:
+                candidate_ns = tuple(sorted(int(x.strip()) for x in env_lengths.split(',') if x.strip()))
+            else:
+                candidate_ns = (512, 1024, 2048, 4096, 8192, 16384, 32768, 65536)
         else:
             candidate_ns = tuple(sorted(int(n) for n in fft_lengths))
 
@@ -226,7 +314,9 @@ class TimeDomainFilterBank:
         raw_groups, order = _partition_templates(
             self.effective_data_counts,
             max_batch=self.max_batch_size,
-            candidate_ns=candidate_ns
+            candidate_ns=candidate_ns,
+            engine=self.engine,
+            device=self.device,
         )
 
         self._groups: List[_TemplateGroup] = []

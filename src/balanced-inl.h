@@ -99,7 +99,7 @@ typedef struct {
  * measurements and the dispatch rule. MF_PBMAX remains an explicit override. */
 static inline int pairbatch_size(size_t N){
   if(N>1024u||!esupported((int)N)) return 0;
-  size_t lim = (AP_W >= 16) ? 1024u : 128u;
+  size_t lim = 128u;
   { const char *e=getenv("MF_PBMAX"); if(e) lim=(size_t)atol(e); }
   return N<=lim;
 }
@@ -366,7 +366,7 @@ void *create(size_t N){
     p->ser=NULL;   /* set by series_buf() when a caller wants it */
     p->fuse = eprod_ok(p->N2);
     { const char *e=getenv("MF_FUSE"); if(e) p->fuse = atoi(e) ? eprod_ok(p->N2) : 0; }
-    if constexpr (AP_W == 8) {
+    if constexpr (AP_W == 8 || AP_W == 16) {
       if(p->fuse && n1==32 && n2==32 && ap_srprod()) p->fuse=2;
     }
   }
@@ -912,13 +912,19 @@ static void small_scan(BP*p,size_t binsize,float thr,ap_peak*out,size_t ostride,
   if(nb==1){
     vf bmx0=seed, bre0=zero, bim0=zero; vi bix0=nix;
     size_t k=ws;
-    for(;k+1<we;k+=2){
+    for(;k+3<we;k+=4){
       const int e0=eidx(&p->ea,(int)k);
       const int e1=eidx(&p->ea,(int)(k+1));
+      const int e2=eidx(&p->ea,(int)(k+2));
+      const int e3=eidx(&p->ea,(int)(k+3));
       const vf xr0=p->bR[e0], xi0=p->bI[e0];
       const vf xr1=p->bR[e1], xi1=p->bI[e1];
+      const vf xr2=p->bR[e2], xi2=p->bI[e2];
+      const vf xr3=p->bR[e3], xi3=p->bI[e3];
       const vf m2_0=V_FMADD(xr0,xr0,V_MUL(xi0,xi0));
       const vf m2_1=V_FMADD(xr1,xr1,V_MUL(xi1,xi1));
+      const vf m2_2=V_FMADD(xr2,xr2,V_MUL(xi2,xi2));
+      const vf m2_3=V_FMADD(xr3,xr3,V_MUL(xi3,xi3));
       const vm g0=V_CMP_GT(m2_0,bmx0);
       if(__builtin_expect(V_MASK_ANY(g0),0)){
         bmx0=V_SEL(g0,bmx0,m2_0);
@@ -932,6 +938,20 @@ static void small_scan(BP*p,size_t binsize,float thr,ap_peak*out,size_t ostride,
         bre0=V_SEL(g1,bre0,xr1);
         bim0=V_SEL(g1,bim0,xi1);
         bix0=VI_SEL(g1,bix0,VI_SET1((int)(k+1)));
+      }
+      const vm g2=V_CMP_GT(m2_2,bmx0);
+      if(__builtin_expect(V_MASK_ANY(g2),0)){
+        bmx0=V_SEL(g2,bmx0,m2_2);
+        bre0=V_SEL(g2,bre0,xr2);
+        bim0=V_SEL(g2,bim0,xi2);
+        bix0=VI_SEL(g2,bix0,VI_SET1((int)(k+2)));
+      }
+      const vm g3=V_CMP_GT(m2_3,bmx0);
+      if(__builtin_expect(V_MASK_ANY(g3),0)){
+        bmx0=V_SEL(g3,bmx0,m2_3);
+        bre0=V_SEL(g3,bre0,xr3);
+        bim0=V_SEL(g3,bim0,xi3);
+        bix0=VI_SEL(g3,bix0,VI_SET1((int)(k+3)));
       }
     }
     for(;k<we;k++){
@@ -1608,7 +1628,7 @@ static HWY_NOINLINE MF_PEAK_SECTION int binmax_prod_threshold(void *vp,const flo
                     const float*tr,const float*ti,size_t binsize,
                     float thr,ap_peak*out,int conj,size_t ws,size_t we){
   BP *p=(BP*)vp;
-  if constexpr (AP_W==8) {
+  if constexpr (AP_W==8 || AP_W==16) {
     if(__builtin_expect(thr>0.f && (we-ws)<=binsize && p->fuse==2 && p->ilay && p->bblk==1 && p->gmajor
        && !(p->ser && !p->nostore), 1)) {
       stageA_prod_32(p,dr,di,tr,ti);
@@ -1679,7 +1699,7 @@ const ap_backend *Backend(void){
     hwy::TargetName(HWY_TARGET), AP_W,
     create, destroy, fft, supported,
     binmax, binmax_split, has_prod, split, binmax_prod, corr_prod, corr_split, series_buf, series_stride, interp_max,
-    pairbatch, binmax_prod_batch, corr_prod_batch, create_small, broadcast_data, AP_W==8 ? binmax_prod_threshold : nullptr
+    pairbatch, binmax_prod_batch, corr_prod_batch, create_small, broadcast_data, (AP_W==8 || AP_W==16) ? binmax_prod_threshold : nullptr
   };
   return &be;
 }

@@ -103,7 +103,7 @@ static ap_mf_plan *create_mf(size_t n, int ndata, int ntmpl, int pair){
   /* Only the measured x86 targets opt in. MF_PBMAX remains a way to force
      either implementation in one build, without changing process state here. */
   const char *isa=ap_plan_backend(p->fft);
-  const size_t alt_max_n = (!strcmp(isa,"AVX3")) ? 1024u : 512u;
+  const size_t alt_max_n = (!strcmp(isa,"AVX3") || !strcmp(isa,"AVX2")) ? 1024u : 512u;
   p->allow_pair_alt = !pair && !p->pb && n>=256 && n<=alt_max_n && ntmpl>=16
     && !getenv("MF_PBMAX")
     && (!strcmp(isa,"AVX3") || !strcmp(isa,"AVX2") || !strcmp(isa,"SSE4"));
@@ -325,11 +325,11 @@ static int run_pairs_pb(ap_mf_plan *p, int d0, int nd, int t0, int nt,
                         ap_peak *peaks, int *counts, size_t start, size_t end){
   const size_t n=p->n, nb=(end-start+binsize-1)/binsize;
   const int W=p->pb;
-  if(p->pkcap < (size_t)W*nb){
+  if(p->pkcap < (size_t)2*W*nb){
     free(p->pkbuf);
-    p->pkbuf=ap_alloc64((size_t)W*nb*sizeof(ap_peak));
+    p->pkbuf=ap_alloc64((size_t)2*W*nb*sizeof(ap_peak));
     if(!p->pkbuf){ p->pkcap=0; return -1; }
-    p->pkcap=(size_t)W*nb;
+    p->pkcap=(size_t)2*W*nb;
   }
   int total=0;
   for(int d=0;d<nd;d++){
@@ -342,12 +342,64 @@ static int run_pairs_pb(ap_mf_plan *p, int d0, int nd, int t0, int nt,
       }
       Dr=p->ebr; Di=p->ebi;
     }
-    for(int tt=0;tt<nsel;tt+=W){
+    int tt=0;
+    for(; tt+2*W<=nsel; tt+=2*W){
+      const int base0=t0+tt;
+      const int base1=base0+W;
+      const float *Tr0, *Ti0, *Tr1, *Ti1;
+      if(!tsel && (base0%W)==0){
+        Tr0=p->tre+(size_t)(base0/W)*n*W;
+        Ti0=p->tim+(size_t)(base0/W)*n*W;
+        Tr1=p->tre+(size_t)(base1/W)*n*W;
+        Ti1=p->tim+(size_t)(base1/W)*n*W;
+      } else {
+        memset(p->tsr,0,n*(size_t)W*sizeof(float));
+        memset(p->tsi,0,n*(size_t)W*sizeof(float));
+        for(int l=0;l<W;l++){
+          const int t=t0+(tsel?tsel[tt+l]:(tt+l));
+          const float *sr=p->tre+(size_t)(t/W)*n*W+(size_t)(t%W);
+          const float *si=p->tim+(size_t)(t/W)*n*W+(size_t)(t%W);
+          for(size_t k=0;k<n;k++){ p->tsr[k*W+l]=sr[k*W]; p->tsi[k*W+l]=si[k*W]; }
+        }
+        Tr0=p->tsr; Ti0=p->tsi;
+        if(ap_binmax_prod_batch_peaks(p->fft,Dr,Di,Tr0,Ti0,W,binsize,threshold,
+                                p->pkbuf,AP_BACKWARD,start,end)<0) return -1;
+        memset(p->tsr,0,n*(size_t)W*sizeof(float));
+        memset(p->tsi,0,n*(size_t)W*sizeof(float));
+        for(int l=0;l<W;l++){
+          const int t=t0+(tsel?tsel[tt+W+l]:(tt+W+l));
+          const float *sr=p->tre+(size_t)(t/W)*n*W+(size_t)(t%W);
+          const float *si=p->tim+(size_t)(t/W)*n*W+(size_t)(t%W);
+          for(size_t k=0;k<n;k++){ p->tsr[k*W+l]=sr[k*W]; p->tsi[k*W+l]=si[k*W]; }
+        }
+        Tr1=p->tsr; Ti1=p->tsi;
+        if(ap_binmax_prod_batch_peaks(p->fft,Dr,Di,Tr1,Ti1,W,binsize,threshold,
+                                p->pkbuf+(size_t)W*nb,AP_BACKWARD,start,end)<0) return -1;
+        goto place_peaks;
+      }
+      if(ap_binmax_prod_batch_peaks(p->fft,Dr,Di,Tr0,Ti0,W,binsize,threshold,
+                              p->pkbuf,AP_BACKWARD,start,end)<0) return -1;
+      if(ap_binmax_prod_batch_peaks(p->fft,Dr,Di,Tr1,Ti1,W,binsize,threshold,
+                              p->pkbuf+(size_t)W*nb,AP_BACKWARD,start,end)<0) return -1;
+place_peaks:
+      for(int l=0;l<2*W;l++){
+        const int t = tsel ? tsel[tt+l] : (tt+l);
+        const size_t row=(size_t)d*nt+t;
+        int c=0;
+        for(size_t j=0;j<nb;j++){
+          const ap_peak pk=p->pkbuf[(size_t)l*nb+j];
+          peaks[row*nb+j]=pk;
+          if(pk.index>=0) c++;
+        }
+        if(counts) counts[row]=c;
+        total+=c;
+      }
+    }
+    for(; tt<nsel; tt+=W){
       const int cnt=(nsel-tt<W)?nsel-tt:W;
       const int base=t0+tt;
       const float *Tr,*Ti;
       if(!tsel && (base%W)==0){
-        /* the group is already contiguous in the bank, padding included */
         Tr=p->tre+(size_t)(base/W)*n*W;
         Ti=p->tim+(size_t)(base/W)*n*W;
       } else {
