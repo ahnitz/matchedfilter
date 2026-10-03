@@ -9,7 +9,7 @@ from contextlib import nullcontext
 import numpy as np
 import pytest
 
-from matchedfilter import _vkcompute
+from matchedfilter import _mtlcompute, _vkcompute
 
 
 @pytest.mark.parametrize("layout", ["contiguous", "strided", "reversed", "transposed"])
@@ -130,6 +130,8 @@ def test_revisited_window_receives_updated_inputs(ctx, hier, changed):
             if (ctx._test_backend == "vulkan" and _vkcompute._use_c16(1024)
                     and not _vkcompute._COARSE_TILE.get(1024)):
                 coarse = _vkcompute._pack_half2(coarse)
+            elif ctx._test_backend == "metal" and _mtlcompute._use_c16(1024):
+                coarse = _mtlcompute._pack_half2(coarse)
             np.testing.assert_array_equal(buffers["ct0"].value, coarse)
     else:
         target = list(ctx._batches.values())[-1][0 if changed == "data" else 1]
