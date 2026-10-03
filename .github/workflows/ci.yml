@@ -284,7 +284,7 @@ jobs:
           done
 
       - name: Run the suite
-        run: python -m pytest tests -q --require-coarse-gpu
+        run: python -m pytest tests -q --require-coarse-gpu --tb=short
 
       # The end of the chain: does a shipped kernel actually run and give
       # the right answer? A failure here is the useful outcome -- it says
