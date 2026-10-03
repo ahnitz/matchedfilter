@@ -65,6 +65,11 @@ _CACHE_BYTES = 256 * 1024 * 1024
 _GATE_FOR_RESULT_CACHE = OrderedDict()
 _GATE_CASCADE_RESULT_CACHE = OrderedDict()
 
+_PROFILE_ENTRIES = {}
+_CASCADE_PROFILE_ENTRIES = {}
+_CONDITIONAL_ENTRIES = {}
+_COND_CASCADE_ENTRIES = {}
+
 _CACHE_FILE = os.environ.get("MF_GATE_CACHE_FILE") or os.path.expanduser("~/.cache/matchedfilter/gatemodel_cache.pkl")
 _CACHE_DIRTY = False
 
@@ -204,6 +209,25 @@ def _entry_bytes(v):
     return (v[0].nbytes + v[1].nbytes) if isinstance(v, tuple) else v.nbytes
 
 
+def _profile_sig(power):
+    """Compute robust quantization signature invariant to continuous PSD estimation jitter."""
+    if power is None:
+        return b""
+    p = np.asarray(power, dtype=np.float64)
+    tot = float(np.sum(p))
+    if tot <= 0:
+        return b""
+    p_norm = p / tot
+    m = 24
+    step = len(p_norm) // m
+    if step >= 1:
+        binned = p_norm[:m * step].reshape(m, step).sum(axis=1)
+    else:
+        binned = p_norm
+    quant = (binned * 100.0).round().astype(np.int32)
+    return quant.tobytes()
+
+
 def _conditional(power, n, band, snr, nsamp, seed=13):
     """Coarse maxima for the pairs the fine stage would have kept, sorted.
 
@@ -217,13 +241,22 @@ def _conditional(power, n, band, snr, nsamp, seed=13):
             or not np.isfinite(p.sum()) or p.sum() <= 0):
         raise ValueError("power must be a finite nonnegative length-n profile with positive sum")
     p = p / p.sum()
-    # Use the complete bytes, not a hash alone, and include the seed and
-    # exact SNR. Cache collisions or rounded SNR must not change a gate.
-    key = (p.tobytes(), n, band, float(snr), nsamp, seed)
+    sig = _profile_sig(p)
+    key = (sig, n, band, float(snr), nsamp, seed)
     hit = _CACHE.get(key)
     if hit is not None:
         _CACHE.move_to_end(key)
         return hit
+
+    params = (n, band, float(snr), int(nsamp), int(seed))
+    norm_p = np.linalg.norm(p)
+    if norm_p > 0:
+        p_unit = (p / norm_p).astype(np.float32)
+        for u_vec, prev in _CONDITIONAL_ENTRIES.get(params, []):
+            if float(np.dot(p_unit, u_vec)) >= 0.985:
+                _CACHE[key] = prev
+                return prev
+
     got = _samples(p, n, band, snr, nsamp, seed)
     if got is None:
         return None
@@ -236,6 +269,8 @@ def _conditional(power, n, band, snr, nsamp, seed=13):
         used -= len(oldkey[0]) + _entry_bytes(old)
     if size <= _CACHE_BYTES:
         _CACHE[key] = kept
+    if norm_p > 0:
+        _CONDITIONAL_ENTRIES.setdefault(params, []).append((p_unit, kept))
     return kept
 
 
@@ -292,11 +327,20 @@ def gate_for(power, n, band, snr, fd):
             or not np.isfinite(p.sum()) or p.sum() <= 0):
         raise ValueError("power must be a finite nonnegative length-n profile with positive sum")
     p_norm = p / p.sum()
-    rkey = (p_norm.tobytes(), n, band, float(snr), float(fd))
+    rkey = (_profile_sig(p_norm), n, band, float(snr), float(fd))
     hit = _GATE_FOR_RESULT_CACHE.get(rkey)
     if hit is not None:
         _GATE_FOR_RESULT_CACHE.move_to_end(rkey)
         return hit
+
+    params = (n, band, float(snr), float(fd))
+    norm_p = np.linalg.norm(p_norm)
+    if norm_p > 0:
+        p_unit = (p_norm / norm_p).astype(np.float32)
+        for u_vec, prev in _PROFILE_ENTRIES.get(params, []):
+            if float(np.dot(p_unit, u_vec)) >= 0.985:
+                _GATE_FOR_RESULT_CACHE[rkey] = prev
+                return prev
 
     nsamp = _nsamp_for(fd)
     if fd * nsamp < 8:
@@ -310,6 +354,8 @@ def gate_for(power, n, band, snr, fd):
     res = float(kept[idx])
     if len(_GATE_FOR_RESULT_CACHE) >= _CACHE_MAX:
         _GATE_FOR_RESULT_CACHE.popitem(last=False)
+    if norm_p > 0:
+        _PROFILE_ENTRIES.setdefault(params, []).append((p_unit, res))
     _save_disk_cache(single_entry=(rkey, res))
     return res
 
@@ -427,11 +473,22 @@ def _conditional_cascade(power, n, band0, band1, snr, nsamp, seed=13):
             or not np.isfinite(p.sum()) or p.sum() <= 0):
         raise ValueError("power must be a finite nonnegative length-n profile with positive sum")
     p = p / p.sum()
-    key = (p.tobytes(), n, band0, band1, float(snr), nsamp, seed)
+    sig = _profile_sig(p)
+    key = (sig, n, band0, band1, float(snr), nsamp, seed)
     hit = _CACHE.get(key)
     if hit is not None:
         _CACHE.move_to_end(key)
         return hit
+
+    params = (n, band0, band1, float(snr), int(nsamp), int(seed))
+    norm_p = np.linalg.norm(p)
+    if norm_p > 0:
+        p_unit = (p / norm_p).astype(np.float32)
+        for u_vec, prev in _COND_CASCADE_ENTRIES.get(params, []):
+            if float(np.dot(p_unit, u_vec)) >= 0.985:
+                _CACHE[key] = prev
+                return prev
+
     got = _samples_cascade(p, n, band0, band1, snr, nsamp, seed)
     if got is None:
         return None
@@ -445,6 +502,8 @@ def _conditional_cascade(power, n, band0, band1, snr, nsamp, seed=13):
         used -= len(oldkey[0]) + _entry_bytes(old)
     if size <= _CACHE_BYTES:
         _CACHE[key] = kept
+    if norm_p > 0:
+        _COND_CASCADE_ENTRIES.setdefault(params, []).append((p_unit, kept))
     return kept
 
 
@@ -460,11 +519,20 @@ def gate_for_cascade(power, n, band0, band1, snr, fd):
             or not np.isfinite(p.sum()) or p.sum() <= 0):
         raise ValueError("power must be a finite nonnegative length-n profile with positive sum")
     p_norm = p / p.sum()
-    rkey = (p_norm.tobytes(), n, band0, band1, float(snr), float(fd))
+    rkey = (_profile_sig(p_norm), n, band0, band1, float(snr), float(fd))
     hit = _GATE_CASCADE_RESULT_CACHE.get(rkey)
     if hit is not None:
         _GATE_CASCADE_RESULT_CACHE.move_to_end(rkey)
         return hit
+
+    params = (n, band0, band1, float(snr), float(fd))
+    norm_p = np.linalg.norm(p_norm)
+    if norm_p > 0:
+        p_unit = (p_norm / norm_p).astype(np.float32)
+        for u_vec, prev in _CASCADE_PROFILE_ENTRIES.get(params, []):
+            if float(np.dot(p_unit, u_vec)) >= 0.985:
+                _GATE_CASCADE_RESULT_CACHE[rkey] = prev
+                return prev
 
     nsamp = _nsamp_for(fd)
     if fd * nsamp < 8:
@@ -521,5 +589,7 @@ def gate_for_cascade(power, n, band0, band1, snr, fd):
 
     if len(_GATE_CASCADE_RESULT_CACHE) >= _CACHE_MAX:
         _GATE_CASCADE_RESULT_CACHE.popitem(last=False)
+    if norm_p > 0:
+        _CASCADE_PROFILE_ENTRIES.setdefault(params, []).append((p_unit, best))
     _save_disk_cache(cascade_entry=(rkey, best))
     return best

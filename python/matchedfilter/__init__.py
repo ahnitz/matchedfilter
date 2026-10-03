@@ -1723,6 +1723,8 @@ def _min_band_for(device=None, tuning=None):
     return 128
 
 
+
+
 def _complexity_cost(power, n, snr, fd, band, cascade_band=None):
     """Analytical computational complexity cost based on FDR gate model resolution."""
     if cascade_band is None:
@@ -1753,66 +1755,34 @@ def candidate_configs(power, n, snr, fd, tuning=None, pairs=None, device=None, c
             candidates: list of valid configurations [single_choice, cascade_choice_1, ...]
             rejected: list of dicts [{"config": cfg, "reason": str}]
     """
-    viable_single = []
-    if tuning is not None and any(k in tuning for k in ("cost", "cost_fd", "cost_fd_pairs")):
-        try:
-            cands = _cost_candidates(power, n, snr, tuning, fd, pairs)
-            for c in cands:
-                band = c["band"]
-                K = c.get("K", 8)
-                g = choose_threshold(power, n, snr, fd, band)
-                if g is not None:
-                    viable_single.append((c.get("cost", 0.0), band, K))
-        except Exception:
-            pass
-
-    if not viable_single:
-        if tuning is not None and "cost_fd_pairs" in tuning:
-            covered = {r[0] for r in tuning["cost_fd_pairs"]}
-            if covered and n not in covered:
-                return [], [{"config": None, "reason": f"No measured tuning coverage for n={n}"}]
-
-        b = 128
-        while b <= n // 2:
-            cost = _complexity_cost(power, n, snr, fd, b)
-            if cost is not None:
-                viable_single.append((cost, b, 8))
-            b *= 2
-
-    if not viable_single:
+    if tuning is None:
+        tuning = _load_tuning_for(device) if device is not None else _load_tuning()
+    cands = _cost_candidates(power, n, snr, tuning, fd, pairs)
+    single_choice = None
+    for candidate in cands:
+        band = candidate["band"]
+        g = choose_threshold(power, n, snr, fd, band)
+        if g is not None:
+            single_choice = (band, candidate["K"])
+            break
+    if single_choice is None:
         return [], [{"config": None, "reason": "No single-tier band can resolve FDR budget"}]
-
-    viable_single.sort(key=lambda x: x[0])
-    best_single_cost, best_single_b, best_single_K = viable_single[0]
-    single_choice = (best_single_b, best_single_K)
 
     candidates = [single_choice]
     rejected = []
 
     if cascade:
-        # Cascade candidate generation:
-        # Evaluate coarse bands b0 strictly narrower than best single-tier band b_fine
-        b_fine = best_single_b
+        b_single, K = single_choice
         min_floor = _min_band_for(device, tuning)
-        seen = {_config_key(single_choice)}
-        cascade_candidates = []
-        for b0 in [b_fine // 2, b_fine // 4]:
+        for b0 in [b_single // 2, b_single // 4]:
             if b0 < min_floor:
-                rejected.append({"config": (b0, b_fine, best_single_K), "reason": f"Coarse band {b0} below SIMD/scalloping floor ({min_floor})"})
+                rejected.append({"config": (b0, b_single, K), "reason": f"Coarse band {b0} below SIMD/scalloping floor ({min_floor})"})
                 continue
-            c_key = (b0, b_fine, best_single_K)
-            if c_key in seen:
-                continue
-            c_cost = _complexity_cost(power, n, snr, fd, b_fine, cascade_band=b0)
-            if c_cost is not None:
-                seen.add(c_key)
-                cascade_candidates.append((c_cost, CascadeConfig(b0, b_fine, best_single_K)))
+            thr = choose_threshold(power, n, snr, fd, b_single, cascade_band=b0)
+            if thr is not None:
+                candidates.append(CascadeConfig(b0, b_single, K))
             else:
-                rejected.append({"config": (b0, b_fine, best_single_K), "reason": f"FDR gate model cannot resolve budget (fd={fd})"})
-
-        cascade_candidates.sort(key=lambda item: item[0])
-        for _, c_cfg in cascade_candidates:
-            candidates.append(c_cfg)
+                rejected.append({"config": (b0, b_single, K), "reason": f"FDR gate model cannot resolve budget (fd={fd})"})
 
     return candidates, rejected
 
@@ -1833,7 +1803,7 @@ def choose_config(power, n, snr, fd, tuning=None, pairs=None, device=None, casca
         b1 = getattr(cand, "b1", cand[1] if isinstance(cand, (tuple, list)) and len(cand) == 3 else None)
         if b0 is not None and b1 is not None:
             c_cost = _complexity_cost(power, n, snr, fd, b1, cascade_band=b0)
-            if c_cost is not None and c_cost < best_cost:
+            if c_cost is not None and (best_cost is None or c_cost < best_cost):
                 best_cost = c_cost
                 best_cfg = cand
 
@@ -2107,6 +2077,10 @@ class HierarchicalFilter(MatchedFilter):
             else:
                 _, self._cost_key = cost_table_for(self.device)
                 tuning = _load_tuning_for(self.device)
+                if tuning is not None:
+                    cov_ns = {k[0] for rows in (tuning["cost"], tuning.get("cost_fd", {}), tuning.get("cost_fd_pairs", {})) for k in rows}
+                    if cov_ns and self.n not in cov_ns:
+                        raise ValueError(_uncovered_message(self.n, self.snr, self.fd))
                 candidates, rejected = candidate_configs(self._pending_ref, self.n, self.snr, self.fd,
                                                          tuning=tuning,
                                                          pairs=self.ndata * self.ntemplates,
@@ -2116,7 +2090,13 @@ class HierarchicalFilter(MatchedFilter):
                 if not candidates:
                     cfg = None
                 else:
-                    b_target = candidates[0][0]
+                    cand0 = candidates[0]
+                    if isinstance(cand0, CascadeConfig):
+                        b_target = cand0.b1
+                    elif isinstance(cand0, (tuple, list)) and len(cand0) == 3:
+                        b_target = cand0[1]
+                    else:
+                        b_target = cand0[0]
                     self._target_band = b_target
                     cache_key = self._autotune_cache_key(b_target=b_target)
                     cached_winner = None
@@ -2668,10 +2648,19 @@ class HierarchicalFilter(MatchedFilter):
                         valid_samples = None
                 self._record_autotune_trial(dt, n_blocks=n_blocks, n_templates=n_tmpls, pairs=p_cnt, triggers=t_cnt, valid_samples=valid_samples)
             return res
-        return super().run_series(series, starts=starts, win_start=win_start,
+        t0 = time.perf_counter()
+        res = super().run_series(series, starts=starts, win_start=win_start,
                                   win_end=win_end, binsize=binsize,
                                   threshold=threshold, templates=templates,
                                   raw=raw)
+        dt = time.perf_counter() - t0
+        if os.environ.get("MF_TRACE_RUN", "0") != "0":
+            try:
+                p_cnt, t_cnt = self.stats
+            except Exception:
+                p_cnt, t_cnt = None, None
+            print(f"[MF_TRACE_RUN] cfg={self.config} dt={dt*1000:.2f}ms pairs={p_cnt} trigs={t_cnt} N={self.n} tmpls={self.ntemplates} nblk={len(starts) if starts is not None else 1}", file=sys.stderr, flush=True)
+        return res
 
     def _gpu_calibration(self, threshold):
         """Use the same profile model or explicit gate as the CPU."""
@@ -2980,6 +2969,17 @@ class HierarchicalFilter(MatchedFilter):
                 raise ValueError("reference must be a one-dimensional array of length %d" % self.n)
             if not np.isfinite(p).all() or np.any(p < 0) or not np.any(p > 0):
                 raise ValueError("reference must be finite, nonnegative, with positive total power")
+            if getattr(self, '_pending_ref', None) is not None and getattr(self, '_thr_applied', False):
+                p_old = self._pending_ref
+                norm_p = np.linalg.norm(p)
+                norm_old = np.linalg.norm(p_old)
+                if norm_p > 0 and norm_old > 0:
+                    sim = float(np.dot(p, p_old) / (norm_p * norm_old))
+                    if sim >= 0.985:
+                        self._pending_ref = p
+                        if self._mf is not None:
+                            self._mf.set_reference(p)
+                        return
         if self._gpu is not None:
             # Calibration and scaled coarse templates depend on the reference,
             # even when the template spectra themselves have not changed.
