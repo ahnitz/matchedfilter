@@ -27,6 +27,7 @@ import hashlib
 import math
 import operator
 import os
+import sys
 import threading
 import time
 import warnings
@@ -1718,10 +1719,30 @@ def _min_band_for(device=None, tuning=None):
             return 128
         if "model85" in paths or "Xeon(R) Platinum" in cpu or "Xeon(R) Gold" in cpu:
             return 256
-    b = (backend() or "").upper()
-    if "AVX3" in b or "AVX512" in b:
-        return 256
+        return 128
     return 128
+
+
+def _complexity_cost(power, n, snr, fd, band, cascade_band=None):
+    """Analytical computational complexity cost based on FDR gate model resolution."""
+    if cascade_band is None:
+        g = choose_threshold(power, n, snr, fd, band)
+        if g is None:
+            return None
+        pfa = math.exp(-0.5 * float(g) * float(g))
+        return float(band * math.log2(band) + band * pfa * n * math.log2(n))
+    else:
+        b0 = min(int(cascade_band), int(band))
+        b1 = max(int(cascade_band), int(band))
+        res = choose_threshold(power, n, snr, fd, b1, cascade_band=b0)
+        if res is None:
+            return None
+        g0, g1 = res
+        pfa0 = math.exp(-0.5 * float(g0) * float(g0))
+        pfa1 = math.exp(-0.5 * float(g1) * float(g1))
+        raw = b0 * math.log2(b0) + b0 * pfa0 * b1 * math.log2(b1) + b0 * pfa1 * n * math.log2(n)
+        # Multi-pass memory dispatch overhead penalty (~25%)
+        return float(raw * 1.25)
 
 
 def candidate_configs(power, n, snr, fd, tuning=None, pairs=None, device=None, cascade=True):
@@ -1732,33 +1753,66 @@ def candidate_configs(power, n, snr, fd, tuning=None, pairs=None, device=None, c
             candidates: list of valid configurations [single_choice, cascade_choice_1, ...]
             rejected: list of dicts [{"config": cfg, "reason": str}]
     """
-    if tuning is None:
-        tuning = _load_tuning_for(device) if device is not None else _load_tuning()
-    cands = _cost_candidates(power, n, snr, tuning, fd, pairs)
-    single_choice = None
-    for candidate in cands:
-        band = candidate["band"]
-        g = choose_threshold(power, n, snr, fd, band)
-        if g is not None:
-            single_choice = (band, candidate["K"])
-            break
-    if single_choice is None:
+    viable_single = []
+    if tuning is not None and any(k in tuning for k in ("cost", "cost_fd", "cost_fd_pairs")):
+        try:
+            cands = _cost_candidates(power, n, snr, tuning, fd, pairs)
+            for c in cands:
+                band = c["band"]
+                K = c.get("K", 8)
+                g = choose_threshold(power, n, snr, fd, band)
+                if g is not None:
+                    viable_single.append((c.get("cost", 0.0), band, K))
+        except Exception:
+            pass
+
+    if not viable_single:
+        if tuning is not None and "cost_fd_pairs" in tuning:
+            covered = {r[0] for r in tuning["cost_fd_pairs"]}
+            if covered and n not in covered:
+                return [], [{"config": None, "reason": f"No measured tuning coverage for n={n}"}]
+
+        b = 128
+        while b <= n // 2:
+            cost = _complexity_cost(power, n, snr, fd, b)
+            if cost is not None:
+                viable_single.append((cost, b, 8))
+            b *= 2
+
+    if not viable_single:
         return [], [{"config": None, "reason": "No single-tier band can resolve FDR budget"}]
+
+    viable_single.sort(key=lambda x: x[0])
+    best_single_cost, best_single_b, best_single_K = viable_single[0]
+    single_choice = (best_single_b, best_single_K)
 
     candidates = [single_choice]
     rejected = []
 
     if cascade:
-        b_single, K = single_choice
-        for b0 in [b_single // 2, b_single // 4]:
-            if b0 < 128:
-                rejected.append({"config": (b0, b_single, K), "reason": f"Coarse band {b0} below SIMD/scalloping floor (128)"})
+        # Cascade candidate generation:
+        # Evaluate coarse bands b0 strictly narrower than best single-tier band b_fine
+        b_fine = best_single_b
+        min_floor = _min_band_for(device, tuning)
+        seen = {_config_key(single_choice)}
+        cascade_candidates = []
+        for b0 in [b_fine // 2, b_fine // 4]:
+            if b0 < min_floor:
+                rejected.append({"config": (b0, b_fine, best_single_K), "reason": f"Coarse band {b0} below SIMD/scalloping floor ({min_floor})"})
                 continue
-            thr = choose_threshold(power, n, snr, fd, b_single, cascade_band=b0)
-            if thr is not None:
-                candidates.append(CascadeConfig(b0, b_single, K))
+            c_key = (b0, b_fine, best_single_K)
+            if c_key in seen:
+                continue
+            c_cost = _complexity_cost(power, n, snr, fd, b_fine, cascade_band=b0)
+            if c_cost is not None:
+                seen.add(c_key)
+                cascade_candidates.append((c_cost, CascadeConfig(b0, b_fine, best_single_K)))
             else:
-                rejected.append({"config": (b0, b_single, K), "reason": f"FDR gate model cannot resolve budget (fd={fd})"})
+                rejected.append({"config": (b0, b_fine, best_single_K), "reason": f"FDR gate model cannot resolve budget (fd={fd})"})
+
+        cascade_candidates.sort(key=lambda item: item[0])
+        for _, c_cfg in cascade_candidates:
+            candidates.append(c_cfg)
 
     return candidates, rejected
 
@@ -1771,39 +1825,30 @@ def choose_config(power, n, snr, fd, tuning=None, pairs=None, device=None, casca
     if not cascade or len(candidates) == 1:
         return candidates[0]
 
-    # AVX-512 CPU uses 512-bit SIMD registers. Small-band FFT execution (<=512)
-    # is memory-bandwidth bound and core downclocked; coarse band 256 costs ~95% of band 512.
-    # Running two separate memory passes in single-batch correlation regresses runtime on AVX-512 CPU.
-    is_gpu = False
-    if device is not None:
-        if getattr(device, "kind", None) == "gpu" or (isinstance(device, str) and device.lower().startswith("gpu")):
-            is_gpu = True
-    if tuning is not None:
-        paths = " ".join(tuning.get("paths", []))
-        if "vulkan" in paths or "metal" in paths or "gpu" in paths or "gfx" in paths or "apple" in paths:
-            is_gpu = True
+    best_cfg = candidates[0]
+    best_cost = _complexity_cost(power, n, snr, fd, best_cfg[0])
 
-    is_avx512_cpu = False
-    if not is_gpu and (device is None or getattr(device, "kind", None) == "cpu"):
-        b_name = (backend() or "").upper()
-        if "AVX3" in b_name or "AVX512" in b_name:
-            is_avx512_cpu = True
-        elif tuning is not None:
-            paths = " ".join(tuning.get("paths", []))
-            meta = tuning.get("meta", {})
-            cpu_name = meta.get("cpu", "")
-            if "model85" in paths or "Xeon(R) Platinum" in cpu_name or "Xeon(R) Gold" in cpu_name:
-                is_avx512_cpu = True
+    for cand in candidates[1:]:
+        b0 = getattr(cand, "b0", cand[0] if isinstance(cand, (tuple, list)) and len(cand) == 3 else None)
+        b1 = getattr(cand, "b1", cand[1] if isinstance(cand, (tuple, list)) and len(cand) == 3 else None)
+        if b0 is not None and b1 is not None:
+            c_cost = _complexity_cost(power, n, snr, fd, b1, cascade_band=b0)
+            if c_cost is not None and c_cost < best_cost:
+                best_cost = c_cost
+                best_cfg = cand
 
-    if is_avx512_cpu:
-        return candidates[0]
-
-    return candidates[1]
+    return best_cfg
 
 
 _AUTOTUNE_LOCK = threading.Lock()
 _GLOBAL_AUTOTUNE_CACHE = {}
 _GLOBAL_AUTOTUNE_TRIALS = {}
+
+
+def _log_autotune(msg, *args):
+    if os.environ.get("MF_AUTOTUNE_LOG", "0") != "0":
+        text = msg % args if args else msg
+        print(f"[MF_AUTOTUNE] {text}", file=sys.stderr, flush=True)
 
 
 def _reference_hash(power):
@@ -2080,6 +2125,7 @@ class HierarchicalFilter(MatchedFilter):
                             cached_winner = _GLOBAL_AUTOTUNE_CACHE.get(cache_key)
 
                     if cached_winner is not None and any(_config_key(c) == _config_key(cached_winner) for c in candidates):
+                        _log_autotune("REUSING_GLOBAL_WINNER cache_key=%s winner=%s", cache_key, cached_winner)
                         self.autotune_info["status"] = "locked"
                         self.autotune_info["winner"] = cached_winner
                         self.autotune_info["untried"] = []
@@ -2087,6 +2133,7 @@ class HierarchicalFilter(MatchedFilter):
                         cfg = cached_winner
                     elif len(candidates) == 1:
                         winner = candidates[0]
+                        _log_autotune("SINGLE_CANDIDATE_LOCK cache_key=%s winner=%s", cache_key, winner)
                         self.autotune_info["status"] = "locked"
                         self.autotune_info["winner"] = winner
                         self.autotune_info["untried"] = []
@@ -2096,18 +2143,14 @@ class HierarchicalFilter(MatchedFilter):
                                 _GLOBAL_AUTOTUNE_CACHE[cache_key] = winner
                         cfg = winner
                     else:
-                        static_choice = choose_config(self._pending_ref, self.n, self.snr, self.fd,
-                                                      tuning=tuning,
-                                                      pairs=self.ndata * self.ntemplates,
-                                                      device=self.device,
-                                                      cascade=self.cascade)
-                        ordered = [static_choice] + [c for c in candidates if _config_key(c) != _config_key(static_choice)]
+                        ordered = list(candidates)
                         self._tune_candidates = ordered
 
                         if cache_key is not None:
                             with _AUTOTUNE_LOCK:
                                 if cache_key in _GLOBAL_AUTOTUNE_CACHE and any(_config_key(c) == _config_key(_GLOBAL_AUTOTUNE_CACHE[cache_key]) for c in candidates):
                                     winner = _GLOBAL_AUTOTUNE_CACHE[cache_key]
+                                    _log_autotune("LOCKING_FROM_SHARED_CACHE cache_key=%s winner=%s", cache_key, winner)
                                     self.autotune_info["status"] = "locked"
                                     self.autotune_info["winner"] = winner
                                     self.autotune_info["untried"] = []
@@ -2132,6 +2175,9 @@ class HierarchicalFilter(MatchedFilter):
                                     self._assigned_candidate_key = _config_key(next_cfg)
                                     self.autotune_info["status"] = "tuning"
                                     self.autotune_info["winner"] = None
+                                    self.autotune_info["untried"] = [c for c in ordered if _config_key(c) != _config_key(next_cfg)]
+                                    _log_autotune("COLLAB_ASSIGN cache_key=%s next_cfg=%s tested=%s assigned=%s",
+                                                  cache_key, next_cfg, tested_keys, assigned_keys)
                                     cfg = next_cfg
                         else:
                             self.autotune_info["untried"] = list(ordered[1:])
@@ -2354,13 +2400,17 @@ class HierarchicalFilter(MatchedFilter):
         self._mf = new_plan
         self._thr_applied = (tv is not None)
 
-    def _record_autotune_trial(self, dt, n_blocks=1, n_templates=None, pairs=None, triggers=None):
+    def _record_autotune_trial(self, dt, n_blocks=1, n_templates=None, pairs=None, triggers=None, valid_samples=None):
         """Record batch timing for current configuration and progress autotune state."""
         cfg = getattr(self, '_active_cfg', self.config)
         nt = n_templates if n_templates is not None else self.ntemplates
         nb = max(1, int(n_blocks))
-        norm_factor = float(self.ndata * nt * nb)
-        time_per_pair = (dt * 1000.0) / norm_factor
+        if valid_samples is not None and valid_samples > 0:
+            effective_blocks = float(valid_samples) / float(self.n)
+        else:
+            effective_blocks = float(nb)
+        norm_factor = float(self.ndata * nt * effective_blocks)
+        time_per_pair = (dt * 1000.0) / max(1e-6, norm_factor)
 
         trial = {
             "config": cfg,
@@ -2384,8 +2434,13 @@ class HierarchicalFilter(MatchedFilter):
         with _AUTOTUNE_LOCK:
             if cache_key is not None and cache_key in _GLOBAL_AUTOTUNE_CACHE:
                 winner = _GLOBAL_AUTOTUNE_CACHE[cache_key]
-                if hasattr(self, '_assigned_candidate_key') and cache_key in _GLOBAL_AUTOTUNE_TRIALS:
-                    _GLOBAL_AUTOTUNE_TRIALS[cache_key].get("assigned", set()).discard(self._assigned_candidate_key)
+                if hasattr(self, '_assigned_candidate_key') and self._assigned_candidate_key is not None:
+                    if cache_key in _GLOBAL_AUTOTUNE_TRIALS:
+                        as_dict = _GLOBAL_AUTOTUNE_TRIALS[cache_key].get("assigned", {})
+                        if isinstance(as_dict, dict):
+                            as_dict[self._assigned_candidate_key] = max(0, as_dict.get(self._assigned_candidate_key, 1) - 1)
+                        elif isinstance(as_dict, set):
+                            as_dict.discard(self._assigned_candidate_key)
                     self._assigned_candidate_key = None
                 self.autotune_info["status"] = "locked"
                 self.autotune_info["winner"] = winner
@@ -2396,8 +2451,12 @@ class HierarchicalFilter(MatchedFilter):
 
             shared = _GLOBAL_AUTOTUNE_TRIALS.get(cache_key) if cache_key is not None else None
             if shared is not None:
-                if hasattr(self, '_assigned_candidate_key'):
-                    shared.get("assigned", set()).discard(self._assigned_candidate_key)
+                if hasattr(self, '_assigned_candidate_key') and self._assigned_candidate_key is not None:
+                    as_set = shared.get("assigned", set())
+                    if isinstance(as_set, set):
+                        as_set.discard(self._assigned_candidate_key)
+                    elif isinstance(as_set, dict):
+                        as_set.pop(self._assigned_candidate_key, None)
                     self._assigned_candidate_key = None
 
                 shared["trials"].append({
@@ -2410,6 +2469,8 @@ class HierarchicalFilter(MatchedFilter):
                     "pairs": pairs,
                     "triggers": triggers,
                 })
+                _log_autotune("TRIAL cache_key=%s cfg=%s time_per_pair=%.4fms dt=%.2fms blocks=%d tmpls=%d pairs=%s trigs=%s",
+                              cache_key, cfg, time_per_pair, dt * 1000.0, nb, nt, pairs, triggers)
                 all_candidate_keys = {_config_key(c) for c in shared["candidates"]}
                 tested_keys = {_config_key(t["config"]) for t in shared["trials"]}
 
@@ -2432,6 +2493,8 @@ class HierarchicalFilter(MatchedFilter):
                         return val / 0.95
 
                     winner = min(shared["candidates"], key=score)
+                    _log_autotune("WINNER LOCKED cache_key=%s winner=%s scores=%s",
+                                  cache_key, winner, [(c, score(c)) for c in shared["candidates"]])
                     _GLOBAL_AUTOTUNE_CACHE[cache_key] = winner
                     self.autotune_info["status"] = "locked"
                     self.autotune_info["winner"] = winner
@@ -2445,13 +2508,11 @@ class HierarchicalFilter(MatchedFilter):
                 untested_unassigned = [c for c in untested if _config_key(c) not in assigned_keys]
                 if untested_unassigned:
                     next_cfg = untested_unassigned[0]
-                elif untested:
-                    next_cfg = untested[0]
-                else:
-                    next_cfg = shared["candidates"][0]
-
-                self.autotune_info["untried"] = [c for c in untested if _config_key(c) != _config_key(next_cfg)]
-                self._switch_config(next_cfg)
+                    shared.setdefault("assigned", set()).add(_config_key(next_cfg))
+                    self._assigned_candidate_key = _config_key(next_cfg)
+                    self.autotune_info["untried"] = [c for c in untested if _config_key(c) != _config_key(next_cfg)]
+                    _log_autotune("SWITCHING cache_key=%s next_cfg=%s", cache_key, next_cfg)
+                    self._switch_config(next_cfg)
                 return
 
         if self.autotune_info["untried"]:
@@ -2472,7 +2533,7 @@ class HierarchicalFilter(MatchedFilter):
                     val = float(np.median(times[1:]))
                 else:
                     val = float(np.mean(times))
-                if _config_key(cand) == _config_key(self._tune_candidates[0]):
+                if self._tune_candidates and _config_key(cand) == _config_key(self._tune_candidates[0]):
                     return val
                 return val / 0.95
 
@@ -2493,8 +2554,13 @@ class HierarchicalFilter(MatchedFilter):
                 with _AUTOTUNE_LOCK:
                     if cache_key in _GLOBAL_AUTOTUNE_CACHE:
                         winner = _GLOBAL_AUTOTUNE_CACHE[cache_key]
-                        if hasattr(self, '_assigned_candidate_key') and cache_key in _GLOBAL_AUTOTUNE_TRIALS:
-                            _GLOBAL_AUTOTUNE_TRIALS[cache_key].get("assigned", set()).discard(self._assigned_candidate_key)
+                        if hasattr(self, '_assigned_candidate_key') and self._assigned_candidate_key is not None:
+                            if cache_key in _GLOBAL_AUTOTUNE_TRIALS:
+                                as_target = _GLOBAL_AUTOTUNE_TRIALS[cache_key].get("assigned")
+                                if isinstance(as_target, set):
+                                    as_target.discard(self._assigned_candidate_key)
+                                elif isinstance(as_target, dict):
+                                    as_target.pop(self._assigned_candidate_key, None)
                             self._assigned_candidate_key = None
                         self.autotune_info["status"] = "locked"
                         self.autotune_info["winner"] = winner
@@ -2503,20 +2569,6 @@ class HierarchicalFilter(MatchedFilter):
                             self._switch_config(winner)
         is_tuning_or_uninit = self.autotune_info.get("status") in ("tuning", "uninitialized")
         if is_tuning_or_uninit:
-            cache_key = self._autotune_cache_key() if getattr(self, '_pending_ref', None) is not None else None
-            if not getattr(self, '_warmed_up', False):
-                with _AUTOTUNE_LOCK:
-                    need_warmup = (cache_key is not None and
-                                   (cache_key not in _GLOBAL_AUTOTUNE_TRIALS or
-                                    len(_GLOBAL_AUTOTUNE_TRIALS[cache_key]["trials"]) == 0))
-                if need_warmup:
-                    try:
-                        super().run(binsize=binsize, threshold=threshold, window=window,
-                                    data=data, templates=templates, counts=counts, raw=raw)
-                    except Exception:
-                        pass
-                self._warmed_up = True
-
             t0 = time.perf_counter()
             res = super().run(binsize=binsize, threshold=threshold, window=window,
                               data=data, templates=templates, counts=counts, raw=raw)
@@ -2526,7 +2578,13 @@ class HierarchicalFilter(MatchedFilter):
                     p_cnt, t_cnt = self.stats
                 except Exception:
                     p_cnt, t_cnt = None, None
-                self._record_autotune_trial(dt, n_blocks=1, n_templates=self.ntemplates, pairs=p_cnt, triggers=t_cnt)
+                valid_samples = None
+                if window is not None:
+                    try:
+                        valid_samples = int(window[1] - window[0])
+                    except Exception:
+                        valid_samples = None
+                self._record_autotune_trial(dt, n_blocks=1, n_templates=self.ntemplates, pairs=p_cnt, triggers=t_cnt, valid_samples=valid_samples)
             return res
         return super().run(binsize=binsize, threshold=threshold, window=window,
                            data=data, templates=templates, counts=counts, raw=raw)
@@ -2550,8 +2608,13 @@ class HierarchicalFilter(MatchedFilter):
                 with _AUTOTUNE_LOCK:
                     if cache_key in _GLOBAL_AUTOTUNE_CACHE:
                         winner = _GLOBAL_AUTOTUNE_CACHE[cache_key]
-                        if hasattr(self, '_assigned_candidate_key') and cache_key in _GLOBAL_AUTOTUNE_TRIALS:
-                            _GLOBAL_AUTOTUNE_TRIALS[cache_key].get("assigned", set()).discard(self._assigned_candidate_key)
+                        if hasattr(self, '_assigned_candidate_key') and self._assigned_candidate_key is not None:
+                            if cache_key in _GLOBAL_AUTOTUNE_TRIALS:
+                                as_target = _GLOBAL_AUTOTUNE_TRIALS[cache_key].get("assigned")
+                                if isinstance(as_target, set):
+                                    as_target.discard(self._assigned_candidate_key)
+                                elif isinstance(as_target, dict):
+                                    as_target.pop(self._assigned_candidate_key, None)
                             self._assigned_candidate_key = None
                         self.autotune_info["status"] = "locked"
                         self.autotune_info["winner"] = winner
@@ -2569,14 +2632,15 @@ class HierarchicalFilter(MatchedFilter):
                                     len(_GLOBAL_AUTOTUNE_TRIALS[cache_key]["trials"]) == 0))
                 if need_warmup:
                     try:
-                        w_starts = starts[:1] if starts is not None and hasattr(starts, '__len__') and len(starts) > 0 else None
-                        w_ws = win_start[:1] if win_start is not None and hasattr(win_start, '__len__') and len(win_start) > 0 else None
-                        w_we = win_end[:1] if win_end is not None and hasattr(win_end, '__len__') and len(win_end) > 0 else None
-                        if w_starts is not None:
-                            self._mf.run_series(series, w_starts, w_ws, w_we, binsize=binsize,
-                                                threshold=threshold, templates=templates, raw=True)
+                        self._in_hier_series_call = True
+                        super().run_series(series, starts=starts, win_start=win_start,
+                                           win_end=win_end, binsize=binsize,
+                                           threshold=threshold, templates=templates,
+                                           raw=raw)
                     except Exception:
                         pass
+                    finally:
+                        self._in_hier_series_call = False
                 self._warmed_up = True
 
             self._in_hier_series_call = True
@@ -2596,7 +2660,13 @@ class HierarchicalFilter(MatchedFilter):
                     p_cnt, t_cnt = self.stats
                 except Exception:
                     p_cnt, t_cnt = None, None
-                self._record_autotune_trial(dt, n_blocks=n_blocks, n_templates=n_tmpls, pairs=p_cnt, triggers=t_cnt)
+                valid_samples = None
+                if win_start is not None and win_end is not None:
+                    try:
+                        valid_samples = int(np.sum(np.asarray(win_end) - np.asarray(win_start)))
+                    except Exception:
+                        valid_samples = None
+                self._record_autotune_trial(dt, n_blocks=n_blocks, n_templates=n_tmpls, pairs=p_cnt, triggers=t_cnt, valid_samples=valid_samples)
             return res
         return super().run_series(series, starts=starts, win_start=win_start,
                                   win_end=win_end, binsize=binsize,
