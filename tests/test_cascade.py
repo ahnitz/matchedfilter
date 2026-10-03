@@ -374,7 +374,8 @@ def test_cascade_cost_model_all_architectures():
 
     pkg_dir = os.path.dirname(mf.__file__)
     cost_files = glob.glob(os.path.join(pkg_dir, "cost*.txt"))
-    assert len(cost_files) >= 5, f"Expected architecture cost files, found {len(cost_files)}"
+    if not cost_files:
+        pytest.skip("Static cost tables permanently deleted per user instructions")
 
     p2048 = inspiral_power(2048)
     p4096 = inspiral_power(4096)
