@@ -80,6 +80,8 @@ def validate(device):
 def collect(args):
     if args.cpu is not None and hasattr(os, "sched_setaffinity"):
         os.sched_setaffinity(0, {args.cpu})
+    if hasattr(args, 'data') and hasattr(args, 'templates'):
+        teaser.set_workload(nd=args.data, nt=args.templates)
     devices = teaser.mf.devices()
     report = dict(host=args.host or platform.node().split('.')[0],
                   date=datetime.now(timezone.utc).isoformat(), revision=args.revision,
@@ -133,12 +135,12 @@ def collect(args):
             if baseline == 'FFTW' and kind == 'baseline':
                 row['fftw'] = teaser._DETAILS.get('fftw', {})
             if args.device == 'gpu' and kind == 'baseline':
-                row['timing']['executions_per_call'] = 8
-                # _timed measured eight queued batches; fn returned ms/8.
-                # Keep samples in the same units as the reported median.
-                row['timing']['block_ms'] = [v/8 for v in row['timing']['block_ms']]
-                row['timing']['min_ms'] /= 8
-                row['timing']['max_ms'] /= 8
+                n_queued = 1 if (teaser.PAIRS * teaser.N * 8 >= (512 << 20)) else 8
+                row['timing']['executions_per_call'] = n_queued
+                if n_queued > 1:
+                    row['timing']['block_ms'] = [v/n_queued for v in row['timing']['block_ms']]
+                    row['timing']['min_ms'] /= n_queued
+                    row['timing']['max_ms'] /= n_queued
                 row['timing']['block_ms_scope'] = 'per transform batch'
             report['rows'].append(row)
             print(json.dumps(row), flush=True)
@@ -242,6 +244,8 @@ def main(argv=None):
     parser.add_argument('--cpu', type=int, help='Linux CPU affinity for repeatability')
     parser.add_argument('--revision', default='unknown')
     parser.add_argument('--reps', type=int, default=9, help='timing blocks per filter mode')
+    parser.add_argument('--data', type=int, default=512, help='Data series count (default: 512)')
+    parser.add_argument('--templates', type=int, default=512, help='Template series count (default: 512)')
     parser.add_argument('--compare', nargs='+', metavar='JSON')
     args = parser.parse_args(argv)
     if args.reps < 1:
