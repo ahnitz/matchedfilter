@@ -23,7 +23,7 @@ uint firstbithigh_0(uint value_0)
 }
 
 
-#line 345 "/tmp/tmpoukn7ahn/forward.slang"
+#line 345 "/tmp/tmpprduhc56/forward.slang"
 void r4_0(float2 thread* a_0, float2 thread* b_0, float2 thread* c_0, float2 thread* d_0)
 {
     float2 t0_0 = *a_0 + *c_0;
@@ -347,7 +347,7 @@ struct EntryPointParams_0
 };
 
 
-#line 176 "/tmp/tmpoukn7ahn/forward.slang"
+#line 176 "/tmp/tmpprduhc56/forward.slang"
 struct KernelContext_0
 {
     EntryPointParams_0 constant* entryPointParams_0;
@@ -621,15 +621,15 @@ void innermost_0(array<float2, int(16)> thread* r_3)
 }
 
 
-#line 1292
+#line 1349
 void forwardTransform_0(array<float2, int(16)> thread* r_4, uint tid_0, KernelContext_0 thread* kernelContext_3)
 {
 
-#line 1292
+#line 1349
     for(;;)
     {
 
-#line 1292
+#line 1349
         for(;;)
         {
 
@@ -719,7 +719,7 @@ void forwardTransform_0(array<float2, int(16)> thread* r_4, uint tid_0, KernelCo
 #line 43
     innermost_0(r_4);
 
-#line 1295 "/tmp/tmpoukn7ahn/forward.slang"
+#line 1352 "/tmp/tmpprduhc56/forward.slang"
     return;
 }
 
@@ -784,138 +784,138 @@ uint slotToIndex_0(uint slot_0)
 }
 
 
-#line 1300
+#line 1357
 [[kernel]] void seriesForward(uint3 gid_0 [[threadgroup_position_in_grid]], uint3 lid_0 [[thread_position_in_threadgroup]], EntryPointParams_0 constant* entryPointParams_1 [[buffer(0)]], packed_float2 device* entryPointParams_series_1 [[buffer(1)]], uint device* entryPointParams_starts_1 [[buffer(2)]], packed_float2 device* entryPointParams_spectra_1 [[buffer(3)]])
 {
 
-#line 1300
+#line 1357
     thread KernelContext_0 kernelContext_4;
 
-#line 1300
+#line 1357
     (&kernelContext_4)->entryPointParams_0 = entryPointParams_1;
 
-#line 1300
+#line 1357
     (&kernelContext_4)->entryPointParams_series_0 = entryPointParams_series_1;
 
-#line 1300
+#line 1357
     (&kernelContext_4)->entryPointParams_starts_0 = entryPointParams_starts_1;
 
-#line 1300
+#line 1357
     (&kernelContext_4)->entryPointParams_spectra_0 = entryPointParams_spectra_1;
 
-#line 1300
+#line 1357
     threadgroup array<uint, int(512)> stg_1;
 
-#line 1300
+#line 1357
     (&kernelContext_4)->stg_0 = &stg_1;
 
-#line 1306
+#line 1363
     uint tid_1 = lid_0.x;
     (&kernelContext_4)->_tid_0 = tid_1;
     (&kernelContext_4)->_stgBase_0 = 0U;
     uint _S22 = gid_0.x;
 
-#line 1309
+#line 1366
     uint _S23 = entryPointParams_starts_1[_S22];
     thread array<float2, int(16)> r_5;
 
-#line 1310
+#line 1367
     uint k_0 = 0U;
     for(;;)
     {
 
-#line 1311
+#line 1368
         if(k_0 < 16U)
         {
         }
         else
         {
 
-#line 1311
+#line 1368
             break;
         }
 
-#line 1312
+#line 1369
         uint offset_0 = tid_1 + 16U * k_0;
         float2 _S24 = float2(0.0, 0.0);
 
-#line 1313
+#line 1370
         bool _S25;
 
         if(_S23 < ((&kernelContext_4)->entryPointParams_0->seriesLength_0))
         {
 
-#line 1315
+#line 1372
             _S25 = offset_0 < ((&kernelContext_4)->entryPointParams_0->seriesLength_0 - _S23);
 
-#line 1315
+#line 1372
         }
         else
         {
 
-#line 1315
+#line 1372
             _S25 = false;
 
-#line 1315
+#line 1372
         }
 
-#line 1315
+#line 1372
         float2 x_0;
 
-#line 1315
+#line 1372
         if(_S25)
         {
 
-#line 1315
+#line 1372
             x_0 = float2(*((&kernelContext_4)->entryPointParams_series_0+(_S23 + offset_0))) ;
 
-#line 1315
+#line 1372
         }
         else
         {
 
-#line 1315
+#line 1372
             x_0 = _S24;
 
-#line 1315
+#line 1372
         }
 
         r_5[k_0] = float2(x_0.x / 256.0, - x_0.y / 256.0);
 
-#line 1311
+#line 1368
         k_0 = k_0 + 1U;
 
-#line 1311
+#line 1368
     }
 
-#line 1311
+#line 1368
     forwardTransform_0(&r_5, tid_1, &kernelContext_4);
 
-#line 1311
+#line 1368
     k_0 = 0U;
 
-#line 1320
+#line 1377
     for(;;)
     {
 
-#line 1320
+#line 1377
         if(k_0 < 16U)
         {
         }
         else
         {
 
-#line 1320
+#line 1377
             break;
         }
 
-#line 1320
+#line 1377
         *((&kernelContext_4)->entryPointParams_spectra_0+(_S22 * 256U + slotToIndex_0(tid_1 * 16U + k_0))) = packed_float2(float2(r_5[k_0].x, - r_5[k_0].y)) ;
 
-#line 1320
+#line 1377
         k_0 = k_0 + 1U;
 
-#line 1320
+#line 1377
     }
 
 

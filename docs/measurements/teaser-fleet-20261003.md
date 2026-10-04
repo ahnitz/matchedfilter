@@ -136,7 +136,7 @@ Milliseconds per batch; smaller is faster.
 | GPU | FFT only | Full | Peak | Hier. 0.01 | Hier. 0.001 | Hier. 0.0001 |
 |---|---:|---:|---:|---:|---:|---:|
 | NVIDIA A100 80GB (Ampere sm_80) | 10.41 (cuFFT) | 20.11 | 62.32 | 8.89 | 14.95 | 17.15 |
-| NVIDIA L40S 48GB (Ada sm_89) | 26.10 (cuFFT) | 13.21 | 28.31 | 4.04 | 6.25 | 7.22 |
+| NVIDIA L40S 48GB (Ada sm_89) | 26.28 (cuFFT) | 13.17 | 21.18 | 3.81 | 6.08 | 6.78 |
 | NVIDIA A40 48GB (Ampere sm_86) | 30.70 (cuFFT) | 39.75 | 87.82 | 11.60 | 18.60 | 21.58 |
 | Radeon 8060S (RADV GFX1151) | 82.95 (rocFFT) | 16.67 | 23.32 | 3.68 | 4.84 | 5.01 |
 | Apple M2 (10 GPU cores) | 371.43 (MLX) | 186.57 | 115.36 | 17.14 | 21.81 | 23.08 |
@@ -146,7 +146,7 @@ Milliseconds per batch; smaller is faster.
 | GPU | 5.0 | 5.5 | 5.75 | 6.0 | 6.5 |
 |---|---:|---:|---:|---:|---:|
 | NVIDIA A100 80GB (Ampere sm_80) | 21.89 | 14.95 | 10.68 | 8.60 | 7.31 |
-| NVIDIA L40S 48GB (Ada sm_89) | 9.25 | 6.25 | 4.82 | 3.93 | 3.45 |
+| NVIDIA L40S 48GB (Ada sm_89) | 8.29 | 6.08 | 4.37 | 3.72 | 3.29 |
 | NVIDIA A40 48GB (Ampere sm_86) | 28.03 | 18.60 | 13.54 | 10.62 | 8.81 |
 | Radeon 8060S (RADV GFX1151) | 8.35 | 4.84 | 4.40 | 3.67 | 1.69 |
 | Apple M2 (10 GPU cores) | 33.31 | 21.81 | 21.09 | 16.44 | 10.58 |
@@ -156,15 +156,28 @@ Milliseconds per batch; smaller is faster.
 | GPU | Full | Peak | Hier. 0.01 @ 5.5 | Hier. 0.001 @ 5.5 | Hier. 0.001 @ 6.5 |
 |---|---:|---:|---:|---:|---:|
 | NVIDIA A100 80GB (Ampere sm_80) | 13.0 M/s | 4.2 M/s | 29.5 M/s | 17.5 M/s | 35.9 M/s |
-| NVIDIA L40S 48GB (Ada sm_89) | 19.8 M/s | 9.3 M/s | 64.8 M/s | 41.9 M/s | 75.9 M/s |
+| NVIDIA L40S 48GB (Ada sm_89) | 19.9 M/s | 12.4 M/s | 68.7 M/s | 43.1 M/s | 79.7 M/s |
 | NVIDIA A40 48GB (Ampere sm_86) | 6.6 M/s | 3.0 M/s | 22.6 M/s | 14.1 M/s | 29.7 M/s |
 | Radeon 8060S (RADV GFX1151) | 15.7 M/s | 11.2 M/s | 71.3 M/s | 54.1 M/s | 155.1 M/s |
 | Apple M2 (10 GPU cores) | 1.4 M/s | 2.3 M/s | 15.3 M/s | 12.0 M/s | 24.8 M/s |
 
+### Understanding Full Output vs. Peak Only Latencies
+
+Why did Full Output measure faster than Peak Only on discrete GPUs in the device-resident benchmark?
+
+1. **Host Readback Asymmetry in Microbenchmarks**:
+   - **Full output**: When passed preallocated shared memory (`out=f.empty_shared(...)`), the GPU kernel writes directly into device memory (`cuMemAllocManaged`). The CPU benchmark timer stops immediately upon GPU kernel completion, leaving all 8.58 GB of output resident in VRAM. If the caller actually reads back the full correlation array into host NumPy memory, PCIe 4.0 transfer latency increases execution time to **1,137 ms** on the L40S.
+   - **Peak only**: `f.run(binsize=N)` automatically transfers `peakIdx` (1 MB) and `peakVal` (2 MB) over PCIe back into host memory and formats them as a structured NumPy array on the CPU.
+   - When both return results to host Python memory, **Peak only (21.18 ms) is 54× faster than Full output (1,137 ms)**.
+
+2. **Kernel Register Spilling in `fusedTierB`**:
+   - On the device itself, the baseline `fusedTierB` kernel demanded 93 registers per thread, declaring 16-element arrays `myMag[16]` and `myBin[16]` while keeping the 16 complex FFT registers (`r[16]`) alive across 4 workgroup synchronizations and atomic reductions. This forced `ptxas` to spill **288 bytes per thread to local memory stack**, creating **19.3 GB of spill memory traffic to DRAM** across the 67 million threads in the grid.
+   - We specialized the single-bin path (`nbins == 1` / `SINGLE_BIN`), eliminating `myMag` and `myBin` allocations and immediately releasing the FFT registers after local reduction. This reduced register pressure from 93 to 72 registers, cut stack spills, and accelerated L40S Peak Only from **28.31 ms to 21.18 ms** (and pure GPU device time from 26.96 ms to 19.89 ms).
+
 ### Key Observations at Scale
 
 1. **HBM2e vs. GDDR6 Bandwidth (A100 vs. A40)**: The A100’s 1.93 TB/s HBM2e memory gives it nearly 3× faster cuFFT throughput (10.41 ms vs. 30.70 ms) and doubles full output throughput (13.0 M/s vs. 6.6 M/s) compared to the GDDR6-based A40.
-2. **Generational Scaling (Ampere vs. Ada Lovelace)**: The L40S (Ada sm_89) leverages its 48 MB on-chip L2 cache and enhanced FP32 ALUs to significantly outperform the A100 on matched filter pipelines: 1.5× faster on full correlation (13.21 ms vs. 20.11 ms), 2.2× faster on flat peak (28.31 ms vs. 62.32 ms), and 2.4× faster on hierarchical screening (6.25 ms vs. 14.95 ms at SNR 5.5).
+2. **Generational Scaling (Ampere vs. Ada Lovelace)**: The L40S (Ada sm_89) leverages its 48 MB on-chip L2 cache and enhanced FP32 ALUs to significantly outperform the A100 on matched filter pipelines: 1.5× faster on full correlation (13.17 ms vs. 20.11 ms), 2.9× faster on flat peak (21.18 ms vs. 62.32 ms), and 2.5× faster on hierarchical screening (6.08 ms vs. 14.95 ms at SNR 5.5).
 3. **APU Unified Memory Efficiency (Radeon 8060S)**: The AMD Radeon 8060S (Strix Halo) maintains the highest peak and hierarchical throughput across all tested hardware: 155.1 Mpairs/s at SNR 6.5 and 71.3 Mpairs/s at SNR 5.5, driven by its 32 MB Infinity Cache (MALL) and barrier-free hardware Wave32 DPP shuffle reductions.
 
 ## Reproducing the charts

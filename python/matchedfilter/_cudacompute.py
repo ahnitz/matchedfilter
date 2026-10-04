@@ -277,14 +277,14 @@ class Context(InputUploads):
             p_s = f"p{ppg}" if ppg > 1 else ""
             t_s = f"t{tile}" if tile > 1 else ""
             return f"tierb_{n}_c16{p_s}{t_s}"
-        if one_bin and n >= 16384:
-            return f"tierb_{n}_onebin"
         if entry == "refineListed":
-            return f"refine_{n}_onebin" if (one_bin and n >= 16384) else f"refine_{n}"
+            return f"refine_{n}_onebin" if (one_bin and n >= 4096) else f"refine_{n}"
         if entry == "fullCorrelation":
             return f"full_{n}"
         if entry == "fullCorrelationSeries":
             return f"full_series_{n}"
+        if one_bin and n >= 4096:
+            return f"tierb_{n}_onebin"
         return f"tierb_{n}"
 
     def pipeline(self, n, entry="fusedTierB", one_bin=False, c16=False, ppg=1, tile=1):

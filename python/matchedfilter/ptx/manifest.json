@@ -101,7 +101,13 @@
         "file": "full_series_4096.ptx"
       },
       "refine": {
-        "file": "refine_4096.ptx"
+        "file": "refine_4096.ptx",
+        "one_bin": {
+          "file": "refine_4096_onebin.ptx"
+        }
+      },
+      "one_bin": {
+        "file": "tierb_4096_onebin.ptx"
       }
     },
     "8192": {
@@ -133,6 +139,18 @@
         "portable": {
           "file": "refine_8192_lds32.ptx",
           "lds_bytes": 32768
+        },
+        "one_bin": {
+          "file": "refine_8192_onebin.ptx",
+          "portable": {
+            "file": "refine_8192_onebin_lds32.ptx"
+          }
+        }
+      },
+      "one_bin": {
+        "file": "tierb_8192_onebin.ptx",
+        "portable": {
+          "file": "tierb_8192_onebin_lds32.ptx"
         }
       }
     },

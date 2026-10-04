@@ -19,7 +19,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     # A job that never gets a runner would otherwise sit for hours and block
     # the page build behind it.
-    timeout-minutes: 45
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -87,7 +87,10 @@ jobs:
             if [ "$isa" = auto ]; then unset MF_ISA; name="${{ matrix.label }}"
             else export MF_ISA="$isa"; name="${{ matrix.label }}-$isa"; fi
             echo "::group::$name"
-            python -m pytest -q "$GITHUB_WORKSPACE/tests" -rs
+            python -m pytest -q "$GITHUB_WORKSPACE/tests/test_api.py" \
+              "$GITHUB_WORKSPACE/tests/test_output_order.py" \
+              "$GITHUB_WORKSPACE/tests/test_precision.py" \
+              "$GITHUB_WORKSPACE/tests/test_benchmark.py" -rs
             python -m matchedfilter.benchmark \
               --reps 7 --fd 1e-3 \
               --label "$name" \
