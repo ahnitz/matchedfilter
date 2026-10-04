@@ -466,7 +466,7 @@ def main(argv=None):
                 file=rsmall.name, lds_bytes=lds_bytes(n, PORTABLE_CAP))
         # Benchmarked one-bin specialization for the large full-precision
         # Vulkan kernels. Keep the general kernels for multiple output bins.
-        if n >= 16384:
+        if n >= 4096:
             for entry, target in (("fusedTierB", info), ("refineListed", info["refine"])):
                 one = compile_one(slangc, n, OUT, entry, suffix="_onebin", single_bin=1)
                 target["one_bin"] = dict(file=one.name)

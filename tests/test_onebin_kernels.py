@@ -19,7 +19,9 @@ def test_onebin_artifacts_and_selection(n, shared):
         assert one.endswith('_lds32.spv') == (shared == 32768)
         assert (V._SPIRV / one).is_file()
         assert (V._SPIRV / general).is_file()
-    assert c._peak_file(4096, 1) == c._kernel_file(4096)
+    assert c._peak_file(2048, 1) == c._kernel_file(2048)
+    assert c._peak_file(4096, 1) == 'tierb_4096_onebin.spv'
+    assert c._peak_file(4096, 2) == c._kernel_file(4096)
 
 
 def test_compaction_has_one_canonical_artifact():
