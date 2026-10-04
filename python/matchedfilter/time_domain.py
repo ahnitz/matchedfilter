@@ -50,6 +50,8 @@ def _partition_templates(
 
     valid_ns = sorted(int(n) for n in candidate_ns)
 
+    min_cand = valid_ns[0] if valid_ns else 1024
+
     def pick_n(max_c: int) -> int:
         for n in valid_ns:
             if n > max_c and (n - max_c) / n >= 0.50:
@@ -57,7 +59,7 @@ def _partition_templates(
         for n in reversed(valid_ns):
             if n > max_c:
                 return n
-        return 1 << int(math.ceil(math.log2(max(2048, 2 * max_c))))
+        return 1 << int(math.ceil(math.log2(max(min_cand, 2 * max_c))))
 
     # Partition contiguous runs sharing the same chosen FFT block size,
     # then split each run into balanced sub-batches sized to the cache budget.
@@ -168,6 +170,7 @@ class TimeDomainFilterBank:
         max_batch_size: Optional[int] = None,
         fft_lengths: Optional[Sequence[int]] = None,
         reference: Optional[Any] = None,
+        analytic: bool = False,
     ):
         from . import MatchedFilter, HierarchicalFilter
 
@@ -178,6 +181,7 @@ class TimeDomainFilterBank:
         self.first_stage_snr = float(first_stage_snr)
         self.coarse_band_hz = coarse_band_hz
         self.device = device
+        self.analytic = bool(analytic)
         self.max_batch_size = int(max_batch_size) if max_batch_size is not None else None
 
         mode = {'pycbc': 'flat', 'matchedfilter': 'flat',
@@ -225,6 +229,8 @@ class TimeDomainFilterBank:
             env_lengths = os.environ.get('PYCBC_RATIO_FFT_LENGTH')
             if env_lengths:
                 candidate_ns = tuple(sorted(int(x.strip()) for x in env_lengths.split(',') if x.strip()))
+            elif self.data_sample_rate <= 1024.0 or self.analytic:
+                candidate_ns = (1024, 2048, 4096, 8192, 16384, 32768, 65536)
             else:
                 candidate_ns = (2048, 4096, 8192, 16384, 32768, 65536)
         else:
@@ -288,7 +294,12 @@ class TimeDomainFilterBank:
                     buf = np.roll(buf, -(cnt // 2))
 
                     spec = np.fft.fft(buf).astype(np.complex64)
-                    if N_taps > chosen_N:
+                    if self.analytic and N_taps > chosen_N:
+                        # For an analytic series with positive-frequency support [f_low, f_high) < data Nyquist:
+                        # Positive-frequency bins [0, chosen_N) map directly to [0, f_Nyquist) without
+                        # negative-frequency mirroring.
+                        spec_data = np.ascontiguousarray(spec[:chosen_N])
+                    elif N_taps > chosen_N:
                         # Truncate frequencies above data Nyquist (preserving positive and negative bins)
                         spec_data = np.zeros(chosen_N, dtype=np.complex64)
                         spec_data[:chosen_N // 2 + 1] = spec[:chosen_N // 2 + 1]
