@@ -60,10 +60,12 @@ ap_hmf_plan *ap_hmf_create_cascade(size_t n,int ndata,int ntmpl,float snr,float 
   p->full=ap_mf_create(n,p->nd,ntmpl);
   { const char *pbmax=getenv("MF_PBMAX");
     size_t pblim = pbmax ? (size_t)atol(pbmax) : (ap_lane_width() >= 16 ? 1024u : 512u);
-    if(ntmpl>=16 && band<=pblim){
+    int lw = ap_lane_width();
+    size_t min_ntmpl = (lw > 0) ? (size_t)lw : 16u;
+    if(ntmpl>=min_ntmpl && band<=pblim){
       p->coarse=ap_mf_create_pairbatch(band,p->nd,ntmpl);
     }
-    if(band0>0 && ntmpl>=16 && band0<=pblim){
+    if(band0>0 && ntmpl>=min_ntmpl && band0<=pblim){
       p->coarse0=ap_mf_create_pairbatch(band0,p->nd,ntmpl);
     }
   }

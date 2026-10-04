@@ -81,6 +81,7 @@ typedef struct {
   /* 1 when N is below AP_W^2 and the plan runs the pair-batched path instead
      of the balanced split.  See create_small(). */
   int small;
+  int coarse_int16;
 } BP;
 
 /* Which lengths take the pair-batched path.
@@ -435,6 +436,12 @@ static void *create_small(size_t N){
   BP *p=ap_alloc64(sizeof(BP)); if(!p) return NULL;
   memset(p,0,sizeof(BP));
   p->N=N; p->N1=(int)N; p->N2=1; p->small=1;
+#if HWY_TARGET == HWY_AVX2
+  if(AP_W == 8 && (N == 256 || N == 512)){
+    const char *e_int16 = getenv("MF_COARSE_INT16");
+    p->coarse_int16 = (e_int16 && atoi(e_int16) > 0) ? 1 : 0;
+  }
+#endif
   p->a1=M1; p->a2=M2; p->b1=M1; p->b2=M2;
   p->ea=emake(M1,M2); p->eb=p->ea;
   const size_t se=(M2==1)?(size_t)N:(size_t)ESTRIDE(M1)*M2;
@@ -1561,11 +1568,8 @@ int binmax_prod_batch(void *vp,const float*dr,const float*di,
   const size_t nb=(we-ws+binsize-1)/binsize;
   if(bins_reserve(p,nb)) return -1;
 #if HWY_TARGET == HWY_AVX2
-  if(AP_W == 8 && nb == 1 && (p->N == 256 || p->N == 512)) {
-    const char *e_int16 = getenv("MF_COARSE_INT16");
-    if(e_int16 && atoi(e_int16) > 0) {
-      return ap_binmax_prod_batch_q15(dr, di, tr, ti, nlane, p->N, binsize, thr, out, ws, we);
-    }
+  if(p->coarse_int16 && nb == 1) {
+    return ap_binmax_prod_batch_q15(dr, di, tr, ti, nlane, p->N, binsize, thr, out, ws, we);
   }
 #endif
   if(broadcast_data(p))

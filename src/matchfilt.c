@@ -61,6 +61,7 @@ struct ap_mf_plan {
   int ntpad;                  /* template rows, rounded up to a multiple of pb */
   float *ebr,*ebi;            /* fallback lane-expanded data */
   float *tsr,*tsi;            /* [n][pb] gathered template group, when needed  */
+  float *tmre,*tmim;          /* [ntpad][n] template-major copy for stride-1 survivor gathers */
   float *corrbuf;             /* [pb][n] full-output staging for pair batches */
   ap_peak *pkbuf;             /* [pb][nb] dense results, before placement      */
   size_t pkcap;
@@ -103,8 +104,8 @@ static ap_mf_plan *create_mf(size_t n, int ndata, int ntmpl, int pair){
   /* Only the measured x86 targets opt in. MF_PBMAX remains a way to force
      either implementation in one build, without changing process state here. */
   const char *isa=ap_plan_backend(p->fft);
-  const size_t alt_max_n = (!strcmp(isa,"AVX3") || !strcmp(isa,"AVX2")) ? 1024u : 512u;
-  p->allow_pair_alt = !pair && !p->pb && n>=256 && n<=alt_max_n && ntmpl>=16
+  const size_t alt_max_n = (!strcmp(isa,"AVX3") && ap_lane_width() >= 16) ? 1024u : 512u;
+  p->allow_pair_alt = !pair && !p->pb && n>=256 && n<=alt_max_n && p->w>0 && ntmpl>=(size_t)p->w
     && !getenv("MF_PBMAX")
     && (!strcmp(isa,"AVX3") || !strcmp(isa,"AVX2") || !strcmp(isa,"SSE4"));
   p->ntpad = p->pb ? ((ntmpl + p->pb - 1)/p->pb)*p->pb : ntmpl;
@@ -130,6 +131,11 @@ static ap_mf_plan *create_mf(size_t n, int ndata, int ntmpl, int pair){
     p->tsr=ap_alloc64((size_t)n*p->pb*sizeof(float));
     p->tsi=ap_alloc64((size_t)n*p->pb*sizeof(float));
     if(!p->tsr||!p->tsi){ ap_mf_destroy(p); return NULL; }
+    p->tmre=ap_alloc64((size_t)p->ntpad*n*sizeof(float));
+    p->tmim=ap_alloc64((size_t)p->ntpad*n*sizeof(float));
+    if(!p->tmre||!p->tmim){ ap_mf_destroy(p); return NULL; }
+    memset(p->tmre,0,(size_t)p->ntpad*n*sizeof(float));
+    memset(p->tmim,0,(size_t)p->ntpad*n*sizeof(float));
   }
   return p;
 }
@@ -151,6 +157,7 @@ void ap_mf_destroy(ap_mf_plan *p){
   free(p->pr);free(p->pi);free(p->scratch);
   free(p->sfwd);free(p->sspec);
   free(p->ebr);free(p->ebi);free(p->tsr);free(p->tsi);free(p->pkbuf);
+  free(p->tmre);free(p->tmim);
   free(p->corrbuf);
   free(p);
 }
@@ -232,9 +239,14 @@ int ap_mf_set_template(ap_mf_plan *p, int t, const float *spec){
     const size_t n=p->n; const int W=p->pb;
     const size_t base=(size_t)(t/W)*n*W + (size_t)(t%W);
     float *re=p->tre+base, *im=p->tim+base;
+    float *mre=p->tmre ? p->tmre+(size_t)t*n : NULL;
+    float *mim=p->tmim ? p->tmim+(size_t)t*n : NULL;
     for(size_t k=0;k<n;k++){
-      re[k*W]= spec[2*k];
-      im[k*W]=-spec[2*k+1];          /* conjugated at ingest, as below */
+      const float r=spec[2*k];
+      const float i=-spec[2*k+1];          /* conjugated at ingest, as below */
+      re[k*W]=r;
+      im[k*W]=i;
+      if(mre){ mre[k]=r; mim[k]=i; }
     }
     return 0;
   }
@@ -319,6 +331,129 @@ static ap_mf_plan *pair_alternate(ap_mf_plan *p,int d0,int nd,int t0,int nt){
  *
  * Results come back dense [lane][nbins] and are placed by the caller's row
  * index, because a scattered template selection has no single stride. */
+static inline void gather_template_batch(float * restrict tsr, float * restrict tsi,
+                                         const ap_mf_plan *p,
+                                         int t0, const int *tsel, int tt, int cnt){
+  const size_t n = p->n;
+  const int W = p->pb;
+  const float *srp[32];
+  const float *sip[32];
+  const int stride1 = (p->tmre != NULL);
+
+  for(int l=0; l<cnt; l++){
+    const int t = t0 + (tsel ? tsel[tt+l] : (tt+l));
+    if(stride1){
+      srp[l] = p->tmre + (size_t)t * n;
+      sip[l] = p->tmim + (size_t)t * n;
+    } else {
+      srp[l] = p->tre + (size_t)(t/W)*n*W + (size_t)(t%W);
+      sip[l] = p->tim + (size_t)(t/W)*n*W + (size_t)(t%W);
+    }
+  }
+
+  if(stride1){
+    if(cnt == W){
+      if(W == 8){
+        for(size_t k=0; k<n; k++){
+          float * restrict dr = tsr + k * 8;
+          float * restrict di = tsi + k * 8;
+          dr[0] = srp[0][k]; di[0] = sip[0][k];
+          dr[1] = srp[1][k]; di[1] = sip[1][k];
+          dr[2] = srp[2][k]; di[2] = sip[2][k];
+          dr[3] = srp[3][k]; di[3] = sip[3][k];
+          dr[4] = srp[4][k]; di[4] = sip[4][k];
+          dr[5] = srp[5][k]; di[5] = sip[5][k];
+          dr[6] = srp[6][k]; di[6] = sip[6][k];
+          dr[7] = srp[7][k]; di[7] = sip[7][k];
+        }
+      } else if(W == 16){
+        for(size_t k=0; k<n; k++){
+          float * restrict dr = tsr + k * 16;
+          float * restrict di = tsi + k * 16;
+          for(int l=0; l<16; l++){
+            dr[l] = srp[l][k];
+            di[l] = sip[l][k];
+          }
+        }
+      } else {
+        for(size_t k=0; k<n; k++){
+          float * restrict dr = tsr + k * W;
+          float * restrict di = tsi + k * W;
+          for(int l=0; l<W; l++){
+            dr[l] = srp[l][k];
+            di[l] = sip[l][k];
+          }
+        }
+      }
+    } else {
+      for(size_t k=0; k<n; k++){
+        float * restrict dr = tsr + k * W;
+        float * restrict di = tsi + k * W;
+        for(int l=0; l<cnt; l++){
+          dr[l] = srp[l][k];
+          di[l] = sip[l][k];
+        }
+        for(int l=cnt; l<W; l++){
+          dr[l] = 0.0f;
+          di[l] = 0.0f;
+        }
+      }
+    }
+  } else {
+    if(cnt == W){
+      if(W == 8){
+        for(size_t k=0; k<n; k++){
+          float * restrict dr = tsr + k * 8;
+          float * restrict di = tsi + k * 8;
+          const size_t kw = k * 8;
+          dr[0] = srp[0][kw]; di[0] = sip[0][kw];
+          dr[1] = srp[1][kw]; di[1] = sip[1][kw];
+          dr[2] = srp[2][kw]; di[2] = sip[2][kw];
+          dr[3] = srp[3][kw]; di[3] = sip[3][kw];
+          dr[4] = srp[4][kw]; di[4] = sip[4][kw];
+          dr[5] = srp[5][kw]; di[5] = sip[5][kw];
+          dr[6] = srp[6][kw]; di[6] = sip[6][kw];
+          dr[7] = srp[7][kw]; di[7] = sip[7][kw];
+        }
+      } else if(W == 16){
+        for(size_t k=0; k<n; k++){
+          float * restrict dr = tsr + k * 16;
+          float * restrict di = tsi + k * 16;
+          const size_t kw = k * 16;
+          for(int l=0; l<16; l++){
+            dr[l] = srp[l][kw];
+            di[l] = sip[l][kw];
+          }
+        }
+      } else {
+        for(size_t k=0; k<n; k++){
+          float * restrict dr = tsr + k * W;
+          float * restrict di = tsi + k * W;
+          const size_t kw = k * W;
+          for(int l=0; l<W; l++){
+            dr[l] = srp[l][kw];
+            di[l] = sip[l][kw];
+          }
+        }
+      }
+    } else {
+      for(size_t k=0; k<n; k++){
+        float * restrict dr = tsr + k * W;
+        float * restrict di = tsi + k * W;
+        const size_t kw = k * W;
+        for(int l=0; l<cnt; l++){
+          dr[l] = srp[l][kw];
+          di[l] = sip[l][kw];
+        }
+        for(int l=cnt; l<W; l++){
+          dr[l] = 0.0f;
+          di[l] = 0.0f;
+        }
+      }
+    }
+  }
+}
+
 static int run_pairs_pb(ap_mf_plan *p, int d0, int nd, int t0, int nt,
                         const int *tsel, int nsel,
                         size_t binsize, float threshold,
@@ -353,25 +488,11 @@ static int run_pairs_pb(ap_mf_plan *p, int d0, int nd, int t0, int nt,
         Tr1=p->tre+(size_t)(base1/W)*n*W;
         Ti1=p->tim+(size_t)(base1/W)*n*W;
       } else {
-        memset(p->tsr,0,n*(size_t)W*sizeof(float));
-        memset(p->tsi,0,n*(size_t)W*sizeof(float));
-        for(int l=0;l<W;l++){
-          const int t=t0+(tsel?tsel[tt+l]:(tt+l));
-          const float *sr=p->tre+(size_t)(t/W)*n*W+(size_t)(t%W);
-          const float *si=p->tim+(size_t)(t/W)*n*W+(size_t)(t%W);
-          for(size_t k=0;k<n;k++){ p->tsr[k*W+l]=sr[k*W]; p->tsi[k*W+l]=si[k*W]; }
-        }
+        gather_template_batch(p->tsr, p->tsi, p, t0, tsel, tt, W);
         Tr0=p->tsr; Ti0=p->tsi;
         if(ap_binmax_prod_batch_peaks(p->fft,Dr,Di,Tr0,Ti0,W,binsize,threshold,
                                 p->pkbuf,AP_BACKWARD,start,end)<0) return -1;
-        memset(p->tsr,0,n*(size_t)W*sizeof(float));
-        memset(p->tsi,0,n*(size_t)W*sizeof(float));
-        for(int l=0;l<W;l++){
-          const int t=t0+(tsel?tsel[tt+W+l]:(tt+W+l));
-          const float *sr=p->tre+(size_t)(t/W)*n*W+(size_t)(t%W);
-          const float *si=p->tim+(size_t)(t/W)*n*W+(size_t)(t%W);
-          for(size_t k=0;k<n;k++){ p->tsr[k*W+l]=sr[k*W]; p->tsi[k*W+l]=si[k*W]; }
-        }
+        gather_template_batch(p->tsr, p->tsi, p, t0, tsel, tt+W, W);
         Tr1=p->tsr; Ti1=p->tsi;
         if(ap_binmax_prod_batch_peaks(p->fft,Dr,Di,Tr1,Ti1,W,binsize,threshold,
                                 p->pkbuf+(size_t)W*nb,AP_BACKWARD,start,end)<0) return -1;
@@ -403,14 +524,7 @@ place_peaks:
         Tr=p->tre+(size_t)(base/W)*n*W;
         Ti=p->tim+(size_t)(base/W)*n*W;
       } else {
-        memset(p->tsr,0,n*(size_t)W*sizeof(float));
-        memset(p->tsi,0,n*(size_t)W*sizeof(float));
-        for(int l=0;l<cnt;l++){
-          const int t=t0+(tsel?tsel[tt+l]:(tt+l));
-          const float *sr=p->tre+(size_t)(t/W)*n*W+(size_t)(t%W);
-          const float *si=p->tim+(size_t)(t/W)*n*W+(size_t)(t%W);
-          for(size_t k=0;k<n;k++){ p->tsr[k*W+l]=sr[k*W]; p->tsi[k*W+l]=si[k*W]; }
-        }
+        gather_template_batch(p->tsr, p->tsi, p, t0, tsel, tt, cnt);
         Tr=p->tsr; Ti=p->tsi;
       }
       if(ap_binmax_prod_batch_peaks(p->fft,Dr,Di,Tr,Ti,cnt,binsize,threshold,
@@ -441,7 +555,7 @@ static int run_pairs(ap_mf_plan *p, int d0, int nd, int t0, int nt,
   /* Lanes span templates, not D*T: 32x1 cannot fill one vector. Require
      >=75% occupancy, aligned contiguous templates, and a broad single bin.
      Unmeasured sparse/multi-bin/narrow-window cases keep the original path. */
-  if(p->allow_pair_alt && !tsel && nd>=4 && nt>=16 && t0%p->w==0
+  if(p->allow_pair_alt && !tsel && nd>=4 && p->w>0 && nt>=p->w && t0%p->w==0
      && 4*(size_t)nt>=3*((nt+p->w-1)/p->w)*(size_t)p->w
      && end-start>=p->n/2 && binsize>=end-start){
     ap_mf_plan *q=pair_alternate(p,d0,nd,t0,nt);
@@ -551,16 +665,7 @@ int ap_mf_correlate(ap_mf_plan *p,int d0,int nd,int t0,int nt,float *out){
           Tr=p->tre+(size_t)(base/W)*n*W;
           Ti=p->tim+(size_t)(base/W)*n*W;
         } else {
-          memset(p->tsr,0,n*(size_t)W*sizeof(float));
-          memset(p->tsi,0,n*(size_t)W*sizeof(float));
-          for(int l=0;l<cnt;l++){
-            const int t=base+l;
-            const float *sr=p->tre+(size_t)(t/W)*n*W+(size_t)(t%W);
-            const float *si=p->tim+(size_t)(t/W)*n*W+(size_t)(t%W);
-            for(size_t k=0;k<n;k++){
-              p->tsr[k*W+l]=sr[k*W]; p->tsi[k*W+l]=si[k*W];
-            }
-          }
+          gather_template_batch(p->tsr, p->tsi, p, base, NULL, 0, cnt);
           Tr=p->tsr; Ti=p->tsi;
         }
         float *dst=out+2*((size_t)d*nt+tt)*n;
@@ -676,16 +781,7 @@ int ap_mf_correlate_series_continuous(ap_mf_plan *p,const float *series,
             Tr=p->tre+(size_t)(base/W)*n*W;
             Ti=p->tim+(size_t)(base/W)*n*W;
           }else{
-            memset(p->tsr,0,n*(size_t)W*sizeof(float));
-            memset(p->tsi,0,n*(size_t)W*sizeof(float));
-            for(int l=0;l<cnt;l++){
-              const int t=base+l;
-              const float *sr=p->tre+(size_t)(t/W)*n*W+(size_t)(t%W);
-              const float *si=p->tim+(size_t)(t/W)*n*W+(size_t)(t%W);
-              for(size_t k=0;k<n;k++){
-                p->tsr[k*W+l]=sr[k*W]; p->tsi[k*W+l]=si[k*W];
-              }
-            }
+            gather_template_batch(p->tsr, p->tsi, p, base, NULL, 0, cnt);
             Tr=p->tsr; Ti=p->tsi;
           }
           if(ap_corr_prod_batch(p->fft,Dr,Di,Tr,Ti,cnt,p->corrbuf)) return -1;

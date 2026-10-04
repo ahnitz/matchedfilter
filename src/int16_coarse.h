@@ -201,7 +201,7 @@ AP_TARGET_AVX2 static inline int ap_binmax_prod_batch_q15(const float *dr, const
     if (prod2 < 1e-24f) prod2 = 1e-24f;
     float inv_mag = _mm_cvtss_f32(_mm_rsqrt_ss(_mm_set_ss(prod2)));
     float scale = 26000.f * inv_mag;
-    float inv_scale = 1.0f / scale;
+    float inv_scale = (float)n / scale;
 
     __m128i X_re[512] __attribute__((aligned(32)));
     __m128i X_im[512] __attribute__((aligned(32)));
@@ -215,8 +215,8 @@ AP_TARGET_AVX2 static inline int ap_binmax_prod_batch_q15(const float *dr, const
         __m256 t_r = _mm256_loadu_ps(tr + k * 8);
         __m256 t_i = _mm256_loadu_ps(ti + k * 8);
 
-        __m256 p_r = _mm256_mul_ps(_mm256_fmadd_ps(d_r, t_r, _mm256_mul_ps(d_i, t_i)), vscale);
-        __m256 p_i = _mm256_mul_ps(_mm256_fmsub_ps(d_i, t_r, _mm256_mul_ps(d_r, t_i)), vscale);
+        __m256 p_r = _mm256_mul_ps(_mm256_fmsub_ps(d_r, t_r, _mm256_mul_ps(d_i, t_i)), vscale);
+        __m256 p_i = _mm256_mul_ps(_mm256_fmadd_ps(d_r, t_i, _mm256_mul_ps(d_i, t_r)), vscale);
 
         __m256i ir = _mm256_cvtps_epi32(p_r);
         __m256i ii = _mm256_cvtps_epi32(p_i);
@@ -233,7 +233,7 @@ AP_TARGET_AVX2 static inline int ap_binmax_prod_batch_q15(const float *dr, const
     }
 
     // 4. Vectorized Peak Scan
-    float qthr = (thr > 0.f) ? thr * scale : 0.f;
+    float qthr = (thr > 0.f) ? (thr * scale / (float)n) : 0.f;
     int32_t qthr2 = (int32_t)(qthr * qthr);
 
     __m256i cur_max = _mm256_set1_epi32(qthr2);
@@ -275,7 +275,7 @@ AP_TARGET_AVX2 static inline int ap_binmax_prod_batch_q15(const float *dr, const
             _mm_storeu_si128((__m128i*)r, X_re[rev]);
             _mm_storeu_si128((__m128i*)i, X_im[rev]);
             out[l].re = (float)r[l] * inv_scale;
-            out[l].im = -(float)i[l] * inv_scale;
+            out[l].im = (float)i[l] * inv_scale;
         } else {
             out[l].index = -1;
             out[l].magnitude = 0.f;
