@@ -61,6 +61,7 @@ struct ap_mf_plan {
   int ntpad;                  /* template rows, rounded up to a multiple of pb */
   float *ebr,*ebi;            /* fallback lane-expanded data */
   float *tsr,*tsi;            /* [n][pb] gathered template group, when needed  */
+  float *dsr,*dsi;            /* [n][pb] gathered data group, for pooled pairs */
   float *tmre,*tmim;          /* [ntpad][n] template-major copy for stride-1 survivor gathers */
   float *corrbuf;             /* [pb][n] full-output staging for pair batches */
   ap_peak *pkbuf;             /* [pb][nb] dense results, before placement      */
@@ -87,9 +88,9 @@ static ap_mf_plan *create_mf(size_t n, int ndata, int ntmpl, int pair){
     if(!ap_plan_split(p->fft,&p->n1,&p->n2)){ p->n1=p->n2=0; }
     p->w = ap_lane_width();
     /* Group-major storage is only correct if the fused loader consumes it, so
-       ask the plan rather than assuming.  The AVX-512 1024 kernel has no fused
-       variant, but AVX2 at 1024 runs on the generic back end, which does - and
-       hard-coding n!=1024 silently cost the AVX2 path its fused product. */
+        ask the plan rather than assuming.  The AVX-512 1024 kernel has no fused
+        variant, but AVX2 at 1024 runs on the generic back end, which does - and
+        hard-coding n!=1024 silently cost the AVX2 path its fused product. */
     p->gmajor = (p->w>0 && p->n1>0 && p->n1%p->w==0
                  && (size_t)p->n1*p->n2==n && ap_has_fused_prod(p->fft)) ? 1 : 0;
     const char *e=getenv("MF_GMAJOR"); if(e && !atoi(e)) p->gmajor=0;
@@ -130,7 +131,9 @@ static ap_mf_plan *create_mf(size_t n, int ndata, int ntmpl, int pair){
     memset(p->tim,0,(size_t)p->ntpad*n*sizeof(float));
     p->tsr=ap_alloc64((size_t)n*p->pb*sizeof(float));
     p->tsi=ap_alloc64((size_t)n*p->pb*sizeof(float));
-    if(!p->tsr||!p->tsi){ ap_mf_destroy(p); return NULL; }
+    p->dsr=ap_alloc64((size_t)n*p->pb*sizeof(float));
+    p->dsi=ap_alloc64((size_t)n*p->pb*sizeof(float));
+    if(!p->tsr||!p->tsi||!p->dsr||!p->dsi){ ap_mf_destroy(p); return NULL; }
     p->tmre=ap_alloc64((size_t)p->ntpad*n*sizeof(float));
     p->tmim=ap_alloc64((size_t)p->ntpad*n*sizeof(float));
     if(!p->tmre||!p->tmim){ ap_mf_destroy(p); return NULL; }
@@ -156,7 +159,7 @@ void ap_mf_destroy(ap_mf_plan *p){
   free(p->dre);free(p->dim);free(p->tre);free(p->tim);
   free(p->pr);free(p->pi);free(p->scratch);
   free(p->sfwd);free(p->sspec);
-  free(p->ebr);free(p->ebi);free(p->tsr);free(p->tsi);free(p->pkbuf);
+  free(p->ebr);free(p->ebi);free(p->tsr);free(p->tsi);free(p->dsr);free(p->dsi);free(p->pkbuf);
   free(p->tmre);free(p->tmim);
   free(p->corrbuf);
   free(p);
@@ -449,6 +452,69 @@ static inline void gather_template_batch(float * restrict tsr, float * restrict 
           dr[l] = 0.0f;
           di[l] = 0.0f;
         }
+      }
+    }
+  }
+}
+
+static inline void gather_data_batch(float * restrict dsr, float * restrict dsi,
+                                     const ap_mf_plan *p,
+                                     int d0, const int *dsel, int tt, int cnt){
+  const size_t n = p->n;
+  const int W = p->pb;
+  const float *drp[32];
+  const float *dip[32];
+
+  for(int l=0; l<cnt; l++){
+    const int d = d0 + dsel[tt+l];
+    drp[l] = p->dre + (size_t)d * n;
+    dip[l] = p->dim + (size_t)d * n;
+  }
+
+  if(cnt == W){
+    if(W == 8){
+      for(size_t k=0; k<n; k++){
+        float * restrict dr = dsr + k * 8;
+        float * restrict di = dsi + k * 8;
+        dr[0] = drp[0][k]; di[0] = dip[0][k];
+        dr[1] = drp[1][k]; di[1] = dip[1][k];
+        dr[2] = drp[2][k]; di[2] = dip[2][k];
+        dr[3] = drp[3][k]; di[3] = dip[3][k];
+        dr[4] = drp[4][k]; di[4] = dip[4][k];
+        dr[5] = drp[5][k]; di[5] = dip[5][k];
+        dr[6] = drp[6][k]; di[6] = dip[6][k];
+        dr[7] = drp[7][k]; di[7] = dip[7][k];
+      }
+    } else if(W == 16){
+      for(size_t k=0; k<n; k++){
+        float * restrict dr = dsr + k * 16;
+        float * restrict di = dsi + k * 16;
+        for(int l=0; l<16; l++){
+          dr[l] = drp[l][k];
+          di[l] = dip[l][k];
+        }
+      }
+    } else {
+      for(size_t k=0; k<n; k++){
+        float * restrict dr = dsr + k * W;
+        float * restrict di = dsi + k * W;
+        for(int l=0; l<W; l++){
+          dr[l] = drp[l][k];
+          di[l] = dip[l][k];
+        }
+      }
+    }
+  } else {
+    for(size_t k=0; k<n; k++){
+      float * restrict dr = dsr + k * W;
+      float * restrict di = dsi + k * W;
+      for(int l=0; l<cnt; l++){
+        dr[l] = drp[l][k];
+        di[l] = dip[l][k];
+      }
+      for(int l=cnt; l<W; l++){
+        dr[l] = 0.0f;
+        di[l] = 0.0f;
       }
     }
   }
@@ -890,6 +956,77 @@ int ap_mf_run_sel(ap_mf_plan *p, int d0, int nd, int t0, int nt,
   if(start>=end) return 0;
   return run_pairs(p,d0,nd,t0,nt,tsel,nsel,binsize,threshold,
                    peaks,counts,start,end);
+}
+
+static int run_pairs_pooled_pb(ap_mf_plan *p, int d0,
+                               const int *dsel, const int *tsel, int npairs,
+                               int t0, size_t binsize, float threshold,
+                               ap_peak *peaks, int *counts, size_t start, size_t end,
+                               int nt){
+  const size_t n = p->n, nb = (end - start + binsize - 1) / binsize;
+  const int W = p->pb;
+  if(p->pkcap < (size_t)W * nb){
+    free(p->pkbuf);
+    p->pkbuf = ap_alloc64((size_t)W * nb * sizeof(ap_peak));
+    if(!p->pkbuf){ p->pkcap = 0; return -1; }
+    p->pkcap = (size_t)W * nb;
+  }
+  int total = 0;
+  for(int tt = 0; tt < npairs; tt += W){
+    const int cnt = (npairs - tt < W) ? npairs - tt : W;
+    gather_data_batch(p->dsr, p->dsi, p, d0, dsel, tt, cnt);
+    gather_template_batch(p->tsr, p->tsi, p, t0, tsel, tt, cnt);
+    if(ap_binmax_prod_batch_lanes_peaks(p->fft, p->dsr, p->dsi, p->tsr, p->tsi, cnt,
+                                        binsize, threshold, p->pkbuf, AP_BACKWARD, start, end) < 0){
+      return -1;
+    }
+    for(int l = 0; l < cnt; l++){
+      const int d = dsel[tt + l];
+      const int t = tsel[tt + l];
+      const size_t row = (size_t)d * nt + t;
+      int c = 0;
+      for(size_t j = 0; j < nb; j++){
+        const ap_peak pk = p->pkbuf[(size_t)l * nb + j];
+        peaks[row * nb + j] = pk;
+        if(pk.index >= 0) c++;
+      }
+      if(counts) counts[row] = c;
+      total += c;
+    }
+  }
+  return total;
+}
+
+int ap_mf_run_pairs_pooled(ap_mf_plan *p, int d0,
+                           const int *dsel, const int *tsel, int npairs,
+                           int t0, size_t binsize, float threshold,
+                           ap_peak *peaks, int *counts, size_t start, size_t end,
+                           int nt){
+  if(!p || npairs < 1 || !binsize) return 0;
+  if(d0 < 0 || d0 >= p->nd || t0 < 0 || t0 + nt > p->nt) return -1;
+  for(int j = 0; j < npairs; j++){
+    if(dsel[j] < 0 || d0 + dsel[j] >= p->nd) return -1;
+    if(tsel[j] < 0 || tsel[j] >= nt) return -1;
+  }
+  if(end > p->n) end = p->n;
+  if(start >= end) return 0;
+  if(p->pb && p->dsr && p->tsr){
+    return run_pairs_pooled_pb(p, d0, dsel, tsel, npairs, t0, binsize, threshold,
+                               peaks, counts, start, end, nt);
+  }
+  const size_t nb = (end - start + binsize - 1) / binsize;
+  int total = 0;
+  for(int i = 0; i < npairs; i++){
+    int d = dsel[i];
+    int t = tsel[i];
+    const size_t row = (size_t)d * nt + t;
+    int r = ap_mf_run(p, d0 + d, 1, t0 + t, 1, binsize, threshold,
+                      peaks + row * nb, counts ? counts + row : NULL,
+                      start, end);
+    if(r < 0) return -1;
+    total += r;
+  }
+  return total;
 }
 
 /* Debug accessor: how many data slots the plan actually has. */

@@ -24,6 +24,8 @@ struct ap_hmf_plan {
   float ref_f,ref_f0,cal_thr,cal_thr0;
   ap_peak *cebuf,*cebuf0;
   int *firebuf,*firebuf0;
+  int *fire_d,*fire_t;
+  int *fire_d0,*fire_t0;
   long pairs,trig;
   unsigned long long c_even,c_odd,c_ref,c_fill;
   int prof,trace;
@@ -86,6 +88,8 @@ ap_hmf_plan *ap_hmf_create_cascade(size_t n,int ndata,int ntmpl,float snr,float 
   p->fpow=calloc((size_t)ntmpl,sizeof(float));
   p->cebuf=calloc((size_t)p->nd*ntmpl,sizeof(ap_peak));
   p->firebuf=calloc((size_t)ntmpl,sizeof(int));
+  p->fire_d=calloc((size_t)p->nd*ntmpl,sizeof(int));
+  p->fire_t=calloc((size_t)p->nd*ntmpl,sizeof(int));
   p->cal_thr=-1;
   p->cal_thr0=-1;
 
@@ -95,13 +99,17 @@ ap_hmf_plan *ap_hmf_create_cascade(size_t n,int ndata,int ntmpl,float snr,float 
     p->fpow0=calloc((size_t)ntmpl,sizeof(float));
     p->cebuf0=calloc((size_t)p->nd*ntmpl,sizeof(ap_peak));
     p->firebuf0=calloc((size_t)ntmpl,sizeof(int));
-    if(!p->coarse0||!p->ct0_0||!p->scratch0||!p->fpow0||!p->cebuf0||!p->firebuf0){
+    p->fire_d0=calloc((size_t)p->nd*ntmpl,sizeof(int));
+    p->fire_t0=calloc((size_t)p->nd*ntmpl,sizeof(int));
+    if(!p->coarse0||!p->ct0_0||!p->scratch0||!p->fpow0||!p->cebuf0||!p->firebuf0
+       ||!p->fire_d0||!p->fire_t0){
       ap_hmf_destroy(p); return NULL;
     }
   }
 
   if(!p->full||!p->coarse||!p->full_fft||!p->fwd||!p->spec||!p->dspec
-     ||!p->dready||!p->tready||!p->ct0||!p->scratch||!p->fpow||!p->cebuf||!p->firebuf){
+     ||!p->dready||!p->tready||!p->ct0||!p->scratch||!p->fpow||!p->cebuf
+     ||!p->firebuf||!p->fire_d||!p->fire_t){
     ap_hmf_destroy(p); return NULL;
   }
   p->prof=getenv("MF_HMF_PROF")!=NULL;
@@ -118,11 +126,14 @@ void ap_hmf_destroy(ap_hmf_plan *p){
   ap_destroy(p->full_fft);
   free(p->fwd); free(p->spec); free(p->dspec); free(p->dready); free(p->tready);
   free(p->ct0); free(p->scratch); free(p->fpow); free(p->cebuf); free(p->firebuf);
+  free(p->fire_d); free(p->fire_t);
   if(p->ct0_0) free(p->ct0_0);
   if(p->scratch0) free(p->scratch0);
   if(p->fpow0) free(p->fpow0);
   if(p->cebuf0) free(p->cebuf0);
   if(p->firebuf0) free(p->firebuf0);
+  if(p->fire_d0) free(p->fire_d0);
+  if(p->fire_t0) free(p->fire_t0);
   if(p->dump) fclose(p->dump);
   free(p);
 }
@@ -346,13 +357,15 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
                  cstart0, cend0) < 0) return -1;
     if(p->prof) p->c_even += ap_ticks() - _eb0;
 
+    int nfire0 = 0;
     for(int d = 0; d < nd; d++){
-      int nfire0 = 0;
       for(int t = 0; t < nt; t++){
         p->pairs++;
         ap_peak ce0 = p->cebuf0[(size_t)d * nt + t];
         if(ce0.index >= 0 && ce0.magnitude >= p->cal_thr0){
-          p->firebuf0[nfire0++] = t;
+          p->fire_d0[nfire0] = d;
+          p->fire_t0[nfire0] = t;
+          nfire0++;
         } else {
           const size_t row = (size_t)d * nt + t;
           if(nb == 1){
@@ -366,50 +379,55 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
           if(counts) counts[row] = 0;
         }
       }
-      if(!nfire0) continue;
+    }
+    if(!nfire0) return 0;
 
-      /* Tier 1 coarse execution ONLY on templates surviving Tier 0 */
-      unsigned long long _t1 = p->prof ? ap_ticks() : 0;
-      if(ap_mf_run_sel(p->coarse, d0 + d, 1, t0, nt, p->firebuf0, nfire0,
-                       cspan, minev, p->cebuf, NULL, cstart, cend) < 0) return -1;
-      if(p->prof) p->c_odd += ap_ticks() - _t1;
+    /* Tier 1 coarse execution ONLY on templates surviving Tier 0, pooled across all data blocks */
+    unsigned long long _t1 = p->prof ? ap_ticks() : 0;
+    if(ap_mf_run_pairs_pooled(p->coarse, d0, p->fire_d0, p->fire_t0, nfire0,
+                             t0, cspan, minev, p->cebuf, NULL, cstart, cend, nt) < 0) return -1;
+    if(p->prof) p->c_odd += ap_ticks() - _t1;
 
-      int nfire = 0;
-      for(int j = 0; j < nfire0; j++){
-        int t = p->firebuf0[j];
-        const size_t row = (size_t)d * nt + t;
-        ap_peak ce = p->cebuf[t];
-        if(ce.index >= 0 && ce.magnitude >= p->cal_thr){
-          p->trig++;
-          p->firebuf[nfire++] = t;
+    int nfire = 0;
+    for(int j = 0; j < nfire0; j++){
+      int d = p->fire_d0[j];
+      int t = p->fire_t0[j];
+      const size_t row = (size_t)d * nt + t;
+      ap_peak ce = p->cebuf[row];
+      if(ce.index >= 0 && ce.magnitude >= p->cal_thr){
+        p->trig++;
+        p->fire_d[nfire] = d;
+        p->fire_t[nfire] = t;
+        nfire++;
+      } else {
+        if(nb == 1){
+          peaks[row].index = -1;
+          peaks[row].re = peaks[row].im = peaks[row].magnitude = 0.f;
         } else {
-          if(nb == 1){
-            peaks[row].index = -1;
-            peaks[row].re = peaks[row].im = peaks[row].magnitude = 0.f;
-          } else {
-            const ap_peak empty_peak = {-1, 0.f, 0.f, 0.f};
-            ap_peak * restrict dst = peaks + row * nb;
-            for(size_t b = 0; b < nb; b++) dst[b] = empty_peak;
-          }
-          if(counts) counts[row] = 0;
+          const ap_peak empty_peak = {-1, 0.f, 0.f, 0.f};
+          ap_peak * restrict dst = peaks + row * nb;
+          for(size_t b = 0; b < nb; b++) dst[b] = empty_peak;
         }
+        if(counts) counts[row] = 0;
       }
+    }
 
-      if(nfire){
+    if(nfire){
+      for(int j = 0; j < nfire; j++){
+        int d = p->fire_d[j];
         if(!p->dready[d0 + d]){
           if(!p->dspec[d0 + d]) return -1;
           if(ap_mf_set_data(p->full, d0 + d, p->dspec[d0 + d])) return -1;
           p->dready[d0 + d] = 1;
         }
-        unsigned long long r0 = p->prof ? ap_ticks() : 0;
-        int r = ap_mf_run_sel(p->full, d0 + d, 1, t0, nt, p->firebuf, nfire,
-                              binsize, threshold,
-                              peaks + (size_t)d * nt * nb, counts ? counts + (size_t)d * nt : NULL,
-                              start, end);
-        if(p->prof) p->c_ref += ap_ticks() - r0;
-        if(r < 0) return -1;
-        total += r;
       }
+      unsigned long long r0 = p->prof ? ap_ticks() : 0;
+      int r = ap_mf_run_pairs_pooled(p->full, d0, p->fire_d, p->fire_t, nfire,
+                                    t0, binsize, threshold,
+                                    peaks, counts, start, end, nt);
+      if(p->prof) p->c_ref += ap_ticks() - r0;
+      if(r < 0) return -1;
+      total += r;
     }
     return total;
   }
@@ -418,45 +436,31 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
     if(ap_mf_run(p->coarse,d0,nd,t0,nt,cspan,minev,p->cebuf,NULL,
                  cstart,cend)<0) return -1;
     if(p->prof) p->c_even += ap_ticks()-_eb; } /* batched: charged to the batch */
+  int nfire=0;
   for(int d=0;d<nd;d++){
-    int nfire=0;
     for(int t=0;t<nt;t++){
       const size_t row=(size_t)d*nt+t;
       p->pairs++;
       const float thr = p->cal_thr;
       int fire=0;
-      /* Fused coarse pass: product, transform and maximum in one kernel, with
-       * the product never reaching memory.  One bin spanning the whole coarse
-       * window means the reported peak IS the maximum, so the separate scan
-       * that used to walk the materialised series disappears entirely. */
-      ap_peak ce;
-      unsigned long long _t0 = p->prof ? ap_ticks() : 0;
-      ce = p->cebuf[(size_t)d*nt+t];
+      ap_peak ce = p->cebuf[(size_t)d*nt+t];
       if(ce.index>=0 && ce.magnitude<thr) ce.index=-1;
-      if(ce.index<0){
+      if(ce.index>=0){
+        const float bestmag = ce.magnitude;
+        if(p->dump){ float rec[8]={ce.magnitude,0.0f,bestmag,thr,
+                                   thr,thr,
+                                   (float)(d0+d),(float)(t0+t)};
+                     fwrite(rec,sizeof rec,1,p->dump); }
         if(p->trace && p->pairs<6)
-          fprintf(stderr,"    [trace] pair=%ld thr=%.3f coarse max BELOW thr\n",
-                  p->pairs,thr);
-        goto verdict;
+          fprintf(stderr,"    [trace] pair=%ld thr=%.3f coarse max=%.3f\n",
+                  p->pairs,thr,bestmag);
+        fire = bestmag>=thr;
       }
-      if(p->prof){ unsigned long long t1=ap_ticks(); p->c_odd+=t1-_t0; _t0=t1; }
-      const float bestmag = ce.magnitude;
-      /* The pair id is part of the record.  Without it a reader has to match
-         rows by their coarse value, which is ambiguous whenever two pairs land
-         close together -- and that ambiguity is indistinguishable from a
-         mirror that computes the wrong thing. */
-      if(p->dump){ float rec[8]={ce.magnitude,0.0f,bestmag,thr,
-                                 thr,thr,
-                                 (float)(d0+d),(float)(t0+t)};
-                   fwrite(rec,sizeof rec,1,p->dump); }
-      if(p->trace && p->pairs<6)
-        fprintf(stderr,"    [trace] pair=%ld thr=%.3f coarse max=%.3f\n",
-                p->pairs,thr,bestmag);
-      fire = bestmag>=thr;
-      verdict:
       if(fire){
         p->trig++;
-        p->firebuf[nfire++]=t;   /* reconstructed together, after this loop */
+        p->fire_d[nfire] = d;
+        p->fire_t[nfire] = t;
+        nfire++;
       }else{
         unsigned long long f0 = p->prof ? ap_ticks() : 0;
         if(nb==1){
@@ -471,31 +475,23 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
         if(p->prof) p->c_fill += ap_ticks()-f0;
       }
     }
-    /* Second stage, for every template of this segment that fired, in one
-       call.  Run one at a time it re-read the data spectrum per template and
-       cost 4.65 us/pair against 2.76 us batched; the coarse threshold makes the fired set
-       sparse and scattered, which is why ap_mf_run_sel takes an index list
-       rather than a range. */
-    if(nfire){
+  }
+  if(nfire){
+    for(int j = 0; j < nfire; j++){
+      int d = p->fire_d[j];
       if(!p->dready[d0+d]){
-        /* No spectrum was ever handed to this slot. ap_hmf_set_data stores
-           the CALLER'S pointer and the refine path is the first thing to
-           dereference it, so a run() with no set_data() reached here with
-           NULL and segfaulted -- and only when a pair actually fired, which
-           made it look intermittent. Refuse instead. */
         if(!p->dspec[d0+d]) return -1;
         if(ap_mf_set_data(p->full,d0+d,p->dspec[d0+d])) return -1;
         p->dready[d0+d]=1;
       }
-      unsigned long long r0 = p->prof ? ap_ticks() : 0;
-      int r=ap_mf_run_sel(p->full,d0+d,1,t0,nt,p->firebuf,nfire,
-                          binsize,threshold,
-                          peaks+(size_t)d*nt*nb,counts?counts+(size_t)d*nt:NULL,
-                          start,end);
-      if(p->prof) p->c_ref += ap_ticks()-r0;
-      if(r<0) return -1;
-      total+=r;
     }
+    unsigned long long r0 = p->prof ? ap_ticks() : 0;
+    int r = ap_mf_run_pairs_pooled(p->full, d0, p->fire_d, p->fire_t, nfire,
+                                  t0, binsize, threshold,
+                                  peaks, counts, start, end, nt);
+    if(p->prof) p->c_ref += ap_ticks()-r0;
+    if(r<0) return -1;
+    total+=r;
   }
   return total;
 }
