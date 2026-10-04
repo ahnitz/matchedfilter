@@ -53,6 +53,10 @@ typedef struct {
                              const float *tr, const float *ti, int nlane,
                              size_t binsize, float thr, ap_peak *out, int conj,
                              size_t start, size_t end);
+  int   (*binmax_prod_batch_lanes)(void *, const float *dr, const float *di,
+                                   const float *tr, const float *ti, int nlane,
+                                   size_t binsize, float thr, ap_peak *out, int conj,
+                                   size_t start, size_t end);
   int   (*corr_prod_batch)(void *, const float *dr, const float *di,
                            const float *tr, const float *ti, int nlane,
                            float *out);

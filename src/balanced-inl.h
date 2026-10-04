@@ -1580,6 +1580,18 @@ int binmax_prod_batch(void *vp,const float*dr,const float*di,
   return 0;
 }
 
+int binmax_prod_batch_lanes(void *vp, const float *dr, const float *di,
+                            const float *tr, const float *ti, int nlane, size_t binsize,
+                            float thr, ap_peak *out, int conj, size_t ws, size_t we){
+  BP *p = (BP*)vp;
+  if(!p->small || nlane < 1 || nlane > AP_W) return -1;
+  const size_t nb = (we - ws + binsize - 1) / binsize;
+  if(bins_reserve(p, nb)) return -1;
+  efft_prod((int)p->N, dr, di, tr, ti, p->bR, p->bI, p->sR, p->sI, p->w1r, p->w1i);
+  small_scan(p, binsize, thr, out, nb, conj, ws, we, nlane);
+  return 0;
+}
+
 int corr_prod_batch(void *vp,const float *dr,const float *di,
                     const float *tr,const float *ti,int nlane,float *out){
   BP *p=(BP*)vp;
@@ -1703,7 +1715,7 @@ const ap_backend *Backend(void){
     hwy::TargetName(HWY_TARGET), AP_W,
     create, destroy, fft, supported,
     binmax, binmax_split, has_prod, split, binmax_prod, corr_prod, corr_split, series_buf, series_stride, interp_max,
-    pairbatch, binmax_prod_batch, corr_prod_batch, create_small, broadcast_data, (AP_W==8 || AP_W==16) ? binmax_prod_threshold : nullptr
+    pairbatch, binmax_prod_batch, binmax_prod_batch_lanes, corr_prod_batch, create_small, broadcast_data, (AP_W==8 || AP_W==16) ? binmax_prod_threshold : nullptr
   };
   return &be;
 }

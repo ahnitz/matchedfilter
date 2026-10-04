@@ -97,6 +97,17 @@ int ap_mf_run_sel(ap_mf_plan *p, int d0, int nd, int t0, int nt,
                   size_t binsize, float threshold,
                   ap_peak *peaks, int *counts, size_t start, size_t end);
 
+/* Run a pooled list of (data, template) pairs.
+   dsel[0..npairs) are data block indices relative to d0.
+   tsel[0..npairs) are template indices relative to t0.
+   peaks receives the result for each pair, placed at row = (dsel[i]*nt + tsel[i]).
+   nt is the row stride in templates. */
+int ap_mf_run_pairs_pooled(ap_mf_plan *p, int d0,
+                           const int *dsel, const int *tsel, int npairs,
+                           int t0, size_t binsize, float threshold,
+                           ap_peak *peaks, int *counts, size_t start, size_t end,
+                           int nt);
+
 /* Filter a time series over a caller-supplied block layout: block b covers
    series[start[b] ...] and reports lags [win_start[b], win_end[b]).  Windows
    are per block, so the ragged ones at a segment's edges need no grouping.
