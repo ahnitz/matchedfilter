@@ -135,8 +135,7 @@ best configurations; these noise-only timings do not measure FDR. The
 two panels use separate scales; compare their printed values. This is a
 workload example, not a speed guarantee.
 
-For comparisons measured across seven machines with selectable thresholds and
-output modes, see the [hardware comparison](docs/measurements/teaser-fleet-20261003.md).
+For comparisons measured across seven architectures (including 512×512 scaling across NVIDIA L40S, A100, A40, AMD Radeon 8060S, and Apple M2) with selectable thresholds and output modes, see the [hardware comparison](docs/measurements/teaser-fleet-20261003.md).
 
 The [flat](https://ahnitz.github.io/matchedfilter/benchmarks.html) and
 [hierarchical](https://ahnitz.github.io/matchedfilter/hierarchical-benchmarks.html)
