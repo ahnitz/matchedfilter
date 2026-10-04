@@ -6,7 +6,7 @@ import matchedfilter as mf
 from matchedfilter.benchmark import _inspiral_power
 
 
-@pytest.mark.parametrize("n", [256, 512])
+@pytest.mark.parametrize("n", [128, 256, 512])
 def test_q15_matched_filter_peak_accuracy(n, monkeypatch):
     """Verify that Q15 coarse matched filtering preserves peak index and magnitude."""
     nd, nt = 4, 32

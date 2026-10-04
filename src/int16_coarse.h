@@ -18,21 +18,35 @@ extern "C" {
 #define AP_TARGET_AVX2
 #endif
 
+static int16_t ap_tw128_re[64] __attribute__((aligned(32)));
+static int16_t ap_tw128_im[64] __attribute__((aligned(32)));
 static int16_t ap_tw256_re[128] __attribute__((aligned(32)));
 static int16_t ap_tw256_im[128] __attribute__((aligned(32)));
 static int16_t ap_tw512_re[256] __attribute__((aligned(32)));
 static int16_t ap_tw512_im[256] __attribute__((aligned(32)));
 
+static __m128i ap_vtw128_re[64] __attribute__((aligned(32)));
+static __m128i ap_vtw128_im[64] __attribute__((aligned(32)));
 static __m128i ap_vtw256_re[128] __attribute__((aligned(32)));
 static __m128i ap_vtw256_im[128] __attribute__((aligned(32)));
 static __m128i ap_vtw512_re[256] __attribute__((aligned(32)));
 static __m128i ap_vtw512_im[256] __attribute__((aligned(32)));
 
+static int16_t ap_bitrev128[128] __attribute__((aligned(32)));
 static int16_t ap_bitrev256[256] __attribute__((aligned(32)));
 static int16_t ap_bitrev512[512] __attribute__((aligned(32)));
 static pthread_once_t ap_int16_init_once = PTHREAD_ONCE_INIT;
 
 static void ap_int16_init_tables(void) {
+    for (int k = 0; k < 64; k++) {
+        double a = 2.0 * M_PI * k / 128.0;
+        int16_t cr = (int16_t)round(cos(a) * 32767.0);
+        int16_t ci = (int16_t)round(sin(a) * 32767.0);
+        ap_tw128_re[k] = cr;
+        ap_tw128_im[k] = ci;
+        ap_vtw128_re[k] = _mm_set1_epi16(cr);
+        ap_vtw128_im[k] = _mm_set1_epi16(ci);
+    }
     for (int k = 0; k < 128; k++) {
         double a = 2.0 * M_PI * k / 256.0;
         int16_t cr = (int16_t)round(cos(a) * 32767.0);
@@ -51,6 +65,11 @@ static void ap_int16_init_tables(void) {
         ap_vtw512_re[k] = _mm_set1_epi16(cr);
         ap_vtw512_im[k] = _mm_set1_epi16(ci);
     }
+    for (int i = 0; i < 128; i++) {
+        int r = 0;
+        for (int b = 0; b < 7; b++) if (i & (1 << b)) r |= (1 << (6 - b));
+        ap_bitrev128[i] = (int16_t)r;
+    }
     for (int i = 0; i < 256; i++) {
         int r = 0;
         for (int b = 0; b < 8; b++) if (i & (1 << b)) r |= (1 << (7 - b));
@@ -60,6 +79,54 @@ static void ap_int16_init_tables(void) {
         int r = 0;
         for (int b = 0; b < 9; b++) if (i & (1 << b)) r |= (1 << (8 - b));
         ap_bitrev512[i] = (int16_t)r;
+    }
+}
+
+AP_TARGET_AVX2 static inline void ap_ifft128_q15_avx2(__m128i *X_re, __m128i *X_im) {
+    int half = 64;
+    int step = 1;
+    for (int s = 0; s < 7; s++) {
+        int tw_step = step;
+        for (int b = 0; b < 128; b += 2 * half) {
+            // First butterfly (k=0) has W = 1.0 (no twiddle multiplication)
+            int i0 = b;
+            int i1 = i0 + half;
+            __m128i u_r = X_re[i0], u_i = X_im[i0];
+            __m128i v_r = X_re[i1], v_i = X_im[i1];
+
+            X_re[i0] = _mm_srai_epi16(_mm_add_epi16(u_r, v_r), 1);
+            X_im[i0] = _mm_srai_epi16(_mm_add_epi16(u_i, v_i), 1);
+            X_re[i1] = _mm_srai_epi16(_mm_sub_epi16(u_r, v_r), 1);
+            X_im[i1] = _mm_srai_epi16(_mm_sub_epi16(u_i, v_i), 1);
+
+            for (int k = 1; k < half; k++) {
+                i0 = b + k;
+                i1 = i0 + half;
+
+                u_r = X_re[i0]; u_i = X_im[i0];
+                v_r = X_re[i1]; v_i = X_im[i1];
+
+                X_re[i0] = _mm_srai_epi16(_mm_add_epi16(u_r, v_r), 1);
+                X_im[i0] = _mm_srai_epi16(_mm_add_epi16(u_i, v_i), 1);
+
+                __m128i diff_r = _mm_srai_epi16(_mm_sub_epi16(u_r, v_r), 1);
+                __m128i diff_i = _mm_srai_epi16(_mm_sub_epi16(u_i, v_i), 1);
+
+                int tw_idx = k * tw_step;
+                __m128i vWr = ap_vtw128_re[tw_idx];
+                __m128i vWi = ap_vtw128_im[tw_idx];
+
+                __m128i rr = _mm_mulhrs_epi16(diff_r, vWr);
+                __m128i ii = _mm_mulhrs_epi16(diff_i, vWi);
+                __m128i ri = _mm_mulhrs_epi16(diff_r, vWi);
+                __m128i ir = _mm_mulhrs_epi16(diff_i, vWr);
+
+                X_re[i1] = _mm_sub_epi16(rr, ii);
+                X_im[i1] = _mm_add_epi16(ri, ir);
+            }
+        }
+        half /= 2;
+        step *= 2;
     }
 }
 
@@ -165,7 +232,7 @@ AP_TARGET_AVX2 static inline int ap_binmax_prod_batch_q15(const float *dr, const
                                                          size_t ws, size_t we) {
     (void)binsize;
     pthread_once(&ap_int16_init_once, ap_int16_init_tables);
-    if (n != 256 && n != 512) return -1;
+    if (n != 128 && n != 256 && n != 512) return -1;
     if (nlane < 1 || nlane > 8) return -1;
     if (we > n) we = n;
     if (ws >= we) return 0;
@@ -226,7 +293,9 @@ AP_TARGET_AVX2 static inline int ap_binmax_prod_batch_q15(const float *dr, const
     }
 
     // 3. Fast Fixed-Point IFFT
-    if (n == 256) {
+    if (n == 128) {
+        ap_ifft128_q15_avx2(X_re, X_im);
+    } else if (n == 256) {
         ap_ifft256_q15_avx2(X_re, X_im);
     } else {
         ap_ifft512_q15_avx2(X_re, X_im);
@@ -239,7 +308,7 @@ AP_TARGET_AVX2 static inline int ap_binmax_prod_batch_q15(const float *dr, const
     __m256i cur_max = _mm256_set1_epi32(qthr2);
     __m256i cur_idx = _mm256_set1_epi32(-1);
 
-    const int16_t *bitrev_tab = (n == 256) ? ap_bitrev256 : ap_bitrev512;
+    const int16_t *bitrev_tab = (n == 128) ? ap_bitrev128 : (n == 256) ? ap_bitrev256 : ap_bitrev512;
 
     for (size_t t = ws; t < we; t++) {
         int rev = bitrev_tab[t];
