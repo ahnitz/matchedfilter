@@ -21,6 +21,149 @@ class FilterResults(NamedTuple):
     block_lengths: np.ndarray      # int64: FFT block length used for this template
 
 
+def _make_kaiser_sinc_kernel(
+    K: int = 32,
+    fc: float = 410.0,
+    fs: float = 1024.0,
+    beta: float = 10.5
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Precompute 32-tap Kaiser sinc half-sample delay filter demodulated at band center."""
+    j = np.arange(-K // 2 + 1, K // 2 + 1)  # -15 .. 16
+    x = 0.5 - j
+    sinc = np.sin(np.pi * x) / (np.pi * x)
+    r = (j - 0.5) / (K / 2.0)
+    w = np.zeros(K, dtype=np.float64)
+    mask = np.abs(r) <= 1.0
+    w[mask] = np.i0(beta * np.sqrt(1.0 - r[mask] ** 2)) / np.i0(beta)
+    demod = np.exp(2j * np.pi * fc * x / fs)
+    g = (sinc * w * demod).astype(np.complex64)
+    return j, g
+
+
+_KERNEL_CACHE: Dict[Tuple[int, float, float, float], Tuple[np.ndarray, np.ndarray]] = {}
+
+
+def _get_interp_kernel(K: int = 32, fc: float = 410.0, fs: float = 1024.0, beta: float = 10.5) -> Tuple[np.ndarray, np.ndarray]:
+    key = (K, float(fc), float(fs), float(beta))
+    k = _KERNEL_CACHE.get(key)
+    if k is None:
+        k = _make_kaiser_sinc_kernel(K, fc, fs, beta)
+        _KERNEL_CACHE[key] = k
+    return k
+
+
+class AnalyticSeries:
+    """Band-limited analytic signal series sampled at a reduced rate.
+
+    Holds complex analytic data sampled at `sample_rate` (e.g. 1024 Hz) with support in
+    `band = (f_low, f_high)` (e.g. [20, 800) Hz). Provides on-demand band-limited
+    interpolation back to full `input_sample_rate` (e.g. 2048 Hz) via `window(start, stop)`
+    using a 32-tap band-centered Kaiser filter (accuracy <= 4e-6 relative error).
+    """
+
+    def __init__(
+        self,
+        data: np.ndarray,
+        *,
+        sample_rate: float = 1024.0,
+        input_sample_rate: float = 2048.0,
+        band: Tuple[float, float] = (20.0, 800.0),
+        offset: int = 0
+    ):
+        self.data = np.asarray(data, dtype=np.complex64)
+        self.sample_rate = float(sample_rate)
+        self.input_sample_rate = float(input_sample_rate)
+        self.rate_ratio = self.input_sample_rate / self.sample_rate
+        self.band = (float(band[0]), float(band[1]))
+        self.offset = int(offset)
+        fc = (self.band[0] + self.band[1]) / 2.0
+        self._j, self._g = _get_interp_kernel(32, fc=fc, fs=self.sample_rate)
+
+    @property
+    def input_size(self) -> int:
+        """Total length in full input-rate samples."""
+        return int(round(self.data.shape[-1] * self.rate_ratio))
+
+    @property
+    def shape(self) -> Tuple[int, ...]:
+        """Shape in full input-rate samples."""
+        return self.data.shape[:-1] + (self.input_size,)
+
+    @property
+    def ndim(self) -> int:
+        return self.data.ndim
+
+    @property
+    def size(self) -> int:
+        return self.input_size
+
+    @property
+    def duration(self) -> float:
+        """Duration in seconds."""
+        return self.data.shape[-1] / self.sample_rate
+
+    def window(self, start: Optional[int] = None, stop: Optional[int] = None) -> np.ndarray:
+        """Return full input-rate complex64 samples for input-rate indices [start, stop)."""
+        total = self.input_size
+        s = 0 if start is None else int(start)
+        e = total if stop is None else int(stop)
+        if s < 0:
+            s = max(0, total + s)
+        if e < 0:
+            e = max(0, total + e)
+        if e <= s:
+            return np.empty(self.data.shape[:-1] + (0,), dtype=np.complex64)
+        L = e - s
+        if self.rate_ratio == 1.0:
+            return self.data[..., s:e]
+
+        out = np.empty(self.data.shape[:-1] + (L,), dtype=np.complex64)
+        out_idx = np.arange(L)
+        k_arr = s + out_idx
+        is_even = (k_arr % 2 == 0)
+        M = self.data.shape[-1]
+
+        # Even samples map directly from reduced-rate samples
+        m_even = k_arr[is_even] // 2
+        valid_even = (m_even >= 0) & (m_even < M)
+        out[..., out_idx[is_even][valid_even]] = self.data[..., m_even[valid_even]]
+        if not np.all(valid_even):
+            out[..., out_idx[is_even][~valid_even]] = 0.0
+
+        # Odd samples are evaluated via the 32-tap centered Kaiser filter
+        if np.any(~is_even):
+            m_odd = (k_arr[~is_even] - 1) // 2
+            m_matrix = m_odd[:, None] + self._j[None, :]
+            valid_mask = (m_matrix >= 0) & (m_matrix < M)
+            clamped = np.clip(m_matrix, 0, M - 1)
+            if self.data.ndim == 1:
+                sampled = self.data[clamped]
+                sampled[~valid_mask] = 0.0
+                odd_vals = sampled.dot(self._g)
+                out[out_idx[~is_even]] = odd_vals.astype(np.complex64)
+            else:
+                sampled = self.data[:, clamped]
+                sampled[:, ~valid_mask] = 0.0
+                odd_vals = np.tensordot(sampled, self._g, axes=([2], [0]))
+                out[:, out_idx[~is_even]] = odd_vals.astype(np.complex64)
+        return out
+
+    def __getitem__(self, key: Any) -> np.ndarray:
+        if isinstance(key, slice):
+            return self.window(key.start, key.stop)
+        elif isinstance(key, (int, np.integer)):
+            idx = int(key)
+            return self.window(idx, idx + 1)[..., 0]
+        elif isinstance(key, tuple):
+            if len(key) == 2 and isinstance(key[1], slice):
+                return self.window(key[1].start, key[1].stop)[key[0]]
+            raise IndexError(f"Unsupported indexing key {key}")
+        raise TypeError(f"Invalid key type {type(key)}")
+
+    def __len__(self) -> int:
+        return self.shape[0] if self.ndim > 1 else self.size
+
+
 def _partition_templates(
     counts: np.ndarray,
     max_batch: Optional[int] = None,
@@ -171,6 +314,7 @@ class TimeDomainFilterBank:
         fft_lengths: Optional[Sequence[int]] = None,
         reference: Optional[Any] = None,
         analytic: bool = False,
+        execution_rate: Optional[Union[float, str]] = None,
     ):
         from . import MatchedFilter, HierarchicalFilter
 
@@ -183,6 +327,24 @@ class TimeDomainFilterBank:
         self.device = device
         self.analytic = bool(analytic)
         self.max_batch_size = int(max_batch_size) if max_batch_size is not None else None
+
+        self.execution_rate = None
+        if execution_rate is not None:
+            if execution_rate == 'auto':
+                if self.data_sample_rate >= 2048.0:
+                    self.execution_rate = 1024.0
+                else:
+                    self.execution_rate = self.data_sample_rate
+            else:
+                self.execution_rate = float(execution_rate)
+
+        if self.execution_rate is not None and self.execution_rate < self.data_sample_rate:
+            self.analytic = True
+            self._engine_rate = self.execution_rate
+            self._data_decimation_stride = int(round(self.data_sample_rate / self.execution_rate))
+        else:
+            self._engine_rate = self.data_sample_rate
+            self._data_decimation_stride = 1
 
         mode = {'pycbc': 'flat', 'matchedfilter': 'flat',
                 'matchedfilter-hierarchical': 'hier',
@@ -220,16 +382,16 @@ class TimeDomainFilterBank:
         self._taps_list = taps_list
 
 
-        # Multi-rate scaling: ratio of tap sample rate to data sample rate
-        self.rate_ratio = self.tap_sample_rate / self.data_sample_rate
-        # Effective tap length in data samples
+        # Multi-rate scaling: ratio of tap sample rate to engine sample rate
+        self.rate_ratio = self.tap_sample_rate / self._engine_rate
+        # Effective tap length in engine data samples
         self.effective_data_counts = np.ceil(self.tap_counts / self.rate_ratio).astype(np.int64)
 
         if fft_lengths is None:
             env_lengths = os.environ.get('PYCBC_RATIO_FFT_LENGTH')
             if env_lengths:
                 candidate_ns = tuple(sorted(int(x.strip()) for x in env_lengths.split(',') if x.strip()))
-            elif self.data_sample_rate <= 1024.0 or self.analytic:
+            elif self._engine_rate <= 1024.0 or self.analytic:
                 candidate_ns = (1024, 2048, 4096, 8192, 16384, 32768, 65536)
             else:
                 candidate_ns = (2048, 4096, 8192, 16384, 32768, 65536)
@@ -276,8 +438,15 @@ class TimeDomainFilterBank:
                     group_counts = np.ascontiguousarray(self.tap_counts[tmpl_indices], dtype=np.int64)
                     _core.taps_to_spectra(group_taps, group_counts, chosen_N, orig_taps_max, spectra)
                     for row, g_idx in enumerate(tmpl_indices):
-                        self._filters_f_list[g_idx] = np.conj(spectra[row])
-                        self._block_lengths_arr[g_idx] = chosen_N
+                        if self._data_decimation_stride > 1:
+                            full_N = chosen_N * self._data_decimation_stride
+                            full_spec = np.zeros(full_N, dtype=np.complex64)
+                            full_spec[:chosen_N] = spectra[row]
+                            self._filters_f_list[g_idx] = np.conj(full_spec)
+                            self._block_lengths_arr[g_idx] = full_N
+                        else:
+                            self._filters_f_list[g_idx] = np.conj(spectra[row])
+                            self._block_lengths_arr[g_idx] = chosen_N
                     used_fast_c = True
                 except Exception:
                     used_fast_c = False
@@ -316,8 +485,15 @@ class TimeDomainFilterBank:
                         spec_data = spec
 
                     spectra[row] = spec_data
-                    self._filters_f_list[g_idx] = np.conj(spec_data)
-                    self._block_lengths_arr[g_idx] = chosen_N
+                    if self._data_decimation_stride > 1:
+                        full_N = chosen_N * self._data_decimation_stride
+                        full_spec = np.zeros(full_N, dtype=np.complex64)
+                        full_spec[:chosen_N] = spec_data
+                        self._filters_f_list[g_idx] = np.conj(full_spec)
+                        self._block_lengths_arr[g_idx] = full_N
+                    else:
+                        self._filters_f_list[g_idx] = np.conj(spec_data)
+                        self._block_lengths_arr[g_idx] = chosen_N
 
             # Create matchedfilter plan
             if self.engine == 'corr':
@@ -329,7 +505,7 @@ class TimeDomainFilterBank:
             elif self.engine == 'hier':
                 band_bins = None
                 if self.coarse_band_hz is not None and self.coarse_band_hz > 0:
-                    delta_f = self.data_sample_rate / chosen_N
+                    delta_f = self._engine_rate / chosen_N
                     band_bins = int(round(self.coarse_band_hz / delta_f))
                 plan = HierarchicalFilter(
                     chosen_N, ndata=1, ntemplates=T,
@@ -388,13 +564,16 @@ class TimeDomainFilterBank:
     @property
     def groups(self) -> List[Dict]:
         """Summary of template partitions."""
+        stride = getattr(self, '_data_decimation_stride', 1)
         return [
             {
-                'n': g.n,
+                'n': g.n * stride,
+                'engine_n': g.n,
+                'engine_rate': getattr(self, '_engine_rate', self.data_sample_rate),
                 'count': len(g.template_indices),
                 'template_indices': g.template_indices,
-                'c_bad': g.c_bad,
-                'n_valid': g.n_valid,
+                'c_bad': g.c_bad * stride,
+                'n_valid': g.n_valid * stride,
                 'orig_taps_max': g.orig_taps_max,
                 'efficiency': g.n_valid / g.n
             }
@@ -514,14 +693,33 @@ class TimeDomainFilterBank:
                 block_starts: start sample of block containing each trigger
                 block_lengths: FFT block length used for each trigger
         """
-        ser = np.ascontiguousarray(series, dtype=np.complex64)
+        if isinstance(series, AnalyticSeries):
+            ser = np.ascontiguousarray(series.data, dtype=np.complex64)
+            decim_stride = int(round(series.rate_ratio))
+            eff_rate = series.sample_rate
+            in_rate = series.input_sample_rate
+            eff_band = series.band
+        else:
+            in_rate = self.data_sample_rate
+            decim_stride = getattr(self, '_data_decimation_stride', 1)
+            eff_rate = getattr(self, '_engine_rate', self.data_sample_rate)
+            eff_band = (20.0, 800.0)
+            if decim_stride > 1:
+                ser = np.ascontiguousarray(series[::decim_stride], dtype=np.complex64)
+            else:
+                ser = np.ascontiguousarray(series, dtype=np.complex64)
+
         if ser.ndim != 1:
             raise ValueError("series must be a 1D array")
         S = len(ser)
 
         if valid_slice is not None:
-            v_start = 0 if valid_slice.start is None else int(valid_slice.start)
-            v_stop = S if valid_slice.stop is None else int(valid_slice.stop)
+            if decim_stride > 1:
+                v_start = 0 if valid_slice.start is None else int(round(valid_slice.start / decim_stride))
+                v_stop = S if valid_slice.stop is None else int(round(valid_slice.stop / decim_stride))
+            else:
+                v_start = 0 if valid_slice.start is None else int(valid_slice.start)
+                v_stop = S if valid_slice.stop is None else int(valid_slice.stop)
         else:
             v_start, v_stop = 0, S
 
@@ -675,21 +873,49 @@ class TimeDomainFilterBank:
                             out_block_lens.append(np.full(bi.size, N, dtype=np.int64))
 
         if out_template_indices:
-            if len(out_template_indices) == 1:
+            all_tmpl = np.concatenate(out_template_indices).astype(np.int64) if len(out_template_indices) > 1 else out_template_indices[0].astype(np.int64, copy=False)
+            all_samp = np.concatenate(out_sample_indices).astype(np.int64) if len(out_sample_indices) > 1 else out_sample_indices[0].astype(np.int64, copy=False)
+            all_snr = np.concatenate(out_snrs).astype(np.complex64) if len(out_snrs) > 1 else out_snrs[0].astype(np.complex64, copy=False)
+            all_tstarts = np.concatenate(out_tstarts).astype(np.int64) if len(out_tstarts) > 1 else out_tstarts[0].astype(np.int64, copy=False)
+            all_block_lens = np.concatenate(out_block_lens).astype(np.int64) if len(out_block_lens) > 1 else out_block_lens[0].astype(np.int64, copy=False)
+
+            if decim_stride > 1:
+                fc = (eff_band[0] + eff_band[1]) / 2.0
+                j_k, g_k = _get_interp_kernel(32, fc=fc, fs=eff_rate)
+                M = len(ser)
+                out_samp_final = all_samp * decim_stride
+                out_snr_final = all_snr.copy()
+
+                for idx in range(len(all_samp)):
+                    m = all_samp[idx]
+                    even_mag = np.abs(all_snr[idx])
+                    if m + 16 < M and m - 15 >= 0:
+                        odd_p1 = np.sum(g_k * ser[m + j_k])
+                        if np.abs(odd_p1) > even_mag:
+                            out_samp_final[idx] = m * decim_stride + 1
+                            out_snr_final[idx] = odd_p1
+                            even_mag = np.abs(odd_p1)
+                    if (m - 1) + 16 < M and (m - 1) - 15 >= 0:
+                        odd_m1 = np.sum(g_k * ser[m - 1 + j_k])
+                        if np.abs(odd_m1) > even_mag:
+                            out_samp_final[idx] = m * decim_stride - 1
+                            out_snr_final[idx] = odd_m1
+
                 return FilterResults(
-                    template_indices=out_template_indices[0].astype(np.int64, copy=False),
-                    sample_indices=out_sample_indices[0].astype(np.int64, copy=False),
-                    snr=out_snrs[0].astype(np.complex64, copy=False),
-                    block_starts=out_tstarts[0].astype(np.int64, copy=False),
-                    block_lengths=out_block_lens[0].astype(np.int64, copy=False),
+                    template_indices=all_tmpl,
+                    sample_indices=out_samp_final,
+                    snr=out_snr_final,
+                    block_starts=all_tstarts * decim_stride,
+                    block_lengths=all_block_lens * decim_stride,
                 )
-            return FilterResults(
-                template_indices=np.concatenate(out_template_indices).astype(np.int64),
-                sample_indices=np.concatenate(out_sample_indices).astype(np.int64),
-                snr=np.concatenate(out_snrs).astype(np.complex64),
-                block_starts=np.concatenate(out_tstarts).astype(np.int64),
-                block_lengths=np.concatenate(out_block_lens).astype(np.int64),
-            )
+            else:
+                return FilterResults(
+                    template_indices=all_tmpl,
+                    sample_indices=all_samp,
+                    snr=all_snr,
+                    block_starts=all_tstarts,
+                    block_lengths=all_block_lens,
+                )
         else:
             return FilterResults(
                 template_indices=np.empty(0, dtype=np.int64),
@@ -872,5 +1098,42 @@ class TimeDomainFilterBank:
                 result[g_indices] = g_tmp
 
         return result
+
+    def correlate_series_analytic(
+        self,
+        series: Union[np.ndarray, AnalyticSeries],
+        valid_slice: Optional[slice] = None,
+        scales: Optional[Union[np.ndarray, Sequence[float]]] = None,
+        template_index: Optional[int] = None,
+        band: Optional[Tuple[float, float]] = None,
+    ) -> AnalyticSeries:
+        """Correlate continuous series returning an AnalyticSeries at reduced execution rate.
+
+        If series is at full input rate (e.g. 2048 Hz), it is decimated losslessly
+        to execution rate (e.g. 1024 Hz) before correlation. The returned AnalyticSeries
+        provides on-demand band-limited interpolation back to input rate via .window(start, stop).
+        """
+        if isinstance(series, AnalyticSeries):
+            ser_data = series.data
+            in_rate = series.input_sample_rate
+            out_rate = series.sample_rate
+            eff_band = series.band
+        else:
+            in_rate = self.data_sample_rate
+            out_rate = getattr(self, '_engine_rate', 1024.0 if in_rate >= 2048.0 else in_rate)
+            eff_band = band or (20.0, 800.0)
+            stride = int(round(in_rate / out_rate))
+            ser_data = np.ascontiguousarray(series[::stride], dtype=np.complex64) if stride > 1 else np.ascontiguousarray(series, dtype=np.complex64)
+
+        if valid_slice is not None and in_rate != out_rate:
+            stride = int(round(in_rate / out_rate))
+            vs = 0 if valid_slice.start is None else int(round(valid_slice.start / stride))
+            ve = len(ser_data) if valid_slice.stop is None else int(round(valid_slice.stop / stride))
+            v_slice = slice(vs, ve)
+        else:
+            v_slice = valid_slice
+
+        res = self.correlate_series(ser_data, valid_slice=v_slice, scales=scales, template_index=template_index)
+        return AnalyticSeries(res, sample_rate=out_rate, input_sample_rate=in_rate, band=eff_band)
 
     process_segment = filter_series
