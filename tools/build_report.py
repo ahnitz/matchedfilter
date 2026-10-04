@@ -1799,9 +1799,11 @@ def main():
         for f in sorted(os.listdir(src)):
             if f.endswith(".svg"):
                 shutil.copyfile(os.path.join(src, f), os.path.join(dst, f))
-        fleet = os.path.join(a.root, 'docs', 'measurements', 'teaser-fleet-20260928.json')
-        if os.path.isfile(fleet):
-            shutil.copyfile(fleet, os.path.join(dst, os.path.basename(fleet)))
+        m_dir = os.path.join(a.root, 'docs', 'measurements')
+        if os.path.isdir(m_dir):
+            for pat in ('teaser-fleet-*.json', 'gpu-fleet-*.json', 'a100_gpu_*.json', 'a40_gpu_*.json', 'l40s_gpu*.json'):
+                for fpath in glob.glob(os.path.join(m_dir, pat)):
+                    shutil.copyfile(fpath, os.path.join(dst, os.path.basename(fpath)))
     print("wrote %d pages to %s/ from %d run(s): %s"
           % (len(pages), outdir, len(runs),
              ", ".join((r["host"]["label"] if isinstance(r.get("host"), dict) else str(r.get("host", ""))) for r in runs)))
