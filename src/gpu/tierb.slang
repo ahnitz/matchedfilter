@@ -657,15 +657,27 @@ void filterPair(uint pair, uint tid,
     uint threadBestSlot = 0xffffffffu;
     float2 threadBestVal = float2(0.0f, 0.0f);
 
-    [unroll] for (uint i = 0; i < R; ++i) {
-        uint idx = slotToIndex(tid * R + i);
-        bool live = (idx >= winStart && idx < winEnd);
-        float _rx = float(r[i].x), _ry = float(r[i].y);
-        uint magBits = live ? asuint(_rx*_rx + _ry*_ry) : 0u;
-        if (magBits > threadBestBits) {
-            threadBestBits = magBits;
-            threadBestSlot = tid * R + i;
-            threadBestVal = float2(_rx, _ry);
+    if (winStart == 0u && winEnd >= N) {
+        [unroll] for (uint i = 0; i < R; ++i) {
+            float _rx = float(r[i].x), _ry = float(r[i].y);
+            uint magBits = asuint(_rx*_rx + _ry*_ry);
+            if (magBits > threadBestBits) {
+                threadBestBits = magBits;
+                threadBestSlot = tid * R + i;
+                threadBestVal = float2(_rx, _ry);
+            }
+        }
+    } else {
+        [unroll] for (uint i = 0; i < R; ++i) {
+            uint idx = slotToIndex(tid * R + i);
+            bool live = (idx >= winStart && idx < winEnd);
+            float _rx = float(r[i].x), _ry = float(r[i].y);
+            uint magBits = live ? asuint(_rx*_rx + _ry*_ry) : 0u;
+            if (magBits > threadBestBits) {
+                threadBestBits = magBits;
+                threadBestSlot = tid * R + i;
+                threadBestVal = float2(_rx, _ry);
+            }
         }
     }
 

@@ -325,7 +325,7 @@ void dftR_0(array<float2, int(32)> thread* r_2)
 }
 
 
-#line 1052
+#line 1064
 struct EntryPointParams_0
 {
     uint4 params_0;
@@ -878,154 +878,154 @@ uint slotToIndex_0(uint slot_0)
 }
 
 
-#line 1052
+#line 1064
 [[kernel]] void fullCorrelationSeries(uint3 gid_0 [[threadgroup_position_in_grid]], uint3 lid_0 [[thread_position_in_threadgroup]], EntryPointParams_0 constant* entryPointParams_1 [[buffer(0)]], packed_float2 device* entryPointParams_data_1 [[buffer(1)]], packed_float2 device* entryPointParams_tmpl_1 [[buffer(2)]], uint device* entryPointParams_starts_1 [[buffer(3)]], packed_float2 device* entryPointParams_output_1 [[buffer(4)]])
 {
 
-#line 1052
+#line 1064
     thread KernelContext_0 kernelContext_4;
 
-#line 1052
+#line 1064
     (&kernelContext_4)->entryPointParams_0 = entryPointParams_1;
 
-#line 1052
+#line 1064
     (&kernelContext_4)->entryPointParams_data_0 = entryPointParams_data_1;
 
-#line 1052
+#line 1064
     (&kernelContext_4)->entryPointParams_tmpl_0 = entryPointParams_tmpl_1;
 
-#line 1052
+#line 1064
     (&kernelContext_4)->entryPointParams_starts_0 = entryPointParams_starts_1;
 
-#line 1052
+#line 1064
     (&kernelContext_4)->entryPointParams_output_0 = entryPointParams_output_1;
 
-#line 1052
+#line 1064
     threadgroup array<uint, int(16384)> stg_1;
 
-#line 1052
+#line 1064
     (&kernelContext_4)->stg_0 = &stg_1;
 
-#line 1057
+#line 1069
     uint pair_0 = gid_0.x;
 
-#line 1057
+#line 1069
     uint tid_1 = lid_0.x;
     uint d_3 = pair_0 / entryPointParams_1->params_0.x;
 
-#line 1058
+#line 1070
     uint _S32 = pair_0 % entryPointParams_1->params_0.x;
     uint _S33 = (&kernelContext_4)->entryPointParams_starts_0[d_3];
     (&kernelContext_4)->_tid_0 = tid_1;
     (&kernelContext_4)->_stgBase_0 = 0U;
     thread array<float2, int(32)> r_6;
 
-#line 1062
+#line 1074
     uint i_5 = 0U;
     for(;;)
     {
 
-#line 1063
+#line 1075
         if(i_5 < 32U)
         {
         }
         else
         {
 
-#line 1063
+#line 1075
             break;
         }
 
-#line 1064
+#line 1076
         uint idx_0 = tid_1 + 1024U * i_5;
         r_6[i_5] = cmulConj_0(cload_0((&kernelContext_4)->entryPointParams_data_0, d_3 * 32768U + idx_0), cload_0((&kernelContext_4)->entryPointParams_tmpl_0, _S32 * 32768U + idx_0));
 
-#line 1063
+#line 1075
         i_5 = i_5 + 1U;
 
-#line 1063
+#line 1075
     }
 
-#line 1063
+#line 1075
     transform_0(&r_6, tid_1, &kernelContext_4);
 
-#line 1063
+#line 1075
     i_5 = 0U;
 
-#line 1068
+#line 1080
     for(;;)
     {
 
-#line 1068
+#line 1080
         if(i_5 < 32U)
         {
         }
         else
         {
 
-#line 1068
+#line 1080
             break;
         }
 
-#line 1069
+#line 1081
         uint lag_0 = slotToIndex_0(tid_1 * 32U + i_5);
 
-#line 1069
+#line 1081
         bool _S34;
         if(lag_0 >= (entryPointParams_1->params_0.z))
         {
 
-#line 1070
+#line 1082
             _S34 = lag_0 < (entryPointParams_1->params_0.w);
 
-#line 1070
+#line 1082
         }
         else
         {
 
-#line 1070
+#line 1082
             _S34 = false;
 
-#line 1070
+#line 1082
         }
 
-#line 1070
+#line 1082
         bool _S35;
 
-#line 1070
+#line 1082
         if(_S34)
         {
 
-#line 1070
+#line 1082
             _S35 = lag_0 < (entryPointParams_1->params_0.y - _S33);
 
-#line 1070
+#line 1082
         }
         else
         {
 
-#line 1070
+#line 1082
             _S35 = false;
 
-#line 1070
+#line 1082
         }
 
-#line 1070
+#line 1082
         if(_S35)
         {
 
-#line 1070
+#line 1082
             *((&kernelContext_4)->entryPointParams_output_0+(_S32 * entryPointParams_1->params_0.y + _S33 + lag_0)) = packed_float2(float2(r_6[i_5].x, r_6[i_5].y)) ;
 
-#line 1070
+#line 1082
         }
 
-#line 1068
+#line 1080
         i_5 = i_5 + 1U;
 
-#line 1068
+#line 1080
     }
 
-#line 1073
+#line 1085
     return;
 }

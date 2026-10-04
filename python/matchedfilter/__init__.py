@@ -548,7 +548,7 @@ class MatchedFilter:
             self.n, D, H, binsize=binsize, threshold=threshold,
             window=(start, end), upload_data=self._ddirty,
             upload_tmpl=self._tdirty, slot=slot, async_submit=async_submit)
-        self._tdirty = False
+        self._ddirty = self._tdirty = False
         return res
 
     # ---- run ----------------------------------------------------------------

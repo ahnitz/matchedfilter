@@ -26,7 +26,7 @@ import matchedfilter as mf
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tests'))
 N = int(os.environ.get('MF_TEASER_N', '4096'))
-ND = int(os.environ.get('MF_TEASER_NDATA', '512'))
+ND = int(os.environ.get('MF_TEASER_NDATA', '16'))
 NT = int(os.environ.get('MF_TEASER_NTMPL', '512'))
 PAIRS = ND * NT
 BUDGETS = (1e-2, 1e-3, 1e-4)
@@ -75,13 +75,13 @@ def _case(seed=1):
     return d, _reference()[1]
 
 
-def _timed(fn, reps, min_warmup=5):
+def _timed(fn, reps, min_warmup=12):
     """Sustained warmup and block medians; preserve variability for review.
 
-    Ensures both a duration floor (0.5 s) and a call count floor (min_warmup)
+    Ensures both a duration floor (0.8 s) and a call count floor (min_warmup)
     so steady-state clocks and driver plans burn in across all workload sizes.
     """
-    until = time.perf_counter() + .5
+    until = time.perf_counter() + .8
     warmup_count = 0
     while (time.perf_counter() < until) or (warmup_count < min_warmup):
         fn()
@@ -555,8 +555,16 @@ def main(argv=None):
             row = dict(device=device,label=label,kind=kind,fd=fd,ms=ms,
                        timing=dict(_timed.details))
             if device == 'gpu' and kind == 'baseline':
-                # Each GPU reference call executes eight transform batches.
-                row['timing']['executions_per_call'] = 8
+                n_queued = 1 if (PAIRS * N * 8 >= (512 << 20)) else 8
+                row['timing']['executions_per_call'] = n_queued
+                if n_queued > 1:
+                    if 'block_ms' in row['timing']:
+                        row['timing']['block_ms'] = [v/n_queued for v in row['timing']['block_ms']]
+                    if 'min_ms' in row['timing']:
+                        row['timing']['min_ms'] /= n_queued
+                    if 'max_ms' in row['timing']:
+                        row['timing']['max_ms'] /= n_queued
+                row['timing']['block_ms_scope'] = 'per transform batch'
             if device == 'cpu' and kind == 'baseline':
                 row['fftw'] = _DETAILS.get('fftw', {})
             if row['timing']['max_ms'] > 1.25 * row['timing']['min_ms']:
