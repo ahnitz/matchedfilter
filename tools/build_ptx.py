@@ -115,6 +115,7 @@ def compile_tierb(slangc, nvrtc, env, n, outdir, entry=ENTRY, cap=None, suffix="
         "#define NLEN %d\n#define LDS_CAP %d\n#define COARSE16 %d\n"
         "#define PPG %d\n#define TILE_T %d\n#define RADIX %d\n#define SINGLE_BIN %d\n"
         "#define SLANG_CUDA_STRUCTURED_BUFFER_NO_COUNT 1\n"
+        "#define TARGET_CUDA 1\n"
         % (n, cap, coarse16, ppg, tile, r, single_bin)
         + KERNEL.read_text()
     )

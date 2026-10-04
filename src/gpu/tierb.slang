@@ -651,7 +651,6 @@ void filterPair(uint pair, uint tid,
     // Eliminate myMag[RADIX] and myBin[RADIX] arrays entirely and free r[RADIX]
     // immediately after the unrolled reduction loop to eliminate register spilling.
     if (tid == 0) { stg[_stgBase] = thrBits; stg[_stgBase+1] = 0xffffffffu; }
-    GroupMemoryBarrierWithGroupSync();
 
     uint threadBestBits = thrBits;
     uint threadBestSlot = 0xffffffffu;
@@ -681,7 +680,9 @@ void filterPair(uint pair, uint tid,
         }
     }
 
-#if PPG == 1
+    GroupMemoryBarrierWithGroupSync();          // ensure tid 0 stg initialized before atomics
+
+#if PPG == 1 && !TARGET_CUDA
     uint wm = WaveActiveMax(threadBestBits);
     if (WaveIsFirstLane() && wm > thrBits) InterlockedMax(stg[_stgBase], wm);
 #else
@@ -693,7 +694,7 @@ void filterPair(uint pair, uint tid,
     if (threadBestBits > thrBits && threadBestBits == stg[_stgBase])
         winner = threadBestSlot;
 
-#if PPG == 1
+#if PPG == 1 && !TARGET_CUDA
     uint waveWinner = WaveActiveMin(winner);
     if (WaveIsFirstLane() && waveWinner != 0xffffffffu)
         InterlockedMin(stg[_stgBase+1], waveWinner);

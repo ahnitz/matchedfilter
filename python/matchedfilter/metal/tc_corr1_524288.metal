@@ -813,43 +813,43 @@ uint slotToIndex_0(uint slot_0)
 }
 
 
-#line 1183
+#line 1184
 [[kernel]] void tcStage1(uint3 gid_0 [[threadgroup_position_in_grid]], uint3 lid_0 [[thread_position_in_threadgroup]], EntryPointParams_0 constant* entryPointParams_1 [[buffer(0)]], packed_float2 device* entryPointParams_data_1 [[buffer(1)]], packed_float2 device* entryPointParams_tmpl_1 [[buffer(2)]], packed_float2 device* entryPointParams_scratch_1 [[buffer(3)]])
 {
 
-#line 1183
+#line 1184
     thread KernelContext_0 kernelContext_4;
 
-#line 1183
+#line 1184
     (&kernelContext_4)->entryPointParams_0 = entryPointParams_1;
 
-#line 1183
+#line 1184
     (&kernelContext_4)->entryPointParams_data_0 = entryPointParams_data_1;
 
-#line 1183
+#line 1184
     (&kernelContext_4)->entryPointParams_tmpl_0 = entryPointParams_tmpl_1;
 
-#line 1183
+#line 1184
     (&kernelContext_4)->entryPointParams_scratch_0 = entryPointParams_scratch_1;
 
-#line 1183
+#line 1184
     threadgroup array<uint, int(1024)> stg_1;
 
-#line 1183
+#line 1184
     (&kernelContext_4)->stg_0 = &stg_1;
 
 
 
     uint _S31 = gid_0.x;
 
-#line 1187
+#line 1188
     uint pair_0 = _S31 / 512U;
 
-#line 1187
+#line 1188
     uint _S32 = _S31 % 512U;
     uint _S33 = pair_0 / entryPointParams_1->ntmpl_0;
 
-#line 1188
+#line 1189
     uint _S34 = pair_0 % entryPointParams_1->ntmpl_0;
     uint tid_1 = lid_0.x;
     (&kernelContext_4)->_tid_0 = tid_1;
@@ -857,65 +857,65 @@ uint slotToIndex_0(uint slot_0)
 
     thread array<float2, int(16)> r_5;
 
-#line 1193
+#line 1194
     uint m_1 = 0U;
     for(;;)
     {
 
-#line 1194
+#line 1195
         if(m_1 < 16U)
         {
         }
         else
         {
 
-#line 1194
+#line 1195
             break;
         }
 
-#line 1195
+#line 1196
         uint j_2 = _S32 + 512U * (tid_1 + 64U * m_1);
         r_5[m_1] = cmulConj_0(float2(*((&kernelContext_4)->entryPointParams_data_0+(_S33 * 524288U + j_2))) , float2(*((&kernelContext_4)->entryPointParams_tmpl_0+(_S34 * 524288U + j_2))) );
 
-#line 1194
+#line 1195
         m_1 = m_1 + 1U;
 
-#line 1194
+#line 1195
     }
 
-#line 1194
+#line 1195
     transform_0(&r_5, tid_1, &kernelContext_4);
 
-#line 1194
+#line 1195
     uint i_4 = 0U;
 
-#line 1203
+#line 1204
     for(;;)
     {
 
-#line 1203
+#line 1204
         if(i_4 < 16U)
         {
         }
         else
         {
 
-#line 1203
+#line 1204
             break;
         }
 
-#line 1204
+#line 1205
         uint k2_2 = slotToIndex_0(tid_1 * 16U + i_4);
 
-#line 1204
+#line 1205
         *((&kernelContext_4)->entryPointParams_scratch_0+(pair_0 * 524288U + k2_2 * 512U + _S32)) = packed_float2(cmul_0(r_5[i_4], mfTwiddle_0(6.28318548202514648 * float(_S32 * k2_2) / 5.24288e+05))) ;
 
-#line 1203
+#line 1204
         i_4 = i_4 + 1U;
 
-#line 1203
+#line 1204
     }
 
-#line 1208
+#line 1209
     return;
 }
