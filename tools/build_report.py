@@ -1697,7 +1697,7 @@ def build(runs, root=".", require_demo=False):
     readme = split_readme(read(os.path.join(root, "README.md")))
     readme = {k: retarget_anchors(v) for k, v in readme.items()}
     readme["_intro"] = strip_self_reference(readme.get("_intro", ""))
-    version = next((r["host"].get("version") for r in runs if r.get("host")), "")
+    version = next((r["host"].get("version") for r in runs if isinstance(r.get("host"), dict)), "")
     order = [(fn, label) for fn, label, _, _, _ in PAGES]
     out = {}
     for i, (fn, label, kind, arg, _grp) in enumerate(PAGES):

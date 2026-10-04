@@ -16,6 +16,7 @@ on:
 jobs:
   bench:
     name: ${{ matrix.label }}
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
     runs-on: ${{ matrix.os }}
     # A job that never gets a runner would otherwise sit for hours and block
     # the page build behind it.
@@ -135,7 +136,7 @@ jobs:
   page:
     name: Build the documentation page
     needs: bench
-    if: always()
+    if: always() && !cancelled()
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -143,6 +144,7 @@ jobs:
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
       - uses: actions/download-artifact@v4
+        continue-on-error: true
         with: { pattern: bench-*, path: results, merge-multiple: true }
 
       - name: Install the library, so the demo page can run it
@@ -155,13 +157,21 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install .
 
-      - run: |
-          ls -l results
-          # --root so the prose comes from this checkout's README and docs/,
-          # keeping the page and the source in step.
-          # --require-demo so a page that cannot run the library fails here
-          # rather than publishing with an apology where the figures go.
-          python tools/build_report.py results --root . --require-demo \
+      - name: Build documentation site
+        run: |
+          mkdir -p results
+          # If fresh runner benchmarks were produced, include them; otherwise use committed fleet benchmarks
+          inputs=()
+          if ls results/*.json 1> /dev/null 2>&1; then
+            inputs+=(results/*.json)
+          fi
+          if ls docs/measurements/bench/*.json 1> /dev/null 2>&1; then
+            inputs+=(docs/measurements/bench/*.json)
+          fi
+          if [ ${#inputs[@]} -eq 0 ]; then
+            inputs+=(docs/measurements/authenticamd-*.json docs/measurements/genuineintel-*.json)
+          fi
+          python tools/build_report.py "${inputs[@]}" --root . --require-demo \
                  --out site/index.html
       - uses: actions/upload-artifact@v4
         with:

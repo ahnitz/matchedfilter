@@ -799,6 +799,8 @@ def main(argv=None):
               "of this benchmark. It should narrow as the threshold rises.")
 
     if a.json:
+        if os.path.dirname(a.json):
+            os.makedirs(os.path.dirname(a.json), exist_ok=True)
         with open(a.json, "w") as fh:
             json.dump({"host": host_info(a.label),
                        "flat": flat_rows, "hierarchical": hier_rows}, fh, indent=1)
