@@ -646,6 +646,59 @@ void filterPair(uint pair, uint tid,
     // than -1 also means a bin whose every |v|^2 underflowed reports index
     // -1 instead of naming the first sample, matching the CPU.
     GroupMemoryBarrierWithGroupSync();          // transform is done with stg
+#if SINGLE_BIN
+    // ONE BIN by construction:
+    // Eliminate myMag[RADIX] and myBin[RADIX] arrays entirely and free r[RADIX]
+    // immediately after the unrolled reduction loop to eliminate register spilling.
+    if (tid == 0) { stg[_stgBase] = thrBits; stg[_stgBase+1] = 0xffffffffu; }
+    GroupMemoryBarrierWithGroupSync();
+
+    uint threadBestBits = thrBits;
+    uint threadBestSlot = 0xffffffffu;
+    float2 threadBestVal = float2(0.0f, 0.0f);
+
+    [unroll] for (uint i = 0; i < R; ++i) {
+        uint idx = slotToIndex(tid * R + i);
+        bool live = (idx >= winStart && idx < winEnd);
+        float _rx = float(r[i].x), _ry = float(r[i].y);
+        uint magBits = live ? asuint(_rx*_rx + _ry*_ry) : 0u;
+        if (magBits > threadBestBits) {
+            threadBestBits = magBits;
+            threadBestSlot = tid * R + i;
+            threadBestVal = float2(_rx, _ry);
+        }
+    }
+
+#if PPG == 1
+    uint wm = WaveActiveMax(threadBestBits);
+    if (WaveIsFirstLane() && wm > thrBits) InterlockedMax(stg[_stgBase], wm);
+#else
+    if (threadBestBits > thrBits) InterlockedMax(stg[_stgBase], threadBestBits);
+#endif
+    GroupMemoryBarrierWithGroupSync();
+
+    uint winner = 0xffffffffu;
+    if (threadBestBits > thrBits && threadBestBits == stg[_stgBase])
+        winner = threadBestSlot;
+
+#if PPG == 1
+    uint waveWinner = WaveActiveMin(winner);
+    if (WaveIsFirstLane() && waveWinner != 0xffffffffu)
+        InterlockedMin(stg[_stgBase+1], waveWinner);
+#else
+    if (winner != 0xffffffffu) InterlockedMin(stg[_stgBase+1], winner);
+#endif
+    GroupMemoryBarrierWithGroupSync();
+
+    if (threadBestSlot == stg[_stgBase+1] && threadBestSlot != 0xffffffffu) {
+        peakIdx[pair] = int(slotToIndex(threadBestSlot));
+        peakVal[pair] = threadBestVal;
+    }
+    if (tid == 0 && stg[_stgBase+1] == 0xffffffffu) {
+        peakIdx[pair] = -1;
+        peakVal[pair] = float2(0, 0);
+    }
+#else
 #if COARSE16
     // ONE BIN by construction on the coarse gate: cidx/cval are sized
     // `pairs`, so the coarse stage reports one value per pair and never a
@@ -772,6 +825,7 @@ void filterPair(uint pair, uint tid,
             }
         }
     }
+#endif
 #endif
 }
 

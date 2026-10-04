@@ -194,7 +194,7 @@ def main():
                                    cap=PORTABLE_CAP, suffix="_lds32")
             info["refine"]["portable"] = dict(file=rsmall.name, lds_bytes=lds_bytes(n, PORTABLE_CAP))
 
-        if n >= 16384:
+        if n >= 4096:
             for entry, target in (("fusedTierB", info), ("refineListed", info["refine"])):
                 one = compile_tierb(slangc, nvrtc, env, n, OUT, entry, suffix="_onebin", single_bin=1)
                 target["one_bin"] = dict(file=one.name)
