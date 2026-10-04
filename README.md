@@ -123,8 +123,8 @@ fraction of pairs requiring refinement.
 
 ![CPU and GPU matched-filter measurements at 4096 points](docs/assets/teaser.svg)
 
-Measured on a Ryzen AI MAX+ 395 / Radeon 8060S: 16 data segments ×
-512 templates, 4,096 points, with the bank drawn from the captured PyCBC
+Measured on a Ryzen AI MAX+ 395 / Radeon 8060S: 512 data segments ×
+512 templates (262,144 pairs), 4,096 points, with the bank drawn from the captured PyCBC
 reference profile. The bars move from a general inverse FFT to
 fused full output, peak-only output and hierarchical screening. FFTW and
 rocFFT time only the inverse transform, so they do less work than the filter

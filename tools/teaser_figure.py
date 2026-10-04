@@ -26,7 +26,7 @@ import matchedfilter as mf
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tests'))
 N = int(os.environ.get('MF_TEASER_N', '4096'))
-ND = int(os.environ.get('MF_TEASER_NDATA', '16'))
+ND = int(os.environ.get('MF_TEASER_NDATA', '512'))
 NT = int(os.environ.get('MF_TEASER_NTMPL', '512'))
 PAIRS = ND * NT
 BUDGETS = (1e-2, 1e-3, 1e-4)
@@ -429,8 +429,10 @@ def plot(report, out):
         for i, (row, value) in enumerate(zip(rows[:3], throughput[:3])):
             ax.bar(i, value, color=colors[i], width=.65, zorder=3)
             inside = (i == 2 and min(throughput[3:]) - value < max(throughput)*.18)
+            time_str = f"{row['ms']/1000:.2f} s" if row['ms'] >= 1000 else f"{row['ms']:.2f} ms"
+            rate_str = f"{value/1e6:.2f}M/s" if value >= 1e6 else (f"{value/1e3:.0f}k/s" if value >= 1e3 else f"{value:.0f}/s")
             ax.text(i, value*.5 if inside else value,
-                    f"{value/1e6:.2f}M/s\n{row['ms']:.2f} ms", ha='center',
+                    f"{rate_str}\n{time_str}", ha='center',
                     va='center' if inside else 'bottom', color=bg if inside else fg,
                     size=9 if inside else 10, linespacing=1.4)
         hierarchical = sorted(zip(rows[3:], throughput[3:], colors[3:]),
@@ -439,7 +441,9 @@ def plot(report, out):
             ax.bar(3.2, value, color=color, width=.8, zorder=3)
             ax.plot([2.64, 2.8], [value, value], color=color, lw=1, zorder=4)
             budget = {1e-2:'10⁻²', 1e-3:'10⁻³', 1e-4:'10⁻⁴'}[row['fd']]
-            ax.text(2.58, value, f"{budget}  {value/1e6:.2f}M/s · {row['ms']:.2f} ms",
+            time_str = f"{row['ms']/1000:.2f} s" if row['ms'] >= 1000 else f"{row['ms']:.2f} ms"
+            rate_str = f"{value/1e6:.2f}M/s" if value >= 1e6 else (f"{value/1e3:.0f}k/s" if value >= 1e3 else f"{value:.0f}/s")
+            ax.text(2.58, value, f"{budget}  {rate_str} · {time_str}",
                     ha='right', va='center', color=fg, size=9)
         ax.set_xlim(-.55, 3.95)
         ax.set_ylim(0, max(throughput)*1.27)
@@ -447,7 +451,7 @@ def plot(report, out):
                       color=fg, size=10)
         ax.tick_params(axis='x', length=0, pad=8)
         ax.tick_params(axis='y', colors=muted, labelsize=9)
-        ax.yaxis.set_major_formatter(FuncFormatter(lambda v, pos: f'{v/1e6:g}M'))
+        ax.yaxis.set_major_formatter(FuncFormatter(lambda v, pos: f'{v/1e6:g}M' if v >= 1e6 else (f'{v/1e3:g}k' if v > 0 else '0')))
         ax.yaxis.set_major_locator(MaxNLocator(4))
         ax.grid(axis='y', color='#243044', zorder=0)
         for spine in ax.spines.values(): spine.set_visible(False)
@@ -528,11 +532,14 @@ def main(argv=None):
     from datetime import date
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--out', default='docs/assets/teaser.svg')
+    ap.add_argument('--data', type=int, default=ND, help='number of data segments (default: %(default)s)')
+    ap.add_argument('--templates', type=int, default=NT, help='number of templates (default: %(default)s)')
     ap.add_argument('--compare', nargs=2, metavar='JSON', help='plot two existing teaser reports without benchmarking')
     args = ap.parse_args(argv)
     if args.compare:
         plot_comparison([json.loads(Path(p).read_text()) for p in args.compare], args.out)
         return 0
+    set_workload(nd=args.data, nt=args.templates)
     baseline, gpu_reference = ('MLX', mlx_ms) if sys.platform == 'darwin' else ('rocFFT', rocfft_ms)
     report = dict(n=N, data=ND, templates=NT, snr=5.5, date=date.today().isoformat(),
                   cpu=_cpu_name(), gpu=_gpu_name(), fftw_planning_limit_seconds=15,
