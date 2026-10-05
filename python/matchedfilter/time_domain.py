@@ -409,7 +409,7 @@ class TimeDomainFilterBank:
 
         D = 1
         nu_c = 0.40
-        scalloping_L = 0.08
+        scalloping_L = float(os.environ.get('PYCBC_RATIO_SCALLOPING', 0.03))
 
         ref_arr = None
         if reference is not None:
@@ -434,7 +434,7 @@ class TimeDomainFilterBank:
                             nu_c = D * (k_lo + k_hi) / (2.0 * n_ref)
                             r_auto = np.abs(np.fft.ifft(ref_arr))
                             if r_auto[0] > 0:
-                                scalloping_L = float(np.clip(1.0 - (r_auto[1] / r_auto[0]) + 0.03, 0.01, 0.20))
+                                scalloping_L = float(os.environ.get('PYCBC_RATIO_SCALLOPING', np.clip(1.0 - (r_auto[1] / r_auto[0]) + 0.02, 0.01, 0.10)))
                         else:
                             D = 1
                     else:
@@ -443,7 +443,7 @@ class TimeDomainFilterBank:
                     if self.data_sample_rate >= 2048.0:
                         D = 2
                         nu_c = 0.40
-                        scalloping_L = 0.08
+                        scalloping_L = float(os.environ.get('PYCBC_RATIO_SCALLOPING', 0.03))
                     else:
                         D = 1
             else:
@@ -505,6 +505,13 @@ class TimeDomainFilterBank:
         self.n_templates = n_templates
         self.tap_counts = tap_counts
         self._taps_list = taps_list
+        if self._raw_taps is None:
+            max_c = int(np.max(self.tap_counts)) if len(self.tap_counts) > 0 else 0
+            raw_mat = np.zeros((self.n_templates, max_c), dtype=np.float32)
+            for i in range(self.n_templates):
+                c = int(self.tap_counts[i])
+                raw_mat[i, :c] = self._taps_list[i][:c]
+            self._raw_taps = raw_mat
 
 
         # Multi-rate scaling: ratio of tap sample rate to engine sample rate
@@ -632,10 +639,11 @@ class TimeDomainFilterBank:
                 band_bins = None
                 if self.coarse_band_hz is not None and self.coarse_band_hz > 0:
                     delta_f = self._engine_rate / chosen_N
-                    band_bins = int(round(self.coarse_band_hz / delta_f))
-                elif self._engine_rate <= 1024.0 or self.analytic:
-                    delta_f = self._engine_rate / chosen_N
-                    band_bins = min(chosen_N // 2, max(64, int(round(256.0 / delta_f))))
+                    raw_b = int(round(self.coarse_band_hz / delta_f))
+                    b_pow2 = 1 << int(np.ceil(np.log2(max(64, raw_b))))
+                    band_bins = min(b_pow2, chosen_N // 2)
+                elif self._data_decimation_stride > 1:
+                    band_bins = chosen_N // 2
                 plan = HierarchicalFilter(
                     chosen_N, ndata=1, ntemplates=T,
                     snr=self.threshold, fd=self.false_dismissal,
@@ -859,7 +867,9 @@ class TimeDomainFilterBank:
 
         eff_threshold = self.threshold if threshold is None else float(threshold)
         if decim_stride > 1:
-            scalloping_L = getattr(self, '_scalloping_L', 0.05)
+            scalloping_L = getattr(self, '_scalloping_L', 0.03)
+            if 'PYCBC_RATIO_SCALLOPING' in os.environ:
+                scalloping_L = float(os.environ['PYCBC_RATIO_SCALLOPING'])
             refine_thr = eff_threshold * (1.0 - scalloping_L)
         else:
             refine_thr = eff_threshold
@@ -1019,73 +1029,134 @@ class TimeDomainFilterBank:
             all_block_lens = np.concatenate(out_block_lens).astype(np.int64) if len(out_block_lens) > 1 else out_block_lens[0].astype(np.int64, copy=False)
 
             if decim_stride > 1:
-                n_trigs = len(all_samp)
-                out_samp_final = np.empty(n_trigs, dtype=np.int64)
-                out_snr_final = np.empty(n_trigs, dtype=np.complex64)
-                keep_mask = np.ones(n_trigs, dtype=bool)
+                if eff_threshold <= 0.0:
+                    return FilterResults(
+                        template_indices=all_tmpl,
+                        sample_indices=all_samp * decim_stride,
+                        snr=all_snr,
+                        block_starts=all_tstarts * decim_stride,
+                        block_lengths=all_block_lens * decim_stride,
+                    )
 
-                is_analytic_obj = isinstance(series, AnalyticSeries)
-                full_series = series if not is_analytic_obj else None
-                S_in = series.input_size if is_analytic_obj else len(series)
+                has_c_refine = (
+                    _core is not None
+                    and hasattr(_core, 'refine_peaks_decim')
+                    and self._raw_taps is not None
+                )
 
-                for idx in range(n_trigs):
-                    tmpl_id = int(all_tmpl[idx])
-                    m = int(all_samp[idx])
-                    k_even = m * decim_stride
-                    z_even = all_snr[idx]
-                    mag_even = abs(z_even)
+                if has_c_refine:
+                    if isinstance(series, AnalyticSeries):
+                        full_series = np.ascontiguousarray(series.window(), dtype=np.complex64)
+                    else:
+                        full_series = np.ascontiguousarray(series, dtype=np.complex64)
 
-                    taps = self._taps_list[tmpl_id] if (self._taps_list is not None and tmpl_id < len(self._taps_list)) else None
-                    if taps is not None:
-                        cnt = len(taps)
-                        half = cnt // 2
-                        k_m1 = k_even - 1
-                        k_p1 = k_even + 1
+                    raw_taps = np.ascontiguousarray(self._raw_taps, dtype=np.float32)
+                    t_counts = np.ascontiguousarray(self.tap_counts, dtype=np.int64)
+                    in_tmpl = np.ascontiguousarray(all_tmpl, dtype=np.int64)
+                    in_samp = np.ascontiguousarray(all_samp, dtype=np.int64)
+                    in_snr = np.ascontiguousarray(all_snr, dtype=np.complex64)
 
-                        if is_analytic_obj:
-                            w_start = min(k_m1 - half, k_even - half)
-                            w_stop = max(k_p1 - half + cnt, k_even - half + cnt)
-                            win = series.window(w_start, w_stop)
-                            s_m1_rel = k_m1 - half - w_start
-                            s_p1_rel = k_p1 - half - w_start
-                            s_0_rel = k_even - half - w_start
-                            z_m1 = np.dot(win[s_m1_rel : s_m1_rel + cnt], taps) if s_m1_rel >= 0 and s_m1_rel + cnt <= len(win) else 0.0
-                            z_p1 = np.dot(win[s_p1_rel : s_p1_rel + cnt], taps) if s_p1_rel >= 0 and s_p1_rel + cnt <= len(win) else 0.0
-                            z_0 = np.dot(win[s_0_rel : s_0_rel + cnt], taps) if s_0_rel >= 0 and s_0_rel + cnt <= len(win) else z_even
-                        else:
-                            s_m1 = k_m1 - half
-                            s_p1 = k_p1 - half
-                            s_0 = k_even - half
-                            z_m1 = np.dot(full_series[s_m1 : s_m1 + cnt], taps) if s_m1 >= 0 and s_m1 + cnt <= S_in else 0.0
-                            z_p1 = np.dot(full_series[s_p1 : s_p1 + cnt], taps) if s_p1 >= 0 and s_p1 + cnt <= S_in else 0.0
-                            z_0 = np.dot(full_series[s_0 : s_0 + cnt], taps) if s_0 >= 0 and s_0 + cnt <= S_in else z_even
+                    n_cand = len(in_tmpl)
+                    out_tmpl = np.empty(n_cand, dtype=np.int64)
+                    out_samp = np.empty(n_cand, dtype=np.int64)
+                    out_snr = np.empty(n_cand, dtype=np.complex64)
+                    out_surv = np.empty(n_cand, dtype=np.int64)
 
-                        mag_m1 = abs(z_m1)
-                        mag_p1 = abs(z_p1)
-                        mag_0 = abs(z_0)
+                    out_count = _core.refine_peaks_decim(
+                        full_series, raw_taps, t_counts,
+                        in_tmpl, in_samp, in_snr,
+                        float(eff_threshold), float(scalloping_L), int(decim_stride),
+                        out_tmpl, out_samp, out_snr, out_surv
+                    )
 
-                        if mag_p1 > mag_0 and mag_p1 >= mag_m1:
-                            best_k = k_p1
-                            best_z = z_p1
-                            best_mag = mag_p1
-                        elif mag_m1 > mag_0 and mag_m1 > mag_p1:
-                            best_k = k_m1
-                            best_z = z_m1
-                            best_mag = mag_m1
+                    if out_count > 0:
+                        surv = out_surv[:out_count]
+                        return FilterResults(
+                            template_indices=out_tmpl[:out_count],
+                            sample_indices=out_samp[:out_count],
+                            snr=out_snr[:out_count],
+                            block_starts=all_tstarts[surv] * decim_stride,
+                            block_lengths=all_block_lens[surv] * decim_stride,
+                        )
+                    else:
+                        return FilterResults(
+                            template_indices=np.empty(0, dtype=np.int64),
+                            sample_indices=np.empty(0, dtype=np.int64),
+                            snr=np.empty(0, dtype=np.complex64),
+                            block_starts=np.empty(0, dtype=np.int64),
+                            block_lengths=np.empty(0, dtype=np.int64),
+                        )
+                else:
+                    n_trigs = len(all_samp)
+                    out_samp_final = np.empty(n_trigs, dtype=np.int64)
+                    out_snr_final = np.empty(n_trigs, dtype=np.complex64)
+                    keep_mask = np.ones(n_trigs, dtype=bool)
+                    is_analytic_obj = isinstance(series, AnalyticSeries)
+                    full_series = series if not is_analytic_obj else None
+                    S_in = series.input_size if is_analytic_obj else len(series)
+
+                    for idx in range(n_trigs):
+                        tmpl_id = int(all_tmpl[idx])
+                        m = int(all_samp[idx])
+                        k_even = m * decim_stride
+                        z_even = all_snr[idx]
+                        mag_even = abs(z_even)
+
+                        if mag_even < refine_thr:
+                            keep_mask[idx] = False
+                            continue
+
+                        taps = self._taps_list[tmpl_id] if (self._taps_list is not None and tmpl_id < len(self._taps_list)) else None
+                        if taps is not None:
+                            cnt = len(taps)
+                            half = cnt // 2
+                            k_m1 = k_even - 1
+                            k_p1 = k_even + 1
+
+                            if is_analytic_obj:
+                                w_start = min(k_m1 - half, k_even - half)
+                                w_stop = max(k_p1 - half + cnt, k_even - half + cnt)
+                                win = series.window(w_start, w_stop)
+                                s_m1_rel = k_m1 - half - w_start
+                                s_p1_rel = k_p1 - half - w_start
+                                s_0_rel = k_even - half - w_start
+                                z_m1 = np.dot(win[s_m1_rel : s_m1_rel + cnt], taps) if s_m1_rel >= 0 and s_m1_rel + cnt <= len(win) else 0.0
+                                z_p1 = np.dot(win[s_p1_rel : s_p1_rel + cnt], taps) if s_p1_rel >= 0 and s_p1_rel + cnt <= len(win) else 0.0
+                                z_0 = np.dot(win[s_0_rel : s_0_rel + cnt], taps) if s_0_rel >= 0 and s_0_rel + cnt <= len(win) else z_even
+                            else:
+                                s_m1 = k_m1 - half
+                                s_p1 = k_p1 - half
+                                s_0 = k_even - half
+                                z_m1 = np.dot(full_series[s_m1 : s_m1 + cnt], taps) if s_m1 >= 0 and s_m1 + cnt <= S_in else 0.0
+                                z_p1 = np.dot(full_series[s_p1 : s_p1 + cnt], taps) if s_p1 >= 0 and s_p1 + cnt <= S_in else 0.0
+                                z_0 = np.dot(full_series[s_0 : s_0 + cnt], taps) if s_0 >= 0 and s_0 + cnt <= S_in else z_even
+
+                            mag_m1 = abs(z_m1)
+                            mag_p1 = abs(z_p1)
+                            mag_0 = abs(z_0)
+
+                            if mag_p1 > mag_0 and mag_p1 >= mag_m1:
+                                best_k = k_p1
+                                best_z = z_p1
+                                best_mag = mag_p1
+                            elif mag_m1 > mag_0 and mag_m1 > mag_p1:
+                                best_k = k_m1
+                                best_z = z_m1
+                                best_mag = mag_m1
+                            else:
+                                best_k = k_even
+                                best_z = z_0
+                                best_mag = mag_0
                         else:
                             best_k = k_even
-                            best_z = z_0
-                            best_mag = mag_0
-                    else:
-                        best_k = k_even
-                        best_z = z_even
-                        best_mag = mag_even
+                            best_z = z_even
+                            best_mag = mag_even
 
-                    if best_mag >= eff_threshold:
-                        out_samp_final[idx] = best_k
-                        out_snr_final[idx] = best_z
-                    else:
-                        keep_mask[idx] = False
+                        if best_mag >= eff_threshold:
+                            out_samp_final[idx] = best_k
+                            out_snr_final[idx] = best_z
+                        else:
+                            keep_mask[idx] = False
 
                 if not np.all(keep_mask):
                     all_tmpl = all_tmpl[keep_mask]
