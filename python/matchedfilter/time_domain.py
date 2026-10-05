@@ -409,7 +409,7 @@ class TimeDomainFilterBank:
 
         D = 1
         nu_c = 0.40
-        scalloping_L = float(os.environ.get('PYCBC_RATIO_SCALLOPING', 0.03))
+        scalloping_L = float(os.environ.get('PYCBC_RATIO_SCALLOPING', 0.08))
 
         ref_arr = None
         if reference is not None:
@@ -443,7 +443,7 @@ class TimeDomainFilterBank:
                     if self.data_sample_rate >= 2048.0:
                         D = 2
                         nu_c = 0.40
-                        scalloping_L = float(os.environ.get('PYCBC_RATIO_SCALLOPING', 0.03))
+                        scalloping_L = float(os.environ.get('PYCBC_RATIO_SCALLOPING', 0.08))
                     else:
                         D = 1
             else:
@@ -867,7 +867,7 @@ class TimeDomainFilterBank:
 
         eff_threshold = self.threshold if threshold is None else float(threshold)
         if decim_stride > 1:
-            scalloping_L = getattr(self, '_scalloping_L', 0.03)
+            scalloping_L = getattr(self, '_scalloping_L', 0.08)
             if 'PYCBC_RATIO_SCALLOPING' in os.environ:
                 scalloping_L = float(os.environ['PYCBC_RATIO_SCALLOPING'])
             refine_thr = eff_threshold * (1.0 - scalloping_L)
