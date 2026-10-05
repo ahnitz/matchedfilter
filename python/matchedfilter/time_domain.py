@@ -440,7 +440,12 @@ class TimeDomainFilterBank:
                     else:
                         D = 1
                 else:
-                    D = 1
+                    if self.data_sample_rate >= 2048.0:
+                        D = 2
+                        nu_c = 0.40
+                        scalloping_L = 0.08
+                    else:
+                        D = 1
             else:
                 try:
                     val = float(chosen_decim)
@@ -1043,29 +1048,34 @@ class TimeDomainFilterBank:
                             win = series.window(w_start, w_stop)
                             s_m1_rel = k_m1 - half - w_start
                             s_p1_rel = k_p1 - half - w_start
+                            s_0_rel = k_even - half - w_start
                             z_m1 = np.dot(win[s_m1_rel : s_m1_rel + cnt], taps) if s_m1_rel >= 0 and s_m1_rel + cnt <= len(win) else 0.0
                             z_p1 = np.dot(win[s_p1_rel : s_p1_rel + cnt], taps) if s_p1_rel >= 0 and s_p1_rel + cnt <= len(win) else 0.0
+                            z_0 = np.dot(win[s_0_rel : s_0_rel + cnt], taps) if s_0_rel >= 0 and s_0_rel + cnt <= len(win) else z_even
                         else:
                             s_m1 = k_m1 - half
                             s_p1 = k_p1 - half
+                            s_0 = k_even - half
                             z_m1 = np.dot(full_series[s_m1 : s_m1 + cnt], taps) if s_m1 >= 0 and s_m1 + cnt <= S_in else 0.0
                             z_p1 = np.dot(full_series[s_p1 : s_p1 + cnt], taps) if s_p1 >= 0 and s_p1 + cnt <= S_in else 0.0
+                            z_0 = np.dot(full_series[s_0 : s_0 + cnt], taps) if s_0 >= 0 and s_0 + cnt <= S_in else z_even
 
                         mag_m1 = abs(z_m1)
                         mag_p1 = abs(z_p1)
+                        mag_0 = abs(z_0)
 
-                        if mag_p1 > mag_even and mag_p1 >= mag_m1:
+                        if mag_p1 > mag_0 and mag_p1 >= mag_m1:
                             best_k = k_p1
                             best_z = z_p1
                             best_mag = mag_p1
-                        elif mag_m1 > mag_even and mag_m1 > mag_p1:
+                        elif mag_m1 > mag_0 and mag_m1 > mag_p1:
                             best_k = k_m1
                             best_z = z_m1
                             best_mag = mag_m1
                         else:
                             best_k = k_even
-                            best_z = z_even
-                            best_mag = mag_even
+                            best_z = z_0
+                            best_mag = mag_0
                     else:
                         best_k = k_even
                         best_z = z_even
