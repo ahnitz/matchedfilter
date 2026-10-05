@@ -308,7 +308,7 @@ _REF_BINNED_CACHE: Dict[Tuple[int, int, float], np.ndarray] = {}
 class _TemplateGroup:
     """Internal container for a homogeneous batch of templates sharing an FFT size."""
 
-    def __init__(self, plan, n, template_indices, c_bad, n_valid, spectra, orig_taps_max, device=None):
+    def __init__(self, plan, n, template_indices, c_bad, n_valid, spectra, orig_taps_max, device=None, is_dif=False, k=0, twiddles=None, spectra_active=None):
         self.plan = plan
         self.n = int(n)
         self.template_indices = np.asarray(template_indices, dtype=np.int64)
@@ -321,6 +321,11 @@ class _TemplateGroup:
         self._cached_layout: Optional[Tuple[Tuple[int, int, int], np.ndarray, np.ndarray, np.ndarray]] = None
         self._flat_plan: Optional[Any] = None
         self._corr_plan: Optional[Any] = None
+        self.is_dif = bool(is_dif)
+        self.bandlimited = bool(is_dif)
+        self.k = int(k)
+        self.twiddles = twiddles
+        self.spectra_active = spectra_active
 
     def get_flat_plan(self):
         from . import MatchedFilter, HierarchicalFilter
@@ -380,6 +385,7 @@ class TimeDomainFilterBank:
         analytic: bool = False,
         execution_rate: Optional[Union[float, str]] = None,
         decimation: Optional[Union[int, str]] = None,
+        bandlimited: Optional[bool] = None,
     ):
         from . import MatchedFilter, HierarchicalFilter
 
@@ -395,7 +401,9 @@ class TimeDomainFilterBank:
 
         mode = {'pycbc': 'flat', 'matchedfilter': 'flat',
                 'matchedfilter-hierarchical': 'hier',
-                'correlation': 'corr', 'corr': 'corr'}.get(engine, engine).lower()
+                'correlation': 'corr', 'corr': 'corr',
+                'dif': 'dif', 'bandlimited': 'dif',
+                'matchedfilter-dif': 'dif'}.get(engine, engine).lower()
         self.engine = mode
 
         # Determine decimation factor D
@@ -406,6 +414,20 @@ class TimeDomainFilterBank:
             chosen_decim = os.environ.get('PYCBC_RATIO_DECIMATION')
         if chosen_decim is None:
             chosen_decim = os.environ.get('PYCBC_RATIO_EXECUTION_RATE')
+
+        if bandlimited is not None:
+            is_bandlimited = bool(bandlimited)
+        else:
+            is_bandlimited = (
+                self.engine in ('dif', 'bandlimited', 'matchedfilter-dif')
+                or str(chosen_decim).strip().lower() in ('dif', 'bandlimited')
+                or os.environ.get('PYCBC_RATIO_BANDLIMITED', '0').strip().lower() in ('1', 'true', 'yes')
+                or os.environ.get('PYCBC_RATIO_DIF', '0').strip().lower() in ('1', 'true', 'yes')
+            )
+        if is_bandlimited and self.engine in ('dif', 'bandlimited', 'matchedfilter-dif'):
+            self.engine = 'flat'
+        self.is_dif = is_bandlimited
+        self.bandlimited = is_bandlimited
 
         D = 1
         nu_c = 0.40
@@ -440,12 +462,7 @@ class TimeDomainFilterBank:
                     else:
                         D = 1
                 else:
-                    if self.data_sample_rate >= 2048.0:
-                        D = 2
-                        nu_c = 0.40
-                        scalloping_L = float(os.environ.get('PYCBC_RATIO_SCALLOPING', 0.08))
-                    else:
-                        D = 1
+                    D = 1
             else:
                 try:
                     val = float(chosen_decim)
@@ -611,10 +628,13 @@ class TimeDomainFilterBank:
 
                         spec = np.fft.fft(buf).astype(np.complex64)
                         if N_taps > chosen_N:
-                            spec_data = np.zeros(chosen_N, dtype=np.complex64)
-                            spec_data[:chosen_N // 2 + 1] = spec[:chosen_N // 2 + 1]
-                            neg_count = chosen_N - (chosen_N // 2 + 1)
-                            spec_data[chosen_N // 2 + 1:] = spec[N_taps - neg_count:]
+                            if self.engine == 'corr' or self.analytic or self.is_dif:
+                                spec_data = spec[:chosen_N]
+                            else:
+                                spec_data = np.zeros(chosen_N, dtype=np.complex64)
+                                spec_data[:chosen_N // 2 + 1] = spec[:chosen_N // 2 + 1]
+                                neg_count = chosen_N - (chosen_N // 2 + 1)
+                                spec_data[chosen_N // 2 + 1:] = spec[N_taps - neg_count:]
                         elif N_taps < chosen_N:
                             spec_data = np.zeros(chosen_N, dtype=np.complex64)
                             half_taps = N_taps // 2
@@ -628,13 +648,47 @@ class TimeDomainFilterBank:
                         self._filters_f_list[g_idx] = np.conj(spec_data)
                         self._block_lengths_arr[g_idx] = chosen_N
 
-            # Create matchedfilter plan
-            if self.engine == 'corr':
+            if self.is_dif or self.bandlimited:
+                chosen_K = chosen_N // 2
+                spec_active = np.ascontiguousarray(spectra[:, :chosen_K])
+                twiddles = np.exp(2j * np.pi * np.arange(chosen_K, dtype=np.float64) / chosen_N).astype(np.complex64)
+                plan = MatchedFilter(
+                    chosen_N, ndata=2, ntemplates=T,
+                    device=self.device
+                )
+                plan.set_templates(spec_active)
+                grp = _TemplateGroup(
+                    plan=plan,
+                    n=chosen_N,
+                    template_indices=tmpl_indices,
+                    c_bad=c_bad,
+                    n_valid=n_valid,
+                    spectra=spectra,
+                    orig_taps_max=orig_taps_max,
+                    device=self.device,
+                    is_dif=True,
+                    k=chosen_K,
+                    twiddles=twiddles,
+                    spectra_active=spec_active,
+                )
+                grp.templates_loaded = True
+            elif self.engine == 'corr':
                 from . import CorrelationFilter
                 plan = CorrelationFilter(
                     chosen_N, ndata=1, ntemplates=T,
                     device=self.device, valid=(c_bad, chosen_N - c_bad)
                 )
+                grp = _TemplateGroup(
+                    plan=plan,
+                    n=chosen_N,
+                    template_indices=tmpl_indices,
+                    c_bad=c_bad,
+                    n_valid=n_valid,
+                    spectra=spectra,
+                    orig_taps_max=orig_taps_max,
+                    device=self.device,
+                )
+                grp.templates_loaded = False
             elif self.engine == 'hier':
                 band_bins = None
                 if self.coarse_band_hz is not None and self.coarse_band_hz > 0:
@@ -651,23 +705,35 @@ class TimeDomainFilterBank:
                 )
                 if self.first_stage_snr > 0:
                     plan.set_first_stage(self.first_stage_snr)
+                grp = _TemplateGroup(
+                    plan=plan,
+                    n=chosen_N,
+                    template_indices=tmpl_indices,
+                    c_bad=c_bad,
+                    n_valid=n_valid,
+                    spectra=spectra,
+                    orig_taps_max=orig_taps_max,
+                    device=self.device,
+                )
+                grp.templates_loaded = False
             else:
                 plan = MatchedFilter(
                     chosen_N, ndata=1, ntemplates=T,
                     device=self.device
                 )
-            grp = _TemplateGroup(
-                plan=plan,
-                n=chosen_N,
-                template_indices=tmpl_indices,
-                c_bad=c_bad,
-                n_valid=n_valid,
-                spectra=spectra,
-                orig_taps_max=orig_taps_max,
-                device=self.device,
-            )
-            grp.templates_loaded = False
-            if self.engine != 'hier':
+                grp = _TemplateGroup(
+                    plan=plan,
+                    n=chosen_N,
+                    template_indices=tmpl_indices,
+                    c_bad=c_bad,
+                    n_valid=n_valid,
+                    spectra=spectra,
+                    orig_taps_max=orig_taps_max,
+                    device=self.device,
+                )
+                grp.templates_loaded = False
+
+            if not grp.templates_loaded and self.engine != 'hier':
                 plan.set_templates(spectra)
                 grp.templates_loaded = True
                 if self.engine == 'corr':
@@ -963,23 +1029,32 @@ class TimeDomainFilterBank:
                 bs = max(1, int(round(binsize / decim_stride)))
             else:
                 bs = N if binsize is None else int(binsize)
-            if bs >= N:
-                bs = N
-                groups_bins = [(bstarts, bws, bwe)]
+
+            is_bandlimited = getattr(g, 'bandlimited', False) or getattr(g, 'is_dif', False) or getattr(active_plan, '_bandlimited', False)
+            is_decim = is_bandlimited and ((decim_stride > 1) or (self.data_sample_rate < self.tap_sample_rate))
+
+            if is_bandlimited and not is_decim:
+                K = getattr(g, 'k', N // 2)
+                bs_k = K if bs >= N else max(1, int(bs // 2))
+                wk_s_arr = bws // 2
+                wk_e_arr = np.minimum(K, (bwe + 1) // 2)
+                bin_counts = ((wk_e_arr - wk_s_arr + bs_k - 1) // bs_k).astype(np.int64)
             else:
                 bin_counts = ((bwe - bws + bs - 1) // bs).astype(np.int64)
-                if len(bstarts) <= 1 or np.all(bin_counts == bin_counts[0]):
-                    groups_bins = [(bstarts, bws, bwe)]
-                else:
-                    groups_bins = []
-                    for u_cnt in np.unique(bin_counts):
-                        mask = (bin_counts == u_cnt)
-                        groups_bins.append((bstarts[mask], bws[mask], bwe[mask]))
+
+            if len(bstarts) <= 1 or np.all(bin_counts == bin_counts[0]):
+                groups_bins = [(bstarts, bws, bwe)]
+            else:
+                groups_bins = []
+                for u_cnt in np.unique(bin_counts):
+                    mask = (bin_counts == u_cnt)
+                    groups_bins.append((bstarts[mask], bws[mask], bwe[mask]))
 
             for sub_starts, sub_bws, sub_bwe in groups_bins:
                 aidx, aval = active_plan.run_series(
                     data_in, sub_starts, sub_bws, sub_bwe, binsize=bs,
-                    threshold=refine_thr, templates=tmpl_arg, raw=True
+                    threshold=refine_thr, templates=tmpl_arg, raw=True,
+                    decimated=is_decim if is_bandlimited else None
                 )
 
                 # aidx has shape (nblocks, ntemplates, nbins)

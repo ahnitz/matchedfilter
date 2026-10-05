@@ -88,6 +88,48 @@ static int series_shape(Py_ssize_t n,int maxt,int t0,int nt,Py_ssize_t binsize,
   }
   *nb=first; *rows=(Py_ssize_t)*blocks*nt; return 1;
 }
+static int series_shape_dif(Py_ssize_t n,int maxt,int t0,int nt,Py_ssize_t binsize,
+                            int decimated,
+                            Py_buffer *ser,Py_buffer *st,Py_buffer *ws,Py_buffer *we,
+                            int *blocks,size_t *nb,Py_ssize_t *rows){
+  const Py_ssize_t unit=(Py_ssize_t)sizeof(size_t);
+  if(ser->len%8 || st->len<unit || st->len%unit || st->len/unit>INT_MAX
+     || ws->len!=st->len || we->len!=st->len){
+    PyErr_SetString(PyExc_ValueError,"invalid series or block-layout buffer lengths"); return 0;
+  }
+  if(t0<0 || nt<1 || nt>maxt || t0>maxt-nt || binsize<1){
+    PyErr_SetString(PyExc_ValueError,"invalid template subrange or binsize"); return 0;
+  }
+  *blocks=(int)(st->len/unit);
+  const size_t *starts=st->buf,*lo=ws->buf,*hi=we->buf;
+  const size_t N = decimated ? (size_t)n : (size_t)(2 * n);
+  const size_t bs_k = decimated
+    ? ((size_t)binsize >= N ? (size_t)n : ((size_t)binsize > 0 ? (size_t)binsize : 1))
+    : ((size_t)binsize >= N ? (size_t)n : ((size_t)binsize / 2 > 0 ? (size_t)binsize / 2 : 1));
+  size_t first=0;
+  for(int i=0;i<*blocks;i++){
+    if(starts[i]>SIZE_MAX-N || lo[i]>(size_t)PY_SSIZE_T_MAX
+       || hi[i]>(size_t)PY_SSIZE_T_MAX || lo[i]>=hi[i] || lo[i]>=N){
+      PyErr_SetString(PyExc_ValueError,"block offset or window overflows / invalid"); return 0;
+    }
+    size_t w_end = hi[i] > N ? N : hi[i];
+    size_t wk_s = decimated ? lo[i] : lo[i] / 2;
+    size_t wk_e = decimated ? w_end : (w_end + 1) / 2;
+    if(wk_e > (size_t)n) wk_e = (size_t)n;
+    if(wk_s >= wk_e){
+      PyErr_SetString(PyExc_ValueError,"invalid reduced search window in DIF"); return 0;
+    }
+    size_t bins = (wk_e - wk_s + bs_k - 1) / bs_k;
+    if(i && bins!=first){
+      PyErr_SetString(PyExc_ValueError,"block windows must have equal bin counts"); return 0;
+    }
+    first=bins;
+  }
+  if((Py_ssize_t)*blocks>PY_SSIZE_T_MAX/nt){
+    PyErr_SetString(PyExc_ValueError,"pair count overflows"); return 0;
+  }
+  *nb=first; *rows=(Py_ssize_t)*blocks*nt; return 1;
+}
 static ap_peak *reserve_peaks(ap_peak **storage,Py_ssize_t *capacity,Py_ssize_t need){
   if(need>*capacity){
     ap_peak *next=PyMem_Realloc(*storage,(size_t)need*sizeof(ap_peak));
@@ -341,6 +383,69 @@ static PyObject *MF_run_series(MFObject *self,PyObject *args){
   if(tot<0){ PyErr_SetString(PyExc_RuntimeError,"matchedfilter: run_series failed"); return NULL; }
   return PyLong_FromLong(tot);
 }
+/* run_series_dif(series, starts, wstart, wend, t0, nt, binsize, thr, idx,val,mag,cnt [, peaks, decimated]) */
+static PyObject *MF_run_series_dif(MFObject *self,PyObject *args){
+  Py_buffer bs,bst,bws,bwe,bidx,bval,bmag,bcnt,bpk = {0};
+  int t0,nt; Py_ssize_t binsize; double thr; int decimated = 0;
+  PyObject *pk_arg = NULL;
+  if(!PyArg_ParseTuple(args,"y*y*y*y*iindw*w*w*w*|Oi",&bs,&bst,&bws,&bwe,
+                       &t0,&nt,&binsize,&thr,&bidx,&bval,&bmag,&bcnt,&pk_arg,&decimated)) return NULL;
+  if(pk_arg && pk_arg != Py_None){
+    if(PyObject_GetBuffer(pk_arg,&bpk,PyBUF_WRITABLE)<0){
+      PyBuffer_Release(&bs);PyBuffer_Release(&bst);PyBuffer_Release(&bws);
+      PyBuffer_Release(&bwe);PyBuffer_Release(&bidx);PyBuffer_Release(&bval);
+      PyBuffer_Release(&bmag);PyBuffer_Release(&bcnt);
+      return NULL;
+    }
+  }
+  int nblocks; size_t nb;
+  Py_ssize_t rows,need;
+  if(!series_shape_dif(self->n,self->nt,t0,nt,binsize,decimated,&bs,&bst,&bws,&bwe,
+                       &nblocks,&nb,&rows)
+     || !output_shape(rows,nb,&bidx,&bval,&bmag,&bcnt,&bpk,&need)){
+    PyBuffer_Release(&bs);PyBuffer_Release(&bst);PyBuffer_Release(&bws);
+    PyBuffer_Release(&bwe);PyBuffer_Release(&bidx);PyBuffer_Release(&bval);
+    PyBuffer_Release(&bmag);PyBuffer_Release(&bcnt);
+    if(bpk.buf) PyBuffer_Release(&bpk);
+    return NULL;
+  }
+  size_t nseries=(size_t)(bs.len/8);
+  ap_peak *pk=reserve_peaks(&self->peaks,&self->peak_capacity,need);
+  if(!pk){ PyBuffer_Release(&bs);PyBuffer_Release(&bst);PyBuffer_Release(&bws);
+           PyBuffer_Release(&bwe);PyBuffer_Release(&bidx);PyBuffer_Release(&bval);
+           PyBuffer_Release(&bmag);PyBuffer_Release(&bcnt);
+           if(bpk.buf) PyBuffer_Release(&bpk);
+           return NULL; }
+  int tot;
+  Py_BEGIN_ALLOW_THREADS
+  tot=ap_mf_run_series_dif(self->p,(const float*)bs.buf,nseries,
+                           (const size_t*)bst.buf,(const size_t*)bws.buf,
+                           (const size_t*)bwe.buf,nblocks,t0,nt,(size_t)binsize,
+                           (float)thr,decimated,pk,(int*)bcnt.buf);
+  Py_END_ALLOW_THREADS
+  if(tot>=0){
+    if(bpk.buf && bpk.len>=need*(Py_ssize_t)sizeof(ap_structured_peak)){
+      ap_structured_peak *s=(ap_structured_peak*)bpk.buf;
+      for(Py_ssize_t a=0;a<need;a++){
+        s[a].index=(int64_t)pk[a].index;
+        s[a].re=pk[a].re;
+        s[a].im=pk[a].im;
+      }
+    }
+    if(bidx.buf && bidx.len>=need*8 && bval.buf && bval.len>=need*8){
+      long long *ix=(long long*)bidx.buf; float *vl=(float*)bval.buf,*mg=bmag.len ? (float*)bmag.buf : NULL;
+      for(Py_ssize_t a=0;a<need;a++){
+        ix[a]=(long long)pk[a].index; vl[2*a]=pk[a].re; vl[2*a+1]=pk[a].im; if(mg) mg[a]=pk[a].magnitude;
+      }
+    }
+  }
+  PyBuffer_Release(&bs);PyBuffer_Release(&bst);PyBuffer_Release(&bws);
+  PyBuffer_Release(&bwe);PyBuffer_Release(&bidx);PyBuffer_Release(&bval);
+  PyBuffer_Release(&bmag);PyBuffer_Release(&bcnt);
+  if(bpk.buf) PyBuffer_Release(&bpk);
+  if(tot<0){ PyErr_SetString(PyExc_RuntimeError,"matchedfilter: run_series_dif failed"); return NULL; }
+  return PyLong_FromLong(tot);
+}
 static PyObject *MF_nbins(MFObject *self,PyObject *args){
   Py_ssize_t bs,st,en;
   if(!PyArg_ParseTuple(args,"nnn",&bs,&st,&en)) return NULL;
@@ -357,6 +462,7 @@ static PyMethodDef MF_methods[]={
   {"correlate_series_continuous",(PyCFunction)MF_correlate_series_continuous,METH_VARARGS,
    "correlate_series_continuous(...) -> continuous valid correlation"},
   {"run_series",(PyCFunction)MF_run_series,METH_VARARGS,"run_series(...)"},
+  {"run_series_dif",(PyCFunction)MF_run_series_dif,METH_VARARGS,"run_series_dif(...)"},
   {"nbins",(PyCFunction)MF_nbins,METH_VARARGS,"nbins(binsize, start, end)"},
   {NULL}
 };
