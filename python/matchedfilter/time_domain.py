@@ -495,13 +495,21 @@ class TimeDomainFilterBank:
 
         # Parse inputs
         self._raw_taps = None
+        is_complex = (
+            (isinstance(taps, np.ndarray) and np.iscomplexobj(taps))
+            or (isinstance(taps, (list, tuple)) and len(taps) > 0 and np.iscomplexobj(taps[0]))
+        )
+        tap_dtype = np.complex64 if is_complex else np.float32
+        if is_complex:
+            self.analytic = True
+
         if isinstance(taps, (list, tuple)):
             n_templates = len(taps)
             if tap_counts is None:
                 tap_counts = np.array([len(t) for t in taps], dtype=np.int64)
             else:
                 tap_counts = np.asarray(tap_counts, dtype=np.int64)
-            taps_list = [np.asarray(t, dtype=np.float32) for t in taps]
+            taps_list = [np.asarray(t, dtype=tap_dtype) for t in taps]
         elif isinstance(taps, np.ndarray):
             if taps.ndim == 1:
                 taps = taps[None, :]
@@ -510,8 +518,8 @@ class TimeDomainFilterBank:
                 tap_counts = np.full(n_templates, taps.shape[1], dtype=np.int64)
             else:
                 tap_counts = np.asarray(tap_counts, dtype=np.int64)
-            taps_list = [taps[i, :tap_counts[i]].astype(np.float32) for i in range(n_templates)]
-            self._raw_taps = np.ascontiguousarray(taps, dtype=np.float32)
+            taps_list = [taps[i, :tap_counts[i]].astype(tap_dtype) for i in range(n_templates)]
+            self._raw_taps = np.ascontiguousarray(taps, dtype=tap_dtype)
         else:
             self._raw_taps = None
             raise TypeError("taps must be a numpy array or sequence of arrays")
@@ -524,7 +532,7 @@ class TimeDomainFilterBank:
         self._taps_list = taps_list
         if self._raw_taps is None:
             max_c = int(np.max(self.tap_counts)) if len(self.tap_counts) > 0 else 0
-            raw_mat = np.zeros((self.n_templates, max_c), dtype=np.float32)
+            raw_mat = np.zeros((self.n_templates, max_c), dtype=tap_dtype)
             for i in range(self.n_templates):
                 c = int(self.tap_counts[i])
                 raw_mat[i, :c] = self._taps_list[i][:c]
@@ -622,13 +630,14 @@ class TimeDomainFilterBank:
                         cnt = int(self.tap_counts[g_idx])
                         N_taps = int(round(chosen_N * self.rate_ratio))
 
-                        buf = np.zeros(N_taps, dtype=np.float32)
+                        buf_dtype = np.complex64 if np.iscomplexobj(t_arr) else np.float32
+                        buf = np.zeros(N_taps, dtype=buf_dtype)
                         buf[:cnt] = t_arr[:cnt]
                         buf = np.roll(buf, -(cnt // 2))
 
                         spec = np.fft.fft(buf).astype(np.complex64)
                         if N_taps > chosen_N:
-                            if self.engine == 'corr' or self.analytic or self.is_dif:
+                            if self.engine == 'corr' or self.analytic or np.iscomplexobj(t_arr):
                                 spec_data = spec[:chosen_N]
                             else:
                                 spec_data = np.zeros(chosen_N, dtype=np.complex64)
@@ -636,11 +645,15 @@ class TimeDomainFilterBank:
                                 neg_count = chosen_N - (chosen_N // 2 + 1)
                                 spec_data[chosen_N // 2 + 1:] = spec[N_taps - neg_count:]
                         elif N_taps < chosen_N:
-                            spec_data = np.zeros(chosen_N, dtype=np.complex64)
-                            half_taps = N_taps // 2
-                            spec_data[:half_taps + 1] = spec[:half_taps + 1]
-                            neg_count = N_taps - (half_taps + 1)
-                            spec_data[chosen_N - neg_count:] = spec[half_taps + 1:]
+                            if self.engine == 'corr' or self.analytic or np.iscomplexobj(t_arr):
+                                spec_data = np.zeros(chosen_N, dtype=np.complex64)
+                                spec_data[:N_taps] = spec
+                            else:
+                                spec_data = np.zeros(chosen_N, dtype=np.complex64)
+                                half_taps = N_taps // 2
+                                spec_data[:half_taps + 1] = spec[:half_taps + 1]
+                                neg_count = N_taps - (half_taps + 1)
+                                spec_data[chosen_N - neg_count:] = spec[half_taps + 1:]
                         else:
                             spec_data = spec
 
