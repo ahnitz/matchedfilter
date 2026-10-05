@@ -10,6 +10,7 @@
 #include <limits.h>
 #include "matchedfilter.h"
 #include "transform.h"
+#include "refine.h"
 
 /* Validate the extension boundary independently of the Python convenience API.
    Divide byte capacities instead of multiplying untrusted sizes. */
@@ -785,12 +786,74 @@ static PyObject *M_taps_to_spectra(PyObject *self, PyObject *args){
   PyBuffer_Release(&btaps); PyBuffer_Release(&bcnt); PyBuffer_Release(&bout);
   Py_RETURN_NONE;
 }
+
+static PyObject *M_refine_peaks_decim(PyObject *self, PyObject *args) {
+  Py_buffer b_ser, b_taps, b_counts;
+  Py_buffer b_in_tmpl, b_in_samp, b_in_snr;
+  double threshold, scalloping_L;
+  int decim_stride;
+  Py_buffer b_out_tmpl, b_out_samp, b_out_snr, b_out_surv;
+
+  if (!PyArg_ParseTuple(args, "y*y*y*y*y*y*ddiw*w*w*w*",
+                        &b_ser, &b_taps, &b_counts,
+                        &b_in_tmpl, &b_in_samp, &b_in_snr,
+                        &threshold, &scalloping_L, &decim_stride,
+                        &b_out_tmpl, &b_out_samp, &b_out_snr, &b_out_surv)) {
+    return NULL;
+  }
+
+  size_t s_len = (size_t)(b_ser.len / (2 * sizeof(float)));
+  size_t n_cand = (size_t)(b_in_tmpl.len / sizeof(int64_t));
+  size_t n_templates = (size_t)(b_counts.len / sizeof(int64_t));
+  size_t max_taps = n_templates > 0 ? (size_t)(b_taps.len / (n_templates * sizeof(float))) : 0;
+
+  if (n_cand == 0 || n_templates == 0) {
+    PyBuffer_Release(&b_ser); PyBuffer_Release(&b_taps); PyBuffer_Release(&b_counts);
+    PyBuffer_Release(&b_in_tmpl); PyBuffer_Release(&b_in_samp); PyBuffer_Release(&b_in_snr);
+    PyBuffer_Release(&b_out_tmpl); PyBuffer_Release(&b_out_samp);
+    PyBuffer_Release(&b_out_snr); PyBuffer_Release(&b_out_surv);
+    return PyLong_FromSize_t(0);
+  }
+
+  const float *series = (const float*)b_ser.buf;
+  const float *raw_taps = (const float*)b_taps.buf;
+  const int64_t *tap_counts = (const int64_t*)b_counts.buf;
+
+  const int64_t *in_tmpl = (const int64_t*)b_in_tmpl.buf;
+  const int64_t *in_samp = (const int64_t*)b_in_samp.buf;
+  const float *in_snr = (const float*)b_in_snr.buf;
+
+  int64_t *out_tmpl = (int64_t*)b_out_tmpl.buf;
+  int64_t *out_samp = (int64_t*)b_out_samp.buf;
+  float *out_snr = (float*)b_out_snr.buf;
+  int64_t *out_surv = (int64_t*)b_out_surv.buf;
+
+  size_t out_count = 0;
+
+  Py_BEGIN_ALLOW_THREADS
+  out_count = ap_refine_peaks_decim(
+      series, s_len, raw_taps, tap_counts, n_templates, max_taps,
+      in_tmpl, in_samp, in_snr, n_cand,
+      (float)threshold, (float)scalloping_L, decim_stride,
+      out_tmpl, out_samp, out_snr, out_surv
+  );
+  Py_END_ALLOW_THREADS
+
+  PyBuffer_Release(&b_ser); PyBuffer_Release(&b_taps); PyBuffer_Release(&b_counts);
+  PyBuffer_Release(&b_in_tmpl); PyBuffer_Release(&b_in_samp); PyBuffer_Release(&b_in_snr);
+  PyBuffer_Release(&b_out_tmpl); PyBuffer_Release(&b_out_samp);
+  PyBuffer_Release(&b_out_snr); PyBuffer_Release(&b_out_surv);
+
+  return PyLong_FromSize_t(out_count);
+}
+
 static PyMethodDef methods[]={
   {"backend",M_backend,METH_NOARGS,"backend() -> name of the selected kernel"},
   {"targets",M_targets,METH_NOARGS,"targets() -> names this build can run here"},
   {"set_target",M_set_target,METH_VARARGS,"set_target(name|None) -> narrow the choice"},
   {"pack_peaks",M_pack_peaks,METH_VARARGS,"pack_peaks(peaks, idx, val) -> copy into structured peaks"},
   {"taps_to_spectra",M_taps_to_spectra,METH_VARARGS,"taps_to_spectra(taps, counts, n, max_taps, out_spectra)"},
+  {"refine_peaks_decim",M_refine_peaks_decim,METH_VARARGS,"refine_peaks_decim(series, taps, counts, in_tmpl, in_samp, in_snr, threshold, scalloping_L, decim_stride, out_tmpl, out_samp, out_snr, out_surv)"},
   {NULL,NULL,0,NULL}};
 static struct PyModuleDef mod={PyModuleDef_HEAD_INIT,"matchedfilter._core",NULL,-1,methods};
 PyMODINIT_FUNC PyInit__core(void){
