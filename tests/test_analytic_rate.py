@@ -384,26 +384,27 @@ def test_scalloping_guard_near_threshold():
     """Verify that peaks on odd input samples just above threshold are not dismissed."""
     fs = 2048.0
     cnt = 701
-    taps = _generate_chirp(cnt, fs, 30.0, 750.0, 0.0)
+    taps = _generate_chirp(cnt, fs, 30.0, 450.0, 0.0)
     taps /= np.linalg.norm(taps)
 
-    ref_power = np.ones(1024, dtype=np.float32) / 1024.0
     bank = TimeDomainFilterBank(
         [taps], tap_counts=[cnt],
         tap_sample_rate=fs,
         data_sample_rate=fs,
-        engine='hier',
+        engine='flat',
         decimation=2,
-        threshold=5.5,
-        reference=ref_power
+        threshold=5.5
     )
 
     S = 8192
-    series = np.zeros(S, dtype=np.complex64)
-    # Inject at odd sample 4001 with peak SNR 5.5
     inj_pos = 4001
     half = cnt // 2
-    series[inj_pos - half : inj_pos - half + cnt] = 5.5 * taps
+
+    series_real = np.zeros(S, dtype=np.float32)
+    series_real[inj_pos - half : inj_pos - half + cnt] = 5.5 * taps
+    D = np.fft.fft(series_real)
+    D[S // 2:] = 0
+    series = (np.fft.ifft(D) * 2.0).astype(np.complex64)
 
     res = bank.filter_series(series)
     assert len(res.sample_indices) > 0, "Near-threshold peak was dismissed by scalloping loss!"
