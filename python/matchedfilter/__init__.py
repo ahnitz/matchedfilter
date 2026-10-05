@@ -412,7 +412,12 @@ class MatchedFilter:
             a = np.ascontiguousarray(_from_any(spectra), dtype=np.complex64)
             shape = (self.ndata if what == "data" else self.ntemplates, self.n)
             if a.shape != shape:
-                raise ValueError("expected shape %s, got %s" % (shape, a.shape))
+                if what == "template" and a.ndim == 2 and a.shape == (self.ntemplates, self.n // 2):
+                    pad_a = np.zeros(shape, dtype=np.complex64)
+                    pad_a[:, :self.n // 2] = a
+                    a = pad_a
+                else:
+                    raise ValueError("expected shape %s, got %s" % (shape, a.shape))
             from ._shared import shared_buffer
             attr = "_gdata" if what == "data" else "_gtmpl"
             if shared_buffer(a, self._gpu) is not None:
@@ -810,7 +815,10 @@ class MatchedFilter:
         if win_start is None or win_end is None:
             raise ValueError('explicit starts require win_start and win_end')
         if getattr(self, '_bandlimited', False):
-            decim = bool(decimated) if decimated is not None else False
+            if decimated is None:
+                decim = getattr(series, 'sample_rate', 2048) < getattr(series, 'input_sample_rate', 2048)
+            else:
+                decim = bool(decimated)
             return self.run_series_dif(
                 series, starts, win_start, win_end, binsize=binsize,
                 threshold=threshold, templates=templates, raw=raw,
