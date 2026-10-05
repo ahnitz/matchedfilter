@@ -409,7 +409,7 @@ class TimeDomainFilterBank:
 
         D = 1
         nu_c = 0.40
-        scalloping_L = 0.05
+        scalloping_L = 0.08
 
         ref_arr = None
         if reference is not None:
@@ -434,7 +434,7 @@ class TimeDomainFilterBank:
                             nu_c = D * (k_lo + k_hi) / (2.0 * n_ref)
                             r_auto = np.abs(np.fft.ifft(ref_arr))
                             if r_auto[0] > 0:
-                                scalloping_L = float(np.clip(1.0 - (r_auto[1] / r_auto[0]), 0.01, 0.20))
+                                scalloping_L = float(np.clip(1.0 - (r_auto[1] / r_auto[0]) + 0.03, 0.01, 0.20))
                         else:
                             D = 1
                     else:
@@ -511,9 +511,10 @@ class TimeDomainFilterBank:
             env_lengths = os.environ.get('PYCBC_RATIO_FFT_LENGTH')
             if env_lengths:
                 candidate_ns = tuple(sorted(int(x.strip()) for x in env_lengths.split(',') if x.strip()))
+            elif self._engine_rate <= 1024.0 or self.analytic or self._data_decimation_stride > 1:
+                candidate_ns = (1024, 2048, 4096, 8192, 16384, 32768, 65536)
             else:
-                base_ns = (2048, 4096, 8192, 16384, 32768, 65536)
-                candidate_ns = tuple(sorted(n // self._data_decimation_stride for n in base_ns))
+                candidate_ns = (2048, 4096, 8192, 16384, 32768, 65536)
         else:
             candidate_ns = tuple(sorted(int(n) for n in fft_lengths))
 
