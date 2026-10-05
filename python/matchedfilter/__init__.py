@@ -491,8 +491,20 @@ class MatchedFilter:
             self._mark_ready("template", index)
             return
         a = np.ascontiguousarray(_from_any(spectra), dtype=np.complex64)
-        if a.ndim != 2 or a.shape != (self.ntemplates, self.n):
-            raise ValueError(f"expected shape ({self.ntemplates}, {self.n}), got {a.shape}")
+        if a.ndim != 2:
+            raise ValueError(f"expected 2D array of spectra, got {a.shape}")
+        if a.shape[0] != self.ntemplates:
+            raise ValueError(f"expected {self.ntemplates} templates, got {a.shape[0]}")
+        if a.shape[1] == self.n:
+            self._bandlimited = False
+            self.k = self.n
+        elif a.shape[1] == self.n // 2:
+            self._bandlimited = True
+            self.k = self.n // 2
+            if self._gpu is None and (not hasattr(self, '_mf') or self._mf is None or getattr(self._mf, 'n', None) != self.k):
+                self._mf = _core.MF(self.k, 2, self.ntemplates)
+        else:
+            raise ValueError(f"expected shape ({self.ntemplates}, {self.n}) or ({self.ntemplates}, {self.n // 2}), got {a.shape}")
         self._held_templates = a.copy()
         plan = self._ensure()
         if hasattr(plan, 'set_template_batch'):
@@ -706,7 +718,8 @@ class MatchedFilter:
         return ser, layout, binsize, t0, nt
 
     def run_series(self, series, starts=None, win_start=None, win_end=None,
-                   binsize=None, threshold=0.0, templates=None, raw=False):
+                   binsize=None, threshold=0.0, templates=None, raw=False,
+                   decimated=None):
         """Filter a series using this filter's ``valid`` overlap-save window.
 
         ``run_series(series)`` derives contiguous blocks and returns peak
@@ -735,7 +748,7 @@ class MatchedFilter:
             return self._run_series_inner(series, starts=starts, win_start=win_start,
                                           win_end=win_end, binsize=binsize,
                                           threshold=threshold, templates=templates,
-                                          raw=raw)
+                                          raw=raw, decimated=decimated)
         finally:
             if is_outer:
                 self._in_series_call = False
@@ -745,7 +758,8 @@ class MatchedFilter:
                 self.performance_stats["batch_times_ms"].append(dt * 1000.0)
 
     def _run_series_inner(self, series, starts=None, win_start=None, win_end=None,
-                          binsize=None, threshold=0.0, templates=None, raw=False):
+                          binsize=None, threshold=0.0, templates=None, raw=False,
+                          decimated=None):
         if starts is None:
             if win_start is not None or win_end is not None:
                 raise ValueError('win_start and win_end require explicit starts')
@@ -795,6 +809,13 @@ class MatchedFilter:
             return _absolute_peak_indices(result, st, False)
         if win_start is None or win_end is None:
             raise ValueError('explicit starts require win_start and win_end')
+        if getattr(self, '_bandlimited', False):
+            decim = bool(decimated) if decimated is not None else False
+            return self.run_series_dif(
+                series, starts, win_start, win_end, binsize=binsize,
+                threshold=threshold, templates=templates, raw=raw,
+                decimated=decim
+            )
         ser, layout, binsize, t0, nt = self._series_layout(
             series, starts, win_start, win_end, binsize, templates)
         if self._gpu is not None or self.ndata > 1 or isinstance(self, HierarchicalFilter):
@@ -846,6 +867,75 @@ class MatchedFilter:
         return self.run_series(series, starts, win_start, win_end,
                                binsize=binsize, threshold=threshold,
                                templates=templates, raw=raw)
+
+    def run_series_dif(self, series, starts, win_start, win_end,
+                       binsize=None, threshold=0.0, templates=None, raw=False,
+                       decimated=False):
+        """Filter a full-rate series using 2-channel decimation-in-frequency (DIF)."""
+        ser = np.ascontiguousarray(_from_any(series), dtype=np.complex64)
+        st = np.ascontiguousarray(_from_any(starts), dtype=np.uintp)
+        ws = np.ascontiguousarray(_from_any(win_start), dtype=np.uintp)
+        we = np.ascontiguousarray(_from_any(win_end), dtype=np.uintp)
+        if any(a.ndim != 1 for a in (ser, st, ws, we)):
+            raise ValueError("series, starts, win_start and win_end must be one-dimensional")
+        if not (st.size == ws.size == we.size):
+            raise ValueError("starts, win_start and win_end must be the same length")
+        if st.size < 1:
+            raise ValueError("run_series_dif needs at least one block")
+        decim = int(bool(decimated))
+        k_val = getattr(self, 'k', self.n)
+        if decim:
+            N = k_val
+            wk_s0 = int(ws[0])
+            wk_e0 = min(k_val, int(we[0]))
+            bs = N if binsize is None else int(binsize)
+            bs_k = k_val if bs >= k_val else max(1, int(bs))
+        else:
+            N = self.n if getattr(self, '_bandlimited', False) else self.n * 2
+            wk_s0 = int(ws[0] // 2)
+            wk_e0 = min(k_val, int((we[0] + 1) // 2))
+            bs = N if binsize is None else int(binsize)
+            bs_k = k_val if bs >= N else max(1, int(bs // 2))
+        if bs < 1:
+            raise ValueError("binsize must be >= 1")
+        t0, nt = (0, self.ntemplates) if templates is None else (
+            int(templates[0]), int(templates[1]))
+        if nt < 1 or t0 < 0 or t0 + nt > self.ntemplates:
+            raise ValueError("templates sub-range out of bounds")
+        self._require_templates(t0, nt)
+
+        nblk = st.size
+        nb = 1 + (wk_e0 - wk_s0 - 1) // bs_k
+        need = nblk * nt * nb
+        shape = (nblk, nt, nb)
+
+        self._dataset = False
+        self._data_ready = set()
+
+        if raw:
+            sb = getattr(self, '_sbuf_dif', None)
+            if sb is None or sb[0] != shape:
+                sb = self._sbuf_dif = (shape,
+                                       np.empty(need, dtype=np.int64),
+                                       np.empty(need, dtype=np.complex64),
+                                       np.empty(0, dtype=np.float32),
+                                       np.empty(nblk * nt, dtype=np.int32))
+            _, idx, val, mag, cnt = sb
+            self._execution_plan().run_series_dif(ser, st, ws, we, t0, nt, bs,
+                                                  float(threshold), idx, val, mag, cnt, None, decim)
+            return _format_result(idx.reshape(shape), val.reshape(shape), raw=True)
+        spbuf = getattr(self, '_spbuf_dif', None)
+        if spbuf is None or spbuf[0] != shape:
+            spbuf = self._spbuf_dif = (shape,
+                                       np.empty(shape, dtype=PEAK_DTYPE),
+                                       np.empty(0, dtype=np.int64),
+                                       np.empty(0, dtype=np.complex64),
+                                       np.empty(0, dtype=np.float32),
+                                       np.empty(nblk * nt, dtype=np.int32))
+        _, peaks, empty_idx, empty_val, mag, cnt = spbuf
+        self._execution_plan().run_series_dif(ser, st, ws, we, t0, nt, bs,
+                                              float(threshold), empty_idx, empty_val, mag, cnt, peaks, decim)
+        return _format_result(None, None, raw=False, out=peaks)
 
     @property
     def performance_info(self):
@@ -1734,7 +1824,7 @@ def _min_band_for(device=None, tuning=None):
             return 128
         if "model85" in paths or "Xeon(R) Platinum" in cpu or "Xeon(R) Gold" in cpu:
             return 256
-    return 128
+    return 64
 
 
 def candidate_configs(power, n, snr, fd, tuning=None, pairs=None, device=None, cascade=True):
@@ -1742,7 +1832,7 @@ def candidate_configs(power, n, snr, fd, tuning=None, pairs=None, device=None, c
 
     Returns:
         (candidates, rejected):
-            candidates: list of valid configurations [single_choice, cascade_choice_1, ...]
+            candidates: list of valid configurations [best_predicted, alternative_1, ...]
             rejected: list of dicts [{"config": cfg, "reason": str}]
     """
     if tuning is None and os.environ.get("MF_COST"):
@@ -1888,7 +1978,10 @@ def _autotune_cache_key(device, n, snr, fd, b_target=None, ref=None, cascade=Tru
         b_val = int(ref)
     else:
         b_val = None
-    p_val = int(pairs) if isinstance(pairs, (int, np.integer)) else None
+    if isinstance(pairs, (int, np.integer)):
+        p_val = "batch" if pairs >= 64 else int(pairs)
+    else:
+        p_val = None
     return (str(dev_kind), int(n), b_val, float(snr), float(fd), bool(cascade), p_val)
 
 
@@ -2131,6 +2224,8 @@ class HierarchicalFilter(MatchedFilter):
                                                          pairs=self.ndata * self.ntemplates,
                                                          device=self.device,
                                                          cascade=self.cascade)
+                if os.environ.get("MF_AUTOTUNE", "1").strip().lower() in ("0", "false", "no", "off"):
+                    candidates = candidates[:1]
                 self.autotune_info["rejected"] = rejected
                 if not candidates:
                     cfg = None
@@ -2617,7 +2712,8 @@ class HierarchicalFilter(MatchedFilter):
                            data=data, templates=templates, counts=counts, raw=raw)
 
     def run_series(self, series, starts=None, win_start=None, win_end=None,
-                   binsize=None, threshold=0.0, templates=None, raw=False):
+                   binsize=None, threshold=0.0, templates=None, raw=False,
+                   decimated=None):
         is_outer = not getattr(self, '_in_hier_series_call', False)
         # Avoid autotuning on sub-template narrow follow-ups or micro-slices
         is_sub_template = (templates is not None and templates[1] < self.ntemplates)
@@ -2651,27 +2747,13 @@ class HierarchicalFilter(MatchedFilter):
 
         is_tuning_or_uninit = self.autotune_info.get("status") in ("tuning", "uninitialized")
         if should_tune and is_tuning_or_uninit:
-            cache_key = self._autotune_cache_key() if getattr(self, '_pending_ref', None) is not None else None
-            if not getattr(self, '_warmed_up', False):
-                try:
-                    self._in_hier_series_call = True
-                    super().run_series(series, starts=starts, win_start=win_start,
-                                       win_end=win_end, binsize=binsize,
-                                       threshold=threshold, templates=templates,
-                                       raw=raw)
-                except Exception:
-                    pass
-                finally:
-                    self._in_hier_series_call = False
-                self._warmed_up = True
-
             self._in_hier_series_call = True
             t0 = time.perf_counter()
             try:
                 res = super().run_series(series, starts=starts, win_start=win_start,
                                          win_end=win_end, binsize=binsize,
                                          threshold=threshold, templates=templates,
-                                         raw=raw)
+                                         raw=raw, decimated=decimated)
             finally:
                 self._in_hier_series_call = False
             dt = time.perf_counter() - t0
@@ -2694,7 +2776,7 @@ class HierarchicalFilter(MatchedFilter):
         res = super().run_series(series, starts=starts, win_start=win_start,
                                   win_end=win_end, binsize=binsize,
                                   threshold=threshold, templates=templates,
-                                  raw=raw)
+                                  raw=raw, decimated=decimated)
         dt = time.perf_counter() - t0
         if os.environ.get("MF_TRACE_RUN", "0") != "0":
             try:
@@ -2733,6 +2815,8 @@ class HierarchicalFilter(MatchedFilter):
                                                              pairs=self.ndata * self.ntemplates,
                                                              device=self.device,
                                                              cascade=self.cascade)
+                    if os.environ.get("MF_AUTOTUNE", "1").strip().lower() in ("0", "false", "no", "off"):
+                        candidates = candidates[:1]
                     self.autotune_info["rejected"] = rejected
                     if not candidates:
                         cfg = None
@@ -3132,6 +3216,6 @@ def __getattr__(name):
         from .device import Device
         return Device
     if name == "device":
-        from . import device
-        return device
+        import importlib
+        return importlib.import_module(".device", __name__)
     raise AttributeError(name)

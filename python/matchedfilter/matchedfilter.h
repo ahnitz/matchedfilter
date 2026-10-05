@@ -122,6 +122,13 @@ int ap_mf_run_series(ap_mf_plan *p,
                      const size_t *win_end, int nblocks,
                      int t0, int nt, size_t binsize, float threshold,
                      ap_peak *peaks, int *counts);
+int ap_mf_run_series_dif(ap_mf_plan *p,
+                         const float *series, size_t nseries,
+                         const size_t *start, const size_t *win_start,
+                         const size_t *win_end, int nblocks,
+                         int t0, int nt, size_t binsize, float threshold,
+                         int decimated,
+                         ap_peak *peaks, int *counts);
 
 /* Interpolated coarse maximum, alongside the peak scan.  hlo/hhi are complex
    taps (2*ntap floats each) for the two half-sample offsets, ncand is how many

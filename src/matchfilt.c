@@ -71,6 +71,15 @@ struct ap_mf_plan {
   struct ap_mf_plan *pair_alt;
   unsigned char *alt_dready, *alt_tready;
   int allow_pair_alt;
+  /* DIF series filtering fields */
+  float *twiddles;
+  float *sspec_tw;
+  ap_peak *dif_pkbuf;
+  size_t dif_pkcap;
+  ap_plan *fft_fwd;
+  float *sfwd_2n, *sspec_2n;
+  ap_plan *fft_fwd_n;
+  float *sfwd_n, *sspec_n;
 };
 
 static ap_mf_plan *create_mf(size_t n, int ndata, int ntmpl, int pair){
@@ -162,6 +171,11 @@ void ap_mf_destroy(ap_mf_plan *p){
   free(p->ebr);free(p->ebi);free(p->tsr);free(p->tsi);free(p->dsr);free(p->dsi);free(p->pkbuf);
   free(p->tmre);free(p->tmim);
   free(p->corrbuf);
+  if(p->fft_fwd) ap_destroy(p->fft_fwd);
+  if(p->fft_fwd_n) ap_destroy(p->fft_fwd_n);
+  free(p->twiddles);free(p->sspec_tw);free(p->dif_pkbuf);
+  free(p->sfwd_2n);free(p->sspec_2n);
+  free(p->sfwd_n);free(p->sspec_n);
   free(p);
 }
 
@@ -941,6 +955,177 @@ int ap_mf_run_series(ap_mf_plan *p,
     if(r<0) return -1;
     total+=r;
     b0+=g;
+  }
+  return total;
+}
+
+int ap_mf_run_series_dif(ap_mf_plan *p,
+                         const float *series, size_t nseries,
+                         const size_t *start, const size_t *win_start,
+                         const size_t *win_end, int nblocks,
+                         int t0, int nt, size_t binsize, float threshold,
+                         int decimated,
+                         ap_peak *peaks, int *counts){
+  if(!p || nblocks < 1 || nt < 1 || !binsize) return 0;
+  if(!series || !start || !win_start || !win_end || !peaks) return -1;
+  if(t0 < 0 || t0 + nt > p->nt) return -1;
+  if(p->nd < 2) return -1;
+
+  const size_t n = p->n;
+
+  if(!p->sspec_tw){
+    p->sspec_tw = ap_alloc64(2 * n * sizeof(float));
+    p->twiddles = ap_alloc64(2 * n * sizeof(float));
+    if(!p->sspec_tw || !p->twiddles) return -1;
+    const size_t N_tw = 2 * n;
+    for(size_t k = 0; k < n; k++){
+      double angle = 2.0 * M_PI * (double)k / (double)N_tw;
+      p->twiddles[2 * k]     = (float)cos(angle);
+      p->twiddles[2 * k + 1] = (float)sin(angle);
+    }
+  }
+
+  size_t bs_k, wk_s0, wk_e0, nb0;
+  if(decimated){
+    if(!p->fft_fwd_n){
+      p->fft_fwd_n = ap_create(n);
+      p->sfwd_n = ap_alloc64(2 * n * sizeof(float));
+      p->sspec_n = ap_alloc64(2 * n * sizeof(float));
+      if(!p->fft_fwd_n || !p->sfwd_n || !p->sspec_n) return -1;
+    }
+    bs_k = binsize >= n ? n : (binsize > 0 ? binsize : 1);
+    wk_s0 = win_start[0];
+    wk_e0 = win_end[0] > n ? n : win_end[0];
+    nb0 = ap_mf_nbins(p, bs_k, wk_s0, wk_e0);
+  } else {
+    const size_t N = 2 * n;
+    if(!p->fft_fwd){
+      p->fft_fwd = ap_create(N);
+      p->sfwd_2n = ap_alloc64(2 * N * sizeof(float));
+      p->sspec_2n = ap_alloc64(2 * N * sizeof(float));
+      if(!p->fft_fwd || !p->sfwd_2n || !p->sspec_2n) return -1;
+    }
+    bs_k = binsize >= N ? n : (binsize / 2 > 0 ? binsize / 2 : 1);
+    wk_s0 = win_start[0] / 2;
+    wk_e0 = (win_end[0] + 1) / 2 > n ? n : (win_end[0] + 1) / 2;
+    nb0 = ap_mf_nbins(p, bs_k, wk_s0, wk_e0);
+  }
+
+  size_t pk_need = (size_t)2 * (size_t)nt * nb0;
+  if(pk_need > p->dif_pkcap){
+    free(p->dif_pkbuf);
+    p->dif_pkbuf = malloc(pk_need * sizeof(ap_peak));
+    if(!p->dif_pkbuf){ p->dif_pkcap = 0; return -1; }
+    p->dif_pkcap = pk_need;
+  }
+
+  int total = 0;
+
+  for(int b = 0; b < nblocks; b++){
+    const size_t s0 = start[b];
+    const size_t ws = win_start[b];
+    const size_t we = win_end[b];
+
+    size_t wk_s, wk_e, nb;
+    const float * restrict d0_ptr;
+
+    if(decimated){
+      wk_s = ws;
+      wk_e = we > n ? n : we;
+      nb = ap_mf_nbins(p, bs_k, wk_s, wk_e);
+      if(nb != nb0) return -1;
+
+      size_t have = s0 < nseries ? nseries - s0 : 0;
+      if(have > n) have = n;
+      const float inv = 1.0f / (float)n;
+      const float * restrict src = series + 2 * s0;
+      float * restrict dst = p->sfwd_n;
+      for(size_t k = 0; k < 2 * have; k++) dst[k] = src[k] * inv;
+      if(have < n) memset(dst + 2 * have, 0, 2 * (n - have) * sizeof(float));
+
+      ap_fft(p->fft_fwd_n, p->sfwd_n, p->sspec_n, AP_FORWARD);
+      d0_ptr = p->sspec_n;
+    } else {
+      const size_t N = 2 * n;
+      wk_s = ws / 2;
+      wk_e = (we + 1) / 2 > n ? n : (we + 1) / 2;
+      nb = ap_mf_nbins(p, bs_k, wk_s, wk_e);
+      if(nb != nb0) return -1;
+
+      size_t have = s0 < nseries ? nseries - s0 : 0;
+      if(have > N) have = N;
+      const float inv = 1.0f / (float)N;
+      const float * restrict src = series + 2 * s0;
+      float * restrict dst = p->sfwd_2n;
+      for(size_t k = 0; k < 2 * have; k++) dst[k] = src[k] * inv;
+      if(have < N) memset(dst + 2 * have, 0, 2 * (N - have) * sizeof(float));
+
+      ap_fft(p->fft_fwd, p->sfwd_2n, p->sspec_2n, AP_FORWARD);
+      d0_ptr = p->sspec_2n;
+    }
+
+    const float * restrict tw = p->twiddles;
+    float * restrict d1_ptr = p->sspec_tw;
+    for(size_t k = 0; k < n; k++){
+      float dr = d0_ptr[2 * k];
+      float di = d0_ptr[2 * k + 1];
+      float wr = tw[2 * k];
+      float wi = tw[2 * k + 1];
+      d1_ptr[2 * k]     = dr * wr - di * wi;
+      d1_ptr[2 * k + 1] = dr * wi + di * wr;
+    }
+
+    if(ap_mf_set_data(p, 0, d0_ptr)) return -1;
+    if(ap_mf_set_data(p, 1, d1_ptr)) return -1;
+
+    int r = ap_mf_run(p, 0, 2, t0, nt, bs_k, threshold, p->dif_pkbuf, NULL, wk_s, wk_e);
+    if(r < 0) return -1;
+
+    const size_t full_ws = decimated ? 2 * ws : ws;
+    const size_t full_we = decimated ? 2 * we : we;
+
+    for(int j = 0; j < nt; j++){
+      const ap_peak *pk_e_row = p->dif_pkbuf + (size_t)j * nb;
+      const ap_peak *pk_o_row = p->dif_pkbuf + (size_t)(nt + j) * nb;
+      ap_peak *out_row = peaks + ((size_t)b * (size_t)nt + (size_t)j) * nb;
+      int c = 0;
+
+      for(size_t bin = 0; bin < nb; bin++){
+        const ap_peak *pke = pk_e_row + bin;
+        const ap_peak *pko = pk_o_row + bin;
+        ap_peak *outp = out_row + bin;
+
+        int64_t idx_e = pke->index >= 0 ? 2 * (int64_t)pke->index : -1;
+        if(idx_e >= 0 && ((size_t)idx_e < full_ws || (size_t)idx_e >= full_we)) idx_e = -1;
+
+        int64_t idx_o = pko->index >= 0 ? 2 * (int64_t)pko->index + 1 : -1;
+        if(idx_o >= 0 && ((size_t)idx_o < full_ws || (size_t)idx_o >= full_we)) idx_o = -1;
+
+        float mag_e = (idx_e >= 0) ? (pke->magnitude > 0.0f ? pke->magnitude : sqrtf(pke->re * pke->re + pke->im * pke->im)) : -1.0f;
+        float mag_o = (idx_o >= 0) ? (pko->magnitude > 0.0f ? pko->magnitude : sqrtf(pko->re * pko->re + pko->im * pko->im)) : -1.0f;
+
+        if(idx_e >= 0 && (idx_o < 0 || mag_e >= mag_o)){
+          outp->index = (long)idx_e;
+          outp->re = pke->re;
+          outp->im = pke->im;
+          outp->magnitude = (pke->magnitude > 0.0f) ? pke->magnitude : mag_e;
+          c++;
+        } else if(idx_o >= 0){
+          outp->index = (long)idx_o;
+          outp->re = pko->re;
+          outp->im = pko->im;
+          outp->magnitude = (pko->magnitude > 0.0f) ? pko->magnitude : mag_o;
+          c++;
+        } else {
+          outp->index = -1;
+          outp->re = 0.0f;
+          outp->im = 0.0f;
+          outp->magnitude = 0.0f;
+        }
+      }
+      if(counts) counts[(size_t)b * (size_t)nt + (size_t)j] = c;
+      total += c;
+    }
   }
   return total;
 }
