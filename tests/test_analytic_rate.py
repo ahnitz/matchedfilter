@@ -251,3 +251,217 @@ def test_filter_series_with_analytic_series():
     assert np.all(results.block_lengths >= 1024)
 
 
+def test_odd_sample_peak_recovery():
+    """Verify that peaks occurring at odd input-rate samples are recovered at exact odd index."""
+    fs_taps = 2048.0
+    fs_data = 2048.0
+    taps = _generate_chirp(350, fs_taps, 30.0, 750.0, 0.0)
+
+    ref_power = np.ones(1024, dtype=np.float32) / 1024.0
+    bank = TimeDomainFilterBank(
+        [taps], tap_counts=[350],
+        tap_sample_rate=fs_taps,
+        data_sample_rate=fs_data,
+        engine='hier',
+        execution_rate=1024.0,
+        threshold=5.0,
+        reference=ref_power
+    )
+
+    S = 8192
+    t = np.arange(S) / fs_data
+    rng = np.random.default_rng(42)
+    white = rng.standard_normal(S).astype(np.float32)
+    W = np.fft.fft(white)
+    W[S // 2:] = 0
+    data_analytic = (np.fft.ifft(W) * 2.0).astype(np.complex64)
+
+    # Injected peak at sample where center-tap lands on odd sample:
+    # inj_pos = 2000, cnt = 350, cnt // 2 = 175 -> expected_peak = 2175 (odd!)
+    inj_pos = 2000
+    sig_len = min(len(taps), S - inj_pos)
+    T_f = np.fft.fft(taps[:sig_len], n=sig_len)
+    T_f[sig_len // 2:] = 0
+    sig_analytic = (np.fft.ifft(T_f) * 2.0).astype(np.complex64)
+    data_analytic[inj_pos:inj_pos + sig_len] += 15.0 * sig_analytic
+
+    # Pass full-rate series (testing Step 1 decimation + odd peak recovery)
+    results = bank.filter_series(data_analytic)
+
+    expected_peak = inj_pos + (len(taps) // 2)
+    assert expected_peak % 2 == 1, "Expected peak should be odd"
+    assert len(results.sample_indices) > 0, "No triggers detected"
+    matched = np.any(results.sample_indices == expected_peak)
+    assert matched, f"Expected exact odd peak at {expected_peak}, got {results.sample_indices}"
+
+
+def test_tap_folding_suppresses_dc_gain_tails():
+    """Verify that folding with 32-tap Kaiser sinc filter suppresses tails by > 1000x compared to cut."""
+    from matchedfilter.time_domain import _fold_taps_2x, _get_interp_kernel
+
+    Nin = 2048
+    Ne = 1024
+    cnt = 701
+    fs = 2048.0
+    t = np.arange(cnt) / fs
+    # Filter with large low-frequency/DC gain (like consumer FIRs)
+    h_raw = (np.sin(2 * np.pi * 100 * t) / (t + 0.01)).astype(np.float32)
+
+    h = np.zeros(Nin, dtype=np.float32)
+    h[:cnt] = h_raw
+    h = np.roll(h, -(cnt // 2))
+
+    H_full = np.fft.fft(h).astype(np.complex64)
+    H_cut = H_full[:Ne].copy()
+
+    j_idx, g_kernel = _get_interp_kernel(32, nu_c=0.40)
+    h_group = h[None, :]
+    h_e = _fold_taps_2x(h_group, g_kernel, j_idx, Nin, Ne)[0]
+    H_fold = np.fft.fft(h_e).astype(np.complex64)
+
+    h_cut_t = np.fft.ifft(H_cut)
+    h_fold_t = np.fft.ifft(H_fold)
+
+    c_bad = int(np.ceil((cnt // 2) / 2)) + 16
+    tail_cut = np.max(np.abs(h_cut_t[c_bad : Ne - c_bad]))
+    tail_fold = np.max(np.abs(h_fold_t[c_bad : Ne - c_bad]))
+
+    assert tail_cut > 0.5, f"Expected large tail from cut, got {tail_cut}"
+    assert tail_fold < 1e-4, f"Expected suppressed tail from fold, got {tail_fold}"
+    assert tail_cut / tail_fold > 1000.0, f"Fold tail should be > 1000x smaller than cut tail"
+
+
+def test_engine_filter_every_sample_accuracy():
+    """Verify that every even and odd output in valid window has error <= 1e-4 vs full rate."""
+    fs = 2048.0
+    cnt = 701
+    taps = _generate_chirp(cnt, fs, 30.0, 750.0, 0.0)
+
+    Nin = 2048
+    Ne = 1024
+    h = np.zeros(Nin, dtype=np.float32)
+    h[:cnt] = taps
+    h = np.roll(h, -(cnt // 2))
+
+    S = 8192
+    rng = np.random.default_rng(999)
+    white = rng.standard_normal(S).astype(np.float32)
+    W = np.fft.fft(white)
+    # Band-limited to [20, 800) Hz
+    W[:80] = 0
+    W[3200:] = 0
+    x_full = (np.fft.ifft(W) * 2.0).astype(np.complex64)
+
+    # Full rate exact output for block 0
+    blk_full = x_full[:Nin]
+    H_full = np.fft.fft(h).astype(np.complex64)
+    z_full_blk = np.fft.ifft(np.fft.fft(blk_full) * np.conj(H_full))
+
+    # Engine folded filter for block 0
+    from matchedfilter.time_domain import _fold_taps_2x, _get_interp_kernel
+    j_idx, g_kernel = _get_interp_kernel(32, nu_c=0.40)
+    h_e = _fold_taps_2x(h[None, :], g_kernel, j_idx, Nin, Ne)[0]
+    H_fold = np.fft.fft(h_e)
+
+    blk_e = x_full[:Nin:2]
+    z_fold_blk = np.fft.ifft(np.fft.fft(blk_e) * np.conj(H_fold))
+
+    c_bad = int(np.ceil((cnt // 2) / 2)) + 16
+    m_eval = np.arange(c_bad + 16, Ne - c_bad - 16)
+
+    # Even samples
+    norm_ref = np.max(np.abs(z_full_blk[2 * m_eval]))
+    even_err = np.max(np.abs(z_fold_blk[m_eval] - z_full_blk[2 * m_eval])) / norm_ref
+    assert even_err < 1e-4, f"Even sample relative error {even_err} exceeded 1e-4"
+
+    # Odd samples via 32-tap kernel
+    odd_interp = np.array([np.dot(z_fold_blk[m + j_idx], g_kernel) for m in m_eval])
+    odd_err = np.max(np.abs(odd_interp - z_full_blk[2 * m_eval + 1])) / norm_ref
+    assert odd_err < 1e-4, f"Odd sample relative error {odd_err} exceeded 1e-4"
+
+
+def test_scalloping_guard_near_threshold():
+    """Verify that peaks on odd input samples just above threshold are not dismissed."""
+    fs = 2048.0
+    cnt = 701
+    taps = _generate_chirp(cnt, fs, 30.0, 750.0, 0.0)
+    taps /= np.linalg.norm(taps)
+
+    ref_power = np.ones(1024, dtype=np.float32) / 1024.0
+    bank = TimeDomainFilterBank(
+        [taps], tap_counts=[cnt],
+        tap_sample_rate=fs,
+        data_sample_rate=fs,
+        engine='hier',
+        decimation=2,
+        threshold=5.5,
+        reference=ref_power
+    )
+
+    S = 8192
+    series = np.zeros(S, dtype=np.complex64)
+    # Inject at odd sample 4001 with peak SNR 5.5
+    inj_pos = 4001
+    half = cnt // 2
+    series[inj_pos - half : inj_pos - half + cnt] = 5.5 * taps
+
+    res = bank.filter_series(series)
+    assert len(res.sample_indices) > 0, "Near-threshold peak was dismissed by scalloping loss!"
+    matched = np.any(res.sample_indices == inj_pos)
+    assert matched, f"Expected peak at odd sample {inj_pos}, got {res.sample_indices}"
+    max_snr = np.max(np.abs(res.snr))
+    assert np.isclose(max_snr, 5.5, rtol=1e-4), f"Expected SNR ~5.5, got {max_snr}"
+
+
+def test_decimation_fallback_and_profile_selection():
+    """Verify decimation='auto' falls back to 1 if profile exceeds Nyquist/2, and 2 if within."""
+    fs = 2048.0
+    taps = _generate_chirp(350, fs, 30.0, 750.0, 0.0)
+
+    # Profile fitting inside [0, N/2)
+    ref_low = np.zeros(2048, dtype=np.float32)
+    ref_low[20:800] = 1.0
+    bank_low = TimeDomainFilterBank([taps], decimation='auto', reference=ref_low)
+    assert bank_low.decimation == 2
+    assert bank_low._data_decimation_stride == 2
+
+    # Profile extending beyond N/2 (e.g. up to bin 1000 in 2048)
+    ref_high = np.zeros(2048, dtype=np.float32)
+    ref_high[20:1000] = 1.0
+    bank_high = TimeDomainFilterBank([taps], decimation='auto', reference=ref_high)
+    assert bank_high.decimation == 1
+    assert bank_high._data_decimation_stride == 1
+
+
+def test_compatibility_contract():
+    """Verify FilterResults shape and units, filters_f length, and groups keys."""
+    fs = 2048.0
+    taps = _generate_chirp(350, fs, 30.0, 750.0, 0.0)
+
+    ref_power = np.ones(1024, dtype=np.float32) / 1024.0
+    bank = TimeDomainFilterBank([taps], decimation=2, reference=ref_power)
+
+    # filters_f must return full-rate 2048-point spectrum
+    filt_f = bank.filters_f[0]
+    assert len(filt_f) == 2048
+
+    # block_lengths must return full-rate length 2048
+    assert bank.block_lengths[0] == 2048
+    assert bank.get_block_length(0) == 2048
+
+    # FilterResults namedtuple fields
+    S = 8192
+    data = np.zeros(S, dtype=np.complex64)
+    data[2000:2000 + len(taps)] = 10.0 * taps
+    res = bank.filter_series(data)
+
+    assert hasattr(res, 'template_indices')
+    assert hasattr(res, 'sample_indices')
+    assert hasattr(res, 'snr')
+    assert hasattr(res, 'block_starts')
+    assert hasattr(res, 'block_lengths')
+    assert len(res) == 5
+    assert np.all(res.block_lengths == 2048)
+
+
+
