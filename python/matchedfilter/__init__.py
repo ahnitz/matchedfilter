@@ -506,7 +506,7 @@ class MatchedFilter:
         elif a.shape[1] == self.n // 2:
             self._bandlimited = True
             self.k = self.n // 2
-            if self._gpu is None and (not hasattr(self, '_mf') or self._mf is None or getattr(self._mf, 'n', None) != self.k):
+            if self._gpu is None and type(self).__name__ != 'HierarchicalFilter' and (not hasattr(self, '_mf') or self._mf is None or getattr(self._mf, 'n', None) != self.k):
                 self._mf = _core.MF(self.k, 2, self.ntemplates)
         else:
             raise ValueError(f"expected shape ({self.ntemplates}, {self.n}) or ({self.ntemplates}, {self.n // 2}), got {a.shape}")
@@ -814,7 +814,7 @@ class MatchedFilter:
             return _absolute_peak_indices(result, st, False)
         if win_start is None or win_end is None:
             raise ValueError('explicit starts require win_start and win_end')
-        if getattr(self, '_bandlimited', False):
+        if getattr(self, '_bandlimited', False) and not isinstance(self, HierarchicalFilter):
             if decimated is None:
                 decim = getattr(series, 'sample_rate', 2048) < getattr(series, 'input_sample_rate', 2048)
             else:
@@ -2183,11 +2183,29 @@ class HierarchicalFilter(MatchedFilter):
         cband = cascade_band if cascade_band is not None else getattr(self, 'cascade_band', None)
         default_grp = 32 if self.n <= 2048 else 16
         grp = self._execution_policy.get('series_group', default_grp)
+        k_bins = getattr(self, 'k', self.n) or self.n
         if cband is not None and cband > 0:
-            return _core.HMF(self.n, self.ndata, self.ntemplates, self.snr, self.fd,
-                             int(band), 1, int(taps), grp, int(cband))
-        return _core.HMF(self.n, self.ndata, self.ntemplates, self.snr, self.fd,
-                         int(band), 1, int(taps), grp)
+            plan = _core.HMF(self.n, self.ndata, self.ntemplates, self.snr, self.fd,
+                             int(band), 1, int(taps), grp, int(cband), int(k_bins))
+        else:
+            plan = _core.HMF(self.n, self.ndata, self.ntemplates, self.snr, self.fd,
+                             int(band), 1, int(taps), grp, 0, int(k_bins))
+        if getattr(self, '_hermitian', False) and hasattr(plan, 'set_hermitian'):
+            plan.set_hermitian(True)
+        return plan
+
+    def set_hermitian(self, hermitian: bool):
+        self._hermitian = bool(hermitian)
+        if hasattr(self, '_mf') and self._mf is not None and hasattr(self._mf, 'set_hermitian'):
+            self._mf.set_hermitian(self._hermitian)
+
+    @property
+    def hermitian(self):
+        return getattr(self, '_hermitian', False)
+
+    @hermitian.setter
+    def hermitian(self, value):
+        self.set_hermitian(value)
 
     def _ensure(self):
         """Build the plan, choosing its configuration if that was deferred.
@@ -2399,6 +2417,72 @@ class HierarchicalFilter(MatchedFilter):
                     if d is not None and i >= 0:
                         self._mf.set_data(i, d)
         return self._mf
+
+    def set_templates(self, spectra, index=None):
+        if self._gpu is not None or index is not None:
+            return super().set_templates(spectra, index=index)
+        a = np.ascontiguousarray(_from_any(spectra), dtype=np.complex64)
+        if a.ndim != 2:
+            raise ValueError(f"expected 2D array of spectra, got {a.shape}")
+        if a.shape[0] != self.ntemplates:
+            raise ValueError(f"expected {self.ntemplates} templates, got {a.shape[0]}")
+        if a.shape[1] == self.n:
+            self._bandlimited = False
+            self.k = self.n
+        elif a.shape[1] == self.n // 2:
+            self._bandlimited = True
+            self.k = self.n // 2
+        else:
+            raise ValueError(f"expected shape ({self.ntemplates}, {self.n}) or ({self.ntemplates}, {self.n // 2}), got {a.shape}")
+
+        if self._mf is not None and getattr(self._mf, 'k', self.n) != self.k:
+            cfg = getattr(self, '_active_cfg', self._pinned)
+            if cfg is not None:
+                if isinstance(cfg, CascadeConfig) or (isinstance(cfg, (tuple, list)) and len(cfg) == 3):
+                    b0 = cfg.b0 if isinstance(cfg, CascadeConfig) else cfg[0]
+                    b1 = cfg.b1 if isinstance(cfg, CascadeConfig) else cfg[1]
+                    taps = cfg.taps if isinstance(cfg, CascadeConfig) else cfg[2]
+                    self._mf = self._new_cpu_plan(int(b1), int(taps), cascade_band=int(b0))
+                    tv = self._coarse_value(int(b1), required=False)
+                else:
+                    b, taps = cfg[0], cfg[1]
+                    self._mf = self._new_cpu_plan(int(b), int(taps))
+                    tv = self._coarse_value(int(b), required=False)
+                if tv is not None:
+                    if isinstance(tv, (tuple, list)):
+                        self._mf.set_threshold(*tv)
+                    else:
+                        self._mf.set_threshold(tv)
+                    self._thr_applied = True
+                if self._pending_ref is not None:
+                    self._mf.set_reference(self._pending_ref)
+                if hasattr(self, '_held') and self._held:
+                    if -1 in self._held:
+                        a_data = self._held[-1]
+                        if hasattr(self._mf, 'set_data_batch'):
+                            self._mf.set_data_batch(0, a_data)
+                        else:
+                            for i in range(self.ndata):
+                                self._mf.set_data(i, a_data[i])
+                    else:
+                        for i, d in self._held.items():
+                            if d is not None and i >= 0:
+                                self._mf.set_data(i, d)
+            else:
+                self._mf = None
+                self._thr_applied = False
+
+        self._held_templates = a.copy()
+        plan = self._ensure()
+        if getattr(self, '_hermitian', False) and hasattr(plan, 'set_hermitian'):
+            plan.set_hermitian(True)
+        if hasattr(plan, 'set_template_batch'):
+            plan.set_template_batch(0, a)
+        else:
+            set_tmpl_fn = plan.set_template
+            for i in range(self.ntemplates):
+                set_tmpl_fn(i, a[i])
+        self._mark_ready("template", None)
 
     # ---- GPU -----------------------------------------------------------
     #
@@ -3113,7 +3197,7 @@ class HierarchicalFilter(MatchedFilter):
         """
         if power is not None:
             p = np.ascontiguousarray(_from_any(power), dtype=np.float32)
-            if p.shape != (self.n,):
+            if p.shape != (self.n,) and p.shape != (getattr(self, 'k', self.n),):
                 raise ValueError("reference must be a one-dimensional array of length %d" % self.n)
             if not np.isfinite(p).all() or np.any(p < 0) or not np.any(p > 0):
                 raise ValueError("reference must be finite, nonnegative, with positive total power")

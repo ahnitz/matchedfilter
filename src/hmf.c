@@ -13,6 +13,9 @@
 
 struct ap_hmf_plan {
   size_t n,m,m0;
+  size_t k;
+  int is_dif;
+  int hermitian;
   int nd,nt,K,dgroup;
   ap_mf_plan *full,*coarse,*coarse0;
   ap_plan *full_fft;
@@ -30,36 +33,71 @@ struct ap_hmf_plan {
   unsigned long long c_even,c_odd,c_ref,c_fill;
   int prof,trace;
   FILE *dump;
+  float *twiddles,*tw_scratch;
+  float *tmpls_half,*prod_scratch;
+  ap_peak *dif_pk_e,*dif_pk_o;
+  size_t dif_pkcap;
 };
 
 ap_hmf_plan *ap_hmf_create_ex(size_t n,int ndata,int ntmpl,float snr,float fd,
                               size_t band,int taps){
-  return ap_hmf_create_cascade(n,ndata,ntmpl,snr,fd,0,band,taps,8);
+  return ap_hmf_create_cascade_k(n,0,ndata,ntmpl,snr,fd,0,band,taps,8);
 }
 
 int ap_hmf_series_group(const ap_hmf_plan *p){ return p ? p->dgroup : 0; }
 
 ap_hmf_plan *ap_hmf_create_grouped(size_t n,int ndata,int ntmpl,float snr,float fd,
                                    size_t band,int taps,int series_group){
-  return ap_hmf_create_cascade(n,ndata,ntmpl,snr,fd,0,band,taps,series_group);
+  return ap_hmf_create_cascade_k(n,0,ndata,ntmpl,snr,fd,0,band,taps,series_group);
 }
 
 ap_hmf_plan *ap_hmf_create_cascade(size_t n,int ndata,int ntmpl,float snr,float fd,
                                    size_t band0,size_t band,int taps,int series_group){
+  return ap_hmf_create_cascade_k(n,0,ndata,ntmpl,snr,fd,band0,band,taps,series_group);
+}
+
+ap_hmf_plan *ap_hmf_create_cascade_k(size_t n,size_t k,int ndata,int ntmpl,float snr,float fd,
+                                     size_t band0,size_t band,int taps,int series_group){
   (void)snr; (void)fd;
   if(series_group<1||series_group>65535||ndata<1||ntmpl<1||!ap_supported(n)||!ap_supported(band)||band>=n
      ||taps<2||taps>64||(taps&1)) return NULL;
   if(band0>0 && (!ap_supported(band0) || band0>=band)) return NULL;
+  if(k>0 && k!=n && k!=n/2) return NULL;
+  if(k>0 && k==n/2 && !ap_supported(k)) return NULL;
   ap_hmf_plan *p=calloc(1,sizeof(*p));
   if(!p) return NULL;
-  p->n=n; p->m=band; p->m0=band0; p->nt=ntmpl; p->K=taps;
+  p->n=n;
+  p->k=(k>0) ? k : n;
+  p->is_dif=(p->k == n/2);
+  p->m=band; p->m0=band0; p->nt=ntmpl; p->K=taps;
   /* Execution policy belongs to the caller; the environment is diagnostic. */
   int grp = series_group;
   { const char *e=getenv("MF_DGROUP"); if(e){ int v=atoi(e); if(v>0) grp=v; } }
   /* bounded by what the held spectra cost, which is what bites at long n */
   while(grp>1 && (size_t)grp*2*n*sizeof(float) > (size_t)4*1024*1024) grp>>=1;
   p->dgroup=grp; p->nd=ndata>grp ? ndata : grp;
-  p->full=ap_mf_create(n,p->nd,ntmpl);
+  if(p->is_dif){
+    p->full=ap_mf_create(p->k, 2*p->nd, ntmpl);
+    p->twiddles=ap_alloc64(2*p->k*sizeof(float));
+    p->tw_scratch=ap_alloc64(2*p->k*sizeof(float));
+    p->tmpls_half=ap_alloc64((size_t)ntmpl*2*p->k*sizeof(float));
+    p->prod_scratch=ap_alloc64(2*p->n*sizeof(float));
+    p->dif_pkcap=16;
+    p->dif_pk_e=malloc(p->dif_pkcap*sizeof(ap_peak));
+    p->dif_pk_o=malloc(p->dif_pkcap*sizeof(ap_peak));
+    if(!p->twiddles || !p->tw_scratch || !p->dif_pk_e || !p->dif_pk_o
+       || !p->tmpls_half || !p->prod_scratch){
+      ap_hmf_destroy(p); return NULL;
+    }
+    const size_t N_tw = 2 * p->k;
+    for(size_t j = 0; j < p->k; j++){
+      double angle = 2.0 * M_PI * (double)j / (double)N_tw;
+      p->twiddles[2 * j]     = (float)cos(angle);
+      p->twiddles[2 * j + 1] = (float)sin(angle);
+    }
+  } else {
+    p->full=ap_mf_create(n, p->nd, ntmpl);
+  }
   { const char *pbmax=getenv("MF_PBMAX");
     size_t pblim = pbmax ? (size_t)atol(pbmax) : (ap_lane_width() >= 16 ? 512u : 512u);
     int lw = ap_lane_width();
@@ -127,6 +165,12 @@ void ap_hmf_destroy(ap_hmf_plan *p){
   free(p->fwd); free(p->spec); free(p->dspec); free(p->dready); free(p->tready);
   free(p->ct0); free(p->scratch); free(p->fpow); free(p->cebuf); free(p->firebuf);
   free(p->fire_d); free(p->fire_t);
+  if(p->twiddles) free(p->twiddles);
+  if(p->tw_scratch) free(p->tw_scratch);
+  if(p->tmpls_half) free(p->tmpls_half);
+  if(p->prod_scratch) free(p->prod_scratch);
+  if(p->dif_pk_e) free(p->dif_pk_e);
+  if(p->dif_pk_o) free(p->dif_pk_o);
   if(p->ct0_0) free(p->ct0_0);
   if(p->scratch0) free(p->scratch0);
   if(p->fpow0) free(p->fpow0);
@@ -138,6 +182,16 @@ void ap_hmf_destroy(ap_hmf_plan *p){
   free(p);
 }
 
+int ap_hmf_set_hermitian(ap_hmf_plan *p,int hermitian){
+  if(!p) return -1;
+  p->hermitian = hermitian ? 1 : 0;
+  return 0;
+}
+
+int ap_hmf_get_hermitian(const ap_hmf_plan *p){
+  return p ? p->hermitian : 0;
+}
+
 int ap_hmf_coarse_thresholds(ap_hmf_plan *p,float threshold,float *thr){
   (void)threshold;
   if(!p || !isfinite(p->cal_thr) || p->cal_thr<0) return -1;
@@ -145,7 +199,10 @@ int ap_hmf_coarse_thresholds(ap_hmf_plan *p,float threshold,float *thr){
   return 0;
 }
 size_t ap_hmf_nbins(const ap_hmf_plan *p,size_t bs,size_t lo,size_t hi){
-  return p ? ap_mf_nbins(p->full,bs,lo,hi) : 0;
+  if(!p || !bs) return 0;
+  if(hi > p->n) hi = p->n;
+  if(lo >= hi) return 0;
+  return (hi - lo + bs - 1) / bs;
 }
 void ap_hmf_stats(const ap_hmf_plan *p,long *pairs,long *triggers){
   if(!p) return;
@@ -210,7 +267,7 @@ int ap_hmf_set_reference(ap_hmf_plan *p,const float *power){
   if(!p) return -1;
   if(power){
     double total=0,low=0,low0=0;
-    for(size_t k=0;k<p->n;k++){
+    for(size_t k=0;k<p->k;k++){
       if(!isfinite(power[k]) || power[k]<0) return -1;
       total+=power[k];
       if(k<p->m) low+=power[k];
@@ -233,19 +290,46 @@ int ap_hmf_set_data(ap_hmf_plan *p,int d,const float *spec){
 }
 int ap_hmf_set_template(ap_hmf_plan *p,int t,const float *spec){
   if(!p||t<0||t>=p->nt||!spec) return -1;
-  if(ap_mf_set_template(p->full,t,spec)) return -1;
+  if(p->is_dif){
+    if(p->tmpls_half) memcpy(p->tmpls_half+(size_t)t*2*p->k,spec,2*p->k*sizeof(float));
+    if(!p->hermitian && ap_mf_set_template(p->full,t,spec)) return -1;
+  } else {
+    if(ap_mf_set_template(p->full,t,spec)) return -1;
+  }
   double total=0,low=0,low0=0;
-  for(size_t k=0;k<p->n;k++){
-    double re=spec[2*k],im=spec[2*k+1],power=re*re+im*im;
-    total+=power;
-    if(k<p->m) low+=power;
-    if(p->m0>0 && k<p->m0) low0+=power;
+  if(p->is_dif && p->hermitian){
+    double dc_pow=(double)spec[0]*(double)spec[0];
+    double nyq_pow=(double)spec[1]*(double)spec[1];
+    double pos_pow=0.0;
+    for(size_t k=1;k<p->k;k++){
+      double re=spec[2*k],im=spec[2*k+1];
+      double pwr=re*re+im*im;
+      pos_pow+=pwr;
+      if(k<p->m) low+=pwr;
+      if(p->m0>0 && k<p->m0) low0+=pwr;
+    }
+    total=dc_pow+nyq_pow+2.0*pos_pow;
+    low+=dc_pow;
+    if(p->m0>0) low0+=dc_pow;
+  } else {
+    for(size_t k=0;k<p->k;k++){
+      double re=spec[2*k],im=spec[2*k+1],power=re*re+im*im;
+      total+=power;
+      if(k<p->m) low+=power;
+      if(p->m0>0 && k<p->m0) low0+=power;
+    }
   }
   p->fpow[t]=total>0 ? (float)(low/total) : 0;
   memcpy(p->ct0+(size_t)t*2*p->m,spec,2*p->m*sizeof(float));
+  if(p->is_dif && p->hermitian){
+    (p->ct0+(size_t)t*2*p->m)[1]=0.0f;
+  }
   if(p->m0>0 && p->coarse0){
     p->fpow0[t]=total>0 ? (float)(low0/total) : 0;
     memcpy(p->ct0_0+(size_t)t*2*p->m0,spec,2*p->m0*sizeof(float));
+    if(p->is_dif && p->hermitian){
+      (p->ct0_0+(size_t)t*2*p->m0)[1]=0.0f;
+    }
   }
   p->tready[t]=1;
   return refresh_template(p,t);
@@ -260,7 +344,7 @@ int ap_hmf_run_series(ap_hmf_plan *p,
   if(!p||nblocks<1||nt<1||!binsize) return 0;
   if(t0<0||t0+nt>p->nt) return -1;
   const size_t n=p->n;
-  const size_t nb0=ap_mf_nbins(p->full,binsize,win_start[0],win_end[0]);
+  const size_t nb0=ap_hmf_nbins(p,binsize,win_start[0],win_end[0]);
   int total=0;
   /* Filter several blocks together where they share a window.  Blocks differ
      only at a segment's edges, so runs of equal windows are long. */
@@ -297,7 +381,7 @@ int ap_hmf_run_series(ap_hmf_plan *p,
          per slot removes that and lets ap_hmf_run's existing lazy path do it
          on demand.  dready stays 0 to say so. */
     }
-    size_t nb=ap_mf_nbins(p->full,binsize,win_start[b0],win_end[b0]);
+    size_t nb=ap_hmf_nbins(p,binsize,win_start[b0],win_end[b0]);
     /* peaks is addressed at a single stride, so every window must produce the
        same bin count. A shorter one at a segment's edge does not: it writes
        where the next block's row begins and runs off the end of the caller's
@@ -316,6 +400,189 @@ int ap_hmf_run_series(ap_hmf_plan *p,
   return total;
 }
 
+static int hmf_refine(ap_hmf_plan *p, int d0, int t0, int nt, int nfire,
+                      size_t binsize, float threshold,
+                      ap_peak *peaks, int *counts, size_t start, size_t end){
+  if(nfire <= 0) return 0;
+
+  if(p->is_dif && p->hermitian){
+    const size_t nb = ap_hmf_nbins(p, binsize, start, end);
+    const size_t K = p->k;
+    const size_t N = p->n;
+    unsigned long long r0 = p->prof ? ap_ticks() : 0;
+    int total = 0;
+
+    for(int j = 0; j < nfire; j++){
+      int d = p->fire_d[j];
+      int t = p->fire_t[j];
+      const size_t row = (size_t)d * nt + t;
+      const float *sp = p->dspec[d0 + d];
+      if(!sp) return -1;
+      const float *tmpl = p->tmpls_half + (size_t)(t0 + t) * 2 * K;
+      float *prod = p->prod_scratch;
+
+      /* DC bin (k = 0): template DC is real in tmpl[0] */
+      prod[0] = sp[0] * tmpl[0];
+      prod[1] = sp[1] * tmpl[0];
+
+      /* Nyquist bin (k = K): template Nyquist is real in tmpl[1] */
+      prod[2 * K]     = sp[2 * K] * tmpl[1];
+      prod[2 * K + 1] = sp[2 * K + 1] * tmpl[1];
+
+      /* Positive bins k = 1 .. K - 1 */
+      for(size_t k = 1; k < K; k++){
+        float xr = sp[2 * k], xi = sp[2 * k + 1];
+        float hr = tmpl[2 * k], hi = tmpl[2 * k + 1];
+        prod[2 * k]     = xr * hr + xi * hi;
+        prod[2 * k + 1] = xi * hr - xr * hi;
+      }
+
+      /* Negative bins k = K + 1 .. N - 1:
+       * By Hermitian symmetry: H*[k] = H[N - k] = hr + j * hi */
+      for(size_t k = K + 1; k < N; k++){
+        size_t k_pos = N - k;
+        float xr = sp[2 * k], xi = sp[2 * k + 1];
+        float hr = tmpl[2 * k_pos], hi = tmpl[2 * k_pos + 1];
+        prod[2 * k]     = xr * hr - xi * hi;
+        prod[2 * k + 1] = xr * hi + xi * hr;
+      }
+
+      int c = 0;
+      int r = ap_binmax(p->full_fft, prod, N, 1, binsize, threshold,
+                        peaks + row * nb, &c, AP_BACKWARD, start, end);
+      if(r < 0) return -1;
+      if(counts) counts[row] = c;
+      total += c;
+    }
+    if(p->prof) p->c_ref += ap_ticks() - r0;
+    return total;
+  } else if(p->is_dif){
+    for(int j = 0; j < nfire; j++){
+      int d = p->fire_d[j];
+      if(!p->dready[d0 + d]){
+        const float *sp = p->dspec[d0 + d];
+        if(!sp) return -1;
+        if(ap_mf_set_data(p->full, 2 * (d0 + d), sp)) return -1;
+        const float * restrict tw = p->twiddles;
+        float * restrict d1 = p->tw_scratch;
+        for(size_t k = 0; k < p->k; k++){
+          float dr = sp[2 * k], di = sp[2 * k + 1];
+          float wr = tw[2 * k], wi = tw[2 * k + 1];
+          d1[2 * k]     = dr * wr - di * wi;
+          d1[2 * k + 1] = dr * wi + di * wr;
+        }
+        if(ap_mf_set_data(p->full, 2 * (d0 + d) + 1, d1)) return -1;
+        p->dready[d0 + d] = 1;
+      }
+    }
+
+    const size_t nb = ap_hmf_nbins(p, binsize, start, end);
+    size_t wk_s_e = (start + 1) / 2;
+    size_t wk_e_e = (end + 1) / 2;
+    if(wk_e_e > p->k) wk_e_e = p->k;
+    if(wk_s_e > wk_e_e) wk_s_e = wk_e_e;
+
+    size_t wk_s_o = start / 2;
+    size_t wk_e_o = end / 2;
+    if(wk_e_o > p->k) wk_e_o = p->k;
+    if(wk_s_o > wk_e_o) wk_s_o = wk_e_o;
+
+    size_t bs_k = (binsize >= p->n) ? p->k : (binsize / 2 > 0 ? binsize / 2 : 1);
+    size_t nb_e = (wk_e_e > wk_s_e) ? (wk_e_e - wk_s_e + bs_k - 1) / bs_k : 0;
+    size_t nb_o = (wk_e_o > wk_s_o) ? (wk_e_o - wk_s_o + bs_k - 1) / bs_k : 0;
+    size_t nb_alloc = nb > nb_e ? nb : nb_e;
+    if(nb_o > nb_alloc) nb_alloc = nb_o;
+    if(nb_alloc == 0) nb_alloc = 1;
+    if(p->dif_pkcap < nb_alloc){
+      free(p->dif_pk_e); free(p->dif_pk_o);
+      p->dif_pk_e = malloc(nb_alloc * sizeof(ap_peak));
+      p->dif_pk_o = malloc(nb_alloc * sizeof(ap_peak));
+      if(!p->dif_pk_e || !p->dif_pk_o){ p->dif_pkcap = 0; return -1; }
+      p->dif_pkcap = nb_alloc;
+    }
+
+    unsigned long long r0 = p->prof ? ap_ticks() : 0;
+    int total = 0;
+
+    for(int j = 0; j < nfire; j++){
+      int d = p->fire_d[j];
+      int t = p->fire_t[j];
+      const size_t row = (size_t)d * nt + t;
+
+      for(size_t b = 0; b < nb_alloc; b++){
+        p->dif_pk_e[b] = (ap_peak){-1, 0.f, 0.f, 0.f};
+        p->dif_pk_o[b] = (ap_peak){-1, 0.f, 0.f, 0.f};
+      }
+
+      int r_e = (wk_s_e < wk_e_e)
+        ? ap_mf_run(p->full, 2 * (d0 + d), 1, t0 + t, 1, bs_k, threshold,
+                    p->dif_pk_e, NULL, wk_s_e, wk_e_e)
+        : 0;
+      if(r_e < 0) return -1;
+
+      int r_o = (wk_s_o < wk_e_o)
+        ? ap_mf_run(p->full, 2 * (d0 + d) + 1, 1, t0 + t, 1, bs_k, threshold,
+                    p->dif_pk_o, NULL, wk_s_o, wk_e_o)
+        : 0;
+      if(r_o < 0) return -1;
+
+      int c = 0;
+      for(size_t b = 0; b < nb; b++){
+        ap_peak pke = (b < nb_e) ? p->dif_pk_e[b] : (ap_peak){-1, 0.f, 0.f, 0.f};
+        ap_peak pko = (b < nb_o) ? p->dif_pk_o[b] : (ap_peak){-1, 0.f, 0.f, 0.f};
+
+        int64_t idx_e = (pke.index >= 0) ? 2 * (int64_t)pke.index : -1;
+        if(idx_e >= 0 && ((size_t)idx_e < start || (size_t)idx_e >= end)) idx_e = -1;
+
+        int64_t idx_o = (pko.index >= 0) ? 2 * (int64_t)pko.index + 1 : -1;
+        if(idx_o >= 0 && ((size_t)idx_o < start || (size_t)idx_o >= end)) idx_o = -1;
+
+        float mag_e = (idx_e >= 0) ? ((pke.magnitude > 0.f) ? pke.magnitude : sqrtf(pke.re * pke.re + pke.im * pke.im)) : -1.0f;
+        float mag_o = (idx_o >= 0) ? ((pko.magnitude > 0.f) ? pko.magnitude : sqrtf(pko.re * pko.re + pko.im * pko.im)) : -1.0f;
+
+        ap_peak *outp = peaks + row * nb + b;
+        if(idx_e >= 0 && (idx_o < 0 || mag_e >= mag_o)){
+          outp->index = (long)idx_e;
+          outp->re = pke.re;
+          outp->im = pke.im;
+          outp->magnitude = (pke.magnitude > 0.f) ? pke.magnitude : mag_e;
+          c++;
+        } else if(idx_o >= 0){
+          outp->index = (long)idx_o;
+          outp->re = pko.re;
+          outp->im = pko.im;
+          outp->magnitude = (pko.magnitude > 0.f) ? pko.magnitude : mag_o;
+          c++;
+        } else {
+          outp->index = -1;
+          outp->re = 0.0f;
+          outp->im = 0.0f;
+          outp->magnitude = 0.0f;
+        }
+      }
+      if(counts) counts[row] = c;
+      total += c;
+    }
+    if(p->prof) p->c_ref += ap_ticks() - r0;
+    return total;
+  } else {
+    for(int j = 0; j < nfire; j++){
+      int d = p->fire_d[j];
+      if(!p->dready[d0 + d]){
+        if(!p->dspec[d0 + d]) return -1;
+        if(ap_mf_set_data(p->full, d0 + d, p->dspec[d0 + d])) return -1;
+        p->dready[d0 + d] = 1;
+      }
+    }
+    unsigned long long r0 = p->prof ? ap_ticks() : 0;
+    int r = ap_mf_run_pairs_pooled(p->full, d0, p->fire_d, p->fire_t, nfire,
+                                  t0, binsize, threshold,
+                                  peaks, counts, start, end, nt);
+    if(p->prof) p->c_ref += ap_ticks() - r0;
+    return r;
+  }
+}
+
 int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
                size_t binsize,float threshold,
                ap_peak *peaks,int *counts,size_t start,size_t end){
@@ -324,7 +591,7 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
   if(end>p->n) end=p->n;
   if(start>=end) return 0;
   const size_t n=p->n,m=p->m;
-  const size_t nb=ap_mf_nbins(p->full,binsize,start,end);
+  const size_t nb=ap_hmf_nbins(p,binsize,start,end);
 
   if(!isfinite(p->cal_thr) || p->cal_thr < 0) return -1;
   /* Coarse sample j maps to full lag j*R. Widen by one coarse sample
@@ -413,19 +680,8 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
     }
 
     if(nfire){
-      for(int j = 0; j < nfire; j++){
-        int d = p->fire_d[j];
-        if(!p->dready[d0 + d]){
-          if(!p->dspec[d0 + d]) return -1;
-          if(ap_mf_set_data(p->full, d0 + d, p->dspec[d0 + d])) return -1;
-          p->dready[d0 + d] = 1;
-        }
-      }
-      unsigned long long r0 = p->prof ? ap_ticks() : 0;
-      int r = ap_mf_run_pairs_pooled(p->full, d0, p->fire_d, p->fire_t, nfire,
-                                    t0, binsize, threshold,
-                                    peaks, counts, start, end, nt);
-      if(p->prof) p->c_ref += ap_ticks() - r0;
+      int r = hmf_refine(p, d0, t0, nt, nfire, binsize, threshold,
+                         peaks, counts, start, end);
       if(r < 0) return -1;
       total += r;
     }
@@ -477,21 +733,10 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
     }
   }
   if(nfire){
-    for(int j = 0; j < nfire; j++){
-      int d = p->fire_d[j];
-      if(!p->dready[d0+d]){
-        if(!p->dspec[d0+d]) return -1;
-        if(ap_mf_set_data(p->full,d0+d,p->dspec[d0+d])) return -1;
-        p->dready[d0+d]=1;
-      }
-    }
-    unsigned long long r0 = p->prof ? ap_ticks() : 0;
-    int r = ap_mf_run_pairs_pooled(p->full, d0, p->fire_d, p->fire_t, nfire,
-                                  t0, binsize, threshold,
-                                  peaks, counts, start, end, nt);
-    if(p->prof) p->c_ref += ap_ticks()-r0;
-    if(r<0) return -1;
-    total+=r;
+    int r = hmf_refine(p, d0, t0, nt, nfire, binsize, threshold,
+                       peaks, counts, start, end);
+    if(r < 0) return -1;
+    total += r;
   }
   return total;
 }

@@ -478,13 +478,14 @@ static PyTypeObject MFType={
    only genuinely new surface is stats(), which reports the trigger rate - the
    quantity the whole speedup rides on, and the first thing to look at when the
    filter is slower than expected on a particular data set. */
-typedef struct { PyObject_HEAD ap_hmf_plan *p; Py_ssize_t n; int nd,nt; ap_peak *peaks; Py_ssize_t peak_capacity; } HMFObject;
+typedef struct { PyObject_HEAD ap_hmf_plan *p; Py_ssize_t n, k; int nd,nt; ap_peak *peaks; Py_ssize_t peak_capacity; } HMFObject;
 
 static int HMF_init(HMFObject *self,PyObject *args,PyObject *kw){
   Py_ssize_t n; int nd,nt; double snr,fd; (void)kw;
-  Py_ssize_t band=0; int u=0,k=0,group=8;
+  Py_ssize_t band=0; int u=0,taps=0,group=8;
   Py_ssize_t band0=0;
-  if(!PyArg_ParseTuple(args,"niidd|niiin",&n,&nd,&nt,&snr,&fd,&band,&u,&k,&group,&band0)) return -1;
+  Py_ssize_t k_bins=0;
+  if(!PyArg_ParseTuple(args,"niidd|niiinn",&n,&nd,&nt,&snr,&fd,&band,&u,&taps,&group,&band0,&k_bins)) return -1;
   /* band and taps are required: the choice belongs to the measured tuning
      tables, which the Python class reads and which refuse rather than guess
      outside their coverage. `u` is accepted and ignored -- the oversample is
@@ -493,13 +494,10 @@ static int HMF_init(HMFObject *self,PyObject *args,PyObject *kw){
   if(!band){ PyErr_SetString(PyExc_ValueError,
       "band and taps are required; HierarchicalFilter picks them "
       "from the tuning tables"); return -1; }
-  if(band0>0){
-    self->p = ap_hmf_create_cascade((size_t)n,nd,nt,(float)snr,(float)fd,(size_t)band0,(size_t)band,k,group);
-  } else {
-    self->p = ap_hmf_create_grouped((size_t)n,nd,nt,(float)snr,(float)fd,(size_t)band,k,group);
-  }
+  self->k = (k_bins > 0) ? k_bins : n;
+  self->p = ap_hmf_create_cascade_k((size_t)n,(size_t)self->k,nd,nt,(float)snr,(float)fd,(size_t)band0,(size_t)band,taps,group);
   if(!self->p){ PyErr_Format(PyExc_ValueError,
-      "no hierarchical plan for n=%zd band=%zd u=%d k=%d",n,band,u,k); return -1; }
+      "no hierarchical plan for n=%zd k=%zd band=%zd u=%d taps=%d",n,self->k,band,u,taps); return -1; }
   self->n=n; self->nd=nd; self->nt=nt; return 0;
 }
 static void HMF_dealloc(HMFObject *self){
@@ -510,9 +508,10 @@ static void HMF_dealloc(HMFObject *self){
 static PyObject *HMF_set(HMFObject *self,PyObject *args,int is_data){
   int i; Py_buffer b;
   if(!PyArg_ParseTuple(args,"iy*",&i,&b)) return NULL;
-  if(b.len < self->n*2*(Py_ssize_t)sizeof(float)){
+  Py_ssize_t req = (is_data ? self->n : self->k) * 2 * (Py_ssize_t)sizeof(float);
+  if(b.len < req){
     PyBuffer_Release(&b);
-    return PyErr_Format(PyExc_ValueError,"segment must hold %zd complex64 samples",self->n);
+    return PyErr_Format(PyExc_ValueError,"segment must hold %zd complex64 samples",is_data ? self->n : self->k);
   }
   int r;
   Py_BEGIN_ALLOW_THREADS
@@ -529,10 +528,10 @@ static PyObject *HMF_set_reference(HMFObject *self,PyObject *args){
   int r;
   if(!b.buf){ r=ap_hmf_set_reference(self->p,NULL); }
   else {
-    if(b.len < self->n*(Py_ssize_t)sizeof(float)){
+    if(b.len < self->k*(Py_ssize_t)sizeof(float)){
       PyBuffer_Release(&b);
       return PyErr_Format(PyExc_ValueError,
-                          "reference must hold %zd float32 values",self->n);
+                          "reference must hold %zd float32 values",self->k);
     }
     r=ap_hmf_set_reference(self->p,(const float*)b.buf);
   }
@@ -543,7 +542,8 @@ static PyObject *HMF_set_reference(HMFObject *self,PyObject *args){
 static PyObject *HMF_set_batch(HMFObject *self,PyObject *args,int is_data){
   int i0; Py_buffer b;
   if(!PyArg_ParseTuple(args,"iy*",&i0,&b)) return NULL;
-  Py_ssize_t rowbytes = self->n*2*(Py_ssize_t)sizeof(float);
+  Py_ssize_t step_samples = is_data ? self->n : self->k;
+  Py_ssize_t rowbytes = step_samples*2*(Py_ssize_t)sizeof(float);
   if(rowbytes <= 0 || b.len < rowbytes || b.len % rowbytes != 0){
     PyBuffer_Release(&b);
     return PyErr_Format(PyExc_ValueError,"buffer size must be a positive multiple of row size (%zd bytes)",rowbytes);
@@ -557,9 +557,9 @@ static PyObject *HMF_set_batch(HMFObject *self,PyObject *args,int is_data){
   const float *ptr = (const float*)b.buf;
   int r = 0;
   Py_BEGIN_ALLOW_THREADS
-  for(int k=0;k<count;k++){
-    r = is_data ? ap_hmf_set_data(self->p,i0+k,ptr+(size_t)k*self->n*2)
-                : ap_hmf_set_template(self->p,i0+k,ptr+(size_t)k*self->n*2);
+  for(int idx=0;idx<count;idx++){
+    r = is_data ? ap_hmf_set_data(self->p,i0+idx,ptr+(size_t)idx*step_samples*2)
+                : ap_hmf_set_template(self->p,i0+idx,ptr+(size_t)idx*step_samples*2);
     if(r < 0) break;
   }
   Py_END_ALLOW_THREADS
@@ -719,6 +719,16 @@ static PyObject *HMF_series_group(HMFObject *self,PyObject *unused){
   (void)unused; return PyLong_FromLong(ap_hmf_series_group(self->p));
 }
 
+static PyObject *HMF_set_hermitian(HMFObject *self,PyObject *args){
+  int h;
+  if(!PyArg_ParseTuple(args,"p",&h)) return NULL;
+  if(ap_hmf_set_hermitian(self->p,h)<0){
+    PyErr_SetString(PyExc_RuntimeError,"failed to set hermitian mode");
+    return NULL;
+  }
+  Py_RETURN_NONE;
+}
+
 static PyMethodDef HMF_methods[]={
   {"series_group",(PyCFunction)HMF_series_group,METH_NOARGS,"actual series block group"},
   {"set_data",(PyCFunction)HMF_set_data,METH_VARARGS,"set_data(i, buffer)"},
@@ -728,6 +738,7 @@ static PyMethodDef HMF_methods[]={
   {"set_reference",(PyCFunction)HMF_set_reference,METH_VARARGS,"set_reference(buffer|None)"},
   {"set_first_stage",(PyCFunction)HMF_set_first_stage,METH_VARARGS,"set_first_stage(snr)"},
   {"set_threshold",(PyCFunction)HMF_set_threshold,METH_VARARGS,"set_threshold(t)"},
+  {"set_hermitian",(PyCFunction)HMF_set_hermitian,METH_VARARGS,"set_hermitian(bool)"},
   {"run",(PyCFunction)HMF_run,METH_VARARGS,"run(...) -> total crossings"},
   {"nbins",(PyCFunction)HMF_nbins,METH_VARARGS,"nbins(binsize, start, end)"},
   {"run_series",(PyCFunction)HMF_run_series,METH_VARARGS,"run_series(...)"},
@@ -736,12 +747,40 @@ static PyMethodDef HMF_methods[]={
   {"coarse_threshold",(PyCFunction)HMF_coarse_threshold,METH_VARARGS,NULL},
   {NULL}
 };
+static PyObject *HMF_get_n(HMFObject *self, void *closure){
+  (void)closure;
+  return PyLong_FromSsize_t(self->n);
+}
+static PyObject *HMF_get_k(HMFObject *self, void *closure){
+  (void)closure;
+  return PyLong_FromSsize_t(self->k);
+}
+static PyObject *HMF_get_hermitian(HMFObject *self, void *closure){
+  (void)closure;
+  return PyBool_FromLong(ap_hmf_get_hermitian(self->p));
+}
+static int HMF_set_hermitian_prop(HMFObject *self, PyObject *value, void *closure){
+  (void)closure;
+  if(!value){
+    PyErr_SetString(PyExc_AttributeError, "cannot delete attribute 'hermitian'");
+    return -1;
+  }
+  int h = PyObject_IsTrue(value);
+  if(h < 0) return -1;
+  return ap_hmf_set_hermitian(self->p, h);
+}
+static PyGetSetDef HMF_getset[] = {
+  {"n", (getter)HMF_get_n, NULL, "full FFT size", NULL},
+  {"k", (getter)HMF_get_k, NULL, "template bins", NULL},
+  {"hermitian", (getter)HMF_get_hermitian, (setter)HMF_set_hermitian_prop, "Hermitian symmetry mode for real filters", NULL},
+  {NULL}
+};
 static PyTypeObject HMFType={
   PyVarObject_HEAD_INIT(NULL,0)
   .tp_name="matchedfilter._core.HMF", .tp_basicsize=sizeof(HMFObject),
   .tp_flags=Py_TPFLAGS_DEFAULT, .tp_new=PyType_GenericNew,
   .tp_init=(initproc)HMF_init, .tp_dealloc=(destructor)HMF_dealloc,
-  .tp_methods=HMF_methods, .tp_doc="matchedfilter hierarchical matched filter (opaque)",
+  .tp_methods=HMF_methods, .tp_getset=HMF_getset, .tp_doc="matchedfilter hierarchical matched filter (opaque)",
 };
 
 static PyObject *M_backend(PyObject *self,PyObject *args){
