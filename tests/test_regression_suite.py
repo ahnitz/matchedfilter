@@ -68,20 +68,14 @@ def _load_or_generate_bank(T_req=128):
     return _generate_synthetic_bank(T=T_req, L=501)
 
 
-def _compute_reference_spectrum(bank_taps, bank_counts, nfft=2048):
-    """Compute realistic power spectrum reference from template bank."""
-    ref_w = np.zeros(nfft, dtype=np.float32)
-    n_sample = min(len(bank_taps), 16)
-    for t_idx in range(n_sample):
-        h_pad = np.zeros(nfft, dtype=np.float32)
-        c = bank_counts[t_idx]
-        h_pad[:c] = bank_taps[t_idx, :c]
-        h_fft = np.fft.rfft(h_pad)
-        ref_w[:len(h_fft)] += np.abs(h_fft) ** 2
-    max_val = np.max(ref_w)
-    if max_val > 0:
-        ref_w /= max_val
-    return ref_w
+def _compute_reference_spectrum(bank_taps=None, bank_counts=None, nfft=2048, exponent=-7 / 3.0, knee_frac=0.0150):
+    """Compute realistic inspiral power spectrum reference for nfft."""
+    p = np.zeros(nfft, dtype=np.float32)
+    k = np.arange(1, nfft // 2).astype(np.float64)
+    p[1:nfft // 2] = (k ** exponent / ((knee_frac * nfft / k) ** 4 + 1.0)).astype(np.float32)
+    tot = float(p.sum())
+    return p / tot if tot > 0 else p
+
 
 
 # =============================================================================
@@ -388,7 +382,7 @@ def test_timedomain_multigroup_real_bank_contract():
     if not os.path.exists(bank_path):
         pytest.skip(f"Reference bank {bank_path} not found")
 
-    import h5py
+    h5py = pytest.importorskip("h5py")
     taps_list = []
     counts_list = []
     with h5py.File(bank_path, "r") as f:
@@ -436,7 +430,7 @@ def test_hierarchical_fine_fir_throughput_contract():
     if not os.path.exists(bank_path):
         pytest.skip(f"Reference bank {bank_path} not found")
 
-    import h5py
+    h5py = pytest.importorskip("h5py")
     with h5py.File(bank_path, "r") as f:
         # Load middle group 0 (260 templates)
         g = f["fir_data/0"]
