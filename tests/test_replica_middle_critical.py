@@ -6,10 +6,10 @@ using positive-frequency response bins directly from the real 2048 Hz taps:
 2. Requires exactly 50% buffer memory.
 3. Yields > 2x speedup on Zen 5 (dev2).
 """
+import os
 import time
 import numpy as np
 import pytest
-import h5py
 from matchedfilter import _automatic_series_layout, CorrelationFilter
 
 
@@ -18,6 +18,9 @@ BANK_FILE = "/home/ahnitz/projects/claude/searchdev/work/scale100k/fir_three_lev
 
 @pytest.fixture(scope="module")
 def bank_data():
+    if not os.path.exists(BANK_FILE):
+        pytest.skip(f"Bank file {BANK_FILE} not found")
+    h5py = pytest.importorskip("h5py")
     f = h5py.File(BANK_FILE, "r")
     g = f["fir_data/upper/0"]
     taps = g["taps"][:]
