@@ -99,7 +99,7 @@ typedef struct {
  * See docs/cpu-plan.md and tools/bench_pairbatch.py for ingestion-inclusive
  * measurements and the dispatch rule. MF_PBMAX remains an explicit override. */
 static inline int pairbatch_size(size_t N){
-  if(N>1024u||!esupported((int)N)) return 0;
+  if(N>2048u||!esupported((int)N)) return 0;
   size_t lim = 128u;
   { const char *e=getenv("MF_PBMAX"); if(e) lim=(size_t)atol(e); }
   return N<=lim;

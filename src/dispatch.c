@@ -40,7 +40,7 @@ const char *ap_plan_backend(const ap_plan *p){ return p?p->be->name:"none"; }
 
 ap_plan *ap_create_pairbatch(size_t N){
   const ap_backend *b=pick();
-  if(!b || N<64 || N>1024 || !b->supported(N) || !b->create_pairbatch) return NULL;
+  if(!b || N<64 || N>2048 || !b->supported(N) || !b->create_pairbatch) return NULL;
   void *h=b->create_pairbatch(N);
   if(!h) return NULL;
   ap_plan *p=malloc(sizeof(*p));

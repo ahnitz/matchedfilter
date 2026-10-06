@@ -848,8 +848,11 @@ class MatchedFilter:
                                    np.empty(0, dtype=np.float32),
                                    np.empty(nblk * nt, dtype=np.int32))
             _, idx, val, mag, cnt = sb
-            self._execution_plan().run_series(ser, st, ws, we, t0, nt, binsize,
-                                              float(threshold), idx, val, mag, cnt)
+            tot = self._execution_plan().run_series(ser, st, ws, we, t0, nt, binsize,
+                                                    float(threshold), idx, val, mag, cnt)
+            self._last_n_triggers = tot
+            if tot == 0 and layout.order is not None:
+                return (idx.reshape(shape), val.reshape(shape))
             return _format_result(idx.reshape(shape), val.reshape(shape),
                                   raw=True, order=layout.order)
         spbuf = getattr(self, '_spbuf', None)
@@ -861,8 +864,9 @@ class MatchedFilter:
                                    np.empty(0, dtype=np.float32),
                                    np.empty(nblk * nt, dtype=np.int32))
         _, peaks, empty_idx, empty_val, mag, cnt = spbuf
-        self._execution_plan().run_series(ser, st, ws, we, t0, nt, binsize,
-                                          float(threshold), empty_idx, empty_val, mag, cnt, peaks)
+        tot = self._execution_plan().run_series(ser, st, ws, we, t0, nt, binsize,
+                                                float(threshold), empty_idx, empty_val, mag, cnt, peaks)
+        self._last_n_triggers = tot
         return _format_result(None, None, raw=False, order=layout.order, out=peaks)
 
     def run_blocks(self, series, starts, win_start, win_end,
@@ -1855,7 +1859,7 @@ def candidate_configs(power, n, snr, fd, tuning=None, pairs=None, device=None, c
         min_floor = _min_band_for(device, tuning)
         is_gpu = getattr(device, "kind", None) == "gpu" or (isinstance(device, str) and device.lower().startswith("gpu"))
         default_k = 4 if is_gpu else 8
-        b_target = max(min_floor, n // 8)
+        b_target = max(min_floor, n // 16)
         cand_list = []
         b = b_target
         while b < n:
@@ -2087,6 +2091,9 @@ class HierarchicalFilter(MatchedFilter):
             self.cascade = True
         else:
             self.cascade = True if band is None else False
+        env_casc = os.environ.get("MF_CASCADE")
+        if env_casc is not None:
+            self.cascade = bool(env_casc.strip().lower() not in ("0", "false", "no", "off"))
         self._initial_cascade = bool(self.cascade)
         if self.ndata < 1 or self.ntemplates < 1:
             raise ValueError("ndata and ntemplates must be >= 1")
@@ -2174,7 +2181,7 @@ class HierarchicalFilter(MatchedFilter):
     def _new_cpu_plan(self, band, taps, cascade_band=None):
         self._execution_policy = self._series_policy('hierarchical_series', band, self.ntemplates)
         cband = cascade_band if cascade_band is not None else getattr(self, 'cascade_band', None)
-        default_grp = 32 if self.n <= 512 else (16 if self.n <= 1024 else 8)
+        default_grp = 32 if self.n <= 2048 else 16
         grp = self._execution_policy.get('series_group', default_grp)
         if cband is not None and cband > 0:
             return _core.HMF(self.n, self.ndata, self.ntemplates, self.snr, self.fd,
@@ -2232,6 +2239,13 @@ class HierarchicalFilter(MatchedFilter):
                                                          pairs=self.ndata * self.ntemplates,
                                                          device=self.device,
                                                          cascade=self.cascade)
+                best_model = choose_config(self._pending_ref, self.n, self.snr, self.fd,
+                                           tuning=tuning,
+                                           pairs=self.ndata * self.ntemplates,
+                                           device=self.device,
+                                           cascade=self.cascade)
+                if best_model is not None and any(_config_key(c) == _config_key(best_model) for c in candidates):
+                    candidates = [best_model] + [c for c in candidates if _config_key(c) != _config_key(best_model)]
                 if os.environ.get("MF_AUTOTUNE", "1").strip().lower() in ("0", "false", "no", "off"):
                     candidates = candidates[:1]
                 self.autotune_info["rejected"] = rejected
@@ -3103,6 +3117,8 @@ class HierarchicalFilter(MatchedFilter):
                 raise ValueError("reference must be a one-dimensional array of length %d" % self.n)
             if not np.isfinite(p).all() or np.any(p < 0) or not np.any(p > 0):
                 raise ValueError("reference must be finite, nonnegative, with positive total power")
+            if self._pending_ref is not None and np.array_equal(p, self._pending_ref):
+                return
         if self._gpu is not None:
             # Calibration and scaled coarse templates depend on the reference,
             # even when the template spectra themselves have not changed.
@@ -3112,11 +3128,13 @@ class HierarchicalFilter(MatchedFilter):
         if self._mf is not None and self._cal_thr is None:
             self._mf.set_threshold(-1.0)
         if power is None:
+            if self._pending_ref is None:
+                return
             self._pending_ref = None
             if self._mf is not None:
                 self._mf.set_reference(None)
             return
-        self._pending_ref = p
+        self._pending_ref = p.copy()
         if self._mf is not None:
             self._mf.set_reference(p)
 

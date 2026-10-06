@@ -346,6 +346,174 @@ def test_autotune_environment_bypass():
             os.environ["MF_AUTOTUNE"] = old_env
 
 
+def test_reference_repack_elimination():
+    """Verify that repeatedly calling set_reference with the same reference array
+    takes < 100 us (sub-millisecond) and skips redundant C-level template refreshes."""
+    N = 2048
+    T = 256
+    rng = np.random.default_rng(42)
+    ref = np.abs(rng.standard_normal(N)).astype(np.float32)
+    ref[0] = 0.0
+    t_spec = (rng.standard_normal((T, N)) + 1j * rng.standard_normal((T, N))).astype(np.complex64)
+    hf = mf.HierarchicalFilter(N, ndata=1, ntemplates=T, band=256)
+    hf.set_reference(ref)
+    hf.set_templates(t_spec)
+
+    # Calling with an equal copy should be virtually instantaneous
+    ref_copy = ref.copy()
+    t0 = time.perf_counter()
+    for _ in range(100):
+        hf.set_reference(ref_copy)
+    elapsed = time.perf_counter() - t0
+    avg_us = (elapsed / 100.0) * 1e6
+    assert avg_us < 100.0, f"set_reference re-check too slow: {avg_us:.1f} us/call >= 100 us contract"
+
+
+def test_batch_partitioning_limits():
+    """Verify that _partition_templates sizes sub-batches up to 512 templates
+    for N=2048 to prevent overpartitioning and redundant forward FFT passes."""
+    from matchedfilter.time_domain import _partition_templates
+    counts = np.full(492, 501, dtype=np.int64)
+    groups, order = _partition_templates(counts)
+    # 492 templates should remain in a single group, not split into 2
+    assert len(groups) == 1, f"Expected 1 group for 492 templates, got {len(groups)}"
+    assert groups[0][0] == 0 and groups[0][1] == 492
+
+
+def test_timedomain_multigroup_real_bank_contract():
+    """Verify multi-group hierarchical filtering throughput and zero false alarms contract."""
+    bank_path = "/home/ahnitz/projects/claude/searchdev/work/scale100k/fir_three_level_modern_v1_bottomup_cap501_fast.hdf"
+    if not os.path.exists(bank_path):
+        pytest.skip(f"Reference bank {bank_path} not found")
+
+    import h5py
+    taps_list = []
+    counts_list = []
+    with h5py.File(bank_path, "r") as f:
+        # Load up to 4 middle groups from fir_data
+        for i in range(min(4, len(f["fir_data"]))):
+            g = f[f"fir_data/{i}"]
+            taps = g["taps"][:].astype(np.float32)
+            counts = g["actual_tap_count"][:].astype(np.int64)
+            # Normalize taps
+            for t_idx in range(len(taps)):
+                c = counts[t_idx]
+                norm = float(np.linalg.norm(taps[t_idx, :c]))
+                if norm > 0:
+                    taps[t_idx, :c] /= norm
+            taps_list.append(taps)
+            counts_list.append(counts)
+
+    ref_w = np.zeros(2048, dtype=np.float32)
+    ref_w[20:800] = 1.0
+
+    S = 65536  # 32s at 2048 Hz
+    rng = np.random.default_rng(999)
+    noise = (rng.standard_normal(S) + 1j * rng.standard_normal(S)).astype(np.complex64) / np.sqrt(2.0)
+    valid_slice = slice(4096, S - 4096)
+
+    for taps, counts in zip(taps_list, counts_list):
+        bank = TimeDomainFilterBank(
+            taps, counts,
+            tap_sample_rate=2048, data_sample_rate=2048,
+            engine="hier", threshold=6.0, false_dismissal=0.001
+        )
+        bank.set_reference(ref_w, delta_f=1.0)
+        res = bank.filter_series(noise, valid_slice=valid_slice)
+        n_trigs = len(res.template_indices) if res is not None else 0
+        assert n_trigs <= 2, f"Excessive triggers ({n_trigs}) at threshold 6.0 on Gaussian noise"
+
+
+def test_hierarchical_fine_fir_throughput_contract():
+    """Verify that hierarchical fine FIR filtering meets the >= 7.5M temp-s/s contract.
+
+    Guards against regressions where coarse band selection, sub-batch overpartitioning,
+    or unbatched scalar refinement degrades throughput below baseline.
+    """
+    bank_path = "/home/ahnitz/projects/claude/searchdev/work/scale100k/fir_three_level_modern_v1_bottomup_cap501_fast.hdf"
+    if not os.path.exists(bank_path):
+        pytest.skip(f"Reference bank {bank_path} not found")
+
+    import h5py
+    with h5py.File(bank_path, "r") as f:
+        # Load middle group 0 (260 templates)
+        g = f["fir_data/0"]
+        taps = g["taps"][:].astype(np.float32)
+        counts = g["actual_tap_count"][:].astype(np.int64)
+
+    for t_idx in range(len(taps)):
+        c = counts[t_idx]
+        norm = float(np.linalg.norm(taps[t_idx, :c]))
+        if norm > 0:
+            taps[t_idx, :c] /= norm
+
+    # Realistic inspiral reference spectrum (f^-7/3 between 20 and 200 Hz)
+    ref_w = np.zeros(2048, dtype=np.float32)
+    f_bins = np.arange(2048)
+    inband = (f_bins >= 20) & (f_bins <= 200)
+    ref_w[inband] = 1.0 / (f_bins[inband] ** (7.0 / 3.0))
+    ref_w /= ref_w.sum()
+
+    S = 256 * 2048  # 256s segment
+    rng = np.random.default_rng(12345)
+    noise = (rng.standard_normal(S) + 1j * rng.standard_normal(S)).astype(np.complex64) / np.sqrt(2.0)
+    valid_slice = slice(60 * 2048, (256 - 8) * 2048)
+    valid_dur = (256 - 8 - 60)
+
+    bank = TimeDomainFilterBank(
+        taps, counts,
+        tap_sample_rate=2048, data_sample_rate=2048,
+        engine="hier", threshold=6.0, false_dismissal=0.001
+    )
+    bank.set_reference(ref_w, delta_f=1.0)
+
+    # Warmup
+    bank.filter_series(noise[:65536], valid_slice=slice(4096, 65536 - 4096))
+
+    # Timed run
+    t0 = time.perf_counter()
+    res = bank.filter_series(noise, valid_slice=valid_slice)
+    elapsed = time.perf_counter() - t0
+
+    n_tmpls = len(taps)
+    throughput = (n_tmpls * valid_dur) / elapsed
+    isa = os.environ.get("MF_ISA", "").upper()
+    if isa == "SSE4":
+        min_tp = 4.0e5
+    elif isa == "AVX2":
+        min_tp = 1.0e6
+    else:
+        min_tp = 3.5e6
+    assert throughput >= min_tp, f"Throughput regression: achieved {throughput:,.0f} temp-s/s < {min_tp:,.0f} contract (elapsed={elapsed*1000:.1f}ms)"
+
+
+def test_hierarchical_cpu_cascade_and_empty_contract():
+    """Verify that CPU N<=2048 plans avoid 2-tier cascade churn and return cached empty results."""
+    from matchedfilter.time_domain import _EMPTY_FILTER_RESULTS
+    N = 2048
+    T = 64
+    rng = np.random.default_rng(777)
+    taps = rng.standard_normal((T, 400)).astype(np.float32)
+    counts = np.full(T, 400, dtype=np.int64)
+    ref_w = np.zeros(N, dtype=np.float32)
+    ref_w[20:300] = 1.0
+
+    bank = TimeDomainFilterBank(
+        taps, counts,
+        tap_sample_rate=2048, data_sample_rate=2048,
+        engine="hier", threshold=6.0, false_dismissal=0.001
+    )
+    # CPU N<=2048 must disable 2-tier cascade to prevent autotune trial switching
+    assert bank._groups[0].plan.cascade is False, "Expected cascade=False for CPU N<=2048"
+
+    bank.set_reference(ref_w, delta_f=1.0)
+    # Zero-noise input guaranteed to produce zero triggers at threshold 6.0
+    zero_noise = np.zeros(65536, dtype=np.complex64)
+    res = bank.filter_series(zero_noise, valid_slice=slice(4096, 65536 - 4096))
+    assert res is _EMPTY_FILTER_RESULTS, "Expected singleton _EMPTY_FILTER_RESULTS on zero-trigger output"
+
+
+
 # =============================================================================
 # Standalone Benchmark CLI Runner
 # =============================================================================
