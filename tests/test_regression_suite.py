@@ -132,7 +132,7 @@ def test_timedomain_filterbank_noise_contract(engine):
     """Enforce strict threshold contract: unit Gaussian noise at threshold=6.0 yields <= 2 triggers."""
     N_ser = 131072  # 64s at 2048 Hz
     rng = np.random.default_rng(999)
-    noise_ser = (rng.standard_normal(N_ser) + 1j * rng.standard_normal(N_ser)).astype(np.complex64) / np.sqrt(2.0)
+    noise_ser = (rng.standard_normal(N_ser) + 1j * rng.standard_normal(N_ser)).astype(np.complex64) / np.float32(np.sqrt(2.0))
     valid_slice = slice(4096, N_ser - 4096)
 
     bank_taps, bank_counts = _load_or_generate_bank(T_req=128)
@@ -155,7 +155,7 @@ def test_signal_injection_recovery(engine):
     """Verify injection recovery fidelity and timing parity across all filtering engines."""
     N_ser = 131072
     rng = np.random.default_rng(999)
-    noise_ser = (rng.standard_normal(N_ser) + 1j * rng.standard_normal(N_ser)).astype(np.complex64) / np.sqrt(2.0)
+    noise_ser = (rng.standard_normal(N_ser) + 1j * rng.standard_normal(N_ser)).astype(np.complex64) / np.float32(np.sqrt(2.0))
     valid_slice = slice(4096, N_ser - 4096)
 
     bank_taps, bank_counts = _load_or_generate_bank(T_req=128)
@@ -293,7 +293,7 @@ def test_autotune_threshold_contract_during_tuning():
     N = 2048
     N_ser = 131072
     rng = np.random.default_rng(777)
-    noise_ser = (rng.standard_normal(N_ser) + 1j * rng.standard_normal(N_ser)).astype(np.complex64) / np.sqrt(2.0)
+    noise_ser = (rng.standard_normal(N_ser) + 1j * rng.standard_normal(N_ser)).astype(np.complex64) / np.float32(np.sqrt(2.0))
     valid_slice = slice(4096, N_ser - 4096)
 
     bank_taps, bank_counts = _load_or_generate_bank(T_req=128)
@@ -405,7 +405,7 @@ def test_timedomain_multigroup_real_bank_contract():
 
     S = 65536  # 32s at 2048 Hz
     rng = np.random.default_rng(999)
-    noise = (rng.standard_normal(S) + 1j * rng.standard_normal(S)).astype(np.complex64) / np.sqrt(2.0)
+    noise = (rng.standard_normal(S) + 1j * rng.standard_normal(S)).astype(np.complex64) / np.float32(np.sqrt(2.0))
     valid_slice = slice(4096, S - 4096)
 
     for taps, counts in zip(taps_list, counts_list):
@@ -452,7 +452,12 @@ def test_hierarchical_fine_fir_throughput_contract():
 
     S = 256 * 2048  # 256s segment
     rng = np.random.default_rng(12345)
-    noise = (rng.standard_normal(S) + 1j * rng.standard_normal(S)).astype(np.complex64) / np.sqrt(2.0)
+    noise = (rng.standard_normal(S) + 1j * rng.standard_normal(S)).astype(np.complex64) / np.float32(np.sqrt(2.0))
+    # Must be complex64, as pycbc passes it. Under NumPy 2 a float64 scalar
+    # (np.sqrt(2.0)) promotes the series to complex128, and filter_series
+    # then converts it back on every call -- measured at 24% of runtime,
+    # which this contract was silently charging to the library.
+    assert noise.dtype == np.complex64
     valid_slice = slice(60 * 2048, (256 - 8) * 2048)
     valid_dur = (256 - 8 - 60)
 
@@ -619,7 +624,7 @@ def run_suite():
     print("\n--- 3. TimeDomainFilterBank Interface (Series & Invariants) ---")
     N_ser = 131072
     rng = np.random.default_rng(999)
-    noise_ser = (rng.standard_normal(N_ser) + 1j * rng.standard_normal(N_ser)).astype(np.complex64) / np.sqrt(2.0)
+    noise_ser = (rng.standard_normal(N_ser) + 1j * rng.standard_normal(N_ser)).astype(np.complex64) / np.float32(np.sqrt(2.0))
     valid_slice = slice(4096, N_ser - 4096)
 
     bank_taps, bank_counts = _load_or_generate_bank(T_req=128)
