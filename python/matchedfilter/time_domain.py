@@ -21,213 +21,6 @@ class FilterResults(NamedTuple):
     block_lengths: np.ndarray      # int64: FFT block length used for this template
 
 
-def _make_kaiser_sinc_kernel(
-    K: int = 32,
-    nu_c: float = 0.40,
-    beta: float = 10.5
-) -> Tuple[np.ndarray, np.ndarray]:
-    """Precompute 32-tap Kaiser sinc half-sample delay filter demodulated at band center nu_c."""
-    j = np.arange(-K // 2 + 1, K // 2 + 1)  # -15 .. 16
-    x = 0.5 - j
-    sinc = np.sin(np.pi * x) / (np.pi * x)
-    r = (j - 0.5) / (K / 2.0)
-    w = np.zeros(K, dtype=np.float64)
-    mask = np.abs(r) <= 1.0
-    w[mask] = np.i0(beta * np.sqrt(1.0 - r[mask] ** 2)) / np.i0(beta)
-    demod = np.exp(2j * np.pi * nu_c * x)
-    g = (sinc * w * demod).astype(np.complex64)
-    return j, g
-
-
-_KERNEL_CACHE: Dict[Tuple[int, float, float], Tuple[np.ndarray, np.ndarray]] = {}
-
-
-def _get_interp_kernel(
-    K: int = 32,
-    nu_c: float = 0.40,
-    beta: float = 10.5,
-    fc: Optional[float] = None,
-    fs: Optional[float] = None
-) -> Tuple[np.ndarray, np.ndarray]:
-    if fc is not None and fs is not None and fs > 0:
-        nu_c = float(fc) / float(fs)
-    key = (K, round(float(nu_c), 6), float(beta))
-    k = _KERNEL_CACHE.get(key)
-    if k is None:
-        k = _make_kaiser_sinc_kernel(K, nu_c=nu_c, beta=beta)
-        _KERNEL_CACHE[key] = k
-    return k
-
-
-def _fold_taps_2x(
-    h_group: np.ndarray,
-    g_kernel: np.ndarray,
-    j_indices: np.ndarray,
-    Nin: int,
-    Ne: int
-) -> np.ndarray:
-    """Fold input-rate taps array (T, Nin) into engine rate (T, Ne).
-    h_e[q] = h[2q] + sum_j conj(g[j]) * h[(2(q-j)+1) % Nin]
-    """
-    q = np.arange(Ne)
-    h_e_group = h_group[:, 2 * q].astype(np.complex64)
-    odd_idx = (2 * (q[None, :] - j_indices[:, None]) + 1) % Nin
-    odd_vals = h_group[:, odd_idx]  # (T, K, Ne)
-    h_e_group += np.tensordot(odd_vals, np.conj(g_kernel), axes=([1], [0]))
-    return h_e_group
-
-
-class AnalyticSeries:
-    """Band-limited analytic signal series sampled at a reduced rate.
-
-    Holds complex analytic data sampled at `sample_rate` (e.g. 1024 Hz) with support in
-    `band = (f_low, f_high)` (e.g. [20, 800) Hz). Provides on-demand band-limited
-    interpolation back to full `input_sample_rate` (e.g. 2048 Hz) via `window(start, stop)`
-    using a 32-tap band-centered Kaiser filter (accuracy <= 4e-6 relative error).
-    """
-
-    def __init__(
-        self,
-        data: np.ndarray,
-        *,
-        sample_rate: float = 1024.0,
-        input_sample_rate: float = 2048.0,
-        band: Optional[Tuple[float, float]] = None,
-        nu_c: Optional[float] = None,
-        offset: int = 0
-    ):
-        self.data = np.asarray(data, dtype=np.complex64)
-        self.sample_rate = float(sample_rate)
-        self.input_sample_rate = float(input_sample_rate)
-        self.rate_ratio = self.input_sample_rate / self.sample_rate
-        self.band = (float(band[0]), float(band[1])) if band is not None else None
-        self.offset = int(offset)
-        if nu_c is not None:
-            self.nu_c = float(nu_c)
-        elif self.band is not None:
-            self.nu_c = (self.band[0] + self.band[1]) / (2.0 * self.sample_rate)
-        else:
-            self.nu_c = 0.40
-        self._j, self._g = _get_interp_kernel(32, nu_c=self.nu_c)
-
-    @property
-    def input_size(self) -> int:
-        """Total length in full input-rate samples."""
-        return int(round(self.data.shape[-1] * self.rate_ratio))
-
-    @property
-    def shape(self) -> Tuple[int, ...]:
-        """Shape in full input-rate samples."""
-        return self.data.shape[:-1] + (self.input_size,)
-
-    @property
-    def ndim(self) -> int:
-        return self.data.ndim
-
-    @property
-    def size(self) -> int:
-        return self.input_size
-
-    @property
-    def duration(self) -> float:
-        """Duration in seconds."""
-        return self.data.shape[-1] / self.sample_rate
-
-    def window(self, start: Optional[int] = None, stop: Optional[int] = None) -> np.ndarray:
-        """Return full input-rate complex64 samples for input-rate indices [start, stop)."""
-        total = self.input_size
-        s = 0 if start is None else int(start)
-        e = total if stop is None else int(stop)
-        if s < 0:
-            s = max(0, total + s)
-        if e < 0:
-            e = max(0, total + e)
-        if e <= s:
-            return np.empty(self.data.shape[:-1] + (0,), dtype=np.complex64)
-        L = e - s
-        if self.rate_ratio == 1.0:
-            return self.data[..., s:e]
-
-        out = np.empty(self.data.shape[:-1] + (L,), dtype=np.complex64)
-        out_idx = np.arange(L)
-        k_arr = s + out_idx
-        is_even = (k_arr % 2 == 0)
-        M = self.data.shape[-1]
-
-        # Even samples map directly from reduced-rate samples
-        m_even = k_arr[is_even] // 2
-        valid_even = (m_even >= 0) & (m_even < M)
-        out[..., out_idx[is_even][valid_even]] = self.data[..., m_even[valid_even]]
-        if not np.all(valid_even):
-            out[..., out_idx[is_even][~valid_even]] = 0.0
-
-        # Odd samples are evaluated via the 32-tap centered Kaiser filter
-        if np.any(~is_even):
-            m_odd = (k_arr[~is_even] - 1) // 2
-            m_matrix = m_odd[:, None] + self._j[None, :]
-            valid_mask = (m_matrix >= 0) & (m_matrix < M)
-            clamped = np.clip(m_matrix, 0, M - 1)
-            if self.data.ndim == 1:
-                sampled = self.data[clamped]
-                sampled[~valid_mask] = 0.0
-                odd_vals = sampled.dot(self._g)
-                out[out_idx[~is_even]] = odd_vals.astype(np.complex64)
-            else:
-                sampled = self.data[:, clamped]
-                sampled[:, ~valid_mask] = 0.0
-                odd_vals = np.tensordot(sampled, self._g, axes=([2], [0]))
-                out[:, out_idx[~is_even]] = odd_vals.astype(np.complex64)
-        return out
-
-    def __getitem__(self, key: Any) -> Any:
-        if self.data.ndim > 1:
-            if isinstance(key, (int, np.integer)):
-                return AnalyticSeries(
-                    self.data[key],
-                    sample_rate=self.sample_rate,
-                    input_sample_rate=self.input_sample_rate,
-                    band=self.band,
-                    nu_c=self.nu_c,
-                    offset=self.offset,
-                )
-            elif isinstance(key, tuple) and len(key) == 2:
-                row_key, time_key = key
-                if isinstance(time_key, slice):
-                    sub = self.window(time_key.start, time_key.stop)
-                    return sub[row_key]
-                elif isinstance(time_key, (int, np.integer)):
-                    idx = int(time_key)
-                    sub = self.window(idx, idx + 1)
-                    return sub[row_key, ..., 0]
-        if isinstance(key, slice):
-            return self.window(key.start, key.stop)
-        elif isinstance(key, (int, np.integer)):
-            idx = int(key)
-            return self.window(idx, idx + 1)[..., 0]
-        elif isinstance(key, tuple):
-            if len(key) == 2 and isinstance(key[1], slice):
-                return self.window(key[1].start, key[1].stop)[key[0]]
-            raise IndexError(f"Unsupported indexing key {key}")
-        raise TypeError(f"Invalid key type {type(key)}")
-
-    def __iter__(self):
-        if self.data.ndim > 1:
-            for i in range(self.data.shape[0]):
-                yield self[i]
-        else:
-            for val in self.window():
-                yield val
-
-    def __array__(self, dtype=None):
-        arr = self.window()
-        if dtype is not None:
-            return arr.astype(dtype, copy=False)
-        return arr
-
-    def __len__(self) -> int:
-        return self.shape[0] if self.ndim > 1 else self.size
-
-
 def _partition_templates(
     counts: np.ndarray,
     max_batch: Optional[int] = None,
@@ -308,7 +101,7 @@ _REF_BINNED_CACHE: Dict[Tuple[int, int, float], np.ndarray] = {}
 class _TemplateGroup:
     """Internal container for a homogeneous batch of templates sharing an FFT size."""
 
-    def __init__(self, plan, n, template_indices, c_bad, n_valid, spectra, orig_taps_max, device=None, is_dif=False, k=0, twiddles=None, spectra_active=None):
+    def __init__(self, plan, n, template_indices, c_bad, n_valid, spectra, orig_taps_max, device=None):
         self.plan = plan
         self.n = int(n)
         self.template_indices = np.asarray(template_indices, dtype=np.int64)
@@ -321,11 +114,6 @@ class _TemplateGroup:
         self._cached_layout: Optional[Tuple[Tuple[int, int, int], np.ndarray, np.ndarray, np.ndarray]] = None
         self._flat_plan: Optional[Any] = None
         self._corr_plan: Optional[Any] = None
-        self.is_dif = bool(is_dif)
-        self.bandlimited = bool(is_dif)
-        self.k = int(k)
-        self.twiddles = twiddles
-        self.spectra_active = spectra_active
 
     def get_flat_plan(self):
         from . import MatchedFilter, HierarchicalFilter
@@ -383,9 +171,6 @@ class TimeDomainFilterBank:
         fft_lengths: Optional[Sequence[int]] = None,
         reference: Optional[Any] = None,
         analytic: bool = False,
-        execution_rate: Optional[Union[float, str]] = None,
-        decimation: Optional[Union[int, str]] = None,
-        bandlimited: Optional[bool] = None,
     ):
         from . import MatchedFilter, HierarchicalFilter
 
@@ -401,115 +186,18 @@ class TimeDomainFilterBank:
 
         mode = {'pycbc': 'flat', 'matchedfilter': 'flat',
                 'matchedfilter-hierarchical': 'hier',
-                'correlation': 'corr', 'corr': 'corr',
-                'dif': 'dif', 'bandlimited': 'dif',
-                'matchedfilter-dif': 'dif'}.get(engine, engine).lower()
+                'correlation': 'corr', 'corr': 'corr'}.get(engine, engine).lower()
         self.engine = mode
-
-        # Determine decimation factor D
-        chosen_decim = decimation
-        if chosen_decim is None:
-            chosen_decim = execution_rate
-        if chosen_decim is None:
-            chosen_decim = os.environ.get('PYCBC_RATIO_DECIMATION')
-        if chosen_decim is None:
-            chosen_decim = os.environ.get('PYCBC_RATIO_EXECUTION_RATE')
-
-        if bandlimited is not None:
-            is_bandlimited = bool(bandlimited)
-        else:
-            is_bandlimited = (
-                self.engine in ('dif', 'bandlimited', 'matchedfilter-dif')
-                or str(chosen_decim).strip().lower() in ('dif', 'bandlimited')
-                or os.environ.get('PYCBC_RATIO_BANDLIMITED', '0').strip().lower() in ('1', 'true', 'yes')
-                or os.environ.get('PYCBC_RATIO_DIF', '0').strip().lower() in ('1', 'true', 'yes')
-            )
-        if is_bandlimited and self.engine in ('dif', 'bandlimited', 'matchedfilter-dif'):
-            self.engine = 'flat'
-        self.is_dif = is_bandlimited
-        self.bandlimited = is_bandlimited
-
-        D = 1
-        nu_c = 0.40
-        scalloping_L = float(os.environ.get('PYCBC_RATIO_SCALLOPING', 0.08))
-
-        ref_arr = None
-        if reference is not None:
-            if isinstance(reference, np.ndarray):
-                ref_arr = reference
-            elif isinstance(reference, dict) and len(reference) > 0:
-                ref_arr = next(iter(reference.values()))
-
-        if chosen_decim is not None:
-            c_str = str(chosen_decim).strip().lower()
-            if c_str in ('none', 'false', '0', '1', 'full'):
-                D = 1
-            elif c_str == 'auto':
-                if ref_arr is not None:
-                    pos = np.nonzero(ref_arr > 1e-7 * np.max(ref_arr))[0]
-                    if len(pos) > 0:
-                        k_lo = int(pos[0])
-                        k_hi = int(pos[-1]) + 1
-                        n_ref = len(ref_arr)
-                        if k_hi / float(n_ref) <= 0.42:
-                            D = 2
-                            nu_c = D * (k_lo + k_hi) / (2.0 * n_ref)
-                            r_auto = np.abs(np.fft.ifft(ref_arr))
-                            if r_auto[0] > 0:
-                                scalloping_L = float(os.environ.get('PYCBC_RATIO_SCALLOPING', np.clip(1.0 - (r_auto[1] / r_auto[0]) + 0.02, 0.01, 0.10)))
-                        else:
-                            D = 1
-                    else:
-                        D = 1
-                else:
-                    D = 1
-            else:
-                try:
-                    val = float(chosen_decim)
-                    if val > 16.0:
-                        D = int(round(self.data_sample_rate / val))
-                    else:
-                        D = int(round(val))
-                    if D > 1 and ref_arr is not None:
-                        pos = np.nonzero(ref_arr > 1e-7 * np.max(ref_arr))[0]
-                        if len(pos) > 0:
-                            k_lo = int(pos[0])
-                            k_hi = int(pos[-1]) + 1
-                            nu_c = D * (k_lo + k_hi) / (2.0 * len(ref_arr))
-                except (ValueError, TypeError):
-                    D = 1
-
-        self.decimation = D
-        self.execution_rate = self.data_sample_rate / D if D > 1 else None
-        self._nu_c = float(nu_c)
-        self._scalloping_L = float(scalloping_L)
-
-        if D > 1:
-            self.analytic = True
-            self._engine_rate = self.data_sample_rate / D
-            self._data_decimation_stride = D
-        else:
-            self._engine_rate = self.data_sample_rate
-            self._data_decimation_stride = 1
-
 
         # Parse inputs
         self._raw_taps = None
-        is_complex = (
-            (isinstance(taps, np.ndarray) and np.iscomplexobj(taps))
-            or (isinstance(taps, (list, tuple)) and len(taps) > 0 and np.iscomplexobj(taps[0]))
-        )
-        tap_dtype = np.complex64 if is_complex else np.float32
-        if is_complex:
-            self.analytic = True
-
         if isinstance(taps, (list, tuple)):
             n_templates = len(taps)
             if tap_counts is None:
                 tap_counts = np.array([len(t) for t in taps], dtype=np.int64)
             else:
                 tap_counts = np.asarray(tap_counts, dtype=np.int64)
-            taps_list = [np.asarray(t, dtype=tap_dtype) for t in taps]
+            taps_list = [np.asarray(t, dtype=np.float32) for t in taps]
         elif isinstance(taps, np.ndarray):
             if taps.ndim == 1:
                 taps = taps[None, :]
@@ -518,8 +206,8 @@ class TimeDomainFilterBank:
                 tap_counts = np.full(n_templates, taps.shape[1], dtype=np.int64)
             else:
                 tap_counts = np.asarray(tap_counts, dtype=np.int64)
-            taps_list = [taps[i, :tap_counts[i]].astype(tap_dtype) for i in range(n_templates)]
-            self._raw_taps = np.ascontiguousarray(taps, dtype=tap_dtype)
+            taps_list = [taps[i, :tap_counts[i]].astype(np.float32) for i in range(n_templates)]
+            self._raw_taps = np.ascontiguousarray(taps, dtype=np.float32)
         else:
             self._raw_taps = None
             raise TypeError("taps must be a numpy array or sequence of arrays")
@@ -530,25 +218,18 @@ class TimeDomainFilterBank:
         self.n_templates = n_templates
         self.tap_counts = tap_counts
         self._taps_list = taps_list
-        if self._raw_taps is None:
-            max_c = int(np.max(self.tap_counts)) if len(self.tap_counts) > 0 else 0
-            raw_mat = np.zeros((self.n_templates, max_c), dtype=tap_dtype)
-            for i in range(self.n_templates):
-                c = int(self.tap_counts[i])
-                raw_mat[i, :c] = self._taps_list[i][:c]
-            self._raw_taps = raw_mat
 
 
-        # Multi-rate scaling: ratio of tap sample rate to engine sample rate
-        self.rate_ratio = self.tap_sample_rate / self._engine_rate
-        # Effective tap length in engine data samples
+        # Multi-rate scaling: ratio of tap sample rate to data sample rate
+        self.rate_ratio = self.tap_sample_rate / self.data_sample_rate
+        # Effective tap length in data samples
         self.effective_data_counts = np.ceil(self.tap_counts / self.rate_ratio).astype(np.int64)
 
         if fft_lengths is None:
             env_lengths = os.environ.get('PYCBC_RATIO_FFT_LENGTH')
             if env_lengths:
                 candidate_ns = tuple(sorted(int(x.strip()) for x in env_lengths.split(',') if x.strip()))
-            elif self._engine_rate <= 1024.0 or self.analytic or self._data_decimation_stride > 1:
+            elif self.data_sample_rate <= 1024.0 or self.analytic:
                 candidate_ns = (1024, 2048, 4096, 8192, 16384, 32768, 65536)
             else:
                 candidate_ns = (2048, 4096, 8192, 16384, 32768, 65536)
@@ -575,142 +256,81 @@ class TimeDomainFilterBank:
 
             orig_taps_max = int(np.max(self.tap_counts[tmpl_indices]))
             l_data_max = int(np.max(self.effective_data_counts[tmpl_indices]))
-            if self._data_decimation_stride > 1:
-                # c_bad = ceil((taps//2)/D) + K/2
-                c_bad = int(np.ceil((orig_taps_max // 2) / self._data_decimation_stride)) + 16
-                n_valid = int(chosen_N - 2 * c_bad)
-            else:
-                c_bad = int(np.ceil((orig_taps_max // 2) / self.rate_ratio))
-                n_valid = int(chosen_N - l_data_max + 1)
+            c_bad = int(np.ceil((orig_taps_max // 2) / self.rate_ratio))
+            n_valid = int(chosen_N - l_data_max + 1)
 
             # Frequency domain conversion for each template in this group
             spectra = np.zeros((T, chosen_N), dtype=np.complex64)
-
-            if self._data_decimation_stride > 1:
-                full_N = chosen_N * self._data_decimation_stride
-                j_idx, g_kernel = _get_interp_kernel(32, nu_c=self._nu_c)
-
-                h_group = np.zeros((T, full_N), dtype=np.float32)
-                for r, g_idx in enumerate(tmpl_indices):
-                    t_arr = self._taps_list[g_idx]
-                    cnt = min(int(self.tap_counts[g_idx]), full_N)
-                    h_group[r, :cnt] = t_arr[:cnt]
-                    h_group[r] = np.roll(h_group[r], -(cnt // 2))
-
-                    self._filters_f_list[g_idx] = np.conj(np.fft.fft(h_group[r]).astype(np.complex64))
-                    self._block_lengths_arr[g_idx] = full_N
-
-                h_e_group = _fold_taps_2x(h_group, g_kernel, j_idx, full_N, chosen_N)
-                spectra = np.fft.fft(h_e_group, axis=-1).astype(np.complex64)
-            else:
-                has_fast_c = (self.rate_ratio == 1.0 and _core is not None and hasattr(_core, 'taps_to_spectra'))
-                used_fast_c = False
-                if has_fast_c:
-                    try:
-                        if self._raw_taps is not None and self._raw_taps.shape[1] >= orig_taps_max:
-                            group_taps = np.ascontiguousarray(self._raw_taps[tmpl_indices, :orig_taps_max])
-                        else:
-                            group_taps = np.zeros((T, orig_taps_max), dtype=np.float32)
-                            for r, g_idx in enumerate(tmpl_indices):
-                                t_arr = self._taps_list[g_idx]
-                                cnt = min(int(self.tap_counts[g_idx]), orig_taps_max)
-                                group_taps[r, :cnt] = t_arr[:cnt]
-                        group_counts = np.ascontiguousarray(self.tap_counts[tmpl_indices], dtype=np.int64)
-                        _core.taps_to_spectra(group_taps, group_counts, chosen_N, orig_taps_max, spectra)
-                        for row, g_idx in enumerate(tmpl_indices):
-                            self._filters_f_list[g_idx] = np.conj(spectra[row])
-                            self._block_lengths_arr[g_idx] = chosen_N
-                        used_fast_c = True
-                    except Exception:
-                        used_fast_c = False
-
-                if not used_fast_c:
+            has_fast_c = (self.rate_ratio == 1.0 and _core is not None and hasattr(_core, 'taps_to_spectra'))
+            used_fast_c = False
+            if has_fast_c:
+                try:
+                    if self._raw_taps is not None and self._raw_taps.shape[1] >= orig_taps_max:
+                        group_taps = np.ascontiguousarray(self._raw_taps[tmpl_indices, :orig_taps_max])
+                    else:
+                        group_taps = np.zeros((T, orig_taps_max), dtype=np.float32)
+                        for r, g_idx in enumerate(tmpl_indices):
+                            t_arr = self._taps_list[g_idx]
+                            cnt = min(int(self.tap_counts[g_idx]), orig_taps_max)
+                            group_taps[r, :cnt] = t_arr[:cnt]
+                    group_counts = np.ascontiguousarray(self.tap_counts[tmpl_indices], dtype=np.int64)
+                    _core.taps_to_spectra(group_taps, group_counts, chosen_N, orig_taps_max, spectra)
                     for row, g_idx in enumerate(tmpl_indices):
-                        t_arr = self._taps_list[g_idx]
-                        cnt = int(self.tap_counts[g_idx])
-                        N_taps = int(round(chosen_N * self.rate_ratio))
-
-                        buf_dtype = np.complex64 if np.iscomplexobj(t_arr) else np.float32
-                        buf = np.zeros(N_taps, dtype=buf_dtype)
-                        buf[:cnt] = t_arr[:cnt]
-                        buf = np.roll(buf, -(cnt // 2))
-
-                        spec = np.fft.fft(buf).astype(np.complex64)
-                        if N_taps > chosen_N:
-                            if self.engine == 'corr' or self.analytic or np.iscomplexobj(t_arr):
-                                spec_data = spec[:chosen_N]
-                            else:
-                                spec_data = np.zeros(chosen_N, dtype=np.complex64)
-                                spec_data[:chosen_N // 2 + 1] = spec[:chosen_N // 2 + 1]
-                                neg_count = chosen_N - (chosen_N // 2 + 1)
-                                spec_data[chosen_N // 2 + 1:] = spec[N_taps - neg_count:]
-                        elif N_taps < chosen_N:
-                            if self.engine == 'corr' or self.analytic or np.iscomplexobj(t_arr):
-                                spec_data = np.zeros(chosen_N, dtype=np.complex64)
-                                spec_data[:N_taps] = spec
-                            else:
-                                spec_data = np.zeros(chosen_N, dtype=np.complex64)
-                                half_taps = N_taps // 2
-                                spec_data[:half_taps + 1] = spec[:half_taps + 1]
-                                neg_count = N_taps - (half_taps + 1)
-                                spec_data[chosen_N - neg_count:] = spec[half_taps + 1:]
-                        else:
-                            spec_data = spec
-
-                        spectra[row] = spec_data
-                        self._filters_f_list[g_idx] = np.conj(spec_data)
+                        self._filters_f_list[g_idx] = np.conj(spectra[row])
                         self._block_lengths_arr[g_idx] = chosen_N
+                    used_fast_c = True
+                except Exception:
+                    used_fast_c = False
 
-            if self.is_dif or self.bandlimited:
-                chosen_K = chosen_N // 2
-                spec_active = np.ascontiguousarray(spectra[:, :chosen_K])
-                twiddles = np.exp(2j * np.pi * np.arange(chosen_K, dtype=np.float64) / chosen_N).astype(np.complex64)
-                plan = MatchedFilter(
-                    chosen_N, ndata=2, ntemplates=T,
-                    device=self.device
-                )
-                plan.set_templates(spec_active)
-                grp = _TemplateGroup(
-                    plan=plan,
-                    n=chosen_N,
-                    template_indices=tmpl_indices,
-                    c_bad=c_bad,
-                    n_valid=n_valid,
-                    spectra=spectra,
-                    orig_taps_max=orig_taps_max,
-                    device=self.device,
-                    is_dif=True,
-                    k=chosen_K,
-                    twiddles=twiddles,
-                    spectra_active=spec_active,
-                )
-                grp.templates_loaded = True
-            elif self.engine == 'corr':
+            if not used_fast_c:
+                for row, g_idx in enumerate(tmpl_indices):
+                    t_arr = self._taps_list[g_idx]
+                    cnt = int(self.tap_counts[g_idx])
+                    N_taps = int(round(chosen_N * self.rate_ratio))
+
+                    buf = np.zeros(N_taps, dtype=np.float32)
+                    buf[:cnt] = t_arr[:cnt]
+                    # Center-tap circular roll alignment
+                    buf = np.roll(buf, -(cnt // 2))
+
+                    spec = np.fft.fft(buf).astype(np.complex64)
+                    if self.analytic and N_taps > chosen_N:
+                        # For an analytic series with positive-frequency support [f_low, f_high) < data Nyquist:
+                        # Positive-frequency bins [0, chosen_N) map directly to [0, f_Nyquist) without
+                        # negative-frequency mirroring.
+                        spec_data = np.ascontiguousarray(spec[:chosen_N])
+                    elif N_taps > chosen_N:
+                        # Truncate frequencies above data Nyquist (preserving positive and negative bins)
+                        spec_data = np.zeros(chosen_N, dtype=np.complex64)
+                        spec_data[:chosen_N // 2 + 1] = spec[:chosen_N // 2 + 1]
+                        neg_count = chosen_N - (chosen_N // 2 + 1)
+                        spec_data[chosen_N // 2 + 1:] = spec[N_taps - neg_count:]
+                    elif N_taps < chosen_N:
+                        # Zero-pad frequencies above template Nyquist
+                        spec_data = np.zeros(chosen_N, dtype=np.complex64)
+                        half_taps = N_taps // 2
+                        spec_data[:half_taps + 1] = spec[:half_taps + 1]
+                        neg_count = N_taps - (half_taps + 1)
+                        spec_data[chosen_N - neg_count:] = spec[half_taps + 1:]
+                    else:
+                        spec_data = spec
+
+                    spectra[row] = spec_data
+                    self._filters_f_list[g_idx] = np.conj(spec_data)
+                    self._block_lengths_arr[g_idx] = chosen_N
+
+            # Create matchedfilter plan
+            if self.engine == 'corr':
                 from . import CorrelationFilter
                 plan = CorrelationFilter(
                     chosen_N, ndata=1, ntemplates=T,
                     device=self.device, valid=(c_bad, chosen_N - c_bad)
                 )
-                grp = _TemplateGroup(
-                    plan=plan,
-                    n=chosen_N,
-                    template_indices=tmpl_indices,
-                    c_bad=c_bad,
-                    n_valid=n_valid,
-                    spectra=spectra,
-                    orig_taps_max=orig_taps_max,
-                    device=self.device,
-                )
-                grp.templates_loaded = False
             elif self.engine == 'hier':
                 band_bins = None
                 if self.coarse_band_hz is not None and self.coarse_band_hz > 0:
-                    delta_f = self._engine_rate / chosen_N
-                    raw_b = int(round(self.coarse_band_hz / delta_f))
-                    b_pow2 = 1 << int(np.ceil(np.log2(max(64, raw_b))))
-                    band_bins = min(b_pow2, chosen_N // 2)
-                elif self._data_decimation_stride > 1:
-                    band_bins = chosen_N // 2
+                    delta_f = self.data_sample_rate / chosen_N
+                    band_bins = int(round(self.coarse_band_hz / delta_f))
                 plan = HierarchicalFilter(
                     chosen_N, ndata=1, ntemplates=T,
                     snr=self.threshold, fd=self.false_dismissal,
@@ -718,35 +338,23 @@ class TimeDomainFilterBank:
                 )
                 if self.first_stage_snr > 0:
                     plan.set_first_stage(self.first_stage_snr)
-                grp = _TemplateGroup(
-                    plan=plan,
-                    n=chosen_N,
-                    template_indices=tmpl_indices,
-                    c_bad=c_bad,
-                    n_valid=n_valid,
-                    spectra=spectra,
-                    orig_taps_max=orig_taps_max,
-                    device=self.device,
-                )
-                grp.templates_loaded = False
             else:
                 plan = MatchedFilter(
                     chosen_N, ndata=1, ntemplates=T,
                     device=self.device
                 )
-                grp = _TemplateGroup(
-                    plan=plan,
-                    n=chosen_N,
-                    template_indices=tmpl_indices,
-                    c_bad=c_bad,
-                    n_valid=n_valid,
-                    spectra=spectra,
-                    orig_taps_max=orig_taps_max,
-                    device=self.device,
-                )
-                grp.templates_loaded = False
-
-            if not grp.templates_loaded and self.engine != 'hier':
+            grp = _TemplateGroup(
+                plan=plan,
+                n=chosen_N,
+                template_indices=tmpl_indices,
+                c_bad=c_bad,
+                n_valid=n_valid,
+                spectra=spectra,
+                orig_taps_max=orig_taps_max,
+                device=self.device,
+            )
+            grp.templates_loaded = False
+            if self.engine != 'hier':
                 plan.set_templates(spectra)
                 grp.templates_loaded = True
                 if self.engine == 'corr':
@@ -764,9 +372,8 @@ class TimeDomainFilterBank:
                 if not g.templates_loaded:
                     g.plan.set_templates(g.spectra)
                     g.templates_loaded = True
-        if self._data_decimation_stride == 1:
-            self._taps_list = None
-            self._raw_taps = None
+        self._taps_list = None
+        self._raw_taps = None
 
     @property
     def filters_f(self) -> Sequence[np.ndarray]:
@@ -781,16 +388,13 @@ class TimeDomainFilterBank:
     @property
     def groups(self) -> List[Dict]:
         """Summary of template partitions."""
-        stride = getattr(self, '_data_decimation_stride', 1)
         return [
             {
-                'n': g.n * stride,
-                'engine_n': g.n,
-                'engine_rate': getattr(self, '_engine_rate', self.data_sample_rate),
+                'n': g.n,
                 'count': len(g.template_indices),
                 'template_indices': g.template_indices,
-                'c_bad': g.c_bad * stride,
-                'n_valid': g.n_valid * stride,
+                'c_bad': g.c_bad,
+                'n_valid': g.n_valid,
                 'orig_taps_max': g.orig_taps_max,
                 'efficiency': g.n_valid / g.n
             }
@@ -832,14 +436,14 @@ class TimeDomainFilterBank:
                     b_key = (id(reference), g.n, float(delta_f))
                     ref_input = _REF_BINNED_CACHE.get(b_key)
                     if ref_input is None:
-                        delta_f_engine = self._engine_rate / g.n
+                        delta_f_engine = self.data_sample_rate / g.n
                         ratio = int(round(delta_f_engine / float(delta_f)))
                         if ratio < 1:
                             ratio = 1
                         keep = (len(ref_arr) // ratio) * ratio
                         binned = ref_arr[:keep].reshape(-1, ratio).sum(axis=1)
                         ref_g = np.zeros(g.n, dtype=np.float64)
-                        k = min(len(binned), g.n if self.analytic else (g.n // 2 + 1))
+                        k = min(len(binned), g.n // 2 + 1)
                         ref_g[:k] = binned[:k]
                         tot = ref_g.sum()
                         ref_input = (ref_g / tot).astype(np.float32) if tot > 0 else None
@@ -910,33 +514,14 @@ class TimeDomainFilterBank:
                 block_starts: start sample of block containing each trigger
                 block_lengths: FFT block length used for each trigger
         """
-        if isinstance(series, AnalyticSeries):
-            ser = np.ascontiguousarray(series.data, dtype=np.complex64)
-            decim_stride = int(round(series.rate_ratio))
-            eff_rate = series.sample_rate
-            in_rate = series.input_sample_rate
-            eff_band = series.band
-        else:
-            in_rate = self.data_sample_rate
-            decim_stride = getattr(self, '_data_decimation_stride', 1)
-            eff_rate = getattr(self, '_engine_rate', self.data_sample_rate)
-            eff_band = (20.0, 800.0)
-            if decim_stride > 1:
-                ser = np.ascontiguousarray(series[::decim_stride], dtype=np.complex64)
-            else:
-                ser = np.ascontiguousarray(series, dtype=np.complex64)
-
+        ser = np.ascontiguousarray(series, dtype=np.complex64)
         if ser.ndim != 1:
             raise ValueError("series must be a 1D array")
         S = len(ser)
 
         if valid_slice is not None:
-            if decim_stride > 1:
-                v_start = 0 if valid_slice.start is None else int(round(valid_slice.start / decim_stride))
-                v_stop = S if valid_slice.stop is None else int(round(valid_slice.stop / decim_stride))
-            else:
-                v_start = 0 if valid_slice.start is None else int(valid_slice.start)
-                v_stop = S if valid_slice.stop is None else int(valid_slice.stop)
+            v_start = 0 if valid_slice.start is None else int(valid_slice.start)
+            v_stop = S if valid_slice.stop is None else int(valid_slice.stop)
         else:
             v_start, v_stop = 0, S
 
@@ -945,13 +530,6 @@ class TimeDomainFilterBank:
                 raise IndexError(f"template_index {template_index} out of range [0, {self.n_templates})")
 
         eff_threshold = self.threshold if threshold is None else float(threshold)
-        if decim_stride > 1:
-            scalloping_L = getattr(self, '_scalloping_L', 0.08)
-            if 'PYCBC_RATIO_SCALLOPING' in os.environ:
-                scalloping_L = float(os.environ['PYCBC_RATIO_SCALLOPING'])
-            refine_thr = eff_threshold * (1.0 - scalloping_L)
-        else:
-            refine_thr = eff_threshold
 
         out_template_indices = []
         out_sample_indices = []
@@ -970,7 +548,7 @@ class TimeDomainFilterBank:
             work_items = [(g, None) for g in self._groups]
 
         for g, tmpl_arg in work_items:
-            if self.engine == 'hier' and (eff_threshold <= 0.0 or tmpl_arg is not None or (threshold is not None and eff_threshold < self.threshold)):
+            if self.engine == 'hier' and (eff_threshold < self.threshold or eff_threshold <= 0.0 or tmpl_arg is not None):
                 active_plan = g.get_flat_plan()
             else:
                 active_plan = g.plan
@@ -1038,36 +616,23 @@ class TimeDomainFilterBank:
 
             data_in = ser
 
-            if decim_stride > 1 and binsize is not None:
-                bs = max(1, int(round(binsize / decim_stride)))
-            else:
-                bs = N if binsize is None else int(binsize)
-
-            is_bandlimited = getattr(g, 'bandlimited', False) or getattr(g, 'is_dif', False) or getattr(active_plan, '_bandlimited', False)
-            is_decim = is_bandlimited and ((decim_stride > 1) or (self.data_sample_rate < self.tap_sample_rate))
-
-            if is_bandlimited and not is_decim:
-                K = getattr(g, 'k', N // 2)
-                bs_k = K if bs >= N else max(1, int(bs // 2))
-                wk_s_arr = bws // 2
-                wk_e_arr = np.minimum(K, (bwe + 1) // 2)
-                bin_counts = ((wk_e_arr - wk_s_arr + bs_k - 1) // bs_k).astype(np.int64)
-            else:
-                bin_counts = ((bwe - bws + bs - 1) // bs).astype(np.int64)
-
-            if len(bstarts) <= 1 or np.all(bin_counts == bin_counts[0]):
+            bs = N if binsize is None else int(binsize)
+            if bs >= N:
                 groups_bins = [(bstarts, bws, bwe)]
             else:
-                groups_bins = []
-                for u_cnt in np.unique(bin_counts):
-                    mask = (bin_counts == u_cnt)
-                    groups_bins.append((bstarts[mask], bws[mask], bwe[mask]))
+                bin_counts = ((bwe - bws + bs - 1) // bs).astype(np.int64)
+                if len(bstarts) <= 1 or np.all(bin_counts == bin_counts[0]):
+                    groups_bins = [(bstarts, bws, bwe)]
+                else:
+                    groups_bins = []
+                    for u_cnt in np.unique(bin_counts):
+                        mask = (bin_counts == u_cnt)
+                        groups_bins.append((bstarts[mask], bws[mask], bwe[mask]))
 
             for sub_starts, sub_bws, sub_bwe in groups_bins:
                 aidx, aval = active_plan.run_series(
                     data_in, sub_starts, sub_bws, sub_bwe, binsize=bs,
-                    threshold=refine_thr, templates=tmpl_arg, raw=True,
-                    decimated=is_decim if is_bandlimited else None
+                    threshold=eff_threshold, templates=tmpl_arg, raw=True
                 )
 
                 # aidx has shape (nblocks, ntemplates, nbins)
@@ -1110,164 +675,21 @@ class TimeDomainFilterBank:
                             out_block_lens.append(np.full(bi.size, N, dtype=np.int64))
 
         if out_template_indices:
-            all_tmpl = np.concatenate(out_template_indices).astype(np.int64) if len(out_template_indices) > 1 else out_template_indices[0].astype(np.int64, copy=False)
-            all_samp = np.concatenate(out_sample_indices).astype(np.int64) if len(out_sample_indices) > 1 else out_sample_indices[0].astype(np.int64, copy=False)
-            all_snr = np.concatenate(out_snrs).astype(np.complex64) if len(out_snrs) > 1 else out_snrs[0].astype(np.complex64, copy=False)
-            all_tstarts = np.concatenate(out_tstarts).astype(np.int64) if len(out_tstarts) > 1 else out_tstarts[0].astype(np.int64, copy=False)
-            all_block_lens = np.concatenate(out_block_lens).astype(np.int64) if len(out_block_lens) > 1 else out_block_lens[0].astype(np.int64, copy=False)
-
-            if decim_stride > 1:
-                if eff_threshold <= 0.0:
-                    return FilterResults(
-                        template_indices=all_tmpl,
-                        sample_indices=all_samp * decim_stride,
-                        snr=all_snr,
-                        block_starts=all_tstarts * decim_stride,
-                        block_lengths=all_block_lens * decim_stride,
-                    )
-
-                has_c_refine = (
-                    _core is not None
-                    and hasattr(_core, 'refine_peaks_decim')
-                    and self._raw_taps is not None
-                )
-
-                if has_c_refine:
-                    if isinstance(series, AnalyticSeries):
-                        full_series = np.ascontiguousarray(series.window(), dtype=np.complex64)
-                    else:
-                        full_series = np.ascontiguousarray(series, dtype=np.complex64)
-
-                    raw_taps = np.ascontiguousarray(self._raw_taps, dtype=np.float32)
-                    t_counts = np.ascontiguousarray(self.tap_counts, dtype=np.int64)
-                    in_tmpl = np.ascontiguousarray(all_tmpl, dtype=np.int64)
-                    in_samp = np.ascontiguousarray(all_samp, dtype=np.int64)
-                    in_snr = np.ascontiguousarray(all_snr, dtype=np.complex64)
-
-                    n_cand = len(in_tmpl)
-                    out_tmpl = np.empty(n_cand, dtype=np.int64)
-                    out_samp = np.empty(n_cand, dtype=np.int64)
-                    out_snr = np.empty(n_cand, dtype=np.complex64)
-                    out_surv = np.empty(n_cand, dtype=np.int64)
-
-                    out_count = _core.refine_peaks_decim(
-                        full_series, raw_taps, t_counts,
-                        in_tmpl, in_samp, in_snr,
-                        float(eff_threshold), float(scalloping_L), int(decim_stride),
-                        out_tmpl, out_samp, out_snr, out_surv
-                    )
-
-                    if out_count > 0:
-                        surv = out_surv[:out_count]
-                        return FilterResults(
-                            template_indices=out_tmpl[:out_count],
-                            sample_indices=out_samp[:out_count],
-                            snr=out_snr[:out_count],
-                            block_starts=all_tstarts[surv] * decim_stride,
-                            block_lengths=all_block_lens[surv] * decim_stride,
-                        )
-                    else:
-                        return FilterResults(
-                            template_indices=np.empty(0, dtype=np.int64),
-                            sample_indices=np.empty(0, dtype=np.int64),
-                            snr=np.empty(0, dtype=np.complex64),
-                            block_starts=np.empty(0, dtype=np.int64),
-                            block_lengths=np.empty(0, dtype=np.int64),
-                        )
-                else:
-                    n_trigs = len(all_samp)
-                    out_samp_final = np.empty(n_trigs, dtype=np.int64)
-                    out_snr_final = np.empty(n_trigs, dtype=np.complex64)
-                    keep_mask = np.ones(n_trigs, dtype=bool)
-                    is_analytic_obj = isinstance(series, AnalyticSeries)
-                    full_series = series if not is_analytic_obj else None
-                    S_in = series.input_size if is_analytic_obj else len(series)
-
-                    for idx in range(n_trigs):
-                        tmpl_id = int(all_tmpl[idx])
-                        m = int(all_samp[idx])
-                        k_even = m * decim_stride
-                        z_even = all_snr[idx]
-                        mag_even = abs(z_even)
-
-                        if mag_even < refine_thr:
-                            keep_mask[idx] = False
-                            continue
-
-                        taps = self._taps_list[tmpl_id] if (self._taps_list is not None and tmpl_id < len(self._taps_list)) else None
-                        if taps is not None:
-                            cnt = len(taps)
-                            half = cnt // 2
-                            k_m1 = k_even - 1
-                            k_p1 = k_even + 1
-
-                            if is_analytic_obj:
-                                w_start = min(k_m1 - half, k_even - half)
-                                w_stop = max(k_p1 - half + cnt, k_even - half + cnt)
-                                win = series.window(w_start, w_stop)
-                                s_m1_rel = k_m1 - half - w_start
-                                s_p1_rel = k_p1 - half - w_start
-                                s_0_rel = k_even - half - w_start
-                                z_m1 = np.dot(win[s_m1_rel : s_m1_rel + cnt], taps) if s_m1_rel >= 0 and s_m1_rel + cnt <= len(win) else 0.0
-                                z_p1 = np.dot(win[s_p1_rel : s_p1_rel + cnt], taps) if s_p1_rel >= 0 and s_p1_rel + cnt <= len(win) else 0.0
-                                z_0 = np.dot(win[s_0_rel : s_0_rel + cnt], taps) if s_0_rel >= 0 and s_0_rel + cnt <= len(win) else z_even
-                            else:
-                                s_m1 = k_m1 - half
-                                s_p1 = k_p1 - half
-                                s_0 = k_even - half
-                                z_m1 = np.dot(full_series[s_m1 : s_m1 + cnt], taps) if s_m1 >= 0 and s_m1 + cnt <= S_in else 0.0
-                                z_p1 = np.dot(full_series[s_p1 : s_p1 + cnt], taps) if s_p1 >= 0 and s_p1 + cnt <= S_in else 0.0
-                                z_0 = np.dot(full_series[s_0 : s_0 + cnt], taps) if s_0 >= 0 and s_0 + cnt <= S_in else z_even
-
-                            mag_m1 = abs(z_m1)
-                            mag_p1 = abs(z_p1)
-                            mag_0 = abs(z_0)
-
-                            if mag_p1 > mag_0 and mag_p1 >= mag_m1:
-                                best_k = k_p1
-                                best_z = z_p1
-                                best_mag = mag_p1
-                            elif mag_m1 > mag_0 and mag_m1 > mag_p1:
-                                best_k = k_m1
-                                best_z = z_m1
-                                best_mag = mag_m1
-                            else:
-                                best_k = k_even
-                                best_z = z_0
-                                best_mag = mag_0
-                        else:
-                            best_k = k_even
-                            best_z = z_even
-                            best_mag = mag_even
-
-                        if best_mag >= eff_threshold:
-                            out_samp_final[idx] = best_k
-                            out_snr_final[idx] = best_z
-                        else:
-                            keep_mask[idx] = False
-
-                if not np.all(keep_mask):
-                    all_tmpl = all_tmpl[keep_mask]
-                    out_samp_final = out_samp_final[keep_mask]
-                    out_snr_final = out_snr_final[keep_mask]
-                    all_tstarts = all_tstarts[keep_mask]
-                    all_block_lens = all_block_lens[keep_mask]
-
+            if len(out_template_indices) == 1:
                 return FilterResults(
-                    template_indices=all_tmpl,
-                    sample_indices=out_samp_final,
-                    snr=out_snr_final,
-                    block_starts=all_tstarts * decim_stride,
-                    block_lengths=all_block_lens * decim_stride,
+                    template_indices=out_template_indices[0].astype(np.int64, copy=False),
+                    sample_indices=out_sample_indices[0].astype(np.int64, copy=False),
+                    snr=out_snrs[0].astype(np.complex64, copy=False),
+                    block_starts=out_tstarts[0].astype(np.int64, copy=False),
+                    block_lengths=out_block_lens[0].astype(np.int64, copy=False),
                 )
-            else:
-                return FilterResults(
-                    template_indices=all_tmpl,
-                    sample_indices=all_samp,
-                    snr=all_snr,
-                    block_starts=all_tstarts,
-                    block_lengths=all_block_lens,
-                )
+            return FilterResults(
+                template_indices=np.concatenate(out_template_indices).astype(np.int64),
+                sample_indices=np.concatenate(out_sample_indices).astype(np.int64),
+                snr=np.concatenate(out_snrs).astype(np.complex64),
+                block_starts=np.concatenate(out_tstarts).astype(np.int64),
+                block_lengths=np.concatenate(out_block_lens).astype(np.int64),
+            )
         else:
             return FilterResults(
                 template_indices=np.empty(0, dtype=np.int64),
@@ -1450,42 +872,5 @@ class TimeDomainFilterBank:
                 result[g_indices] = g_tmp
 
         return result
-
-    def correlate_series_analytic(
-        self,
-        series: Union[np.ndarray, AnalyticSeries],
-        valid_slice: Optional[slice] = None,
-        scales: Optional[Union[np.ndarray, Sequence[float]]] = None,
-        template_index: Optional[int] = None,
-        band: Optional[Tuple[float, float]] = None,
-    ) -> AnalyticSeries:
-        """Correlate continuous series returning an AnalyticSeries at reduced execution rate.
-
-        If series is at full input rate (e.g. 2048 Hz), it is decimated losslessly
-        to execution rate (e.g. 1024 Hz) before correlation. The returned AnalyticSeries
-        provides on-demand band-limited interpolation back to input rate via .window(start, stop).
-        """
-        if isinstance(series, AnalyticSeries):
-            ser_data = series.data
-            in_rate = series.input_sample_rate
-            out_rate = series.sample_rate
-            eff_band = series.band
-        else:
-            in_rate = self.data_sample_rate
-            out_rate = getattr(self, '_engine_rate', 1024.0 if in_rate >= 2048.0 else in_rate)
-            eff_band = band or (20.0, 800.0)
-            stride = int(round(in_rate / out_rate))
-            ser_data = np.ascontiguousarray(series[::stride], dtype=np.complex64) if stride > 1 else np.ascontiguousarray(series, dtype=np.complex64)
-
-        if valid_slice is not None and in_rate != out_rate:
-            stride = int(round(in_rate / out_rate))
-            vs = 0 if valid_slice.start is None else int(round(valid_slice.start / stride))
-            ve = len(ser_data) if valid_slice.stop is None else int(round(valid_slice.stop / stride))
-            v_slice = slice(vs, ve)
-        else:
-            v_slice = valid_slice
-
-        res = self.correlate_series(ser_data, valid_slice=v_slice, scales=scales, template_index=template_index)
-        return AnalyticSeries(res, sample_rate=out_rate, input_sample_rate=in_rate, band=eff_band, nu_c=getattr(self, '_nu_c', 0.40))
 
     process_segment = filter_series
