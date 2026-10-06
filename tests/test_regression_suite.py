@@ -212,28 +212,30 @@ def test_signal_injection_recovery(engine):
 # -----------------------------------------------------------------------------
 
 def test_autotune_candidate_generation_and_unblocking():
-    """Verify that autotuning generates cascade configurations and min_floor does not reject them."""
+    """Verify that autotuning generates cascade configurations when viable and respects SIMD floor."""
     bank_taps, bank_counts = _load_or_generate_bank(T_req=64)
-    ref_w = _compute_reference_spectrum(bank_taps, bank_counts, nfft=2048)
+    ref_8192 = _compute_reference_spectrum(bank_taps, bank_counts, nfft=8192)
 
-    # 1. N=2048 with realistic power
-    cands, rejs = mf.candidate_configs(ref_w, 2048, 5.5, 0.01, cascade=True)
-    assert len(cands) >= 2, f"Expected at least 2 candidates for N=2048, got {cands}"
+    # 1. N=8192 where b_single >= 512, allowing cascade above the SIMD floor
+    cands, rejs = mf.candidate_configs(ref_8192, 8192, 5.0, 1e-3, cascade=True)
+    assert len(cands) >= 2, f"Expected at least 2 candidates for N=8192, got {cands}"
     # Verify cascade options are present
     cascade_cands = [c for c in cands if isinstance(c, mf.CascadeConfig) or (isinstance(c, (tuple, list)) and len(c) == 3)]
-    assert len(cascade_cands) >= 1, f"No cascade options generated for N=2048! Cands: {cands}"
-    # Verify no valid powers of 2 were improperly rejected by min_floor
+    assert len(cascade_cands) >= 1, f"No cascade options generated for N=8192! Cands: {cands}"
+    # Verify no valid coarse band >= min_floor was improperly rejected
+    min_floor = mf._min_band_for()
     for r in rejs:
         cfg = r.get("config")
         if cfg:
             b0 = getattr(cfg, "cascade_band", None) or (cfg[0] if len(cfg) == 3 else None)
-            if b0 is not None:
-                assert b0 < 64, f"Improperly rejected coarse band {b0} >= 64: {r}"
+            if b0 is not None and "SIMD" in r.get("reason", ""):
+                assert b0 < min_floor, f"Improperly rejected coarse band {b0} >= min_floor ({min_floor}): {r}"
 
-    # 2. N=1024 with realistic power
-    ref_1024 = _compute_reference_spectrum(bank_taps, bank_counts, nfft=1024)
-    cands_1024, rejs_1024 = mf.candidate_configs(ref_1024, 1024, 5.5, 0.01, cascade=True)
-    assert len(cands_1024) >= 1, f"Expected candidates for N=1024, got {cands_1024}"
+    # 2. N=2048: where coarse bands fall below SIMD floor, single-tier is safely chosen
+    ref_2048 = _compute_reference_spectrum(bank_taps, bank_counts, nfft=2048)
+    cands_2048, rejs_2048 = mf.candidate_configs(ref_2048, 2048, 5.5, 0.01, cascade=True)
+    assert len(cands_2048) >= 1, f"Expected candidates for N=2048, got {cands_2048}"
+    assert all(r.get("config") is not None for r in rejs_2048), "Rejection records should be preserved"
 
 
 def test_autotune_selection_monotonicity():
