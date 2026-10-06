@@ -61,7 +61,7 @@ ap_hmf_plan *ap_hmf_create_cascade(size_t n,int ndata,int ntmpl,float snr,float 
   p->dgroup=grp; p->nd=ndata>grp ? ndata : grp;
   p->full=ap_mf_create(n,p->nd,ntmpl);
   { const char *pbmax=getenv("MF_PBMAX");
-    size_t pblim = pbmax ? (size_t)atol(pbmax) : (ap_lane_width() >= 16 ? 1024u : 512u);
+    size_t pblim = pbmax ? (size_t)atol(pbmax) : (ap_lane_width() >= 16 ? 512u : 512u);
     int lw = ap_lane_width();
     size_t min_ntmpl = (lw > 0) ? (size_t)lw : 16u;
     if(ntmpl>=min_ntmpl && band<=pblim){

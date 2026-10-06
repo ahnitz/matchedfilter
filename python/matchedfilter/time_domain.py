@@ -21,6 +21,15 @@ class FilterResults(NamedTuple):
     block_lengths: np.ndarray      # int64: FFT block length used for this template
 
 
+_EMPTY_FILTER_RESULTS = FilterResults(
+    template_indices=np.empty(0, dtype=np.int64),
+    sample_indices=np.empty(0, dtype=np.int64),
+    snr=np.empty(0, dtype=np.complex64),
+    block_starts=np.empty(0, dtype=np.int64),
+    block_lengths=np.empty(0, dtype=np.int64),
+)
+
+
 def _partition_templates(
     counts: np.ndarray,
     max_batch: Optional[int] = None,
@@ -75,7 +84,7 @@ def _partition_templates(
         if max_batch is None:
             # Sized to stay resident within 1 MB L2 cache per core:
             # coarse template memory = b * sizeof(complex64) = (current_n // 8) * 8 bytes = current_n bytes.
-            batch_target = min(256, max(32, 1048576 // (max(64, current_n // 8) * 8)))
+            batch_target = min(512, max(32, 1048576 // (max(64, current_n // 8) * 8)))
         else:
             batch_target = int(max_batch)
 
@@ -171,6 +180,7 @@ class TimeDomainFilterBank:
         fft_lengths: Optional[Sequence[int]] = None,
         reference: Optional[Any] = None,
         analytic: bool = False,
+        bandlimited: bool = False,
     ):
         from . import MatchedFilter, HierarchicalFilter
 
@@ -187,6 +197,8 @@ class TimeDomainFilterBank:
         mode = {'pycbc': 'flat', 'matchedfilter': 'flat',
                 'matchedfilter-hierarchical': 'hier',
                 'correlation': 'corr', 'corr': 'corr'}.get(engine, engine).lower()
+        if bandlimited:
+            mode = 'dif'
         self.engine = mode
 
         # Parse inputs
@@ -328,13 +340,17 @@ class TimeDomainFilterBank:
                 )
             elif self.engine == 'hier':
                 band_bins = None
-                if self.coarse_band_hz is not None and self.coarse_band_hz > 0:
+                if isinstance(self.coarse_band_hz, (tuple, list)):
+                    delta_f = self.data_sample_rate / chosen_N
+                    band_bins = tuple(int(round(float(b) / delta_f)) for b in self.coarse_band_hz)
+                elif self.coarse_band_hz is not None and self.coarse_band_hz > 0:
                     delta_f = self.data_sample_rate / chosen_N
                     band_bins = int(round(self.coarse_band_hz / delta_f))
                 plan = HierarchicalFilter(
                     chosen_N, ndata=1, ntemplates=T,
                     snr=self.threshold, fd=self.false_dismissal,
-                    band=band_bins, device=self.device
+                    band=band_bins, device=self.device,
+                    cascade=False if (((self.device is None) or getattr(self.device, 'kind', None) == 'cpu') and chosen_N <= 2048) else None
                 )
                 if self.first_stage_snr > 0:
                     plan.set_first_stage(self.first_stage_snr)
@@ -429,6 +445,10 @@ class TimeDomainFilterBank:
                     g.plan.set_reference(reference[g.n])
             return
 
+        ref_key = (id(reference), float(delta_f) if delta_f is not None else None)
+        if getattr(self, '_current_ref_key', None) == ref_key and all(g.templates_loaded for g in self._groups):
+            return
+
         ref_arr = np.asarray(reference, dtype=np.float64)
         if delta_f is not None and float(delta_f) > 0:
             for g in self._groups:
@@ -461,6 +481,7 @@ class TimeDomainFilterBank:
             if not g.templates_loaded and hasattr(g.plan, 'set_templates'):
                 g.plan.set_templates(g.spectra)
                 g.templates_loaded = True
+        self._current_ref_key = ref_key
 
     def set_reference_from_template(
         self,
@@ -634,6 +655,8 @@ class TimeDomainFilterBank:
                     data_in, sub_starts, sub_bws, sub_bwe, binsize=bs,
                     threshold=eff_threshold, templates=tmpl_arg, raw=True
                 )
+                if getattr(active_plan, '_last_n_triggers', None) == 0:
+                    continue
 
                 # aidx has shape (nblocks, ntemplates, nbins)
                 if tmpl_arg is not None:
@@ -691,13 +714,7 @@ class TimeDomainFilterBank:
                 block_lengths=np.concatenate(out_block_lens).astype(np.int64),
             )
         else:
-            return FilterResults(
-                template_indices=np.empty(0, dtype=np.int64),
-                sample_indices=np.empty(0, dtype=np.int64),
-                snr=np.empty(0, dtype=np.complex64),
-                block_starts=np.empty(0, dtype=np.int64),
-                block_lengths=np.empty(0, dtype=np.int64),
-            )
+            return _EMPTY_FILTER_RESULTS
 
     def correlate_series(
         self,
