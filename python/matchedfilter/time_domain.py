@@ -133,7 +133,16 @@ class _TemplateGroup:
                 self.n, ndata=1, ntemplates=len(self.template_indices),
                 device=self.device
             )
-            fp.set_templates(self.spectra)
+            if self.spectra.shape[1] < self.n:
+                K = self.spectra.shape[1]
+                full_sp = np.zeros((self.spectra.shape[0], self.n), dtype=np.complex64)
+                full_sp[:, 0] = self.spectra[:, 0].real
+                full_sp[:, K] = self.spectra[:, 0].imag
+                full_sp[:, 1:K] = self.spectra[:, 1:K]
+                full_sp[:, K + 1:] = np.conj(self.spectra[:, K - 1:0:-1])
+                fp.set_templates(full_sp)
+            else:
+                fp.set_templates(self.spectra)
             self._flat_plan = fp
         return self._flat_plan
 
@@ -147,7 +156,16 @@ class _TemplateGroup:
                     self.n, ndata=1, ntemplates=len(self.template_indices),
                     device=self.device, valid=(self.c_bad, self.n - self.c_bad)
                 )
-                cp.set_templates(self.spectra)
+                if self.spectra.shape[1] < self.n:
+                    K = self.spectra.shape[1]
+                    full_sp = np.zeros((self.spectra.shape[0], self.n), dtype=np.complex64)
+                    full_sp[:, 0] = self.spectra[:, 0].real
+                    full_sp[:, K] = self.spectra[:, 0].imag
+                    full_sp[:, 1:K] = self.spectra[:, 1:K]
+                    full_sp[:, K + 1:] = np.conj(self.spectra[:, K - 1:0:-1])
+                    cp.set_templates(full_sp)
+                else:
+                    cp.set_templates(self.spectra)
                 self._corr_plan = cp
         return self._corr_plan
 
@@ -359,13 +377,22 @@ class TimeDomainFilterBank:
                     chosen_N, ndata=1, ntemplates=T,
                     device=self.device
                 )
+            if self.engine == 'hier' and chosen_N >= 1024:
+                K = chosen_N // 2
+                grp_spectra = np.ascontiguousarray(spectra[:, :K])
+                grp_spectra[:, 0] = spectra[:, 0].real + 1j * spectra[:, K].real
+                if hasattr(plan, 'set_hermitian'):
+                    plan.set_hermitian(True)
+            else:
+                grp_spectra = spectra
+
             grp = _TemplateGroup(
                 plan=plan,
                 n=chosen_N,
                 template_indices=tmpl_indices,
                 c_bad=c_bad,
                 n_valid=n_valid,
-                spectra=spectra,
+                spectra=grp_spectra,
                 orig_taps_max=orig_taps_max,
                 device=self.device,
             )
@@ -638,7 +665,20 @@ class TimeDomainFilterBank:
             data_in = ser
 
             bs = N if binsize is None else int(binsize)
-            if bs >= N:
+            if getattr(active_plan, '_bandlimited', False) and type(active_plan).__name__ != 'HierarchicalFilter':
+                bs_k = max(1, bs // 2) if bs < N else g.n // 2
+                wk_s = (bws // 2).astype(np.int64)
+                w_end = np.minimum(bwe, N)
+                wk_e = ((w_end + 1) // 2).astype(np.int64)
+                bin_counts = np.maximum(1, (wk_e - wk_s + bs_k - 1) // bs_k)
+                if len(bstarts) <= 1 or np.all(bin_counts == bin_counts[0]):
+                    groups_bins = [(bstarts, bws, bwe)]
+                else:
+                    groups_bins = []
+                    for u_cnt in np.unique(bin_counts):
+                        mask = (bin_counts == u_cnt)
+                        groups_bins.append((bstarts[mask], bws[mask], bwe[mask]))
+            elif bs >= N:
                 groups_bins = [(bstarts, bws, bwe)]
             else:
                 bin_counts = ((bwe - bws + bs - 1) // bs).astype(np.int64)
