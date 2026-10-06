@@ -1828,6 +1828,9 @@ def _min_band_for(device=None, tuning=None):
             return 128
         if isinstance(device, str) and device.lower().startswith("gpu"):
             return 128
+    b = (backend() or "").upper()
+    if "AVX3" in b or "AVX512" in b:
+        return 256
     if tuning is not None:
         paths = " ".join(tuning.get("paths", []))
         meta = tuning.get("meta", {})
@@ -1836,7 +1839,7 @@ def _min_band_for(device=None, tuning=None):
             return 128
         if "model85" in paths or "Xeon(R) Platinum" in cpu or "Xeon(R) Gold" in cpu:
             return 256
-    return 64
+    return 128
 
 
 def candidate_configs(power, n, snr, fd, tuning=None, pairs=None, device=None, cascade=True):
@@ -1897,10 +1900,9 @@ def candidate_configs(power, n, snr, fd, tuning=None, pairs=None, device=None, c
     is_cuda = getattr(device, "backend", None) == "cuda"
     if cascade and not is_cuda and (not is_gpu or (pairs is not None and pairs >= 16384)):
         b_single, K = single_choice
-        min_floor = _min_band_for(device, tuning)
         for b0 in [b_single // 2, b_single // 4]:
-            if b0 < min_floor:
-                rejected.append({"config": (b0, b_single, K), "reason": f"Coarse band {b0} below SIMD/scalloping floor ({min_floor})"})
+            if b0 < 128:
+                rejected.append({"config": (b0, b_single, K), "reason": "Coarse band {} below SIMD/scalloping floor (128)".format(b0)})
                 continue
             thr = choose_threshold(power, n, snr, fd, b_single, cascade_band=b0) if power is not None else (-1.0, -1.0)
             if thr is not None:
