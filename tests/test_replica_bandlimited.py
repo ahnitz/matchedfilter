@@ -4,9 +4,9 @@ against standard full-rate filter on dev2.
 Verifies exact numerical parity (< 1e-6 relative difference), peak triggers,
 and microbenchmark timing.
 """
+import os
 import time
 import numpy as np
-import h5py
 import pytest
 
 import matchedfilter as mf
@@ -123,6 +123,9 @@ def test_bandlimited_dif_exact_parity():
 def test_bank_templates_bandlimited_parity():
     """Test with actual FIR filter templates from the scale100k bank."""
     bank_path = "/home/ahnitz/projects/claude/searchdev/work/scale100k/fir_three_level_opt501_v2.hdf"
+    if not os.path.exists(bank_path):
+        pytest.skip(f"Bank file {bank_path} not found")
+    h5py = pytest.importorskip("h5py")
     with h5py.File(bank_path, "r") as f:
         taps = f["fir_data/0/taps"][:64]
         counts = f["fir_data/0/actual_tap_count"][:64]
