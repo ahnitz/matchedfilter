@@ -136,6 +136,30 @@ synchronous. See the source documentation for
 [GPU FFTs and shared storage](https://github.com/ahnitz/matchedfilter/blob/main/docs/gpu-forward-and-arrays.md)
 for memory and interoperability details.
 
+## Analysis windows on a filter bank
+
+`TimeDomainFilterBank.filter_series` and `correlate_series` take `windows=`,
+in series sample coordinates. It accepts `None` (the whole series), a
+`slice`, a sequence of slices or `(start, stop)` pairs, or a `(K, 2)` integer
+array. Python slice rules apply: `None`, negative indices and clipping to the
+series. A bare pair such as `[a, b]` is rejected as ambiguous; write
+`slice(a, b)` or `[(a, b)]`.
+
+Overlapping or touching windows merge, so the result depends only on the
+union of samples. One call returns exactly the results of one call per merged
+window, in some order, and a block that intersects no window is never computed.
+Use several windows in one call, for example one per injection in a segment,
+to skip the gaps between them.
+
+`filter_series` keeps each peak search inside its window, even when two
+windows share a block. `correlate_series` returns the correlation inside the
+union and exact zeros everywhere else; a supplied `out=` array is fully
+overwritten.
+
+Windows select output samples only. If a later stage needs filter context
+around them, widen the windows before passing them. This is distinct from
+`valid=(lo, hi)` on the plans above, which is a lag window inside each block.
+
 ## Hierarchical filtering
 
 `HierarchicalFilter` screens pairs using a coarse frequency band and refines
