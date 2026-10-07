@@ -445,8 +445,9 @@ class TimeDomainFilterBank:
                     chosen_N, ndata=1, ntemplates=T,
                     snr=self.threshold, fd=self.false_dismissal,
                     band=band_bins, device=self.device,
-                    cascade=False if (((self.device is None) or getattr(self.device, 'kind', None) == 'cpu') and chosen_N <= 2048) else None
                 )
+                # The lags each block's peak search covers: the gate model prices noise passes over these.
+                plan.search_window = (int(c_bad), int(chosen_N - c_bad))
                 if self.first_stage_snr > 0:
                     plan.set_first_stage(self.first_stage_snr)
             else:
