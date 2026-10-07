@@ -12,7 +12,7 @@ def test_large_transform_splits_before_dispatch(kind, monkeypatch):
         pytest.skip('no usable GPU')
     n, nd, nt = 65536, 17, 512  # one row beyond the large-transform work bound
     cls = mf.MatchedFilter if kind=='flat' else mf.HierarchicalFilter
-    f = cls(n, nd, nt, device=device, **({'band':256} if kind=='hier' else {}))
+    f = cls(n, nd, nt, device=device, **({'chain':256} if kind=='hier' else {}))
     if kind=='hier':
         f.set_coarse_threshold(0.)  # every pair must refine
     h = np.zeros((nt,n), np.complex64)

@@ -33,13 +33,13 @@ import pytest                                          # noqa: E402
 def _clean_autotune_cache():
     try:
         import matchedfilter as mf
-        mf._clear_autotune_cache()
+        mf.clear_autotune_cache()
     except Exception:
         pass
     yield
     try:
         import matchedfilter as mf
-        mf._clear_autotune_cache()
+        mf.clear_autotune_cache()
     except Exception:
         pass
 

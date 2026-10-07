@@ -54,7 +54,7 @@ def test_q15_hierarchical_injection_preservation(monkeypatch):
 
     # Baseline FP32
     monkeypatch.delenv("MF_COARSE_INT16", raising=False)
-    hf_fp = mf.HierarchicalFilter(n, nd, nt, band=512, snr=5.5, fd=1e-3)
+    hf_fp = mf.HierarchicalFilter(n, nd, nt, chain=512, snr=5.5, fd=1e-3)
     hf_fp.set_reference(power)
     hf_fp.set_templates(np.repeat(h_conj[None, :], nt, axis=0))
     hf_fp.set_data(noise)
@@ -62,7 +62,7 @@ def test_q15_hierarchical_injection_preservation(monkeypatch):
 
     # Q15 coarse screening
     monkeypatch.setenv("MF_COARSE_INT16", "1")
-    hf_q15 = mf.HierarchicalFilter(n, nd, nt, band=512, snr=5.5, fd=1e-3)
+    hf_q15 = mf.HierarchicalFilter(n, nd, nt, chain=512, snr=5.5, fd=1e-3)
     hf_q15.set_reference(power)
     hf_q15.set_templates(np.repeat(h_conj[None, :], nt, axis=0))
     hf_q15.set_data(noise)

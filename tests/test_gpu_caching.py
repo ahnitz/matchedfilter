@@ -326,63 +326,6 @@ def test_both_staging_variants_agree(n):
                                rtol=1e-5, atol=1e-5)
 
 
-def test_the_gpu_selects_with_its_own_cost_table():
-    """Cost is a property of the machine; the shipped table is a CPU's.
-
-    Without this the GPU chose whichever band is cheapest on an AVX-512
-    core -- not wrong, since any band is correct and the tables only price
-    them, but measured on completely different hardware.
-    """
-    from test_api import inspiral_power, template_with_power
-    n, nt = 1024, 4
-    reference = inspiral_power(n)
-    H = np.stack([template_with_power(n, reference) for _ in range(nt)])
-    f = mf.HierarchicalFilter(n, 1, nt, snr=5.5, fd=1e-2, device=DEVICE)
-    f.set_reference(reference)
-    f.set_templates(H)
-    f.set_data(np.zeros((1, n), np.complex64))
-    gpu = [d for d in mf.devices() if d.kind == "gpu"][0]
-    _, expected = mf.cost_table_for(gpu)
-    key = f.cost_table
-    if expected is None:
-        # No table has been measured for this GPU yet -- only gfx11 has one.
-        # Falling back to the generic table is then the RIGHT answer, and
-        # asserting otherwise turns "nobody has profiled this device" into a
-        # failure. What must still hold is that the filter agrees with the
-        # resolver about which table that is.
-        assert key is None, (
-            "no table ships for %s (arch %s) yet the filter selected %r"
-            % (gpu.name, gpu.arch, key))
-        return
-    assert key == expected, (
-        "the filter used %r where the resolver picks %r for %s"
-        % (key, expected, gpu.name))
-
-
-def test_cost_table_resolution_order():
-    """Most specific first, then family, then vendor, then generic."""
-    import os
-    import matchedfilter as mf
-    from matchedfilter import cost_table_for
-    from matchedfilter.device import Device, arch_keys
-
-    pkg_dir = os.path.dirname(mf.__file__)
-    if not os.path.exists(os.path.join(pkg_dir, "cost-gfx1151.txt")):
-        pytest.skip("Static cost tables permanently deleted per user instructions")
-
-    keys = arch_keys(0x1002, "AMD Radeon 8060S Graphics (RADV GFX1151)")
-    assert keys == ["gfx1151", "gfx11", "amd"]
-    exact = Device("gpu", 0, "AMD Radeon 8060S", "vulkan", arch=tuple(keys))
-    path, key = cost_table_for(exact)
-    assert key == "gfx1151" and path.endswith("cost-gfx1151.txt")
-    # nvidia and intel resolve to their vendor with no architecture tag
-    assert arch_keys(0x10DE, "NVIDIA GeForce RTX 4090") == ["nvidia"]
-    # a device with nothing measured falls back to the generic table
-    unknown = Device("gpu", 0, "Some Other GPU", "vulkan", arch=("nope",))
-    path, key = cost_table_for(unknown)
-    assert key is None and path.endswith("cost.txt")
-
-
 def test_the_chosen_kernel_fits_the_invocation_limit():
     """n=16384 needs a 1024-thread workgroup, exactly Apple's limit.
 

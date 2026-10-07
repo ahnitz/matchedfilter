@@ -147,7 +147,7 @@ def run_evaluation(trials=600, snr_inject=5.5):
     n, m = 4096, 1024
     power, templates, data, cstart, cend, R = generate_workload(n=n, m=m, seed=123)
 
-    plan = mf.HierarchicalFilter(n, 1, len(templates), snr=snr_inject, fd=0.001, band=m)
+    plan = mf.HierarchicalFilter(n, 1, len(templates), snr=snr_inject, fd=0.001, chain=m)
     plan.set_reference(power)
 
     ratios = []

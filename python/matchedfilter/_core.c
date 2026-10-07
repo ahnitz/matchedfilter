@@ -705,6 +705,14 @@ static PyObject *HMF_tier_stats(HMFObject *self,PyObject *a){
   }
   return l;
 }
+static PyObject *HMF_thresholds(HMFObject *self,PyObject *a){
+  float thr[AP_HMF_MAX_TIERS]; (void)a;
+  int nti=ap_hmf_thresholds(self->p,thr);
+  PyObject *t=PyTuple_New(nti);
+  if(!t) return NULL;
+  for(int i=0;i<nti;i++) PyTuple_SET_ITEM(t,i,PyFloat_FromDouble((double)thr[i]));
+  return t;
+}
 static PyObject *HMF_set_thresholds(HMFObject *self,PyObject *args){
   PyObject *obj;
   if(!PyArg_ParseTuple(args,"O",&obj)) return NULL;
@@ -752,6 +760,7 @@ static PyMethodDef HMF_methods[]={
   {"run_series",(PyCFunction)HMF_run_series,METH_VARARGS,"run_series(...)"},
   {"stats",(PyCFunction)HMF_stats,METH_NOARGS,"stats() -> (pairs, refined)"},
   {"chain",(PyCFunction)HMF_chain,METH_NOARGS,"chain() -> bands"},
+  {"thresholds",(PyCFunction)HMF_thresholds,METH_NOARGS,"thresholds() -> per-tier thresholds in force"},
   {"tier_stats",(PyCFunction)HMF_tier_stats,METH_NOARGS,"[(band, passed, ticks) per tier] + [(n, refined, ticks)]"},
   {NULL}
 };

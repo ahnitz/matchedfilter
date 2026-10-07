@@ -362,8 +362,7 @@ def test_hierarchical_matches_flat_on_the_same_device(device):
 
     for band in (128, 256, 512):
         try:
-            h = mf.HierarchicalFilter(n, nd, nt, snr=5.0, fd=1e-2,
-                                      band=band, taps=8, device=device)
+            h = mf.HierarchicalFilter(n, nd, nt, snr=5.0, fd=1e-2, chain=band, device=device)
             h.set_reference(power)
             h.set_templates(H)
             h.set_data(D)
@@ -407,8 +406,7 @@ def test_manual_overrides_reach_every_backend(device):
         D[i] += (9.0 * H[i % nt]).astype(np.complex64)   # REPORTING threshold
 
     for band in (256, 512):
-        h = mf.HierarchicalFilter(n, nd, nt, snr=5.5, fd=1e-2,
-                                  band=band, taps=8, device=device)
+        h = mf.HierarchicalFilter(n, nd, nt, snr=5.5, fd=1e-2, chain=band, device=device)
         h.set_reference(power)
         h.set_templates(H)
         h.set_data(D)
@@ -426,8 +424,7 @@ def test_manual_overrides_reach_every_backend(device):
     # and the two look identical.
     outs = {}
     for thr in (0.0, 1e9):
-        h = mf.HierarchicalFilter(n, nd, nt, snr=5.5, fd=1e-2,
-                                  band=512, taps=8, device=device)
+        h = mf.HierarchicalFilter(n, nd, nt, snr=5.5, fd=1e-2, chain=512, device=device)
         h.set_reference(power)
         h.set_templates(H)
         h.set_data(D)
@@ -517,8 +514,7 @@ def test_every_size_and_band_is_correct_not_merely_runnable(device):
              if band >= n:
                  continue
              try:
-                 h = mf.HierarchicalFilter(n, 2, nt, snr=5.5, fd=1e-2,
-                                           band=band, taps=8, device=device)
+                 h = mf.HierarchicalFilter(n, 2, nt, snr=5.5, fd=1e-2, chain=band, device=device)
                  h.set_reference(ref)
                  # Exercise execution coverage independently of calibration coverage.
                  h.set_coarse_threshold(0.0)
@@ -589,8 +585,7 @@ def test_cpu_and_gpu_agree_through_run_series(open_gate):
         f.set_templates(H)
         out[("flat", dev)] = f.run_series(ser, starts, ws, we,
                                           binsize=n, threshold=snr)
-        h = mf.HierarchicalFilter(n, 1, nt, snr=snr, fd=1e-2, device=dev,
-                                  band=512 if open_gate else None)
+        h = mf.HierarchicalFilter(n, 1, nt, snr=snr, fd=1e-2, device=dev, chain=512 if open_gate else None)
         h.set_reference(ref)
         if open_gate:
             h.set_coarse_threshold(0)

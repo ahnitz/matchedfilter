@@ -22,11 +22,11 @@ def test_survivor_pooling_fidelity(n, cascade):
     threshold = 5.5
 
     if cascade:
-        hmf = _core.HMF(n, nd, nt, snr_target, 0.001, band, 1, 8, 8, band0)
-        hmf.set_threshold(3.5, 4.5)
+        hmf = _core.HMF(n, nd, nt, [band0, band], 8)
+        hmf.set_thresholds([3.5, 4.5])
     else:
-        hmf = _core.HMF(n, nd, nt, snr_target, 0.001, band, 1, 8, 8)
-        hmf.set_threshold(4.5)
+        hmf = _core.HMF(n, nd, nt, [band], 8)
+        hmf.set_thresholds([4.5])
 
     power = inspiral_power(n)
     hmf.set_reference(power)
@@ -98,8 +98,8 @@ def test_survivor_pooling_sparse_occupancy():
     """Verify that very sparse survivors across blocks (e.g. 1 survivor per block) execute cleanly."""
     n = 2048
     nd, nt = 8, 32
-    hmf = _core.HMF(n, nd, nt, 6.0, 0.001, 256, 1, 8, 8, 128)
-    hmf.set_threshold(4.5, 5.0)
+    hmf = _core.HMF(n, nd, nt, [128, 256], 8)
+    hmf.set_thresholds([4.5, 5.0])
 
     power = inspiral_power(n)
     hmf.set_reference(power)

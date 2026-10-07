@@ -72,10 +72,10 @@ def test_cpu_native_plan_consumes_policy_and_override(tmp_path, monkeypatch):
     from matchedfilter.device import parse
     d = parse('cpu')
     install(tmp_path, monkeypatch, [dict(row(), device=d.name, backend=d.backend)])
-    f = mf.HierarchicalFilter(4096, 1, 64, band=1024)
+    f = mf.HierarchicalFilter(4096, 1, 64, chain=1024)
     assert f._ensure().series_group() == 4
     monkeypatch.setenv('MF_DGROUP', '2')
-    f = mf.HierarchicalFilter(4096, 1, 64, band=1024)
+    f = mf.HierarchicalFilter(4096, 1, 64, chain=1024)
     assert f._ensure().series_group() == 2
 
 
@@ -108,7 +108,7 @@ def test_gpu_policy_caps_batches_without_overriding_memory(tmp_path, monkeypatch
 def test_native_group_rejects_invalid_sizes(group):
     from matchedfilter import _core
     with pytest.raises(ValueError):
-        _core.HMF(4096, 1, 1, 5.5, .001, 1024, 1, 8, group)
+        _core.HMF(4096, 1, 1, [1024], group)
 
 
 @pytest.mark.parametrize('hierarchical', [False, True])
@@ -129,7 +129,7 @@ def test_measured_gpu_group_preserves_series_results(tmp_path, monkeypatch, hier
         return (rng.normal(size=shape) + 1j*rng.normal(size=shape)).astype(np.complex64)
     series, templates = noise((8*n,)), noise((nt, n))
     if hierarchical:
-        f = mf.HierarchicalFilter(n, 1, nt, band=256, device=gpu)
+        f = mf.HierarchicalFilter(n, 1, nt, chain=256, device=gpu)
         f.set_coarse_threshold(0.)
     else:
         f = mf.MatchedFilter(n, 1, nt, device=gpu)

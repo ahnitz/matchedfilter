@@ -22,8 +22,7 @@ def plan(device, request):
     if request.param == "flat":
         f = mf.MatchedFilter(n, ndata=2, ntemplates=2, device=device)
     else:
-        f = mf.HierarchicalFilter(n, ndata=2, ntemplates=2, band=512,
-                                  snr=5.5, fd=1e-2, device=device)
+        f = mf.HierarchicalFilter(n, ndata=2, ntemplates=2, chain=512, snr=5.5, fd=1e-2, device=device)
         f.set_reference(np.ones(n, np.float32))
         f.set_coarse_threshold(0.)  # isolate execution from statistical gating
     rng = np.random.default_rng(441)
@@ -122,7 +121,7 @@ def test_reference_update_recalibrates_a_reused_gpu_filter():
     if device is None:
         pytest.skip("no usable GPU")
     n, band = 2048, 512
-    f = mf.HierarchicalFilter(n, band=band, snr=5.5, fd=1e-2, device=device)
+    f = mf.HierarchicalFilter(n, chain=band, snr=5.5, fd=1e-2, device=device)
     # The coarse peak is 0.5 at f=1/4 and 0.293 at f=8/11. A threshold
     # between those proves recalibration changes the executed gate too.
     f.set_coarse_threshold(.35)
@@ -138,8 +137,8 @@ def test_reference_update_recalibrates_a_reused_gpu_filter():
         peaks = f.run(binsize=n)
         assert (peaks["index"] >= 0).all() == (low_power == 1.)
         fraction = ref[:band].sum() / ref.sum()
-        assert f._gpu_calibration(0.)[1] == pytest.approx(fraction)
-        np.testing.assert_allclose(f._ct, h[:, :band] / np.sqrt(fraction), rtol=1e-6)
+        assert f._gpu_calibration(0.)[1][0] == pytest.approx(fraction)
+        np.testing.assert_allclose(f._ct[0], h[:, :band] / np.sqrt(fraction), rtol=1e-6)
 
 
 def test_series_keeps_unchanged_template_buffers_resident(plan, monkeypatch):

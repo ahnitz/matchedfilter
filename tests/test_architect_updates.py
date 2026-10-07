@@ -1,7 +1,7 @@
 """Unit tests for search architect updates:
 - _core.taps_to_spectra vectorized FIR ingestion
 - TimeDomainFilterBank memory management and raw_taps
-- gatemodel disk-backed cache persistence
+- chain trials: what is measured and how it is normalised
 """
 import os
 import tempfile
@@ -11,7 +11,6 @@ import pytest
 import matchedfilter as mf
 from matchedfilter import _core, CorrelationFilter
 from matchedfilter.time_domain import TimeDomainFilterBank
-from matchedfilter.gatemodel import _save_disk_cache, _load_disk_cache, _GATE_FOR_RESULT_CACHE
 
 
 def test_taps_to_spectra_numpy_equivalence():
@@ -120,26 +119,6 @@ def test_timedomainfilterbank_2d_raw_taps_and_memory():
     assert np.allclose(res_2d.snr, res_list.snr, atol=1e-5)
 
 
-def test_gatemodel_disk_cache(monkeypatch):
-    """Verify that gatemodel cache saves to and loads from disk cleanly."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        test_cache_file = os.path.join(tmpdir, "test_gate_cache.pkl")
-        monkeypatch.setattr("matchedfilter.gatemodel._CACHE_FILE", test_cache_file)
-
-        # Save an entry
-        key = ("test_hash", 4096, 512, 5.5, 0.001)
-        val = 4.875
-        _save_disk_cache(single_entry=(key, val))
-
-        assert os.path.exists(test_cache_file)
-
-        # Clear in-memory cache and reload from disk
-        _GATE_FOR_RESULT_CACHE.pop(key, None)
-        assert key not in _GATE_FOR_RESULT_CACHE
-        _load_disk_cache()
-        assert _GATE_FOR_RESULT_CACHE.get(key) == val
-
-
 def test_public_taps_to_spectra_api():
     """Verify that public matchedfilter.taps_to_spectra matches np.fft.fft circularly rolled taps."""
     rng = np.random.default_rng(999)
@@ -204,50 +183,39 @@ def test_time_domain_filter_bank_narrow_slice_and_template_index():
     assert np.all(narrow_res.sample_indices < 30500)
 
 
-def test_hierarchical_run_series_autotune_work_normalization():
-    """Verify that run_series autotuning normalizes by block count and ignores micro sub-template slices."""
+def test_chain_trial_work_normalization(monkeypatch):
+    """Chain trials time full-template series calls per (block x template) and ignore follow-up slices."""
     def inspiral_power(n, exponent=-7 / 3.0, knee_frac=0.0150):
         p = np.zeros(n, dtype=np.float32)
         k = np.arange(1, n // 2).astype(np.float64)
         p[1:n // 2] = (k ** exponent / ((knee_frac * n / k) ** 4 + 1.0)).astype(np.float32)
         return p / p.sum()
 
-    mf._clear_autotune_cache()
-
-    n = 4096
+    monkeypatch.setenv("MF_CHAIN_MARGIN", "100")      # keep several chains on the short list
+    monkeypatch.setenv("MF_AUTOTUNE", "1")
+    mf.clear_autotune_cache()
+    n, nt = 4096, 4
     power = inspiral_power(n)
-    h = np.sqrt(power).astype(np.complex64)
-    h_conj = np.conj(h)
-    nt = 4
-
-    hf = mf.HierarchicalFilter(n, 1, nt, snr=5.5, fd=1e-3, cascade=True, valid=(0, n))
+    h = np.conj(np.sqrt(power).astype(np.complex64))
+    hf = mf.HierarchicalFilter(n, 1, nt, snr=5.5, fd=1e-3, valid=(0, n))
     hf.set_reference(power)
-    hf.set_templates(np.repeat(h_conj[None, :], nt, axis=0))
+    hf.set_templates(np.repeat(h[None, :], nt, axis=0))
+    assert hf.autotune_info["status"] == "trial" and len(hf.autotune_info["shortlist"]) > 1
 
     rng = np.random.default_rng(77)
-    series_len = n * 8
-    series = (rng.standard_normal(series_len) + 1j * rng.standard_normal(series_len)).astype(np.complex64)
+    series = (rng.standard_normal(n * 8) + 1j * rng.standard_normal(n * 8)).astype(np.complex64)
 
-    # 1. Sub-template narrow slice: template_index follow-up (templates=(1, 1), 1 block)
-    # This must NOT record a trial or corrupt autotune statistics
-    hf.run_series(series, starts=np.array([0], dtype=np.uintp),
-                  win_start=np.array([0], dtype=np.uintp),
-                  win_end=np.array([n], dtype=np.uintp),
-                  binsize=n, threshold=5.0, templates=(1, 1))
-    assert len(hf.autotune_info["trials"]) == 0
+    def samples():
+        (trial,) = mf.get_autotune_state()["trials"].values()
+        return trial["samples"][hf.config]
 
-    # 2. Full segment with 4 blocks: should be timed and normalized by n_blocks=4 and n_templates=4
+    # A follow-up on one template over one block is not representative work: not recorded.
+    hf.run_series(series, starts=np.array([0], dtype=np.uintp), win_start=np.array([0], dtype=np.uintp),
+                  win_end=np.array([n], dtype=np.uintp), binsize=n, threshold=5.0, templates=(1, 1))
+    assert samples() == []
+    # A full call over 4 blocks is recorded once, per pair.
     starts = np.array([0, n, 2 * n, 3 * n], dtype=np.uintp)
-    win_start = np.zeros(4, dtype=np.uintp)
-    win_end = np.full(4, n, dtype=np.uintp)
-    hf.run_series(series, starts=starts, win_start=win_start, win_end=win_end,
-                  binsize=n, threshold=5.0)
-
-    assert len(hf.autotune_info["trials"]) == 1
-    trial0 = hf.autotune_info["trials"][0]
-    assert trial0["n_blocks"] == 4
-    assert trial0["n_templates"] == nt
-    expected_norm = float(1 * nt * 4)
-    assert np.isclose(trial0["time_per_pair"], trial0["time_ms"] / expected_norm)
-
-
+    hf.run_series(series, starts=starts, win_start=np.zeros(4, dtype=np.uintp),
+                  win_end=np.full(4, n, dtype=np.uintp), binsize=n, threshold=5.0)
+    s = samples()
+    assert len(s) == 1 and 0 < s[0] < 1e-3          # seconds per (block x template) pair

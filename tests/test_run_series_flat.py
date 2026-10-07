@@ -169,7 +169,7 @@ def test_windows_with_different_bin_counts_are_refused(device, klass):
     if klass == "flat":
         f = mf.MatchedFilter(N, 4, NT, device=device)
     else:
-        f = mf.HierarchicalFilter(N, 4, NT, snr=5.5, fd=1e-2, band=256, device=device)
+        f = mf.HierarchicalFilter(N, 4, NT, snr=5.5, fd=1e-2, chain=256, device=device)
         f.set_reference(np.abs(h[0]) ** 2)
         f.set_coarse_threshold(0.0)
     f.set_templates(h)
@@ -200,7 +200,7 @@ def test_raw_returns_two_arrays_on_every_path(device, klass):
     if klass == "flat":
         f = mf.MatchedFilter(N, 4, NT, device=device)
     else:
-        f = mf.HierarchicalFilter(N, 4, NT, snr=5.5, fd=1e-2, band=256, device=device)
+        f = mf.HierarchicalFilter(N, 4, NT, snr=5.5, fd=1e-2, chain=256, device=device)
         f.set_reference(np.abs(h[0]) ** 2)
         f.set_coarse_threshold(0.0)
     f.set_templates(h)
@@ -221,7 +221,7 @@ def test_run_raw_arity_matches_run_series(klass):
     """run and run_series must agree with each other about raw=True too."""
     series, h, starts = fixture()
     f = (mf.MatchedFilter(N, 4, NT, device="cpu") if klass == "flat"
-         else mf.HierarchicalFilter(N, 4, NT, snr=5.5, fd=1e-2, band=256, device="cpu"))
+         else mf.HierarchicalFilter(N, 4, NT, snr=5.5, fd=1e-2, chain=256, device="cpu"))
     if klass == "hier":
         f.set_reference(np.abs(h[0]) ** 2)
         f.set_coarse_threshold(0.0)

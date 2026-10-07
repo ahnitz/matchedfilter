@@ -7,10 +7,10 @@ with their files, margin placement, SNR envelopes and obsolete producers.
 There is no accuracy-table fallback. Unresolvable budgets refuse; an
 explicit band and coarse threshold still bypass model calculation.
 
-`MF_ACCURACY` and `MF_THRESHOLD` now raise an explicit migration error
-rather than silently overriding or being ignored by a model-driven gate.
-`MF_COST` remains supported. The `tuning` argument to `choose_threshold`
-remains accepted but cannot affect accuracy.
+The single-band functions here (`gate_for`, `dismissal`) are the one-tier
+case of the gate-chain model in `gatechain`, computed from the same joint
+draws. `MF_ACCURACY`, `MF_THRESHOLD`, `MF_COST` and the `tuning` argument are
+gone.
 
 ## The full-band blocker was a reference mismatch
 
@@ -93,6 +93,12 @@ Its noise-only timing rows report **requested** FDR, not measured signal
 loss. `audit_gate_model.py` reports empirical counts and Wilson intervals.
 
 ## Cost migration and performance
+
+> **Historical.** The cost tables described in this section were retired when
+> configurations became gate chains: tier costs are now calibrated in-process
+> on the running machine (see [the hierarchical filter](hierarchical.md)), and
+> `MF_COST`, the cost files and their tools no longer exist. The section is
+> kept as the record of the gate-model migration.
 
 Cost measurements remain hardware-specific. The obsolete gate-scale axis
 had inconsistent provenance across generations and cannot be interpreted

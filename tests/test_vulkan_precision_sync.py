@@ -38,7 +38,7 @@ def test_first_dispatch_and_changing_survivor_counts(binsize):
     rng = np.random.default_rng(641)
     d, h = spectra((2,n), rng), spectra((3,n), rng)
     flat = mf.MatchedFilter(n,2,3,device='cpu')
-    hier = mf.HierarchicalFilter(n,2,3,band=256,device='gpu:0')
+    hier = mf.HierarchicalFilter(n, 2, 3, chain=256, device='gpu:0')
     try:
         for f in (flat,hier):
             f.set_data(d); f.set_templates(h)

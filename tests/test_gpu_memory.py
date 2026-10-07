@@ -11,7 +11,7 @@ def plan(request):
     if dev is None: pytest.skip('no usable GPU')
     if request.param=='flat': f=mf.MatchedFilter(1024,2,2,device=dev)
     else:
-        f=mf.HierarchicalFilter(1024,2,2,band=256,device=dev)
+        f=mf.HierarchicalFilter(1024, 2, 2, chain=256, device=dev)
         f.set_reference(np.ones(1024,np.float32)); f.set_coarse_threshold(0.)
     rng=np.random.default_rng(888)
     h=(rng.normal(size=(2,1024))+1j*rng.normal(size=(2,1024))).astype(np.complex64)

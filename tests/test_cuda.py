@@ -90,14 +90,14 @@ def test_cuda_hierarchical_filter_agrees_with_cpu():
     # Add strong injection to trigger survivor
     data[0, :] += 15.0 * tmpl[0, :]
 
-    hf_cpu = matchedfilter.HierarchicalFilter(n, 2, 4, band=512, device="cpu")
+    hf_cpu = matchedfilter.HierarchicalFilter(n, 2, 4, chain=512, device="cpu")
     hf_cpu.set_reference(np.ones(n, dtype=np.float32))
     hf_cpu.set_coarse_threshold(4.0)
     hf_cpu.set_data(data)
     hf_cpu.set_templates(tmpl)
     res_cpu = hf_cpu.run(threshold=6.0)
 
-    hf_gpu = matchedfilter.HierarchicalFilter(n, 2, 4, band=512, device=dev)
+    hf_gpu = matchedfilter.HierarchicalFilter(n, 2, 4, chain=512, device=dev)
     hf_gpu.set_reference(np.ones(n, dtype=np.float32))
     hf_gpu.set_coarse_threshold(4.0)
     hf_gpu.set_data(data)

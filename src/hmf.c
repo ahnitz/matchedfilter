@@ -194,6 +194,11 @@ int ap_hmf_chain(const ap_hmf_plan *p,size_t *bands){
   if(bands) for(int i=0;i<p->ntiers;i++) bands[i]=p->tier[i].m;
   return p->ntiers;
 }
+int ap_hmf_thresholds(const ap_hmf_plan *p,float *thr){
+  if(!p) return 0;
+  if(thr) for(int i=0;i<p->ntiers;i++) thr[i]=p->tier[i].thr;
+  return p->ntiers;
+}
 int ap_hmf_set_thresholds(ap_hmf_plan *p,const float *thr,int ntiers){
   if(!p || !thr || ntiers!=p->ntiers) return -1;
   for(int i=0;i<ntiers;i++) if(!isfinite(thr[i])) return -1;

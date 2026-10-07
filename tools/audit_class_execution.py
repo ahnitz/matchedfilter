@@ -73,7 +73,7 @@ def inputs(n, blocks, nt, groups=1):
 def plan(n, nd, nt, device, kind, h, group=8):
     with environment(MF_DGROUP=group):
         if kind == 'hier':
-            f = mf.HierarchicalFilter(n, nd, nt, device=device, band=256)
+            f = mf.HierarchicalFilter(n, nd, nt, device=device, chain=256)
             f.set_coarse_threshold(4.)
         else:
             f = mf.MatchedFilter(n, nd, nt, device=device)

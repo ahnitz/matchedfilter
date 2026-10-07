@@ -45,7 +45,7 @@ def test_specialized_and_general_peaks_are_identical(n, hierarchical, shared):
     filters = []
     try:
         for specialized in (False, True):
-            f = (mf.HierarchicalFilter(n,3,2,band=256,device='gpu:0')
+            f = (mf.HierarchicalFilter(n, 3, 2, chain=256, device='gpu:0')
                  if hierarchical else mf.MatchedFilter(n,3,2,device='gpu:0'))
             if hierarchical:
                 f.set_coarse_threshold(0.)

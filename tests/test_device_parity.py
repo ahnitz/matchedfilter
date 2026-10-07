@@ -17,7 +17,7 @@ def device(request):
 def plan(request,device):
     if request.param=='flat':
         return mf.MatchedFilter(1024,2,2,device=device)
-    f=mf.HierarchicalFilter(1024,2,2,band=256,device=device)
+    f=mf.HierarchicalFilter(1024, 2, 2, chain=256, device=device)
     f.set_reference(np.ones(1024,np.float32))
     f.set_coarse_threshold(0.)
     return f
@@ -59,7 +59,7 @@ def test_failed_data_set_does_not_enable_run(plan):
 
 
 def test_refinement_stats_count_work_not_detections(device):
-    f=mf.HierarchicalFilter(1024,2,2,band=256,device=device)
+    f=mf.HierarchicalFilter(1024, 2, 2, chain=256, device=device)
     f.set_reference(np.ones(1024,np.float32)); f.set_coarse_threshold(0.)
     populate(f)
     p=f.run(threshold=1e10,binsize=1)
@@ -73,12 +73,12 @@ def test_refinement_stats_count_work_not_detections(device):
 
 
 def test_threshold_reset_and_reference_change(device,monkeypatch):
-    def lookup(power,n,snr,fd,band): return float(power[0])+snr
-    monkeypatch.setattr(mf,'choose_threshold',lookup)
-    f=mf.HierarchicalFilter(1024,1,1,band=256,snr=5.5,device=device)
+    def lookup(power,n,snr,fd,chain,**kw): return {"thresholds":(float(power[0])+snr,)}
+    monkeypatch.setattr(mf._gatechain,'chain_thresholds',lookup)
+    f=mf.HierarchicalFilter(1024, 1, 1, chain=256, snr=5.5, device=device)
     ref=np.ones(1024,np.float32); f.set_reference(ref)
     def threshold():
-        return f._gpu_calibration(5.5)[2] if f._gpu is not None else f._ensure().coarse_threshold(5.5)
+        return f._gpu_calibration(5.5)[2][0] if f._gpu is not None else f._execution_plan().thresholds()[0]
     assert threshold()==pytest.approx(6.5)
     f.set_coarse_threshold(0.)
     assert threshold()==0.
@@ -94,7 +94,7 @@ def test_threshold_reset_and_reference_change(device,monkeypatch):
 
 @pytest.mark.parametrize('bad',['zero','negative','nan','shape'])
 def test_invalid_reference(device,bad):
-    f=mf.HierarchicalFilter(1024,band=256,device=device)
+    f=mf.HierarchicalFilter(1024, chain=256, device=device)
     p=np.ones(1024,np.float32)
     if bad=='zero': p[:]=0
     elif bad=='negative': p[0]=-1
@@ -129,12 +129,12 @@ def test_raw_output_types(plan):
     assert counts.dtype==np.int32
 
 
-@pytest.mark.parametrize('kwargs',[{'ndata':0},{'ntemplates':0},{'band':32},{'band':1024},{'band':123},{'taps':0},{'taps':3}])
+@pytest.mark.parametrize('kwargs',[{'ndata':0},{'ntemplates':0},{'chain':32},{'chain':1024},{'chain':123},{'chain':(512,256)},{'chain':()}])
 def test_invalid_constructor(device,kwargs):
     with pytest.raises(ValueError): mf.HierarchicalFilter(1024,device=device,**kwargs)
 
 
 @pytest.mark.parametrize('threshold',[-1,np.nan,np.inf])
 def test_invalid_coarse_threshold(device,threshold):
-    f=mf.HierarchicalFilter(1024,band=256,device=device)
+    f=mf.HierarchicalFilter(1024, chain=256, device=device)
     with pytest.raises(ValueError): f.set_coarse_threshold(threshold)

@@ -48,8 +48,7 @@ class Cell:
         self.H = np.stack([template_with_power(n, power) for _ in range(nt)])
         self.flat = mf.MatchedFilter(n, nb, nt)
         self.flat.set_templates(self.H)
-        self.hier = mf.HierarchicalFilter(n, nb, nt, snr=snr, fd=fd,
-                                          band=band, taps=8)
+        self.hier = mf.HierarchicalFilter(n, nb, nt, snr=snr, fd=fd, chain=band)
         self.hier.set_reference(power)
         self.hier.set_templates(self.H)
         self.ph = np.exp(2j * np.pi * np.arange(n) / n)

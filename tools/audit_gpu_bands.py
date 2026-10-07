@@ -31,8 +31,7 @@ def main():
         plans = []
         try:
             for band in args.bands:
-                f = mf.HierarchicalFilter(teaser.N, teaser.ND, teaser.NT,
-                    snr=5.5, fd=fd, band=band, device='gpu')
+                f = mf.HierarchicalFilter(teaser.N, teaser.ND, teaser.NT, snr=5.5, fd=fd, chain=band, device='gpu')
                 plans.append((band, f))
                 f.set_reference(ref)
                 f.set_data(d)

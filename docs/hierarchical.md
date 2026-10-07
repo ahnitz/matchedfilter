@@ -1,8 +1,12 @@
 # The hierarchical matched filter
 
-The coarse stage correlates the first `band` spectral bins on a lag grid
-spaced by `n / band`. It rejects a pair when its maximum is below the coarse
-threshold. Surviving pairs run the full matched filter. CPU and GPU follow
+The filter gates pairs with a **chain** of coarse tiers before paying for the
+full correlation. A tier at band `b` correlates the first `b` spectral bins
+on a lag grid spaced by `n / b` and rejects a pair when its maximum is below
+the tier's threshold. Tier 0 runs on every (block, template) pair; each
+later tier, at a wider band, runs only on the previous tier's survivors; the
+survivors of the last tier run the full matched filter. A single coarse gate
+is the one-tier chain. CPU and GPU follow
 this algorithm; arithmetic precision can move decisions near the gate.
 Every reported survivor agrees with the flat filter within the backend's
 floating-point accuracy. The hierarchy can omit triggers.
@@ -31,23 +35,39 @@ hf.set_data(data)
 peaks = hf.run(binsize=n, threshold=5.5)
 ```
 
-Configuration selection ranks candidates using measured **cost** files;
-accuracy no longer comes from ACC/ACC2/THR files. `MF_COST` selects a local
-cost file; GPU selection otherwise uses the most specific available device
-cost table. Without usable costs, pin `band`. Without a resolvable model
-budget, supply an explicitly validated gate as well:
+## Choosing the chain
+
+With a reference set, the filter chooses its own chain. Every chain of up to
+`max_tiers` (default 3) power-of-two bands is priced:
+
+* **thresholds** -- the false-dismissal budget `fd` is split between the
+  tiers from the same joint signal draws (`gatechain.chain_thresholds`);
+* **noise pass rates** -- simulated from the reference over the block's
+  searched lags, jointly across tiers (nested tiers share their noise);
+* **tier costs** -- measured once per process on the machine itself, through
+  the engine's per-tier counters (`gatechain.calibrate_costs`, well under a
+  second). Nothing is tabulated or shipped.
+
+The model only has to keep the cheapest chain on a short list. Chains within
+its error margin of the best (`MF_CHAIN_MARGIN`, default 0.30) are then
+**measured on the real workload**: plans with the same short list run it
+round-robin, and the chain with the lowest measured time per pair is kept by
+all of them. `MF_AUTOTUNE=0` keeps the model's choice instead (deterministic).
+`config` reports the chain in use; `autotune_info` the model's choice, the
+short list and whether the trial has finished.
+
+To pin a chain, pass it; to bypass the model, give one threshold per tier:
 
 ```python
-hf = matchedfilter.HierarchicalFilter(n, band=512)
-hf.set_coarse_threshold(3.0)
+hf = matchedfilter.HierarchicalFilter(n, chain=(256, 512))
+hf.set_coarse_threshold((3.9, 4.6))
 ```
 
-An explicit band and gate need no reference or tuning file. With no
+A pinned chain with explicit thresholds needs no reference. With no
 reference, coarse templates use their own in-band power fractions.
 `set_coarse_threshold(None)` restores model gating and requires a reference.
 `set_first_stage(snr)` changes the model's design SNR without changing the
-final threshold or pinned configuration. `taps` is compatibility metadata;
-there is no coarse interpolation or oversampling control.
+final threshold or the chain.
 
 ## Reference groups and full-band scalloping
 
@@ -69,13 +89,8 @@ Tighter budgets need more samples (20,000 at .01, 200,000 at .001,
 2,000,000 at .0001). Requests below the available resolution refuse rather
 than falling back to an obsolete table. Kernel execution is unchanged.
 
-Cost is approximately coarse work plus the fraction of pairs refined times
-full-filter work. `refine_rate` reports this fraction over the plan's lifetime.
-Cost files rank alternatives but are not runtime predictions: hardware,
-batch shape, input population, window and budget affect the best choice.
-Remeasure the CPU table with `tools/regen/cost_cpu.py --out mycost.txt` or
-use `tools/audit_selection.py` to inspect the actual workload. The CPU sweep
-uses serial, rotated measurements at fd=.01, .001 and .0001, with the model
-gate recomputed for each configuration and budget. The older
-`tools/hmf_tune.py --retune-cost` command still produces a nine-field table
-measured only at fd=.001.
+Cost is approximately first-tier work, plus each later tier's work on its
+survivors, plus the refined fraction times full-filter work. `refine_rate`
+reports the refined fraction over the plan's lifetime, and `tier_stats` each
+tier's passes and time. `tools/audit_gate_model.py --chain ...` measures a
+chain's dismissal by injection against the flat filter.

@@ -434,20 +434,22 @@ class TimeDomainFilterBank:
                     device=self.device, valid=(c_bad, chosen_N - c_bad)
                 )
             elif self.engine == 'hier':
-                band_bins = None
+                # coarse_band_hz pins a chain (one band or a tuple of bands, in Hz);
+                # otherwise the plan chooses its own from the reference.
+                chain = None
                 if isinstance(self.coarse_band_hz, (tuple, list)):
                     delta_f = self.data_sample_rate / chosen_N
-                    band_bins = tuple(int(round(float(b) / delta_f)) for b in self.coarse_band_hz)
+                    chain = tuple(int(round(float(b) / delta_f)) for b in self.coarse_band_hz)
                 elif self.coarse_band_hz is not None and self.coarse_band_hz > 0:
                     delta_f = self.data_sample_rate / chosen_N
-                    band_bins = int(round(self.coarse_band_hz / delta_f))
+                    chain = (int(round(self.coarse_band_hz / delta_f)),)
                 plan = HierarchicalFilter(
                     chosen_N, ndata=1, ntemplates=T,
                     snr=self.threshold, fd=self.false_dismissal,
-                    band=band_bins, device=self.device,
+                    chain=chain, device=self.device,
+                    # the lags each block's peak search covers: noise passes are priced over these
+                    search_window=(int(c_bad), int(chosen_N - c_bad)),
                 )
-                # The lags each block's peak search covers: the gate model prices noise passes over these.
-                plan.search_window = (int(c_bad), int(chosen_N - c_bad))
                 if self.first_stage_snr > 0:
                     plan.set_first_stage(self.first_stage_snr)
             else:

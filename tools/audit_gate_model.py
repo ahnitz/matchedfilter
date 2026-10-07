@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Measure dismissal at the model's gate using independent filter injections.
 
-Example: python tools/audit_gate_model.py --n 1024 --band 256 --snr 5.5 \
+Example: python tools/audit_gate_model.py --n 1024 --chain 256 --snr 5.5 \
     --fd .0001 --trials 1500000
+         python tools/audit_gate_model.py --n 2048 --chain 256 512 --snr 6 --fd .001
 
 The confidence interval describes binomial counting uncertainty, not model
 error or uncertainty about whether a reference represents a template bank.
@@ -13,9 +14,12 @@ import math
 
 import numpy as np
 import matchedfilter as mf
-from matchedfilter import gatemodel
+import os
+import sys
+from matchedfilter import gatechain, gatemodel
 from matchedfilter.benchmark import _inspiral_power
-from hmf_tune import measure
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'tests'))
+from _gatelib import measure  # noqa: E402
 
 
 def wilson(missed, detected):
@@ -32,7 +36,7 @@ def wilson(missed, detected):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--n', type=int, default=4096)
-    ap.add_argument('--band', type=int)
+    ap.add_argument('--chain', type=int, nargs='+', help='bands of the gate chain (default: the model\'s choice)')
     ap.add_argument('--snr', type=float, default=5.5)
     ap.add_argument('--fd', type=float, nargs='+', default=[.01, .001, .0001])
     ap.add_argument('--trials', type=int)
@@ -42,25 +46,30 @@ def main(argv=None):
     a = ap.parse_args(argv)
     power = np.load(a.profile) if a.profile else _inspiral_power(a.n)
     for fd in a.fd:
-        cfg = (a.band, 8) if a.band else mf.choose_config(power, a.n, a.snr, fd)
-        if cfg is None:
-            raise ValueError('no cost configuration with a resolvable gate')
-        band, taps = cfg
-        gate = mf.choose_threshold(power, a.n, a.snr, fd, band)
-        if gate is None:
+        if a.chain:
+            chain = tuple(a.chain)
+        else:
+            best, _ = gatechain.choose_chain(power, a.n, a.snr, fd, cost=gatechain.calibrate_costs(a.n, 64))
+            if best is None:
+                raise ValueError('no chain with a resolvable gate')
+            chain = best["chain"]
+        plan = gatechain.chain_thresholds(power, a.n, a.snr, fd, chain)
+        if plan is None:
             raise ValueError('budget is below model resolution')
+        gate = plan["thresholds"]
         trials = a.trials if a.trials is not None else max(20000, int(200/fd))
         if trials <= 0:
             raise ValueError('trials must be positive')
-        rate, detected, _ = measure(a.n, band, 2, taps, a.snr, trials,
+        rate, detected, _ = measure(a.n, chain, a.snr, trials,
                                     seed=a.seed, power=power, thr=gate, device=a.device)
         missed = round(rate*detected)
-        print(json.dumps(dict(n=a.n, band=band, snr=a.snr, fd=fd, gate=gate,
+        model_fdr = (gatemodel.dismissal(power, a.n, chain[0], a.snr, gate[0], fd_hint=fd)
+                     if len(chain) == 1 else fd)
+        print(json.dumps(dict(n=a.n, chain=list(chain), snr=a.snr, fd=fd, gate=list(gate),
                               device=a.device, trials_requested=trials,
                               seed=a.seed, detected=detected, missed=missed,
                               measured_fdr=rate, wilson95=wilson(missed, detected),
-                              model_fdr=gatemodel.dismissal(power, a.n, band,
-                                                           a.snr, gate, fd_hint=fd))), flush=True)
+                              model_fdr=model_fdr)), flush=True)
     return 0
 
 

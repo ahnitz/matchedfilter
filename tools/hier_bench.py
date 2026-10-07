@@ -185,10 +185,7 @@ def replay(mf, path, reps, a):
     st, ws, we = (z["starts"].astype(np.uintp), z["win_start"].astype(np.uintp),
                   z["win_end"].astype(np.uintp))
 
-    p = mf.HierarchicalFilter(n, ndata=1, ntemplates=nb, snr=thr,
-                              fd=float(z["fd"]),
-                              band=band,
-                              taps=a.filter_taps if band else None)
+    p = mf.HierarchicalFilter(n, ndata=1, ntemplates=nb, snr=thr, fd=float(z["fd"]), chain=band)
     if len(z["reference"]):
         p.set_reference(z["reference"])
     p.set_templates(z["templates"])
@@ -345,10 +342,7 @@ def main(argv=None):
     st, ws, we = blocks(a.n, a.taps, a.series)
     npair = len(st) * a.templates
 
-    p = mf.HierarchicalFilter(a.n, ndata=1, ntemplates=a.templates,
-                              snr=a.threshold, fd=1e-3,
-                              band=a.band or None,
-                              taps=a.filter_taps if a.band else None)
+    p = mf.HierarchicalFilter(a.n, ndata=1, ntemplates=a.templates, snr=a.threshold, fd=1e-3, chain=a.band or None)
     p.set_reference(power)
     p.set_templates(h)
     if a.first_stage:
@@ -382,10 +376,10 @@ def main(argv=None):
     # Do not request an unmeasured SNR and rely on implicit clamping.
     if len(p.config) == 3:
         b0, band, taps = p.config
-        opened = mf.HierarchicalFilter(a.n, 1, a.templates, band=band, taps=taps, cascade_band=b0)
+        opened = mf.HierarchicalFilter(a.n, 1, a.templates, chain=(b0, band))
     else:
         band, taps = p.config
-        opened = mf.HierarchicalFilter(a.n, 1, a.templates, band=band, taps=taps)
+        opened = mf.HierarchicalFilter(a.n, 1, a.templates, chain=band)
     opened.set_coarse_threshold(0.0)
     opened.set_reference(power)
     opened.set_templates(h)

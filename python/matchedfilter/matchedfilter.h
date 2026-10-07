@@ -173,6 +173,8 @@ ap_hmf_plan *ap_hmf_create_chain(size_t n, size_t k, int ndata, int ntmpl,
 /* One finite threshold per tier, in coarse-output units; a negative value
    marks the plan unconfigured and execution then fails. */
 int ap_hmf_set_thresholds(ap_hmf_plan *p, const float *thr, int ntiers);
+/* The thresholds in force (thr may be NULL); returns the number of tiers. */
+int ap_hmf_thresholds(const ap_hmf_plan *p, float *thr);
 /* The chain's bands (bands may be NULL); returns the number of tiers. */
 int ap_hmf_chain(const ap_hmf_plan *p, size_t *bands);
 /* Pairs that passed tier `tier` and the ticks spent in it; tier == ntiers is

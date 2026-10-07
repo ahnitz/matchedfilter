@@ -139,10 +139,10 @@ _MC = {}
 
 
 def filter_mc(p, thr, trials=6000, band=BAND, n=N, snr=SNR, device=None):
-    import hmf_tune as t
+    import _gatelib as t
     key = (p.tobytes().__hash__(), round(thr, 6), trials, band, n, snr, device)
     if key not in _MC:
-        dm, _, _ = t.measure(n, band, 2, 8, snr, trials, power=p, thr=thr,
+        dm, _, _ = t.measure(n, band, snr, trials, power=p, thr=thr,
                              device=device)
         _MC[key] = dm
     return _MC[key]
@@ -169,8 +169,7 @@ def test_kappa_matches_the_coarse_stage_it_models():
         D = (10.0 * H * ph ** off).astype(np.complex64)[None, :]
         # One filter, 20 thresholds. Constructing it per iteration re-ran
         # device enumeration 60 times for nothing.
-        hf = mf.HierarchicalFilter(N, ndata=1, ntemplates=1, snr=SNR,
-                                   fd=1e-3, band=BAND, taps=8)
+        hf = mf.HierarchicalFilter(N, ndata=1, ntemplates=1, snr=SNR, fd=1e-3, chain=BAND)
         hf.set_reference(p)
         hf.set_templates(H[None, :])
         hf.set_data(D)
@@ -229,7 +228,7 @@ def test_dismissal_rises_with_the_gate(thr):
 def test_scalloping_not_beff_is_what_predicts_dismissal():
     """The key. Two profiles matched on (f, B_eff) but differing in kappa
     must differ in dismissal, or the old key was sufficient after all."""
-    import hmf_tune as t
+    import _gatelib as t
     p = profile()
     f, be = mf._band_features(p, BAND)
     synth = t.make_ref(N, BAND, f, be)
@@ -322,7 +321,7 @@ def test_quantile_placement_uses_the_conditional_distribution(fd):
     from matchedfilter import gatemodel as gm
     p = profile()
     gate = gm.gate_for(p, N, BAND, SNR, fd)
-    kept = gm._conditional(p, N, BAND, SNR, gm._nsamp_for(fd))
+    kept = gm._kept(p, N, BAND, SNR, fd)
     idx = int(np.floor(fd * len(kept)))
     assert gate == float(kept[idx])
     assert gm.dismissal(p, N, BAND, SNR, gate, fd_hint=fd) <= fd
@@ -330,16 +329,15 @@ def test_quantile_placement_uses_the_conditional_distribution(fd):
     assert (idx + 1) / len(kept) > fd
 
 
-def test_full_band_has_no_independent_noise_but_still_has_grid_loss():
-    from matchedfilter import gatemodel as gm
+def test_coarse_never_exceeds_its_local_fine_maximum():
+    """With all power in band (f = 1, no 1/sqrt(f) rescaling) the coarse lags are a subset of
+    the fine grid, so the coarse maximum cannot exceed its local fine maximum."""
+    from matchedfilter import gatechain as gc
     p = np.zeros(1024); p[:512] = 1.
-    coarse, fine = gm._samples(p, 1024, 512, 5., 8000, 71)
-    assert np.all(coarse <= fine + 2e-6)
-    assert np.mean(coarse < .9 * fine) > .1
-    # With identical lag grids, both outputs must actually coincide.
-    coarse, fine = gm._samples(p, 1024, 1024, 5., 8000, 71)
-    np.testing.assert_array_equal(coarse, fine)
-
+    C, F = gc.signal_draws(p, 1024, [128, 512], 5., 8000, 71)
+    assert np.all(C[:, 1] <= F[:, 1] + 2e-6)
+    # ...but the decimated grid still loses SNR (scalloping) even at full in-band power.
+    assert np.mean(C[:, 1] < .9 * F[:, 1]) > .1
 
 @pytest.mark.parametrize("fd", [0., -1., 1., np.nan, np.inf])
 def test_invalid_model_budget_is_rejected(fd):
@@ -357,36 +355,30 @@ def test_invalid_model_profile_is_rejected(power):
 
 
 def test_unresolvable_budget_refuses_without_sampling(monkeypatch):
-    from matchedfilter import gatemodel as gm
+    from matchedfilter import gatemodel as gm, gatechain as gc
     def forbidden(*args, **kwargs):
         raise AssertionError("unresolvable request allocated samples")
-    monkeypatch.setattr(gm, '_conditional', forbidden)
+    monkeypatch.setattr(gc, 'signal_draws', forbidden)
     assert gm.gate_for(np.ones(128), 128, 64, 5., 1e-8) is None
 
 
 def test_sampling_cache_includes_seed_and_exact_snr(monkeypatch):
-    from matchedfilter import gatemodel as gm
+    from matchedfilter import gatechain as gc
     from collections import OrderedDict
-    monkeypatch.setattr(gm, '_CACHE', OrderedDict())
+    monkeypatch.setattr(gc, '_SIGNAL_CACHE', OrderedDict())
+    monkeypatch.setattr(gc, '_SIMILAR', {})
     p = np.ones(128)
-    calls = []
-    original = gm._samples
-    def samples(*args):
-        calls.append(args[3:])
-        return original(*args)
-    monkeypatch.setattr(gm, '_samples', samples)
-    a = gm._conditional(p, 128, 64, 5., 1024, 1)
-    assert gm._conditional(8*p, 128, 64, 5., 1024, 1) is a
-    gm._conditional(p, 128, 64, 5., 1024, 2)
-    gm._conditional(p, 128, 64, 5.00001, 1024, 1)
-    assert len(calls) == 3
+    a = gc.signal_draws(p, 128, [64], 5., 1024, 1)
+    assert gc.signal_draws(8*p, 128, [64], 5., 1024, 1) is a       # only the profile's shape matters
+    assert gc.signal_draws(p, 128, [64], 5., 1024, 2) is not a
+    assert gc.signal_draws(p, 128, [64], 5.00001, 1024, 1) is not a
 
 
-def test_sampling_cache_respects_memory_limit(monkeypatch):
-    from matchedfilter import gatemodel as gm
+def test_sampling_cache_is_bounded(monkeypatch):
+    from matchedfilter import gatechain as gc
     from collections import OrderedDict
-    monkeypatch.setattr(gm, '_CACHE', OrderedDict())
-    monkeypatch.setattr(gm, '_CACHE_BYTES', 8192)
+    monkeypatch.setattr(gc, '_SIGNAL_CACHE', OrderedDict())
+    monkeypatch.setattr(gc, '_CACHE_MAX', 3)
     for seed in range(5):
-        gm._conditional(np.ones(128), 128, 64, 5., 1024, seed)
-    assert sum(len(k[0])+v.nbytes for k,v in gm._CACHE.items()) <= 8192
+        gc.signal_draws(np.ones(128), 128, [64], 5., 1024, seed)
+    assert len(gc._SIGNAL_CACHE) <= 3
