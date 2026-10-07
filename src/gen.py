@@ -149,10 +149,31 @@ class Gen:
             return res
         raise Exception("radix %d"%r)
 
+def fold_negations(body):
+    """Fold each unary negation NAME = 0-SRC into the adds and subtracts that use
+    it: a+NAME -> a-SRC, NAME+a -> a-SRC, a-NAME -> a+SRC, then drop the definition
+    if nothing else reads it.  Multiplying by +-i or -1 is otherwise a real
+    add-pipe instruction per use, and the add pipes are what these codelets are
+    bound by.  a+(0-x) and a-x differ only in the sign of an exact zero result,
+    which the numeric contract does not distinguish (see the unit codelets)."""
+    import re
+    for name, src in re.findall(r"(\w+)=V_SUB\(Z,(\w+)\)", body):
+        body = re.sub(r"V_ADD\((\w+),%s\)" % name, r"V_SUB(\1,%s)" % src, body)
+        body = re.sub(r"V_ADD\(%s,(\w+)\)" % name, r"V_SUB(\1,%s)" % src, body)
+        body = re.sub(r"V_SUB\((\w+),%s\)" % name, r"V_ADD(\1,%s)" % src, body)
+        if len(re.findall(r"\b%s\b" % name, body)) == 1:   # only its definition left
+            d = r"%s=V_SUB\(Z,%s\)" % (name, src)
+            body, k = re.subn(r"  vf %s;\n" % d, "", body)
+            if not k: body, k = re.subn(r"vf %s, " % d, "vf ", body)
+            if not k: body, k = re.subn(r", %s;" % d, ";", body)
+            assert k == 1, name
+    return body
+
+
 def build(n,radices,name,tw=False,preload=False,prod=False):
     g=Gen(n,name,tw,preload,prod); flip=g.run(radices)
     if (preload or tw or prod) and len(radices)==1: flip=0
-    body="\n".join(g.L)
+    body=fold_negations("\n".join(g.L))
     cdefs="\n".join("  const vf %s=V_SET1(%sf);"%(v,k) for k,v in g.consts.items())
     if prod:
         # ar/ai are never read - the first pass comes from the spectra - but the
@@ -277,7 +298,7 @@ def build_sr(n,name,tw=False,prod=False,unit=False,inplace=False,sink=False,out_
             else:
                 scheduled.append(line)
         g.L=scheduled
-    body="\n".join(g.L)
+    body=fold_negations("\n".join(g.L))
     cdefs="\n".join("  const vf %s=V_SET1(%sf);"%(v,k) for k,v in g.consts.items())
     if prod:
         args=("const float*restrict dr,const float*restrict di,"
