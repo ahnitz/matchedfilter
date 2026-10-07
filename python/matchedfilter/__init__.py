@@ -1783,16 +1783,18 @@ class HierarchicalFilter(MatchedFilter):
         chain = model_best
         self._chain_trial = None
         if len(shortlist) > 1:
-            # Plans with the same shortlist share one trial: search windows that differ by a
-            # few samples do not change which chain is cheaper.
-            tkey = (self.n, float(snr), float(self.fd), tiers, shortlist)
+            # One trial per configuration: plans whose references differ slightly (another
+            # segment's PSD, another template group) have slightly different short lists, and
+            # their union is what gets measured. Candidates arriving before the lock join it;
+            # after the lock every plan adopts the winner.
+            tkey = (self.n, float(snr), float(self.fd), tiers)
             with _AUTOTUNE_LOCK:
-                tr = _CHAIN_TRIALS.setdefault(tkey, {"samples": {c: [] for c in shortlist},
-                                                     "assigned": {c: 0 for c in shortlist},
-                                                     "winner": None})
+                tr = _CHAIN_TRIALS.setdefault(tkey, {"samples": {}, "assigned": {}, "winner": None})
                 if tr["winner"] is not None:
                     chain = tr["winner"]
                 else:
+                    for c in shortlist:
+                        tr["samples"].setdefault(c, []); tr["assigned"].setdefault(c, 0)
                     chain = min(shortlist, key=lambda c: (len(tr["samples"][c]) + tr["assigned"][c],
                                                           shortlist.index(c)))
                     tr["assigned"][chain] += 1
@@ -1830,6 +1832,8 @@ class HierarchicalFilter(MatchedFilter):
             return super().run_series(series, starts=starts, win_start=win_start, win_end=win_end,
                                       binsize=binsize, threshold=threshold, templates=templates,
                                       raw=raw, decimated=decimated)
+        # One-off work (building the plan, calibrating its thresholds) is not the chain's cost.
+        self._execution_plan()
         t0 = time.perf_counter()
         res = super().run_series(series, starts=starts, win_start=win_start, win_end=win_end,
                                  binsize=binsize, threshold=threshold, templates=templates,
