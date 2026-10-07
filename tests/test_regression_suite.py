@@ -489,7 +489,7 @@ def test_hierarchical_fine_fir_throughput_contract():
 
 
 def test_hierarchical_cpu_cascade_and_empty_contract():
-    """Verify that CPU N<=2048 plans avoid 2-tier cascade churn and return cached empty results."""
+    """No hierarchical configuration is excluded by rule, and zero-trigger output is the cached empty result."""
     from matchedfilter.time_domain import _EMPTY_FILTER_RESULTS
     N = 2048
     T = 64
@@ -504,8 +504,8 @@ def test_hierarchical_cpu_cascade_and_empty_contract():
         tap_sample_rate=2048, data_sample_rate=2048,
         engine="hier", threshold=6.0, false_dismissal=0.001
     )
-    # CPU N<=2048 must disable 2-tier cascade to prevent autotune trial switching
-    assert bank._groups[0].plan.cascade is False, "Expected cascade=False for CPU N<=2048"
+    # Every chain stays a candidate: the bank must not force single-tier (or any) configuration on the plan.
+    assert bank._groups[0].plan.cascade is not False, "TimeDomainFilterBank must not exclude multi-tier chains"
 
     bank.set_reference(ref_w, delta_f=1.0)
     # Zero-noise input guaranteed to produce zero triggers at threshold 6.0

@@ -34,6 +34,7 @@ import warnings
 
 import numpy as np
 from . import _core
+from . import gatechain as _gatechain
 
 try:
     from importlib.metadata import version as _version, PackageNotFoundError
@@ -1936,6 +1937,13 @@ def choose_config(power, n, snr, fd, tuning=None, pairs=None, device=None, casca
 
 
 _AUTOTUNE_LOCK = threading.Lock()
+_CHAIN_CHOICE = {}
+_CHAIN_TRIALS = {}
+#: Relative cost margin inside which modelled chains are measured rather than decided by the model.
+#: It is the model's demonstrated error (tier costs vs. engine counters agreed to ~25% in the consumer).
+_CHAIN_MARGIN = 0.30
+_CHAIN_SHORTLIST_MAX = 4
+_CHAIN_TRIALS_PER_CAND = 6
 _GLOBAL_AUTOTUNE_CACHE = {}
 _GLOBAL_AUTOTUNE_TRIALS = {}
 
@@ -1991,6 +1999,8 @@ def _clear_autotune_cache():
     with _AUTOTUNE_LOCK:
         _GLOBAL_AUTOTUNE_CACHE.clear()
         _GLOBAL_AUTOTUNE_TRIALS.clear()
+        _CHAIN_CHOICE.clear()
+        _CHAIN_TRIALS.clear()
 
 
 def clear_autotune_cache():
@@ -2042,8 +2052,10 @@ class HierarchicalFilter(MatchedFilter):
 
     def __init__(self, n, ndata=1, ntemplates=1, snr=5.5, fd=1e-2,
                  band=None, taps=None, device=None, *, valid=None, cascade_band=None,
-                 cascade="auto"):
+                 cascade="auto", max_tiers=3):
         from .device import parse as _parse_device
+        self.max_tiers = int(max_tiers)
+        self._chain = None
         self.device = _parse_device(device)
         self.n = int(n)
         self.valid = _valid_series_window(self.n, valid)
@@ -2222,6 +2234,9 @@ class HierarchicalFilter(MatchedFilter):
             # the tables do not describe, which is what the tuner does on
             # every cell.
             cfg = self._pinned
+        elif (self._pending_ref is not None and self.device.kind == "cpu"
+              and _gatechain.cost_model(self.n) is not None):
+            cfg = self._choose_chain()
         elif self._pending_ref is not None:
             if self.autotune_info.get("status") == "locked":
                 cfg = self.autotune_info["winner"]
@@ -2490,12 +2505,102 @@ class HierarchicalFilter(MatchedFilter):
         self._gtmpl = None
         self._gcal = None
 
+    def _choose_chain(self):
+        """Pick a gate chain: the model prices every chain, measurement settles the close ones.
+
+        The model (gatechain) need not be exact. It prunes: chains whose modelled cost is
+        more than the model's error margin above the best cannot win and are never run.
+        If more than one chain survives, plans sharing a key run the shortlist round-robin
+        on real data, and the one with the lowest measured time per pair is kept for
+        every plan with that key. MF_AUTOTUNE=0 keeps the model's choice (deterministic).
+        """
+        snr = self._fs_snr or self.snr
+        tiers = min(self.max_tiers, self._ENGINE_MAX_TIERS)
+        window = getattr(self, "search_window", None)
+        prof = _gatechain._gm._profile_sig(np.asarray(self._pending_ref, np.float64) / float(np.sum(self._pending_ref)))
+        key = (self.n, float(snr), float(self.fd), tiers, window, prof)
+        hit = _CHAIN_CHOICE.get(key)
+        if hit is None:
+            best, plans = _gatechain.choose_chain(self._pending_ref, self.n, snr, self.fd,
+                                                  cost=_gatechain.cost_model(self.n),
+                                                  max_tiers=tiers, window=window)
+            if best is None:
+                raise ValueError(_uncovered_message(self.n, self.snr, self.fd))
+            margin = float(os.environ.get("MF_CHAIN_MARGIN", _CHAIN_MARGIN))
+            shortlist = tuple(q["chain"] for q in plans if q["cost"] <= best["cost"] * (1.0 + margin))
+            shortlist = shortlist[:_CHAIN_SHORTLIST_MAX]
+            hit = _CHAIN_CHOICE[key] = (tuple(best["chain"]), shortlist)
+            _log_autotune("CHAIN n=%d model=%s shortlist=%s ranking=%s", self.n, best["chain"], shortlist,
+                          [(q["chain"], round(q["cost"], 1)) for q in plans[:6]])
+        model_best, shortlist = hit
+        if os.environ.get("MF_AUTOTUNE", "1").strip().lower() in ("0", "false", "no", "off"):
+            shortlist = shortlist[:1]          # deterministic: the model's choice, no measured trials
+        chain = model_best
+        self._chain_trial = None
+        if len(shortlist) > 1:
+            # Trials are shared by every plan with the same shortlist; search windows differing by a few
+            # samples (template lengths within a block size) do not change which chain is cheaper.
+            tkey = (self.n, float(snr), float(self.fd), tiers, shortlist)
+            with _AUTOTUNE_LOCK:
+                tr = _CHAIN_TRIALS.setdefault(tkey, {"cands": shortlist, "samples": {c: [] for c in shortlist},
+                                                     "assigned": {c: 0 for c in shortlist}, "winner": None})
+                if tr["winner"] is not None:
+                    chain = tr["winner"]
+                else:
+                    chain = min(shortlist, key=lambda c: (len(tr["samples"][c]) + tr["assigned"][c], shortlist.index(c)))
+                    tr["assigned"][chain] += 1
+                    self._chain_trial = tkey
+        self._chain = tuple(chain)
+        cfg = self._chain_cfg(self._chain)
+        self.autotune_info.update(status="locked" if self._chain_trial is None else "chain-trial", winner=cfg, untried=[])
+        return cfg
+
+    @staticmethod
+    def _chain_cfg(chain):
+        return (chain[0], 8) if len(chain) == 1 else CascadeConfig(chain[0], chain[1], 8)
+
+    def _chain_trial_record(self, dt, pairs):
+        """Record one measured call for this plan's trial chain; lock the winner when every candidate has enough."""
+        tkey = self._chain_trial
+        with _AUTOTUNE_LOCK:
+            tr = _CHAIN_TRIALS.get(tkey)
+            if tr is None:
+                return
+            if tr["winner"] is None and pairs > 0:
+                tr["samples"][self._chain].append(dt / pairs)
+                need = int(os.environ.get("MF_CHAIN_TRIALS", _CHAIN_TRIALS_PER_CAND))
+                if all(len(v) >= need for v in tr["samples"].values()):
+                    med = {c: float(np.median(v)) for c, v in tr["samples"].items()}
+                    tr["winner"] = min(med, key=med.get)
+                    _log_autotune("CHAIN-TRIAL locked %s  median s/pair %s", tr["winner"],
+                                  {c: "%.3g" % v for c, v in med.items()})
+            winner = tr["winner"]
+        if winner is not None:
+            self._chain_trial = None
+            self.autotune_info.update(status="locked", winner=self._chain_cfg(winner))
+            if tuple(winner) != tuple(self._chain):
+                self._chain = tuple(winner)
+                self._switch_config(self._chain_cfg(winner))
+
+    #: Tiers the CPU engine can execute; the chain model may consider more (max_tiers).
+    _ENGINE_MAX_TIERS = 2
+
     def _coarse_value(self, band, *, required=True):
         """Resolve one gate from an explicit value or the reference model."""
         if self._cal_thr is not None:
             if self._pinned is None:
                 raise ValueError("an explicit coarse threshold requires an explicit band")
             return self._cal_thr
+        if getattr(self, "_chain", None) is not None and self._pending_ref is not None:
+            pl = _gatechain.chain_thresholds(self._pending_ref, self.n, self._fs_snr or self.snr, self.fd,
+                                             self._chain, cost=_gatechain.cost_model(self.n),
+                                             window=getattr(self, "search_window", None))
+            if pl is None:
+                if required:
+                    raise ValueError("no calibrated thresholds for chain %s at n=%d" % (self._chain, self.n))
+                return None
+            th = pl["thresholds"]
+            return float(th[0]) if len(th) == 1 else tuple(float(x) for x in th)
         value = None
         if self._pending_ref is not None:
             cband = getattr(self, 'cascade_band', None)
@@ -2801,6 +2906,24 @@ class HierarchicalFilter(MatchedFilter):
                            data=data, templates=templates, counts=counts, raw=raw)
 
     def run_series(self, series, starts=None, win_start=None, win_end=None,
+                   binsize=None, threshold=0.0, templates=None, raw=False,
+                   decimated=None):
+        if getattr(self, "_chain_trial", None) is None:
+            return self._run_series_tuned(series, starts=starts, win_start=win_start, win_end=win_end,
+                                          binsize=binsize, threshold=threshold, templates=templates,
+                                          raw=raw, decimated=decimated)
+        t0 = time.perf_counter()
+        res = self._run_series_tuned(series, starts=starts, win_start=win_start, win_end=win_end,
+                                     binsize=binsize, threshold=threshold, templates=templates,
+                                     raw=raw, decimated=decimated)
+        dt = time.perf_counter() - t0
+        full = templates is None or templates[1] >= self.ntemplates
+        nblk = len(starts) if starts is not None else 1
+        if full and nblk >= 2 and getattr(self, "_chain_trial", None) is not None:
+            self._chain_trial_record(dt, nblk * self.ntemplates * self.ndata)
+        return res
+
+    def _run_series_tuned(self, series, starts=None, win_start=None, win_end=None,
                    binsize=None, threshold=0.0, templates=None, raw=False,
                    decimated=None):
         is_outer = not getattr(self, '_in_hier_series_call', False)
