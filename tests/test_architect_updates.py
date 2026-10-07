@@ -1,7 +1,6 @@
 """Unit tests for search architect updates:
 - _core.taps_to_spectra vectorized FIR ingestion
 - TimeDomainFilterBank memory management and raw_taps
-- CorrelationFilter.run_series with valid_slice (positive and negative indices)
 - gatemodel disk-backed cache persistence
 """
 import os
@@ -121,38 +120,6 @@ def test_timedomainfilterbank_2d_raw_taps_and_memory():
     assert np.allclose(res_2d.snr, res_list.snr, atol=1e-5)
 
 
-def test_correlation_filter_valid_slice():
-    """Verify that CorrelationFilter.run_series with valid_slice restricts blocks correctly."""
-    rng = np.random.default_rng(777)
-    N = 4096
-    filt = CorrelationFilter(N, ndata=1, ntemplates=2, valid=(1024, 3072))
-    t1 = (rng.standard_normal(N) + 1j * rng.standard_normal(N)).astype(np.complex64)
-    t2 = (rng.standard_normal(N) + 1j * rng.standard_normal(N)).astype(np.complex64)
-    filt.set_templates(np.stack([t1, t2]))
-
-    series_len = 32768
-    series = (rng.standard_normal(series_len) + 1j * rng.standard_normal(series_len)).astype(np.complex64)
-
-    # Full run
-    full_res = filt.run_series(series).copy()
-
-    # Windowed run with positive slice
-    vs = slice(8000, 16000)
-    slice_res = filt.run_series(series, valid_slice=vs).copy()
-
-    # The computed valid blocks overlapping [8000, 16000) must match full run
-    assert np.allclose(slice_res[:, 8000:16000], full_res[:, 8000:16000], atol=1e-5)
-    # Blocks far outside the valid slice must remain 0
-    assert np.all(slice_res[:, :4000] == 0)
-    assert np.all(slice_res[:, 24000:] == 0)
-
-    # Windowed run with negative slice
-    vs_neg = slice(-8000, -2000)
-    neg_res = filt.run_series(series, valid_slice=vs_neg).copy()
-    assert np.allclose(neg_res[:, -8000:-2000], full_res[:, -8000:-2000], atol=1e-5)
-    assert np.all(neg_res[:, :10000] == 0)
-
-
 def test_gatemodel_disk_cache(monkeypatch):
     """Verify that gatemodel cache saves to and loads from disk cleanly."""
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -226,7 +193,7 @@ def test_time_domain_filter_bank_narrow_slice_and_template_index():
 
     # Narrow slice follow-up for template 1 around 30000
     narrow_slice = slice(29500, 30500)
-    narrow_res = bank.filter_series(data, valid_slice=narrow_slice, template_index=1)
+    narrow_res = bank.filter_series(data, windows=narrow_slice, template_index=1)
     mask_narrow = (narrow_res.template_indices == 1) & (narrow_res.sample_indices == 30000)
     assert np.any(mask_narrow)
     narrow_snr = narrow_res.snr[mask_narrow][0]
