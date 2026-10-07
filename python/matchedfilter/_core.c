@@ -480,24 +480,29 @@ static PyTypeObject MFType={
    filter is slower than expected on a particular data set. */
 typedef struct { PyObject_HEAD ap_hmf_plan *p; Py_ssize_t n, k; int nd,nt; ap_peak *peaks; Py_ssize_t peak_capacity; } HMFObject;
 
+/* HMF(n, ndata, ntemplates, bands, series_group=8, k=0): a gate chain of coarse
+   bands (strictly increasing), then the full refine. Thresholds come from Python. */
 static int HMF_init(HMFObject *self,PyObject *args,PyObject *kw){
-  Py_ssize_t n; int nd,nt; double snr,fd; (void)kw;
-  Py_ssize_t band=0; int u=0,taps=0,group=8;
-  Py_ssize_t band0=0;
-  Py_ssize_t k_bins=0;
-  if(!PyArg_ParseTuple(args,"niidd|niiinn",&n,&nd,&nt,&snr,&fd,&band,&u,&taps,&group,&band0,&k_bins)) return -1;
-  /* band and taps are required: the choice belongs to the measured tuning
-     tables, which the Python class reads and which refuse rather than guess
-     outside their coverage. `u` is accepted and ignored -- the oversample is
-     gone and the argument is kept only so old callers still load. */
-  (void)u;
-  if(!band){ PyErr_SetString(PyExc_ValueError,
-      "band and taps are required; HierarchicalFilter picks them "
-      "from the tuning tables"); return -1; }
+  Py_ssize_t n; int nd,nt; PyObject *bands_obj; (void)kw;
+  int group=8; Py_ssize_t k_bins=0;
+  if(!PyArg_ParseTuple(args,"niiO|in",&n,&nd,&nt,&bands_obj,&group,&k_bins)) return -1;
+  PyObject *seq=PySequence_Fast(bands_obj,"bands must be a sequence of ints");
+  if(!seq) return -1;
+  Py_ssize_t nti=PySequence_Fast_GET_SIZE(seq);
+  if(nti<1 || nti>AP_HMF_MAX_TIERS){ Py_DECREF(seq);
+    PyErr_Format(PyExc_ValueError,"a chain has 1..%d bands",AP_HMF_MAX_TIERS); return -1; }
+  size_t bands[AP_HMF_MAX_TIERS];
+  for(Py_ssize_t i=0;i<nti;i++){
+    Py_ssize_t v=PyNumber_AsSsize_t(PySequence_Fast_GET_ITEM(seq,i),PyExc_OverflowError);
+    if(v==-1 && PyErr_Occurred()){ Py_DECREF(seq); return -1; }
+    bands[i]=(size_t)v;
+  }
+  Py_DECREF(seq);
   self->k = (k_bins > 0) ? k_bins : n;
-  self->p = ap_hmf_create_cascade_k((size_t)n,(size_t)self->k,nd,nt,(float)snr,(float)fd,(size_t)band0,(size_t)band,taps,group);
+  self->p = ap_hmf_create_chain((size_t)n,(size_t)self->k,nd,nt,bands,(int)nti,group);
   if(!self->p){ PyErr_Format(PyExc_ValueError,
-      "no hierarchical plan for n=%zd k=%zd band=%zd u=%d taps=%d",n,self->k,band,u,taps); return -1; }
+      "no hierarchical plan for n=%zd k=%zd with this chain (bands must be supported "
+      "powers of two, strictly increasing and < n)",n,self->k); return -1; }
   self->n=n; self->nd=nd; self->nt=nt; return 0;
 }
 static void HMF_dealloc(HMFObject *self){
@@ -679,39 +684,43 @@ static PyObject *HMF_stats(HMFObject *self,PyObject *a){
   long pr=0,tg=0; (void)a; ap_hmf_stats(self->p,&pr,&tg);
   return Py_BuildValue("(ll)",pr,tg);
 }
-static PyObject *HMF_coarse_threshold(HMFObject *self,PyObject *args){
-  float thr,out=0;
-  if(!PyArg_ParseTuple(args,"f",&thr)) return NULL;
-  if(ap_hmf_coarse_thresholds(self->p,thr,&out)<0){
-    PyErr_SetString(PyExc_RuntimeError,"coarse_threshold failed"); return NULL; }
-  return PyFloat_FromDouble((double)out);
+static PyObject *HMF_chain(HMFObject *self,PyObject *a){
+  size_t bands[AP_HMF_MAX_TIERS]; (void)a;
+  int nti=ap_hmf_chain(self->p,bands);
+  PyObject *t=PyTuple_New(nti);
+  if(!t) return NULL;
+  for(int i=0;i<nti;i++) PyTuple_SET_ITEM(t,i,PyLong_FromSize_t(bands[i]));
+  return t;
 }
-static PyObject *HMF_config(HMFObject *self,PyObject *a){
-  size_t band0=0,band=0; int k=0; (void)a;
-  ap_hmf_config_cascade(self->p,&band0,&band,&k);
-  if(band0>0){
-    return Py_BuildValue("(nnii)",(Py_ssize_t)band0,(Py_ssize_t)band,1,k);
+/* [(band, passed, ticks) per tier] + [(n, refined, ticks)] */
+static PyObject *HMF_tier_stats(HMFObject *self,PyObject *a){
+  size_t bands[AP_HMF_MAX_TIERS]; (void)a;
+  int nti=ap_hmf_chain(self->p,bands);
+  PyObject *l=PyList_New(nti+1);
+  if(!l) return NULL;
+  for(int i=0;i<=nti;i++){
+    long passed=0; unsigned long long ticks=0;
+    ap_hmf_tier_stats(self->p,i,&passed,&ticks);
+    PyList_SET_ITEM(l,i,Py_BuildValue("(nlK)",(Py_ssize_t)(i<nti ? bands[i] : (size_t)self->n),passed,ticks));
   }
-  return Py_BuildValue("(nii)",(Py_ssize_t)band,1,k);
+  return l;
 }
-static PyObject *HMF_set_threshold(HMFObject *self,PyObject *args){
-  double t0=0,t1=0;
-  if(PyArg_ParseTuple(args,"dd",&t0,&t1)){
-    if(ap_hmf_set_cascade_thresholds(self->p,(float)t0,(float)t1)<0){
-      PyErr_SetString(PyExc_RuntimeError,"set_threshold failed"); return NULL; }
-    Py_RETURN_NONE;
+static PyObject *HMF_set_thresholds(HMFObject *self,PyObject *args){
+  PyObject *obj;
+  if(!PyArg_ParseTuple(args,"O",&obj)) return NULL;
+  PyObject *seq=PySequence_Fast(obj,"thresholds must be a sequence");
+  if(!seq) return NULL;
+  Py_ssize_t m=PySequence_Fast_GET_SIZE(seq);
+  float thr[AP_HMF_MAX_TIERS];
+  if(m<1 || m>AP_HMF_MAX_TIERS){ Py_DECREF(seq); PyErr_SetString(PyExc_ValueError,"one threshold per tier"); return NULL; }
+  for(Py_ssize_t i=0;i<m;i++){
+    double v=PyFloat_AsDouble(PySequence_Fast_GET_ITEM(seq,i));
+    if(v==-1.0 && PyErr_Occurred()){ Py_DECREF(seq); return NULL; }
+    thr[i]=(float)v;
   }
-  PyErr_Clear();
-  double t; if(!PyArg_ParseTuple(args,"d",&t)) return NULL;
-  if(ap_hmf_set_threshold(self->p,(float)t)<0){
-    PyErr_SetString(PyExc_RuntimeError,"set_threshold failed"); return NULL; }
-  Py_RETURN_NONE;
-}
-static PyObject *HMF_set_first_stage(HMFObject *self,PyObject *args){
-  float snr;
-  if(!PyArg_ParseTuple(args,"f",&snr)) return NULL;
-  if(ap_hmf_set_first_stage(self->p,snr)<0){
-    PyErr_SetString(PyExc_RuntimeError,"set_first_stage failed"); return NULL; }
+  Py_DECREF(seq);
+  if(ap_hmf_set_thresholds(self->p,thr,(int)m)<0){
+    PyErr_SetString(PyExc_ValueError,"set_thresholds: need one finite value per tier"); return NULL; }
   Py_RETURN_NONE;
 }
 
@@ -736,15 +745,14 @@ static PyMethodDef HMF_methods[]={
   {"set_data_batch",(PyCFunction)HMF_set_data_batch,METH_VARARGS,"set_data_batch(i0, buffer)"},
   {"set_template_batch",(PyCFunction)HMF_set_template_batch,METH_VARARGS,"set_template_batch(i0, buffer)"},
   {"set_reference",(PyCFunction)HMF_set_reference,METH_VARARGS,"set_reference(buffer|None)"},
-  {"set_first_stage",(PyCFunction)HMF_set_first_stage,METH_VARARGS,"set_first_stage(snr)"},
-  {"set_threshold",(PyCFunction)HMF_set_threshold,METH_VARARGS,"set_threshold(t)"},
+  {"set_thresholds",(PyCFunction)HMF_set_thresholds,METH_VARARGS,"set_thresholds([t per tier]); negative = unconfigured"},
   {"set_hermitian",(PyCFunction)HMF_set_hermitian,METH_VARARGS,"set_hermitian(bool)"},
   {"run",(PyCFunction)HMF_run,METH_VARARGS,"run(...) -> total crossings"},
   {"nbins",(PyCFunction)HMF_nbins,METH_VARARGS,"nbins(binsize, start, end)"},
   {"run_series",(PyCFunction)HMF_run_series,METH_VARARGS,"run_series(...)"},
-  {"stats",(PyCFunction)HMF_stats,METH_NOARGS,"stats() -> (pairs, triggers)"},
-  {"config",(PyCFunction)HMF_config,METH_NOARGS,"config() -> (band, 1, taps)"},
-  {"coarse_threshold",(PyCFunction)HMF_coarse_threshold,METH_VARARGS,NULL},
+  {"stats",(PyCFunction)HMF_stats,METH_NOARGS,"stats() -> (pairs, refined)"},
+  {"chain",(PyCFunction)HMF_chain,METH_NOARGS,"chain() -> bands"},
+  {"tier_stats",(PyCFunction)HMF_tier_stats,METH_NOARGS,"[(band, passed, ticks) per tier] + [(n, refined, ticks)]"},
   {NULL}
 };
 static PyObject *HMF_get_n(HMFObject *self, void *closure){
