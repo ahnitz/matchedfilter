@@ -547,6 +547,44 @@ static int run_pairs_pb(ap_mf_plan *p, int d0, int nd, int t0, int nt,
     p->pkcap=(size_t)2*W*nb;
   }
   int total=0;
+  /* Template-outer when the data needs no per-lane expansion: each template
+     batch is reused across all nd blocks while it is still in cache, instead of
+     re-streaming the whole template set once per block.  The peaks written are
+     the same either way; only the order of the calls changes.  Measured on the
+     hierarchical coarse pass (2026-10): the gain grows once a group's coarse
+     templates outgrow L2. */
+  if(!p->ebr && nd>1){
+    for(int tt=0; tt<nsel; tt+=W){
+      const int cnt=(nsel-tt<W)?nsel-tt:W;
+      const int base=t0+tt;
+      const float *Tr,*Ti;
+      if(!tsel && (base%W)==0){
+        Tr=p->tre+(size_t)(base/W)*n*W;
+        Ti=p->tim+(size_t)(base/W)*n*W;
+      } else {
+        gather_template_batch(p->tsr, p->tsi, p, t0, tsel, tt, cnt);
+        Tr=p->tsr; Ti=p->tsi;
+      }
+      for(int d=0;d<nd;d++){
+        const float *Dr=p->dre+(size_t)(d0+d)*n, *Di=p->dim+(size_t)(d0+d)*n;
+        if(ap_binmax_prod_batch_peaks(p->fft,Dr,Di,Tr,Ti,cnt,binsize,threshold,
+                                p->pkbuf,AP_BACKWARD,start,end)<0) return -1;
+        for(int l=0;l<cnt;l++){
+          const int t = tsel ? tsel[tt+l] : (tt+l);
+          const size_t row=(size_t)d*nt+t;
+          int c=0;
+          for(size_t j=0;j<nb;j++){
+            const ap_peak pk=p->pkbuf[(size_t)l*nb+j];
+            peaks[row*nb+j]=pk;
+            if(pk.index>=0) c++;
+          }
+          if(counts) counts[row]=c;
+          total+=c;
+        }
+      }
+    }
+    return total;
+  }
   for(int d=0;d<nd;d++){
     const float *Dr=p->dre+(size_t)(d0+d)*n, *Di=p->dim+(size_t)(d0+d)*n;
     if(p->ebr){
