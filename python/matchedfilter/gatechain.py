@@ -49,8 +49,10 @@ _SIG = _gm._SIG
 _NB, _W = _gm._NB, _gm._W
 _MIN_BAND = 64
 
-#: Grid of per-tier budget shares searched when splitting fd across a chain.
+#: Grid of per-tier budget shares searched when splitting fd across a chain. Chains of three or
+#: more tiers search a product of these grids, so they use the coarser one.
 _SPLIT = np.linspace(0.05, 0.95, 19)
+_SPLIT_COARSE = np.linspace(0.05, 0.95, 9)
 
 _SIGNAL_CACHE = OrderedDict()
 _NOISE_CACHE = OrderedDict()
@@ -433,7 +435,7 @@ def plan_chain(sig, noise, bands, chain, fd, cost, n, snr):
             # tier i takes a share of the budget still unallocated; the last tier gets what is left
             if i == k - 1:
                 cands.append(finish(prefix)); return
-            for a in _SPLIT:
+            for a in (_SPLIT if k <= 2 else _SPLIT_COARSE):
                 share = a * remaining
                 idx = int(math.floor(share * K))
                 if idx < 1:
@@ -476,15 +478,38 @@ def choose_chain(power, n, snr, fd, cost=None, max_tiers=3, floor=_MIN_BAND, nsi
     return (plans[0] if plans else None), plans
 
 
+_PLAN_CACHE = OrderedDict()
+
+
 def chain_thresholds(power, n, snr, fd, chain, cost=None, floor=_MIN_BAND, nsim=20000, window=None):
-    """Thresholds (and modelled reach/cost) for one given chain under `power`."""
-    bands = usable_bands(power, n, floor)
+    """Thresholds (and modelled reach/cost) for one given chain under `power`.
+
+    Called whenever a plan's reference changes, inside the caller's filtering,
+    so results are cached -- by profile signature, and reused for profiles
+    within the same cosine similarity gatemodel applies to its draws.
+    """
+    p = _norm_profile(power, n)
+    chain = tuple(int(b) for b in chain)
+    win = None if window is None else (int(window[0]), int(window[1]))
+    key = _key(p, n, chain, float(snr), float(fd), win, int(nsim), id(cost))
+    hit = _PLAN_CACHE.get(key)
+    if hit is not None:
+        _PLAN_CACHE.move_to_end(key)
+        return hit
+    sim_params = (n, chain, float(snr), float(fd), win, int(nsim), id(cost))
+    unit, hit = _similar_get("plan", p, sim_params)
+    if hit is not None:
+        return hit
+    bands = usable_bands(p, n, floor)
     if not set(chain) <= set(bands):
         return None
-    sig = signal_draws(power, n, bands, snr, _gm._nsamp_for(fd))
+    sig = signal_draws(p, n, bands, snr, _gm._nsamp_for(fd))
     if sig is None:
         return None
-    noise = noise_block_maxima(power, n, bands, nsim=nsim, window=window)
-    return plan_chain(sig, noise, bands, list(chain), fd, cost, n, snr)
+    noise = noise_block_maxima(p, n, bands, nsim=nsim, window=window)
+    out = plan_chain(sig, noise, bands, list(chain), fd, cost, n, snr)
+    _cache_put(_PLAN_CACHE, key, out)
+    _similar_put("plan", unit, sim_params, out)
+    return out
 
 
