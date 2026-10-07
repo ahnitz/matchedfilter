@@ -82,7 +82,8 @@ def test_hierarchical_filter_bandlimited_dif_direct():
 
 
 def test_time_domain_filter_bank_hier_template_memory_halved():
-    """Verify that TimeDomainFilterBank with engine='hier' stores K = N // 2 templates."""
+    """With pack_templates=True, engine='hier' stores K = N // 2 bins per template;
+    the default keeps full spectra (the faster fused refine)."""
     N = 2048
     n_templates = 8
     rng = np.random.default_rng(123)
@@ -95,6 +96,15 @@ def test_time_domain_filter_bank_hier_template_memory_halved():
         tap_sample_rate=2048, data_sample_rate=2048,
         engine='hier', threshold=5.0,
         coarse_band_hz=256.0,
+    )
+    for g in bank._groups:
+        assert g.spectra.shape[1] == g.n
+
+    bank = mf.TimeDomainFilterBank(
+        taps, counts,
+        tap_sample_rate=2048, data_sample_rate=2048,
+        engine='hier', threshold=5.0,
+        coarse_band_hz=256.0, pack_templates=True,
     )
 
     # Check that each group has spectra of width N // 2

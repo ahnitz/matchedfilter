@@ -199,6 +199,7 @@ class TimeDomainFilterBank:
         reference: Optional[Any] = None,
         analytic: bool = False,
         bandlimited: bool = False,
+        pack_templates: bool = False,
     ):
         from . import MatchedFilter, HierarchicalFilter
 
@@ -210,6 +211,11 @@ class TimeDomainFilterBank:
         self.coarse_band_hz = coarse_band_hz
         self.device = device
         self.analytic = bool(analytic)
+        # Off by default: halving the stored hierarchical templates (Hermitian
+        # packing of real taps) is exact, but its refine builds the product in a
+        # separate pass and measured slower than the fused full-template refine
+        # (+14-25% refine cycles on Zen 5, +35-45% on Haswell, 2026-10-06).
+        self.pack_templates = bool(pack_templates)
         self.max_batch_size = int(max_batch_size) if max_batch_size is not None else None
 
         mode = {'pycbc': 'flat', 'matchedfilter': 'flat',
@@ -377,7 +383,7 @@ class TimeDomainFilterBank:
                     chosen_N, ndata=1, ntemplates=T,
                     device=self.device
                 )
-            if self.engine == 'hier' and chosen_N >= 1024:
+            if self.engine == 'hier' and self.pack_templates and chosen_N >= 1024:
                 K = chosen_N // 2
                 grp_spectra = np.ascontiguousarray(spectra[:, :K])
                 grp_spectra[:, 0] = spectra[:, 0].real + 1j * spectra[:, K].real
