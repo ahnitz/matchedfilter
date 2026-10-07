@@ -472,10 +472,21 @@ class TimeDomainFilterBank:
                 - 1D reference profile if all groups share the same block size.
             delta_f: Frequency resolution of fine grid (required when reference is w(f)).
         """
+        hier_ns = sorted({g.n for g in self._groups if hasattr(g.plan, 'set_reference')})
+        accepted = ("pass a dict {n: profile} with one length-n profile per block size, "
+                    "or a fine-grid profile together with delta_f")
         if isinstance(reference, dict):
+            missing = [n for n in hier_ns if n not in reference]
+            if missing:
+                raise ValueError(f"reference dict has no profile for hierarchical block size(s) "
+                                 f"{missing} (bank block sizes: {hier_ns}); {accepted}")
             for g in self._groups:
-                if hasattr(g.plan, 'set_reference') and g.n in reference:
+                if hasattr(g.plan, 'set_reference'):
                     g.plan.set_reference(reference[g.n])
+            # Load templates as the other forms do; returning here left a bank
+            # given its dict after construction with no templates at all.
+            self._load_templates()
+            self._current_ref_key = None
             return
 
         ref_key = (id(reference), float(delta_f) if delta_f is not None else None)
@@ -505,16 +516,25 @@ class TimeDomainFilterBank:
                     if ref_input is not None:
                         g.plan.set_reference(ref_input)
         else:
+            # A 1-D profile without delta_f is per-bin on one block size.  Applying
+            # it only to the groups it happens to fit left the others with no
+            # reference, which surfaced later as a misleading gate-model error.
+            wrong = [n for n in hier_ns if n != len(ref_arr)]
+            if wrong:
+                raise ValueError(f"1-D reference of length {len(ref_arr)} does not match hierarchical "
+                                 f"block size(s) {wrong} (bank block sizes: {hier_ns}); {accepted}")
             for g in self._groups:
                 if hasattr(g.plan, 'set_reference'):
-                    if len(ref_arr) == g.n:
-                        g.plan.set_reference(ref_arr.astype(np.float32))
+                    g.plan.set_reference(ref_arr.astype(np.float32))
 
+        self._load_templates()
+        self._current_ref_key = ref_key
+
+    def _load_templates(self) -> None:
         for g in self._groups:
             if not g.templates_loaded and hasattr(g.plan, 'set_templates'):
                 g.plan.set_templates(g.spectra)
                 g.templates_loaded = True
-        self._current_ref_key = ref_key
 
     def set_reference_from_template(
         self,

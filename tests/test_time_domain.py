@@ -190,6 +190,31 @@ def test_filter_f_and_block_length_properties():
     assert len(bank.get_filter_f(1)) == bank.get_block_length(1)
 
 
+def test_reference_must_cover_every_hierarchical_block_size():
+    """A 1-D profile without delta_f fits one block size; a bank with two must
+    get a dict (or delta_f).  It used to drop the profile silently for the other
+    group, which then failed later with a misleading gate-model error."""
+    rng = np.random.default_rng(6)
+    counts = [251] * 8 + [1501] * 8
+    taps = [rng.standard_normal(c).astype(np.float32) / np.sqrt(c) for c in counts]
+
+    def prof(n):
+        p = np.zeros(n, np.float32); p[:n // 2 + 1] = 1
+        return p / p.sum()
+
+    bank = TimeDomainFilterBank(taps, counts, engine='hier', threshold=5.0)
+    ns = sorted({g.n for g in bank._groups})
+    assert len(ns) == 2
+    with pytest.raises(ValueError) as e:
+        bank.set_reference(prof(ns[1]))
+    assert str(ns[0]) in str(e.value) and "dict" in str(e.value)
+    with pytest.raises(ValueError) as e:
+        bank.set_reference({ns[1]: prof(ns[1])})
+    assert str(ns[0]) in str(e.value)
+    bank.set_reference({n: prof(n) for n in ns})
+    bank.filter_series(np.zeros(32 * 4096, np.complex64))
+
+
 def test_hierarchical_mode_and_reference():
     from spectral_profiles import make_spectral_profile
     rng = np.random.default_rng(888)
