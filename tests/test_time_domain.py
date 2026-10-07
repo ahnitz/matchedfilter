@@ -471,3 +471,57 @@ def test_correlation_filter_scales_support():
 
 
 
+
+
+def _corr_bank_taps(layout, rng):
+    if layout == "one":
+        counts = [451] * 8
+    elif layout == "two":
+        counts = [251] * 6 + [1151] * 6          # contiguous groups
+    else:
+        counts = [251, 1151] * 6                 # interleaved groups
+    taps = [rng.standard_normal(c).astype(np.float32) / np.sqrt(c) for c in counts]
+    return taps, counts
+
+
+@pytest.mark.parametrize("layout", ["one", "two", "interleaved"])
+@pytest.mark.parametrize("window", [None, slice(20000, 90000)])
+def test_correlate_series_gpu_matches_cpu_for_every_group_layout(layout, window):
+    """The GPU continuous path needs a library-allocated shared output. The
+    contiguous-group branch used to pass a plain NumPy slice and raised
+    'continuous output and starts must be shared GPU buffers'."""
+    from conftest import usable_gpu
+    gpu = usable_gpu()
+    if gpu is None:
+        pytest.skip("no usable GPU")
+    rng = np.random.default_rng(7)
+    taps, counts = _corr_bank_taps(layout, rng)
+    S = 32 * 4096
+    ser = ((rng.standard_normal(S) + 1j * rng.standard_normal(S)) / np.sqrt(2)).astype(np.complex64)
+    cpu = TimeDomainFilterBank(taps, counts, engine='corr').correlate_series(ser, valid_slice=window)
+    gbank = TimeDomainFilterBank(taps, counts, engine='corr', device=gpu)
+    got = gbank.correlate_series(ser, valid_slice=window)
+    scale = np.abs(cpu).max()
+    assert scale > 0
+    assert np.max(np.abs(got - cpu)) <= 1e-5 * scale
+    # Same bank, a different window: the shared workspace must not leak the
+    # previous call's samples into the new result.
+    window2 = slice(60000, 61000)
+    cpu2 = TimeDomainFilterBank(taps, counts, engine='corr').correlate_series(ser, valid_slice=window2)
+    got2 = gbank.correlate_series(ser, valid_slice=window2)
+    assert np.max(np.abs(got2 - cpu2)) <= 1e-5 * np.abs(cpu2).max()
+    got_t = gbank.correlate_series(ser, valid_slice=window, template_index=3)
+    assert np.max(np.abs(got_t - cpu[3])) <= 1e-5 * scale
+
+
+@pytest.mark.parametrize("layout", ["two", "interleaved"])
+def test_correlate_series_window_before_first_block_is_zero(layout):
+    """A window that no block's valid region reaches used to pass an empty
+    block list to the execution layer, which raised."""
+    rng = np.random.default_rng(8)
+    taps, counts = _corr_bank_taps(layout, rng)
+    S = 16 * 4096
+    ser = ((rng.standard_normal(S) + 1j * rng.standard_normal(S)) / np.sqrt(2)).astype(np.complex64)
+    bank = TimeDomainFilterBank(taps, counts, engine='corr')
+    assert not np.any(bank.correlate_series(ser, valid_slice=slice(0, 50)))
+    assert not np.any(bank.correlate_series(ser, valid_slice=slice(0, 50), template_index=2))
