@@ -782,6 +782,53 @@ class TimeDomainFilterBank:
         else:
             return _EMPTY_FILTER_RESULTS
 
+    @staticmethod
+    def _block_coverage(S: int, st: np.ndarray, lo: int, hi: int) -> np.ndarray:
+        """Samples written by blocks starting at st, each valid over [st+lo, st+hi)."""
+        mask = np.zeros(S, dtype=bool)
+        for s0 in st.tolist():
+            mask[s0 + lo:min(s0 + hi, S)] = True
+        return mask
+
+    def _correlate_group(self, g: "_TemplateGroup", ser: np.ndarray, st: np.ndarray,
+                         t0: int, nt: int, dest: np.ndarray) -> None:
+        """Correlate rows [t0, t0+nt) of group g over blocks st into dest (nt, S).
+
+        Writes only the samples the blocks cover; leaves the rest of dest alone.
+        The GPU path cannot write into caller memory, so it computes into a
+        cached shared workspace and copies the covered samples out.  Mirrors
+        what CorrelationFilter.run_series does before touching the execution
+        layer, so the plan's invariants hold without going through it."""
+        if st.size == 0:
+            return
+        cplan = g.get_correlation_plan()
+        S = ser.size
+        cplan._require_templates(t0, nt)
+        cplan._dataset = False
+        cplan._data_ready = set()
+        lo, hi = cplan.valid
+        if cplan._gpu is None:
+            if dest.flags.c_contiguous and dest.flags.writeable:
+                cplan._execution_plan().correlate_series_continuous(ser, st, lo, hi, t0, nt, dest)
+            else:
+                tmp = np.empty((nt, S), dtype=np.complex64)
+                cplan._execution_plan().correlate_series_continuous(ser, st, lo, hi, t0, nt, tmp)
+                cover = self._block_coverage(S, st, lo, hi)
+                dest[:, cover] = tmp[:, cover]
+            return
+        shape = (nt, S)
+        ws = getattr(g, '_corr_workspace', None)
+        if ws is None or ws.shape != shape:
+            nbytes = nt * S * np.dtype(np.complex64).itemsize
+            if nbytes > cplan._max_auto_output_bytes:
+                raise ValueError("continuous correlation needs %d bytes of output; "
+                                 "select fewer templates or a shorter series" % nbytes)
+            ws = cplan._gpu.empty_shared(shape, readback=True)
+            g._corr_workspace = ws
+        cplan._continuous_gpu(ser, st, t0, nt, ws)
+        cover = self._block_coverage(S, st, lo, hi)
+        dest[:, cover] = ws[:, cover]
+
     def correlate_series(
         self,
         series: np.ndarray,
@@ -872,12 +919,7 @@ class TimeDomainFilterBank:
                     if last_end < S:
                         out_2d[:, last_end:] = 0
 
-            if cplan._gpu is not None:
-                cplan._continuous_gpu(ser, st, ti_local, 1, out_2d)
-            else:
-                cplan._execution_plan().correlate_series_continuous(
-                    ser, st, cplan.valid[0], cplan.valid[1], ti_local, 1, out_2d
-                )
+            self._correlate_group(target_g, ser, st, ti_local, 1, out_2d)
 
             if single_scale is not None:
                 np.multiply(out_2d, single_scale[:, None], out=out_2d)
@@ -935,24 +977,18 @@ class TimeDomainFilterBank:
 
             if is_contiguous_slice:
                 g_dest = result[g_indices[0] : g_indices[0] + g_cnt]
-                if valid_slice is None:
-                    g_dest[:, :cplan.valid[0]] = 0
-                    if st.size > 0:
-                        last_end = min(S, st[-1] + cplan.valid[1])
-                        if last_end < S:
-                            g_dest[:, last_end:] = 0
-                if cplan._gpu is not None:
-                    cplan._continuous_gpu(ser, st, 0, g_cnt, g_dest)
-                else:
-                    cplan._execution_plan().correlate_series_continuous(
-                        ser, st, cplan.valid[0], cplan.valid[1], 0, g_cnt, g_dest
-                    )
-                if g_scales is not None:
-                    np.multiply(g_dest, g_scales[:, None], out=g_dest)
             else:
-                # Group templates are interleaved; use cplan's internal buffer or allocate
-                g_tmp = cplan.run_series(ser, valid_slice=valid_slice, scales=g_scales)
-                result[g_indices] = g_tmp
+                # Interleaved templates: compute into a group-sized array, then scatter.
+                g_dest = np.zeros((g_cnt, S), dtype=np.complex64)
+            if valid_slice is None:
+                g_dest[:, :cplan.valid[0]] = 0
+                last_end = min(S, int(st[-1]) + cplan.valid[1]) if st.size else 0
+                g_dest[:, last_end:] = 0
+            self._correlate_group(g, ser, st, 0, g_cnt, g_dest)
+            if g_scales is not None:
+                np.multiply(g_dest, g_scales[:, None], out=g_dest)
+            if not is_contiguous_slice:
+                result[g_indices] = g_dest
 
         return result
 
