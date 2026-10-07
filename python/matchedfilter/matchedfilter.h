@@ -155,26 +155,29 @@ int ap_mf_run_series_dif(ap_mf_plan *p,
  * false-dismissal target given at construction.  If that trade is not acceptable,
  * use ap_mf_run.
  *
- * snr is the |rho| of the weakest signal that must be kept (5 is typical); fd is
- * the tolerated false-dismissal probability for such a signal (1e-2 .. 1e-4).
- * The caller supplies band and a nonnegative coarse threshold. The native
- * engine does not read files or derive calibration; Python resolves measured
- * files before execution. snr/fd/taps are retained for ABI compatibility.
+ * The caller supplies the chain of bands and one nonnegative threshold per
+ * tier. The native engine derives no calibration; Python computes the
+ * thresholds from the reference profile and the false-dismissal budget.
  */
 typedef struct ap_hmf_plan ap_hmf_plan;
 
-ap_hmf_plan *ap_hmf_create_ex(size_t n, int ndata, int ntmpl, float snr, float fd,
-                              size_t band, int taps);
-/* Execution grouping only; calibration and the mathematical filter are unchanged.
- * The engine bounds the requested group by its working-memory limit. */
-ap_hmf_plan *ap_hmf_create_grouped(size_t n, int ndata, int ntmpl, float snr, float fd,
-                                  size_t band, int taps, int series_group);
-ap_hmf_plan *ap_hmf_create_cascade(size_t n, int ndata, int ntmpl, float snr, float fd,
-                                   size_t band0, size_t band, int taps, int series_group);
-ap_hmf_plan *ap_hmf_create_cascade_k(size_t n, size_t k, int ndata, int ntmpl, float snr, float fd,
-                                     size_t band0, size_t band, int taps, int series_group);
-int ap_hmf_set_cascade_thresholds(ap_hmf_plan *p, float thr0, float thr1);
-void ap_hmf_config_cascade(const ap_hmf_plan *p, size_t *band0, size_t *band1, int *taps);
+/* Gate chain: coarse tiers at strictly increasing bands, then the full refine.
+ * Tier 0 filters every (block, template) pair; tier i only the pairs that
+ * passed tier i-1; pairs passing the last tier are refined at full band.
+ * A one-band chain is the classic single coarse gate. k = n/2 selects the
+ * half-length (DIF) layout, 0 or n the full one. series_group bounds how
+ * many blocks are filtered together (execution grouping only). */
+#define AP_HMF_MAX_TIERS 8
+ap_hmf_plan *ap_hmf_create_chain(size_t n, size_t k, int ndata, int ntmpl,
+                                 const size_t *bands, int ntiers, int series_group);
+/* One finite threshold per tier, in coarse-output units; a negative value
+   marks the plan unconfigured and execution then fails. */
+int ap_hmf_set_thresholds(ap_hmf_plan *p, const float *thr, int ntiers);
+/* The chain's bands (bands may be NULL); returns the number of tiers. */
+int ap_hmf_chain(const ap_hmf_plan *p, size_t *bands);
+/* Pairs that passed tier `tier` and the ticks spent in it; tier == ntiers is
+   the refine (refined pairs, refine ticks). Always counted. */
+int ap_hmf_tier_stats(const ap_hmf_plan *p, int tier, long *passed, unsigned long long *ticks);
 int ap_hmf_series_group(const ap_hmf_plan *p);
 int ap_hmf_set_hermitian(ap_hmf_plan *p, int hermitian);
 int ap_hmf_get_hermitian(const ap_hmf_plan *p);
@@ -198,13 +201,6 @@ size_t ap_hmf_nbins(const ap_hmf_plan *p, size_t binsize, size_t start, size_t e
  *
  * Pass NULL to use each template. Existing templates are rescaled on change. */
 int    ap_hmf_set_reference(ap_hmf_plan *p, const float *power);
-/* Legacy ABI: invalidate the gate; the caller must supply a recalibrated
-   threshold before the next execution. No model or clamping is applied. */
-int    ap_hmf_set_first_stage(ap_hmf_plan *p, float snr);
-/* Supply a finite nonnegative coarse threshold in coarse-output units.
-   A negative value marks the plan unconfigured; execution then fails. */
-int    ap_hmf_set_threshold(ap_hmf_plan *p, float t);
-
 int    ap_hmf_set_data    (ap_hmf_plan *p, int d, const float *spec);
 int    ap_hmf_set_template(ap_hmf_plan *p, int t, const float *spec);
 
@@ -238,15 +234,8 @@ int ap_hmf_run_series(ap_hmf_plan *p,
                       ap_peak *peaks, int *counts);
 
 /* Diagnostics: pairs examined and pairs that went to the full correlation.
-   The ratio is the measured trigger rate, which is what the speedup rides on. */
-void ap_hmf_stats(const ap_hmf_plan *p, long *pairs, long *triggers);
-
-/* Read the supplied scalar coarse threshold. Returns -1 if unconfigured.
-   The threshold argument is retained for ABI compatibility and is ignored. */
-int ap_hmf_coarse_thresholds(ap_hmf_plan *p, float threshold, float *thr);
-
-/* The supplied band and taps, for reporting. */
-void ap_hmf_config(const ap_hmf_plan *p, size_t *band, int *taps);
+   The ratio is the measured refine rate, which is what the speedup rides on. */
+void ap_hmf_stats(const ap_hmf_plan *p, long *pairs, long *refined);
 
 int ap_supported(size_t n);
 
