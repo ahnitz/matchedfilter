@@ -53,13 +53,13 @@ tmpl = (np.random.randn(nt, n) + 1j * np.random.randn(nt, n)).astype(np.complex6
 # Inject signal on pair (0, 0)
 data[0, :] += 20.0 * tmpl[0, :]
 
-hf_cpu = matchedfilter.HierarchicalFilter(n, nd, nt, band=512, device="cpu")
+hf_cpu = matchedfilter.HierarchicalFilter(n, nd, nt, chain=512, device="cpu")
 hf_cpu.set_coarse_threshold(4.0)
 hf_cpu.set_data(data)
 hf_cpu.set_templates(tmpl)
 idx_cpu, val_cpu = hf_cpu.run(threshold=5.5, raw=True)
 
-hf_gpu = matchedfilter.HierarchicalFilter(n, nd, nt, band=512, device=dev)
+hf_gpu = matchedfilter.HierarchicalFilter(n, nd, nt, chain=512, device=dev)
 hf_gpu.set_coarse_threshold(4.0)
 hf_gpu.set_data(data)
 hf_gpu.set_templates(tmpl)
@@ -76,7 +76,7 @@ data = (np.random.randn(nd, n) + 1j * np.random.randn(nd, n)).astype(np.complex6
 tmpl = (np.random.randn(nt, n) + 1j * np.random.randn(nt, n)).astype(np.complex64)
 
 # Warmup
-hf_gpu = matchedfilter.HierarchicalFilter(n, nd, nt, band=512, device=dev)
+hf_gpu = matchedfilter.HierarchicalFilter(n, nd, nt, chain=512, device=dev)
 hf_gpu.set_coarse_threshold(4.0)
 hf_gpu.set_data(data)
 hf_gpu.set_templates(tmpl)

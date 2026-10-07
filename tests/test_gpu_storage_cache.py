@@ -12,7 +12,7 @@ def plan(request):
         pytest.skip('no usable GPU')
     kind, shared = request.param
     cls = mf.MatchedFilter if kind == 'flat' else mf.HierarchicalFilter
-    f = cls(1024, 2, 3, device=device, **({'band':256} if kind=='hier' else {}))
+    f = cls(1024, 2, 3, device=device, **({'chain':256} if kind=='hier' else {}))
     if kind == 'hier':
         f.set_coarse_threshold(0.)
     assert f._gdata is None and f._gtmpl is None

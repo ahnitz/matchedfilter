@@ -41,7 +41,7 @@ def test_hierarchical_pairbatch_matches_balanced(band,monkeypatch):
     for cutoff in ("128",None):
         if cutoff is None: monkeypatch.delenv("MF_PBMAX")
         else: monkeypatch.setenv("MF_PBMAX",cutoff)
-        f=mf.HierarchicalFilter(n,1,nt,band=band,snr=5.5,fd=1e-2)
+        f=mf.HierarchicalFilter(n, 1, nt, chain=band, snr=5.5, fd=1e-2)
         f.set_reference(np.ones(n,np.float32)); f.set_coarse_threshold(0.)
         f.set_templates(h)
         outputs.append(f.run_series(series,[0,n,2*n,3*n],[0,300,0,300],[n]*4,
@@ -124,7 +124,7 @@ def test_series_grouping_preserves_ragged_blocks_and_refinement(nt, monkeypatch)
             monkeypatch.delenv('MF_DGROUP')
         else:
             monkeypatch.setenv('MF_DGROUP', group)
-        f = mf.HierarchicalFilter(n, 1, nt, band=1024, snr=5.5, fd=.001)
+        f = mf.HierarchicalFilter(n, 1, nt, chain=1024, snr=5.5, fd=.001)
         f.set_templates(templates)
         f.set_coarse_threshold(0.)
         # Realize lazy native plans while the explicit grouping is in scope.

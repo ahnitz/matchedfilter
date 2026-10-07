@@ -46,7 +46,7 @@ def test_interleaved_packed_batches(device, kind, raw):
     if kind == 'flat':
         f = mf.MatchedFilter(n, 8, nt, device=device)
     else:
-        f = mf.HierarchicalFilter(n, 8, nt, band=256, device=device)
+        f = mf.HierarchicalFilter(n, 8, nt, chain=256, device=device)
         f.set_coarse_threshold(0.)
     h = (rng.normal(size=(nt,n))+1j*rng.normal(size=(nt,n))).astype('complex64')
     series = (rng.normal(size=n*13)+1j*rng.normal(size=n*13)).astype('complex64')

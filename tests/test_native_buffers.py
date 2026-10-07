@@ -7,8 +7,8 @@ from matchedfilter import _core
 @pytest.fixture(params=['flat','hier'])
 def native(request):
     n=128
-    f=_core.MF(n,1,1) if request.param=='flat' else _core.HMF(n,1,1,5.5,.01,64,1,8)
-    if request.param=='hier': f.set_threshold(0.)
+    f=_core.MF(n,1,1) if request.param=='flat' else _core.HMF(n, 1, 1, [64])
+    if request.param=='hier': f.set_thresholds([0.])
     data=np.ones(n,np.complex64)
     f.set_data(0,data); f.set_template(0,data)
     return f,data  # hierarchical native ingestion retains the caller's pointer

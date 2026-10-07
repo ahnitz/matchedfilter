@@ -21,7 +21,7 @@ def test_gate_quantile_matches_filter_at_budget(band):
 
 
 def test_model_distinguishes_bands_with_identical_old_table_keys():
-    import hmf_tune as ht
+    import _gatelib as ht
     gates = []
     for band in (128, 1024):
         p = ht.make_ref(4096, band, .70, band/1.20)

@@ -453,9 +453,7 @@ def compare_backends(isas, reps, n=4096, ntmpl=64, ntaps=1024,
         except ValueError:
             continue                    # not in this build, or not runnable here
         def build():
-            q = mf.HierarchicalFilter(n, ndata=1, ntemplates=ntmpl,
-                                      snr=threshold, fd=1e-3, band=512,
-                                      taps=8)
+            q = mf.HierarchicalFilter(n, ndata=1, ntemplates=ntmpl, snr=threshold, fd=1e-3, chain=512)
             q.set_reference(power); q.set_templates(h)
             return q
 
@@ -567,19 +565,9 @@ def _bench_hier(n, nd, nt, snr, fd, reps):
     flat_run = lambda: flat.run(binsize=bs, threshold=snr, window=(ws, we))
     hier_run = lambda: hf.run(binsize=bs, threshold=snr, window=(ws, we))
     # Force the plan to exist before any clock starts. Construction is
-    # deferred until first use so the configuration can see the reference, and
-    # that first use runs choose_config -- table lookup, not filtering. It was
-    # already outside the timed region because per_call warms up first, but
-    # relying on that is fragile and it is the kind of thing that silently
-    # becomes 28% of a measurement when the tables grow.
+    # deferred until first use so the chain can be chosen from the reference
+    # (gate model and cost calibration), which is not filtering.
     hf._ensure()
-    # Settle autotuning so that candidate trials finish and the winner configuration locks
-    # before measuring steady-state throughput.
-    settle_count = 0
-    max_settle = len(getattr(hf, "_tune_candidates", [])) + 5
-    while getattr(hf, "autotune_info", {}).get("status") in ("uninitialized", "tuning") and settle_count < max(10, max_settle):
-        hier_run()
-        settle_count += 1
     flat_run()
     hier_run()
 
@@ -770,15 +758,7 @@ def main(argv=None):
                                       "data": hnd, "templates": hnt,
                                       "uncovered": first})
                     continue
-                if len(cfg) == 3:
-                    b0, b1, taps = cfg
-                    tag = f"{b0}/{b1}/{taps}"
-                    band = b1
-                    cascade_band = b0
-                else:
-                    band, taps = cfg
-                    tag = f"{band}/{taps}"
-                    cascade_band = None
+                tag = "/".join(str(b) for b in cfg)
                 print(f"  {n:>8} {fd:>7.0e} {snr:>5.1f} {tf * 1e3:>10.2f}ms "
                       f"{th * 1e3:>10.2f}ms {speed:>8.2f}x {rate:>9.1%} "
                       f"{tag:>14}")
@@ -786,15 +766,12 @@ def main(argv=None):
                             "data": hnd, "templates": hnt,
                             "flat_ms": tf * 1e3, "hier_ms": th * 1e3,
                             "speedup": speed, "refine_rate": rate,
-                            "band": band,
-                            "taps": taps}
-                if cascade_band is not None:
-                    row_dict["cascade_band"] = cascade_band
+                            "chain": list(cfg)}
                 hier_rows.append(row_dict)
         print("\nThe coarse stage skips a pair when a cheap low-band estimate rules\n"
               "out any sample reaching the threshold, so the speedup grows with\n"
               "the threshold and falls to ~1 on data where everything triggers.\n"
-              "'chosen' is the first-stage band/taps the library\n"
+              "'chosen' is the gate chain (coarse bands) the library\n"
               "selected from the reference and the threshold -- not a setting\n"
               "of this benchmark. It should narrow as the threshold rises.")
 

@@ -1331,8 +1331,7 @@ def setup_section(runs, hier):
                      if f.get("data") and f.get("templates")})
     shape = ", ".join("%d data segments x %d templates = %d pairs"
                       % (d, t, d * t) for d, t in shapes)
-    cfgs = sorted({(h["band"], h["taps"])
-                   for h in hier if "band" in h})
+    cfgs = sorted({_chain_label(h) for h in hier if "chain" in h or "band" in h})
     rows = [
         ("Workload", (shape or "Batch shape not recorded") +
          ". Gaussian noise; complex64 inputs; one CPU thread."),
@@ -1340,9 +1339,8 @@ def setup_section(runs, hier):
         ("Timing", "Flat and hierarchical calls alternate on the same data. "
          "The reported speedup is the median of per-repeat ratios; each "
          "timing loop runs for at least 20 ms."),
-        ("First stage", "Selected from the reference and calibration. "
-         "Recorded band/taps: " + (", ".join("%d/%d" % c for c in cfgs)
-                                    or "not recorded") + "."),
+        ("Gate chain", "Selected from the reference and this machine's calibration. "
+         "Recorded: " + (", ".join(cfgs) or "not recorded") + "."),
         ("Comparing runners", "Compare ratios within a runner. CPU, device, "
          "batch shape and calibration affect the relative costs."),
     ]
@@ -1384,11 +1382,19 @@ def coverage_and_escalation(runs):
     return "".join(o)
 
 
+def _chain_label(h):
+    """The gate chain a row ran: 'b1/b2/..' (current runs) or 'band/taps' (runs recorded before chains)."""
+    if "chain" in h:
+        return "/".join(str(b) for b in h["chain"])
+    if "band" in h:
+        return "%d/%d" % (h["band"], h["taps"])
+    return "-"
+
+
 def bench_hier_raw(runs):
     rows = [[html.escape(r["host"]["label"]), h["n"], "%g" % h.get("fd", 0),
              "%g" % h["snr"],
-             ("%d/%d" % (h["band"], h["taps"])
-              if "band" in h else "-"),
+             _chain_label(h),
              "%.3f" % h["flat_ms"], "%.3f" % _hier_ms(h),
              "<b>%.2fx</b>" % h["speedup"], "%.2f%%" % (_rate(h) * 100)]
             for r in runs for h in r.get("hierarchical", []) if "speedup" in h]

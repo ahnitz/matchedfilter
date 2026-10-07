@@ -39,7 +39,7 @@ def test_ties_through_coarse_compaction_and_refinement(band):
     n = 4096
     bank = np.zeros((4, n), np.complex64)
     bank[:, band//4] = 1
-    f = mf.HierarchicalFilter(n, 4, 4, band=band, device=dev)
+    f = mf.HierarchicalFilter(n, 4, 4, chain=band, device=dev)
     f.set_coarse_threshold(.5)
     f.set_data(bank)
     f.set_templates(bank)

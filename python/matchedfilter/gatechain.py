@@ -24,9 +24,13 @@ Two questions decide a chain, and they are kept separate:
             the first b bins -- precisely its coarse lag grid. Tiers are nested
             and share their noise, so their passes are strongly correlated; the
             simulation carries that, which a product of marginal rates cannot.
-            Per-tier costs are measured on the machine (tools/measure_chain_costs.py)
-            as functions of survivor density, since pooled tiers and the refine
-            amortise less when few pairs survive.
+            Per-tier costs are measured on the machine the job runs on, through
+            the engine itself (calibrate_costs), as functions of survivor
+            density: pooled tiers and the refine amortise less when few pairs
+            survive. Nothing is tabulated; the numbers belong to this process.
+
+The model does not have to be exact. Its job is to keep the cheapest chain on a
+short list; the autotuner measures the short list on the real workload.
 
 The budget is split between the tiers by minimising that cost subject to the
 compound dismissal bound; the split is part of the chain's plan.
@@ -112,13 +116,18 @@ def _similar_put(kind, u, params, value):
 
 
 def signal_draws(power, n, bands, snr, nsamp, seed=13):
-    """Coarse maxima at every band in `bands`, for draws whose fine maximum >= snr.
+    """Joint draws of every band's coarse maximum and local fine maximum under a signal of strength snr.
 
-    Returns an (M, len(bands)) float32 array. Generalises gatemodel's
-    single/cascade samplers: the in-band noise is split into independent
-    segments between consecutive band edges, and tier b's noise is the
-    normalised sum of the segments below it, so all tiers and the fine stage
-    share their noise exactly as the filter does.
+    Returns (C, F), both (M, len(bands)) float32: C[:, i] is band i's coarse
+    maximum over its own lag grid, F[:, i] the fine maximum over the fine lags
+    and that grid -- the neighbourhood gatemodel's single-band construction
+    uses. A chain conditions on the maximum of F over its own bands (its
+    tiers' grids plus the fine lags), which for one band is exactly the
+    single-tier model and for two the cascade model. Generalises those
+    samplers: the in-band noise is split into independent segments between
+    consecutive band edges, and tier b's noise is the normalised sum of the
+    segments below it, so all tiers and the fine stage share their noise
+    exactly as the filter does.
     """
     p = _norm_profile(power, n)
     bands = sorted(int(b) for b in bands)
@@ -171,22 +180,25 @@ def signal_draws(power, n, bands, snr, nsamp, seed=13):
             w = (rng.standard_normal((m, len(taus)), dtype=np.float32)
                  + 1j * rng.standard_normal((m, len(taus)), dtype=np.float32)) / np.float32(np.sqrt(2))
             seg_noise.append((w @ L.T) * np.float32(_SIG * np.sqrt(fr)))      # unnormalised: variance fr
-        cols = []
+        nfull = sum(sn for sn in seg_noise if sn is not None)
+        afull = np.abs(np.float32(snr) * look(full_corr, taus - off).astype(np.complex64)[None, :] + nfull)
+        fidx = np.searchsorted(taus, fl)
+        ffine = afull[:, fidx].max(1)
+        cols, fcols = [], []
         for i, b in enumerate(bands):
             # tier i's noise is the sum of the segments below its band edge, j = 0..i
             acc_b = sum(sn for sn in seg_noise[:i + 1] if sn is not None)
             nb = acc_b / np.float32(np.sqrt(F[i]))
             z = np.float32(snr * np.sqrt(F[i])) * look(band_corr[i], taus - off).astype(np.complex64)[None, :] + nb
             cols.append(np.abs(z)[:, gidx[i]].max(1))
-        nfull = sum(sn for sn in seg_noise if sn is not None)
-        zf = np.float32(snr) * look(full_corr, taus - off).astype(np.complex64)[None, :] + nfull
-        F_out.append(np.abs(zf).max(1))
+            # the coarse lags are a subset of the fine grid, so they count toward the fine maximum
+            fcols.append(np.maximum(ffine, afull[:, gidx[i]].max(1)))
         C_out.append(np.stack(cols, 1))
-    C_all = np.concatenate(C_out); F_all = np.concatenate(F_out)
-    kept = C_all[F_all >= snr].astype(np.float32)
-    _cache_put(_SIGNAL_CACHE, key, kept)
-    _similar_put("signal", unit, sim_params, kept)
-    return kept
+        F_out.append(np.stack(fcols, 1))
+    out = (np.concatenate(C_out).astype(np.float32), np.concatenate(F_out).astype(np.float32))
+    _cache_put(_SIGNAL_CACHE, key, out)
+    _similar_put("signal", unit, sim_params, out)
+    return out
 
 
 def noise_block_maxima(power, n, bands, nsim=20000, seed=29, chunk=2000, window=None):
@@ -233,14 +245,18 @@ def noise_block_maxima(power, n, bands, nsim=20000, seed=29, chunk=2000, window=
 
 
 class CostModel:
-    """Measured per-tier costs for one transform size (see tools/measure_chain_costs.py)."""
+    """Per-tier costs for one transform size, in engine ticks.
 
-    def __init__(self, table):
-        self.n = int(table["n"])
-        self.dense = {int(b): float(v) for b, v in table["dense"].items()}
-        self._refine = sorted((float(f), float(v)) for f, v in table["refine"].items())
-        self._sparse = {int(b): sorted((float(f), float(v)) for f, v in d.items())
-                        for b, d in table["sparse"].items()}
+    dense[b]          first tier at band b, per pair
+    sparse[b]         [(density, ticks per survivor)] for a later tier at band b
+    refine            [(density, ticks per refined pair)]
+    """
+
+    def __init__(self, n, dense, sparse, refine):
+        self.n = int(n)
+        self.dense = {int(b): float(v) for b, v in dense.items()}
+        self._sparse = {int(b): sorted((float(f), float(v)) for f, v in rows) for b, rows in sparse.items()}
+        self._refine = sorted((float(f), float(v)) for f, v in refine)
 
     @staticmethod
     def _interp(rows, f):
@@ -262,18 +278,96 @@ class CostModel:
         c += reach[len(chain)] * self.refine(reach[len(chain)])
         return c
 
-    @classmethod
-    def load(cls, path=None, n=None):
-        path = path or os.environ.get("MF_CHAIN_COSTS")
-        if not path:
-            return None
-        with open(path) as fh:
-            data = json.load(fh)
-        tables = data if isinstance(data, list) else [data]
-        for t in tables:
-            if n is None or int(t["n"]) == int(n):
-                return cls(t)
-        return None
+
+_COSTS = {}
+#: Survivor densities the calibration places the tiers at (bracketing production's 0.1-10%).
+_CAL_DENSITIES = (0.1, 0.01)
+
+
+def calibrate_costs(n, ntemplates, blocks=256, reps=5, seed=11):
+    """Measure this machine's tier costs at transform size n through the engine itself.
+
+    Synthetic analytic noise and whitened random templates; thresholds are
+    placed so that the tier under test sees each target survivor density, and
+    costs are read from the engine's per-tier counters (ap_hmf_tier_stats), so
+    no wall-clock subtraction is involved. Calls are sized like a segment's
+    (hundreds of blocks), because a pooled tier's fixed per-call cost is only
+    representative when amortised over a realistic number of survivors.
+    Under a second per (n, template count), once per process.
+    """
+    from . import _core
+    nt = int(min(max(int(ntemplates), 8), 128))
+    key = (int(n), nt)
+    if key in _COSTS:
+        return _COSTS[key]
+    rng = np.random.default_rng(seed)
+    bands = candidate_bands(n)
+    taps = n // 4
+    h = np.zeros((nt, n), np.complex64)
+    h[:, :taps] = rng.standard_normal((nt, taps)) / np.sqrt(taps)
+    spec = np.fft.fft(h, axis=1).astype(np.complex64)
+    step = n - taps
+    S = (blocks + 1) * step + n
+    x = (rng.standard_normal(S) + 1j * rng.standard_normal(S)) / np.sqrt(2)
+    X = np.fft.fft(x); X[S // 2:] = 0
+    ser = (np.fft.ifft(X) * np.sqrt(2)).astype(np.complex64).view(np.float32)
+    starts = (np.arange(blocks) * step).astype(np.uint64)
+    ws = np.full(blocks, taps, np.uint64); we = np.full(blocks, n, np.uint64)
+    ref = np.zeros(n, np.float32); ref[:n // 2] = 1.0
+    idx = np.zeros((blocks, nt, 1), np.int64); val = np.zeros((blocks, nt, 1), np.complex64)
+    mag = np.zeros((blocks, nt, 1), np.float32); cnt = np.zeros((blocks, nt), np.int32)
+    big = float(np.finfo(np.float32).max)
+
+    def run(chain, thr, reps=reps):
+        """Pairs per call and per-tier (band, passed, ticks) per call: medians over repetitions."""
+        p = _core.HMF(n, 1, nt, list(chain), 8, n)
+        p.set_reference(ref); p.set_template_batch(0, spec); p.set_thresholds(list(thr))
+        p.run_series(ser, starts, ws, we, 0, nt, n, big, idx, val, mag, cnt)      # warm-up
+        prev = p.tier_stats(); rows = []
+        for _ in range(reps):
+            p.run_series(ser, starts, ws, we, 0, nt, n, big, idx, val, mag, cnt)
+            cur = p.tier_stats()
+            rows.append([(c[1] - q[1], c[2] - q[2]) for c, q in zip(cur, prev)])
+            prev = cur
+        med = [(prev[i][0], float(np.median([r[i][0] for r in rows])), float(np.median([r[i][1] for r in rows])))
+               for i in range(len(prev))]
+        return blocks * nt, med
+
+    def thr_for(b, density):
+        """Tier-0 threshold at band b passing about `density` of pairs (secant on log pass rate)."""
+        lo, hi = 0.0, 16.0
+        for _ in range(14):
+            mid = 0.5 * (lo + hi)
+            pairs, st = run((b,), (mid,), reps=1)
+            frac = st[0][1] / pairs
+            if frac > density:
+                lo = mid
+            else:
+                hi = mid
+            if abs(frac - density) < 0.25 * density:
+                break
+        return mid
+
+    dense, sparse, refine = {}, {}, []
+    for b in bands:
+        pairs, st = run((b,), (big,))
+        dense[b] = st[0][2] / pairs
+    b0 = bands[0]
+    for f in _CAL_DENSITIES:
+        g0 = thr_for(b0, f)
+        pairs, st = run((b0,), (g0,))
+        if st[-1][1]:
+            refine.append((st[0][1] / pairs, st[-1][2] / st[-1][1]))
+        for b in bands[1:]:
+            pairs, st = run((b0, b), (g0, big))
+            if st[0][1]:
+                sparse.setdefault(b, []).append((st[0][1] / pairs, st[1][2] / st[0][1]))
+    # the first band can only be a first tier; give it the next band's sparse curve for completeness
+    if bands[1:]:
+        sparse.setdefault(b0, list(sparse.get(bands[1], [])))
+    cm = CostModel(n, dense, sparse, refine)
+    _COSTS[key] = cm
+    return cm
 
 
 def _reach(N, cols, thresholds):
@@ -286,19 +380,33 @@ def _reach(N, cols, thresholds):
     return out
 
 
-def plan_chain(sig, noise, bands, chain, fd, cost, n):
+def kept_draws(sig, bands, chain, snr):
+    """Coarse maxima of `chain`'s tiers for the draws the fine stage keeps (fine max >= snr)."""
+    C, F = sig
+    cols = [bands.index(b) for b in chain]
+    keep = F[:, cols].max(1) >= snr
+    return C[keep][:, cols]
+
+
+def plan_chain(sig, noise, bands, chain, fd, cost, n, snr):
     """Thresholds for `chain` meeting compound dismissal <= fd at minimum modelled cost.
 
     sig, noise: signal_draws / noise_block_maxima over `bands`.
     Returns dict(chain, thresholds, reach, cost) or None when fd cannot be resolved.
     """
     cols = [bands.index(b) for b in chain]
-    M = sig.shape[0]
-    K = int(math.floor(float(fd) * M))       # the single-tier contract of gatemodel.gate_for
+    S = kept_draws(sig, bands, chain, snr)
+    M = S.shape[0]
+    k = len(chain)
+    if k == 1:
+        K = int(math.floor(float(fd) * M))   # the single-tier contract of gatemodel.gate_for
+    else:
+        # Splitting the budget searches many threshold combinations on the same draws and keeps
+        # the cheapest, which favours combinations whose dismissal those draws understate. A
+        # one-sided 95% binomial tolerance on the budget removes that selection bias.
+        K = int(math.floor(float(fd) * M - 1.645 * math.sqrt(M * float(fd) * (1.0 - float(fd)))))
     if K < 8:
         return None
-    S = sig[:, cols]
-    k = len(chain)
     best = None
 
     def finish(prefix):
@@ -356,12 +464,12 @@ def choose_chain(power, n, snr, fd, cost=None, max_tiers=3, floor=_MIN_BAND, nsi
     if not bands:
         return None, []
     sig = signal_draws(power, n, bands, snr, _gm._nsamp_for(fd))
-    if sig is None or not len(sig):
+    if sig is None:
         return None, []
     noise = noise_block_maxima(power, n, bands, nsim=nsim, window=window)
     plans = []
     for chain in enumerate_chains(n, max_tiers, floor, bands=bands):
-        pl = plan_chain(sig, noise, bands, list(chain), fd, cost, n)
+        pl = plan_chain(sig, noise, bands, list(chain), fd, cost, n, snr)
         if pl is not None:
             plans.append(pl)
     plans.sort(key=lambda d: d["cost"])
@@ -374,24 +482,9 @@ def chain_thresholds(power, n, snr, fd, chain, cost=None, floor=_MIN_BAND, nsim=
     if not set(chain) <= set(bands):
         return None
     sig = signal_draws(power, n, bands, snr, _gm._nsamp_for(fd))
-    if sig is None or not len(sig):
+    if sig is None:
         return None
     noise = noise_block_maxima(power, n, bands, nsim=nsim, window=window)
-    return plan_chain(sig, noise, bands, list(chain), fd, cost, n)
+    return plan_chain(sig, noise, bands, list(chain), fd, cost, n, snr)
 
 
-_COSTS = {}
-
-
-def cost_model(n):
-    """The measured cost table for n from $MF_CHAIN_COSTS, or None (then chains are not used)."""
-    path = os.environ.get("MF_CHAIN_COSTS")
-    if not path:
-        return None
-    key = (path, int(n))
-    if key not in _COSTS:
-        try:
-            _COSTS[key] = CostModel.load(path, n)
-        except (OSError, ValueError, KeyError):
-            _COSTS[key] = None
-    return _COSTS[key]

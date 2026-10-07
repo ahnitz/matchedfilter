@@ -12,9 +12,10 @@ and the rule still wrong, which is exactly what happened before.
 import sys, argparse
 import numpy as np
 import multiprocessing as mp
-sys.path.insert(0, 'tools')
-import hmf_tune as t
+sys.path.insert(0, 'tests')
+import _gatelib as t
 import matchedfilter as mf
+from matchedfilter import gatechain
 
 
 def references(n):
@@ -33,19 +34,15 @@ def references(n):
 def one(job):
     n, snr, fd, name, p, trials = job
     try:
-        cfg = mf.choose_config(p, n, snr, fd)
+        best, _ = gatechain.choose_chain(p, n, snr, fd, cost=gatechain.calibrate_costs(n, 64))
     except Exception as e:
         return dict(n=n, snr=snr, fd=fd, ref=name, cfg=None, err=str(e))
-    if cfg is None:
-        return dict(n=n, snr=snr, fd=fd, ref=name, cfg=None, err="no config")
-    # No margin. choose_config used to return one and this passed it back
-    # in, which measured a configuration the library never runs: the margin
-    # is an axis of the measured grid, and what the filter is actually run
-    # at is the profile-model threshold. Measuring the chosen config
-    # means measuring it as the library will build it.
-    band, K = cfg
-    dm, det, _sec = t.measure(n, band, 1, K, snr, trials, power=p)
-    f, be = mf._band_features(p, band)
+    if best is None:
+        return dict(n=n, snr=snr, fd=fd, ref=name, cfg=None, err="no chain")
+    # Measure the model's chain at the thresholds the library itself computes for it.
+    cfg = best["chain"]
+    dm, det, _sec = t.measure(n, cfg, snr, trials, power=p, fd=fd)
+    f, be = mf._band_features(p, cfg[0])
     return dict(n=n, snr=snr, fd=fd, ref=name, cfg=cfg, f=f, beff=be,
                 dismissal=dm, detected=det)
 

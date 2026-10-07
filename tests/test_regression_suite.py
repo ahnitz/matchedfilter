@@ -117,8 +117,7 @@ def test_hierarchical_filter_configurations(N, band, cband, T):
     d_spec = (rng.standard_normal((1, N)) + 1j * rng.standard_normal((1, N))).astype(np.complex64)
     t_spec = (rng.standard_normal((T, N)) + 1j * rng.standard_normal((T, N))).astype(np.complex64)
 
-    hf = mf.HierarchicalFilter(N, ndata=1, ntemplates=T, band=band, cascade_band=cband,
-                               snr=5.5, fd=1e-2)
+    hf = mf.HierarchicalFilter(N, ndata=1, ntemplates=T, chain=(band,) if cband is None else (cband, band), snr=5.5, fd=1e-2)
     hf.set_reference(ref)
     hf.set_data(d_spec)
     hf.set_templates(t_spec)
@@ -205,86 +204,53 @@ def test_signal_injection_recovery(engine):
 # Autotuning Verification Tests
 # -----------------------------------------------------------------------------
 
-def test_autotune_candidate_generation_and_unblocking():
-    """Verify that autotuning generates cascade configurations when viable and respects SIMD floor."""
+def test_chain_pool_excludes_nothing():
+    """Every chain of up to max_tiers usable bands is priced; none is excluded by rule."""
+    from matchedfilter import gatechain as gc
     bank_taps, bank_counts = _load_or_generate_bank(T_req=64)
-    ref_8192 = _compute_reference_spectrum(bank_taps, bank_counts, nfft=8192)
-
-    # 1. N=8192 where b_single >= 512, allowing cascade above the SIMD floor
-    cands, rejs = mf.candidate_configs(ref_8192, 8192, 5.0, 1e-3, cascade=True)
-    assert len(cands) >= 2, f"Expected at least 2 candidates for N=8192, got {cands}"
-    # Verify cascade options are present
-    cascade_cands = [c for c in cands if isinstance(c, mf.CascadeConfig) or (isinstance(c, (tuple, list)) and len(c) == 3)]
-    assert len(cascade_cands) >= 1, f"No cascade options generated for N=8192! Cands: {cands}"
-    # Verify no valid coarse band >= min_floor was improperly rejected
-    min_floor = mf._min_band_for()
-    for r in rejs:
-        cfg = r.get("config")
-        if cfg:
-            b0 = getattr(cfg, "cascade_band", None) or (cfg[0] if len(cfg) == 3 else None)
-            if b0 is not None and "SIMD" in r.get("reason", ""):
-                assert b0 < min_floor, f"Improperly rejected coarse band {b0} >= min_floor ({min_floor}): {r}"
-
-    # 2. N=2048: where coarse bands fall below SIMD floor, single-tier is safely chosen
-    ref_2048 = _compute_reference_spectrum(bank_taps, bank_counts, nfft=2048)
-    cands_2048, rejs_2048 = mf.candidate_configs(ref_2048, 2048, 5.5, 0.01, cascade=True)
-    assert len(cands_2048) >= 1, f"Expected candidates for N=2048, got {cands_2048}"
-    assert all(r.get("config") is not None for r in rejs_2048), "Rejection records should be preserved"
+    for nfft in (2048, 8192):
+        ref = _compute_reference_spectrum(bank_taps, bank_counts, nfft=nfft)
+        best, plans = gc.choose_chain(ref, nfft, 5.5, 1e-2, cost=gc.calibrate_costs(nfft, 64), max_tiers=3)
+        assert best is not None
+        priced = {q["chain"] for q in plans}
+        pool = set(gc.enumerate_chains(nfft, 3, bands=gc.usable_bands(ref, nfft)))
+        assert priced <= pool
+        # multi-tier chains are candidates at every n, including small blocks
+        assert any(len(c) > 1 for c in priced), (nfft, sorted(priced))
+        assert plans == sorted(plans, key=lambda q: q["cost"])
 
 
-def test_autotune_selection_monotonicity():
-    """Verify band monotonicity: as threshold increases, chosen band never widens."""
+def test_gate_thresholds_rise_with_snr():
+    """For a fixed chain, the calibrated gates rise as the detection threshold rises."""
+    from matchedfilter import gatechain as gc
     bank_taps, bank_counts = _load_or_generate_bank(T_req=64)
     ref_w = _compute_reference_spectrum(bank_taps, bank_counts, nfft=2048)
-
-    thresholds = [5.0, 5.5, 6.0, 6.5, 7.0]
-    chosen_bands = []
-    for thr in thresholds:
-        cfg = mf.choose_config(ref_w, 2048, thr, 0.01, cascade=False)
-        assert cfg is not None, f"choose_config returned None for threshold {thr}"
-        band = cfg[0]
-        chosen_bands.append(band)
-
-    # Verify monotonic non-increasing band width as threshold rises
-    for i in range(len(chosen_bands) - 1):
-        assert chosen_bands[i+1] <= chosen_bands[i], (
-            f"Band widened as threshold rose! {thresholds[i]}->{chosen_bands[i]} vs "
-            f"{thresholds[i+1]}->{chosen_bands[i+1]}"
-        )
+    for chain in ((256,), (256, 512)):
+        gates = [gc.chain_thresholds(ref_w, 2048, s, 0.01, chain)["thresholds"] for s in (5.0, 5.5, 6.0, 6.5, 7.0)]
+        for lo, hi in zip(gates, gates[1:]):
+            assert all(b > a for a, b in zip(lo, hi)), (chain, gates)
 
 
-def test_autotune_cache_sharing_across_groups():
-    """Verify that multi-group searches share autotune cache entries and lock to a winner."""
+def test_chain_choice_is_shared_across_groups():
+    """Groups with the same reference share one model evaluation and agree on the chain."""
     mf.clear_autotune_cache()
     group_sizes = [248, 247, 192, 115]
     N = 2048
     bank_taps, bank_counts = _load_or_generate_bank(T_req=248)
     ref_w = _compute_reference_spectrum(bank_taps, bank_counts, nfft=2048)
-
     rng = np.random.default_rng(123)
     d_spec = (rng.standard_normal((1, N)) + 1j * rng.standard_normal((1, N))).astype(np.complex64)
     t_spec = np.zeros((248, N), dtype=np.complex64)
-
-    winners = []
-    statuses = []
-    for g_idx, g_size in enumerate(group_sizes):
-        hf = mf.HierarchicalFilter(N, ndata=1, ntemplates=g_size, cascade="auto",
-                                   snr=5.5, fd=1e-2)
+    models = []
+    for g_size in group_sizes:
+        hf = mf.HierarchicalFilter(N, ndata=1, ntemplates=g_size, snr=5.5, fd=1e-2)
         hf.set_reference(ref_w)
         hf.set_data(d_spec)
         hf.set_templates(t_spec[:g_size])
         hf.run(binsize=N, threshold=6.0)
-        info = hf.autotune_info
-        statuses.append(info.get("status"))
-        winners.append(info.get("winner"))
-
-    cache = mf.get_autotune_cache()
-    assert len(cache) > 0, "Autotune cache was not populated across multi-group run!"
-    # Later groups must lock onto a winner and reuse it
-    assert "locked" in statuses, f"Autotune never locked across groups: {statuses}"
-    locked_winner = winners[-1]
-    assert locked_winner is not None, "Final group did not have a locked winner!"
-    assert winners[-2] == locked_winner, "Winner changed between locked groups!"
+        models.append(hf.autotune_info["model"])
+    assert len(set(models)) == 1, models
+    assert len(mf.get_autotune_state()["choices"]) == 1
 
 
 def test_autotune_threshold_contract_during_tuning():
@@ -325,8 +291,7 @@ def test_autotune_environment_bypass():
         d_spec = (rng.standard_normal((1, N)) + 1j * rng.standard_normal((1, N))).astype(np.complex64)
         t_spec = np.zeros((64, N), dtype=np.complex64)
 
-        hf = mf.HierarchicalFilter(N, ndata=1, ntemplates=64, cascade="auto",
-                                   snr=5.5, fd=1e-2)
+        hf = mf.HierarchicalFilter(N, ndata=1, ntemplates=64, snr=5.5, fd=1e-2)
         hf.set_reference(ref_w)
         hf.set_data(d_spec)
         hf.set_templates(t_spec)
@@ -351,7 +316,7 @@ def test_reference_repack_elimination():
     ref = np.abs(rng.standard_normal(N)).astype(np.float32)
     ref[0] = 0.0
     t_spec = (rng.standard_normal((T, N)) + 1j * rng.standard_normal((T, N))).astype(np.complex64)
-    hf = mf.HierarchicalFilter(N, ndata=1, ntemplates=T, band=256)
+    hf = mf.HierarchicalFilter(N, ndata=1, ntemplates=T, chain=256)
     hf.set_reference(ref)
     hf.set_templates(t_spec)
 
@@ -504,8 +469,8 @@ def test_hierarchical_cpu_cascade_and_empty_contract():
         tap_sample_rate=2048, data_sample_rate=2048,
         engine="hier", threshold=6.0, false_dismissal=0.001
     )
-    # Every chain stays a candidate: the bank must not force single-tier (or any) configuration on the plan.
-    assert bank._groups[0].plan.cascade is not False, "TimeDomainFilterBank must not exclude multi-tier chains"
+    # Every chain stays a candidate: the bank must not pin a configuration on the plan.
+    assert bank._groups[0].plan._pinned is None, "TimeDomainFilterBank must not pin a chain"
 
     bank.set_reference(ref_w, delta_f=1.0)
     # Zero-noise input guaranteed to produce zero triggers at threshold 6.0
@@ -586,8 +551,7 @@ def run_suite():
         lbl = f"b={band}" + (f", b0={cband}" if cband else " (single)")
 
         try:
-            hf = mf.HierarchicalFilter(N, ndata=1, ntemplates=T, band=band, cascade_band=cband,
-                                       snr=5.5, fd=1e-2)
+            hf = mf.HierarchicalFilter(N, ndata=1, ntemplates=T, chain=(band,) if cband is None else (cband, band), snr=5.5, fd=1e-2)
             hf.set_reference(ref)
             hf.set_data(d_spec)
             hf.set_templates(t_spec)
@@ -836,73 +800,33 @@ def run_suite():
             "status": status
         })
 
-    # 6. Autotuning Features, Monotonicity & Convergence
-    print("\n--- 6. Autotuning Features, Monotonicity & Convergence ---")
+    # 6. Gate chain selection
+    print("\n--- 6. Gate chain selection ---")
+    from matchedfilter import gatechain as gc
+    best, plans = gc.choose_chain(ref_w, 2048, 5.5, 0.01, cost=gc.calibrate_costs(2048, 64), max_tiers=3)
+    multi = any(len(q["chain"]) > 1 for q in plans)
+    pool_status = "PASS" if (best is not None and multi) else "FAIL (multi-tier chains missing)"
+    print(f"  Chain pool N=2048 | priced {len(plans)} chains, best {best and best['chain']} | Status: {pool_status}")
+    results.append({"interface": "ChainPool", "config": "N=2048, max_tiers=3", "ms": 0.0,
+                    "throughput": f"{len(plans)} chains", "status": pool_status})
 
-    # 6.1 Candidate Generation & Cascade Unblocking
-    cands_2048, rejs_2048 = mf.candidate_configs(ref_w, 2048, 5.5, 0.01, cascade=True)
-    has_cascade = any(isinstance(c, mf.CascadeConfig) or (isinstance(c, (tuple, list)) and len(c) == 3) for c in cands_2048)
-    unblock_status = "PASS" if has_cascade else "FAIL (No cascade options)"
-    print(f"  Candidate Generation N=2048 | Candidates: {cands_2048} | Status: {unblock_status}")
-    results.append({
-        "interface": "AutotuneCandidateGen",
-        "config": "N=2048, cascade=True",
-        "ms": 0.0,
-        "throughput": f"{len(cands_2048)} candidates",
-        "status": unblock_status
-    })
-
-    # 6.2 Selection Monotonicity Across Thresholds
-    thresholds = [5.0, 5.5, 6.0, 6.5, 7.0]
-    bands = [mf.choose_config(ref_w, 2048, thr, 0.01, cascade=False)[0] for thr in thresholds]
-    monotonic = all(bands[i+1] <= bands[i] for i in range(len(bands)-1))
-    mono_status = "PASS" if monotonic else "FAIL"
-    print(f"  Selection Monotonicity     | Thr: {thresholds} -> Bands: {bands} | Status: {mono_status}")
-    results.append({
-        "interface": "AutotuneMonotonicity",
-        "config": "5 thresholds (5.0 to 7.0)",
-        "ms": 0.0,
-        "throughput": f"Bands: {bands}",
-        "status": mono_status
-    })
-
-    # 6.3 Multi-Group Cache Sharing & Convergence
     mf.clear_autotune_cache()
     group_sizes = [248, 247, 192, 115]
     N = 2048
-    locked_winner = None
-
+    models = []
     for g_idx, g_size in enumerate(group_sizes):
-        d_blk = noise_ser[:N]
-        d_spec = np.fft.fft(d_blk)[:N] / float(N)
-        d_spec = d_spec[None, :]
-
-        hf = mf.HierarchicalFilter(N, ndata=1, ntemplates=g_size, cascade="auto",
-                                   snr=5.5, fd=1e-2)
+        d_spec = (np.fft.fft(noise_ser[:N])[:N] / float(N))[None, :]
+        hf = mf.HierarchicalFilter(N, ndata=1, ntemplates=g_size, snr=5.5, fd=1e-2)
         hf.set_reference(ref_w)
         hf.set_data(d_spec)
-        t_spec = np.zeros((g_size, N), dtype=np.complex64)
-        hf.set_templates(t_spec)
-
+        hf.set_templates(np.zeros((g_size, N), dtype=np.complex64))
         hf.run(binsize=N, threshold=6.0)
-        info = hf.autotune_info
-        status_str = info.get("status", "unknown")
-        winner = info.get("winner")
-        if status_str == "locked":
-            locked_winner = winner
-        print(f"  Group {g_idx+1} (M={g_size:3d}) | Autotune status: {status_str:<7} | Active/Winner: {winner}")
-
-    cache_entries_after = len(mf.get_autotune_cache())
-    auto_status = "PASS" if (cache_entries_after > 0 and locked_winner is not None) else "FAIL (Cache isolated)"
-    print(f"  Autotune Cache Convergence | Entries: {cache_entries_after}, Locked: {locked_winner} | Status: {auto_status}")
-
-    results.append({
-        "interface": "AutotuneConvergence",
-        "config": f"4 groups ({group_sizes})",
-        "ms": 0.0,
-        "throughput": f"Winner: {locked_winner}",
-        "status": auto_status
-    })
+        models.append(hf.autotune_info.get("model"))
+        print(f"  Group {g_idx+1} (M={g_size:3d}) | status {hf.autotune_info.get('status'):<6} | chain {hf.config}")
+    share_status = "PASS" if len(set(models)) == 1 and len(mf.get_autotune_state()["choices"]) == 1 else "FAIL"
+    print(f"  Shared chain choice | {models[-1]} | Status: {share_status}")
+    results.append({"interface": "ChainSharing", "config": f"4 groups ({group_sizes})", "ms": 0.0,
+                    "throughput": f"Chain: {models[-1]}", "status": share_status})
 
     # 7. Summary
     print("\n" + "=" * 80)

@@ -12,7 +12,7 @@ some calibration tools need separately captured data.
 | Website and figure | `build_report.py`, `teaser_figure.py`, `teaser_fleet.py` | Benchmark workflow builds the site; figure is regenerated deliberately |
 | Public performance | `python -m matchedfilter.benchmark`, `bench_series_workloads.py`, `bench_device_paths.py` | Spectral and series benchmarks; `bench_series_workloads.py --quick` runs in benchmark CI |
 | Targeted diagnosis | `audit_class_execution.py`, `bench_class_changes.py`, `bench_pairbatch.py`, `bench_stages.py`, `audit_kernel_binaries.py` | Run when investigating a specific scheduling or kernel cost |
-| Calibration and validation | `hmf_tune.py`, `regen/cost_cpu.py`, `regen/cost_gpu.py`, `audit_gate_model.py`, `audit_selection.py`, `audit_threshold.py`, `score_*.py` | Regenerate or check measured coarse-gate tables; not part of normal installation |
+| Gate validation | `audit_gate_model.py`, `audit_threshold.py`, `score_fdr.py`, `verify_cascade_fdr.py` | Measure a gate chain's dismissal by injection against the flat filter; not part of normal installation |
 
 For a quick CPU/GPU overlap-save comparison with output validation:
 

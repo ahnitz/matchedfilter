@@ -74,7 +74,7 @@ def test_peak_filters_derive_same_blocks_and_pad_last_bins(klass):
     n, valid, length = 1024, (100, 700), 2100
     series = _spectra((length,), 20)
     tmpl = _spectra((2, n), 21)
-    kwargs = {'band': 128} if klass is HierarchicalFilter else {}
+    kwargs = {'chain': 128} if klass is HierarchicalFilter else {}
     f = klass(n, ndata=3, ntemplates=2, valid=valid, **kwargs)
     if klass is HierarchicalFilter:
         f.set_coarse_threshold(0)
@@ -151,7 +151,7 @@ def test_automatic_layout_accepts_host_dlpack_without_len():
 @pytest.mark.parametrize('klass', [MatchedFilter, HierarchicalFilter])
 def test_run_blocks_names_the_block_local_peak_contract(klass):
     n, lo, hi = 1024, 71, 800
-    kwargs = {'band': 128} if klass is HierarchicalFilter else {}
+    kwargs = {'chain': 128} if klass is HierarchicalFilter else {}
     f = klass(n, ntemplates=2, valid=(lo, hi), **kwargs)
     if klass is HierarchicalFilter:
         f.set_coarse_threshold(0)

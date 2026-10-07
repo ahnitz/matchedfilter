@@ -256,8 +256,7 @@ def test_coarse_threshold_reads_the_reference_not_the_template():
     assert (np.abs(H[:band]) ** 2).sum() < 0.2          # template: high band
     assert out_power[:band].sum() / out_power.sum() > 0.9   # output: low band
 
-    hf = mf.HierarchicalFilter(n, ndata=32, ntemplates=1, snr=5.5, fd=1e-2,
-                                   band=band, taps=8)
+    hf = mf.HierarchicalFilter(n, ndata=32, ntemplates=1, snr=5.5, fd=1e-2, chain=band)
     hf.set_reference(out_power)
     hf.set_templates(H[None, :])
     hf.set_data(noise((32, n), rng))
@@ -285,8 +284,7 @@ def test_coarse_scaling_follows_the_reference():
     falling[1:n // 2] = (k.astype(np.float64) ** -3.0).astype(np.float32)
     out_power = (np.abs(H) ** 2 * falling).astype(np.float32)
 
-    hf = mf.HierarchicalFilter(n, ndata=64, ntemplates=1, snr=5.5, fd=1e-2,
-                                   band=band, taps=8)
+    hf = mf.HierarchicalFilter(n, ndata=64, ntemplates=1, snr=5.5, fd=1e-2, chain=band)
     hf.set_reference(out_power)
     hf.set_templates(H[None, :])
     hf.set_data(noise((64, n), rng))
@@ -307,8 +305,7 @@ def test_peaks_on_odd_lags_survive():
     power = inspiral_power(n)
     H = template_with_power(n, power)
     filt = mf.MatchedFilter(n, ndata=1, ntemplates=1)
-    hf = mf.HierarchicalFilter(n, ndata=1, ntemplates=1, snr=snr, fd=1e-2,
-                                   band=band, taps=8)
+    hf = mf.HierarchicalFilter(n, ndata=1, ntemplates=1, snr=snr, fd=1e-2, chain=band)
     hf.set_reference(power)
     filt.set_templates(H[None, :])
     hf.set_templates(H[None, :])
@@ -515,9 +512,9 @@ def test_pinning_reads_the_threshold_from_the_model():
 
     # and the pinned plan actually RUNS at that number
     want = mf.choose_threshold(power, n, 5.0, 1e-3, 512)
-    hf = mf.HierarchicalFilter(n, 8, 4, snr=5.0, fd=1e-3, band=512, taps=8)
+    hf = mf.HierarchicalFilter(n, 8, 4, snr=5.0, fd=1e-3, chain=512)
     hf.set_reference(power)
-    got = hf._ensure().coarse_threshold(5.0)
+    got = hf._execution_plan().thresholds()[0]
     assert got == pytest.approx(want, rel=1e-3), (got, want)
     assert got > 0.0, got
 
@@ -551,8 +548,7 @@ def test_an_explicit_coarse_threshold_overrides_the_table_on_a_pinned_plan():
 
     rates = {}
     for explicit in (None, 0.0, 3.5, 4.5):
-        hf = mf.HierarchicalFilter(n, 8, 4, snr=5.0, fd=1e-3,
-                                   band=512, taps=8)
+        hf = mf.HierarchicalFilter(n, 8, 4, snr=5.0, fd=1e-3, chain=512)
         hf.set_reference(power)
         if explicit is not None:
             hf.set_coarse_threshold(explicit)
@@ -670,8 +666,7 @@ def _ratio_filter_shaped_trial(pin=True, seed=22):
             scale = (snr + 2.0) / max(np.abs(np.fft.ifft(inj * np.conj(H[t])) * n).max(), 1e-30)
             s0 = int(starts[b])          # uintp; see the note above
             ser[s0:s0 + n] += (np.fft.ifft(inj) * n * scale).astype(np.complex64)
-    hf = (mf.HierarchicalFilter(n, ndata=1, ntemplates=nt, snr=snr, fd=1e-2,
-                                band=512, taps=8) if pin else
+    hf = (mf.HierarchicalFilter(n, ndata=1, ntemplates=nt, snr=snr, fd=1e-2, chain=512) if pin else
           mf.HierarchicalFilter(n, ndata=1, ntemplates=nt, snr=snr, fd=1e-2))
     hf.set_reference(ref)
     hf.set_templates(H)
@@ -814,8 +809,7 @@ def test_first_stage_threshold_is_independent_of_configuration():
 
     rates, cfgs = {}, {}
     for fs in (None, 6.0, 5.5, 5.0):
-        hf = mf.HierarchicalFilter(n, ndata=nd, ntemplates=nt, snr=5.5,
-                                   fd=1e-3, band=512, taps=8)
+        hf = mf.HierarchicalFilter(n, ndata=nd, ntemplates=nt, snr=5.5, fd=1e-3, chain=512)
         hf.set_reference(power)
         hf.set_templates(h)
         hf.set_data(d)
@@ -841,7 +835,7 @@ def test_first_stage_threshold_is_independent_of_configuration():
 def test_first_stage_uses_its_own_snr_below_the_old_grid():
     """The model computes the requested SNR rather than borrowing a row."""
     n = 4096
-    hf = mf.HierarchicalFilter(n, band=512, snr=5.5)
+    hf = mf.HierarchicalFilter(n, chain=512, snr=5.5)
     hf.set_reference(inspiral_power(n))
     hf.set_templates(template_with_power(n, inspiral_power(n))[None, :])
     hf.set_data(noise((1, n), np.random.default_rng(3)))
@@ -849,7 +843,7 @@ def test_first_stage_uses_its_own_snr_below_the_old_grid():
         hf.set_first_stage(fs)
         hf.run()
         want = mf.choose_threshold(inspiral_power(n), n, fs, hf.fd, 512)
-        assert hf._ensure().coarse_threshold(fs) == pytest.approx(want, rel=1e-6)
+        assert hf._execution_plan().thresholds()[0] == pytest.approx(want, rel=1e-6)
 
 
 @pytest.mark.parametrize("klass", ["flat", "hier"])
@@ -872,8 +866,7 @@ def test_run_without_set_data_raises_rather_than_crashing(klass):
     if klass == "flat":
         f = mf.MatchedFilter(n, 1, nt)
     else:
-        f = mf.HierarchicalFilter(n, 1, nt, snr=5.5, fd=1e-2, band=256,
-                                  taps=8)
+        f = mf.HierarchicalFilter(n, 1, nt, snr=5.5, fd=1e-2, chain=256)
         f.set_reference(power)
     f.set_templates(H)
     with pytest.raises(ValueError, match="set_data"):

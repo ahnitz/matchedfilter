@@ -39,7 +39,7 @@ def test_full_spectral_coverage_still_scallops_between_grid_lags():
     # An odd fine-grid lag lies halfway between coarse samples.
     d = (5.1 * h * np.exp(2j*np.pi*np.arange(n)/n)).astype(np.complex64)
     flat = mf.MatchedFilter(n)
-    hier = mf.HierarchicalFilter(n, band=band)
+    hier = mf.HierarchicalFilter(n, chain=band)
     hier.set_reference(p); hier.set_coarse_threshold(4.)
     for f in (flat, hier):
         f.set_templates(h[None]); f.set_data(d[None])

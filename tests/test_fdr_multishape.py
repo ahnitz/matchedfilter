@@ -42,16 +42,17 @@ def test_cascade_fdr_multi_shape(shape_name):
     h_freq = np.sqrt(power).astype(np.complex64)
     h_conj = np.conj(h_freq)
 
-    thr_cascade = mf.choose_threshold(power, n, snr_target, fdr_target, band=m1, cascade_band=m0)
+    _plan = mf._gatechain.chain_thresholds(power, n, snr_target, fdr_target, (m0, m1))
+    thr_cascade = None if _plan is None else _plan["thresholds"]
     assert thr_cascade is not None, f"Could not calibrate cascade gates for shape {shape_name}"
     g0, g1 = map(float, thr_cascade)
 
     mf_full = mf.MatchedFilter(n, ndata=1, ntemplates=1)
     mf_full.set_templates(h_conj[None, :])
 
-    hmf_cascade = _core.HMF(n, 1, 1, snr_target, fdr_target, m1, 1, 8, 8, m0)
+    hmf_cascade = _core.HMF(n, 1, 1, [m0, m1], 8)
     hmf_cascade.set_reference(power)
-    hmf_cascade.set_threshold(g0, g1)
+    hmf_cascade.set_thresholds([g0, g1])
     hmf_cascade.set_template(0, h_conj)
 
     p_cascade = np.empty((1, 1), dtype=mf.PEAK_DTYPE)

@@ -37,8 +37,7 @@ def main():
     args = (data["series"], data["starts"], data["win_start"], data["win_end"])
     kwargs = dict(binsize=n, threshold=threshold, raw=True)
     plans = {
-        "hier": mf.HierarchicalFilter(n, 1, nt, snr=threshold,
-                                     fd=float(data["fd"]), band=a.band, taps=a.taps),
+        "hier": mf.HierarchicalFilter(n, 1, nt, snr=threshold, fd=float(data["fd"]), chain=a.band),
         "flat": mf.MatchedFilter(n, 1, nt),
     }
     plans["hier"].set_reference(data["reference"])

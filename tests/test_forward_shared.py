@@ -118,7 +118,7 @@ def test_series_has_no_numpy_fft_and_accepts_dlpack(kind, device_name, monkeypat
     n = 1024
     kwargs = dict(device=device)
     if kind == 'hier':
-        kwargs['band'] = 256
+        kwargs['chain'] = 256
     cls = mf.MatchedFilter if kind == 'flat' else mf.HierarchicalFilter
     plan = cls(n, 2, 2, **kwargs)
     if kind == 'hier':
@@ -152,7 +152,7 @@ def test_shared_banks_bind_without_copy_and_survive_eviction(gpu, kind):
     cls = mf.MatchedFilter if kind == 'flat' else mf.HierarchicalFilter
     kwargs = dict(device=gpu)
     if kind == 'hier':
-        kwargs['band'] = 256
+        kwargs['chain'] = 256
     plan = cls(1024, 2, 2, **kwargs)
     if kind == 'hier':
         plan.set_coarse_threshold(0.)
@@ -199,7 +199,7 @@ def test_shared_shapes_and_types(gpu):
 
 
 def test_shared_series_refresh_and_validation_failure(gpu):
-    plan = mf.HierarchicalFilter(1024, 1, 1, band=256, device=gpu)
+    plan = mf.HierarchicalFilter(1024, 1, 1, chain=256, device=gpu)
     rng = np.random.default_rng(129)
     plan.set_templates(random_complex(rng, (1, 1024)))
     series = plan.empty_shared(1200)
@@ -243,7 +243,7 @@ def test_shared_bank_replacement_and_external_context(gpu):
 def test_cpu_dlpack_noncontiguous_banks_and_reference():
     rng = np.random.default_rng(145)
     bank = random_complex(rng, (2, 2048))[:, ::2]
-    plan = mf.HierarchicalFilter(1024, 2, 2, band=256, device='cpu')
+    plan = mf.HierarchicalFilter(1024, 2, 2, chain=256, device='cpu')
     plan.set_coarse_threshold(0.)
     plan.set_reference(Producer(np.ones(1024, np.float32)))
     plan.set_data(Producer(bank))

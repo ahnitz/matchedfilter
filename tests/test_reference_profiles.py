@@ -1,7 +1,7 @@
 """A REAL reference profile, and what it shows the synthetic ones do not.
 
 Every accuracy and threshold number in this library was calibrated against
-`hmf_tune.make_ref`, a synthetic profile built to hit a target (f, B_eff).
+`_gatelib.make_ref`, a synthetic profile built to hit a target (f, B_eff).
 The key assumption is that those two numbers determine how the coarse gate
 behaves. They do not.
 
@@ -78,7 +78,7 @@ def test_band_and_beff_do_not_determine_the_gate_behaviour():
     f, be = mf._band_features(p, band)
     import sys
     sys.path.insert(0, str(pathlib.Path(__file__).parents[1] / "tools"))
-    import hmf_tune as t
+    import _gatelib as t
     synth = t.make_ref(n, band, f, be)
     fs, bes = mf._band_features(synth, band)
     assert abs(fs - f) < 5e-3 and abs(bes - be) / be < 0.05, "not matched on the key"
@@ -98,12 +98,12 @@ def test_each_band_meets_its_requested_budget():
     """
     import sys
     sys.path.insert(0, str(pathlib.Path(__file__).parents[1] / "tools"))
-    import hmf_tune as t
+    import _gatelib as t
     p = real_profile()
     n, snr, fd = 4096, 5.0, 1e-2
     for band in (256, 512, 1024):
         gate = mf.choose_threshold(p, n, snr, fd, band)
         assert gate is not None
-        rate, detected, _ = t.measure(n, band, 2, 8, snr, 12000, power=p, thr=gate)
+        rate, detected, _ = t.measure(n, band, snr, 12000, power=p, thr=gate)
         assert detected * fd > 50, "insufficient statistical power"
         assert rate <= 1.7 * fd, (band, gate, rate, detected)

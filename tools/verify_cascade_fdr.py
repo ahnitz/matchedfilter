@@ -55,7 +55,8 @@ def verify_fdr(shape_name='aligo_o4_inspiral', n=4096, m0=256, m1=512,
 
     # Calibrate gates dynamically
     gate_single = float(mf.choose_threshold(power, n, snr_target, fdr_target, band=m1))
-    thr_cascade = mf.choose_threshold(power, n, snr_target, fdr_target, band=m1, cascade_band=m0)
+    _plan = mf._gatechain.chain_thresholds(power, n, snr_target, fdr_target, (m0, m1))
+    thr_cascade = None if _plan is None else _plan["thresholds"]
     if thr_cascade is None:
         raise ValueError(f"Could not calibrate cascade gates for shape {shape_name}, n={n}, m0={m0}, m1={m1}")
     gate_t0, gate_t1 = map(float, thr_cascade)
@@ -69,14 +70,14 @@ def verify_fdr(shape_name='aligo_o4_inspiral', n=4096, m0=256, m1=512,
     mf_full = mf.MatchedFilter(n, ndata=1, ntemplates=1)
     mf_full.set_templates(h_conj[None, :])
 
-    hmf_single = _core.HMF(n, 1, 1, snr_target, fdr_target, m1, 1, 8, 8)
+    hmf_single = _core.HMF(n, 1, 1, [m1], 8)
     hmf_single.set_reference(power)
-    hmf_single.set_threshold(gate_single)
+    hmf_single.set_thresholds([gate_single])
     hmf_single.set_template(0, h_conj)
 
-    hmf_cascade = _core.HMF(n, 1, 1, snr_target, fdr_target, m1, 1, 8, 8, m0)
+    hmf_cascade = _core.HMF(n, 1, 1, [m0, m1], 8)
     hmf_cascade.set_reference(power)
-    hmf_cascade.set_threshold(gate_t0, gate_t1)
+    hmf_cascade.set_thresholds([gate_t0, gate_t1])
     hmf_cascade.set_template(0, h_conj)
 
     # Buffers

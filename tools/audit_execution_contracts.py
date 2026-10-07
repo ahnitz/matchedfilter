@@ -19,7 +19,7 @@ def run(device, repeats):
         bank[0, frequency] = 1
         rows = {}
         for dev in ['cpu', device]:
-            f = mf.HierarchicalFilter(n, band=256, device=dev)
+            f = mf.HierarchicalFilter(n, chain=256, device=dev)
             f.set_coarse_threshold(gate)
             f.set_data(bank)
             f.set_templates(bank)

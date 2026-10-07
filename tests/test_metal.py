@@ -133,7 +133,7 @@ def test_single_bin_and_general_pipeline_agree(n, hierarchical, monkeypatch):
     data = (rng.normal(size=(3, n)) + 1j*rng.normal(size=(3, n))).astype('complex64')
     bank /= np.linalg.norm(bank, axis=1, keepdims=True)
     if hierarchical:
-        f = matchedfilter.HierarchicalFilter(n, 3, 7, band=256, device='gpu')
+        f = matchedfilter.HierarchicalFilter(n, 3, 7, chain=256, device='gpu')
         f.set_coarse_threshold(0.)  # all pairs refine
     else:
         f = matchedfilter.MatchedFilter(n, 3, 7, device='gpu')

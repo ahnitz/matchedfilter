@@ -246,8 +246,8 @@ def hierarchical():
     hf.set_data(data)
     peaks = hf.run(binsize=n, threshold=6.0)
 
-    band, taps = hf.config
-    print("it chose band %d, taps %d" % (band, taps))
+    print("it chose the gate chain %s (coarse bands, then the full refine)"
+          % "/".join(str(b) for b in hf.config))
     print("escalated to the full correlation: %.1f%% of pairs"
           % (100 * hf.refine_rate))
     for d_, t_, b_ in np.argwhere(peaks["index"] >= 0):
@@ -281,7 +281,7 @@ def refuses():
         print("ValueError:", head.split(". ")[0])
     print()
     print("An fd of 1e-6 is below what the shipped tables resolve, so it")
-    print("declines. Passing band, oversample and taps yourself always works.")
+    print("declines. Pinning a chain (chain=...) and its thresholds yourself always works.")
 
 
 def teaser():

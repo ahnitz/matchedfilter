@@ -66,9 +66,7 @@ _GPU_SIZES = frozenset((64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384,
 
 __all__ = ["MatchedFilter", "CorrelationFilter", "HierarchicalFilter", "PEAK_DTYPE", "backend",
            "targets", "set_target", "devices", "Device", "__version__",
-           "candidate_configs", "choose_config", "CascadeConfig",
-           "get_autotune_cache", "_clear_autotune_cache", "clear_autotune_cache",
-           "get_autotune_trials",
+           "get_autotune_state", "clear_autotune_cache",
            "TimeDomainFilterBank", "FilterResults", "taps_to_spectra"]
 
 from .time_domain import TimeDomainFilterBank, FilterResults
@@ -998,8 +996,7 @@ class MatchedFilter:
         batch = min(nblk, 65535, max(1, self._gpu_pair_limit() // nt),
                     max(1, budget // (8*n + 4 + 12*nt*nb)))
         if isinstance(self, HierarchicalFilter):
-            cal_band = self._gpu_calibration(threshold)[0]
-            band = cal_band[1] if isinstance(cal_band, tuple) else cal_band
+            band = self._gpu_calibration(threshold)[0][-1]
             operation = 'hierarchical_series'
         else:
             band, operation = 0, 'flat_series'
@@ -1419,207 +1416,16 @@ def include_dir():
 
 
 
-_TUNING = None
-_warned_uncovered = False
-
-
-def _uncovered_reference(power, n, t):
-    """True when no candidate band has a localised peak to work with.
-
-    A reference whose in-band power sits in a bin or two gives a
-    correlation of nearly constant magnitude -- there is no peak to find
-    coarsely and refine, so the method does not apply. See `_BEFF_MIN`.
-    """
-    if t is None:
-        bands = [b for b in (64, 128, 256, 512, 1024, 2048) if b < n]
-    else:
-        bands = {key[1] for rows in (t["cost"], t.get("cost_fd", {}),
-                                    t.get("cost_fd_pairs", {}))
-                 for key in rows if key[0] == n and key[1] < n}
-    if not bands:
-        return False
-    return all(_band_features(power, b)[1] < _BEFF_MIN for b in bands)
-
-
 def _uncovered_message(n, snr, fd):
     return (
-        f"no certified configuration for n={n} snr={snr:.2f} fd={fd:.0e}: "
-        "FDR gate model cannot resolve the requested budget for this spectrum profile. "
-        "Provide a valid reference spectrum with localized peak or set coarse band explicitly."
+        f"no gate chain for n={n} snr={snr:.2f} fd={fd:.0e}: the gate model cannot resolve "
+        "the false-dismissal budget for this reference profile. Provide a reference with a "
+        "localised correlation peak, or pin a chain and set its thresholds explicitly."
     )
 
 
-#: Where the parsed tables are cached. Beside the package if that is
-#: writable, otherwise the user cache directory; if neither is, the cache is
-#: skipped and the text is parsed as before.
-def _cache_path(paths):
-    import hashlib
-    key = hashlib.sha1(("cost-v6|" + "|".join(
-        "%s:%d:%d" % (q, os.stat(q).st_mtime_ns, os.path.getsize(q)) for q in paths
-        if os.path.exists(q))).encode()).hexdigest()[:16]
-    xdg_cache = os.path.join(
-        os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache")), "matchedfilter")
-    package_cache = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cache")
-    for base in (xdg_cache, package_cache):
-        try:
-            os.makedirs(base, exist_ok=True)
-            if os.access(base, os.W_OK):
-                return os.path.join(base, "tuning-%s.pkl" % key)
-        except Exception:
-            continue
-    return None
-
-
-def _cached_tuning(paths):
-    """Load the parsed tables from a cache keyed on the text files' mtimes.
-
-    Parsing the shipped tables is 54 ms of pure Python -- 30000 lines, nine
-    float() calls each -- and it lands wherever the caller first builds a
-    plan. In pycbc_inspiral_fir that is inside the timed kernel, where it made
-    the first segment 50 ms against a steady-state 8 ms and read as a 28%
-    regression.
-    
-    Two attempts to parse faster were both SLOWER than the loop (np.array on
-    split rows 74 ms, np.fromstring 64 ms) because the cost is building 11264
-    tuples and 2048 dict entries, not converting the floats. So the parse is
-    skipped instead: a pickle of the result loads in 6.6 ms, 8x faster.
-
-    The text files stay the source of truth. The cache key is their paths and
-    modification times, so editing one or pointing MF_COST somewhere else
-    misses the cache and reparses rather than serving something stale.
-    """
-    if not paths:
-        return None
-    cp = _cache_path(paths)
-    if cp is None or not os.path.exists(cp):
-        return None
-    try:
-        import pickle
-        with open(cp, "rb") as fh:
-            t = pickle.load(fh)
-        t["paths"] = list(paths)
-        return t
-    except Exception:
-        return None          # a corrupt or stale-format cache is not fatal
-
-
-def _store_tuning(t, paths):
-    cp = _cache_path(paths)
-    if cp is None:
-        return
-    try:
-        import pickle
-        tmp = cp + ".%d" % os.getpid()
-        with open(tmp, "wb") as fh:
-            pickle.dump({k: v for k, v in t.items() if k != "paths"}, fh,
-                        protocol=pickle.HIGHEST_PROTOCOL)
-        os.replace(tmp, cp)          # atomic, so a concurrent reader is safe
-    except Exception:
-        pass
-
-
-
-def cost_table_for(device):
-    """Path to the cost table that best describes `device`, and its key."""
-    here = os.path.dirname(__file__)
-    if os.environ.get("MF_COST"):
-        p = os.environ["MF_COST"]
-        if os.path.exists(p):
-            return p, "MF_COST"
-    for key in getattr(device, "arch", ()) or ():
-        candidate = os.path.join(here, "cost-%s.txt" % key)
-        if os.path.exists(candidate):
-            return candidate, key
-    generic = os.path.join(here, "cost.txt")
-    if os.path.exists(generic):
-        return generic, None
-    return None, None
-
-
-def _load_tuning_for(device):
-    """Device-specific measured costs; every device uses the same gate model."""
-    cost, _ = cost_table_for(device)
-    if cost is None:
-        return None
-    return _load_tuning_paths([cost], cache=False)
-
-
-def _load_tuning(path=None):
-    """Read measured runtime costs. Accuracy is computed from the profile."""
-    cache = path is None
-    path = path or os.environ.get("MF_COST") or os.path.join(
-        os.path.dirname(__file__), "cost.txt")
-    if not path or not os.path.exists(path):
-        return None
-    if cache and _TUNING is not None and _TUNING["paths"] == [path]:
-        return _TUNING
-    return _load_tuning_paths([path], cache=cache)
-
-
-def _load_tuning_paths(paths, cache=True):
-    global _TUNING
-    cached = _cached_tuning(tuple(paths))
-    if cached is not None:
-        if cache:
-            _TUNING = cached
-        return cached
-    cost, cost_fd, cost_fd_pairs, meta = {}, {}, {}, {}
-    for one in paths:
-        fd_format = False
-        fd_pairs_format = False
-        with open(one) as fh:
-            for number, line in enumerate(fh, 1):
-                f = line.split()
-                if not f:
-                    continue
-                if f[0] == "#":
-                    if f[1:] == ["format", "cost-fd-v1"]:
-                        fd_format = True
-                    if f[1:] == ["format", "cost-fd-pairs-v1"]:
-                        fd_pairs_format = True
-                    if len(f) > 2 and f[1] in ("cpu", "commit", "trials"):
-                        meta[f[1]] = " ".join(f[2:])
-                    continue
-                if f[0].startswith("#"):
-                    continue
-                if (f[0] != "COST" or len(f) not in (9, 10, 11)
-                        or len(f) == 10 and not fd_format
-                        or len(f) == 11 and not fd_pairs_format):
-                    raise ValueError("%s:%d: expected COST n band U K snr [fd [pairs]] f beff relative_cost; "
-                                     "regenerate old tuning files" % (one, number))
-                n, band, u, k = map(int, f[1:5])
-                snr = float(f[5])
-                fd = float(f[6]) if len(f) >= 10 else None
-                pairs = int(f[7]) if len(f) == 11 else None
-                fraction, beff, value = map(float, f[-3:])
-                if (n <= band or band < 64 or band & (band - 1)
-                        or not np.isfinite([snr, fraction, beff, value]).all()
-                        or fd is not None and (not np.isfinite(fd) or not 0 < fd < 1)
-                        or pairs is not None and pairs < 1
-                        or snr <= 0 or not 0 < fraction <= 1
-                        or beff <= 0 or value <= 0):
-                    raise ValueError("%s:%d: invalid cost row" % (one, number))
-                target = (cost if fd is None else
-                          cost_fd if pairs is None else cost_fd_pairs)
-                key = ((n, band, u, k, snr) if fd is None else
-                       (n, band, u, k, snr, fd) if pairs is None else
-                       (n, band, u, k, snr, fd, pairs))
-                target.setdefault(key, []).append((fraction, beff, value))
-    t = {"cost": cost, "cost_fd": cost_fd,
-         "cost_fd_pairs": cost_fd_pairs, "meta": meta, "paths": list(paths)}
-    _cost_index(t)
-    _store_tuning(t, tuple(paths))
-    if cache:
-        _TUNING = t
-    return t
-
-
 def _band_features(power, m):
-    """(in-band fraction, effective bandwidth in bins) at band m.
-
-    These are cost-interpolation features, not sufficient statistics for
-    accuracy. Gate placement uses the complete reference profile.
-    """
+    """(in-band fraction, effective bandwidth in bins) at band m."""
     p = np.asarray(power, dtype=np.float64)
     p = np.where(p > 0, p, 0.0)
     tot = p.sum()
@@ -1637,315 +1443,49 @@ def _band_features(power, m):
 _BEFF_MIN = 8.0
 
 
-def _spread(v):
-    """Scale for one feature axis: its standard deviation, never zero."""
-    if len(v) < 2:
-        return 1.0
-    m = sum(v) / len(v)
-    sd = (sum((x - m) ** 2 for x in v) / len(v)) ** 0.5
-    return sd if sd > 1e-9 else 1.0
+def _uncovered_reference(power, n):
+    """True when no candidate band has a localised peak to work with.
 
-
-def _idw(rows, f, be, k=4, power=2.0, log=False, floor=1e-12):
-    """Inverse-distance interpolation of `rows` = (f, B_eff, value).
-
-    A convex combination of measured cells, so it can never return a value
-    outside them. That is why it is inverse distance and not a fitted
-    surface: a least-squares plane over the same scattered rows extrapolates
-    past the edge of the data, and when it was scored it picked band 256 at
-    n=8192 and n=16384 where the measured best is 4096 and 2048 -- 41-50% of
-    the available speedup, against 98.3% for this.
-
-    Distances are in units of each feature's spread across the rows, so
-    neither axis dominates through its units: f runs 0 to 1 and B_eff runs
-    to hundreds of bins.
-
-    `log=True` interpolates the logarithm, which is what dismissal needs --
-    it moves by orders of magnitude across the grid while the features move
-    by factors.
+    A reference whose in-band power sits in a bin or two gives a correlation
+    of nearly constant magnitude -- there is no peak to find coarsely and
+    refine, so the hierarchical method does not apply. See `_BEFF_MIN`.
     """
-    if not rows:
-        return None
-    sf, sb = _spread([r[0] for r in rows]), _spread([r[1] for r in rows])
-    d2 = sorted((((tf - f) / sf) ** 2 + ((tb - be) / sb) ** 2, v)
-                for (tf, tb, v) in rows)
-    near = d2[:max(k, 1)]
-    if near[0][0] < 1e-18:
-        return near[0][1]
-    if log:
-        ws = [(d ** (-0.5 * power), math.log10(max(v, floor))) for d, v in near]
-        return 10.0 ** (sum(w * v for w, v in ws) / sum(w for w, _ in ws))
-    ws = [(d ** (-0.5 * power), v) for d, v in near]
-    return sum(w * v for w, v in ws) / sum(w for w, _ in ws)
+    bands = _gatechain.candidate_bands(n)
+    return bool(bands) and all(_band_features(power, b)[1] < _BEFF_MIN for b in bands)
 
 
-def choose_threshold(power, n, snr, fd, band, tuning=None, cascade_band=None):
-    """Compute the gate from the complete reference profile.
-
-    ``tuning`` remains accepted for source compatibility but cannot affect
-    accuracy. Returns None when the sampling budget cannot resolve ``fd``.
-    The profile must describe the templates; a heterogeneous bank needs
-    separate reference groups or an explicitly validated coarse threshold.
-    """
-    for obsolete in ("MF_ACCURACY", "MF_THRESHOLD"):
-        if os.environ.get(obsolete):
-            raise ValueError("%s is retired: use the reference gate model, or set "
-                             "an explicit band and coarse threshold" % obsolete)
-    if cascade_band is not None:
-        b0 = min(int(cascade_band), int(band))
-        b1 = max(int(cascade_band), int(band))
-        from .gatemodel import gate_for_cascade
-        return gate_for_cascade(power, n, b0, b1, snr, fd)
+def choose_threshold(power, n, snr, fd, band):
+    """The single-tier gate at `band` for this reference and budget (gatemodel.gate_for)."""
     from .gatemodel import gate_for
-    return gate_for(power, n, band, snr, fd)
+    return gate_for(power, n, int(band), snr, fd)
 
 
-def _cost_index(t):
-    """Group measured row keys once; selection should not rescan the file."""
-    if "cost_index" not in t:
-        index = {}
-        for source in ("cost", "cost_fd", "cost_fd_pairs"):
-            for key in t.get(source, {}):
-                index.setdefault(key[:4], {}).setdefault(source, []).append(key)
-        t["cost_index"] = index
-    return t["cost_index"]
-
-
-def _cost_candidates(power, n, snr, t, fd=1e-3, pairs=None):
-    """Rank configurations using measured costs near SNR, FDR and pair count.
-
-    Costs only rank candidates, never set the gate. Coverage is resolved per
-    configuration so a partially measured SNR cannot hide other bands.
-    """
-    if not np.isfinite(fd) or not 0 < fd < 1:
-        raise ValueError("fd must be finite and between zero and one")
-    if pairs is not None and (not isinstance(pairs, (int, np.integer)) or pairs < 1):
-        raise ValueError("pairs must be a positive integer")
-    candidates = []
-    for (cn, band, u, k), keys in _cost_index(t).items():
-        if cn != n or band >= n:
-            continue
-        f, be = _band_features(power, band)
-        if be < _BEFF_MIN:
-            continue
-        measured_pairs = keys.get("cost_fd_pairs", ())
-        if measured_pairs:
-            # Direct library callers may omit a plan shape; use the smaller
-            # measured batch then. Plans pass their actual pair count.
-            query_pairs = 4096 if pairs is None else pairs
-            use = min(measured_pairs, key=lambda key: (
-                abs(key[4] - snr), abs(math.log(key[5] / fd)),
-                abs(math.log(key[6] / query_pairs)), key[4], key[5], key[6]))
-            rows = t["cost_fd_pairs"][use]
-        else:
-            measured = keys.get("cost_fd", ())
-            if measured:
-                # Compare FDR on a log scale: each decade is equally distant.
-                use = min(measured, key=lambda key: (abs(key[4] - snr),
-                          abs(math.log(key[5] / fd)), key[4], key[5]))
-                rows = t["cost_fd"][use]
-            else:
-                use = min(keys["cost"], key=lambda key:
-                          (abs(key[4] - snr), key[4]))
-                rows = t["cost"][use]
-        value = _idw(rows, f, be)
-        if value is not None:
-            candidates.append(dict(band=band, U=u, K=k, f=f, beff=be,
-                                   crows=rows, cost=value))
-    return sorted(candidates, key=lambda c: (c["cost"], c["band"], c["K"]))
-
-
-class CascadeConfig(tuple):
-    """Configuration for two-tier cascade matched filtering.
-
-    Unpacks as (band, taps) for 100% backwards compatibility with legacy
-    callers expecting a 2-tuple, while exposing b0, b1, cascade_band, and
-    matching both (b1, taps) and (b0, b1, taps) on equality.
-    """
-    def __new__(cls, b0, b1, taps):
-        obj = super().__new__(cls, (int(b1), int(taps)))
-        obj.b0 = int(b0)
-        obj.b1 = int(b1)
-        obj.cascade_band = int(b0)
-        obj.band = int(b1)
-        obj.taps = int(taps)
-        obj.cascade = True
-        return obj
-
-    @property
-    def bands(self):
-        return (self.b0, self.b1)
-
-    def __eq__(self, other):
-        if isinstance(other, tuple):
-            if len(other) == 3 and (other[0], other[1], other[2]) == (self.b0, self.b1, self.taps):
-                return True
-            if len(other) == 2 and (other[0], other[1]) == (self.b1, self.taps):
-                return True
-        return super().__eq__(other)
-
-    def __hash__(self):
-        return hash((self.b0, self.b1, self.taps))
-
-    def __repr__(self):
-        return f"({self.b0}, {self.b1}, {self.taps})"
-
-
-def _config_key(cfg):
-    """Normalize configuration to (b0, b1, taps) for exact comparison, using None for single-tier b0."""
-    if cfg is None:
-        return None
-    if isinstance(cfg, CascadeConfig):
-        return (cfg.b0, cfg.b1, cfg.taps)
-    if isinstance(cfg, (tuple, list)):
-        if len(cfg) == 3:
-            return (int(cfg[0]), int(cfg[1]), int(cfg[2]))
-        if len(cfg) == 2:
-            return (None, int(cfg[0]), int(cfg[1]))
-    return cfg
-
-
-def _min_band_for(device=None, tuning=None):
-    """Determine minimum viable coarse band based on microarchitecture / SIMD width."""
-    if device is not None:
-        if getattr(device, "kind", None) == "gpu":
-            return 128
-        if isinstance(device, str) and device.lower().startswith("gpu"):
-            return 128
-    if tuning is not None:
-        paths = " ".join(tuning.get("paths", []))
-        meta = tuning.get("meta", {})
-        cpu = meta.get("cpu", "")
-        if "vulkan" in paths or "metal" in paths:
-            return 128
-        if "model85" in paths or "Xeon(R) Platinum" in cpu or "Xeon(R) Gold" in cpu:
-            return 256
-    return 128
-
-
-def candidate_configs(power, n, snr, fd, tuning=None, pairs=None, device=None, cascade=True):
-    """Generate viable candidate configurations certified by the FDR gate model.
-
-    Returns:
-        (candidates, rejected):
-            candidates: list of valid configurations [best_predicted, alternative_1, ...]
-            rejected: list of dicts [{"config": cfg, "reason": str}]
-    """
-    if tuning is None and os.environ.get("MF_COST"):
-        tuning = _load_tuning(os.environ["MF_COST"])
-    elif tuning is None and device is not None:
-        table_path, table_key = cost_table_for(device)
-        if table_key is not None and getattr(device, 'arch', None) is not None:
-            tuning = _load_tuning_paths([table_path], cache=False)
-
-    cands = _cost_candidates(power, n, snr, tuning, fd, pairs) if tuning is not None else []
-    if not cands:
-        min_floor = _min_band_for(device, tuning)
-        is_gpu = getattr(device, "kind", None) == "gpu" or (isinstance(device, str) and device.lower().startswith("gpu"))
-        default_k = 4 if is_gpu else 8
-        b_target = max(min_floor, n // 16)
-        cand_list = []
-        b = b_target
-        while b < n:
-            g = choose_threshold(power, n, snr, fd, b) if power is not None else -1.0
-            if g is not None:
-                p_trig = max(0.0, min(1.0, 1.0 - (1.0 - math.exp(-0.5 * float(g) * float(g))) ** b)) if g > 0 else 0.0
-                cost = float(b * math.log2(b) + p_trig * n * math.log2(n))
-                cand_list.append(dict(band=b, K=default_k, cost=cost))
-            b *= 2
-        if not cand_list:
-            b = min_floor
-            while b < n:
-                g = choose_threshold(power, n, snr, fd, b) if power is not None else -1.0
-                if g is not None:
-                    p_trig = max(0.0, min(1.0, 1.0 - (1.0 - math.exp(-0.5 * float(g) * float(g))) ** b)) if g > 0 else 0.0
-                    cost = float(b * math.log2(b) + p_trig * n * math.log2(n))
-                    cand_list.append(dict(band=b, K=default_k, cost=cost))
-                b *= 2
-        cands = sorted(cand_list, key=lambda c: (c["cost"], c["band"]))
-
-    single_choice = None
-    for candidate in cands:
-        band = candidate["band"]
-        g = choose_threshold(power, n, snr, fd, band) if power is not None else -1.0
-        if g is not None:
-            single_choice = (band, candidate.get("K", 8))
-            break
-    if single_choice is None:
-        return [], [{"config": None, "reason": "No single-tier band can resolve FDR budget"}]
-
-    candidates = [single_choice]
-    rejected = []
-
-    is_gpu = getattr(device, "kind", None) == "gpu" or (isinstance(device, str) and device.lower().startswith("gpu"))
-    is_cuda = getattr(device, "backend", None) == "cuda"
-    if cascade and not is_cuda and (not is_gpu or (pairs is not None and pairs >= 16384)):
-        b_single, K = single_choice
-        min_floor = _min_band_for(device, tuning)
-        for b0 in [b_single // 2, b_single // 4]:
-            if b0 < min_floor:
-                rejected.append({"config": (b0, b_single, K), "reason": f"Coarse band {b0} below SIMD/scalloping floor ({min_floor})"})
-                continue
-            thr = choose_threshold(power, n, snr, fd, b_single, cascade_band=b0) if power is not None else (-1.0, -1.0)
-            if thr is not None:
-                candidates.append(CascadeConfig(b0, b_single, K))
-            else:
-                rejected.append({"config": (b0, b_single, K), "reason": f"FDR gate model cannot resolve budget (fd={fd})"})
-
-    return candidates, rejected
-
-
-def choose_config(power, n, snr, fd, tuning=None, pairs=None, device=None, cascade=False):
-    """Cheapest measured configuration whose model gate resolves the budget."""
-    candidates, _ = candidate_configs(power, n, snr, fd, tuning=tuning, pairs=pairs, device=device, cascade=cascade)
-    if not candidates:
-        return None
-    if not cascade or len(candidates) == 1:
-        return candidates[0]
-
-    single_choice = candidates[0]
-    is_gpu = getattr(device, "kind", None) == "gpu" or (isinstance(device, str) and device.lower().startswith("gpu"))
-    if is_gpu and pairs is not None and pairs < 16384:
-        return single_choice
-
-    b_single = single_choice[0]
-    g_single = choose_threshold(power, n, snr, fd, b_single) if power is not None else None
-    p_ref_single = (1.0 - (1.0 - math.exp(-0.5 * float(g_single) * float(g_single))) ** b_single) if g_single is not None else 0.0
-
-    best_cfg = single_choice
-    min_ratio = 1.0
-
-    for cand in candidates[1:]:
-        b0 = getattr(cand, "b0", cand[0] if isinstance(cand, (tuple, list)) and len(cand) == 3 else None)
-        b1 = getattr(cand, "b1", cand[1] if isinstance(cand, (tuple, list)) and len(cand) == 3 else None)
-        if b0 is None or b1 is None:
-            continue
-        coarse_ratio = (b0 * math.log2(b0)) / (b1 * math.log2(b1))
-        fine_ratio = (n * math.log2(n)) / (b1 * math.log2(b1))
-        thr = choose_threshold(power, n, snr, fd, b1, cascade_band=b0) if power is not None else None
-        if thr is not None:
-            g0, g1 = thr
-            p0 = max(0.0, min(1.0, 1.0 - (1.0 - math.exp(-0.5 * float(g0) * float(g0))) ** b0))
-            p1 = max(0.0, min(1.0, 1.0 - (1.0 - math.exp(-0.5 * float(g1) * float(g1))) ** b1))
-            delta_ref = max(0.0, p1 - p_ref_single)
-            est_ratio = (coarse_ratio + p0) + fine_ratio * delta_ref
-            if est_ratio < min_ratio:
-                min_ratio = est_ratio
-                best_cfg = cand
-
-    return best_cfg
+def _normalize_chain(chain, n):
+    """A chain as a tuple of strictly increasing power-of-two bands in [64, n)."""
+    if isinstance(chain, (int, np.integer)):
+        chain = (int(chain),)
+    chain = tuple(int(b) for b in chain)
+    if not chain:
+        raise ValueError("a chain needs at least one band")
+    for i, b in enumerate(chain):
+        if b < 64 or b >= n or b & (b - 1):
+            raise ValueError("chain bands must be powers of two, >= 64 and < n; got %s" % (chain,))
+        if i and b <= chain[i - 1]:
+            raise ValueError("chain bands must be strictly increasing; got %s" % (chain,))
+    return chain
 
 
 _AUTOTUNE_LOCK = threading.Lock()
+#: (n, snr, fd, tiers, window, profile signature) -> (model's chain, shortlist)
 _CHAIN_CHOICE = {}
+#: (n, snr, fd, tiers, shortlist) -> measured trials shared by every plan with that shortlist
 _CHAIN_TRIALS = {}
-#: Relative cost margin inside which modelled chains are measured rather than decided by the model.
-#: It is the model's demonstrated error (tier costs vs. engine counters agreed to ~25% in the consumer).
+#: Relative cost margin inside which modelled chains are measured rather than decided by the
+#: model. It is the model's demonstrated error: tier costs agreed with the engine counters to
+#: ~25% in the consumer.
 _CHAIN_MARGIN = 0.30
 _CHAIN_SHORTLIST_MAX = 4
 _CHAIN_TRIALS_PER_CAND = 6
-_GLOBAL_AUTOTUNE_CACHE = {}
-_GLOBAL_AUTOTUNE_TRIALS = {}
 
 
 def _log_autotune(msg, *args):
@@ -1954,616 +1494,317 @@ def _log_autotune(msg, *args):
         print(f"[MF_AUTOTUNE] {text}", file=sys.stderr, flush=True)
 
 
-def _reference_hash(power):
-    """Compute a SHA-256 hex digest for a reference spectrum profile."""
-    if power is None:
-        return None
-    p = np.ascontiguousarray(_from_any(power), dtype=np.float32)
-    tot = float(np.sum(p, dtype=np.float64))
-    if tot > 0 and abs(tot - 1.0) > 1e-5:
-        p = (p / tot).astype(np.float32)
-    return hashlib.sha256(p.tobytes()).hexdigest()
+def _autotune_enabled():
+    """MF_AUTOTUNE=0 keeps the model's choice (deterministic); otherwise close calls are measured."""
+    return os.environ.get("MF_AUTOTUNE", "1").strip().lower() not in ("0", "false", "no", "off")
 
 
-def _autotune_cache_key(device, n, snr, fd, b_target=None, ref=None, cascade=True, pairs=None):
-    """Compute canonical process-level cache key for autotuned winner configurations.
-
-    Autotuning measures the hardware execution throughput of candidate configurations
-    for a given device, FFT block size N, target band b_target, SNR threshold, and FDR budget.
-    Keying on b_target ensures that templates with different bandwidth requirements
-    do not conflate or overwrite each other's tuned plans. Keying on pairs bounds
-    cross-talk between tiny validation/test fixtures and large batch workloads.
-    """
-    dev_kind = getattr(device, "kind", str(device)) if device is not None else "cpu"
-    if isinstance(b_target, (int, np.integer)):
-        b_val = int(b_target)
-    elif isinstance(ref, (int, np.integer)):
-        b_val = int(ref)
-    else:
-        b_val = None
-    if isinstance(pairs, (int, np.integer)):
-        p_val = "batch" if pairs >= 64 else int(pairs)
-    else:
-        p_val = None
-    return (str(dev_kind), int(n), b_val, float(snr), float(fd), bool(cascade), p_val)
-
-
-def get_autotune_cache():
-    """Return a shallow copy of the process-level autotune winner cache."""
+def get_autotune_state():
+    """Snapshot of the process's chain choices and measured trials."""
     with _AUTOTUNE_LOCK:
-        return dict(_GLOBAL_AUTOTUNE_CACHE)
+        return {"choices": dict(_CHAIN_CHOICE),
+                "trials": {k: {"winner": v["winner"], "samples": {c: list(s) for c, s in v["samples"].items()}}
+                           for k, v in _CHAIN_TRIALS.items()}}
 
 
-def _clear_autotune_cache():
-    """Clear all entries in the process-level autotune cache and in-flight trials."""
+def clear_autotune_cache():
+    """Forget every chain choice and trial in this process."""
     with _AUTOTUNE_LOCK:
-        _GLOBAL_AUTOTUNE_CACHE.clear()
-        _GLOBAL_AUTOTUNE_TRIALS.clear()
         _CHAIN_CHOICE.clear()
         _CHAIN_TRIALS.clear()
 
 
-def clear_autotune_cache():
-    """Public alias for _clear_autotune_cache()."""
-    _clear_autotune_cache()
-
-
-def get_autotune_trials(cache_key=None):
-    """Return a snapshot of recorded in-flight autotune trial timings and metadata.
-
-    Parameters:
-        cache_key: Optional cache key tuple to retrieve trials for a specific target.
-                   If None, returns a copy of the entire trial dictionary across all keys.
-    """
-    with _AUTOTUNE_LOCK:
-        if cache_key is not None:
-            return dict(_GLOBAL_AUTOTUNE_TRIALS.get(cache_key, {}))
-        return {k: dict(v) for k, v in _GLOBAL_AUTOTUNE_TRIALS.items()}
-
-
 class HierarchicalFilter(MatchedFilter):
-    """Matched filter that correlates the low band first and refines on demand.
+    """Matched filter that gates on cheap coarse correlations and refines on demand.
 
-    Most of a template's SNR sits in the low part of its band.  This correlates
-    only that part, on a coarse lag grid, and pays for the full correlation only
-    where the coarse result could still become a detection.
+    Most of a template's SNR sits in the low part of its band. A gate chain
+    correlates only low bands -- tier 0 at band b1 on every pair, tier i at
+    band b_i on the survivors of tier i-1 -- and pays for the full correlation
+    only for pairs that pass every tier.
 
         >>> hf = matchedfilter.HierarchicalFilter(1 << 12, ndata=16, ntemplates=16,
-        ...                                snr=5.5, fd=1e-2)
+        ...                                       snr=5.5, fd=1e-2)
+        >>> hf.set_reference(profile)          # expected output power per bin
         >>> hf.set_data(data_spectra)
         >>> hf.set_templates(template_spectra)
         >>> peaks = hf.run(binsize=1024, threshold=t)
-        >>> hf.refine_rate        # fraction of pairs that needed the full filter
+        >>> hf.config, hf.refine_rate          # the chain in use, fraction refined
 
-    Every reported peak is refined by the full filter. Compare values across
-    devices within float32 roundoff, not bitwise. The coarse gate can omit
+    Every reported peak is refined by the full filter. The gate can omit
     peaks; ``fd`` is its modelled false-dismissal target at strength ``snr``,
-    not a distribution-independent bound. Use :class:`MatchedFilter` to
-    avoid coarse-gate omissions.
+    shared between the chain's tiers. Use :class:`MatchedFilter` to avoid
+    gate omissions.
 
-    ``snr`` is the |rho| of the weakest signal that must be kept; ``fd`` is the
-    tolerated false-dismissal probability for such a signal. Configuration
-    comes from measured cost files; the coarse threshold is computed from
-    the complete reference profile. Unresolvable budgets raise. Alternatively, explicitly
-    set ``band`` and call ``set_coarse_threshold(value)``; this mode needs no
-    cost file or reference. ``taps`` remains configuration metadata for
-    existing tables; execution uses the raw coarse maximum without interpolation.
+    The chain is chosen automatically from the reference: every chain of up to
+    ``max_tiers`` bands is priced by a model (gate thresholds from the profile,
+    noise pass rates simulated from it, tier costs calibrated on this machine),
+    and the ones the model cannot separate are measured on the real workload
+    (``MF_AUTOTUNE=0`` keeps the model's choice). Pin a chain with
+    ``chain=(b1, b2, ...)``; pass explicit thresholds with
+    :meth:`set_coarse_threshold` to skip the model entirely.
     """
 
-    def __init__(self, n, ndata=1, ntemplates=1, snr=5.5, fd=1e-2,
-                 band=None, taps=None, device=None, *, valid=None, cascade_band=None,
-                 cascade="auto", max_tiers=3):
+    #: Tiers each device's engine executes.
+    _MAX_TIERS = {"cpu": 8, "gpu": 2}
+
+    def __init__(self, n, ndata=1, ntemplates=1, snr=5.5, fd=1e-2, chain=None,
+                 device=None, *, valid=None, max_tiers=3, search_window=None):
         from .device import parse as _parse_device
-        self.max_tiers = int(max_tiers)
-        self._chain = None
         self.device = _parse_device(device)
         self.n = int(n)
         self.valid = _valid_series_window(self.n, valid)
         self.ndata = int(ndata)
         self.ntemplates = int(ntemplates)
-        if isinstance(band, (tuple, list)):
-            if len(band) == 3:
-                cascade_band = band[0]
-                band_val = band[1]
-                taps = band[2]
-            elif len(band) == 2:
-                if band[0] < band[1] and band[0] >= 64:
-                    cascade_band = band[0]
-                    band_val = band[1]
-                else:
-                    band_val = band[0]
-                    taps = band[1]
-            else:
-                raise ValueError("tuple band must have 2 or 3 elements (b0, b1[, taps]) or (band, taps)")
-            band = band_val
-        self.cascade_band = int(cascade_band) if cascade_band is not None else None
-        if self.cascade_band is not None:
-            if self.cascade_band < 64 or self.cascade_band >= self.n or self.cascade_band & (self.cascade_band - 1):
-                raise ValueError("cascade_band must be a power of two, >= 64 and < n")
-        if cascade is False:
-            self.cascade = False
-        elif cascade is True or self.cascade_band is not None:
-            self.cascade = True
-        else:
-            self.cascade = True if band is None else False
-        env_casc = os.environ.get("MF_CASCADE")
-        if env_casc is not None:
-            self.cascade = bool(env_casc.strip().lower() not in ("0", "false", "no", "off"))
-        self._initial_cascade = bool(self.cascade)
         if self.ndata < 1 or self.ntemplates < 1:
             raise ValueError("ndata and ntemplates must be >= 1")
         if self.device.kind == 'cpu' and self.n > self._cpu_max_n:
             raise ValueError("CPU transform size %d exceeds this filter's limit of %d"
                              % (self.n, self._cpu_max_n))
-        if band is not None:
-            band = int(band)
-            if band < 64 or band >= self.n or band & (band - 1):
-                raise ValueError("band must be a power of two, >= 64 and < n")
-        if taps is not None:
-            taps = int(taps)
-            if taps < 2 or taps > 64 or taps % 2:
-                raise ValueError("taps must be even and between 2 and 64")
         self.snr = float(snr)
         self.fd = float(fd)
+        self.max_tiers = int(max_tiers)
+        if self.max_tiers < 1:
+            raise ValueError("max_tiers must be >= 1")
+        #: Lags each block's peak search covers, (start, end) in samples; prices noise passes.
+        self.search_window = None if search_window is None else (int(search_window[0]), int(search_window[1]))
         self._init_state()
         self._pending_ref = None
-        self._cal_thr = None
+        self._cal_thr = None           # explicit per-tier thresholds, bypassing the model
         self._thr_applied = False
-        self._pinned = None
         self._fs_snr = None
-        self._tune_candidates = []
-        self._active_cfg = None
-        self._in_hier_series_call = False
+        self._hermitian = False
+        self._mf = None
+        self._chain_trial = None
+        self._pinned = None if chain is None else _normalize_chain(chain, self.n)
+        if self._pinned is not None and len(self._pinned) > self._MAX_TIERS[self.device.kind]:
+            raise ValueError("this device executes chains of at most %d tiers"
+                             % self._MAX_TIERS[self.device.kind])
+        self._chain = self._pinned
+        self.autotune_info = {"status": "pinned" if self._pinned else "uninitialized",
+                              "winner": self._pinned, "shortlist": ()}
         if self.device.kind == "gpu":
-            if band is not None:
-                if self.cascade_band is not None:
-                    self._pinned = CascadeConfig(int(self.cascade_band), int(band), int(taps or 8))
-                else:
-                    self._pinned = (int(band), int(taps or 8))
-                self._active_cfg = self._pinned
-            self.autotune_info = {
-                "status": "pinned" if self._pinned is not None else "uninitialized",
-                "winner": self._pinned,
-                "trials": [],
-                "untried": [],
-                "rejected": []
-            }
             self._start_gpu()
-            self._defer = True
-            self._mf = None
             return
-        if band is None:
-            self._mf = None
-            self._defer = True
-            self.autotune_info = {
-                "status": "uninitialized",
-                "winner": None,
-                "trials": [],
-                "untried": [],
-                "rejected": []
-            }
-        else:
-            self._defer = False
-            if self.cascade_band is not None:
-                self._pinned = CascadeConfig(int(self.cascade_band), int(band), int(taps or 8))
-                self._mf = self._new_cpu_plan(int(band), int(taps or 8), cascade_band=self.cascade_band)
-            else:
-                self._pinned = (int(band), int(taps or 8))
-                self._mf = self._new_cpu_plan(*self._pinned)
-            self._active_cfg = self._pinned
-            self.autotune_info = {
-                "status": "pinned",
-                "winner": self._pinned,
-                "trials": [],
-                "untried": [],
-                "rejected": []
-            }
-            if self._cal_thr is not None:
-                if isinstance(self._cal_thr, (tuple, list)):
-                    self._mf.set_threshold(*self._cal_thr)
-                else:
-                    self._mf.set_threshold(self._cal_thr)
+        if self._pinned is not None:
+            self._mf = self._new_cpu_plan(self._pinned)
 
-    def _autotune_cache_key(self, b_target=None):
-        if getattr(self, '_pending_ref', None) is None:
-            return None
-        cascade_flag = getattr(self, '_initial_cascade', self.cascade)
-        bt = b_target if b_target is not None else getattr(self, '_target_band', None)
-        pairs = self.ndata * self.ntemplates if hasattr(self, 'ndata') and hasattr(self, 'ntemplates') else None
-        return _autotune_cache_key(self.device, self.n, self.snr, self.fd,
-                                  b_target=bt, cascade=cascade_flag, pairs=pairs)
-
-    def _new_cpu_plan(self, band, taps, cascade_band=None):
-        self._execution_policy = self._series_policy('hierarchical_series', band, self.ntemplates)
-        cband = cascade_band if cascade_band is not None else getattr(self, 'cascade_band', None)
-        default_grp = 32 if self.n <= 2048 else 16
-        grp = self._execution_policy.get('series_group', default_grp)
-        k_bins = getattr(self, 'k', self.n) or self.n
-        if cband is not None and cband > 0:
-            plan = _core.HMF(self.n, self.ndata, self.ntemplates, self.snr, self.fd,
-                             int(band), 1, int(taps), grp, int(cband), int(k_bins))
-        else:
-            plan = _core.HMF(self.n, self.ndata, self.ntemplates, self.snr, self.fd,
-                             int(band), 1, int(taps), grp, 0, int(k_bins))
-        if getattr(self, '_hermitian', False) and hasattr(plan, 'set_hermitian'):
+    # ---- plan --------------------------------------------------------------
+    def _new_cpu_plan(self, chain):
+        self._execution_policy = self._series_policy('hierarchical_series', chain[-1], self.ntemplates)
+        grp = self._execution_policy.get('series_group', 32 if self.n <= 2048 else 16)
+        plan = _core.HMF(self.n, self.ndata, self.ntemplates, list(chain), grp,
+                         int(getattr(self, 'k', self.n) or self.n))
+        if self._hermitian:
             plan.set_hermitian(True)
         return plan
 
-    def set_hermitian(self, hermitian: bool):
-        self._hermitian = bool(hermitian)
-        if hasattr(self, '_mf') and self._mf is not None and hasattr(self._mf, 'set_hermitian'):
-            self._mf.set_hermitian(self._hermitian)
-
-    @property
-    def hermitian(self):
-        return getattr(self, '_hermitian', False)
-
-    @hermitian.setter
-    def hermitian(self, value):
-        self.set_hermitian(value)
-
-    def _ensure(self):
-        """Build the plan, choosing its configuration if that was deferred.
-
-        The band should be chosen from the reference, and every caller sets
-        the reference after construction -- so the plan is built on first use
-        instead of in __init__.  That lets the choice see the reference with
-        no rebuild and no re-ingest of templates.
-        """
-        if self._mf is not None:
-            if not self._thr_applied:
-                cfg_b = self._mf.config()[1] if len(self._mf.config()) == 4 else self._mf.config()[0]
-                tv = self._coarse_value(cfg_b, required=False)
-                if tv is not None:
-                    if isinstance(tv, (tuple, list)):
-                        self._mf.set_threshold(*tv)
-                    else:
-                        self._mf.set_threshold(tv)
-                    self._thr_applied = True
-            return self._mf
-        cfg = None
-        if self._pinned is not None:
-            # A pinned configuration is an instruction, not a hint.
-            #
-            # On the CPU path __init__ builds the plan immediately and this
-            # returns above. On the GPU path it records the pin and leaves
-            # _mf None -- so without this, the first _ensure() threw the pin
-            # away and asked the table, and then REFUSED for any reference
-            # the table does not cover, even though the caller had already
-            # said what to run. Pinning exists precisely to run something
-            # the tables do not describe, which is what the tuner does on
-            # every cell.
-            cfg = self._pinned
-        elif (self._pending_ref is not None and self.device.kind == "cpu"
-              and _gatechain.cost_model(self.n) is not None):
-            cfg = self._choose_chain()
-        elif self._pending_ref is not None:
-            if self.autotune_info.get("status") == "locked":
-                cfg = self.autotune_info["winner"]
-            elif self.autotune_info.get("status") == "tuning" and getattr(self, '_active_cfg', None) is not None:
-                cfg = self._active_cfg
-            else:
-                table_path, self._cost_key = cost_table_for(self.device)
-                tuning = _load_tuning_paths([table_path], cache=False) if (self._cost_key is not None and getattr(self.device, 'arch', None) is not None) else None
-                if tuning is not None:
-                    cov_ns = {k[0] for rows in (tuning["cost"], tuning.get("cost_fd", {}), tuning.get("cost_fd_pairs", {})) for k in rows}
-                    allowed_ns = cov_ns | {512}
-                    if allowed_ns and self.n not in allowed_ns:
-                        raise ValueError(_uncovered_message(self.n, self.snr, self.fd))
-                candidates, rejected = candidate_configs(self._pending_ref, self.n, self.snr, self.fd,
-                                                         tuning=tuning,
-                                                         pairs=self.ndata * self.ntemplates,
-                                                         device=self.device,
-                                                         cascade=self.cascade)
-                best_model = choose_config(self._pending_ref, self.n, self.snr, self.fd,
-                                           tuning=tuning,
-                                           pairs=self.ndata * self.ntemplates,
-                                           device=self.device,
-                                           cascade=self.cascade)
-                if best_model is not None and any(_config_key(c) == _config_key(best_model) for c in candidates):
-                    candidates = [best_model] + [c for c in candidates if _config_key(c) != _config_key(best_model)]
-                if os.environ.get("MF_AUTOTUNE", "1").strip().lower() in ("0", "false", "no", "off"):
-                    candidates = candidates[:1]
-                self.autotune_info["rejected"] = rejected
-                if not candidates:
-                    cfg = None
-                else:
-                    cand0 = candidates[0]
-                    if isinstance(cand0, CascadeConfig):
-                        b_target = cand0.b1
-                    elif isinstance(cand0, (tuple, list)) and len(cand0) == 3:
-                        b_target = cand0[1]
-                    else:
-                        b_target = cand0[0]
-                    self._target_band = b_target
-                    cache_key = self._autotune_cache_key(b_target=b_target)
-                    cached_winner = None
-                    if cache_key is not None:
-                        with _AUTOTUNE_LOCK:
-                            cached_winner = _GLOBAL_AUTOTUNE_CACHE.get(cache_key)
-
-                    if cached_winner is not None and any(_config_key(c) == _config_key(cached_winner) for c in candidates):
-                        _log_autotune("REUSING_GLOBAL_WINNER cache_key=%s winner=%s", cache_key, cached_winner)
-                        self.autotune_info["status"] = "locked"
-                        self.autotune_info["winner"] = cached_winner
-                        self.autotune_info["untried"] = []
-                        self._tune_candidates = [cached_winner]
-                        cfg = cached_winner
-                    elif len(candidates) == 1:
-                        winner = candidates[0]
-                        _log_autotune("SINGLE_CANDIDATE_LOCK cache_key=%s winner=%s", cache_key, winner)
-                        self.autotune_info["status"] = "locked"
-                        self.autotune_info["winner"] = winner
-                        self.autotune_info["untried"] = []
-                        self._tune_candidates = [winner]
-                        if cache_key is not None:
-                            with _AUTOTUNE_LOCK:
-                                _GLOBAL_AUTOTUNE_CACHE[cache_key] = winner
-                        cfg = winner
-                    else:
-                        ordered = list(candidates)
-                        self._tune_candidates = ordered
-
-                        if cache_key is not None:
-                            with _AUTOTUNE_LOCK:
-                                if cache_key in _GLOBAL_AUTOTUNE_CACHE and any(_config_key(c) == _config_key(_GLOBAL_AUTOTUNE_CACHE[cache_key]) for c in candidates):
-                                    winner = _GLOBAL_AUTOTUNE_CACHE[cache_key]
-                                    _log_autotune("LOCKING_FROM_SHARED_CACHE cache_key=%s winner=%s", cache_key, winner)
-                                    self.autotune_info["status"] = "locked"
-                                    self.autotune_info["winner"] = winner
-                                    self.autotune_info["untried"] = []
-                                    cfg = winner
-                                else:
-                                    shared = _GLOBAL_AUTOTUNE_TRIALS.setdefault(cache_key, {
-                                        "trials": [],
-                                        "candidates": ordered,
-                                        "assigned": set(),
-                                    })
-                                    tested_keys = {_config_key(t["config"]) for t in shared["trials"]}
-                                    assigned_keys = set(shared.get("assigned", set()))
-                                    untested_unassigned = [c for c in shared["candidates"]
-                                                           if _config_key(c) not in tested_keys and _config_key(c) not in assigned_keys]
-                                    if untested_unassigned:
-                                        next_cfg = untested_unassigned[0]
-                                    else:
-                                        untested = [c for c in shared["candidates"] if _config_key(c) not in tested_keys]
-                                        next_cfg = untested[0] if untested else ordered[0]
-
-                                    shared.setdefault("assigned", set()).add(_config_key(next_cfg))
-                                    self._assigned_candidate_key = _config_key(next_cfg)
-                                    self.autotune_info["status"] = "tuning"
-                                    self.autotune_info["winner"] = None
-                                    self.autotune_info["untried"] = [c for c in ordered if _config_key(c) != _config_key(next_cfg)]
-                                    _log_autotune("COLLAB_ASSIGN cache_key=%s next_cfg=%s tested=%s assigned=%s",
-                                                  cache_key, next_cfg, tested_keys, assigned_keys)
-                                    cfg = next_cfg
-                        else:
-                            self.autotune_info["untried"] = list(ordered[1:])
-                            self.autotune_info["status"] = "tuning"
-                            self.autotune_info["winner"] = None
-                            cfg = ordered[0]
-        if cfg is None:
-            # Autotuning is a promise, so it refuses rather than guesses.
-            # There used to be a compiled design table to fall back on; it was
-            # a model, it did not promise the budget -- 3.7% missed against
-            # 0.1% on the captures -- and having it made the library quietly
-            # answer a question it had no measurement for. A caller who wants
-            # a configuration the tables do not cover states it directly.
-            if self._pending_ref is not None:
-                try:
-                    table_path, t_key = cost_table_for(self.device)
-                    t_cov = _load_tuning_paths([table_path], cache=False) if t_key is not None else None
-                    bad_ref = _uncovered_reference(self._pending_ref, self.n, t_cov)
-                except Exception:
-                    bad_ref = False
-                if bad_ref:
-                    raise ValueError(
-                        "the reference has no localised correlation peak at "
-                        "n=%d: every candidate band has an effective "
-                        "bandwidth below %.0f bins, which means its in-band "
-                        "power sits in a bin or two and the correlation "
-                        "magnitude is nearly constant across every lag. "
-                        "There is nothing for a coarse pass to localise, so "
-                        "the hierarchical mode does not apply -- use "
-                        "MatchedFilter. A reference that looks like this is "
-                        "usually |h|^2 without the 1/S(f), or a spectrum "
-                        "with no low-frequency cutoff."
-                        % (self.n, _BEFF_MIN))
-            raise ValueError(_uncovered_message(self.n, self.snr, self.fd))
-        self._active_cfg = cfg
-        if isinstance(cfg, CascadeConfig) or (isinstance(cfg, tuple) and len(cfg) == 3):
-            if isinstance(cfg, CascadeConfig):
-                b0, b1, k = cfg.b0, cfg.b1, cfg.taps
-            else:
-                b0, b1, k = cfg
-            self.cascade_band = b0
-            self._mf = self._new_cpu_plan(b1, k, cascade_band=b0)
-            tv = self._coarse_value(b1, required=False)
-        else:
-            b, k = cfg
-            self._mf = self._new_cpu_plan(b, k)
-            tv = self._coarse_value(b, required=False)
-        if tv is not None:
-            if isinstance(tv, (tuple, list)):
-                self._mf.set_threshold(*tv)
-            else:
-                self._mf.set_threshold(tv)
-            self._thr_applied = True
+    def _restore_into(self, plan):
+        """Replay reference, templates and data into a freshly built plan."""
         if self._pending_ref is not None:
-            self._mf.set_reference(self._pending_ref)
-        if hasattr(self, '_held_templates') and self._held_templates is not None:
-            if isinstance(self._held_templates, np.ndarray):
-                if hasattr(self._mf, 'set_template_batch'):
-                    self._mf.set_template_batch(0, self._held_templates)
-                else:
-                    for i in range(self.ntemplates):
-                        self._mf.set_template(i, self._held_templates[i])
-            elif isinstance(self._held_templates, list):
-                for i, t in enumerate(self._held_templates):
-                    if t is not None:
-                        self._mf.set_template(i, t)
-        if hasattr(self, '_held') and self._held:
+            plan.set_reference(self._pending_ref)
+        t = self._held_templates
+        if isinstance(t, np.ndarray):
+            plan.set_template_batch(0, t)
+        elif isinstance(t, list):
+            for i, x in enumerate(t):
+                if x is not None:
+                    plan.set_template(i, x)
+        if self._held:
             if -1 in self._held:
-                a = self._held[-1]
-                if hasattr(self._mf, 'set_data_batch'):
-                    self._mf.set_data_batch(0, a)
-                else:
-                    for i in range(self.ndata):
-                        self._mf.set_data(i, a[i])
+                plan.set_data_batch(0, self._held[-1])
             else:
                 for i, d in self._held.items():
                     if d is not None and i >= 0:
-                        self._mf.set_data(i, d)
+                        plan.set_data(i, d)
+
+    def _ensure(self):
+        """The live plan, built on first use once the chain is known."""
+        if self._mf is not None:
+            return self._mf
+        if self._chain is None:
+            if self._pending_ref is None:
+                raise ValueError("set a reference first (set_reference), or pin a chain")
+            self._chain = self._choose_chain()
+        self._mf = self._new_cpu_plan(self._chain)
+        self._thr_applied = False
+        self._restore_into(self._mf)
         return self._mf
 
-    def set_templates(self, spectra, index=None):
-        if self._gpu is not None or index is not None:
-            return super().set_templates(spectra, index=index)
-        a = np.ascontiguousarray(_from_any(spectra), dtype=np.complex64)
-        if a.ndim != 2:
-            raise ValueError(f"expected 2D array of spectra, got {a.shape}")
-        if a.shape[0] != self.ntemplates:
-            raise ValueError(f"expected {self.ntemplates} templates, got {a.shape[0]}")
-        if a.shape[1] == self.n:
-            self._bandlimited = False
-            self.k = self.n
-        elif a.shape[1] == self.n // 2:
-            self._bandlimited = True
-            self.k = self.n // 2
-        else:
-            raise ValueError(f"expected shape ({self.ntemplates}, {self.n}) or ({self.ntemplates}, {self.n // 2}), got {a.shape}")
-
-        if self._mf is not None and getattr(self._mf, 'k', self.n) != self.k:
-            cfg = getattr(self, '_active_cfg', self._pinned)
-            if cfg is not None:
-                if isinstance(cfg, CascadeConfig) or (isinstance(cfg, (tuple, list)) and len(cfg) == 3):
-                    b0 = cfg.b0 if isinstance(cfg, CascadeConfig) else cfg[0]
-                    b1 = cfg.b1 if isinstance(cfg, CascadeConfig) else cfg[1]
-                    taps = cfg.taps if isinstance(cfg, CascadeConfig) else cfg[2]
-                    self._mf = self._new_cpu_plan(int(b1), int(taps), cascade_band=int(b0))
-                    tv = self._coarse_value(int(b1), required=False)
-                else:
-                    b, taps = cfg[0], cfg[1]
-                    self._mf = self._new_cpu_plan(int(b), int(taps))
-                    tv = self._coarse_value(int(b), required=False)
-                if tv is not None:
-                    if isinstance(tv, (tuple, list)):
-                        self._mf.set_threshold(*tv)
-                    else:
-                        self._mf.set_threshold(tv)
-                    self._thr_applied = True
-                if self._pending_ref is not None:
-                    self._mf.set_reference(self._pending_ref)
-                if hasattr(self, '_held') and self._held:
-                    if -1 in self._held:
-                        a_data = self._held[-1]
-                        if hasattr(self._mf, 'set_data_batch'):
-                            self._mf.set_data_batch(0, a_data)
-                        else:
-                            for i in range(self.ndata):
-                                self._mf.set_data(i, a_data[i])
-                    else:
-                        for i, d in self._held.items():
-                            if d is not None and i >= 0:
-                                self._mf.set_data(i, d)
-            else:
-                self._mf = None
-                self._thr_applied = False
-
-        self._held_templates = a.copy()
+    def _execution_plan(self):
         plan = self._ensure()
-        if getattr(self, '_hermitian', False) and hasattr(plan, 'set_hermitian'):
-            plan.set_hermitian(True)
-        if hasattr(plan, 'set_template_batch'):
-            plan.set_template_batch(0, a)
-        else:
-            set_tmpl_fn = plan.set_template
-            for i in range(self.ntemplates):
-                set_tmpl_fn(i, a[i])
-        self._mark_ready("template", None)
+        if not self._thr_applied:
+            plan.set_thresholds(list(self._thresholds(required=True)))
+            self._thr_applied = True
+        return plan
 
-    # ---- GPU -----------------------------------------------------------
-    #
-    # The port is tractable because of one fact src/hmf.c states outright:
-    # the coarse pass IS a matched filter on an m-point plan. It is not a
-    # bespoke decimation -- it is the ordinary flat filter at length `band`,
-    # on templates truncated to that band and scaled by 1/sqrt(f). So the
-    # coarse pass needs no kernel of its own; it is the kernel that already
-    # ships, at a shorter length.
-    #
-    # A supplied reference gives a common power fraction; pinned plans may
-    # instead normalize each coarse template by its own power fraction.
-    def _start_gpu(self):
-        # Same one-contract-two-backends shape as the flat filter, plus the
-        # calibration cache. Written as one path for the reason given there.
-        if self.n not in _GPU_SIZES:
+    def _switch_chain(self, chain):
+        """Run a different chain from now on, keeping loaded data and templates."""
+        self._chain = tuple(chain)
+        self._thr_applied = False
+        if self._gpu is not None:
+            self._gcal = None
+            self._tdirty = True
+            return
+        self._mf = self._new_cpu_plan(self._chain)
+        self._restore_into(self._mf)
+
+    # ---- thresholds ----------------------------------------------------------
+    def _thresholds(self, *, required=True):
+        """One threshold per tier: explicit, or from the reference model."""
+        if self._cal_thr is not None:
+            if len(self._cal_thr) != len(self._chain):
+                raise ValueError("explicit thresholds %s do not match chain %s" % (self._cal_thr, self._chain))
+            return self._cal_thr
+        if self._pending_ref is not None:
+            pl = _gatechain.chain_thresholds(self._pending_ref, self.n, self._fs_snr or self.snr, self.fd,
+                                             self._chain, cost=self._cost_model(),
+                                             window=self.search_window)
+            if pl is not None:
+                th = tuple(float(x) for x in pl["thresholds"])
+                for v in th:
+                    if not np.isfinite(v) or v < 0 or v > float(np.finfo(np.float32).max):
+                        raise ValueError("calibrated coarse threshold must be finite, nonnegative float32; got %r" % (th,))
+                return th
+        if required:
             raise ValueError(
-                "device='gpu' supports n in %s; got %d"
-                % (sorted(_GPU_SIZES), self.n))
-        self._gpu = self._backend().Context(self.device.index)
-        self._gdata = None  # series execution uses its own workspace
-        self._gtmpl = None
+                "no calibrated coarse threshold for chain %s at n=%d: provide a reference and a "
+                "resolvable budget, or set the thresholds explicitly" % (self._chain, self.n))
+        return None
+
+    def set_coarse_threshold(self, value):
+        """Set the gate thresholds directly, bypassing the model.
+
+        ``value`` is one number per tier of the pinned chain (a bare number
+        for a one-tier chain). Each tier's coarse maximum is compared against
+        its threshold; a pair that falls below any is dismissed. The guarantee
+        becomes whatever these thresholds imply. Pass None to return to the model.
+        """
+        if value is None:
+            self._cal_thr = None
+            self._thr_applied = False
+            return
+        vals = (value,) if np.isscalar(value) else tuple(value)
+        vals = tuple(float(v) for v in vals)
+        for v in vals:
+            if not np.isfinite(v) or v < 0 or v > float(np.finfo(np.float32).max):
+                raise ValueError("coarse thresholds must be finite nonnegative float32, or None")
+        if self._pinned is None:
+            raise ValueError("explicit thresholds require an explicit band (a pinned chain)")
+        if len(vals) != len(self._pinned):
+            raise ValueError("chain %s needs %d thresholds" % (self._pinned, len(self._pinned)))
+        self._cal_thr = vals
+        self._thr_applied = False
         self._gcal = None
+
+    def set_first_stage(self, snr):
+        """Calibrate the gate against `snr` rather than the constructor's.
+
+        Final triggers are still cut at the threshold passed to :meth:`run`;
+        this sets only where the gate decides a full reconstruction is needed.
+        Pass ``None`` or a non-positive value to use the constructor's SNR.
+        """
+        self._fs_snr = float(snr) if snr is not None and float(snr) > 0 else None
+        self._thr_applied = False
+        self._gcal = None
+
+    def set_reference(self, power):
+        """Set the reference SNR distribution: expected power per bin of the filter output.
+
+        Only its shape matters. The profile must describe every template in
+        this plan. Pass ``None`` to use each template's own band fraction
+        (explicit thresholds only). Changing it recalibrates the thresholds of
+        the chain in use.
+        """
+        if power is not None:
+            p = np.ascontiguousarray(_from_any(power), dtype=np.float32)
+            if p.shape != (self.n,) and p.shape != (getattr(self, 'k', self.n),):
+                raise ValueError("reference must be a one-dimensional array of length %d" % self.n)
+            if not np.isfinite(p).all() or np.any(p < 0) or not np.any(p > 0):
+                raise ValueError("reference must be finite, nonnegative, with positive total power")
+            if self._pending_ref is not None and np.array_equal(p, self._pending_ref):
+                return
+        self._thr_applied = False
+        if self._gpu is not None:
+            self._gcal = None
+            self._tdirty = True
+        if power is None:
+            self._pending_ref = None
+            if self._mf is not None:
+                self._mf.set_reference(None)
+            return
+        self._pending_ref = p.copy()
+        if self._mf is not None:
+            self._mf.set_reference(p)
+
+    # ---- chain choice ----------------------------------------------------------
+    def _cost_model(self):
+        return _gatechain.calibrate_costs(self.n, self.ntemplates)
 
     def _choose_chain(self):
         """Pick a gate chain: the model prices every chain, measurement settles the close ones.
 
-        The model (gatechain) need not be exact. It prunes: chains whose modelled cost is
-        more than the model's error margin above the best cannot win and are never run.
-        If more than one chain survives, plans sharing a key run the shortlist round-robin
-        on real data, and the one with the lowest measured time per pair is kept for
-        every plan with that key. MF_AUTOTUNE=0 keeps the model's choice (deterministic).
+        The model need not be exact. It prunes: chains whose modelled cost is
+        more than the model's error margin above the best cannot win and are
+        never run. If more than one chain survives, plans sharing a shortlist
+        run it round-robin on real calls, and the chain with the lowest
+        measured time per pair is kept for all of them. MF_AUTOTUNE=0 keeps
+        the model's choice.
         """
+        if _uncovered_reference(self._pending_ref, self.n):
+            raise ValueError(
+                "the reference has no localised correlation peak at n=%d: every candidate "
+                "band has an effective bandwidth below %.0f bins, so there is nothing for a "
+                "coarse pass to localise -- use MatchedFilter. A reference like this is "
+                "usually |h|^2 without the 1/S(f), or a spectrum with no low-frequency cutoff."
+                % (self.n, _BEFF_MIN))
         snr = self._fs_snr or self.snr
-        tiers = min(self.max_tiers, self._ENGINE_MAX_TIERS)
-        window = getattr(self, "search_window", None)
-        prof = _gatechain._gm._profile_sig(np.asarray(self._pending_ref, np.float64) / float(np.sum(self._pending_ref)))
-        key = (self.n, float(snr), float(self.fd), tiers, window, prof)
-        hit = _CHAIN_CHOICE.get(key)
+        tiers = min(self.max_tiers, self._MAX_TIERS[self.device.kind])
+        ref = np.asarray(self._pending_ref, np.float64)
+        prof = _gatechain._gm._profile_sig(ref / ref.sum())
+        key = (self.n, float(snr), float(self.fd), tiers, self.search_window, prof)
+        with _AUTOTUNE_LOCK:
+            hit = _CHAIN_CHOICE.get(key)
         if hit is None:
             best, plans = _gatechain.choose_chain(self._pending_ref, self.n, snr, self.fd,
-                                                  cost=_gatechain.cost_model(self.n),
-                                                  max_tiers=tiers, window=window)
+                                                  cost=self._cost_model(), max_tiers=tiers,
+                                                  window=self.search_window)
             if best is None:
                 raise ValueError(_uncovered_message(self.n, self.snr, self.fd))
             margin = float(os.environ.get("MF_CHAIN_MARGIN", _CHAIN_MARGIN))
             shortlist = tuple(q["chain"] for q in plans if q["cost"] <= best["cost"] * (1.0 + margin))
-            shortlist = shortlist[:_CHAIN_SHORTLIST_MAX]
-            hit = _CHAIN_CHOICE[key] = (tuple(best["chain"]), shortlist)
-            _log_autotune("CHAIN n=%d model=%s shortlist=%s ranking=%s", self.n, best["chain"], shortlist,
+            hit = (tuple(best["chain"]), shortlist[:_CHAIN_SHORTLIST_MAX])
+            with _AUTOTUNE_LOCK:
+                _CHAIN_CHOICE[key] = hit
+            _log_autotune("CHAIN n=%d model=%s shortlist=%s ranking=%s", self.n, hit[0], hit[1],
                           [(q["chain"], round(q["cost"], 1)) for q in plans[:6]])
         model_best, shortlist = hit
-        if os.environ.get("MF_AUTOTUNE", "1").strip().lower() in ("0", "false", "no", "off"):
-            shortlist = shortlist[:1]          # deterministic: the model's choice, no measured trials
+        if not _autotune_enabled() or self._gpu is not None:
+            shortlist = shortlist[:1]
         chain = model_best
         self._chain_trial = None
         if len(shortlist) > 1:
-            # Trials are shared by every plan with the same shortlist; search windows differing by a few
-            # samples (template lengths within a block size) do not change which chain is cheaper.
+            # Plans with the same shortlist share one trial: search windows that differ by a
+            # few samples do not change which chain is cheaper.
             tkey = (self.n, float(snr), float(self.fd), tiers, shortlist)
             with _AUTOTUNE_LOCK:
-                tr = _CHAIN_TRIALS.setdefault(tkey, {"cands": shortlist, "samples": {c: [] for c in shortlist},
-                                                     "assigned": {c: 0 for c in shortlist}, "winner": None})
+                tr = _CHAIN_TRIALS.setdefault(tkey, {"samples": {c: [] for c in shortlist},
+                                                     "assigned": {c: 0 for c in shortlist},
+                                                     "winner": None})
                 if tr["winner"] is not None:
                     chain = tr["winner"]
                 else:
-                    chain = min(shortlist, key=lambda c: (len(tr["samples"][c]) + tr["assigned"][c], shortlist.index(c)))
+                    chain = min(shortlist, key=lambda c: (len(tr["samples"][c]) + tr["assigned"][c],
+                                                          shortlist.index(c)))
                     tr["assigned"][chain] += 1
                     self._chain_trial = tkey
-        self._chain = tuple(chain)
-        cfg = self._chain_cfg(self._chain)
-        self.autotune_info.update(status="locked" if self._chain_trial is None else "chain-trial", winner=cfg, untried=[])
-        return cfg
-
-    @staticmethod
-    def _chain_cfg(chain):
-        return (chain[0], 8) if len(chain) == 1 else CascadeConfig(chain[0], chain[1], 8)
+        self.autotune_info = {"status": "trial" if self._chain_trial else "locked",
+                              "winner": tuple(chain), "shortlist": shortlist, "model": model_best}
+        return tuple(chain)
 
     def _chain_trial_record(self, dt, pairs):
-        """Record one measured call for this plan's trial chain; lock the winner when every candidate has enough."""
-        tkey = self._chain_trial
+        """Record one measured call for this plan's trial chain; lock the winner once every candidate has enough."""
         with _AUTOTUNE_LOCK:
-            tr = _CHAIN_TRIALS.get(tkey)
+            tr = _CHAIN_TRIALS.get(self._chain_trial)
             if tr is None:
                 return
             if tr["winner"] is None and pairs > 0:
@@ -2577,849 +1818,184 @@ class HierarchicalFilter(MatchedFilter):
             winner = tr["winner"]
         if winner is not None:
             self._chain_trial = None
-            self.autotune_info.update(status="locked", winner=self._chain_cfg(winner))
+            self.autotune_info.update(status="locked", winner=tuple(winner))
             if tuple(winner) != tuple(self._chain):
-                self._chain = tuple(winner)
-                self._switch_config(self._chain_cfg(winner))
+                self._switch_chain(winner)
 
-    #: Tiers the CPU engine can execute; the chain model may consider more (max_tiers).
-    _ENGINE_MAX_TIERS = 2
-
-    def _coarse_value(self, band, *, required=True):
-        """Resolve one gate from an explicit value or the reference model."""
-        if self._cal_thr is not None:
-            if self._pinned is None:
-                raise ValueError("an explicit coarse threshold requires an explicit band")
-            return self._cal_thr
-        if getattr(self, "_chain", None) is not None and self._pending_ref is not None:
-            pl = _gatechain.chain_thresholds(self._pending_ref, self.n, self._fs_snr or self.snr, self.fd,
-                                             self._chain, cost=_gatechain.cost_model(self.n),
-                                             window=getattr(self, "search_window", None))
-            if pl is None:
-                if required:
-                    raise ValueError("no calibrated thresholds for chain %s at n=%d" % (self._chain, self.n))
-                return None
-            th = pl["thresholds"]
-            return float(th[0]) if len(th) == 1 else tuple(float(x) for x in th)
-        value = None
-        if self._pending_ref is not None:
-            cband = getattr(self, 'cascade_band', None)
-            if cband is not None and cband > 0:
-                value = choose_threshold(self._pending_ref, self.n,
-                                         self._fs_snr or self.snr, self.fd, int(band),
-                                         cascade_band=int(cband))
-            else:
-                value = choose_threshold(self._pending_ref, self.n,
-                                         self._fs_snr or self.snr, self.fd, int(band))
-        if value is None and required:
-            raise ValueError(
-                "no calibrated coarse threshold for n=%d band=%d: provide a "
-                "reference and a resolvable budget, or set both band and coarse threshold"
-                % (self.n, band))
-        if value is not None:
-            if isinstance(value, (tuple, list)):
-                return (float(value[0]), float(value[1]))
-            if not np.isfinite(value) or value < 0 or value > float(np.finfo(np.float32).max):
-                raise ValueError("calibrated coarse threshold must be finite, nonnegative float32")
-            return float(value)
-        return None
-
-    def _execution_plan(self):
-        plan = self._ensure()
-        if not self._thr_applied:
-            cfg_b = plan.config()[1] if len(plan.config()) == 4 else plan.config()[0]
-            tv = self._coarse_value(cfg_b)
-            if isinstance(tv, (tuple, list)):
-                plan.set_threshold(*tv)
-            else:
-                plan.set_threshold(tv)
-            self._thr_applied = True
-        return plan
-
-    def _switch_config(self, cfg):
-        """Switch active plan configuration dynamically, preserving loaded data and templates."""
-        self._active_cfg = cfg
-        self._warmed_up = False
-        if isinstance(cfg, CascadeConfig) or (isinstance(cfg, (tuple, list)) and len(cfg) == 3):
-            b_target = cfg.b1 if isinstance(cfg, CascadeConfig) else cfg[1]
-        else:
-            self.cascade_band = None
-            b_target = cfg[0]
-        self._target_band = b_target
-        # GPU path
-        if self.device.kind == "gpu":
-            if isinstance(cfg, CascadeConfig):
-                b0, b1, taps = cfg.b0, cfg.b1, cfg.taps
-                self.cascade_band = int(b0)
-                self._gcfg = (int(b0), int(b1), int(taps))
-            elif isinstance(cfg, (tuple, list)) and len(cfg) == 3:
-                b0, b1, taps = cfg[0], cfg[1], cfg[2]
-                self.cascade_band = int(b0)
-                self._gcfg = (int(b0), int(b1), int(taps))
-            else:
-                band, taps = cfg[0], cfg[1]
-                self.cascade_band = None
-                self._gcfg = (int(band), int(taps))
-            self._gcal = None
-            self._ckey = None
-            self._ct = None
-            self._tdirty = True
-            return
-
-        # CPU path
-        if isinstance(cfg, CascadeConfig):
-            b0, b1, taps = cfg.b0, cfg.b1, cfg.taps
-            self.cascade_band = int(b0)
-            new_plan = self._new_cpu_plan(int(b1), int(taps), cascade_band=int(b0))
-            tv = self._coarse_value(int(b1), required=False)
-        elif isinstance(cfg, (tuple, list)) and len(cfg) == 3:
-            b0, b1, taps = cfg[0], cfg[1], cfg[2]
-            self.cascade_band = int(b0)
-            new_plan = self._new_cpu_plan(int(b1), int(taps), cascade_band=int(b0))
-            tv = self._coarse_value(int(b1), required=False)
-        else:
-            band, taps = cfg[0], cfg[1]
-            self.cascade_band = None
-            new_plan = self._new_cpu_plan(int(band), int(taps))
-            tv = self._coarse_value(int(band), required=False)
-
-        if tv is not None:
-            if isinstance(tv, (tuple, list)):
-                new_plan.set_threshold(*tv)
-            else:
-                new_plan.set_threshold(tv)
-
-        if self._pending_ref is not None:
-            new_plan.set_reference(self._pending_ref)
-
-        # Restore templates into the new plan
-        if hasattr(self, '_held_templates') and self._held_templates is not None:
-            if isinstance(self._held_templates, np.ndarray):
-                if hasattr(new_plan, 'set_template_batch'):
-                    new_plan.set_template_batch(0, self._held_templates)
-                else:
-                    for i in range(self.ntemplates):
-                        new_plan.set_template(i, self._held_templates[i])
-            elif isinstance(self._held_templates, list):
-                for i, t in enumerate(self._held_templates):
-                    if t is not None:
-                        new_plan.set_template(i, t)
-
-        # Restore data into the new plan if present
-        if hasattr(self, '_held') and self._held:
-            if -1 in self._held:
-                a = self._held[-1]
-                if hasattr(new_plan, 'set_data_batch'):
-                    new_plan.set_data_batch(0, a)
-                else:
-                    for i in range(self.ndata):
-                        new_plan.set_data(i, a[i])
-            else:
-                for i, d in self._held.items():
-                    if d is not None and i >= 0:
-                        new_plan.set_data(i, d)
-
-        self._mf = new_plan
-        self._thr_applied = (tv is not None)
-
-    def _record_autotune_trial(self, dt, n_blocks=1, n_templates=None, pairs=None, triggers=None, valid_samples=None):
-        """Record batch timing for current configuration and progress autotune state."""
-        cfg = getattr(self, '_active_cfg', self.config)
-        nt = n_templates if n_templates is not None else self.ntemplates
-        nb = max(1, int(n_blocks))
-        if valid_samples is not None and valid_samples > 0:
-            effective_blocks = float(valid_samples) / float(self.n)
-        else:
-            effective_blocks = float(nb)
-        if self._gpu is not None and getattr(self._gpu, "last_gpu_time", 0) > 0:
-            dt = self._gpu.last_gpu_time
-        norm_factor = float(self.ndata * nt * effective_blocks)
-        time_per_pair = (dt * 1000.0) / max(1e-6, norm_factor)
-
-        trial = {
-            "config": cfg,
-            "duration_s": dt,
-            "time_ms": dt * 1000.0,
-            "time_per_pair": time_per_pair,
-            "n_blocks": nb,
-            "n_templates": nt,
-            "pairs": pairs,
-            "triggers": triggers,
-        }
-        self.autotune_info["trials"].append(trial)
-
-        # Remove from local untried if present
-        self.autotune_info["untried"] = [
-            c for c in self.autotune_info["untried"] if _config_key(c) != _config_key(cfg)
-        ]
-
-        cache_key = self._autotune_cache_key() if getattr(self, '_pending_ref', None) is not None else None
-
-        with _AUTOTUNE_LOCK:
-            if cache_key is not None and cache_key in _GLOBAL_AUTOTUNE_CACHE:
-                winner = _GLOBAL_AUTOTUNE_CACHE[cache_key]
-                if hasattr(self, '_assigned_candidate_key') and self._assigned_candidate_key is not None:
-                    if cache_key in _GLOBAL_AUTOTUNE_TRIALS:
-                        as_dict = _GLOBAL_AUTOTUNE_TRIALS[cache_key].get("assigned", {})
-                        if isinstance(as_dict, dict):
-                            as_dict[self._assigned_candidate_key] = max(0, as_dict.get(self._assigned_candidate_key, 1) - 1)
-                        elif isinstance(as_dict, set):
-                            as_dict.discard(self._assigned_candidate_key)
-                    self._assigned_candidate_key = None
-                self.autotune_info["status"] = "locked"
-                self.autotune_info["winner"] = winner
-                self.autotune_info["untried"] = []
-                if _config_key(self.config) != _config_key(winner):
-                    self._switch_config(winner)
-                return
-
-            shared = _GLOBAL_AUTOTUNE_TRIALS.get(cache_key) if cache_key is not None else None
-            if shared is not None:
-                if hasattr(self, '_assigned_candidate_key') and self._assigned_candidate_key is not None:
-                    as_set = shared.get("assigned", set())
-                    if isinstance(as_set, set):
-                        as_set.discard(self._assigned_candidate_key)
-                    elif isinstance(as_set, dict):
-                        as_set.pop(self._assigned_candidate_key, None)
-                    self._assigned_candidate_key = None
-
-                shared["trials"].append({
-                    "config": cfg,
-                    "duration_s": dt,
-                    "time_ms": dt * 1000.0,
-                    "time_per_pair": time_per_pair,
-                    "n_blocks": nb,
-                    "n_templates": nt,
-                    "pairs": pairs,
-                    "triggers": triggers,
-                })
-                _log_autotune("TRIAL cache_key=%s cfg=%s time_per_pair=%.4fms dt=%.2fms blocks=%d tmpls=%d pairs=%s trigs=%s",
-                              cache_key, cfg, time_per_pair, dt * 1000.0, nb, nt, pairs, triggers)
-                all_candidate_keys = {_config_key(c) for c in shared["candidates"]}
-                tested_keys = {_config_key(t["config"]) for t in shared["trials"]}
-
-                if all_candidate_keys.issubset(tested_keys):
-                    candidate_times = {}
-                    for t in shared["trials"]:
-                        c = t["config"]
-                        k = _config_key(c)
-                        candidate_times.setdefault(k, []).append(t.get("time_per_pair", t["time_ms"]))
-
-                    def score(cand):
-                        k = _config_key(cand)
-                        times = candidate_times.get(k, [float('inf')])
-                        if len(times) >= 2:
-                            return float(np.median(times[1:]))
-                        return float(np.median(times))
-
-                    winner = min(shared["candidates"], key=score)
-                    _log_autotune("WINNER LOCKED cache_key=%s winner=%s scores=%s",
-                                  cache_key, winner, [(c, score(c)) for c in shared["candidates"]])
-                    _GLOBAL_AUTOTUNE_CACHE[cache_key] = winner
-                    self.autotune_info["status"] = "locked"
-                    self.autotune_info["winner"] = winner
-                    self.autotune_info["untried"] = []
-                    if _config_key(self.config) != _config_key(winner):
-                        self._switch_config(winner)
-                    return
-
-                untested = [c for c in shared["candidates"] if _config_key(c) not in tested_keys]
-                assigned_keys = set(shared.get("assigned", set()))
-                untested_unassigned = [c for c in untested if _config_key(c) not in assigned_keys]
-                if untested_unassigned:
-                    next_cfg = untested_unassigned[0]
-                    shared.setdefault("assigned", set()).add(_config_key(next_cfg))
-                    self._assigned_candidate_key = _config_key(next_cfg)
-                    self.autotune_info["untried"] = [c for c in untested if _config_key(c) != _config_key(next_cfg)]
-                    _log_autotune("SWITCHING cache_key=%s next_cfg=%s", cache_key, next_cfg)
-                    self._switch_config(next_cfg)
-                return
-
-        if self.autotune_info["untried"]:
-            next_cfg = self.autotune_info["untried"][0]
-            self._switch_config(next_cfg)
-        else:
-            # All candidates tested empirically on real batches!
-            candidate_times = {}
-            for t in self.autotune_info["trials"]:
-                c = t["config"]
-                key = _config_key(c)
-                candidate_times.setdefault(key, []).append(t.get("time_per_pair", t["time_ms"]))
-
-            def score(cand):
-                key = _config_key(cand)
-                times = candidate_times.get(key, [float('inf')])
-                if len(times) >= 2:
-                    return float(np.median(times[1:]))
-                return float(np.median(times))
-
-            winner = min(self._tune_candidates, key=score)
-            self.autotune_info["status"] = "locked"
-            self.autotune_info["winner"] = winner
-            if _config_key(self.config) != _config_key(winner):
-                self._switch_config(winner)
-            if cache_key is not None:
-                with _AUTOTUNE_LOCK:
-                    _GLOBAL_AUTOTUNE_CACHE[cache_key] = winner
-
-    def run(self, binsize=None, threshold=0.0, window=None,
-            data=None, templates=None, counts=False, raw=False):
-        if self.autotune_info.get("status") == "tuning":
-            cache_key = self._autotune_cache_key() if getattr(self, '_pending_ref', None) is not None else None
-            if cache_key is not None:
-                with _AUTOTUNE_LOCK:
-                    if cache_key in _GLOBAL_AUTOTUNE_CACHE:
-                        winner = _GLOBAL_AUTOTUNE_CACHE[cache_key]
-                        if hasattr(self, '_assigned_candidate_key') and self._assigned_candidate_key is not None:
-                            if cache_key in _GLOBAL_AUTOTUNE_TRIALS:
-                                as_target = _GLOBAL_AUTOTUNE_TRIALS[cache_key].get("assigned")
-                                if isinstance(as_target, set):
-                                    as_target.discard(self._assigned_candidate_key)
-                                elif isinstance(as_target, dict):
-                                    as_target.pop(self._assigned_candidate_key, None)
-                            self._assigned_candidate_key = None
-                        self.autotune_info["status"] = "locked"
-                        self.autotune_info["winner"] = winner
-                        self.autotune_info["untried"] = []
-                        if _config_key(self.config) != _config_key(winner):
-                            self._switch_config(winner)
-        is_tuning_or_uninit = self.autotune_info.get("status") in ("tuning", "uninitialized")
-        if is_tuning_or_uninit:
-            t0 = time.perf_counter()
-            res = super().run(binsize=binsize, threshold=threshold, window=window,
-                              data=data, templates=templates, counts=counts, raw=raw)
-            dt = time.perf_counter() - t0
-            if self.autotune_info.get("status") == "tuning":
-                try:
-                    p_cnt, t_cnt = self.stats
-                except Exception:
-                    p_cnt, t_cnt = None, None
-                valid_samples = None
-                if window is not None:
-                    try:
-                        valid_samples = int(window[1] - window[0])
-                    except Exception:
-                        valid_samples = None
-                self._record_autotune_trial(dt, n_blocks=1, n_templates=self.ntemplates, pairs=p_cnt, triggers=t_cnt, valid_samples=valid_samples)
-            return res
-        return super().run(binsize=binsize, threshold=threshold, window=window,
-                           data=data, templates=templates, counts=counts, raw=raw)
-
+    # ---- run ----------------------------------------------------------------
     def run_series(self, series, starts=None, win_start=None, win_end=None,
                    binsize=None, threshold=0.0, templates=None, raw=False,
                    decimated=None):
-        if getattr(self, "_chain_trial", None) is None:
-            return self._run_series_tuned(series, starts=starts, win_start=win_start, win_end=win_end,
-                                          binsize=binsize, threshold=threshold, templates=templates,
-                                          raw=raw, decimated=decimated)
+        if self._chain_trial is None:
+            return super().run_series(series, starts=starts, win_start=win_start, win_end=win_end,
+                                      binsize=binsize, threshold=threshold, templates=templates,
+                                      raw=raw, decimated=decimated)
         t0 = time.perf_counter()
-        res = self._run_series_tuned(series, starts=starts, win_start=win_start, win_end=win_end,
-                                     binsize=binsize, threshold=threshold, templates=templates,
-                                     raw=raw, decimated=decimated)
+        res = super().run_series(series, starts=starts, win_start=win_start, win_end=win_end,
+                                 binsize=binsize, threshold=threshold, templates=templates,
+                                 raw=raw, decimated=decimated)
         dt = time.perf_counter() - t0
         full = templates is None or templates[1] >= self.ntemplates
         nblk = len(starts) if starts is not None else 1
-        if full and nblk >= 2 and getattr(self, "_chain_trial", None) is not None:
+        if full and nblk >= 2 and self._chain_trial is not None:
             self._chain_trial_record(dt, nblk * self.ntemplates * self.ndata)
         return res
 
-    def _run_series_tuned(self, series, starts=None, win_start=None, win_end=None,
-                   binsize=None, threshold=0.0, templates=None, raw=False,
-                   decimated=None):
-        is_outer = not getattr(self, '_in_hier_series_call', False)
-        # Avoid autotuning on sub-template narrow follow-ups or micro-slices
-        is_sub_template = (templates is not None and templates[1] < self.ntemplates)
-        is_tiny_slice = False
-        if starts is not None:
-            try:
-                is_tiny_slice = (len(starts) < 2)
-            except (TypeError, AttributeError):
-                pass
-        should_tune = is_outer and not is_sub_template and not is_tiny_slice
+    def set_templates(self, spectra, index=None):
+        if self._gpu is not None or index is not None:
+            return super().set_templates(spectra, index=index)
+        a = np.ascontiguousarray(_from_any(spectra), dtype=np.complex64)
+        if a.ndim != 2:
+            raise ValueError(f"expected 2D array of spectra, got {a.shape}")
+        if a.shape[0] != self.ntemplates:
+            raise ValueError(f"expected {self.ntemplates} templates, got {a.shape[0]}")
+        if a.shape[1] == self.n:
+            self._bandlimited, k = False, self.n
+        elif a.shape[1] == self.n // 2:
+            self._bandlimited, k = True, self.n // 2
+        else:
+            raise ValueError(f"expected shape ({self.ntemplates}, {self.n}) or ({self.ntemplates}, {self.n // 2}), got {a.shape}")
+        rebuild = self._mf is not None and getattr(self._mf, 'k', self.n) != k
+        self.k = k
+        self._held_templates = a.copy()
+        if rebuild:
+            self._mf = None
+        plan = self._ensure()
+        if not rebuild:
+            plan.set_template_batch(0, a)
+        self._mark_ready("template", None)
 
-        if should_tune and self.autotune_info.get("status") == "tuning":
-            cache_key = self._autotune_cache_key() if getattr(self, '_pending_ref', None) is not None else None
-            if cache_key is not None:
-                with _AUTOTUNE_LOCK:
-                    if cache_key in _GLOBAL_AUTOTUNE_CACHE:
-                        winner = _GLOBAL_AUTOTUNE_CACHE[cache_key]
-                        if hasattr(self, '_assigned_candidate_key') and self._assigned_candidate_key is not None:
-                            if cache_key in _GLOBAL_AUTOTUNE_TRIALS:
-                                as_target = _GLOBAL_AUTOTUNE_TRIALS[cache_key].get("assigned")
-                                if isinstance(as_target, set):
-                                    as_target.discard(self._assigned_candidate_key)
-                                elif isinstance(as_target, dict):
-                                    as_target.pop(self._assigned_candidate_key, None)
-                            self._assigned_candidate_key = None
-                        self.autotune_info["status"] = "locked"
-                        self.autotune_info["winner"] = winner
-                        self.autotune_info["untried"] = []
-                        if _config_key(self.config) != _config_key(winner):
-                            self._switch_config(winner)
+    def set_hermitian(self, hermitian: bool):
+        self._hermitian = bool(hermitian)
+        if self._mf is not None:
+            self._mf.set_hermitian(self._hermitian)
 
-        is_tuning_or_uninit = self.autotune_info.get("status") in ("tuning", "uninitialized")
-        if should_tune and is_tuning_or_uninit:
-            self._in_hier_series_call = True
-            t0 = time.perf_counter()
-            try:
-                res = super().run_series(series, starts=starts, win_start=win_start,
-                                         win_end=win_end, binsize=binsize,
-                                         threshold=threshold, templates=templates,
-                                         raw=raw, decimated=decimated)
-            finally:
-                self._in_hier_series_call = False
-            dt = time.perf_counter() - t0
-            if self.autotune_info.get("status") == "tuning":
-                n_blocks = len(starts) if starts is not None else 1
-                n_tmpls = int(templates[1]) if templates is not None else self.ntemplates
-                try:
-                    p_cnt, t_cnt = self.stats
-                except Exception:
-                    p_cnt, t_cnt = None, None
-                valid_samples = None
-                if win_start is not None and win_end is not None:
-                    try:
-                        valid_samples = int(np.sum(np.asarray(win_end) - np.asarray(win_start)))
-                    except Exception:
-                        valid_samples = None
-                self._record_autotune_trial(dt, n_blocks=n_blocks, n_templates=n_tmpls, pairs=p_cnt, triggers=t_cnt, valid_samples=valid_samples)
-            return res
-        t0 = time.perf_counter()
-        res = super().run_series(series, starts=starts, win_start=win_start,
-                                  win_end=win_end, binsize=binsize,
-                                  threshold=threshold, templates=templates,
-                                  raw=raw, decimated=decimated)
-        dt = time.perf_counter() - t0
-        if os.environ.get("MF_TRACE_RUN", "0") != "0":
-            try:
-                p_cnt, t_cnt = self.stats
-            except Exception:
-                p_cnt, t_cnt = None, None
-            print(f"[MF_TRACE_RUN] cfg={self.config} dt={dt*1000:.2f}ms pairs={p_cnt} trigs={t_cnt} N={self.n} tmpls={self.ntemplates} nblk={len(starts) if starts is not None else 1}", file=sys.stderr, flush=True)
-        return res
+    @property
+    def hermitian(self):
+        return self._hermitian
+
+    @hermitian.setter
+    def hermitian(self, value):
+        self.set_hermitian(value)
+
+    # ---- GPU -----------------------------------------------------------
+    #
+    # The coarse pass IS a matched filter on an m-point plan: the ordinary flat
+    # filter at length `band`, on templates truncated to that band and scaled
+    # by 1/sqrt(f). A supplied reference gives a common power fraction;
+    # otherwise each coarse template is normalized by its own.
+    def _start_gpu(self):
+        if self.n not in _GPU_SIZES:
+            raise ValueError(
+                "device='gpu' supports n in %s; got %d"
+                % (sorted(_GPU_SIZES), self.n))
+        self._gpu = self._backend().Context(self.device.index)
+        self._gdata = None  # series execution uses its own workspace
+        self._gtmpl = None
+        self._gcal = None
 
     def _gpu_calibration(self, threshold):
-        """Use the same profile model or explicit gate as the CPU."""
-        key = (self.snr, self.fd, self._fs_snr, self._pinned, self._cal_thr)
+        """(chain, per-tier reference band fractions or None, per-tier thresholds)."""
+        key = (self.snr, self.fd, self._fs_snr, self._chain, self._cal_thr)
         if self._gcal is not None and self._gcal[0] == key:
             return self._gcal[1]
-        cfg = self._pinned
-        if cfg is None:
-            if getattr(self, '_active_cfg', None) is not None:
-                cfg = self._active_cfg
-            elif self._pending_ref is not None:
-                cache_key = self._autotune_cache_key()
-                cached_winner = None
-                if cache_key is not None:
-                    with _AUTOTUNE_LOCK:
-                        cached_winner = _GLOBAL_AUTOTUNE_CACHE.get(cache_key)
-                if cached_winner is not None:
-                    self.autotune_info["status"] = "locked"
-                    self.autotune_info["winner"] = cached_winner
-                    self.autotune_info["untried"] = []
-                    self._tune_candidates = [cached_winner]
-                    cfg = cached_winner
-                elif self.autotune_info.get("status") == "uninitialized":
-                    table_path, self._cost_key = cost_table_for(self.device)
-                    tuning = _load_tuning_paths([table_path], cache=False) if (self._cost_key is not None and getattr(self.device, 'arch', None) is not None) else None
-                    candidates, rejected = candidate_configs(self._pending_ref, self.n, self.snr, self.fd,
-                                                             tuning=tuning,
-                                                             pairs=self.ndata * self.ntemplates,
-                                                             device=self.device,
-                                                             cascade=self.cascade)
-                    if os.environ.get("MF_AUTOTUNE", "1").strip().lower() in ("0", "false", "no", "off"):
-                        candidates = candidates[:1]
-                    self.autotune_info["rejected"] = rejected
-                    if not candidates:
-                        cfg = None
-                    elif len(candidates) == 1:
-                        winner = candidates[0]
-                        self.autotune_info["status"] = "locked"
-                        self.autotune_info["winner"] = winner
-                        self.autotune_info["untried"] = []
-                        self._tune_candidates = [winner]
-                        if cache_key is not None:
-                            with _AUTOTUNE_LOCK:
-                                _GLOBAL_AUTOTUNE_CACHE[cache_key] = winner
-                        cfg = winner
-                    else:
-                        static_choice = choose_config(self._pending_ref, self.n, self.snr, self.fd,
-                                                      tuning=tuning,
-                                                      pairs=self.ndata * self.ntemplates,
-                                                      device=self.device,
-                                                      cascade=self.cascade)
-                        ordered = [static_choice] + [c for c in candidates if _config_key(c) != _config_key(static_choice)]
-                        self._tune_candidates = ordered
-
-                        if cache_key is not None:
-                            with _AUTOTUNE_LOCK:
-                                if cache_key in _GLOBAL_AUTOTUNE_CACHE:
-                                    winner = _GLOBAL_AUTOTUNE_CACHE[cache_key]
-                                    self.autotune_info["status"] = "locked"
-                                    self.autotune_info["winner"] = winner
-                                    self.autotune_info["untried"] = []
-                                    cfg = winner
-                                else:
-                                    shared = _GLOBAL_AUTOTUNE_TRIALS.setdefault(cache_key, {
-                                        "trials": [],
-                                        "candidates": ordered,
-                                        "assigned": set(),
-                                    })
-                                    tested_keys = {_config_key(t["config"]) for t in shared["trials"]}
-                                    assigned_keys = set(shared.get("assigned", set()))
-                                    untested_unassigned = [c for c in shared["candidates"]
-                                                           if _config_key(c) not in tested_keys and _config_key(c) not in assigned_keys]
-                                    if untested_unassigned:
-                                        next_cfg = untested_unassigned[0]
-                                    else:
-                                        untested = [c for c in shared["candidates"] if _config_key(c) not in tested_keys]
-                                        if untested:
-                                            next_cfg = untested[0]
-                                        else:
-                                            next_cfg = ordered[0]
-
-                                    shared.setdefault("assigned", set()).add(_config_key(next_cfg))
-                                    self._assigned_candidate_key = _config_key(next_cfg)
-                                    untested_all = [c for c in shared["candidates"] if _config_key(c) not in tested_keys]
-                                    self.autotune_info["untried"] = [c for c in untested_all if _config_key(c) != _config_key(next_cfg)]
-                                    self.autotune_info["status"] = "tuning"
-                                    self.autotune_info["winner"] = None
-                                    cfg = next_cfg
-                        else:
-                            self.autotune_info["untried"] = list(ordered[1:])
-                            self.autotune_info["status"] = "tuning"
-                            self.autotune_info["winner"] = None
-                            cfg = ordered[0]
-                elif self.autotune_info.get("status") == "locked":
-                    cfg = self.autotune_info["winner"]
-                else:
-                    cfg = getattr(self, '_active_cfg', self._tune_candidates[0] if self._tune_candidates else None)
-                self._active_cfg = cfg
-            else:
-                raise ValueError("set_reference is required for file-based configuration selection")
-        if cfg is None:
-            raise ValueError(_uncovered_message(self.n, self.snr, self.fd))
-        if isinstance(cfg, CascadeConfig) or (isinstance(cfg, tuple) and len(cfg) == 3):
-            if isinstance(cfg, CascadeConfig):
-                b0, b1, taps = cfg.b0, cfg.b1, cfg.taps
-            else:
-                b0, b1, taps = cfg
-            self.cascade_band = b0
-            tv = self._coarse_value(b1)
-            f = None
-            if self._pending_ref is not None:
-                ref = np.asarray(self._pending_ref, dtype=np.float64)
-                ref_sum = ref.sum()
-                f0 = float(ref[:b0].sum() / ref_sum) if ref_sum > 0 else 0.0
-                f1 = float(ref[:b1].sum() / ref_sum) if ref_sum > 0 else 0.0
-                f = (f0, f1)
-            self._gcfg = (int(b0), int(b1), int(taps))
-            out = ((int(b0), int(b1)), f, tv)
-        else:
-            band, taps = cfg
-            tv = self._coarse_value(band)
-            f = None
-            if self._pending_ref is not None:
-                ref = np.asarray(self._pending_ref, dtype=np.float64)
-                f = float(ref[:band].sum() / ref.sum())
-            self._gcfg = (int(band), int(taps))
-            out = (int(band), f, tv)
+        if self._chain is None:
+            if self._pending_ref is None:
+                raise ValueError("set a reference first (set_reference), or pin a chain")
+            self._chain = self._choose_chain()
+            key = (self.snr, self.fd, self._fs_snr, self._chain, self._cal_thr)
+        thr = self._thresholds(required=True)
+        f = None
+        if self._pending_ref is not None:
+            ref = np.asarray(self._pending_ref, dtype=np.float64)
+            tot = ref.sum()
+            f = tuple(float(ref[:b].sum() / tot) if tot > 0 else 0.0 for b in self._chain)
+        out = (self._chain, f, thr)
         self._gcal = (key, out)
         return out
 
+    def _coarse_templates(self, H, bands, f):
+        """Coarse templates per tier: the first b bins scaled by 1/sqrt(band fraction)."""
+        out = []
+        for i, b in enumerate(bands):
+            if f is None:
+                power = H.real * H.real + H.imag * H.imag
+                total = power.sum(axis=1, dtype=np.float64)
+                frac = np.divide(power[:, :b].sum(axis=1, dtype=np.float64), total,
+                                 out=np.zeros_like(total), where=total > 0)
+                sc = np.divide(1.0, np.sqrt(frac), out=np.zeros_like(frac), where=frac > 0)[:, None].astype(np.float32)
+            else:
+                sc = np.float32(1.0 / np.sqrt(f[i])) if f[i] > 0 else np.float32(0.0)
+            out.append(H[:, :b] * sc)
+        return out
+
     def _gpu_dispatch(self, D, H, binsize, threshold, start, end, slot=None, async_submit=False):
-        """Run coarse filtering and refinement without host survivor readback."""
-        band, f, thr = self._gpu_calibration(threshold)
-        if isinstance(band, tuple):
-            b0, b1 = band
-            f0, f1 = (None, None) if f is None else f
-            thr0, thr1 = thr
-            ck = (band, f, H.ctypes.data, H.shape)
-            if getattr(self, "_ckey", None) != ck or self._tdirty:
-                if f0 is None or f1 is None:
-                    hr = H.real
-                    hi = H.imag
-                    power = hr * hr + hi * hi
-                    total = power.sum(axis=1, dtype=np.float64)
-                    bp0 = power[:, :b0].sum(axis=1, dtype=np.float64)
-                    frac0 = np.divide(bp0, total, out=np.zeros_like(total), where=total > 0)
-                    sc0 = np.divide(1.0, np.sqrt(frac0), out=np.zeros_like(frac0), where=frac0 > 0)[:, None].astype(np.float32)
-                    ct0 = H[:, :b0] * sc0
-
-                    bp1 = power[:, :b1].sum(axis=1, dtype=np.float64)
-                    frac1 = np.divide(bp1, total, out=np.zeros_like(total), where=total > 0)
-                    sc1 = np.divide(1.0, np.sqrt(frac1), out=np.zeros_like(frac1), where=frac1 > 0)[:, None].astype(np.float32)
-                    ct1 = H[:, :b1] * sc1
-                else:
-                    sc0 = np.float32(1.0 / np.sqrt(f0)) if f0 > 0 else np.float32(0.0)
-                    ct0 = H[:, :b0] * sc0
-                    sc1 = np.float32(1.0 / np.sqrt(f1)) if f1 > 0 else np.float32(0.0)
-                    ct1 = H[:, :b1] * sc1
-                self._ct = (ct0, ct1)
-                self._ckey = ck
-            ct0, ct1 = self._ct
-
+        """Run the gate chain and refinement without host survivor readback."""
+        chain, f, thr = self._gpu_calibration(threshold)
+        ck = (chain, f, H.ctypes.data, H.shape)
+        if getattr(self, "_ckey", None) != ck or self._tdirty:
+            self._ct = self._coarse_templates(H, chain, f)
+            self._ckey = ck
+        ct = self._ct
+        if len(chain) == 1:
             res = self._gpu.hier_peaks(
-                self.n, b1, D, H, ct0, thr0,
+                self.n, chain[0], D, H, ct[0], thr[0],
                 binsize=binsize, threshold=threshold, window=(start, end),
                 upload_data=self._ddirty, upload_tmpl=self._tdirty,
-                cascade_band=b0, ct1=ct1, raw_thr1=thr1,
                 slot=slot, async_submit=async_submit)
-            self._ddirty = self._tdirty = False
-
-            if async_submit:
-                def readback():
-                    idx, val = res()
-                    self._gpairs += idx.shape[0] * idx.shape[1]
-                    self._gtrig += self._gpu.last_refinements
-                    return idx, val
-                return readback
-
-            idx, val = res
-            self._gpairs += idx.shape[0] * idx.shape[1]
-            self._gtrig += self._gpu.last_refinements
-            return idx, val
         else:
-            ck = (band, f, H.ctypes.data, H.shape)
-            if getattr(self, "_ckey", None) != ck or self._tdirty:
-                if f is None:
-                    hr = H.real
-                    hi = H.imag
-                    power = hr * hr + hi * hi
-                    total = power.sum(axis=1, dtype=np.float64)
-                    band_power = power[:, :band].sum(axis=1, dtype=np.float64)
-                    fraction = np.divide(band_power, total,
-                                         out=np.zeros_like(total), where=total > 0)
-                    sc = np.divide(1.0, np.sqrt(fraction),
-                                   out=np.zeros_like(fraction), where=fraction > 0)[:, None].astype(np.float32)
-                    ct0 = H[:, :band] * sc
-                else:
-                    sc = np.float32(1.0 / np.sqrt(f)) if f > 0 else np.float32(0.0)
-                    ct0 = H[:, :band] * sc
-                self._ct = ct0
-                self._ckey = ck
-            ct0 = self._ct
-
             res = self._gpu.hier_peaks(
-                self.n, band, D, H, ct0, thr,
+                self.n, chain[1], D, H, ct[0], thr[0],
                 binsize=binsize, threshold=threshold, window=(start, end),
                 upload_data=self._ddirty, upload_tmpl=self._tdirty,
+                cascade_band=chain[0], ct1=ct[1], raw_thr1=thr[1],
                 slot=slot, async_submit=async_submit)
-            self._ddirty = self._tdirty = False
+        self._ddirty = self._tdirty = False
 
-            if async_submit:
-                def readback():
-                    idx, val = res()
-                    self._gpairs += idx.shape[0] * idx.shape[1]
-                    self._gtrig += self._gpu.last_refinements
-                    return idx, val
-                return readback
-
-            idx, val = res
+        def account(r):
+            idx, val = r
             self._gpairs += idx.shape[0] * idx.shape[1]
             self._gtrig += self._gpu.last_refinements
             return idx, val
+        if async_submit:
+            return lambda: account(res())
+        return account(res)
 
-    def set_coarse_threshold(self, value):
-        """Set the coarse threshold directly, bypassing the model.
-
-        The coarse pass reports one number per pair -- the maximum of the
-        band-limited correlation -- and this is what it is compared against.
-        Above it the pair gets the full filter; below it the pair is
-        dismissed. That is the whole decision.
-
-        Autotuning exists to choose this number for a false-dismissal budget,
-        using the reference profile model. A caller who knows what threshold
-        they want does not: set it here and no table is consulted, no
-        reference is required when the band is explicitly set, and nothing is modelled. The guarantee becomes
-        whatever the caller's own threshold implies, which is the honest
-        trade for not asking the library to promise a budget.
-
-        Pass None to go back to the model.
-        """
-        if value is None:
-            self._cal_thr = None
-            self._thr_applied = False
-            if self._mf is not None:
-                self._mf.set_threshold(-1.0)
-            return
-        if isinstance(value, (tuple, list)):
-            if len(value) != 2:
-                raise ValueError("expected 2 thresholds for cascade (thr0, thr1)")
-            t0, t1 = float(value[0]), float(value[1])
-            self._cal_thr = (t0, t1)
-            self._thr_applied = True
-            if self._mf is not None:
-                self._mf.set_threshold(t0, t1)
-            return
-        value = float(value)
-        if not np.isfinite(value) or value < 0 or value > float(np.finfo(np.float32).max):
-            raise ValueError("coarse threshold must be finite nonnegative float32, or None")
-        if self._pinned is None:
-            raise ValueError("an explicit coarse threshold requires an explicit band")
-        self._cal_thr = value
-        self._thr_applied = True
-        if self._mf is not None:
-            self._mf.set_threshold(float(value))
-
-    def set_first_stage(self, snr):
-        """Calibrate the first stage against `snr` rather than the threshold.
-
-        Final triggers are still cut at the threshold passed to :meth:`run`;
-        this sets only where the cheap first pass decides a full
-        reconstruction is needed.  Lower it to run the first stage more
-        conservatively, at the cost of reconstructing more often.
-
-        The threshold is computed from the profile at this SNR. An unresolved
-        budget raises at execution. Band and taps stay fixed. An explicit
-        coarse threshold takes precedence over this setting.
-
-        Pass ``None`` or a non-positive value to use the constructor's SNR.
-        """
-        self._fs_snr = float(snr) if snr is not None and float(snr) > 0 else None
-        self._thr_applied = False
-        if self._mf is not None and self._cal_thr is None:
-            self._mf.set_threshold(-1.0)
-
-    def set_reference(self, power):
-        """Set the reference SNR distribution.
-
-        ``power`` is a real frequency series of length ``n``: the expected
-        power of the filter *output* in each bin.  Only its shape matters, as
-        the total is divided out.
-
-        By default each template's band fraction is
-        computed from the template itself, which assumes its own power
-        distribution is the distribution of the SNR it produces.  That holds
-        only when the data is white and the template whitened.  A broadband
-        ratio filter reconstructing a low-frequency signal breaks it badly --
-        the coarse threshold would read the filter, not the signal.
-
-        The profile must describe every template in this plan. Heterogeneous
-        banks may need separate reference groups: equal in-band fractions
-        do not imply equal scalloping or dismissal. Pass ``None`` to use each
-        template's own band fraction with an explicit coarse threshold.
-        Changing the reference refreshes already-loaded coarse templates.
-        """
-        if power is not None:
-            p = np.ascontiguousarray(_from_any(power), dtype=np.float32)
-            if p.shape != (self.n,) and p.shape != (getattr(self, 'k', self.n),):
-                raise ValueError("reference must be a one-dimensional array of length %d" % self.n)
-            if not np.isfinite(p).all() or np.any(p < 0) or not np.any(p > 0):
-                raise ValueError("reference must be finite, nonnegative, with positive total power")
-            if self._pending_ref is not None and np.array_equal(p, self._pending_ref):
-                return
-        if self._gpu is not None:
-            # Calibration and scaled coarse templates depend on the reference,
-            # even when the template spectra themselves have not changed.
-            self._gcal = None
-            self._tdirty = True
-        self._thr_applied = False
-        if self._mf is not None and self._cal_thr is None:
-            self._mf.set_threshold(-1.0)
-        if power is None:
-            if self._pending_ref is None:
-                return
-            self._pending_ref = None
-            if self._mf is not None:
-                self._mf.set_reference(None)
-            return
-        self._pending_ref = p.copy()
-        if self._mf is not None:
-            self._mf.set_reference(p)
-
-
+    # ---- reporting -----------------------------------------------------------
     @property
     def config(self):
-        """Selected or explicitly pinned ``(band, taps)`` or ``(b0, b1, taps)``."""
-        if self._pinned is not None:
-            if len(self._pinned) == 3:
-                return CascadeConfig(*self._pinned)
-            return self._pinned
-        if getattr(self, '_active_cfg', None) is not None:
-            cfg = self._active_cfg
-            if isinstance(cfg, CascadeConfig):
-                return cfg
-            if isinstance(cfg, (tuple, list)) and len(cfg) == 3:
-                return CascadeConfig(*cfg)
-            return cfg
-        if self._gpu is not None:
-            self._gpu_calibration(self.snr)
-            if getattr(self, 'cascade', False) and self._gcfg is not None and len(self._gcfg) == 3:
-                return CascadeConfig(*self._gcfg)
-            return self._gcfg
-        cfg = self._ensure().config()
-        if len(cfg) == 4:
-            b0, b1, _u, k = cfg
-            return CascadeConfig(b0, b1, k)
-        band, _u, k = cfg
-        return band, k
-
-    @property
-    def cascade_config(self):
-        """Full 3-element tuple (b0, b1, taps) if cascade, or None."""
-        cfg = self.config
-        if isinstance(cfg, CascadeConfig) or hasattr(cfg, "b0"):
-            return (cfg.b0, cfg.b1, cfg.taps)
-        return None
-
-    @property
-    def band(self):
-        """Coarse band: (b0, b1) if cascade, or single integer band."""
-        cfg = self.config
-        if isinstance(cfg, CascadeConfig) or hasattr(cfg, "b0"):
-            return (cfg.b0, cfg.b1)
-        return cfg[0]
-
-    @property
-    def cost_table(self):
-        """Which cost table selection used, or None for the generic one.
-
-        Worth being able to ask: a device with no measurements of its own
-        falls back to a CPU's, which is a real difference in what was
-        chosen, and it should not be something a user has to infer.
-        """
-        if self._gpu is not None:
-            self._gpu_calibration(self.snr)
-            return getattr(self, "_cost_key", None)
-        self._ensure()
-        return getattr(self, "_cost_key", None)
+        """The gate chain in use: a tuple of bands."""
+        if self._chain is None:
+            if self._gpu is not None:
+                self._gpu_calibration(self.snr)
+            else:
+                self._ensure()
+        return tuple(self._chain)
 
     @property
     def stats(self):
-        """``(pairs, triggers)`` accumulated since construction."""
+        """``(pairs, refined)`` accumulated since construction."""
         if self._gpu is not None:
             return (self._gpairs, self._gtrig)
         return self._ensure().stats()
+
+    @property
+    def tier_stats(self):
+        """Per tier ``(band, passed, ticks)``, then ``(n, refined, ticks)`` for the refine (CPU)."""
+        if self._gpu is not None:
+            return None
+        return self._ensure().tier_stats()
 
     @property
     def refine_rate(self):
         """Fraction of pairs that needed the full correlation.
 
         This is what the speedup rides on, and the first thing to look at when
-        the filter is slower than expected: a data set noisier than the design
-        assumed opens the coarse threshold more often, and at a high enough trigger rate the
-        coarse pass is pure overhead.
-
-        Counted over the plan's whole lifetime, not per run.  To measure one
-        workload, filter it with a plan that has seen nothing else.
+        the filter is slower than expected. Counted over the plan's lifetime.
         """
-        if self._gpu is not None:
-            return self._gtrig / self._gpairs if self._gpairs else 0.0
-        pairs, trig = self._ensure().stats()
+        pairs, trig = self.stats
         return trig / pairs if pairs else 0.0
 
-
-# Read and index the tuning tables at IMPORT, not at the first plan build.
-#
-# Doing it lazily meant the cost landed wherever a caller first constructed a
-# HierarchicalFilter, and callers construct those inside their hot loop:
-# pycbc_inspiral_fir builds its plan inside the timed kernel, so a 10 ms load
-# showed up as 10 ms of filtering on the first segment and nothing thereafter.
-# Import is the one place that is unambiguously not in anyone's measurement,
-# and it already costs ~70 ms for numpy and the extension, so this is ~14% of
-# something already paid.
-#
 
 def __getattr__(name):
     """Expose ``Device`` without enumerating hardware at import time.

@@ -75,7 +75,7 @@ class TestEdgeFrequencyBins:
         res_mf = mf_plan.run(threshold=0.0)
 
         # 2. HierarchicalFilter (Hermitian mode)
-        hf_plan = mf.HierarchicalFilter(N, ndata=1, ntemplates=1, band=256, taps=8, cascade=False)
+        hf_plan = mf.HierarchicalFilter(N, ndata=1, ntemplates=1, chain=256)
         hf_plan.set_hermitian(True)
         hf_plan.set_coarse_threshold(0.0)
         hf_plan.set_templates(t_half)
@@ -128,7 +128,7 @@ class TestEdgeFrequencyBins:
         mf_plan.set_data(d_full)
         res_mf = mf_plan.run(threshold=0.0)
 
-        hf_dif = mf.HierarchicalFilter(N, ndata=1, ntemplates=1, band=256, taps=8, cascade=False)
+        hf_dif = mf.HierarchicalFilter(N, ndata=1, ntemplates=1, chain=256)
         hf_dif.set_hermitian(False)
         hf_dif.set_coarse_threshold(0.0)
         hf_dif.set_templates(t_half)
@@ -166,7 +166,7 @@ class TestNoiseFloorInvariant:
         all_re_hf = []
         all_re_mf = []
 
-        hf_plan = mf.HierarchicalFilter(N, ndata=1, ntemplates=1, band=256, taps=8, cascade=False)
+        hf_plan = mf.HierarchicalFilter(N, ndata=1, ntemplates=1, chain=256)
         hf_plan.set_hermitian(True)
         hf_plan.set_coarse_threshold(0.0)
         hf_plan.set_templates(t_half)
@@ -456,7 +456,7 @@ class TestBoundaryAndNegativeConditions:
         mf_plan.set_templates(t_full)
         mf_plan.set_data(d_full)
 
-        hf_plan = mf.HierarchicalFilter(N, ndata=1, ntemplates=1, band=256, taps=8, cascade=False)
+        hf_plan = mf.HierarchicalFilter(N, ndata=1, ntemplates=1, chain=256)
         hf_plan.set_hermitian(True)
         hf_plan.set_coarse_threshold(0.0)
         hf_plan.set_templates(t_half)
@@ -490,7 +490,7 @@ class TestBoundaryAndNegativeConditions:
         d_full[0, 20:220] = spec / np.linalg.norm(spec)
 
         # Correct contract: templates set before data
-        hf_ok = mf.HierarchicalFilter(N, ndata=1, ntemplates=1, band=256, taps=8, cascade=False)
+        hf_ok = mf.HierarchicalFilter(N, ndata=1, ntemplates=1, chain=256)
         hf_ok.set_coarse_threshold(0.0)
         hf_ok.set_templates(t_half)
         hf_ok.set_data(d_full)
@@ -498,7 +498,7 @@ class TestBoundaryAndNegativeConditions:
         assert r_ok['index'][0, 0, 0] >= 0, "Correct calling order failed to detect trigger"
 
         # Adverse order: data set before templates (re-instantiates C plan with K bins)
-        hf_adv = mf.HierarchicalFilter(N, ndata=1, ntemplates=1, band=256, taps=8, cascade=False)
+        hf_adv = mf.HierarchicalFilter(N, ndata=1, ntemplates=1, chain=256)
         hf_adv.set_coarse_threshold(0.0)
         hf_adv.set_data(d_full)
         hf_adv.set_templates(t_half)

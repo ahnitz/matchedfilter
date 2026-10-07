@@ -50,7 +50,7 @@ def test_gate_matches_reference_under_scaling_and_bank_partition(device, band):
         order = np.arange(nt)[::-1]
         for begin, end in chunks:
             cols = order[begin:end]
-            f = mf.HierarchicalFilter(n, nd, len(cols), band=band, device=device)
+            f = mf.HierarchicalFilter(n, nd, len(cols), chain=band, device=device)
             f.set_coarse_threshold(float(threshold))
             f.set_reference(reference*refscale)
             f.set_templates(templates[cols]/scale)
@@ -69,28 +69,10 @@ def test_gate_matches_reference_under_scaling_and_bank_partition(device, band):
             np.testing.assert_array_equal(changed['index'] >= 0, newmask[..., None])
 
 
-def test_threshold_lookup_is_independent_of_cost_and_reference_amplitude():
+def test_threshold_is_independent_of_reference_amplitude():
     n, band = 1024, 256
     power = np.exp(-np.arange(n)/180)
-    table = {'cost': {}}
-    a = mf.choose_threshold(power, n, 5., .001, band, tuning=table)
+    a = mf.choose_threshold(power, n, 5., .001, band)
     assert a is not None
-    # Timing optimization may reorder candidates, but cannot change the
-    # calibrated threshold for the same configuration.
     for scale in (.125, 8.):
-        tuning = dict(table, cost={(n, band): 1e-12}, fdr=[], by_ns={})
-        b = mf.choose_threshold(power*scale, n, 5., .001, band, tuning=tuning)
-        assert b == pytest.approx(a, rel=1e-12)
-
-
-def test_shipped_cost_rows_are_finite_and_cannot_set_accuracy():
-    tuning = mf._load_tuning()
-    if tuning is None:
-        pytest.skip("Static cost tables permanently deleted per user instructions")
-    assert tuning['cost_fd_pairs']
-    assert not ({'thr', 'acc2', 'acc2r', 'fdr'} & tuning.keys())
-    for key, rows in tuning['cost_fd_pairs'].items():
-        assert len(key) == 7
-        assert 0 < key[5] < 1 and key[6] > 0
-        assert np.isfinite(rows).all()
-        assert all(cost > 0 for _, _, cost in rows)
+        assert mf.choose_threshold(power*scale, n, 5., .001, band) == pytest.approx(a, rel=1e-12)

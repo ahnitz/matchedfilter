@@ -31,7 +31,7 @@ def worker():
                 return (rng.normal(size=shape) + 1j*rng.normal(size=shape)).astype('complex64')
             n = 4096 if kind == 'hier' else band
             if kind == 'hier':
-                f = mf.HierarchicalFilter(n, 8, nt, band=band, snr=5.5, fd=.01)
+                f = mf.HierarchicalFilter(n, 8, nt, chain=band, snr=5.5, fd=.01)
                 f.set_coarse_threshold(0.)
             else:
                 f = mf.MatchedFilter(n, 8, nt)

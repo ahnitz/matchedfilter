@@ -108,16 +108,16 @@ def test_hierarchical_gpu_cascade_vs_cpu():
     phase = np.exp(-2j * np.pi * np.arange(n) * lag / n).astype(np.complex64)
     d[2] += 40.0 * h[3] * phase
 
-    # Pinned cascade (128, 512, 16)
-    gpu_plan = HierarchicalFilter(n, nd, nt, snr=10.0, fd=1e-4, band=(128, 512, 16), cascade=True, device="gpu")
-    cpu_plan = HierarchicalFilter(n, nd, nt, snr=10.0, fd=1e-4, band=(128, 512, 16), cascade=True, device="cpu")
+    # Pinned two-tier chain (128, 512)
+    gpu_plan = HierarchicalFilter(n, nd, nt, snr=10.0, fd=1e-4, chain=(128, 512), device="gpu")
+    cpu_plan = HierarchicalFilter(n, nd, nt, snr=10.0, fd=1e-4, chain=(128, 512), device="cpu")
 
     # Set explicit coarse thresholds (t0, t1)
     gpu_plan.set_coarse_threshold((0.9, 2.0))
     cpu_plan.set_coarse_threshold((0.9, 2.0))
 
-    assert gpu_plan.config == (128, 512, 16)
-    assert cpu_plan.config == (128, 512, 16)
+    assert gpu_plan.config == (128, 512)
+    assert cpu_plan.config == (128, 512)
 
     gpu_plan.set_data(d)
     gpu_plan.set_templates(h)
@@ -166,7 +166,7 @@ def test_gpu_series_pipelined():
     res_flat = flat_gpu.run_series(ser, starts, ws, we)
     assert res_flat.shape == (nblk, nt, 1)
 
-    hier_gpu = HierarchicalFilter(n, 1, nt, snr=10.0, fd=1e-4, band=(128, 512, 16), cascade=True, device="gpu")
+    hier_gpu = HierarchicalFilter(n, 1, nt, snr=10.0, fd=1e-4, chain=(128, 512), device="gpu")
     hier_gpu.set_coarse_threshold((0.9, 2.0))
     hier_gpu.set_templates(h)
     res_hier = hier_gpu.run_series(ser, starts, ws, we)

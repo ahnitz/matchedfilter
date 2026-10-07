@@ -43,20 +43,12 @@ def test_hierarchical_filter_bandlimited_dif_direct():
     threshold = 5.5
 
     # 1. Full-size templates HierarchicalFilter
-    hf_full = mf.HierarchicalFilter(
-        N, ndata=1, ntemplates=n_templates,
-        band=band, taps=taps, snr=threshold, fd=0.01,
-        cascade=False
-    )
+    hf_full = mf.HierarchicalFilter(N, ndata=1, ntemplates=n_templates, chain=band, snr=threshold, fd=0.01)
     hf_full.set_coarse_threshold(3.0)
     hf_full.set_templates(tmpl_full)
 
     # 2. Half-size templates HierarchicalFilter (DIF)
-    hf_half = mf.HierarchicalFilter(
-        N, ndata=1, ntemplates=n_templates,
-        band=band, taps=taps, snr=threshold, fd=0.01,
-        cascade=False
-    )
+    hf_half = mf.HierarchicalFilter(N, ndata=1, ntemplates=n_templates, chain=band, snr=threshold, fd=0.01)
     hf_half.set_coarse_threshold(3.0)
     hf_half.set_templates(tmpl_half)
 

@@ -39,13 +39,12 @@ profile shapes, bands 512/1024/2048, snr 5.0/5.5/6.0 -- at ratios 0.88 to
 1.10, and against every device, which is how an approximation in the
 coarse stage (the GPU already runs it in half precision) shows up as a
 calibration change rather than passing quietly. See tests/test_gate_model.py.
-"""
-import atexit
-import os
-import pickle
-import tempfile
-from collections import OrderedDict
 
+The joint draws now live in gatechain, which takes them over every candidate
+band at once so that a chain of tiers (and a single tier, its length-1 case)
+is calibrated from one sample set. This module keeps the single-band view:
+gate_for and dismissal, the quantities the validation above is stated in.
+"""
 import numpy as np
 
 #: Lag half-widths. The in-band correlation decays over ~n/B_eff samples,
@@ -59,158 +58,9 @@ _W = 3                       # fine integer lags either side
 #: is scaled by this. See the noise-convention note above.
 _SIG = np.sqrt(2.0)
 
-_CACHE = OrderedDict()
-_CACHE_MAX = 512
-_CACHE_BYTES = 256 * 1024 * 1024
-_GATE_FOR_RESULT_CACHE = OrderedDict()
-_GATE_CASCADE_RESULT_CACHE = OrderedDict()
-
-_PROFILE_ENTRIES = {}
-_CASCADE_PROFILE_ENTRIES = {}
-_CONDITIONAL_ENTRIES = {}
-_COND_CASCADE_ENTRIES = {}
-
-_CACHE_FILE = os.environ.get("MF_GATE_CACHE_FILE") or os.path.expanduser("~/.cache/matchedfilter/gatemodel_cache.pkl")
-_CACHE_DIRTY = False
-
-def _load_disk_cache():
-    if not os.path.exists(_CACHE_FILE):
-        return
-    try:
-        with open(_CACHE_FILE, "rb") as f:
-            data = pickle.load(f)
-        if isinstance(data, dict):
-            single = data.get("single", {})
-            cascade = data.get("cascade", {})
-            for k, v in single.items():
-                _GATE_FOR_RESULT_CACHE[k] = v
-            for k, v in cascade.items():
-                _GATE_CASCADE_RESULT_CACHE[k] = v
-    except Exception:
-        pass
-
-def _save_disk_cache(single_entry=None, cascade_entry=None):
-    global _CACHE_DIRTY
-    if single_entry is not None:
-        k, v = single_entry
-        _GATE_FOR_RESULT_CACHE[k] = v
-        _CACHE_DIRTY = True
-    if cascade_entry is not None:
-        k, v = cascade_entry
-        _GATE_CASCADE_RESULT_CACHE[k] = v
-        _CACHE_DIRTY = True
-
-    if not _CACHE_DIRTY:
-        return
-
-    cache_dir = os.path.dirname(_CACHE_FILE)
-    try:
-        os.makedirs(cache_dir, exist_ok=True)
-        to_save_single = dict(_GATE_FOR_RESULT_CACHE)
-        to_save_cascade = dict(_GATE_CASCADE_RESULT_CACHE)
-        if os.path.exists(_CACHE_FILE):
-            try:
-                with open(_CACHE_FILE, "rb") as f:
-                    existing = pickle.load(f)
-                if isinstance(existing, dict):
-                    if "single" in existing and isinstance(existing["single"], dict):
-                        existing["single"].update(to_save_single)
-                        to_save_single = existing["single"]
-                    if "cascade" in existing and isinstance(existing["cascade"], dict):
-                        existing["cascade"].update(to_save_cascade)
-                        to_save_cascade = existing["cascade"]
-            except Exception:
-                pass
-        with tempfile.NamedTemporaryFile(dir=cache_dir, delete=False, prefix="gatemodel_cache_") as tf:
-            pickle.dump({"single": to_save_single, "cascade": to_save_cascade}, tf, protocol=pickle.HIGHEST_PROTOCOL)
-            temp_name = tf.name
-        os.replace(temp_name, _CACHE_FILE)
-        _CACHE_DIRTY = False
-    except Exception:
-        pass
-
-_load_disk_cache()
-atexit.register(_save_disk_cache)
-
-
-def _samples(power, n, band, snr, nsamp, seed):
-    """Joint draws of (coarse max, fine max) for one configuration."""
-    pf = np.asarray(power, dtype=np.float64)
-    tot = pf.sum()
-    if tot <= 0:
-        return None
-    pf = pf / tot
-    f = float(pf[:band].sum())
-    f = min(max(f, 0.0), 1.0)
-    if f == 0:
-        return None
-    step = n // band
-    qb = pf[:band] / f
-    out_of_band = (1.0 - f) > 1e-9
-
-    #: A(d) = sum_k q_k exp(2i.pi.k.d/n) is an inverse DFT of the profile,
-    #: so ONE transform gives it at every lag. Evaluating it as explicit
-    #: complex exponentials cost O(lags x n) and dominated everything --
-    #: worst at narrow bands, where a band of 64 walks 64 offsets across a
-    #: lag span of 5*step. This is O(n log n), once.
-    #:
-    #: The out-of-band correlation needs no transform of its own:
-    #: pf = f*qb + (1-f)*qo by construction, so Ao = (Af - f*Ab)/(1-f).
-    def _corr(x):
-        return np.fft.ifft(x) * n
-
-    Af_t = _corr(pf)
-    qb_full = np.zeros(n, dtype=np.float64)
-    qb_full[:band] = qb
-    Ab_t = _corr(qb_full)
-    Ao_t = ((Af_t - f * Ab_t) / (1.0 - f)) if out_of_band else None
-    look = lambda tab, d: tab[np.asarray(d) % n]
-
-    gl = np.arange(-_NB, _NB + 1) * step
-
-    rng = np.random.default_rng(seed)
-    C_all, F_all = [], []
-    for off in range(step):
-        fl = np.arange(-_W, _W + 1) + off
-        taus = np.unique(np.concatenate([fl, gl]))
-        gi = np.searchsorted(taus, gl)
-        lag = taus[:, None] - taus[None, :]
-        eye = 1e-9 * np.eye(len(taus))
-        Cb = look(Ab_t, lag); Cb = (Cb + Cb.conj().T) / 2 + eye
-        Lb32 = np.linalg.cholesky(Cb).astype(np.complex64)
-        m = max(nsamp // step, 256)
-        w1 = (rng.standard_normal((m, len(taus)), dtype=np.float32)
-              + 1j * rng.standard_normal((m, len(taus)), dtype=np.float32)
-              ) / np.float32(np.sqrt(2))
-        nin = (w1 @ Lb32.T) * np.float32(_SIG)
-        if out_of_band:
-            Co = look(Ao_t, lag); Co = (Co + Co.conj().T) / 2 + eye
-            Lo32 = np.linalg.cholesky(Co).astype(np.complex64)
-            w2 = (rng.standard_normal((m, len(taus)), dtype=np.float32)
-                  + 1j * rng.standard_normal((m, len(taus)), dtype=np.float32)
-                  ) / np.float32(np.sqrt(2))
-            nout = (w2 @ Lo32.T) * np.float32(_SIG)
-        else:
-            nout = np.float32(0.0)
-        sf = look(Af_t, taus - off).astype(np.complex64)
-        sb = look(Ab_t, taus - off).astype(np.complex64)
-        # Include every coarse lag in the fine maximum: they are a subset
-        # of the fine grid. Even at f=1, fine-only lags can exceed the coarse
-        # maximum because the coarse grid is still decimated.
-        F_all.append(np.abs(np.float32(snr) * sf[None, :]
-                            + np.float32(np.sqrt(f)) * nin
-                            + np.float32(np.sqrt(1 - f)) * nout).max(1))
-        C_all.append(np.abs(np.float32(snr * np.sqrt(f)) * sb[None, :]
-                            + nin)[:, gi].max(1))
-    return np.concatenate(C_all), np.concatenate(F_all)
-
-
-def _entry_bytes(v):
-    return (v[0].nbytes + v[1].nbytes) if isinstance(v, tuple) else v.nbytes
-
 
 def _profile_sig(power):
-    """Compute robust quantization signature invariant to continuous PSD estimation jitter."""
+    """Quantised signature of a profile, invariant to small PSD-estimation jitter."""
     if power is None:
         return b""
     p = np.asarray(power, dtype=np.float64)
@@ -228,52 +78,6 @@ def _profile_sig(power):
     return quant.tobytes()
 
 
-def _conditional(power, n, band, snr, nsamp, seed=13):
-    """Coarse maxima for the pairs the fine stage would have kept, sorted.
-
-    Sorted once so any budget is a quantile lookup: the gate for fd is the
-    fd-quantile of this, and a table of gates per fd is a table of indices
-    into one array. That is why this costs one sample set rather than a
-    root-find per budget.
-    """
-    p = np.asarray(power, dtype=np.float64)
-    if (p.shape != (n,) or not np.isfinite(p).all() or (p < 0).any()
-            or not np.isfinite(p.sum()) or p.sum() <= 0):
-        raise ValueError("power must be a finite nonnegative length-n profile with positive sum")
-    p = p / p.sum()
-    sig = _profile_sig(p)
-    key = (sig, n, band, float(snr), nsamp, seed)
-    hit = _CACHE.get(key)
-    if hit is not None:
-        _CACHE.move_to_end(key)
-        return hit
-
-    params = (n, band, float(snr), int(nsamp), int(seed))
-    norm_p = np.linalg.norm(p)
-    if norm_p > 0:
-        p_unit = (p / norm_p).astype(np.float32)
-        for u_vec, prev in _CONDITIONAL_ENTRIES.get(params, []):
-            if float(np.dot(p_unit, u_vec)) >= 0.985:
-                _CACHE[key] = prev
-                return prev
-
-    got = _samples(p, n, band, snr, nsamp, seed)
-    if got is None:
-        return None
-    coarse, fine = got
-    kept = np.sort(coarse[fine >= snr])
-    size = len(key[0]) + kept.nbytes
-    used = sum(len(k[0]) + _entry_bytes(v) for k, v in _CACHE.items())
-    while _CACHE and (len(_CACHE) >= _CACHE_MAX or used + size > _CACHE_BYTES):
-        oldkey, old = _CACHE.popitem(last=False)
-        used -= len(oldkey[0]) + _entry_bytes(old)
-    if size <= _CACHE_BYTES:
-        _CACHE[key] = kept
-    if norm_p > 0:
-        _CONDITIONAL_ENTRIES.setdefault(params, []).append((p_unit, kept))
-    return kept
-
-
 def _nsamp_for(fd):
     """Enough draws that the fd-quantile rests on a usable number of them.
 
@@ -285,8 +89,7 @@ def _nsamp_for(fd):
     rarest one.
 
     Below the floor the quantile is not a measurement and gate_for returns
-    None, so the caller refuses rather than guesses -- the same contract
-    the table had for an unmeasured cell.
+    None, so the caller refuses rather than guesses.
     """
     fd = max(float(fd), 1e-6)
     return int(min(max(2.0e4, 200.0 / fd), 3.0e6))
@@ -303,293 +106,52 @@ def _validate(n, band, snr, fd):
         raise ValueError("fd must be finite and between zero and one")
 
 
+def _check_power(power, n):
+    p = np.asarray(power, dtype=np.float64)
+    if (p.shape != (n,) or not np.isfinite(p).all() or (p < 0).any()
+            or not np.isfinite(p.sum()) or p.sum() <= 0):
+        raise ValueError("power must be a finite nonnegative length-n profile with positive sum")
+    return p
+
+
+def _kept(power, n, band, snr, fd):
+    """Sorted coarse maxima at `band` for draws the fine stage keeps, or None."""
+    from . import gatechain
+    bands = gatechain.usable_bands(power, n)
+    if band not in bands:
+        return None
+    sig = gatechain.signal_draws(power, n, bands, snr, _nsamp_for(fd))
+    if sig is None:
+        return None
+    return np.sort(gatechain.kept_draws(sig, bands, (band,), snr)[:, 0])
+
+
 def dismissal(power, n, band, snr, gate, fd_hint=1e-3):
-    """Modelled false-dismissal rate at `gate`."""
+    """Modelled false-dismissal rate of a single tier at `band` with threshold `gate`."""
     _validate(n, band, snr, fd_hint)
     if not np.isfinite(gate) or gate < 0:
         raise ValueError("gate must be finite and nonnegative")
-    kept = _conditional(power, n, band, snr, _nsamp_for(fd_hint))
+    kept = _kept(_check_power(power, n), n, band, snr, fd_hint)
     if kept is None or not len(kept):
         return None
     return float(np.searchsorted(kept, float(gate)) / len(kept))
 
 
 def gate_for(power, n, band, snr, fd):
-    """The largest gate whose modelled dismissal still meets `fd`.
+    """The largest single-tier gate at `band` whose modelled dismissal still meets `fd`.
 
+    The length-1 chain of gatechain.chain_thresholds, from the same draws.
     Returns None when the budget is below what this many draws can place,
-    so the caller refuses rather than guessing -- the same contract the
-    table had when a cell was unmeasured.
+    so the caller refuses rather than guessing.
     """
     _validate(n, band, snr, fd)
-    p = np.asarray(power, dtype=np.float64)
-    if (p.shape != (n,) or not np.isfinite(p).all() or (p < 0).any()
-            or not np.isfinite(p.sum()) or p.sum() <= 0):
-        raise ValueError("power must be a finite nonnegative length-n profile with positive sum")
-    p_norm = p / p.sum()
-    rkey = (_profile_sig(p_norm), n, band, float(snr), float(fd))
-    hit = _GATE_FOR_RESULT_CACHE.get(rkey)
-    if hit is not None:
-        _GATE_FOR_RESULT_CACHE.move_to_end(rkey)
-        return hit
-
-    params = (n, band, float(snr), float(fd))
-    norm_p = np.linalg.norm(p_norm)
-    if norm_p > 0:
-        p_unit = (p_norm / norm_p).astype(np.float32)
-        for u_vec, prev in _PROFILE_ENTRIES.get(params, []):
-            if float(np.dot(p_unit, u_vec)) >= 0.985:
-                _GATE_FOR_RESULT_CACHE[rkey] = prev
-                return prev
-
-    nsamp = _nsamp_for(fd)
-    if fd * nsamp < 8:
+    p = _check_power(power, n)
+    if fd * _nsamp_for(fd) < 8:
         return None
-    kept = _conditional(power, n, band, snr, nsamp)
+    kept = _kept(p, n, band, snr, fd)
     if kept is None or not len(kept):
         return None
     idx = int(np.floor(float(fd) * len(kept)))
     if idx < 8:
         return None                      # too few draws below the budget
-    res = float(kept[idx])
-    if len(_GATE_FOR_RESULT_CACHE) >= _CACHE_MAX:
-        _GATE_FOR_RESULT_CACHE.popitem(last=False)
-    if norm_p > 0:
-        _PROFILE_ENTRIES.setdefault(params, []).append((p_unit, res))
-    _save_disk_cache(single_entry=(rkey, res))
-    return res
-
-
-def _validate_cascade(n, band0, band1, snr, fd):
-    _validate(n, band0, snr, fd)
-    _validate(n, band1, snr, fd)
-    if band0 >= band1:
-        raise ValueError("band0 must be strictly less than band1")
-
-
-def _samples_cascade(power, n, band0, band1, snr, nsamp, seed):
-    """Joint draws of (tier0 max, tier1 max, fine max) for a cascade configuration."""
-    pf = np.asarray(power, dtype=np.float64)
-    tot = pf.sum()
-    if tot <= 0:
-        return None
-    pf = pf / tot
-    f0 = float(pf[:band0].sum())
-    f0 = min(max(f0, 0.0), 1.0)
-    f1 = float(pf[:band1].sum())
-    f1 = min(max(f1, 0.0), 1.0)
-    if f0 <= 0 or f1 <= f0:
-        return None
-
-    df = f1 - f0
-    step0 = n // band0
-    step1 = n // band1
-    q0 = pf[:band0] / f0
-    q1 = pf[:band1] / f1
-
-    def _corr(x):
-        return np.fft.ifft(x) * n
-
-    Af_t = _corr(pf)
-    q0_full = np.zeros(n, dtype=np.float64)
-    q0_full[:band0] = q0
-    A0_t = _corr(q0_full)
-
-    q1_full = np.zeros(n, dtype=np.float64)
-    q1_full[:band1] = q1
-    A1_t = _corr(q1_full)
-
-    Amid_t = ((f1 * A1_t - f0 * A0_t) / df) if df > 1e-9 else None
-    Aout_t = ((Af_t - f1 * A1_t) / (1.0 - f1)) if (1.0 - f1) > 1e-9 else None
-
-    look = lambda tab, d: tab[np.asarray(d) % n]
-    gl0_base = np.arange(-_NB, _NB + 1) * step0
-    gl1_base = np.arange(-_NB, _NB + 1) * step1
-
-    rng = np.random.default_rng(seed)
-    C0_all, C1_all, F_all = [], [], []
-
-    for off in range(step0):
-        fl = np.arange(-_W, _W + 1) + off
-        k1 = (off // step1) * step1
-        gl1 = k1 + gl1_base
-        gl0 = gl0_base
-
-        taus = np.unique(np.concatenate([fl, gl1, gl0]))
-        gi0 = np.searchsorted(taus, gl0)
-        gi1 = np.searchsorted(taus, gl1)
-
-        lag = taus[:, None] - taus[None, :]
-        eye = 1e-9 * np.eye(len(taus))
-
-        C0 = look(A0_t, lag); C0 = (C0 + C0.conj().T) / 2 + eye
-        L0 = np.linalg.cholesky(C0).astype(np.complex64)
-
-        m = max(nsamp // step0, 256)
-        w0 = (rng.standard_normal((m, len(taus)), dtype=np.float32)
-              + 1j * rng.standard_normal((m, len(taus)), dtype=np.float32)) / np.float32(np.sqrt(2))
-        n0 = (w0 @ L0.T) * np.float32(_SIG)
-
-        if Amid_t is not None:
-            Cmid = look(Amid_t, lag); Cmid = (Cmid + Cmid.conj().T) / 2 + eye
-            Lmid = np.linalg.cholesky(Cmid).astype(np.complex64)
-            wmid = (rng.standard_normal((m, len(taus)), dtype=np.float32)
-                    + 1j * rng.standard_normal((m, len(taus)), dtype=np.float32)) / np.float32(np.sqrt(2))
-            nmid = (wmid @ Lmid.T) * np.float32(_SIG)
-        else:
-            nmid = np.float32(0.0)
-
-        if Aout_t is not None:
-            Cout = look(Aout_t, lag); Cout = (Cout + Cout.conj().T) / 2 + eye
-            Lout = np.linalg.cholesky(Cout).astype(np.complex64)
-            wout = (rng.standard_normal((m, len(taus)), dtype=np.float32)
-                    + 1j * rng.standard_normal((m, len(taus)), dtype=np.float32)) / np.float32(np.sqrt(2))
-            nout = (wout @ Lout.T) * np.float32(_SIG)
-        else:
-            nout = np.float32(0.0)
-
-        sf = look(Af_t, taus - off).astype(np.complex64)
-        s0 = look(A0_t, taus - off).astype(np.complex64)
-        s1 = look(A1_t, taus - off).astype(np.complex64)
-
-        n1 = np.float32(np.sqrt(f0 / f1)) * n0 + np.float32(np.sqrt(df / f1)) * nmid
-        nfull = np.float32(np.sqrt(f1)) * n1 + np.float32(np.sqrt(1 - f1)) * nout
-
-        z_fine = np.float32(snr) * sf[None, :] + nfull
-        z1 = np.float32(snr * np.sqrt(f1)) * s1[None, :] + n1
-        z0 = np.float32(snr * np.sqrt(f0)) * s0[None, :] + n0
-
-        F_all.append(np.abs(z_fine).max(1))
-        C1_all.append(np.abs(z1)[:, gi1].max(1))
-        C0_all.append(np.abs(z0)[:, gi0].max(1))
-
-    return np.concatenate(C0_all), np.concatenate(C1_all), np.concatenate(F_all)
-
-
-def _conditional_cascade(power, n, band0, band1, snr, nsamp, seed=13):
-    """Draws of (c0, c1) for pairs that survive the fine detection cut."""
-    p = np.asarray(power, dtype=np.float64)
-    if (p.shape != (n,) or not np.isfinite(p).all() or (p < 0).any()
-            or not np.isfinite(p.sum()) or p.sum() <= 0):
-        raise ValueError("power must be a finite nonnegative length-n profile with positive sum")
-    p = p / p.sum()
-    sig = _profile_sig(p)
-    key = (sig, n, band0, band1, float(snr), nsamp, seed)
-    hit = _CACHE.get(key)
-    if hit is not None:
-        _CACHE.move_to_end(key)
-        return hit
-
-    params = (n, band0, band1, float(snr), int(nsamp), int(seed))
-    norm_p = np.linalg.norm(p)
-    if norm_p > 0:
-        p_unit = (p / norm_p).astype(np.float32)
-        for u_vec, prev in _COND_CASCADE_ENTRIES.get(params, []):
-            if float(np.dot(p_unit, u_vec)) >= 0.985:
-                _CACHE[key] = prev
-                return prev
-
-    got = _samples_cascade(p, n, band0, band1, snr, nsamp, seed)
-    if got is None:
-        return None
-    c0, c1, fine = got
-    mask = fine >= snr
-    kept = (c0[mask], c1[mask])
-    size = len(key[0]) + kept[0].nbytes + kept[1].nbytes
-    used = sum(len(k[0]) + _entry_bytes(v) for k, v in _CACHE.items())
-    while _CACHE and (len(_CACHE) >= _CACHE_MAX or used + size > _CACHE_BYTES):
-        oldkey, old = _CACHE.popitem(last=False)
-        used -= len(oldkey[0]) + _entry_bytes(old)
-    if size <= _CACHE_BYTES:
-        _CACHE[key] = kept
-    if norm_p > 0:
-        _COND_CASCADE_ENTRIES.setdefault(params, []).append((p_unit, kept))
-    return kept
-
-
-def gate_for_cascade(power, n, band0, band1, snr, fd):
-    """Derive (gate0, gate1) compound thresholds guaranteeing compound FDR <= fd.
-
-    Optimizes the allocation of false dismissal budget between Tier 0 and Tier 1
-    to minimize expected computational cost while strictly satisfying compound FDR <= fd.
-    """
-    _validate_cascade(n, band0, band1, snr, fd)
-    p = np.asarray(power, dtype=np.float64)
-    if (p.shape != (n,) or not np.isfinite(p).all() or (p < 0).any()
-            or not np.isfinite(p.sum()) or p.sum() <= 0):
-        raise ValueError("power must be a finite nonnegative length-n profile with positive sum")
-    p_norm = p / p.sum()
-    rkey = (_profile_sig(p_norm), n, band0, band1, float(snr), float(fd))
-    hit = _GATE_CASCADE_RESULT_CACHE.get(rkey)
-    if hit is not None:
-        _GATE_CASCADE_RESULT_CACHE.move_to_end(rkey)
-        return hit
-
-    params = (n, band0, band1, float(snr), float(fd))
-    norm_p = np.linalg.norm(p_norm)
-    if norm_p > 0:
-        p_unit = (p_norm / norm_p).astype(np.float32)
-        for u_vec, prev in _CASCADE_PROFILE_ENTRIES.get(params, []):
-            if float(np.dot(p_unit, u_vec)) >= 0.985:
-                _GATE_CASCADE_RESULT_CACHE[rkey] = prev
-                return prev
-
-    nsamp = _nsamp_for(fd)
-    if fd * nsamp < 8:
-        return None
-    got = _conditional_cascade(power, n, band0, band1, snr, nsamp)
-    if got is None:
-        return None
-    c0_k, c1_k = got
-    M = len(c0_k)
-    # One-sided 95% statistical binomial tolerance bound on finite Monte Carlo draws:
-    # K = floor(M * fd - 1.645 * sqrt(M * fd * (1 - fd)))
-    K = int(np.floor(float(fd) * M - 1.645 * np.sqrt(M * float(fd) * (1.0 - float(fd)))))
-    if K < 1 or M < 16:
-        return None
-
-    best = None
-    best_cost = float('inf')
-    cost0 = band0 * np.log2(band0)
-    cost1 = band1 * np.log2(band1)
-    cost_fine = n * np.log2(n)
-
-    c0_sort = np.sort(c0_k)
-
-    for alpha in np.linspace(0.10, 0.80, 36):
-        k0 = int(np.floor(alpha * K))
-        if k0 < 1:
-            continue
-        g0 = float(c0_sort[k0])
-        surv = c0_k >= g0
-        d0 = int((c0_k < g0).sum())
-        k1 = K - d0
-        if k1 < 0 or surv.sum() <= k1:
-            continue
-        g1 = float(np.sort(c1_k[surv])[k1])
-        actual_d = int(((c0_k < g0) | (c1_k < g1)).sum())
-        if actual_d > K:
-            continue
-
-        p0 = 1.0 - (1.0 - np.exp(-0.5 * g0**2))**band0
-        p1 = 1.0 - (1.0 - np.exp(-0.5 * g1**2))**band1
-        tot_cost = cost0 + p0 * cost1 + (p0 * p1) * cost_fine
-
-        if tot_cost < best_cost:
-            best_cost = tot_cost
-            best = (float(g0), float(g1))
-
-    if best is None:
-        k0 = max(1, int(np.floor(0.40 * K)))
-        g0 = float(c0_sort[k0])
-        surv = c0_k >= g0
-        k1 = max(0, K - int((c0_k < g0).sum()))
-        g1 = float(np.sort(c1_k[surv])[k1])
-        best = (float(g0), float(g1))
-
-    if len(_GATE_CASCADE_RESULT_CACHE) >= _CACHE_MAX:
-        _GATE_CASCADE_RESULT_CACHE.popitem(last=False)
-    if norm_p > 0:
-        _CASCADE_PROFILE_ENTRIES.setdefault(params, []).append((p_unit, best))
-    _save_disk_cache(cascade_entry=(rkey, best))
-    return best
+    return float(kept[idx])

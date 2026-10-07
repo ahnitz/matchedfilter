@@ -22,8 +22,7 @@ def worker(fixture, variant):
     if not 1 <= nt <= int(d['nbatch']):
         raise ValueError('template count must fit the capture')
     d['series'] = d['series'] * np.float32(variant['scale'])
-    p = mf.HierarchicalFilter(n, 1, nt, snr=float(d['threshold']),
-                             fd=float(d['fd']), band=1024, taps=8)
+    p = mf.HierarchicalFilter(n, 1, nt, snr=float(d['threshold']), fd=float(d['fd']), chain=1024)
     p.set_reference(d['reference'])
     p.set_templates(d['templates'][:nt])
     if float(d['first_stage']) > 0:
