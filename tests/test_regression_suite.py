@@ -144,7 +144,7 @@ def test_timedomain_filterbank_noise_contract(engine):
         engine=engine, threshold=6.0, false_dismissal=0.001
     )
     bank.set_reference(ref_w, delta_f=1.0)
-    res = bank.filter_series(noise_ser, valid_slice=valid_slice)
+    res = bank.filter_series(noise_ser, windows=valid_slice)
 
     n_trigs = len(res[0]) if res is not None else 0
     assert n_trigs <= 2, f"Engine {engine} produced {n_trigs} false alarms on unit noise at threshold 6.0!"
@@ -184,7 +184,7 @@ def test_signal_injection_recovery(engine):
         engine=engine, threshold=6.0, false_dismissal=0.001
     )
     bank.set_reference(ref_w, delta_f=1.0)
-    res = bank.filter_series(test_ser, valid_slice=valid_slice)
+    res = bank.filter_series(test_ser, windows=valid_slice)
     tmpl_ids, samp_ids, snrs = res[0], res[1], res[2]
 
     match = (tmpl_ids == inj_tmpl_idx)
@@ -306,7 +306,7 @@ def test_autotune_threshold_contract_during_tuning():
         engine='hier', threshold=6.0, false_dismissal=0.001
     )
     bank.set_reference(ref_w, delta_f=1.0)
-    res = bank.filter_series(noise_ser, valid_slice=valid_slice)
+    res = bank.filter_series(noise_ser, windows=valid_slice)
 
     n_trigs = len(res[0]) if res is not None else 0
     assert n_trigs <= 2, f"Active autotuning produced {n_trigs} false triggers at threshold 6.0!"
@@ -415,7 +415,7 @@ def test_timedomain_multigroup_real_bank_contract():
             engine="hier", threshold=6.0, false_dismissal=0.001
         )
         bank.set_reference(ref_w, delta_f=1.0)
-        res = bank.filter_series(noise, valid_slice=valid_slice)
+        res = bank.filter_series(noise, windows=valid_slice)
         n_trigs = len(res.template_indices) if res is not None else 0
         assert n_trigs <= 2, f"Excessive triggers ({n_trigs}) at threshold 6.0 on Gaussian noise"
 
@@ -469,11 +469,11 @@ def test_hierarchical_fine_fir_throughput_contract():
     bank.set_reference(ref_w, delta_f=1.0)
 
     # Warmup
-    bank.filter_series(noise[:65536], valid_slice=slice(4096, 65536 - 4096))
+    bank.filter_series(noise[:65536], windows=slice(4096, 65536 - 4096))
 
     # Timed run
     t0 = time.perf_counter()
-    res = bank.filter_series(noise, valid_slice=valid_slice)
+    res = bank.filter_series(noise, windows=valid_slice)
     elapsed = time.perf_counter() - t0
 
     n_tmpls = len(taps)
@@ -510,7 +510,7 @@ def test_hierarchical_cpu_cascade_and_empty_contract():
     bank.set_reference(ref_w, delta_f=1.0)
     # Zero-noise input guaranteed to produce zero triggers at threshold 6.0
     zero_noise = np.zeros(65536, dtype=np.complex64)
-    res = bank.filter_series(zero_noise, valid_slice=slice(4096, 65536 - 4096))
+    res = bank.filter_series(zero_noise, windows=slice(4096, 65536 - 4096))
     assert res is _EMPTY_FILTER_RESULTS, "Expected singleton _EMPTY_FILTER_RESULTS on zero-trigger output"
 
 
@@ -638,12 +638,12 @@ def run_suite():
             engine=eng, threshold=6.0, false_dismissal=0.001
         )
         bank.set_reference(ref_w, delta_f=1.0)
-        bank.filter_series(noise_ser[:8192], valid_slice=slice(2048, 6144))
+        bank.filter_series(noise_ser[:8192], windows=slice(2048, 6144))
 
         iters = 5
         t0 = time.perf_counter()
         for _ in range(iters):
-            res = bank.filter_series(noise_ser, valid_slice=valid_slice)
+            res = bank.filter_series(noise_ser, windows=valid_slice)
         elapsed = (time.perf_counter() - t0) / iters
 
         n_trigs = len(res[0]) if res is not None else 0
@@ -720,7 +720,9 @@ def run_suite():
             })
             print(f"  MultiGroup Screening (29 gps, {n_tmpls_tot} tmpls, 2 det) | Latency: {elapsed_screen*1000:6.1f} ms | Rate: {rate_screen/1e6:5.2f} M tmpl-s/s")
             print(f"  MultiGroup Noise     (29 gps, {n_tmpls_tot} tmpls, 2 det) | Latency: {elapsed_noise*1000:6.1f} ms | Rate: {rate_noise/1e6:5.2f} M tmpl-s/s")
-        except Exception as e:
+        except (ImportError, FileNotFoundError) as e:
+            # Only a missing pycbc or bank is a skip.  Anything else (e.g. a
+            # TypeError from a stale pycbc call into this library) must fail.
             print(f"  MultiGroup Top 7 benchmark skipped ({e})")
 
     # 4. UpperReferenceBatch
@@ -809,7 +811,7 @@ def run_suite():
             engine=eng, threshold=6.0, false_dismissal=0.001
         )
         bank.set_reference(ref_w, delta_f=1.0)
-        res = bank.filter_series(test_ser, valid_slice=valid_slice)
+        res = bank.filter_series(test_ser, windows=valid_slice)
         tmpl_ids, samp_ids, snrs = res[0], res[1], res[2]
         match = (tmpl_ids == inj_tmpl_idx)
         if np.any(match):

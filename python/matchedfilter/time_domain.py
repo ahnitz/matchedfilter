@@ -30,6 +30,77 @@ _EMPTY_FILTER_RESULTS = FilterResults(
 )
 
 
+def _is_index(x) -> bool:
+    return isinstance(x, (int, np.integer)) and not isinstance(x, (bool, np.bool_))
+
+
+def _normalize_windows(windows, S: int) -> np.ndarray:
+    """Analysis windows as a sorted, disjoint int64 (K, 2) array of [start, stop).
+
+    Accepts None (the whole series), a slice, a sequence of slices or
+    (start, stop) pairs, or a (K, 2) integer array.  Each interval follows
+    Python slice rules (None, negative indices, clipping to [0, S]); empty ones
+    are dropped and overlapping or touching ones merged, so the result depends
+    only on the union of samples.  A bare pair [a, b] is rejected: it is
+    ambiguous, and slice(a, b) or [(a, b)] says it plainly."""
+    if windows is None:
+        return np.array([[0, S]], dtype=np.int64) if S > 0 else np.empty((0, 2), dtype=np.int64)
+    if isinstance(windows, slice):
+        items = [windows]
+    elif isinstance(windows, np.ndarray):
+        if windows.ndim != 2 or windows.shape[1] != 2:
+            raise ValueError(f"windows array must have shape (K, 2), got {windows.shape}")
+        if windows.dtype.kind not in "iu":
+            raise TypeError(f"windows array must be integer, got dtype {windows.dtype}")
+        items = [(int(a), int(b)) for a, b in windows.tolist()]
+    else:
+        try:
+            items = list(windows)
+        except TypeError:
+            raise TypeError("windows must be None, a slice, a sequence of slices or "
+                            "(start, stop) pairs, or a (K, 2) integer array") from None
+        if len(items) == 2 and all(_is_index(x) for x in items):
+            raise ValueError("windows=[a, b] is ambiguous; pass slice(a, b) or [(a, b)]")
+    pairs = []
+    for it in items:
+        if isinstance(it, slice):
+            if it.step not in (None, 1):
+                raise ValueError("window slices must have step 1")
+            for v in (it.start, it.stop):
+                if v is not None and not _is_index(v):
+                    raise TypeError(f"window bounds must be integers, got {v!r}")
+            sl = it
+        else:
+            try:
+                seq = tuple(it)
+            except TypeError:
+                raise TypeError(f"each window must be a slice or a (start, stop) pair, got {it!r}") from None
+            if len(seq) != 2 or not all(_is_index(v) for v in seq):
+                raise TypeError(f"each window must be a slice or an integer (start, stop) pair, got {it!r}")
+            sl = slice(int(seq[0]), int(seq[1]))
+        a, b, _ = sl.indices(S)
+        if b > a:
+            pairs.append((a, b))
+    if not pairs:
+        return np.empty((0, 2), dtype=np.int64)
+    pairs.sort()
+    merged = [list(pairs[0])]
+    for a, b in pairs[1:]:
+        if a <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], b)
+        else:
+            merged.append([a, b])
+    return np.asarray(merged, dtype=np.int64)
+
+
+def _interval_mask(S: int, starts: np.ndarray, stops: np.ndarray) -> np.ndarray:
+    """Boolean mask of length S that is True on the union of [starts, stops)."""
+    edge = np.zeros(S + 1, dtype=np.int32)
+    np.add.at(edge, np.clip(starts, 0, S), 1)
+    np.add.at(edge, np.clip(stops, 0, S), -1)
+    return np.cumsum(edge[:-1]) > 0
+
+
 def _partition_templates(
     counts: np.ndarray,
     max_batch: Optional[int] = None,
@@ -563,10 +634,40 @@ class TimeDomainFilterBank:
             _REF_PROFILE_CACHE[p_key] = w
         self.set_reference(w, delta_f=df)
 
+    @staticmethod
+    def _window_layout(g: "_TemplateGroup", W: np.ndarray, S: int):
+        """Block entries (start, window start, window end) for normalised windows W.
+
+        One entry per (block, window) pair: two windows inside one block give
+        two entries for the same start, each with its own peak-search span, so
+        a peak in the gap can never be reported or displace a real one.
+        Per window this is the bank's established vectorised layout."""
+        STEP = g.n_valid
+        c_bad = g.c_bad
+        N_valid = g.n_valid
+        parts_t, parts_s, parts_e = [], [], []
+        for v_start, v_stop in W.tolist():
+            first_block_idx = max(0, (v_start - c_bad) // STEP)
+            ts = np.arange(first_block_idx * STEP, S, STEP, dtype=np.int64)
+            bvt0 = ts + c_bad
+            keep = (bvt0 < v_stop) & (bvt0 + N_valid > v_start)
+            ts = ts[keep]
+            if not ts.size:
+                continue
+            rs = np.maximum(v_start, bvt0[keep])
+            re = np.minimum(v_stop, bvt0[keep] + N_valid)
+            good = re > rs
+            parts_t.append(ts[good]); parts_s.append((rs - ts)[good]); parts_e.append((re - ts)[good])
+        if not parts_t:
+            empty = np.empty(0, np.uintp)
+            return empty, empty, empty
+        cat = (lambda xs: np.ascontiguousarray(np.concatenate(xs), dtype=np.uintp))
+        return cat(parts_t), cat(parts_s), cat(parts_e)
+
     def filter_series(
         self,
         series: np.ndarray,
-        valid_slice: Optional[slice] = None,
+        windows=None,
         binsize: Optional[int] = None,
         threshold: Optional[float] = None,
         template_index: Optional[int] = None
@@ -574,8 +675,17 @@ class TimeDomainFilterBank:
         """Filter a continuous series across all template groups (or a specific template).
 
         Parameters:
-            series: Continuous data series (e.g. complex reference SNR).
-            valid_slice: Analysis window slice(start, stop). None analyzes whole series.
+            series: Continuous data series (e.g. complex reference SNR). The
+                hierarchical engine's coarse gate is calibrated for an analytic
+                (positive-frequency) series, which is what pycbc passes.
+            windows: Analysis windows in series coordinates: None (the whole
+                series), a slice, a sequence of slices or (start, stop) pairs,
+                or a (K, 2) integer array. Python slice rules apply; overlapping
+                or touching windows merge, so the result depends only on the
+                union of samples. One call returns exactly what one call per
+                (merged) window would, and a block that no window intersects
+                is never computed. Each peak search stays inside its window.
+                Padding for filter context is the caller's job.
             binsize: Bins per block. Defaults to block size N (1 bin per block).
             threshold: Optional SNR threshold override. None uses bank threshold.
             template_index: Optional single template index to filter.
@@ -593,11 +703,9 @@ class TimeDomainFilterBank:
             raise ValueError("series must be a 1D array")
         S = len(ser)
 
-        if valid_slice is not None:
-            v_start = 0 if valid_slice.start is None else int(valid_slice.start)
-            v_stop = S if valid_slice.stop is None else int(valid_slice.stop)
-        else:
-            v_start, v_stop = 0, S
+        W = _normalize_windows(windows, S)
+        if W.shape[0] == 0:
+            return _EMPTY_FILTER_RESULTS
 
         if template_index is not None:
             if template_index < 0 or template_index >= self.n_templates:
@@ -611,7 +719,7 @@ class TimeDomainFilterBank:
         out_tstarts = []
         out_block_lens = []
 
-        cache_key = (S, v_start, v_stop)
+        cache_key = (S, W.tobytes())
 
         if template_index is not None:
             if template_index < 0 or template_index >= self.n_templates:
@@ -628,62 +736,12 @@ class TimeDomainFilterBank:
                 active_plan = g.plan
 
             N = g.n
-            c_bad = g.c_bad
-            N_valid = g.n_valid
-            STEP = N_valid
-
-            is_narrow = (template_index is not None) or ((v_stop - v_start) < 4 * N_valid)
-            if is_narrow:
-                first_b = max(0, int((v_start - c_bad) // STEP))
-                last_b = min(max(0, int((S - 1) // STEP)), int((v_stop - 1 - c_bad) // STEP))
-                if last_b < first_b:
-                    bstarts = np.empty(0, np.uintp)
-                    bws = np.empty(0, np.uintp)
-                    bwe = np.empty(0, np.uintp)
-                else:
-                    bstarts_list = []
-                    bws_list = []
-                    bwe_list = []
-                    for b_idx in range(first_b, last_b + 1):
-                        t = b_idx * STEP
-                        if t >= S:
-                            break
-                        bvt0 = t + c_bad
-                        rs = max(v_start, bvt0)
-                        re = min(v_stop, bvt0 + N_valid)
-                        if re > rs:
-                            bstarts_list.append(t)
-                            bws_list.append(rs - t)
-                            bwe_list.append(re - t)
-                    bstarts = np.asarray(bstarts_list, dtype=np.uintp)
-                    bws = np.asarray(bws_list, dtype=np.uintp)
-                    bwe = np.asarray(bwe_list, dtype=np.uintp)
+            layout = g._cached_layout
+            if layout is None or layout[0] != cache_key:
+                bstarts, bws, bwe = self._window_layout(g, W, S)
+                g._cached_layout = (cache_key, bstarts, bws, bwe)
             else:
-                layout = g._cached_layout
-                if layout is None or layout[0] != cache_key:
-                    first_block_idx = max(0, int(np.floor((v_start - c_bad) / STEP)))
-                    loop_start = first_block_idx * STEP
-                    ts = np.arange(loop_start, S, STEP, dtype=np.uintp)
-
-                    bvt0 = ts + c_bad
-                    keep = (bvt0 < v_stop) & (bvt0 + N_valid > v_start)
-                    if keep.any():
-                        last = np.flatnonzero(bvt0 < v_stop)
-                        keep &= np.arange(ts.size) <= last[-1]
-                    ts = ts[keep]
-                    if not ts.size:
-                        g._cached_layout = (cache_key, np.empty(0, np.uintp), np.empty(0, np.uintp), np.empty(0, np.uintp))
-                        continue
-
-                    rs = np.maximum(v_start, bvt0[keep])
-                    re = np.minimum(v_stop, bvt0[keep] + N_valid)
-                    good = re > rs
-                    bstarts = np.ascontiguousarray(ts[good], dtype=np.uintp)
-                    bws = np.ascontiguousarray((rs - ts)[good], dtype=np.uintp)
-                    bwe = np.ascontiguousarray((re - ts)[good], dtype=np.uintp)
-                    g._cached_layout = (cache_key, bstarts, bws, bwe)
-                else:
-                    _, bstarts, bws, bwe = layout
+                _, bstarts, bws, bwe = layout
 
             if bstarts.size == 0:
                 continue
@@ -785,10 +843,8 @@ class TimeDomainFilterBank:
     @staticmethod
     def _block_coverage(S: int, st: np.ndarray, lo: int, hi: int) -> np.ndarray:
         """Samples written by blocks starting at st, each valid over [st+lo, st+hi)."""
-        mask = np.zeros(S, dtype=bool)
-        for s0 in st.tolist():
-            mask[s0 + lo:min(s0 + hi, S)] = True
-        return mask
+        b0 = st.astype(np.int64) + lo
+        return _interval_mask(S, b0, np.minimum(b0 + (hi - lo), S))
 
     def _correlate_group(self, g: "_TemplateGroup", ser: np.ndarray, st: np.ndarray,
                          t0: int, nt: int, dest: np.ndarray) -> None:
@@ -829,10 +885,38 @@ class TimeDomainFilterBank:
         cover = self._block_coverage(S, st, lo, hi)
         dest[:, cover] = ws[:, cover]
 
+    def _correlate_windows(self, g: "_TemplateGroup", ser: np.ndarray, W: np.ndarray,
+                           t0: int, nt: int, dest: np.ndarray) -> None:
+        """Fill dest (nt, S) for group rows [t0, t0+nt): the correlation inside the
+        union of W (where blocks compute it), exact zeros everywhere else.
+
+        Only blocks whose valid span intersects a window are computed, each once
+        even when several windows touch it."""
+        from . import _automatic_series_layout
+        S = ser.size
+        keep = np.zeros(S, dtype=bool)
+        if W.shape[0]:
+            cplan = g.get_correlation_plan()
+            lo, hi = cplan.valid
+            st, _, _ = _automatic_series_layout(S, cplan.valid)
+            st = np.asarray(st, dtype=np.uintp)
+            if st.size:
+                b0 = st.astype(np.int64) + lo
+                b1 = np.minimum(st.astype(np.int64) + hi, S)
+                j = np.searchsorted(W[:, 1], b0, side='right')   # first window ending after b0
+                hit = j < W.shape[0]
+                hit[hit] = W[j[hit], 0] < b1[hit]
+                st = st[hit]
+                if st.size:
+                    self._correlate_group(g, ser, st, t0, nt, dest)
+                    keep = (_interval_mask(S, W[:, 0], W[:, 1])
+                            & _interval_mask(S, b0[hit], b1[hit]))
+        dest[:, ~keep] = 0
+
     def correlate_series(
         self,
         series: np.ndarray,
-        valid_slice: Optional[slice] = None,
+        windows=None,
         scales: Optional[Union[np.ndarray, Sequence[float]]] = None,
         template_index: Optional[int] = None,
         out: Optional[np.ndarray] = None,
@@ -845,7 +929,12 @@ class TimeDomainFilterBank:
 
         Parameters:
             series: Continuous data series (1D complex64).
-            valid_slice: Optional analysis window slice(start, stop). None analyzes whole series.
+            windows: Analysis windows in series coordinates, in the same forms as
+                     `filter_series`. Only blocks intersecting a window are
+                     computed. The output holds the correlation inside the union
+                     of the windows and exact zeros everywhere else, including
+                     the parts of partially covered blocks outside every window.
+                     Padding for filter context is the caller's job.
             scales: Optional per-template scale factors. Must have length `n_templates`
                     (or 1 / length matching template if `template_index` is specified).
             template_index: Optional single template index to filter. If specified,
@@ -853,25 +942,26 @@ class TimeDomainFilterBank:
             out: Optional preallocated output array. If `template_index` is None, shape
                  must be `(n_templates, len(series))` and dtype `complex64`. If `template_index`
                  is specified, shape can be `(len(series),)` or `(1, len(series))`.
+                 Every sample is overwritten, so it need not be cleared.
                  If None, a new array is allocated.
 
         Returns:
             If `template_index` is None: 2D complex64 array of shape `(n_templates, len(series))`.
             If `template_index` is specified: 1D complex64 array of shape `(len(series),)`.
         """
-        from . import _from_any, _automatic_series_layout
+        from . import _from_any
 
         ser = np.ascontiguousarray(_from_any(series), dtype=np.complex64)
         if ser.ndim != 1:
             raise ValueError("series must be a 1D array")
         S = ser.size
         nt = self.n_templates
+        W = _normalize_windows(windows, S)
 
         if template_index is not None:
             if template_index < 0 or template_index >= nt:
                 raise IndexError(f"template_index {template_index} out of range [0, {nt})")
             target_g, ti_local = self._template_map[template_index]
-            cplan = target_g.get_correlation_plan()
 
             if scales is not None:
                 sc_arr = np.ascontiguousarray(_from_any(scales), dtype=np.float32)
@@ -894,33 +984,10 @@ class TimeDomainFilterBank:
                     out_2d = out
                 else:
                     raise ValueError(f"out shape {out.shape} must match ({S},) or (1, {S})")
-                if valid_slice is not None:
-                    out_2d.fill(0)
             else:
-                out_2d = np.zeros((1, S), dtype=np.complex64) if valid_slice is not None else np.empty((1, S), dtype=np.complex64)
+                out_2d = np.empty((1, S), dtype=np.complex64)
 
-            st, _, _ = _automatic_series_layout(S, cplan.valid)
-            if valid_slice is not None:
-                vs = 0 if valid_slice.start is None else int(valid_slice.start)
-                ve = S if valid_slice.stop is None else int(valid_slice.stop)
-                if vs < 0:
-                    vs = max(0, S + vs)
-                if ve < 0:
-                    ve = max(0, S + ve)
-                lo, hi = cplan.valid
-                b_start = st + lo
-                b_end = np.minimum(st + hi, S)
-                keep = (b_start < ve) & (b_end > vs)
-                st = st[keep] if keep.any() else np.empty(0, dtype=np.uintp)
-            else:
-                out_2d[:, :cplan.valid[0]] = 0
-                if st.size > 0:
-                    last_end = min(S, st[-1] + cplan.valid[1])
-                    if last_end < S:
-                        out_2d[:, last_end:] = 0
-
-            self._correlate_group(target_g, ser, st, ti_local, 1, out_2d)
-
+            self._correlate_windows(target_g, ser, W, ti_local, 1, out_2d)
             if single_scale is not None:
                 np.multiply(out_2d, single_scale[:, None], out=out_2d)
 
@@ -943,53 +1010,27 @@ class TimeDomainFilterBank:
                or not out.flags.writeable:
                 raise ValueError(f"out must be a writable C-contiguous complex64 array of shape {shape}")
             result = out
-            if valid_slice is not None:
-                result.fill(0)
         else:
-            result = np.zeros(shape, dtype=np.complex64) if valid_slice is not None else np.empty(shape, dtype=np.complex64)
+            result = np.empty(shape, dtype=np.complex64)
 
         for g in self._groups:
-            cplan = g.get_correlation_plan()
             g_indices = g.template_indices
             g_cnt = len(g_indices)
             if g_cnt == 0:
                 continue
-            g_scales = scales_arr[g_indices] if scales_arr is not None else None
-
             is_contiguous_slice = (
                 (g_indices[-1] - g_indices[0] + 1 == g_cnt) and
                 np.array_equal(g_indices, np.arange(g_indices[0], g_indices[0] + g_cnt))
             )
-
-            st, _, _ = _automatic_series_layout(S, cplan.valid)
-            if valid_slice is not None:
-                vs = 0 if valid_slice.start is None else int(valid_slice.start)
-                ve = S if valid_slice.stop is None else int(valid_slice.stop)
-                if vs < 0:
-                    vs = max(0, S + vs)
-                if ve < 0:
-                    ve = max(0, S + ve)
-                lo, hi = cplan.valid
-                b_start = st + lo
-                b_end = np.minimum(st + hi, S)
-                keep = (b_start < ve) & (b_end > vs)
-                st = st[keep] if keep.any() else np.empty(0, dtype=np.uintp)
-
             if is_contiguous_slice:
                 g_dest = result[g_indices[0] : g_indices[0] + g_cnt]
             else:
                 # Interleaved templates: compute into a group-sized array, then scatter.
-                g_dest = np.zeros((g_cnt, S), dtype=np.complex64)
-            if valid_slice is None:
-                g_dest[:, :cplan.valid[0]] = 0
-                last_end = min(S, int(st[-1]) + cplan.valid[1]) if st.size else 0
-                g_dest[:, last_end:] = 0
-            self._correlate_group(g, ser, st, 0, g_cnt, g_dest)
-            if g_scales is not None:
-                np.multiply(g_dest, g_scales[:, None], out=g_dest)
+                g_dest = np.empty((g_cnt, S), dtype=np.complex64)
+            self._correlate_windows(g, ser, W, 0, g_cnt, g_dest)
+            if scales_arr is not None:
+                np.multiply(g_dest, scales_arr[g_indices][:, None], out=g_dest)
             if not is_contiguous_slice:
                 result[g_indices] = g_dest
 
         return result
-
-    process_segment = filter_series

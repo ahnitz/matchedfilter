@@ -231,8 +231,8 @@ class TestNoiseFloorInvariant:
         )
 
         noise = (rng.standard_normal(S_len) + 1j * rng.standard_normal(S_len)).astype(np.complex64)
-        res_h = bank_hier.filter_series(noise, valid_slice=slice(N, S_len - N), threshold=6.0)
-        res_b = bank_base.filter_series(noise, valid_slice=slice(N, S_len - N), threshold=6.0)
+        res_h = bank_hier.filter_series(noise, windows=slice(N, S_len - N), threshold=6.0)
+        res_b = bank_base.filter_series(noise, windows=slice(N, S_len - N), threshold=6.0)
 
         assert len(res_h.snr) == 0, f"False alarm violation! HierarchicalFilter produced {len(res_h.snr)} triggers at rho >= 6.0 in pure noise"
         assert len(res_b.snr) == 0, f"False alarm violation in baseline! Produced {len(res_b.snr)} triggers at rho >= 6.0"
@@ -284,9 +284,9 @@ class TestSNRLadderAndFidelity:
         inj_waveform = t_tap * np.exp(1j * inj_phase) * target_snr
         noise[inj_time:inj_time + len(t_tap)] += inj_waveform
 
-        res_hier = bank_hier.filter_series(noise, valid_slice=slice(N, S_len - N),
+        res_hier = bank_hier.filter_series(noise, windows=slice(N, S_len - N),
                                            template_index=target_template_idx, threshold=5.0)
-        res_base = bank_base.filter_series(noise, valid_slice=slice(N, S_len - N),
+        res_base = bank_base.filter_series(noise, windows=slice(N, S_len - N),
                                            template_index=target_template_idx, threshold=5.0)
 
         assert len(res_hier.snr) > 0, f"SNR {target_snr}: HierarchicalFilter failed to recover injection"
@@ -347,9 +347,9 @@ class TestTimingAndPhaseInvariance:
             noise = np.zeros(S_len, dtype=np.complex64)
             noise[inj_pos:inj_pos + len(t_tap)] = t_tap * 12.0
 
-            r_h = bank_hier.filter_series(noise, valid_slice=slice(N, S_len - N),
+            r_h = bank_hier.filter_series(noise, windows=slice(N, S_len - N),
                                           template_index=target_template_idx, threshold=6.0)
-            r_b = bank_base.filter_series(noise, valid_slice=slice(N, S_len - N),
+            r_b = bank_base.filter_series(noise, windows=slice(N, S_len - N),
                                           template_index=target_template_idx, threshold=6.0)
 
             assert len(r_h.sample_indices) == 1
@@ -391,9 +391,9 @@ class TestTimingAndPhaseInvariance:
             noise = np.zeros(S_len, dtype=np.complex64)
             noise[inj_pos:inj_pos + len(t_tap)] = t_tap * 15.0 * np.exp(1j * ang)
 
-            r_h = bank_hier.filter_series(noise, valid_slice=slice(N, S_len - N),
+            r_h = bank_hier.filter_series(noise, windows=slice(N, S_len - N),
                                           template_index=target_template_idx, threshold=6.0)
-            r_b = bank_base.filter_series(noise, valid_slice=slice(N, S_len - N),
+            r_b = bank_base.filter_series(noise, windows=slice(N, S_len - N),
                                           template_index=target_template_idx, threshold=6.0)
 
             assert len(r_h.snr) == 1
@@ -430,7 +430,7 @@ class TestBoundaryAndNegativeConditions:
         noise = np.zeros(S_len, dtype=np.complex64)
         noise[3000:3000 + len(t_tap)] = t_tap * 10.0
 
-        res = bank.filter_series(noise, valid_slice=slice(v_start, v_stop), threshold=5.0)
+        res = bank.filter_series(noise, windows=slice(v_start, v_stop), threshold=5.0)
         assert len(res.sample_indices) > 0
         for s in res.sample_indices:
             assert v_start <= s < v_stop, f"Trigger index {s} outside valid window [{v_start}, {v_stop})"

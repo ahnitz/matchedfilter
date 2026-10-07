@@ -1306,7 +1306,7 @@ class CorrelationFilter(MatchedFilter):
             np.multiply(result, sc[None, :, None], out=result)
         return result
 
-    def run_series(self, series, starts=None, templates=None, out=None, valid_slice=None, scales=None):
+    def run_series(self, series, starts=None, templates=None, out=None, scales=None):
         """Correlate a series into continuous output over the configured valid window.
 
         With explicit ``starts``, preserve the block-major full-output form.
@@ -1318,21 +1318,6 @@ class CorrelationFilter(MatchedFilter):
             if out is not None:
                 raise ValueError('automatic run_series owns its output; omit out')
             st, _, _ = _automatic_series_layout(ser.size, self.valid)
-            if valid_slice is not None:
-                vs = 0 if valid_slice.start is None else int(valid_slice.start)
-                ve = ser.size if valid_slice.stop is None else int(valid_slice.stop)
-                if vs < 0:
-                    vs = max(0, ser.size + vs)
-                if ve < 0:
-                    ve = max(0, ser.size + ve)
-                lo, hi = self.valid
-                b_start = st + lo
-                b_end = np.minimum(st + hi, ser.size)
-                keep = (b_start < ve) & (b_end > vs)
-                if keep.any():
-                    st = st[keep]
-                else:
-                    st = np.empty(0, dtype=np.uintp)
             t0, nt = (0, self.ntemplates) if templates is None else (
                 int(templates[0]), int(templates[1]))
             if nt < 1 or t0 < 0 or t0 + nt > self.ntemplates:
@@ -1349,8 +1334,6 @@ class CorrelationFilter(MatchedFilter):
                           if self._gpu is not None else self.empty_shared(shape))
                 result[:, :self.valid[0]] = 0
                 self._continuous_output = result
-            if valid_slice is not None:
-                result.fill(0)
             self._dataset = False
             self._data_ready = set()
             if self._gpu is not None:

@@ -36,7 +36,7 @@ def test_time_domain_filter_bank_dif_exact_parity():
         tap_sample_rate=2048, data_sample_rate=2048,
         engine='dif', threshold=5.0
     )
-    res_dif = b_dif.filter_series(noise, valid_slice=valid_slice)
+    res_dif = b_dif.filter_series(noise, windows=valid_slice)
 
     # 2. DIF bank via bandlimited=True
     b_bl = mf.TimeDomainFilterBank(
@@ -44,7 +44,7 @@ def test_time_domain_filter_bank_dif_exact_parity():
         tap_sample_rate=2048, data_sample_rate=2048,
         bandlimited=True, threshold=5.0
     )
-    res_bl = b_bl.filter_series(noise, valid_slice=valid_slice)
+    res_bl = b_bl.filter_series(noise, windows=valid_slice)
 
     assert len(res_dif.template_indices) > 0
     assert len(res_dif.template_indices) == len(res_bl.template_indices)
@@ -70,10 +70,10 @@ def test_time_domain_filter_bank_dif_single_template():
         engine='dif', threshold=5.0
     )
 
-    res_all = b_dif.filter_series(noise, valid_slice=valid_slice)
+    res_all = b_dif.filter_series(noise, windows=valid_slice)
     
     # Filter single template 3
-    res_3 = b_dif.filter_series(noise, valid_slice=valid_slice, template_index=3)
+    res_3 = b_dif.filter_series(noise, windows=valid_slice, template_index=3)
 
     mask_3 = (res_all.template_indices == 3)
     assert np.sum(mask_3) == len(res_3.template_indices)
@@ -98,8 +98,8 @@ def test_time_domain_filter_bank_dif_binsize():
         engine='dif', threshold=5.0
     )
 
-    res_b512 = b_dif.filter_series(noise, valid_slice=valid_slice, binsize=512)
-    res_b2048 = b_dif.filter_series(noise, valid_slice=valid_slice, binsize=2048)
+    res_b512 = b_dif.filter_series(noise, windows=valid_slice, binsize=512)
+    res_b2048 = b_dif.filter_series(noise, windows=valid_slice, binsize=2048)
 
     # Smaller binsize yields >= number of triggers as larger binsize
     assert len(res_b512.template_indices) >= len(res_b2048.template_indices)

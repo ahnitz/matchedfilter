@@ -141,7 +141,7 @@ def test_trigger_accuracy_flat():
     assert rel_err2 < 1e-4
 
 
-def test_valid_slice_series():
+def test_window_series():
     rng = np.random.default_rng(999)
     counts = [200, 500]
     taps = [rng.standard_normal(c).astype(np.float32) for c in counts]
@@ -162,7 +162,7 @@ def test_valid_slice_series():
     data[50000 - 100 : 50000 - 100 + 200] += taps[0] * 30.0
 
     valid_slice = slice(20000, 40000)
-    results = bank.filter_series(data, valid_slice=valid_slice)
+    results = bank.filter_series(data, windows=valid_slice)
 
     # Triggers must lie entirely within [20000, 40000)
     assert np.all(results.sample_indices >= 20000)
@@ -265,7 +265,7 @@ def test_filter_series_binsize_ragged_edges():
 
     data = (rng.standard_normal(65536) + 1j * rng.standard_normal(65536)).astype(np.complex64)
     # Valid slice with non-aligned boundaries creating ragged edge blocks
-    res = bank.filter_series(data, valid_slice=slice(100, 20000), binsize=200)
+    res = bank.filter_series(data, windows=slice(100, 20000), binsize=200)
     assert isinstance(res, FilterResults)
     if len(res.sample_indices) > 0:
         assert np.all(res.sample_indices >= 100)
@@ -285,7 +285,7 @@ def test_filter_series_single_template_zero_threshold():
     assert len(res_none.sample_indices) == 0
 
     # With threshold=0.0 and binsize=200 over a 2000-sample window, each bin produces a peak
-    res_zero = bank.filter_series(data, valid_slice=slice(5000, 7000), binsize=200, threshold=0.0, template_index=1)
+    res_zero = bank.filter_series(data, windows=slice(5000, 7000), binsize=200, threshold=0.0, template_index=1)
     assert len(res_zero.sample_indices) > 0
     assert np.all(res_zero.template_indices == 1)
     assert np.all(res_zero.sample_indices >= 5000)
@@ -419,8 +419,8 @@ def test_correlate_series_out_and_template_index():
         bank.correlate_series(data, template_index=T)
 
 
-def test_correlate_series_valid_slice():
-    """Verify valid_slice restricts block computation and matches un-sliced output."""
+def test_correlate_series_window():
+    """A window restricts block computation and matches the unwindowed output inside it."""
     rng = np.random.default_rng(999)
     T = 2
     counts = [1001, 3001]
@@ -432,7 +432,7 @@ def test_correlate_series_valid_slice():
     res_full = bank.correlate_series(data)
 
     v_slice = slice(20000, 40000)
-    res_slice = bank.correlate_series(data, valid_slice=v_slice)
+    res_slice = bank.correlate_series(data, windows=v_slice)
 
     # Valid slice window must match full
     np.testing.assert_allclose(res_slice[:, 20000:40000], res_full[:, 20000:40000], atol=1e-5)
@@ -498,19 +498,19 @@ def test_correlate_series_gpu_matches_cpu_for_every_group_layout(layout, window)
     taps, counts = _corr_bank_taps(layout, rng)
     S = 32 * 4096
     ser = ((rng.standard_normal(S) + 1j * rng.standard_normal(S)) / np.sqrt(2)).astype(np.complex64)
-    cpu = TimeDomainFilterBank(taps, counts, engine='corr').correlate_series(ser, valid_slice=window)
+    cpu = TimeDomainFilterBank(taps, counts, engine='corr').correlate_series(ser, windows=window)
     gbank = TimeDomainFilterBank(taps, counts, engine='corr', device=gpu)
-    got = gbank.correlate_series(ser, valid_slice=window)
+    got = gbank.correlate_series(ser, windows=window)
     scale = np.abs(cpu).max()
     assert scale > 0
     assert np.max(np.abs(got - cpu)) <= 1e-5 * scale
     # Same bank, a different window: the shared workspace must not leak the
     # previous call's samples into the new result.
     window2 = slice(60000, 61000)
-    cpu2 = TimeDomainFilterBank(taps, counts, engine='corr').correlate_series(ser, valid_slice=window2)
-    got2 = gbank.correlate_series(ser, valid_slice=window2)
+    cpu2 = TimeDomainFilterBank(taps, counts, engine='corr').correlate_series(ser, windows=window2)
+    got2 = gbank.correlate_series(ser, windows=window2)
     assert np.max(np.abs(got2 - cpu2)) <= 1e-5 * np.abs(cpu2).max()
-    got_t = gbank.correlate_series(ser, valid_slice=window, template_index=3)
+    got_t = gbank.correlate_series(ser, windows=window, template_index=3)
     assert np.max(np.abs(got_t - cpu[3])) <= 1e-5 * scale
 
 
@@ -523,5 +523,5 @@ def test_correlate_series_window_before_first_block_is_zero(layout):
     S = 16 * 4096
     ser = ((rng.standard_normal(S) + 1j * rng.standard_normal(S)) / np.sqrt(2)).astype(np.complex64)
     bank = TimeDomainFilterBank(taps, counts, engine='corr')
-    assert not np.any(bank.correlate_series(ser, valid_slice=slice(0, 50)))
-    assert not np.any(bank.correlate_series(ser, valid_slice=slice(0, 50), template_index=2))
+    assert not np.any(bank.correlate_series(ser, windows=slice(0, 50)))
+    assert not np.any(bank.correlate_series(ser, windows=slice(0, 50), template_index=2))
