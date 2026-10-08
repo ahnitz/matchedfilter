@@ -39,15 +39,50 @@ class _Borrowed:
         pass
 
 
+def _same_device(a, b):
+    """Contexts whose buffers are interchangeable: the same one, or two on one shared
+    device (Vulkan contexts share a logical device per process)."""
+    if a is b:
+        return True
+    da = getattr(a, '_device_state', None)
+    return da is not None and da is getattr(b, '_device_state', None)
+
+
 def shared_buffer(array, ctx):
     """Recognize a contiguous prefix, including through host DLPack imports."""
     if not isinstance(array, np.ndarray) or not array.flags.c_contiguous:
         return None
     allocation = _allocations.get(array.ctypes.data)
-    if (allocation is None or allocation.buffer.ctx is not ctx
+    if (allocation is None or not _same_device(allocation.buffer.ctx, ctx)
             or array.nbytes > allocation.buffer.nbytes):
         return None
     return _Borrowed(allocation)
+
+
+def containing(array, ctx):
+    """(whole allocation as a 1-D array, element offset) when `array` lies inside a shared
+    allocation usable by ctx -- e.g. one row of a device-resident (templates, samples)
+    buffer -- else None. The returned array keeps the allocation alive."""
+    if not isinstance(array, np.ndarray) or not array.flags.c_contiguous or array.nbytes == 0:
+        return None
+    addr, item = array.ctypes.data, array.dtype.itemsize
+    for start, allocation in list(_allocations.items()):
+        nbytes = allocation.buffer.nbytes
+        if (start <= addr and addr + array.nbytes <= start + nbytes
+                and (addr - start) % item == 0 and _same_device(allocation.buffer.ctx, ctx)):
+            whole = _whole.get(start)
+            if whole is None or whole.dtype != array.dtype:
+                storage = (ctypes.c_ubyte * (nbytes - nbytes % item)).from_address(start)
+                storage._allocation = allocation
+                whole = np.ndarray(((nbytes - nbytes % item) // item,), dtype=array.dtype,
+                                   buffer=storage)
+                _whole[start] = whole
+            return whole, (addr - start) // item
+    return None
+
+
+#: One whole-allocation view per allocation, so recordings keyed on it repeat.
+_whole = weakref.WeakValueDictionary()
 
 
 def shared_key(array, ctx):

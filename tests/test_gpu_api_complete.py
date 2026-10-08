@@ -188,9 +188,12 @@ def test_reported_configuration_is_real(filt):
     had no way to tell whether the port was misconfigured or the report was.
     """
     f = filt[0]
-    band, taps = f.config
-    assert band in (128, 256, 512, 1024, 2048)
-    assert taps > 0, "taps reported as %r" % (taps,)
+    chain = tuple(f.config)
+    # The chain is the device's own choice (GPU banks price chains with GPU costs), so its
+    # length is not fixed; what must hold is that it is a real chain.
+    assert 1 <= len(chain) <= 2, "config reported as %r" % (chain,)
+    assert all(b in (64, 128, 256, 512, 1024, 2048) for b in chain), chain
+    assert list(chain) == sorted(chain) and len(set(chain)) == len(chain), chain
 
 
 def test_counters_count(filt):

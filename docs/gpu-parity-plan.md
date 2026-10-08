@@ -415,3 +415,19 @@ or measured on the discrete L40S.
 3. **Host overhead and round trips.** Per-call recording churn (the cache entry limit against
    chain trials x pipelining slots), per-call uploads, and the idle-latency trap. Batching
    (lever 1) removes most of it.
+
+### Falsified on Vulkan (2026-10-08)
+
+- **Per-call import of caller memory** (`VK_EXT_external_memory_host`, the Vulkan counterpart
+  of Metal's `host_view`). The fine stage got 7x slower on the bench: 0.31 -> 2.2 s per
+  4 segments.
+  - Importing pins an 8 MB series' pages (get_user_pages) and forces a new forward recording
+    each call, ~40 ms per call against a ~1-2 ms copy.
+  - The middle output import gained nothing either.
+  - Zero copy on Vulkan has to come from library-owned device allocations with stable
+    addresses: the middle stage writes rows that the fine banks read by offset.
+- **Device-owned middle output read in place by the fine banks.**
+  - The middle stage allocated 216 MB of device memory per call: middle 0.18 -> 0.74 s.
+  - Every new row address keyed a new forward recording, so the fine stage got slower too.
+  - Zero copy needs stable addresses and descriptor rebinding instead of new recordings: part
+    of the fused segment executor, not a patch to the per-call path.
