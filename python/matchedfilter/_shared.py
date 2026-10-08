@@ -3,32 +3,44 @@
 These arrays export CPU DLPack: a Vulkan/Metal allocation is not a CUDA or
 ROCm allocation. Consumers must finish writing before a synchronous filter call.
 """
+import bisect
 import ctypes
 import weakref
 import numpy as np
 
 _allocations = weakref.WeakValueDictionary()
+# Sorted start addresses, for backends that bind views INSIDE an allocation
+# (ctx.shared_views): CUDA unified memory has one address on host and device, so a
+# row of a shared (templates, samples) output is itself a valid device pointer.
+_starts = []
 
 
 class _Allocation:
     def __init__(self, buffer):
         self.buffer = buffer
-        _allocations[int(buffer.ptr.value if hasattr(buffer.ptr, 'value')
-                         else buffer.ptr)] = self
+        start = int(buffer.ptr.value if hasattr(buffer.ptr, 'value') else buffer.ptr)
+        _allocations[start] = self
+        bisect.insort(_starts, start)
 
     def __del__(self):
         buf = self.buffer
+        start = int(buf.ptr.value if hasattr(buf.ptr, 'value') else buf.ptr)
+        i = bisect.bisect_left(_starts, start)
+        if i < len(_starts) and _starts[i] == start:
+            del _starts[i]
         if getattr(buf.ctx, 'device', None):
             buf.destroy()
 
 
 class _Borrowed:
     """A descriptor reference; cache eviction must not free its allocation."""
-    def __init__(self, allocation):
+    def __init__(self, allocation, offset=0):
         self.owner = allocation
+        self.offset = offset
         self.handle = allocation.buffer.handle
-        self.nbytes = allocation.buffer.nbytes
-        self.ptr = allocation.buffer.ptr
+        self.nbytes = allocation.buffer.nbytes - offset
+        base = allocation.buffer.ptr
+        self.ptr = (base.value if hasattr(base, 'value') else base) + offset if offset else base
 
     def write(self, array):
         pointer = self.ptr.value if hasattr(self.ptr, 'value') else self.ptr
@@ -41,22 +53,45 @@ class _Borrowed:
 
 def _same_device(a, b):
     """Contexts whose buffers are interchangeable: the same one, or two on one shared
-    device (Vulkan contexts share a logical device per process)."""
+    device (Vulkan contexts share a logical device per process; CUDA contexts on one
+    device share its primary context)."""
     if a is b:
         return True
     da = getattr(a, '_device_state', None)
     return da is not None and da is getattr(b, '_device_state', None)
 
 
+def _containing(address):
+    """The live allocation whose range starts at or before ``address``."""
+    i = bisect.bisect_right(_starts, address) - 1
+    while i >= 0:
+        start = _starts[i]
+        allocation = _allocations.get(start)
+        if allocation is not None:
+            return start, allocation
+        del _starts[i]           # freed: prune lazily
+        i -= 1
+    return None, None
+
+
 def shared_buffer(array, ctx):
-    """Recognize a contiguous prefix, including through host DLPack imports."""
+    """Recognize a contiguous prefix, including through host DLPack imports.
+
+    A backend declaring ``shared_views`` also gets contiguous views that start
+    inside an allocation (e.g. one row of a shared output), with ``offset`` set.
+    """
     if not isinstance(array, np.ndarray) or not array.flags.c_contiguous:
         return None
-    allocation = _allocations.get(array.ctypes.data)
+    address = array.ctypes.data
+    allocation = _allocations.get(address)
+    offset = 0
+    if allocation is None and getattr(ctx, 'shared_views', False):
+        start, allocation = _containing(address)
+        offset = address - start if allocation is not None else 0
     if (allocation is None or not _same_device(allocation.buffer.ctx, ctx)
-            or array.nbytes > allocation.buffer.nbytes):
+            or offset + array.nbytes > allocation.buffer.nbytes):
         return None
-    return _Borrowed(allocation)
+    return _Borrowed(allocation, offset)
 
 
 def containing(array, ctx):
