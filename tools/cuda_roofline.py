@@ -169,7 +169,7 @@ def main():
     args = Args()
     for k, v in dict(seg_samples=1 << 20, start_pad=120.0, end_pad=16.0, pad=4096, threshold=6.0,
                      fd=1e-3, peak_window=1.0, asym_threshold=6.0, asym_bin_width=0.03,
-                     asym_num_bins=1000, segments=a.segments, resident=True).items():
+                     asym_num_bins=1000, segments=a.segments, resident=True, fft_length=0).items():
         setattr(args, k, v)
     tops = ladder.load_tops(a.bank, 1)
     _gputime.collect()                                   # drop setup timings
