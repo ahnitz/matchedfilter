@@ -355,11 +355,6 @@ def _store_cost(path, skey, cm):
 _CAL_TEMPLATES = 64
 
 
-def _nt_bucket(ntemplates):
-    """The template count a calibration stands for (see _CAL_TEMPLATES)."""
-    return _CAL_TEMPLATES
-
-
 def default_series_group(n):
     """Blocks a CPU plan filters together, as HierarchicalFilter uses without an execution policy."""
     return 32 if n <= 2048 else 16
@@ -374,10 +369,11 @@ def calibrate_costs(n, ntemplates, blocks=256, reps=5, seed=11, group=None):
     no wall-clock subtraction is involved. Calls are sized like a segment's
     (hundreds of blocks), because a pooled tier's fixed per-call cost is only
     representative when amortised over a realistic number of survivors.
-    Under a second per (n, series group), once per process.
+    Under a second per (n, series group), once per process. Runs at _CAL_TEMPLATES
+    templates whatever `ntemplates` is (kept for callers; see _CAL_TEMPLATES).
     """
     from . import _core
-    nt = _nt_bucket(ntemplates)
+    nt = _CAL_TEMPLATES
     # The series group must be the plans' own: the first tier batches its work over the blocks in a
     # group, so calibrating at a smaller group overstates its cost (2x at n=1024 with 8 vs 32).
     group = int(group or default_series_group(n))
@@ -702,8 +698,7 @@ def price_block_sizes(fine, delta_f, data_rate, longest, margin, ntemplates, snr
             continue
         q = max(n // 32, 1)                  # the bank prices its windows on this grid
         lo = (int(margin) // q) * q
-        key = (sig, float(delta_f), float(data_rate), n, lo, _nt_bucket(ntemplates),
-               float(snr), float(fd), int(max_tiers))
+        key = (sig, float(delta_f), float(data_rate), n, lo, float(snr), float(fd), int(max_tiers))
         hit = _PRICE_CACHE.get(key)
         if hit is None:
             ref = rebin_profile(fine, delta_f, data_rate, n)
