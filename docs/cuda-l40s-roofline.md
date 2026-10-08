@@ -137,10 +137,14 @@ pinning a run with `taskset`.
 
 What binds, in order:
 
-1. **Host time is 2/3 of the fine stage's wall time.** 0.075 s wall against 0.025 s device.
-   Each fine call costs ~0.47 ms of host Python on top of ~0.23 ms of device work: layout,
-   records, about 13 launch calls through ctypes, readback copy and peak packing. Nothing
-   overlaps, because each `filter_series` waits for its own result.
+1. **Host time is ~3/4 of the fine stage's wall time.** 0.091 s wall against 0.025 s
+   device. Each fine call costs ~0.6 ms of host Python on top of ~0.23 ms of device work:
+   - layout and records;
+   - about 13 launch calls through ctypes;
+   - readback copy, `nonzero` and peak packing in `filter_series`.
+
+   Nothing overlaps, because each `filter_series` waits for its own result. Device-priced
+   chains do not see host cost: the model prices device ns only.
 2. **Production calls are below saturation.** At 80k pairs per call the device runs at ~2x
    its saturated ns/pair, and each kernel at 4-30 us is launch- and tail-bound.
 3. **Kernel efficiency at saturation is still low.** At 1.3 ns/pair, n=2048 with 200
