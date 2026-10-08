@@ -846,6 +846,7 @@ def test_segment_plan_replays_and_matches(monkeypatch):
     from conftest import usable_gpu
     from matchedfilter.time_domain import SegmentPlan
     monkeypatch.setenv("MF_AUTOTUNE", "0")
+    monkeypatch.setenv("MF_SEGMENT_REPLAY", "1")      # experimental: exercised here
     dev = usable_gpu()
     if dev is None:
         pytest.skip("no usable GPU")

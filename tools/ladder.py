@@ -26,6 +26,7 @@ Throughput is templates-in-real-time: fine templates x analysed seconds x detect
 """
 import argparse
 import json
+import os
 import platform
 import subprocess
 import sys
@@ -38,6 +39,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "python"))
 import matchedfilter as mf                                    # noqa: E402
 from matchedfilter import TimeDomainFilterBank, _gputime      # noqa: E402
+from matchedfilter.time_domain import SegmentPlan             # noqa: E402
 
 RATE = 2048.0
 DF = 1.0 / 16
@@ -49,11 +51,12 @@ def profile():
     return np.where((f > 20) & (f < 900), np.maximum(f, 1.0) ** (-7.0 / 3), 0.0)
 
 
-def analytic_series(rng, S, amp):
-    """Analytic Gaussian series of length S, spectrum amp(f), unit variance per quadrature."""
+def analytic_series(rng, S, amp, df=DF):
+    """Analytic Gaussian series of length S, spectrum amp(f) (on a grid of spacing df), unit
+    variance per quadrature."""
     X = np.fft.fft(rng.standard_normal(S))
     k = np.arange(S // 2)
-    X[:S // 2] *= np.interp(k * RATE / S, np.arange(amp.size) * DF, amp)
+    X[:S // 2] *= np.interp(k * RATE / S, np.arange(amp.size) * df, amp)
     X[S // 2:] = 0
     x = np.fft.ifft(X)
     x /= np.sqrt(np.mean(np.abs(x) ** 2) / 2)
@@ -118,26 +121,33 @@ def run_device(device, tops, args, seed):
     a0 = int(args.start_pad * RATE)
     a1 = S - int(args.end_pad * RATE)
     analysed = (a1 - a0) / RATE
-    amp = np.sqrt(profile())
-    w = profile()
+    profiles = np.load(args.profiles) if args.profiles else None
     bs = max(1, int(round(args.asym_bin_width * RATE)))
     half = (args.asym_num_bins // 2) * bs
     first, steady = Timer(), Timer()
     results = {}
     counts = defaultdict(int)
     for top in tops:
+        # The top template's own output profile |h|^2/S (tools/ladder_profiles.py) colours its
+        # reference series and is the fine banks' reference, as in pycbc_inspiral_fir; without
+        # it a generic inspiral-like profile stands in (and the gates refine far more).
+        if profiles is not None:
+            w, df = profiles["top_%d" % top["top"]], float(profiles["delta_f"])
+        else:
+            w, df = profile(), DF
+        amp = np.sqrt(w)
         t0 = time.perf_counter()
         # Each middle filter's scale is folded into its taps, as pycbc does: here the scale that
         # makes noise unit variance per quadrature, measured once on an untimed series.
         probe = TimeDomainFilterBank(top["mid_taps"], tap_counts=top["mid_counts"], engine="corr")
-        x = analytic_series(rng, 1 << 18, amp)
+        x = analytic_series(rng, 1 << 18, amp, df)
         y = probe.correlate_series(x)[:, 1 << 15:-(1 << 15)]
         scale = 1.0 / np.sqrt(np.mean(np.abs(y) ** 2, axis=1) / 2)
         mid = TimeDomainFilterBank(top["mid_taps"] * scale[:, None].astype(np.float32),
                                    tap_counts=top["mid_counts"], engine="corr", device=device)
         # The fine taps are scaled likewise against a middle series, so a fine output in noise
         # is an SNR (pycbc gets this from the reference series' normalisation).
-        xm = probe.correlate_series(analytic_series(rng, 1 << 18, amp))
+        xm = probe.correlate_series(analytic_series(rng, 1 << 18, amp, df))
         xm = xm * scale[:, None].astype(np.float32)
         fine = []
         for row, (m, taps, c) in enumerate(top["fine"]):
@@ -148,15 +158,16 @@ def run_device(device, tops, args, seed):
                                      false_dismissal=args.fd, device=device,
                                      binsize=int(args.peak_window * RATE),
                                      fft_lengths=[args.fft_length] if args.fft_length else None)
-            b.set_reference(w, delta_f=DF)
+            b.set_reference(w, delta_f=df)
             fine.append((m, b))
         # The middle output in device memory, reused every segment (as a pipeline would):
         # written in place by the middle stage and read in place by the fine banks.
         mid_out = {ifo: mid.empty_shared((len(top["mid_counts"]), S)) for ifo in ("H1", "L1")}
+        seg_plan = SegmentPlan()
         first.add("prep", time.perf_counter() - t0)
         for seg in range(args.segments):
             tm = first if seg == 0 else steady
-            ser = {ifo: analytic_series(rng, S, amp) for ifo in ("H1", "L1")}
+            ser = {ifo: analytic_series(rng, S, amp, df) for ifo in ("H1", "L1")}
             mids = {}
             for ifo in ser:
                 t = time.perf_counter()
@@ -172,7 +183,21 @@ def run_device(device, tops, args, seed):
             if args.no_batch:
                 fine_out = [b.filter_series(x, **kw) for b, x, kw in jobs]
             else:
-                fine_out = TimeDomainFilterBank.filter_series_many(jobs)
+                # The same banks, windows and device buffers every segment: a SegmentPlan
+                # replays the traced segment.
+                # SegmentPlan replay (LADDER_REPLAY=1) is under investigation: it dropped
+                # peaks on realistic data. The batched path is the default.
+                fine_out = (seg_plan.run(jobs) if os.environ.get("LADDER_REPLAY")
+                            else TimeDomainFilterBank.filter_series_many(jobs))
+                if os.environ.get("LADDER_VERIFY_REPLAY"):
+                    again = TimeDomainFilterBank.filter_series_many(jobs)
+                    bad = sum(not (np.array_equal(a.sample_indices, b.sample_indices)
+                                   and np.array_equal(a.snr, b.snr)) for a, b in zip(fine_out, again))
+                    in_trial = sum(getattr(g.plan, "_chain_trial", None) is not None
+                                   for _, bk in fine for g in bk._groups)
+                    print("verify replay seg %d: replays %d, mismatched jobs %d, peaks %d, plans in trial %d"
+                          % (seg, seg_plan.replays, bad, sum(len(a.snr) for a in fine_out), in_trial),
+                          flush=True)
             tm.add("fine", time.perf_counter() - t)
             fine_res = iter(fine_out)
             asym_jobs, asym_keys = [], []
@@ -277,6 +302,8 @@ def main():
     p.add_argument("--asym-threshold", type=float, default=6.0)
     p.add_argument("--asym-bin-width", type=float, default=0.03)
     p.add_argument("--asym-num-bins", type=int, default=1000)
+    p.add_argument("--profiles", default=None,
+                   help="per-top reference profiles (.npz from tools/ladder_profiles.py)")
     p.add_argument("--check", default=None, help="also run this device (e.g. cpu) and compare outputs")
     p.add_argument("--fft-length", type=int, default=0,
                    help="pin the fine banks' block size (0: the library chooses). A check compares "

@@ -1615,6 +1615,12 @@ class SegmentPlan:
         return tuple(sig)
 
     def run(self, jobs):
+        import os
+        if os.environ.get("MF_SEGMENT_REPLAY", "0") == "0":
+            # Experimental: on realistic data (two-tier chains, several job sets sharing the
+            # device) replays dropped peaks and once read freed buffers. Until that is fixed
+            # this is filter_series_many; MF_SEGMENT_REPLAY=1 enables replay for investigation.
+            return TimeDomainFilterBank.filter_series_many(jobs)
         sig = self._signature(jobs)
         tr = self._trace
         if tr is not None and tr["sig"] == sig:

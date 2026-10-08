@@ -505,7 +505,11 @@ def main(argv=None):
             # SEPARATE build so the host can fall back when the pair count
             # is not a multiple of 4 -- a partial group would run pairs off
             # the end of the data buffer.
-            for _p in (2, 4):
+            # 8 and 16 as well: a wave64 device needs 64/(band/16) pairs to fill a wave at the
+            # small bands (_vkcompute._coarse_geometry chooses among what is built here).
+            for _p in (2, 4, 8, 16):
+                if (n // 16) * _p > 1024:
+                    continue
                 compile_one(slangc, n, OUT, entry=centry,
                             suffix="_c16p%d" % _p, coarse16=1, ppg=_p)
             # The TILE is part of kernel IDENTITY. TILE_T is compiled in,
@@ -520,7 +524,9 @@ def main(argv=None):
             # Spelled exactly as the host spells it: "p1" is omitted.
             _t = COARSE_TILE_T.get(n, 1)
             if _t > 1:
-                for _p in (1, 2, 4):
+                for _p in (1, 2, 4, 8, 16):
+                    if (n // 16) * _p > 1024:
+                        continue
                     compile_one(slangc, n, OUT, entry=centry, coarse16=1,
                                 ppg=_p, tile=_t,
                                 suffix="_c16%st%d"
