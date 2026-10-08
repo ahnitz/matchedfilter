@@ -108,7 +108,9 @@ def model(label, grid, n_survivors=None):
         pairs = grid
         return pairs * (fft + 9 * n), pairs * 8, pairs * n * 16
     if kind in ("refine", "tier1"):                    # listed refine over survivors
-        pairs = n_survivors if n_survivors is not None else grid
+        if n_survivors is None:
+            return None                                # grid-stride: the grid is not the work
+        pairs = n_survivors
         return pairs * (fft + 9 * n), pairs * 16, pairs * n * 16
     if kind == "forward":
         return grid * (fft + 2 * n), grid * n * 16, grid * n * 16
