@@ -555,6 +555,11 @@ def calibrate_costs_gpu(n, device, blocks=1024, reps=5, seed=11, nt=256):
     b0 = bands[0]
     t_small, _, _ = run((b0,), (big,), ntm=nt // 4)
     t_full, _, _ = run((b0,), (big,))
+    if not (t_full > 0 and t_small > 0):
+        # A backend that ignored the timer switch reports nothing, and a model priced at zero
+        # picks the largest blocks and widest gates (seen on CUDA): refuse rather than guess.
+        raise RuntimeError("device timers recorded no time on %s; cannot calibrate GPU costs"
+                           % (device,))
     per_pair0 = (t_full - t_small) / (blocks * (nt - nt // 4))
     block = max(0.0, t_full / blocks - nt * per_pair0)
     dense = {}
