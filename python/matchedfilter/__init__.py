@@ -197,6 +197,23 @@ def _as_c64(a, n, what):
 from ._errors import UnsupportedSize      # noqa: E402
 
 
+def _unpack_half(a, n, hermitian):
+    """Full length-n spectra from (T, n // 2) templates, the convention the CPU plans read.
+
+    hermitian: the spectrum of a real filter, packed with the Nyquist bin in the imaginary
+    part of bin 0; the upper half is the conjugate mirror. Otherwise the template is
+    band-limited to the lower half and zero above.
+    """
+    K = n // 2
+    full = np.zeros((a.shape[0], n), dtype=np.complex64)
+    full[:, :K] = a
+    if hermitian:
+        full[:, 0] = a[:, 0].real
+        full[:, K] = a[:, 0].imag
+        full[:, K + 1:] = np.conj(a[:, 1:][:, ::-1])
+    return full
+
+
 def _format_result(idx, val, *, raw=False, counts=None, out=None, order=None):
     """Assemble the public dtype once, or return separate raw arrays."""
     if counts is True:
@@ -412,9 +429,8 @@ class MatchedFilter:
             shape = (self.ndata if what == "data" else self.ntemplates, self.n)
             if a.shape != shape:
                 if what == "template" and a.ndim == 2 and a.shape == (self.ntemplates, self.n // 2):
-                    pad_a = np.zeros(shape, dtype=np.complex64)
-                    pad_a[:, :self.n // 2] = a
-                    a = pad_a
+                    self._gpu_packed = a
+                    a = _unpack_half(a, self.n, getattr(self, "_hermitian", False))
                 else:
                     raise ValueError("expected shape %s, got %s" % (shape, a.shape))
             from ._shared import shared_buffer
@@ -1008,21 +1024,33 @@ class MatchedFilter:
         queue_ahead = int(os.environ.get("MF_GPU_QUEUE_AHEAD", "8"))
         K = max(1, queue_ahead) if pipelined else 1
         source_shared = shared_buffer(ser, self._gpu) is not None
+        # Pools are sized by capacity, not by this call's batch: windowed calls vary in
+        # block count, and reallocating would also discard every recording built on them.
         workspace = getattr(self, "_series_workspace", None)
-        if workspace is None or workspace[0] != (batch, n, K):
+        if workspace is None or workspace[0][1:] != (n, K) or workspace[0][0] < batch:
             spectra_pool = [self._gpu.empty_shared((batch, n)) for _ in range(K)]
             starts_pool = [self._gpu.empty_shared(batch, np.uint32) for _ in range(K)]
-            workspace = ((batch, n, K), None, spectra_pool, starts_pool)
+            workspace = ((batch, n, K), None if workspace is None else workspace[1],
+                         spectra_pool, starts_pool)
         _, source, spectra_pool, starts_pool = workspace
         if source_shared:
-            source = ser
+            source, base = ser, 0
             self._series_workspace = (workspace[0], None, spectra_pool, starts_pool)
         else:
-            if source is None or source.size < ser.size:
-                source = self._gpu.empty_shared(ser.shape)
-            source[:ser.size] = ser
+            # Upload only the span the blocks read: a windowed call touches a small part
+            # of a long series. Starts are rebased onto it; reads past the series end
+            # stay past the end of the span.
+            base = min(int(layout.starts.min()), ser.size) if nblk else 0
+            top = min(ser.size, int(layout.starts.max()) + n) if nblk else 0
+            if top - base < 1:                # every block starts at the series end
+                base = max(0, top - 1)
+            span = max(top - base, 1)
+            if source is None or source.size < span:
+                # Capacity for the whole series: later windows need not reallocate.
+                source = self._gpu.empty_shared((max(ser.size, span),))
+            source[:top - base] = ser[base:top]
             self._series_workspace = (workspace[0], source, spectra_pool, starts_pool)
-            source = source[:ser.size]
+            source = source[:top - base]
         # A single group needs no aggregate buffers or scatter.
         single = len(layout.groups) == 1 and nblk <= batch
         shape = (nblk, nt, nb)
@@ -1056,7 +1084,7 @@ class MatchedFilter:
                 slot_idx += 1
                 starts = starts_pool[slot]
                 spec = spectra_pool[slot][:count]
-                starts[:count] = np.minimum(layout.starts[begin:end], ser.size)
+                starts[:count] = np.minimum(layout.starts[begin:end], ser.size) - base
                 try:
                     if pipelined:
                         self._gpu.forward(n, source, starts[:count], spec, defer=True, slot=slot)
@@ -1114,7 +1142,7 @@ class MatchedFilter:
                 slot_idx += 1
                 starts = starts_pool[slot]
                 spec = spectra_pool[slot][:count]
-                starts[:count] = np.minimum(layout.starts[begin:end], ser.size)
+                starts[:count] = np.minimum(layout.starts[begin:end], ser.size) - base
                 try:
                     if pipelined:
                         self._gpu.forward(n, source, starts[:count], spec, defer=True, slot=slot)
@@ -1875,6 +1903,10 @@ class HierarchicalFilter(MatchedFilter):
         self._hermitian = bool(hermitian)
         if self._mf is not None:
             self._mf.set_hermitian(self._hermitian)
+        # The GPU kernels take full spectra: half-length templates were unpacked when
+        # set, so a change of convention re-unpacks them.
+        if self._gpu is not None and getattr(self, "_gpu_packed", None) is not None:
+            self.set_templates(self._gpu_packed)
 
     @property
     def hermitian(self):

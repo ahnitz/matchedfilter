@@ -274,7 +274,7 @@ _DEVICE_TOL = 1.35
 def _gpu():
     import matchedfilter as _mf
     for d in _mf.devices():
-        if str(d).startswith("gpu") and not getattr(d, "software", False):
+        if str(d).startswith("gpu") and not d.is_software:
             return str(d)
     return None
 

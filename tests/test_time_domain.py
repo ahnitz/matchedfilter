@@ -697,3 +697,32 @@ def test_gpu_correlation_bank_prices_its_own_layout_and_matches_cpu():
     inner = slice(edge, S - 65536)                 # past the largest block's tail on either device
     scale = np.abs(a[:, inner]).max()
     assert np.max(np.abs(b[:, inner] - a[:, inner])) <= 1e-5 * scale
+
+
+@pytest.mark.parametrize("pack", [False, True])
+def test_gpu_hierarchical_bank_matches_cpu_including_packed_templates(pack):
+    """The fine-stage bank finds the same peaks on a GPU as on the CPU. Packed templates hold
+    the Nyquist bin in the imaginary part of bin 0; a GPU plan that zero-padded them instead of
+    unpacking the Hermitian spectrum was off by ~3e-3."""
+    from conftest import usable_gpu
+    gpu = usable_gpu()
+    if gpu is None:
+        pytest.skip("no usable GPU")
+    rng = np.random.default_rng(4)
+    counts = list(rng.integers(200, 400, 24))
+    taps, w, df = _whitened_inspiral_bank(rng, counts)
+    S = 1 << 17
+    X = np.fft.fft(rng.standard_normal(S))
+    X[S // 2:] = 0
+    ser = (np.fft.ifft(X) * 2).astype(np.complex64)      # analytic, unit variance per quadrature
+    found = []
+    for dev in (None, gpu):
+        bank = TimeDomainFilterBank(taps, tap_counts=counts, engine='hier', threshold=4.5,
+                                    false_dismissal=1e-3, device=dev, fft_lengths=[2048],
+                                    pack_templates=pack)
+        bank.set_reference(w, delta_f=df)
+        r = bank.filter_series(ser, binsize=2048)
+        found.append(dict(zip(zip(r.template_indices.tolist(), r.sample_indices.tolist()), r.snr)))
+    cpu, dev = found
+    assert len(cpu) >= 10 and set(cpu) == set(dev)
+    assert max(abs(dev[k] - cpu[k]) / abs(cpu[k]) for k in cpu) < 1e-5

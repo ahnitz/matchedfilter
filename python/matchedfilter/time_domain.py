@@ -393,6 +393,18 @@ class _TemplateGroup:
             full_sp[:, 1:K] = sp[:, 1:K]
             full_sp[:, K + 1:] = np.conj(sp[:, K - 1:0:-1])
             sp = full_sp
+        from .device import parse as _parse_device
+        if _parse_device(self.device).kind == 'gpu':
+            # A GPU plan owns a device context (~10 ms to create): keep one and load the
+            # template into it. The caller runs the plan before asking for the next one.
+            plan = self.__dict__.get('_single_gpu_plan')
+            if plan is None:
+                plan = self._single_gpu_plan = MatchedFilter(self.n, ndata=1, ntemplates=1,
+                                                             device=self.device)
+            if self.__dict__.get('_single_gpu_ti') != int(ti):
+                plan.set_templates(np.ascontiguousarray(sp))
+                self._single_gpu_ti = int(ti)
+            return plan
         plan = MatchedFilter(self.n, ndata=1, ntemplates=1, device=self.device)
         plan.set_templates(np.ascontiguousarray(sp))
         cache[int(ti)] = plan
