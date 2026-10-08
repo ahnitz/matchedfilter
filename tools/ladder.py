@@ -146,7 +146,8 @@ def run_device(device, tops, args, seed):
             taps = taps / np.sqrt(np.mean(np.abs(yf) ** 2, axis=1) / 2)[:, None].astype(np.float32)
             b = TimeDomainFilterBank(taps, tap_counts=c, engine="hier", threshold=args.threshold,
                                      false_dismissal=args.fd, device=device,
-                                     binsize=int(args.peak_window * RATE))
+                                     binsize=int(args.peak_window * RATE),
+                                     fft_lengths=[args.fft_length] if args.fft_length else None)
             b.set_reference(w, delta_f=DF)
             fine.append((m, b))
         first.add("prep", time.perf_counter() - t0)
@@ -239,6 +240,9 @@ def main():
     p.add_argument("--asym-bin-width", type=float, default=0.03)
     p.add_argument("--asym-num-bins", type=int, default=1000)
     p.add_argument("--check", default=None, help="also run this device (e.g. cpu) and compare outputs")
+    p.add_argument("--fft-length", type=int, default=0,
+                   help="pin the fine banks' block size (0: the library chooses). A check compares "
+                        "peaks per bin, so it is exact only when both devices block alike")
     p.add_argument("--seed", type=int, default=1)
     p.add_argument("--out", default=None, help="write the JSON report here")
     p.add_argument("--timing", action="store_true",
