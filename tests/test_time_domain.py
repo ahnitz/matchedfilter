@@ -525,3 +525,70 @@ def test_correlate_series_window_before_first_block_is_zero(layout):
     bank = TimeDomainFilterBank(taps, counts, engine='corr')
     assert not np.any(bank.correlate_series(ser, windows=slice(0, 50)))
     assert not np.any(bank.correlate_series(ser, windows=slice(0, 50), template_index=2))
+
+
+def _whitened_inspiral_bank(rng, counts, rate=2048.0):
+    """Templates whose spectra follow an inspiral-like output-power profile, and that profile
+    on a fine grid (delta_f = 1/16 Hz): what pycbc hands the bank as its reference."""
+    df = 1.0 / 16
+    f = np.arange(int(rate / 2 / df) + 1) * df
+    w = np.where((f > 20) & (f < 900), np.maximum(f, 1.0) ** (-7.0 / 3), 0.0)
+    taps = []
+    for c in counts:
+        ff = np.fft.rfftfreq(c, 1 / rate)
+        amp = np.sqrt(np.interp(ff, f, w))
+        h = np.fft.irfft(amp * np.exp(2j * np.pi * rng.random(ff.size)), c)
+        taps.append((h / np.linalg.norm(h)).astype(np.float32))
+    return taps, w, df
+
+
+def test_block_size_chosen_by_cost_when_peak_granularity_is_stated():
+    rng = np.random.default_rng(5)
+    counts = list(rng.integers(300, 900, 48))
+    taps, w, df = _whitened_inspiral_bank(rng, counts)
+    bank = TimeDomainFilterBank(taps, tap_counts=counts, engine='hier', threshold=5.5,
+                                false_dismissal=0.001, binsize=256)
+    assert bank._built is None                       # nothing built before the reference
+    bound = bank.max_block_length
+    bank.set_reference(w, delta_f=df)
+    assert bank.max_block_length == bound            # the announced bound holds after the choice
+    longest = max(counts)
+    for g in bank.groups:
+        assert longest < g['n'] <= bound
+    assert sum(c for c, _ in bank.chosen_layout) == len(counts)
+
+    L = 1 << 16
+    data = ((rng.standard_normal(L) + 1j * rng.standard_normal(L)) / np.sqrt(2)).astype(np.complex64)
+    t0, k = 30000, 7
+    data[t0 - counts[k] // 2: t0 - counts[k] // 2 + counts[k]] += 12.0 * taps[k]
+    res = bank.filter_series(data)
+    hit = (res.template_indices == k) & (np.abs(res.sample_indices - t0) <= 1)
+    assert hit.any()
+    # every reported peak is the exact correlation at its sample (centre tap (count - 1) // 2)
+    for ti in np.unique(res.template_indices):
+        fir = taps[ti]
+        m = (counts[ti] - 1) // 2
+        direct = np.convolve(data, fir[::-1], mode='full')[m: m + L]
+        sel = res.template_indices == ti
+        np.testing.assert_allclose(res.snr[sel], direct[res.sample_indices[sel]], rtol=1e-3, atol=1e-3)
+
+
+def test_block_size_rule_stands_without_peak_granularity():
+    rng = np.random.default_rng(6)
+    counts = [400, 700]
+    taps, w, df = _whitened_inspiral_bank(rng, counts)
+    bank = TimeDomainFilterBank(taps, tap_counts=counts, engine='hier', threshold=5.5)
+    before = [g['n'] for g in bank.groups]
+    bank.set_reference(w, delta_f=df)
+    assert [g['n'] for g in bank.groups] == before
+    assert not hasattr(bank, 'chosen_layout')
+
+
+def test_unpinned_band_of_zero_still_chooses_block_size():
+    rng = np.random.default_rng(7)
+    counts = [400, 700]
+    taps, w, df = _whitened_inspiral_bank(rng, counts)
+    bank = TimeDomainFilterBank(taps, tap_counts=counts, engine='hier', threshold=5.5,
+                                binsize=256, coarse_band_hz=0.0)      # pycbc's "not pinned"
+    bank.set_reference(w, delta_f=df)
+    assert hasattr(bank, 'chosen_layout')

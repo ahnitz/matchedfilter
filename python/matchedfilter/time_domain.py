@@ -107,6 +107,7 @@ def _partition_templates(
     candidate_ns: Sequence[int] = (2048, 4096, 8192, 16384, 32768, 65536),
     engine: Optional[str] = None,
     device: Optional[Any] = None,
+    n_sorted: Optional[np.ndarray] = None,
     **kwargs: Any,
 ) -> Tuple[List[Tuple[int, int, int, int]], np.ndarray]:
     """Partition templates sorted by length into homogeneous, balanced sub-batches.
@@ -116,6 +117,10 @@ def _partition_templates(
     bounded by max_batch if explicitly specified. Selects FFT block sizes based on
     filter length to guarantee high efficiency (valid fraction >= 50%) while
     maximizing L1/L2 cache hit rates and SIMD lane utilization.
+
+    n_sorted, when given, is the block size of each template in sorted order (a
+    choice made elsewhere, e.g. by cost); runs then follow it instead of the
+    valid-fraction rule.
 
     Returns:
         (groups, sort_order)
@@ -144,12 +149,17 @@ def _partition_templates(
     # Partition contiguous runs sharing the same chosen FFT block size,
     # then split each run into balanced sub-batches sized to the cache budget.
     # This guarantees that all M templates are included without dropping any.
+    if n_sorted is None:
+        n_at = lambda i: pick_n(int(sorted_counts[i]))
+    else:
+        n_at = lambda i: int(n_sorted[i])
+
     groups = []
     run_start = 0
     while run_start < M:
-        current_n = pick_n(int(sorted_counts[run_start]))
+        current_n = n_at(run_start)
         run_end = run_start + 1
-        while run_end < M and pick_n(int(sorted_counts[run_end])) == current_n:
+        while run_end < M and n_at(run_end) == current_n:
             run_end += 1
 
         if max_batch is None:
@@ -271,6 +281,8 @@ class TimeDomainFilterBank:
         analytic: bool = False,
         bandlimited: bool = False,
         pack_templates: bool = False,
+        binsize: Optional[int] = None,
+        max_block_length: int = 8192,
     ):
         from . import MatchedFilter, HierarchicalFilter
 
@@ -343,16 +355,47 @@ class TimeDomainFilterBank:
         else:
             candidate_ns = tuple(sorted(int(n) for n in fft_lengths))
 
-        # Dynamic partitioning
-        raw_groups, order = _partition_templates(
+        # Peak granularity the caller asks for (samples); None keeps one peak per block.
+        self.binsize = int(binsize) if binsize else None
+        self._candidate_ns = candidate_ns
+        self._legacy_layout = _partition_templates(
             self.effective_data_counts,
             max_batch=self.max_batch_size,
             candidate_ns=candidate_ns,
             engine=self.engine,
             device=self.device,
         )
+        # Block size by cost. With a stated peak granularity the block size no
+        # longer shapes the output, so it is the bank's to choose: the first
+        # fine-grid reference prices every candidate per length batch (gate model,
+        # calibrated tier costs) and the groups are built at the cheapest. Without
+        # one, or with lengths or a chain pinned, the valid-fraction rule stands.
+        # max_block_length bounds the candidates: the caller pads its series and
+        # guards its windows by the longest block, costs the model does not price.
+        self._choose_n = (self.engine == 'hier' and self.binsize is not None and fft_lengths is None
+                          and not os.environ.get('PYCBC_RATIO_FFT_LENGTH')
+                          and not (isinstance(coarse_band_hz, (tuple, list)) or (coarse_band_hz or 0) > 0))
+        legacy_max = max(g[2] for g in self._legacy_layout[0]) if self._legacy_layout[0] else 0
+        self._choice_ns = tuple(n for n in candidate_ns if n <= max(int(max_block_length), legacy_max))
+        self._built: Optional[List[_TemplateGroup]] = None
+        if not self._choose_n:
+            self._build(*self._legacy_layout)
+        if reference is not None:
+            self.set_reference(reference)
+            for g in self._groups:
+                if not g.templates_loaded:
+                    g.plan.set_templates(g.spectra)
+                    g.templates_loaded = True
+        if not self._choose_n:
+            self._taps_list = None
+            self._raw_taps = None
 
-        self._groups: List[_TemplateGroup] = []
+    def _build(self, raw_groups, order) -> None:
+        """Groups, spectra and plans for one partition of the bank."""
+        from . import MatchedFilter, HierarchicalFilter
+        n_templates = self.n_templates
+        self._built = []
+        self._built_layout = list(raw_groups)
         self._filters_f_list = [None] * n_templates
         self._block_lengths_arr = np.zeros(n_templates, dtype=np.int64)
 
@@ -447,8 +490,11 @@ class TimeDomainFilterBank:
                     chosen_N, ndata=1, ntemplates=T,
                     snr=self.threshold, fd=self.false_dismissal,
                     chain=chain, device=self.device,
-                    # the lags each block's peak search covers: noise passes are priced over these
-                    search_window=(int(c_bad), int(chosen_N - c_bad)),
+                    # the lags each block's peak search covers: noise passes are priced over these.
+                    # Rounded outward to n/32: the window only enters the cost model's noise pass
+                    # rates (dismissal is set by the signal draws), it over-counts lags by <= ~3%,
+                    # and groups of similar filter length then share one chain choice.
+                    search_window=self._priced_window(c_bad, chosen_N),
                 )
                 if self.first_stage_snr > 0:
                     plan.set_first_stage(self.first_stage_snr)
@@ -482,30 +528,64 @@ class TimeDomainFilterBank:
                 grp.templates_loaded = True
                 if self.engine == 'corr':
                     grp._corr_plan = plan
-            self._groups.append(grp)
+            self._built.append(grp)
 
         self._template_map = [None] * n_templates
-        for g in self._groups:
+        for g in self._built:
             for ti_local, global_idx in enumerate(g.template_indices):
                 self._template_map[int(global_idx)] = (g, int(ti_local))
+        self._current_ref_key = None
 
-        if reference is not None:
-            self.set_reference(reference)
-            for g in self._groups:
-                if not g.templates_loaded:
-                    g.plan.set_templates(g.spectra)
-                    g.templates_loaded = True
-        self._taps_list = None
-        self._raw_taps = None
+    @staticmethod
+    def _priced_window(c_bad: int, n: int) -> Tuple[int, int]:
+        q = max(n // 32, 1)
+        lo = (int(c_bad) // q) * q
+        return lo, int(n) - lo
+
+    @property
+    def _groups(self) -> List[_TemplateGroup]:
+        # Asked for before a reference has chosen the block sizes: build by the
+        # valid-fraction rule; the first fine-grid reference may still rebuild.
+        if self._built is None:
+            self._build(*self._legacy_layout)
+        return self._built
+
+    @property
+    def max_block_length(self) -> int:
+        """The longest block the bank uses, or may choose before its first reference."""
+        if self._choose_n:
+            return int(max(self._choice_ns + tuple(g[2] for g in self._legacy_layout[0])))
+        return int(max((g.n for g in self._groups), default=0))
+
+    def _choose_layout(self, fine: np.ndarray, delta_f: float):
+        """Partition with each length batch at its cheapest modelled block size."""
+        from . import gatechain, _log_autotune
+        groups, order = self._legacy_layout
+        counts = self.effective_data_counts[order]
+        n_sorted = np.empty(len(order), dtype=np.int64)
+        for i, j, n0, _ in groups:
+            longest = int(counts[j - 1])
+            taps_max = int(np.max(self.tap_counts[order[i:j]]))
+            margin = int(np.ceil((taps_max // 2) / self.rate_ratio))
+            ranked = gatechain.price_block_sizes(
+                fine, delta_f, self.data_sample_rate, longest, margin, j - i,
+                self.threshold, self.false_dismissal, [n for n in self._choice_ns if n > longest])
+            n_sorted[i:j] = ranked[0][1] if ranked else n0
+            _log_autotune("BLOCK templates=%d longest=%d legacy n=%d -> n=%d  %s", j - i, longest, n0,
+                          int(n_sorted[i]), " ".join("%d:%.3g" % (n, c) for c, n, _ in ranked))
+        return _partition_templates(self.effective_data_counts, max_batch=self.max_batch_size,
+                                    candidate_ns=self._candidate_ns, n_sorted=n_sorted)
 
     @property
     def filters_f(self) -> Sequence[np.ndarray]:
         """Sequence of frequency-domain filters for each template."""
+        self._groups
         return self._filters_f_list
 
     @property
     def block_lengths(self) -> np.ndarray:
         """FFT block length assigned to each template."""
+        self._groups
         return self._block_lengths_arr
 
     @property
@@ -526,11 +606,11 @@ class TimeDomainFilterBank:
 
     def get_filter_f(self, template_index: int) -> np.ndarray:
         """Return the frequency-domain filter for a specific template."""
-        return self._filters_f_list[template_index]
+        return self.filters_f[template_index]
 
     def get_block_length(self, template_index: int) -> int:
         """Return the FFT block length for a specific template."""
-        return int(self._block_lengths_arr[template_index])
+        return int(self.block_lengths[template_index])
 
     def set_reference(
         self,
@@ -546,6 +626,18 @@ class TimeDomainFilterBank:
                 - 1D reference profile if all groups share the same block size.
             delta_f: Frequency resolution of fine grid (required when reference is w(f)).
         """
+        if self._choose_n and not getattr(self, '_n_chosen', False):
+            # The first reference settles the block sizes: by cost from a fine-grid
+            # profile, else by the valid-fraction rule.
+            if not isinstance(reference, dict) and delta_f is not None and float(delta_f) > 0:
+                layout = self._choose_layout(np.asarray(reference, dtype=np.float64), float(delta_f))
+                if self._built is None or layout[0] != self._built_layout:
+                    self._build(*layout)
+                self.chosen_layout = [(int(e - b), int(n)) for b, e, n, _ in layout[0]]
+            self._groups
+            self._n_chosen = True
+            self._taps_list = None
+            self._raw_taps = None
         hier_ns = sorted({g.n for g in self._groups if hasattr(g.plan, 'set_reference')})
         accepted = ("pass a dict {n: profile} with one length-n profile per block size, "
                     "or a fine-grid profile together with delta_f")
@@ -689,7 +781,8 @@ class TimeDomainFilterBank:
                 (merged) window would, and a block that no window intersects
                 is never computed. Each peak search stays inside its window.
                 Padding for filter context is the caller's job.
-            binsize: Bins per block. Defaults to block size N (1 bin per block).
+            binsize: Samples per peak bin. Defaults to the bank's binsize, else the
+                block size N (1 bin per block).
             threshold: Optional SNR threshold override. None uses bank threshold.
             template_index: Optional single template index to filter.
 
@@ -727,6 +820,7 @@ class TimeDomainFilterBank:
         if template_index is not None:
             if template_index < 0 or template_index >= self.n_templates:
                 raise IndexError(f"template_index {template_index} out of range [0, {self.n_templates})")
+            self._groups
             target_g, ti_local = self._template_map[template_index]
             work_items = [(target_g, (ti_local, 1))]
         else:
@@ -751,7 +845,7 @@ class TimeDomainFilterBank:
 
             data_in = ser
 
-            bs = N if binsize is None else int(binsize)
+            bs = int(binsize) if binsize is not None else (self.binsize or N)
             if getattr(active_plan, '_bandlimited', False) and type(active_plan).__name__ != 'HierarchicalFilter':
                 bs_k = max(1, bs // 2) if bs < N else g.n // 2
                 wk_s = (bws // 2).astype(np.int64)
@@ -964,6 +1058,7 @@ class TimeDomainFilterBank:
         if template_index is not None:
             if template_index < 0 or template_index >= nt:
                 raise IndexError(f"template_index {template_index} out of range [0, {nt})")
+            self._groups
             target_g, ti_local = self._template_map[template_index]
 
             if scales is not None:

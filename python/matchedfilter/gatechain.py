@@ -217,12 +217,22 @@ def noise_block_maxima(power, n, bands, nsim=20000, seed=29, chunk=2000, window=
     p = _norm_profile(power, n)
     bands = sorted(int(b) for b in bands)
     win = (0, n) if window is None else (int(window[0]), int(window[1]))
-    key = _key(p, n, bands, int(nsim), int(seed), win)
+    # Each band's coarse statistic is circularly stationary over its lags (independent
+    # bins), so a window's maximum depends only on how many lags it covers, not where:
+    # simulate lags [0, count) per band, and windows of equal span share one simulation.
+    counts = []
+    for b in bands:
+        R = n // b
+        c0 = max(win[0] // R - 1, 0) if win[0] > 0 else 0
+        c1 = min(-(-win[1] // R), b)
+        counts.append(max(c1 - c0, 1))
+    counts = tuple(counts)
+    key = _key(p, n, bands, int(nsim), int(seed), counts)
     hit = _NOISE_CACHE.get(key)
     if hit is not None:
         _NOISE_CACHE.move_to_end(key)
         return hit
-    sim_params = (n, tuple(bands), int(nsim), int(seed), win)
+    sim_params = (n, tuple(bands), int(nsim), int(seed), counts)
     unit, hit = _similar_get("noise", p, sim_params)
     if hit is not None:
         return hit
@@ -236,11 +246,8 @@ def noise_block_maxima(power, n, bands, nsim=20000, seed=29, chunk=2000, window=
         X = ((rng.standard_normal((m, bmax), dtype=np.float32)
               + 1j * rng.standard_normal((m, bmax), dtype=np.float32)) / np.float32(np.sqrt(2))) * sd
         for i, b in enumerate(bands):
-            R = n // b
-            c0 = max(win[0] // R - 1, 0) if win[0] > 0 else 0
-            c1 = min(-(-win[1] // R), b)
             z = np.fft.ifft(X[:, :b], axis=1) * np.float32(b)
-            out[s:s + m, i] = np.abs(z[:, c0:c1]).max(1) * np.float32(_SIG / np.sqrt(F[i]))
+            out[s:s + m, i] = np.abs(z[:, :counts[i]]).max(1) * np.float32(_SIG / np.sqrt(F[i]))
     _cache_put(_NOISE_CACHE, key, out)
     _similar_put("noise", unit, sim_params, out)
     return out
@@ -326,6 +333,11 @@ def _store_cost(path, skey, cm):
     os.replace(tmp, path)
 
 
+def _nt_bucket(ntemplates):
+    """The template count a calibration stands for: the nearest power of two in [8, 128]."""
+    return 1 << int(round(math.log2(min(max(int(ntemplates), 8), 128))))
+
+
 def default_series_group(n):
     """Blocks a CPU plan filters together, as HierarchicalFilter uses without an execution policy."""
     return 32 if n <= 2048 else 16
@@ -347,7 +359,7 @@ def calibrate_costs(n, ntemplates, blocks=256, reps=5, seed=11, group=None):
     # Per-pair costs vary slowly with the template count (cache footprint, per-call
     # amortisation), so one calibration per power of two serves every bank near it:
     # a run builds banks of many sizes, and each calibration is a fraction of a second.
-    nt = 1 << int(round(math.log2(min(max(int(ntemplates), 8), 128))))
+    nt = _nt_bucket(ntemplates)
     # The series group must be the plans' own: the first tier batches its work over the blocks in a
     # group, so calibrating at a smaller group overstates its cost (2x at n=1024 with 8 vs 32).
     group = int(group or default_series_group(n))
@@ -463,11 +475,26 @@ def kept_draws(sig, bands, chain, snr):
     return C[keep][:, cols]
 
 
+def _smallest(col, m):
+    """Indices of col's m smallest values, in ascending order of value (O(len) selection)."""
+    m = min(int(m), col.size)
+    if m <= 0:
+        return np.empty(0, np.int64)
+    idx = np.argpartition(col, m - 1)[:m] if m < col.size else np.arange(col.size)
+    return idx[np.argsort(col[idx], kind="stable")]
+
+
 def plan_chain(sig, noise, bands, chain, fd, cost, n, snr):
     """Thresholds for `chain` meeting compound dismissal <= fd at minimum modelled cost.
 
     sig, noise: signal_draws / noise_block_maxima over `bands`.
     Returns dict(chain, thresholds, reach, cost) or None when fd cannot be resolved.
+
+    Every threshold here dismisses at most the budget K of the M kept draws, so only
+    each column's K-or-so smallest values ever matter: the search works on those (a
+    selection, not a sort, per column) and on the few dismissed draws' indices, instead
+    of masking and sorting all M draws for every candidate split. Noise passes are
+    carried down the split search, so candidates sharing a prefix share its work.
     """
     cols = [bands.index(b) for b in chain]
     S = kept_draws(sig, bands, chain, snr)
@@ -482,46 +509,51 @@ def plan_chain(sig, noise, bands, chain, fd, cost, n, snr):
         K = int(math.floor(float(fd) * M - 1.645 * math.sqrt(M * float(fd) * (1.0 - float(fd)))))
     if K < 8:
         return None
+    # The earlier tiers' thresholds sit at index <= K of their sorted columns; the last
+    # tier's is the rem-th smallest alive value with rem + dismissed <= K.
+    low = [_smallest(S[:, i], K + 1) for i in range(k - 1)]
+    low_val = [S[o, i] for i, o in enumerate(low)]
+    last_order = _smallest(S[:, k - 1], K + 1)
+    last_val = S[last_order, k - 1]
     best = None
 
-    def finish(prefix):
-        """Given thresholds for tiers 0..k-2, set the last to use the remaining budget."""
-        alive = np.ones(M, bool)
-        for i, g in enumerate(prefix):
-            alive &= S[:, i] >= g
-        used = M - int(alive.sum())
-        rem = K - used
-        if rem < 0:
-            return None
-        last = np.sort(S[alive, k - 1])
-        if rem >= len(last):
-            return None
-        return list(prefix) + [float(last[rem])]
-
-    if k == 1:
-        cands = [finish([])]
-    else:
-        # Each earlier tier spends a share of the budget on its own marginal; the last fills the rest.
-        sorted_cols = [np.sort(S[:, i]) for i in range(k - 1)]
-        cands = []
-        def rec(i, prefix, remaining):
-            # tier i takes a share of the budget still unallocated; the last tier gets what is left
-            if i == k - 1:
-                cands.append(finish(prefix)); return
-            for a in (_SPLIT if k <= 2 else _SPLIT_COARSE):
-                share = a * remaining
-                idx = int(math.floor(share * K))
-                if idx < 1:
-                    continue
-                rec(i + 1, prefix + [float(sorted_cols[i][idx])], remaining - share)
-        rec(0, [], 1.0)
-    for th in cands:
-        if th is None:
-            continue
-        reach = _reach(noise, cols, th)
+    def consider(prefix, dead, nalive):
+        """Given thresholds for tiers 0..k-2, the last uses the remaining budget."""
+        nonlocal best
+        rem = K - dead.size
+        if rem < 0 or rem >= M - dead.size:
+            return
+        # the rem-th smallest last-tier value among draws not yet dismissed
+        alive = ~np.isin(last_order, dead, assume_unique=False) if dead.size else np.ones(last_order.size, bool)
+        pos = np.flatnonzero(np.cumsum(alive) == rem + 1)
+        if not pos.size:
+            return
+        g = float(last_val[pos[0]])
+        th = list(prefix) + [g]
+        reach = [1.0] + [float(x) for x in nalive[1:]]
+        reach.append(float((nalive[0] & (noise[:, cols[-1]] >= g)).mean()))
         c = cost.chain_cost(chain, reach) if cost is not None else _flop_cost(chain, reach, n)
         if best is None or c < best["cost"]:
             best = dict(chain=tuple(chain), thresholds=tuple(th), reach=tuple(reach), cost=float(c))
+
+    def rec(i, prefix, remaining, dead, alive_noise, fracs):
+        # tier i takes a share of the budget still unallocated; the last tier gets what is left
+        if i == k - 1:
+            consider(prefix, dead, [alive_noise] + fracs)
+            return
+        for a in (_SPLIT if k <= 2 else _SPLIT_COARSE):
+            share = a * remaining
+            idx = int(math.floor(share * K))
+            if idx < 1:
+                continue
+            g = float(low_val[i][idx])
+            # draws this tier dismisses: its column strictly below g
+            cut = int(np.searchsorted(low_val[i], g, side="left"))
+            d = np.union1d(dead, low[i][:cut])
+            an = alive_noise & (noise[:, cols[i]] >= g)
+            rec(i + 1, prefix + [g], remaining - share, d, an, fracs + [float(an.mean())])
+
+    rec(0, [], 1.0, np.empty(0, np.int64), np.ones(noise.shape[0], bool), [])
     return best
 
 
@@ -533,8 +565,33 @@ def _flop_cost(chain, reach, n):
     return c + reach[len(chain)] * n * math.log2(n)
 
 
+_CHOICE_CACHE = OrderedDict()
+
+
 def choose_chain(power, n, snr, fd, cost=None, max_tiers=3, floor=_MIN_BAND, nsim=20000, window=None):
-    """Price every chain and return (best, all_plans sorted by cost)."""
+    """Price every chain and return (best, all_plans sorted by cost).
+
+    Cached like the draws it is built from: by profile signature, and reused for
+    profiles within the cosine similarity gatemodel applies to them.
+    """
+    p = _norm_profile(power, n)
+    win = None if window is None else (int(window[0]), int(window[1]))
+    params = (n, float(snr), float(fd), int(max_tiers), int(floor), int(nsim), win, id(cost))
+    key = (_gm._profile_sig(p),) + params
+    hit = _CHOICE_CACHE.get(key)
+    if hit is not None:
+        _CHOICE_CACHE.move_to_end(key)
+        return hit
+    unit, hit = _similar_get("choice", p, params)
+    if hit is not None:
+        return hit
+    out = _choose_chain(p, n, snr, fd, cost, max_tiers, floor, nsim, win)
+    _cache_put(_CHOICE_CACHE, key, out)
+    _similar_put("choice", unit, params, out)
+    return out
+
+
+def _choose_chain(power, n, snr, fd, cost, max_tiers, floor, nsim, window):
     bands = usable_bands(power, n, floor)
     if not bands:
         return None, []
@@ -601,6 +658,9 @@ def rebin_profile(fine, delta_f, data_rate, n):
     return out / tot if tot > 0 else None
 
 
+_PRICE_CACHE = OrderedDict()
+
+
 def price_block_sizes(fine, delta_f, data_rate, longest, margin, ntemplates, snr, fd, candidates,
                       max_tiers=3):
     """Rank block sizes for one bank by modelled cost per valid output sample and template.
@@ -609,19 +669,42 @@ def price_block_sizes(fine, delta_f, data_rate, longest, margin, ntemplates, snr
     block costs its fixed work (calibrated) spread over the templates, plus every pair's cost
     under the best chain at that n (gate model with the reference rebinned to n, calibrated
     tier costs). Returns [(cost, n, chain)] sorted, cheapest first.
+
+    Candidates are priced in ascending order and the search stops at the first that
+    costs more than the best so far: a pair's cost grows faster than n (every tier and
+    the refine scale with it at fixed bandwidth) while the valid fraction only creeps
+    toward one, so past the minimum larger blocks only get dearer -- and pricing one
+    means calibrating and simulating at that size.
     """
+    sig = _gm._profile_sig(np.asarray(fine, np.float64))
     out = []
-    for n in candidates:
+    for n in sorted(int(c) for c in candidates):
         nvalid = n - int(longest) + 1
-        if nvalid < n // 8:
+        if nvalid < 1:
             continue
-        ref = rebin_profile(fine, delta_f, data_rate, n)
-        if ref is None:
+        q = max(n // 32, 1)                  # the bank prices its windows on this grid
+        lo = (int(margin) // q) * q
+        key = (sig, float(delta_f), float(data_rate), n, lo, _nt_bucket(ntemplates),
+               float(snr), float(fd), int(max_tiers))
+        hit = _PRICE_CACHE.get(key)
+        if hit is None:
+            ref = rebin_profile(fine, delta_f, data_rate, n)
+            hit = (None, None, None)
+            if ref is not None:
+                cm = calibrate_costs(n, ntemplates)
+                best, _ = choose_chain(ref, n, snr, fd, cost=cm, max_tiers=max_tiers, window=(lo, n - lo))
+                if best is not None:
+                    hit = (cm.block, best["cost"], best["chain"])
+            _cache_put(_PRICE_CACHE, key, hit)
+        else:
+            _PRICE_CACHE.move_to_end(key)
+        block, pair_cost, chain = hit
+        if pair_cost is None:
             continue
-        cm = calibrate_costs(n, ntemplates)
-        win = (int(margin), int(n - margin))
-        best, _ = choose_chain(ref, n, snr, fd, cost=cm, max_tiers=max_tiers, window=win)
-        if best is None:
-            continue
-        out.append(((cm.block / max(ntemplates, 1) + best["cost"]) / nvalid, int(n), best["chain"]))
+        # per valid output sample and template: the block's fixed work shared by the bank's templates
+        c = (block / max(int(ntemplates), 1) + pair_cost) / nvalid
+        stop = bool(out) and c > min(o[0] for o in out)
+        out.append((c, n, chain))
+        if stop:
+            break
     return sorted(out)
