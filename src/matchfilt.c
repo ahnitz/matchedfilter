@@ -348,6 +348,83 @@ static ap_mf_plan *pair_alternate(ap_mf_plan *p,int d0,int nd,int t0,int nt){
  *
  * Results come back dense [lane][nbins] and are placed by the caller's row
  * index, because a scattered template selection has no single stride. */
+/* dst[k*W + l] = src[l][k] for l < cnt (zero for cnt <= l < W), k < n: W rows of spectra
+   transposed into the lane-interleaved layout the pair-batch kernels read. Survivor
+   batches are gathered this way for every later tier and the refine; done one scalar at
+   a time it cost as much as the batch's correlation itself (~250 ticks per pair each
+   for data and templates at n=512). In registers it is W loads, a WxW transpose and W
+   stores per W elements. n is a multiple of W (power-of-two transforms >= 64). */
+#if (defined(__x86_64__) || defined(_M_X64)) && (defined(__GNUC__) || defined(__clang__))
+#include <immintrin.h>
+#define AP_HAVE_LANE_TRANSPOSE 1
+__attribute__((target("avx512f")))
+static void lanes_transpose16(float * restrict dst, const float *const *src, int cnt, size_t n){
+  for(size_t k = 0; k < n; k += 16){
+    __m512 r[16], t[16], u[16];
+    for(int l = 0; l < 16; l++) r[l] = l < cnt ? _mm512_loadu_ps(src[l] + k) : _mm512_setzero_ps();
+    for(int i = 0; i < 8; i++){
+      t[2*i]   = _mm512_unpacklo_ps(r[2*i], r[2*i+1]);
+      t[2*i+1] = _mm512_unpackhi_ps(r[2*i], r[2*i+1]);
+    }
+    for(int j = 0; j < 4; j++){
+      u[4*j+0] = _mm512_shuffle_ps(t[4*j],   t[4*j+2], 0x44);
+      u[4*j+1] = _mm512_shuffle_ps(t[4*j],   t[4*j+2], 0xEE);
+      u[4*j+2] = _mm512_shuffle_ps(t[4*j+1], t[4*j+3], 0x44);
+      u[4*j+3] = _mm512_shuffle_ps(t[4*j+1], t[4*j+3], 0xEE);
+    }
+    float *d = dst + k * 16;
+    for(int m = 0; m < 4; m++){
+      const __m512 w0 = _mm512_shuffle_f32x4(u[m],     u[4+m],  0x88);
+      const __m512 w1 = _mm512_shuffle_f32x4(u[m],     u[4+m],  0xDD);
+      const __m512 x0 = _mm512_shuffle_f32x4(u[8+m],   u[12+m], 0x88);
+      const __m512 x1 = _mm512_shuffle_f32x4(u[8+m],   u[12+m], 0xDD);
+      _mm512_storeu_ps(d + (m + 0)  * 16, _mm512_shuffle_f32x4(w0, x0, 0x88));
+      _mm512_storeu_ps(d + (m + 8)  * 16, _mm512_shuffle_f32x4(w0, x0, 0xDD));
+      _mm512_storeu_ps(d + (m + 4)  * 16, _mm512_shuffle_f32x4(w1, x1, 0x88));
+      _mm512_storeu_ps(d + (m + 12) * 16, _mm512_shuffle_f32x4(w1, x1, 0xDD));
+    }
+  }
+}
+__attribute__((target("avx")))
+static void lanes_transpose8(float * restrict dst, const float *const *src, int cnt, size_t n){
+  for(size_t k = 0; k < n; k += 8){
+    __m256 r[8];
+    for(int l = 0; l < 8; l++) r[l] = l < cnt ? _mm256_loadu_ps(src[l] + k) : _mm256_setzero_ps();
+    const __m256 t0 = _mm256_unpacklo_ps(r[0], r[1]), t1 = _mm256_unpackhi_ps(r[0], r[1]);
+    const __m256 t2 = _mm256_unpacklo_ps(r[2], r[3]), t3 = _mm256_unpackhi_ps(r[2], r[3]);
+    const __m256 t4 = _mm256_unpacklo_ps(r[4], r[5]), t5 = _mm256_unpackhi_ps(r[4], r[5]);
+    const __m256 t6 = _mm256_unpacklo_ps(r[6], r[7]), t7 = _mm256_unpackhi_ps(r[6], r[7]);
+    const __m256 u0 = _mm256_shuffle_ps(t0, t2, 0x44), u1 = _mm256_shuffle_ps(t0, t2, 0xEE);
+    const __m256 u2 = _mm256_shuffle_ps(t1, t3, 0x44), u3 = _mm256_shuffle_ps(t1, t3, 0xEE);
+    const __m256 u4 = _mm256_shuffle_ps(t4, t6, 0x44), u5 = _mm256_shuffle_ps(t4, t6, 0xEE);
+    const __m256 u6 = _mm256_shuffle_ps(t5, t7, 0x44), u7 = _mm256_shuffle_ps(t5, t7, 0xEE);
+    float *d = dst + k * 8;
+    _mm256_storeu_ps(d + 0 * 8, _mm256_permute2f128_ps(u0, u4, 0x20));
+    _mm256_storeu_ps(d + 1 * 8, _mm256_permute2f128_ps(u1, u5, 0x20));
+    _mm256_storeu_ps(d + 2 * 8, _mm256_permute2f128_ps(u2, u6, 0x20));
+    _mm256_storeu_ps(d + 3 * 8, _mm256_permute2f128_ps(u3, u7, 0x20));
+    _mm256_storeu_ps(d + 4 * 8, _mm256_permute2f128_ps(u0, u4, 0x31));
+    _mm256_storeu_ps(d + 5 * 8, _mm256_permute2f128_ps(u1, u5, 0x31));
+    _mm256_storeu_ps(d + 6 * 8, _mm256_permute2f128_ps(u2, u6, 0x31));
+    _mm256_storeu_ps(d + 7 * 8, _mm256_permute2f128_ps(u3, u7, 0x31));
+  }
+}
+#endif
+
+static void lanes_transpose(float * restrict dst, const float *const *src, int cnt, int W, size_t n){
+#ifdef AP_HAVE_LANE_TRANSPOSE
+  static int have512 = -1, have256 = -1;
+  if(have512 < 0){ have512 = __builtin_cpu_supports("avx512f"); have256 = __builtin_cpu_supports("avx"); }
+  if(W == 16 && have512 && n % 16 == 0){ lanes_transpose16(dst, src, cnt, n); return; }
+  if(W == 8 && have256 && n % 8 == 0){ lanes_transpose8(dst, src, cnt, n); return; }
+#endif
+  for(size_t k = 0; k < n; k++){
+    float * restrict d = dst + k * W;
+    for(int l = 0; l < cnt; l++) d[l] = src[l][k];
+    for(int l = cnt; l < W; l++) d[l] = 0.0f;
+  }
+}
+
 static inline void gather_template_batch(float * restrict tsr, float * restrict tsi,
                                          const ap_mf_plan *p,
                                          int t0, const int *tsel, int tt, int cnt){
@@ -369,53 +446,8 @@ static inline void gather_template_batch(float * restrict tsr, float * restrict 
   }
 
   if(stride1){
-    if(cnt == W){
-      if(W == 8){
-        for(size_t k=0; k<n; k++){
-          float * restrict dr = tsr + k * 8;
-          float * restrict di = tsi + k * 8;
-          dr[0] = srp[0][k]; di[0] = sip[0][k];
-          dr[1] = srp[1][k]; di[1] = sip[1][k];
-          dr[2] = srp[2][k]; di[2] = sip[2][k];
-          dr[3] = srp[3][k]; di[3] = sip[3][k];
-          dr[4] = srp[4][k]; di[4] = sip[4][k];
-          dr[5] = srp[5][k]; di[5] = sip[5][k];
-          dr[6] = srp[6][k]; di[6] = sip[6][k];
-          dr[7] = srp[7][k]; di[7] = sip[7][k];
-        }
-      } else if(W == 16){
-        for(size_t k=0; k<n; k++){
-          float * restrict dr = tsr + k * 16;
-          float * restrict di = tsi + k * 16;
-          for(int l=0; l<16; l++){
-            dr[l] = srp[l][k];
-            di[l] = sip[l][k];
-          }
-        }
-      } else {
-        for(size_t k=0; k<n; k++){
-          float * restrict dr = tsr + k * W;
-          float * restrict di = tsi + k * W;
-          for(int l=0; l<W; l++){
-            dr[l] = srp[l][k];
-            di[l] = sip[l][k];
-          }
-        }
-      }
-    } else {
-      for(size_t k=0; k<n; k++){
-        float * restrict dr = tsr + k * W;
-        float * restrict di = tsi + k * W;
-        for(int l=0; l<cnt; l++){
-          dr[l] = srp[l][k];
-          di[l] = sip[l][k];
-        }
-        for(int l=cnt; l<W; l++){
-          dr[l] = 0.0f;
-          di[l] = 0.0f;
-        }
-      }
-    }
+    lanes_transpose(tsr, srp, cnt, W, n);
+    lanes_transpose(tsi, sip, cnt, W, n);
   } else {
     if(cnt == W){
       if(W == 8){
@@ -485,53 +517,8 @@ static inline void gather_data_batch(float * restrict dsr, float * restrict dsi,
     dip[l] = p->dim + (size_t)d * n;
   }
 
-  if(cnt == W){
-    if(W == 8){
-      for(size_t k=0; k<n; k++){
-        float * restrict dr = dsr + k * 8;
-        float * restrict di = dsi + k * 8;
-        dr[0] = drp[0][k]; di[0] = dip[0][k];
-        dr[1] = drp[1][k]; di[1] = dip[1][k];
-        dr[2] = drp[2][k]; di[2] = dip[2][k];
-        dr[3] = drp[3][k]; di[3] = dip[3][k];
-        dr[4] = drp[4][k]; di[4] = dip[4][k];
-        dr[5] = drp[5][k]; di[5] = dip[5][k];
-        dr[6] = drp[6][k]; di[6] = dip[6][k];
-        dr[7] = drp[7][k]; di[7] = dip[7][k];
-      }
-    } else if(W == 16){
-      for(size_t k=0; k<n; k++){
-        float * restrict dr = dsr + k * 16;
-        float * restrict di = dsi + k * 16;
-        for(int l=0; l<16; l++){
-          dr[l] = drp[l][k];
-          di[l] = dip[l][k];
-        }
-      }
-    } else {
-      for(size_t k=0; k<n; k++){
-        float * restrict dr = dsr + k * W;
-        float * restrict di = dsi + k * W;
-        for(int l=0; l<W; l++){
-          dr[l] = drp[l][k];
-          di[l] = dip[l][k];
-        }
-      }
-    }
-  } else {
-    for(size_t k=0; k<n; k++){
-      float * restrict dr = dsr + k * W;
-      float * restrict di = dsi + k * W;
-      for(int l=0; l<cnt; l++){
-        dr[l] = drp[l][k];
-        di[l] = dip[l][k];
-      }
-      for(int l=cnt; l<W; l++){
-        dr[l] = 0.0f;
-        di[l] = 0.0f;
-      }
-    }
-  }
+  lanes_transpose(dsr, drp, cnt, W, n);
+  lanes_transpose(dsi, dip, cnt, W, n);
 }
 
 static int run_pairs_pb(ap_mf_plan *p, int d0, int nd, int t0, int nt,
