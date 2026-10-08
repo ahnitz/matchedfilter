@@ -484,6 +484,11 @@ def _corr_bank_taps(layout, rng):
     return taps, counts
 
 
+# The layouts below are the valid-fraction rule's groupings; a CPU bank otherwise prices its own
+# (and a GPU bank does not), so pin the sizes to compare the same groups on both devices.
+PINNED = [2048, 4096]
+
+
 @pytest.mark.parametrize("layout", ["one", "two", "interleaved"])
 @pytest.mark.parametrize("window", [None, slice(20000, 90000)])
 def test_correlate_series_gpu_matches_cpu_for_every_group_layout(layout, window):
@@ -498,8 +503,8 @@ def test_correlate_series_gpu_matches_cpu_for_every_group_layout(layout, window)
     taps, counts = _corr_bank_taps(layout, rng)
     S = 32 * 4096
     ser = ((rng.standard_normal(S) + 1j * rng.standard_normal(S)) / np.sqrt(2)).astype(np.complex64)
-    cpu = TimeDomainFilterBank(taps, counts, engine='corr').correlate_series(ser, windows=window)
-    gbank = TimeDomainFilterBank(taps, counts, engine='corr', device=gpu)
+    cpu = TimeDomainFilterBank(taps, counts, engine='corr', fft_lengths=PINNED).correlate_series(ser, windows=window)
+    gbank = TimeDomainFilterBank(taps, counts, engine='corr', device=gpu, fft_lengths=PINNED)
     got = gbank.correlate_series(ser, windows=window)
     scale = np.abs(cpu).max()
     assert scale > 0
@@ -507,7 +512,7 @@ def test_correlate_series_gpu_matches_cpu_for_every_group_layout(layout, window)
     # Same bank, a different window: the shared workspace must not leak the
     # previous call's samples into the new result.
     window2 = slice(60000, 61000)
-    cpu2 = TimeDomainFilterBank(taps, counts, engine='corr').correlate_series(ser, windows=window2)
+    cpu2 = TimeDomainFilterBank(taps, counts, engine='corr', fft_lengths=PINNED).correlate_series(ser, windows=window2)
     got2 = gbank.correlate_series(ser, windows=window2)
     assert np.max(np.abs(got2 - cpu2)) <= 1e-5 * np.abs(cpu2).max()
     got_t = gbank.correlate_series(ser, windows=window, template_index=3)
