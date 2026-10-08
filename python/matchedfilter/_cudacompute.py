@@ -342,6 +342,18 @@ class _BatchTuple(tuple):
         return self._dict.keys()
 
 
+class _Record(dict):
+    """A cache record: named buffers, also indexable in the legacy tuple order."""
+    ORDER = ("data", "tmpl", "idx", "val", "host")
+
+    def __getitem__(self, item):
+        if isinstance(item, int):
+            return dict.__getitem__(self, self.ORDER[item])
+        if isinstance(item, slice):
+            return tuple(dict.__getitem__(self, k) for k in self.ORDER[item])
+        return dict.__getitem__(self, item)
+
+
 def _owned(buffers):
     """The allocations a cache record owns: not borrowed shared arrays."""
     return [b for b in buffers if isinstance(b, (_Buffer, _Pinned))]
@@ -735,6 +747,37 @@ class Context(InputUploads):
         self._cache_touch(kind, key)
         return rec, fresh
 
+    def _grow(self, rec, name, nbytes, cls, stream):
+        """Ensure rec[name] holds at least nbytes, growing geometrically. Returns True if
+        it was (re)allocated -- its contents are then undefined."""
+        cur = rec.get(name)
+        if cur is not None and (isinstance(cur, _Borrowed) or cur.nbytes >= nbytes):
+            return False
+        if cur is not None:
+            self._sync(stream)            # enqueued work may still use the old allocation
+            cur.destroy()
+        rec[name] = cls(self, max(int(nbytes), 64) if cur is None else max(int(nbytes), 2 * cur.nbytes))
+        return True
+
+    def _flat_record(self, key, n, nd, nt, out, dsh, tsh, stream):
+        """The flat-filter record for (n, templates, slot, shared inputs), sized by
+        capacity: a call with another block or bin count reuses it (growing it if
+        needed) instead of allocating a record per shape. Returns (record, fresh)."""
+        estimate = (0 if dsh else nd * n * 8) + (0 if tsh else nt * n * 8) + out * 24
+        rec, fresh = self._record("flat", self._batches, key, estimate, _Record)
+        if dsh is not None:
+            rec["data"] = dsh
+        elif self._grow(rec, "data", nd * n * 8, _Buffer, stream):
+            fresh = True
+        if tsh is not None:
+            rec["tmpl"] = tsh
+        elif self._grow(rec, "tmpl", nt * n * 8, _Buffer, stream):
+            fresh = True
+        self._grow(rec, "idx", out * 4, _Buffer, stream)
+        self._grow(rec, "val", out * 8, _Buffer, stream)
+        self._grow(rec, "host", out * 12, _Pinned, stream)
+        return rec, fresh
+
     def _results(self, host, nd, nt, nbins):
         out = nd * nt * nbins
         idx = host.view(np.int32, out).reshape(nd, nt, nbins).copy()
@@ -773,18 +816,11 @@ class Context(InputUploads):
         t2 = float(threshold) ** 2 if threshold > 0 else 0.0
         stream = self.get_stream(slot)
         dsh, tsh = shared_buffer(data, self), shared_buffer(tmpl, self)
-        key = (n, nd, nt, nbins, slot, dsh and data.ctypes.data, tsh and tmpl.ctypes.data)
+        key = (n, nt, slot, dsh and data.ctypes.data, tsh and tmpl.ctypes.data)
         upload_data, upload_tmpl, dsig, tsig = self._input_uploads(
             key, data, tmpl, upload_data, upload_tmpl)
         out = nd * nt * nbins
-        estimate = (0 if dsh else nd * n * 8) + (0 if tsh else nt * n * 8) + out * 24
-        bufs, fresh = self._record("flat", self._batches, key, estimate, lambda: _BatchTuple(
-            dsh or _Buffer(self, nd * n * 8),
-            tsh or _Buffer(self, nt * n * 8),
-            _Buffer(self, out * 4),
-            _Buffer(self, out * 8),
-            _Pinned(self, out * 12),
-        ))
+        bufs, fresh = self._flat_record(key, n, nd, nt, out, dsh, tsh, stream)
         if fresh:
             upload_data = upload_tmpl = True
         if upload_data:
@@ -832,18 +868,11 @@ class Context(InputUploads):
         t2 = float(threshold) ** 2 if threshold > 0 else 0.0
         stream = self.get_stream(slot)
         dsh, tsh = shared_buffer(data, self), shared_buffer(tmpl, self)
-        key = ("grouped", n, nd, nt, nb, slot, dsh and data.ctypes.data, tsh and tmpl.ctypes.data)
+        key = (n, nt, slot, dsh and data.ctypes.data, tsh and tmpl.ctypes.data)
         upload_data, upload_tmpl, dsig, tsig = self._input_uploads(
             key, data, tmpl, True, upload_tmpl)
         out = nd * nt * nb
-        estimate = (0 if dsh else nd * n * 8) + (0 if tsh else nt * n * 8) + out * 24
-        bufs, fresh = self._record("flat", self._batches, key, estimate, lambda: _BatchTuple(
-            dsh or _Buffer(self, nd * n * 8),
-            tsh or _Buffer(self, nt * n * 8),
-            _Buffer(self, out * 4),
-            _Buffer(self, out * 8),
-            _Pinned(self, out * 12),
-        ))
+        bufs, fresh = self._flat_record(key, n, nd, nt, out, dsh, tsh, stream)
         if fresh:
             upload_tmpl = True
         # Grouped spectra are a fresh forward batch on every call.
@@ -1142,7 +1171,9 @@ class Context(InputUploads):
         t2 = float(threshold) ** 2 if threshold > 0 else 0.0
         stream = self.get_stream(slot)
         dsh, tsh = shared_buffer(data, self), shared_buffer(tmpl, self)
-        key = (n, band0, band1, nd, nt, nbins, slot, dsh and data.ctypes.data, tsh and tmpl.ctypes.data)
+        # Keyed without block or bin counts: buffers are sized by capacity and grow,
+        # so windowed calls of varying size reuse one record (no per-shape churn).
+        key = (n, band0, band1, nt, slot, dsh and data.ctypes.data, tsh and tmpl.ctypes.data)
         upload_data, upload_tmpl, dsig, tsig = self._input_uploads(
             key, data, tmpl, upload_data, upload_tmpl)
         c16 = _use_c16(band0)
@@ -1150,44 +1181,34 @@ class Context(InputUploads):
         out = nd * nt * nbins
         cfn, cwg, ppg, tile, _ = self._coarse_kernel(band0, nt)
         group = ppg * tile
-        # Data rows padded so the pair count fills whole groups; the extra rows are
-        # zero and their pairs sit past `pairs`, where the compaction never looks.
+        # Data rows padded so the pair count fills whole groups. The padding pairs'
+        # coarse values land past `pairs`, which the compaction never reads.
         ndp = nd
         while (ndp * nt) % group:
             ndp += 1
-
-        def make():
-            b = {
-                "data": dsh or _Buffer(self, nd * n * 8),
-                "tmpl": tsh or _Buffer(self, nt * n * 8),
-                "cdata0": _Buffer(self, ndp * band0 * cb0),
-                "ct0": _Buffer(self, nt * band0 * cb0),
-                "cidx0": _Buffer(self, ndp * nt * 4),
-                "cval0": _Buffer(self, ndp * nt * 8),
-                "surv0": _Buffer(self, pairs * 4),
-                # [refine count, tier-1 count]
-                "args": _Buffer(self, 16),
-                "idx": _Buffer(self, out * 4),
-                "val": _Buffer(self, out * 8),
-                "host": _Pinned(self, out * 12 + 16),
-            }
-            if cascade:
-                b.update({
-                    "cdata1": _Buffer(self, nd * band1 * 8),
-                    "ct1": _Buffer(self, nt * band1 * 8),
-                    "cidx1": _Buffer(self, pairs * 4),
-                    "cval1": _Buffer(self, pairs * 8),
-                    "surv1": _Buffer(self, pairs * 4),
-                })
-            return b
         estimate = ((0 if dsh else nd * n * 8) + (0 if tsh else nt * n * 8)
                     + (nd + nt) * (band0 * cb0 + (band1 or 0) * 8) + pairs * 40 + out * 24)
-        bufs, fresh = self._record("hier", self._hier, key, estimate, make)
+        bufs, fresh = self._record("hier", self._hier, key, estimate, dict)
+        sizes = [("cdata0", ndp * band0 * cb0, _Buffer), ("cidx0", ndp * nt * 4, _Buffer),
+                 ("cval0", ndp * nt * 8, _Buffer), ("surv0", pairs * 4, _Buffer),
+                 ("args", 16, _Buffer), ("idx", out * 4, _Buffer), ("val", out * 8, _Buffer),
+                 ("host", out * 12 + 16, _Pinned)]
+        if cascade:
+            sizes += [("cdata1", nd * band1 * 8, _Buffer), ("cidx1", pairs * 4, _Buffer),
+                      ("cval1", pairs * 8, _Buffer), ("surv1", pairs * 4, _Buffer)]
+        for name, nbytes, cls in sizes:
+            if self._grow(bufs, name, nbytes, cls, stream) and name.startswith("cdata"):
+                upload_data = True           # its packed copy of the data is gone
+        for name, nbytes, src in (("data", nd * n * 8, dsh), ("tmpl", nt * n * 8, tsh)):
+            if src is not None:
+                bufs[name] = src
+            elif self._grow(bufs, name, nbytes, _Buffer, stream):
+                fresh = True
+        for name, nbytes in (("ct0", nt * band0 * cb0),) + ((("ct1", nt * band1 * 8),) if cascade else ()):
+            if self._grow(bufs, name, nbytes, _Buffer, stream):
+                upload_tmpl = True
         if fresh:
             upload_data = upload_tmpl = True
-            if ndp > nd:
-                self._fill32(_ptr(bufs["cdata0"].dptr.value + nd * band0 * cb0), 0,
-                             (ndp - nd) * band0 * cb0 // 4, stream)
 
         if upload_data:
             self._upload(bufs["data"], data, stream)
@@ -1326,40 +1347,30 @@ class Context(InputUploads):
         ng = len(groups)
         out = nd * nt * nb
         pairs = nd * nt
-        key = ("grouped", n, band0, band1, nd, nt, nb, slot, data.ctypes.data,
-               tsh and tmpl.ctypes.data)
+        key = ("grouped", n, band0, band1, nt, slot, data.ctypes.data, tsh and tmpl.ctypes.data)
         _, upload_tmpl, _, tsig = self._input_uploads(key, data, tmpl, True, upload_tmpl)
-
-        def make():
-            b = {
-                "data": dsh,
-                "tmpl": tsh or _Buffer(self, nt * n * 8),
-                "ct0": _Buffer(self, nt * band0 * cb0),
-                "surv0": _Buffer(self, pairs * 4),
-                "idx": _Buffer(self, out * 4),
-                "val": _Buffer(self, out * 8),
-            }
-            if cascade:
-                b.update({"cdata1": _Buffer(self, nd * band1 * 8),
-                          "ct1": _Buffer(self, nt * band1 * 8),
-                          "cidx1": _Buffer(self, pairs * 4),
-                          "cval1": _Buffer(self, pairs * 8),
-                          "surv1": _Buffer(self, pairs * 4)})
-            return b
         estimate = ((0 if tsh else nt * n * 8) + nt * (band0 * cb0 + (band1 or 0) * 8)
                     + pairs * 40 + out * 24)
-        bufs, fresh = self._record("hier", self._hier, key, estimate, make)
+        bufs, fresh = self._record("hier", self._hier, key, estimate, dict)
+        bufs["data"] = dsh
+        if tsh is not None:
+            bufs["tmpl"] = tsh
+        elif self._grow(bufs, "tmpl", nt * n * 8, _Buffer, stream):
+            fresh = True
+        sizes = [("ct0", nt * band0 * cb0, _Buffer), ("surv0", pairs * 4, _Buffer),
+                 ("idx", out * 4, _Buffer), ("val", out * 8, _Buffer),
+                 ("cdata0", ndp * band0 * cb0, _Buffer), ("cidx0", ndp * nt * 4, _Buffer),
+                 ("cval0", ndp * nt * 8, _Buffer), ("args", 8 * ng, _Buffer),
+                 ("host", out * 12 + 8 * ng, _Pinned)]
+        if cascade:
+            sizes += [("ct1", nt * band1 * 8, _Buffer), ("cdata1", nd * band1 * 8, _Buffer),
+                      ("cidx1", pairs * 4, _Buffer), ("cval1", pairs * 8, _Buffer),
+                      ("surv1", pairs * 4, _Buffer)]
+        for name, nbytes, cls in sizes:
+            if self._grow(bufs, name, nbytes, cls, stream) and name in ("ct0", "ct1"):
+                upload_tmpl = True
         if fresh:
             upload_tmpl = True
-        # Per-call sized parts: the padded coarse rows and the per-group counters.
-        for name, nbytes in (("cdata0", ndp * band0 * cb0), ("cidx0", ndp * nt * 4),
-                             ("cval0", ndp * nt * 8), ("args", 8 * ng), ("host", out * 12 + 8 * ng)):
-            cur = bufs.get(name)
-            if cur is None or cur.nbytes < nbytes:
-                if cur is not None:
-                    self._sync(stream)
-                    cur.destroy()
-                bufs[name] = (_Pinned if name == "host" else _Buffer)(self, max(nbytes, 64))
         if upload_tmpl:
             self._upload(bufs["tmpl"], tmpl, stream)
             bufs["ct0"].write(_pack_half2(ct0) if c16 else np.ascontiguousarray(ct0, np.complex64),
