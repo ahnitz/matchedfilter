@@ -463,6 +463,8 @@ class _TemplateGroup:
                 plan = self._single_gpu_plan = MatchedFilter(self.n, ndata=1, ntemplates=1,
                                                              device=self.device)
             if self.__dict__.get('_single_gpu_ti') != int(ti):
+                # Calls deferred in a batch still read the current template: let them finish.
+                plan._settle_deferred()
                 plan.set_templates(np.ascontiguousarray(sp))
                 self._single_gpu_ti = int(ti)
             return plan

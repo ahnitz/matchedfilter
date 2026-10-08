@@ -763,3 +763,32 @@ def test_filter_series_many_matches_one_call_at_a_time(device):
     for r1, r2 in zip(one, many):
         for f in r1._fields:
             np.testing.assert_array_equal(getattr(r1, f), getattr(r2, f))
+
+
+def test_filter_series_many_mixes_deferred_and_synchronous_calls_on_one_plan():
+    """Follow-up-style calls in one batch: one template's single plan serves several jobs,
+    some with windows that give mixed bin counts (a synchronous path on some backends) and
+    some deferred. A synchronous call must not reuse a slot a deferred call still holds --
+    that left a fence wait that never returned."""
+    from conftest import usable_gpu
+    dev = usable_gpu()
+    if dev is None:
+        pytest.skip("no usable GPU")
+    rng = np.random.default_rng(12)
+    counts = list(rng.integers(200, 400, 30))
+    taps, w, df = _whitened_inspiral_bank(rng, counts)
+    bank = TimeDomainFilterBank(taps, tap_counts=counts, engine='hier', threshold=5.0,
+                                false_dismissal=1e-3, device=dev, fft_lengths=[2048], binsize=2048)
+    bank.set_reference(w, delta_f=df)
+    S = 1 << 17
+    X = np.fft.fft(rng.standard_normal(S))
+    X[S // 2:] = 0
+    x = (np.fft.ifft(X) * 2).astype(np.complex64)
+    jobs = [(bank, x, dict(windows=slice(c - 15000, c + 15000), binsize=61, threshold=0.0,
+                           template_index=t))
+            for t, c in ((3, 30000), (3, 61000), (8, 47000), (8, 90000), (3, 70000)) * 4]
+    one = [bank.filter_series(x, **kw) for _, x, kw in jobs]
+    many = TimeDomainFilterBank.filter_series_many(jobs)
+    for r1, r2 in zip(one, many):
+        np.testing.assert_array_equal(r1.sample_indices, r2.sample_indices)
+        np.testing.assert_array_equal(r1.snr, r2.snr)
