@@ -287,7 +287,11 @@ def _corr_block_costs(n: int, device: Optional[Any] = None) -> Tuple[float, floa
         lo, hi = cf.valid
         st, _, _ = _automatic_series_layout(L, cf.valid)
         if cf._gpu is not None:
-            dest = cf.empty_shared((nt, L), readback=True)
+            # On a discrete GPU the destination's residency dominates: a host-read
+            # output is written over the bus at a cost per sample independent of n, which
+            # swamped the kernel and priced n=32768 (whose CUDA kernel spills) as cheapest.
+            # There, price the kernel into device-resident output (the resident path).
+            dest = cf.empty_shared((nt, L), readback=not getattr(cf._gpu, 'discrete', False))
             run = lambda: cf._continuous_gpu(ser, st, 0, nt, dest)
         else:
             dest = np.zeros((nt, L), np.complex64)
