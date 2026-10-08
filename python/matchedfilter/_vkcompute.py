@@ -510,6 +510,10 @@ class Context(InputUploads):
         if self._timing:
             _gputime.register(self)
         self._ts = None
+        # MF_GPU_PROFILE=1 (set when plans are recorded): timestamps between the phases of a
+        # recording, reported as ("k:<phase>", device_ms) in timing_log.
+        self._profile = self._timing and os.environ.get("MF_GPU_PROFILE", "0") not in ("", "0")
+        self._prof = None
 
     _SHARED = ("vk", "instance", "physical", "queue_family", "queues", "queue", "device",
                "_accurate_trig", "max_shared_memory", "max_invocations", "max_dispatch_x",
@@ -1030,6 +1034,7 @@ class Context(InputUploads):
                "vkAllocateCommandBuffers")
         _check(vk.vkBeginCommandBuffer(cmd, ctypes.byref(
             _CmdBufBegin(42, None, 0, None))), "vkBeginCommandBuffer")
+        self._stamp(cmd, "start")
 
         def coarse(ds):
             vk.vkCmdBindPipeline(cmd, _BIND_POINT_COMPUTE, cpipe)
@@ -1091,6 +1096,7 @@ class Context(InputUploads):
         barrier(src_stage=_STAGE_TRANSFER_BIT, src_access=_ACCESS_TRANSFER_WRITE,
                 dst_stage=_STAGE_COMPUTE_BIT | _STAGE_DRAW_INDIRECT_BIT,
                 dst_access=_ACCESS_SHADER_READ | _ACCESS_SHADER_WRITE | _ACCESS_INDIRECT_READ)
+        self._stamp(cmd, "fill")
 
         if shared_data:
             vk.vkCmdBindPipeline(cmd, _BIND_POINT_COMPUTE, ppipe)
@@ -1103,9 +1109,11 @@ class Context(InputUploads):
                                   ctypes.byref(pc))
             vk.vkCmdDispatch(cmd, (nd*band + 255)//256, 1, 1)
             barrier()
+            self._stamp(cmd, "pack")
 
         coarse(ds_coarse)
         barrier()
+        self._stamp(cmd, "coarse%d" % band)
 
         vk.vkCmdBindPipeline(cmd, _BIND_POINT_COMPUTE, kpipe)
         sets = (_vp * 1)(ds_compact)
@@ -1121,6 +1129,7 @@ class Context(InputUploads):
         # (zero on first use), even while the host read the new count later.
         barrier(dst_stage=_STAGE_COMPUTE_BIT | _STAGE_DRAW_INDIRECT_BIT,
                 dst_access=_ACCESS_SHADER_READ | _ACCESS_SHADER_WRITE | _ACCESS_INDIRECT_READ)
+        self._stamp(cmd, "compact")
 
         vk.vkCmdBindPipeline(cmd, _BIND_POINT_COMPUTE, rpipe)
         sets = (_vp * 1)(ds_listed)
@@ -1137,6 +1146,7 @@ class Context(InputUploads):
         barrier(src_stage=_STAGE_COMPUTE_BIT | _STAGE_TRANSFER_BIT,
                 src_access=_ACCESS_SHADER_WRITE | _ACCESS_TRANSFER_WRITE,
                 dst_stage=_STAGE_HOST_BIT, dst_access=_ACCESS_HOST_READ)
+        self._stamp(cmd, "refine")
         _check(vk.vkEndCommandBuffer(cmd), "vkEndCommandBuffer")
         return b, cmd
 
@@ -1216,6 +1226,7 @@ class Context(InputUploads):
                "vkAllocateCommandBuffers")
         _check(vk.vkBeginCommandBuffer(cmd, ctypes.byref(
             _CmdBufBegin(42, None, 0, None))), "vkBeginCommandBuffer")
+        self._stamp(cmd, "start")
 
         def barrier(src_stage=_STAGE_COMPUTE_BIT, dst_stage=_STAGE_COMPUTE_BIT,
                     src_access=_ACCESS_SHADER_WRITE, dst_access=_ACCESS_SHADER_READ):
@@ -1235,6 +1246,7 @@ class Context(InputUploads):
                 dst_stage=_STAGE_COMPUTE_BIT | _STAGE_DRAW_INDIRECT_BIT,
                 dst_access=_ACCESS_SHADER_READ | _ACCESS_SHADER_WRITE | _ACCESS_INDIRECT_READ)
 
+        self._stamp(cmd, "fill")
         # 2. Extract coarse bands if shared
         if shared_data:
             vk.vkCmdBindPipeline(cmd, _BIND_POINT_COMPUTE, ppipe)
@@ -1250,6 +1262,7 @@ class Context(InputUploads):
             vk.vkCmdPushConstants(cmd, playout, _STAGE_COMPUTE, 0, 16, ctypes.byref(pc1))
             vk.vkCmdDispatch(cmd, (nd * band1 + 255) // 256, 1, 1)
             barrier()
+            self._stamp(cmd, "pack")
 
         # 3. Stage 1: Tier 0 Coarse (all pairs)
         vk.vkCmdBindPipeline(cmd, _BIND_POINT_COMPUTE, cpipe0)
@@ -1269,6 +1282,7 @@ class Context(InputUploads):
         vk.vkCmdPushConstants(cmd, clayout0, _STAGE_COMPUTE, 0, _PUSH_BYTES, ctypes.byref(pc0))
         vk.vkCmdDispatch(cmd, pairs // (_ppg0 * _tile0), 1, 1)
         barrier()
+        self._stamp(cmd, "coarse%d" % band0)
 
         # 4. Stage 2: Compact 0
         vk.vkCmdBindPipeline(cmd, _BIND_POINT_COMPUTE, kpipe)
@@ -1279,6 +1293,7 @@ class Context(InputUploads):
         vk.vkCmdDispatch(cmd, (pairs + 255) // 256, 1, 1)
         barrier(dst_stage=_STAGE_COMPUTE_BIT | _STAGE_DRAW_INDIRECT_BIT,
                 dst_access=_ACCESS_SHADER_READ | _ACCESS_SHADER_WRITE | _ACCESS_INDIRECT_READ)
+        self._stamp(cmd, "compact0")
 
         # 5. Stage 3: Tier 1 Coarse (Indirect on survivors0)
         vk.vkCmdBindPipeline(cmd, _BIND_POINT_COMPUTE, cpipe1)
@@ -1298,6 +1313,7 @@ class Context(InputUploads):
         vk.vkCmdPushConstants(cmd, clayout1, _STAGE_COMPUTE, 0, _PUSH_BYTES, ctypes.byref(pc1))
         vk.vkCmdDispatchIndirect(cmd, b["args_tier1"].handle, 0)
         barrier()
+        self._stamp(cmd, "coarse%d" % band1)
 
         # 6. Stage 4: Compact 1
         vk.vkCmdBindPipeline(cmd, _BIND_POINT_COMPUTE, kpipe)
@@ -1308,6 +1324,7 @@ class Context(InputUploads):
         vk.vkCmdDispatch(cmd, (pairs + 255) // 256, 1, 1)
         barrier(dst_stage=_STAGE_COMPUTE_BIT | _STAGE_DRAW_INDIRECT_BIT,
                 dst_access=_ACCESS_SHADER_READ | _ACCESS_SHADER_WRITE | _ACCESS_INDIRECT_READ)
+        self._stamp(cmd, "compact1")
 
         # 7. Stage 5: Refine (Indirect on survivors1)
         vk.vkCmdBindPipeline(cmd, _BIND_POINT_COMPUTE, rpipe)
@@ -1323,6 +1340,7 @@ class Context(InputUploads):
         barrier(src_stage=_STAGE_COMPUTE_BIT | _STAGE_TRANSFER_BIT,
                 src_access=_ACCESS_SHADER_WRITE | _ACCESS_TRANSFER_WRITE,
                 dst_stage=_STAGE_HOST_BIT, dst_access=_ACCESS_HOST_READ)
+        self._stamp(cmd, "refine")
         _check(vk.vkEndCommandBuffer(cmd), "vkEndCommandBuffer")
         return b, cmd
 
@@ -1360,6 +1378,7 @@ class Context(InputUploads):
                                                ctypes.byref(cmd)), "allocate forward")
             begin = _CmdBufBegin(42, None, 0, None)
             _check(vk.vkBeginCommandBuffer(cmd, ctypes.byref(begin)), "begin forward")
+            self._stamp(cmd, "start")
             vk.vkCmdBindPipeline(cmd, _BIND_POINT_COMPUTE, pipe)
             sets = (_vp * 1)(ds)
             vk.vkCmdBindDescriptorSets(cmd, _BIND_POINT_COMPUTE, layout, 0, 1,
@@ -1375,6 +1394,7 @@ class Context(InputUploads):
             vk.vkCmdPipelineBarrier(cmd, _STAGE_COMPUTE_BIT,
                                     _STAGE_COMPUTE_BIT | 0x4000,  # HOST
                                     0, 0, None, 1, ctypes.byref(barrier), 0, None)
+            self._stamp(cmd, "forward")
             _check(vk.vkEndCommandBuffer(cmd), "end forward")
             batch = (*buffers, cmd)
             forwards[key] = batch
@@ -1498,7 +1518,9 @@ class Context(InputUploads):
             _check(vk.vkAllocateCommandBuffers(self.device, ctypes.byref(alloc), cmds),
                    "allocate timestamp buffers")
             for i in range(self._TS_RING):
-                b, e = cmds[2 * i], cmds[2 * i + 1]
+                # As handles, not ints: indexing a c_void_p array yields a Python int, which
+                # ctypes passes to a function without argtypes as a 32-bit C int.
+                b, e = _vp(cmds[2 * i]), _vp(cmds[2 * i + 1])
                 begin = _CmdBufBegin(42, None, 0, None)
                 _check(vk.vkBeginCommandBuffer(b, ctypes.byref(begin)), "begin timestamp")
                 vk.vkCmdResetQueryPool(b, pool, 2 * i, 2)
@@ -1514,7 +1536,69 @@ class Context(InputUploads):
         if i in ts["pending"]:                 # the ring wrapped: settle that slot first
             self._timestamp_resolve(only=i)
         ts["pending"][i] = label
-        return ts["cmds"][2 * i], ts["cmds"][2 * i + 1]
+        return _vp(ts["cmds"][2 * i]), _vp(ts["cmds"][2 * i + 1])
+
+    _PROF_QUERIES = 8192
+
+    def _stamp(self, cmd, label):
+        """Record a timestamp into recording `cmd` (MF_GPU_PROFILE=1 only)."""
+        if not getattr(self, "_profile", False):
+            return
+        vk = self.vk
+        if self._prof is None:
+            for name, args in (("vkCmdWriteTimestamp", [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_uint32]),
+                               ("vkCmdResetQueryPool", [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32]),
+                               ("vkGetQueryPoolResults", [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint32,
+                                                          ctypes.c_uint32, ctypes.c_size_t, ctypes.c_void_p,
+                                                          ctypes.c_uint64, ctypes.c_uint32])):
+                getattr(vk, name).argtypes = args
+            info = _QueryPoolCreate(11, None, 0, 2, self._PROF_QUERIES, 0)
+            pool = _vp()
+            _check(vk.vkCreateQueryPool(self.device, ctypes.byref(info), None, ctypes.byref(pool)),
+                   "vkCreateQueryPool")
+            self._prof = dict(pool=pool, next=0, marks={}, pending=[])
+        pr = self._prof
+        q = pr["next"]
+        if q >= self._PROF_QUERIES:
+            return                                     # out of queries: stop marking
+        pr["next"] = q + 1
+        handle = getattr(cmd, "value", cmd)
+        vk.vkCmdResetQueryPool(cmd, pr["pool"], q, 1)
+        vk.vkCmdWriteTimestamp(cmd, 0x2000, pr["pool"], q)        # BOTTOM_OF_PIPE
+        pr["marks"].setdefault(handle, []).append((q, label))
+
+    def _profile_submitted(self, commands):
+        pr = self._prof
+        if pr is None:
+            return
+        for c in commands:
+            h = getattr(c, "value", c)
+            if h in pr["marks"]:
+                if h in pr["pending"]:                 # its queries are about to be rewritten
+                    self._profile_resolve()
+                pr["pending"].append(h)
+
+    def _profile_resolve(self):
+        pr = self._prof
+        if pr is None or not pr["pending"]:
+            return
+        out = ctypes.c_uint64()
+        for h in pr["pending"]:
+            marks = pr["marks"][h]
+            times = []
+            for q, label in marks:
+                _check(self.vk.vkGetQueryPoolResults(self.device, pr["pool"], q, 1, 8,
+                                                     ctypes.byref(out), 8, 0x3), "vkGetQueryPoolResults")
+                times.append(out.value)
+            for (_, label), t0, t1 in zip(marks[1:], times, times[1:]):
+                self.timing_log.append(("k:" + label, (t1 - t0) * self._ts_period * 1e-6))
+        pr["pending"] = []
+
+    def _wait_queues(self):
+        """Wait for every queue this context submits to. Pipelined slots run on queues 1-3, so
+        waiting on queue 0 alone let a recording be freed while another queue executed it."""
+        for q in self.queues:
+            _check(self.vk.vkQueueWaitIdle(q), "vkQueueWaitIdle")
 
     def _timestamp_resolve(self, only=None):
         ts = self._ts
@@ -1530,6 +1614,7 @@ class Context(InputUploads):
     def timings(self):
         """Settle outstanding timestamps and return the timing log (MF_GPU_TIMING=1)."""
         self._timestamp_resolve()
+        self._profile_resolve()
         return self.timing_log
 
     def _submit(self, cmd, fence=None, wait=True, slot=None):
@@ -1554,6 +1639,7 @@ class Context(InputUploads):
         if self._timing:
             label = sys._getframe(1).f_code.co_name + ("+forward" if pending is not None else "")
             begin, end = self._timestamp_pair(label)
+            self._profile_submitted(commands)
             commands = [begin] + commands + [end]
         cmds = (_vp * len(commands))(*commands)
         submit = _SubmitInfo(4, None, 0, None, None, len(commands), cmds, 0, None)
@@ -2116,7 +2202,7 @@ class Context(InputUploads):
         elif pf is not None and getattr(pf, 'value', pf) == cmd_val:
             self._pending_forward = None
             self._submit(cmd)
-        _check(self.vk.vkQueueWaitIdle(self.queue), "vkQueueWaitIdle")
+        self._wait_queues()
         commands = (_vp * 1)(cmd)
         self.vk.vkFreeCommandBuffers.argtypes = [_vp, _vp, _u32, ctypes.POINTER(_vp)]
         self.vk.vkFreeCommandBuffers(self.device, self.command_pool, 1, commands)
@@ -2140,7 +2226,7 @@ class Context(InputUploads):
     def clear_cache(self):
         """Release records and owned storage, preserving external shared arrays."""
         self._submit(None)
-        _check(self.vk.vkQueueWaitIdle(self.queue), "vkQueueWaitIdle")
+        self._wait_queues()
         self.vk.vkFreeCommandBuffers.argtypes = [_vp, _vp, _u32, ctypes.POINTER(_vp)]
         for kind, cache in (('flat', self._batches), ('hier', self._hier),
                             ('hier_cascade', getattr(self, '_hier_cascade', {})),
@@ -2174,6 +2260,9 @@ class Context(InputUploads):
         for fence in getattr(self, "_fences", {}).values():
             vk.vkDestroyFence(self.device, fence, None)
         self._fences.clear()
+        if getattr(self, "_prof", None) is not None:
+            vk.vkDestroyQueryPool(self.device, self._prof["pool"], None)
+            self._prof = None
         if self._ts is not None:
             vk.vkFreeCommandBuffers(self.device, self.command_pool, 2 * self._TS_RING,
                                     self._ts["cmds"])

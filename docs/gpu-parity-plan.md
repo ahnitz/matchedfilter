@@ -371,3 +371,47 @@ audited budget. Tuning comes from the device's own calibration.
 
 - Accept the targets in section 6, or set others?
 - Which GPU is the eventual production GPU? The plan tunes on the L40S and checks on the A100.
+
+## 9. The high-level gap: what stands between the GPU and 10-100x (2026-10-08, measured)
+
+For one top template and one segment, the fine stage is ~4.4M (template, block) pairs across
+27 banks and two detectors. Today that is 54 calls of ~100k pairs each.
+
+**Device time per pair** (MF_GPU_TIMING, n=2048, threshold 6):
+- 44 ns at 10k pairs per call;
+- 25 ns at ~137k pairs, the production call size;
+- levelling off at ~9 ns only past 0.6M pairs.
+
+Wall time adds 2-3x on top. One Zen 5 core is 55-120 ns/pair, so even saturated the GPU's
+device time is only ~6x one core.
+
+**Where the device time goes** (MF_GPU_PROFILE, which timestamps the phases inside a recording):
+- the band-128 coarse kernel is ~80% of it: 5 ns/pair saturated, 18 ns at production size;
+- the forward FFT costs 1-2.7 us per 2048-point block and gets slower as the series grows,
+  which suggests source memory placement;
+- compaction, refinement and fills are small.
+
+**Clock.** On the dev host the Radeon is an APU sharing package power with a loaded CPU, and it
+held 600 MHz of 2900 (busy 7-27% on production calls, 62-73% on large flat calls). All numbers
+above are at roughly 1/4-1/5 clock. They have to be judged in cycles, with sclk and power logged,
+or measured on the discrete L40S.
+
+**Three levers, in order:**
+1. **Granularity (structural).** Hand the library a whole segment: all of a top template's fine
+   banks, each reading its own middle series, both detectors, in one submission.
+   - The GPU forward-transforms every block of every middle series in one dispatch.
+   - It runs the coarse tiers over a grouped pair space: each bank's templates against its own
+     series' blocks, selected by descriptor offsets as `peaks_grouped` already does for flat
+     windows.
+   - It compacts and refines once.
+
+   Together with a device-resident middle output (the series never leaves the GPU), that is
+   ~4.4M pairs per submission instead of 54 submissions of ~100k. It is a library API (a bank
+   set) that pycbc can adopt later. The same structure batches the follow-ups: (template,
+   window) items as groups of one template each.
+2. **Kernel efficiency.** The coarse kernel is ~1.2k cycles/pair at 600 MHz for ~5k flops. Its
+   targets are in section 6. The forward FFT needs its source in device-local memory and a
+   multi-block-per-workgroup layout.
+3. **Host overhead and round trips.** Per-call recording churn (the cache entry limit against
+   chain trials x pipelining slots), per-call uploads, and the idle-latency trap. Batching
+   (lever 1) removes most of it.
