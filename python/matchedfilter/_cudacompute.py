@@ -354,9 +354,14 @@ class _Record(dict):
         return dict.__getitem__(self, item)
 
 
+class _Resident(_Buffer):
+    """A context-wide device copy of a template bank (or its coarse bands). Records
+    reference it but do not own it: one copy serves every record and slot of a plan."""
+
+
 def _owned(buffers):
-    """The allocations a cache record owns: not borrowed shared arrays."""
-    return [b for b in buffers if isinstance(b, (_Buffer, _Pinned))]
+    """The allocations a cache record owns: not borrowed shared arrays, not residents."""
+    return [b for b in buffers if isinstance(b, (_Buffer, _Pinned)) and not isinstance(b, _Resident)]
 
 
 class Context(InputUploads):
@@ -368,6 +373,15 @@ class Context(InputUploads):
     shared_views = True
     # Device memory is separate from host memory (residency matters for pricing).
     discrete = True
+    # forward/peaks/peaks_grouped/hier_peaks(_grouped) take slot= and async_submit=:
+    # a slot maps to one of 4 streams, and its readback callable syncs that stream only.
+    supports_async = True
+
+    @property
+    def timing(self):
+        """Device timers on. ``_timing`` is the attribute shared with the Vulkan backend:
+        gatechain.calibrate_costs_gpu switches it on around its measurement runs."""
+        return self._timing
 
     def shares_memory_with(self, other):
         """Contexts on one device share its primary context, hence every allocation."""
@@ -410,11 +424,12 @@ class Context(InputUploads):
         self.stream = self.streams[0]
 
         # The shared timing contract (_gputime): register, keep (label, device_ms).
-        self.timing = _gputime.enabled()
+        self._fwd_events = {}
+        self._timing = _gputime.enabled()
         self.timing_log = []
         self._event_pool = []
         self._pending_events = {}
-        if self.timing:
+        if self._timing:
             _gputime.register(self)
 
         self.last_gpu_time = 0.0
@@ -431,6 +446,7 @@ class Context(InputUploads):
             self._modules, self._pipelines, self._occupancy, self._labels = {}, {}, {}, {}
             self._shared_modules = False
         self._scratch_bufs = {}
+        self._residents = {}
         self._batches = {}
         self._full_batches = {}
         self._tierc_batches = {}
@@ -460,9 +476,20 @@ class Context(InputUploads):
         check_cuda(self.cuda.cuEventCreate(ctypes.byref(e), 0), "cuEventCreate")
         return e
 
+    def _new_event(self):
+        e = ctypes.c_void_p()
+        check_cuda(self.cuda.cuEventCreate(ctypes.byref(e), 2), "cuEventCreate")  # no timing
+        return e
+
+    def _after_forwards(self, stream):
+        """Order ``stream`` after every deferred forward enqueued on other streams."""
+        for key, ev in self._fwd_events.items():
+            if key != stream.value:
+                check_cuda(self.cuda.cuStreamWaitEvent(stream, ev, 0), "cuStreamWaitEvent")
+
     def _mark(self, stream):
         """Open a timed region on ``stream``; returns a token for _close (None when off)."""
-        if not self.timing:
+        if not self._timing:
             return None
         e0 = self._event()
         check_cuda(self.cuda.cuEventRecord(e0, stream), "cuEventRecord")
@@ -519,7 +546,7 @@ class Context(InputUploads):
         if count > 0:
             check_cuda(self.cuda.cuMemsetD32Async(dptr, value, count, stream), "cuMemsetD32Async")
 
-    def _small_input(self, name, array, stream):
+    def _small_input(self, name, array, stream, slot=None):
         """A device copy of a small host-written input (block starts): one async copy.
 
         Kernels must not read these from managed memory: the host rewrites them every
@@ -529,7 +556,10 @@ class Context(InputUploads):
         pinned staging buffer, which the previous call's sync has released."""
         array = np.ascontiguousarray(array)
         nbytes = max(array.nbytes, 4)
-        k = (name, stream.value)
+        # Keyed by SLOT, not stream: slots s and s+4 share a stream, and the host rewrites
+        # this pinned buffer before the stream has run the previous slot's copy from it.
+        # A slot is reused only after its readback synchronized, so per-slot is safe.
+        k = (name, slot, stream.value)
         sc = self._scratch_bufs.get(k)
         if sc is None or sc[0].nbytes < nbytes:
             if sc is not None:
@@ -552,6 +582,31 @@ class Context(InputUploads):
         if (isinstance(buf, _Borrowed) and getattr(buf.owner.buffer, "managed", False)
                 and nbytes > 0 and hasattr(self.cuda, "cuMemPrefetchAsync")):
             self.cuda.cuMemPrefetchAsync(buf.dptr.value + offset, nbytes, self.device.value, stream)
+
+    def _resident(self, name, array, dirty, stream, pack=None):
+        """The context's one device copy of ``array`` (templates or a coarse band).
+
+        Re-uploaded only when the caller marks it dirty or a different array arrives.
+        Records keyed by slot or window shape used to hold a copy each and upload it on
+        first use: a plan alternating grouped and single-window calls, with K pipelined
+        slots, uploaded its bank up to 2K times."""
+        sig = (array.ctypes.data, array.shape, array.strides)
+        data = pack(array) if (pack is not None) else None
+        nbytes = data.nbytes if data is not None else array.size * 8
+        ent = self._residents.get(name)
+        if ent is None or ent[0].nbytes < nbytes:
+            if ent is not None:
+                self._bind()
+                check_cuda(self.cuda.cuCtxSynchronize(), "cuCtxSynchronize")
+                ent[0].destroy()
+            ent = [_Resident(self, nbytes), None]
+            self._residents[name] = ent
+        if dirty or ent[1] != sig:
+            if data is None:
+                data = np.ascontiguousarray(array, np.complex64)
+            ent[0].write(data, stream)
+            ent[1] = sig
+        return ent[0]
 
     def _upload(self, buf, array, stream):
         """Bring a host input onto the device, or verify a shared one is already there."""
@@ -815,6 +870,7 @@ class Context(InputUploads):
 
         t2 = float(threshold) ** 2 if threshold > 0 else 0.0
         stream = self.get_stream(slot)
+        self._after_forwards(stream)
         dsh, tsh = shared_buffer(data, self), shared_buffer(tmpl, self)
         key = (n, nt, slot, dsh and data.ctypes.data, tsh and tmpl.ctypes.data)
         upload_data, upload_tmpl, dsig, tsig = self._input_uploads(
@@ -867,6 +923,7 @@ class Context(InputUploads):
                 raise ValueError("grouped windows must not exceed the first group's bin count")
         t2 = float(threshold) ** 2 if threshold > 0 else 0.0
         stream = self.get_stream(slot)
+        self._after_forwards(stream)
         dsh, tsh = shared_buffer(data, self), shared_buffer(tmpl, self)
         key = (n, nt, slot, dsh and data.ctypes.data, tsh and tmpl.ctypes.data)
         upload_data, upload_tmpl, dsig, tsig = self._input_uploads(
@@ -1170,10 +1227,12 @@ class Context(InputUploads):
             raise ValueError(f"tier-1 coarse templates must be ({nt}, {band1}), got {ct1.shape}")
         t2 = float(threshold) ** 2 if threshold > 0 else 0.0
         stream = self.get_stream(slot)
+        self._after_forwards(stream)
         dsh, tsh = shared_buffer(data, self), shared_buffer(tmpl, self)
         # Keyed without block or bin counts: buffers are sized by capacity and grow,
         # so windowed calls of varying size reuse one record (no per-shape churn).
         key = (n, band0, band1, nt, slot, dsh and data.ctypes.data, tsh and tmpl.ctypes.data)
+        tmpl_dirty = upload_tmpl
         upload_data, upload_tmpl, dsig, tsig = self._input_uploads(
             key, data, tmpl, upload_data, upload_tmpl)
         c16 = _use_c16(band0)
@@ -1199,16 +1258,18 @@ class Context(InputUploads):
         for name, nbytes, cls in sizes:
             if self._grow(bufs, name, nbytes, cls, stream) and name.startswith("cdata"):
                 upload_data = True           # its packed copy of the data is gone
-        for name, nbytes, src in (("data", nd * n * 8, dsh), ("tmpl", nt * n * 8, tsh)):
-            if src is not None:
-                bufs[name] = src
-            elif self._grow(bufs, name, nbytes, _Buffer, stream):
-                fresh = True
-        for name, nbytes in (("ct0", nt * band0 * cb0),) + ((("ct1", nt * band1 * 8),) if cascade else ()):
-            if self._grow(bufs, name, nbytes, _Buffer, stream):
-                upload_tmpl = True
+        if dsh is not None:
+            bufs["data"] = dsh
+        elif self._grow(bufs, "data", nd * n * 8, _Buffer, stream):
+            fresh = True
         if fresh:
-            upload_data = upload_tmpl = True
+            upload_data = True
+        bufs["tmpl"] = tsh or self._resident("tmpl", tmpl, tmpl_dirty, stream)
+        bufs["ct0"] = self._resident(("ct", band0, c16), ct0, tmpl_dirty, stream,
+                                     _pack_half2 if c16 else None)
+        if cascade:
+            bufs["ct1"] = self._resident(("ct", band1, False), ct1, tmpl_dirty, stream)
+        upload_tmpl = False                  # the residents above handled the templates
 
         if upload_data:
             self._upload(bufs["data"], data, stream)
@@ -1327,6 +1388,7 @@ class Context(InputUploads):
             raise ValueError("coarse templates do not match the chain's bands")
         t2 = float(threshold) ** 2 if threshold > 0 else 0.0
         stream = self.get_stream(slot)
+        self._after_forwards(stream)
         dsh, tsh = shared_buffer(data, self), shared_buffer(tmpl, self)
         if dsh is None:
             raise ValueError("grouped spectra must be GPU-shared (a forward batch)")
@@ -1348,36 +1410,27 @@ class Context(InputUploads):
         out = nd * nt * nb
         pairs = nd * nt
         key = ("grouped", n, band0, band1, nt, slot, data.ctypes.data, tsh and tmpl.ctypes.data)
-        _, upload_tmpl, _, tsig = self._input_uploads(key, data, tmpl, True, upload_tmpl)
+        tmpl_dirty = upload_tmpl
         estimate = ((0 if tsh else nt * n * 8) + nt * (band0 * cb0 + (band1 or 0) * 8)
                     + pairs * 40 + out * 24)
         bufs, fresh = self._record("hier", self._hier, key, estimate, dict)
         bufs["data"] = dsh
-        if tsh is not None:
-            bufs["tmpl"] = tsh
-        elif self._grow(bufs, "tmpl", nt * n * 8, _Buffer, stream):
-            fresh = True
-        sizes = [("ct0", nt * band0 * cb0, _Buffer), ("surv0", pairs * 4, _Buffer),
+        bufs["tmpl"] = tsh or self._resident("tmpl", tmpl, tmpl_dirty, stream)
+        bufs["ct0"] = self._resident(("ct", band0, c16), ct0, tmpl_dirty, stream,
+                                     _pack_half2 if c16 else None)
+        if cascade:
+            bufs["ct1"] = self._resident(("ct", band1, False), ct1, tmpl_dirty, stream)
+        sizes = [("surv0", pairs * 4, _Buffer),
                  ("idx", out * 4, _Buffer), ("val", out * 8, _Buffer),
                  ("cdata0", ndp * band0 * cb0, _Buffer), ("cidx0", ndp * nt * 4, _Buffer),
                  ("cval0", ndp * nt * 8, _Buffer), ("args", 8 * ng, _Buffer),
                  ("host", out * 12 + 8 * ng, _Pinned)]
         if cascade:
-            sizes += [("ct1", nt * band1 * 8, _Buffer), ("cdata1", nd * band1 * 8, _Buffer),
+            sizes += [("cdata1", nd * band1 * 8, _Buffer),
                       ("cidx1", pairs * 4, _Buffer), ("cval1", pairs * 8, _Buffer),
                       ("surv1", pairs * 4, _Buffer)]
         for name, nbytes, cls in sizes:
-            if self._grow(bufs, name, nbytes, cls, stream) and name in ("ct0", "ct1"):
-                upload_tmpl = True
-        if fresh:
-            upload_tmpl = True
-        if upload_tmpl:
-            self._upload(bufs["tmpl"], tmpl, stream)
-            bufs["ct0"].write(_pack_half2(ct0) if c16 else np.ascontiguousarray(ct0, np.complex64),
-                              stream)
-            if cascade:
-                bufs["ct1"].write(np.ascontiguousarray(ct1, np.complex64), stream)
-            self._uploaded["tmpl"][key] = tsig
+            self._grow(bufs, name, nbytes, cls, stream)
 
         args = bufs["args"].dptr.value
         self._fill32(_ptr(args), 0, 2 * ng, stream)
@@ -1475,7 +1528,7 @@ class Context(InputUploads):
                 lo_ = int(min(st.min(), series.size))
                 hi_ = int(min(series.size, st.max() + n))
                 self._prefetch(sh[0], lo_ * series.itemsize, (hi_ - lo_) * series.itemsize, stream)
-            sh[1] = self._small_input("starts", np.asarray(starts, np.uint32), stream)
+            sh[1] = self._small_input("starts", np.asarray(starts, np.uint32), stream, slot)
         if any(b is None for b in sh):
             key = ("forward", n, series.nbytes, starts.nbytes, spectra.nbytes, slot)
             bufs, _ = self._record("forward", self._forwards, key,
@@ -1508,6 +1561,13 @@ class Context(InputUploads):
             self._sync(stream)
         elif not defer:
             self._sync(stream)
+        else:
+            # A consumer may run on another stream (a tiled or unslotted dispatch of these
+            # spectra): it must wait for this forward. Recorded here, waited on in _after.
+            ev = self._fwd_events.get(stream.value)
+            if ev is None:
+                ev = self._fwd_events[stream.value] = self._new_event()
+            check_cuda(self.cuda.cuEventRecord(ev, stream), "cuEventRecord")
 
     def cancel_forward(self, slot=None):
         # Launches are already enqueued; the stream orders whatever follows.
@@ -1523,6 +1583,9 @@ class Context(InputUploads):
                 for b in _owned(rec.values() if hasattr(rec, "values") else rec):
                     b.destroy()
             table.clear()
+        for ent in self._residents.values():
+            ent[0].destroy()
+        self._residents.clear()
         self._uploaded = {"data": {}, "tmpl": {}}
         self._cache_order = {}
 
@@ -1543,6 +1606,10 @@ class Context(InputUploads):
         for e in self._event_pool:
             if e.value:
                 self.cuda.cuEventDestroy_v2(e)
+        for e in self._fwd_events.values():
+            if e.value:
+                self.cuda.cuEventDestroy_v2(e)
+        self._fwd_events.clear()
         self._event_pool.clear()
         for s in self.streams:
             if s.value:

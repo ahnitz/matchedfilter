@@ -145,6 +145,85 @@ def test_hier_grouped_windows_match_cpu_in_one_sync(chain, monkeypatch):
     assert (out["cpu"]["index"] >= 0).any()
 
 
+def test_slots_sharing_a_stream_keep_their_own_block_starts(ctx):
+    """Slots s and s+4 share a stream. The block starts go host -> pinned staging ->
+    device asynchronously; with one staging buffer per stream, slot 4's starts overwrote
+    slot 0's before the busy stream had copied them, and slot 0 transformed slot 4's blocks."""
+    n = 65536
+    rng = np.random.default_rng(5)
+    series = ctx.empty_shared((40 * n,))
+    series[:] = _complex(rng, series.shape)
+    spec = [ctx.empty_shared((16, n)) for _ in range(2)]
+    starts = [np.arange(16, dtype=np.uint32) * n, np.arange(16, dtype=np.uint32) * n + 17 * n]
+    busy = ctx.empty_shared((64, n))                 # a long forward first: stream 0 is busy
+    ctx.forward(n, series, np.arange(64, dtype=np.uint32) * (n // 2), busy, defer=True, slot=0)
+    ctx.forward(n, series, starts[0], spec[0], defer=True, slot=0)
+    ctx.forward(n, series, starts[1], spec[1], defer=True, slot=4)
+    ctx._sync(ctx.get_stream(0))
+    for s, st in zip(spec, starts):
+        ref = np.fft.fft(np.stack([series[a:a + n] for a in st[:3]]), axis=1) / n
+        np.testing.assert_allclose(s[:3], ref, rtol=0, atol=1e-5 * np.abs(ref).max())
+
+
+def test_unslotted_consumer_waits_for_a_slot_forward(ctx):
+    """A tiled dispatch runs unslotted (stream 0) on spectra a slot's deferred forward is
+    still writing on its own stream: it must be ordered after that forward."""
+    n, rows = 65536, 96                                   # a forward of ~1 ms
+    rng = np.random.default_rng(6)
+    series = ctx.empty_shared((rows * n // 2 + n,))
+    series[:] = _complex(rng, series.shape)
+    spec = ctx.empty_shared((rows, n))
+    h = _complex(rng, (1, n))
+    st = np.arange(rows, dtype=np.uint32) * (n // 2)
+    d = (np.fft.fft(np.stack([series[a:a + n] for a in st]), axis=1) / n).astype(np.complex64)
+    ref_i, ref_v = ctx.peaks(n, d, h, binsize=n)
+    for _ in range(3):
+        spec[:] = 0
+        ctx.forward(n, series, st, spec, defer=True, slot=1)
+        idx, val = ctx.peaks(n, spec, h, binsize=n)       # unslotted: stream 0
+        np.testing.assert_array_equal(idx, ref_i)
+        np.testing.assert_allclose(val, ref_v, rtol=1e-4, atol=1e-6)
+
+
+@pytest.mark.parametrize("tiled", [False, True])
+@pytest.mark.parametrize("kind", ["flat", "hier"])
+def test_pipelined_series_across_streams_matches_cpu(kind, tiled, monkeypatch):
+    """Many batches in flight on 4 streams (supports_async). With a dispatch limit the
+    window falls back to tiled, unslotted dispatches on the default stream, which must
+    wait for the forward FFTs enqueued on the slot streams -- without that wait the
+    tiled path read spectra still being written (wrong peaks, intermittently)."""
+    # n=65536: each batch's forward FFT runs long enough (~1 ms) for an unordered
+    # consumer on another stream to overtake it.
+    n, nt = 65536, 4
+    rng = np.random.default_rng(12)
+    h = _complex(rng, (nt, n))
+    h /= np.linalg.norm(h, axis=1, keepdims=True)
+    ser = _complex(rng, 48 * 40000 + n)
+    starts = np.arange(0, 48 * 40000, 40000)
+    ws = np.full(starts.size, 1000); we = np.full(starts.size, 61000)
+    ws[0], we[0] = 0, 60000; ws[-1], we[-1] = 2000, 62000   # three window groups, one bin count
+    out = {}
+    for dev in ("cpu", DEV):
+        cls = mf.MatchedFilter if kind == "flat" else mf.HierarchicalFilter
+        kw = {} if kind == "flat" else dict(snr=6.0, fd=1e-3, chain=256)
+        f = cls(n, 1, nt, device=dev, **kw)
+        if kind == "hier":
+            f.set_coarse_threshold(0.3)
+        f.set_templates(h)
+        if dev == DEV:
+            assert f._gpu.supports_async
+            f.set_memory_limits(series_bytes=8 * n * 6)       # ~6 blocks per batch: many batches
+            if tiled:
+                monkeypatch.setattr(f._gpu, "max_dispatch_x", nt // 2, raising=False)
+        # A race shows intermittently: repeat the device call.
+        out[dev] = [f.run_series(ser, starts=starts, win_start=ws, win_end=we,
+                                 binsize=30000, threshold=3.0).copy()
+                    for _ in range(1 if dev == "cpu" else 3)]
+    for got in out[DEV]:
+        np.testing.assert_array_equal(got["index"], out["cpu"][0]["index"])
+        np.testing.assert_allclose(got["value"], out["cpu"][0]["value"], rtol=2e-5, atol=1e-5)
+
+
 # ---- grouped run_series -----------------------------------------------------------
 @pytest.mark.parametrize("binsize", [61, 256])
 def test_grouped_windows_match_cpu(binsize):
@@ -380,3 +459,17 @@ print("OK", len(labels))
     env = dict(os.environ, MF_GPU_TIMING="1")
     r = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True)
     assert r.returncode == 0 and "OK" in r.stdout, r.stdout + r.stderr
+
+
+def test_gpu_cost_calibration_measures_on_cuda():
+    """gatechain.calibrate_costs_gpu switches the device timers on through ctx._timing.
+    CUDA kept its own flag, so every measurement was 0 ns: the bank priced every chain at
+    zero and picked n=8192 banks with 1024-4096 bins of coarse band (2x slower fine stage,
+    and loud peaks dismissed). The model must carry real, positive, ordered costs."""
+    from matchedfilter import gatechain
+    cm = gatechain.calibrate_costs_gpu(2048, DEV, blocks=256, reps=2, nt=64)
+    assert cm.block > 0
+    assert all(v > 0 for v in cm.dense.values()), cm.dense
+    assert cm.refine(1e-2) > 0
+    bands = sorted(cm.dense)
+    assert cm.dense[bands[-1]] > cm.dense[bands[0]], cm.dense   # a wider gate costs more

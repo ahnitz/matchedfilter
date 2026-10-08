@@ -724,8 +724,17 @@ def test_gpu_hierarchical_bank_matches_cpu_including_packed_templates(pack):
         r = bank.filter_series(ser, binsize=2048)
         found.append(dict(zip(zip(r.template_indices.tolist(), r.sample_indices.tolist()), r.snr)))
     cpu, dev = found
-    assert len(cpu) >= 10 and set(cpu) == set(dev)
-    assert max(abs(dev[k] - cpu[k]) / abs(cpu[k]) for k in cpu) < 1e-5
+    # Each device prices its own gate chain, so near-threshold noise peaks may be dismissed
+    # differently (the gate is calibrated for signals at the threshold SNR): a peak found on
+    # one side only must lie within 0.25 of the threshold. (On the L40S the CUDA-priced
+    # chain dismisses two peaks at SNR 4.51 and 4.69 that the CPU's chain keeps; the CPU
+    # with the same pinned chain dismisses exactly the same two.) The precision claim --
+    # the packed Nyquist bin -- is the SNR agreement on every common peak.
+    common = set(cpu) & set(dev)
+    assert len(common) >= 10
+    for k in set(cpu) ^ set(dev):
+        assert abs(cpu[k] if k in cpu else dev[k]) < 4.5 + 0.25, k
+    assert max(abs(dev[k] - cpu[k]) / abs(cpu[k]) for k in common) < 1e-5
 
 
 @pytest.mark.parametrize("device", ["cpu", "gpu"])
