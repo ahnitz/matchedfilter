@@ -52,7 +52,14 @@ The model only has to keep the cheapest chain on a short list. Chains within
 its error margin of the best (`MF_CHAIN_MARGIN`, default 0.30) are then
 **measured on the real workload**: plans with the same short list run it
 round-robin, and the chain with the lowest measured time per pair is kept by
-all of them. `MF_AUTOTUNE=0` keeps the model's choice instead (deterministic).
+all of them. `MF_AUTOTUNE=0` keeps the model's choice instead.
+
+Tier costs are timed, so under varying machine load two runs can calibrate
+differently and pick different chains or budget splits -- each within the
+dismissal budget, but not with the same triggers near threshold. For
+reproducible runs set `MF_COST_FILE=<path>`: cost models are read from that JSON
+file and any missing one is measured once and added. With the file populated
+and `MF_AUTOTUNE=0`, the choice is deterministic.
 `config` reports the chain in use; `autotune_info` the model's choice, the
 short list and whether the trial has finished.
 

@@ -160,6 +160,27 @@ Windows select output samples only. If a later stage needs filter context
 around them, widen the windows before passing them. This is distinct from
 `valid=(lo, hi)` on the plans above, which is a lag window inside each block.
 
+## Block sizes on a filter bank
+
+`TimeDomainFilterBank` partitions its templates by length and picks a transform
+size per group. Pass `fft_lengths=` to pin the sizes; otherwise the bank decides:
+
+* `engine='corr'` returns every lag, so its layout is a pure cost choice: the
+  length-sorted templates are split into contiguous groups, and each group's
+  transform size chosen, to minimise the calibrated cost per output sample
+  (per-block forward cost plus per-template cost, measured once per process).
+* A hierarchical bank given `binsize=` (samples per reported peak) chooses at its
+  first fine-grid reference (`set_reference(profile, delta_f=...)`): each length
+  batch is priced at every candidate size with the gate model and calibrated
+  tier costs, and the groups are built at the cheapest. `max_block_length`
+  (default 8192) bounds the candidates and is available before the choice, for
+  callers that pad their series by the longest block. Without `binsize` the
+  block size changes which peaks are reported, so the valid-fraction rule (the
+  smallest size with at least half its samples valid) stands.
+* Other engines use the valid-fraction rule.
+
+`filter_series` uses the bank's `binsize` unless the call passes its own.
+
 ## Hierarchical filtering
 
 `HierarchicalFilter` screens pairs using a coarse frequency band and refines
