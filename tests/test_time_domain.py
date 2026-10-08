@@ -837,3 +837,45 @@ def test_single_template_calls_choose_the_faster_device_and_agree():
         assert np.max(np.abs(r_g.snr - r_c.snr) / scale) < 1e-4
     (state,) = td._SINGLE_CHOICE.values()
     assert state["winner"] in ("gpu", "cpu") and len(state["gpu"]) >= 4 and len(state["cpu"]) >= 4
+
+
+def test_segment_plan_replays_and_matches(monkeypatch):
+    """A recurring job set (same banks, windows and device input buffers, rewritten in place
+    each segment) is traced once and then replayed; every replay returns what
+    filter_series_many returns for the same data."""
+    from conftest import usable_gpu
+    from matchedfilter.time_domain import SegmentPlan
+    monkeypatch.setenv("MF_AUTOTUNE", "0")
+    dev = usable_gpu()
+    if dev is None:
+        pytest.skip("no usable GPU")
+    rng = np.random.default_rng(31)
+    banks = []
+    for _ in range(3):
+        counts = list(rng.integers(200, 400, 37))           # odd: exercises dispatch padding
+        taps, w, df = _whitened_inspiral_bank(rng, counts)
+        b = TimeDomainFilterBank(taps, tap_counts=counts, engine='hier', threshold=4.5,
+                                 false_dismissal=1e-3, device=dev, fft_lengths=[2048], binsize=2048)
+        b.set_reference(w, delta_f=df)
+        banks.append(b)
+    S = 1 << 17
+    rows = banks[0].empty_shared((len(banks), S))
+    jobs = [(b, rows[i], dict(windows=slice(3000, S - 3000))) for i, b in enumerate(banks)]
+    plan = SegmentPlan()
+    total = 0
+    for seg in range(4):
+        for i in range(len(banks)):
+            X = np.fft.fft(rng.standard_normal(S))
+            X[S // 2:] = 0
+            rows[i] = (np.fft.ifft(X) * 2).astype(np.complex64)
+        got = plan.run(jobs)
+        want = TimeDomainFilterBank.filter_series_many(jobs)
+        for r1, r2 in zip(want, got):
+            for f in r1._fields:
+                np.testing.assert_array_equal(getattr(r1, f), getattr(r2, f))
+        total += sum(len(r.snr) for r in got)
+    if getattr(rows, 'ctypes', None) is not None and plan.replays == 0:
+        from matchedfilter._shared import shared_buffer
+        if shared_buffer(rows, banks[0]._groups[0].plan._gpu) is not None:
+            pytest.fail("a device-resident job set was never replayed")
+    assert total >= 5

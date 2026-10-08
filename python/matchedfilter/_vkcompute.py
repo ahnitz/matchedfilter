@@ -404,6 +404,8 @@ class _FusedBatch:
         key = tuple((id(ctx), tuple(cmds)) for ctx, cmds in self.items)
         cache = dev.__dict__.setdefault("fused_cache", OrderedDict())
         hit = cache.get(key)
+        if dev.trace is not None:
+            dev.trace.append(key)
         if hit is not None and all(h in getattr(ctx, "_phases", {}) and ctx.device is not None
                                    for ctx, cmds in self.items for h in cmds):
             cache.move_to_end(key)
@@ -418,6 +420,9 @@ class _FusedBatch:
                "allocate fused")
         _check(vk.vkBeginCommandBuffer(cmd, ctypes.byref(_CmdBufBegin(42, None, 0, None))),
                "begin fused")
+        prof = next((ctx for ctx, _ in self.items if getattr(ctx, "_profile", False)), None)
+        if prof is not None:
+            prof._stamp(cmd, "start")
         for phase in _FUSED_PHASES:
             barriers = []
             for ctx, cmds in self.items:
@@ -441,7 +446,10 @@ class _FusedBatch:
                         continue
                     seen.add(sig)
                 getattr(vk, name)(cmd, *args[1:])
+            if prof is not None:
+                prof._stamp(cmd, "fused " + phase)
         _check(vk.vkEndCommandBuffer(cmd), "end fused")
+        self.prof = prof
         cache[key] = (cmd,)
         while len(cache) > 16:
             _, (old_cmd,) = cache.popitem(last=False)
@@ -455,6 +463,9 @@ class _FusedBatch:
 
     def _submit_fused(self, cmd):
         dev, vk = self.dev, self.dev.vk
+        prof = next((ctx for ctx, _ in self.items if getattr(ctx, "_profile", False)), None)
+        if prof is not None:
+            prof._profile_submitted([cmd])
         fc = _FenceCreate(8, None, 0)
         self.fence = _vp()
         _check(vk.vkCreateFence(dev.device, ctypes.byref(fc), None, ctypes.byref(self.fence)),
@@ -499,6 +510,44 @@ def fused():
     return close
 
 
+def replay_fused(dev, keys):
+    """Submit cached fused recordings again, in order, as one submission, and wait; False
+    (nothing submitted) if any is gone or a constituent recording was evicted."""
+    cache = dev.__dict__.get("fused_cache", {})
+    cmds = []
+    for key in keys:
+        hit = cache.get(key)
+        if hit is None:
+            return False
+        for ctx_id, hs in key:
+            pass
+        cmds.append(hit[0])
+    vk = dev.vk
+    arr = (_vp * len(cmds))(*cmds)
+    submit = _SubmitInfo(4, None, 0, None, None, len(cmds), arr, 0, None)
+    fc = _FenceCreate(8, None, 0)
+    fence = _vp()
+    _check(vk.vkCreateFence(dev.device, ctypes.byref(fc), None, ctypes.byref(fence)), "vkCreateFence")
+    try:
+        _check(vk.vkQueueSubmit(dev.queue, 1, ctypes.byref(submit), fence), "vkQueueSubmit")
+        _check(vk.vkWaitForFences(dev.device, 1, (_vp * 1)(fence), 1, 0xFFFFFFFFFFFFFFFF),
+               "vkWaitForFences")
+    finally:
+        vk.vkDestroyFence(dev.device, fence, None)
+    return True
+
+
+def read_dispatch(entry):
+    """(count, idx, val) of one recorded hierarchical dispatch, from its result buffers."""
+    bufs, nd, nt, nbins, cascade = entry
+    count = int(bufs["args_refine" if cascade else "args"].read(np.uint32, 1)[0])
+    if count == 0:
+        return 0, None, None
+    out = nd * nt * nbins
+    return (count, bufs["idx"].read(np.int32, out).reshape(nd, nt, nbins),
+            bufs["val"].read(np.complex64, out).reshape(nd, nt, nbins))
+
+
 #: One _Device per Vulkan device index, for the life of the process.
 _DEVICES = {}
 
@@ -513,6 +562,7 @@ class _Device:
         self.vk = vk
         self.pipelines = {}
         self.collector = None        # a _FusedBatch while filter_series_many is collecting
+        self.trace = None            # fused-batch keys flushed while a SegmentPlan traces
         app = _vulkan._AppInfo(0, None, b"matchedfilter", 1, b"matchedfilter", 1,
                                (1 << 22) | (1 << 12))
         ci = _vulkan._InstInfo(1, None, 0, ctypes.pointer(app), 0, None, 0, None)
@@ -938,6 +988,8 @@ class Context(InputUploads):
                     upload_data = upload_tmpl = True
             self._cache_touch('hier_cascade', key)
             bufs, cmd = batch
+            # What a traced segment (SegmentPlan) reads back on replay.
+            self._last_dispatch = (bufs, nd, nt, nbins, True)
             if upload_data:
                 write_input(bufs["data"], data)
                 if shared_buffer(data, self) is not None:
@@ -1012,6 +1064,8 @@ class Context(InputUploads):
                 upload_data = upload_tmpl = True
         self._cache_touch('hier', key)
         bufs, cmd = batch
+        # What a traced segment (SegmentPlan) reads back on replay.
+        self._last_dispatch = (bufs, nd, nt, nbins, False)
         if upload_data:
             write_input(bufs["data"], data)
             if shared_buffer(data, self) is not None:
@@ -1083,6 +1137,34 @@ class Context(InputUploads):
         vk.vkUpdateDescriptorSets(self.device, nbind, writes, 0, None)
         return dset
 
+    def _coarse_geometry(self, band, nd, nt):
+        """(pairs per workgroup, templates per tile) for the packed coarse kernel.
+
+        A pair takes band/16 threads, so pairs are packed until a workgroup fills one wave of
+        THIS device. The rule was 512/band -- a wave32 -- and this Radeon runs wave64: band 128
+        filled half of every wave and band 64 a quarter. The largest built variant whose
+        geometry divides the pair count is taken (a partial group would index past the
+        data); MF_VK_COARSE_PPG caps it, for measurement.
+        """
+        wg = max(1, band // 16)
+        want = max(1, int(self.subgroup_size) // wg)
+        cap = int(os.environ.get("MF_VK_COARSE_PPG", "0") or 0)
+        if cap:
+            want = min(want, cap) if cap <= want else cap
+        pairs = nd * nt
+        tile = _COARSE_TILE_T.get(band, 1)
+        for ppg in sorted({p for p in (want, 32, 16, 8, 4, 2, 1) if p <= want}, reverse=True):
+            name = "tierb_%d_c16%s.spv" % (band, "p%d" % ppg if ppg > 1 else "")
+            if pairs % ppg or not (_SPIRV / name).is_file():
+                continue
+            t = 1
+            if tile > 1 and nt % tile == 0 and pairs % (ppg * tile) == 0 and (
+                    _SPIRV / ("tierb_%d_c16%st%d.spv" % (band, "p%d" % ppg if ppg > 1 else "", tile))
+                    ).is_file():
+                t = tile
+            return ppg, t
+        return 1, 1
+
     def _make_hier(self, key, n, band, nd, nt, nbins, binsize, shift, lo, hi,
                    t2, raw_thr, data=None, tmpl=None):
         vk = self.vk
@@ -1111,9 +1193,7 @@ class Context(InputUploads):
             # PPG = 512/band fills a wave32 where WG < 32. Safe now
             # that the peak reduction is per-pair (see tierb.slang): each
             # lane maxes into its own slot, so tiles cannot mix.
-            _ppg = max(1, min(4, 512 // band))
-            if (nd * nt) % _ppg:
-                _ppg = 1          # a partial group would index past the data
+            _ppg, _tile = self._coarse_geometry(band, nd, nt)
 
             # TILE_T is COMPILED INTO the kernel, so it is part of kernel
             # identity and must be decided HERE, where the kernel is
@@ -1126,9 +1206,6 @@ class Context(InputUploads):
             # band 512: 4 groups at p0 = 0, 4, 8, 12 with only pairs 0 and
             # 1 reachable, so half the signals were dismissed -- and at
             # nt=4 the out-of-range groups WROTE past the output buffer.
-            _tile = _COARSE_TILE_T.get(band, 1)
-            if _tile > 1 and (nt % _tile or (nd * nt) % (_ppg * _tile)):
-                _tile = 1
 
             cpipe, clayout, cset_layout = self._build_pipeline(
                 ("coarse16", band, _ppg, _tile),
@@ -1314,12 +1391,7 @@ class Context(InputUploads):
     def _make_hier_cascade(self, key, n, band0, band1, nd, nt, nbins, binsize, shift, lo, hi,
                            t2, raw_thr0, raw_thr1, data=None, tmpl=None):
         vk = self.vk
-        _ppg0 = max(1, min(4, 512 // band0))
-        if (nd * nt) % _ppg0:
-            _ppg0 = 1
-        _tile0 = _COARSE_TILE_T.get(band0, 1)
-        if _tile0 > 1 and (nt % _tile0 or (nd * nt) % (_ppg0 * _tile0)):
-            _tile0 = 1
+        _ppg0, _tile0 = self._coarse_geometry(band0, nd, nt)
 
         cpipe0, clayout0, cset_layout0 = self._build_pipeline(
             ("coarse16", band0, _ppg0, _tile0),
