@@ -511,9 +511,14 @@ class TimeDomainFilterBank:
         legacy_max = max(g[2] for g in self._legacy_layout[0]) if self._legacy_layout[0] else 0
         self._choice_ns = tuple(n for n in candidate_ns if n <= max(int(max_block_length), legacy_max))
         self._built: Optional[List[_TemplateGroup]] = None
-        if self.engine == 'corr' and fft_lengths is None:
+        from .device import parse as _parse_device
+        if self.engine == 'corr' and fft_lengths is None and _parse_device(self.device).kind == 'cpu':
             # Continuous correlation outputs every sample whatever the blocking, so its layout is
             # a pure cost choice: price partitions and transform sizes with calibrated block costs.
+            # CPU only for now: on a GPU the cost is dominated by reading the shared workspace
+            # (templates x series length) back, which on RADV falls off a cliff past ~128 MB
+            # (17+ templates over 2^20 samples: 0.08 -> 0.5-3.5 s) -- a size a short calibration
+            # cannot see. GPU banks keep the valid-fraction rule until that is modelled or fixed.
             layout = _corr_layout(self.effective_data_counts, candidate_ns, self.max_batch_size)
             if layout is not None:
                 self._legacy_layout = layout
