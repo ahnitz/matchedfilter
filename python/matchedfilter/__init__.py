@@ -1035,6 +1035,11 @@ class MatchedFilter:
             summary["autotune"] = dict(self.autotune_info)
         return summary
 
+    def _grouped_dispatch(self, n, spec, H, groups, binsize, threshold, **kw):
+        """Every window group of one spectra batch in one backend submission."""
+        return self._gpu.peaks_grouped(n, spec, H, groups, binsize, threshold,
+                                       upload_tmpl=self._tdirty, **kw)
+
     def _series_window(self, spec, H, binsize, threshold, w0, w1, slot=None, async_submit=False):
         # Each group has fresh spectra, even when it reuses an allocation.
         self._ddirty = True
@@ -1169,7 +1174,14 @@ class MatchedFilter:
                 _, peaks = spbuf
         # Irregular flat windows share one forward FFT dispatch and submission per
         # bounded batch. Hierarchical and other backends keep their executor.
-        grouped = grouped_flat
+        # Hierarchical plans join when the backend submits grouped hierarchical windows in one
+        # submission -- unless this call is deferred (filter_series_many), which overlaps
+        # whole calls instead.
+        grouped = grouped_flat or (
+            not defer and len(layout.groups) > 1 and isinstance(self, HierarchicalFilter)
+            and hasattr(self._gpu, "hier_peaks_grouped")
+            and nb <= getattr(self._gpu, "max_grouped_bins", 0)
+            and nt <= self._gpu_pair_limit())
         if grouped:
             in_flight = []
             slot_idx = 0
@@ -1186,8 +1198,8 @@ class MatchedFilter:
                 self._gpu.forward(n, source, starts[:count], spec, defer=True,
                                   slot=slot if pipelined else None)
                 try:
-                    res = self._gpu.peaks_grouped(
-                        n, spec, H, groups, binsize, threshold, upload_tmpl=self._tdirty,
+                    res = self._grouped_dispatch(
+                        n, spec, H, groups, binsize, threshold,
                         slot=slot if pipelined else None, async_submit=pipelined,
                         **({"nbins": nb} if getattr(layout, "ragged", False) else {}))
                     self._tdirty = False
@@ -2048,6 +2060,27 @@ class HierarchicalFilter(MatchedFilter):
                 sc = np.float32(1.0 / np.sqrt(f[i])) if f[i] > 0 else np.float32(0.0)
             out.append(H[:, :b] * sc)
         return out
+
+    def _grouped_dispatch(self, n, spec, H, groups, binsize, threshold, **kw):
+        """The gate chain over every window group of one spectra batch, one submission."""
+        chain, f, thr = self._gpu_calibration(threshold)
+        ck = (chain, f, H.ctypes.data, H.shape)
+        if getattr(self, "_ckey", None) != ck or self._tdirty:
+            self._ct = self._coarse_templates(H, chain, f)
+            self._ckey = ck
+        ct = self._ct
+        extra = {} if len(chain) == 1 else dict(cascade_band=chain[0], ct1=ct[1], raw_thr1=thr[1])
+        res = self._gpu.hier_peaks_grouped(n, chain[-1], spec, H, ct[0], thr[0], groups, binsize,
+                                           threshold, upload_tmpl=self._tdirty, **extra, **kw)
+
+        def account(r):
+            idx, val = r
+            self._gpairs += idx.shape[0] * idx.shape[1]
+            self._gtrig += self._gpu.last_refinements
+            return idx, val
+        if kw.get("async_submit"):
+            return lambda: account(res())
+        return account(res)
 
     def _gpu_dispatch(self, D, H, binsize, threshold, start, end, slot=None, async_submit=False):
         """Run the gate chain and refinement without host survivor readback."""
