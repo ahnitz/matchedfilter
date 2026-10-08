@@ -138,6 +138,6 @@ def test_measured_gpu_group_preserves_series_results(tmp_path, monkeypatch, hier
     for p in (f, reference):
         p.set_templates(templates)
     got, want = f.run_series(*args, binsize=n), reference.run_series(*args, binsize=n)
-    assert f._series_workspace[0][0] == 3
+    assert f._last_series_batch == 3
     np.testing.assert_array_equal(got['index'], want['index'])
     np.testing.assert_allclose(got['value'], want['value'], rtol=3e-4, atol=3e-5)

@@ -917,6 +917,7 @@ class TimeDomainFilterBank:
             # given its dict after construction with no templates at all.
             self._load_templates()
             self._current_ref_key = None
+            self._state_version = getattr(self, '_state_version', 0) + 1
             return
 
         ref_key = (id(reference), float(delta_f) if delta_f is not None else None)
@@ -952,6 +953,7 @@ class TimeDomainFilterBank:
 
         self._load_templates()
         self._current_ref_key = ref_key
+        self._state_version = getattr(self, '_state_version', 0) + 1
 
     def _load_templates(self) -> None:
         for g in self._groups:
@@ -1127,6 +1129,9 @@ class TimeDomainFilterBank:
         from . import _Deferred
         defer = getattr(self, '_defer', False)
         pending = []
+        sink = getattr(self, '_trace_sink', None)
+        if sink is not None:
+            sink.append((pending, template_index, [False]))
         for g, tmpl_arg in work_items:
             plan_templates = tmpl_arg
             trial = None
@@ -1214,6 +1219,8 @@ class TimeDomainFilterBank:
                     pending.append((res, sub_starts, g, tmpl_arg, N))
                     continue
                 aidx, aval = res
+                if sink is not None:
+                    sink[-1][2][0] = True          # a synchronous result: not replayable
                 if getattr(active_plan, '_last_n_triggers', None) == 0:
                     continue
                 consume(aidx, aval, sub_starts, g, tmpl_arg, N)
@@ -1567,3 +1574,148 @@ class TimeDomainFilterBank:
                 result[g_indices] = g_dest
 
         return result
+
+
+class SegmentPlan:
+    """filter_series_many for a job set that recurs, e.g. every segment of one top template.
+
+    The first run of a job set is traced: which fused GPU recordings it submitted and where
+    each job's results land. A later run with the same banks (same reference and thresholds),
+    the same windows and the same input buffers -- device memory the caller rewrites in place,
+    such as a reused correlate_series(out=...) -- replays the recordings as one submission,
+    waits once, and reads back only the jobs whose gates refined anything: the host no
+    longer rebuilds every call's layout, keys and submissions. Anything else (another job set,
+    an evicted recording, a non-Vulkan device, a CPU bank) runs filter_series_many as usual.
+    The results are identical either way.
+    """
+
+    def __init__(self):
+        self._trace = None
+        self.replays = 0
+
+    @staticmethod
+    def _signature(jobs):
+        sig = []
+        for bank, series, kw in jobs:
+            kw = kw or {}
+            items = []
+            for k in sorted(kw):
+                v = kw[k]
+                if isinstance(v, slice):
+                    v = ("slice", v.start, v.stop, v.step)
+                elif isinstance(v, np.ndarray):
+                    v = ("arr", v.tobytes())
+                items.append((k, v))
+            plans = tuple((id(g.plan), getattr(g.plan, '_chain', None),
+                           (getattr(g.plan, '_gcal', None) or (None,))[0])
+                          for g in bank._groups if g.is_hier)
+            sig.append((id(bank), getattr(bank, '_state_version', 0), plans,
+                        getattr(series, 'ctypes', None) and series.ctypes.data,
+                        getattr(series, 'size', None), tuple(items)))
+        return tuple(sig)
+
+    def run(self, jobs):
+        sig = self._signature(jobs)
+        tr = self._trace
+        if tr is not None and tr["sig"] == sig:
+            out = self._replay(tr)
+            if out is not None:
+                self.replays += 1
+                return out
+        return self._trace_run(jobs, sig)
+
+    def _trace_run(self, jobs, sig):
+        from . import _vkcompute
+        devs = list(_vkcompute._DEVICES.values())
+        for dev in devs:
+            dev.trace = []
+        sinks = []
+        for bank, _, _ in jobs:
+            bank._trace_sink = []
+        try:
+            out = TimeDomainFilterBank.filter_series_many(jobs)
+            sinks = [bank._trace_sink for bank, _, _ in jobs]
+        finally:
+            for bank, _, _ in jobs:
+                bank._trace_sink = None
+            keys = {id(dev): dev.trace for dev in devs}
+            for dev in devs:
+                dev.trace = None
+        # One sink entry per filter_series call, in job order; a bank appearing in several
+        # jobs logged each call in turn.
+        per_job, cursor = [], {}
+        for j, (bank, _, _) in enumerate(jobs):
+            k = cursor.get(id(bank), 0)
+            cursor[id(bank)] = k + 1
+            per_job.append(sinks[j][k] if k < len(sinks[j]) else None)
+        used = [dev for dev in devs if keys[id(dev)]]
+        replayable = (len(used) == 1
+                      and all(e is not None and not e[2][0]
+                              and all(getattr(d, "trace", None) is not None for d, *_ in e[0])
+                              for e in per_job))
+        self._trace = dict(sig=sig, dev=used[0], keys=list(keys[id(used[0])]),
+                           jobs=[(e[0], e[1]) for e in per_job]) if replayable else None
+        return out
+
+    def _replay(self, tr):
+        from . import _vkcompute
+        if not _vkcompute.replay_fused(tr["dev"], tr["keys"]):
+            self._trace = None
+            return None
+        results = []
+        for entries, template_index in tr["jobs"]:
+            lists = ([], [], [], [], [])
+            for d, sub_starts, g, tmpl_arg, N in entries:
+                t = d.trace
+                idx = val = None
+                for b0, b1, entry in t["groups"]:
+                    count, gi, gv = _vkcompute.read_dispatch(entry)
+                    if count == 0:
+                        continue
+                    if idx is None:
+                        idx = np.full(t["shape"], -1, dtype=np.int64)
+                        val = np.zeros(t["shape"], dtype=np.complex64)
+                    idx[b0:b1], val[b0:b1] = gi[:b1 - b0], gv[:b1 - b0]   # padded rows dropped
+                if idx is None:
+                    continue
+                if t["order"] is not None:
+                    ri, rv = np.empty_like(idx), np.empty_like(val)
+                    ri[t["order"]], rv[t["order"]] = idx, val
+                    idx, val = ri, rv
+                _consume_into(lists, idx, val, sub_starts, g, tmpl_arg, N, template_index)
+            results.append(_results_from(lists))
+        return results
+
+
+def _consume_into(lists, aidx, aval, sub_starts, g, tmpl_arg, N, template_index):
+    """Append the peaks of one run_series result (nblocks, ntemplates, nbins) to lists."""
+    ti_out, si_out, snr_out, ts_out, bl_out = lists
+    if tmpl_arg is not None:
+        bi, _, bini = np.nonzero(aidx >= 0)
+        if bi.size:
+            ti_out.append(np.full(bi.size, template_index, dtype=np.int64))
+            si_out.append(sub_starts[bi] + aidx[bi, 0, bini])
+            snr_out.append(aval[bi, 0, bini])
+            ts_out.append(sub_starts[bi])
+            bl_out.append(np.full(bi.size, N, dtype=np.int64))
+    else:
+        bi, ti, bini = np.nonzero(aidx >= 0)
+        if bi.size:
+            ti_out.append(g.template_indices[ti])
+            si_out.append(sub_starts[bi] + aidx[bi, ti, bini])
+            snr_out.append(aval[bi, ti, bini])
+            ts_out.append(sub_starts[bi])
+            bl_out.append(np.full(bi.size, N, dtype=np.int64))
+
+
+def _results_from(lists):
+    ti, si, snr, ts, bl = lists
+    if not ti:
+        return _EMPTY_FILTER_RESULTS
+    return FilterResults(
+        template_indices=np.concatenate(ti).astype(np.int64),
+        sample_indices=np.concatenate(si).astype(np.int64),
+        snr=np.concatenate(snr).astype(np.complex64),
+        block_starts=np.concatenate(ts).astype(np.int64),
+        block_lengths=np.concatenate(bl).astype(np.int64),
+    )

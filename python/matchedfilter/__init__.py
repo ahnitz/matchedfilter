@@ -218,10 +218,11 @@ class _Deferred:
     """A GPU result submitted but not yet collected; result() waits once and caches.
     empty: True once collected if the gates refined nothing (every slot is -1), so a
     consumer can skip scanning it."""
-    __slots__ = ("_finish", "_value", "_done", "empty")
+    __slots__ = ("_finish", "_value", "_done", "empty", "trace")
 
     def __init__(self, finish):
         self._finish, self._value, self._done, self.empty = finish, None, False, False
+        self.trace = None
 
     def result(self):
         if not self._done:
@@ -1075,6 +1076,8 @@ class MatchedFilter:
         if policy:
             batch = min(batch, policy['series_group'])
         single = len(layout.groups) == 1 and nblk <= batch
+        self._last_series_batch = batch
+        is_hier = isinstance(self, HierarchicalFilter)
         # A declared capability, not a probe for one backend's internals.
         can_pipeline = (getattr(self._gpu, "supports_async", False)
                         and getattr(self._gpu, "cache_limit_bytes", 10**9) > 1024 * 1024)
@@ -1113,7 +1116,7 @@ class MatchedFilter:
         workspace = getattr(self, "_series_workspace", None)
         if (workspace is None or workspace[0][1] != n or workspace[0][0] < batch
                 or workspace[0][2] < K):
-            cap_b = batch if workspace is None or workspace[0][1] != n else max(batch, workspace[0][0])
+            cap_b = (batch if workspace is None or workspace[0][1] != n else max(batch, workspace[0][0])) + 16
             cap_k = K if workspace is None or workspace[0][1] != n else max(K, workspace[0][2])
             spectra_pool = [self._gpu.empty_shared((cap_b, n)) for _ in range(cap_k)]
             starts_pool = [self._gpu.empty_shared(cap_b, np.uint32) for _ in range(cap_k)]
@@ -1242,17 +1245,26 @@ class MatchedFilter:
             return _format_result(None, None, raw=False, order=layout.order, out=peaks)
         in_flight = []
         collected_early = [False]
+        trace_groups = []
         slot_idx = slot0
+        # The packed coarse kernel takes pairs in groups of up to 16 per workgroup and needs
+        # the pair count to divide: pad a hierarchical dispatch with copies of its last block
+        # (results dropped) rather than fall back to an unpacked, half-idle kernel.
+        pad_unit = (16 // math.gcd(nt, 16)) if (is_hier and getattr(self._gpu, "_device_state", None)
+                                                 is not None) else 1
         for w0, w1, a, b in layout.groups:
             for begin in range(a, b, batch):
                 end = min(begin + batch, b)
                 count = end - begin
+                count_p = -(-count // pad_unit) * pad_unit
                 slot = slot_idx % K
                 slot_idx += 1
                 starts = starts_pool[slot]
-                spec = spectra_pool[slot][:count]
+                spec = spectra_pool[slot][:count_p]
                 starts[:count] = np.minimum(layout.starts[begin:end], ser.size).astype(np.int64) - base
-                self._gpu.forward(n, source, starts[:count], spec, defer=True,
+                if count_p > count:
+                    starts[count:count_p] = starts[count - 1]
+                self._gpu.forward(n, source, starts[:count_p], spec, defer=True,
                                   slot=slot if pipelined else None)
                 try:
                     res = self._series_window(spec, H, binsize, threshold, w0, w1,
@@ -1262,7 +1274,14 @@ class MatchedFilter:
                     self._gpu.cancel_forward(slot=slot if pipelined else None)
                     raise
                 self._ddirty = self._tdirty = False
+                if count_p > count:
+                    if callable(res):
+                        res = (lambda r=res, c=count: tuple(x[:c] for x in r()))
+                    else:
+                        res = tuple(x[:count] for x in res)
                 in_flight.append((begin, end, res))
+                if defer and is_hier:
+                    trace_groups.append((begin, end, getattr(self._gpu, "_last_dispatch", None)))
                 if len(in_flight) >= K:
                     collected_early[0] = True
                     b_start, b_end, item = in_flight.pop(0)
@@ -1319,6 +1338,9 @@ class MatchedFilter:
                 deferred.empty = True
             return value
         deferred = _Deferred(finish_marking)
+        if trace_groups and all(t[2] is not None for t in trace_groups) and raw:
+            # How to read this call's result again from its buffers (SegmentPlan replay).
+            deferred.trace = dict(groups=trace_groups, shape=shape, order=layout.order)
         owners = self.__dict__.setdefault("_slot_owner", {})
         for k in range(slot0, slot_idx):
             owners[k % K] = deferred
