@@ -254,8 +254,9 @@ class CostModel:
     refine            [(density, ticks per refined pair)]
     """
 
-    def __init__(self, n, dense, sparse, refine):
+    def __init__(self, n, dense, sparse, refine, block=0.0):
         self.n = int(n)
+        self.block = float(block)          # fixed work per block: forward transform, ingest
         self.dense = {int(b): float(v) for b, v in dense.items()}
         self._sparse = {int(b): sorted((float(f), float(v)) for f, v in rows) for b, rows in sparse.items()}
         self._refine = sorted((float(f), float(v)) for f, v in refine)
@@ -272,6 +273,14 @@ class CostModel:
     def sparse(self, b, f):
         return self._interp(self._sparse[int(b)], f)
 
+    def to_dict(self):
+        return {"n": self.n, "block": self.block, "dense": self.dense,
+                "sparse": self._sparse, "refine": self._refine}
+
+    @classmethod
+    def from_dict(cls, d):
+        return cls(d["n"], d["dense"], d["sparse"], d["refine"], block=d.get("block", 0.0))
+
     def chain_cost(self, chain, reach):
         """reach[i] = P(a pair reaches tier i+1) for i = 0..k-1, reach[k] = P(reaches refine)."""
         c = self.dense[int(chain[0])]
@@ -286,7 +295,43 @@ _COSTS = {}
 _CAL_DENSITIES = (0.1, 0.01)
 
 
-def calibrate_costs(n, ntemplates, blocks=256, reps=5, seed=11):
+def _cost_file():
+    """MF_COST_FILE: a JSON file of measured cost models, for reproducible runs.
+
+    Calibration times the engine, so under varying machine load two runs can
+    measure different costs and choose different chains or budget splits --
+    each within the false-dismissal budget, but not the same triggers near
+    threshold. With MF_COST_FILE set, models are read from the file and any
+    missing one is measured once and added; with the file populated and
+    MF_AUTOTUNE=0 (no timed trials), the chain choice is deterministic.
+    """
+    return os.environ.get("MF_COST_FILE") or None
+
+
+def _load_cost_file(path):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def _store_cost(path, skey, cm):
+    """Add one model to the file; merges with what other processes wrote, replaces atomically."""
+    data = _load_cost_file(path)
+    data[skey] = cm.to_dict()
+    tmp = "%s.%d.tmp" % (path, os.getpid())
+    with open(tmp, "w") as f:
+        json.dump(data, f, indent=1, sort_keys=True)
+    os.replace(tmp, path)
+
+
+def default_series_group(n):
+    """Blocks a CPU plan filters together, as HierarchicalFilter uses without an execution policy."""
+    return 32 if n <= 2048 else 16
+
+
+def calibrate_costs(n, ntemplates, blocks=256, reps=5, seed=11, group=None):
     """Measure this machine's tier costs at transform size n through the engine itself.
 
     Synthetic analytic noise and whitened random templates; thresholds are
@@ -299,9 +344,19 @@ def calibrate_costs(n, ntemplates, blocks=256, reps=5, seed=11):
     """
     from . import _core
     nt = int(min(max(int(ntemplates), 8), 128))
-    key = (int(n), nt)
+    # The series group must be the plans' own: the first tier batches its work over the blocks in a
+    # group, so calibrating at a smaller group overstates its cost (2x at n=1024 with 8 vs 32).
+    group = int(group or default_series_group(n))
+    key = (int(n), nt, group)
     if key in _COSTS:
         return _COSTS[key]
+    path = _cost_file()
+    skey = "%d,%d,%d" % key
+    if path is not None:
+        stored = _load_cost_file(path).get(skey)
+        if stored is not None:
+            _COSTS[key] = cm = CostModel.from_dict(stored)
+            return cm
     rng = np.random.default_rng(seed)
     bands = candidate_bands(n)
     taps = n // 4
@@ -322,7 +377,7 @@ def calibrate_costs(n, ntemplates, blocks=256, reps=5, seed=11):
 
     def run(chain, thr, reps=reps):
         """Pairs per call and per-tier (band, passed, ticks) per call: medians over repetitions."""
-        p = _core.HMF(n, 1, nt, list(chain), 8, n)
+        p = _core.HMF(n, 1, nt, list(chain), group, n)
         p.set_reference(ref); p.set_template_batch(0, spec); p.set_thresholds(list(thr))
         p.run_series(ser, starts, ws, we, 0, nt, n, big, idx, val, mag, cnt)      # warm-up
         prev = p.tier_stats(); rows = []
@@ -351,9 +406,21 @@ def calibrate_costs(n, ntemplates, blocks=256, reps=5, seed=11):
         return mid
 
     dense, sparse, refine = {}, {}, []
+    block = []
     for b in bands:
         pairs, st = run((b,), (big,))
         dense[b] = st[0][2] / pairs
+    # Per-block fixed work: a whole run_series call minus its tiers and refine (nothing passes), per block.
+    for b in bands[:2]:
+        p = _core.HMF(n, 1, nt, [b], group, n)
+        p.set_reference(ref); p.set_template_batch(0, spec); p.set_thresholds([big])
+        p.run_series(ser, starts, ws, we, 0, nt, n, big, idx, val, mag, cnt)
+        per = []
+        for _ in range(reps):
+            s0, t0 = p.series_ticks(), sum(x[2] for x in p.tier_stats())
+            p.run_series(ser, starts, ws, we, 0, nt, n, big, idx, val, mag, cnt)
+            per.append((p.series_ticks() - s0 - (sum(x[2] for x in p.tier_stats()) - t0)) / blocks)
+        block.append(float(np.median(per)))
     b0 = bands[0]
     for f in _CAL_DENSITIES:
         g0 = thr_for(b0, f)
@@ -367,8 +434,10 @@ def calibrate_costs(n, ntemplates, blocks=256, reps=5, seed=11):
     # the first band can only be a first tier; give it the next band's sparse curve for completeness
     if bands[1:]:
         sparse.setdefault(b0, list(sparse.get(bands[1], [])))
-    cm = CostModel(n, dense, sparse, refine)
+    cm = CostModel(n, dense, sparse, refine, block=float(np.median(block)))
     _COSTS[key] = cm
+    if path is not None:
+        _store_cost(path, skey, cm)
     return cm
 
 
@@ -513,3 +582,42 @@ def chain_thresholds(power, n, snr, fd, chain, cost=None, floor=_MIN_BAND, nsim=
     return out
 
 
+
+
+def rebin_profile(fine, delta_f, data_rate, n):
+    """A fine-grid output-power profile (spacing delta_f) on block size n's bins, normalised."""
+    fine = np.asarray(fine, np.float64)
+    ratio = max(int(round((data_rate / n) / float(delta_f))), 1)
+    keep = (len(fine) // ratio) * ratio
+    binned = fine[:keep].reshape(-1, ratio).sum(axis=1)
+    out = np.zeros(n)
+    k = min(len(binned), n // 2 + 1)
+    out[:k] = binned[:k]
+    tot = out.sum()
+    return out / tot if tot > 0 else None
+
+
+def price_block_sizes(fine, delta_f, data_rate, longest, margin, ntemplates, snr, fd, candidates,
+                      max_tiers=3):
+    """Rank block sizes for one bank by modelled cost per valid output sample and template.
+
+    For each n the bank would run one plan over blocks advancing n - longest + 1 samples; a
+    block costs its fixed work (calibrated) spread over the templates, plus every pair's cost
+    under the best chain at that n (gate model with the reference rebinned to n, calibrated
+    tier costs). Returns [(cost, n, chain)] sorted, cheapest first.
+    """
+    out = []
+    for n in candidates:
+        nvalid = n - int(longest) + 1
+        if nvalid < n // 8:
+            continue
+        ref = rebin_profile(fine, delta_f, data_rate, n)
+        if ref is None:
+            continue
+        cm = calibrate_costs(n, ntemplates)
+        win = (int(margin), int(n - margin))
+        best, _ = choose_chain(ref, n, snr, fd, cost=cm, max_tiers=max_tiers, window=win)
+        if best is None:
+            continue
+        out.append(((cm.block / max(ntemplates, 1) + best["cost"]) / nvalid, int(n), best["chain"]))
+    return sorted(out)
