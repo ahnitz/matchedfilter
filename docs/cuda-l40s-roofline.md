@@ -135,6 +135,22 @@ pinning a run with `taskset`.
   the CPU and GPU now price different chains. The same bank with one pinned chain is
   identical on both devices.
 
+After rebasing onto 16ac4ae, which brought batched `filter_series_many` (now the ladder's
+default) and main's device-resident middle buffer, the numbers are min of 5, interleaved:
+
+| ladder mode | middle | fine | asym | TIRT |
+|---|---:|---:|---:|---:|
+| CPU 1 core | 0.160 | 0.328 | 0.009 | 14.2e6 |
+| CUDA, batched (default) | 0.0118 | 0.129 | 0.016 | 45.1e6 |
+| CUDA, `--no-batch` | 0.0119 | **0.090** | 0.016 | **60.1e6** |
+
+On CUDA, batching is 1.4x slower, the opposite of Vulkan. A deferred call skips the
+one-submission grouped hierarchical path (`hier_peaks_grouped` is used only when not
+deferred), so each fine call becomes 3 window submissions. Forward launches go from 168 to
+308 per steady stage, and forward device time from 3.9 ms to 25 ms (4 streams overlapping
+inflate per-launch event time, but the wall time confirms it). The open item is to make the
+grouped hierarchical path deferrable.
+
 What binds, in order:
 
 1. **Host time is ~3/4 of the fine stage's wall time.** 0.091 s wall against 0.025 s

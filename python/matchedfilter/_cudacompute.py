@@ -438,6 +438,8 @@ class Context(InputUploads):
         shared = _DEVICE_SHARED.get(index)
         if shared is None and self._using_primary_ctx:
             shared = _DEVICE_SHARED[index] = _DeviceShared(self.cuda, self.device.value)
+        # _shared._same_device: Contexts with one _device_state exchange buffers freely.
+        self._device_state = shared
         if shared is not None:
             self._modules, self._pipelines = shared.modules, shared.pipelines
             self._occupancy, self._labels = shared.occupancy, shared.labels
