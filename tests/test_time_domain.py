@@ -592,3 +592,37 @@ def test_unpinned_band_of_zero_still_chooses_block_size():
                                 binsize=256, coarse_band_hz=0.0)      # pycbc's "not pinned"
     bank.set_reference(w, delta_f=df)
     assert hasattr(bank, 'chosen_layout')
+
+
+def test_correlation_layout_is_priced_and_exact():
+    """engine='corr' picks its partition by calibrated cost: every template in exactly one group,
+    each group's transform longer than its longest filter, no costlier than the valid-fraction
+    rule under the same costs, and the output still the direct correlation."""
+    from matchedfilter import time_domain as td
+    rng = np.random.default_rng(11)
+    counts = np.sort(rng.integers(15, 5000, 25))
+    taps = np.zeros((len(counts), counts.max()), np.float32)
+    for i, c in enumerate(counts):
+        taps[i, :c] = rng.standard_normal(c)
+    bank = TimeDomainFilterBank(taps, tap_counts=counts, engine='corr')
+    seen = np.concatenate([g['template_indices'] for g in bank.groups])
+    assert sorted(seen.tolist()) == list(range(len(counts)))
+    for g in bank.groups:
+        assert g['n'] > counts[g['template_indices']].max()
+
+    def modelled(groups):
+        return sum((td._corr_block_costs(n)[0] + (j - i) * td._corr_block_costs(n)[1]) / (n - L + 1)
+                   for i, j, n, L in groups)
+    legacy, _ = td._partition_templates(counts, candidate_ns=(2048, 4096, 8192, 16384, 32768, 65536))
+    legacy_eff = [(i, j, n, int(np.sort(counts)[j - 1])) for i, j, n, _ in legacy]
+    assert modelled(td._corr_layout(counts, (2048, 4096, 8192, 16384, 32768, 65536), None)[0]) <= modelled(legacy_eff) * (1 + 1e-12)
+
+    L = 1 << 16
+    data = (rng.standard_normal(L) + 1j * rng.standard_normal(L)).astype(np.complex64)
+    res = bank.correlate_series(data)
+    for i in (0, len(counts) // 2, len(counts) - 1):
+        m = (counts[i] - 1) // 2                      # centre tap of an even-length filter
+        direct = np.convolve(data, taps[i, :counts[i]][::-1], mode='full')[m: m + L]
+        g, _ = bank._template_map[i]
+        sl = slice(g.c_bad, L - g.c_bad)
+        assert np.max(np.abs(res[i, sl] - direct[sl])) / np.max(np.abs(direct[sl])) < 1e-4

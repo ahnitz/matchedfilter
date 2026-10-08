@@ -282,7 +282,10 @@ def test_empty_windows_return_empty_results():
 def _corr_bank(layout, device=None):
     rng = np.random.default_rng(9)
     counts = {"contiguous": [251] * 6 + [1151] * 6, "interleaved": [251, 1151] * 6}[layout]
-    return TimeDomainFilterBank(_white_taps(rng, counts), counts, engine="corr", device=device)
+    # The window geometries here are sized against 2048/4096 blocks, so pin those sizes rather
+    # than let the bank price its own layout (test_time_domain covers that).
+    return TimeDomainFilterBank(_white_taps(rng, counts), counts, engine="corr", device=device,
+                                fft_lengths=[2048, 4096])
 
 
 def _corr_check(bank, ser, windows, ref_bank=None, tol=0.0, **kw):
@@ -380,7 +383,7 @@ def test_correlate_series_computes_only_intersecting_blocks(layout, monkeypatch)
     orig = TimeDomainFilterBank._correlate_group
 
     def spy(self, g, ser, st, t0, nt, dest):
-        calls.append((g.n, np.asarray(st).tolist()))
+        calls.append((id(g), np.asarray(st).tolist()))      # per group: several may share a size
         return orig(self, g, ser, st, t0, nt, dest)
 
     monkeypatch.setattr(TimeDomainFilterBank, "_correlate_group", spy)
@@ -393,7 +396,7 @@ def test_correlate_series_computes_only_intersecting_blocks(layout, monkeypatch)
         st, _, _ = _automatic_series_layout(S, cp.valid)
         want = [int(s) for s in st
                 if any(int(s) + lo < b and min(int(s) + hi, S) > a for a, b in W)]
-        got = [c[1] for c in calls if c[0] == g.n]
+        got = [c[1] for c in calls if c[0] == id(g)]
         assert got == [want] and 0 < len(want) < len(st) // 2
     calls.clear()
     assert not np.any(bank.correlate_series(_analytic(14), windows=[]))

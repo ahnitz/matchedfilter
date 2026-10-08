@@ -183,6 +183,109 @@ def _partition_templates(
     return groups, order
 
 
+_CORR_COSTS: Dict[int, Tuple[float, float]] = {}
+
+
+def _corr_block_costs(n: int) -> Tuple[float, float]:
+    """Seconds per block of continuous correlation at transform size n: (fixed, per template).
+
+    The fixed part is the block's forward transform and bookkeeping, the per-template part its
+    product and inverse transform. Measured once per process (or read from MF_COST_FILE) through
+    the engine at 2 and 16 templates -- the sizes the layout builds groups of, so the per-template
+    cost includes the cache footprint of a group's spectra -- taking the fastest of a few
+    repetitions, which is the least load-sensitive estimate of a fixed amount of work.
+    """
+    n = int(n)
+    hit = _CORR_COSTS.get(n)
+    if hit is not None:
+        return hit
+    from . import CorrelationFilter, _automatic_series_layout, gatechain
+    path = gatechain._cost_file()
+    key = "corr,%d" % n
+    if path is not None:
+        stored = gatechain._load_cost_file(path).get(key)
+        if stored is not None:
+            _CORR_COSTS[n] = hit = (float(stored[0]), float(stored[1]))
+            return hit
+    rng = np.random.default_rng(7)
+    taps = n // 4
+    nblocks = 8
+    L = nblocks * (n - taps) + n
+    ser = ((rng.standard_normal(L) + 1j * rng.standard_normal(L)) / np.sqrt(2)).astype(np.complex64)
+    per_block = []
+    for nt in (2, 16):
+        h = np.zeros((nt, n), np.complex64)
+        h[:, :taps] = rng.standard_normal((nt, taps))
+        cf = CorrelationFilter(n, ndata=1, ntemplates=nt, valid=(taps // 2, n - taps // 2))
+        cf.set_templates(np.fft.fft(h, axis=1).astype(np.complex64))
+        lo, hi = cf.valid
+        st, _, _ = _automatic_series_layout(L, cf.valid)
+        dest = np.zeros((nt, L), np.complex64)
+        ep = cf._execution_plan()
+        ep.correlate_series_continuous(ser, st, lo, hi, 0, nt, dest)
+        best = np.inf
+        for _ in range(5):
+            t0 = time.perf_counter()
+            ep.correlate_series_continuous(ser, st, lo, hi, 0, nt, dest)
+            best = min(best, time.perf_counter() - t0)
+        per_block.append(best / len(st))
+    b = max((per_block[1] - per_block[0]) / 14.0, 0.0)
+    hit = (max(per_block[0] - 2.0 * b, 0.0), b)
+    _CORR_COSTS[n] = hit
+    if path is not None:
+        gatechain._store_cost(path, key, list(hit))
+    return hit
+
+
+def _batch_target(n: int, max_batch: Optional[int]) -> int:
+    """Templates per group: the bank's cache-resident sizing, or the caller's bound."""
+    if max_batch is not None:
+        return int(max_batch)
+    return min(512, max(32, 1048576 // (max(64, n // 8) * 8)))
+
+
+def _corr_layout(counts: np.ndarray, candidate_ns: Sequence[int], max_batch: Optional[int]):
+    """Partition for continuous correlation by cost: contiguous runs of length-sorted templates,
+    each at the transform size minimising the calibrated cost per output sample.
+
+    A run [i, j) at size n costs (a(n) + (j - i) b(n)) / (n - L_j + 1) per output sample, where
+    L_j is its longest template; a dynamic programme over j picks the cheapest partition.
+    Runs are bounded by the bank's group sizing. Returns (groups, order) as _partition_templates.
+    """
+    counts = np.asarray(counts, dtype=np.int64)
+    order = np.argsort(counts)
+    Ls = counts[order]
+    M = len(Ls)
+    if M == 0:
+        return [], order
+    ns = sorted(int(n) for n in candidate_ns)
+    best = np.full(M + 1, np.inf); best[0] = 0.0
+    arg: List[Tuple[int, int]] = [(0, 0)] * (M + 1)
+    for j in range(1, M + 1):
+        L = int(Ls[j - 1])
+        for n in ns:
+            nv = n - L + 1
+            if nv < 1:
+                continue
+            a, b = _corr_block_costs(n)
+            cap = _batch_target(n, max_batch)
+            i0 = max(0, j - cap)
+            i = np.arange(i0, j)
+            c = best[i0:j] + (a + (j - i) * b) / nv
+            k = int(np.argmin(c))
+            if c[k] < best[j]:
+                best[j] = c[k]; arg[j] = (int(i[k]), n)
+    if not np.isfinite(best[M]):
+        return None
+    groups = []
+    j = M
+    while j > 0:
+        i, n = arg[j]
+        groups.append((i, j, n, int(Ls[j - 1])))
+        j = i
+    return groups[::-1], order
+
+
 _REF_PROFILE_CACHE: Dict[Tuple[int, int, float, float, float], np.ndarray] = {}
 _REF_BINNED_CACHE: Dict[Tuple[int, int, float], np.ndarray] = {}
 
@@ -373,6 +476,12 @@ class TimeDomainFilterBank:
         legacy_max = max(g[2] for g in self._legacy_layout[0]) if self._legacy_layout[0] else 0
         self._choice_ns = tuple(n for n in candidate_ns if n <= max(int(max_block_length), legacy_max))
         self._built: Optional[List[_TemplateGroup]] = None
+        if self.engine == 'corr' and fft_lengths is None:
+            # Continuous correlation outputs every sample whatever the blocking, so its layout is
+            # a pure cost choice: price partitions and transform sizes with calibrated block costs.
+            layout = _corr_layout(self.effective_data_counts, candidate_ns, self.max_batch_size)
+            if layout is not None:
+                self._legacy_layout = layout
         if not self._choose_n:
             self._build(*self._legacy_layout)
         if reference is not None:
