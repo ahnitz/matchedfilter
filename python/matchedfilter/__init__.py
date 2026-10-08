@@ -1081,6 +1081,15 @@ class MatchedFilter:
         series_owner = view(ser) if (view is not None and not source_shared) else None
         if series_owner is not None:
             source_shared = True
+        # A series inside a device allocation (a row of a device buffer a caller reuses, e.g.
+        # correlate_series(out=bank.empty_shared(...))) is read where it is, by offset --
+        # unless a block would read past its end, where the upload's zero padding is needed.
+        contained = None
+        if not source_shared and nblk:
+            from ._shared import containing
+            contained = containing(ser, self._gpu)
+            if contained is not None and int(layout.starts.max()) + n > ser.size:
+                contained = None
         # Pools are sized by capacity, not by this call's batch: windowed calls vary in
         # block count, and reallocating would also discard every recording built on them.
         # Capacity in both batch and slots: a call alternating unpipelined (K=1) and pipelined
@@ -1109,7 +1118,10 @@ class MatchedFilter:
                 prev = owners.pop((slot0 + k) % K, None)
                 if prev is not None:
                     prev.result()
-        if source_shared:
+        if contained is not None:
+            source, base = contained[0], -contained[1]
+            self._series_workspace = (workspace[0], workspace[1], spectra_pool, starts_pool)
+        elif source_shared:
             source, base = ser, 0
             # A viewed series keeps the copy buffer for later calls that need one.
             self._series_workspace = (workspace[0], workspace[1] if series_owner is not None
@@ -1170,7 +1182,7 @@ class MatchedFilter:
                 slot_idx += 1
                 starts = starts_pool[slot]
                 spec = spectra_pool[slot][:count]
-                starts[:count] = np.minimum(layout.starts[begin:end], ser.size) - base
+                starts[:count] = np.minimum(layout.starts[begin:end], ser.size).astype(np.int64) - base
                 self._gpu.forward(n, source, starts[:count], spec, defer=True,
                                   slot=slot if pipelined else None)
                 try:
@@ -1210,7 +1222,7 @@ class MatchedFilter:
                 slot_idx += 1
                 starts = starts_pool[slot]
                 spec = spectra_pool[slot][:count]
-                starts[:count] = np.minimum(layout.starts[begin:end], ser.size) - base
+                starts[:count] = np.minimum(layout.starts[begin:end], ser.size).astype(np.int64) - base
                 self._gpu.forward(n, source, starts[:count], spec, defer=True,
                                   slot=slot if pipelined else None)
                 try:

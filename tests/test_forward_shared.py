@@ -236,7 +236,10 @@ def test_shared_bank_replacement_and_external_context(gpu):
     alien = other.empty_shared(shared.shape)
     alien[:] = shared
     plan.set_data(alien)
-    assert not np.shares_memory(plan._gdata, alien)
+    # Another plan's allocation is bound in place when both plans share the device (Vulkan
+    # contexts do), and copied otherwise; the result is the same either way.
+    from matchedfilter._shared import _same_device
+    assert np.shares_memory(plan._gdata, alien) == _same_device(plan._gpu, other._gpu)
     np.testing.assert_array_equal(plan.run(), first)
 
 

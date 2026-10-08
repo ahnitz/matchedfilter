@@ -150,6 +150,9 @@ def run_device(device, tops, args, seed):
                                      fft_lengths=[args.fft_length] if args.fft_length else None)
             b.set_reference(w, delta_f=DF)
             fine.append((m, b))
+        # The middle output in device memory, reused every segment (as a pipeline would):
+        # written in place by the middle stage and read in place by the fine banks.
+        mid_out = {ifo: mid.empty_shared((len(top["mid_counts"]), S)) for ifo in ("H1", "L1")}
         first.add("prep", time.perf_counter() - t0)
         for seg in range(args.segments):
             tm = first if seg == 0 else steady
@@ -158,7 +161,8 @@ def run_device(device, tops, args, seed):
             for ifo in ser:
                 t = time.perf_counter()
                 mids[ifo] = mid.correlate_series(ser[ifo], windows=slice(max(0, a0 - args.pad),
-                                                                         min(S, a1 + args.pad)))
+                                                                         min(S, a1 + args.pad)),
+                                                 out=mid_out[ifo])
                 tm.add("middle", time.perf_counter() - t)
             # The fine stage of a segment: every bank on its middle series, both detectors.
             # Batched (default), the library sees the whole segment in one call.

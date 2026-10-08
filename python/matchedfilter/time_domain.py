@@ -1222,6 +1222,18 @@ class TimeDomainFilterBank:
 
         return _Deferred(build) if pending else build()
 
+    def empty_shared(self, shape, dtype=np.complex64):
+        """An array in this bank's device memory (host-readable), for outputs a caller reuses:
+        correlate_series(out=...) writes such an array in place, and a fine bank on the same
+        device reads its rows in place. On a CPU bank, ordinary page-aligned memory."""
+        self._groups
+        for g in self._groups:
+            plan = g.get_correlation_plan() if self.engine == 'corr' else g.plan
+            gpu = getattr(plan, '_gpu', None)
+            if gpu is not None:
+                return gpu.empty_shared(tuple(shape), dtype, readback=True)
+        return _page_aligned_empty(tuple(shape), dtype)
+
     @staticmethod
     def filter_series_many(jobs):
         """Several filter_series calls as one batch: jobs is [(bank, series, kwargs)], the
@@ -1286,6 +1298,12 @@ class TimeDomainFilterBank:
                 cplan._continuous_gpu(ser, st, t0, nt, dest)
             finally:
                 del ser_owner, out_owner
+            return
+        # A destination in device memory on this device (a caller's reused buffer) is
+        # written in place: no workspace, no copy-out.
+        from ._shared import shared_buffer
+        if dest.flags.c_contiguous and shared_buffer(dest, cplan._gpu) is not None:
+            cplan._continuous_gpu(ser, st, t0, nt, dest)
             return
         shape = (nt, S)
         ws = getattr(g, '_corr_workspace', None)
