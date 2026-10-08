@@ -340,10 +340,14 @@ def calibrate_costs(n, ntemplates, blocks=256, reps=5, seed=11, group=None):
     no wall-clock subtraction is involved. Calls are sized like a segment's
     (hundreds of blocks), because a pooled tier's fixed per-call cost is only
     representative when amortised over a realistic number of survivors.
-    Under a second per (n, template count), once per process.
+    Under a second per (n, template count to the nearest power of two, series
+    group), once per process.
     """
     from . import _core
-    nt = int(min(max(int(ntemplates), 8), 128))
+    # Per-pair costs vary slowly with the template count (cache footprint, per-call
+    # amortisation), so one calibration per power of two serves every bank near it:
+    # a run builds banks of many sizes, and each calibration is a fraction of a second.
+    nt = 1 << int(round(math.log2(min(max(int(ntemplates), 8), 128))))
     # The series group must be the plans' own: the first tier batches its work over the blocks in a
     # group, so calibrating at a smaller group overstates its cost (2x at n=1024 with 8 vs 32).
     group = int(group or default_series_group(n))
