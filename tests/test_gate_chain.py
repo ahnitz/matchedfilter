@@ -1,3 +1,4 @@
+import os
 import numpy as np
 import pytest
 import matchedfilter as mf
@@ -629,3 +630,58 @@ def test_cost_file_reproduces_the_measured_models(monkeypatch, tmp_path):
     assert loaded.to_dict() == measured.to_dict()
     reach = [1.0, 0.05, 0.01]
     assert loaded.chain_cost((128, 512), reach) == measured.chain_cost((128, 512), reach)
+
+
+def _plan_chain_bruteforce(sig, noise, bands, chain, fd, cost, n, snr):
+    """The split search done the plain way: mask and sort every kept draw for each candidate."""
+    import math
+    gc = mf._gatechain
+    cols = [bands.index(b) for b in chain]
+    S = gc.kept_draws(sig, bands, chain, snr)
+    M, k = S.shape[0], len(chain)
+    K = int(math.floor(fd * M)) if k == 1 else int(math.floor(fd * M - 1.645 * math.sqrt(M * fd * (1 - fd))))
+    if K < 8:
+        return None
+    sorted_cols = [np.sort(S[:, i]) for i in range(k - 1)]
+    cands = []
+
+    def rec(i, prefix, remaining):
+        if i == k - 1:
+            alive = np.ones(M, bool)
+            for j, g in enumerate(prefix):
+                alive &= S[:, j] >= g
+            rem = K - (M - int(alive.sum()))
+            last = np.sort(S[alive, k - 1])
+            if 0 <= rem < len(last):
+                cands.append(list(prefix) + [float(last[rem])])
+            return
+        for a in (gc._SPLIT if k <= 2 else gc._SPLIT_COARSE):
+            share = a * remaining
+            idx = int(math.floor(share * K))
+            if idx >= 1:
+                rec(i + 1, prefix + [float(sorted_cols[i][idx])], remaining - share)
+    rec(0, [], 1.0)
+    best = None
+    for th in cands:
+        reach = gc._reach(noise, cols, th)
+        c = cost.chain_cost(chain, reach)
+        if best is None or c < best["cost"]:
+            best = dict(thresholds=tuple(th), reach=tuple(reach), cost=float(c))
+    return best
+
+
+def test_plan_chain_matches_the_plain_split_search():
+    gc = mf._gatechain
+    prof = np.load(os.path.join(os.path.dirname(__file__), "data", "reference_profile_o2_h1l1_2048.npy"))
+    n = 2048
+    cm = gc.calibrate_costs(n, 32)
+    bands = gc.usable_bands(prof, n)
+    sig = gc.signal_draws(prof, n, bands, 6.0, gc._gm._nsamp_for(1e-3))
+    noise = gc.noise_block_maxima(prof, n, bands, window=(192, n - 192))
+    for chain in gc.enumerate_chains(n, 3, bands=bands):
+        fast = gc.plan_chain(sig, noise, bands, list(chain), 1e-3, cm, n, 6.0)
+        ref = _plan_chain_bruteforce(sig, noise, bands, list(chain), 1e-3, cm, n, 6.0)
+        assert (fast is None) == (ref is None), chain
+        if fast is not None:
+            assert fast["thresholds"] == ref["thresholds"] and fast["reach"] == ref["reach"], chain
+            assert fast["cost"] == ref["cost"], chain
