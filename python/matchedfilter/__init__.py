@@ -1738,7 +1738,9 @@ class HierarchicalFilter(MatchedFilter):
 
     # ---- chain choice ----------------------------------------------------------
     def _cost_model(self):
-        return _gatechain.calibrate_costs(self.n, self.ntemplates)
+        policy = self._series_policy('hierarchical_series', 0, self.ntemplates) or {}
+        return _gatechain.calibrate_costs(self.n, self.ntemplates,
+                                          group=policy.get('series_group', _gatechain.default_series_group(self.n)))
 
     def _choose_chain(self):
         """Pick a gate chain: the model prices every chain, measurement settles the close ones.

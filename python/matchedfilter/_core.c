@@ -705,6 +705,9 @@ static PyObject *HMF_tier_stats(HMFObject *self,PyObject *a){
   }
   return l;
 }
+static PyObject *HMF_series_ticks(HMFObject *self,PyObject *a){
+  (void)a; return PyLong_FromUnsignedLongLong(ap_hmf_series_ticks(self->p));
+}
 static PyObject *HMF_thresholds(HMFObject *self,PyObject *a){
   float thr[AP_HMF_MAX_TIERS]; (void)a;
   int nti=ap_hmf_thresholds(self->p,thr);
@@ -761,6 +764,7 @@ static PyMethodDef HMF_methods[]={
   {"stats",(PyCFunction)HMF_stats,METH_NOARGS,"stats() -> (pairs, refined)"},
   {"chain",(PyCFunction)HMF_chain,METH_NOARGS,"chain() -> bands"},
   {"thresholds",(PyCFunction)HMF_thresholds,METH_NOARGS,"thresholds() -> per-tier thresholds in force"},
+  {"series_ticks",(PyCFunction)HMF_series_ticks,METH_NOARGS,"series_ticks() -> ticks spent in run_series calls"},
   {"tier_stats",(PyCFunction)HMF_tier_stats,METH_NOARGS,"[(band, passed, ticks) per tier] + [(n, refined, ticks)]"},
   {NULL}
 };

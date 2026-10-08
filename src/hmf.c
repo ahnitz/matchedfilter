@@ -40,6 +40,7 @@ struct ap_hmf_plan {
   int ref_on;
   long pairs,trig;
   unsigned long long c_ref,c_fill;
+  unsigned long long c_series;      /* whole ap_hmf_run_series calls: transforms, ingest, tiers, refine */
   int prof,trace;
   FILE *dump;
   float *twiddles,*tw_scratch;
@@ -284,6 +285,7 @@ int ap_hmf_run_series(ap_hmf_plan *p,
                       ap_peak *peaks,int *counts){
   if(!p||nblocks<1||nt<1||!binsize) return 0;
   if(t0<0||t0+nt>p->nt) return -1;
+  const unsigned long long call0=ap_ticks();
   const size_t n=p->n;
   const size_t nb0=ap_hmf_nbins(p,binsize,win_start[0],win_end[0]);
   int total=0;
@@ -338,8 +340,11 @@ int ap_hmf_run_series(ap_hmf_plan *p,
     total+=r;
     b0+=g;
   }
+  p->c_series += ap_ticks()-call0;
   return total;
 }
+
+unsigned long long ap_hmf_series_ticks(const ap_hmf_plan *p){ return p ? p->c_series : 0; }
 
 static int hmf_refine(ap_hmf_plan *p, const int *fire_d, const int *fire_t,
                       int d0, int t0, int nt, int nfire,

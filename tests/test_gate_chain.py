@@ -614,3 +614,18 @@ def test_cost_calibration_is_sane():
     assert all(v > 0 for v in cm.dense.values())
     assert cm.dense[64] < cm.dense[1024]               # wider first tiers cost more per pair
     assert cm.refine(0.05) > cm.dense[256]             # a refine costs more than a coarse evaluation
+
+
+def test_cost_file_reproduces_the_measured_models(monkeypatch, tmp_path):
+    gc = mf._gatechain
+    path = tmp_path / "costs.json"
+    monkeypatch.setenv("MF_COST_FILE", str(path))
+    monkeypatch.setattr(gc, "_COSTS", {})
+    measured = gc.calibrate_costs(1024, 24)
+    assert path.exists()
+    monkeypatch.setattr(gc, "_COSTS", {})
+    monkeypatch.setattr(gc.np.random, "default_rng", None)    # a reload must not measure
+    loaded = gc.calibrate_costs(1024, 24)
+    assert loaded.to_dict() == measured.to_dict()
+    reach = [1.0, 0.05, 0.01]
+    assert loaded.chain_cost((128, 512), reach) == measured.chain_cost((128, 512), reach)

@@ -180,6 +180,9 @@ int ap_hmf_chain(const ap_hmf_plan *p, size_t *bands);
 /* Pairs that passed tier `tier` and the ticks spent in it; tier == ntiers is
    the refine (refined pairs, refine ticks). Always counted. */
 int ap_hmf_tier_stats(const ap_hmf_plan *p, int tier, long *passed, unsigned long long *ticks);
+/* Ticks spent in ap_hmf_run_series calls in total: with the tier counters this
+   gives the per-block fixed work (forward transform, ingest) in the same units. */
+unsigned long long ap_hmf_series_ticks(const ap_hmf_plan *p);
 int ap_hmf_series_group(const ap_hmf_plan *p);
 int ap_hmf_set_hermitian(ap_hmf_plan *p, int hermitian);
 int ap_hmf_get_hermitian(const ap_hmf_plan *p);
