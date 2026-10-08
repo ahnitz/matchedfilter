@@ -215,11 +215,13 @@ def _unpack_half(a, n, hermitian):
 
 
 class _Deferred:
-    """A GPU result submitted but not yet collected; result() waits once and caches."""
-    __slots__ = ("_finish", "_value", "_done")
+    """A GPU result submitted but not yet collected; result() waits once and caches.
+    empty: True once collected if the gates refined nothing (every slot is -1), so a
+    consumer can skip scanning it."""
+    __slots__ = ("_finish", "_value", "_done", "empty")
 
     def __init__(self, finish):
-        self._finish, self._value, self._done = finish, None, False
+        self._finish, self._value, self._done, self.empty = finish, None, False, False
 
     def result(self):
         if not self._done:
@@ -1239,6 +1241,7 @@ class MatchedFilter:
                 return _format_result(idx, val, raw=True, order=layout.order)
             return _format_result(None, None, raw=False, order=layout.order, out=peaks)
         in_flight = []
+        collected_early = [False]
         slot_idx = slot0
         for w0, w1, a, b in layout.groups:
             for begin in range(a, b, batch):
@@ -1261,6 +1264,7 @@ class MatchedFilter:
                 self._ddirty = self._tdirty = False
                 in_flight.append((begin, end, res))
                 if len(in_flight) >= K:
+                    collected_early[0] = True
                     b_start, b_end, item = in_flight.pop(0)
                     gi, gv = item() if callable(item) else item
                     if single:
@@ -1275,10 +1279,15 @@ class MatchedFilter:
                         idx[b_start:b_end], val[b_start:b_end] = gi, gv
                     else:
                         _core.pack_peaks(peaks[b_start:b_end], gi, gv)
+        refined = [0]
+        hier = isinstance(self, HierarchicalFilter)
+
         def finish():
             while in_flight:
                 b_start, b_end, item = in_flight.pop(0)
                 gi, gv = item() if callable(item) else item
+                if hier:
+                    refined[0] += getattr(self._gpu, "last_refinements", 1)
                 if single:
                     if raw:
                         return _format_result(gi, gv, raw=True)
@@ -1301,7 +1310,15 @@ class MatchedFilter:
         if not defer:
             return finish()
         self._defer_slot = slot_idx
-        deferred = _Deferred(finish)
+
+        def finish_marking():
+            value = finish()
+            # Refinements already collected mid-loop are not counted: only claim empty when
+            # every batch was collected here.
+            if hier and refined[0] == 0 and not collected_early[0]:
+                deferred.empty = True
+            return value
+        deferred = _Deferred(finish_marking)
         owners = self.__dict__.setdefault("_slot_owner", {})
         for k in range(slot0, slot_idx):
             owners[k % K] = deferred

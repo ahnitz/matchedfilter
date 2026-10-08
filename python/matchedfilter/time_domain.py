@@ -1222,7 +1222,9 @@ class TimeDomainFilterBank:
 
         def build():
             for d, sub_starts, g, tmpl_arg, N in pending:
-                consume(*d.result(), sub_starts, g, tmpl_arg, N)
+                res = d.result()
+                if not d.empty:
+                    consume(*res, sub_starts, g, tmpl_arg, N)
             if out_template_indices:
                 if len(out_template_indices) == 1:
                     return FilterResults(
@@ -1301,15 +1303,31 @@ class TimeDomainFilterBank:
         On a CPU the calls simply run in order.
         """
         from . import _Deferred
+        import os
         global _BATCH_TOKEN
         _BATCH_TOKEN += 1
-        out = []
-        for j, (bank, series, kw) in enumerate(jobs):
-            bank._defer, bank._queue_offset = _BATCH_TOKEN, j
+        # On Vulkan the deferred submissions are also fused: one command buffer runs every
+        # job's forward transforms, then every job's first tier, ..., one barrier per phase
+        # (MF_GPU_FUSE=0 submits them separately, for comparison).
+        close = None
+        if os.environ.get("MF_GPU_FUSE", "1") != "0" and any(
+                getattr(b, "device", None) is not None for b, _, _ in jobs):
             try:
-                out.append(bank.filter_series(series, **(kw or {})))
-            finally:
-                bank._defer, bank._queue_offset = 0, 0
+                from . import _vkcompute
+                close = _vkcompute.fused()
+            except Exception:
+                close = None
+        out = []
+        try:
+            for j, (bank, series, kw) in enumerate(jobs):
+                bank._defer, bank._queue_offset = _BATCH_TOKEN, j
+                try:
+                    out.append(bank.filter_series(series, **(kw or {})))
+                finally:
+                    bank._defer, bank._queue_offset = 0, 0
+        finally:
+            if close is not None:
+                close()
         return [r.result() if isinstance(r, _Deferred) else r for r in out]
 
     @staticmethod

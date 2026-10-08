@@ -11,6 +11,7 @@ pipeline, one queue, one descriptor set.
 """
 import ctypes
 import os
+from collections import OrderedDict
 import pathlib
 import sys
 
@@ -347,6 +348,157 @@ class _Buffer:
             self.handle = None
 
 
+class _CaptureVK:
+    """The Vulkan function table, also logging vkCmd* calls (name, args) into a capture."""
+
+    def __init__(self, real, cap):
+        self._real, self._cap = real, cap
+
+    def __getattr__(self, name):
+        fn = getattr(self._real, name)
+        if not name.startswith("vkCmd"):
+            return fn
+        cap = self._cap
+
+        def call(*args):
+            cap["ops"].append((name, args))
+            return fn(*args)
+        return call
+
+
+#: Phases of forward and hierarchical recordings, in execution order. A fused batch runs
+#: every recording's work for a phase, then their barriers, then the next phase: the
+#: dispatches of a phase are independent across recordings and overlap on the device.
+_FUSED_PHASES = ("forward", "fill", "pack", "coarse0", "compact0", "coarse1", "compact1", "refine")
+
+
+class _FusedBatch:
+    """Submissions collected across contexts on one device, recorded and submitted together."""
+
+    def __init__(self, dev):
+        self.dev, self.items, self.state = dev, [], "open"
+
+    #: Submissions per fused command buffer. The device starts on a chunk while the host
+    #: prepares the next: fusing a whole segment into one buffer left the GPU idle through
+    #: all the host's preparation. MF_GPU_FUSE_CHUNK overrides.
+    chunk = int(os.environ.get("MF_GPU_FUSE_CHUNK", "16"))
+
+    def add(self, ctx, commands, fence):
+        self.items.append((ctx, [getattr(c, "value", c) for c in commands]))
+        ctx.__dict__.setdefault("_collected", {})[getattr(fence, "value", fence)] = self
+        if len(self.items) >= self.chunk and self.dev.collector is self:
+            nxt = _FusedBatch(self.dev)
+            self.dev.collector = nxt
+            self.flush()
+            self.dev.collector = nxt
+
+    def flush(self):
+        if self.state != "open":
+            return
+        self.state = "submitted"
+        if self.dev.collector is self:
+            self.dev.collector = None
+        dev, vk = self.dev, self.dev.vk
+        # The same jobs recur every segment: reuse their fused recording while every
+        # constituent recording is still cached (eviction drops its phases).
+        key = tuple((id(ctx), tuple(cmds)) for ctx, cmds in self.items)
+        cache = dev.__dict__.setdefault("fused_cache", OrderedDict())
+        hit = cache.get(key)
+        if hit is not None and all(h in getattr(ctx, "_phases", {}) and ctx.device is not None
+                                   for ctx, cmds in self.items for h in cmds):
+            cache.move_to_end(key)
+            self._submit_fused(hit[0])
+            return
+        if hit is not None:
+            cache.pop(key)
+            self._free(hit[0])
+        cmd = _vp()
+        info = _CmdBufAlloc(40, None, dev.command_pool, 0, 1)
+        _check(vk.vkAllocateCommandBuffers(dev.device, ctypes.byref(info), ctypes.byref(cmd)),
+               "allocate fused")
+        _check(vk.vkBeginCommandBuffer(cmd, ctypes.byref(_CmdBufBegin(42, None, 0, None))),
+               "begin fused")
+        for phase in _FUSED_PHASES:
+            barriers = []
+            for ctx, cmds in self.items:
+                for h in cmds:
+                    work_bar = ctx._phases[h].get(phase)
+                    if work_bar is None:
+                        continue
+                    work, bar = work_bar
+                    for name, args in work:
+                        getattr(vk, name)(cmd, *args[1:])
+                    barriers.extend(bar)
+            # One global barrier per distinct (stages, access) is enough for the whole phase;
+            # buffer barriers are kept as recorded.
+            seen = set()
+            for name, args in barriers:
+                if args[4] == 1 and args[6] == 0:
+                    mb = getattr(args[5], "_obj", None)
+                    sig = (args[1], args[2], getattr(mb, "srcAccessMask", id(mb)),
+                           getattr(mb, "dstAccessMask", id(mb)))
+                    if sig in seen:
+                        continue
+                    seen.add(sig)
+                getattr(vk, name)(cmd, *args[1:])
+        _check(vk.vkEndCommandBuffer(cmd), "end fused")
+        cache[key] = (cmd,)
+        while len(cache) > 16:
+            _, (old_cmd,) = cache.popitem(last=False)
+            self._free(old_cmd)
+        self._submit_fused(cmd)
+
+    def _free(self, cmd):
+        vk = self.dev.vk
+        vk.vkFreeCommandBuffers.argtypes = [_vp, _vp, _u32, ctypes.POINTER(_vp)]
+        vk.vkFreeCommandBuffers(self.dev.device, self.dev.command_pool, 1, (_vp * 1)(cmd))
+
+    def _submit_fused(self, cmd):
+        dev, vk = self.dev, self.dev.vk
+        fc = _FenceCreate(8, None, 0)
+        self.fence = _vp()
+        _check(vk.vkCreateFence(dev.device, ctypes.byref(fc), None, ctypes.byref(self.fence)),
+               "vkCreateFence")
+        self.cmd = cmd
+        timed = next((ctx for ctx, _ in self.items if ctx._timing), None)
+        if timed is not None:
+            begin, end = timed._timestamp_pair("fused")
+            cmds = (_vp * 3)(begin, cmd, end)
+            submit = _SubmitInfo(4, None, 0, None, None, 3, cmds, 0, None)
+        else:
+            cmds = (_vp * 1)(cmd)
+            submit = _SubmitInfo(4, None, 0, None, None, 1, cmds, 0, None)
+        _check(vk.vkQueueSubmit(dev.queue, 1, ctypes.byref(submit), self.fence), "vkQueueSubmit")
+
+    def wait(self):
+        if self.state == "open":
+            self.flush()
+        if self.state != "submitted":
+            return
+        self.state = "done"
+        dev, vk = self.dev, self.dev.vk
+        fences = (_vp * 1)(self.fence)
+        _check(vk.vkWaitForFences(dev.device, 1, fences, 1, 0xFFFFFFFFFFFFFFFF), "vkWaitForFences")
+        vk.vkDestroyFence(dev.device, self.fence, None)
+
+
+def fused():
+    """Begin a fused batch on every Vulkan device in use; returns a callable that closes it
+    (any collected work is submitted when first waited on, or at close)."""
+    devs = []
+    for dev in _DEVICES.values():
+        if dev.collector is None:
+            dev.collector = _FusedBatch(dev)
+            devs.append(dev)
+
+    def close():
+        for dev in devs:
+            b, dev.collector = dev.collector, None
+            if b is not None and b.items:
+                b.flush()
+    return close
+
+
 #: One _Device per Vulkan device index, for the life of the process.
 _DEVICES = {}
 
@@ -360,6 +512,7 @@ class _Device:
             raise VulkanError(err)
         self.vk = vk
         self.pipelines = {}
+        self.collector = None        # a _FusedBatch while filter_series_many is collecting
         app = _vulkan._AppInfo(0, None, b"matchedfilter", 1, b"matchedfilter", 1,
                                (1 << 22) | (1 << 12))
         ci = _vulkan._InstInfo(1, None, 0, ctypes.pointer(app), 0, None, 0, None)
@@ -552,6 +705,10 @@ class Context(InputUploads):
         return fence
 
     def _wait_fence(self, fence):
+        batch = getattr(self, "_collected", {}).pop(getattr(fence, "value", fence), None)
+        if batch is not None:
+            batch.wait()
+            return
         fences = (_vp * 1)(fence)
         _check(self.vk.vkWaitForFences(self.device, 1, fences, 1, 0xFFFFFFFFFFFFFFFF),
                "vkWaitForFences")
@@ -769,8 +926,12 @@ class Context(InputUploads):
                 self._cache_room(estimate, incoming=incoming, keep_storage=storage_key)
                 fresh = storage_key not in self._storage
                 pool_start = len(getattr(self, '_pools', []))
-                batch = self._make_hier_cascade(storage_key, n, band0, band1, nd, nt, nbins, binsize,
-                                                shift, lo, hi, t2, thr0, thr1, data, tmpl)
+                self._capture_begin()
+                try:
+                    batch = self._make_hier_cascade(storage_key, n, band0, band1, nd, nt, nbins, binsize,
+                                                    shift, lo, hi, t2, thr0, thr1, data, tmpl)
+                finally:
+                    self._capture_end(batch[-1] if batch else None)
                 self._hier_cascade[key] = batch
                 self._register_record('hier_cascade', key, storage_key, pool_start)
                 if fresh:
@@ -839,8 +1000,12 @@ class Context(InputUploads):
             self._cache_room(estimate, incoming=incoming, keep_storage=storage_key)
             fresh = storage_key not in self._storage
             pool_start = len(getattr(self, '_pools', []))
-            batch = self._make_hier(storage_key, n, band, nd, nt, nbins, binsize,
-                                    shift, lo, hi, t2, raw_thr, data, tmpl)
+            self._capture_begin()
+            try:
+                batch = self._make_hier(storage_key, n, band, nd, nt, nbins, binsize,
+                                        shift, lo, hi, t2, raw_thr, data, tmpl)
+            finally:
+                self._capture_end(batch[-1] if batch else None)
             self._hier[key] = batch
             self._register_record('hier', key, storage_key, pool_start)
             if fresh:
@@ -1372,6 +1537,7 @@ class Context(InputUploads):
             info = _CmdBufAlloc(40, None, self.command_pool, 0, 1)
             _check(vk.vkAllocateCommandBuffers(self.device, ctypes.byref(info),
                                                ctypes.byref(cmd)), "allocate forward")
+            vk = self._capture_begin()
             begin = _CmdBufBegin(42, None, 0, None)
             _check(vk.vkBeginCommandBuffer(cmd, ctypes.byref(begin)), "begin forward")
             self._stamp(cmd, "start")
@@ -1392,6 +1558,8 @@ class Context(InputUploads):
                                     0, 0, None, 1, ctypes.byref(barrier), 0, None)
             self._stamp(cmd, "forward")
             _check(vk.vkEndCommandBuffer(cmd), "end forward")
+            self._capture_end(cmd)
+            vk = self.vk
             batch = (*buffers, cmd)
             forwards[key] = batch
             self._register_record('forward', key, None, pool_start)
@@ -1534,13 +1702,47 @@ class Context(InputUploads):
         ts["pending"][i] = label
         return _vp(ts["cmds"][2 * i]), _vp(ts["cmds"][2 * i + 1])
 
+    def _capture_begin(self):
+        """Record the vkCmd* calls of the recording about to be built, by phase (see _stamp),
+        so a fused batch can replay them interleaved with other recordings'."""
+        self._cap = {"phases": [], "ops": []}
+        self.vk = _CaptureVK(self.vk, self._cap)
+        return self.vk
+
+    def _capture_end(self, cmd):
+        self.vk = getattr(self.vk, "_real", self.vk)
+        cap, self._cap = getattr(self, "_cap", None), None
+        if cap is None or cmd is None:
+            return
+        phases, coarse = {}, 0
+        for label, ops in cap["phases"]:
+            if label == "start":
+                name = "start"
+            elif label.startswith("coarse"):
+                name = "coarse%d" % min(coarse, 1)
+                coarse += 1
+            elif label == "compact":
+                name = "compact0"
+            else:
+                name = label
+            phases[name] = ([o for o in ops if o[0] != "vkCmdPipelineBarrier"],
+                            [o for o in ops if o[0] == "vkCmdPipelineBarrier"])
+        if set(phases) - set(_FUSED_PHASES) - {"start"}:
+            return                                  # an unknown structure: never fused
+        self.__dict__.setdefault("_phases", {})[getattr(cmd, "value", cmd)] = phases
+
     _PROF_QUERIES = 8192
 
     def _stamp(self, cmd, label):
-        """Record a timestamp into recording `cmd` (MF_GPU_PROFILE=1 only)."""
+        """Mark a phase boundary in recording `cmd`: for a capture (fused batches), and with
+        MF_GPU_PROFILE=1 as a timestamp."""
+        cap = getattr(self, "_cap", None)
+        if cap is not None:
+            cap["phases"].append((label, cap["ops"]))
+            cap["ops"] = []
         if not getattr(self, "_profile", False):
             return
-        vk = self.vk
+        vk = getattr(self.vk, "_real", self.vk)
         if self._prof is None:
             for name, args in (("vkCmdWriteTimestamp", [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_uint32]),
                                ("vkCmdResetQueryPool", [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32]),
@@ -1631,6 +1833,12 @@ class Context(InputUploads):
         if cmd is not None:
             commands.append(cmd)
         if not commands:
+            return
+        batch = self._device_state.collector
+        if (batch is not None and fence is not None and not wait
+                and all(getattr(c, "value", c) in getattr(self, "_phases", {}) for c in commands)):
+            # A fused batch (filter_series_many): recorded with the others when first waited on.
+            batch.add(self, commands, fence)
             return
         if self._timing:
             label = sys._getframe(1).f_code.co_name + ("+forward" if pending is not None else "")
@@ -2183,6 +2391,7 @@ class Context(InputUploads):
                  'tierc': getattr(self, '_tierc_batches', {})}[kind]
         batch = cache.pop(key)
         cmd = batch[-1]
+        getattr(self, "_phases", {}).pop(getattr(cmd, "value", cmd), None)
         pf = getattr(self, '_pending_forward', None)
         cmd_val = getattr(cmd, 'value', cmd)
         if isinstance(pf, dict):
