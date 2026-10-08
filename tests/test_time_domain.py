@@ -626,3 +626,22 @@ def test_correlation_layout_is_priced_and_exact():
         g, _ = bank._template_map[i]
         sl = slice(g.c_bad, L - g.c_bad)
         assert np.max(np.abs(res[i, sl] - direct[sl])) / np.max(np.abs(direct[sl])) < 1e-4
+
+
+def test_reference_caches_never_serve_a_recycled_id():
+    """A freed reference array's id is reused by the next allocation; the bank must not serve
+    the new array the old one's binned profile."""
+    rng = np.random.default_rng(12)
+    counts = [400, 700]
+    taps, w, df = _whitened_inspiral_bank(rng, counts)
+    bank = TimeDomainFilterBank(taps, tap_counts=counts, engine='hier', threshold=5.5)
+    n = bank.groups[0]['n']
+    for scale_lo in (1.0, 50.0, 1.0, 50.0):
+        prof = w.copy()
+        prof[: len(prof) // 8] *= scale_lo           # a different shape each round, often the same id
+        bank.set_reference(prof, delta_f=df)
+        got = bank._groups[0].plan._pending_ref
+        from matchedfilter.gatechain import rebin_profile
+        want = rebin_profile(prof, df, bank.data_sample_rate, n).astype(np.float32)
+        np.testing.assert_allclose(np.asarray(got, np.float64), want / want.sum(), rtol=1e-6)
+        del prof

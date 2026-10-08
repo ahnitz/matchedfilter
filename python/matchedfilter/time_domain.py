@@ -286,8 +286,11 @@ def _corr_layout(counts: np.ndarray, candidate_ns: Sequence[int], max_batch: Opt
     return groups[::-1], order
 
 
-_REF_PROFILE_CACHE: Dict[Tuple[int, int, float, float, float], np.ndarray] = {}
-_REF_BINNED_CACHE: Dict[Tuple[int, int, float], np.ndarray] = {}
+# Keyed by object identity for speed; each entry also holds the objects it was keyed on, so
+# an id cannot be handed to a new object while its entry exists (a freed array's id is
+# reused, which would serve the new array the old one's profile).
+_REF_PROFILE_CACHE: Dict[Tuple[int, int, float, float, float], Tuple[Any, Any, np.ndarray]] = {}
+_REF_BINNED_CACHE: Dict[Tuple[int, int, float], Tuple[Any, Optional[np.ndarray]]] = {}
 
 
 class _TemplateGroup:
@@ -768,21 +771,14 @@ class TimeDomainFilterBank:
             for g in self._groups:
                 if hasattr(g.plan, 'set_reference'):
                     b_key = (id(reference), g.n, float(delta_f))
-                    ref_input = _REF_BINNED_CACHE.get(b_key)
-                    if ref_input is None:
-                        delta_f_engine = self.data_sample_rate / g.n
-                        ratio = int(round(delta_f_engine / float(delta_f)))
-                        if ratio < 1:
-                            ratio = 1
-                        keep = (len(ref_arr) // ratio) * ratio
-                        binned = ref_arr[:keep].reshape(-1, ratio).sum(axis=1)
-                        ref_g = np.zeros(g.n, dtype=np.float64)
-                        k = min(len(binned), g.n // 2 + 1)
-                        ref_g[:k] = binned[:k]
-                        tot = ref_g.sum()
-                        ref_input = (ref_g / tot).astype(np.float32) if tot > 0 else None
-                        if ref_input is not None:
-                            _REF_BINNED_CACHE[b_key] = ref_input
+                    hit = _REF_BINNED_CACHE.get(b_key)
+                    if hit is not None and hit[0] is reference:
+                        ref_input = hit[1]
+                    else:
+                        from .gatechain import rebin_profile
+                        ref_g = rebin_profile(ref_arr, float(delta_f), self.data_sample_rate, g.n)
+                        ref_input = ref_g.astype(np.float32) if ref_g is not None else None
+                        _REF_BINNED_CACHE[b_key] = (reference, ref_input)
                     if ref_input is not None:
                         g.plan.set_reference(ref_input)
         else:
@@ -818,7 +814,8 @@ class TimeDomainFilterBank:
         fhi = float(f_high or 0.0)
         df = float(stilde.delta_f)
         p_key = (id(ref_template), id(psd), flo, fhi, df)
-        w = _REF_PROFILE_CACHE.get(p_key)
+        hit = _REF_PROFILE_CACHE.get(p_key)
+        w = hit[2] if hit is not None and hit[0] is ref_template and hit[1] is psd else None
         if w is None:
             h = np.asarray(ref_template)
             S = np.asarray(psd)
@@ -830,7 +827,7 @@ class TimeDomainFilterBank:
             w[f < flo] = 0.0
             if fhi > 0:
                 w[f > fhi] = 0.0
-            _REF_PROFILE_CACHE[p_key] = w
+            _REF_PROFILE_CACHE[p_key] = (ref_template, psd, w)
         self.set_reference(w, delta_f=df)
 
     @staticmethod
