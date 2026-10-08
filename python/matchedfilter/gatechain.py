@@ -340,7 +340,7 @@ def _load_cost_file(path):
 def _store_cost(path, skey, cm):
     """Add one model to the file; merges with what other processes wrote, replaces atomically."""
     data = _load_cost_file(path)
-    data[skey] = cm.to_dict()
+    data[skey] = cm.to_dict() if hasattr(cm, "to_dict") else cm
     tmp = "%s.%d.tmp" % (path, os.getpid())
     with open(tmp, "w") as f:
         json.dump(data, f, indent=1, sort_keys=True)
