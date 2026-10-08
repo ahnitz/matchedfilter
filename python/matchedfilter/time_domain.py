@@ -296,8 +296,16 @@ _REF_BINNED_CACHE: Dict[Tuple[int, int, float], Tuple[Any, Optional[np.ndarray]]
 class _TemplateGroup:
     """Internal container for a homogeneous batch of templates sharing an FFT size."""
 
-    def __init__(self, plan, n, template_indices, c_bad, n_valid, spectra, orig_taps_max, device=None):
-        self.plan = plan
+    def __init__(self, plan, n, template_indices, c_bad, n_valid, spectra, orig_taps_max, device=None,
+                 plan_factory=None, kind=None):
+        # A hierarchical plan is made up front (references and templates load into it); a flat or
+        # correlation plan only when something first filters with it, so a bank kept for its
+        # spectra and layout alone costs no plan memory.
+        self._plan = plan
+        self._plan_factory = plan_factory
+        self.is_hier = plan_factory is None and type(plan).__name__ == 'HierarchicalFilter'
+        self.kind = kind
+        self._spectra_source = None
         self.n = int(n)
         self.template_indices = np.asarray(template_indices, dtype=np.int64)
         self.c_bad = int(c_bad)
@@ -309,6 +317,30 @@ class _TemplateGroup:
         self._cached_layout: Optional[Tuple[Tuple[int, int, int], np.ndarray, np.ndarray, np.ndarray]] = None
         self._flat_plan: Optional[Any] = None
         self._corr_plan: Optional[Any] = None
+
+    @property
+    def spectra(self):
+        # A lazily planned group keeps no copy of its spectra: the bank's filters_f holds them
+        # (conjugated), and the plan, if one is ever made, is loaded from those.
+        if self._spectra is None and self._spectra_source is not None:
+            return self._spectra_source()
+        return self._spectra
+
+    @spectra.setter
+    def spectra(self, value):
+        self._spectra = value
+
+    @property
+    def plan(self):
+        if self._plan is None and self._plan_factory is not None:
+            from . import CorrelationFilter
+            plan = self._plan_factory()
+            plan.set_templates(self.spectra)
+            self.templates_loaded = True
+            if isinstance(plan, CorrelationFilter):
+                self._corr_plan = plan
+            self._plan = plan
+        return self._plan
 
     def get_flat_plan(self):
         from . import MatchedFilter, HierarchicalFilter
@@ -335,7 +367,7 @@ class _TemplateGroup:
     def get_correlation_plan(self):
         if self._corr_plan is None:
             from . import CorrelationFilter
-            if isinstance(self.plan, CorrelationFilter):
+            if self.kind == 'corr':
                 self._corr_plan = self.plan
             else:
                 cp = CorrelationFilter(
@@ -490,7 +522,7 @@ class TimeDomainFilterBank:
         if reference is not None:
             self.set_reference(reference)
             for g in self._groups:
-                if not g.templates_loaded:
+                if g.is_hier and not g.templates_loaded:
                     g.plan.set_templates(g.spectra)
                     g.templates_loaded = True
         if not self._choose_n:
@@ -577,12 +609,12 @@ class TimeDomainFilterBank:
                     self._block_lengths_arr[g_idx] = chosen_N
 
             # Create matchedfilter plan
+            factory = None
             if self.engine == 'corr':
                 from . import CorrelationFilter
-                plan = CorrelationFilter(
-                    chosen_N, ndata=1, ntemplates=T,
-                    device=self.device, valid=(c_bad, chosen_N - c_bad)
-                )
+                factory = (lambda n_=chosen_N, T_=T, v_=(c_bad, chosen_N - c_bad), dev=self.device:
+                           CorrelationFilter(n_, ndata=1, ntemplates=T_, device=dev, valid=v_))
+                plan = None
             elif self.engine == 'hier':
                 # coarse_band_hz pins a chain (one band or a tuple of bands, in Hz);
                 # otherwise the plan chooses its own from the reference.
@@ -606,10 +638,9 @@ class TimeDomainFilterBank:
                 if self.first_stage_snr > 0:
                     plan.set_first_stage(self.first_stage_snr)
             else:
-                plan = MatchedFilter(
-                    chosen_N, ndata=1, ntemplates=T,
-                    device=self.device
-                )
+                factory = (lambda n_=chosen_N, T_=T, dev=self.device:
+                           MatchedFilter(n_, ndata=1, ntemplates=T_, device=dev))
+                plan = None
             if self.engine == 'hier' and self.pack_templates and chosen_N >= 1024:
                 K = chosen_N // 2
                 grp_spectra = np.ascontiguousarray(spectra[:, :K])
@@ -628,13 +659,14 @@ class TimeDomainFilterBank:
                 spectra=grp_spectra,
                 orig_taps_max=orig_taps_max,
                 device=self.device,
+                plan_factory=factory,
+                kind=self.engine,
             )
             grp.templates_loaded = False
-            if self.engine != 'hier':
-                plan.set_templates(spectra)
-                grp.templates_loaded = True
-                if self.engine == 'corr':
-                    grp._corr_plan = plan
+            if factory is not None:
+                grp._spectra_source = (lambda idx=tmpl_indices, ff=self._filters_f_list:
+                                       np.conj(np.stack([ff[int(i)] for i in idx])))
+                grp.spectra = None
             self._built.append(grp)
 
         self._template_map = [None] * n_templates
@@ -745,7 +777,7 @@ class TimeDomainFilterBank:
             self._n_chosen = True
             self._taps_list = None
             self._raw_taps = None
-        hier_ns = sorted({g.n for g in self._groups if hasattr(g.plan, 'set_reference')})
+        hier_ns = sorted({g.n for g in self._groups if g.is_hier})
         accepted = ("pass a dict {n: profile} with one length-n profile per block size, "
                     "or a fine-grid profile together with delta_f")
         if isinstance(reference, dict):
@@ -754,7 +786,7 @@ class TimeDomainFilterBank:
                 raise ValueError(f"reference dict has no profile for hierarchical block size(s) "
                                  f"{missing} (bank block sizes: {hier_ns}); {accepted}")
             for g in self._groups:
-                if hasattr(g.plan, 'set_reference'):
+                if g.is_hier:
                     g.plan.set_reference(reference[g.n])
             # Load templates as the other forms do; returning here left a bank
             # given its dict after construction with no templates at all.
@@ -763,13 +795,13 @@ class TimeDomainFilterBank:
             return
 
         ref_key = (id(reference), float(delta_f) if delta_f is not None else None)
-        if getattr(self, '_current_ref_key', None) == ref_key and all(g.templates_loaded for g in self._groups):
+        if getattr(self, '_current_ref_key', None) == ref_key and all(g.templates_loaded for g in self._groups if g.is_hier):
             return
 
         ref_arr = np.asarray(reference, dtype=np.float64)
         if delta_f is not None and float(delta_f) > 0:
             for g in self._groups:
-                if hasattr(g.plan, 'set_reference'):
+                if g.is_hier:
                     b_key = (id(reference), g.n, float(delta_f))
                     hit = _REF_BINNED_CACHE.get(b_key)
                     if hit is not None and hit[0] is reference:
@@ -790,7 +822,7 @@ class TimeDomainFilterBank:
                 raise ValueError(f"1-D reference of length {len(ref_arr)} does not match hierarchical "
                                  f"block size(s) {wrong} (bank block sizes: {hier_ns}); {accepted}")
             for g in self._groups:
-                if hasattr(g.plan, 'set_reference'):
+                if g.is_hier:
                     g.plan.set_reference(ref_arr.astype(np.float32))
 
         self._load_templates()
@@ -798,7 +830,7 @@ class TimeDomainFilterBank:
 
     def _load_templates(self) -> None:
         for g in self._groups:
-            if not g.templates_loaded and hasattr(g.plan, 'set_templates'):
+            if g.is_hier and not g.templates_loaded:
                 g.plan.set_templates(g.spectra)
                 g.templates_loaded = True
 
