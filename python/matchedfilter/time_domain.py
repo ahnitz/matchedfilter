@@ -1201,7 +1201,12 @@ class TimeDomainFilterBank:
                     self._correlate_group(g, ser, st, t0, nt, dest)
                     keep = (_interval_mask(S, W[:, 0], W[:, 1])
                             & _interval_mask(S, b0[hit], b1[hit]))
-        dest[:, ~keep] = 0
+        # Zero the complement by contiguous runs. Not dest[:, ~keep] = 0: boolean indexing
+        # along axis 1 thrashes one cache set once 17+ rows sit 2^20 samples apart (see
+        # _correlate_group); 27 rows took ~400 ms against ~10 ms by runs.
+        edges = np.flatnonzero(np.diff(np.concatenate(([True], keep, [True])).view(np.int8)))
+        for a, b in zip(edges[::2], edges[1::2]):
+            dest[:, a:b] = 0
 
     def correlate_series(
         self,
