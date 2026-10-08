@@ -37,7 +37,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "python"))
 import matchedfilter as mf                                    # noqa: E402
-from matchedfilter import TimeDomainFilterBank                # noqa: E402
+from matchedfilter import TimeDomainFilterBank, _gputime      # noqa: E402
 
 RATE = 2048.0
 DF = 1.0 / 16
@@ -90,13 +90,26 @@ def load_tops(path, ntops):
 
 
 class Timer:
+    """Wall time per stage and, with --timing, device time per stage and kernel label."""
+
     def __init__(self):
         self.t = defaultdict(float)
         self.n = defaultdict(int)
+        self.device = defaultdict(lambda: defaultdict(lambda: [0, 0.0]))
 
     def add(self, key, dt, n=1):
         self.t[key] += dt
         self.n[key] += n
+        if _timing():
+            for label, (calls, ms) in _gputime.collect().items():
+                d = self.device[key][label]
+                d[0] += calls
+                d[1] += ms
+
+
+def _timing():
+    import os
+    return os.environ.get("MF_GPU_TIMING", "0") not in ("", "0")
 
 
 def run_device(device, tops, args, seed):
@@ -181,6 +194,8 @@ def run_device(device, tops, args, seed):
         analysed_seconds_per_segment=analysed, first_segment_s=dict(first.t), steady_s=dict(steady.t),
         steady_calls=dict(steady.n), counts=dict(counts),
     )
+    if steady.device:
+        report["steady_device_ms"] = {k: {l: v for l, v in d.items()} for k, d in steady.device.items()}
     if steady_segments and total > 0:
         # templates-in-real-time: each top's fine templates over its analysed time, both detectors
         work = sum(t["nfine"] for t in tops) / len(tops) * analysed * 2 * steady_segments
@@ -226,7 +241,12 @@ def main():
     p.add_argument("--check", default=None, help="also run this device (e.g. cpu) and compare outputs")
     p.add_argument("--seed", type=int, default=1)
     p.add_argument("--out", default=None, help="write the JSON report here")
+    p.add_argument("--timing", action="store_true",
+                   help="device time per kernel label for each stage (sets MF_GPU_TIMING=1)")
     args = p.parse_args()
+    if args.timing:
+        import os
+        os.environ["MF_GPU_TIMING"] = "1"
 
     tops = load_tops(args.bank, args.tops)
     report, results = run_device(args.device, tops, args, args.seed)
@@ -253,6 +273,10 @@ def main():
         print("  templates-in-real-time: " + ", ".join(f"{k} {v:.3g}" for k, v in tirt.items()))
     print("  calls: " + ", ".join(f"{k} {v}" for k, v in report["steady_calls"].items()) +
           "; " + ", ".join(f"{k} {v}" for k, v in report["counts"].items()))
+    for stage, d in report.get("steady_device_ms", {}).items():
+        dev = sum(v[1] for v in d.values())
+        print(f"  {stage}: device {dev / 1e3:.3f}s of wall {report['steady_s'][stage]:.3f}s; " +
+              ", ".join(f"{l} {v[0]}x {v[1]:.1f}ms" for l, v in sorted(d.items(), key=lambda x: -x[1][1])))
     if "check" in report:
         r = report["reference"]
         print(f"  reference {r['device']}: steady " + ", ".join(f"{k} {v:.2f}s" for k, v in r["steady_s"].items()))

@@ -10,11 +10,13 @@ Scope is deliberately compute-only.  No swapchain, no images, no graphics
 pipeline, one queue, one descriptor set.
 """
 import ctypes
+import os
 import pathlib
+import sys
 
 import numpy as np
 
-from . import _vulkan
+from . import _gputime, _vulkan
 from ._shared import empty_shared, shared_buffer, shared_key, write_input
 
 _SPIRV = pathlib.Path(__file__).resolve().parent / "spirv"
@@ -88,6 +90,8 @@ def _pack_half2(a):
 #: sits 216 bytes into those limits.
 _OFF_SHARED_MEMORY = 296 + 216
 _OFF_MAX_INVOCATIONS = 296 + 232
+#: timestampPeriod (float, ns per tick) sits 424 bytes into the limits.
+_OFF_TIMESTAMP_PERIOD = 296 + 424
 
 #: Bands that USE the tiled coarse kernel. It is built and validated for
 #: 512 and 1024 as well, and deliberately not selected there.
@@ -250,6 +254,10 @@ _CmdBufAlloc = _struct("VkCommandBufferAllocateInfo",
 _CmdBufBegin = _struct("VkCommandBufferBeginInfo",
                        ("sType", _u32), ("pNext", _vp), ("flags", _u32),
                        ("pInheritanceInfo", _vp))
+_QueryPoolCreate = _struct("VkQueryPoolCreateInfo",
+                           ("sType", ctypes.c_int), ("pNext", _vp), ("flags", _u32),
+                           ("queryType", ctypes.c_int), ("queryCount", _u32),
+                           ("pipelineStatistics", _u32))
 _SubmitInfo = _struct("VkSubmitInfo",
                       ("sType", _u32), ("pNext", _vp),
                       ("waitSemaphoreCount", _u32), ("pWaitSemaphores", _vp),
@@ -339,38 +347,19 @@ class _Buffer:
             self.handle = None
 
 
-class Context(InputUploads):
-    """One Vulkan device, its compute queue, and the pipelines built on it."""
+#: One _Device per Vulkan device index, for the life of the process.
+_DEVICES = {}
 
-    max_grouped_bins = _MAX_BINS
 
-    def __init__(self, index=0):
+class _Device:
+    """A Vulkan instance and logical device, its compute queues, command pool and pipelines."""
+
+    def __init__(self, index):
         vk, err = _vulkan._load()
         if vk is None:
             raise VulkanError(err)
         self.vk = vk
-        # VkDeviceSize is 64-bit. Without argtypes ctypes passes a Python int
-        # as a C int and the offset and size arrive truncated, which for a
-        # fill is silent corruption rather than an error.
-        vk.vkCmdFillBuffer.argtypes = [ctypes.c_void_p, ctypes.c_void_p,
-                                       ctypes.c_uint64, ctypes.c_uint64,
-                                       ctypes.c_uint32]
-        vk.vkCmdDispatchIndirect.argtypes = [ctypes.c_void_p, ctypes.c_void_p,
-                                             ctypes.c_uint64]
-        self._pipelines = {}
-        self._batches = {}
-        self._full_batches = {}
-        self._tierc_batches = {}
-        self._storage = {}
-        self._storage_users = {}
-        self._record_storage = {}
-        self._record_pools = {}
-        self._hier = {}
-        self._hier_cascade = {}
-        self._fences = {}
-        self._pending_forward = None
-        self._uploaded = {"data": {}, "tmpl": {}}
-
+        self.pipelines = {}
         app = _vulkan._AppInfo(0, None, b"matchedfilter", 1, b"matchedfilter", 1,
                                (1 << 22) | (1 << 12))
         ci = _vulkan._InstInfo(1, None, 0, ctypes.pointer(app), 0, None, 0, None)
@@ -456,6 +445,8 @@ class Context(InputUploads):
         _check(vk.vkCreateCommandPool(self.device, ctypes.byref(pool_info), None,
                                       ctypes.byref(self.command_pool)),
                "vkCreateCommandPool")
+        self._ts_period = float(ctypes.cast(ctypes.byref(props, _OFF_TIMESTAMP_PERIOD),
+                                            ctypes.POINTER(ctypes.c_float))[0])
 
     def _compute_queue_family(self):
         """The queue family with COMPUTE.
@@ -477,6 +468,68 @@ class Context(InputUploads):
             if fam.queueFlags & _QUEUE_COMPUTE:
                 return i, fam.queueCount
         raise VulkanError("device exposes no compute queue")
+
+
+class Context(InputUploads):
+    """One Vulkan device, its compute queue, and the pipelines built on it."""
+
+    max_grouped_bins = _MAX_BINS
+
+    def __init__(self, index=0):
+        vk, err = _vulkan._load()
+        if vk is None:
+            raise VulkanError(err)
+        self.vk = vk
+        # VkDeviceSize is 64-bit. Without argtypes ctypes passes a Python int
+        # as a C int and the offset and size arrive truncated, which for a
+        # fill is silent corruption rather than an error.
+        vk.vkCmdFillBuffer.argtypes = [ctypes.c_void_p, ctypes.c_void_p,
+                                       ctypes.c_uint64, ctypes.c_uint64,
+                                       ctypes.c_uint32]
+        vk.vkCmdDispatchIndirect.argtypes = [ctypes.c_void_p, ctypes.c_void_p,
+                                             ctypes.c_uint64]
+        self._batches = {}
+        self._full_batches = {}
+        self._tierc_batches = {}
+        self._storage = {}
+        self._storage_users = {}
+        self._record_storage = {}
+        self._record_pools = {}
+        self._hier = {}
+        self._hier_cascade = {}
+        self._fences = {}
+        self._pending_forward = None
+        self._uploaded = {"data": {}, "tmpl": {}}
+
+        self._attach_device(index)
+
+        # MF_GPU_TIMING=1: device time of every submission, as (label, device_ms) in
+        # timing_log (the contract all backends share). Off, it costs one attribute test.
+        self._timing = _gputime.enabled()
+        self.timing_log = []
+        if self._timing:
+            _gputime.register(self)
+        self._ts = None
+
+    _SHARED = ("vk", "instance", "physical", "queue_family", "queues", "queue", "device",
+               "_accurate_trig", "max_shared_memory", "max_invocations", "max_dispatch_x",
+               "subgroup_size", "mem_props", "command_pool", "_ts_period")
+
+    def _attach_device(self, index):
+        """Share the device, its queues, command pool and compiled pipelines per process.
+
+        Creating an instance and device and compiling pipelines took ~10-50 ms per context,
+        and a bank holds one plan per template group: a three-level bank built dozens. What
+        stays per context is what a plan owns -- its buffers, recordings, descriptor pools,
+        fences and caches -- so plans still cannot evict or free each other's work.
+        """
+        dev = _DEVICES.get(index)
+        if dev is None:
+            dev = _DEVICES[index] = _Device(index)
+        self._device_state = dev
+        for name in self._SHARED:
+            setattr(self, name, getattr(dev, name))
+        self._pipelines = dev.pipelines
 
     def _get_fence(self, slot=0):
         if slot is None:
@@ -1423,6 +1476,62 @@ class Context(InputUploads):
         else:
             self._pending_forward = None
 
+    _TS_RING = 256
+
+    def _timestamp_pair(self, label):
+        """Two recorded command buffers bracketing a submission with timestamps."""
+        vk = self.vk
+        if self._ts is None:
+            vk.vkCmdWriteTimestamp.argtypes = [ctypes.c_void_p, ctypes.c_uint32,
+                                               ctypes.c_void_p, ctypes.c_uint32]
+            vk.vkCmdResetQueryPool.argtypes = [ctypes.c_void_p, ctypes.c_void_p,
+                                               ctypes.c_uint32, ctypes.c_uint32]
+            vk.vkGetQueryPoolResults.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint32,
+                                                 ctypes.c_uint32, ctypes.c_size_t, ctypes.c_void_p,
+                                                 ctypes.c_uint64, ctypes.c_uint32]
+            info = _QueryPoolCreate(11, None, 0, 2, 2 * self._TS_RING, 0)   # TIMESTAMP
+            pool = _vp()
+            _check(vk.vkCreateQueryPool(self.device, ctypes.byref(info), None, ctypes.byref(pool)),
+                   "vkCreateQueryPool")
+            cmds = (_vp * (2 * self._TS_RING))()
+            alloc = _CmdBufAlloc(40, None, self.command_pool, 0, 2 * self._TS_RING)
+            _check(vk.vkAllocateCommandBuffers(self.device, ctypes.byref(alloc), cmds),
+                   "allocate timestamp buffers")
+            for i in range(self._TS_RING):
+                b, e = cmds[2 * i], cmds[2 * i + 1]
+                begin = _CmdBufBegin(42, None, 0, None)
+                _check(vk.vkBeginCommandBuffer(b, ctypes.byref(begin)), "begin timestamp")
+                vk.vkCmdResetQueryPool(b, pool, 2 * i, 2)
+                vk.vkCmdWriteTimestamp(b, 0x1, pool, 2 * i)            # TOP_OF_PIPE
+                _check(vk.vkEndCommandBuffer(b), "end timestamp")
+                _check(vk.vkBeginCommandBuffer(e, ctypes.byref(begin)), "begin timestamp")
+                vk.vkCmdWriteTimestamp(e, 0x2000, pool, 2 * i + 1)     # BOTTOM_OF_PIPE
+                _check(vk.vkEndCommandBuffer(e), "end timestamp")
+            self._ts = dict(pool=pool, cmds=cmds, next=0, pending={})
+        ts = self._ts
+        i = ts["next"]
+        ts["next"] = (i + 1) % self._TS_RING
+        if i in ts["pending"]:                 # the ring wrapped: settle that slot first
+            self._timestamp_resolve(only=i)
+        ts["pending"][i] = label
+        return ts["cmds"][2 * i], ts["cmds"][2 * i + 1]
+
+    def _timestamp_resolve(self, only=None):
+        ts = self._ts
+        if ts is None:
+            return
+        out = (ctypes.c_uint64 * 2)()
+        for i in ([only] if only is not None else sorted(ts["pending"])):
+            label = ts["pending"].pop(i)
+            _check(self.vk.vkGetQueryPoolResults(self.device, ts["pool"], 2 * i, 2, 16, out, 8, 0x3),
+                   "vkGetQueryPoolResults")              # 64-bit, wait
+            self.timing_log.append((label, (out[1] - out[0]) * self._ts_period * 1e-6))
+
+    def timings(self):
+        """Settle outstanding timestamps and return the timing log (MF_GPU_TIMING=1)."""
+        self._timestamp_resolve()
+        return self.timing_log
+
     def _submit(self, cmd, fence=None, wait=True, slot=None):
         """Forward and correlation share one submit and completion wait."""
         pending = None
@@ -1442,6 +1551,10 @@ class Context(InputUploads):
             commands.append(cmd)
         if not commands:
             return
+        if self._timing:
+            label = sys._getframe(1).f_code.co_name + ("+forward" if pending is not None else "")
+            begin, end = self._timestamp_pair(label)
+            commands = [begin] + commands + [end]
         cmds = (_vp * len(commands))(*commands)
         submit = _SubmitInfo(4, None, 0, None, None, len(commands), cmds, 0, None)
         queue = self.queues[slot % len(self.queues)] if (getattr(self, "queues", None) and slot is not None) else self.queue
@@ -2061,14 +2174,13 @@ class Context(InputUploads):
         for fence in getattr(self, "_fences", {}).values():
             vk.vkDestroyFence(self.device, fence, None)
         self._fences.clear()
-        for pipe, layout, set_layout in self._pipelines.values():
-            vk.vkDestroyPipeline(self.device, pipe, None)
-            vk.vkDestroyPipelineLayout(self.device, layout, None)
-            vk.vkDestroyDescriptorSetLayout(self.device, set_layout, None)
-        self._pipelines.clear()
-        vk.vkDestroyCommandPool(self.device, self.command_pool, None)
-        vk.vkDestroyDevice(self.device, None)
-        vk.vkDestroyInstance(self.instance, None)
+        if self._ts is not None:
+            vk.vkFreeCommandBuffers(self.device, self.command_pool, 2 * self._TS_RING,
+                                    self._ts["cmds"])
+            vk.vkDestroyQueryPool(self.device, self._ts["pool"], None)
+            self._ts = None
+        # The device, its pipelines and command pool are shared (_Device) and live as long
+        # as the process; what this context created is released above.
         self.device = None
         self.instance = None
 
