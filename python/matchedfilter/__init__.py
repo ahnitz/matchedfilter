@@ -1026,11 +1026,16 @@ class MatchedFilter:
         source_shared = shared_buffer(ser, self._gpu) is not None
         # Pools are sized by capacity, not by this call's batch: windowed calls vary in
         # block count, and reallocating would also discard every recording built on them.
+        # Capacity in both batch and slots: a call alternating unpipelined (K=1) and pipelined
+        # (K=8) groups reallocated every call, and recordings are keyed on these buffers.
         workspace = getattr(self, "_series_workspace", None)
-        if workspace is None or workspace[0][1:] != (n, K) or workspace[0][0] < batch:
-            spectra_pool = [self._gpu.empty_shared((batch, n)) for _ in range(K)]
-            starts_pool = [self._gpu.empty_shared(batch, np.uint32) for _ in range(K)]
-            workspace = ((batch, n, K), None if workspace is None else workspace[1],
+        if (workspace is None or workspace[0][1] != n or workspace[0][0] < batch
+                or workspace[0][2] < K):
+            cap_b = batch if workspace is None or workspace[0][1] != n else max(batch, workspace[0][0])
+            cap_k = K if workspace is None or workspace[0][1] != n else max(K, workspace[0][2])
+            spectra_pool = [self._gpu.empty_shared((cap_b, n)) for _ in range(cap_k)]
+            starts_pool = [self._gpu.empty_shared(cap_b, np.uint32) for _ in range(cap_k)]
+            workspace = ((cap_b, n, cap_k), None if workspace is None else workspace[1],
                          spectra_pool, starts_pool)
         _, source, spectra_pool, starts_pool = workspace
         if source_shared:
@@ -1766,6 +1771,10 @@ class HierarchicalFilter(MatchedFilter):
 
     # ---- chain choice ----------------------------------------------------------
     def _cost_model(self):
+        """The costs of the device this plan runs on: chains rank differently on a GPU (a refined
+        pair costs ~30 coarse pairs there against ~100 on a CPU core)."""
+        if self.device.kind == "gpu":
+            return _gatechain.calibrate_costs_gpu(self.n, str(self.device))
         policy = self._series_policy('hierarchical_series', 0, self.ntemplates) or {}
         return _gatechain.calibrate_costs(self.n, self.ntemplates,
                                           group=policy.get('series_group', _gatechain.default_series_group(self.n)))
@@ -1791,7 +1800,7 @@ class HierarchicalFilter(MatchedFilter):
         tiers = min(self.max_tiers, self._MAX_TIERS[self.device.kind])
         ref = np.asarray(self._pending_ref, np.float64)
         prof = _gatechain._gm._profile_sig(ref / ref.sum())
-        key = (self.n, float(snr), float(self.fd), tiers, self.search_window, prof)
+        key = (self.n, float(snr), float(self.fd), tiers, self.search_window, prof, str(self.device))
         with _AUTOTUNE_LOCK:
             hit = _CHAIN_CHOICE.get(key)
         if hit is None:
@@ -1808,7 +1817,7 @@ class HierarchicalFilter(MatchedFilter):
             _log_autotune("CHAIN n=%d model=%s shortlist=%s ranking=%s", self.n, hit[0], hit[1],
                           [(q["chain"], round(q["cost"], 1)) for q in plans[:6]])
         model_best, shortlist = hit
-        if not _autotune_enabled() or self._gpu is not None:
+        if not _autotune_enabled():
             shortlist = shortlist[:1]
         chain = model_best
         self._chain_trial = None
@@ -1817,7 +1826,7 @@ class HierarchicalFilter(MatchedFilter):
             # segment's PSD, another template group) have slightly different short lists, and
             # their union is what gets measured. Candidates arriving before the lock join it;
             # after the lock every plan adopts the winner.
-            tkey = (self.n, float(snr), float(self.fd), tiers)
+            tkey = (self.n, float(snr), float(self.fd), tiers, str(self.device))
             with _AUTOTUNE_LOCK:
                 tr = _CHAIN_TRIALS.setdefault(tkey, {"samples": {}, "assigned": {}, "winner": None})
                 if tr["winner"] is not None:

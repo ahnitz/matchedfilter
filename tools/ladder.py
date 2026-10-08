@@ -205,9 +205,16 @@ def run_device(device, tops, args, seed):
     return report, results
 
 
-def compare(ref, got):
-    """Peak sets and SNRs of every call, device against reference."""
-    worst, missing, extra, calls = 0.0, 0, 0, 0
+def compare(ref, got, threshold, margin=0.25):
+    """Peaks and SNRs of every call, device against reference.
+
+    SNR differences are relative to max(|snr|, 1): a threshold-0 follow-up reports bins whose
+    SNR is ~1e-7, where a relative difference means nothing. A fine-stage peak present on one
+    device only is a gate-margin difference when its SNR is within `margin` of the threshold
+    (the gates are calibrated against signals, so near-threshold noise peaks may be dismissed
+    differently by different chains or rounding); anything louder is a miss.
+    """
+    worst, calls, margin_only, missed = 0.0, 0, 0, []
     for key, a in ref.items():
         b = got.get(key)
         if b is None:
@@ -215,12 +222,20 @@ def compare(ref, got):
         calls += 1
         ka = dict(zip(zip(a.template_indices.tolist(), a.sample_indices.tolist()), a.snr))
         kb = dict(zip(zip(b.template_indices.tolist(), b.sample_indices.tolist()), b.snr))
-        missing += len(set(ka) - set(kb))
-        extra += len(set(kb) - set(ka))
         for k in set(ka) & set(kb):
-            worst = max(worst, abs(ka[k] - kb[k]) / max(abs(ka[k]), 1e-30))
-    return dict(calls=calls, peaks_only_in_reference=missing, peaks_only_on_device=extra,
-                max_rel_snr_diff=worst)
+            worst = max(worst, abs(ka[k] - kb[k]) / max(abs(ka[k]), 1.0))
+        if "fine" in key:
+            for name, side, keys in (("reference only", ka, set(ka) - set(kb)),
+                                     ("device only", kb, set(kb) - set(ka))):
+                for k in keys:
+                    if abs(side[k]) < threshold + margin:
+                        margin_only += 1
+                    else:
+                        missed.append((name, key, k, float(abs(side[k]))))
+    return dict(calls=calls, max_snr_diff=worst, gate_margin_peaks=margin_only,
+                peaks_reference_only=sum(m[0] == "reference only" for m in missed),
+                peaks_device_only=sum(m[0] == "device only" for m in missed),
+                loudest=sorted(missed, key=lambda m: -m[3])[:5])
 
 
 def main():
@@ -257,7 +272,7 @@ def main():
     if args.check:
         ref_report, ref_results = run_device(args.check, tops, args, args.seed)
         report["reference"] = ref_report
-        report["check"] = compare(ref_results, results)
+        report["check"] = compare(ref_results, results, args.threshold)
     try:
         rev = subprocess.run(["git", "-C", str(Path(__file__).parent), "rev-parse", "--short", "HEAD"],
                              capture_output=True, text=True).stdout.strip()

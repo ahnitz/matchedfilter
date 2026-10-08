@@ -24,7 +24,10 @@ class InputUploads:
         return (*needed, *signatures)
 
     cache_limit_bytes = 512 * 1024 * 1024
-    cache_limit_entries = 32
+    # Recordings are kept per pipelining slot (8 by default) and per chain, and chain trials
+    # run several chains: at 32 entries a trialling plan evicted and re-recorded every call
+    # (63 buffer allocations per call at n=4096). Memory is bounded by the byte limit.
+    cache_limit_entries = 256
 
     @staticmethod
     def _allocation(buf):
