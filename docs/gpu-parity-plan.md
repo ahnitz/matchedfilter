@@ -191,8 +191,8 @@ was made from wall time.
   - Library: `correlate_series(out=)` into a GPU-shared allocation (`empty_shared`, the existing
     DLPack and shared-buffer path). `filter_series` already skips the upload when the series is
     a shared buffer (`source_shared`).
-  - pycbc: pass the device to the middle bank and request device-resident outputs. That is a
-    pycbc-side opt-in, not a library hack.
+  - pycbc is not changed now (user direction 2026-10-08). The library provides the
+    device-resident API, and the standalone bench (G) exercises it the way pycbc will.
   - Also: `CorrelationFilter._full_output` uses write-combined memory without `readback=True`.
     Kernel 2.2 ms against copy 64 ms.
 
@@ -230,20 +230,144 @@ was made from wall time.
 - Metal "async", which is synchronous.
 - The CUDA refine reads the survivor count back to the host between dispatches.
 
-## 4. Order
+## 4. Scope set by the user (2026-10-08)
 
-1. A1-A3 (correctness, Vulkan), with B7 hygiene so the suite can see regressions.
-2. C1 (instrumentation), because every later decision depends on it.
-3. D1 + D2 (one submission per batch of windows), verified on the replica. That turns the GPU job
-   from slower than one core into a win.
-4. D3 (device-resident middle), which needs a pycbc opt-in.
-5. E1-E3 (tuning on the device), then D4 (kernels, by consumer share).
-6. B1-B6, B8 alongside; A4-A5 and F as fill.
+- **Library only.** A GPU job is an eventual target, but pycbc is not changed now. Everything
+  pycbc would need goes into the library and is exercised by the standalone bench (G):
+  - device-resident series between stages;
+  - one batched call for (template, window) pairs;
+  - batched windows for the fine stage.
 
-## 5. Decisions for the user
+  Integrating later should then be a thin change on the pycbc side.
+- **Every backend to the same level.** Vulkan (Radeon 8060S, here), CUDA and Metal each get the
+  same correctness, tests, timers, device-calibrated costs, autotuning and policy rows as the
+  CPU. CUDA and Metal are not refused; they are brought up to the same level.
+- **The individual kernels are well below optimal too.** Kernel work is not deferred until the
+  host side is done; it runs in parallel (section 6).
 
-- Is a GPU job (one GPU per job, or a GPU shared by N jobs) a production target? That decides
-  whether D3's pycbc opt-in and the GPU ladder leg are worth maintaining. Throughput should be
-  compared as templates-in-real-time per device and per dollar, not as speedup ratios.
-- CUDA and Metal: refuse the broken paths now (A4), or keep them until hardware is available?
-  This plan defaults to refusing.
+## 5. Machines
+
+| backend | machine | device | access |
+|---------|---------|--------|--------|
+| Vulkan  | this host | Radeon 8060S (gfx1151, RDNA 3.5, 40 CU, ~14.8 TF fp32, ~256 GB/s shared) | local |
+| Metal   | `empire` | Apple M2, 10 GPU cores (~3.6 TF fp32, ~100 GB/s unified), 24 GB, macOS 26, Metal 4 | ssh |
+| CUDA    | sugwg cluster | one GPU held for days through a condor job from `sugwg-login2`, used with `condor_ssh_to_job` | condor |
+
+The cluster has, by count: Quadro RTX 6000 (71), L40S (34), A100 80GB PCIe (27), A40 (26),
+H100 (10) and RTX 5000 (6).
+- **Primary CUDA device:** an L40S, Ada sm_89, the most numerous modern part and fp32 heavy.
+- **Second architecture:** an A100, Ampere sm_80 with HBM. Rules are checked on it before they
+  ship, so nothing is tuned to one GPU.
+- **Holding the node:** a long-lived job requesting 1 GPU and a few cores, which sleeps and
+  keeps a working tree on node-local scratch. Release it when the work pauses. If the job is
+  preempted, the work resumes from git; nothing lives only on the node.
+
+## 6. Two tracks, run in concert
+
+The host pipeline and the kernels are developed in parallel, not in sequence. The bench (G) and
+the timers (C1) are their shared contract. After each change the bench reports two things:
+- device time per kernel;
+- host time per call, split into upload, record, submit, wait and readback.
+
+So each track sees when it has become the other's bottleneck.
+
+**Track H, the host pipeline. One implementation shared by the backends where possible.**
+- H1. Timers (C1) on every backend: Vulkan timestamp queries, CUDA events, Metal
+  `GPUStartTime`/`GPUEndTime` and counter sample buffers.
+- H2. One submission per batch of windows (D2), and the batched (template, window) call (D1).
+  Recordings keyed on shape; window bounds and thresholds in buffers or push constants.
+- H3. A device-resident series path between stages (D3). On Metal and on the shared-memory
+  Radeon the host and device share memory, so zero copy is possible; on CUDA, device buffers
+  plus pinned staging.
+- H4. Overheads (D5): one context per physical device, pooled descriptors and buffers, correct
+  `_cache_bytes`.
+- H5. Tuning (E): a cost model per device calibrated from H1's timings, autotune trials on the
+  GPU, policy rows with evidence, and no hard-coded tier limits.
+
+**Track K, the kernels. Per backend, against a per-kernel roofline (C2).** Kernels in order of
+their share of the bench's time:
+1. hierarchical coarse;
+2. survivor compaction and refine;
+3. flat inverse FFT and peak;
+4. forward FFT;
+5. continuous correlation.
+
+For each kernel on each device:
+- record achieved against attainable throughput (flops or bytes);
+- record occupancy, register and LDS use, and the instruction mix: RADV shaderstats, Nsight
+  Compute, Xcode GPU counters;
+- apply the delete-work method of docs/gpu-coarse-plan.md, and keep a falsified list per
+  device.
+
+Targets until measured otherwise: compute-bound kernels at >=50% of fp32/fp16 peak, and
+memory-bound kernels at >=70% of bandwidth.
+
+Backend-specific work:
+- **CUDA:** native kernels, using cuFFT where it wins (measured, not assumed). Fix k=2 chains,
+  grouped `run_series`, eviction, and the tiled two-stage correlation. Remove the host readback
+  of the survivor count between dispatches (use indirect or device-side launch).
+- **Metal:** make k=2 chains real, real async submission, and threadgroup-memory limits (32 KB)
+  in the kernel variants. The M2 is SIMD-32, so check the wave assumptions.
+- **Vulkan:** register pressure in the coarse kernel (216 VGPR), scalar fp16 from `cmul`, and
+  the wave32 assumptions on a wave64 device.
+
+**Loop.** Each iteration:
+1. bench on every device;
+2. the H1 split says which track binds;
+3. that track takes the next item, while the other continues on its own list;
+4. a speedup counts only when it is verified on the bench and checked bitwise or to tolerance
+   against the CPU.
+
+Both tracks share the correctness gate: A1-A3, plus the parity suite on every backend.
+
+### G. The standalone ladder: the bench both tracks work from
+
+`bench/ladder` in mf, independent of pycbc and an analogue of the pycbc three-level pipeline:
+1. **Inputs:** Gaussian noise (white analytic, and coloured by the reference profile
+   `_whitened_inspiral_bank` uses), with optional injections.
+2. **Templates:** read directly from the bank files we use (`fir_three_level_modern_v1_*.hdf`:
+   top, middle and fine taps and their hierarchy), plus synthetic banks at production sizes.
+3. **Stages:**
+   - the top reference series;
+   - the middle correlation bank;
+   - candidate windows from middle peaks above threshold;
+   - the fine hierarchical bank on those windows;
+   - single-template follow-ups (1000 bins, ~61k-sample windows, threshold 0), in the call
+     pattern the replica makes;
+   - the chisq-block spectra.
+4. **Reports:**
+   - templates-in-real-time per stage and per device;
+   - the H1 time split;
+   - per-kernel roofline fractions;
+   - outputs against the CPU (identical peak sets at the gate margin within the dismissal
+     audit, SNR to 1e-5).
+5. **Scales:**
+   - a seconds-long quick mode, for every iteration;
+   - a full mode, matching a test27 short span in work.
+6. Runs on every backend from one command, and writes JSON that tracks results over time, as
+   the CPU ladder does.
+
+The bench's call counts and shapes are checked once against the test27 replica's logs, so it
+stays a faithful analogue.
+
+## 7. Order
+
+Track H and Track K run concurrently from step 2.
+
+1. G quick mode plus H1 timers on Vulkan. Get the cluster GPU job and the empire environment
+   building mf (CUDA toolkit, Metal toolchain); baseline every backend on the bench.
+2. Correctness on all three backends: A1-A5 and B (the parity suite on CUDA and Metal hardware).
+3. Track H: H2, then H3, then H4, with H5 once H1 timings exist per device. Track K: kernel 1,
+   then kernel 2, on Vulkan and CUDA first, then Metal, each against its roofline.
+4. Full-mode bench per device; then GPU rows in the execution policy; then the A100 check.
+5. F (cleanup) as fill; refresh docs/cpu-gpu-parity.md and docs/local-device-timings.md to the
+   new state.
+
+**Done means:** on every backend, the bench's stages run at their kernel roofline fractions
+(targets above) with host overhead under 10% of device time. Outputs match the CPU within the
+audited budget. Tuning comes from the device's own calibration.
+
+## 8. Open decisions
+
+- Accept the targets in section 6, or set others?
+- Which GPU is the eventual production GPU? The plan tunes on the L40S and checks on the A100.
