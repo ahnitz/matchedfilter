@@ -650,3 +650,25 @@ def test_reference_caches_never_serve_a_recycled_id():
         want = rebin_profile(prof, df, bank.data_sample_rate, n).astype(np.float32)
         np.testing.assert_allclose(np.asarray(got, np.float64), want / want.sum(), rtol=1e-6)
         del prof
+
+
+def test_single_template_call_equals_the_ungated_bank_for_that_template():
+    """filter_series(template_index=k) runs a one-template plan; it must report exactly what the
+    group's whole ungated plan reports for template k."""
+    rng = np.random.default_rng(13)
+    counts = list(rng.integers(300, 600, 24))
+    taps, w, df = _whitened_inspiral_bank(rng, counts)
+    bank = TimeDomainFilterBank(taps, tap_counts=counts, engine='hier', threshold=5.5)
+    bank.set_reference(w, delta_f=df)
+    L = 1 << 16
+    x = rng.standard_normal(L); X = np.fft.fft(x); X[L // 2:] = 0
+    ser = (np.fft.ifft(X) * np.sqrt(2)).astype(np.complex64)
+    win = slice(9000, 40000)
+    every = bank.filter_series(ser, windows=win, binsize=61, threshold=0.0)
+    for k in (0, 7, 23):
+        one = bank.filter_series(ser, windows=win, binsize=61, threshold=0.0, template_index=k)
+        sel = every.template_indices == k
+        assert sel.sum() > 0 and len(one.snr) == sel.sum()
+        o1 = np.argsort(one.sample_indices); o2 = np.argsort(every.sample_indices[sel])
+        np.testing.assert_array_equal(one.sample_indices[o1], every.sample_indices[sel][o2])
+        np.testing.assert_array_equal(one.snr[o1], every.snr[sel][o2])

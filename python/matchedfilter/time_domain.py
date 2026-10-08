@@ -2,6 +2,7 @@
 automatically select optimal FFT block sizes, and filter continuous series."""
 
 import math
+from collections import OrderedDict
 import time
 from typing import Any, NamedTuple, Optional, Sequence, Union, Tuple, List, Dict
 import numpy as np
@@ -363,6 +364,31 @@ class _TemplateGroup:
                 fp.set_templates(self.spectra)
             self._flat_plan = fp
         return self._flat_plan
+
+    def get_single_plan(self, ti: int):
+        """An ungated plan holding only local template ti (a few kept per group): what a
+        single-template call needs, without building the group's whole ungated bank."""
+        from . import MatchedFilter
+        cache = self.__dict__.setdefault('_single_plans', OrderedDict())
+        plan = cache.get(int(ti))
+        if plan is not None:
+            cache.move_to_end(int(ti))
+            return plan
+        sp = self.spectra[int(ti):int(ti) + 1]
+        if sp.shape[1] < self.n:
+            K = sp.shape[1]
+            full_sp = np.zeros((1, self.n), dtype=np.complex64)
+            full_sp[:, 0] = sp[:, 0].real
+            full_sp[:, K] = sp[:, 0].imag
+            full_sp[:, 1:K] = sp[:, 1:K]
+            full_sp[:, K + 1:] = np.conj(sp[:, K - 1:0:-1])
+            sp = full_sp
+        plan = MatchedFilter(self.n, ndata=1, ntemplates=1, device=self.device)
+        plan.set_templates(np.ascontiguousarray(sp))
+        cache[int(ti)] = plan
+        while len(cache) > 8:
+            cache.popitem(last=False)
+        return plan
 
     def get_correlation_plan(self):
         if self._corr_plan is None:
@@ -965,7 +991,12 @@ class TimeDomainFilterBank:
             work_items = [(g, None) for g in self._groups]
 
         for g, tmpl_arg in work_items:
-            if self.engine == 'hier' and (eff_threshold < self.threshold or eff_threshold <= 0.0 or tmpl_arg is not None):
+            plan_templates = tmpl_arg
+            if self.engine == 'hier' and tmpl_arg is not None:
+                # one template ungated: a plan holding just it, not the group's whole ungated bank
+                active_plan = g.get_single_plan(tmpl_arg[0])
+                plan_templates = None
+            elif self.engine == 'hier' and (eff_threshold < self.threshold or eff_threshold <= 0.0):
                 active_plan = g.get_flat_plan()
             else:
                 active_plan = g.plan
@@ -1012,7 +1043,7 @@ class TimeDomainFilterBank:
             for sub_starts, sub_bws, sub_bwe in groups_bins:
                 aidx, aval = active_plan.run_series(
                     data_in, sub_starts, sub_bws, sub_bwe, binsize=bs,
-                    threshold=eff_threshold, templates=tmpl_arg, raw=True
+                    threshold=eff_threshold, templates=plan_templates, raw=True
                 )
                 if getattr(active_plan, '_last_n_triggers', None) == 0:
                     continue
