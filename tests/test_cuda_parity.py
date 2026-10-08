@@ -97,7 +97,7 @@ def test_two_tier_series_matches_cpu():
     h = _complex(rng, (nt, n))
     h /= np.linalg.norm(h, axis=1, keepdims=True)
     ser = _complex(rng, 40000)
-    ser[9000:9000 + n] += 30 * np.fft.ifft(np.conj(h[3])).astype(np.complex64) * n
+    ser[9216 + 500:9216 + 500 + n] += 30 * n * np.fft.ifft(h[3]).astype(np.complex64)
     out = {}
     for dev in ("cpu", DEV):
         f = mf.HierarchicalFilter(n, 1, nt, snr=8.0, fd=1e-3, chain=(128, 512), device=dev)
@@ -108,6 +108,41 @@ def test_two_tier_series_matches_cpu():
                                 binsize=512, threshold=4.0).copy()
     np.testing.assert_array_equal(out[DEV]["index"], out["cpu"]["index"])
     np.testing.assert_allclose(out[DEV]["value"], out["cpu"]["value"], rtol=2e-5, atol=1e-5)
+
+
+@pytest.mark.parametrize("chain", [256, (128, 512)])
+def test_hier_grouped_windows_match_cpu_in_one_sync(chain, monkeypatch):
+    """First and last blocks with their own windows: one submission for all groups."""
+    n, nt = 2048, 7                      # odd template count: exercises the padded PPG rows
+    rng = np.random.default_rng(31)
+    h = _complex(rng, (nt, n))
+    h /= np.linalg.norm(h, axis=1, keepdims=True)
+    ser = _complex(rng, 30000)
+    # A block's spectrum is FFT(x)/n, so x = n*ifft(h) correlates to a peak at its offset
+    # into the block: lag 700 of the block starting at 12000 (inside the 200..1800 window).
+    ser[12700:12700 + n] += 25 * n * np.fft.ifft(h[4]).astype(np.complex64)
+    starts = np.arange(0, 26000, 1500)
+    ws = np.full(starts.size, 200)
+    we = np.full(starts.size, 1800)
+    ws[0], we[0] = 0, 1600               # three window groups, one bin count
+    ws[-1], we[-1] = 300, 1900
+    thr = (0.5, 1.0) if isinstance(chain, tuple) else 0.6
+    out = {}
+    for dev in ("cpu", DEV):
+        f = mf.HierarchicalFilter(n, 1, nt, snr=8.0, fd=1e-3, chain=chain, device=dev)
+        f.set_coarse_threshold(thr)
+        f.set_templates(h)
+        if dev == DEV:
+            f.run_series(ser, starts=starts, win_start=ws, win_end=we, binsize=512, threshold=4.0)
+            syncs = []
+            real = f._gpu._sync
+            monkeypatch.setattr(f._gpu, "_sync", lambda st=None: (syncs.append(1), real(st))[1])
+        out[dev] = f.run_series(ser, starts=starts, win_start=ws, win_end=we,
+                                binsize=512, threshold=4.0).copy()
+    assert len(syncs) == 1, "every window group must go in one submission"
+    np.testing.assert_array_equal(out[DEV]["index"], out["cpu"]["index"])
+    np.testing.assert_allclose(out[DEV]["value"], out["cpu"]["value"], rtol=2e-5, atol=1e-5)
+    assert (out["cpu"]["index"] >= 0).any()
 
 
 # ---- grouped run_series -----------------------------------------------------------

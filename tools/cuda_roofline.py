@@ -89,7 +89,7 @@ def ceilings(ctx):
     return best_f, best_b
 
 
-_STEM = re.compile(r"^(?P<kind>[a-z_]+?)_(?P<n>\d+)(?P<rest>.*)$")
+_STEM = re.compile(r"^(?P<kind>tier1|[a-z_]+?)_(?P<n>\d+)(?P<rest>.*)$")
 
 
 def model(label, grid, n_survivors=None):
