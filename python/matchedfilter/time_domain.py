@@ -241,6 +241,11 @@ def _max_tiers(device) -> int:
 #: Identifies one filter_series_many batch to the plans it defers.
 _BATCH_TOKEN = 0
 
+#: Device choice for single-template calls, per (device, n, block-count bucket); see
+#: TimeDomainFilterBank._single_device. The first sample of each side is discarded (warm-up).
+_SINGLE_CHOICE: Dict[Tuple[str, int, int], Dict[str, Any]] = {}
+_SINGLE_TRIALS = 4
+
 _CORR_COSTS: Dict[Tuple[int, str], Tuple[float, float]] = {}
 
 
@@ -440,9 +445,10 @@ class _TemplateGroup:
             self._flat_plan = fp
         return self._flat_plan
 
-    def get_single_plan(self, ti: int):
+    def get_single_plan(self, ti: int, on_cpu: bool = False):
         """An ungated plan holding only local template ti (a few kept per group): what a
-        single-template call needs, without building the group's whole ungated bank."""
+        single-template call needs, without building the group's whole ungated bank.
+        on_cpu: the CPU's plan even for a GPU group (see TimeDomainFilterBank._single_device)."""
         from . import MatchedFilter
         cache = self.__dict__.setdefault('_single_plans', OrderedDict())
         plan = cache.get(int(ti))
@@ -459,7 +465,7 @@ class _TemplateGroup:
             full_sp[:, K + 1:] = np.conj(sp[:, K - 1:0:-1])
             sp = full_sp
         from .device import parse as _parse_device
-        if _parse_device(self.device).kind == 'gpu':
+        if _parse_device(self.device).kind == 'gpu' and not on_cpu:
             # A GPU plan owns a device context (~10 ms to create): keep one and load the
             # template into it. The caller runs the plan before asking for the next one.
             plan = self.__dict__.get('_single_gpu_plan')
@@ -472,7 +478,7 @@ class _TemplateGroup:
                 plan.set_templates(np.ascontiguousarray(sp))
                 self._single_gpu_ti = int(ti)
             return plan
-        plan = MatchedFilter(self.n, ndata=1, ntemplates=1, device=self.device)
+        plan = MatchedFilter(self.n, ndata=1, ntemplates=1, device=None if on_cpu else self.device)
         plan.set_templates(np.ascontiguousarray(sp))
         cache[int(ti)] = plan
         while len(cache) > 8:
@@ -1123,9 +1129,16 @@ class TimeDomainFilterBank:
         pending = []
         for g, tmpl_arg in work_items:
             plan_templates = tmpl_arg
+            trial = None
             if self.engine == 'hier' and tmpl_arg is not None:
-                # one template ungated: a plan holding just it, not the group's whole ungated bank
-                active_plan = g.get_single_plan(tmpl_arg[0])
+                # one template ungated: a plan holding just it, not the group's whole ungated
+                # bank -- on whichever device runs this call shape faster
+                layout = g._cached_layout
+                if layout is None or layout[0] != cache_key:
+                    bstarts, bws, bwe = self._window_layout(g, W, S)
+                    g._cached_layout = (cache_key, bstarts, bws, bwe)
+                on_cpu, trial = self._single_device(g, g._cached_layout[1].size)
+                active_plan = g.get_single_plan(tmpl_arg[0], on_cpu=on_cpu)
                 plan_templates = None
             elif self.engine == 'hier' and (eff_threshold < self.threshold or eff_threshold <= 0.0):
                 active_plan = g.get_flat_plan()
@@ -1182,9 +1195,10 @@ class TimeDomainFilterBank:
                     threshold=eff_threshold, templates=plan_templates)
                 if res is not None:
                     work = [((bstarts, bws, bwe), res)]
+            t_trial = time.perf_counter()
             for (sub_starts, sub_bws, sub_bwe), res in work:
                 if res is None:
-                    if defer:
+                    if defer and trial is None:
                         active_plan._defer_series = defer       # the batch's token
                         if getattr(active_plan, '_gpu', None) is not None:
                             active_plan._gpu._queue_offset = getattr(self, '_queue_offset', 0)
@@ -1194,7 +1208,7 @@ class TimeDomainFilterBank:
                             threshold=eff_threshold, templates=plan_templates, raw=True
                         )
                     finally:
-                        if defer:
+                        if defer and trial is None:
                             active_plan._defer_series = False
                 if isinstance(res, _Deferred):
                     pending.append((res, sub_starts, g, tmpl_arg, N))
@@ -1203,6 +1217,8 @@ class TimeDomainFilterBank:
                 if getattr(active_plan, '_last_n_triggers', None) == 0:
                     continue
                 consume(aidx, aval, sub_starts, g, tmpl_arg, N)
+            if trial is not None:
+                trial(time.perf_counter() - t_trial)
 
         def build():
             for d, sub_starts, g, tmpl_arg, N in pending:
@@ -1239,6 +1255,40 @@ class TimeDomainFilterBank:
             if gpu is not None:
                 return gpu.empty_shared(tuple(shape), dtype, readback=True)
         return _page_aligned_empty(tuple(shape), dtype)
+
+    def _single_device(self, g, nblocks):
+        """(on_cpu, trial recorder or None) for a single-template call on group g.
+
+        A follow-up filters one template over a few dozen blocks: a GPU call is then all
+        fixed cost (submission, recording for its window, readback, the wake from idle),
+        which a CPU core undercuts by far. Neither side is assumed: the first calls of a
+        shape (device, block size, block count) alternate between the GPU plan and a CPU
+        plan, timed synchronously, and the faster is kept for every bank.
+        MF_AUTOTUNE=0 keeps the bank's device.
+        """
+        from .device import parse as _parse_device
+        from . import _autotune_enabled
+        import os
+        # MF_SINGLE_DEVICE=bank keeps every call on the bank's device: the pure-GPU path is a
+        # product in its own right and is benchmarked as one (tools/ladder.py --pure).
+        if (_parse_device(self.device).kind != 'gpu' or not _autotune_enabled()
+                or os.environ.get("MF_SINGLE_DEVICE", "auto") == "bank"):
+            return False, None
+        key = (str(self.device), int(g.n), 1 << max(0, int(nblocks) - 1).bit_length())
+        tr = _SINGLE_CHOICE.setdefault(key, {"gpu": [], "cpu": [], "winner": None})
+        if tr["winner"] is not None:
+            return tr["winner"] == "cpu", None
+        side = "gpu" if len(tr["gpu"]) <= len(tr["cpu"]) else "cpu"
+
+        def record(dt, side=side):
+            tr[side].append(dt)
+            if tr["winner"] is None and min(len(tr["gpu"]), len(tr["cpu"])) >= _SINGLE_TRIALS:
+                med = {k: float(np.median(tr[k][1:])) for k in ("gpu", "cpu")}
+                tr["winner"] = min(med, key=med.get)
+                from . import _log_autotune
+                _log_autotune("SINGLE %s n=%d blocks~%d -> %s  median s %s", key[0], key[1],
+                              key[2], tr["winner"], {k: "%.3g" % v for k, v in med.items()})
+        return side == "cpu", record
 
     @staticmethod
     def filter_series_many(jobs):

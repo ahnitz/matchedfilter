@@ -283,14 +283,19 @@ def main():
                         "peaks per bin, so it is exact only when both devices block alike")
     p.add_argument("--seed", type=int, default=1)
     p.add_argument("--out", default=None, help="write the JSON report here")
+    p.add_argument("--pure", action="store_true",
+                   help="every call on the bank's device (MF_SINGLE_DEVICE=bank): the GPU-only or "
+                        "CPU-only path, without the library moving small calls to the other device")
     p.add_argument("--no-batch", action="store_true",
                    help="fine stage as one filter_series call per bank and detector (the old pattern)")
     p.add_argument("--timing", action="store_true",
                    help="device time per kernel label for each stage (sets MF_GPU_TIMING=1)")
     args = p.parse_args()
+    import os
     if args.timing:
-        import os
         os.environ["MF_GPU_TIMING"] = "1"
+    if args.pure:
+        os.environ["MF_SINGLE_DEVICE"] = "bank"
 
     tops = load_tops(args.bank, args.tops)
     report, results = run_device(args.device, tops, args, args.seed)

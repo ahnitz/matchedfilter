@@ -738,11 +738,14 @@ def test_gpu_hierarchical_bank_matches_cpu_including_packed_templates(pack):
 
 
 @pytest.mark.parametrize("device", ["cpu", "gpu"])
-def test_filter_series_many_matches_one_call_at_a_time(device):
+def test_filter_series_many_matches_one_call_at_a_time(device, monkeypatch):
     """A batch returns exactly what the calls return one at a time -- including a bank that
     appears in several jobs with different series (in flight together on a GPU) and
     single-template calls -- whatever the device does to overlap them."""
     from conftest import usable_gpu
+    # The model's choices only: trials would move single-template calls between devices
+    # mid-test, and this compares GPU deferral against GPU calls exactly.
+    monkeypatch.setenv("MF_AUTOTUNE", "0")
     dev = None
     if device == "gpu":
         dev = usable_gpu()
@@ -774,12 +777,13 @@ def test_filter_series_many_matches_one_call_at_a_time(device):
             np.testing.assert_array_equal(getattr(r1, f), getattr(r2, f))
 
 
-def test_filter_series_many_mixes_deferred_and_synchronous_calls_on_one_plan():
+def test_filter_series_many_mixes_deferred_and_synchronous_calls_on_one_plan(monkeypatch):
     """Follow-up-style calls in one batch: one template's single plan serves several jobs,
     some with windows that give mixed bin counts (a synchronous path on some backends) and
     some deferred. A synchronous call must not reuse a slot a deferred call still holds --
     that left a fence wait that never returned."""
     from conftest import usable_gpu
+    monkeypatch.setenv("MF_AUTOTUNE", "0")     # keep the follow-ups on the GPU plan
     dev = usable_gpu()
     if dev is None:
         pytest.skip("no usable GPU")
@@ -801,3 +805,35 @@ def test_filter_series_many_mixes_deferred_and_synchronous_calls_on_one_plan():
     for r1, r2 in zip(one, many):
         np.testing.assert_array_equal(r1.sample_indices, r2.sample_indices)
         np.testing.assert_array_equal(r1.snr, r2.snr)
+
+
+def test_single_template_calls_choose_the_faster_device_and_agree():
+    """A GPU bank's single-template calls are timed on the GPU and on a CPU plan for their
+    first calls, then run on the faster; either way they give the GPU's answers to ~1e-5."""
+    from conftest import usable_gpu
+    from matchedfilter import time_domain as td
+    dev = usable_gpu()
+    if dev is None:
+        pytest.skip("no usable GPU")
+    rng = np.random.default_rng(14)
+    counts = list(rng.integers(200, 400, 20))
+    taps, w, df = _whitened_inspiral_bank(rng, counts)
+    S = 1 << 17
+    X = np.fft.fft(rng.standard_normal(S))
+    X[S // 2:] = 0
+    x = (np.fft.ifft(X) * 2).astype(np.complex64)
+    gpu = TimeDomainFilterBank(taps, tap_counts=counts, engine='hier', threshold=5.0,
+                               false_dismissal=1e-3, device=dev, fft_lengths=[2048], binsize=2048)
+    cpu = TimeDomainFilterBank(taps, tap_counts=counts, engine='hier', threshold=5.0,
+                               false_dismissal=1e-3, fft_lengths=[2048], binsize=2048)
+    for b in (gpu, cpu):
+        b.set_reference(w, delta_f=df)
+    td._SINGLE_CHOICE.clear()
+    for k, c in enumerate(range(20000, 110000, 7000)):
+        kw = dict(windows=slice(c - 9000, c + 9000), binsize=61, threshold=0.0, template_index=k % 5)
+        r_g, r_c = gpu.filter_series(x, **kw), cpu.filter_series(x, **kw)
+        np.testing.assert_array_equal(r_g.sample_indices, r_c.sample_indices)
+        scale = np.maximum(np.abs(r_c.snr), 1.0)
+        assert np.max(np.abs(r_g.snr - r_c.snr) / scale) < 1e-4
+    (state,) = td._SINGLE_CHOICE.values()
+    assert state["winner"] in ("gpu", "cpu") and len(state["gpu"]) >= 4 and len(state["cpu"]) >= 4
