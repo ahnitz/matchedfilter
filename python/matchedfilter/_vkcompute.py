@@ -451,7 +451,7 @@ class _FusedBatch:
         _check(vk.vkEndCommandBuffer(cmd), "end fused")
         self.prof = prof
         cache[key] = (cmd,)
-        while len(cache) > 16:
+        while len(cache) > int(os.environ.get("MF_GPU_FUSE_CACHE", "64")):
             _, (old_cmd,) = cache.popitem(last=False)
             self._free(old_cmd)
         self._submit_fused(cmd)
@@ -519,8 +519,13 @@ def replay_fused(dev, keys):
         hit = cache.get(key)
         if hit is None:
             return False
-        for ctx_id, hs in key:
-            pass
+        # Every constituent recording must still exist: eviction frees its descriptor sets
+        # and buffers, and replaying a recording built on them faults the device.
+        for ctx_id, handles in key:
+            ctx = _CONTEXTS_BY_ID.get(ctx_id)
+            if ctx is None or ctx.device is None or any(h not in getattr(ctx, "_phases", {})
+                                                        for h in handles):
+                return False
         cmds.append(hit[0])
     vk = dev.vk
     arr = (_vp * len(cmds))(*cmds)
@@ -550,6 +555,10 @@ def read_dispatch(entry):
 
 #: One _Device per Vulkan device index, for the life of the process.
 _DEVICES = {}
+
+#: Live contexts by id(), for validating cached fused recordings (keys hold ids).
+import weakref as _weakref
+_CONTEXTS_BY_ID = _weakref.WeakValueDictionary()
 
 
 class _Device:
@@ -709,6 +718,7 @@ class Context(InputUploads):
         self._queue_offset = 0
 
         self._attach_device(index)
+        _CONTEXTS_BY_ID[id(self)] = self
 
         # MF_GPU_TIMING=1: device time of every submission, as (label, device_ms) in
         # timing_log (the contract all backends share). Off, it costs one attribute test.
@@ -1148,9 +1158,11 @@ class Context(InputUploads):
         """
         wg = max(1, band // 16)
         want = max(1, int(self.subgroup_size) // wg)
-        cap = int(os.environ.get("MF_VK_COARSE_PPG", "0") or 0)
-        if cap:
-            want = min(want, cap) if cap <= want else cap
+        # At most 4 pairs unless asked: the 8- and 16-pair builds hung the GPU (compute ring
+        # timeout) under realistic gating on gfx1151, and measured within 3% of 4 pairs once
+        # dispatches are padded. MF_VK_COARSE_PPG sets the cap, to investigate them.
+        cap = int(os.environ.get("MF_VK_COARSE_PPG", "0") or 0) or 4
+        want = min(want, cap)
         pairs = nd * nt
         tile = _COARSE_TILE_T.get(band, 1)
         for ppg in sorted({p for p in (want, 32, 16, 8, 4, 2, 1) if p <= want}, reverse=True):
