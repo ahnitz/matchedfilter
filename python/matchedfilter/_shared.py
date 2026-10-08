@@ -101,7 +101,16 @@ def containing(array, ctx):
     if not isinstance(array, np.ndarray) or not array.flags.c_contiguous or array.nbytes == 0:
         return None
     addr, item = array.ctypes.data, array.dtype.itemsize
-    for start, allocation in list(_allocations.items()):
+
+    def candidates():
+        # The allocations that held recent series first: a segment's rows are all in one or
+        # two, and scanning every live allocation per call cost ~5 ms a segment.
+        for st in list(_recent):
+            a = _allocations.get(st)
+            if a is not None:
+                yield st, a
+        yield from list(_allocations.items())
+    for start, allocation in candidates():
         nbytes = allocation.buffer.nbytes
         if (start <= addr and addr + array.nbytes <= start + nbytes
                 and (addr - start) % item == 0 and _same_device(allocation.buffer.ctx, ctx)):
@@ -112,8 +121,15 @@ def containing(array, ctx):
                 whole = np.ndarray(((nbytes - nbytes % item) // item,), dtype=array.dtype,
                                    buffer=storage)
                 _whole[start] = whole
+            if start in _recent:
+                _recent.remove(start)
+            _recent.insert(0, start)
+            del _recent[4:]
             return whole, (addr - start) // item
     return None
+
+
+_recent = []
 
 
 #: One whole-allocation view per allocation, so recordings keyed on it repeat.
