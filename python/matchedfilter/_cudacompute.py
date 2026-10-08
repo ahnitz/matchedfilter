@@ -591,8 +591,7 @@ class Context(InputUploads):
         first use: a plan alternating grouped and single-window calls, with K pipelined
         slots, uploaded its bank up to 2K times."""
         sig = (array.ctypes.data, array.shape, array.strides)
-        data = pack(array) if (pack is not None) else None
-        nbytes = data.nbytes if data is not None else array.size * 8
+        nbytes = array.size * (4 if pack is not None else 8)    # pack: half2, 4 B per sample
         ent = self._residents.get(name)
         if ent is None or ent[0].nbytes < nbytes:
             if ent is not None:
@@ -602,8 +601,8 @@ class Context(InputUploads):
             ent = [_Resident(self, nbytes), None]
             self._residents[name] = ent
         if dirty or ent[1] != sig:
-            if data is None:
-                data = np.ascontiguousarray(array, np.complex64)
+            # Packed only when uploaded: packing every call cost 0.2 ms per fine call.
+            data = pack(array) if pack is not None else np.ascontiguousarray(array, np.complex64)
             ent[0].write(data, stream)
             ent[1] = sig
         return ent[0]

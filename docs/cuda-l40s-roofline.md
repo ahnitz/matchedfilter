@@ -113,14 +113,27 @@ The stage totals (device time, s), against the ladder's wall time:
 
 ## GPU vs one CPU core, and what prevents 10-100x
 
-Ladder, 1 top, 3 segments (2 steady), min of 3, steady seconds:
+Ladder, 1 top, 3 segments (2 steady), interleaved runs (GPU, CPU, GPU, ...), min of 5, steady
+seconds. This is the final state after rebasing onto main at f9717a1, which brought device-priced
+chains and block sizes: CUDA now runs the fine banks at n=4096 with a band-256 gate.
 
-| stage | CPU 1 core | CUDA default | CUDA --resident | resident / core (wall) | device-only / core |
+The CPU column is one core. The library's CPU path is single-threaded, which I confirmed by
+pinning a run with `taskset`.
+
+| stage | CPU 1 core | CUDA --resident | wall ratio | CUDA device time | device-only ratio |
 |---|---:|---:|---:|---:|---:|
-| middle | 0.243 | 0.289 | 0.026 | 9.5x | ~90x |
-| fine | 0.366 | 0.24 | 0.075 | 4.9x | ~15x |
-| asym | 0.008-0.03 | 0.023 | 0.017 | ~0.5-1.7x | ~2-6x |
-| total (TIRT) | 11.3e6 | 12.9e6 | 60.1e6 | 5.3x | |
+| middle | 0.216 | 0.0121 | **18x** | 0.003 | ~70x |
+| fine | 0.330 | 0.091 | **3.6x** | 0.025 | ~13x |
+| asym | 0.011 | 0.016 | 0.7x | 0.004 | ~3x |
+| total (TIRT) | 12.6e6 | 59.1e6 | **4.7x** | | |
+
+`--check cpu` on the final state:
+- SNR on common peaks within 8e-6;
+- asym peak sets identical;
+- no CPU-only fine peak above the gate margin (threshold + 0.25);
+- 12 GPU-only fine peaks above the margin. These are loud peaks the CPU's own chain dismissed:
+  the CPU and GPU now price different chains. The same bank with one pinned chain is
+  identical on both devices.
 
 What binds, in order:
 
@@ -155,7 +168,10 @@ The structural fixes, in that order:
 | Middle block size priced on the device with device-resident output | n=32768: 3.19 ms/launch, 504 B spill | n=16384: 0.59 ms/launch |
 | Grouped hierarchical windows: one submission per fine call (was 3) | fine 0.092 s | (included below) |
 | Capacity-keyed records, grow-only series pools (no per-call reallocation) | 55/195 record lookups allocated | 15/174 (each plan's first use) |
-| Net, ladder --resident | TIRT 26.5e6 | **60.1e6**; fine 0.075 s |
+| Net, ladder --resident (before the rebase) | TIRT 26.5e6 | 60.1e6; fine 0.075 s |
+| After the rebase: GPU cost calibration read 0 ns on CUDA (`_timing` switch not honored) | fine 0.16-0.25 s, loud peaks dismissed | fixed: fine 0.09-0.10 s |
+| ct0 packed to fp16 on every call by the resident-template cache | 1.59 ms/call host | 1.34 ms/call |
+| Final, ladder --resident, min of 5 | | **TIRT 59.1e6** (CPU core 12.6e6) |
 
 ## Falsified, or not worth it
 
