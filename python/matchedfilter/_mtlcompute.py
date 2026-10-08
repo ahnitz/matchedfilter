@@ -17,7 +17,7 @@ import ctypes
 import pathlib
 import sys
 from contextlib import contextmanager
-from functools import wraps
+from functools import lru_cache, wraps
 
 import numpy as np
 from ._shared import empty_shared, shared_buffer, shared_key, write_input
@@ -73,14 +73,51 @@ def _radix(n):
     return _RADIX.get(n, 16)
 
 
+@lru_cache(maxsize=None)
+def _shipped(stem):
+    """Whether a kernel shipped (source or library). Asked per dispatch, so cached:
+    the stat calls were ~18 per fine-stage call."""
+    return any((_METAL_DIR / (stem + ext)).is_file() for ext in (".metal", ".metallib"))
+
+
 def _use_c16(band):
     """Half-width coarse path where the FP16 kernel is available.
 
     Loads tierb_<band>_c16.metal. Applies at every coarse band where
     a pre-compiled FP16 kernel exists.
     """
-    return (_METAL_DIR / ("tierb_%d_c16.metal" % band)).is_file() or \
-           (_METAL_DIR / ("tierb_%d_c16.metallib" % band)).is_file()
+    return _shipped("tierb_%d_c16" % band)
+
+
+def _ppg_of(entry):
+    """Pairs per threadgroup an entry name carries: coarse16p8 -> 8."""
+    return int(entry[len("coarse16p"):]) if entry.startswith("coarse16p") else 1
+
+
+def coarse_ppg(band, pairs, override=None):
+    """Pairs per threadgroup for the half-width coarse pass at this band.
+
+    One pair is band/16 threads; an Apple SIMD group is 32 lanes. Pick the
+    smallest packing that fills at least TARGET_THREADS lanes, from the
+    variants shipped. Partial groups are safe: the host pads the coarse
+    buffers to a whole number of groups. ``MF_METAL_COARSE_PPG`` overrides,
+    for measurement.
+    """
+    import os
+    want = override if override is not None else os.environ.get("MF_METAL_COARSE_PPG")
+    shipped = [p for p in (32, 16, 8, 4, 2) if _shipped("tierb_%d_c16p%d" % (band, p))]
+    if want is not None:
+        want = int(want)
+        return want if want == 1 or want in shipped else 1
+    wg = band // _radix(band)
+    for p in sorted(shipped):
+        if wg * p >= TARGET_THREADS:
+            return p
+    return max(shipped, default=1) if wg < TARGET_THREADS else 1
+
+
+#: Threads the coarse pass packs pairs up to; see coarse_ppg.
+TARGET_THREADS = 32
 
 
 def _pack_half2(a):
@@ -213,6 +250,26 @@ class _Buffer:
             self.handle = None
 
 
+class _HostBuffer(_Buffer):
+    """A device buffer over caller memory, without a copy (unified memory).
+
+    newBufferWithBytesNoCopy needs a page-aligned pointer and a whole number
+    of pages; the caller's array keeps the memory alive, and this object must
+    be dropped before the array is. No deallocator: Metal never frees it.
+    """
+
+    def __init__(self, ctx, array):
+        self.ctx = ctx
+        self.nbytes = array.nbytes
+        self.ptr = ctypes.c_void_p(array.ctypes.data)
+        self.handle = ctx.o.call(
+            ctx.device, b"newBufferWithBytesNoCopy:length:options:deallocator:",
+            args=(self.ptr, self.nbytes, _STORAGE_SHARED, None),
+            argtypes=(ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_void_p))
+        if not self.handle:
+            raise MetalError("newBufferWithBytesNoCopy failed for %d bytes" % self.nbytes)
+
+
 def describe_error(o, err):
     """Everything the NSError carries, not only its one-line summary.
 
@@ -253,6 +310,8 @@ class Context(InputUploads):
     """One Metal device, its queue, and the pipelines built on it."""
 
     max_grouped_bins = _MAX_BINS
+    #: peaks_grouped takes nbins: window groups may give different bin counts.
+    supports_ragged_bins = True
     #: Commits return without waiting when asked (async_submit with a slot):
     #: the series loop keeps several batches in flight. Declared, so callers
     #: test a capability instead of probing signatures for a TypeError.
@@ -377,8 +436,8 @@ class Context(InputUploads):
             return "pack_coarse"
         if entry == "seriesForward":
             return "forward_%d" % n
-        if entry == "coarse16":
-            return "tierb_%d_c16" % n
+        if entry.startswith("coarse16"):
+            return "tierb_%d_c16%s" % (n, entry[len("coarse16"):])
         tierc = {"tcStage1": "corr1", "tcFullStage3": "corr2",
                  "tcFullSeriesStage3": "corr_series2",
                  "tcForwardStage1": "fwd1", "tcForwardStage3": "fwd2"}
@@ -459,14 +518,14 @@ class Context(InputUploads):
 
     @_autoreleased
     def pipeline(self, n, entry="fusedTierB", one_bin=False, c16=False):
-        if c16 or entry == "coarse16":
-            entry_name = "coarse16"
+        if c16 or entry.startswith("coarse16"):
+            entry_name = entry if entry.startswith("coarse16") else "coarse16"
             fn_name = "fusedTierB"
         else:
             entry_name = entry
             fn_name = entry
         single = (_manifest().get("modules", {}).get(str(n), {}).get("metal", {})
-                  .get(entry_name, {}).get("one_bin")) if (one_bin and not c16 and entry != "coarse16") else None
+                  .get(entry_name, {}).get("one_bin")) if (one_bin and not entry_name.startswith("coarse16")) else None
         if single and single["lds_bytes"] > self.max_shared_memory:
             single = None
         key = (n, entry_name, True) if single else (n, entry_name)
@@ -489,7 +548,7 @@ class Context(InputUploads):
             elif entry_name == "compactPairs":
                 want = 256
             else:
-                want = n // _radix(n)
+                want = n // _radix(n) * _ppg_of(entry_name)
             err = ctypes.c_void_p()
             pso = self.o.call(self.device,
                               b"newComputePipelineStateWithFunction:error:",
@@ -510,6 +569,8 @@ class Context(InputUploads):
                     "%d on %s even when asked for %d; use a shorter transform or "
                     "device='cpu'" % (n, want, limit, self.name, want))
             self._pipelines[key] = pso
+            #: What each pipeline is, for profilers that observe _dispatch.
+            self.__dict__.setdefault("pipeline_names", {})[pso] = (stem, n, entry_name)
             result, pso = pso, None  # ownership transferred to the cache
             return result
 
@@ -600,16 +661,19 @@ class Context(InputUploads):
                     args=(ctypes.byref(blk), ctypes.sizeof(blk), 0),
                     argtypes=(ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong))
 
-    def _dispatch(self, enc, pso, params, buffers, tg, groups=None, indirect=None):
+    def _dispatch(self, enc, pso, params, buffers, tg, groups=None, indirect=None,
+                  offsets=None):
         """One kernel: pipeline, uniforms at 0, buffers from 1, then the grid.
 
         ``indirect`` is an args buffer whose first word a compaction filled
         on the device; the threadgroup count then never reaches the host.
+        Every kernel is encoded here, so this is also the one place a
+        per-kernel profiler (tools/metal_roofline.py) has to observe.
         """
         self.o.call(enc, b"setComputePipelineState:", restype=None,
                     args=(pso,), argtypes=(ctypes.c_void_p,))
         self._set_params(enc, params)
-        self._set_buffers(enc, buffers)
+        self._set_buffers(enc, buffers, offsets=offsets)
         if indirect is not None:
             self.o.call(
                 enc,
@@ -626,6 +690,28 @@ class Context(InputUploads):
 
     def empty_shared(self, shape, dtype=np.complex64, *, readback=False):
         return empty_shared(self, _Buffer, shape, dtype)
+
+    #: Page size newBufferWithBytesNoCopy requires (16 KiB on Apple silicon).
+    page_bytes = 16384
+
+    def host_view(self, array):
+        """Make caller memory usable as device memory in place, or return None.
+
+        Unified memory: a page-aligned, whole-page, C-contiguous array can back a
+        Metal buffer directly, so a kernel writes its output where the caller
+        reads it -- no workspace and no copy. Returns an owner; shared_buffer()
+        recognises the array while the owner lives. Drop the owner when the
+        dispatch has completed, and before the array.
+        """
+        from ._shared import _Allocation
+        if (not isinstance(array, np.ndarray) or not array.flags.c_contiguous
+                or not array.flags.writeable or array.nbytes == 0
+                or array.ctypes.data % self.page_bytes or array.nbytes % self.page_bytes):
+            return None
+        try:
+            return _Allocation(_HostBuffer(self, array))
+        except MetalError:
+            return None
 
     def _forward_fused(self, n, series, starts, spectra, *, defer=False, slot=None):
         """Dispatch fused forward FFT kernel path."""
@@ -734,7 +820,7 @@ class Context(InputUploads):
     @_autoreleased
     def peaks(self, n, data, tmpl, binsize=None, threshold=0.0, window=None,
               upload_data=True, upload_tmpl=True, _groups=None,
-              slot=None, async_submit=False):
+              slot=None, async_submit=False, nbins=None):
         """Peak index and complex value per (data, template, bin).
 
         The same contract as the Vulkan path: bins counted from `start`, a
@@ -746,7 +832,10 @@ class Context(InputUploads):
         if lo >= hi:
             raise ValueError("empty window (%d, %d)" % (lo, hi))
         binsize = n if binsize is None else int(binsize)
-        nbins = -(-(hi - lo) // binsize)
+        if nbins is None:
+            nbins = -(-(hi - lo) // binsize)
+        elif _groups is None or nbins < max(-(-(w1 - w0) // binsize) for w0, w1, _, _ in _groups):
+            raise ValueError("nbins must cover every grouped window's bins")
         if nbins > _MAX_BINS:
             # Bins are contiguous in the window, so cutting the window on a
             # bin boundary cuts the bins exactly and the pieces concatenate.
@@ -808,16 +897,9 @@ class Context(InputUploads):
         for w0, w1, first, last in (_groups or ((lo, hi, 0, nd),)):
             params = (nt, w0, w1, binsize, shift & 0xFFFFFFFF, nbins,
                       int(np.float32(t2).view(np.uint32)))
-            self.o.call(enc, b"setComputePipelineState:", restype=None,
-                        args=(pso,), argtypes=(ctypes.c_void_p,))
-            self._set_params(enc, params)
-            self._set_buffers(enc, batch, offsets=(first*n*8, 0, first*nt*nbins*4,
-                                                   first*nt*nbins*8))
-            self.o.call(enc, b"dispatchThreadgroups:threadsPerThreadgroup:",
-                        restype=None,
-                        args=(_MTLSize((last-first)*nt, 1, 1),
-                              _MTLSize(n // _radix(n), 1, 1)),
-                        argtypes=(_MTLSize, _MTLSize))
+            self._dispatch(enc, pso, params, batch, n // _radix(n),
+                           groups=(last - first) * nt,
+                           offsets=(first*n*8, 0, first*nt*nbins*4, first*nt*nbins*8))
         self.o.call(enc, b"endEncoding", restype=None)
 
         out = nd * nt * nbins
@@ -828,14 +910,14 @@ class Context(InputUploads):
         return self._commit(cmd, "flat", async_submit=async_submit, finish=finish)
 
     def peaks_grouped(self, n, data, tmpl, groups, binsize, threshold, *, upload_tmpl=True,
-                      slot=None, async_submit=False):
+                      slot=None, async_submit=False, nbins=None):
         """Submit shared FFT rows with distinct flat windows in one command buffer."""
         if shared_buffer(data, self) is None:
             raise ValueError("grouped spectra must belong to this GPU context")
         return self.peaks(n, data, tmpl, binsize=binsize, threshold=threshold,
                           window=groups[0][:2], upload_data=False,
                           upload_tmpl=upload_tmpl, _groups=groups,
-                          slot=slot, async_submit=async_submit)
+                          slot=slot, async_submit=async_submit, nbins=nbins)
 
     @_autoreleased
     def _full_tile(self, n, data, tmpl, out, upload_data, upload_tmpl):
@@ -865,20 +947,7 @@ class Context(InputUploads):
         pso = self.pipeline(n, 'fullCorrelation')
         cmd = self._command_buffer()
         enc = self.o.call(cmd, b'computeCommandEncoder')
-        self.o.call(enc, b'setComputePipelineState:', restype=None,
-                    args=(pso,), argtypes=(ctypes.c_void_p,))
-        params = ctypes.c_uint32(nt)
-        self.o.call(enc, b'setBytes:length:atIndex:', restype=None,
-                    args=(ctypes.byref(params), 4, 0),
-                    argtypes=(ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong))
-        for slot, buf in enumerate(batch, start=1):
-            self.o.call(enc, b'setBuffer:offset:atIndex:', restype=None,
-                        args=(buf.handle, 0, slot),
-                        argtypes=(ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong))
-        self.o.call(enc, b'dispatchThreadgroups:threadsPerThreadgroup:',
-                    restype=None, args=(_MTLSize(nd*nt, 1, 1),
-                                        _MTLSize(n//_radix(n), 1, 1)),
-                    argtypes=(_MTLSize, _MTLSize))
+        self._dispatch(enc, pso, (nt,), batch, n // _radix(n), groups=nd * nt)
         self.o.call(enc, b'endEncoding', restype=None)
         self._commit(cmd, 'full')
         if shared_buffer(out, self) is None:
@@ -935,9 +1004,11 @@ class Context(InputUploads):
         geometry = _manifest().get('full_tierc', {}).get(str(n)) if n > 65536 else None
         if n > 65536 and geometry is None:
             raise UnsupportedSize('no two-stage continuous kernel for n=%d' % n)
+        # The starts and the output are bound per call, not cached: an output
+        # written in place (host_view) is a different allocation every call,
+        # and keying on it would rebuild the template copy each time.
         key = ('series', n, nd, nt, length, lo, hi,
-               shared_key(data, self), shared_key(tmpl, self),
-               shared_key(starts, self), shared_key(out, self))
+               shared_key(data, self), shared_key(tmpl, self))
         uploads = self._input_uploads(key, data, tmpl, upload_data, upload_tmpl)
         cache = self._tierc_batches if geometry else self._full_batches
         batch = cache.get(key)
@@ -949,11 +1020,7 @@ class Context(InputUploads):
             self._cache_room(estimate, incoming=external)
             bd = shared_buffer(data, self) or _Buffer(self, data.nbytes)
             bt = shared_buffer(tmpl, self) or _Buffer(self, tmpl.nbytes)
-            if geometry:
-                scratch = _Buffer(self, nd*nt*n*8)
-                batch = (bd, bt, scratch, bs, bo)
-            else:
-                batch = (bd, bt, bs, bo)
+            batch = (bd, bt, _Buffer(self, nd*nt*n*8)) if geometry else (bd, bt)
             cache[key] = batch
             uploads = (True, True, *uploads[2:])
         self._cache_touch('tierc' if geometry else 'full', key)
@@ -969,25 +1036,12 @@ class Context(InputUploads):
         if geometry:
             self._encode_tierc(cmd, n, 'corr1', (bd, bt, batch[2]),
                                nd*nt*geometry['n1'], nt)
-            self._encode_tierc(cmd, n, 'corr_series2', batch[2:],
+            self._encode_tierc(cmd, n, 'corr_series2', (batch[2], bs, bo),
                                nd*nt*geometry['n2'], params)
         else:
             enc = self.o.call(cmd, b'computeCommandEncoder')
-            self.o.call(enc, b'setComputePipelineState:', restype=None,
-                        args=(self.pipeline(n, 'fullCorrelationSeries'),),
-                        argtypes=(ctypes.c_void_p,))
-            value = (ctypes.c_uint32 * 4)(*params)
-            self.o.call(enc, b'setBytes:length:atIndex:', restype=None,
-                        args=(ctypes.byref(value), ctypes.sizeof(value), 0),
-                        argtypes=(ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong))
-            for slot, buf in enumerate(batch, start=1):
-                self.o.call(enc, b'setBuffer:offset:atIndex:', restype=None,
-                            args=(buf.handle, 0, slot),
-                            argtypes=(ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong))
-            self.o.call(enc, b'dispatchThreadgroups:threadsPerThreadgroup:',
-                        restype=None,
-                        args=(_MTLSize(nd*nt, 1, 1), _MTLSize(n//_radix(n), 1, 1)),
-                        argtypes=(_MTLSize, _MTLSize))
+            self._dispatch(enc, self.pipeline(n, 'fullCorrelationSeries'), params,
+                           (bd, bt, bs, bo), n // _radix(n), groups=nd * nt)
             self.o.call(enc, b'endEncoding', restype=None)
         self._commit(cmd, 'series')
 
@@ -1107,10 +1161,16 @@ class Context(InputUploads):
         # precision refine kernel, which reads float2.
         half = [i == 0 and _use_c16(b) for i, (b, _, _) in enumerate(tiers)]
         sfx = ["" if i == 0 else str(i) for i in range(len(tiers))]
+        # Pairs per threadgroup for the first tier, and the pair count padded
+        # to whole groups: the padded pairs read a spare data row and write
+        # spare outputs, and no compaction ever lists them.
+        ppg = coarse_ppg(tiers[0][0], pairs) if half[0] else 1
+        padded = -(-pairs // ppg) * ppg
+        rows0 = (padded - 1) // nt + 1
 
         # In flight, a result owns its buffers: the slot is part of the key.
         slot = slot if async_submit else None
-        key = (n, tuple(b for b, _, _ in tiers), nd, nt, nbins)
+        key = (n, tuple(b for b, _, _ in tiers), nd, nt, nbins, ppg)
         key += (shared_key(data, self), shared_key(tmpl, self), slot)
         upload_data, upload_tmpl, dsig, tsig = self._input_uploads(
             key, data, tmpl, upload_data, upload_tmpl)
@@ -1132,10 +1192,11 @@ class Context(InputUploads):
             }
             for i, ((b, _, _), h) in enumerate(zip(tiers, half)):
                 cb = 4 if h else 8
-                bufs["cdata" + sfx[i]] = _Buffer(self, nd * b * cb)
+                rows, slots = (rows0, padded) if i == 0 else (nd, pairs)
+                bufs["cdata" + sfx[i]] = _Buffer(self, rows * b * cb)
                 bufs["ct" + str(i)] = _Buffer(self, nt * b * cb)
-                bufs["cidx" + sfx[i]] = _Buffer(self, pairs * 4)
-                bufs["cval" + sfx[i]] = _Buffer(self, pairs * 8)
+                bufs["cidx" + sfx[i]] = _Buffer(self, slots * 4)
+                bufs["cval" + sfx[i]] = _Buffer(self, slots * 8)
                 # Compacted survivors and the indirect threadgroup count:
                 # args is [groupsX, 1, 1] and the compaction bumps [0]
                 # atomically, so the count stays on the device.
@@ -1195,10 +1256,11 @@ class Context(InputUploads):
         for i, ((b, _, thr), h) in enumerate(zip(tiers, half)):
             span = self._coarse_span(n, b, lo, hi)
             if i == 0:
-                coarse = self.pipeline(b, "coarse16" if h else "fusedTierB")
+                coarse = self.pipeline(b, ("coarse16" + ("p%d" % ppg if ppg > 1 else ""))
+                                       if h else "fusedTierB")
                 self._dispatch(enc, coarse, (nt, *span, 1, 0),
                                use("cdata", "ct0", "cidx", "cval"),
-                               b // _radix(b), groups=pairs)
+                               b // _radix(b) * ppg, groups=padded // ppg)
             else:
                 # The listed refine at this band over the previous tier's
                 # survivors; one bin, so cval holds each listed pair's maximum.

@@ -63,7 +63,9 @@ def test_metal_two_tier_chain_runs_both_tiers(mock_ctx):
     h = np.ones((3, n), np.complex64)
     mock_ctx.hier_peaks(n, b1, d, h, h[:, :b0], 0.25, cascade_band=b0,
                         ct1=h[:, :b1], raw_thr1=0.75, threshold=5.0)
-    kinds = [(x["pso"][0], x["pso"][1]) for x in mock_ctx.dispatched]
+    # The coarse entry may carry a pairs-per-group suffix (coarse16p8).
+    kinds = [(x["pso"][0], "coarse16" if x["pso"][1].startswith("coarse16") else x["pso"][1])
+             for x in mock_ctx.dispatched]
     coarse = "coarse16" if _mtlcompute._use_c16(b0) else "fusedTierB"
     assert kinds == [(b0, coarse), (b0, "compactPairs"), (b1, "refineListed"),
                      (b0, "compactPairs"), (n, "refineListed")]
@@ -83,7 +85,8 @@ def test_metal_one_tier_chain_is_unchanged(mock_ctx):
     d = np.ones((1, n), np.complex64)
     h = np.ones((2, n), np.complex64)
     mock_ctx.hier_peaks(n, b, d, h, h[:, :b], 0.5)
-    assert [x["pso"][1] for x in mock_ctx.dispatched] == [
+    assert [("coarse16" if x["pso"][1].startswith("coarse16") else x["pso"][1])
+            for x in mock_ctx.dispatched] == [
         "coarse16" if _mtlcompute._use_c16(b) else "fusedTierB", "compactPairs", "refineListed"]
 
 
@@ -368,3 +371,113 @@ def test_metal_timing_log_contract():
     if os.environ.get("MF_GPU_TIMING", "") in ("", "0"):
         f.run()
         assert f._gpu.timing_log == []
+
+
+def test_coarse_packing_fills_a_simd_group():
+    for band in (64, 128, 256, 512):
+        p = _mtlcompute.coarse_ppg(band, 1000, override=None) if not os.environ.get(
+            "MF_METAL_COARSE_PPG") else None
+        if p is not None:
+            assert band // 16 * p >= _mtlcompute.TARGET_THREADS
+            assert (_mtlcompute._METAL_DIR / ("tierb_%d_c16p%d.metal" % (band, p))).is_file()
+    assert _mtlcompute.coarse_ppg(64, 10, override=3) == 1     # not shipped: unpacked
+
+
+@metal
+@pytest.mark.parametrize("band", [64, 128])
+def test_metal_packed_coarse_handles_partial_groups(ctx, band, monkeypatch):
+    """15 pairs never fill a group of 2, 4, 8 or 16: the padding must not leak."""
+    n, nd, nt = 2048, 3, 5
+    d, h = _bank(n, nd, nt, seed=band)
+    lag = 77
+    d[2] += 30.0 * h[4] * np.exp(-2j * np.pi * np.arange(n) * lag / n).astype(np.complex64)
+    results = {}
+    for p in (1, 2, 4, 8, 16):
+        monkeypatch.setenv("MF_METAL_COARSE_PPG", str(p))
+        idx, val = ctx.hier_peaks(n, band, d, h, h[:, :band], {64: 0.75, 128: 1.2}[band],
+                                  threshold=0.0)
+        results[p] = (idx.copy(), val.copy(), ctx.last_refinements)
+    for p, (idx, val, refined) in results.items():
+        np.testing.assert_array_equal(idx, results[1][0])
+        np.testing.assert_array_equal(val, results[1][1])
+        assert refined == results[1][2]
+    assert results[1][0][2, 4, 0] == lag
+    assert 0 < results[1][2] < nd * nt          # the gate dismissed some pairs
+
+
+@metal
+def test_metal_continuous_correlation_writes_in_place():
+    """Unified memory: the GPU writes the bank's output where the caller reads it."""
+    from matchedfilter import TimeDomainFilterBank
+    rng = np.random.default_rng(3)
+    taps = rng.standard_normal((6, 700)).astype(np.float32)
+    counts = np.array([300, 350, 420, 500, 640, 700])
+    S = 1 << 17
+    x = (rng.standard_normal(S) + 1j * rng.standard_normal(S)).astype(np.complex64)
+    win = [(5000, 60000), (70000, 120000)]
+    got = TimeDomainFilterBank(taps, tap_counts=counts, engine="corr", device="gpu")
+    want = TimeDomainFilterBank(taps, tap_counts=counts, engine="corr", device="cpu")
+    a = got.correlate_series(x, windows=win)
+    b = want.correlate_series(x, windows=win)
+    assert a.ctypes.data % _mtlcompute.Context.page_bytes == 0
+    assert all(getattr(g, "_corr_workspace", None) is None for g in got._groups)
+    scale = np.abs(b).max()
+    assert np.abs(a - b).max() / scale < 1e-5
+    np.testing.assert_array_equal(a[:, :5000], 0)
+    np.testing.assert_array_equal(a[:, 60000:70000], 0)
+    # A caller-provided output that cannot back a buffer still works, via the workspace.
+    out = np.empty(6 * S + 1, np.complex64)[1:].reshape(6, S)      # 8 bytes off a page
+    assert out.flags.c_contiguous and out.ctypes.data % _mtlcompute.Context.page_bytes
+    np.testing.assert_array_equal(got.correlate_series(x, windows=win, out=out), a)
+    assert any(getattr(g, "_corr_workspace", None) is not None for g in got._groups)
+
+
+@metal
+def test_metal_ragged_bins_are_one_submission_and_match_per_count_calls(monkeypatch):
+    """Window groups with different bin counts: one command buffer, same peaks."""
+    n, nt = 2048, 1
+    rng = np.random.default_rng(11)
+    ser = (rng.standard_normal(9 * n) + 1j * rng.standard_normal(9 * n)).astype(np.complex64)
+    h = (rng.standard_normal((nt, n)) + 1j * rng.standard_normal((nt, n))).astype(np.complex64)
+    starts = np.arange(0, 8 * 1500, 1500, dtype=np.uint64)
+    ws = np.array([700, 300, 300, 300, 300, 300, 300, 300], np.uint64)
+    we = np.array([1800, 1800, 1800, 1800, 1800, 1800, 1800, 1100], np.uint64)
+    bs = 61
+    f = mf.MatchedFilter(n, 1, nt, device="gpu")
+    f.set_templates(h)
+    commits = []
+    real = f._gpu._commit
+    monkeypatch.setattr(f._gpu, "_commit", lambda cmd, label, **kw: (commits.append(label),
+                                                                      real(cmd, label, **kw))[1])
+    idx, val = f._run_series_ragged(ser, starts, ws, we, binsize=bs)
+    assert len(commits) == 1
+    counts = 1 + (we - ws - 1) // bs
+    assert idx.shape == (8, nt, counts.max())
+    for c in np.unique(counts):
+        m = counts == c
+        ri, rv = f.run_series(ser, starts[m], ws[m], we[m], binsize=bs, raw=True)
+        np.testing.assert_array_equal(idx[m][:, :, :c], ri)
+        np.testing.assert_array_equal(val[m][:, :, :c], rv)
+        np.testing.assert_array_equal(idx[m][:, :, c:], -1)
+        np.testing.assert_array_equal(val[m][:, :, c:], 0)
+
+
+@metal
+def test_metal_single_template_follow_up_matches_cpu():
+    from matchedfilter import TimeDomainFilterBank
+    rng = np.random.default_rng(5)
+    taps = rng.standard_normal((4, 400)).astype(np.float32)
+    counts = np.array([250, 300, 380, 400])
+    x = (rng.standard_normal(1 << 17) + 1j * rng.standard_normal(1 << 17)).astype(np.complex64)
+    kw = dict(engine="hier", threshold=6.0, false_dismissal=1e-3, binsize=2048)
+    res = []
+    for dev in ("gpu", "cpu"):
+        b = TimeDomainFilterBank(taps, tap_counts=counts, device=dev, **kw)
+        b.set_reference(np.where(np.arange(1025) > 20, 1.0, 0.0), delta_f=1.0)
+        res.append(b.filter_series(x, windows=slice(40000, 40000 + 1000 * 31), binsize=31,
+                                   threshold=0.0, template_index=2))
+    # Same peaks; the order follows the call structure (one ragged call on the GPU,
+    # one call per bin count on the CPU), so compare sorted by sample.
+    g, c = ((np.sort(r.sample_indices), r.snr[np.argsort(r.sample_indices)]) for r in res)
+    np.testing.assert_array_equal(g[0], c[0])
+    np.testing.assert_allclose(g[1], c[1], rtol=2e-5, atol=1e-5 * np.abs(c[1]).max())

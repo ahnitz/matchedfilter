@@ -706,7 +706,8 @@ class MatchedFilter:
                               out=peaks)
 
 
-    def _series_layout(self, series, starts, win_start, win_end, binsize, templates):
+    def _series_layout(self, series, starts, win_start, win_end, binsize, templates,
+                       ragged=False):
         """Validate the shared series contract before either native backend."""
         ser = np.ascontiguousarray(_from_any(series), dtype=np.complex64)
         st = np.ascontiguousarray(_from_any(starts), dtype=np.uintp)
@@ -731,8 +732,36 @@ class MatchedFilter:
             raise ValueError("templates sub-range out of bounds")
         self._require_templates(t0, nt)
         from ._series import SeriesLayout
-        layout = SeriesLayout(self.n, st, ws, we, binsize)
+        layout = SeriesLayout(self.n, st, ws, we, binsize, ragged=ragged)
         return ser, layout, binsize, t0, nt
+
+    def _run_series_ragged(self, series, starts, win_start, win_end, binsize=None,
+                           threshold=0.0, templates=None):
+        """run_series(raw=True) over blocks whose windows give DIFFERENT bin counts.
+
+        The result is (nblocks, nt, max bins); a block's bins past its own count are
+        dismissed (-1, 0), as each block's own call would report them. Every window
+        group is one dispatch of a single submission, where calling run_series once per
+        distinct bin count costs a submission and a wait each -- most of a
+        single-template follow-up's time on a GPU.
+
+        Returns None when this plan cannot (CPU, a hierarchical plan, a backend
+        without ``supports_ragged_bins``, or a shape the grouped path does not take);
+        the caller then makes one call per bin count.
+        """
+        if (self._gpu is None or type(self) is not MatchedFilter
+                or not getattr(self._gpu, "supports_ragged_bins", False)):
+            return None
+        ser, layout, binsize, t0, nt = self._series_layout(
+            series, starts, win_start, win_end, binsize, templates, ragged=True)
+        layout.group(materialize=True)
+        if (len(layout.groups) < 2 or layout.nbins > getattr(self._gpu, "max_grouped_bins", 0)
+                or nt > self._gpu_pair_limit()):
+            return None
+        layout.ragged = True
+        self._dataset = False
+        self._data_ready = set()
+        return self._run_series_gpu(ser, layout, binsize, threshold, t0, nt, True)
 
     def run_series(self, series, starts=None, win_start=None, win_end=None,
                    binsize=None, threshold=0.0, templates=None, raw=False,
@@ -1023,6 +1052,13 @@ class MatchedFilter:
         queue_ahead = int(os.environ.get("MF_GPU_QUEUE_AHEAD", "8"))
         K = max(1, queue_ahead) if pipelined else 1
         source_shared = shared_buffer(ser, self._gpu) is not None
+        # Unified memory: read a page-aligned series where it is rather than copying the
+        # span into the source buffer (a fine-stage call copied ~6 MB per call). The owner
+        # lives for this call; each command buffer retains what it reads.
+        view = getattr(self._gpu, "host_view", None)
+        series_owner = view(ser) if (view is not None and not source_shared) else None
+        if series_owner is not None:
+            source_shared = True
         # Pools are sized by capacity, not by this call's batch: windowed calls vary in
         # block count, and reallocating would also discard every recording built on them.
         workspace = getattr(self, "_series_workspace", None)
@@ -1034,7 +1070,9 @@ class MatchedFilter:
         _, source, spectra_pool, starts_pool = workspace
         if source_shared:
             source, base = ser, 0
-            self._series_workspace = (workspace[0], None, spectra_pool, starts_pool)
+            # A viewed series keeps the copy buffer for later calls that need one.
+            self._series_workspace = (workspace[0], workspace[1] if series_owner is not None
+                                      else None, spectra_pool, starts_pool)
         else:
             # Upload only the span the blocks read: a windowed call touches a small part
             # of a long series. Starts are rebased onto it; reads past the series end
@@ -1089,7 +1127,8 @@ class MatchedFilter:
                 try:
                     res = self._gpu.peaks_grouped(
                         n, spec, H, groups, binsize, threshold, upload_tmpl=self._tdirty,
-                        slot=slot if pipelined else None, async_submit=pipelined)
+                        slot=slot if pipelined else None, async_submit=pipelined,
+                        **({"nbins": nb} if getattr(layout, "ragged", False) else {}))
                     self._tdirty = False
                 except Exception:
                     self._gpu.cancel_forward(slot=slot if pipelined else None)

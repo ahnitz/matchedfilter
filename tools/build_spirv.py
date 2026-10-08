@@ -114,6 +114,14 @@ METAL_CAP = {1024: 1024, 2048: 2048, 4096: 4096}
 # Shared SINGLE_BIN specialization, measured on M2 for flat and refinement.
 # Smaller staging increased barriers and lost; 8192 must fit Apple's 32 KiB.
 METAL_SINGLE_BIN_CAP = {2048: 2048, 4096: 4096, 8192: 4096}
+#: Pairs per threadgroup for the Metal half-width coarse kernel. A coarse
+#: transform of length B runs on B/16 threads -- 4 at band 64 -- and an Apple
+#: GPU executes 32-wide SIMD groups, so one pair per threadgroup leaves 7/8 of
+#: every SIMD idle at band 64. Packing pairs fills them. Built up to 256
+#: threads per group; the host picks from what is shipped (see
+#: _mtlcompute.coarse_ppg).
+METAL_C16_PPG = (2, 4, 8, 16, 32)
+METAL_C16_MAX_THREADS = 256
 
 
 def metal_cap(n):
@@ -518,6 +526,10 @@ def main(argv=None):
                                 suffix="_c16%st%d"
                                        % ("p%d" % _p if _p > 1 else "", _t))
             compile_metal(slangc, n, mcap, centry, MSL, suffix="_c16", coarse16=1)
+            for _p in METAL_C16_PPG:
+                if (n // RADIX.get(n, 16)) * _p <= METAL_C16_MAX_THREADS:
+                    compile_metal(slangc, n, mcap, centry, MSL, suffix="_c16p%d" % _p,
+                                  coarse16=1, ppg=_p)
 
         for entry in ENTRIES + (("fullCorrelation", "fullCorrelationSeries") if n >= 1024 else ()):
             m, lib = compile_metal(slangc, n, mcap, entry, MSL)
