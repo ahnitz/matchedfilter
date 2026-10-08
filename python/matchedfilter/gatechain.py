@@ -471,6 +471,124 @@ def calibrate_costs(n, ntemplates, blocks=256, reps=5, seed=11, group=None):
     return cm
 
 
+
+def calibrate_costs_gpu(n, device, blocks=1024, reps=5, seed=11, nt=256):
+    """This GPU's tier costs at transform size n, in device nanoseconds, as a CostModel.
+
+    The CPU calibration's construction (synthetic analytic noise, whitened random templates,
+    thresholds placed at target survivor densities), timed by the device's own timestamps
+    around each submission rather than tick counters: the GPU executes a chain as one
+    recording, so a tier's cost is the difference between runs that differ in that tier.
+      block      per-block fixed work (forward transform, compaction setup): from two template
+                 counts at a threshold nothing passes
+      dense[b]   a first tier at band b, per pair
+      refine     per refined pair, at survivor densities _CAL_DENSITIES
+      sparse[b]  a second tier at band b, per first-tier survivor
+    Sized like a segment's call on this hardware (1024 blocks x 256 templates): at a few
+    thousand pairs a GPU call is fixed latency and every difference above is noise.
+    A few seconds per (n, device), once per process, or read from MF_COST_FILE.
+    """
+    from . import HierarchicalFilter
+    key = ("gpu", int(n), str(device))
+    if key in _COSTS:
+        return _COSTS[key]
+    path = _cost_file()
+    skey = "gpu,%d,%s" % (int(n), str(device))
+    if path is not None:
+        stored = _load_cost_file(path).get(skey)
+        if stored is not None:
+            _COSTS[key] = cm = CostModel.from_dict(stored)
+            return cm
+    rng = np.random.default_rng(seed)
+    bands = candidate_bands(n)
+    taps = n // 4
+    h = np.zeros((nt, n), np.complex64)
+    h[:, :taps] = rng.standard_normal((nt, taps)) / np.sqrt(taps)
+    spec = np.fft.fft(h, axis=1).astype(np.complex64)
+    step = n - taps
+    S = (blocks + 1) * step + n
+    x = (rng.standard_normal(S) + 1j * rng.standard_normal(S)) / np.sqrt(2)
+    X = np.fft.fft(x); X[S // 2:] = 0
+    ser = (np.fft.ifft(X) * np.sqrt(2)).astype(np.complex64)
+    starts = (np.arange(blocks) * step).astype(np.int64)
+    ws = np.full(blocks, taps, np.int64); we = np.full(blocks, n, np.int64)
+    big = float(np.finfo(np.float32).max)
+    plans = {}
+
+    def run(chain, thr, ntm=nt, reps=reps):
+        """(device ns per call: fastest repetition, first-tier survivors, refined pairs)."""
+        k = (tuple(chain), ntm)
+        p = plans.get(k)
+        if p is None:
+            p = plans[k] = HierarchicalFilter(n, 1, ntm, chain=tuple(chain), device=device)
+            p.set_templates(spec[:ntm])
+        p.set_coarse_threshold(tuple(thr))
+        ctx = p._gpu
+        ctx._timing = True
+        p.run_series(ser, starts, ws, we, threshold=1e6)                 # warm-up, recording
+        ctx.timings().clear()
+        t, s1, r = [], [], []
+        for _ in range(reps):
+            p.run_series(ser, starts, ws, we, threshold=1e6)
+            log = ctx.timings()
+            t.append(sum(ms for _, ms in log) * 1e6)
+            log.clear()
+            s1.append(getattr(ctx, "last_tier1_survivors", 0))
+            r.append(getattr(ctx, "last_refinements", 0))
+        ctx._timing = False
+        return float(np.min(t)), float(np.median(s1)), float(np.median(r))
+
+    def thr_for(b, density):
+        lo, hi = 0.0, 16.0
+        for _ in range(14):
+            mid = 0.5 * (lo + hi)
+            _, _, refined = run((b,), (mid,), reps=1)
+            frac = refined / (blocks * nt)
+            if frac > density:
+                lo = mid
+            else:
+                hi = mid
+            if abs(frac - density) < 0.25 * density:
+                break
+        return mid
+
+    b0 = bands[0]
+    t_small, _, _ = run((b0,), (big,), ntm=nt // 4)
+    t_full, _, _ = run((b0,), (big,))
+    per_pair0 = (t_full - t_small) / (blocks * (nt - nt // 4))
+    block = max(0.0, t_full / blocks - nt * per_pair0)
+    dense = {}
+    for b in bands:
+        t, _, _ = run((b,), (big,))
+        dense[b] = max(1e-3, (t / blocks - block) / nt)
+    refine, sparse = [], {}
+    for f in _CAL_DENSITIES:
+        g0 = thr_for(b0, f)
+        t, _, refined = run((b0,), (g0,))
+        if refined:
+            refine.append((refined / (blocks * nt), max(1e-3, (t - blocks * (block + nt * dense[b0])) / refined)))
+        for b in bands[1:]:
+            t2, s1, _ = run((b0, b), (g0, big))
+            if s1:
+                sparse.setdefault(b, []).append(
+                    (s1 / (blocks * nt), max(1e-3, (t2 - blocks * (block + nt * dense[b0])) / s1)))
+    if bands[1:]:
+        sparse.setdefault(b0, list(sparse.get(bands[1], [])))
+    cm = CostModel(n, dense, sparse, refine, block=block)
+    _COSTS[key] = cm
+    if path is not None:
+        _store_cost(path, skey, cm)
+    return cm
+
+
+def device_costs(n, device=None, ntemplates=_CAL_TEMPLATES, group=None):
+    """The cost model of the device a plan runs on: CPU tick counters, or GPU device time."""
+    from .device import parse as _parse_device
+    dev = _parse_device(device)
+    if dev.kind == "gpu":
+        return calibrate_costs_gpu(n, str(dev))
+    return calibrate_costs(n, ntemplates, group=group)
+
 def _reach(N, cols, thresholds):
     """Cumulative noise pass probabilities through the chain."""
     alive = np.ones(N.shape[0], bool)
@@ -676,7 +794,7 @@ _PRICE_CACHE = OrderedDict()
 
 
 def price_block_sizes(fine, delta_f, data_rate, longest, margin, ntemplates, snr, fd, candidates,
-                      max_tiers=3):
+                      max_tiers=3, device=None):
     """Rank block sizes for one bank by modelled cost per valid output sample and template.
 
     For each n the bank would run one plan over blocks advancing n - longest + 1 samples; a
@@ -698,13 +816,13 @@ def price_block_sizes(fine, delta_f, data_rate, longest, margin, ntemplates, snr
             continue
         q = max(n // 32, 1)                  # the bank prices its windows on this grid
         lo = (int(margin) // q) * q
-        key = (sig, float(delta_f), float(data_rate), n, lo, float(snr), float(fd), int(max_tiers))
+        key = (sig, float(delta_f), float(data_rate), n, lo, float(snr), float(fd), int(max_tiers), str(device))
         hit = _PRICE_CACHE.get(key)
         if hit is None:
             ref = rebin_profile(fine, delta_f, data_rate, n)
             hit = (None, None, None)
             if ref is not None:
-                cm = calibrate_costs(n, ntemplates)
+                cm = device_costs(n, device, ntemplates)
                 best, _ = choose_chain(ref, n, snr, fd, cost=cm, max_tiers=max_tiers, window=(lo, n - lo))
                 if best is not None:
                     hit = (cm.block, best["cost"], best["chain"])

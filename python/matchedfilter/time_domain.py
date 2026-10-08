@@ -184,6 +184,13 @@ def _partition_templates(
     return groups, order
 
 
+def _max_tiers(device) -> int:
+    """Gate tiers the device's hierarchical engine executes (HierarchicalFilter._MAX_TIERS)."""
+    from . import HierarchicalFilter
+    from .device import parse as _parse_device
+    return min(3, HierarchicalFilter._MAX_TIERS[_parse_device(device).kind])
+
+
 _CORR_COSTS: Dict[Tuple[int, str], Tuple[float, float]] = {}
 
 
@@ -759,7 +766,8 @@ class TimeDomainFilterBank:
             margin = int(np.ceil((taps_max // 2) / self.rate_ratio))
             ranked = gatechain.price_block_sizes(
                 fine, delta_f, self.data_sample_rate, longest, margin, j - i,
-                self.threshold, self.false_dismissal, [n for n in self._choice_ns if n > longest])
+                self.threshold, self.false_dismissal, [n for n in self._choice_ns if n > longest],
+                max_tiers=_max_tiers(self.device), device=self.device)
             n_sorted[i:j] = ranked[0][1] if ranked else n0
             _log_autotune("BLOCK templates=%d longest=%d legacy n=%d -> n=%d  %s", j - i, longest, n0,
                           int(n_sorted[i]), " ".join("%d:%.3g" % (n, c) for c, n, _ in ranked))
