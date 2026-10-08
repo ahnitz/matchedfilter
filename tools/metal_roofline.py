@@ -237,7 +237,7 @@ def stages(bank, reps, nfine=1):
     """Capture and replay the ladder's three stages for its largest top template."""
     args = argparse.Namespace(seg_samples=1 << 20, start_pad=120.0, end_pad=16.0, pad=4096,
                               threshold=6.0, fd=1e-3, peak_window=1.0, asym_threshold=6.0,
-                              asym_bin_width=0.03, asym_num_bins=1000)
+                              asym_bin_width=0.03, asym_num_bins=1000, fft_length=0)
     top = ladder.load_tops(bank, 1)[0]
     rng = np.random.default_rng(1)
     amp = np.sqrt(ladder.profile())
