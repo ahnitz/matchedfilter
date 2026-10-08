@@ -1,6 +1,7 @@
 """Exercise CLI reporting without expensive timing or optional FFT engines."""
 import json
 
+import matchedfilter as mf
 from matchedfilter import benchmark
 
 
@@ -80,4 +81,10 @@ def test_one_in_ten_thousand_budget_runs_a_real_benchmark():
         1024, 2, 4, 5.5, 1e-4, 1)
     assert all(math.isfinite(v) and v > 0 for v in (flat, hier, speed))
     assert 0 <= rate <= 1
-    assert len(cfg) == 2 and 64 <= cfg[0] < 1024
+    # The chain is the autotuner's choice and depends on the machine's costs
+    # (AVX-512 picks two tiers, NEON has picked (128,)): assert it is a valid
+    # chain, not one machine's answer.
+    cfg = tuple(int(b) for b in cfg)
+    assert 1 <= len(cfg) <= mf.HierarchicalFilter._MAX_TIERS["cpu"]
+    assert all(64 <= b < 1024 and b & (b - 1) == 0 for b in cfg)
+    assert list(cfg) == sorted(set(cfg))
