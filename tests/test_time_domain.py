@@ -672,3 +672,28 @@ def test_single_template_call_equals_the_ungated_bank_for_that_template():
         o1 = np.argsort(one.sample_indices); o2 = np.argsort(every.sample_indices[sel])
         np.testing.assert_array_equal(one.sample_indices[o1], every.sample_indices[sel][o2])
         np.testing.assert_array_equal(one.snr[o1], every.snr[sel][o2])
+
+
+def test_gpu_correlation_bank_prices_its_own_layout_and_matches_cpu():
+    """Each device prices its correlation layout with its own block costs; whatever groups result,
+    the correlation agrees with the CPU's away from the series edges (where coverage depends on
+    the transform size)."""
+    from conftest import usable_gpu
+    gpu = usable_gpu()
+    if gpu is None:
+        pytest.skip("no usable GPU")
+    rng = np.random.default_rng(21)
+    counts = np.sort(rng.integers(15, 5000, 24))
+    taps = np.zeros((len(counts), counts.max()), np.float32)
+    for i, c in enumerate(counts):
+        taps[i, :c] = rng.standard_normal(c) / np.sqrt(c)
+    S = 1 << 18
+    ser = ((rng.standard_normal(S) + 1j * rng.standard_normal(S)) / np.sqrt(2)).astype(np.complex64)
+    cpu = TimeDomainFilterBank(taps, tap_counts=counts, engine='corr')
+    g = TimeDomainFilterBank(taps, tap_counts=counts, engine='corr', device=gpu)
+    assert sum(x['count'] for x in g.groups) == len(counts)
+    a, b = cpu.correlate_series(ser), g.correlate_series(ser)
+    edge = 2 * int(counts.max())
+    inner = slice(edge, S - 65536)                 # past the largest block's tail on either device
+    scale = np.abs(a[:, inner]).max()
+    assert np.max(np.abs(b[:, inner] - a[:, inner])) <= 1e-5 * scale
