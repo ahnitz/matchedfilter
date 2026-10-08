@@ -101,6 +101,53 @@ def _interval_mask(S: int, starts: np.ndarray, stops: np.ndarray) -> np.ndarray:
     return np.cumsum(edge[:-1]) > 0
 
 
+def _page_aligned_empty(shape, dtype=np.complex64, page: int = 16384) -> np.ndarray:
+    """np.empty, starting on a page boundary: unified-memory GPUs can then write into it
+    in place (see _correlate_group). Costs at most one page."""
+    dtype = np.dtype(dtype)
+    nbytes = int(np.prod(shape)) * dtype.itemsize
+    raw = np.empty(nbytes + page, dtype=np.uint8)
+    off = (-raw.ctypes.data) % page
+    return raw[off:off + nbytes].view(dtype).reshape(shape)
+
+
+def _interval_runs(S: int, starts: np.ndarray, stops: np.ndarray) -> np.ndarray:
+    """The union of [starts, stops) clipped to [0, S), as sorted disjoint (K, 2) runs.
+
+    What _interval_mask describes, without an S-long array: a 2^20-sample mask costs a
+    cumsum and a pass per use, and the middle stage needed three per group per call.
+    """
+    a = np.clip(np.asarray(starts, np.int64), 0, S)
+    b = np.clip(np.asarray(stops, np.int64), 0, S)
+    keep = b > a
+    a, b = a[keep], b[keep]
+    if a.size == 0:
+        return np.empty((0, 2), np.int64)
+    order = np.argsort(a, kind="stable")
+    a, b = a[order], np.maximum.accumulate(b[order])
+    # A run starts where a start lies beyond every earlier stop.
+    new = np.ones(a.size, bool)
+    new[1:] = a[1:] > b[:-1]
+    first = np.flatnonzero(new)
+    last = np.append(first[1:] - 1, a.size - 1)
+    return np.stack([a[first], b[last]], axis=1)
+
+
+def _intersect_runs(x: np.ndarray, y: np.ndarray) -> np.ndarray:
+    """Intersection of two sorted disjoint run lists."""
+    out = []
+    i = j = 0
+    while i < len(x) and j < len(y):
+        a, b = max(x[i, 0], y[j, 0]), min(x[i, 1], y[j, 1])
+        if a < b:
+            out.append((a, b))
+        if x[i, 1] < y[j, 1]:
+            i += 1
+        else:
+            j += 1
+    return np.asarray(out, np.int64).reshape(-1, 2)
+
+
 def _partition_templates(
     counts: np.ndarray,
     max_batch: Optional[int] = None,
@@ -214,7 +261,11 @@ def _corr_block_costs(n: int, device: Optional[Any] = None) -> Tuple[float, floa
             return hit
     rng = np.random.default_rng(7)
     taps = n // 4
-    nblocks = 8
+    # A GPU call carries a fixed submit-and-wait cost (~0.2 ms on an M2) that production
+    # spreads over a whole series of blocks. Over 8 blocks it was most of a(n) and noisy enough
+    # to flip the middle bank between n=8192 and 16384 run to run (16384 runs 2.3x slower
+    # there), so a GPU is priced over about half a million samples, as the bank calls it.
+    nblocks = 8 if dkey == "cpu" else max(8, (1 << 19) // (n - taps))
     L = nblocks * (n - taps) + n
     ser = ((rng.standard_normal(L) + 1j * rng.standard_normal(L)) / np.sqrt(2)).astype(np.complex64)
     per_block = []
@@ -1060,11 +1111,25 @@ class TimeDomainFilterBank:
                         mask = (bin_counts == u_cnt)
                         groups_bins.append((bstarts[mask], bws[mask], bwe[mask]))
 
-            for sub_starts, sub_bws, sub_bwe in groups_bins:
-                aidx, aval = active_plan.run_series(
-                    data_in, sub_starts, sub_bws, sub_bwe, binsize=bs,
-                    threshold=eff_threshold, templates=plan_templates, raw=True
-                )
+            # Every bin count in one GPU submission where the backend can, instead of a
+            # submission and a wait per count (see MatchedFilter._run_series_ragged).
+            work = [(gb, None) for gb in groups_bins]
+            if (len(groups_bins) > 1 and getattr(active_plan, '_gpu', None) is not None
+                    and not getattr(active_plan, '_bandlimited', False)
+                    and hasattr(active_plan, '_run_series_ragged')):
+                res = active_plan._run_series_ragged(
+                    data_in, bstarts, bws, bwe, binsize=bs,
+                    threshold=eff_threshold, templates=plan_templates)
+                if res is not None:
+                    work = [((bstarts, bws, bwe), res)]
+            for (sub_starts, sub_bws, sub_bwe), res in work:
+                if res is not None:
+                    aidx, aval = res
+                else:
+                    aidx, aval = active_plan.run_series(
+                        data_in, sub_starts, sub_bws, sub_bwe, binsize=bs,
+                        threshold=eff_threshold, templates=plan_templates, raw=True
+                    )
                 if getattr(active_plan, '_last_n_triggers', None) == 0:
                     continue
 
@@ -1128,9 +1193,9 @@ class TimeDomainFilterBank:
 
     @staticmethod
     def _block_coverage(S: int, st: np.ndarray, lo: int, hi: int) -> np.ndarray:
-        """Samples written by blocks starting at st, each valid over [st+lo, st+hi)."""
+        """Runs of samples written by blocks starting at st, each valid over [st+lo, st+hi)."""
         b0 = st.astype(np.int64) + lo
-        return _interval_mask(S, b0, np.minimum(b0 + (hi - lo), S))
+        return _interval_runs(S, b0, np.minimum(b0 + (hi - lo), S))
 
     def _correlate_group(self, g: "_TemplateGroup", ser: np.ndarray, st: np.ndarray,
                          t0: int, nt: int, dest: np.ndarray) -> None:
@@ -1155,8 +1220,19 @@ class TimeDomainFilterBank:
             else:
                 tmp = np.empty((nt, S), dtype=np.complex64)
                 cplan._execution_plan().correlate_series_continuous(ser, st, lo, hi, t0, nt, tmp)
-                cover = self._block_coverage(S, st, lo, hi)
-                np.copyto(dest, tmp, where=cover[None, :])   # see _correlate_group
+                for a, b in self._block_coverage(S, st, lo, hi):
+                    dest[:, a:b] = tmp[:, a:b]                # see below
+            return
+        # Unified memory (Metal): write straight into dest, and read the series where it
+        # is. A page-aligned destination needs no workspace and no copy-out.
+        view = getattr(cplan._gpu, 'host_view', None)
+        out_owner = view(dest) if view is not None else None
+        if out_owner is not None:
+            ser_owner = view(ser) if ser.flags.writeable else None
+            try:
+                cplan._continuous_gpu(ser, st, t0, nt, dest)
+            finally:
+                del ser_owner, out_owner
             return
         shape = (nt, S)
         ws = getattr(g, '_corr_workspace', None)
@@ -1168,12 +1244,14 @@ class TimeDomainFilterBank:
             ws = cplan._gpu.empty_shared(shape, readback=True)
             g._corr_workspace = ws
         cplan._continuous_gpu(ser, st, t0, nt, ws)
-        cover = self._block_coverage(S, st, lo, hi)
         # Not dest[:, cover] = ws[:, cover]: boolean indexing along axis 1 walks the rows
         # column by column, and with rows a power of two apart (2^20 samples = 8 MiB) every
         # access lands in one cache set -- 16 rows fit, 17+ thrash it (16 -> 24 templates
-        # took 70 ms -> 2.1 s). copyto with a broadcast mask copies row by row.
-        np.copyto(dest, ws, where=cover[None, :])
+        # took 70 ms -> 2.1 s). Copying the covered runs row by row is a plain memcpy per
+        # row, 2.6x faster again than copyto with a broadcast mask (4.6 ms against 12.1 ms
+        # for 27 rows on an M2), and builds no S-long mask.
+        for a, b in self._block_coverage(S, st, lo, hi):
+            dest[:, a:b] = ws[:, a:b]
 
     def _correlate_windows(self, g: "_TemplateGroup", ser: np.ndarray, W: np.ndarray,
                            t0: int, nt: int, dest: np.ndarray) -> None:
@@ -1184,7 +1262,7 @@ class TimeDomainFilterBank:
         even when several windows touch it."""
         from . import _automatic_series_layout
         S = ser.size
-        keep = np.zeros(S, dtype=bool)
+        keep = np.empty((0, 2), np.int64)
         if W.shape[0]:
             cplan = g.get_correlation_plan()
             lo, hi = cplan.valid
@@ -1199,14 +1277,15 @@ class TimeDomainFilterBank:
                 st = st[hit]
                 if st.size:
                     self._correlate_group(g, ser, st, t0, nt, dest)
-                    keep = (_interval_mask(S, W[:, 0], W[:, 1])
-                            & _interval_mask(S, b0[hit], b1[hit]))
+                    keep = _intersect_runs(_interval_runs(S, W[:, 0], W[:, 1]),
+                                           _interval_runs(S, b0[hit], b1[hit]))
         # Zero the complement by contiguous runs. Not dest[:, ~keep] = 0: boolean indexing
         # along axis 1 thrashes one cache set once 17+ rows sit 2^20 samples apart (see
         # _correlate_group); 27 rows took ~400 ms against ~10 ms by runs.
-        edges = np.flatnonzero(np.diff(np.concatenate(([True], keep, [True])).view(np.int8)))
+        edges = np.concatenate(([0], keep.ravel(), [S]))
         for a, b in zip(edges[::2], edges[1::2]):
-            dest[:, a:b] = 0
+            if b > a:
+                dest[:, a:b] = 0
 
     def correlate_series(
         self,
@@ -1307,7 +1386,7 @@ class TimeDomainFilterBank:
                 raise ValueError(f"out must be a writable C-contiguous complex64 array of shape {shape}")
             result = out
         else:
-            result = np.empty(shape, dtype=np.complex64)
+            result = _page_aligned_empty(shape)
 
         for g in self._groups:
             g_indices = g.template_indices

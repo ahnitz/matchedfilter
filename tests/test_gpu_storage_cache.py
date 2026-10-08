@@ -72,7 +72,9 @@ def test_selective_record_eviction_preserves_hot_storage(plan):
 
 
 def test_series_source_capacity_does_not_reallocate_fft_workspace(plan):
-    series = np.ones(4096, dtype='complex64')
+    # Off a page boundary, so a unified-memory backend copies into its source buffer
+    # rather than reading the series in place.
+    series = np.ones(4097, dtype='complex64')[1:]
     plan.run_series(series, [0,512], [0,0], [1024,1024])
     first = plan._series_workspace
     actual = plan.run_series(series[:3000], [0,2700], [0,0], [1024,1024]).copy()

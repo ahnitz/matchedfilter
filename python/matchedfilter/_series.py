@@ -3,9 +3,10 @@ import numpy as np
 
 
 class SeriesLayout:
-    def __init__(self, n, starts, low, high, binsize):
+    def __init__(self, n, starts, low, high, binsize, ragged=False):
         self.order = None
         self.groups = None
+        self.ragged = False
         self.starts = starts
         limit = np.iinfo(np.intp).max
         if low.size == 1 or (np.all(low == low[0]) and np.all(high == high[0])):
@@ -29,8 +30,8 @@ class SeriesLayout:
         widths = self.high - self.low
         # Avoid unsigned/object arithmetic for a Python binsize above uintp.
         bins = np.ones_like(widths) if binsize >= n else 1 + (widths - 1) // binsize
-        self.nbins = int(bins[0])
-        if np.any(bins != self.nbins):
+        self.nbins = int(bins.max()) if ragged else int(bins[0])
+        if not ragged and np.any(bins != self.nbins):
             raise ValueError('every block\'s window must give the same bin count; '
                              'call run_series once per distinct bin count')
 
