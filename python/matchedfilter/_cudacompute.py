@@ -21,20 +21,39 @@ import pathlib
 
 import numpy as np
 
-from . import _cuda
+from . import _cuda, _gputime
 from ._cuda import check_cuda
 from ._errors import UnsupportedSize
 from ._gpu_cache import InputUploads
 from ._shared import empty_shared, shared_buffer, shared_key, _Borrowed
 
-if not hasattr(_Borrowed, "dptr"):
-    _Borrowed.dptr = property(
-        lambda self: getattr(
-            self.owner.buffer,
-            "dptr",
-            ctypes.c_uint64(self.handle.value if hasattr(self.handle, "value") else int(self.handle)),
-        )
-    )
+def _borrowed_dptr(self):
+    """Device address of a shared array, including a view's offset into its allocation."""
+    base = getattr(self.owner.buffer, "dptr", None)
+    base = base.value if base is not None else int(getattr(self.handle, "value", self.handle))
+    return ctypes.c_uint64(base + getattr(self, "offset", 0))
+
+
+_Borrowed.dptr = property(_borrowed_dptr)
+
+
+class _DeviceShared:
+    """Per-device state every Context on that device shares: the primary context's
+    loaded modules and functions, occupancy and labels. All Contexts on one device
+    retain the same primary context, so one module load serves every plan (a bank
+    makes dozens of plans; each used to JIT-load its own copy of every kernel)."""
+
+    def __init__(self, cuda, device):
+        self.ctx = ctypes.c_void_p()
+        check_cuda(cuda.cuDevicePrimaryCtxRetain(ctypes.byref(self.ctx), device),
+                   "cuDevicePrimaryCtxRetain")       # held for the process lifetime
+        self.modules = {}
+        self.pipelines = {}
+        self.occupancy = {}
+        self.labels = {}
+
+
+_DEVICE_SHARED = {}
 
 
 _HERE = pathlib.Path(__file__).resolve().parent
@@ -219,11 +238,11 @@ class _HostBuffer:
                 self.ctx.cuda.cuMemAllocManaged(ctypes.byref(self.dptr), self.nbytes, 1),
                 "cuMemAllocManaged",
             )
-            if readback and hasattr(self.ctx.cuda, "cuMemAdvise"):
-                cu = self.ctx.cuda
-                # Advice is a hint: a device without it still runs correctly.
-                cu.cuMemAdvise(self.dptr, self.nbytes, _ADVISE_PREFERRED_LOCATION, _CPU_DEVICE)
-                cu.cuMemAdvise(self.dptr, self.nbytes, _ADVISE_ACCESSED_BY, ctx.device.value)
+            # No placement advice, readback or not. Host-preferred placement made every GPU
+            # write cross PCIe (the middle stage's 216 MB output: 33 ms, against 0.6 ms
+            # device-resident); and a `readback` output is often consumed on the device
+            # (TimeDomainFilterBank.empty_shared feeds the fine stage). Unadvised managed
+            # pages stay where they were last written and migrate when read elsewhere.
         else:
             p = ctypes.c_void_p()
             check_cuda(self.ctx.cuda.cuMemAllocHost_v2(ctypes.byref(p), self.nbytes),
@@ -333,6 +352,12 @@ class Context(InputUploads):
 
     max_grouped_bins = _MAX_BINS
     cache_limit_bytes = 1024 * 1024 * 1024
+    # Unified addressing: a view inside a shared allocation is a device pointer.
+    shared_views = True
+
+    def shares_memory_with(self, other):
+        """Contexts on one device share its primary context, hence every allocation."""
+        return isinstance(other, Context) and other.dev_idx == self.dev_idx
 
     def __init__(self, index=0):
         self.cuda = _cuda.get_cuda_lib()
@@ -370,17 +395,27 @@ class Context(InputUploads):
             self.streams.append(s)
         self.stream = self.streams[0]
 
-        self.timing = os.environ.get("MF_GPU_TIMING", "") not in ("", "0")
+        # The shared timing contract (_gputime): register, keep (label, device_ms).
+        self.timing = _gputime.enabled()
         self.timing_log = []
         self._event_pool = []
         self._pending_events = {}
+        if self.timing:
+            _gputime.register(self)
 
         self.last_gpu_time = 0.0
         self.last_refinements = 0
         self.last_tier1_survivors = 0
-        self._modules = {}
-        self._pipelines = {}
-        self._occupancy = {}
+        shared = _DEVICE_SHARED.get(index)
+        if shared is None and self._using_primary_ctx:
+            shared = _DEVICE_SHARED[index] = _DeviceShared(self.cuda, self.device.value)
+        if shared is not None:
+            self._modules, self._pipelines = shared.modules, shared.pipelines
+            self._occupancy, self._labels = shared.occupancy, shared.labels
+            self._shared_modules = True
+        else:
+            self._modules, self._pipelines, self._occupancy, self._labels = {}, {}, {}, {}
+            self._shared_modules = False
         self._batches = {}
         self._full_batches = {}
         self._tierc_batches = {}
@@ -429,17 +464,29 @@ class Context(InputUploads):
         """Wait for ``stream``; resolve its timed regions into timing_log."""
         st = self.stream if stream is None else stream
         check_cuda(self.cuda.cuStreamSynchronize(st), "cuStreamSynchronize")
-        pending = self._pending_events.pop(st.value, None)
+        self._resolve(st.value)
+
+    def _resolve(self, key):
+        pending = self._pending_events.pop(key, None)
         if pending:
             total = 0.0
             ms = ctypes.c_float(0.0)
             for label, e0, e1 in pending:
+                check_cuda(self.cuda.cuEventSynchronize(e1), "cuEventSynchronize")
                 check_cuda(self.cuda.cuEventElapsedTime(ctypes.byref(ms), e0, e1),
                            "cuEventElapsedTime")
                 self.timing_log.append((label, float(ms.value)))
                 total += float(ms.value)
                 self._event_pool.extend((e0, e1))
             self.last_gpu_time = total * 1e-3
+
+    def timings(self):
+        """Settle every outstanding measurement and return timing_log (the _gputime contract)."""
+        if self._pending_events:
+            self._bind()
+            for key in list(self._pending_events):
+                self._resolve(key)
+        return self.timing_log
 
     def _copy_h2d(self, dst, src, nbytes, stream, label):
         st = self.stream if stream is None else stream
@@ -554,7 +601,6 @@ class Context(InputUploads):
                                           fn_name.encode("utf-8")),
             f"cuModuleGetFunction({fn_name})",
         )
-        self._labels = getattr(self, "_labels", {})
         self._labels[hfunc.value] = stem
         return hfunc
 
@@ -956,6 +1002,23 @@ class Context(InputUploads):
         self._sync(stream)
         return out
 
+    def zero_columns(self, dest, a, b):
+        """Zero dest[:, a:b] of a GPU-shared 2-D array on the device (enqueued).
+
+        Call zero_columns_done() after the last one: it waits, so work on another
+        Context's stream sees the zeros."""
+        sb = shared_buffer(dest, self)
+        if sb is None or dest.ndim != 2 or b <= a:
+            raise ValueError("zero_columns needs a GPU-shared 2-D array and a nonempty range")
+        width = (b - a) * dest.itemsize // 4
+        self._bind()
+        check_cuda(self.cuda.cuMemsetD2D32Async(sb.dptr.value + a * dest.itemsize, dest.strides[0],
+                                                0, width, dest.shape[0], self.stream),
+                   "cuMemsetD2D32Async")
+
+    def zero_columns_done(self):
+        self._sync(self.stream)
+
     # ---- hierarchical ---------------------------------------------------------------
     def _coarse_kernel(self, band, pairs, nt):
         """The coarse gate kernel for ``band`` and its pairs-per-group / tile geometry."""
@@ -1219,10 +1282,11 @@ class Context(InputUploads):
             return
         self._bind()
         self.clear_cache()
-        for mod in self._modules.values():
-            self.cuda.cuModuleUnload(mod)
-        self._modules.clear()
-        self._pipelines.clear()
+        if not self._shared_modules:
+            for mod in self._modules.values():
+                self.cuda.cuModuleUnload(mod)
+            self._modules.clear()
+            self._pipelines.clear()
         for _, pending in self._pending_events.items():
             for _, e0, e1 in pending:
                 self._event_pool.extend((e0, e1))

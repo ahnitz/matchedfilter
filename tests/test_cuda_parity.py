@@ -263,6 +263,37 @@ def test_large_shared_memory_kernels_load_and_agree(n):
     np.testing.assert_allclose(out[DEV]["value"], out["cpu"]["value"], rtol=2e-5)
 
 
+# ---- device-resident middle -> fine (plan D3) --------------------------------------------------
+def test_resident_correlation_feeds_filter_in_place():
+    from matchedfilter import TimeDomainFilterBank
+    from matchedfilter._shared import shared_buffer
+    rng = np.random.default_rng(21)
+    S = 200000
+    ser = _complex(rng, S)
+    mid_taps = rng.standard_normal((5, 300)).astype(np.float32)
+    fine_taps = rng.standard_normal((7, 250)).astype(np.float32)
+    win = slice(30000, 170000)
+    banks = {d: TimeDomainFilterBank(mid_taps, engine="corr", device=d) for d in ("cpu", DEV)}
+    ref = banks["cpu"].correlate_series(ser, windows=win)
+    out = banks[DEV].empty_shared((5, S))
+    out[:] = 7.0                               # stale contents must be overwritten, zeros included
+    got = banks[DEV].correlate_series(ser, windows=win, out=out)
+    assert got is out
+    np.testing.assert_allclose(got, ref, rtol=0, atol=1e-5 * np.abs(ref).max())
+    assert not np.any(got[:, :win.start - 300]) and not np.any(got[:, win.stop + 300:])
+    fine = {d: TimeDomainFilterBank(fine_taps, engine="flat", threshold=3.0, device=d,
+                                    binsize=4096) for d in ("cpu", DEV)}
+    row = got[3]
+    gplan = fine[DEV]._groups[0].plan
+    assert shared_buffer(row, gplan._gpu) is not None, "a row of shared output must bind in place"
+    r_dev = fine[DEV].filter_series(row, windows=slice(40000, 160000))
+    r_cpu = fine["cpu"].filter_series(ref[3], windows=slice(40000, 160000))
+    ws = getattr(gplan, "_series_workspace", None)
+    assert ws is not None and ws[1] is None, "the series was staged through the host"
+    np.testing.assert_array_equal(r_dev.sample_indices, r_cpu.sample_indices)
+    np.testing.assert_allclose(r_dev.snr, r_cpu.snr, rtol=2e-5, atol=1e-4)
+
+
 # ---- A3: no TypeError probing re-dispatch ----------------------------------------------------
 def test_backend_type_error_is_not_retried(monkeypatch):
     f = mf.MatchedFilter(1024, 1, 2, device=DEV)
@@ -304,6 +335,11 @@ labels = [l for l, ms in c.timing_log]
 assert all(ms >= 0 for l, ms in c.timing_log), c.timing_log
 for want in ("tierb_512_c16", "compact", "refine_2048", "readback", "upload"):
     assert any(l.startswith(want) for l in labels), (want, labels)
+from matchedfilter import _gputime
+c.peaks(n, d, h)
+agg = _gputime.collect()                  # the shared contract: settles and sums
+assert agg.get("tierb_2048", (0, 0))[0] == 1, agg
+assert c.timing_log == []                 # collect() cleared the context's own log
 print("OK", len(labels))
 """
     env = dict(os.environ, MF_GPU_TIMING="1")
