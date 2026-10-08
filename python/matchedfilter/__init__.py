@@ -748,6 +748,15 @@ class MatchedFilter:
         layout = SeriesLayout(self.n, st, ws, we, binsize, ragged=ragged)
         return ser, layout, binsize, t0, nt
 
+    def _settle_deferred(self):
+        """Collect every deferred call still in flight on this plan (filter_series_many)."""
+        owners = self.__dict__.get("_slot_owner")
+        if owners:
+            pending = list(owners.values())
+            owners.clear()
+            for d in pending:
+                d.result()
+
     def _run_series_ragged(self, series, starts, win_start, win_end, binsize=None,
                            threshold=0.0, templates=None):
         """run_series(raw=True) over blocks whose windows give DIFFERENT bin counts.
@@ -1104,6 +1113,11 @@ class MatchedFilter:
             workspace = ((cap_b, n, cap_k), None if workspace is None else workspace[1],
                          spectra_pool, starts_pool)
         _, source, spectra_pool, starts_pool = workspace
+        if not defer:
+            # A synchronous call reuses slots (and their fences) from 0: finish whatever a
+            # batch still has in flight on this plan first, or two submissions share a fence
+            # and one wait never returns.
+            self._settle_deferred()
         if defer and getattr(self, "_defer_token", None) != self._defer_series:
             # A new batch starts at slot 0: slots only have to differ among calls in flight
             # together, and reusing the same few keeps their recordings and sources warm.

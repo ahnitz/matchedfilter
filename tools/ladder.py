@@ -175,6 +175,7 @@ def run_device(device, tops, args, seed):
                 fine_out = TimeDomainFilterBank.filter_series_many(jobs)
             tm.add("fine", time.perf_counter() - t)
             fine_res = iter(fine_out)
+            asym_jobs, asym_keys = [], []
             for row, (m, b) in enumerate(fine):
                 trig = {}
                 for ifo in ser:
@@ -193,13 +194,22 @@ def run_device(device, tops, args, seed):
                             continue
                         used.add(sec)
                         c0 = int(r.sample_indices[i])
-                        t = time.perf_counter()
-                        fr = b.filter_series(mids[other][row], windows=slice(max(0, c0 - half), min(S, c0 + half)),
-                                             binsize=bs, threshold=0.0,
-                                             template_index=int(r.template_indices[i]))
-                        tm.add("asym", time.perf_counter() - t)
-                        results[(top["top"], seg, m, other, "asym", c0, int(r.template_indices[i]))] = fr
-                        counts["asym_calls"] += 1
+                        asym_jobs.append((b, mids[other][row],
+                                          dict(windows=slice(max(0, c0 - half), min(S, c0 + half)),
+                                               binsize=bs, threshold=0.0,
+                                               template_index=int(r.template_indices[i]))))
+                        asym_keys.append((top["top"], seg, m, other, "asym", c0, int(r.template_indices[i])))
+            # The segment's follow-ups, batched like the fine stage (--no-batch: one call each).
+            t = time.perf_counter()
+            if args.no_batch:
+                asym_out = [b.filter_series(x, **kw) for b, x, kw in asym_jobs]
+            else:
+                asym_out = TimeDomainFilterBank.filter_series_many(asym_jobs)
+            if asym_jobs:
+                tm.add("asym", time.perf_counter() - t)
+            for k, fr in zip(asym_keys, asym_out):
+                results[k] = fr
+            counts["asym_calls"] += len(asym_jobs)
     nfine = sum(t["nfine"] for t in tops)
     steady_segments = max(0, args.segments - 1) * len(tops)
     total = sum(steady.t.values())
