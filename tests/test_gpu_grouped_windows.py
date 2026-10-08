@@ -64,6 +64,13 @@ def test_irregular_windows_share_one_submission(monkeypatch):
             calls.append(cmd)
             return original(cmd, **kw)
         monkeypatch.setattr(f._gpu, '_submit', submit)
+    elif f.device.backend == 'cuda':
+        # CUDA enqueues on a stream; a submission is what the host waits for.
+        original = f._gpu._sync
+        def sync(stream=None):
+            calls.append(stream)
+            return original(stream)
+        monkeypatch.setattr(f._gpu, '_sync', sync)
     else:
         original = f._gpu.o.call
         def message(obj, selector, **kwargs):
