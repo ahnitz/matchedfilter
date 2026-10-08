@@ -213,6 +213,7 @@ def get_cuda_lib():
     # Optional entry points: bound when the driver has them, probed with hasattr.
     _opt = {
         "cuMemcpyDtoDAsync_v2": [ctypes.c_uint64, ctypes.c_uint64, ctypes.c_size_t, ctypes.c_void_p],
+        "cuMemcpyAsync": [ctypes.c_uint64, ctypes.c_uint64, ctypes.c_size_t, ctypes.c_void_p],
         "cuMemsetD8Async": [ctypes.c_uint64, ctypes.c_ubyte, ctypes.c_size_t, ctypes.c_void_p],
         "cuMemsetD2D32Async": [ctypes.c_uint64, ctypes.c_size_t, ctypes.c_uint, ctypes.c_size_t,
                                ctypes.c_size_t, ctypes.c_void_p],

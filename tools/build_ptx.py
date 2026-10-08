@@ -174,7 +174,7 @@ def build_full_tierc(slangc, nvrtc, env, outdir):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--slangc", default=None)
-    ap.add_argument("--only", choices=("all", "tierc", "refine"), default="all",
+    ap.add_argument("--only", choices=("all", "tierc", "refine", "coarse"), default="all",
                     help="rebuild only the two-stage kernels (and their manifest entry), "
                          "or only the refine family")
     args = ap.parse_args()
@@ -195,6 +195,17 @@ def main():
         manifest = json.loads((OUT / "manifest.json").read_text())
         manifest["full_tierc"] = build_full_tierc(slangc, nvrtc, env, OUT)
         (OUT / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+        return 0
+    if args.only == "coarse":
+        for n in (64, 128, 256):
+            for _p in (8, 16):
+                compile_tierb(slangc, nvrtc, env, n, OUT, entry="fusedTierB", suffix="_c16p%d" % _p,
+                              coarse16=1, ppg=_p)
+            _t = COARSE_TILE_T.get(n, 1)
+            if _t > 1:
+                compile_tierb(slangc, nvrtc, env, n, OUT, entry="fusedTierB", coarse16=1, ppg=8,
+                              tile=_t, suffix="_c16p8t%d" % _t)
+            print("  coarse n=%d" % n, flush=True)
         return 0
     if args.only == "refine":
         for n in TIER_B:
@@ -276,11 +287,13 @@ def main():
         # Coarse fp16 variants
         for centry in (("fusedTierB",) if RADIX.get(n, 16) == 16 else ()):
             compile_tierb(slangc, nvrtc, env, n, OUT, entry=centry, suffix="_c16", coarse16=1)
-            for _p in (2, 4):
+            # p8/p16 fill a 32/64-thread block at the small bands (WG = n/16 is 4 at
+            # band 64); the CUDA host picks the variant with the best occupancy.
+            for _p in (2, 4) + ((8, 16) if n <= 256 else ()):
                 compile_tierb(slangc, nvrtc, env, n, OUT, entry=centry, suffix="_c16p%d" % _p, coarse16=1, ppg=_p)
             _t = COARSE_TILE_T.get(n, 1)
             if _t > 1:
-                for _p in (1, 2, 4):
+                for _p in (1, 2, 4) + ((8,) if n <= 256 else ()):
                     compile_tierb(slangc, nvrtc, env, n, OUT, entry=centry, coarse16=1,
                                   ppg=_p, tile=_t,
                                   suffix="_c16%st%d" % ("p%d" % _p if _p > 1 else "", _t))

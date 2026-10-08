@@ -354,6 +354,8 @@ class Context(InputUploads):
     cache_limit_bytes = 1024 * 1024 * 1024
     # Unified addressing: a view inside a shared allocation is a device pointer.
     shared_views = True
+    # Device memory is separate from host memory (residency matters for pricing).
+    discrete = True
 
     def shares_memory_with(self, other):
         """Contexts on one device share its primary context, hence every allocation."""
@@ -416,6 +418,7 @@ class Context(InputUploads):
         else:
             self._modules, self._pipelines, self._occupancy, self._labels = {}, {}, {}, {}
             self._shared_modules = False
+        self._scratch_bufs = {}
         self._batches = {}
         self._full_batches = {}
         self._tierc_batches = {}
@@ -490,7 +493,6 @@ class Context(InputUploads):
 
     def _copy_h2d(self, dst, src, nbytes, stream, label):
         st = self.stream if stream is None else stream
-        self._bind()
         tok = self._mark(st)
         check_cuda(self.cuda.cuMemcpyHtoDAsync_v2(dst, src, nbytes, st), "cuMemcpyHtoDAsync")
         self._close(tok, st, label)
@@ -504,6 +506,40 @@ class Context(InputUploads):
     def _fill32(self, dptr, value, count, stream):
         if count > 0:
             check_cuda(self.cuda.cuMemsetD32Async(dptr, value, count, stream), "cuMemsetD32Async")
+
+    def _small_input(self, name, array, stream):
+        """A device copy of a small host-written input (block starts): one async copy.
+
+        Kernels must not read these from managed memory: the host rewrites them every
+        call, so each launch's first read page-faults them back onto the GPU (the
+        forward kernel took 132 us/launch on the L40S, 15 us with this). Nor may the
+        copy read managed memory (144 us per cuMemcpyAsync): the values go through a
+        pinned staging buffer, which the previous call's sync has released."""
+        array = np.ascontiguousarray(array)
+        nbytes = max(array.nbytes, 4)
+        k = (name, stream.value)
+        sc = self._scratch_bufs.get(k)
+        if sc is None or sc[0].nbytes < nbytes:
+            if sc is not None:
+                self._sync(stream)
+                sc[0].destroy()
+                sc[1].destroy()
+            size = max(nbytes, 4096)
+            sc = self._scratch_bufs[k] = (_Buffer(self, size), _Pinned(self, size))
+        dev, pin = sc
+        if array.nbytes:
+            ctypes.memmove(pin.ptr, array.ctypes.data, array.nbytes)
+            self._copy_h2d(dev.dptr.value, pin.ptr, array.nbytes, stream, "upload")
+        return dev
+
+    def _prefetch(self, buf, offset, nbytes, stream):
+        """Migrate a managed span to this device ahead of the kernel that reads it.
+
+        Host-written managed pages would otherwise be faulted in page by page by the
+        kernel itself; already-resident pages make this nearly free."""
+        if (isinstance(buf, _Borrowed) and getattr(buf.owner.buffer, "managed", False)
+                and nbytes > 0 and hasattr(self.cuda, "cuMemPrefetchAsync")):
+            self.cuda.cuMemPrefetchAsync(buf.dptr.value + offset, nbytes, self.device.value, stream)
 
     def _upload(self, buf, array, stream):
         """Bring a host input onto the device, or verify a shared one is already there."""
@@ -649,7 +685,6 @@ class Context(InputUploads):
     def _launch(self, hfunc, grid_dim, block_dim, params, shared_mem=0, stream=None, label=None):
         if (grid_dim if not isinstance(grid_dim, tuple) else grid_dim[0]) <= 0:
             return
-        self._bind()
         param_ptrs = (ctypes.c_void_p * len(params))(
             *[ctypes.c_void_p(ctypes.addressof(p)) for p in params]
         )
@@ -710,6 +745,7 @@ class Context(InputUploads):
     def peaks(self, n, data, tmpl, binsize=None, threshold=0.0, window=None,
               upload_data=True, upload_tmpl=True, _groups=None,
               slot=None, async_submit=False):
+        self._bind()
         nd, nt = data.shape[0], tmpl.shape[0]
         lo, hi = (0, n) if window is None else (int(window[0]), int(window[1]))
         lo, hi = max(0, min(lo, n)), max(0, min(hi, n))
@@ -737,7 +773,7 @@ class Context(InputUploads):
         t2 = float(threshold) ** 2 if threshold > 0 else 0.0
         stream = self.get_stream(slot)
         dsh, tsh = shared_buffer(data, self), shared_buffer(tmpl, self)
-        key = (n, nd, nt, nbins, slot, shared_key(data, self), shared_key(tmpl, self))
+        key = (n, nd, nt, nbins, slot, dsh and data.ctypes.data, tsh and tmpl.ctypes.data)
         upload_data, upload_tmpl, dsig, tsig = self._input_uploads(
             key, data, tmpl, upload_data, upload_tmpl)
         out = nd * nt * nbins
@@ -781,6 +817,7 @@ class Context(InputUploads):
         ``groups`` holds (lo, hi, a, b): rows a..b of ``data`` are searched over
         the window [lo, hi). Every group shares one bin count (the first group's).
         """
+        self._bind()
         nd, nt = data.shape[0], tmpl.shape[0]
         groups = tuple((int(lo), int(hi), int(a), int(b)) for lo, hi, a, b in groups)
         binsize = int(binsize)
@@ -795,7 +832,7 @@ class Context(InputUploads):
         t2 = float(threshold) ** 2 if threshold > 0 else 0.0
         stream = self.get_stream(slot)
         dsh, tsh = shared_buffer(data, self), shared_buffer(tmpl, self)
-        key = ("grouped", n, nd, nt, nb, slot, shared_key(data, self), shared_key(tmpl, self))
+        key = ("grouped", n, nd, nt, nb, slot, dsh and data.ctypes.data, tsh and tmpl.ctypes.data)
         upload_data, upload_tmpl, dsig, tsig = self._input_uploads(
             key, data, tmpl, True, upload_tmpl)
         out = nd * nt * nb
@@ -843,7 +880,7 @@ class Context(InputUploads):
     def _full_inputs(self, kind, n, data, tmpl, upload_data, upload_tmpl, stream):
         nd, nt = data.shape[0], tmpl.shape[0]
         dsh, tsh = shared_buffer(data, self), shared_buffer(tmpl, self)
-        key = (kind, n, nd, nt, shared_key(data, self), shared_key(tmpl, self))
+        key = (kind, n, nd, nt, dsh and data.ctypes.data, tsh and tmpl.ctypes.data)
         upload_data, upload_tmpl, dsig, tsig = self._input_uploads(
             key, data, tmpl, upload_data, upload_tmpl)
         estimate = (0 if dsh else data.nbytes) + (0 if tsh else tmpl.nbytes)
@@ -874,6 +911,7 @@ class Context(InputUploads):
 
     def correlate(self, n, data, tmpl, out, *, upload_data=True, upload_tmpl=True):
         """Full circular correlation in natural lag order: out[d, t, lag]."""
+        self._bind()
         nd, nt = data.shape[0], tmpl.shape[0]
         if out.shape != (nd, nt, n) or out.dtype != np.complex64 or not out.flags.c_contiguous:
             raise ValueError("out must be a C-contiguous complex64 (%d, %d, %d) array" % (nd, nt, n))
@@ -935,19 +973,14 @@ class Context(InputUploads):
     def correlate_continuous(self, n, data, tmpl, starts, out, lo, hi,
                              *, upload_data=True, upload_tmpl=True):
         """Full correlation written at continuous absolute series offsets: out[t, start + lag]."""
+        self._bind()
         nd, nt = data.shape[0], tmpl.shape[0]
         if out.ndim != 2 or out.shape[0] != nt or out.dtype != np.complex64 or not out.flags.c_contiguous:
             raise ValueError("out must be a C-contiguous complex64 (templates, samples) array")
         stream = self.stream
         key, bufs = self._full_inputs("full_series", n, data, tmpl, upload_data, upload_tmpl, stream)
         starts = np.ascontiguousarray(starts, np.uint32)
-        ssh = shared_buffer(starts, self)
-        if ssh is None:
-            sb = bufs.get("starts")
-            if sb is None or sb.nbytes < starts.nbytes:
-                sb = bufs["starts"] = _Buffer(self, max(starts.nbytes, 4))
-            sb.write(starts, stream)
-            ssh = sb
+        ssh = self._small_input("cstarts", starts, stream)
         S = out.shape[1]
         osh = shared_buffer(out, self)
         tierc = n > 65536
@@ -1020,18 +1053,37 @@ class Context(InputUploads):
         self._sync(self.stream)
 
     # ---- hierarchical ---------------------------------------------------------------
-    def _coarse_kernel(self, band, pairs, nt):
-        """The coarse gate kernel for ``band`` and its pairs-per-group / tile geometry."""
+    def _coarse_kernel(self, band, nt):
+        """The coarse gate kernel for ``band``: (fn, threads, ppg, tile, c16).
+
+        PPG pairs per block and TILE_T templates per pair-group are compiled in. The
+        choice is the shipped variant with the highest theoretical occupancy on this
+        device (threads resident per SM), ties to the larger group. A tile walks
+        TILE_T consecutive templates of one data row, so it needs nt % TILE_T == 0;
+        a partial PPG group is handled by padding the data rows (hier_peaks)."""
         if not _use_c16(band):
             fn, wg = self.pipeline(band, "fusedTierB")
             return fn, wg, 1, 1, False
-        ppg = max(1, min(4, 512 // band))
-        if pairs % ppg:
-            ppg = 1
-        tile = _COARSE_TILE_T.get(band, 1)
-        if tile > 1 and (nt % tile or pairs % (ppg * tile)):
-            tile = 1
-        fn, wg = self.pipeline(band, "fusedTierB", c16=True, ppg=ppg, tile=tile)
+        key = ("coarse_choice", band, nt % max(_COARSE_TILE_T.get(band, 1), 1) == 0)
+        if key not in self._pipelines:
+            best = None
+            tiles = (1, _COARSE_TILE_T[band]) if (band in _COARSE_TILE_T and key[2]) else (1,)
+            for tile in tiles:
+                for ppg in (1, 2, 4, 8, 16):
+                    if ppg > 1 and band // 16 * ppg > 1024:
+                        continue
+                    try:
+                        fn, wg = self.pipeline(band, "fusedTierB", c16=True, ppg=ppg, tile=tile)
+                    except UnsupportedSize:
+                        continue
+                    resident = self._blocks_per_sm(fn, wg) * wg
+                    score = (resident, ppg * tile)
+                    if best is None or score > best[0]:
+                        best = (score, fn, wg, ppg, tile)
+            if best is None:
+                raise UnsupportedSize(f"no coarse c16 kernel for band {band}")
+            self._pipelines[key] = best[1:]
+        fn, wg, ppg, tile = self._pipelines[key]
         return fn, wg, ppg, tile, True
 
     def _refine_grid(self, fn, wg, pairs):
@@ -1047,6 +1099,7 @@ class Context(InputUploads):
         convention): tier 0 is ``cascade_band`` with ``ct0``/``raw_thr``, tier 1
         is ``band`` with ``ct1``/``raw_thr1``.
         """
+        self._bind()
         if isinstance(band, (tuple, list)):
             cascade_band, band = band[0], band[1]
         if isinstance(ct0, (tuple, list)):
@@ -1089,21 +1142,28 @@ class Context(InputUploads):
         t2 = float(threshold) ** 2 if threshold > 0 else 0.0
         stream = self.get_stream(slot)
         dsh, tsh = shared_buffer(data, self), shared_buffer(tmpl, self)
-        key = (n, band0, band1, nd, nt, nbins, slot, shared_key(data, self), shared_key(tmpl, self))
+        key = (n, band0, band1, nd, nt, nbins, slot, dsh and data.ctypes.data, tsh and tmpl.ctypes.data)
         upload_data, upload_tmpl, dsig, tsig = self._input_uploads(
             key, data, tmpl, upload_data, upload_tmpl)
         c16 = _use_c16(band0)
         cb0 = 4 if c16 else 8
         out = nd * nt * nbins
+        cfn, cwg, ppg, tile, _ = self._coarse_kernel(band0, nt)
+        group = ppg * tile
+        # Data rows padded so the pair count fills whole groups; the extra rows are
+        # zero and their pairs sit past `pairs`, where the compaction never looks.
+        ndp = nd
+        while (ndp * nt) % group:
+            ndp += 1
 
         def make():
             b = {
                 "data": dsh or _Buffer(self, nd * n * 8),
                 "tmpl": tsh or _Buffer(self, nt * n * 8),
-                "cdata0": _Buffer(self, nd * band0 * cb0),
+                "cdata0": _Buffer(self, ndp * band0 * cb0),
                 "ct0": _Buffer(self, nt * band0 * cb0),
-                "cidx0": _Buffer(self, pairs * 4),
-                "cval0": _Buffer(self, pairs * 8),
+                "cidx0": _Buffer(self, ndp * nt * 4),
+                "cval0": _Buffer(self, ndp * nt * 8),
                 "surv0": _Buffer(self, pairs * 4),
                 # [refine count, tier-1 count]
                 "args": _Buffer(self, 16),
@@ -1125,6 +1185,9 @@ class Context(InputUploads):
         bufs, fresh = self._record("hier", self._hier, key, estimate, make)
         if fresh:
             upload_data = upload_tmpl = True
+            if ndp > nd:
+                self._fill32(_ptr(bufs["cdata0"].dptr.value + nd * band0 * cb0), 0,
+                             (ndp - nd) * band0 * cb0 // 4, stream)
 
         if upload_data:
             self._upload(bufs["data"], data, stream)
@@ -1156,10 +1219,9 @@ class Context(InputUploads):
                              [bufs["data"].dptr, bufs[name].dptr, _u32(n), _u32(b),
                               _u32(nd * b), _u32(packed)], stream=stream)
 
-        # Tier 0: the coarse gate over every pair.
-        cfn, cwg, ppg, tile, _ = self._coarse_kernel(band0, pairs, nt)
+        # Tier 0: the coarse gate over every pair (and the padding rows' pairs).
         cs, ce, csp, csh = _coarse_span(n, band0, lo, hi)
-        self._launch(cfn, pairs // (ppg * tile), cwg,
+        self._launch(cfn, ndp * nt // group, cwg,
                      [bufs["cdata0"].dptr, bufs["ct0"].dptr, bufs["cidx0"].dptr,
                       bufs["cval0"].dptr, _u32(nt), _u32(cs), _u32(ce), _u32(csp),
                       _i32(csh), _u32(1), _u32(0)], stream=stream)
@@ -1219,6 +1281,7 @@ class Context(InputUploads):
 
     def forward(self, n, series, starts, spectra, *, defer=False, slot=None, fused=False):
         """Batch forward FFTs of series blocks into ``spectra`` (deferred: no sync)."""
+        self._bind()
         stream = self.get_stream(slot)
         tierc = n > 65536
         if tierc:
@@ -1227,6 +1290,13 @@ class Context(InputUploads):
         else:
             hfunc, wg = self.pipeline(n, "seriesForward")
         sh = [shared_buffer(a, self) for a in (series, starts, spectra)]
+        if sh[0] is not None and sh[2] is not None:
+            st = np.asarray(starts, dtype=np.int64)
+            if st.size:
+                lo_ = int(min(st.min(), series.size))
+                hi_ = int(min(series.size, st.max() + n))
+                self._prefetch(sh[0], lo_ * series.itemsize, (hi_ - lo_) * series.itemsize, stream)
+            sh[1] = self._small_input("starts", np.asarray(starts, np.uint32), stream)
         if any(b is None for b in sh):
             key = ("forward", n, series.nbytes, starts.nbytes, spectra.nbytes, slot)
             bufs, _ = self._record("forward", self._forwards, key,
