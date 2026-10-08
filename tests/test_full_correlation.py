@@ -278,9 +278,8 @@ def test_gpu_shared_output_is_one_dispatch_past_staging_budget(monkeypatch):
     device = _device('gpu')
     from matchedfilter.device import parse
     parsed = parse(device)
-    backend = (__import__('matchedfilter._mtlcompute', fromlist=['Context'])
-               if parsed.backend == 'metal' else
-               __import__('matchedfilter._vkcompute', fromlist=['Context']))
+    backend = __import__('matchedfilter._%s' % {'metal': 'mtlcompute', 'cuda': 'cudacompute'}
+                         .get(parsed.backend, 'vkcompute'), fromlist=['Context'])
     ctx = backend.Context(parsed.index)
     try:
         n, nt = 4096, 2049  # just above the 64 MiB host staging budget
@@ -288,6 +287,12 @@ def test_gpu_shared_output_is_one_dispatch_past_staging_budget(monkeypatch):
         tmpl = np.empty((nt, n), np.complex64)
         out = ctx.empty_shared((1, nt, n))
         calls = []
+        if parsed.backend == 'cuda':
+            # No tile layer: count kernel launches, and their grid.
+            monkeypatch.setattr(ctx, '_launch', lambda fn, grid, *a, **k: calls.append(grid))
+            ctx.correlate(n, data, tmpl, out)
+            assert calls == [nt]
+            return
         monkeypatch.setattr(ctx, '_full_tile', lambda *args: calls.append(args))
         ctx.correlate(n, data, tmpl, out)
         assert len(calls) == 1
