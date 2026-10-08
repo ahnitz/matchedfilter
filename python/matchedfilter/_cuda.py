@@ -210,6 +210,27 @@ def get_cuda_lib():
     lib.cuEventElapsedTime.argtypes = [ctypes.POINTER(ctypes.c_float), ctypes.c_void_p, ctypes.c_void_p]
     lib.cuEventElapsedTime.restype = ctypes.c_int
 
+    # Optional entry points: bound when the driver has them, probed with hasattr.
+    _opt = {
+        "cuMemcpyDtoDAsync_v2": [ctypes.c_uint64, ctypes.c_uint64, ctypes.c_size_t, ctypes.c_void_p],
+        "cuMemsetD8Async": [ctypes.c_uint64, ctypes.c_ubyte, ctypes.c_size_t, ctypes.c_void_p],
+        "cuMemPrefetchAsync": [ctypes.c_uint64, ctypes.c_size_t, ctypes.c_int, ctypes.c_void_p],
+        "cuMemAdvise": [ctypes.c_uint64, ctypes.c_size_t, ctypes.c_int, ctypes.c_int],
+        "cuFuncGetAttribute": [ctypes.POINTER(ctypes.c_int), ctypes.c_int, ctypes.c_void_p],
+        "cuFuncSetAttribute": [ctypes.c_void_p, ctypes.c_int, ctypes.c_int],
+        "cuOccupancyMaxActiveBlocksPerMultiprocessor": [
+            ctypes.POINTER(ctypes.c_int), ctypes.c_void_p, ctypes.c_int, ctypes.c_size_t],
+        "cuStreamWaitEvent": [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint],
+        "cuMemGetInfo_v2": [ctypes.POINTER(ctypes.c_size_t), ctypes.POINTER(ctypes.c_size_t)],
+        "cuMemHostRegister_v2": [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint],
+        "cuMemHostUnregister": [ctypes.c_void_p],
+    }
+    for name, argtypes in _opt.items():
+        if hasattr(lib, name):
+            fn = getattr(lib, name)
+            fn.argtypes = argtypes
+            fn.restype = ctypes.c_int
+
     _LIB_CACHE = lib
     return lib
 
