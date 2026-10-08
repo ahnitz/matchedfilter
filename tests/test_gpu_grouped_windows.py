@@ -60,9 +60,9 @@ def test_irregular_windows_share_one_submission(monkeypatch):
     calls = []
     if hasattr(f._gpu, '_submit'):
         original = f._gpu._submit
-        def submit(cmd):
+        def submit(cmd, **kw):
             calls.append(cmd)
-            return original(cmd)
+            return original(cmd, **kw)
         monkeypatch.setattr(f._gpu, '_submit', submit)
     else:
         original = f._gpu.o.call

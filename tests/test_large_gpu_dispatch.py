@@ -21,10 +21,10 @@ def test_large_transform_splits_before_dispatch(kind, monkeypatch):
     calls = []
     original = f._gpu_dispatch
 
-    def dispatch(d, h, *args):
+    def dispatch(d, h, *args, **kw):
         calls.append(d.shape[0]*h.shape[0])
         assert calls[-1] <= f._gpu_pair_limit()
-        return original(d, h, *args)
+        return original(d, h, *args, **kw)
 
     monkeypatch.setattr(f, '_gpu_dispatch', dispatch)
     try:

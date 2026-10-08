@@ -553,13 +553,10 @@ class MatchedFilter:
         nd, nt = D.shape[0], H.shape[0]
         limit = self._gpu_pair_limit()
         if nd * nt <= limit:
-            if slot is not None or async_submit:
-                try:
-                    return self._gpu_dispatch(D, H, binsize, threshold, start, end, slot=slot, async_submit=async_submit)
-                except TypeError:
-                    res = self._gpu_dispatch(D, H, binsize, threshold, start, end)
-                    return (lambda: res) if async_submit else res
-            return self._gpu_dispatch(D, H, binsize, threshold, start, end)
+            # No signature probing: a TypeError raised after a submit would
+            # have dispatched the same work twice.
+            return self._gpu_dispatch(D, H, binsize, threshold, start, end,
+                                      slot=slot, async_submit=async_submit)
         nb = 1 + (end - start - 1) // binsize
         idx = np.empty((nd, nt, nb), np.int32)
         val = np.empty((nd, nt, nb), np.complex64)
@@ -1020,7 +1017,9 @@ class MatchedFilter:
         if policy:
             batch = min(batch, policy['series_group'])
         single = len(layout.groups) == 1 and nblk <= batch
-        pipelined = hasattr(self._gpu, "_get_fence") and getattr(self._gpu, "cache_limit_bytes", 10**9) > 1024 * 1024 and not single
+        # A declared capability, not a probe for one backend's internals.
+        pipelined = (getattr(self._gpu, "supports_async", False)
+                     and getattr(self._gpu, "cache_limit_bytes", 10**9) > 1024 * 1024 and not single)
         queue_ahead = int(os.environ.get("MF_GPU_QUEUE_AHEAD", "8"))
         K = max(1, queue_ahead) if pipelined else 1
         source_shared = shared_buffer(ser, self._gpu) is not None
@@ -1085,34 +1084,15 @@ class MatchedFilter:
                 starts = starts_pool[slot]
                 spec = spectra_pool[slot][:count]
                 starts[:count] = np.minimum(layout.starts[begin:end], ser.size) - base
+                self._gpu.forward(n, source, starts[:count], spec, defer=True,
+                                  slot=slot if pipelined else None)
                 try:
-                    if pipelined:
-                        self._gpu.forward(n, source, starts[:count], spec, defer=True, slot=slot)
-                    else:
-                        self._gpu.forward(n, source, starts[:count], spec, defer=True)
-                except TypeError:
-                    self._gpu.forward(n, source, starts[:count], spec, defer=True)
-                try:
-                    if pipelined:
-                        res = self._gpu.peaks_grouped(
-                            n, spec, H, groups, binsize, threshold, upload_tmpl=self._tdirty,
-                            slot=slot, async_submit=True)
-                    else:
-                        res = self._gpu.peaks_grouped(
-                            n, spec, H, groups, binsize, threshold, upload_tmpl=self._tdirty)
-                    self._tdirty = False
-                except TypeError:
                     res = self._gpu.peaks_grouped(
-                        n, spec, H, groups, binsize, threshold, upload_tmpl=self._tdirty)
+                        n, spec, H, groups, binsize, threshold, upload_tmpl=self._tdirty,
+                        slot=slot if pipelined else None, async_submit=pipelined)
                     self._tdirty = False
                 except Exception:
-                    try:
-                        if pipelined:
-                            self._gpu.cancel_forward(slot=slot)
-                        else:
-                            self._gpu.cancel_forward()
-                    except TypeError:
-                        self._gpu.cancel_forward()
+                    self._gpu.cancel_forward(slot=slot if pipelined else None)
                     raise
                 in_flight.append((begin, end, res))
                 if len(in_flight) >= K:
@@ -1143,29 +1123,14 @@ class MatchedFilter:
                 starts = starts_pool[slot]
                 spec = spectra_pool[slot][:count]
                 starts[:count] = np.minimum(layout.starts[begin:end], ser.size) - base
+                self._gpu.forward(n, source, starts[:count], spec, defer=True,
+                                  slot=slot if pipelined else None)
                 try:
-                    if pipelined:
-                        self._gpu.forward(n, source, starts[:count], spec, defer=True, slot=slot)
-                    else:
-                        self._gpu.forward(n, source, starts[:count], spec, defer=True)
-                except TypeError:
-                    self._gpu.forward(n, source, starts[:count], spec, defer=True)
-                try:
-                    if pipelined:
-                        res = self._series_window(spec, H, binsize, threshold, w0, w1,
-                                                  slot=slot, async_submit=True)
-                    else:
-                        res = self._series_window(spec, H, binsize, threshold, w0, w1)
-                except TypeError:
-                    res = self._series_window(spec, H, binsize, threshold, w0, w1)
+                    res = self._series_window(spec, H, binsize, threshold, w0, w1,
+                                              slot=slot if pipelined else None,
+                                              async_submit=pipelined)
                 except Exception:
-                    try:
-                        if pipelined:
-                            self._gpu.cancel_forward(slot=slot)
-                        else:
-                            self._gpu.cancel_forward()
-                    except TypeError:
-                        self._gpu.cancel_forward()
+                    self._gpu.cancel_forward(slot=slot if pipelined else None)
                     raise
                 self._ddirty = self._tdirty = False
                 in_flight.append((begin, end, res))
