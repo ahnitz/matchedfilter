@@ -474,6 +474,9 @@ class Context(InputUploads):
     """One Vulkan device, its compute queue, and the pipelines built on it."""
 
     max_grouped_bins = _MAX_BINS
+    #: Async submission with per-slot fences: the series loop keeps several
+    #: batches in flight. A declared capability, not a signature probe.
+    supports_async = True
 
     def __init__(self, index=0):
         vk, err = _vulkan._load()
@@ -789,11 +792,7 @@ class Context(InputUploads):
 
             fence = self._get_fence(slot) if (async_submit and slot is not None) else None
             if async_submit and slot is not None:
-                try:
-                    self._submit(cmd, fence=fence, wait=False, slot=slot)
-                except TypeError:
-                    self._submit(cmd)
-                    fence = None
+                self._submit(cmd, fence=fence, wait=False, slot=slot)
             else:
                 self._submit(cmd)
 
@@ -810,7 +809,7 @@ class Context(InputUploads):
                     idx = bufs["idx"].read(np.int32, out).reshape(nd, nt, nbins)
                     val = bufs["val"].read(np.complex64, out).reshape(nd, nt, nbins)
                     return idx, val
-                return readback
+                return self._track(readback)
 
             surv_count = int(bufs["args_refine"].read(np.uint32, 1)[0])
             self.last_refinements = surv_count
@@ -866,11 +865,7 @@ class Context(InputUploads):
 
         fence = self._get_fence(slot) if (async_submit and slot is not None) else None
         if async_submit and slot is not None:
-            try:
-                self._submit(cmd, fence=fence, wait=False, slot=slot)
-            except TypeError:
-                self._submit(cmd)
-                fence = None
+            self._submit(cmd, fence=fence, wait=False, slot=slot)
         else:
             self._submit(cmd)
 
@@ -886,7 +881,7 @@ class Context(InputUploads):
                 idx = bufs["idx"].read(np.int32, out).reshape(nd, nt, nbins)
                 val = bufs["val"].read(np.complex64, out).reshape(nd, nt, nbins)
                 return idx, val
-            return readback
+            return self._track(readback)
 
         surv_count = int(bufs["args"].read(np.uint32, 1)[0])
         self.last_refinements = surv_count
@@ -1781,11 +1776,7 @@ class Context(InputUploads):
 
         fence = self._get_fence(slot) if (async_submit and slot is not None) else None
         if async_submit and slot is not None:
-            try:
-                self._submit(cmd, fence=fence, wait=False, slot=slot)
-            except TypeError:
-                self._submit(cmd)
-                fence = None
+            self._submit(cmd, fence=fence, wait=False, slot=slot)
         else:
             self._submit(cmd)
 
@@ -1797,7 +1788,7 @@ class Context(InputUploads):
                 idx = b_idx.read(np.int32, out).reshape(nd, nt, nbins)
                 val = b_val.read(np.complex64, out).reshape(nd, nt, nbins)
                 return idx, val
-            return readback
+            return self._track(readback)
 
         # int32 as the kernel wrote it. The caller's PEAK_DTYPE index is
         # int64, and assigning int32 into that field widens it during the
@@ -1890,11 +1881,7 @@ class Context(InputUploads):
             self._uploaded["tmpl"][key] = tsig
         fence = self._get_fence(slot) if (async_submit and slot is not None) else None
         if async_submit and slot is not None:
-            try:
-                self._submit(cmd, fence=fence, wait=False, slot=slot)
-            except TypeError:
-                self._submit(cmd)
-                fence = None
+            self._submit(cmd, fence=fence, wait=False, slot=slot)
         else:
             self._submit(cmd)
         if async_submit:
@@ -1910,7 +1897,7 @@ class Context(InputUploads):
                     idx[a:b] = indices[offset:offset+count].reshape(b-a, nt, nb)
                     val[a:b] = values[offset:offset+count].reshape(b-a, nt, nb)
                 return idx, val
-            return readback
+            return self._track(readback)
         indices = b_idx.read(np.int32, size)
         values = b_val.read(np.complex64, size)
         idx = np.empty((nd, nt, nb), np.int32)
@@ -2182,6 +2169,8 @@ class Context(InputUploads):
             resident.pop(key, None)
 
     def _evict_record(self, kind, key, keep_storage=None):
+        # An in-flight readback reads this record's buffers when collected.
+        self._drain()
         token = (kind, key)
         cache = {'flat': self._batches, 'hier': self._hier,
                  'hier_cascade': getattr(self, '_hier_cascade', {}),
@@ -2225,6 +2214,7 @@ class Context(InputUploads):
 
     def clear_cache(self):
         """Release records and owned storage, preserving external shared arrays."""
+        self._drain()
         self._submit(None)
         self._wait_queues()
         self.vk.vkFreeCommandBuffers.argtypes = [_vp, _vp, _u32, ctypes.POINTER(_vp)]

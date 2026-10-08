@@ -1,7 +1,41 @@
 """Input residency shared by the Vulkan and Metal dispatch caches."""
 
 
+class Pending:
+    """An in-flight dispatch's result, materialized once on first call.
+
+    Returned for async_submit: the caller encodes the next batch while this
+    one runs. The context keeps every unfinished one, so evicting or clearing
+    cached buffers can finish them first -- a result is read from those
+    buffers, and reading one after its release reads freed memory.
+    """
+    __slots__ = ("ctx", "fn", "result", "done")
+
+    def __init__(self, ctx, fn):
+        self.ctx, self.fn, self.result, self.done = ctx, fn, None, False
+
+    def __call__(self):
+        if not self.done:
+            self.done = True
+            self.ctx._inflight.pop(id(self), None)
+            fn, self.fn = self.fn, None
+            self.result = fn()
+        return self.result
+
+
 class InputUploads:
+    def _track(self, fn):
+        """Register an in-flight readback; see Pending."""
+        inflight = self.__dict__.setdefault("_inflight", {})
+        pending = Pending(self, fn)
+        inflight[id(pending)] = pending
+        return pending
+
+    def _drain(self):
+        """Finish every in-flight dispatch, keeping its result for its caller."""
+        for pending in list(self.__dict__.get("_inflight", {}).values()):
+            pending()
+
     def _input_uploads(self, key, data, tmpl, upload_data, upload_tmpl):
         """Invalidate all resident copies when an input changes.
 
