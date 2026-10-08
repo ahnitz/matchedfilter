@@ -280,6 +280,16 @@ class CostModel:
     def sparse(self, b, f):
         return self._interp(self._sparse[int(b)], f)
 
+    def signature(self):
+        """A hashable summary of the model's content, for cache keys (an object's id can be
+        reused once it is collected, which would hand a new model an old model's results)."""
+        sig = getattr(self, "_sig", None)
+        if sig is None:
+            sig = self._sig = (self.n, self.block, tuple(sorted(self.dense.items())),
+                               tuple((b, tuple(r)) for b, r in sorted(self._sparse.items())),
+                               tuple(self._refine))
+        return sig
+
     def to_dict(self):
         return {"n": self.n, "block": self.block, "dense": self.dense,
                 "sparse": self._sparse, "refine": self._refine}
@@ -298,6 +308,10 @@ class CostModel:
 
 
 _COSTS = {}
+
+
+def _cost_sig(cost):
+    return None if cost is None else cost.signature()
 #: Survivor densities the calibration places the tiers at (bracketing production's 0.1-10%).
 _CAL_DENSITIES = (0.1, 0.01)
 
@@ -576,7 +590,7 @@ def choose_chain(power, n, snr, fd, cost=None, max_tiers=3, floor=_MIN_BAND, nsi
     """
     p = _norm_profile(power, n)
     win = None if window is None else (int(window[0]), int(window[1]))
-    params = (n, float(snr), float(fd), int(max_tiers), int(floor), int(nsim), win, id(cost))
+    params = (n, float(snr), float(fd), int(max_tiers), int(floor), int(nsim), win, _cost_sig(cost))
     key = (_gm._profile_sig(p),) + params
     hit = _CHOICE_CACHE.get(key)
     if hit is not None:
@@ -621,12 +635,12 @@ def chain_thresholds(power, n, snr, fd, chain, cost=None, floor=_MIN_BAND, nsim=
     p = _norm_profile(power, n)
     chain = tuple(int(b) for b in chain)
     win = None if window is None else (int(window[0]), int(window[1]))
-    key = _key(p, n, chain, float(snr), float(fd), win, int(nsim), id(cost))
+    key = _key(p, n, chain, float(snr), float(fd), win, int(nsim), _cost_sig(cost))
     hit = _PLAN_CACHE.get(key)
     if hit is not None:
         _PLAN_CACHE.move_to_end(key)
         return hit
-    sim_params = (n, chain, float(snr), float(fd), win, int(nsim), id(cost))
+    sim_params = (n, chain, float(snr), float(fd), win, int(nsim), _cost_sig(cost))
     unit, hit = _similar_get("plan", p, sim_params)
     if hit is not None:
         return hit

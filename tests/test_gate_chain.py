@@ -685,3 +685,18 @@ def test_plan_chain_matches_the_plain_split_search():
         if fast is not None:
             assert fast["thresholds"] == ref["thresholds"] and fast["reach"] == ref["reach"], chain
             assert fast["cost"] == ref["cost"], chain
+
+
+def test_choice_cache_keys_on_cost_content_not_identity(monkeypatch):
+    """A new cost model must not inherit cached choices of an old one that happened to share its id."""
+    gc = mf._gatechain
+    prof = np.load(os.path.join(os.path.dirname(__file__), "data", "reference_profile_o2_h1l1_2048.npy"))
+    cm = gc.calibrate_costs(2048, 32)
+    d = cm.to_dict()
+    cheap_refine = gc.CostModel.from_dict(dict(d, refine=[(f, v * 1e-3) for f, v in d["refine"]]))
+    dear_refine = gc.CostModel.from_dict(dict(d, refine=[(f, v * 1e3) for f, v in d["refine"]]))
+    a, _ = gc.choose_chain(prof, 2048, 6.0, 1e-3, cost=cheap_refine, window=(192, 1856))
+    b, _ = gc.choose_chain(prof, 2048, 6.0, 1e-3, cost=dear_refine, window=(192, 1856))
+    assert a["cost"] != b["cost"]
+    same = gc.CostModel.from_dict(dear_refine.to_dict())
+    assert gc.choose_chain(prof, 2048, 6.0, 1e-3, cost=same, window=(192, 1856))[0] is b   # content hit

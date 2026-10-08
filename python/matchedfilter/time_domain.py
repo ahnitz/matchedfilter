@@ -2,7 +2,6 @@
 automatically select optimal FFT block sizes, and filter continuous series."""
 
 import math
-import os
 import time
 from typing import Any, NamedTuple, Optional, Sequence, Union, Tuple, List, Dict
 import numpy as np
@@ -345,10 +344,7 @@ class TimeDomainFilterBank:
         self.effective_data_counts = np.ceil(self.tap_counts / self.rate_ratio).astype(np.int64)
 
         if fft_lengths is None:
-            env_lengths = os.environ.get('PYCBC_RATIO_FFT_LENGTH')
-            if env_lengths:
-                candidate_ns = tuple(sorted(int(x.strip()) for x in env_lengths.split(',') if x.strip()))
-            elif self.data_sample_rate <= 1024.0 or self.analytic:
+            if self.data_sample_rate <= 1024.0 or self.analytic:
                 candidate_ns = (1024, 2048, 4096, 8192, 16384, 32768, 65536)
             else:
                 candidate_ns = (2048, 4096, 8192, 16384, 32768, 65536)
@@ -373,7 +369,6 @@ class TimeDomainFilterBank:
         # max_block_length bounds the candidates: the caller pads its series and
         # guards its windows by the longest block, costs the model does not price.
         self._choose_n = (self.engine == 'hier' and self.binsize is not None and fft_lengths is None
-                          and not os.environ.get('PYCBC_RATIO_FFT_LENGTH')
                           and not (isinstance(coarse_band_hz, (tuple, list)) or (coarse_band_hz or 0) > 0))
         legacy_max = max(g[2] for g in self._legacy_layout[0]) if self._legacy_layout[0] else 0
         self._choice_ns = tuple(n for n in candidate_ns if n <= max(int(max_block_length), legacy_max))
