@@ -81,8 +81,28 @@ def test_pipeline_ownership(fail, limits):
 def test_pending_forward_ownership_is_released():
     c = context()
     c._pending_metal = (c.o.new(8), [])
-    c._forward_inflight = (c.o.new(9), [])
     c.destroy()
+    assert not +c.o.refs
+
+
+def test_committed_command_buffers_are_released_sync_and_async():
+    c = context()
+    c._inflight = {}
+    c._check_completed = lambda cmd: None
+    c._record_gpu_time = lambda cmd, label: None
+    c.o.call = (lambda obj, selector, call=c.o.call, **kw:
+                c.o.new(9) if selector == b'commandBuffer' else
+                (c.o.new(obj) if selector == b'retain' else call(obj, selector, **kw)))
+    cmd = c._command_buffer()
+    c.o.refs[cmd] -= 1          # the queue's autoreleased reference
+    assert c._commit(cmd, 'sync', finish=lambda: 'done') == 'done'
+    assert c.o.refs[9] == 0
+    cmd = c._command_buffer()
+    c.o.refs[cmd] -= 1
+    pending = c._commit(cmd, 'async', async_submit=True, finish=lambda: 'later')
+    assert c.o.refs[9] == 1 and c._inflight   # still in flight, still owned
+    c.destroy()                               # teardown finishes it first
+    assert pending.done and pending() == 'later'
     assert not +c.o.refs
 
 

@@ -94,9 +94,9 @@ def test_gpu_policy_caps_batches_without_overriding_memory(tmp_path, monkeypatch
     f._gpu = SimpleNamespace(max_dispatch_x=65535,
                              empty_shared=lambda shape, dtype=np.complex64: np.empty(shape, dtype),
                              forward=lambda n, source, starts, spec, **kw: calls.append(len(starts)),
-                             cancel_forward=lambda: None)
+                             cancel_forward=lambda **kw: None)
     f._series_batch_bytes = memory_blocks * (8*n + 4 + 12*nt)
-    f._series_window = lambda d, h, *args: (np.zeros((len(d), nt, 1), np.int64),
+    f._series_window = lambda d, h, *args, **kw: (np.zeros((len(d), nt, 1), np.int64),
                                           np.zeros((len(d), nt, 1), np.complex64))
     layout = SimpleNamespace(nbins=1, starts=np.arange(7)*n, groups=[(0, n, 0, 7)], order=None)
     idx, val = f._run_series_gpu(np.zeros(8*n, np.complex64), layout, n, 0., 0, nt, True)
