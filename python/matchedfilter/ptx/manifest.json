@@ -286,5 +286,271 @@
         }
       }
     }
+  },
+  "full_tierc": {
+    "131072": {
+      "n1": 256,
+      "n2": 512,
+      "corr1": {
+        "file": "tc_corr1_131072.ptx",
+        "local_size": [
+          32,
+          1,
+          1
+        ]
+      },
+      "corr2": {
+        "file": "tc_corr2_131072.ptx",
+        "local_size": [
+          16,
+          1,
+          1
+        ]
+      },
+      "corr_series2": {
+        "file": "tc_corr_series2_131072.ptx",
+        "local_size": [
+          16,
+          1,
+          1
+        ]
+      },
+      "fwd1": {
+        "file": "tc_fwd1_131072.ptx",
+        "local_size": [
+          32,
+          1,
+          1
+        ]
+      },
+      "fwd2": {
+        "file": "tc_fwd2_131072.ptx",
+        "local_size": [
+          16,
+          1,
+          1
+        ]
+      }
+    },
+    "262144": {
+      "n1": 512,
+      "n2": 512,
+      "corr1": {
+        "file": "tc_corr1_262144.ptx",
+        "local_size": [
+          32,
+          1,
+          1
+        ]
+      },
+      "corr2": {
+        "file": "tc_corr2_262144.ptx",
+        "local_size": [
+          32,
+          1,
+          1
+        ]
+      },
+      "corr_series2": {
+        "file": "tc_corr_series2_262144.ptx",
+        "local_size": [
+          32,
+          1,
+          1
+        ]
+      },
+      "fwd1": {
+        "file": "tc_fwd1_262144.ptx",
+        "local_size": [
+          32,
+          1,
+          1
+        ]
+      },
+      "fwd2": {
+        "file": "tc_fwd2_262144.ptx",
+        "local_size": [
+          32,
+          1,
+          1
+        ]
+      }
+    },
+    "524288": {
+      "n1": 512,
+      "n2": 1024,
+      "corr1": {
+        "file": "tc_corr1_524288.ptx",
+        "local_size": [
+          64,
+          1,
+          1
+        ]
+      },
+      "corr2": {
+        "file": "tc_corr2_524288.ptx",
+        "local_size": [
+          32,
+          1,
+          1
+        ]
+      },
+      "corr_series2": {
+        "file": "tc_corr_series2_524288.ptx",
+        "local_size": [
+          32,
+          1,
+          1
+        ]
+      },
+      "fwd1": {
+        "file": "tc_fwd1_524288.ptx",
+        "local_size": [
+          64,
+          1,
+          1
+        ]
+      },
+      "fwd2": {
+        "file": "tc_fwd2_524288.ptx",
+        "local_size": [
+          32,
+          1,
+          1
+        ]
+      }
+    },
+    "1048576": {
+      "n1": 1024,
+      "n2": 1024,
+      "corr1": {
+        "file": "tc_corr1_1048576.ptx",
+        "local_size": [
+          64,
+          1,
+          1
+        ]
+      },
+      "corr2": {
+        "file": "tc_corr2_1048576.ptx",
+        "local_size": [
+          64,
+          1,
+          1
+        ]
+      },
+      "corr_series2": {
+        "file": "tc_corr_series2_1048576.ptx",
+        "local_size": [
+          64,
+          1,
+          1
+        ]
+      },
+      "fwd1": {
+        "file": "tc_fwd1_1048576.ptx",
+        "local_size": [
+          64,
+          1,
+          1
+        ]
+      },
+      "fwd2": {
+        "file": "tc_fwd2_1048576.ptx",
+        "local_size": [
+          64,
+          1,
+          1
+        ]
+      }
+    },
+    "2097152": {
+      "n1": 1024,
+      "n2": 2048,
+      "corr1": {
+        "file": "tc_corr1_2097152.ptx",
+        "local_size": [
+          128,
+          1,
+          1
+        ]
+      },
+      "corr2": {
+        "file": "tc_corr2_2097152.ptx",
+        "local_size": [
+          64,
+          1,
+          1
+        ]
+      },
+      "corr_series2": {
+        "file": "tc_corr_series2_2097152.ptx",
+        "local_size": [
+          64,
+          1,
+          1
+        ]
+      },
+      "fwd1": {
+        "file": "tc_fwd1_2097152.ptx",
+        "local_size": [
+          128,
+          1,
+          1
+        ]
+      },
+      "fwd2": {
+        "file": "tc_fwd2_2097152.ptx",
+        "local_size": [
+          64,
+          1,
+          1
+        ]
+      }
+    },
+    "4194304": {
+      "n1": 2048,
+      "n2": 2048,
+      "corr1": {
+        "file": "tc_corr1_4194304.ptx",
+        "local_size": [
+          128,
+          1,
+          1
+        ]
+      },
+      "corr2": {
+        "file": "tc_corr2_4194304.ptx",
+        "local_size": [
+          128,
+          1,
+          1
+        ]
+      },
+      "corr_series2": {
+        "file": "tc_corr_series2_4194304.ptx",
+        "local_size": [
+          128,
+          1,
+          1
+        ]
+      },
+      "fwd1": {
+        "file": "tc_fwd1_4194304.ptx",
+        "local_size": [
+          128,
+          1,
+          1
+        ]
+      },
+      "fwd2": {
+        "file": "tc_fwd2_4194304.ptx",
+        "local_size": [
+          128,
+          1,
+          1
+        ]
+      }
+    }
   }
 }

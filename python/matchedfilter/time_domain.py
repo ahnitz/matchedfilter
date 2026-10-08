@@ -287,7 +287,11 @@ def _corr_block_costs(n: int, device: Optional[Any] = None) -> Tuple[float, floa
         lo, hi = cf.valid
         st, _, _ = _automatic_series_layout(L, cf.valid)
         if cf._gpu is not None:
-            dest = cf.empty_shared((nt, L), readback=True)
+            # On a discrete GPU the destination's residency dominates: a host-read
+            # output is written over the bus at a cost per sample independent of n, which
+            # swamped the kernel and priced n=32768 (whose CUDA kernel spills) as cheapest.
+            # There, price the kernel into device-resident output (the resident path).
+            dest = cf.empty_shared((nt, L), readback=not getattr(cf._gpu, 'discrete', False))
             run = lambda: cf._continuous_gpu(ser, st, 0, nt, dest)
         else:
             dest = np.zeros((nt, L), np.complex64)
@@ -1356,9 +1360,22 @@ class TimeDomainFilterBank:
         # along axis 1 thrashes one cache set once 17+ rows sit 2^20 samples apart (see
         # _correlate_group); 27 rows took ~400 ms against ~10 ms by runs.
         edges = np.concatenate(([0], keep.ravel(), [S]))
+        # A GPU-shared dest is zeroed on the device: host writes would pull its pages
+        # back to the CPU (CUDA managed memory) only for the next kernel to fault them in.
+        gpu = getattr(g.get_correlation_plan(), '_gpu', None) if W.shape[0] else None
+        zero = getattr(gpu, 'zero_columns', None)
+        if zero is not None:
+            from ._shared import shared_buffer
+            if shared_buffer(dest, gpu) is None:
+                zero = None
         for a, b in zip(edges[::2], edges[1::2]):
             if b > a:
-                dest[:, a:b] = 0
+                if zero is not None:
+                    zero(dest, int(a), int(b))
+                else:
+                    dest[:, a:b] = 0
+        if zero is not None:
+            gpu.zero_columns_done()
 
     def correlate_series(
         self,

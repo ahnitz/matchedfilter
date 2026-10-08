@@ -19,6 +19,9 @@ KERNEL = ROOT / "src" / "gpu" / "tierb.slang"
 COARSE_KERNEL = ROOT / "src" / "gpu" / "coarse_tile.slang"
 PACK_KERNEL = ROOT / "src" / "gpu" / "pack_coarse.slang"
 SERIES_KERNEL = ROOT / "src" / "gpu" / "series_forward.slang"
+# CUDA's refine: a grid-stride entry reading the survivor count on the device
+# (no indirect dispatch on CUDA). Appended to tierb.slang, as series_forward is.
+REFINE_KERNEL = ROOT / "src" / "gpu" / "refine_bounded.slang"
 
 TIER_B = (64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536)
 RADIX = {32768: 32, 65536: 64}
@@ -66,22 +69,24 @@ def find_slangc(explicit=None):
 
 def find_nvrtc():
     candidates = [
+        os.environ.get("MF_NVRTC"),
         "/home/ahnitz/miniconda3/lib/python3.13/site-packages/nvidia/cuda_nvrtc/lib/libnvrtc.so.12",
         "/usr/lib/x86_64-linux-gnu/libnvrtc.so",
     ]
     for c in candidates:
-        if os.path.exists(c):
+        if c and os.path.exists(c):
             return str(c)
     return None
 
 
 def find_cuda_path():
     candidates = [
+        os.environ.get("MF_CUDA_PATH"),
         "/home/ahnitz/miniconda3/lib/python3.13/site-packages/nvidia/cuda_runtime",
         "/usr/local/cuda",
     ]
     for c in candidates:
-        if os.path.exists(c):
+        if c and os.path.exists(c):
             return str(c)
     return None
 
@@ -121,12 +126,57 @@ def compile_tierb(slangc, nvrtc, env, n, outdir, entry=ENTRY, cap=None, suffix="
     )
     name = "%s_%d%s.ptx" % (STEMS[entry], n, suffix)
     ptx = outdir / name
+    if entry == "refineListed":
+        text += "\n" + REFINE_KERNEL.read_text()
+        entry = "refineListedBounded"
     return compile_ptx(slangc, nvrtc, env, text, ptx, entry, extra_flags=extra_flags)
+
+
+FULL_TIER_C = tuple(1 << k for k in range(17, 23))
+TIER_C_ENTRIES = (("corr1", "tcStage1"), ("corr2", "tcFullStage3"),
+                  ("corr_series2", "tcFullSeriesStage3"),
+                  ("fwd1", "tcForwardStage1"), ("fwd2", "tcForwardStage3"))
+
+
+def tierc_split(n):
+    """The same n = n1 * n2 split build_spirv.py uses (n2 the largest power of two
+    with 2*n2^2 <= n), so every backend runs the same decomposition."""
+    n2 = 1
+    while n2 * n2 * 2 <= n:
+        n2 *= 2
+    return n // n2, n2
+
+
+def build_full_tierc(slangc, nvrtc, env, outdir):
+    """Two-stage (Tier C) correlation and series-forward kernels past 65536."""
+    entries = {}
+    for n in FULL_TIER_C:
+        n1, n2 = tierc_split(n)
+        info = {"n1": n1, "n2": n2}
+        for role, entry in TIER_C_ENTRIES:
+            sub = n2 if role.endswith("1") else n1
+            r = RADIX.get(sub, 16)
+            text = (
+                "#define NLEN %d\n#define TC_N %d\n#define LDS_CAP %d\n#define RADIX %d\n"
+                "#define SLANG_CUDA_STRUCTURED_BUFFER_NO_COUNT 1\n#define TARGET_CUDA 1\n"
+                % (sub, n, min(LDS_CAP[sub], PORTABLE_CAP), r)
+                + KERNEL.read_text()
+            )
+            ptx = outdir / ("tc_%s_%d.ptx" % (role, n))
+            extra = ["-Xnvrtc", "-maxrregcount=64"] if sub // r >= 1024 else []
+            compile_ptx(slangc, nvrtc, env, text, ptx, entry, extra_flags=extra)
+            info[role] = dict(file=ptx.name, local_size=[sub // r, 1, 1])
+        entries[str(n)] = info
+        print("  full Tier C n=%d split=%dx%d" % (n, n1, n2), flush=True)
+    return entries
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--slangc", default=None)
+    ap.add_argument("--only", choices=("all", "tierc", "refine", "coarse"), default="all",
+                    help="rebuild only the two-stage kernels (and their manifest entry), "
+                         "or only the refine family")
     args = ap.parse_args()
 
     slangc = find_slangc(args.slangc)
@@ -141,6 +191,36 @@ def main():
         env["CUDA_PATH"] = cuda_path
 
     OUT.mkdir(parents=True, exist_ok=True)
+    if args.only == "tierc":
+        manifest = json.loads((OUT / "manifest.json").read_text())
+        manifest["full_tierc"] = build_full_tierc(slangc, nvrtc, env, OUT)
+        (OUT / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+        return 0
+    if args.only == "coarse":
+        for n in (64, 128, 256):
+            for _p in (8, 16):
+                compile_tierb(slangc, nvrtc, env, n, OUT, entry="fusedTierB", suffix="_c16p%d" % _p,
+                              coarse16=1, ppg=_p)
+            _t = COARSE_TILE_T.get(n, 1)
+            if _t > 1:
+                compile_tierb(slangc, nvrtc, env, n, OUT, entry="fusedTierB", coarse16=1, ppg=8,
+                              tile=_t, suffix="_c16p8t%d" % _t)
+            print("  coarse n=%d" % n, flush=True)
+        return 0
+    if args.only == "refine":
+        for n in TIER_B:
+            compile_tierb(slangc, nvrtc, env, n, OUT, "refineListed")
+            if lds_bytes(n, LDS_CAP[n]) > lds_bytes(n, PORTABLE_CAP):
+                compile_tierb(slangc, nvrtc, env, n, OUT, "refineListed",
+                              cap=PORTABLE_CAP, suffix="_lds32")
+            if n >= 4096:
+                compile_tierb(slangc, nvrtc, env, n, OUT, "refineListed",
+                              suffix="_onebin", single_bin=1)
+                if lds_bytes(n, LDS_CAP[n]) > lds_bytes(n, PORTABLE_CAP):
+                    compile_tierb(slangc, nvrtc, env, n, OUT, "refineListed", cap=PORTABLE_CAP,
+                                  suffix="_onebin_lds32", single_bin=1)
+            print("  refine n=%d" % n, flush=True)
+        return 0
     manifest = dict(entry=ENTRY, kernel=KERNEL.name, modules={})
 
     # 1. Coarse tile kernels
@@ -207,11 +287,13 @@ def main():
         # Coarse fp16 variants
         for centry in (("fusedTierB",) if RADIX.get(n, 16) == 16 else ()):
             compile_tierb(slangc, nvrtc, env, n, OUT, entry=centry, suffix="_c16", coarse16=1)
-            for _p in (2, 4):
+            # p8/p16 fill a 32/64-thread block at the small bands (WG = n/16 is 4 at
+            # band 64); the CUDA host picks the variant with the best occupancy.
+            for _p in (2, 4) + ((8, 16) if n <= 256 else ()):
                 compile_tierb(slangc, nvrtc, env, n, OUT, entry=centry, suffix="_c16p%d" % _p, coarse16=1, ppg=_p)
             _t = COARSE_TILE_T.get(n, 1)
             if _t > 1:
-                for _p in (1, 2, 4):
+                for _p in (1, 2, 4) + ((8,) if n <= 256 else ()):
                     compile_tierb(slangc, nvrtc, env, n, OUT, entry=centry, coarse16=1,
                                   ppg=_p, tile=_t,
                                   suffix="_c16%st%d" % ("p%d" % _p if _p > 1 else "", _t))
@@ -230,6 +312,7 @@ def main():
         manifest["modules"][str(n)] = info
         print("  n=%-6d %-16s %5d bytes  wg=%-4d" % (n, ptx.name, info["bytes"], wg))
 
+    manifest["full_tierc"] = build_full_tierc(slangc, nvrtc, env, OUT)
     (OUT / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     print("Wrote PTX manifest: %s" % (OUT / "manifest.json"))
     return 0
