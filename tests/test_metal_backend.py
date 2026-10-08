@@ -120,7 +120,9 @@ def test_async_submission_is_deferred_and_keyed_by_slot(mock_ctx):
 def test_series_pipelining_is_a_declared_capability():
     from matchedfilter import _vkcompute, _cudacompute
     assert _mtlcompute.Context.supports_async and _vkcompute.Context.supports_async
-    assert not getattr(_cudacompute.Context, "supports_async", False)
+    # CUDA declares it too: slots map to streams, readbacks sync their own stream, and
+    # consumers on another stream wait for deferred forwards (tests/test_cuda_parity.py).
+    assert _cudacompute.Context.supports_async
 
 
 def test_no_signature_probing_retries_in_the_dispatch_path():
