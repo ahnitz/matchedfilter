@@ -503,6 +503,7 @@ class Context(InputUploads):
         self._fences = {}
         self._pending_forward = None
         self._uploaded = {"data": {}, "tmpl": {}}
+        self._queue_offset = 0
 
         self._attach_device(index)
 
@@ -1638,7 +1639,10 @@ class Context(InputUploads):
             commands = [begin] + commands + [end]
         cmds = (_vp * len(commands))(*commands)
         submit = _SubmitInfo(4, None, 0, None, None, len(commands), cmds, 0, None)
-        queue = self.queues[slot % len(self.queues)] if (getattr(self, "queues", None) and slot is not None) else self.queue
+        # _queue_offset spreads concurrent plans over the compute queues (filter_series_many):
+        # barriers order work only within a queue, so banks on different queues overlap.
+        queue = (self.queues[(slot + self._queue_offset) % len(self.queues)]
+                 if (getattr(self, "queues", None) and slot is not None) else self.queue)
         _check(self.vk.vkQueueSubmit(queue, 1, ctypes.byref(submit), fence),
                "vkQueueSubmit")
         if wait:

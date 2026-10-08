@@ -160,12 +160,21 @@ def run_device(device, tops, args, seed):
                 mids[ifo] = mid.correlate_series(ser[ifo], windows=slice(max(0, a0 - args.pad),
                                                                          min(S, a1 + args.pad)))
                 tm.add("middle", time.perf_counter() - t)
+            # The fine stage of a segment: every bank on its middle series, both detectors.
+            # Batched (default), the library sees the whole segment in one call.
+            jobs = [(b, mids[ifo][row], dict(windows=slice(a0, a1)))
+                    for row, (m, b) in enumerate(fine) for ifo in ser]
+            t = time.perf_counter()
+            if args.no_batch:
+                fine_out = [b.filter_series(x, **kw) for b, x, kw in jobs]
+            else:
+                fine_out = TimeDomainFilterBank.filter_series_many(jobs)
+            tm.add("fine", time.perf_counter() - t)
+            fine_res = iter(fine_out)
             for row, (m, b) in enumerate(fine):
                 trig = {}
                 for ifo in ser:
-                    t = time.perf_counter()
-                    r = b.filter_series(mids[ifo][row], windows=slice(a0, a1))
-                    tm.add("fine", time.perf_counter() - t)
+                    r = next(fine_res)
                     trig[ifo] = r
                     results[(top["top"], seg, m, ifo, "fine")] = r
                     counts["fine_triggers"] += len(r.snr)
@@ -260,6 +269,8 @@ def main():
                         "peaks per bin, so it is exact only when both devices block alike")
     p.add_argument("--seed", type=int, default=1)
     p.add_argument("--out", default=None, help="write the JSON report here")
+    p.add_argument("--no-batch", action="store_true",
+                   help="fine stage as one filter_series call per bank and detector (the old pattern)")
     p.add_argument("--timing", action="store_true",
                    help="device time per kernel label for each stage (sets MF_GPU_TIMING=1)")
     args = p.parse_args()

@@ -214,6 +214,19 @@ def _unpack_half(a, n, hermitian):
     return full
 
 
+class _Deferred:
+    """A GPU result submitted but not yet collected; result() waits once and caches."""
+    __slots__ = ("_finish", "_value", "_done")
+
+    def __init__(self, finish):
+        self._finish, self._value, self._done = finish, None, False
+
+    def result(self):
+        if not self._done:
+            self._value, self._finish, self._done = self._finish(), None, True
+        return self._value
+
+
 def _format_result(idx, val, *, raw=False, counts=None, out=None, order=None):
     """Assemble the public dtype once, or return separate raw arrays."""
     if counts is True:
@@ -1047,8 +1060,17 @@ class MatchedFilter:
             batch = min(batch, policy['series_group'])
         single = len(layout.groups) == 1 and nblk <= batch
         # A declared capability, not a probe for one backend's internals.
-        pipelined = (getattr(self._gpu, "supports_async", False)
-                     and getattr(self._gpu, "cache_limit_bytes", 10**9) > 1024 * 1024 and not single)
+        can_pipeline = (getattr(self._gpu, "supports_async", False)
+                        and getattr(self._gpu, "cache_limit_bytes", 10**9) > 1024 * 1024)
+        grouped_flat = (len(layout.groups) > 1 and type(self) is MatchedFilter
+                        and nb <= getattr(self._gpu, "max_grouped_bins", 0)
+                        and nt <= self._gpu_pair_limit())
+        # Deferred (TimeDomainFilterBank.filter_series_many): submit now, collect later, so the
+        # GPU works on this call while the host prepares the next bank's. Chain trials time
+        # their calls, so a plan under trial runs synchronously.
+        defer = (getattr(self, "_defer_series", False) and can_pipeline and not grouped_flat
+                 and getattr(self, "_chain_trial", None) is None)
+        pipelined = can_pipeline and (not single or defer)
         queue_ahead = int(os.environ.get("MF_GPU_QUEUE_AHEAD", "8"))
         K = max(1, queue_ahead) if pipelined else 1
         source_shared = shared_buffer(ser, self._gpu) is not None
@@ -1073,6 +1095,20 @@ class MatchedFilter:
             workspace = ((cap_b, n, cap_k), None if workspace is None else workspace[1],
                          spectra_pool, starts_pool)
         _, source, spectra_pool, starts_pool = workspace
+        if defer and getattr(self, "_defer_token", None) != self._defer_series:
+            # A new batch starts at slot 0: slots only have to differ among calls in flight
+            # together, and reusing the same few keeps their recordings and sources warm.
+            self._defer_token, self._defer_slot = self._defer_series, 0
+        slot0 = getattr(self, "_defer_slot", 0) % K if defer else 0
+        if defer:
+            # Settle whatever still holds the slots this call will use: its spectra, starts,
+            # source and recordings are about to be rewritten.
+            owners = self.__dict__.setdefault("_slot_owner", {})
+            nslots = min(K, -(-nblk // batch) + len(layout.groups))
+            for k in range(nslots):
+                prev = owners.pop((slot0 + k) % K, None)
+                if prev is not None:
+                    prev.result()
         if source_shared:
             source, base = ser, 0
             # A viewed series keeps the copy buffer for later calls that need one.
@@ -1087,16 +1123,26 @@ class MatchedFilter:
             if top - base < 1:                # every block starts at the series end
                 base = max(0, top - 1)
             span = max(top - base, 1)
-            if source is None or source.size < span:
+            # One source per slot: deferred calls on this plan can be in flight together
+            # with different series (a bank filters each detector's).
+            sources = source if isinstance(source, dict) else ({} if source is None else {0: source})
+            src = sources.get(slot0)
+            if src is None or src.size < span:
                 # Capacity for the whole series: later windows need not reallocate.
-                source = self._gpu.empty_shared((max(ser.size, span),))
-            source[:top - base] = ser[base:top]
-            self._series_workspace = (workspace[0], source, spectra_pool, starts_pool)
-            source = source[:top - base]
+                src = sources[slot0] = self._gpu.empty_shared((max(ser.size, span),))
+            src[:top - base] = ser[base:top]
+            self._series_workspace = (workspace[0], sources, spectra_pool, starts_pool)
+            source = src[:top - base]
         # A single group needs no aggregate buffers or scatter.
         single = len(layout.groups) == 1 and nblk <= batch
         shape = (nblk, nt, nb)
-        if not single:
+        if not single and defer:
+            if raw:
+                idx = np.empty(shape, dtype=np.int64)
+                val = np.empty(shape, dtype=np.complex64)
+            else:
+                peaks = np.empty(shape, dtype=PEAK_DTYPE)
+        elif not single:
             if raw:
                 sb = getattr(self, "_sbuf", None)
                 if sb is None or sb[0] != shape:
@@ -1111,9 +1157,7 @@ class MatchedFilter:
                 _, peaks = spbuf
         # Irregular flat windows share one forward FFT dispatch and submission per
         # bounded batch. Hierarchical and other backends keep their executor.
-        grouped = (len(layout.groups) > 1 and type(self) is MatchedFilter
-                   and nb <= getattr(self._gpu, "max_grouped_bins", 0)
-                   and nt <= self._gpu_pair_limit())
+        grouped = grouped_flat
         if grouped:
             in_flight = []
             slot_idx = 0
@@ -1157,7 +1201,7 @@ class MatchedFilter:
                 return _format_result(idx, val, raw=True, order=layout.order)
             return _format_result(None, None, raw=False, order=layout.order, out=peaks)
         in_flight = []
-        slot_idx = 0
+        slot_idx = slot0
         for w0, w1, a, b in layout.groups:
             for begin in range(a, b, batch):
                 end = min(begin + batch, b)
@@ -1193,24 +1237,37 @@ class MatchedFilter:
                         idx[b_start:b_end], val[b_start:b_end] = gi, gv
                     else:
                         _core.pack_peaks(peaks[b_start:b_end], gi, gv)
-        while in_flight:
-            b_start, b_end, item = in_flight.pop(0)
-            gi, gv = item() if callable(item) else item
-            if single:
+        def finish():
+            while in_flight:
+                b_start, b_end, item = in_flight.pop(0)
+                gi, gv = item() if callable(item) else item
+                if single:
+                    if raw:
+                        return _format_result(gi, gv, raw=True)
+                    if defer:
+                        out = np.empty(shape, dtype=PEAK_DTYPE)
+                    else:
+                        spbuf = getattr(self, '_spbuf', None)
+                        if spbuf is None or spbuf[0] != shape:
+                            spbuf = self._spbuf = (shape, np.empty(shape, dtype=PEAK_DTYPE))
+                        out = spbuf[1]
+                    return _format_result(gi, gv, raw=False, out=out)
                 if raw:
-                    return _format_result(gi, gv, raw=True)
-                spbuf = getattr(self, '_spbuf', None)
-                if spbuf is None or spbuf[0] != shape:
-                    spbuf = self._spbuf = (shape, np.empty(shape, dtype=PEAK_DTYPE))
-                _, peaks = spbuf
-                return _format_result(gi, gv, raw=False, out=peaks)
+                    idx[b_start:b_end], val[b_start:b_end] = gi, gv
+                else:
+                    _core.pack_peaks(peaks[b_start:b_end], gi, gv)
             if raw:
-                idx[b_start:b_end], val[b_start:b_end] = gi, gv
-            else:
-                _core.pack_peaks(peaks[b_start:b_end], gi, gv)
-        if raw:
-            return _format_result(idx, val, raw=True, order=layout.order)
-        return _format_result(None, None, raw=False, order=layout.order, out=peaks)
+                return _format_result(idx, val, raw=True, order=layout.order)
+            return _format_result(None, None, raw=False, order=layout.order, out=peaks)
+
+        if not defer:
+            return finish()
+        self._defer_slot = slot_idx
+        deferred = _Deferred(finish)
+        owners = self.__dict__.setdefault("_slot_owner", {})
+        for k in range(slot0, slot_idx):
+            owners[k % K] = deferred
+        return deferred
 
     def empty_shared(self, shape, dtype=np.complex64, *, readback=False):
         """Allocate a NumPy array backed by this filter's GPU shared memory.

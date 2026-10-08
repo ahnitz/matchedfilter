@@ -726,3 +726,40 @@ def test_gpu_hierarchical_bank_matches_cpu_including_packed_templates(pack):
     cpu, dev = found
     assert len(cpu) >= 10 and set(cpu) == set(dev)
     assert max(abs(dev[k] - cpu[k]) / abs(cpu[k]) for k in cpu) < 1e-5
+
+
+@pytest.mark.parametrize("device", ["cpu", "gpu"])
+def test_filter_series_many_matches_one_call_at_a_time(device):
+    """A batch returns exactly what the calls return one at a time -- including a bank that
+    appears in several jobs with different series (in flight together on a GPU) and
+    single-template calls -- whatever the device does to overlap them."""
+    from conftest import usable_gpu
+    dev = None
+    if device == "gpu":
+        dev = usable_gpu()
+        if dev is None:
+            pytest.skip("no usable GPU")
+    rng = np.random.default_rng(8)
+    banks = []
+    for _ in range(3):
+        counts = list(rng.integers(200, 400, 40))
+        taps, w, df = _whitened_inspiral_bank(rng, counts)
+        b = TimeDomainFilterBank(taps, tap_counts=counts, engine='hier', threshold=4.5,
+                                 false_dismissal=1e-3, device=dev, fft_lengths=[2048], binsize=2048)
+        b.set_reference(w, delta_f=df)
+        banks.append(b)
+    S = 1 << 17
+    series = []
+    for _ in range(2):
+        X = np.fft.fft(rng.standard_normal(S))
+        X[S // 2:] = 0
+        series.append((np.fft.ifft(X) * 2).astype(np.complex64))
+    jobs = [(b, x, dict(windows=slice(3000, S - 3000))) for b in banks for x in series]
+    jobs += [(banks[0], series[1], dict(windows=slice(40000, 60000), binsize=61, threshold=0.0,
+                                        template_index=7))]
+    one = [b.filter_series(x, **kw) for b, x, kw in jobs]
+    many = TimeDomainFilterBank.filter_series_many(jobs)
+    assert sum(len(r.snr) for r in one[:-1]) >= 5
+    for r1, r2 in zip(one, many):
+        for f in r1._fields:
+            np.testing.assert_array_equal(getattr(r1, f), getattr(r2, f))

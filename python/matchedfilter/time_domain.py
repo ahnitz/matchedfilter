@@ -238,6 +238,9 @@ def _max_tiers(device) -> int:
     return min(3, HierarchicalFilter._MAX_TIERS[_parse_device(device).kind])
 
 
+#: Identifies one filter_series_many batch to the plans it defers.
+_BATCH_TOKEN = 0
+
 _CORR_COSTS: Dict[Tuple[int, str], Tuple[float, float]] = {}
 
 
@@ -1069,6 +1072,49 @@ class TimeDomainFilterBank:
         else:
             work_items = [(g, None) for g in self._groups]
 
+        def consume(aidx, aval, sub_starts, g, tmpl_arg, N):
+            # aidx has shape (nblocks, ntemplates, nbins)
+            if tmpl_arg is not None:
+                # Single template filtered (ntemplates == 1)
+                if aidx.ndim == 3 and aidx.shape[2] == 1:
+                    ii = aidx[:, 0, 0]
+                    bi = np.nonzero(ii >= 0)[0]
+                    if bi.size:
+                        out_template_indices.append(np.full(bi.size, template_index, dtype=np.int64))
+                        out_sample_indices.append(sub_starts[bi] + ii[bi])
+                        out_snrs.append(aval[:, 0, 0][bi])
+                        out_tstarts.append(sub_starts[bi])
+                        out_block_lens.append(np.full(bi.size, N, dtype=np.int64))
+                else:
+                    bi, _, bini = np.nonzero(aidx >= 0)
+                    if bi.size:
+                        out_template_indices.append(np.full(bi.size, template_index, dtype=np.int64))
+                        out_sample_indices.append(sub_starts[bi] + aidx[bi, 0, bini])
+                        out_snrs.append(aval[bi, 0, bini])
+                        out_tstarts.append(sub_starts[bi])
+                        out_block_lens.append(np.full(bi.size, N, dtype=np.int64))
+            else:
+                if aidx.ndim == 3 and aidx.shape[2] == 1:
+                    ii = aidx[:, :, 0]
+                    bi, ti = np.nonzero(ii >= 0)
+                    if bi.size:
+                        out_template_indices.append(g.template_indices[ti])
+                        out_sample_indices.append(sub_starts[bi] + ii[bi, ti])
+                        out_snrs.append(aval[:, :, 0][bi, ti])
+                        out_tstarts.append(sub_starts[bi])
+                        out_block_lens.append(np.full(bi.size, N, dtype=np.int64))
+                else:
+                    bi, ti, bini = np.nonzero(aidx >= 0)
+                    if bi.size:
+                        out_template_indices.append(g.template_indices[ti])
+                        out_sample_indices.append(sub_starts[bi] + aidx[bi, ti, bini])
+                        out_snrs.append(aval[bi, ti, bini])
+                        out_tstarts.append(sub_starts[bi])
+                        out_block_lens.append(np.full(bi.size, N, dtype=np.int64))
+
+        from . import _Deferred
+        defer = getattr(self, '_defer', False)
+        pending = []
         for g, tmpl_arg in work_items:
             plan_templates = tmpl_arg
             if self.engine == 'hier' and tmpl_arg is not None:
@@ -1131,73 +1177,72 @@ class TimeDomainFilterBank:
                 if res is not None:
                     work = [((bstarts, bws, bwe), res)]
             for (sub_starts, sub_bws, sub_bwe), res in work:
-                if res is not None:
-                    aidx, aval = res
-                else:
-                    aidx, aval = active_plan.run_series(
-                        data_in, sub_starts, sub_bws, sub_bwe, binsize=bs,
-                        threshold=eff_threshold, templates=plan_templates, raw=True
-                    )
+                if res is None:
+                    if defer:
+                        active_plan._defer_series = defer       # the batch's token
+                        if getattr(active_plan, '_gpu', None) is not None:
+                            active_plan._gpu._queue_offset = getattr(self, '_queue_offset', 0)
+                    try:
+                        res = active_plan.run_series(
+                            data_in, sub_starts, sub_bws, sub_bwe, binsize=bs,
+                            threshold=eff_threshold, templates=plan_templates, raw=True
+                        )
+                    finally:
+                        if defer:
+                            active_plan._defer_series = False
+                if isinstance(res, _Deferred):
+                    pending.append((res, sub_starts, g, tmpl_arg, N))
+                    continue
+                aidx, aval = res
                 if getattr(active_plan, '_last_n_triggers', None) == 0:
                     continue
+                consume(aidx, aval, sub_starts, g, tmpl_arg, N)
 
-                # aidx has shape (nblocks, ntemplates, nbins)
-                if tmpl_arg is not None:
-                    # Single template filtered (ntemplates == 1)
-                    if aidx.ndim == 3 and aidx.shape[2] == 1:
-                        ii = aidx[:, 0, 0]
-                        bi = np.nonzero(ii >= 0)[0]
-                        if bi.size:
-                            out_template_indices.append(np.full(bi.size, template_index, dtype=np.int64))
-                            out_sample_indices.append(sub_starts[bi] + ii[bi])
-                            out_snrs.append(aval[:, 0, 0][bi])
-                            out_tstarts.append(sub_starts[bi])
-                            out_block_lens.append(np.full(bi.size, N, dtype=np.int64))
-                    else:
-                        bi, _, bini = np.nonzero(aidx >= 0)
-                        if bi.size:
-                            out_template_indices.append(np.full(bi.size, template_index, dtype=np.int64))
-                            out_sample_indices.append(sub_starts[bi] + aidx[bi, 0, bini])
-                            out_snrs.append(aval[bi, 0, bini])
-                            out_tstarts.append(sub_starts[bi])
-                            out_block_lens.append(np.full(bi.size, N, dtype=np.int64))
-                else:
-                    if aidx.ndim == 3 and aidx.shape[2] == 1:
-                        ii = aidx[:, :, 0]
-                        bi, ti = np.nonzero(ii >= 0)
-                        if bi.size:
-                            out_template_indices.append(g.template_indices[ti])
-                            out_sample_indices.append(sub_starts[bi] + ii[bi, ti])
-                            out_snrs.append(aval[:, :, 0][bi, ti])
-                            out_tstarts.append(sub_starts[bi])
-                            out_block_lens.append(np.full(bi.size, N, dtype=np.int64))
-                    else:
-                        bi, ti, bini = np.nonzero(aidx >= 0)
-                        if bi.size:
-                            out_template_indices.append(g.template_indices[ti])
-                            out_sample_indices.append(sub_starts[bi] + aidx[bi, ti, bini])
-                            out_snrs.append(aval[bi, ti, bini])
-                            out_tstarts.append(sub_starts[bi])
-                            out_block_lens.append(np.full(bi.size, N, dtype=np.int64))
-
-        if out_template_indices:
-            if len(out_template_indices) == 1:
+        def build():
+            for d, sub_starts, g, tmpl_arg, N in pending:
+                consume(*d.result(), sub_starts, g, tmpl_arg, N)
+            if out_template_indices:
+                if len(out_template_indices) == 1:
+                    return FilterResults(
+                        template_indices=out_template_indices[0].astype(np.int64, copy=False),
+                        sample_indices=out_sample_indices[0].astype(np.int64, copy=False),
+                        snr=out_snrs[0].astype(np.complex64, copy=False),
+                        block_starts=out_tstarts[0].astype(np.int64, copy=False),
+                        block_lengths=out_block_lens[0].astype(np.int64, copy=False),
+                    )
                 return FilterResults(
-                    template_indices=out_template_indices[0].astype(np.int64, copy=False),
-                    sample_indices=out_sample_indices[0].astype(np.int64, copy=False),
-                    snr=out_snrs[0].astype(np.complex64, copy=False),
-                    block_starts=out_tstarts[0].astype(np.int64, copy=False),
-                    block_lengths=out_block_lens[0].astype(np.int64, copy=False),
+                    template_indices=np.concatenate(out_template_indices).astype(np.int64),
+                    sample_indices=np.concatenate(out_sample_indices).astype(np.int64),
+                    snr=np.concatenate(out_snrs).astype(np.complex64),
+                    block_starts=np.concatenate(out_tstarts).astype(np.int64),
+                    block_lengths=np.concatenate(out_block_lens).astype(np.int64),
                 )
-            return FilterResults(
-                template_indices=np.concatenate(out_template_indices).astype(np.int64),
-                sample_indices=np.concatenate(out_sample_indices).astype(np.int64),
-                snr=np.concatenate(out_snrs).astype(np.complex64),
-                block_starts=np.concatenate(out_tstarts).astype(np.int64),
-                block_lengths=np.concatenate(out_block_lens).astype(np.int64),
-            )
-        else:
-            return _EMPTY_FILTER_RESULTS
+            else:
+                return _EMPTY_FILTER_RESULTS
+
+        return _Deferred(build) if pending else build()
+
+    @staticmethod
+    def filter_series_many(jobs):
+        """Several filter_series calls as one batch: jobs is [(bank, series, kwargs)], the
+        result the list of their FilterResults, identical to calling each in turn.
+
+        On a GPU every call is submitted before any is collected, and each job's work goes to
+        its own compute queue: the device runs banks concurrently and works on early banks
+        while the host uploads later ones, and the host waits once rather than per call.
+        On a CPU the calls simply run in order.
+        """
+        from . import _Deferred
+        global _BATCH_TOKEN
+        _BATCH_TOKEN += 1
+        out = []
+        for j, (bank, series, kw) in enumerate(jobs):
+            bank._defer, bank._queue_offset = _BATCH_TOKEN, j
+            try:
+                out.append(bank.filter_series(series, **(kw or {})))
+            finally:
+                bank._defer, bank._queue_offset = 0, 0
+        return [r.result() if isinstance(r, _Deferred) else r for r in out]
 
     @staticmethod
     def _block_coverage(S: int, st: np.ndarray, lo: int, hi: int) -> np.ndarray:
