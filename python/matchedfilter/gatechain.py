@@ -347,9 +347,17 @@ def _store_cost(path, skey, cm):
     os.replace(tmp, path)
 
 
+#: The template count calibrations run at. Per-pair tier and refine costs are flat in the
+#: count to within a calibration's own noise (n=2048, 4096; 40-128 templates), and a bank's
+#: own count enters pricing through the per-block share (CostModel.block / ntemplates), so one
+#: calibration per transform size serves every bank -- and every bank then shares one cost
+#: model, and with it the cached chain choices.
+_CAL_TEMPLATES = 64
+
+
 def _nt_bucket(ntemplates):
-    """The template count a calibration stands for: the nearest power of two in [8, 128]."""
-    return 1 << int(round(math.log2(min(max(int(ntemplates), 8), 128))))
+    """The template count a calibration stands for (see _CAL_TEMPLATES)."""
+    return _CAL_TEMPLATES
 
 
 def default_series_group(n):
@@ -366,13 +374,9 @@ def calibrate_costs(n, ntemplates, blocks=256, reps=5, seed=11, group=None):
     no wall-clock subtraction is involved. Calls are sized like a segment's
     (hundreds of blocks), because a pooled tier's fixed per-call cost is only
     representative when amortised over a realistic number of survivors.
-    Under a second per (n, template count to the nearest power of two, series
-    group), once per process.
+    Under a second per (n, series group), once per process.
     """
     from . import _core
-    # Per-pair costs vary slowly with the template count (cache footprint, per-call
-    # amortisation), so one calibration per power of two serves every bank near it:
-    # a run builds banks of many sizes, and each calibration is a fraction of a second.
     nt = _nt_bucket(ntemplates)
     # The series group must be the plans' own: the first tier batches its work over the blocks in a
     # group, so calibrating at a smaller group overstates its cost (2x at n=1024 with 8 vs 32).
