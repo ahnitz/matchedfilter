@@ -1094,7 +1094,21 @@ class TimeDomainFilterBank:
             work_items = [(g, None) for g in self._groups]
 
         def consume(aidx, aval, sub_starts, g, tmpl_arg, N):
-            # aidx has shape (nblocks, ntemplates, nbins)
+            # aidx has shape (nblocks, ntemplates, nbins), or is a sparse result (aval None)
+            if aval is None:
+                sp = aidx
+                if sp.flat.size == 0:
+                    return
+                nt_, nb_ = sp.shape[1], sp.shape[2]
+                bi, rest = np.divmod(sp.flat, nt_ * nb_)
+                ti = rest // nb_
+                out_template_indices.append(np.full(bi.size, template_index, dtype=np.int64)
+                                            if tmpl_arg is not None else g.template_indices[ti])
+                out_sample_indices.append(sub_starts[bi] + sp.idx)
+                out_snrs.append(sp.val)
+                out_tstarts.append(sub_starts[bi])
+                out_block_lens.append(np.full(bi.size, N, dtype=np.int64))
+                return
             if tmpl_arg is not None:
                 # Single template filtered (ntemplates == 1)
                 if aidx.ndim == 3 and aidx.shape[2] == 1:
@@ -1133,7 +1147,7 @@ class TimeDomainFilterBank:
                         out_tstarts.append(sub_starts[bi])
                         out_block_lens.append(np.full(bi.size, N, dtype=np.int64))
 
-        from . import _Deferred
+        from . import _Deferred, _SparsePeaks
         defer = getattr(self, '_defer', False)
         pending = []
         sink = getattr(self, '_trace_sink', None)
@@ -1232,18 +1246,20 @@ class TimeDomainFilterBank:
                         active_plan._defer_series = defer       # the batch's token
                         if getattr(active_plan, '_gpu', None) is not None:
                             active_plan._gpu._queue_offset = getattr(self, '_queue_offset', 0)
+                    active_plan._want_sparse = True
                     try:
                         res = active_plan.run_series(
                             data_in, sub_starts, sub_bws, sub_bwe, binsize=bs,
                             threshold=eff_threshold, templates=plan_templates, raw=True
                         )
                     finally:
+                        active_plan._want_sparse = False
                         if defer and trial is None:
                             active_plan._defer_series = False
                 if isinstance(res, _Deferred):
                     pending.append((res, sub_starts, g, tmpl_arg, N))
                     continue
-                aidx, aval = res
+                aidx, aval = (res, None) if isinstance(res, _SparsePeaks) else res
                 if sink is not None:
                     sink[-1][2][0] = True          # a synchronous result: not replayable
                 if getattr(active_plan, '_last_n_triggers', None) == 0:
@@ -1261,7 +1277,8 @@ class TimeDomainFilterBank:
             for d, sub_starts, g, tmpl_arg, N in pending:
                 res = d.result()
                 if not d.empty:
-                    consume(*res, sub_starts, g, tmpl_arg, N)
+                    consume(*((res, None) if isinstance(res, _SparsePeaks) else res),
+                            sub_starts, g, tmpl_arg, N)
             if out_template_indices:
                 if len(out_template_indices) == 1:
                     return FilterResults(

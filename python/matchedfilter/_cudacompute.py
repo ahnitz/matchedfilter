@@ -75,6 +75,8 @@ def _manifest():
 
 
 _MAX_BINS = 2048
+# Sparse readback: peak records copied back with the count, before a second round trip.
+_SPARSE_HOST = 4096
 _COARSE_TILE_T = {128: 2, 256: 2, 512: 4, 1024: 2}
 # Device scratch bound per tile of a full correlation into a host array.
 _TILE_BYTES = 64 * 1024 * 1024
@@ -368,6 +370,10 @@ class Context(InputUploads):
     """One NVIDIA CUDA device context, stream, and loaded PTX pipelines."""
 
     max_grouped_bins = _MAX_BINS
+    # Results may come back sparse (see _tail); the series path asks with sparse=True.
+    supports_sparse = True
+    # Coarse PPG/tile groups are padded inside the backend (hier_peaks pads its rows).
+    pads_coarse_groups = True
     cache_limit_bytes = 1024 * 1024 * 1024
     # Unified addressing: a view inside a shared allocation is a device pointer.
     shared_views = True
@@ -834,6 +840,71 @@ class Context(InputUploads):
         self._grow(rec, "host", out * 12, _Pinned, stream)
         return rec, fresh
 
+    def _tail(self, bufs, out, shape, stream, sparse, counts=None, ncounts=0):
+        """Enqueue the result readback; returns collect() -> (result, counts or None).
+
+        Dense: the (blocks, templates, bins) index and value tables come back whole.
+        Sparse: compactPeaks gathers the peaks on the device, and only the count, the
+        first _SPARSE_HOST records and the survivor counters cross the bus."""
+        i0, v0 = bufs["idx"].dptr.value, bufs["val"].dptr.value
+        if not sparse:
+            host = bufs["host"]
+            self._copy_d2h(host.ptr, i0, out * 4, stream, "readback")
+            self._copy_d2h(host.ptr + out * 4, v0, out * 8, stream, "readback")
+            if ncounts:
+                self._copy_d2h(host.ptr + out * 12, counts, 4 * ncounts, stream, "readback")
+
+            def collect():
+                self._sync(stream)
+                c = host.view(np.uint32, ncounts, offset=out * 12) if ncounts else None
+                return self._results(host, *shape), c
+            return collect
+        cap = min(_SPARSE_HOST, out)
+        self._grow(bufs, "sp_cnt", 16, _Buffer, stream)
+        self._grow(bufs, "sp_list", out * 16, _Buffer, stream)
+        loff = 16 + ((4 * ncounts + 15) // 16) * 16     # records 16-byte aligned after counts
+        self._grow(bufs, "sp_host", loff + cap * 16, _Pinned, stream)
+        cnt, lst, hp = bufs["sp_cnt"].dptr.value, bufs["sp_list"].dptr.value, bufs["sp_host"]
+        self._fill32(_ptr(cnt), 0, 1, stream)
+        kfn, _ = self._compact_peaks()
+        self._launch(kfn, (out + 255) // 256, 256,
+                     [_ptr(i0), _ptr(v0), _ptr(cnt), _ptr(lst), _u32(out), _u32(out)],
+                     stream=stream)
+        coff = 16
+        self._copy_d2h(hp.ptr, cnt, 4, stream, "readback")
+        if ncounts:
+            self._copy_d2h(hp.ptr + coff, counts, 4 * ncounts, stream, "readback")
+        self._copy_d2h(hp.ptr + loff, lst, cap * 16, stream, "readback")
+
+        def collect():
+            from . import _SparsePeaks
+            self._sync(stream)
+            c = int(hp.view(np.uint32, 1)[0])
+            if c <= cap:
+                rec = hp.view(np.uint32, 4 * c, offset=loff).reshape(c, 4).copy()
+            else:                              # more peaks than the first read held
+                rec = np.empty((c, 4), np.uint32)
+                rec[:cap] = hp.view(np.uint32, 4 * cap, offset=loff).reshape(cap, 4)
+                self._copy_d2h(rec[cap:].ctypes.data, lst + cap * 16, (c - cap) * 16, stream,
+                               "readback")
+                self._sync(stream)
+            k = np.argsort(rec[:, 0], kind="stable")
+            rec = rec[k]
+            val = rec[:, 2:4].copy().view(np.float32).view(np.complex64).reshape(-1)
+            sp = _SparsePeaks(shape, rec[:, 0], rec[:, 1].view(np.int32), val)
+            cts = hp.view(np.uint32, ncounts, offset=coff).copy() if ncounts else None
+            return sp, cts
+        return collect
+
+    def _compact_peaks(self):
+        key = ("compactPeaks",)
+        if key not in self._pipelines:
+            f = _PTX_DIR / "compact_peaks.ptx"
+            if not f.is_file():
+                raise UnsupportedSize("compact_peaks.ptx not built")
+            self._pipelines[key] = (self._load("compact_peaks", f, "compactPeaks", 256), 256)
+        return self._pipelines[key]
+
     def _results(self, host, nd, nt, nbins):
         out = nd * nt * nbins
         idx = host.view(np.int32, out).reshape(nd, nt, nbins).copy()
@@ -843,7 +914,7 @@ class Context(InputUploads):
     # ---- flat ------------------------------------------------------------------
     def peaks(self, n, data, tmpl, binsize=None, threshold=0.0, window=None,
               upload_data=True, upload_tmpl=True, _groups=None,
-              slot=None, async_submit=False):
+              slot=None, async_submit=False, sparse=False):
         self._bind()
         nd, nt = data.shape[0], tmpl.shape[0]
         lo, hi = (0, n) if window is None else (int(window[0]), int(window[1]))
@@ -892,19 +963,16 @@ class Context(InputUploads):
                   _u32(nt), _u32(lo), _u32(hi), _u32(binsize), _i32(_shift(binsize)),
                   _u32(nbins), _f32bits(t2)]
         self._launch(hfunc, nd * nt, wg, params, stream=stream)
-        host = bufs["host"]
-        self._copy_d2h(host.ptr, bufs["idx"].dptr.value, out * 4, stream, "readback")
-        self._copy_d2h(host.ptr + out * 4, bufs["val"].dptr.value, out * 8, stream, "readback")
+        collect = self._tail(bufs, out, (nd, nt, nbins), stream, sparse)
 
         def readback():
-            self._sync(stream)
-            return self._results(host, nd, nt, nbins)
+            return collect()[0]
         if async_submit:
             return readback
         return readback()
 
     def peaks_grouped(self, n, data, tmpl, groups, binsize, threshold, *, upload_tmpl=True,
-                      slot=None, async_submit=False):
+                      slot=None, async_submit=False, sparse=False):
         """Distinct flat search windows over row ranges of one spectra batch: one sync.
 
         ``groups`` holds (lo, hi, a, b): rows a..b of ``data`` are searched over
@@ -952,13 +1020,10 @@ class Context(InputUploads):
                       _u32(nt), _u32(lo), _u32(hi), _u32(binsize), _i32(_shift(binsize)),
                       _u32(nb), _f32bits(t2)]
             self._launch(hfunc, (b - a) * nt, wg, params, stream=stream)
-        host = bufs["host"]
-        self._copy_d2h(host.ptr, i0, out * 4, stream, "readback")
-        self._copy_d2h(host.ptr + out * 4, v0, out * 8, stream, "readback")
+        collect = self._tail(bufs, out, (nd, nt, nb), stream, sparse)
 
         def readback():
-            self._sync(stream)
-            return self._results(host, nd, nt, nb)
+            return collect()[0]
         if async_submit:
             return readback
         return readback()
@@ -1179,7 +1244,7 @@ class Context(InputUploads):
     def hier_peaks(self, n, band, data, tmpl, ct0, raw_thr, binsize=None,
                    threshold=0.0, window=None, upload_data=True, upload_tmpl=True,
                    cascade_band=None, ct1=None, raw_thr1=None,
-                   slot=None, async_submit=False):
+                   slot=None, async_submit=False, sparse=False):
         """Hierarchical coarse-to-fine peaks, one or two coarse tiers, one sync.
 
         Single tier: ``band``/``ct0``/``raw_thr``. Two tiers (the Vulkan
@@ -1342,24 +1407,20 @@ class Context(InputUploads):
                       surv.dptr, _ptr(args), _u32(nt), _u32(lo), _u32(hi), _u32(binsize),
                       _i32(_shift(binsize)), _u32(nbins), _f32bits(t2), _u32(g)], stream=stream)
 
-        host = bufs["host"]
-        self._copy_d2h(host.ptr, bufs["idx"].dptr.value, out * 4, stream, "readback")
-        self._copy_d2h(host.ptr + out * 4, bufs["val"].dptr.value, out * 8, stream, "readback")
-        self._copy_d2h(host.ptr + out * 12, args, 8, stream, "readback")
+        collect = self._tail(bufs, out, (nd, nt, nbins), stream, sparse, args, 2)
 
         def readback():
-            self._sync(stream)
-            counts = host.view(np.uint32, 2, offset=out * 12)
+            res, counts = collect()
             self.last_refinements = int(counts[0])
             self.last_tier1_survivors = int(counts[1]) if cascade else int(counts[0])
-            return self._results(host, nd, nt, nbins)
+            return res
         if async_submit:
             return readback
         return readback()
 
     def hier_peaks_grouped(self, n, band, data, tmpl, ct0, raw_thr, groups, binsize, threshold,
                            *, upload_tmpl=True, cascade_band=None, ct1=None, raw_thr1=None,
-                           slot=None, async_submit=False):
+                           slot=None, async_submit=False, sparse=False):
         """Hierarchical peaks over row ranges of one spectra batch, each with its own
         window -- every group in ONE submission and one sync (plan D2).
 
@@ -1492,17 +1553,14 @@ class Context(InputUploads):
                           _ptr(v0 + a * nt * nb * 8), _ptr(surv + a * nt * 4), cnt_ref, _u32(nt),
                           _u32(lo), _u32(hi), _u32(binsize), _i32(_shift(binsize)), _u32(nb),
                           _f32bits(t2), _u32(g2)], stream=stream)
-        host = bufs["host"]
-        self._copy_d2h(host.ptr, i0, out * 4, stream, "readback")
-        self._copy_d2h(host.ptr + out * 4, v0, out * 8, stream, "readback")
-        self._copy_d2h(host.ptr + out * 12, args, 8 * ng, stream, "readback")
+        collect = self._tail(bufs, out, (nd, nt, nb), stream, sparse, args, 2 * ng)
 
         def readback():
-            self._sync(stream)
-            counts = host.view(np.uint32, 2 * ng, offset=out * 12).reshape(ng, 2)
+            res, counts = collect()
+            counts = counts.reshape(ng, 2)
             self.last_refinements = int(counts[:, 0].sum())
             self.last_tier1_survivors = int(counts[:, 1].sum()) if cascade else self.last_refinements
-            return self._results(host, nd, nt, nb)
+            return res
         if async_submit:
             return readback
         return readback()
