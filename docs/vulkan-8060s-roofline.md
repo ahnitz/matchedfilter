@@ -164,3 +164,58 @@ GPU:**
 With the cheaper refine, the autotuner now picks the single-tier chain (256,) for these
 dispatches. Coarse1 disappears and the n=2048 refine takes more survivors. The device total
 goes down by 1.5-2.7 ms.
+
+## 6. Third pass: pack fusion, other bands, refine twiddle table (falsified)
+
+**Pack phase removed.** The coarse tiers now read their band directly from the fp32 spectra
+the forward wrote. Specialization constant 75 (`mfDataStride`) carries the row stride n, and
+the packed coarse role rounds to half in the kernel with the same round-to-nearest-even
+`packCoarse` used. The forward still writes the full spectra, so the forward pass itself
+moves the same bytes; what goes away is the pack phase that re-read and re-wrote the bands
+(0.7-1.2 ms a segment of pack dispatches and band copies). The outputs are bit-identical,
+and coarse0 costs the same 96-97 CU-cycles per pair reading fp32 as it did reading packed
+fp16, because the data slice is loaded once per group and reused across 8 pairs.
+
+**Coarse at every band** (CU-cycles per pair; % of the pk-fp16 peak by nominal flops):
+
+| band | 0948b24 | now | % peak |
+|---|---|---|---|
+| 64 | 112 (p4) | 28 (p8t2/p16t2) | 34% |
+| 128 | 120 | 48-51 | 42-45% |
+| 256 | 209-237 | 92-96 | 51% |
+| 512 | 633 | 211-214 | 50% |
+| 1024 | 932 | 475 | 49% |
+
+Band 64 lagged because it had no tiled build and the 4-pair cap left 48 of 64 lanes idle.
+It now has a TILE_T=2 build. Tiled builds fill the whole subgroup
+(`subgroup_size / (band/16)` pairs). The 4-pair cap stays on the untiled builds, whose LDS
+atomic election is the one that hung. The p8/p16 tiled builds pass the FDR-transfer test,
+the suite and `--check cpu`, with no ring resets.
+
+**Refine twiddle table: falsified.** A correctly rounded fp32 table (constant data,
+16 × 8 B per lane) made the one-bin refine 20-28% slower: 547 → 663, 1016 → 1292 and
+2112 → 2708 CU-cycles per pair at n = 512, 1024, 2048. The table loads cost more than the
+single-pass fp32 recurrence they replace. Not shipped. (The fp16 table does pay in coarse0,
+because there the recurrence carried fp32↔fp16 conversions and the kernel is VALU-bound.)
+
+## 7. What should transfer to Metal and CUDA
+
+All of these depend on queried capabilities or geometry. None is specific to gfx1151.
+
+- **Peak election with subgroup shuffles** (`peakTwoWave`). This applies wherever the pair's
+  WG ≤ subgroup size (keyed on the subgroup size the API reports, here spec constant 74).
+  Apple SIMD-groups of 32 and CUDA warps qualify at bands ≤ 512.
+- **Affine-separable exchange addressing** (one base per thread, immediate offsets). This is
+  pure index algebra and holds on every backend. `tools/coarse_layout.py` checks it.
+- **Bank padding of the exchange stage.** The model assumes 32 four-byte banks, which
+  matches CUDA shared memory and AMD LDS. Apple's threadgroup memory banking differs, so
+  it would need re-measuring there.
+- **fp16 twiddle table for the packed coarse role.** It pays wherever the coarse kernel is
+  VALU-bound with fp16↔fp32 conversions in the recurrence.
+- **Ragged tiles** (any template count keeps the two-pairs-per-register build). Host
+  geometry only.
+- **Reading the band from the spectra** (no pack pass). A stride parameter: a function
+  constant on Metal, a kernel argument on CUDA.
+- **One-bin refine builds and a listed compact for tier 1.** Backend-independent.
+- **Not transferable:** the measured wave64 rates (pk-fp16 is two passes, fp32 FMA is
+  one). Each device needs its own probe.
