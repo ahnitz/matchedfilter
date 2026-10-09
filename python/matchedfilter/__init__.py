@@ -453,6 +453,17 @@ class MatchedFilter:
             attr = "_gdata" if what == "data" else "_gtmpl"
             if shared_buffer(a, self._gpu) is not None:
                 setattr(self, attr, a)
+            elif what == "template" and getattr(self._gpu, "_device_state", None) is not None:
+                # One device copy of the bank that every recording binds in place. Copied per
+                # storage (per slot, window group and chain), the spectra overran the cache
+                # budget at n=4096, and each eviction drained the in-flight batch.
+                self._settle_deferred()
+                buf = store if (store is not None and store.shape == a.shape
+                                and shared_buffer(store, self._gpu) is not None) else None
+                if buf is None:
+                    buf = self._gpu.empty_shared(a.shape)
+                buf[:] = a
+                setattr(self, attr, buf)
             elif store is None or shared_buffer(store, self._gpu) is not None or not store.flags.writeable:
                 setattr(self, attr, a.copy())
             else:
