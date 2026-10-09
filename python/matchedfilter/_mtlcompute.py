@@ -306,12 +306,68 @@ def _autoreleased(method):
     return call
 
 
+class _Device:
+    """One Metal device per index for the life of the process, with the Objective-C
+    bindings and every compiled pipeline.
+
+    A bank holds dozens of plans, each with its own Context. Giving each its own device
+    handle recompiled every kernel from source per plan (the ladder's first segment was
+    mostly that), and made buffers of one plan foreign to another: a fine bank reading
+    the middle bank's output could not bind it by offset, and wrapping that memory in a
+    second buffer cost ~60 ms per call on the M2. Contexts on one _Device share buffers
+    (_shared._same_device), pipelines and libraries; each keeps its own queue and caches.
+    Never released: it lives as long as the process.
+    """
+
+    def __init__(self, index):
+        self.o = o = _ObjC()
+        o.metal.MTLCreateSystemDefaultDevice.restype = ctypes.c_void_p
+        # Enumerate rather than ask for the "system default", which is the device
+        # recommended for RENDERING and is nil with no display attached.
+        from . import _metal
+        with o.autorelease_pool():
+            found = _metal._all_devices(o.objc, o.metal)
+            if not found:
+                one = o.metal.MTLCreateSystemDefaultDevice()
+                found = [one] if one else []
+            if index < 0 or index >= len(found):
+                for handle in found:
+                    o.call(handle, b"release", restype=None)
+                raise MetalError(
+                    "no Metal device with index %d (found %d); "
+                    "MTLCopyAllDevices is the enumeration and "
+                    "MTLCreateSystemDefaultDevice needs a display"
+                    % (index, len(found)))
+            self.handle = found[index]
+            for i, handle in enumerate(found):
+                if i != index:
+                    o.call(handle, b"release", restype=None)
+            self.name = o.to_str(o.call(self.handle, b"name"))
+            self.max_shared_memory = int(o.call(
+                self.handle, b"maxThreadgroupMemoryLength", restype=ctypes.c_ulong))
+        self.pipelines = {}
+        self.pipeline_names = {}
+
+
+_DEVICES = {}
+
+
+def _device(index):
+    dev = _DEVICES.get(index)
+    if dev is None:
+        dev = _DEVICES[index] = _Device(index)
+    return dev
+
+
 class Context(InputUploads):
-    """One Metal device, its queue, and the pipelines built on it."""
+    """A queue and dispatch caches on one process-wide Metal device (see _Device)."""
 
     max_grouped_bins = _MAX_BINS
     #: peaks_grouped takes nbins: window groups may give different bin counts.
     supports_ragged_bins = True
+    #: shared_buffer() may hand back a view inside an allocation (one row of a device-
+    #: resident middle output); every binding adds its offset.
+    shared_views = True
     #: Commits return without waiting when asked (async_submit with a slot):
     #: the series loop keeps several batches in flight. Declared, so callers
     #: test a capability instead of probing signatures for a TypeError.
@@ -322,7 +378,6 @@ class Context(InputUploads):
     def __init__(self, index=0):
         if sys.platform != "darwin":
             raise MetalError("Metal is only available on macOS")
-        self.o = _ObjC()
         self.device = self.queue = None
         self._pipelines = {}
         self._batches = {}
@@ -338,44 +393,27 @@ class Context(InputUploads):
         self._timing = _gputime.enabled()
         if self._timing:
             _gputime.register(self)
+        dev = _device(index)
+        self.o = dev.o
         try:
-            self._initialize(index)
+            self._initialize(index, dev)
         except Exception:
             self.destroy()
             raise
 
-    @_autoreleased
-    def _initialize(self, index):
-        self.o.metal.MTLCreateSystemDefaultDevice.restype = ctypes.c_void_p
-        # Enumerate rather than ask for the "system default", which is the
-        # device recommended for RENDERING and is nil with no display
-        # attached. Compute does not need one.
-        from . import _metal
-        found = _metal._all_devices(self.o.objc, self.o.metal)
-        if not found:
-            one = self.o.metal.MTLCreateSystemDefaultDevice()
-            found = [one] if one else []
-        if index < 0 or index >= len(found):
-            for handle in found:
-                self.o.call(handle, b"release", restype=None)
-            raise MetalError(
-                "no Metal device with index %d (found %d); "
-                "MTLCopyAllDevices is the enumeration and "
-                "MTLCreateSystemDefaultDevice needs a display"
-                % (index, len(found)))
-        self.device = found[index]
-        for i, handle in enumerate(found):
-            if i != index:
-                self.o.call(handle, b"release", restype=None)
-        self.name = self.o.to_str(self.o.call(self.device, b"name"))
-        self.queue = self.o.call(self.device, b"newCommandQueue")
+    def _initialize(self, index, dev):
+        self._device_state = dev
+        self.device = dev.handle
+        self.name = dev.name
+        self.max_shared_memory = dev.max_shared_memory
+        self._pipelines = dev.pipelines
+        self.pipeline_names = dev.pipeline_names
+        with self.o.autorelease_pool():
+            self.queue = self.o.call(self.device, b"newCommandQueue")
         #: Device-only seconds for the last dispatch, see _record_gpu_time.
         self.last_gpu_time = 0.0
         if not self.queue:
             raise MetalError("newCommandQueue failed")
-        self.max_shared_memory = int(self.o.call(
-            self.device, b"maxThreadgroupMemoryLength", restype=ctypes.c_ulong))
-        self._pipelines = {}
         self._batches = {}
         self._hier = {}
         self._uploaded = {"data": {}, "tmpl": {}}
@@ -570,7 +608,9 @@ class Context(InputUploads):
                     "device='cpu'" % (n, want, limit, self.name, want))
             self._pipelines[key] = pso
             #: What each pipeline is, for profilers that observe _dispatch.
-            self.__dict__.setdefault("pipeline_names", {})[pso] = (stem, n, entry_name)
+            if "pipeline_names" not in self.__dict__:
+                self.pipeline_names = {}
+            self.pipeline_names[pso] = (stem, n, entry_name)
             result, pso = pso, None  # ownership transferred to the cache
             return result
 
@@ -651,8 +691,9 @@ class Context(InputUploads):
 
     def _set_buffers(self, enc, buffers, start=1, offsets=None):
         for slot, buf in enumerate(buffers, start=start):
+            off = getattr(buf, "offset", 0) + (0 if offsets is None else offsets[slot - start])
             self.o.call(enc, b"setBuffer:offset:atIndex:", restype=None,
-                        args=(buf.handle, 0 if offsets is None else offsets[slot - start], slot),
+                        args=(buf.handle, off, slot),
                         argtypes=(ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong))
 
     def _set_params(self, enc, params):
@@ -703,7 +744,13 @@ class Context(InputUploads):
         recognises the array while the owner lives. Drop the owner when the
         dispatch has completed, and before the array.
         """
-        from ._shared import _Allocation
+        from ._shared import _Allocation, _containing
+        if isinstance(array, np.ndarray) and array.nbytes:
+            # Memory already inside a device allocation is bound by offset instead: a
+            # second buffer over the same pages cost ~60 ms before the GPU started.
+            start, owner = _containing(array.ctypes.data)
+            if owner is not None and array.ctypes.data < start + owner.buffer.nbytes:
+                return None
         if (not isinstance(array, np.ndarray) or not array.flags.c_contiguous
                 or not array.flags.writeable or array.nbytes == 0
                 or array.ctypes.data % self.page_bytes or array.nbytes % self.page_bytes):
@@ -768,7 +815,7 @@ class Context(InputUploads):
             slot = 1
         for buf in buffers:
             self.o.call(enc, b'setBuffer:offset:atIndex:', restype=None,
-                        args=(buf.handle, 0, slot),
+                        args=(buf.handle, getattr(buf, "offset", 0), slot),
                         argtypes=(ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong))
             slot += 1
         width = _manifest()['full_tierc'][str(n)][role]['local_size'][0]
@@ -1362,13 +1409,17 @@ class Context(InputUploads):
             return
         self.cancel_forward()
         self.clear_cache()
-        for pipeline in self._pipelines.values():
-            self.o.call(pipeline, b"release", restype=None)
-        self._pipelines.clear()
+        shared = getattr(self, "_device_state", None) is not None
+        if not shared:
+            # A context that owns its device (built without _Device) owns its pipelines.
+            for pipeline in self._pipelines.values():
+                self.o.call(pipeline, b"release", restype=None)
+            self._pipelines.clear()
         if self.queue:
             self.o.call(self.queue, b"release", restype=None)
             self.queue = None
-        self.o.call(self.device, b"release", restype=None)
+        if not shared:
+            self.o.call(self.device, b"release", restype=None)
         self.device = None
 
     def __del__(self):

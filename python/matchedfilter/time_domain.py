@@ -1199,7 +1199,15 @@ class TimeDomainFilterBank:
                     data_in, bstarts, bws, bwe, binsize=bs,
                     threshold=eff_threshold, templates=plan_templates)
                 if res is not None:
-                    work = [((bstarts, bws, bwe), res)]
+                    # Split back into the per-count groups, in their order, so the result
+                    # is the one per-count calls give (peak order included).
+                    ridx, rval = res
+                    bc = ((bwe - bws + bs - 1) // bs).astype(np.int64)
+                    work = []
+                    for u in np.unique(bc):
+                        m = bc == u
+                        work.append(((bstarts[m], bws[m], bwe[m]),
+                                     (ridx[m][:, :, :u], rval[m][:, :, :u])))
             t_trial = time.perf_counter()
             for (sub_starts, sub_bws, sub_bwe), res in work:
                 if res is None:
