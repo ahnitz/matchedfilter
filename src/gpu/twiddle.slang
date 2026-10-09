@@ -4,7 +4,12 @@
 #ifdef MF_VULKAN
 [[vk::constant_id(73)]] const uint mfAccurateTrig = 0;
 [[vk::constant_id(74)]] const uint mfSubgroupSize = 32;
+// Row stride of the DATA spectra, in complex elements; 0 means the kernel's own
+// length. The hierarchical stages read their band straight out of the full
+// n-point spectra (stride n) instead of a packed band copy.
+[[vk::constant_id(75)]] const uint mfDataStride = 0;
 #else
+static const uint mfDataStride = 0;
 static const uint mfAccurateTrig = 0;
 static const uint mfSubgroupSize = 32;
 #endif
