@@ -1325,7 +1325,7 @@ class TimeDomainFilterBank:
         return side == "cpu", record
 
     @staticmethod
-    def filter_series_many(jobs):
+    def filter_series_many(jobs, wait=True):
         """Several filter_series calls as one batch: jobs is [(bank, series, kwargs)], the
         result the list of their FilterResults, identical to calling each in turn.
 
@@ -1333,6 +1333,11 @@ class TimeDomainFilterBank:
         its own compute queue: the device runs banks concurrently and works on early banks
         while the host uploads later ones, and the host waits once rather than per call.
         On a CPU the calls simply run in order.
+
+        wait=False returns, per job, an object whose result() gives its FilterResults: the GPU
+        keeps working while the caller prepares the next batch (keeping the device busy keeps
+        its clock up). The jobs' input series must not be overwritten until then. A later
+        batch on the same banks first finishes whatever of this one it would overwrite.
         """
         from . import _Deferred
         import os
@@ -1360,6 +1365,8 @@ class TimeDomainFilterBank:
         finally:
             if close is not None:
                 close()
+        if not wait:
+            return [r if isinstance(r, _Deferred) else _Deferred(lambda r=r: r) for r in out]
         return [r.result() if isinstance(r, _Deferred) else r for r in out]
 
     @staticmethod
