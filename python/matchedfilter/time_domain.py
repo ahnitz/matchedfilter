@@ -1427,16 +1427,20 @@ class TimeDomainFilterBank:
                 continue
             groups.setdefault((id(bank), id(g), bs, thr), []).append(
                 (j, bank, g, ser, bstarts, bws, bwe, ti_local, ti))
-        done, submitted = set(), []
-        for (_, _, bs, thr), members in groups.items():   # every group submitted, then one wait
+        done = set()
+        # Submit every template group's items, then collect: a backend that can leaves each
+        # submission in flight (wait=False), so the device runs them back to back.
+        submitted = []
+        for (_, _, bs, thr), members in groups.items():
             g = members[0][2]
             plan = g.get_flat_plan()
             res = plan._items_gpu([(ser, st, ws, we, tl) for _, _, _, ser, st, ws, we, tl, _ in members],
                                   bs, thr, wait=False) if hasattr(plan, "_items_gpu") else None
             if res is not None:
-                submitted.append((members, bs, res))
-        for members, bs, res in submitted:
-            for (j, bank, g, ser, st, ws, we, tl, ti), (idx, val) in zip(members, res()):
+                submitted.append((bs, members, res))
+        for bs, members, res in submitted:
+            res = res()
+            for (j, bank, g, ser, st, ws, we, tl, ti), (idx, val) in zip(members, res):
                 lists = ([], [], [], [], [])
                 # Peaks in the order one call per bin count gives them.
                 counts = ((we - ws + bs - 1) // bs).astype(np.int64)

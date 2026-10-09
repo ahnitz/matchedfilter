@@ -472,7 +472,7 @@ def calibrate_costs(n, ntemplates, blocks=256, reps=5, seed=11, group=None):
 
 
 
-def calibrate_costs_gpu(n, device, blocks=1024, reps=5, seed=11, nt=256):
+def calibrate_costs_gpu(n, device, blocks=None, reps=5, seed=11, nt=256):
     """This GPU's tier costs at transform size n, in device nanoseconds, as a CostModel.
 
     The CPU calibration's construction (synthetic analytic noise, whitened random templates,
@@ -484,11 +484,17 @@ def calibrate_costs_gpu(n, device, blocks=1024, reps=5, seed=11, nt=256):
       dense[b]   a first tier at band b, per pair
       refine     per refined pair, at survivor densities _CAL_DENSITIES
       sparse[b]  a second tier at band b, per first-tier survivor
-    Sized like a segment's call on this hardware (1024 blocks x 256 templates): at a few
-    thousand pairs a GPU call is fixed latency and every difference above is noise.
-    A few seconds per (n, device), once per process, or read from MF_COST_FILE.
+    Sized like a segment's call: a fixed span of series (2^21 samples: 1024 blocks at
+    n=2048, 128 at 16384) against 256 templates, so every n is measured at the call size
+    it serves and above the few thousand pairs where a GPU call is fixed latency. Sized
+    in blocks instead, the work grew as n log n: 139 s at n=16384 and 814 s at 32768 on
+    an M2. The device is warmed first: a GPU idle at a low clock reads slow for its first
+    calls (one process of three priced band 128 at 2x the others).
+    About a second per n on an M2, once per process, or read from MF_COST_FILE.
     """
     from . import HierarchicalFilter
+    if blocks is None:
+        blocks = max(64, (1024 * 2048) // int(n))
     key = ("gpu", int(n), str(device))
     if key in _COSTS:
         return _COSTS[key]
@@ -553,6 +559,11 @@ def calibrate_costs_gpu(n, device, blocks=1024, reps=5, seed=11, nt=256):
         return mid
 
     b0 = bands[0]
+    import time as _time
+    warm_until = _time.perf_counter() + 0.25
+    run((b0,), (big,), reps=1)
+    while _time.perf_counter() < warm_until:
+        run((b0,), (big,), reps=1)
     t_small, _, _ = run((b0,), (big,), ntm=nt // 4)
     t_full, _, _ = run((b0,), (big,))
     if not (t_full > 0 and t_small > 0):
