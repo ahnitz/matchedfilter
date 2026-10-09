@@ -63,4 +63,49 @@ fine 3.24-3.25 s -> 2.73-2.74 s (**1.19x**); trial locks q15=True every time
 (1.95e-7 -> 1.63e-7 s/pair). Tier 0 (band 256): 437 -> 330 cycles/pair; the
 screen 288 cycles/pair; 6.8% of pairs re-run in float (float tier passes 4.5%).
 Standalone kernel (dev2 Zen 5, loaded): 1.6-2.3x over the float pair kernel.
-Haswell, dev3, dev4 not measured (haswell at load 35 and without a build env).
+
+### All hosts (2026-10-09, base = main 46fe361 before the screen, steady fine stage, 2 interleaved reps each)
+
+| host | CPU | base | screen | gain | note |
+|---|---|---|---|---|---|
+| dev1 | Ryzen 9 5950X (Zen 3, AVX2) | 3.24 s | 2.73 s | 1.19x | load < 1 |
+| dev3 | Ryzen 5 5500U (Zen 2, AVX2) | 4.49-4.51 s | 3.93-3.94 s | 1.14x | load < 1 |
+| dev4 | i5-13500H (Raptor Lake P-core, AVX2) | 2.84-2.85 s | 2.63 s | 1.08x | load < 1 |
+| haswell | Xeon E5-2698 v3 | 11.24-11.49 s | 9.15-9.48 s | 1.22x | shared node, load ~38/64 |
+| dev2 | Ryzen AI Max+ 395 (Zen 5, AVX-512) | -- | -- | -- | load 20-40 all day; only the standalone kernel figure above |
+
+Fine triggers identical with and without the screen on every host. The trial chose the screen on every run.
+Warm-up grows 5-18 s, from the screen's cost calibration plus its trials (calibration only runs once per process, or is
+read from MF_COST_FILE).
+
+### Pricing (MF_AUTOTUNE=0)
+
+`calibrate_costs` also measures, per band with a screen: the screen alone (threshold
+unreachable), its pass excess over the float tier at the calibration densities, and
+the per-pair cost of re-running its survivors. `CostModel.first_tier` picks the
+cheaper first tier; `choose_chain` records the choice and a plan built with
+autotune off uses it. With autotune on, the on/off trial still decides. Cost files
+written by a build without the screen are keyed apart (`,q15`).
+
+### In-situ gap: none on AVX2
+
+The 1.6-2.3x was the Zen 5 / AVX-512 standalone figure. On dev1 (AVX2) the standalone
+kernel at the in-situ shape (32 blocks x 343 templates, band 256, window from n/4)
+is 1.52-1.58x, against 437/288 = 1.52x in situ, so nothing is lost in the
+integration. Two attempts to go further were measured and are not kept:
+* fusing the window maximum into pass 2 (no store of pass-2 outputs): the screen got
+  slower in situ, 288 -> 373 cycles/pair on dev1 (the per-output mask branch and the
+  extra live registers in a 16-register file);
+* other factorisations (256 = 8x32 / 32x8, 512 = 16x32): within +-3% of 16x16 / 32x16.
+The per-pair threshold work is a vectorised per-lane computation, one per (template
+group, block); it is not significant next to ~4.5K cycles per 16-lane call.
+
+### Where the fine stage goes now (dev1, screen on)
+
+Tier 0 (band 256) is 330 of ~420 cycles/pair: the screen 288, plus the float re-run of
+6.5% of pairs (the float tier itself passes 4.5%). Tier 1 is 76, tier 2 14, refine 2.
+The middle stage (correlation) is 0.39 s against 2.73 s. The next x86 lever is still
+the first tier, not refine or forward: (a) the screen kernel's op count on AVX2
+(split-radix int16 at ~4.4K cycles per 16-lane 256-point call), (b) the recheck excess
+(2 points of the 6.5%, ~9% of tier 0) that a smaller derived margin would cut, and (c)
+a cheaper 128-band screened first tier, which the model now prices.
