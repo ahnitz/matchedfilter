@@ -224,6 +224,7 @@ def get_cuda_lib():
         "cuOccupancyMaxActiveBlocksPerMultiprocessor": [
             ctypes.POINTER(ctypes.c_int), ctypes.c_void_p, ctypes.c_int, ctypes.c_size_t],
         "cuStreamWaitEvent": [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint],
+        "cuEventQuery": [ctypes.c_void_p],
         "cuMemGetInfo_v2": [ctypes.POINTER(ctypes.c_size_t), ctypes.POINTER(ctypes.c_size_t)],
         "cuMemHostRegister_v2": [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint],
         "cuMemHostUnregister": [ctypes.c_void_p],
