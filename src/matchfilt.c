@@ -14,6 +14,7 @@
 #include "alloc.h"
 #include "matchedfilter.h"
 #include "transform.h"
+#include "q15.h"
 #define AP_MF_MAXCAND 64
 
 /* Unfused product, for a back end with no fused stage-A loader.  Every
@@ -80,6 +81,16 @@ struct ap_mf_plan {
   float *sfwd_2n, *sspec_2n;
   ap_plan *fft_fwd_n;
   float *sfwd_n, *sspec_n;
+  /* Q15 coarse screen (ap_mf_q15_screen): int16 copies of the inputs, made on
+     first use and invalidated by the setters. */
+  int qw;                     /* int16 lanes per screen call; 0 until first use */
+  int16_t *qtr,*qti;          /* [group][n][qw] quantised templates, conjugated */
+  float *qts;                 /* [nt] template scale: t_q = t * qts */
+  unsigned char *qtok;        /* [nt] quantised copy current */
+  int16_t *qd;                /* [nd][n][3] quantised data, (dr, di, -di) */
+  float *qds;                 /* [nd] data scale */
+  unsigned char *qdok;        /* [nd] */
+  void *qscr;                 /* kernel scratch */
 };
 
 static ap_mf_plan *create_mf(size_t n, int ndata, int ntmpl, int pair){
@@ -176,6 +187,8 @@ void ap_mf_destroy(ap_mf_plan *p){
   free(p->twiddles);free(p->sspec_tw);free(p->dif_pkbuf);
   free(p->sfwd_2n);free(p->sspec_2n);
   free(p->sfwd_n);free(p->sspec_n);
+  free(p->qtr);free(p->qti);free(p->qts);free(p->qtok);
+  free(p->qd);free(p->qds);free(p->qdok);free(p->qscr);
   free(p);
 }
 
@@ -236,6 +249,7 @@ static void split_store(const float * restrict inter,float * restrict re,float *
 
 int ap_mf_set_data(ap_mf_plan *p, int d, const float *spec){
   if(!p||d<0||d>=p->nd) return -1;
+  if(p->qdok) p->qdok[d]=0;
   split_store(spec, p->dre+(size_t)d*p->n, p->dim+(size_t)d*p->n, p->n, 0,
               p->gmajor?p->n1:0, p->n2, p->w);
   if(p->pair_alt){
@@ -247,6 +261,7 @@ int ap_mf_set_data(ap_mf_plan *p, int d, const float *spec){
 
 int ap_mf_set_template(ap_mf_plan *p, int t, const float *spec){
   if(!p||t<0||t>=p->nt) return -1;
+  if(p->qtok) p->qtok[t]=0;
   if(p->pb){
     /* Bank stored [group][element][lane], lane = t % pb.  The pair kernel
        reads a whole group as one contiguous [element][lane] run, so the
@@ -1235,6 +1250,194 @@ int ap_mf_run_pairs_pooled(ap_mf_plan *p, int d0,
                       start, end);
     if(r < 0) return -1;
     total += r;
+  }
+  return total;
+}
+
+/* ---- Q15 coarse screen ---------------------------------------------------
+ *
+ * The coarse tier's question is only "can this pair's maximum reach the
+ * threshold".  The screen answers it for 2*AP_W pairs per call in int16 fixed
+ * point (q15-inl.h) and says "maybe" whenever the int16 maximum, plus the
+ * transform's error margin, reaches the threshold.  The caller then runs the
+ * float tier on exactly those pairs, so its decisions -- and every peak -- are
+ * the float tier's own; the screen only removes pairs the float tier would
+ * have rejected anyway.  See docs/cpu-q15-gate.md for the error model and the
+ * measurement behind ap_q15_margin.
+ *
+ * Inputs are quantised per template (once) and per data slot (on first use
+ * after set_data), from the plan's own float copies. */
+static size_t q15_nat(const ap_mf_plan *p,size_t k){
+  if(!p->gmajor) return k;
+  const size_t a=k%(size_t)p->n1, b=k/(size_t)p->n1;
+  return (a/(size_t)p->w)*(size_t)p->n2*(size_t)p->w+b*(size_t)p->w+a%(size_t)p->w;
+}
+
+int ap_mf_q15_lanes(const ap_mf_plan *p){
+  if(!p) return 0;
+  int M1,M2;
+  if(ap_q15_factor(p->n,&M1,&M2)) return 0;
+  return ap_q15_lanes();
+}
+
+static int q15_prepare(ap_mf_plan *p){
+  if(p->qw) return 0;
+  const int qw=ap_mf_q15_lanes(p);
+  if(qw<=0) return -1;
+  const size_t n=p->n, ng=((size_t)p->nt+qw-1)/qw;
+  p->qtr=ap_alloc64(ng*n*qw*sizeof(int16_t));
+  p->qti=ap_alloc64(ng*n*qw*sizeof(int16_t));
+  p->qts=calloc((size_t)p->nt,sizeof(float));
+  p->qtok=calloc((size_t)p->nt,1);
+  p->qd=ap_alloc64((size_t)p->nd*n*3*sizeof(int16_t));
+  p->qds=calloc((size_t)p->nd,sizeof(float));
+  p->qdok=calloc((size_t)p->nd,1);
+  p->qscr=ap_alloc64(ap_q15_scratch_bytes(n,qw));
+  if(!p->qtr||!p->qti||!p->qts||!p->qtok||!p->qd||!p->qds||!p->qdok||!p->qscr){
+    free(p->qtr);free(p->qti);free(p->qts);free(p->qtok);
+    free(p->qd);free(p->qds);free(p->qdok);free(p->qscr);
+    p->qtr=p->qti=NULL;p->qts=NULL;p->qtok=NULL;p->qd=NULL;p->qds=NULL;p->qdok=NULL;p->qscr=NULL;
+    return -1;
+  }
+  /* padding lanes of the last group stay zero */
+  memset(p->qtr,0,ng*n*qw*sizeof(int16_t));
+  memset(p->qti,0,ng*n*qw*sizeof(int16_t));
+  p->qw=qw;
+  return 0;
+}
+
+static inline int16_t q15_q(float v,double s){
+  double r=nearbyint((double)v*s);
+  if(r>32767.0) r=32767.0;
+  if(r<-32767.0) r=-32767.0;
+  return (int16_t)r;
+}
+
+/* Templates are stored conjugated already; quantise as stored. |t_q|_2 is
+   AP_Q15_TNORM unless that would put a component past int16. */
+static void q15_template(ap_mf_plan *p,int t){
+  const size_t n=p->n; const int qw=p->qw;
+  const float *re,*im; int nat=0;
+  if(p->pb && p->tmre){ re=p->tmre+(size_t)t*n; im=p->tmim+(size_t)t*n; }
+  else { re=p->tre+(size_t)t*n; im=p->tim+(size_t)t*n; nat=1; }
+  double ss=0, amax=0;
+  for(size_t k=0;k<n;k++){
+    const size_t j=nat?q15_nat(p,k):k;
+    const double r=re[j], i=im[j];
+    ss+=r*r+i*i;
+    if(fabs(r)>amax) amax=fabs(r);
+    if(fabs(i)>amax) amax=fabs(i);
+  }
+  double sc=0;
+  if(isfinite(ss) && ss>0){
+    sc=AP_Q15_TNORM(n)/sqrt(ss);
+    if(sc*amax>32767.0) sc=32767.0/amax;
+  }
+  int16_t *qr=p->qtr+(size_t)(t/qw)*n*qw+(t%qw), *qi=p->qti+(size_t)(t/qw)*n*qw+(t%qw);
+  for(size_t k=0;k<n;k++){
+    const size_t j=nat?q15_nat(p,k):k;
+    qr[k*qw]=sc>0?q15_q(re[j],sc):0;
+    qi[k*qw]=sc>0?q15_q(im[j],sc):0;
+  }
+  p->qts[t]=(float)sc;
+  p->qtok[t]=1;
+}
+
+/* |d_q|_2 is set so that |d_q|_2 * AP_Q15_TNORM / 2^15 + 1.5 n <= AP_Q15_L1:
+   every template's |t_q|_2 is at most AP_Q15_TNORM, so this holds for every
+   pair (the sqrt(n) is the rounding's worst growth of the norm). */
+static void q15_data(ap_mf_plan *p,int d){
+  const size_t n=p->n;
+  const float *re=p->dre+(size_t)d*n, *im=p->dim+(size_t)d*n;
+  int16_t *q=p->qd+(size_t)d*n*3;
+  double ss=0;
+  if(p->gmajor){
+    for(size_t k=0;k<n;k++){ const size_t j=q15_nat(p,k); ss+=(double)re[j]*re[j]+(double)im[j]*im[j]; }
+  } else {
+    float s4[4]={0,0,0,0};
+    size_t k=0;
+    for(;k+4<=n;k+=4) for(int u=0;u<4;u++) s4[u]+=re[k+u]*re[k+u]+im[k+u]*im[k+u];
+    for(;k<n;k++) s4[0]+=re[k]*re[k]+im[k]*im[k];
+    ss=(double)s4[0]+s4[1]+s4[2]+s4[3];
+  }
+  const double D=(AP_Q15_L1-1.5*(double)n)*32768.0/AP_Q15_TNORM(n)-sqrt((double)n);
+  /* float rounding of the sum can overstate or understate it by ~1e-7
+     relative; the 0.999 keeps the bound on the side that matters. */
+  const double sc=(isfinite(ss) && ss>0) ? 0.999*D/sqrt(ss) : 0.0;
+  const float scf=(float)sc;
+  if(!(sc>0)){ memset(q,0,n*3*sizeof(int16_t)); }
+  else if(p->gmajor){
+    for(size_t k=0;k<n;k++){
+      const size_t j=q15_nat(p,k);
+      const int16_t r=q15_q(re[j],sc), i=q15_q(im[j],sc);
+      q[3*k]=r; q[3*k+1]=i; q[3*k+2]=(int16_t)-i;
+    }
+  } else {
+    /* |x*scf| <= |d_q|_2 < 32767 by construction, so no clamp is needed */
+    for(size_t k=0;k<n;k++){
+      const int r=(int)lrintf(re[k]*scf), i=(int)lrintf(im[k]*scf);
+      q[3*k]=(int16_t)r; q[3*k+1]=(int16_t)i; q[3*k+2]=(int16_t)-i;
+    }
+  }
+  p->qds[d]=(float)sc;
+  p->qdok[d]=1;
+}
+
+int ap_mf_q15_screen(ap_mf_plan *p,int d0,int nd,int t0,int nt,float threshold,
+                     size_t start,size_t end,unsigned char *pass,float *stat){
+  if(!p||nd<1||nt<1) return 0;
+  if(d0<0||d0+nd>p->nd||t0<0||t0+nt>p->nt) return -1;
+  if(end>p->n) end=p->n;
+  if(start>=end) return 0;
+  if(q15_prepare(p)) return -1;
+  const size_t n=p->n; const int qw=p->qw;
+  const float EQ=(float)ap_q15_margin(n);
+  float bl[64];
+  int16_t lanethr[64], lanemax[64];
+  int total=0;
+  for(int g=t0/qw; g*qw<t0+nt; g++){
+    const int l0 = g*qw<t0 ? t0-g*qw : 0;
+    const int l1 = (g+1)*qw>t0+nt ? t0+nt-g*qw : qw;
+    for(int l=0;l<qw;l++){
+      const int t=g*qw+l;
+      bl[l]=0.f;
+      if(l<l0 || l>=l1) continue;
+      if(!p->qtok[t]) q15_template(p,t);
+      bl[l]=p->qts[t];
+    }
+    const int16_t *tr=p->qtr+(size_t)g*n*qw, *ti=p->qti+(size_t)g*n*qw;
+    for(int d=d0;d<d0+nd;d++){
+      if(!p->qdok[d]) q15_data(p,d);
+      /* Lane l's int16 maximum m satisfies m >= |z_q|^2/2^15 - 1, and
+         z_q = z * sd*st/2^15 to within EQ (ap_q15_margin).  So the float
+         maximum can reach `threshold` only if m >= q^2/2^15 - 1 with
+         q = threshold*sd*st/2^15 - EQ.  A lane with q <= 0, or with a zero
+         or non-finite scale, always passes.  The 1e-4 covers the float
+         tier's own rounding (~1e-6 relative). */
+      const float a=threshold*p->qds[d]*(float)(1.0/32768.0)*(1.0f-1e-4f);
+      for(int l=0;l<qw;l++){
+        const float q=a*bl[l]-EQ;
+        const float T=q*q*(float)(1.0/32768.0)-1.0f;
+        lanethr[l] = !(q>0.f) ? (int16_t)-32768 : T>=32767.f ? (int16_t)32767 : (int16_t)ceilf(T);
+      }
+      uint64_t bits=0;
+      if(ap_q15_screen(n,p->qd+(size_t)d*n*3,tr,ti,start,end,lanethr,&bits,
+                       stat?lanemax:NULL,p->qscr)) return -1;
+      /* lanes l0..l1 are templates g*qw+l0-t0 .. in the caller's rows */
+      unsigned char *row=pass+(size_t)(d-d0)*nt+(size_t)(g*qw+l0-t0);
+      for(int l=l0;l<l1;l++){
+        const int ok=(int)((bits>>l)&1u);
+        row[l-l0]=(unsigned char)ok;
+        total+=ok;
+      }
+      if(stat){
+        float *srow=stat+(size_t)(d-d0)*nt+(size_t)(g*qw+l0-t0);
+        for(int l=l0;l<l1;l++){
+          const double sdt=(double)p->qds[d]*bl[l]/32768.0;
+          srow[l-l0] = sdt>0 ? (float)(sqrt((double)lanemax[l]*32768.0)/sdt) : -1.0f;
+        }
+      }
+    }
   }
   return total;
 }
