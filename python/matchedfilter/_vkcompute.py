@@ -20,6 +20,7 @@ import numpy as np
 
 from . import _gputime, _vulkan
 from ._shared import empty_shared, shared_buffer, shared_key, shared_view, write_input
+from ._gpuhost import bin_shift, plan_items, split_items
 from ._shared import pack_half2 as _pack_half2, sparse_from_dense as _sparse_from_dense, sparsified as _sparsified
 
 _SPIRV = pathlib.Path(__file__).resolve().parent / "spirv"
@@ -2428,17 +2429,10 @@ class Context(InputUploads):
         b_data, b_tmpl = shared_buffer(data, self), shared_buffer(tmpl, self)
         if b_data is None or b_tmpl is None:
             raise ValueError("item spectra and templates must be shared allocations")
-        shift = binsize.bit_length() - 1 if binsize & (binsize - 1) == 0 else -1
+        shift = bin_shift(binsize)
         t2 = int(np.float32(float(threshold) ** 2 if threshold > 0 else 0).view(np.uint32))
-        offs, nbs, size = [], [], 0
-        words = self.storage_offset_alignment // 4
-        for lo, hi, a, b, t in items:
-            nb = -(-(hi - lo) // binsize)
-            if nb > _MAX_BINS:
-                raise UnsupportedSize("an item's window exceeds the kernel bin limit")
-            offs.append(size)
-            nbs.append(nb)
-            size += -(-((b - a) * nb) // words) * words     # storage-offset aligned
+        # Each item's output starts at the storage-buffer offset alignment (descriptor offsets).
+        offs, nbs, size = plan_items(items, binsize, self.storage_offset_alignment // 4, _MAX_BINS)
         cap = getattr(self, "_items_cap", 0)
         if cap < size:
             cap = max(size, 2 * cap)
@@ -2534,14 +2528,8 @@ class Context(InputUploads):
 
     def _items_read(self, items, offs, nbs, size):
         b_idx, b_val = self._items_out
-        indices = b_idx.read(np.int32, size)
-        values = b_val.read(np.complex64, size)
-        out = []
-        for (lo, hi, a, b, t), off, nb in zip(items, offs, nbs):
-            c = (b - a) * nb
-            out.append((indices[off:off + c].reshape(b - a, 1, nb),
-                        values[off:off + c].reshape(b - a, 1, nb)))
-        return out
+        return split_items(items, offs, nbs, b_idx.read(np.int32, size),
+                           b_val.read(np.complex64, size))
 
     def peaks_grouped(self, n, data, tmpl, groups, binsize, threshold, *, upload_tmpl=True,
                       slot=None, async_submit=False, sparse=False):

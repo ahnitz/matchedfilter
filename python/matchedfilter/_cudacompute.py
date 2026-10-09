@@ -27,6 +27,7 @@ from ._cuda import check_cuda
 from ._errors import UnsupportedSize
 from ._gpu_cache import InputUploads
 from ._shared import empty_shared, shared_buffer, shared_key, _Borrowed
+from ._gpuhost import bin_shift, plan_items, split_items
 from ._shared import pack_half2 as _pack_half2
 
 def _borrowed_dptr(self):
@@ -133,8 +134,7 @@ def _use_c16(band):
     return band <= 1024
 
 
-def _shift(binsize):
-    return (binsize.bit_length() - 1) if binsize & (binsize - 1) == 0 else -1
+_shift = bin_shift
 
 
 def _coarse_span(n, band, lo, hi):
@@ -1872,14 +1872,7 @@ class Context(InputUploads):
             raise ValueError("item spectra and templates must be shared allocations")
         binsize = int(binsize)
         t2 = float(threshold) ** 2 if threshold > 0 else 0.0
-        offs, nbs, size = [], [], 0
-        for lo, hi, a, b, t in items:
-            nb = -(-(hi - lo) // binsize)
-            if nb > _MAX_BINS:
-                raise UnsupportedSize("an item's window exceeds the kernel bin limit")
-            offs.append(size)
-            nbs.append(nb)
-            size += (b - a) * nb
+        offs, nbs, size = plan_items(items, binsize, 1, _MAX_BINS)    # pointer offsets
         # Output buffers are per DEVICE, not per Context: follow-ups run on a single-template
         # plan per bank, each its own Context, and per-Context buffers meant an allocation
         # on nearly every call (a bank's follow-ups are rare). One collector may be pending.
@@ -1913,9 +1906,7 @@ class Context(InputUploads):
                 self._sync(stream)
                 idx = host.view(np.int32, size)
                 val = host.view(np.complex64, size, offset=size * 4)
-                done.append([(idx[o:o + (b - a) * nb].reshape(b - a, 1, nb).copy(),
-                              val[o:o + (b - a) * nb].reshape(b - a, 1, nb).copy())
-                             for (lo, hi, a, b, t), o, nb in zip(items, offs, nbs)])
+                done.append(split_items(items, offs, nbs, idx, val, copy=True))
                 if getattr(holder, "items_inflight", None) is collect:
                     holder.items_inflight = None
             return done[0]
