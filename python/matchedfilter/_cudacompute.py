@@ -1301,17 +1301,19 @@ class Context(InputUploads):
         """The coarse gate kernel for ``band``: (fn, threads, ppg, tile, c16).
 
         PPG pairs per block and TILE_T templates per pair-group are compiled in. The
-        choice is the shipped variant with the highest theoretical occupancy on this
-        device (threads resident per SM), ties to the larger group. A tile walks
-        TILE_T consecutive templates of one data row, so it needs nt % TILE_T == 0;
-        a partial PPG group is handled by padding the data rows (hier_peaks)."""
+        choice is MEASURED: every shipped variant timed once per device and band on 16k
+        synthetic pairs (a few ms, cached for the process). Picking by theoretical
+        occupancy chose the untiled variants, 1.3-1.5x slower than the tiled ones at
+        bands 256-1024 on the L40S. A tile walks TILE_T consecutive templates of one data
+        row, so it needs nt % TILE_T == 0; a partial PPG group is handled by padding the
+        data rows (hier_peaks)."""
         if not _use_c16(band):
             fn, wg = self.pipeline(band, "fusedTierB")
             return fn, wg, 1, 1, False
         key = ("coarse_choice", band, nt % max(_COARSE_TILE_T.get(band, 1), 1) == 0)
         if key not in self._pipelines:
-            best = None
             tiles = (1, _COARSE_TILE_T[band]) if (band in _COARSE_TILE_T and key[2]) else (1,)
+            cands = []
             for tile in tiles:
                 for ppg in (1, 2, 4, 8, 16):
                     if ppg > 1 and band // 16 * ppg > 1024:
@@ -1320,15 +1322,60 @@ class Context(InputUploads):
                         fn, wg = self.pipeline(band, "fusedTierB", c16=True, ppg=ppg, tile=tile)
                     except UnsupportedSize:
                         continue
-                    resident = self._blocks_per_sm(fn, wg) * wg
-                    score = (resident, ppg * tile)
-                    if best is None or score > best[0]:
-                        best = (score, fn, wg, ppg, tile)
-            if best is None:
+                    cands.append((fn, wg, ppg, tile))
+            if not cands:
                 raise UnsupportedSize(f"no coarse c16 kernel for band {band}")
-            self._pipelines[key] = best[1:]
+            self._pipelines[key] = self._time_coarse(band, cands)
         fn, wg, ppg, tile = self._pipelines[key]
         return fn, wg, ppg, tile, True
+
+    def _time_coarse(self, band, cands):
+        """The fastest of the coarse variants on synthetic data (device time, min of 3)."""
+        P, ntm = 16384, 16
+        ndm = P // ntm
+        rng = np.random.default_rng(0)
+        x = (rng.standard_normal((ndm, band)) + 1j * rng.standard_normal((ndm, band))) * 0.1
+        bufs = [_Buffer(self, ndm * band * 4), _Buffer(self, ntm * band * 4),
+                _Buffer(self, P * 4), _Buffer(self, P * 8)]
+        st = self.stream
+        bufs[0].write(_pack_half2(x), st)
+        bufs[1].write(_pack_half2(x[:ntm]), st)
+        e0, e1 = self._new_event_timed(), self._new_event_timed()
+        ms = ctypes.c_float()
+        best = None
+        try:
+            for fn, wg, ppg, tile in cands:
+                times = []
+                for rep in range(4):
+                    check_cuda(self.cuda.cuEventRecord(e0, st), "cuEventRecord")
+                    self._launch(fn, P // (ppg * tile), wg,
+                                 [bufs[0].dptr, bufs[1].dptr, bufs[2].dptr, bufs[3].dptr,
+                                  _u32(ntm), _u32(0), _u32(band), _u32(band),
+                                  _i32(_shift(band)), _u32(1), _u32(0)], stream=st,
+                                 label="coarse_choice")
+                    check_cuda(self.cuda.cuEventRecord(e1, st), "cuEventRecord")
+                    check_cuda(self.cuda.cuEventSynchronize(e1), "cuEventSynchronize")
+                    check_cuda(self.cuda.cuEventElapsedTime(ctypes.byref(ms), e0, e1),
+                               "cuEventElapsedTime")
+                    if rep:
+                        times.append(ms.value)
+                t = min(times)
+                if best is None or t < best[0]:
+                    best = (t, fn, wg, ppg, tile)
+        finally:
+            self._sync(st)              # resolves any timed regions of the launches above
+            if self._timing:            # the calibration is not the caller's work
+                self.timing_log[:] = [e for e in self.timing_log if e[0] != "coarse_choice"]
+            for b in bufs:
+                b.destroy()
+            for e in (e0, e1):
+                self.cuda.cuEventDestroy_v2(e)
+        return best[1:]
+
+    def _new_event_timed(self):
+        e = ctypes.c_void_p()
+        check_cuda(self.cuda.cuEventCreate(ctypes.byref(e), 0), "cuEventCreate")
+        return e
 
     def _refine_grid(self, fn, wg, pairs):
         return max(1, min(pairs, self._blocks_per_sm(fn, wg) * self.sm_count))
@@ -1772,10 +1819,16 @@ class Context(InputUploads):
             offs.append(size)
             nbs.append(nb)
             size += (b - a) * nb
-        prior = self.__dict__.pop("_items_inflight", None)
+        # Output buffers are per DEVICE, not per Context: follow-ups run on a single-template
+        # plan per bank, each its own Context, and per-Context buffers meant an allocation
+        # on nearly every call (a bank's follow-ups are rare). One collector may be pending.
+        st = self._device_state
+        holder = st if st is not None else self
+        prior = getattr(holder, "items_inflight", None)
+        holder.items_inflight = None
         if prior is not None:
             prior()                          # its output and host buffers are about to be reused
-        rec = self.__dict__.setdefault("_items_rec", {})
+        rec = holder.__dict__.setdefault("items_rec", {})
         self._grow(rec, "idx", size * 4, _Buffer, stream)
         self._grow(rec, "val", size * 8, _Buffer, stream)
         self._grow(rec, "host", size * 12, _Pinned, stream)
@@ -1802,11 +1855,11 @@ class Context(InputUploads):
                 done.append([(idx[o:o + (b - a) * nb].reshape(b - a, 1, nb).copy(),
                               val[o:o + (b - a) * nb].reshape(b - a, 1, nb).copy())
                              for (lo, hi, a, b, t), o, nb in zip(items, offs, nbs)])
-                if self.__dict__.get("_items_inflight") is collect:
-                    del self._items_inflight
+                if getattr(holder, "items_inflight", None) is collect:
+                    holder.items_inflight = None
             return done[0]
         if async_submit:
-            self._items_inflight = collect
+            holder.items_inflight = collect
             return collect
         return collect()
 
