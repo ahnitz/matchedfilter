@@ -231,6 +231,22 @@ _SubgroupProperties = _struct("VkPhysicalDeviceSubgroupProperties",
                              ("supportedStages", _u32),
                              ("supportedOperations", _u32),
                              ("quadOperationsInAllStages", _u32))
+#: VK_EXT_subgroup_size_control (core in 1.3; this instance asks for 1.1).
+_SSC_EXT = b"VK_EXT_subgroup_size_control"
+_SSCFeatures = _struct("VkPhysicalDeviceSubgroupSizeControlFeatures",
+                       ("sType", _u32), ("pNext", _vp),
+                       ("subgroupSizeControl", _u32), ("computeFullSubgroups", _u32))
+_SSCProperties = _struct("VkPhysicalDeviceSubgroupSizeControlProperties",
+                         ("sType", _u32), ("pNext", _vp),
+                         ("minSubgroupSize", _u32), ("maxSubgroupSize", _u32),
+                         ("maxComputeWorkgroupSubgroups", _u32),
+                         ("requiredSubgroupSizeStages", _u32))
+_StageRequiredSize = _struct("VkPipelineShaderStageRequiredSubgroupSizeCreateInfo",
+                             ("sType", _u32), ("pNext", _vp), ("requiredSubgroupSize", _u32))
+_Features2 = _struct("VkPhysicalDeviceFeatures2", ("sType", _u32), ("pNext", _vp),
+                     ("features", ctypes.c_ubyte * 256))
+_ExtProps = _struct("VkExtensionProperties", ("extensionName", ctypes.c_char * 256),
+                    ("specVersion", _u32))
 _PhysicalDeviceProperties2 = _struct("VkPhysicalDeviceProperties2",
                                     ("sType", _u32), ("pNext", _vp),
                                     ("properties", ctypes.c_ubyte * 2048))
@@ -668,8 +684,14 @@ class _Device:
         q_count = max(1, min(int(fam_qcount), 4))
         priorities = (ctypes.c_float * q_count)(*(1.0 for _ in range(q_count)))
         qci = _QueueCreate(2, None, 0, self.queue_family, q_count, priorities)
-        dci = _DeviceCreate(3, None, 0, 1, ctypes.pointer(qci),
-                            0, None, 0, None, None)
+        # Pin the subgroup size where the device lets us (VK_EXT_subgroup_size_control):
+        # the kernels are specialized on it (constant 74), and RADV may otherwise pick
+        # wave32 or wave64 per pipeline.
+        ssc_feat, ext_names = self._subgroup_control_features()
+        dci = _DeviceCreate(3, ctypes.cast(ctypes.pointer(ssc_feat), _vp) if ssc_feat else None,
+                            0, 1, ctypes.pointer(qci), 0, None,
+                            len(ext_names) if ext_names else 0,
+                            ctypes.cast(ext_names, _vp) if ext_names else None, None)
         self.device = _vp()
         _check(vk.vkCreateDevice(self.physical, ctypes.byref(dci), None,
                                  ctypes.byref(self.device)), "vkCreateDevice")
@@ -719,11 +741,15 @@ class _Device:
             ctypes.byref(props, _OFF_MAX_WORKGROUP_SIZE), ctypes.POINTER(_u32 * 3))[0])
 
         self.subgroup_size = 32
+        self.subgroup_range = None          # (min, max) when the size can be required
         try:
             if hasattr(vk, "vkGetPhysicalDeviceProperties2"):
-                sub_props = _SubgroupProperties(1000094000, None, 0, 0, 0, 0)
+                ssc_props = _SSCProperties(1000225000, None, 0, 0, 0, 0)
+                sub_props = _SubgroupProperties(
+                    1000094000, ctypes.cast(ctypes.pointer(ssc_props), _vp) if ssc_feat else None,
+                    0, 0, 0, 0)
                 props2 = _PhysicalDeviceProperties2(
-                    1000059000,
+                    1000059001,
                     ctypes.cast(ctypes.pointer(sub_props), _vp),
                     (ctypes.c_ubyte * 2048)()
                 )
@@ -732,6 +758,10 @@ class _Device:
                 vk.vkGetPhysicalDeviceProperties2(self.physical, ctypes.byref(props2))
                 if sub_props.subgroupSize > 0:
                     self.subgroup_size = int(sub_props.subgroupSize)
+                if ssc_feat and ssc_props.requiredSubgroupSizeStages & _STAGE_COMPUTE \
+                        and ssc_props.minSubgroupSize <= self.subgroup_size <= ssc_props.maxSubgroupSize:
+                    self.subgroup_range = (int(ssc_props.minSubgroupSize),
+                                           int(ssc_props.maxSubgroupSize))
         except Exception:
             self.subgroup_size = 32
 
@@ -746,6 +776,33 @@ class _Device:
                "vkCreateCommandPool")
         self._ts_period = float(ctypes.cast(ctypes.byref(props, _OFF_TIMESTAMP_PERIOD),
                                             ctypes.POINTER(ctypes.c_float))[0])
+
+    def _subgroup_control_features(self):
+        """(features struct to chain, extension-name array) enabling subgroup size control,
+        or (None, None) where the device lacks it."""
+        vk = self.vk
+        try:
+            if os.environ.get("MF_VK_NO_SUBGROUP_PIN") or not hasattr(vk, "vkGetPhysicalDeviceFeatures2"):
+                return None, None
+            vk.vkEnumerateDeviceExtensionProperties.argtypes = [_vp, _vp, ctypes.POINTER(_u32), _vp]
+            n = _u32()
+            vk.vkEnumerateDeviceExtensionProperties(self.physical, None, ctypes.byref(n), None)
+            exts = (_ExtProps * n.value)()
+            vk.vkEnumerateDeviceExtensionProperties(self.physical, None, ctypes.byref(n), exts)
+            if not any(e.extensionName == _SSC_EXT for e in exts):
+                return None, None
+            feat = _SSCFeatures(1000225002, None, 0, 0)
+            f2 = _Features2(1000059000, ctypes.cast(ctypes.pointer(feat), _vp), (ctypes.c_ubyte * 256)())
+            vk.vkGetPhysicalDeviceFeatures2.argtypes = [_vp, _vp]
+            vk.vkGetPhysicalDeviceFeatures2.restype = None
+            vk.vkGetPhysicalDeviceFeatures2(self.physical, ctypes.byref(f2))
+            if not feat.subgroupSizeControl:
+                return None, None
+            feat.pNext, feat.computeFullSubgroups = None, 0
+            self._ssc_keep = (feat, (ctypes.c_char_p * 1)(_SSC_EXT))
+            return self._ssc_keep
+        except Exception:
+            return None, None
 
     def _compute_queue_family(self):
         """The queue family with COMPUTE.
@@ -829,7 +886,7 @@ class Context(InputUploads):
 
     _SHARED = ("vk", "instance", "physical", "queue_family", "queues", "queue", "device",
                "_accurate_trig", "max_shared_memory", "max_invocations", "max_dispatch_x",
-               "subgroup_size", "mem_props", "command_pool", "_ts_period",
+               "subgroup_size", "subgroup_range", "mem_props", "command_pool", "_ts_period",
                "storage_offset_alignment", "max_workgroup_size")
 
     def _attach_device(self, index):
@@ -1021,7 +1078,12 @@ class Context(InputUploads):
                                         ctypes.sizeof(c_data),
                                         ctypes.cast(ctypes.pointer(c_data), _vp))
         special = ctypes.cast(ctypes.pointer(spec_info), _vp)
-        stage = _StageCreate(18, None, 0, _STAGE_COMPUTE, module,
+        req = None
+        if getattr(self, "subgroup_range", None):
+            # The size the kernels are specialized on (constant 74), required, not hoped for.
+            req = _StageRequiredSize(1000225001, None, int(self.subgroup_size))
+        stage = _StageCreate(18, ctypes.cast(ctypes.pointer(req), _vp) if req else None,
+                             0, _STAGE_COMPUTE, module,
                              b"main", special)
         cp_info = _ComputePipelineCreate(29, None, 0, stage, layout, None, 0)
         pipe = _vp()
@@ -1301,6 +1363,15 @@ class Context(InputUploads):
         tile = _COARSE_TILE_T.get(band, 1)
         if tile > 1:
             want = min(full, env_cap) if env_cap else full
+
+        # Device limits, queried: a group of ppg pairs is (band/16)*ppg invocations and
+        # holds ppg padded exchange stages (about 17/16 * band words each).
+        def fits(ppg):
+            return (wg * ppg <= self.max_invocations
+                    and (band * 17 // 16 + 32) * 4 * ppg <= self.max_shared_memory)
+        while want > 1 and not fits(want):
+            want //= 2
+        if tile > 1:
             for ppg in sorted({p for p in (want, 32, 16, 8, 4, 2, 1) if p <= want}, reverse=True):
                 name = "tierb_%d_c16%st%d.spv" % (band, "p%d" % ppg if ppg > 1 else "", tile)
                 if (_SPIRV / name).is_file():

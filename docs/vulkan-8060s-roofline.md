@@ -219,3 +219,49 @@ All of these depend on queried capabilities or geometry. None is specific to gfx
 - **One-bin refine builds and a listed compact for tier 1.** Backend-independent.
 - **Not transferable:** the measured wave64 rates (pk-fp16 is two passes, fp32 FMA is
   one). Each device needs its own probe.
+
+## 8. Fourth pass: one dispatch per fine call, device-limit geometry, clock reference
+
+**`hier_peaks_grouped`.** A fine call's window groups (first block, interior, last block) used
+to be separate `hier_peaks` recordings: three dispatches per stage. They are now one
+recording.
+- Each data row's `(lo, hi)` comes from a `gRowWin` binding, read when specialization
+  constant 76 (`mfRowWindows`) is set: 1 = the raw window, 2 = the window mapped onto the
+  kernel's coarse band, exactly as the host maps it.
+- Every stage is one dispatch over all rows.
+- The recordings are ordinary hier recordings, so fused batches and SegmentPlan replay
+  traces work unchanged.
+- Results are bit-identical to per-group `hier_peaks` (`tests/test_vk_hier_grouped.py`).
+- Pipelined ladder with `--timing`, alternating with main: fine 0.25 → 0.18 s, segment
+  0.84 → 0.71 s.
+
+**Bindings follow the module.** `_build_pipeline` reflects the SPIR-V for its highest
+binding. `_descriptor_set` fills declared but unused trailing bindings with a dummy buffer,
+so callers that do not use per-row windows need no change.
+
+**Subgroup size pinned.** With `VK_EXT_subgroup_size_control` (feature queried, extension
+enabled, `requiredSubgroupSizeStages` covering compute, and the size within
+[min, max] = [32, 64] here), every pipeline requires the queried subgroup size. That is the
+size the kernels are specialized on (constant 74), so RADV can no longer choose wave32 for
+a kernel built for wave64. `MF_VK_NO_SUBGROUP_PIN=1` disables it. Wave32 as a timed
+candidate (VOPD dual issue for the fp32 refine) is a possible follow-up.
+
+**Coarse geometry from queried limits.** Pairs per group = subgroup / (band/16), bounded by
+`maxComputeWorkGroupInvocations` and `maxComputeSharedMemorySize` against the padded stage
+size.
+- The untiled builds keep the 4-pair cap. While a geometry bug (since fixed) briefly routed
+  realistic calls to untiled 8- and 16-pair builds, the whole suite lost its detections. The
+  same builds are bit-correct in the micro-bench at an even template count, so the hazard is
+  workload-dependent and still unexplained.
+- I did not add a timed pairs-per-group choice. The measured spread between filling
+  candidates is ≤ 6% (band 128: p4 51 vs p8 48; band 64: p8 28 vs p16 29 CU-cycles), which
+  does not pay for a per-device timing pass.
+- Bank count has no query on Vulkan (or Metal; CUDA documents 32), so the padding stays a
+  build-time model parameter.
+
+**Clock reference: already active on Vulkan.** `calibrate_costs_gpu` takes every
+measurement relative to `gatechain._ClockRef` for any GPU device. Measured here:
+- The reference reads 35 µs warm and 155-178 µs after 2 s idle (4.4-5x).
+- Three calibrations in one process with 3 s idle between agree within about 20% per tier
+  (dense[512] 3.86 / 4.59 / 4.39 ns), against the 5x raw swing.
+- No change needed. The review's note predates 70cb1e2.
