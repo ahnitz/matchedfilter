@@ -1213,6 +1213,12 @@ void filterPair(uint pair, uint tid,
 #else
     uint p0 = pair * TILE_T;
     uint d = p0 / ntmpl, t0 = p0 % ntmpl;
+#if COARSE16
+    // Every coarse build honours per-row windows. The untiled builds once skipped
+    // this: their module then declared no gRowWin, the host bound one past the
+    // layout, and a grouped call gated every pair out (tests/test_vk_hier_grouped.py).
+    rowWindow(d, winStart, winEnd);
+#endif
 #endif
     C dreg[RADIX];
 #if COARSE16
