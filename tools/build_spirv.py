@@ -389,13 +389,33 @@ def _exchange_layout(n, ppg, cap):
     return _LAYOUTS[(n, ppg, cap)]
 
 
+#: Row padding of the fp32 exchange stage, in complex elements. Rows WG apart put
+#: every register a thread gathers on the same few banks; two extra elements (16 B)
+#: rotate consecutive rows across the 64-bit LDS accesses. Measured on the 8060S,
+#: listed one-bin refine, CU-cycles/pair, pad 0 / 1 / 2 / 4 / 8:
+#:     n=512    606 / 550 / 547 / 547 / 552
+#:     n=1024  1105 /1078 /1041 /1024 /1020
+#:     n=2048  2232 /2081 /2126 /2273 /2254
+#: One rule rather than a per-length optimum. Applied only where the padded stage
+#: stays within the 32 KB portable cap, so no LDS limit or portable variant moves.
+FP32_PAD = 2
+
+
+def fp32_xstride(n, cap):
+    r = RADIX.get(n, 16)
+    wg = n // r
+    ch = min(max(cap // wg, 1), r)
+    return wg + FP32_PAD if ch * (wg + FP32_PAD) * 8 <= PORTABLE_CAP * 8 else wg
+
+
 def compile_one(slangc, n, outdir, entry=ENTRY, cap=None, suffix="", coarse16=0, ppg=1, tile=1, single_bin=0):
     cap = LDS_CAP[n] if cap is None else cap
     src = outdir / ("mf_%d_%s%s.slang" % (n, entry, suffix))
     src.write_text("#define NLEN %d\n#define LDS_CAP %d\n#define COARSE16 %d\n"
                    "#define PPG %d\n#define TILE_T %d\n#define RADIX %d\n#define SINGLE_BIN %d\n"
                    % (n, cap, coarse16, ppg, tile, RADIX.get(n, 16), single_bin)
-                   + (coarse_prelude(n, cap, ppg) if coarse16 else "")
+                   + (coarse_prelude(n, cap, ppg) if coarse16
+                      else "#define XSTRIDE_F %d\n" % fp32_xstride(n, cap))
                    + KERNEL.read_text())
     name = "%s_%d%s.spv" % (STEMS[entry], n, suffix)
     spv = outdir / name
@@ -509,6 +529,12 @@ def main(argv=None):
                 file=rsmall.name, lds_bytes=lds_bytes(n, PORTABLE_CAP))
         # Benchmarked one-bin specialization for the large full-precision
         # Vulkan kernels. Keep the general kernels for multiple output bins.
+        # One-bin refine below 4096 as well: the cascade's tier-1 stage and the
+        # n=2048 refine run one bin. Listed one-bin refine, CU-cycles/pair,
+        # general -> one-bin: n=512 945 -> 677, 1024 1686 -> 1288, 2048 3590 -> 2851.
+        if 256 <= n < 4096:
+            one = compile_one(slangc, n, OUT, "refineListed", suffix="_onebin", single_bin=1)
+            info["refine"]["one_bin"] = dict(file=one.name)
         if n >= 4096:
             for entry, target in (("fusedTierB", info), ("refineListed", info["refine"])):
                 one = compile_one(slangc, n, OUT, entry, suffix="_onebin", single_bin=1)
