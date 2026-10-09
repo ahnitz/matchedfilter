@@ -311,6 +311,17 @@ def _sparsified(res, sparse):
     return _sparse_from_dense(*res)
 
 
+#: An indirect dispatch's initial (x, y, z) = (0, 1, 1): x counts survivors. One
+#: vkCmdUpdateBuffer per counter instead of two fills; small transfer commands cost ~2 us
+#: each on the device, and a segment records hundreds. Module-level because fused batches
+#: re-record captured calls later, and the command reads its data at record time.
+_ARGS_INIT = (ctypes.c_uint32 * 3)(0, 1, 1)
+
+
+def _reset_args(vk, cmd, buf):
+    vk.vkCmdUpdateBuffer(cmd, buf.handle, 0, 12, ctypes.addressof(_ARGS_INIT))
+
+
 class _Buffer:
     """A storage buffer plus its memory, mapped for the lifetime of the object.
 
@@ -595,9 +606,11 @@ def read_dispatch(entry):
     count = int(bufs["args_refine" if cascade else "args"].read(np.uint32, 1)[0])
     if count == 0:
         return 0, None, None
-    out = nd * nt * nbins
-    return (count, bufs["idx"].read(np.int32, out).reshape(nd, nt, nbins),
-            bufs["val"].read(np.complex64, out).reshape(nd, nt, nbins))
+    # From the refined pairs (the survivor list): a sparse recording does not clear the
+    # dense tables, and the refine writes every bin of a listed pair.
+    idx, val = Context._read_peaks(bufs, "surv1" if cascade else "surv", count,
+                                   nd, nt, nbins, True).dense()
+    return count, idx, val
 
 
 #: One _Device per Vulkan device index, for the life of the process.
@@ -616,6 +629,14 @@ class _Device:
         if vk is None:
             raise VulkanError(err)
         self.vk = vk
+        # Every Context uses THIS function table (vk is shared): argtypes set on a context's
+        # own table were dropped. VkDeviceSize is 64-bit; without argtypes ctypes passes a
+        # Python int as a C int, truncating offsets and sizes (or crashing).
+        vk.vkCmdFillBuffer.argtypes = [ctypes.c_void_p, ctypes.c_void_p,
+                                       ctypes.c_uint64, ctypes.c_uint64, ctypes.c_uint32]
+        vk.vkCmdDispatchIndirect.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint64]
+        vk.vkCmdUpdateBuffer.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint64,
+                                         ctypes.c_uint64, ctypes.c_void_p]
         self.pipelines = {}
         self.collector = None        # a _FusedBatch while filter_series_many is collecting
         self.trace = None            # fused-batch keys flushed while a SegmentPlan traces
@@ -1024,9 +1045,11 @@ class Context(InputUploads):
             band1 = int(band)
             thr0 = float(raw_thr)
             thr1 = float(raw_thr1)
+            # A sparse caller reads only the refined pairs, which the refine writes in full:
+            # its recording skips clearing the dense outputs (bool(sparse) in the key).
             key = ("hier_cascade", n, band0, band1, nd, nt, nbins, binsize, shift, lo, hi,
                    int(np.float32(t2).view(np.uint32)),
-                   thr0, thr1)
+                   thr0, thr1, bool(sparse))
             key += (shared_key(data, self), shared_key(tmpl, self), slot)
             storage_key = ("hier_cascade", n, band0, band1, nd, nt, nbins, *key[-3:])
             upload_data, upload_tmpl, dsig, tsig = self._input_uploads(
@@ -1045,7 +1068,8 @@ class Context(InputUploads):
                 self._capture_begin()
                 try:
                     batch = self._make_hier_cascade(storage_key, n, band0, band1, nd, nt, nbins, binsize,
-                                                    shift, lo, hi, t2, thr0, thr1, data, tmpl)
+                                                    shift, lo, hi, t2, thr0, thr1, data, tmpl,
+                                                    clear_out=not sparse)
                 finally:
                     self._capture_end(batch[-1] if batch else None)
                 self._hier_cascade[key] = batch
@@ -1087,7 +1111,7 @@ class Context(InputUploads):
 
         key = ("hier", n, band, nd, nt, nbins, binsize, shift, lo, hi,
                int(np.float32(t2).view(np.uint32)),
-               float(raw_thr))
+               float(raw_thr), bool(sparse))
         key += (shared_key(data, self), shared_key(tmpl, self), slot)
         storage_key = ("hier", n, band, nd, nt, nbins, *key[-3:])
         upload_data, upload_tmpl, dsig, tsig = self._input_uploads(
@@ -1106,7 +1130,8 @@ class Context(InputUploads):
             self._capture_begin()
             try:
                 batch = self._make_hier(storage_key, n, band, nd, nt, nbins, binsize,
-                                        shift, lo, hi, t2, raw_thr, data, tmpl)
+                                        shift, lo, hi, t2, raw_thr, data, tmpl,
+                                        clear_out=not sparse)
             finally:
                 self._capture_end(batch[-1] if batch else None)
             self._hier[key] = batch
@@ -1226,7 +1251,7 @@ class Context(InputUploads):
         return 1, 1
 
     def _make_hier(self, key, n, band, nd, nt, nbins, binsize, shift, lo, hi,
-                   t2, raw_thr, data=None, tmpl=None):
+                   t2, raw_thr, data=None, tmpl=None, clear_out=True):
         vk = self.vk
         tile = _COARSE_TILE.get(band)
         _ppg = 1          # pairs per workgroup; raised only on the c16 path
@@ -1384,10 +1409,10 @@ class Context(InputUploads):
         # compaction kernel walks every pair and writes the -1 for the ones
         # it dismisses, so filling 3 MB here would only be overwriting
         # slots the refine is about to fill anyway.
-        vk.vkCmdFillBuffer(cmd, b["args"].handle, 0, 4, 0)   # count starts at 0
-        vk.vkCmdFillBuffer(cmd, b["args"].handle, 4, 8, 1)   # y = z = 1
-        vk.vkCmdFillBuffer(cmd, b["idx"].handle, 0, _WHOLE_SIZE, 0xFFFFFFFF)
-        vk.vkCmdFillBuffer(cmd, b["val"].handle, 0, _WHOLE_SIZE, 0)
+        _reset_args(vk, cmd, b["args"])                       # count 0, y = z = 1
+        if clear_out:                       # pairs never refined read as -1 / 0 (dense)
+            vk.vkCmdFillBuffer(cmd, b["idx"].handle, 0, _WHOLE_SIZE, 0xFFFFFFFF)
+            vk.vkCmdFillBuffer(cmd, b["val"].handle, 0, _WHOLE_SIZE, 0)
         # Compaction atomically updates the filled count, and indirect fetch
         # reads all three words. With zero survivors, even the count remains
         # a transfer-only write: the later shader-write barrier cannot cover it.
@@ -1449,7 +1474,7 @@ class Context(InputUploads):
         return b, cmd
 
     def _make_hier_cascade(self, key, n, band0, band1, nd, nt, nbins, binsize, shift, lo, hi,
-                           t2, raw_thr0, raw_thr1, data=None, tmpl=None):
+                           t2, raw_thr0, raw_thr1, data=None, tmpl=None, clear_out=True):
         vk = self.vk
         _ppg0, _tile0 = self._coarse_geometry(band0, nd, nt)
 
@@ -1528,13 +1553,12 @@ class Context(InputUploads):
                                     0, 1, ctypes.byref(mb), 0, None, 0, None)
 
         # 1. Clear indirect args and intermediate peak values
-        vk.vkCmdFillBuffer(cmd, b["args_tier1"].handle, 0, 4, 0)
-        vk.vkCmdFillBuffer(cmd, b["args_tier1"].handle, 4, 8, 1)
-        vk.vkCmdFillBuffer(cmd, b["args_refine"].handle, 0, 4, 0)
-        vk.vkCmdFillBuffer(cmd, b["args_refine"].handle, 4, 8, 1)
+        _reset_args(vk, cmd, b["args_tier1"])
+        _reset_args(vk, cmd, b["args_refine"])
         vk.vkCmdFillBuffer(cmd, b["cval1"].handle, 0, pairs * 8, 0)
-        vk.vkCmdFillBuffer(cmd, b["idx"].handle, 0, _WHOLE_SIZE, 0xFFFFFFFF)
-        vk.vkCmdFillBuffer(cmd, b["val"].handle, 0, _WHOLE_SIZE, 0)
+        if clear_out:                       # pairs never refined read as -1 / 0 (dense)
+            vk.vkCmdFillBuffer(cmd, b["idx"].handle, 0, _WHOLE_SIZE, 0xFFFFFFFF)
+            vk.vkCmdFillBuffer(cmd, b["val"].handle, 0, _WHOLE_SIZE, 0)
         barrier(src_stage=_STAGE_TRANSFER_BIT, src_access=_ACCESS_TRANSFER_WRITE,
                 dst_stage=_STAGE_COMPUTE_BIT | _STAGE_DRAW_INDIRECT_BIT,
                 dst_access=_ACCESS_SHADER_READ | _ACCESS_SHADER_WRITE | _ACCESS_INDIRECT_READ)

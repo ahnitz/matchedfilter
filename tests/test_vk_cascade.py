@@ -210,6 +210,15 @@ def test_vk_sparse_readback_equals_dense(ctx, kind, level, gate):
     si, sv = sp.dense()
     np.testing.assert_array_equal(si, di)
     np.testing.assert_array_equal(sv, dv)
+    # A sparse recording does not clear the dense outputs (only refined pairs are read):
+    # a dense call on the same storage afterwards must still come back clean, also after
+    # a sparse call on other data has left other rows behind.
+    spec[:] = spec[::-1].copy()
+    call(True)
+    spec[:] = spec[::-1].copy()
+    di2, dv2 = call(False)
+    np.testing.assert_array_equal(di2, di)
+    np.testing.assert_array_equal(dv2, dv)
     if gate == 0.0 or kind.startswith("peaks"):
         assert 0 < sp.flat.size < di.size if level == "mid" else sp.flat.size == di.size
 

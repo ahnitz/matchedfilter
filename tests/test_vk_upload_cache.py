@@ -82,7 +82,7 @@ def ctx(request, monkeypatch):
                 c._storage[key] = tuple(Buffer() for _ in range(4))
             return (*c._storage[key], None)
 
-        def make_hier(key, *args):
+        def make_hier(key, *args, **kwargs):
             if key not in c._storage:
                 c._storage[key] = {name: Buffer() for name in
                     ("data", "tmpl", "cdata", "ct0", "idx", "val", "args")}
