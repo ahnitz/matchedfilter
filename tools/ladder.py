@@ -16,8 +16,9 @@ detector:
           0 -- the single-template call pycbc's asymmetric follow-up makes
 
 Taps come from a three-level bank file (fir_data/upper/<top> -> middle taps, fir_data/<middle>
--> fine taps), the format pycbc reads. The first segment of each top template is reported
-separately: it holds plan construction and the bank's block and chain choices.
+-> fine taps), the format pycbc reads. The first --warmup segments (default 2) of each top
+template are reported separately: the first holds plan construction and the bank's block and
+chain choices, the second the chain trials locking (MF_AUTOTUNE). Neither recurs.
 
     python tools/ladder.py --bank BANK.hdf --device gpu:0 --tops 2 --segments 3
     python tools/ladder.py --bank BANK.hdf --device gpu:0 --check cpu      # outputs vs the CPU
@@ -167,7 +168,7 @@ def run_device(device, tops, args, seed):
         first.add("prep", time.perf_counter() - t0)
         next_ser = {ifo: analytic_series(rng, S, amp, df) for ifo in ("H1", "L1")}
         for seg in range(args.segments):
-            tm = first if seg == 0 else steady
+            tm = first if seg < args.warmup else steady
             ser = next_ser
             next_ser = None
             mids = {}
@@ -246,7 +247,7 @@ def run_device(device, tops, args, seed):
             if next_ser is None and seg + 1 < args.segments:
                 next_ser = {ifo: analytic_series(rng, S, amp, df) for ifo in ("H1", "L1")}
     nfine = sum(t["nfine"] for t in tops)
-    steady_segments = max(0, args.segments - 1) * len(tops)
+    steady_segments = max(0, args.segments - args.warmup) * len(tops)
     total = sum(steady.t.values())
     report = dict(
         device=str(device), segments=args.segments, tops=[t["top"] for t in tops], fine_templates=nfine,
@@ -301,7 +302,10 @@ def main():
     p.add_argument("--bank", required=True)
     p.add_argument("--device", default="cpu")
     p.add_argument("--tops", type=int, default=2, help="top templates, most fine templates first")
-    p.add_argument("--segments", type=int, default=3, help="segments per top (the first is setup)")
+    p.add_argument("--segments", type=int, default=3, help="segments per top (the first --warmup are setup)")
+    p.add_argument("--warmup", type=int, default=2,
+                   help="segments per top not counted as steady: the first builds plans, the "
+                        "second is where chain trials lock (MF_AUTOTUNE), each a one-off")
     p.add_argument("--seg-samples", type=int, default=1 << 20, help="512 s at 2048 Hz")
     p.add_argument("--start-pad", type=float, default=120.0)
     p.add_argument("--end-pad", type=float, default=16.0)
@@ -357,7 +361,7 @@ def main():
     print(f"{report['device']}: {report['fine_templates']} fine templates, {len(tops)} tops x "
           f"{args.segments} segments; steady " + ", ".join(
               f"{k} {v:.2f}s" for k, v in report["steady_s"].items()) +
-          f"; first segment {sum(report['first_segment_s'].values()):.1f}s")
+          f"; warmup ({args.warmup} segments) {sum(report['first_segment_s'].values()):.1f}s")
     if tirt:
         print("  templates-in-real-time: " + ", ".join(f"{k} {v:.3g}" for k, v in tirt.items()))
     print("  calls: " + ", ".join(f"{k} {v}" for k, v in report["steady_calls"].items()) +
