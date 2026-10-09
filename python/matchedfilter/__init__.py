@@ -773,6 +773,72 @@ class MatchedFilter:
             for d in pending:
                 d.result()
 
+    def _items_gpu(self, jobs, binsize, threshold):
+        """Many single-template series calls as one forward dispatch and one submission.
+
+        jobs: [(series, starts, win_start, win_end, template)] -- each a run_series call on one
+        template of this plan. Every series must lie in one device allocation (rows of a
+        reused device buffer), read in place. Returns per job (idx, val) shaped
+        (nblocks, 1, max bins) with -1 in bins past a block's own count, or None when this
+        plan or these inputs cannot take the path (the caller then makes the calls)."""
+        from ._shared import containing
+        gpu = self._gpu
+        if (gpu is None or not hasattr(gpu, "peaks_items") or type(self) is not MatchedFilter
+                or self._gtmpl is None or not jobs):
+            return None
+        whole, rows = None, []
+        for ser, st, ws, we, t in jobs:
+            c = containing(np.ascontiguousarray(ser), gpu)
+            if c is None or (whole is not None and c[0] is not whole):
+                return None
+            if st.size and int(st.max()) + self.n > ser.size:
+                return None                     # needs the upload's zero padding past the end
+            whole = c[0]
+            rows.append(c[1])
+        n = self.n
+        total = sum(int(st.size) for _, st, _, _, _ in jobs)
+        if total == 0:
+            return [(np.empty((0, 1, 1), np.int64), np.empty((0, 1, 1), np.complex64))
+                    for _ in jobs]
+        cap = getattr(self, "_items_ws", None)
+        if cap is None or cap[0].shape[0] < total:
+            cap = (gpu.empty_shared((max(total, 2 * (cap[0].shape[0] if cap else 0)), n)),
+                   gpu.empty_shared(max(total, 2 * (cap[0].shape[0] if cap else 0)), np.uint32))
+            self._items_ws = cap
+        spec, starts = cap
+        items, pos = [], 0
+        for (ser, st, ws, we, t), row in zip(jobs, rows):
+            k = int(st.size)
+            starts[pos:pos + k] = np.minimum(st, ser.size).astype(np.int64) + row
+            lo_hi = np.stack([np.minimum(ws, n), np.minimum(we, n)], 1).astype(np.int64)
+            j = 0
+            while j < k:                        # runs of blocks with one window
+                e = j + 1
+                while e < k and lo_hi[e, 0] == lo_hi[j, 0] and lo_hi[e, 1] == lo_hi[j, 1]:
+                    e += 1
+                items.append((int(lo_hi[j, 0]), int(lo_hi[j, 1]), pos + j, pos + e, int(t)))
+                j = e
+            pos += k
+        self._settle_deferred()
+        gpu.forward(n, whole, starts[:total], spec[:total], defer=True)
+        res = gpu.peaks_items(n, spec[:total], self._gtmpl, items, binsize, threshold)
+        out, it, pos = [], 0, 0
+        for ser, st, ws, we, t in jobs:
+            k = int(st.size)
+            mine = []
+            while it < len(items) and items[it][3] <= pos + k:
+                mine.append((items[it], res[it]))
+                it += 1
+            nbmax = max([r[0].shape[2] for _, r in mine] or [1])
+            idx = np.full((k, 1, nbmax), -1, np.int64)
+            val = np.zeros((k, 1, nbmax), np.complex64)
+            for (lo, hi, a, b, _), (gi, gv) in mine:
+                idx[a - pos:b - pos, :, :gi.shape[2]] = gi
+                val[a - pos:b - pos, :, :gv.shape[2]] = gv
+            out.append((idx, val))
+            pos += k
+        return out
+
     def _run_series_ragged(self, series, starts, win_start, win_end, binsize=None,
                            threshold=0.0, templates=None):
         """run_series(raw=True) over blocks whose windows give DIFFERENT bin counts.

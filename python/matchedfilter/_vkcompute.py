@@ -2151,6 +2151,94 @@ class Context(InputUploads):
         val = b_val.read(np.complex64, out).reshape(nd, nt, nbins)
         return idx, val
 
+    def peaks_items(self, n, data, tmpl, items, binsize, threshold):
+        """One submission over items (lo, hi, a, b, t): rows a:b of data against template row t,
+        searched over [lo, hi) in bins of binsize. Returns per item (idx, val) shaped
+        (b - a, 1, nbins). Data and templates are shared allocations; descriptor offsets select
+        each item's rows. A one-off recording (follow-up windows do not repeat), with one
+        descriptor pool for all its sets, released after the call."""
+        vk = self.vk
+        b_data, b_tmpl = shared_buffer(data, self), shared_buffer(tmpl, self)
+        if b_data is None or b_tmpl is None:
+            raise ValueError("item spectra and templates must be shared allocations")
+        shift = binsize.bit_length() - 1 if binsize & (binsize - 1) == 0 else -1
+        t2 = int(np.float32(float(threshold) ** 2 if threshold > 0 else 0).view(np.uint32))
+        offs, nbs, size = [], [], 0
+        for lo, hi, a, b, t in items:
+            nb = -(-(hi - lo) // binsize)
+            if nb > _MAX_BINS:
+                raise UnsupportedSize("an item's window exceeds the kernel bin limit")
+            offs.append(size)
+            nbs.append(nb)
+            size += ((b - a) * nb + 63) // 64 * 64          # 256-byte aligned offsets
+        cap = getattr(self, "_items_cap", 0)
+        if cap < size:
+            cap = max(size, 2 * cap)
+            self._items_out = (_Buffer(self, cap * 4, readback=True),
+                               _Buffer(self, cap * 8, readback=True))
+            self._items_cap = cap
+        b_idx, b_val = self._items_out
+        sizes = (_PoolSize * 1)(_PoolSize(_DESC_STORAGE_BUFFER, 4 * len(items)))
+        dp = _DescPoolCreate(33, None, 0, len(items), 1, sizes)
+        pool = _vp()
+        _check(vk.vkCreateDescriptorPool(self.device, ctypes.byref(dp), None, ctypes.byref(pool)),
+               "vkCreateDescriptorPool")
+        cmd = _vp()
+        try:
+            info = _CmdBufAlloc(40, None, self.command_pool, 0, 1)
+            _check(vk.vkAllocateCommandBuffers(self.device, ctypes.byref(info), ctypes.byref(cmd)),
+                   "allocate item peaks")
+            _check(vk.vkBeginCommandBuffer(cmd, ctypes.byref(_CmdBufBegin(42, None, 1, None))),
+                   "begin item peaks")
+            bufs = (b_data, b_tmpl, b_idx, b_val)
+            bound = None
+            for (lo, hi, a, b, t), off, nb in zip(items, offs, nbs):
+                filename = self._peak_file(n, nb)
+                pipe, layout, sl = self._build_pipeline(("peaks", filename), filename,
+                                                        _NBIND, _PUSH_BYTES)
+                if bound != pipe:
+                    vk.vkCmdBindPipeline(cmd, _BIND_POINT_COMPUTE, pipe)
+                    bound = pipe
+                layouts = (_vp * 1)(sl)
+                dset = _vp()
+                _check(vk.vkAllocateDescriptorSets(self.device, ctypes.byref(
+                    _DescSetAlloc(34, None, pool, 1, ctypes.cast(layouts, _vp))), ctypes.byref(dset)),
+                    "vkAllocateDescriptorSets")
+                offsets = (a * n * 8, t * n * 8, off * 4, off * 8)
+                infos = (_DescBufferInfo * 4)(*[_DescBufferInfo(bf.handle, o, bf.nbytes - o)
+                                                for bf, o in zip(bufs, offsets)])
+                writes = (_WriteDescSet * 4)(*[
+                    _WriteDescSet(35, None, dset, i, 0, 1, _DESC_STORAGE_BUFFER, None,
+                                  ctypes.pointer(infos[i]), None) for i in range(4)])
+                vk.vkUpdateDescriptorSets(self.device, 4, writes, 0, None)
+                vk.vkCmdBindDescriptorSets(cmd, _BIND_POINT_COMPUTE, layout, 0, 1,
+                                           (_vp * 1)(dset), 0, None)
+                pc = (_u32 * 7)(1, lo, hi, binsize, shift & 0xffffffff, nb, t2)
+                vk.vkCmdPushConstants(cmd, layout, _STAGE_COMPUTE, 0, _PUSH_BYTES, ctypes.byref(pc))
+                vk.vkCmdDispatch(cmd, b - a, 1, 1)
+            barriers = (_BufMemBarrier * 2)(
+                _BufMemBarrier(44, None, _ACCESS_SHADER_WRITE, 0x2000, _QUEUE_FAMILY_IGNORED,
+                               _QUEUE_FAMILY_IGNORED, b_idx.handle, 0, _WHOLE_SIZE),
+                _BufMemBarrier(44, None, _ACCESS_SHADER_WRITE, 0x2000, _QUEUE_FAMILY_IGNORED,
+                               _QUEUE_FAMILY_IGNORED, b_val.handle, 0, _WHOLE_SIZE))
+            vk.vkCmdPipelineBarrier(cmd, _STAGE_COMPUTE_BIT, 0x4000, 0, 0, None, 2,
+                                    ctypes.cast(barriers, _vp), 0, None)
+            _check(vk.vkEndCommandBuffer(cmd), "end item peaks")
+            self._submit(cmd)                                # with the pending forward
+            indices = b_idx.read(np.int32, size)
+            values = b_val.read(np.complex64, size)
+        finally:
+            if cmd:
+                vk.vkFreeCommandBuffers.argtypes = [_vp, _vp, _u32, ctypes.POINTER(_vp)]
+                vk.vkFreeCommandBuffers(self.device, self.command_pool, 1, (_vp * 1)(cmd))
+            vk.vkDestroyDescriptorPool(self.device, pool, None)
+        out = []
+        for (lo, hi, a, b, t), off, nb in zip(items, offs, nbs):
+            c = (b - a) * nb
+            out.append((indices[off:off + c].reshape(b - a, 1, nb),
+                        values[off:off + c].reshape(b - a, 1, nb)))
+        return out
+
     def peaks_grouped(self, n, data, tmpl, groups, binsize, threshold, *, upload_tmpl=True,
                       slot=None, async_submit=False):
         """Run distinct flat search windows in one synchronous submission.

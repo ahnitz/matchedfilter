@@ -1248,6 +1248,11 @@ class TimeDomainFilterBank:
                     sink[-1][2][0] = True          # a synchronous result: not replayable
                 if getattr(active_plan, '_last_n_triggers', None) == 0:
                     continue
+                if pending:
+                    # Keep the call's order: parts already deferred are consumed at build().
+                    pending.append((_Deferred(lambda r=(aidx, aval): r), sub_starts, g,
+                                    tmpl_arg, N))
+                    continue
                 consume(aidx, aval, sub_starts, g, tmpl_arg, N)
             if trial is not None:
                 trial(time.perf_counter() - t_trial)
@@ -1354,12 +1359,17 @@ class TimeDomainFilterBank:
                 close = _vkcompute.fused()
             except Exception:
                 close = None
-        out = []
+        out = [None] * len(jobs)
+        # Single-template (follow-up) calls on a GPU bank, per template group: one forward
+        # dispatch and one submission for all of them instead of a few submissions each.
+        done = TimeDomainFilterBank._items_batch(jobs, out)
         try:
             for j, (bank, series, kw) in enumerate(jobs):
+                if j in done:
+                    continue
                 bank._defer, bank._queue_offset = _BATCH_TOKEN, j
                 try:
-                    out.append(bank.filter_series(series, **(kw or {})))
+                    out[j] = bank.filter_series(series, **(kw or {}))
                 finally:
                     bank._defer, bank._queue_offset = 0, 0
         finally:
@@ -1368,6 +1378,57 @@ class TimeDomainFilterBank:
         if not wait:
             return [r if isinstance(r, _Deferred) else _Deferred(lambda r=r: r) for r in out]
         return [r.result() if isinstance(r, _Deferred) else r for r in out]
+
+    @staticmethod
+    def _items_batch(jobs, out):
+        """Run eligible single-template GPU jobs of a batch together; returns their indices."""
+        import os
+        from .device import parse as _parse_device
+        if os.environ.get("MF_GPU_ITEMS", "1") == "0":
+            return set()
+        groups = {}
+        for j, (bank, series, kw) in enumerate(jobs):
+            kw = kw or {}
+            ti = kw.get("template_index")
+            if (ti is None or bank.engine != 'hier' or _parse_device(bank.device).kind != 'gpu'
+                    or set(kw) - {"windows", "binsize", "threshold", "template_index"}):
+                continue
+            ser = np.ascontiguousarray(series, dtype=np.complex64)
+            S = ser.size
+            W = _normalize_windows(kw.get("windows"), S)
+            bank._groups
+            g, ti_local = bank._template_map[ti]
+            bs = int(kw["binsize"]) if kw.get("binsize") is not None else (bank.binsize or g.n)
+            if bs >= g.n or W.shape[0] == 0:
+                continue
+            on_cpu, trial = bank._single_device(g, 1)
+            if on_cpu or trial is not None:
+                continue
+            thr = bank.threshold if kw.get("threshold") is None else float(kw["threshold"])
+            bstarts, bws, bwe = bank._window_layout(g, W, S)
+            if bstarts.size == 0:
+                continue
+            groups.setdefault((id(bank), id(g), bs, thr), []).append(
+                (j, bank, g, ser, bstarts, bws, bwe, ti_local, ti))
+        done = set()
+        for (_, _, bs, thr), members in groups.items():
+            g = members[0][2]
+            plan = g.get_flat_plan()
+            res = plan._items_gpu([(ser, st, ws, we, tl) for _, _, _, ser, st, ws, we, tl, _ in members],
+                                  bs, thr) if hasattr(plan, "_items_gpu") else None
+            if res is None:
+                continue
+            for (j, bank, g, ser, st, ws, we, tl, ti), (idx, val) in zip(members, res):
+                lists = ([], [], [], [], [])
+                # Peaks in the order one call per bin count gives them.
+                counts = ((we - ws + bs - 1) // bs).astype(np.int64)
+                for u in np.unique(counts):
+                    m = counts == u
+                    _consume_into(lists, idx[m][:, :, :u], val[m][:, :, :u], st[m], g,
+                                  (tl, 1), g.n, ti)
+                out[j] = _results_from(lists)
+                done.add(j)
+        return done
 
     @staticmethod
     def _block_coverage(S: int, st: np.ndarray, lo: int, hi: int) -> np.ndarray:
