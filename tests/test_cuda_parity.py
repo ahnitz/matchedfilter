@@ -473,3 +473,37 @@ def test_gpu_cost_calibration_measures_on_cuda():
     assert cm.refine(1e-2) > 0
     bands = sorted(cm.dense)
     assert cm.dense[bands[-1]] > cm.dense[bands[0]], cm.dense   # a wider gate costs more
+
+
+# ---- sparse readback ---------------------------------------------------------------------
+@pytest.mark.parametrize("kind", ["peaks", "peaks_grouped", "hier", "hier_grouped"])
+@pytest.mark.parametrize("thr", [4.5, 0.0])        # 0: every bin a peak, past _SPARSE_HOST
+def test_sparse_readback_equals_dense(ctx, kind, thr):
+    from matchedfilter import _SparsePeaks
+    n, nd, nt, bs = 2048, 24, 9, 512
+    rng = np.random.default_rng(17)
+    spec = ctx.empty_shared((nd, n))
+    spec[:] = _complex(rng, (nd, n)) / np.sqrt(n)
+    h = _complex(rng, (nt, n))
+    h /= np.linalg.norm(h, axis=1, keepdims=True) / np.sqrt(n)
+    groups = [(0, 2000, 0, 3), (40, 2040, 3, 20), (10, 2010, 20, 24)]
+
+    def call(sparse):
+        if kind == "peaks":
+            return ctx.peaks(n, spec, h, binsize=bs, threshold=thr, window=(40, 2040), sparse=sparse)
+        if kind == "peaks_grouped":
+            return ctx.peaks_grouped(n, spec, h, groups, bs, thr, sparse=sparse)
+        if kind == "hier":
+            return ctx.hier_peaks(n, 512, spec, h, h[:, :128], 0.5, cascade_band=128, ct1=h[:, :512],
+                                  raw_thr1=1.0, binsize=bs, threshold=thr, window=(40, 2040),
+                                  sparse=sparse)
+        return ctx.hier_peaks_grouped(n, 256, spec, h, h[:, :256], 0.5, groups, bs, thr,
+                                      sparse=sparse)
+    di, dv = call(False)
+    sp = call(True)
+    assert isinstance(sp, _SparsePeaks) and sp.shape == di.shape
+    si, sv = sp.dense()
+    np.testing.assert_array_equal(si, di)
+    np.testing.assert_array_equal(sv, dv)
+    if thr == 0.0:
+        assert sp.flat.size > 4096 or sp.flat.size == di.size

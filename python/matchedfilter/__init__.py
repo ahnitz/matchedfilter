@@ -214,6 +214,48 @@ def _unpack_half(a, n, hermitian):
     return full
 
 
+class _SparsePeaks:
+    """The peaks of a (blocks, templates, bins) result, sparse: flat indices into that shape,
+    sample indices and values, in C order. What a backend with ``supports_sparse`` returns
+    when a caller asks (``_want_sparse``): at a detection threshold almost every bin is
+    empty, and reading back, widening and scanning the dense table cost more host time than
+    the device spent on the call."""
+    __slots__ = ("shape", "flat", "idx", "val")
+
+    def __init__(self, shape, flat, idx, val):
+        self.shape = tuple(shape)
+        self.flat = np.asarray(flat, np.int64)
+        self.idx = np.asarray(idx, np.int64)
+        self.val = np.asarray(val, np.complex64)
+
+    def dense(self):
+        idx = np.full(self.shape, -1, np.int64)
+        val = np.zeros(self.shape, np.complex64)
+        idx.reshape(-1)[self.flat] = self.idx
+        val.reshape(-1)[self.flat] = self.val
+        return idx, val
+
+    @staticmethod
+    def combine(parts, shape, order=None):
+        """One result for a call from (first block, part) pieces; ``order`` maps computed
+        block rows to output rows as _format_result does (out[order] = computed)."""
+        nt, nb = shape[1], shape[2]
+        per_block = nt * nb
+        flats, idxs, vals = [], [], []
+        for b0, sp in parts:
+            flats.append(sp.flat + b0 * per_block)
+            idxs.append(sp.idx)
+            vals.append(sp.val)
+        flat = np.concatenate(flats) if flats else np.empty(0, np.int64)
+        idx = np.concatenate(idxs) if idxs else np.empty(0, np.int64)
+        val = np.concatenate(vals) if vals else np.empty(0, np.complex64)
+        if order is not None and flat.size:
+            rows, rest = np.divmod(flat, per_block)
+            flat = np.asarray(order, np.int64)[rows] * per_block + rest
+        k = np.argsort(flat, kind="stable")
+        return _SparsePeaks(shape, flat[k], idx[k], val[k])
+
+
 class _Deferred:
     """A GPU result submitted but not yet collected; result() waits once and caches.
     empty: True once collected if the gates refined nothing (every slot is -1), so a
@@ -578,14 +620,15 @@ class MatchedFilter:
         from ._execution_policy import select
         return select(self.device, operation, self.n, band, templates)
 
-    def _gpu_window(self, D, H, binsize, threshold, start, end, slot=None, async_submit=False):
+    def _gpu_window(self, D, H, binsize, threshold, start, end, slot=None, async_submit=False,
+                    **kw):
         nd, nt = D.shape[0], H.shape[0]
         limit = self._gpu_pair_limit()
         if nd * nt <= limit:
             # No signature probing: a TypeError raised after a submit would
             # have dispatched the same work twice.
             return self._gpu_dispatch(D, H, binsize, threshold, start, end,
-                                      slot=slot, async_submit=async_submit)
+                                      slot=slot, async_submit=async_submit, **kw)
         nb = 1 + (end - start - 1) // binsize
         idx = np.empty((nd, nt, nb), np.int32)
         val = np.empty((nd, nt, nb), np.complex64)
@@ -601,11 +644,12 @@ class MatchedFilter:
             return lambda: (idx, val)
         return idx, val
 
-    def _gpu_dispatch(self, D, H, binsize, threshold, start, end, slot=None, async_submit=False):
+    def _gpu_dispatch(self, D, H, binsize, threshold, start, end, slot=None, async_submit=False,
+                      **kw):
         res = self._gpu.peaks(
             self.n, D, H, binsize=binsize, threshold=threshold,
             window=(start, end), upload_data=self._ddirty,
-            upload_tmpl=self._tdirty, slot=slot, async_submit=async_submit)
+            upload_tmpl=self._tdirty, slot=slot, async_submit=async_submit, **kw)
         self._ddirty = self._tdirty = False
         return res
 
@@ -1131,10 +1175,12 @@ class MatchedFilter:
         return self._gpu.peaks_grouped(n, spec, H, groups, binsize, threshold,
                                        upload_tmpl=self._tdirty, **kw)
 
-    def _series_window(self, spec, H, binsize, threshold, w0, w1, slot=None, async_submit=False):
+    def _series_window(self, spec, H, binsize, threshold, w0, w1, slot=None, async_submit=False,
+                       **kw):
         # Each group has fresh spectra, even when it reuses an allocation.
         self._ddirty = True
-        return self._gpu_window(spec, H, binsize, threshold, w0, w1, slot=slot, async_submit=async_submit)
+        return self._gpu_window(spec, H, binsize, threshold, w0, w1, slot=slot,
+                                async_submit=async_submit, **kw)
 
     def _run_series_gpu(self, ser, layout, binsize, threshold, t0, nt, raw):
         """Execute shared layout groups with bounded FFT/gather storage."""
@@ -1156,6 +1202,34 @@ class MatchedFilter:
             batch = min(batch, policy['series_group'])
         single = len(layout.groups) == 1 and nblk <= batch
         self._last_series_batch = batch
+        # Sparse results (time_domain asks with _want_sparse): only the peaks come back.
+        sparse = bool(raw and getattr(self, "_want_sparse", False)
+                      and getattr(self._gpu, "supports_sparse", False))
+        skw = {"sparse": True} if sparse else {}
+        sparse_parts = []
+
+        def take_dense(b_start, b_end, r):
+            """Store one batch's result; sparse pieces are kept aside (see finish)."""
+            if isinstance(r, _SparsePeaks):
+                sparse_parts.append((b_start, r))
+                return
+            gi, gv = r
+            if raw:
+                idx[b_start:b_end], val[b_start:b_end] = gi, gv
+            else:
+                _core.pack_peaks(peaks[b_start:b_end], gi, gv)
+
+        def finish_raw():
+            if sparse_parts:
+                sp = _SparsePeaks.combine(sparse_parts, shape, layout.order)
+                if not dense_seen[0]:
+                    return sp
+                # Mixed (a tiled fallback came back dense): densify the sparse pieces.
+                for b0, part in sparse_parts:
+                    pi, pv = part.dense()
+                    idx[b0:b0 + part.shape[0]], val[b0:b0 + part.shape[0]] = pi, pv
+            return _format_result(idx, val, raw=True, order=layout.order)
+        dense_seen = [False]
         is_hier = isinstance(self, HierarchicalFilter)
         # A declared capability, not a probe for one backend's internals.
         can_pipeline = (getattr(self._gpu, "supports_async", False)
@@ -1306,7 +1380,7 @@ class MatchedFilter:
                     res = self._grouped_dispatch(
                         n, spec, H, groups, binsize, threshold,
                         slot=slot if pipelined else None, async_submit=pipelined,
-                        **({"nbins": nb} if getattr(layout, "ragged", False) else {}))
+                        **({"nbins": nb} if getattr(layout, "ragged", False) else {}), **skw)
                     self._tdirty = False
                 except Exception:
                     self._gpu.cancel_forward(slot=slot if pipelined else None)
@@ -1314,22 +1388,14 @@ class MatchedFilter:
                 in_flight.append((begin, end, res))
                 if len(in_flight) >= K:
                     b_start, b_end, item = in_flight.pop(0)
-                    gi, gv = item() if callable(item) else item
-                    if raw:
-                        idx[b_start:b_end], val[b_start:b_end] = gi, gv
-                    else:
-                        _core.pack_peaks(peaks[b_start:b_end], gi, gv)
+                    take_dense(b_start, b_end, item() if callable(item) else item)
 
             def finish_grouped():
                 while in_flight:
                     b_start, b_end, item = in_flight.pop(0)
-                    gi, gv = item() if callable(item) else item
-                    if raw:
-                        idx[b_start:b_end], val[b_start:b_end] = gi, gv
-                    else:
-                        _core.pack_peaks(peaks[b_start:b_end], gi, gv)
+                    take_dense(b_start, b_end, item() if callable(item) else item)
                 if raw:
-                    return _format_result(idx, val, raw=True, order=layout.order)
+                    return finish_raw()
                 return _format_result(None, None, raw=False, order=layout.order, out=peaks)
             if not defer:
                 return finish_grouped()
@@ -1347,7 +1413,8 @@ class MatchedFilter:
         # the pair count to divide: pad a hierarchical dispatch with copies of its last block
         # (results dropped) rather than fall back to an unpacked, half-idle kernel.
         pad_unit = (16 // math.gcd(nt, 16)) if (is_hier and getattr(self._gpu, "_device_state", None)
-                                                 is not None) else 1
+                                                 is not None
+                                                 and not getattr(self._gpu, "pads_coarse_groups", False)) else 1
         for w0, w1, a, b in layout.groups:
             for begin in range(a, b, batch):
                 end = min(begin + batch, b)
@@ -1365,7 +1432,8 @@ class MatchedFilter:
                 try:
                     res = self._series_window(spec, H, binsize, threshold, w0, w1,
                                               slot=slot if pipelined else None,
-                                              async_submit=pipelined)
+                                              async_submit=pipelined,
+                                              **(skw if count_p == count else {}))
                 except Exception:
                     self._gpu.cancel_forward(slot=slot if pipelined else None)
                     raise
@@ -1381,7 +1449,14 @@ class MatchedFilter:
                 if len(in_flight) >= K:
                     collected_early[0] = True
                     b_start, b_end, item = in_flight.pop(0)
-                    gi, gv = item() if callable(item) else item
+                    r = item() if callable(item) else item
+                    if isinstance(r, _SparsePeaks):
+                        if single:
+                            return r
+                        sparse_parts.append((b_start, r))
+                        continue
+                    gi, gv = r
+                    dense_seen[0] = True
                     if single:
                         if raw:
                             return _format_result(gi, gv, raw=True)
@@ -1400,9 +1475,16 @@ class MatchedFilter:
         def finish():
             while in_flight:
                 b_start, b_end, item = in_flight.pop(0)
-                gi, gv = item() if callable(item) else item
+                r = item() if callable(item) else item
                 if hier:
                     refined[0] += getattr(self._gpu, "last_refinements", 1)
+                if isinstance(r, _SparsePeaks):
+                    if single:
+                        return r
+                    sparse_parts.append((b_start, r))
+                    continue
+                gi, gv = r
+                dense_seen[0] = True
                 if single:
                     if raw:
                         return _format_result(gi, gv, raw=True)
@@ -1419,7 +1501,7 @@ class MatchedFilter:
                 else:
                     _core.pack_peaks(peaks[b_start:b_end], gi, gv)
             if raw:
-                return _format_result(idx, val, raw=True, order=layout.order)
+                return finish_raw()
             return _format_result(None, None, raw=False, order=layout.order, out=peaks)
 
         if not defer:
@@ -2234,15 +2316,16 @@ class HierarchicalFilter(MatchedFilter):
                                            threshold, upload_tmpl=self._tdirty, **extra, **kw)
 
         def account(r):
-            idx, val = r
-            self._gpairs += idx.shape[0] * idx.shape[1]
+            shp = r.shape if isinstance(r, _SparsePeaks) else r[0].shape
+            self._gpairs += shp[0] * shp[1]
             self._gtrig += self._gpu.last_refinements
-            return idx, val
+            return r
         if kw.get("async_submit"):
             return lambda: account(res())
         return account(res)
 
-    def _gpu_dispatch(self, D, H, binsize, threshold, start, end, slot=None, async_submit=False):
+    def _gpu_dispatch(self, D, H, binsize, threshold, start, end, slot=None, async_submit=False,
+                      **kw):
         """Run the gate chain and refinement without host survivor readback."""
         chain, f, thr = self._gpu_calibration(threshold)
         ck = (chain, f, H.ctypes.data, H.shape)
@@ -2255,21 +2338,21 @@ class HierarchicalFilter(MatchedFilter):
                 self.n, chain[0], D, H, ct[0], thr[0],
                 binsize=binsize, threshold=threshold, window=(start, end),
                 upload_data=self._ddirty, upload_tmpl=self._tdirty,
-                slot=slot, async_submit=async_submit)
+                slot=slot, async_submit=async_submit, **kw)
         else:
             res = self._gpu.hier_peaks(
                 self.n, chain[1], D, H, ct[0], thr[0],
                 binsize=binsize, threshold=threshold, window=(start, end),
                 upload_data=self._ddirty, upload_tmpl=self._tdirty,
                 cascade_band=chain[0], ct1=ct[1], raw_thr1=thr[1],
-                slot=slot, async_submit=async_submit)
+                slot=slot, async_submit=async_submit, **kw)
         self._ddirty = self._tdirty = False
 
         def account(r):
-            idx, val = r
-            self._gpairs += idx.shape[0] * idx.shape[1]
+            shp = r.shape if isinstance(r, _SparsePeaks) else r[0].shape
+            self._gpairs += shp[0] * shp[1]
             self._gtrig += self._gpu.last_refinements
-            return idx, val
+            return r
         if async_submit:
             return lambda: account(res())
         return account(res)

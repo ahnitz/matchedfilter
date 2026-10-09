@@ -22,6 +22,7 @@ SERIES_KERNEL = ROOT / "src" / "gpu" / "series_forward.slang"
 # CUDA's refine: a grid-stride entry reading the survivor count on the device
 # (no indirect dispatch on CUDA). Appended to tierb.slang, as series_forward is.
 REFINE_KERNEL = ROOT / "src" / "gpu" / "refine_bounded.slang"
+COMPACT_PEAKS_KERNEL = ROOT / "src" / "gpu" / "compact_peaks.slang"
 
 TIER_B = (64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536)
 RADIX = {32768: 32, 65536: 64}
@@ -147,6 +148,12 @@ def tierc_split(n):
     return n // n2, n2
 
 
+def build_compact_peaks(slangc, nvrtc, env, outdir):
+    """The sparse peak readback kernel (CUDA only)."""
+    text = "#define SLANG_CUDA_STRUCTURED_BUFFER_NO_COUNT 1\n" + COMPACT_PEAKS_KERNEL.read_text()
+    return compile_ptx(slangc, nvrtc, env, text, outdir / "compact_peaks.ptx", "compactPeaks")
+
+
 def build_full_tierc(slangc, nvrtc, env, outdir):
     """Two-stage (Tier C) correlation and series-forward kernels past 65536."""
     entries = {}
@@ -174,7 +181,7 @@ def build_full_tierc(slangc, nvrtc, env, outdir):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--slangc", default=None)
-    ap.add_argument("--only", choices=("all", "tierc", "refine", "coarse"), default="all",
+    ap.add_argument("--only", choices=("all", "tierc", "refine", "coarse", "compact"), default="all",
                     help="rebuild only the two-stage kernels (and their manifest entry), "
                          "or only the refine family")
     args = ap.parse_args()
@@ -195,6 +202,9 @@ def main():
         manifest = json.loads((OUT / "manifest.json").read_text())
         manifest["full_tierc"] = build_full_tierc(slangc, nvrtc, env, OUT)
         (OUT / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+        return 0
+    if args.only == "compact":
+        build_compact_peaks(slangc, nvrtc, env, OUT)
         return 0
     if args.only == "coarse":
         for n in (64, 128, 256):
@@ -313,6 +323,7 @@ def main():
         print("  n=%-6d %-16s %5d bytes  wg=%-4d" % (n, ptx.name, info["bytes"], wg))
 
     manifest["full_tierc"] = build_full_tierc(slangc, nvrtc, env, OUT)
+    build_compact_peaks(slangc, nvrtc, env, OUT)
     (OUT / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     print("Wrote PTX manifest: %s" % (OUT / "manifest.json"))
     return 0
