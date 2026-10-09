@@ -235,6 +235,13 @@ class _SparsePeaks:
         val.reshape(-1)[self.flat] = self.val
         return idx, val
 
+    def head(self, nblocks):
+        """The first nblocks blocks: a padded dispatch's extra rows dropped."""
+        per_block = self.shape[1] * self.shape[2]
+        keep = self.flat < nblocks * per_block
+        return _SparsePeaks((nblocks,) + self.shape[1:], self.flat[keep], self.idx[keep],
+                            self.val[keep])
+
     @staticmethod
     def combine(parts, shape, order=None):
         """One result for a call from (first block, part) pieces; ``order`` maps computed
@@ -254,6 +261,13 @@ class _SparsePeaks:
             flat = np.asarray(order, np.int64)[rows] * per_block + rest
         k = np.argsort(flat, kind="stable")
         return _SparsePeaks(shape, flat[k], idx[k], val[k])
+
+
+def _head(r, count):
+    """The first count blocks of a dispatch's result (padding rows dropped)."""
+    if isinstance(r, _SparsePeaks):
+        return r.head(count)
+    return tuple(x[:count] for x in r)
 
 
 class _Deferred:
@@ -1502,16 +1516,16 @@ class MatchedFilter:
                     res = self._series_window(spec, H, binsize, threshold, w0, w1,
                                               slot=slot if pipelined else None,
                                               async_submit=pipelined,
-                                              **(skw if count_p == count else {}))
+                                              **skw)
                 except Exception:
                     self._gpu.cancel_forward(slot=slot if pipelined else None)
                     raise
                 self._ddirty = self._tdirty = False
                 if count_p > count:
                     if callable(res):
-                        res = (lambda r=res, c=count: tuple(x[:c] for x in r()))
+                        res = (lambda r=res, c=count: _head(r(), c))
                     else:
-                        res = tuple(x[:count] for x in res)
+                        res = _head(res, count)
                 in_flight.append((begin, end, res))
                 if defer and is_hier:
                     trace_groups.append((begin, end, getattr(self._gpu, "_last_dispatch", None)))

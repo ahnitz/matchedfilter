@@ -43,3 +43,20 @@ def test_entry_cap_is_independent_of_byte_budget():
         c._cache_touch('flat',i)
     c._cache_room(1)
     assert c.evicted == [0]
+
+
+def test_caller_held_shared_allocation_is_not_counted():
+    """A shared allocation its caller still holds is not in the budget (eviction cannot
+    free it); once the caller lets go, the borrowing records are what keep it, and it counts.
+    Counting a search's ~0.5 GB middle output made every fine call evict and re-record."""
+    import weakref
+
+    class Storage:
+        pass
+    c = Cache()
+    storage = Storage()
+    owner = SimpleNamespace(buffer=SimpleNamespace(nbytes=4096), _storage=weakref.ref(storage))
+    c._batches = {0: (SimpleNamespace(owner=owner), SimpleNamespace(nbytes=16))}
+    assert c._cache_bytes() == 16
+    del storage
+    assert c._cache_bytes() == 4096 + 16
