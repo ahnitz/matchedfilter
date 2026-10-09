@@ -109,3 +109,36 @@ the first tier, not refine or forward: (a) the screen kernel's op count on AVX2
 (split-radix int16 at ~4.4K cycles per 16-lane 256-point call), (b) the recheck excess
 (2 points of the 6.5%, ~9% of tier 0) that a smaller derived margin would cut, and (c)
 a cheaper 128-band screened first tier, which the model now prices.
+
+## Margin derived from a target tail (2026-10-09, later)
+
+The 5 sqrt(N) margin (10.7 rms) was rounded up, not derived. Re-measured on 307k pairs
+per N (128/256/512; random and profile-shaped templates): rms 0.46-0.47 sqrt(N), and
+the tail counts follow a Gaussian of that rms as deep as the sample resolves:
+
+| N | > 3 rms (Gaussian 829) | > 4 rms (19.5) | > 5 rms (0.18) |
+|---|---|---|---|
+| 128 | 810 | 19 | 0 |
+| 256 | 773 | 11 | 0 |
+| 512 | 670 | 12 | 0 |
+
+With sigma = 0.48 sqrt(N) (above every fit) and a one-sided tail of 4e-11 per pair
+(k = 6.5; a millionth of fd 1e-4), the margin is 3.12 sqrt(N). Beyond 4 rms this is the
+Gaussian model, not a measurement -- the same standing as the NEON fp16 gate's kappa
+(16 against 12.9 seen). A proven bound is not usable here: the deterministic worst case
+of the rounding sum is ~N LSB (all roundings aligned), 30-60x the rms.
+
+Effect on dev1 (ladder, load < 1): the screen passes 5.8% of pairs instead of 6.5% (float
+tier 4.5%); fine 2.73 -> 2.70-2.72 s, inside run-to-run noise (~1%). Base 3.24-3.25 s.
+With MF_AUTOTUNE=0 and a fresh cost file the model now picks the screen itself (2.71 s).
+
+## Band-128 screened first tier
+
+Already a candidate: the model prices the screen at every band 64..1024 and every chain.
+On the ladder workload it ranks (256,512,1024) first (416 vs 434/457 ticks for the next
+two), and no 128-first chain reaches the top six, screened or not; the trials agree.
+
+## dev2
+
+Load stayed high most of the day; one window at load ~8: base 1.71 s -> 1.49 s (1.15x).
+A second rep was invalidated by load rising to 18.
