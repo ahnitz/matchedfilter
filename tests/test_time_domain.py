@@ -918,3 +918,45 @@ def test_filter_series_many_without_wait_overlaps_and_matches(monkeypatch):
     for r1, r2 in zip(want, got):
         np.testing.assert_array_equal(r1.sample_indices, r2.sample_indices)
         np.testing.assert_array_equal(r1.snr, r2.snr)
+
+
+def test_gpu_follow_up_batch_matches_direct_calls(monkeypatch):
+    """Single-template calls on device-resident rows go out as one forward and one item
+    submission per template group; each job's FilterResults equal its direct call exactly,
+    peak order included (one call per bin count), with edge blocks of fewer bins."""
+    from conftest import usable_gpu
+    monkeypatch.setenv("MF_AUTOTUNE", "0")
+    monkeypatch.setenv("MF_SINGLE_DEVICE", "bank")
+    dev = usable_gpu()
+    if dev is None:
+        pytest.skip("no usable GPU")
+    rng = np.random.default_rng(53)
+    counts = list(rng.integers(200, 400, 25))
+    taps, w, df = _whitened_inspiral_bank(rng, counts)
+    bank = TimeDomainFilterBank(taps, tap_counts=counts, engine='hier', threshold=5.0,
+                                false_dismissal=1e-3, device=dev, fft_lengths=[2048], binsize=2048)
+    bank.set_reference(w, delta_f=df)
+    S = 1 << 17
+    rows = bank.empty_shared((2, S))
+    for i in range(2):
+        X = np.fft.fft(rng.standard_normal(S))
+        X[S // 2:] = 0
+        rows[i] = (np.fft.ifft(X) * 2).astype(np.complex64)
+    jobs = []
+    for k in range(16):
+        c0 = int(rng.integers(20000, S - 20000))
+        jobs.append((bank, rows[k % 2], dict(windows=slice(c0 - 9000, c0 + 9100), binsize=61,
+                                             threshold=0.0, template_index=int(rng.integers(0, 25)))))
+    from matchedfilter import _vkcompute
+    used = []
+    if hasattr(_vkcompute.Context, "peaks_items"):
+        orig = _vkcompute.Context.peaks_items
+        monkeypatch.setattr(_vkcompute.Context, "peaks_items",
+                            lambda self, *a, **k: used.append(1) or orig(self, *a, **k))
+    many = TimeDomainFilterBank.filter_series_many(jobs)
+    direct = [b.filter_series(x, **kw) for b, x, kw in jobs]
+    for r1, r2 in zip(direct, many):
+        for f in r1._fields:
+            np.testing.assert_array_equal(getattr(r1, f), getattr(r2, f))
+    if bank._groups[0].plan._gpu is not None and hasattr(bank._groups[0].plan._gpu, "peaks_items"):
+        assert used, "the batched follow-up path was not taken"
