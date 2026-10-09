@@ -233,23 +233,28 @@ def table(records, times, groups, ceil, stage):
 
 
 # ---- production shapes ---------------------------------------------------------------------
-def stages(bank, reps, nfine=1):
+def stages(bank, reps, nfine=1, profiles=None):
     """Capture and replay the ladder's three stages for its largest top template."""
     args = argparse.Namespace(seg_samples=1 << 20, start_pad=120.0, end_pad=16.0, pad=4096,
                               threshold=6.0, fd=1e-3, peak_window=1.0, asym_threshold=6.0,
                               asym_bin_width=0.03, asym_num_bins=1000, fft_length=0)
     top = ladder.load_tops(bank, 1)[0]
+    if profiles:
+        pz = np.load(profiles)
+        w, df = pz["top_%d" % top["top"]], float(pz["delta_f"])
+    else:
+        w, df = ladder.profile(), ladder.DF
+    amp = np.sqrt(w)
     rng = np.random.default_rng(1)
-    amp = np.sqrt(ladder.profile())
     S = args.seg_samples
     a0, a1 = int(args.start_pad * ladder.RATE), S - int(args.end_pad * ladder.RATE)
     probe = TimeDomainFilterBank(top["mid_taps"], tap_counts=top["mid_counts"], engine="corr")
-    y = probe.correlate_series(ladder.analytic_series(rng, 1 << 18, amp))[:, 1 << 15:-(1 << 15)]
+    y = probe.correlate_series(ladder.analytic_series(rng, 1 << 18, amp, df))[:, 1 << 15:-(1 << 15)]
     scale = (1.0 / np.sqrt(np.mean(np.abs(y) ** 2, axis=1) / 2)).astype(np.float32)
     mid = TimeDomainFilterBank(top["mid_taps"] * scale[:, None], tap_counts=top["mid_counts"],
                                engine="corr", device="gpu:0")
-    xm = probe.correlate_series(ladder.analytic_series(rng, 1 << 18, amp)) * scale[:, None]
-    ser = ladder.analytic_series(rng, S, amp)
+    xm = probe.correlate_series(ladder.analytic_series(rng, 1 << 18, amp, df)) * scale[:, None]
+    ser = ladder.analytic_series(rng, S, amp, df)
     win = slice(max(0, a0 - args.pad), min(S, a1 + args.pad))
     mid.correlate_series(ser, windows=win)                       # plans, pipelines
     with Capture() as cap:
@@ -271,7 +276,7 @@ def stages(bank, reps, nfine=1):
         b = TimeDomainFilterBank(taps, tap_counts=c, engine="hier", threshold=args.threshold,
                                  false_dismissal=args.fd, device="gpu:0",
                                  binsize=int(args.peak_window * ladder.RATE))
-        b.set_reference(ladder.profile(), delta_f=ladder.DF)
+        b.set_reference(w, delta_f=df)
         b.filter_series(mids[row], windows=slice(a0, a1))
         with Capture() as cap:
             r = b.filter_series(mids[row], windows=slice(a0, a1))
@@ -300,13 +305,14 @@ def main():
     ap.add_argument("--bank", required=True)
     ap.add_argument("--reps", type=int, default=20)
     ap.add_argument("--fine-banks", type=int, default=1)
+    ap.add_argument("--profiles", default=None, help="tools/ladder_profiles.py output, as ladder --profiles")
     ap.add_argument("--json", default=None)
     a = ap.parse_args()
     ceil = ceilings()
     print("device %s: measured FMA %.0f GFLOP/s (spec %.0f), add %.0f GFLOP/s, copy %.1f GB/s (spec %.0f)"
           % (ceil["device"], ceil["fma"] / 1e9, SPEC["fma"] / 1e9, ceil["add"] / 1e9,
              ceil["bw"] / 1e9, SPEC["bw"] / 1e9))
-    res, meta = stages(a.bank, a.reps, a.fine_banks)
+    res, meta = stages(a.bank, a.reps, a.fine_banks, a.profiles)
     print("shapes:", json.dumps(meta, default=str))
     rows = []
     for stage, (recs, times, groups) in res.items():
