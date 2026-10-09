@@ -1688,12 +1688,8 @@ class Context(InputUploads):
                 # forward scratch. Finish that command before releasing it;
                 # the resulting spectra remain valid for the next command.
                 self._flush_forward()
-        cache = {'flat': self._batches, 'hier': self._hier,
-                 'full': self._full_batches, 'tierc': self._tierc_batches,
-                 'forward': self._forwards}[kind]
-        batch = cache.pop(key)
-        for buf in (batch.values() if isinstance(batch, dict) else
-                    batch if isinstance(batch, tuple) else (batch,)):
+        batch = self._record_tables()[kind].pop(key)
+        for buf in self._record_buffers(batch):
             buf.destroy()
         for resident in self._uploaded.values():
             resident.pop(key, None)
@@ -1701,28 +1697,11 @@ class Context(InputUploads):
     def clear_cache(self):
         self._drain()
         self.cancel_forward()
-        for batch in self._batches.values():
-            for buf in batch:
-                buf.destroy()
-        for bufs in self._hier.values():
-            for buf in bufs.values():
-                buf.destroy()
-        for batch in getattr(self, '_full_batches', {}).values():
-            for buf in batch:
-                buf.destroy()
-        for batch in getattr(self, '_tierc_batches', {}).values():
-            for buf in batch:
-                buf.destroy()
-        for buf in getattr(self, '_forwards', {}).values():
-            buf.destroy()
-        self._batches.clear()
-        self._hier.clear()
-        if hasattr(self, '_full_batches'):
-            self._full_batches.clear()
-        if hasattr(self, '_tierc_batches'):
-            self._tierc_batches.clear()
-        if hasattr(self, '_forwards'):
-            self._forwards.clear()
+        for table in self._record_tables().values():
+            for record in table.values():
+                for buf in self._record_buffers(record):
+                    buf.destroy()
+            table.clear()
         if getattr(self, '_persistent_scratch', None) is not None:
             self._persistent_scratch.destroy()
             self._persistent_scratch = None
