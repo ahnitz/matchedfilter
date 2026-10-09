@@ -1417,8 +1417,11 @@ class CorrelationFilter(MatchedFilter):
     _cpu_max_n = 1 << 22
     _max_auto_output_bytes = 512 * 1024 * 1024
 
-    def _continuous_gpu(self, ser, starts, t0, nt, out):
-        """Forward-transform bounded block batches into continuous GPU output."""
+    def _continuous_gpu(self, ser, starts, t0, nt, out, defer=False):
+        """Forward-transform bounded block batches into continuous GPU output.
+
+        ``defer``: leave the last batch in flight (a backend with zero_columns finishes it
+        in zero_columns_done), so the caller's zeroing overlaps the device's work."""
         from ._shared import shared_buffer
         if ser.size > np.iinfo(np.uint32).max or nt * ser.size > np.iinfo(np.uint32).max:
             raise ValueError("GPU series exceeds the 32-bit sample address range")
@@ -1438,6 +1441,13 @@ class CorrelationFilter(MatchedFilter):
             self._continuous_workspace = work
         _, staging, spec, offsets = work
         source = ser if shared_buffer(ser, self._gpu) is not None else staging
+        if source is staging and defer:
+            # Unified memory: read the caller's series in place; the context keeps the
+            # view until zero_columns_done has waited for the work that reads it.
+            owner = getattr(self._gpu, 'host_view', lambda a: None)(ser)
+            if owner is not None:
+                self._gpu._keep_until_done.append(owner)
+                source = ser
         if source is staging:
             source[:] = ser
         lo, hi = self.valid
@@ -1447,10 +1457,11 @@ class CorrelationFilter(MatchedFilter):
             offsets[:count] = np.minimum(starts[b0:b1], ser.size)
             self._gpu.forward(self.n, source, offsets[:count], spec[:count], defer=True)
             try:
+                kw = dict(async_submit=True) if (defer and b1 == starts.size) else {}
                 self._gpu.correlate_continuous(
                     self.n, spec[:count], self._gtmpl[t0:t0 + nt],
                     offsets[:count], out, lo, hi,
-                    upload_data=True, upload_tmpl=self._tdirty)
+                    upload_data=True, upload_tmpl=self._tdirty, **kw)
             finally:
                 self._gpu.cancel_forward()
             self._tdirty = False
