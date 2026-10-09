@@ -197,3 +197,33 @@ def write_input(buffer, array):
         buffer.write(array)
     else:
         buffer.write(np.ascontiguousarray(array, np.complex64))
+
+
+def pack_half2(a):
+    """complex64 -> one uint32 per value, (real, imag) as fp16 with real in the low half.
+
+    The GPU coarse stages are bandwidth bound, so their two big inputs ship at half width,
+    packed into uint32 so no 16-bit storage extension/capability is needed. Shared by the
+    Vulkan, CUDA and Metal backends (bit-identical across them)."""
+    a = np.ascontiguousarray(a, np.complex64)
+    if np.little_endian:
+        return a.view(np.float32).astype(np.float16).view(np.uint32)
+    re = a.real.astype(np.float16).view(np.uint16).astype(np.uint32)
+    im = a.imag.astype(np.float16).view(np.uint16).astype(np.uint32)
+    return np.ascontiguousarray(re | (im << 16), np.uint32)
+
+
+def sparse_from_dense(idx, val):
+    """A dense (idx, val) peak result as a _SparsePeaks (entries with idx >= 0)."""
+    from . import _SparsePeaks
+    flat = np.flatnonzero(idx >= 0)
+    return _SparsePeaks(idx.shape, flat, idx.reshape(-1)[flat], val.reshape(-1)[flat])
+
+
+def sparsified(res, sparse):
+    """A dense (idx, val) result -- or a pending one -- as a _SparsePeaks when asked."""
+    if not sparse:
+        return res
+    if callable(res):
+        return lambda: sparse_from_dense(*res())
+    return sparse_from_dense(*res)
