@@ -969,3 +969,51 @@ def test_gpu_follow_up_batch_matches_direct_calls(monkeypatch):
     if bank._groups[0].plan._gpu is not None and hasattr(bank._groups[0].plan._gpu, "peaks_items"):
         assert used, "the batched follow-up path was not taken"
         assert len(used) <= len(bank._groups), "one item submission per template group"
+
+
+def test_gpu_workspace_growth_settles_calls_in_flight(monkeypatch):
+    """A deferred call whose plan must grow its spectra pools first collects the plan's calls
+    still in flight: their forwards write the old pools, and freeing those under queued (or
+    captured, unsubmitted) work was a GPU write to freed pages -- an amdgpu page fault and
+    VK_ERROR_DEVICE_LOST in about one ladder run in five. The fault itself is intermittent,
+    so this checks the invariant: nothing in flight on the plan when the pools are replaced."""
+    from conftest import usable_gpu
+    monkeypatch.setenv("MF_AUTOTUNE", "0")
+    dev = usable_gpu()
+    if dev is None:
+        pytest.skip("no usable GPU")
+    rng = np.random.default_rng(71)
+    counts = list(rng.integers(200, 400, 16))
+    taps, w, df = _whitened_inspiral_bank(rng, counts)
+    bank = TimeDomainFilterBank(taps, tap_counts=counts, engine='hier', threshold=5.0,
+                                false_dismissal=1e-3, device=dev, fft_lengths=[2048], binsize=2048)
+    bank.set_reference(w, delta_f=df)
+    S = 1 << 18
+    rows = bank.empty_shared((2, S))
+    for i in range(2):
+        X = np.fft.fft(rng.standard_normal(S))
+        X[S // 2:] = 0
+        rows[i] = (np.fft.ifft(X) * 2).astype(np.complex64)
+    plans = [g.plan for g in bank._groups]
+    if not all(getattr(p, "_gpu", None) is not None for p in plans):
+        pytest.skip("groups not on the GPU")
+    replaced = []
+    for p in plans:
+        gpu = p._gpu
+        orig = gpu.empty_shared
+
+        def spy(shape, *a, _p=p, _orig=orig, **k):
+            if isinstance(shape, tuple) and len(shape) == 2 and shape[1] == _p.n:
+                replaced.append(dict(_p.__dict__.get("_slot_owner") or {}))
+            return _orig(shape, *a, **k)
+        monkeypatch.setattr(gpu, "empty_shared", spy)
+    # A short window first, then the whole series: the second call needs bigger pools.
+    jobs = [(bank, rows[0], dict(windows=slice(4096, 4096 + 8 * 2048))),
+            (bank, rows[1], dict(windows=slice(0, S)))]
+    many = TimeDomainFilterBank.filter_series_many(jobs)
+    direct = [b.filter_series(x, **kw) for b, x, kw in jobs]
+    for r1, r2 in zip(direct, many):
+        for f in r1._fields:
+            np.testing.assert_array_equal(getattr(r1, f), getattr(r2, f))
+    assert replaced, "the pools never grew; the test does not exercise the growth"
+    assert all(not owners for owners in replaced), "pools replaced under calls in flight"

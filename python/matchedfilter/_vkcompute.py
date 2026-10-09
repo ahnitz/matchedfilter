@@ -10,6 +10,7 @@ Scope is deliberately compute-only.  No swapchain, no images, no graphics
 pipeline, one queue, one descriptor set.
 """
 import ctypes
+import itertools
 import os
 from collections import OrderedDict
 import pathlib
@@ -295,6 +296,21 @@ def _check(rc, what):
         raise VulkanError("%s failed with VkResult %d" % (what, rc))
 
 
+def _sparse_from_dense(idx, val):
+    from . import _SparsePeaks
+    flat = np.flatnonzero(idx >= 0)
+    return _SparsePeaks(idx.shape, flat, idx.reshape(-1)[flat], val.reshape(-1)[flat])
+
+
+def _sparsified(res, sparse):
+    """A dense (idx, val) result -- or a readback giving one -- as a _SparsePeaks."""
+    if not sparse:
+        return res
+    if callable(res):
+        return lambda: _sparse_from_dense(*res())
+    return _sparse_from_dense(*res)
+
+
 class _Buffer:
     """A storage buffer plus its memory, mapped for the lifetime of the object.
 
@@ -377,6 +393,26 @@ class _CaptureVK:
 #: dispatches of a phase are independent across recordings and overlap on the device.
 _FUSED_PHASES = ("forward", "fill", "pack", "coarse0", "compact0", "coarse1", "compact1", "refine")
 
+#: A unique number per captured recording. Fused recordings are cached by their constituents,
+#: and a command-buffer handle is no identity: once a recording is evicted the driver hands
+#: the same handle value to a new one, and a cache keyed on handles resubmitted a fused buffer
+#: whose commands still named the evicted recording's freed descriptor sets and buffers -- a
+#: GPU write to freed pages (amdgpu page fault, VK_ERROR_DEVICE_LOST) in about a third of
+#: ladder runs.
+_RECORDING_SERIAL = itertools.count(1)
+
+
+def _fused_key(items):
+    """Cache key of a fused batch: per context, its recordings' serials (see above)."""
+    return tuple((id(ctx), tuple(ctx._phases[h]["_serial"] for h in cmds)) for ctx, cmds in items)
+
+
+def _fused_valid(ctx, cmds, serials):
+    """Every recording of cmds is still the one the serials name."""
+    phases = getattr(ctx, "_phases", {})
+    return (ctx is not None and ctx.device is not None and len(cmds) == len(serials)
+            and all(phases.get(h, {}).get("_serial") == k for h, k in zip(cmds, serials)))
+
 
 class _FusedBatch:
     """Submissions collected across contexts on one device, recorded and submitted together."""
@@ -409,13 +445,14 @@ class _FusedBatch:
         dev, vk = self.dev, self.dev.vk
         # The same jobs recur every segment: reuse their fused recording while every
         # constituent recording is still cached (eviction drops its phases).
-        key = tuple((id(ctx), tuple(cmds)) for ctx, cmds in self.items)
+        key = _fused_key(self.items)
         cache = dev.__dict__.setdefault("fused_cache", OrderedDict())
         hit = cache.get(key)
         if dev.trace is not None:
             dev.trace.append(key)
-        if hit is not None and all(h in getattr(ctx, "_phases", {}) and ctx.device is not None
-                                   for ctx, cmds in self.items for h in cmds):
+        if hit is not None:
+            # Serials are never reused, so a hit IS these recordings; they are live (add()
+            # accepts only registered recordings, and eviction flushes the batch first).
             cache.move_to_end(key)
             self._submit_fused(hit[0])
             return
@@ -458,9 +495,9 @@ class _FusedBatch:
                 prof._stamp(cmd, "fused " + phase)
         _check(vk.vkEndCommandBuffer(cmd), "end fused")
         self.prof = prof
-        cache[key] = (cmd,)
+        cache[key] = (cmd, [list(cmds) for _, cmds in self.items])
         while len(cache) > int(os.environ.get("MF_GPU_FUSE_CACHE", "64")):
-            _, (old_cmd,) = cache.popitem(last=False)
+            _, (old_cmd, _) = cache.popitem(last=False)
             self._free(old_cmd)
         self._submit_fused(cmd)
 
@@ -531,10 +568,8 @@ def replay_fused(dev, keys):
             return False
         # Every constituent recording must still exist: eviction frees its descriptor sets
         # and buffers, and replaying a recording built on them faults the device.
-        for ctx_id, handles in key:
-            ctx = _CONTEXTS_BY_ID.get(ctx_id)
-            if ctx is None or ctx.device is None or any(h not in getattr(ctx, "_phases", {})
-                                                        for h in handles):
+        for (ctx_id, serials), cmds in zip(key, hit[1]):
+            if not _fused_valid(_CONTEXTS_BY_ID.get(ctx_id), cmds, serials):
                 if os.environ.get("MF_REPLAY_DEBUG"):
                     print("replay invalid: constituent recording gone", flush=True)
                 return False
@@ -701,9 +736,9 @@ class Context(InputUploads):
     #: Async submission with per-slot fences: the series loop keeps several
     #: batches in flight. A declared capability, not a signature probe.
     supports_async = True
-    #: hier_peaks returns a SparsePeaks of its survivor list when sparse_peaks is set.
-    supports_sparse_peaks = True
-    sparse_peaks = False
+    #: peaks, peaks_grouped and hier_peaks take sparse=True and return a _SparsePeaks;
+    #: hier_peaks reads only its refined pairs (the survivor list) back.
+    supports_sparse = True
 
     def __init__(self, index=0):
         vk, err = _vulkan._load()
@@ -937,7 +972,7 @@ class Context(InputUploads):
                    binsize=None, threshold=0.0, window=None,
                    upload_data=True, upload_tmpl=True,
                    cascade_band=None, ct1=None, raw_thr1=None,
-                   slot=None, async_submit=False):
+                   slot=None, async_submit=False, sparse=False):
         """The whole hierarchical filter in ONE command buffer.
 
         Coarse correlation, survivor compaction, then listed refinement.
@@ -964,25 +999,18 @@ class Context(InputUploads):
         if nbins > _MAX_BINS:
             span = _MAX_BINS * binsize
             pi, pv = [], []
-            sparse, self.sparse_peaks = getattr(self, "sparse_peaks", False), False
-            try:
-                for a in range(lo, hi, span):
-                    bnd = min(a + span, hi)
-                    i2, v2 = self.hier_peaks(n, band, data, tmpl, ct0, raw_thr, binsize=binsize,
-                                             threshold=threshold, window=(a, bnd),
-                                             upload_data=upload_data,
-                                             upload_tmpl=upload_tmpl,
-                                             cascade_band=cascade_band, ct1=ct1, raw_thr1=raw_thr1,
-                                             slot=slot, async_submit=False)
-                    pi.append(i2); pv.append(v2)
-                    upload_data = upload_tmpl = False
-            finally:
-                self.sparse_peaks = sparse
+            for a in range(lo, hi, span):
+                bnd = min(a + span, hi)
+                i2, v2 = self.hier_peaks(n, band, data, tmpl, ct0, raw_thr, binsize=binsize,
+                                         threshold=threshold, window=(a, bnd),
+                                         upload_data=upload_data,
+                                         upload_tmpl=upload_tmpl,
+                                         cascade_band=cascade_band, ct1=ct1, raw_thr1=raw_thr1,
+                                         slot=slot, async_submit=False)
+                pi.append(i2); pv.append(v2)
+                upload_data = upload_tmpl = False
             idx, val = np.concatenate(pi, axis=2), np.concatenate(pv, axis=2)
-            if sparse:
-                from ._shared import SparsePeaks
-                return SparsePeaks.from_dense(idx, val)
-            return idx, val
+            return _sparse_from_dense(idx, val) if sparse else (idx, val)
         shift = (binsize.bit_length() - 1) if binsize & (binsize - 1) == 0 else -1
         t2 = float(threshold) ** 2 if threshold > 0 else 0.0
 
@@ -1042,8 +1070,6 @@ class Context(InputUploads):
                 self._submit(cmd, fence=fence, wait=False, slot=slot)
             else:
                 self._submit(cmd)
-
-            sparse = getattr(self, "sparse_peaks", False)
 
             def readback():
                 if fence is not None:
@@ -1109,8 +1135,6 @@ class Context(InputUploads):
         else:
             self._submit(cmd)
 
-        sparse = getattr(self, "sparse_peaks", False)
-
         def readback():
             if fence is not None:
                 self._wait_fence(fence)
@@ -1121,13 +1145,16 @@ class Context(InputUploads):
 
     @staticmethod
     def _read_peaks(bufs, surv_key, count, nd, nt, nbins, sparse):
-        """The refined result: dense (idx, val), or a SparsePeaks of the listed pairs."""
+        """The refined result: dense (idx, val), or a _SparsePeaks read from the refined
+        pairs alone (the survivor list): the refine writes every bin of a listed pair."""
         if sparse:
-            from ._shared import SparsePeaks
+            from . import _SparsePeaks
             rows = np.sort(bufs[surv_key].view(np.uint32, count).astype(np.int64))
-            idx = bufs["idx"].view(np.int32, nd * nt * nbins).reshape(nd * nt, nbins)[rows]
-            val = bufs["val"].view(np.complex64, nd * nt * nbins).reshape(nd * nt, nbins)[rows]
-            return SparsePeaks((nd, nt, nbins), rows, idx.astype(np.int64), val)
+            ri = bufs["idx"].view(np.int32, nd * nt * nbins).reshape(nd * nt, nbins)[rows]
+            k, b = np.nonzero(ri >= 0)
+            vals = bufs["val"].view(np.complex64, nd * nt * nbins).reshape(nd * nt, nbins)
+            return _SparsePeaks((nd, nt, nbins), rows[k] * nbins + b, ri[k, b],
+                                vals[rows[k], b])
         if count == 0:
             return (np.full((nd, nt, nbins), -1, dtype=np.int32),
                     np.zeros((nd, nt, nbins), dtype=np.complex64))
@@ -1264,7 +1291,7 @@ class Context(InputUploads):
                 # args is [groupCountX, 1, 1]; compactPairs atomically bumps
                 # [0], so the count never has to reach the host and this
                 # stays one recorded command buffer.
-                "surv":  _Buffer(self, pairs * 4, readback=True),
+                "surv":  _Buffer(self, pairs * 4),
                 "args":  _Buffer(self, 12, usage=_BUF_STORAGE | _BUF_INDIRECT | _BUF_TRANSFER_DST),
                 "idx":   _Buffer(self, nd * nt * nbins * 4, readback=True, usage=_BUF_STORAGE | _BUF_TRANSFER_DST),
                 "val":   _Buffer(self, nd * nt * nbins * 8, readback=True, usage=_BUF_STORAGE | _BUF_TRANSFER_DST),
@@ -1453,7 +1480,7 @@ class Context(InputUploads):
                 "ct1":         _Buffer(self, nt * band1 * 8),
                 "cidx1":       _Buffer(self, pairs * 4),
                 "cval1":       _Buffer(self, pairs * 8, usage=_BUF_STORAGE | _BUF_TRANSFER_DST),
-                "surv1":       _Buffer(self, pairs * 4, readback=True),
+                "surv1":       _Buffer(self, pairs * 4),
                 "args_refine": _Buffer(self, 12, usage=_BUF_STORAGE | _BUF_INDIRECT | _BUF_TRANSFER_DST),
                 "idx":         _Buffer(self, nd * nt * nbins * 4, readback=True, usage=_BUF_STORAGE | _BUF_TRANSFER_DST),
                 "val":         _Buffer(self, nd * nt * nbins * 8, readback=True, usage=_BUF_STORAGE | _BUF_TRANSFER_DST),
@@ -1836,6 +1863,7 @@ class Context(InputUploads):
                             [o for o in ops if o[0] == "vkCmdPipelineBarrier"])
         if set(phases) - set(_FUSED_PHASES) - {"start"}:
             return                                  # an unknown structure: never fused
+        phases["_serial"] = next(_RECORDING_SERIAL)
         self.__dict__.setdefault("_phases", {})[getattr(cmd, "value", cmd)] = phases
 
     _PROF_QUERIES = 8192
@@ -2039,7 +2067,12 @@ class Context(InputUploads):
         vk.vkDestroyDescriptorPool(self.device, pool, None)
 
     def peaks(self, n, data, tmpl, binsize=None, threshold=0.0, window=None,
-              upload_data=True, upload_tmpl=True, slot=None, async_submit=False):
+              upload_data=True, upload_tmpl=True, slot=None, async_submit=False, sparse=False):
+        return _sparsified(self._peaks(n, data, tmpl, binsize, threshold, window, upload_data,
+                                       upload_tmpl, slot, async_submit), sparse)
+
+    def _peaks(self, n, data, tmpl, binsize=None, threshold=0.0, window=None,
+               upload_data=True, upload_tmpl=True, slot=None, async_submit=False):
         """Peak index and complex value per (data, template, bin).
 
         Mirrors MatchedFilter.run: bins are ``ceil((end-start)/binsize)``
@@ -2301,7 +2334,13 @@ class Context(InputUploads):
         return out
 
     def peaks_grouped(self, n, data, tmpl, groups, binsize, threshold, *, upload_tmpl=True,
-                      slot=None, async_submit=False):
+                      slot=None, async_submit=False, sparse=False):
+        return _sparsified(self._peaks_grouped(n, data, tmpl, groups, binsize, threshold,
+                                               upload_tmpl=upload_tmpl, slot=slot,
+                                               async_submit=async_submit), sparse)
+
+    def _peaks_grouped(self, n, data, tmpl, groups, binsize, threshold, *, upload_tmpl=True,
+                       slot=None, async_submit=False):
         """Run distinct flat search windows in one synchronous submission.
 
         Data is a shared forward-FFT batch. Descriptor offsets select each
