@@ -370,12 +370,32 @@ def lds_bytes(n, cap):
     return ch * wg * 8
 
 
+def coarse_prelude(n, cap, ppg):
+    """Build-time inputs of the SPIR-V packed coarse kernel (see tools/coarse_layout.py):
+    the bank-conflict-free exchange padding for (band, PPG) and the fp16 twiddle table."""
+    import coarse_layout
+    xs, slot = _exchange_layout(n, ppg, cap)
+    return ("#define XSTRIDE %d\n#define XSLOT %d\n" % (xs, slot)
+            + coarse_layout.twiddle_table_source(n))
+
+
+_LAYOUTS = {}
+
+
+def _exchange_layout(n, ppg, cap):
+    import coarse_layout
+    if (n, ppg, cap) not in _LAYOUTS:
+        _LAYOUTS[(n, ppg, cap)] = coarse_layout.exchange_layout(n, ppg, cap)
+    return _LAYOUTS[(n, ppg, cap)]
+
+
 def compile_one(slangc, n, outdir, entry=ENTRY, cap=None, suffix="", coarse16=0, ppg=1, tile=1, single_bin=0):
     cap = LDS_CAP[n] if cap is None else cap
     src = outdir / ("mf_%d_%s%s.slang" % (n, entry, suffix))
     src.write_text("#define NLEN %d\n#define LDS_CAP %d\n#define COARSE16 %d\n"
                    "#define PPG %d\n#define TILE_T %d\n#define RADIX %d\n#define SINGLE_BIN %d\n"
                    % (n, cap, coarse16, ppg, tile, RADIX.get(n, 16), single_bin)
+                   + (coarse_prelude(n, cap, ppg) if coarse16 else "")
                    + KERNEL.read_text())
     name = "%s_%d%s.spv" % (STEMS[entry], n, suffix)
     spv = outdir / name

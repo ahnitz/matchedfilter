@@ -155,7 +155,22 @@ C cload(StructuredBuffer<CVal> b, uint i) { return b[i]; }
 //: that was not binding until PPG made waves available to use it. The two
 //: changes are only worth anything together.
 #if COARSE16
-static const uint STGW = CH * WG;
+//: XS: the stage's row stride in the SoA exchange (exchangeS), one row per
+//: register, one column per thread. XSLOT: the words between two pairs'
+//: regions. At the defaults (WG, CH*WG) the band-256 exchange read 16
+//: registers of one thread from one row -- stride WG = 16 words across the
+//: 16 lanes of a pair -- which lands a wave64 read on 4 of the 32 banks a
+//: half-wave sees: 8-way conflicts on every read, 9x the conflict-free LDS
+//: cost by the bank model in tools/lds_layout.py, which picks both values per
+//: (band, PPG) for the build. Padding only; the transform is unchanged.
+#ifndef XSTRIDE
+#define XSTRIDE (NLEN / RADIX)
+#endif
+static const uint XS = XSTRIDE;
+#ifndef XSLOT
+#define XSLOT (CH * XS)
+#endif
+static const uint STGW = (XSLOT > CH * XS) ? XSLOT : CH * XS;
 groupshared uint stg[STGW * PPG];
 static uint _stgBase;
 //: Pure bitcast, no conversion. C is already half2 and the slot is 32
@@ -192,6 +207,8 @@ inline uint computeWant(uint d, uint TB, uint len, uint blk, uint lane, uint per
 
 #if COARSE16
 typedef half2 H;
+//: A pair index that writes nothing: the clamped tail of a ragged tile.
+static const uint NOPAIR = 0xFFFFFFFFu;
 
 //: Complex multiply by a twiddle that is the SAME for both transforms, so
 //: wr/wi broadcast to both lanes. Four v_pk_* and nothing else.
@@ -297,6 +314,14 @@ H mag2s(H re, H im) { return re * re + im * im; }
 //: Dual exchange. Two passes over the same stage -- re then im -- so the
 //: LDS sizing is untouched. Each stgPut stores one half2, which is the
 //: same element of BOTH transforms, so one pass moves both.
+//:
+//: The source of register d is (row i, column col) of the stage, and both
+//: are AFFINE-SEPARABLE in (tid, d): i(tid,d) = i(tid,0) + i(0,d), and the
+//: same for col. So each thread works its base out once and every register
+//: reads at a compile-time offset from it -- an LDS immediate, no address
+//: arithmetic. Recomputing computeWant per register cost ~4 VALU each, 128
+//: per exchange at band 256. tools/lds_layout.py checks the separation for
+//: every band and level the build emits.
 void exchangeS(inout H re[16], inout H im[16],
                uint lgLen, uint lgSpan,
                uint TB, uint len, uint blk, uint lane, uint per, uint TB2, uint len2, uint blk2, uint lane2)
@@ -305,26 +330,26 @@ void exchangeS(inout H re[16], inout H im[16],
     [unroll] for (uint z = 0; z < R; ++z) { outr[z] = H(0.0f); outi[z] = H(0.0f); }
     uint spanMask = (1u << lgSpan) - 1u;
     uint lenMask  = (1u << lgLen) - 1u;
+    uint p0 = computeWant(0, TB, len, blk, lane, per, TB2, len2, blk2, lane2);
+    uint i0 = (p0 & lenMask) >> lgSpan;
+    uint a0 = i0 * XS + ((p0 >> lgLen) << lgSpan) + (p0 & lenMask & spanMask);
     [unroll] for (uint c = 0; c < R / CH; ++c) {
-        GroupMemoryBarrierWithGroupSync();
-        [unroll] for (uint j = 0; j < CH; ++j) stgPut(j * WG + _tid, re[c * CH + j]);
-        GroupMemoryBarrierWithGroupSync();
-        [unroll] for (uint d = 0; d < R; ++d) {
-            uint p = computeWant(d, TB, len, blk, lane, per, TB2, len2, blk2, lane2);
-            uint b = p >> lgLen, rem = p & lenMask;
-            uint i = rem >> lgSpan, ln = rem & spanMask;
-            if (i >= c * CH && i < (c + 1) * CH)
-                outr[d] = stgGet((i - c * CH) * WG + (b << lgSpan) + ln);
-        }
-        GroupMemoryBarrierWithGroupSync();
-        [unroll] for (uint j = 0; j < CH; ++j) stgPut(j * WG + _tid, im[c * CH + j]);
-        GroupMemoryBarrierWithGroupSync();
-        [unroll] for (uint d = 0; d < R; ++d) {
-            uint p = computeWant(d, TB, len, blk, lane, per, TB2, len2, blk2, lane2);
-            uint b = p >> lgLen, rem = p & lenMask;
-            uint i = rem >> lgSpan, ln = rem & spanMask;
-            if (i >= c * CH && i < (c + 1) * CH)
-                outi[d] = stgGet((i - c * CH) * WG + (b << lgSpan) + ln);
+        [ForceUnroll] for (uint comp = 0; comp < 2; ++comp) {
+            GroupMemoryBarrierWithGroupSync();
+            [unroll] for (uint j = 0; j < CH; ++j)
+                stgPut(j * XS + _tid, comp == 0 ? re[c * CH + j] : im[c * CH + j]);
+            GroupMemoryBarrierWithGroupSync();
+            [unroll] for (uint d = 0; d < R; ++d) {
+                // tid = 0 terms: blk = lane = blk2 = lane2 = 0, all constants
+                uint pz = computeWant(d, TB, len, 0u, 0u, per, TB2, len2, 0u, 0u);
+                uint iz = (pz & lenMask) >> lgSpan;
+                uint az = iz * XS + ((pz >> lgLen) << lgSpan) + (pz & lenMask & spanMask);
+                uint i = i0 + iz;
+                if (CH == R || (i >= c * CH && i < (c + 1) * CH)) {
+                    H v = stgGet(a0 + az - c * CH * XS);
+                    if (comp == 0) outr[d] = v; else outi[d] = v;
+                }
+            }
         }
     }
     [unroll] for (uint d = 0; d < R; ++d) { re[d] = outr[d]; im[d] = outi[d]; }
@@ -923,15 +948,90 @@ void peakLane(uint pair, uint tid, uint lane, H magv[16], H re[16], H im[16],
 #endif
     GroupMemoryBarrierWithGroupSync();
     [unroll] for (uint i = 0; i < R; ++i) {
-        if (stg[_stgBase+1] == tid*R+i) {
+        if (pair != NOPAIR && stg[_stgBase+1] == tid*R+i) {
             peakIdx[pair] = int(slotToIndex(tid*R+i));
             peakVal[pair] = float2(float(lane == 0u ? re[i].x : re[i].y),
                                    float(lane == 0u ? im[i].x : im[i].y));
         }
     }
-    if (tid == 0 && stg[_stgBase+1] == 0xffffffffu) {
+    if (pair != NOPAIR && tid == 0 && stg[_stgBase+1] == 0xffffffffu) {
         peakIdx[pair] = -1;
         peakVal[pair] = float2(0.0f, 0.0f);
+    }
+}
+
+//: The same election as two peakLane calls -- the largest fp16 |v|^2 in the
+//: window, ties to the LOWEST slot, its (re, im) reported -- for a pair whose
+//: WG threads sit inside one subgroup, without LDS atomics or a dependent LDS
+//: round trip per register.
+//:
+//: peakLane re-read the elected maximum from LDS inside every register's
+//: comparison, so each of its 32 iterations (16 registers x 2 lanes) waited
+//: out an LDS latency behind a branch: 30% of the band-256 coarse kernel,
+//: measured by deleting it. Here the election is a max over 32-bit KEYS,
+//:
+//:     key = (fp16 |v|^2 bits << 16) | (0xFFFF - slot),
+//:
+//: so the larger magnitude wins and, among equal magnitudes, the lower slot.
+//: Non-negative fp16 values order like their bit patterns, and like the
+//: float32 bits peakLane compared, so the elected element is the same one.
+//: The cross-thread max is a shuffle-xor butterfly over the pair's WG lanes,
+//: which ACO emits as DPP max instructions (no LDS). The elected register is
+//: then fetched through the stage by one lane.
+//:
+//: The window test uses that slotToIndex is a bit permutation: the register
+//: index and tid*R occupy disjoint bits, so idx = slotToIndex(tid*R) |
+//: slotToIndex(i), the second term a compile-time constant.
+void peakTwoWave(uint pairA, uint pairB, uint tid, H re[16], H im[16],
+                 RWStructuredBuffer<int> peakIdx, RWStructuredBuffer<float2> peakVal,
+                 uint winStart, uint winEnd, uint thrBits)
+{
+    uint u0 = slotToIndex(tid * R) - winStart;      // idx - winStart, wrapping
+    uint span = winEnd - winStart;
+    uint kA = 0u, kB = 0u;
+    [unroll] for (uint i = 0; i < R; ++i) {
+        bool live = (u0 + slotToIndex(i)) < span;  // winStart <= idx < winEnd
+        uint m = live ? bit_cast<uint>(mag2s(re[i], im[i])) : 0u;
+        kA = max(kA, (m << 16) | (15u - i));
+        kB = max(kB, (m & 0xFFFF0000u) | (15u - i));
+    }
+    // 0xFFFF - (tid*R + i) == ((0xFFF - tid) << 4) | (15 - i), R == 16
+    kA |= (0xFFFu - tid) << 4;
+    kB |= (0xFFFu - tid) << 4;
+    [ForceUnroll] for (uint s = 1; s < WG; s <<= 1) {
+        kA = max(kA, WaveReadLaneAt(kA, WaveGetLaneIndex() ^ s));
+        kB = max(kB, WaveReadLaneAt(kB, WaveGetLaneIndex() ^ s));
+    }
+    uint slotA = 0xFFFFu - (kA & 0xFFFFu), slotB = 0xFFFFu - (kB & 0xFFFFu);
+    bool hitA = asuint(f16tof32(kA >> 16)) > thrBits;
+    bool hitB = asuint(f16tof32(kB >> 16)) > thrBits;
+
+    // Fetch the elected registers through the stage, one component at a
+    // time and CH registers per chunk -- the stage holds CH*WG values.
+    uint wA = slotA >> 4, iA = slotA & 15u, wB = slotB >> 4, iB = slotB & 15u;
+    float vA[2], vB[2];
+    vA[0] = vA[1] = vB[0] = vB[1] = 0.0f;
+    [ForceUnroll] for (uint comp = 0; comp < 2; ++comp) {
+        [ForceUnroll] for (uint c = 0; c < R / CH; ++c) {
+            GroupMemoryBarrierWithGroupSync();
+            [unroll] for (uint j = 0; j < CH; ++j)
+                stg[_stgBase + j * XS + tid] = bit_cast<uint>(comp == 0 ? re[c * CH + j] : im[c * CH + j]);
+            GroupMemoryBarrierWithGroupSync();
+            if (tid == 0) {
+                if (iA >= c * CH && iA < (c + 1) * CH)
+                    vA[comp] = f16tof32(stg[_stgBase + (iA - c * CH) * XS + wA]);
+                if (iB >= c * CH && iB < (c + 1) * CH)
+                    vB[comp] = f16tof32(stg[_stgBase + (iB - c * CH) * XS + wB] >> 16);
+            }
+        }
+    }
+    if (tid == 0 && pairA != NOPAIR) {
+        peakIdx[pairA] = hitA ? int(slotToIndex(slotA)) : -1;
+        peakVal[pairA] = hitA ? float2(vA[0], vA[1]) : float2(0.0f, 0.0f);
+    }
+    if (tid == 0 && pairB != NOPAIR) {
+        peakIdx[pairB] = hitB ? int(slotToIndex(slotB)) : -1;
+        peakVal[pairB] = hitB ? float2(vB[0], vB[1]) : float2(0.0f, 0.0f);
     }
 }
 
@@ -964,6 +1064,19 @@ void filterTwo(uint pairA, uint pairB, uint tA, uint tB, uint tid,
         uint lane = tid & (TB - 1);
 
         dft16s(re, im);
+#if defined(COARSE_TWT)
+        {
+            // W_len^(lane*k2) from the build's table, correctly rounded to
+            // half: one 64-byte row per lane, so four 128-bit loads at
+            // immediate offsets replace a cos/sin and an fp32 recurrence
+            // with two conversions per register (~6 VALU each, ~96 a level).
+            const uint toff = (lvl == 0) ? 0u : ((lvl == 1) ? WG * R : WG * R + (WG >> LGR) * R);
+            [unroll] for (uint k2 = 0; k2 < R; ++k2) {
+                H w = bit_cast<H>(COARSE_TWT[toff + lane * R + k2]);
+                cmulw(re[k2], im[k2], w.x, w.y);
+            }
+        }
+#else
         {
             float a1 = 2.0f * PI * float(lane) / float(len);
             float2 tw = mfTwiddle(a1);
@@ -976,6 +1089,7 @@ void filterTwo(uint pairA, uint pairB, uint tA, uint tB, uint tid,
                 cr = nr;
             }
         }
+#endif
         const uint per  = R / max(TB, 1u);
         const uint TB2  = max(TB >> LGR, 1u), len2 = TB;
         uint blk2 = tid / TB2, lane2 = tid % TB2;
@@ -988,15 +1102,26 @@ void filterTwo(uint pairA, uint pairB, uint tA, uint tB, uint tid,
     // |v|^2 masked by the window, both lanes at once. `live` depends on the
     // element index, which is shared by the two transforms, so the select
     // is packed and no lane is extracted here.
-    H magv[16];
-    [unroll] for (uint i = 0; i < R; ++i) {
-        uint idx = slotToIndex(tid * R + i);
-        bool live = (idx >= winStart && idx < winEnd);
-        magv[i] = live ? mag2s(re[i], im[i]) : H(0.0f);
+#if defined(MF_VULKAN)
+    // mfSubgroupSize is a specialization constant: one branch survives.
+    // Vulkan only for now -- the Metal and CUDA builds keep peakLane until
+    // they are measured on their own hardware.
+    const bool wavePeak = WG <= mfSubgroupSize;
+#else
+    const bool wavePeak = false;
+#endif
+    if (wavePeak) {
+        peakTwoWave(pairA, pairB, tid, re, im, peakIdx, peakVal, winStart, winEnd, thrBits);
+    } else {
+        H magv[16];
+        [unroll] for (uint i = 0; i < R; ++i) {
+            uint idx = slotToIndex(tid * R + i);
+            bool live = (idx >= winStart && idx < winEnd);
+            magv[i] = live ? mag2s(re[i], im[i]) : H(0.0f);
+        }
+        peakLane(pairA, tid, 0u, magv, re, im, peakIdx, peakVal, winStart, winEnd, thrBits);
+        peakLane(pairB, tid, 1u, magv, re, im, peakIdx, peakVal, winStart, winEnd, thrBits);
     }
-
-    peakLane(pairA, tid, 0u, magv, re, im, peakIdx, peakVal, winStart, winEnd, thrBits);
-    peakLane(pairB, tid, 1u, magv, re, im, peakIdx, peakVal, winStart, winEnd, thrBits);
 }
 #endif
 
@@ -1016,8 +1141,27 @@ void filterPair(uint pair, uint tid,
     // Consecutive pairs share a data row because d = pair/ntmpl, provided
     // the run does not straddle a row end; the host drops to TILE_T=1 when
     // the pair count is not a multiple of it.
+#if defined(MF_VULKAN) && COARSE16 && (TILE_T % 2) == 0
+    // RAGGED TILES. Each group slot takes TILE_T consecutive templates of ONE
+    // data row, the row's last tile clamped to its last template; the host
+    // passes the row count in `binsize` (unused by the one-bin coarse role)
+    // and dispatches ceil(rows * ceil(ntmpl/TILE_T) / PPG) groups. A slot or
+    // template past the end recomputes a valid one and writes nothing.
+    //
+    // This is what lets an ODD template count keep the two-pairs-per-lane
+    // kernel. The exact-tile rule (ntmpl % TILE_T == 0) sent 52% of a
+    // realistic fine segment's coarse pairs to the TILE_T=1 build, which
+    // packs nothing into the second half of each register.
+    uint tiles = (ntmpl + TILE_T - 1) / TILE_T;
+    uint slots = binsize * tiles;
+    bool slotOk = pair < slots;
+    uint q = slotOk ? pair : slots - 1u;
+    uint d = q / tiles, t0 = (q - d * tiles) * TILE_T;
+    uint p0 = d * ntmpl + t0;
+#else
     uint p0 = pair * TILE_T;
     uint d = p0 / ntmpl, t0 = p0 % ntmpl;
+#endif
     C dreg[RADIX];
 #if COARSE16
     [unroll] for (uint n2 = 0; n2 < R; ++n2)
@@ -1027,9 +1171,18 @@ void filterPair(uint pair, uint tid,
 #endif
 #if COARSE16 && (TILE_T % 2) == 0
     // Two at a time, in split/SoA form.
+#if defined(MF_VULKAN)
+    [unroll] for (uint k = 0; k < TILE_T; k += 2) {
+        bool okA = slotOk && t0 + k < ntmpl, okB = slotOk && t0 + k + 1 < ntmpl;
+        filterTwo(okA ? p0 + k : NOPAIR, okB ? p0 + k + 1 : NOPAIR,
+                  min(t0 + k, ntmpl - 1u), min(t0 + k + 1, ntmpl - 1u), tid, dreg, tmpl,
+                  peakIdx, peakVal, winStart, winEnd, thrBits);
+    }
+#else
     [unroll] for (uint k = 0; k < TILE_T; k += 2)
         filterTwo(p0 + k, p0 + k + 1, t0 + k, t0 + k + 1, tid, dreg, tmpl,
                   peakIdx, peakVal, winStart, winEnd, thrBits);
+#endif
 #else
     [unroll] for (uint k = 0; k < TILE_T; ++k)
         filterOne(p0 + k, d, t0 + k, tid, dreg, data, tmpl, peakIdx, peakVal,
