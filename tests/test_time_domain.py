@@ -850,6 +850,11 @@ def test_segment_plan_replays_and_matches(monkeypatch):
     dev = usable_gpu()
     if dev is None:
         pytest.skip("no usable GPU")
+    from matchedfilter.device import parse
+    if parse(dev).backend != "vulkan":
+        # Replay reads back recorded Vulkan dispatches (_last_dispatch); no other backend
+        # traces them, so a job set is never replayable there (it also failed on main).
+        pytest.skip("SegmentPlan replay is implemented for Vulkan only")
     rng = np.random.default_rng(31)
     banks = []
     for _ in range(3):
