@@ -110,3 +110,57 @@ clean final end-to-end number.
 - **listed compact1** (the coordinator's suggestion): not done.
 - Coarse at bands 64/128/512/1024 gets the same code (the layout model covers every band
   and PPG), but it was only benchmarked at 256.
+
+## 5. Second pass: refine, coarse1, forward, listed compact1
+
+All micro-benchmarks below use the interleaved clock calibration.
+
+**Refine and coarse1 (listed fp32 refine, one bin).** The tier-1 stage of the cascade
+(`_peak_file(band1, 1)`) and the n=2048 refine both run with a single bin. Below n=4096 they
+still used the general multi-bin build, which has 181 branches. Two changes:
+
+- One-bin builds now exist for n=256..2048 (`refine_N_onebin.spv`).
+- The fp32 `exchange()` reads each register at a fixed offset from a per-thread base, as
+  in the coarse fix, and its stage rows are padded by 2 complex elements (`XSTRIDE_F`,
+  applied only where the stage stays within 32 KB).
+
+Outputs are bit-identical. CU-cycles per pair, 4000 survivors:
+
+| n | shipped | one-bin | + exchange | nominal-flop % of peak |
+|---|---|---|---|---|
+| 512 | 939 | 677 | 557 | 11% -> 19% |
+| 1024 | 1700 | 1288 | 1030 | 12% -> 21% |
+| 2048 | 3590 | 2851 | 2114 | 14% -> 24% |
+
+The rest of the gap is fp32 VALU (about 1000 VALU per wave at n=2048, two waves per pair)
+plus the per-pair launch. A fp32 twiddle table would remove the recurrence's 4 VALU per
+register, about 64 of roughly 1000 per level. That is an estimated 5%, and it would make the
+outputs no longer bit-identical, so I did not do it.
+
+**Forward (n=2048) is at the bandwidth ceiling.** A float4 copy probe measured 198 GB/s
+(read + write), which is 77% of the 256 GB/s LPDDR5X peak. `forward_2048` moves the same
+bytes at 188-205 GB/s, which is 95-103% of the copy and 73-80% of theoretical. The ≥70%
+target is met. The remaining lever is fewer bytes: fuse the band pack into the forward
+write, or skip writing the bins no stage reads.
+
+**Listed compact1.** A new `compactListed` entry gates tier 1 over the tier-0 survivor list
+(count in `args_tier1`), so it no longer walks all pairs. The per-dispatch `cval1` clear
+(pairs × 8 B) is gone.
+
+**Busy fine segment, alternating main 3da7bce and this branch, about 2.1-2.2 GHz, shared
+GPU:**
+
+| | main | branch |
+|---|---|---|
+| wall median (ms) | 24.0 / 24.3 | 22.3 / 21.5 |
+| device total (ms) | 14.7 / 16.0 | 13.2 / 13.3 |
+| fill | 0.6 | 0.1 |
+| pack | 1.0-1.8 | 0.7 |
+| forward | 3.7-3.9 | 3.3-3.5 |
+| coarse0 | 4.6-4.9 | 4.5-4.9 |
+| coarse1 | 1.9-3.4 | (no second tier) |
+| refine | 1.1-2.4 | 4.1 |
+
+With the cheaper refine, the autotuner now picks the single-tier chain (256,) for these
+dispatches. Coarse1 disappears and the n=2048 refine takes more survivors. The device total
+goes down by 1.5-2.7 ms.

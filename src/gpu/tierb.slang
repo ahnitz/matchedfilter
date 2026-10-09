@@ -1327,6 +1327,36 @@ void compactPairs(uint3 gid: SV_DispatchThreadID,
 #endif
 }
 
+//: Compaction over a LIST: the second tier's gate. Tier 1 ran only on the
+//: pairs in `list` (the tier-0 survivors, count in listArgs[0]), so only those
+//: pairs have a tier-1 value. Walking every pair, as compactPairs does, read
+//: the whole cval1 array and needed it pre-cleared (pairs x 8 B of fill per
+//: dispatch) so unvisited pairs read as zero. This visits the list alone.
+//: The host dispatches ceil(pairs/256) groups -- an upper bound on the list
+//: -- and lanes past the count exit; that costs launches, not bandwidth.
+[shader("compute")][numthreads(256,1,1)]
+void compactListed(uint3 gid: SV_DispatchThreadID,
+                   StructuredBuffer<float2> coarse,
+                   RWStructuredBuffer<uint> survivors,
+                   RWStructuredBuffer<uint> args,
+                   StructuredBuffer<uint> list,
+                   StructuredBuffer<uint> listArgs,
+                   uniform uint pairs, uniform float thr, uniform uint nbins)
+{
+    uint k = gid.x;
+    uint count = listArgs[0];
+    uint pair = (k < count) ? list[k] : 0u;
+    bool active = (k < count) && (length(coarse[pair]) >= thr);
+    uint waveCount = WaveActiveCountBits(active);
+    uint waveOffset = WavePrefixCountBits(active);
+    uint baseSlot = 0;
+    if (WaveIsFirstLane() && waveCount > 0)
+        InterlockedAdd(args[0], waveCount, baseSlot);
+    baseSlot = WaveReadLaneFirst(baseSlot);
+    if (active)
+        survivors[baseSlot + waveOffset] = pair;
+}
+
 //: The refine, over a compacted list. Uses the same filtering body, except that
 //: the pair comes from the list rather than from the group id, and there is
 //: no gate left to apply -- being in the list IS having passed it.
