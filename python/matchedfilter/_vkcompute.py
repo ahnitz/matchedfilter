@@ -2674,12 +2674,7 @@ class Context(InputUploads):
             uploads = (True, True, *uploads[2:])
         self._cache_touch('full', key)
         bdata, btmpl, bout, cmd = batch
-        if uploads[0]:
-            write_input(bdata, data)
-            self._uploaded['data'][key] = uploads[2]
-        if uploads[1]:
-            write_input(btmpl, tmpl)
-            self._uploaded['tmpl'][key] = uploads[3]
+        self._write_uploads(key, uploads, bdata, data, btmpl, tmpl)
         self._submit(cmd)
         if shared_buffer(out, self) is None:
             bout.read_into(out)
@@ -2739,12 +2734,7 @@ class Context(InputUploads):
             uploads = (True, True, *uploads[2:])
         self._cache_touch('tierc', key)
         bd, bt, scratch, bo, cmd = batch
-        if uploads[0]:
-            write_input(bd, data)
-            self._uploaded['data'][key] = uploads[2]
-        if uploads[1]:
-            write_input(bt, tmpl)
-            self._uploaded['tmpl'][key] = uploads[3]
+        self._write_uploads(key, uploads, bd, data, bt, tmpl)
         self._submit(cmd)
         if shared_buffer(out, self) is None:
             bo.read_into(out)
@@ -2906,12 +2896,7 @@ class Context(InputUploads):
             uploads = (True, True, *uploads[2:])
         self._cache_touch('tierc' if geometry else 'full', key)
         bd, bt = batch[:2]
-        if uploads[0]:
-            write_input(bd, data)
-            self._uploaded['data'][key] = uploads[2]
-        if uploads[1]:
-            write_input(bt, tmpl)
-            self._uploaded['tmpl'][key] = uploads[3]
+        self._write_uploads(key, uploads, bd, data, bt, tmpl)
         if async_submit:
             self._submit_pending(batch[-1])
         else:
