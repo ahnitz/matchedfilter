@@ -166,8 +166,88 @@ def run_device(device, tops, args, seed):
         mid_out = {ifo: mid.empty_shared((len(top["mid_counts"]), S)) for ifo in ("H1", "L1")}
         seg_plan = SegmentPlan()
         first.add("prep", time.perf_counter() - t0)
+        def finish(seg, ser, mids, fine_out, tm):
+            """A segment's fine results: record them and run its follow-ups."""
+            fine_res = iter(fine_out)
+            asym_jobs, asym_keys = [], []
+            for row, (m, b) in enumerate(fine):
+                trig = {}
+                for ifo in ser:
+                    r = next(fine_res)
+                    trig[ifo] = r
+                    results[(top["top"], seg, m, ifo, "fine")] = r
+                    counts["fine_triggers"] += len(r.snr)
+                for ifo, other in (("H1", "L1"), ("L1", "H1")):
+                    r = trig[ifo]
+                    keep = np.flatnonzero(np.abs(r.snr) >= args.asym_threshold)
+                    keep = keep[np.argsort(-np.abs(r.snr[keep]), kind="stable")]
+                    used = set()
+                    for i in keep:
+                        sec = int(r.sample_indices[i] // int(RATE))
+                        if sec in used:
+                            continue
+                        used.add(sec)
+                        c0 = int(r.sample_indices[i])
+                        asym_jobs.append((b, mids[other][row],
+                                          dict(windows=slice(max(0, c0 - half), min(S, c0 + half)),
+                                               binsize=bs, threshold=0.0,
+                                               template_index=int(r.template_indices[i]))))
+                        asym_keys.append((top["top"], seg, m, other, "asym", c0, int(r.template_indices[i])))
+            # The segment's follow-ups, batched like the fine stage (--no-batch: one call each).
+            t = time.perf_counter()
+            if args.no_batch:
+                asym_out = [b.filter_series(x, **kw) for b, x, kw in asym_jobs]
+            else:
+                asym_out = TimeDomainFilterBank.filter_series_many(asym_jobs)
+            if asym_jobs:
+                tm.add("asym", time.perf_counter() - t)
+            for k, fr in zip(asym_keys, asym_out):
+                results[k] = fr
+            counts["asym_calls"] += len(asym_jobs)
         next_ser = {ifo: analytic_series(rng, S, amp, df) for ifo in ("H1", "L1")}
+        if args.pipeline:
+            # The device is fed continuously: segment k's middle and fine stages are enqueued
+            # back to back (the fine banks read the middle output on the device, ordered there),
+            # and segment k-1's results and follow-ups are collected while the device works on
+            # k. Two middle buffers per detector, so k's middle never overwrites what k-1's
+            # follow-ups read. Stage times here are host-side; "segment" is the comparable one.
+            bufs = [mid_out, {ifo: mid.empty_shared((len(top["mid_counts"]), S))
+                              for ifo in ("H1", "L1")}]
+            pending = None
+            for seg in range(args.segments + 1):
+                t_seg = time.perf_counter()
+                if seg < args.segments:
+                    tm = first if seg < args.warmup else steady
+                    ser, next_ser = next_ser, None
+                    out = bufs[seg % 2]
+                    t = time.perf_counter()
+                    mids = {ifo: mid.correlate_series(
+                        ser[ifo], windows=slice(max(0, a0 - args.pad), min(S, a1 + args.pad)),
+                        out=out[ifo], wait=False) for ifo in ser}
+                    tm.add("middle", time.perf_counter() - t)
+                    jobs = [(b, mids[ifo][row], dict(windows=slice(a0, a1)))
+                            for row, (m, b) in enumerate(fine) for ifo in ser]
+                    t = time.perf_counter()
+                    futures = TimeDomainFilterBank.filter_series_many(jobs, wait=False)
+                    tm.add("fine", time.perf_counter() - t)
+                if pending is not None:
+                    p_seg, p_ser, p_mids, p_futures, p_tm = pending
+                    t = time.perf_counter()
+                    p_out = [f.result() for f in p_futures]
+                    p_tm.add("fine", time.perf_counter() - t)
+                    finish(p_seg, p_ser, p_mids, p_out, p_tm)
+                pending = (seg, ser, mids, futures, tm) if seg < args.segments else None
+                elapsed = time.perf_counter() - t_seg
+                if seg < args.segments:
+                    tm.add("segment", elapsed)
+                    t = time.perf_counter()
+                    if seg + 1 < args.segments:   # data for k+1, untimed as everywhere here
+                        next_ser = {ifo: analytic_series(rng, S, amp, df) for ifo in ("H1", "L1")}
+                else:
+                    tm.add("segment", elapsed)    # the last collection belongs to the last segment
+            continue
         for seg in range(args.segments):
+            t_seg = time.perf_counter()
             tm = first if seg < args.warmup else steady
             ser = next_ser
             next_ser = None
@@ -208,47 +288,15 @@ def run_device(device, tops, args, seed):
                           % (seg, seg_plan.replays, bad, sum(len(a.snr) for a in fine_out), in_trial),
                           flush=True)
             tm.add("fine", time.perf_counter() - t)
-            fine_res = iter(fine_out)
-            asym_jobs, asym_keys = [], []
-            for row, (m, b) in enumerate(fine):
-                trig = {}
-                for ifo in ser:
-                    r = next(fine_res)
-                    trig[ifo] = r
-                    results[(top["top"], seg, m, ifo, "fine")] = r
-                    counts["fine_triggers"] += len(r.snr)
-                for ifo, other in (("H1", "L1"), ("L1", "H1")):
-                    r = trig[ifo]
-                    keep = np.flatnonzero(np.abs(r.snr) >= args.asym_threshold)
-                    keep = keep[np.argsort(-np.abs(r.snr[keep]), kind="stable")]
-                    used = set()
-                    for i in keep:
-                        sec = int(r.sample_indices[i] // int(RATE))
-                        if sec in used:
-                            continue
-                        used.add(sec)
-                        c0 = int(r.sample_indices[i])
-                        asym_jobs.append((b, mids[other][row],
-                                          dict(windows=slice(max(0, c0 - half), min(S, c0 + half)),
-                                               binsize=bs, threshold=0.0,
-                                               template_index=int(r.template_indices[i]))))
-                        asym_keys.append((top["top"], seg, m, other, "asym", c0, int(r.template_indices[i])))
-            # The segment's follow-ups, batched like the fine stage (--no-batch: one call each).
-            t = time.perf_counter()
-            if args.no_batch:
-                asym_out = [b.filter_series(x, **kw) for b, x, kw in asym_jobs]
-            else:
-                asym_out = TimeDomainFilterBank.filter_series_many(asym_jobs)
-            if asym_jobs:
-                tm.add("asym", time.perf_counter() - t)
-            for k, fr in zip(asym_keys, asym_out):
-                results[k] = fr
-            counts["asym_calls"] += len(asym_jobs)
+            finish(seg, ser, mids, fine_out, tm)
+            tm.add("segment", time.perf_counter() - t_seg)
             if next_ser is None and seg + 1 < args.segments:
                 next_ser = {ifo: analytic_series(rng, S, amp, df) for ifo in ("H1", "L1")}
     nfine = sum(t["nfine"] for t in tops)
     steady_segments = max(0, args.segments - args.warmup) * len(tops)
-    total = sum(steady.t.values())
+    # "segment" is the whole of each segment (the stages together, as the device is fed):
+    # the total when present -- the stage timers overlap under --pipeline -- else their sum.
+    total = steady.t.get("segment") or sum(v for k, v in steady.t.items() if k != "segment")
     report = dict(
         device=str(device), segments=args.segments, tops=[t["top"] for t in tops], fine_templates=nfine,
         analysed_seconds_per_segment=analysed, first_segment_s=dict(first.t), steady_s=dict(steady.t),
@@ -302,6 +350,9 @@ def main():
     p.add_argument("--bank", required=True)
     p.add_argument("--device", default="cpu")
     p.add_argument("--tops", type=int, default=2, help="top templates, most fine templates first")
+    p.add_argument("--pipeline", action="store_true",
+                   help="feed the device continuously: enqueue segment k's middle and fine "
+                        "stages, collect segment k-1 meanwhile (compare 'segment' times)")
     p.add_argument("--segments", type=int, default=3, help="segments per top (the first --warmup are setup)")
     p.add_argument("--warmup", type=int, default=2,
                    help="segments per top not counted as steady: the first builds plans, the "
@@ -361,7 +412,7 @@ def main():
     print(f"{report['device']}: {report['fine_templates']} fine templates, {len(tops)} tops x "
           f"{args.segments} segments; steady " + ", ".join(
               f"{k} {v:.2f}s" for k, v in report["steady_s"].items()) +
-          f"; warmup ({args.warmup} segments) {sum(report['first_segment_s'].values()):.1f}s")
+          f"; warmup ({args.warmup} segments) {sum(v for k, v in report['first_segment_s'].items() if k != 'segment'):.1f}s")
     if tirt:
         print("  templates-in-real-time: " + ", ".join(f"{k} {v:.3g}" for k, v in tirt.items()))
     print("  calls: " + ", ".join(f"{k} {v}" for k, v in report["steady_calls"].items()) +

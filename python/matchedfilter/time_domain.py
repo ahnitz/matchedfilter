@@ -1586,6 +1586,7 @@ class TimeDomainFilterBank:
         scales: Optional[Union[np.ndarray, Sequence[float]]] = None,
         template_index: Optional[int] = None,
         out: Optional[np.ndarray] = None,
+        wait: bool = True,
     ) -> np.ndarray:
         """Correlate a continuous series across all templates (or a specific template).
 
@@ -1610,6 +1611,11 @@ class TimeDomainFilterBank:
                  is specified, shape can be `(len(series),)` or `(1, len(series))`.
                  Every sample is overwritten, so it need not be cleared.
                  If None, a new array is allocated.
+            wait: False, with `out` a device-shared array (`empty_shared`) on a backend
+                  that can (Vulkan): return once the work is submitted. Later work on the
+                  same device -- e.g. filter_series_many reading `out` -- is ordered after
+                  it on the device, so the GPU is fed without a host round trip. Before
+                  reading `out` on the host, call `wait()`.
 
         Returns:
             If `template_index` is None: 2D complex64 array of shape `(n_templates, len(series))`.
@@ -1681,12 +1687,25 @@ class TimeDomainFilterBank:
             result = _page_aligned_empty(shape)
 
         settle = []
+        ok = False
         try:
             self._correlate_bank(ser, W, scales_arr, result, settle)
+            ok = True
         finally:
             for gpu in {id(x): x for x in settle}.values():
-                gpu.zero_columns_done()
+                if ok and not wait and getattr(gpu, 'async_zero', False):
+                    gpu.zero_columns_done(wait=False)
+                else:
+                    gpu.zero_columns_done()
         return result
+
+    def wait(self) -> None:
+        """Finish work this bank's devices left in flight (correlate_series(wait=False))."""
+        for g in self._groups:
+            for plan in (getattr(g, '_corr_plan', None), g.plan):
+                settle = getattr(getattr(plan, '_gpu', None), 'settle_writes', None)
+                if settle is not None:
+                    settle()
 
     def _correlate_bank(self, ser, W, scales_arr, result, settle):
         S = ser.size
