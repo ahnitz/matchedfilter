@@ -328,7 +328,7 @@ def test_metal_first_dispatch_and_changing_survivor_counts(binsize):
 
 
 @metal
-@pytest.mark.parametrize("n", [2048, 4096, 8192])
+@pytest.mark.parametrize("n", [256, 512, 1024, 2048, 4096, 8192])
 @pytest.mark.parametrize("hierarchical", [False, True])
 def test_metal_one_bin_and_general_kernels_agree(n, hierarchical, monkeypatch):
     rng = np.random.default_rng(n)
@@ -336,7 +336,7 @@ def test_metal_one_bin_and_general_kernels_agree(n, hierarchical, monkeypatch):
     h = (rng.normal(size=(2, n)) + 1j * rng.normal(size=(2, n))).astype(np.complex64)
     filters = []
     for specialized in (False, True):
-        f = (mf.HierarchicalFilter(n, 3, 2, chain=256, device="gpu") if hierarchical
+        f = (mf.HierarchicalFilter(n, 3, 2, chain=max(64, n // 8), device="gpu") if hierarchical
              else mf.MatchedFilter(n, 3, 2, device="gpu"))
         if hierarchical:
             f.set_coarse_threshold(0.)
