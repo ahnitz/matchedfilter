@@ -4,7 +4,7 @@
   "modules": {
     "64": {
       "file": "tierb_64.ptx",
-      "bytes": 71241,
+      "bytes": 125035,
       "local_size": [
         4,
         1,
@@ -16,7 +16,7 @@
     },
     "128": {
       "file": "tierb_128.ptx",
-      "bytes": 108276,
+      "bytes": 145088,
       "local_size": [
         8,
         1,
@@ -28,7 +28,7 @@
     },
     "256": {
       "file": "tierb_256.ptx",
-      "bytes": 74426,
+      "bytes": 128328,
       "local_size": [
         16,
         1,
@@ -40,7 +40,7 @@
     },
     "512": {
       "file": "tierb_512.ptx",
-      "bytes": 96940,
+      "bytes": 152526,
       "local_size": [
         32,
         1,
@@ -52,7 +52,7 @@
     },
     "1024": {
       "file": "tierb_1024.ptx",
-      "bytes": 129403,
+      "bytes": 190576,
       "local_size": [
         64,
         1,
@@ -70,7 +70,7 @@
     },
     "2048": {
       "file": "tierb_2048.ptx",
-      "bytes": 168933,
+      "bytes": 212701,
       "local_size": [
         128,
         1,
@@ -88,7 +88,7 @@
     },
     "4096": {
       "file": "tierb_4096.ptx",
-      "bytes": 129080,
+      "bytes": 190652,
       "local_size": [
         256,
         1,
@@ -112,7 +112,7 @@
     },
     "8192": {
       "file": "tierb_8192.ptx",
-      "bytes": 129365,
+      "bytes": 177110,
       "local_size": [
         512,
         1,
@@ -156,7 +156,7 @@
     },
     "16384": {
       "file": "tierb_16384.ptx",
-      "bytes": 174417,
+      "bytes": 226004,
       "local_size": [
         1024,
         1,
@@ -200,7 +200,7 @@
     },
     "32768": {
       "file": "tierb_32768.ptx",
-      "bytes": 414672,
+      "bytes": 494152,
       "local_size": [
         1024,
         1,
@@ -244,7 +244,7 @@
     },
     "65536": {
       "file": "tierb_65536.ptx",
-      "bytes": 1117658,
+      "bytes": 1212945,
       "local_size": [
         1024,
         1,
