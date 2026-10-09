@@ -500,6 +500,41 @@ void innermost(inout C r[RADIX])
 //   scatter wrote   p = blk*len + i*span + lane
 //   so from p:      blk = p/len, i = (p%len)/span, lane = (p%len)%span
 //                   writer thread = blk*span + lane
+//: SPLIT_STAGE: the same staging bytes as two float2 chunks hold every register of every
+//: thread as ONE float each, so the exchange runs once per component instead of once per
+//: chunk. Same four barriers; but every staged read lands (a chunk's reader loop walks all
+//: R registers and keeps only CH of them) and the source index of each register is worked
+//: out once rather than per chunk. Only where two chunks would be needed and the staging
+//: holds R*WG floats: the Metal build at n=8192, whose 64 KB variant Apple cannot create.
+#ifndef SPLIT_STAGE
+#define SPLIT_STAGE 0
+#endif
+#if SPLIT_STAGE && !COARSE16
+#if (2 * LDS_CAP) < (NLEN)
+#error "SPLIT_STAGE needs staging for R*WG floats"
+#endif
+void exchange(inout C r[RADIX], uint lgLen, uint lgSpan,
+              uint TB, uint len, uint blk, uint lane, uint per, uint TB2, uint len2, uint blk2, uint lane2)
+{
+    uint spanMask = (1u << lgSpan) - 1u;
+    uint lenMask  = (1u << lgLen) - 1u;
+    uint src[RADIX];
+    [unroll] for (uint d = 0; d < R; ++d) {
+        uint p = computeWant(d, TB, len, blk, lane, per, TB2, len2, blk2, lane2);
+        uint b = p >> lgLen, rem = p & lenMask;
+        src[d] = (rem >> lgSpan) * WG + (b << lgSpan) + (rem & spanMask);
+    }
+    float xr[RADIX];
+    GroupMemoryBarrierWithGroupSync();
+    [unroll] for (uint j = 0; j < R; ++j) stg[_stgBase + j * WG + _tid] = asuint(r[j].x);
+    GroupMemoryBarrierWithGroupSync();
+    [unroll] for (uint d = 0; d < R; ++d) xr[d] = asfloat(stg[_stgBase + src[d]]);
+    GroupMemoryBarrierWithGroupSync();
+    [unroll] for (uint j = 0; j < R; ++j) stg[_stgBase + j * WG + _tid] = asuint(r[j].y);
+    GroupMemoryBarrierWithGroupSync();
+    [unroll] for (uint d = 0; d < R; ++d) r[d] = C(xr[d], asfloat(stg[_stgBase + src[d]]));
+}
+#else
 void exchange(inout C r[RADIX], uint lgLen, uint lgSpan,
               uint TB, uint len, uint blk, uint lane, uint per, uint TB2, uint len2, uint blk2, uint lane2)
 {
@@ -530,6 +565,7 @@ void exchange(inout C r[RADIX], uint lgLen, uint lgSpan,
     }
     [unroll] for (uint d = 0; d < R; ++d) r[d] = out[d];
 }
+#endif
 
 //: The four-step skips its final transposes, so the transform leaves results
 //: in mixed-radix digit-reversed order: register q of thread tid holds output
