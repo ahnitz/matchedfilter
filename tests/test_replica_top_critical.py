@@ -4,7 +4,6 @@ Validates that evaluating the positive-frequency analytic spectrum [0, N/2)
 using an N/2-point IFFT produces the exact even samples of the full-rate
 analytic N-point IFFT with < 1e-6 relative difference, and measures the speedup.
 """
-import time
 import numpy as np
 import pytest
 
@@ -78,21 +77,8 @@ def test_top_critical_rate_speedup_benchmark():
     Q_full[100:int(N*800/2048)] = (rng.standard_normal(int(N*800/2048) - 100) + 1j * rng.standard_normal(int(N*800/2048) - 100)).astype(np.complex64)
     Q_crit = Q_full[:K].copy()
 
-    # Warmup
-    _ = np.fft.ifft(Q_full)
-    _ = np.fft.ifft(Q_crit)
-
-    n_iter = 10
-    t0 = time.perf_counter()
-    for _ in range(n_iter):
-        _ = np.fft.ifft(Q_full)
-    t_full = (time.perf_counter() - t0) / n_iter
-
-    t0 = time.perf_counter()
-    for _ in range(n_iter):
-        _ = np.fft.ifft(Q_crit)
-    t_crit = (time.perf_counter() - t0) / n_iter
-
-    speedup = t_full / t_crit
+    from conftest import interleaved_speedup
+    speedup, t_full, t_crit = interleaved_speedup(lambda: np.fft.ifft(Q_full),
+                                                  lambda: np.fft.ifft(Q_crit))
     print(f"\n[Step 1 Benchmark] Full N={N}: {t_full*1000:.2f} ms | Critical N/2={K}: {t_crit*1000:.2f} ms | Speedup: {speedup:.2f}x")
     assert speedup >= 1.5, f"Expected at least 1.5x speedup, got {speedup:.2f}x"

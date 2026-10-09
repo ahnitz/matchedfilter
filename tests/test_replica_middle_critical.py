@@ -7,7 +7,6 @@ using positive-frequency response bins directly from the real 2048 Hz taps:
 3. Yields > 2x speedup on Zen 5 (dev2).
 """
 import os
-import time
 import numpy as np
 import pytest
 from matchedfilter import _automatic_series_layout, CorrelationFilter
@@ -141,22 +140,8 @@ def test_middle_critical_rate_speedup_and_memory(bank_data):
                 q_crit, st, lo, hi, 0, len(idx), out_c[idx]
             )
 
-    # Warmup
-    run_full()
-    run_crit()
-
-    n_iter = 5
-    t0 = time.perf_counter()
-    for _ in range(n_iter):
-        run_full()
-    t_full = (time.perf_counter() - t0) / n_iter
-
-    t0 = time.perf_counter()
-    for _ in range(n_iter):
-        run_crit()
-    t_crit = (time.perf_counter() - t0) / n_iter
-
-    speedup = t_full / t_crit
+    from conftest import interleaved_speedup
+    speedup, t_full, t_crit = interleaved_speedup(run_full, run_crit, reps=9)
     print(f"\n[Step 2 Benchmark] 30 templates: Full {t_full*1000:.2f} ms vs Critical {t_crit*1000:.2f} ms | Speedup: {speedup:.2f}x")
 
     assert speedup >= 1.5, f"Expected >= 1.5x speedup, got {speedup:.2f}x"
