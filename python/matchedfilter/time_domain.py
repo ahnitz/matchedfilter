@@ -1560,8 +1560,10 @@ class TimeDomainFilterBank:
         gpu = getattr(g.get_correlation_plan(), '_gpu', None) if W.shape[0] else None
         zero = getattr(gpu, 'zero_columns', None)
         if zero is not None:
-            from ._shared import shared_buffer
-            if shared_buffer(dest, gpu) is None:
+            from ._shared import shared_buffer, shared_view
+            held = (shared_view(dest, gpu, align=4) if getattr(gpu, 'continuous_out_views', False)
+                    else shared_buffer(dest, gpu))
+            if held is None:
                 zero = None
         for a, b in zip(edges[::2], edges[1::2]):
             if b > a:
