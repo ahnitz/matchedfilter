@@ -3,6 +3,7 @@ automatically select optimal FFT block sizes, and filter continuous series."""
 
 import math
 from collections import OrderedDict
+import os
 import time
 from typing import Any, NamedTuple, Optional, Sequence, Union, Tuple, List, Dict
 import numpy as np
@@ -1623,6 +1624,13 @@ class SegmentPlan:
             return TimeDomainFilterBank.filter_series_many(jobs)
         sig = self._signature(jobs)
         tr = self._trace
+        if os.environ.get("MF_REPLAY_DEBUG"):
+            if tr is None:
+                print("replay: no trace", flush=True)
+            elif tr["sig"] != sig:
+                diff = [j for j, (a, b) in enumerate(zip(tr["sig"], sig)) if a != b]
+                print("replay: signature differs in jobs", diff[:5], tr["sig"][diff[0]][:3] if diff else "",
+                      sig[diff[0]][:3] if diff else "", flush=True)
         if tr is not None and tr["sig"] == sig:
             out = self._replay(tr)
             if out is not None:
@@ -1661,6 +1669,11 @@ class SegmentPlan:
                               for e in per_job))
         self._trace = dict(sig=sig, dev=used[0], keys=list(keys[id(used[0])]),
                            jobs=[(e[0], e[1]) for e in per_job]) if replayable else None
+        if os.environ.get("MF_REPLAY_DEBUG") and not replayable:
+            print("replay: trace not replayable: devices", len(used), "sync jobs",
+                  sum(1 for e in per_job if e is None or e[2][0]),
+                  "untraced", sum(1 for e in per_job if e is not None and not all(
+                      getattr(d, "trace", None) is not None for d, *_ in e[0])), flush=True)
         return out
 
     def _replay(self, tr):

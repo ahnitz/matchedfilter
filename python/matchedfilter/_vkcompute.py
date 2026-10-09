@@ -520,6 +520,8 @@ def replay_fused(dev, keys):
     for key in keys:
         hit = cache.get(key)
         if hit is None:
+            if os.environ.get("MF_REPLAY_DEBUG"):
+                print("replay invalid: fused key not cached", flush=True)
             return False
         # Every constituent recording must still exist: eviction frees its descriptor sets
         # and buffers, and replaying a recording built on them faults the device.
@@ -527,6 +529,8 @@ def replay_fused(dev, keys):
             ctx = _CONTEXTS_BY_ID.get(ctx_id)
             if ctx is None or ctx.device is None or any(h not in getattr(ctx, "_phases", {})
                                                         for h in handles):
+                if os.environ.get("MF_REPLAY_DEBUG"):
+                    print("replay invalid: constituent recording gone", flush=True)
                 return False
         cmds.append(hit[0])
     vk = dev.vk
