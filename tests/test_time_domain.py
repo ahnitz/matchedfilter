@@ -883,3 +883,38 @@ def test_segment_plan_replays_and_matches(monkeypatch):
         if shared_buffer(rows, ctx) is not None and type(ctx).__module__.endswith("_vkcompute"):
             pytest.fail("a device-resident job set was never replayed")
     assert total >= 5
+
+
+def test_filter_series_many_without_wait_overlaps_and_matches(monkeypatch):
+    """wait=False hands back results to collect later; two batches in flight on the same banks
+    (different input buffers) both come back exactly as synchronous calls give them."""
+    from conftest import usable_gpu
+    monkeypatch.setenv("MF_AUTOTUNE", "0")
+    dev = usable_gpu()
+    if dev is None:
+        pytest.skip("no usable GPU")
+    rng = np.random.default_rng(41)
+    banks = []
+    for _ in range(2):
+        counts = list(rng.integers(200, 400, 30))
+        taps, w, df = _whitened_inspiral_bank(rng, counts)
+        b = TimeDomainFilterBank(taps, tap_counts=counts, engine='hier', threshold=4.5,
+                                 false_dismissal=1e-3, device=dev, fft_lengths=[2048], binsize=2048)
+        b.set_reference(w, delta_f=df)
+        banks.append(b)
+    S = 1 << 16
+    def series():
+        X = np.fft.fft(rng.standard_normal(S))
+        X[S // 2:] = 0
+        return (np.fft.ifft(X) * 2).astype(np.complex64)
+    xs = [series() for _ in range(4)]
+    batch1 = [(b, xs[i], dict(windows=slice(2000, S - 2000))) for i, b in enumerate(banks)]
+    batch2 = [(b, xs[2 + i], dict(windows=slice(2000, S - 2000))) for i, b in enumerate(banks)]
+    f1 = TimeDomainFilterBank.filter_series_many(batch1, wait=False)
+    f2 = TimeDomainFilterBank.filter_series_many(batch2, wait=False)
+    got = [f.result() for f in f1 + f2]
+    want = [b.filter_series(x, **kw) for b, x, kw in batch1 + batch2]
+    assert sum(len(r.snr) for r in want) >= 3
+    for r1, r2 in zip(want, got):
+        np.testing.assert_array_equal(r1.sample_indices, r2.sample_indices)
+        np.testing.assert_array_equal(r1.snr, r2.snr)

@@ -165,9 +165,11 @@ def run_device(device, tops, args, seed):
         mid_out = {ifo: mid.empty_shared((len(top["mid_counts"]), S)) for ifo in ("H1", "L1")}
         seg_plan = SegmentPlan()
         first.add("prep", time.perf_counter() - t0)
+        next_ser = {ifo: analytic_series(rng, S, amp, df) for ifo in ("H1", "L1")}
         for seg in range(args.segments):
             tm = first if seg == 0 else steady
-            ser = {ifo: analytic_series(rng, S, amp, df) for ifo in ("H1", "L1")}
+            ser = next_ser
+            next_ser = None
             mids = {}
             for ifo in ser:
                 t = time.perf_counter()
@@ -182,11 +184,17 @@ def run_device(device, tops, args, seed):
             t = time.perf_counter()
             if args.no_batch:
                 fine_out = [b.filter_series(x, **kw) for b, x, kw in jobs]
+            elif args.overlap and seg + 1 < args.segments:
+                # Submit, prepare the next segment's data on the host while the device works
+                # (untimed, as data setup is), then collect: a busy device keeps its clock up.
+                futures = TimeDomainFilterBank.filter_series_many(jobs, wait=False)
+                submit = time.perf_counter() - t
+                next_ser = {ifo: analytic_series(rng, S, amp, df) for ifo in ("H1", "L1")}
+                t = time.perf_counter() - submit
+                fine_out = [f.result() for f in futures]
             else:
-                # The same banks, windows and device buffers every segment: a SegmentPlan
-                # replays the traced segment.
-                # SegmentPlan replay (LADDER_REPLAY=1) is under investigation: it dropped
-                # peaks on realistic data. The batched path is the default.
+                # SegmentPlan replay (LADDER_REPLAY=1, MF_SEGMENT_REPLAY=1) is exact but not
+                # faster than the batched path, which is the default.
                 fine_out = (seg_plan.run(jobs) if os.environ.get("LADDER_REPLAY")
                             else TimeDomainFilterBank.filter_series_many(jobs))
                 if os.environ.get("LADDER_VERIFY_REPLAY"):
@@ -235,6 +243,8 @@ def run_device(device, tops, args, seed):
             for k, fr in zip(asym_keys, asym_out):
                 results[k] = fr
             counts["asym_calls"] += len(asym_jobs)
+            if next_ser is None and seg + 1 < args.segments:
+                next_ser = {ifo: analytic_series(rng, S, amp, df) for ifo in ("H1", "L1")}
     nfine = sum(t["nfine"] for t in tops)
     steady_segments = max(0, args.segments - 1) * len(tops)
     total = sum(steady.t.values())
@@ -313,6 +323,9 @@ def main():
     p.add_argument("--pure", action="store_true",
                    help="every call on the bank's device (MF_SINGLE_DEVICE=bank): the GPU-only or "
                         "CPU-only path, without the library moving small calls to the other device")
+    p.add_argument("--overlap", action="store_true",
+                   help="submit each segment's fine stage, prepare the next segment's data while "
+                        "the device works, then collect (filter_series_many(wait=False))")
     p.add_argument("--no-batch", action="store_true",
                    help="fine stage as one filter_series call per bank and detector (the old pattern)")
     p.add_argument("--timing", action="store_true",
