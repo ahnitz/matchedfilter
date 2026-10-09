@@ -1299,6 +1299,11 @@ class Context(InputUploads):
         # windows are off) get a small dummy buffer the kernel never reads.
         want = self._device_state.__dict__.get("layout_nbind", {}).get(
             getattr(set_layout, "value", set_layout), len(bufs))
+        if len(bufs) > want:
+            # A buffer for a binding the module does not declare: the kernel cannot read
+            # it, so whatever the caller meant it to do silently does not happen.
+            raise VulkanError("descriptor set given %d buffers for a %d-binding layout"
+                              % (len(bufs), want))
         if want > len(bufs):
             dummy = getattr(self, "_dummy_buf", None)
             if dummy is None:
@@ -1350,19 +1355,19 @@ class Context(InputUploads):
         """
         wg = max(1, band // 16)
         want = max(1, int(self.subgroup_size) // wg)
-        # At most 4 pairs unless asked: the 8- and 16-pair builds hung the GPU (compute ring
-        # timeout) under realistic gating on gfx1151, and measured within 3% of 4 pairs once
-        # dispatches are padded. MF_VK_COARSE_PPG sets the cap, to investigate them.
-        # The tiled builds elect their peak with subgroup shuffles and take no LDS atomics,
-        # so they fill the whole subgroup; the 4-pair cap stays on the untiled builds.
-        # Band 64, CU-cycles/pair: p4 96, p4t2 47, p8t2 28, p16t2 29.
+        # Every build fills the subgroup; MF_VK_COARSE_PPG caps it, for measurement.
+        # There used to be a 4-pair cap on the untiled builds: the 8- and 16-pair builds
+        # "hung the GPU" on an older kernel, and later an untiled call lost every
+        # detection. The second was a binding bug (untiled builds ignored per-row windows,
+        # so their module declared no gRowWin and a grouped call gated everything out),
+        # fixed with a test; with it fixed, untiled 16-pair builds run the realistic ladder
+        # exact in both modes and ~330 back-to-back fine segments without a fault. The
+        # cap had been containing that bug, not a hang.
         env_cap = int(os.environ.get("MF_VK_COARSE_PPG", "0") or 0)
-        full = want
-        want = min(want, env_cap or 4)
+        if env_cap:
+            want = min(want, env_cap)
         pairs = nd * nt
         tile = _COARSE_TILE_T.get(band, 1)
-        if tile > 1:
-            want = min(full, env_cap) if env_cap else full
 
         # Device limits, queried: a group of ppg pairs is (band/16)*ppg invocations and
         # holds ppg padded exchange stages (about 17/16 * band words each).
