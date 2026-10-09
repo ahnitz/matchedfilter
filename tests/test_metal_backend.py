@@ -485,3 +485,83 @@ def test_metal_single_template_follow_up_matches_cpu():
     g, c = ((np.sort(r.sample_indices), r.snr[np.argsort(r.sample_indices)]) for r in res)
     np.testing.assert_array_equal(g[0], c[0])
     np.testing.assert_allclose(g[1], c[1], rtol=2e-5, atol=1e-5 * np.abs(c[1]).max())
+
+
+@metal
+@pytest.mark.parametrize("kind", ["peaks", "peaks_grouped", "hier", "hier_cascade"])
+@pytest.mark.parametrize("level", ["mid", "zero"])
+@pytest.mark.parametrize("gate", [0.0, 0.5])
+def test_metal_sparse_readback_equals_dense(ctx, kind, level, gate):
+    """sparse=True gives the dense result's peaks exactly; the hierarchical paths read only
+    the refined pairs back and skip the dense fill, relying on the refine writing every bin."""
+    from matchedfilter import _SparsePeaks
+    n, nd, nt, bs = 2048, 24, 9, 512
+    rng = np.random.default_rng(17)
+    spec = ctx.empty_shared((nd, n))
+    spec[:] = ((rng.standard_normal((nd, n)) + 1j * rng.standard_normal((nd, n)))
+               / np.sqrt(2 * n)).astype(np.complex64)
+    h = (rng.standard_normal((nt, n)) + 1j * rng.standard_normal((nt, n))).astype(np.complex64)
+    h /= np.linalg.norm(h, axis=1, keepdims=True) / np.sqrt(n)
+    groups = [(0, 2000, 0, 3), (40, 2040, 3, 20), (10, 2010, 20, 24)]
+
+    def call(sparse):
+        if kind == "peaks":
+            return ctx.peaks(n, spec, h, binsize=bs, threshold=thr, window=(40, 2040), sparse=sparse)
+        if kind == "peaks_grouped":
+            return ctx.peaks_grouped(n, spec, h, groups, bs, thr, sparse=sparse)
+        if kind == "hier":
+            return ctx.hier_peaks(n, 512, spec, h, h[:, :512], gate, binsize=bs, threshold=thr,
+                                  window=(40, 2040), sparse=sparse)
+        return ctx.hier_peaks(n, 512, spec, h, h[:, :128], gate, cascade_band=128, ct1=h[:, :512],
+                              raw_thr1=2 * gate, binsize=bs, threshold=thr, window=(40, 2040),
+                              sparse=sparse)
+    thr = 0.0
+    if level == "mid":
+        thr = float(np.quantile(np.abs(call(False)[1]), 0.8))
+    di, dv = call(False)
+    sp = call(True)
+    assert isinstance(sp, _SparsePeaks) and sp.shape == di.shape
+    si, sv = sp.dense()
+    np.testing.assert_array_equal(si, di)
+    np.testing.assert_array_equal(sv, dv)
+    # Dense after sparse on the same storage: the skipped fill must not leak stale rows.
+    di2, dv2 = call(False)
+    np.testing.assert_array_equal(di2, di)
+
+
+@metal
+def test_metal_follow_ups_across_allocations_are_one_submission(monkeypatch):
+    """Both detectors' rows (two device allocations) go out in one forward + item submission
+    (forward_rows), and every job equals its direct call."""
+    from matchedfilter import TimeDomainFilterBank
+    monkeypatch.setenv("MF_AUTOTUNE", "0")
+    monkeypatch.setenv("MF_SINGLE_DEVICE", "bank")
+    rng = np.random.default_rng(53)
+    taps = rng.standard_normal((12, 400)).astype(np.float32)
+    counts = list(rng.integers(250, 400, 12))
+    bank = TimeDomainFilterBank(taps, tap_counts=counts, engine="hier", threshold=5.0,
+                                false_dismissal=1e-3, device="gpu", fft_lengths=[2048],
+                                binsize=2048)
+    bank.set_reference(np.where(np.arange(1025) > 20, 1.0, 0.0), delta_f=1.0)
+    S = 1 << 17
+    rows = [bank.empty_shared((1, S)) for _ in range(2)]          # two allocations
+    for r in rows:
+        r[0] = ((rng.standard_normal(S) + 1j * rng.standard_normal(S)) / 2).astype(np.complex64)
+    jobs = []
+    for k in range(10):
+        c0 = int(rng.integers(20000, S - 20000))
+        jobs.append((bank, rows[k % 2][0], dict(windows=slice(c0 - 9000, c0 + 9100), binsize=61,
+                                                threshold=0.0, template_index=k % 12)))
+    ctxs = {id(g.get_flat_plan()._gpu): g.get_flat_plan()._gpu for g in bank._groups}
+    commits = []
+    for c in ctxs.values():
+        real = c._commit
+        monkeypatch.setattr(c, "_commit", lambda cmd, label, real=real, **kw:
+                            (commits.append(label), real(cmd, label, **kw))[1])
+    many = TimeDomainFilterBank.filter_series_many(jobs)
+    n_items = commits.count("items")
+    direct = [b.filter_series(x, **kw) for b, x, kw in jobs]
+    for r1, r2 in zip(direct, many):
+        for f in r1._fields:
+            np.testing.assert_array_equal(getattr(r1, f), getattr(r2, f))
+    assert n_items == len(bank._groups)          # one per template group, not per detector
