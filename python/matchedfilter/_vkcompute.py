@@ -333,7 +333,8 @@ class _Buffer:
     kind of code that looks right and halves throughput.
     """
 
-    def __init__(self, ctx, nbytes, readback=False, usage=_BUF_STORAGE):
+    # TRANSFER_DST: any buffer may be cleared on the device (zero_columns, output fills).
+    def __init__(self, ctx, nbytes, readback=False, usage=_BUF_STORAGE | _BUF_TRANSFER_DST):
         self.ctx, self.nbytes = ctx, max(int(nbytes), 4)
         vk = ctx.vk
         info = _BufferCreate(12, None, 0, self.nbytes, usage, 0, 0, None)
@@ -2601,6 +2602,52 @@ class Context(InputUploads):
         self._submit(cmd)
         if shared_buffer(out, self) is None:
             bo.read_into(out)
+
+    def zero_columns(self, dest, a, b):
+        """Zero dest[:, a:b] of a device-shared 2-D array (or rows of one) on the device.
+
+        Collected, and recorded by zero_columns_done() as fills in one submission behind a
+        barrier, so they land after the correlation writes they may overlap. A host memset
+        of a middle stage's complement is ~60 MB a call; the device clears it in ~0.3 ms."""
+        sb = shared_view(dest, self, align=4)
+        if sb is None or dest.ndim != 2 or b <= a or not dest.flags.c_contiguous:
+            raise ValueError("zero_columns needs a device-shared 2-D array and a nonempty range")
+        base = sb.offset + a * dest.itemsize
+        length = (b - a) * dest.itemsize
+        if base % 4 or length % 4:
+            raise ValueError("zero_columns ranges must be 4-byte aligned")
+        pending = self.__dict__.setdefault("_zero_ranges", [])
+        row = dest.strides[0]
+        pending.extend((sb, base + r * row, length) for r in range(dest.shape[0]))
+
+    def zero_columns_done(self):
+        """Record and submit every collected zero_columns range, and wait for them."""
+        ranges, self._zero_ranges = getattr(self, "_zero_ranges", None) or [], []
+        if not ranges:
+            return
+        vk = self.vk
+        cmd = _vp()
+        _check(vk.vkAllocateCommandBuffers(self.device, ctypes.byref(
+            _CmdBufAlloc(40, None, self.command_pool, 0, 1)), ctypes.byref(cmd)), "allocate zero")
+        try:
+            _check(vk.vkBeginCommandBuffer(cmd, ctypes.byref(_CmdBufBegin(42, None, _ONE_TIME_SUBMIT, None))),
+                   "begin zero")
+            mb = _MemBarrier(46, None, _ACCESS_SHADER_WRITE | _ACCESS_TRANSFER_WRITE,
+                             _ACCESS_TRANSFER_WRITE)
+            vk.vkCmdPipelineBarrier(cmd, _STAGE_COMPUTE_BIT | _STAGE_TRANSFER_BIT, _STAGE_TRANSFER_BIT,
+                                    0, 1, ctypes.byref(mb), 0, None, 0, None)
+            for sb, off, length in ranges:
+                vk.vkCmdFillBuffer(cmd, sb.handle, off, length, 0)
+            mb = _MemBarrier(46, None, _ACCESS_TRANSFER_WRITE,
+                             _ACCESS_HOST_READ | _ACCESS_SHADER_READ)
+            vk.vkCmdPipelineBarrier(cmd, _STAGE_TRANSFER_BIT, _STAGE_HOST_BIT | _STAGE_COMPUTE_BIT,
+                                    0, 1, ctypes.byref(mb), 0, None, 0, None)
+            _check(vk.vkEndCommandBuffer(cmd), "end zero")
+            self._submit(cmd)                   # waits; same queue as the correlation
+            self._wait_queues()                 # and anything on the other queues
+        finally:
+            vk.vkFreeCommandBuffers.argtypes = [_vp, _vp, _u32, ctypes.POINTER(_vp)]
+            vk.vkFreeCommandBuffers(self.device, self.command_pool, 1, (_vp * 1)(cmd))
 
     def correlate_continuous(self, n, data, tmpl, starts, out, lo, hi,
                              *, upload_data=True, upload_tmpl=True):
