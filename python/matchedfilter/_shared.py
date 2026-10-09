@@ -102,10 +102,11 @@ def shared_buffer(array, ctx):
     return _Borrowed(allocation, offset)
 
 
-def shared_view(array, ctx, align=256):
+def shared_view(array, ctx, align=None):
     """shared_buffer, also for a contiguous view starting inside an allocation (e.g. a
     template group's rows of a caller's (templates, samples) output), whose offset is a
-    multiple of align (256: the largest storage-buffer offset alignment Vulkan allows).
+    multiple of align (default: the context's queried storage_offset_alignment, else 256,
+    the largest storage-buffer offset alignment Vulkan allows).
     For a backend call that applies the returned _Borrowed's offset itself."""
     buf = shared_buffer(array, ctx)
     if buf is not None or not isinstance(array, np.ndarray) or not array.flags.c_contiguous:
@@ -113,6 +114,8 @@ def shared_view(array, ctx, align=256):
     start, allocation = _containing(array.ctypes.data)
     if allocation is None or not _same_device(allocation.buffer.ctx, ctx):
         return None
+    if align is None:
+        align = getattr(ctx, 'storage_offset_alignment', 256)
     offset = array.ctypes.data - start
     if offset % align or offset + array.nbytes > allocation.buffer.nbytes:
         return None

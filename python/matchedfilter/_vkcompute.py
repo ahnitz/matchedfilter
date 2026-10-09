@@ -106,6 +106,10 @@ _OFF_SHARED_MEMORY = 296 + 216
 _OFF_MAX_INVOCATIONS = 296 + 232
 #: timestampPeriod (float, ns per tick) sits 424 bytes into the limits.
 _OFF_TIMESTAMP_PERIOD = 296 + 424
+#: maxComputeWorkGroupSize[3] (uint32) sits 236 bytes into the limits, and
+#: minStorageBufferOffsetAlignment (VkDeviceSize) 328.
+_OFF_MAX_WORKGROUP_SIZE = 296 + 236
+_OFF_STORAGE_OFFSET_ALIGNMENT = 296 + 328
 
 #: Bands that USE the tiled coarse kernel. It is built and validated for
 #: 512 and 1024 as well, and deliberately not selected there.
@@ -726,6 +730,16 @@ class _Device:
             ctypes.byref(props, _OFF_MAX_INVOCATIONS - 12),
             ctypes.POINTER(_u32))[0])
 
+        # Descriptor offsets into a storage buffer must be multiples of this. 256 is the
+        # largest the spec allows (AMD), NVIDIA reports 16-64; packing sub-results at the
+        # device's own alignment instead of 256 keeps the readback dense where it can be.
+        align = int(ctypes.cast(ctypes.byref(props, _OFF_STORAGE_OFFSET_ALIGNMENT),
+                                ctypes.POINTER(_u64))[0])
+        self.storage_offset_alignment = align if 0 < align <= 256 and align & (align - 1) == 0 \
+            else 256
+        self.max_workgroup_size = tuple(int(v) for v in ctypes.cast(
+            ctypes.byref(props, _OFF_MAX_WORKGROUP_SIZE), ctypes.POINTER(_u32 * 3))[0])
+
         self.subgroup_size = 32
         try:
             if hasattr(vk, "vkGetPhysicalDeviceProperties2"):
@@ -837,7 +851,8 @@ class Context(InputUploads):
 
     _SHARED = ("vk", "instance", "physical", "queue_family", "queues", "queue", "device",
                "_accurate_trig", "max_shared_memory", "max_invocations", "max_dispatch_x",
-               "subgroup_size", "mem_props", "command_pool", "_ts_period")
+               "subgroup_size", "mem_props", "command_pool", "_ts_period",
+               "storage_offset_alignment", "max_workgroup_size")
 
     def _attach_device(self, index):
         """Share the device, its queues, command pool and compiled pipelines per process.
@@ -2298,13 +2313,14 @@ class Context(InputUploads):
         shift = binsize.bit_length() - 1 if binsize & (binsize - 1) == 0 else -1
         t2 = int(np.float32(float(threshold) ** 2 if threshold > 0 else 0).view(np.uint32))
         offs, nbs, size = [], [], 0
+        words = self.storage_offset_alignment // 4
         for lo, hi, a, b, t in items:
             nb = -(-(hi - lo) // binsize)
             if nb > _MAX_BINS:
                 raise UnsupportedSize("an item's window exceeds the kernel bin limit")
             offs.append(size)
             nbs.append(nb)
-            size += ((b - a) * nb + 63) // 64 * 64          # 256-byte aligned offsets
+            size += -(-((b - a) * nb) // words) * words     # storage-offset aligned
         cap = getattr(self, "_items_cap", 0)
         if cap < size:
             cap = max(size, 2 * cap)
@@ -2434,11 +2450,11 @@ class Context(InputUploads):
                shared_key(data, self), shared_key(tmpl, self), slot)
         if key[-3] is None:
             raise ValueError("grouped spectra must belong to this GPU context")
-        # 64 indices occupy 256 bytes, meeting Vulkan storage-offset alignment.
-        offsets, size = [], 0
+        # Each group's results start at the device's storage-buffer offset alignment.
+        offsets, size, words = [], 0, self.storage_offset_alignment // 4
         for _, _, a, b in groups:
             offsets.append(size)
-            size += ((b - a) * nt * nb + 63) // 64 * 64
+            size += -(-((b - a) * nt * nb) // words) * words
         _, upload_tmpl, _, tsig = self._input_uploads(
             key, data, tmpl, False, upload_tmpl)
         batch = self._batches.get(key)
