@@ -825,14 +825,12 @@ class Context(InputUploads):
 
     # ---- cache ----------------------------------------------------------------
     def _cached_buffers(self):
-        for table in (self._batches, self._hier, self._full_batches, self._forwards):
+        for table in self._record_tables().values():
             for rec in table.values():
-                yield from _owned(rec.values() if hasattr(rec, "values") else rec)
+                yield from _owned(self._record_buffers(rec))
 
     def _evict_record(self, kind, key, keep_storage=None):
-        table = {"flat": self._batches, "hier": self._hier, "full": self._full_batches,
-                 "forward": self._forwards}[kind]
-        rec = table.pop(key, None)
+        rec = self._record_tables()[kind].pop(key, None)
         if rec is None:
             return
         # A record may still be referenced by enqueued work on any stream.
@@ -1931,9 +1929,9 @@ class Context(InputUploads):
         self._bind()
         if self.ctx.value:
             self.cuda.cuCtxSynchronize()
-        for table in (self._batches, self._full_batches, self._hier, self._forwards):
+        for table in self._record_tables().values():
             for rec in table.values():
-                for b in _owned(rec.values() if hasattr(rec, "values") else rec):
+                for b in _owned(self._record_buffers(rec)):
                     b.destroy()
             table.clear()
         for ent in self._residents.values():

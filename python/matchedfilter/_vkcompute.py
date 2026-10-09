@@ -3027,12 +3027,7 @@ class Context(InputUploads):
         # An in-flight readback reads this record's buffers when collected.
         self._drain()
         token = (kind, key)
-        cache = {'flat': self._batches, 'hier': self._hier,
-                 'hier_cascade': getattr(self, '_hier_cascade', {}),
-                 'forward': getattr(self, '_forwards', {}),
-                 'full': getattr(self, '_full_batches', {}),
-                 'tierc': getattr(self, '_tierc_batches', {})}[kind]
-        batch = cache.pop(key)
+        batch = self._record_tables()[kind].pop(key)
         cmd = batch[-1]
         getattr(self, "_phases", {}).pop(getattr(cmd, "value", cmd), None)
         pf = getattr(self, '_pending_forward', None)
@@ -3074,13 +3069,7 @@ class Context(InputUploads):
         self._submit(None)
         self._wait_queues()
         self.vk.vkFreeCommandBuffers.argtypes = [_vp, _vp, _u32, ctypes.POINTER(_vp)]
-        for kind, cache in (('flat', self._batches), ('hier', self._hier),
-                            ('hier_cascade', getattr(self, '_hier_cascade', {})),
-                            ('full', getattr(self, '_full_batches', {})),
-                            ('tierc', getattr(self, '_tierc_batches', {})),
-                            ('forward', getattr(self, '_forwards', {}))):
-            for key in list(cache):
-                self._evict_record(kind, key)
+        self._evict_all()
         # Also clean up storage/descriptors left by failed construction.
         for key in list(self._storage):
             self._drop_storage(key)

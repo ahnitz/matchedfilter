@@ -75,6 +75,34 @@ class InputUploads:
     # (63 buffer allocations per call at n=4096). Memory is bounded by the byte limit.
     cache_limit_entries = 256
 
+    #: Record kind -> the attribute holding that kind's records, for every backend. A
+    #: backend that lacks an attribute simply has no records of that kind. A new kind
+    #: (e.g. a grouped hierarchical record) is one line here, and eviction, clear_cache
+    #: and the byte budget all see it.
+    RECORD_TABLES = (('flat', '_batches'), ('hier', '_hier'), ('hier_cascade', '_hier_cascade'),
+                     ('full', '_full_batches'), ('tierc', '_tierc_batches'),
+                     ('forward', '_forwards'))
+
+    def _record_tables(self):
+        """{kind: table} for the record tables this context has."""
+        return {kind: getattr(self, attr) for kind, attr in self.RECORD_TABLES
+                if getattr(self, attr, None) is not None}
+
+    @staticmethod
+    def _record_buffers(record):
+        """The buffers one record holds: a dict's values, a tuple/list, or one buffer."""
+        if isinstance(record, dict):
+            return tuple(record.values())
+        if isinstance(record, (tuple, list)):
+            return tuple(record)
+        return (record,)
+
+    def _evict_all(self):
+        """Evict every record through the backend's _evict_record."""
+        for kind, table in self._record_tables().items():
+            for key in list(table):
+                self._evict_record(kind, key)
+
     @staticmethod
     def _allocation(buf):
         owner = getattr(buf, 'owner', None)
