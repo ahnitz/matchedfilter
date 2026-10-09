@@ -5,6 +5,81 @@ Written 2026-10-08 by the Metal track of docs/gpu-parity-plan.md. Machine: Mac m
 sources (Command Line Tools only). All numbers are min of repeats on an idle machine (load
 average 2-4 from system daemons), warm, with outputs checked against the CPU.
 
+Sections 1-8 are phase 1, measured on the old generic bench data. **Phase 2 (section 0) is on
+realistic data and supersedes their bench numbers.**
+
+## 0. Phase 2: realistic data, pure paths
+
+Bench: `tools/ladder.py --bank bank3.hdf --profiles ladder_profiles_H1.npz --tops 1 --pure
+--check cpu` (per-top |h|^2/S from the production job, so the gates refine ~0.2% of pairs as in
+production rather than ~75%). Steady state is reached only after the chain trials of the first
+3-4 segments (fine per segment, ms: 1079, 204, 176, 118, 101, 109, 108, 107, 104, 108), so
+steady numbers below are per segment from segments >= 5 of a 10-segment run (`scratch` per-call
+timer around filter_series_many), and the ladder's own averages are given beside them.
+
+| stage, ms per segment | CPU, 1 core (NEON) | GPU at phase-2 start (main + shared device) | GPU now | GPU / core |
+|---|---:|---:|---:|---:|
+| middle (27 templates, 2^20 samples, x2 detectors) | 137 | 73 | **23** | 6x |
+| fine (54 banks x 2 detectors, filter_series_many) | 1700 | ~100 | ~105 (steady) | **16x** |
+| follow-ups (~25 single-template calls) | ~10 | ~15 | ~10 | 1x |
+
+Ladder averages, 7 steady segments: GPU middle 0.16 s, fine 1.01 s, asym 0.07 s; CPU middle
+0.96 s, fine 11.91 s, asym 0.07 s. Check: 557 calls, 0 peaks on one side only, 6 gate-margin
+peaks, SNR to 2.6e-5.
+
+Realistic data moved the fine stage's chain from (64, 256) to (256, 512), and with it the kernel
+mix:
+
+| kernel (realistic data) | device ms | share | now | target | note |
+|---|---:|---:|---:|---|---|
+| coarse16 band 256, 2 pairs/group | 1.24 | 60% of fine | **81% of FMA** | >=50% | meets; the packing the runtime picks (2 pairs at band 256) runs clean under realistic gating (8-segment check: no hang, identical peaks); 1/2/4/8/16 pairs agree bit-for-bit in the hardware tests (synthetic gating) |
+| refineListed n=512 (2nd tier) | 0.33 | 16% | 29% of FMA | below | next kernel |
+| seriesForward n=2048 | 0.25 | 12% | 69% of BW | >=70% | at target (0.266 -> 0.248 ms, split staging) |
+| refineListed n=2048 one-bin | 0.17 | 8% | 71% of BW | >=70% | meets |
+| full_series n=8192 (middle) | 6.58 per call | 89% of middle | 29% of FMA (was 22%) | below | split staging, see below |
+| seriesForward n=8192 (middle) | 0.81 | 11% | 68% of BW | ~target | |
+
+**Where the time goes now.** The fine stage is device-bound: a GPU timeline of one steady
+filter_series_many (162 command buffers on 54 contexts) shows the GPU busy 94.5 of 101.4 ms (the
+union of command-buffer intervals). The middle is near device-bound (7.5 ms device of 8.8 ms per
+call). The follow-ups are host-bound (GPU 1.2 ms of ~8-10 ms; ~0.3-0.5 ms of Python per job).
+
+Note on `--timing` on Metal: contexts run on separate queues concurrently, so the summed
+per-command-buffer device time over-counts (fine: 586 ms summed against 94.5 ms of GPU busy in
+one segment). Use the busy union, not the sum, for utilization.
+
+### Phase 2 changes, measured (all checked against the CPU)
+
+| change | before | after |
+|---|---:|---:|
+| One Metal device per process (`_Device`): pipelines compiled once, buffers bind across plans by offset (`shared_views`); before, a fine bank wrapping a row of the middle's device output in a second buffer waited **~60 ms** before its GPU work started | fine 6.05 s over 3 steady segments (generic data, `--pure`), 60 ms from commit to GPU start per call | the ~60 ms stall is gone (timeline); not re-measured on generic data -- realistic-data steady is ~0.1 s/segment |
+| SPLIT_STAGE exchange (Metal builds where staging holds half a transform): full_series_8192 | 4.24 ms | 3.05 ms (bit-identical) |
+| same, forward_2048 | 0.266 ms | 0.244 ms |
+| Middle: device-side zeroing (blit fills), groups left in flight and settled once, stable length sort so groups are contiguous rows (a swapped tie forced a 5 ms scatter copy) | 16.0 ms/call | 8.8 ms/call |
+| Follow-ups: grouped (all bin counts) calls defer in filter_series_many | 10.3 ms/batch | 7.7 ms/batch |
+| ragged follow-up results split back per bin count (peak order identical to per-count calls) | test failure on main | fixed |
+
+### Phase 2 task list status
+1. Middle n=8192 kernel: 22% -> 29% of FMA (split staging). Still the largest kernel below target.
+2. filter_series_many on Metal: works and batches; one command buffer per bank-call (1.5 per
+   call), no extra submissions. The device is ~93% busy during the fine stage, so a fused
+   single-command-buffer submission (task 6) can buy at most the remaining ~7%; not done.
+3. Pure-GPU follow-ups: one submission per call and now deferred across the batch; fusing all
+   follow-ups into one submission is the remaining step (host Python per job binds).
+4. Objective-C messages per dispatch: not reduced. The fine stage is device-bound and the
+   middle near it, so this only matters for the follow-ups, where Python layout work per job
+   is as large.
+5. Shared device per process: done (it was the largest single win of phase 2).
+6. Fused multi-bank submission: not done; see 2.
+
+CPU (NEON): not worked on in this phase. The CPU path runs the flat filter at ~38 GFLOP/s on one
+M2 performance core (~34% of an estimated 112 GFLOP/s peak); no NEON change was made or measured.
+
+Known issue, not Metal's: GPU cost calibration takes ~28 s on first use per process without
+`MF_COST_FILE` (a test that builds a GPU bank spends 30 s in it) and is clock-dependent, so
+block-size and chain choices can differ run to run; tests comparing devices peak-for-peak must
+pin `fft_lengths`.
+
 ## 1. Ceilings, measured
 
 `tools/metal_roofline.py` measures them the same way it times kernels (device time from
