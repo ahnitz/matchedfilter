@@ -3,7 +3,7 @@
 #include <metal_texture>
 using namespace metal;
 
-#line 70 "/home/ahnitz/projects/claude/searchdev/work/peak-fft/python/matchedfilter/spirv/ct_512_m.slang"
+#line 70 "/home/ahnitz/projects/claude/searchdev/work/peak-fft/.claude/worktrees/agent-aaf230abdd173dffa/python/matchedfilter/spirv/ct_512_m.slang"
 float2 cmulConj_0(float2 a_0, float2 b_0)
 {
 
@@ -203,7 +203,7 @@ void dft16_0(array<float2, int(16)> thread* r_0)
 }
 
 
-#line 12 "/home/ahnitz/projects/claude/searchdev/work/peak-fft/src/gpu/twiddle.slang"
+#line 12 "/home/ahnitz/projects/claude/searchdev/work/peak-fft/.claude/worktrees/agent-aaf230abdd173dffa/src/gpu/twiddle.slang"
 float2 mfTwiddle_0(float angle_0)
 {
 
@@ -211,7 +211,7 @@ float2 mfTwiddle_0(float angle_0)
 }
 
 
-#line 108 "/home/ahnitz/projects/claude/searchdev/work/peak-fft/python/matchedfilter/spirv/ct_512_m.slang"
+#line 108 "/home/ahnitz/projects/claude/searchdev/work/peak-fft/.claude/worktrees/agent-aaf230abdd173dffa/python/matchedfilter/spirv/ct_512_m.slang"
 void dft32_0(array<float2, int(32)> thread* r_1)
 {
     thread array<float2, int(16)> e_0;
@@ -414,7 +414,7 @@ struct EntryPointParams_0
 };
 
 
-#line 182 "/home/ahnitz/projects/claude/searchdev/work/peak-fft/python/matchedfilter/spirv/ct_512_m.slang"
+#line 182 "/home/ahnitz/projects/claude/searchdev/work/peak-fft/.claude/worktrees/agent-aaf230abdd173dffa/python/matchedfilter/spirv/ct_512_m.slang"
 struct KernelContext_0
 {
     EntryPointParams_0 constant* entryPointParams_0;
