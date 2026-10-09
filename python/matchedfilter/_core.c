@@ -247,6 +247,27 @@ static PyObject *MF_run(MFObject *self,PyObject *args){
   if(tot<0){ PyErr_SetString(PyExc_RuntimeError,"matchedfilter: matched filter failed"); return NULL; }
   return PyLong_FromLong(tot);
 }
+/* q15_screen(d0, nd, t0, nt, threshold, start, end, pass[u8 nd*nt], stat[f32 nd*nt] or b"")
+   -> pairs passed, or -1 when this plan has no Q15 screen (see ap_mf_q15_screen). */
+static PyObject *MF_q15_screen(MFObject *self,PyObject *args){
+  int d0,nd,t0,nt; double thr; Py_ssize_t start,end; Py_buffer bp,bs;
+  if(!PyArg_ParseTuple(args,"iiiidnnw*w*",&d0,&nd,&t0,&nt,&thr,&start,&end,&bp,&bs)) return NULL;
+  if(d0<0||nd<1||t0<0||nt<1||d0+nd>self->nd||t0+nt>self->nt||start<0||end<=start
+     ||bp.len<(Py_ssize_t)nd*nt||(bs.len && bs.len<(Py_ssize_t)nd*nt*(Py_ssize_t)sizeof(float))){
+    PyBuffer_Release(&bp);PyBuffer_Release(&bs);
+    PyErr_SetString(PyExc_ValueError,"invalid q15_screen arguments"); return NULL;
+  }
+  int r;
+  Py_BEGIN_ALLOW_THREADS
+  r=ap_mf_q15_screen(self->p,d0,nd,t0,nt,(float)thr,(size_t)start,(size_t)end,
+                     (unsigned char*)bp.buf,bs.len?(float*)bs.buf:NULL);
+  Py_END_ALLOW_THREADS
+  PyBuffer_Release(&bp);PyBuffer_Release(&bs);
+  return PyLong_FromLong(r);
+}
+static PyObject *MF_q15_lanes(MFObject *self,PyObject *unused){
+  (void)unused; return PyLong_FromLong(ap_mf_q15_lanes(self->p));
+}
 static PyObject *MF_correlate(MFObject *self,PyObject *args){
   int d0,nd,t0,nt; Py_buffer out;
   if(!PyArg_ParseTuple(args,"iiiiw*",&d0,&nd,&t0,&nt,&out)) return NULL;
@@ -463,6 +484,8 @@ static PyMethodDef MF_methods[]={
   {"run_series",(PyCFunction)MF_run_series,METH_VARARGS,"run_series(...)"},
   {"run_series_dif",(PyCFunction)MF_run_series_dif,METH_VARARGS,"run_series_dif(...)"},
   {"nbins",(PyCFunction)MF_nbins,METH_VARARGS,"nbins(binsize, start, end)"},
+  {"q15_screen",(PyCFunction)MF_q15_screen,METH_VARARGS,"q15_screen(d0,nd,t0,nt,thr,start,end,pass,stat) -> passed"},
+  {"q15_lanes",(PyCFunction)MF_q15_lanes,METH_NOARGS,"q15_lanes() -> pairs per Q15 screen call, 0 if none"},
   {NULL}
 };
 static PyTypeObject MFType={
@@ -735,6 +758,15 @@ static PyObject *HMF_set_thresholds(HMFObject *self,PyObject *args){
   Py_RETURN_NONE;
 }
 
+static PyObject *HMF_set_q15(HMFObject *self,PyObject *args){
+  int on; if(!PyArg_ParseTuple(args,"p",&on)) return NULL;
+  return PyBool_FromLong(ap_hmf_set_q15(self->p,on)==0);
+}
+static PyObject *HMF_q15_stats(HMFObject *self,PyObject *unused){
+  (void)unused; long passed=0; unsigned long long ticks=0;
+  ap_hmf_q15_stats(self->p,&passed,&ticks);
+  return Py_BuildValue("(iLK)",ap_hmf_get_q15(self->p),(long long)passed,ticks);
+}
 static PyObject *HMF_series_group(HMFObject *self,PyObject *unused){
   (void)unused; return PyLong_FromLong(ap_hmf_series_group(self->p));
 }
@@ -751,6 +783,8 @@ static PyObject *HMF_set_hermitian(HMFObject *self,PyObject *args){
 
 static PyMethodDef HMF_methods[]={
   {"series_group",(PyCFunction)HMF_series_group,METH_NOARGS,"actual series block group"},
+  {"set_q15",(PyCFunction)HMF_set_q15,METH_VARARGS,"set_q15(on) -> True if the first tier now runs behind the Q15 screen"},
+  {"q15_stats",(PyCFunction)HMF_q15_stats,METH_NOARGS,"q15_stats() -> (on, pairs passed to the float tier, screen ticks)"},
   {"set_data",(PyCFunction)HMF_set_data,METH_VARARGS,"set_data(i, buffer)"},
   {"set_template",(PyCFunction)HMF_set_template,METH_VARARGS,"set_template(i, buffer)"},
   {"set_data_batch",(PyCFunction)HMF_set_data_batch,METH_VARARGS,"set_data_batch(i0, buffer)"},

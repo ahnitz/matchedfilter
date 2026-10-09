@@ -16,8 +16,8 @@
  * one contiguous run.
  */
 #include <time.h>
-#include "int16_coarse.h"
 #include "elemfft-inl.h"
+#include "q15-inl.h"
 
 #if defined(AP_BALANCED_INL_H_) == defined(HWY_TARGET_TOGGLE)
 #ifdef AP_BALANCED_INL_H_
@@ -81,7 +81,6 @@ typedef struct {
   /* 1 when N is below AP_W^2 and the plan runs the pair-batched path instead
      of the balanced split.  See create_small(). */
   int small;
-  int coarse_int16;
 } BP;
 
 /* Which lengths take the pair-batched path.
@@ -436,12 +435,6 @@ static void *create_small(size_t N){
   BP *p=ap_alloc64(sizeof(BP)); if(!p) return NULL;
   memset(p,0,sizeof(BP));
   p->N=N; p->N1=(int)N; p->N2=1; p->small=1;
-#if HWY_TARGET == HWY_AVX2
-  if(AP_W == 8 && (N == 256 || N == 512)){
-    const char *e_int16 = getenv("MF_COARSE_INT16");
-    p->coarse_int16 = (e_int16 && atoi(e_int16) > 0) ? 1 : 0;
-  }
-#endif
   p->a1=M1; p->a2=M2; p->b1=M1; p->b2=M2;
   p->ea=emake(M1,M2); p->eb=p->ea;
   const size_t se=(M2==1)?(size_t)N:(size_t)ESTRIDE(M1)*M2;
@@ -1567,11 +1560,6 @@ int binmax_prod_batch(void *vp,const float*dr,const float*di,
   if(!p->small||nlane<1||nlane>AP_W) return -1;
   const size_t nb=(we-ws+binsize-1)/binsize;
   if(bins_reserve(p,nb)) return -1;
-#if HWY_TARGET == HWY_AVX2
-  if(p->coarse_int16 && nb == 1) {
-    return ap_binmax_prod_batch_q15(dr, di, tr, ti, nlane, p->N, binsize, thr, out, ws, we);
-  }
-#endif
   if(broadcast_data(p))
     efft_prod_broadcast((int)p->N,dr,di,tr,ti,p->bR,p->bI,p->sR,p->sI,p->w1r,p->w1i);
   else
@@ -1715,7 +1703,8 @@ const ap_backend *Backend(void){
     hwy::TargetName(HWY_TARGET), AP_W,
     create, destroy, fft, supported,
     binmax, binmax_split, has_prod, split, binmax_prod, corr_prod, corr_split, series_buf, series_stride, interp_max,
-    pairbatch, binmax_prod_batch, binmax_prod_batch_lanes, corr_prod_batch, create_small, broadcast_data, (AP_W==8 || AP_W==16) ? binmax_prod_threshold : nullptr
+    pairbatch, binmax_prod_batch, binmax_prod_batch_lanes, corr_prod_batch, create_small, broadcast_data, (AP_W==8 || AP_W==16) ? binmax_prod_threshold : nullptr,
+    q15_lanes, q15_screen
   };
   return &be;
 }

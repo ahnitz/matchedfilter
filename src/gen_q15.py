@@ -1,0 +1,124 @@
+"""Generate the Q15 (int16 fixed-point) split-radix codelets in codelets-q15-inl.h.
+
+Same DAGs as gen.py's split-radix codelets, on a vector of int16 lanes (`vq`,
+twice the float lane count at a given vector width). The arithmetic is exact
+integer add/subtract plus Q15 rounding multiplies (Q_MUL = round(a*b / 2^15),
+vpmulhrsw on x86), and nothing in a codelet rescales: the caller sizes its
+inputs so that every intermediate stays in range (see q15-inl.h for the bound).
+Twiddle constants are |cos|, |sin| rounded to Q15 and the signs ride on the
+adds, as gen.py does for the float FMAs.
+
+    python src/gen_q15.py          # rewrites src/codelets-q15-inl.h
+"""
+import os
+import re
+
+from gen import SRGen, fold_negations, trivial, wconst
+
+
+def q15(v):
+    return max(-32767, min(32767, int(round(v * 32768.0))))
+
+
+class QGen(SRGen):
+    def const(s, c, v):
+        key = "%d" % q15(v)
+        if key not in s.consts:
+            s.consts[key] = "c%d" % len(s.consts)
+        return s.consts[key]
+
+    def cmul(s, ar, ai, c, sn, out):
+        t = trivial(c, sn)
+        orr, oii = out
+        if t == "1":
+            s.emit("vf %s=%s, %s=%s;" % (orr, ar, oii, ai)); return
+        if t == "-1":
+            s.emit("vf %s=V_SUB(Z,%s), %s=V_SUB(Z,%s);" % (orr, ar, oii, ai)); return
+        if t == "-i":
+            s.emit("vf %s=%s, %s=V_SUB(Z,%s);" % (orr, ai, oii, ar)); return
+        if t == "+i":
+            s.emit("vf %s=V_SUB(Z,%s), %s=%s;" % (orr, ai, oii, ar)); return
+        cc = s.const("c", abs(c)); ss = s.const("s", abs(sn))
+        k = s.nc; s.nc += 1
+        x1, x2, y1, y2 = ("m%d_%d" % (k, j) for j in range(4))
+        s.emit("vf %s=Q_MUL(%s,%s), %s=Q_MUL(%s,%s);" % (x1, ar, cc, x2, ai, ss))
+        s.emit("vf %s=Q_MUL(%s,%s), %s=Q_MUL(%s,%s);" % (y1, ar, ss, y2, ai, cc))
+        sc = 1 if c >= 0 else -1
+        sg = 1 if sn >= 0 else -1
+        # real = sc*x1 - sg*x2
+        if (sc, sg) == (1, 1):
+            s.emit("vf %s=V_SUB(%s,%s);" % (orr, x1, x2))
+        elif (sc, sg) == (1, -1):
+            s.emit("vf %s=V_ADD(%s,%s);" % (orr, x1, x2))
+        elif (sc, sg) == (-1, -1):
+            s.emit("vf %s=V_SUB(%s,%s);" % (orr, x2, x1))
+        else:
+            s.emit("vf n%s=V_ADD(%s,%s);" % (orr, x1, x2))
+            s.emit("vf %s=V_SUB(Z,n%s);" % (orr, orr))
+        # imag = sg*y1 + sc*y2
+        if (sg, sc) == (1, 1):
+            s.emit("vf %s=V_ADD(%s,%s);" % (oii, y1, y2))
+        elif (sg, sc) == (1, -1):
+            s.emit("vf %s=V_SUB(%s,%s);" % (oii, y1, y2))
+        elif (sg, sc) == (-1, 1):
+            s.emit("vf %s=V_SUB(%s,%s);" % (oii, y2, y1))
+        else:
+            s.emit("vf n%s=V_ADD(%s,%s);" % (oii, y1, y2))
+            s.emit("vf %s=V_SUB(Z,n%s);" % (oii, oii))
+
+    def load(s, idx):
+        o = ("q%d_r" % idx, "q%d_i" % idx)
+        if s.prod:
+            # conj(d*t) = (dr*tr - di*ti) + i(-di*tr - dr*ti). The data element
+            # is stored as (dr, di, -di) so the imaginary part is one subtract.
+            s.emit("vf tR%d=Q_LOADU(tr+TS*%d), tI%d=Q_LOADU(ti+TS*%d);" % (idx, idx, idx, idx))
+            s.emit("vf dR%d=Q_SET1(dq[DS*%d]), dI%d=Q_SET1(dq[DS*%d+1]), nI%d=Q_SET1(dq[DS*%d+2]);"
+                   % (idx, idx, idx, idx, idx, idx))
+            s.emit("vf %s=V_SUB(Q_MUL(dR%d,tR%d),Q_MUL(dI%d,tI%d));" % (o[0], idx, idx, idx, idx))
+            s.emit("vf %s=V_SUB(Q_MUL(nI%d,tR%d),Q_MUL(dR%d,tI%d));" % (o[1], idx, idx, idx, idx))
+            return o
+        if s.tw and idx != 0:
+            s.emit("const vf W%dr=Q_SET1(twr[%d]), W%di=Q_SET1(twi[%d]);" % (idx, idx, idx, idx))
+            s.emit("vf %s=V_SUB(Q_MUL(ar[S*%d],W%dr),Q_MUL(ai[S*%d],W%di));" % (o[0], idx, idx, idx, idx))
+            s.emit("vf %s=V_ADD(Q_MUL(ar[S*%d],W%di),Q_MUL(ai[S*%d],W%dr));" % (o[1], idx, idx, idx, idx))
+            return o
+        s.emit("vf %s=ar[S*%d], %s=ai[S*%d];" % (o[0], idx, o[1], idx))
+        return o
+
+
+def build_q(n, name, tw=False, prod=False):
+    g = QGen(n, name, tw, False, prod)
+    X = g.rec(list(range(n)))
+    for k in range(n):
+        g.emit("ar[S*%d]=%s; ai[S*%d]=%s;" % (k, X[k][0], k, X[k][1]))
+    body = fold_negations("\n".join(g.L))
+    body = re.sub(r"\bvf\b", "vq", body)
+    body = body.replace("V_ADD(", "Q_ADD(").replace("V_SUB(", "Q_SUB(")
+    cdefs = "\n".join("  const vq %s=Q_SET1(%s);" % (v, k) for k, v in g.consts.items())
+    if prod:
+        args = ("const int16_t*restrict dq,const int16_t*restrict tr,const int16_t*restrict ti,"
+                "vq*restrict ar,vq*restrict ai,const long S,const long DS,const long TS")
+    elif tw:
+        args = ("vq*restrict ar,vq*restrict ai,const long S,"
+                "const int16_t*restrict twr,const int16_t*restrict twi")
+    else:
+        args = "vq*restrict ar,vq*restrict ai,const long S"
+    zero = "  const vq Z=Q_ZERO();\n" if re.search(r"\bZ\b", body) else ""
+    return ("static HWY_INLINE void %s(%s){\n%s%s\n%s\n}\n" % (name, args, zero, cdefs, body))
+
+
+if __name__ == "__main__":
+    out = ["/* generated by gen_q15.py - do not edit.  Q15 split-radix codelets on vq,",
+           "   the int16 vector q15-inl.h defines for the current target. */",
+           "#if defined(AP_CODELETS_Q15_INL_H_) == defined(HWY_TARGET_TOGGLE)",
+           "#ifdef AP_CODELETS_Q15_INL_H_", "#undef AP_CODELETS_Q15_INL_H_",
+           "#else", "#define AP_CODELETS_Q15_INL_H_", "#endif", "",
+           "HWY_BEFORE_NAMESPACE();", "namespace ap {", "namespace HWY_NAMESPACE {", ""]
+    for nn in (8, 16, 32):
+        out.append(build_q(nn, "qsr%d_prod" % nn, prod=True))
+        out.append(build_q(nn, "qsr%d_tw" % nn, tw=True))
+    out += ["}  // namespace HWY_NAMESPACE", "}  // namespace ap",
+            "HWY_AFTER_NAMESPACE();", "", "#endif", ""]
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "codelets-q15-inl.h")
+    open(path, "w").write("\n".join(out))
+    print("generated", path)

@@ -57,6 +57,12 @@ struct ap_hmf_plan {
   float *tmpls_half,*prod_scratch;
   ap_peak *dif_pk_e,*dif_pk_o;
   size_t dif_pkcap;
+  /* Q15 screen in front of the first tier (ap_hmf_set_q15) */
+  int q15;
+  unsigned char *qpass;           /* [nd*nt] */
+  int *qd,*qt;                    /* the screen's survivors */
+  long qpassed;
+  unsigned long long qticks;
 };
 
 int ap_hmf_series_group(const ap_hmf_plan *p){ return p ? p->dgroup : 0; }
@@ -162,7 +168,30 @@ void ap_hmf_destroy(ap_hmf_plan *p){
   if(p->dif_pk_e) free(p->dif_pk_e);
   if(p->dif_pk_o) free(p->dif_pk_o);
   if(p->dump) fclose(p->dump);
+  free(p->qpass); free(p->qd); free(p->qt);
   free(p);
+}
+
+int ap_hmf_set_q15(ap_hmf_plan *p,int on){
+  if(!p) return -1;
+  if(!on){ p->q15=0; return 0; }
+  if(ap_mf_q15_lanes(p->tier[0].mf)<=0) return -1;
+  if(!p->qpass){
+    const size_t np=(size_t)p->nd*p->nt;
+    p->qpass=malloc(np); p->qd=malloc(np*sizeof(int)); p->qt=malloc(np*sizeof(int));
+    if(!p->qpass||!p->qd||!p->qt){
+      free(p->qpass); free(p->qd); free(p->qt); p->qpass=NULL; p->qd=p->qt=NULL; return -1;
+    }
+  }
+  p->q15=1;
+  return 0;
+}
+int ap_hmf_get_q15(const ap_hmf_plan *p){ return p ? p->q15 : 0; }
+int ap_hmf_q15_stats(const ap_hmf_plan *p,long *passed,unsigned long long *ticks){
+  if(!p) return -1;
+  if(passed) *passed=p->qpassed;
+  if(ticks) *ticks=p->qticks;
+  return 0;
 }
 
 int ap_hmf_set_hermitian(ap_hmf_plan *p,int hermitian){
@@ -578,7 +607,25 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
     const size_t cspan = cend>cstart ? cend-cstart : 1;
     const float thr=tr->thr;
     unsigned long long t_0=ap_ticks();
-    if(i==0){
+    if(i==0 && p->q15){
+      /* Screen every pair in int16, then run the float tier on the pairs the
+         screen could not reject, pooled as a later tier is.  A pair the screen
+         rejects cannot reach thr in the float tier (ap_mf_q15_screen), so the
+         survivors -- and everything downstream -- are the float tier's. */
+      unsigned long long q0=ap_ticks();
+      int ns=ap_mf_q15_screen(tr->mf,d0,nd,t0,nt,thr,cstart,cend,p->qpass,NULL);
+      if(ns<0) return -1;
+      int k=0;
+      for(int d=0;d<nd;d++) for(int t=0;t<nt;t++){
+        const size_t row=(size_t)d*nt+t;
+        if(p->qpass[row]){ p->qd[k]=d; p->qt[k]=t; k++; }
+        else tr->cebuf[row].index=-1;
+      }
+      p->qpassed+=k;
+      p->qticks+=ap_ticks()-q0;
+      if(k && ap_mf_run_pairs_pooled(tr->mf,d0,p->qd,p->qt,k,t0,cspan,thr,tr->cebuf,NULL,
+                                     cstart,cend,nt)<0) return -1;
+    } else if(i==0){
       /* The first tier runs on every pair of the segment in one call: the data
          spectrum is read once and stays resident across the whole template sweep. */
       if(tr->g16){

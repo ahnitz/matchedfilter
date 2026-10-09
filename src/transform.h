@@ -7,6 +7,7 @@
  * reason to hold a transform plan - the MatchedFilter is the plan - and every
  * symbol here is used only by src/matchfilt.c, the tests and the benchmarks. */
 #include <stddef.h>
+#include <stdint.h>
 #include "matchedfilter.h"
 
 typedef struct ap_plan ap_plan;
@@ -90,5 +91,15 @@ int ap_corr_prod(ap_plan *p, const float *dr, const float *di,
 int ap_corr_split(ap_plan *p, const float *re, const float *im, float *out);
 int ap_corr_prod_batch(ap_plan *p, const float *dr, const float *di,
                        const float *tr, const float *ti, int nlane, float *out);
+
+/* Q15 coarse screen (q15-inl.h).  ap_q15_lanes: int16 lanes per screen call
+   on the active back end, 0 if it has none.  ap_q15_screen: for that many
+   pairs, bit l of *bits is set when lane l's maximum of |z|^2/2^15 over
+   [start,end) reaches lanethr[l]; lanemax (may be NULL) receives the maxima.
+   dq is [N][3] = (dr, di, -di), tr/ti are [N][lanes].  0 on success. */
+int ap_q15_lanes(void);
+int ap_q15_screen(size_t N, const int16_t *dq, const int16_t *tr, const int16_t *ti,
+                  size_t start, size_t end, const int16_t *lanethr, uint64_t *bits,
+                  int16_t *lanemax, void *scratch);
 
 #endif
