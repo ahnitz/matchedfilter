@@ -8,8 +8,13 @@
 // length. The hierarchical stages read their band straight out of the full
 // n-point spectra (stride n) instead of a packed band copy.
 [[vk::constant_id(75)]] const uint mfDataStride = 0;
+// Per-row search windows (hier_peaks_grouped): 0 off, 1 the row's raw window
+// [lo, hi), 2 that window mapped onto this kernel's coarse band. The rows'
+// (lo, hi) come from the gRowWin buffer.
+[[vk::constant_id(76)]] const uint mfRowWindows = 0;
 #else
 static const uint mfDataStride = 0;
+static const uint mfRowWindows = 0;
 static const uint mfAccurateTrig = 0;
 static const uint mfSubgroupSize = 32;
 #endif

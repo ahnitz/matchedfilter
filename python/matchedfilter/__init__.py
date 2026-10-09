@@ -1487,6 +1487,7 @@ class MatchedFilter:
             and nt <= self._gpu_pair_limit())
         if grouped:
             in_flight = []
+            gtrace = []
             slot_idx = slot0 if defer else 0
             # The batches' groups and rebased starts, per (layout, batch, series size, base):
             # the same every segment of a search.
@@ -1523,6 +1524,8 @@ class MatchedFilter:
                     self._gpu.cancel_forward(slot=slot if pipelined else None)
                     raise
                 in_flight.append((begin, end, res))
+                if defer and is_hier:
+                    gtrace.append((begin, end, getattr(self._gpu, "_last_dispatch", None)))
                 if len(in_flight) >= K:
                     b_start, b_end, item = in_flight.pop(0)
                     take_dense(b_start, b_end, item() if callable(item) else item)
@@ -1538,6 +1541,9 @@ class MatchedFilter:
                 return finish_grouped()
             self._defer_slot = slot_idx
             deferred = _Deferred(finish_grouped)
+            if gtrace and all(t[2] is not None for t in gtrace) and raw:
+                # How to read this call's result again from its buffers (SegmentPlan replay).
+                deferred.trace = dict(groups=gtrace, shape=shape, order=layout.order)
             owners = self.__dict__.setdefault("_slot_owner", {})
             for k in range(slot0, slot_idx):
                 owners[k % K] = deferred

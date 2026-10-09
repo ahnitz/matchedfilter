@@ -43,7 +43,7 @@
       },
       "refine": {
         "file": "refine_64.spv",
-        "descriptors": 5
+        "descriptors": 6
       },
       "metal": {
         "fusedTierB": {
@@ -105,7 +105,7 @@
       },
       "refine": {
         "file": "refine_128.spv",
-        "descriptors": 5
+        "descriptors": 6
       },
       "metal": {
         "fusedTierB": {
@@ -167,7 +167,7 @@
       },
       "refine": {
         "file": "refine_256.spv",
-        "descriptors": 5,
+        "descriptors": 6,
         "one_bin": {
           "file": "refine_256_onebin.spv"
         }
@@ -242,7 +242,7 @@
       },
       "refine": {
         "file": "refine_512.spv",
-        "descriptors": 5,
+        "descriptors": 6,
         "one_bin": {
           "file": "refine_512_onebin.spv"
         }
@@ -323,7 +323,7 @@
       },
       "refine": {
         "file": "refine_1024.spv",
-        "descriptors": 5,
+        "descriptors": 6,
         "one_bin": {
           "file": "refine_1024_onebin.spv"
         }
@@ -412,7 +412,7 @@
       },
       "refine": {
         "file": "refine_2048.spv",
-        "descriptors": 5,
+        "descriptors": 6,
         "one_bin": {
           "file": "refine_2048_onebin.spv"
         }
@@ -501,7 +501,7 @@
       },
       "refine": {
         "file": "refine_4096.spv",
-        "descriptors": 5,
+        "descriptors": 6,
         "one_bin": {
           "file": "refine_4096_onebin.spv"
         }
@@ -599,7 +599,7 @@
       },
       "refine": {
         "file": "refine_8192.spv",
-        "descriptors": 5,
+        "descriptors": 6,
         "portable": {
           "file": "refine_8192_lds32.spv",
           "lds_bytes": 32768
@@ -736,7 +736,7 @@
       },
       "refine": {
         "file": "refine_16384.spv",
-        "descriptors": 5,
+        "descriptors": 6,
         "portable": {
           "file": "refine_16384_lds32.spv",
           "lds_bytes": 32768
@@ -863,7 +863,7 @@
       },
       "refine": {
         "file": "refine_32768.spv",
-        "descriptors": 5,
+        "descriptors": 6,
         "portable": {
           "file": "refine_32768_lds32.spv",
           "lds_bytes": 32768
@@ -990,7 +990,7 @@
       },
       "refine": {
         "file": "refine_65536.spv",
-        "descriptors": 5,
+        "descriptors": 6,
         "portable": {
           "file": "refine_65536_lds32.spv",
           "lds_bytes": 32768
@@ -1478,11 +1478,11 @@
     }
   },
   "source_hashes": {
-    "tierb.slang": "57c588946eae111744557ccf324e961d0e364668076d0aeb3a479528dcc47e02",
+    "tierb.slang": "bf2739fed6277b038c4b8308fcb6d3144461ed6b79df25e461f0e6eb4cbf5b6a",
     "fft_transform.slang": "504c70cb63d1d87c84d60d93b7a0c9a359fe67cfe48dcbe1fbc84127a12b3bc1",
     "coarse_tile.slang": "8b1a3f9193e20b76cc02641e71b77023d544b0bd1bff8c4194f38371ad47fb47",
     "series_forward.slang": "1ed347cedae7d1f7543ccfbfd6a4ea1971f6be1eb4fdd504c9e6b0a17b849ee5",
     "pack_coarse.slang": "6599e775732a3d54ef2517a469aaa311a38028b41a92a87e166fce94ef3076c2",
-    "twiddle.slang": "962aa8eb399c0e8ccd9c80ba97a5f11b84dfa4db64c009d15c8d0a915bad16d1"
+    "twiddle.slang": "9204f1c0df8a313c0cee560fbaeea44065cac1830b91299a8c1dc43eb1025315"
   }
 }

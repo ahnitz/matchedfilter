@@ -215,7 +215,7 @@ void dftR_0(array<float2, int(16)> thread* r_1)
 }
 
 
-#line 17 "/home/ahnitz/projects/claude/searchdev/work/peak-fft/.claude/worktrees/agent-aaf230abdd173dffa/src/gpu/twiddle.slang"
+#line 22 "/home/ahnitz/projects/claude/searchdev/work/peak-fft/.claude/worktrees/agent-aaf230abdd173dffa/src/gpu/twiddle.slang"
 float2 mfTwiddle_0(float angle_0)
 {
 

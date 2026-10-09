@@ -64,6 +64,21 @@ def _use_c16(band):
     return True   # one-bin specialised coarse kernel; applies at every band
 
 
+def _module_bindings(blob):
+    """1 + the highest descriptor binding a SPIR-V module declares (0 if none)."""
+    import struct
+    words = struct.unpack("<%dI" % (len(blob) // 4), blob)
+    top, i = -1, 5
+    while i < len(words):
+        op, count = words[i] & 0xFFFF, words[i] >> 16
+        if count == 0:
+            break
+        if op == 71 and count >= 4 and words[i + 2] == 33:      # OpDecorate Binding
+            top = max(top, words[i + 3])
+        i += count
+    return top + 1
+
+
 def coarse_launch(nd, nt, ppg, tile, cspan):
     """(push-constant binsize slot, workgroup count) for a packed coarse build.
 
@@ -932,15 +947,21 @@ class Context(InputUploads):
             return alt["file"]
         return "tierb_%d.spv" % n
 
-    def _build_pipeline(self, key, filename, nbind, push_bytes, data_stride=0):
+    def _build_pipeline(self, key, filename, nbind, push_bytes, data_stride=0, row_windows=0):
         """data_stride: specialization constant 75 (mfDataStride), the data spectra's row
-        stride when a hierarchical stage reads its band straight out of them."""
-        if data_stride:
-            key = (key, "stride", data_stride)
+        stride when a hierarchical stage reads its band straight out of them.
+        row_windows: constant 76 (mfRowWindows), per-row windows from the gRowWin binding.
+
+        The set layout covers every binding the MODULE declares, which can exceed the
+        caller's count (gRowWin); _descriptor_set fills such trailing bindings with a
+        dummy buffer."""
+        if data_stride or row_windows:
+            key = (key, "stride", data_stride, "rowwin", row_windows)
         if key in self._pipelines:
             return self._pipelines[key]
         vk = self.vk
         blob = (_SPIRV / filename).read_bytes()
+        nbind = max(nbind, _module_bindings(blob))
         code = (ctypes.c_ubyte * len(blob)).from_buffer_copy(blob)
         sm_info = _ShaderModule(16, None, 0, len(blob), ctypes.cast(code, _vp))
         module = _vp()
@@ -955,6 +976,7 @@ class Context(InputUploads):
         _check(vk.vkCreateDescriptorSetLayout(self.device, ctypes.byref(sl_info),
                                               None, ctypes.byref(set_layout)),
                "vkCreateDescriptorSetLayout")
+        self._device_state.__dict__.setdefault("layout_nbind", {})[set_layout.value] = nbind
 
         # The uniform entry-point parameters compile to PUSH CONSTANTS, not
         # to a descriptor. Taking that from the compiled module rather than
@@ -981,6 +1003,10 @@ class Context(InputUploads):
         if data_stride:
             entries.append(_SpecializationEntry(75, offset, 4))
             data_vals.append(int(data_stride))
+            offset += 4
+        if row_windows:
+            entries.append(_SpecializationEntry(76, offset, 4))
+            data_vals.append(int(row_windows))
             offset += 4
 
         # Intel accurate trig (constant ID 73)
@@ -1011,7 +1037,7 @@ class Context(InputUploads):
                    binsize=None, threshold=0.0, window=None,
                    upload_data=True, upload_tmpl=True,
                    cascade_band=None, ct1=None, raw_thr1=None,
-                   slot=None, async_submit=False, sparse=False):
+                   slot=None, async_submit=False, sparse=False, row_windows=None):
         """The whole hierarchical filter in ONE command buffer.
 
         Coarse correlation, survivor compaction, then listed refinement.
@@ -1035,6 +1061,11 @@ class Context(InputUploads):
             raise ValueError("empty window (%d, %d)" % (lo, hi))
         binsize = n if binsize is None else int(binsize)
         nbins = -(-(hi - lo) // binsize)
+        # row_windows (hier_peaks_grouped): (groups, per-row uint32 [lo, hi] pairs).
+        rw_key = None if row_windows is None else row_windows[0]
+        rw = None if row_windows is None else row_windows[1]
+        if nbins > _MAX_BINS and rw is not None:
+            raise ValueError("grouped dispatch exceeds the kernel bin limit")
         if nbins > _MAX_BINS:
             span = _MAX_BINS * binsize
             pi, pv = [], []
@@ -1062,9 +1093,9 @@ class Context(InputUploads):
             # its recording skips clearing the dense outputs (bool(sparse) in the key).
             key = ("hier_cascade", n, band0, band1, nd, nt, nbins, binsize, shift, lo, hi,
                    int(np.float32(t2).view(np.uint32)),
-                   thr0, thr1, bool(sparse))
+                   thr0, thr1, bool(sparse), rw_key)
             key += (shared_key(data, self), shared_key(tmpl, self), slot)
-            storage_key = ("hier_cascade", n, band0, band1, nd, nt, nbins, *key[-3:])
+            storage_key = ("hier_cascade", n, band0, band1, nd, nt, nbins, rw_key, *key[-3:])
             upload_data, upload_tmpl, dsig, tsig = self._input_uploads(
                 storage_key, data, tmpl, upload_data, upload_tmpl)
             batch = self._hier_cascade.get(key)
@@ -1082,7 +1113,7 @@ class Context(InputUploads):
                 try:
                     batch = self._make_hier_cascade(storage_key, n, band0, band1, nd, nt, nbins, binsize,
                                                     shift, lo, hi, t2, thr0, thr1, data, tmpl,
-                                                    clear_out=not sparse)
+                                                    clear_out=not sparse, rowwin=rw)
                 finally:
                     self._capture_end(batch[-1] if batch else None)
                 self._hier_cascade[key] = batch
@@ -1119,9 +1150,9 @@ class Context(InputUploads):
 
         key = ("hier", n, band, nd, nt, nbins, binsize, shift, lo, hi,
                int(np.float32(t2).view(np.uint32)),
-               float(raw_thr), bool(sparse))
+               float(raw_thr), bool(sparse), rw_key)
         key += (shared_key(data, self), shared_key(tmpl, self), slot)
-        storage_key = ("hier", n, band, nd, nt, nbins, *key[-3:])
+        storage_key = ("hier", n, band, nd, nt, nbins, rw_key, *key[-3:])
         upload_data, upload_tmpl, dsig, tsig = self._input_uploads(
             storage_key, data, tmpl, upload_data, upload_tmpl)
         batch = self._hier.get(key)
@@ -1139,7 +1170,7 @@ class Context(InputUploads):
             try:
                 batch = self._make_hier(storage_key, n, band, nd, nt, nbins, binsize,
                                         shift, lo, hi, t2, raw_thr, data, tmpl,
-                                        clear_out=not sparse)
+                                        clear_out=not sparse, rowwin=rw)
             finally:
                 self._capture_end(batch[-1] if batch else None)
             self._hier[key] = batch
@@ -1202,6 +1233,17 @@ class Context(InputUploads):
 
     def _descriptor_set(self, set_layout, bufs, offsets=None):
         vk = self.vk
+        # Bindings the module declares past the caller's list (gRowWin when per-row
+        # windows are off) get a small dummy buffer the kernel never reads.
+        want = self._device_state.__dict__.get("layout_nbind", {}).get(
+            getattr(set_layout, "value", set_layout), len(bufs))
+        if want > len(bufs):
+            dummy = getattr(self, "_dummy_buf", None)
+            if dummy is None:
+                dummy = self._dummy_buf = _Buffer(self, 64)
+            bufs = list(bufs) + [dummy] * (want - len(bufs))
+            if offsets is not None:
+                offsets = list(offsets) + [0] * (want - len(offsets))
         nbind = len(bufs)
         sizes = (_PoolSize * 1)(_PoolSize(_DESC_STORAGE_BUFFER, nbind))
         dp = _DescPoolCreate(33, None, 0, 1, 1, sizes)
@@ -1271,7 +1313,7 @@ class Context(InputUploads):
         return 1, 1, pairs, False
 
     def _make_hier(self, key, n, band, nd, nt, nbins, binsize, shift, lo, hi,
-                   t2, raw_thr, data=None, tmpl=None, clear_out=True):
+                   t2, raw_thr, data=None, tmpl=None, clear_out=True, rowwin=None):
         vk = self.vk
         tile = _COARSE_TILE.get(band)
         _ppg = 1          # pairs per workgroup; raised only on the c16 path
@@ -1319,7 +1361,7 @@ class Context(InputUploads):
                 "tierb_%d_c16%s%s.spv" % (band,
                     "p%d" % _ppg if _ppg > 1 else "",
                     "t%d" % _tile if _tile > 1 else ""),
-                _NBIND, _PUSH_BYTES, data_stride=n)
+                _NBIND, _PUSH_BYTES, data_stride=n, row_windows=2 if rowwin is not None else 0)
         # gatedTierB is NOT built. Its only caller was coarse_odd(), the
         # last remnant of the even/odd split, which was never invoked after
         # the odd half was removed -- so the kernel was compiled on every
@@ -1330,7 +1372,8 @@ class Context(InputUploads):
             "compact", "compact.spv", 3, 12)
         refine_file = self._peak_file(n, nbins, refine=True)
         rpipe, rlayout, rset_layout = self._build_pipeline(
-            ("refine", refine_file), refine_file, 5, _PUSH_BYTES)
+            ("refine", refine_file), refine_file, 5, _PUSH_BYTES,
+            row_windows=1 if rowwin is not None else 0)
         pairs = nd * nt
         b = self._storage.get(key)
         if b is None:
@@ -1352,7 +1395,13 @@ class Context(InputUploads):
                 "idx":   _Buffer(self, nd * nt * nbins * 4, readback=True, usage=_BUF_STORAGE | _BUF_TRANSFER_DST),
                 "val":   _Buffer(self, nd * nt * nbins * 8, readback=True, usage=_BUF_STORAGE | _BUF_TRANSFER_DST),
             }
+            if rowwin is not None:
+                if not direct:
+                    raise ValueError("per-row windows need the packed coarse role")
+                b["rowwin"] = _Buffer(self, rowwin.nbytes)
+                b["rowwin"].write(rowwin)
             self._storage[key] = b
+        rwb = [b["rowwin"]] if rowwin is not None else []
         # The tiled coarse kernel reports a magnitude per pair and nothing
         # else -- a maximum does not depend on the output ordering, so it
         # needs no index and no digit reversal.
@@ -1362,12 +1411,12 @@ class Context(InputUploads):
         else:
             ds_coarse = self._descriptor_set(cset_layout,
                                            [b["data"] if direct else b["cdata"], b["ct0"],
-                                            b["cidx"], b["cval"]])
+                                            b["cidx"], b["cval"]] + rwb)
         ds_compact = self._descriptor_set(
             kset_layout, [b["cval"], b["surv"], b["args"]])
         ds_listed = self._descriptor_set(
             rset_layout,
-            [b["data"], b["tmpl"], b["idx"], b["val"], b["surv"]])
+            [b["data"], b["tmpl"], b["idx"], b["val"], b["surv"]] + rwb)
 
         shared_data = shared_buffer(data, self) is not None and not direct
         if shared_data:
@@ -1501,8 +1550,10 @@ class Context(InputUploads):
         return b, cmd
 
     def _make_hier_cascade(self, key, n, band0, band1, nd, nt, nbins, binsize, shift, lo, hi,
-                           t2, raw_thr0, raw_thr1, data=None, tmpl=None, clear_out=True):
+                           t2, raw_thr0, raw_thr1, data=None, tmpl=None, clear_out=True,
+                           rowwin=None):
         vk = self.vk
+        rwc, rwr = (2, 1) if rowwin is not None else (0, 0)   # coarse / raw row windows
         _ppg0, _tile0, _groups0, _ragged0 = self._coarse_geometry(band0, nd, nt)
 
         cpipe0, clayout0, cset_layout0 = self._build_pipeline(
@@ -1510,18 +1561,19 @@ class Context(InputUploads):
             "tierb_%d_c16%s%s.spv" % (band0,
                 "p%d" % _ppg0 if _ppg0 > 1 else "",
                 "t%d" % _tile0 if _tile0 > 1 else ""),
-            _NBIND, _PUSH_BYTES, data_stride=n)
+            _NBIND, _PUSH_BYTES, data_stride=n, row_windows=rwc)
 
         kpipe, klayout, kset_layout = self._build_pipeline(
             "compact", "compact.spv", 3, 12)
 
         refine_file1 = self._peak_file(band1, 1, refine=True)
         cpipe1, clayout1, cset_layout1 = self._build_pipeline(
-            ("refine", refine_file1), refine_file1, 5, _PUSH_BYTES, data_stride=n)
+            ("refine", refine_file1), refine_file1, 5, _PUSH_BYTES, data_stride=n,
+            row_windows=rwc)
 
         refine_file = self._peak_file(n, nbins, refine=True)
         rpipe, rlayout, rset_layout = self._build_pipeline(
-            ("refine", refine_file), refine_file, 5, _PUSH_BYTES)
+            ("refine", refine_file), refine_file, 5, _PUSH_BYTES, row_windows=rwr)
 
         pairs = nd * nt
         b = self._storage.get(key)
@@ -1544,20 +1596,24 @@ class Context(InputUploads):
                 "idx":         _Buffer(self, nd * nt * nbins * 4, readback=True, usage=_BUF_STORAGE | _BUF_TRANSFER_DST),
                 "val":         _Buffer(self, nd * nt * nbins * 8, readback=True, usage=_BUF_STORAGE | _BUF_TRANSFER_DST),
             }
+            if rowwin is not None:
+                b["rowwin"] = _Buffer(self, rowwin.nbytes)
+                b["rowwin"].write(rowwin)
             self._storage[key] = b
+        rwb = [b["rowwin"]] if rowwin is not None else []
 
         ds_coarse0 = self._descriptor_set(
-            cset_layout0, [b["data"], b["ct0"], b["cidx0"], b["cval0"]])
+            cset_layout0, [b["data"], b["ct0"], b["cidx0"], b["cval0"]] + rwb)
         ds_compact0 = self._descriptor_set(
             kset_layout, [b["cval0"], b["surv0"], b["args_tier1"]])
         ds_tier1 = self._descriptor_set(
-            cset_layout1, [b["data"], b["ct1"], b["cidx1"], b["cval1"], b["surv0"]])
+            cset_layout1, [b["data"], b["ct1"], b["cidx1"], b["cval1"], b["surv0"]] + rwb)
         lpipe, llayout, lset_layout = self._build_pipeline(
             "compactl", "compactl.spv", 5, 12)
         ds_compact1 = self._descriptor_set(
             lset_layout, [b["cval1"], b["surv1"], b["args_refine"], b["surv0"], b["args_tier1"]])
         ds_listed = self._descriptor_set(
-            rset_layout, [b["data"], b["tmpl"], b["idx"], b["val"], b["surv1"]])
+            rset_layout, [b["data"], b["tmpl"], b["idx"], b["val"], b["surv1"]] + rwb)
 
         cb = _CmdBufAlloc(40, None, self.command_pool, 0, 1)
         cmd = _vp()
@@ -1666,6 +1722,46 @@ class Context(InputUploads):
         self._stamp(cmd, "refine")
         _check(vk.vkEndCommandBuffer(cmd), "vkEndCommandBuffer")
         return b, cmd
+
+    def hier_peaks_grouped(self, n, band, data, tmpl, ct0, raw_thr, groups, binsize, threshold,
+                           *, upload_tmpl=True, cascade_band=None, ct1=None, raw_thr1=None,
+                           slot=None, async_submit=False, sparse=False, nbins=None):
+        """Hierarchical peaks over row ranges of one spectra batch, each with its own window,
+        as ONE recording: every tier is a single dispatch over all rows.
+
+        ``groups`` holds (lo, hi, a, b): rows a..b of ``data`` are searched over [lo, hi).
+        The windows go to the kernels per row (gRowWin, mfRowWindows), so a series call's
+        first, interior and last block groups no longer cost three dispatches per stage.
+        Output bins follow the first group's bin count, as hier_peaks_grouped on CUDA."""
+        nd = data.shape[0]
+        groups = tuple((int(lo), int(hi), int(a), int(b)) for lo, hi, a, b in groups)
+        binsize = int(binsize)
+        nb = (groups[0][1] - groups[0][0] - 1) // binsize + 1
+        if nbins is not None:
+            nb = max(nb, int(nbins))
+        if nb > _MAX_BINS:
+            raise ValueError("grouped dispatch exceeds the kernel bin limit")
+        if shared_buffer(data, self) is None:
+            raise ValueError("grouped spectra must be GPU-shared (a forward batch)")
+        win = np.zeros(2 * nd, np.uint32)
+        for lo, hi, a, b in groups:
+            if not (0 <= lo < hi <= n) or not (0 <= a < b <= nd):
+                raise ValueError("invalid group (%d, %d, %d, %d)" % (lo, hi, a, b))
+            if (hi - lo - 1) // binsize + 1 > nb:
+                raise ValueError("grouped windows must not exceed the first group's bin count")
+            win[2 * a:2 * b:2] = lo
+            win[2 * a + 1:2 * b:2] = hi
+        # The recording's bin count is the output's: a window of nb bins from the first
+        # group's start (clipped to n), the per-row windows narrowing it on the device.
+        lo0 = groups[0][0]
+        hi0 = min(n, lo0 + nb * binsize)
+        if -(-(hi0 - lo0) // binsize) != nb:
+            lo0, hi0 = max(0, n - nb * binsize), n
+        return self.hier_peaks(n, band, data, tmpl, ct0, raw_thr, binsize=binsize,
+                               threshold=threshold, window=(lo0, hi0), upload_data=False,
+                               upload_tmpl=upload_tmpl, cascade_band=cascade_band, ct1=ct1,
+                               raw_thr1=raw_thr1, slot=slot, async_submit=async_submit,
+                               sparse=sparse, row_windows=(groups, win))
 
     def empty_shared(self, shape, dtype=np.complex64, *, readback=False):
         factory = (lambda ctx, size: _Buffer(ctx, size, readback=True)) if readback else _Buffer

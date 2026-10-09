@@ -146,6 +146,32 @@ C cload(StructuredBuffer<CVal> b, uint i) { return b[i]; }
 #endif
 //: The data row stride (see mfDataStride in twiddle.slang).
 #define DSTRIDE ((mfDataStride != 0u) ? mfDataStride : N)
+
+#if defined(MF_VULKAN)
+//: Per-row windows, (lo, hi) per data row, read when mfRowWindows != 0. A
+//: separate binding after the entry's own (4 for the coarse role, 5 for the
+//: listed refine), so no existing binding moves; Vulkan only.
+#if COARSE16
+[[vk::binding(4, 0)]] StructuredBuffer<uint> gRowWin;
+#else
+[[vk::binding(5, 0)]] StructuredBuffer<uint> gRowWin;
+#endif
+//: The window of data row d for this kernel: raw, or mapped onto the band
+//: exactly as the host maps one window (cstart/cend in _vkcompute).
+void rowWindow(uint d, inout uint winStart, inout uint winEnd)
+{
+    if (mfRowWindows == 0u) return;
+    uint lo = gRowWin[2u * d], hi = gRowWin[2u * d + 1u];
+    if (mfRowWindows == 1u) { winStart = lo; winEnd = hi; return; }
+    uint rr = mfDataStride / N;
+    uint cs = lo / rr, ce = min(N, (hi + rr - 1u) / rr);
+    if (cs > 0u) cs -= 1u;
+    ce = max(cs + 1u, ce);
+    winStart = cs; winEnd = ce;
+}
+#else
+void rowWindow(uint d, inout uint winStart, inout uint winEnd) {}
+#endif
 //: A data element for the coarse role. With a stride set, the data buffer is
 //: the full fp32 spectra (two words per element) and is rounded to half here,
 //: exactly as packCoarse rounded it (f32tof16, round to nearest even).
@@ -1183,6 +1209,7 @@ void filterPair(uint pair, uint tid,
     uint q = slotOk ? pair : slots - 1u;
     uint d = q / tiles, t0 = (q - d * tiles) * TILE_T;
     uint p0 = d * ntmpl + t0;
+    rowWindow(d, winStart, winEnd);
 #else
     uint p0 = pair * TILE_T;
     uint d = p0 / ntmpl, t0 = p0 % ntmpl;
@@ -1390,8 +1417,10 @@ void refineListed(uint3 gid: SV_GroupID, uint3 lid: SV_GroupThreadID,
     // written, every coarse peak came back -1, and macOS CI dismissed a
     // 12-sigma injection while Linux passed.
     _stgBase = 0;
+    uint ws = winStart, we = winEnd;
+    rowWindow(pair / ntmpl, ws, we);
     filterPair(pair, lid.x, data, tmpl, peakIdx, peakVal, ntmpl,
-               winStart, winEnd, binsize, binShift, nbins, thrBits);
+               ws, we, binsize, binShift, nbins, thrBits);
 }
 
 // ---------------------------------------------------------------------
