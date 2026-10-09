@@ -2210,7 +2210,8 @@ class HierarchicalFilter(MatchedFilter):
         tiers = min(self.max_tiers, self._MAX_TIERS[self.device.kind])
         ref = np.asarray(self._pending_ref, np.float64)
         prof = _gatechain._gm._profile_sig(ref / ref.sum())
-        key = (self.n, float(snr), float(self.fd), tiers, self.search_window, prof, str(self.device))
+        key = (self.n, float(snr), float(self.fd), tiers, self.search_window, prof, str(self.device),
+               _gatechain.cpu_gate_kind() if self.device.kind == "cpu" else None)
         with _AUTOTUNE_LOCK:
             hit = _CHAIN_CHOICE.get(key)
         if hit is None:

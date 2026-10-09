@@ -16,7 +16,10 @@ def device(request):
 
 
 @pytest.mark.parametrize('band', [128, 256, 512])
-def test_gate_matches_reference_under_scaling_and_bank_partition(device, band):
+def test_gate_matches_reference_under_scaling_and_bank_partition(device, band, monkeypatch):
+    # Exact admission at the threshold is the FP32 gate's property. The FP16 first gate (ARM)
+    # admits a superset by a measured margin instead; tests/test_gate16.py covers it.
+    monkeypatch.setenv("MF_GATE16", "0")
     n, nd, nt = 1024, 12, 4
     rng = np.random.default_rng(810 + band)
     data = (rng.normal(size=(nd, n)) + 1j*rng.normal(size=(nd, n))).astype(np.complex64)
