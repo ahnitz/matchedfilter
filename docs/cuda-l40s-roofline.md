@@ -280,3 +280,72 @@ forward FFT.
 - A smaller coarse gate cost, by occupancy and by fusing the forward FFT into the gate's pack.
 - One fused multi-bank submission per segment. It needs a multi-bank API that skips per-bank
   Python, because host time is now ~60% of wall.
+
+## Phase 3 (2026-10-09): follow-up items, no local arrays, measured coarse variant
+
+### How the bench was run
+`ladder --profiles ladder_profiles_H1.npz --pure --segments 4`, with main's default
+`--warmup 2`, so 2 steady segments. Runs are interleaved (CPU, main 0bc93f8, this branch),
+min of 5, steady seconds.
+
+### Results
+
+| | middle | fine | asym | fine+asym | TIRT (median) |
+|---|---:|---:|---:|---:|---:|
+| CPU, 1 core | 0.162 | 0.993-0.999 | 0.017 | 1.01 | 4.5e6 |
+| main, batched, `MF_AUTOTUNE=0` | 0.012 | 0.028 | 0.039 | ~0.07-0.15 | 76.2e6 |
+| this branch, batched, `MF_AUTOTUNE=0` | 0.012 | 0.050 | **0.0155** | 0.065-0.079 | **90.4e6** |
+| main, `--no-batch`, `MF_AUTOTUNE=0` | 0.012 | 0.052 | 0.032 | 0.084 | 65.6e6 |
+| this branch, `--no-batch`, `MF_AUTOTUNE=0` | 0.012 | 0.045 | 0.029 | 0.073 | 80.8e6 |
+| main, batched, autotune on | 0.012 | 0.072 | 0.040 | 0.112 | 53.4e6 |
+| this branch, batched, autotune on | 0.012 | 0.067 | 0.015 | 0.082 | 71.5e6 |
+
+**Read fine and asym together on main.** Main's batched fine is sometimes 0.028 s because its
+follow-ups fall back to per-call submissions, and those wait for the fine batch: the wait is
+billed to asym. Per run, main's fine+asym varied from 0.069 to 0.146 s; this branch's from
+0.065 to 0.079 s.
+
+**Batched follow-ups now beat the CPU:** 0.0155 s against 0.017 s for one core.
+
+`--check cpu` passes, with autotune on and off: identical peak sets, SNR within 2.6e-5.
+
+### What changed
+
+| change | effect |
+|---|---|
+| CUDA `peaks_items` (`items_async`) and `forward(rows=)` (`forward_rows`) | Batched follow-ups no longer fall back to per-call submissions: forwards 43 -> 13 and readbacks 92 -> 26 per stage. Output buffers are per device, not per Context: each bank's follow-up plan is its own Context, so per-Context buffers meant an allocation on almost every call |
+| The CUDA build forces `[unroll]` to `[ForceUnroll]` (`tools/build_ptx.py`; shared source unchanged) | Slang had emitted the multi-bin peak loops as plain loops, so `myMag`/`myBin` lived in local memory: 288 B/thread and ~110 local loads. Now 28 B, the kernel context. `tierb_2048` 1.62 -> 0.54 ms, `refine_2048` 1.70 -> 0.63 ms, `tierb_4096` 1.25 -> 0.63 ms, `refine_4096` 1.27 -> 1.12 ms (same shapes, every pair refined) |
+| Coarse gate variant chosen by measurement, once per device and band | The occupancy ranking had picked untiled variants. Tiled ones are 1.3-1.5x faster: band 256 71 -> 49 µs, band 1024 364 -> 287 µs at 84k pairs |
+
+### The coarse gate against its target
+
+Coarse gate rates at 84k pairs, best variant per band:
+
+| band | rate |
+|---:|---:|
+| 128 | 14 TFLOPS |
+| 256 | 21 TFLOPS |
+| 512 | 15 TFLOPS |
+| 1024 | 17 TFLOPS |
+
+That is 10-15% of the packed-fp16 rate (2 x the 72.7 TFLOPS measured fp32 FMA). It is
+**not** at the 50% target. The kernel is a radix-16 FFT across register, shared-memory
+exchange and barrier stages, with 62-112 registers. Reaching 50% means a different kernel
+design: tensor-core or warp-shuffle transforms, and fewer exchange passes. It is the largest
+device-side item left.
+
+### What binds now
+Per fine call (`--no-batch`, `MF_AUTOTUNE=0`):
+- device ~0.27 ms;
+- wall ~0.4 ms.
+
+The remainder is host Python, mostly in the shared series path. On the CUDA side the
+remaining host costs are the forward call (~55-75 µs), a graphed hierarchical call
+(~45 µs), and waits.
+
+### Graph cache and the use-after-free pattern
+The CUDA graph cache is keyed on every bound buffer address plus the shapes and parameters.
+A freed address that is reused therefore maps to a graph whose captured parameters are
+exactly the current buffers, so an address recycled after a free (the ABA case behind main's
+fused-recording bug) replays correctly. Graph caches are per record and are destroyed with
+it.
