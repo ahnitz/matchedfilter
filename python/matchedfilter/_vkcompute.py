@@ -1222,13 +1222,20 @@ class Context(InputUploads):
         return dset
 
     def _coarse_geometry(self, band, nd, nt):
-        """(pairs per workgroup, templates per tile) for the packed coarse kernel.
+        """(pairs per workgroup, templates per tile, groups, ragged) for the packed coarse kernel.
 
         A pair takes band/16 threads, so pairs are packed until a workgroup fills one wave of
         THIS device. The rule was 512/band -- a wave32 -- and this Radeon runs wave64: band 128
-        filled half of every wave and band 64 a quarter. The largest built variant whose
-        geometry divides the pair count is taken (a partial group would index past the
-        data); MF_VK_COARSE_PPG caps it, for measurement.
+        filled half of every wave and band 64 a quarter. MF_VK_COARSE_PPG caps it, for
+        measurement.
+
+        A tiled build (TILE_T templates per pair slot) takes RAGGED tiles: each slot covers
+        TILE_T templates of one data row and the row's last tile is clamped inside the kernel,
+        so any template count and any group count work -- the host passes the row count and
+        dispatches ceil(rows * ceil(nt/TILE_T) / PPG) groups. The exact-tile rule it replaces
+        (nt % TILE_T == 0 and pairs % (PPG*TILE_T) == 0) sent every odd template count to the
+        untiled build: 52% of a realistic fine segment's coarse pairs, at 2.5x the cycles per
+        pair. Untiled builds keep exact geometry: the largest built PPG dividing the pair count.
         """
         wg = max(1, band // 16)
         want = max(1, int(self.subgroup_size) // wg)
@@ -1239,23 +1246,25 @@ class Context(InputUploads):
         want = min(want, cap)
         pairs = nd * nt
         tile = _COARSE_TILE_T.get(band, 1)
+        if tile > 1:
+            for ppg in sorted({p for p in (want, 32, 16, 8, 4, 2, 1) if p <= want}, reverse=True):
+                name = "tierb_%d_c16%st%d.spv" % (band, "p%d" % ppg if ppg > 1 else "", tile)
+                if (_SPIRV / name).is_file():
+                    slots = nd * (-(-nt // tile))
+                    return ppg, tile, -(-slots // ppg), True
         for ppg in sorted({p for p in (want, 32, 16, 8, 4, 2, 1) if p <= want}, reverse=True):
             name = "tierb_%d_c16%s.spv" % (band, "p%d" % ppg if ppg > 1 else "")
             if pairs % ppg or not (_SPIRV / name).is_file():
                 continue
-            t = 1
-            if tile > 1 and nt % tile == 0 and pairs % (ppg * tile) == 0 and (
-                    _SPIRV / ("tierb_%d_c16%st%d.spv" % (band, "p%d" % ppg if ppg > 1 else "", tile))
-                    ).is_file():
-                t = tile
-            return ppg, t
-        return 1, 1
+            return ppg, 1, pairs // ppg, False
+        return 1, 1, pairs, False
 
     def _make_hier(self, key, n, band, nd, nt, nbins, binsize, shift, lo, hi,
                    t2, raw_thr, data=None, tmpl=None, clear_out=True):
         vk = self.vk
         tile = _COARSE_TILE.get(band)
         _ppg = 1          # pairs per workgroup; raised only on the c16 path
+        _ragged, _groups = False, nd * nt   # see _coarse_geometry
         _tile = 1         # templates per tile; compiled into the kernel,
                           # so it is chosen with the kernel, not later
         if tile:
@@ -1279,7 +1288,7 @@ class Context(InputUploads):
             # PPG = 512/band fills a wave32 where WG < 32. Safe now
             # that the peak reduction is per-pair (see tierb.slang): each
             # lane maxes into its own slot, so tiles cannot mix.
-            _ppg, _tile = self._coarse_geometry(band, nd, nt)
+            _ppg, _tile, _groups, _ragged = self._coarse_geometry(band, nd, nt)
 
             # TILE_T is COMPILED INTO the kernel, so it is part of kernel
             # identity and must be decided HERE, where the kernel is
@@ -1384,7 +1393,9 @@ class Context(InputUploads):
                 cend = max(cstart + 1, cend)
                 cspan = max(1, cend - cstart)
                 shift_c = (cspan.bit_length() - 1) if cspan & (cspan - 1) == 0 else -1
-                pc = (ctypes.c_uint32 * 7)(nt, cstart, cend, cspan,
+                # A ragged-tile build reads the data row count where the
+                # (unused, one-bin) coarse bin size would go.
+                pc = (ctypes.c_uint32 * 7)(nt, cstart, cend, nd if _ragged else cspan,
                                            shift_c & 0xFFFFFFFF, 1, 0)
                 vk.vkCmdPushConstants(cmd, clayout, _STAGE_COMPUTE, 0,
                                       _PUSH_BYTES, ctypes.byref(pc))
@@ -1395,7 +1406,7 @@ class Context(InputUploads):
                 # chosen where the pipeline is chosen. Recomputing it here
                 # is what let the two disagree: the kernel carried tile 4
                 # while this dispatched for tile 1.
-                vk.vkCmdDispatch(cmd, pairs // (_ppg * _tile), 1, 1)
+                vk.vkCmdDispatch(cmd, _groups, 1, 1)
 
         def barrier(src_stage=_STAGE_COMPUTE_BIT, dst_stage=_STAGE_COMPUTE_BIT,
                     src_access=_ACCESS_SHADER_WRITE, dst_access=_ACCESS_SHADER_READ):
@@ -1477,7 +1488,7 @@ class Context(InputUploads):
     def _make_hier_cascade(self, key, n, band0, band1, nd, nt, nbins, binsize, shift, lo, hi,
                            t2, raw_thr0, raw_thr1, data=None, tmpl=None, clear_out=True):
         vk = self.vk
-        _ppg0, _tile0 = self._coarse_geometry(band0, nd, nt)
+        _ppg0, _tile0, _groups0, _ragged0 = self._coarse_geometry(band0, nd, nt)
 
         cpipe0, clayout0, cset_layout0 = self._build_pipeline(
             ("coarse16", band0, _ppg0, _tile0),
@@ -1596,9 +1607,10 @@ class Context(InputUploads):
         cend0 = max(cstart0 + 1, cend0)
         cspan0 = max(1, cend0 - cstart0)
         shift_c0 = (cspan0.bit_length() - 1) if cspan0 & (cspan0 - 1) == 0 else -1
-        pc0 = (ctypes.c_uint32 * 7)(nt, cstart0, cend0, cspan0, shift_c0 & 0xFFFFFFFF, 1, 0)
+        pc0 = (ctypes.c_uint32 * 7)(nt, cstart0, cend0, nd if _ragged0 else cspan0,
+                                    shift_c0 & 0xFFFFFFFF, 1, 0)
         vk.vkCmdPushConstants(cmd, clayout0, _STAGE_COMPUTE, 0, _PUSH_BYTES, ctypes.byref(pc0))
-        vk.vkCmdDispatch(cmd, pairs // (_ppg0 * _tile0), 1, 1)
+        vk.vkCmdDispatch(cmd, _groups0, 1, 1)
         barrier()
         self._stamp(cmd, "coarse%d" % band0)
 
