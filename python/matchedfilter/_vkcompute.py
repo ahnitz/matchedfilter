@@ -43,7 +43,7 @@ _MAX_BINS = 2048
 
 #: Must match COARSE_TILE_T in tools/build_spirv.py -- the kernel is
 #: compiled with the tile baked in, so the dispatch has to agree.
-_COARSE_TILE_T = {128: 2, 256: 2, 512: 4, 1024: 2}
+_COARSE_TILE_T = {64: 2, 128: 2, 256: 2, 512: 4, 1024: 2}
 
 
 def _use_c16(band):
@@ -954,7 +954,11 @@ class Context(InputUploads):
             return alt["file"]
         return "tierb_%d.spv" % n
 
-    def _build_pipeline(self, key, filename, nbind, push_bytes):
+    def _build_pipeline(self, key, filename, nbind, push_bytes, data_stride=0):
+        """data_stride: specialization constant 75 (mfDataStride), the data spectra's row
+        stride when a hierarchical stage reads its band straight out of them."""
+        if data_stride:
+            key = (key, "stride", data_stride)
         if key in self._pipelines:
             return self._pipelines[key]
         vk = self.vk
@@ -996,6 +1000,10 @@ class Context(InputUploads):
         entries.append(_SpecializationEntry(74, offset, 4))
         data_vals.append(int(self.subgroup_size))
         offset += 4
+        if data_stride:
+            entries.append(_SpecializationEntry(75, offset, 4))
+            data_vals.append(int(data_stride))
+            offset += 4
 
         # Intel accurate trig (constant ID 73)
         if self._accurate_trig:
@@ -1109,11 +1117,6 @@ class Context(InputUploads):
             self._last_dispatch = (bufs, nd, nt, nbins, True)
             if upload_data:
                 write_input(bufs["data"], data)
-                if shared_buffer(data, self) is not None:
-                    pass
-                else:
-                    bufs["cdata0"].write(_pack_half2(data[:, :band0]))
-                    bufs["cdata1"].write(np.ascontiguousarray(data[:, :band1], np.complex64))
                 self._uploaded["data"][storage_key] = dsig
             if upload_tmpl:
                 write_input(bufs["tmpl"], tmpl)
@@ -1174,7 +1177,7 @@ class Context(InputUploads):
             if shared_buffer(data, self) is not None:
                 pass
             elif _use_c16(band) and not _COARSE_TILE.get(band):
-                bufs["cdata"].write(_pack_half2(data[:, :band]))
+                pass                     # the coarse role reads `data` directly
             else:
                 bufs["cdata"].write(np.ascontiguousarray(data[:, :band], np.complex64))
             self._uploaded["data"][storage_key] = dsig
@@ -1268,11 +1271,16 @@ class Context(InputUploads):
         # At most 4 pairs unless asked: the 8- and 16-pair builds hung the GPU (compute ring
         # timeout) under realistic gating on gfx1151, and measured within 3% of 4 pairs once
         # dispatches are padded. MF_VK_COARSE_PPG sets the cap, to investigate them.
-        cap = int(os.environ.get("MF_VK_COARSE_PPG", "0") or 0) or 4
-        want = min(want, cap)
+        # The tiled builds elect their peak with subgroup shuffles and take no LDS atomics,
+        # so they fill the whole subgroup; the 4-pair cap stays on the untiled builds.
+        # Band 64, CU-cycles/pair: p4 96, p4t2 47, p8t2 28, p16t2 29.
+        env_cap = int(os.environ.get("MF_VK_COARSE_PPG", "0") or 0)
+        full = want
+        want = min(want, env_cap or 4)
         pairs = nd * nt
         tile = _COARSE_TILE_T.get(band, 1)
         if tile > 1:
+            want = min(full, env_cap) if env_cap else full
             for ppg in sorted({p for p in (want, 32, 16, 8, 4, 2, 1) if p <= want}, reverse=True):
                 name = "tierb_%d_c16%st%d.spv" % (band, "p%d" % ppg if ppg > 1 else "", tile)
                 if (_SPIRV / name).is_file():
@@ -1292,6 +1300,7 @@ class Context(InputUploads):
         _ragged, _groups = False, nd * nt   # see _coarse_geometry
         _tile = 1         # templates per tile; compiled into the kernel,
                           # so it is chosen with the kernel, not later
+        direct = bool(_use_c16(band) and not tile)
         if tile:
             cpipe, clayout, cset_layout = self._build_pipeline(
                 ("coarse", band), "coarse_%d.spv" % band, 3, 8)
@@ -1332,7 +1341,7 @@ class Context(InputUploads):
                 "tierb_%d_c16%s%s.spv" % (band,
                     "p%d" % _ppg if _ppg > 1 else "",
                     "t%d" % _tile if _tile > 1 else ""),
-                _NBIND, _PUSH_BYTES)
+                _NBIND, _PUSH_BYTES, data_stride=n)
         # gatedTierB is NOT built. Its only caller was coarse_odd(), the
         # last remnant of the even/odd split, which was never invoked after
         # the odd half was removed -- so the kernel was compiled on every
@@ -1350,7 +1359,9 @@ class Context(InputUploads):
             b = {
                 "data":  shared_buffer(data, self) or _Buffer(self, nd * n * 8),
                 "tmpl":  shared_buffer(tmpl, self) or _Buffer(self, nt * n * 8),
-                "cdata": _Buffer(self, nd * band * (4 if _use_c16(band) and not tile else 8)),
+                # The packed coarse role reads its band straight from `data` (stride n,
+                # rounded to half in the kernel): no band copy and no pack pass.
+                "cdata": _Buffer(self, 4 if direct else nd * band * 8),
                 "ct0":   _Buffer(self, nt * band * (4 if _use_c16(band) and not tile else 8)),
                 "cidx":  _Buffer(self, pairs * 4),
                 "cval":  _Buffer(self, pairs * 8),
@@ -1372,14 +1383,15 @@ class Context(InputUploads):
                                            [b["cdata"], b["ct0"], b["cval"]])
         else:
             ds_coarse = self._descriptor_set(cset_layout,
-                                           [b["cdata"], b["ct0"], b["cidx"], b["cval"]])
+                                           [b["data"] if direct else b["cdata"], b["ct0"],
+                                            b["cidx"], b["cval"]])
         ds_compact = self._descriptor_set(
             kset_layout, [b["cval"], b["surv"], b["args"]])
         ds_listed = self._descriptor_set(
             rset_layout,
             [b["data"], b["tmpl"], b["idx"], b["val"], b["surv"]])
 
-        shared_data = shared_buffer(data, self) is not None
+        shared_data = shared_buffer(data, self) is not None and not direct
         if shared_data:
             ppipe, playout, psl = self._build_pipeline(
                 "pack_coarse", "pack_coarse.spv", 2, 16)
@@ -1520,14 +1532,14 @@ class Context(InputUploads):
             "tierb_%d_c16%s%s.spv" % (band0,
                 "p%d" % _ppg0 if _ppg0 > 1 else "",
                 "t%d" % _tile0 if _tile0 > 1 else ""),
-            _NBIND, _PUSH_BYTES)
+            _NBIND, _PUSH_BYTES, data_stride=n)
 
         kpipe, klayout, kset_layout = self._build_pipeline(
             "compact", "compact.spv", 3, 12)
 
         refine_file1 = self._peak_file(band1, 1, refine=True)
         cpipe1, clayout1, cset_layout1 = self._build_pipeline(
-            ("refine", refine_file1), refine_file1, 5, _PUSH_BYTES)
+            ("refine", refine_file1), refine_file1, 5, _PUSH_BYTES, data_stride=n)
 
         refine_file = self._peak_file(n, nbins, refine=True)
         rpipe, rlayout, rset_layout = self._build_pipeline(
@@ -1539,13 +1551,13 @@ class Context(InputUploads):
             b = {
                 "data":        shared_buffer(data, self) or _Buffer(self, nd * n * 8),
                 "tmpl":        shared_buffer(tmpl, self) or _Buffer(self, nt * n * 8),
-                "cdata0":      _Buffer(self, nd * band0 * 4),
+                # Both tiers read their bands straight from `data` (stride n): no
+                # band copies, no pack pass.
                 "ct0":         _Buffer(self, nt * band0 * 4),
                 "cidx0":       _Buffer(self, pairs * 4),
                 "cval0":       _Buffer(self, pairs * 8),
                 "surv0":       _Buffer(self, pairs * 4),
                 "args_tier1":  _Buffer(self, 12, usage=_BUF_STORAGE | _BUF_INDIRECT | _BUF_TRANSFER_DST),
-                "cdata1":      _Buffer(self, nd * band1 * 8),
                 "ct1":         _Buffer(self, nt * band1 * 8),
                 "cidx1":       _Buffer(self, pairs * 4),
                 "cval1":       _Buffer(self, pairs * 8, usage=_BUF_STORAGE | _BUF_TRANSFER_DST),
@@ -1557,24 +1569,17 @@ class Context(InputUploads):
             self._storage[key] = b
 
         ds_coarse0 = self._descriptor_set(
-            cset_layout0, [b["cdata0"], b["ct0"], b["cidx0"], b["cval0"]])
+            cset_layout0, [b["data"], b["ct0"], b["cidx0"], b["cval0"]])
         ds_compact0 = self._descriptor_set(
             kset_layout, [b["cval0"], b["surv0"], b["args_tier1"]])
         ds_tier1 = self._descriptor_set(
-            cset_layout1, [b["cdata1"], b["ct1"], b["cidx1"], b["cval1"], b["surv0"]])
+            cset_layout1, [b["data"], b["ct1"], b["cidx1"], b["cval1"], b["surv0"]])
         lpipe, llayout, lset_layout = self._build_pipeline(
             "compactl", "compactl.spv", 5, 12)
         ds_compact1 = self._descriptor_set(
             lset_layout, [b["cval1"], b["surv1"], b["args_refine"], b["surv0"], b["args_tier1"]])
         ds_listed = self._descriptor_set(
             rset_layout, [b["data"], b["tmpl"], b["idx"], b["val"], b["surv1"]])
-
-        shared_data = shared_buffer(data, self) is not None
-        if shared_data:
-            ppipe, playout, psl = self._build_pipeline(
-                "pack_coarse", "pack_coarse.spv", 2, 16)
-            ds_pack0 = self._descriptor_set(psl, [b["data"], b["cdata0"]])
-            ds_pack1 = self._descriptor_set(psl, [b["data"], b["cdata1"]])
 
         cb = _CmdBufAlloc(40, None, self.command_pool, 0, 1)
         cmd = _vp()
@@ -1603,23 +1608,6 @@ class Context(InputUploads):
                 dst_access=_ACCESS_SHADER_READ | _ACCESS_SHADER_WRITE | _ACCESS_INDIRECT_READ)
 
         self._stamp(cmd, "fill")
-        # 2. Extract coarse bands if shared
-        if shared_data:
-            vk.vkCmdBindPipeline(cmd, _BIND_POINT_COMPUTE, ppipe)
-            sets = (_vp * 1)(ds_pack0)
-            vk.vkCmdBindDescriptorSets(cmd, _BIND_POINT_COMPUTE, playout, 0, 1, sets, 0, None)
-            pc0 = (ctypes.c_uint32 * 4)(n, band0, nd * band0, 1)
-            vk.vkCmdPushConstants(cmd, playout, _STAGE_COMPUTE, 0, 16, ctypes.byref(pc0))
-            vk.vkCmdDispatch(cmd, (nd * band0 + 255) // 256, 1, 1)
-
-            sets = (_vp * 1)(ds_pack1)
-            vk.vkCmdBindDescriptorSets(cmd, _BIND_POINT_COMPUTE, playout, 0, 1, sets, 0, None)
-            pc1 = (ctypes.c_uint32 * 4)(n, band1, nd * band1, 0)
-            vk.vkCmdPushConstants(cmd, playout, _STAGE_COMPUTE, 0, 16, ctypes.byref(pc1))
-            vk.vkCmdDispatch(cmd, (nd * band1 + 255) // 256, 1, 1)
-            barrier()
-            self._stamp(cmd, "pack")
-
         # 3. Stage 1: Tier 0 Coarse (all pairs)
         vk.vkCmdBindPipeline(cmd, _BIND_POINT_COMPUTE, cpipe0)
         sets = (_vp * 1)(ds_coarse0)
