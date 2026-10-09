@@ -397,7 +397,9 @@ class _FusedBatch:
             return
         self.state = "submitted"
         if self.dev.collector is self:
-            self.dev.collector = None
+            # Flushed early (a wait mid-batch: a slot settled, an eviction drained): keep
+            # collecting the rest of the batch into a fresh one rather than stop fusing.
+            self.dev.collector = _FusedBatch(self.dev)
         dev, vk = self.dev, self.dev.vk
         # The same jobs recur every segment: reuse their fused recording while every
         # constituent recording is still cached (eviction drops its phases).
