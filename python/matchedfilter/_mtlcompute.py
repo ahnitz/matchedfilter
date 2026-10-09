@@ -21,7 +21,8 @@ from functools import lru_cache, wraps
 
 import numpy as np
 from ._shared import empty_shared, shared_buffer, shared_key, write_input
-from ._gpuhost import bin_shift, plan_items, split_items
+from ._gpuhost import (bin_shift, plan_items, split_items, hier_tiers, hier_window,
+                       split_bins)
 from ._shared import pack_half2 as _pack_half2, sparsified as _sparsified
 
 _HERE = pathlib.Path(__file__).resolve().parent
@@ -1460,20 +1461,11 @@ class Context(InputUploads):
         raises: running one tier with another tier's threshold would be a
         different computation, not a slower one.
         """
-        if isinstance(band, (tuple, list)):
-            cascade_band = band[0]
-            band = band[1]
-        if isinstance(ct0, (tuple, list)):
-            ct1 = ct0[1]
-            ct0 = ct0[0]
-        if isinstance(raw_thr, (tuple, list)):
-            raw_thr1 = raw_thr[1]
-            raw_thr = raw_thr[0]
+        band, ct0, raw_thr, cascade_band, ct1, raw_thr1 = hier_tiers(
+            n, band, ct0, raw_thr, cascade_band, ct1, raw_thr1)
         if cascade_band is None:
             tiers = ((int(band), ct0, float(raw_thr)),)
         else:
-            if ct1 is None or raw_thr1 is None:
-                raise ValueError("a two-tier cascade needs ct1 and raw_thr1")
             tiers = ((int(cascade_band), ct0, float(raw_thr)),
                      (int(band), ct1, float(raw_thr1)))
             if not tiers[0][0] < tiers[1][0] < n:
@@ -1482,31 +1474,15 @@ class Context(InputUploads):
 
         nd, nt = data.shape[0], tmpl.shape[0]
         pairs = nd * nt
-        lo, hi = (0, n) if window is None else (int(window[0]), int(window[1]))
-        lo, hi = max(0, min(lo, n)), max(0, min(hi, n))
-        if lo >= hi:
-            raise ValueError("empty window (%d, %d)" % (lo, hi))
-        binsize = n if binsize is None else int(binsize)
-        nbins = -(-(hi - lo) // binsize)
+        lo, hi, binsize, nbins = hier_window(n, window, binsize)
         if nbins > _MAX_BINS:
-            span = _MAX_BINS * binsize
-            pi, pv = [], []
-            for a in range(lo, hi, span):
-                i2, v2 = self.hier_peaks(n, band, data, tmpl, ct0, raw_thr, binsize=binsize,
-                                         threshold=threshold,
-                                         window=(a, min(a + span, hi)),
-                                         upload_data=upload_data,
-                                         upload_tmpl=upload_tmpl,
-                                         cascade_band=cascade_band, ct1=ct1, raw_thr1=raw_thr1,
-                                         slot=slot, async_submit=False)
-                pi.append(i2)
-                pv.append(v2)
-                upload_data = upload_tmpl = False     # already on the device
-            idx_all = np.concatenate(pi, axis=2)
-            val_all = np.concatenate(pv, axis=2)
-            res = _sparsified((idx_all, val_all), sparse)
-            return (lambda: res) if async_submit else res
-        shift = (binsize.bit_length() - 1) if binsize & (binsize - 1) == 0 else -1
+            return split_bins(
+                lambda w, ud, ut: self.hier_peaks(
+                    n, band, data, tmpl, ct0, raw_thr, binsize=binsize, threshold=threshold,
+                    window=w, upload_data=ud, upload_tmpl=ut, cascade_band=cascade_band,
+                    ct1=ct1, raw_thr1=raw_thr1, slot=slot, async_submit=False),
+                lo, hi, binsize, _MAX_BINS, upload_data, upload_tmpl, sparse, async_submit)
+        shift = bin_shift(binsize)
         t2 = float(threshold) ** 2 if threshold > 0 else 0.0
         # Half width only for the first tier: a later tier is the full-
         # precision refine kernel, which reads float2.

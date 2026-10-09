@@ -3,7 +3,8 @@ import numpy as np
 import pytest
 
 from matchedfilter._errors import UnsupportedSize
-from matchedfilter._gpuhost import bin_shift, plan_items, split_items
+from matchedfilter._gpuhost import (bin_shift, plan_items, split_items, hier_tiers, hier_window,
+                                    split_bins, padded_rows, grouped_windows)
 
 
 def test_bin_shift():
@@ -31,3 +32,48 @@ def test_plan_and_split_items(align):
 def test_plan_items_bin_limit():
     with pytest.raises(UnsupportedSize):
         plan_items([(0, 100, 0, 1, 0)], 1, 1, max_bins=64)
+
+
+def test_hier_tiers_and_window():
+    assert hier_tiers(4096, (256, 1024), ("c0", "c1"), (1.0, 2.0)) == \
+        (1024, "c0", 1.0, 256, "c1", 2.0)
+    assert hier_tiers(4096, 512, "c0", 3.0) == (512, "c0", 3.0, None, None, None)
+    with pytest.raises(ValueError):
+        hier_tiers(4096, 1024, "c0", 1.0, cascade_band=256)
+    assert hier_window(4096, None, None) == (0, 4096, 4096, 1)
+    assert hier_window(4096, (-5, 5000), 100) == (0, 4096, 100, 41)
+    with pytest.raises(ValueError):
+        hier_window(4096, (10, 10), 1)
+
+
+@pytest.mark.parametrize("sparse", [False, True])
+@pytest.mark.parametrize("async_submit", [False, True])
+def test_split_bins_matches_one_call(sparse, async_submit):
+    calls = []
+
+    def call(w, ud, ut):
+        calls.append((w, ud, ut))
+        nb = -(-(w[1] - w[0]) // 4)
+        idx = np.where(np.arange(nb) % 3 == 0, np.arange(w[0], w[1], 4), -1)
+        idx = np.broadcast_to(idx, (2, 3, nb)).astype(np.int32)
+        return idx, idx.astype(np.complex64)
+    res = split_bins(call, 0, 100, 4, 10, True, True, sparse, async_submit)
+    if async_submit:
+        assert callable(res)
+        res = res()
+    assert [c[0] for c in calls] == [(0, 40), (40, 80), (80, 100)]
+    assert [c[1:] for c in calls] == [(True, True), (False, False), (False, False)]
+    if sparse:
+        assert res.shape == (2, 3, 25)
+    else:
+        assert res[0].shape == (2, 3, 25)
+
+
+def test_padded_rows_and_grouped_windows():
+    assert padded_rows(5, 3, 4) == 8 and padded_rows(4, 2, 8) == 4 and padded_rows(7, 1, 1) == 7
+    groups, nb = grouped_windows([(0, 100, 0, 2), (10, 90, 2, 5)], 4096, 5, 16)
+    assert nb == 7 and groups[1] == (10, 90, 2, 5)
+    with pytest.raises(ValueError):
+        grouped_windows([(0, 10, 0, 2), (0, 100, 2, 3)], 4096, 5, 16)
+    with pytest.raises(ValueError):
+        grouped_windows([(0, 10, 0, 6)], 4096, 5, 16)

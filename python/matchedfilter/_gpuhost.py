@@ -47,3 +47,79 @@ def split_items(items, offs, nbs, indices, values, copy=False):
         v = values[off:off + c].reshape(b - a, 1, nb)
         out.append((i.copy(), v.copy()) if copy else (i, v))
     return out
+
+
+# ---- hierarchical calls: the argument contract every backend's hier_peaks shares ----------
+
+def hier_tiers(n, band, ct0, raw_thr, cascade_band=None, ct1=None, raw_thr1=None):
+    """Normalise a hier_peaks/hier_peaks_grouped chain to (band, ct0, raw_thr, cascade_band,
+    ct1, raw_thr1) in the keyword convention.
+
+    band/ct0/raw_thr may each be a (tier0, tier1) pair; a two-tier chain is then tier 0 =
+    cascade_band with ct0/raw_thr and tier 1 = band with ct1/raw_thr1. An incomplete
+    cascade raises: running one tier with another tier's threshold would be a different
+    computation, not a slower one."""
+    if isinstance(band, (tuple, list)):
+        cascade_band, band = band[0], band[1]
+    if isinstance(ct0, (tuple, list)):
+        ct0, ct1 = ct0[0], ct0[1]
+    if isinstance(raw_thr, (tuple, list)):
+        raw_thr, raw_thr1 = raw_thr[0], raw_thr[1]
+    if cascade_band is not None and (ct1 is None or raw_thr1 is None):
+        raise ValueError("a two-tier cascade needs ct1 and raw_thr1")
+    return band, ct0, raw_thr, cascade_band, ct1, raw_thr1
+
+
+def hier_window(n, window, binsize):
+    """(lo, hi, binsize, nbins) of a hierarchical call: the window clamped to [0, n],
+    binsize defaulting to n (one bin)."""
+    lo, hi = (0, n) if window is None else (int(window[0]), int(window[1]))
+    lo, hi = max(0, min(lo, n)), max(0, min(hi, n))
+    if lo >= hi:
+        raise ValueError("empty window (%d, %d)" % (lo, hi))
+    binsize = n if binsize is None else int(binsize)
+    return lo, hi, binsize, -(-(hi - lo) // binsize)
+
+
+def split_bins(call, lo, hi, binsize, max_bins, upload_data, upload_tmpl, sparse, async_submit):
+    """A window wider than max_bins bins, as consecutive sub-windows of max_bins bins.
+
+    call(window, upload_data, upload_tmpl) returns one sub-window's dense (idx, val); inputs
+    upload with the first only. The result honours sparse and async_submit exactly as one
+    call would (a collector when async_submit)."""
+    from ._shared import sparsified
+    span = max_bins * binsize
+    pi, pv = [], []
+    for a in range(lo, hi, span):
+        i2, v2 = call((a, min(a + span, hi)), upload_data, upload_tmpl)
+        pi.append(i2)
+        pv.append(v2)
+        upload_data = upload_tmpl = False             # already on the device
+    import numpy as np
+    res = sparsified((np.concatenate(pi, axis=2), np.concatenate(pv, axis=2)), sparse)
+    return (lambda: res) if async_submit else res
+
+
+def padded_rows(rows, nt, unit):
+    """Data rows padded so rows * nt pairs fill whole coarse groups of `unit` pairs (pairs
+    per group x templates per tile). Padding pairs land past the real ones and are never
+    listed by the compaction."""
+    while (rows * nt) % unit:
+        rows += 1
+    return rows
+
+
+def grouped_windows(groups, n, nd, binsize, max_bins=MAX_BINS):
+    """Validated (lo, hi, a, b) groups of a grouped call, as ints, and their common bin count
+    (the first group's; no later group may need more)."""
+    groups = tuple((int(lo), int(hi), int(a), int(b)) for lo, hi, a, b in groups)
+    binsize = int(binsize)
+    nb = (groups[0][1] - groups[0][0] - 1) // binsize + 1
+    if nb > max_bins:
+        raise ValueError("grouped dispatch exceeds the kernel bin limit")
+    for lo, hi, a, b in groups:
+        if not (0 <= lo < hi <= n) or not (0 <= a < b <= nd):
+            raise ValueError("invalid group (%d, %d, %d, %d)" % (lo, hi, a, b))
+        if (hi - lo - 1) // binsize + 1 > nb:
+            raise ValueError("grouped windows must not exceed the first group's bin count")
+    return groups, nb

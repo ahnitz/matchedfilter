@@ -20,8 +20,9 @@ import numpy as np
 
 from . import _gputime, _vulkan
 from ._shared import empty_shared, shared_buffer, shared_key, shared_view, write_input
-from ._gpuhost import bin_shift, plan_items, split_items
-from ._shared import pack_half2 as _pack_half2, sparse_from_dense as _sparse_from_dense, sparsified as _sparsified
+from ._gpuhost import (bin_shift, plan_items, split_items, hier_tiers, hier_window,
+                       split_bins)
+from ._shared import pack_half2 as _pack_half2, sparsified as _sparsified
 
 _SPIRV = pathlib.Path(__file__).resolve().parent / "spirv"
 
@@ -1106,45 +1107,25 @@ class Context(InputUploads):
         Coarse correlation, survivor compaction, then listed refinement.
         Supports single-tier or two-tier cascade indirect execution.
         """
-        if isinstance(band, (tuple, list)):
-            cascade_band = band[0]
-            band = band[1]
-        if isinstance(ct0, (tuple, list)):
-            ct1 = ct0[1]
-            ct0 = ct0[0]
-        if isinstance(raw_thr, (tuple, list)):
-            raw_thr1 = raw_thr[1]
-            raw_thr = raw_thr[0]
+        band, ct0, raw_thr, cascade_band, ct1, raw_thr1 = hier_tiers(
+            n, band, ct0, raw_thr, cascade_band, ct1, raw_thr1)
 
         vk = self.vk
         nd, nt = data.shape[0], tmpl.shape[0]
-        lo, hi = (0, n) if window is None else (int(window[0]), int(window[1]))
-        lo, hi = max(0, min(lo, n)), max(0, min(hi, n))
-        if lo >= hi:
-            raise ValueError("empty window (%d, %d)" % (lo, hi))
-        binsize = n if binsize is None else int(binsize)
-        nbins = -(-(hi - lo) // binsize)
+        lo, hi, binsize, nbins = hier_window(n, window, binsize)
         # row_windows (hier_peaks_grouped): (groups, per-row uint32 [lo, hi] pairs).
         rw_key = None if row_windows is None else row_windows[0]
         rw = None if row_windows is None else row_windows[1]
         if nbins > _MAX_BINS and rw is not None:
             raise ValueError("grouped dispatch exceeds the kernel bin limit")
         if nbins > _MAX_BINS:
-            span = _MAX_BINS * binsize
-            pi, pv = [], []
-            for a in range(lo, hi, span):
-                bnd = min(a + span, hi)
-                i2, v2 = self.hier_peaks(n, band, data, tmpl, ct0, raw_thr, binsize=binsize,
-                                         threshold=threshold, window=(a, bnd),
-                                         upload_data=upload_data,
-                                         upload_tmpl=upload_tmpl,
-                                         cascade_band=cascade_band, ct1=ct1, raw_thr1=raw_thr1,
-                                         slot=slot, async_submit=False)
-                pi.append(i2); pv.append(v2)
-                upload_data = upload_tmpl = False
-            idx, val = np.concatenate(pi, axis=2), np.concatenate(pv, axis=2)
-            return _sparse_from_dense(idx, val) if sparse else (idx, val)
-        shift = (binsize.bit_length() - 1) if binsize & (binsize - 1) == 0 else -1
+            return split_bins(
+                lambda w, ud, ut: self.hier_peaks(
+                    n, band, data, tmpl, ct0, raw_thr, binsize=binsize, threshold=threshold,
+                    window=w, upload_data=ud, upload_tmpl=ut, cascade_band=cascade_band,
+                    ct1=ct1, raw_thr1=raw_thr1, slot=slot, async_submit=False),
+                lo, hi, binsize, _MAX_BINS, upload_data, upload_tmpl, sparse, async_submit)
+        shift = bin_shift(binsize)
         t2 = float(threshold) ** 2 if threshold > 0 else 0.0
 
         if cascade_band is not None:

@@ -27,7 +27,8 @@ from ._cuda import check_cuda
 from ._errors import UnsupportedSize
 from ._gpu_cache import InputUploads
 from ._shared import empty_shared, shared_buffer, shared_key, _Borrowed
-from ._gpuhost import bin_shift, plan_items, split_items
+from ._gpuhost import (bin_shift, plan_items, split_items, hier_tiers, hier_window,
+                       split_bins, padded_rows, grouped_windows)
 from ._shared import pack_half2 as _pack_half2
 
 def _borrowed_dptr(self):
@@ -1451,38 +1452,19 @@ class Context(InputUploads):
         is ``band`` with ``ct1``/``raw_thr1``.
         """
         self._bind()
-        if isinstance(band, (tuple, list)):
-            cascade_band, band = band[0], band[1]
-        if isinstance(ct0, (tuple, list)):
-            ct0, ct1 = ct0[0], ct0[1]
-        if isinstance(raw_thr, (tuple, list)):
-            raw_thr, raw_thr1 = raw_thr[0], raw_thr[1]
+        band, ct0, raw_thr, cascade_band, ct1, raw_thr1 = hier_tiers(
+            n, band, ct0, raw_thr, cascade_band, ct1, raw_thr1)
         cascade = cascade_band is not None
-        if cascade and (ct1 is None or raw_thr1 is None):
-            raise ValueError("a two-tier chain needs ct1 and raw_thr1")
         nd, nt = data.shape[0], tmpl.shape[0]
         pairs = nd * nt
-        lo, hi = (0, n) if window is None else (int(window[0]), int(window[1]))
-        lo, hi = max(0, min(lo, n)), max(0, min(hi, n))
-        if lo >= hi:
-            raise ValueError(f"empty window ({lo}, {hi})")
-        binsize = n if binsize is None else int(binsize)
-        nbins = -(-(hi - lo) // binsize)
+        lo, hi, binsize, nbins = hier_window(n, window, binsize)
         if nbins > _MAX_BINS:
-            span = _MAX_BINS * binsize
-            pi, pv = [], []
-            for a in range(lo, hi, span):
-                i2, v2 = self.hier_peaks(n, band, data, tmpl, ct0, raw_thr,
-                                         binsize=binsize, threshold=threshold,
-                                         window=(a, min(a + span, hi)),
-                                         upload_data=upload_data, upload_tmpl=upload_tmpl,
-                                         cascade_band=cascade_band, ct1=ct1, raw_thr1=raw_thr1,
-                                         slot=slot)
-                pi.append(i2)
-                pv.append(v2)
-                upload_data = upload_tmpl = False
-            res = (np.concatenate(pi, axis=2), np.concatenate(pv, axis=2))
-            return (lambda: res) if async_submit else res
+            return split_bins(
+                lambda w, ud, ut: self.hier_peaks(
+                    n, band, data, tmpl, ct0, raw_thr, binsize=binsize, threshold=threshold,
+                    window=w, upload_data=ud, upload_tmpl=ut, cascade_band=cascade_band,
+                    ct1=ct1, raw_thr1=raw_thr1, slot=slot),
+                lo, hi, binsize, _MAX_BINS, upload_data, upload_tmpl, sparse, async_submit)
 
         band0 = int(cascade_band) if cascade else int(band)
         band1 = int(band) if cascade else None
@@ -1507,9 +1489,7 @@ class Context(InputUploads):
         group = ppg * tile
         # Data rows padded so the pair count fills whole groups. The padding pairs'
         # coarse values land past `pairs`, which the compaction never reads.
-        ndp = nd
-        while (ndp * nt) % group:
-            ndp += 1
+        ndp = padded_rows(nd, nt, group)
         estimate = ((0 if dsh else nd * n * 8) + (0 if tsh else nt * n * 8)
                     + (nd + nt) * (band0 * cb0 + (band1 or 0) * 8) + pairs * 40 + out * 24)
         bufs, fresh = self._record("hier", self._hier, key, estimate, dict)
@@ -1635,20 +1615,12 @@ class Context(InputUploads):
         call for one block of work each. Tiers as in hier_peaks.
         """
         self._bind()
+        band, ct0, raw_thr, cascade_band, ct1, raw_thr1 = hier_tiers(
+            n, band, ct0, raw_thr, cascade_band, ct1, raw_thr1)
         cascade = cascade_band is not None
-        if cascade and (ct1 is None or raw_thr1 is None):
-            raise ValueError("a two-tier chain needs ct1 and raw_thr1")
         nd, nt = data.shape[0], tmpl.shape[0]
-        groups = tuple((int(lo), int(hi), int(a), int(b)) for lo, hi, a, b in groups)
         binsize = int(binsize)
-        nb = (groups[0][1] - groups[0][0] - 1) // binsize + 1
-        if nb > _MAX_BINS:
-            raise ValueError("grouped dispatch exceeds the kernel bin limit")
-        for lo, hi, a, b in groups:
-            if not (0 <= lo < hi <= n) or not (0 <= a < b <= nd):
-                raise ValueError(f"invalid group ({lo}, {hi}, {a}, {b})")
-            if (hi - lo - 1) // binsize + 1 > nb:
-                raise ValueError("grouped windows must not exceed the first group's bin count")
+        groups, nb = grouped_windows(groups, n, nd, binsize, _MAX_BINS)
         band0 = int(cascade_band) if cascade else int(band)
         band1 = int(band) if cascade else None
         if ct0.shape != (nt, band0) or (cascade and ct1.shape != (nt, band1)):
@@ -1668,11 +1640,8 @@ class Context(InputUploads):
         # their pairs land past the group's own pairs, which is all its compaction reads.
         offs, ndp = [], 0
         for lo, hi, a, b in groups:
-            rows = b - a
-            while (rows * nt) % unit:
-                rows += 1
             offs.append(ndp)
-            ndp += rows
+            ndp += padded_rows(b - a, nt, unit)
         ng = len(groups)
         out = nd * nt * nb
         pairs = nd * nt
