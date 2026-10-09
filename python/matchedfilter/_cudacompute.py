@@ -49,6 +49,9 @@ class _DeviceShared:
                    "cuDevicePrimaryCtxRetain")       # held for the process lifetime
         self.modules = {}
         self.pipelines = {}
+        # Events after writes left in flight (correlate_series(wait=False)): every Context's
+        # streams order their work after them; settle_writes() waits on them for the host.
+        self.pending_writes = []
         self.occupancy = {}
         self.labels = {}
 
@@ -526,7 +529,9 @@ class Context(InputUploads):
         return e
 
     def _after_forwards(self, stream):
-        """Order ``stream`` after every deferred forward enqueued on other streams."""
+        """Order ``stream`` after every deferred forward enqueued on other streams, and after
+        writes left in flight (correlate_series(wait=False))."""
+        self._after_writes(stream)
         for key, ev in self._fwd_events.items():
             if key != stream.value:
                 check_cuda(self.cuda.cuStreamWaitEvent(stream, ev, 0), "cuStreamWaitEvent")
@@ -1215,8 +1220,17 @@ class Context(InputUploads):
         return [(d, d + 1, t0, min(t0 + per, nt)) for d in range(nd) for t0 in range(0, nt, per)]
 
     def correlate_continuous(self, n, data, tmpl, starts, out, lo, hi,
-                             *, upload_data=True, upload_tmpl=True):
-        """Full correlation written at continuous absolute series offsets: out[t, start + lag]."""
+                             *, upload_data=True, upload_tmpl=True, async_submit=False):
+        """Full correlation written at continuous absolute series offsets: out[t, start + lag].
+
+        async_submit (``defers_continuous``), for an in-place device output: leave the work
+        in flight; device consumers are ordered after it, the host settles it."""
+        if async_submit and shared_buffer(out, self) is not None:
+            # Write-after-read: readers of this output (last segment's fine stage, on other
+            # Contexts' streams) may still be in flight. Streams of different Contexts share
+            # no order, so the device is drained before the rewrite starts.
+            self._bind()
+            check_cuda(self.cuda.cuCtxSynchronize(), "cuCtxSynchronize")
         self._bind()
         nd, nt = data.shape[0], tmpl.shape[0]
         if out.ndim != 2 or out.shape[0] != nt or out.dtype != np.complex64 or not out.flags.c_contiguous:
@@ -1276,6 +1290,9 @@ class Context(InputUploads):
             for t in range(nt):
                 self._copy_d2h(out[t, w0:w1].ctypes.data, dst + t * length * 8,
                                length * 8, stream, "readback")
+        if async_submit and osh is not None:
+            self._pend_write(stream)
+            return out
         self._sync(stream)
         return out
 
@@ -1293,8 +1310,49 @@ class Context(InputUploads):
                                                 0, width, dest.shape[0], self.stream),
                    "cuMemsetD2D32Async")
 
-    def zero_columns_done(self):
-        self._sync(self.stream)
+    def zero_columns_done(self, wait=True):
+        """Finish the enqueued zeroing (and the correlation before it on this stream): wait,
+        or (``async_zero``) leave it in flight for the device consumers to order after."""
+        if wait:
+            self._sync(self.stream)
+            self.settle_writes()
+        else:
+            self._pend_write(self.stream)
+
+    def _pend_write(self, stream):
+        e = self._new_event()
+        check_cuda(self.cuda.cuEventRecord(e, stream), "cuEventRecord")
+        holder = self._device_state if self._device_state is not None else self
+        holder.__dict__.setdefault("pending_writes", []).append(e)
+
+    def settle_writes(self):
+        """Wait for every write left in flight on this device (correlate_series(wait=False))."""
+        holder = self._device_state if self._device_state is not None else self
+        pend = holder.__dict__.get("pending_writes") or []
+        while pend:
+            e = pend.pop(0)
+            check_cuda(self.cuda.cuEventSynchronize(e), "cuEventSynchronize")
+            self.cuda.cuEventDestroy_v2(e)
+
+    def _after_writes(self, stream):
+        """Order ``stream`` after writes left in flight (dropping those already complete)."""
+        holder = self._device_state if self._device_state is not None else self
+        pend = holder.__dict__.get("pending_writes")
+        if not pend:
+            return
+        keep = []
+        for e in pend:
+            if self.cuda.cuEventQuery(e) == 0:
+                self.cuda.cuEventDestroy_v2(e)
+            else:
+                check_cuda(self.cuda.cuStreamWaitEvent(stream, e, 0), "cuStreamWaitEvent")
+                keep.append(e)
+        pend[:] = keep
+
+    #: correlate_continuous(async_submit=True) leaves an in-place write in flight.
+    defers_continuous = True
+    #: zero_columns_done(wait=False) leaves the zeroing in flight.
+    async_zero = True
 
     # ---- hierarchical ---------------------------------------------------------------
     def _coarse_kernel(self, band, nt):
@@ -1739,6 +1797,7 @@ class Context(InputUploads):
             r0, count = int(rows[0]), int(rows[1])
             starts, spectra = starts[r0:r0 + count], spectra[r0:r0 + count]
         stream = self.get_stream(slot)
+        self._after_writes(stream)           # the series may be a middle output still in flight
         tierc = n > 65536
         if tierc:
             f1, f1wg, n1, n2 = self._tierc(n, "fwd1")
