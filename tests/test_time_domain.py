@@ -519,6 +519,40 @@ def test_correlate_series_gpu_matches_cpu_for_every_group_layout(layout, window)
     assert np.max(np.abs(got_t - cpu[3])) <= 1e-5 * scale
 
 
+@pytest.mark.parametrize("window", [None, slice(20000, 90000)])
+def test_correlate_series_gpu_writes_group_rows_of_shared_out_in_place(window):
+    """out= a caller's shared buffer: each template group's rows (a view inside the
+    allocation) are written there directly -- on Vulkan through a descriptor offset --
+    rather than computed into a workspace and copied out by the host (~5 ms a group for
+    a 2^20-sample middle stage). Values equal the CPU's; no workspace is allocated."""
+    from conftest import usable_gpu
+    gpu = usable_gpu()
+    if gpu is None:
+        pytest.skip("no usable GPU")
+    rng = np.random.default_rng(11)
+    taps, counts = _corr_bank_taps("two", rng)
+    S = 32 * 4096
+    ser = ((rng.standard_normal(S) + 1j * rng.standard_normal(S)) / np.sqrt(2)).astype(np.complex64)
+    sers = [ser, ser[::-1].copy()]
+    ref = TimeDomainFilterBank(taps, counts, engine='corr', fft_lengths=PINNED)
+    cpus = [ref.correlate_series(x, windows=window) for x in sers]
+    gbank = TimeDomainFilterBank(taps, counts, engine='corr', device=gpu, fft_lengths=PINNED)
+    # Both detectors' outputs in one allocation, called repeatedly: several row views of
+    # one shape, each of which must get its own recording (a shared cache key once replayed
+    # one view's recording into another's rows).
+    buf = gbank.empty_shared((2, len(counts), S))
+    for _ in range(2):
+        for out, x in zip(buf, sers):
+            out[:] = np.nan                             # every sample must be written
+            got = gbank.correlate_series(x, windows=window, out=out)
+            assert got is out or np.shares_memory(got, out)
+    for out, cpu in zip(buf, cpus):
+        assert np.max(np.abs(out - cpu)) <= 1e-5 * np.abs(cpu).max()
+    if len(gbank._groups) > 1 and getattr(gbank._groups[0].get_correlation_plan()._gpu,
+                                          'continuous_out_views', False):
+        assert all(getattr(g, '_corr_workspace', None) is None for g in gbank._groups)
+
+
 @pytest.mark.parametrize("layout", ["two", "interleaved"])
 def test_correlate_series_window_before_first_block_is_zero(layout):
     """A window that no block's valid region reaches used to pass an empty
