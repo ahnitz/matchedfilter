@@ -1562,8 +1562,10 @@ class Context(InputUploads):
             kset_layout, [b["cval0"], b["surv0"], b["args_tier1"]])
         ds_tier1 = self._descriptor_set(
             cset_layout1, [b["cdata1"], b["ct1"], b["cidx1"], b["cval1"], b["surv0"]])
+        lpipe, llayout, lset_layout = self._build_pipeline(
+            "compactl", "compactl.spv", 5, 12)
         ds_compact1 = self._descriptor_set(
-            kset_layout, [b["cval1"], b["surv1"], b["args_refine"]])
+            lset_layout, [b["cval1"], b["surv1"], b["args_refine"], b["surv0"], b["args_tier1"]])
         ds_listed = self._descriptor_set(
             rset_layout, [b["data"], b["tmpl"], b["idx"], b["val"], b["surv1"]])
 
@@ -1592,7 +1594,7 @@ class Context(InputUploads):
         # 1. Clear indirect args and intermediate peak values
         _reset_args(vk, cmd, b["args_tier1"])
         _reset_args(vk, cmd, b["args_refine"])
-        vk.vkCmdFillBuffer(cmd, b["cval1"].handle, 0, pairs * 8, 0)
+        # cval1 needs no clear: compactListed reads only the pairs tier 1 wrote.
         if clear_out:                       # pairs never refined read as -1 / 0 (dense)
             vk.vkCmdFillBuffer(cmd, b["idx"].handle, 0, _WHOLE_SIZE, 0xFFFFFFFF)
             vk.vkCmdFillBuffer(cmd, b["val"].handle, 0, _WHOLE_SIZE, 0)
@@ -1671,11 +1673,11 @@ class Context(InputUploads):
         self._stamp(cmd, "coarse%d" % band1)
 
         # 6. Stage 4: Compact 1
-        vk.vkCmdBindPipeline(cmd, _BIND_POINT_COMPUTE, kpipe)
+        vk.vkCmdBindPipeline(cmd, _BIND_POINT_COMPUTE, lpipe)
         sets = (_vp * 1)(ds_compact1)
-        vk.vkCmdBindDescriptorSets(cmd, _BIND_POINT_COMPUTE, klayout, 0, 1, sets, 0, None)
+        vk.vkCmdBindDescriptorSets(cmd, _BIND_POINT_COMPUTE, llayout, 0, 1, sets, 0, None)
         kpc1 = (ctypes.c_uint32 * 3)(pairs, int(np.float32(raw_thr1).view(np.uint32)), nbins)
-        vk.vkCmdPushConstants(cmd, klayout, _STAGE_COMPUTE, 0, 12, ctypes.byref(kpc1))
+        vk.vkCmdPushConstants(cmd, llayout, _STAGE_COMPUTE, 0, 12, ctypes.byref(kpc1))
         vk.vkCmdDispatch(cmd, (pairs + 255) // 256, 1, 1)
         barrier(dst_stage=_STAGE_COMPUTE_BIT | _STAGE_DRAW_INDIRECT_BIT,
                 dst_access=_ACCESS_SHADER_READ | _ACCESS_SHADER_WRITE | _ACCESS_INDIRECT_READ)

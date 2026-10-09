@@ -169,7 +169,7 @@ COARSE_TILE_T = {128: 2, 256: 2, 512: 4, 1024: 2}
 #: Artifact prefix per entry point. Two entries used to be distinguished by
 #: `entry == ENTRY`, which silently collides the moment there is a third.
 STEMS = {"fusedTierB": "tierb",
-         "compactPairs": "compact", "refineListed": "refine",
+         "compactPairs": "compact", "compactListed": "compactl", "refineListed": "refine",
          "fullCorrelation": "full", "fullCorrelationSeries": "full_series"}
 
 FULL_TIER_C = tuple(1 << k for k in range(17, 23))
@@ -513,6 +513,7 @@ def main(argv=None):
         comp = OUT / "compact.spv"
         if n == TIER_B[0]:
             compile_one(slangc, n, OUT, "compactPairs").replace(comp)
+            compile_one(slangc, n, OUT, "compactListed").replace(OUT / "compactl.spv")
             for obsolete in OUT.glob("compact_*.spv"):
                 obsolete.unlink()
         cinfo = reflect(comp.read_bytes())
