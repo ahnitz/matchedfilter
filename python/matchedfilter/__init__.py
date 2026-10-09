@@ -1303,6 +1303,11 @@ class MatchedFilter:
         workspace = getattr(self, "_series_workspace", None)
         if (workspace is None or workspace[0][1] != n or workspace[0][0] < batch
                 or workspace[0][2] < K):
+            # The old pools go when this call replaces them: deferred calls of this plan still
+            # in flight (or captured into an unsubmitted fused batch) write their spectra, so
+            # settle them first. Dropping the pools under them was a GPU write to freed pages
+            # (amdgpu page fault, VK_ERROR_DEVICE_LOST) in about one ladder run in five.
+            self._settle_deferred()
             cap_b = (batch if workspace is None or workspace[0][1] != n else max(batch, workspace[0][0])) + 16
             cap_k = K if workspace is None or workspace[0][1] != n else max(K, workspace[0][2])
             spectra_pool = [self._gpu.empty_shared((cap_b, n)) for _ in range(cap_k)]

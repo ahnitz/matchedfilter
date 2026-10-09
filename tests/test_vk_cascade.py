@@ -171,3 +171,62 @@ def test_gpu_series_pipelined():
     hier_gpu.set_templates(h)
     res_hier = hier_gpu.run_series(ser, starts, ws, we)
     assert res_hier.shape == (nblk, nt, 1)
+
+
+@novk
+@pytest.mark.parametrize("kind", ["peaks", "peaks_grouped", "hier", "hier_cascade"])
+@pytest.mark.parametrize("level", ["mid", "zero"])     # mid: about a fifth of bins a peak
+@pytest.mark.parametrize("gate", [0.0, 0.5])            # 0: every pair refined
+def test_vk_sparse_readback_equals_dense(ctx, kind, level, gate):
+    """sparse=True gives the dense result's peaks exactly; the hierarchical paths read only
+    the refined pairs (survivor list) back, relying on the refine writing every bin of them."""
+    from matchedfilter import _SparsePeaks
+    n, nd, nt, bs = 2048, 24, 9, 512
+    rng = np.random.default_rng(17)
+    spec = ctx.empty_shared((nd, n))
+    spec[:] = ((rng.standard_normal((nd, n)) + 1j * rng.standard_normal((nd, n)))
+               / np.sqrt(2 * n)).astype(np.complex64)
+    h = (rng.standard_normal((nt, n)) + 1j * rng.standard_normal((nt, n))).astype(np.complex64)
+    h /= np.linalg.norm(h, axis=1, keepdims=True) / np.sqrt(n)
+    groups = [(0, 2000, 0, 3), (40, 2040, 3, 20), (10, 2010, 20, 24)]
+
+    def call(sparse):
+        if kind == "peaks":
+            return ctx.peaks(n, spec, h, binsize=bs, threshold=thr, window=(40, 2040), sparse=sparse)
+        if kind == "peaks_grouped":
+            return ctx.peaks_grouped(n, spec, h, groups, bs, thr, sparse=sparse)
+        if kind == "hier":
+            return ctx.hier_peaks(n, 512, spec, h, h[:, :512], gate, binsize=bs, threshold=thr,
+                                  window=(40, 2040), sparse=sparse)
+        return ctx.hier_peaks(n, 512, spec, h, h[:, :128], gate, cascade_band=128, ct1=h[:, :512],
+                              raw_thr1=2 * gate, binsize=bs, threshold=thr, window=(40, 2040),
+                              sparse=sparse)
+    thr = 0.0
+    if level == "mid":
+        thr = float(np.quantile(np.abs(call(False)[1]), 0.8))
+    di, dv = call(False)
+    sp = call(True)
+    assert isinstance(sp, _SparsePeaks) and sp.shape == di.shape
+    si, sv = sp.dense()
+    np.testing.assert_array_equal(si, di)
+    np.testing.assert_array_equal(sv, dv)
+    if gate == 0.0 or kind.startswith("peaks"):
+        assert 0 < sp.flat.size < di.size if level == "mid" else sp.flat.size == di.size
+
+
+def test_fused_cache_key_is_not_a_command_buffer_handle():
+    """A fused recording is cached by its constituents' serials, not their handles: an
+    evicted recording's handle value is reused by the next one, and a handle-keyed cache
+    resubmitted commands naming the evicted recording's freed buffers (GPU page faults)."""
+    from types import SimpleNamespace
+    from matchedfilter import _vkcompute as V
+    ctx = SimpleNamespace(device=object(), _phases={0xabc: {"_serial": next(V._RECORDING_SERIAL)}})
+    before = V._fused_key([(ctx, [0xabc])])
+    serial = before[0][1]
+    assert V._fused_valid(ctx, [0xabc], serial)
+    # Evicted, and the same handle value registered again for a new recording.
+    ctx._phases[0xabc] = {"_serial": next(V._RECORDING_SERIAL)}
+    assert V._fused_key([(ctx, [0xabc])]) != before
+    assert not V._fused_valid(ctx, [0xabc], serial)
+    del ctx._phases[0xabc]
+    assert not V._fused_valid(ctx, [0xabc], serial)
