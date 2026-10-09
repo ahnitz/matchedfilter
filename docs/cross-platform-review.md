@@ -253,6 +253,48 @@ glitches.
 The GPU fp16 coarse (`c16`) has no host-side error margin today. It relies on the refine chain's
 slack. It is the third instance of the same lever and should go through the same harness.
 
+### 6.1 The harness: `tools/gate_margin.py` (first results, 2026-10-09, 8060S + Zen 5)
+
+The harness works from each gate's pass/reject decisions only, so one method covers the CPU
+screen and the GPU kernel.
+- Every pair's exact float64 maximum is scaled to K.
+- A threshold grid thr = K(1 + delta) is swept, with delta = 0 on the grid.
+- **slack** = thr_max/ref - 1, where thr_max is the largest grid threshold at which the pair
+  still passes. A negative slack is a dismissal the gate added.
+- **margin use** applies where the gate exposes its statistic s. It is
+  (ref - s)/(thr_max - s), and the criterion is < 0.5.
+- The families are noise, profile-shaped, injection, loud transient, and full scale
+  (K = 3e4).
+- `--loud` adds an end-to-end CPU-versus-GPU check with one loud injection.
+
+Results:
+- **x86 Q15 screen** (N = 128-1024, 256 pairs per family per N): 0 dismissals; minimum slack
+  +0.1% to +2.5%.
+  - The largest margin use is **0.49**, on the loud transient at N=128; 0.47 at N=256.
+    Elsewhere it is 0.32-0.45.
+  - The statistical margin holds, but the transient family sits at the 2x-headroom line, as §6
+    predicted. Do not lower the 5 sqrt(N) margin.
+- **GPU first tier through `hier_peaks`, ordinary scale** (N = 128-1024): about 55-65% of
+  pairs whose exact maximum equals the threshold are rejected. The gate value sits up to 0.14%
+  below the exact one, with no margin.
+  - This is a symmetric-error gate. The effective threshold rises by up to ~0.14%, an
+    unbudgeted but small change to the false-dismissal rate.
+  - Fix: lower the tier's raw threshold by a derived bound (the NEON gate's (1 + 3u) +
+    kappa u rms form), or fail open by ~2 ulp of fp16.
+- **GPU at large coarse values: a correctness bug, not a margin question.**
+  - The gate grid rejects every pair once the coarse maximum is above ~1e3 (100 passes, 1000
+    fails), at every band 128-1024.
+  - End to end (`--loud`, HierarchicalFilter at n=4096, threshold 6 sigma), one injection
+    at SNR >= 2500 makes the GPU return **0 peaks for the whole batch**, against 62 on the
+    CPU. At SNR 2000 the two agree.
+  - It also fails with `chain=(2048,)`, which is an fp32 coarse tier, so the cause is not
+    only fp16 coarse inputs.
+  - Loud glitches at these SNRs occur in detector data. Every other trigger in the same call
+    is lost with them.
+  - Owner: the Vulkan kernel track (compaction, peak packing, or refine value range). CUDA
+    and Metal should run `python tools/gate_margin.py --gate gpu-c16 --loud` once their
+    adapter exists (the GPU adapter currently drives `_vkcompute`).
+
 ## 7. Top recommendations (impact x breadth)
 
 1. **Shared host layer (`_gpuhost`) over a primitive backend interface** (§3.1). Every bug class
