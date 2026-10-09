@@ -2039,6 +2039,8 @@ class HierarchicalFilter(MatchedFilter):
                          int(getattr(self, 'k', self.n) or self.n))
         if self._hermitian:
             plan.set_hermitian(True)
+        if os.environ.get("MF_Q15_TMP", "0") == "1":
+            plan.set_q15(True)
         return plan
 
     def _restore_into(self, plan):

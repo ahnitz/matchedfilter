@@ -1,6 +1,7 @@
 #ifndef AP_BACKEND_H
 #define AP_BACKEND_H
 #include <stddef.h>
+#include <stdint.h>
 #include "matchedfilter.h"
 /* One implementation of the transform, selected at runtime by CPU support. */
 typedef struct {
@@ -66,6 +67,13 @@ typedef struct {
   int (*binmax_prod_threshold)(void *, const float *, const float *,
                               const float *, const float *, size_t,
                               float, ap_peak *, int, size_t, size_t);
+  /* Q15 coarse screen (q15-inl.h): int16 lanes per call; for that many pairs,
+     bit l of *bits set when lane l's maximum of |z|^2/2^15 over [start,end)
+     reaches lanethr[l] (and the maxima in lanemax, when not NULL). */
+  int (*q15_lanes)(void);
+  int (*q15_screen)(size_t N, const int16_t *dq, const int16_t *tr, const int16_t *ti,
+                    size_t start, size_t end, const int16_t *lanethr, uint64_t *bits,
+                    int16_t *lanemax, void *scratch);
 } ap_backend;
 
 /* The kernel for the target Highway's runtime dispatch selected, or NULL if
