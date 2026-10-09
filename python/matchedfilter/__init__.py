@@ -1394,6 +1394,10 @@ class MatchedFilter:
             # Upload only the span the blocks read: a windowed call touches a small part
             # of a long series. Starts are rebased onto it; reads past the series end
             # stay past the end of the span.
+            # The host reads the series here: writes left in flight to it must land first.
+            settle = getattr(self._gpu, 'settle_writes', None)
+            if settle is not None:
+                settle()
             base = min(int(layout.starts.min()), ser.size) if nblk else 0
             top = min(ser.size, int(layout.starts.max()) + n) if nblk else 0
             if top - base < 1:                # every block starts at the series end
@@ -1681,6 +1685,9 @@ class CorrelationFilter(MatchedFilter):
         if policy:
             batch = min(batch, policy['series_group'])
         key = (batch, nt, self.n, ser.size)
+        settle = getattr(self._gpu, 'settle_writes', None)
+        if settle is not None:
+            settle()        # a call left in flight still reads the workspaces rewritten below
         work = getattr(self, '_continuous_workspace', None)
         if work is None or work[0] != key:
             work = (key, self.empty_shared(ser.shape),

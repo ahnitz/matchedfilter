@@ -296,6 +296,16 @@ def _check(rc, what):
         raise VulkanError("%s failed with VkResult %d" % (what, rc))
 
 
+def _global_barrier(vk, cmd):
+    """All earlier compute/transfer work before all later work, memory included."""
+    mb = _MemBarrier(46, None, _ACCESS_SHADER_WRITE | _ACCESS_TRANSFER_WRITE | _ACCESS_SHADER_READ,
+                     _ACCESS_SHADER_READ | _ACCESS_SHADER_WRITE | _ACCESS_TRANSFER_WRITE
+                     | _ACCESS_HOST_READ)
+    vk.vkCmdPipelineBarrier(cmd, _STAGE_COMPUTE_BIT | _STAGE_TRANSFER_BIT,
+                            _STAGE_COMPUTE_BIT | _STAGE_TRANSFER_BIT | _STAGE_HOST_BIT,
+                            0, 1, ctypes.byref(mb), 0, None, 0, None)
+
+
 def _sparse_from_dense(idx, val):
     from . import _SparsePeaks
     flat = np.flatnonzero(idx >= 0)
@@ -640,6 +650,10 @@ class _Device:
                                          ctypes.c_uint64, ctypes.c_void_p]
         self.pipelines = {}
         self.collector = None        # a _FusedBatch while filter_series_many is collecting
+        # Fences of writes left in flight (correlate_series(wait=False)): device consumers on
+        # the main queue are ordered by the barriers those recordings carry; anything else
+        # (another queue, a host write to their inputs, a host read) waits here first.
+        self.pending_writes = []
         self.trace = None            # fused-batch keys flushed while a SegmentPlan traces
         app = _vulkan._AppInfo(0, None, b"matchedfilter", 1, b"matchedfilter", 1,
                                (1 << 22) | (1 << 12))
@@ -2019,6 +2033,10 @@ class Context(InputUploads):
         # barriers order work only within a queue, so banks on different queues overlap.
         queue = (self.queues[(slot + self._queue_offset) % len(self.queues)]
                  if (getattr(self, "queues", None) and slot is not None) else self.queue)
+        dev = getattr(self, "_device_state", None)
+        if dev is not None and dev.pending_writes and queue is not self.queue \
+                and getattr(queue, "value", queue) != getattr(self.queue, "value", self.queue):
+            self.settle_writes()                # barriers order only one queue
         _check(self.vk.vkQueueSubmit(queue, 1, ctypes.byref(submit), fence),
                "vkQueueSubmit")
         if wait:
@@ -2620,10 +2638,13 @@ class Context(InputUploads):
         row = dest.strides[0]
         pending.extend((sb, base + r * row, length) for r in range(dest.shape[0]))
 
-    def zero_columns_done(self):
-        """Record and submit every collected zero_columns range, and wait for them."""
+    def zero_columns_done(self, wait=True):
+        """Record and submit every collected zero_columns range, and wait for them and every
+        write left in flight -- or, wait=False, leave them in flight too."""
         ranges, self._zero_ranges = getattr(self, "_zero_ranges", None) or [], []
         if not ranges:
+            if wait:
+                self.settle_writes()
             return
         vk = self.vk
         cmd = _vp()
@@ -2643,14 +2664,31 @@ class Context(InputUploads):
             vk.vkCmdPipelineBarrier(cmd, _STAGE_TRANSFER_BIT, _STAGE_HOST_BIT | _STAGE_COMPUTE_BIT,
                                     0, 1, ctypes.byref(mb), 0, None, 0, None)
             _check(vk.vkEndCommandBuffer(cmd), "end zero")
+            if not wait:
+                self._submit_pending(cmd)
+                self._zero_cmds = getattr(self, "_zero_cmds", []) + [cmd]
+                cmd = None                       # freed once settled (_free_zero_cmds)
+                return
             self._submit(cmd)                   # waits; same queue as the correlation
+            self.settle_writes()
             self._wait_queues()                 # and anything on the other queues
+            self._free_zero_cmds()
         finally:
+            if cmd is not None:
+                vk.vkFreeCommandBuffers.argtypes = [_vp, _vp, _u32, ctypes.POINTER(_vp)]
+                vk.vkFreeCommandBuffers(self.device, self.command_pool, 1, (_vp * 1)(cmd))
+
+    def _free_zero_cmds(self):
+        """Free zeroing command buffers left in flight, once their writes are settled."""
+        cmds, self._zero_cmds = getattr(self, "_zero_cmds", []), []
+        if cmds:
+            self.settle_writes()
+            vk = self.vk
             vk.vkFreeCommandBuffers.argtypes = [_vp, _vp, _u32, ctypes.POINTER(_vp)]
-            vk.vkFreeCommandBuffers(self.device, self.command_pool, 1, (_vp * 1)(cmd))
+            vk.vkFreeCommandBuffers(self.device, self.command_pool, len(cmds), (_vp * len(cmds))(*cmds))
 
     def correlate_continuous(self, n, data, tmpl, starts, out, lo, hi,
-                             *, upload_data=True, upload_tmpl=True):
+                             *, upload_data=True, upload_tmpl=True, async_submit=False):
         """Write valid lags into template-major shared output on the GPU."""
         nd, nt = data.shape[0], tmpl.shape[0]
         length = out.shape[1]
@@ -2704,6 +2742,10 @@ class Context(InputUploads):
                                                     ctypes.byref(cmd)), 'continuous allocate')
             _check(self.vk.vkBeginCommandBuffer(cmd, ctypes.byref(
                 _CmdBufBegin(42, None, 0, None))), 'continuous begin')
+            # Ordered against neighbouring work on this queue without a host wait: earlier
+            # readers of `out` (last segment's fine stage) finish first, and later readers
+            # see these writes (correlate_series(wait=False) leaves this in flight).
+            _global_barrier(self.vk, cmd)
             params = (_u32 * 4)(nt, length, lo, hi)
             if geometry:
                 self.vk.vkCmdBindPipeline(cmd, _BIND_POINT_COMPUTE, p1)
@@ -2727,6 +2769,7 @@ class Context(InputUploads):
             self.vk.vkCmdPushConstants(cmd, layout, _STAGE_COMPUTE, 0, 16,
                                         ctypes.byref(params))
             self.vk.vkCmdDispatch(cmd, nd*nt*(geometry['n2'] if geometry else 1), 1, 1)
+            _global_barrier(self.vk, cmd)
             _check(self.vk.vkEndCommandBuffer(cmd), 'continuous end')
             batch = ((bd, bt, scratch, bs, bo, cmd) if geometry
                      else (bd, bt, bs, bo, cmd))
@@ -2741,7 +2784,38 @@ class Context(InputUploads):
         if uploads[1]:
             write_input(bt, tmpl)
             self._uploaded['tmpl'][key] = uploads[3]
-        self._submit(batch[-1])
+        if async_submit:
+            self._submit_pending(batch[-1])
+        else:
+            self._submit(batch[-1])
+
+    def _submit_pending(self, cmd):
+        """Submit on the main queue and leave it in flight (see _Device.pending_writes)."""
+        fence = _vp()
+        _check(self.vk.vkCreateFence(self.device, ctypes.byref(_FenceCreate(8, None, 0)), None,
+                                     ctypes.byref(fence)), "vkCreateFence")
+        try:
+            self._submit(cmd, fence=fence, wait=False)
+        except BaseException:
+            self.vk.vkDestroyFence(self.device, fence, None)
+            raise
+        self._device_state.pending_writes.append(fence)
+
+    def settle_writes(self):
+        """Wait for every write left in flight on this device (correlate_series(wait=False))."""
+        dev = self._device_state
+        while dev.pending_writes:
+            fence = dev.pending_writes.pop(0)
+            fences = (_vp * 1)(fence)
+            _check(self.vk.vkWaitForFences(self.device, 1, fences, 1, 0xFFFFFFFFFFFFFFFF),
+                   "vkWaitForFences")
+            self.vk.vkDestroyFence(self.device, fence, None)
+
+    #: correlate_continuous(async_submit=True) leaves the last batch in flight; a later call
+    #: settles it before rewriting the workspaces it reads (_continuous_gpu).
+    defers_continuous = True
+    #: zero_columns_done(wait=False) leaves the zeroing in flight.
+    async_zero = True
 
     def correlate(self, n, data, tmpl, out, *, upload_data=True, upload_tmpl=True):
         """Write full correlations to caller storage with bounded GPU batches."""
