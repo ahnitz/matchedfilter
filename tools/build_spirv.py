@@ -286,7 +286,19 @@ def reflect(blob):
                 push_constant=push_constant)
 
 
-def compile_metal(slangc, n, cap, entry, outdir, suffix="", coarse16=0, ppg=1, single_bin=0):
+def metal_split(n, cap, coarse16=0):
+    """Whether a Metal build stages its exchange one float per register (SPLIT_STAGE).
+
+    Where the staging holds half a transform (cap < n <= 2 cap: n=8192 at Apple's 32 KB),
+    the float2 exchange runs in two chunks; staging one component at a time runs it in one
+    pass per component from the same bytes. Measured on an M2, middle-stage
+    full_series_8192: 4.24 -> 3.05 ms, bit-identical output.
+    """
+    return int(not coarse16 and cap < n <= 2 * cap)
+
+
+def compile_metal(slangc, n, cap, entry, outdir, suffix="", coarse16=0, ppg=1, single_bin=0,
+                  split=None):
     """Emit Metal Shading Language, and a .metallib when one can be built.
 
     The MSL is generated anywhere -- it is Slang's own output and needs no
@@ -299,10 +311,13 @@ def compile_metal(slangc, n, cap, entry, outdir, suffix="", coarse16=0, ppg=1, s
     a device whose .metallib is missing or stale can still be served by
     compiling at run time rather than refusing.
     """
+    if split is None:
+        split = metal_split(n, cap, coarse16)
     src = outdir / ("mm_%d_%s%s.slang" % (n, entry, suffix))
     src.write_text("#define NLEN %d\n#define LDS_CAP %d\n#define COARSE16 %d\n"
-                   "#define PPG %d\n#define RADIX %d\n#define SINGLE_BIN %d\n"
-                   % (n, cap, coarse16, ppg, RADIX.get(n, 16), single_bin) + KERNEL.read_text())
+                   "#define PPG %d\n#define RADIX %d\n#define SINGLE_BIN %d\n#define SPLIT_STAGE %d\n"
+                   % (n, cap, coarse16, ppg, RADIX.get(n, 16), single_bin, split)
+                   + KERNEL.read_text())
     stem = "%s_%d%s" % (STEMS[entry], n, suffix)
     msl = outdir / (stem + ".metal")
     proc = subprocess.run(

@@ -877,6 +877,9 @@ def test_segment_plan_replays_and_matches(monkeypatch):
         total += sum(len(r.snr) for r in got)
     if getattr(rows, 'ctypes', None) is not None and plan.replays == 0:
         from matchedfilter._shared import shared_buffer
-        if shared_buffer(rows, banks[0]._groups[0].plan._gpu) is not None:
+        ctx = banks[0]._groups[0].plan._gpu
+        # Replay is implemented for Vulkan recordings only; elsewhere this is
+        # filter_series_many, which the comparison above already checks.
+        if shared_buffer(rows, ctx) is not None and type(ctx).__module__.endswith("_vkcompute"):
             pytest.fail("a device-resident job set was never replayed")
     assert total >= 5
