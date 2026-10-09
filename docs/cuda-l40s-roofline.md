@@ -217,3 +217,66 @@ The structural fixes, in that order:
 - No refine survivor attribution in the grouped path, so refine rows have no rate.
 - The A100 check (sm_80) is outstanding. The occupancy-based coarse choice and the
   register cap (65536/threads) are device-queried, not sm_89 constants.
+
+## Phase 2 (2026-10-09): realistic gating, host overhead
+
+All numbers here use the realistic bench data:
+`ladder --profiles ladder_profiles_H1.npz --pure`, with per-top reference profiles. The gates
+refine ~0.5% of pairs, against ~75% with the old generic profile, so earlier numbers in this
+document were partly refine-dominated.
+
+Runs are interleaved (CPU, GPU batched, GPU `--no-batch`), min of 5, steady seconds, on main
+1b9b856 plus this branch.
+
+| | middle | fine | asym | TIRT |
+|---|---:|---:|---:|---:|
+| CPU, 1 core (autotune on) | 0.160 | 1.003 | 0.009 | 6.0e6 |
+| CUDA before phase 2, batched / `--no-batch` | 0.012 | 0.184 / 0.159 | 0.020 / 0.022 | 32.7e6 / 36.5e6 |
+| CUDA now, batched / `--no-batch` (autotune on) | 0.012 | 0.167 / 0.116 | 0.029 / 0.017 | 33.9e6 / 48.9e6 |
+| CUDA now, batched / `--no-batch` (`MF_AUTOTUNE=0`) | 0.012 | **0.055** / 0.063 | 0.029 / 0.016 | **73.4e6** / 76.7e6 |
+
+`--check cpu` passes in all four modes: identical peak sets, SNR within 1.8e-5.
+
+**CUDA against one CPU core:**
+- Per job, with steady chains: 12x by templates-in-real-time.
+- Middle: 13x. Fine: 18x.
+- Asym (follow-ups): 0.3-0.6x. These are small single-template calls; with the default
+  `MF_SINGLE_DEVICE=auto` they are measured and moved to the CPU, and `--pure` forbids that.
+
+**Autotune changes the steady segments, not the device code.** With the default
+`MF_AUTOTUNE=1`, each fine plan rotates candidate chains on real calls for many calls (2 per
+segment per bank). So the bench's "steady" segments still contain trial calls, records for
+chains about to be discarded, and pool rebuilds.
+
+What changed in phase 2 (fine stage, `MF_AUTOTUNE=0`, `--no-batch`):
+
+| change | before | after |
+|---|---:|---:|
+| Sparse peak readback (`compactPeaks` on device; `_SparsePeaks` up to `filter_series`) | 0.159 s | 0.117 s |
+| CUDA graphs for `hier_peaks` / `hier_peaks_grouped` (~20 launches -> 1 `cuGraphLaunch`): grouped-call host time 240 -> 45 us | 0.101 s | 0.063 s |
+| Deferred calls keep the one-submission grouped path | batched 1.4x slower than `--no-batch` | batched 0.055 vs `--no-batch` 0.063 |
+
+**What binds now.** Fine stage, `MF_AUTOTUNE=0`, `--no-batch`, per fine call:
+
+| | per call |
+|---|---:|
+| wall | ~0.8 ms |
+| device | ~0.33 ms |
+| waiting in `_sync` | ~0.24 ms |
+| host Python | the rest, spread over many small layers |
+
+The host Python covers `filter_series`, layout, `run_series` and the forward call; that
+layering is shared code.
+
+Device time is ~60% the coarse gate. `tierb_1024_c16p2` runs at 65 µs per launch, ~22 TFLOPS
+fp16-equivalent: 15-30% of the fp16 rate. The rest is refine, at ~17 µs per launch for a few
+hundred survivors: per-block FFT latency, with the 288 B/thread spill still there, plus the
+forward FFT.
+
+**Open items:**
+- CUDA follow-up items: an equivalent of Vulkan's `peaks_items`, so batched follow-ups are
+  one submission per template group. Batched asym is 0.029 s against 0.016 s per call.
+- Refine spills and per-block FFT latency.
+- A smaller coarse gate cost, by occupancy and by fusing the forward FFT into the gate's pack.
+- One fused multi-bank submission per segment. It needs a multi-bank API that skips per-bank
+  Python, because host time is now ~60% of wall.
