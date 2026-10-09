@@ -1201,19 +1201,29 @@ class TimeDomainFilterBank:
             if (len(groups_bins) > 1 and getattr(active_plan, '_gpu', None) is not None
                     and not getattr(active_plan, '_bandlimited', False)
                     and hasattr(active_plan, '_run_series_ragged')):
-                res = active_plan._run_series_ragged(
-                    data_in, bstarts, bws, bwe, binsize=bs,
-                    threshold=eff_threshold, templates=plan_templates)
+                if defer and trial is None:
+                    active_plan._defer_series = defer
+                    active_plan._gpu._queue_offset = getattr(self, '_queue_offset', 0)
+                try:
+                    res = active_plan._run_series_ragged(
+                        data_in, bstarts, bws, bwe, binsize=bs,
+                        threshold=eff_threshold, templates=plan_templates)
+                finally:
+                    if defer and trial is None:
+                        active_plan._defer_series = False
                 if res is not None:
                     # Split back into the per-count groups, in their order, so the result
                     # is the one per-count calls give (peak order included).
-                    ridx, rval = res
                     bc = ((bwe - bws + bs - 1) // bs).astype(np.int64)
                     work = []
                     for u in np.unique(bc):
                         m = bc == u
+
+                        def part(r, m=m, u=u):
+                            return r[0][m][:, :, :u], r[1][m][:, :, :u]
                         work.append(((bstarts[m], bws[m], bwe[m]),
-                                     (ridx[m][:, :, :u], rval[m][:, :, :u])))
+                                     _Deferred(lambda d=res, part=part: part(d.result()))
+                                     if isinstance(res, _Deferred) else part(res)))
             t_trial = time.perf_counter()
             for (sub_starts, sub_bws, sub_bwe), res in work:
                 if res is None:

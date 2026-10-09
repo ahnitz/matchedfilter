@@ -1100,7 +1100,11 @@ class MatchedFilter:
         # Deferred (TimeDomainFilterBank.filter_series_many): submit now, collect later, so the
         # GPU works on this call while the host prepares the next bank's. Chain trials time
         # their calls, so a plan under trial runs synchronously.
-        defer = (getattr(self, "_defer_series", False) and can_pipeline and not grouped_flat
+        # A grouped flat call defers too when it is one batch (a follow-up's window: one
+        # submission for every bin count), on a backend that declares it can.
+        defer = (getattr(self, "_defer_series", False) and can_pipeline
+                 and (not grouped_flat or (nblk <= batch
+                                           and getattr(self._gpu, "defers_grouped", False)))
                  and getattr(self, "_chain_trial", None) is None)
         pipelined = can_pipeline and (not single or defer)
         queue_ahead = int(os.environ.get("MF_GPU_QUEUE_AHEAD", "8"))
@@ -1216,7 +1220,7 @@ class MatchedFilter:
             and nt <= self._gpu_pair_limit())
         if grouped:
             in_flight = []
-            slot_idx = 0
+            slot_idx = slot0 if defer else 0
             for begin in range(0, nblk, batch):
                 end = min(begin + batch, nblk)
                 count = end - begin
@@ -1246,16 +1250,26 @@ class MatchedFilter:
                         idx[b_start:b_end], val[b_start:b_end] = gi, gv
                     else:
                         _core.pack_peaks(peaks[b_start:b_end], gi, gv)
-            while in_flight:
-                b_start, b_end, item = in_flight.pop(0)
-                gi, gv = item() if callable(item) else item
+
+            def finish_grouped():
+                while in_flight:
+                    b_start, b_end, item = in_flight.pop(0)
+                    gi, gv = item() if callable(item) else item
+                    if raw:
+                        idx[b_start:b_end], val[b_start:b_end] = gi, gv
+                    else:
+                        _core.pack_peaks(peaks[b_start:b_end], gi, gv)
                 if raw:
-                    idx[b_start:b_end], val[b_start:b_end] = gi, gv
-                else:
-                    _core.pack_peaks(peaks[b_start:b_end], gi, gv)
-            if raw:
-                return _format_result(idx, val, raw=True, order=layout.order)
-            return _format_result(None, None, raw=False, order=layout.order, out=peaks)
+                    return _format_result(idx, val, raw=True, order=layout.order)
+                return _format_result(None, None, raw=False, order=layout.order, out=peaks)
+            if not defer:
+                return finish_grouped()
+            self._defer_slot = slot_idx
+            deferred = _Deferred(finish_grouped)
+            owners = self.__dict__.setdefault("_slot_owner", {})
+            for k in range(slot0, slot_idx):
+                owners[k % K] = deferred
+            return deferred
         in_flight = []
         collected_early = [False]
         trace_groups = []
