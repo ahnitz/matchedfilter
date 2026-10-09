@@ -1004,7 +1004,8 @@ class Context(InputUploads):
             return alt["file"]
         return "tierb_%d.spv" % n
 
-    def _build_pipeline(self, key, filename, nbind, push_bytes, data_stride=0, row_windows=0):
+    def _build_pipeline(self, key, filename, nbind, push_bytes, data_stride=0, row_windows=0,
+                        subgroup=0):
         """data_stride: specialization constant 75 (mfDataStride), the data spectra's row
         stride when a hierarchical stage reads its band straight out of them.
         row_windows: constant 76 (mfRowWindows), per-row windows from the gRowWin binding.
@@ -1014,6 +1015,14 @@ class Context(InputUploads):
         dummy buffer."""
         if data_stride or row_windows:
             key = (key, "stride", data_stride, "rowwin", row_windows)
+        # subgroup: a size within the device's required-size range to build this pipeline
+        # at instead of the default (specialization constant 74 follows it).
+        rng = getattr(self, "subgroup_range", None)
+        if subgroup and not (rng and rng[0] <= subgroup <= rng[1]):
+            raise VulkanError("subgroup size %d cannot be required here" % subgroup)
+        sg = int(subgroup or self.subgroup_size)
+        if subgroup:
+            key = (key, "subgroup", sg)
         if key in self._pipelines:
             return self._pipelines[key]
         vk = self.vk
@@ -1055,7 +1064,7 @@ class Context(InputUploads):
 
         # Subgroup specialization (constant ID 74)
         entries.append(_SpecializationEntry(74, offset, 4))
-        data_vals.append(int(self.subgroup_size))
+        data_vals.append(sg)
         offset += 4
         if data_stride:
             entries.append(_SpecializationEntry(75, offset, 4))
@@ -1081,7 +1090,7 @@ class Context(InputUploads):
         req = None
         if getattr(self, "subgroup_range", None):
             # The size the kernels are specialized on (constant 74), required, not hoped for.
-            req = _StageRequiredSize(1000225001, None, int(self.subgroup_size))
+            req = _StageRequiredSize(1000225001, None, sg)
         stage = _StageCreate(18, ctypes.cast(ctypes.pointer(req), _vp) if req else None,
                              0, _STAGE_COMPUTE, module,
                              b"main", special)
@@ -1337,6 +1346,19 @@ class Context(InputUploads):
         vk.vkUpdateDescriptorSets(self.device, nbind, writes, 0, None)
         return dset
 
+    def _fit_subgroup(self, n):
+        """The subgroup size to build a one-pair-per-group kernel of length n at: the
+        smallest the device can be required to run that still holds the workgroup
+        (n/16 invocations), so a 32-invocation group does not leave half of a 64-wide
+        wave idle. 0 (the default size) otherwise. Listed one-bin refine, CU-cycles/pair,
+        wave64 -> wave32: n=256 481 -> 385, n=512 (32 invocations) 620 -> 552; 1024 1020 -> 1157, 2048
+        2113 -> 2266, 4096 4400 -> 4921 (larger groups lose)."""
+        rng = getattr(self, "subgroup_range", None)
+        wg = max(1, n // 16)
+        if not rng or wg > rng[0] or rng[0] >= self.subgroup_size:
+            return 0
+        return rng[0] if wg <= rng[0] else 0
+
     def _coarse_geometry(self, band, nd, nt):
         """(pairs per workgroup, templates per tile, groups, ragged) for the packed coarse kernel.
 
@@ -1449,7 +1471,7 @@ class Context(InputUploads):
         refine_file = self._peak_file(n, nbins, refine=True)
         rpipe, rlayout, rset_layout = self._build_pipeline(
             ("refine", refine_file), refine_file, 5, _PUSH_BYTES,
-            row_windows=1 if rowwin is not None else 0)
+            row_windows=1 if rowwin is not None else 0, subgroup=self._fit_subgroup(n))
         pairs = nd * nt
         b = self._storage.get(key)
         if b is None:
@@ -1645,11 +1667,12 @@ class Context(InputUploads):
         refine_file1 = self._peak_file(band1, 1, refine=True)
         cpipe1, clayout1, cset_layout1 = self._build_pipeline(
             ("refine", refine_file1), refine_file1, 5, _PUSH_BYTES, data_stride=n,
-            row_windows=rwc)
+            row_windows=rwc, subgroup=self._fit_subgroup(band1))
 
         refine_file = self._peak_file(n, nbins, refine=True)
         rpipe, rlayout, rset_layout = self._build_pipeline(
-            ("refine", refine_file), refine_file, 5, _PUSH_BYTES, row_windows=rwr)
+            ("refine", refine_file), refine_file, 5, _PUSH_BYTES, row_windows=rwr,
+            subgroup=self._fit_subgroup(n))
 
         pairs = nd * nt
         b = self._storage.get(key)
