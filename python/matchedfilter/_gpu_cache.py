@@ -93,8 +93,18 @@ class InputUploads:
                 yield batch
 
     def _cache_bytes(self, incoming=()):
+        """Bytes eviction could free: buffers the cache owns, and borrowed shared
+        allocations only once their caller has let go (see _shared._caller_holds). A
+        search's middle-stage output, read in place by every fine bank's forward, is
+        ~0.5 GB its caller keeps; counted, it filled the budget by itself, and every call
+        evicted and re-recorded (100 recordings and 1500 buffer allocations per 8
+        segments)."""
+        from ._shared import _caller_holds
         allocations = {}
         for buf in (*self._cached_buffers(), *incoming):
+            owner = getattr(buf, 'owner', None)
+            if owner is not None and _caller_holds(owner):
+                continue
             allocation = self._allocation(buf)
             allocations[id(allocation)] = getattr(allocation, 'nbytes', 0)
         return sum(allocations.values())

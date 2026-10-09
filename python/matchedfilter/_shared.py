@@ -32,6 +32,14 @@ class _Allocation:
             buf.destroy()
 
 
+def _caller_holds(allocation):
+    """True while a caller's array (or a view of it) still holds this shared allocation:
+    evicting the recordings that borrow it then frees nothing, so a cache budget must not
+    count it. Dropped by the caller, only borrowers keep it, and eviction does free it."""
+    ref = getattr(allocation, "_storage", None)
+    return ref is not None and ref() is not None
+
+
 class _Borrowed:
     """A descriptor reference; cache eviction must not free its allocation."""
     def __init__(self, allocation, offset=0):
@@ -157,6 +165,8 @@ def empty_shared(ctx, buffer_type, shape, dtype=np.complex64):
     address = buf.ptr.value if hasattr(buf.ptr, 'value') else buf.ptr
     storage = (ctypes.c_ubyte * nbytes).from_address(address)
     storage._allocation = owner
+    # Alive while any caller array or view of it is: see _Allocation.caller_holds.
+    owner._storage = weakref.ref(storage)
     return np.ndarray(shape, dtype=dtype, buffer=storage)
 
 

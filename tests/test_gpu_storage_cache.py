@@ -37,9 +37,15 @@ def test_window_records_share_storage_and_refresh_inputs(plan):
         assert len(ctx._storage) == 1
         records = ctx._batches or ctx._hier
         assert len(records) == 6
+    # Shared allocations the caller still holds are not counted: evicting the recordings
+    # that borrow them would free nothing.
+    from matchedfilter._shared import _caller_holds
+    held = lambda b: getattr(b, 'owner', None) is not None and _caller_holds(b.owner)
     allocations = {id(ctx._allocation(b)):ctx._allocation(b).nbytes
-                   for b in ctx._cached_buffers()}
+                   for b in ctx._cached_buffers() if not held(b)}
     assert ctx._cache_bytes() == sum(allocations.values())
+    if any(held(b) for b in ctx._cached_buffers()):
+        assert plan._gdata.nbytes + plan._gtmpl.nbytes > 0       # the shared variants
     plan._gdata[:] *= 2j
     plan.set_data(plan._gdata)
     plan._gtmpl[:] *= .5j
