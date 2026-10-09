@@ -35,6 +35,15 @@ def _is_index(x) -> bool:
     return isinstance(x, (int, np.integer)) and not isinstance(x, (bool, np.bool_))
 
 
+def _settle_metal_writes():
+    """Wait for Metal writes left in flight (zero_columns_done(wait=False)) before a host
+    read. Metal orders its own contexts on the GPU, so only host readers wait."""
+    import sys
+    mtl = sys.modules.get(__package__ + '._mtlcompute')
+    if mtl is not None:
+        mtl.settle_all()
+
+
 def _normalize_windows(windows, S: int) -> np.ndarray:
     """Analysis windows as a sorted, disjoint int64 (K, 2) array of [start, stop).
 
@@ -1170,6 +1179,10 @@ class TimeDomainFilterBank:
                 active_plan = g.get_flat_plan()
             else:
                 active_plan = g.plan
+            if getattr(active_plan, '_gpu', None) is None:
+                # A host plan reads the series on the host: device writes left in flight
+                # to it (correlate_series(wait=False)) must land first.
+                _settle_metal_writes()
 
             N = g.n
             layout = g._cached_layout

@@ -9,10 +9,18 @@ class Pending:
     cached buffers can finish them first -- a result is read from those
     buffers, and reading one after its release reads freed memory.
     """
-    __slots__ = ("ctx", "fn", "result", "done")
+    __slots__ = ("ctx", "fn", "result", "done", "stats")
+
+    #: Per-dispatch statistics a finish leaves on the context (last_refinements, ...). A
+    #: result can be materialised early -- _drain from timings(), a cache eviction, a slot
+    #: reuse -- and in any order, while callers read these attributes when THEY collect
+    #: it: each result restores its own values whenever it is returned. Read stale, a
+    #: deferred hierarchical call counted 0 refinements and marked itself empty.
+    STATS = ("last_refinements", "last_tier1_survivors")
 
     def __init__(self, ctx, fn):
         self.ctx, self.fn, self.result, self.done = ctx, fn, None, False
+        self.stats = None
 
     def __call__(self):
         if not self.done:
@@ -20,6 +28,10 @@ class Pending:
             self.ctx._inflight.pop(id(self), None)
             fn, self.fn = self.fn, None
             self.result = fn()
+            self.stats = {k: getattr(self.ctx, k) for k in self.STATS if hasattr(self.ctx, k)}
+        else:
+            for k, v in (self.stats or {}).items():
+                setattr(self.ctx, k, v)
         return self.result
 
 
