@@ -773,14 +773,19 @@ class MatchedFilter:
             for d in pending:
                 d.result()
 
-    def _items_gpu(self, jobs, binsize, threshold):
+    def _items_gpu(self, jobs, binsize, threshold, wait=True):
         """Many single-template series calls as one forward dispatch and one submission.
 
         jobs: [(series, starts, win_start, win_end, template)] -- each a run_series call on one
         template of this plan. Every series must lie in one device allocation (rows of a
         reused device buffer), read in place. Returns per job (idx, val) shaped
         (nblocks, 1, max bins) with -1 in bins past a block's own count, or None when this
-        plan or these inputs cannot take the path (the caller then makes the calls)."""
+        plan or these inputs cannot take the path (the caller then makes the calls).
+
+        wait=False on a backend declaring ``items_async``: returns a callable giving that
+        list once the submission completes, so a caller submits every template group's
+        items before waiting on any (a GPU idle between small submissions takes ~1 ms to
+        start the next on an M2)."""
         from ._shared import containing
         gpu = self._gpu
         if (gpu is None or not hasattr(gpu, "peaks_items") or type(self) is not MatchedFilter
@@ -800,6 +805,9 @@ class MatchedFilter:
         if total == 0:
             return [(np.empty((0, 1, 1), np.int64), np.empty((0, 1, 1), np.complex64))
                     for _ in jobs]
+        prior = self.__dict__.pop("_items_pending", None)
+        if prior is not None:
+            prior()                              # its workspace is about to be rewritten
         cap = getattr(self, "_items_ws", None)
         if cap is None or cap[0].shape[0] < total:
             cap = (gpu.empty_shared((max(total, 2 * (cap[0].shape[0] if cap else 0)), n)),
@@ -821,23 +829,39 @@ class MatchedFilter:
             pos += k
         self._settle_deferred()
         gpu.forward(n, whole, starts[:total], spec[:total], defer=True)
-        res = gpu.peaks_items(n, spec[:total], self._gtmpl, items, binsize, threshold)
-        out, it, pos = [], 0, 0
-        for ser, st, ws, we, t in jobs:
-            k = int(st.size)
-            mine = []
-            while it < len(items) and items[it][3] <= pos + k:
-                mine.append((items[it], res[it]))
-                it += 1
-            nbmax = max([r[0].shape[2] for _, r in mine] or [1])
-            idx = np.full((k, 1, nbmax), -1, np.int64)
-            val = np.zeros((k, 1, nbmax), np.complex64)
-            for (lo, hi, a, b, _), (gi, gv) in mine:
-                idx[a - pos:b - pos, :, :gi.shape[2]] = gi
-                val[a - pos:b - pos, :, :gv.shape[2]] = gv
-            out.append((idx, val))
-            pos += k
-        return out
+        async_ok = not wait and getattr(gpu, "items_async", False)
+        res = gpu.peaks_items(n, spec[:total], self._gtmpl, items, binsize, threshold,
+                              **({"async_submit": True} if async_ok else {}))
+
+        def assemble(res):
+            out, it, pos = [], 0, 0
+            for ser, st, ws, we, t in jobs:
+                k = int(st.size)
+                mine = []
+                while it < len(items) and items[it][3] <= pos + k:
+                    mine.append((items[it], res[it]))
+                    it += 1
+                nbmax = max([r[0].shape[2] for _, r in mine] or [1])
+                idx = np.full((k, 1, nbmax), -1, np.int64)
+                val = np.zeros((k, 1, nbmax), np.complex64)
+                for (lo, hi, a, b, _), (gi, gv) in mine:
+                    idx[a - pos:b - pos, :, :gi.shape[2]] = gi
+                    val[a - pos:b - pos, :, :gv.shape[2]] = gv
+                out.append((idx, val))
+                pos += k
+            return out
+        if not async_ok:
+            out = assemble(res)
+            return out if wait else (lambda: out)
+        done = []
+
+        def collect():
+            if not done:
+                self.__dict__.pop("_items_pending", None)
+                done.append(assemble(res()))
+            return done[0]
+        self._items_pending = collect
+        return collect
 
     def _run_series_ragged(self, series, starts, win_start, win_end, binsize=None,
                            threshold=0.0, templates=None):

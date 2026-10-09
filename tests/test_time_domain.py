@@ -947,11 +947,11 @@ def test_gpu_follow_up_batch_matches_direct_calls(monkeypatch):
         c0 = int(rng.integers(20000, S - 20000))
         jobs.append((bank, rows[k % 2], dict(windows=slice(c0 - 9000, c0 + 9100), binsize=61,
                                              threshold=0.0, template_index=int(rng.integers(0, 25)))))
-    from matchedfilter import _vkcompute
     used = []
-    if hasattr(_vkcompute.Context, "peaks_items"):
-        orig = _vkcompute.Context.peaks_items
-        monkeypatch.setattr(_vkcompute.Context, "peaks_items",
+    ctx = bank._groups[0].plan._gpu
+    if ctx is not None and hasattr(type(ctx), "peaks_items"):      # any backend's
+        orig = type(ctx).peaks_items
+        monkeypatch.setattr(type(ctx), "peaks_items",
                             lambda self, *a, **k: used.append(1) or orig(self, *a, **k))
     many = TimeDomainFilterBank.filter_series_many(jobs)
     direct = [b.filter_series(x, **kw) for b, x, kw in jobs]

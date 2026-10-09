@@ -962,6 +962,59 @@ class Context(InputUploads):
                     b_val.read(np.complex64, out).reshape(nd, nt, nbins))
         return self._commit(cmd, "flat", async_submit=async_submit, finish=finish)
 
+    #: peaks_items takes async_submit (MatchedFilter._items_gpu(wait=False)).
+    items_async = True
+
+    @_autoreleased
+    def peaks_items(self, n, data, tmpl, items, binsize, threshold, async_submit=False):
+        """One command buffer over items (lo, hi, a, b, t): rows a:b of data against
+        template row t, searched over [lo, hi) in bins of binsize. Returns per item
+        (idx, val) shaped (b - a, 1, nbins). Data and templates are device allocations;
+        buffer offsets select each item's rows, so nothing is copied or recorded."""
+        b_data, b_tmpl = shared_buffer(data, self), shared_buffer(tmpl, self)
+        if b_data is None or b_tmpl is None:
+            raise ValueError("item spectra and templates must be shared allocations")
+        shift = binsize.bit_length() - 1 if binsize & (binsize - 1) == 0 else -1
+        t2 = int(np.float32(float(threshold) ** 2 if threshold > 0 else 0).view(np.uint32))
+        offs, nbs, size = [], [], 0
+        for lo, hi, a, b, t in items:
+            nb = -(-(hi - lo) // binsize)
+            if nb > _MAX_BINS:
+                raise UnsupportedSize("an item's window exceeds the kernel bin limit")
+            offs.append(size)
+            nbs.append(nb)
+            size += (b - a) * nb
+        prior = self.__dict__.pop("_items_inflight", None)
+        if prior is not None and not prior.done:
+            prior()                          # its output buffers are about to be reused
+        if getattr(self, "_items_cap", 0) < size:
+            self._drain()
+            cap = max(size, 2 * getattr(self, "_items_cap", 0))
+            for buf in getattr(self, "_items_out", ()):
+                buf.destroy()
+            self._items_out = (_Buffer(self, cap * 4), _Buffer(self, cap * 8))
+            self._items_cap = cap
+        b_idx, b_val = self._items_out
+        cmd = self._command_buffer()
+        enc = self.o.call(cmd, b"computeCommandEncoder")
+        for (lo, hi, a, b, t), off, nb in zip(items, offs, nbs):
+            self._dispatch(enc, self.pipeline(n, "fusedTierB", nb == 1),
+                           (1, lo, hi, binsize, shift & 0xFFFFFFFF, nb, t2),
+                           (b_data, b_tmpl, b_idx, b_val), n // _radix(n), groups=b - a,
+                           offsets=(a * n * 8, t * n * 8, off * 4, off * 8))
+        self.o.call(enc, b"endEncoding", restype=None)
+
+        def finish():
+            indices = b_idx.read(np.int32, size)
+            values = b_val.read(np.complex64, size)
+            return [(indices[off:off + (b - a) * nb].reshape(b - a, 1, nb),
+                     values[off:off + (b - a) * nb].reshape(b - a, 1, nb))
+                    for (lo, hi, a, b, t), off, nb in zip(items, offs, nbs)]
+        res = self._commit(cmd, "items", async_submit=async_submit, finish=finish)
+        if async_submit:
+            self._items_inflight = res
+        return res
+
     def peaks_grouped(self, n, data, tmpl, groups, binsize, threshold, *, upload_tmpl=True,
                       slot=None, async_submit=False, nbins=None):
         """Submit shared FFT rows with distinct flat windows in one command buffer."""
