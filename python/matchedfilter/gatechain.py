@@ -259,10 +259,17 @@ class CostModel:
     dense[b]          first tier at band b, per pair
     sparse[b]         [(density, ticks per survivor)] for a later tier at band b
     refine            [(density, ticks per refined pair)]
+    screen[b]         Q15 screen in front of a first tier at band b (q15-inl.h), when the
+                      back end has one: {"dense": ticks per pair screened,
+                      "excess": [(float density, screen density)], "recheck": ticks per
+                      pair the screen passes back to the float tier}
     """
 
-    def __init__(self, n, dense, sparse, refine, block=0.0):
+    def __init__(self, n, dense, sparse, refine, block=0.0, screen=None):
         self.n = int(n)
+        self.screen = {int(b): {"dense": float(v["dense"]), "recheck": float(v["recheck"]),
+                                "excess": sorted((float(a), float(c)) for a, c in v["excess"])}
+                       for b, v in (screen or {}).items()}
         self.block = float(block)          # fixed work per block: forward transform, ingest
         self.dense = {int(b): float(v) for b, v in dense.items()}
         self._sparse = {int(b): sorted((float(f), float(v)) for f, v in rows) for b, rows in sparse.items()}
@@ -287,20 +294,38 @@ class CostModel:
         if sig is None:
             sig = self._sig = (self.n, self.block, tuple(sorted(self.dense.items())),
                                tuple((b, tuple(r)) for b, r in sorted(self._sparse.items())),
-                               tuple(self._refine))
+                               tuple(self._refine),
+                               tuple((b, v["dense"], v["recheck"], tuple(v["excess"]))
+                                     for b, v in sorted(self.screen.items())))
         return sig
 
     def to_dict(self):
         return {"n": self.n, "block": self.block, "dense": self.dense,
-                "sparse": self._sparse, "refine": self._refine}
+                "sparse": self._sparse, "refine": self._refine, "screen": self.screen}
 
     @classmethod
     def from_dict(cls, d):
-        return cls(d["n"], d["dense"], d["sparse"], d["refine"], block=d.get("block", 0.0))
+        return cls(d["n"], d["dense"], d["sparse"], d["refine"], block=d.get("block", 0.0),
+                   screen=d.get("screen"))
+
+    def first_tier(self, b, reach1):
+        """(cost per pair, q15) of the cheaper first tier at band b, where reach1 is the float
+        tier's pass rate. Screened: the screen on every pair, plus the float tier re-run on
+        what the screen passes -- reach1 scaled by the measured excess (the screen passes a
+        superset: the float passes plus pairs within its error margin of the threshold)."""
+        c = self.dense[int(b)]
+        sc = self.screen.get(int(b))
+        if sc is None or not sc["excess"]:
+            return c, False
+        fs = np.log([r[0] for r in sc["excess"]])
+        ratio = np.log([r[1] / r[0] for r in sc["excess"]])
+        passed = min(1.0, max(reach1, 1e-6) * float(np.exp(np.interp(math.log(max(reach1, 1e-6)), fs, ratio))))
+        cq = sc["dense"] + passed * sc["recheck"]
+        return (cq, True) if cq < c else (c, False)
 
     def chain_cost(self, chain, reach):
         """reach[i] = P(a pair reaches tier i+1) for i = 0..k-1, reach[k] = P(reaches refine)."""
-        c = self.dense[int(chain[0])]
+        c = self.first_tier(chain[0], reach[1] if len(reach) > 1 else 1.0)[0]
         for i in range(1, len(chain)):
             c += reach[i] * self.sparse(chain[i], reach[i])
         c += reach[len(chain)] * self.refine(reach[len(chain)])
@@ -363,6 +388,21 @@ def _store_cost(path, skey, cm):
 _CAL_TEMPLATES = 64
 
 
+_Q15_BAND = {}
+
+
+def _q15_band(b):
+    """Whether this back end has a Q15 screen for a first tier at band b."""
+    from . import _core
+    b = int(b)
+    if b not in _Q15_BAND:
+        try:
+            _Q15_BAND[b] = _core.MF(b, 1, 1).q15_lanes() > 0
+        except (ValueError, AttributeError):
+            _Q15_BAND[b] = False
+    return _Q15_BAND[b]
+
+
 def default_series_group(n):
     """Blocks a CPU plan filters together, as HierarchicalFilter uses without an execution policy."""
     return 32 if n <= 2048 else 16
@@ -392,7 +432,9 @@ def calibrate_costs(n, ntemplates, blocks=256, reps=5, seed=11, group=None):
     if key in _COSTS:
         return _COSTS[key]
     path = _cost_file()
-    skey = "%d,%d,%d" % key[:3] + (",g16" if g16 else "")
+    # A model made without the Q15 screen's prices (an older build, or a back end without
+    # it) must not be reused by one that has it, or the screen is never priced.
+    skey = "%d,%d,%d" % key[:3] + (",g16" if g16 else "") + (",q15" if not g16 and _q15_band(64) else "")
     if path is not None:
         stored = _load_cost_file(path).get(skey)
         if stored is not None:
@@ -416,19 +458,29 @@ def calibrate_costs(n, ntemplates, blocks=256, reps=5, seed=11, group=None):
     mag = np.zeros((blocks, nt, 1), np.float32); cnt = np.zeros((blocks, nt), np.int32)
     big = float(np.finfo(np.float32).max)
 
-    def run(chain, thr, reps=reps):
-        """Pairs per call and per-tier (band, passed, ticks) per call: medians over repetitions."""
+    def run(chain, thr, reps=reps, q15=False, stats=False):
+        """Pairs per call and per-tier (band, passed, ticks) per call: medians over repetitions.
+        With stats, also the Q15 screen's (on, passed, ticks) per call."""
         p = _core.HMF(n, 1, nt, list(chain), group, n)
         p.set_reference(ref); p.set_template_batch(0, spec); p.set_thresholds(list(thr))
+        if q15:
+            p.set_q15(True)
         p.run_series(ser, starts, ws, we, 0, nt, n, big, idx, val, mag, cnt)      # warm-up
         prev = p.tier_stats(); rows = []
+        qprev = p.q15_stats(); qrows = []
         for _ in range(reps):
             p.run_series(ser, starts, ws, we, 0, nt, n, big, idx, val, mag, cnt)
             cur = p.tier_stats()
             rows.append([(c[1] - q[1], c[2] - q[2]) for c, q in zip(cur, prev)])
             prev = cur
+            qcur = p.q15_stats()
+            qrows.append((qcur[1] - qprev[1], qcur[2] - qprev[2]))
+            qprev = qcur
         med = [(prev[i][0], float(np.median([r[i][0] for r in rows])), float(np.median([r[i][1] for r in rows])))
                for i in range(len(prev))]
+        if stats:
+            return blocks * nt, med, (qprev[0], float(np.median([r[0] for r in qrows])),
+                                      float(np.median([r[1] for r in qrows])))
         return blocks * nt, med
 
     def thr_for(b, density):
@@ -475,7 +527,27 @@ def calibrate_costs(n, ntemplates, blocks=256, reps=5, seed=11, group=None):
     # the first band can only be a first tier; give it the next band's sparse curve for completeness
     if bands[1:]:
         sparse.setdefault(b0, list(sparse.get(bands[1], [])))
-    cm = CostModel(n, dense, sparse, refine, block=float(np.median(block)))
+    screen = {}
+    if not g16:
+        for b in bands:
+            if not _q15_band(b):
+                continue
+            # screen alone: at an unreachable threshold nothing passes, so the tier's ticks are
+            # the screen's; then at calibrated densities, how many pairs it passes to the float
+            # tier and what re-running them costs
+            pairs, st = run((b,), (big,), q15=True)
+            ent = {"dense": st[0][2] / pairs, "excess": [], "recheck": 0.0}
+            rc = []
+            for f in _CAL_DENSITIES:
+                g = thr_for(b, f)
+                pairs, st, qs = run((b,), (g,), q15=True, stats=True)
+                if st[0][1] and qs[1]:
+                    ent["excess"].append((st[0][1] / pairs, qs[1] / pairs))
+                    rc.append((st[0][2] - qs[2]) / qs[1])
+            if ent["excess"]:
+                ent["recheck"] = float(np.median(rc))
+                screen[b] = ent
+    cm = CostModel(n, dense, sparse, refine, block=float(np.median(block)), screen=screen)
     _COSTS[key] = cm
     if path is not None:
         _store_cost(path, skey, cm)
@@ -762,7 +834,9 @@ def plan_chain(sig, noise, bands, chain, fd, cost, n, snr):
         reach.append(float((nalive[0] & (noise[:, cols[-1]] >= g)).mean()))
         c = cost.chain_cost(chain, reach) if cost is not None else _flop_cost(chain, reach, n)
         if best is None or c < best["cost"]:
-            best = dict(chain=tuple(chain), thresholds=tuple(th), reach=tuple(reach), cost=float(c))
+            q15 = bool(cost.first_tier(chain[0], reach[1])[1]) if hasattr(cost, "first_tier") else False
+            best = dict(chain=tuple(chain), thresholds=tuple(th), reach=tuple(reach), cost=float(c),
+                        q15=q15)
 
     def rec(i, prefix, remaining, dead, alive_noise, fracs):
         # tier i takes a share of the budget still unallocated; the last tier gets what is left
