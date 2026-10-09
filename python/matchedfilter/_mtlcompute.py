@@ -21,6 +21,7 @@ from functools import lru_cache, wraps
 
 import numpy as np
 from ._shared import empty_shared, shared_buffer, shared_key, write_input
+from ._shared import pack_half2 as _pack_half2, sparsified as _sparsified
 
 _HERE = pathlib.Path(__file__).resolve().parent
 _METAL_DIR = _HERE / "metal"
@@ -118,21 +119,6 @@ def coarse_ppg(band, pairs, override=None):
 
 #: Threads the coarse pass packs pairs up to; see coarse_ppg.
 TARGET_THREADS = 32
-
-
-def _pack_half2(a):
-    """complex64 -> one uint32 per value, real in the low half.
-
-    The coarse stage is bandwidth bound, so its two big inputs ship at half
-    width. Packed into uint32 rather than a half2 buffer so no 16-bit storage
-    extension is needed. Done once on upload.
-    """
-    a = np.ascontiguousarray(a, np.complex64)
-    if np.little_endian:
-        return a.view(np.float32).astype(np.float16).view(np.uint32)
-    re = a.real.astype(np.float16).view(np.uint16).astype(np.uint32)
-    im = a.imag.astype(np.float16).view(np.uint16).astype(np.uint32)
-    return np.ascontiguousarray(re | (im << 16), np.uint32)
 
 
 class MetalError(RuntimeError):
@@ -281,21 +267,6 @@ class _HostBuffer(_Buffer):
             raise MetalError("newBufferWithBytesNoCopy failed for %d bytes" % self.nbytes)
 
 
-def _sparse_from_dense(idx, val):
-    from . import _SparsePeaks
-    flat = np.flatnonzero(idx >= 0)
-    return _SparsePeaks(idx.shape, flat, idx.reshape(-1)[flat], val.reshape(-1)[flat])
-
-
-def _sparsified(res, sparse):
-    """A dense (idx, val) result -- or a pending one -- as a _SparsePeaks when asked."""
-    if not sparse:
-        return res
-    if callable(res):
-        return lambda: _sparse_from_dense(*res())
-    return _sparse_from_dense(*res)
-
-
 def describe_error(o, err):
     """Everything the NSError carries, not only its one-line summary.
 
@@ -321,7 +292,6 @@ def describe_error(o, err):
     code = int(o.call(err.value, b"code", restype=ctypes.c_long))
     parts.append("[domain=%s code=%d]" % (domain or "?", code))
     return " | ".join(parts)
-
 
 
 def _autoreleased(method):

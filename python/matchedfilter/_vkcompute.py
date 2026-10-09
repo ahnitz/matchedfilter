@@ -20,6 +20,7 @@ import numpy as np
 
 from . import _gputime, _vulkan
 from ._shared import empty_shared, shared_buffer, shared_key, shared_view, write_input
+from ._shared import pack_half2 as _pack_half2, sparse_from_dense as _sparse_from_dense, sparsified as _sparsified
 
 _SPIRV = pathlib.Path(__file__).resolve().parent / "spirv"
 
@@ -74,29 +75,6 @@ def coarse_launch(nd, nt, ppg, tile, cspan):
         return nd, -(-(nd * -(-nt // tile)) // ppg)
     return cspan, nd * nt // ppg
 
-
-def _pack_half2(a):
-    """complex64 -> one uint32 per value, real in the low half.
-
-    The coarse stage is bandwidth bound -- 978 GB/s at 3.19 FLOP/byte -- so
-    its two big inputs ship at half width. Packed into uint32 rather than a
-    half2 buffer so no 16-bit storage extension is needed.
-
-    Done ONCE on upload: every row is reused across the whole N x M pair
-    grid, so the conversion amortises to nothing.
-
-    Coarse only. The refine stage reads the full-precision data/tmpl
-    buffers, which is why survivors still get an exact peak.
-    """
-    a = np.ascontiguousarray(a, np.complex64)
-    if np.little_endian:
-        # Complex storage is already [real, imag]. Convert the interleaved
-        # components in one pass rather than allocating widened integers,
-        # shifting, and ORing two separately converted arrays.
-        return a.view(np.float32).astype(np.float16).view(np.uint32)
-    re = a.real.astype(np.float16).view(np.uint16).astype(np.uint32)
-    im = a.imag.astype(np.float16).view(np.uint16).astype(np.uint32)
-    return np.ascontiguousarray(re | (im << 16), np.uint32)
 
 #: Byte offsets into VkPhysicalDeviceProperties. The 5 leading uint32s, the
 #: 256-byte name and the 16-byte UUID come to 292, padded to 296 because
@@ -320,21 +298,6 @@ def _global_barrier(vk, cmd):
     vk.vkCmdPipelineBarrier(cmd, _STAGE_COMPUTE_BIT | _STAGE_TRANSFER_BIT,
                             _STAGE_COMPUTE_BIT | _STAGE_TRANSFER_BIT | _STAGE_HOST_BIT,
                             0, 1, ctypes.byref(mb), 0, None, 0, None)
-
-
-def _sparse_from_dense(idx, val):
-    from . import _SparsePeaks
-    flat = np.flatnonzero(idx >= 0)
-    return _SparsePeaks(idx.shape, flat, idx.reshape(-1)[flat], val.reshape(-1)[flat])
-
-
-def _sparsified(res, sparse):
-    """A dense (idx, val) result -- or a readback giving one -- as a _SparsePeaks."""
-    if not sparse:
-        return res
-    if callable(res):
-        return lambda: _sparse_from_dense(*res())
-    return _sparse_from_dense(*res)
 
 
 #: An indirect dispatch's initial (x, y, z) = (0, 1, 1): x counts survivors. One
