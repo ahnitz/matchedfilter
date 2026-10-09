@@ -144,6 +144,19 @@ C cload(StructuredBuffer<CVal> b, uint i)
 typedef float2 CVal;
 C cload(StructuredBuffer<CVal> b, uint i) { return b[i]; }
 #endif
+//: The data row stride (see mfDataStride in twiddle.slang).
+#define DSTRIDE ((mfDataStride != 0u) ? mfDataStride : N)
+//: A data element for the coarse role. With a stride set, the data buffer is
+//: the full fp32 spectra (two words per element) and is rounded to half here,
+//: exactly as packCoarse rounded it (f32tof16, round to nearest even).
+#if COARSE16
+C dload(StructuredBuffer<CVal> b, uint i)
+{
+    if (mfDataStride != 0u)
+        return C(CS(asfloat(b[2u * i])), CS(asfloat(b[2u * i + 1u])));
+    return cload(b, i);
+}
+#endif
 //: Half-width staging is what makes PPG pay. Each pair needs its own
 //: region, so LDS scales with PPG -- at CH*WG*2 uints per pair, PPG=4 costs
 //: 16 KB and a CU fits 4 workgroups x 4 waves: still 16 waves, exactly what
@@ -701,7 +714,7 @@ void filterPair(uint pair, uint tid,
     // flat filter 1.29 -> 2.93 ms at n=4096 before this guard.
     [unroll] for (uint n2 = 0; n2 < R; ++n2) {
         uint idx = tid + WG * n2;
-        r[n2] = cmulConj(cload(data, d*N + idx), cload(tmpl, t*N + idx));
+        r[n2] = cmulConj(cload(data, d*DSTRIDE + idx), cload(tmpl, t*N + idx));
     }
 #endif
 
@@ -1177,7 +1190,7 @@ void filterPair(uint pair, uint tid,
     C dreg[RADIX];
 #if COARSE16
     [unroll] for (uint n2 = 0; n2 < R; ++n2)
-        dreg[n2] = cload(data, d*N + tid + WG * n2);
+        dreg[n2] = dload(data, d*DSTRIDE + tid + WG * n2);
 #else
     [unroll] for (uint n2 = 0; n2 < R; ++n2) dreg[n2] = C(0.0f);
 #endif
