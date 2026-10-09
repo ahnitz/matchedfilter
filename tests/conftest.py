@@ -196,3 +196,26 @@ def pytest_collection_modifyitems(config, items):
         for item in items:
             if 'performance' in item.keywords:
                 item.add_marker(skip)
+
+
+def interleaved_speedup(slow, fast, reps=15):
+    """Speedup of fast() over slow(), robust to a shared host's load.
+
+    Timing all of one then all of the other lets load that comes and goes between the
+    two blocks move the ratio (both replica speedup tests failed that way at load 20-60
+    and passed alone). Here the two alternate, so both see the same load, and each side
+    is its fastest run: contention only ever adds time, so the minimum is the least
+    disturbed measurement of the work itself. Returns (speedup, t_slow, t_fast)."""
+    import time
+    slow(), fast()                                   # warm both
+    t_slow = t_fast = float("inf")
+    for i in range(reps):
+        for fn, which in ((slow, 0), (fast, 1)) if i % 2 == 0 else ((fast, 1), (slow, 0)):
+            t0 = time.perf_counter()
+            fn()
+            dt = time.perf_counter() - t0
+            if which == 0:
+                t_slow = min(t_slow, dt)
+            else:
+                t_fast = min(t_fast, dt)
+    return t_slow / t_fast, t_slow, t_fast
