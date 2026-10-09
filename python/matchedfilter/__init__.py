@@ -461,7 +461,9 @@ class MatchedFilter:
                 buf = store if (store is not None and store.shape == a.shape
                                 and shared_buffer(store, self._gpu) is not None) else None
                 if buf is None:
-                    buf = self._gpu.empty_shared(a.shape)
+                    # Host-cached: the host reads it too (coarse templates are cut from it),
+                    # and reads from write-combined memory cost 70 ms per plan.
+                    buf = self._gpu.empty_shared(a.shape, readback=True)
                 buf[:] = a
                 setattr(self, attr, buf)
             elif store is None or shared_buffer(store, self._gpu) is not None or not store.flags.writeable:

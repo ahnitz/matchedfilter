@@ -39,6 +39,7 @@ def test_cpu_identity_keys_are_metadata_not_architecture_special_cases(monkeypat
     monkeypatch.setattr(device, 'open', lambda path: io.StringIO(
         'processor : 0\nvendor_id : GenuineIntel\ncpu family : 6\n'
         'model : 63\nmodel name : example processor\n\n'), raising=False)
+    monkeypatch.setattr(device, '_CPU_DEVICES', {})       # the device is cached per backend
     d = device._cpu_device()
     assert d.name == 'example processor'
     assert d.arch == ('genuineintel-family6-model63',)

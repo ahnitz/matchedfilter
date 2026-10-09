@@ -1984,6 +1984,38 @@ class Context(InputUploads):
         _check(vk.vkEndCommandBuffer(cmd), "vkEndCommandBuffer")
         return (b_data, b_tmpl, b_idx, b_val, cmd)
 
+    def _transient_peaks(self, storage_key, n, nd, nt, nbins, binsize, shift, lo, hi, t2):
+        """(command buffer, descriptor pool) for one flat-peaks call on cached buffers."""
+        vk = self.vk
+        filename = self._peak_file(n, nbins)
+        pipe, layout, set_layout = self._build_pipeline(
+            ("peaks", filename), filename, _NBIND, _PUSH_BYTES)
+        pools = self.__dict__.setdefault("_pools", [])
+        dset = self._descriptor_set(set_layout, self._storage[storage_key])
+        pool = pools.pop()                       # owned by this call, not the cache
+        cmd = _vp()
+        info = _CmdBufAlloc(40, None, self.command_pool, 0, 1)
+        _check(vk.vkAllocateCommandBuffers(self.device, ctypes.byref(info), ctypes.byref(cmd)),
+               "allocate transient peaks")
+        _check(vk.vkBeginCommandBuffer(cmd, ctypes.byref(_CmdBufBegin(42, None, 1, None))),
+               "begin transient peaks")            # ONE_TIME_SUBMIT
+        vk.vkCmdBindPipeline(cmd, _BIND_POINT_COMPUTE, pipe)
+        vk.vkCmdBindDescriptorSets(cmd, _BIND_POINT_COMPUTE, layout, 0, 1, (_vp * 1)(dset),
+                                   0, None)
+        pc = (ctypes.c_uint32 * 7)(nt, lo, hi, binsize, shift & 0xFFFFFFFF, nbins,
+                                   int(np.float32(t2).view(np.uint32)))
+        vk.vkCmdPushConstants(cmd, layout, _STAGE_COMPUTE, 0, _PUSH_BYTES, ctypes.byref(pc))
+        vk.vkCmdDispatch(cmd, nd * nt, 1, 1)
+        _check(vk.vkEndCommandBuffer(cmd), "end transient peaks")
+        return cmd, pool
+
+    def _release_transient(self, transient):
+        cmd, pool = transient
+        vk = self.vk
+        vk.vkFreeCommandBuffers.argtypes = [_vp, _vp, _u32, ctypes.POINTER(_vp)]
+        vk.vkFreeCommandBuffers(self.device, self.command_pool, 1, (_vp * 1)(cmd))
+        vk.vkDestroyDescriptorPool(self.device, pool, None)
+
     def peaks(self, n, data, tmpl, binsize=None, threshold=0.0, window=None,
               upload_data=True, upload_tmpl=True, slot=None, async_submit=False):
         """Peak index and complex value per (data, template, bin).
@@ -2046,7 +2078,18 @@ class Context(InputUploads):
         upload_data, upload_tmpl, dsig, tsig = self._input_uploads(
             storage_key, data, tmpl, upload_data, upload_tmpl)
         batch = self._batches.get(key)
-        if batch is None:
+        transient = None
+        windows = self.__dict__.setdefault("_flat_windows", {})
+        if batch is None and storage_key in self._storage and windows.get(storage_key, 0) >= 8:
+            # A stream of new windows (follow-ups): every one would be a cached recording,
+            # and once the cache filled each would evict another -- descriptor pools freed,
+            # every queue idled. Past 8 windows of a shape, record a one-off command
+            # buffer on the cached buffers instead (released after the call); the first
+            # windows of a shape stay cached, for callers that repeat them.
+            transient = self._transient_peaks(storage_key, n, nd, nt, nbins, binsize, shift,
+                                              lo, hi, t2)
+            batch = (*self._storage[storage_key], transient[0])
+        elif batch is None:
             incoming = [b for b in (shared_buffer(data, self), shared_buffer(tmpl, self)) if b is not None]
             estimate = (8*n*(nd+nt) + 12*nd*nt*nbins
                         - (nd*n*8 if shared_buffer(data, self) else 0)
@@ -2060,9 +2103,11 @@ class Context(InputUploads):
                                      binsize, shift, lo, hi, t2, data, tmpl)
             self._batches[key] = batch
             self._register_record('flat', key, storage_key, pool_start)
+            windows[storage_key] = windows.get(storage_key, 0) + 1
             if fresh:
                 upload_data = upload_tmpl = True
-        self._cache_touch('flat', key)
+        if transient is None:
+            self._cache_touch('flat', key)
         b_data, b_tmpl, b_idx, b_val, cmd = batch
 
         if upload_data:
@@ -2085,8 +2130,12 @@ class Context(InputUploads):
                     self._wait_fence(fence)
                 idx = b_idx.read(np.int32, out).reshape(nd, nt, nbins)
                 val = b_val.read(np.complex64, out).reshape(nd, nt, nbins)
+                if transient is not None:
+                    self._release_transient(transient)
                 return idx, val
             return self._track(readback)
+        if transient is not None:
+            self._release_transient(transient)
 
         # int32 as the kernel wrote it. The caller's PEAK_DTYPE index is
         # int64, and assigning int32 into that field widens it during the
