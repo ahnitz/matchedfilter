@@ -20,6 +20,7 @@ import numpy as np
 
 from . import _gputime, _vulkan
 from ._shared import empty_shared, shared_buffer, shared_key, shared_view, write_input
+from ._shared import pack_half2 as _pack_half2, sparse_from_dense as _sparse_from_dense, sparsified as _sparsified
 
 _SPIRV = pathlib.Path(__file__).resolve().parent / "spirv"
 
@@ -75,29 +76,6 @@ def coarse_launch(nd, nt, ppg, tile, cspan):
     return cspan, nd * nt // ppg
 
 
-def _pack_half2(a):
-    """complex64 -> one uint32 per value, real in the low half.
-
-    The coarse stage is bandwidth bound -- 978 GB/s at 3.19 FLOP/byte -- so
-    its two big inputs ship at half width. Packed into uint32 rather than a
-    half2 buffer so no 16-bit storage extension is needed.
-
-    Done ONCE on upload: every row is reused across the whole N x M pair
-    grid, so the conversion amortises to nothing.
-
-    Coarse only. The refine stage reads the full-precision data/tmpl
-    buffers, which is why survivors still get an exact peak.
-    """
-    a = np.ascontiguousarray(a, np.complex64)
-    if np.little_endian:
-        # Complex storage is already [real, imag]. Convert the interleaved
-        # components in one pass rather than allocating widened integers,
-        # shifting, and ORing two separately converted arrays.
-        return a.view(np.float32).astype(np.float16).view(np.uint32)
-    re = a.real.astype(np.float16).view(np.uint16).astype(np.uint32)
-    im = a.imag.astype(np.float16).view(np.uint16).astype(np.uint32)
-    return np.ascontiguousarray(re | (im << 16), np.uint32)
-
 #: Byte offsets into VkPhysicalDeviceProperties. The 5 leading uint32s, the
 #: 256-byte name and the 16-byte UUID come to 292, padded to 296 because
 #: VkPhysicalDeviceLimits contains 64-bit members; maxComputeSharedMemorySize
@@ -106,6 +84,10 @@ _OFF_SHARED_MEMORY = 296 + 216
 _OFF_MAX_INVOCATIONS = 296 + 232
 #: timestampPeriod (float, ns per tick) sits 424 bytes into the limits.
 _OFF_TIMESTAMP_PERIOD = 296 + 424
+#: maxComputeWorkGroupSize[3] (uint32) sits 236 bytes into the limits, and
+#: minStorageBufferOffsetAlignment (VkDeviceSize) 328.
+_OFF_MAX_WORKGROUP_SIZE = 296 + 236
+_OFF_STORAGE_OFFSET_ALIGNMENT = 296 + 328
 
 #: Bands that USE the tiled coarse kernel. It is built and validated for
 #: 512 and 1024 as well, and deliberately not selected there.
@@ -316,21 +298,6 @@ def _global_barrier(vk, cmd):
     vk.vkCmdPipelineBarrier(cmd, _STAGE_COMPUTE_BIT | _STAGE_TRANSFER_BIT,
                             _STAGE_COMPUTE_BIT | _STAGE_TRANSFER_BIT | _STAGE_HOST_BIT,
                             0, 1, ctypes.byref(mb), 0, None, 0, None)
-
-
-def _sparse_from_dense(idx, val):
-    from . import _SparsePeaks
-    flat = np.flatnonzero(idx >= 0)
-    return _SparsePeaks(idx.shape, flat, idx.reshape(-1)[flat], val.reshape(-1)[flat])
-
-
-def _sparsified(res, sparse):
-    """A dense (idx, val) result -- or a readback giving one -- as a _SparsePeaks."""
-    if not sparse:
-        return res
-    if callable(res):
-        return lambda: _sparse_from_dense(*res())
-    return _sparse_from_dense(*res)
 
 
 #: An indirect dispatch's initial (x, y, z) = (0, 1, 1): x counts survivors. One
@@ -726,6 +693,16 @@ class _Device:
             ctypes.byref(props, _OFF_MAX_INVOCATIONS - 12),
             ctypes.POINTER(_u32))[0])
 
+        # Descriptor offsets into a storage buffer must be multiples of this. 256 is the
+        # largest the spec allows (AMD), NVIDIA reports 16-64; packing sub-results at the
+        # device's own alignment instead of 256 keeps the readback dense where it can be.
+        align = int(ctypes.cast(ctypes.byref(props, _OFF_STORAGE_OFFSET_ALIGNMENT),
+                                ctypes.POINTER(_u64))[0])
+        self.storage_offset_alignment = align if 0 < align <= 256 and align & (align - 1) == 0 \
+            else 256
+        self.max_workgroup_size = tuple(int(v) for v in ctypes.cast(
+            ctypes.byref(props, _OFF_MAX_WORKGROUP_SIZE), ctypes.POINTER(_u32 * 3))[0])
+
         self.subgroup_size = 32
         try:
             if hasattr(vk, "vkGetPhysicalDeviceProperties2"):
@@ -837,7 +814,8 @@ class Context(InputUploads):
 
     _SHARED = ("vk", "instance", "physical", "queue_family", "queues", "queue", "device",
                "_accurate_trig", "max_shared_memory", "max_invocations", "max_dispatch_x",
-               "subgroup_size", "mem_props", "command_pool", "_ts_period")
+               "subgroup_size", "mem_props", "command_pool", "_ts_period",
+               "storage_offset_alignment", "max_workgroup_size")
 
     def _attach_device(self, index):
         """Share the device, its queues, command pool and compiled pipelines per process.
@@ -2286,13 +2264,14 @@ class Context(InputUploads):
         shift = binsize.bit_length() - 1 if binsize & (binsize - 1) == 0 else -1
         t2 = int(np.float32(float(threshold) ** 2 if threshold > 0 else 0).view(np.uint32))
         offs, nbs, size = [], [], 0
+        words = self.storage_offset_alignment // 4
         for lo, hi, a, b, t in items:
             nb = -(-(hi - lo) // binsize)
             if nb > _MAX_BINS:
                 raise UnsupportedSize("an item's window exceeds the kernel bin limit")
             offs.append(size)
             nbs.append(nb)
-            size += ((b - a) * nb + 63) // 64 * 64          # 256-byte aligned offsets
+            size += -(-((b - a) * nb) // words) * words     # storage-offset aligned
         cap = getattr(self, "_items_cap", 0)
         if cap < size:
             cap = max(size, 2 * cap)
@@ -2422,11 +2401,11 @@ class Context(InputUploads):
                shared_key(data, self), shared_key(tmpl, self), slot)
         if key[-3] is None:
             raise ValueError("grouped spectra must belong to this GPU context")
-        # 64 indices occupy 256 bytes, meeting Vulkan storage-offset alignment.
-        offsets, size = [], 0
+        # Each group's results start at the device's storage-buffer offset alignment.
+        offsets, size, words = [], 0, self.storage_offset_alignment // 4
         for _, _, a, b in groups:
             offsets.append(size)
-            size += ((b - a) * nt * nb + 63) // 64 * 64
+            size += -(-((b - a) * nt * nb) // words) * words
         _, upload_tmpl, _, tsig = self._input_uploads(
             key, data, tmpl, False, upload_tmpl)
         batch = self._batches.get(key)
