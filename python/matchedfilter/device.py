@@ -96,8 +96,21 @@ class Device:
         return hash((self.kind, self.index))
 
 
+_CPU_DEVICES = {}
+
+
 def _cpu_device():
+    """The CPU Device for the current backend. Cached: it reads /proc/cpuinfo, and plans parse
+    their device often (28k times in one bench run, 1.1 s)."""
     from . import backend as _backend
+    b = _backend()
+    hit = _CPU_DEVICES.get(b)
+    if hit is None:
+        hit = _CPU_DEVICES[b] = _read_cpu_device(b)
+    return hit
+
+
+def _read_cpu_device(backend_name):
     import platform
     fields = {}
     try:
@@ -115,7 +128,7 @@ def _cpu_device():
         arch = ('%s-family%s-model%s' % (fields['vendor_id'].lower(),
                                        fields['cpu family'], fields['model']),)
     return Device("cpu", 0, fields.get('model name') or platform.processor() or "CPU",
-                  _backend(), arch=arch)
+                  backend_name, arch=arch)
 
 
 _DEVICES_CACHE = None
