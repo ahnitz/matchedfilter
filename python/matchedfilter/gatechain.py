@@ -432,7 +432,9 @@ def calibrate_costs(n, ntemplates, blocks=256, reps=5, seed=11, group=None):
     if key in _COSTS:
         return _COSTS[key]
     path = _cost_file()
-    skey = "%d,%d,%d" % key[:3] + (",g16" if g16 else "")
+    # A model made without the Q15 screen's prices (an older build, or a back end without
+    # it) must not be reused by one that has it, or the screen is never priced.
+    skey = "%d,%d,%d" % key[:3] + (",g16" if g16 else "") + (",q15" if not g16 and _q15_band(64) else "")
     if path is not None:
         stored = _load_cost_file(path).get(skey)
         if stored is not None:
