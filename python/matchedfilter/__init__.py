@@ -825,15 +825,21 @@ class MatchedFilter:
         jobs: [(series, starts, win_start, win_end, template)] -- each a run_series call on one
         template of this plan. Returns per job (idx, val) shaped (nblocks, 1, max bins) with -1
         in bins past a block's own count, or None when this plan or these inputs cannot take
-        the path (the caller then makes the calls). wait=False returns a function giving
-        that list, so several plans share one wait."""
+        the path (the caller then makes the calls).
+
+        Several allocations share one spectra workspace on a backend whose forward takes a
+        row range (``forward_rows``); elsewhere each allocation is its own submission.
+        wait=False on a backend declaring ``items_async``: returns a callable giving that
+        list once the submission completes, so a caller submits every template group's
+        items before waiting on any (an idle GPU takes ~1 ms to start each small submission
+        on an M2 or an APU)."""
         from ._shared import containing
         gpu = self._gpu
         if (gpu is None or not hasattr(gpu, "peaks_items") or type(self) is not MatchedFilter
                 or self._gtmpl is None or not jobs):
             return None
         n = self.n
-        allocs, rows = {}, []                 # id(whole) -> (whole, row0 in the workspace)
+        allocs, rows = {}, []                 # id(whole) -> [whole, row0 in the workspace, rows]
         for ser, st, ws, we, t in jobs:
             c = containing(np.ascontiguousarray(ser), gpu)
             if c is None:
@@ -842,19 +848,20 @@ class MatchedFilter:
                 return None                     # needs the upload's zero padding past the end
             allocs.setdefault(id(c[0]), [c[0], 0, 0])[2] += int(st.size)
             rows.append((id(c[0]), c[1]))
-        if len(allocs) > 1 and n > 65536:
-            return None
+        by_rows = getattr(gpu, "forward_rows", False) and n <= 65536
+        if len(allocs) > 1 and not by_rows:
+            return self._items_by_allocation(jobs, rows, binsize, threshold, wait)
         total = 0
         for a in allocs.values():               # each allocation's rows start 64-aligned
             a[1] = total
-            total += -(-a[2] // 64) * 64
+            total += -(-a[2] // 64) * 64 if by_rows else a[2]
         if sum(a[2] for a in allocs.values()) == 0:
             res = [(np.empty((0, 1, 1), np.int64), np.empty((0, 1, 1), np.complex64))
                    for _ in jobs]
             return res if wait else (lambda: res)
-        pending = getattr(self, "_items_finish", None)
-        if pending is not None:                 # the workspace below is still being read
-            pending()
+        prior = self.__dict__.pop("_items_pending", None)
+        if prior is not None:
+            prior()                              # its workspace is about to be rewritten
         cap = getattr(self, "_items_ws", None)
         if cap is None or cap[0].shape[0] < total:
             size = max(total, 2 * (cap[0].shape[0] if cap else 0))
@@ -877,21 +884,25 @@ class MatchedFilter:
                 items.append((int(lo_hi[j, 0]), int(lo_hi[j, 1]), pos + j, pos + e, int(t)))
                 j = e
         self._settle_deferred()
-        for i, (whole, r0, count) in enumerate(allocs.values()):
-            if count:
-                # Whole 64-row chunks (padding rows read the allocation's start), so the
-                # forward recordings repeat across calls.
-                padded = -(-count // 64) * 64
-                starts[r0 + count:r0 + padded] = 0
-                if n > 65536:                   # two-stage forward: one allocation, no rows
-                    gpu.forward(n, whole, starts[:total], spec[:total], defer=True, slot=('items', i))
-                else:
+        if by_rows:
+            for i, (whole, r0, count) in enumerate(allocs.values()):
+                if count:
+                    # Whole 64-row chunks (padding rows read the allocation's start), so the
+                    # forward recordings repeat across calls.
+                    padded = -(-count // 64) * 64
+                    starts[r0 + count:r0 + padded] = 0
                     gpu.forward(n, whole, starts, spec, defer=True, slot=('items', i),
                                 rows=(r0, padded))
-        got = gpu.peaks_items(n, spec, self._gtmpl, items, binsize, threshold, wait=wait)
+            data = spec
+        else:
+            whole = next(iter(allocs.values()))[0]
+            gpu.forward(n, whole, starts[:total], spec[:total], defer=True)
+            data = spec[:total]
+        async_ok = not wait and getattr(gpu, "items_async", False)
+        res = gpu.peaks_items(n, data, self._gtmpl, items, binsize, threshold,
+                              **({"async_submit": True} if async_ok else {}))
 
-        def results():
-            res = got if wait else got()
+        def assemble(res):
             out, it = [], 0
             for (ser, st, ws, we, t), pos in zip(jobs, place):
                 k = int(st.size)
@@ -907,10 +918,33 @@ class MatchedFilter:
                     val[a - pos:b - pos, :, :gv.shape[2]] = gv
                 out.append((idx, val))
             return out
-        if wait:
-            return results()
-        self._items_finish = got
-        return results
+        if not async_ok:
+            out = assemble(res)
+            return out if wait else (lambda: out)
+        done = []
+
+        def collect():
+            if not done:
+                self.__dict__.pop("_items_pending", None)
+                done.append(assemble(res()))
+            return done[0]
+        self._items_pending = collect
+        return collect
+
+    def _items_by_allocation(self, jobs, rows, binsize, threshold, wait):
+        """_items_gpu for jobs spanning allocations on a backend without forward row ranges:
+        one submission per allocation, in turn."""
+        by = {}
+        for j, (k_alloc, _) in enumerate(rows):
+            by.setdefault(k_alloc, []).append(j)
+        out = [None] * len(jobs)
+        for js in by.values():
+            res = self._items_gpu([jobs[j] for j in js], binsize, threshold)
+            if res is None:
+                return None
+            for j, r in zip(js, res):
+                out[j] = r
+        return out if wait else (lambda: out)
 
     def _run_series_ragged(self, series, starts, win_start, win_end, binsize=None,
                            threshold=0.0, templates=None):

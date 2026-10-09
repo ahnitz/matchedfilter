@@ -8,6 +8,41 @@ average 2-4 from system daemons), warm, with outputs checked against the CPU.
 Sections 1-8 are phase 1, measured on the old generic bench data. **Phase 2 (section 0) is on
 realistic data and supersedes their bench numbers.**
 
+## 0a. Phase 3 (2026-10-09)
+
+Same bench and check as phase 2 (`--profiles --pure --check cpu`, clean after every change:
+0 one-sided peaks, 1-6 gate-margin peaks, SNR to 3.2e-5).
+
+| item | before | after | status |
+|---|---:|---:|---|
+| 2nd-tier refine n=512: one-bin kernels at 256/512/1024 (Metal had them only from 2048) | 0.337 ms, 29% of FMA | **0.207 ms, 49%** | done; fine steady ~105 -> ~93 ms/segment |
+| middle full_series n=8192 | 29% of FMA | unchanged | two variants falsified (below); still the largest kernel below target |
+| follow-ups: Metal `peaks_items` (main's batched item path), all template groups submitted before any wait | 16.6 ms/batch with synchronous items | 7.8 ms/batch (GPU busy 1.1 ms) | done; equal to phase 2's per-job deferral (7.7 ms) with 8x fewer submissions; the rest is ~0.5 ms of host Python per job |
+| GPU cost calibration: fixed series span instead of fixed blocks, 0.25 s device warm-up | n=8192 15.6 s, 16384 139 s, 32768 814 s | 1.3 s, 2.8 s, 8.9 s | done; empire suite 310 -> 159 s; affects Vulkan and CUDA (to verify there) |
+| NEON (CPU path) | flat 34% of peak | not changed | profiled only, see below |
+
+Falsified in phase 3:
+- **Packing listed refine pairs** (2/4/8 pairs per group behind a listGroups kernel that sizes the
+  indirect grid): 0.369 / 0.373 / 0.392 ms against 0.337 unpacked. A 32-thread group already fills
+  an Apple SIMD group; occupancy was not the limit. Not shipped.
+- **Smaller staging for the n=8192 middle kernel** to fit two groups per core: 16 KB (split,
+  two chunks per component) 4.11 ms and 8 KB 5.79 ms against 2.24 ms for the shipped 32 KB split
+  (same replay, bit-identical output). Barriers, not occupancy, bind it; the remaining lever is
+  fewer exchange levels (e.g. SIMD-group shuffles for the innermost exchange), a kernel rewrite.
+
+Calibration stability after warm-up: three fresh processes at n=2048 give band costs within
+~5-10% (64: 1.9/2.5/2.5, 128: 4.2/5.0/4.9, 256: 9.3/10.1/10.0 ns per pair); before, one process
+of three priced band 128 at 2x. Chain choices can still differ run to run where costs are close
+(steady fine 84 vs 100 ms in two fresh runs); ranking against a reference kernel timed alongside
+(cancelling the clock) is the next step if that matters.
+
+CPU (NEON) profile, the CPU fine stage on realistic data (`sample`, 15 s, main thread): 36% of
+samples in `codelet_prod` (the coarse gate's fused product + small FFT, Highway NEON_BF16, 4
+lanes), then stage-A product, template gather and pair pooling. The gate is fp32 on the CPU
+while the GPU runs it in fp16; Apple's NEON does fp16 FMA at twice the fp32 rate, so an fp16 (or
+the existing opt-in x86 int16, `MF_COARSE_INT16`) coarse gate ported to NEON is the lever this
+profile points at. Not attempted in this phase.
+
 ## 0. Phase 2: realistic data, pure paths
 
 Bench: `tools/ladder.py --bank bank3.hdf --profiles ladder_profiles_H1.npz --tops 1 --pure

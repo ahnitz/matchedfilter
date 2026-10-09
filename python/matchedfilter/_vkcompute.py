@@ -739,6 +739,9 @@ class Context(InputUploads):
     #: peaks, peaks_grouped and hier_peaks take sparse=True and return a _SparsePeaks;
     #: hier_peaks reads only its refined pairs (the survivor list) back.
     supports_sparse = True
+    #: peaks_items(async_submit=True) returns a collector; forward takes rows=(r0, count).
+    items_async = True
+    forward_rows = True
 
     def __init__(self, index=0):
         vk, err = _vulkan._load()
@@ -2202,7 +2205,7 @@ class Context(InputUploads):
         val = b_val.read(np.complex64, out).reshape(nd, nt, nbins)
         return idx, val
 
-    def peaks_items(self, n, data, tmpl, items, binsize, threshold, *, wait=True):
+    def peaks_items(self, n, data, tmpl, items, binsize, threshold, *, async_submit=False):
         """One submission over items (lo, hi, a, b, t): rows a:b of data against template row t,
         searched over [lo, hi) in bins of binsize. Returns per item (idx, val) shaped
         (b - a, 1, nbins). Data and templates are shared allocations; descriptor offsets select
@@ -2210,8 +2213,9 @@ class Context(InputUploads):
         descriptor pool for all its sets, released after the call.
 
         Every forward deferred into data (forward(..., defer=True, slot=('items', i))) goes in
-        the same submission. wait=False submits and returns a function giving the results, so
+        the same submission. async_submit=True submits and returns a function giving the results, so
         several plans' follow-ups share one wait; this context's next call must come after it."""
+        wait = not async_submit
         vk = self.vk
         pending = getattr(self, "_items_finish", None)
         if pending is not None:

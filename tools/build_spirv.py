@@ -113,7 +113,7 @@ LDS_CAP = {
 METAL_CAP = {1024: 1024, 2048: 2048, 4096: 4096}
 # Shared SINGLE_BIN specialization, measured on M2 for flat and refinement.
 # Smaller staging increased barriers and lost; 8192 must fit Apple's 32 KiB.
-METAL_SINGLE_BIN_CAP = {2048: 2048, 4096: 4096, 8192: 4096}
+METAL_SINGLE_BIN_CAP = {256: 512, 512: 512, 1024: 1024, 2048: 2048, 4096: 4096, 8192: 4096}
 #: Pairs per threadgroup for the Metal half-width coarse kernel. A coarse
 #: transform of length B runs on B/16 threads -- 4 at band 64 -- and an Apple
 #: GPU executes 32-wide SIMD groups, so one pair per threadgroup leaves 7/8 of
