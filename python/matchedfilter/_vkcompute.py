@@ -43,7 +43,7 @@ _MAX_BINS = 2048
 
 #: Must match COARSE_TILE_T in tools/build_spirv.py -- the kernel is
 #: compiled with the tile baked in, so the dispatch has to agree.
-_COARSE_TILE_T = {128: 2, 256: 2, 512: 4, 1024: 2}
+_COARSE_TILE_T = {64: 2, 128: 2, 256: 2, 512: 4, 1024: 2}
 
 
 def _use_c16(band):
@@ -1271,11 +1271,16 @@ class Context(InputUploads):
         # At most 4 pairs unless asked: the 8- and 16-pair builds hung the GPU (compute ring
         # timeout) under realistic gating on gfx1151, and measured within 3% of 4 pairs once
         # dispatches are padded. MF_VK_COARSE_PPG sets the cap, to investigate them.
-        cap = int(os.environ.get("MF_VK_COARSE_PPG", "0") or 0) or 4
-        want = min(want, cap)
+        # The tiled builds elect their peak with subgroup shuffles and take no LDS atomics,
+        # so they fill the whole subgroup; the 4-pair cap stays on the untiled builds.
+        # Band 64, CU-cycles/pair: p4 96, p4t2 47, p8t2 28, p16t2 29.
+        env_cap = int(os.environ.get("MF_VK_COARSE_PPG", "0") or 0)
+        full = want
+        want = min(want, env_cap or 4)
         pairs = nd * nt
         tile = _COARSE_TILE_T.get(band, 1)
         if tile > 1:
+            want = min(full, env_cap) if env_cap else full
             for ppg in sorted({p for p in (want, 32, 16, 8, 4, 2, 1) if p <= want}, reverse=True):
                 name = "tierb_%d_c16%st%d.spv" % (band, "p%d" % ppg if ppg > 1 else "", tile)
                 if (_SPIRV / name).is_file():
