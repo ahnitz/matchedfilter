@@ -1100,6 +1100,9 @@ class Context(InputUploads):
 
     #: _continuous_gpu may leave its last batch in flight: zero_columns_done finishes it.
     defers_continuous = True
+    #: A grouped flat call may stay in flight (filter_series_many): peaks_grouped keys its
+    #: buffers by slot when asked to submit asynchronously.
+    defers_grouped = True
 
     def zero_columns(self, dest, a, b):
         """Zero dest[:, a:b] of a device-shared 2-D array on the device (enqueued after
