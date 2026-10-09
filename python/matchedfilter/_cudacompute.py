@@ -75,6 +75,11 @@ def _manifest():
 
 
 _MAX_BINS = 2048
+# Sparse readback: peak records copied back with the count, before a second round trip.
+_SPARSE_HOST = 4096
+_PREFETCH = os.environ.get("MF_CUDA_PREFETCH", "1") != "0"
+# CUDA graphs for the hierarchical launch sequences (MF_CUDA_GRAPHS=0 issues them directly).
+_GRAPHS = os.environ.get("MF_CUDA_GRAPHS", "1") != "0"
 _COARSE_TILE_T = {128: 2, 256: 2, 512: 4, 1024: 2}
 # Device scratch bound per tile of a full correlation into a host array.
 _TILE_BYTES = 64 * 1024 * 1024
@@ -342,6 +347,32 @@ class _BatchTuple(tuple):
         return self._dict.keys()
 
 
+class _GraphCache:
+    """Instantiated CUDA graphs of one record, LRU-bounded; destroyed with the record."""
+    nbytes = 0          # host-side handles: nothing for the cache budget
+
+    def __init__(self, ctx, limit=8):
+        self.ctx, self.limit, self.items, self.seen = ctx, limit, {}, {}
+
+    def get(self, key):
+        ex = self.items.pop(key, None)
+        if ex is not None:
+            self.items[key] = ex
+        return ex
+
+    def put(self, key, ex):
+        self.items[key] = ex
+        while len(self.items) > self.limit:
+            old = self.items.pop(next(iter(self.items)))
+            self.ctx.cuda.cuGraphExecDestroy(old)
+
+    def destroy(self):
+        for ex in self.items.values():
+            if ex.value:
+                self.ctx.cuda.cuGraphExecDestroy(ex)
+        self.items.clear()
+
+
 class _Record(dict):
     """A cache record: named buffers, also indexable in the legacy tuple order."""
     ORDER = ("data", "tmpl", "idx", "val", "host")
@@ -360,14 +391,20 @@ class _Resident(_Buffer):
 
 
 def _owned(buffers):
-    """The allocations a cache record owns: not borrowed shared arrays, not residents."""
-    return [b for b in buffers if isinstance(b, (_Buffer, _Pinned)) and not isinstance(b, _Resident)]
+    """The allocations a cache record owns: not borrowed shared arrays, not residents.
+    (Graph caches are destroyed with them: they reference those buffers.)"""
+    return [b for b in buffers if (isinstance(b, (_Buffer, _Pinned)) and not isinstance(b, _Resident))
+            or isinstance(b, _GraphCache)]
 
 
 class Context(InputUploads):
     """One NVIDIA CUDA device context, stream, and loaded PTX pipelines."""
 
     max_grouped_bins = _MAX_BINS
+    # Results may come back sparse (see _tail); the series path asks with sparse=True.
+    supports_sparse = True
+    # Coarse PPG/tile groups are padded inside the backend (hier_peaks pads its rows).
+    pads_coarse_groups = True
     cache_limit_bytes = 1024 * 1024 * 1024
     # Unified addressing: a view inside a shared allocation is a device pointer.
     shared_views = True
@@ -581,7 +618,7 @@ class Context(InputUploads):
 
         Host-written managed pages would otherwise be faulted in page by page by the
         kernel itself; already-resident pages make this nearly free."""
-        if (isinstance(buf, _Borrowed) and getattr(buf.owner.buffer, "managed", False)
+        if (_PREFETCH and isinstance(buf, _Borrowed) and getattr(buf.owner.buffer, "managed", False)
                 and nbytes > 0 and hasattr(self.cuda, "cuMemPrefetchAsync")):
             self.cuda.cuMemPrefetchAsync(buf.dptr.value + offset, nbytes, self.device.value, stream)
 
@@ -834,6 +871,127 @@ class Context(InputUploads):
         self._grow(rec, "host", out * 12, _Pinned, stream)
         return rec, fresh
 
+    def _tail(self, bufs, out, shape, stream, sparse, counts=None, ncounts=0, enqueue=True):
+        """Enqueue the result readback; returns collect() -> (result, counts or None).
+
+        Dense: the (blocks, templates, bins) index and value tables come back whole.
+        Sparse: compactPeaks gathers the peaks on the device, and only the count, the
+        first _SPARSE_HOST records and the survivor counters cross the bus."""
+        i0, v0 = bufs["idx"].dptr.value, bufs["val"].dptr.value
+        if not sparse:
+            host = bufs["host"]
+            if enqueue:
+                self._copy_d2h(host.ptr, i0, out * 4, stream, "readback")
+                self._copy_d2h(host.ptr + out * 4, v0, out * 8, stream, "readback")
+                if ncounts:
+                    self._copy_d2h(host.ptr + out * 12, counts, 4 * ncounts, stream, "readback")
+
+            def collect():
+                self._sync(stream)
+                c = host.view(np.uint32, ncounts, offset=out * 12) if ncounts else None
+                return self._results(host, *shape), c
+            return collect
+        cap = min(_SPARSE_HOST, out)
+        self._grow(bufs, "sp_cnt", 16, _Buffer, stream)
+        self._grow(bufs, "sp_list", out * 16, _Buffer, stream)
+        loff = 16 + ((4 * ncounts + 15) // 16) * 16     # records 16-byte aligned after counts
+        self._grow(bufs, "sp_host", loff + cap * 16, _Pinned, stream)
+        cnt, lst, hp = bufs["sp_cnt"].dptr.value, bufs["sp_list"].dptr.value, bufs["sp_host"]
+        coff = 16
+        if enqueue:
+            self._fill32(_ptr(cnt), 0, 1, stream)
+            kfn, _ = self._compact_peaks()
+            self._launch(kfn, (out + 255) // 256, 256,
+                         [_ptr(i0), _ptr(v0), _ptr(cnt), _ptr(lst), _u32(out), _u32(out)],
+                         stream=stream)
+            self._copy_d2h(hp.ptr, cnt, 4, stream, "readback")
+            if ncounts:
+                self._copy_d2h(hp.ptr + coff, counts, 4 * ncounts, stream, "readback")
+            self._copy_d2h(hp.ptr + loff, lst, cap * 16, stream, "readback")
+
+        def collect():
+            from . import _SparsePeaks
+            self._sync(stream)
+            c = int(hp.view(np.uint32, 1)[0])
+            if c <= cap:
+                rec = hp.view(np.uint32, 4 * c, offset=loff).reshape(c, 4).copy()
+            else:                              # more peaks than the first read held
+                rec = np.empty((c, 4), np.uint32)
+                rec[:cap] = hp.view(np.uint32, 4 * cap, offset=loff).reshape(cap, 4)
+                self._copy_d2h(rec[cap:].ctypes.data, lst + cap * 16, (c - cap) * 16, stream,
+                               "readback")
+                self._sync(stream)
+            k = np.argsort(rec[:, 0], kind="stable")
+            rec = rec[k]
+            val = rec[:, 2:4].copy().view(np.float32).view(np.complex64).reshape(-1)
+            sp = _SparsePeaks(shape, rec[:, 0], rec[:, 1].view(np.int32), val)
+            cts = hp.view(np.uint32, ncounts, offset=coff).copy() if ncounts else None
+            return sp, cts
+        return collect
+
+    def _graphed(self, bufs, gkey, stream, enqueue):
+        """Run enqueue() through a CUDA graph cached in the record.
+
+        A hierarchical call is ~20 launches, fills and copies; issued one by one through
+        ctypes they cost ~200 us of host per call, more than many of the kernels. Captured
+        once per (shape, windows, thresholds, buffers) and replayed with one cuGraphLaunch,
+        they cost one call. The key carries every buffer address, so a grown or replaced
+        buffer gets a new graph; a record keeps at most 8. Device timers (MF_GPU_TIMING)
+        need per-kernel events, so with timing on the launches are issued directly."""
+        if self._timing or not _GRAPHS:
+            enqueue()
+            return
+        ptrs = tuple(sorted((k, getattr(b, "ptr", 0)) for k, b in bufs.items()
+                            if k != "_graphs" and hasattr(b, "ptr")))
+        gkey = (gkey, ptrs, stream.value)
+        graphs = bufs.get("_graphs")
+        if graphs is None:
+            graphs = bufs["_graphs"] = _GraphCache(self)
+        ex = graphs.get(gkey)
+        if ex is None:
+            if graphs.seen.get(gkey, 0) < 1:
+                # First use runs directly: modules load and occupancy is queried outside any
+                # capture. A key that recurs is captured.
+                graphs.seen[gkey] = 1
+                enqueue()
+                return
+            if graphs.seen[gkey] > 1:          # capture failed once: stay direct
+                enqueue()
+                return
+            cu = self.cuda
+            graphs.seen[gkey] = 2
+            check_cuda(cu.cuStreamBeginCapture_v2(stream, 2), "cuStreamBeginCapture")  # relaxed
+            graph = ctypes.c_void_p()
+            failed = False
+            try:
+                enqueue()
+            except _cuda.CudaError:
+                failed = True                  # e.g. an operation that cannot be captured
+            finally:
+                rc = cu.cuStreamEndCapture(stream, ctypes.byref(graph))
+            if rc != 0 or failed:
+                # Nothing ran: the capture recorded only. Run the work directly.
+                if graph.value:
+                    cu.cuGraphDestroy(graph)
+                enqueue()
+                return
+            ex = ctypes.c_void_p()
+            check_cuda(cu.cuGraphInstantiateWithFlags(ctypes.byref(ex), graph, 0),
+                       "cuGraphInstantiateWithFlags")
+            cu.cuGraphDestroy(graph)
+            graphs.put(gkey, ex)
+            graphs.seen[gkey] = 1
+        check_cuda(self.cuda.cuGraphLaunch(ex, stream), "cuGraphLaunch")
+
+    def _compact_peaks(self):
+        key = ("compactPeaks",)
+        if key not in self._pipelines:
+            f = _PTX_DIR / "compact_peaks.ptx"
+            if not f.is_file():
+                raise UnsupportedSize("compact_peaks.ptx not built")
+            self._pipelines[key] = (self._load("compact_peaks", f, "compactPeaks", 256), 256)
+        return self._pipelines[key]
+
     def _results(self, host, nd, nt, nbins):
         out = nd * nt * nbins
         idx = host.view(np.int32, out).reshape(nd, nt, nbins).copy()
@@ -843,7 +1001,7 @@ class Context(InputUploads):
     # ---- flat ------------------------------------------------------------------
     def peaks(self, n, data, tmpl, binsize=None, threshold=0.0, window=None,
               upload_data=True, upload_tmpl=True, _groups=None,
-              slot=None, async_submit=False):
+              slot=None, async_submit=False, sparse=False):
         self._bind()
         nd, nt = data.shape[0], tmpl.shape[0]
         lo, hi = (0, n) if window is None else (int(window[0]), int(window[1]))
@@ -892,19 +1050,16 @@ class Context(InputUploads):
                   _u32(nt), _u32(lo), _u32(hi), _u32(binsize), _i32(_shift(binsize)),
                   _u32(nbins), _f32bits(t2)]
         self._launch(hfunc, nd * nt, wg, params, stream=stream)
-        host = bufs["host"]
-        self._copy_d2h(host.ptr, bufs["idx"].dptr.value, out * 4, stream, "readback")
-        self._copy_d2h(host.ptr + out * 4, bufs["val"].dptr.value, out * 8, stream, "readback")
+        collect = self._tail(bufs, out, (nd, nt, nbins), stream, sparse)
 
         def readback():
-            self._sync(stream)
-            return self._results(host, nd, nt, nbins)
+            return collect()[0]
         if async_submit:
             return readback
         return readback()
 
     def peaks_grouped(self, n, data, tmpl, groups, binsize, threshold, *, upload_tmpl=True,
-                      slot=None, async_submit=False):
+                      slot=None, async_submit=False, sparse=False):
         """Distinct flat search windows over row ranges of one spectra batch: one sync.
 
         ``groups`` holds (lo, hi, a, b): rows a..b of ``data`` are searched over
@@ -952,13 +1107,10 @@ class Context(InputUploads):
                       _u32(nt), _u32(lo), _u32(hi), _u32(binsize), _i32(_shift(binsize)),
                       _u32(nb), _f32bits(t2)]
             self._launch(hfunc, (b - a) * nt, wg, params, stream=stream)
-        host = bufs["host"]
-        self._copy_d2h(host.ptr, i0, out * 4, stream, "readback")
-        self._copy_d2h(host.ptr + out * 4, v0, out * 8, stream, "readback")
+        collect = self._tail(bufs, out, (nd, nt, nb), stream, sparse)
 
         def readback():
-            self._sync(stream)
-            return self._results(host, nd, nt, nb)
+            return collect()[0]
         if async_submit:
             return readback
         return readback()
@@ -1179,7 +1331,7 @@ class Context(InputUploads):
     def hier_peaks(self, n, band, data, tmpl, ct0, raw_thr, binsize=None,
                    threshold=0.0, window=None, upload_data=True, upload_tmpl=True,
                    cascade_band=None, ct1=None, raw_thr1=None,
-                   slot=None, async_submit=False):
+                   slot=None, async_submit=False, sparse=False):
         """Hierarchical coarse-to-fine peaks, one or two coarse tiers, one sync.
 
         Single tier: ``band``/``ct0``/``raw_thr``. Two tiers (the Vulkan
@@ -1289,77 +1441,79 @@ class Context(InputUploads):
             self._uploaded["tmpl"][key] = tsig
 
         args = bufs["args"].dptr.value
-        self._fill32(_ptr(args), 0, 4, stream)
-        self._fill32(bufs["idx"].dptr, 0xFFFFFFFF, out, stream)
-        self._fill32(bufs["val"].dptr, 0, out * 2, stream)
+        collect = self._tail(bufs, out, (nd, nt, nbins), stream, sparse, args, 2, enqueue=False)
 
-        if dsh is not None:
-            # Coarse bands straight from the device spectra.
-            pack_fn, pack_wg = self.pipeline(4096, "packCoarse")
-            for name, b, packed in (("cdata0", band0, int(c16)),) + (
-                    (("cdata1", band1, 0),) if cascade else ()):
-                self._launch(pack_fn, (nd * b + 255) // 256, 256,
-                             [bufs["data"].dptr, bufs[name].dptr, _u32(n), _u32(b),
-                              _u32(nd * b), _u32(packed)], stream=stream)
+        def enqueue():
+            args = bufs["args"].dptr.value
+            self._fill32(_ptr(args), 0, 4, stream)
+            self._fill32(bufs["idx"].dptr, 0xFFFFFFFF, out, stream)
+            self._fill32(bufs["val"].dptr, 0, out * 2, stream)
 
-        # Tier 0: the coarse gate over every pair (and the padding rows' pairs).
-        cs, ce, csp, csh = _coarse_span(n, band0, lo, hi)
-        self._launch(cfn, ndp * nt // group, cwg,
-                     [bufs["cdata0"].dptr, bufs["ct0"].dptr, bufs["cidx0"].dptr,
-                      bufs["cval0"].dptr, _u32(nt), _u32(cs), _u32(ce), _u32(csp),
-                      _i32(csh), _u32(1), _u32(0)], stream=stream)
-        kfn, _ = self.pipeline(band0, "compactPairs")
-        cpt = (pairs + 255) // 256
-        if cascade:
-            # Tier 0 compaction counts into args[1]; tier 1 refines those pairs at
-            # band1 (one bin over its coarse window) and compacts into args[0].
-            self._fill32(bufs["cval1"].dptr, 0, pairs * 2, stream)
-            self._launch(kfn, cpt, 256, [bufs["cval0"].dptr, bufs["surv0"].dptr, _ptr(args + 4),
-                                         _u32(pairs), ctypes.c_float(float(raw_thr)), _u32(nbins)],
-                         stream=stream)
-            r1, r1wg = self.pipeline(band1, "refineListed", one_bin=True)
-            cs1, ce1, csp1, csh1 = _coarse_span(n, band1, lo, hi)
-            g1 = self._refine_grid(r1, r1wg, pairs)
-            self._launch(r1, g1, r1wg,
-                         [bufs["cdata1"].dptr, bufs["ct1"].dptr, bufs["cidx1"].dptr,
-                          bufs["cval1"].dptr, bufs["surv0"].dptr, _ptr(args + 4),
-                          _u32(nt), _u32(cs1), _u32(ce1), _u32(csp1), _i32(csh1), _u32(1),
-                          _u32(0), _u32(g1)], stream=stream, label=f"tier1_{band1}")
-            self._launch(kfn, cpt, 256, [bufs["cval1"].dptr, bufs["surv1"].dptr, _ptr(args),
-                                         _u32(pairs), ctypes.c_float(float(raw_thr1)), _u32(nbins)],
-                         stream=stream)
-            surv = bufs["surv1"]
-        else:
-            self._launch(kfn, cpt, 256, [bufs["cval0"].dptr, bufs["surv0"].dptr, _ptr(args),
-                                         _u32(pairs), ctypes.c_float(float(raw_thr)), _u32(nbins)],
-                         stream=stream)
-            surv = bufs["surv0"]
+            if dsh is not None:
+                # Coarse bands straight from the device spectra.
+                pack_fn, pack_wg = self.pipeline(4096, "packCoarse")
+                for name, b, packed in (("cdata0", band0, int(c16)),) + (
+                        (("cdata1", band1, 0),) if cascade else ()):
+                    self._launch(pack_fn, (nd * b + 255) // 256, 256,
+                                 [bufs["data"].dptr, bufs[name].dptr, _u32(n), _u32(b),
+                                  _u32(nd * b), _u32(packed)], stream=stream)
 
-        rfn, rwg = self.pipeline(n, "refineListed", one_bin=(nbins == 1))
-        g = self._refine_grid(rfn, rwg, pairs)
-        self._launch(rfn, g, rwg,
-                     [bufs["data"].dptr, bufs["tmpl"].dptr, bufs["idx"].dptr, bufs["val"].dptr,
-                      surv.dptr, _ptr(args), _u32(nt), _u32(lo), _u32(hi), _u32(binsize),
-                      _i32(_shift(binsize)), _u32(nbins), _f32bits(t2), _u32(g)], stream=stream)
+            # Tier 0: the coarse gate over every pair (and the padding rows' pairs).
+            cs, ce, csp, csh = _coarse_span(n, band0, lo, hi)
+            self._launch(cfn, ndp * nt // group, cwg,
+                         [bufs["cdata0"].dptr, bufs["ct0"].dptr, bufs["cidx0"].dptr,
+                          bufs["cval0"].dptr, _u32(nt), _u32(cs), _u32(ce), _u32(csp),
+                          _i32(csh), _u32(1), _u32(0)], stream=stream)
+            kfn, _ = self.pipeline(band0, "compactPairs")
+            cpt = (pairs + 255) // 256
+            if cascade:
+                # Tier 0 compaction counts into args[1]; tier 1 refines those pairs at
+                # band1 (one bin over its coarse window) and compacts into args[0].
+                self._fill32(bufs["cval1"].dptr, 0, pairs * 2, stream)
+                self._launch(kfn, cpt, 256, [bufs["cval0"].dptr, bufs["surv0"].dptr, _ptr(args + 4),
+                                             _u32(pairs), ctypes.c_float(float(raw_thr)), _u32(nbins)],
+                             stream=stream)
+                r1, r1wg = self.pipeline(band1, "refineListed", one_bin=True)
+                cs1, ce1, csp1, csh1 = _coarse_span(n, band1, lo, hi)
+                g1 = self._refine_grid(r1, r1wg, pairs)
+                self._launch(r1, g1, r1wg,
+                             [bufs["cdata1"].dptr, bufs["ct1"].dptr, bufs["cidx1"].dptr,
+                              bufs["cval1"].dptr, bufs["surv0"].dptr, _ptr(args + 4),
+                              _u32(nt), _u32(cs1), _u32(ce1), _u32(csp1), _i32(csh1), _u32(1),
+                              _u32(0), _u32(g1)], stream=stream, label=f"tier1_{band1}")
+                self._launch(kfn, cpt, 256, [bufs["cval1"].dptr, bufs["surv1"].dptr, _ptr(args),
+                                             _u32(pairs), ctypes.c_float(float(raw_thr1)), _u32(nbins)],
+                             stream=stream)
+                surv = bufs["surv1"]
+            else:
+                self._launch(kfn, cpt, 256, [bufs["cval0"].dptr, bufs["surv0"].dptr, _ptr(args),
+                                             _u32(pairs), ctypes.c_float(float(raw_thr)), _u32(nbins)],
+                             stream=stream)
+                surv = bufs["surv0"]
 
-        host = bufs["host"]
-        self._copy_d2h(host.ptr, bufs["idx"].dptr.value, out * 4, stream, "readback")
-        self._copy_d2h(host.ptr + out * 4, bufs["val"].dptr.value, out * 8, stream, "readback")
-        self._copy_d2h(host.ptr + out * 12, args, 8, stream, "readback")
+            rfn, rwg = self.pipeline(n, "refineListed", one_bin=(nbins == 1))
+            g = self._refine_grid(rfn, rwg, pairs)
+            self._launch(rfn, g, rwg,
+                         [bufs["data"].dptr, bufs["tmpl"].dptr, bufs["idx"].dptr, bufs["val"].dptr,
+                          surv.dptr, _ptr(args), _u32(nt), _u32(lo), _u32(hi), _u32(binsize),
+                          _i32(_shift(binsize)), _u32(nbins), _f32bits(t2), _u32(g)], stream=stream)
+            self._tail(bufs, out, (nd, nt, nbins), stream, sparse, args, 2)
+        self._graphed(bufs, ("hier", lo, hi, binsize, nbins, t2, float(raw_thr),
+                             float(raw_thr1) if cascade else None, band0, band1, nd, nt, ndp,
+                             sparse, dsh is not None), stream, enqueue)
 
         def readback():
-            self._sync(stream)
-            counts = host.view(np.uint32, 2, offset=out * 12)
+            res, counts = collect()
             self.last_refinements = int(counts[0])
             self.last_tier1_survivors = int(counts[1]) if cascade else int(counts[0])
-            return self._results(host, nd, nt, nbins)
+            return res
         if async_submit:
             return readback
         return readback()
 
     def hier_peaks_grouped(self, n, band, data, tmpl, ct0, raw_thr, groups, binsize, threshold,
                            *, upload_tmpl=True, cascade_band=None, ct1=None, raw_thr1=None,
-                           slot=None, async_submit=False):
+                           slot=None, async_submit=False, sparse=False):
         """Hierarchical peaks over row ranges of one spectra batch, each with its own
         window -- every group in ONE submission and one sync (plan D2).
 
@@ -1432,7 +1586,29 @@ class Context(InputUploads):
                       ("surv1", pairs * 4, _Buffer)]
         for name, nbytes, cls in sizes:
             self._grow(bufs, name, nbytes, cls, stream)
+        args = bufs["args"].dptr.value
+        collect = self._tail(bufs, out, (nd, nt, nb), stream, sparse, args, 2 * ng, enqueue=False)
+        gkey = ("grouped", groups, nb, binsize, t2, float(raw_thr),
+                float(raw_thr1) if cascade else None, band0, band1, sparse, nd, nt)
+        self._graphed(bufs, gkey, stream, lambda: self._grouped_enqueue(
+            bufs, n, nd, nt, nb, groups, offs, unit, cfn, cwg, band0, band1, c16, cb0, cascade,
+            raw_thr, raw_thr1, binsize, t2, out, pairs, ng, sparse, stream))
 
+        def readback():
+            res, counts = collect()
+            counts = counts.reshape(ng, 2)
+            self.last_refinements = int(counts[:, 0].sum())
+            self.last_tier1_survivors = int(counts[:, 1].sum()) if cascade else self.last_refinements
+            return res
+        if async_submit:
+            return readback
+        return readback()
+
+    def _grouped_enqueue(self, bufs, n, nd, nt, nb, groups, offs, unit, cfn, cwg, band0, band1,
+                         c16, cb0, cascade, raw_thr, raw_thr1, binsize, t2, out, pairs, ng,
+                         sparse, stream):
+        """hier_peaks_grouped's device work, in stream order (captured into a graph)."""
+        dsh = bufs["data"]
         args = bufs["args"].dptr.value
         self._fill32(_ptr(args), 0, 2 * ng, stream)
         self._fill32(bufs["idx"].dptr, 0xFFFFFFFF, out, stream)
@@ -1492,20 +1668,7 @@ class Context(InputUploads):
                           _ptr(v0 + a * nt * nb * 8), _ptr(surv + a * nt * 4), cnt_ref, _u32(nt),
                           _u32(lo), _u32(hi), _u32(binsize), _i32(_shift(binsize)), _u32(nb),
                           _f32bits(t2), _u32(g2)], stream=stream)
-        host = bufs["host"]
-        self._copy_d2h(host.ptr, i0, out * 4, stream, "readback")
-        self._copy_d2h(host.ptr + out * 4, v0, out * 8, stream, "readback")
-        self._copy_d2h(host.ptr + out * 12, args, 8 * ng, stream, "readback")
-
-        def readback():
-            self._sync(stream)
-            counts = host.view(np.uint32, 2 * ng, offset=out * 12).reshape(ng, 2)
-            self.last_refinements = int(counts[:, 0].sum())
-            self.last_tier1_survivors = int(counts[:, 1].sum()) if cascade else self.last_refinements
-            return self._results(host, nd, nt, nb)
-        if async_submit:
-            return readback
-        return readback()
+        self._tail(bufs, out, (nd, nt, nb), stream, sparse, args, 2 * ng)
 
     # ---- series forward -----------------------------------------------------------
     def _forward_fused(self, n, series, starts, spectra, *, defer=False, slot=None):
