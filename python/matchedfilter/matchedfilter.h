@@ -108,6 +108,17 @@ int ap_mf_run_pairs_pooled(ap_mf_plan *p, int d0,
                            ap_peak *peaks, int *counts, size_t start, size_t end,
                            int nt);
 
+/* Q15 coarse screen.  ap_mf_q15_lanes: pairs per screen call for this plan's
+   length on the active back end, 0 when there is no screen.  ap_mf_q15_screen:
+   for the pairs [d0,d0+nd) x [t0,t0+nt), pass[(d-d0)*nt + t-t0] = 1 unless the
+   pair's maximum over [start,end) certainly stays below `threshold` -- the
+   pairs a float run at that threshold could report.  stat, if not NULL,
+   receives the screen's estimate of each maximum.  Returns the number passed,
+   or -1 when the plan has no screen. */
+int ap_mf_q15_lanes(const ap_mf_plan *p);
+int ap_mf_q15_screen(ap_mf_plan *p, int d0, int nd, int t0, int nt, float threshold,
+                     size_t start, size_t end, unsigned char *pass, float *stat);
+
 /* Filter a time series over a caller-supplied block layout: block b covers
    series[start[b] ...] and reports lags [win_start[b], win_end[b]).  Windows
    are per block, so the ragged ones at a segment's edges need no grouping.
@@ -184,6 +195,14 @@ int ap_hmf_tier_stats(const ap_hmf_plan *p, int tier, long *passed, unsigned lon
    gives the per-block fixed work (forward transform, ingest) in the same units. */
 unsigned long long ap_hmf_series_ticks(const ap_hmf_plan *p);
 int ap_hmf_series_group(const ap_hmf_plan *p);
+/* Run the first tier through the Q15 screen (ap_mf_q15_screen): the float
+   tier then runs only on the pairs the screen cannot reject, so every result
+   is the float tier's own.  Returns 0, or -1 when the first tier's band has no
+   screen on this back end (the plan is then unchanged).  0 turns it off. */
+int ap_hmf_set_q15(ap_hmf_plan *p, int on);
+int ap_hmf_get_q15(const ap_hmf_plan *p);
+/* Pairs the screen passed to the float first tier, and ticks spent screening. */
+int ap_hmf_q15_stats(const ap_hmf_plan *p, long *passed, unsigned long long *ticks);
 int ap_hmf_set_hermitian(ap_hmf_plan *p, int hermitian);
 int ap_hmf_get_hermitian(const ap_hmf_plan *p);
 void         ap_hmf_destroy(ap_hmf_plan *p);
