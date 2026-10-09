@@ -773,42 +773,56 @@ class MatchedFilter:
             for d in pending:
                 d.result()
 
-    def _items_gpu(self, jobs, binsize, threshold):
-        """Many single-template series calls as one forward dispatch and one submission.
+    def _items_gpu(self, jobs, binsize, threshold, wait=True):
+        """Many single-template series calls as one submission: a forward per series
+        allocation (e.g. each detector's rows of a reused device buffer, read in place) and
+        one peak dispatch per window.
 
         jobs: [(series, starts, win_start, win_end, template)] -- each a run_series call on one
-        template of this plan. Every series must lie in one device allocation (rows of a
-        reused device buffer), read in place. Returns per job (idx, val) shaped
-        (nblocks, 1, max bins) with -1 in bins past a block's own count, or None when this
-        plan or these inputs cannot take the path (the caller then makes the calls)."""
+        template of this plan. Returns per job (idx, val) shaped (nblocks, 1, max bins) with -1
+        in bins past a block's own count, or None when this plan or these inputs cannot take
+        the path (the caller then makes the calls). wait=False returns a function giving
+        that list, so several plans share one wait."""
         from ._shared import containing
         gpu = self._gpu
         if (gpu is None or not hasattr(gpu, "peaks_items") or type(self) is not MatchedFilter
                 or self._gtmpl is None or not jobs):
             return None
-        whole, rows = None, []
+        n = self.n
+        allocs, rows = {}, []                 # id(whole) -> (whole, row0 in the workspace)
         for ser, st, ws, we, t in jobs:
             c = containing(np.ascontiguousarray(ser), gpu)
-            if c is None or (whole is not None and c[0] is not whole):
+            if c is None:
                 return None
-            if st.size and int(st.max()) + self.n > ser.size:
+            if st.size and int(st.max()) + n > ser.size:
                 return None                     # needs the upload's zero padding past the end
-            whole = c[0]
-            rows.append(c[1])
-        n = self.n
-        total = sum(int(st.size) for _, st, _, _, _ in jobs)
-        if total == 0:
-            return [(np.empty((0, 1, 1), np.int64), np.empty((0, 1, 1), np.complex64))
-                    for _ in jobs]
+            allocs.setdefault(id(c[0]), [c[0], 0, 0])[2] += int(st.size)
+            rows.append((id(c[0]), c[1]))
+        if len(allocs) > 1 and n > 65536:
+            return None
+        total = 0
+        for a in allocs.values():               # each allocation's rows start 64-aligned
+            a[1] = total
+            total += -(-a[2] // 64) * 64
+        if sum(a[2] for a in allocs.values()) == 0:
+            res = [(np.empty((0, 1, 1), np.int64), np.empty((0, 1, 1), np.complex64))
+                   for _ in jobs]
+            return res if wait else (lambda: res)
+        pending = getattr(self, "_items_finish", None)
+        if pending is not None:                 # the workspace below is still being read
+            pending()
         cap = getattr(self, "_items_ws", None)
         if cap is None or cap[0].shape[0] < total:
-            cap = (gpu.empty_shared((max(total, 2 * (cap[0].shape[0] if cap else 0)), n)),
-                   gpu.empty_shared(max(total, 2 * (cap[0].shape[0] if cap else 0)), np.uint32))
+            size = max(total, 2 * (cap[0].shape[0] if cap else 0))
+            cap = (gpu.empty_shared((size, n)), gpu.empty_shared(size, np.uint32))
             self._items_ws = cap
         spec, starts = cap
-        items, pos = [], 0
-        for (ser, st, ws, we, t), row in zip(jobs, rows):
+        items, place, fill = [], [], {k: a[1] for k, a in allocs.items()}
+        for (ser, st, ws, we, t), (k_alloc, row) in zip(jobs, rows):
             k = int(st.size)
+            pos = fill[k_alloc]
+            fill[k_alloc] += k
+            place.append(pos)
             starts[pos:pos + k] = np.minimum(st, ser.size).astype(np.int64) + row
             lo_hi = np.stack([np.minimum(ws, n), np.minimum(we, n)], 1).astype(np.int64)
             j = 0
@@ -818,26 +832,41 @@ class MatchedFilter:
                     e += 1
                 items.append((int(lo_hi[j, 0]), int(lo_hi[j, 1]), pos + j, pos + e, int(t)))
                 j = e
-            pos += k
         self._settle_deferred()
-        gpu.forward(n, whole, starts[:total], spec[:total], defer=True)
-        res = gpu.peaks_items(n, spec[:total], self._gtmpl, items, binsize, threshold)
-        out, it, pos = [], 0, 0
-        for ser, st, ws, we, t in jobs:
-            k = int(st.size)
-            mine = []
-            while it < len(items) and items[it][3] <= pos + k:
-                mine.append((items[it], res[it]))
-                it += 1
-            nbmax = max([r[0].shape[2] for _, r in mine] or [1])
-            idx = np.full((k, 1, nbmax), -1, np.int64)
-            val = np.zeros((k, 1, nbmax), np.complex64)
-            for (lo, hi, a, b, _), (gi, gv) in mine:
-                idx[a - pos:b - pos, :, :gi.shape[2]] = gi
-                val[a - pos:b - pos, :, :gv.shape[2]] = gv
-            out.append((idx, val))
-            pos += k
-        return out
+        for i, (whole, r0, count) in enumerate(allocs.values()):
+            if count:
+                # Whole 64-row chunks (padding rows read the allocation's start), so the
+                # forward recordings repeat across calls.
+                padded = -(-count // 64) * 64
+                starts[r0 + count:r0 + padded] = 0
+                if n > 65536:                   # two-stage forward: one allocation, no rows
+                    gpu.forward(n, whole, starts[:total], spec[:total], defer=True, slot=('items', i))
+                else:
+                    gpu.forward(n, whole, starts, spec, defer=True, slot=('items', i),
+                                rows=(r0, padded))
+        got = gpu.peaks_items(n, spec, self._gtmpl, items, binsize, threshold, wait=wait)
+
+        def results():
+            res = got if wait else got()
+            out, it = [], 0
+            for (ser, st, ws, we, t), pos in zip(jobs, place):
+                k = int(st.size)
+                mine = []
+                while it < len(items) and items[it][3] <= pos + k and items[it][2] >= pos:
+                    mine.append((items[it], res[it]))
+                    it += 1
+                nbmax = max([r[0].shape[2] for _, r in mine] or [1])
+                idx = np.full((k, 1, nbmax), -1, np.int64)
+                val = np.zeros((k, 1, nbmax), np.complex64)
+                for (lo, hi, a, b, _), (gi, gv) in mine:
+                    idx[a - pos:b - pos, :, :gi.shape[2]] = gi
+                    val[a - pos:b - pos, :, :gv.shape[2]] = gv
+                out.append((idx, val))
+            return out
+        if wait:
+            return results()
+        self._items_finish = got
+        return results
 
     def _run_series_ragged(self, series, starts, win_start, win_end, binsize=None,
                            threshold=0.0, templates=None):

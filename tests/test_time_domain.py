@@ -937,15 +937,18 @@ def test_gpu_follow_up_batch_matches_direct_calls(monkeypatch):
                                 false_dismissal=1e-3, device=dev, fft_lengths=[2048], binsize=2048)
     bank.set_reference(w, delta_f=df)
     S = 1 << 17
-    rows = bank.empty_shared((2, S))
-    for i in range(2):
+    # Two allocations (one per detector, as a search holds them): one forward each, one
+    # item submission for both.
+    allocs = [bank.empty_shared((2, S)) for _ in range(2)]
+    rows = [a[i] for a in allocs for i in range(2)]
+    for r in rows:
         X = np.fft.fft(rng.standard_normal(S))
         X[S // 2:] = 0
-        rows[i] = (np.fft.ifft(X) * 2).astype(np.complex64)
+        r[:] = (np.fft.ifft(X) * 2).astype(np.complex64)
     jobs = []
     for k in range(16):
         c0 = int(rng.integers(20000, S - 20000))
-        jobs.append((bank, rows[k % 2], dict(windows=slice(c0 - 9000, c0 + 9100), binsize=61,
+        jobs.append((bank, rows[k % 4], dict(windows=slice(c0 - 9000, c0 + 9100), binsize=61,
                                              threshold=0.0, template_index=int(rng.integers(0, 25)))))
     from matchedfilter import _vkcompute
     used = []
@@ -960,3 +963,4 @@ def test_gpu_follow_up_batch_matches_direct_calls(monkeypatch):
             np.testing.assert_array_equal(getattr(r1, f), getattr(r2, f))
     if bank._groups[0].plan._gpu is not None and hasattr(bank._groups[0].plan._gpu, "peaks_items"):
         assert used, "the batched follow-up path was not taken"
+        assert len(used) <= len(bank._groups), "one item submission per template group"
