@@ -69,6 +69,17 @@ class InputUploads:
             signatures.append(signature)
         return (*needed, *signatures)
 
+    def _write_uploads(self, key, uploads, b_data, data, b_tmpl, tmpl):
+        """Write the inputs _input_uploads found stale into their device buffers, and record
+        their signatures under key (only after the write succeeded)."""
+        from ._shared import write_input
+        if uploads[0]:
+            write_input(b_data, data)
+            self._uploaded["data"][key] = uploads[2]
+        if uploads[1]:
+            write_input(b_tmpl, tmpl)
+            self._uploaded["tmpl"][key] = uploads[3]
+
     cache_limit_bytes = 512 * 1024 * 1024
     # Recordings are kept per pipelining slot (8 by default) and per chain, and chain trials
     # run several chains: at 32 entries a trialling plan evicted and re-recorded every call

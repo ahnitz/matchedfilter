@@ -1202,12 +1202,7 @@ class Context(InputUploads):
             uploads = (True, True, *uploads[2:])
         self._cache_touch('full', key)
         bd, bt, bo = batch
-        if uploads[0]:
-            write_input(bd, data)
-            self._uploaded['data'][key] = uploads[2]
-        if uploads[1]:
-            write_input(bt, tmpl)
-            self._uploaded['tmpl'][key] = uploads[3]
+        self._write_uploads(key, uploads, bd, data, bt, tmpl)
         pso = self.pipeline(n, 'fullCorrelation')
         cmd = self._command_buffer()
         enc = self.o.call(cmd, b'computeCommandEncoder')
@@ -1241,12 +1236,7 @@ class Context(InputUploads):
             uploads = (True, True, *uploads[2:])
         self._cache_touch('tierc', key)
         bd, bt, scratch, bo = batch
-        if uploads[0]:
-            write_input(bd, data)
-            self._uploaded['data'][key] = uploads[2]
-        if uploads[1]:
-            write_input(bt, tmpl)
-            self._uploaded['tmpl'][key] = uploads[3]
+        self._write_uploads(key, uploads, bd, data, bt, tmpl)
         cmd = self._command_buffer()
         self._encode_tierc(cmd, n, 'corr1', (bd, bt, scratch),
                            nd*nt*geometry['n1'], nt)
@@ -1289,12 +1279,7 @@ class Context(InputUploads):
             uploads = (True, True, *uploads[2:])
         self._cache_touch('tierc' if geometry else 'full', key)
         bd, bt = batch[:2]
-        if uploads[0]:
-            write_input(bd, data)
-            self._uploaded['data'][key] = uploads[2]
-        if uploads[1]:
-            write_input(bt, tmpl)
-            self._uploaded['tmpl'][key] = uploads[3]
+        self._write_uploads(key, uploads, bd, data, bt, tmpl)
         cmd = self._command_buffer()
         params = (nt, length, lo, hi)
         if geometry:
