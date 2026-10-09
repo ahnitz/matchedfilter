@@ -334,6 +334,12 @@ class _Buffer:
         ctypes.memmove(out.ctypes.data, self.ptr, out.nbytes)
         return out
 
+    def view(self, dtype, count):
+        """The first count elements, in place (valid while the buffer lives)."""
+        dtype = np.dtype(dtype)
+        return np.frombuffer((ctypes.c_char * (count * dtype.itemsize)).from_address(
+            int(self.ptr.value if hasattr(self.ptr, 'value') else self.ptr)), dtype, count)
+
     def read_into(self, out):
         """Zero-copy direct read into caller-provided contiguous array."""
         ctypes.memmove(out.ctypes.data, self.ptr, min(self.nbytes, out.nbytes))
@@ -695,6 +701,9 @@ class Context(InputUploads):
     #: Async submission with per-slot fences: the series loop keeps several
     #: batches in flight. A declared capability, not a signature probe.
     supports_async = True
+    #: hier_peaks returns a SparsePeaks of its survivor list when sparse_peaks is set.
+    supports_sparse_peaks = True
+    sparse_peaks = False
 
     def __init__(self, index=0):
         vk, err = _vulkan._load()
@@ -955,17 +964,25 @@ class Context(InputUploads):
         if nbins > _MAX_BINS:
             span = _MAX_BINS * binsize
             pi, pv = [], []
-            for a in range(lo, hi, span):
-                bnd = min(a + span, hi)
-                i2, v2 = self.hier_peaks(n, band, data, tmpl, ct0, raw_thr, binsize=binsize,
-                                         threshold=threshold, window=(a, bnd),
-                                         upload_data=upload_data,
-                                         upload_tmpl=upload_tmpl,
-                                         cascade_band=cascade_band, ct1=ct1, raw_thr1=raw_thr1,
-                                         slot=slot, async_submit=False)
-                pi.append(i2); pv.append(v2)
-                upload_data = upload_tmpl = False
-            return np.concatenate(pi, axis=2), np.concatenate(pv, axis=2)
+            sparse, self.sparse_peaks = getattr(self, "sparse_peaks", False), False
+            try:
+                for a in range(lo, hi, span):
+                    bnd = min(a + span, hi)
+                    i2, v2 = self.hier_peaks(n, band, data, tmpl, ct0, raw_thr, binsize=binsize,
+                                             threshold=threshold, window=(a, bnd),
+                                             upload_data=upload_data,
+                                             upload_tmpl=upload_tmpl,
+                                             cascade_band=cascade_band, ct1=ct1, raw_thr1=raw_thr1,
+                                             slot=slot, async_submit=False)
+                    pi.append(i2); pv.append(v2)
+                    upload_data = upload_tmpl = False
+            finally:
+                self.sparse_peaks = sparse
+            idx, val = np.concatenate(pi, axis=2), np.concatenate(pv, axis=2)
+            if sparse:
+                from ._shared import SparsePeaks
+                return SparsePeaks.from_dense(idx, val)
+            return idx, val
         shift = (binsize.bit_length() - 1) if binsize & (binsize - 1) == 0 else -1
         t2 = float(threshold) ** 2 if threshold > 0 else 0.0
 
@@ -1026,29 +1043,16 @@ class Context(InputUploads):
             else:
                 self._submit(cmd)
 
-            out = nd * nt * nbins
-            if async_submit:
-                def readback():
-                    if fence is not None:
-                        self._wait_fence(fence)
-                    surv_count = int(bufs["args_refine"].read(np.uint32, 1)[0])
-                    self.last_refinements = surv_count
-                    self.last_tier1_survivors = int(bufs["args_tier1"].read(np.uint32, 1)[0])
-                    if surv_count == 0:
-                        return np.full((nd, nt, nbins), -1, dtype=np.int32), np.zeros((nd, nt, nbins), dtype=np.complex64)
-                    idx = bufs["idx"].read(np.int32, out).reshape(nd, nt, nbins)
-                    val = bufs["val"].read(np.complex64, out).reshape(nd, nt, nbins)
-                    return idx, val
-                return self._track(readback)
+            sparse = getattr(self, "sparse_peaks", False)
 
-            surv_count = int(bufs["args_refine"].read(np.uint32, 1)[0])
-            self.last_refinements = surv_count
-            self.last_tier1_survivors = int(bufs["args_tier1"].read(np.uint32, 1)[0])
-            if surv_count == 0:
-                return np.full((nd, nt, nbins), -1, dtype=np.int32), np.zeros((nd, nt, nbins), dtype=np.complex64)
-            idx = bufs["idx"].read(np.int32, out).reshape(nd, nt, nbins)
-            val = bufs["val"].read(np.complex64, out).reshape(nd, nt, nbins)
-            return idx, val
+            def readback():
+                if fence is not None:
+                    self._wait_fence(fence)
+                surv_count = int(bufs["args_refine"].read(np.uint32, 1)[0])
+                self.last_refinements = surv_count
+                self.last_tier1_survivors = int(bufs["args_tier1"].read(np.uint32, 1)[0])
+                return self._read_peaks(bufs, "surv1", surv_count, nd, nt, nbins, sparse)
+            return self._track(readback) if async_submit else readback()
 
         key = ("hier", n, band, nd, nt, nbins, binsize, shift, lo, hi,
                int(np.float32(t2).view(np.uint32)),
@@ -1105,27 +1109,31 @@ class Context(InputUploads):
         else:
             self._submit(cmd)
 
-        out = nd * nt * nbins
-        if async_submit:
-            def readback():
-                if fence is not None:
-                    self._wait_fence(fence)
-                surv_count = int(bufs["args"].read(np.uint32, 1)[0])
-                self.last_refinements = surv_count
-                if surv_count == 0:
-                    return np.full((nd, nt, nbins), -1, dtype=np.int32), np.zeros((nd, nt, nbins), dtype=np.complex64)
-                idx = bufs["idx"].read(np.int32, out).reshape(nd, nt, nbins)
-                val = bufs["val"].read(np.complex64, out).reshape(nd, nt, nbins)
-                return idx, val
-            return self._track(readback)
+        sparse = getattr(self, "sparse_peaks", False)
 
-        surv_count = int(bufs["args"].read(np.uint32, 1)[0])
-        self.last_refinements = surv_count
-        if surv_count == 0:
-            return np.full((nd, nt, nbins), -1, dtype=np.int32), np.zeros((nd, nt, nbins), dtype=np.complex64)
-        idx = bufs["idx"].read(np.int32, out).reshape(nd, nt, nbins)
-        val = bufs["val"].read(np.complex64, out).reshape(nd, nt, nbins)
-        return idx, val
+        def readback():
+            if fence is not None:
+                self._wait_fence(fence)
+            surv_count = int(bufs["args"].read(np.uint32, 1)[0])
+            self.last_refinements = surv_count
+            return self._read_peaks(bufs, "surv", surv_count, nd, nt, nbins, sparse)
+        return self._track(readback) if async_submit else readback()
+
+    @staticmethod
+    def _read_peaks(bufs, surv_key, count, nd, nt, nbins, sparse):
+        """The refined result: dense (idx, val), or a SparsePeaks of the listed pairs."""
+        if sparse:
+            from ._shared import SparsePeaks
+            rows = np.sort(bufs[surv_key].view(np.uint32, count).astype(np.int64))
+            idx = bufs["idx"].view(np.int32, nd * nt * nbins).reshape(nd * nt, nbins)[rows]
+            val = bufs["val"].view(np.complex64, nd * nt * nbins).reshape(nd * nt, nbins)[rows]
+            return SparsePeaks((nd, nt, nbins), rows, idx.astype(np.int64), val)
+        if count == 0:
+            return (np.full((nd, nt, nbins), -1, dtype=np.int32),
+                    np.zeros((nd, nt, nbins), dtype=np.complex64))
+        out = nd * nt * nbins
+        return (bufs["idx"].read(np.int32, out).reshape(nd, nt, nbins),
+                bufs["val"].read(np.complex64, out).reshape(nd, nt, nbins))
 
     def _descriptor_set(self, set_layout, bufs, offsets=None):
         vk = self.vk
@@ -1256,7 +1264,7 @@ class Context(InputUploads):
                 # args is [groupCountX, 1, 1]; compactPairs atomically bumps
                 # [0], so the count never has to reach the host and this
                 # stays one recorded command buffer.
-                "surv":  _Buffer(self, pairs * 4),
+                "surv":  _Buffer(self, pairs * 4, readback=True),
                 "args":  _Buffer(self, 12, usage=_BUF_STORAGE | _BUF_INDIRECT | _BUF_TRANSFER_DST),
                 "idx":   _Buffer(self, nd * nt * nbins * 4, readback=True, usage=_BUF_STORAGE | _BUF_TRANSFER_DST),
                 "val":   _Buffer(self, nd * nt * nbins * 8, readback=True, usage=_BUF_STORAGE | _BUF_TRANSFER_DST),
@@ -1445,7 +1453,7 @@ class Context(InputUploads):
                 "ct1":         _Buffer(self, nt * band1 * 8),
                 "cidx1":       _Buffer(self, pairs * 4),
                 "cval1":       _Buffer(self, pairs * 8, usage=_BUF_STORAGE | _BUF_TRANSFER_DST),
-                "surv1":       _Buffer(self, pairs * 4),
+                "surv1":       _Buffer(self, pairs * 4, readback=True),
                 "args_refine": _Buffer(self, 12, usage=_BUF_STORAGE | _BUF_INDIRECT | _BUF_TRANSFER_DST),
                 "idx":         _Buffer(self, nd * nt * nbins * 4, readback=True, usage=_BUF_STORAGE | _BUF_TRANSFER_DST),
                 "val":         _Buffer(self, nd * nt * nbins * 8, readback=True, usage=_BUF_STORAGE | _BUF_TRANSFER_DST),
@@ -1603,17 +1611,26 @@ class Context(InputUploads):
         """Dispatch fused forward FFT kernel path."""
         return self.forward(n, series, starts, spectra, defer=defer, slot=slot, fused=True)
 
-    def forward(self, n, series, starts, spectra, *, defer=False, slot=None, fused=False):
-        """Gather and normalize forward FFTs directly into shared spectra."""
+    def forward(self, n, series, starts, spectra, *, defer=False, slot=None, fused=False, rows=None):
+        """Gather and normalize forward FFTs directly into shared spectra.
+
+        rows=(r0, count): only rows r0..r0+count of starts/spectra (r0 a multiple of 64, so
+        the descriptor offsets stay aligned); lets several series allocations fill one
+        spectra workspace."""
         if n > 65536:
+            if rows is not None:
+                raise UnsupportedSize('row ranges need the one-stage forward')
             return self._forward_tierc(n, series, starts, spectra, defer=defer, slot=slot, fused=fused)
+        r0, count = rows if rows is not None else (0, spectra.shape[0])
+        if r0 % 64:
+            raise ValueError("forward row offsets must be multiples of 64")
         vk = self.vk
         pipe, layout, sl = self._build_pipeline(
             ("forward", n), "forward_%d.spv" % n, 3, 4)
         buffers = [shared_buffer(a, self) for a in (series, starts, spectra)]
         if any(b is None for b in buffers):
             raise ValueError("forward buffers must belong to this GPU context")
-        key = (n, series.size, spectra.shape[0], fused,
+        key = (n, series.size, spectra.shape[0], fused, rows,
                *(a.ctypes.data for a in (series, starts, spectra)))
         forwards = getattr(self, "_forwards", None)
         if forwards is None:
@@ -1622,7 +1639,7 @@ class Context(InputUploads):
         if batch is None:
             self._cache_room(0, incoming=buffers)
             pool_start = len(getattr(self, '_pools', []))
-            ds = self._descriptor_set(sl, buffers)
+            ds = self._descriptor_set(sl, buffers, [0, r0 * 4, r0 * n * 8] if r0 else None)
             cmd = _vp()
             info = _CmdBufAlloc(40, None, self.command_pool, 0, 1)
             _check(vk.vkAllocateCommandBuffers(self.device, ctypes.byref(info),
@@ -1638,7 +1655,7 @@ class Context(InputUploads):
             params = _u32(series.size)
             vk.vkCmdPushConstants(cmd, layout, _STAGE_COMPUTE, 0, 4,
                                   ctypes.byref(params))
-            vk.vkCmdDispatch(cmd, spectra.shape[0], 1, 1)
+            vk.vkCmdDispatch(cmd, count, 1, 1)
             barrier = _BufMemBarrier(44, None, _ACCESS_SHADER_WRITE,
                                      _ACCESS_SHADER_READ | 0x2000,
                                      _QUEUE_FAMILY_IGNORED, _QUEUE_FAMILY_IGNORED,
@@ -1905,8 +1922,9 @@ class Context(InputUploads):
         self._profile_resolve()
         return self.timing_log
 
-    def _submit(self, cmd, fence=None, wait=True, slot=None):
-        """Forward and correlation share one submit and completion wait."""
+    def _submit(self, cmd, fence=None, wait=True, slot=None, pre=()):
+        """Forward and correlation share one submit and completion wait (pre: commands to
+        run first, in the same submission)."""
         pending = None
         if isinstance(getattr(self, "_pending_forward", None), dict):
             if slot is not None:
@@ -1919,7 +1937,7 @@ class Context(InputUploads):
         else:
             pending = getattr(self, "_pending_forward", None)
             self._pending_forward = None
-        commands = ([pending] if pending is not None else [])
+        commands = list(pre) + ([pending] if pending is not None else [])
         if cmd is not None:
             commands.append(cmd)
         if not commands:
@@ -1931,7 +1949,7 @@ class Context(InputUploads):
             batch.add(self, commands, fence)
             return
         if self._timing:
-            label = sys._getframe(1).f_code.co_name + ("+forward" if pending is not None else "")
+            label = sys._getframe(1).f_code.co_name + ("+forward" if pending is not None or pre else "")
             begin, end = self._timestamp_pair(label)
             self._profile_submitted(commands)
             commands = [begin] + commands + [end]
@@ -2151,13 +2169,20 @@ class Context(InputUploads):
         val = b_val.read(np.complex64, out).reshape(nd, nt, nbins)
         return idx, val
 
-    def peaks_items(self, n, data, tmpl, items, binsize, threshold):
+    def peaks_items(self, n, data, tmpl, items, binsize, threshold, *, wait=True):
         """One submission over items (lo, hi, a, b, t): rows a:b of data against template row t,
         searched over [lo, hi) in bins of binsize. Returns per item (idx, val) shaped
         (b - a, 1, nbins). Data and templates are shared allocations; descriptor offsets select
         each item's rows. A one-off recording (follow-up windows do not repeat), with one
-        descriptor pool for all its sets, released after the call."""
+        descriptor pool for all its sets, released after the call.
+
+        Every forward deferred into data (forward(..., defer=True, slot=('items', i))) goes in
+        the same submission. wait=False submits and returns a function giving the results, so
+        several plans' follow-ups share one wait; this context's next call must come after it."""
         vk = self.vk
+        pending = getattr(self, "_items_finish", None)
+        if pending is not None:
+            pending()
         b_data, b_tmpl = shared_buffer(data, self), shared_buffer(tmpl, self)
         if b_data is None or b_tmpl is None:
             raise ValueError("item spectra and templates must be shared allocations")
@@ -2224,14 +2249,50 @@ class Context(InputUploads):
             vk.vkCmdPipelineBarrier(cmd, _STAGE_COMPUTE_BIT, 0x4000, 0, 0, None, 2,
                                     ctypes.cast(barriers, _vp), 0, None)
             _check(vk.vkEndCommandBuffer(cmd), "end item peaks")
-            self._submit(cmd)                                # with the pending forward
-            indices = b_idx.read(np.int32, size)
-            values = b_val.read(np.complex64, size)
-        finally:
-            if cmd:
-                vk.vkFreeCommandBuffers.argtypes = [_vp, _vp, _u32, ctypes.POINTER(_vp)]
-                vk.vkFreeCommandBuffers(self.device, self.command_pool, 1, (_vp * 1)(cmd))
-            vk.vkDestroyDescriptorPool(self.device, pool, None)
+            fwd = self._pending_forward if isinstance(getattr(self, "_pending_forward", None), dict) else {}
+            pre = [fwd.pop(k) for k in sorted((k for k in fwd if isinstance(k, tuple)
+                                                and k[0] == 'items'), key=lambda k: k[1])]
+            if fwd is not None and not fwd:
+                self._pending_forward = None
+            fence = None
+            if not wait:
+                fence = _vp()
+                _check(vk.vkCreateFence(self.device, ctypes.byref(_FenceCreate(8, None, 0)), None,
+                                        ctypes.byref(fence)), "vkCreateFence")
+            self._submit(cmd, fence=fence, wait=wait, pre=pre)   # with the pending forwards
+        except BaseException:
+            self._items_release(cmd, pool, None)
+            raise
+        if wait:
+            self._items_release(cmd, pool, None)
+            return self._items_read(items, offs, nbs, size)
+        done = []
+
+        def finish():
+            if not done:
+                self._items_finish = None
+                try:
+                    self._wait_fence(fence)
+                finally:
+                    self._items_release(cmd, pool, fence)
+                done.append(self._items_read(items, offs, nbs, size))
+            return done[0]
+        self._items_finish = finish
+        return finish
+
+    def _items_release(self, cmd, pool, fence):
+        vk = self.vk
+        if cmd:
+            vk.vkFreeCommandBuffers.argtypes = [_vp, _vp, _u32, ctypes.POINTER(_vp)]
+            vk.vkFreeCommandBuffers(self.device, self.command_pool, 1, (_vp * 1)(cmd))
+        vk.vkDestroyDescriptorPool(self.device, pool, None)
+        if fence is not None:
+            vk.vkDestroyFence(self.device, fence, None)
+
+    def _items_read(self, items, offs, nbs, size):
+        b_idx, b_val = self._items_out
+        indices = b_idx.read(np.int32, size)
+        values = b_val.read(np.complex64, size)
         out = []
         for (lo, hi, a, b, t), off, nb in zip(items, offs, nbs):
             c = (b - a) * nb
