@@ -6,6 +6,7 @@ from collections import OrderedDict
 import os
 import time
 from typing import Any, NamedTuple, Optional, Sequence, Union, Tuple, List, Dict
+import sys
 import numpy as np
 try:
     from . import _core
@@ -1384,11 +1385,26 @@ class TimeDomainFilterBank:
         close = None
         if os.environ.get("MF_GPU_FUSE", "1") != "0" and any(
                 getattr(b, "device", None) is not None for b, _, _ in jobs):
-            try:
-                from . import _vkcompute
-                close = _vkcompute.fused()
-            except Exception:
-                close = None
+            # Every GPU backend in use shares the protocol: fused() begins collecting on its
+            # devices and returns a close (Vulkan: _vkcompute._FusedBatch; Metal: shared
+            # command buffers, _mtlcompute._FusedBatch).
+            closes = []
+            for name in ('_vkcompute', '_mtlcompute'):
+                mod = sys.modules.get(__package__ + '.' + name)
+                if mod is None and name == '_vkcompute':
+                    try:
+                        from . import _vkcompute as mod
+                    except Exception:
+                        mod = None
+                if mod is not None and hasattr(mod, 'fused'):
+                    try:
+                        closes.append(mod.fused())
+                    except Exception:
+                        pass
+            if closes:
+                def close(closes=closes):
+                    for c in closes:
+                        c()
         out = [None] * len(jobs)
         # Single-template (follow-up) calls on a GPU bank, per template group: one forward
         # dispatch and one submission for all of them instead of a few submissions each.

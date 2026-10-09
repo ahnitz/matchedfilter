@@ -379,9 +379,106 @@ class _Device:
         #: their own queues, so another context's command buffer waits on those events on
         #: the GPU (Context._new_cmd) -- no host wait between the stages.
         self.pending_contexts = []
+        #: A _FusedBatch while filter_series_many is collecting (fused()), else None.
+        self.collector = None
 
 
 _DEVICES = {}
+
+
+class _FusedBatch:
+    """Command buffers shared by every context on one device while a batch collects
+    (TimeDomainFilterBank.filter_series_many): the protocol of _vkcompute._FusedBatch.
+
+    Each plan has its own Context and queue, so a segment's fine stage was ~200 small
+    command buffers, each committed separately, with the GPU idle across every host gap
+    between them. While collecting, Context._new_cmd hands out the batch's current command
+    buffer instead (on one device-level queue, so successive batch buffers run in order);
+    an asynchronous _commit leaves it open, and it is committed once `chunk` submissions
+    have joined it (the device starts on a chunk while the host prepares the next), when
+    a result from it is waited on, or at close. Encoders are always ended before the
+    methods that open them return, so contexts never interleave inside one encoder."""
+
+    #: Submissions per command buffer; MF_GPU_FUSE_CHUNK overrides (shared with Vulkan).
+    chunk = int(__import__("os").environ.get("MF_GPU_FUSE_CHUNK", "16"))
+
+    def __init__(self, dev):
+        self.dev, self.cmd, self.count = dev, None, 0
+        self.holders = []           # contexts holding self.cmd uncommitted (deferred forward)
+        self.waited = {}            # id(ctx) -> event value already waited on in self.cmd
+        self.untimed = set()        # committed buffers whose device time is not yet recorded
+
+    def acquire(self, ctx):
+        """The current shared command buffer (autoreleased semantics: callers retain)."""
+        o = self.dev.o
+        if self.cmd is None:
+            if getattr(self.dev, "batch_queue", None) is None:
+                self.dev.batch_queue = o.call(self.dev.handle, b"newCommandQueue")
+            self.cmd = o.call(self.dev.batch_queue, b"commandBuffer")
+            o.call(self.cmd, b"retain")
+            self.waited = {}
+        for c in self.dev.pending_contexts:
+            # Writes another context left in flight: ordered here, between encoders, as
+            # _new_cmd orders a fresh buffer.
+            if self.waited.get(id(c), 0) < c._signal_value:
+                o.call(self.cmd, b"encodeWaitForEvent:value:", restype=None,
+                       args=(c._signal_event, c._signal_value),
+                       argtypes=(ctypes.c_void_p, ctypes.c_uint64))
+                self.waited[id(c)] = c._signal_value
+        self.holders.append(ctx)
+        return self.cmd
+
+    def owns(self, cmd):
+        return cmd is not None and self.cmd is not None and cmd == self.cmd
+
+    def _release_holder(self, ctx):
+        try:
+            self.holders.remove(ctx)
+        except ValueError:
+            pass
+
+    def joined(self, ctx, async_submit):
+        """ctx submitted into the shared buffer: commit it when due (a synchronous
+        submission waits right away, so it is due now)."""
+        self._release_holder(ctx)
+        self.count += 1
+        if not async_submit or (self.count >= self.chunk and not self.holders):
+            self.flush()
+
+    def dropped(self, ctx):
+        self._release_holder(ctx)
+
+    def flush(self):
+        """Commit the current buffer. A context still holding it (a deferred forward
+        waiting for its consumer) has its forward committed with it: the consumer then
+        starts a new buffer on the same queue, which runs after this one."""
+        if self.cmd is None:
+            return
+        cmd, self.cmd, self.count = self.cmd, None, 0
+        for ctx in self.holders:
+            pending = ctx._pending_metal
+            if pending is not None and pending[0] == cmd:
+                ctx._pending_metal = None
+                self.dev.o.call(cmd, b"release", restype=None)   # the forward's retain
+        self.holders = []
+        self.untimed.add(cmd)
+        self.dev.o.call(cmd, b"commit", restype=None)
+        self.dev.o.call(cmd, b"release", restype=None)
+
+
+def fused():
+    """Begin a fused batch on every Metal device in use; returns a callable closing it
+    (the same protocol as _vkcompute.fused)."""
+    devs = [d for d in _DEVICES.values() if d.collector is None]
+    for d in devs:
+        d.collector = _FusedBatch(d)
+
+    def close():
+        for d in devs:
+            b, d.collector = d.collector, None
+            if b is not None:
+                b.flush()
+    return close
 
 
 def settle_all():
@@ -693,11 +790,16 @@ class Context(InputUploads):
         self._drain()
         return self.timing_log
 
-    def _new_cmd(self):
+    def _new_cmd(self, shared_ok=True):
         """A new (autoreleased) command buffer on this context's queue, ordered on the GPU
         after writes other contexts left in flight (zero_columns_done(wait=False))."""
-        cmd = self.o.call(self.queue, b"commandBuffer")
         dev = getattr(self, "_device_state", None)
+        batch = getattr(dev, "collector", None)
+        if batch is not None and not shared_ok:
+            batch = None
+        if batch is not None:
+            return batch.acquire(self)
+        cmd = self.o.call(self.queue, b"commandBuffer")
         for c in (dev.pending_contexts if dev is not None else ()):
             if c is not self:
                 self.o.call(cmd, b"encodeWaitForEvent:value:", restype=None,
@@ -733,13 +835,27 @@ class Context(InputUploads):
         """
         label = getattr(self, "_cmd_prefix", "") + label
         self._cmd_prefix = ""
-        self.o.call(cmd, b"commit", restype=None)
+        dev = getattr(self, "_device_state", None)
+        batch = getattr(dev, "collector", None)
+        if batch is not None and batch.owns(cmd):
+            batch.joined(self, async_submit)
+        else:
+            batch = None
+            self.o.call(cmd, b"commit", restype=None)
 
         def complete():
             try:
+                if batch is not None and batch.owns(cmd):
+                    batch.flush()           # waited on before its chunk filled
                 self.o.call(cmd, b"waitUntilCompleted", restype=None)
                 self._check_completed(cmd)
-                self._record_gpu_time(cmd, label)
+                if batch is None:
+                    self._record_gpu_time(cmd, label)
+                elif cmd in batch.untimed:
+                    batch.untimed.discard(cmd)  # one shared buffer, timed once
+                    self._record_gpu_time(cmd, "fused")
+                else:
+                    self.last_gpu_time = 0.0
             finally:
                 self.o.call(cmd, b"release", restype=None)
             return finish() if finish is not None else None
@@ -937,6 +1053,9 @@ class Context(InputUploads):
         pending = self._pending_metal
         if pending is not None:
             self._pending_metal = None
+            batch = getattr(getattr(self, "_device_state", None), "collector", None)
+            if batch is not None and batch.owns(pending[0]):
+                batch.dropped(self)
             self.o.call(pending[0], b"release", restype=None)
 
     def peaks(self, n, data, tmpl, binsize=None, threshold=0.0, window=None,
@@ -1246,7 +1365,7 @@ class Context(InputUploads):
         o = self.o
         if getattr(self, "_zero_enc", None) is None:
             with o.autorelease_pool():
-                cmd = self._new_cmd()
+                cmd = self._new_cmd(shared_ok=False)   # its encoder stays open across calls
                 o.call(cmd, b"retain")
                 enc = o.call(cmd, b"blitCommandEncoder")
                 o.call(enc, b"retain")          # outlives this pool until zero_columns_done
@@ -1269,7 +1388,7 @@ class Context(InputUploads):
         if not wait and dev is not None:
             if enc is None:
                 with self.o.autorelease_pool():
-                    cmd = self._new_cmd()
+                    cmd = self._new_cmd(shared_ok=False)
                     self.o.call(cmd, b"retain")
                 self._zero_cmd = cmd
             else:
