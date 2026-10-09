@@ -55,7 +55,10 @@ def test_screen_subrange_rows():
 
 
 @pytest.mark.parametrize("chain", [(256,), (512,), (128, 512)])
-def test_hierarchical_results_identical_with_screen(chain):
+def test_hierarchical_results_identical_with_screen(chain, monkeypatch):
+    # The screen guards the FP32 tier; the FP16 first gate (ARM, src/gate16.cc) replaces
+    # that tier and admits a superset of its pairs, so exact identity is an FP32 property.
+    monkeypatch.setenv("MF_GATE16", "0")
     n, nd, nt = 4096, 8, 40
     power = _inspiral_power(n)
     h = np.sqrt(power).astype(np.complex64)

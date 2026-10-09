@@ -373,9 +373,22 @@ class _Device:
                 self.handle, b"maxThreadgroupMemoryLength", restype=ctypes.c_ulong))
         self.pipelines = {}
         self.pipeline_names = {}
+        #: Contexts holding writes left in flight by zero_columns_done(wait=False). Each
+        #: signals its own MTLSharedEvent after them (one event per queue: a shared one
+        #: could be set back by a later, lower signal from another queue). Contexts have
+        #: their own queues, so another context's command buffer waits on those events on
+        #: the GPU (Context._new_cmd) -- no host wait between the stages.
+        self.pending_contexts = []
 
 
 _DEVICES = {}
+
+
+def settle_all():
+    """Wait for every write left in flight on any Metal device (a host read follows)."""
+    for dev in _DEVICES.values():
+        if dev.pending_contexts:
+            dev.pending_contexts[0].settle_writes()
 
 
 def _device(index):
@@ -680,6 +693,18 @@ class Context(InputUploads):
         self._drain()
         return self.timing_log
 
+    def _new_cmd(self):
+        """A new (autoreleased) command buffer on this context's queue, ordered on the GPU
+        after writes other contexts left in flight (zero_columns_done(wait=False))."""
+        cmd = self.o.call(self.queue, b"commandBuffer")
+        dev = getattr(self, "_device_state", None)
+        for c in (dev.pending_contexts if dev is not None else ()):
+            if c is not self:
+                self.o.call(cmd, b"encodeWaitForEvent:value:", restype=None,
+                            args=(c._signal_event, c._signal_value),
+                            argtypes=(ctypes.c_void_p, ctypes.c_uint64))
+        return cmd
+
     def _command_buffer(self):
         """An OWNED command buffer: the deferred forward's, or a new one.
 
@@ -690,7 +715,7 @@ class Context(InputUploads):
         """
         pending = self._pending_metal
         if pending is None:
-            cmd = self.o.call(self.queue, b"commandBuffer")
+            cmd = self._new_cmd()
             self.o.call(cmd, b"retain")
             self._cmd_prefix = ""
             return cmd
@@ -836,7 +861,7 @@ class Context(InputUploads):
         if pending is not None:
             cmd = pending[0]
         else:
-            cmd = self.o.call(self.queue, b"commandBuffer")
+            cmd = self._new_cmd()
             self.o.call(cmd, b"retain")
         enc = self.o.call(cmd, b"computeCommandEncoder")
         self._dispatch(enc, pso, (series.size,), buffers, n // _radix(n), groups=count,
@@ -899,7 +924,7 @@ class Context(InputUploads):
                 scratch = _Buffer(self, spectra.nbytes)
                 self._forwards[key] = scratch
         self._cache_touch('forward', key)
-        cmd = self.o.call(self.queue, b'commandBuffer')
+        cmd = self._new_cmd()
         self.o.call(cmd, b'retain')
         self._encode_tierc(cmd, n, 'fwd1', (buffers[0], buffers[1], scratch),
                            spectra.shape[0]*geometry['n1'], series.size)
@@ -1221,7 +1246,7 @@ class Context(InputUploads):
         o = self.o
         if getattr(self, "_zero_enc", None) is None:
             with o.autorelease_pool():
-                cmd = o.call(self.queue, b"commandBuffer")
+                cmd = self._new_cmd()
                 o.call(cmd, b"retain")
                 enc = o.call(cmd, b"blitCommandEncoder")
                 o.call(enc, b"retain")          # outlives this pool until zero_columns_done
@@ -1234,8 +1259,35 @@ class Context(InputUploads):
         for r in range(dest.shape[0]):
             fill(self._zero_enc, sel, sb.handle, _NSRange(base + r * row, length), 0)
 
-    def zero_columns_done(self):
+    def zero_columns_done(self, wait=True):
+        """Commit the collected zeroing and wait for it and every command still in flight on
+        this context -- or, wait=False, leave them in flight: the zeroing then signals this
+        context's event, which other contexts' command buffers wait on (_new_cmd), and
+        settle_writes() waits on the host."""
         enc = getattr(self, "_zero_enc", None)
+        dev = getattr(self, "_device_state", None)
+        if not wait and dev is not None:
+            if enc is None:
+                with self.o.autorelease_pool():
+                    cmd = self._new_cmd()
+                    self.o.call(cmd, b"retain")
+                self._zero_cmd = cmd
+            else:
+                self._zero_enc = None
+                self.o.call(enc, b"endEncoding", restype=None)
+                self.o.call(enc, b"release", restype=None)
+            if getattr(self, "_signal_event", None) is None:
+                self._signal_event = self.o.call(self.device, b"newSharedEvent")
+                self._signal_value = 0
+            self._signal_value += 1
+            self.o.call(self._zero_cmd, b"encodeSignalEvent:value:", restype=None,
+                        args=(self._signal_event, self._signal_value),
+                        argtypes=(ctypes.c_void_p, ctypes.c_uint64))
+            self._cmd_prefix = ""
+            self._commit(self._zero_cmd, "zero", async_submit=True)
+            if self not in dev.pending_contexts:
+                dev.pending_contexts.append(self)
+            return
         try:
             if enc is not None:
                 self._zero_enc = None
@@ -1246,6 +1298,24 @@ class Context(InputUploads):
             self._drain()
         finally:
             self._keep_until_done.clear()
+        self.settle_writes()
+
+    def settle_writes(self):
+        """Wait for every write left in flight on this device (zero_columns_done(wait=False)),
+        and release the host memory those commands read in place."""
+        dev = getattr(self, "_device_state", None)
+        if dev is None:
+            self._drain()
+            return
+        ctxs, dev.pending_contexts = dev.pending_contexts, []
+        for ctx in ctxs:
+            try:
+                ctx._drain()
+            finally:
+                ctx._keep_until_done.clear()
+
+    #: zero_columns_done(wait=False) leaves the zeroing and the middle stage in flight.
+    async_zero = True
 
     def correlate(self, n, data, tmpl, out, *, upload_data=True, upload_tmpl=True):
         nd, nt = data.shape[0], tmpl.shape[0]
@@ -1574,8 +1644,14 @@ class Context(InputUploads):
         if getattr(self, "device", None) is None:
             return
         self.cancel_forward()
+        dev = getattr(self, "_device_state", None)
+        if dev is not None and self in dev.pending_contexts:
+            self.settle_writes()
         self.clear_cache()
-        shared = getattr(self, "_device_state", None) is not None
+        if getattr(self, "_signal_event", None) is not None:
+            self.o.call(self._signal_event, b"release", restype=None)
+            self._signal_event = None
+        shared = dev is not None
         if not shared:
             # A context that owns its device (built without _Device) owns its pipelines.
             for pipeline in self._pipelines.values():

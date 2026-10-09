@@ -166,8 +166,8 @@ def run_device(device, tops, args, seed):
         mid_out = {ifo: mid.empty_shared((len(top["mid_counts"]), S)) for ifo in ("H1", "L1")}
         seg_plan = SegmentPlan()
         first.add("prep", time.perf_counter() - t0)
-        def finish(seg, ser, mids, fine_out, tm):
-            """A segment's fine results: record them and run its follow-ups."""
+        def followups(seg, ser, mids, fine_out):
+            """A segment's fine results: record them, and return its follow-up jobs."""
             fine_res = iter(fine_out)
             asym_jobs, asym_keys = [], []
             for row, (m, b) in enumerate(fine):
@@ -193,17 +193,32 @@ def run_device(device, tops, args, seed):
                                                binsize=bs, threshold=0.0,
                                                template_index=int(r.template_indices[i]))))
                         asym_keys.append((top["top"], seg, m, other, "asym", c0, int(r.template_indices[i])))
-            # The segment's follow-ups, batched like the fine stage (--no-batch: one call each).
+            return asym_jobs, asym_keys
+
+        def submit_followups(asym_jobs, tm, wait=True):
+            """The segment's follow-ups, batched like the fine stage (--no-batch: one call
+            each); wait=False returns futures."""
             t = time.perf_counter()
             if args.no_batch:
                 asym_out = [b.filter_series(x, **kw) for b, x, kw in asym_jobs]
             else:
-                asym_out = TimeDomainFilterBank.filter_series_many(asym_jobs)
+                asym_out = TimeDomainFilterBank.filter_series_many(asym_jobs, wait=wait)
             if asym_jobs:
                 tm.add("asym", time.perf_counter() - t)
+            return asym_out
+
+        def collect_followups(asym_keys, asym_out, tm):
+            t = time.perf_counter()
             for k, fr in zip(asym_keys, asym_out):
-                results[k] = fr
-            counts["asym_calls"] += len(asym_jobs)
+                results[k] = fr.result() if hasattr(fr, "result") else fr
+            if asym_keys:
+                tm.add("asym", time.perf_counter() - t, n=0)
+            counts["asym_calls"] += len(asym_keys)
+
+        def finish(seg, ser, mids, fine_out, tm):
+            """A segment's fine results: record them and run its follow-ups."""
+            jobs, keys = followups(seg, ser, mids, fine_out)
+            collect_followups(keys, submit_followups(jobs, tm), tm)
         next_ser = {ifo: analytic_series(rng, S, amp, df) for ifo in ("H1", "L1")}
         if args.pipeline:
             # The device is fed continuously: segment k's middle and fine stages are enqueued
@@ -211,6 +226,11 @@ def run_device(device, tops, args, seed):
             # and segment k-1's results and follow-ups are collected while the device works on
             # k. Two middle buffers per detector, so k's middle never overwrites what k-1's
             # follow-ups read. Stage times here are host-side; "segment" is the comparable one.
+            # Order within an iteration: k's middle is enqueued; k-1's fine results are read
+            # (done by now) and its follow-ups enqueued; then k's fine stage. The follow-ups
+            # run ahead of it on the same queues, so collecting them waits for them alone and
+            # not for k's fine stage, and the host's remaining work (recording results, k+1's
+            # data and middle) overlaps k's fine stage instead of leaving the device idle.
             bufs = [mid_out, {ifo: mid.empty_shared((len(top["mid_counts"]), S))
                               for ifo in ("H1", "L1")}]
             pending = None
@@ -225,17 +245,22 @@ def run_device(device, tops, args, seed):
                         ser[ifo], windows=slice(max(0, a0 - args.pad), min(S, a1 + args.pad)),
                         out=out[ifo], wait=False) for ifo in ser}
                     tm.add("middle", time.perf_counter() - t)
-                    jobs = [(b, mids[ifo][row], dict(windows=slice(a0, a1)))
-                            for row, (m, b) in enumerate(fine) for ifo in ser]
-                    t = time.perf_counter()
-                    futures = TimeDomainFilterBank.filter_series_many(jobs, wait=False)
-                    tm.add("fine", time.perf_counter() - t)
+                asym = None
                 if pending is not None:
                     p_seg, p_ser, p_mids, p_futures, p_tm = pending
                     t = time.perf_counter()
                     p_out = [f.result() for f in p_futures]
                     p_tm.add("fine", time.perf_counter() - t)
-                    finish(p_seg, p_ser, p_mids, p_out, p_tm)
+                    a_jobs, a_keys = followups(p_seg, p_ser, p_mids, p_out)
+                    asym = (a_keys, submit_followups(a_jobs, p_tm, wait=False), p_tm)
+                if seg < args.segments:
+                    jobs = [(b, mids[ifo][row], dict(windows=slice(a0, a1)))
+                            for row, (m, b) in enumerate(fine) for ifo in ser]
+                    t = time.perf_counter()
+                    futures = TimeDomainFilterBank.filter_series_many(jobs, wait=False)
+                    tm.add("fine", time.perf_counter() - t)
+                if asym is not None:
+                    collect_followups(*asym)
                 pending = (seg, ser, mids, futures, tm) if seg < args.segments else None
                 elapsed = time.perf_counter() - t_seg
                 if seg < args.segments:
