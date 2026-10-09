@@ -1918,7 +1918,23 @@ def _normalize_chain(chain, n):
     return chain
 
 
+_Q15_BANDS = {}
+
+
+def _q15_available(band):
+    """Whether this machine's back end has a Q15 screen for a first tier at `band`."""
+    band = int(band)
+    if band not in _Q15_BANDS:
+        try:
+            _Q15_BANDS[band] = _core.MF(band, 1, 1).q15_lanes() > 0
+        except (ValueError, AttributeError):
+            _Q15_BANDS[band] = False
+    return _Q15_BANDS[band]
+
+
 _AUTOTUNE_LOCK = threading.Lock()
+#: (n, snr, fd, chain, device) -> {"samples": {False: [...], True: [...]}, "winner": bool|None}
+_Q15_TRIALS = {}
 #: (n, snr, fd, tiers, window, profile signature) -> (model's chain, shortlist)
 _CHAIN_CHOICE = {}
 #: (n, snr, fd, tiers, shortlist) -> measured trials shared by every plan with that shortlist
@@ -1955,6 +1971,7 @@ def clear_autotune_cache():
     with _AUTOTUNE_LOCK:
         _CHAIN_CHOICE.clear()
         _CHAIN_TRIALS.clear()
+        _Q15_TRIALS.clear()
 
 
 class HierarchicalFilter(MatchedFilter):
@@ -2018,6 +2035,7 @@ class HierarchicalFilter(MatchedFilter):
         self._hermitian = False
         self._mf = None
         self._chain_trial = None
+        self._q15 = False
         self._pinned = None if chain is None else _normalize_chain(chain, self.n)
         if self._pinned is not None and len(self._pinned) > self._MAX_TIERS[self.device.kind]:
             raise ValueError("this device executes chains of at most %d tiers"
@@ -2039,9 +2057,46 @@ class HierarchicalFilter(MatchedFilter):
                          int(getattr(self, 'k', self.n) or self.n))
         if self._hermitian:
             plan.set_hermitian(True)
-        if os.environ.get("MF_Q15_TMP", "0") == "1":
-            plan.set_q15(True)
+        if getattr(self, "_q15", False) and not plan.set_q15(True):
+            self._q15 = False
         return plan
+
+    # ---- Q15 screen: a measured candidate, never a default ---------------------
+    # The screen in front of the first tier (docs/cpu-q15-gate.md) changes no result -- the
+    # float tier re-runs every pair it passes -- so only time is at stake, and time is
+    # measured: plans whose chain's first band has a screen alternate it on and off over
+    # real calls, pooled per (n, snr, fd, chain), and every plan adopts the faster once
+    # each side has MF_CHAIN_TRIALS samples. MF_AUTOTUNE=0 keeps the float tier.
+    def _q15_trial_key(self):
+        return (self.n, float(self._fs_snr or self.snr), float(self.fd), tuple(self._chain), str(self.device))
+
+    def _q15_before_call(self):
+        """Pick the screen setting for this call; True when the call is a timed sample."""
+        if (self.device.kind != "cpu" or self._mf is None or self._chain is None
+                or not _autotune_enabled() or not _q15_available(self._chain[0])):
+            return False
+        with _AUTOTUNE_LOCK:
+            tr = _Q15_TRIALS.setdefault(self._q15_trial_key(), {"samples": {False: [], True: []}, "winner": None})
+            win = tr["winner"]
+            want = win if win is not None else len(tr["samples"][True]) < len(tr["samples"][False])
+        if bool(want) != bool(self._q15):
+            self._q15 = bool(want) and self._mf.set_q15(True)
+            if not want:
+                self._mf.set_q15(False)
+        return win is None
+
+    def _q15_record(self, dt, pairs):
+        with _AUTOTUNE_LOCK:
+            tr = _Q15_TRIALS.get(self._q15_trial_key())
+            if tr is None or tr["winner"] is not None or pairs <= 0:
+                return
+            tr["samples"][bool(self._q15)].append(dt / pairs)
+            need = int(os.environ.get("MF_CHAIN_TRIALS", _CHAIN_TRIALS_PER_CAND))
+            if all(len(v) >= need for v in tr["samples"].values()):
+                med = {k: float(np.median(v)) for k, v in tr["samples"].items()}
+                tr["winner"] = med[True] < med[False]
+                _log_autotune("Q15-TRIAL chain=%s locked q15=%s  median s/pair %s", self._chain,
+                              tr["winner"], {k: "%.3g" % v for k, v in med.items()})
 
     def _restore_into(self, plan):
         """Replay reference, templates and data into a freshly built plan."""
@@ -2069,7 +2124,7 @@ class HierarchicalFilter(MatchedFilter):
         if self._chain is None:
             if self._pending_ref is None:
                 raise ValueError("set a reference first (set_reference), or pin a chain")
-            self._chain = self._choose_chain()
+            self._chain, self._q15 = self._choose_chain(), False
         self._mf = self._new_cpu_plan(self._chain)
         self._thr_applied = False
         self._restore_into(self._mf)
@@ -2083,8 +2138,8 @@ class HierarchicalFilter(MatchedFilter):
         return plan
 
     def _switch_chain(self, chain):
-        """Run a different chain from now on, keeping loaded data and templates."""
-        self._chain = tuple(chain)
+        """Run a different configuration from now on, keeping loaded data and templates."""
+        self._chain, self._q15 = tuple(chain), False
         self._thr_applied = False
         if self._gpu is not None:
             self._gcal = None
@@ -2231,6 +2286,7 @@ class HierarchicalFilter(MatchedFilter):
         model_best, shortlist = hit
         if not _autotune_enabled():
             shortlist = shortlist[:1]
+
         chain = model_best
         self._chain_trial = None
         if len(shortlist) > 1:
@@ -2279,6 +2335,21 @@ class HierarchicalFilter(MatchedFilter):
     def run_series(self, series, starts=None, win_start=None, win_end=None,
                    binsize=None, threshold=0.0, templates=None, raw=False,
                    decimated=None):
+        if self._chain_trial is None and self.device.kind == "cpu" and self._mf is not None:
+            if self._q15_before_call():
+                t0 = time.perf_counter()
+                res = super().run_series(series, starts=starts, win_start=win_start, win_end=win_end,
+                                         binsize=binsize, threshold=threshold, templates=templates,
+                                         raw=raw, decimated=decimated)
+                dt = time.perf_counter() - t0
+                full = templates is None or templates[1] >= self.ntemplates
+                try:
+                    nblk = len(starts) if starts is not None else 1
+                except TypeError:
+                    nblk = 0
+                if full and nblk >= 2:
+                    self._q15_record(dt, nblk * self.ntemplates * self.ndata)
+                return res
         if self._chain_trial is None:
             return super().run_series(series, starts=starts, win_start=win_start, win_end=win_end,
                                       binsize=binsize, threshold=threshold, templates=templates,
@@ -2361,7 +2432,7 @@ class HierarchicalFilter(MatchedFilter):
         if self._chain is None:
             if self._pending_ref is None:
                 raise ValueError("set a reference first (set_reference), or pin a chain")
-            self._chain = self._choose_chain()
+            self._chain, self._q15 = self._choose_chain(), False
             key = (self.snr, self.fd, self._fs_snr, self._chain, self._cal_thr)
         thr = self._thresholds(required=True)
         f = None
