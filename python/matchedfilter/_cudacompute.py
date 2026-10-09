@@ -26,6 +26,7 @@ from ._cuda import check_cuda
 from ._errors import UnsupportedSize
 from ._gpu_cache import InputUploads
 from ._shared import empty_shared, shared_buffer, shared_key, _Borrowed
+from ._shared import pack_half2 as _pack_half2
 
 def _borrowed_dptr(self):
     """Device address of a shared array, including a view's offset into its allocation."""
@@ -121,14 +122,6 @@ def _radix(n):
 
 def _use_c16(band):
     return band <= 1024
-
-
-def _pack_half2(a):
-    """Bit-pack complex64 into uint32 holding (real_half, imag_half)."""
-    a = np.ascontiguousarray(a, dtype=np.complex64)
-    r = a.real.astype(np.float16).view(np.uint16)
-    i = a.imag.astype(np.float16).view(np.uint16)
-    return (r.astype(np.uint32) | (i.astype(np.uint32) << 16)).copy()
 
 
 def _shift(binsize):
