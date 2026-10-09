@@ -246,9 +246,15 @@ def run_device(device, tops, args, seed):
                 else:
                     tm.add("segment", elapsed)    # the last collection belongs to the last segment
             continue
+        prof = None
+        if os.environ.get("LADDER_PROFILE"):      # cProfile of the steady segments only
+            import cProfile
+            prof = cProfile.Profile()
         for seg in range(args.segments):
-            t_seg = time.perf_counter()
             tm = first if seg < args.warmup else steady
+            if prof is not None and tm is steady:
+                prof.enable()
+            t_seg = time.perf_counter()
             ser = next_ser
             next_ser = None
             mids = {}
@@ -290,6 +296,9 @@ def run_device(device, tops, args, seed):
             tm.add("fine", time.perf_counter() - t)
             finish(seg, ser, mids, fine_out, tm)
             tm.add("segment", time.perf_counter() - t_seg)
+            if prof is not None and tm is steady:
+                prof.disable()
+                prof.dump_stats(os.environ["LADDER_PROFILE"])
             if next_ser is None and seg + 1 < args.segments:
                 next_ser = {ifo: analytic_series(rng, S, amp, df) for ifo in ("H1", "L1")}
     nfine = sum(t["nfine"] for t in tops)

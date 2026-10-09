@@ -18,6 +18,7 @@ synchronization that completes it, ``(label, device_ms)`` is appended to
 import ctypes
 import os
 import pathlib
+import threading
 
 import numpy as np
 
@@ -80,6 +81,11 @@ def _manifest():
 _MAX_BINS = 2048
 # Sparse readback: peak records copied back with the count, before a second round trip.
 _SPARSE_HOST = 4096
+# The primary context this thread last made current (handles are stable: _DeviceShared retains
+# each device's primary context for the process lifetime). cuCtxSetCurrent per call measured
+# ~75 us of host time per fine-stage forward on the L40S.
+_BOUND = threading.local()
+
 _PREFETCH = os.environ.get("MF_CUDA_PREFETCH", "1") != "0"
 # CUDA graphs for the hierarchical launch sequences (MF_CUDA_GRAPHS=0 issues them directly).
 _GRAPHS = os.environ.get("MF_CUDA_GRAPHS", "1") != "0"
@@ -460,6 +466,7 @@ class Context(InputUploads):
                 "cuCtxCreate",
             )
         check_cuda(self.cuda.cuCtxSetCurrent(self.ctx), "cuCtxSetCurrent")
+        _BOUND.ctx = self.ctx.value if self._using_primary_ctx else None
         for _ in range(4):
             s = ctypes.c_void_p()
             check_cuda(self.cuda.cuStreamCreate(ctypes.byref(s), 1), "cuStreamCreate")
@@ -506,8 +513,12 @@ class Context(InputUploads):
         return v.value
 
     def _bind(self):
-        if getattr(self, "ctx", None) and self.ctx.value:
-            check_cuda(self.cuda.cuCtxSetCurrent(self.ctx), "cuCtxSetCurrent")
+        ctx = getattr(self, "ctx", None)
+        if ctx and ctx.value:
+            if self._using_primary_ctx and getattr(_BOUND, "ctx", None) == ctx.value:
+                return
+            check_cuda(self.cuda.cuCtxSetCurrent(ctx), "cuCtxSetCurrent")
+            _BOUND.ctx = ctx.value if self._using_primary_ctx else None
 
     def get_stream(self, slot=None):
         # Integer slots spread over the streams; any other slot (e.g. a follow-up items
@@ -1969,6 +1980,7 @@ class Context(InputUploads):
             self.cuda.cuDevicePrimaryCtxRelease(self.device.value)
         else:
             self.cuda.cuCtxDestroy_v2(self.ctx)
+        _BOUND.ctx = None
         self.ctx.value = 0
 
     def __del__(self):

@@ -822,6 +822,41 @@ class MatchedFilter:
         layout = SeriesLayout(self.n, st, ws, we, binsize, ragged=ragged)
         return ser, layout, binsize, t0, nt
 
+    def _grouped_layout(self, series, starts, win_start, win_end, binsize, templates):
+        """_series_layout, grouped, cached per layout signature.
+
+        A search calls the same plan with the same blocks every segment: validating and
+        grouping them again was a large part of the per-call host time. The key is the
+        layout's bytes (not array identity), so a caller reusing and rewriting its arrays
+        still gets a fresh layout. A cached layout is never mutated after grouping."""
+        group = self._gpu is not None or self.ndata > 1 or isinstance(self, HierarchicalFilter)
+        key = None
+        if (type(starts) is np.ndarray and type(win_start) is np.ndarray
+                and type(win_end) is np.ndarray):
+            key = (starts.dtype.char, starts.tobytes(), win_start.dtype.char, win_start.tobytes(),
+                   win_end.dtype.char, win_end.tobytes(), binsize,
+                   None if templates is None else (int(templates[0]), int(templates[1])),
+                   group, self._gpu is not None)
+            cache = self.__dict__.get("_layout_cache")
+            hit = cache.get(key) if cache is not None else None
+            if hit is not None:
+                ser = np.ascontiguousarray(_from_any(series), dtype=np.complex64)
+                if ser.ndim != 1:
+                    raise ValueError("series, starts, win_start and win_end must be one-dimensional")
+                layout, binsize, t0, nt = hit
+                self._require_templates(t0, nt)
+                return ser, layout, binsize, t0, nt
+        ser, layout, binsize, t0, nt = self._series_layout(
+            series, starts, win_start, win_end, binsize, templates)
+        if group:
+            layout.group(materialize=self._gpu is not None)
+        if key is not None:
+            cache = self.__dict__.setdefault("_layout_cache", {})
+            if len(cache) >= 32:
+                cache.clear()
+            cache[key] = (layout, binsize, t0, nt)
+        return ser, layout, binsize, t0, nt
+
     def _settle_deferred(self):
         """Collect every deferred call still in flight on this plan (filter_series_many)."""
         owners = self.__dict__.get("_slot_owner")
@@ -1090,10 +1125,8 @@ class MatchedFilter:
                 threshold=threshold, templates=templates, raw=raw,
                 decimated=decim
             )
-        ser, layout, binsize, t0, nt = self._series_layout(
+        ser, layout, binsize, t0, nt = self._grouped_layout(
             series, starts, win_start, win_end, binsize, templates)
-        if self._gpu is not None or self.ndata > 1 or isinstance(self, HierarchicalFilter):
-            layout.group(materialize=self._gpu is not None)
         st, ws, we = layout.starts, layout.low, layout.high
         nblk = st.size
         # CPU series execution reuses the data slots. Require fresh spectra
@@ -1274,7 +1307,11 @@ class MatchedFilter:
             operation = 'hierarchical_series'
         else:
             band, operation = 0, 'flat_series'
-        policy = self._series_policy(operation, band, nt)
+        pkey = (operation, band, nt)
+        pc = self.__dict__.setdefault("_policy_cache", {})
+        policy = pc.get(pkey, pc)
+        if policy is pc:
+            policy = pc[pkey] = self._series_policy(operation, band, nt)
         if policy:
             batch = min(batch, policy['series_group'])
         single = len(layout.groups) == 1 and nblk <= batch
@@ -1451,16 +1488,29 @@ class MatchedFilter:
         if grouped:
             in_flight = []
             slot_idx = slot0 if defer else 0
-            for begin in range(0, nblk, batch):
-                end = min(begin + batch, nblk)
-                count = end - begin
-                groups = [(lo, hi, max(a, begin)-begin, min(b, end)-begin)
-                          for lo, hi, a, b in layout.groups if a < end and b > begin]
+            # The batches' groups and rebased starts, per (layout, batch, series size, base):
+            # the same every segment of a search.
+            ckey = (id(layout), batch, ser.size, base)
+            bc = self.__dict__.setdefault("_batch_cache", {})
+            plan_b = bc.get(ckey)
+            if plan_b is None or plan_b[0] is not layout:
+                if len(bc) >= 32:
+                    bc.clear()
+                parts = []
+                for begin in range(0, nblk, batch):
+                    end = min(begin + batch, nblk)
+                    parts.append((begin, end, end - begin, tuple(
+                        (lo, hi, max(a, begin)-begin, min(b, end)-begin)
+                        for lo, hi, a, b in layout.groups if a < end and b > begin),
+                        (np.minimum(layout.starts[begin:end], ser.size).astype(np.int64)
+                         - base).astype(np.uint32)))
+                plan_b = bc[ckey] = (layout, parts)
+            for begin, end, count, groups, rebased in plan_b[1]:
                 slot = slot_idx % K
                 slot_idx += 1
                 starts = starts_pool[slot]
                 spec = spectra_pool[slot][:count]
-                starts[:count] = np.minimum(layout.starts[begin:end], ser.size).astype(np.int64) - base
+                starts[:count] = rebased
                 self._gpu.forward(n, source, starts[:count], spec, defer=True,
                                   slot=slot if pipelined else None)
                 try:
