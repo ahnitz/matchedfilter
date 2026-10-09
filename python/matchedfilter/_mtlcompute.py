@@ -207,6 +207,10 @@ class _ObjC:
             if ptr else ""
 
 
+class _NSRange(ctypes.Structure):
+    _fields_ = [("location", ctypes.c_ulong), ("length", ctypes.c_ulong)]
+
+
 class _MTLSize(ctypes.Structure):
     _fields_ = [("width", ctypes.c_ulong),
                 ("height", ctypes.c_ulong),
@@ -386,6 +390,8 @@ class Context(InputUploads):
         self._forwards = {}
         self._hier = {}
         self._inflight = {}
+        #: Host memory a deferred command reads in place (host_view owners).
+        self._keep_until_done = []
         #: (label, device_ms) per command buffer when MF_GPU_TIMING=1, from
         #: GPUStartTime/GPUEndTime (the contract in _gputime). Off, nothing
         #: registers and nothing is appended.
@@ -1041,7 +1047,7 @@ class Context(InputUploads):
 
     @_autoreleased
     def correlate_continuous(self, n, data, tmpl, starts, out, lo, hi,
-                             *, upload_data=True, upload_tmpl=True):
+                             *, upload_data=True, upload_tmpl=True, async_submit=False):
         """Write valid lags directly to a filter-owned continuous GPU buffer."""
         nd, nt = data.shape[0], tmpl.shape[0]
         length = out.shape[1]
@@ -1090,7 +1096,48 @@ class Context(InputUploads):
             self._dispatch(enc, self.pipeline(n, 'fullCorrelationSeries'), params,
                            (bd, bt, bs, bo), n // _radix(n), groups=nd * nt)
             self.o.call(enc, b'endEncoding', restype=None)
-        self._commit(cmd, 'series')
+        return self._commit(cmd, 'series', async_submit=async_submit)
+
+    #: _continuous_gpu may leave its last batch in flight: zero_columns_done finishes it.
+    defers_continuous = True
+
+    def zero_columns(self, dest, a, b):
+        """Zero dest[:, a:b] of a device-shared 2-D array on the device (enqueued after
+        whatever this context has submitted that writes it: tracked buffers order them).
+
+        Call zero_columns_done() after the last one: it commits and waits, for these and
+        for every command still in flight on this context."""
+        sb = shared_buffer(dest, self)
+        if sb is None or dest.ndim != 2 or b <= a or not dest.flags.c_contiguous:
+            raise ValueError("zero_columns needs a device-shared 2-D array and a nonempty range")
+        o = self.o
+        if getattr(self, "_zero_enc", None) is None:
+            with o.autorelease_pool():
+                cmd = o.call(self.queue, b"commandBuffer")
+                o.call(cmd, b"retain")
+                enc = o.call(cmd, b"blitCommandEncoder")
+                o.call(enc, b"retain")          # outlives this pool until zero_columns_done
+            self._zero_cmd, self._zero_enc = cmd, enc
+        row = dest.strides[0]
+        base = getattr(sb, "offset", 0) + a * dest.itemsize
+        length = (b - a) * dest.itemsize
+        fill = o.send(None, (ctypes.c_void_p, _NSRange, ctypes.c_ubyte))
+        sel = o.sel(b"fillBuffer:range:value:")
+        for r in range(dest.shape[0]):
+            fill(self._zero_enc, sel, sb.handle, _NSRange(base + r * row, length), 0)
+
+    def zero_columns_done(self):
+        enc = getattr(self, "_zero_enc", None)
+        try:
+            if enc is not None:
+                self._zero_enc = None
+                self.o.call(enc, b"endEncoding", restype=None)
+                self.o.call(enc, b"release", restype=None)
+                self._cmd_prefix = ""
+                self._commit(self._zero_cmd, "zero")
+            self._drain()
+        finally:
+            self._keep_until_done.clear()
 
     def correlate(self, n, data, tmpl, out, *, upload_data=True, upload_tmpl=True):
         nd, nt = data.shape[0], tmpl.shape[0]
