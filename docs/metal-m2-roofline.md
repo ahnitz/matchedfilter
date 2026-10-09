@@ -8,6 +8,43 @@ average 2-4 from system daemons), warm, with outputs checked against the CPU.
 Sections 1-8 are phase 1, measured on the old generic bench data. **Phase 2 (section 0) is on
 realistic data and supersedes their bench numbers.**
 
+## 0b. Phase 4 (2026-10-09)
+
+| item | result |
+|---|---|
+| Sparse readback (`supports_sparse`) | done: peaks/peaks_grouped/hier_peaks return `_SparsePeaks`; hier reads only the refined pairs and skips the dense host fill. Fine stage is device-bound, so the ladder does not move |
+| `forward_rows` | done: both detectors' follow-ups (two allocations) in one forward + one item submission per template group |
+| Use-after-free audit (the two Vulkan bugs) | no Metal analogue: no recordings or handle-keyed caches; cached batches hold their allocations' owners; command buffers retain bound MTLBuffers; replaced item workspaces settle in-flight calls first |
+| Middle n=8192 kernel | 29% of FMA, unchanged; both levers below falsified |
+| NEON fp16 coarse gate | not implemented; feasibility measured (below) |
+| Clock-independent ranking | done: `_ClockRef` reference call timed beside every calibration repetition, median of ratios |
+
+Falsified in phase 4 (middle n=8192 correlation, replayed kernels, bit-identical output):
+- **SIMD-group barriers for exchanges confined to 32 threads** (`simdgroup_barrier` instead of a
+  threadgroup barrier at levels whose blocks hold <= 32 threads): 29% -> 32% of FMA, but the empire
+  suite then failed 16 tests with rare garbage values (0.3% of coarse outputs, e.g. 1.3e36 against
+  6.4): the SIMD-local ordering assumption does not hold on the M2 as used. Reverted; not shipped.
+- **Coalesced output writes** (reorder the digit-reversed registers through the staging so
+  consecutive threads write consecutive lags): 2.73 -> 3.05 ms. The scattered writes are not
+  the binding cost; the global level-0 exchange (512 threads, one 32 KB group per core) is.
+
+NEON fp16, measured on one M2 performance core (Highway, static NEON target, 16 independent FMA
+chains): f32 ~72 GFLOP/s (4 lanes), f16 ~143 GFLOP/s (8 lanes) -- the 2x is real. The CPU's coarse
+gate is the balanced four-step (`stageA_prod_gm` -> `codelet_prod`, 36% of CPU fine-stage
+samples), whose vector width, template layout (group-major, AP_W floats per element), generated
+codelets and plan buffers are all instantiated over 4-lane f32. An f16 gate needs that kernel
+instantiated a second time over 8-lane f16 (kernel.cc with a different element type and
+namespace), coarse spectra stored in f16, and hmf.c's tier-0 dispatch routed to it, with the gate
+thresholds re-validated against the dismissal budget. Expected ceiling: the gate's 36% share at
+2x, about 1.2x on the CPU fine stage. Scoped, not attempted in this phase.
+
+Clock reference: on the M2 (whose clock did not move under these loads) the spread across four
+fresh processes stays within the noise it already had (n=2048: dense[1024] 45.7-49.3 ns/pair,
+refine 249-265). The mechanism is for shared-power parts; Vulkan and CUDA should verify ranking
+stability under a concurrent CPU load. Steady fine stage still differs between fresh processes
+(88 vs 137 ms per segment in two `--warmup 2` runs): the chain is settled by autotune trials on
+real calls, which this calibration does not reach.
+
 ## 0a. Phase 3 (2026-10-09)
 
 Same bench and check as phase 2 (`--profiles --pure --check cpu`, clean after every change:
