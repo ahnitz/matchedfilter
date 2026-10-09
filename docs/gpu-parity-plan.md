@@ -431,3 +431,99 @@ or measured on the discrete L40S.
   - Every new row address keyed a new forward recording, so the fine stage got slower too.
   - Zero copy needs stable addresses and descriptor rebinding instead of new recordings: part
     of the fused segment executor, not a patch to the per-call path.
+
+## 10. State on 2026-10-09 (main da0dc72): measured, fixed, falsified, next
+
+### Measured
+The setup:
+- realistic ladder (`--profiles ladder_profiles_H1.npz --pure`, 1 top, 10 segments);
+- steady = segments 3-10 (`--warmup 2`: plan builds, then chain trials lock);
+- `--check cpu` exact (0 one-sided peaks) on every row below;
+- host load ~5.
+
+| Stage, s per 8 segments | Radeon 8060S (Vulkan) | 1 Zen 5 core | GPU / core |
+|---|---:|---:|---:|
+| Middle | 0.13-0.14 | 0.48 | 3.5x |
+| Fine | 0.22-0.27 | 3.0 | 11-13x |
+| Follow-ups | 0.06 | 0.07 | 1.1x |
+| Total | ~0.45 | ~3.5 | ~8x |
+
+Against the whole 16-core CPU (~0.22 s) the GPU is still ~0.5x. By peak arithmetic it should be
+~6x (fp32) to ~12x (fp16). The fine stage alone, looped back to back so the clock rises
+(~2.6 GHz), is **device-bound**: wall 22-24 ms per segment, device 20-25 ms. So the kernels are now
+the limit, not the host. Per-phase device ms per segment at ~2.6 GHz:
+
+| Phase | ms |
+|---|---|
+| coarse0 | 9.6-10 |
+| refine | 1-5.7 (depends on the chain) |
+| coarse1 | 0-3.7 |
+| forward | 3.4-3.9 |
+| pack | 0.7-1.7 |
+| fill | 0.1 (was 1.5) |
+
+At ~4.6M pairs per segment in 162 dispatches, coarse0 is ~2.2 ns/pair, ~10% of the fp16 peak by a
+flop count. In the ladder (not looped) the GPU sits at 600-1000 MHz and ~11% busy: the governor
+does not ramp when the GPU idles between the host's calls.
+
+CUDA (L40S, phase 2, `MF_AUTOTUNE=0`): 12x one core end to end; fine 18x, middle 13x. Host Python is
+~60% of the fine stage's wall time.
+
+Metal (M2): the fine stage is device-bound (94% busy), ~85-100 ms per segment, ~16x one core.
+
+### Fixed tonight (each with a test that fails without the fix)
+- **Two use-after-free bugs:** GPU page faults and VK_ERROR_DEVICE_LOST in ~1/3 of runs, main
+  included.
+  - The fused-recording cache was keyed on command-buffer handles, which the driver reuses after
+    eviction. It is now keyed on unique recording serials.
+  - A plan's pools were replaced under its in-flight deferred calls.
+- **Cache budget:** caller-held shared allocations (the ~480 MB middle output) were counted
+  against the 512 MB budget, so every fine call evicted and re-recorded. Profiled host time
+  went 1.58 -> 0.98 s per 8 segments.
+- **Sparse readback** (`_SparsePeaks`) works on every backend, including padded dispatches
+  (before, only 112 of 1296 readbacks were sparse). Sparse callers skip the dense clear.
+- **Middle stage:** template-group row views of a shared output are written in place
+  (descriptor offset), instead of through a workspace and a host copy: 0.23 -> 0.14 s.
+  - Two bugs were found on the way: a doubly shrunk descriptor range, and a recording key that
+    was None for every view (95/76 one-sided peaks until fixed).
+- **Follow-ups:** both detectors' series go in one item submission, and every group is in flight
+  before one wait. The old asym time of 1.5-3 s came from the per-call fallback.
+- **Vulkan argtypes:** they were set on a function table that gets replaced, so 64-bit sizes were
+  passed as masked C ints.
+- **Ladder `--warmup`:** chain-trial segments no longer count as steady (they were inflating the
+  fine stage ~25%).
+
+### Falsified or parked
+- **SegmentPlan replay** (`MF_SEGMENT_REPLAY=1`, off by default) is still not usable on realistic
+  data. Most segments are not replayable (synchronous jobs), and with `LADDER_REPLAY` the check
+  lost 32 peaks. The fix for host cost is not replay. It is less host work per call, plus kernels
+  fast enough that the device bounds the stage.
+- **Metal:**
+  - SIMD-group barriers in the middle kernel: rare garbage values on the M2, reverted.
+  - Coalesced output writes: slower.
+  - Smaller staging: ~2x slower.
+- **Packing 2-8 listed pairs per threadgroup in the Metal refine:** slower at every packing.
+
+### Next, by track
+- **Vulkan kernels** (agent, `kernels/vulkan`):
+  - roofline accounting in `docs/vulkan-8060s-roofline.md`;
+  - coarse0 toward ≥50% of the fp16 rate;
+  - refine, coarse1, and forward toward ≥70% of bandwidth;
+  - a listed compact1 (removes the cval1 fill);
+  - the tiny edge dispatches (nd 1-16).
+- **Host and high level** (coordinator):
+  - per-call Python in `filter_series` -> `run_series` -> `_run_series_gpu` (~0.7 ms a call,
+    54 calls a segment);
+  - fewer dispatches per call (3 window groups -> 1, as `hier_peaks_grouped` does on CUDA);
+  - keeping the GPU busy so its clock ramps.
+- **CUDA** (agent, phase 3):
+  - re-verify calibration;
+  - `peaks_items`;
+  - the refine spill;
+  - the fp16 coarse gate at 15-30% of its rate;
+  - host path.
+- **Metal and the ARM CPU** (agent, phase 5): the NEON fp16 coarse gate for the CPU path (~1.2x on
+  the CPU fine stage), validated against the false-dismissal budget.
+- **Calibration:** the clock-reference ranking (`_ClockRef`) needs verifying under CPU load on the
+  APU. Chain choice still differs between processes: (256,) vs (256, 512) here, 88 vs 137 ms on
+  the M2.
