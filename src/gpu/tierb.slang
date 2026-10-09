@@ -167,6 +167,7 @@ C cload(StructuredBuffer<CVal> b, uint i) { return b[i]; }
 #define XSTRIDE (NLEN / RADIX)
 #endif
 static const uint XS = XSTRIDE;
+static const uint XSF = NLEN / RADIX;     // the AoS exchange(), unused by the SoA path
 #ifndef XSLOT
 #define XSLOT (CH * XS)
 #endif
@@ -182,7 +183,12 @@ static uint _stgBase;
 void stgPut(uint i, C v) { stg[_stgBase+i] = bit_cast<uint>(v); }
 C stgGet(uint i) { return bit_cast<C>(stg[_stgBase+i]); }
 #else
-static const uint STGW = CH * WG * 2;
+//: Row stride of the fp32 exchange stage, in complex elements (see XSTRIDE).
+#ifndef XSTRIDE_F
+#define XSTRIDE_F (NLEN / RADIX)
+#endif
+static const uint XSF = XSTRIDE_F;
+static const uint STGW = CH * XSF * 2;
 groupshared uint stg[STGW * PPG];
 static uint _stgBase;
 void stgPut(uint i, float2 v) { stg[_stgBase+2*i] = asuint(v.x); stg[_stgBase+2*i+1] = asuint(v.y); }
@@ -576,16 +582,22 @@ void exchange(inout C r[RADIX], uint lgLen, uint lgSpan,
     [unroll] for (uint z = 0; z < R; ++z) out[z] = C(0.0f, 0.0f);
     uint spanMask = (1u << lgSpan) - 1u;
     uint lenMask  = (1u << lgLen) - 1u;
+    // Affine-separable source (see exchangeS): one base per thread, every
+    // register at a compile-time offset; rows XSF apart (bank padding).
+    uint p0 = computeWant(0, TB, len, blk, lane, per, TB2, len2, blk2, lane2);
+    uint a0 = ((p0 & lenMask) >> lgSpan) * XSF + ((p0 >> lgLen) << lgSpan) + (p0 & lenMask & spanMask);
+    uint i0 = (p0 & lenMask) >> lgSpan;
     [unroll] for (uint c = 0; c < R / CH; ++c) {
         GroupMemoryBarrierWithGroupSync();
-        [unroll] for (uint j = 0; j < CH; ++j) stgPut(j * WG + _tid, r[c * CH + j]);
+        [unroll] for (uint j = 0; j < CH; ++j) stgPut(j * XSF + _tid, r[c * CH + j]);
         GroupMemoryBarrierWithGroupSync();
         [unroll] for (uint d = 0; d < R; ++d) {
-            uint p = computeWant(d, TB, len, blk, lane, per, TB2, len2, blk2, lane2);
-            uint b = p >> lgLen, rem = p & lenMask;
-            uint i = rem >> lgSpan, ln = rem & spanMask;
-            if (i >= c * CH && i < (c + 1) * CH)
-                out[d] = stgGet((i - c * CH) * WG + (b << lgSpan) + ln);
+            uint pz = computeWant(d, TB, len, 0u, 0u, per, TB2, len2, 0u, 0u);
+            uint iz = (pz & lenMask) >> lgSpan;
+            uint az = iz * XSF + ((pz >> lgLen) << lgSpan) + (pz & lenMask & spanMask);
+            uint i = i0 + iz;
+            if (CH == R || (i >= c * CH && i < (c + 1) * CH))
+                out[d] = stgGet(a0 + az - c * CH * XSF);
         }
     }
     [unroll] for (uint d = 0; d < R; ++d) r[d] = out[d];
