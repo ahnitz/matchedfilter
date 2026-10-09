@@ -1279,8 +1279,11 @@ class MatchedFilter:
         # Hierarchical plans join when the backend submits grouped hierarchical windows in one
         # submission -- unless this call is deferred (filter_series_many), which overlaps
         # whole calls instead.
+        # Deferred calls (filter_series_many) keep the one-submission grouped path: without
+        # it a deferred hierarchical call became one submission per window group (3x the
+        # submissions and launches of the synchronous call, measured 1.4x slower on CUDA).
         grouped = grouped_flat or (
-            not defer and len(layout.groups) > 1 and isinstance(self, HierarchicalFilter)
+            len(layout.groups) > 1 and isinstance(self, HierarchicalFilter)
             and hasattr(self._gpu, "hier_peaks_grouped")
             and nb <= getattr(self._gpu, "max_grouped_bins", 0)
             and nt <= self._gpu_pair_limit())
