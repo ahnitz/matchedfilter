@@ -22,6 +22,17 @@ SERIES_KERNEL = ROOT / "src" / "gpu" / "series_forward.slang"
 # CUDA's refine: a grid-stride entry reading the survivor count on the device
 # (no indirect dispatch on CUDA). Appended to tierb.slang, as series_forward is.
 REFINE_KERNEL = ROOT / "src" / "gpu" / "refine_bounded.slang"
+
+
+def kernel_text():
+    """tierb.slang for the CUDA build, with every [unroll] forced ([ForceUnroll]).
+
+    Slang emits some of tierb.slang's [unroll] loops -- the per-register peak and bin loops
+    of the multi-bin path -- as plain loops in CUDA source, and NVVM then keeps myMag/myBin
+    in local memory: 288 bytes per thread, ~110 local loads, in every refine and flat build.
+    Forcing the unroll in Slang removes them (28 bytes left: the kernel context). Applied to
+    the text here, so the shared source and its SPIR-V/Metal builds are unchanged."""
+    return KERNEL.read_text().replace("[unroll]", "[ForceUnroll]")
 COMPACT_PEAKS_KERNEL = ROOT / "src" / "gpu" / "compact_peaks.slang"
 
 TIER_B = (64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536)
@@ -123,7 +134,7 @@ def compile_tierb(slangc, nvrtc, env, n, outdir, entry=ENTRY, cap=None, suffix="
         "#define SLANG_CUDA_STRUCTURED_BUFFER_NO_COUNT 1\n"
         "#define TARGET_CUDA 1\n"
         % (n, cap, coarse16, ppg, tile, r, single_bin)
-        + KERNEL.read_text()
+        + kernel_text()
     )
     name = "%s_%d%s.ptx" % (STEMS[entry], n, suffix)
     ptx = outdir / name
@@ -167,7 +178,7 @@ def build_full_tierc(slangc, nvrtc, env, outdir):
                 "#define NLEN %d\n#define TC_N %d\n#define LDS_CAP %d\n#define RADIX %d\n"
                 "#define SLANG_CUDA_STRUCTURED_BUFFER_NO_COUNT 1\n#define TARGET_CUDA 1\n"
                 % (sub, n, min(LDS_CAP[sub], PORTABLE_CAP), r)
-                + KERNEL.read_text()
+                + kernel_text()
             )
             ptx = outdir / ("tc_%s_%d.ptx" % (role, n))
             extra = ["-Xnvrtc", "-maxrregcount=64"] if sub // r >= 1024 else []
@@ -313,7 +324,7 @@ def main():
         fwd_text = (
             f"#define NLEN {n}\n#define RADIX {r}\n#define LDS_CAP {cap}\n"
             f"#define SLANG_CUDA_STRUCTURED_BUFFER_NO_COUNT 1\n"
-            + KERNEL.read_text() + "\n" + SERIES_KERNEL.read_text()
+            + kernel_text() + "\n" + SERIES_KERNEL.read_text()
         )
         fwd_ptx = OUT / f"forward_{n}.ptx"
         extra = ["-Xnvrtc", "-maxrregcount=64"] if wg >= 1024 else []
