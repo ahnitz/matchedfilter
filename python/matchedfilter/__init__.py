@@ -1100,7 +1100,11 @@ class MatchedFilter:
         # Deferred (TimeDomainFilterBank.filter_series_many): submit now, collect later, so the
         # GPU works on this call while the host prepares the next bank's. Chain trials time
         # their calls, so a plan under trial runs synchronously.
-        defer = (getattr(self, "_defer_series", False) and can_pipeline and not grouped_flat
+        # A grouped flat call defers too when it is one batch (a follow-up's window: one
+        # submission for every bin count), on a backend that declares it can.
+        defer = (getattr(self, "_defer_series", False) and can_pipeline
+                 and (not grouped_flat or (nblk <= batch
+                                           and getattr(self._gpu, "defers_grouped", False)))
                  and getattr(self, "_chain_trial", None) is None)
         pipelined = can_pipeline and (not single or defer)
         queue_ahead = int(os.environ.get("MF_GPU_QUEUE_AHEAD", "8"))
@@ -1216,7 +1220,7 @@ class MatchedFilter:
             and nt <= self._gpu_pair_limit())
         if grouped:
             in_flight = []
-            slot_idx = 0
+            slot_idx = slot0 if defer else 0
             for begin in range(0, nblk, batch):
                 end = min(begin + batch, nblk)
                 count = end - begin
@@ -1246,16 +1250,26 @@ class MatchedFilter:
                         idx[b_start:b_end], val[b_start:b_end] = gi, gv
                     else:
                         _core.pack_peaks(peaks[b_start:b_end], gi, gv)
-            while in_flight:
-                b_start, b_end, item = in_flight.pop(0)
-                gi, gv = item() if callable(item) else item
+
+            def finish_grouped():
+                while in_flight:
+                    b_start, b_end, item = in_flight.pop(0)
+                    gi, gv = item() if callable(item) else item
+                    if raw:
+                        idx[b_start:b_end], val[b_start:b_end] = gi, gv
+                    else:
+                        _core.pack_peaks(peaks[b_start:b_end], gi, gv)
                 if raw:
-                    idx[b_start:b_end], val[b_start:b_end] = gi, gv
-                else:
-                    _core.pack_peaks(peaks[b_start:b_end], gi, gv)
-            if raw:
-                return _format_result(idx, val, raw=True, order=layout.order)
-            return _format_result(None, None, raw=False, order=layout.order, out=peaks)
+                    return _format_result(idx, val, raw=True, order=layout.order)
+                return _format_result(None, None, raw=False, order=layout.order, out=peaks)
+            if not defer:
+                return finish_grouped()
+            self._defer_slot = slot_idx
+            deferred = _Deferred(finish_grouped)
+            owners = self.__dict__.setdefault("_slot_owner", {})
+            for k in range(slot0, slot_idx):
+                owners[k % K] = deferred
+            return deferred
         in_flight = []
         collected_early = [False]
         trace_groups = []
@@ -1417,8 +1431,11 @@ class CorrelationFilter(MatchedFilter):
     _cpu_max_n = 1 << 22
     _max_auto_output_bytes = 512 * 1024 * 1024
 
-    def _continuous_gpu(self, ser, starts, t0, nt, out):
-        """Forward-transform bounded block batches into continuous GPU output."""
+    def _continuous_gpu(self, ser, starts, t0, nt, out, defer=False):
+        """Forward-transform bounded block batches into continuous GPU output.
+
+        ``defer``: leave the last batch in flight (a backend with zero_columns finishes it
+        in zero_columns_done), so the caller's zeroing overlaps the device's work."""
         from ._shared import shared_buffer
         if ser.size > np.iinfo(np.uint32).max or nt * ser.size > np.iinfo(np.uint32).max:
             raise ValueError("GPU series exceeds the 32-bit sample address range")
@@ -1438,6 +1455,13 @@ class CorrelationFilter(MatchedFilter):
             self._continuous_workspace = work
         _, staging, spec, offsets = work
         source = ser if shared_buffer(ser, self._gpu) is not None else staging
+        if source is staging and defer:
+            # Unified memory: read the caller's series in place; the context keeps the
+            # view until zero_columns_done has waited for the work that reads it.
+            owner = getattr(self._gpu, 'host_view', lambda a: None)(ser)
+            if owner is not None:
+                self._gpu._keep_until_done.append(owner)
+                source = ser
         if source is staging:
             source[:] = ser
         lo, hi = self.valid
@@ -1447,10 +1471,11 @@ class CorrelationFilter(MatchedFilter):
             offsets[:count] = np.minimum(starts[b0:b1], ser.size)
             self._gpu.forward(self.n, source, offsets[:count], spec[:count], defer=True)
             try:
+                kw = dict(async_submit=True) if (defer and b1 == starts.size) else {}
                 self._gpu.correlate_continuous(
                     self.n, spec[:count], self._gtmpl[t0:t0 + nt],
                     offsets[:count], out, lo, hi,
-                    upload_data=True, upload_tmpl=self._tdirty)
+                    upload_data=True, upload_tmpl=self._tdirty, **kw)
             finally:
                 self._gpu.cancel_forward()
             self._tdirty = False

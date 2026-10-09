@@ -471,7 +471,9 @@ def test_metal_single_template_follow_up_matches_cpu():
     taps = rng.standard_normal((4, 400)).astype(np.float32)
     counts = np.array([250, 300, 380, 400])
     x = (rng.standard_normal(1 << 17) + 1j * rng.standard_normal(1 << 17)).astype(np.complex64)
-    kw = dict(engine="hier", threshold=6.0, false_dismissal=1e-3, binsize=2048)
+    # Blocks pinned: peaks are per bin within a block, so the devices agree exactly only
+    # when they block alike, and each device prices block sizes on its own costs.
+    kw = dict(engine="hier", threshold=6.0, false_dismissal=1e-3, binsize=2048, fft_lengths=[2048])
     res = []
     for dev in ("gpu", "cpu"):
         b = TimeDomainFilterBank(taps, tap_counts=counts, device=dev, **kw)

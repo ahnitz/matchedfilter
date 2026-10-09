@@ -26,9 +26,13 @@ def build_kernels(compiler, build_module=build):
                    f'#define LDS_CAP {cap}\n')
         with tempfile.TemporaryDirectory() as tmp:
             src = pathlib.Path(tmp) / 'forward.slang'
-            src.write_text(defines + source)
             for target, folder, suffix in [('spirv', 'spirv', 'spv'),
                                             ('metal', 'metal', 'metal')]:
+                # Metal stages its exchange per component where that removes a chunk
+                # (build_spirv.metal_split); SPIR-V is unchanged.
+                split = (build.metal_split(n, cap) if target == 'metal'
+                         and hasattr(build, 'metal_split') else 0)
+                src.write_text(defines + f'#define SPLIT_STAGE {split}\n' + source)
                 out = build.ROOT / 'python/matchedfilter' / folder / f'forward_{n}.{suffix}'
                 subprocess.run([compiler, str(src), '-I', str(build.KERNEL.parent), '-target', target,
                                 '-entry', 'seriesForward', '-stage', 'compute',

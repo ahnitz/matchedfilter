@@ -175,7 +175,10 @@ def _partition_templates(
         where each group is a tuple: (start_idx, end_idx, chosen_N, max_tap_count).
     """
     counts = np.asarray(counts, dtype=np.int64)
-    order = np.argsort(counts)
+    # Stable: equal lengths keep their index order, so a bank already sorted by length
+    # (pycbc's, the ladder's) yields groups that are contiguous row ranges, which a GPU
+    # writes in place; quicksort swapped ties and forced a scatter copy (~5 ms per call).
+    order = np.argsort(counts, kind="stable")
     sorted_counts = counts[order]
     M = len(sorted_counts)
     if M == 0:
@@ -335,7 +338,10 @@ def _corr_layout(counts: np.ndarray, candidate_ns: Sequence[int], max_batch: Opt
     Runs are bounded by the bank's group sizing. Returns (groups, order) as _partition_templates.
     """
     counts = np.asarray(counts, dtype=np.int64)
-    order = np.argsort(counts)
+    # Stable: equal lengths keep their index order, so a bank already sorted by length
+    # (pycbc's, the ladder's) yields groups that are contiguous row ranges, which a GPU
+    # writes in place; quicksort swapped ties and forced a scatter copy (~5 ms per call).
+    order = np.argsort(counts, kind="stable")
     Ls = counts[order]
     M = len(Ls)
     if M == 0:
@@ -1196,11 +1202,29 @@ class TimeDomainFilterBank:
             if (len(groups_bins) > 1 and getattr(active_plan, '_gpu', None) is not None
                     and not getattr(active_plan, '_bandlimited', False)
                     and hasattr(active_plan, '_run_series_ragged')):
-                res = active_plan._run_series_ragged(
-                    data_in, bstarts, bws, bwe, binsize=bs,
-                    threshold=eff_threshold, templates=plan_templates)
+                if defer and trial is None:
+                    active_plan._defer_series = defer
+                    active_plan._gpu._queue_offset = getattr(self, '_queue_offset', 0)
+                try:
+                    res = active_plan._run_series_ragged(
+                        data_in, bstarts, bws, bwe, binsize=bs,
+                        threshold=eff_threshold, templates=plan_templates)
+                finally:
+                    if defer and trial is None:
+                        active_plan._defer_series = False
                 if res is not None:
-                    work = [((bstarts, bws, bwe), res)]
+                    # Split back into the per-count groups, in their order, so the result
+                    # is the one per-count calls give (peak order included).
+                    bc = ((bwe - bws + bs - 1) // bs).astype(np.int64)
+                    work = []
+                    for u in np.unique(bc):
+                        m = bc == u
+
+                        def part(r, m=m, u=u):
+                            return r[0][m][:, :, :u], r[1][m][:, :, :u]
+                        work.append(((bstarts[m], bws[m], bwe[m]),
+                                     _Deferred(lambda d=res, part=part: part(d.result()))
+                                     if isinstance(res, _Deferred) else part(res)))
             t_trial = time.perf_counter()
             for (sub_starts, sub_bws, sub_bwe), res in work:
                 if res is None:
@@ -1385,7 +1409,10 @@ class TimeDomainFilterBank:
         # written in place: no workspace, no copy-out.
         from ._shared import shared_buffer
         if dest.flags.c_contiguous and shared_buffer(dest, cplan._gpu) is not None:
-            cplan._continuous_gpu(ser, st, t0, nt, dest)
+            # A backend that zeroes on the device also finishes this work there
+            # (zero_columns_done in _correlate_windows): leave it in flight meanwhile.
+            defer = getattr(cplan._gpu, 'defers_continuous', False)
+            cplan._continuous_gpu(ser, st, t0, nt, dest, **({'defer': True} if defer else {}))
             return
         shape = (nt, S)
         ws = getattr(g, '_corr_workspace', None)
@@ -1407,7 +1434,7 @@ class TimeDomainFilterBank:
             dest[:, a:b] = ws[:, a:b]
 
     def _correlate_windows(self, g: "_TemplateGroup", ser: np.ndarray, W: np.ndarray,
-                           t0: int, nt: int, dest: np.ndarray) -> None:
+                           t0: int, nt: int, dest: np.ndarray, settle=None) -> None:
         """Fill dest (nt, S) for group rows [t0, t0+nt): the correlation inside the
         union of W (where blocks compute it), exact zeros everywhere else.
 
@@ -1451,7 +1478,12 @@ class TimeDomainFilterBank:
                 else:
                     dest[:, a:b] = 0
         if zero is not None:
-            gpu.zero_columns_done()
+            # `settle` collects contexts to finish later, so groups on different
+            # contexts run concurrently; the caller settles them before returning.
+            if settle is not None:
+                settle.append(gpu)
+            else:
+                gpu.zero_columns_done()
 
     def correlate_series(
         self,
@@ -1554,6 +1586,16 @@ class TimeDomainFilterBank:
         else:
             result = _page_aligned_empty(shape)
 
+        settle = []
+        try:
+            self._correlate_bank(ser, W, scales_arr, result, settle)
+        finally:
+            for gpu in {id(x): x for x in settle}.values():
+                gpu.zero_columns_done()
+        return result
+
+    def _correlate_bank(self, ser, W, scales_arr, result, settle):
+        S = ser.size
         for g in self._groups:
             g_indices = g.template_indices
             g_cnt = len(g_indices)
@@ -1568,13 +1610,13 @@ class TimeDomainFilterBank:
             else:
                 # Interleaved templates: compute into a group-sized array, then scatter.
                 g_dest = np.empty((g_cnt, S), dtype=np.complex64)
-            self._correlate_windows(g, ser, W, 0, g_cnt, g_dest)
+            # Only a group written in place with nothing to do after may stay in flight.
+            late = is_contiguous_slice and scales_arr is None
+            self._correlate_windows(g, ser, W, 0, g_cnt, g_dest, settle if late else None)
             if scales_arr is not None:
                 np.multiply(g_dest, scales_arr[g_indices][:, None], out=g_dest)
             if not is_contiguous_slice:
                 result[g_indices] = g_dest
-
-        return result
 
 
 class SegmentPlan:
