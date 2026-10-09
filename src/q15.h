@@ -24,13 +24,24 @@
 
 /* Error margin in Q units (the int16 output's LSB) at transform size N: the
    screen treats |z_q - z sdt| <= ap_q15_margin(N) as the int16 transform's
-   error bound.  Measured (docs/cpu-q15-gate.md, 41k pairs per N, noise data,
-   random and profile-shaped templates, N = 64..1024): the error is a sum of
-   independent roundings with rms 0.46-0.47 sqrt(N) LSB and a largest seen of
-   4.6 rms.  The margin is 5 sqrt(N) = ~10.7 rms: a Gaussian tail of ~1e-26
-   per lag.  It is derived from the rms, not tuned on pass/fail counts. */
+   error bound.  Derived, not tuned (docs/cpu-q15-gate.md):
+     - the error of the screen's maximum is a sum of independent Q15 roundings;
+       measured on 307k pairs per N (noise data; random and profile-shaped
+       templates) its rms is 0.46-0.47 sqrt(N) LSB, and its tail counts match a
+       Gaussian of that rms out to 4 rms (the deepest the sample resolves:
+       k>3: 670-810 seen vs 829 expected, k>4: 11-19 vs 19.5, k>5: 0 vs 0.2);
+     - a pair is lost only if the error at its maximum exceeds the margin
+       downwards: one-sided Gaussian tail at k rms;
+     - sigma is taken as 0.48 sqrt(N) (above every fit) and k = 6.5, a tail of
+       4e-11 per pair, a millionth of the smallest budget the gate model
+       accepts (fd 1e-4 at its sampling floor).
+   So the margin is 6.5 * 0.48 = 3.12 sqrt(N).  It replaces 5 sqrt(N) (10.7
+   rms), which was rounded up rather than derived from a target tail.  Beyond
+   4 rms the Gaussian form is a model, not a measurement -- the same standing
+   as the NEON fp16 gate's kappa (docs/cpu-neon-fp16-gate.md); a deterministic
+   bound for this transform is ~N LSB, far too loose to use. */
 static inline double ap_q15_margin(size_t N){
-  return 5.0 * sqrt((double)N);
+  return 6.5 * 0.48 * sqrt((double)N);
 }
 
 /* Transform sizes the screen implements. */
