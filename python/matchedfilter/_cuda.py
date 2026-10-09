@@ -227,6 +227,13 @@ def get_cuda_lib():
         "cuMemGetInfo_v2": [ctypes.POINTER(ctypes.c_size_t), ctypes.POINTER(ctypes.c_size_t)],
         "cuMemHostRegister_v2": [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint],
         "cuMemHostUnregister": [ctypes.c_void_p],
+        "cuStreamBeginCapture_v2": [ctypes.c_void_p, ctypes.c_int],
+        "cuStreamEndCapture": [ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)],
+        "cuGraphInstantiateWithFlags": [ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p,
+                                        ctypes.c_ulonglong],
+        "cuGraphLaunch": [ctypes.c_void_p, ctypes.c_void_p],
+        "cuGraphExecDestroy": [ctypes.c_void_p],
+        "cuGraphDestroy": [ctypes.c_void_p],
     }
     for name, argtypes in _opt.items():
         if hasattr(lib, name):

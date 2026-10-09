@@ -1203,7 +1203,8 @@ class MatchedFilter:
         single = len(layout.groups) == 1 and nblk <= batch
         self._last_series_batch = batch
         # Sparse results (time_domain asks with _want_sparse): only the peaks come back.
-        sparse = bool(raw and getattr(self, "_want_sparse", False)
+        # At threshold 0 (follow-ups) every bin holds a peak: dense is cheaper there.
+        sparse = bool(raw and threshold > 0 and getattr(self, "_want_sparse", False)
                       and getattr(self._gpu, "supports_sparse", False))
         skw = {"sparse": True} if sparse else {}
         sparse_parts = []
