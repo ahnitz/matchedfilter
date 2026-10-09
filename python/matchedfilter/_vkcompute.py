@@ -19,7 +19,7 @@ import sys
 import numpy as np
 
 from . import _gputime, _vulkan
-from ._shared import empty_shared, shared_buffer, shared_key, write_input
+from ._shared import empty_shared, shared_buffer, shared_key, shared_view, write_input
 
 _SPIRV = pathlib.Path(__file__).resolve().parent / "spirv"
 
@@ -739,6 +739,8 @@ class Context(InputUploads):
     #: peaks, peaks_grouped and hier_peaks take sparse=True and return a _SparsePeaks;
     #: hier_peaks reads only its refined pairs (the survivor list) back.
     supports_sparse = True
+    #: correlate_continuous writes into rows of a caller's shared output, at an offset.
+    continuous_out_views = True
     #: peaks_items(async_submit=True) returns a collector; forward takes rows=(r0, count).
     items_async = True
     forward_rows = True
@@ -1182,8 +1184,10 @@ class Context(InputUploads):
         _check(vk.vkAllocateDescriptorSets(self.device, ctypes.byref(da),
                                            ctypes.byref(dset)),
                "vkAllocateDescriptorSets")
+        # A view's nbytes already excludes its own offset (_Borrowed): the range runs from
+        # the descriptor offset to the end of the whole buffer.
         infos = (_DescBufferInfo * nbind)(
-            *[_DescBufferInfo(b.handle, offset, b.nbytes - offset)
+            *[_DescBufferInfo(b.handle, offset, b.nbytes + getattr(b, 'offset', 0) - offset)
               for b, offset in zip(bufs, offsets or [0] * nbind)])
         writes = (_WriteDescSet * nbind)(*[
             _WriteDescSet(35, None, dset, i, 0, 1, _DESC_STORAGE_BUFFER, None,
@@ -2579,15 +2583,19 @@ class Context(InputUploads):
         """Write valid lags into template-major shared output on the GPU."""
         nd, nt = data.shape[0], tmpl.shape[0]
         length = out.shape[1]
-        bs, bo = shared_buffer(starts, self), shared_buffer(out, self)
+        # out may be rows inside a caller's shared output (continuous_out_views).
+        bs, bo = shared_buffer(starts, self), shared_view(out, self)
         if bs is None or bo is None or starts.shape != (nd,) or out.shape[0] != nt:
             raise ValueError('continuous output and starts must be shared GPU buffers')
         geometry = _manifest().get('full_tierc', {}).get(str(n)) if n > 65536 else None
         if n > 65536 and geometry is None:
             raise UnsupportedSize('no two-stage continuous kernel for n=%d' % n)
+        # out by address, not shared_key: a view inside an allocation has no shared_key, and
+        # every row view sharing the key None replayed one view's recording into another's
+        # rows. The recording holds its _Borrowed, so the address cannot be reused under it.
         key = ('series', n, nd, nt, length, lo, hi,
                shared_key(data, self), shared_key(tmpl, self),
-               shared_key(starts, self), shared_key(out, self))
+               shared_key(starts, self), out.ctypes.data)
         uploads = self._input_uploads(key, data, tmpl, upload_data, upload_tmpl)
         cache = self._tierc_batches if geometry else self._full_batches
         batch = cache.get(key)
@@ -2607,7 +2615,7 @@ class Context(InputUploads):
                                                    geometry['corr_series2']['file'], 3, 16)
                 scratch = _Buffer(self, nd*nt*n*8)
                 ds1 = self._descriptor_set(sl1, (bd, bt, scratch))
-                ds2 = self._descriptor_set(sl2, (scratch, bs, bo))
+                ds2 = self._descriptor_set(sl2, (scratch, bs, bo), [0, 0, bo.offset])
             else:
                 info = _manifest()['modules'][str(n)]
                 entry = info['full_series']
@@ -2618,7 +2626,7 @@ class Context(InputUploads):
                     raise UnsupportedSize('no portable continuous kernel for n=%d' % n)
                 pipe, layout, sl = self._build_pipeline(('full-series', filename),
                                                          filename, 4, 16)
-                ds = self._descriptor_set(sl, (bd, bt, bs, bo))
+                ds = self._descriptor_set(sl, (bd, bt, bs, bo), [0, 0, 0, bo.offset])
             cmd = _vp()
             ci = _CmdBufAlloc(40, None, self.command_pool, 0, 1)
             _check(self.vk.vkAllocateCommandBuffers(self.device, ctypes.byref(ci),

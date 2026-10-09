@@ -1497,8 +1497,10 @@ class TimeDomainFilterBank:
             return
         # A destination in device memory on this device (a caller's reused buffer) is
         # written in place: no workspace, no copy-out.
-        from ._shared import shared_buffer
-        if dest.flags.c_contiguous and shared_buffer(dest, cplan._gpu) is not None:
+        from ._shared import shared_buffer, shared_view
+        in_place = (shared_view(dest, cplan._gpu) if getattr(cplan._gpu, 'continuous_out_views', False)
+                    else shared_buffer(dest, cplan._gpu))
+        if dest.flags.c_contiguous and in_place is not None:
             # A backend that zeroes on the device also finishes this work there
             # (zero_columns_done in _correlate_windows): leave it in flight meanwhile.
             defer = getattr(cplan._gpu, 'defers_continuous', False)
