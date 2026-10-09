@@ -265,3 +265,46 @@ measurement relative to `gatechain._ClockRef` for any GPU device. Measured here:
 - Three calibrations in one process with 3 s idle between agree within about 20% per tier
   (dense[512] 3.86 / 4.59 / 4.39 ns), against the 5x raw swing.
 - No change needed. The review's note predates 70cb1e2.
+
+## 9. Fifth pass: the untiled-builds hazard explained; wave32 for small refine groups
+
+**The "untiled 8/16-pair hazard" was a binding bug, and it hit every PPG.** I reproduced it
+with a realistic-call harness: the `test_hierarchical_matrix` series, under a real (closed)
+autotuned gate, with the untiled builds forced.
+- **Symptom:** hierarchical found 0 of 1307 peaks at PPG 1, 4 and 8 alike. With an open gate
+  everything matched, which is why the earlier checks missed it: the coarse result does not
+  matter when every pair passes. With grouped dispatch disabled, the untiled builds were
+  exact at every PPG.
+- **Cause:** the untiled builds never called `rowWindow`, so their modules declared no
+  `gRowWin` binding. The grouped host bound a buffer one past the layout, and every pair was
+  gated out.
+- **Fix:** every coarse build now applies per-row windows, and `_descriptor_set` refuses
+  more buffers than a layout declares.
+- **Tests:** `tests/test_vk_hier_grouped.py` runs the grouped equivalence test on both build
+  families, and checks every untiled PPG from 1 to 16 against the tiled result under a real
+  gate. Both fail on the old kernels (8 cases).
+
+**The 4-pair cap is removed.** It was containing the binding bug, not a hang. With the
+untiled 16-pair builds forced, the realistic ladder `--check cpu` is exact in batched and
+pipelined mode, and about 330 back-to-back fine segments ran with no ring reset or page
+fault. The original 8/16-pair hang was reported on an older kernel (before the subgroup
+election, padded exchange and ragged tiles) and does not reproduce. `coarse_tile.slang`
+(the barrier-UB suspect) ships no selected kernel, since `_COARSE_TILE` is empty.
+
+**Wave32 where the group is small.** `_build_pipeline(subgroup=...)` requires any size in the
+device's range and specializes constant 74 to it. `_fit_subgroup(n)` picks the smallest
+required size that holds a one-pair group of n/16 invocations, so a 16- or 32-invocation
+group does not idle half of a wave64. Listed one-bin refine, CU-cycles per pair (outputs
+bit-identical):
+
+| n | wave64 | wave32 |
+|---|---|---|
+| 256 | 481 | 385 |
+| 512 | 620 | 552 |
+| 1024 | 1020 | 1157 |
+| 2048 | 2113 | 2266 |
+| 4096 | 4400 | 4921 |
+
+Wave32 is applied at n ≤ 512 (the tier-1 stage at bands 256/512), where it wins by 11-20%.
+Larger groups stay at wave64, where wave32 loses 7-15%. This is a rule from the queried
+range and the workgroup size, backed by these measurements, not a per-device timing.
