@@ -21,6 +21,7 @@ from functools import lru_cache, wraps
 
 import numpy as np
 from ._shared import empty_shared, shared_buffer, shared_key, write_input
+from ._gpuhost import bin_shift, plan_items, split_items
 from ._shared import pack_half2 as _pack_half2, sparsified as _sparsified
 
 _HERE = pathlib.Path(__file__).resolve().parent
@@ -1140,16 +1141,9 @@ class Context(InputUploads):
         b_data, b_tmpl = shared_buffer(data, self), shared_buffer(tmpl, self)
         if b_data is None or b_tmpl is None:
             raise ValueError("item spectra and templates must be shared allocations")
-        shift = binsize.bit_length() - 1 if binsize & (binsize - 1) == 0 else -1
+        shift = bin_shift(binsize)
         t2 = int(np.float32(float(threshold) ** 2 if threshold > 0 else 0).view(np.uint32))
-        offs, nbs, size = [], [], 0
-        for lo, hi, a, b, t in items:
-            nb = -(-(hi - lo) // binsize)
-            if nb > _MAX_BINS:
-                raise UnsupportedSize("an item's window exceeds the kernel bin limit")
-            offs.append(size)
-            nbs.append(nb)
-            size += (b - a) * nb
+        offs, nbs, size = plan_items(items, binsize, 1, _MAX_BINS)    # buffer offsets: 4 B
         prior = self.__dict__.pop("_items_inflight", None)
         if prior is not None and not prior.done:
             prior()                          # its output buffers are about to be reused
@@ -1171,11 +1165,8 @@ class Context(InputUploads):
         self.o.call(enc, b"endEncoding", restype=None)
 
         def finish():
-            indices = b_idx.read(np.int32, size)
-            values = b_val.read(np.complex64, size)
-            return [(indices[off:off + (b - a) * nb].reshape(b - a, 1, nb),
-                     values[off:off + (b - a) * nb].reshape(b - a, 1, nb))
-                    for (lo, hi, a, b, t), off, nb in zip(items, offs, nbs)]
+            return split_items(items, offs, nbs, b_idx.read(np.int32, size),
+                               b_val.read(np.complex64, size))
         res = self._commit(cmd, "items", async_submit=async_submit, finish=finish)
         if async_submit:
             self._items_inflight = res
