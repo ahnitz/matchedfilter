@@ -28,7 +28,9 @@ class VulkanCoarse:
         self.half = '_c16' in filename
         m = re.search(r'_c16(?:p(\d+))?(?:t(\d+))?', filename)
         ppg, tile = (int(m[1] or 1), int(m[2] or 1)) if m else (1, 1)
-        group_pairs = 4 if self.tiled else ppg * tile
+        # BATCH data rows x 4 templates; the same launch rule the host uses.
+        slot, groups = ((band, BATCH) if self.tiled
+                        else V.coarse_launch(BATCH, 4, ppg, tile, band))
         self.buffers = []
         try:
             size = 4 if self.half else 8
@@ -51,10 +53,10 @@ class VulkanCoarse:
             c.vk.vkCmdBindDescriptorSets(cmd, V._BIND_POINT_COMPUTE, layout,
                                         0, 1, (V._vp*1)(ds), 0, None)
             pc = ((ctypes.c_uint32*2)(4, BATCH*4) if self.tiled else
-                  (ctypes.c_uint32*7)(4, 0, band, band, band.bit_length()-1, 1, 0))
+                  (ctypes.c_uint32*7)(4, 0, band, slot, band.bit_length()-1, 1, 0))
             c.vk.vkCmdPushConstants(cmd, layout, V._STAGE_COMPUTE, 0,
                                     ctypes.sizeof(pc), ctypes.byref(pc))
-            c.vk.vkCmdDispatch(cmd, BATCH*4//group_pairs, 1, 1)
+            c.vk.vkCmdDispatch(cmd, groups, 1, 1)
             V._check(c.vk.vkEndCommandBuffer(cmd), 'end FDR command')
         except Exception:
             self.close()
