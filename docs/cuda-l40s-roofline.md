@@ -349,3 +349,75 @@ A freed address that is reused therefore maps to a graph whose captured paramete
 exactly the current buffers, so an address recycled after a free (the ABA case behind main's
 fused-recording bug) replays correctly. Graph caches are per record and are destroyed with
 it.
+
+## Phase 4 (2026-10-09): a CUDA-only coarse gate (`src/gpu/coarse_warp.cu`)
+
+### The kernel
+It is a warp-shuffle fp16 FFT gate in its own source file, built through NVRTC by
+`tools/build_ptx.py --only warp`. It is a timed candidate alongside the Slang variants, and
+`tierb.slang` is untouched.
+
+How it computes:
+- A group of LANES lanes (32, 16 or 8) works on two pairs at once, one per half of each
+  half2 lane.
+- It runs a radix-2 DIF over its registers, applies a twiddle, then a LANES-point DIF across
+  lanes with branch-free xor shuffles.
+
+### Speed at the realistic shape
+450 rows x 200 templates, best variant:
+
+| band | Slang gate (µs, TFLOPS) | warp gate (µs, TFLOPS) |
+|---:|---:|---:|
+| 128 | 36.9, 13.4 | 23.7, 20.9 |
+| 256 | 55.1, 20.1 | 44.3, 25.0 |
+| 512 | 182, 13.4 | 89.1, 27.4 |
+| 1024 | 305, 17.5 | 180, 29.7 |
+
+### The rate it is measured against
+The packed-fp16 rate measured on this L40S is **87.9 TFLOPS** (an HFMA2 loop). Ada runs
+half2 at the fp32 lane rate, so the "2x fp32" figure used earlier overstated the target.
+
+Against 87.9 TFLOPS:
+- the warp gate runs at 24-34%;
+- the Slang gate ran at 15-23%;
+- the ≥50% target is not reached.
+
+### Accuracy
+The error against float64 on the same fp16 inputs equals the Slang fp16 gate's:
+relative p50 2.6e-4, p99.9 1.3e-3, max 1.8e-3. The gate's false-dismissal budget is
+therefore unchanged. `--check cpu` gives identical peak sets in every mode.
+
+### End to end: no gain
+Ladder, `--pure --profiles`, min of 5, interleaved with main 46fe361. The kernel gain does
+not show at the job level:
+
+| `MF_AUTOTUNE=0` | fine | asym | median TIRT |
+|---|---:|---:|---:|
+| batched, main | 0.037 | 0.017 | 101.8e6 |
+| batched, branch | 0.042 | 0.019 | 95.9e6 |
+| `--no-batch`, main | 0.045 | 0.028 | 76.9e6 |
+| `--no-batch`, branch | 0.045 | 0.030 | 73.8e6 |
+
+Two reasons:
+- The job is host-bound.
+- The cheaper gate moves the device-priced chain to a wider gate (band 512 instead of
+  256/512 tiers), and its total device time comes out about the same.
+
+With autotune on the branch is slower in median (59.9e6 against 73.6e6 batched; 62.5e6
+against 76.3e6 `--no-batch`); the trial calls make that mode noisier.
+
+### What 50% would take
+Where the time goes:
+- Issue utilisation is about 30%: ~470 instructions per pair-pair per thread against
+  ~1600 issue slots at the achieved rate.
+- Removing the template-load traffic changed the time by only 8%.
+- So the binding constraint is the shuffle stages' dependency and latency chain, not the
+  arithmetic count and not L2.
+
+A tensor-core gate:
+- A 256 = 16x16 DFT costs 8 m16n16k16 complex-split MMAs per pair, about 5.3x the FFT flop
+  count.
+- At the dense fp16 tensor rate (~180-360 TFLOPS) that is ~35-70 TFLOPS of FFT-equivalent
+  work, the only route past ~40% of the fp16 rate.
+- It needs mma.sync with known fragment layouts, so the twiddle can be applied between
+  stages in registers. Not attempted here.
