@@ -405,6 +405,9 @@ class Context(InputUploads):
     supports_sparse = True
     # Coarse PPG/tile groups are padded inside the backend (hier_peaks pads its rows).
     pads_coarse_groups = True
+    # Follow-ups: peaks_items(async_submit=True) returns a collector; forward takes rows=.
+    items_async = True
+    forward_rows = True
     cache_limit_bytes = 1024 * 1024 * 1024
     # Unified addressing: a view inside a shared allocation is a device pointer.
     shared_views = True
@@ -504,7 +507,9 @@ class Context(InputUploads):
             check_cuda(self.cuda.cuCtxSetCurrent(self.ctx), "cuCtxSetCurrent")
 
     def get_stream(self, slot=None):
-        if slot is not None and self.streams:
+        # Integer slots spread over the streams; any other slot (e.g. a follow-up items
+        # allocation) runs on the default stream, ordered with peaks_items.
+        if isinstance(slot, int) and self.streams:
             return self.streams[slot % len(self.streams)]
         return self.stream
 
@@ -1675,9 +1680,17 @@ class Context(InputUploads):
         """Dispatch fused forward FFT kernel path."""
         return self.forward(n, series, starts, spectra, defer=defer, slot=slot, fused=True)
 
-    def forward(self, n, series, starts, spectra, *, defer=False, slot=None, fused=False):
-        """Batch forward FFTs of series blocks into ``spectra`` (deferred: no sync)."""
+    def forward(self, n, series, starts, spectra, *, defer=False, slot=None, fused=False,
+                rows=None):
+        """Batch forward FFTs of series blocks into ``spectra`` (deferred: no sync).
+
+        rows=(r0, count) (``forward_rows``): transform only blocks r0..r0+count, reading
+        starts[r0:] and writing spectra[r0:] -- several series allocations share one
+        spectra workspace."""
         self._bind()
+        if rows is not None:
+            r0, count = int(rows[0]), int(rows[1])
+            starts, spectra = starts[r0:r0 + count], spectra[r0:r0 + count]
         stream = self.get_stream(slot)
         tierc = n > 65536
         if tierc:
@@ -1736,6 +1749,66 @@ class Context(InputUploads):
     def cancel_forward(self, slot=None):
         # Launches are already enqueued; the stream orders whatever follows.
         pass
+
+    def peaks_items(self, n, data, tmpl, items, binsize, threshold, *, async_submit=False):
+        """One submission over follow-up items (lo, hi, a, b, t): rows a:b of ``data`` against
+        template row t, searched over [lo, hi) in bins of ``binsize``. Returns per item
+        (idx, val) shaped (b - a, 1, nbins), or with async_submit a collector for that list.
+        Data and templates are device allocations; pointer offsets select each item's rows,
+        so nothing is copied, and the output comes back in one copy and one sync."""
+        self._bind()
+        stream = self.stream
+        self._after_forwards(stream)
+        b_data, b_tmpl = shared_buffer(data, self), shared_buffer(tmpl, self)
+        if b_data is None or b_tmpl is None:
+            raise ValueError("item spectra and templates must be shared allocations")
+        binsize = int(binsize)
+        t2 = float(threshold) ** 2 if threshold > 0 else 0.0
+        offs, nbs, size = [], [], 0
+        for lo, hi, a, b, t in items:
+            nb = -(-(hi - lo) // binsize)
+            if nb > _MAX_BINS:
+                raise UnsupportedSize("an item's window exceeds the kernel bin limit")
+            offs.append(size)
+            nbs.append(nb)
+            size += (b - a) * nb
+        prior = self.__dict__.pop("_items_inflight", None)
+        if prior is not None:
+            prior()                          # its output and host buffers are about to be reused
+        rec = self.__dict__.setdefault("_items_rec", {})
+        self._grow(rec, "idx", size * 4, _Buffer, stream)
+        self._grow(rec, "val", size * 8, _Buffer, stream)
+        self._grow(rec, "host", size * 12, _Pinned, stream)
+        i0, v0, host = rec["idx"].dptr.value, rec["val"].dptr.value, rec["host"]
+        d0, tp = b_data.dptr.value, b_tmpl.dptr.value
+        for (lo, hi, a, b, t), off, nb in zip(items, offs, nbs):
+            if b <= a:
+                continue
+            hfunc, wg = self.pipeline(n, "fusedTierB", one_bin=(nb == 1))
+            self._launch(hfunc, b - a, wg,
+                         [_ptr(d0 + a * n * 8), _ptr(tp + t * n * 8), _ptr(i0 + off * 4),
+                          _ptr(v0 + off * 8), _u32(1), _u32(lo), _u32(hi), _u32(binsize),
+                          _i32(_shift(binsize)), _u32(nb), _f32bits(t2)], stream=stream)
+        if size:
+            self._copy_d2h(host.ptr, i0, size * 4, stream, "readback")
+            self._copy_d2h(host.ptr + size * 4, v0, size * 8, stream, "readback")
+        done = []
+
+        def collect():
+            if not done:
+                self._sync(stream)
+                idx = host.view(np.int32, size)
+                val = host.view(np.complex64, size, offset=size * 4)
+                done.append([(idx[o:o + (b - a) * nb].reshape(b - a, 1, nb).copy(),
+                              val[o:o + (b - a) * nb].reshape(b - a, 1, nb).copy())
+                             for (lo, hi, a, b, t), o, nb in zip(items, offs, nbs)])
+                if self.__dict__.get("_items_inflight") is collect:
+                    del self._items_inflight
+            return done[0]
+        if async_submit:
+            self._items_inflight = collect
+            return collect
+        return collect()
 
     # ---- lifetime ----------------------------------------------------------------
     def clear_cache(self):
