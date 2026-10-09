@@ -159,6 +159,54 @@ def tierc_split(n):
     return n // n2, n2
 
 
+COARSE_WARP_KERNEL = ROOT / "src" / "gpu" / "coarse_warp.cu"
+COARSE_WARP_BANDS = (128, 256, 512, 1024)
+COARSE_WARP_PPW = (8, 16, 32)
+COARSE_WARP_LANES = (32, 16, 8)
+
+
+def nvrtc_ptx(nvrtc, cuda_path, source, name, defines):
+    """CUDA C -> PTX through NVRTC (the same library slangc uses), for sm_75+."""
+    import ctypes
+    lib = ctypes.CDLL(nvrtc)
+    prog = ctypes.c_void_p()
+    if lib.nvrtcCreateProgram(ctypes.byref(prog), source.encode(), name.encode(), 0, None, None):
+        raise RuntimeError("nvrtcCreateProgram failed")
+    opts = [b"--gpu-architecture=compute_75", b"--use_fast_math", b"-std=c++14"]
+    if cuda_path:
+        opts.append(("-I" + str(pathlib.Path(cuda_path) / "include")).encode())
+    opts += [("-D%s=%s" % kv).encode() for kv in defines.items()]
+    arr = (ctypes.c_char_p * len(opts))(*opts)
+    rc = lib.nvrtcCompileProgram(prog, len(opts), arr)
+    size = ctypes.c_size_t()
+    lib.nvrtcGetProgramLogSize(prog, ctypes.byref(size))
+    log = ctypes.create_string_buffer(size.value)
+    lib.nvrtcGetProgramLog(prog, log)
+    if rc:
+        raise RuntimeError("nvrtc %s %s:\n%s" % (name, defines, log.value.decode()))
+    lib.nvrtcGetPTXSize(prog, ctypes.byref(size))
+    ptx = ctypes.create_string_buffer(size.value)
+    lib.nvrtcGetPTX(prog, ptx)
+    return ptx.value
+
+
+def build_coarse_warp(nvrtc, cuda_path, outdir):
+    """The warp-shuffle fp16 coarse gate (src/gpu/coarse_warp.cu), one PTX per band and
+    pairs-per-warp; the CUDA backend times them against the Slang coarse variants."""
+    src = COARSE_WARP_KERNEL.read_text()
+    for band in COARSE_WARP_BANDS:
+        for lanes in COARSE_WARP_LANES:
+            if not 4 <= band // lanes <= 32:       # registers per lane: R = band / lanes
+                continue
+            for ppw in COARSE_WARP_PPW:
+                if ppw % (2 * (32 // lanes)):
+                    continue
+                out = outdir / ("coarse_warp_%d_l%d_p%d.ptx" % (band, lanes, ppw))
+                out.write_bytes(nvrtc_ptx(nvrtc, cuda_path, src, "coarse_warp.cu",
+                                          dict(BAND=band, LANES=lanes, PPW=ppw, WPB=4)))
+                print("  coarse_warp band=%d lanes=%d ppw=%d" % (band, lanes, ppw), flush=True)
+
+
 def build_compact_peaks(slangc, nvrtc, env, outdir):
     """The sparse peak readback kernel (CUDA only)."""
     text = "#define SLANG_CUDA_STRUCTURED_BUFFER_NO_COUNT 1\n" + COMPACT_PEAKS_KERNEL.read_text()
@@ -192,7 +240,7 @@ def build_full_tierc(slangc, nvrtc, env, outdir):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--slangc", default=None)
-    ap.add_argument("--only", choices=("all", "tierc", "refine", "coarse", "compact"), default="all",
+    ap.add_argument("--only", choices=("all", "tierc", "refine", "coarse", "compact", "warp"), default="all",
                     help="rebuild only the two-stage kernels (and their manifest entry), "
                          "or only the refine family")
     args = ap.parse_args()
@@ -213,6 +261,9 @@ def main():
         manifest = json.loads((OUT / "manifest.json").read_text())
         manifest["full_tierc"] = build_full_tierc(slangc, nvrtc, env, OUT)
         (OUT / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+        return 0
+    if args.only == "warp":
+        build_coarse_warp(nvrtc, cuda_path, OUT)
         return 0
     if args.only == "compact":
         build_compact_peaks(slangc, nvrtc, env, OUT)
@@ -335,6 +386,7 @@ def main():
 
     manifest["full_tierc"] = build_full_tierc(slangc, nvrtc, env, OUT)
     build_compact_peaks(slangc, nvrtc, env, OUT)
+    build_coarse_warp(nvrtc, cuda_path, OUT)
     (OUT / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     print("Wrote PTX manifest: %s" % (OUT / "manifest.json"))
     return 0

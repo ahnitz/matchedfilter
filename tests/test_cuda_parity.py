@@ -447,8 +447,8 @@ h = (rng.standard_normal((3, n)) + 1j*rng.standard_normal((3, n))).astype(np.com
 c.hier_peaks(n, 512, d, h, h[:, :512], 0.0)
 labels = [l for l, ms in c.timing_log]
 assert all(ms >= 0 for l, ms in c.timing_log), c.timing_log
-for want in ("tierb_512_c16", "compact", "refine_2048", "readback", "upload"):
-    assert any(l.startswith(want) for l in labels), (want, labels)
+for want in (("tierb_512_c16", "coarse_warp_512"), "compact", "refine_2048", "readback", "upload"):
+    assert any(l.startswith(want) for l in labels), (want, labels)   # coarse: the measured variant
 from matchedfilter import _gputime
 c.peaks(n, d, h)
 agg = _gputime.collect()                  # the shared contract: settles and sums
@@ -507,3 +507,45 @@ def test_sparse_readback_equals_dense(ctx, kind, thr):
     np.testing.assert_array_equal(sv, dv)
     if thr == 0.0:
         assert sp.flat.size > 4096 or sp.flat.size == di.size
+
+
+# ---- warp-shuffle coarse gate (src/gpu/coarse_warp.cu) -------------------------------------
+@pytest.mark.parametrize("band", [128, 256, 512, 1024])
+@pytest.mark.parametrize("nt", [7, 80])          # 7: pairs straddle row ends inside a warp
+def test_warp_coarse_gate_matches_exact(ctx, band, nt):
+    """Peak |y| over the coarse window equals the float64 value on the same fp16 inputs to
+    fp16 accuracy (the existing fp16 gate's tolerance), for every pair."""
+    from matchedfilter import _cudacompute as cc
+    rng = np.random.default_rng(band + nt)
+    nd = 37
+    pairs = nd * nt
+    D = (rng.standard_normal((nd, band)) + 1j * rng.standard_normal((nd, band))) / np.sqrt(2 * band) * 3
+    T = (rng.standard_normal((nt, band)) + 1j * rng.standard_normal((nt, band))) / np.sqrt(2)
+    Dp, Tp = cc._pack_half2(D), cc._pack_half2(T)
+    Dh = Dp.view(np.float16).reshape(nd, band, 2).astype(np.float64)
+    Th = Tp.view(np.float16).reshape(nt, band, 2).astype(np.float64)
+    y = np.fft.ifft((Dh[..., 0] + 1j * Dh[..., 1])[:, None, :]
+                    * np.conj(Th[..., 0] + 1j * Th[..., 1])[None, :, :], axis=-1) * band
+    cs, ce = band // 8, band - band // 16
+    exact = np.abs(y[..., cs:ce]).max(axis=-1)
+    variants = sorted(cc._PTX_DIR.glob("coarse_warp_%d_l*_p*.ptx" % band))
+    assert variants
+    for f in variants:
+        ppw = int(f.stem.rsplit("_p", 1)[1])
+        fn = ctx._load(f.stem, f, "coarseWarp", 128)
+        group = 4 * ppw
+        ndp = nd
+        while (ndp * nt) % group:                    # rows padded as hier_peaks does
+            ndp += 1
+        bd, bt = cc._Buffer(ctx, ndp * band * 4), cc._Buffer(ctx, Tp.nbytes)
+        bd.write(Dp); bt.write(Tp)
+        bi, bv = cc._Buffer(ctx, ndp * nt * 4), cc._Buffer(ctx, ndp * nt * 8)
+        ctx._launch(fn, ndp * nt // group, 128,
+                    [bd.dptr, bt.dptr, bi.dptr, bv.dptr, cc._u32(nt), cc._u32(cs), cc._u32(ce),
+                     cc._u32(ce - cs), cc._i32(-1), cc._u32(1), cc._u32(0)])
+        v = bv.read(np.float32, ndp * nt * 2).reshape(ndp, nt, 2)[:nd]
+        got = np.hypot(v[..., 0], v[..., 1])
+        rel = np.abs(got - exact) / exact
+        assert rel.max() < 5e-3, (ppw, rel.max())
+        for b in (bd, bt, bi, bv):
+            b.destroy()

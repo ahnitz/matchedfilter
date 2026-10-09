@@ -1323,6 +1323,11 @@ class Context(InputUploads):
                     except UnsupportedSize:
                         continue
                     cands.append((fn, wg, ppg, tile))
+            # The warp-shuffle gate (src/gpu/coarse_warp.cu), PPW pairs per warp, 4 warps
+            # per block: the caller's "group" of consecutive pairs per block is 4*PPW.
+            for f in sorted(_PTX_DIR.glob("coarse_warp_%d_l*_p*.ptx" % band)):
+                ppw = int(f.stem.rsplit("_p", 1)[1])
+                cands.append((self._load(f.stem, f, "coarseWarp", 128), 128, 4 * ppw, 1))
             if not cands:
                 raise UnsupportedSize(f"no coarse c16 kernel for band {band}")
             self._pipelines[key] = self._time_coarse(band, cands)
@@ -1331,7 +1336,7 @@ class Context(InputUploads):
 
     def _time_coarse(self, band, cands):
         """The fastest of the coarse variants on synthetic data (device time, min of 3)."""
-        P, ntm = 16384, 16
+        P, ntm = 65536, 128            # production-like: 512 rows x 128 templates
         ndm = P // ntm
         rng = np.random.default_rng(0)
         x = (rng.standard_normal((ndm, band)) + 1j * rng.standard_normal((ndm, band))) * 0.1
