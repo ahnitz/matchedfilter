@@ -63,6 +63,18 @@ def _use_c16(band):
     return True   # one-bin specialised coarse kernel; applies at every band
 
 
+def coarse_launch(nd, nt, ppg, tile, cspan):
+    """(push-constant binsize slot, workgroup count) for a packed coarse build.
+
+    Tiled builds (tile > 1) take ragged tiles: the slot carries the data row count and
+    ceil(nd * ceil(nt/tile) / ppg) groups run. Untiled builds take the coarse span and
+    exact geometry. The host and every harness that dispatches a coarse build directly
+    must use this, so the two cannot disagree."""
+    if tile > 1:
+        return nd, -(-(nd * -(-nt // tile)) // ppg)
+    return cspan, nd * nt // ppg
+
+
 def _pack_half2(a):
     """complex64 -> one uint32 per value, real in the low half.
 
@@ -1250,8 +1262,7 @@ class Context(InputUploads):
             for ppg in sorted({p for p in (want, 32, 16, 8, 4, 2, 1) if p <= want}, reverse=True):
                 name = "tierb_%d_c16%st%d.spv" % (band, "p%d" % ppg if ppg > 1 else "", tile)
                 if (_SPIRV / name).is_file():
-                    slots = nd * (-(-nt // tile))
-                    return ppg, tile, -(-slots // ppg), True
+                    return ppg, tile, coarse_launch(nd, nt, ppg, tile, 0)[1], True
         for ppg in sorted({p for p in (want, 32, 16, 8, 4, 2, 1) if p <= want}, reverse=True):
             name = "tierb_%d_c16%s.spv" % (band, "p%d" % ppg if ppg > 1 else "")
             if pairs % ppg or not (_SPIRV / name).is_file():
