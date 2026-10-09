@@ -952,8 +952,15 @@ static PyObject *M_taps_to_spectra(PyObject *self, PyObject *args){
   Py_RETURN_NONE;
 }
 
+int ap_gate16_available(void);
+static PyObject *M_gate16(PyObject *self, PyObject *noargs){
+  (void)self; (void)noargs;
+  return PyBool_FromLong(ap_gate16_available());
+}
+
 static PyMethodDef methods[]={
   {"backend",M_backend,METH_NOARGS,"backend() -> name of the selected kernel"},
+  {"gate16",M_gate16,METH_NOARGS,"gate16() -> whether new hierarchical plans run the FP16 first gate"},
   {"targets",M_targets,METH_NOARGS,"targets() -> names this build can run here"},
   {"set_target",M_set_target,METH_VARARGS,"set_target(name|None) -> narrow the choice"},
   {"pack_peaks",M_pack_peaks,METH_VARARGS,"pack_peaks(peaks, idx, val) -> copy into structured peaks"},

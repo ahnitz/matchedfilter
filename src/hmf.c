@@ -11,6 +11,15 @@
 #include "matchedfilter.h"
 #include "transform.h"
 
+/* The FP16 first gate (gate16.cc): an upper bound on the FP32 tier's peak magnitude per
+   pair, on ARM with FP16 vectors; unavailable elsewhere (and with MF_GATE16=0). */
+int ap_gate16_available(void);
+void *ap_gate16_create(size_t m,int nd,int nt);
+void ap_gate16_destroy(void *g);
+int ap_gate16_set_template(void *g,int t,const float *spec);
+int ap_gate16_set_data(void *g,int d,const float *spec);
+int ap_gate16_run(void *g,int d0,int nd,int t0,int nt,size_t ws,size_t we,ap_peak *out);
+
 /* One coarse tier of the gate chain. Tier i runs on the survivors of tier i-1
    (tier 0 on every pair); the survivors of the last tier get the full refine. */
 typedef struct {
@@ -22,6 +31,7 @@ typedef struct {
   int *fire_d,*fire_t;            /* this tier's survivors */
   long passed;                    /* pairs that passed this tier */
   unsigned long long ticks;       /* time spent in this tier */
+  void *g16;                      /* FP16 gate for this tier (tier 0 only), or NULL */
 } hmf_tier;
 
 struct ap_hmf_plan {
@@ -104,6 +114,8 @@ ap_hmf_plan *ap_hmf_create_chain(size_t n,size_t k,int ndata,int ntmpl,
       tr->m=bands[i]; tr->thr=-1;
       if((size_t)ntmpl>=min_ntmpl && tr->m<=pblim) tr->mf=ap_mf_create_pairbatch(tr->m,p->nd,ntmpl);
       if(!tr->mf) tr->mf=ap_mf_create(tr->m,p->nd,ntmpl);
+      /* The first tier sees every pair; it is the one worth halving (see gate16.cc). */
+      if(i==0 && ap_gate16_available()) tr->g16=ap_gate16_create(tr->m,p->nd,ntmpl);
       tr->ct0=ap_alloc64((size_t)ntmpl*2*tr->m*sizeof(float));
       tr->scratch=ap_alloc64(2*tr->m*sizeof(float));
       tr->fpow=calloc((size_t)ntmpl,sizeof(float));
@@ -137,6 +149,7 @@ void ap_hmf_destroy(ap_hmf_plan *p){
   for(int i=0;i<p->ntiers;i++){
     hmf_tier *tr=&p->tier[i];
     if(tr->mf) ap_mf_destroy(tr->mf);
+    if(tr->g16) ap_gate16_destroy(tr->g16);
     free(tr->ct0); free(tr->scratch); free(tr->fpow); free(tr->cebuf);
     free(tr->fire_d); free(tr->fire_t);
   }
@@ -214,6 +227,7 @@ static int refresh_template(ap_hmf_plan *p,int t){
     const float *original=tr->ct0+(size_t)t*2*tr->m;
     for(size_t k=0;k<2*tr->m;k++) tr->scratch[k]=(float)(original[k]*scale);
     if(ap_mf_set_template(tr->mf,t,tr->scratch)) return -1;
+    if(tr->g16 && ap_gate16_set_template(tr->g16,t,tr->scratch)) return -1;
   }
   return 0;
 }
@@ -236,7 +250,10 @@ int ap_hmf_set_reference(ap_hmf_plan *p,const float *power){
 int ap_hmf_set_data(ap_hmf_plan *p,int d,const float *spec){
   if(!p||d<0||d>=p->nd||!spec) return -1;
   p->dspec[d]=spec; p->dready[d]=0;
-  for(int i=0;i<p->ntiers;i++) if(ap_mf_set_data(p->tier[i].mf,d,spec)) return -1;
+  for(int i=0;i<p->ntiers;i++){
+    if(ap_mf_set_data(p->tier[i].mf,d,spec)) return -1;
+    if(p->tier[i].g16 && ap_gate16_set_data(p->tier[i].g16,d,spec)) return -1;
+  }
   return 0;
 }
 int ap_hmf_set_template(ap_hmf_plan *p,int t,const float *spec){
@@ -564,7 +581,11 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
     if(i==0){
       /* The first tier runs on every pair of the segment in one call: the data
          spectrum is read once and stays resident across the whole template sweep. */
-      if(ap_mf_run(tr->mf,d0,nd,t0,nt,cspan,thr,tr->cebuf,NULL,cstart,cend)<0) return -1;
+      if(tr->g16){
+        /* FP16: the reported magnitude is an upper bound on the FP32 one, so every pair
+           the FP32 gate would pass passes here too (gate16.cc). */
+        if(ap_gate16_run(tr->g16,d0,nd,t0,nt,cstart,cend,tr->cebuf)<0) return -1;
+      } else if(ap_mf_run(tr->mf,d0,nd,t0,nt,cspan,thr,tr->cebuf,NULL,cstart,cend)<0) return -1;
     } else {
       /* Later tiers run only on the previous tier's survivors, pooled across blocks. */
       if(ap_mf_run_pairs_pooled(tr->mf,d0,fire_d,fire_t,nfire,t0,cspan,thr,tr->cebuf,NULL,
@@ -581,7 +602,9 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
       ap_peak ce = tr->cebuf[row];
       int fire = ce.index>=0 && ce.magnitude>=thr;
       if(i==0 && fire){
-        if(p->dump){ float rec[8]={ce.magnitude,0.0f,ce.magnitude,thr,thr,thr,
+        /* rec[2] repeats the maximum, except under the FP16 gate, where it carries what
+           MF_GATE16_DEBUG puts in im: the pair's all-lag rms (tools/gate16_error.py). */
+        if(p->dump){ float rec[8]={ce.magnitude,0.0f,tr->g16?ce.im:ce.magnitude,thr,thr,thr,
                                    (float)(d0+d),(float)(t0+t)};
                      fwrite(rec,sizeof rec,1,p->dump); }
         if(p->trace && p->pairs<6)

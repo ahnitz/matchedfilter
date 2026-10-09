@@ -58,6 +58,11 @@ def test_even_coarse_maximum_matches_the_c_implementation(tmp_path):
     dump = tmp_path / "dump.bin"
     old = os.environ.get("MF_HMF_DUMP")
     os.environ["MF_HMF_DUMP"] = str(dump)
+    # This checks the FP32 coarse kernel against its mirror bit for bit; the FP16 first
+    # gate (ARM) reports an upper bound instead and has its own measurement
+    # (tools/gate16_error.py, tests/test_gate16.py).
+    old16 = os.environ.get("MF_GATE16")
+    os.environ["MF_GATE16"] = "0"
     try:
         hf = mf.HierarchicalFilter(n, ndata=nd, ntemplates=nt, snr=5.0, fd=1e-2)
         hf.set_reference(reference)
@@ -71,6 +76,10 @@ def test_even_coarse_maximum_matches_the_c_implementation(tmp_path):
             os.environ.pop("MF_HMF_DUMP", None)
         else:
             os.environ["MF_HMF_DUMP"] = old
+        if old16 is None:
+            os.environ.pop("MF_GATE16", None)
+        else:
+            os.environ["MF_GATE16"] = old16
 
     if not dump.exists() or dump.stat().st_size == 0:
         pytest.skip("no pair survived the early-out, so nothing was dumped")

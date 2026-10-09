@@ -310,6 +310,14 @@ class CostModel:
 _COSTS = {}
 
 
+def cpu_gate_kind():
+    """'f16' when new CPU hierarchical plans run the FP16 first gate (gate16.cc: ARM with
+    FP16 vectors, unless MF_GATE16=0), else 'f32'. Costs, block prices and chain choices
+    are cached per kind."""
+    from . import _core
+    return "f16" if getattr(_core, "gate16", lambda: False)() else "f32"
+
+
 def _cost_sig(cost):
     return None if cost is None else cost.signature()
 #: Survivor densities the calibration places the tiers at (bracketing production's 0.1-10%).
@@ -377,11 +385,14 @@ def calibrate_costs(n, ntemplates, blocks=256, reps=5, seed=11, group=None):
     # The series group must be the plans' own: the first tier batches its work over the blocks in a
     # group, so calibrating at a smaller group overstates its cost (2x at n=1024 with 8 vs 32).
     group = int(group or default_series_group(n))
-    key = (int(n), nt, group)
+    # The FP16 first gate (ARM, gate16.cc) changes what tier 0 costs: priced and cached
+    # apart from the FP32 gate, so neither is ranked with the other's numbers.
+    g16 = cpu_gate_kind() == "f16"
+    key = (int(n), nt, group) + (("g16",) if g16 else ())
     if key in _COSTS:
         return _COSTS[key]
     path = _cost_file()
-    skey = "%d,%d,%d" % key
+    skey = "%d,%d,%d" % key[:3] + (",g16" if g16 else "")
     if path is not None:
         stored = _load_cost_file(path).get(skey)
         if stored is not None:
@@ -901,7 +912,8 @@ def price_block_sizes(fine, delta_f, data_rate, longest, margin, ntemplates, snr
             continue
         q = max(n // 32, 1)                  # the bank prices its windows on this grid
         lo = (int(margin) // q) * q
-        key = (sig, float(delta_f), float(data_rate), n, lo, float(snr), float(fd), int(max_tiers), str(device))
+        key = (sig, float(delta_f), float(data_rate), n, lo, float(snr), float(fd), int(max_tiers), str(device),
+               cpu_gate_kind())
         hit = _PRICE_CACHE.get(key)
         if hit is None:
             ref = rebin_profile(fine, delta_f, data_rate, n)
