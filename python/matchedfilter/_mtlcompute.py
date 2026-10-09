@@ -243,6 +243,13 @@ class _Buffer:
         ctypes.memmove(out.ctypes.data, self.ptr, out.nbytes)
         return out
 
+    def view(self, dtype, count):
+        """The first `count` elements as a NumPy view of the buffer (no copy)."""
+        dtype = np.dtype(dtype)
+        raw = (ctypes.c_ubyte * (count * dtype.itemsize)).from_address(
+            self.ptr.value if hasattr(self.ptr, "value") else self.ptr)
+        return np.frombuffer(raw, dtype=dtype, count=count)
+
     def read_into(self, out):
         """Zero-copy direct read into caller-provided contiguous array."""
         ctypes.memmove(out.ctypes.data, self.ptr, min(self.nbytes, out.nbytes))
@@ -272,6 +279,21 @@ class _HostBuffer(_Buffer):
             argtypes=(ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_void_p))
         if not self.handle:
             raise MetalError("newBufferWithBytesNoCopy failed for %d bytes" % self.nbytes)
+
+
+def _sparse_from_dense(idx, val):
+    from . import _SparsePeaks
+    flat = np.flatnonzero(idx >= 0)
+    return _SparsePeaks(idx.shape, flat, idx.reshape(-1)[flat], val.reshape(-1)[flat])
+
+
+def _sparsified(res, sparse):
+    """A dense (idx, val) result -- or a pending one -- as a _SparsePeaks when asked."""
+    if not sparse:
+        return res
+    if callable(res):
+        return lambda: _sparse_from_dense(*res())
+    return _sparse_from_dense(*res)
 
 
 def describe_error(o, err):
@@ -369,6 +391,12 @@ class Context(InputUploads):
     max_grouped_bins = _MAX_BINS
     #: peaks_grouped takes nbins: window groups may give different bin counts.
     supports_ragged_bins = True
+    #: peaks, peaks_grouped and hier_peaks take sparse=True and return a _SparsePeaks;
+    #: hier_peaks reads back only its refined pairs and skips the output fill.
+    supports_sparse = True
+    #: forward takes rows=(r0, count) (MatchedFilter._items_gpu: both detectors' series
+    #: in one workspace and one submission).
+    forward_rows = True
     #: shared_buffer() may hand back a view inside an allocation (one row of a device-
     #: resident middle output); every binding adds its offset.
     shared_views = True
@@ -788,19 +816,35 @@ class Context(InputUploads):
             self._commit(pending[0], "forward")
 
     @_autoreleased
-    def forward(self, n, series, starts, spectra, *, defer=False, fused=False, slot=None):
+    def forward(self, n, series, starts, spectra, *, defer=False, fused=False, slot=None,
+                rows=None):
+        """Gather and forward-transform blocks of `series` into `spectra`.
+
+        rows=(r0, count): only rows r0..r0+count of starts/spectra -- several series
+        allocations then fill one spectra workspace (forward_rows). A deferred forward
+        joins one still pending: the consumer's command buffer runs them all first."""
         if n > 65536:
+            if rows is not None:
+                raise UnsupportedSize("row ranges need the one-stage forward")
             return self._forward_tierc(n, series, starts, spectra, defer=defer, fused=fused)
         pso = self.pipeline(n, "seriesForward")
         buffers = [shared_buffer(a, self) for a in (series, starts, spectra)]
         if any(b is None for b in buffers):
             raise ValueError("forward buffers must belong to this GPU context")
-        cmd = self.o.call(self.queue, b"commandBuffer")
-        self.o.call(cmd, b"retain")
+        r0, count = rows if rows is not None else (0, spectra.shape[0])
+        pending = self._pending_metal if defer else None
+        if pending is not None:
+            cmd = pending[0]
+        else:
+            cmd = self.o.call(self.queue, b"commandBuffer")
+            self.o.call(cmd, b"retain")
         enc = self.o.call(cmd, b"computeCommandEncoder")
-        self._dispatch(enc, pso, (series.size,), buffers, n // _radix(n),
-                       groups=spectra.shape[0])
+        self._dispatch(enc, pso, (series.size,), buffers, n // _radix(n), groups=count,
+                       offsets=(0, r0 * 4, r0 * n * 8))
         self.o.call(enc, b"endEncoding", restype=None)
+        if pending is not None:
+            self._pending_metal = (cmd, tuple(pending[1]) + tuple(buffers))
+            return None
         self._defer_or_submit(cmd, buffers, defer, "forward")
 
     def _encode_tierc(self, cmd, n, role, buffers, groups, uniform=None):
@@ -870,10 +914,18 @@ class Context(InputUploads):
             self._pending_metal = None
             self.o.call(pending[0], b"release", restype=None)
 
-    @_autoreleased
     def peaks(self, n, data, tmpl, binsize=None, threshold=0.0, window=None,
               upload_data=True, upload_tmpl=True, _groups=None,
-              slot=None, async_submit=False, nbins=None):
+              slot=None, async_submit=False, nbins=None, sparse=False):
+        """See _peaks; sparse=True returns a _SparsePeaks (supports_sparse)."""
+        return _sparsified(self._peaks(n, data, tmpl, binsize, threshold, window,
+                                       upload_data, upload_tmpl, _groups, slot,
+                                       async_submit, nbins), sparse)
+
+    @_autoreleased
+    def _peaks(self, n, data, tmpl, binsize=None, threshold=0.0, window=None,
+               upload_data=True, upload_tmpl=True, _groups=None,
+               slot=None, async_submit=False, nbins=None):
         """Peak index and complex value per (data, template, bin).
 
         The same contract as the Vulkan path: bins counted from `start`, a
@@ -895,7 +947,7 @@ class Context(InputUploads):
             span = _MAX_BINS * binsize
             pi, pv = [], []
             for a in range(lo, hi, span):
-                i2, v2 = self.peaks(n, data, tmpl, binsize=binsize,
+                i2, v2 = self._peaks(n, data, tmpl, binsize=binsize,
                                     threshold=threshold,
                                     window=(a, min(a + span, hi)),
                                     upload_data=upload_data,
@@ -1016,14 +1068,14 @@ class Context(InputUploads):
         return res
 
     def peaks_grouped(self, n, data, tmpl, groups, binsize, threshold, *, upload_tmpl=True,
-                      slot=None, async_submit=False, nbins=None):
+                      slot=None, async_submit=False, nbins=None, sparse=False):
         """Submit shared FFT rows with distinct flat windows in one command buffer."""
         if shared_buffer(data, self) is None:
             raise ValueError("grouped spectra must belong to this GPU context")
         return self.peaks(n, data, tmpl, binsize=binsize, threshold=threshold,
                           window=groups[0][:2], upload_data=False,
                           upload_tmpl=upload_tmpl, _groups=groups,
-                          slot=slot, async_submit=async_submit, nbins=nbins)
+                          slot=slot, async_submit=async_submit, nbins=nbins, sparse=sparse)
 
     @_autoreleased
     def _full_tile(self, n, data, tmpl, out, upload_data, upload_tmpl):
@@ -1241,7 +1293,7 @@ class Context(InputUploads):
                    binsize=None, threshold=0.0, window=None,
                    upload_data=True, upload_tmpl=True,
                    cascade_band=None, ct1=None, raw_thr1=None,
-                   slot=None, async_submit=False):
+                   slot=None, async_submit=False, sparse=False):
         """The whole hierarchical filter in ONE command buffer.
 
         One or two gate tiers, then listed refinement at n. Tier 0 correlates
@@ -1302,9 +1354,8 @@ class Context(InputUploads):
                 upload_data = upload_tmpl = False     # already on the device
             idx_all = np.concatenate(pi, axis=2)
             val_all = np.concatenate(pv, axis=2)
-            if async_submit:
-                return lambda: (idx_all, val_all)
-            return idx_all, val_all
+            res = _sparsified((idx_all, val_all), sparse)
+            return (lambda: res) if async_submit else res
         shift = (binsize.bit_length() - 1) if binsize & (binsize - 1) == 0 else -1
         t2 = float(threshold) ** 2 if threshold > 0 else 0.0
         # Half width only for the first tier: a later tier is the full-
@@ -1382,8 +1433,11 @@ class Context(InputUploads):
             # Tier 1 visits only tier 0's survivors; every other pair must
             # read as dismissed to the compaction after it.
             bufs["cval1"].write(np.zeros(pairs * 2, dtype=np.float32))
-        bufs["idx"].write(np.full(out, -1, dtype=np.int32))
-        bufs["val"].write(np.zeros(out * 2, dtype=np.float32))
+        if not sparse:
+            # Dense: every unrefined pair must read as dismissed. Sparse reads only the
+            # listed pairs, every bin of which the refine writes, so it skips this fill.
+            bufs["idx"].write(np.full(out, -1, dtype=np.int32))
+            bufs["val"].write(np.zeros(out * 2, dtype=np.float32))
 
         compact = self.pipeline(tiers[0][0], "compactPairs")
         refine = self.pipeline(n, "refineListed", nbins == 1)
@@ -1431,11 +1485,20 @@ class Context(InputUploads):
         self.o.call(enc, b"endEncoding", restype=None)
 
         def finish():
-            idx = bufs["idx"].read(np.int32, out).reshape(nd, nt, nbins)
-            val = bufs["val"].read(np.complex64, out).reshape(nd, nt, nbins)
-            self.last_refinements = int(bufs["args" + last].read(np.uint32, 1)[0])
+            count = int(bufs["args" + last].read(np.uint32, 1)[0])
+            self.last_refinements = count
             if len(tiers) > 1:
                 self.last_tier1_survivors = int(bufs["args"].read(np.uint32, 1)[0])
+            if sparse:
+                from . import _SparsePeaks
+                rows = np.sort(bufs["surv" + last].view(np.uint32, count).astype(np.int64))
+                ri = bufs["idx"].view(np.int32, out).reshape(pairs, nbins)[rows]
+                k, b = np.nonzero(ri >= 0)
+                vals = bufs["val"].view(np.complex64, out).reshape(pairs, nbins)
+                return _SparsePeaks((nd, nt, nbins), rows[k] * nbins + b, ri[k, b],
+                                    vals[rows[k], b])
+            idx = bufs["idx"].read(np.int32, out).reshape(nd, nt, nbins)
+            val = bufs["val"].read(np.complex64, out).reshape(nd, nt, nbins)
             return idx, val
         return self._commit(cmd, "hier" if len(tiers) == 1 else "hier_cascade",
                             async_submit=async_submit, finish=finish)
