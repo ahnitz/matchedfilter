@@ -1942,6 +1942,8 @@ def _q15_available(band):
 _AUTOTUNE_LOCK = threading.Lock()
 #: (n, snr, fd, chain, device) -> {"samples": {False: [...], True: [...]}, "winner": bool|None}
 _Q15_TRIALS = {}
+#: (chain-choice key, chain) -> whether the cost model prices the Q15 screen cheaper
+_Q15_MODEL = {}
 #: (n, snr, fd, tiers, window, profile signature) -> (model's chain, shortlist)
 _CHAIN_CHOICE = {}
 #: (n, snr, fd, tiers, shortlist) -> measured trials shared by every plan with that shortlist
@@ -2073,7 +2075,8 @@ class HierarchicalFilter(MatchedFilter):
     # float tier re-runs every pair it passes -- so only time is at stake, and time is
     # measured: plans whose chain's first band has a screen alternate it on and off over
     # real calls, pooled per (n, snr, fd, chain), and every plan adopts the faster once
-    # each side has MF_CHAIN_TRIALS samples. MF_AUTOTUNE=0 keeps the float tier.
+    # each side has MF_CHAIN_TRIALS samples. MF_AUTOTUNE=0 keeps the cost model's choice
+    # (gatechain.CostModel.first_tier).
     def _q15_trial_key(self):
         return (self.n, float(self._fs_snr or self.snr), float(self.fd), tuple(self._chain), str(self.device))
 
@@ -2131,7 +2134,7 @@ class HierarchicalFilter(MatchedFilter):
         if self._chain is None:
             if self._pending_ref is None:
                 raise ValueError("set a reference first (set_reference), or pin a chain")
-            self._chain, self._q15 = self._choose_chain(), False
+            self._chain = self._choose_chain(); self._q15 = getattr(self, "_q15_pref", False)
         self._mf = self._new_cpu_plan(self._chain)
         self._thr_applied = False
         self._restore_into(self._mf)
@@ -2288,6 +2291,8 @@ class HierarchicalFilter(MatchedFilter):
             shortlist = tuple(q["chain"] for q in plans if q["cost"] <= best["cost"] * (1.0 + margin))
             hit = (tuple(best["chain"]), shortlist[:_CHAIN_SHORTLIST_MAX])
             with _AUTOTUNE_LOCK:
+                _Q15_MODEL[(key, tuple(best["chain"]))] = bool(best.get("q15", False))
+            with _AUTOTUNE_LOCK:
                 _CHAIN_CHOICE[key] = hit
             _log_autotune("CHAIN n=%d model=%s shortlist=%s ranking=%s", self.n, hit[0], hit[1],
                           [(q["chain"], round(q["cost"], 1)) for q in plans[:6]])
@@ -2316,6 +2321,9 @@ class HierarchicalFilter(MatchedFilter):
                     self._chain_trial = tkey
         self.autotune_info = {"status": "trial" if self._chain_trial else "locked",
                               "winner": tuple(chain), "shortlist": shortlist, "model": model_best}
+        # The model's screen choice for this chain; with MF_AUTOTUNE on, trials override it.
+        with _AUTOTUNE_LOCK:
+            self._q15_pref = _Q15_MODEL.get((key, tuple(chain)), False)
         return tuple(chain)
 
     def _chain_trial_record(self, dt, pairs):
@@ -2440,7 +2448,7 @@ class HierarchicalFilter(MatchedFilter):
         if self._chain is None:
             if self._pending_ref is None:
                 raise ValueError("set a reference first (set_reference), or pin a chain")
-            self._chain, self._q15 = self._choose_chain(), False
+            self._chain = self._choose_chain(); self._q15 = getattr(self, "_q15_pref", False)
             key = (self.snr, self.fd, self._fs_snr, self._chain, self._cal_thr)
         thr = self._thresholds(required=True)
         f = None

@@ -78,3 +78,17 @@ def test_hierarchical_results_identical_with_screen(chain):
     np.testing.assert_array_equal(out[0][0]["index"], out[1][0]["index"])
     np.testing.assert_array_equal(out[0][0]["value"], out[1][0]["value"])
     assert out[0][1] == out[1][1]
+
+
+def test_cost_model_prices_the_screen():
+    cm = mf._gatechain.calibrate_costs(2048, 64)
+    if not cm.screen:
+        pytest.skip("no Q15 screen on this back end")
+    for b, ent in cm.screen.items():
+        assert ent["dense"] > 0 and ent["recheck"] > 0
+        assert all(q >= f for f, q in ent["excess"])          # the screen passes a superset
+        c, on = cm.first_tier(b, 0.01)
+        assert on == (c < cm.dense[b])
+    import json
+    rt = mf._gatechain.CostModel.from_dict(json.loads(json.dumps(cm.to_dict())))
+    assert rt.signature() == cm.signature()
