@@ -110,27 +110,24 @@ the first tier, not refine or forward: (a) the screen kernel's op count on AVX2
 (2 points of the 6.5%, ~9% of tier 0) that a smaller derived margin would cut, and (c)
 a cheaper 128-band screened first tier, which the model now prices.
 
-## Margin derived from a target tail (2026-10-09, later)
+## Margin: 5 sqrt(N) kept; a tighter Gaussian-tail margin rejected (2026-10-09)
 
-The 5 sqrt(N) margin (10.7 rms) was rounded up, not derived. Re-measured on 307k pairs
-per N (128/256/512; random and profile-shaped templates): rms 0.46-0.47 sqrt(N), and
-the tail counts follow a Gaussian of that rms as deep as the sample resolves:
+A 3.12 sqrt(N) margin was derived from a 4e-11 Gaussian tail (rms 0.46-0.47 sqrt(N),
+tails Gaussian to 4 rms on 307k noise pairs). Checked against the merge gate
+(`tools/gate_margin.py`, criterion margin use < 0.5) and against 10k pairs per input
+family (noise, profile, injection, loud transient, full scale; N = 128..1024):
 
-| N | > 3 rms (Gaussian 829) | > 4 rms (19.5) | > 5 rms (0.18) |
-|---|---|---|---|
-| 128 | 810 | 19 | 0 |
-| 256 | 773 | 11 | 0 |
-| 512 | 670 | 12 | 0 |
+* the error does not grow with the peak: rms 0.44-0.47 sqrt(N) in every family,
+  including injections whose peaks reach 29000 LSB -- no peak-proportional term is
+  needed, unlike the fp16 gate whose rounding is relative;
+* but the worst error seen is 3.2-4.2 rms per family (4.6 in 307k pairs), so 3.12 sqrt(N)
+  (6.6 rms) is used up to 0.63 -- it fails the 2x-headroom rule; the gate needs
+  > ~9.2 rms = 4.3 sqrt(N);
+* and it bought nothing measurable: screen pass rate 6.5% -> 5.8%, fine stage
+  2.73 -> 2.70-2.72 s on dev1, inside run-to-run noise.
 
-With sigma = 0.48 sqrt(N) (above every fit) and a one-sided tail of 4e-11 per pair
-(k = 6.5; a millionth of fd 1e-4), the margin is 3.12 sqrt(N). Beyond 4 rms this is the
-Gaussian model, not a measurement -- the same standing as the NEON fp16 gate's kappa
-(16 against 12.9 seen). A proven bound is not usable here: the deterministic worst case
-of the rounding sum is ~N LSB (all roundings aligned), 30-60x the rms.
-
-Effect on dev1 (ladder, load < 1): the screen passes 5.8% of pairs instead of 6.5% (float
-tier 4.5%); fine 2.73 -> 2.70-2.72 s, inside run-to-run noise (~1%). Base 3.24-3.25 s.
-With MF_AUTOTUNE=0 and a fresh cost file the model now picks the screen itself (2.71 s).
+So the margin stays 5 sqrt(N) (10.7 rms). Harness, all families, N = 64..1024: 0
+dismissals, margin use max 0.31.
 
 ## Band-128 screened first tier
 
