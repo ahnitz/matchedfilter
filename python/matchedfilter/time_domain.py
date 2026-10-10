@@ -287,6 +287,118 @@ def _partition_templates(
     return groups, order
 
 
+#: Block-size trials: candidate layouts within this relative modelled cost of the cheapest
+#: are measured on real calls; at most _BLOCK_TRIAL_RANKS of them; each needs
+#: _BLOCK_TRIAL_SAMPLES clean timed batches. A batch in which a bank switched layout is not
+#: timed (the switch uploads templates), so a rank runs one batch to settle and then its
+#: samples: two candidates at one sample each is four batches -- a two-segment warm-up with
+#: two top templates' batches per segment.
+_BLOCK_TRIAL_MARGIN = 0.30
+_BLOCK_TRIAL_RANKS = 2
+_BLOCK_TRIAL_SAMPLES = 1
+
+
+class _BlockTrials:
+    """Measure the model's candidate block-size layouts end to end and lock the faster.
+
+    A layout's modelled cost is a sum of calibrated per-term costs, and on a latency-bound GPU
+    those terms are below a call's noise, so the model alone cannot separate block sizes that
+    differ by tens of percent (docs/gate-model.md, "Large-n pricing"). Instead, every batch of
+    calls runs all participating banks on one candidate rank, timed from submission to
+    collection per unit of work (templates x series samples); ranks alternate until each has
+    _BLOCK_TRIAL_SAMPLES, then the fastest median within gatechain.TIE of the best -- the
+    model's own rank first, so a tie keeps the model's choice -- is locked for every bank.
+    Samples are pooled over banks: per unit of work, banks are comparable. Keyed by device,
+    so CPU and GPU banks trial apart. MF_AUTOTUNE=0 keeps rank 0 (the model's choice)."""
+
+    def __init__(self):
+        self.state = {}
+
+    def rank_for(self, key, nranks):
+        """Ranks in order, each until it has its samples: the model's choice first."""
+        st = self.state.setdefault(key, {"samples": {}, "winner": None})
+        if st["winner"] is not None:
+            return st["winner"]
+        for r in range(nranks):
+            st["samples"].setdefault(r, [])
+        need = int(os.environ.get("MF_BLOCK_TRIALS", _BLOCK_TRIAL_SAMPLES))
+        return next((r for r in range(nranks) if len(st["samples"][r]) < need), 0)
+
+    def record(self, key, rank, seconds, work):
+        from . import gatechain, _log_autotune
+        st = self.state.get(key)
+        if st is None or st["winner"] is not None or work <= 0:
+            return
+        st["samples"].setdefault(rank, []).append(seconds / work)
+        need = int(os.environ.get("MF_BLOCK_TRIALS", _BLOCK_TRIAL_SAMPLES))
+        if all(len(v) >= need for v in st["samples"].values()):
+            med = {r: float(np.median(v)) for r, v in st["samples"].items()}
+            st["winner"] = gatechain.pick_stable(sorted(med), med.get, lambda r: r)
+            _log_autotune("BLOCK-TRIAL %s locked rank %d  median s/unit %s", key, st["winner"],
+                          {r: "%.3g" % v for r, v in med.items()})
+
+    def winner(self, key):
+        st = self.state.get(key)
+        return None if st is None else st["winner"]
+
+
+_BLOCK_TRIALS = _BlockTrials()
+
+
+def _trial_banks(jobs):
+    """Banks in a batch that have candidate layouts to trial, grouped by device key."""
+    out = {}
+    for bank, _, kw in jobs:
+        if (kw or {}).get("template_index") is not None:
+            continue
+        lay = getattr(bank, '_layouts', None)
+        if lay and len(lay) > 1:
+            out.setdefault(str(bank.device), []).append(bank)
+    return out
+
+
+def _trial_begin(jobs):
+    """Put every trialling bank of the batch on its key's current rank; returns what to record."""
+    import time
+    from . import _autotune_enabled
+    if not _autotune_enabled():
+        return None
+    banks = _trial_banks(jobs)
+    if not banks:
+        return None
+    plan = []
+    for key, bs in banks.items():
+        nr = min(len(b._layouts) for b in bs)
+        r = _BLOCK_TRIALS.rank_for(key, nr)
+        switched = any(getattr(b, '_layout_rank', 0) != r or not getattr(b, '_layout_warm', False)
+                       for b in bs)
+        for b in bs:
+            b._use_layout(r)
+            b._layout_warm = not switched or getattr(b, '_layout_warm', False)
+        plan.append((key, r, bs, switched))
+    work = sum(len(b.filters_f) * int(np.asarray(x).size) for b, x, kw in jobs
+               if (kw or {}).get("template_index") is None)
+    return (time.perf_counter(), plan, work)
+
+
+def _trial_end(tok):
+    import time
+    if tok is None:
+        return
+    t0, plan, work = tok
+    dt = time.perf_counter() - t0
+    for key, r, bs, switched in plan:
+        if switched:
+            for b in bs:
+                b._layout_warm = True        # its next batch on this rank is a clean sample
+            continue
+        _BLOCK_TRIALS.record(key, r, dt, work)
+        w = _BLOCK_TRIALS.winner(key)
+        if w is not None:
+            for b in bs:
+                b._lock_layout(w)
+
+
 def _max_tiers(device) -> int:
     """Gate tiers the device's hierarchical engine executes (HierarchicalFilter._MAX_TIERS)."""
     from . import HierarchicalFilter
@@ -879,12 +991,15 @@ class TimeDomainFilterBank:
             return int(max(self._choice_ns + tuple(g[2] for g in self._legacy_layout[0])))
         return int(max((g.n for g in self._groups), default=0))
 
-    def _choose_layout(self, fine: np.ndarray, delta_f: float):
-        """Partition with each length batch at its cheapest modelled block size."""
+    def _choose_layout(self, fine: np.ndarray, delta_f: float, rank: int = 0):
+        """Partition with each length batch at its rank-th cheapest modelled block size (the
+        cheapest when fewer are within _BLOCK_TRIAL_MARGIN of it). Rank 0 is the model's
+        choice; ranks 1.. are the alternatives block-size trials measure (_BlockTrials)."""
         from . import gatechain, _log_autotune
         groups, order = self._legacy_layout
         counts = self.effective_data_counts[order]
         n_sorted = np.empty(len(order), dtype=np.int64)
+        self._alt_ranks = 0
         for i, j, n0, _ in groups:
             longest = int(counts[j - 1])
             taps_max = int(np.max(self.tap_counts[order[i:j]]))
@@ -893,9 +1008,12 @@ class TimeDomainFilterBank:
                 fine, delta_f, self.data_sample_rate, longest, margin, j - i,
                 self.threshold, self.false_dismissal, [n for n in self._choice_ns if n > longest],
                 max_tiers=_max_tiers(self.device), device=self.device)
-            n_sorted[i:j] = ranked[0][1] if ranked else n0
-            _log_autotune("BLOCK templates=%d longest=%d legacy n=%d -> n=%d  %s", j - i, longest, n0,
-                          int(n_sorted[i]), " ".join("%d:%.3g" % (n, c) for c, n, _ in ranked))
+            near = [o for o in ranked if o[0] <= ranked[0][0] * (1.0 + _BLOCK_TRIAL_MARGIN)] if ranked else []
+            self._alt_ranks = max(self._alt_ranks, len(near))
+            n_sorted[i:j] = near[min(rank, len(near) - 1)][1] if near else n0
+            if rank == 0:
+                _log_autotune("BLOCK templates=%d longest=%d legacy n=%d -> n=%d  %s", j - i, longest, n0,
+                              int(n_sorted[i]), " ".join("%d:%.3g" % (n, c) for c, n, _ in ranked))
         return _partition_templates(self.effective_data_counts, max_batch=self.max_batch_size,
                                     candidate_ns=self._candidate_ns, n_sorted=n_sorted)
 
@@ -953,10 +1071,25 @@ class TimeDomainFilterBank:
             # The first reference settles the block sizes: by cost from a fine-grid
             # profile, else by the valid-fraction rule.
             if not isinstance(reference, dict) and delta_f is not None and float(delta_f) > 0:
-                layout = self._choose_layout(np.asarray(reference, dtype=np.float64), float(delta_f))
+                fine_ref = np.asarray(reference, dtype=np.float64)
+                layout = self._choose_layout(fine_ref, float(delta_f))
+                alts = [layout]
+                for r in range(1, min(self._alt_ranks, int(os.environ.get('MF_BLOCK_TRIAL_RANKS', _BLOCK_TRIAL_RANKS)))):
+                    alt = self._choose_layout(fine_ref, float(delta_f), rank=r)
+                    if all(alt[0] != a[0] for a in alts):
+                        alts.append(alt)
                 if self._built is None or layout[0] != self._built_layout:
                     self._build(*layout)
                 self.chosen_layout = [(int(e - b), int(n)) for b, e, n, _ in layout[0]]
+                # Block-size trials (_BlockTrials): the model's alternatives within its margin are
+                # built now -- the taps are freed below -- and measured on real calls.
+                self._layouts = [self._snapshot()]
+                for alt in alts[1:]:
+                    self._build(*alt)
+                    self._layouts.append(self._snapshot())
+                self._restore(self._layouts[0])
+                self._layout_rank = 0
+                self._layout_ref = (reference, delta_f)
             self._groups
             self._n_chosen = True
             self._taps_list = None
@@ -1013,6 +1146,37 @@ class TimeDomainFilterBank:
         self._load_templates()
         self._current_ref_key = ref_key
         self._state_version = getattr(self, '_state_version', 0) + 1
+
+    _LAYOUT_ATTRS = ('_built', '_built_layout', '_filters_f_list', '_block_lengths_arr',
+                     '_template_map')
+
+    def _snapshot(self):
+        return {k: getattr(self, k, None) for k in self._LAYOUT_ATTRS}
+
+    def _restore(self, snap):
+        for k, v in snap.items():
+            setattr(self, k, v)
+
+    def _use_layout(self, rank: int) -> None:
+        """Run on the rank-th candidate layout (built at the first reference). The plans differ,
+        so the state version moves and recorded call plans are invalidated."""
+        layouts = getattr(self, '_layouts', None)
+        if not layouts or rank == getattr(self, '_layout_rank', 0) or rank >= len(layouts):
+            return
+        self._layouts[self._layout_rank] = self._snapshot()
+        self._layout_warm = False
+        self._restore(layouts[rank])
+        self._layout_rank = rank
+        self.chosen_layout = [(int(e - b), int(n)) for b, e, n, _ in self._built_layout]
+        ref, df = self._layout_ref
+        self._current_ref_key = None
+        self.set_reference(ref, delta_f=df)          # this layout's groups get it, and templates
+        self._state_version = getattr(self, '_state_version', 0) + 1
+
+    def _lock_layout(self, rank: int) -> None:
+        """Keep the rank-th layout and free the others."""
+        self._use_layout(rank)
+        self._layouts = None
 
     def _load_templates(self) -> None:
         for g in self._groups:
@@ -1493,6 +1657,7 @@ class TimeDomainFilterBank:
                     for c in closes:
                         c()
         out = [None] * len(jobs)
+        trial = _trial_begin(jobs)
         # Single-template (follow-up) calls on a GPU bank, per template group: one forward
         # dispatch and one submission for all of them instead of a few submissions each.
         done = TimeDomainFilterBank._items_batch(jobs, out)
@@ -1509,8 +1674,26 @@ class TimeDomainFilterBank:
             if close is not None:
                 close()
         if not wait:
-            return [r if isinstance(r, _Deferred) else _Deferred(lambda r=r: r) for r in out]
-        return [r.result() if isinstance(r, _Deferred) else r for r in out]
+            res = [r if isinstance(r, _Deferred) else _Deferred(lambda r=r: r) for r in out]
+            if trial is not None:
+                # the batch's time runs to its last result's collection
+                pending = {"n": len(res)}
+                def wrap(d):
+                    seen = [False]
+                    def get(d=d):
+                        v = d.result()
+                        if not seen[0]:
+                            seen[0] = True
+                            pending["n"] -= 1
+                            if pending["n"] == 0:
+                                _trial_end(trial)
+                        return v
+                    return _Deferred(get)
+                res = [wrap(d) for d in res]
+            return res
+        res = [r.result() if isinstance(r, _Deferred) else r for r in out]
+        _trial_end(trial)
+        return res
 
     @staticmethod
     def _items_batch(jobs, out):

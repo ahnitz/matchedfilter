@@ -223,3 +223,41 @@ remains for other hardware.
   the host term. On the 8060S: host_block 2.1 us at n = 2048 and 5.7 us at 4096, against
   device block work of ~0.3/0.7; with it the n = 2048 margin over 4096 went from ~6% (inside
   the noise that made it flip) to ~30%.
+
+## Block-size trials (2026-10-10): built, measured, net loss -- not ready
+
+`time_domain._BlockTrials` builds the model's top block-size layouts (within 30% of its
+cheapest; at most 2) at the first reference, while the taps are still held. Each batch of
+`filter_series_many` puts every trialling bank on one candidate rank and times the batch from
+submission to the last result, per template x series sample. Batches in which a bank
+switched layout are not timed. The model's rank runs first. After one clean sample per
+rank, the fastest within gatechain.TIE is locked (ties keep the model's choice); the
+others are dropped. `tests/test_block_trials.py` checks that a clearly worse rank (1.5-10x)
+is never locked, in either order, that ties keep rank 0, and that a bank's switch and lock
+work end to end.
+
+Measured on dev3's Renoir (Vulkan, load < 1), 3 interleaved processes, autotune on, 2 tops
+x 6 segments, steady fine stage:
+
+| | run 1 | run 2 | run 3 |
+|---|---|---|---|
+| main | 1.83 s | 1.82 s | 2.29 s |
+| branch | 2.67 s | 3.81 s | 2.50 s |
+
+The branch is slower in every run, including runs where it locked rank 0, so the cost is
+not the choice itself. The likely cause, not yet proven: building a second layout doubles
+each bank's GPU-resident spectra and plans on an iGPU with a small shared budget. The
+dropped layout's device storage is evicted only by LRU, so live data is re-uploaded in
+steady state. Two further caveats:
+- One sample per rank is thin: the locked ranks differed 12-27% on single batches.
+- Main itself chooses differently across processes on this host ((2048, (512,)),
+  (2048, (256, 512)), mixed 2048/4096), so the baseline is not a fixed point.
+
+Needed before this can ship:
+1. Free the dropped layout's device storage explicitly at lock (GPU cache API), or build the
+   alternative only for the batches that trial it.
+2. Take more than one sample per rank, still within the warm-up: time per bank rather than
+   per batch.
+3. Then re-measure.
+
+Until then the forward credit stays measured-only.
