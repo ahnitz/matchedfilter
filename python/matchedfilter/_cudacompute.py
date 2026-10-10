@@ -59,6 +59,7 @@ class _DeviceShared:
         self.occupancy = {}
         self.labels = {}
         self.c16_flags = {}         # coarse module stem -> [mf_c16_raw address, value]
+        self.tc_persistent = {}     # persistent coarse kernel -> grid cap (blocks)
 
 
 _DEVICE_SHARED = {}
@@ -89,6 +90,11 @@ _SPARSE_HOST = 4096
 # each device's primary context for the process lifetime). cuCtxSetCurrent per call measured
 # ~75 us of host time per fine-stage forward on the L40S.
 _BOUND = threading.local()
+
+#: Blocks per SM for the persistent tensor-core coarse gate: its block setup (DFT matrices)
+#: amortises over the slots each warp loops through. Measured on the L40S at 131k pairs:
+#: 4-8 best; 16 within 5%.
+_TC_BLOCKS_PER_SM = 8
 
 _PREFETCH = os.environ.get("MF_CUDA_PREFETCH", "1") != "0"
 # CUDA graphs for the hierarchical launch sequences (MF_CUDA_GRAPHS=0 issues them directly).
@@ -501,10 +507,12 @@ class Context(InputUploads):
             self._modules, self._pipelines = shared.modules, shared.pipelines
             self._occupancy, self._labels = shared.occupancy, shared.labels
             self._c16_flags = shared.c16_flags
+            self._tc_persistent = shared.tc_persistent
             self._shared_modules = True
         else:
             self._modules, self._pipelines, self._occupancy, self._labels = {}, {}, {}, {}
             self._c16_flags = {}
+            self._tc_persistent = {}
             self._shared_modules = False
         self._scratch_bufs = {}
         self._residents = {}
@@ -1425,12 +1433,26 @@ class Context(InputUploads):
                         except UnsupportedSize:
                             continue
                         cands.append((fn, wg, ppg, tile))
+            # The tensor-core gate (src/gpu/coarse_tc.cu): one warp per 2-template ragged
+            # slot, WPB warps per block, persistent (grid capped by _coarse_grid_for).
+            for wpb in (2, 4):
+                f = _PTX_DIR / ("coarse_tc_%d_w%d.ptx" % (band, wpb))
+                if f.is_file() and self.cc >= (8, 0):
+                    fn = self._load(f.stem, f, "fusedTierB", 32 * wpb)
+                    self._tc_persistent[fn.value] = self.sm_count * _TC_BLOCKS_PER_SM
+                    cands.append((fn, 32 * wpb, wpb, 2))
             if not cands:
                 raise UnsupportedSize(f"no coarse c16 kernel for band {band}")
             self._pipelines[key] = self._time_coarse(band, cands)
         fn, wg, ppg, tile = self._pipelines[key]
         self._c16_bound_flag(fn)
         return fn, wg, ppg, tile, True
+
+    def _coarse_grid_for(self, fn, rows, nt, ppg, tile):
+        """_coarse_grid, with a persistent kernel's grid capped (its warps loop over slots)."""
+        grid, rowarg = _coarse_grid(rows, nt, ppg, tile)
+        cap = self._tc_persistent.get(fn.value)
+        return (min(grid, cap) if cap else grid), rowarg
 
     def _c16_bound_flag(self, fn):
         """Set the coarse module's fp16 bound switch (mf_c16_raw, Vulkan's constant 77):
@@ -1449,7 +1471,7 @@ class Context(InputUploads):
 
     def _time_coarse(self, band, cands):
         """The fastest of the coarse variants on synthetic data (device time, min of 3)."""
-        P, ntm = 16384, 16
+        P, ntm = 65536, 16
         ndm = P // ntm
         rng = np.random.default_rng(0)
         x = (rng.standard_normal((ndm, band)) + 1j * rng.standard_normal((ndm, band))) * 0.1
@@ -1466,7 +1488,7 @@ class Context(InputUploads):
                 times = []
                 for rep in range(4):
                     check_cuda(self.cuda.cuEventRecord(e0, st), "cuEventRecord")
-                    grid, rowarg = _coarse_grid(ndm, ntm, ppg, tile)
+                    grid, rowarg = self._coarse_grid_for(fn, ndm, ntm, ppg, tile)
                     self._launch(fn, grid, wg,
                                  [bufs[0].dptr, bufs[1].dptr, bufs[2].dptr, bufs[3].dptr,
                                   _u32(ntm), _u32(0), _u32(band),
@@ -1480,7 +1502,7 @@ class Context(InputUploads):
                     if rep:
                         times.append(ms.value)
                 t = min(times)
-                self.__dict__.setdefault("coarse_times", {}).setdefault(band, {})[(ppg, tile, self._labels.get(fn.value, "").endswith("w"))] = (
+                self.__dict__.setdefault("coarse_times", {}).setdefault(band, {})[self._labels.get(fn.value, "")] = (
                     t * 1e6 / P)                         # ns per pair, for reports
                 if best is None or t < best[0]:
                     best = (t, fn, wg, ppg, tile)
@@ -1613,7 +1635,7 @@ class Context(InputUploads):
 
             # Tier 0: the coarse gate over every pair (and the padding rows' pairs).
             cs, ce, csp, csh = _coarse_span(n, band0, lo, hi)
-            grid, rowarg = _coarse_grid(ndp, nt, ppg, tile)
+            grid, rowarg = self._coarse_grid_for(cfn, ndp, nt, ppg, tile)
             self._launch(cfn, grid, cwg,
                          [bufs["cdata0"].dptr, bufs["ct0"].dptr, bufs["cidx0"].dptr,
                           bufs["cval0"].dptr, _u32(nt), _u32(cs), _u32(ce),
@@ -1781,7 +1803,7 @@ class Context(InputUploads):
                          [_ptr(dptr + a * n * 8), _ptr(cd0 + off * band0 * cb0), _u32(n),
                           _u32(band0), _u32((b - a) * band0), _u32(int(c16))], stream=stream)
             cs, ce, csp, csh = _coarse_span(n, band0, lo, hi)
-            grid, rowarg = _coarse_grid(rows, nt, *geom)
+            grid, rowarg = self._coarse_grid_for(cfn, rows, nt, *geom)
             self._launch(cfn, grid, cwg,
                          [_ptr(cd0 + off * band0 * cb0), bufs["ct0"].dptr, _ptr(ci0 + off * nt * 4),
                           _ptr(cv0 + off * nt * 8), _u32(nt), _u32(cs), _u32(ce),

@@ -431,3 +431,50 @@ belongs to the application (pycbc, after building its banks), not to the library
 The prefetch could be skipped for spans the device itself wrote (the middle output), but a
 host read of those pages in between (pycbc reads the middle series for other statistics)
 migrates them back, and a kernel then faults them in at the 2.7x cost above. Not done.
+
+## Phase 7 (2026-10-10): tensor-core coarse gate
+
+`src/gpu/coarse_tc.cu`, built by `tools/build_ptx.py` (`coarse_tc_<band>_w<warps>.ptx`,
+compute_80) and offered to the measured coarse choice next to the Slang variants.
+
+**Design.** Band B = 16 M as a two-stage matrix DFT: A = X . F_M (16 x M by M x M), the twiddle
+W_B^(n1 k2) applied to the stage-1 accumulators in registers, then Z = F_16 . C (16 x 16 by
+16 x M), each complex product four real `mma.sync.m16n8k16` (fp16 in, fp32 accumulate; a
+negated imaginary DFT matrix keeps all four accumulates). Stage-1 operands are read straight
+from global memory into the A fragments; the DFT matrices and twiddles stay in registers for
+the warp's life (persistent warps, 8 blocks per SM: the block's setup of ~1.5k sincos
+amortises over the slots). Only C crosses shared memory (`ldmatrix.trans` for the stage-2 B
+operand). The window maximum, its value and the energy for the bound come from the stage-2
+accumulators in registers. Same interface and ragged 2-template slots as the Slang coarse
+kernel; fails open on a non-finite value. Band 128 (M = 8) does not fit: stage 1's k
+dimension is M and the instruction's is 16, so half of every product would be padding --
+not built. Band 1024 (M = 64) needs 4 x 8 x 3 x 2 = 192 registers of F_M fragments alone.
+
+**Exactness.** Against float64 on the fp16-rounded inputs, 8192 pairs per band over the
+gate_margin families: no elected lag differs except within the error (ties); |error| at the
+lag in u rms(y) units mean 0.76 / 0.71, std 0.40 / 0.39, max 3.31 / 5.19 (bands 256 / 512)
+-- smaller than the Slang radix-16 tier's (sigma 1.8 / 2.2), as the products accumulate in
+fp32. The error magnitude has a heavier tail than a Rayleigh fit, so its kappa is not z x
+std: it is set at twice the largest error seen (margin use < 0.5), kappa 7.0 / 10.5
+(`COARSE_TC_SIGMA`, `tools/cuda_tc_sigma.py`). `tests/test_cuda_c16_bound.py` checks the
+bound covers the exact maximum with margin use < 0.5 on these kernels too.
+
+**Speed** (ns per pair, 131k pairs; the mma.sync m16n8k16 f32-accumulate ceiling measured
+on this part: **365 TFLOP/s**):
+
+| band | tensor-core | its tensor rate | Slang best (65k-pair batch) |
+|---|---|---|---|
+| 256 | 0.73 | 90 TF/s, 25% of 365 | **0.56** (p8 t2) |
+| 512 | 1.60 | 123 TF/s, 34% of 365 | **1.14** (p2 t4) |
+
+The tensor units are at 25-34% of their ceiling, but the matrix DFT issues 5x (band 256)
+to 9x (band 512) the flops of the radix-16 FFT, and the per-pair scalar work (the D conj(T)
+products, the twiddle, the C round trip and the maximum: ~150 instructions per lane per
+pair) is the same order as the Slang kernel's whole packed-half2 transform. It loses by
+25-40% and the measured choice never picks it; it stays a candidate (no hard exclusion),
+where a part with a higher tensor:SIMT ratio, or a fused forward feeding it, may pick it.
+
+**The measured choice's batch.** `_time_coarse` timed 16,384 pairs; a fine-stage call is
+~80k (4.34M pairs over 54 calls). At 16k pairs launch and setup costs dominate: the Slang
+variants measured 0.94 / 1.69 ns per pair at bands 256 / 512 there, 0.56 / 1.14 at 65k.
+The choice now times 65,536 pairs; it picks differently at band 512 (p2 t4 rather than p1 t4).
