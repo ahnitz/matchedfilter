@@ -502,6 +502,8 @@ def main():
         dev = sum(v[1] for d in report["steady_device_ms"].values() for v in d.values()) / 1e3
         print(f"  device busy {100 * dev / report['steady_s']['wall']:.0f}%: device {dev:.3f}s "
               f"of steady wall {report['steady_s']['wall']:.3f}s")
+        if _gputime.rejected():
+            print(f"  ({_gputime.rejected()} timestamp pairs rejected as impossible)")
     for stage, d in report.get("steady_device_ms", {}).items():
         dev = sum(v[1] for v in d.values())
         print(f"  {stage}: device {dev / 1e3:.3f}s of wall {report['steady_s'][stage]:.3f}s; " +
