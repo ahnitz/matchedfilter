@@ -15,6 +15,7 @@ import os
 from collections import OrderedDict
 import pathlib
 import sys
+import time
 
 import numpy as np
 
@@ -963,9 +964,11 @@ class _Device:
         # Dedicated compute queues with multiple hardware queues
         for i, fam in enumerate(families):
             if (fam.queueFlags & _QUEUE_COMPUTE) and not (fam.queueFlags & 1):
+                self.timestamp_bits = int(fam.timestampValidBits)
                 return i, fam.queueCount
         for i, fam in enumerate(families):
             if fam.queueFlags & _QUEUE_COMPUTE:
+                self.timestamp_bits = int(fam.timestampValidBits)
                 return i, fam.queueCount
         raise VulkanError("device exposes no compute queue")
 
@@ -1051,7 +1054,7 @@ class Context(InputUploads):
     _SHARED = ("vk", "instance", "physical", "queue_family", "queues", "queue", "device",
                "_accurate_trig", "max_shared_memory", "max_invocations", "max_dispatch_x",
                "subgroup_size", "subgroup_range", "mem_props", "command_pool", "_ts_period",
-               "storage_offset_alignment", "max_workgroup_size")
+               "storage_offset_alignment", "max_workgroup_size", "timestamp_bits")
 
     def _attach_device(self, index):
         """Share the device, its queues, command pool and compiled pipelines per process.
@@ -2466,7 +2469,7 @@ class Context(InputUploads):
         ts["next"] = (i + 1) % self._TS_RING
         if i in ts["pending"]:                 # the ring wrapped: settle that slot first
             self._timestamp_resolve(only=i)
-        ts["pending"][i] = label
+        ts["pending"][i] = (label, time.perf_counter())
         return _vp(ts["cmds"][2 * i]), _vp(ts["cmds"][2 * i + 1])
 
     def _capture_begin(self):
@@ -2572,10 +2575,16 @@ class Context(InputUploads):
             return
         out = (ctypes.c_uint64 * 2)()
         for i in ([only] if only is not None else sorted(ts["pending"])):
-            label = ts["pending"].pop(i)
+            label, t_host = ts["pending"].pop(i)
             _check(self.vk.vkGetQueryPoolResults(self.device, ts["pool"], 2 * i, 2, 16, out, 8, 0x3),
                    "vkGetQueryPoolResults")              # 64-bit, wait
-            self.timing_log.append((label, (out[1] - out[0]) * self._ts_period * 1e-6))
+            ms = _gputime.interval_ms(out[0], out[1], self._ts_period,
+                                      getattr(self, "timestamp_bits", 64),
+                                      (time.perf_counter() - t_host) * 1e3)
+            if ms is None:
+                self.timing_rejected = getattr(self, "timing_rejected", 0) + 1
+            else:
+                self.timing_log.append((label, ms))
 
     def timings(self):
         """Settle outstanding timestamps and return the timing log (MF_GPU_TIMING=1)."""
@@ -3370,6 +3379,28 @@ class Context(InputUploads):
             _check(self.vk.vkWaitForFences(self.device, 1, fences, 1, 0xFFFFFFFFFFFFFFFF),
                    "vkWaitForFences")
             self.vk.vkDestroyFence(self.device, fence, None)
+
+    def write_token(self):
+        """A token for the writes left in flight so far on this device (the newest one), for
+        settle_until: None when nothing is in flight."""
+        dev = self._device_state
+        return dev.pending_writes[-1] if dev.pending_writes else None
+
+    def settle_until(self, token):
+        """Wait for the writes in flight up to and including token (write_token()), not
+        later ones. Each earlier write is waited on too (submissions may complete out of
+        order). A token already settled is a no-op."""
+        dev = self._device_state
+        if token is None or all(f is not token for f in dev.pending_writes):
+            return
+        while dev.pending_writes:
+            fence = dev.pending_writes.pop(0)
+            fences = (_vp * 1)(fence)
+            _check(self.vk.vkWaitForFences(self.device, 1, fences, 1, 0xFFFFFFFFFFFFFFFF),
+                   "vkWaitForFences")
+            self.vk.vkDestroyFence(self.device, fence, None)
+            if fence is token:
+                break
 
     #: correlate_continuous(async_submit=True) leaves the last batch in flight; a later call
     #: settles it before rewriting the workspaces it reads (_continuous_gpu).

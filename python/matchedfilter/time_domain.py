@@ -1826,7 +1826,12 @@ class TimeDomainFilterBank:
     def _stage_series(self, ser):
         """ser in device-shared memory usable by every group's correlation plan: ser itself if
         it is, else one copy for the whole bank (each group copied the series into its own
-        staging buffer, ~0.6 ms per group per call at 2^20 samples), else ser."""
+        staging buffer, ~0.6 ms per group per call at 2^20 samples), else ser.
+
+        Two staging buffers alternate per call. Each remembers, per device, the write its
+        call left in flight (_staging_done): rewriting it waits for exactly that call (two
+        back), not for every write on the device. A backend without settle_until settles
+        all its writes, as before."""
         from ._shared import shared_buffer
         gpus = []
         for g in self._groups:
@@ -1838,19 +1843,43 @@ class TimeDomainFilterBank:
             return ser                       # one group, or unified memory read in place
         if all(shared_buffer(ser, gpu) is not None for gpu in gpus):
             return ser
-        staged = self.__dict__.get('_ser_staging')
+        devs = {id(x): x for x in gpus}.values()
+        double = all(hasattr(g, 'settle_until') and hasattr(g, 'write_token') for g in devs)
+        bufs = self.__dict__.setdefault('_ser_stagings', [])
+        k = self.__dict__.get('_ser_staging_next', 0) % (2 if double else 1)
+        self._ser_staging_next = k + 1
+        while len(bufs) <= k:
+            bufs.append([None, []])
+        slot = bufs[k]
+        if double:
+            for gpu, token in slot[1]:
+                gpu.settle_until(token)      # the call that read this buffer has finished
+        else:
+            for gpu in devs:
+                settle = getattr(gpu, 'settle_writes', None)
+                if settle is not None:
+                    settle()                 # a call left in flight may still read it
+        slot[1] = []
+        staged = slot[0]
         if staged is None or staged.shape != ser.shape or any(
                 shared_buffer(staged, gpu) is None for gpu in gpus):
             staged = gpus[0].empty_shared(ser.shape)
             if any(shared_buffer(staged, gpu) is None for gpu in gpus):
                 return ser
-            self._ser_staging = staged
-        for gpu in {id(x): x for x in gpus}.values():
-            settle = getattr(gpu, 'settle_writes', None)
-            if settle is not None:
-                settle()                     # a call left in flight may still read it
+            slot[0] = staged
         self._fill_staging(staged, ser)
+        self._staging_slot = slot
         return staged
+
+    def _staging_done(self):
+        """Remember, per device, the write left in flight by the call that read the staging
+        buffer just filled (see _stage_series)."""
+        slot = self.__dict__.pop('_staging_slot', None)
+        if slot is None:
+            return
+        devs = {id(g.get_correlation_plan()._gpu): g.get_correlation_plan()._gpu
+                for g in self._groups}.values()
+        slot[1] = [(gpu, gpu.write_token()) for gpu in devs if hasattr(gpu, 'write_token')]
 
     @staticmethod
     def _fill_staging(staged, ser):
@@ -1859,6 +1888,13 @@ class TimeDomainFilterBank:
     def _correlate_bank(self, ser, W, scales_arr, result, settle):
         S = ser.size
         ser = self._stage_series(ser)
+        try:
+            self._correlate_groups(ser, W, scales_arr, result, settle)
+        finally:
+            self._staging_done()
+
+    def _correlate_groups(self, ser, W, scales_arr, result, settle):
+        S = ser.size
         for g in self._groups:
             g_indices = g.template_indices
             g_cnt = len(g_indices)
