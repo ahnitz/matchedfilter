@@ -242,6 +242,19 @@ class _SparsePeaks:
         return _SparsePeaks((nblocks,) + self.shape[1:], self.flat[keep], self.idx[keep],
                             self.val[keep])
 
+    def blocks(self, mask, nbins):
+        """The blocks selected by a boolean mask, with their first nbins bins: the sparse
+        form of ``(idx[mask][:, :, :nbins], val[mask][:, :, :nbins])``."""
+        nt, nb = self.shape[1], self.shape[2]
+        b, rest = np.divmod(self.flat, nt * nb)
+        t, k = np.divmod(rest, nb)
+        mask = np.asarray(mask, bool)
+        keep = mask[b] & (k < nbins)
+        rank = np.cumsum(mask) - 1
+        flat = (rank[b[keep]] * nt + t[keep]) * nbins + k[keep]
+        return _SparsePeaks((int(mask.sum()), nt, int(nbins)), flat, self.idx[keep],
+                            self.val[keep])
+
     @staticmethod
     def combine(parts, shape, order=None):
         """One result for a call from (first block, part) pieces; ``order`` maps computed
@@ -822,7 +835,8 @@ class MatchedFilter:
         layout = SeriesLayout(self.n, st, ws, we, binsize, ragged=ragged)
         return ser, layout, binsize, t0, nt
 
-    def _grouped_layout(self, series, starts, win_start, win_end, binsize, templates):
+    def _grouped_layout(self, series, starts, win_start, win_end, binsize, templates,
+                        ragged=False):
         """_series_layout, grouped, cached per layout signature.
 
         A search calls the same plan with the same blocks every segment: validating and
@@ -836,7 +850,7 @@ class MatchedFilter:
             key = (starts.dtype.char, starts.tobytes(), win_start.dtype.char, win_start.tobytes(),
                    win_end.dtype.char, win_end.tobytes(), binsize,
                    None if templates is None else (int(templates[0]), int(templates[1])),
-                   group, self._gpu is not None)
+                   group, self._gpu is not None, ragged)
             cache = self.__dict__.get("_layout_cache")
             hit = cache.get(key) if cache is not None else None
             if hit is not None:
@@ -847,9 +861,11 @@ class MatchedFilter:
                 self._require_templates(t0, nt)
                 return ser, layout, binsize, t0, nt
         ser, layout, binsize, t0, nt = self._series_layout(
-            series, starts, win_start, win_end, binsize, templates)
+            series, starts, win_start, win_end, binsize, templates, ragged=ragged)
         if group:
             layout.group(materialize=self._gpu is not None)
+        if ragged:
+            layout.ragged = True
         if key is not None:
             cache = self.__dict__.setdefault("_layout_cache", {})
             if len(cache) >= 32:
@@ -1005,20 +1021,29 @@ class MatchedFilter:
         distinct bin count costs a submission and a wait each -- most of a
         single-template follow-up's time on a GPU.
 
-        Returns None when this plan cannot (CPU, a hierarchical plan, a backend
-        without ``supports_ragged_bins``, or a shape the grouped path does not take);
-        the caller then makes one call per bin count.
+        A hierarchical plan takes this path on a backend with ``supports_ragged_hier``:
+        its grouped call runs per-row windows (each block's own [lo, hi)) under one
+        recording of the largest bin count, so a block's bins past its own count are
+        empty exactly as for a flat plan.
+
+        Returns None when this plan cannot (CPU, a backend without ragged support, or a
+        shape the grouped path does not take); the caller then makes one call per bin count.
         """
-        if (self._gpu is None or type(self) is not MatchedFilter
+        if self._gpu is None:
+            return None
+        if isinstance(self, HierarchicalFilter):
+            if not getattr(self._gpu, "supports_ragged_hier", False):
+                return None
+        elif (type(self) is not MatchedFilter
                 or not getattr(self._gpu, "supports_ragged_bins", False)):
             return None
-        ser, layout, binsize, t0, nt = self._series_layout(
+        # Cached per layout bytes (as run_series), so a repeated call keeps its layout and
+        # with it its call plan.
+        ser, layout, binsize, t0, nt = self._grouped_layout(
             series, starts, win_start, win_end, binsize, templates, ragged=True)
-        layout.group(materialize=True)
         if (len(layout.groups) < 2 or layout.nbins > getattr(self._gpu, "max_grouped_bins", 0)
                 or nt > self._gpu_pair_limit()):
             return None
-        layout.ragged = True
         self._dataset = False
         self._data_ready = set()
         return self._run_series_gpu(ser, layout, binsize, threshold, t0, nt, True)
@@ -1292,8 +1317,161 @@ class MatchedFilter:
         return self._gpu_window(spec, H, binsize, threshold, w0, w1, slot=slot,
                                 async_submit=async_submit, **kw)
 
+    def _call_plan_state(self, layout, binsize, threshold, t0, nt):
+        """Everything a recorded call plan was built under: (objects, values). Objects are
+        compared by identity -- the plan holds them, so none can be freed and replaced at the
+        same address -- and values by equality. Anything that changes what the call would
+        submit changes one of them: new templates or coarse templates, a recalibrated chain,
+        replaced pools, another backend context, the queue depth, the batch budget."""
+        ws = self.__dict__.get("_series_workspace")
+        objs = (layout, self._gpu, self._gtmpl, self.__dict__.get("_gcal"),
+                self.__dict__.get("_ct"), self.__dict__.get("_ckey"),
+                None if ws is None else ws[2], None if ws is None else ws[3])
+        vals = (int(binsize), float(threshold), t0, nt, self.__dict__.get("_series_batch_bytes"),
+                os.environ.get("MF_GPU_QUEUE_AHEAD", "8"),
+                bool(self.__dict__.get("_want_sparse", False)))
+        return objs, vals
+
+    @staticmethod
+    def _same_state(a, b):
+        return (a[1] == b[1] and len(a[0]) == len(b[0])
+                and all(x is y for x, y in zip(a[0], b[0])))
+
+    def _replay_call_plan(self, ser, layout, binsize, threshold, t0, nt, raw):
+        """A deferred grouped hierarchical call submitted from its recorded call plan, or None.
+
+        The first deferred call of a shape runs the full path below and records what it
+        submitted (_record_call_plan): the batches' rebased starts, and per batch the
+        backend's forward and hierarchical records (handles). A repeat with the same state
+        (_call_plan_state), the same series memory and the same slot skips layout, policy,
+        source resolution and key building: it rewrites the starts, re-queues the records and
+        returns the same kind of deferred result. The backend checks each handle (record
+        identity, resident input signatures) before anything is submitted; any stale handle
+        falls back to the full path, which records afresh."""
+        plans = self.__dict__.get("_call_plans")
+        if (not plans or not raw or self._tdirty or not getattr(self, "_defer_series", False)
+                or getattr(self, "_chain_trial", None) is not None):
+            return None
+        d = self.__dict__
+        vals = (int(binsize), float(threshold), t0, nt, d.get("_series_batch_bytes"),
+                os.environ.get("MF_GPU_QUEUE_AHEAD", "8"), bool(d.get("_want_sparse", False)))
+        addr = ser.ctypes.data
+        entry = plans.get((addr, ser.size, vals, id(layout)))
+        if entry is None:
+            return None
+        # The objects of _call_plan_state, by identity, inline (this is the hot path).
+        objs = entry["state"][0]
+        ws = d.get("_series_workspace")
+        if (objs[0] is not layout or objs[1] is not self._gpu or objs[2] is not self._gtmpl
+                or objs[3] is not d.get("_gcal") or objs[4] is not d.get("_ct")
+                or objs[5] is not d.get("_ckey") or ws is None or objs[6] is not ws[2]
+                or objs[7] is not ws[3]):
+            return None
+        lo_addr, hi_addr = entry["span"]
+        if not (lo_addr <= addr and addr + ser.nbytes <= hi_addr):
+            return None
+        K = entry["K"]
+        token = self._defer_series
+        slot0 = 0 if getattr(self, "_defer_token", None) != token else (
+            getattr(self, "_defer_slot", 0) % K)
+        parts = entry["slots"].get(slot0)
+        if parts is None:
+            return None
+        gpu = self._gpu
+        for _, fh, hh in parts:
+            if not (gpu.forward_valid(fh) and gpu.hier_valid(hh)):
+                return None
+        if getattr(self, "_defer_token", None) != token:
+            self._defer_token, self._defer_slot = token, 0
+        owners = self.__dict__.setdefault("_slot_owner", {})
+        for k in range(min(K, len(parts) + len(layout.groups))):
+            prev = owners.pop((slot0 + k) % K, None)
+            if prev is not None:
+                prev.result()
+        n = self.n
+        shape = (layout.starts.size, nt, layout.nbins)
+        self._last_series_batch = entry["batch"]
+        starts_pool = entry["starts_pool"]
+        in_flight, gtrace = [], []
+        slot_idx = slot0
+        for (begin, end, count, rebased), fh, hh in parts:
+            slot = slot_idx % K
+            slot_idx += 1
+            starts_pool[slot][:count] = rebased
+            gpu.forward_replay(fh, slot)
+            res = gpu.hier_replay(hh, slot, True)
+            in_flight.append((begin, end, res))
+            gtrace.append((begin, end, getattr(gpu, "_last_dispatch", None)))
+        idx = np.empty(shape, dtype=np.int64)
+        val = np.empty(shape, dtype=np.complex64)
+        sparse_parts = []
+
+        def finish_grouped():
+            # As the full path's finish_grouped/take_dense/finish_raw for a grouped call.
+            for b_start, b_end, item in in_flight:
+                r = item()
+                shp = r.shape if isinstance(r, _SparsePeaks) else r[0].shape
+                self._gpairs += shp[0] * shp[1]
+                self._gtrig += gpu.last_refinements
+                if isinstance(r, _SparsePeaks):
+                    sparse_parts.append((b_start, r))
+                else:
+                    idx[b_start:b_end], val[b_start:b_end] = r
+            in_flight.clear()
+            if sparse_parts:
+                return _SparsePeaks.combine(sparse_parts, shape, layout.order)
+            return _format_result(idx, val, raw=True, order=layout.order)
+        self._defer_slot = slot_idx
+        deferred = _Deferred(finish_grouped)
+        if gtrace and all(t[2] is not None for t in gtrace):
+            deferred.trace = dict(groups=gtrace, shape=shape, order=layout.order)
+        for k in range(slot0, slot_idx):
+            owners[k % K] = deferred
+        self.call_plan_replays = getattr(self, "call_plan_replays", 0) + 1
+        return deferred
+
+    def _record_call_plan(self, ser, layout, binsize, threshold, t0, nt, K, batch, slot0,
+                          whole, parts, starts_pool):
+        """Keep what a deferred grouped call submitted, for _replay_call_plan."""
+        state = self._call_plan_state(layout, binsize, threshold, t0, nt)
+        plans = self.__dict__.setdefault("_call_plans", {})
+        key = (ser.ctypes.data, ser.size, state[1], id(layout))
+        entry = plans.get(key)
+        if entry is None or not self._same_state(entry["state"], state):
+            if len(plans) >= 16:
+                plans.clear()
+            start = whole.ctypes.data
+            # Holding whole keeps its allocation alive, so its address range cannot be
+            # reused by another allocation while this plan exists.
+            entry = plans[key] = dict(state=state, K=K, batch=batch, whole=whole,
+                                      span=(start, start + whole.nbytes), slots={},
+                                      starts_pool=starts_pool)
+        entry["slots"][slot0] = parts
+
+    def _fast_series(self, ser, layout, binsize, threshold, defer, queue_offset, sparse):
+        """A repeated deferred series call straight from its call plan (_replay_call_plan),
+        with the flags run_series would set around it; None when the plan does not hold
+        (the caller then makes the full call). layout is the one this plan's full call
+        used (_last_layout): the plan checks its identity."""
+        self._defer_series, self._want_sparse = defer, sparse
+        self._gpu._queue_offset = queue_offset
+        try:
+            res = self._replay_call_plan(ser, layout, binsize, threshold, 0, self.ntemplates,
+                                         True)
+        finally:
+            self._defer_series, self._want_sparse = False, False
+        if res is not None:
+            self._dataset = False
+            self._data_ready = set()
+            self.performance_stats["total_calls"] += 1
+        return res
+
     def _run_series_gpu(self, ser, layout, binsize, threshold, t0, nt, raw):
         """Execute shared layout groups with bounded FFT/gather storage."""
+        self._last_layout = layout
+        replayed = self._replay_call_plan(ser, layout, binsize, threshold, t0, nt, raw)
+        if replayed is not None:
+            return replayed
         n, nb, nblk = self.n, layout.nbins, layout.starts.size
         H = self._gtmpl[t0:t0 + nt]
         from ._shared import shared_buffer
@@ -1506,23 +1684,39 @@ class MatchedFilter:
                         (np.minimum(layout.starts[begin:end], ser.size).astype(np.int64)
                          - base).astype(np.uint32)))
                 plan_b = bc[ckey] = (layout, parts)
+            # A deferred call reading a device allocation in place records its call plan
+            # (_replay_call_plan): every batch's forward and hierarchical record handles.
+            # Read in place means a row of an allocation (contained) or a whole one -- not a
+            # host array viewed for this call (series_owner).
+            record = (defer and is_hier and raw and pipelined
+                      and (contained is not None or (source_shared and series_owner is None))
+                      and getattr(self._gpu, "supports_replay", False))
+            recorded = []
             for begin, end, count, groups, rebased in plan_b[1]:
                 slot = slot_idx % K
                 slot_idx += 1
                 starts = starts_pool[slot]
                 spec = spectra_pool[slot][:count]
                 starts[:count] = rebased
+                fh, hh = [], []
                 self._gpu.forward(n, source, starts[:count], spec, defer=True,
-                                  slot=slot if pipelined else None)
+                                  slot=slot if pipelined else None,
+                                  **({"handle_out": fh} if record else {}))
                 try:
                     res = self._grouped_dispatch(
                         n, spec, H, groups, binsize, threshold,
                         slot=slot if pipelined else None, async_submit=pipelined,
-                        **({"nbins": nb} if getattr(layout, "ragged", False) else {}), **skw)
+                        **({"nbins": nb} if getattr(layout, "ragged", False) else {}), **skw,
+                        **({"handle_out": hh} if record else {}))
                     self._tdirty = False
                 except Exception:
                     self._gpu.cancel_forward(slot=slot if pipelined else None)
                     raise
+                if record:
+                    if len(fh) == 1 and len(hh) == 1:
+                        recorded.append(((begin, end, count, rebased), fh[0], hh[0]))
+                    else:
+                        record = False              # e.g. a split window: not one record
                 in_flight.append((begin, end, res))
                 if defer and is_hier:
                     gtrace.append((begin, end, getattr(self._gpu, "_last_dispatch", None)))
@@ -1539,6 +1733,10 @@ class MatchedFilter:
                 return _format_result(None, None, raw=False, order=layout.order, out=peaks)
             if not defer:
                 return finish_grouped()
+            if record and recorded:
+                self._record_call_plan(ser, layout, binsize, threshold, t0, nt, K, batch, slot0,
+                                       contained[0] if contained is not None else ser,
+                                       recorded, starts_pool)
             self._defer_slot = slot_idx
             deferred = _Deferred(finish_grouped)
             if gtrace and all(t[2] is not None for t in gtrace) and raw:

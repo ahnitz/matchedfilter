@@ -45,6 +45,15 @@ def _settle_metal_writes():
         mtl.settle_all()
 
 
+def _bin_count_part(r, m, u):
+    """The blocks of a ragged result selected by mask m, with their first u bins: dense
+    (idx, val) or a _SparsePeaks, as the result is."""
+    from . import _SparsePeaks
+    if isinstance(r, _SparsePeaks):
+        return r.blocks(m, u)
+    return r[0][m][:, :, :u], r[1][m][:, :, :u]
+
+
 def _normalize_windows(windows, S: int) -> np.ndarray:
     """Analysis windows as a sorted, disjoint int64 (K, 2) array of [start, stop).
 
@@ -1076,7 +1085,22 @@ class TimeDomainFilterBank:
             raise ValueError("series must be a 1D array")
         S = len(ser)
 
-        W = _normalize_windows(windows, S)
+        # A slice of a given series length normalises the same way every call (the
+        # search's windows recur every segment): memoised, with its layout cache key.
+        wkey = ((S, windows.start, windows.stop, windows.step)
+                if type(windows) is slice else None)
+        wmemo = self.__dict__.setdefault('_window_memo', {})
+        hit = wmemo.get(wkey) if wkey is not None else None
+        if hit is not None:
+            W, cache_key = hit
+        else:
+            W = _normalize_windows(windows, S)
+            cache_key = (S, W.tobytes())
+            if wkey is not None:
+                if len(wmemo) >= 64:
+                    wmemo.clear()
+                W.flags.writeable = False
+                wmemo[wkey] = (W, cache_key)
         if W.shape[0] == 0:
             return _EMPTY_FILTER_RESULTS
 
@@ -1092,7 +1116,6 @@ class TimeDomainFilterBank:
         out_tstarts = []
         out_block_lens = []
 
-        cache_key = (S, W.tobytes())
 
         if template_index is not None:
             if template_index < 0 or template_index >= self.n_templates:
@@ -1199,6 +1222,29 @@ class TimeDomainFilterBank:
             data_in = ser
 
             bs = int(binsize) if binsize is not None else (self.binsize or N)
+            # A repeat of a deferred call this group's plan has made before goes straight to
+            # the plan's recorded call plan: no bin grouping, layout or key building. The
+            # plan validates everything (layout identity, state, series memory, records);
+            # on a miss the full call below runs and records again.
+            fast_key = None
+            if (self.engine == 'hier' and tmpl_arg is None and defer and trial is None
+                    and active_plan is g.plan and getattr(active_plan, '_gpu', None) is not None
+                    and hasattr(active_plan, '_fast_series')):
+                fast_key = (cache_key, bs, eff_threshold)
+                fast = g.__dict__.get('_fast_calls')
+                hit = fast.get(fast_key) if fast else None
+                if hit is not None and hit[0] is active_plan:
+                    res = active_plan._fast_series(data_in, hit[1], bs, eff_threshold, defer,
+                                                                   getattr(self, '_queue_offset', 0), True)
+                    if res is not None:
+                        if hit[2] is None:
+                            pending.append((res, bstarts, g, tmpl_arg, N))
+                        else:
+                            for m, u in hit[2]:
+                                pending.append((_Deferred(
+                                    lambda d=res, m=m, u=u: _bin_count_part(d.result(), m, u)),
+                                    bstarts[m], g, tmpl_arg, N))
+                        continue
             if getattr(active_plan, '_bandlimited', False) and type(active_plan).__name__ != 'HierarchicalFilter':
                 bs_k = max(1, bs // 2) if bs < N else g.n // 2
                 wk_s = (bws // 2).astype(np.int64)
@@ -1233,6 +1279,10 @@ class TimeDomainFilterBank:
                 if defer and trial is None:
                     active_plan._defer_series = defer
                     active_plan._gpu._queue_offset = getattr(self, '_queue_offset', 0)
+                # A hierarchical ragged call reads back sparse, as its per-count calls would.
+                sparse_ragged = type(active_plan).__name__ == 'HierarchicalFilter'
+                if sparse_ragged:
+                    active_plan._want_sparse = True
                 try:
                     res = active_plan._run_series_ragged(
                         data_in, bstarts, bws, bwe, binsize=bs,
@@ -1240,16 +1290,22 @@ class TimeDomainFilterBank:
                 finally:
                     if defer and trial is None:
                         active_plan._defer_series = False
+                    if sparse_ragged:
+                        active_plan._want_sparse = False
                 if res is not None:
                     # Split back into the per-count groups, in their order, so the result
                     # is the one per-count calls give (peak order included).
                     bc = ((bwe - bws + bs - 1) // bs).astype(np.int64)
                     work = []
+                    if fast_key is not None and isinstance(res, _Deferred):
+                        g.__dict__.setdefault('_fast_calls', {})[fast_key] = (
+                            active_plan, getattr(active_plan, '_last_layout', None),
+                            [(bc == u, int(u)) for u in np.unique(bc)])
                     for u in np.unique(bc):
                         m = bc == u
 
                         def part(r, m=m, u=u):
-                            return r[0][m][:, :, :u], r[1][m][:, :, :u]
+                            return _bin_count_part(r, m, u)
                         work.append(((bstarts[m], bws[m], bwe[m]),
                                      _Deferred(lambda d=res, part=part: part(d.result()))
                                      if isinstance(res, _Deferred) else part(res)))
@@ -1272,6 +1328,9 @@ class TimeDomainFilterBank:
                             active_plan._defer_series = False
                 if isinstance(res, _Deferred):
                     pending.append((res, sub_starts, g, tmpl_arg, N))
+                    if fast_key is not None and len(work) == 1:
+                        g.__dict__.setdefault('_fast_calls', {})[fast_key] = (
+                            active_plan, getattr(active_plan, '_last_layout', None), None)
                     continue
                 aidx, aval = (res, None) if isinstance(res, _SparsePeaks) else res
                 if sink is not None:
