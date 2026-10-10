@@ -955,6 +955,17 @@ class _Device:
         raise VulkanError("device exposes no compute queue")
 
 
+class _HierHandle:
+    """What hier_replay needs to submit one hier_peaks call again (see hier_peaks)."""
+    __slots__ = ("kind", "key", "batch", "storage_key", "dsig", "tsig", "nd", "nt", "nbins",
+                 "sparse")
+
+    def __init__(self, kind, key, batch, storage_key, dsig, tsig, nd, nt, nbins, sparse):
+        self.kind, self.key, self.batch, self.storage_key = kind, key, batch, storage_key
+        self.dsig, self.tsig, self.nd, self.nt, self.nbins, self.sparse = (
+            dsig, tsig, nd, nt, nbins, sparse)
+
+
 class Context(InputUploads):
     """One Vulkan device, its compute queue, and the pipelines built on it."""
 
@@ -962,6 +973,11 @@ class Context(InputUploads):
     #: Async submission with per-slot fences: the series loop keeps several
     #: batches in flight. A declared capability, not a signature probe.
     supports_async = True
+    #: hier_peaks/forward take handle_out, and hier_replay/forward_replay resubmit them.
+    supports_replay = True
+    #: hier_peaks_grouped takes groups of different bin counts (nbins = the largest; per-row
+    #: windows bound each block), so a hierarchical plan's ragged call is one submission.
+    supports_ragged_hier = True
     #: peaks, peaks_grouped and hier_peaks take sparse=True and return a _SparsePeaks;
     #: hier_peaks reads only its refined pairs (the survivor list) back.
     supports_sparse = True
@@ -1245,11 +1261,17 @@ class Context(InputUploads):
                    binsize=None, threshold=0.0, window=None,
                    upload_data=True, upload_tmpl=True,
                    cascade_band=None, ct1=None, raw_thr1=None,
-                   slot=None, async_submit=False, sparse=False, row_windows=None):
+                   slot=None, async_submit=False, sparse=False, row_windows=None,
+                   handle_out=None):
         """The whole hierarchical filter in ONE command buffer.
 
         Coarse correlation, survivor compaction, then listed refinement.
         Supports single-tier or two-tier cascade indirect execution.
+
+        handle_out (a list): receives a replay handle for this exact call -- the record it
+        submitted and the input signatures it was valid for. hier_replay(handle, ...) submits
+        that record again without any of the work above, or returns None when the handle
+        no longer holds (record evicted or rebuilt, inputs re-uploaded since).
         """
         band, ct0, raw_thr, cascade_band, ct1, raw_thr1 = hier_tiers(
             n, band, ct0, raw_thr, cascade_band, ct1, raw_thr1)
@@ -1310,8 +1332,6 @@ class Context(InputUploads):
                     upload_data = upload_tmpl = True
             self._cache_touch('hier_cascade', key)
             bufs, cmd = batch
-            # What a traced segment (SegmentPlan) reads back on replay.
-            self._last_dispatch = (bufs, nd, nt, nbins, True)
             if upload_data:
                 write_input(bufs["data"], data)
                 self._uploaded["data"][storage_key] = dsig
@@ -1321,20 +1341,12 @@ class Context(InputUploads):
                 bufs["ct1"].write(np.ascontiguousarray(ct1, np.complex64))
                 self._uploaded["tmpl"][storage_key] = tsig
 
-            fence = self._get_fence(slot) if (async_submit and slot is not None) else None
-            if async_submit and slot is not None:
-                self._submit(cmd, fence=fence, wait=False, slot=slot)
-            else:
-                self._submit(cmd)
-
-            def readback():
-                if fence is not None:
-                    self._wait_fence(fence)
-                surv_count = int(bufs["args_refine"].read(np.uint32, 1)[0])
-                self.last_refinements = surv_count
-                self.last_tier1_survivors = int(bufs["args_tier1"].read(np.uint32, 1)[0])
-                return self._read_peaks(bufs, "surv1", surv_count, nd, nt, nbins, sparse)
-            return self._track(readback) if async_submit else readback()
+            if handle_out is not None:
+                handle_out.append(_HierHandle('hier_cascade', key, batch, storage_key,
+                                              self._uploaded["data"].get(storage_key),
+                                              self._uploaded["tmpl"].get(storage_key),
+                                              nd, nt, nbins, sparse))
+            return self._hier_submit(batch, True, nd, nt, nbins, sparse, slot, async_submit)
 
         key = ("hier", n, band, nd, nt, nbins, binsize, shift, lo, hi,
                int(np.float32(t2).view(np.uint32)),
@@ -1367,8 +1379,6 @@ class Context(InputUploads):
                 upload_data = upload_tmpl = True
         self._cache_touch('hier', key)
         bufs, cmd = batch
-        # What a traced segment (SegmentPlan) reads back on replay.
-        self._last_dispatch = (bufs, nd, nt, nbins, False)
         if upload_data:
             write_input(bufs["data"], data)
             if shared_buffer(data, self) is not None:
@@ -1386,19 +1396,110 @@ class Context(InputUploads):
                 bufs["ct0"].write(np.ascontiguousarray(ct0, np.complex64))
             self._uploaded["tmpl"][storage_key] = tsig
 
+        if handle_out is not None:
+            handle_out.append(_HierHandle('hier', key, batch, storage_key,
+                                          self._uploaded["data"].get(storage_key),
+                                          self._uploaded["tmpl"].get(storage_key),
+                                          nd, nt, nbins, sparse))
+        return self._hier_submit(batch, False, nd, nt, nbins, sparse, slot, async_submit)
+
+    def _hier_submit(self, batch, cascade, nd, nt, nbins, sparse, slot, async_submit):
+        """Submit one hierarchical record and return its readback (tracked when async)."""
+        bufs, cmd = batch
+        # What a traced segment (SegmentPlan) reads back on replay.
+        self._last_dispatch = (bufs, nd, nt, nbins, cascade)
         fence = self._get_fence(slot) if (async_submit and slot is not None) else None
         if async_submit and slot is not None:
             self._submit(cmd, fence=fence, wait=False, slot=slot)
         else:
             self._submit(cmd)
 
+        v = self._peak_views(bufs, cascade, nd, nt, nbins)
+
         def readback():
             if fence is not None:
                 self._wait_fence(fence)
-            surv_count = int(bufs["args"].read(np.uint32, 1)[0])
+            if v is None:                       # buffers without in-place views
+                key = "args_refine" if cascade else "args"
+                surv_count = int(bufs[key].read(np.uint32, 1)[0])
+                self.last_refinements = surv_count
+                if cascade:
+                    self.last_tier1_survivors = int(bufs["args_tier1"].read(np.uint32, 1)[0])
+                return self._read_peaks(bufs, "surv1" if cascade else "surv", surv_count,
+                                        nd, nt, nbins, sparse)
+            surv_count = int(v[0][0])
             self.last_refinements = surv_count
-            return self._read_peaks(bufs, "surv", surv_count, nd, nt, nbins, sparse)
+            if cascade:
+                self.last_tier1_survivors = int(v[1][0])
+            if sparse:
+                from . import _SparsePeaks
+                rows = np.sort(v[2][:surv_count].astype(np.int64))
+                ri = v[3][rows]
+                k, b = np.nonzero(ri >= 0)
+                return _SparsePeaks((nd, nt, nbins), rows[k] * nbins + b, ri[k, b],
+                                    v[4][rows[k], b])
+            if surv_count == 0:
+                return (np.full((nd, nt, nbins), -1, dtype=np.int32),
+                        np.zeros((nd, nt, nbins), dtype=np.complex64))
+            return v[3].reshape(nd, nt, nbins).copy(), v[4].reshape(nd, nt, nbins).copy()
         return self._track(readback) if async_submit else readback()
+
+    def _peak_views(self, bufs, cascade, nd, nt, nbins):
+        """In-place views of a hierarchical record's outputs, made once per record: (refine
+        count, tier-1 count or None, survivor list, idx (pairs, nbins), val (pairs, nbins)).
+        Results read through them are copied (np.sort, fancy indexing, .copy()) before the
+        record runs again. Dropped with the record (_evict_record)."""
+        views = self.__dict__.setdefault("_pviews", {})
+        hit = views.get(id(bufs))
+        if hit is not None and hit[0] is bufs and hit[1] == (nd, nt, nbins):
+            return hit[2]
+        pairs = nd * nt
+        names = (("args_refine", "args_tier1", "surv1") if cascade else ("args", "surv")) + ("idx", "val")
+        if not all(hasattr(bufs[k], "view") for k in names):
+            return None
+        v = ((bufs["args_refine"] if cascade else bufs["args"]).view(np.uint32, 1),
+             bufs["args_tier1"].view(np.uint32, 1) if cascade else None,
+             bufs["surv1" if cascade else "surv"].view(np.uint32, pairs),
+             bufs["idx"].view(np.int32, pairs * nbins).reshape(pairs, nbins),
+             bufs["val"].view(np.complex64, pairs * nbins).reshape(pairs, nbins))
+        views[id(bufs)] = (bufs, (nd, nt, nbins), v)
+        return v
+
+    def hier_valid(self, h):
+        """Whether hier_replay(h) would submit: the record is the one the handle saw (an
+        evicted or rebuilt record is a new object) and both inputs are still resident under
+        the signatures it saw (nothing re-uploaded or invalidated them since)."""
+        table = self._hier_cascade if h.kind == 'hier_cascade' else self._hier
+        return (table.get(h.key) is h.batch
+                and self._uploaded["data"].get(h.storage_key) == h.dsig
+                and self._uploaded["tmpl"].get(h.storage_key) == h.tsig)
+
+    def forward_valid(self, h):
+        forwards = getattr(self, "_forwards", None)
+        return forwards is not None and forwards.get(h[0]) is h[1]
+
+    def hier_replay(self, h, slot, async_submit):
+        """Submit a hier_peaks call again from its handle, or None if the handle is stale.
+
+        Valid exactly when the record is the one the handle saw (identity: an evicted or
+        rebuilt record is a new object) and both inputs are still resident under the
+        signatures it saw (nothing re-uploaded or invalidated them since)."""
+        if not self.hier_valid(h):
+            return None
+        self._cache_touch(h.kind, h.key)
+        return self._hier_submit(h.batch, h.kind == 'hier_cascade', h.nd, h.nt, h.nbins,
+                                 h.sparse, slot, async_submit)
+
+    def forward_replay(self, h, slot):
+        """Queue a forward call again from its handle (forward(..., handle_out=)); False if
+        the record is no longer the one the handle saw."""
+        if not self.forward_valid(h):
+            return False
+        self._cache_touch('forward', h[0])
+        if not isinstance(getattr(self, "_pending_forward", None), dict):
+            self._pending_forward = {}
+        self._pending_forward[slot] = h[1][-1]
+        return True
 
     @staticmethod
     def _read_peaks(bufs, surv_key, count, nd, nt, nbins, sparse):
@@ -1941,7 +2042,8 @@ class Context(InputUploads):
 
     def hier_peaks_grouped(self, n, band, data, tmpl, ct0, raw_thr, groups, binsize, threshold,
                            *, upload_tmpl=True, cascade_band=None, ct1=None, raw_thr1=None,
-                           slot=None, async_submit=False, sparse=False, nbins=None):
+                           slot=None, async_submit=False, sparse=False, nbins=None,
+                           handle_out=None):
         """Hierarchical peaks over row ranges of one spectra batch, each with its own window,
         as ONE recording: every tier is a single dispatch over all rows.
 
@@ -1953,7 +2055,7 @@ class Context(InputUploads):
                                    threshold, upload_tmpl=upload_tmpl, cascade_band=cascade_band,
                                    ct1=ct1, raw_thr1=raw_thr1, slot=slot,
                                    async_submit=async_submit, sparse=sparse, nbins=nbins,
-                                   max_bins=_MAX_BINS)
+                                   max_bins=_MAX_BINS, handle_out=handle_out)
 
     def empty_shared(self, shape, dtype=np.complex64, *, readback=False):
         factory = (lambda ctx, size: _Buffer(ctx, size, readback=True)) if readback else _Buffer
@@ -1963,8 +2065,11 @@ class Context(InputUploads):
         """Dispatch fused forward FFT kernel path."""
         return self.forward(n, series, starts, spectra, defer=defer, slot=slot, fused=True)
 
-    def forward(self, n, series, starts, spectra, *, defer=False, slot=None, fused=False, rows=None):
+    def forward(self, n, series, starts, spectra, *, defer=False, slot=None, fused=False, rows=None,
+                handle_out=None):
         """Gather and normalize forward FFTs directly into shared spectra.
+
+        handle_out (a list): receives (key, record) for forward_replay.
 
         rows=(r0, count): only rows r0..r0+count of starts/spectra (r0 a multiple of 64, so
         the descriptor offsets stay aligned); lets several series allocations fill one
@@ -2024,6 +2129,8 @@ class Context(InputUploads):
             self._register_record('forward', key, None, pool_start)
         self._cache_touch('forward', key)
         cmd = batch[-1]
+        if handle_out is not None:
+            handle_out.append((key, batch))
         if defer:
             if not isinstance(getattr(self, "_pending_forward", None), dict):
                 self._pending_forward = {}
@@ -3121,6 +3228,8 @@ class Context(InputUploads):
         self._drain()
         token = (kind, key)
         batch = self._record_tables()[kind].pop(key)
+        if kind in ('hier', 'hier_cascade'):
+            self.__dict__.get("_pviews", {}).pop(id(batch[0]), None)
         cmd = batch[-1]
         getattr(self, "_phases", {}).pop(getattr(cmd, "value", cmd), None)
         pf = getattr(self, '_pending_forward', None)
