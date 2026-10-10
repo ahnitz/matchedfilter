@@ -139,3 +139,26 @@ two), and no 128-first chain reaches the top six, screened or not; the trials ag
 
 Load stayed high most of the day; one window at load ~8: base 1.71 s -> 1.49 s (1.15x).
 A second rep was invalidated by load rising to 18.
+
+## Pricing a bounding first tier on the GPU (gatechain, 2026-10-09)
+
+A first tier that reports an upper bound of the FP32 statistic (Vulkan fp16 coarse with
+`MF_VK_C16_BOUND`, docs/vulkan-8060s-roofline.md section 10) passes a superset of the pairs
+the gate model's noise draws assume; the extra pairs go straight to the next stage. That is
+safe but was unpriced. Now, backend-neutrally:
+
+* `_RAW_GATE_SWITCH` maps a GPU backend to the switch that makes its first tier report the
+  raw statistic, and a gate kind (`c16b` for Vulkan). A backend whose kernel gains a bound
+  adds a row; Metal and CUDA have none yet, so they price as before (`f32`).
+* `calibrate_costs_gpu` measures, per band, the refined-pair count at thresholds placed at
+  the calibration densities with the raw gate (in a child process: the switch is baked into
+  pipelines and recorded command buffers, so it cannot be flipped within a context), and
+  the bounded gate's count at the same thresholds: `CostModel.excess[b]`.
+* `CostModel.chain_cost` scales the first stage after tier 0 by `pass_excess(b, reach)`.
+  Later tiers are not scaled: the extra pairs sit just under the gate, and a later tier
+  rejects them at its modelled rate or better.
+* Cost files are keyed by gate kind (`gpu,n,device,c16b`), so a model measured without the
+  bound is not reused for one with it.
+
+Measured on the 8060S (n = 2048): bounded / raw pass rate 1.06-1.09 at 1% density and
+1.04-1.07 at 10%, rising with band (64 -> 1024). Calibration grows by about 2 s per n.

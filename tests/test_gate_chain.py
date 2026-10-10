@@ -700,3 +700,36 @@ def test_choice_cache_keys_on_cost_content_not_identity(monkeypatch):
     assert a["cost"] != b["cost"]
     same = gc.CostModel.from_dict(dear_refine.to_dict())
     assert gc.choose_chain(prof, 2048, 6.0, 1e-3, cost=same, window=(192, 1856))[0] is b   # content hit
+
+
+def test_bounding_first_tier_excess_is_priced():
+    """A first tier that reports a bound passes extra pairs; the model charges the next stage."""
+    gc = mf._gatechain
+    dense = {256: 10.0, 512: 30.0}
+    sparse = {256: [(0.01, 40.0), (0.1, 35.0)], 512: [(0.01, 60.0), (0.1, 50.0)]}
+    refine = [(0.01, 1000.0), (0.1, 900.0)]
+    plain = gc.CostModel(2048, dense, sparse, refine)
+    bound = gc.CostModel(2048, dense, sparse, refine,
+                         excess={256: [(0.01, 0.0108), (0.1, 0.105)]})
+    assert plain.pass_excess(256, 0.02) == 1.0
+    assert 1.05 < bound.pass_excess(256, 0.02) < 1.08
+    assert bound.pass_excess(512, 0.02) == 1.0          # no row for this band
+    reach = [1.0, 0.02, 0.002]
+    extra = bound.chain_cost((256, 512), reach) - plain.chain_cost((256, 512), reach)
+    r1 = 0.02 * bound.pass_excess(256, 0.02)
+    assert extra == pytest.approx(r1 * plain.sparse(512, r1) - 0.02 * plain.sparse(512, 0.02))
+    assert extra > 0
+    import json
+    rt = gc.CostModel.from_dict(json.loads(json.dumps(bound.to_dict())))
+    assert rt.signature() == bound.signature()
+
+
+def test_gpu_gate_kind_keys(monkeypatch):
+    gc = mf._gatechain
+    monkeypatch.setattr(gc, "_gpu_backend", lambda d: "vulkan")
+    monkeypatch.delenv("MF_VK_C16_BOUND", raising=False)
+    assert gc.gpu_gate_kind("gpu:0") == "c16b"
+    monkeypatch.setenv("MF_VK_C16_BOUND", "0")
+    assert gc.gpu_gate_kind("gpu:0") == "f32"
+    monkeypatch.setattr(gc, "_gpu_backend", lambda d: "metal")
+    assert gc.gpu_gate_kind("gpu:0") == "f32"
