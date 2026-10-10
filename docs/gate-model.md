@@ -244,3 +244,44 @@ r = 2.8e-3 and 200 templates give 43%, matching Vulkan's ~40%, while (256, 1024)
 r ~ 5e-5 gives ~1%. Which chain is running is what decides f; a calibration on injections
 and glitches is not needed to price it. So no new density model is added; the measuring
 tool is kept for when a workload with glitches says otherwise.
+
+## Large-n pricing on the GPU (2026-10-10): measured, nothing kept
+
+Asked: why did model-based forward credit move 1757 templates to (8192, (1024, 2048)) and
+make the fine stage 1.4-1.7x slower? Measured on dev3's Renoir iGPU (Vulkan, load < 1) with
+pinned block sizes (ladder, 2 tops x 6 segments, MF_AUTOTUNE=0, one cost file):
+
+| n | chain (main) | fine |
+|---|---|---|
+| 2048 | (512, 1024) | 2.16 s |
+| 4096 | (512, 1024) | 1.96 s |
+| 8192 | (1024, 2048) | 2.53 s |
+
+Main's automatic choice was (4096, ...) in every run (1.96-2.05 s), so without the credit
+main already picks the best of the three here. On dev2's 8060S it picks 2048 (section
+above).
+
+**What is wrong is the per-term GPU calibration, not one term.** Two calibrations of the
+same n on the quiet Renoir disagree by several-fold per term:
+- dense[2048] at n = 8192: 317 vs 107.
+- dense[128]: clamped to 0.
+- block at n = 2048: 269 vs 726 (cost files of two processes).
+- Sparse and refine values at 1% density: often clamped to 0.
+
+Two attempts to make the terms robust were measured, and both are rejected:
+- Every term as a difference of two calls, alternated so clock drift cancels.
+- A host fit on a fixed-length series, so series staging counts per call, not per block.
+
+Per-pair coarse work at small bands is below the call's noise. On this GPU the call is
+bound by fixed latency, not by pairs. With the reworked terms the branch chose
+(8192, (2048, 4096)) and the fine stage took 3.47 s, against main's 2.03 s.
+
+So the model's per-term sum resolves n only when the terms differ by much more than their
+noise. A credit that is itself a per-term correction (the band forward's) can tip a near
+tie the wrong way. That is what happened with the model's refine-block fraction. The
+fraction itself is right (previous section).
+
+The robust fix is to measure n end to end, as chains are already measured: trial the
+model's top block sizes on real calls and lock the faster, with the same deterministic tie
+rule. That is the next step for `price_block_sizes`. Until it exists, the forward credit
+stays measured-only.
