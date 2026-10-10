@@ -2344,7 +2344,9 @@ class HierarchicalFilter(MatchedFilter):
             if best is None:
                 raise ValueError(_uncovered_message(self.n, self.snr, self.fd))
             margin = float(os.environ.get("MF_CHAIN_MARGIN", _CHAIN_MARGIN))
-            shortlist = tuple(q["chain"] for q in plans if q["cost"] <= best["cost"] * (1.0 + margin))
+            shortlist = tuple(q["chain"] for q in sorted(
+                (q for q in plans if q["cost"] <= best["cost"] * (1.0 + margin)),
+                key=lambda q: (q["chain"] != best["chain"], q["cost"])))
             hit = (tuple(best["chain"]), shortlist[:_CHAIN_SHORTLIST_MAX])
             with _AUTOTUNE_LOCK:
                 _Q15_MODEL[(key, tuple(best["chain"]))] = bool(best.get("q15", False))
@@ -2382,6 +2384,21 @@ class HierarchicalFilter(MatchedFilter):
             self._q15_pref = _Q15_MODEL.get((key, tuple(chain)), False)
         return tuple(chain)
 
+    def _first_tier_pass(self, pairs):
+        """Fraction of the last call's pairs the first tier passed, where the engine reports it."""
+        if self._gpu is not None:
+            ctx = self._gpu
+            n1 = getattr(ctx, "last_tier1_survivors", None) if len(self._chain) > 1 else \
+                getattr(ctx, "last_refinements", None)
+            return None if n1 is None else n1 / pairs
+        if self._mf is None:
+            return None
+        st = self._mf.tier_stats()
+        prev, self._tier0_seen = getattr(self, "_tier0_seen", None), (st[0][1], self._mf.stats()[0])
+        if prev is None or self._tier0_seen[1] <= prev[1]:
+            return None
+        return (self._tier0_seen[0] - prev[0]) / (self._tier0_seen[1] - prev[1])
+
     def _chain_trial_record(self, dt, pairs):
         """Record one measured call for this plan's trial chain; lock the winner once every candidate has enough."""
         with _AUTOTUNE_LOCK:
@@ -2389,11 +2406,16 @@ class HierarchicalFilter(MatchedFilter):
             if tr is None:
                 return
             if tr["winner"] is None and pairs > 0:
-                tr["samples"][self._chain].append(dt / pairs)
+                # A chain whose first tier passed most pairs on this call gates nothing: it
+                # is priced at infinity, so it can never be locked in whatever its time.
+                frac = self._first_tier_pass(pairs)
+                tr["samples"][self._chain].append(
+                    float("inf") if frac is not None and frac > _gatechain._USELESS_PASS else dt / pairs)
                 need = int(os.environ.get("MF_CHAIN_TRIALS", _CHAIN_TRIALS_PER_CAND))
                 if all(len(v) >= need for v in tr["samples"].values()):
                     med = {c: float(np.median(v)) for c, v in tr["samples"].items()}
-                    tr["winner"] = min(med, key=med.get)
+                    # Within the trials' own noise, a fixed order decides, not the timer.
+                    tr["winner"] = _gatechain.pick_stable(med, med.get, _gatechain.canonical_order)
                     _log_autotune("CHAIN-TRIAL locked %s  median s/pair %s", tr["winner"],
                                   {c: "%.3g" % v for c, v in med.items()})
             winner = tr["winner"]
