@@ -162,7 +162,8 @@ def grouped_row_windows(groups, n, nd, binsize, max_bins=MAX_BINS, nbins=None):
 
 def hier_peaks_grouped(ctx, n, band, data, tmpl, ct0, raw_thr, groups, binsize, threshold, *,
                        upload_tmpl=True, cascade_band=None, ct1=None, raw_thr1=None,
-                       slot=None, async_submit=False, sparse=False, nbins=None, max_bins=MAX_BINS):
+                       slot=None, async_submit=False, sparse=False, nbins=None, max_bins=MAX_BINS,
+                       handle_out=None):
     """hier_peaks_grouped for any backend whose hier_peaks accepts row_windows: one
     recording, each tier a single dispatch over all rows, per-row windows in the kernels.
 
@@ -177,4 +178,5 @@ def hier_peaks_grouped(ctx, n, band, data, tmpl, ct0, raw_thr, groups, binsize, 
                           threshold=threshold, window=window, upload_data=False,
                           upload_tmpl=upload_tmpl, cascade_band=cascade_band, ct1=ct1,
                           raw_thr1=raw_thr1, slot=slot, async_submit=async_submit,
-                          sparse=sparse, row_windows=(groups, win))
+                          sparse=sparse, row_windows=(groups, win),
+                          **({} if handle_out is None else {"handle_out": handle_out}))
