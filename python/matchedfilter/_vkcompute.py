@@ -448,6 +448,15 @@ def _fused_valid(ctx, cmds, serials):
             and all(phases.get(h, {}).get("_serial") == k for h, k in zip(cmds, serials)))
 
 
+def _fuse_interleave():
+    """Phases the second half of a fused batch runs behind the first (0: lockstep).
+    MF_GPU_FUSE_INTERLEAVE overrides; the default aligns the forward with coarse0."""
+    v = os.environ.get("MF_GPU_FUSE_INTERLEAVE")
+    if v is not None and v != "":
+        return max(0, int(v))
+    return 0
+
+
 class _FusedBatch:
     """Submissions collected across contexts on one device, recorded and submitted together."""
 
@@ -502,18 +511,34 @@ class _FusedBatch:
         prof = next((ctx for ctx, _ in self.items if getattr(ctx, "_profile", False)), None)
         if prof is not None:
             prof._stamp(cmd, "start")
-        for phase in _FUSED_PHASES:
+        # Phases run in lockstep across the batch's items, one global barrier per phase.
+        # With an interleave offset k the batch's second half runs k phases behind its
+        # first: forward (DRAM-bound) of one half then shares a barrier interval with
+        # coarse0 (VALU-bound) of the other, so the two overlap on the device. Every item
+        # still sees its own phases in order, each behind its own recorded barriers.
+        P = _FUSED_PHASES
+        k = _fuse_interleave() if len(self.items) > 1 else 0
+        half = (len(self.items) + 1) // 2
+        groups = ((self.items[:half], 0), (self.items[half:], k)) if k else ((self.items, 0),)
+        for step in range(len(P) + k):
             barriers = []
-            for ctx, cmds in self.items:
-                for h in cmds:
-                    work_bar = ctx._phases[h].get(phase)
-                    if work_bar is None:
-                        continue
-                    work, bar = work_bar
-                    for name, args in work:
-                        getattr(vk, name)(cmd, *args[1:])
-                    barriers.extend(bar)
-            # One global barrier per distinct (stages, access) is enough for the whole phase;
+            labels = []
+            for items, lag in groups:
+                i = step - lag
+                if not 0 <= i < len(P):
+                    continue
+                phase = P[i]
+                labels.append(phase)
+                for ctx, cmds in items:
+                    for h in cmds:
+                        work_bar = ctx._phases[h].get(phase)
+                        if work_bar is None:
+                            continue
+                        work, bar = work_bar
+                        for name, args in work:
+                            getattr(vk, name)(cmd, *args[1:])
+                        barriers.extend(bar)
+            # One global barrier per distinct (stages, access) is enough for the step;
             # buffer barriers are kept as recorded.
             seen = set()
             for name, args in barriers:
@@ -526,7 +551,7 @@ class _FusedBatch:
                     seen.add(sig)
                 getattr(vk, name)(cmd, *args[1:])
             if prof is not None:
-                prof._stamp(cmd, "fused " + phase)
+                prof._stamp(cmd, "fused " + ("+".join(labels) if k else labels[0]))
         _check(vk.vkEndCommandBuffer(cmd), "end fused")
         self.prof = prof
         cache[key] = (cmd, [list(cmds) for _, cmds in self.items])
