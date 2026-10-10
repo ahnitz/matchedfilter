@@ -204,9 +204,11 @@ remains for other hardware.
   and the sparse tier-2 price at density 1.0 is a clamped extrapolation of the 1%/10%
   calibration, so the chain could rank near the top. (The order is not narrower-then-wider:
   the GPU prints the cascade as (band, cascade_band); the chain is (64, 256).)
-* **Now:** `choose_chain` skips any split in which a tier's modelled noise pass rate exceeds
-  `_USELESS_PASS = 0.5` (pinned chains still get thresholds). Trials record a call whose
-  first tier passed more than that fraction as infinitely slow, so such a chain cannot lock.
+* **Now:** `choose_chain` skips any split in which a tier passes more than
+  `_USELESS_PASS = 0.5` of its pairs on to another tier (pinned chains still get thresholds;
+  the last tier's pass rate into the refine is left to the cost, since at low snr every
+  chain refines most pairs). Trials record a call whose first tier passed more than that
+  fraction to the next tier as infinitely slow, so such a chain cannot lock.
   `test_a_tier_that_passes_most_pairs_is_never_chosen` reproduces the (64, ...) candidates
   without the rule.
 * **Stable ties.** Candidates within `TIE = 5%` are treated as tied: the model breaks ties on
