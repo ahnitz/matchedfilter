@@ -448,13 +448,81 @@ def _fused_valid(ctx, cmds, serials):
             and all(phases.get(h, {}).get("_serial") == k for h, k in zip(cmds, serials)))
 
 
+#: Interleave depths a fused batch is timed at: 0 is lockstep; 3 puts the second half's
+#: forward (DRAM-bound) beside the first half's coarse0 (VALU-bound).
+_INTERLEAVE_CANDIDATES = (0, 3)
+#: An interleaved depth must beat lockstep by this factor to be chosen.
+_INTERLEAVE_MARGIN = 0.95
+#: Timed submissions per candidate before a batch shape's depth is decided.
+_INTERLEAVE_TRIALS = 5
+
+
+def _batch_shape(items):
+    """(shape, work) of a fused batch: the multiset of phase sets its items carry, and its
+    coarse work (workgroups dispatched in coarse0, at least 1) to normalise a timing."""
+    sig, work = [], 1
+    for ctx, cmds in items:
+        names = []
+        for h in cmds:
+            ph = ctx._phases[h]
+            names.extend(n for n in _FUSED_PHASES if n in ph)
+            for name, args in (ph.get("coarse0") or ((), ()))[0]:
+                if name == "vkCmdDispatch":
+                    work += int(getattr(args[1], "value", args[1]))
+        sig.append(tuple(names))
+    return (len(items) > 1, tuple(sorted(set(sig)))), work
+
+
 def _fuse_interleave():
-    """Phases the second half of a fused batch runs behind the first (0: lockstep).
-    MF_GPU_FUSE_INTERLEAVE overrides; the default aligns the forward with coarse0."""
+    """A forced interleave depth (MF_GPU_FUSE_INTERLEAVE), or None: measured per batch."""
     v = os.environ.get("MF_GPU_FUSE_INTERLEAVE")
     if v is not None and v != "":
         return max(0, int(v))
-    return 0
+    return None
+
+
+class _DeviceTimer:
+    """Timestamps around whole submissions on one device, independent of MF_GPU_TIMING:
+    used to choose a fused batch's interleave depth by measurement."""
+    RING = 64
+
+    def __init__(self, dev):
+        vk = dev.vk
+        for name, args in (("vkCmdWriteTimestamp", [_vp, _u32, _vp, _u32]),
+                           ("vkCmdResetQueryPool", [_vp, _vp, _u32, _u32]),
+                           ("vkGetQueryPoolResults", [_vp, _vp, _u32, _u32, ctypes.c_size_t, _vp,
+                                                      ctypes.c_uint64, _u32])):
+            getattr(vk, name).argtypes = args
+        self.dev = dev
+        self.pool = _vp()
+        _check(vk.vkCreateQueryPool(dev.device, ctypes.byref(
+            _QueryPoolCreate(11, None, 0, 2, 2 * self.RING, 0)), None, ctypes.byref(self.pool)),
+            "timer pool")
+        self.cmds = (_vp * (2 * self.RING))()
+        _check(vk.vkAllocateCommandBuffers(dev.device, ctypes.byref(
+            _CmdBufAlloc(40, None, dev.command_pool, 0, 2 * self.RING)), self.cmds), "timer cmds")
+        for i in range(self.RING):
+            b, e = _vp(self.cmds[2 * i]), _vp(self.cmds[2 * i + 1])
+            begin = _CmdBufBegin(42, None, 0, None)
+            _check(vk.vkBeginCommandBuffer(b, ctypes.byref(begin)), "timer b")
+            vk.vkCmdResetQueryPool(b, self.pool, 2 * i, 2)
+            vk.vkCmdWriteTimestamp(b, 0x1, self.pool, 2 * i)
+            _check(vk.vkEndCommandBuffer(b), "timer b end")
+            _check(vk.vkBeginCommandBuffer(e, ctypes.byref(begin)), "timer e")
+            vk.vkCmdWriteTimestamp(e, 0x2000, self.pool, 2 * i + 1)
+            _check(vk.vkEndCommandBuffer(e), "timer e end")
+        self.next = 0
+
+    def pair(self):
+        i = self.next
+        self.next = (i + 1) % self.RING
+        return i, _vp(self.cmds[2 * i]), _vp(self.cmds[2 * i + 1])
+
+    def ns(self, i, period):
+        out = (ctypes.c_uint64 * 2)()
+        _check(self.dev.vk.vkGetQueryPoolResults(self.dev.device, self.pool, 2 * i, 2, 16, out, 8,
+                                                 0x3), "timer read")
+        return (out[1] - out[0]) * period
 
 
 class _FusedBatch:
@@ -462,6 +530,7 @@ class _FusedBatch:
 
     def __init__(self, dev):
         self.dev, self.items, self.state = dev, [], "open"
+        self.trial = None
 
     #: Submissions per fused command buffer. The device starts on a chunk while the host
     #: prepares the next: fusing a whole segment into one buffer left the GPU idle through
@@ -488,7 +557,29 @@ class _FusedBatch:
         dev, vk = self.dev, self.dev.vk
         # The same jobs recur every segment: reuse their fused recording while every
         # constituent recording is still cached (eviction drops its phases).
-        key = _fused_key(self.items)
+        base = _fused_key(self.items)
+        # The interleave depth is a MEASURED choice, per device and batch SHAPE (the
+        # phases its items carry): the first batches of a shape take the candidates in a
+        # random order under device timestamps, each time normalised by the batch's
+        # coarse work, and the lower median is kept from then on. So it turns on where the
+        # forward is DRAM-bound (full clock, other GPUs) and stays off where it is not.
+        # Batches rarely recur exactly (a chunk's composition varies), so a per-batch
+        # trial would seldom finish; the shape is what decides whether overlap can pay.
+        forced = _fuse_interleave()
+        choice = dev.__dict__.setdefault("interleave_choice", {})
+        if forced is not None or len(self.items) < 2:
+            k = forced or 0
+        else:
+            shape, work = _batch_shape(self.items)
+            st = choice.setdefault(shape, {"k": None, "t": {c: [] for c in _INTERLEAVE_CANDIDATES}})
+            if st["k"] is not None:
+                k = st["k"]
+            else:
+                pending = [c for c in _INTERLEAVE_CANDIDATES
+                           if len(st["t"][c]) < _INTERLEAVE_TRIALS]
+                k = pending[int.from_bytes(os.urandom(1), "little") % len(pending)]
+                self.trial = (shape, k, work)
+        key = (base, k)
         cache = dev.__dict__.setdefault("fused_cache", OrderedDict())
         hit = cache.get(key)
         if dev.trace is not None:
@@ -517,7 +608,6 @@ class _FusedBatch:
         # coarse0 (VALU-bound) of the other, so the two overlap on the device. Every item
         # still sees its own phases in order, each behind its own recorded barriers.
         P = _FUSED_PHASES
-        k = _fuse_interleave() if len(self.items) > 1 else 0
         half = (len(self.items) + 1) // 2
         groups = ((self.items[:half], 0), (self.items[half:], k)) if k else ((self.items, 0),)
         for step in range(len(P) + k):
@@ -576,7 +666,15 @@ class _FusedBatch:
                "vkCreateFence")
         self.cmd = cmd
         timed = next((ctx for ctx, _ in self.items if ctx._timing), None)
-        if timed is not None:
+        if self.trial is not None:
+            timer = dev.__dict__.get("fuse_timer")
+            if timer is None:
+                timer = dev.fuse_timer = _DeviceTimer(dev)
+            slot, begin, end = timer.pair()
+            self.trial = self.trial + (slot,)
+            cmds = (_vp * 3)(begin, cmd, end)
+            submit = _SubmitInfo(4, None, 0, None, None, 3, cmds, 0, None)
+        elif timed is not None:
             begin, end = timed._timestamp_pair("fused")
             cmds = (_vp * 3)(begin, cmd, end)
             submit = _SubmitInfo(4, None, 0, None, None, 3, cmds, 0, None)
@@ -595,6 +693,19 @@ class _FusedBatch:
         fences = (_vp * 1)(self.fence)
         _check(vk.vkWaitForFences(dev.device, 1, fences, 1, 0xFFFFFFFFFFFFFFFF), "vkWaitForFences")
         vk.vkDestroyFence(dev.device, self.fence, None)
+        if self.trial is not None and len(self.trial) == 4:
+            shape, k, work, slot = self.trial
+            st = dev.__dict__.get("interleave_choice", {}).get(shape)
+            if st is not None and st["k"] is None:
+                st["t"][k].append(dev.fuse_timer.ns(slot, dev._ts_period) / work)
+                if all(len(v) >= _INTERLEAVE_TRIALS for v in st["t"].values()):
+                    # Lockstep unless a deeper interleave is clearly faster: the timings
+                    # carry a few percent of clock and content noise, and a coin flip
+                    # between two equal choices only adds a barrier per phase.
+                    med = {c: float(np.median(v)) for c, v in st["t"].items()}
+                    st["k"] = min(med, key=lambda c: med[c] / (1.0 if c == 0 else _INTERLEAVE_MARGIN))
+                    # The losers' recordings are never submitted again; the cache's LRU
+                    # retires them (another batch may still be executing one now).
 
 
 def fused():
@@ -627,8 +738,8 @@ def replay_fused(dev, keys):
             return False
         # Every constituent recording must still exist: eviction frees its descriptor sets
         # and buffers, and replaying a recording built on them faults the device.
-        for (ctx_id, serials), cmds in zip(key, hit[1]):
-            if not _fused_valid(_CONTEXTS_BY_ID.get(ctx_id), cmds, serials):
+        for (ctx_id, serials), rec in zip(key[0], hit[1]):
+            if not _fused_valid(_CONTEXTS_BY_ID.get(ctx_id), rec, serials):
                 if os.environ.get("MF_REPLAY_DEBUG"):
                     print("replay invalid: constituent recording gone", flush=True)
                 return False
