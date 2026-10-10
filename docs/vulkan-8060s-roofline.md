@@ -464,3 +464,19 @@ forwards of one half of a fused chunk with the compute-bound coarse0 of the othe
 Today every forward of a chunk runs before a global barrier and all coarse0 after it, so
 the two never overlap. This is a recording-order change in `_FusedBatch.flush`, and it
 should capture most of the max(compute, memory) benefit.
+
+### Interleaved fused chunks (measured candidate, off by default)
+`_FusedBatch.flush` can run the chunk's second half k phases behind its first
+(`MF_GPU_FUSE_INTERLEAVE=k`). With k = 3, forward(B) shares a barrier interval with
+coarse0(A).
+- **Ordering:** each item still sees its own phases in order, behind its own recorded
+  barriers. The per-step barrier dedup only merges identical global memory barriers.
+- **Correctness:** forced on, `--check cpu` is exact in both modes.
+- **Speed, as measured:** the GPU was held at ~600-700 MHz by the APU's shared ~120 W
+  package power under the Pegasus load. At that clock, chain (512, 256) gives fused device
+  time 31.7 ms in lockstep against 32.7 and 32.5 ms interleaved.
+- **No overlap gain at that clock.** The coarse0+forward step took 13.3 ms against ~12.4 ms
+  for the two halves serially. At 600 MHz the forward is no longer DRAM-bound (its FFT
+  dominates), so there is nothing to hide.
+- **It stays off** until it can be measured at full clock, where the forward is DRAM-bound
+  (169 GB/s) and the overlap premise holds.
