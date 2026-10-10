@@ -887,92 +887,92 @@ uint slotToIndex_0(uint slot_0)
 }
 
 
-#line 1550
+#line 1578
 [[kernel]] void tcFullStage3(uint3 gid_0 [[threadgroup_position_in_grid]], uint3 lid_0 [[thread_position_in_threadgroup]], packed_float2 device* entryPointParams_scratch_1 [[buffer(0)]], packed_float2 device* entryPointParams_output_1 [[buffer(1)]])
 {
 
-#line 1550
+#line 1578
     thread KernelContext_0 kernelContext_4;
 
-#line 1550
+#line 1578
     (&kernelContext_4)->entryPointParams_scratch_0 = entryPointParams_scratch_1;
 
-#line 1550
+#line 1578
     (&kernelContext_4)->entryPointParams_output_0 = entryPointParams_output_1;
 
-#line 1550
+#line 1578
     threadgroup array<uint, int(2048)> stg_1;
 
-#line 1550
+#line 1578
     (&kernelContext_4)->stg_0 = &stg_1;
 
 
 
     uint _S31 = gid_0.x;
 
-#line 1554
+#line 1582
     uint _S32 = _S31 / 2048U;
 
-#line 1554
+#line 1582
     uint _S33 = _S31 % 2048U;
     uint tid_1 = lid_0.x;
     (&kernelContext_4)->_tid_0 = tid_1;
     (&kernelContext_4)->_stgBase_0 = 0U;
     thread array<float2, int(16)> r_5;
 
-#line 1558
+#line 1586
     uint m_1 = 0U;
     for(;;)
     {
 
-#line 1559
+#line 1587
         if(m_1 < 16U)
         {
         }
         else
         {
 
-#line 1559
+#line 1587
             break;
         }
 
-#line 1560
+#line 1588
         r_5[m_1] = float2(*((&kernelContext_4)->entryPointParams_scratch_0+(_S32 * 4194304U + _S33 * 2048U + tid_1 + 128U * m_1))) ;
 
-#line 1559
+#line 1587
         m_1 = m_1 + 1U;
 
-#line 1559
+#line 1587
     }
 
-#line 1559
+#line 1587
     transform_0(&r_5, tid_1, &kernelContext_4);
 
-#line 1559
+#line 1587
     uint i_5 = 0U;
 
 
     for(;;)
     {
 
-#line 1562
+#line 1590
         if(i_5 < 16U)
         {
         }
         else
         {
 
-#line 1562
+#line 1590
             break;
         }
 
-#line 1562
+#line 1590
         *((&kernelContext_4)->entryPointParams_output_0+(_S32 * 4194304U + slotToIndex_0(tid_1 * 16U + i_5) * 2048U + _S33)) = packed_float2(float2(r_5[i_5].x, r_5[i_5].y)) ;
 
-#line 1562
+#line 1590
         i_5 = i_5 + 1U;
 
-#line 1562
+#line 1590
     }
 
 
