@@ -1804,17 +1804,8 @@ class Context(InputUploads):
         _check(vk.vkEndCommandBuffer(cmd), "vkEndCommandBuffer")
         return b, cmd
 
-    def hier_peaks_grouped(self, n, band, data, tmpl, ct0, raw_thr, groups, binsize, threshold,
-                           *, upload_tmpl=True, cascade_band=None, ct1=None, raw_thr1=None,
-                           slot=None, async_submit=False, sparse=False, nbins=None):
-        """Hierarchical peaks over row ranges of one spectra batch, each with its own window,
-        as ONE recording: every tier is a single dispatch over all rows.
-
-        ``groups`` holds (lo, hi, a, b): rows a..b of ``data`` are searched over [lo, hi).
-        The windows go to the kernels per row (gRowWin, mfRowWindows), so a series call's
-        first, interior and last block groups no longer cost three dispatches per stage.
-        Output bins follow the first group's bin count, as hier_peaks_grouped on CUDA."""
-        nd = data.shape[0]
+    def _row_windows(self, n, nd, groups, binsize, nbins):
+        """Validated (groups, binsize, per-row windows, recording window) of a grouped call."""
         groups = tuple((int(lo), int(hi), int(a), int(b)) for lo, hi, a, b in groups)
         binsize = int(binsize)
         nb = (groups[0][1] - groups[0][0] - 1) // binsize + 1
@@ -1822,8 +1813,6 @@ class Context(InputUploads):
             nb = max(nb, int(nbins))
         if nb > _MAX_BINS:
             raise ValueError("grouped dispatch exceeds the kernel bin limit")
-        if shared_buffer(data, self) is None:
-            raise ValueError("grouped spectra must be GPU-shared (a forward batch)")
         win = np.zeros(2 * nd, np.uint32)
         for lo, hi, a, b in groups:
             if not (0 <= lo < hi <= n) or not (0 <= a < b <= nd):
@@ -1838,6 +1827,34 @@ class Context(InputUploads):
         hi0 = min(n, lo0 + nb * binsize)
         if -(-(hi0 - lo0) // binsize) != nb:
             lo0, hi0 = max(0, n - nb * binsize), n
+        return groups, binsize, win, lo0, hi0
+
+    def hier_peaks_grouped(self, n, band, data, tmpl, ct0, raw_thr, groups, binsize, threshold,
+                           *, upload_tmpl=True, cascade_band=None, ct1=None, raw_thr1=None,
+                           slot=None, async_submit=False, sparse=False, nbins=None):
+        """Hierarchical peaks over row ranges of one spectra batch, each with its own window,
+        as ONE recording: every tier is a single dispatch over all rows.
+
+        ``groups`` holds (lo, hi, a, b): rows a..b of ``data`` are searched over [lo, hi).
+        The windows go to the kernels per row (gRowWin, mfRowWindows), so a series call's
+        first, interior and last block groups no longer cost three dispatches per stage.
+        Output bins follow the first group's bin count, as hier_peaks_grouped on CUDA."""
+        nd = data.shape[0]
+        if shared_buffer(data, self) is None:
+            raise ValueError("grouped spectra must be GPU-shared (a forward batch)")
+        # The same groups recur every segment: their validated per-row windows are cached
+        # (a fine segment makes hundreds of these calls; rebuilding them was host time the
+        # device waited for).
+        memo = self.__dict__.setdefault("_rowwin_memo", {})
+        mkey = (n, nd, groups if isinstance(groups, tuple) else tuple(map(tuple, groups)),
+                int(binsize), nbins)
+        hit = memo.get(mkey)
+        if hit is None:
+            hit = self._row_windows(n, nd, groups, binsize, nbins)
+            if len(memo) > 4096:
+                memo.clear()
+            memo[mkey] = hit
+        groups, binsize, win, lo0, hi0 = hit
         return self.hier_peaks(n, band, data, tmpl, ct0, raw_thr, binsize=binsize,
                                threshold=threshold, window=(lo0, hi0), upload_data=False,
                                upload_tmpl=upload_tmpl, cascade_band=cascade_band, ct1=ct1,
