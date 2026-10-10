@@ -1076,6 +1076,11 @@ class Context(InputUploads):
             entries.append(_SpecializationEntry(76, offset, 4))
             data_vals.append(int(row_windows))
             offset += 4
+        if os.environ.get("MF_VK_C16_BOUND", "1") == "0":
+            # Raw fp16 coarse maxima, for measuring the error bound's margin use only.
+            entries.append(_SpecializationEntry(77, offset, 4))
+            data_vals.append(0)
+            offset += 4
 
         # Intel accurate trig (constant ID 73)
         if self._accurate_trig:

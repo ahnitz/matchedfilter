@@ -12,9 +12,13 @@
 // [lo, hi), 2 that window mapped onto this kernel's coarse band. The rows'
 // (lo, hi) come from the gRowWin buffer.
 [[vk::constant_id(76)]] const uint mfRowWindows = 0;
+// The fp16 coarse tier's error bound (C16_KAPPA): 1 applies it (the default the host
+// uses), 0 reports the raw fp16 maximum -- for measuring the bound's margin use only.
+[[vk::constant_id(77)]] const uint mfC16Bound = 1;
 #else
 static const uint mfDataStride = 0;
 static const uint mfRowWindows = 0;
+static const uint mfC16Bound = 1;
 static const uint mfAccurateTrig = 0;
 static const uint mfSubgroupSize = 32;
 #endif
