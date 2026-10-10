@@ -973,9 +973,14 @@ void peakLane(uint pair, uint tid, uint lane, H magv[16], H re[16], H im[16],
     // Reduce PACKED: one v_pk_max_f16 per register gives both lanes'
     // running maximum. The previous form extracted a lane per element --
     // 16 v_mov_b16 per pair -- to do the same work at half rate.
-    H bestH = H(0.0f);
-    [unroll] for (uint i = 0; i < R; ++i) bestH = max(bestH, magv[i]);
-    uint bestBits = max(thrBits, asuint(float(lane == 0u ? bestH.x : bestH.y)));
+    // FAIL OPEN on overflow. A loud pair overflows fp16 (|v|^2 past 65504, and
+    // inf - inf = NaN inside the transform); v_pk_max_f16 drops NaN, which made a
+    // pair whose every sample overflowed report nothing and be gated out. NaN is
+    // elected as +inf instead: any non-finite element wins and passes the gate.
+    H bestH = H(0.0f), poison = H(0.0f);
+    [unroll] for (uint i = 0; i < R; ++i) { bestH = max(bestH, magv[i]); poison += magv[i] * H(0.0f); }
+    float pl = float(lane == 0u ? poison.x : poison.y);
+    uint bestBits = max(thrBits, isnan(pl) ? 0x7F800000u : asuint(float(lane == 0u ? bestH.x : bestH.y)));
 #if PPG == 1
     uint wm = WaveActiveMax(bestBits);
     if (WaveIsFirstLane() && wm > thrBits) InterlockedMax(stg[_stgBase], wm);
@@ -986,7 +991,7 @@ void peakLane(uint pair, uint tid, uint lane, H magv[16], H re[16], H im[16],
 
     uint winner = 0xffffffffu;
     [unroll] for (uint i = 0; i < R; ++i) {
-        uint mi = asuint(float(lane == 0u ? magv[i].x : magv[i].y));
+        uint mi = min(asuint(float(lane == 0u ? magv[i].x : magv[i].y)), 0x7F800000u);
         if (mi > thrBits && stg[_stgBase] == mi)
             winner = min(winner, tid*R+i);
     }
@@ -1033,6 +1038,19 @@ void peakLane(uint pair, uint tid, uint lane, H magv[16], H re[16], H im[16],
 //: The window test uses that slotToIndex is a bit permutation: the register
 //: index and tid*R occupy disjoint bits, so idx = slotToIndex(tid*R) |
 //: slotToIndex(i), the second term a compile-time constant.
+// The butterfly's lane exchange. The partner lane (lane ^ s, s < WG) is always in the
+// same pair and so the same workgroup, and every lane of the group reaches this call.
+// CUDA: a FULL-warp shuffle. Slang lowers WaveReadLaneAt to shfl.sync with a
+// ballot-derived member mask, which under independent thread scheduling can name a
+// partial warp after the barriers above (wrong peaks, measured on the L40S by the CUDA
+// fold). Vulkan/Metal: subgroup read, which RADV emits as DPP with every lane active.
+#if defined(MF_CUDA)
+__target_intrinsic(cuda, "__shfl_xor_sync(0xffffffffu, $0, $1)")
+uint mfShflXor(uint v, uint s);
+#else
+uint mfShflXor(uint v, uint s) { return WaveReadLaneAt(v, WaveGetLaneIndex() ^ s); }
+#endif
+
 void peakTwoWave(uint pairA, uint pairB, uint tid, H re[16], H im[16],
                  RWStructuredBuffer<int> peakIdx, RWStructuredBuffer<float2> peakVal,
                  uint winStart, uint winEnd, uint thrBits)
@@ -1050,12 +1068,18 @@ void peakTwoWave(uint pairA, uint pairB, uint tid, H re[16], H im[16],
     kA |= (0xFFFu - tid) << 4;
     kB |= (0xFFFu - tid) << 4;
     [ForceUnroll] for (uint s = 1; s < WG; s <<= 1) {
-        kA = max(kA, WaveReadLaneAt(kA, WaveGetLaneIndex() ^ s));
-        kB = max(kB, WaveReadLaneAt(kB, WaveGetLaneIndex() ^ s));
+        kA = max(kA, mfShflXor(kA, s));
+        kB = max(kB, mfShflXor(kB, s));
     }
     uint slotA = 0xFFFFu - (kA & 0xFFFFu), slotB = 0xFFFFu - (kB & 0xFFFFu);
-    bool hitA = asuint(f16tof32(kA >> 16)) > thrBits;
-    bool hitB = asuint(f16tof32(kB >> 16)) > thrBits;
+    // FAIL OPEN on overflow. Keys compare as unsigned, so a NaN or inf |v|^2
+    // (bits >= 0x7C00: a loud pair overflowing fp16) outranks every finite one and
+    // is elected; it must then PASS. Its reported value is replaced by the largest
+    // float, since the element itself may be NaN, which compares false against any
+    // threshold and gated the whole loud batch out (0 peaks at SNR >= 2500).
+    bool infA = (kA >> 16) >= 0x7C00u, infB = (kB >> 16) >= 0x7C00u;
+    bool hitA = infA || asuint(f16tof32(kA >> 16)) > thrBits;
+    bool hitB = infB || asuint(f16tof32(kB >> 16)) > thrBits;
 
     // Fetch the elected registers through the stage, one component at a
     // time and CH registers per chunk -- the stage holds CH*WG values.
@@ -1078,11 +1102,13 @@ void peakTwoWave(uint pairA, uint pairB, uint tid, H re[16], H im[16],
     }
     if (tid == 0 && pairA != NOPAIR) {
         peakIdx[pairA] = hitA ? int(slotToIndex(slotA)) : -1;
-        peakVal[pairA] = hitA ? float2(vA[0], vA[1]) : float2(0.0f, 0.0f);
+        peakVal[pairA] = infA ? float2(3.402823e38f, 0.0f)
+                       : (hitA ? float2(vA[0], vA[1]) : float2(0.0f, 0.0f));
     }
     if (tid == 0 && pairB != NOPAIR) {
         peakIdx[pairB] = hitB ? int(slotToIndex(slotB)) : -1;
-        peakVal[pairB] = hitB ? float2(vB[0], vB[1]) : float2(0.0f, 0.0f);
+        peakVal[pairB] = infB ? float2(3.402823e38f, 0.0f)
+                       : (hitB ? float2(vB[0], vB[1]) : float2(0.0f, 0.0f));
     }
 }
 
@@ -1213,6 +1239,12 @@ void filterPair(uint pair, uint tid,
 #else
     uint p0 = pair * TILE_T;
     uint d = p0 / ntmpl, t0 = p0 % ntmpl;
+#if COARSE16
+    // Every coarse build honours per-row windows. The untiled builds once skipped
+    // this: their module then declared no gRowWin, the host bound one past the
+    // layout, and a grouped call gated every pair out (tests/test_vk_hier_grouped.py).
+    rowWindow(d, winStart, winEnd);
+#endif
 #endif
     C dreg[RADIX];
 #if COARSE16
@@ -1344,7 +1376,9 @@ void compactPairs(uint3 gid: SV_DispatchThreadID,
 {
     uint pair = gid.x;
 #if defined(MF_VULKAN) || defined(MF_CUDA)
-    bool active = (pair < pairs) && (length(coarse[pair]) >= thr);
+    // !(x < thr), not x >= thr: a NaN coarse value (an overflowed narrow tier)
+    // passes. The gate may only ever fail open.
+    bool active = (pair < pairs) && !(length(coarse[pair]) < thr);
     uint waveCount = WaveActiveCountBits(active);
     uint waveOffset = WavePrefixCountBits(active);
     uint baseSlot = 0;
@@ -1359,7 +1393,7 @@ void compactPairs(uint3 gid: SV_DispatchThreadID,
     }
 #else
     if (pair >= pairs) return;
-    if (length(coarse[pair]) >= thr) {
+    if (!(length(coarse[pair]) < thr)) {
         uint slot;
         InterlockedAdd(args[0], 1u, slot);
         survivors[slot] = pair;
@@ -1386,7 +1420,7 @@ void compactListed(uint3 gid: SV_DispatchThreadID,
     uint k = gid.x;
     uint count = listArgs[0];
     uint pair = (k < count) ? list[k] : 0u;
-    bool active = (k < count) && (length(coarse[pair]) >= thr);
+    bool active = (k < count) && !(length(coarse[pair]) < thr);
     uint waveCount = WaveActiveCountBits(active);
     uint waveOffset = WavePrefixCountBits(active);
     uint baseSlot = 0;
