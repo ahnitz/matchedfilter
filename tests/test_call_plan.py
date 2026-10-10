@@ -140,3 +140,18 @@ def test_explicit_gate_thresholds_invalidate(monkeypatch):
         seen.add((thr, n > 0))
     assert (1e30, False) in seen and (0.0, True) in seen, seen
     assert _replays([(bank, w, df)]) > 0
+
+
+def test_sparse_blocks_matches_dense_split():
+    """_SparsePeaks.blocks is the sparse form of a ragged result's per-count split."""
+    from matchedfilter import _SparsePeaks
+    rng = np.random.default_rng(5)
+    idx = np.where(rng.random((7, 3, 4)) < 0.3, rng.integers(0, 99, (7, 3, 4)), -1)
+    val = (rng.standard_normal(idx.shape) + 1j).astype(np.complex64) * (idx >= 0)
+    flat = np.flatnonzero(idx >= 0)
+    sp = _SparsePeaks(idx.shape, flat, idx.reshape(-1)[flat], val.reshape(-1)[flat])
+    for m, u in ((np.array([1, 0, 1, 1, 0, 0, 1], bool), 2), (np.ones(7, bool), 4),
+                 (np.zeros(7, bool), 3)):
+        di, dv = sp.blocks(m, u).dense()
+        np.testing.assert_array_equal(di, np.where(idx[m][:, :, :u] >= 0, idx[m][:, :, :u], -1))
+        np.testing.assert_array_equal(dv, val[m][:, :, :u])
