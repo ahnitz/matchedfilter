@@ -1351,6 +1351,12 @@ class MatchedFilter:
         return self._gpu_window(spec, H, binsize, threshold, w0, w1, slot=slot,
                                 async_submit=async_submit, **kw)
 
+    def _next_batch_base(self, K):
+        """The first slot of a new deferred batch: 0 and K/2 alternately (see
+        _run_series_gpu)."""
+        prev = self.__dict__.get("_defer_base")
+        return 0 if prev is None or K < 2 else (prev + K // 2) % K
+
     def _call_plan_state(self, layout, binsize, threshold, t0, nt):
         """Everything a recorded call plan was built under: (objects, values). Objects are
         compared by identity -- the plan holds them, so none can be freed and replaced at the
@@ -1406,7 +1412,7 @@ class MatchedFilter:
             return None
         K = entry["K"]
         token = self._defer_series
-        slot0 = 0 if getattr(self, "_defer_token", None) != token else (
+        slot0 = self._next_batch_base(K) if getattr(self, "_defer_token", None) != token else (
             getattr(self, "_defer_slot", 0) % K)
         parts = entry["slots"].get(slot0)
         if parts is None:
@@ -1416,7 +1422,8 @@ class MatchedFilter:
             if not (gpu.forward_valid(fh) and gpu.hier_valid(hh)):
                 return None
         if getattr(self, "_defer_token", None) != token:
-            self._defer_token, self._defer_slot = token, 0
+            self._defer_base = slot0
+            self._defer_token, self._defer_slot = token, slot0
         owners = self.__dict__.setdefault("_slot_owner", {})
         for k in range(min(K, len(parts) + len(layout.groups))):
             prev = owners.pop((slot0 + k) % K, None)
@@ -1618,9 +1625,13 @@ class MatchedFilter:
             # and one wait never returns.
             self._settle_deferred()
         if defer and getattr(self, "_defer_token", None) != self._defer_series:
-            # A new batch starts at slot 0: slots only have to differ among calls in flight
-            # together, and reusing the same few keeps their recordings and sources warm.
-            self._defer_token, self._defer_slot = self._defer_series, 0
+            # A new batch starts at slot 0 or K/2, alternately: slots only have to differ
+            # among calls in flight together -- a batch's own, and the previous batch's
+            # while the caller keeps two in flight (a pipeline collecting segment k-2) --
+            # and reusing the same few keeps their recordings and sources warm.
+            base = self._next_batch_base(K)
+            self._defer_base = base
+            self._defer_token, self._defer_slot = self._defer_series, base
         slot0 = getattr(self, "_defer_slot", 0) % K if defer else 0
         if defer:
             # Settle whatever still holds the slots this call will use: its spectra, starts,
@@ -1941,7 +1952,7 @@ class MatchedFilter:
         if self._gpu is not None:
             self._gpu.clear_cache()
             self._series_workspace = None
-            self._continuous_workspace = None
+            self._continuous_workspaces = []
             self._ddirty = self._tdirty = True
 
 
@@ -1973,16 +1984,30 @@ class CorrelationFilter(MatchedFilter):
         if policy:
             batch = min(batch, policy['series_group'])
         key = (batch, nt, self.n, ser.size)
-        settle = getattr(self._gpu, 'settle_writes', None)
-        if settle is not None:
-            settle()        # a call left in flight still reads the workspaces rewritten below
-        work = getattr(self, '_continuous_workspace', None)
+        # Two workspaces, alternating per call, each remembering the write it left in flight:
+        # rewriting one waits only for the call two back, not for every write on the device
+        # (the previous call -- another detector's middle stage -- keeps running).
+        until = getattr(self._gpu, 'settle_until', None)
+        token_of = getattr(self._gpu, 'write_token', None)
+        nws = 2 if until is not None and token_of is not None else 1
+        pool = self.__dict__.setdefault('_continuous_workspaces', [])
+        k = self.__dict__.get('_continuous_next', 0) % nws
+        self._continuous_next = k + 1
+        while len(pool) <= k:
+            pool.append(None)
+        work = pool[k]
+        if work is not None:
+            if nws == 2:
+                until(work[4])     # the call that used this workspace has finished reading it
+            else:
+                settle = getattr(self._gpu, 'settle_writes', None)
+                if settle is not None:
+                    settle()       # a call left in flight still reads the workspaces below
         if work is None or work[0] != key:
             work = (key, self.empty_shared(ser.shape),
                     self.empty_shared((batch, self.n)),
-                    self.empty_shared(batch, np.uint32))
-            self._continuous_workspace = work
-        _, staging, spec, offsets = work
+                    self.empty_shared(batch, np.uint32), None)
+        _, staging, spec, offsets, _ = work
         source = ser if shared_buffer(ser, self._gpu) is not None else staging
         if source is staging and defer:
             # Unified memory: read the caller's series in place; the context keeps the
@@ -2008,6 +2033,7 @@ class CorrelationFilter(MatchedFilter):
             finally:
                 self._gpu.cancel_forward()
             self._tdirty = False
+        pool[k] = work[:4] + (token_of() if token_of is not None else None,)
 
     def _full_output(self, shape, out):
         nbytes = math.prod(shape) * np.dtype(np.complex64).itemsize

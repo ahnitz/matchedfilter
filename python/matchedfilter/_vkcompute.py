@@ -3179,6 +3179,28 @@ class Context(InputUploads):
                    "vkWaitForFences")
             self.vk.vkDestroyFence(self.device, fence, None)
 
+    def write_token(self):
+        """A token for the writes left in flight so far on this device (the newest one), for
+        settle_until: None when nothing is in flight."""
+        dev = self._device_state
+        return dev.pending_writes[-1] if dev.pending_writes else None
+
+    def settle_until(self, token):
+        """Wait for the writes in flight up to and including token (write_token()), not
+        later ones. Each earlier write is waited on too (submissions may complete out of
+        order). A token already settled is a no-op."""
+        dev = self._device_state
+        if token is None or all(f is not token for f in dev.pending_writes):
+            return
+        while dev.pending_writes:
+            fence = dev.pending_writes.pop(0)
+            fences = (_vp * 1)(fence)
+            _check(self.vk.vkWaitForFences(self.device, 1, fences, 1, 0xFFFFFFFFFFFFFFFF),
+                   "vkWaitForFences")
+            self.vk.vkDestroyFence(self.device, fence, None)
+            if fence is token:
+                break
+
     #: correlate_continuous(async_submit=True) leaves the last batch in flight; a later call
     #: settles it before rewriting the workspaces it reads (_continuous_gpu).
     defers_continuous = True

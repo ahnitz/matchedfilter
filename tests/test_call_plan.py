@@ -84,7 +84,7 @@ def test_recalibration_and_eviction_invalidate(monkeypatch):
     S = 1 << 17
     rows = banks[0][0].empty_shared((len(banks), S))
     jobs = [(b, rows[i], dict(windows=slice(3000, S - 3000))) for i, (b, _, _) in enumerate(banks)]
-    for seg in range(6):
+    for seg in range(9):        # batches alternate slot bases: replays from the 3rd stable one
         _fill(rng, rows, S)
         if seg == 2:                         # a new reference SHAPE: new band fractions
             for b, w, df in banks:
@@ -203,7 +203,8 @@ def test_staged_series_in_flight(monkeypatch):
     if dev is None:
         pytest.skip("no usable GPU")
     rng = np.random.default_rng(77)
-    counts = list(rng.integers(200, 400, 20)) + list(rng.integers(1300, 1800, 20))
+    # Sorted: each template group is a contiguous slice, so its work stays in flight.
+    counts = sorted(list(rng.integers(200, 400, 20)) + list(rng.integers(1300, 1800, 20)))
     taps, w, df = _whitened_inspiral_bank(rng, counts)
     bank = TimeDomainFilterBank(taps, tap_counts=counts, engine='hier', threshold=4.5,
                                 false_dismissal=1e-3, device=dev, fft_lengths=[2048, 4096])
@@ -217,30 +218,53 @@ def test_staged_series_in_flight(monkeypatch):
         X[S // 2:] = 0
         xs.append((np.fft.ifft(X) * 2).astype(np.complex64))
     outs = [bank.empty_shared((bank.n_templates, S)) for _ in xs]
-    # The device may finish call 1 before call 2's copy on a fast GPU, so also check the
-    # guard itself: each staging copy settles every group's device first.
+    # The device may finish call 1 before call 3's copy on a fast GPU, so also check the
+    # guard itself. Two staging buffers alternate: call i's copy must first wait for the
+    # writes that call i-2 (the last reader of the same buffer) left in flight.
     gpus = {id(g.get_correlation_plan()._gpu): g.get_correlation_plan()._gpu
             for g in bank._groups}
     events = []
     for gpu in gpus.values():
-        orig = gpu.settle_writes
+        if hasattr(gpu, "settle_until"):
+            orig = gpu.settle_until
+            monkeypatch.setattr(gpu, "settle_until",
+                                lambda token, orig=orig: events.append(("until", id(token)))
+                                or orig(token))
+        orig_s = gpu.settle_writes
         monkeypatch.setattr(gpu, "settle_writes",
-                            lambda orig=orig: events.append("settle") or orig())
+                            lambda orig=orig_s: events.append(("settle", None)) or orig())
     orig_fill = type(bank)._fill_staging
 
     def fill(staged, ser):
-        events.append("fill")
+        events.append(("fill", None))
         return orig_fill(staged, ser)
     monkeypatch.setattr(type(bank), "_fill_staging", staticmethod(fill))
-    for x, o in zip(xs, outs):
-        events.append("call")
+    tokens, cw_tokens = [], []
+    for i, (x, o) in enumerate(zip(xs, outs)):
+        events.append(("call", i))
         bank.correlate_series(x, windows=slice(3000, S - 3000), out=o, wait=False)
-    calls = [i for i, e in enumerate(events) if e == "call"] + [len(events)]
-    for a, b in zip(calls, calls[1:]):
+        slots = bank.__dict__.get("_ser_stagings", [])
+        tokens.append({id(t) for _, t in (slots[i % len(slots)][1] if slots else [])
+                       if t is not None})
+        cws = [g.get_correlation_plan().__dict__.get("_continuous_workspaces", [])
+               for g in bank._groups]
+        cw_tokens.append({id(p[i % len(p)][4]) for p in cws
+                          if p and p[i % len(p)] is not None and p[i % len(p)][4] is not None})
+    calls = [j for j, e in enumerate(events) if e[0] == "call"] + [len(events)]
+    double = len(bank.__dict__.get("_ser_stagings", [])) == 2
+    for i, (a, b) in enumerate(zip(calls, calls[1:])):
         part = events[a:b]
-        assert "fill" in part, events
-        before = part[:part.index("fill")]
-        assert before.count("settle") >= len(gpus), events
+        fi = [e[0] for e in part].index("fill")
+        before = part[:fi]
+        if not double:
+            assert sum(e[0] == "settle" for e in before) >= len(gpus), events
+        elif i >= 2:
+            waited = {e[1] for e in before if e[0] == "until"}
+            assert tokens[i - 2] <= waited, (i, tokens[i - 2], events)
+            # Each group's continuous workspace likewise waits for its call two back.
+            assert cw_tokens[i - 2] <= {e[1] for e in part if e[0] == "until"}, (i, events)
+    if double:
+        assert any(cw_tokens[:1]) and any(tokens[:1]), "nothing was left in flight"
     bank.wait()
     for x, o in zip(xs, outs):
         np.testing.assert_array_equal(o, bank.correlate_series(x, windows=slice(3000, S - 3000)))
@@ -266,3 +290,29 @@ def test_follow_up_pool_never_hands_out_a_workspace_in_use():
     b._items_return(gpu, 256, wb)
     assert a._items_checkout(gpu, 256, 100) is not wa  # wa is out with b
     assert a._items_checkout(gpu, 256, 300)[0].shape[0] >= 300
+
+
+def test_two_segments_in_flight_match_serial(monkeypatch):
+    """A pipeline keeping two segments in flight (collecting k-2): every result equals the
+    serial call on the same data -- slots, recordings, workspaces and call plans of one
+    batch are never rewritten under the other."""
+    rng, banks = _setup(monkeypatch, nbanks=3, seed=78)
+    S = 1 << 17
+    sets = [banks[0][0].empty_shared((len(banks), S)) for _ in range(3)]
+    inflight, checked = [], 0
+    for seg in range(8):
+        rows = sets[seg % 3]
+        _fill(rng, rows, S)
+        jobs = [(b, rows[i], dict(windows=slice(3000, S - 3000)))
+                for i, (b, _, _) in enumerate(banks)]
+        inflight.append((jobs, TimeDomainFilterBank.filter_series_many(jobs, wait=False)))
+        while len(inflight) > 2 or (seg == 7 and inflight):
+            old_jobs, futures = inflight.pop(0)
+            got = [f.result() for f in futures]
+            want = [b.filter_series(x, **kw) for b, x, kw in old_jobs]
+            for r1, r2 in zip(want, got):
+                for f in r1._fields:
+                    np.testing.assert_array_equal(getattr(r1, f), getattr(r2, f))
+            checked += 1
+    assert checked == 8
+    assert _replays(banks) > 0
