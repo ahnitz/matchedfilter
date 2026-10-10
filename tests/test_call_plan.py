@@ -341,3 +341,44 @@ def test_two_segments_in_flight_match_serial(monkeypatch):
             checked += 1
     assert checked == 8
     assert _replays(banks) > 0
+
+
+@pytest.mark.parametrize("band", ["0", "1"])
+@pytest.mark.parametrize("depth", [1, 2])
+def test_steady_segments_replay(monkeypatch, band, depth):
+    """With chain trials ON (the default), band mode forced either way, and one or two
+    segments in flight: after warm-up every fine call of a segment replays its call plan.
+    A trial that never locks (its calls bypassed the timed path), slot bases that never
+    settle, or a mode that flips every call all show up here as misses, not as host time."""
+    import matchedfilter as mf
+    # Trials are process-wide per configuration: start from none, as a fresh search does
+    # (another test's dead plans hold candidates of the same configuration).
+    monkeypatch.setattr(mf, "_CHAIN_TRIALS", {})
+    monkeypatch.setattr(mf, "_CHAIN_CHOICE", {})
+    monkeypatch.delenv("MF_AUTOTUNE", raising=False)      # trials on
+    rng, banks = _setup(monkeypatch, nbanks=2, seed=79)
+    monkeypatch.delenv("MF_AUTOTUNE", raising=False)
+    monkeypatch.setenv("MF_CHAIN_TRIALS", "2")
+    monkeypatch.setenv("MF_VK_BAND_FORWARD", band)
+    S = 1 << 17
+    sets = [banks[0][0].empty_shared((len(banks), S)) for _ in range(depth + 1)]
+    inflight, deltas = [], []
+    for seg in range(16):
+        rows = sets[seg % (depth + 1)]
+        _fill(rng, rows, S)
+        jobs = [(b, rows[i], dict(windows=slice(3001, S - 2999), binsize=500))
+                for i, (b, _, _) in enumerate(banks)]
+        before = _replays(banks)
+        inflight.append(TimeDomainFilterBank.filter_series_many(jobs, wait=False))
+        deltas.append((_replays(banks) - before, sum(len(b._groups) for b, _, _ in jobs)))
+        while len(inflight) > depth:
+            [f.result() for f in inflight.pop(0)]
+    for fs in inflight:
+        [f.result() for f in fs]
+    for b, _, _ in banks:
+        for g in b._groups:
+            tk = getattr(g.plan, "_chain_trial", None)
+            assert tk is None, ("a chain trial never locked", g.plan._chain,
+                                {c: len(v) for c, v in mf._CHAIN_TRIALS[tk]["samples"].items()},
+                                mf._CHAIN_TRIALS[tk]["assigned"])
+    assert all(d == want for d, want in deltas[-4:]), deltas
