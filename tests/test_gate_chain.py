@@ -756,3 +756,14 @@ def test_ties_break_deterministically():
         assert got[0] == (256, 512)                     # tied with the cheapest; canonical first
     assert gc.pick_stable(items, lambda x: x[1] if x[0] != (512,) else 10.0,
                           lambda x: gc.canonical_order(x[0]))[0] == (512,)
+
+
+def test_host_terms_round_trip():
+    import json
+    gc = mf._gatechain
+    cm = gc.CostModel(2048, {256: 1.0}, {256: [(0.01, 2.0)]}, [(0.01, 9.0)], block=3.0,
+                      host_call=100.0, host_block=7.0)
+    rt = gc.CostModel.from_dict(json.loads(json.dumps(cm.to_dict())))
+    assert (rt.host_call, rt.host_block) == (100.0, 7.0)
+    old = gc.CostModel.from_dict({k: v for k, v in cm.to_dict().items() if not k.startswith("host")})
+    assert (old.host_call, old.host_block) == (0.0, 0.0)     # files from before the term

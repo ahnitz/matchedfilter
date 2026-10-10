@@ -213,7 +213,11 @@ remains for other hardware.
   the calibration-free flop proxy, trials on (fewer tiers, smaller bands), the block size on
   the smaller n. On dev2's GPU the choice repeated across processes after this, (2048, (256,
   1024)) in every run, as on main.
-* **Host cost per block (not kept).** Charging wall-minus-device time per block in the GPU
-  calibration moved the bank to n = 4096 and made the fine stage 1.4x slower (0.54 vs 0.39 s):
-  the wall-minus-device residue is not a per-block cost. Pricing the host needs a per-call
-  term measured with call counts varied, not a per-block one.
+* **Host cost.** A first attempt charged all of (wall - device) per block; it moved the bank
+  to n = 4096 and the fine stage got 1.4x slower, because most of that residue is per call.
+  Now `calibrate_costs_gpu` times the same call at two block counts and fits
+  host = host_call + host_block * blocks; `price_block_sizes` charges host_block per block
+  (a bank makes one call per segment, so host_call does not depend on n) and breaks ties on
+  the host term. On the 8060S: host_block 2.1 us at n = 2048 and 5.7 us at 4096, against
+  device block work of ~0.3/0.7; with it the n = 2048 margin over 4096 went from ~6% (inside
+  the noise that made it flip) to ~30%.

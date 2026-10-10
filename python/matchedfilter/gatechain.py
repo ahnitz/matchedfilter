@@ -265,8 +265,15 @@ class CostModel:
                       pair the screen passes back to the float tier}
     """
 
-    def __init__(self, n, dense, sparse, refine, block=0.0, screen=None, excess=None):
+    def __init__(self, n, dense, sparse, refine, block=0.0, screen=None, excess=None,
+                 host_call=0.0, host_block=0.0):
         self.n = int(n)
+        # Host time a call spends outside the device (wall minus device time), as
+        # host_call + host_block * blocks: what a host-starved GPU pays on top of the device
+        # work. Measured on the host clock; zero where not measured (the CPU's ticks already
+        # include it).
+        self.host_call = float(host_call)
+        self.host_block = float(host_block)
         # excess[b]: [(modelled density, measured density)] for a first tier at band b whose
         # gate reports an upper bound of the FP32 statistic instead of the statistic itself
         # (GPU fp16 coarse with its error bound): it passes a superset of the pairs the gate
@@ -309,13 +316,15 @@ class CostModel:
 
     def to_dict(self):
         return {"n": self.n, "block": self.block, "dense": self.dense,
+                "host_call": self.host_call, "host_block": self.host_block,
                 "sparse": self._sparse, "refine": self._refine, "screen": self.screen,
                 "excess": self.excess}
 
     @classmethod
     def from_dict(cls, d):
         return cls(d["n"], d["dense"], d["sparse"], d["refine"], block=d.get("block", 0.0),
-                   screen=d.get("screen"), excess=d.get("excess"))
+                   screen=d.get("screen"), excess=d.get("excess"),
+                   host_call=d.get("host_call", 0.0), host_block=d.get("host_block", 0.0))
 
     def pass_excess(self, b, f):
         """Measured / modelled first-tier pass rate at band b and modelled density f (>= 1):
@@ -700,6 +709,9 @@ def calibrate_costs_gpu(n, device, blocks=None, reps=5, seed=11, nt=256):
     plans = {}
     import time as _time
 
+    last_host = [0.0]
+    nblk, sub_len = blocks, len(ser)
+
     def run(chain, thr, ntm=nt, reps=reps):
         """(device ns per call, first-tier survivors, refined pairs). The time is the median
         over repetitions of its ratio to the clock reference timed just before it, in the
@@ -716,18 +728,24 @@ def calibrate_costs_gpu(n, device, blocks=None, reps=5, seed=11, nt=256):
         p.run_series(ser, starts, ws, we, threshold=1e6)                 # warm-up, recording
         ctx.timings().clear()
         t, s1, r = [], [], []
+        hostw = []
         for _ in range(reps):
             ctx._timing = False
             ref_t = clock.time()             # the reference, just before: same clock state
             ctx._timing = True
             ctx.timings().clear()
-            p.run_series(ser, starts, ws, we, threshold=1e6)
+            w0 = _time.perf_counter()
+            p.run_series(ser[:sub_len], starts[:nblk], ws[:nblk], we[:nblk], threshold=1e6)
+            wall = (_time.perf_counter() - w0) * 1e9
             log = ctx.timings()
-            t.append(sum(ms for _, ms in log) * 1e6 * (clock.anchor / ref_t if ref_t > 0 else 1.0))
+            dev = sum(ms for _, ms in log) * 1e6
+            hostw.append(max(0.0, wall - dev))
+            t.append(dev * (clock.anchor / ref_t if ref_t > 0 else 1.0))
             log.clear()
             s1.append(getattr(ctx, "last_tier1_survivors", 0))
             r.append(getattr(ctx, "last_refinements", 0))
         ctx._timing = False
+        last_host[0] = float(np.median(hostw))
         return float(np.median(t)), float(np.median(s1)), float(np.median(r))
 
     def thr_for(b, density):
@@ -785,7 +803,17 @@ def calibrate_costs_gpu(n, device, blocks=None, reps=5, seed=11, nt=256):
         for b, g, r_raw in _raw_gate_survivors(n, device, bands, blocks, nt, seed):
             _, _, r_bnd = run((b,), (g,))
             excess.setdefault(b, []).append((r_raw / (blocks * nt), r_bnd / (blocks * nt)))
-    cm = CostModel(n, dense, sparse, refine, block=block, excess=excess)
+    # Host per call and per block: the same call at two block counts (nothing passes).
+    hosts = []
+    for nb in (blocks // 4, blocks):
+        nblk, sub_len = nb, int(starts[nb - 1]) + n
+        run((b0,), (big,))
+        hosts.append((nb, last_host[0]))
+    nblk, sub_len = blocks, len(ser)
+    host_block = max(0.0, (hosts[1][1] - hosts[0][1]) / (hosts[1][0] - hosts[0][0]))
+    host_call = max(0.0, hosts[1][1] - host_block * hosts[1][0])
+    cm = CostModel(n, dense, sparse, refine, block=block, excess=excess,
+                   host_call=host_call, host_block=host_block)
     _COSTS[key] = cm
     if path is not None:
         _store_cost(path, skey, cm)
@@ -1149,6 +1177,7 @@ def price_block_sizes(fine, delta_f, data_rate, longest, margin, ntemplates, snr
     """
     sig = _gm._profile_sig(np.asarray(fine, np.float64))
     out = []
+    hosts = {}
     for n in sorted(int(c) for c in candidates):
         nvalid = n - int(longest) + 1
         if nvalid < 1:
@@ -1165,23 +1194,28 @@ def price_block_sizes(fine, delta_f, data_rate, longest, margin, ntemplates, snr
                 cm = device_costs(n, device, ntemplates)
                 best, _ = choose_chain(ref, n, snr, fd, cost=cm, max_tiers=max_tiers, window=(lo, n - lo))
                 if best is not None:
-                    hit = (cm.block, best["cost"], best["chain"])
+                    hit = (cm.block, best["cost"], best["chain"], getattr(cm, "host_block", 0.0))
             _cache_put(_PRICE_CACHE, key, hit)
         else:
             _PRICE_CACHE.move_to_end(key)
-        block, pair_cost, chain = hit
+        block, pair_cost, chain, host_block = hit if len(hit) == 4 else hit + (0.0,)
         if pair_cost is None:
             continue
         # per valid output sample and template: the block's fixed work shared by the bank's templates
-        c = (block / max(int(ntemplates), 1) + pair_cost) / nvalid
+        # Host time per block, like the device's per-block work, is shared by the templates.
+        # (A per-call host term does not depend on n: a bank makes one call per segment.)
+        h = host_block / max(int(ntemplates), 1) / nvalid
+        c = (block / max(int(ntemplates), 1) + pair_cost) / nvalid + h
         stop = bool(out) and c > min(o[0] for o in out) * (1.0 + TIE)
         out.append((c, n, chain))
+        hosts[n] = h
         if stop:
             break
     out.sort()
-    # The block size within TIE of the cheapest that is smallest goes first: the choice must
-    # not flip between processes on calibration noise (seen on CUDA: 4096 vs 2048 run to run).
-    first = pick_stable(out, lambda o: o[0], lambda o: o[1])
+    # Within TIE of the cheapest, the block size with the smaller host term goes first (then
+    # the smaller n): the choice must not flip between processes on calibration noise (seen
+    # on CUDA: 4096 vs 2048 run to run).
+    first = pick_stable(out, lambda o: o[0], lambda o: (hosts.get(o[1], 0.0), o[1]))
     if first is not None:
         out.remove(first)
         out.insert(0, first)
