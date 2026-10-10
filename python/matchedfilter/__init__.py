@@ -2386,10 +2386,10 @@ class HierarchicalFilter(MatchedFilter):
 
     def _first_tier_pass(self, pairs):
         """Fraction of the last call's pairs the first tier passed, where the engine reports it."""
+        if len(self._chain) < 2:
+            return None          # a single tier's passes are refines; its cost already shows them
         if self._gpu is not None:
-            ctx = self._gpu
-            n1 = getattr(ctx, "last_tier1_survivors", None) if len(self._chain) > 1 else \
-                getattr(ctx, "last_refinements", None)
+            n1 = getattr(self._gpu, "last_tier1_survivors", None)
             return None if n1 is None else n1 / pairs
         if self._mf is None:
             return None

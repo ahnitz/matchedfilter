@@ -745,7 +745,7 @@ def test_a_tier_that_passes_most_pairs_is_never_chosen():
     best, plans = gc.choose_chain(power, n, 6.0, 1e-3, max_tiers=2)
     assert best is not None
     for q in plans:
-        assert all(r <= gc._USELESS_PASS for r in q["reach"][1:]), q
+        assert all(r <= gc._USELESS_PASS for r in q["reach"][1:len(q["chain"])]), q
 
 
 def test_ties_break_deterministically():

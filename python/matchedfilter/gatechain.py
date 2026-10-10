@@ -997,8 +997,11 @@ def plan_chain(sig, noise, bands, chain, fd, cost, n, snr, prune=False):
         th = list(prefix) + [g]
         reach = [1.0] + [float(x) for x in nalive[1:]]
         reach.append(float((nalive[0] & (noise[:, cols[-1]] >= g)).mean()))
-        if prune and any(r > _USELESS_PASS for r in reach[1:]):
-            return          # choosing: a tier passing most of its pairs only adds its own cost
+        if prune and any(r > _USELESS_PASS for r in reach[1:len(chain)]):
+            # choosing: a tier that passes most of its pairs on to ANOTHER TIER only adds its
+            # own cost. (The last tier's pass rate into the refine is not judged here: at a
+            # low snr every chain refines most pairs, and the cost already says so.)
+            return
         c = cost.chain_cost(chain, reach) if cost is not None else _flop_cost(chain, reach, n)
         if best is None or c < best["cost"]:
             q15 = bool(cost.first_tier(chain[0], reach[1])[1]) if hasattr(cost, "first_tier") else False
