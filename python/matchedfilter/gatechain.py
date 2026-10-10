@@ -797,6 +797,8 @@ def calibrate_costs_gpu(n, device, blocks=None, reps=5, seed=11, nt=256):
 #: kind it names for cost-file keys. A backend whose coarse kernel gains a bound adds a row.
 _RAW_GATE_SWITCH = {
     "vulkan": ("MF_VK_C16_BOUND", "0", "c16b"),
+    # CUDA's coarse modules read the same switch (mf_c16_raw, _cudacompute._c16_bound_flag).
+    "cuda": ("MF_VK_C16_BOUND", "0", "c16b"),
 }
 
 
