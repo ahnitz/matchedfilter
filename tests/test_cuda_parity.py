@@ -507,3 +507,21 @@ def test_sparse_readback_equals_dense(ctx, kind, thr):
     np.testing.assert_array_equal(sv, dv)
     if thr == 0.0:
         assert sp.flat.size > 4096 or sp.flat.size == di.size
+
+
+def test_clock_reference_reads_the_sm_clock(ctx):
+    """CUDA calibrations are scaled by the SM clock (NVML), not by a small timed call."""
+    mhz = ctx.clock_mhz()
+    if mhz is None:
+        pytest.skip("NVML unavailable")
+    assert 100.0 < mhz < 10000.0
+    from matchedfilter import gatechain
+    ref = gatechain._clock_ref("gpu:0")
+    assert ref._mhz is not None
+    # At an unchanged clock the reference is the anchor; it scales inversely with the clock.
+    reader, mhz0 = ref._mhz
+    ref._mhz = (lambda: mhz0 * 2.0, mhz0)
+    try:
+        assert ref.time() == pytest.approx(ref.anchor / 2.0)
+    finally:
+        ref._mhz = (reader, mhz0)

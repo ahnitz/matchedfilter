@@ -506,6 +506,24 @@ class Context(InputUploads):
         self.cuda.cuDeviceGetAttribute(ctypes.byref(v), attr, self.device.value)
         return v.value
 
+    def clock_mhz(self):
+        """The device's current SM clock in MHz (NVML), or None where it cannot be read.
+
+        gatechain._ClockRef scales calibration timings by it: on the L40S the clock holds at
+        2520 MHz under load, and the timed reference call it otherwise uses (~60 us) varied
+        1.4-2x after a host pause, which spread the calibrated costs by +-30%."""
+        reader = self.__dict__.get("_clock_reader", False)
+        if reader is False:
+            reader = None
+            try:
+                buf = ctypes.create_string_buffer(32)
+                if self.cuda.cuDeviceGetPCIBusId(buf, len(buf), self.device.value) == 0:
+                    reader = _cuda.nvml_sm_clock(buf.value)
+            except (AttributeError, OSError):
+                reader = None
+            self._clock_reader = reader
+        return reader() if reader is not None else None
+
     def _bind(self):
         ctx = getattr(self, "ctx", None)
         if ctx and ctx.value:

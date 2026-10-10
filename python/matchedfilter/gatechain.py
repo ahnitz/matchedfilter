@@ -594,6 +594,11 @@ class _ClockRef:
     time in this process: chains and block sizes are ranked by those ratios, which the
     clock cancels out of. One small, fixed workload for every n, so models at different n
     stay comparable. Backend-neutral: it only needs device timers (ctx.timings()).
+
+    A backend that can read its clock (``ctx.clock_mhz()``, CUDA through NVML) is scaled by
+    the clock itself instead: the reference call is small, and its own launch latency after
+    a host pause (1.4-2x on the L40S at a fixed 2520 MHz) made it a noisier ruler than the
+    clock it stands for. The reference stays the fallback wherever the clock is unknown.
     """
 
     def __init__(self, device):
@@ -612,12 +617,25 @@ class _ClockRef:
                      np.full(blocks, n // 4, np.int64), np.full(blocks, n, np.int64))
         import time as _time
         until = _time.perf_counter() + 0.25          # warm the device before the anchor
-        self.time()
+        self._timed()
         while _time.perf_counter() < until:
-            self.time()
-        self.anchor = min(self.time() for _ in range(5))
+            self._timed()
+        self.anchor = min(self._timed() for _ in range(5))
+        reader = getattr(self.plan._gpu, "clock_mhz", None)
+        mhz = reader() if reader is not None else None
+        self._mhz = (reader, mhz) if mhz else None
 
     def time(self):
+        """The reference, in device ns at the current clock: the anchor scaled by the clock
+        when the backend reports one, else the reference call timed now."""
+        if self._mhz is not None:
+            reader, mhz0 = self._mhz
+            now = reader()
+            if now:
+                return self.anchor * mhz0 / now
+        return self._timed()
+
+    def _timed(self):
         ctx = self.plan._gpu
         ctx._timing = True
         try:
