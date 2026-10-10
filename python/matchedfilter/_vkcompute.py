@@ -15,6 +15,7 @@ import os
 from collections import OrderedDict
 import pathlib
 import sys
+import time
 
 import numpy as np
 
@@ -948,9 +949,11 @@ class _Device:
         # Dedicated compute queues with multiple hardware queues
         for i, fam in enumerate(families):
             if (fam.queueFlags & _QUEUE_COMPUTE) and not (fam.queueFlags & 1):
+                self.timestamp_bits = int(fam.timestampValidBits)
                 return i, fam.queueCount
         for i, fam in enumerate(families):
             if fam.queueFlags & _QUEUE_COMPUTE:
+                self.timestamp_bits = int(fam.timestampValidBits)
                 return i, fam.queueCount
         raise VulkanError("device exposes no compute queue")
 
@@ -1032,7 +1035,7 @@ class Context(InputUploads):
     _SHARED = ("vk", "instance", "physical", "queue_family", "queues", "queue", "device",
                "_accurate_trig", "max_shared_memory", "max_invocations", "max_dispatch_x",
                "subgroup_size", "subgroup_range", "mem_props", "command_pool", "_ts_period",
-               "storage_offset_alignment", "max_workgroup_size")
+               "storage_offset_alignment", "max_workgroup_size", "timestamp_bits")
 
     def _attach_device(self, index):
         """Share the device, its queues, command pool and compiled pipelines per process.
@@ -2265,7 +2268,7 @@ class Context(InputUploads):
         ts["next"] = (i + 1) % self._TS_RING
         if i in ts["pending"]:                 # the ring wrapped: settle that slot first
             self._timestamp_resolve(only=i)
-        ts["pending"][i] = label
+        ts["pending"][i] = (label, time.perf_counter())
         return _vp(ts["cmds"][2 * i]), _vp(ts["cmds"][2 * i + 1])
 
     def _capture_begin(self):
@@ -2371,10 +2374,16 @@ class Context(InputUploads):
             return
         out = (ctypes.c_uint64 * 2)()
         for i in ([only] if only is not None else sorted(ts["pending"])):
-            label = ts["pending"].pop(i)
+            label, t_host = ts["pending"].pop(i)
             _check(self.vk.vkGetQueryPoolResults(self.device, ts["pool"], 2 * i, 2, 16, out, 8, 0x3),
                    "vkGetQueryPoolResults")              # 64-bit, wait
-            self.timing_log.append((label, (out[1] - out[0]) * self._ts_period * 1e-6))
+            ms = _gputime.interval_ms(out[0], out[1], self._ts_period,
+                                      getattr(self, "timestamp_bits", 64),
+                                      (time.perf_counter() - t_host) * 1e3)
+            if ms is None:
+                self.timing_rejected = getattr(self, "timing_rejected", 0) + 1
+            else:
+                self.timing_log.append((label, ms))
 
     def timings(self):
         """Settle outstanding timestamps and return the timing log (MF_GPU_TIMING=1)."""
