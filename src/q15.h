@@ -24,24 +24,23 @@
 
 /* Error margin in Q units (the int16 output's LSB) at transform size N: the
    screen treats |z_q - z sdt| <= ap_q15_margin(N) as the int16 transform's
-   error bound.  Derived, not tuned (docs/cpu-q15-gate.md):
-     - the error of the screen's maximum is a sum of independent Q15 roundings;
-       measured on 307k pairs per N (noise data; random and profile-shaped
-       templates) its rms is 0.46-0.47 sqrt(N) LSB, and its tail counts match a
-       Gaussian of that rms out to 4 rms (the deepest the sample resolves:
-       k>3: 670-810 seen vs 829 expected, k>4: 11-19 vs 19.5, k>5: 0 vs 0.2);
-     - a pair is lost only if the error at its maximum exceeds the margin
-       downwards: one-sided Gaussian tail at k rms;
-     - sigma is taken as 0.48 sqrt(N) (above every fit) and k = 6.5, a tail of
-       4e-11 per pair, a millionth of the smallest budget the gate model
-       accepts (fd 1e-4 at its sampling floor).
-   So the margin is 6.5 * 0.48 = 3.12 sqrt(N).  It replaces 5 sqrt(N) (10.7
-   rms), which was rounded up rather than derived from a target tail.  Beyond
-   4 rms the Gaussian form is a model, not a measurement -- the same standing
-   as the NEON fp16 gate's kappa (docs/cpu-neon-fp16-gate.md); a deterministic
-   bound for this transform is ~N LSB, far too loose to use. */
+   error bound (docs/cpu-q15-gate.md):
+     - the error of the screen's maximum is a sum of independent Q15 roundings
+       with rms 0.44-0.47 sqrt(N) LSB in every input family of
+       tools/gate_margin.py (noise, profile, injection, loud transient,
+       full-scale; 10k pairs each, N = 128..1024) and in 307k-pair noise runs;
+       its tails are Gaussian as far as measured (4 rms);
+     - it does NOT grow with the peak: injections with peaks at 29000 LSB have
+       the same rms as noise at 2400, so no peak-proportional term is needed
+       (unlike the fp16 gate, whose rounding is relative);
+     - the merge gate asks for margin use < 0.5, i.e. at least twice the worst
+       error seen.  The worst seen is 4.2 rms in 10k pairs and 4.6 rms in 307k,
+       so the margin must exceed ~9.2 rms = 4.3 sqrt(N).  5 sqrt(N) (10.7 rms)
+       keeps it with room: harness use <= 0.31.  A 3.12 sqrt(N) margin derived
+       from a 4e-11 Gaussian tail used up to 0.63 of itself and bought nothing
+       measurable (fine stage within noise), so it was not kept. */
 static inline double ap_q15_margin(size_t N){
-  return 6.5 * 0.48 * sqrt((double)N);
+  return 5.0 * sqrt((double)N);
 }
 
 /* Transform sizes the screen implements. */
