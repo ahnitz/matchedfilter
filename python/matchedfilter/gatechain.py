@@ -827,6 +827,8 @@ _RAW_GATE_SWITCH = {
     "vulkan": ("MF_VK_C16_BOUND", "0", "c16b"),
     # CUDA's coarse modules read the same switch (mf_c16_raw, _cudacompute._c16_bound_flag).
     "cuda": ("MF_VK_C16_BOUND", "0", "c16b"),
+    # Metal compiles the same switch into its coarse libraries (MF_C16_RAW, _mtlcompute._library).
+    "metal": ("MF_VK_C16_BOUND", "0", "c16b"),
 }
 
 

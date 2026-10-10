@@ -894,6 +894,9 @@ void filterPair(uint pair, uint tid,
 
     uint myMag[RADIX];
     uint myBin[RADIX];
+#if defined(MF_METAL) && COARSE16
+    uint ovAcc = 0u;
+#endif
     MF_UNROLL for (uint i = 0; i < R; ++i) {
         uint idx = slotToIndex(tid * R + i);
         bool live = (idx >= winStart && idx < winEnd);
@@ -902,6 +905,13 @@ void filterPair(uint pair, uint tid,
         // and no divergence.
         float _rx = float(r[i].x), _ry = float(r[i].y);
         myMag[i] = live ? asuint(_rx*_rx + _ry*_ry) : 0u;
+#if defined(MF_METAL) && COARSE16
+        // FAIL OPEN on fp16 overflow. Metal compiles with fast math, under which an inf
+        // or NaN magnitude compares unpredictably. An fp16 exponent field of all ones
+        // (inf or NaN) carries into its sign bit when 0x0400 is added to the masked
+        // field: two integer ops per register, exact under any math mode.
+        ovAcc |= (bit_cast<uint>(r[i]) & 0x7C007C00u) + 0x04000400u;
+#endif
         uint off = idx - winStart;
         // Shift when the binsize is a power of two, divide when it is not --
         // the same split the CPU makes, and the reason no restriction on
@@ -917,6 +927,17 @@ void filterPair(uint pair, uint tid,
             InterlockedMax(stg[_stgBase+myBin[i]], myMag[i]);
 #endif
     }
+#if defined(MF_METAL) && COARSE16
+    // An overflow anywhere in this thread's registers (the transform has blown up; a NaN
+    // spreads): every in-window register reports +inf, which passes every gate, and the
+    // exact refine decides. Rare, so the branch costs nothing on quiet data.
+    if ((ovAcc & 0x80008000u) != 0u) {
+        MF_UNROLL for (uint i = 0; i < R; ++i)
+            if (myMag[i] != 0u || (slotToIndex(tid * R + i) >= winStart
+                                   && slotToIndex(tid * R + i) < winEnd))
+                myMag[i] = 0x7F800000u;
+    }
+#endif
 
     // One bin over the whole window is the common case at the small sizes --
     // the CPU has a dedicated binmax_one for it. Every register shares the
@@ -1125,15 +1146,31 @@ void peakTwoWave(uint pairA, uint pairB, uint tid, H re[16], H im[16],
     // the transform itself makes it inf, and then the pair passes, as it must.
     H en = H(0.0f);
     const H esc = H(0.015625f);
+#if defined(MF_METAL)
+    uint ovAcc = 0u;
+#endif
     MF_UNROLL for (uint i = 0; i < R; ++i) {
         bool live = (u0 + slotToIndex(i)) < span;  // winStart <= idx < winEnd
         H mg = mag2s(re[i], im[i]);
         H sr = re[i] * esc, si = im[i] * esc;
         en += sr * sr + si * si;
         uint m = live ? bit_cast<uint>(mg) : 0u;
+#if defined(MF_METAL)
+        // FAIL OPEN on fp16 overflow, per lane (A low half, B high half): an exponent
+        // field of all ones carries into the sign bit (see filterOne). Exact under fast math.
+        // Each operand tested on its own: OR-ing the two first can assemble an all-ones
+        // field from two finite exponents (0x7800 | 0x4400).
+        ovAcc |= ((bit_cast<uint>(re[i]) & 0x7C007C00u) + 0x04000400u)
+               | ((bit_cast<uint>(im[i]) & 0x7C007C00u) + 0x04000400u);
+#endif
         kA = max(kA, (m << 16) | (15u - i));
         kB = max(kB, (m & 0xFFFF0000u) | (15u - i));
     }
+#if defined(MF_METAL)
+    // An overflowed lane takes the +inf key (slot of register 0), which wins and passes.
+    if ((ovAcc & 0x00008000u) != 0u) kA = max(kA, 0x7C00000Fu);
+    if ((ovAcc & 0x80000000u) != 0u) kB = max(kB, 0x7C00000Fu);
+#endif
     // 0xFFFF - (tid*R + i) == ((0xFFF - tid) << 4) | (15 - i), R == 16
     kA |= (0xFFFu - tid) << 4;
     kB |= (0xFFFu - tid) << 4;
@@ -1152,8 +1189,15 @@ void peakTwoWave(uint pairA, uint pairB, uint tid, H re[16], H im[16],
     // float, since the element itself may be NaN, which compares false against any
     // threshold and gated the whole loud batch out (0 peaks at SNR >= 2500).
     bool infA = (kA >> 16) >= 0x7C00u, infB = (kB >> 16) >= 0x7C00u;
+#if defined(MF_METAL)
+    // Slang's Metal target types f16tof32 as half, and as_type<uint>(half) is rejected;
+    // both sides are non-negative and finite here, so values order as the bits do.
+    bool hitA = infA || f16tof32(kA >> 16) > asfloat(thrBits);
+    bool hitB = infB || f16tof32(kB >> 16) > asfloat(thrBits);
+#else
     bool hitA = infA || asuint(f16tof32(kA >> 16)) > thrBits;
     bool hitB = infB || asuint(f16tof32(kB >> 16)) > thrBits;
+#endif
 
     // Fetch the elected registers through the stage, one component at a
     // time and CH registers per chunk -- the stage holds CH*WG values.
@@ -1253,9 +1297,11 @@ void filterTwo(uint pairA, uint pairB, uint tA, uint tB, uint tid,
     // |v|^2 masked by the window, both lanes at once. `live` depends on the
     // element index, which is shared by the two transforms, so the select
     // is packed and no lane is extracted here.
-#if defined(MF_VULKAN) || defined(MF_CUDA)
-    // mfSubgroupSize is a specialization constant (CUDA: the warp, 32): one branch
-    // survives. Metal keeps peakLane until it is measured on its own hardware.
+#if defined(MF_VULKAN) || defined(MF_CUDA) || defined(MF_METAL)
+    // mfSubgroupSize is a specialization constant on Vulkan (one branch survives); 32 on
+    // CUDA (the warp) and on Metal (Apple's SIMD-group width; the host checks the
+    // pipeline's threadExecutionWidth). The election is subgroup shuffles and no barrier:
+    // the earlier falsified Metal attempt relied on a simdgroup_barrier.
     const bool wavePeak = WG <= mfSubgroupSize;
 #else
     const bool wavePeak = false;
@@ -1271,6 +1317,19 @@ void filterTwo(uint pairA, uint pairB, uint tA, uint tB, uint tid,
             H mg = mag2s(re[i], im[i]);
             eA += float(mg.x); eB += float(mg.y);
             magv[i] = live ? mg : H(0.0f);
+#if defined(MF_METAL)
+            // FAIL OPEN on fp16 overflow, per lane (see filterOne): an exponent field of
+            // all ones in re or im makes that lane's magnitude +inf (a NaN would compare
+            // unpredictably under fast math), which peakLane elects and passes.
+            if (live) {
+                uint ov = ((bit_cast<uint>(re[i]) & 0x7C007C00u) + 0x04000400u)
+                        | ((bit_cast<uint>(im[i]) & 0x7C007C00u) + 0x04000400u);
+                uint mb = bit_cast<uint>(magv[i]);
+                if ((ov & 0x00008000u) != 0u) mb = (mb & 0xFFFF0000u) | 0x7C00u;
+                if ((ov & 0x80000000u) != 0u) mb = (mb & 0x0000FFFFu) | 0x7C000000u;
+                magv[i] = bit_cast<H>(mb);
+            }
+#endif
         }
         eA = pairSum(tid, eA) / float(N);
         eB = pairSum(tid, eB) / float(N);
@@ -1296,7 +1355,7 @@ void filterPair(uint pair, uint tid,
     // Consecutive pairs share a data row because d = pair/ntmpl, provided
     // the run does not straddle a row end; the host drops to TILE_T=1 when
     // the pair count is not a multiple of it.
-#if (defined(MF_VULKAN) || defined(MF_CUDA)) && COARSE16 && (TILE_T % 2) == 0
+#if (defined(MF_VULKAN) || defined(MF_CUDA) || defined(MF_METAL)) && COARSE16 && (TILE_T % 2) == 0
     // RAGGED TILES. Each group slot takes TILE_T consecutive templates of ONE
     // data row, the row's last tile clamped to its last template; the host
     // passes the row count in `binsize` (unused by the one-bin coarse role)
@@ -1333,7 +1392,7 @@ void filterPair(uint pair, uint tid,
 #endif
 #if COARSE16 && (TILE_T % 2) == 0
     // Two at a time, in split/SoA form.
-#if defined(MF_VULKAN) || defined(MF_CUDA)
+#if defined(MF_VULKAN) || defined(MF_CUDA) || defined(MF_METAL)
     MF_UNROLL for (uint k = 0; k < TILE_T; k += 2) {
         bool okA = slotOk && t0 + k < ntmpl, okB = slotOk && t0 + k + 1 < ntmpl;
         filterTwo(okA ? p0 + k : NOPAIR, okB ? p0 + k + 1 : NOPAIR,
@@ -1471,6 +1530,7 @@ void compactPairs(uint3 gid: SV_DispatchThreadID,
     }
 #else
     if (pair >= pairs) return;
+    // !(x < thr): a NaN coarse value is listed for the exact refine (fails open).
     if (!(length(coarse[pair]) < thr)) {
         uint slot;
         InterlockedAdd(args[0], 1u, slot);
