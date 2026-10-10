@@ -1066,7 +1066,11 @@ class MatchedFilter:
         if self._gpu is None:
             return None
         if isinstance(self, HierarchicalFilter):
-            if not getattr(self._gpu, "supports_ragged_hier", False):
+            # A plan under a chain trial is timed per run_series call (its trial records only
+            # there): a ragged call would never record, and the trial never locks -- every
+            # later call then runs synchronously, untimed, forever.
+            if (not getattr(self._gpu, "supports_ragged_hier", False)
+                    or getattr(self, "_chain_trial", None) is not None):
                 return None
         elif (type(self) is not MatchedFilter
                 or not getattr(self._gpu, "supports_ragged_bins", False)):
@@ -1352,10 +1356,18 @@ class MatchedFilter:
                                 async_submit=async_submit, **kw)
 
     def _next_batch_base(self, K):
-        """The first slot of a new deferred batch: 0 and K/2 alternately (see
-        _run_series_gpu)."""
+        """The first slot of a new deferred batch: the previous batch's base once that batch
+        has been collected, else the other half (0 <-> K/2). Slots, their recordings and call
+        plans are per slot, so alternating unconditionally doubled them (and with them cache
+        evictions and re-recording, every segment) for callers that never keep two batches
+        in flight; a caller that does (a pipeline collecting k-2) gets disjoint slots for the
+        batch still running."""
         prev = self.__dict__.get("_defer_base")
-        return 0 if prev is None or K < 2 else (prev + K // 2) % K
+        if prev is None or K < 2:
+            return 0
+        owners = self.__dict__.get("_slot_owner") or {}
+        busy = any(not getattr(d, "_done", True) for d in owners.values())
+        return (prev + K // 2) % K if busy else prev
 
     def _call_plan_state(self, layout, binsize, threshold, t0, nt):
         """Everything a recorded call plan was built under: (objects, values). Objects are
@@ -2468,6 +2480,10 @@ class HierarchicalFilter(MatchedFilter):
         if self._gpu is not None:
             self._gcal = None
             self._tdirty = True
+            # A host plan built for the old chain (_execution_plan builds one for a timed
+            # trial call) would take the new chain's thresholds: one per tier of a chain it
+            # does not run. Rebuilt on next use.
+            self._mf = None
             return
         self._mf = self._new_cpu_plan(self._chain)
         self._restore_into(self._mf)
@@ -2677,11 +2693,35 @@ class HierarchicalFilter(MatchedFilter):
                     _log_autotune("CHAIN-TRIAL locked %s  median s/pair %s", tr["winner"],
                                   {c: "%.3g" % v for c, v in med.items()})
             winner = tr["winner"]
+            move = None
+            if winner is None:
+                # Candidates that joined later (another plan's shortlist, another reference)
+                # may never be run by any live plan: their samples never come, the trial
+                # never locks, and every plan in it stays synchronous and untimed for good.
+                # A plan whose own shortlist is fully sampled settles on its own: it moves
+                # to an unsampled candidate of ITS shortlist, or locks the best of it.
+                need = int(os.environ.get("MF_CHAIN_TRIALS", _CHAIN_TRIALS_PER_CAND))
+                own = [tuple(c) for c in self.autotune_info.get("shortlist", ())
+                       if tuple(c) in tr["samples"]]
+                mine = tuple(self._chain)
+                if own and len(tr["samples"].get(mine, ())) >= need:
+                    lacking = [c for c in own if len(tr["samples"][c]) < need]
+                    if lacking:
+                        move = min(lacking, key=lambda c: (len(tr["samples"][c]) + tr["assigned"][c],
+                                                           own.index(c)))
+                        tr["assigned"][move] += 1
+                        tr["assigned"][mine] = max(0, tr["assigned"].get(mine, 1) - 1)
+                    else:
+                        med = {c: float(np.median(tr["samples"][c])) for c in own}
+                        winner = _gatechain.pick_stable(med, med.get, _gatechain.canonical_order)
+                        _log_autotune("CHAIN-TRIAL plan locked %s on its own shortlist", winner)
         if winner is not None:
             self._chain_trial = None
             self.autotune_info.update(status="locked", winner=tuple(winner))
             if tuple(winner) != tuple(self._chain):
                 self._switch_chain(winner)
+        elif move is not None:
+            self._switch_chain(move)
 
     # ---- run ----------------------------------------------------------------
     def run_series(self, series, starts=None, win_start=None, win_end=None,
