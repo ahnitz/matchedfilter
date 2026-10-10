@@ -111,6 +111,50 @@ class Timer:
                 d[1] += ms
 
 
+class GpuSampler:
+    """Samples the GPU's shader clock and the driver's busy percentage (amdgpu sysfs:
+    hwmon freq1_input, gpu_busy_percent) every 20 ms while on: an independent device-busy
+    figure, and the clock the timestamps were taken at. Silent where the files are absent."""
+
+    def __init__(self):
+        import glob
+        self.files = []
+        for dev in glob.glob("/sys/class/drm/card*/device"):
+            busy = dev + "/gpu_busy_percent"
+            freq = glob.glob(dev + "/hwmon/hwmon*/freq1_input")
+            if os.path.exists(busy) and freq:
+                self.files.append((busy, freq[0]))
+        self.samples, self.on, self.thread = [], False, None
+
+    def _run(self):
+        while self.thread is not None:
+            if self.on:
+                for busy, freq in self.files:
+                    try:
+                        with open(busy) as b, open(freq) as f:
+                            self.samples.append((int(b.read()), int(f.read()) / 1e6))
+                    except (OSError, ValueError):
+                        pass
+            time.sleep(0.02)
+
+    def start(self):
+        if self.files and self.thread is None:
+            import threading
+            self.thread = threading.Thread(target=self._run, daemon=True)
+            self.thread.start()
+
+    def stop(self):
+        self.thread = None
+
+    def report(self):
+        if not self.samples:
+            return None
+        b = np.array([x[0] for x in self.samples], float)
+        f = np.array([x[1] for x in self.samples], float)
+        return dict(busy_pct=float(b.mean()), sclk_mhz_mean=float(f.mean()),
+                    sclk_mhz_min=float(f.min()), sclk_mhz_max=float(f.max()), n=len(b))
+
+
 def _timing():
     import os
     return os.environ.get("MF_GPU_TIMING", "0") not in ("", "0")
@@ -239,14 +283,23 @@ def run_device(device, tops, args, seed):
             # run ahead of it on the same queues, so collecting them waits for them alone and
             # not for k's fine stage, and the host's remaining work (recording results, k+1's
             # data and middle) overlaps k's fine stage instead of leaving the device idle.
-            bufs = [mid_out, {ifo: mid.empty_shared((len(top["mid_counts"]), S))
-                              for ifo in ("H1", "L1")}]
-            pending = None
+            # --depth segments in flight: segment k's results are collected after k+depth's
+            # middle stage is enqueued, so the waits find finished work. depth+1 middle
+            # buffers per detector: k's middle never overwrites what an uncollected
+            # segment's fine stage or follow-ups read.
+            depth = max(1, args.depth)
+            bufs = [mid_out] + [{ifo: mid.empty_shared((len(top["mid_counts"]), S))
+                                 for ifo in ("H1", "L1")} for _ in range(depth)]
+            from collections import deque
+            inflight = deque()
             prof = None
             if os.environ.get("LADDER_PROFILE"):  # cProfile of the steady iterations only
                 import cProfile
                 prof = cProfile.Profile()
-            for seg in range(args.segments + 1):
+            sampler = GpuSampler()
+            sampler.start()
+            for seg in range(args.segments + depth):
+                sampler.on = args.warmup <= seg
                 profiled = prof is not None and args.warmup <= seg < args.segments
                 if profiled:
                     prof.enable()
@@ -255,13 +308,15 @@ def run_device(device, tops, args, seed):
                 if seg < args.segments:
                     tm = first if seg < args.warmup else steady
                     ser, next_ser = next_ser, None
-                    out = bufs[seg % 2]
+                    out = bufs[seg % (depth + 1)]
                     t = time.perf_counter()
                     mids = {ifo: mid.correlate_series(
                         ser[ifo], windows=slice(max(0, a0 - args.pad), min(S, a1 + args.pad)),
                         out=out[ifo], wait=False) for ifo in ser}
                     tm.add("middle", time.perf_counter() - t)
                 asym = None
+                pending = (inflight.popleft() if len(inflight) >= depth
+                           or (seg >= args.segments and inflight) else None)
                 if pending is not None:
                     p_seg, p_ser, p_mids, p_futures, p_tm = pending
                     t = time.perf_counter()
@@ -277,7 +332,8 @@ def run_device(device, tops, args, seed):
                     tm.add("fine", time.perf_counter() - t)
                 if asym is not None:
                     collect_followups(*asym)
-                pending = (seg, ser, mids, futures, tm) if seg < args.segments else None
+                if seg < args.segments:
+                    inflight.append((seg, ser, mids, futures, tm))
                 elapsed = time.perf_counter() - t_seg
                 if seg < args.segments:
                     tm.add("segment", elapsed)
@@ -294,6 +350,8 @@ def run_device(device, tops, args, seed):
                 (tm if seg < args.segments else steady).add("cpu", time.thread_time() - c_seg, n=0)
                 if profiled:
                     prof.disable()
+            sampler.stop()
+            counts["gpu_sampler"] = sampler.report()
             if prof is not None:
                 prof.dump_stats(os.environ["LADDER_PROFILE"])
             continue
@@ -461,6 +519,8 @@ def main():
                         "default every segment's data is drawn before the timed loop (same data): "
                         "a search reads its data, and generating it here (~0.1 s a segment) idled "
                         "the device between segments")
+    p.add_argument("--depth", type=int, default=2,
+                   help="--pipeline: segments in flight before one is collected (default 2)")
     p.add_argument("--timing", action="store_true",
                    help="device time per kernel label for each stage (sets MF_GPU_TIMING=1)")
     args = p.parse_args()
@@ -494,7 +554,11 @@ def main():
     if tirt:
         print("  templates-in-real-time: " + ", ".join(f"{k} {v:.3g}" for k, v in tirt.items()))
     print("  calls: " + ", ".join(f"{k} {v}" for k, v in report["steady_calls"].items()) +
-          "; " + ", ".join(f"{k} {v}" for k, v in report["counts"].items()))
+          "; " + ", ".join(f"{k} {v}" for k, v in report["counts"].items() if not isinstance(v, dict)))
+    gs = report["counts"].get("gpu_sampler")
+    if gs:
+        print(f"  gpu (sysfs, steady): busy {gs['busy_pct']:.0f}%, sclk mean {gs['sclk_mhz_mean']:.0f} "
+              f"MHz (min {gs['sclk_mhz_min']:.0f}, max {gs['sclk_mhz_max']:.0f}), {gs['n']} samples")
     if report["steady_s"].get("wall") and report["steady_s"].get("cpu") is not None:
         w, c = report["steady_s"]["wall"], report["steady_s"]["cpu"]
         print(f"  host: cpu {c:.3f}s of steady wall {w:.3f}s ({100 * c / w:.0f}%)")
@@ -502,6 +566,8 @@ def main():
         dev = sum(v[1] for d in report["steady_device_ms"].values() for v in d.values()) / 1e3
         print(f"  device busy {100 * dev / report['steady_s']['wall']:.0f}%: device {dev:.3f}s "
               f"of steady wall {report['steady_s']['wall']:.3f}s")
+        if _gputime.rejected():
+            print(f"  ({_gputime.rejected()} timestamp pairs rejected as impossible)")
     for stage, d in report.get("steady_device_ms", {}).items():
         dev = sum(v[1] for v in d.values())
         print(f"  {stage}: device {dev / 1e3:.3f}s of wall {report['steady_s'][stage]:.3f}s; " +
