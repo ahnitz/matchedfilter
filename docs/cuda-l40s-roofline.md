@@ -349,3 +349,85 @@ A freed address that is reused therefore maps to a graph whose captured paramete
 exactly the current buffers, so an address recycled after a free (the ABA case behind main's
 fused-recording bug) replays correctly. Graph caches are per record and are destroyed with
 it.
+
+## Phase 6 (2026-10-10): arithmetic-intensity accounting on the L40S, band-1024 regression
+
+### Measured workload, one fine segment
+Production bank (bank3), `--pure --profiles`, `MF_AUTOTUNE=0`, main 0623b71 + this branch. Counts
+from wrapping the backend calls over the two steady segments (`acct.py`), device times from
+`ladder --timing` (graphs off while timing, so per-launch overheads are slightly inflated).
+
+- 24,866 data blocks of n = 2048 (the same segment the Vulkan accounting used), 4.34M pairs,
+  54 grouped calls (one per bank and detector).
+- Chain (512,) on every bank: one fp16 tier at band 512, no second tier.
+- Refined pairs: 7,254.
+
+### Per segment
+
+| Phase | Flops | DRAM bytes | Device time | Achieved | Bound |
+|---|---|---|---|---|---|
+| forward (2048) | 2.8 G | 815 MB (16 KB in + 16 KB out per block) | 1.25 ms | 652 GB/s | **DRAM**, at the 623 GB/s stream ceiling |
+| pack_coarse (band rows to half2) | ~0 | ~150 MB (4 KB in, 2 KB out per row) | 0.75 ms | 200 GB/s | launch/latency (162 small launches) |
+| coarse0 (band 512, fp16) | ~117 G (27k / pair) | ~50 MB + templates from L2 | 6.65 ms | 17.6 TFLOP/s | **ALU**, 20% of the 87.9 TF half2 rate |
+| refine (2048) | 0.9 G | ~25 MB | 1.95 ms | 0.5 TFLOP/s | latency (7k pairs over 54 calls) |
+| compact, readback, upload, compact_peaks | – | small | 2.0 ms | – | launch/latency |
+| **Total** | **~121 G** | **~1.05 GB** | **~12.5 ms** | | |
+
+- **Ridge points:** 87.9 TF / 0.623 TB/s = 141 flop/B (half2), 117 flop/B (fp32). The segment as
+  a whole sits at ~115 flop/B, just left of the ridge, and as on the 8060S the forward is
+  ~80% of the DRAM bytes for ~2% of the flops.
+- **But the share of TIME differs.** The L40S has 2.4x the 8060S's bandwidth, so the
+  DRAM-bound forward is 10% of device time here (1.25 of 12.5 ms), against 38% (4.7 of
+  12.5 ms) on the 8060S. The fused forward+coarse0 design (vulkan-8060s-roofline.md §12)
+  removes at most the forward and the pack: ~2.0 ms, **~1.19x on device time**, not 1.5x.
+  Option (a) alone (write only the tier band, half2, from the forward) removes the pack
+  launches and ~40% of the forward's bytes: ~1.25 ms, ~1.1x.
+- **The device is not the binding constraint.** Segment wall time is ~28 ms with timers on
+  (~15 ms off) against ~12.5 ms of device work: the job is still host-bound, so none of
+  these show end to end until per-call host cost falls (gatechain host-cost pricing, the
+  remaining host items below).
+- **Where the device time is:** coarse0 is 53% of it at 20% of the half2 rate. That, not
+  DRAM, is the largest device lever on this part (the warp gate reached 24-34% on the same
+  kernel shape, phase 4).
+
+### Band 1024: the twiddle table
+The SPIR-V coarse prelude (phase 5 fold) brought the fp16 twiddle table (`COARSE_TWT`) to CUDA.
+Measured per variant, ns/pair, same session (table / no table):
+
+| band | best no-table | best table | tiled p2t2 no-table / table |
+|---|---|---|---|
+| 64 | 0.94 | 0.95 | – |
+| 128 | 0.96 | 0.94 | 1.13 / 1.13 |
+| 256 | 1.13 | 1.15 | 1.13 / 1.19 |
+| 512 | 1.75 | 1.81 | 1.75 / 1.88 |
+| 1024 | 4.70 | 4.80 | **4.92 / 6.81** |
+
+The table costs band 1024's tiled build 38%: its table is 32 loads per level per lane, against
+2-4 at the smaller bands. `build_ptx.py` now builds both (table variants suffixed `w`) and the
+measured coarse choice picks per band; on this part it picks the table only where it is even.
+Band 1024's tiled build is then no worse than untiled (4.92 vs 4.70), so nothing is excluded.
+
+### Host costs (steady fine stage, unprofiled perf_counter wraps)
+
+| Item | Host time | Finding |
+|---|---|---|
+| cyclic GC | one full (gen 2) collection per ~2 segments, **10.9 ms** each | the setup heap (~37k tracked objects: modules, functions, the bank's plans) is rescanned; it is not the per-call code |
+| `filter_series` | 265 us/call (177 us with the heap frozen) | 108 calls per segment |
+| `hier_peaks_grouped` | 159 us/call (67 us frozen) | the GC pauses landed in its allocations (`_tail` 102 -> 6 us) |
+| `forward` / `_prefetch` | 66 / 24 us per call | prefetch is required: `MF_CUDA_PREFETCH=0` made the segment 2.7x slower |
+| first-use flat plans (`_gpu_set`) | ~6 ms per segment while new groups get follow-ups | warm-up, bounded by the bank's group count; not a steady cost |
+
+`gc.freeze()` after setup (what an application does once its banks exist; `LADDER_GC_FREEZE=1`
+in ladder) measured, min/median of 5 interleaved 4-segment runs:
+
+| | segment, default | segment, frozen |
+|---|---|---|
+| `MF_AUTOTUNE=0` | 0.112 / 0.133 s | 0.099 / 0.100 s |
+| autotune on | 0.140 / 0.141 s | 0.125 / 0.127 s |
+
+10-24% end to end, more than any remaining per-call item. It is a process-wide decision, so it
+belongs to the application (pycbc, after building its banks), not to the library.
+
+The prefetch could be skipped for spans the device itself wrote (the middle output), but a
+host read of those pages in between (pycbc reads the middle series for other statistics)
+migrates them back, and a kernel then faults them in at the 2.7x cost above. Not done.

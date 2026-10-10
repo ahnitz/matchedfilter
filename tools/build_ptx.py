@@ -27,15 +27,23 @@ REFINE_KERNEL = ROOT / "src" / "gpu" / "refine_bounded.slang"
 def kernel_text():
     """tierb.slang as every target builds it (MF_CUDA selects its CUDA choices, MF_UNROLL)."""
     return KERNEL.read_text()
-def _coarse_prelude(n, cap, ppg):
+def _coarse_prelude(n, cap, ppg, table=True):
     """The packed coarse kernel's build-time inputs, exactly as the SPIR-V build makes them
     (build_spirv.coarse_prelude): the fp16 error bound's C16_KAPPA, the bank-conflict-free
     exchange layout and the fp16 twiddle table. Without it the CUDA coarse tier reported
-    B = |c16|(1+3u) with no rounding term (C16_KAPPA defaulting to 0)."""
+    B = |c16|(1+3u) with no rounding term (C16_KAPPA defaulting to 0).
+
+    table=False leaves out the fp16 twiddle table (the kernel then runs the twiddle
+    recurrence). Both are built, the table variant with a "w" suffix, and the measured
+    coarse choice (_cudacompute._coarse_kernel) picks: on the L40S the table cost band 1024's
+    tiled build ~40% and band 512's ~10%, and was even at 64-256."""
     import sys as _sys
     _sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
     import build_spirv
-    return build_spirv.coarse_prelude(n, cap, ppg)
+    text = build_spirv.coarse_prelude(n, cap, ppg)
+    if not table:
+        text = text[:text.index("static const uint COARSE_TWT_DATA")]
+    return text
 
 
 COMPACT_PEAKS_KERNEL = ROOT / "src" / "gpu" / "compact_peaks.slang"
@@ -128,7 +136,11 @@ def compile_ptx(slangc, nvrtc, env, src_text, out_path, entry, extra_flags=()):
     return out_path
 
 
-def compile_tierb(slangc, nvrtc, env, n, outdir, entry=ENTRY, cap=None, suffix="", coarse16=0, ppg=1, tile=1, single_bin=0):
+def compile_tierb(slangc, nvrtc, env, n, outdir, entry=ENTRY, cap=None, suffix="", coarse16=0, ppg=1, tile=1, single_bin=0, table=None):
+    if coarse16 and table is None:
+        compile_tierb(slangc, nvrtc, env, n, outdir, entry, cap, suffix + "w", coarse16, ppg,
+                      tile, single_bin, table=True)
+        table = False
     cap = LDS_CAP[n] if cap is None else cap
     r = RADIX.get(n, 16)
     wg = (n // r) * ppg if entry in ("fusedTierB", "refineListed") else (n // r)
@@ -139,7 +151,7 @@ def compile_tierb(slangc, nvrtc, env, n, outdir, entry=ENTRY, cap=None, suffix="
         "#define SLANG_CUDA_STRUCTURED_BUFFER_NO_COUNT 1\n"
         "#define TARGET_CUDA 1\n"
         % (n, cap, coarse16, ppg, tile, r, single_bin)
-        + (_coarse_prelude(n, cap, ppg) if coarse16 else "")
+        + (_coarse_prelude(n, cap, ppg, table=bool(table)) if coarse16 else "")
         + kernel_text()
     )
     name = "%s_%d%s.ptx" % (STEMS[entry], n, suffix)
