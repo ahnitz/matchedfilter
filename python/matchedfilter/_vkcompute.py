@@ -1006,7 +1006,8 @@ class Context(InputUploads):
             return alt["file"]
         return "tierb_%d.spv" % n
 
-    def _build_pipeline(self, key, filename, nbind, push_bytes, data_stride=0, row_windows=0):
+    def _build_pipeline(self, key, filename, nbind, push_bytes, data_stride=0, row_windows=0,
+                        subgroup=0):
         """data_stride: specialization constant 75 (mfDataStride), the data spectra's row
         stride when a hierarchical stage reads its band straight out of them.
         row_windows: constant 76 (mfRowWindows), per-row windows from the gRowWin binding.
@@ -1016,6 +1017,14 @@ class Context(InputUploads):
         dummy buffer."""
         if data_stride or row_windows:
             key = (key, "stride", data_stride, "rowwin", row_windows)
+        # subgroup: a size within the device's required-size range to build this pipeline
+        # at instead of the default (specialization constant 74 follows it).
+        rng = getattr(self, "subgroup_range", None)
+        if subgroup and not (rng and rng[0] <= subgroup <= rng[1]):
+            raise VulkanError("subgroup size %d cannot be required here" % subgroup)
+        sg = int(subgroup or self.subgroup_size)
+        if subgroup:
+            key = (key, "subgroup", sg)
         if key in self._pipelines:
             return self._pipelines[key]
         vk = self.vk
@@ -1057,7 +1066,7 @@ class Context(InputUploads):
 
         # Subgroup specialization (constant ID 74)
         entries.append(_SpecializationEntry(74, offset, 4))
-        data_vals.append(int(self.subgroup_size))
+        data_vals.append(sg)
         offset += 4
         if data_stride:
             entries.append(_SpecializationEntry(75, offset, 4))
@@ -1083,7 +1092,7 @@ class Context(InputUploads):
         req = None
         if getattr(self, "subgroup_range", None):
             # The size the kernels are specialized on (constant 74), required, not hoped for.
-            req = _StageRequiredSize(1000225001, None, int(self.subgroup_size))
+            req = _StageRequiredSize(1000225001, None, sg)
         stage = _StageCreate(18, ctypes.cast(ctypes.pointer(req), _vp) if req else None,
                              0, _STAGE_COMPUTE, module,
                              b"main", special)
@@ -1281,6 +1290,11 @@ class Context(InputUploads):
         # windows are off) get a small dummy buffer the kernel never reads.
         want = self._device_state.__dict__.get("layout_nbind", {}).get(
             getattr(set_layout, "value", set_layout), len(bufs))
+        if len(bufs) > want:
+            # A buffer for a binding the module does not declare: the kernel cannot read
+            # it, so whatever the caller meant it to do silently does not happen.
+            raise VulkanError("descriptor set given %d buffers for a %d-binding layout"
+                              % (len(bufs), want))
         if want > len(bufs):
             dummy = getattr(self, "_dummy_buf", None)
             if dummy is None:
@@ -1314,6 +1328,19 @@ class Context(InputUploads):
         vk.vkUpdateDescriptorSets(self.device, nbind, writes, 0, None)
         return dset
 
+    def _fit_subgroup(self, n):
+        """The subgroup size to build a one-pair-per-group kernel of length n at: the
+        smallest the device can be required to run that still holds the workgroup
+        (n/16 invocations), so a 32-invocation group does not leave half of a 64-wide
+        wave idle. 0 (the default size) otherwise. Listed one-bin refine, CU-cycles/pair,
+        wave64 -> wave32: n=256 481 -> 385, n=512 (32 invocations) 620 -> 552; 1024 1020 -> 1157, 2048
+        2113 -> 2266, 4096 4400 -> 4921 (larger groups lose)."""
+        rng = getattr(self, "subgroup_range", None)
+        wg = max(1, n // 16)
+        if not rng or wg > rng[0] or rng[0] >= self.subgroup_size:
+            return 0
+        return rng[0] if wg <= rng[0] else 0
+
     def _coarse_geometry(self, band, nd, nt):
         """(pairs per workgroup, templates per tile, groups, ragged) for the packed coarse kernel.
 
@@ -1332,19 +1359,19 @@ class Context(InputUploads):
         """
         wg = max(1, band // 16)
         want = max(1, int(self.subgroup_size) // wg)
-        # At most 4 pairs unless asked: the 8- and 16-pair builds hung the GPU (compute ring
-        # timeout) under realistic gating on gfx1151, and measured within 3% of 4 pairs once
-        # dispatches are padded. MF_VK_COARSE_PPG sets the cap, to investigate them.
-        # The tiled builds elect their peak with subgroup shuffles and take no LDS atomics,
-        # so they fill the whole subgroup; the 4-pair cap stays on the untiled builds.
-        # Band 64, CU-cycles/pair: p4 96, p4t2 47, p8t2 28, p16t2 29.
+        # Every build fills the subgroup; MF_VK_COARSE_PPG caps it, for measurement.
+        # There used to be a 4-pair cap on the untiled builds: the 8- and 16-pair builds
+        # "hung the GPU" on an older kernel, and later an untiled call lost every
+        # detection. The second was a binding bug (untiled builds ignored per-row windows,
+        # so their module declared no gRowWin and a grouped call gated everything out),
+        # fixed with a test; with it fixed, untiled 16-pair builds run the realistic ladder
+        # exact in both modes and ~330 back-to-back fine segments without a fault. The
+        # cap had been containing that bug, not a hang.
         env_cap = int(os.environ.get("MF_VK_COARSE_PPG", "0") or 0)
-        full = want
-        want = min(want, env_cap or 4)
+        if env_cap:
+            want = min(want, env_cap)
         pairs = nd * nt
         tile = _COARSE_TILE_T.get(band, 1)
-        if tile > 1:
-            want = min(full, env_cap) if env_cap else full
 
         # Device limits, queried: a group of ppg pairs is (band/16)*ppg invocations and
         # holds ppg padded exchange stages (about 17/16 * band words each).
@@ -1426,7 +1453,7 @@ class Context(InputUploads):
         refine_file = self._peak_file(n, nbins, refine=True)
         rpipe, rlayout, rset_layout = self._build_pipeline(
             ("refine", refine_file), refine_file, 5, _PUSH_BYTES,
-            row_windows=1 if rowwin is not None else 0)
+            row_windows=1 if rowwin is not None else 0, subgroup=self._fit_subgroup(n))
         pairs = nd * nt
         b = self._storage.get(key)
         if b is None:
@@ -1622,11 +1649,12 @@ class Context(InputUploads):
         refine_file1 = self._peak_file(band1, 1, refine=True)
         cpipe1, clayout1, cset_layout1 = self._build_pipeline(
             ("refine", refine_file1), refine_file1, 5, _PUSH_BYTES, data_stride=n,
-            row_windows=rwc)
+            row_windows=rwc, subgroup=self._fit_subgroup(band1))
 
         refine_file = self._peak_file(n, nbins, refine=True)
         rpipe, rlayout, rset_layout = self._build_pipeline(
-            ("refine", refine_file), refine_file, 5, _PUSH_BYTES, row_windows=rwr)
+            ("refine", refine_file), refine_file, 5, _PUSH_BYTES, row_windows=rwr,
+            subgroup=self._fit_subgroup(n))
 
         pairs = nd * nt
         b = self._storage.get(key)
