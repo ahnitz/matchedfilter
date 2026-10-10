@@ -266,8 +266,15 @@ class CostModel:
     """
 
     def __init__(self, n, dense, sparse, refine, block=0.0, screen=None, excess=None,
-                 host_call=0.0, host_block=0.0):
+                 host_call=0.0, host_block=0.0, forward=0.0, band_forward=False):
         self.n = int(n)
+        # forward: the full forward transform's share of `block`, per block. band_forward: the
+        # backend can instead write only the widest tier's band and recompute the full
+        # spectra of blocks with a refined pair (Vulkan, docs/vulkan-8060s-roofline.md
+        # section 13), so a chain's forward cost depends on its band and refine-block
+        # fraction (forward_cost).
+        self.forward = float(forward)
+        self.band_forward = bool(band_forward)
         # Host time a call spends outside the device (wall minus device time), as
         # host_call + host_block * blocks: what a host-starved GPU pays on top of the device
         # work. Measured on the host clock; zero where not measured (the CPU's ticks already
@@ -317,6 +324,7 @@ class CostModel:
     def to_dict(self):
         return {"n": self.n, "block": self.block, "dense": self.dense,
                 "host_call": self.host_call, "host_block": self.host_block,
+                "forward": self.forward, "band_forward": self.band_forward,
                 "sparse": self._sparse, "refine": self._refine, "screen": self.screen,
                 "excess": self.excess}
 
@@ -324,7 +332,24 @@ class CostModel:
     def from_dict(cls, d):
         return cls(d["n"], d["dense"], d["sparse"], d["refine"], block=d.get("block", 0.0),
                    screen=d.get("screen"), excess=d.get("excess"),
-                   host_call=d.get("host_call", 0.0), host_block=d.get("host_block", 0.0))
+                   host_call=d.get("host_call", 0.0), host_block=d.get("host_block", 0.0),
+                   forward=d.get("forward", 0.0), band_forward=d.get("band_forward", False))
+
+    def forward_cost(self, chain, f):
+        """Per-block forward cost for this chain: the full forward, or -- where the backend
+        has band forwards and chooses them (f < (n - B)/2n, its own byte rule, B the widest
+        band) -- the band write plus recomputing the f blocks that have a refined pair.
+        Costs scale the measured full forward: a band forward reads the same series and
+        writes B of n samples (half the full forward's time is the write); a recompute is a
+        full forward of one block. On the 8060S at (1024, 512), n=2048 this gives 0.75 of the
+        full forward for the band write, against 2.8/3.8 = 0.74 measured."""
+        full = self.forward
+        if not self.band_forward or full <= 0:
+            return full
+        n, B = self.n, int(max(chain))
+        if B >= n or not f < (n - B) / (2.0 * n):
+            return full
+        return full * (0.5 + 0.5 * B / n) + float(f) * full
 
     def pass_excess(self, b, f):
         """Measured / modelled first-tier pass rate at band b and modelled density f (>= 1):
@@ -349,6 +374,25 @@ class CostModel:
         passed = min(1.0, max(reach1, 1e-6) * float(np.exp(np.interp(math.log(max(reach1, 1e-6)), fs, ratio))))
         cq = sc["dense"] + passed * sc["recheck"]
         return (cq, True) if cq < c else (c, False)
+
+    def chain_forward_delta(self, chain, reach, ntemplates):
+        """Per-pair change from the full forward this chain's forward makes (<= 0), with the
+        refine-block fraction from the model: a block has a refined pair with probability
+        1 - (1 - P(refine))^templates, unless a measured fraction is registered."""
+        if not self.band_forward or not ntemplates or self.forward <= 0:
+            return 0.0
+        f = measured_refine_blocks(self.n, chain)
+        if f is None:
+            # No measurement: no credit. The noise model's refine-block fraction,
+            # 1 - (1 - P(refine))^templates, was tried and is far too low on real data (7%
+            # modelled where Vulkan measures ~40% of blocks with a refined pair): it moved
+            # 1757 of 4249 ladder templates to n = 8192 and made the fine stage 1.4-1.7x slower.
+            return 0.0
+        return (self.forward_cost(chain, f) - self.forward) / float(ntemplates)
+
+    def chain_forward(self, chain, reach, ntemplates):
+        """Per-pair forward cost of this chain (>= 0): forward_cost shared by the templates."""
+        return self.forward / float(ntemplates) + self.chain_forward_delta(chain, reach, ntemplates)
 
     def chain_cost(self, chain, reach):
         """reach[i] = P(a pair reaches tier i+1) for i = 0..k-1, reach[k] = P(reaches refine)."""
@@ -803,6 +847,10 @@ def calibrate_costs_gpu(n, device, blocks=None, reps=5, seed=11, nt=256):
         for b, g, r_raw in _raw_gate_survivors(n, device, bands, blocks, nt, seed):
             _, _, r_bnd = run((b,), (g,))
             excess.setdefault(b, []).append((r_raw / (blocks * nt), r_bnd / (blocks * nt)))
+    # The forward's share of the per-block work: the calibration cannot time it apart (one
+    # submission), and per-block fixed work on the GPU is the forward transform plus small
+    # bookkeeping, so `block` stands for it (an upper estimate of what a band forward saves).
+    forward = block
     # Host per call and per block: the same call at two block counts (nothing passes).
     hosts = []
     for nb in (blocks // 4, blocks):
@@ -813,12 +861,17 @@ def calibrate_costs_gpu(n, device, blocks=None, reps=5, seed=11, nt=256):
     host_block = max(0.0, (hosts[1][1] - hosts[0][1]) / (hosts[1][0] - hosts[0][0]))
     host_call = max(0.0, hosts[1][1] - host_block * hosts[1][0])
     cm = CostModel(n, dense, sparse, refine, block=block, excess=excess,
-                   host_call=host_call, host_block=host_block)
+                   host_call=host_call, host_block=host_block,
+                   forward=forward, band_forward=_gpu_backend(device) in _BAND_FORWARD)
     _COSTS[key] = cm
     if path is not None:
         _store_cost(path, skey, cm)
     return cm
 
+
+#: GPU backends whose hierarchical call can run a band-only forward with survivor recompute
+#: (CostModel.forward_cost). Metal and CUDA join when their kernels do.
+_BAND_FORWARD = {"vulkan"}
 
 #: Per GPU backend: the environment switch that makes its first tier report the raw coarse
 #: statistic instead of an upper bound of it, read when its pipelines are built, and the gate
@@ -951,7 +1004,7 @@ def _smallest(col, m):
     return idx[np.argsort(col[idx], kind="stable")]
 
 
-def plan_chain(sig, noise, bands, chain, fd, cost, n, snr, prune=False):
+def plan_chain(sig, noise, bands, chain, fd, cost, n, snr, prune=False, ntemplates=None):
     """Thresholds for `chain` meeting compound dismissal <= fd at minimum modelled cost.
 
     sig, noise: signal_draws / noise_block_maxima over `bands`.
@@ -1005,6 +1058,11 @@ def plan_chain(sig, noise, bands, chain, fd, cost, n, snr, prune=False):
             # low snr every chain refines most pairs, and the cost already says so.)
             return
         c = cost.chain_cost(chain, reach) if cost is not None else _flop_cost(chain, reach, n)
+        if ntemplates and getattr(cost, "band_forward", False):
+            # only the change from the full forward (already in `block`), so a chain without
+            # a measured credit is priced exactly as before; pick_stable's tie window is
+            # absolute-valued, so a credit that takes a total below zero still compares
+            c += cost.chain_forward_delta(chain, reach, ntemplates)
         if best is None or c < best["cost"]:
             q15 = bool(cost.first_tier(chain[0], reach[1])[1]) if hasattr(cost, "first_tier") else False
             best = dict(chain=tuple(chain), thresholds=tuple(th), reach=tuple(reach), cost=float(c),
@@ -1055,7 +1113,24 @@ def pick_stable(items, cost, key):
     if not items:
         return None
     lo = min(cost(x) for x in items)
-    return min((x for x in items if cost(x) <= lo * (1.0 + TIE)), key=key)
+    return min((x for x in items if cost(x) <= lo + TIE * abs(lo)), key=key)
+
+
+_REFINE_BLOCKS = {}
+
+
+def note_refine_blocks(n, band, f):
+    """Record a measured refine-block fraction for transform size n and widest band `band`
+    (a backend that measures it -- Vulkan's band/full choice -- calls this after each call),
+    used by forward pricing in place of the model's. Keyed by the widest band, which is what
+    the backend sees; chains sharing it share the measurement (a running mean)."""
+    key = (int(n), int(band))
+    old = _REFINE_BLOCKS.get(key)
+    _REFINE_BLOCKS[key] = float(f) if old is None else 0.5 * (old + float(f))
+
+
+def measured_refine_blocks(n, chain):
+    return _REFINE_BLOCKS.get((int(n), int(max(chain))))
 
 
 def _flop_cost(chain, reach, n):
@@ -1069,7 +1144,8 @@ def _flop_cost(chain, reach, n):
 _CHOICE_CACHE = OrderedDict()
 
 
-def choose_chain(power, n, snr, fd, cost=None, max_tiers=3, floor=_MIN_BAND, nsim=20000, window=None):
+def choose_chain(power, n, snr, fd, cost=None, max_tiers=3, floor=_MIN_BAND, nsim=20000, window=None,
+                 ntemplates=None):
     """Price every chain and return (best, all_plans sorted by cost).
 
     Cached like the draws it is built from: by profile signature, and reused for
@@ -1077,7 +1153,11 @@ def choose_chain(power, n, snr, fd, cost=None, max_tiers=3, floor=_MIN_BAND, nsi
     """
     p = _norm_profile(power, n)
     win = None if window is None else (int(window[0]), int(window[1]))
-    params = (n, float(snr), float(fd), int(max_tiers), int(floor), int(nsim), win, _cost_sig(cost))
+    params = (n, float(snr), float(fd), int(max_tiers), int(floor), int(nsim), win, _cost_sig(cost),
+              # ntemplates prices the forward; measured refine-block fractions are left out of
+              # the key on purpose, so a choice made once stays made in this process instead
+              # of drifting with each call's measurement.
+              None if not getattr(cost, "band_forward", False) else int(ntemplates or 0))
     key = (_gm._profile_sig(p),) + params
     hit = _CHOICE_CACHE.get(key)
     if hit is not None:
@@ -1086,13 +1166,13 @@ def choose_chain(power, n, snr, fd, cost=None, max_tiers=3, floor=_MIN_BAND, nsi
     unit, hit = _similar_get("choice", p, params)
     if hit is not None:
         return hit
-    out = _choose_chain(p, n, snr, fd, cost, max_tiers, floor, nsim, win)
+    out = _choose_chain(p, n, snr, fd, cost, max_tiers, floor, nsim, win, ntemplates)
     _cache_put(_CHOICE_CACHE, key, out)
     _similar_put("choice", unit, params, out)
     return out
 
 
-def _choose_chain(power, n, snr, fd, cost, max_tiers, floor, nsim, window):
+def _choose_chain(power, n, snr, fd, cost, max_tiers, floor, nsim, window, ntemplates=None):
     bands = usable_bands(power, n, floor)
     if not bands:
         return None, []
@@ -1102,7 +1182,8 @@ def _choose_chain(power, n, snr, fd, cost, max_tiers, floor, nsim, window):
     noise = noise_block_maxima(power, n, bands, nsim=nsim, window=window)
     plans = []
     for chain in enumerate_chains(n, max_tiers, floor, bands=bands):
-        pl = plan_chain(sig, noise, bands, list(chain), fd, cost, n, snr, prune=True)
+        pl = plan_chain(sig, noise, bands, list(chain), fd, cost, n, snr, prune=True,
+                        ntemplates=ntemplates)
         if pl is not None:
             plans.append(pl)
     plans.sort(key=lambda d: d["cost"])
@@ -1197,7 +1278,8 @@ def price_block_sizes(fine, delta_f, data_rate, longest, margin, ntemplates, snr
             hit = (None, None, None)
             if ref is not None:
                 cm = device_costs(n, device, ntemplates)
-                best, _ = choose_chain(ref, n, snr, fd, cost=cm, max_tiers=max_tiers, window=(lo, n - lo))
+                best, _ = choose_chain(ref, n, snr, fd, cost=cm, max_tiers=max_tiers, window=(lo, n - lo),
+                                       ntemplates=ntemplates)
                 if best is not None:
                     hit = (cm.block, best["cost"], best["chain"], getattr(cm, "host_block", 0.0))
             _cache_put(_PRICE_CACHE, key, hit)

@@ -2239,6 +2239,8 @@ class Context(InputUploads):
         else:
             f = len(np.unique(bufs[surv_key].view(np.uint32, count) // nt)) / float(nd)
         self.__dict__.setdefault("_band_f", {})[(n, B, nd, nt)] = f
+        from . import gatechain as _gc           # forward pricing uses the measured fraction
+        _gc.note_refine_blocks(n, B, f)
 
     def hier_peaks_grouped(self, n, band, data, tmpl, ct0, raw_thr, groups, binsize, threshold,
                            *, upload_tmpl=True, cascade_band=None, ct1=None, raw_thr1=None,

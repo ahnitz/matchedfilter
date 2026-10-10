@@ -223,3 +223,33 @@ remains for other hardware.
   the host term. On the 8060S: host_block 2.1 us at n = 2048 and 5.7 us at 4096, against
   device block work of ~0.3/0.7; with it the n = 2048 margin over 4096 went from ~6% (inside
   the noise that made it flip) to ~30%.
+
+## Forward priced per chain (2026-10-10)
+
+Vulkan can write only the widest tier's band of each block's spectrum and recompute the
+full spectra of blocks with a refined pair (docs/vulkan-8060s-roofline.md section 13); it does
+so when the refine-block fraction f < (n - B)/2n. A chain that refines few blocks therefore
+pays a cheaper forward, which the cost model did not credit.
+
+* `CostModel.forward` is the full forward per block (on the GPU, `block`: per-block fixed work
+  is the forward plus small bookkeeping, and one submission cannot time it apart), and
+  `band_forward` is a backend capability (`_BAND_FORWARD = {"vulkan"}`).
+* `forward_cost(chain, f)` applies the backend's own byte rule: full, or a band write
+  `forward * (1/2 + B/2n)` (same series read, B of n written; 0.75 at B = n/2 against
+  2.8/3.8 = 0.74 measured) plus `f * forward` of recompute.
+* f: only the measured fraction (`note_refine_blocks`, called by Vulkan's band measurement,
+  keyed by (n, widest band)); without one a chain gets no credit. The noise model's
+  1 - (1 - P(refine))^templates was tried first and is far too low on real data -- about 7%
+  where Vulkan measures ~40% of blocks with a refined pair (glitches and signals refine, noise
+  draws do not): it moved 1757 of 4249 ladder templates to n = 8192 and the fine stage got
+  1.4-1.7x slower in interleaved runs. Measured values do not enter the choice cache key, so a
+  choice made once stays made within a process.
+* `choose_chain(..., ntemplates=)` adds each chain's forward change from the full forward
+  (already in `block`), shared by the templates; HierarchicalFilter and block-size pricing
+  pass their template counts. With few templates a credit can take a total below zero, so
+  the tie window is now `lo + TIE * |lo|`. (Adding the whole forward to every chain instead
+  widened every relative tie window and, by itself, moved templates to n = 8192.)
+
+Effect: with the model's f, (256, 1024) at n = 2048 (f = 1%) gained the band credit and tied
+(256, 512); on the ladder the credit at n = 8192 went the wrong way (above). With measured-only
+f, a process's first choices are the base's, and later choices see Vulkan's measured fraction.

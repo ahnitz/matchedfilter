@@ -2596,7 +2596,7 @@ class HierarchicalFilter(MatchedFilter):
         with _AUTOTUNE_LOCK:
             hit = _CHAIN_CHOICE.get(key)
         if hit is None:
-            best, plans = _gatechain.choose_chain(self._pending_ref, self.n, snr, self.fd,
+            best, plans = _gatechain.choose_chain(self._pending_ref, self.n, snr, self.fd, ntemplates=self.ntemplates,
                                                   cost=self._cost_model(), max_tiers=tiers,
                                                   window=self.search_window)
             if best is None:
