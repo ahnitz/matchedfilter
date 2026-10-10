@@ -83,6 +83,9 @@ def get_cuda_lib():
     lib.cuDeviceGetName.argtypes = [ctypes.c_char_p, ctypes.c_int, ctypes.c_int]
     lib.cuDeviceGetName.restype = ctypes.c_int
 
+    lib.cuDeviceGetPCIBusId.argtypes = [ctypes.c_char_p, ctypes.c_int, ctypes.c_int]
+    lib.cuDeviceGetPCIBusId.restype = ctypes.c_int
+
     lib.cuDeviceTotalMem_v2.argtypes = [ctypes.POINTER(ctypes.c_size_t), ctypes.c_int]
     lib.cuDeviceTotalMem_v2.restype = ctypes.c_int
 
@@ -244,6 +247,39 @@ def get_cuda_lib():
 
     _LIB_CACHE = lib
     return lib
+
+
+_NVML = None
+
+
+def nvml_sm_clock(pci_bus_id):
+    """A callable giving the current SM clock (MHz) of the GPU at ``pci_bus_id``, or None.
+
+    NVML ships with the driver (libnvidia-ml); the PCI bus id maps a CUDA device to its NVML
+    handle whatever CUDA_VISIBLE_DEVICES says."""
+    global _NVML
+    if _NVML is None:
+        _NVML = False
+        for name in ("libnvidia-ml.so.1", "libnvidia-ml.so"):
+            try:
+                lib = ctypes.CDLL(name)
+            except OSError:
+                continue
+            if lib.nvmlInit_v2() == 0:
+                _NVML = lib
+            break
+    if not _NVML:
+        return None
+    handle = ctypes.c_void_p()
+    if _NVML.nvmlDeviceGetHandleByPciBusId_v2(pci_bus_id, ctypes.byref(handle)) != 0:
+        return None
+    mhz = ctypes.c_uint()
+
+    def clock():
+        if _NVML.nvmlDeviceGetClockInfo(handle, 1, ctypes.byref(mhz)) != 0:   # 1: NVML_CLOCK_SM
+            return None
+        return float(mhz.value)
+    return clock if clock() else None
 
 
 def check_cuda(result, func_name=""):
