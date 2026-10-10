@@ -223,3 +223,24 @@ remains for other hardware.
   the host term. On the 8060S: host_block 2.1 us at n = 2048 and 5.7 us at 4096, against
   device block work of ~0.3/0.7; with it the n = 2048 margin over 4096 went from ~6% (inside
   the noise that made it flip) to ~30%.
+
+## Refine density on realistic data (2026-10-10)
+
+The premise that the gate model's refine density is ~5x low on real data does not hold.
+`tools/refine_density.py` runs the realistic ladder (test27 bank, H1 per-top profiles) and
+compares, per (n, chain), the refined fraction each plan measured with the refine reach the
+model predicts for that chain from noise draws of the plan's own reference
+(MF_AUTOTUNE=0, 2 tops x 4 segments, 32.8M pairs):
+
+| device | n | chain | measured | modelled |
+|---|---|---|---|---|
+| cpu | 2048 | (256, 512, 1024) | 1.7e-4 | 2.2e-4 |
+| gpu:0 (8060S, fp16 bound) | 2048 | (256, 512) | 2.8e-3 | 3.1e-3 |
+
+The model is within 10-25% per pair and on the conservative side. The "7% vs 40%" was a
+conversion error in the forward pricing, not a model error: the block fraction is
+1 - (1 - r)^(templates per row) with r the chain's own refine reach. For (256, 512),
+r = 2.8e-3 and 200 templates give 43%, matching Vulkan's ~40%, while (256, 1024)'s
+r ~ 5e-5 gives ~1%. Which chain is running is what decides f; a calibration on injections
+and glitches is not needed to price it. So no new density model is added; the measuring
+tool is kept for when a workload with glitches says otherwise.
