@@ -771,15 +771,19 @@ def test_gpu_hierarchical_bank_matches_cpu_including_packed_templates(pack):
     assert max(abs(dev[k] - cpu[k]) / abs(cpu[k]) for k in common) < 1e-5
 
 
-@pytest.mark.parametrize("device", ["cpu", "gpu"])
-def test_filter_series_many_matches_one_call_at_a_time(device, monkeypatch):
+@pytest.mark.parametrize("device,interleave", [("cpu", ""), ("gpu", ""), ("gpu", "0"),
+                                                ("gpu", "3")])
+def test_filter_series_many_matches_one_call_at_a_time(device, interleave, monkeypatch):
     """A batch returns exactly what the calls return one at a time -- including a bank that
     appears in several jobs with different series (in flight together on a GPU) and
-    single-template calls -- whatever the device does to overlap them."""
+    single-template calls -- whatever the device does to overlap them, at every fused-batch
+    interleave depth (forced here; measured per batch shape otherwise)."""
     from conftest import usable_gpu
     # The model's choices only: trials would move single-template calls between devices
     # mid-test, and this compares GPU deferral against GPU calls exactly.
     monkeypatch.setenv("MF_AUTOTUNE", "0")
+    if interleave:
+        monkeypatch.setenv("MF_GPU_FUSE_INTERLEAVE", interleave)
     dev = None
     if device == "gpu":
         dev = usable_gpu()

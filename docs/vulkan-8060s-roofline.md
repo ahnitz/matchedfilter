@@ -478,5 +478,16 @@ coarse0(A).
 - **No overlap gain at that clock.** The coarse0+forward step took 13.3 ms against ~12.4 ms
   for the two halves serially. At 600 MHz the forward is no longer DRAM-bound (its FFT
   dominates), so there is nothing to hide.
-- **It stays off** until it can be measured at full clock, where the forward is DRAM-bound
-  (169 GB/s) and the overlap premise holds.
+- **Depth is now a measured choice, not a switch.** Per device and batch shape (the phase
+  sets its items carry), the first batches take depth 0 or 3 in random order, 5 each.
+  - Each run is timed with device timestamps around the submission and normalised by the
+    batch's coarse0 workgroups.
+  - Interleave is kept only if its median beats lockstep by 5%; otherwise lockstep stays.
+  - So it switches on where the forward is DRAM-bound (full clock, other GPUs) without a
+    hand-set default. `MF_GPU_FUSE_INTERLEAVE` still forces a depth.
+  - Per-batch keys would rarely finish a trial: in a 12-segment pipelined ladder, 35
+    multi-item batches recurred about twice each. Shapes recur constantly.
+- **Measured at the capped clock:** normalised medians were 23.0 / 23.0 and 21.2 / 21.0 ns
+  per coarse0 workgroup (lockstep / interleave), within noise. Lockstep is kept.
+- **Fix found along the way:** `replay_fused` shadowed its submission list with the loop
+  variable over constituent recordings.
