@@ -446,9 +446,11 @@ def main():
                         "the device works, then collect (filter_series_many(wait=False))")
     p.add_argument("--no-batch", action="store_true",
                    help="fine stage as one filter_series call per bank and detector (the old pattern)")
-    p.add_argument("--pregen", action="store_true",
-                   help="generate every segment's input data before the timed loop (same data), "
-                        "so the bench's data generation does not idle the device between segments")
+    p.add_argument("--no-pregen", dest="pregen", action="store_false",
+                   help="generate each segment's input data inside the loop (the old default). By "
+                        "default every segment's data is drawn before the timed loop (same data): "
+                        "a search reads its data, and generating it here (~0.1 s a segment) idled "
+                        "the device between segments")
     p.add_argument("--timing", action="store_true",
                    help="device time per kernel label for each stage (sets MF_GPU_TIMING=1)")
     args = p.parse_args()
