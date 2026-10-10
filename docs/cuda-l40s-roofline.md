@@ -478,3 +478,60 @@ where a part with a higher tensor:SIMT ratio, or a fused forward feeding it, may
 ~80k (4.34M pairs over 54 calls). At 16k pairs launch and setup costs dominate: the Slang
 variants measured 0.94 / 1.69 ns per pair at bands 256 / 512 there, 0.56 / 1.14 at 65k.
 The choice now times 65,536 pairs; it picks differently at band 512 (p2 t4 rather than p1 t4).
+
+**κ for the tensor-core gate is empirical.** The Slang tiers' κ = z·σ comes from a measured σ and
+an assumed Gaussian tail at the 1e-12 per-pair failure target (`coarse_layout.C16_FAIL`). The
+tensor-core error magnitude is visibly heavier-tailed than a Rayleigh fit, so that derivation
+does not hold for it. Its κ (7.0 / 10.5) is set at twice the largest error seen in 8192 pairs
+per band: it meets the margin-use < 0.5 criterion on what was measured, and carries no proven
+per-pair failure rate. The same caveat as the Q15 gate's empirical margin. The kernel is never
+chosen on this part, so this bounds nothing in production today.
+
+## Phase 8 (2026-10-10): one CUDA graph per segment's fine stage
+
+**What.** `SegmentPlan` (time_domain) on CUDA: the first run of a job set runs as usual, the second
+is captured whole into one CUDA graph (`_cudacompute.SegmentGraph`) -- every bank's forwards,
+coarse gates, compactions, refines and readbacks -- and later runs relaunch it with one
+`cuGraphLaunch` and one wait, then read each dispatch's results. While capturing:
+- every Context's streams resolve to the graph's four fork streams (slot k -> stream k mod 4),
+  so independent banks still run concurrently inside the graph;
+- per-call graphs are bypassed, cross-stream waits use events recorded in the capture only,
+  managed-memory prefetches are recorded and issued by the replay;
+- every device and pinned address the captured work touches is collected; freeing or growing
+  any of them bumps a generation that makes the graph stale (fallback, re-capture).
+Results are read sparse, straight into each job's peak lists in filter_series order.
+`ladder` uses it with `LADDER_REPLAY=1` (a measured candidate; the default path is unchanged).
+
+**Correctness.** `tests/test_cuda_segment_graph.py`: replays match filter_series exactly with
+data rewritten in place (>=3 replays asserted); a new allocation each segment and an
+alternating job set fall back without a stale replay. `ladder --check cpu` exact with
+`LADDER_REPLAY=1`, batched and `--pipeline`; `LADDER_VERIFY_REPLAY` reports 0 mismatched jobs
+against the per-call path.
+
+**Measured** (production bank, n pinned at 2048 so both runs use the same chain; 10 segments,
+8 steady of which 7 replay; `LADDER_GC_FREEZE=1`; `MF_CUDA_BLOCKING_SYNC=1` so host waits sleep
+and process CPU counts host work only; 5 interleaved rounds, medians):
+
+| | segment wall | fine stage wall | host CPU per segment |
+|---|---|---|---|
+| parity/cuda-tc base | 25.3 ms | 12.2 ms | 24.4 ms |
+| segment graph | 26.5 ms | 12.3 ms | **18.5 ms** |
+
+Per replayed segment the fine stage's host work is ~1 ms (graph launch, ~0.9 ms of result
+parsing for 108 jobs) against ~10 ms of per-call submission before: 54 banks x 2 detectors of
+host work became one call's worth. Segment wall does not move: the fine stage is now
+device-bound (the graph runs ~9 ms of device work), and the per-call path already hid its host
+submission under that device time. The remaining host time per segment is the follow-ups
+(~9 ms) and the middle stage (~5 ms).
+
+**Extending it.** `SegmentGraph.capture(run)` captures whatever `run` submits; `SegmentPlan` keys
+a graph on the job set's signature. A production job's many top templates x segments of
+identical shapes are separate signatures today (one graph each, no re-capture across segments).
+Folding several top templates' job sets into one capture, and the follow-ups (`_items_batch`)
+into the same graph, are the next steps; both need the follow-up windows to be data (device
+arrays the graph reads) rather than host-built per segment.
+
+**Call plans.** This composes with the review agent's call-plan layer rather than replacing it:
+the capture run goes through the normal deferred path (call plans included), and a replay skips
+the whole Python path. On CUDA the call plans never replay (the backend has no
+forward_replay/hier_replay), so for the fine stage the segment graph supersedes them.
