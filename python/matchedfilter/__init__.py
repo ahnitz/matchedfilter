@@ -927,11 +927,12 @@ class MatchedFilter:
         prior = self.__dict__.pop("_items_pending", None)
         if prior is not None:
             prior()                              # its workspace is about to be rewritten
-        cap = getattr(self, "_items_ws", None)
-        if cap is None or cap[0].shape[0] < total:
-            size = max(total, 2 * (cap[0].shape[0] if cap else 0))
-            cap = (gpu.empty_shared((size, n)), gpu.empty_shared(size, np.uint32))
-            self._items_ws = cap
+        # Workspaces come from a per-device pool (follow-ups run on a different single-template
+        # plan per bank, and per-plan workspaces were a new allocation -- and new forward
+        # recordings -- whenever a bank first had follow-ups). One is checked out for this
+        # submission and returned once its results are read; sizes are powers of two rows,
+        # so a recurring call takes the same workspace and its recordings repeat.
+        cap = self._items_checkout(gpu, n, total)
         spec, starts = cap
         items, place, fill = [], [], {k: a[1] for k, a in allocs.items()}
         for (ser, st, ws, we, t), (k_alloc, row) in zip(jobs, rows):
@@ -985,16 +986,49 @@ class MatchedFilter:
             return out
         if not async_ok:
             out = assemble(res)
+            self._items_return(gpu, n, cap)
             return out if wait else (lambda: out)
         done = []
 
         def collect():
             if not done:
                 self.__dict__.pop("_items_pending", None)
-                done.append(assemble(res()))
+                try:
+                    done.append(assemble(res()))
+                finally:
+                    self._items_return(gpu, n, cap)
             return done[0]
         self._items_pending = collect
         return collect
+
+    @staticmethod
+    def _items_pool(gpu, n):
+        holder = getattr(gpu, "_device_state", None) or gpu
+        return holder.__dict__.setdefault("items_pool", {}).setdefault(n, [])
+
+    def _items_checkout(self, gpu, n, rows):
+        """A free (spectra, starts) workspace of at least rows rows, taken out of the pool."""
+        pool = self._items_pool(gpu, n)
+        # This plan's last workspace first: its forward recordings are on it.
+        last = self.__dict__.get("_items_last")
+        for i, ws in enumerate(pool):
+            if ws is last and ws[0].shape[0] >= rows:
+                return pool.pop(i)
+        fits = [i for i, ws in enumerate(pool) if ws[0].shape[0] >= rows]
+        if fits:
+            ws = pool.pop(min(fits, key=lambda i: pool[i][0].shape[0]))
+        else:
+            size = 64
+            while size < rows:
+                size *= 2
+            ws = gpu.empty_shared((size, n)), gpu.empty_shared(size, np.uint32)
+        self._items_last = ws
+        return ws
+
+    def _items_return(self, gpu, n, ws):
+        pool = self._items_pool(gpu, n)
+        if all(w is not ws for w in pool):
+            pool.append(ws)
 
     def _items_by_allocation(self, jobs, rows, binsize, threshold, wait):
         """_items_gpu for jobs spanning allocations on a backend without forward row ranges:
