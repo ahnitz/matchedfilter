@@ -15,9 +15,13 @@
 // The fp16 coarse tier's error bound (C16_KAPPA): 1 applies it (the default the host
 // uses), 0 reports the raw fp16 maximum -- for measuring the bound's margin use only.
 [[vk::constant_id(77)]] const uint mfC16Bound = 1;
+// The transform length behind the data rows when they are band rows (stride B < n) of
+// the band-only forward; 0: the stride is the length (mfDataStride).
+[[vk::constant_id(78)]] const uint mfFullLength = 0;
 #elif defined(MF_CUDA)
 static const uint mfDataStride = 0;
 static const uint mfRowWindows = 0;
+static const uint mfFullLength = 0;
 // The fp16 bound switch (constant 77 on Vulkan) as a module __constant__ the host writes
 // (cuModuleGetGlobal "mf_c16_raw"): zero-initialized, so the bound applies unless the host
 // asks for the raw maximum (MF_VK_C16_BOUND=0, for measuring the bound's margin).
@@ -34,6 +38,7 @@ static const uint mfSubgroupSize = 32;
 #elif defined(MF_METAL)
 static const uint mfDataStride = 0;
 static const uint mfRowWindows = 0;
+static const uint mfFullLength = 0;
 // The fp16 bound switch (constant 77 on Vulkan) as an MSL preprocessor macro the host sets
 // when it compiles the library (MTLCompileOptions.preprocessorMacros, MF_C16_RAW=1 when
 // MF_VK_C16_BOUND=0): the bound applies unless the raw maximum is asked for.
@@ -50,6 +55,7 @@ static const uint mfSubgroupSize = 32;
 #else
 static const uint mfDataStride = 0;
 static const uint mfRowWindows = 0;
+static const uint mfFullLength = 0;
 static const uint mfC16Bound = 1;
 static const uint mfAccurateTrig = 0;
 static const uint mfSubgroupSize = 32;

@@ -41,6 +41,22 @@ def build_kernels(compiler, build_module=build):
         info = build.reflect(blob.read_bytes())
         entries[str(n)] = dict(file=blob.name, metal=f'forward_{n}.metal',
                                local_size=info['local_size'], lds_cap=cap)
+        # The band-only forward and its survivor recompute (series_bands.slang), Vulkan:
+        # the hierarchical path reads a band of every block and full spectra of a few.
+        with tempfile.TemporaryDirectory() as tmp:
+            src = pathlib.Path(tmp) / 'bands.slang'
+            src.write_text(defines + '#define SPLIT_STAGE 0\n' + source + '\n'
+                           + (build.ROOT / 'src/gpu/series_bands.slang').read_text())
+            for entry, stem in (('seriesForwardBands', 'forward_bands'),
+                                ('seriesForwardListed', 'forward_listed')) + (
+                                    (('markBlocks', 'markblocks'),) if n == build.TIER_B[0] else ()):
+                out = build.ROOT / 'python/matchedfilter/spirv' / (
+                    f'{stem}_{n}.spv' if stem != 'markblocks' else 'markblocks.spv')
+                subprocess.run([compiler, str(src), '-I', str(build.KERNEL.parent), '-target', 'spirv',
+                                '-entry', entry, '-stage', 'compute', '-O3', '-DMF_VULKAN=1',
+                                '-o', str(out)], check=True)
+        entries[str(n)]['bands'] = f'forward_bands_{n}.spv'
+        entries[str(n)]['listed'] = f'forward_listed_{n}.spv'
         print(n, flush=True)
     metal = build.ROOT / 'python/matchedfilter/metal'
     for path in list(metal.glob('forward_*.metal')) + [metal / 'pack_coarse.metal']:

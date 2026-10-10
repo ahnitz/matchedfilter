@@ -266,3 +266,28 @@ def test_follow_up_pool_never_hands_out_a_workspace_in_use():
     b._items_return(gpu, 256, wb)
     assert a._items_checkout(gpu, 256, 100) is not wa  # wa is out with b
     assert a._items_checkout(gpu, 256, 300)[0].shape[0] >= 300
+
+
+
+def test_band_mode_flip_replays_exact(monkeypatch):
+    """Vulkan's band-only forward (option a): a replayed band-mode call resubmits its own
+    band forward and recompute records, and a flip of the band/full choice (forced here;
+    measured otherwise) never replays a record made for the other mode. Every call matches
+    the synchronous full call exactly, before and after each flip."""
+    rng, banks = _setup(monkeypatch, seed=73)
+    ctx = banks[0][0]._groups[0].plan._gpu
+    if not hasattr(ctx, "_band_wanted"):
+        pytest.skip("this backend has no band-only forward")
+    S = 1 << 17
+    rows = banks[0][0].empty_shared((len(banks), S))
+    jobs = [(b, rows[i], dict(windows=slice(3000, S - 3000))) for i, (b, _, _) in enumerate(banks)]
+    seen = []
+    for mode in ("1", "1", "1", "0", "0", "1", "1"):
+        monkeypatch.setenv("MF_VK_BAND_FORWARD", mode)
+        before = _replays(banks)
+        _fill(rng, rows, S)
+        _check(jobs)
+        seen.append((mode, _replays(banks) - before))
+    # Replays happened within a mode, and the first call after a flip re-recorded.
+    assert any(r for m, r in seen[1:3]), seen
+    assert seen[3][1] == 0 and seen[5][1] == 0, seen

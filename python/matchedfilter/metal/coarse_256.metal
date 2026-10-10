@@ -3,7 +3,7 @@
 #include <metal_texture>
 using namespace metal;
 
-#line 70 "/home/ahnitz/mtlbuild/python/matchedfilter/spirv/ct_256_m.slang"
+#line 70 "/home/ahnitz/projects/claude/searchdev/work/peak-fft/.claude/worktrees/agent-aaf230abdd173dffa/python/matchedfilter/spirv/ct_256_m.slang"
 float2 cmulConj_0(float2 a_0, float2 b_0)
 {
 
@@ -215,7 +215,7 @@ void dftR_0(array<float2, int(16)> thread* r_1)
 }
 
 
-#line 58 "/home/ahnitz/mtlbuild/src/gpu/twiddle.slang"
+#line 64 "/home/ahnitz/projects/claude/searchdev/work/peak-fft/.claude/worktrees/agent-aaf230abdd173dffa/src/gpu/twiddle.slang"
 float2 mfTwiddle_0(float angle_0)
 {
 
@@ -223,7 +223,7 @@ float2 mfTwiddle_0(float angle_0)
 }
 
 
-#line 137 "/home/ahnitz/mtlbuild/python/matchedfilter/spirv/ct_256_m.slang"
+#line 137 "/home/ahnitz/projects/claude/searchdev/work/peak-fft/.claude/worktrees/agent-aaf230abdd173dffa/python/matchedfilter/spirv/ct_256_m.slang"
 void stage2_0(array<float2, int(16)> thread* r_2)
 {
 
@@ -242,7 +242,7 @@ struct EntryPointParams_0
 };
 
 
-#line 182 "/home/ahnitz/mtlbuild/python/matchedfilter/spirv/ct_256_m.slang"
+#line 182 "/home/ahnitz/projects/claude/searchdev/work/peak-fft/.claude/worktrees/agent-aaf230abdd173dffa/python/matchedfilter/spirv/ct_256_m.slang"
 struct KernelContext_0
 {
     EntryPointParams_0 constant* entryPointParams_0;

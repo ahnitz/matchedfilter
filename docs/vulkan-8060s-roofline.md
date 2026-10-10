@@ -491,3 +491,61 @@ coarse0(A).
   per coarse0 workgroup (lockstep / interleave), within noise. Lockstep is kept.
 - **Fix found along the way:** `replay_fused` shadowed its submission list with the loop
   variable over constituent recordings.
+
+## 13. Option (a) shipped: band-only forward, survivor recompute
+
+### Kernels (`src/gpu/series_bands.slang`, Vulkan builds)
+- `seriesForwardBands` writes the first B bins of every block.
+- `markBlocks` lists the distinct blocks among the refine's survivors.
+- `seriesForwardListed` writes those blocks' full spectra into their own rows.
+- All use the same transform and output order as `seriesForward`, so band rows and listed
+  rows are bit-identical to the full forward's.
+- The coarse tiers read band rows with stride B (specialization constant 75). Constant 78
+  (`mfFullLength`) keeps per-row windows mapped against the true length n.
+
+### Host (`_vkcompute`)
+- `forward()` remembers each deferred forward's source.
+- A hierarchical call on those spectra can swap the pending full forward for a band-forward
+  recording, and records `mark` and `recompute` phases before its refine.
+- Each is its own fused phase. A fused batch emits every item's work for a phase before any
+  of their barriers, so dependent steps inside one call must be separate phases.
+- The first version recomputed in one phase. It was exact on single calls and wrong in
+  multi-item fused batches (filter_series_many dropped peaks), which the
+  one-call-at-a-time equivalence test caught with the mode forced on.
+
+### The choice is derived, not switched
+- Per block, the full forward writes n samples and the band forward B.
+- The recompute reads and writes n for each block with a refined pair.
+- So bands move fewer bytes iff the refine-block fraction f < (n − B)/2n. That is 0.25 at
+  B = n/2, and 0.44 at B = n/8.
+- f is measured on the call shape's previous run; the first run is full.
+- `MF_VK_BAND_FORWARD=0/1` forces it, for measurement.
+- Across a pipelined ladder 217 of 252 cascade calls chose bands. The refine-heavy chain
+  (256,), with 173k refined pairs touching most blocks, correctly stays full.
+
+### Measured (busy fine loop, ~1.9–2.1 GHz, alternating runs)
+
+| chain | mode | forward | mark + recompute | fused segment |
+|---|---|---|---|---|
+| (1024, 512) | full | 3.8 ms | – | 14.5 ms |
+| (1024, 512) | bands | 2.8 ms | 0.7 ms | 13.7 ms |
+| (256,) | full | 4.3 ms | – | 14.2 ms |
+| (256,) | bands chosen off | 3.8 ms | 0.1 ms | 13.6 ms |
+
+- **Forward:** 1.36x less forward time, as the prototype predicted (0.795 → 0.497 per 4096
+  blocks).
+- **Net segment gain:** about 5%. The recompute costs more than projected (0.7 against
+  0.4 ms), because blocks with a refined pair are ~40% of blocks in this chain, not 8.7%.
+- **This falls well short of §12's 1.5x.** That projection assumed the forward's DRAM time
+  hides under coarse0's compute.
+
+### What remains of the fused-kernel projection
+- **Overlap:** hiding the forward's memory time under coarse0 is what the measured
+  interleave (§12) does when it pays. At ~2 GHz it chose interleave for the (256,) shape in
+  the last run, where it had chosen lockstep at 600 MHz.
+- **What fusion adds on top of (a) plus interleave:** not writing and re-reading the band
+  rows. That is B × 8 bytes per block, 8 KB at B = 1024 against the 16 KB series read the
+  fused kernel still needs, so about 30% of the remaining forward traffic.
+- **Fused forward + coarse0 kernel: not built.** It needs a parameterized transform in
+  `tierb.slang`. On these numbers I would build it only if a full-clock measurement shows
+  the forward still exposed after (a) and interleave.

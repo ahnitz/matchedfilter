@@ -23,7 +23,7 @@ uint firstbithigh_0(uint value_0)
 }
 
 
-#line 58 "/home/ahnitz/mtlbuild/src/gpu/twiddle.slang"
+#line 64 "/home/ahnitz/projects/claude/searchdev/work/peak-fft/.claude/worktrees/agent-aaf230abdd173dffa/src/gpu/twiddle.slang"
 float2 mfTwiddle_0(float angle_0)
 {
 
@@ -31,7 +31,7 @@ float2 mfTwiddle_0(float angle_0)
 }
 
 
-#line 256 "/tmp/tmpwgd686c3/forward.slang"
+#line 256 "/tmp/tmpz3h2ucsx/forward.slang"
 float2 cmul_0(float2 a_0, float2 b_0)
 {
 
@@ -337,7 +337,7 @@ struct EntryPointParams_0
 };
 
 
-#line 245 "/tmp/tmpwgd686c3/forward.slang"
+#line 245 "/tmp/tmpz3h2ucsx/forward.slang"
 struct KernelContext_0
 {
     EntryPointParams_0 constant* entryPointParams_0;
@@ -611,7 +611,7 @@ void forwardTransform_0(array<float2, int(32)> thread* r_5, uint tid_0, KernelCo
         for(;;)
         {
 
-#line 7 "/home/ahnitz/mtlbuild/src/gpu/fft_transform.slang"
+#line 7 "/home/ahnitz/projects/claude/searchdev/work/peak-fft/.claude/worktrees/agent-aaf230abdd173dffa/src/gpu/fft_transform.slang"
             for(;;)
             {
 
@@ -786,7 +786,7 @@ void forwardTransform_0(array<float2, int(32)> thread* r_5, uint tid_0, KernelCo
 #line 43
     innermost_0(r_5);
 
-#line 1811 "/tmp/tmpwgd686c3/forward.slang"
+#line 1811 "/tmp/tmpz3h2ucsx/forward.slang"
     return;
 }
 

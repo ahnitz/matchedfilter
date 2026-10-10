@@ -23,7 +23,7 @@ uint firstbithigh_0(uint value_0)
 }
 
 
-#line 256 "/home/ahnitz/mtlbuild/python/matchedfilter/metal/tc_corr1_1048576.slang"
+#line 256 "/home/ahnitz/projects/claude/searchdev/work/peak-fft/.claude/worktrees/agent-aaf230abdd173dffa/python/matchedfilter/metal/tc_corr1_1048576.slang"
 float2 cmulConj_0(float2 a_0, float2 b_0)
 {
 
@@ -223,7 +223,7 @@ void dft16_0(array<float2, int(16)> thread* r_0)
 }
 
 
-#line 58 "/home/ahnitz/mtlbuild/src/gpu/twiddle.slang"
+#line 64 "/home/ahnitz/projects/claude/searchdev/work/peak-fft/.claude/worktrees/agent-aaf230abdd173dffa/src/gpu/twiddle.slang"
 float2 mfTwiddle_0(float angle_0)
 {
 
@@ -231,7 +231,7 @@ float2 mfTwiddle_0(float angle_0)
 }
 
 
-#line 257 "/home/ahnitz/mtlbuild/python/matchedfilter/metal/tc_corr1_1048576.slang"
+#line 257 "/home/ahnitz/projects/claude/searchdev/work/peak-fft/.claude/worktrees/agent-aaf230abdd173dffa/python/matchedfilter/metal/tc_corr1_1048576.slang"
 uint computeWant_0(uint d_1, uint TB_0, uint len_0, uint blk_0, uint lane_0, uint per_0, uint TB2_0, uint len2_0, uint blk2_0, uint lane2_0)
 {
     uint _S11 = max(TB_0, 1U);
@@ -273,7 +273,7 @@ struct EntryPointParams_0
 };
 
 
-#line 244 "/home/ahnitz/mtlbuild/python/matchedfilter/metal/tc_corr1_1048576.slang"
+#line 244 "/home/ahnitz/projects/claude/searchdev/work/peak-fft/.claude/worktrees/agent-aaf230abdd173dffa/python/matchedfilter/metal/tc_corr1_1048576.slang"
 struct KernelContext_0
 {
     EntryPointParams_0 constant* entryPointParams_0;
@@ -587,7 +587,7 @@ void transform_0(array<float2, int(16)> thread* r_4, uint tid_0, KernelContext_0
         for(;;)
         {
 
-#line 7 "/home/ahnitz/mtlbuild/src/gpu/fft_transform.slang"
+#line 7 "/home/ahnitz/projects/claude/searchdev/work/peak-fft/.claude/worktrees/agent-aaf230abdd173dffa/src/gpu/fft_transform.slang"
             for(;;)
             {
 
@@ -762,7 +762,7 @@ void transform_0(array<float2, int(16)> thread* r_4, uint tid_0, KernelContext_0
 #line 43
     innermost_0(r_4);
 
-#line 750 "/home/ahnitz/mtlbuild/python/matchedfilter/metal/tc_corr1_1048576.slang"
+#line 750 "/home/ahnitz/projects/claude/searchdev/work/peak-fft/.claude/worktrees/agent-aaf230abdd173dffa/python/matchedfilter/metal/tc_corr1_1048576.slang"
     return;
 }
 
