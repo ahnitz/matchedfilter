@@ -45,6 +45,15 @@ def _settle_metal_writes():
         mtl.settle_all()
 
 
+def _bin_count_part(r, m, u):
+    """The blocks of a ragged result selected by mask m, with their first u bins: dense
+    (idx, val) or a _SparsePeaks, as the result is."""
+    from . import _SparsePeaks
+    if isinstance(r, _SparsePeaks):
+        return r.blocks(m, u)
+    return r[0][m][:, :, :u], r[1][m][:, :, :u]
+
+
 def _normalize_windows(windows, S: int) -> np.ndarray:
     """Analysis windows as a sorted, disjoint int64 (K, 2) array of [start, stop).
 
@@ -1226,14 +1235,14 @@ class TimeDomainFilterBank:
                 hit = fast.get(fast_key) if fast else None
                 if hit is not None and hit[0] is active_plan:
                     res = active_plan._fast_series(data_in, hit[1], bs, eff_threshold, defer,
-                                                   getattr(self, '_queue_offset', 0), hit[2] is None)
+                                                                   getattr(self, '_queue_offset', 0), True)
                     if res is not None:
                         if hit[2] is None:
                             pending.append((res, bstarts, g, tmpl_arg, N))
                         else:
                             for m, u in hit[2]:
                                 pending.append((_Deferred(
-                                    lambda d=res, m=m, u=u: (lambda r: (r[0][m][:, :, :u], r[1][m][:, :, :u]))(d.result())),
+                                    lambda d=res, m=m, u=u: _bin_count_part(d.result(), m, u)),
                                     bstarts[m], g, tmpl_arg, N))
                         continue
             if getattr(active_plan, '_bandlimited', False) and type(active_plan).__name__ != 'HierarchicalFilter':
@@ -1270,6 +1279,10 @@ class TimeDomainFilterBank:
                 if defer and trial is None:
                     active_plan._defer_series = defer
                     active_plan._gpu._queue_offset = getattr(self, '_queue_offset', 0)
+                # A hierarchical ragged call reads back sparse, as its per-count calls would.
+                sparse_ragged = type(active_plan).__name__ == 'HierarchicalFilter'
+                if sparse_ragged:
+                    active_plan._want_sparse = True
                 try:
                     res = active_plan._run_series_ragged(
                         data_in, bstarts, bws, bwe, binsize=bs,
@@ -1277,6 +1290,8 @@ class TimeDomainFilterBank:
                 finally:
                     if defer and trial is None:
                         active_plan._defer_series = False
+                    if sparse_ragged:
+                        active_plan._want_sparse = False
                 if res is not None:
                     # Split back into the per-count groups, in their order, so the result
                     # is the one per-count calls give (peak order included).
@@ -1290,7 +1305,7 @@ class TimeDomainFilterBank:
                         m = bc == u
 
                         def part(r, m=m, u=u):
-                            return r[0][m][:, :, :u], r[1][m][:, :, :u]
+                            return _bin_count_part(r, m, u)
                         work.append(((bstarts[m], bws[m], bwe[m]),
                                      _Deferred(lambda d=res, part=part: part(d.result()))
                                      if isinstance(res, _Deferred) else part(res)))

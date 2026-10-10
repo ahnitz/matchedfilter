@@ -242,6 +242,19 @@ class _SparsePeaks:
         return _SparsePeaks((nblocks,) + self.shape[1:], self.flat[keep], self.idx[keep],
                             self.val[keep])
 
+    def blocks(self, mask, nbins):
+        """The blocks selected by a boolean mask, with their first nbins bins: the sparse
+        form of ``(idx[mask][:, :, :nbins], val[mask][:, :, :nbins])``."""
+        nt, nb = self.shape[1], self.shape[2]
+        b, rest = np.divmod(self.flat, nt * nb)
+        t, k = np.divmod(rest, nb)
+        mask = np.asarray(mask, bool)
+        keep = mask[b] & (k < nbins)
+        rank = np.cumsum(mask) - 1
+        flat = (rank[b[keep]] * nt + t[keep]) * nbins + k[keep]
+        return _SparsePeaks((int(mask.sum()), nt, int(nbins)), flat, self.idx[keep],
+                            self.val[keep])
+
     @staticmethod
     def combine(parts, shape, order=None):
         """One result for a call from (first block, part) pieces; ``order`` maps computed
