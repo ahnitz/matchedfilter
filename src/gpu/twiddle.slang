@@ -31,6 +31,22 @@ uint mfC16RawFlag()
 #define mfC16Bound (1u - mfC16RawFlag())
 static const uint mfAccurateTrig = 0;
 static const uint mfSubgroupSize = 32;
+#elif defined(MF_METAL)
+static const uint mfDataStride = 0;
+static const uint mfRowWindows = 0;
+// The fp16 bound switch (constant 77 on Vulkan) as an MSL preprocessor macro the host sets
+// when it compiles the library (MTLCompileOptions.preprocessorMacros, MF_C16_RAW=1 when
+// MF_VK_C16_BOUND=0): the bound applies unless the raw maximum is asked for.
+__target_intrinsic(metal, "(MF_C16_RAW)")
+uint mfC16RawValue();
+uint mfC16RawFlag()
+{
+    __requirePrelude("#ifndef MF_C16_RAW\n#define MF_C16_RAW 0u\n#endif");
+    return mfC16RawValue();
+}
+#define mfC16Bound (1u - mfC16RawFlag())
+static const uint mfAccurateTrig = 0;
+static const uint mfSubgroupSize = 32;
 #else
 static const uint mfDataStride = 0;
 static const uint mfRowWindows = 0;
