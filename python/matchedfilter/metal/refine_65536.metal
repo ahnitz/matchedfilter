@@ -90,7 +90,7 @@ void r4_0(float2 thread* a_1, float2 thread* b_2, float2 thread* c_0, float2 thr
 }
 
 
-#line 58 "twiddle.slang"
+#line 64 "twiddle.slang"
 float2 mfTwiddle_0(float angle_0)
 {
 

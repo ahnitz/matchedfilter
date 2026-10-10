@@ -444,7 +444,7 @@ def compile_one(slangc, n, outdir, entry=ENTRY, cap=None, suffix="", coarse16=0,
 def source_hashes():
     """Fingerprint all production shader dependencies for freshness checks."""
     names = ('tierb.slang', 'fft_transform.slang', 'coarse_tile.slang',
-             'series_forward.slang', 'pack_coarse.slang', 'twiddle.slang')
+             'series_forward.slang', 'series_bands.slang', 'pack_coarse.slang', 'twiddle.slang')
     return {name: hashlib.sha256((KERNEL.parent / name).read_bytes()).hexdigest()
             for name in names}
 

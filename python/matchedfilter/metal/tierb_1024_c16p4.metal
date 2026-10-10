@@ -256,7 +256,7 @@ void dft16_0(array<half2, int(16)> thread* r_0)
 }
 
 
-#line 58 "twiddle.slang"
+#line 64 "twiddle.slang"
 float2 mfTwiddle_0(float angle_0)
 {
 
@@ -862,13 +862,13 @@ uint slotToIndex_0(uint slot_0)
 }
 
 
-#line 42 "twiddle.slang"
+#line 47 "twiddle.slang"
 uint mfC16RawFlag_0()
 {
     ;
     uint _S28 = ((MF_C16_RAW));
 
-#line 45
+#line 50
     return _S28;
 }
 
@@ -877,7 +877,7 @@ uint mfC16RawFlag_0()
 float2 c16Bound_0(float2 v_2, float energy_0)
 {
 
-#line 47 "twiddle.slang"
+#line 52 "twiddle.slang"
     uint _S29 = mfC16RawFlag_0();
 
 #line 295 "mm_1024_fusedTierB_c16p4.slang"

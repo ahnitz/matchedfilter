@@ -416,7 +416,12 @@ class _CaptureVK:
 #: Phases of forward and hierarchical recordings, in execution order. A fused batch runs
 #: every recording's work for a phase, then their barriers, then the next phase: the
 #: dispatches of a phase are independent across recordings and overlap on the device.
-_FUSED_PHASES = ("forward", "fill", "pack", "coarse0", "compact0", "coarse1", "compact1", "refine")
+#: A phase is ONE step of each recording: a fused batch emits every item's work for a phase
+#: and then their barriers, so a recording's barrier only separates its phases. Steps that
+#: depend on each other within a call (marking survivor blocks, then recomputing them) are
+#: therefore separate phases.
+_FUSED_PHASES = ("forward", "fill", "pack", "coarse0", "compact0", "coarse1", "compact1",
+                 "mark", "recompute", "refine")
 
 #: A unique number per captured recording. Fused recordings are cached by their constituents,
 #: and a command-buffer handle is no identity: once a recording is evicted the driver hands
@@ -462,6 +467,16 @@ def _batch_shape(items):
                     work += int(getattr(args[1], "value", args[1]))
         sig.append(tuple(names))
     return (len(items) > 1, tuple(sorted(set(sig)))), work
+
+
+def _band_key(bands):
+    """What a band-mode recording binds besides its storage: the band width and the series
+    the recompute reads (the buffers and the row offset), or None in full mode."""
+    if not bands:
+        return None
+    B, (n, series_b, starts_b, r0, count, nser, _slot, _cmd) = bands
+    return (B, getattr(series_b.handle, "value", series_b.handle),
+            getattr(starts_b.handle, "value", starts_b.handle), r0, nser)
 
 
 def _fuse_interleave():
@@ -958,12 +973,16 @@ class _Device:
 class _HierHandle:
     """What hier_replay needs to submit one hier_peaks call again (see hier_peaks)."""
     __slots__ = ("kind", "key", "batch", "storage_key", "dsig", "tsig", "nd", "nt", "nbins",
-                 "sparse")
+                 "sparse", "mode", "bfwd")
 
-    def __init__(self, kind, key, batch, storage_key, dsig, tsig, nd, nt, nbins, sparse):
+    def __init__(self, kind, key, batch, storage_key, dsig, tsig, nd, nt, nbins, sparse,
+                 mode=None, bfwd=None):
         self.kind, self.key, self.batch, self.storage_key = kind, key, batch, storage_key
         self.dsig, self.tsig, self.nd, self.nt, self.nbins, self.sparse = (
             dsig, tsig, nd, nt, nbins, sparse)
+        # mode: (n, B, nd, nt, band key or None): the band/full choice this record was made
+        # for. bfwd: (forward key, record) of its band-only forward, in band mode.
+        self.mode, self.bfwd = mode, bfwd
 
 
 class Context(InputUploads):
@@ -1150,7 +1169,7 @@ class Context(InputUploads):
         return "tierb_%d.spv" % n
 
     def _build_pipeline(self, key, filename, nbind, push_bytes, data_stride=0, row_windows=0,
-                        subgroup=0):
+                        subgroup=0, full_length=0):
         """data_stride: specialization constant 75 (mfDataStride), the data spectra's row
         stride when a hierarchical stage reads its band straight out of them.
         row_windows: constant 76 (mfRowWindows), per-row windows from the gRowWin binding.
@@ -1158,8 +1177,8 @@ class Context(InputUploads):
         The set layout covers every binding the MODULE declares, which can exceed the
         caller's count (gRowWin); _descriptor_set fills such trailing bindings with a
         dummy buffer."""
-        if data_stride or row_windows:
-            key = (key, "stride", data_stride, "rowwin", row_windows)
+        if data_stride or row_windows or full_length:
+            key = (key, "stride", data_stride, "rowwin", row_windows, "n", full_length)
         raw_c16 = os.environ.get("MF_VK_C16_BOUND", "1") == "0"
         if raw_c16:
             key = (key, "raw-c16")
@@ -1221,6 +1240,10 @@ class Context(InputUploads):
         if row_windows:
             entries.append(_SpecializationEntry(76, offset, 4))
             data_vals.append(int(row_windows))
+            offset += 4
+        if full_length:
+            entries.append(_SpecializationEntry(78, offset, 4))
+            data_vals.append(int(full_length))
             offset += 4
         if raw_c16:
             # Raw fp16 coarse maxima, for measuring the error bound's margin use only.
@@ -1301,11 +1324,13 @@ class Context(InputUploads):
             thr1 = float(raw_thr1)
             # A sparse caller reads only the refined pairs, which the refine writes in full:
             # its recording skips clearing the dense outputs (bool(sparse) in the key).
+            bands = self._band_source(n, max(band0, band1), nd, nt, data, slot)
+            bkey = _band_key(bands)
             key = ("hier_cascade", n, band0, band1, nd, nt, nbins, binsize, shift, lo, hi,
                    int(np.float32(t2).view(np.uint32)),
-                   thr0, thr1, bool(sparse), rw_key)
+                   thr0, thr1, bool(sparse), rw_key, bkey)
             key += (shared_key(data, self), shared_key(tmpl, self), slot)
-            storage_key = ("hier_cascade", n, band0, band1, nd, nt, nbins, rw_key, *key[-3:])
+            storage_key = ("hier_cascade", n, band0, band1, nd, nt, nbins, rw_key, bkey, *key[-3:])
             upload_data, upload_tmpl, dsig, tsig = self._input_uploads(
                 storage_key, data, tmpl, upload_data, upload_tmpl)
             batch = self._hier_cascade.get(key)
@@ -1323,7 +1348,7 @@ class Context(InputUploads):
                 try:
                     batch = self._make_hier_cascade(storage_key, n, band0, band1, nd, nt, nbins, binsize,
                                                     shift, lo, hi, t2, thr0, thr1, data, tmpl,
-                                                    clear_out=not sparse, rowwin=rw)
+                                                    clear_out=not sparse, rowwin=rw, bands=bands)
                 finally:
                     self._capture_end(batch[-1] if batch else None)
                 self._hier_cascade[key] = batch
@@ -1332,6 +1357,9 @@ class Context(InputUploads):
                     upload_data = upload_tmpl = True
             self._cache_touch('hier_cascade', key)
             bufs, cmd = batch
+            bfwd = self._band_forward(storage_key, bufs, bands, nd) if bands else None
+            if bfwd is not None:
+                self._pending_forward[slot] = bfwd[1][-1]
             if upload_data:
                 write_input(bufs["data"], data)
                 self._uploaded["data"][storage_key] = dsig
@@ -1341,18 +1369,23 @@ class Context(InputUploads):
                 bufs["ct1"].write(np.ascontiguousarray(ct1, np.complex64))
                 self._uploaded["tmpl"][storage_key] = tsig
 
+            mode = (n, max(band0, band1), nd, nt, bkey)
             if handle_out is not None:
                 handle_out.append(_HierHandle('hier_cascade', key, batch, storage_key,
                                               self._uploaded["data"].get(storage_key),
                                               self._uploaded["tmpl"].get(storage_key),
-                                              nd, nt, nbins, sparse))
-            return self._hier_submit(batch, True, nd, nt, nbins, sparse, slot, async_submit)
+                                              nd, nt, nbins, sparse, mode, bfwd))
+            return self._hier_submit(batch, True, nd, nt, nbins, sparse, slot, async_submit,
+                                     mode)
 
+        bands = (self._band_source(n, band, nd, nt, data, slot)
+                 if _use_c16(band) and not _COARSE_TILE.get(band) else None)
+        bkey = _band_key(bands)
         key = ("hier", n, band, nd, nt, nbins, binsize, shift, lo, hi,
                int(np.float32(t2).view(np.uint32)),
-               float(raw_thr), bool(sparse), rw_key)
+               float(raw_thr), bool(sparse), rw_key, bkey)
         key += (shared_key(data, self), shared_key(tmpl, self), slot)
-        storage_key = ("hier", n, band, nd, nt, nbins, rw_key, *key[-3:])
+        storage_key = ("hier", n, band, nd, nt, nbins, rw_key, bkey, *key[-3:])
         upload_data, upload_tmpl, dsig, tsig = self._input_uploads(
             storage_key, data, tmpl, upload_data, upload_tmpl)
         batch = self._hier.get(key)
@@ -1370,7 +1403,7 @@ class Context(InputUploads):
             try:
                 batch = self._make_hier(storage_key, n, band, nd, nt, nbins, binsize,
                                         shift, lo, hi, t2, raw_thr, data, tmpl,
-                                        clear_out=not sparse, rowwin=rw)
+                                        clear_out=not sparse, rowwin=rw, bands=bands)
             finally:
                 self._capture_end(batch[-1] if batch else None)
             self._hier[key] = batch
@@ -1379,6 +1412,9 @@ class Context(InputUploads):
                 upload_data = upload_tmpl = True
         self._cache_touch('hier', key)
         bufs, cmd = batch
+        bfwd = self._band_forward(storage_key, bufs, bands, nd) if bands else None
+        if bfwd is not None:
+            self._pending_forward[slot] = bfwd[1][-1]
         if upload_data:
             write_input(bufs["data"], data)
             if shared_buffer(data, self) is not None:
@@ -1396,14 +1432,16 @@ class Context(InputUploads):
                 bufs["ct0"].write(np.ascontiguousarray(ct0, np.complex64))
             self._uploaded["tmpl"][storage_key] = tsig
 
+        mode = (n, band, nd, nt, bkey)
         if handle_out is not None:
             handle_out.append(_HierHandle('hier', key, batch, storage_key,
                                           self._uploaded["data"].get(storage_key),
                                           self._uploaded["tmpl"].get(storage_key),
-                                          nd, nt, nbins, sparse))
-        return self._hier_submit(batch, False, nd, nt, nbins, sparse, slot, async_submit)
+                                          nd, nt, nbins, sparse, mode, bfwd))
+        return self._hier_submit(batch, False, nd, nt, nbins, sparse, slot, async_submit, mode)
 
-    def _hier_submit(self, batch, cascade, nd, nt, nbins, sparse, slot, async_submit):
+    def _hier_submit(self, batch, cascade, nd, nt, nbins, sparse, slot, async_submit,
+                     mode=None):
         """Submit one hierarchical record and return its readback (tracked when async)."""
         bufs, cmd = batch
         # What a traced segment (SegmentPlan) reads back on replay.
@@ -1423,12 +1461,18 @@ class Context(InputUploads):
                 key = "args_refine" if cascade else "args"
                 surv_count = int(bufs[key].read(np.uint32, 1)[0])
                 self.last_refinements = surv_count
+                if mode is not None:
+                    self._band_measure(mode[0], mode[1], nd, nt, bufs,
+                                       "surv1" if cascade else "surv", surv_count)
                 if cascade:
                     self.last_tier1_survivors = int(bufs["args_tier1"].read(np.uint32, 1)[0])
                 return self._read_peaks(bufs, "surv1" if cascade else "surv", surv_count,
                                         nd, nt, nbins, sparse)
             surv_count = int(v[0][0])
             self.last_refinements = surv_count
+            if mode is not None:
+                self._band_measure(mode[0], mode[1], nd, nt, bufs,
+                                   "surv1" if cascade else "surv", surv_count)
             if cascade:
                 self.last_tier1_survivors = int(v[1][0])
             if sparse:
@@ -1470,9 +1514,20 @@ class Context(InputUploads):
         evicted or rebuilt record is a new object) and both inputs are still resident under
         the signatures it saw (nothing re-uploaded or invalidated them since)."""
         table = self._hier_cascade if h.kind == 'hier_cascade' else self._hier
-        return (table.get(h.key) is h.batch
+        if not (table.get(h.key) is h.batch
                 and self._uploaded["data"].get(h.storage_key) == h.dsig
-                and self._uploaded["tmpl"].get(h.storage_key) == h.tsig)
+                and self._uploaded["tmpl"].get(h.storage_key) == h.tsig):
+            return False
+        # The band/full choice is part of validity: a record made for one mode is never
+        # replayed once the measured refine-block fraction has flipped the choice.
+        if h.mode is not None:
+            n, B, nd, nt, bkey = h.mode
+            if self._band_wanted(n, B, nd, nt) != (bkey is not None):
+                return False
+            forwards = getattr(self, "_forwards", None) or {}
+            if h.bfwd is not None and forwards.get(h.bfwd[0]) is not h.bfwd[1]:
+                return False
+        return True
 
     def forward_valid(self, h):
         forwards = getattr(self, "_forwards", None)
@@ -1487,8 +1542,15 @@ class Context(InputUploads):
         if not self.hier_valid(h):
             return None
         self._cache_touch(h.kind, h.key)
+        if h.bfwd is not None:
+            # Band mode: the pending forward (queued by forward_replay) is the full one;
+            # this record reads the band-only forward's rows instead.
+            self._cache_touch('forward', h.bfwd[0])
+            if not isinstance(getattr(self, "_pending_forward", None), dict):
+                self._pending_forward = {}
+            self._pending_forward[slot] = h.bfwd[1][-1]
         return self._hier_submit(h.batch, h.kind == 'hier_cascade', h.nd, h.nt, h.nbins,
-                                 h.sparse, slot, async_submit)
+                                 h.sparse, slot, async_submit, h.mode)
 
     def forward_replay(self, h, slot):
         """Queue a forward call again from its handle (forward(..., handle_out=)); False if
@@ -1629,7 +1691,7 @@ class Context(InputUploads):
         return 1, 1, pairs, False
 
     def _make_hier(self, key, n, band, nd, nt, nbins, binsize, shift, lo, hi,
-                   t2, raw_thr, data=None, tmpl=None, clear_out=True, rowwin=None):
+                   t2, raw_thr, data=None, tmpl=None, clear_out=True, rowwin=None, bands=None):
         vk = self.vk
         tile = _COARSE_TILE.get(band)
         _ppg = 1          # pairs per workgroup; raised only on the c16 path
@@ -1677,7 +1739,8 @@ class Context(InputUploads):
                 "tierb_%d_c16%s%s.spv" % (band,
                     "p%d" % _ppg if _ppg > 1 else "",
                     "t%d" % _tile if _tile > 1 else ""),
-                _NBIND, _PUSH_BYTES, data_stride=n, row_windows=2 if rowwin is not None else 0)
+                _NBIND, _PUSH_BYTES, data_stride=bands[0] if bands else n,
+                row_windows=2 if rowwin is not None else 0, full_length=n if bands else 0)
         # gatedTierB is NOT built. Its only caller was coarse_odd(), the
         # last remnant of the even/odd split, which was never invoked after
         # the odd half was removed -- so the kernel was compiled on every
@@ -1716,6 +1779,10 @@ class Context(InputUploads):
                     raise ValueError("per-row windows need the packed coarse role")
                 b["rowwin"] = _Buffer(self, rowwin.nbytes)
                 b["rowwin"].write(rowwin)
+            if bands:
+                if not direct:
+                    raise ValueError("band rows need the packed coarse role")
+                self._band_storage(b, nd, bands[0])
             self._storage[key] = b
         rwb = [b["rowwin"]] if rowwin is not None else []
         # The tiled coarse kernel reports a magnitude per pair and nothing
@@ -1726,7 +1793,8 @@ class Context(InputUploads):
                                            [b["cdata"], b["ct0"], b["cval"]])
         else:
             ds_coarse = self._descriptor_set(cset_layout,
-                                           [b["data"] if direct else b["cdata"], b["ct0"],
+                                           [(b["bands"] if bands else b["data"]) if direct
+                                            else b["cdata"], b["ct0"],
                                             b["cidx"], b["cval"]] + rwb)
         ds_compact = self._descriptor_set(
             kset_layout, [b["cval"], b["surv"], b["args"]])
@@ -1802,6 +1870,8 @@ class Context(InputUploads):
         # it dismisses, so filling 3 MB here would only be overwriting
         # slots the refine is about to fill anyway.
         _reset_args(vk, cmd, b["args"])                       # count 0, y = z = 1
+        if bands:
+            self._band_fill(vk, cmd, b)
         if clear_out:                       # pairs never refined read as -1 / 0 (dense)
             vk.vkCmdFillBuffer(cmd, b["idx"].handle, 0, _WHOLE_SIZE, 0xFFFFFFFF)
             vk.vkCmdFillBuffer(cmd, b["val"].handle, 0, _WHOLE_SIZE, 0)
@@ -1845,6 +1915,9 @@ class Context(InputUploads):
         barrier(dst_stage=_STAGE_COMPUTE_BIT | _STAGE_DRAW_INDIRECT_BIT,
                 dst_access=_ACCESS_SHADER_READ | _ACCESS_SHADER_WRITE | _ACCESS_INDIRECT_READ)
         self._stamp(cmd, "compact")
+        if bands:
+            self._band_recompute(vk, cmd, b, bands, nt, pairs, "surv", "args", barrier)
+            self._stamp(cmd, "recompute")
 
         vk.vkCmdBindPipeline(cmd, _BIND_POINT_COMPUTE, rpipe)
         sets = (_vp * 1)(ds_listed)
@@ -1867,9 +1940,13 @@ class Context(InputUploads):
 
     def _make_hier_cascade(self, key, n, band0, band1, nd, nt, nbins, binsize, shift, lo, hi,
                            t2, raw_thr0, raw_thr1, data=None, tmpl=None, clear_out=True,
-                           rowwin=None):
+                           rowwin=None, bands=None):
         vk = self.vk
         rwc, rwr = (2, 1) if rowwin is not None else (0, 0)   # coarse / raw row windows
+        # bands: the coarse tiers read band rows of width B (the band-only forward's) instead
+        # of the full spectra, and the refine's survivor rows are recomputed first.
+        dstride = bands[0] if bands else n
+        flen = n if bands else 0
         _ppg0, _tile0, _groups0, _ragged0 = self._coarse_geometry(band0, nd, nt)
 
         cpipe0, clayout0, cset_layout0 = self._build_pipeline(
@@ -1877,15 +1954,15 @@ class Context(InputUploads):
             "tierb_%d_c16%s%s.spv" % (band0,
                 "p%d" % _ppg0 if _ppg0 > 1 else "",
                 "t%d" % _tile0 if _tile0 > 1 else ""),
-            _NBIND, _PUSH_BYTES, data_stride=n, row_windows=rwc)
+            _NBIND, _PUSH_BYTES, data_stride=dstride, row_windows=rwc, full_length=flen)
 
         kpipe, klayout, kset_layout = self._build_pipeline(
             "compact", "compact.spv", 3, 12)
 
         refine_file1 = self._peak_file(band1, 1, refine=True)
         cpipe1, clayout1, cset_layout1 = self._build_pipeline(
-            ("refine", refine_file1), refine_file1, 5, _PUSH_BYTES, data_stride=n,
-            row_windows=rwc, subgroup=self._fit_subgroup(band1))
+            ("refine", refine_file1), refine_file1, 5, _PUSH_BYTES, data_stride=dstride,
+            row_windows=rwc, subgroup=self._fit_subgroup(band1), full_length=flen)
 
         refine_file = self._peak_file(n, nbins, refine=True)
         rpipe, rlayout, rset_layout = self._build_pipeline(
@@ -1916,15 +1993,18 @@ class Context(InputUploads):
             if rowwin is not None:
                 b["rowwin"] = _Buffer(self, rowwin.nbytes)
                 b["rowwin"].write(rowwin)
+            if bands:
+                self._band_storage(b, nd, bands[0])
             self._storage[key] = b
         rwb = [b["rowwin"]] if rowwin is not None else []
+        cdata = b["bands"] if bands else b["data"]
 
         ds_coarse0 = self._descriptor_set(
-            cset_layout0, [b["data"], b["ct0"], b["cidx0"], b["cval0"]] + rwb)
+            cset_layout0, [cdata, b["ct0"], b["cidx0"], b["cval0"]] + rwb)
         ds_compact0 = self._descriptor_set(
             kset_layout, [b["cval0"], b["surv0"], b["args_tier1"]])
         ds_tier1 = self._descriptor_set(
-            cset_layout1, [b["data"], b["ct1"], b["cidx1"], b["cval1"], b["surv0"]] + rwb)
+            cset_layout1, [cdata, b["ct1"], b["cidx1"], b["cval1"], b["surv0"]] + rwb)
         lpipe, llayout, lset_layout = self._build_pipeline(
             "compactl", "compactl.spv", 5, 12)
         ds_compact1 = self._descriptor_set(
@@ -1950,6 +2030,8 @@ class Context(InputUploads):
         # 1. Clear indirect args and intermediate peak values
         _reset_args(vk, cmd, b["args_tier1"])
         _reset_args(vk, cmd, b["args_refine"])
+        if bands:
+            self._band_fill(vk, cmd, b)
         # cval1 needs no clear: compactListed reads only the pairs tier 1 wrote.
         if clear_out:                       # pairs never refined read as -1 / 0 (dense)
             vk.vkCmdFillBuffer(cmd, b["idx"].handle, 0, _WHOLE_SIZE, 0xFFFFFFFF)
@@ -2021,6 +2103,9 @@ class Context(InputUploads):
         barrier(dst_stage=_STAGE_COMPUTE_BIT | _STAGE_DRAW_INDIRECT_BIT,
                 dst_access=_ACCESS_SHADER_READ | _ACCESS_SHADER_WRITE | _ACCESS_INDIRECT_READ)
         self._stamp(cmd, "compact1")
+        if bands:
+            self._band_recompute(vk, cmd, b, bands, nt, pairs, "surv1", "args_refine", barrier)
+            self._stamp(cmd, "recompute")
 
         # 7. Stage 5: Refine (Indirect on survivors1)
         vk.vkCmdBindPipeline(cmd, _BIND_POINT_COMPUTE, rpipe)
@@ -2039,6 +2124,118 @@ class Context(InputUploads):
         self._stamp(cmd, "refine")
         _check(vk.vkEndCommandBuffer(cmd), "vkEndCommandBuffer")
         return b, cmd
+
+    # ---- band-only forward with survivor recompute (docs section 12, option (a)) ----------
+    def _band_source(self, n, B, nd, nt, data, slot):
+        """(B, source) when this call should read band rows and recompute survivor rows,
+        else None. Chosen from bytes, not a switch: per block the full forward writes n
+        samples and the band forward B, while the recompute reads and writes n for each block
+        with a refined pair, so bands move fewer bytes iff that fraction f < (n - B) / 2n.
+        f is the one measured on this call shape's previous run; the first run is full."""
+        if os.environ.get("MF_VK_BAND_FORWARD") == "0" or n > 65536 or B >= n:
+            return None
+        src = getattr(self, "_fwd_src", {}).get(data.ctypes.data)
+        pend = getattr(self, "_pending_forward", None)
+        if (src is None or src[0] != n or src[4] != nd or not isinstance(pend, dict)
+                or pend.get(slot) is not src[7]):
+            return None
+        if not self._band_wanted(n, B, nd, nt):
+            return None
+        return (B, src)
+
+    def _band_wanted(self, n, B, nd, nt):
+        """The band/full choice for this call shape from its measured refine-block fraction
+        (see _band_source); forced by MF_VK_BAND_FORWARD=0/1."""
+        env = os.environ.get("MF_VK_BAND_FORWARD")
+        if env == "0" or n > 65536 or B >= n:
+            return False
+        if env == "1":
+            return True
+        f = getattr(self, "_band_f", {}).get((n, B, nd, nt))
+        return f is not None and f < (n - B) / (2.0 * n)
+
+    def _band_storage(self, b, nd, B):
+        b["bands"] = _Buffer(self, nd * B * 8)
+        b["bflags"] = _Buffer(self, nd * 4, usage=_BUF_STORAGE | _BUF_TRANSFER_DST)
+        b["blocks"] = _Buffer(self, nd * 4)
+        b["bargs"] = _Buffer(self, 12, usage=_BUF_STORAGE | _BUF_INDIRECT | _BUF_TRANSFER_DST)
+
+    def _band_fill(self, vk, cmd, b):
+        vk.vkCmdFillBuffer(cmd, b["bflags"].handle, 0, _WHOLE_SIZE, 0)
+        _reset_args(vk, cmd, b["bargs"])
+
+    def _band_recompute(self, vk, cmd, b, bands, nt, pairs, surv_key, args_key, barrier):
+        # Two phases ("mark", then "recompute"): the second reads what the first wrote.
+        """The refine's survivor blocks, their full spectra recomputed into their rows."""
+        B, (n, series_b, starts_b, r0, count, nser, _slot, _cmd) = bands
+        mpipe, mlayout, msl = self._build_pipeline("markblocks", "markblocks.spv", 5, 4)
+        ds = self._descriptor_set(msl, [b[surv_key], b[args_key], b["bflags"], b["blocks"],
+                                        b["bargs"]])
+        vk.vkCmdBindPipeline(cmd, _BIND_POINT_COMPUTE, mpipe)
+        vk.vkCmdBindDescriptorSets(cmd, _BIND_POINT_COMPUTE, mlayout, 0, 1, (_vp * 1)(ds), 0, None)
+        pc = (ctypes.c_uint32 * 1)(nt)
+        vk.vkCmdPushConstants(cmd, mlayout, _STAGE_COMPUTE, 0, 4, ctypes.byref(pc))
+        vk.vkCmdDispatch(cmd, (pairs + 255) // 256, 1, 1)
+        barrier(dst_stage=_STAGE_COMPUTE_BIT | _STAGE_DRAW_INDIRECT_BIT,
+                dst_access=_ACCESS_SHADER_READ | _ACCESS_SHADER_WRITE | _ACCESS_INDIRECT_READ)
+        self._stamp(cmd, "mark")
+        lname = "forward_listed_%d.spv" % n
+        lpipe, llayout, lsl = self._build_pipeline(("listed", n), lname, 4, 4)
+        ds = self._descriptor_set(lsl, [series_b, starts_b, b["data"], b["blocks"]],
+                                  [0, r0 * 4, 0, 0] if r0 else None)
+        vk.vkCmdBindPipeline(cmd, _BIND_POINT_COMPUTE, lpipe)
+        vk.vkCmdBindDescriptorSets(cmd, _BIND_POINT_COMPUTE, llayout, 0, 1, (_vp * 1)(ds), 0, None)
+        pc = (ctypes.c_uint32 * 1)(nser)
+        vk.vkCmdPushConstants(cmd, llayout, _STAGE_COMPUTE, 0, 4, ctypes.byref(pc))
+        vk.vkCmdDispatchIndirect(cmd, b["bargs"].handle, 0)
+        barrier()
+
+    def _band_forward(self, storage_key, b, bands, nd):
+        """The band-only forward writing b["bands"]: a recording of its own (phase
+        "forward"), swapped in for the pending full forward of the same spectra."""
+        B, (n, series_b, starts_b, r0, count, nser, slot, _cmd) = bands
+        fkey = ("bandfwd", storage_key, _band_key(bands))
+        forwards = self.__dict__.setdefault("_forwards", {})
+        rec = forwards.get(fkey)
+        if rec is not None:
+            self._cache_touch('forward', fkey)
+            return fkey, rec
+        vk = self.vk
+        pipe, layout, sl = self._build_pipeline(("bands", n), "forward_bands_%d.spv" % n, 3, 8)
+        pool_start = len(getattr(self, '_pools', []))
+        ds = self._descriptor_set(sl, [series_b, starts_b, b["bands"]],
+                                  [0, r0 * 4, 0] if r0 else None)
+        cmd = _vp()
+        _check(vk.vkAllocateCommandBuffers(self.device, ctypes.byref(
+            _CmdBufAlloc(40, None, self.command_pool, 0, 1)), ctypes.byref(cmd)), "band forward")
+        vk = self._capture_begin()
+        try:
+            _check(vk.vkBeginCommandBuffer(cmd, ctypes.byref(_CmdBufBegin(42, None, 0, None))), "b")
+            self._stamp(cmd, "start")
+            vk.vkCmdBindPipeline(cmd, _BIND_POINT_COMPUTE, pipe)
+            vk.vkCmdBindDescriptorSets(cmd, _BIND_POINT_COMPUTE, layout, 0, 1, (_vp * 1)(ds), 0, None)
+            pc = (ctypes.c_uint32 * 2)(nser, B)
+            vk.vkCmdPushConstants(cmd, layout, _STAGE_COMPUTE, 0, 8, ctypes.byref(pc))
+            vk.vkCmdDispatch(cmd, nd, 1, 1)
+            mb = _MemBarrier(46, None, _ACCESS_SHADER_WRITE, _ACCESS_SHADER_READ)
+            vk.vkCmdPipelineBarrier(cmd, _STAGE_COMPUTE_BIT, _STAGE_COMPUTE_BIT, 0, 1,
+                                    ctypes.byref(mb), 0, None, 0, None)
+            self._stamp(cmd, "forward")
+            _check(vk.vkEndCommandBuffer(cmd), "e")
+        finally:
+            self._capture_end(cmd)
+        # A forward record like any other, tied to the storage whose band buffer it writes.
+        forwards[fkey] = (cmd,)          # buffers belong to the storage and the caller
+        self._register_record('forward', fkey, storage_key, pool_start)
+        return fkey, forwards[fkey]
+
+    def _band_measure(self, n, B, nd, nt, bufs, surv_key, count):
+        """The fraction of blocks the refine touched, for the next call's choice."""
+        if count <= 0:
+            f = 0.0
+        else:
+            f = len(np.unique(bufs[surv_key].view(np.uint32, count) // nt)) / float(nd)
+        self.__dict__.setdefault("_band_f", {})[(n, B, nd, nt)] = f
 
     def hier_peaks_grouped(self, n, band, data, tmpl, ct0, raw_thr, groups, binsize, threshold,
                            *, upload_tmpl=True, cascade_band=None, ct1=None, raw_thr1=None,
@@ -2135,6 +2332,10 @@ class Context(InputUploads):
             if not isinstance(getattr(self, "_pending_forward", None), dict):
                 self._pending_forward = {}
             self._pending_forward[slot] = cmd
+            # A hierarchical call on these spectra may swap this forward for the band-only
+            # one (_band_source): what it needs to recompute survivor rows itself.
+            self.__dict__.setdefault("_fwd_src", {})[spectra.ctypes.data + r0 * n * 8] = (
+                n, buffers[0], buffers[1], r0, count, int(series.size), slot, cmd)
         else:
             self._submit(cmd, slot=slot)
 

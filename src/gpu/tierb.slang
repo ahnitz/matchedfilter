@@ -171,7 +171,7 @@ void rowWindow(uint d, inout uint winStart, inout uint winEnd)
     if (mfRowWindows == 0u) return;
     uint lo = gRowWin[2u * d], hi = gRowWin[2u * d + 1u];
     if (mfRowWindows == 1u) { winStart = lo; winEnd = hi; return; }
-    uint rr = mfDataStride / N;
+    uint rr = ((mfFullLength != 0u) ? mfFullLength : mfDataStride) / N;
     uint cs = lo / rr, ce = min(N, (hi + rr - 1u) / rr);
     if (cs > 0u) cs -= 1u;
     ce = max(cs + 1u, ce);

@@ -231,7 +231,7 @@ void dft16s_0(array<half2, int(16)> thread* re_2, array<half2, int(16)> thread* 
 }
 
 
-#line 58 "twiddle.slang"
+#line 64 "twiddle.slang"
 float2 mfTwiddle_0(float angle_0)
 {
 
@@ -727,13 +727,13 @@ uint mfShflXor_0(uint v_1, uint s_0, KernelContext_0 thread* kernelContext_3)
 }
 
 
-#line 42 "twiddle.slang"
+#line 47 "twiddle.slang"
 uint mfC16RawFlag_0()
 {
     ;
     uint _S20 = ((MF_C16_RAW));
 
-#line 45
+#line 50
     return _S20;
 }
 
@@ -742,7 +742,7 @@ uint mfC16RawFlag_0()
 float2 c16Bound_0(float2 v_2, float energy_0)
 {
 
-#line 47 "twiddle.slang"
+#line 52 "twiddle.slang"
     uint _S21 = mfC16RawFlag_0();
 
 #line 295 "mm_512_fusedTierB_c16p8t4.slang"
