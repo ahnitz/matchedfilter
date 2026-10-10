@@ -33,7 +33,7 @@ struct EntryPointParams_0
 };
 
 
-#line 3 "/home/ahnitz/projects/claude/searchdev/work/peak-fft/.claude/worktrees/agent-aaf230abdd173dffa/src/gpu/pack_coarse.slang"
+#line 3 "/home/ahnitz/mtlbuild/src/gpu/pack_coarse.slang"
 struct KernelContext_0
 {
     EntryPointParams_0 constant* entryPointParams_0;

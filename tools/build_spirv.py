@@ -297,8 +297,15 @@ def metal_split(n, cap, coarse16=0):
     return int(not coarse16 and cap < n <= 2 * cap)
 
 
+def _metal_c16_kappa(n):
+    """The derived fp16 bound's kappa for a Metal coarse build, from Apple's measured error
+    table (tools/coarse_layout.py C16_SIGMA_APPLE; tools/metal_c16_sigma.py)."""
+    import coarse_layout
+    return "#define C16_KAPPA %.4f\n" % coarse_layout.c16_kappa(n, coarse_layout.C16_SIGMA_APPLE)
+
+
 def compile_metal(slangc, n, cap, entry, outdir, suffix="", coarse16=0, ppg=1, single_bin=0,
-                  split=None):
+                  split=None, tile=1, prelude=""):
     """Emit Metal Shading Language, and a .metallib when one can be built.
 
     The MSL is generated anywhere -- it is Slang's own output and needs no
@@ -314,10 +321,12 @@ def compile_metal(slangc, n, cap, entry, outdir, suffix="", coarse16=0, ppg=1, s
     if split is None:
         split = metal_split(n, cap, coarse16)
     src = outdir / ("mm_%d_%s%s.slang" % (n, entry, suffix))
-    src.write_text("#define NLEN %d\n#define LDS_CAP %d\n#define COARSE16 %d\n"
-                   "#define PPG %d\n#define RADIX %d\n#define SINGLE_BIN %d\n#define SPLIT_STAGE %d\n"
-                   % (n, cap, coarse16, ppg, RADIX.get(n, 16), single_bin, split)
-                   + KERNEL.read_text())
+    src.write_text("#define MF_METAL 1\n#define NLEN %d\n#define LDS_CAP %d\n#define COARSE16 %d\n"
+                   "#define PPG %d\n#define TILE_T %d\n#define RADIX %d\n#define SINGLE_BIN %d\n"
+                   "#define SPLIT_STAGE %d\n"
+                   % (n, cap, coarse16, ppg, tile, RADIX.get(n, 16), single_bin, split)
+                   + (_metal_c16_kappa(n) if coarse16 else "")
+                   + prelude + KERNEL.read_text())
     stem = "%s_%d%s" % (STEMS[entry], n, suffix)
     msl = outdir / (stem + ".metal")
     proc = subprocess.run(
@@ -370,11 +379,12 @@ def lds_bytes(n, cap):
     return ch * wg * 8
 
 
-def coarse_prelude(n, cap, ppg):
-    """Build-time inputs of the SPIR-V packed coarse kernel (see tools/coarse_layout.py):
-    the bank-conflict-free exchange padding for (band, PPG) and the fp16 twiddle table."""
+def coarse_prelude(n, cap, ppg, model="rdna_wave64"):
+    """Build-time inputs of the packed coarse kernel (see tools/coarse_layout.py): the
+    bank-conflict-free exchange padding for (band, PPG) under the target's bank model, and
+    the fp16 twiddle table."""
     import coarse_layout
-    xs, slot = _exchange_layout(n, ppg, cap)
+    xs, slot = _exchange_layout(n, ppg, cap, model)
     return ("#define XSTRIDE %d\n#define XSLOT %d\n#define C16_KAPPA %.4f\n"
             % (xs, slot, coarse_layout.c16_kappa(n))
             + coarse_layout.twiddle_table_source(n))
@@ -383,11 +393,11 @@ def coarse_prelude(n, cap, ppg):
 _LAYOUTS = {}
 
 
-def _exchange_layout(n, ppg, cap):
+def _exchange_layout(n, ppg, cap, model="rdna_wave64"):
     import coarse_layout
-    if (n, ppg, cap) not in _LAYOUTS:
-        _LAYOUTS[(n, ppg, cap)] = coarse_layout.exchange_layout(n, ppg, cap)
-    return _LAYOUTS[(n, ppg, cap)]
+    if (n, ppg, cap, model) not in _LAYOUTS:
+        _LAYOUTS[(n, ppg, cap, model)] = coarse_layout.exchange_layout(n, ppg, cap, model)
+    return _LAYOUTS[(n, ppg, cap, model)]
 
 
 #: Row padding of the fp32 exchange stage, in complex elements. Rows WG apart put
@@ -599,6 +609,16 @@ def main(argv=None):
                 if (n // RADIX.get(n, 16)) * _p <= METAL_C16_MAX_THREADS:
                     compile_metal(slangc, n, mcap, centry, MSL, suffix="_c16p%d" % _p,
                                   coarse16=1, ppg=_p)
+            # Tiled, ragged builds for Metal too (two templates per lane in one half2
+            # register; _mtlcompute.coarse_geometry). No bank-model prelude: on the M2 the
+            # padded exchange made the untiled build slower (1.24 -> 1.46 ms) and the tiled
+            # one no faster (1.00 -> 0.99 ms), so Metal keeps the default stride.
+            _t = COARSE_TILE_T.get(n, 1)
+            if _t > 1:
+                for _p in (1,) + tuple(METAL_C16_PPG):
+                    if (n // RADIX.get(n, 16)) * _p <= METAL_C16_MAX_THREADS:
+                        compile_metal(slangc, n, mcap, centry, MSL, coarse16=1, ppg=_p, tile=_t,
+                                      suffix="_c16%st%d" % ("p%d" % _p if _p > 1 else "", _t))
 
         for entry in ENTRIES + (("fullCorrelation", "fullCorrelationSeries") if n >= 1024 else ()):
             m, lib = compile_metal(slangc, n, mcap, entry, MSL)

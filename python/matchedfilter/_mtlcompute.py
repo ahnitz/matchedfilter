@@ -14,6 +14,7 @@ development machine, so every line here is exercised only by the macOS CI
 job. It is written to fail loudly rather than plausibly.
 """
 import ctypes
+import os
 import pathlib
 import sys
 from contextlib import contextmanager
@@ -83,6 +84,20 @@ def _shipped(stem):
     return any((_METAL_DIR / (stem + ext)).is_file() for ext in (".metal", ".metallib"))
 
 
+def _ieee_kernel(stem):
+    """Whether a kernel library compiles with IEEE (not fast) math: the survivor compaction,
+    which must list a NaN coarse value (see Context._library). MF_METAL_IEEE=all|none
+    overrides, for measurement."""
+    import os
+    mode = os.environ.get("MF_METAL_IEEE", "default")
+    if mode in ("all", "none"):
+        return mode == "all"
+    # The coarse kernels keep fast math (IEEE cost the band-256 tiled kernel 1.00 -> 1.23 ms)
+    # and fail open by an integer test of the fp16 exponent instead (tierb.slang, MF_METAL);
+    # the compaction is cheap and compares the possibly-NaN coarse value, so it is IEEE.
+    return stem.startswith("compact_")
+
+
 def _use_c16(band):
     """Half-width coarse path where the FP16 kernel is available.
 
@@ -93,33 +108,72 @@ def _use_c16(band):
 
 
 def _ppg_of(entry):
-    """Pairs per threadgroup an entry name carries: coarse16p8 -> 8."""
-    return int(entry[len("coarse16p"):]) if entry.startswith("coarse16p") else 1
+    """Pairs per threadgroup an entry name carries: coarse16p8 -> 8, coarse16p8t2 -> 8."""
+    if not entry.startswith("coarse16p"):
+        return 1
+    return int(entry[len("coarse16p"):].split("t")[0])
 
 
-def coarse_ppg(band, pairs, override=None):
+#: Templates per pair slot of the tiled coarse builds; must match COARSE_TILE_T in
+#: tools/build_spirv.py (compiled into the kernel). Shared with _vkcompute._COARSE_TILE_T.
+_COARSE_TILE_T = {64: 2, 128: 2, 256: 2, 512: 4, 1024: 2}
+
+
+def coarse_geometry(band, nd, nt, simd_width=32):
+    """(entry, pairs per threadgroup, tile, groups, ragged) for the half-width coarse pass.
+
+    A tiled build (two templates per lane, the fp16 pair in one register; ragged tiles,
+    so any template count) is preferred where one is shipped: its PPG is the smallest that
+    fills the pipeline's SIMD width (threadExecutionWidth). Otherwise coarse_ppg's untiled
+    packing, with the pair count padded to whole groups. MF_METAL_COARSE_TILE=0 disables
+    the tiled builds, for measurement."""
+    import os
+    from ._coarse import coarse_launch
+    pairs = nd * nt
+    wg = band // _radix(band)
+    tile = _COARSE_TILE_T.get(band, 1)
+    if tile > 1 and os.environ.get("MF_METAL_COARSE_TILE", "1") != "0":
+        want = os.environ.get("MF_METAL_COARSE_PPG") or None
+        built = [p for p in (1, 2, 4, 8, 16, 32)
+                 if _shipped("tierb_%d_c16%st%d" % (band, "p%d" % p if p > 1 else "", tile))]
+        if built:
+            if want is not None and int(want) in built:
+                ppg = int(want)
+            else:
+                ppg = next((p for p in built if wg * p >= simd_width), built[-1])
+            entry = "coarse16%st%d" % ("p%d" % ppg if ppg > 1 else "", tile)
+            return entry, ppg, tile, coarse_launch(nd, nt, ppg, tile, 0)[1], True
+    ppg = coarse_ppg(band, pairs, simd_width=simd_width)
+    padded = -(-pairs // ppg) * ppg
+    return "coarse16" + ("p%d" % ppg if ppg > 1 else ""), ppg, 1, padded // ppg, False
+
+
+def coarse_ppg(band, pairs, override=None, simd_width=None):
     """Pairs per threadgroup for the half-width coarse pass at this band.
 
     One pair is band/16 threads; an Apple SIMD group is 32 lanes. Pick the
-    smallest packing that fills at least TARGET_THREADS lanes, from the
+    smallest packing that fills at least simd_width lanes (the pipeline's
+    threadExecutionWidth; TARGET_THREADS when not given), from the
     variants shipped. Partial groups are safe: the host pads the coarse
     buffers to a whole number of groups. ``MF_METAL_COARSE_PPG`` overrides,
     for measurement.
     """
     import os
-    want = override if override is not None else os.environ.get("MF_METAL_COARSE_PPG")
+    want = override if override is not None else (os.environ.get("MF_METAL_COARSE_PPG") or None)
     shipped = [p for p in (32, 16, 8, 4, 2) if _shipped("tierb_%d_c16p%d" % (band, p))]
     if want is not None:
         want = int(want)
         return want if want == 1 or want in shipped else 1
+    target = simd_width or TARGET_THREADS
     wg = band // _radix(band)
     for p in sorted(shipped):
-        if wg * p >= TARGET_THREADS:
+        if wg * p >= target:
             return p
-    return max(shipped, default=1) if wg < TARGET_THREADS else 1
+    return max(shipped, default=1) if wg < target else 1
 
 
-#: Threads the coarse pass packs pairs up to; see coarse_ppg.
+#: Threads the coarse pass packs pairs up to when no pipeline width is known; the host passes
+#: the coarse pipeline's threadExecutionWidth (Context._simd_width).
 TARGET_THREADS = 32
 
 
@@ -560,11 +614,38 @@ class Context(InputUploads):
             raise MetalError("no Metal kernel for %s (looked for %s and %s)"
                              % (stem, lib_path.name, src_path.name))
         err = ctypes.c_void_p()
+        opts = None
+        raw = (stem.startswith("tierb_") and "_c16" in stem
+               and os.environ.get("MF_VK_C16_BOUND", "1") == "0")
+        if raw:
+            # The fp16 bound switch (gatechain._RAW_GATE_SWITCH; Vulkan's constant 77): the
+            # raw fp16 maximum, for measuring the bound's margin only (twiddle.slang).
+            o = self.o
+            opts = o.call(o.call(o.objc.objc_getClass(b"MTLCompileOptions"), b"alloc"), b"init")
+            num = o.call(o.objc.objc_getClass(b"NSNumber"), b"numberWithInt:", args=(1,),
+                         argtypes=(ctypes.c_int,))
+            macros = o.call(o.objc.objc_getClass(b"NSDictionary"), b"dictionaryWithObject:forKey:",
+                            args=(num, o.nsstring("MF_C16_RAW")),
+                            argtypes=(ctypes.c_void_p, ctypes.c_void_p))
+            o.call(opts, b"setPreprocessorMacros:", restype=None, args=(macros,),
+                   argtypes=(ctypes.c_void_p,))
+        if _ieee_kernel(stem):
+            # Gates must fail open: a value that overflows fp16 becomes inf, and an
+            # inf - inf in the transform becomes NaN. Under the default fast-math the
+            # compiler assumes neither exists and a NaN magnitude lost every comparison,
+            # dismissing the loudest pair (tools/gate_margin.py --loud). IEEE semantics
+            # make NaN and inf compare as the largest bit patterns, so they pass.
+            opts = self.o.call(self.o.call(self.o.objc.objc_getClass(b"MTLCompileOptions"),
+                                           b"alloc"), b"init")
+            self.o.call(opts, b"setFastMathEnabled:", restype=None, args=(False,),
+                        argtypes=(ctypes.c_bool,))
         lib = self.o.call(self.device, b"newLibraryWithSource:options:error:",
-                          args=(self.o.nsstring(src_path.read_text()), None,
+                          args=(self.o.nsstring(src_path.read_text()), opts,
                                 ctypes.byref(err)),
                           argtypes=(ctypes.c_void_p, ctypes.c_void_p,
                                     ctypes.c_void_p))
+        if opts:
+            self.o.call(opts, b"release", restype=None)
         if not lib:
             raise MetalError("could not build a Metal library from %s: %s"
                              % (src_path.name, self._error(err)))
@@ -683,6 +764,10 @@ class Context(InputUploads):
         if single and single["lds_bytes"] > self.max_shared_memory:
             single = None
         key = (n, entry_name, True) if single else (n, entry_name)
+        if entry_name.startswith("coarse16") and os.environ.get("MF_VK_C16_BOUND", "1") == "0":
+            # The raw-maximum build (_library's MF_C16_RAW) is a different library: a process
+            # that switches it (the physics tests) must not reuse the bound pipeline.
+            key = key + ("raw",)
         if key in self._pipelines:
             return self._pipelines[key]
         stem = pathlib.Path(single["msl"]).stem if single else self._stem(n, entry_name)
@@ -1406,6 +1491,20 @@ class Context(InputUploads):
                    upload_data, upload_tmpl)
 
     # ---- hierarchical -----------------------------------------------------
+    def _simd_width(self, band):
+        """threadExecutionWidth of this band's coarse pipeline (32 on Apple GPUs): what the
+        coarse packing fills, queried rather than assumed (cross-platform review)."""
+        cache = self.__dict__.setdefault("_simd_widths", {})
+        if band not in cache:
+            width = None
+            try:
+                pso = self.pipeline(band, "coarse16")
+                width = self.o.call(pso, b"threadExecutionWidth", restype=ctypes.c_ulong)
+            except (MetalError, UnsupportedSize, AttributeError, TypeError):
+                pass
+            cache[band] = int(width) if isinstance(width, int) and width > 0 else TARGET_THREADS
+        return cache[band]
+
     @staticmethod
     def _coarse_span(n, band, lo, hi):
         """The gate's window in band samples: (start, end, span, shift).
@@ -1476,13 +1575,19 @@ class Context(InputUploads):
         # Pairs per threadgroup for the first tier, and the pair count padded
         # to whole groups: the padded pairs read a spare data row and write
         # spare outputs, and no compaction ever lists them.
-        ppg = coarse_ppg(tiers[0][0], pairs) if half[0] else 1
-        padded = -(-pairs // ppg) * ppg
-        rows0 = (padded - 1) // nt + 1
+        if half[0]:
+            centry, ppg, ctile, cgroups, ragged = coarse_geometry(
+                tiers[0][0], nd, nt, self._simd_width(tiers[0][0]))
+        else:
+            centry, ppg, ctile, cgroups, ragged = "fusedTierB", 1, 1, pairs, False
+        # Ragged tiles clamp inside the kernel and write only real pairs; untiled builds
+        # run whole groups over a padded pair count (spare data rows, spare outputs).
+        padded = pairs if ragged else cgroups * ppg
+        rows0 = nd if ragged else (padded - 1) // nt + 1
 
         # In flight, a result owns its buffers: the slot is part of the key.
         slot = slot if async_submit else None
-        key = (n, tuple(b for b, _, _ in tiers), nd, nt, nbins, ppg)
+        key = (n, tuple(b for b, _, _ in tiers), nd, nt, nbins, centry)
         key += (shared_key(data, self), shared_key(tmpl, self), slot)
         upload_data, upload_tmpl, dsig, tsig = self._input_uploads(
             key, data, tmpl, upload_data, upload_tmpl)
@@ -1551,6 +1656,9 @@ class Context(InputUploads):
             bufs["val"].write(np.zeros(out * 2, dtype=np.float32))
 
         compact = self.pipeline(tiers[0][0], "compactPairs")
+        # Every pipeline before the encoder opens: a build failure raised with an encoder
+        # open aborts the process (an encoder released without endEncoding).
+        coarse0 = self.pipeline(tiers[0][0], centry)
         refine = self.pipeline(n, "refineListed", nbins == 1)
         cmd = self._command_buffer()
         enc = self.o.call(cmd, b"computeCommandEncoder")
@@ -1571,11 +1679,13 @@ class Context(InputUploads):
         for i, ((b, _, thr), h) in enumerate(zip(tiers, half)):
             span = self._coarse_span(n, b, lo, hi)
             if i == 0:
-                coarse = self.pipeline(b, ("coarse16" + ("p%d" % ppg if ppg > 1 else ""))
-                                       if h else "fusedTierB")
-                self._dispatch(enc, coarse, (nt, *span, 1, 0),
+                coarse = coarse0
+                # A ragged build reads the data row count from the binsize slot
+                # (coarse_launch), which the one-bin coarse role does not otherwise use.
+                cparams = (nt, span[0], span[1], nd if ragged else span[2], *span[3:], 1, 0)
+                self._dispatch(enc, coarse, cparams,
                                use("cdata", "ct0", "cidx", "cval"),
-                               b // _radix(b) * ppg, groups=padded // ppg)
+                               b // _radix(b) * ppg, groups=cgroups)
             else:
                 # The listed refine at this band over the previous tier's
                 # survivors; one bin, so cval holds each listed pair's maximum.

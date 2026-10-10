@@ -175,9 +175,13 @@ def work(r, groups):
     cb = 4 if entry.startswith("coarse16") else 8
     if entry.startswith("coarse16") or entry in ("fusedTierB", "refineListed"):
         nbins = p[5]
-        # coarse16pK packs K pairs per threadgroup (padded to whole groups).
-        ppg = int(entry[len("coarse16p"):]) if entry.startswith("coarse16p") else 1
-        pairs = groups * ppg
+        # coarse16pK packs K pairs per threadgroup (padded to whole groups); a tiled
+        # coarse16[pK]tT build runs T templates per slot over ragged rows (p[3] = rows).
+        from matchedfilter._mtlcompute import _ppg_of
+        ppg = _ppg_of(entry)
+        tile = (int(entry.rsplit("t", 1)[1])
+                if entry.startswith("coarse16") and "t" in entry[len("coarse16"):] else 1)
+        pairs = groups * ppg * tile if tile == 1 else min(groups * ppg * tile, p[3] * nt)
         listed = entry == "refineListed"
         total = r["groups"] if not listed else None
         flops = pairs * (6 * n + fft_flops(n) + 3 * n)

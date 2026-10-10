@@ -81,16 +81,7 @@ def _module_bindings(blob):
     return top + 1
 
 
-def coarse_launch(nd, nt, ppg, tile, cspan):
-    """(push-constant binsize slot, workgroup count) for a packed coarse build.
-
-    Tiled builds (tile > 1) take ragged tiles: the slot carries the data row count and
-    ceil(nd * ceil(nt/tile) / ppg) groups run. Untiled builds take the coarse span and
-    exact geometry. The host and every harness that dispatches a coarse build directly
-    must use this, so the two cannot disagree."""
-    if tile > 1:
-        return nd, -(-(nd * -(-nt // tile)) // ppg)
-    return cspan, nd * nt // ppg
+from ._coarse import coarse_launch   # noqa: E402,F401  (shared with Metal; re-exported)
 
 
 #: Byte offsets into VkPhysicalDeviceProperties. The 5 leading uint32s, the
