@@ -22,7 +22,10 @@ a loud broadband transient, and full scale (K near the top of fp16 range, where 
 that scales nothing overflows). Each family runs at the requested N.
 
     python tools/gate_margin.py --gate q15 --n 64 128 256 512 1024
-    python tools/gate_margin.py --gate gpu-c16 --n 128 256 512 1024 --device gpu:0
+    python tools/gate_margin.py --gate gpu-c16 --n 128 256 512 1024 --device gpu:0 --loud
+
+--device picks the backend as the library does (Metal on Apple, CUDA on NVIDIA, else
+Vulkan), so the same command runs the full harness on every GPU.
     python tools/gate_margin.py --gate q15 gpu-c16 --json out.json
 
 The NEON fp16 gate (src/gate16.cc) reports its statistic through MF_GATE16_DEBUG and is
@@ -103,15 +106,32 @@ class Q15:
         return ps.astype(bool), st
 
 
+def gpu_backend(device):
+    """(compute module, index) for a device spec, chosen exactly as the library chooses it:
+    Metal on Apple, CUDA on NVIDIA, else Vulkan."""
+    from matchedfilter.device import parse
+    dev = parse(device)
+    backend = getattr(dev, "backend", None)
+    if backend == "metal":
+        from matchedfilter import _mtlcompute as mod
+    elif backend == "cuda":
+        from matchedfilter import _cudacompute as mod
+    else:
+        from matchedfilter import _vkcompute as mod
+    return mod, dev.index
+
+
 class GpuC16:
-    """The GPU first tier at band N (fp16 coarse where shipped) through hier_peaks: every
-    pair the tier passes is refined with threshold 0, so idx >= 0 marks the pass."""
+    """The GPU first tier at band N (fp16 coarse where shipped) through hier_peaks, on any
+    backend (Vulkan, CUDA, Metal: the contract is the same): every pair the tier passes is
+    refined with threshold 0, so idx >= 0 marks the pass."""
     name = "gpu-c16"
     n = 4096
 
-    def __init__(self, N, nt, device=0):
-        from matchedfilter import _vkcompute
-        self.ctx = _vkcompute.Context(device)
+    def __init__(self, N, nt, device="gpu:0"):
+        mod, index = gpu_backend(device)
+        self.ctx = mod.Context(index)
+        self.name = "gpu-c16/" + mod.__name__.rsplit("._", 1)[-1].replace("compute", "")
         self.N, self.nt = N, nt
 
     def load(self, D, T):
@@ -214,16 +234,16 @@ def main():
             rng = np.random.default_rng(args.seed + N)
             try:
                 gate = (Q15(N, args.templates) if g == "q15" else
-                        GpuC16(N, args.templates, int(args.device.split(":")[-1])))
+                        GpuC16(N, args.templates, args.device))
             except Exception as e:                       # noqa: BLE001
                 print("%-8s N=%-5d unavailable: %s" % (g, N, e))
                 continue
             res = measure(gate, families(N, rng, args.templates))
-            report["%s/%d" % (g, N)] = res
+            report["%s/%d" % (gate.name, N)] = res
             for fam, r in res.items():
-                print("%-8s N=%-5d %-10s pairs %5d  dismissals %3d  slack min %+.4f p0.1%% %+.4f "
+                print("%-12s N=%-5d %-10s pairs %5d  dismissals %3d  slack min %+.4f p0.1%% %+.4f "
                       "median %+.4f  margin use max %s  %s"
-                      % (g, N, fam, r["pairs"], r["dismissals"], r["slack_min"], r["slack_p001"],
+                      % (gate.name, N, fam, r["pairs"], r["dismissals"], r["slack_min"], r["slack_p001"],
                          r["slack_median"], "-" if r["use_max"] is None else "%.3f" % r["use_max"],
                          "ok" if r["ok"] else "FAIL"))
     if args.json:
