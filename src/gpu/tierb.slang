@@ -1110,14 +1110,18 @@ void peakTwoWave(uint pairA, uint pairB, uint tid, H re[16], H im[16],
     uint u0 = slotToIndex(tid * R) - winStart;      // idx - winStart, wrapping
     uint span = winEnd - winStart;
     uint kA = 0u, kB = 0u;
-    // Energy, both pairs, all lags, accumulated at 2^-12 so a band's whole energy
-    // fits fp16 (<= 2048 lags x 65504); a lag that overflowed makes it inf and
-    // the bound passes the pair, as it must.
+    // Energy, both pairs, all lags, from values scaled by 2^-6 (exact): |v|^2
+    // overflows fp16 past |v| = 256, which out-of-window lags of an ordinary
+    // pair reach, and an inf energy would pass every pair. Scaled, a lag reaches
+    // 16384 and the band's sum (x 2^-12) fits; only a value that overflowed
+    // the transform itself makes it inf, and then the pair passes, as it must.
     H en = H(0.0f);
+    const H esc = H(0.015625f);
     [unroll] for (uint i = 0; i < R; ++i) {
         bool live = (u0 + slotToIndex(i)) < span;  // winStart <= idx < winEnd
         H mg = mag2s(re[i], im[i]);
-        en += mg * H(2.44140625e-4);
+        H sr = re[i] * esc, si = im[i] * esc;
+        en += sr * sr + si * si;
         uint m = live ? bit_cast<uint>(mg) : 0u;
         kA = max(kA, (m << 16) | (15u - i));
         kB = max(kB, (m & 0xFFFF0000u) | (15u - i));

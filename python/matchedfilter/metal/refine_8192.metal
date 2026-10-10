@@ -1619,52 +1619,52 @@ void filterPair_0(uint pair_0, uint tid_1, packed_float2 device* data_0, packed_
 }
 
 
-#line 1512
+#line 1516
 [[kernel]] void refineListed(uint3 gid_0 [[threadgroup_position_in_grid]], uint3 lid_0 [[thread_position_in_threadgroup]], EntryPointParams_0 constant* entryPointParams_1 [[buffer(0)]], packed_float2 device* entryPointParams_data_1 [[buffer(1)]], packed_float2 device* entryPointParams_tmpl_1 [[buffer(2)]], int device* entryPointParams_peakIdx_1 [[buffer(3)]], packed_float2 device* entryPointParams_peakVal_1 [[buffer(4)]], uint device* entryPointParams_survivors_1 [[buffer(5)]])
 {
 
-#line 1512
+#line 1516
     thread KernelContext_0 kernelContext_5;
 
-#line 1512
+#line 1516
     (&kernelContext_5)->entryPointParams_0 = entryPointParams_1;
 
-#line 1512
+#line 1516
     (&kernelContext_5)->entryPointParams_data_0 = entryPointParams_data_1;
 
-#line 1512
+#line 1516
     (&kernelContext_5)->entryPointParams_tmpl_0 = entryPointParams_tmpl_1;
 
-#line 1512
+#line 1516
     (&kernelContext_5)->entryPointParams_peakIdx_0 = entryPointParams_peakIdx_1;
 
-#line 1512
+#line 1516
     (&kernelContext_5)->entryPointParams_peakVal_0 = entryPointParams_peakVal_1;
 
-#line 1512
+#line 1516
     (&kernelContext_5)->entryPointParams_survivors_0 = entryPointParams_survivors_1;
 
-#line 1512
+#line 1516
     threadgroup array<uint, int(16384)> stg_1;
 
-#line 1512
+#line 1516
     (&kernelContext_5)->stg_0 = &stg_1;
 
-#line 1521
+#line 1525
     uint pair_1 = entryPointParams_survivors_1[gid_0.x];
 
-#line 1527
+#line 1531
     (&kernelContext_5)->_stgBase_0 = 0U;
     thread uint ws_0 = entryPointParams_1->winStart_1;
 
-#line 1528
+#line 1532
     thread uint we_0 = entryPointParams_1->winEnd_1;
     uint _S50 = pair_1 / entryPointParams_1->ntmpl_0;
 
-#line 1529
+#line 1533
     rowWindow_0(_S50, &ws_0, &we_0);
 
-#line 1529
+#line 1533
     filterPair_0(pair_1, lid_0.x, (&kernelContext_5)->entryPointParams_data_0, (&kernelContext_5)->entryPointParams_tmpl_0, (&kernelContext_5)->entryPointParams_peakIdx_0, (&kernelContext_5)->entryPointParams_peakVal_0, entryPointParams_1->ntmpl_0, ws_0, we_0, (&kernelContext_5)->entryPointParams_0->binsize_0, (&kernelContext_5)->entryPointParams_0->binShift_0, (&kernelContext_5)->entryPointParams_0->nbins_0, (&kernelContext_5)->entryPointParams_0->thrBits_0, &kernelContext_5);
 
 

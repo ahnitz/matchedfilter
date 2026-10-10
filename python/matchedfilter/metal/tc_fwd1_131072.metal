@@ -763,38 +763,38 @@ uint slotToIndex_0(uint slot_0)
 }
 
 
-#line 1689
+#line 1693
 [[kernel]] void tcForwardStage1(uint3 gid_0 [[threadgroup_position_in_grid]], uint3 lid_0 [[thread_position_in_threadgroup]], EntryPointParams_0 constant* entryPointParams_1 [[buffer(0)]], packed_float2 device* entryPointParams_series_1 [[buffer(1)]], uint device* entryPointParams_starts_1 [[buffer(2)]], packed_float2 device* entryPointParams_scratch_1 [[buffer(3)]])
 {
 
-#line 1689
+#line 1693
     thread KernelContext_0 kernelContext_4;
 
-#line 1689
+#line 1693
     (&kernelContext_4)->entryPointParams_0 = entryPointParams_1;
 
-#line 1689
+#line 1693
     (&kernelContext_4)->entryPointParams_series_0 = entryPointParams_series_1;
 
-#line 1689
+#line 1693
     (&kernelContext_4)->entryPointParams_starts_0 = entryPointParams_starts_1;
 
-#line 1689
+#line 1693
     (&kernelContext_4)->entryPointParams_scratch_0 = entryPointParams_scratch_1;
 
-#line 1689
+#line 1693
     threadgroup array<uint, int(1024)> stg_1;
 
-#line 1689
+#line 1693
     (&kernelContext_4)->stg_0 = &stg_1;
 
-#line 1695
+#line 1699
     uint _S26 = gid_0.x;
 
-#line 1695
+#line 1699
     uint block_0 = _S26 / 256U;
 
-#line 1695
+#line 1699
     uint _S27 = _S26 % 256U;
     uint tid_1 = lid_0.x;
     uint _S28 = entryPointParams_starts_1[block_0];
@@ -802,107 +802,107 @@ uint slotToIndex_0(uint slot_0)
     (&kernelContext_4)->_stgBase_0 = 0U;
     thread array<float2, int(16)> r_5;
 
-#line 1700
+#line 1704
     uint m_1 = 0U;
     for(;;)
     {
 
-#line 1701
+#line 1705
         if(m_1 < 16U)
         {
         }
         else
         {
 
-#line 1701
+#line 1705
             break;
         }
 
-#line 1702
+#line 1706
         uint j_2 = _S27 + 256U * (tid_1 + 32U * m_1);
         float2 _S29 = float2(0.0, 0.0);
 
-#line 1703
+#line 1707
         bool _S30;
         if(_S28 < ((&kernelContext_4)->entryPointParams_0->seriesLength_0))
         {
 
-#line 1704
+#line 1708
             _S30 = j_2 < ((&kernelContext_4)->entryPointParams_0->seriesLength_0 - _S28);
 
-#line 1704
+#line 1708
         }
         else
         {
 
-#line 1704
+#line 1708
             _S30 = false;
 
-#line 1704
+#line 1708
         }
 
-#line 1704
+#line 1708
         float2 x_1;
 
-#line 1704
+#line 1708
         if(_S30)
         {
 
-#line 1704
+#line 1708
             x_1 = float2(*((&kernelContext_4)->entryPointParams_series_0+(_S28 + j_2))) ;
 
-#line 1704
+#line 1708
         }
         else
         {
 
-#line 1704
+#line 1708
             x_1 = _S29;
 
-#line 1704
+#line 1708
         }
 
         r_5[m_1] = float2(x_1.x / 1.31072e+05, - x_1.y / 1.31072e+05);
 
-#line 1701
+#line 1705
         m_1 = m_1 + 1U;
 
-#line 1701
+#line 1705
     }
 
-#line 1701
+#line 1705
     transform_0(&r_5, tid_1, &kernelContext_4);
 
-#line 1701
+#line 1705
     uint i_3 = 0U;
 
-#line 1709
+#line 1713
     for(;;)
     {
 
-#line 1709
+#line 1713
         if(i_3 < 16U)
         {
         }
         else
         {
 
-#line 1709
+#line 1713
             break;
         }
 
-#line 1710
+#line 1714
         uint k2_2 = slotToIndex_0(tid_1 * 16U + i_3);
 
-#line 1710
+#line 1714
         *((&kernelContext_4)->entryPointParams_scratch_0+(block_0 * 131072U + k2_2 * 256U + _S27)) = packed_float2(cmul_0(r_5[i_3], mfTwiddle_0(6.28318548202514648 * float(_S27 * k2_2) / 1.31072e+05))) ;
 
-#line 1709
+#line 1713
         i_3 = i_3 + 1U;
 
-#line 1709
+#line 1713
     }
 
-#line 1714
+#line 1718
     return;
 }
