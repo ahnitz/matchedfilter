@@ -219,7 +219,15 @@ def run_device(device, tops, args, seed):
             """A segment's fine results: record them and run its follow-ups."""
             jobs, keys = followups(seg, ser, mids, fine_out)
             collect_followups(keys, submit_followups(jobs, tm), tm)
-        next_ser = {ifo: analytic_series(rng, S, amp, df) for ifo in ("H1", "L1")}
+        # --pregen draws every segment's data up front, in the same order (identical data):
+        # the bench's own generation (~0.1 s a segment) then stays off the device's timeline.
+        def draw():
+            return {ifo: analytic_series(rng, S, amp, df) for ifo in ("H1", "L1")}
+        pregen = [draw() for _ in range(args.segments)] if args.pregen else None
+
+        def new_series():
+            return pregen.pop(0) if pregen else draw()
+        next_ser = new_series()
         if args.pipeline:
             # The device is fed continuously: segment k's middle and fine stages are enqueued
             # back to back (the fine banks read the middle output on the device, ordered there),
@@ -234,7 +242,14 @@ def run_device(device, tops, args, seed):
             bufs = [mid_out, {ifo: mid.empty_shared((len(top["mid_counts"]), S))
                               for ifo in ("H1", "L1")}]
             pending = None
+            prof = None
+            if os.environ.get("LADDER_PROFILE"):  # cProfile of the steady iterations only
+                import cProfile
+                prof = cProfile.Profile()
             for seg in range(args.segments + 1):
+                profiled = prof is not None and args.warmup <= seg < args.segments
+                if profiled:
+                    prof.enable()
                 t_seg = time.perf_counter()
                 if seg < args.segments:
                     tm = first if seg < args.warmup else steady
@@ -267,9 +282,16 @@ def run_device(device, tops, args, seed):
                     tm.add("segment", elapsed)
                     t = time.perf_counter()
                     if seg + 1 < args.segments:   # data for k+1, untimed as everywhere here
-                        next_ser = {ifo: analytic_series(rng, S, amp, df) for ifo in ("H1", "L1")}
+                        next_ser = new_series()
                 else:
                     tm.add("segment", elapsed)    # the last collection belongs to the last segment
+                # "wall": the whole iteration, the bench's data generation included -- what
+                # the device sees between segments (device busy = device time / wall).
+                (tm if seg < args.segments else steady).add("wall", time.perf_counter() - t_seg, n=0)
+                if profiled:
+                    prof.disable()
+            if prof is not None:
+                prof.dump_stats(os.environ["LADDER_PROFILE"])
             continue
         prof = None
         if os.environ.get("LADDER_PROFILE"):      # cProfile of the steady segments only
@@ -301,7 +323,7 @@ def run_device(device, tops, args, seed):
                 # (untimed, as data setup is), then collect: a busy device keeps its clock up.
                 futures = TimeDomainFilterBank.filter_series_many(jobs, wait=False)
                 submit = time.perf_counter() - t
-                next_ser = {ifo: analytic_series(rng, S, amp, df) for ifo in ("H1", "L1")}
+                next_ser = new_series()
                 t = time.perf_counter() - submit
                 fine_out = [f.result() for f in futures]
             else:
@@ -325,7 +347,7 @@ def run_device(device, tops, args, seed):
                 prof.disable()
                 prof.dump_stats(os.environ["LADDER_PROFILE"])
             if next_ser is None and seg + 1 < args.segments:
-                next_ser = {ifo: analytic_series(rng, S, amp, df) for ifo in ("H1", "L1")}
+                next_ser = new_series()
         if os.environ.get("LADDER_CHAINS"):      # each fine bank's (n, chain) per template group
             from collections import Counter
             ch = Counter()
@@ -424,6 +446,9 @@ def main():
                         "the device works, then collect (filter_series_many(wait=False))")
     p.add_argument("--no-batch", action="store_true",
                    help="fine stage as one filter_series call per bank and detector (the old pattern)")
+    p.add_argument("--pregen", action="store_true",
+                   help="generate every segment's input data before the timed loop (same data), "
+                        "so the bench's data generation does not idle the device between segments")
     p.add_argument("--timing", action="store_true",
                    help="device time per kernel label for each stage (sets MF_GPU_TIMING=1)")
     args = p.parse_args()
@@ -458,6 +483,10 @@ def main():
         print("  templates-in-real-time: " + ", ".join(f"{k} {v:.3g}" for k, v in tirt.items()))
     print("  calls: " + ", ".join(f"{k} {v}" for k, v in report["steady_calls"].items()) +
           "; " + ", ".join(f"{k} {v}" for k, v in report["counts"].items()))
+    if report.get("steady_device_ms") and report["steady_s"].get("wall"):
+        dev = sum(v[1] for d in report["steady_device_ms"].values() for v in d.values()) / 1e3
+        print(f"  device busy {100 * dev / report['steady_s']['wall']:.0f}%: device {dev:.3f}s "
+              f"of steady wall {report['steady_s']['wall']:.3f}s")
     for stage, d in report.get("steady_device_ms", {}).items():
         dev = sum(v[1] for v in d.values())
         print(f"  {stage}: device {dev / 1e3:.3f}s of wall {report['steady_s'][stage]:.3f}s; " +
