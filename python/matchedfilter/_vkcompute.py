@@ -21,7 +21,7 @@ import numpy as np
 from . import _gputime, _vulkan
 from ._shared import empty_shared, shared_buffer, shared_key, shared_view, write_input
 from ._gpuhost import (bin_shift, plan_items, split_items, hier_tiers, hier_window,
-                       split_bins)
+                       split_bins, hier_peaks_grouped as _hier_peaks_grouped)
 from ._shared import pack_half2 as _pack_half2, sparsified as _sparsified
 
 _SPIRV = pathlib.Path(__file__).resolve().parent / "spirv"
@@ -1814,35 +1814,11 @@ class Context(InputUploads):
         The windows go to the kernels per row (gRowWin, mfRowWindows), so a series call's
         first, interior and last block groups no longer cost three dispatches per stage.
         Output bins follow the first group's bin count, as hier_peaks_grouped on CUDA."""
-        nd = data.shape[0]
-        groups = tuple((int(lo), int(hi), int(a), int(b)) for lo, hi, a, b in groups)
-        binsize = int(binsize)
-        nb = (groups[0][1] - groups[0][0] - 1) // binsize + 1
-        if nbins is not None:
-            nb = max(nb, int(nbins))
-        if nb > _MAX_BINS:
-            raise ValueError("grouped dispatch exceeds the kernel bin limit")
-        if shared_buffer(data, self) is None:
-            raise ValueError("grouped spectra must be GPU-shared (a forward batch)")
-        win = np.zeros(2 * nd, np.uint32)
-        for lo, hi, a, b in groups:
-            if not (0 <= lo < hi <= n) or not (0 <= a < b <= nd):
-                raise ValueError("invalid group (%d, %d, %d, %d)" % (lo, hi, a, b))
-            if (hi - lo - 1) // binsize + 1 > nb:
-                raise ValueError("grouped windows must not exceed the first group's bin count")
-            win[2 * a:2 * b:2] = lo
-            win[2 * a + 1:2 * b:2] = hi
-        # The recording's bin count is the output's: a window of nb bins from the first
-        # group's start (clipped to n), the per-row windows narrowing it on the device.
-        lo0 = groups[0][0]
-        hi0 = min(n, lo0 + nb * binsize)
-        if -(-(hi0 - lo0) // binsize) != nb:
-            lo0, hi0 = max(0, n - nb * binsize), n
-        return self.hier_peaks(n, band, data, tmpl, ct0, raw_thr, binsize=binsize,
-                               threshold=threshold, window=(lo0, hi0), upload_data=False,
-                               upload_tmpl=upload_tmpl, cascade_band=cascade_band, ct1=ct1,
-                               raw_thr1=raw_thr1, slot=slot, async_submit=async_submit,
-                               sparse=sparse, row_windows=(groups, win))
+        return _hier_peaks_grouped(self, n, band, data, tmpl, ct0, raw_thr, groups, binsize,
+                                   threshold, upload_tmpl=upload_tmpl, cascade_band=cascade_band,
+                                   ct1=ct1, raw_thr1=raw_thr1, slot=slot,
+                                   async_submit=async_submit, sparse=sparse, nbins=nbins,
+                                   max_bins=_MAX_BINS)
 
     def empty_shared(self, shape, dtype=np.complex64, *, readback=False):
         factory = (lambda ctx, size: _Buffer(ctx, size, readback=True)) if readback else _Buffer
