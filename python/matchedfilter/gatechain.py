@@ -265,8 +265,15 @@ class CostModel:
                       pair the screen passes back to the float tier}
     """
 
-    def __init__(self, n, dense, sparse, refine, block=0.0, screen=None):
+    def __init__(self, n, dense, sparse, refine, block=0.0, screen=None, excess=None):
         self.n = int(n)
+        # excess[b]: [(modelled density, measured density)] for a first tier at band b whose
+        # gate reports an upper bound of the FP32 statistic instead of the statistic itself
+        # (GPU fp16 coarse with its error bound): it passes a superset of the pairs the gate
+        # model assumes, and those extra pairs reach the next stage. Measured, per band,
+        # against the same gate with the bound off (calibrate_costs_gpu).
+        self.excess = {int(b): sorted((float(a), float(c)) for a, c in rows)
+                       for b, rows in (excess or {}).items()}
         self.screen = {int(b): {"dense": float(v["dense"]), "recheck": float(v["recheck"]),
                                 "excess": sorted((float(a), float(c)) for a, c in v["excess"])}
                        for b, v in (screen or {}).items()}
@@ -296,17 +303,28 @@ class CostModel:
                                tuple((b, tuple(r)) for b, r in sorted(self._sparse.items())),
                                tuple(self._refine),
                                tuple((b, v["dense"], v["recheck"], tuple(v["excess"]))
-                                     for b, v in sorted(self.screen.items())))
+                                     for b, v in sorted(self.screen.items())),
+                               tuple((b, tuple(r)) for b, r in sorted(self.excess.items())))
         return sig
 
     def to_dict(self):
         return {"n": self.n, "block": self.block, "dense": self.dense,
-                "sparse": self._sparse, "refine": self._refine, "screen": self.screen}
+                "sparse": self._sparse, "refine": self._refine, "screen": self.screen,
+                "excess": self.excess}
 
     @classmethod
     def from_dict(cls, d):
         return cls(d["n"], d["dense"], d["sparse"], d["refine"], block=d.get("block", 0.0),
-                   screen=d.get("screen"))
+                   screen=d.get("screen"), excess=d.get("excess"))
+
+    def pass_excess(self, b, f):
+        """Measured / modelled first-tier pass rate at band b and modelled density f (>= 1):
+        1 for a gate that reports its statistic, larger for one that reports a bound."""
+        rows = self.excess.get(int(b))
+        if not rows:
+            return 1.0
+        fs = np.log([r[0] for r in rows]); rs = np.log([max(r[1] / r[0], 1.0) for r in rows])
+        return float(np.exp(np.interp(math.log(max(f, 1e-12)), fs, rs)))
 
     def first_tier(self, b, reach1):
         """(cost per pair, q15) of the cheaper first tier at band b, where reach1 is the float
@@ -326,6 +344,12 @@ class CostModel:
     def chain_cost(self, chain, reach):
         """reach[i] = P(a pair reaches tier i+1) for i = 0..k-1, reach[k] = P(reaches refine)."""
         c = self.first_tier(chain[0], reach[1] if len(reach) > 1 else 1.0)[0]
+        if len(reach) > 1:
+            # A bounding first tier's extra passes are the next stage's to pay for. Only the
+            # first stage after it is scaled: those pairs sit just under the gate, so a later
+            # tier (same signal, more band) rejects them at its modelled rate or better.
+            reach = list(reach)
+            reach[1] = min(1.0, reach[1] * self.pass_excess(chain[0], reach[1]))
         for i in range(1, len(chain)):
             c += reach[i] * self.sparse(chain[i], reach[i])
         c += reach[len(chain)] * self.refine(reach[len(chain)])
@@ -639,29 +663,21 @@ def calibrate_costs_gpu(n, device, blocks=None, reps=5, seed=11, nt=256):
     from . import HierarchicalFilter
     if blocks is None:
         blocks = max(64, (1024 * 2048) // int(n))
-    key = ("gpu", int(n), str(device))
+    kind = gpu_gate_kind(device)
+    key = ("gpu", int(n), str(device), kind)
     if key in _COSTS:
         return _COSTS[key]
     path = _cost_file()
-    skey = "gpu,%d,%s" % (int(n), str(device))
+    # Keyed by gate kind: a model measured with the bound off (or before it existed) prices a
+    # different first tier, and must not be reused for this one.
+    skey = "gpu,%d,%s" % (int(n), str(device)) + ("" if kind == "f32" else "," + kind)
     if path is not None:
         stored = _load_cost_file(path).get(skey)
         if stored is not None:
             _COSTS[key] = cm = CostModel.from_dict(stored)
             return cm
-    rng = np.random.default_rng(seed)
     bands = candidate_bands(n)
-    taps = n // 4
-    h = np.zeros((nt, n), np.complex64)
-    h[:, :taps] = rng.standard_normal((nt, taps)) / np.sqrt(taps)
-    spec = np.fft.fft(h, axis=1).astype(np.complex64)
-    step = n - taps
-    S = (blocks + 1) * step + n
-    x = (rng.standard_normal(S) + 1j * rng.standard_normal(S)) / np.sqrt(2)
-    X = np.fft.fft(x); X[S // 2:] = 0
-    ser = (np.fft.ifft(X) * np.sqrt(2)).astype(np.complex64)
-    starts = (np.arange(blocks) * step).astype(np.int64)
-    ws = np.full(blocks, taps, np.int64); we = np.full(blocks, n, np.int64)
+    spec, ser, starts, ws, we = _gpu_cal_inputs(n, blocks, nt, seed)
     big = float(np.finfo(np.float32).max)
     plans = {}
 
@@ -742,11 +758,112 @@ def calibrate_costs_gpu(n, device, blocks=None, reps=5, seed=11, nt=256):
                     (s1 / (blocks * nt), max(1e-3, (t2 - blocks * (block + nt * dense[b0])) / s1)))
     if bands[1:]:
         sparse.setdefault(b0, list(sparse.get(bands[1], [])))
-    cm = CostModel(n, dense, sparse, refine, block=block)
+    # The first tier's pass excess over its own statistic, per band: the same threshold,
+    # refined pairs with the gate's bound on against off. Only where the backend has a bound.
+    # The raw gate runs in a child process: the switch is read where pipelines are built
+    # and baked into recorded command buffers, so it cannot be flipped inside one context.
+    excess = {}
+    if kind != "f32":
+        for b, g, r_raw in _raw_gate_survivors(n, device, bands, blocks, nt, seed):
+            _, _, r_bnd = run((b,), (g,))
+            excess.setdefault(b, []).append((r_raw / (blocks * nt), r_bnd / (blocks * nt)))
+    cm = CostModel(n, dense, sparse, refine, block=block, excess=excess)
     _COSTS[key] = cm
     if path is not None:
         _store_cost(path, skey, cm)
     return cm
+
+
+#: Per GPU backend: the environment switch that makes its first tier report the raw coarse
+#: statistic instead of an upper bound of it, read when its pipelines are built, and the gate
+#: kind it names for cost-file keys. A backend whose coarse kernel gains a bound adds a row.
+_RAW_GATE_SWITCH = {
+    "vulkan": ("MF_VK_C16_BOUND", "0", "c16b"),
+}
+
+
+def _gpu_backend(device):
+    try:
+        from .device import parse as _parse
+        d = _parse(device)
+        return str(getattr(d, "backend", "") or "").lower()
+    except Exception:
+        return ""
+
+
+def gpu_gate_kind(device):
+    """'f32' unless the device's first tier reports a bound (a _RAW_GATE_SWITCH row whose
+    switch is not set to raw); then that row's kind."""
+    row = _RAW_GATE_SWITCH.get(_gpu_backend(device))
+    if row is None or os.environ.get(row[0]) == row[1]:
+        return "f32"
+    return row[2]
+
+
+def _gpu_cal_inputs(n, blocks, nt, seed):
+    """The synthetic series and templates calibrate_costs_gpu measures on."""
+    rng = np.random.default_rng(seed)
+    taps = n // 4
+    h = np.zeros((nt, n), np.complex64)
+    h[:, :taps] = rng.standard_normal((nt, taps)) / np.sqrt(taps)
+    spec = np.fft.fft(h, axis=1).astype(np.complex64)
+    step = n - taps
+    S = (blocks + 1) * step + n
+    x = (rng.standard_normal(S) + 1j * rng.standard_normal(S)) / np.sqrt(2)
+    X = np.fft.fft(x); X[S // 2:] = 0
+    ser = (np.fft.ifft(X) * np.sqrt(2)).astype(np.complex64)
+    starts = (np.arange(blocks) * step).astype(np.int64)
+    ws = np.full(blocks, taps, np.int64); we = np.full(blocks, n, np.int64)
+    return spec, ser, starts, ws, we
+
+
+def _raw_survivors_here(n, device, bands, blocks, nt, seed):
+    """[(band, threshold, refined pairs)] with this process's gate, at thresholds placed at
+    _CAL_DENSITIES: run by _raw_gate_survivors in a child with the raw switch set."""
+    from . import HierarchicalFilter
+    spec, ser, starts, ws, we = _gpu_cal_inputs(n, blocks, nt, seed)
+    out = []
+    for b in bands:
+        p = HierarchicalFilter(n, 1, nt, chain=(int(b),), device=device)
+        p.set_templates(spec)
+
+        def refined(g):
+            p.set_coarse_threshold((g,))
+            p.run_series(ser, starts, ws, we, threshold=1e6)
+            return p._gpu.last_refinements
+
+        for f in _CAL_DENSITIES:
+            lo, hi = 0.0, 16.0
+            for _ in range(14):
+                mid = 0.5 * (lo + hi)
+                r = refined(mid)
+                if r / (blocks * nt) > f:
+                    lo = mid
+                else:
+                    hi = mid
+                if abs(r / (blocks * nt) - f) < 0.25 * f:
+                    break
+            out.append((int(b), float(mid), int(refined(mid))))
+    return out
+
+
+def _raw_gate_survivors(n, device, bands, blocks, nt, seed):
+    row = _RAW_GATE_SWITCH.get(_gpu_backend(device))
+    if row is None:
+        return []
+    import json, subprocess, sys
+    env = dict(os.environ)
+    env[row[0]] = row[1]
+    env.pop("MF_COST_FILE", None)
+    code = ("import json,sys; from matchedfilter import gatechain as g; "
+            "print(json.dumps(g._raw_survivors_here(%d, %r, %r, %d, %d, %d)))"
+            % (int(n), str(device), [int(b) for b in bands], int(blocks), int(nt), int(seed)))
+    pkg = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    env["PYTHONPATH"] = pkg + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+    res = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True)
+    if res.returncode != 0:
+        raise RuntimeError("raw-gate calibration failed: %s" % res.stderr[-2000:])
+    return [tuple(r) for r in json.loads(res.stdout.strip().splitlines()[-1])]
 
 
 def device_costs(n, device=None, ntemplates=_CAL_TEMPLATES, group=None):
