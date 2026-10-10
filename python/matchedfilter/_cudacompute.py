@@ -702,7 +702,7 @@ class Context(InputUploads):
             buf.write(np.ascontiguousarray(array, np.complex64), stream)
 
     # ---- kernels -------------------------------------------------------------
-    def _stem(self, n, entry, one_bin=False, c16=False, ppg=1, tile=1):
+    def _stem(self, n, entry, one_bin=False, c16=False, ppg=1, tile=1, twt=False):
         if entry == "packCoarse":
             return "pack_coarse"
         if entry == "compactPairs":
@@ -714,7 +714,7 @@ class Context(InputUploads):
         if c16:
             p_s = f"p{ppg}" if ppg > 1 else ""
             t_s = f"t{tile}" if tile > 1 else ""
-            return f"tierb_{n}_c16{p_s}{t_s}"
+            return f"tierb_{n}_c16{p_s}{t_s}{'w' if twt else ''}"
         if entry == "refineListed":
             return f"refine_{n}_onebin" if (one_bin and n >= 4096) else f"refine_{n}"
         if entry == "fullCorrelation":
@@ -725,9 +725,10 @@ class Context(InputUploads):
             return f"tierb_{n}_onebin"
         return f"tierb_{n}"
 
-    def pipeline(self, n, entry="fusedTierB", one_bin=False, c16=False, ppg=1, tile=1):
-        """Retrieve or load the compiled PTX kernel function: (function, threads per block)."""
-        key = (n, entry, one_bin, c16, ppg, tile)
+    def pipeline(self, n, entry="fusedTierB", one_bin=False, c16=False, ppg=1, tile=1, twt=False):
+        """Retrieve or load the compiled PTX kernel function: (function, threads per block).
+        twt: the coarse build with the fp16 twiddle table (tools/build_ptx.py)."""
+        key = (n, entry, one_bin, c16, ppg, tile, twt)
         if key in self._pipelines:
             return self._pipelines[key]
 
@@ -738,7 +739,7 @@ class Context(InputUploads):
             )
         )
 
-        stem = self._stem(n, entry, one_bin=one_bin, c16=c16, ppg=ppg, tile=tile)
+        stem = self._stem(n, entry, one_bin=one_bin, c16=c16, ppg=ppg, tile=tile, twt=twt)
         ptx_file = _PTX_DIR / f"{stem}.ptx"
         if ptx_file.is_file() and _static_shared(ptx_file) > _STATIC_SHARED_MAX:
             # CUDA caps STATIC shared memory at 48 KB per block on every
@@ -1417,11 +1418,13 @@ class Context(InputUploads):
                 for ppg in (1, 2, 4, 8, 16):
                     if ppg > 1 and band // 16 * ppg > 1024:
                         continue
-                    try:
-                        fn, wg = self.pipeline(band, "fusedTierB", c16=True, ppg=ppg, tile=tile)
-                    except UnsupportedSize:
-                        continue
-                    cands.append((fn, wg, ppg, tile))
+                    for twt in (False, True):
+                        try:
+                            fn, wg = self.pipeline(band, "fusedTierB", c16=True, ppg=ppg,
+                                                   tile=tile, twt=twt)
+                        except UnsupportedSize:
+                            continue
+                        cands.append((fn, wg, ppg, tile))
             if not cands:
                 raise UnsupportedSize(f"no coarse c16 kernel for band {band}")
             self._pipelines[key] = self._time_coarse(band, cands)
@@ -1477,7 +1480,7 @@ class Context(InputUploads):
                     if rep:
                         times.append(ms.value)
                 t = min(times)
-                self.__dict__.setdefault("coarse_times", {}).setdefault(band, {})[(ppg, tile)] = (
+                self.__dict__.setdefault("coarse_times", {}).setdefault(band, {})[(ppg, tile, self._labels.get(fn.value, "").endswith("w"))] = (
                     t * 1e6 / P)                         # ns per pair, for reports
                 if best is None or t < best[0]:
                     best = (t, fn, wg, ppg, tile)

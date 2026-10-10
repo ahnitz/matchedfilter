@@ -299,6 +299,12 @@ def run_device(device, tops, args, seed):
             prof = cProfile.Profile()
         for seg in range(args.segments):
             tm = first if seg < args.warmup else steady
+            if seg == args.warmup and os.environ.get("LADDER_GC_FREEZE"):
+                # What an application does after setup: move the setup heap out of the
+                # cyclic collector's view (a full collection of it measured ~11 ms here).
+                import gc
+                gc.collect()
+                gc.freeze()
             if prof is not None and tm is steady:
                 prof.enable()
             t_seg = time.perf_counter()
