@@ -236,6 +236,11 @@ _SSCProperties = _struct("VkPhysicalDeviceSubgroupSizeControlProperties",
                          ("requiredSubgroupSizeStages", _u32))
 _StageRequiredSize = _struct("VkPipelineShaderStageRequiredSubgroupSizeCreateInfo",
                              ("sType", _u32), ("pNext", _vp), ("requiredSubgroupSize", _u32))
+#: VK_EXT_host_query_reset (core in 1.2): timestamp queries reset from the host when a
+#: slot is handed out, so a read that waits really waits for this use's write.
+_HQR_EXT = b"VK_EXT_host_query_reset"
+_HQRFeatures = _struct("VkPhysicalDeviceHostQueryResetFeatures",
+                       ("sType", _u32), ("pNext", _vp), ("hostQueryReset", _u32))
 _Features2 = _struct("VkPhysicalDeviceFeatures2", ("sType", _u32), ("pNext", _vp),
                      ("features", ctypes.c_ubyte * 256))
 _ExtProps = _struct("VkExtensionProperties", ("extensionName", ctypes.c_char * 256),
@@ -846,6 +851,15 @@ class _Device:
                                 ctypes.byref(q))
             self.queues.append(q)
         self.queue = self.queues[0]
+        # Host query reset: a timestamp slot handed out again is made unavailable on the
+        # host first, so a waiting read cannot return a value that is not this use's.
+        self._reset_query = None
+        if getattr(self, "host_query_reset", False):
+            vk.vkGetDeviceProcAddr.argtypes = [_vp, ctypes.c_char_p]
+            vk.vkGetDeviceProcAddr.restype = _vp
+            fn = vk.vkGetDeviceProcAddr(self.device, b"vkResetQueryPoolEXT")
+            if fn:
+                self._reset_query = ctypes.CFUNCTYPE(None, _vp, _vp, _u32, _u32)(fn)
 
         # What this device will actually give a workgroup. Several kernels
         # are built at 64 KB because that is fastest here, and Apple allows
@@ -890,7 +904,8 @@ class _Device:
             if hasattr(vk, "vkGetPhysicalDeviceProperties2"):
                 ssc_props = _SSCProperties(1000225000, None, 0, 0, 0, 0)
                 sub_props = _SubgroupProperties(
-                    1000094000, ctypes.cast(ctypes.pointer(ssc_props), _vp) if ssc_feat else None,
+                    1000094000, ctypes.cast(ctypes.pointer(ssc_props), _vp)
+                    if getattr(self, "subgroup_control", False) else None,
                     0, 0, 0, 0)
                 props2 = _PhysicalDeviceProperties2(
                     1000059001,
@@ -902,7 +917,8 @@ class _Device:
                 vk.vkGetPhysicalDeviceProperties2(self.physical, ctypes.byref(props2))
                 if sub_props.subgroupSize > 0:
                     self.subgroup_size = int(sub_props.subgroupSize)
-                if ssc_feat and ssc_props.requiredSubgroupSizeStages & _STAGE_COMPUTE \
+                if getattr(self, "subgroup_control", False) \
+                        and ssc_props.requiredSubgroupSizeStages & _STAGE_COMPUTE \
                         and ssc_props.minSubgroupSize <= self.subgroup_size <= ssc_props.maxSubgroupSize:
                     self.subgroup_range = (int(ssc_props.minSubgroupSize),
                                            int(ssc_props.maxSubgroupSize))
@@ -922,29 +938,42 @@ class _Device:
                                             ctypes.POINTER(ctypes.c_float))[0])
 
     def _subgroup_control_features(self):
-        """(features struct to chain, extension-name array) enabling subgroup size control,
-        or (None, None) where the device lacks it."""
+        """(feature chain head, extension-name array) enabling the device extensions used:
+        subgroup size control and host query reset, each where the device offers it; or
+        (None, None)."""
         vk = self.vk
         try:
-            if os.environ.get("MF_VK_NO_SUBGROUP_PIN") or not hasattr(vk, "vkGetPhysicalDeviceFeatures2"):
+            if not hasattr(vk, "vkGetPhysicalDeviceFeatures2"):
                 return None, None
             vk.vkEnumerateDeviceExtensionProperties.argtypes = [_vp, _vp, ctypes.POINTER(_u32), _vp]
             n = _u32()
             vk.vkEnumerateDeviceExtensionProperties(self.physical, None, ctypes.byref(n), None)
             exts = (_ExtProps * n.value)()
             vk.vkEnumerateDeviceExtensionProperties(self.physical, None, ctypes.byref(n), exts)
-            if not any(e.extensionName == _SSC_EXT for e in exts):
-                return None, None
-            feat = _SSCFeatures(1000225002, None, 0, 0)
-            f2 = _Features2(1000059000, ctypes.cast(ctypes.pointer(feat), _vp), (ctypes.c_ubyte * 256)())
+            have = {e.extensionName for e in exts}
+            ssc = _SSCFeatures(1000225002, None, 0, 0)
+            hqr = _HQRFeatures(1000261000, None, 0)
+            ssc.pNext = ctypes.cast(ctypes.pointer(hqr), _vp)
+            f2 = _Features2(1000059000, ctypes.cast(ctypes.pointer(ssc), _vp), (ctypes.c_ubyte * 256)())
             vk.vkGetPhysicalDeviceFeatures2.argtypes = [_vp, _vp]
             vk.vkGetPhysicalDeviceFeatures2.restype = None
             vk.vkGetPhysicalDeviceFeatures2(self.physical, ctypes.byref(f2))
-            if not feat.subgroupSizeControl:
+            names, chain = [], []
+            if (_SSC_EXT in have and ssc.subgroupSizeControl
+                    and not os.environ.get("MF_VK_NO_SUBGROUP_PIN")):
+                ssc.computeFullSubgroups = 0
+                names.append(_SSC_EXT); chain.append(ssc)
+            if _HQR_EXT in have and hqr.hostQueryReset:
+                names.append(_HQR_EXT); chain.append(hqr)
+            self.host_query_reset = _HQR_EXT in names
+            if not chain:
                 return None, None
-            feat.pNext, feat.computeFullSubgroups = None, 0
-            self._ssc_keep = (feat, (ctypes.c_char_p * 1)(_SSC_EXT))
-            return self._ssc_keep
+            for a, b in zip(chain, chain[1:]):
+                a.pNext = ctypes.cast(ctypes.pointer(b), _vp)
+            chain[-1].pNext = None
+            self._ssc_keep = (chain[0], (ctypes.c_char_p * len(names))(*names), chain)
+            self.subgroup_control = _SSC_EXT in names
+            return self._ssc_keep[:2]
         except Exception:
             return None, None
 
@@ -1051,6 +1080,7 @@ class Context(InputUploads):
     _SHARED = ("vk", "instance", "physical", "queue_family", "queues", "queue", "device",
                "_accurate_trig", "max_shared_memory", "max_invocations", "max_dispatch_x",
                "subgroup_size", "subgroup_range", "mem_props", "command_pool", "_ts_period",
+               "_reset_query",
                "storage_offset_alignment", "max_workgroup_size")
 
     def _attach_device(self, index):
@@ -2466,6 +2496,13 @@ class Context(InputUploads):
         ts["next"] = (i + 1) % self._TS_RING
         if i in ts["pending"]:                 # the ring wrapped: settle that slot first
             self._timestamp_resolve(only=i)
+        # The pair's queries are reset on the device when its command buffers run. Until
+        # then a waiting read saw them AVAILABLE -- zero on a slot's first use, its previous
+        # use's values after that -- so a read made before the submission executed (a
+        # collect while a pipelined batch is still in flight) returned 0/0 or a stale
+        # interval. Reset from the host now: the read then waits for this use's writes.
+        if getattr(self, "_reset_query", None) is not None:
+            self._reset_query(self.device, ts["pool"], 2 * i, 2)
         ts["pending"][i] = label
         return _vp(ts["cmds"][2 * i]), _vp(ts["cmds"][2 * i + 1])
 
@@ -2543,6 +2580,10 @@ class Context(InputUploads):
                 if h in pr["pending"]:                 # its queries are about to be rewritten
                     self._profile_resolve()
                 pr["pending"].append(h)
+                # As for timestamp pairs: unavailable until this submission writes them.
+                if getattr(self, "_reset_query", None) is not None:
+                    for q, _ in pr["marks"][h]:
+                        self._reset_query(self.device, pr["pool"], q, 1)
 
     def _profile_resolve(self):
         pr = self._prof
