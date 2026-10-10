@@ -77,3 +77,14 @@ def test_padded_rows_and_grouped_windows():
         grouped_windows([(0, 10, 0, 2), (0, 100, 2, 3)], 4096, 5, 16)
     with pytest.raises(ValueError):
         grouped_windows([(0, 10, 0, 6)], 4096, 5, 16)
+
+
+def test_grouped_row_windows():
+    from matchedfilter._gpuhost import grouped_row_windows
+    g, nb, win, (lo0, hi0) = grouped_row_windows([(100, 900, 0, 2), (0, 1024, 2, 5)], 1024, 5, 256)
+    assert nb == 4 and (lo0, hi0) == (100, 1024)           # clipped to n, still 4 bins
+    assert win.tolist() == [100, 900, 100, 900, 0, 1024, 0, 1024, 0, 1024]
+    assert not win.flags.writeable
+    assert grouped_row_windows([(100, 900, 0, 2), (0, 1024, 2, 5)], 1024, 5, 256)[2] is win
+    g, nb, win, w = grouped_row_windows([(0, 300, 0, 1)], 1024, 1, 256, nbins=3)
+    assert nb == 3 and w == (0, 768)

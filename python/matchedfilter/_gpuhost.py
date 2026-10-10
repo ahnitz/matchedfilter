@@ -109,12 +109,14 @@ def padded_rows(rows, nt, unit):
     return rows
 
 
-def grouped_windows(groups, n, nd, binsize, max_bins=MAX_BINS):
+def grouped_windows(groups, n, nd, binsize, max_bins=MAX_BINS, nbins=None):
     """Validated (lo, hi, a, b) groups of a grouped call, as ints, and their common bin count
-    (the first group's; no later group may need more)."""
+    (the first group's, or nbins if larger; no group may need more)."""
     groups = tuple((int(lo), int(hi), int(a), int(b)) for lo, hi, a, b in groups)
     binsize = int(binsize)
     nb = (groups[0][1] - groups[0][0] - 1) // binsize + 1
+    if nbins is not None:
+        nb = max(nb, int(nbins))
     if nb > max_bins:
         raise ValueError("grouped dispatch exceeds the kernel bin limit")
     for lo, hi, a, b in groups:
@@ -123,3 +125,56 @@ def grouped_windows(groups, n, nd, binsize, max_bins=MAX_BINS):
         if (hi - lo - 1) // binsize + 1 > nb:
             raise ValueError("grouped windows must not exceed the first group's bin count")
     return groups, nb
+
+
+_ROW_WINDOWS = {}
+
+
+def grouped_row_windows(groups, n, nd, binsize, max_bins=MAX_BINS, nbins=None):
+    """The per-row form of a grouped call, for a backend whose hier_peaks takes row_windows:
+    (groups, nb, win, (lo0, hi0)).
+
+    win is uint32 [lo, hi] per data row; (lo0, hi0) is the recording's window, nb bins from
+    the first group's start (clipped to n), which the per-row windows narrow on the device.
+    A series call repeats the same few group layouts, so results are memoised (win is
+    read-only)."""
+    key = (tuple(tuple(g) for g in groups), n, nd, int(binsize), max_bins, nbins)
+    hit = _ROW_WINDOWS.get(key)
+    if hit is not None:
+        return hit
+    import numpy as np
+    groups, nb = grouped_windows(groups, n, nd, binsize, max_bins, nbins)
+    win = np.zeros(2 * nd, np.uint32)
+    for lo, hi, a, b in groups:
+        win[2 * a:2 * b:2] = lo
+        win[2 * a + 1:2 * b:2] = hi
+    win.flags.writeable = False
+    binsize = int(binsize)
+    lo0 = groups[0][0]
+    hi0 = min(n, lo0 + nb * binsize)
+    if -(-(hi0 - lo0) // binsize) != nb:
+        lo0, hi0 = max(0, n - nb * binsize), n
+    if len(_ROW_WINDOWS) > 4096:
+        _ROW_WINDOWS.clear()
+    hit = _ROW_WINDOWS[key] = (groups, nb, win, (lo0, hi0))
+    return hit
+
+
+def hier_peaks_grouped(ctx, n, band, data, tmpl, ct0, raw_thr, groups, binsize, threshold, *,
+                       upload_tmpl=True, cascade_band=None, ct1=None, raw_thr1=None,
+                       slot=None, async_submit=False, sparse=False, nbins=None, max_bins=MAX_BINS):
+    """hier_peaks_grouped for any backend whose hier_peaks accepts row_windows: one
+    recording, each tier a single dispatch over all rows, per-row windows in the kernels.
+
+    groups holds (lo, hi, a, b): rows a..b of data searched over [lo, hi). Output bins
+    follow the first group's bin count (or nbins)."""
+    from ._shared import shared_buffer
+    if shared_buffer(data, ctx) is None:
+        raise ValueError("grouped spectra must be GPU-shared (a forward batch)")
+    groups, nb, win, window = grouped_row_windows(groups, n, data.shape[0], binsize,
+                                                  max_bins, nbins)
+    return ctx.hier_peaks(n, band, data, tmpl, ct0, raw_thr, binsize=int(binsize),
+                          threshold=threshold, window=window, upload_data=False,
+                          upload_tmpl=upload_tmpl, cascade_band=cascade_band, ct1=ct1,
+                          raw_thr1=raw_thr1, slot=slot, async_submit=async_submit,
+                          sparse=sparse, row_windows=(groups, win))
