@@ -372,3 +372,111 @@ the last 3 s of a 20-segment pipelined ladder:
 - **To be device-bound** the per-bank host path has to shrink about 3x more, or the
   segment's fused recordings have to be replayed (SegmentPlan) rather than rebuilt per
   call. Both are host-layer structure rather than kernel work.
+
+## 12. Arithmetic-intensity redesign: accounting, projection, first prototype
+
+### Measured workload, one fine segment
+Ladder bank, chain (512, 256); `shapes_b.py` capture.
+
+- 54 dispatches, 24,866 data blocks of n = 2048, 4.34M pairs (174 templates per block on
+  average).
+- Tier-0 survivors: 200,882 pairs, on 14,972 distinct blocks (60%).
+- Refined pairs: 11,039, on **2,164 distinct blocks (8.7%)**.
+
+### Current structure, per segment
+"L2" is traffic served by the 2 MB L2 or the 32 MB MALL. "DRAM" is unique bytes.
+
+| Phase | Flops | DRAM bytes | L2 bytes | Flop/byte (DRAM) | Bound |
+|---|---|---|---|---|---|
+| forward (2048) | 2.8 G (113k / block) | 815 MB (read 16 KB + write 16 KB per block) | – | 3.4 | **DRAM**, 169 GB/s |
+| coarse0 (band 256) | 53 G (12.3k / pair) | ~51 MB (band rows once) | ~2.2 GB (templates, 512 B / pair) | ~1000 | **VALU**, 51% of peak |
+| coarse1 (band 512) | 5.4 G (27k / survivor) | ~61 MB (band-1 rows of 15k blocks) | ~1.6 GB | ~90 | VALU |
+| refine (2048) | 1.4 G (129k / pair) | ~35 MB (2,164 data rows) + templates | ~0.35 GB | ~40 | VALU / latency |
+| **Total** | **~63 G** | **~0.96 GB** | | **~65** | |
+
+- **Ridge point:** ~29 TFLOP/s / 0.256 TB/s ≈ 113 flop/byte. The segment as a whole sits
+  left of it, because of the forward alone: it moves 85% of the DRAM bytes for 4% of the
+  flops.
+- **Template reuse:** template rows are already reused through L2. A bank's band-256
+  templates are ~89 KB and its full templates ~2.8 MB, both resident. So per-pair template
+  reloads are L2 hits, not DRAM traffic, in coarse0, coarse1 and refine.
+- **Data-row reuse:** survivors are compacted roughly in pair order (data-row major), so
+  consecutive survivors share data rows through L2.
+- **The DRAM problem is the forward's full-spectrum round trip.** Template reuse is not
+  the issue.
+
+### Option (a): write only the tiers' bands; refine recomputes its survivors' spectra
+**Prototype:** `src/gpu/proto/forward_bands.slang`, an entry appended to the shipped
+forward source. Not built by `build_spirv.py` while `tierb.slang` is frozen.
+
+**Measured:** 4096 blocks, hop 1650, ~1.1–2.0 GHz:
+
+| | Traffic | Time | Note |
+|---|---|---|---|
+| full spectra (today) | 134 MB | 0.795 ms | 169 GB/s |
+| band-1 fp32 + band-0 fp16 only | 88 MB | **0.497 ms** | 176 GB/s; band-1 output bit-equal to the full spectra's first 512 bins |
+
+- **Exchange-row padding:** no effect on the forward (0.794 vs 0.795 ms; 0.501 vs 0.497).
+  The forward is DRAM-bound, so the padding is not worth adding here.
+- **Per segment:** forward 4.7 → ~2.9 ms.
+- **Recompute cost:** refine then recomputes 2,164 blocks' full spectra (8.7%), about
+  0.4 ms of forward.
+- **Net:** about −1.4 ms per segment (~11% of ~12.5 ms at full clock).
+
+**Option (b), full spectra only for survivor blocks, is dominated by (a).**
+- **Second tier:** a 60%-of-blocks second forward for the tier-1 band would cost more than
+  (a)'s band write.
+- **Refine:** for refine alone it is the same 8.7% recompute.
+
+### Fused forward + coarse0 (projected; needs `tierb.slang` integration)
+**Design.** One workgroup:
+- forward-transforms a block in its stage (LDS);
+- writes the band-1 row (DRAM);
+- keeps band 0 as half2 in LDS;
+- then runs that block's pairs against all of the bank's templates. Data is reused in
+  registers across all ~174 templates; template bands come from L2.
+
+**Tile shape.** Set by the queried limits.
+- 128 invocations (n/16) and a 16 KB fp32 stage per block: 8 blocks fit a 64 KB CU.
+- Coarse pairs inside the group take the shipped `peakTwoWave` geometry (band/16 lanes per
+  pair, two templates per register).
+
+**Per-pair accounting.**
+- **DRAM:** (16 KB series read + 4 KB band-1 write) / 174 ≈ 115 B.
+- **Flops:** 12.3k (coarse) + 0.65k (forward share) ≈ 13k.
+- **Intensity:** ≈ 112 flop/B, at the ridge. With the forward's memory time hidden under
+  coarse0's VALU time, the fused phase runs at max(compute, memory) ≈ max(~5.4, ~2.9) ms
+  rather than the sum.
+- **Projected segment** at 2.6 GHz:
+  - fused forward+coarse0 ~5.5–6 ms + coarse1 ~1.2 + refine with recompute ~0.8 + compacts
+    and fills ~0.7 ≈ **8–8.5 ms**, against ~12.5 today (1.5x);
+  - coarse0's compute stays at ~51% of peak (it is unchanged math);
+  - the segment moves from DRAM-limited to compute-limited.
+
+**What stops it being built today.** The transform in `tierb.slang` is specialized on one
+`NLEN` per shader. A fused kernel needs the 2048 forward and the 256 coarse transform in
+one module, so the transform must take its length as a parameter (generic or
+`transform<N>`). That is a `tierb.slang` refactor, deferred until the CUDA and Metal
+rebases land.
+
+**An intermediate step that does not need the refactor.** Overlap the memory-bound
+forwards of one half of a fused chunk with the compute-bound coarse0 of the other half.
+Today every forward of a chunk runs before a global barrier and all coarse0 after it, so
+the two never overlap. This is a recording-order change in `_FusedBatch.flush`, and it
+should capture most of the max(compute, memory) benefit.
+
+### Interleaved fused chunks (measured candidate, off by default)
+`_FusedBatch.flush` can run the chunk's second half k phases behind its first
+(`MF_GPU_FUSE_INTERLEAVE=k`). With k = 3, forward(B) shares a barrier interval with
+coarse0(A).
+- **Ordering:** each item still sees its own phases in order, behind its own recorded
+  barriers. The per-step barrier dedup only merges identical global memory barriers.
+- **Correctness:** forced on, `--check cpu` is exact in both modes.
+- **Speed, as measured:** the GPU was held at ~600-700 MHz by the APU's shared ~120 W
+  package power under the Pegasus load. At that clock, chain (512, 256) gives fused device
+  time 31.7 ms in lockstep against 32.7 and 32.5 ms interleaved.
+- **No overlap gain at that clock.** The coarse0+forward step took 13.3 ms against ~12.4 ms
+  for the two halves serially. At 600 MHz the forward is no longer DRAM-bound (its FFT
+  dominates), so there is nothing to hide.
+- **It stays off** until it can be measured at full clock, where the forward is DRAM-bound
+  (169 GB/s) and the overlap premise holds.
