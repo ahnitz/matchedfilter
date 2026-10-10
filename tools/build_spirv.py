@@ -375,7 +375,8 @@ def coarse_prelude(n, cap, ppg):
     the bank-conflict-free exchange padding for (band, PPG) and the fp16 twiddle table."""
     import coarse_layout
     xs, slot = _exchange_layout(n, ppg, cap)
-    return ("#define XSTRIDE %d\n#define XSLOT %d\n" % (xs, slot)
+    return ("#define XSTRIDE %d\n#define XSLOT %d\n#define C16_KAPPA %.4f\n"
+            % (xs, slot, coarse_layout.c16_kappa(n))
             + coarse_layout.twiddle_table_source(n))
 
 
