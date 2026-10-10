@@ -251,6 +251,7 @@ def run_device(device, tops, args, seed):
                 if profiled:
                     prof.enable()
                 t_seg = time.perf_counter()
+                c_seg = time.thread_time()
                 if seg < args.segments:
                     tm = first if seg < args.warmup else steady
                     ser, next_ser = next_ser, None
@@ -288,6 +289,9 @@ def run_device(device, tops, args, seed):
                 # "wall": the whole iteration, the bench's data generation included -- what
                 # the device sees between segments (device busy = device time / wall).
                 (tm if seg < args.segments else steady).add("wall", time.perf_counter() - t_seg, n=0)
+                # "cpu": the host thread's CPU time over the same span. wall - cpu is time the
+                # host spent waiting (on the device, or descheduled).
+                (tm if seg < args.segments else steady).add("cpu", time.thread_time() - c_seg, n=0)
                 if profiled:
                     prof.disable()
             if prof is not None:
@@ -485,6 +489,9 @@ def main():
         print("  templates-in-real-time: " + ", ".join(f"{k} {v:.3g}" for k, v in tirt.items()))
     print("  calls: " + ", ".join(f"{k} {v}" for k, v in report["steady_calls"].items()) +
           "; " + ", ".join(f"{k} {v}" for k, v in report["counts"].items()))
+    if report["steady_s"].get("wall") and report["steady_s"].get("cpu") is not None:
+        w, c = report["steady_s"]["wall"], report["steady_s"]["cpu"]
+        print(f"  host: cpu {c:.3f}s of steady wall {w:.3f}s ({100 * c / w:.0f}%)")
     if report.get("steady_device_ms") and report["steady_s"].get("wall"):
         dev = sum(v[1] for d in report["steady_device_ms"].values() for v in d.values()) / 1e3
         print(f"  device busy {100 * dev / report['steady_s']['wall']:.0f}%: device {dev:.3f}s "
