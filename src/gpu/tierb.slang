@@ -29,6 +29,14 @@
 #ifndef NLEN
 #define NLEN 1024
 #endif
+//: Every unroll in this file. CUDA forces it: with a plain [unroll] Slang emitted the
+//: multi-bin path's per-register loops as loops in CUDA source and NVVM kept myMag/myBin in
+//: local memory (288 B per thread). SPIR-V and Metal keep [unroll] (their output unchanged).
+#if defined(MF_CUDA)
+#define MF_UNROLL [ForceUnroll]
+#else
+#define MF_UNROLL [unroll]
+#endif
 //: Points per thread.  16 wherever a workgroup can carry the transform at
 //: 16; 32 and 64 are what take a length past 16384, where WG = NLEN/R would
 //: otherwise need more than the 1024 threads a workgroup is allowed.
@@ -352,8 +360,8 @@ void dft4s(inout H re[16], inout H im[16], uint o)
 void dft8s(inout H re[16], inout H im[16], uint o)
 {
     H br[8], bi[8];
-    [unroll] for (uint s = 1; s < 8; s <<= 1) {
-        [unroll] for (uint j = 0; j < 4; ++j) {
+    MF_UNROLL for (uint s = 1; s < 8; s <<= 1) {
+        MF_UNROLL for (uint j = 0; j < 4; ++j) {
             uint k = j & (s-1), base = (j-k) << 1;
             float ang = PI * float(k) / float(s);
             H vr = re[o+j+4], vi = im[o+j+4];
@@ -363,13 +371,13 @@ void dft8s(inout H re[16], inout H im[16], uint o)
             br[base+k]   = ur + vr; bi[base+k]   = ui + vi;
             br[base+k+s] = ur - vr; bi[base+k+s] = ui - vi;
         }
-        [unroll] for (uint i = 0; i < 8; ++i) { re[o+i] = br[i]; im[o+i] = bi[i]; }
+        MF_UNROLL for (uint i = 0; i < 8; ++i) { re[o+i] = br[i]; im[o+i] = bi[i]; }
     }
 }
 
 void dft16s(inout H re[16], inout H im[16])
 {
-    [unroll] for (uint n1 = 0; n1 < 4; ++n1) r4s(re, im, n1, n1+4, n1+8, n1+12);
+    MF_UNROLL for (uint n1 = 0; n1 < 4; ++n1) r4s(re, im, n1, n1+4, n1+8, n1+12);
     // Same twiddles as the AoS form, now broadcast scalars rather than
     // packed constants -- the multiply is elementwise in SoA.
     cmulw(re[5],  im[5],  CS( 0.92387953f), CS( 0.38268343f));  // W1
@@ -381,7 +389,7 @@ void dft16s(inout H re[16], inout H im[16])
     cmulw(re[7],  im[7],  CS( 0.38268343f), CS( 0.92387953f));  // W3
     cmulw(re[11], im[11], CS(-0.70710678f), CS( 0.70710678f));  // W6
     cmulw(re[15], im[15], CS(-0.92387953f), CS(-0.38268343f));  // W9
-    [unroll] for (uint k2 = 0; k2 < 4; ++k2)
+    MF_UNROLL for (uint k2 = 0; k2 < 4; ++k2)
         r4s(re, im, 4*k2, 4*k2+1, 4*k2+2, 4*k2+3);
     swap2(re, im, 1, 4);   swap2(re, im, 2, 8);   swap2(re, im, 3, 12);
     swap2(re, im, 6, 9);   swap2(re, im, 7, 13);  swap2(re, im, 11, 14);
@@ -410,19 +418,19 @@ void exchangeS(inout H re[16], inout H im[16],
                uint TB, uint len, uint blk, uint lane, uint per, uint TB2, uint len2, uint blk2, uint lane2)
 {
     H outr[16], outi[16];
-    [unroll] for (uint z = 0; z < R; ++z) { outr[z] = H(0.0f); outi[z] = H(0.0f); }
+    MF_UNROLL for (uint z = 0; z < R; ++z) { outr[z] = H(0.0f); outi[z] = H(0.0f); }
     uint spanMask = (1u << lgSpan) - 1u;
     uint lenMask  = (1u << lgLen) - 1u;
     uint p0 = computeWant(0, TB, len, blk, lane, per, TB2, len2, blk2, lane2);
     uint i0 = (p0 & lenMask) >> lgSpan;
     uint a0 = i0 * XS + ((p0 >> lgLen) << lgSpan) + (p0 & lenMask & spanMask);
-    [unroll] for (uint c = 0; c < R / CH; ++c) {
+    MF_UNROLL for (uint c = 0; c < R / CH; ++c) {
         [ForceUnroll] for (uint comp = 0; comp < 2; ++comp) {
             GroupMemoryBarrierWithGroupSync();
-            [unroll] for (uint j = 0; j < CH; ++j)
+            MF_UNROLL for (uint j = 0; j < CH; ++j)
                 stgPut(j * XS + _tid, comp == 0 ? re[c * CH + j] : im[c * CH + j]);
             GroupMemoryBarrierWithGroupSync();
-            [unroll] for (uint d = 0; d < R; ++d) {
+            MF_UNROLL for (uint d = 0; d < R; ++d) {
                 // tid = 0 terms: blk = lane = blk2 = lane2 = 0, all constants
                 uint pz = computeWant(d, TB, len, 0u, 0u, per, TB2, len2, 0u, 0u);
                 uint iz = (pz & lenMask) >> lgSpan;
@@ -435,15 +443,15 @@ void exchangeS(inout H re[16], inout H im[16],
             }
         }
     }
-    [unroll] for (uint d = 0; d < R; ++d) { re[d] = outr[d]; im[d] = outi[d]; }
+    MF_UNROLL for (uint d = 0; d < R; ++d) { re[d] = outr[d]; im[d] = outi[d]; }
 }
 
 void innermostS(inout H re[16], inout H im[16])
 {
     if (INNER == 16)     { dft16s(re, im); }
-    else if (INNER == 8) { [unroll] for (uint b = 0; b < 2; ++b) dft8s(re, im, b*8); }
-    else if (INNER == 4) { [unroll] for (uint b = 0; b < 4; ++b) dft4s(re, im, b*4); }
-    else                 { [unroll] for (uint b = 0; b < 8; ++b) dft2s(re, im, b*2); }
+    else if (INNER == 8) { MF_UNROLL for (uint b = 0; b < 2; ++b) dft8s(re, im, b*8); }
+    else if (INNER == 4) { MF_UNROLL for (uint b = 0; b < 4; ++b) dft4s(re, im, b*4); }
+    else                 { MF_UNROLL for (uint b = 0; b < 8; ++b) dft2s(re, im, b*2); }
 }
 #endif
 
@@ -472,15 +480,15 @@ void dft8(inout C r[RADIX], uint o)
     // radix-2, three stages, fully unrolled with static indices
     const float S = 0.70710678f;
     C b[8];
-    [unroll] for (uint s = 1; s < 8; s <<= 1) {
-        [unroll] for (uint j = 0; j < 4; ++j) {
+    MF_UNROLL for (uint s = 1; s < 8; s <<= 1) {
+        MF_UNROLL for (uint j = 0; j < 4; ++j) {
             uint k = j & (s-1), base = (j-k) << 1;
             float ang = PI * float(k) / float(s);
             C w = C(mfTwiddle(ang));
             C u = r[o+j], v = r[o+j+4], t = cmul(w, v);
             b[base+k] = u+t; b[base+k+s] = u-t;
         }
-        [unroll] for (uint i = 0; i < 8; ++i) r[o+i] = b[i];
+        MF_UNROLL for (uint i = 0; i < 8; ++i) r[o+i] = b[i];
     }
 }
 void dft16(inout C r[16])
@@ -491,11 +499,11 @@ void dft16(inout C r[16])
     const C W4 = C( 0.0f,         1.0f       );
     const C W6 = C(-0.70710678f,  0.70710678f);
     const C W9 = C(-0.92387953f, -0.38268343f);
-    [unroll] for (uint n1 = 0; n1 < 4; ++n1) r4(r[n1], r[n1+4], r[n1+8], r[n1+12]);
+    MF_UNROLL for (uint n1 = 0; n1 < 4; ++n1) r4(r[n1], r[n1+4], r[n1+8], r[n1+12]);
     r[5]=cmul(r[5],W1);  r[9]=cmul(r[9],W2);   r[13]=cmul(r[13],W3);
     r[6]=cmul(r[6],W2);  r[10]=cmul(r[10],W4); r[14]=cmul(r[14],W6);
     r[7]=cmul(r[7],W3);  r[11]=cmul(r[11],W6); r[15]=cmul(r[15],W9);
-    [unroll] for (uint k2 = 0; k2 < 4; ++k2) r4(r[4*k2], r[4*k2+1], r[4*k2+2], r[4*k2+3]);
+    MF_UNROLL for (uint k2 = 0; k2 < 4; ++k2) r4(r[4*k2], r[4*k2+1], r[4*k2+2], r[4*k2+3]);
     C t;
     t=r[1];  r[1]=r[4];   r[4]=t;
     t=r[2];  r[2]=r[8];   r[8]=t;
@@ -514,9 +522,9 @@ void dft16at(inout C r[RADIX], uint o)
     dft16(r);
 #else
     C b[16];
-    [unroll] for (uint i = 0; i < 16; ++i) b[i] = r[o + i];
+    MF_UNROLL for (uint i = 0; i < 16; ++i) b[i] = r[o + i];
     dft16(b);
-    [unroll] for (uint i = 0; i < 16; ++i) r[o + i] = b[i];
+    MF_UNROLL for (uint i = 0; i < 16; ++i) r[o + i] = b[i];
 #endif
 }
 
@@ -532,7 +540,7 @@ void dft16at(inout C r[RADIX], uint o)
 void dft32(inout C r[RADIX])
 {
     C u[16], v[16];
-    [unroll] for (uint j = 0; j < 16; ++j) {
+    MF_UNROLL for (uint j = 0; j < 16; ++j) {
         C a = r[j], b = r[j + 16];
         u[j] = a + b;
         float ang = 2.0f * PI * float(j) / 32.0f;
@@ -540,7 +548,7 @@ void dft32(inout C r[RADIX])
     }
     dft16(u);
     dft16(v);
-    [unroll] for (uint k = 0; k < 16; ++k) { r[2 * k] = u[k]; r[2 * k + 1] = v[k]; }
+    MF_UNROLL for (uint k = 0; k < 16; ++k) { r[2 * k] = u[k]; r[2 * k + 1] = v[k]; }
 }
 #endif
 
@@ -551,19 +559,19 @@ void dft32(inout C r[RADIX])
 //: r4 per j and no twiddle of its own.
 void dft64(inout C r[RADIX])
 {
-    [unroll] for (uint j = 0; j < 16; ++j)
+    MF_UNROLL for (uint j = 0; j < 16; ++j)
         r4(r[j], r[j + 16], r[j + 32], r[j + 48]);
     C o[64];
-    [unroll] for (uint pp = 0; pp < 4; ++pp) {
+    MF_UNROLL for (uint pp = 0; pp < 4; ++pp) {
         C b[16];
-        [unroll] for (uint j = 0; j < 16; ++j) {
+        MF_UNROLL for (uint j = 0; j < 16; ++j) {
             float ang = 2.0f * PI * float(pp * j) / 64.0f;
             b[j] = cmul(r[pp * 16 + j], C(mfTwiddle(ang)));
         }
         dft16(b);
-        [unroll] for (uint k = 0; k < 16; ++k) o[4 * k + pp] = b[k];
+        MF_UNROLL for (uint k = 0; k < 16; ++k) o[4 * k + pp] = b[k];
     }
-    [unroll] for (uint i = 0; i < 64; ++i) r[i] = o[i];
+    MF_UNROLL for (uint i = 0; i < 64; ++i) r[i] = o[i];
 }
 #endif
 
@@ -591,12 +599,12 @@ void innermost(inout C r[RADIX])
 #if RADIX == 32
     dft32(r);                                    // INNER == 32
 #elif RADIX == 64
-    [unroll] for (uint b = 0; b < 4; ++b) dft16at(r, b*16);   // INNER == 16
+    MF_UNROLL for (uint b = 0; b < 4; ++b) dft16at(r, b*16);   // INNER == 16
 #else
     if (INNER == 16)     { dft16(r); }
-    else if (INNER == 8) { [unroll] for (uint b = 0; b < 2; ++b) dft8(r, b*8); }
-    else if (INNER == 4) { [unroll] for (uint b = 0; b < 4; ++b) dft4(r, b*4); }
-    else                 { [unroll] for (uint b = 0; b < 8; ++b) dft2(r, b*2); }
+    else if (INNER == 8) { MF_UNROLL for (uint b = 0; b < 2; ++b) dft8(r, b*8); }
+    else if (INNER == 4) { MF_UNROLL for (uint b = 0; b < 4; ++b) dft4(r, b*4); }
+    else                 { MF_UNROLL for (uint b = 0; b < 8; ++b) dft2(r, b*2); }
 #endif
 }
 
@@ -627,20 +635,20 @@ void exchange(inout C r[RADIX], uint lgLen, uint lgSpan,
     uint spanMask = (1u << lgSpan) - 1u;
     uint lenMask  = (1u << lgLen) - 1u;
     uint src[RADIX];
-    [unroll] for (uint d = 0; d < R; ++d) {
+    MF_UNROLL for (uint d = 0; d < R; ++d) {
         uint p = computeWant(d, TB, len, blk, lane, per, TB2, len2, blk2, lane2);
         uint b = p >> lgLen, rem = p & lenMask;
         src[d] = (rem >> lgSpan) * WG + (b << lgSpan) + (rem & spanMask);
     }
     float xr[RADIX];
     GroupMemoryBarrierWithGroupSync();
-    [unroll] for (uint j = 0; j < R; ++j) stg[_stgBase + j * WG + _tid] = asuint(r[j].x);
+    MF_UNROLL for (uint j = 0; j < R; ++j) stg[_stgBase + j * WG + _tid] = asuint(r[j].x);
     GroupMemoryBarrierWithGroupSync();
-    [unroll] for (uint d = 0; d < R; ++d) xr[d] = asfloat(stg[_stgBase + src[d]]);
+    MF_UNROLL for (uint d = 0; d < R; ++d) xr[d] = asfloat(stg[_stgBase + src[d]]);
     GroupMemoryBarrierWithGroupSync();
-    [unroll] for (uint j = 0; j < R; ++j) stg[_stgBase + j * WG + _tid] = asuint(r[j].y);
+    MF_UNROLL for (uint j = 0; j < R; ++j) stg[_stgBase + j * WG + _tid] = asuint(r[j].y);
     GroupMemoryBarrierWithGroupSync();
-    [unroll] for (uint d = 0; d < R; ++d) r[d] = C(xr[d], asfloat(stg[_stgBase + src[d]]));
+    MF_UNROLL for (uint d = 0; d < R; ++d) r[d] = C(xr[d], asfloat(stg[_stgBase + src[d]]));
 }
 #else
 void exchange(inout C r[RADIX], uint lgLen, uint lgSpan,
@@ -656,7 +664,7 @@ void exchange(inout C r[RADIX], uint lgLen, uint lgSpan,
     // garbage rather than zero would turn that warning into a wrong
     // answer. Cheap insurance against a compiler we have not met.
     C out[RADIX];
-    [unroll] for (uint z = 0; z < R; ++z) out[z] = C(0.0f, 0.0f);
+    MF_UNROLL for (uint z = 0; z < R; ++z) out[z] = C(0.0f, 0.0f);
     uint spanMask = (1u << lgSpan) - 1u;
     uint lenMask  = (1u << lgLen) - 1u;
     // Affine-separable source (see exchangeS): one base per thread, every
@@ -664,11 +672,11 @@ void exchange(inout C r[RADIX], uint lgLen, uint lgSpan,
     uint p0 = computeWant(0, TB, len, blk, lane, per, TB2, len2, blk2, lane2);
     uint a0 = ((p0 & lenMask) >> lgSpan) * XSF + ((p0 >> lgLen) << lgSpan) + (p0 & lenMask & spanMask);
     uint i0 = (p0 & lenMask) >> lgSpan;
-    [unroll] for (uint c = 0; c < R / CH; ++c) {
+    MF_UNROLL for (uint c = 0; c < R / CH; ++c) {
         GroupMemoryBarrierWithGroupSync();
-        [unroll] for (uint j = 0; j < CH; ++j) stgPut(j * XSF + _tid, r[c * CH + j]);
+        MF_UNROLL for (uint j = 0; j < CH; ++j) stgPut(j * XSF + _tid, r[c * CH + j]);
         GroupMemoryBarrierWithGroupSync();
-        [unroll] for (uint d = 0; d < R; ++d) {
+        MF_UNROLL for (uint d = 0; d < R; ++d) {
             uint pz = computeWant(d, TB, len, 0u, 0u, per, TB2, len2, 0u, 0u);
             uint iz = (pz & lenMask) >> lgSpan;
             uint az = iz * XSF + ((pz >> lgLen) << lgSpan) + (pz & lenMask & spanMask);
@@ -677,7 +685,7 @@ void exchange(inout C r[RADIX], uint lgLen, uint lgSpan,
                 out[d] = stgGet(a0 + az - c * CH * XSF);
         }
     }
-    [unroll] for (uint d = 0; d < R; ++d) r[d] = out[d];
+    MF_UNROLL for (uint d = 0; d < R; ++d) r[d] = out[d];
 }
 #endif
 
@@ -769,14 +777,14 @@ void filterPair(uint pair, uint tid,
 
     // level 0: gather this thread's stride-WG column straight from global
 #if COARSE16
-    [unroll] for (uint n2 = 0; n2 < R; ++n2)
+    MF_UNROLL for (uint n2 = 0; n2 < R; ++n2)
         r[n2] = cmulConj(dreg[n2], cload(tmpl, t*N + tid + WG * n2));
 #else
     // No tile on this path, so nothing amortises a hoisted data slice --
     // it is 16 live registers of pure cost. The FLAT filter and the refine
     // stage both come through here, and holding dreg for them cost the
     // flat filter 1.29 -> 2.93 ms at n=4096 before this guard.
-    [unroll] for (uint n2 = 0; n2 < R; ++n2) {
+    MF_UNROLL for (uint n2 = 0; n2 < R; ++n2) {
         uint idx = tid + WG * n2;
         r[n2] = cmulConj(cload(data, d*DSTRIDE + idx), cload(tmpl, t*N + idx));
     }
@@ -799,7 +807,7 @@ void filterPair(uint pair, uint tid,
     // The pair's energy over all lags, for the coarse error bound (c16Bound),
     // before the peak tables take the stage over.
     float energy = 0.0f;
-    [unroll] for (uint i = 0; i < R; ++i) {
+    MF_UNROLL for (uint i = 0; i < R; ++i) {
         float _ex = float(r[i].x), _ey = float(r[i].y);
         energy += _ex * _ex + _ey * _ey;
     }
@@ -817,7 +825,7 @@ void filterPair(uint pair, uint tid,
     float2 threadBestVal = float2(0.0f, 0.0f);
 
     if (winStart == 0u && winEnd >= N) {
-        [unroll] for (uint i = 0; i < R; ++i) {
+        MF_UNROLL for (uint i = 0; i < R; ++i) {
             float _rx = float(r[i].x), _ry = float(r[i].y);
             uint magBits = asuint(_rx*_rx + _ry*_ry);
             if (magBits > threadBestBits) {
@@ -827,7 +835,7 @@ void filterPair(uint pair, uint tid,
             }
         }
     } else {
-        [unroll] for (uint i = 0; i < R; ++i) {
+        MF_UNROLL for (uint i = 0; i < R; ++i) {
             uint idx = slotToIndex(tid * R + i);
             bool live = (idx >= winStart && idx < winEnd);
             float _rx = float(r[i].x), _ry = float(r[i].y);
@@ -886,7 +894,7 @@ void filterPair(uint pair, uint tid,
 
     uint myMag[RADIX];
     uint myBin[RADIX];
-    [unroll] for (uint i = 0; i < R; ++i) {
+    MF_UNROLL for (uint i = 0; i < R; ++i) {
         uint idx = slotToIndex(tid * R + i);
         bool live = (idx >= winStart && idx < winEnd);
         // Out-of-window samples are set to zero rather than branched around:
@@ -921,7 +929,7 @@ void filterPair(uint pair, uint tid,
     if (nbins == 1) {
 #endif
         uint bestBits = thrBits;
-        [unroll] for (uint i = 0; i < R; ++i) bestBits = max(bestBits, myMag[i]);
+        MF_UNROLL for (uint i = 0; i < R; ++i) bestBits = max(bestBits, myMag[i]);
 #if PPG == 1
         uint wm = WaveActiveMax(bestBits);
         if (WaveIsFirstLane() && wm > thrBits) InterlockedMax(stg[_stgBase], wm);
@@ -949,7 +957,7 @@ void filterPair(uint pair, uint tid,
     if (nbins == 1) {
 #endif
         uint winner = 0xffffffffu;
-        [unroll] for (uint i = 0; i < R; ++i)
+        MF_UNROLL for (uint i = 0; i < R; ++i)
             if (myMag[i] > thrBits && myMag[i] == stg[_stgBase])
                 winner = min(winner, tid * R + i);
 #if PPG == 1
@@ -960,7 +968,7 @@ void filterPair(uint pair, uint tid,
         if (winner != 0xffffffffu) InterlockedMin(stg[_stgBase+1], winner);
 #endif
         GroupMemoryBarrierWithGroupSync();
-        [unroll] for (uint i = 0; i < R; ++i) {
+        MF_UNROLL for (uint i = 0; i < R; ++i) {
             if (tid * R + i == stg[_stgBase+1]) {
                 peakIdx[pair] = int(slotToIndex(tid * R + i));
 #if COARSE16
@@ -979,16 +987,16 @@ void filterPair(uint pair, uint tid,
     else {
         // Reuse the magnitude table for winner slots, retaining candidates
         // in registers. A separate bin array would increase LDS occupancy.
-        [unroll] for (uint i = 0; i < R; ++i)
+        MF_UNROLL for (uint i = 0; i < R; ++i)
             myMag[i] = uint(myMag[i] > thrBits &&
                            myMag[i] == stg[_stgBase+myBin[i]]);
         GroupMemoryBarrierWithGroupSync();
         for (uint b = tid; b < nbins; b += WG) stg[_stgBase+b] = 0xffffffffu;
         GroupMemoryBarrierWithGroupSync();
-        [unroll] for (uint i = 0; i < R; ++i)
+        MF_UNROLL for (uint i = 0; i < R; ++i)
             if (myMag[i] != 0u) InterlockedMin(stg[_stgBase+myBin[i]], tid*R+i);
         GroupMemoryBarrierWithGroupSync();
-        [unroll] for (uint i = 0; i < R; ++i) {
+        MF_UNROLL for (uint i = 0; i < R; ++i) {
             if (myMag[i] != 0u && stg[_stgBase+myBin[i]] == tid*R+i) {
                 uint o = pair * nbins + myBin[i];
                 peakIdx[o] = int(slotToIndex(tid*R+i));
@@ -1030,7 +1038,7 @@ void peakLane(uint pair, uint tid, uint lane, H magv[16], H re[16], H im[16],
     // pair whose every sample overflowed report nothing and be gated out. NaN is
     // elected as +inf instead: any non-finite element wins and passes the gate.
     H bestH = H(0.0f), poison = H(0.0f);
-    [unroll] for (uint i = 0; i < R; ++i) { bestH = max(bestH, magv[i]); poison += magv[i] * H(0.0f); }
+    MF_UNROLL for (uint i = 0; i < R; ++i) { bestH = max(bestH, magv[i]); poison += magv[i] * H(0.0f); }
     float pl = float(lane == 0u ? poison.x : poison.y);
     uint bestBits = max(thrBits, isnan(pl) ? 0x7F800000u : asuint(float(lane == 0u ? bestH.x : bestH.y)));
 #if PPG == 1
@@ -1042,7 +1050,7 @@ void peakLane(uint pair, uint tid, uint lane, H magv[16], H re[16], H im[16],
     GroupMemoryBarrierWithGroupSync();
 
     uint winner = 0xffffffffu;
-    [unroll] for (uint i = 0; i < R; ++i) {
+    MF_UNROLL for (uint i = 0; i < R; ++i) {
         uint mi = min(asuint(float(lane == 0u ? magv[i].x : magv[i].y)), 0x7F800000u);
         if (mi > thrBits && stg[_stgBase] == mi)
             winner = min(winner, tid*R+i);
@@ -1055,7 +1063,7 @@ void peakLane(uint pair, uint tid, uint lane, H magv[16], H re[16], H im[16],
     if (winner != 0xffffffffu) InterlockedMin(stg[_stgBase+1], winner);
 #endif
     GroupMemoryBarrierWithGroupSync();
-    [unroll] for (uint i = 0; i < R; ++i) {
+    MF_UNROLL for (uint i = 0; i < R; ++i) {
         if (pair != NOPAIR && stg[_stgBase+1] == tid*R+i) {
             peakIdx[pair] = int(slotToIndex(tid*R+i));
             peakVal[pair] = c16Bound(float2(float(lane == 0u ? re[i].x : re[i].y),
@@ -1117,7 +1125,7 @@ void peakTwoWave(uint pairA, uint pairB, uint tid, H re[16], H im[16],
     // the transform itself makes it inf, and then the pair passes, as it must.
     H en = H(0.0f);
     const H esc = H(0.015625f);
-    [unroll] for (uint i = 0; i < R; ++i) {
+    MF_UNROLL for (uint i = 0; i < R; ++i) {
         bool live = (u0 + slotToIndex(i)) < span;  // winStart <= idx < winEnd
         H mg = mag2s(re[i], im[i]);
         H sr = re[i] * esc, si = im[i] * esc;
@@ -1155,7 +1163,7 @@ void peakTwoWave(uint pairA, uint pairB, uint tid, H re[16], H im[16],
     [ForceUnroll] for (uint comp = 0; comp < 2; ++comp) {
         [ForceUnroll] for (uint c = 0; c < R / CH; ++c) {
             GroupMemoryBarrierWithGroupSync();
-            [unroll] for (uint j = 0; j < CH; ++j)
+            MF_UNROLL for (uint j = 0; j < CH; ++j)
                 stg[_stgBase + j * XS + tid] = bit_cast<uint>(comp == 0 ? re[c * CH + j] : im[c * CH + j]);
             GroupMemoryBarrierWithGroupSync();
             if (tid == 0) {
@@ -1188,7 +1196,7 @@ void filterTwo(uint pairA, uint pairB, uint tA, uint tB, uint tid,
                uint winStart, uint winEnd, uint thrBits)
 {
     H re[16], im[16];
-    [unroll] for (uint n2 = 0; n2 < R; ++n2) {
+    MF_UNROLL for (uint n2 = 0; n2 < R; ++n2) {
         C ta = cload(tmpl, tA*N + tid + WG * n2);
         C tb = cload(tmpl, tB*N + tid + WG * n2);
         H dr = H(dreg[n2].x, dreg[n2].x);     // data broadcast: .xx swizzle
@@ -1214,7 +1222,7 @@ void filterTwo(uint pairA, uint pairB, uint tA, uint tB, uint tid,
             // immediate offsets replace a cos/sin and an fp32 recurrence
             // with two conversions per register (~6 VALU each, ~96 a level).
             const uint toff = (lvl == 0) ? 0u : ((lvl == 1) ? WG * R : WG * R + (WG >> LGR) * R);
-            [unroll] for (uint k2 = 0; k2 < R; ++k2) {
+            MF_UNROLL for (uint k2 = 0; k2 < R; ++k2) {
                 H w = bit_cast<H>(COARSE_TWT[toff + lane * R + k2]);
                 cmulw(re[k2], im[k2], w.x, w.y);
             }
@@ -1225,7 +1233,7 @@ void filterTwo(uint pairA, uint pairB, uint tA, uint tB, uint tid,
             float2 tw = mfTwiddle(a1);
             float wr = tw.x, wi = tw.y;
             float cr = 1.0f, ci = 0.0f;
-            [unroll] for (uint k2 = 0; k2 < R; ++k2) {
+            MF_UNROLL for (uint k2 = 0; k2 < R; ++k2) {
                 cmulw(re[k2], im[k2], CS(cr), CS(ci));
                 float nr = cr * wr - ci * wi;
                 ci = cr * wi + ci * wr;
@@ -1245,10 +1253,9 @@ void filterTwo(uint pairA, uint pairB, uint tA, uint tB, uint tid,
     // |v|^2 masked by the window, both lanes at once. `live` depends on the
     // element index, which is shared by the two transforms, so the select
     // is packed and no lane is extracted here.
-#if defined(MF_VULKAN)
-    // mfSubgroupSize is a specialization constant: one branch survives.
-    // Vulkan only for now -- the Metal and CUDA builds keep peakLane until
-    // they are measured on their own hardware.
+#if defined(MF_VULKAN) || defined(MF_CUDA)
+    // mfSubgroupSize is a specialization constant (CUDA: the warp, 32): one branch
+    // survives. Metal keeps peakLane until it is measured on its own hardware.
     const bool wavePeak = WG <= mfSubgroupSize;
 #else
     const bool wavePeak = false;
@@ -1258,7 +1265,7 @@ void filterTwo(uint pairA, uint pairB, uint tA, uint tB, uint tid,
     } else {
         H magv[16];
         float eA = 0.0f, eB = 0.0f;
-        [unroll] for (uint i = 0; i < R; ++i) {
+        MF_UNROLL for (uint i = 0; i < R; ++i) {
             uint idx = slotToIndex(tid * R + i);
             bool live = (idx >= winStart && idx < winEnd);
             H mg = mag2s(re[i], im[i]);
@@ -1289,7 +1296,7 @@ void filterPair(uint pair, uint tid,
     // Consecutive pairs share a data row because d = pair/ntmpl, provided
     // the run does not straddle a row end; the host drops to TILE_T=1 when
     // the pair count is not a multiple of it.
-#if defined(MF_VULKAN) && COARSE16 && (TILE_T % 2) == 0
+#if (defined(MF_VULKAN) || defined(MF_CUDA)) && COARSE16 && (TILE_T % 2) == 0
     // RAGGED TILES. Each group slot takes TILE_T consecutive templates of ONE
     // data row, the row's last tile clamped to its last template; the host
     // passes the row count in `binsize` (unused by the one-bin coarse role)
@@ -1319,27 +1326,27 @@ void filterPair(uint pair, uint tid,
 #endif
     C dreg[RADIX];
 #if COARSE16
-    [unroll] for (uint n2 = 0; n2 < R; ++n2)
+    MF_UNROLL for (uint n2 = 0; n2 < R; ++n2)
         dreg[n2] = dload(data, d*DSTRIDE + tid + WG * n2);
 #else
-    [unroll] for (uint n2 = 0; n2 < R; ++n2) dreg[n2] = C(0.0f);
+    MF_UNROLL for (uint n2 = 0; n2 < R; ++n2) dreg[n2] = C(0.0f);
 #endif
 #if COARSE16 && (TILE_T % 2) == 0
     // Two at a time, in split/SoA form.
-#if defined(MF_VULKAN)
-    [unroll] for (uint k = 0; k < TILE_T; k += 2) {
+#if defined(MF_VULKAN) || defined(MF_CUDA)
+    MF_UNROLL for (uint k = 0; k < TILE_T; k += 2) {
         bool okA = slotOk && t0 + k < ntmpl, okB = slotOk && t0 + k + 1 < ntmpl;
         filterTwo(okA ? p0 + k : NOPAIR, okB ? p0 + k + 1 : NOPAIR,
                   min(t0 + k, ntmpl - 1u), min(t0 + k + 1, ntmpl - 1u), tid, dreg, tmpl,
                   peakIdx, peakVal, winStart, winEnd, thrBits);
     }
 #else
-    [unroll] for (uint k = 0; k < TILE_T; k += 2)
+    MF_UNROLL for (uint k = 0; k < TILE_T; k += 2)
         filterTwo(p0 + k, p0 + k + 1, t0 + k, t0 + k + 1, tid, dreg, tmpl,
                   peakIdx, peakVal, winStart, winEnd, thrBits);
 #endif
 #else
-    [unroll] for (uint k = 0; k < TILE_T; ++k)
+    MF_UNROLL for (uint k = 0; k < TILE_T; ++k)
         filterOne(p0 + k, d, t0 + k, tid, dreg, data, tmpl, peakIdx, peakVal,
                   winStart, winEnd, binsize, binShift, nbins, thrBits);
 #endif
@@ -1388,12 +1395,12 @@ void fullCorrelation(uint3 gid: SV_GroupID, uint3 lid: SV_GroupThreadID,
     _tid = tid;
     _stgBase = 0;
     C r[RADIX];
-    [unroll] for (uint i = 0; i < R; ++i) {
+    MF_UNROLL for (uint i = 0; i < R; ++i) {
         uint idx = tid + WG * i;
         r[i] = cmulConj(cload(data, d*N + idx), cload(tmpl, t*N + idx));
     }
     transform(r, tid);
-    [unroll] for (uint i = 0; i < R; ++i)
+    MF_UNROLL for (uint i = 0; i < R; ++i)
         output[pair*N + slotToIndex(tid*R + i)] = float2(float(r[i].x), float(r[i].y));
 }
 
@@ -1411,12 +1418,12 @@ void fullCorrelationSeries(uint3 gid: SV_GroupID, uint3 lid: SV_GroupThreadID,
     _tid = tid;
     _stgBase = 0;
     C r[RADIX];
-    [unroll] for (uint i = 0; i < R; ++i) {
+    MF_UNROLL for (uint i = 0; i < R; ++i) {
         uint idx = tid + WG * i;
         r[i] = cmulConj(cload(data, d*N + idx), cload(tmpl, t*N + idx));
     }
     transform(r, tid);
-    [unroll] for (uint i = 0; i < R; ++i) {
+    MF_UNROLL for (uint i = 0; i < R; ++i) {
         uint lag = slotToIndex(tid*R + i);
         if (lag >= params.z && lag < params.w && lag < params.y - start)
             output[t*params.y + start + lag] = float2(float(r[i].x), float(r[i].y));
@@ -1567,7 +1574,7 @@ void tcStage1(uint3 gid: SV_GroupID, uint3 lid: SV_GroupThreadID,
     _stgBase = 0;
 
     C r[RADIX];
-    [unroll] for (uint m = 0; m < R; ++m) {
+    MF_UNROLL for (uint m = 0; m < R; ++m) {
         uint j = n1 + TC_OTHER * (tid + WG * m);
         r[m] = cmulConj(data[d * TC_N + j], tmpl[t * TC_N + j]);
     }
@@ -1576,7 +1583,7 @@ void tcStage1(uint3 gid: SV_GroupID, uint3 lid: SV_GroupThreadID,
     //: n1*k2 < N1*N2 = n <= 2^22, so the product is exact in float32 and the
     //: angle stays inside one turn. Folding it any other way costs accuracy
     //: for nothing.
-    [unroll] for (uint i = 0; i < R; ++i) {
+    MF_UNROLL for (uint i = 0; i < R; ++i) {
         uint k2 = slotToIndex(tid * R + i);
         float a = 2.0f * PI * float(n1 * k2) / float(TC_N);
         scratch[pair * TC_N + k2 * TC_OTHER + n1] = cmul(r[i], C(mfTwiddle(a)));
@@ -1601,12 +1608,12 @@ void tcStage3(uint3 gid: SV_GroupID, uint3 lid: SV_GroupThreadID,
     _stgBase = 0;
 
     C r[RADIX];
-    [unroll] for (uint m = 0; m < R; ++m)
+    MF_UNROLL for (uint m = 0; m < R; ++m)
         r[m] = scratch[pair * TC_N + k2 * NLEN + (tid + WG * m)];
     transform(r, tid);
 
     uint best = thrBits;
-    [unroll] for (uint i = 0; i < R; ++i) {
+    MF_UNROLL for (uint i = 0; i < R; ++i) {
         uint k1 = slotToIndex(tid * R + i);
         uint idx = k1 * TC_OTHER + k2;
         bool live = (idx >= winStart && idx < winEnd);
@@ -1627,7 +1634,7 @@ void tcStage3(uint3 gid: SV_GroupID, uint3 lid: SV_GroupThreadID,
         candVal[slot] = float2(0.0f, 0.0f);
     }
     GroupMemoryBarrierWithGroupSync();
-    [unroll] for (uint i = 0; i < R; ++i) {
+    MF_UNROLL for (uint i = 0; i < R; ++i) {
         uint k1 = slotToIndex(tid * R + i);
         uint idx = k1 * TC_OTHER + k2;
         bool live = (idx >= winStart && idx < winEnd);
@@ -1652,10 +1659,10 @@ void tcFullStage3(uint3 gid: SV_GroupID, uint3 lid: SV_GroupThreadID,
     _tid = tid;
     _stgBase = 0;
     C r[RADIX];
-    [unroll] for (uint m = 0; m < R; ++m)
+    MF_UNROLL for (uint m = 0; m < R; ++m)
         r[m] = scratch[pair * TC_N + k2 * NLEN + tid + WG*m];
     transform(r, tid);
-    [unroll] for (uint i = 0; i < R; ++i) {
+    MF_UNROLL for (uint i = 0; i < R; ++i) {
         uint k1 = slotToIndex(tid * R + i);
         output[pair * TC_N + k1 * TC_OTHER + k2] = float2(r[i].x, r[i].y);
     }
@@ -1674,10 +1681,10 @@ void tcFullSeriesStage3(uint3 gid: SV_GroupID, uint3 lid: SV_GroupThreadID,
     _tid = tid;
     _stgBase = 0;
     C r[RADIX];
-    [unroll] for (uint m = 0; m < R; ++m)
+    MF_UNROLL for (uint m = 0; m < R; ++m)
         r[m] = scratch[pair * TC_N + k2 * NLEN + tid + WG*m];
     transform(r, tid);
-    [unroll] for (uint i = 0; i < R; ++i) {
+    MF_UNROLL for (uint i = 0; i < R; ++i) {
         uint lag = slotToIndex(tid * R + i) * TC_OTHER + k2;
         if (lag >= params.z && lag < params.w && lag < params.y - start)
             output[t * params.y + start + lag] = float2(r[i].x, r[i].y);
@@ -1699,7 +1706,7 @@ void tcForwardStage1(uint3 gid: SV_GroupID, uint3 lid: SV_GroupThreadID,
     _tid = tid;
     _stgBase = 0;
     C r[RADIX];
-    [unroll] for (uint m = 0; m < R; ++m) {
+    MF_UNROLL for (uint m = 0; m < R; ++m) {
         uint j = n1 + TC_OTHER * (tid + WG*m);
         float2 x = float2(0, 0);
         if (start < seriesLength && j < seriesLength - start)
@@ -1707,7 +1714,7 @@ void tcForwardStage1(uint3 gid: SV_GroupID, uint3 lid: SV_GroupThreadID,
         r[m] = C(x.x/float(TC_N), -x.y/float(TC_N));
     }
     transform(r, tid);
-    [unroll] for (uint i = 0; i < R; ++i) {
+    MF_UNROLL for (uint i = 0; i < R; ++i) {
         uint k2 = slotToIndex(tid * R + i);
         float a = 2.0f * PI * float(n1 * k2) / float(TC_N);
         scratch[block * TC_N + k2 * TC_OTHER + n1] = cmul(r[i], C(mfTwiddle(a)));
@@ -1724,10 +1731,10 @@ void tcForwardStage3(uint3 gid: SV_GroupID, uint3 lid: SV_GroupThreadID,
     _tid = tid;
     _stgBase = 0;
     C r[RADIX];
-    [unroll] for (uint m = 0; m < R; ++m)
+    MF_UNROLL for (uint m = 0; m < R; ++m)
         r[m] = scratch[block * TC_N + k2 * NLEN + tid + WG*m];
     transform(r, tid);
-    [unroll] for (uint i = 0; i < R; ++i) {
+    MF_UNROLL for (uint i = 0; i < R; ++i) {
         uint k1 = slotToIndex(tid * R + i);
         spectra[block * TC_N + k1 * TC_OTHER + k2] = float2(r[i].x, -r[i].y);
     }

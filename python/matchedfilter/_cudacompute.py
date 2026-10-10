@@ -58,6 +58,7 @@ class _DeviceShared:
         self.pending_writes = []
         self.occupancy = {}
         self.labels = {}
+        self.c16_flags = {}         # coarse module stem -> [mf_c16_raw address, value]
 
 
 _DEVICE_SHARED = {}
@@ -148,6 +149,18 @@ def _coarse_span(n, band, lo, hi):
     cend = max(cstart + 1, cend)
     cspan = max(1, cend - cstart)
     return cstart, cend, cspan, _shift(cspan)
+
+
+def _coarse_grid(rows, nt, ppg, tile):
+    """(blocks, row argument) of a coarse launch over rows x nt pairs.
+
+    An even tile is ragged (tierb.slang RAGGED TILES): each slot takes `tile` templates of
+    one row, the row's last tile clamped, and the row count rides in the binsize argument
+    (the coarse span's slot, as on Vulkan); None keeps the span there.
+    Otherwise the pairs must fill whole PPG*TILE groups (the caller pads rows)."""
+    if tile % 2 == 0:
+        return -(-rows * (-(-nt // tile)) // ppg), rows
+    return rows * nt // (ppg * tile), None
 
 
 def _u32(x):
@@ -487,9 +500,11 @@ class Context(InputUploads):
         if shared is not None:
             self._modules, self._pipelines = shared.modules, shared.pipelines
             self._occupancy, self._labels = shared.occupancy, shared.labels
+            self._c16_flags = shared.c16_flags
             self._shared_modules = True
         else:
             self._modules, self._pipelines, self._occupancy, self._labels = {}, {}, {}, {}
+            self._c16_flags = {}
             self._shared_modules = False
         self._scratch_bufs = {}
         self._residents = {}
@@ -769,6 +784,10 @@ class Context(InputUploads):
                     f"cuModuleLoadData({stem})",
                 )
             self._modules[stem] = mod
+            g, size = ctypes.c_uint64(), ctypes.c_size_t()
+            if self.cuda.cuModuleGetGlobal_v2(ctypes.byref(g), ctypes.byref(size), mod,
+                                              b"mf_c16_raw") == 0:
+                self._c16_flags[stem] = [g.value, 0]          # zero-initialized: bound on
         hfunc = ctypes.c_void_p()
         check_cuda(
             self.cuda.cuModuleGetFunction(ctypes.byref(hfunc), self._modules[stem],
@@ -1389,7 +1408,8 @@ class Context(InputUploads):
         if not _use_c16(band):
             fn, wg = self.pipeline(band, "fusedTierB")
             return fn, wg, 1, 1, False
-        key = ("coarse_choice", band, nt % max(_COARSE_TILE_T.get(band, 1), 1) == 0)
+        # Even tiles are ragged (tierb.slang RAGGED TILES): any template count keeps them.
+        key = ("coarse_choice", band, True)
         if key not in self._pipelines:
             tiles = (1, _COARSE_TILE_T[band]) if (band in _COARSE_TILE_T and key[2]) else (1,)
             cands = []
@@ -1406,7 +1426,23 @@ class Context(InputUploads):
                 raise UnsupportedSize(f"no coarse c16 kernel for band {band}")
             self._pipelines[key] = self._time_coarse(band, cands)
         fn, wg, ppg, tile = self._pipelines[key]
+        self._c16_bound_flag(fn)
         return fn, wg, ppg, tile, True
+
+    def _c16_bound_flag(self, fn):
+        """Set the coarse module's fp16 bound switch (mf_c16_raw, Vulkan's constant 77):
+        the bound applies unless MF_VK_C16_BOUND=0 asks for the raw fp16 maximum, which
+        only the bound's own margin measurements and the physics checks use."""
+        ent = self._c16_flags.get(self._labels.get(fn.value))
+        if ent is None:
+            return
+        raw = 1 if os.environ.get("MF_VK_C16_BOUND", "1") == "0" else 0
+        if ent[1] != raw:
+            self._bind()
+            check_cuda(self.cuda.cuCtxSynchronize(), "cuCtxSynchronize")
+            v = ctypes.c_uint32(raw)
+            check_cuda(self.cuda.cuMemcpyHtoD_v2(ent[0], ctypes.byref(v), 4), "cuMemcpyHtoD")
+            ent[1] = raw
 
     def _time_coarse(self, band, cands):
         """The fastest of the coarse variants on synthetic data (device time, min of 3)."""
@@ -1427,9 +1463,11 @@ class Context(InputUploads):
                 times = []
                 for rep in range(4):
                     check_cuda(self.cuda.cuEventRecord(e0, st), "cuEventRecord")
-                    self._launch(fn, P // (ppg * tile), wg,
+                    grid, rowarg = _coarse_grid(ndm, ntm, ppg, tile)
+                    self._launch(fn, grid, wg,
                                  [bufs[0].dptr, bufs[1].dptr, bufs[2].dptr, bufs[3].dptr,
-                                  _u32(ntm), _u32(0), _u32(band), _u32(band),
+                                  _u32(ntm), _u32(0), _u32(band),
+                                  _u32(band if rowarg is None else rowarg),
                                   _i32(_shift(band)), _u32(1), _u32(0)], stream=st,
                                  label="coarse_choice")
                     check_cuda(self.cuda.cuEventRecord(e1, st), "cuEventRecord")
@@ -1439,6 +1477,8 @@ class Context(InputUploads):
                     if rep:
                         times.append(ms.value)
                 t = min(times)
+                self.__dict__.setdefault("coarse_times", {}).setdefault(band, {})[(ppg, tile)] = (
+                    t * 1e6 / P)                         # ns per pair, for reports
                 if best is None or t < best[0]:
                     best = (t, fn, wg, ppg, tile)
         finally:
@@ -1504,7 +1544,7 @@ class Context(InputUploads):
         cb0 = 4 if c16 else 8
         out = nd * nt * nbins
         cfn, cwg, ppg, tile, _ = self._coarse_kernel(band0, nt)
-        group = ppg * tile
+        group = 1 if tile % 2 == 0 else ppg * tile      # even tiles are ragged: no padding
         # Data rows padded so the pair count fills whole groups. The padding pairs'
         # coarse values land past `pairs`, which the compaction never reads.
         ndp = padded_rows(nd, nt, group)
@@ -1570,9 +1610,11 @@ class Context(InputUploads):
 
             # Tier 0: the coarse gate over every pair (and the padding rows' pairs).
             cs, ce, csp, csh = _coarse_span(n, band0, lo, hi)
-            self._launch(cfn, ndp * nt // group, cwg,
+            grid, rowarg = _coarse_grid(ndp, nt, ppg, tile)
+            self._launch(cfn, grid, cwg,
                          [bufs["cdata0"].dptr, bufs["ct0"].dptr, bufs["cidx0"].dptr,
-                          bufs["cval0"].dptr, _u32(nt), _u32(cs), _u32(ce), _u32(csp),
+                          bufs["cval0"].dptr, _u32(nt), _u32(cs), _u32(ce),
+                          _u32(csp if rowarg is None else rowarg),
                           _i32(csh), _u32(1), _u32(0)], stream=stream)
             kfn, _ = self.pipeline(band0, "compactPairs")
             cpt = (pairs + 255) // 256
@@ -1652,7 +1694,7 @@ class Context(InputUploads):
         c16 = _use_c16(band0)
         cb0 = 4 if c16 else 8
         cfn, cwg, ppg, tile, _ = self._coarse_kernel(band0, nt)
-        unit = ppg * tile
+        unit = 1 if tile % 2 == 0 else ppg * tile       # even tiles are ragged: no padding
         # Coarse rows in a padded layout: group g at rows off[g].., padded so its pairs
         # fill whole PPG/tile groups. Padding rows hold whatever an earlier call left;
         # their pairs land past the group's own pairs, which is all its compaction reads.
@@ -1690,7 +1732,7 @@ class Context(InputUploads):
         gkey = ("grouped", groups, nb, binsize, t2, float(raw_thr),
                 float(raw_thr1) if cascade else None, band0, band1, sparse, nd, nt)
         self._graphed(bufs, gkey, stream, lambda: self._grouped_enqueue(
-            bufs, n, nd, nt, nb, groups, offs, unit, cfn, cwg, band0, band1, c16, cb0, cascade,
+            bufs, n, nd, nt, nb, groups, offs, unit, (ppg, tile), cfn, cwg, band0, band1, c16, cb0, cascade,
             raw_thr, raw_thr1, binsize, t2, out, pairs, ng, sparse, stream))
 
         def readback():
@@ -1703,7 +1745,7 @@ class Context(InputUploads):
             return readback
         return readback()
 
-    def _grouped_enqueue(self, bufs, n, nd, nt, nb, groups, offs, unit, cfn, cwg, band0, band1,
+    def _grouped_enqueue(self, bufs, n, nd, nt, nb, groups, offs, unit, geom, cfn, cwg, band0, band1,
                          c16, cb0, cascade, raw_thr, raw_thr1, binsize, t2, out, pairs, ng,
                          sparse, stream):
         """hier_peaks_grouped's device work, in stream order (captured into a graph)."""
@@ -1736,9 +1778,11 @@ class Context(InputUploads):
                          [_ptr(dptr + a * n * 8), _ptr(cd0 + off * band0 * cb0), _u32(n),
                           _u32(band0), _u32((b - a) * band0), _u32(int(c16))], stream=stream)
             cs, ce, csp, csh = _coarse_span(n, band0, lo, hi)
-            self._launch(cfn, rows * nt // unit, cwg,
+            grid, rowarg = _coarse_grid(rows, nt, *geom)
+            self._launch(cfn, grid, cwg,
                          [_ptr(cd0 + off * band0 * cb0), bufs["ct0"].dptr, _ptr(ci0 + off * nt * 4),
-                          _ptr(cv0 + off * nt * 8), _u32(nt), _u32(cs), _u32(ce), _u32(csp),
+                          _ptr(cv0 + off * nt * 8), _u32(nt), _u32(cs), _u32(ce),
+                          _u32(csp if rowarg is None else rowarg),
                           _i32(csh), _u32(1), _u32(0)], stream=stream)
             cpt = (gp + 255) // 256
             if cascade:

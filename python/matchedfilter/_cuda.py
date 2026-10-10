@@ -134,6 +134,10 @@ def get_cuda_lib():
     lib.cuModuleGetFunction.argtypes = [ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p, ctypes.c_char_p]
     lib.cuModuleGetFunction.restype = ctypes.c_int
 
+    lib.cuModuleGetGlobal_v2.argtypes = [ctypes.POINTER(ctypes.c_uint64), ctypes.POINTER(ctypes.c_size_t),
+                                         ctypes.c_void_p, ctypes.c_char_p]
+    lib.cuModuleGetGlobal_v2.restype = ctypes.c_int
+
     # Memory Management
     lib.cuMemAlloc_v2.argtypes = [ctypes.POINTER(ctypes.c_uint64), ctypes.c_size_t]
     lib.cuMemAlloc_v2.restype = ctypes.c_int

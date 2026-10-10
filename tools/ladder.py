@@ -326,6 +326,13 @@ def run_device(device, tops, args, seed):
                 prof.dump_stats(os.environ["LADDER_PROFILE"])
             if next_ser is None and seg + 1 < args.segments:
                 next_ser = {ifo: analytic_series(rng, S, amp, df) for ifo in ("H1", "L1")}
+        if os.environ.get("LADDER_CHAINS"):      # each fine bank's (n, chain) per template group
+            from collections import Counter
+            ch = Counter()
+            for _, b in fine:
+                for g in b._groups:
+                    ch[(g.n, getattr(g.plan, "_chain", None))] += len(g.template_indices)
+            print("chains (n, chain): templates", dict(sorted(ch.items(), key=str)), flush=True)
     nfine = sum(t["nfine"] for t in tops)
     steady_segments = max(0, args.segments - args.warmup) * len(tops)
     # "segment" is the whole of each segment (the stages together, as the device is fed):
