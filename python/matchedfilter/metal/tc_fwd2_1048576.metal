@@ -792,92 +792,92 @@ uint slotToIndex_0(uint slot_0)
 }
 
 
-#line 1717
+#line 1721
 [[kernel]] void tcForwardStage3(uint3 gid_0 [[threadgroup_position_in_grid]], uint3 lid_0 [[thread_position_in_threadgroup]], packed_float2 device* entryPointParams_scratch_1 [[buffer(0)]], packed_float2 device* entryPointParams_spectra_1 [[buffer(1)]])
 {
 
-#line 1717
+#line 1721
     thread KernelContext_0 kernelContext_4;
 
-#line 1717
+#line 1721
     (&kernelContext_4)->entryPointParams_scratch_0 = entryPointParams_scratch_1;
 
-#line 1717
+#line 1721
     (&kernelContext_4)->entryPointParams_spectra_0 = entryPointParams_spectra_1;
 
-#line 1717
+#line 1721
     threadgroup array<uint, int(1024)> stg_1;
 
-#line 1717
+#line 1721
     (&kernelContext_4)->stg_0 = &stg_1;
 
 
 
     uint _S29 = gid_0.x;
 
-#line 1721
+#line 1725
     uint _S30 = _S29 / 1024U;
 
-#line 1721
+#line 1725
     uint _S31 = _S29 % 1024U;
     uint tid_1 = lid_0.x;
     (&kernelContext_4)->_tid_0 = tid_1;
     (&kernelContext_4)->_stgBase_0 = 0U;
     thread array<float2, int(16)> r_5;
 
-#line 1725
+#line 1729
     uint m_1 = 0U;
     for(;;)
     {
 
-#line 1726
+#line 1730
         if(m_1 < 16U)
         {
         }
         else
         {
 
-#line 1726
+#line 1730
             break;
         }
 
-#line 1727
+#line 1731
         r_5[m_1] = float2(*((&kernelContext_4)->entryPointParams_scratch_0+(_S30 * 1048576U + _S31 * 1024U + tid_1 + 64U * m_1))) ;
 
-#line 1726
+#line 1730
         m_1 = m_1 + 1U;
 
-#line 1726
+#line 1730
     }
 
-#line 1726
+#line 1730
     transform_0(&r_5, tid_1, &kernelContext_4);
 
-#line 1726
+#line 1730
     uint i_4 = 0U;
 
 
     for(;;)
     {
 
-#line 1729
+#line 1733
         if(i_4 < 16U)
         {
         }
         else
         {
 
-#line 1729
+#line 1733
             break;
         }
 
-#line 1729
+#line 1733
         *((&kernelContext_4)->entryPointParams_spectra_0+(_S30 * 1048576U + slotToIndex_0(tid_1 * 16U + i_4) * 1024U + _S31)) = packed_float2(float2(r_5[i_4].x, - r_5[i_4].y)) ;
 
-#line 1729
+#line 1733
         i_4 = i_4 + 1U;
 
-#line 1729
+#line 1733
     }
 
 

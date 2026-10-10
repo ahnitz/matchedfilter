@@ -892,99 +892,99 @@ uint slotToIndex_0(uint slot_0)
 }
 
 
-#line 1385
+#line 1389
 [[kernel]] void fullCorrelation(uint3 gid_0 [[threadgroup_position_in_grid]], uint3 lid_0 [[thread_position_in_threadgroup]], EntryPointParams_0 constant* entryPointParams_1 [[buffer(0)]], packed_float2 device* entryPointParams_data_1 [[buffer(1)]], packed_float2 device* entryPointParams_tmpl_1 [[buffer(2)]], packed_float2 device* entryPointParams_output_1 [[buffer(3)]])
 {
 
-#line 1385
+#line 1389
     thread KernelContext_0 kernelContext_4;
 
-#line 1385
+#line 1389
     (&kernelContext_4)->entryPointParams_0 = entryPointParams_1;
 
-#line 1385
+#line 1389
     (&kernelContext_4)->entryPointParams_data_0 = entryPointParams_data_1;
 
-#line 1385
+#line 1389
     (&kernelContext_4)->entryPointParams_tmpl_0 = entryPointParams_tmpl_1;
 
-#line 1385
+#line 1389
     (&kernelContext_4)->entryPointParams_output_0 = entryPointParams_output_1;
 
-#line 1385
+#line 1389
     threadgroup array<uint, int(4096)> stg_1;
 
-#line 1385
+#line 1389
     (&kernelContext_4)->stg_0 = &stg_1;
 
 
 
     uint pair_0 = gid_0.x;
 
-#line 1389
+#line 1393
     uint tid_1 = lid_0.x;
     uint _S32 = pair_0 / entryPointParams_1->ntmpl_0;
 
-#line 1390
+#line 1394
     uint _S33 = pair_0 % entryPointParams_1->ntmpl_0;
     (&kernelContext_4)->_tid_0 = tid_1;
     (&kernelContext_4)->_stgBase_0 = 0U;
     thread array<float2, int(16)> r_5;
 
-#line 1393
+#line 1397
     uint i_5 = 0U;
     for(;;)
     {
 
-#line 1394
+#line 1398
         if(i_5 < 16U)
         {
         }
         else
         {
 
-#line 1394
+#line 1398
             break;
         }
 
-#line 1395
+#line 1399
         uint idx_0 = tid_1 + 128U * i_5;
         r_5[i_5] = cmulConj_0(cload_0((&kernelContext_4)->entryPointParams_data_0, _S32 * 2048U + idx_0), cload_0((&kernelContext_4)->entryPointParams_tmpl_0, _S33 * 2048U + idx_0));
 
-#line 1394
+#line 1398
         i_5 = i_5 + 1U;
 
-#line 1394
+#line 1398
     }
 
-#line 1394
+#line 1398
     transform_0(&r_5, tid_1, &kernelContext_4);
 
-#line 1394
+#line 1398
     i_5 = 0U;
 
-#line 1399
+#line 1403
     for(;;)
     {
 
-#line 1399
+#line 1403
         if(i_5 < 16U)
         {
         }
         else
         {
 
-#line 1399
+#line 1403
             break;
         }
 
-#line 1399
+#line 1403
         *((&kernelContext_4)->entryPointParams_output_0+(pair_0 * 2048U + slotToIndex_0(tid_1 * 16U + i_5))) = packed_float2(float2(r_5[i_5].x, r_5[i_5].y)) ;
 
-#line 1399
+#line 1403
         i_5 = i_5 + 1U;
 
-#line 1399
+#line 1403
     }
 
     return;
