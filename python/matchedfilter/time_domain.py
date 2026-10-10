@@ -45,13 +45,46 @@ def _settle_metal_writes():
         mtl.settle_all()
 
 
-def _bin_count_part(r, m, u):
-    """The blocks of a ragged result selected by mask m, with their first u bins: dense
-    (idx, val) or a _SparsePeaks, as the result is."""
-    from . import _SparsePeaks
-    if isinstance(r, _SparsePeaks):
-        return r.blocks(m, u)
-    return r[0][m][:, :, :u], r[1][m][:, :, :u]
+class _RaggedSplit:
+    """A ragged result's per-bin-count parts, in the order per-count calls give them: part i
+    is the blocks with the i-th smallest bin count, with that many bins. Computed once per
+    result (one pass over a sparse result's entries) and shared by every part."""
+
+    def __init__(self, bc):
+        bc = np.asarray(bc, np.int64)
+        self.bc = bc
+        self.us = [int(u) for u in np.unique(bc)]
+        self.masks = [bc == u for u in self.us]
+        self.rank = np.zeros(bc.size, np.int64)
+        for m in self.masks:
+            self.rank[m] = np.arange(int(m.sum()))
+
+    def parts(self, r):
+        from . import _SparsePeaks
+        if not isinstance(r, _SparsePeaks):
+            return [(r[0][m][:, :, :u], r[1][m][:, :, :u]) for m, u in zip(self.masks, self.us)]
+        nt, nb = r.shape[1], r.shape[2]
+        b, rest = np.divmod(r.flat, nt * nb)
+        t, k = np.divmod(rest, nb)
+        cb = self.bc[b]
+        out = []
+        for m, u in zip(self.masks, self.us):
+            sel = (cb == u) & (k < u)
+            out.append(_SparsePeaks((int(m.sum()), nt, u),
+                                    (self.rank[b[sel]] * nt + t[sel]) * u + k[sel],
+                                    r.idx[sel], r.val[sel]))
+        return out
+
+    def deferred(self, d):
+        """One _Deferred per part of the deferred result d, sharing one split."""
+        from . import _Deferred
+        cell = []
+
+        def part(i):
+            if not cell:
+                cell.append(self.parts(d.result()))
+            return cell[0][i]
+        return [_Deferred(lambda i=i: part(i)) for i in range(len(self.us))]
 
 
 def _normalize_windows(windows, S: int) -> np.ndarray:
@@ -1240,10 +1273,9 @@ class TimeDomainFilterBank:
                         if hit[2] is None:
                             pending.append((res, bstarts, g, tmpl_arg, N))
                         else:
-                            for m, u in hit[2]:
-                                pending.append((_Deferred(
-                                    lambda d=res, m=m, u=u: _bin_count_part(d.result(), m, u)),
-                                    bstarts[m], g, tmpl_arg, N))
+                            split, starts_parts = hit[2]
+                            for d, st_part in zip(split.deferred(res), starts_parts):
+                                pending.append((d, st_part, g, tmpl_arg, N))
                         continue
             if getattr(active_plan, '_bandlimited', False) and type(active_plan).__name__ != 'HierarchicalFilter':
                 bs_k = max(1, bs // 2) if bs < N else g.n // 2
@@ -1296,19 +1328,15 @@ class TimeDomainFilterBank:
                     # Split back into the per-count groups, in their order, so the result
                     # is the one per-count calls give (peak order included).
                     bc = ((bwe - bws + bs - 1) // bs).astype(np.int64)
-                    work = []
+                    split = _RaggedSplit(bc)
+                    subs = [(bstarts[m], bws[m], bwe[m]) for m in split.masks]
                     if fast_key is not None and isinstance(res, _Deferred):
                         g.__dict__.setdefault('_fast_calls', {})[fast_key] = (
                             active_plan, getattr(active_plan, '_last_layout', None),
-                            [(bc == u, int(u)) for u in np.unique(bc)])
-                    for u in np.unique(bc):
-                        m = bc == u
-
-                        def part(r, m=m, u=u):
-                            return _bin_count_part(r, m, u)
-                        work.append(((bstarts[m], bws[m], bwe[m]),
-                                     _Deferred(lambda d=res, part=part: part(d.result()))
-                                     if isinstance(res, _Deferred) else part(res)))
+                            (split, [sb[0] for sb in subs]))
+                    parts = (split.deferred(res) if isinstance(res, _Deferred)
+                             else split.parts(res))
+                    work = list(zip(subs, parts))
             t_trial = time.perf_counter()
             for (sub_starts, sub_bws, sub_bwe), res in work:
                 if res is None:
@@ -1795,8 +1823,42 @@ class TimeDomainFilterBank:
                 if settle is not None:
                     settle()
 
+    def _stage_series(self, ser):
+        """ser in device-shared memory usable by every group's correlation plan: ser itself if
+        it is, else one copy for the whole bank (each group copied the series into its own
+        staging buffer, ~0.6 ms per group per call at 2^20 samples), else ser."""
+        from ._shared import shared_buffer
+        gpus = []
+        for g in self._groups:
+            gpu = getattr(g.get_correlation_plan(), '_gpu', None)
+            if gpu is None:
+                return ser
+            gpus.append(gpu)
+        if len(gpus) < 2 or getattr(gpus[0], 'host_view', None) is not None:
+            return ser                       # one group, or unified memory read in place
+        if all(shared_buffer(ser, gpu) is not None for gpu in gpus):
+            return ser
+        staged = self.__dict__.get('_ser_staging')
+        if staged is None or staged.shape != ser.shape or any(
+                shared_buffer(staged, gpu) is None for gpu in gpus):
+            staged = gpus[0].empty_shared(ser.shape)
+            if any(shared_buffer(staged, gpu) is None for gpu in gpus):
+                return ser
+            self._ser_staging = staged
+        for gpu in {id(x): x for x in gpus}.values():
+            settle = getattr(gpu, 'settle_writes', None)
+            if settle is not None:
+                settle()                     # a call left in flight may still read it
+        self._fill_staging(staged, ser)
+        return staged
+
+    @staticmethod
+    def _fill_staging(staged, ser):
+        staged[:] = ser
+
     def _correlate_bank(self, ser, W, scales_arr, result, settle):
         S = ser.size
+        ser = self._stage_series(ser)
         for g in self._groups:
             g_indices = g.template_indices
             g_cnt = len(g_indices)
