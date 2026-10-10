@@ -15,6 +15,22 @@
 // The fp16 coarse tier's error bound (C16_KAPPA): 1 applies it (the default the host
 // uses), 0 reports the raw fp16 maximum -- for measuring the bound's margin use only.
 [[vk::constant_id(77)]] const uint mfC16Bound = 1;
+#elif defined(MF_CUDA)
+static const uint mfDataStride = 0;
+static const uint mfRowWindows = 0;
+// The fp16 bound switch (constant 77 on Vulkan) as a module __constant__ the host writes
+// (cuModuleGetGlobal "mf_c16_raw"): zero-initialized, so the bound applies unless the host
+// asks for the raw maximum (MF_VK_C16_BOUND=0, for measuring the bound's margin).
+__target_intrinsic(cuda, "(mf_c16_raw)")
+uint mfC16RawValue();
+uint mfC16RawFlag()
+{
+    __requirePrelude("extern \"C\" __constant__ unsigned int mf_c16_raw;");
+    return mfC16RawValue();
+}
+#define mfC16Bound (1u - mfC16RawFlag())
+static const uint mfAccurateTrig = 0;
+static const uint mfSubgroupSize = 32;
 #else
 static const uint mfDataStride = 0;
 static const uint mfRowWindows = 0;

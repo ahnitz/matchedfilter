@@ -25,14 +25,19 @@ REFINE_KERNEL = ROOT / "src" / "gpu" / "refine_bounded.slang"
 
 
 def kernel_text():
-    """tierb.slang for the CUDA build, with every [unroll] forced ([ForceUnroll]).
+    """tierb.slang as every target builds it (MF_CUDA selects its CUDA choices, MF_UNROLL)."""
+    return KERNEL.read_text()
+def _coarse_prelude(n, cap, ppg):
+    """The packed coarse kernel's build-time inputs, exactly as the SPIR-V build makes them
+    (build_spirv.coarse_prelude): the fp16 error bound's C16_KAPPA, the bank-conflict-free
+    exchange layout and the fp16 twiddle table. Without it the CUDA coarse tier reported
+    B = |c16|(1+3u) with no rounding term (C16_KAPPA defaulting to 0)."""
+    import sys as _sys
+    _sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+    import build_spirv
+    return build_spirv.coarse_prelude(n, cap, ppg)
 
-    Slang emits some of tierb.slang's [unroll] loops -- the per-register peak and bin loops
-    of the multi-bin path -- as plain loops in CUDA source, and NVVM then keeps myMag/myBin
-    in local memory: 288 bytes per thread, ~110 local loads, in every refine and flat build.
-    Forcing the unroll in Slang removes them (28 bytes left: the kernel context). Applied to
-    the text here, so the shared source and its SPIR-V/Metal builds are unchanged."""
-    return KERNEL.read_text().replace("[unroll]", "[ForceUnroll]")
+
 COMPACT_PEAKS_KERNEL = ROOT / "src" / "gpu" / "compact_peaks.slang"
 
 TIER_B = (64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536)
@@ -109,7 +114,7 @@ def compile_ptx(slangc, nvrtc, env, src_text, out_path, entry, extra_flags=()):
     cmd = [
         slangc, str(src_file), "-I", str(KERNEL.parent),
         "-target", "ptx", "-entry", entry, "-stage", "compute", "-O3",
-        "-DSLANG_CUDA_STRUCTURED_BUFFER_NO_COUNT=1",
+        "-DSLANG_CUDA_STRUCTURED_BUFFER_NO_COUNT=1", "-DMF_CUDA=1",
     ]
     if nvrtc:
         cmd.extend(["-nvrtc-path", str(nvrtc)])
@@ -134,6 +139,7 @@ def compile_tierb(slangc, nvrtc, env, n, outdir, entry=ENTRY, cap=None, suffix="
         "#define SLANG_CUDA_STRUCTURED_BUFFER_NO_COUNT 1\n"
         "#define TARGET_CUDA 1\n"
         % (n, cap, coarse16, ppg, tile, r, single_bin)
+        + (_coarse_prelude(n, cap, ppg) if coarse16 else "")
         + kernel_text()
     )
     name = "%s_%d%s.ptx" % (STEMS[entry], n, suffix)
