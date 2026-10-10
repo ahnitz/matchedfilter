@@ -23,6 +23,11 @@ import numpy as np
 
 R = 16
 WAVE, BANKS, HALF = 64, 32, 32
+#: Bank models, (subgroup lanes, banks of 4 B, lanes served per bank cycle). RDNA wave64 runs
+#: an LDS access as two 32-lane halves. Apple (M2) measured with tools/metal_bank_probe.py:
+#: the k-way conflict cost is linear in k-1 with period 32 in the word stride, so 32 banks of
+#: 4 B serving the whole 32-lane SIMD group at once.
+MODELS = {"rdna_wave64": (64, 32, 32), "apple_simd32": (32, 32, 32)}
 
 
 def _lg(x):
@@ -100,8 +105,19 @@ def exchange_cost(n, ppg, xs, slot, lds_cap):
     return total
 
 
-def exchange_layout(n, ppg, lds_cap):
-    """(XSTRIDE, XSLOT) for the coarse SoA exchange at band n and ppg pairs per group."""
+def exchange_layout(n, ppg, lds_cap, model="rdna_wave64"):
+    """(XSTRIDE, XSLOT) for the coarse SoA exchange at band n and ppg pairs per group,
+    under a bank model of MODELS."""
+    global WAVE, BANKS, HALF
+    saved = WAVE, BANKS, HALF
+    WAVE, BANKS, HALF = MODELS[model]
+    try:
+        return _exchange_layout(n, ppg, lds_cap)
+    finally:
+        WAVE, BANKS, HALF = saved
+
+
+def _exchange_layout(n, ppg, lds_cap):
     wg, ch, _ = _geometry(n, lds_cap)
     if not affine_separable(n, lds_cap):
         raise ValueError("exchangeS needs affine-separable sources; n=%d is not" % n)
@@ -155,6 +171,12 @@ if __name__ == "__main__":
 #: margin, which follows from it:
 C16_SIGMA = {64: 1.6, 128: 1.7, 256: 1.8, 512: 2.2, 1024: 2.5, 2048: 3.3}
 
+#: The same, measured on the Apple M2 through the Metal builds (tiled and untiled, the
+#: larger), by tools/metal_c16_sigma.py with the bound switched off (MF_VK_C16_BOUND=0):
+#: 8192 pairs per band. The worst residual after the proven (1+3u) factor was 4.9 u rms
+#: (band 2048, loud transient), against kappa 18.3 there.
+C16_SIGMA_APPLE = {64: 1.5, 128: 1.7, 256: 1.8, 512: 2.0, 1024: 2.2, 2048: 2.6}
+
 #: Per-pair probability that the rms part of the bound fails, and the one-sided
 #: normal quantile it implies: kappa_B = z * sigma_B. 1e-12 per pair is ~1e-3 per
 #: year of pairs at this search's rate; the dismissal budget the gates are
@@ -162,9 +184,11 @@ C16_SIGMA = {64: 1.6, 128: 1.7, 256: 1.8, 512: 2.2, 1024: 2.5, 2048: 3.3}
 C16_FAIL = 1e-12
 
 
-def c16_kappa(n):
-    """kappa for band n: z(C16_FAIL) * sigma_n (the bound's rms coefficient)."""
+def c16_kappa(n, sigmas=None):
+    """kappa for band n: z(C16_FAIL) * sigma_n (the bound's rms coefficient); sigmas is the
+    measured table of the target (C16_SIGMA: Radeon/Vulkan, C16_SIGMA_APPLE: Metal)."""
     from statistics import NormalDist
+    sigmas = C16_SIGMA if sigmas is None else sigmas
     z = NormalDist().inv_cdf(1.0 - C16_FAIL)
-    sigma = C16_SIGMA.get(n, max(C16_SIGMA.values()))
+    sigma = sigmas.get(n, max(sigmas.values()))
     return z * sigma
