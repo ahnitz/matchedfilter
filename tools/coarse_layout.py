@@ -144,3 +144,27 @@ if __name__ == "__main__":
             print("band %4d ppg %2d: default cost %4d -> XSTRIDE %2d XSLOT %4d cost %4d"
                   % (n, ppg, exchange_cost(n, ppg, wg, ch * wg, B.LDS_CAP[n]), xs, slot,
                      exchange_cost(n, ppg, xs, slot, B.LDS_CAP[n])))
+
+
+#: The fp16 coarse transform's rounding error at the elected lag, in units of
+#: u rms(y) (u = 2^-11, rms(y)^2 = sum_j |x_j|^2): its standard deviation per band,
+#: the largest over the gate_margin families (noise, profile-shaped, injection, loud
+#: transient), 1024 pairs each, rounded up to 0.1. Measured on the Radeon 8060S with
+#: the bound disabled (spec constant mfC16Bound = 0; see docs/vulkan-8060s-roofline.md
+#: section 10). This is the arithmetic's own error, characterised once -- it is NOT the
+#: margin, which follows from it:
+C16_SIGMA = {64: 1.6, 128: 1.7, 256: 1.8, 512: 2.2, 1024: 2.5, 2048: 3.3}
+
+#: Per-pair probability that the rms part of the bound fails, and the one-sided
+#: normal quantile it implies: kappa_B = z * sigma_B. 1e-12 per pair is ~1e-3 per
+#: year of pairs at this search's rate; the dismissal budget the gates are
+#: calibrated to (fd ~ 1e-3 per signal) is many orders of magnitude larger.
+C16_FAIL = 1e-12
+
+
+def c16_kappa(n):
+    """kappa for band n: z(C16_FAIL) * sigma_n (the bound's rms coefficient)."""
+    from statistics import NormalDist
+    z = NormalDist().inv_cdf(1.0 - C16_FAIL)
+    sigma = C16_SIGMA.get(n, max(C16_SIGMA.values()))
+    return z * sigma

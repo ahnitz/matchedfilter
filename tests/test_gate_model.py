@@ -280,12 +280,16 @@ def _gpu():
 
 
 @pytest.mark.parametrize("thr", LOOSE_GATES)
-def test_every_device_matches_the_model(thr):
+def test_every_device_matches_the_model(thr, monkeypatch):
     """A device whose coarse stage drifts from the physics is a device whose
     calibration is wrong, however fast it is."""
     dev = _gpu()
     if dev is None:
         pytest.skip("no hardware GPU")
+    # The physics check is on the coarse STATISTIC. The Vulkan fp16 tier reports an upper
+    # bound on it (c16Bound), a deliberate superset whose margin only lowers dismissals --
+    # tests/test_gpu_c16_bound.py checks that bound; here it is switched off.
+    monkeypatch.setenv("MF_VK_C16_BOUND", "0")
     p = profile()
     want = model(p, thr)
     got = filter_mc(p, thr, device=dev)
