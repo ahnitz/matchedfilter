@@ -698,6 +698,7 @@ def calibrate_costs_gpu(n, device, blocks=None, reps=5, seed=11, nt=256):
     spec, ser, starts, ws, we = _gpu_cal_inputs(n, blocks, nt, seed)
     big = float(np.finfo(np.float32).max)
     plans = {}
+    import time as _time
 
     def run(chain, thr, ntm=nt, reps=reps):
         """(device ns per call, first-tier survivors, refined pairs). The time is the median
@@ -744,7 +745,6 @@ def calibrate_costs_gpu(n, device, blocks=None, reps=5, seed=11, nt=256):
         return mid
 
     b0 = bands[0]
-    import time as _time
     clock = _clock_ref(device)
     warm_until = _time.perf_counter() + 0.25
     run((b0,), (big,), reps=1)
@@ -921,7 +921,7 @@ def _smallest(col, m):
     return idx[np.argsort(col[idx], kind="stable")]
 
 
-def plan_chain(sig, noise, bands, chain, fd, cost, n, snr):
+def plan_chain(sig, noise, bands, chain, fd, cost, n, snr, prune=False):
     """Thresholds for `chain` meeting compound dismissal <= fd at minimum modelled cost.
 
     sig, noise: signal_draws / noise_block_maxima over `bands`.
@@ -969,6 +969,8 @@ def plan_chain(sig, noise, bands, chain, fd, cost, n, snr):
         th = list(prefix) + [g]
         reach = [1.0] + [float(x) for x in nalive[1:]]
         reach.append(float((nalive[0] & (noise[:, cols[-1]] >= g)).mean()))
+        if prune and any(r > _USELESS_PASS for r in reach[1:]):
+            return          # choosing: a tier passing most of its pairs only adds its own cost
         c = cost.chain_cost(chain, reach) if cost is not None else _flop_cost(chain, reach, n)
         if best is None or c < best["cost"]:
             q15 = bool(cost.first_tier(chain[0], reach[1])[1]) if hasattr(cost, "first_tier") else False
@@ -994,6 +996,33 @@ def plan_chain(sig, noise, bands, chain, fd, cost, n, snr):
 
     rec(0, [], 1.0, np.empty(0, np.int64), np.ones(noise.shape[0], bool), [])
     return best
+
+
+#: A tier whose modelled noise pass rate exceeds this rejects too little to be worth running:
+#: such a split is skipped, so a chain is priced only with thresholds that make every tier
+#: gate. (Seen on Vulkan: a band-64 first tier ahead of 256 passing 4,337,904 of 4,337,904
+#: pairs, at 2-3x the segment time of every other choice.)
+_USELESS_PASS = 0.5
+
+#: Relative cost inside which two candidates are treated as tied, and the tie broken by a
+#: fixed order (canonical_order) instead of by which calibration or trial read faster: cost
+#: calibration and timed trials move by about this much between processes on a busy host,
+#: and a choice that flips with them makes runs incomparable.
+TIE = 0.05
+
+
+def canonical_order(chain):
+    """Deterministic preference among tied chains: fewer tiers, then the smaller bands."""
+    return (len(chain), tuple(chain))
+
+
+def pick_stable(items, cost, key):
+    """The canonical-first of the items whose cost is within TIE of the cheapest."""
+    items = list(items)
+    if not items:
+        return None
+    lo = min(cost(x) for x in items)
+    return min((x for x in items if cost(x) <= lo * (1.0 + TIE)), key=key)
 
 
 def _flop_cost(chain, reach, n):
@@ -1040,11 +1069,14 @@ def _choose_chain(power, n, snr, fd, cost, max_tiers, floor, nsim, window):
     noise = noise_block_maxima(power, n, bands, nsim=nsim, window=window)
     plans = []
     for chain in enumerate_chains(n, max_tiers, floor, bands=bands):
-        pl = plan_chain(sig, noise, bands, list(chain), fd, cost, n, snr)
+        pl = plan_chain(sig, noise, bands, list(chain), fd, cost, n, snr, prune=True)
         if pl is not None:
             plans.append(pl)
     plans.sort(key=lambda d: d["cost"])
-    return (plans[0] if plans else None), plans
+    # Ties (within the calibration's process-to-process noise) go to the cheaper chain on the
+    # calibration-free flop proxy: deterministic for a given profile, and still a cost.
+    best = pick_stable(plans, lambda d: d["cost"], lambda d: (_flop_cost(d["chain"], d["reach"], n), d["chain"]))
+    return best, plans
 
 
 _PLAN_CACHE = OrderedDict()
@@ -1142,8 +1174,15 @@ def price_block_sizes(fine, delta_f, data_rate, longest, margin, ntemplates, snr
             continue
         # per valid output sample and template: the block's fixed work shared by the bank's templates
         c = (block / max(int(ntemplates), 1) + pair_cost) / nvalid
-        stop = bool(out) and c > min(o[0] for o in out)
+        stop = bool(out) and c > min(o[0] for o in out) * (1.0 + TIE)
         out.append((c, n, chain))
         if stop:
             break
-    return sorted(out)
+    out.sort()
+    # The block size within TIE of the cheapest that is smallest goes first: the choice must
+    # not flip between processes on calibration noise (seen on CUDA: 4096 vs 2048 run to run).
+    first = pick_stable(out, lambda o: o[0], lambda o: o[1])
+    if first is not None:
+        out.remove(first)
+        out.insert(0, first)
+    return out

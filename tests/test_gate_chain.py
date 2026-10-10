@@ -733,3 +733,26 @@ def test_gpu_gate_kind_keys(monkeypatch):
     assert gc.gpu_gate_kind("gpu:0") == "f32"
     monkeypatch.setattr(gc, "_gpu_backend", lambda d: "metal")
     assert gc.gpu_gate_kind("gpu:0") == "f32"
+
+
+def test_a_tier_that_passes_most_pairs_is_never_chosen():
+    """A first tier with almost none of the profile's power cannot gate; choice must skip it."""
+    gc = mf._gatechain
+    n = 2048
+    f = np.arange(n, dtype=float)
+    power = np.where((f >= 60) & (f < 900), np.maximum(f, 1.0) ** (-7.0 / 3), 0.0)
+    power[:60] = 1e-9 * power[60]                       # band 64 holds ~nothing
+    best, plans = gc.choose_chain(power, n, 6.0, 1e-3, max_tiers=2)
+    assert best is not None
+    for q in plans:
+        assert all(r <= gc._USELESS_PASS for r in q["reach"][1:]), q
+
+
+def test_ties_break_deterministically():
+    gc = mf._gatechain
+    items = [((256, 1024), 100.0), ((256, 512), 101.0), ((512,), 120.0)]
+    for perm in (items, items[::-1], items[1:] + items[:1]):
+        got = gc.pick_stable(perm, lambda x: x[1], lambda x: gc.canonical_order(x[0]))
+        assert got[0] == (256, 512)                     # tied with the cheapest; canonical first
+    assert gc.pick_stable(items, lambda x: x[1] if x[0] != (512,) else 10.0,
+                          lambda x: gc.canonical_order(x[0]))[0] == (512,)

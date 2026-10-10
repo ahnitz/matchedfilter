@@ -194,3 +194,26 @@ calibration still comes only from the reference gate model. See the
 [retune audit](measurements/gpu-cost-retune-2026-09-26.md), including raw
 measurements and independent holdout results. The prior gfx11 family table
 remains for other hardware.
+
+## Chain choice: useless tiers and stable ties (2026-10-10)
+
+* **How (64, 256) gets in.** Through the model's candidate list (not reproduced here as the
+  winner, but present): for a reference whose power
+  sits above bin 64, band 64 is still "usable" (nonzero power), and the budget split gives
+  it a threshold at which it passes ~every pair (modelled reach 1.0). Its own cost is tiny
+  and the sparse tier-2 price at density 1.0 is a clamped extrapolation of the 1%/10%
+  calibration, so the chain could rank near the top. (The order is not narrower-then-wider:
+  the GPU prints the cascade as (band, cascade_band); the chain is (64, 256).)
+* **Now:** `choose_chain` skips any split in which a tier's modelled noise pass rate exceeds
+  `_USELESS_PASS = 0.5` (pinned chains still get thresholds). Trials record a call whose
+  first tier passed more than that fraction as infinitely slow, so such a chain cannot lock.
+  `test_a_tier_that_passes_most_pairs_is_never_chosen` reproduces the (64, ...) candidates
+  without the rule.
+* **Stable ties.** Candidates within `TIE = 5%` are treated as tied: the model breaks ties on
+  the calibration-free flop proxy, trials on (fewer tiers, smaller bands), the block size on
+  the smaller n. On dev2's GPU the choice repeated across processes after this, (2048, (256,
+  1024)) in every run, as on main.
+* **Host cost per block (not kept).** Charging wall-minus-device time per block in the GPU
+  calibration moved the bank to n = 4096 and made the fine stage 1.4x slower (0.54 vs 0.39 s):
+  the wall-minus-device residue is not a per-block cost. Pricing the host needs a per-call
+  term measured with call counts varied, not a per-block one.
