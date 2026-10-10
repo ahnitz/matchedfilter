@@ -1017,6 +1017,9 @@ class Context(InputUploads):
         dummy buffer."""
         if data_stride or row_windows:
             key = (key, "stride", data_stride, "rowwin", row_windows)
+        raw_c16 = os.environ.get("MF_VK_C16_BOUND", "1") == "0"
+        if raw_c16:
+            key = (key, "raw-c16")
         # subgroup: a size within the device's required-size range to build this pipeline
         # at instead of the default (specialization constant 74 follows it).
         rng = getattr(self, "subgroup_range", None)
@@ -1075,6 +1078,11 @@ class Context(InputUploads):
         if row_windows:
             entries.append(_SpecializationEntry(76, offset, 4))
             data_vals.append(int(row_windows))
+            offset += 4
+        if raw_c16:
+            # Raw fp16 coarse maxima, for measuring the error bound's margin use only.
+            entries.append(_SpecializationEntry(77, offset, 4))
+            data_vals.append(0)
             offset += 4
 
         # Intel accurate trig (constant ID 73)

@@ -308,3 +308,67 @@ bit-identical):
 Wave32 is applied at n ≤ 512 (the tier-1 stage at bands 256/512), where it wins by 11-20%.
 Larger groups stay at wave64, where wave32 loses 7-15%. This is a rule from the queried
 range and the workgroup size, backed by these measurements, not a per-device timing.
+
+## 10. An error bound for the fp16 coarse tier
+
+**Before.** The tier reported the raw fp16 maximum. `gate_margin.py --gate gpu-c16` showed it
+up to 0.14% below the exact float64 maximum, with no margin: a pair at the threshold could be
+rejected.
+
+**The bound.** Each pair now reports an upper bound on its exact coarse maximum:
+
+    B = |c16| (1 + 3u) + kappa_B u rms(y),    u = 2^-11,   rms(y)^2 = sum_j |x_j|^2
+
+- **(1 + 3u), proven.** The lag is elected on fp16 |v|² (two roundings). So every fp16
+  power is within (1 ± u)² of the fp16 transform's, and the fp16 maximum is at most
+  |c16| (1+u)/(1-u) < |c16| (1 + 3u). This is the same argument as the NEON gate, and it is
+  the peak-proportional part. Without it, the band-2048 injection case's lag error reached
+  -17.5 u rms.
+- **kappa_B u rms, modelled.** This covers the transform's rounding error at the elected lag.
+  - rms(y) is computed in the kernel over all lags (Parseval: energy / N). In fp16 it is
+    accumulated at 2^-12 so a whole band fits; an overflow makes it inf and the pair passes.
+  - kappa_B = z sigma_B. z = 7.03 is the one-sided normal quantile for a 1e-12 per-pair
+    failure target, so z is derived, not tuned.
+  - sigma_B is the arithmetic's measured error rms, in u rms units, at the chosen lag. It is
+    the largest over the noise, profile, injection and transient families (1024 pairs each,
+    seed 3), rounded up to 0.1: 1.6 / 1.7 / 1.8 / 2.2 / 2.5 / 3.3 at bands
+    64 / 128 / 256 / 512 / 1024 / 2048 (`tools/coarse_layout.py`).
+  - So kappa_B = 11.3 / 12.0 / 12.7 / 15.5 / 17.6 / 23.2.
+- **Not a first-principles count.** Counting roundings (u²/... per level over input,
+  products, butterflies and twiddles) predicts sigma about 1.2-1.3 at band 256 against 1.7-1.8
+  measured. That model under-predicts, so sigma is characterised instead, as the NEON gate's
+  kappa was.
+- **Implemented on all three peak paths:** the subgroup election, `peakLane`, and the
+  untiled builds. `mfC16Bound` (specialization constant 77; `MF_VK_C16_BOUND=0`) reports the
+  raw maximum, for measurement only.
+
+**Verification.**
+- **Fresh seed, not used for sigma (seed 7, 1024 pairs per band and family):** 0 dismissals.
+  Worst margin use (exact − raw) / (B − raw) is 0.383, where the criterion is < 0.5; per
+  band 0.31-0.38. The bound costs a median 0.40-0.56% of the maximum.
+- **`gate_margin.py --gate gpu-c16 --n 64 … 2048`:** 0 dismissals in every family; minimum
+  slack +0.14% (it was -0.14%).
+- **Margin-use column:** the harness has no statistic hook for the GPU, so it prints "-".
+  The figure above comes from the raw/bounded pair (scratch `margin_use.py`). An adapter can
+  read the raw value with `MF_VK_C16_BOUND=0`.
+- **Fullscale (|y| ≈ 3e4):** overflows fp16 at bands ≤ 1024 and fails open (FLT_MAX).
+- **Cost:** about 5% of the band-256 coarse kernel (96 → 101 CU-cycles per pair).
+
+## 11. Device idle time in a pipelined segment
+
+Measured with absolute submission timestamps (`MF_GPU_TIMING`), unioned across queues over
+the last 3 s of a 20-segment pipelined ladder:
+- **The device is busy 10-14% of the span.**
+- **Most idle time is outside the fine stage:** about 117 ms per segment of the 140 ms
+  sits before each segment's middle submission. That is the host's per-segment work: data,
+  results, follow-up collection.
+- **The fine stage itself is host-bound:**
+  - The device runs it in about 15-16 ms per segment (fused).
+  - The host spends about 22 ms per `filter_series_many` call preparing it: 54 bank calls
+    of 0.4-0.5 ms each, in `_run_series_gpu`, `hier_peaks_grouped`/`hier_peaks` keys,
+    `shared_buffer` lookups and `_submit`.
+  - Caching the grouped per-row windows cut that host time by 20% (0.446 → 0.355 s over 16
+    calls).
+- **To be device-bound** the per-bank host path has to shrink about 3x more, or the
+  segment's fused recordings have to be replayed (SegmentPlan) rather than rebuilt per
+  call. Both are host-layer structure rather than kernel work.

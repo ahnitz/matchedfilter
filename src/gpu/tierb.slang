@@ -255,6 +255,44 @@ typedef half2 H;
 //: A pair index that writes nothing: the clamped tail of a ragged tile.
 static const uint NOPAIR = 0xFFFFFFFFu;
 
+//: The coarse tier's ERROR BOUND (docs/vulkan-8060s-roofline.md section 10). The
+//: value a pair reports is an upper bound on its exact coarse maximum, not the fp16
+//: maximum itself:
+//:
+//:     B = |c16| (1 + 3u) + C16_KAPPA u rms(y),   u = 2^-11,  rms(y)^2 = sum_j |x_j|^2
+//:
+//: (1 + 3u) is proven: the lag is chosen on fp16 |v|^2 (two roundings, within
+//: (1 +- u)^2 of the fp16 transform's power), so the fp16 maximum is at most
+//: |c16| (1+u)/(1-u). C16_KAPPA u rms covers the transform's own rounding error at
+//: that lag: z sigma_B with sigma_B the band's measured error rms (in u rms units)
+//: and z the one-sided normal quantile of the per-pair failure target, both set at
+//: build time (tools/coarse_layout.py). rms is over all lags (Parseval: the inputs'
+//: energy), so a loud out-of-window glitch raises the bound with it.
+#ifndef C16_KAPPA
+#define C16_KAPPA 0.0
+#endif
+static const float C16_U = 4.8828125e-4f;          // 2^-11
+float2 c16Bound(float2 v, float energy)
+{
+    if (mfC16Bound == 0u) return v;
+    float m = length(v);
+    float b = m * (1.0f + 3.0f * C16_U) + float(C16_KAPPA) * C16_U * sqrt(energy);
+    return (m > 0.0f) ? v * (b / m) : float2(b, 0.0f);
+}
+
+//: Sum of one float per thread over a pair's WG threads through the stage, the
+//: result on every thread. Uniform control flow; leaves the stage free again.
+float pairSum(uint tid, float v)
+{
+    GroupMemoryBarrierWithGroupSync();
+    stg[_stgBase + tid] = asuint(v);
+    GroupMemoryBarrierWithGroupSync();
+    float t = 0.0f;
+    for (uint k = 0; k < WG; ++k) t += asfloat(stg[_stgBase + k]);
+    GroupMemoryBarrierWithGroupSync();
+    return t;
+}
+
 //: Complex multiply by a twiddle that is the SAME for both transforms, so
 //: wr/wi broadcast to both lanes. Four v_pk_* and nothing else.
 void cmulw(inout H xr, inout H xi, CS wr, CS wi)
@@ -757,6 +795,16 @@ void filterPair(uint pair, uint tid,
     // clears it, often nothing at all in a given bin. Seeding at zero rather
     // than -1 also means a bin whose every |v|^2 underflowed reports index
     // -1 instead of naming the first sample, matching the CPU.
+#if COARSE16
+    // The pair's energy over all lags, for the coarse error bound (c16Bound),
+    // before the peak tables take the stage over.
+    float energy = 0.0f;
+    [unroll] for (uint i = 0; i < R; ++i) {
+        float _ex = float(r[i].x), _ey = float(r[i].y);
+        energy += _ex * _ex + _ey * _ey;
+    }
+    energy = pairSum(tid, energy) / float(N);
+#endif
     GroupMemoryBarrierWithGroupSync();          // transform is done with stg
 #if SINGLE_BIN
     // ONE BIN by construction:
@@ -915,7 +963,11 @@ void filterPair(uint pair, uint tid,
         [unroll] for (uint i = 0; i < R; ++i) {
             if (tid * R + i == stg[_stgBase+1]) {
                 peakIdx[pair] = int(slotToIndex(tid * R + i));
+#if COARSE16
+                peakVal[pair] = c16Bound(float2(float(r[i].x), float(r[i].y)), energy);
+#else
                 peakVal[pair] = float2(float(r[i].x), float(r[i].y));
+#endif
             }
         }
         if (tid == 0 && stg[_stgBase+1] == 0xffffffffu) {
@@ -964,7 +1016,7 @@ void filterPair(uint pair, uint tid,
 //: is what catches it.
 void peakLane(uint pair, uint tid, uint lane, H magv[16], H re[16], H im[16],
               RWStructuredBuffer<int> peakIdx, RWStructuredBuffer<float2> peakVal,
-              uint winStart, uint winEnd, uint thrBits)
+              uint winStart, uint winEnd, uint thrBits, float energy)
 {
     GroupMemoryBarrierWithGroupSync();
     if (tid == 0) { stg[_stgBase] = thrBits; stg[_stgBase+1] = 0xffffffffu; }
@@ -1006,8 +1058,8 @@ void peakLane(uint pair, uint tid, uint lane, H magv[16], H re[16], H im[16],
     [unroll] for (uint i = 0; i < R; ++i) {
         if (pair != NOPAIR && stg[_stgBase+1] == tid*R+i) {
             peakIdx[pair] = int(slotToIndex(tid*R+i));
-            peakVal[pair] = float2(float(lane == 0u ? re[i].x : re[i].y),
-                                   float(lane == 0u ? im[i].x : im[i].y));
+            peakVal[pair] = c16Bound(float2(float(lane == 0u ? re[i].x : re[i].y),
+                                            float(lane == 0u ? im[i].x : im[i].y)), energy);
         }
     }
     if (pair != NOPAIR && tid == 0 && stg[_stgBase+1] == 0xffffffffu) {
@@ -1058,9 +1110,19 @@ void peakTwoWave(uint pairA, uint pairB, uint tid, H re[16], H im[16],
     uint u0 = slotToIndex(tid * R) - winStart;      // idx - winStart, wrapping
     uint span = winEnd - winStart;
     uint kA = 0u, kB = 0u;
+    // Energy, both pairs, all lags, from values scaled by 2^-6 (exact): |v|^2
+    // overflows fp16 past |v| = 256, which out-of-window lags of an ordinary
+    // pair reach, and an inf energy would pass every pair. Scaled, a lag reaches
+    // 16384 and the band's sum (x 2^-12) fits; only a value that overflowed
+    // the transform itself makes it inf, and then the pair passes, as it must.
+    H en = H(0.0f);
+    const H esc = H(0.015625f);
     [unroll] for (uint i = 0; i < R; ++i) {
         bool live = (u0 + slotToIndex(i)) < span;  // winStart <= idx < winEnd
-        uint m = live ? bit_cast<uint>(mag2s(re[i], im[i])) : 0u;
+        H mg = mag2s(re[i], im[i]);
+        H sr = re[i] * esc, si = im[i] * esc;
+        en += sr * sr + si * si;
+        uint m = live ? bit_cast<uint>(mg) : 0u;
         kA = max(kA, (m << 16) | (15u - i));
         kB = max(kB, (m & 0xFFFF0000u) | (15u - i));
     }
@@ -1070,7 +1132,11 @@ void peakTwoWave(uint pairA, uint pairB, uint tid, H re[16], H im[16],
     [ForceUnroll] for (uint s = 1; s < WG; s <<= 1) {
         kA = max(kA, mfShflXor(kA, s));
         kB = max(kB, mfShflXor(kB, s));
+        en += bit_cast<H>(mfShflXor(bit_cast<uint>(en), s));
     }
+    // The transform's energy over all lags is N times the inputs' (Parseval), so
+    // the per-lag rms the bound needs is energy / N.
+    float enA = float(en.x) * (4096.0f / float(N)), enB = float(en.y) * (4096.0f / float(N));
     uint slotA = 0xFFFFu - (kA & 0xFFFFu), slotB = 0xFFFFu - (kB & 0xFFFFu);
     // FAIL OPEN on overflow. Keys compare as unsigned, so a NaN or inf |v|^2
     // (bits >= 0x7C00: a loud pair overflowing fp16) outranks every finite one and
@@ -1103,12 +1169,12 @@ void peakTwoWave(uint pairA, uint pairB, uint tid, H re[16], H im[16],
     if (tid == 0 && pairA != NOPAIR) {
         peakIdx[pairA] = hitA ? int(slotToIndex(slotA)) : -1;
         peakVal[pairA] = infA ? float2(3.402823e38f, 0.0f)
-                       : (hitA ? float2(vA[0], vA[1]) : float2(0.0f, 0.0f));
+                       : (hitA ? c16Bound(float2(vA[0], vA[1]), enA) : float2(0.0f, 0.0f));
     }
     if (tid == 0 && pairB != NOPAIR) {
         peakIdx[pairB] = hitB ? int(slotToIndex(slotB)) : -1;
         peakVal[pairB] = infB ? float2(3.402823e38f, 0.0f)
-                       : (hitB ? float2(vB[0], vB[1]) : float2(0.0f, 0.0f));
+                       : (hitB ? c16Bound(float2(vB[0], vB[1]), enB) : float2(0.0f, 0.0f));
     }
 }
 
@@ -1191,13 +1257,18 @@ void filterTwo(uint pairA, uint pairB, uint tA, uint tB, uint tid,
         peakTwoWave(pairA, pairB, tid, re, im, peakIdx, peakVal, winStart, winEnd, thrBits);
     } else {
         H magv[16];
+        float eA = 0.0f, eB = 0.0f;
         [unroll] for (uint i = 0; i < R; ++i) {
             uint idx = slotToIndex(tid * R + i);
             bool live = (idx >= winStart && idx < winEnd);
-            magv[i] = live ? mag2s(re[i], im[i]) : H(0.0f);
+            H mg = mag2s(re[i], im[i]);
+            eA += float(mg.x); eB += float(mg.y);
+            magv[i] = live ? mg : H(0.0f);
         }
-        peakLane(pairA, tid, 0u, magv, re, im, peakIdx, peakVal, winStart, winEnd, thrBits);
-        peakLane(pairB, tid, 1u, magv, re, im, peakIdx, peakVal, winStart, winEnd, thrBits);
+        eA = pairSum(tid, eA) / float(N);
+        eB = pairSum(tid, eB) / float(N);
+        peakLane(pairA, tid, 0u, magv, re, im, peakIdx, peakVal, winStart, winEnd, thrBits, eA);
+        peakLane(pairB, tid, 1u, magv, re, im, peakIdx, peakVal, winStart, winEnd, thrBits, eB);
     }
 }
 #endif
