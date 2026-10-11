@@ -382,3 +382,26 @@ def test_steady_segments_replay(monkeypatch, band, depth):
                                 {c: len(v) for c, v in mf._CHAIN_TRIALS[tk]["samples"].items()},
                                 mf._CHAIN_TRIALS[tk]["assigned"])
     assert all(d == want for d, want in deltas[-4:]), deltas
+
+
+def test_depth_one_keeps_one_set_of_recordings(monkeypatch):
+    """A caller that collects each batch before the next (depth 1) must reuse the same slots:
+    the hierarchical recordings stop growing after warm-up. Alternating slot bases regardless
+    doubled them, which at n=8192 overflowed the recording cache (re-recording every call)."""
+    rng, banks = _setup(monkeypatch, nbanks=2, seed=80)
+    S = 1 << 17
+    rows = banks[0][0].empty_shared((len(banks), S))
+    jobs = [(b, rows[i], dict(windows=slice(3001, S - 2999), binsize=500))
+            for i, (b, _, _) in enumerate(banks)]
+
+    def recordings():
+        ctxs = {id(g.plan._gpu): g.plan._gpu for b, _, _ in banks for g in b._groups}
+        return sum(len(getattr(c, "_hier", {})) + len(getattr(c, "_hier_cascade", {}))
+                   for c in ctxs.values())
+    counts = []
+    for seg in range(8):
+        _fill(rng, rows, S)
+        [f.result() for f in TimeDomainFilterBank.filter_series_many(jobs, wait=False)]
+        counts.append(recordings())
+    assert counts[0] == counts[-1], counts       # the first batch recorded them all
+    assert _replays(banks) > 0

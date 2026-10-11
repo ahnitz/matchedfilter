@@ -1473,14 +1473,19 @@ class Context(InputUploads):
                                         nd, nt, nbins, sparse)
             surv_count = int(v[0][0])
             self.last_refinements = surv_count
+            rows = None
+            if sparse or mode is not None:
+                rows = np.sort(v[2][:surv_count].astype(np.int64))
             if mode is not None:
-                self._band_measure(mode[0], mode[1], nd, nt, bufs,
-                                   "surv1" if cascade else "surv", surv_count)
+                # The refine-block fraction from the sorted survivor list (distinct blocks),
+                # not a second view and np.unique of it per call.
+                blk = rows // nt
+                nblk = int(np.count_nonzero(blk[1:] != blk[:-1])) + 1 if blk.size else 0
+                self.__dict__.setdefault("_band_f", {})[(mode[0], mode[1], nd, nt)] = nblk / float(nd)
             if cascade:
                 self.last_tier1_survivors = int(v[1][0])
             if sparse:
                 from . import _SparsePeaks
-                rows = np.sort(v[2][:surv_count].astype(np.int64))
                 ri = v[3][rows]
                 k, b = np.nonzero(ri >= 0)
                 return _SparsePeaks((nd, nt, nbins), rows[k] * nbins + b, ri[k, b],
