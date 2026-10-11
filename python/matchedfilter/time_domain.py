@@ -2206,6 +2206,18 @@ from ._gpuhost import FollowupSpec                        # noqa: E402
 FollowUp = FollowupSpec                                       # the name the CUDA track used
 
 
+class _SegmentResult:
+    """SegmentPlan.submit's handle: result() gives what SegmentPlan.run returns."""
+
+    def __init__(self, fn):
+        self._fn, self._done, self._value = fn, False, None
+
+    def result(self):
+        if not self._done:
+            self._value, self._done, self._fn = self._fn(), True, None
+        return self._value
+
+
 class SegmentPlan:
     """filter_series_many for a job set that recurs, e.g. every segment of one top template.
 
@@ -2219,9 +2231,13 @@ class SegmentPlan:
     The results are identical either way.
     """
 
-    def __init__(self):
+    def __init__(self, slot_half=None):
+        """slot_half (0 or 1): this plan's calls use that half of every fine plan's slots, so
+        two SegmentPlans can keep their segments in flight together (submit) without their
+        device records aliasing."""
         self._trace = None
         self.replays = 0
+        self.slot_half = slot_half
         self._seen = None          # CUDA: the signature of the last untraced run
         self._graph = None         # CUDA: this plan's SegmentGraph (its own fork streams)
         self.capture_failures = 0
@@ -2315,6 +2331,46 @@ class SegmentPlan:
         return self._trace_run(jobs, sig)
 
     # ---- CUDA: the whole fine stage as one graph -----------------------------------------
+    def _halves(self, jobs, on):
+        if self.slot_half is None:
+            return
+        for bank, _, _ in jobs:
+            for g in bank._groups:
+                p = getattr(g, "_plan", None)
+                if p is not None:
+                    if on:
+                        p._force_slot_half = self.slot_half
+                    else:
+                        p.__dict__.pop("_force_slot_half", None)
+
+    def submit(self, jobs, prelude=None, prelude_key=None, followup=None):
+        """run(), started: a replayed segment graph is launched and not waited for, so the
+        host can collect the previous segment meanwhile. Returns an object whose result()
+        gives what run() returns. Any other path runs now (after the graphs in flight)."""
+        import os
+        ctx = self._cuda_context(jobs)
+        if ctx is not None and os.environ.get("MF_CUDA_SEGMENT_GRAPH", "1") != "0":
+            from . import _cudacompute
+            sig = (self._signature(jobs), prelude_key if prelude is not None else None,
+                   followup.key() if followup is not None else None)
+            tr = self._trace
+            if tr is not None and tr["sig"] == sig and self._graph.launch():
+                self.replays += 1
+                return _SegmentResult(lambda: self._collect_cuda(tr, followup))
+            _cudacompute.SegmentGraph.wait_all()
+        out = self.run(jobs, prelude=prelude, prelude_key=prelude_key, followup=followup)
+        return _SegmentResult(lambda: out)
+
+    def _collect_cuda(self, tr, followup):
+        self._graph.wait()
+        out = self._parse_cuda(tr)
+        if followup is None:
+            return out
+        fu = self._read_followups(tr.get("fu"))
+        if fu is None:
+            fu = followup.run_host(self._jobs_of(tr), out)
+        return out, fu
+
     def _run_cuda(self, jobs, ctx, prelude=None, prelude_key=None, followup=None):
         """One CUDA graph per recurring job set: the first run of a signature runs as usual
         (allocations, module loads, per-call graphs and plans settle), the second is captured
@@ -2338,7 +2394,11 @@ class SegmentPlan:
             self._seen = sig
             if prelude is not None:
                 prelude()
-            return wrap(TimeDomainFilterBank.filter_series_many(jobs))
+            self._halves(jobs, True)
+            try:
+                return wrap(TimeDomainFilterBank.filter_series_many(jobs))
+            finally:
+                self._halves(jobs, False)
         if self._graph is None:
             self._graph = _cudacompute.SegmentGraph(ctx)
         for bank, _, _ in jobs:
@@ -2352,6 +2412,7 @@ class SegmentPlan:
             if followup is not None:
                 built["fu"] = self._device_followups(ctx, jobs, followup)
             return futures
+        self._halves(jobs, True)
         try:
             futures = self._graph.capture(submit)
             sinks = [bank._trace_sink for bank, _, _ in jobs]
@@ -2366,6 +2427,7 @@ class SegmentPlan:
                 prelude()
             return wrap(TimeDomainFilterBank.filter_series_many(jobs))
         finally:
+            self._halves(jobs, False)
             for bank, _, _ in jobs:
                 bank._trace_sink = None
         self._graph.replay()
@@ -2377,7 +2439,8 @@ class SegmentPlan:
             per_job.append(sinks[j][k] if k < len(sinks[j]) else None)
         if all(e is not None and not e[2][0]
                and all(getattr(d, "trace", None) is not None for d, *_ in e[0]) for e in per_job):
-            self._trace = dict(sig=sig, jobs=[(e[0], e[1]) for e in per_job], fu=built.get("fu"))
+            self._trace = dict(sig=sig, jobs=[(e[0], e[1]) for e in per_job], fu=built.get("fu"),
+                               all_jobs=jobs)
         return wrap(out, self._read_followups(built.get("fu")))
 
     def _read_followups(self, dfu):
@@ -2421,14 +2484,22 @@ class SegmentPlan:
         dfu.enqueue()
         return dfu
 
+    @staticmethod
+    def _jobs_of(tr):
+        return tr["all_jobs"]
+
     def _replay_cuda(self, tr):
-        """Relaunch the segment graph, then read every dispatch. Sparse results go straight
+        """Relaunch the segment graph, wait, then read every dispatch (_parse_cuda)."""
+        if not self._graph.replay():
+            return None
+        return self._parse_cuda(tr)
+
+    def _parse_cuda(self, tr):
+        """Read every dispatch of a finished segment graph. Sparse results go straight
         into the job's peak lists, without dense tables, in the order filter_series gives:
         (block, template, bin), blocks in the caller's order. A dense dispatch (threshold 0,
         or a fallback) takes the table route for its whole call."""
         from . import _SparsePeaks
-        if not self._graph.replay():
-            return None
         results = []
         for entries, template_index in tr["jobs"]:
             lists = ([], [], [], [], [])
