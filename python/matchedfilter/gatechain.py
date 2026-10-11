@@ -375,13 +375,17 @@ class CostModel:
         cq = sc["dense"] + passed * sc["recheck"]
         return (cq, True) if cq < c else (c, False)
 
-    def chain_forward_delta(self, chain, reach, ntemplates):
+    def chain_forward_delta(self, chain, reach, ntemplates, model_f=False):
         """Per-pair change from the full forward this chain's forward makes (<= 0), with the
         refine-block fraction from the model: a block has a refined pair with probability
         1 - (1 - P(refine))^templates, unless a measured fraction is registered."""
         if not self.band_forward or not ntemplates or self.forward <= 0:
             return 0.0
         f = measured_refine_blocks(self.n, chain)
+        if f is None and model_f:
+            # Proposals only (block-size trial candidates, time_domain._BlockTrials): the
+            # model's fraction may suggest a size, and the end-to-end trial decides.
+            f = 1.0 - (1.0 - min(max(reach[len(chain)], 0.0), 1.0)) ** int(ntemplates)
         if f is None:
             # No measurement: no credit. The model's refine-block fraction,
             # 1 - (1 - P(refine))^templates, is right per chain, but with it the credit tipped
@@ -1005,7 +1009,8 @@ def _smallest(col, m):
     return idx[np.argsort(col[idx], kind="stable")]
 
 
-def plan_chain(sig, noise, bands, chain, fd, cost, n, snr, prune=False, ntemplates=None):
+def plan_chain(sig, noise, bands, chain, fd, cost, n, snr, prune=False, ntemplates=None,
+               model_f=False):
     """Thresholds for `chain` meeting compound dismissal <= fd at minimum modelled cost.
 
     sig, noise: signal_draws / noise_block_maxima over `bands`.
@@ -1063,7 +1068,7 @@ def plan_chain(sig, noise, bands, chain, fd, cost, n, snr, prune=False, ntemplat
             # only the change from the full forward (already in `block`), so a chain without
             # a measured credit is priced exactly as before; pick_stable's tie window is
             # absolute-valued, so a credit that takes a total below zero still compares
-            c += cost.chain_forward_delta(chain, reach, ntemplates)
+            c += cost.chain_forward_delta(chain, reach, ntemplates, model_f=model_f)
         if best is None or c < best["cost"]:
             q15 = bool(cost.first_tier(chain[0], reach[1])[1]) if hasattr(cost, "first_tier") else False
             best = dict(chain=tuple(chain), thresholds=tuple(th), reach=tuple(reach), cost=float(c),
@@ -1146,7 +1151,7 @@ _CHOICE_CACHE = OrderedDict()
 
 
 def choose_chain(power, n, snr, fd, cost=None, max_tiers=3, floor=_MIN_BAND, nsim=20000, window=None,
-                 ntemplates=None):
+                 ntemplates=None, model_f=False):
     """Price every chain and return (best, all_plans sorted by cost).
 
     Cached like the draws it is built from: by profile signature, and reused for
@@ -1158,7 +1163,7 @@ def choose_chain(power, n, snr, fd, cost=None, max_tiers=3, floor=_MIN_BAND, nsi
               # ntemplates prices the forward; measured refine-block fractions are left out of
               # the key on purpose, so a choice made once stays made in this process instead
               # of drifting with each call's measurement.
-              None if not getattr(cost, "band_forward", False) else int(ntemplates or 0))
+              None if not getattr(cost, "band_forward", False) else (int(ntemplates or 0), bool(model_f)))
     key = (_gm._profile_sig(p),) + params
     hit = _CHOICE_CACHE.get(key)
     if hit is not None:
@@ -1167,13 +1172,14 @@ def choose_chain(power, n, snr, fd, cost=None, max_tiers=3, floor=_MIN_BAND, nsi
     unit, hit = _similar_get("choice", p, params)
     if hit is not None:
         return hit
-    out = _choose_chain(p, n, snr, fd, cost, max_tiers, floor, nsim, win, ntemplates)
+    out = _choose_chain(p, n, snr, fd, cost, max_tiers, floor, nsim, win, ntemplates, model_f)
     _cache_put(_CHOICE_CACHE, key, out)
     _similar_put("choice", unit, params, out)
     return out
 
 
-def _choose_chain(power, n, snr, fd, cost, max_tiers, floor, nsim, window, ntemplates=None):
+def _choose_chain(power, n, snr, fd, cost, max_tiers, floor, nsim, window, ntemplates=None,
+                  model_f=False):
     bands = usable_bands(power, n, floor)
     if not bands:
         return None, []
@@ -1184,7 +1190,7 @@ def _choose_chain(power, n, snr, fd, cost, max_tiers, floor, nsim, window, ntemp
     plans = []
     for chain in enumerate_chains(n, max_tiers, floor, bands=bands):
         pl = plan_chain(sig, noise, bands, list(chain), fd, cost, n, snr, prune=True,
-                        ntemplates=ntemplates)
+                        ntemplates=ntemplates, model_f=model_f)
         if pl is not None:
             plans.append(pl)
     plans.sort(key=lambda d: d["cost"])
@@ -1248,7 +1254,7 @@ _PRICE_CACHE = OrderedDict()
 
 
 def price_block_sizes(fine, delta_f, data_rate, longest, margin, ntemplates, snr, fd, candidates,
-                      max_tiers=3, device=None, ahead=0):
+                      max_tiers=3, device=None, ahead=0, model_f=False):
     """Rank block sizes for one bank by modelled cost per valid output sample and template.
 
     For each n the bank would run one plan over blocks advancing n - longest + 1 samples; a
@@ -1272,7 +1278,7 @@ def price_block_sizes(fine, delta_f, data_rate, longest, margin, ntemplates, snr
         q = max(n // 32, 1)                  # the bank prices its windows on this grid
         lo = (int(margin) // q) * q
         key = (sig, float(delta_f), float(data_rate), n, lo, float(snr), float(fd), int(max_tiers), str(device),
-               cpu_gate_kind())
+               cpu_gate_kind(), bool(model_f), int(ntemplates))
         hit = _PRICE_CACHE.get(key)
         if hit is None:
             ref = rebin_profile(fine, delta_f, data_rate, n)
@@ -1280,7 +1286,7 @@ def price_block_sizes(fine, delta_f, data_rate, longest, margin, ntemplates, snr
             if ref is not None:
                 cm = device_costs(n, device, ntemplates)
                 best, _ = choose_chain(ref, n, snr, fd, cost=cm, max_tiers=max_tiers, window=(lo, n - lo),
-                                       ntemplates=ntemplates)
+                                       ntemplates=ntemplates, model_f=model_f)
                 if best is not None:
                     hit = (cm.block, best["cost"], best["chain"], getattr(cm, "host_block", 0.0))
             _cache_put(_PRICE_CACHE, key, hit)

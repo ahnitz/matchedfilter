@@ -389,3 +389,42 @@ same layout in every process. In both sets the trial confirmed the model's layou
 first set comes from the calibrated cost models in that file, not from a different layout.
 Where the model is right, trials buy stability and a guard against its mistakes, not speed. The trial costs one process's fine stage once per machine and
 candidate set, not once per process.
+
+### Model-f proposals, pooled trials, and persisted chain locks (2026-10-11)
+
+- **Model f proposes, the trial decides.** Block-size trial candidates are ranked with the band-
+  forward credit at the model's refine-block fraction (`price_block_sizes(model_f=True)`,
+  `CostModel.chain_forward_delta(model_f)`). Rank 0 stays the model's own layout, priced without
+  that credit, so model f can only add a candidate. Its own pricing never changes a choice. On the
+  dev3 ladder the proposals are the same sizes as without the credit (4096, 8192), and the trial
+  keeps the model's 2048 layout.
+- **Pooled trials, cheap adoption.**
+  - The trial key is the device plus the candidate block sizes. Ranks mean the same in every bank:
+    0 is its model layout, k is its k-th proposed size. All banks of a search pool into one trial.
+  - Each bank's proposal list is kept in MF_COST_FILE under its model layout. A later process maps
+    the lock's rank to the bank's size without pricing proposals, and builds only the winner.
+  - Pricing extra sizes (`ahead`) happens only when proposing. Keys per bank fragmented the trial,
+    so the first version re-ran trials and paid ~30 s of warm-up in every process.
+- **Chain-trial locks are persisted too** (`chain-trial|n|snr|fd|tiers|device`, used only if the
+  stored chain is on the plan's shortlist).
+
+**The unexplained 4-10% gain, isolated.** It was not the block-size layout. In matched processes
+with the same layout and the same chain, (2048, (256, 512)), main's steady fine stage was 1.08-1.12 s
+and the branch's 0.94-0.96 s. Main runs its chain trials in every process: one candidate needs
+MF_CHAIN_TRIALS = 6 calls, and the trials run past the two warm-up segments into the steady ones.
+Some processes even lock a different chain, e.g. (256, 1024) at 1.12 s. With the lock on file, no
+trial runs and the steady segments are clean.
+
+dev3 Renoir, load ~1. Each side has its own fresh MF_COST_FILE, the processes are interleaved, the
+configuration is 2 tops x 6 segments, and the figure is the steady fine stage:
+
+| process | main (block-trials round 3) | branch |
+|---|---|---|
+| 1 (trials run, files written) | 4.12 s | 4.58 s |
+| 2 | 1.09 s | 0.94 s |
+| 3 | 1.09 s | 0.95 s |
+| 4 | 1.12 s, chain (256, 1024) | 0.96 s |
+| 5 | 1.08 s | 0.94 s |
+
+After the first process the branch is 12-15% faster in steady state, and identical from process
+to process. The first process of each side carries both kinds of trials, once per machine.

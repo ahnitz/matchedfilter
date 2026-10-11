@@ -796,3 +796,25 @@ def test_forward_priced_per_chain():
         gc._REFINE_BLOCKS.clear()
     rt = gc.CostModel.from_dict(json.loads(json.dumps(cm.to_dict())))
     assert (rt.forward, rt.band_forward) == (300.0, True)
+
+
+def test_model_f_credit_is_proposal_only():
+    """The model's refine-block fraction credits the band forward only when asked to (block-size
+    trial proposals); priced normally a chain without a measurement gets no credit."""
+    gc = mf._gatechain
+    gc._REFINE_BLOCKS.clear()
+    cm = gc.CostModel(2048, {256: 1.0, 512: 2.0}, {}, [(0.01, 9.0)], block=300.0, forward=300.0,
+                      band_forward=True)
+    reach = [1.0, 0.01, 0.0005]
+    assert cm.chain_forward_delta((256, 512), reach, 100) == 0.0
+    f = 1 - (1 - 0.0005) ** 100
+    d = cm.chain_forward_delta((256, 512), reach, 100, model_f=True)
+    assert d == pytest.approx((cm.forward_cost((256, 512), f) - 300.0) / 100) and d < 0
+
+
+def test_chain_trial_lock_persists(monkeypatch, tmp_path):
+    monkeypatch.setenv("MF_COST_FILE", str(tmp_path / "c.json"))
+    tkey = (4096, 5.5, 1e-3, 3, "cpu:0")
+    mf._store_chain_lock(tkey, (256, 512))
+    assert mf._stored_chain_lock(tkey, ((256, 512), (256, 1024))) == (256, 512)
+    assert mf._stored_chain_lock(tkey, ((512,), (256, 1024))) is None     # not on this shortlist
