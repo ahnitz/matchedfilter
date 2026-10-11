@@ -767,3 +767,32 @@ def test_host_terms_round_trip():
     assert (rt.host_call, rt.host_block) == (100.0, 7.0)
     old = gc.CostModel.from_dict({k: v for k, v in cm.to_dict().items() if not k.startswith("host")})
     assert (old.host_call, old.host_block) == (0.0, 0.0)     # files from before the term
+
+
+def test_forward_priced_per_chain():
+    """Band forwards credit chains that refine few blocks; the backend's own byte rule decides."""
+    import json
+    gc = mf._gatechain
+    gc._REFINE_BLOCKS.clear()                 # earlier GPU calls in this process may have noted some
+    kw = dict(block=300.0, forward=300.0)
+    cm = gc.CostModel(2048, {256: 1.0, 512: 2.0, 1024: 4.0}, {}, [(0.01, 9.0)], band_forward=True, **kw)
+    # B = 512: bands pay iff f < (2048 - 512) / 4096 = 0.375
+    assert cm.forward_cost((256, 512), 0.087) == pytest.approx(300 * (0.5 + 0.125) + 0.087 * 300)
+    assert cm.forward_cost((256, 512), 0.40) == 300.0
+    assert cm.forward_cost((512, 1024), 0.20) == pytest.approx(300 * 0.75 + 0.2 * 300)
+    assert cm.forward_cost((512, 1024), 0.30) == 300.0          # past 0.25 for B = n/2
+    off = gc.CostModel(2048, {256: 1.0}, {}, [(0.01, 9.0)], **kw)
+    assert off.forward_cost((256, 512), 0.0) == 300.0              # no capability: full
+    # per pair: no credit without a measured refine-block fraction
+    assert cm.chain_forward_delta((256, 512), [1.0, 0.01, 0.0005], 100) == 0.0
+    try:
+        gc.note_refine_blocks(2048, 512, 0.087)                     # measured: bands win
+        d = cm.chain_forward_delta((256, 512), [1.0, 0.01, 0.0005], 100)
+        assert d == pytest.approx((cm.forward_cost((256, 512), 0.087) - 300.0) / 100) and d < 0
+        gc._REFINE_BLOCKS.clear()
+        gc.note_refine_blocks(2048, 512, 0.5)                       # measured: bands lose
+        assert cm.chain_forward_delta((256, 512), [1.0, 0.01, 0.0005], 100) == 0.0
+    finally:
+        gc._REFINE_BLOCKS.clear()
+    rt = gc.CostModel.from_dict(json.loads(json.dumps(cm.to_dict())))
+    assert (rt.forward, rt.band_forward) == (300.0, True)
