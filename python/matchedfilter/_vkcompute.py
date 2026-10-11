@@ -674,6 +674,7 @@ class _FusedBatch:
 
     def _free(self, cmd):
         vk = self.dev.vk
+        _settle_replays(self.dev, cmd)          # a replay in flight may still execute it
         vk.vkFreeCommandBuffers.argtypes = [_vp, _vp, _u32, ctypes.POINTER(_vp)]
         vk.vkFreeCommandBuffers(self.dev.device, self.dev.command_pool, 1, (_vp * 1)(cmd))
 
@@ -749,9 +750,61 @@ def fused():
     return close
 
 
-def replay_fused(dev, keys):
+class _ReplayLaunch:
+    """A replay_fused submission in flight: its fence, and the fused command buffers it
+    executes. Held on the device (dev.replays) until waited for, so freeing one of those
+    command buffers (the fused cache retiring it) waits for the replay first."""
+
+    def __init__(self, dev, cmds):
+        self.dev, self.cmds, self.done = dev, {getattr(c, "value", c) for c in cmds}, False
+        vk = dev.vk
+        if dev.collector is not None and dev.collector.items:
+            dev.collector.flush()               # work queued before the replay runs first
+        arr = (_vp * len(cmds))(*cmds)
+        submit = _SubmitInfo(4, None, 0, None, None, len(cmds), arr, 0, None)
+        self.fence = _vp()
+        _check(vk.vkCreateFence(dev.device, ctypes.byref(_FenceCreate(8, None, 0)), None,
+                                ctypes.byref(self.fence)), "vkCreateFence")
+        try:
+            _check(vk.vkQueueSubmit(dev.queue, 1, ctypes.byref(submit), self.fence),
+                   "vkQueueSubmit")
+        except BaseException:
+            vk.vkDestroyFence(dev.device, self.fence, None)
+            raise
+        dev.__dict__.setdefault("replays", []).append(self)
+
+    def wait(self):
+        if self.done:
+            return
+        self.done = True
+        vk, d = self.dev.vk, self.dev.device
+        try:
+            _check(vk.vkWaitForFences(d, 1, (_vp * 1)(self.fence), 1, 0xFFFFFFFFFFFFFFFF),
+                   "vkWaitForFences")
+        finally:
+            vk.vkDestroyFence(d, self.fence, None)
+            rs = self.dev.__dict__.get("replays", [])
+            if self in rs:
+                rs.remove(self)
+
+
+def _settle_replays(dev, cmd=None):
+    """Wait for the replays in flight on dev that execute cmd (every one, without cmd)."""
+    v = getattr(cmd, "value", cmd)
+    for r in list(dev.__dict__.get("replays", [])):
+        if cmd is None or v in r.cmds:
+            r.wait()
+
+
+def replay_fused(dev, keys, wait=True, before=None):
     """Submit cached fused recordings again, in order, as one submission, and wait; False
-    (nothing submitted) if any is gone or a constituent recording was evicted."""
+    (nothing submitted) if any is gone or a constituent recording was evicted.
+
+    wait=False: leave it in flight and return its _ReplayLaunch (wait() it before reading
+    the results). The caller keeps the results' buffers alive until then: SegmentPlan
+    registers the read as an in-flight readback on every context involved, so evicting a
+    record reads the replay's results first (Pending, _drain). before: called once the
+    recordings are validated, just before the submission."""
     cache = dev.__dict__.get("fused_cache", {})
     cmds = []
     for key in keys:
@@ -768,19 +821,25 @@ def replay_fused(dev, keys):
                     print("replay invalid: constituent recording gone", flush=True)
                 return False
         cmds.append(hit[0])
-    vk = dev.vk
-    arr = (_vp * len(cmds))(*cmds)
-    submit = _SubmitInfo(4, None, 0, None, None, len(cmds), arr, 0, None)
-    fc = _FenceCreate(8, None, 0)
-    fence = _vp()
-    _check(vk.vkCreateFence(dev.device, ctypes.byref(fc), None, ctypes.byref(fence)), "vkCreateFence")
-    try:
-        _check(vk.vkQueueSubmit(dev.queue, 1, ctypes.byref(submit), fence), "vkQueueSubmit")
-        _check(vk.vkWaitForFences(dev.device, 1, (_vp * 1)(fence), 1, 0xFFFFFFFFFFFFFFFF),
-               "vkWaitForFences")
-    finally:
-        vk.vkDestroyFence(dev.device, fence, None)
+    if before is not None:
+        before()                                # e.g. the work producing the inputs
+    launch = _ReplayLaunch(dev, cmds)
+    if not wait:
+        return launch
+    launch.wait()
     return True
+
+
+def read_dispatch_sparse(entry):
+    """The refined peaks of one recorded hierarchical dispatch, as _SparsePeaks, read from
+    its survivor list (SegmentPlan replay: the same reader for every backend's trace)."""
+    bufs, nd, nt, nbins, cascade = entry
+    count = int(bufs["args_refine" if cascade else "args"].read(np.uint32, 1)[0])
+    if count == 0:
+        from . import _SparsePeaks
+        e = np.empty(0, np.int64)
+        return _SparsePeaks((nd, nt, nbins), e, e, np.empty(0, np.complex64))
+    return Context._read_peaks(bufs, "surv1" if cascade else "surv", count, nd, nt, nbins, True)
 
 
 def read_dispatch(entry):
@@ -1646,12 +1705,17 @@ class Context(InputUploads):
         pairs alone (the survivor list): the refine writes every bin of a listed pair."""
         if sparse:
             from . import _SparsePeaks
-            rows = np.sort(bufs[surv_key].view(np.uint32, count).astype(np.int64))
+            # Gathered and scanned in the list's (completion) order; only the hits are put
+            # in C order -- most refined pairs hold no peak.
+            rows = bufs[surv_key].view(np.uint32, count)
             ri = bufs["idx"].view(np.int32, nd * nt * nbins).reshape(nd * nt, nbins)[rows]
             k, b = np.nonzero(ri >= 0)
             vals = bufs["val"].view(np.complex64, nd * nt * nbins).reshape(nd * nt, nbins)
-            return _SparsePeaks((nd, nt, nbins), rows[k] * nbins + b, ri[k, b],
-                                vals[rows[k], b])
+            rk = rows[k].astype(np.int64)
+            flat = rk * nbins + b
+            order = np.argsort(flat)
+            return _SparsePeaks((nd, nt, nbins), flat[order], ri[k, b][order],
+                                vals[rk, b][order])
         if count == 0:
             return (np.full((nd, nt, nbins), -1, dtype=np.int32),
                     np.zeros((nd, nt, nbins), dtype=np.complex64))

@@ -564,3 +564,21 @@ def test_device_followups_steady_state_allocates_nothing(monkeypatch):
     assert made[warm:] == [], made[warm:]
     assert len(getattr(ctx, "_pools", [])) == pools
     assert sum(len(ex.workspaces) for ex in _vkfollowup._EXECUTORS.values()) == workspaces
+
+
+def test_more_batches_than_slots(monkeypatch):
+    """A call with more batches than queue slots: a later batch reuses an earlier one's slot,
+    fence and recordings. Replayed from its call plan without collecting the earlier batch
+    first, the reused fence was waited for although nothing would ever signal it (the second
+    segment hung), and the earlier batch's results were overwritten."""
+    monkeypatch.setenv("MF_GPU_QUEUE_AHEAD", "2")
+    rng, banks = _setup(monkeypatch, nbanks=2, seed=86)
+    for b, _, _ in banks:
+        for g in b._groups:
+            g.plan._series_batch_bytes = 1 << 20          # several batches per call
+    S = 1 << 18
+    rows = banks[0][0].empty_shared((len(banks), S))
+    jobs = [(b, rows[i], dict(windows=slice(3000, S - 3000))) for i, (b, _, _) in enumerate(banks)]
+    for _ in range(3):
+        _fill(rng, rows, S)
+        _check(jobs)

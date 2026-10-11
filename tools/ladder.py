@@ -541,9 +541,10 @@ def run_device(device, tops, args, seed):
                 for seg in range(args.segments):
                     tm = first if seg < args.warmup else steady
                     bsampler.on = args.warmup <= seg
-                    if seg == args.warmup and not fold and not inflight:
-                        roof_snap("mid")
-                        roof_snap("fine")
+                    if seg == args.warmup and not fold:
+                        roof_snap("mid")             # the middle's work is counted at submit
+                        if not inflight:
+                            roof_snap("fine")
                     if seg == args.warmup and os.environ.get("LADDER_GC_FREEZE"):
                         # What an application does after setup: move the setup heap out of the
                         # cyclic collector's view (a full collection of it measured ~11 ms here).
@@ -553,6 +554,7 @@ def run_device(device, tops, args, seed):
                     if prof is not None and tm is steady:
                         prof.enable()
                     t_seg = time.perf_counter()
+                    c_seg = time.thread_time()          # host CPU per segment, as --pipeline
                     ser = next_ser
                     next_ser = None
                     mids = {}
@@ -601,8 +603,8 @@ def run_device(device, tops, args, seed):
                         t = time.perf_counter() - submit
                         fine_out = [f.result() for f in futures]
                     else:
-                        # SegmentPlan replay (LADDER_REPLAY=1, MF_SEGMENT_REPLAY=1) is exact but not
-                        # faster than the batched path, which is the default.
+                        # SegmentPlan replay (LADDER_REPLAY=1): with two segments in flight
+                        # (LADDER_GRAPH_MIDDLE=1 LADDER_INFLIGHT=1) it beats --pipeline on Vulkan.
                         fu = None
                         spec = (followup_spec(ser) if os.environ.get("LADDER_REPLAY")
                                 and os.environ.get("LADDER_DEVICE_FOLLOWUPS") else None)
@@ -616,9 +618,15 @@ def run_device(device, tops, args, seed):
                                                             followup=spec)
                             if pending is not None:
                                 collect(pending)
+                            if seg == args.warmup:
+                                # The fine work is counted when collected: the warmup's last
+                                # segment just was, so the span holds the steady segments'.
+                                roof_snap("fine")
                             pending = (seg, ser, mids, handle, tm)
                             tm.add("fine", time.perf_counter() - t)
                             tm.add("segment", time.perf_counter() - t_seg)
+                            tm.add("wall", time.perf_counter() - t_seg, n=0)
+                            tm.add("cpu", time.thread_time() - c_seg, n=0)
                             if next_ser is None and seg + 1 < args.segments:
                                 next_ser = new_series()
                             continue
@@ -638,6 +646,8 @@ def run_device(device, tops, args, seed):
                     finish(seg, ser, mids, fine_out, tm, fu=fu)
                     if not fold:
                         tm.add("segment", time.perf_counter() - t_seg)
+                        tm.add("wall", time.perf_counter() - t_seg, n=0)
+                        tm.add("cpu", time.thread_time() - c_seg, n=0)
                     if prof is not None and tm is steady:
                         prof.disable()
                         prof.dump_stats(os.environ["LADDER_PROFILE"])
@@ -650,7 +660,12 @@ def run_device(device, tops, args, seed):
                 bsampler.stop()
                 if bsampler.samples:
                     counts["gpu_sampler"] = bsampler.report()
-                if fold or inflight:
+                # A Vulkan segment replay advances the fine plans' work counters as the calls
+                # would (_vkcompute.read_dispatch_sparse); the CUDA graph does not yet.
+                rctx = _roofline.gpu_context(fine_banks)
+                vk_inflight = (inflight and not fold and rctx is not None
+                               and type(rctx).__module__.endswith("_vkcompute"))
+                if (fold or inflight) and not vk_inflight:
                     if roof is not None:
                         roof["problems"].append("roofline counting is not wired for "
                                                 "LADDER_FOLD_TOPS / LADDER_INFLIGHT")

@@ -1376,6 +1376,16 @@ class MatchedFilter:
         busy = any(not getattr(d, "_done", True) for d in owners.values())
         return (prev + K // 2) % K if busy else prev
 
+    def _slot_span(self, K):
+        """(first, count): the slots this plan's deferred calls cycle through. All K, or the
+        half a SegmentPlan keeping two job sets in flight gave it (_force_slot_half): a call
+        with more batches than that wraps within its half, never into the other set's slots
+        (their records hold the other set's results until it is collected)."""
+        half = self.__dict__.get("_force_slot_half")
+        if half is not None and K >= 2:
+            return (int(half) % 2) * (K // 2), K // 2
+        return 0, K
+
     def _call_plan_state(self, layout, binsize, threshold, t0, nt):
         """Everything a recorded call plan was built under: (objects, values). Objects are
         compared by identity -- the plan holds them, so none can be freed and replaced at the
@@ -1434,7 +1444,11 @@ class MatchedFilter:
         slot0 = self._next_batch_base(K) if getattr(self, "_defer_token", None) != token else (
             getattr(self, "_defer_slot", 0) % K)
         parts = entry["slots"].get(slot0)
-        if parts is None:
+        lo, span = self._slot_span(K)
+        if parts is None or len(parts) > span:
+            # More batches than slots: a batch would reuse an earlier one's slot (fence,
+            # recordings, result buffers) while it is in flight. The full path collects the
+            # earlier one first.
             return None
         gpu = self._gpu
         for _, fh, hh in parts:
@@ -1444,20 +1458,21 @@ class MatchedFilter:
             self._defer_base = slot0
             self._defer_token, self._defer_slot = token, slot0
         owners = self.__dict__.setdefault("_slot_owner", {})
-        for k in range(min(K, len(parts) + len(layout.groups))):
-            prev = owners.pop((slot0 + k) % K, None)
+        for k in range(min(span, len(parts) + len(layout.groups))):
+            prev = owners.pop(lo + (slot0 + k - lo) % span, None)
             if prev is not None:
                 prev.result()
         n = self.n
         shape = (layout.starts.size, nt, layout.nbins)
         self._last_series_batch = entry["batch"]
         starts_pool = entry["starts_pool"]
-        in_flight, gtrace = [], []
+        in_flight, gtrace, gstarts = [], [], []
         slot_idx = slot0
         for (begin, end, count, rebased), fh, hh in parts:
-            slot = slot_idx % K
+            slot = lo + (slot_idx - lo) % span
             slot_idx += 1
             starts_pool[slot][:count] = rebased
+            gstarts.append((starts_pool[slot], rebased))
             gpu.forward_replay(fh, slot)
             res = gpu.hier_replay(hh, slot, True, validated=True)
             if res is None:
@@ -1487,9 +1502,11 @@ class MatchedFilter:
         self._defer_slot = slot_idx
         deferred = _Deferred(finish_grouped)
         if gtrace and all(t[2] is not None for t in gtrace):
-            deferred.trace = dict(groups=gtrace, shape=shape, order=layout.order)
+            deferred.trace = dict(groups=gtrace, shape=shape, order=layout.order, plan=self,
+                                  slots=[lo + (k - lo) % span for k in range(slot0, slot_idx)],
+                                  starts=gstarts)
         for k in range(slot0, slot_idx):
-            owners[k % K] = deferred
+            owners[lo + (k - lo) % span] = deferred
         self.call_plan_replays = getattr(self, "call_plan_replays", 0) + 1
         return deferred
 
@@ -1655,13 +1672,17 @@ class MatchedFilter:
             self._defer_base = base
             self._defer_token, self._defer_slot = self._defer_series, base
         slot0 = getattr(self, "_defer_slot", 0) % K if defer else 0
+        slot_lo, span = self._slot_span(K) if defer else (0, K)
+
+        def slot_of(i, slot_lo=slot_lo, span=span):   # names of their own: lo is reused below
+            return slot_lo + (i - slot_lo) % span
         if defer:
             # Settle whatever still holds the slots this call will use: its spectra, starts,
             # source and recordings are about to be rewritten.
             owners = self.__dict__.setdefault("_slot_owner", {})
-            nslots = min(K, -(-nblk // batch) + len(layout.groups))
+            nslots = min(span, -(-nblk // batch) + len(layout.groups))
             for k in range(nslots):
-                prev = owners.pop((slot0 + k) % K, None)
+                prev = owners.pop(slot_of(slot0 + k), None)
                 if prev is not None:
                     prev.result()
         if contained is not None:
@@ -1732,7 +1753,7 @@ class MatchedFilter:
             and nt <= self._gpu_pair_limit())
         if grouped:
             in_flight = []
-            gtrace = []
+            gtrace, gstarts = [], []
             slot_idx = slot0 if defer else 0
             # The batches' groups and rebased starts, per (layout, batch, series size, base):
             # the same every segment of a search.
@@ -1760,11 +1781,12 @@ class MatchedFilter:
                       and getattr(self._gpu, "supports_replay", False))
             recorded = []
             for begin, end, count, groups, rebased in plan_b[1]:
-                slot = slot_idx % K
+                slot = slot_of(slot_idx)
                 slot_idx += 1
                 starts = starts_pool[slot]
                 spec = spectra_pool[slot][:count]
                 starts[:count] = rebased
+                gstarts.append((starts, rebased))
                 fh, hh = [], []
                 self._gpu.forward(n, source, starts[:count], spec, defer=True,
                                   slot=slot if pipelined else None,
@@ -1787,7 +1809,7 @@ class MatchedFilter:
                 in_flight.append((begin, end, res))
                 if defer and is_hier:
                     gtrace.append((begin, end, getattr(self._gpu, "_last_dispatch", None)))
-                if len(in_flight) >= K:
+                if len(in_flight) >= span:
                     b_start, b_end, item = in_flight.pop(0)
                     take_dense(b_start, b_end, item() if callable(item) else item)
 
@@ -1807,15 +1829,18 @@ class MatchedFilter:
             self._defer_slot = slot_idx
             deferred = _Deferred(finish_grouped)
             if gtrace and all(t[2] is not None for t in gtrace) and raw:
-                # How to read this call's result again from its buffers (SegmentPlan replay).
-                deferred.trace = dict(groups=gtrace, shape=shape, order=layout.order)
+                # How to read this call's result again from its buffers (SegmentPlan replay),
+                # and the slots it used (a replay needs each slot used once per segment).
+                deferred.trace = dict(groups=gtrace, shape=shape, order=layout.order, plan=self,
+                                      slots=[slot_of(k) for k in range(slot0, slot_idx)],
+                                      starts=gstarts)
             owners = self.__dict__.setdefault("_slot_owner", {})
             for k in range(slot0, slot_idx):
-                owners[k % K] = deferred
+                owners[slot_of(k)] = deferred
             return deferred
         in_flight = []
         collected_early = [False]
-        trace_groups = []
+        trace_groups, tstarts = [], []
         slot_idx = slot0
         # The packed coarse kernel takes pairs in groups of up to 16 per workgroup and needs
         # the pair count to divide: pad a hierarchical dispatch with copies of its last block
@@ -1828,13 +1853,14 @@ class MatchedFilter:
                 end = min(begin + batch, b)
                 count = end - begin
                 count_p = -(-count // pad_unit) * pad_unit
-                slot = slot_idx % K
+                slot = slot_of(slot_idx)
                 slot_idx += 1
                 starts = starts_pool[slot]
                 spec = spectra_pool[slot][:count_p]
                 starts[:count] = np.minimum(layout.starts[begin:end], ser.size).astype(np.int64) - base
                 if count_p > count:
                     starts[count:count_p] = starts[count - 1]
+                tstarts.append((starts, starts[:count_p].copy()))
                 self._gpu.forward(n, source, starts[:count_p], spec, defer=True,
                                   slot=slot if pipelined else None)
                 try:
@@ -1854,7 +1880,7 @@ class MatchedFilter:
                 in_flight.append((begin, end, res))
                 if defer and is_hier:
                     trace_groups.append((begin, end, getattr(self._gpu, "_last_dispatch", None)))
-                if len(in_flight) >= K:
+                if len(in_flight) >= span:
                     collected_early[0] = True
                     b_start, b_end, item = in_flight.pop(0)
                     r = item() if callable(item) else item
@@ -1925,11 +1951,14 @@ class MatchedFilter:
             return value
         deferred = _Deferred(finish_marking)
         if trace_groups and all(t[2] is not None for t in trace_groups) and raw:
-            # How to read this call's result again from its buffers (SegmentPlan replay).
-            deferred.trace = dict(groups=trace_groups, shape=shape, order=layout.order)
+            # How to read this call's result again from its buffers (SegmentPlan replay),
+            # and the slots it used (a replay needs each slot used once per segment).
+            deferred.trace = dict(groups=trace_groups, shape=shape, order=layout.order,
+                                  plan=self, slots=[slot_of(k) for k in range(slot0, slot_idx)],
+                                  starts=tstarts)
         owners = self.__dict__.setdefault("_slot_owner", {})
         for k in range(slot0, slot_idx):
-            owners[k % K] = deferred
+            owners[slot_of(k)] = deferred
         return deferred
 
     def empty_shared(self, shape, dtype=np.complex64, *, readback=False):
