@@ -240,7 +240,8 @@ def fine_work(work, before, after, fine_banks, device, binsize=None, problems=No
         s = work.stage("forward", "fp32", unit="blocks")
         s.add(blocks * fft_flops(n), blocks * (g.n_valid + n) * 8, blocks)
         inputs = pairs
-        if d.get("q15") is not None and d["ticks"] and d["ticks"]["q15"] > 0:
+        screened = bool(d.get("q15") is not None and d["ticks"] and d["ticks"]["q15"] > 0)
+        if screened:
             # The int16 screen ran on every pair; tier 0's float pass on what it passed.
             b0 = chain[0]
             s = work.stage("q15 b%d" % b0, "int16")
@@ -248,7 +249,9 @@ def fine_work(work, before, after, fine_banks, device, binsize=None, problems=No
                   (blocks + nt) * b0 * CBYTES["int16"] + d["q15"] * 8, pairs)
             inputs = d["q15"]
         for i, band in enumerate(chain):
-            prec = tier_precision(device, i, band)
+            # Behind the int16 screen the CPU's tier 0 is the pooled FP32 pass over the
+            # screen's survivors (hmf.c), not the FP16 gate.
+            prec = "fp32" if (i == 0 and screened) else tier_precision(device, i, band)
             surv = d["passed"][i]
             rows_d, rows_t = (blocks, nt) if inputs == pairs else (min(inputs, blocks), min(inputs, nt))
             s = work.stage("tier%d b%d" % (i, band), prec)

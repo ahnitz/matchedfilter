@@ -426,7 +426,35 @@ static void lanes_transpose8(float * restrict dst, const float *const *src, int 
 }
 #endif
 
+#if defined(__aarch64__) && (defined(__GNUC__) || defined(__clang__))
+#include <arm_neon.h>
+#define AP_HAVE_LANE_TRANSPOSE_NEON 1
+/* NEON (W = 4, the pair batch of 128-bit lanes): four loads, a 4x4 transpose in registers
+   and four stores per four elements. The scalar loop below measured ~16% of the M2 CPU's
+   fine stage (gather_template_batch + gather_data_batch around the pooled tiers). */
+static void lanes_transpose4(float * restrict dst, const float *const *src, int cnt, size_t n){
+  const float zero[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+  const float *s0 = cnt > 0 ? src[0] : zero, *s1 = cnt > 1 ? src[1] : zero;
+  const float *s2 = cnt > 2 ? src[2] : zero, *s3 = cnt > 3 ? src[3] : zero;
+  const size_t i0 = cnt > 0 ? 4 : 0, i1 = cnt > 1 ? 4 : 0, i2 = cnt > 2 ? 4 : 0, i3 = cnt > 3 ? 4 : 0;
+  for(size_t k = 0; k < n; k += 4){
+    float32x4_t a = vld1q_f32(s0), b = vld1q_f32(s1), c = vld1q_f32(s2), d = vld1q_f32(s3);
+    s0 += i0; s1 += i1; s2 += i2; s3 += i3;
+    float32x4_t ab0 = vtrn1q_f32(a, b), ab1 = vtrn2q_f32(a, b);
+    float32x4_t cd0 = vtrn1q_f32(c, d), cd1 = vtrn2q_f32(c, d);
+    float * restrict o = dst + k * 4;
+    vst1q_f32(o,      vreinterpretq_f32_f64(vtrn1q_f64(vreinterpretq_f64_f32(ab0), vreinterpretq_f64_f32(cd0))));
+    vst1q_f32(o + 4,  vreinterpretq_f32_f64(vtrn1q_f64(vreinterpretq_f64_f32(ab1), vreinterpretq_f64_f32(cd1))));
+    vst1q_f32(o + 8,  vreinterpretq_f32_f64(vtrn2q_f64(vreinterpretq_f64_f32(ab0), vreinterpretq_f64_f32(cd0))));
+    vst1q_f32(o + 12, vreinterpretq_f32_f64(vtrn2q_f64(vreinterpretq_f64_f32(ab1), vreinterpretq_f64_f32(cd1))));
+  }
+}
+#endif
+
 static void lanes_transpose(float * restrict dst, const float *const *src, int cnt, int W, size_t n){
+#ifdef AP_HAVE_LANE_TRANSPOSE_NEON
+  if(W == 4 && n % 4 == 0){ lanes_transpose4(dst, src, cnt, n); return; }
+#endif
 #ifdef AP_HAVE_LANE_TRANSPOSE
   static int have512 = -1, have256 = -1;
   if(have512 < 0){ have512 = __builtin_cpu_supports("avx512f"); have256 = __builtin_cpu_supports("avx"); }
