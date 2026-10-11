@@ -7,6 +7,8 @@ helpers for the parts that must agree across backends. See docs/cross-platform-r
 section 3.1 for the layer this is growing into.
 """
 
+import numpy as np
+
 from ._errors import UnsupportedSize
 
 #: Most bins one peak kernel dispatch reduces into (the kernels' compiled limit).
@@ -180,3 +182,115 @@ def hier_peaks_grouped(ctx, n, band, data, tmpl, ct0, raw_thr, groups, binsize, 
                           raw_thr1=raw_thr1, slot=slot, async_submit=async_submit,
                           sparse=sparse, row_windows=(groups, win),
                           **({} if handle_out is None else {"handle_out": handle_out}))
+
+
+# ---- device follow-up items (FollowupSpec), shared by the GPU backends -----------------------
+class FollowupSpec:
+    """A follow-up rule over a segment's fine results (pycbc's asymmetric follow-up).
+
+    For each job j: its peaks with |snr| >= threshold, by |snr| descending (ties in result
+    order), keeping the first in each interval of ``dedupe`` samples; each kept peak at
+    sample c with template ti is followed up on the PARTNER job's series (pairs[j], same
+    bank): filter_series(windows=slice(max(0, c - half), min(S, c + half)), binsize,
+    threshold=0, template_index=ti).
+
+    TimeDomainFilterBank.filter_series_many(jobs, followups=spec) and
+    SegmentPlan.run(jobs, followup=spec) apply it: on the device where a backend can (the CUDA
+    segment graph, _cudafollowup), else on the host (run_host). Both give
+    [(source job, rank, c, ti, FilterResults)] in (job, rank) order, and a device selection
+    must equal select() exactly: same candidates (|snr| = hypot(re, im) >= threshold), same
+    order (|snr| descending, ties by FOLLOWUP_KEY_SHIFTS), same dedupe."""
+
+    def __init__(self, pairs, threshold, dedupe, half, binsize, max_items=128,
+                 max_items_per_region=48):
+        self.pairs = [int(p) for p in pairs]
+        self.threshold, self.dedupe = float(threshold), int(dedupe)
+        self.half, self.binsize = int(half), int(binsize)
+        self.max_items, self.max_items_per_region = int(max_items), int(max_items_per_region)
+
+    def key(self):
+        return (tuple(self.pairs), self.threshold, self.dedupe, self.half, self.binsize)
+
+    def select(self, jobs, fine_out):
+        """[(j, rank, c, ti, follow-up job)] by the rule, from host results."""
+        sel = []
+        for j, r in enumerate(fine_out):
+            a = np.abs(r.snr)
+            keep = np.flatnonzero(a >= self.threshold)
+            keep = keep[np.argsort(-a[keep], kind="stable")]
+            used = set()
+            bank = jobs[j][0]
+            partner = jobs[self.pairs[j]][1]
+            S = len(partner)
+            for rank, i in enumerate(keep):
+                sec = int(r.sample_indices[i] // self.dedupe)
+                if sec in used:
+                    continue
+                used.add(sec)
+                c0 = int(r.sample_indices[i])
+                ti = int(r.template_indices[i])
+                sel.append((j, rank, c0, ti, (bank, partner, dict(
+                    windows=slice(max(0, c0 - self.half), min(S, c0 + self.half)),
+                    binsize=self.binsize, threshold=0.0, template_index=ti))))
+        return sel
+
+    def run_host(self, jobs, fine_out):
+        sel = self.select(jobs, fine_out)
+        from .time_domain import TimeDomainFilterBank
+        res = TimeDomainFilterBank.filter_series_many([s[4] for s in sel])
+        return [(j, rank, c0, ti, r) for (j, rank, c0, ti, _), r in zip(sel, res)]
+
+
+#: The device follow-up item record: FOLLOWUP_ITEM_WORDS uint32 words, in this order.
+#: c0 and the global template index are 64-bit (lo, hi). "rank" is the peak's position in the
+#: source job's candidates ordered by |snr| descending, ties by FOLLOWUP_KEY (result order).
+FOLLOWUP_ITEM_FIELDS = ("job", "rank", "c0_lo", "c0_hi", "ti_lo", "ti_hi", "t_local", "group",
+                        "slot", "nblocks")
+FOLLOWUP_ITEM_WORDS = len(FOLLOWUP_ITEM_FIELDS)
+#: The tie key a device selection ranks equal |snr| by (= FilterResults order of the job):
+#: entry (the job's sub-call) << 56 | caller block << 32 | local template << 16 | bin.
+FOLLOWUP_KEY_SHIFTS = dict(entry=56, row=32, template=16, bin=0)
+#: The logical per-dispatch descriptor a backend encodes into its own binding: the source job,
+#: its sub-call entry, (templates, bins) of the call, the dispatch's first layout row and row
+#: count, the layout-row -> caller-block map, the block start samples, the global templates.
+FOLLOWUP_DISPATCH_FIELDS = ("job", "entry", "nt", "nb", "b0", "rows", "row_caller",
+                            "row_sample", "template_global")
+
+
+def read_followup_items(items, idx_all, val_all, nbins, bpi, groups, spec, series_len):
+    """Host assembly of device follow-ups: [(job, rank, c0, ti, FilterResults)] in (job, rank)
+    order, or None when the device and host block layouts disagree (the caller then runs the
+    follow-ups on the host).
+
+    items: (k, FOLLOWUP_ITEM_WORDS) uint32 records; idx_all/val_all: the per-slot peaks, slot
+    (item index * bpi + block) holding nbins bins; groups[item.group]: the bank template group;
+    series_len[j]: the length of job j's series. Assembled exactly as
+    TimeDomainFilterBank._items_batch does for the same calls."""
+    from .time_domain import TimeDomainFilterBank, _consume_into, _results_from
+    out = []
+    order = np.lexsort((items[:, 1], items[:, 0]))
+    bs = int(spec.binsize)
+    for it in order:
+        o = items[it]
+        j, rank = int(o[0]), int(o[1])
+        c0 = int(o[2]) | (int(o[3]) << 32)
+        ti = int(o[4]) | (int(o[5]) << 32)
+        g = groups[int(o[7])]
+        S = int(series_len[int(spec.pairs[j])])
+        W = np.array([[max(0, c0 - int(spec.half)), min(S, c0 + int(spec.half))]], np.int64)
+        st, ws, we = TimeDomainFilterBank._window_layout(g, W, S)
+        m = int(st.size)
+        if m != int(o[9]) or m > bpi:
+            return None
+        base = int(it) * bpi * nbins
+        idx = np.asarray(idx_all[base:base + m * nbins]).reshape(m, 1, nbins).astype(np.int64)
+        val = np.array(val_all[base:base + m * nbins]).reshape(m, 1, nbins)
+        counts = ((we - ws + bs - 1) // bs).astype(np.int64)
+        lists = ([], [], [], [], [])
+        stt = st.astype(np.int64)
+        for u in np.unique(counts):
+            mk = counts == u
+            _consume_into(lists, idx[mk][:, :, :u], val[mk][:, :, :u], stt[mk], g,
+                          (int(o[6]), 1), g.n, ti)
+        out.append((j, rank, c0, ti, _results_from(lists)))
+    return out

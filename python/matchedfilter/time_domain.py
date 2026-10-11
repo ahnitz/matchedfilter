@@ -1448,7 +1448,7 @@ class TimeDomainFilterBank:
         return side == "cpu", record
 
     @staticmethod
-    def filter_series_many(jobs, wait=True):
+    def filter_series_many(jobs, wait=True, followups=None):
         """Several filter_series calls as one batch: jobs is [(bank, series, kwargs)], the
         result the list of their FilterResults, identical to calling each in turn.
 
@@ -1462,6 +1462,11 @@ class TimeDomainFilterBank:
         its clock up). The jobs' input series must not be overwritten until then. A later
         batch on the same banks first finishes whatever of this one it would overwrite.
         """
+        if followups is not None:
+            # The fine stage, then the follow-up rule on its results (_gpuhost.FollowupSpec).
+            # A CUDA segment graph runs both on the device: SegmentPlan.run(followup=...).
+            fine = TimeDomainFilterBank.filter_series_many(jobs)
+            return fine, followups.run_host(jobs, fine)
         from . import _Deferred
         import os
         global _BATCH_TOKEN
@@ -1918,6 +1923,10 @@ class TimeDomainFilterBank:
                 result[g_indices] = g_dest
 
 
+from ._gpuhost import FollowupSpec                        # noqa: E402
+FollowUp = FollowupSpec                                       # the name the CUDA track used
+
+
 class SegmentPlan:
     """filter_series_many for a job set that recurs, e.g. every segment of one top template.
 
@@ -1976,11 +1985,31 @@ class SegmentPlan:
                         getattr(series, 'size', None), tuple(items)))
         return tuple(sig)
 
-    def run(self, jobs):
+    def run(self, jobs, prelude=None, prelude_key=None, followup=None):
+        """filter_series_many(jobs), replayed when the job set recurs.
+
+        prelude (CUDA): a callable submitting the work that produces the jobs' input series
+        on the device -- e.g. the middle stage, correlate_series(..., out=<the jobs' series
+        buffer>, wait=False) from inputs the caller rewrites in place -- run before the jobs
+        and captured into the same graph. prelude_key identifies what it submits (the caller
+        guarantees the same key means the same submission: buffers, windows, banks); a
+        replay then runs it from the graph without calling it.
+
+        followup (FollowUp): also run its follow-ups, and return (fine results, follow-ups)."""
         import os
         ctx = self._cuda_context(jobs)
         if ctx is not None and os.environ.get("MF_CUDA_SEGMENT_GRAPH", "1") != "0":
-            return self._run_cuda(jobs, ctx)
+            out = self._run_cuda(jobs, ctx, prelude, prelude_key, followup)
+            if followup is None:
+                return out
+            fine, fu = out
+            if fu is None:
+                fu = followup.run_host(jobs, fine)
+            return fine, fu
+        if prelude is not None:
+            prelude()
+        if followup is not None:
+            return TimeDomainFilterBank.filter_series_many(jobs, followups=followup)
         if os.environ.get("MF_SEGMENT_REPLAY", "0") == "0":
             # Experimental: on realistic data (two-tier chains, several job sets sharing the
             # device) replays dropped peaks and once read freed buffers. Until that is fixed
@@ -2003,37 +2032,56 @@ class SegmentPlan:
         return self._trace_run(jobs, sig)
 
     # ---- CUDA: the whole fine stage as one graph -----------------------------------------
-    def _run_cuda(self, jobs, ctx):
+    def _run_cuda(self, jobs, ctx, prelude=None, prelude_key=None, followup=None):
         """One CUDA graph per recurring job set: the first run of a signature runs as usual
         (allocations, module loads, per-call graphs and plans settle), the second is captured
         whole -- every bank's forwards, gates, compactions, refines and readbacks, across the
         fork streams -- and later runs relaunch it with one cuGraphLaunch and one wait, then
         read each dispatch's results. Any change (signature, a freed buffer, a failed
         capture) falls back to filter_series_many."""
+        import os
         from . import _cudacompute
-        sig = self._signature(jobs)
+        sig = (self._signature(jobs), prelude_key if prelude is not None else None,
+               followup.key() if followup is not None else None)
+        wrap = (lambda out, fu=None: (out, fu)) if followup is not None else (lambda out, fu=None: out)
         tr = self._trace
         if tr is not None and tr["sig"] == sig:
             out = self._replay_cuda(tr)
             if out is not None:
                 self.replays += 1
-                return out
+                return wrap(out, self._read_followups(tr.get("fu")))
         self._trace = None
         if self._seen != sig:
             self._seen = sig
-            return TimeDomainFilterBank.filter_series_many(jobs)
+            if prelude is not None:
+                prelude()
+            return wrap(TimeDomainFilterBank.filter_series_many(jobs))
         if self._graph is None:
             self._graph = _cudacompute.SegmentGraph(ctx)
         for bank, _, _ in jobs:
             bank._trace_sink = []
+        built = {}
+
+        def submit():
+            if prelude is not None:
+                prelude()
+            futures = TimeDomainFilterBank.filter_series_many(jobs, wait=False)
+            if followup is not None:
+                built["fu"] = self._device_followups(ctx, jobs, followup)
+            return futures
         try:
-            futures = self._graph.capture(
-                lambda: TimeDomainFilterBank.filter_series_many(jobs, wait=False))
+            futures = self._graph.capture(submit)
             sinks = [bank._trace_sink for bank, _, _ in jobs]
-        except RuntimeError:
+        except RuntimeError as e:
             self.capture_failures += 1
+            self.last_capture_error = str(e)
+            if os.environ.get("MF_REPLAY_DEBUG"):
+                import traceback
+                traceback.print_exc()
             self._seen = None
-            return TimeDomainFilterBank.filter_series_many(jobs)
+            if prelude is not None:
+                prelude()
+            return wrap(TimeDomainFilterBank.filter_series_many(jobs))
         finally:
             for bank, _, _ in jobs:
                 bank._trace_sink = None
@@ -2046,8 +2094,49 @@ class SegmentPlan:
             per_job.append(sinks[j][k] if k < len(sinks[j]) else None)
         if all(e is not None and not e[2][0]
                and all(getattr(d, "trace", None) is not None for d, *_ in e[0]) for e in per_job):
-            self._trace = dict(sig=sig, jobs=[(e[0], e[1]) for e in per_job])
-        return out
+            self._trace = dict(sig=sig, jobs=[(e[0], e[1]) for e in per_job], fu=built.get("fu"))
+        return wrap(out, self._read_followups(built.get("fu")))
+
+    def _read_followups(self, dfu):
+        """The device follow-ups' results, or None (the caller runs them on the host)."""
+        if dfu is None:
+            self.followups_host = getattr(self, "followups_host", 0) + 1
+            return None
+        res = dfu.read()
+        if res is None:
+            self.followups_overflow = getattr(self, "followups_overflow", 0) + 1
+        else:
+            self.followups_device = getattr(self, "followups_device", 0) + 1
+        return res
+
+    def _device_followups(self, ctx, jobs, followup):
+        """Inside the capture, after the fine stage: the follow-ups on the device, or None
+        (the host then runs them) when this job set cannot take that path."""
+        import os
+        try:
+            from . import _cudafollowup
+        except ImportError:                    # a build without the CUDA follow-up kernels
+            return None
+        if os.environ.get("MF_CUDA_DEVICE_FOLLOWUPS", "1") == "0":
+            return None
+        per_job, cursor = [], {}
+        for j, (bank, _, _) in enumerate(jobs):
+            k = cursor.get(id(bank), 0)
+            cursor[id(bank)] = k + 1
+            sink = bank._trace_sink
+            e = sink[k] if k < len(sink) else None
+            if e is None or e[2][0] or not all(getattr(d, "trace", None) is not None
+                                               for d, *_ in e[0]):
+                return None
+            per_job.append(e[0])
+        try:
+            dfu = _cudafollowup.DeviceFollowUps(ctx, self._graph, followup, jobs, per_job)
+        except _cudafollowup.Unsupported as e:
+            self.followup_unsupported = str(e)
+            return None
+        self._graph.join()
+        dfu.enqueue()
+        return dfu
 
     def _replay_cuda(self, tr):
         """Relaunch the segment graph, then read every dispatch. Sparse results go straight
