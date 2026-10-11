@@ -29,6 +29,12 @@
 #ifndef NLEN
 #define NLEN 1024
 #endif
+//: MF_PAIR_OUT: filterPair's output slot as a parameter (filterPairOut), for the listed
+//: follow-up entry refineItems (refine_bounded.slang). CUDA always builds it; a SPIR-V build
+//: defines it for the refineItems module only, so tierb's other modules are unchanged.
+#if defined(MF_CUDA) && !defined(MF_PAIR_OUT)
+#define MF_PAIR_OUT 1
+#endif
 //: Every unroll in this file. CUDA forces it: with a plain [unroll] Slang emitted the
 //: multi-bin path's per-register loops as loops in CUDA source and NVVM kept myMag/myBin in
 //: local memory (288 B per thread). SPIR-V and Metal keep [unroll] (their output unchanged).
@@ -755,6 +761,14 @@ void filterOne(uint pair, uint d, uint t, uint tid, C dreg[RADIX],
                RWStructuredBuffer<int> peakIdx, RWStructuredBuffer<float2> peakVal,
                uint winStart, uint winEnd,
                uint binsize, int binShift, uint nbins, uint thrBits)
+#elif defined(MF_PAIR_OUT)
+//: CUDA: the output slot is a parameter (filterPairOut), so a listed entry can place a
+//: pair's peaks compactly (refineItems, refine_bounded.slang); filterPair passes pair.
+void filterPairOut(uint pair, uint opair, uint tid,
+                   StructuredBuffer<CVal> data, StructuredBuffer<CVal> tmpl,
+                   RWStructuredBuffer<int> peakIdx, RWStructuredBuffer<float2> peakVal,
+                   uint ntmpl, uint winStart, uint winEnd,
+                   uint binsize, int binShift, uint nbins, uint thrBits)
 #else
 void filterPair(uint pair, uint tid,
                 StructuredBuffer<CVal> data, StructuredBuffer<CVal> tmpl,
@@ -772,6 +786,9 @@ void filterPair(uint pair, uint tid,
 #endif
     _tid = tid;
     uint d = pair / ntmpl, t = pair % ntmpl;
+#if defined(MF_PAIR_OUT)
+    pair = opair;                       // from here on, pair is only the output slot
+#endif
 #endif
     C r[RADIX];
 
@@ -1034,6 +1051,18 @@ void filterPair(uint pair, uint tid,
 #endif
 #endif
 }
+
+#if !COARSE16 && defined(MF_PAIR_OUT)
+void filterPair(uint pair, uint tid,
+                StructuredBuffer<CVal> data, StructuredBuffer<CVal> tmpl,
+                RWStructuredBuffer<int> peakIdx, RWStructuredBuffer<float2> peakVal,
+                uint ntmpl, uint winStart, uint winEnd,
+                uint binsize, int binShift, uint nbins, uint thrBits)
+{
+    filterPairOut(pair, pair, tid, data, tmpl, peakIdx, peakVal, ntmpl, winStart, winEnd,
+                  binsize, binShift, nbins, thrBits);
+}
+#endif
 
 
 

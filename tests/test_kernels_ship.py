@@ -113,7 +113,7 @@ def test_production_shader_sources_match_built_manifest():
     recorded = _manifest()['source_hashes']
     assert set(recorded) == {'tierb.slang', 'fft_transform.slang', 'coarse_tile.slang',
                              'series_forward.slang', 'series_bands.slang', 'pack_coarse.slang',
-                             'twiddle.slang'}
+                             'twiddle.slang', 'refine_bounded.slang'}
     for name, digest in recorded.items():
         assert hashlib.sha256((source / name).read_bytes()).hexdigest() == digest, (
             '%s changed: rebuild all kernels with tools/build_spirv.py' % name)

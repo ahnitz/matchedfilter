@@ -62,7 +62,11 @@
       "metal_lds_cap": 512,
       "metal_lds_bytes": 512,
       "lds_cap": 512,
-      "lds_bytes": 512
+      "lds_bytes": 512,
+      "items": {
+        "file": "items_64.spv",
+        "descriptors": 6
+      }
     },
     "128": {
       "local_size": [
@@ -124,7 +128,11 @@
       "metal_lds_cap": 512,
       "metal_lds_bytes": 1024,
       "lds_cap": 512,
-      "lds_bytes": 1024
+      "lds_bytes": 1024,
+      "items": {
+        "file": "items_128.spv",
+        "descriptors": 6
+      }
     },
     "256": {
       "local_size": [
@@ -199,7 +207,11 @@
       "metal_lds_cap": 512,
       "metal_lds_bytes": 2048,
       "lds_cap": 512,
-      "lds_bytes": 2048
+      "lds_bytes": 2048,
+      "items": {
+        "file": "items_256.spv",
+        "descriptors": 6
+      }
     },
     "512": {
       "local_size": [
@@ -274,7 +286,11 @@
       "metal_lds_cap": 512,
       "metal_lds_bytes": 4096,
       "lds_cap": 512,
-      "lds_bytes": 4096
+      "lds_bytes": 4096,
+      "items": {
+        "file": "items_512.spv",
+        "descriptors": 6
+      }
     },
     "1024": {
       "local_size": [
@@ -363,7 +379,11 @@
       "metal_lds_cap": 1024,
       "metal_lds_bytes": 8192,
       "lds_cap": 512,
-      "lds_bytes": 4096
+      "lds_bytes": 4096,
+      "items": {
+        "file": "items_1024.spv",
+        "descriptors": 6
+      }
     },
     "2048": {
       "local_size": [
@@ -452,7 +472,11 @@
       "metal_lds_cap": 2048,
       "metal_lds_bytes": 16384,
       "lds_cap": 1024,
-      "lds_bytes": 8192
+      "lds_bytes": 8192,
+      "items": {
+        "file": "items_2048.spv",
+        "descriptors": 6
+      }
     },
     "4096": {
       "local_size": [
@@ -544,7 +568,11 @@
       "metal_lds_cap": 4096,
       "metal_lds_bytes": 32768,
       "lds_cap": 2048,
-      "lds_bytes": 16384
+      "lds_bytes": 16384,
+      "items": {
+        "file": "items_4096.spv",
+        "descriptors": 6
+      }
     },
     "8192": {
       "local_size": [
@@ -681,6 +709,14 @@
       "portable": {
         "file": "tierb_8192_lds32.spv",
         "lds_bytes": 32768
+      },
+      "items": {
+        "file": "items_8192.spv",
+        "descriptors": 6,
+        "portable": {
+          "file": "items_8192_lds32.spv",
+          "lds_bytes": 32768
+        }
       }
     },
     "16384": {
@@ -808,6 +844,14 @@
       "portable": {
         "file": "tierb_16384_lds32.spv",
         "lds_bytes": 32768
+      },
+      "items": {
+        "file": "items_16384.spv",
+        "descriptors": 6,
+        "portable": {
+          "file": "items_16384_lds32.spv",
+          "lds_bytes": 32768
+        }
       }
     },
     "32768": {
@@ -935,6 +979,14 @@
       "portable": {
         "file": "tierb_32768_lds32.spv",
         "lds_bytes": 32768
+      },
+      "items": {
+        "file": "items_32768.spv",
+        "descriptors": 6,
+        "portable": {
+          "file": "items_32768_lds32.spv",
+          "lds_bytes": 32768
+        }
       }
     },
     "65536": {
@@ -1062,6 +1114,14 @@
       "portable": {
         "file": "tierb_65536_lds32.spv",
         "lds_bytes": 32768
+      },
+      "items": {
+        "file": "items_65536.spv",
+        "descriptors": 6,
+        "portable": {
+          "file": "items_65536_lds32.spv",
+          "lds_bytes": 32768
+        }
       }
     }
   },
@@ -1500,12 +1560,13 @@
     }
   },
   "source_hashes": {
-    "tierb.slang": "84797f14b2fed3ccabd110f2c04e93220daf588f611a1798572d511976689c86",
+    "tierb.slang": "4ad1055383af191476d264db99dc758fe07874123d4037a34e909e0a0055dbdf",
     "fft_transform.slang": "504c70cb63d1d87c84d60d93b7a0c9a359fe67cfe48dcbe1fbc84127a12b3bc1",
     "coarse_tile.slang": "8b1a3f9193e20b76cc02641e71b77023d544b0bd1bff8c4194f38371ad47fb47",
     "series_forward.slang": "1ed347cedae7d1f7543ccfbfd6a4ea1971f6be1eb4fdd504c9e6b0a17b849ee5",
     "series_bands.slang": "6948766ea903aef0c4039d2545e0a1611fd4a7ce0e7fd908ece7651aaca4d2b1",
     "pack_coarse.slang": "6599e775732a3d54ef2517a469aaa311a38028b41a92a87e166fce94ef3076c2",
-    "twiddle.slang": "b5be2ea75191cff650ca27da20975a078cacc131711aab125219601a80781134"
+    "twiddle.slang": "b5be2ea75191cff650ca27da20975a078cacc131711aab125219601a80781134",
+    "refine_bounded.slang": "48203de4ade278cc9f6a504810f328757515e918602ce92ea2c3c4469379e882"
   }
 }
