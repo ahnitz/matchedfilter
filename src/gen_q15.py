@@ -3,7 +3,8 @@
 Same DAGs as gen.py's split-radix codelets, on a vector of int16 lanes (`vq`,
 twice the float lane count at a given vector width). The arithmetic is exact
 integer add/subtract plus Q15 rounding multiplies (Q_MUL = round(a*b / 2^15),
-vpmulhrsw on x86), and nothing in a codelet rescales: the caller sizes its
+vpmulhrsw on x86) and multiply-accumulates (Q_MLAH/Q_MLSH = acc +- round(a*b / 2^15),
+one SQRDMLAH/SQRDMLSH on AArch64, Q_ADD/Q_SUB(acc, Q_MUL) elsewhere), and nothing in a codelet rescales: the caller sizes its
 inputs so that every intermediate stays in range (see q15-inl.h for the bound).
 Twiddle constants are |cos|, |sin| rounded to Q15 and the signs ride on the
 adds, as gen.py does for the float FMAs.
@@ -39,31 +40,29 @@ class QGen(SRGen):
         if t == "+i":
             s.emit("vf %s=V_SUB(Z,%s), %s=%s;" % (orr, ai, oii, ar)); return
         cc = s.const("c", abs(c)); ss = s.const("s", abs(sn))
-        k = s.nc; s.nc += 1
-        x1, x2, y1, y2 = ("m%d_%d" % (k, j) for j in range(4))
-        s.emit("vf %s=Q_MUL(%s,%s), %s=Q_MUL(%s,%s);" % (x1, ar, cc, x2, ai, ss))
-        s.emit("vf %s=Q_MUL(%s,%s), %s=Q_MUL(%s,%s);" % (y1, ar, ss, y2, ai, cc))
+        # x1 = ar*cc, x2 = ai*ss, y1 = ar*ss, y2 = ai*cc; real = sc*x1 - sg*x2,
+        # imag = sg*y1 + sc*y2. One product of each pair is a plain Q_MUL and the other
+        # rides in a rounding multiply-accumulate (Q_MLAH/Q_MLSH: acc +- round(a*b/2^15),
+        # one instruction where the target has it, else exactly Q_ADD/Q_SUB(acc, Q_MUL)).
         sc = 1 if c >= 0 else -1
         sg = 1 if sn >= 0 else -1
-        # real = sc*x1 - sg*x2
         if (sc, sg) == (1, 1):
-            s.emit("vf %s=V_SUB(%s,%s);" % (orr, x1, x2))
+            s.emit("vf %s=Q_MLSH(Q_MUL(%s,%s),%s,%s);" % (orr, ar, cc, ai, ss))
         elif (sc, sg) == (1, -1):
-            s.emit("vf %s=V_ADD(%s,%s);" % (orr, x1, x2))
+            s.emit("vf %s=Q_MLAH(Q_MUL(%s,%s),%s,%s);" % (orr, ar, cc, ai, ss))
         elif (sc, sg) == (-1, -1):
-            s.emit("vf %s=V_SUB(%s,%s);" % (orr, x2, x1))
+            s.emit("vf %s=Q_MLSH(Q_MUL(%s,%s),%s,%s);" % (orr, ai, ss, ar, cc))
         else:
-            s.emit("vf n%s=V_ADD(%s,%s);" % (orr, x1, x2))
+            s.emit("vf n%s=Q_MLAH(Q_MUL(%s,%s),%s,%s);" % (orr, ar, cc, ai, ss))
             s.emit("vf %s=V_SUB(Z,n%s);" % (orr, orr))
-        # imag = sg*y1 + sc*y2
         if (sg, sc) == (1, 1):
-            s.emit("vf %s=V_ADD(%s,%s);" % (oii, y1, y2))
+            s.emit("vf %s=Q_MLAH(Q_MUL(%s,%s),%s,%s);" % (oii, ar, ss, ai, cc))
         elif (sg, sc) == (1, -1):
-            s.emit("vf %s=V_SUB(%s,%s);" % (oii, y1, y2))
+            s.emit("vf %s=Q_MLSH(Q_MUL(%s,%s),%s,%s);" % (oii, ar, ss, ai, cc))
         elif (sg, sc) == (-1, 1):
-            s.emit("vf %s=V_SUB(%s,%s);" % (oii, y2, y1))
+            s.emit("vf %s=Q_MLSH(Q_MUL(%s,%s),%s,%s);" % (oii, ai, cc, ar, ss))
         else:
-            s.emit("vf n%s=V_ADD(%s,%s);" % (oii, y1, y2))
+            s.emit("vf n%s=Q_MLAH(Q_MUL(%s,%s),%s,%s);" % (oii, ar, ss, ai, cc))
             s.emit("vf %s=V_SUB(Z,n%s);" % (oii, oii))
 
     def load(s, idx):
@@ -74,13 +73,13 @@ class QGen(SRGen):
             s.emit("vf tR%d=Q_LOADU(tr+TS*%d), tI%d=Q_LOADU(ti+TS*%d);" % (idx, idx, idx, idx))
             s.emit("vf dR%d=Q_SET1(dq[DS*%d]), dI%d=Q_SET1(dq[DS*%d+1]), nI%d=Q_SET1(dq[DS*%d+2]);"
                    % (idx, idx, idx, idx, idx, idx))
-            s.emit("vf %s=V_SUB(Q_MUL(dR%d,tR%d),Q_MUL(dI%d,tI%d));" % (o[0], idx, idx, idx, idx))
-            s.emit("vf %s=V_SUB(Q_MUL(nI%d,tR%d),Q_MUL(dR%d,tI%d));" % (o[1], idx, idx, idx, idx))
+            s.emit("vf %s=Q_MLSH(Q_MUL(dR%d,tR%d),dI%d,tI%d);" % (o[0], idx, idx, idx, idx))
+            s.emit("vf %s=Q_MLSH(Q_MUL(nI%d,tR%d),dR%d,tI%d);" % (o[1], idx, idx, idx, idx))
             return o
         if s.tw and idx != 0:
             s.emit("const vf W%dr=Q_SET1(twr[%d]), W%di=Q_SET1(twi[%d]);" % (idx, idx, idx, idx))
-            s.emit("vf %s=V_SUB(Q_MUL(ar[S*%d],W%dr),Q_MUL(ai[S*%d],W%di));" % (o[0], idx, idx, idx, idx))
-            s.emit("vf %s=V_ADD(Q_MUL(ar[S*%d],W%di),Q_MUL(ai[S*%d],W%dr));" % (o[1], idx, idx, idx, idx))
+            s.emit("vf %s=Q_MLSH(Q_MUL(ar[S*%d],W%dr),ai[S*%d],W%di);" % (o[0], idx, idx, idx, idx))
+            s.emit("vf %s=Q_MLAH(Q_MUL(ar[S*%d],W%di),ai[S*%d],W%dr);" % (o[1], idx, idx, idx, idx))
             return o
         s.emit("vf %s=ar[S*%d], %s=ai[S*%d];" % (o[0], idx, o[1], idx))
         return o
