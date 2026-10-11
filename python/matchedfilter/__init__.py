@@ -1362,6 +1362,11 @@ class MatchedFilter:
         evictions and re-recording, every segment) for callers that never keep two batches
         in flight; a caller that does (a pipeline collecting k-2) gets disjoint slots for the
         batch still running."""
+        half = self.__dict__.get("_force_slot_half")
+        if half is not None and K >= 2:
+            # A SegmentPlan keeping two job sets in flight (slot_half): each set's calls
+            # use their own half of the slots, so their records never alias.
+            return (int(half) % 2) * (K // 2)
         prev = self.__dict__.get("_defer_base")
         if prev is None or K < 2:
             return 0

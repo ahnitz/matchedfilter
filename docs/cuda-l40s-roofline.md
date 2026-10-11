@@ -581,3 +581,64 @@ busy 37-54%). Host CPU falls only ~3 ms, because the remaining host work is resu
 data staging, not submission. The next step for the graph is to keep two segments in flight
 (two graphs, double-buffered inputs), as the per-call path now does. (The "2 tops, base" host
 CPU figure is not comparable: the measurement starts at gc.freeze, which runs once per top.)
+
+## Phase 10 (2026-10-11): the folded-tops gap explained; two segment graphs in flight
+
+**The gap is not folding.** The device-only fine peak (top 14, segment 1, bank 311, L1: template
+50 at 271264, SNR 6.257 against threshold 6) appears in some processes and not others, in
+EVERY mode, including the plain per-call path with no graph and no folding:
+
+| run | mode | device-only peak |
+|---|---|---|
+| 1 | folded graph | yes |
+| 1 | per-call | no |
+| 2 | folded graph | no |
+| 2 | per-call | **yes** |
+| 3 | folded graph | no |
+| 3 | per-call | no |
+
+Within one process, folded and unfolded, graph and per-call give identical results on every
+job (`LADDER_VERIFY_REPLAY`, and the new `test_folded_job_sets_match_separate_calls` and
+`test_two_segments_in_flight_match_separate_calls`). Across processes the per-call path itself
+differs (dumps of two per-call runs on identical data differ in 1-3 jobs per segment). The
+cause is per-process measured choices: the coarse kernel variant (timed at first use; three
+processes picked three different variant sets, and the table and recurrence variants round
+differently) and the per-group chain from the timed cost model (the same bank picked
+(256, 512) or (512, 1024) in different runs). Each choice is a valid, bounded gate; a pair whose
+coarse value sits at the gate margin can pass under one and not another. The peak is real (an
+exact refine of an above-threshold pair), its SNR is 0.26 above threshold, and the CPU
+reference dismissed it at its own gate: harmless, inside the false-dismissal budget. Making
+runs reproducible means persisting the measured choices (cost file, coarse choice) per device,
+which is the chain-stability work on gatechain.
+
+Two real hazards turned up on the way and are fixed:
+- A captured host-to-device copy reads its host source at every launch. Sources included
+  temporaries (packed coarse templates) and per-call staging. The capture now snapshots every
+  host source into staging the graph owns.
+- A resident upload (templates, coarse bands) was ordered on its own stream only, while later
+  calls of the same Context read it from other slot streams. It is now ordered as a write in
+  flight, in both the per-call path and the graph.
+
+Graph staleness is now per graph (each graph's own address set), not a global generation:
+before, any unrelated free -- an old bank collected, a follow-up workspace replaced -- stopped
+every graph from replaying.
+
+**Two segment graphs in flight** (`SegmentPlan.submit`, `SegmentPlan(slot_half=)`, ladder
+`LADDER_INFLIGHT=1` with `LADDER_GRAPH_MIDDLE` and `LADDER_DEVICE_FOLLOWUPS`):
+- Segment k's graph is launched, then segment k-1 is collected while the device runs k.
+- Inputs and middle outputs are double-buffered, one SegmentPlan per buffer.
+- Each plan's calls use their own half of every fine plan's slots, so the two graphs' records,
+  workspaces and readbacks never alias.
+- Graphs wait for the previous graph on the device (one at a time there).
+
+Measured steady state (production bank, 14 segments, the first 6 excluded so that capture
+runs are not counted; `LADDER_GC_FREEZE=1`, `MF_CUDA_BLOCKING_SYNC=1`; 3 interleaved rounds,
+medians; base main c4f1c45 per-call):
+
+| | segment, n=2048 | segment, unpinned | host CPU |
+|---|---|---|---|
+| base (per-call) | 19.7 ms | 21.3 ms | 21.5 ms |
+| two graphs in flight | **13.6 ms** | **13.1 ms** | 21.2 ms |
+
+1.45x (pinned) and 1.6x (unpinned) over main's per-call path. The steady segment is now about
+the host's own work (data staging, result parsing, recording) and no longer waits for it.
