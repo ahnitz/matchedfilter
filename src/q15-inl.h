@@ -46,6 +46,19 @@ typedef hn::Vec<ap_qtag> vq;
 #define Q_ADD(a, b)    hn::SaturatedAdd((a), (b))
 #define Q_SUB(a, b)    hn::SaturatedSub((a), (b))
 #define Q_MUL(a, b)    hn::MulFixedPoint15((a), (b))
+/* acc +- round(a*b / 2^15): AArch64 SQRDMLAH/SQRDMLSH (FEAT_RDM, every Apple core) in one
+   instruction. acc is an integer, so rounding the sum is rounding the product: identical
+   to Q_ADD/Q_SUB(acc, Q_MUL(a, b)) except where Q_MUL alone saturates (a = b = -32768),
+   which the screen's input range excludes. */
+#if HWY_ARCH_ARM_A64 && defined(__ARM_FEATURE_QRDMX) && \
+    (HWY_TARGET == HWY_NEON || HWY_TARGET == HWY_NEON_BF16 || HWY_TARGET == HWY_NEON_WITHOUT_AES)
+static_assert(HWY_MAX_LANES_D(ap_qtag) == 8, "Q_MLAH assumes a full 128-bit int16 vector");
+#define Q_MLAH(acc, a, b) vq{vqrdmlahq_s16((acc).raw, (a).raw, (b).raw)}
+#define Q_MLSH(acc, a, b) vq{vqrdmlshq_s16((acc).raw, (a).raw, (b).raw)}
+#else
+#define Q_MLAH(acc, a, b) Q_ADD((acc), Q_MUL((a), (b)))
+#define Q_MLSH(acc, a, b) Q_SUB((acc), Q_MUL((a), (b)))
+#endif
 
 }  // namespace HWY_NAMESPACE
 }  // namespace ap
