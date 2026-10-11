@@ -162,6 +162,21 @@ class GpuSampler:
     def stop(self):
         self.thread = None
 
+    def mark(self, on):
+        """Steady span starts (on) / ends: device intervals (Metal, MF_GPU_TIMING=1) are
+        cleared at the start and their union taken at the end, against the host span."""
+        if on and not self.on:
+            _gputime.busy(clear=True)
+            self.t_on = time.perf_counter()
+        self.on = on
+
+    def busy_union(self):
+        if getattr(self, "t_on", None) is None:
+            return None
+        wall = time.perf_counter() - self.t_on
+        tot, _, _ = _gputime.busy(clear=True)
+        return dict(busy_pct=100.0 * tot / wall, device_s=tot, wall_s=wall) if tot else None
+
     def report(self):
         if not self.samples:
             return None
@@ -540,7 +555,7 @@ def run_device(device, tops, args, seed):
                     finish(pseg, pser, pmids, fo, ptm, fu=ff)
                 for seg in range(args.segments):
                     tm = first if seg < args.warmup else steady
-                    bsampler.on = args.warmup <= seg
+                    bsampler.mark(args.warmup <= seg)
                     if seg == args.warmup and not fold:
                         roof_snap("mid")             # the middle's work is counted at submit
                         if not inflight:
@@ -658,6 +673,9 @@ def run_device(device, tops, args, seed):
                     collect(pending)
                     pending[4].add("segment", time.perf_counter() - t, n=0)
                 bsampler.stop()
+                bu = bsampler.busy_union()
+                if bu:
+                    counts["gpu_busy_union"] = bu
                 if bsampler.samples:
                     counts["gpu_sampler"] = bsampler.report()
                 # A Vulkan segment replay advances the fine plans' work counters as the calls
@@ -886,6 +904,10 @@ def main():
     if gs:
         print(f"  gpu (sysfs, steady): busy {gs['busy_pct']:.0f}%, sclk mean {gs['sclk_mhz_mean']:.0f} "
               f"MHz (min {gs['sclk_mhz_min']:.0f}, max {gs['sclk_mhz_max']:.0f}), {gs['n']} samples")
+    bu = report["counts"].get("gpu_busy_union")
+    if bu:
+        print(f"  gpu (command-buffer union, steady): busy {bu['busy_pct']:.0f}%: device "
+              f"{bu['device_s']:.3f}s of {bu['wall_s']:.3f}s")
     if report["steady_s"].get("wall") and report["steady_s"].get("cpu") is not None:
         w, c = report["steady_s"]["wall"], report["steady_s"]["cpu"]
         print(f"  host: cpu {c:.3f}s of steady wall {w:.3f}s ({100 * c / w:.0f}%)")

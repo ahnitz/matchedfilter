@@ -841,6 +841,8 @@ class Context(InputUploads):
         self.last_gpu_time = float(t1) - float(t0)
         if self._timing:
             self.timing_log.append((label, self.last_gpu_time * 1e3))
+            if t1 > t0 > 0:
+                _gputime.INTERVALS.append((float(t0), float(t1)))
 
     def timings(self):
         """Finish outstanding command buffers and return the timing log (MF_GPU_TIMING=1)."""

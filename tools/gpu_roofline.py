@@ -157,8 +157,9 @@ class Probe:
         return best
 
 
-def chain_src(nchain, op):
-    """A probe with `nchain` independent dependency chains.
+def chain_src(nchain, op, unroll=1):
+    """A probe with `nchain` independent dependency chains, each advanced `unroll` times per
+    loop iteration (rate = threads x iters x nchain x unroll ops).
 
     Too few chains and the loop measures instruction LATENCY, not throughput:
     each operation waits on the previous one. Too many and the registers
@@ -172,6 +173,7 @@ def chain_src(nchain, op):
         body = " ".join("a%d=fma(a%d,k,c);" % (i, i) for i in range(nchain))
     else:
         body = " ".join("a%d+=c;" % i for i in range(nchain))
+    body = " ".join([body] * unroll)
     tot = "+".join("a%d" % i for i in range(nchain))
     return """
 #include <metal_stdlib>

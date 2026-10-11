@@ -8,6 +8,28 @@ import os
 import weakref
 
 _CONTEXTS = weakref.WeakSet()
+#: (start_s, end_s) device intervals on one host-comparable clock, from backends that report
+#: absolute command-buffer times (Metal GPUStartTime/GPUEndTime). busy() takes their union.
+INTERVALS = []
+
+
+def busy(clear=True):
+    """(device-busy seconds, first start, last end) of the recorded intervals: the union, so
+    command buffers that ran concurrently on separate queues are counted once."""
+    iv = sorted(INTERVALS)
+    if clear:
+        INTERVALS.clear()
+    tot, cur0, cur1 = 0.0, None, None
+    for a, b in iv:
+        if cur1 is None or a > cur1:
+            if cur1 is not None:
+                tot += cur1 - cur0
+            cur0, cur1 = a, b
+        else:
+            cur1 = max(cur1, b)
+    if cur1 is not None:
+        tot += cur1 - cur0
+    return tot, (iv[0][0] if iv else None), (max(b for _, b in iv) if iv else None)
 
 
 def enabled():
