@@ -103,11 +103,14 @@ def test_a_bank_adopts_a_persisted_lock(monkeypatch, tmp_path):
         pytest.skip("the model offered one block size only")
     key = td._trial_key(bank)
     from matchedfilter import gatechain
+    cands = list(bank._candidate_sig)
     gatechain._store_cost(str(tmp_path / "costs.json"), "block-trial|" + key, {"winner": 1})
     monkeypatch.setattr(td, "_BLOCK_TRIALS", td._BlockTrials())       # a new process
     again, rng = _inspiral_bank()
     assert td._trial_key(again) == key
-    assert again._layouts is None and again._layout_rank == 1
+    assert td._stored_cands(again) == cands                          # kept for the mapping
+    assert again._layouts is None                                    # only the winner built
+    assert {n for _, n in again.chosen_layout} == {int(cands[1])}     # the whole bank at it
     L = 1 << 15
     data = ((rng.standard_normal(L) + 1j * rng.standard_normal(L)) / np.sqrt(2)).astype(np.complex64)
     TimeDomainFilterBank.filter_series_many([(again, data, {})])      # runs, with templates loaded

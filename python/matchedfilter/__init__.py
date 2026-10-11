@@ -2273,6 +2273,33 @@ def _q15_available(band):
 
 
 _AUTOTUNE_LOCK = threading.Lock()
+
+
+def _chain_lock_key(tkey):
+    n, snr, fd, tiers, device = tkey
+    return "chain-trial|%d|%g|%g|%d|%s" % (n, snr, fd, tiers, device)
+
+
+def _stored_chain_lock(tkey, shortlist):
+    """A chain-trial winner kept in MF_COST_FILE by an earlier process, if it is still on this
+    plan's shortlist. Chain trials, like block-size trials (time_domain._BlockTrials) and the cost
+    models themselves, are per machine: re-run in every process they lock differently on noise,
+    and that was the remaining process-to-process variation of a pinned layout
+    (docs/gate-model.md, "Block-size trials, round 3")."""
+    path = _gatechain._cost_file()
+    if path is None:
+        return None
+    rec = _gatechain._load_cost_file(path).get(_chain_lock_key(tkey))
+    if not isinstance(rec, dict):
+        return None
+    chain = tuple(int(b) for b in rec.get("chain", ()))
+    return chain if chain in tuple(tuple(c) for c in shortlist) else None
+
+
+def _store_chain_lock(tkey, chain):
+    path = _gatechain._cost_file()
+    if path is not None and tkey is not None:
+        _gatechain._store_cost(path, _chain_lock_key(tkey), {"chain": [int(b) for b in chain]})
 #: (n, snr, fd, chain, device) -> {"samples": {False: [...], True: [...]}, "winner": bool|None}
 _Q15_TRIALS = {}
 #: (chain-choice key, chain) -> whether the cost model prices the Q15 screen cheaper
@@ -2648,7 +2675,10 @@ class HierarchicalFilter(MatchedFilter):
             # after the lock every plan adopts the winner.
             tkey = (self.n, float(snr), float(self.fd), tiers, str(self.device))
             with _AUTOTUNE_LOCK:
-                tr = _CHAIN_TRIALS.setdefault(tkey, {"samples": {}, "assigned": {}, "winner": None})
+                tr = _CHAIN_TRIALS.get(tkey)
+                if tr is None:
+                    tr = _CHAIN_TRIALS[tkey] = {"samples": {}, "assigned": {},
+                                                "winner": _stored_chain_lock(tkey, shortlist)}
                 if tr["winner"] is not None:
                     chain = tr["winner"]
                 else:
@@ -2699,6 +2729,7 @@ class HierarchicalFilter(MatchedFilter):
                     tr["winner"] = _gatechain.pick_stable(med, med.get, _gatechain.canonical_order)
                     _log_autotune("CHAIN-TRIAL locked %s  median s/pair %s", tr["winner"],
                                   {c: "%.3g" % v for c, v in med.items()})
+                    _store_chain_lock(self._chain_trial, tr["winner"])
             winner = tr["winner"]
             move = None
             if winner is None:
