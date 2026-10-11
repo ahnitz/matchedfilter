@@ -1363,7 +1363,11 @@ class Context(InputUploads):
                    int(np.float32(t2).view(np.uint32)),
                    thr0, thr1, bool(sparse), rw_key, bkey)
             key += (shared_key(data, self), shared_key(tmpl, self), slot)
-            storage_key = ("hier_cascade", n, band0, band1, nd, nt, nbins, rw_key, bkey, *key[-3:])
+            # Storage depends on the band width only. The series/starts a band-mode record
+            # binds (bkey) change with the follow-up pools every segment: keying the buffers on
+            # them allocated a new set per call (1339 buffers in 38 steady segments).
+            storage_key = ("hier_cascade", n, band0, band1, nd, nt, nbins, rw_key,
+                           bkey and bkey[0], *key[-3:])
             upload_data, upload_tmpl, dsig, tsig = self._input_uploads(
                 storage_key, data, tmpl, upload_data, upload_tmpl)
             batch = self._hier_cascade.get(key)
@@ -1418,7 +1422,7 @@ class Context(InputUploads):
                int(np.float32(t2).view(np.uint32)),
                float(raw_thr), bool(sparse), rw_key, bkey)
         key += (shared_key(data, self), shared_key(tmpl, self), slot)
-        storage_key = ("hier", n, band, nd, nt, nbins, rw_key, bkey, *key[-3:])
+        storage_key = ("hier", n, band, nd, nt, nbins, rw_key, bkey and bkey[0], *key[-3:])
         upload_data, upload_tmpl, dsig, tsig = self._input_uploads(
             storage_key, data, tmpl, upload_data, upload_tmpl)
         batch = self._hier.get(key)
@@ -1503,23 +1507,36 @@ class Context(InputUploads):
                                         nd, nt, nbins, sparse)
             surv_count = int(v[0][0])
             self.last_refinements = surv_count
-            rows = None
-            if sparse or mode is not None:
-                rows = np.sort(v[2][:surv_count].astype(np.int64))
-            if mode is not None:
-                # The refine-block fraction from the sorted survivor list (distinct blocks),
-                # not a second view and np.unique of it per call.
-                blk = rows // nt
-                nblk = int(np.count_nonzero(blk[1:] != blk[:-1])) + 1 if blk.size else 0
-                self.__dict__.setdefault("_band_f", {})[(mode[0], mode[1], nd, nt)] = nblk / float(nd)
             if cascade:
                 self.last_tier1_survivors = int(v[1][0])
+            if surv_count == 0 and sparse:
+                # The common case at a detection threshold: nothing to sort, gather or scan.
+                if mode is not None:
+                    self.__dict__.setdefault("_band_f", {})[(mode[0], mode[1], nd, nt)] = 0.0
+                from . import _SparsePeaks
+                e = np.empty(0, np.int64)
+                return _SparsePeaks((nd, nt, nbins), e, e, np.empty(0, np.complex64))
+            rows = v[2][:surv_count] if (sparse or mode is not None) else None
+            if mode is not None:
+                # The refine-block fraction: distinct survivor blocks, marked rather than
+                # sorted (the list is in device completion order).
+                seen = np.zeros(nd, np.bool_)
+                seen[rows // nt] = True
+                self.__dict__.setdefault("_band_f", {})[(mode[0], mode[1], nd, nt)] = (
+                    int(np.count_nonzero(seen)) / float(nd))
             if sparse:
                 from . import _SparsePeaks
+                # Gather and scan in completion order; only the hits are put in C order.
                 ri = v[3][rows]
                 k, b = np.nonzero(ri >= 0)
-                return _SparsePeaks((nd, nt, nbins), rows[k] * nbins + b, ri[k, b],
-                                    v[4][rows[k], b])
+                if not k.size:
+                    e = np.empty(0, np.int64)
+                    return _SparsePeaks((nd, nt, nbins), e, e, np.empty(0, np.complex64))
+                rk = rows[k]
+                flat = rk.astype(np.int64) * nbins + b
+                order = np.argsort(flat)
+                return _SparsePeaks((nd, nt, nbins), flat[order], ri[k, b][order],
+                                    v[4][rk, b][order])
             if surv_count == 0:
                 return (np.full((nd, nt, nbins), -1, dtype=np.int32),
                         np.zeros((nd, nt, nbins), dtype=np.complex64))
@@ -1813,7 +1830,7 @@ class Context(InputUploads):
                 # args is [groupCountX, 1, 1]; compactPairs atomically bumps
                 # [0], so the count never has to reach the host and this
                 # stays one recorded command buffer.
-                "surv":  _Buffer(self, pairs * 4),
+                "surv":  _Buffer(self, pairs * 4, readback=True),
                 "args":  _Buffer(self, 12, usage=_BUF_STORAGE | _BUF_INDIRECT | _BUF_TRANSFER_DST),
                 "idx":   _Buffer(self, nd * nt * nbins * 4, readback=True, usage=_BUF_STORAGE | _BUF_TRANSFER_DST),
                 "val":   _Buffer(self, nd * nt * nbins * 8, readback=True, usage=_BUF_STORAGE | _BUF_TRANSFER_DST),
@@ -2029,7 +2046,7 @@ class Context(InputUploads):
                 "ct1":         _Buffer(self, nt * band1 * 8),
                 "cidx1":       _Buffer(self, pairs * 4),
                 "cval1":       _Buffer(self, pairs * 8, usage=_BUF_STORAGE | _BUF_TRANSFER_DST),
-                "surv1":       _Buffer(self, pairs * 4),
+                "surv1":       _Buffer(self, pairs * 4, readback=True),
                 "args_refine": _Buffer(self, 12, usage=_BUF_STORAGE | _BUF_INDIRECT | _BUF_TRANSFER_DST),
                 "idx":         _Buffer(self, nd * nt * nbins * 4, readback=True, usage=_BUF_STORAGE | _BUF_TRANSFER_DST),
                 "val":         _Buffer(self, nd * nt * nbins * 8, readback=True, usage=_BUF_STORAGE | _BUF_TRANSFER_DST),
