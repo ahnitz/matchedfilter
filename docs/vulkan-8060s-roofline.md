@@ -549,3 +549,69 @@ coarse0(A).
 - **Fused forward + coarse0 kernel: not built.** It needs a parameterized transform in
   `tierb.slang`. On these numbers I would build it only if a full-clock measurement shows
   the forward still exposed after (a) and interleave.
+
+## 14. Full-clock timeline; the fused kernel deferred; host cost per segment
+
+### Device timeline at full clock (record of the deferral)
+A busy fine loop at ~2.4 GHz, lockstep fused batches, device ms per segment from the
+host-reset timestamps (§11):
+
+| phase | ms | share |
+|---|---|---|
+| forward | 2.7 (3.8 with chains that stay full) | 25–30% |
+| coarse0 | 4.8 | ~45% |
+| coarse1 | 1.4 | ~13% |
+| mark + recompute | 0.4 | ~4% |
+| refine | 0.6 | ~6% |
+| total | 10.3 | |
+
+- The measured interleave hides about 5% of this.
+- A fused forward + coarse0 kernel could remove at most ~2.5 ms (the forward's remaining
+  time, less what the interleave already hides).
+- **The decision was to defer it.** In the pipelined ladder the device is ~20% busy: the
+  run is host-bound (~100 ms host per segment under load at the time, 93% CPU), so device
+  time is not what sets the wall. Revisit when host time per segment is below device time.
+
+### Host cost per segment (pipelined ladder, --profiles, depth 1, n=2048, one thread)
+Changes on this branch, each exact against the CPU:
+- **Band-mode storage keyed on the band width**, not the rotating series/starts handles.
+  The handle key allocated a new buffer set per call: 1339 buffers in 38 segments. Steady
+  state now allocates none (`test_band_mode_allocates_nothing_in_steady_state`).
+- **Survivor lists in HOST_CACHED memory.** Uncached host reads of them were half of each
+  sparse readback: about 210 → 90 µs per call. There is also a zero-survivor fast path, and
+  the sparse readback now sorts only the hits.
+- **peaks_items (host follow-up path):**
+  - one descriptor set per kernel per call, with dynamic storage offsets, instead of one
+    set per item;
+  - descriptor pools and output buffers reused from device free lists;
+  - consecutive async calls merged into one `vkQueueSubmit` (`_ItemsGroup`).
+  
+  With 16 items a call went from 1.5 to 0.73 ms of CPU.
+
+Measured against main dd3c0cf, which already runs the ladder's follow-ups on the device
+(`_vkfollowup`, one submission per segment):
+- **Submits per segment: 9 on both.** These are 4 fused chunks, 4 in-flight writes (the
+  middle stage's correlation and zero fill) and 1 follow-up submission. The peaks_items
+  changes no longer fire in the ladder.
+- **Host CPU: 23–26 ms per segment on both,** within the noise of three alternating runs.
+  The machine was at load ~20.
+- **Before the device follow-ups (main 894a612):** 21.4 submits per segment, of which 12
+  were peaks_items. The items group took that to 11.8 and steady host CPU down by 26%.
+
+### Where the remaining host time is (cProfile, steady segments)
+- **The middle stage's series copy.** The middle series reaches `_continuous_gpu` as host
+  memory, so it is copied into a shared staging buffer every call: 4–8 MB, ~1.5–2 ms of CPU
+  per call, 2 calls per segment.
+  - Importing host memory was falsified (§9).
+  - The copy goes away only if the caller hands the series in a device-shared allocation.
+    That is a consumer change.
+- **Steady allocations in the device follow-ups:** `_vkfollowup` workspaces and
+  `empty_shared` per segment, ~2.5 per segment at ~1 ms each.
+- **Fine-call replay and readback:** ~54 calls per segment at ~0.1–0.2 ms each (call
+  plan, sparse readback).
+- **Submit cost itself is small now.** It is 50–150 µs of driver CPU per submit with real
+  command buffers, against ~9 µs for an empty one. The cost grows weakly with command count
+  and not with the number of buffers referenced (measured to 3000).
+- **Falsified: grouping the in-flight writes (`_submit_pending`).** Merging them into the
+  open group would save 2 submits per segment, but it broke the ordering one test relies on
+  (`test_correlate_series_gpu_writes_group_rows_of_shared_out_in_place[window1]`). Not shipped.
