@@ -344,3 +344,48 @@ Two conclusions:
    per process. That also makes the choice stable across processes.
 
 Not shippable as is.
+
+### Block-size trials, round 3 (2026-10-11): whole-bank candidates, fused-batch samples, persisted lock
+
+- **Candidates per bank.** The model's own layout is rank 0. After it come the whole bank at each
+  of its cheapest single block sizes: sizes every length batch can use, ranked by their summed
+  modelled cost. A single size whose partition equals the model's is skipped. There are at most
+  3 candidates (`_BLOCK_TRIAL_RANKS`). `price_block_sizes(ahead=)` prices that many sizes past the
+  first dearer one so that they exist.
+- **Samples.** A sample is one whole `filter_series_many` batch, fused and concurrent as in steady
+  state, timed from submission to its last result, per template x series sample. A rank's first
+  batch after a switch only settles (it uploads). There are 2 samples per rank. Rank r > 0 wins
+  only if its median beats rank 0's by more than gatechain.TIE, so a tie keeps the model's layout.
+- **Persisted lock.** The winner is stored in MF_COST_FILE under `block-trial|<device>|<candidate
+  set>`. A bank whose key is on file adopts it at its first reference with no trial, and only
+  layouts that ran are evicted from the device at a lock.
+- **Only where the lock can be kept.** Without MF_COST_FILE (or with MF_AUTOTUNE=0) no candidates
+  are built and no trial runs. The bank is the model's layout, exactly main's behaviour. A trial in
+  every process would cost that process its warm-up and more (the trial process below), for a few
+  percent.
+
+dev3 Renoir, Vulkan, load < 1. Each side has its own fresh MF_COST_FILE, the processes are
+interleaved, the configuration is 2 tops x 6 segments, and the figure is the steady fine stage.
+Main with a cost file is the fair baseline: with persisted cost models it is itself stable,
+(2048, (256, 512)) at 1.14-1.26 s, against 1.8-2.3 s and varying layouts without a file.
+
+| process | main | branch |
+|---|---|---|
+| 1 (branch runs its trial) | 1.26 s | 4.09 s (trial: 8192 at 2.1x, 4096 at 1.08x, locked the model's) |
+| 2 | 1.15 s | 1.09 s |
+| 3 | 1.14 s | 1.09 s |
+| 4 | 1.14 s | 1.09 s |
+| 5 | 1.20 s | 1.08 s |
+
+Second set (final code: candidates built only with a cost file), fresh cost files:
+
+| process | main | branch |
+|---|---|---|
+| 1 (trial) | 1.36 s | 4.39 s (4096 at 2.4x, 8192 at 6x; locked the model's) |
+| 2-4 | 1.35 / 1.34 / 1.34 s | 1.34 / 1.34 / 1.35 s |
+
+After the one trial process, the branch is never slower than main (equal in the second set, 4-10% faster in the first), and the
+same layout in every process. In both sets the trial confirmed the model's layout; the gain in the
+first set comes from the calibrated cost models in that file, not from a different layout.
+Where the model is right, trials buy stability and a guard against its mistakes, not speed. The trial costs one process's fine stage once per machine and
+candidate set, not once per process.
