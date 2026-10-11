@@ -124,10 +124,21 @@ class GpuSampler:
             freq = glob.glob(dev + "/hwmon/hwmon*/freq1_input")
             if os.path.exists(busy) and freq:
                 self.files.append((busy, freq[0]))
+        self.nvml = None
+        if not self.files:                     # CUDA: NVML utilization and SM clock
+            try:
+                from matchedfilter import _cuda
+                self.nvml = _cuda.nvml_busy(0)
+            except Exception:                  # noqa: BLE001 -- no NVML: silent, as without sysfs
+                self.nvml = None
         self.samples, self.on, self.thread = [], False, None
 
     def _run(self):
         while self.thread is not None:
+            if self.on and self.nvml is not None:
+                v = self.nvml()
+                if v is not None:
+                    self.samples.append(v)
             if self.on:
                 for busy, freq in self.files:
                     try:
@@ -138,7 +149,7 @@ class GpuSampler:
             time.sleep(0.02)
 
     def start(self):
-        if self.files and self.thread is None:
+        if (self.files or self.nvml is not None) and self.thread is None:
             import threading
             self.thread = threading.Thread(target=self._run, daemon=True)
             self.thread.start()
@@ -160,6 +171,77 @@ def _timing():
     return os.environ.get("MF_GPU_TIMING", "0") not in ("", "0")
 
 
+def report_counts(counts, seg_plan):
+    if os.environ.get("LADDER_REPLAY"):
+        counts["segment_replays"] += seg_plan.replays
+        counts["segment_capture_failures"] += getattr(seg_plan, "capture_failures", 0)
+        for k in ("followups_device", "followups_host", "followups_overflow"):
+            if getattr(seg_plan, k, 0):
+                counts[k] += getattr(seg_plan, k)
+
+
+def drive_folded(gens, args, first, steady, counts):
+    """LADDER_FOLD_TOPS: every top's segment k as ONE SegmentPlan request -- their middle
+    stages (preludes), fine stages and follow-ups in one capture, one graph per segment."""
+    from matchedfilter.time_domain import FollowUp
+    plan = SegmentPlan()
+    reqs = [next(g) for g in gens]
+    seg = 0
+    while reqs:
+        tm = first if seg < args.warmup else steady
+        t_seg = time.perf_counter()
+        jobs, offs, preludes, keys, pairs, spec0 = [], [], [], [], [], None
+        for jb, prelude, pkey, spec in reqs:
+            offs.append(len(jobs))
+            if spec is not None:
+                spec0 = spec
+                pairs += [p + len(jobs) for p in spec.pairs]
+            jobs += jb
+            if prelude is not None:
+                preludes.append(prelude)
+                keys.append(pkey)
+
+        def prelude_all(preludes=preludes):
+            for f in preludes:
+                f()
+        spec_all = (FollowUp(pairs, spec0.threshold, spec0.dedupe, spec0.half, spec0.binsize,
+                             max_items=spec0.max_items * len(reqs),
+                             max_items_per_region=spec0.max_items_per_region)
+                    if spec0 is not None else None)
+        t = time.perf_counter()
+        out = plan.run(jobs, prelude=prelude_all if preludes else None,
+                       prelude_key=tuple(keys) if preludes else None, followup=spec_all)
+        fine_out, fu = out if spec_all is not None else (out, None)
+        tm.add("fine", time.perf_counter() - t)
+        if os.environ.get("LADDER_DUMP"):
+            import pickle
+            with open(os.environ["LADDER_DUMP"] + ".%d" % seg, "wb") as fh:
+                pickle.dump([(a.template_indices, a.sample_indices, a.snr) for a in fine_out], fh)
+        if os.environ.get("LADDER_VERIFY_REPLAY"):
+            again = TimeDomainFilterBank.filter_series_many(jobs)
+            bad = [j for j, (a, b) in enumerate(zip(fine_out, again))
+                   if not (np.array_equal(a.sample_indices, b.sample_indices)
+                           and np.array_equal(a.snr, b.snr))]
+            print("verify folded seg %d: replays %d, mismatched jobs %s, peaks %d vs %d"
+                  % (seg, plan.replays, bad[:8], sum(len(a.snr) for a in fine_out),
+                     sum(len(a.snr) for a in again)), flush=True)
+        nxt = []
+        for k, g in enumerate(gens):
+            lo = offs[k]
+            hi = offs[k + 1] if k + 1 < len(offs) else len(jobs)
+            mine = None if fu is None else [(j - lo, r, c, ti, fr) for j, r, c, ti, fr in fu
+                                              if lo <= j < hi]
+            try:
+                nxt.append((g, g.send((fine_out[lo:hi], mine))))
+            except StopIteration:
+                pass
+        tm.add("segment", time.perf_counter() - t_seg)
+        gens = [g for g, _ in nxt]
+        reqs = [r for _, r in nxt]
+        seg += 1
+    report_counts(counts, plan)
+
+
 def run_device(device, tops, args, seed):
     rng = np.random.default_rng(seed)
     S = args.seg_samples
@@ -172,257 +254,355 @@ def run_device(device, tops, args, seed):
     first, steady = Timer(), Timer()
     results = {}
     counts = defaultdict(int)
-    for top in tops:
-        # The top template's own output profile |h|^2/S (tools/ladder_profiles.py) colours its
-        # reference series and is the fine banks' reference, as in pycbc_inspiral_fir; without
-        # it a generic inspiral-like profile stands in (and the gates refine far more).
-        if profiles is not None:
-            w, df = profiles["top_%d" % top["top"]], float(profiles["delta_f"])
-        else:
-            w, df = profile(), DF
-        amp = np.sqrt(w)
-        t0 = time.perf_counter()
-        # Each middle filter's scale is folded into its taps, as pycbc does: here the scale that
-        # makes noise unit variance per quadrature, measured once on an untimed series.
-        probe = TimeDomainFilterBank(top["mid_taps"], tap_counts=top["mid_counts"], engine="corr")
-        x = analytic_series(rng, 1 << 18, amp, df)
-        y = probe.correlate_series(x)[:, 1 << 15:-(1 << 15)]
-        scale = 1.0 / np.sqrt(np.mean(np.abs(y) ** 2, axis=1) / 2)
-        mid = TimeDomainFilterBank(top["mid_taps"] * scale[:, None].astype(np.float32),
-                                   tap_counts=top["mid_counts"], engine="corr", device=device)
-        # The fine taps are scaled likewise against a middle series, so a fine output in noise
-        # is an SNR (pycbc gets this from the reference series' normalisation).
-        xm = probe.correlate_series(analytic_series(rng, 1 << 18, amp, df))
-        xm = xm * scale[:, None].astype(np.float32)
-        fine = []
-        for row, (m, taps, c) in enumerate(top["fine"]):
-            pf = TimeDomainFilterBank(taps, tap_counts=c, engine="corr")
-            yf = pf.correlate_series(xm[row])[:, 1 << 15:-(1 << 15)]
-            taps = taps / np.sqrt(np.mean(np.abs(yf) ** 2, axis=1) / 2)[:, None].astype(np.float32)
-            b = TimeDomainFilterBank(taps, tap_counts=c, engine="hier", threshold=args.threshold,
-                                     false_dismissal=args.fd, device=device,
-                                     binsize=int(args.peak_window * RATE),
-                                     fft_lengths=[args.fft_length] if args.fft_length else None)
-            b.set_reference(w, delta_f=df)
-            fine.append((m, b))
-        # The middle output in device memory, reused every segment (as a pipeline would):
-        # written in place by the middle stage and read in place by the fine banks.
-        mid_out = {ifo: mid.empty_shared((len(top["mid_counts"]), S)) for ifo in ("H1", "L1")}
-        seg_plan = SegmentPlan()
-        first.add("prep", time.perf_counter() - t0)
-        def followups(seg, ser, mids, fine_out):
-            """A segment's fine results: record them, and return its follow-up jobs."""
-            fine_res = iter(fine_out)
-            asym_jobs, asym_keys = [], []
-            for row, (m, b) in enumerate(fine):
-                trig = {}
-                for ifo in ser:
-                    r = next(fine_res)
-                    trig[ifo] = r
-                    results[(top["top"], seg, m, ifo, "fine")] = r
-                    counts["fine_triggers"] += len(r.snr)
-                for ifo, other in (("H1", "L1"), ("L1", "H1")):
-                    r = trig[ifo]
-                    keep = np.flatnonzero(np.abs(r.snr) >= args.asym_threshold)
-                    keep = keep[np.argsort(-np.abs(r.snr[keep]), kind="stable")]
-                    used = set()
-                    for i in keep:
-                        sec = int(r.sample_indices[i] // int(RATE))
-                        if sec in used:
-                            continue
-                        used.add(sec)
-                        c0 = int(r.sample_indices[i])
-                        asym_jobs.append((b, mids[other][row],
-                                          dict(windows=slice(max(0, c0 - half), min(S, c0 + half)),
-                                               binsize=bs, threshold=0.0,
-                                               template_index=int(r.template_indices[i]))))
-                        asym_keys.append((top["top"], seg, m, other, "asym", c0, int(r.template_indices[i])))
-            return asym_jobs, asym_keys
+    folded = []
 
-        def submit_followups(asym_jobs, tm, wait=True):
-            """The segment's follow-ups, batched like the fine stage (--no-batch: one call
-            each); wait=False returns futures."""
-            t = time.perf_counter()
-            if args.no_batch:
-                asym_out = [b.filter_series(x, **kw) for b, x, kw in asym_jobs]
+    def one_top(top):
+        # Each top template in its own scope: its segment loop (a generator under
+        # LADDER_FOLD_TOPS) keeps its own banks, buffers and data.
+            # The top template's own output profile |h|^2/S (tools/ladder_profiles.py) colours its
+            # reference series and is the fine banks' reference, as in pycbc_inspiral_fir; without
+            # it a generic inspiral-like profile stands in (and the gates refine far more).
+            if profiles is not None:
+                w, df = profiles["top_%d" % top["top"]], float(profiles["delta_f"])
             else:
-                asym_out = TimeDomainFilterBank.filter_series_many(asym_jobs, wait=wait)
-            if asym_jobs:
-                tm.add("asym", time.perf_counter() - t)
-            return asym_out
+                w, df = profile(), DF
+            amp = np.sqrt(w)
+            t0 = time.perf_counter()
+            # Each middle filter's scale is folded into its taps, as pycbc does: here the scale that
+            # makes noise unit variance per quadrature, measured once on an untimed series.
+            probe = TimeDomainFilterBank(top["mid_taps"], tap_counts=top["mid_counts"], engine="corr")
+            x = analytic_series(rng, 1 << 18, amp, df)
+            y = probe.correlate_series(x)[:, 1 << 15:-(1 << 15)]
+            scale = 1.0 / np.sqrt(np.mean(np.abs(y) ** 2, axis=1) / 2)
+            mid = TimeDomainFilterBank(top["mid_taps"] * scale[:, None].astype(np.float32),
+                                       tap_counts=top["mid_counts"], engine="corr", device=device)
+            # The fine taps are scaled likewise against a middle series, so a fine output in noise
+            # is an SNR (pycbc gets this from the reference series' normalisation).
+            xm = probe.correlate_series(analytic_series(rng, 1 << 18, amp, df))
+            xm = xm * scale[:, None].astype(np.float32)
+            fine = []
+            for row, (m, taps, c) in enumerate(top["fine"]):
+                pf = TimeDomainFilterBank(taps, tap_counts=c, engine="corr")
+                yf = pf.correlate_series(xm[row])[:, 1 << 15:-(1 << 15)]
+                taps = taps / np.sqrt(np.mean(np.abs(yf) ** 2, axis=1) / 2)[:, None].astype(np.float32)
+                b = TimeDomainFilterBank(taps, tap_counts=c, engine="hier", threshold=args.threshold,
+                                         false_dismissal=args.fd, device=device,
+                                         binsize=int(args.peak_window * RATE),
+                                         fft_lengths=[args.fft_length] if args.fft_length else None)
+                b.set_reference(w, delta_f=df)
+                fine.append((m, b))
+            # The middle output in device memory, reused every segment (as a pipeline would):
+            # written in place by the middle stage and read in place by the fine banks.
+            mid_out = {ifo: mid.empty_shared((len(top["mid_counts"]), S)) for ifo in ("H1", "L1")}
+            seg_plan = SegmentPlan()
+            first.add("prep", time.perf_counter() - t0)
+            def followups(seg, ser, mids, fine_out):
+                """A segment's fine results: record them, and return its follow-up jobs."""
+                fine_res = iter(fine_out)
+                asym_jobs, asym_keys = [], []
+                for row, (m, b) in enumerate(fine):
+                    trig = {}
+                    for ifo in ser:
+                        r = next(fine_res)
+                        trig[ifo] = r
+                        results[(top["top"], seg, m, ifo, "fine")] = r
+                        counts["fine_triggers"] += len(r.snr)
+                    for ifo, other in (("H1", "L1"), ("L1", "H1")):
+                        r = trig[ifo]
+                        keep = np.flatnonzero(np.abs(r.snr) >= args.asym_threshold)
+                        keep = keep[np.argsort(-np.abs(r.snr[keep]), kind="stable")]
+                        used = set()
+                        for i in keep:
+                            sec = int(r.sample_indices[i] // int(RATE))
+                            if sec in used:
+                                continue
+                            used.add(sec)
+                            c0 = int(r.sample_indices[i])
+                            asym_jobs.append((b, mids[other][row],
+                                              dict(windows=slice(max(0, c0 - half), min(S, c0 + half)),
+                                                   binsize=bs, threshold=0.0,
+                                                   template_index=int(r.template_indices[i]))))
+                            asym_keys.append((top["top"], seg, m, other, "asym", c0, int(r.template_indices[i])))
+                return asym_jobs, asym_keys
 
-        def collect_followups(asym_keys, asym_out, tm):
-            t = time.perf_counter()
-            for k, fr in zip(asym_keys, asym_out):
-                results[k] = fr.result() if hasattr(fr, "result") else fr
-            if asym_keys:
-                tm.add("asym", time.perf_counter() - t, n=0)
-            counts["asym_calls"] += len(asym_keys)
+            def submit_followups(asym_jobs, tm, wait=True):
+                """The segment's follow-ups, batched like the fine stage (--no-batch: one call
+                each); wait=False returns futures."""
+                t = time.perf_counter()
+                if args.no_batch:
+                    asym_out = [b.filter_series(x, **kw) for b, x, kw in asym_jobs]
+                else:
+                    asym_out = TimeDomainFilterBank.filter_series_many(asym_jobs, wait=wait)
+                if asym_jobs:
+                    tm.add("asym", time.perf_counter() - t)
+                return asym_out
 
-        def finish(seg, ser, mids, fine_out, tm):
-            """A segment's fine results: record them and run its follow-ups."""
-            jobs, keys = followups(seg, ser, mids, fine_out)
-            collect_followups(keys, submit_followups(jobs, tm), tm)
-        # --pregen draws every segment's data up front, in the same order (identical data):
-        # the bench's own generation (~0.1 s a segment) then stays off the device's timeline.
-        def draw():
-            return {ifo: analytic_series(rng, S, amp, df) for ifo in ("H1", "L1")}
-        pregen = [draw() for _ in range(args.segments)] if args.pregen else None
+            def collect_followups(asym_keys, asym_out, tm):
+                t = time.perf_counter()
+                for k, fr in zip(asym_keys, asym_out):
+                    results[k] = fr.result() if hasattr(fr, "result") else fr
+                if asym_keys:
+                    tm.add("asym", time.perf_counter() - t, n=0)
+                counts["asym_calls"] += len(asym_keys)
 
-        def new_series():
-            return pregen.pop(0) if pregen else draw()
-        next_ser = new_series()
-        if args.pipeline:
-            # The device is fed continuously: segment k's middle and fine stages are enqueued
-            # back to back (the fine banks read the middle output on the device, ordered there),
-            # and segment k-1's results and follow-ups are collected while the device works on
-            # k. Two middle buffers per detector, so k's middle never overwrites what k-1's
-            # follow-ups read. Stage times here are host-side; "segment" is the comparable one.
-            # Order within an iteration: k's middle is enqueued; k-1's fine results are read
-            # (done by now) and its follow-ups enqueued; then k's fine stage. The follow-ups
-            # run ahead of it on the same queues, so collecting them waits for them alone and
-            # not for k's fine stage, and the host's remaining work (recording results, k+1's
-            # data and middle) overlaps k's fine stage instead of leaving the device idle.
-            # --depth segments in flight: segment k's results are collected after k+depth's
-            # middle stage is enqueued, so the waits find finished work. depth+1 middle
-            # buffers per detector: k's middle never overwrites what an uncollected
-            # segment's fine stage or follow-ups read.
-            depth = max(1, args.depth)
-            bufs = [mid_out] + [{ifo: mid.empty_shared((len(top["mid_counts"]), S))
-                                 for ifo in ("H1", "L1")} for _ in range(depth)]
-            from collections import deque
-            inflight = deque()
+            def finish(seg, ser, mids, fine_out, tm, fu=None):
+                """A segment's fine results: record them and run its follow-ups -- or, with fu
+                (SegmentPlan follow-ups, [(job, rank, c0, ti, result)]), record those."""
+                jobs, keys = followups(seg, ser, mids, fine_out)
+                if fu is None:
+                    collect_followups(keys, submit_followups(jobs, tm), tm)
+                    return
+                ifos = list(ser)
+                got = {}
+                for j, rank, c0, ti, fr in fu:
+                    row, other = j // len(ifos), ifos[(j % len(ifos)) ^ 1]
+                    got[(top["top"], seg, fine[row][0], other, "asym", c0, ti)] = fr
+                if set(got) != set(keys):
+                    raise RuntimeError("device follow-ups differ from the host rule: %d vs %d keys"
+                                       % (len(got), len(keys)))
+                results.update(got)
+                counts["asym_calls"] += len(got)
+
+            def followup_spec(ser):
+                from matchedfilter.time_domain import FollowUp
+                n = len(ser)
+                return FollowUp(pairs=[j ^ 1 for j in range(len(fine) * n)],
+                                threshold=args.asym_threshold, dedupe=int(RATE), half=half,
+                                binsize=bs)
+            # --pregen draws every segment's data up front, in the same order (identical data):
+            # the bench's own generation (~0.1 s a segment) then stays off the device's timeline.
+            def draw():
+                return {ifo: analytic_series(rng, S, amp, df) for ifo in ("H1", "L1")}
+            pregen = [draw() for _ in range(args.segments)] if args.pregen else None
+
+            def new_series():
+                return pregen.pop(0) if pregen else draw()
+            next_ser = new_series()
+            if args.pipeline:
+                # The device is fed continuously: segment k's middle and fine stages are enqueued
+                # back to back (the fine banks read the middle output on the device, ordered there),
+                # and segment k-1's results and follow-ups are collected while the device works on
+                # k. Two middle buffers per detector, so k's middle never overwrites what k-1's
+                # follow-ups read. Stage times here are host-side; "segment" is the comparable one.
+                # Order within an iteration: k's middle is enqueued; k-1's fine results are read
+                # (done by now) and its follow-ups enqueued; then k's fine stage. The follow-ups
+                # run ahead of it on the same queues, so collecting them waits for them alone and
+                # not for k's fine stage, and the host's remaining work (recording results, k+1's
+                # data and middle) overlaps k's fine stage instead of leaving the device idle.
+                # --depth segments in flight: segment k's results are collected after k+depth's
+                # middle stage is enqueued, so the waits find finished work. depth+1 middle
+                # buffers per detector: k's middle never overwrites what an uncollected
+                # segment's fine stage or follow-ups read.
+                depth = max(1, args.depth)
+                bufs = [mid_out] + [{ifo: mid.empty_shared((len(top["mid_counts"]), S))
+                                     for ifo in ("H1", "L1")} for _ in range(depth)]
+                from collections import deque
+                inflight = deque()
+                prof = None
+                if os.environ.get("LADDER_PROFILE"):  # cProfile of the steady iterations only
+                    import cProfile
+                    prof = cProfile.Profile()
+                sampler = GpuSampler()
+                sampler.start()
+                for seg in range(args.segments + depth):
+                    sampler.on = args.warmup <= seg
+                    profiled = prof is not None and args.warmup <= seg < args.segments
+                    if profiled:
+                        prof.enable()
+                    t_seg = time.perf_counter()
+                    c_seg = time.thread_time()
+                    if seg < args.segments:
+                        tm = first if seg < args.warmup else steady
+                        ser, next_ser = next_ser, None
+                        out = bufs[seg % (depth + 1)]
+                        t = time.perf_counter()
+                        mids = {ifo: mid.correlate_series(
+                            ser[ifo], windows=slice(max(0, a0 - args.pad), min(S, a1 + args.pad)),
+                            out=out[ifo], wait=False) for ifo in ser}
+                        tm.add("middle", time.perf_counter() - t)
+                    asym = None
+                    pending = (inflight.popleft() if len(inflight) >= depth
+                               or (seg >= args.segments and inflight) else None)
+                    if pending is not None:
+                        p_seg, p_ser, p_mids, p_futures, p_tm = pending
+                        t = time.perf_counter()
+                        p_out = [f.result() for f in p_futures]
+                        p_tm.add("fine", time.perf_counter() - t)
+                        a_jobs, a_keys = followups(p_seg, p_ser, p_mids, p_out)
+                        asym = (a_keys, submit_followups(a_jobs, p_tm, wait=False), p_tm)
+                    if seg < args.segments:
+                        jobs = [(b, mids[ifo][row], dict(windows=slice(a0, a1)))
+                                for row, (m, b) in enumerate(fine) for ifo in ser]
+                        t = time.perf_counter()
+                        futures = TimeDomainFilterBank.filter_series_many(jobs, wait=False)
+                        tm.add("fine", time.perf_counter() - t)
+                    if asym is not None:
+                        collect_followups(*asym)
+                    if seg < args.segments:
+                        inflight.append((seg, ser, mids, futures, tm))
+                    elapsed = time.perf_counter() - t_seg
+                    if seg < args.segments:
+                        tm.add("segment", elapsed)
+                        t = time.perf_counter()
+                        if seg + 1 < args.segments:   # data for k+1, untimed as everywhere here
+                            next_ser = new_series()
+                    else:
+                        tm.add("segment", elapsed)    # the last collection belongs to the last segment
+                    # "wall": the whole iteration, the bench's data generation included -- what
+                    # the device sees between segments (device busy = device time / wall).
+                    (tm if seg < args.segments else steady).add("wall", time.perf_counter() - t_seg, n=0)
+                    # "cpu": the host thread's CPU time over the same span. wall - cpu is time the
+                    # host spent waiting (on the device, or descheduled).
+                    (tm if seg < args.segments else steady).add("cpu", time.thread_time() - c_seg, n=0)
+                    if profiled:
+                        prof.disable()
+                sampler.stop()
+                counts["gpu_sampler"] = sampler.report()
+                if prof is not None:
+                    prof.dump_stats(os.environ["LADDER_PROFILE"])
+                return
             prof = None
-            if os.environ.get("LADDER_PROFILE"):  # cProfile of the steady iterations only
+            if os.environ.get("LADDER_PROFILE"):      # cProfile of the steady segments only
                 import cProfile
                 prof = cProfile.Profile()
-            sampler = GpuSampler()
-            sampler.start()
-            for seg in range(args.segments + depth):
-                sampler.on = args.warmup <= seg
-                profiled = prof is not None and args.warmup <= seg < args.segments
-                if profiled:
-                    prof.enable()
-                t_seg = time.perf_counter()
-                c_seg = time.thread_time()
-                if seg < args.segments:
+            def seg_loop(fold):
+                """The batched segment loop. It yields each segment's fine-stage request
+                (jobs, prelude, prelude key, follow-up spec) and is sent (fine results,
+                follow-ups): run here (run_request), or with every top's request of the
+                segment folded into one SegmentPlan run (LADDER_FOLD_TOPS)."""
+                nonlocal next_ser
+                bsampler = GpuSampler()                # device busy over the steady segments
+                bsampler.start()
+                for seg in range(args.segments):
                     tm = first if seg < args.warmup else steady
-                    ser, next_ser = next_ser, None
-                    out = bufs[seg % (depth + 1)]
-                    t = time.perf_counter()
-                    mids = {ifo: mid.correlate_series(
-                        ser[ifo], windows=slice(max(0, a0 - args.pad), min(S, a1 + args.pad)),
-                        out=out[ifo], wait=False) for ifo in ser}
-                    tm.add("middle", time.perf_counter() - t)
-                asym = None
-                pending = (inflight.popleft() if len(inflight) >= depth
-                           or (seg >= args.segments and inflight) else None)
-                if pending is not None:
-                    p_seg, p_ser, p_mids, p_futures, p_tm = pending
-                    t = time.perf_counter()
-                    p_out = [f.result() for f in p_futures]
-                    p_tm.add("fine", time.perf_counter() - t)
-                    a_jobs, a_keys = followups(p_seg, p_ser, p_mids, p_out)
-                    asym = (a_keys, submit_followups(a_jobs, p_tm, wait=False), p_tm)
-                if seg < args.segments:
+                    bsampler.on = args.warmup <= seg
+                    if seg == args.warmup and os.environ.get("LADDER_GC_FREEZE"):
+                        # What an application does after setup: move the setup heap out of the
+                        # cyclic collector's view (a full collection of it measured ~11 ms here).
+                        import gc
+                        gc.collect()
+                        gc.freeze()
+                    if prof is not None and tm is steady:
+                        prof.enable()
+                    t_seg = time.perf_counter()
+                    ser = next_ser
+                    next_ser = None
+                    mids = {}
+                    graph_middle = (os.environ.get("LADDER_REPLAY")
+                                    and os.environ.get("LADDER_GRAPH_MIDDLE"))
+                    if graph_middle:
+                        # The middle stage joins the segment graph (SegmentPlan prelude): its input in
+                        # device-visible memory the host rewrites each segment, read in place.
+                        if top.get("_mid_in") is None:
+                            top["_mid_in"] = {ifo: mid.empty_shared((S,)) for ifo in ("H1", "L1")}
+                        t = time.perf_counter()
+                        for ifo in ser:
+                            top["_mid_in"][ifo][:] = ser[ifo]
+                            mids[ifo] = mid_out[ifo]
+                        tm.add("middle", time.perf_counter() - t)
+
+                        def prelude(ser=ser):
+                            for ifo in ser:
+                                mid.correlate_series(top["_mid_in"][ifo],
+                                                     windows=slice(max(0, a0 - args.pad), min(S, a1 + args.pad)),
+                                                     out=mid_out[ifo], wait=False)
+                    for ifo in (() if graph_middle else ser):
+                        t = time.perf_counter()
+                        mids[ifo] = mid.correlate_series(ser[ifo], windows=slice(max(0, a0 - args.pad),
+                                                                                 min(S, a1 + args.pad)),
+                                                         out=mid_out[ifo])
+                        tm.add("middle", time.perf_counter() - t)
+                    # The fine stage of a segment: every bank on its middle series, both detectors.
+                    # Batched (default), the library sees the whole segment in one call.
                     jobs = [(b, mids[ifo][row], dict(windows=slice(a0, a1)))
                             for row, (m, b) in enumerate(fine) for ifo in ser]
                     t = time.perf_counter()
-                    futures = TimeDomainFilterBank.filter_series_many(jobs, wait=False)
-                    tm.add("fine", time.perf_counter() - t)
-                if asym is not None:
-                    collect_followups(*asym)
-                if seg < args.segments:
-                    inflight.append((seg, ser, mids, futures, tm))
-                elapsed = time.perf_counter() - t_seg
-                if seg < args.segments:
-                    tm.add("segment", elapsed)
-                    t = time.perf_counter()
-                    if seg + 1 < args.segments:   # data for k+1, untimed as everywhere here
+                    fu = None
+                    if args.no_batch:
+                        fine_out = [b.filter_series(x, **kw) for b, x, kw in jobs]
+                    elif args.overlap and seg + 1 < args.segments:
+                        # Submit, prepare the next segment's data on the host while the device works
+                        # (untimed, as data setup is), then collect: a busy device keeps its clock up.
+                        futures = TimeDomainFilterBank.filter_series_many(jobs, wait=False)
+                        submit = time.perf_counter() - t
                         next_ser = new_series()
+                        t = time.perf_counter() - submit
+                        fine_out = [f.result() for f in futures]
+                    else:
+                        # SegmentPlan replay (LADDER_REPLAY=1, MF_SEGMENT_REPLAY=1) is exact but not
+                        # faster than the batched path, which is the default.
+                        fu = None
+                        spec = (followup_spec(ser) if os.environ.get("LADDER_REPLAY")
+                                and os.environ.get("LADDER_DEVICE_FOLLOWUPS") else None)
+                        fine_out, fu = yield (jobs, prelude if graph_middle else None,
+                                              ("middle", top["top"]) if graph_middle else None, spec)
+                        if os.environ.get("LADDER_VERIFY_REPLAY"):
+                            again = TimeDomainFilterBank.filter_series_many(jobs)
+                            bad = sum(not (np.array_equal(a.sample_indices, b.sample_indices)
+                                           and np.array_equal(a.snr, b.snr)) for a, b in zip(fine_out, again))
+                            in_trial = sum(getattr(g.plan, "_chain_trial", None) is not None
+                                           for _, bk in fine for g in bk._groups)
+                            print("verify replay seg %d: replays %d, mismatched jobs %d, peaks %d, plans in trial %d"
+                                  % (seg, seg_plan.replays, bad, sum(len(a.snr) for a in fine_out), in_trial),
+                                  flush=True)
+                    if not fold:
+                        tm.add("fine", time.perf_counter() - t)
+                    finish(seg, ser, mids, fine_out, tm, fu=fu)
+                    if not fold:
+                        tm.add("segment", time.perf_counter() - t_seg)
+                    if prof is not None and tm is steady:
+                        prof.disable()
+                        prof.dump_stats(os.environ["LADDER_PROFILE"])
+                    if next_ser is None and seg + 1 < args.segments:
+                        next_ser = new_series()
+                bsampler.stop()
+                if bsampler.samples:
+                    counts["gpu_sampler"] = bsampler.report()
+                report_plan(seg_plan)
+
+            def report_plan(seg_plan):
+                if os.environ.get("LADDER_REPLAY"):
+                    counts["segment_replays"] += seg_plan.replays
+                    counts["segment_capture_failures"] += getattr(seg_plan, "capture_failures", 0)
+                    for k in ("followups_device", "followups_host", "followups_overflow"):
+                        if getattr(seg_plan, k, 0):
+                            counts[k] += getattr(seg_plan, k)
+                    if getattr(seg_plan, "followup_unsupported", None):
+                        print("device follow-ups unsupported:", seg_plan.followup_unsupported, flush=True)
+
+            def run_request(req):
+                jobs, prelude, pkey, spec = req
+                if os.environ.get("LADDER_REPLAY"):
+                    out = seg_plan.run(jobs, prelude=prelude, prelude_key=pkey, followup=spec)
                 else:
-                    tm.add("segment", elapsed)    # the last collection belongs to the last segment
-                # "wall": the whole iteration, the bench's data generation included -- what
-                # the device sees between segments (device busy = device time / wall).
-                (tm if seg < args.segments else steady).add("wall", time.perf_counter() - t_seg, n=0)
-                # "cpu": the host thread's CPU time over the same span. wall - cpu is time the
-                # host spent waiting (on the device, or descheduled).
-                (tm if seg < args.segments else steady).add("cpu", time.thread_time() - c_seg, n=0)
-                if profiled:
-                    prof.disable()
-            sampler.stop()
-            counts["gpu_sampler"] = sampler.report()
-            if prof is not None:
-                prof.dump_stats(os.environ["LADDER_PROFILE"])
-            continue
-        prof = None
-        if os.environ.get("LADDER_PROFILE"):      # cProfile of the steady segments only
-            import cProfile
-            prof = cProfile.Profile()
-        for seg in range(args.segments):
-            tm = first if seg < args.warmup else steady
-            if seg == args.warmup and os.environ.get("LADDER_GC_FREEZE"):
-                # What an application does after setup: move the setup heap out of the
-                # cyclic collector's view (a full collection of it measured ~11 ms here).
-                import gc
-                gc.collect()
-                gc.freeze()
-            if prof is not None and tm is steady:
-                prof.enable()
-            t_seg = time.perf_counter()
-            ser = next_ser
-            next_ser = None
-            mids = {}
-            for ifo in ser:
-                t = time.perf_counter()
-                mids[ifo] = mid.correlate_series(ser[ifo], windows=slice(max(0, a0 - args.pad),
-                                                                         min(S, a1 + args.pad)),
-                                                 out=mid_out[ifo])
-                tm.add("middle", time.perf_counter() - t)
-            # The fine stage of a segment: every bank on its middle series, both detectors.
-            # Batched (default), the library sees the whole segment in one call.
-            jobs = [(b, mids[ifo][row], dict(windows=slice(a0, a1)))
-                    for row, (m, b) in enumerate(fine) for ifo in ser]
-            t = time.perf_counter()
-            if args.no_batch:
-                fine_out = [b.filter_series(x, **kw) for b, x, kw in jobs]
-            elif args.overlap and seg + 1 < args.segments:
-                # Submit, prepare the next segment's data on the host while the device works
-                # (untimed, as data setup is), then collect: a busy device keeps its clock up.
-                futures = TimeDomainFilterBank.filter_series_many(jobs, wait=False)
-                submit = time.perf_counter() - t
-                next_ser = new_series()
-                t = time.perf_counter() - submit
-                fine_out = [f.result() for f in futures]
-            else:
-                # SegmentPlan replay (LADDER_REPLAY=1, MF_SEGMENT_REPLAY=1) is exact but not
-                # faster than the batched path, which is the default.
-                fine_out = (seg_plan.run(jobs) if os.environ.get("LADDER_REPLAY")
-                            else TimeDomainFilterBank.filter_series_many(jobs))
-                if os.environ.get("LADDER_VERIFY_REPLAY"):
-                    again = TimeDomainFilterBank.filter_series_many(jobs)
-                    bad = sum(not (np.array_equal(a.sample_indices, b.sample_indices)
-                                   and np.array_equal(a.snr, b.snr)) for a, b in zip(fine_out, again))
-                    in_trial = sum(getattr(g.plan, "_chain_trial", None) is not None
-                                   for _, bk in fine for g in bk._groups)
-                    print("verify replay seg %d: replays %d, mismatched jobs %d, peaks %d, plans in trial %d"
-                          % (seg, seg_plan.replays, bad, sum(len(a.snr) for a in fine_out), in_trial),
-                          flush=True)
-            tm.add("fine", time.perf_counter() - t)
-            finish(seg, ser, mids, fine_out, tm)
-            tm.add("segment", time.perf_counter() - t_seg)
-            if prof is not None and tm is steady:
-                prof.disable()
-                prof.dump_stats(os.environ["LADDER_PROFILE"])
-            if next_ser is None and seg + 1 < args.segments:
-                next_ser = new_series()
-        if os.environ.get("LADDER_CHAINS"):      # each fine bank's (n, chain) per template group
-            from collections import Counter
-            ch = Counter()
-            for _, b in fine:
-                for g in b._groups:
-                    ch[(g.n, getattr(g.plan, "_chain", None))] += len(g.template_indices)
-            print("chains (n, chain): templates", dict(sorted(ch.items(), key=str)), flush=True)
+                    out = TimeDomainFilterBank.filter_series_many(jobs)
+                return out if spec is not None else (out, None)
+
+            if os.environ.get("LADDER_FOLD_TOPS") and os.environ.get("LADDER_REPLAY"):
+                # Every top's segment k runs as one SegmentPlan request (driven after every top
+                # is set up).
+                folded.append(seg_loop(True))
+                return
+            gen = seg_loop(False)
+            req = next(gen)
+            while True:
+                try:
+                    req = gen.send(run_request(req))
+                except StopIteration:
+                    break
+
+            if os.environ.get("LADDER_CHAINS"):      # each fine bank's (n, chain) per template group
+                from collections import Counter
+                ch = Counter()
+                for _, b in fine:
+                    for g in b._groups:
+                        ch[(g.n, getattr(g.plan, "_chain", None))] += len(g.template_indices)
+                print("chains (n, chain): templates", dict(sorted(ch.items(), key=str)), flush=True)
+    for top in tops:
+        one_top(top)
+    if folded:
+        drive_folded(folded, args, first, steady, counts)
+        # One folded segment covers every top: the steady time is per folded segment.
     nfine = sum(t["nfine"] for t in tops)
     steady_segments = max(0, args.segments - args.warmup) * len(tops)
     # "segment" is the whole of each segment (the stages together, as the device is fed):
