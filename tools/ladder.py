@@ -40,6 +40,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "python"))
 import matchedfilter as mf                                    # noqa: E402
 from matchedfilter import TimeDomainFilterBank, _gputime      # noqa: E402
+from matchedfilter import _roofline                           # noqa: E402
 from matchedfilter.time_domain import SegmentPlan             # noqa: E402
 
 RATE = 2048.0
@@ -259,6 +260,9 @@ def run_device(device, tops, args, seed):
     results = {}
     counts = defaultdict(int)
     folded = []
+    # --roofline: work counted over each top's steady segments (matchedfilter._roofline).
+    roof = dict(work=_roofline.Work(), ticks=defaultdict(int), problems=[], ctx=None) \
+        if args.roofline else None
 
     def one_top(top):
         # Each top template in its own scope: its segment loop (a generator under
@@ -300,8 +304,37 @@ def run_device(device, tops, args, seed):
             mid_out = {ifo: mid.empty_shared((len(top["mid_counts"]), S)) for ifo in ("H1", "L1")}
             seg_plan = SegmentPlan()
             first.add("prep", time.perf_counter() - t0)
+            fine_banks = [b for _, b in fine]
+            rsnap = {}
+
+            def roof_snap(key):
+                if roof is not None:
+                    rsnap[key] = _roofline.snapshot([mid], fine_banks)
+
+            def roof_close():
+                """This top's steady work: middle from rsnap['mid'], fine from rsnap['fine']."""
+                if roof is None:
+                    return
+                if "mid" not in rsnap or "fine" not in rsnap:
+                    roof["problems"].append("top %d: no steady span (segments <= warmup?)" % top["top"])
+                    return
+                after = _roofline.snapshot([mid], fine_banks)
+                _roofline.middle_work(roof["work"], rsnap["mid"], after, [mid])
+                t = _roofline.fine_work(roof["work"], rsnap["fine"], after, fine_banks, device,
+                                        binsize=int(args.peak_window * RATE),
+                                        problems=roof["problems"])
+                for k, v in t.items():
+                    roof["ticks"][k] += v
+                roof["ctx"] = roof["ctx"] or _roofline.gpu_context(fine_banks)
             def followups(seg, ser, mids, fine_out):
                 """A segment's fine results: record them, and return its follow-up jobs."""
+                if roof is not None and seg >= args.warmup:
+                    jobs = followups_of(seg, ser, mids, fine_out)
+                    _roofline.followup_work(roof["work"], jobs[0])
+                    return jobs
+                return followups_of(seg, ser, mids, fine_out)
+
+            def followups_of(seg, ser, mids, fine_out):
                 fine_res = iter(fine_out)
                 asym_jobs, asym_keys = [], []
                 for row, (m, b) in enumerate(fine):
@@ -415,6 +448,10 @@ def run_device(device, tops, args, seed):
                 sampler.start()
                 for seg in range(args.segments + depth):
                     sampler.on = args.warmup <= seg
+                    if seg == args.warmup:
+                        roof_snap("mid")
+                        if args.warmup == 0:
+                            roof_snap("fine")
                     profiled = prof is not None and args.warmup <= seg < args.segments
                     if profiled:
                         prof.enable()
@@ -437,6 +474,8 @@ def run_device(device, tops, args, seed):
                         t = time.perf_counter()
                         p_out = [f.result() for f in p_futures]
                         p_tm.add("fine", time.perf_counter() - t)
+                        if p_seg == args.warmup - 1:
+                            roof_snap("fine")    # the warmup's fine work is all collected
                         a_jobs, a_keys = followups(p_seg, p_ser, p_mids, p_out)
                         asym = (a_keys, submit_followups(a_jobs, p_tm, wait=False), p_tm)
                     if seg < args.segments:
@@ -467,6 +506,7 @@ def run_device(device, tops, args, seed):
                         prof.disable()
                 sampler.stop()
                 counts["gpu_sampler"] = sampler.report()
+                roof_close()
                 if prof is not None:
                     prof.dump_stats(os.environ["LADDER_PROFILE"])
                 return
@@ -501,6 +541,9 @@ def run_device(device, tops, args, seed):
                 for seg in range(args.segments):
                     tm = first if seg < args.warmup else steady
                     bsampler.on = args.warmup <= seg
+                    if seg == args.warmup and not fold and not inflight:
+                        roof_snap("mid")
+                        roof_snap("fine")
                     if seg == args.warmup and os.environ.get("LADDER_GC_FREEZE"):
                         # What an application does after setup: move the setup heap out of the
                         # cyclic collector's view (a full collection of it measured ~11 ms here).
@@ -607,6 +650,12 @@ def run_device(device, tops, args, seed):
                 bsampler.stop()
                 if bsampler.samples:
                     counts["gpu_sampler"] = bsampler.report()
+                if fold or inflight:
+                    if roof is not None:
+                        roof["problems"].append("roofline counting is not wired for "
+                                                "LADDER_FOLD_TOPS / LADDER_INFLIGHT")
+                else:
+                    roof_close()
                 report_plan(seg_plan)
                 if inflight:
                     for sp in plans2:
@@ -680,6 +729,19 @@ def run_device(device, tops, args, seed):
         work = sum(t["nfine"] for t in tops) / len(tops) * analysed * 2 * steady_segments
         report["templates_in_real_time"] = {k: work / v for k, v in steady.t.items() if v > 0}
         report["templates_in_real_time"]["total"] = work / total
+    if roof is not None and steady_segments and total > 0:
+        measured = {"middle": steady.t.get("middle"), "followups": steady.t.get("asym")}
+        if roof["ticks"]:
+            rate = _roofline.cpu_tick_rate()
+            measured.update({k: v / rate for k, v in roof["ticks"].items()})
+        pk = _roofline.peaks(device, ctx=roof["ctx"])
+        rr = _roofline.report(roof["work"], pk, steady_segments, total,
+                              {k: v for k, v in measured.items() if v is not None})
+        rr["problems"] = roof["problems"]
+        rr["measured_note"] = ("measured ms: middle/followups are the ladder's host stage timers "
+                               "(enqueue time under --pipeline on a GPU); CPU fine stages are "
+                               "engine ticks (forward = run_series minus tiers and refine)")
+        report["roofline"] = rr
     return report, results
 
 
@@ -767,6 +829,10 @@ def main():
                    help="--pipeline: segments in flight before one is collected (default 1: 2 "
                         "doubles the slots and recordings in use, which at n=8192 exceeds the "
                         "recording cache)")
+    p.add_argument("--roofline", action="store_true",
+                   help="count each steady segment's work per stage and report the fraction of "
+                        "theoretical throughput (matchedfilter._roofline)")
+    p.add_argument("--roofline-out", default=None, help="write the roofline report (JSON) here")
     p.add_argument("--timing", action="store_true",
                    help="device time per kernel label for each stage (sets MF_GPU_TIMING=1)")
     args = p.parse_args()
@@ -818,6 +884,10 @@ def main():
         dev = sum(v[1] for v in d.values())
         print(f"  {stage}: device {dev / 1e3:.3f}s of wall {report['steady_s'][stage]:.3f}s; " +
               ", ".join(f"{l} {v[0]}x {v[1]:.1f}ms" for l, v in sorted(d.items(), key=lambda x: -x[1][1])))
+    if "roofline" in report:
+        print(_roofline.format_report(report["roofline"]))
+        if args.roofline_out:
+            Path(args.roofline_out).write_text(json.dumps(report["roofline"], indent=1, default=float))
     if "check" in report:
         r = report["reference"]
         print(f"  reference {r['device']}: steady " + ", ".join(f"{k} {v:.2f}s" for k, v in r["steady_s"].items()))

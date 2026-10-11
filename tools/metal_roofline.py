@@ -156,7 +156,8 @@ def replay(records, reps):
 
 # ---- work model ----------------------------------------------------------------------------
 def fft_flops(n):
-    return 5 * n * math.log2(n)
+    from matchedfilter._roofline import fft_flops as f      # the one shared work model
+    return f(n)
 
 
 def work(r, groups):

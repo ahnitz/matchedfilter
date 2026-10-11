@@ -423,6 +423,7 @@ class MatchedFilter:
         self._gpu = None
         self._gpairs = 0
         self._gtrig = 0
+        self._gt1 = 0          # GPU: pairs tier 0 passed (cascade chains), for _roofline
         self._ddirty = True
         self._tdirty = True
 
@@ -1474,6 +1475,7 @@ class MatchedFilter:
                 shp = r.shape if isinstance(r, _SparsePeaks) else r[0].shape
                 self._gpairs += shp[0] * shp[1]
                 self._gtrig += gpu.last_refinements
+                self._gt1 += getattr(gpu, "last_tier1_survivors", 0) or 0
                 if isinstance(r, _SparsePeaks):
                     sparse_parts.append((b_start, r))
                 else:
@@ -2906,6 +2908,7 @@ class HierarchicalFilter(MatchedFilter):
             shp = r.shape if isinstance(r, _SparsePeaks) else r[0].shape
             self._gpairs += shp[0] * shp[1]
             self._gtrig += self._gpu.last_refinements
+            self._gt1 += getattr(self._gpu, "last_tier1_survivors", 0) or 0
             return r
         if kw.get("async_submit"):
             return lambda: account(res())
@@ -2939,6 +2942,7 @@ class HierarchicalFilter(MatchedFilter):
             shp = r.shape if isinstance(r, _SparsePeaks) else r[0].shape
             self._gpairs += shp[0] * shp[1]
             self._gtrig += self._gpu.last_refinements
+            self._gt1 += getattr(self._gpu, "last_tier1_survivors", 0) or 0
             return r
         if async_submit:
             return lambda: account(res())
@@ -2961,6 +2965,32 @@ class HierarchicalFilter(MatchedFilter):
         if self._gpu is not None:
             return (self._gpairs, self._gtrig)
         return self._ensure().stats()
+
+    def work_counts(self):
+        """Cumulative work counters for matchedfilter._roofline: a dict with the chain
+        (bands), pairs (block, template) seen by tier 0, passed (pairs each tier passed;
+        the last tier's passes are the refines), refined, q15 (pairs the int16 screen
+        passed to the float tier 0, or None when no screen ran) and, on the CPU, ticks per
+        tier, refine, screen and whole series calls. GPU passes for tier 0 of a two-tier
+        chain come from the backend's last_tier1_survivors; ticks are None there."""
+        chain = tuple(self._chain) if self._chain else ()
+        if self._gpu is not None:
+            passed = ([self._gt1] if len(chain) == 2 else []) + [self._gtrig]
+            return dict(backend="gpu", chain=chain, pairs=self._gpairs, passed=passed,
+                        refined=self._gtrig, q15=None, ticks=None, ident=id(self))
+        mf = getattr(self, "_mf", None)
+        if mf is None:
+            return dict(backend="cpu", chain=chain, pairs=0, passed=[0] * len(chain),
+                        refined=0, q15=None, ticks=None, ident=None)
+        st = mf.tier_stats()
+        pairs, refined = mf.stats()
+        q_on, q_passed, q_ticks = mf.q15_stats()
+        return dict(backend="cpu", chain=tuple(int(b) for b, _, _ in st[:-1]), pairs=int(pairs),
+                    passed=[int(p) for _, p, _ in st[:-1]], refined=int(refined),
+                    q15=int(q_passed), q15_on=bool(q_on),
+                    ticks=dict(tiers=[int(t) for _, _, t in st[:-1]], refine=int(st[-1][2]),
+                               q15=int(q_ticks), series=int(mf.series_ticks())),
+                    ident=id(mf))
 
     @property
     def tier_stats(self):
