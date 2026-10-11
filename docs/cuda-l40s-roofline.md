@@ -535,3 +535,49 @@ arrays the graph reads) rather than host-built per segment.
 the capture run goes through the normal deferred path (call plans included), and a replay skips
 the whole Python path. On CUDA the call plans never replay (the backend has no
 forward_replay/hier_replay), so for the fine stage the segment graph supersedes them.
+
+## Phase 9 (2026-10-11): middle stage, device follow-ups and several tops in one graph
+
+All three are opt-in ladder modes on top of the segment graph (`LADDER_REPLAY=1`):
+- `LADDER_GRAPH_MIDDLE=1`: the middle stage is a `SegmentPlan.run(prelude=...)`. Its input is
+  device-visible memory the host rewrites each segment, and its correlate_series(wait=False)
+  is captured into the same graph. Inside a capture, writes left in flight order the fine
+  stage through captured events, and the write-after-read drain is skipped (the replay waits).
+- `LADDER_DEVICE_FOLLOWUPS=1`: the follow-up rule (`_gpuhost.FollowupSpec`, shared with
+  Vulkan) runs on the device (`_cudafollowup`, `src/gpu/followup.cu`).
+  - `fuSelect` reads each fine dispatch's compactPeaks records: threshold, rank by |snr| with
+    ties in result order, one per dedupe interval.
+  - `fuBlocks` lays each window on its group's block grid.
+  - A forward per region, then `refineItems` (the `filterPairOut` split of `filterPair`,
+    `MF_PAIR_OUT`) refines each block against the peak's template.
+  - All of it runs in the graph with no host round trip. Capacities are fixed; an overflow
+    reruns that segment's follow-ups on the host.
+- `LADDER_FOLD_TOPS=1`: every top template's segment k is one request: all the middles, fine
+  stages and follow-ups in one capture.
+
+Exactness: `--check cpu` exact in every mode with one top (419 calls, 0 missed). With two tops
+folded, the replay differs from the per-call path in one fine peak of 922 (SNR 6.26, gate
+threshold 6, outside the check's 0.25 margin); the per-call path with the same data is exact.
+`LADDER_VERIFY_REPLAY` shows the folded graph matching the per-call path on every job of every
+replayed segment, so the difference is ordering-sensitive (which run a borderline coarse value
+reaches the gate in); not yet explained. Folding is therefore not ready.
+
+Measured (base: main c4f1c45, per-call path; 8 segments, 6 steady; `LADDER_GC_FREEZE=1`,
+`MF_CUDA_BLOCKING_SYNC=1`; GPU busy from NVML; 3 interleaved rounds, medians; per top-segment):
+
+| mode | segment, n=2048 | segment, unpinned | host CPU | GPU busy |
+|---|---|---|---|---|
+| base | **22.4 ms** | **23.9 ms** | 24.9 ms | - |
+| segment graph | 27.7 ms | 30.1 ms | 24.8 ms | 54% / 41% |
+| graph + middle + device follow-ups | 27.4 ms | 26.7 ms | **21.6 ms** | 53% / 37% |
+| 2 tops, base | 25.7 ms | | (see note) | |
+| 2 tops folded | 29.0 ms | | 26.5 ms | 37% |
+
+The graph modes are now slower than main's per-call path. Main moved on meanwhile (pipelined
+segments, the host per-segment fixes); the per-call path overlaps the next segment's host work
+with the device, while a segment graph is one launch and one wait per segment with nothing
+behind it: the device idles while the host reads results and prepares the next segment (GPU
+busy 37-54%). Host CPU falls only ~3 ms, because the remaining host work is result handling and
+data staging, not submission. The next step for the graph is to keep two segments in flight
+(two graphs, double-buffered inputs), as the per-call path now does. (The "2 tops, base" host
+CPU figure is not comparable: the measurement starts at gc.freeze, which runs once per top.)
