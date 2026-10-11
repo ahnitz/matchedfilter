@@ -170,7 +170,11 @@ COARSE_TILE_T = {64: 2, 128: 2, 256: 2, 512: 4, 1024: 2}
 #: `entry == ENTRY`, which silently collides the moment there is a third.
 STEMS = {"fusedTierB": "tierb",
          "compactPairs": "compact", "compactListed": "compactl", "refineListed": "refine",
-         "fullCorrelation": "full", "fullCorrelationSeries": "full_series"}
+         "fullCorrelation": "full", "fullCorrelationSeries": "full_series",
+         "refineItems": "items"}
+#: refineItems (the follow-up refine over listed (row, template, window, out) entries) is
+#: tierb.slang with MF_PAIR_OUT defined and refine_bounded.slang (shared with CUDA) appended.
+ITEMS_KERNEL = ROOT / "src" / "gpu" / "refine_bounded.slang"
 
 FULL_TIER_C = tuple(1 << k for k in range(17, 23))
 TIER_C_ENTRIES = (("corr1", "tcStage1"), ("corr2", "tcFullStage3"),
@@ -422,12 +426,15 @@ def fp32_xstride(n, cap):
 def compile_one(slangc, n, outdir, entry=ENTRY, cap=None, suffix="", coarse16=0, ppg=1, tile=1, single_bin=0):
     cap = LDS_CAP[n] if cap is None else cap
     src = outdir / ("mf_%d_%s%s.slang" % (n, entry, suffix))
-    src.write_text("#define NLEN %d\n#define LDS_CAP %d\n#define COARSE16 %d\n"
+    items = entry == "refineItems"
+    src.write_text(("#define MF_PAIR_OUT 1\n" if items else "")
+                   + "#define NLEN %d\n#define LDS_CAP %d\n#define COARSE16 %d\n"
                    "#define PPG %d\n#define TILE_T %d\n#define RADIX %d\n#define SINGLE_BIN %d\n"
                    % (n, cap, coarse16, ppg, tile, RADIX.get(n, 16), single_bin)
                    + (coarse_prelude(n, cap, ppg) if coarse16
                       else "#define XSTRIDE_F %d\n" % fp32_xstride(n, cap))
-                   + KERNEL.read_text())
+                   + KERNEL.read_text()
+                   + (ITEMS_KERNEL.read_text() if items else ""))
     name = "%s_%d%s.spv" % (STEMS[entry], n, suffix)
     spv = outdir / name
     proc = subprocess.run(
@@ -441,10 +448,21 @@ def compile_one(slangc, n, outdir, entry=ENTRY, cap=None, suffix="", coarse16=0,
     return spv
 
 
+def build_items(slangc, n):
+    """The follow-up refine for n (items_<n>.spv), and its portable-LDS variant where needed."""
+    spv = compile_one(slangc, n, OUT, "refineItems")
+    info = dict(file=spv.name, descriptors=len(reflect(spv.read_bytes())["descriptors"]))
+    if lds_bytes(n, LDS_CAP[n]) > lds_bytes(n, PORTABLE_CAP):
+        small = compile_one(slangc, n, OUT, "refineItems", cap=PORTABLE_CAP, suffix="_lds32")
+        info["portable"] = dict(file=small.name, lds_bytes=lds_bytes(n, PORTABLE_CAP))
+    return info
+
+
 def source_hashes():
     """Fingerprint all production shader dependencies for freshness checks."""
     names = ('tierb.slang', 'fft_transform.slang', 'coarse_tile.slang',
-             'series_forward.slang', 'series_bands.slang', 'pack_coarse.slang', 'twiddle.slang')
+             'series_forward.slang', 'series_bands.slang', 'pack_coarse.slang', 'twiddle.slang',
+             'refine_bounded.slang')
     return {name: hashlib.sha256((KERNEL.parent / name).read_bytes()).hexdigest()
             for name in names}
 
@@ -452,6 +470,10 @@ def source_hashes():
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--slangc", default=None)
+    ap.add_argument("--items-only", action="store_true",
+                    help="build only the follow-up refine modules (refineItems) and update the "
+                         "manifest in place: tierb.slang's other modules are unchanged by "
+                         "MF_PAIR_OUT, which only this module defines")
     args = ap.parse_args(argv)
 
     slangc = find_slangc(args.slangc)
@@ -464,6 +486,14 @@ def main(argv=None):
 
     OUT.mkdir(parents=True, exist_ok=True)
     MSL.mkdir(parents=True, exist_ok=True)
+    if args.items_only:
+        manifest = json.loads((OUT / "manifest.json").read_text())
+        for n in TIER_B:
+            manifest["modules"][str(n)]["items"] = build_items(slangc, n)
+            print("  n=%-6d items %s" % (n, manifest["modules"][str(n)]["items"]["file"]))
+        manifest["source_hashes"] = source_hashes()
+        (OUT / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+        return 0
     for band, rpt in COARSE_BANDS.items():
         src = OUT / ("ct_%d.slang" % band)
         src.write_text("#define NBAND %d\n#define RPT %d\n" % (band, rpt)
@@ -530,6 +560,7 @@ def main(argv=None):
         cinfo = reflect(comp.read_bytes())
         info["compact"] = dict(file=comp.name,
                                descriptors=len(cinfo["descriptors"]))
+        info["items"] = build_items(slangc, n)
         ref = compile_one(slangc, n, OUT, "refineListed")
         rinfo = reflect(ref.read_bytes())
         info["refine"] = dict(file=ref.name,
