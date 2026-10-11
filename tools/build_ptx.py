@@ -46,6 +46,64 @@ def _coarse_prelude(n, cap, ppg, table=True):
     return text
 
 
+COARSE_TC_KERNEL = ROOT / "src" / "gpu" / "coarse_tc.cu"
+#: Tensor-core coarse gate builds: bands (B = 16 M, M a multiple of 16) and warps per block.
+COARSE_TC_BANDS = (256, 512)
+COARSE_TC_WPB = (2, 4)
+#: The tensor-core coarse transform's error at the elected lag, in u rms(y) units, measured
+#: on the L40S with the bound off (tools/cuda_tc_sigma.py: 8192 pairs per band over the
+#: gate_margin families; |error| mean 0.76 / 0.71, std 0.40 / 0.39, max 3.31 / 5.19 at bands
+#: 256 / 512). The error magnitude is not Gaussian (its tail is heavier than a Rayleigh fit),
+#: so sigma is not its std: it is set so that kappa = z(C16_FAIL) sigma is at least twice the
+#: largest error seen, the margin-use < 0.5 criterion of tools/gate_margin.py, rounded up to
+#: 0.1: kappa 7.0 / 10.5. Smaller than the Slang tier's (12.7 / 15.5 from C16_SIGMA): the
+#: tensor-core products accumulate in fp32.
+COARSE_TC_SIGMA = {256: 1.0, 512: 1.5}
+
+
+def nvrtc_ptx(nvrtc, cuda_path, source, name, defines, arch="compute_80"):
+    """CUDA C -> PTX through NVRTC (the library slangc uses). compute_80: mma.sync m16n8k16."""
+    import ctypes
+    lib = ctypes.CDLL(str(nvrtc))
+    prog = ctypes.c_void_p()
+    if lib.nvrtcCreateProgram(ctypes.byref(prog), source.encode(), name.encode(), 0, None, None):
+        raise RuntimeError("nvrtcCreateProgram failed")
+    opts = [("--gpu-architecture=%s" % arch).encode(), b"-std=c++14"]
+    if cuda_path:
+        opts.append(("-I" + str(pathlib.Path(cuda_path) / "include")).encode())
+    opts += [("-D%s=%s" % kv).encode() for kv in defines.items()]
+    arr = (ctypes.c_char_p * len(opts))(*opts)
+    rc = lib.nvrtcCompileProgram(prog, len(opts), arr)
+    size = ctypes.c_size_t()
+    lib.nvrtcGetProgramLogSize(prog, ctypes.byref(size))
+    log = ctypes.create_string_buffer(size.value)
+    lib.nvrtcGetProgramLog(prog, log)
+    if rc:
+        raise RuntimeError("nvrtc %s %s:\n%s" % (name, defines, log.value.decode()))
+    lib.nvrtcGetPTXSize(prog, ctypes.byref(size))
+    ptx = ctypes.create_string_buffer(size.value)
+    lib.nvrtcGetPTX(prog, ptx)
+    return ptx.value
+
+
+def build_coarse_tc(nvrtc, outdir):
+    """The tensor-core coarse gate (src/gpu/coarse_tc.cu): one PTX per band and warps per
+    block, timed by the backend against the Slang coarse variants."""
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+    from statistics import NormalDist
+    import coarse_layout
+    z = NormalDist().inv_cdf(1.0 - coarse_layout.C16_FAIL)
+    cuda_path = os.environ.get("MF_CUDA_PATH")
+    src = COARSE_TC_KERNEL.read_text()
+    for band in COARSE_TC_BANDS:
+        for wpb in COARSE_TC_WPB:
+            out = outdir / ("coarse_tc_%d_w%d.ptx" % (band, wpb))
+            kappa = os.environ.get("MF_TC_KAPPA") or "%.4ff" % (z * COARSE_TC_SIGMA[band])
+            out.write_bytes(nvrtc_ptx(nvrtc, cuda_path, src, "coarse_tc.cu",
+                                      dict(BAND=band, WPB=wpb, KAPPA=kappa)))
+            print("  coarse_tc band=%d wpb=%d kappa=%s" % (band, wpb, kappa), flush=True)
+
+
 COMPACT_PEAKS_KERNEL = ROOT / "src" / "gpu" / "compact_peaks.slang"
 
 TIER_B = (64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536)
@@ -210,7 +268,7 @@ def build_full_tierc(slangc, nvrtc, env, outdir):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--slangc", default=None)
-    ap.add_argument("--only", choices=("all", "tierc", "refine", "coarse", "compact"), default="all",
+    ap.add_argument("--only", choices=("all", "tierc", "refine", "coarse", "compact", "tc"), default="all",
                     help="rebuild only the two-stage kernels (and their manifest entry), "
                          "or only the refine family")
     args = ap.parse_args()
@@ -234,6 +292,9 @@ def main():
         return 0
     if args.only == "compact":
         build_compact_peaks(slangc, nvrtc, env, OUT)
+        return 0
+    if args.only == "tc":
+        build_coarse_tc(nvrtc, OUT)
         return 0
     if args.only == "coarse":
         for n in (64, 128, 256):
@@ -353,6 +414,7 @@ def main():
 
     manifest["full_tierc"] = build_full_tierc(slangc, nvrtc, env, OUT)
     build_compact_peaks(slangc, nvrtc, env, OUT)
+    build_coarse_tc(nvrtc, OUT)
     (OUT / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     print("Wrote PTX manifest: %s" % (OUT / "manifest.json"))
     return 0

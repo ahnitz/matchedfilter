@@ -28,6 +28,13 @@ def _variants(cc, ctx, band):
                 except Exception:                               # noqa: BLE001 -- not built
                     continue
                 out.append((fn, wg, ppg, tile))
+    # The tensor-core gate (src/gpu/coarse_tc.cu), its own kappa (build_ptx COARSE_TC_SIGMA).
+    for wpb in (2, 4):
+        f = cc._PTX_DIR / ("coarse_tc_%d_w%d.ptx" % (band, wpb))
+        if f.is_file() and ctx.cc >= (8, 0):
+            fn = ctx._load(f.stem, f, "fusedTierB", 32 * wpb)
+            ctx._tc_persistent[fn.value] = ctx.sm_count * cc._TC_BLOCKS_PER_SM
+            out.append((fn, 32 * wpb, wpb, 2))
     return out
 
 
@@ -45,7 +52,7 @@ def _coarse(cc, ctx, var, band, D, T):
         ent = ctx._c16_flags.get(ctx._labels.get(fn.value))
         ctx._c16_bound_flag(fn)
         assert ent is not None, "coarse module without the mf_c16_raw switch"
-        grid, rowarg = cc._coarse_grid(rows, nt, ppg, tile)
+        grid, rowarg = ctx._coarse_grid_for(fn, rows, nt, ppg, tile)
         ctx._launch(fn, grid, wg, [bufs[0].dptr, bufs[1].dptr, bufs[2].dptr, bufs[3].dptr,
                                    cc._u32(nt), cc._u32(0), cc._u32(band),
                                    cc._u32(band if rowarg is None else rowarg),
@@ -58,7 +65,7 @@ def _coarse(cc, ctx, var, band, D, T):
     return np.abs(v.astype(np.complex128))
 
 
-@pytest.mark.parametrize("band", [64, 256, 1024])
+@pytest.mark.parametrize("band", [64, 256, 512, 1024])
 def test_bound_covers_the_exact_maximum(band, monkeypatch):
     from matchedfilter import _cudacompute as cc
     from test_gpu_c16_bound import _families
