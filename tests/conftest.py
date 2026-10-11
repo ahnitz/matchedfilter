@@ -203,19 +203,24 @@ def interleaved_speedup(slow, fast, reps=15):
 
     Timing all of one then all of the other lets load that comes and goes between the
     two blocks move the ratio (both replica speedup tests failed that way at load 20-60
-    and passed alone). Here the two alternate, so both see the same load, and each side
-    is its fastest run: contention only ever adds time, so the minimum is the least
-    disturbed measurement of the work itself. Returns (speedup, t_slow, t_fast)."""
+    and passed alone). Here the two alternate, and the speedup is the MEDIAN OF PAIRED
+    RATIOS: each slow run is divided by the fast run timed right beside it, so both
+    members of a pair see the same load, and the median ignores pairs a load spike hit.
+    (A ratio of per-side minima still drifted 1.56-2.24x at load ~25: the two minima
+    could come from different moments.) Returns (speedup, t_slow, t_fast) with the
+    per-side medians for reporting."""
     import time
+    import statistics
     slow(), fast()                                   # warm both
-    t_slow = t_fast = float("inf")
+    ratios, ts, tf = [], [], []
     for i in range(reps):
-        for fn, which in ((slow, 0), (fast, 1)) if i % 2 == 0 else ((fast, 1), (slow, 0)):
+        order = ((slow, 0), (fast, 1)) if i % 2 == 0 else ((fast, 1), (slow, 0))
+        pair = {}
+        for fn, which in order:
             t0 = time.perf_counter()
             fn()
-            dt = time.perf_counter() - t0
-            if which == 0:
-                t_slow = min(t_slow, dt)
-            else:
-                t_fast = min(t_fast, dt)
-    return t_slow / t_fast, t_slow, t_fast
+            pair[which] = time.perf_counter() - t0
+        ratios.append(pair[0] / pair[1])
+        ts.append(pair[0])
+        tf.append(pair[1])
+    return statistics.median(ratios), statistics.median(ts), statistics.median(tf)
