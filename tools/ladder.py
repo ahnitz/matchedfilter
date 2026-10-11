@@ -52,15 +52,19 @@ def profile():
     return np.where((f > 20) & (f < 900), np.maximum(f, 1.0) ** (-7.0 / 3), 0.0)
 
 
-def analytic_series(rng, S, amp, df=DF):
+def analytic_series(rng, S, amp, df=DF, out=None):
     """Analytic Gaussian series of length S, spectrum amp(f) (on a grid of spacing df), unit
-    variance per quadrature."""
+    variance per quadrature. out: a complex64 array of length S to write it into (e.g. a
+    bank's empty_shared buffer, which correlate_series then reads without a copy)."""
     X = np.fft.fft(rng.standard_normal(S))
     k = np.arange(S // 2)
     X[:S // 2] *= np.interp(k * RATE / S, np.arange(amp.size) * df, amp)
     X[S // 2:] = 0
     x = np.fft.ifft(X)
     x /= np.sqrt(np.mean(np.abs(x) ** 2) / 2)
+    if out is not None:
+        out[:] = x
+        return out
     return x.astype(np.complex64)
 
 
@@ -372,7 +376,12 @@ def run_device(device, tops, args, seed):
             # --pregen draws every segment's data up front, in the same order (identical data):
             # the bench's own generation (~0.1 s a segment) then stays off the device's timeline.
             def draw():
-                return {ifo: analytic_series(rng, S, amp, df) for ifo in ("H1", "L1")}
+                # --shared-input: the producer writes into the middle bank's device-shared
+                # memory (empty_shared), as a search can whiten into it: the middle stage then
+                # reads the series in place instead of copying it to the device every call.
+                return {ifo: analytic_series(rng, S, amp, df,
+                                             out=mid.empty_shared((S,)) if args.shared_input
+                                             else None) for ifo in ("H1", "L1")}
             pregen = [draw() for _ in range(args.segments)] if args.pregen else None
 
             def new_series():
@@ -750,6 +759,10 @@ def main():
                         "default every segment's data is drawn before the timed loop (same data): "
                         "a search reads its data, and generating it here (~0.1 s a segment) idled "
                         "the device between segments")
+    p.add_argument("--shared-input", action="store_true",
+                   help="draw each segment's series into the middle bank's device-shared memory "
+                        "(TimeDomainFilterBank.empty_shared), which correlate_series reads in "
+                        "place; by default the series is ordinary host memory, copied each call")
     p.add_argument("--depth", type=int, default=1,
                    help="--pipeline: segments in flight before one is collected (default 1: 2 "
                         "doubles the slots and recordings in use, which at n=8192 exceeds the "
