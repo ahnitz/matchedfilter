@@ -725,6 +725,100 @@ class _TemplateGroup:
 
 
 
+def _tap_spectra(taps: np.ndarray, counts: np.ndarray, n: int, rate_ratio: float,
+                 analytic: bool, out: np.ndarray) -> None:
+    """Spectra of FIR taps on an n-sample data block, written into out (T, n).
+
+    taps is (T, m) float32 with each row's first counts[i] samples valid. The
+    centre tap is rolled to lag 0; with taps at a higher rate than the data
+    (rate_ratio > 1) the spectrum is cut at the data Nyquist, at a lower rate it
+    is zero-padded. Not conjugated: filters_f is the conjugate of this.
+    """
+    T, m = taps.shape
+    if rate_ratio == 1.0 and _core is not None and hasattr(_core, 'taps_to_spectra'):
+        try:
+            _core.taps_to_spectra(taps, counts, n, m, out)
+            return
+        except Exception:
+            pass
+    N_taps = int(round(n * rate_ratio))
+    for row in range(T):
+        cnt = int(counts[row])
+        buf = np.zeros(N_taps, dtype=np.float32)
+        buf[:cnt] = taps[row, :cnt]
+        # Center-tap circular roll alignment
+        buf = np.roll(buf, -(cnt // 2))
+        spec = np.fft.fft(buf).astype(np.complex64)
+        if analytic and N_taps > n:
+            # For an analytic series with positive-frequency support [f_low, f_high) < data Nyquist:
+            # Positive-frequency bins [0, n) map directly to [0, f_Nyquist) without
+            # negative-frequency mirroring.
+            out[row] = spec[:n]
+        elif N_taps > n:
+            # Truncate frequencies above data Nyquist (preserving positive and negative bins)
+            out[row] = 0
+            out[row, :n // 2 + 1] = spec[:n // 2 + 1]
+            neg_count = n - (n // 2 + 1)
+            out[row, n // 2 + 1:] = spec[N_taps - neg_count:]
+        elif N_taps < n:
+            # Zero-pad frequencies above template Nyquist
+            out[row] = 0
+            half_taps = N_taps // 2
+            out[row, :half_taps + 1] = spec[:half_taps + 1]
+            neg_count = N_taps - (half_taps + 1)
+            out[row, n - neg_count:] = spec[half_taps + 1:]
+        else:
+            out[row] = spec
+
+
+def template_spectra(
+    taps: np.ndarray,
+    tap_counts: Optional[Sequence[int]],
+    block_length: int,
+    *,
+    tap_sample_rate: float = 2048.0,
+    data_sample_rate: float = 2048.0,
+    analytic: bool = False,
+    out: Optional[np.ndarray] = None,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Each template's filter on one block length, and the lags where it is valid.
+
+    The filters are those TimeDomainFilterBank.filters_f holds for a block of
+    block_length (conjugate spectrum, centre tap at lag 0); nothing else is
+    built: no plans, no groups. With out (T, block_length) complex64, C-contiguous,
+    they are written there and nothing is allocated for them.
+
+    Returns (filters, valid): valid is (T, 2) int64, each template's [start, stop)
+    of lags in a block whose correlation is not wrapped by its own taps.
+    Raises if a template does not fit the block.
+    """
+    taps = np.ascontiguousarray(taps, dtype=np.float32)
+    if taps.ndim == 1:
+        taps = taps[None, :]
+    T = taps.shape[0]
+    counts = (np.full(T, taps.shape[1], dtype=np.int64) if tap_counts is None
+              else np.ascontiguousarray(tap_counts, dtype=np.int64))
+    if counts.shape != (T,):
+        raise ValueError(f"tap_counts must have one entry per template ({T})")
+    n = int(block_length)
+    rate_ratio = float(tap_sample_rate) / float(data_sample_rate)
+    data_counts = np.ceil(counts / rate_ratio).astype(np.int64)
+    start = np.ceil((counts // 2) / rate_ratio).astype(np.int64)
+    stop = start + n - data_counts + 1
+    if np.any(stop <= start):
+        raise ValueError(f"block_length {n} is shorter than the longest filter "
+                         f"({int(data_counts.max())} data samples)")
+    if out is None:
+        out = np.empty((T, n), dtype=np.complex64)
+    elif (out.shape != (T, n) or out.dtype != np.complex64
+          or not out.flags.c_contiguous):
+        raise ValueError(f"out must be C-contiguous complex64 of shape ({T}, {n})")
+    m = max(int(counts.max()), 1)
+    _tap_spectra(taps[:, :m], counts, n, rate_ratio, analytic, out)
+    np.conjugate(out, out=out)
+    return out, np.stack([start, stop], axis=1)
+
+
 class TimeDomainFilterBank:
     """Filter bank that ingests raw time-domain filters and optimizes blocking dynamically.
 
@@ -889,63 +983,18 @@ class TimeDomainFilterBank:
 
             # Frequency domain conversion for each template in this group
             spectra = np.zeros((T, chosen_N), dtype=np.complex64)
-            has_fast_c = (self.rate_ratio == 1.0 and _core is not None and hasattr(_core, 'taps_to_spectra'))
-            used_fast_c = False
-            if has_fast_c:
-                try:
-                    if self._raw_taps is not None and self._raw_taps.shape[1] >= orig_taps_max:
-                        group_taps = np.ascontiguousarray(self._raw_taps[tmpl_indices, :orig_taps_max])
-                    else:
-                        group_taps = np.zeros((T, orig_taps_max), dtype=np.float32)
-                        for r, g_idx in enumerate(tmpl_indices):
-                            t_arr = self._taps_list[g_idx]
-                            cnt = min(int(self.tap_counts[g_idx]), orig_taps_max)
-                            group_taps[r, :cnt] = t_arr[:cnt]
-                    group_counts = np.ascontiguousarray(self.tap_counts[tmpl_indices], dtype=np.int64)
-                    _core.taps_to_spectra(group_taps, group_counts, chosen_N, orig_taps_max, spectra)
-                    for row, g_idx in enumerate(tmpl_indices):
-                        self._filters_f_list[g_idx] = np.conj(spectra[row])
-                        self._block_lengths_arr[g_idx] = chosen_N
-                    used_fast_c = True
-                except Exception:
-                    used_fast_c = False
-
-            if not used_fast_c:
-                for row, g_idx in enumerate(tmpl_indices):
-                    t_arr = self._taps_list[g_idx]
-                    cnt = int(self.tap_counts[g_idx])
-                    N_taps = int(round(chosen_N * self.rate_ratio))
-
-                    buf = np.zeros(N_taps, dtype=np.float32)
-                    buf[:cnt] = t_arr[:cnt]
-                    # Center-tap circular roll alignment
-                    buf = np.roll(buf, -(cnt // 2))
-
-                    spec = np.fft.fft(buf).astype(np.complex64)
-                    if self.analytic and N_taps > chosen_N:
-                        # For an analytic series with positive-frequency support [f_low, f_high) < data Nyquist:
-                        # Positive-frequency bins [0, chosen_N) map directly to [0, f_Nyquist) without
-                        # negative-frequency mirroring.
-                        spec_data = np.ascontiguousarray(spec[:chosen_N])
-                    elif N_taps > chosen_N:
-                        # Truncate frequencies above data Nyquist (preserving positive and negative bins)
-                        spec_data = np.zeros(chosen_N, dtype=np.complex64)
-                        spec_data[:chosen_N // 2 + 1] = spec[:chosen_N // 2 + 1]
-                        neg_count = chosen_N - (chosen_N // 2 + 1)
-                        spec_data[chosen_N // 2 + 1:] = spec[N_taps - neg_count:]
-                    elif N_taps < chosen_N:
-                        # Zero-pad frequencies above template Nyquist
-                        spec_data = np.zeros(chosen_N, dtype=np.complex64)
-                        half_taps = N_taps // 2
-                        spec_data[:half_taps + 1] = spec[:half_taps + 1]
-                        neg_count = N_taps - (half_taps + 1)
-                        spec_data[chosen_N - neg_count:] = spec[half_taps + 1:]
-                    else:
-                        spec_data = spec
-
-                    spectra[row] = spec_data
-                    self._filters_f_list[g_idx] = np.conj(spec_data)
-                    self._block_lengths_arr[g_idx] = chosen_N
+            if self._raw_taps is not None and self._raw_taps.shape[1] >= orig_taps_max:
+                group_taps = np.ascontiguousarray(self._raw_taps[tmpl_indices, :orig_taps_max])
+            else:
+                group_taps = np.zeros((T, orig_taps_max), dtype=np.float32)
+                for r, g_idx in enumerate(tmpl_indices):
+                    cnt = min(int(self.tap_counts[g_idx]), orig_taps_max)
+                    group_taps[r, :cnt] = self._taps_list[g_idx][:cnt]
+            group_counts = np.ascontiguousarray(self.tap_counts[tmpl_indices], dtype=np.int64)
+            _tap_spectra(group_taps, group_counts, chosen_N, self.rate_ratio, self.analytic, spectra)
+            for row, g_idx in enumerate(tmpl_indices):
+                self._filters_f_list[g_idx] = np.conj(spectra[row])
+                self._block_lengths_arr[g_idx] = chosen_N
 
             # Create matchedfilter plan
             factory = None
