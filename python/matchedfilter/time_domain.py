@@ -1448,6 +1448,22 @@ class TimeDomainFilterBank:
         return side == "cpu", record
 
     @staticmethod
+    def _run_followups(jobs, fine, spec):
+        """(follow-ups, "device" or "host"): on a backend that runs selected follow-ups as
+        one fixed recording per template group (Vulkan: _vkfollowup), else on the host."""
+        import os
+        if os.environ.get("MF_VK_DEVICE_FOLLOWUPS", "1") != "0":
+            try:
+                from . import _vkfollowup
+            except ImportError:
+                _vkfollowup = None
+            if _vkfollowup is not None:
+                res = _vkfollowup.run(spec, spec.select(jobs, fine))
+                if res is not None:
+                    return res, "device"
+        return spec.run_host(jobs, fine), "host"
+
+    @staticmethod
     def filter_series_many(jobs, wait=True, followups=None):
         """Several filter_series calls as one batch: jobs is [(bank, series, kwargs)], the
         result the list of their FilterResults, identical to calling each in turn.
@@ -1466,7 +1482,7 @@ class TimeDomainFilterBank:
             # The fine stage, then the follow-up rule on its results (_gpuhost.FollowupSpec).
             # A CUDA segment graph runs both on the device: SegmentPlan.run(followup=...).
             fine = TimeDomainFilterBank.filter_series_many(jobs)
-            return fine, followups.run_host(jobs, fine)
+            return fine, TimeDomainFilterBank._run_followups(jobs, fine, followups)[0]
         from . import _Deferred
         import os
         global _BATCH_TOKEN
@@ -1549,6 +1565,27 @@ class TimeDomainFilterBank:
             groups.setdefault((id(bank), id(g), bs, thr), []).append(
                 (j, bank, g, ser, bstarts, bws, bwe, ti_local, ti))
         done = set()
+        # Threshold-0 follow-ups on Vulkan: every group's items as listed entries of one fixed
+        # recording per template group (_vkfollowup), all in one submission. None (another
+        # backend, past a capacity): the per-group path below.
+        if os.environ.get("MF_VK_DEVICE_FOLLOWUPS", "1") != "0":
+            fast = sorted(m[0] for (_, _, _, thr), members in groups.items() if thr == 0.0
+                          for m in members)
+            if fast:
+                try:
+                    from . import _vkfollowup
+                except ImportError:
+                    _vkfollowup = None
+                collect = (_vkfollowup.submit_jobs([jobs[j] for j in fast])
+                           if _vkfollowup else None)
+                if collect is not None:
+                    # Submitted, not waited on: each job's result is read when asked for, so a
+                    # caller collecting later (filter_series_many(wait=False)) never waits here.
+                    from . import _Deferred
+                    for i, j in enumerate(fast):
+                        out[j] = _Deferred(lambda c=collect, i=i: c()[i])
+                        done.add(j)
+                    groups = {k: v for k, v in groups.items() if k[3] != 0.0}
         # Submit every template group's items, then collect: a backend that can leaves each
         # submission in flight (wait=False), so the device runs them back to back.
         submitted = []
@@ -2009,7 +2046,11 @@ class SegmentPlan:
         if prelude is not None:
             prelude()
         if followup is not None:
-            return TimeDomainFilterBank.filter_series_many(jobs, followups=followup)
+            fine = TimeDomainFilterBank.filter_series_many(jobs)
+            fu, how = TimeDomainFilterBank._run_followups(jobs, fine, followup)
+            name = "followups_device" if how == "device" else "followups_host"
+            setattr(self, name, getattr(self, name, 0) + 1)
+            return fine, fu
         if os.environ.get("MF_SEGMENT_REPLAY", "0") == "0":
             # Experimental: on realistic data (two-tier chains, several job sets sharing the
             # device) replays dropped peaks and once read freed buffers. Until that is fixed

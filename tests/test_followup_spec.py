@@ -58,6 +58,12 @@ def _device_followup_backends():
             out.append("cuda:0")
     except Exception:                                  # noqa: BLE001
         pass
+    try:
+        from matchedfilter import _vulkan
+        if _vulkan.enumerate_devices()[0]:
+            out.append("gpu:0")
+    except Exception:                                  # noqa: BLE001
+        pass
     return out
 
 
@@ -84,7 +90,11 @@ def test_device_followups_equal_the_host_rule(device, monkeypatch):
             r[:] = (np.fft.ifft(X) * 2).astype(np.complex64)
             r[rng.integers(8000, S - 8000, 5)] += 30.0          # loud samples: follow-ups
         fine, fu = plan.run(jobs, followup=spec)
-        want_fine, want_fu = TimeDomainFilterBank.filter_series_many(jobs, followups=spec)
+        # The reference: the fine stage as a batch, and each selected follow-up as its own
+        # filter_series call (no batched or device path on either side).
+        want_fine = TimeDomainFilterBank.filter_series_many(jobs)
+        want_fu = [(j, rank, c0, ti, b.filter_series(x, **kw))
+                   for j, rank, c0, ti, (b, x, kw) in spec.select(jobs, want_fine)]
         for a, b in zip(want_fine, fine):
             for f in a._fields:
                 np.testing.assert_array_equal(getattr(a, f), getattr(b, f))
