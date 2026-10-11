@@ -97,6 +97,8 @@ _OFF_TIMESTAMP_PERIOD = 296 + 424
 #: minStorageBufferOffsetAlignment (VkDeviceSize) 328.
 _OFF_MAX_WORKGROUP_SIZE = 296 + 236
 _OFF_STORAGE_OFFSET_ALIGNMENT = 296 + 328
+#: VkPhysicalDeviceLimits.maxDescriptorSetStorageBuffersDynamic.
+_OFF_MAX_DYNAMIC_STORAGE = 296 + 112
 
 #: Bands that USE the tiled coarse kernel. It is built and validated for
 #: 512 and 1024 as well, and deliberately not selected there.
@@ -138,6 +140,7 @@ _MEM_DEVICE_LOCAL, _MEM_HOST_VISIBLE, _MEM_HOST_COHERENT = 0x1, 0x2, 0x4
 #: measured, and enough to cost more than the kernel.
 _MEM_HOST_CACHED = 0x8
 _DESC_STORAGE_BUFFER = 7
+_DESC_STORAGE_BUFFER_DYNAMIC = 8
 _STAGE_COMPUTE = 0x20
 _BIND_POINT_COMPUTE = 1
 _ONE_TIME_SUBMIT = 0x1
@@ -541,6 +544,64 @@ class _DeviceTimer:
         return (out[1] - out[0]) * period
 
 
+#: peaks_items submissions merged into one vkQueueSubmit (MF_GPU_ITEMS_CHUNK overrides). A
+#: segment's follow-ups are one call per template group, submitted back to back before any is
+#: waited on; each submit cost 50-150 us of host CPU. A chunk bounds how long the first
+#: waits for the device (the host records a call in ~0.1-0.4 ms).
+_ITEMS_CHUNK = int(os.environ.get("MF_GPU_ITEMS_CHUNK", "4"))
+
+
+class _ItemsGroup:
+    """Consecutive asynchronous peaks_items submissions on a device, submitted as one.
+
+    Any other submission on the device flushes the group first (_flush_items), so the
+    device sees exactly the order the calls were made in: only the number of
+    vkQueueSubmit calls changes. One fence for the group; every member's wait waits on it."""
+
+    def __init__(self, dev):
+        self.dev, self.batches, self.state = dev, [], "open"
+        fc = _FenceCreate(8, None, 0)
+        self.fence = _vp()
+        _check(dev.vk.vkCreateFence(dev.device, ctypes.byref(fc), None, ctypes.byref(self.fence)),
+               "vkCreateFence")
+
+    def add(self, commands):
+        self.batches.append([getattr(c, "value", c) for c in commands])
+        if len(self.batches) >= _ITEMS_CHUNK:
+            self.flush()
+
+    def flush(self):
+        if self.state != "open":
+            return
+        self.state = "submitted"
+        if self.dev.__dict__.get("items_group") is self:
+            self.dev.items_group = None
+        arrays = [(_vp * len(b))(*b) for b in self.batches]
+        infos = (_SubmitInfo * len(arrays))(*[
+            _SubmitInfo(4, None, 0, None, None, len(b), a, 0, None)
+            for b, a in zip(self.batches, arrays)])
+        _check(self.dev.vk.vkQueueSubmit(self.dev.queue, len(arrays), infos, self.fence),
+               "vkQueueSubmit")
+
+    def wait(self):
+        if self.state == "open":
+            self.flush()
+        if self.state != "submitted":
+            return
+        self.state = "done"
+        vk, dev = self.dev.vk, self.dev.device
+        _check(vk.vkWaitForFences(dev, 1, (_vp * 1)(self.fence), 1, 0xFFFFFFFFFFFFFFFF),
+               "vkWaitForFences")
+        vk.vkDestroyFence(dev, self.fence, None)
+
+
+def _flush_items(dev):
+    """Submit a device's open peaks_items group, ahead of any other submission."""
+    g = dev.__dict__.get("items_group") if dev is not None else None
+    if g is not None:
+        g.flush()
+
+
 class _FusedBatch:
     """Submissions collected across contexts on one device, recorded and submitted together."""
 
@@ -703,6 +764,7 @@ class _FusedBatch:
         else:
             cmds = (_vp * 1)(cmd)
             submit = _SubmitInfo(4, None, 0, None, None, 1, cmds, 0, None)
+        _flush_items(dev)
         _check(vk.vkQueueSubmit(dev.queue, 1, ctypes.byref(submit), self.fence), "vkQueueSubmit")
 
     def wait(self):
@@ -775,6 +837,7 @@ def replay_fused(dev, keys):
     fence = _vp()
     _check(vk.vkCreateFence(dev.device, ctypes.byref(fc), None, ctypes.byref(fence)), "vkCreateFence")
     try:
+        _flush_items(dev)
         _check(vk.vkQueueSubmit(dev.queue, 1, ctypes.byref(submit), fence), "vkQueueSubmit")
         _check(vk.vkWaitForFences(dev.device, 1, (_vp * 1)(fence), 1, 0xFFFFFFFFFFFFFFFF),
                "vkWaitForFences")
@@ -909,6 +972,8 @@ class _Device:
                                 ctypes.POINTER(_u64))[0])
         self.storage_offset_alignment = align if 0 < align <= 256 and align & (align - 1) == 0 \
             else 256
+        self.max_dynamic_storage = int(ctypes.cast(ctypes.byref(props, _OFF_MAX_DYNAMIC_STORAGE),
+                                                   ctypes.POINTER(_u32))[0])
         self.max_workgroup_size = tuple(int(v) for v in ctypes.cast(
             ctypes.byref(props, _OFF_MAX_WORKGROUP_SIZE), ctypes.POINTER(_u32 * 3))[0])
 
@@ -1100,7 +1165,7 @@ class Context(InputUploads):
                "_accurate_trig", "max_shared_memory", "max_invocations", "max_dispatch_x",
                "subgroup_size", "subgroup_range", "mem_props", "command_pool", "_ts_period",
                "_reset_query",
-               "storage_offset_alignment", "max_workgroup_size", "timestamp_bits")
+               "storage_offset_alignment", "max_dynamic_storage", "max_workgroup_size", "timestamp_bits")
 
     def _attach_device(self, index):
         """Share the device, its queues, command pool and compiled pipelines per process.
@@ -1218,14 +1283,19 @@ class Context(InputUploads):
         return "tierb_%d.spv" % n
 
     def _build_pipeline(self, key, filename, nbind, push_bytes, data_stride=0, row_windows=0,
-                        subgroup=0, full_length=0):
+                        subgroup=0, full_length=0, dynamic=False):
         """data_stride: specialization constant 75 (mfDataStride), the data spectra's row
         stride when a hierarchical stage reads its band straight out of them.
         row_windows: constant 76 (mfRowWindows), per-row windows from the gRowWin binding.
 
         The set layout covers every binding the MODULE declares, which can exceed the
         caller's count (gRowWin); _descriptor_set fills such trailing bindings with a
-        dummy buffer."""
+        dummy buffer.
+
+        dynamic: every binding a STORAGE_BUFFER_DYNAMIC, its offset given at bind time, so
+        one descriptor set serves many dispatches over different rows (peaks_items)."""
+        if dynamic:
+            key = (key, "dynamic")
         if data_stride or row_windows or full_length:
             key = (key, "stride", data_stride, "rowwin", row_windows, "n", full_length)
         raw_c16 = os.environ.get("MF_VK_C16_BOUND", "1") == "0"
@@ -1251,7 +1321,8 @@ class Context(InputUploads):
                                        ctypes.byref(module)), "vkCreateShaderModule")
 
         bindings = (_LayoutBinding * nbind)(
-            *[_LayoutBinding(i, _DESC_STORAGE_BUFFER, 1, _STAGE_COMPUTE, None)
+            *[_LayoutBinding(i, _DESC_STORAGE_BUFFER_DYNAMIC if dynamic else _DESC_STORAGE_BUFFER,
+                             1, _STAGE_COMPUTE, None)
               for i in range(nbind)])
         sl_info = _SetLayoutCreate(32, None, 0, nbind, bindings)
         set_layout = _vp()
@@ -2720,6 +2791,7 @@ class Context(InputUploads):
         if dev is not None and dev.pending_writes and queue is not self.queue \
                 and getattr(queue, "value", queue) != getattr(self.queue, "value", self.queue):
             self.settle_writes()                # barriers order only one queue
+        _flush_items(dev)
         _check(self.vk.vkQueueSubmit(queue, 1, ctypes.byref(submit), fence),
                "vkQueueSubmit")
         if wait:
@@ -2957,18 +3029,75 @@ class Context(InputUploads):
         t2 = int(np.float32(float(threshold) ** 2 if threshold > 0 else 0).view(np.uint32))
         # Each item's output starts at the storage-buffer offset alignment (descriptor offsets).
         offs, nbs, size = plan_items(items, binsize, self.storage_offset_alignment // 4, _MAX_BINS)
-        cap = getattr(self, "_items_cap", 0)
-        if cap < size:
-            cap = max(size, 2 * cap)
-            self._items_out = (_Buffer(self, cap * 4, readback=True),
-                               _Buffer(self, cap * 8, readback=True))
-            self._items_cap = cap
-        b_idx, b_val = self._items_out
-        sizes = (_PoolSize * 1)(_PoolSize(_DESC_STORAGE_BUFFER, 4 * len(items)))
-        dp = _DescPoolCreate(33, None, 0, len(items), 1, sizes)
-        pool = _vp()
-        _check(vk.vkCreateDescriptorPool(self.device, ctypes.byref(dp), None, ctypes.byref(pool)),
-               "vkCreateDescriptorPool")
+        # Slack of the largest item past the end, so one output range (dynamic offsets,
+        # below) reaches any item's results from the last item's offset.
+        need = size + max((b - a) * nb for (lo, hi, a, b, t), nb in zip(items, nbs))
+        out = self._items_checkout_out(need)
+        b_idx, b_val = out[1]
+        bufs = (b_data, b_tmpl, b_idx, b_val)
+        # Per item, its four descriptor offsets and the bytes it reaches past each.
+        item_offs = [(a * n * 8, t * n * 8, off * 4, off * 8)
+                     for (lo, hi, a, b, t), off in zip(items, offs)]
+        item_ext = [((b - a) * n * 8, n * 8, (b - a) * nb * 4, (b - a) * nb * 8)
+                    for (lo, hi, a, b, t), nb in zip(items, nbs)]
+        files = [self._peak_file(n, nb) for nb in nbs]
+        # Dynamic offsets: one descriptor set per kernel for the whole call, each item's rows
+        # chosen at bind time, instead of a set allocated and written per item (the per-item
+        # writes were most of this call's host time). The one range per binding must hold
+        # every item from its offset, and fit the buffer from the largest offset.
+        ranges = [bf.nbytes - max(o[j] for o in item_offs) for j, bf in enumerate(bufs)]
+        dynamic = (len(items) > 1 and all(r > 0 for r in ranges)
+                   and all(e[j] <= ranges[j] for e in item_ext for j in range(4)))
+        pipes = {}
+        for f in files:
+            if f not in pipes:
+                pipe, layout, sl = self._build_pipeline(("peaks", f), f, _NBIND, _PUSH_BYTES,
+                                                        dynamic=dynamic)
+                nbind = self._device_state.__dict__.get("layout_nbind", {}).get(
+                    getattr(sl, "value", sl), _NBIND)
+                if dynamic and nbind > self.max_dynamic_storage:
+                    dynamic = False
+                    pipes.clear()
+                    break
+                pipes[f] = (pipe, layout, sl, nbind)
+        if not dynamic and not pipes:
+            for f in files:
+                if f not in pipes:
+                    pipe, layout, sl = self._build_pipeline(("peaks", f), f, _NBIND, _PUSH_BYTES)
+                    pipes[f] = (pipe, layout, sl, _NBIND)
+        nsets = len(pipes) if dynamic else len(items)
+        nbind_max = max(p[3] for p in pipes.values())
+        sizes = (_PoolSize * 1)(_PoolSize(_DESC_STORAGE_BUFFER_DYNAMIC if dynamic
+                                          else _DESC_STORAGE_BUFFER, nbind_max * nsets))
+        pool = self._items_pool_get(nsets, nbind_max) if dynamic else None
+        if pool is None:
+            dp = _DescPoolCreate(33, None, 0, nsets, 1, sizes)
+            pool = _vp()
+            _check(vk.vkCreateDescriptorPool(self.device, ctypes.byref(dp), None,
+                                             ctypes.byref(pool)), "vkCreateDescriptorPool")
+
+        def new_set(sl, nbind, offsets, rng, dtype):
+            layouts = (_vp * 1)(sl)
+            dset = _vp()
+            _check(vk.vkAllocateDescriptorSets(self.device, ctypes.byref(
+                _DescSetAlloc(34, None, pool, 1, ctypes.cast(layouts, _vp))), ctypes.byref(dset)),
+                "vkAllocateDescriptorSets")
+            bl = list(bufs)
+            if nbind > 4:                       # bindings the module declares past ours
+                dummy = getattr(self, "_dummy_buf", None)
+                if dummy is None:
+                    dummy = self._dummy_buf = _Buffer(self, 64)
+                bl += [dummy] * (nbind - 4)
+            infos = (_DescBufferInfo * nbind)(*[
+                _DescBufferInfo(bf.handle, offsets[i] if i < 4 else 0,
+                                rng[i] if i < 4 else (64 if dynamic else bf.nbytes))
+                for i, bf in enumerate(bl)])
+            writes = (_WriteDescSet * nbind)(*[
+                _WriteDescSet(35, None, dset, i, 0, 1, dtype, None,
+                              ctypes.pointer(infos[i]), None) for i in range(nbind)])
+            vk.vkUpdateDescriptorSets(self.device, nbind, writes, 0, None)
+            return dset
+
         cmd = _vp()
         try:
             info = _CmdBufAlloc(40, None, self.command_pool, 0, 1)
@@ -2976,29 +3105,26 @@ class Context(InputUploads):
                    "allocate item peaks")
             _check(vk.vkBeginCommandBuffer(cmd, ctypes.byref(_CmdBufBegin(42, None, 1, None))),
                    "begin item peaks")
-            bufs = (b_data, b_tmpl, b_idx, b_val)
             bound = None
-            for (lo, hi, a, b, t), off, nb in zip(items, offs, nbs):
-                filename = self._peak_file(n, nb)
-                pipe, layout, sl = self._build_pipeline(("peaks", filename), filename,
-                                                        _NBIND, _PUSH_BYTES)
+            sets = {}
+            for (lo, hi, a, b, t), f, nb, o, e in zip(items, files, nbs, item_offs, item_ext):
+                pipe, layout, sl, nbind = pipes[f]
                 if bound != pipe:
                     vk.vkCmdBindPipeline(cmd, _BIND_POINT_COMPUTE, pipe)
                     bound = pipe
-                layouts = (_vp * 1)(sl)
-                dset = _vp()
-                _check(vk.vkAllocateDescriptorSets(self.device, ctypes.byref(
-                    _DescSetAlloc(34, None, pool, 1, ctypes.cast(layouts, _vp))), ctypes.byref(dset)),
-                    "vkAllocateDescriptorSets")
-                offsets = (a * n * 8, t * n * 8, off * 4, off * 8)
-                infos = (_DescBufferInfo * 4)(*[_DescBufferInfo(bf.handle, o, bf.nbytes - o)
-                                                for bf, o in zip(bufs, offsets)])
-                writes = (_WriteDescSet * 4)(*[
-                    _WriteDescSet(35, None, dset, i, 0, 1, _DESC_STORAGE_BUFFER, None,
-                                  ctypes.pointer(infos[i]), None) for i in range(4)])
-                vk.vkUpdateDescriptorSets(self.device, 4, writes, 0, None)
-                vk.vkCmdBindDescriptorSets(cmd, _BIND_POINT_COMPUTE, layout, 0, 1,
-                                           (_vp * 1)(dset), 0, None)
+                if dynamic:
+                    dset = sets.get(f)
+                    if dset is None:
+                        dset = sets[f] = new_set(sl, nbind, (0, 0, 0, 0), ranges,
+                                                 _DESC_STORAGE_BUFFER_DYNAMIC)
+                    dyn = (_u32 * nbind)(*(list(o) + [0] * (nbind - 4)))
+                    vk.vkCmdBindDescriptorSets(cmd, _BIND_POINT_COMPUTE, layout, 0, 1,
+                                               (_vp * 1)(dset), nbind, dyn)
+                else:
+                    dset = new_set(sl, nbind, o, [bf.nbytes - x for bf, x in zip(bufs, o)],
+                                   _DESC_STORAGE_BUFFER)
+                    vk.vkCmdBindDescriptorSets(cmd, _BIND_POINT_COMPUTE, layout, 0, 1,
+                                               (_vp * 1)(dset), 0, None)
                 pc = (_u32 * 7)(1, lo, hi, binsize, shift & 0xffffffff, nb, t2)
                 vk.vkCmdPushConstants(cmd, layout, _STAGE_COMPUTE, 0, _PUSH_BYTES, ctypes.byref(pc))
                 vk.vkCmdDispatch(cmd, b - a, 1, 1)
@@ -3016,17 +3142,33 @@ class Context(InputUploads):
             if fwd is not None and not fwd:
                 self._pending_forward = None
             fence = None
-            if not wait:
-                fence = _vp()
-                _check(vk.vkCreateFence(self.device, ctypes.byref(_FenceCreate(8, None, 0)), None,
-                                        ctypes.byref(fence)), "vkCreateFence")
-            self._submit(cmd, fence=fence, wait=wait, pre=pre)   # with the pending forwards
+            group = None
+            dev = self._device_state
+            if not wait and not self._timing and _ITEMS_CHUNK > 1:
+                # Merged with the device's other follow-up calls (_ItemsGroup); the pending
+                # forwards go first in the same batch, as in _submit.
+                group = dev.__dict__.get("items_group")
+                if group is None:
+                    group = dev.items_group = _ItemsGroup(dev)
+                fence = group.fence
+                self.__dict__.setdefault("_collected", {})[fence.value] = group
+                group.add(pre + [cmd])
+            else:
+                if not wait:
+                    fence = _vp()
+                    _check(vk.vkCreateFence(self.device, ctypes.byref(_FenceCreate(8, None, 0)),
+                                            None, ctypes.byref(fence)), "vkCreateFence")
+                self._submit(cmd, fence=fence, wait=wait, pre=pre)   # with the pending forwards
         except BaseException:
             self._items_release(cmd, pool, None)
+            self._items_return_out(out)
             raise
         if wait:
             self._items_release(cmd, pool, None)
-            return self._items_read(items, offs, nbs, size)
+            try:
+                return self._items_read(out, items, offs, nbs, size)
+            finally:
+                self._items_return_out(out)
         done = []
 
         def finish():
@@ -3035,8 +3177,12 @@ class Context(InputUploads):
                 try:
                     self._wait_fence(fence)
                 finally:
-                    self._items_release(cmd, pool, fence)
-                done.append(self._items_read(items, offs, nbs, size))
+                    # A group's fence is the group's: destroyed by its wait.
+                    self._items_release(cmd, pool, None if group is not None else fence)
+                try:
+                    done.append(self._items_read(out, items, offs, nbs, size))
+                finally:
+                    self._items_return_out(out)
             return done[0]
         self._items_finish = finish
         return finish
@@ -3046,12 +3192,66 @@ class Context(InputUploads):
         if cmd:
             vk.vkFreeCommandBuffers.argtypes = [_vp, _vp, _u32, ctypes.POINTER(_vp)]
             vk.vkFreeCommandBuffers(self.device, self.command_pool, 1, (_vp * 1)(cmd))
-        vk.vkDestroyDescriptorPool(self.device, pool, None)
+        dev = self._device_state.__dict__
+        if getattr(pool, "value", pool) in dev.get("items_pools", ()):
+            vk.vkResetDescriptorPool(self.device, pool, 0)
+            dev.setdefault("items_pool_free", []).append(pool)
+        else:
+            vk.vkDestroyDescriptorPool(self.device, pool, None)
         if fence is not None:
             vk.vkDestroyFence(self.device, fence, None)
 
-    def _items_read(self, items, offs, nbs, size):
-        b_idx, b_val = self._items_out
+    #: Sets and dynamic descriptors per set of a reusable peaks_items descriptor pool.
+    _ITEMS_POOL_SETS, _ITEMS_POOL_BIND = 16, 8
+
+    def _items_pool_get(self, nsets, nbind):
+        """A reset descriptor pool for a dynamic-offset peaks_items call, from a device free
+        list (creating one per call cost ~30-50 us), or None when the call needs more."""
+        if nsets > self._ITEMS_POOL_SETS or nbind > self._ITEMS_POOL_BIND:
+            return None
+        dev = self._device_state.__dict__
+        free = dev.setdefault("items_pool_free", [])
+        if free:
+            return free.pop()
+        sizes = (_PoolSize * 1)(_PoolSize(_DESC_STORAGE_BUFFER_DYNAMIC,
+                                          self._ITEMS_POOL_SETS * self._ITEMS_POOL_BIND))
+        dp = _DescPoolCreate(33, None, 0, self._ITEMS_POOL_SETS, 1, sizes)
+        pool = _vp()
+        _check(self.vk.vkCreateDescriptorPool(self.device, ctypes.byref(dp), None,
+                                              ctypes.byref(pool)), "vkCreateDescriptorPool")
+        dev.setdefault("items_pools", set()).add(pool.value)
+        return pool
+
+    def _items_checkout_out(self, words):
+        """(capacity, (idx, val)) output buffers for a peaks_items call of `words` results,
+        from a free list on the DEVICE: follow-up plans come and go per segment (each a new
+        context), and per-context buffers were reallocated on most calls (vkAllocateMemory
+        ~0.3 ms each). Checked out until the call's results are read, so concurrent calls
+        of several contexts never share one."""
+        free = self._device_state.__dict__.setdefault("items_out_free", [])
+        fits = [o for o in free if o[0] >= words]
+        if fits:
+            out = min(fits, key=lambda o: o[0])
+            free.remove(out)
+            return out
+        cap = 1 << max(12, int(words - 1).bit_length())
+        return (cap, (_Buffer(self, cap * 4, readback=True), _Buffer(self, cap * 8, readback=True)))
+
+    def _items_return_out(self, out):
+        free = self._device_state.__dict__.setdefault("items_out_free", [])
+        free.append(out)
+        # One per call in flight: a segment's follow-ups (one call per template group) are
+        # all submitted before any is read. Bounded so a burst does not hold memory forever.
+        keep = 64
+        if len(free) > keep:
+            free.sort(key=lambda o: o[0])
+            for _, bufs in free[:-keep]:
+                for b in bufs:
+                    b.destroy()
+            del free[:-keep]
+
+    def _items_read(self, out, items, offs, nbs, size):
+        b_idx, b_val = out[1]
         return split_items(items, offs, nbs, b_idx.read(np.int32, size),
                            b_val.read(np.complex64, size))
 

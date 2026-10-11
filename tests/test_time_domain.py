@@ -997,12 +997,13 @@ def test_gpu_follow_up_batch_matches_direct_calls(monkeypatch, device_followups)
         c0 = int(rng.integers(20000, S - 20000))
         jobs.append((bank, rows[k % 4], dict(windows=slice(c0 - 9000, c0 + 9100), binsize=61,
                                              threshold=0.0, template_index=int(rng.integers(0, 25)))))
-    used = []
+    used, items_calls = [], []
     ctx = bank._groups[0].plan._gpu
     if ctx is not None and hasattr(type(ctx), "peaks_items"):      # any backend's
         orig = type(ctx).peaks_items
         monkeypatch.setattr(type(ctx), "peaks_items",
-                            lambda self, *a, **k: used.append(1) or orig(self, *a, **k))
+                            lambda self, *a, **k: used.append(1) or items_calls.append(1)
+                            or orig(self, *a, **k))
     try:
         from matchedfilter import _vkfollowup
         orig_run = _vkfollowup.Executor.submit_jobs
@@ -1010,6 +1011,11 @@ def test_gpu_follow_up_batch_matches_direct_calls(monkeypatch, device_followups)
                             lambda self, js: used.append(1) or orig_run(self, js))
     except ImportError:
         pass
+    dynamic = []
+    if ctx is not None and hasattr(type(ctx), "_build_pipeline"):        # Vulkan
+        build = type(ctx)._build_pipeline
+        monkeypatch.setattr(type(ctx), "_build_pipeline", lambda self, *a, **k: (
+            dynamic.append(k.get("dynamic", False)), build(self, *a, **k))[1])
     many = TimeDomainFilterBank.filter_series_many(jobs)
     direct = [b.filter_series(x, **kw) for b, x, kw in jobs]
     for r1, r2 in zip(direct, many):
@@ -1018,6 +1024,10 @@ def test_gpu_follow_up_batch_matches_direct_calls(monkeypatch, device_followups)
     if bank._groups[0].plan._gpu is not None and hasattr(bank._groups[0].plan._gpu, "peaks_items"):
         assert used, "the batched follow-up path was not taken"
         assert len(used) <= len(bank._groups), "one item submission per template group"
+    if items_calls and hasattr(type(ctx), "_build_pipeline"):
+        # Vulkan peaks_items (the host follow-up path): the items share one descriptor set
+        # per kernel, rows chosen by dynamic offsets.
+        assert any(dynamic), "peaks_items did not take the dynamic-offset path"
 
 
 def test_gpu_workspace_growth_settles_calls_in_flight(monkeypatch):
