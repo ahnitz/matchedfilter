@@ -1207,10 +1207,14 @@ def price_block_sizes(fine, delta_f, data_rate, longest, margin, ntemplates, snr
         if pair_cost is None:
             continue
         # per valid output sample and template: the block's fixed work shared by the bank's templates
-        # Host time per block, like the device's per-block work, is shared by the templates.
-        # (A per-call host term does not depend on n: a bank makes one call per segment.)
-        h = host_block / max(int(ntemplates), 1) / nvalid
-        c = (block / max(int(ntemplates), 1) + pair_cost) / nvalid + h
+        # The host term is NOT charged. Its fit (calibrate_costs_gpu) grows the series with the
+        # block count, so it measures a per-sample staging cost -- 5/10/20 us per block at
+        # n = 2048/4096/8192 on the 8060S -- that is the same per valid sample at every n and
+        # several times the device terms, under heavy load noisy by 2x. Added here it changed
+        # nothing real and swamped the device terms, so neighbouring length batches flipped
+        # between block sizes run to run (docs/gate-model.md, "Large-n pricing").
+        h = 0.0
+        c = (block / max(int(ntemplates), 1) + pair_cost) / nvalid
         stop = bool(out) and c > min(o[0] for o in out) * (1.0 + TIE)
         out.append((c, n, chain))
         hosts[n] = h
