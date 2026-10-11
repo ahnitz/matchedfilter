@@ -1452,7 +1452,9 @@ class MatchedFilter:
             slot_idx += 1
             starts_pool[slot][:count] = rebased
             gpu.forward_replay(fh, slot)
-            res = gpu.hier_replay(hh, slot, True)
+            res = gpu.hier_replay(hh, slot, True, validated=True)
+            if res is None:
+                raise RuntimeError("a validated call plan part was refused")
             in_flight.append((begin, end, res))
             gtrace.append((begin, end, getattr(gpu, "_last_dispatch", None)))
         idx = np.empty(shape, dtype=np.int64)

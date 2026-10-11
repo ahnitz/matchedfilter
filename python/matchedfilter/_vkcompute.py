@@ -1536,13 +1536,19 @@ class Context(InputUploads):
         forwards = getattr(self, "_forwards", None)
         return forwards is not None and forwards.get(h[0]) is h[1]
 
-    def hier_replay(self, h, slot, async_submit):
+    def hier_replay(self, h, slot, async_submit, validated=False):
         """Submit a hier_peaks call again from its handle, or None if the handle is stale.
 
         Valid exactly when the record is the one the handle saw (identity: an evicted or
         rebuilt record is a new object) and both inputs are still resident under the
-        signatures it saw (nothing re-uploaded or invalidated them since)."""
-        if not self.hier_valid(h):
+        signatures it saw (nothing re-uploaded or invalidated them since).
+
+        validated=True: the caller checked hier_valid for every part of a call before
+        submitting any (a call's parts go out together or not at all). Submitting a part
+        cannot evict a record or re-upload an input, but it can move the measured band/full
+        choice (a flush collects measurements) -- a performance choice that must not leave a
+        call half submitted, so it is not re-checked here."""
+        if not validated and not self.hier_valid(h):
             return None
         self._cache_touch(h.kind, h.key)
         if h.bfwd is not None:

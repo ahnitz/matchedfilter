@@ -519,8 +519,10 @@ def main():
                         "default every segment's data is drawn before the timed loop (same data): "
                         "a search reads its data, and generating it here (~0.1 s a segment) idled "
                         "the device between segments")
-    p.add_argument("--depth", type=int, default=2,
-                   help="--pipeline: segments in flight before one is collected (default 2)")
+    p.add_argument("--depth", type=int, default=1,
+                   help="--pipeline: segments in flight before one is collected (default 1: 2 "
+                        "doubles the slots and recordings in use, which at n=8192 exceeds the "
+                        "recording cache)")
     p.add_argument("--timing", action="store_true",
                    help="device time per kernel label for each stage (sets MF_GPU_TIMING=1)")
     args = p.parse_args()
