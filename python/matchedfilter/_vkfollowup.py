@@ -34,6 +34,8 @@ class Unsupported(Exception):
 REGION_ROWS = 256
 REGIONS = 1
 MAX_ENTRIES = 512
+#: Recordings (each with its own descriptor sets) a workspace keeps, one per group binding.
+_RECORDINGS = 32
 #: Workgroups the refineItems grid strides with.
 GRID = 64
 
@@ -84,8 +86,14 @@ class _Workspace:
                       for a in range(nalloc)]
         ib, io = self._ibufs(self.dummy)
         self.iset = ctx._descriptor_set(isl, ib, io)
+        self.fsl, self.isl = fsl, isl
         self.bound = None                # (templates array, allocations, nt, binsize) recorded
         self.cmd = None
+        # Recordings kept per group binding: [bound, iset, fsets, cmd], most recent last.
+        # Which template groups share a submission changes every segment, and with one
+        # recording a workspace rewrote its descriptor sets and recorded again on most
+        # submissions; kept, a group that comes back to this workspace finds its own.
+        self.recs = [[None, self.iset, self.fsets, None]]
 
     def _fbufs(self, whole, a):
         r0 = a * REGION_ROWS
@@ -101,8 +109,34 @@ class _Workspace:
 
     def bind(self, plan, allocs, binsize):
         """Point the workspace at this group (its templates, its series allocations) and
-        make sure the recording matches. The caller has collected any submission in flight."""
+        make sure the recording matches. The caller has collected any submission in flight.
+
+        A recording kept for this binding (self.recs) is used as it is. Otherwise a new one
+        gets its own descriptor sets while fewer than _RECORDINGS are kept; past that, the
+        least recently used one is rewritten in place and recorded again."""
         key = (plan._gtmpl, tuple(allocs), int(plan._gtmpl.shape[0]), int(binsize))
+        for i, e in enumerate(self.recs):
+            b = e[0]
+            if b is not None and b[0] is key[0] and b[2:] == key[2:] \
+                    and len(b[1]) == len(key[1]) and all(x is y for x, y in zip(b[1], key[1])):
+                self.recs.append(self.recs.pop(i))
+                self.bound, self.iset, self.fsets, self.cmd = e
+                return False
+        tmpl = shared_buffer(plan._gtmpl, self.ctx)
+        if tmpl is None:
+            raise Unsupported("templates are not device-resident")
+        if len(self.recs) < _RECORDINGS and self.recs[-1][0] is not None:
+            # A new binding: fresh sets written with the real buffers, and a new recording.
+            self.iset = self.ctx._descriptor_set(self.isl, *self._ibufs(tmpl))
+            self.fsets = [self.ctx._descriptor_set(self.fsl, *self._fbufs(whole, a))
+                          for a, whole in enumerate(allocs)] + self.fsets[len(allocs):]
+            self.cmd = None                     # the others' recordings stay
+            self._record(key[2], key[3], allocs)
+            self.bound = key
+            self.recs.append([key, self.iset, self.fsets, self.cmd])
+            return True
+        e = self.recs.pop(0) if self.recs[-1][0] is not None else self.recs.pop()
+        self.bound, self.iset, self.fsets, self.cmd = e
         b = self.bound
         if b is not None and b[0] is key[0] and b[2:] == key[2:] and len(b[1]) == len(key[1]) \
                 and all(x is y for x, y in zip(b[1], key[1])):
@@ -117,6 +151,7 @@ class _Workspace:
                 _rewrite(self.ctx, self.fsets[a], *self._fbufs(whole, a))
         self._record(key[2], key[3], allocs)
         self.bound = key
+        self.recs.append([key, self.iset, self.fsets, self.cmd])
         return True
 
     def _record(self, nt, binsize, allocs):
@@ -181,6 +216,7 @@ class Executor:
 
     def __init__(self):
         self.workspaces = {}
+        self.home = {}                     # group binding -> (templates, allocations, workspace)
 
     def run_jobs(self, jobs):
         return self.submit_jobs(jobs)()
@@ -242,7 +278,7 @@ class Executor:
         if not groups:
             return []
         cmds, recs = [], []
-        slots = {}
+        taken = set()                          # workspaces this submission uses (by id; alive)
         for gw in groups.values():
             bs = gw["bs"]
             nbins = max([1] + [-(-(hi - lo) // bs) for _, _, lo, hi in gw["entries"]])
@@ -250,12 +286,27 @@ class Executor:
             if nbins > MAX_BINS:
                 raise Unsupported("window has too many bins")
             gw["nbins"] = nbins
-            # Groups of one submission take distinct workspaces (slot 0, 1, ... per shape).
+            # Groups of one submission take distinct workspaces. A group goes back to the
+            # workspace it used last (its "home", which keeps its recording) when this
+            # submission has not taken it; otherwise to the first free one of its shape.
             shape = (gw["n"], nbins, len(gw["allocs"]))
-            slot = slots[shape] = slots.get(shape, -1) + 1
-            ws = self.workspaces.get(shape + (slot,))
-            if ws is None:
-                ws = self.workspaces[shape + (slot,)] = _Workspace(gw["ctx"], *shape)
+            hkey = (id(gw["plan"]._gtmpl), tuple(id(a) for a in gw["allocs"]), bs) + shape
+            home = self.home.get(hkey)
+            ws = None
+            if home is not None and home[0] is gw["plan"]._gtmpl and all(
+                    x is y for x, y in zip(home[1], gw["allocs"])) and id(home[2]) not in taken:
+                ws = home[2]
+            slot = 0
+            while ws is None:
+                cand = self.workspaces.get(shape + (slot,))
+                if cand is None:
+                    cand = self.workspaces[shape + (slot,)] = _Workspace(gw["ctx"], *shape)
+                if id(cand) not in taken:
+                    ws = cand
+                slot += 1
+            taken.add(id(ws))
+            # Held by reference: the ids in hkey stay those objects' while the entry lives.
+            self.home[hkey] = (gw["plan"]._gtmpl, tuple(gw["allocs"]), ws)
             pending = ws.pending
             if pending is not None:
                 pending()                          # its tables and outputs are rewritten below
