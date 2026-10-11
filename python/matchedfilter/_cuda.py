@@ -287,6 +287,38 @@ def nvml_sm_clock(pci_bus_id):
     return clock if clock() else None
 
 
+def nvml_busy(index=0):
+    """A callable giving (GPU busy %, SM clock MHz) of CUDA device ``index`` from NVML, or None.
+
+    Busy is NVML's utilization: the share of its last sample period (~1/6 s) in which a kernel
+    was running -- a device-busy figure independent of the library's own timers."""
+    lib = get_cuda_lib()
+    if lib is None or lib.cuInit(0) != 0:
+        return None
+    dev = ctypes.c_int()
+    if lib.cuDeviceGet(ctypes.byref(dev), index) != 0:
+        return None
+    buf = ctypes.create_string_buffer(32)
+    if not hasattr(lib, "cuDeviceGetPCIBusId") or lib.cuDeviceGetPCIBusId(buf, 32, dev.value) != 0:
+        return None
+    clock = nvml_sm_clock(buf.value)
+    if clock is None:
+        return None
+    handle = ctypes.c_void_p()
+    if _NVML.nvmlDeviceGetHandleByPciBusId_v2(buf.value, ctypes.byref(handle)) != 0:
+        return None
+
+    class _Util(ctypes.Structure):
+        _fields_ = [("gpu", ctypes.c_uint), ("memory", ctypes.c_uint)]
+    u = _Util()
+
+    def sample():
+        if _NVML.nvmlDeviceGetUtilizationRates(handle, ctypes.byref(u)) != 0:
+            return None
+        return float(u.gpu), clock()
+    return sample
+
+
 def check_cuda(result, func_name=""):
     """Check a CUDA Driver API result code."""
     if result != _CUDA_SUCCESS:

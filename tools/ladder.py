@@ -473,6 +473,22 @@ def run_device(device, tops, args, seed):
                 nonlocal next_ser
                 bsampler = GpuSampler()                # device busy over the steady segments
                 bsampler.start()
+                # LADDER_INFLIGHT: two segment graphs in flight (SegmentPlan.submit): segment k
+                # is launched, then k-1 is collected while the device runs k. Double-buffered
+                # middle input and output; one SegmentPlan per buffer, on its own slot half.
+                inflight = bool(os.environ.get("LADDER_INFLIGHT") and os.environ.get("LADDER_REPLAY")
+                                and os.environ.get("LADDER_GRAPH_MIDDLE") and not fold)
+                if inflight:
+                    plans2 = [SegmentPlan(slot_half=0), SegmentPlan(slot_half=1)]
+                    outs2 = [mid_out, {ifo: mid.empty_shared((len(top["mid_counts"]), S))
+                                       for ifo in ("H1", "L1")}]
+                    ins2 = [{ifo: mid.empty_shared((S,)) for ifo in ("H1", "L1")} for _ in range(2)]
+                pending = None
+
+                def collect(pend):
+                    pseg, pser, pmids, handle, ptm = pend
+                    fo, ff = handle.result()
+                    finish(pseg, pser, pmids, fo, ptm, fu=ff)
                 for seg in range(args.segments):
                     tm = first if seg < args.warmup else steady
                     bsampler.on = args.warmup <= seg
@@ -493,19 +509,23 @@ def run_device(device, tops, args, seed):
                     if graph_middle:
                         # The middle stage joins the segment graph (SegmentPlan prelude): its input in
                         # device-visible memory the host rewrites each segment, read in place.
-                        if top.get("_mid_in") is None:
-                            top["_mid_in"] = {ifo: mid.empty_shared((S,)) for ifo in ("H1", "L1")}
+                        if inflight:
+                            m_in, m_out = ins2[seg % 2], outs2[seg % 2]
+                        else:
+                            if top.get("_mid_in") is None:
+                                top["_mid_in"] = {ifo: mid.empty_shared((S,)) for ifo in ("H1", "L1")}
+                            m_in, m_out = top["_mid_in"], mid_out
                         t = time.perf_counter()
                         for ifo in ser:
-                            top["_mid_in"][ifo][:] = ser[ifo]
-                            mids[ifo] = mid_out[ifo]
+                            m_in[ifo][:] = ser[ifo]
+                            mids[ifo] = m_out[ifo]
                         tm.add("middle", time.perf_counter() - t)
 
-                        def prelude(ser=ser):
+                        def prelude(ser=ser, m_in=m_in, m_out=m_out):
                             for ifo in ser:
-                                mid.correlate_series(top["_mid_in"][ifo],
+                                mid.correlate_series(m_in[ifo],
                                                      windows=slice(max(0, a0 - args.pad), min(S, a1 + args.pad)),
-                                                     out=mid_out[ifo], wait=False)
+                                                     out=m_out[ifo], wait=False)
                     for ifo in (() if graph_middle else ser):
                         t = time.perf_counter()
                         mids[ifo] = mid.correlate_series(ser[ifo], windows=slice(max(0, a0 - args.pad),
@@ -534,6 +554,22 @@ def run_device(device, tops, args, seed):
                         fu = None
                         spec = (followup_spec(ser) if os.environ.get("LADDER_REPLAY")
                                 and os.environ.get("LADDER_DEVICE_FOLLOWUPS") else None)
+                        if inflight:
+                            from matchedfilter.time_domain import FollowUp
+                            spec = spec or FollowUp(pairs=[j ^ 1 for j in range(len(jobs))],
+                                                    threshold=args.asym_threshold, dedupe=int(RATE),
+                                                    half=half, binsize=bs)
+                            handle = plans2[seg % 2].submit(jobs, prelude=prelude,
+                                                            prelude_key=("middle", top["top"], seg % 2),
+                                                            followup=spec)
+                            if pending is not None:
+                                collect(pending)
+                            pending = (seg, ser, mids, handle, tm)
+                            tm.add("fine", time.perf_counter() - t)
+                            tm.add("segment", time.perf_counter() - t_seg)
+                            if next_ser is None and seg + 1 < args.segments:
+                                next_ser = new_series()
+                            continue
                         fine_out, fu = yield (jobs, prelude if graph_middle else None,
                                               ("middle", top["top"]) if graph_middle else None, spec)
                         if os.environ.get("LADDER_VERIFY_REPLAY"):
@@ -555,10 +591,17 @@ def run_device(device, tops, args, seed):
                         prof.dump_stats(os.environ["LADDER_PROFILE"])
                     if next_ser is None and seg + 1 < args.segments:
                         next_ser = new_series()
+                if pending is not None:              # the last segment in flight
+                    t = time.perf_counter()
+                    collect(pending)
+                    pending[4].add("segment", time.perf_counter() - t, n=0)
                 bsampler.stop()
                 if bsampler.samples:
                     counts["gpu_sampler"] = bsampler.report()
                 report_plan(seg_plan)
+                if inflight:
+                    for sp in plans2:
+                        report_plan(sp)
 
             def report_plan(seg_plan):
                 if os.environ.get("LADDER_REPLAY"):
@@ -584,8 +627,8 @@ def run_device(device, tops, args, seed):
                 folded.append(seg_loop(True))
                 return
             gen = seg_loop(False)
-            req = next(gen)
-            while True:
+            req = next(gen, None)
+            while req is not None:
                 try:
                     req = gen.send(run_request(req))
                 except StopIteration:
@@ -598,6 +641,14 @@ def run_device(device, tops, args, seed):
                     for g in b._groups:
                         ch[(g.n, getattr(g.plan, "_chain", None))] += len(g.template_indices)
                 print("chains (n, chain): templates", dict(sorted(ch.items(), key=str)), flush=True)
+                if os.environ.get("LADDER_CHAINS") == "2":   # and every group's gate thresholds
+                    for m, b in fine:
+                        for gi, g in enumerate(b._groups):
+                            gc_ = getattr(g.plan, "_gcal", None)
+                            thr = gc_[1][2] if gc_ else None
+                            print("gate", m, gi, getattr(g.plan, "_chain", None),
+                                  None if thr is None else tuple(float("%.9g" % x) for x in thr),
+                                  flush=True)
     for top in tops:
         one_top(top)
     if folded:

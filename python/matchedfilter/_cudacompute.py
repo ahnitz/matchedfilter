@@ -99,10 +99,10 @@ _BOUND = threading.local()
 #: Context's streams resolve to the graph's fork streams, per-call graphs are bypassed and
 #: the device addresses the captured work touches are collected.
 _SEG = None
-#: Generation of the device allocations captured segment graphs reference: bumped when one
-#: of them is freed (or grown), so a stale graph is never replayed.
-_SEG_GEN = [0]
-_SEG_PTRS = []                # sorted captured addresses (all live segment graphs)
+_SEG_LAST = [None]            # the segment graph launched last (the next waits for it)
+import weakref as _weakref
+_SEG_LIVE = _weakref.WeakSet()  # captured segment graphs (their address sets, for _seg_freed)
+_SEG_INFLIGHT = set()         # segment graphs launched and not yet waited for
 
 
 def _seg_note(*addrs):
@@ -114,12 +114,18 @@ def _seg_note(*addrs):
 
 
 def _seg_freed(start, nbytes):
-    """An allocation [start, start + nbytes) goes away: invalidate graphs that touch it."""
-    if _SEG_PTRS and start:
-        import bisect
-        i = bisect.bisect_left(_SEG_PTRS, int(start))
-        if i < len(_SEG_PTRS) and _SEG_PTRS[i] < int(start) + max(int(nbytes), 1):
-            _SEG_GEN[0] += 1
+    """An allocation [start, start + nbytes) goes away: invalidate the graphs that touch it
+    (only those: a global generation let every unrelated free -- an old bank collected, a
+    follow-up workspace replaced -- stop every graph from replaying)."""
+    if not start or not _SEG_LIVE:
+        return
+    import bisect
+    lo, hi = int(start), int(start) + max(int(nbytes), 1)
+    for g in list(_SEG_LIVE):
+        ptrs = g.ptrs
+        i = bisect.bisect_left(ptrs, lo)
+        if i < len(ptrs) and ptrs[i] < hi:
+            g.stale = True
 
 
 class SegmentGraph:
@@ -132,7 +138,7 @@ class SegmentGraph:
     segment with one cuGraphLaunch and one wait. The graph reads its host inputs (block
     starts) from pinned staging written at capture, so replay is valid only for the same job
     set on the same buffers (the caller's signature) and while every allocation it touches
-    is alive (_SEG_GEN)."""
+    is alive (_seg_freed marks a graph stale when one it touches is freed)."""
 
     def __init__(self, ctx, nstreams=4):
         self.ctx = ctx
@@ -144,7 +150,6 @@ class SegmentGraph:
             check_cuda(self.cuda.cuStreamCreate(ctypes.byref(st), 1), "cuStreamCreate")
             self.streams.append(st)
         self.exec = None
-        self.gen = None
         self.prefetch = []
         self.ptrs = ()
 
@@ -159,13 +164,15 @@ class SegmentGraph:
         global _SEG
         cu, s0 = self.cuda, self.streams[0]
         self.ctx._bind()
+        SegmentGraph.wait_all()
         check_cuda(cu.cuCtxSynchronize(), "cuCtxSynchronize")   # nothing in flight to order
         self.ctx.settle_writes()
         self.release()
         evs = []
         check_cuda(cu.cuStreamBeginCapture_v2(s0, 2), "cuStreamBeginCapture")  # relaxed
         graph = ctypes.c_void_p()
-        _SEG = dict(graph=self, ptrs=set(), prefetch=[], fwd={})
+        _SEG = dict(graph=self, ptrs=set(), prefetch=[], fwd={}, writes=[], joins=[],
+                    staging=[])
         failed = None
         try:
             fork = self.ctx._new_event()
@@ -185,28 +192,49 @@ class SegmentGraph:
             seg = _SEG
             _SEG = None
             rc = cu.cuStreamEndCapture(s0, ctypes.byref(graph))
-            for e in evs + list(seg["fwd"].values()):
+            for e in evs + list(seg["fwd"].values()) + seg["writes"] + seg["joins"]:
                 cu.cuEventDestroy_v2(e)
         if failed is not None or rc != 0:
             if graph.value:
                 cu.cuGraphDestroy(graph)
-            raise RuntimeError("segment capture failed (%s)" % (failed or "end capture %d" % rc))
+            raise RuntimeError("segment capture failed (%s)" % (failed or "end capture %d" % rc)) from failed
         ex = ctypes.c_void_p()
         rc = cu.cuGraphInstantiateWithFlags(ctypes.byref(ex), graph, 0)
         cu.cuGraphDestroy(graph)
         check_cuda(rc, "cuGraphInstantiateWithFlags")
         self.exec = ex
+        self.staging = seg["staging"]           # the captured copies' host sources
         self.prefetch = seg["prefetch"]
         self.ptrs = tuple(sorted(seg["ptrs"]))
-        _SEG_PTRS[:] = sorted(set(_SEG_PTRS) | set(self.ptrs))
-        self.gen = _SEG_GEN[0]
+        self.stale = False
+        _SEG_LIVE.add(self)
         return out
 
     def valid(self):
-        return self.exec is not None and self.gen == _SEG_GEN[0]
+        return self.exec is not None and not getattr(self, "stale", True)
+
+    def join(self):
+        """During capture: order stream 0 after everything enqueued so far on every fork
+        stream (work that consumes all of it, e.g. the device follow-ups)."""
+        cu, s0 = self.cuda, self.streams[0]
+        for st in self.streams[1:]:
+            e = self.ctx._new_event()
+            _SEG["joins"].append(e)
+            check_cuda(cu.cuEventRecord(e, st), "cuEventRecord")
+            check_cuda(cu.cuStreamWaitEvent(s0, e, 0), "cuStreamWaitEvent")
 
     def replay(self):
         """Run the captured segment and wait for it. False when the graph is stale."""
+        if not self.launch():
+            return False
+        self.wait()
+        return True
+
+    def launch(self):
+        """Start the captured segment without waiting (wait() or wait_all() collect it).
+        Segment graphs run one after another on the device -- each waits for the one launched
+        before it -- so two graphs in flight never share the device's workspaces at once; the
+        host works on one segment's results while the device runs the next."""
         if not self.valid():
             return False
         cu, s0 = self.cuda, self.streams[0]
@@ -214,17 +242,40 @@ class SegmentGraph:
         # Order after writes left in flight to the inputs (correlate_series(wait=False)), and
         # migrate managed inputs the host may have touched, as the per-call path does.
         self.ctx._after_writes(s0)
+        last = _SEG_LAST[0]
+        if last is not None and last is not self:
+            check_cuda(cu.cuStreamWaitEvent(s0, last.done, 0), "cuStreamWaitEvent")
         for args in self.prefetch:
             if hasattr(cu, "cuMemPrefetchAsync"):
                 cu.cuMemPrefetchAsync(args[0], args[1], args[2], s0)
         check_cuda(cu.cuGraphLaunch(self.exec, s0), "cuGraphLaunch")
-        check_cuda(cu.cuStreamSynchronize(s0), "cuStreamSynchronize")
+        if getattr(self, "done", None) is None:
+            self.done = self.ctx._new_event()
+        check_cuda(cu.cuEventRecord(self.done, s0), "cuEventRecord")
+        _SEG_LAST[0] = self
+        _SEG_INFLIGHT.add(self)
         return True
 
+    def wait(self):
+        """Wait for this graph's last launch."""
+        if self in _SEG_INFLIGHT:
+            check_cuda(self.cuda.cuEventSynchronize(self.done), "cuEventSynchronize")
+            _SEG_INFLIGHT.discard(self)
+
+    @staticmethod
+    def wait_all():
+        """Wait for every segment graph in flight (before any work outside them)."""
+        for g in list(_SEG_INFLIGHT):
+            g.wait()
+
     def release(self):
+        _SEG_LIVE.discard(self)
         if self.exec is not None:
             self.cuda.cuGraphExecDestroy(self.exec)
             self.exec = None
+        for st in getattr(self, "staging", ()):
+            st.destroy()
+        self.staging = []
 
     def destroy(self):
         self.release()
@@ -573,6 +624,8 @@ class Context(InputUploads):
     supports_sparse = True
     # Coarse PPG/tile groups are padded inside the backend (hier_peaks pads its rows).
     pads_coarse_groups = True
+    # SegmentPlan.run(followup=...) runs the follow-up rule on the device (_cudafollowup).
+    supports_device_followups = True
     # Follow-ups: peaks_items(async_submit=True) returns a collector; forward takes rows=.
     items_async = True
     forward_rows = True
@@ -729,6 +782,7 @@ class Context(InputUploads):
             # Inside a segment capture only events recorded in it may be waited on (an event
             # from outside is a capture-isolation error); the capture began after a full
             # device sync, so nothing earlier is pending.
+            self._after_writes(stream)
             for key, ev in _SEG["fwd"].items():
                 if key != stream.value:
                     check_cuda(self.cuda.cuStreamWaitEvent(stream, ev, 0), "cuStreamWaitEvent")
@@ -755,7 +809,7 @@ class Context(InputUploads):
 
     def _sync(self, stream=None):
         """Wait for ``stream``; resolve its timed regions into timing_log."""
-        st = self.stream if stream is None else stream
+        st = self.get_stream(None) if stream is None else stream
         check_cuda(self.cuda.cuStreamSynchronize(st), "cuStreamSynchronize")
         self._resolve(st.value)
 
@@ -782,9 +836,19 @@ class Context(InputUploads):
         return self.timing_log
 
     def _copy_h2d(self, dst, src, nbytes, stream, label):
-        if _SEG is not None:
+        if _SEG is not None and nbytes > 0:
+            # A captured copy reads its host source at every LAUNCH, not now. Sources are
+            # often temporaries (a packed coarse-template array, freed after this call) or
+            # staging the host rewrites per call: either way a replay would read whatever is
+            # there by then -- the folded-tops gap (a stale coarse band let a pair through a
+            # gate it should not have passed). So the bytes are snapshotted into staging the
+            # graph owns, and the copy reads that: the graph is self-contained.
+            stage = _Pinned(self, nbytes)
+            ctypes.memmove(stage.ptr, int(src), int(nbytes))
+            _SEG["staging"].append(stage)
+            src = stage.ptr
             _seg_note(int(dst), int(src))
-        st = self.stream if stream is None else stream
+        st = self.get_stream(None) if stream is None else stream
         tok = self._mark(st)
         check_cuda(self.cuda.cuMemcpyHtoDAsync_v2(dst, src, nbytes, st), "cuMemcpyHtoDAsync")
         self._close(tok, st, label)
@@ -792,7 +856,7 @@ class Context(InputUploads):
     def _copy_d2h(self, dst, src, nbytes, stream, label):
         if _SEG is not None:
             _seg_note(int(dst), int(src))
-        st = self.stream if stream is None else stream
+        st = self.get_stream(None) if stream is None else stream
         tok = self._mark(st)
         check_cuda(self.cuda.cuMemcpyDtoHAsync_v2(dst, src, nbytes, st), "cuMemcpyDtoHAsync")
         self._close(tok, st, label)
@@ -866,6 +930,12 @@ class Context(InputUploads):
             data = pack(array) if pack is not None else np.ascontiguousarray(array, np.complex64)
             ent[0].write(data, stream)
             ent[1] = sig
+            # The copy is ordered on `stream` only, but later calls of this Context read the
+            # resident from their own slot streams without uploading (it is no longer dirty):
+            # order everything after it, as a write left in flight. In a segment graph every
+            # call is concurrent, and a coarse kernel read its band before the upload landed
+            # (the folded-tops gap: right on a graph's second launch, wrong on its first).
+            self._pend_write(stream)
         return ent[0]
 
     def _upload(self, buf, array, stream):
@@ -1025,7 +1095,7 @@ class Context(InputUploads):
                         if isinstance(getattr(p, "value", None), int) and p.value])
         gx, gy, gz = grid_dim if isinstance(grid_dim, tuple) else (grid_dim, 1, 1)
         bx, by, bz = block_dim if isinstance(block_dim, tuple) else (block_dim, 1, 1)
-        st = self.stream if stream is None else stream
+        st = self.get_stream(None) if stream is None else stream
         tok = self._mark(st)
         check_cuda(
             self.cuda.cuLaunchKernel(hfunc, gx, gy, gz, bx, by, bz, shared_mem, st,
@@ -1155,6 +1225,7 @@ class Context(InputUploads):
             sp = _SparsePeaks(shape, rec[:, 0], rec[:, 1].view(np.int32), val)
             cts = hp.view(np.uint32, ncounts, offset=coff).copy() if ncounts else None
             return sp, cts
+        collect.sparse_dev = (cnt, lst)        # device count and records (device follow-ups)
         return collect
 
     def _graphed(self, bufs, gkey, stream, enqueue):
@@ -1282,6 +1353,7 @@ class Context(InputUploads):
 
         def readback():
             return collect()[0]
+        readback.sparse_dev = getattr(locals().get("collect"), "sparse_dev", None)
         self._last_dispatch = readback        # SegmentPlan: the dispatch's result reader
         if async_submit:
             return readback
@@ -1340,6 +1412,7 @@ class Context(InputUploads):
 
         def readback():
             return collect()[0]
+        readback.sparse_dev = getattr(locals().get("collect"), "sparse_dev", None)
         self._last_dispatch = readback        # SegmentPlan: the dispatch's result reader
         if async_submit:
             return readback
@@ -1384,7 +1457,7 @@ class Context(InputUploads):
         nd, nt = data.shape[0], tmpl.shape[0]
         if out.shape != (nd, nt, n) or out.dtype != np.complex64 or not out.flags.c_contiguous:
             raise ValueError("out must be a C-contiguous complex64 (%d, %d, %d) array" % (nd, nt, n))
-        stream = self.stream
+        stream = self.get_stream(None)
         key, bufs = self._full_inputs("full", n, data, tmpl, upload_data, upload_tmpl, stream)
         dptr, tptr = bufs["data"].dptr.value, bufs["tmpl"].dptr.value
         osh = shared_buffer(out, self)
@@ -1445,17 +1518,18 @@ class Context(InputUploads):
 
         async_submit (``defers_continuous``), for an in-place device output: leave the work
         in flight; device consumers are ordered after it, the host settles it."""
-        if async_submit and shared_buffer(out, self) is not None:
+        if async_submit and _SEG is None and shared_buffer(out, self) is not None:
             # Write-after-read: readers of this output (last segment's fine stage, on other
             # Contexts' streams) may still be in flight. Streams of different Contexts share
-            # no order, so the device is drained before the rewrite starts.
+            # no order, so the device is drained before the rewrite starts. (A segment graph
+            # needs no drain: it is captured after one and each replay waits for its end.)
             self._bind()
             check_cuda(self.cuda.cuCtxSynchronize(), "cuCtxSynchronize")
         self._bind()
         nd, nt = data.shape[0], tmpl.shape[0]
         if out.ndim != 2 or out.shape[0] != nt or out.dtype != np.complex64 or not out.flags.c_contiguous:
             raise ValueError("out must be a C-contiguous complex64 (templates, samples) array")
-        stream = self.stream
+        stream = self.get_stream(None)
         key, bufs = self._full_inputs("full_series", n, data, tmpl, upload_data, upload_tmpl, stream)
         starts = np.ascontiguousarray(starts, np.uint32)
         ssh = self._small_input("cstarts", starts, stream)
@@ -1527,21 +1601,26 @@ class Context(InputUploads):
         width = (b - a) * dest.itemsize // 4
         self._bind()
         check_cuda(self.cuda.cuMemsetD2D32Async(sb.dptr.value + a * dest.itemsize, dest.strides[0],
-                                                0, width, dest.shape[0], self.stream),
+                                                0, width, dest.shape[0], self.get_stream(None)),
                    "cuMemsetD2D32Async")
 
     def zero_columns_done(self, wait=True):
         """Finish the enqueued zeroing (and the correlation before it on this stream): wait,
         or (``async_zero``) leave it in flight for the device consumers to order after."""
         if wait:
-            self._sync(self.stream)
+            self._sync(self.get_stream(None))
             self.settle_writes()
         else:
-            self._pend_write(self.stream)
+            self._pend_write(self.get_stream(None))
 
     def _pend_write(self, stream):
         e = self._new_event()
         check_cuda(self.cuda.cuEventRecord(e, stream), "cuEventRecord")
+        if _SEG is not None:
+            # A write inside a segment capture (the middle stage): its consumers in the same
+            # capture order after it through this captured event; it is gone with the capture.
+            _SEG["writes"].append(e)
+            return
         holder = self._device_state if self._device_state is not None else self
         holder.__dict__.setdefault("pending_writes", []).append(e)
 
@@ -1556,7 +1635,9 @@ class Context(InputUploads):
 
     def _after_writes(self, stream):
         """Order ``stream`` after writes left in flight (dropping those already complete)."""
-        if _SEG is not None:          # settled before the capture began
+        if _SEG is not None:          # earlier writes settled before the capture began
+            for e in _SEG["writes"]:
+                check_cuda(self.cuda.cuStreamWaitEvent(stream, e, 0), "cuStreamWaitEvent")
             return
         holder = self._device_state if self._device_state is not None else self
         pend = holder.__dict__.get("pending_writes")
@@ -1857,6 +1938,7 @@ class Context(InputUploads):
             self.last_refinements = int(counts[0])
             self.last_tier1_survivors = int(counts[1]) if cascade else int(counts[0])
             return res
+        readback.sparse_dev = getattr(locals().get("collect"), "sparse_dev", None)
         self._last_dispatch = readback        # SegmentPlan: the dispatch's result reader
         if async_submit:
             return readback
@@ -1940,6 +2022,7 @@ class Context(InputUploads):
             self.last_refinements = int(counts[:, 0].sum())
             self.last_tier1_survivors = int(counts[:, 1].sum()) if cascade else self.last_refinements
             return res
+        readback.sparse_dev = getattr(locals().get("collect"), "sparse_dev", None)
         self._last_dispatch = readback        # SegmentPlan: the dispatch's result reader
         if async_submit:
             return readback
@@ -2097,7 +2180,7 @@ class Context(InputUploads):
         Data and templates are device allocations; pointer offsets select each item's rows,
         so nothing is copied, and the output comes back in one copy and one sync."""
         self._bind()
-        stream = self.stream
+        stream = self.get_stream(None)
         self._after_forwards(stream)
         b_data, b_tmpl = shared_buffer(data, self), shared_buffer(tmpl, self)
         if b_data is None or b_tmpl is None:
