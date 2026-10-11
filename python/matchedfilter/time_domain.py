@@ -1934,6 +1934,26 @@ class SegmentPlan:
     def __init__(self):
         self._trace = None
         self.replays = 0
+        self._seen = None          # CUDA: the signature of the last untraced run
+        self._graph = None         # CUDA: this plan's SegmentGraph (its own fork streams)
+        self.capture_failures = 0
+
+    @staticmethod
+    def _cuda_context(jobs):
+        """The CUDA Context of a job set run wholly on one CUDA device, else None."""
+        ctx = None
+        for bank, _, _ in jobs:
+            for g in bank._groups:
+                gpu = getattr(g._plan, "_gpu", None) if getattr(g, "_plan", None) is not None else None
+                if gpu is None:
+                    continue
+                if (not type(gpu).__module__.endswith("_cudacompute")
+                        or getattr(gpu, "_device_state", None) is None):
+                    return None
+                if ctx is not None and gpu._device_state is not ctx._device_state:
+                    return None
+                ctx = ctx or gpu
+        return ctx
 
     @staticmethod
     def _signature(jobs):
@@ -1958,6 +1978,9 @@ class SegmentPlan:
 
     def run(self, jobs):
         import os
+        ctx = self._cuda_context(jobs)
+        if ctx is not None and os.environ.get("MF_CUDA_SEGMENT_GRAPH", "1") != "0":
+            return self._run_cuda(jobs, ctx)
         if os.environ.get("MF_SEGMENT_REPLAY", "0") == "0":
             # Experimental: on realistic data (two-tier chains, several job sets sharing the
             # device) replays dropped peaks and once read freed buffers. Until that is fixed
@@ -1978,6 +2001,125 @@ class SegmentPlan:
                 self.replays += 1
                 return out
         return self._trace_run(jobs, sig)
+
+    # ---- CUDA: the whole fine stage as one graph -----------------------------------------
+    def _run_cuda(self, jobs, ctx):
+        """One CUDA graph per recurring job set: the first run of a signature runs as usual
+        (allocations, module loads, per-call graphs and plans settle), the second is captured
+        whole -- every bank's forwards, gates, compactions, refines and readbacks, across the
+        fork streams -- and later runs relaunch it with one cuGraphLaunch and one wait, then
+        read each dispatch's results. Any change (signature, a freed buffer, a failed
+        capture) falls back to filter_series_many."""
+        from . import _cudacompute
+        sig = self._signature(jobs)
+        tr = self._trace
+        if tr is not None and tr["sig"] == sig:
+            out = self._replay_cuda(tr)
+            if out is not None:
+                self.replays += 1
+                return out
+        self._trace = None
+        if self._seen != sig:
+            self._seen = sig
+            return TimeDomainFilterBank.filter_series_many(jobs)
+        if self._graph is None:
+            self._graph = _cudacompute.SegmentGraph(ctx)
+        for bank, _, _ in jobs:
+            bank._trace_sink = []
+        try:
+            futures = self._graph.capture(
+                lambda: TimeDomainFilterBank.filter_series_many(jobs, wait=False))
+            sinks = [bank._trace_sink for bank, _, _ in jobs]
+        except RuntimeError:
+            self.capture_failures += 1
+            self._seen = None
+            return TimeDomainFilterBank.filter_series_many(jobs)
+        finally:
+            for bank, _, _ in jobs:
+                bank._trace_sink = None
+        self._graph.replay()
+        out = [f.result() if hasattr(f, "result") else f for f in futures]
+        per_job, cursor = [], {}
+        for j, (bank, _, _) in enumerate(jobs):
+            k = cursor.get(id(bank), 0)
+            cursor[id(bank)] = k + 1
+            per_job.append(sinks[j][k] if k < len(sinks[j]) else None)
+        if all(e is not None and not e[2][0]
+               and all(getattr(d, "trace", None) is not None for d, *_ in e[0]) for e in per_job):
+            self._trace = dict(sig=sig, jobs=[(e[0], e[1]) for e in per_job])
+        return out
+
+    def _replay_cuda(self, tr):
+        """Relaunch the segment graph, then read every dispatch. Sparse results go straight
+        into the job's peak lists, without dense tables, in the order filter_series gives:
+        (block, template, bin), blocks in the caller's order. A dense dispatch (threshold 0,
+        or a fallback) takes the table route for its whole call."""
+        from . import _SparsePeaks
+        if not self._graph.replay():
+            return None
+        results = []
+        for entries, template_index in tr["jobs"]:
+            lists = ([], [], [], [], [])
+            for d, sub_starts, g, tmpl_arg, N in entries:
+                t = d.trace
+                nt, nb = t["shape"][1], t["shape"][2]
+                order = t["order"]
+                rows, tis, bns, idxs, vals = [], [], [], [], []
+                dense = None
+                for b0, b1, entry in t["groups"]:
+                    r = entry()
+                    if isinstance(r, _SparsePeaks):
+                        if r.flat.size == 0:
+                            continue
+                        per = r.shape[1] * r.shape[2]
+                        keep = r.flat < (b1 - b0) * per          # padded rows dropped
+                        bi, rest = np.divmod(r.flat[keep].astype(np.int64), per)
+                        ti, bn = np.divmod(rest, r.shape[2])
+                        rows.append(bi + b0)                       # layout row
+                        tis.append(ti)
+                        bns.append(bn)
+                        idxs.append(r.idx[keep].astype(np.int64))
+                        vals.append(r.val[keep])
+                    else:
+                        gi, gv = r
+                        if not (gi >= 0).any():
+                            continue
+                        if dense is None:
+                            dense = (np.full(t["shape"], -1, dtype=np.int64),
+                                     np.zeros(t["shape"], dtype=np.complex64))
+                        dense[0][b0:b1], dense[1][b0:b1] = gi[:b1 - b0], gv[:b1 - b0]
+                if dense is not None:
+                    idx, val = dense
+                    if rows:
+                        lr, ti, bn = (np.concatenate(x) for x in (rows, tis, bns))
+                        idx[lr, ti, bn] = np.concatenate(idxs)
+                        val[lr, ti, bn] = np.concatenate(vals)
+                    if order is not None:
+                        ri, rv = np.empty_like(idx), np.empty_like(val)
+                        ri[order], rv[order] = idx, val
+                        idx, val = ri, rv
+                    _consume_into(lists, idx, val, sub_starts, g, tmpl_arg, N, template_index)
+                    continue
+                if not rows:
+                    continue
+                row = np.concatenate(rows)
+                if order is not None:
+                    row = order[row]                               # the caller's block
+                ti, bn = np.concatenate(tis), np.concatenate(bns)
+                srt = np.argsort((row * nt + ti) * nb + bn, kind="stable")
+                row, ti = row[srt], ti[srt]
+                ii = np.concatenate(idxs)[srt]
+                vv = np.concatenate(vals)[srt]
+                if tmpl_arg is not None:
+                    lists[0].append(np.full(row.size, template_index, dtype=np.int64))
+                else:
+                    lists[0].append(g.template_indices[ti])
+                lists[1].append(sub_starts[row] + ii)
+                lists[2].append(vv)
+                lists[3].append(sub_starts[row])
+                lists[4].append(np.full(row.size, N, dtype=np.int64))
+            results.append(_results_from(lists))
+        return results
 
     def _trace_run(self, jobs, sig):
         from . import _vkcompute
