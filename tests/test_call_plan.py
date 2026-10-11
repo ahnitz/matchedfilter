@@ -405,3 +405,28 @@ def test_depth_one_keeps_one_set_of_recordings(monkeypatch):
         counts.append(recordings())
     assert counts[0] == counts[-1], counts       # the first batch recorded them all
     assert _replays(banks) > 0
+
+
+def test_band_mode_allocates_nothing_in_steady_state(monkeypatch):
+    """Band-mode storage is keyed on the band width, not on the series/starts buffers the
+    records bind: those come from rotating pools, and keying buffers on them allocated a new
+    set per call (1339 buffers in 38 steady ladder segments)."""
+    rng, banks = _setup(monkeypatch, seed=74)
+    from matchedfilter import _vkcompute as V
+    monkeypatch.setenv("MF_VK_BAND_FORWARD", "1")
+    S = 1 << 17
+    pools = [banks[0][0].empty_shared((len(banks), S)) for _ in range(3)]
+    made = [0]
+    orig = V._Buffer.__init__
+
+    def counting(self, *a, **k):
+        made[0] += 1
+        orig(self, *a, **k)
+    for seg in range(12):
+        rows = pools[seg % 3]                   # rotating series allocations
+        _fill(rng, rows, S)
+        if seg == 6:
+            monkeypatch.setattr(V._Buffer, "__init__", counting)
+        _check([(b, rows[i], dict(windows=slice(3000, S - 3000)))
+                for i, (b, _, _) in enumerate(banks)])
+    assert made[0] == 0, "%d buffers allocated in steady state" % made[0]
