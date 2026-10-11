@@ -1248,7 +1248,7 @@ _PRICE_CACHE = OrderedDict()
 
 
 def price_block_sizes(fine, delta_f, data_rate, longest, margin, ntemplates, snr, fd, candidates,
-                      max_tiers=3, device=None):
+                      max_tiers=3, device=None, ahead=0):
     """Rank block sizes for one bank by modelled cost per valid output sample and template.
 
     For each n the bank would run one plan over blocks advancing n - longest + 1 samples; a
@@ -1298,7 +1298,9 @@ def price_block_sizes(fine, delta_f, data_rate, longest, margin, ntemplates, snr
         # between block sizes run to run (docs/gate-model.md, "Large-n pricing").
         h = 0.0
         c = (block / max(int(ntemplates), 1) + pair_cost) / nvalid
-        stop = bool(out) and c > min(o[0] for o in out) * (1.0 + TIE)
+        # `ahead` more sizes past the first dearer one are priced (block-size trial candidates)
+        stop = bool(out) and c > min(o[0] for o in out) * (1.0 + TIE) and \
+            sum(o[0] > min(x[0] for x in out) * (1.0 + TIE) for o in out) >= ahead
         out.append((c, n, chain))
         hosts[n] = h
         if stop:

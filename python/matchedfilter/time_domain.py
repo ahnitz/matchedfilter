@@ -287,6 +287,136 @@ def _partition_templates(
     return groups, order
 
 
+#: Block-size trials. Candidates per bank: the model's layout (rank 0), then the whole bank at
+#: each of its cheapest single block sizes, _BLOCK_TRIAL_RANKS in all. A sample is one whole
+#: batch (fused, concurrent: as steady state runs) timed from submission to its last result,
+#: per template x series sample; a rank's first batch after a switch only settles (it uploads).
+#: _BLOCK_TRIAL_SAMPLES per rank. The lock is kept in MF_COST_FILE when one is set, so a
+#: machine pays for the trial once and every process then runs the same layout.
+_BLOCK_TRIAL_RANKS = 3
+_BLOCK_TRIAL_SAMPLES = 2
+
+
+def _trial_key(bank):
+    """Device and the bank's candidate set -- what the persisted lock is valid for."""
+    return "%s|%s" % (bank.device, ",".join(str(x) for x in getattr(bank, '_candidate_sig', ())))
+
+
+class _BlockTrials:
+    """Measure block-size candidates end to end and lock the fastest.
+
+    A layout's modelled cost is a sum of calibrated per-term costs, and on a latency-bound GPU
+    those terms are below a call's noise, so the model alone cannot separate block sizes that
+    differ by tens of percent, and it picks differently from process to process
+    (docs/gate-model.md, "Large-n pricing"). Ranks run in turn, the model's first; the median
+    sample of a rank r > 0 must beat rank 0's by more than gatechain.TIE to win, so a tie keeps
+    the model's layout. Trials are keyed by _trial_key, so only banks offering the same
+    candidates pool their samples. MF_AUTOTUNE=0 keeps rank 0 unless a lock is on file."""
+
+    def __init__(self):
+        self.state = {}
+
+    def _st(self, key):
+        st = self.state.get(key)
+        if st is None:
+            st = self.state[key] = {"samples": {}, "winner": None}
+            from . import gatechain
+            path = gatechain._cost_file()
+            if path is not None:
+                rec = gatechain._load_cost_file(path).get("block-trial|" + key)
+                if isinstance(rec, dict) and "winner" in rec:
+                    st["winner"] = int(rec["winner"])
+        return st
+
+    def rank_for(self, key, nranks):
+        st = self._st(key)
+        if st["winner"] is not None:
+            return st["winner"]
+        for r in range(nranks):
+            st["samples"].setdefault(r, [])
+        need = int(os.environ.get("MF_BLOCK_TRIALS", _BLOCK_TRIAL_SAMPLES))
+        return next((r for r in range(nranks) if len(st["samples"][r]) < need), 0)
+
+    def record(self, key, rank, value):
+        from . import gatechain, _log_autotune
+        st = self._st(key)
+        if st["winner"] is not None:
+            return
+        st["samples"].setdefault(rank, []).append(float(value))
+        need = int(os.environ.get("MF_BLOCK_TRIALS", _BLOCK_TRIAL_SAMPLES))
+        if not all(len(v) >= need for v in st["samples"].values()):
+            return
+        med = {r: float(np.median(v)) for r, v in st["samples"].items()}
+        best = min(med, key=med.get)
+        st["winner"] = best if med[best] < med[0] * (1.0 - gatechain.TIE) else 0
+        _log_autotune("BLOCK-TRIAL %s locked rank %d  median s/unit %s", key, st["winner"],
+                      {r: "%.3g" % v for r, v in med.items()})
+        path = gatechain._cost_file()
+        if path is not None:
+            gatechain._store_cost(path, "block-trial|" + key,
+                                  {"winner": st["winner"], "median": med})
+
+    def winner(self, key):
+        return self._st(key)["winner"]
+
+
+_BLOCK_TRIALS = _BlockTrials()
+
+
+def _trial_begin(jobs):
+    """Put every trialling bank of the batch on its key's current rank (or lock it, once its key
+    has a winner). Returns [(key, rank, banks, settled)] for the banks still trialling."""
+    from . import _autotune_enabled, gatechain
+    groups = {}
+    for bank, _, kw in jobs:
+        if (kw or {}).get("template_index") is not None or not getattr(bank, '_layouts', None):
+            continue
+        groups.setdefault(_trial_key(bank), []).append(bank)
+    plan = []
+    for key, bs in groups.items():
+        w = _BLOCK_TRIALS.winner(key)
+        if w is None and (not _autotune_enabled() or gatechain._cost_file() is None):
+            # A trial is paid for once per machine, so it runs only where its lock can be kept
+            # (MF_COST_FILE). Run every process, it costs that process its warm-up and more --
+            # 2-3 s of fine stage on dev3 -- and gains a few percent: never worth it.
+            w = 0
+        if w is not None:
+            for b in bs:
+                b._lock_layout(w)
+            continue
+        r = _BLOCK_TRIALS.rank_for(key, min(len(b._layouts) for b in bs))
+        settled = all(getattr(b, '_layout_rank', 0) == r and getattr(b, '_layout_warm', False)
+                      for b in bs)
+        for b in bs:
+            b._use_layout(r)
+            b.__dict__.setdefault('_ranks_run', set()).add(r)
+        plan.append((key, r, bs, settled))
+    if not plan:
+        return None
+    import time
+    work = sum(len(b.filters_f) * int(np.asarray(x).size) for b, x, kw in jobs
+               if (kw or {}).get("template_index") is None)
+    return (time.perf_counter(), plan, work)
+
+
+def _trial_end(tok):
+    import time
+    if tok is None:
+        return
+    t0, plan, work = tok
+    dt = time.perf_counter() - t0
+    for key, r, bs, settled in plan:
+        if settled and work > 0:
+            _BLOCK_TRIALS.record(key, r, dt / work)
+        for b in bs:
+            b._layout_warm = True
+        w = _BLOCK_TRIALS.winner(key)
+        if w is not None:
+            for b in bs:
+                if getattr(b, '_layouts', None) is not None:
+                    b._lock_layout(w)
+
+
 def _max_tiers(device) -> int:
     """Gate tiers the device's hierarchical engine executes (HierarchicalFilter._MAX_TIERS)."""
     from . import HierarchicalFilter
@@ -879,12 +1009,15 @@ class TimeDomainFilterBank:
             return int(max(self._choice_ns + tuple(g[2] for g in self._legacy_layout[0])))
         return int(max((g.n for g in self._groups), default=0))
 
-    def _choose_layout(self, fine: np.ndarray, delta_f: float):
-        """Partition with each length batch at its cheapest modelled block size."""
+    def _choose_layout(self, fine: np.ndarray, delta_f: float, single_n: Optional[int] = None):
+        """Partition with each length batch at its cheapest modelled block size -- or, with
+        single_n, every batch at that one size (a block-size trial candidate, _BlockTrials).
+        Also leaves self._single_ns: the sizes every batch can use, cheapest total first."""
         from . import gatechain, _log_autotune
         groups, order = self._legacy_layout
         counts = self.effective_data_counts[order]
         n_sorted = np.empty(len(order), dtype=np.int64)
+        totals, first = {}, True
         for i, j, n0, _ in groups:
             longest = int(counts[j - 1])
             taps_max = int(np.max(self.tap_counts[order[i:j]]))
@@ -892,10 +1025,16 @@ class TimeDomainFilterBank:
             ranked = gatechain.price_block_sizes(
                 fine, delta_f, self.data_sample_rate, longest, margin, j - i,
                 self.threshold, self.false_dismissal, [n for n in self._choice_ns if n > longest],
-                max_tiers=_max_tiers(self.device), device=self.device)
-            n_sorted[i:j] = ranked[0][1] if ranked else n0
-            _log_autotune("BLOCK templates=%d longest=%d legacy n=%d -> n=%d  %s", j - i, longest, n0,
-                          int(n_sorted[i]), " ".join("%d:%.3g" % (n, c) for c, n, _ in ranked))
+                max_tiers=_max_tiers(self.device), device=self.device,
+                ahead=_BLOCK_TRIAL_RANKS - 1)
+            priced = {n: c * (j - i) for c, n, _ in ranked}
+            totals = priced if first else {n: totals[n] + priced[n] for n in totals if n in priced}
+            first = False
+            n_sorted[i:j] = (single_n if single_n is not None else ranked[0][1]) if ranked else n0
+            if single_n is None:
+                _log_autotune("BLOCK templates=%d longest=%d legacy n=%d -> n=%d  %s", j - i, longest, n0,
+                              int(n_sorted[i]), " ".join("%d:%.3g" % (n, c) for c, n, _ in ranked))
+        self._single_ns = [n for _, n in sorted((v, n) for n, v in totals.items())]
         return _partition_templates(self.effective_data_counts, max_batch=self.max_batch_size,
                                     candidate_ns=self._candidate_ns, n_sorted=n_sorted)
 
@@ -953,14 +1092,49 @@ class TimeDomainFilterBank:
             # The first reference settles the block sizes: by cost from a fine-grid
             # profile, else by the valid-fraction rule.
             if not isinstance(reference, dict) and delta_f is not None and float(delta_f) > 0:
-                layout = self._choose_layout(np.asarray(reference, dtype=np.float64), float(delta_f))
+                fine_ref = np.asarray(reference, dtype=np.float64)
+                layout = self._choose_layout(fine_ref, float(delta_f))
+                # Candidates (_BlockTrials): the model's layout, then the whole bank at each of
+                # its _BLOCK_TRIAL_RANKS - 1 cheapest single block sizes.
+                from . import gatechain as _gc, _autotune_enabled
+                # Candidates only where a trial's lock can be kept (see _trial_begin); otherwise
+                # none are built, so the bank is the model's layout at no extra cost.
+                nr = (int(os.environ.get('MF_BLOCK_TRIAL_RANKS', _BLOCK_TRIAL_RANKS))
+                      if _gc._cost_file() is not None and _autotune_enabled() else 1)
+                singles = list(self._single_ns)
+                alts, sig = [layout], ["model"]
+                for n in singles:
+                    if len(alts) >= nr:
+                        break
+                    alt = self._choose_layout(fine_ref, float(delta_f), single_n=n)
+                    if alt[0] != layout[0]:          # a single size equal to the model's adds nothing
+                        alts.append(alt); sig.append(n)
+                self._candidate_sig = tuple(sig)
                 if self._built is None or layout[0] != self._built_layout:
                     self._build(*layout)
                 self.chosen_layout = [(int(e - b), int(n)) for b, e, n, _ in layout[0]]
+                # Block-size trials (_BlockTrials): the model's alternatives within its margin are
+                # built now -- the taps are freed below -- and measured on real calls.
+                self._layouts = [self._snapshot()]
+                for alt in alts[1:]:
+                    if alt[0] == layout[0]:
+                        self._layouts.append(self._layouts[0])      # same partition: share it
+                        continue
+                    self._build(*alt)
+                    self._layouts.append(self._snapshot())
+                self._restore(self._layouts[0])
+                self._layout_rank = 0
+                self._layout_ref = (reference, delta_f)
+                if len(self._layouts) < 2:
+                    self._layouts = None
             self._groups
             self._n_chosen = True
             self._taps_list = None
             self._raw_taps = None
+            if getattr(self, '_layouts', None):
+                w = _BLOCK_TRIALS.winner(_trial_key(self))
+                if w is not None:                     # this machine already measured it
+                    self._lock_layout(w)
         hier_ns = sorted({g.n for g in self._groups if g.is_hier})
         accepted = ("pass a dict {n: profile} with one length-n profile per block size, "
                     "or a fine-grid profile together with delta_f")
@@ -1013,6 +1187,55 @@ class TimeDomainFilterBank:
         self._load_templates()
         self._current_ref_key = ref_key
         self._state_version = getattr(self, '_state_version', 0) + 1
+
+    _LAYOUT_ATTRS = ('_built', '_built_layout', '_filters_f_list', '_block_lengths_arr',
+                     '_template_map')
+
+    def _snapshot(self):
+        return {k: getattr(self, k, None) for k in self._LAYOUT_ATTRS}
+
+    def _restore(self, snap):
+        for k, v in snap.items():
+            setattr(self, k, v)
+
+    def _use_layout(self, rank: int) -> None:
+        """Run on the rank-th candidate layout (built at the first reference). The plans differ,
+        so the state version moves and recorded call plans are invalidated."""
+        layouts = getattr(self, '_layouts', None)
+        if not layouts or rank == getattr(self, '_layout_rank', 0) or rank >= len(layouts):
+            return
+        if layouts[rank] is layouts[self._layout_rank]:
+            self._layout_rank = rank                  # the same partition: nothing to switch
+            return
+        self._layouts[self._layout_rank] = self._snapshot()
+        self._layout_warm = False
+        self._restore(layouts[rank])
+        self._layout_rank = rank
+        self.chosen_layout = [(int(e - b), int(n)) for b, e, n, _ in self._built_layout]
+        ref, df = self._layout_ref
+        self._current_ref_key = None
+        self.set_reference(ref, delta_f=df)          # this layout's groups get it, and templates
+        self._state_version = getattr(self, '_state_version', 0) + 1
+
+    def _lock_layout(self, rank: int) -> None:
+        """Keep the rank-th layout and free the others, on the device too: the dropped
+        layout's spectra and recordings sit in its GPU context's caches, which LRU evicts only
+        under pressure -- on a small shared-memory GPU, after re-uploading live data."""
+        self._use_layout(rank)
+        # only layouts this bank actually ran have anything on the device
+        ran = getattr(self, '_ranks_run', set())
+        dropped = [snap for i, snap in enumerate(self._layouts or []) if i != rank and i in ran]
+        self._layouts = None
+        ctxs = {}
+        for snap in dropped:
+            for g in snap.get('_built') or []:
+                ctx = getattr(getattr(g, 'plan', None), '_gpu', None)
+                if ctx is not None and hasattr(ctx, '_evict_all'):
+                    ctxs[id(ctx)] = ctx
+        for ctx in ctxs.values():
+            if hasattr(ctx, '_drain'):
+                ctx._drain()
+            ctx._evict_all()                 # live layouts re-upload once, on their next call
 
     def _load_templates(self) -> None:
         for g in self._groups:
@@ -1470,6 +1693,7 @@ class TimeDomainFilterBank:
         from . import _Deferred
         import os
         global _BATCH_TOKEN
+        trial = _trial_begin(jobs)
         _BATCH_TOKEN += 1
         # On Vulkan the deferred submissions are also fused: one command buffer runs every
         # job's forward transforms, then every job's first tier, ..., one barrier per phase
@@ -1514,8 +1738,26 @@ class TimeDomainFilterBank:
             if close is not None:
                 close()
         if not wait:
-            return [r if isinstance(r, _Deferred) else _Deferred(lambda r=r: r) for r in out]
-        return [r.result() if isinstance(r, _Deferred) else r for r in out]
+            res = [r if isinstance(r, _Deferred) else _Deferred(lambda r=r: r) for r in out]
+            if trial is not None:
+                # a trial sample runs from submission to the batch's last result
+                left = [len(res)]
+                def wrap(d):
+                    seen = [False]
+                    def get(d=d):
+                        v = d.result()
+                        if not seen[0]:
+                            seen[0] = True
+                            left[0] -= 1
+                            if left[0] == 0:
+                                _trial_end(trial)
+                        return v
+                    return _Deferred(get)
+                res = [wrap(d) for d in res]
+            return res
+        res = [r.result() if isinstance(r, _Deferred) else r for r in out]
+        _trial_end(trial)
+        return res
 
     @staticmethod
     def _items_batch(jobs, out):

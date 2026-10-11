@@ -274,3 +274,118 @@ pays a cheaper forward, which the cost model did not credit.
 Effect: with the model's f, (256, 1024) at n = 2048 (f = 1%) gained the band credit and tied
 (256, 512); on the ladder the credit at n = 8192 went the wrong way (above). With measured-only
 f, a process's first choices are the base's, and later choices see Vulkan's measured fraction.
+
+## Block-size trials (2026-10-10): built, measured, net loss -- not ready
+
+`time_domain._BlockTrials` builds the model's top block-size layouts (within 30% of its
+cheapest; at most 2) at the first reference, while the taps are still held. Each batch of
+`filter_series_many` puts every trialling bank on one candidate rank and times the batch from
+submission to the last result, per template x series sample. Batches in which a bank
+switched layout are not timed. The model's rank runs first. After one clean sample per
+rank, the fastest within gatechain.TIE is locked (ties keep the model's choice); the
+others are dropped. `tests/test_block_trials.py` checks that a clearly worse rank (1.5-10x)
+is never locked, in either order, that ties keep rank 0, and that a bank's switch and lock
+work end to end.
+
+Measured on dev3's Renoir (Vulkan, load < 1), 3 interleaved processes, autotune on, 2 tops
+x 6 segments, steady fine stage:
+
+| | run 1 | run 2 | run 3 |
+|---|---|---|---|
+| main | 1.83 s | 1.82 s | 2.29 s |
+| branch | 2.67 s | 3.81 s | 2.50 s |
+
+The branch is slower in every run, including runs where it locked rank 0, so the cost is
+not the choice itself. The likely cause, not yet proven: building a second layout doubles
+each bank's GPU-resident spectra and plans on an iGPU with a small shared budget. The
+dropped layout's device storage is evicted only by LRU, so live data is re-uploaded in
+steady state. Two further caveats:
+- One sample per rank is thin: the locked ranks differed 12-27% on single batches.
+- Main itself chooses differently across processes on this host ((2048, (512,)),
+  (2048, (256, 512)), mixed 2048/4096), so the baseline is not a fixed point.
+
+Needed before this can ship:
+1. Free the dropped layout's device storage explicitly at lock (GPU cache API), or build the
+   alternative only for the batches that trial it.
+2. Take more than one sample per rank, still within the warm-up: time per bank rather than
+   per batch.
+3. Then re-measure.
+
+Until then the forward credit stays measured-only.
+
+### Block-size trials, second round (2026-10-10): still a net loss; why
+
+Changes:
+- Trial batches run each bank alone, so each bank gives a paired sample: rank r against rank 0
+  on the same bank. There are 22-27 samples per rank within the warm-up.
+- A lock evicts the dropped layout's device storage, and only if that layout ever ran.
+- Banks built after the lock adopt the winner with no trial batch.
+
+dev3 Renoir, load < 1, steady fine stage:
+
+| | main | trials off (MF_BLOCK_TRIAL_RANKS=1) | trials on |
+|---|---|---|---|
+| run 1 | 2.25 s | 2.32 s | 2.80 s (locked rank 1, paired ratio 0.90) |
+| run 2 | 2.32 s | 1.79 s | 3.15 s (locked rank 1, 0.89) |
+
+The machinery costs nothing: with trials off the branch matches main. What the trials lock is
+wrong. Rank 1 is "the second-cheapest n per length batch", and that mixes block sizes within
+a bank (2596 templates at 2048 and 2102 at 4096 in one run). Timed alone, each bank was ~10%
+faster that way. In steady state the banks run fused and concurrently, and the extra
+template groups -- more calls, smaller dispatches -- cost more than that.
+
+Two conclusions:
+1. Candidates must be whole-bank layouts at one n each (n = 2048, 4096, ...), not per-batch
+   rank mixes.
+2. A solo per-bank sample does not predict fused steady-state time. A representative sample is
+   a whole fused batch, at roughly one per batch. Two or three candidates at three samples each
+   do not fit a two-segment warm-up. They fit if the lock is persisted in MF_COST_FILE (keyed by
+   device and the bank's candidate set), so a machine pays for the trial once rather than once
+   per process. That also makes the choice stable across processes.
+
+Not shippable as is.
+
+### Block-size trials, round 3 (2026-10-11): whole-bank candidates, fused-batch samples, persisted lock
+
+- **Candidates per bank.** The model's own layout is rank 0. After it come the whole bank at each
+  of its cheapest single block sizes: sizes every length batch can use, ranked by their summed
+  modelled cost. A single size whose partition equals the model's is skipped. There are at most
+  3 candidates (`_BLOCK_TRIAL_RANKS`). `price_block_sizes(ahead=)` prices that many sizes past the
+  first dearer one so that they exist.
+- **Samples.** A sample is one whole `filter_series_many` batch, fused and concurrent as in steady
+  state, timed from submission to its last result, per template x series sample. A rank's first
+  batch after a switch only settles (it uploads). There are 2 samples per rank. Rank r > 0 wins
+  only if its median beats rank 0's by more than gatechain.TIE, so a tie keeps the model's layout.
+- **Persisted lock.** The winner is stored in MF_COST_FILE under `block-trial|<device>|<candidate
+  set>`. A bank whose key is on file adopts it at its first reference with no trial, and only
+  layouts that ran are evicted from the device at a lock.
+- **Only where the lock can be kept.** Without MF_COST_FILE (or with MF_AUTOTUNE=0) no candidates
+  are built and no trial runs. The bank is the model's layout, exactly main's behaviour. A trial in
+  every process would cost that process its warm-up and more (the trial process below), for a few
+  percent.
+
+dev3 Renoir, Vulkan, load < 1. Each side has its own fresh MF_COST_FILE, the processes are
+interleaved, the configuration is 2 tops x 6 segments, and the figure is the steady fine stage.
+Main with a cost file is the fair baseline: with persisted cost models it is itself stable,
+(2048, (256, 512)) at 1.14-1.26 s, against 1.8-2.3 s and varying layouts without a file.
+
+| process | main | branch |
+|---|---|---|
+| 1 (branch runs its trial) | 1.26 s | 4.09 s (trial: 8192 at 2.1x, 4096 at 1.08x, locked the model's) |
+| 2 | 1.15 s | 1.09 s |
+| 3 | 1.14 s | 1.09 s |
+| 4 | 1.14 s | 1.09 s |
+| 5 | 1.20 s | 1.08 s |
+
+Second set (final code: candidates built only with a cost file), fresh cost files:
+
+| process | main | branch |
+|---|---|---|
+| 1 (trial) | 1.36 s | 4.39 s (4096 at 2.4x, 8192 at 6x; locked the model's) |
+| 2-4 | 1.35 / 1.34 / 1.34 s | 1.34 / 1.34 / 1.35 s |
+
+After the one trial process, the branch is never slower than main (equal in the second set, 4-10% faster in the first), and the
+same layout in every process. In both sets the trial confirmed the model's layout; the gain in the
+first set comes from the calibrated cost models in that file, not from a different layout.
+Where the model is right, trials buy stability and a guard against its mistakes, not speed. The trial costs one process's fine stage once per machine and
+candidate set, not once per process.
