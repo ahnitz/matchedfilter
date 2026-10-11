@@ -223,3 +223,22 @@ remains for other hardware.
   the host term. On the 8060S: host_block 2.1 us at n = 2048 and 5.7 us at 4096, against
   device block work of ~0.3/0.7; with it the n = 2048 margin over 4096 went from ~6% (inside
   the noise that made it flip) to ~30%.
+
+## Host term removed from block-size pricing (2026-10-10)
+
+The per-block host term added in gate/chain-stability is not charged any more. Its fit grows
+the series with the block count, so it measured a per-sample staging cost (5/10/20 us per block
+at n = 2048/4096/8192 on the 8060S): the same per valid sample at every n, several times the
+device terms, and 2x noisy under load. It could only reshuffle near-ties, so neighbouring length
+batches of one bank landed on different block sizes run to run. That fragments banks into more
+template groups, hence more calls. It is a candidate for the fine-call growth on 437367c
+(54 -> 258 calls per segment); the review agent's bisect decides.
+
+dev3 Renoir, Vulkan, load < 1, 3 interleaved processes each, autotune on (2 tops x 6 segments):
+
+| | run 1 | run 2 | run 3 |
+|---|---|---|---|
+| main 437367c, fine | 2.33 s | 1.80 s | 1.87 s |
+| main, layout | 4096 (mixed chains) | 2048 | 2048 + 138 templates at 4096 |
+| host term off, fine | 1.90 s | 1.85 s | 1.73 s |
+| host term off, layout | 2048 | 2048 | 2048 + 69 templates at 4096 |
