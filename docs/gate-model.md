@@ -428,3 +428,18 @@ configuration is 2 tops x 6 segments, and the figure is the steady fine stage:
 
 After the first process the branch is 12-15% faster in steady state, and identical from process
 to process. The first process of each side carries both kinds of trials, once per machine.
+
+### Every measured choice is per machine (2026-10-11)
+
+`gatechain.stored_choice` / `store_choice` keep a measured choice in MF_COST_FILE next to the
+cost models, the chain locks and the block-size locks:
+- CUDA's coarse kernel variant, timed at first use per device and band
+  (`cuda-coarse|<device>|<band>|<variant set>`).
+- Vulkan's fused interleave depth per batch shape (`vk-interleave|<device>|<shape>`).
+
+Metal has no timed choice today. Each choice is valid, but made afresh per process they
+differed on noise (variants round differently), so borderline pairs gated differently in 1-3
+jobs per segment. With a cost file a machine makes each choice once.
+`tests/test_reproducible_choices.py` runs three processes on one cost file, on the CPU and
+on gpu:0 where present, and requires identical triggers, layout and chains: the second and
+third processes against each other, and against the first process's locked segments.

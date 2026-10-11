@@ -1724,7 +1724,20 @@ class Context(InputUploads):
             ent[1] = raw
 
     def _time_coarse(self, band, cands):
-        """The fastest of the coarse variants on synthetic data (device time, min of 3)."""
+        """The fastest of the coarse variants on synthetic data (device time, min of 3); a
+        choice already made on this machine (gatechain.stored_choice) is reused untimed."""
+        from . import gatechain
+        labels = [self._labels.get(c[0].value, "") for c in cands]
+        ckey = "cuda-coarse|%s|%d|%s" % (getattr(self, "name", ""), int(band),
+                                         ",".join(sorted(labels)))
+        held = gatechain.stored_choice(ckey)
+        if held in labels:
+            return cands[labels.index(held)]
+        best = self._time_coarse_measure(band, cands)
+        gatechain.store_choice(ckey, self._labels.get(best[0].value, ""))
+        return best
+
+    def _time_coarse_measure(self, band, cands):
         P, ntm = 65536, 16
         ndm = P // ntm
         rng = np.random.default_rng(0)
