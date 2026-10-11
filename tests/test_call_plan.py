@@ -430,3 +430,137 @@ def test_band_mode_allocates_nothing_in_steady_state(monkeypatch):
         _check([(b, rows[i], dict(windows=slice(3000, S - 3000)))
                 for i, (b, _, _) in enumerate(banks)])
     assert made[0] == 0, "%d buffers allocated in steady state" % made[0]
+
+
+@pytest.mark.parametrize("new_alloc", [False, True])
+def test_device_followups_track_their_buffers(monkeypatch, new_alloc):
+    """Vulkan follow-ups (_vkfollowup) replay one recording per template group, bound to the
+    series allocations and templates it was made for: rewritten data, or a new allocation each
+    segment (perhaps at a freed one's address), must still give each job's direct result."""
+    monkeypatch.setenv("MF_SINGLE_DEVICE", "bank")
+    rng, banks = _setup(monkeypatch, nbanks=1, seed=81)
+    bank = banks[0][0]
+    if not getattr(bank._groups[0].plan._gpu, "supports_device_followups", False):
+        pytest.skip("backend has no device follow-ups")
+    from matchedfilter import _vkfollowup
+    calls = []
+    orig = _vkfollowup.Executor.submit_jobs
+    monkeypatch.setattr(_vkfollowup.Executor, "submit_jobs",
+                        lambda self, js: calls.append(len(js)) or orig(self, js))
+    S = 1 << 17
+    rows = bank.empty_shared((2, S))
+    for seg in range(4):
+        if new_alloc:
+            del rows
+            gc.collect()
+            rows = bank.empty_shared((2, S))
+        _fill(rng, rows, S)
+        jobs = []
+        for k in range(6):
+            c0 = int(rng.integers(20000, S - 20000))
+            jobs.append((bank, rows[k % 2], dict(windows=slice(c0 - 3000, c0 + 3100), binsize=61,
+                                                 threshold=0.0,
+                                                 template_index=int(rng.integers(0, 33)))))
+        many = TimeDomainFilterBank.filter_series_many(jobs)
+        direct = [b.filter_series(x, **kw) for b, x, kw in jobs]
+        for r1, r2 in zip(direct, many):
+            for f in r1._fields:
+                np.testing.assert_array_equal(getattr(r1, f), getattr(r2, f))
+    assert calls, "the device follow-up path was not taken"
+
+
+def test_device_followups_in_flight(monkeypatch):
+    """Vulkan follow-ups are submitted without a wait (filter_series_many(wait=False)): a second
+    batch on the same records, submitted before the first is collected, must first finish the
+    first (its tables and outputs are rewritten), and both must equal their direct calls."""
+    monkeypatch.setenv("MF_SINGLE_DEVICE", "bank")
+    rng, banks = _setup(monkeypatch, nbanks=1, seed=82)
+    bank = banks[0][0]
+    if not getattr(bank._groups[0].plan._gpu, "supports_device_followups", False):
+        pytest.skip("backend has no device follow-ups")
+    S = 1 << 17
+    rows = bank.empty_shared((2, S))
+    _fill(rng, rows, S)
+
+    def batch():
+        jobs = []
+        for k in range(6):
+            c0 = int(rng.integers(20000, S - 20000))
+            jobs.append((bank, rows[k % 2], dict(windows=slice(c0 - 3000, c0 + 3100), binsize=61,
+                                                 threshold=0.0,
+                                                 template_index=int(rng.integers(0, 33)))))
+        return jobs
+    j1, j2 = batch(), batch()
+    f1 = TimeDomainFilterBank.filter_series_many(j1, wait=False)
+    f2 = TimeDomainFilterBank.filter_series_many(j2, wait=False)
+    got = [f.result() for f in f2 + f1]              # second batch collected first
+    want = [b.filter_series(x, **kw) for b, x, kw in j2 + j1]
+    for r1, r2 in zip(want, got):
+        for f in r1._fields:
+            np.testing.assert_array_equal(getattr(r1, f), getattr(r2, f))
+
+
+def test_device_followups_steady_state_allocates_nothing(monkeypatch):
+    """After warm-up, Vulkan follow-ups whose jobs move between template groups and series
+    allocations every segment create no workspace, buffer or descriptor pool: a group's
+    templates and allocations are rebound in place on a pooled workspace."""
+    monkeypatch.setenv("MF_SINGLE_DEVICE", "bank")
+    rng, banks = _setup(monkeypatch, nbanks=1, seed=83)
+    # Several template groups of one block length (they share workspaces), so jobs move
+    # between groups and workspace slots.
+    counts = list(rng.integers(200, 400, 33))
+    taps, w, df = _whitened_inspiral_bank(rng, counts)
+    bank = TimeDomainFilterBank(taps, tap_counts=counts, engine='hier', threshold=4.5,
+                                false_dismissal=1e-3, device=banks[0][0].device,
+                                fft_lengths=[2048], binsize=2048, max_batch_size=8)
+    bank.set_reference(w, delta_f=df)
+    ctx = bank._groups[0].plan._gpu
+    if not getattr(ctx, "supports_device_followups", False):
+        pytest.skip("backend has no device follow-ups")
+    from matchedfilter import _vkfollowup, _vkcompute as vkc
+    made, on = [], [False]
+    for cls in (_vkfollowup._Workspace, vkc._Buffer):
+        orig = cls.__init__
+        monkeypatch.setattr(cls, "__init__", lambda self, *a, _o=orig, _c=cls, **k:
+                            (on[0] and made.append(_c.__name__)) or _o(self, *a, **k))
+    S = 1 << 17
+    rows = [bank.empty_shared((2, S)) for _ in range(2)]
+    groups = {}
+    for t in range(33):
+        groups.setdefault(id(bank._template_map[t][0]), []).append(t)
+    per_group = list(groups.values())
+    assert len(per_group) > 1, "the bank should span several template groups"
+
+    def segment(templates):
+        jobs = []
+        for k, t in enumerate(templates):
+            c0 = int(rng.integers(20000, S - 20000))
+            jobs.append((bank, rows[k % 2][k % 2 - 1], dict(
+                windows=slice(c0 - 3000, c0 + 3100), binsize=61, threshold=0.0,
+                template_index=int(t))))
+        on[0] = True                                  # the follow-ups only, not the references
+        try:
+            many = TimeDomainFilterBank.filter_series_many(jobs)
+        finally:
+            on[0] = False
+        for (b, x, kw), r2 in zip(jobs, many):
+            r1 = b.filter_series(x, **kw)
+            for f in r1._fields:
+                np.testing.assert_array_equal(getattr(r1, f), getattr(r2, f))
+
+    for r in rows:
+        _fill(rng, r, S)
+    # Warm-up: every group at once, in both allocations (the most workspaces a batch takes).
+    segment([g[0] for g in per_group] * 2)
+    warm = len(made)
+    pools = len(getattr(ctx, "_pools", []))
+    workspaces = sum(len(ex.workspaces) for ex in _vkfollowup._EXECUTORS.values())
+    assert workspaces, "the device follow-up path was not taken"
+    for seg in range(6):
+        for r in rows:
+            _fill(rng, r, S)
+        segment([int(rng.choice(g)) for g in rng.permutation(np.array(per_group, object))
+                 for _ in range(int(rng.integers(1, 3)))])
+    assert made[warm:] == [], made[warm:]
+    assert len(getattr(ctx, "_pools", [])) == pools
+    assert sum(len(ex.workspaces) for ex in _vkfollowup._EXECUTORS.values()) == workspaces
