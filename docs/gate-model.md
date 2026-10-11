@@ -312,3 +312,35 @@ Needed before this can ship:
 3. Then re-measure.
 
 Until then the forward credit stays measured-only.
+
+### Block-size trials, second round (2026-10-10): still a net loss; why
+
+Changes:
+- Trial batches run each bank alone, so each bank gives a paired sample: rank r against rank 0
+  on the same bank. There are 22-27 samples per rank within the warm-up.
+- A lock evicts the dropped layout's device storage, and only if that layout ever ran.
+- Banks built after the lock adopt the winner with no trial batch.
+
+dev3 Renoir, load < 1, steady fine stage:
+
+| | main | trials off (MF_BLOCK_TRIAL_RANKS=1) | trials on |
+|---|---|---|---|
+| run 1 | 2.25 s | 2.32 s | 2.80 s (locked rank 1, paired ratio 0.90) |
+| run 2 | 2.32 s | 1.79 s | 3.15 s (locked rank 1, 0.89) |
+
+The machinery costs nothing: with trials off the branch matches main. What the trials lock is
+wrong. Rank 1 is "the second-cheapest n per length batch", and that mixes block sizes within
+a bank (2596 templates at 2048 and 2102 at 4096 in one run). Timed alone, each bank was ~10%
+faster that way. In steady state the banks run fused and concurrently, and the extra
+template groups -- more calls, smaller dispatches -- cost more than that.
+
+Two conclusions:
+1. Candidates must be whole-bank layouts at one n each (n = 2048, 4096, ...), not per-batch
+   rank mixes.
+2. A solo per-bank sample does not predict fused steady-state time. A representative sample is
+   a whole fused batch, at roughly one per batch. Two or three candidates at three samples each
+   do not fit a two-segment warm-up. They fit if the lock is persisted in MF_COST_FILE (keyed by
+   device and the bank's candidate set), so a machine pays for the trial once rather than once
+   per process. That also makes the choice stable across processes.
+
+Not shippable as is.
