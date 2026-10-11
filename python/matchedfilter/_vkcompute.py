@@ -459,6 +459,10 @@ _INTERLEAVE_MARGIN = 0.95
 _INTERLEAVE_TRIALS = 5
 
 
+def _interleave_key(dev, shape):
+    return "vk-interleave|%s|%r" % (getattr(dev, "index", 0), shape)
+
+
 def _batch_shape(items):
     """(shape, work) of a fused batch: the multiset of phase sets its items carry, and its
     coarse work (workgroups dispatched in coarse0, at least 1) to normalise a timing."""
@@ -583,7 +587,13 @@ class _FusedBatch:
             k = forced or 0
         else:
             shape, work = _batch_shape(self.items)
-            st = choice.setdefault(shape, {"k": None, "t": {c: [] for c in _INTERLEAVE_CANDIDATES}})
+            st = choice.get(shape)
+            if st is None:
+                # a depth this machine already measured for the shape is reused untimed
+                from . import gatechain
+                held = gatechain.stored_choice(_interleave_key(dev, shape))
+                st = choice[shape] = {"k": held if held in _INTERLEAVE_CANDIDATES else None,
+                                      "t": {c: [] for c in _INTERLEAVE_CANDIDATES}}
             if st["k"] is not None:
                 k = st["k"]
             else:
@@ -716,6 +726,8 @@ class _FusedBatch:
                     # between two equal choices only adds a barrier per phase.
                     med = {c: float(np.median(v)) for c, v in st["t"].items()}
                     st["k"] = min(med, key=lambda c: med[c] / (1.0 if c == 0 else _INTERLEAVE_MARGIN))
+                    from . import gatechain
+                    gatechain.store_choice(_interleave_key(dev, shape), int(st["k"]))
                     # The losers' recordings are never submitted again; the cache's LRU
                     # retires them (another batch may still be executing one now).
 
@@ -796,6 +808,7 @@ class _Device:
     """A Vulkan instance and logical device, its compute queues, command pool and pipelines."""
 
     def __init__(self, index):
+        self.index = index
         vk, err = _vulkan._load()
         if vk is None:
             raise VulkanError(err)

@@ -452,6 +452,27 @@ def _load_cost_file(path):
         return {}
 
 
+def stored_choice(key):
+    """A measured per-machine choice kept in MF_COST_FILE (None without a file or entry).
+
+    Measured choices -- a coarse kernel variant timed at first use, a fused batch's
+    interleave depth, a chain or block-size trial -- are each valid, but made afresh per
+    process they differ on noise, and borderline pairs then gate differently from run to
+    run. Kept with the cost models, a machine makes each once and every later process
+    reproduces it."""
+    path = _cost_file()
+    if path is None:
+        return None
+    rec = _load_cost_file(path).get("choice|" + key)
+    return rec.get("value") if isinstance(rec, dict) else None
+
+
+def store_choice(key, value):
+    path = _cost_file()
+    if path is not None:
+        _store_cost(path, "choice|" + key, {"value": value})
+
+
 def _store_cost(path, skey, cm):
     """Add one model to the file; merges with what other processes wrote, replaces atomically."""
     data = _load_cost_file(path)
