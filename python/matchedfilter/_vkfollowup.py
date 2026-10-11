@@ -34,6 +34,8 @@ class Unsupported(Exception):
 REGION_ROWS = 256
 REGIONS = 1
 MAX_ENTRIES = 512
+#: Spectra memory a size class's workspace pool is filled to at once (_take).
+_POOL_BYTES = 256 << 20
 #: Workgroups the refineItems grid strides with.
 GRID = 64
 
@@ -41,14 +43,16 @@ GRID = 64
 class _Workspace:
     """Buffers, descriptor sets and recording for one group of a submission.
 
-    Pooled per (n, nbins, allocations, slot of the group within its submission) and shared by
-    every template group: a group's templates and its series allocations are bindings,
-    rewritten in place (vkUpdateDescriptorSets) when they change, and the short recording is
-    redone only then. A steady search therefore creates no buffer, descriptor pool or
-    workspace after warm-up, however its follow-ups spread over template groups."""
+    Pooled per size class -- (n, allocations), with an output capacity of `cap_bins` bins, a
+    power of two -- and shared by every template group and every bin count up to its
+    capacity: a group's templates and series allocations are bindings, rewritten in place
+    (vkUpdateDescriptorSets) when they change, and the short recording is redone only then.
+    Keyed by size class rather than by the group's place in its submission, a steady search
+    stops creating workspaces once the pool holds as many as one submission uses at once."""
 
-    def __init__(self, ctx, n, nbins, nalloc):
-        self.ctx, self.n, self.nbins = ctx, n, nbins
+    def __init__(self, ctx, n, cap_bins, nalloc):
+        self.ctx, self.n, self.cap_bins, self.nalloc = ctx, n, cap_bins, nalloc
+        nbins = cap_bins
         rows = REGION_ROWS * REGIONS
         self.spec = ctx.empty_shared((rows, n))
         self.starts = ctx.empty_shared(rows, np.uint32)
@@ -99,10 +103,20 @@ class _Workspace:
                                          self.count]
         return b, [getattr(x, "offset", 0) for x in b]
 
-    def bind(self, plan, allocs, binsize):
-        """Point the workspace at this group (its templates, its series allocations) and
-        make sure the recording matches. The caller has collected any submission in flight."""
-        key = (plan._gtmpl, tuple(allocs), int(plan._gtmpl.shape[0]), int(binsize))
+    def matches(self, plan, allocs, binsize, nbins):
+        """Bound to exactly this group already (no rewrite, no recording)."""
+        b = self.bound
+        return (b is not None and b[0] is plan._gtmpl and len(b[1]) == len(allocs)
+                and all(x is y for x, y in zip(b[1], allocs))
+                and b[2:] == (int(plan._gtmpl.shape[0]), int(binsize), int(nbins)))
+
+    def bind(self, plan, allocs, binsize, nbins):
+        """Point the workspace at this group (its templates, its series allocations, its bin
+        count) and make sure the recording matches. The caller has collected any submission
+        in flight."""
+        if nbins > self.cap_bins:
+            raise ValueError("bin count beyond the workspace's capacity")
+        key = (plan._gtmpl, tuple(allocs), int(plan._gtmpl.shape[0]), int(binsize), int(nbins))
         b = self.bound
         if b is not None and b[0] is key[0] and b[2:] == key[2:] and len(b[1]) == len(key[1]) \
                 and all(x is y for x, y in zip(b[1], key[1])):
@@ -115,6 +129,7 @@ class _Workspace:
         for a, whole in enumerate(allocs):
             if b is None or b[1][a] is not whole:
                 _rewrite(self.ctx, self.fsets[a], *self._fbufs(whole, a))
+        self.nbins = int(nbins)
         self._record(key[2], key[3], allocs)
         self.bound = key
         return True
@@ -180,7 +195,27 @@ class Executor:
     """Device follow-ups for one Vulkan device: records per template group, reused."""
 
     def __init__(self):
-        self.workspaces = {}
+        self.workspaces = {}               # (n, allocations) -> [_Workspace], any capacity
+
+    def _take(self, gw, nbins, used, most=1):
+        """A workspace for one group of a submission: from the pool of its size class,
+        one this submission has not taken, with room for nbins. Preferred: already bound to
+        this group (no rewrite or recording), then one with nothing in flight (no wait),
+        then the smallest. A new one only when none has room -- and then the pool is filled to
+        `most` (the template groups a submission of these banks can hold) at once: grown one
+        at a time, a pool reached a new size every few segments (each workspace a dozen
+        allocations, ~1 ms each) until a segment happened to use every group."""
+        pool = self.workspaces.setdefault((gw["n"], len(gw["allocs"])), [])
+        free = [w for w in pool if id(w) not in used and w.cap_bins >= nbins]
+        if free:
+            return min(free, key=lambda w: (not w.matches(gw["plan"], gw["allocs"], gw["bs"], nbins),
+                                            w.pending is not None, w.cap_bins))
+        fresh = [_Workspace(gw["ctx"], gw["n"], nbins, len(gw["allocs"]))
+                 for _ in range(max(1, min(most, _POOL_BYTES // (REGION_ROWS * REGIONS
+                                                                  * gw["n"] * 8))
+                                    - len(used)))]
+        pool.extend(fresh)
+        return fresh[0]
 
     def run_jobs(self, jobs):
         return self.submit_jobs(jobs)()
@@ -242,7 +277,12 @@ class Executor:
         if not groups:
             return []
         cmds, recs = [], []
-        slots = {}
+        used = set()                       # workspaces taken by this submission
+        # The most groups one submission of these banks can hold: every template group, per
+        # binsize and allocation seen here.
+        banks = {id(b): b for b, _, _ in jobs}
+        most = sum(len(b._groups) for b in banks.values()) * max(
+            1, len({k[1:] for k in groups}))
         for gw in groups.values():
             bs = gw["bs"]
             nbins = max([1] + [-(-(hi - lo) // bs) for _, _, lo, hi in gw["entries"]])
@@ -250,16 +290,14 @@ class Executor:
             if nbins > MAX_BINS:
                 raise Unsupported("window has too many bins")
             gw["nbins"] = nbins
-            # Groups of one submission take distinct workspaces (slot 0, 1, ... per shape).
-            shape = (gw["n"], nbins, len(gw["allocs"]))
-            slot = slots[shape] = slots.get(shape, -1) + 1
-            ws = self.workspaces.get(shape + (slot,))
-            if ws is None:
-                ws = self.workspaces[shape + (slot,)] = _Workspace(gw["ctx"], *shape)
+            # Groups of one submission take distinct workspaces, from the pool of this size
+            # class (_take).
+            ws = self._take(gw, nbins, used, most)
+            used.add(id(ws))
             pending = ws.pending
             if pending is not None:
                 pending()                          # its tables and outputs are rewritten below
-            ws.bind(gw["plan"], gw["allocs"], bs)
+            ws.bind(gw["plan"], gw["allocs"], bs, nbins)
             rec = ws
             for a in range(len(gw["allocs"])):
                 rows = np.asarray(gw["rows"][a], np.uint32)
@@ -331,7 +369,10 @@ class Executor:
         return out
 
 
-_EXECUTORS = {}
+def _executor(ctx):
+    """The device's executor, held by the device state itself: an id() of it could name a
+    later device once this one is gone (handles and ids are not identities)."""
+    return ctx._device_state.__dict__.setdefault("followup_executor", Executor())
 
 
 def submit_jobs(jobs):
@@ -345,7 +386,7 @@ def submit_jobs(jobs):
         ctx = getattr(g.get_flat_plan(), "_gpu", None)
         if not isinstance(ctx, vkc.Context):
             return None
-        ex = _EXECUTORS.setdefault(id(ctx._device_state), Executor())
+        ex = _executor(ctx)
         return ex.submit_jobs(jobs)
     except (Unsupported, KeyError, TypeError):
         return None
@@ -361,7 +402,7 @@ def run_jobs(jobs):
         ctx = getattr(g.get_flat_plan(), "_gpu", None)
         if not isinstance(ctx, vkc.Context):
             return None
-        ex = _EXECUTORS.setdefault(id(ctx._device_state), Executor())
+        ex = _executor(ctx)
         return ex.run_jobs(jobs)
     except (Unsupported, KeyError, TypeError):
         return None

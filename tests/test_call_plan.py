@@ -554,7 +554,10 @@ def test_device_followups_steady_state_allocates_nothing(monkeypatch):
     segment([g[0] for g in per_group] * 2)
     warm = len(made)
     pools = len(getattr(ctx, "_pools", []))
-    workspaces = sum(len(ex.workspaces) for ex in _vkfollowup._EXECUTORS.values())
+    def count_workspaces():
+        ex = ctx._device_state.__dict__.get("followup_executor")
+        return sum(len(p) for p in ex.workspaces.values()) if ex is not None else 0
+    workspaces = count_workspaces()
     assert workspaces, "the device follow-up path was not taken"
     for seg in range(6):
         for r in rows:
@@ -563,4 +566,36 @@ def test_device_followups_steady_state_allocates_nothing(monkeypatch):
                  for _ in range(int(rng.integers(1, 3)))])
     assert made[warm:] == [], made[warm:]
     assert len(getattr(ctx, "_pools", [])) == pools
-    assert sum(len(ex.workspaces) for ex in _vkfollowup._EXECUTORS.values()) == workspaces
+    assert count_workspaces() == workspaces
+
+
+def test_shared_series_is_read_in_place(monkeypatch):
+    """A series the caller wrote into the bank's device-shared memory (empty_shared) is read
+    where it is: correlate_series stages no copy, and the results equal those of the same
+    series in ordinary host memory (which is copied)."""
+    from conftest import usable_gpu
+    monkeypatch.setenv("MF_AUTOTUNE", "0")
+    dev = usable_gpu()
+    if dev is None:
+        pytest.skip("no usable GPU")
+    rng = np.random.default_rng(78)
+    counts = sorted(list(rng.integers(200, 400, 20)) + list(rng.integers(1300, 1800, 20)))
+    taps, w, df = _whitened_inspiral_bank(rng, counts)
+    bank = TimeDomainFilterBank(taps, tap_counts=counts, engine='hier', threshold=4.5,
+                                false_dismissal=1e-3, device=dev, fft_lengths=[2048, 4096])
+    bank.set_reference(w, delta_f=df)
+    S = 1 << 18
+    X = np.fft.fft(rng.standard_normal(S))
+    X[S // 2:] = 0
+    host = (np.fft.ifft(X) * 2).astype(np.complex64)
+    shared = bank.empty_shared((S,))
+    shared[:] = host
+    fills = []
+    orig_fill = type(bank)._fill_staging
+    monkeypatch.setattr(type(bank), "_fill_staging",
+                        staticmethod(lambda staged, ser: fills.append(1) or orig_fill(staged, ser)))
+    want = bank.correlate_series(host, windows=slice(3000, S - 3000))
+    staged_host = len(fills)
+    got = bank.correlate_series(shared, windows=slice(3000, S - 3000))
+    np.testing.assert_array_equal(got, want)
+    assert len(fills) == staged_host, "a device-shared series was copied"
