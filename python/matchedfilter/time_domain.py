@@ -288,14 +288,15 @@ def _partition_templates(
 
 
 #: Block-size trials: candidate layouts within this relative modelled cost of the cheapest
-#: are measured on real calls; at most _BLOCK_TRIAL_RANKS of them; each needs
-#: _BLOCK_TRIAL_SAMPLES clean timed batches. A batch in which a bank switched layout is not
-#: timed (the switch uploads templates), so a rank runs one batch to settle and then its
-#: samples: two candidates at one sample each is four batches -- a two-segment warm-up with
-#: two top templates' batches per segment.
+#: are measured on real calls, at most _BLOCK_TRIAL_RANKS of them. A trial batch runs its banks
+#: one at a time, so every bank is a sample: rank r's time on a bank is compared with rank 0's
+#: on the SAME bank (same templates, same series length), and the decision is the median of
+#: those paired ratios over at least _BLOCK_TRIAL_BANKS banks. A rank's first batch after a
+#: switch only settles (uploads), so two candidates take four batches: inside a two-segment
+#: warm-up with two top templates.
 _BLOCK_TRIAL_MARGIN = 0.30
 _BLOCK_TRIAL_RANKS = 2
-_BLOCK_TRIAL_SAMPLES = 1
+_BLOCK_TRIAL_BANKS = 4
 
 
 class _BlockTrials:
@@ -303,39 +304,46 @@ class _BlockTrials:
 
     A layout's modelled cost is a sum of calibrated per-term costs, and on a latency-bound GPU
     those terms are below a call's noise, so the model alone cannot separate block sizes that
-    differ by tens of percent (docs/gate-model.md, "Large-n pricing"). Instead, every batch of
-    calls runs all participating banks on one candidate rank, timed from submission to
-    collection per unit of work (templates x series samples); ranks alternate until each has
-    _BLOCK_TRIAL_SAMPLES, then the fastest median within gatechain.TIE of the best -- the
-    model's own rank first, so a tie keeps the model's choice -- is locked for every bank.
-    Samples are pooled over banks: per unit of work, banks are comparable. Keyed by device,
-    so CPU and GPU banks trial apart. MF_AUTOTUNE=0 keeps rank 0 (the model's choice)."""
+    differ by tens of percent (docs/gate-model.md, "Large-n pricing"). Ranks run in turn, the
+    model's (0) first; each rank's batch after it settles times every bank on its own. A rank
+    r > 0 wins only if its median time ratio to rank 0, over the banks both timed, is below
+    1 - gatechain.TIE (and lowest among such ranks): a tie keeps the model's choice. Keyed by
+    device, so CPU and GPU banks trial apart. MF_AUTOTUNE=0 keeps rank 0 (the model's)."""
 
     def __init__(self):
         self.state = {}
 
     def rank_for(self, key, nranks):
-        """Ranks in order, each until it has its samples: the model's choice first."""
-        st = self.state.setdefault(key, {"samples": {}, "winner": None})
+        st = self.state.setdefault(key, {"samples": {}, "winner": None, "nranks": nranks})
         if st["winner"] is not None:
             return st["winner"]
         for r in range(nranks):
-            st["samples"].setdefault(r, [])
-        need = int(os.environ.get("MF_BLOCK_TRIALS", _BLOCK_TRIAL_SAMPLES))
-        return next((r for r in range(nranks) if len(st["samples"][r]) < need), 0)
+            st["samples"].setdefault(r, {})
+        return next((r for r in range(nranks) if not st["samples"][r]), 0)
 
-    def record(self, key, rank, seconds, work):
+    def record(self, key, rank, per_bank):
+        """per_bank: {bank id: seconds per unit of work} for one settled batch on `rank`."""
         from . import gatechain, _log_autotune
         st = self.state.get(key)
-        if st is None or st["winner"] is not None or work <= 0:
+        if st is None or st["winner"] is not None or not per_bank:
             return
-        st["samples"].setdefault(rank, []).append(seconds / work)
-        need = int(os.environ.get("MF_BLOCK_TRIALS", _BLOCK_TRIAL_SAMPLES))
-        if all(len(v) >= need for v in st["samples"].values()):
-            med = {r: float(np.median(v)) for r, v in st["samples"].items()}
-            st["winner"] = gatechain.pick_stable(sorted(med), med.get, lambda r: r)
-            _log_autotune("BLOCK-TRIAL %s locked rank %d  median s/unit %s", key, st["winner"],
-                          {r: "%.3g" % v for r, v in med.items()})
+        st["samples"].setdefault(rank, {}).update(per_bank)
+        if any(not v for v in st["samples"].values()):
+            return
+        base = st["samples"][0]
+        ratio = {0: 1.0}
+        for r, v in st["samples"].items():
+            if r == 0:
+                continue
+            common = [b for b in v if b in base]
+            if len(common) < min(_BLOCK_TRIAL_BANKS, len(base)):
+                ratio[r] = float("inf")
+                continue
+            ratio[r] = float(np.median([v[b] / base[b] for b in common]))
+        st["winner"] = gatechain.pick_stable(sorted(ratio), ratio.get, lambda r: r)
+        _log_autotune("BLOCK-TRIAL %s locked rank %d  median time ratio to rank 0 %s (banks %s)",
+                      key, st["winner"], {r: "%.3f" % v for r, v in ratio.items()},
+                      {r: len(v) for r, v in st["samples"].items()})
 
     def winner(self, key):
         st = self.state.get(key)
@@ -358,45 +366,61 @@ def _trial_banks(jobs):
 
 
 def _trial_begin(jobs):
-    """Put every trialling bank of the batch on its key's current rank; returns what to record."""
-    import time
+    """Put every trialling bank of the batch on its key's current rank; None when no bank of the
+    batch is trialling (the batch then runs as usual)."""
     from . import _autotune_enabled
     if not _autotune_enabled():
         return None
     banks = _trial_banks(jobs)
     if not banks:
         return None
-    plan = []
-    for key, bs in banks.items():
-        nr = min(len(b._layouts) for b in bs)
-        r = _BLOCK_TRIALS.rank_for(key, nr)
-        switched = any(getattr(b, '_layout_rank', 0) != r or not getattr(b, '_layout_warm', False)
-                       for b in bs)
-        for b in bs:
-            b._use_layout(r)
-            b._layout_warm = not switched or getattr(b, '_layout_warm', False)
-        plan.append((key, r, bs, switched))
-    work = sum(len(b.filters_f) * int(np.asarray(x).size) for b, x, kw in jobs
-               if (kw or {}).get("template_index") is None)
-    return (time.perf_counter(), plan, work)
-
-
-def _trial_end(tok):
-    import time
-    if tok is None:
-        return
-    t0, plan, work = tok
-    dt = time.perf_counter() - t0
-    for key, r, bs, switched in plan:
-        if switched:
-            for b in bs:
-                b._layout_warm = True        # its next batch on this rank is a clean sample
-            continue
-        _BLOCK_TRIALS.record(key, r, dt, work)
+    plan = {}
+    for key, bs in list(banks.items()):
         w = _BLOCK_TRIALS.winner(key)
         if w is not None:
+            # a bank built after the lock: adopt the winner without a trial batch
             for b in bs:
                 b._lock_layout(w)
+            continue
+        nr = min(len(b._layouts) for b in bs)
+        r = _BLOCK_TRIALS.rank_for(key, nr)
+        for b in bs:
+            settled = getattr(b, '_layout_rank', 0) == r and getattr(b, '_layout_warm', False)
+            b._use_layout(r)
+            b.__dict__.setdefault('_ranks_run', set()).add(r)
+            plan[id(b)] = (key, r, settled)
+    return plan or None
+
+
+def _trial_run(jobs, trial):
+    """A trial batch: every job alone and collected at once, each bank timed per unit of work."""
+    import time
+    out, per = [], {}
+    for bank, series, kw in jobs:
+        t0 = time.perf_counter()
+        r = bank.filter_series(series, **(kw or {}))
+        r = r.result() if hasattr(r, 'result') else r
+        dt = time.perf_counter() - t0
+        out.append(r)
+        ent = trial.get(id(bank))
+        if ent is None:
+            continue
+        key, rank, settled = ent
+        if settled:
+            work = len(bank.filters_f) * int(np.asarray(series).size)
+            if work > 0:
+                d = per.setdefault((key, rank), {})
+                d[id(bank)] = d.get(id(bank), 0.0) + dt / work
+        bank._layout_warm = True             # its next batch on this rank is a clean sample
+    for (key, rank), d in per.items():
+        _BLOCK_TRIALS.record(key, rank, d)
+    for bank, _, _ in jobs:
+        ent = trial.get(id(bank))
+        if ent is not None:
+            w = _BLOCK_TRIALS.winner(ent[0])
+            if w is not None and getattr(bank, '_layouts', None) is not None:
+                bank._lock_layout(w)
+    return out
 
 
 def _max_tiers(device) -> int:
@@ -1174,9 +1198,24 @@ class TimeDomainFilterBank:
         self._state_version = getattr(self, '_state_version', 0) + 1
 
     def _lock_layout(self, rank: int) -> None:
-        """Keep the rank-th layout and free the others."""
+        """Keep the rank-th layout and free the others, on the device too: the dropped
+        layout's spectra and recordings sit in its GPU context's caches, which LRU evicts only
+        under pressure -- on a small shared-memory GPU, after re-uploading live data."""
         self._use_layout(rank)
+        # only layouts this bank actually ran have anything on the device
+        ran = getattr(self, '_ranks_run', set())
+        dropped = [snap for i, snap in enumerate(self._layouts or []) if i != rank and i in ran]
         self._layouts = None
+        ctxs = {}
+        for snap in dropped:
+            for g in snap.get('_built') or []:
+                ctx = getattr(getattr(g, 'plan', None), '_gpu', None)
+                if ctx is not None and hasattr(ctx, '_evict_all'):
+                    ctxs[id(ctx)] = ctx
+        for ctx in ctxs.values():
+            if hasattr(ctx, '_drain'):
+                ctx._drain()
+            ctx._evict_all()                 # live layouts re-upload once, on their next call
 
     def _load_templates(self) -> None:
         for g in self._groups:
@@ -1634,6 +1673,11 @@ class TimeDomainFilterBank:
         from . import _Deferred
         import os
         global _BATCH_TOKEN
+        trial = _trial_begin(jobs)
+        if trial is not None:
+            # A block-size trial batch (warm-up only): banks one at a time, each timed.
+            res = _trial_run(jobs, trial)
+            return res if wait else [_Deferred(lambda r=r: r) for r in res]
         _BATCH_TOKEN += 1
         # On Vulkan the deferred submissions are also fused: one command buffer runs every
         # job's forward transforms, then every job's first tier, ..., one barrier per phase
@@ -1662,7 +1706,6 @@ class TimeDomainFilterBank:
                     for c in closes:
                         c()
         out = [None] * len(jobs)
-        trial = _trial_begin(jobs)
         # Single-template (follow-up) calls on a GPU bank, per template group: one forward
         # dispatch and one submission for all of them instead of a few submissions each.
         done = TimeDomainFilterBank._items_batch(jobs, out)
@@ -1679,26 +1722,8 @@ class TimeDomainFilterBank:
             if close is not None:
                 close()
         if not wait:
-            res = [r if isinstance(r, _Deferred) else _Deferred(lambda r=r: r) for r in out]
-            if trial is not None:
-                # the batch's time runs to its last result's collection
-                pending = {"n": len(res)}
-                def wrap(d):
-                    seen = [False]
-                    def get(d=d):
-                        v = d.result()
-                        if not seen[0]:
-                            seen[0] = True
-                            pending["n"] -= 1
-                            if pending["n"] == 0:
-                                _trial_end(trial)
-                        return v
-                    return _Deferred(get)
-                res = [wrap(d) for d in res]
-            return res
-        res = [r.result() if isinstance(r, _Deferred) else r for r in out]
-        _trial_end(trial)
-        return res
+            return [r if isinstance(r, _Deferred) else _Deferred(lambda r=r: r) for r in out]
+        return [r.result() if isinstance(r, _Deferred) else r for r in out]
 
     @staticmethod
     def _items_batch(jobs, out):

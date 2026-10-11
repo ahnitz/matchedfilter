@@ -6,28 +6,31 @@ from matchedfilter import TimeDomainFilterBank
 from matchedfilter import time_domain as td
 
 
-def _run(timings, need=1):
-    """Feed per-rank seconds (work 1) through a fresh trial in its own schedule; return the lock."""
+def _run(timings, nbanks=8, seed=0):
+    """Per-rank per-bank seconds (bank b's base time times the rank's factor, with 5% noise)
+    through a fresh trial in its own schedule; return the lock."""
+    rng = np.random.default_rng(seed)
+    base = rng.uniform(0.5, 5.0, nbanks)                 # banks differ widely in size
     tr = td._BlockTrials()
-    feeds = {r: list(v) for r, v in timings.items()}
-    for _ in range(64):
+    for _ in range(16):
         if tr.winner("k") is not None:
             break
         r = tr.rank_for("k", len(timings))
-        tr.record("k", r, feeds[r].pop(0), 1.0)
+        tr.record("k", r, {b: base[b] * timings[r] * rng.normal(1.0, 0.05) for b in range(nbanks)})
     return tr.winner("k")
 
 
 @pytest.mark.parametrize("slower", [1.5, 2.0, 10.0])
 def test_a_clearly_worse_block_size_is_never_locked(slower):
     # either rank may be the bad one: the measured faster wins whatever the model's order
-    assert _run({0: [1.0] * 4, 1: [slower] * 4}) == 0
-    assert _run({0: [slower] * 4, 1: [1.0] * 4}) == 1
+    for seed in range(20):
+        assert _run({0: 1.0, 1: slower}, seed=seed) == 0
+        assert _run({0: slower, 1: 1.0}, seed=seed) == 1
 
 
 def test_a_tie_keeps_the_models_choice():
-    assert _run({0: [1.00] * 4, 1: [0.97] * 4}) == 0          # inside gatechain.TIE
-    assert _run({0: [1.00] * 4, 1: [0.80] * 4}) == 1          # outside it
+    assert _run({0: 1.00, 1: 0.99}) == 0                # inside gatechain.TIE
+    assert _run({0: 1.00, 1: 0.80}) == 1                # outside it
 
 
 def _inspiral_bank(seed=5):
