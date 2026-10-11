@@ -14,6 +14,7 @@ probe streams float4 and is checked against the read+write it claims.
 import ctypes
 import sys
 import time
+from pathlib import Path
 
 import numpy as np
 
@@ -253,11 +254,11 @@ def flops_per_pair(n):
     they are not negligible at these lengths and quietly dropping them
     would flatter the achieved rate by about 15%.
     """
-    import math
-    product = 6 * n                       # data * conj(template), complex
-    inverse = 5 * n * math.log2(n)        # the transform
-    peak = 3 * n                          # |z|^2 and the running max
-    return product + inverse + peak
+    # product 6n (data * conj(template)), inverse 5 n log2 n, peak 3n (|z|^2, running max):
+    # the one shared work model, matchedfilter._roofline.pair_flops.
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "python"))
+    from matchedfilter._roofline import pair_flops
+    return pair_flops(n)
 
 
 def filter_against(fma, add, bw):

@@ -2044,6 +2044,15 @@ class TimeDomainFilterBank:
                     self._correlate_group(g, ser, st, t0, nt, dest)
                     keep = _intersect_runs(_interval_runs(S, W[:, 0], W[:, 1]),
                                            _interval_runs(S, b0[hit], b1[hit]))
+                    # Work counters for matchedfilter._roofline: per block length, the
+                    # blocks transformed, (block, template) products and inverses, the
+                    # output samples the windows ask for, and template spectra read.
+                    wk = self.__dict__.setdefault('_corr_work', {}).setdefault(
+                        g.n, dict(blocks=0, pairs=0, out_samples=0, tmpl_values=0))
+                    wk['blocks'] += int(st.size)
+                    wk['pairs'] += int(st.size) * nt
+                    wk['out_samples'] += int((keep[:, 1] - keep[:, 0]).sum()) * nt
+                    wk['tmpl_values'] += nt * int(np.shape(g.spectra)[1])
         # Zero the complement by contiguous runs. Not dest[:, ~keep] = 0: boolean indexing
         # along axis 1 thrashes one cache set once 17+ rows sit 2^20 samples apart (see
         # _correlate_group); 27 rows took ~400 ms against ~10 ms by runs.
@@ -2122,6 +2131,9 @@ class TimeDomainFilterBank:
         S = ser.size
         nt = self.n_templates
         W = _normalize_windows(windows, S)
+        # Input samples the windows read (matchedfilter._roofline), once per call.
+        self._corr_in_samples = (getattr(self, '_corr_in_samples', 0)
+                                 + int((W[:, 1] - W[:, 0]).sum()))
 
         if template_index is not None:
             if template_index < 0 or template_index >= nt:
