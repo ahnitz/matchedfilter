@@ -72,8 +72,11 @@ def ceilings(reps=10):
     res = {}
     for op in ("fma", "add"):
         best = 0.0
-        for w in (16, 32):
-            pso = p.pipeline(gpu_roofline.chain_src(w, op))
+        # Few chains, unrolled: on the M2, 8 chains x 4 reach 3.2 TFLOP/s (90% of the vendor
+        # figure); 32 chains un-unrolled plateau at 1.55 (register pressure), which this probe
+        # once reported as the ceiling.
+        for w, u in ((8, 4), (16, 2)):
+            pso = p.pipeline(gpu_roofline.chain_src(w, op, u))
 
             # chain_src binds out at 0 and iters at 1, not the library's layout
             def run(e, pso=pso):
@@ -89,7 +92,7 @@ def ceilings(reps=10):
                        args=(M._MTLSize(groups, 1, 1), M._MTLSize(threads, 1, 1)),
                        argtypes=(M._MTLSize, M._MTLSize))
             t = min(_timed(ctx, run) for _ in range(reps))
-            best = max(best, threads * groups * iters * w * (2 if op == "fma" else 1) / t)
+            best = max(best, threads * groups * iters * w * u * (2 if op == "fma" else 1) / t)
         res[op] = best
     nf4 = (256 << 20) // 16
     src, dst = M._Buffer(ctx, nf4 * 16), M._Buffer(ctx, nf4 * 16)
