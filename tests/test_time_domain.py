@@ -1002,7 +1002,7 @@ def test_gpu_follow_up_batch_matches_direct_calls(monkeypatch, device_followups)
     if ctx is not None and hasattr(type(ctx), "peaks_items"):      # any backend's
         orig = type(ctx).peaks_items
         monkeypatch.setattr(type(ctx), "peaks_items",
-                            lambda self, *a, **k: used.append(1) or items_calls.append(1)
+                            lambda self, *a, **k: used.append(1) or items_calls.append(len(a[3]))
                             or orig(self, *a, **k))
     try:
         from matchedfilter import _vkfollowup
@@ -1024,8 +1024,8 @@ def test_gpu_follow_up_batch_matches_direct_calls(monkeypatch, device_followups)
     if bank._groups[0].plan._gpu is not None and hasattr(bank._groups[0].plan._gpu, "peaks_items"):
         assert used, "the batched follow-up path was not taken"
         assert len(used) <= len(bank._groups), "one item submission per template group"
-    if items_calls and hasattr(type(ctx), "_build_pipeline"):
-        # Vulkan peaks_items (the host follow-up path): the items share one descriptor set
+    if max(items_calls, default=0) > 1 and hasattr(type(ctx), "_build_pipeline"):
+        # Vulkan peaks_items over several items (host follow-up path): they share one descriptor set
         # per kernel, rows chosen by dynamic offsets.
         assert any(dynamic), "peaks_items did not take the dynamic-offset path"
 

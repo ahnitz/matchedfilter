@@ -2723,7 +2723,9 @@ class Context(InputUploads):
 
     def _wait_queues(self):
         """Wait for every queue this context submits to. Pipelined slots run on queues 1-3, so
-        waiting on queue 0 alone let a recording be freed while another queue executed it."""
+        waiting on queue 0 alone let a recording be freed while another queue executed it.
+        An open follow-up group is submitted first: an idle queue says nothing of it."""
+        _flush_items(self._device_state)
         for q in self.queues:
             _check(self.vk.vkQueueWaitIdle(q), "vkQueueWaitIdle")
 
