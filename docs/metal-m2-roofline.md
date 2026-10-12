@@ -8,6 +8,69 @@ average 2-4 from system daemons), warm, with outputs checked against the CPU.
 Sections 1-8 are phase 1, measured on the old generic bench data. **Phase 2 (section 0) is on
 realistic data and supersedes their bench numbers.**
 
+## 0c. Roofline fraction (2026-10-11, branch parity/metal-roofline)
+
+Metric: `tools/ladder.py --roofline` (python/matchedfilter/_roofline.py), bank3, H1 profiles,
+`--tops 1 --pure --segments 8 --warmup 3`, one MF_COST_FILE per variant primed by a 14-segment
+run, 3 alternating rounds. The Metal head run used the base-primed cost file (see the
+autotune note below), so both runs execute the same layout, chain and work.
+
+| | segment ms (3 rounds) | fraction | GPU busy |
+|---|---:|---:|---:|
+| Metal, origin/main 44e60d2 | 115.5 / 113.6 / 113.7 | 27.5-28.0% | 86-87% |
+| Metal, branch | 105.6 / 106.4 / 105.6 | 29.9-30.1% | 86% |
+| ARM CPU (1 P-core), origin/main | 1271.5 / 1272.4 / 1268.5 | 32.0-32.1% | |
+| ARM CPU, branch | 1090.7 / 1091.6 / 1091.8 | 37.3% | |
+
+Peaks, verified on the hardware (the model in _roofline.py is unchanged):
+- GPU: 8 independent FMA chains x 4 unrolled per iteration reach 3.23 TFLOP/s fp32 and
+  3.33 fp16, 90-93% of the 3.58 vendor figure; fp16 runs at the fp32 rate. The 1.55 TFLOP/s
+  of section 1 was the probe's own limit (32 chains, no unroll); tools/metal_roofline.py now
+  sweeps (8, 4) and (16, 2).
+- One P-core, 20 independent chains in inline asm: FMLA .4s 111.5, FMLA .8h 223.0, MLA .8h
+  223.1, SQRDMULH/SQRDMLAH/SQADD .8h and FADD .8h all at 4 per cycle: the 4-pipe model holds
+  for every int16 and fp16 op the screen and gate use.
+- Roofline accounting fix: behind the int16 screen the CPU's tier 0 is the pooled FP32 pass
+  over the screen's survivors, now counted at the fp32 peak (was fp16).
+
+What changed, and what bound each step:
+- CPU, gathers (memory/latency): lanes_transpose had AVX paths only, so every pooled tier and
+  refine gathered rows one scalar at a time on ARM (~16% of samples). NEON 4x4 transpose:
+  tier0 164 -> 107 ms, tier1 220 -> 144 ms per segment.
+- CPU, Q15 screen (issue): complex products as SQRDMLAH/SQRDMLSH: 513 -> 479 ms per segment.
+  The screen is now at 51% of the int16 peak; it is add-bound (FFT butterflies), so the
+  FMA-peak ceiling for it is near 60%.
+- Metal, tier-0 gate (issue): deleting parts of the band-256 kernel put the lag election at
+  ~25%, the energy at 11%, the per-register overflow test at 7%, the read-back at 5%; the
+  FFT alone runs at 66% of peak. peakTwoGate reports the bound from packed half2 maxima
+  (no election, overflow through the energy's exponent): kernel 1.249 -> 1.116 ms.
+- Metal, later gate tiers: maximum only (no threadgroup-atomic election): tier-1 kernel
+  1.524 -> 1.311 ms (8-bank replay).
+
+Falsified (kept out):
+- Coarse gate electing only on a hit (branch over a rare condition): slower than the
+  original once >2% of pairs hit (divergence and the select chains in the branch); with the
+  host passing threshold 0 every pair hit, +25% on real data.
+- Writing the elected value from the owning lane by selects instead of the stage read-back:
+  1.249 -> 1.327 ms; barriers on a one-SIMD threadgroup are cheap on the M2.
+- Coarse gate listing its own survivors (no compaction pass): 6 alternating ladder rounds,
+  106.1 vs 106.6 ms.
+- All-lag maximum instead of the energy in the bound: -6% kernel, +7% tier-1 survivors.
+- More pairs per threadgroup at band 256 (p4/p8/p16 t2): 8.46 / 8.85 / 9.90 ms against
+  8.30 for p2 (occupancy is not the limit).
+
+Where the time goes now (Metal, device ms per segment, replay): tier-0 gate ~37, fine
+forward 13.7 (57% of bandwidth), middle 15.8 (full_series_8192 at ~14% of FMA / 36% of the
+bandwidth-bound ideal), tier 1 ~8.5, refine 4.5, pack 2.7, compaction 1.6, follow-ups 2.4
+device of 8.5 wall (host). CPU: q15 479, tier1 147, forward 150 (FFTW PATIENT does a
+2048-point complex transform in 3.0 us on this core against ~4.4 us here), middle 139,
+tier0 108 ms.
+
+Autotune hazard: with a fresh cost file the block-size trial (2 samples per rank, ranks run
+in sequence while chain trials are still moving) locked n=4096 for the head build (rank 1
+median 5.4% under rank 0, past the 5% tie); its steady segment is 142 ms against 106 for
+n=2048. The base build's trial kept 2048 (2.4%).
+
 ## 0b. Phase 4 (2026-10-09)
 
 | item | result |
