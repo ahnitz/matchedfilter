@@ -39,6 +39,9 @@ typedef struct ap_accel ap_accel;
 ap_accel *ap_accel_create(size_t n);
 void ap_accel_destroy(ap_accel *a);
 void ap_accel_forward(ap_accel *a, const float *src, size_t have, float scale, float *out);
+int ap_accel_block(ap_accel *a, const float *src, size_t have, float scale);
+int ap_accel_corr(ap_accel *a, const float *dr, const float *di, const float *tr,
+                  const float *ti, size_t lo, size_t len, float *out);
 
 size_t ap_nbins(const ap_plan *p, size_t binsize, size_t start, size_t end);
 
