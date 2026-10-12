@@ -1143,6 +1143,92 @@ def pick_stable(items, cost, key):
     return min((x for x in items if cost(x) <= lo + TIE * abs(lo)), key=key)
 
 
+# ---- the one rule every measured choice follows ---------------------------------------
+#
+# Block-size trials (time_domain._BlockTrials), Q15 screen trials, and chain trials on the CPU
+# (per call) and GPU (per batch) all decide with measured_choice and re-check with
+# steady_disagrees. History: M2 locked n=4096 on two samples 5.4% faster than n=2048 -- past
+# TIE, inside the noise -- and ran 34% slower in steady state; dev2 locked the Q15 screen off
+# on a 6% "win" and ran 5% slower without it.
+
+#: A candidate beats the model's choice only by more than TIE and by more than Z standard
+#: errors of the difference of the two medians.
+CHOICE_Z = 2.0
+#: Steady-state re-check: the winner's median over RECHECK_N steady samples more than
+#: RECHECK_FRAC above the trial's best median reopens the choice -- once per choice.
+RECHECK_N = 5
+RECHECK_FRAC = 0.15
+
+
+def sample_spread(v):
+    """Standard deviation of samples, conservatively: the larger of the MAD-based and the
+    plain estimate. MAD alone reads 0 when half the samples tie (timer quantisation, a
+    repeated cache state), which made a noisy contest look clear; an outlier inflating the
+    plain one only asks for more samples or lets the model's choice stand."""
+    v = np.asarray(v, float)
+    if v.size < 2:
+        return float("inf")
+    mad = 1.4826 * float(np.median(np.abs(v - np.median(v))))
+    return max(mad, float(np.std(v, ddof=1)))
+
+
+def measured_choice(samples, model, cap, tie=None, z=None):
+    """Decide a measured choice from samples {candidate: [cost, ...]} (lower is better).
+
+    Returns (winner, more): winner is the candidate to lock, or None while more samples are
+    needed, in which case `more` maps the candidates to measure further to the sample count
+    each needs. The fastest median wins only if it is more than `tie` (TIE) below the model's
+    candidate's AND the gap exceeds `z` (CHOICE_Z) standard errors of the two medians'
+    difference; an unclear contest asks for one more sample of both, up to `cap` each, then
+    the model's choice stands. A candidate missing from samples is the model's when model is
+    None (the first key)."""
+    tie = TIE if tie is None else tie
+    z = CHOICE_Z if z is None else z
+    if model not in samples:
+        model = next(iter(samples))
+    med = {c: float(np.median(v)) for c, v in samples.items() if len(v)}
+    if model not in med:
+        return None, {model: 1}
+    best = min(med, key=lambda c: (med[c], c != model))
+    if not np.isfinite(med[model]) and np.isfinite(med[best]):
+        return best, {}                 # the model's candidate is unusable (priced at inf)
+    if best == model or not med[best] < med[model] * (1.0 - tie):
+        return model, {}
+    a, b = samples[model], samples[best]
+    se = float(np.sqrt(sample_spread(a) ** 2 / len(a) + sample_spread(b) ** 2 / len(b)))
+    if med[model] - med[best] > z * se:
+        return best, {}
+    if min(len(a), len(b)) < cap:
+        return None, {model: len(a) + 1, best: len(b) + 1}
+    return model, {}
+
+
+def observe_steady(state, value, on_reopen):
+    """One steady-state sample of a locked choice kept in `state` (a dict with "winner",
+    "median" {candidate: trial median}, "steady" and "rechecked"). Calls on_reopen() and
+    returns True when the steady samples contradict the trial -- once per choice."""
+    if state.get("winner") is None or not state.get("median") or state.get("rechecked"):
+        return False
+    st = state.setdefault("steady", [])
+    st.append(float(value))
+    if not steady_disagrees(st, state["median"], state["winner"]):
+        return False
+    state["rechecked"] = True
+    on_reopen()
+    return True
+
+
+def steady_disagrees(steady, medians, winner, n=None, frac=None):
+    """Whether steady-state samples of a locked `winner` (the last n) contradict the trial
+    that chose it: their median more than frac above the trial's best median."""
+    n = RECHECK_N if n is None else n
+    frac = RECHECK_FRAC if frac is None else frac
+    if len(steady) < n or not medians:
+        return False
+    ref = min(float(v) for v in medians.values())
+    return float(np.median(steady[-n:])) > ref * (1.0 + frac)
+
+
 _REFINE_BLOCKS = {}
 
 
