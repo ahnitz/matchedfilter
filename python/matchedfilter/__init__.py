@@ -1201,6 +1201,22 @@ class MatchedFilter:
         nb = layout.nbins
         need = nblk * nt * nb
         shape = (nblk, nt, nb)
+        ep = self._execution_plan()
+        if (raw and threshold > 0 and getattr(self, "_want_sparse", False)
+                and hasattr(ep, "run_series_sparse")):
+            # Sparse (time_domain asks with _want_sparse): the engine writes peaks only for
+            # rows a tier passed, and only those come back -- no dense table written,
+            # copied or scanned (at a detection threshold almost every row is empty).
+            cnt = getattr(self, "_scnt", None)
+            if cnt is None or cnt.size < nblk * nt:
+                cnt = self._scnt = np.empty(nblk * nt, dtype=np.int32)
+            fl, ix, vl, tot = ep.run_series_sparse(ser, st, ws, we, t0, nt, binsize,
+                                                   float(threshold), cnt[:nblk * nt])
+            self._last_n_triggers = tot
+            sp = _SparsePeaks(shape, np.frombuffer(fl, np.int64), np.frombuffer(ix, np.int64),
+                              np.frombuffer(vl, np.complex64))
+            return sp if layout.order is None else _SparsePeaks.combine([(0, sp)], shape,
+                                                                        layout.order)
         if raw:
             sb = self._sbuf
             if sb is None or sb[0] != shape:
