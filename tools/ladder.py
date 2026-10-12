@@ -262,6 +262,16 @@ def drive_folded(gens, args, first, steady, counts):
     report_counts(counts, plan)
 
 
+#: Block-size trials open when the steady segments began (tools report: a trial that locks
+#: during them still means the steady timings span layout switches).
+_STEADY_OPEN_TRIALS = set()
+
+
+def _note_open_trials():
+    from matchedfilter import time_domain as _td
+    _STEADY_OPEN_TRIALS.update(_td._BLOCK_TRIALS.open_keys())
+
+
 def run_device(device, tops, args, seed):
     rng = np.random.default_rng(seed)
     S = args.seg_samples
@@ -464,6 +474,7 @@ def run_device(device, tops, args, seed):
                 for seg in range(args.segments + depth):
                     sampler.on = args.warmup <= seg
                     if seg == args.warmup:
+                        _note_open_trials()
                         roof_snap("mid")
                         if args.warmup == 0:
                             roof_snap("fine")
@@ -556,6 +567,8 @@ def run_device(device, tops, args, seed):
                 for seg in range(args.segments):
                     tm = first if seg < args.warmup else steady
                     bsampler.mark(args.warmup <= seg)
+                    if seg == args.warmup:
+                        _note_open_trials()
                     if seg == args.warmup and not fold:
                         roof_snap("mid")             # the middle's work is counted at submit
                         if not inflight:
@@ -922,6 +935,9 @@ def main():
         print(f"  {stage}: device {dev / 1e3:.3f}s of wall {report['steady_s'][stage]:.3f}s; " +
               ", ".join(f"{l} {v[0]}x {v[1]:.1f}ms" for l, v in sorted(d.items(), key=lambda x: -x[1][1])))
     from matchedfilter import time_domain as _td
+    for key in sorted(set(_STEADY_OPEN_TRIALS) - set(_td._BLOCK_TRIALS.unlocked())):
+        print(f"  WARNING: block-size trial {key} locked during the steady segments; these "
+              "timings span layout switches -- rerun with the same MF_COST_FILE")
     for key in _td._BLOCK_TRIALS.unlocked():
         # The steady segments ran inside a block-size trial: layouts switched between them,
         # so times and roofline counts are not one layout's. The samples are kept in

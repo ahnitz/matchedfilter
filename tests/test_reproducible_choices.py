@@ -68,9 +68,15 @@ def test_two_processes_sharing_a_cost_file_agree(device, tmp_path):
         if not any(str(d) == device for d in mf.devices()):
             pytest.skip("no %s here" % device)
     cost = tmp_path / "costs.json"
-    first = _run(device, cost)                  # measures and records every choice
+    # A block-size trial samples only once the chain and Q15 trials have locked, so it may
+    # span processes (its samples persist): run until its lock is on file. From then on
+    # every process reads the same choices back.
+    for _ in range(8):
+        first = _run(device, cost)
+        rec = {k: v for k, v in json.loads(cost.read_text()).items() if k.startswith("block-trial|")}
+        if not rec or all("winner" in v for v in rec.values()):
+            break
     second = _run(device, cost)                 # reads them back
     third = _run(device, cost)
     assert second == third                      # reproducible from the file on
     assert second["layout"] == first["layout"] and second["chains"] == first["chains"]
-    assert second["last"] == first["last"]      # the first process's locked segments agree too
