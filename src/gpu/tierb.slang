@@ -631,6 +631,17 @@ void innermost(inout C r[RADIX])
 #ifndef SPLIT_STAGE
 #define SPLIT_STAGE 0
 #endif
+#if defined(MF_METAL)
+//: MF_SIMD_EXCHANGE (Metal): SIMD-scoped barriers in exchange levels confined to one SIMD
+//: group (the split-stage exchange). A threadgroup barrier still orders the first write
+//: after a wider level.
+#ifndef MF_SIMD_EXCHANGE
+#define MF_SIMD_EXCHANGE 1
+#endif
+__target_intrinsic(metal, "simdgroup_barrier(mem_flags::mem_threadgroup)")
+void mfSimdBarrier();
+static const uint FFT_LGR_EX = (RADIX == 16) ? 4u : ((RADIX == 32) ? 5u : 6u);
+#endif
 #if SPLIT_STAGE && !COARSE16
 #if (2 * LDS_CAP) < (NLEN)
 #error "SPLIT_STAGE needs staging for R*WG floats"
@@ -647,6 +658,23 @@ void exchange(inout C r[RADIX], uint lgLen, uint lgSpan,
         src[d] = (rem >> lgSpan) * WG + (b << lgSpan) + (rem & spanMask);
     }
     float xr[RADIX];
+#if defined(MF_METAL) && MF_SIMD_EXCHANGE
+    // A level whose blocks of TB threads sit inside one SIMD group reads only columns its
+    // own SIMD group wrote (stage column = thread), so its barriers can be SIMD-scoped.
+    // The first is not, when the level before was wider: other SIMD groups may still be
+    // reading this group's columns from it. (The falsified attempt of phase 4 scoped
+    // every barrier, that first one included.)
+    const bool local = TB <= mfSubgroupSize;
+    const bool localBefore = (TB << FFT_LGR_EX) <= mfSubgroupSize;
+    if (localBefore) mfSimdBarrier(); else GroupMemoryBarrierWithGroupSync();
+    MF_UNROLL for (uint j = 0; j < R; ++j) stg[_stgBase + j * WG + _tid] = asuint(r[j].x);
+    if (local) mfSimdBarrier(); else GroupMemoryBarrierWithGroupSync();
+    MF_UNROLL for (uint d = 0; d < R; ++d) xr[d] = asfloat(stg[_stgBase + src[d]]);
+    if (local) mfSimdBarrier(); else GroupMemoryBarrierWithGroupSync();
+    MF_UNROLL for (uint j = 0; j < R; ++j) stg[_stgBase + j * WG + _tid] = asuint(r[j].y);
+    if (local) mfSimdBarrier(); else GroupMemoryBarrierWithGroupSync();
+    MF_UNROLL for (uint d = 0; d < R; ++d) r[d] = C(xr[d], asfloat(stg[_stgBase + src[d]]));
+#else
     GroupMemoryBarrierWithGroupSync();
     MF_UNROLL for (uint j = 0; j < R; ++j) stg[_stgBase + j * WG + _tid] = asuint(r[j].x);
     GroupMemoryBarrierWithGroupSync();
@@ -655,6 +683,7 @@ void exchange(inout C r[RADIX], uint lgLen, uint lgSpan,
     MF_UNROLL for (uint j = 0; j < R; ++j) stg[_stgBase + j * WG + _tid] = asuint(r[j].y);
     GroupMemoryBarrierWithGroupSync();
     MF_UNROLL for (uint d = 0; d < R; ++d) r[d] = C(xr[d], asfloat(stg[_stgBase + src[d]]));
+#endif
 }
 #else
 void exchange(inout C r[RADIX], uint lgLen, uint lgSpan,
