@@ -816,6 +816,10 @@ static PyObject *HMF_set_q15(HMFObject *self,PyObject *args){
   int on; if(!PyArg_ParseTuple(args,"p",&on)) return NULL;
   return PyBool_FromLong(ap_hmf_set_q15(self->p,on)==0);
 }
+static PyObject *HMF_set_platform_fft(HMFObject *self,PyObject *args){
+  int on; if(!PyArg_ParseTuple(args,"p",&on)) return NULL;
+  return PyBool_FromLong(ap_hmf_set_platform_fft(self->p,on)==0);
+}
 static PyObject *HMF_q15_stats(HMFObject *self,PyObject *unused){
   (void)unused; long passed=0; unsigned long long ticks=0;
   ap_hmf_q15_stats(self->p,&passed,&ticks);
@@ -837,6 +841,7 @@ static PyObject *HMF_set_hermitian(HMFObject *self,PyObject *args){
 
 static PyMethodDef HMF_methods[]={
   {"series_group",(PyCFunction)HMF_series_group,METH_NOARGS,"actual series block group"},
+  {"set_platform_fft",(PyCFunction)HMF_set_platform_fft,METH_VARARGS,"set_platform_fft(on) -> True if block forwards now run through the platform FFT"},
   {"set_q15",(PyCFunction)HMF_set_q15,METH_VARARGS,"set_q15(on) -> True if the first tier now runs behind the Q15 screen"},
   {"q15_stats",(PyCFunction)HMF_q15_stats,METH_NOARGS,"q15_stats() -> (on, pairs passed to the float tier, screen ticks)"},
   {"set_data",(PyCFunction)HMF_set_data,METH_VARARGS,"set_data(i, buffer)"},
