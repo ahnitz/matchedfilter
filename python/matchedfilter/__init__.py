@@ -2577,13 +2577,34 @@ class HierarchicalFilter(MatchedFilter):
     def _q15_trial_key(self):
         return (self.n, float(self._fs_snr or self.snr), float(self.fd), tuple(self._chain), str(self.device))
 
+    @staticmethod
+    def _q15_lock_key(tkey):
+        n, snr, fd, chain, device = tkey
+        return "q15-trial|%d|%g|%g|%s|%s" % (n, snr, fd, ",".join(str(int(b)) for b in chain), device)
+
+    def _q15_trial(self):
+        """This plan's Q15 trial (caller holds _AUTOTUNE_LOCK), adopting a winner an earlier
+        process kept in MF_COST_FILE: per machine, like chain and block-size locks, so a
+        process does not re-alternate the screen on its first calls -- which would also keep
+        every block-size trial from sampling (time_domain._bank_calibrating)."""
+        tkey = self._q15_trial_key()
+        tr = _Q15_TRIALS.get(tkey)
+        if tr is None:
+            tr = _Q15_TRIALS[tkey] = {"samples": {False: [], True: []}, "winner": None}
+            path = _gatechain._cost_file()
+            if path is not None:
+                rec = _gatechain._load_cost_file(path).get(self._q15_lock_key(tkey))
+                if isinstance(rec, dict) and "q15" in rec:
+                    tr["winner"] = bool(rec["q15"])
+        return tr
+
     def _q15_before_call(self):
         """Pick the screen setting for this call; True when the call is a timed sample."""
         if (self.device.kind != "cpu" or self._mf is None or self._chain is None
                 or not _autotune_enabled() or not _q15_available(self._chain[0])):
             return False
         with _AUTOTUNE_LOCK:
-            tr = _Q15_TRIALS.setdefault(self._q15_trial_key(), {"samples": {False: [], True: []}, "winner": None})
+            tr = self._q15_trial()
             win = tr["winner"]
             want = win if win is not None else len(tr["samples"][True]) < len(tr["samples"][False])
         if bool(want) != bool(self._q15):
@@ -2592,16 +2613,48 @@ class HierarchicalFilter(MatchedFilter):
                 self._mf.set_q15(False)
         return win is None
 
+    def calibrating(self):
+        """Whether this plan is still settling a measured choice -- its chain trial, or the Q15
+        screen trial of its chain -- so that its calls alternate kernels. A block-size trial
+        does not sample batches while any of its plans is (time_domain._bank_calibrating)."""
+        if self._chain is None or self._chain_trial is not None:
+            return True
+        if (self.device.kind == "cpu" and self._mf is not None and _autotune_enabled()
+                and _q15_available(self._chain[0])):
+            with _AUTOTUNE_LOCK:
+                tr = self._q15_trial()
+            return tr["winner"] is None
+        return False
+
     def _q15_record(self, dt, pairs):
         with _AUTOTUNE_LOCK:
             tr = _Q15_TRIALS.get(self._q15_trial_key())
             if tr is None or tr["winner"] is not None or pairs <= 0:
                 return
             tr["samples"][bool(self._q15)].append(dt / pairs)
-            need = int(os.environ.get("MF_CHAIN_TRIALS", _CHAIN_TRIALS_PER_CAND))
+            need = max(int(os.environ.get("MF_CHAIN_TRIALS", _CHAIN_TRIALS_PER_CAND)),
+                       tr.get("need", 0))
             if all(len(v) >= need for v in tr["samples"].values()):
                 med = {k: float(np.median(v)) for k, v in tr["samples"].items()}
-                tr["winner"] = med[True] < med[False]
+                # The faster side wins only clear of TIE and of the samples' own noise; a tie
+                # keeps the cost model's choice (a 6% "win" on noisy samples locked the
+                # screen off on dev2, and steady state ran 5% slower without it).
+                from .time_domain import _spread, _BLOCK_TRIAL_Z
+                fast = med[True] < med[False]
+                lo, hi = (True, False) if fast else (False, True)
+                se = float(np.sqrt(sum(_spread(tr["samples"][k]) ** 2 / len(tr["samples"][k])
+                                       for k in (True, False))))
+                past_tie = med[lo] < med[hi] * (1.0 - _gatechain.TIE)
+                clear = past_tie and med[hi] - med[lo] > _BLOCK_TRIAL_Z * se
+                if past_tie and not clear and need < 2 * _CHAIN_TRIALS_PER_CAND:
+                    tr["need"] = need + 2          # faster, inside the noise: sample further
+                    return
+                tr["winner"] = fast if clear else bool(getattr(self, "_q15_pref", False))
+                path = _gatechain._cost_file()
+                if path is not None:
+                    _gatechain._store_cost(path, self._q15_lock_key(self._q15_trial_key()),
+                                           {"q15": bool(tr["winner"]),
+                                            "median": {str(k): v for k, v in med.items()}})
                 _log_autotune("Q15-TRIAL chain=%s locked q15=%s  median s/pair %s", self._chain,
                               tr["winner"], {k: "%.3g" % v for k, v in med.items()})
 
