@@ -1795,15 +1795,21 @@ class TimeDomainFilterBank:
 
         return _Deferred(build) if pending else build()
 
-    def empty_shared(self, shape, dtype=np.complex64):
+    def empty_shared(self, shape, dtype=np.complex64, input=False):
         """An array in this bank's device memory (host-readable), for outputs a caller reuses:
         correlate_series(out=...) writes such an array in place, and a fine bank on the same
-        device reads its rows in place. On a CPU bank, ordinary page-aligned memory."""
+        device reads its rows in place. On a CPU bank, ordinary page-aligned memory.
+
+        input=True: an input series the host rewrites before every call (a segment's data)
+        and this bank reads in place: the backend may keep it in host memory mapped by the
+        device rather than migrating it there and back each call."""
         self._groups
         for g in self._groups:
             plan = g.get_correlation_plan() if self.engine == 'corr' else g.plan
             gpu = getattr(plan, '_gpu', None)
             if gpu is not None:
+                if input:
+                    return gpu.empty_shared(tuple(shape), dtype, host_input=True)
                 return gpu.empty_shared(tuple(shape), dtype, readback=True)
         return _page_aligned_empty(tuple(shape), dtype)
 
@@ -2096,6 +2102,16 @@ class TimeDomainFilterBank:
         for a, b in self._block_coverage(S, st, lo, hi):
             dest[:, a:b] = ws[:, a:b]
 
+    def _add_corr_work(self, n, d):
+        """Middle-stage work counters (matchedfilter._roofline), per block length n."""
+        wk = self.__dict__.setdefault('_corr_work', {}).setdefault(
+            n, dict(blocks=0, pairs=0, out_samples=0, tmpl_values=0))
+        for k, v in d.items():
+            wk[k] += v
+
+    def _add_corr_in(self, samples):
+        self._corr_in_samples = getattr(self, '_corr_in_samples', 0) + samples
+
     def _correlate_windows(self, g: "_TemplateGroup", ser: np.ndarray, W: np.ndarray,
                            t0: int, nt: int, dest: np.ndarray, settle=None) -> None:
         """Fill dest (nt, S) for group rows [t0, t0+nt): the correlation inside the
@@ -2125,12 +2141,10 @@ class TimeDomainFilterBank:
                     # Work counters for matchedfilter._roofline: per block length, the
                     # blocks transformed, (block, template) products and inverses, the
                     # output samples the windows ask for, and template spectra read.
-                    wk = self.__dict__.setdefault('_corr_work', {}).setdefault(
-                        g.n, dict(blocks=0, pairs=0, out_samples=0, tmpl_values=0))
-                    wk['blocks'] += int(st.size)
-                    wk['pairs'] += int(st.size) * nt
-                    wk['out_samples'] += int((keep[:, 1] - keep[:, 0]).sum()) * nt
-                    wk['tmpl_values'] += nt * int(np.shape(g.spectra)[1])
+                    _count_work(self._add_corr_work, g.n, dict(
+                        blocks=int(st.size), pairs=int(st.size) * nt,
+                        out_samples=int((keep[:, 1] - keep[:, 0]).sum()) * nt,
+                        tmpl_values=nt * int(np.shape(g.spectra)[1])))
         # Zero the complement by contiguous runs. Not dest[:, ~keep] = 0: boolean indexing
         # along axis 1 thrashes one cache set once 17+ rows sit 2^20 samples apart (see
         # _correlate_group); 27 rows took ~400 ms against ~10 ms by runs.
@@ -2210,8 +2224,7 @@ class TimeDomainFilterBank:
         nt = self.n_templates
         W = _normalize_windows(windows, S)
         # Input samples the windows read (matchedfilter._roofline), once per call.
-        self._corr_in_samples = (getattr(self, '_corr_in_samples', 0)
-                                 + int((W[:, 1] - W[:, 0]).sum()))
+        _count_work(self._add_corr_in, int((W[:, 1] - W[:, 0]).sum()))
 
         if template_index is not None:
             if template_index < 0 or template_index >= nt:
@@ -2387,6 +2400,25 @@ class TimeDomainFilterBank:
 
 from ._gpuhost import FollowupSpec                        # noqa: E402
 FollowUp = FollowupSpec                                       # the name the CUDA track used
+
+
+#: Work-counter logs being recorded (SegmentPlan capture). A counter increment made while a
+#: log is open is recorded instead of applied: captured work has not run. The graph applies
+#: the log each time it runs (the capture's own first run and every replay); a failed capture
+#: drops it, and the fallback that runs the work counts it.
+_WORK_LOGS = []
+
+
+def _count_work(fn, *args):
+    if _WORK_LOGS:
+        _WORK_LOGS[-1].append((fn, args))
+    else:
+        fn(*args)
+
+
+def _replay_work(log):
+    for fn, args in log or ():
+        fn(*args)
 
 
 class _SegmentResult:
@@ -2709,9 +2741,15 @@ class SegmentPlan:
             bank._trace_sink = []
         built = {}
 
+        work_log = []
+
         def submit():
             if prelude is not None:
-                prelude()
+                _WORK_LOGS.append(work_log)
+                try:
+                    prelude()
+                finally:
+                    _WORK_LOGS.pop()
             futures = TimeDomainFilterBank.filter_series_many(jobs, wait=False)
             if followup is not None:
                 built["fu"] = self._device_followups(ctx, jobs, followup)
@@ -2735,6 +2773,7 @@ class SegmentPlan:
             for bank, _, _ in jobs:
                 bank._trace_sink = None
         self._graph.replay()
+        _replay_work(work_log)
         out = [f.result() if hasattr(f, "result") else f for f in futures]
         per_job, cursor = [], {}
         for j, (bank, _, _) in enumerate(jobs):
@@ -2744,7 +2783,7 @@ class SegmentPlan:
         if all(e is not None and not e[2][0]
                and all(getattr(d, "trace", None) is not None for d, *_ in e[0]) for e in per_job):
             self._trace = dict(sig=sig, jobs=[(e[0], e[1]) for e in per_job], fu=built.get("fu"),
-                               all_jobs=jobs)
+                               all_jobs=jobs, work=work_log)
         return wrap(out, self._read_followups(built.get("fu")))
 
     def _read_followups(self, dfu):
@@ -2799,6 +2838,13 @@ class SegmentPlan:
         return self._parse_cuda(tr)
 
     def _parse_cuda(self, tr, reader=None):
+        # The replayed prelude's work counters (the fine stage's are counted by each
+        # dispatch's reader). A Vulkan replay passes its own reader and calls its prelude.
+        if reader is None:
+            _replay_work(tr.get("work"))
+        return self._parse_dispatches(tr, reader)
+
+    def _parse_dispatches(self, tr, reader=None):
         """Read every dispatch of a finished segment graph. Sparse results go straight
         into the job's peak lists, without dense tables, in the order filter_series gives:
         (block, template, bin), blocks in the caller's order. A dense dispatch (threshold 0,

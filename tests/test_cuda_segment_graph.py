@@ -131,3 +131,55 @@ def test_two_segments_in_flight_match_separate_calls(monkeypatch):
         pending = (seg, plans[seg % 2].submit(jobs))
     _same(want[pending[0]], pending[1].result())
     assert sum(p.replays for p in plans) >= 4, [(p.replays, p.capture_failures) for p in plans]
+
+
+def test_replays_count_their_work(monkeypatch):
+    """A replayed segment graph runs its dispatches and its prelude without the host calls
+    that count their work (matchedfilter._roofline): each replay must add what the same
+    segment's direct calls add -- the middle bank's counters for the prelude, and every fine
+    plan's pairs, tier passes and refines."""
+    rng, banks = _banks(monkeypatch, nbanks=2, seed=87)
+    S = 1 << 17
+    # One tap count: the group's rows are then a contiguous slice of the output, which
+    # the middle stage writes in place and leaves in flight (as the ladder's bank does).
+    counts = [300] * len(banks)
+    taps, _, _ = _whitened_inspiral_bank(rng, counts)
+    mid = TimeDomainFilterBank(taps, tap_counts=counts, engine="corr", device="cuda:0")
+    assert all(np.array_equal(g.template_indices, np.sort(g.template_indices)) for g in mid._groups)
+    inp = mid.empty_shared((S,), input=True)
+    rows = mid.empty_shared((len(banks), S))
+    jobs = [(b, rows[i], dict(windows=slice(3000, S - 3000))) for i, b in enumerate(banks)]
+
+    def prelude():
+        mid.correlate_series(inp, windows=slice(1000, S - 1000), out=rows, wait=False)
+
+    def snap():
+        fine = [g.plan.work_counts() for b in banks for g in b._groups if g.is_hier]
+        return ({n: dict(v) for n, v in getattr(mid, "_corr_work", {}).items()},
+                getattr(mid, "_corr_in_samples", 0),
+                [(c["pairs"], tuple(c["passed"]), c["refined"]) for c in fine])
+
+    def delta(a, b):
+        mw = {n: {k: v - a[0].get(n, {}).get(k, 0) for k, v in d.items()} for n, d in b[0].items()}
+        fine = [(p1 - p0, tuple(y - x for x, y in zip(s0, s1)), r1 - r0)
+                for (p0, s0, r0), (p1, s1, r1) in zip(a[2], b[2])]
+        return mw, b[1] - a[1], fine
+
+    plan = SegmentPlan()
+    replayed = 0
+    for seg in range(6):
+        X = np.fft.fft(rng.standard_normal(S))
+        X[S // 2:] = 0
+        inp[:] = (np.fft.ifft(X) * 2).astype(np.complex64)
+        inp[rng.integers(5000, S - 5000, 4)] += 30.0
+        s0, r0 = snap(), plan.replays
+        got = plan.run(jobs, prelude=prelude, prelude_key="mid")
+        s1 = snap()
+        replayed += plan.replays > r0
+        # The same segment by direct calls, on the same data.
+        mid.correlate_series(inp, windows=slice(1000, S - 1000), out=rows)
+        want = [b.filter_series(x, **kw) for b, x, kw in jobs]
+        _same(want, got)
+        s2 = snap()
+        assert delta(s0, s1) == delta(s1, s2), seg
+    assert replayed >= 2
