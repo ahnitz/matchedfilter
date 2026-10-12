@@ -2461,6 +2461,16 @@ class _VkReplay:
         return out
 
 
+def _in_chain_trial(jobs):
+    """Whether a plan of the jobs' banks is in a GPU chain trial."""
+    for bank, _, kw in jobs:
+        for g in bank._groups:
+            p = getattr(g, "_plan", None)
+            if p is not None and getattr(p, "_chain_trial", None) is not None:
+                return True
+    return False
+
+
 class SegmentPlan:
     """filter_series_many for a job set that recurs, e.g. every segment of one top template.
 
@@ -2622,6 +2632,10 @@ class SegmentPlan:
                 print("replay: no trace", flush=True)
             elif tr["sig"] != sig:
                 print("replay: signature differs", flush=True)
+        if _in_chain_trial(jobs):
+            # A chain trial runs (and is judged) on whole filter_series_many batches: a
+            # replay would keep the plans on one candidate and the trial would never lock.
+            tr = self._trace = None
         if tr is not None and tr["sig"] == sig:
             from . import _vkcompute
             prev = self.__dict__.pop("_vk_inflight", None)
