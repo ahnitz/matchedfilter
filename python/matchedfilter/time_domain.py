@@ -1755,6 +1755,12 @@ class TimeDomainFilterBank:
                     continue
                 if pending:
                     # Keep the call's order: parts already deferred are consumed at build().
+                    # A synchronous result may be the plan's reused output buffers (_sbuf):
+                    # held until build(), a later call of the same shape on this plan (the
+                    # next follow-up of a batch) overwrote it, and this call returned that
+                    # call's peaks. Own a copy.
+                    if aval is not None:
+                        aidx, aval = np.array(aidx), np.array(aval)
                     pending.append((_Deferred(lambda r=(aidx, aval): r), sub_starts, g,
                                     tmpl_arg, N))
                     continue
