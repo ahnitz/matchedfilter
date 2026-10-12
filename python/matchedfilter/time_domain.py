@@ -350,6 +350,12 @@ class _BlockTrials:
                 rec = gatechain._load_cost_file(path).get("block-trial|" + key)
                 if isinstance(rec, dict) and "winner" in rec:
                     st["winner"] = int(rec["winner"])
+                elif isinstance(rec, dict) and isinstance(rec.get("samples"), dict):
+                    # An unfinished trial an earlier process left: continue it. Without this a
+                    # process shorter than the trial (ranks x (settle + samples) batches)
+                    # restarted it from nothing every time and never locked.
+                    st["samples"] = {int(r): [float(x) for x in v]
+                                     for r, v in rec["samples"].items()}
         return st
 
     def rank_for(self, key, nranks):
@@ -369,6 +375,10 @@ class _BlockTrials:
         st["samples"].setdefault(rank, []).append(float(value))
         need = int(os.environ.get("MF_BLOCK_TRIALS", _BLOCK_TRIAL_SAMPLES))
         if not all(len(v) >= need for v in st["samples"].values()):
+            path = gatechain._cost_file()
+            if path is not None:          # partial: the next process continues from here
+                gatechain._store_cost(path, "block-trial|" + key,
+                                      {"samples": {str(r): v for r, v in st["samples"].items()}})
             return
         med = {r: float(np.median(v)) for r, v in st["samples"].items()}
         best = min(med, key=med.get)
@@ -382,6 +392,11 @@ class _BlockTrials:
 
     def winner(self, key):
         return self._st(key)["winner"]
+
+    def unlocked(self):
+        """Keys this process trialled that have no winner yet (a measurement over such a
+        process includes layout switches, not one steady layout)."""
+        return sorted(k for k, st in self.state.items() if st["winner"] is None and st["samples"])
 
 
 
