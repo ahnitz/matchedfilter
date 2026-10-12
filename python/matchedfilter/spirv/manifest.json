@@ -41,6 +41,10 @@
         "file": "compact.spv",
         "descriptors": 3
       },
+      "items": {
+        "file": "items_64.spv",
+        "descriptors": 6
+      },
       "refine": {
         "file": "refine_64.spv",
         "descriptors": 6
@@ -62,11 +66,7 @@
       "metal_lds_cap": 512,
       "metal_lds_bytes": 512,
       "lds_cap": 512,
-      "lds_bytes": 512,
-      "items": {
-        "file": "items_64.spv",
-        "descriptors": 6
-      }
+      "lds_bytes": 512
     },
     "128": {
       "local_size": [
@@ -107,6 +107,10 @@
         "file": "compact.spv",
         "descriptors": 3
       },
+      "items": {
+        "file": "items_128.spv",
+        "descriptors": 6
+      },
       "refine": {
         "file": "refine_128.spv",
         "descriptors": 6
@@ -128,11 +132,7 @@
       "metal_lds_cap": 512,
       "metal_lds_bytes": 1024,
       "lds_cap": 512,
-      "lds_bytes": 1024,
-      "items": {
-        "file": "items_128.spv",
-        "descriptors": 6
-      }
+      "lds_bytes": 1024
     },
     "256": {
       "local_size": [
@@ -173,6 +173,10 @@
         "file": "compact.spv",
         "descriptors": 3
       },
+      "items": {
+        "file": "items_256.spv",
+        "descriptors": 6
+      },
       "refine": {
         "file": "refine_256.spv",
         "descriptors": 6,
@@ -207,11 +211,7 @@
       "metal_lds_cap": 512,
       "metal_lds_bytes": 2048,
       "lds_cap": 512,
-      "lds_bytes": 2048,
-      "items": {
-        "file": "items_256.spv",
-        "descriptors": 6
-      }
+      "lds_bytes": 2048
     },
     "512": {
       "local_size": [
@@ -252,6 +252,10 @@
         "file": "compact.spv",
         "descriptors": 3
       },
+      "items": {
+        "file": "items_512.spv",
+        "descriptors": 6
+      },
       "refine": {
         "file": "refine_512.spv",
         "descriptors": 6,
@@ -286,11 +290,7 @@
       "metal_lds_cap": 512,
       "metal_lds_bytes": 4096,
       "lds_cap": 512,
-      "lds_bytes": 4096,
-      "items": {
-        "file": "items_512.spv",
-        "descriptors": 6
-      }
+      "lds_bytes": 4096
     },
     "1024": {
       "local_size": [
@@ -337,6 +337,10 @@
         "file": "compact.spv",
         "descriptors": 3
       },
+      "items": {
+        "file": "items_1024.spv",
+        "descriptors": 6
+      },
       "refine": {
         "file": "refine_1024.spv",
         "descriptors": 6,
@@ -379,11 +383,7 @@
       "metal_lds_cap": 1024,
       "metal_lds_bytes": 8192,
       "lds_cap": 512,
-      "lds_bytes": 4096,
-      "items": {
-        "file": "items_1024.spv",
-        "descriptors": 6
-      }
+      "lds_bytes": 4096
     },
     "2048": {
       "local_size": [
@@ -430,6 +430,10 @@
         "file": "compact.spv",
         "descriptors": 3
       },
+      "items": {
+        "file": "items_2048.spv",
+        "descriptors": 6
+      },
       "refine": {
         "file": "refine_2048.spv",
         "descriptors": 6,
@@ -472,11 +476,7 @@
       "metal_lds_cap": 2048,
       "metal_lds_bytes": 16384,
       "lds_cap": 1024,
-      "lds_bytes": 8192,
-      "items": {
-        "file": "items_2048.spv",
-        "descriptors": 6
-      }
+      "lds_bytes": 8192
     },
     "4096": {
       "local_size": [
@@ -523,6 +523,10 @@
         "file": "compact.spv",
         "descriptors": 3
       },
+      "items": {
+        "file": "items_4096.spv",
+        "descriptors": 6
+      },
       "refine": {
         "file": "refine_4096.spv",
         "descriptors": 6,
@@ -568,11 +572,7 @@
       "metal_lds_cap": 4096,
       "metal_lds_bytes": 32768,
       "lds_cap": 2048,
-      "lds_bytes": 16384,
-      "items": {
-        "file": "items_4096.spv",
-        "descriptors": 6
-      }
+      "lds_bytes": 16384
     },
     "8192": {
       "local_size": [
@@ -624,6 +624,14 @@
       "compact": {
         "file": "compact.spv",
         "descriptors": 3
+      },
+      "items": {
+        "file": "items_8192.spv",
+        "descriptors": 6,
+        "portable": {
+          "file": "items_8192_lds32.spv",
+          "lds_bytes": 32768
+        }
       },
       "refine": {
         "file": "refine_8192.spv",
@@ -709,14 +717,6 @@
       "portable": {
         "file": "tierb_8192_lds32.spv",
         "lds_bytes": 32768
-      },
-      "items": {
-        "file": "items_8192.spv",
-        "descriptors": 6,
-        "portable": {
-          "file": "items_8192_lds32.spv",
-          "lds_bytes": 32768
-        }
       }
     },
     "16384": {
@@ -769,6 +769,14 @@
       "compact": {
         "file": "compact.spv",
         "descriptors": 3
+      },
+      "items": {
+        "file": "items_16384.spv",
+        "descriptors": 6,
+        "portable": {
+          "file": "items_16384_lds32.spv",
+          "lds_bytes": 32768
+        }
       },
       "refine": {
         "file": "refine_16384.spv",
@@ -844,14 +852,6 @@
       "portable": {
         "file": "tierb_16384_lds32.spv",
         "lds_bytes": 32768
-      },
-      "items": {
-        "file": "items_16384.spv",
-        "descriptors": 6,
-        "portable": {
-          "file": "items_16384_lds32.spv",
-          "lds_bytes": 32768
-        }
       }
     },
     "32768": {
@@ -904,6 +904,14 @@
       "compact": {
         "file": "compact.spv",
         "descriptors": 3
+      },
+      "items": {
+        "file": "items_32768.spv",
+        "descriptors": 6,
+        "portable": {
+          "file": "items_32768_lds32.spv",
+          "lds_bytes": 32768
+        }
       },
       "refine": {
         "file": "refine_32768.spv",
@@ -979,14 +987,6 @@
       "portable": {
         "file": "tierb_32768_lds32.spv",
         "lds_bytes": 32768
-      },
-      "items": {
-        "file": "items_32768.spv",
-        "descriptors": 6,
-        "portable": {
-          "file": "items_32768_lds32.spv",
-          "lds_bytes": 32768
-        }
       }
     },
     "65536": {
@@ -1039,6 +1039,14 @@
       "compact": {
         "file": "compact.spv",
         "descriptors": 3
+      },
+      "items": {
+        "file": "items_65536.spv",
+        "descriptors": 6,
+        "portable": {
+          "file": "items_65536_lds32.spv",
+          "lds_bytes": 32768
+        }
       },
       "refine": {
         "file": "refine_65536.spv",
@@ -1114,14 +1122,6 @@
       "portable": {
         "file": "tierb_65536_lds32.spv",
         "lds_bytes": 32768
-      },
-      "items": {
-        "file": "items_65536.spv",
-        "descriptors": 6,
-        "portable": {
-          "file": "items_65536_lds32.spv",
-          "lds_bytes": 32768
-        }
       }
     }
   },
@@ -1560,7 +1560,7 @@
     }
   },
   "source_hashes": {
-    "tierb.slang": "4ad1055383af191476d264db99dc758fe07874123d4037a34e909e0a0055dbdf",
+    "tierb.slang": "88ab6981c090f6eb2f149edc9eb25da37cd98c6a3bcfeb4d3fc4078a97a19704",
     "fft_transform.slang": "504c70cb63d1d87c84d60d93b7a0c9a359fe67cfe48dcbe1fbc84127a12b3bc1",
     "coarse_tile.slang": "8b1a3f9193e20b76cc02641e71b77023d544b0bd1bff8c4194f38371ad47fb47",
     "series_forward.slang": "1ed347cedae7d1f7543ccfbfd6a4ea1971f6be1eb4fdd504c9e6b0a17b849ee5",

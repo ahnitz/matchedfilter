@@ -1684,7 +1684,17 @@ class Context(InputUploads):
                 coarse = coarse0
                 # A ragged build reads the data row count from the binsize slot
                 # (coarse_launch), which the one-bin coarse role does not otherwise use.
-                cparams = (nt, span[0], span[1], nd if ragged else span[2], *span[3:], 1, 0)
+                # Tiled fp16 builds whose pair fits one SIMD group take the gate threshold
+                # (magnitude, > 0) in the last slot and report only the gate's decision and
+                # bound (tierb.slang peakTwoGate: no election; tier 0's index has no
+                # reader). A threshold of 0 is passed as the smallest normal float, which
+                # passes the same pairs (a nonzero maximum). 0 elects every pair
+                # (peakTwoWave): the raw (unbounded) build, and every other build, which
+                # reads the slot as a squared seed.
+                gate = (h and ragged and b // _radix(b) <= self._simd_width(b)
+                        and os.environ.get("MF_VK_C16_BOUND", "1") != "0")
+                cparams = (nt, span[0], span[1], nd if ragged else span[2], *span[3:], 1,
+                           bits(max(float(thr), 1.1754944e-38)) if gate else 0)
                 self._dispatch(enc, coarse, cparams,
                                use("cdata", "ct0", "cidx", "cval"),
                                b // _radix(b) * ppg, groups=cgroups)

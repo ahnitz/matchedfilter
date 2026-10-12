@@ -1259,6 +1259,73 @@ void peakTwoWave(uint pairA, uint pairB, uint tid, H re[16], H im[16],
     }
 }
 
+#if defined(MF_METAL)
+//: The gate decision alone, for a pair whose WG lanes sit in one SIMD group (Metal).
+//:
+//: What the hierarchical gate consumes from tier 0 is whether a pair passes: the
+//: compaction lists a pair when the magnitude of its reported value reaches the gate
+//: threshold, and nothing reads tier 0's index. peakTwoWave elects the winning slot
+//: (packed keys), reads its (re, im) back through threadgroup memory and tests every
+//: register for overflow; on the M2 those cost ~25% of the band-256 gate beyond what this
+//: needs. Here every pair reports its bound straight from packed half2 reductions:
+//:
+//:     B = sqrt(P16max) (1 + 2u) + C16_KAPPA u rms(y)
+//:
+//: P16max is the largest fp16 |v|^2 in the window. Every fp16 power (one to three
+//: roundings) is within (1 +- u)^2 of the fp16 transform's |y16|^2, so |y16|max <=
+//: sqrt(P16max) / (1 - u) < sqrt(P16max) (1 + 2u): the same guarantee peakTwoWave's
+//: |y16(k')| (1 + 3u) gives, from the maximum itself rather than from the element at the
+//: lag it names. rms(y) is peakTwoWave's energy term, bit for bit. Index: 0 for a passing
+//: pair (a lag in the band), -1 otherwise.
+//:
+//: Taken when the host passes the gate threshold (magnitude bits) in thrBits; with 0,
+//: peakTwoWave runs and reports its elected element.
+void peakTwoGate(uint pairA, uint pairB, uint tid, H re[16], H im[16],
+                 RWStructuredBuffer<int> peakIdx, RWStructuredBuffer<float2> peakVal,
+                 uint winStart, uint winEnd, float thr)
+{
+    uint u0 = slotToIndex(tid * R) - winStart;      // idx - winStart, wrapping
+    uint span = winEnd - winStart;
+    H best = H(0.0f), en = H(0.0f);
+    const H esc = H(0.015625f);
+    MF_UNROLL for (uint i = 0; i < R; ++i) {
+        bool live = (u0 + slotToIndex(i)) < span;  // winStart <= idx < winEnd
+        best = max(best, live ? mag2s(re[i], im[i]) : H(0.0f));
+        H sr = re[i] * esc, si = im[i] * esc;
+        en += sr * sr + si * si;
+    }
+    [ForceUnroll] for (uint s = 1; s < WG; s <<= 1) {
+        best = max(best, bit_cast<H>(mfShflXor(bit_cast<uint>(best), s)));
+        en += bit_cast<H>(mfShflXor(bit_cast<uint>(en), s));
+    }
+    // FAIL OPEN. An inf or NaN anywhere in the transform makes the all-lag energy inf or
+    // NaN (sums propagate them), and so does |v| >= 2^14 anywhere, which peakTwoWave's own
+    // energy turns into an inf bound; an in-window power past fp16 range elects as +inf in
+    // peakTwoWave's keys. Each is an exponent field of all ones, tested as bits (exact
+    // under fast math), and passes with +inf.
+    uint eb = bit_cast<uint>(en), bb = bit_cast<uint>(best);
+    bool infA = (eb & 0x7C00u) == 0x7C00u || (bb & 0x7C00u) == 0x7C00u;
+    bool infB = (eb & 0x7C000000u) == 0x7C000000u || (bb & 0x7C000000u) == 0x7C000000u;
+    // fp32 from here; the 1.0001 covers this arithmetic's own rounding.
+    const float k1 = (1.0f + 2.0f * C16_U) * 1.0001f;
+    const float k2 = (mfC16Bound != 0u ? float(C16_KAPPA) : 0.0f) * C16_U * 1.0001f;
+    float mA = sqrt(float(best.x)), mB = sqrt(float(best.y));
+    // Parseval: the per-lag mean power is energy / N (x 2^12 for the 2^-6 scaling).
+    float bA = mA * k1 + k2 * sqrt(float(en.x) * (4096.0f / float(N)));
+    float bB = mB * k1 + k2 * sqrt(float(en.y) * (4096.0f / float(N)));
+    bool hitA = infA || (mA > 0.0f && bA >= thr);
+    bool hitB = infB || (mB > 0.0f && bB >= thr);
+    if (tid == 0 && pairA != NOPAIR) {
+        peakIdx[pairA] = hitA ? 0 : -1;
+        peakVal[pairA] = infA ? float2(3.402823e38f, 0.0f) : (hitA ? float2(bA, 0.0f) : float2(0.0f, 0.0f));
+    }
+    if (tid == 0 && pairB != NOPAIR) {
+        peakIdx[pairB] = hitB ? 0 : -1;
+        peakVal[pairB] = infB ? float2(3.402823e38f, 0.0f) : (hitB ? float2(bB, 0.0f) : float2(0.0f, 0.0f));
+    }
+}
+#endif
+
 //: TWO pairs at once in split/SoA form. Both share the data row and differ
 //: only in template, so the data broadcasts to both lanes and the templates
 //: fill one lane each. Every operation from here to the magnitude is
@@ -1336,6 +1403,11 @@ void filterTwo(uint pairA, uint pairB, uint tA, uint tB, uint tid,
     const bool wavePeak = false;
 #endif
     if (wavePeak) {
+#if defined(MF_METAL)
+        if (thrBits != 0u)
+            peakTwoGate(pairA, pairB, tid, re, im, peakIdx, peakVal, winStart, winEnd, asfloat(thrBits));
+        else
+#endif
         peakTwoWave(pairA, pairB, tid, re, im, peakIdx, peakVal, winStart, winEnd, thrBits);
     } else {
         H magv[16];
