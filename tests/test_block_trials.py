@@ -151,7 +151,7 @@ def test_two_short_ladder_processes_lock_the_trial(monkeypatch, tmp_path):
     rng = np.random.default_rng(3)
     L = 1 << 15
     data = ((rng.standard_normal(L) + 1j * rng.standard_normal(L)) / np.sqrt(2)).astype(np.complex64)
-    for proc, batches in ((0, 45), (1, 400)):
+    for proc, batches in ((0, 5), (1, 400)):        # 5 < ranks x (settle + samples)
         monkeypatch.setattr(td, "_BLOCK_TRIALS", td._BlockTrials())   # a new process
         bank, _ = _inspiral_bank()
         if proc == 0 and len(getattr(bank, "_layouts", None) or []) < 2:
@@ -264,3 +264,38 @@ def test_no_block_sample_while_a_plan_calibrates(monkeypatch, tmp_path):
         td._trial_end(tok)
         n = sum(len(v) for v in td._BLOCK_TRIALS.state[td._trial_key(b)]["samples"].values())
         assert n == expect
+
+
+def test_a_fresh_file_locks_the_block_size_within_a_bound(monkeypatch, tmp_path):
+    """GPU-like plans: each candidate layout's plans would run a long chain trial (25 batches
+    of calibrating after first use, like a per-batch GPU chain trial). Calibrations run in
+    order -- the block size first, every layout at its model chain (held) -- so the block
+    trial locks within ranks x (settle + samples) batches, and the winner's held trials start
+    after. Nested per layout, it took ~100 segments on Vulkan and never left rank 0 on Metal."""
+    from matchedfilter import HierarchicalFilter
+    monkeypatch.setenv("MF_COST_FILE", str(tmp_path / "costs.json"))
+    monkeypatch.setattr(td, "_BLOCK_TRIALS", td._BlockTrials())
+    real = HierarchicalFilter.calibrating
+    runs = {}
+
+    def gpu_like(self):
+        if getattr(self, "_trial_hold", False):
+            return real(self)
+        k = id(self)
+        runs[k] = runs.get(k, 0) + 1
+        return runs[k] <= 25 or real(self)
+    monkeypatch.setattr(HierarchicalFilter, "calibrating", gpu_like)
+    bank, rng = _inspiral_bank()
+    if len(getattr(bank, "_layouts", None) or []) < 2:
+        pytest.skip("the model offered one block size only")
+    L = 1 << 15
+    data = ((rng.standard_normal(L) + 1j * rng.standard_normal(L)) / np.sqrt(2)).astype(np.complex64)
+    nr = len(bank._layouts)
+    bound = nr * (1 + td._BLOCK_TRIAL_MAX) + 2      # every rank settled, contests to the cap
+    for i in range(bound):
+        TimeDomainFilterBank.filter_series_many([(bank, data, {})])
+        if bank._layouts is None:
+            break
+    assert bank._layouts is None, "block size not locked in %d batches" % bound
+    held = [g.plan for g in bank._groups if g.is_hier and getattr(g.plan, "_trial_hold", False)]
+    assert not held                                 # the winner's trials were released

@@ -141,3 +141,31 @@ def test_a_batch_trial_with_a_never_run_candidate_still_locks(monkeypatch, tmp_p
             break
     assert w == a                                          # clearly faster than b
     assert i + 1 <= mf._TRIAL_BUDGET * base * 3            # within the budget
+
+
+def test_a_batch_trial_locks_the_measured_best_through_outliers(monkeypatch, tmp_path):
+    """The L40S case: the model's chain (512, 1024) measured 4.05e-12 s/unit, (256, 512)
+    3.0e-12, with spikes (the batch after a switch, a host hiccup). The lock is the measured
+    best -- the plain-std spread let one spike keep the 26% gap "unclear" until the model's
+    slower chain stood."""
+    monkeypatch.setenv("MF_COST_FILE", str(tmp_path / "costs.json"))
+    mf.clear_autotune_cache()
+    tk = (2048, 6.0, 0.001, 2, "gpu:0")
+    model, fast, third = (512, 1024), (256, 512), (128, 512)
+    mf._CHAIN_TRIALS[tk] = {"samples": {model: [], fast: [], third: []}, "assigned": {},
+                            "winner": None}
+    true = {model: 4.05e-12, fast: 3.0e-12, third: 5.0e-12}
+    noise = [0.9, 0.02, -0.03, 0.01, 0.6, -0.02, 0.03, 0.0]     # spikes at samples 0 and 4
+    k = {c: 0 for c in true}
+    w = None
+    for _ in range(100):
+        c = mf._chain_trial_next(tk)
+        if c is None:
+            break
+        w = mf._chain_trial_batch(tk, c, true[c] * (1 + noise[k[c] % len(noise)]))
+        k[c] += 1
+        if w is not None:
+            break
+    assert tuple(w) == fast
+    med = mf._CHAIN_TRIALS[tk]["median"]
+    assert min(med, key=med.get) == fast                       # the lock is the measured best
