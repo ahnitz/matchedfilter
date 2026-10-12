@@ -414,6 +414,7 @@ def _trial_begin(jobs):
             continue
         groups.setdefault(_trial_key(bank), []).append(bank)
     plan = []
+    chains = _chain_trials_begin(jobs)
     for key, bs in groups.items():
         w = _BLOCK_TRIALS.winner(key)
         if w is None and (not _autotune_enabled() or gatechain._cost_file() is None):
@@ -432,20 +433,76 @@ def _trial_begin(jobs):
             b._use_layout(r)
             b.__dict__.setdefault('_ranks_run', set()).add(r)
         plan.append((key, r, bs, settled))
-    if not plan:
+    if not plan and not chains:
         return None
     import time
     work = sum(len(b.filters_f) * int(np.asarray(x).size) for b, x, kw in jobs
                if (kw or {}).get("template_index") is None)
-    return (time.perf_counter(), plan, work)
+    return (time.perf_counter(), plan, work, chains)
+
+
+#: Batches a GPU chain trial runs a candidate before it takes samples of it: after a switch
+#: the ladder's fine stage took 150, 55, then 17 ms for a 17 ms segment, so the third batch
+#: is the first sample.
+_CHAIN_WARM_BATCHES = 2
+
+
+def _chain_trials_begin(jobs):
+    """GPU chain trials judged per batch: every hierarchical GPU plan of the batch in a chain
+    trial is put on its trial's candidate for this batch (_chain_trial_next), so the batch's
+    time is that candidate's. Returns [(trial key, chain, plans, settled)]; settled when every
+    plan already ran that chain in an earlier batch (its first batch builds recordings and
+    calibrates: one-off costs, not the chain's)."""
+    from . import _chain_trial_next, _chain_trial_pending
+    by = {}
+    for bank, _, kw in jobs:
+        if (kw or {}).get("template_index") is not None:
+            continue
+        for g in bank._groups:
+            p = getattr(g, "_plan", None)
+            tk = getattr(p, "_chain_trial", None) if p is not None else None
+            if tk is not None and getattr(p, "_gpu", None) is not None:
+                by.setdefault(tk, {})[id(p)] = p
+    out = []
+    for tk, plans in by.items():
+        c = _chain_trial_next(tk)
+        if c is None:
+            continue
+        settled = True
+        for p in plans.values():
+            # A sample only once the plans have run this chain for _CHAIN_WARM_BATCHES batches
+            # in a row: after a switch, thresholds, uploads, recordings and call plans settle.
+            last, run = p.__dict__.get("_chain_last_batch", (None, 0))
+            if tuple(p._chain) != tuple(c):
+                p._switch_chain(c)
+            run = run + 1 if last == tuple(c) else 1
+            settled = settled and run > _CHAIN_WARM_BATCHES
+            p._chain_last_batch = (tuple(c), run)
+        if settled:
+            _chain_trial_pending(tk, c, +1)
+        out.append((tk, tuple(c), list(plans.values()), settled))
+    return out
 
 
 def _trial_end(tok):
     import time
     if tok is None:
         return
-    t0, plan, work = tok
+    t0, plan, work, chains = tok
     dt = time.perf_counter() - t0
+    from . import _chain_trial_batch, _chain_trial_pending
+    for tk, c, plans, settled in chains:
+        if settled:
+            _chain_trial_pending(tk, c, -1)
+        from . import _log_autotune
+        _log_autotune("CHAIN-TRIAL batch %s settled=%s dt=%.4f work=%d", c, settled, dt, work)
+        w = _chain_trial_batch(tk, c, dt / work) if (settled and work > 0) else None
+        if w is not None:
+            for p in plans:
+                p._chain_trial = None
+                p.autotune_info.update(status="locked", winner=tuple(w))
+                if tuple(w) != tuple(p._chain):
+                    p._switch_chain(w)
     for key, r, bs, settled in plan:
         if settled and work > 0:
             _BLOCK_TRIALS.record(key, r, dt / work)
