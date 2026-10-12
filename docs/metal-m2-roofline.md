@@ -66,6 +66,13 @@ Falsified (kept out):
   fp16 powers in fp32 (1.080 vs 1.072), four templates per thread (1.46 vs 1.33), a full-window
   fast path (real coarse windows are partial), the fp16 twiddle table (-4% kernel, ladder flat).
 
+- fp32 transform with fp16 storage (Candidate 2): deleting every fp16 load conversion and the
+  fp32 twiddle recurrence's conversions (fp16 recurrence instead; timing only) took the band-256
+  gate from 1.116 to 1.098 ms, a 1.6% ceiling; not built.
+- ARM middle stage through vDSP: product + inverse at its n=65536 is 186 us per pair in vDSP
+  against ~184 us for the engine's batched corr_prod (n=8192: 30 us, n=131072: 253 us); no lever
+  at the middle's block size; not built.
+
 Where the time goes now (Metal, device ms per segment, replay): tier-0 gate ~37, fine
 forward 13.7 (57% of bandwidth), middle 15.8 (full_series_8192 at ~14% of FMA / 36% of the
 bandwidth-bound ideal), tier 1 ~8.5, refine 4.5, pack 2.7, compaction 1.6, follow-ups 2.4
