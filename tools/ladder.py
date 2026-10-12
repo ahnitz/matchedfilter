@@ -577,6 +577,8 @@ def run_device(device, tops, args, seed):
                         gc.freeze()
                     if prof is not None and tm is steady:
                         prof.enable()
+                    if os.environ.get("MF_AUTOTUNE_LOG", "0") != "0":
+                        print("[ladder] segment %d" % seg, file=sys.stderr, flush=True)
                     t_seg = time.perf_counter()
                     c_seg = time.thread_time()          # host CPU per segment, as --pipeline
                     ser = next_ser
