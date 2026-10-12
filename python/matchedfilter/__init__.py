@@ -1635,6 +1635,13 @@ class MatchedFilter:
         pipelined = can_pipeline and (not single or defer)
         queue_ahead = int(os.environ.get("MF_GPU_QUEUE_AHEAD", "8"))
         K = max(1, queue_ahead) if pipelined else 1
+        if K > 1 and self.__dict__.get("_force_slot_half") is not None:
+            # A SegmentPlan slot half (_slot_span) holds a whole job set's calls -- a bank
+            # runs once per detector -- so each half gets queue_ahead slots, not half of
+            # them: wrapping within a half settles an earlier call of the same set, which
+            # inside a segment-graph capture is a wait the capture cannot take (every
+            # capture failed and the segment fell back to the per-call path).
+            K *= 2
         source_shared = shared_buffer(ser, self._gpu) is not None
         # Unified memory: read a page-aligned series where it is rather than copying the
         # span into the source buffer (a fine-stage call copied ~6 MB per call). The owner
@@ -1685,15 +1692,16 @@ class MatchedFilter:
             self._defer_base = base
             self._defer_token, self._defer_slot = self._defer_series, base
         slot0 = getattr(self, "_defer_slot", 0) % K if defer else 0
-        slot_lo, span = self._slot_span(K) if defer else (0, K)
+        # nslot, not span: `span` names the uploaded source span below.
+        slot_lo, nslot = self._slot_span(K) if defer else (0, K)
 
-        def slot_of(i, slot_lo=slot_lo, span=span):   # names of their own: lo is reused below
-            return slot_lo + (i - slot_lo) % span
+        def slot_of(i, slot_lo=slot_lo, nslot=nslot):   # names of their own: lo is reused below
+            return slot_lo + (i - slot_lo) % nslot
         if defer:
             # Settle whatever still holds the slots this call will use: its spectra, starts,
             # source and recordings are about to be rewritten.
             owners = self.__dict__.setdefault("_slot_owner", {})
-            nslots = min(span, -(-nblk // batch) + len(layout.groups))
+            nslots = min(nslot, -(-nblk // batch) + len(layout.groups))
             for k in range(nslots):
                 prev = owners.pop(slot_of(slot0 + k), None)
                 if prev is not None:
@@ -1822,7 +1830,7 @@ class MatchedFilter:
                 in_flight.append((begin, end, res))
                 if defer and is_hier:
                     gtrace.append((begin, end, self._counted(self._gpu, getattr(self._gpu, "_last_dispatch", None))))
-                if len(in_flight) >= span:
+                if len(in_flight) >= nslot:
                     b_start, b_end, item = in_flight.pop(0)
                     take_dense(b_start, b_end, item() if callable(item) else item)
 
@@ -1893,7 +1901,7 @@ class MatchedFilter:
                 in_flight.append((begin, end, res))
                 if defer and is_hier:
                     trace_groups.append((begin, end, self._counted(self._gpu, getattr(self._gpu, "_last_dispatch", None))))
-                if len(in_flight) >= span:
+                if len(in_flight) >= nslot:
                     collected_early[0] = True
                     b_start, b_end, item = in_flight.pop(0)
                     r = item() if callable(item) else item
