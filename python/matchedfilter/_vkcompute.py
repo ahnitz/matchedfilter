@@ -830,11 +830,21 @@ def replay_fused(dev, keys, wait=True, before=None):
     return True
 
 
-def read_dispatch_sparse(entry):
+def read_dispatch_sparse(entry, trace=None):
     """The refined peaks of one recorded hierarchical dispatch, as _SparsePeaks, read from
-    its survivor list (SegmentPlan replay: the same reader for every backend's trace)."""
+    its survivor list (SegmentPlan replay: the same reader for every backend's trace).
+
+    trace (the call's trace): its fine plan's work counters advance as the call itself
+    would have advanced them (pairs, tier-0 passes of a cascade, refines), so
+    matchedfilter._roofline counts replayed segments like any other."""
     bufs, nd, nt, nbins, cascade = entry
     count = int(bufs["args_refine" if cascade else "args"].read(np.uint32, 1)[0])
+    plan = (trace or {}).get("plan")
+    if plan is not None:
+        plan._gpairs += nd * nt
+        plan._gtrig += count
+        if cascade:
+            plan._gt1 += int(bufs["args_tier1"].read(np.uint32, 1)[0])
     if count == 0:
         from . import _SparsePeaks
         e = np.empty(0, np.int64)
