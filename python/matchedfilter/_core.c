@@ -698,6 +698,60 @@ static PyObject *HMF_run_series(HMFObject *self,PyObject *args){
   if(tot<0){ PyErr_SetString(PyExc_RuntimeError,"matchedfilter: run_series failed"); return NULL; }
   return PyLong_FromLong(tot);
 }
+/* run_series_sparse(series, starts, wstart, wend, t0, nt, binsize, thr, cnt[i32 rows])
+   -> (flat, index, value) as bytes: int64 flat positions in the (blocks, nt, bins) table,
+   int64 bin indices and complex64 values of every peak, in C order. The engine runs
+   sparse (ap_hmf_set_sparse): rows no tier passes write only cnt, and only rows with
+   cnt > 0 are read back -- no pass over the dense table at either end. */
+static PyObject *HMF_run_series_sparse(HMFObject *self,PyObject *args){
+  Py_buffer bs,bst,bws,bwe,bcnt;
+  int t0,nt; Py_ssize_t binsize; double thr;
+  if(!PyArg_ParseTuple(args,"y*y*y*y*iindw*",&bs,&bst,&bws,&bwe,&t0,&nt,&binsize,&thr,&bcnt))
+    return NULL;
+  int nblocks; size_t nb; Py_ssize_t rows;
+  PyObject *ret=NULL;
+  ap_peak *pk=NULL;
+  if(!series_shape(self->n,self->nt,t0,nt,binsize,&bs,&bst,&bws,&bwe,&nblocks,&nb,&rows))
+    goto done;
+  if(bcnt.len<rows*(Py_ssize_t)sizeof(int)){
+    PyErr_SetString(PyExc_ValueError,"counts buffer too small"); goto done; }
+  if(nb>(size_t)PY_SSIZE_T_MAX/(size_t)rows){
+    PyErr_SetString(PyExc_ValueError,"overflowing output shape"); goto done; }
+  pk=reserve_peaks(&self->peaks,&self->peak_capacity,rows*(Py_ssize_t)nb);
+  if(!pk) goto done;
+  int tot;
+  int *cnt=(int*)bcnt.buf;
+  Py_BEGIN_ALLOW_THREADS
+  ap_hmf_set_sparse(self->p,1);
+  tot=ap_hmf_run_series(self->p,(const float*)bs.buf,(size_t)(bs.len/8),
+                        (const size_t*)bst.buf,(const size_t*)bws.buf,
+                        (const size_t*)bwe.buf,nblocks,t0,nt,(size_t)binsize,
+                        (float)thr,pk,cnt);
+  ap_hmf_set_sparse(self->p,0);
+  Py_END_ALLOW_THREADS
+  if(tot<0){ PyErr_SetString(PyExc_RuntimeError,"matchedfilter: run_series failed"); goto done; }
+  Py_ssize_t m=0;
+  for(Py_ssize_t r=0;r<rows;r++) if(cnt[r]>0)
+    for(size_t b=0;b<nb;b++) if(pk[(size_t)r*nb+b].index>=0) m++;
+  PyObject *fl=PyBytes_FromStringAndSize(NULL,m*8), *ix=PyBytes_FromStringAndSize(NULL,m*8),
+           *vl=PyBytes_FromStringAndSize(NULL,m*8);
+  if(!fl||!ix||!vl){ Py_XDECREF(fl);Py_XDECREF(ix);Py_XDECREF(vl); goto done; }
+  { long long *F=(long long*)PyBytes_AS_STRING(fl), *I=(long long*)PyBytes_AS_STRING(ix);
+    float *V=(float*)PyBytes_AS_STRING(vl);
+    Py_ssize_t k=0;
+    for(Py_ssize_t r=0;r<rows;r++) if(cnt[r]>0)
+      for(size_t b=0;b<nb;b++){
+        const ap_peak *q=&pk[(size_t)r*nb+b];
+        if(q->index<0) continue;
+        F[k]=(long long)((size_t)r*nb+b); I[k]=(long long)q->index;
+        V[2*k]=q->re; V[2*k+1]=q->im; k++;
+      } }
+  ret=Py_BuildValue("(NNNi)",fl,ix,vl,tot);
+done:
+  PyBuffer_Release(&bs);PyBuffer_Release(&bst);PyBuffer_Release(&bws);
+  PyBuffer_Release(&bwe);PyBuffer_Release(&bcnt);
+  return ret;
+}
 static PyObject *HMF_nbins(HMFObject *self,PyObject *args){
   Py_ssize_t bs,st,en;
   if(!PyArg_ParseTuple(args,"nnn",&bs,&st,&en)) return NULL;
@@ -795,6 +849,8 @@ static PyMethodDef HMF_methods[]={
   {"run",(PyCFunction)HMF_run,METH_VARARGS,"run(...) -> total crossings"},
   {"nbins",(PyCFunction)HMF_nbins,METH_VARARGS,"nbins(binsize, start, end)"},
   {"run_series",(PyCFunction)HMF_run_series,METH_VARARGS,"run_series(...)"},
+  {"run_series_sparse",(PyCFunction)HMF_run_series_sparse,METH_VARARGS,
+   "run_series_sparse(series,starts,wstart,wend,t0,nt,binsize,thr,cnt) -> (flat,index,value bytes,total)"},
   {"stats",(PyCFunction)HMF_stats,METH_NOARGS,"stats() -> (pairs, refined)"},
   {"chain",(PyCFunction)HMF_chain,METH_NOARGS,"chain() -> bands"},
   {"thresholds",(PyCFunction)HMF_thresholds,METH_NOARGS,"thresholds() -> per-tier thresholds in force"},
