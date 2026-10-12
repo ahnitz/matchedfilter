@@ -1701,8 +1701,13 @@ class Context(InputUploads):
             else:
                 # The listed refine at this band over the previous tier's
                 # survivors; one bin, so cval holds each listed pair's maximum.
-                self._dispatch(enc, self.pipeline(b, "refineListed", True),
-                               (nt, *span, 1, 0),
+                # nbins = 0 asks a single-bin build at a gate band (<= 1024) for the gate
+                # decision only (the window's maximum |v|; tierb.slang gateOnly): the
+                # compaction below is all that reads it. Other builds read nbins as the bin
+                # count: always 1.
+                listed = self.pipeline(b, "refineListed", True)
+                single = b <= 1024 and (b, "refineListed", True) in self._pipelines
+                self._dispatch(enc, listed, (nt, *span, 0 if single else 1, 0),
                                use("cdata" + sfx[i], "ct" + str(i), "cidx" + sfx[i],
                                    "cval" + sfx[i], "surv" + sfx[i - 1]),
                                b // _radix(b), indirect=bufs["args" + sfx[i - 1]])
