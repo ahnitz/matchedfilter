@@ -371,8 +371,10 @@ def test_steady_segments_replay(monkeypatch, band, depth):
     sets = [banks[0][0].empty_shared((len(banks), S)) for _ in range(depth + 1)]
     inflight, deltas = [], []
     # A GPU chain trial runs each of its (up to 3) candidates for a run of batches -- 3 to
-    # settle after the switch, then MF_CHAIN_TRIALS samples -- before it locks.
-    for seg in range(32):
+    # settle after the switch, then MF_CHAIN_TRIALS samples, up to twice that when the
+    # contest is unclear (gatechain.measured_choice) -- before it locks: up to ~21 batches
+    # plus switches, so 48 segments leave the last 4 well clear of it under load.
+    for seg in range(48):
         rows = sets[seg % (depth + 1)]
         _fill(rng, rows, S)
         jobs = [(b, rows[i], dict(windows=slice(3001, S - 2999), binsize=500))
