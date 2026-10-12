@@ -387,8 +387,10 @@ class MatchedFilter:
         """A traced dispatch's result reader that also counts its work (pairs, tier
         survivors, refines) as the direct call's finish does: a SegmentPlan replay reads
         each dispatch through it, without that finish."""
-        if reader is None:
-            return None
+        if not callable(reader):
+            # None, or a backend's own dispatch record (Vulkan: a tuple its replay reads and
+            # counts itself, _vkcompute.read_dispatch_sparse): kept as the backend made it.
+            return reader
 
         def read():
             r = reader()
