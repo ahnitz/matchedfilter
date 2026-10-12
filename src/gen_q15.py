@@ -86,8 +86,76 @@ class QGen(SRGen):
         return o
 
 
-def build_q(n, name, tw=False, prod=False):
-    g = QGen(n, name, tw, False, prod)
+class QGenClassic(SRGen):
+    """The separate-multiply form (Q_ADD/Q_SUB of Q_MULs), emitted for every target
+    without a fused rounding multiply-accumulate: its text, and so its code, is unchanged."""
+    def const(s, c, v):
+        key = "%d" % q15(v)
+        if key not in s.consts:
+            s.consts[key] = "c%d" % len(s.consts)
+        return s.consts[key]
+
+    def cmul(s, ar, ai, c, sn, out):
+        t = trivial(c, sn)
+        orr, oii = out
+        if t == "1":
+            s.emit("vf %s=%s, %s=%s;" % (orr, ar, oii, ai)); return
+        if t == "-1":
+            s.emit("vf %s=V_SUB(Z,%s), %s=V_SUB(Z,%s);" % (orr, ar, oii, ai)); return
+        if t == "-i":
+            s.emit("vf %s=%s, %s=V_SUB(Z,%s);" % (orr, ai, oii, ar)); return
+        if t == "+i":
+            s.emit("vf %s=V_SUB(Z,%s), %s=%s;" % (orr, ai, oii, ar)); return
+        cc = s.const("c", abs(c)); ss = s.const("s", abs(sn))
+        k = s.nc; s.nc += 1
+        x1, x2, y1, y2 = ("m%d_%d" % (k, j) for j in range(4))
+        s.emit("vf %s=Q_MUL(%s,%s), %s=Q_MUL(%s,%s);" % (x1, ar, cc, x2, ai, ss))
+        s.emit("vf %s=Q_MUL(%s,%s), %s=Q_MUL(%s,%s);" % (y1, ar, ss, y2, ai, cc))
+        sc = 1 if c >= 0 else -1
+        sg = 1 if sn >= 0 else -1
+        # real = sc*x1 - sg*x2
+        if (sc, sg) == (1, 1):
+            s.emit("vf %s=V_SUB(%s,%s);" % (orr, x1, x2))
+        elif (sc, sg) == (1, -1):
+            s.emit("vf %s=V_ADD(%s,%s);" % (orr, x1, x2))
+        elif (sc, sg) == (-1, -1):
+            s.emit("vf %s=V_SUB(%s,%s);" % (orr, x2, x1))
+        else:
+            s.emit("vf n%s=V_ADD(%s,%s);" % (orr, x1, x2))
+            s.emit("vf %s=V_SUB(Z,n%s);" % (orr, orr))
+        # imag = sg*y1 + sc*y2
+        if (sg, sc) == (1, 1):
+            s.emit("vf %s=V_ADD(%s,%s);" % (oii, y1, y2))
+        elif (sg, sc) == (1, -1):
+            s.emit("vf %s=V_SUB(%s,%s);" % (oii, y1, y2))
+        elif (sg, sc) == (-1, 1):
+            s.emit("vf %s=V_SUB(%s,%s);" % (oii, y2, y1))
+        else:
+            s.emit("vf n%s=V_ADD(%s,%s);" % (oii, y1, y2))
+            s.emit("vf %s=V_SUB(Z,n%s);" % (oii, oii))
+
+    def load(s, idx):
+        o = ("q%d_r" % idx, "q%d_i" % idx)
+        if s.prod:
+            # conj(d*t) = (dr*tr - di*ti) + i(-di*tr - dr*ti). The data element
+            # is stored as (dr, di, -di) so the imaginary part is one subtract.
+            s.emit("vf tR%d=Q_LOADU(tr+TS*%d), tI%d=Q_LOADU(ti+TS*%d);" % (idx, idx, idx, idx))
+            s.emit("vf dR%d=Q_SET1(dq[DS*%d]), dI%d=Q_SET1(dq[DS*%d+1]), nI%d=Q_SET1(dq[DS*%d+2]);"
+                   % (idx, idx, idx, idx, idx, idx))
+            s.emit("vf %s=V_SUB(Q_MUL(dR%d,tR%d),Q_MUL(dI%d,tI%d));" % (o[0], idx, idx, idx, idx))
+            s.emit("vf %s=V_SUB(Q_MUL(nI%d,tR%d),Q_MUL(dR%d,tI%d));" % (o[1], idx, idx, idx, idx))
+            return o
+        if s.tw and idx != 0:
+            s.emit("const vf W%dr=Q_SET1(twr[%d]), W%di=Q_SET1(twi[%d]);" % (idx, idx, idx, idx))
+            s.emit("vf %s=V_SUB(Q_MUL(ar[S*%d],W%dr),Q_MUL(ai[S*%d],W%di));" % (o[0], idx, idx, idx, idx))
+            s.emit("vf %s=V_ADD(Q_MUL(ar[S*%d],W%di),Q_MUL(ai[S*%d],W%dr));" % (o[1], idx, idx, idx, idx))
+            return o
+        s.emit("vf %s=ar[S*%d], %s=ai[S*%d];" % (o[0], idx, o[1], idx))
+        return o
+
+
+def build_q(n, name, tw=False, prod=False, fused=True):
+    g = (QGen if fused else QGenClassic)(n, name, tw, False, prod)
     X = g.rec(list(range(n)))
     for k in range(n):
         g.emit("ar[S*%d]=%s; ai[S*%d]=%s;" % (k, X[k][0], k, X[k][1]))
@@ -114,9 +182,17 @@ if __name__ == "__main__":
            "#ifdef AP_CODELETS_Q15_INL_H_", "#undef AP_CODELETS_Q15_INL_H_",
            "#else", "#define AP_CODELETS_Q15_INL_H_", "#endif", "",
            "HWY_BEFORE_NAMESPACE();", "namespace ap {", "namespace HWY_NAMESPACE {", ""]
+    # AP_Q15_FUSED (q15-inl.h): the target has a one-instruction Q_MLAH/Q_MLSH (AArch64
+    # FEAT_RDM). Elsewhere the separate-multiply codelets, byte for byte as before.
+    out.append("#if AP_Q15_FUSED")
     for nn in (8, 16, 32):
         out.append(build_q(nn, "qsr%d_prod" % nn, prod=True))
         out.append(build_q(nn, "qsr%d_tw" % nn, tw=True))
+    out.append("#else")
+    for nn in (8, 16, 32):
+        out.append(build_q(nn, "qsr%d_prod" % nn, prod=True, fused=False))
+        out.append(build_q(nn, "qsr%d_tw" % nn, tw=True, fused=False))
+    out.append("#endif")
     out += ["}  // namespace HWY_NAMESPACE", "}  // namespace ap",
             "HWY_AFTER_NAMESPACE();", "", "#endif", ""]
     path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "codelets-q15-inl.h")
