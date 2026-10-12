@@ -59,6 +59,13 @@ Falsified (kept out):
 - More pairs per threadgroup at band 256 (p4/p8/p16 t2): 8.46 / 8.85 / 9.90 ms against
   8.30 for p2 (occupancy is not the limit).
 
+- Tier-0 gate rewrites (later round): the band-256 kernel's 16x16 transpose costs 2.7% (deleted:
+  1.249 -> 1.215 ms), so a SIMD-shuffle transpose without threadgroup staging has at most that to
+  gain and needs ~256 selects + 64 shuffles per lane against ~390 FFT flops; not built. Also lost
+  or flat: energy and overflow test from the inputs (1.24-1.27 ms against 1.12), energy from the
+  fp16 powers in fp32 (1.080 vs 1.072), four templates per thread (1.46 vs 1.33), a full-window
+  fast path (real coarse windows are partial), the fp16 twiddle table (-4% kernel, ladder flat).
+
 Where the time goes now (Metal, device ms per segment, replay): tier-0 gate ~37, fine
 forward 13.7 (57% of bandwidth), middle 15.8 (full_series_8192 at ~14% of FMA / 36% of the
 bandwidth-bound ideal), tier 1 ~8.5, refine 4.5, pack 2.7, compaction 1.6, follow-ups 2.4
