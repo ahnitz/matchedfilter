@@ -2754,6 +2754,18 @@ class SegmentPlan:
             if followup is not None:
                 built["fu"] = self._device_followups(ctx, jobs, followup)
             return futures
+        # Settle every call still holding a slot of these plans before the capture begins:
+        # a call settles the previous owner of a slot it takes, and inside the capture that
+        # wait is illegal (the capture fails). Nothing is in flight to wait for at this point
+        # (capture syncs the context first), so each settle is only bookkeeping.
+        from . import _cudacompute
+        _cudacompute.SegmentGraph.wait_all()
+        for bank, _, _ in jobs:
+            for g in bank._groups:
+                p = getattr(g, "_plan", None)
+                owners = p.__dict__.get("_slot_owner") if p is not None else None
+                while owners:
+                    owners.popitem()[1].result()
         self._halves(jobs, True)
         try:
             futures = self._graph.capture(submit)
