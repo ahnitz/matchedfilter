@@ -326,27 +326,8 @@ def _store_cands(bank, cands):
         gatechain._store_cost(path, _cands_key(bank), {"cands": list(cands)})
 
 
-#: Noise rule: a rank beats the model's layout only when its median is more than gatechain.TIE
-#: faster AND the gap exceeds _BLOCK_TRIAL_Z standard errors of the two medians' difference.
-#: Unclear: both ranks are sampled further, up to _BLOCK_TRIAL_MAX each; still unclear, the
-#: model's layout stays (a tie keeps the model).
-_BLOCK_TRIAL_Z = 2.0
+#: Ranks sampled at most this many times each when a contest is unclear (gatechain.measured_choice).
 _BLOCK_TRIAL_MAX = 6
-#: Re-check: after a lock, steady batches stay timed. When the winner's steady median (over
-#: _BLOCK_RECHECK_N batches) exceeds what the trial measured for it, or for the best other
-#: rank, by more than _BLOCK_RECHECK, the lock was wrong for steady state: it is reopened in
-#: MF_COST_FILE, so the next process trials again.
-_BLOCK_RECHECK = 0.15
-_BLOCK_RECHECK_N = 5
-
-
-def _spread(v):
-    """Robust standard deviation of samples (MAD), with the plain one as a floor on 2-3."""
-    v = np.asarray(v, float)
-    if v.size < 2:
-        return float("inf")
-    mad = 1.4826 * float(np.median(np.abs(v - np.median(v))))
-    return max(mad, float(np.std(v, ddof=1)) if v.size <= 3 else mad)
 
 
 class _BlockTrials:
@@ -361,7 +342,7 @@ class _BlockTrials:
       * a batch is a sample only when no plan of the trialling banks is still calibrating
         (chain or Q15 trial; _bank_calibrating), since those switch kernels between calls;
       * a rank r > 0 wins only by more than gatechain.TIE AND by more than the samples' own
-        noise (_BLOCK_TRIAL_Z standard errors); unclear contests sample further, up to
+        noise (gatechain.measured_choice: 2 standard errors); unclear contests sample further, up to
         _BLOCK_TRIAL_MAX, then keep the model's layout;
       * a locked winner is re-checked against steady-state batches (observe) and reopened
         when steady state clearly disagrees with the trial.
@@ -431,23 +412,15 @@ class _BlockTrials:
             self._store(key, partial)        # partial: the next process continues from here
             return
         smp = st["samples"]
+        win, more = gatechain.measured_choice(smp, 0, _BLOCK_TRIAL_MAX)
+        if win is None:
+            # Faster than the model's layout, but not clear of the samples' own noise.
+            st["need"].update(more)
+            partial["need"] = {str(r): v for r, v in st["need"].items()}
+            _log_autotune("BLOCK-TRIAL %s unclear, sampling further %s", key, more)
+            self._store(key, partial)
+            return
         med = {r: float(np.median(v)) for r, v in smp.items()}
-        best = min(med, key=med.get)
-        win = 0
-        if best != 0 and med[best] < med[0] * (1.0 - gatechain.TIE):
-            se = float(np.sqrt(_spread(smp[0]) ** 2 / len(smp[0])
-                               + _spread(smp[best]) ** 2 / len(smp[best])))
-            if med[0] - med[best] > _BLOCK_TRIAL_Z * se:
-                win = best
-            elif min(len(smp[0]), len(smp[best])) < _BLOCK_TRIAL_MAX:
-                # Faster, but not clear of the samples' own noise: measure both further.
-                for r in (0, best):
-                    st["need"][r] = len(smp[r]) + 1
-                partial["need"] = {str(r): v for r, v in st["need"].items()}
-                _log_autotune("BLOCK-TRIAL %s rank %d vs 0 unclear (gap %.3g, se %.3g): "
-                              "sampling further", key, best, med[0] - med[best], se)
-                self._store(key, partial)
-                return
         st["winner"], st["median"] = win, med
         _log_autotune("BLOCK-TRIAL %s locked rank %d  median s/unit %s", key, win,
                       {r: "%.3g" % v for r, v in med.items()})
@@ -459,19 +432,15 @@ class _BlockTrials:
     def observe(self, key, value):
         """A steady-state batch of a locked key (s/unit). Reopens the lock when steady state
         clearly disagrees with the trial. Returns True when it reopened."""
-        from . import _log_autotune
+        from . import _log_autotune, gatechain
         st = self._st(key)
         w, med = st["winner"], st["median"]
         if w is None or not med or w not in med or st["reopened"]:
             return False
         st["steady"].append(float(value))
-        if len(st["steady"]) < _BLOCK_RECHECK_N:
+        if not gatechain.steady_disagrees(st["steady"], med, w):
             return False
-        steady = float(np.median(st["steady"][-_BLOCK_RECHECK_N:]))
-        others = [v for r, v in med.items() if r != w]
-        ref = min([med[w]] + others)
-        if steady <= ref * (1.0 + _BLOCK_RECHECK):
-            return False
+        steady = float(np.median(st["steady"][-gatechain.RECHECK_N:]))
         st["reopened"] = True
         _log_autotune("BLOCK-TRIAL %s rank %d steady %.3g s/unit vs trial %s: reopened",
                       key, w, steady, {r: "%.3g" % v for r, v in med.items()})
@@ -570,17 +539,30 @@ def _chain_trials_begin(jobs):
     time is that candidate's. Returns [(trial key, chain, plans, settled)]; settled when every
     plan already ran that chain in an earlier batch (its first batch builds recordings and
     calibrates: one-off costs, not the chain's)."""
-    from . import _chain_trial_next, _chain_trial_pending
-    by = {}
+    from . import _chain_trial_next, _chain_trial_pending, _CHAIN_TRIALS, _AUTOTUNE_LOCK
+    by, watch = {}, {}
     for bank, _, kw in jobs:
         if (kw or {}).get("template_index") is not None:
             continue
         for g in bank._groups:
             p = getattr(g, "_plan", None)
-            tk = getattr(p, "_chain_trial", None) if p is not None else None
-            if tk is not None and getattr(p, "_gpu", None) is not None:
+            if p is None or getattr(p, "_gpu", None) is None:
+                continue
+            tk = getattr(p, "_chain_trial", None)
+            if tk is not None:
                 by.setdefault(tk, {})[id(p)] = p
+            elif getattr(p, "_chain_monitor", None) is not None:
+                watch.setdefault(p._chain_monitor, {})[id(p)] = p
     out = []
+    for tk, plans in watch.items():
+        # Locked GPU chain trials: whole batches re-check the lock (_chain_steady), once.
+        with _AUTOTUNE_LOCK:
+            tr = _CHAIN_TRIALS.get(tk)
+            ok = (tr is not None and tr.get("winner") is not None and tr.get("median")
+                  and not tr.get("rechecked") and tk not in by
+                  and all(tuple(p._chain) == tuple(tr["winner"]) for p in plans.values()))
+        if ok:
+            out.append((tk, tuple(tr["winner"]), list(plans.values()), True, True))
     for tk, plans in by.items():
         c = _chain_trial_next(tk)
         if c is None:
@@ -597,7 +579,7 @@ def _chain_trials_begin(jobs):
             p._chain_last_batch = (tuple(c), run)
         if settled:
             _chain_trial_pending(tk, c, +1)
-        out.append((tk, tuple(c), list(plans.values()), settled))
+        out.append((tk, tuple(c), list(plans.values()), settled, False))
     return out
 
 
@@ -607,8 +589,13 @@ def _trial_end(tok):
         return
     t0, plan, work, chains = tok
     dt = time.perf_counter() - t0
-    from . import _chain_trial_batch, _chain_trial_pending
-    for tk, c, plans, settled in chains:
+    from . import _chain_trial_batch, _chain_trial_pending, _chain_steady
+    for tk, c, plans, settled, steady in chains:
+        if steady:
+            if work > 0 and _chain_steady(tk, dt / work):
+                for p in plans:
+                    p._chain_monitor = None
+            continue
         if settled:
             _chain_trial_pending(tk, c, -1)
         from . import _log_autotune
