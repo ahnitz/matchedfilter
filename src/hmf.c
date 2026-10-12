@@ -44,6 +44,10 @@ struct ap_hmf_plan {
   hmf_tier tier[AP_HMF_MAX_TIERS];
   ap_mf_plan *full;
   ap_plan *full_fft;
+  /* The platform FFT for the block forward (fft_accel.c): a candidate the autotuner
+     times against the engine's transform on real calls (ap_hmf_set_platform_fft). */
+  ap_accel *accel;
+  int use_accel;
   float *fwd,*spec;
   const float **dspec;
   int sparse;                 /* ap_hmf_set_sparse: rows that do not fire write counts only */
@@ -136,6 +140,7 @@ ap_hmf_plan *ap_hmf_create_chain(size_t n,size_t k,int ndata,int ntmpl,
   }
   p->full_fft=ap_create(n);
   p->fwd=ap_alloc64(2*n*sizeof(float));
+  p->accel=ap_accel_create(n);           /* NULL where the platform has none */
   p->spec=ap_alloc64((size_t)grp*2*n*sizeof(float));
   p->dspec=calloc((size_t)p->nd,sizeof(*p->dspec));
   p->dready=calloc((size_t)p->nd,1);
@@ -161,6 +166,7 @@ void ap_hmf_destroy(ap_hmf_plan *p){
     free(tr->fire_d); free(tr->fire_t);
   }
   ap_destroy(p->full_fft);
+  ap_accel_destroy(p->accel);
   free(p->fwd); free(p->spec); free(p->dspec); free(p->dready); free(p->tready);
   if(p->twiddles) free(p->twiddles);
   if(p->tw_scratch) free(p->tw_scratch);
@@ -171,6 +177,13 @@ void ap_hmf_destroy(ap_hmf_plan *p){
   if(p->dump) fclose(p->dump);
   free(p->qpass); free(p->qd); free(p->qt);
   free(p);
+}
+
+int ap_hmf_set_platform_fft(ap_hmf_plan *p,int on){
+  if(!p) return -1;
+  if(on && !p->accel) return -1;
+  p->use_accel=on?1:0;
+  return 0;
 }
 
 int ap_hmf_set_q15(ap_hmf_plan *p,int on){
@@ -359,13 +372,17 @@ int ap_hmf_run_series(ap_hmf_plan *p,
          templates.  n is a power of two, so 1/n is exact and the transform is
          linear: scaling before is bit-for-bit the same as scaling after, which
          the fixtures check by reproducing pycbc's SNRs to 0.0e+00. */
+      float *const sp=p->spec+(size_t)j*2*n;
+      if(p->use_accel){
+        ap_accel_forward(p->accel,have ? series+2*s0 : series,have,1.0f/(float)n,sp);
+      } else {
       { const float inv=1.0f/(float)n;
         const float * restrict src=have ? series+2*s0 : series;
         float * restrict dst=p->fwd;
         for(size_t k=0;k<2*have;k++) dst[k]=src[k]*inv; }
       if(have<n) memset(p->fwd+2*have,0,2*(n-have)*sizeof(float));
-      float *const sp=p->spec+(size_t)j*2*n;
       ap_fft(p->full_fft,p->fwd,sp,AP_FORWARD);
+      }
       if(ap_hmf_set_data(p,j,sp)) return -1;
       /* The full spectrum is NOT ingested here.  Only the coarse band is read
          by every pair; the full one is read only when a pair fires, which at

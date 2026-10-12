@@ -34,6 +34,12 @@ int      ap_plan_split(const ap_plan *p, int *n1, int *n2);
 /* Full transform, AP_FORWARD or AP_BACKWARD.  Neither direction scales by 1/N. */
 void ap_fft(ap_plan *p, const float *in, float *out, int sign);
 
+/* The platform's FFT for the block forward (fft_accel.c): NULL where there is none. */
+typedef struct ap_accel ap_accel;
+ap_accel *ap_accel_create(size_t n);
+void ap_accel_destroy(ap_accel *a);
+void ap_accel_forward(ap_accel *a, const float *src, size_t have, float scale, float *out);
+
 size_t ap_nbins(const ap_plan *p, size_t binsize, size_t start, size_t end);
 
 /* Binned maximum over one transform, and the two variants the matched filter
