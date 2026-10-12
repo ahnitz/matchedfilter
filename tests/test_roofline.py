@@ -117,3 +117,20 @@ def test_report_is_sum_of_maxima():
     assert r["fraction"] == pytest.approx(r["roofline_s"] / 0.1)
     assert r["dominant"] == "refine n512"
     assert [s["bound"] for s in r["stages"]] == ["compute", "memory"]
+
+
+def test_x86_int16_peak_counts_multiply_pipes():
+    """Haswell has one vector int16 multiply pipe, so its int16 peak is its fp32 peak, not
+    twice it; Zen 2-5 and Skylake+ have two."""
+    from matchedfilter import _roofline as r
+    hsw = dict(flags="avx avx2 fma", vendor_id="GenuineIntel", model="63")
+    hsw["cpu family"] = "6"
+    width, fma, _, imul = r._x86_core(hsw)
+    assert (width, fma, imul) == (256, 2, 1)
+    assert (width // 16) * imul == (width // 32) * fma          # int16 rate == fp32 rate
+    zen5 = {"flags": "avx avx2 fma avx512f", "vendor_id": "AuthenticAMD", "cpu family": "26",
+            "model": "112"}
+    assert r._x86_core(zen5)[3] == 2
+    skx = {"flags": "avx avx2 fma avx512f", "vendor_id": "GenuineIntel", "cpu family": "6",
+           "model": "85"}
+    assert r._x86_core(skx)[3] == 2
