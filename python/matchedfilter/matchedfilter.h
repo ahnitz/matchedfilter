@@ -203,6 +203,8 @@ int ap_hmf_set_q15(ap_hmf_plan *p, int on);
 /* The block forward through the platform FFT (macOS: vDSP) instead of the engine's; -1 where
    there is none. Results differ by fp32 rounding only. */
 int ap_hmf_set_platform_fft(ap_hmf_plan *p, int on);
+/* The continuous correlation (correlate_series_continuous) through the platform FFT. */
+int ap_mf_set_platform_fft(ap_mf_plan *p, int on);
 int ap_hmf_get_q15(const ap_hmf_plan *p);
 /* Pairs the screen passed to the float first tier, and ticks spent screening. */
 int ap_hmf_q15_stats(const ap_hmf_plan *p, long *passed, unsigned long long *ticks);

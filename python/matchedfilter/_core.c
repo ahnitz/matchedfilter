@@ -265,6 +265,10 @@ static PyObject *MF_q15_screen(MFObject *self,PyObject *args){
   PyBuffer_Release(&bp);PyBuffer_Release(&bs);
   return PyLong_FromLong(r);
 }
+static PyObject *MF_set_platform_fft(MFObject *self,PyObject *args){
+  int on; if(!PyArg_ParseTuple(args,"p",&on)) return NULL;
+  return PyBool_FromLong(ap_mf_set_platform_fft(self->p,on)==0);
+}
 static PyObject *MF_q15_lanes(MFObject *self,PyObject *unused){
   (void)unused; return PyLong_FromLong(ap_mf_q15_lanes(self->p));
 }
@@ -473,6 +477,7 @@ static PyObject *MF_nbins(MFObject *self,PyObject *args){
 }
 static PyMethodDef MF_methods[]={
   {"set_data",(PyCFunction)MF_set_data,METH_VARARGS,"set_data(i, buffer)"},
+  {"set_platform_fft",(PyCFunction)MF_set_platform_fft,METH_VARARGS,"set_platform_fft(on) -> True if correlate_series_continuous now runs through the platform FFT"},
   {"set_template",(PyCFunction)MF_set_template,METH_VARARGS,"set_template(i, buffer)"},
   {"set_data_batch",(PyCFunction)MF_set_data_batch,METH_VARARGS,"set_data_batch(i0, buffer)"},
   {"set_template_batch",(PyCFunction)MF_set_template_batch,METH_VARARGS,"set_template_batch(i0, buffer)"},

@@ -686,10 +686,13 @@ def _corr_block_costs(n: int, device: Optional[Any] = None) -> Tuple[float, floa
     from . import CorrelationFilter, _automatic_series_layout, gatechain
     path = gatechain._cost_file()
     key = "corr,%d" % n if dkey == "cpu" else "corr,%d,%s" % (n, dkey)
+    from . import _CORR_PFFT
     if path is not None:
         stored = gatechain._load_cost_file(path).get(key)
         if stored is not None:
             _CORR_COSTS[(n, dkey)] = hit = (float(stored[0]), float(stored[1]))
+            if dkey == "cpu":
+                _CORR_PFFT[n] = bool(gatechain._load_cost_file(path).get("corr-pfft,%d" % n, False))
             return hit
     rng = np.random.default_rng(7)
     taps = n // 4
@@ -700,6 +703,32 @@ def _corr_block_costs(n: int, device: Optional[Any] = None) -> Tuple[float, floa
     nblocks = 8 if dkey == "cpu" else max(8, (1 << 19) // (n - taps))
     L = nblocks * (n - taps) + n
     ser = ((rng.standard_normal(L) + 1j * rng.standard_normal(L)) / np.sqrt(2)).astype(np.complex64)
+    # CPU: the engine's transform and the platform FFT (vDSP on macOS) are both priced, and
+    # the cheaper at a group of 16 templates is the one this n runs (_CORR_PFFT).
+    modes = [False]
+    if dkey == "cpu":
+        probe = CorrelationFilter(n, ndata=1, ntemplates=1, valid=(taps // 2, n - taps // 2))
+        probe.set_templates(np.zeros((1, n), np.complex64))
+        if probe._execution_plan().set_platform_fft(True):
+            modes.append(True)
+    hits = {}
+    for mode in modes:
+        _CORR_PFFT[n] = mode
+        hits[mode] = _corr_measure(n, device, dkey, rng, taps, nblocks, L, ser)
+    best_mode = min(hits, key=lambda m: hits[m][0] + 16 * hits[m][1])
+    _CORR_PFFT[n] = best_mode
+    hit = hits[best_mode]
+    _CORR_COSTS[(n, dkey)] = hit
+    if path is not None:
+        gatechain._store_cost(path, key, list(hit))
+        if dkey == "cpu":
+            gatechain._store_cost(path, "corr-pfft,%d" % n, bool(best_mode))
+    return hit
+
+
+def _corr_measure(n, device, dkey, rng, taps, nblocks, L, ser):
+    """(fixed, per template) seconds per block through the bank's continuous path."""
+    from . import CorrelationFilter, _automatic_series_layout
     per_block = []
     for nt in (2, 16):
         h = np.zeros((nt, n), np.complex64)
@@ -717,7 +746,7 @@ def _corr_block_costs(n: int, device: Optional[Any] = None) -> Tuple[float, floa
             run = lambda: cf._continuous_gpu(ser, st, 0, nt, dest)
         else:
             dest = np.zeros((nt, L), np.complex64)
-            ep = cf._execution_plan()
+            ep = cf._continuous_plan()
             run = lambda: ep.correlate_series_continuous(ser, st, lo, hi, 0, nt, dest)
         run()
         best = np.inf
@@ -727,11 +756,7 @@ def _corr_block_costs(n: int, device: Optional[Any] = None) -> Tuple[float, floa
             best = min(best, time.perf_counter() - t0)
         per_block.append(best / len(st))
     b = max((per_block[1] - per_block[0]) / 14.0, 0.0)
-    hit = (max(per_block[0] - 2.0 * b, 0.0), b)
-    _CORR_COSTS[(n, dkey)] = hit
-    if path is not None:
-        gatechain._store_cost(path, key, list(hit))
-    return hit
+    return (max(per_block[0] - 2.0 * b, 0.0), b)
 
 
 def _batch_target(n: int, max_batch: Optional[int]) -> int:
@@ -2197,10 +2222,10 @@ class TimeDomainFilterBank:
         lo, hi = cplan.valid
         if cplan._gpu is None:
             if dest.flags.c_contiguous and dest.flags.writeable:
-                cplan._execution_plan().correlate_series_continuous(ser, st, lo, hi, t0, nt, dest)
+                cplan._continuous_plan().correlate_series_continuous(ser, st, lo, hi, t0, nt, dest)
             else:
                 tmp = np.empty((nt, S), dtype=np.complex64)
-                cplan._execution_plan().correlate_series_continuous(ser, st, lo, hi, t0, nt, tmp)
+                cplan._continuous_plan().correlate_series_continuous(ser, st, lo, hi, t0, nt, tmp)
                 for a, b in self._block_coverage(S, st, lo, hi):
                     dest[:, a:b] = tmp[:, a:b]                # see below
             return

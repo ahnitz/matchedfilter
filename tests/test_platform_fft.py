@@ -50,3 +50,30 @@ def test_platform_fft_refused_where_absent():
     on = h.set_platform_fft(True)
     import sys
     assert on == (sys.platform == "darwin")
+
+
+def test_continuous_correlation_platform_fft_matches_engine():
+    """The middle stage's continuous correlation through the platform FFT (a cost-model
+    candidate, _CORR_PFFT) equals the engine's to fp32 rounding."""
+    from matchedfilter import CorrelationFilter, _automatic_series_layout
+    n, nt, taps = 8192, 4, 2048
+    rng = np.random.default_rng(1)
+    h = np.zeros((nt, n), np.complex64)
+    h[:, :taps] = rng.standard_normal((nt, taps))
+    L = 6 * n
+    ser = (rng.standard_normal(L) + 1j * rng.standard_normal(L)).astype(np.complex64)
+    cf = CorrelationFilter(n, ndata=1, ntemplates=nt, valid=(taps // 2, n - taps // 2))
+    cf.set_templates(np.fft.fft(h, axis=1).astype(np.complex64))
+    lo, hi = cf.valid
+    st, _, _ = _automatic_series_layout(L, cf.valid)
+    ep = cf._execution_plan()
+    out = {}
+    for on in (False, True):
+        if not ep.set_platform_fft(on):
+            assert on
+            return                               # no platform FFT here
+        d = np.zeros((nt, L), np.complex64)
+        ep.correlate_series_continuous(ser, st, lo, hi, 0, nt, d)
+        out[on] = d
+    a, b = out[False], out[True]
+    assert np.abs(a - b).max() <= 1e-5 * np.abs(a).max()
