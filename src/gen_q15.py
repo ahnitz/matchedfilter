@@ -4,7 +4,8 @@ Same DAGs as gen.py's split-radix codelets, on a vector of int16 lanes (`vq`,
 twice the float lane count at a given vector width). The arithmetic is exact
 integer add/subtract plus Q15 rounding multiplies (Q_MUL = round(a*b / 2^15),
 vpmulhrsw on x86) and multiply-accumulates (Q_MLAH/Q_MLSH = acc +- round(a*b / 2^15),
-one SQRDMLAH/SQRDMLSH on AArch64, Q_ADD/Q_SUB(acc, Q_MUL) elsewhere), and nothing in a codelet rescales: the caller sizes its
+one SQRDMLAH/SQRDMLSH on AArch64, Q_ADD/Q_SUB(acc, Q_MUL) elsewhere; every rounding is to
+nearest, within 1/2 LSB), and nothing in a codelet rescales: the caller sizes its
 inputs so that every intermediate stays in range (see q15-inl.h for the bound).
 Twiddle constants are |cos|, |sin| rounded to Q15 and the signs ride on the
 adds, as gen.py does for the float FMAs.
@@ -43,7 +44,7 @@ class QGen(SRGen):
         # x1 = ar*cc, x2 = ai*ss, y1 = ar*ss, y2 = ai*cc; real = sc*x1 - sg*x2,
         # imag = sg*y1 + sc*y2. One product of each pair is a plain Q_MUL and the other
         # rides in a rounding multiply-accumulate (Q_MLAH/Q_MLSH: acc +- round(a*b/2^15),
-        # one instruction where the target has it, else exactly Q_ADD/Q_SUB(acc, Q_MUL)).
+        # one instruction where the target has it, else Q_ADD/Q_SUB(acc, Q_MUL)).
         sc = 1 if c >= 0 else -1
         sg = 1 if sn >= 0 else -1
         if (sc, sg) == (1, 1):
