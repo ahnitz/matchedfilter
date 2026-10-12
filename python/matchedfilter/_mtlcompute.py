@@ -436,7 +436,11 @@ class _FusedBatch:
     methods that open them return, so contexts never interleave inside one encoder."""
 
     #: Submissions per command buffer; MF_GPU_FUSE_CHUNK overrides (shared with Vulkan).
-    chunk = int(__import__("os").environ.get("MF_GPU_FUSE_CHUNK", "16"))
+    #: Metal commits are cheap and the device sat idle while the host filled a chunk:
+    #: M2 ladder (bank3, H1) 100.8 ms per segment at 16, 95.8 at 4, 92.6 at 2, 93.6 at 1;
+    #: with --pipeline 110.0 at 16, 96.9 at 1. Committing on device idle (status) instead,
+    #: 95.7. So 2.
+    chunk = int(__import__("os").environ.get("MF_GPU_FUSE_CHUNK", "2"))
 
     def __init__(self, dev):
         self.dev, self.cmd, self.count = dev, None, 0
