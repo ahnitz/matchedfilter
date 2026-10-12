@@ -2308,9 +2308,14 @@ def _chain_lock_key(tkey):
     return "chain-trial|%d|%g|%g|%d|%s" % (n, snr, fd, tiers, device)
 
 
-def _stored_chain_lock(tkey, shortlist):
-    """A chain-trial winner kept in MF_COST_FILE by an earlier process, if it is still on this
-    plan's shortlist. Chain trials, like block-size trials (time_domain._BlockTrials) and the cost
+def _stored_chain_lock(tkey, feasible):
+    """A chain-trial winner kept in MF_COST_FILE by an earlier process, if this plan can run it
+    (`feasible`: every chain the gate model covers for it). Deliberately NOT only when it is
+    on this process's shortlist: the lock key is the trial's identity, and in-process every
+    plan with the key adopts the winner whatever its own shortlist -- the shortlist is a
+    per-process pruning of what to measure (the model's best few for this group's shape),
+    not of what is valid. Filtered by it, a group whose shortlist missed the winner ignored
+    the lock and the chain varied between processes. Chain trials, like block-size trials (time_domain._BlockTrials) and the cost
     models themselves, are per machine: re-run in every process they lock differently on noise,
     and that was the remaining process-to-process variation of a pinned layout
     (docs/gate-model.md, "Block-size trials, round 3")."""
@@ -2321,7 +2326,7 @@ def _stored_chain_lock(tkey, shortlist):
     if not isinstance(rec, dict):
         return None
     chain = tuple(int(b) for b in rec.get("chain", ()))
-    return chain if chain in tuple(tuple(c) for c in shortlist) else None
+    return chain if chain in tuple(tuple(c) for c in feasible) else None
 
 
 def _chain_trial_next(tkey):
@@ -2341,22 +2346,27 @@ def _chain_trial_next(tkey):
                     c = tuple(int(b) for b in k.split(",") if b)
                     if c in tr["batch"]:            # still a candidate here
                         tr["batch"][c] = [float(x) for x in v]
+                for k, v in (rec.get("need") or {}).items():
+                    c = tuple(int(b) for b in k.split(",") if b)
+                    tr.setdefault("batch_need", {})[c] = int(v)
         bs = tr["batch"]
         for c in tr["samples"]:
             bs.setdefault(c, [])
         # Candidates in turn, each for a run of batches: a switch rebuilds thresholds and
         # uploads (the batch after it is not a sample), so alternating every batch measured
         # mostly the switching -- cheapest for the chain with fewest tiers.
-        need = int(os.environ.get("MF_CHAIN_TRIALS", _CHAIN_BATCH_TRIALS))
+        base = int(os.environ.get("MF_CHAIN_TRIALS", _CHAIN_BATCH_TRIALS))
+        bneed = tr.setdefault("batch_need", {})
+        needs = {c: max(base, bneed.get(c, 0)) for c in bs}
         # Samples taken plus batches in flight that will be (a caller keeping batches in
         # flight records them later than the next batch starts).
         pend = tr.setdefault("batch_pending", {})
         have = {c: len(bs[c]) + pend.get(c, 0) for c in bs}
         cur = tr.get("batch_current")
-        if cur is not None and cur in bs and (have[cur] < need
-                                              or all(v >= need for v in have.values())):
+        if cur is not None and cur in bs and (have[cur] < needs[cur]
+                                              or all(have[c] >= needs[c] for c in bs)):
             return cur          # (all sampled, the last samples still in flight: no switch)
-        cur = tr["batch_current"] = min(bs, key=lambda c: (have[c] >= need, have[c],
+        cur = tr["batch_current"] = min(bs, key=lambda c: (have[c] >= needs[c], have[c],
                                                           list(tr["samples"]).index(c)))
         return cur
 
@@ -2383,28 +2393,107 @@ def _chain_trial_batch(tkey, chain, value):
         bs = tr.setdefault("batch", {c: [] for c in tr["samples"]})
         bs.setdefault(tuple(chain), []).append(float(value))
         _log_autotune("CHAIN-TRIAL batch sample %s %.3g", tuple(chain), value)
-        need = int(os.environ.get("MF_CHAIN_TRIALS", _CHAIN_BATCH_TRIALS))
-        if not all(len(v) >= need for v in bs.values()):
+        base = int(os.environ.get("MF_CHAIN_TRIALS", _CHAIN_BATCH_TRIALS))
+        bneed = tr.setdefault("batch_need", {})
+        done = all(len(v) >= max(base, bneed.get(c, 0)) for c, v in bs.items())
+        if done:
+            # The shared rule (gatechain.measured_choice): the model's chain (the shortlist's
+            # first) stands unless another is clearly faster, past TIE and the noise.
+            w, more = _gatechain.measured_choice(bs, next(iter(tr["samples"])), 2 * base)
+            if w is None:
+                bneed.update(more)
+                done = False
+                _log_autotune("CHAIN-TRIAL (batches) unclear, sampling further %s", more)
+        if not done and sum(len(v) for v in bs.values()) >= _TRIAL_BUDGET * base * len(bs):
+            w = _trial_budget_choice(bs, next(iter(tr["samples"])), base)
+            if w is not None:
+                done = True
+                _log_autotune("CHAIN-TRIAL (batches) budget spent: deciding on %s",
+                              [c for c, v in bs.items() if len(v) >= base])
+        if not done:
             # Unfinished: kept in MF_COST_FILE, so a shorter process than the trial
             # continues it in the next (as block-size trials do).
             path = _gatechain._cost_file()
             if path is not None:
                 _gatechain._store_cost(path, _chain_lock_key(tkey) + "|batches",
-                                       {"samples": {",".join(map(str, c)): v
-                                                    for c, v in bs.items()}})
-        if all(len(v) >= need for v in bs.values()):
-            med = {c: float(np.median(v)) for c, v in bs.items()}
-            tr["winner"] = _gatechain.pick_stable(med, med.get, _gatechain.canonical_order)
+                                       {"samples": {_chain_str(c): v for c, v in bs.items()},
+                                        "need": {_chain_str(c): v for c, v in bneed.items()}})
+        else:
+            med = {c: float(np.median(v)) for c, v in bs.items() if len(v)}
+            _chain_lock(tkey, tr, w, med)
             _log_autotune("CHAIN-TRIAL (batches) locked %s  median s/unit %s", tr["winner"],
                           {c: "%.3g" % v for c, v in med.items()})
-            _store_chain_lock(tkey, tr["winner"])
         return tr["winner"]
 
 
-def _store_chain_lock(tkey, chain):
+#: A trial that has taken this many times its per-candidate samples in total without locking
+#: decides among the candidates it measured (_trial_budget_choice): candidates some live plan
+#: never runs -- another process's shortlist, a group that stopped calling -- must not keep a
+#: trial open for good (a partial "|batches" record with two empty candidates never finished).
+_TRIAL_BUDGET = 3
+
+
+def _trial_budget_choice(samples, model, base):
+    """The shared rule over the candidates with at least `base` samples (model first); None
+    while none has."""
+    sub = {c: v for c, v in samples.items() if len(v) >= base}
+    if not sub:
+        return None
+    w, _ = _gatechain.measured_choice(sub, model if model in sub else next(iter(sub)), 0)
+    return w
+
+
+def _chain_str(c):
+    return ",".join(str(int(b)) for b in c)
+
+
+def _store_chain_lock(tkey, chain, median=None, rechecked=False):
     path = _gatechain._cost_file()
     if path is not None and tkey is not None:
-        _gatechain._store_cost(path, _chain_lock_key(tkey), {"chain": [int(b) for b in chain]})
+        rec = {"chain": [int(b) for b in chain], "rechecked": bool(rechecked)}
+        if median:
+            rec["median"] = {_chain_str(c): float(v) for c, v in median.items()}
+        _gatechain._store_cost(path, _chain_lock_key(tkey), rec)
+
+
+def _chain_lock_state(tkey):
+    """(trial medians {chain: s/unit}, rechecked) of the lock on file, for the re-check."""
+    path = _gatechain._cost_file()
+    rec = _gatechain._load_cost_file(path).get(_chain_lock_key(tkey)) if path else None
+    if not isinstance(rec, dict):
+        return None, False
+    med = rec.get("median")
+    med = ({tuple(int(b) for b in k.split(",") if b): float(v) for k, v in med.items()}
+           if isinstance(med, dict) else None)
+    return med, bool(rec.get("rechecked"))
+
+
+def _chain_lock(tkey, tr, winner, median):
+    """Lock a chain trial (caller holds _AUTOTUNE_LOCK): winner, the medians the re-check
+    compares steady state with, and the lock on file."""
+    tr["winner"], tr["median"] = tuple(winner), dict(median)
+    _store_chain_lock(tkey, tr["winner"], median, tr.get("rechecked", False))
+
+
+def _chain_steady(tkey, value):
+    """A steady-state sample (s/unit, the trial's own unit) of a locked chain trial: reopens
+    the lock on file -- the next process trials again -- when steady state contradicts the
+    trial, once per key (gatechain.observe_steady)."""
+    with _AUTOTUNE_LOCK:
+        tr = _CHAIN_TRIALS.get(tkey)
+        if tr is None:
+            return False
+
+        def reopen():
+            path = _gatechain._cost_file()
+            if path is not None:
+                _gatechain._store_cost(path, _chain_lock_key(tkey),
+                                       {"rechecked": True,
+                                        "reopened": {"chain": _chain_str(tr["winner"]),
+                                                     "steady": float(np.median(tr["steady"][-5:]))}})
+                _gatechain._store_cost(path, _chain_lock_key(tkey) + "|batches", {"samples": {}})
+            _log_autotune("CHAIN-TRIAL %s steady state contradicts the trial: reopened", tkey)
+        return _gatechain.observe_steady(tr, value, reopen)
 #: (n, snr, fd, chain, device) -> {"samples": {False: [...], True: [...]}, "winner": bool|None}
 _Q15_TRIALS = {}
 #: (chain-choice key, chain) -> whether the cost model prices the Q15 screen cheaper
@@ -2567,8 +2656,13 @@ class HierarchicalFilter(MatchedFilter):
             path = _gatechain._cost_file()
             if path is not None:
                 rec = _gatechain._load_cost_file(path).get(self._q15_lock_key(tkey))
-                if isinstance(rec, dict) and "q15" in rec:
-                    tr["winner"] = bool(rec["q15"])
+                if isinstance(rec, dict):
+                    tr["rechecked"] = bool(rec.get("rechecked"))
+                    if "q15" in rec:
+                        tr["winner"] = bool(rec["q15"])
+                        m = rec.get("median")
+                        if isinstance(m, dict):
+                            tr["median"] = {k == "True": float(v) for k, v in m.items()}
         return tr
 
     def _q15_before_call(self):
@@ -2579,12 +2673,13 @@ class HierarchicalFilter(MatchedFilter):
         with _AUTOTUNE_LOCK:
             tr = self._q15_trial()
             win = tr["winner"]
+            watch = win is not None and tr.get("median") and not tr.get("rechecked")
             want = win if win is not None else len(tr["samples"][True]) < len(tr["samples"][False])
         if bool(want) != bool(self._q15):
             self._q15 = bool(want) and self._mf.set_q15(True)
             if not want:
                 self._mf.set_q15(False)
-        return win is None
+        return win is None or bool(watch)
 
     def calibrating(self):
         """Whether this plan is still settling a measured choice -- its chain trial, or the Q15
@@ -2600,36 +2695,46 @@ class HierarchicalFilter(MatchedFilter):
         return False
 
     def _q15_record(self, dt, pairs):
+        """One timed call: a Q15 trial sample, or -- once locked -- a steady sample for the
+        one re-check. Both follow the shared rule (gatechain.measured_choice, observe_steady)."""
         with _AUTOTUNE_LOCK:
             tr = _Q15_TRIALS.get(self._q15_trial_key())
-            if tr is None or tr["winner"] is not None or pairs <= 0:
+            if tr is None or pairs <= 0:
+                return
+            key = self._q15_lock_key(self._q15_trial_key())
+            path = _gatechain._cost_file()
+            if tr["winner"] is not None:
+                if bool(self._q15) != bool(tr["winner"]):
+                    return
+
+                def reopen():
+                    if path is not None:
+                        _gatechain._store_cost(path, key, {"rechecked": True,
+                                                           "reopened": {"q15": bool(tr["winner"])}})
+                    _log_autotune("Q15-TRIAL chain=%s steady state contradicts the trial: reopened",
+                                  self._chain)
+                _gatechain.observe_steady(tr, dt / pairs, reopen)
                 return
             tr["samples"][bool(self._q15)].append(dt / pairs)
-            need = max(int(os.environ.get("MF_CHAIN_TRIALS", _CHAIN_TRIALS_PER_CAND)),
-                       tr.get("need", 0))
-            if all(len(v) >= need for v in tr["samples"].values()):
-                med = {k: float(np.median(v)) for k, v in tr["samples"].items()}
-                # The faster side wins only clear of TIE and of the samples' own noise; a tie
-                # keeps the cost model's choice (a 6% "win" on noisy samples locked the
-                # screen off on dev2, and steady state ran 5% slower without it).
-                from .time_domain import _spread, _BLOCK_TRIAL_Z
-                fast = med[True] < med[False]
-                lo, hi = (True, False) if fast else (False, True)
-                se = float(np.sqrt(sum(_spread(tr["samples"][k]) ** 2 / len(tr["samples"][k])
-                                       for k in (True, False))))
-                past_tie = med[lo] < med[hi] * (1.0 - _gatechain.TIE)
-                clear = past_tie and med[hi] - med[lo] > _BLOCK_TRIAL_Z * se
-                if past_tie and not clear and need < 2 * _CHAIN_TRIALS_PER_CAND:
-                    tr["need"] = need + 2          # faster, inside the noise: sample further
-                    return
-                tr["winner"] = fast if clear else bool(getattr(self, "_q15_pref", False))
-                path = _gatechain._cost_file()
-                if path is not None:
-                    _gatechain._store_cost(path, self._q15_lock_key(self._q15_trial_key()),
-                                           {"q15": bool(tr["winner"]),
-                                            "median": {str(k): v for k, v in med.items()}})
-                _log_autotune("Q15-TRIAL chain=%s locked q15=%s  median s/pair %s", self._chain,
-                              tr["winner"], {k: "%.3g" % v for k, v in med.items()})
+            base = int(os.environ.get("MF_CHAIN_TRIALS", _CHAIN_TRIALS_PER_CAND))
+            need = tr.setdefault("need", {})
+            if not all(len(v) >= max(base, need.get(k, 0)) for k, v in tr["samples"].items()):
+                return
+            # The cost model's choice stands unless the other setting is clearly faster
+            # (a 6% "win" on noisy samples locked the screen off on dev2, and steady state
+            # ran 5% slower without it).
+            model = bool(getattr(self, "_q15_pref", False))
+            w, more = _gatechain.measured_choice(tr["samples"], model, 2 * base)
+            if w is None:
+                need.update(more)
+                return
+            med = {k: float(np.median(v)) for k, v in tr["samples"].items()}
+            tr["winner"], tr["median"] = bool(w), med
+            if path is not None:
+                _gatechain._store_cost(path, key, {"q15": bool(w), "rechecked": bool(tr.get("rechecked")),
+                                                   "median": {str(k): v for k, v in med.items()}})
+            _log_autotune("Q15-TRIAL chain=%s locked q15=%s  median s/pair %s", self._chain,
+                          tr["winner"], {k: "%.3g" % v for k, v in med.items()})
 
     def _restore_into(self, plan):
         """Replay reference, templates and data into a freshly built plan."""
@@ -2825,15 +2930,17 @@ class HierarchicalFilter(MatchedFilter):
                 (q for q in plans if near(q)),
                 key=lambda q: (q["chain"] != best["chain"], q["cost"])))
             hit = (tuple(best["chain"]), shortlist[:_CHAIN_SHORTLIST_MAX if self.device.kind != "gpu"
-                                                   else _CHAIN_SHORTLIST_GPU])
+                                                   else _CHAIN_SHORTLIST_GPU],
+                   tuple(tuple(q["chain"]) for q in plans))
             with _AUTOTUNE_LOCK:
                 _Q15_MODEL[(key, tuple(best["chain"]))] = bool(best.get("q15", False))
             with _AUTOTUNE_LOCK:
                 _CHAIN_CHOICE[key] = hit
             _log_autotune("CHAIN n=%d model=%s shortlist=%s ranking=%s", self.n, hit[0], hit[1],
                           [(q["chain"], round(q["cost"], 1)) for q in plans[:6]])
-        model_best, shortlist = hit
+        model_best, shortlist, feasible = hit
         forced = os.environ.get("MF_CHAIN_FORCE")
+        pinned = False
         if forced:
             # Measurement only (chain studies): every hierarchical plan of this n runs the
             # given bands, outside any trial. "n:b1,b2;n2:b1" or "b1,b2" for every n.
@@ -2842,25 +2949,39 @@ class HierarchicalFilter(MatchedFilter):
                 if not pn or int(pn) == self.n:
                     want = tuple(int(b) for b in bands.split(",") if b)
                     if want and len(want) <= tiers and all(b < self.n for b in want):
-                        model_best, shortlist = want, (want,)
+                        model_best, shortlist, feasible = want, (want,), (want,)
+                        pinned = True
         if not _autotune_enabled():
             shortlist = shortlist[:1]
 
         chain = model_best
         self._chain_trial = None
-        if len(shortlist) > 1:
+        tkey = (self.n, float(snr), float(self.fd), tiers, str(self.device))
+        if not pinned and _autotune_enabled():
+            # A lock this process (or an earlier one, on file) reached for the key applies to
+            # every plan of the key that can run it -- even one whose own shortlist is a
+            # single chain, which used to run the model's choice instead.
+            with _AUTOTUNE_LOCK:
+                tr = _CHAIN_TRIALS.get(tkey)
+                w = tr["winner"] if tr is not None else _stored_chain_lock(tkey, feasible)
+            if w is not None and tuple(w) in feasible:
+                chain = tuple(w)
+                self._chain_monitor = tkey
+        if len(shortlist) > 1 and chain == model_best:
             # One trial per configuration: plans whose references differ slightly (another
             # segment's PSD, another template group) have slightly different short lists, and
             # their union is what gets measured. Candidates arriving before the lock join it;
             # after the lock every plan adopts the winner.
-            tkey = (self.n, float(snr), float(self.fd), tiers, str(self.device))
+            self._chain_monitor = tkey        # steady calls re-check the lock (_chain_steady)
             with _AUTOTUNE_LOCK:
                 tr = _CHAIN_TRIALS.get(tkey)
                 if tr is None:
                     tr = _CHAIN_TRIALS[tkey] = {"samples": {}, "assigned": {},
-                                                "winner": _stored_chain_lock(tkey, shortlist)}
+                                                "winner": _stored_chain_lock(tkey, feasible)}
+                    tr["median"], tr["rechecked"] = _chain_lock_state(tkey)
                 if tr["winner"] is not None:
-                    chain = tr["winner"]
+                    if tuple(tr["winner"]) in feasible:
+                        chain = tr["winner"]
                 else:
                     for c in shortlist:
                         tr["samples"].setdefault(c, []); tr["assigned"].setdefault(c, 0)
@@ -2891,25 +3012,46 @@ class HierarchicalFilter(MatchedFilter):
         return (self._tier0_seen[0] - prev[0]) / (self._tier0_seen[1] - prev[1])
 
     def _chain_trial_record(self, dt, pairs):
-        """Record one measured call for this plan's trial chain; lock the winner once every candidate has enough."""
+        """Record one measured call for this plan's trial chain; lock the winner once every
+        candidate has enough samples and the shared rule (gatechain.measured_choice) is clear."""
         with _AUTOTUNE_LOCK:
             tr = _CHAIN_TRIALS.get(self._chain_trial)
             if tr is None:
                 return
+            base = int(os.environ.get("MF_CHAIN_TRIALS", _CHAIN_TRIALS_PER_CAND))
+            tneed = tr.setdefault("need", {})
+            needs = lambda c: max(base, tneed.get(c, 0))   # noqa: E731
+
+            def decide(smp, model):
+                """Lock from smp, or ask for more (tneed) when the contest is unclear."""
+                w, more = _gatechain.measured_choice(smp, model, 2 * base)
+                if w is None:
+                    tneed.update(more)
+                    _log_autotune("CHAIN-TRIAL unclear, sampling further %s", more)
+                return w
             if tr["winner"] is None and pairs > 0:
                 # A chain whose first tier passed most pairs on this call gates nothing: it
                 # is priced at infinity, so it can never be locked in whatever its time.
                 frac = self._first_tier_pass(pairs)
                 tr["samples"][self._chain].append(
                     float("inf") if frac is not None and frac > _gatechain._USELESS_PASS else dt / pairs)
-                need = int(os.environ.get("MF_CHAIN_TRIALS", _CHAIN_TRIALS_PER_CAND))
-                if all(len(v) >= need for v in tr["samples"].values()):
-                    med = {c: float(np.median(v)) for c, v in tr["samples"].items()}
-                    # Within the trials' own noise, a fixed order decides, not the timer.
-                    tr["winner"] = _gatechain.pick_stable(med, med.get, _gatechain.canonical_order)
-                    _log_autotune("CHAIN-TRIAL locked %s  median s/pair %s", tr["winner"],
-                                  {c: "%.3g" % v for c, v in med.items()})
-                    _store_chain_lock(self._chain_trial, tr["winner"])
+                if all(len(v) >= needs(c) for c, v in tr["samples"].items()):
+                    # The model's chain (the shortlist's first) stands unless another is
+                    # clearly faster, past TIE and the samples' noise.
+                    w = decide(tr["samples"], next(iter(tr["samples"])))
+                    if w is not None:
+                        med = {c: float(np.median(v)) for c, v in tr["samples"].items()}
+                        _chain_lock(self._chain_trial, tr, w, med)
+                        _log_autotune("CHAIN-TRIAL locked %s  median s/pair %s", tr["winner"],
+                                      {c: "%.3g" % v for c, v in med.items()})
+            if (tr["winner"] is None
+                    and sum(len(v) for v in tr["samples"].values())
+                    >= _TRIAL_BUDGET * base * len(tr["samples"])):
+                w = _trial_budget_choice(tr["samples"], next(iter(tr["samples"])), base)
+                if w is not None:
+                    med = {c: float(np.median(v)) for c, v in tr["samples"].items() if len(v)}
+                    _chain_lock(self._chain_trial, tr, w, med)
+                    _log_autotune("CHAIN-TRIAL budget spent: locked %s", tr["winner"])
             winner = tr["winner"]
             move = None
             if winner is None:
@@ -2918,21 +3060,21 @@ class HierarchicalFilter(MatchedFilter):
                 # never locks, and every plan in it stays synchronous and untimed for good.
                 # A plan whose own shortlist is fully sampled settles on its own: it moves
                 # to an unsampled candidate of ITS shortlist, or locks the best of it.
-                need = int(os.environ.get("MF_CHAIN_TRIALS", _CHAIN_TRIALS_PER_CAND))
                 own = [tuple(c) for c in self.autotune_info.get("shortlist", ())
                        if tuple(c) in tr["samples"]]
                 mine = tuple(self._chain)
-                if own and len(tr["samples"].get(mine, ())) >= need:
-                    lacking = [c for c in own if len(tr["samples"][c]) < need]
-                    if lacking:
+                if own and len(tr["samples"].get(mine, ())) >= needs(mine):
+                    lacking = [c for c in own if len(tr["samples"][c]) < needs(c)]
+                    if not lacking:
+                        winner = decide({c: tr["samples"][c] for c in own}, own[0])
+                        if winner is not None:
+                            _log_autotune("CHAIN-TRIAL plan locked %s on its own shortlist", winner)
+                        lacking = [c for c in own if len(tr["samples"][c]) < needs(c)]
+                    if winner is None and lacking:
                         move = min(lacking, key=lambda c: (len(tr["samples"][c]) + tr["assigned"][c],
                                                            own.index(c)))
                         tr["assigned"][move] += 1
                         tr["assigned"][mine] = max(0, tr["assigned"].get(mine, 1) - 1)
-                    else:
-                        med = {c: float(np.median(tr["samples"][c])) for c in own}
-                        winner = _gatechain.pick_stable(med, med.get, _gatechain.canonical_order)
-                        _log_autotune("CHAIN-TRIAL plan locked %s on its own shortlist", winner)
         if winner is not None:
             self._chain_trial = None
             self.autotune_info.update(status="locked", winner=tuple(winner))
@@ -2946,7 +3088,15 @@ class HierarchicalFilter(MatchedFilter):
                    binsize=None, threshold=0.0, templates=None, raw=False,
                    decimated=None):
         if self._chain_trial is None and self.device.kind == "cpu" and self._mf is not None:
-            if self._q15_before_call():
+            q15_timed = self._q15_before_call()
+            mon = getattr(self, "_chain_monitor", None)
+            if mon is not None:
+                with _AUTOTUNE_LOCK:
+                    tr = _CHAIN_TRIALS.get(mon)
+                    if (tr is None or tr.get("rechecked") or not tr.get("median")
+                            or tr.get("winner") is None or tuple(tr["winner"]) != tuple(self._chain)):
+                        mon = None
+            if q15_timed or mon is not None:
                 t0 = time.perf_counter()
                 res = super().run_series(series, starts=starts, win_start=win_start, win_end=win_end,
                                          binsize=binsize, threshold=threshold, templates=templates,
@@ -2958,7 +3108,11 @@ class HierarchicalFilter(MatchedFilter):
                 except TypeError:
                     nblk = 0
                 if full and nblk >= 2:
-                    self._q15_record(dt, nblk * self.ntemplates * self.ndata)
+                    units = nblk * self.ntemplates * self.ndata
+                    if q15_timed:
+                        self._q15_record(dt, units)
+                    if mon is not None and _chain_steady(mon, dt / units):
+                        self._chain_monitor = None
                 return res
         if self._chain_trial is None:
             return super().run_series(series, starts=starts, win_start=win_start, win_end=win_end,

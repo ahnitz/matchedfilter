@@ -37,9 +37,10 @@ bank = TimeDomainFilterBank(taps, tap_counts=counts, engine='hier', threshold=5.
 bank.set_reference(w, delta_f=df)
 L = 1 << 16
 out = []
-# Long enough for the first process to lock every trial it starts: the block-size trial
-# (ranks x (settle + samples) batches), then on a GPU the chain trial (candidates x (2 settle
-# + samples) batches, judged on whole batches since it runs per segment).
+# Trials persist their samples in MF_COST_FILE and may span processes: a block-size trial
+# samples only once its plans' chain and Q15 trials have locked, and on a GPU the chain trial
+# takes candidates x (2 settle + samples) whole batches. The test runs processes until no
+# trial is left open on file.
 for seg in range(20):
     r = np.random.default_rng(100 + seg)
     x = ((r.standard_normal(L) + 1j * r.standard_normal(L)) / np.sqrt(2)).astype(np.complex64)
@@ -61,6 +62,25 @@ def _run(device, cost):
     return json.loads(p.stdout.strip().splitlines()[-1])
 
 
+def _trial_records(rec):
+    """The trial locks on file (what a process reads back), without timings."""
+    out = {}
+    for k, v in rec.items():
+        if k.startswith(("block-trial|", "chain-trial|", "q15-trial|")) and not k.endswith("|batches"):
+            out[k] = (v.get("winner"), tuple(v.get("chain", ())), v.get("q15"), v.get("rechecked"))
+    return out
+
+
+def _open_trials(rec):
+    """Trials on file that have samples but no lock: a block-size trial without a winner, or a
+    chain trial's batch samples without the chain's lock."""
+    open_ = [k for k, v in rec.items() if k.startswith("block-trial|") and "winner" not in v
+             and any(v.get("samples", {}).values())]
+    open_ += [k for k, v in rec.items() if k.endswith("|batches") and any(v.get("samples", {}).values())
+              and "chain" not in rec.get(k[:-len("|batches")], {})]
+    return open_
+
+
 @pytest.mark.parametrize("device", ["cpu", "gpu:0"])
 def test_two_processes_sharing_a_cost_file_agree(device, tmp_path):
     if device != "cpu":
@@ -71,11 +91,17 @@ def test_two_processes_sharing_a_cost_file_agree(device, tmp_path):
     # A block-size trial samples only once the chain and Q15 trials have locked, so it may
     # span processes (its samples persist): run until its lock is on file. From then on
     # every process reads the same choices back.
-    for _ in range(8):
+    # Run until the trial records reach a fixed point: no trial open, and a process changes
+    # none of them (a steady-state re-check may reopen a lock once; then it is final).
+    prev = None
+    for _ in range(10):
         first = _run(device, cost)
-        rec = {k: v for k, v in json.loads(cost.read_text()).items() if k.startswith("block-trial|")}
-        if not rec or all("winner" in v for v in rec.values()):
+        rec = json.loads(cost.read_text())
+        now = _trial_records(rec)
+        if not _open_trials(rec) and now == prev:
             break
+        prev = now
+    assert not _open_trials(rec) and now == prev
     second = _run(device, cost)                 # reads them back
     third = _run(device, cost)
     assert second == third                      # reproducible from the file on
