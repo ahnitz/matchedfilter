@@ -2407,7 +2407,7 @@ class Context(InputUploads):
                                    async_submit=async_submit, sparse=sparse, nbins=nbins,
                                    max_bins=_MAX_BINS, handle_out=handle_out)
 
-    def empty_shared(self, shape, dtype=np.complex64, *, readback=False):
+    def empty_shared(self, shape, dtype=np.complex64, *, readback=False, host_input=False):
         factory = (lambda ctx, size: _Buffer(ctx, size, readback=True)) if readback else _Buffer
         return empty_shared(self, factory, shape, dtype)
 

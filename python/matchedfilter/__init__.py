@@ -382,6 +382,23 @@ class MatchedFilter:
     _gpu_sizes = _GPU_SIZES
     _cpu_max_n = 1 << 20
 
+
+    def _counted(self, gpu, reader):
+        """A traced dispatch's result reader that also counts its work (pairs, tier
+        survivors, refines) as the direct call's finish does: a SegmentPlan replay reads
+        each dispatch through it, without that finish."""
+        if reader is None:
+            return None
+
+        def read():
+            r = reader()
+            shp = r.shape if isinstance(r, _SparsePeaks) else r[0].shape
+            self._gpairs += shp[0] * shp[1]
+            self._gtrig += gpu.last_refinements
+            self._gt1 += getattr(gpu, "last_tier1_survivors", 0) or 0
+            return r
+        read.sparse_dev = getattr(reader, "sparse_dev", None)
+        return read
     def __init__(self, n, ndata=1, ntemplates=1, device=None, *, valid=None):
         from .device import parse as _parse_device
         self.device = _parse_device(device)
@@ -1475,7 +1492,7 @@ class MatchedFilter:
             if res is None:
                 raise RuntimeError("a validated call plan part was refused")
             in_flight.append((begin, end, res))
-            gtrace.append((begin, end, getattr(gpu, "_last_dispatch", None)))
+            gtrace.append((begin, end, self._counted(gpu, getattr(gpu, "_last_dispatch", None))))
         idx = np.empty(shape, dtype=np.int64)
         val = np.empty(shape, dtype=np.complex64)
         sparse_parts = []
@@ -1804,7 +1821,7 @@ class MatchedFilter:
                         record = False              # e.g. a split window: not one record
                 in_flight.append((begin, end, res))
                 if defer and is_hier:
-                    gtrace.append((begin, end, getattr(self._gpu, "_last_dispatch", None)))
+                    gtrace.append((begin, end, self._counted(self._gpu, getattr(self._gpu, "_last_dispatch", None))))
                 if len(in_flight) >= span:
                     b_start, b_end, item = in_flight.pop(0)
                     take_dense(b_start, b_end, item() if callable(item) else item)
@@ -1875,7 +1892,7 @@ class MatchedFilter:
                         res = _head(res, count)
                 in_flight.append((begin, end, res))
                 if defer and is_hier:
-                    trace_groups.append((begin, end, getattr(self._gpu, "_last_dispatch", None)))
+                    trace_groups.append((begin, end, self._counted(self._gpu, getattr(self._gpu, "_last_dispatch", None))))
                 if len(in_flight) >= span:
                     collected_early[0] = True
                     b_start, b_end, item = in_flight.pop(0)
