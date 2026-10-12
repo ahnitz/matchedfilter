@@ -252,6 +252,13 @@ def test_staged_series_in_flight(monkeypatch):
                           if p and p[i % len(p)] is not None and p[i % len(p)][4] is not None})
     calls = [j for j, e in enumerate(events) if e[0] == "call"] + [len(events)]
     double = len(bank.__dict__.get("_ser_stagings", [])) == 2
+    # Unified memory (Metal: host_view): every group reads the caller's series in place
+    # (_stage_series returns it), so no staging buffer exists to guard; the results below
+    # are still checked call by call.
+    in_place = all(getattr(g, "host_view", None) is not None for g in gpus.values())
+    if in_place:
+        assert "_ser_stagings" not in bank.__dict__ and not any(e[0] == "fill" for e in events)
+        calls = []
     for i, (a, b) in enumerate(zip(calls, calls[1:])):
         part = events[a:b]
         fi = [e[0] for e in part].index("fill")
