@@ -53,12 +53,17 @@ typedef hn::Vec<ap_qtag> vq;
    other way from Q_SUB(acc, Q_MUL(a, b)): still within 1/2 LSB, the per-multiply error the
    screen's margin is built on (q15.h). tools/gate_margin.py --gate q15 on the M2, N=128..1024:
    0 dismissals and the same worst margin use (0.310) as the separate form. */
+#undef AP_Q15_FUSED
+#undef Q_MLAH
+#undef Q_MLSH
 #if HWY_ARCH_ARM_A64 && defined(__ARM_FEATURE_QRDMX) && \
     (HWY_TARGET == HWY_NEON || HWY_TARGET == HWY_NEON_BF16 || HWY_TARGET == HWY_NEON_WITHOUT_AES)
 static_assert(HWY_MAX_LANES_D(ap_qtag) == 8, "Q_MLAH assumes a full 128-bit int16 vector");
+#define AP_Q15_FUSED 1
 #define Q_MLAH(acc, a, b) vq{vqrdmlahq_s16((acc).raw, (a).raw, (b).raw)}
 #define Q_MLSH(acc, a, b) vq{vqrdmlshq_s16((acc).raw, (a).raw, (b).raw)}
 #else
+#define AP_Q15_FUSED 0
 #define Q_MLAH(acc, a, b) Q_ADD((acc), Q_MUL((a), (b)))
 #define Q_MLSH(acc, a, b) Q_SUB((acc), Q_MUL((a), (b)))
 #endif
