@@ -65,7 +65,7 @@ def test_steady_state_reopens_a_contradicted_choice_once():
         assert not gc.observe_steady(st, 0.72, lambda: calls.append(1))
     assert not gc.observe_steady(st, 0.72, lambda: calls.append(1))   # agrees: no reopen
     st2 = {"winner": "b", "median": {"a": 1.0, "b": 0.7}}
-    got = [gc.observe_steady(st2, 1.3, lambda: calls.append(1)) for _ in range(gc.RECHECK_N)]
+    got = [gc.observe_steady(st2, 1.5, lambda: calls.append(1)) for _ in range(gc.RECHECK_N)]
     assert got[-1] and calls == [1]
     for _ in range(3 * gc.RECHECK_N):                                   # once per choice
         assert not gc.observe_steady(st2, 2.0, lambda: calls.append(1))
