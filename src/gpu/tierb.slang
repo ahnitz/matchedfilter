@@ -779,6 +779,12 @@ void filterPair(uint pair, uint tid,
 {
 #if !COARSE16
 #if SINGLE_BIN
+#if defined(MF_METAL) && NLEN <= 1024
+    // nbins == 0 (Metal, a later gate tier): report only the window's maximum |v|, the one
+    // number the compaction after it reads (gateOnly below). Built at gate bands only: at
+    // the fine lengths the unused branch cost the final refine ~2% (register pressure).
+    bool gateOnly = (nbins == 0u);
+#endif
     // The host selects this build only when the searched window has one
     // output bin. Constant propagation removes the general bin tables and
     // their live ranges without changing the FFT or tied-winner election.
@@ -832,6 +838,44 @@ void filterPair(uint pair, uint tid,
 #endif
     GroupMemoryBarrierWithGroupSync();          // transform is done with stg
 #if SINGLE_BIN
+#if defined(MF_METAL) && !COARSE16 && NLEN <= 1024
+    // GATE ONLY (a tier between the first and the refine). What follows such a tier is the
+    // compaction, which lists a pair when |peakVal| reaches the tier threshold; the index
+    // has no reader. So: the largest in-window |v|^2 per thread, a SIMD-group maximum, and
+    // across SIMD groups (WG > the SIMD width) one slot of the stage per group -- instead
+    // of the election's threadgroup atomics and three barriers. The value is the same
+    // fp32 |v| the election would report (to the rounding of its own sqrt).
+    if (gateOnly) {
+        // As uint bits, as the election compares them: non-negative floats order like
+        // their bits, and a NaN (an overflowed transform) outranks everything and is
+        // listed by the compaction (!(NaN < thr)), whatever fast math does to a float max.
+        uint m = 0u;
+        if (winStart == 0u && winEnd >= N) {
+            MF_UNROLL for (uint i = 0; i < R; ++i)
+                m = max(m, asuint(r[i].x * r[i].x + r[i].y * r[i].y));
+        } else {
+            MF_UNROLL for (uint i = 0; i < R; ++i) {
+                uint idx = slotToIndex(tid * R + i);
+                bool live = (idx >= winStart && idx < winEnd);
+                uint b = asuint(r[i].x * r[i].x + r[i].y * r[i].y);
+                m = live ? max(m, b) : m;
+            }
+        }
+        m = WaveActiveMax(m);
+        if (WG > mfSubgroupSize) {
+            uint nsg = (WG + mfSubgroupSize - 1u) / mfSubgroupSize;
+            if (WaveIsFirstLane()) stg[_stgBase + tid / mfSubgroupSize] = m;
+            GroupMemoryBarrierWithGroupSync();
+            m = 0u;
+            for (uint k = 0; k < nsg; ++k) m = max(m, stg[_stgBase + k]);
+        }
+        if (tid == 0) {
+            peakIdx[pair] = m > 0u ? 0 : -1;
+            peakVal[pair] = float2(sqrt(asfloat(m)), 0.0f);
+        }
+        return;
+    }
+#endif
     // ONE BIN by construction:
     // Eliminate myMag[RADIX] and myBin[RADIX] arrays entirely and free r[RADIX]
     // immediately after the unrolled reduction loop to eliminate register spilling.
