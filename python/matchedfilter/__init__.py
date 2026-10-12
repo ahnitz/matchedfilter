@@ -705,6 +705,18 @@ class MatchedFilter:
     def _execution_plan(self):
         return self._ensure()
 
+    def _continuous_plan(self):
+        """The CPU plan for continuous correlation, on the transform the cost model chose
+        for this n (_CORR_PFFT: the platform FFT where it measured cheaper)."""
+        ep = self._execution_plan()
+        want = bool(_CORR_PFFT.get(self.n, False))
+        if self.__dict__.get("_pfft_on") != want:
+            ok = ep.set_platform_fft(want) if hasattr(ep, "set_platform_fft") else False
+            if want and not ok:
+                ep.set_platform_fft(False)
+            self._pfft_on = want
+        return ep
+
     def nbins(self, binsize, window=None):
         binsize = int(binsize)
         if binsize < 1:
@@ -2191,7 +2203,7 @@ class CorrelationFilter(MatchedFilter):
             if self._gpu is not None:
                 self._continuous_gpu(ser, st, t0, nt, result)
             else:
-                self._execution_plan().correlate_series_continuous(
+                self._continuous_plan().correlate_series_continuous(
                     ser, st, self.valid[0], self.valid[1], t0, nt, result)
             if scales is not None:
                 sc = np.ascontiguousarray(_from_any(scales), dtype=np.float32)
@@ -2575,6 +2587,9 @@ def _chain_steady(tkey, value):
             _log_autotune("CHAIN-TRIAL %s steady state contradicts the trial: reopened", tkey)
         return _gatechain.observe_steady(tr, value, reopen)
 #: (n, snr, fd, chain, device) -> {"samples": {False: [...], True: [...]}, "winner": bool|None}
+#: n -> whether continuous correlation at n runs through the platform FFT (vDSP on macOS):
+#: set by time_domain._corr_block_costs, which prices both and keeps the cheaper.
+_CORR_PFFT = {}
 _Q15_TRIALS = {}
 #: (n, device) -> {"samples": {False: [...], True: [...]}, "winner": bool|None}: the block
 #: forward through the platform FFT (macOS vDSP) against the engine's (HierarchicalFilter)
