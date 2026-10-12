@@ -225,14 +225,14 @@ def test_a_lock_steady_state_contradicts_is_reopened(monkeypatch, tmp_path):
     fresh = td._BlockTrials()                              # agreement keeps the lock
     assert fresh.winner("k") == 1
     for _ in range(gatechain.RECHECK_N):
-        reopened = fresh.observe("k", 1.3)                 # 30% slower than rank 0's trial
+        reopened = fresh.observe("k", 1.5)                 # 50% slower than the runner-up
     assert reopened
     again = td._BlockTrials()
     assert again.winner("k") is None                      # next process trials again
     assert _drive(again, "k", timer) == 1                  # (the fake timer still says 1)
     final = td._BlockTrials()
     for _ in range(2 * gatechain.RECHECK_N):
-        assert not final.observe("k", 1.3)                # one re-check per key: no flapping
+        assert not final.observe("k", 1.5)                # one re-check per key: no flapping
     assert td._BlockTrials().winner("k") == 1
 
 

@@ -2717,13 +2717,12 @@ class HierarchicalFilter(MatchedFilter):
         with _AUTOTUNE_LOCK:
             tr = self._q15_trial()
             win = tr["winner"]
-            watch = win is not None and tr.get("median") and not tr.get("rechecked")
             want = win if win is not None else len(tr["samples"][True]) < len(tr["samples"][False])
         if bool(want) != bool(self._q15):
             self._q15 = bool(want) and self._mf.set_q15(True)
             if not want:
                 self._mf.set_q15(False)
-        return win is None or bool(watch)
+        return win is None
 
     def calibrating(self):
         """Whether this plan is still settling a measured choice -- its chain trial, or the Q15
@@ -2743,8 +2742,10 @@ class HierarchicalFilter(MatchedFilter):
         return False
 
     def _q15_record(self, dt, pairs):
-        """One timed call: a Q15 trial sample, or -- once locked -- a steady sample for the
-        one re-check. Both follow the shared rule (gatechain.measured_choice, observe_steady)."""
+        """One timed call: a Q15 trial sample, decided by the shared rule
+        (gatechain.measured_choice). No steady re-check: per-call samples pool calls of plans
+        of every group size, so steady and trial medians are not like for like (it reopened
+        locks spuriously at load ~44 on dev2); the batch-measured trials re-check."""
         with _AUTOTUNE_LOCK:
             tr = _Q15_TRIALS.get(self._q15_trial_key())
             if tr is None or pairs <= 0:
@@ -2752,16 +2753,6 @@ class HierarchicalFilter(MatchedFilter):
             key = self._q15_lock_key(self._q15_trial_key())
             path = _gatechain._cost_file()
             if tr["winner"] is not None:
-                if bool(self._q15) != bool(tr["winner"]):
-                    return
-
-                def reopen():
-                    if path is not None:
-                        _gatechain._store_cost(path, key, {"rechecked": True,
-                                                           "reopened": {"q15": bool(tr["winner"])}})
-                    _log_autotune("Q15-TRIAL chain=%s steady state contradicts the trial: reopened",
-                                  self._chain)
-                _gatechain.observe_steady(tr, dt / pairs, reopen)
                 return
             tr["samples"][bool(self._q15)].append(dt / pairs)
             base = int(os.environ.get("MF_CHAIN_TRIALS", _CHAIN_TRIALS_PER_CAND))
@@ -3158,13 +3149,8 @@ class HierarchicalFilter(MatchedFilter):
                    decimated=None):
         if self._chain_trial is None and self.device.kind == "cpu" and self._mf is not None:
             q15_timed = self._q15_before_call()
-            mon = getattr(self, "_chain_monitor", None)
-            if mon is not None:
-                with _AUTOTUNE_LOCK:
-                    tr = _CHAIN_TRIALS.get(mon)
-                    if (tr is None or tr.get("rechecked") or not tr.get("median")
-                            or tr.get("winner") is None or tuple(tr["winner"]) != tuple(self._chain)):
-                        mon = None
+            # (No steady re-check of a CPU chain lock: see _q15_record.)
+            mon = None
             if q15_timed or mon is not None:
                 t0 = time.perf_counter()
                 res = super().run_series(series, starts=starts, win_start=win_start, win_end=win_end,

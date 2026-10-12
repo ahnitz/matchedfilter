@@ -1154,10 +1154,14 @@ def pick_stable(items, cost, key):
 #: A candidate beats the model's choice only by more than TIE and by more than Z standard
 #: errors of the difference of the two medians.
 CHOICE_Z = 2.0
-#: Steady-state re-check: the winner's median over RECHECK_N steady samples more than
-#: RECHECK_FRAC above the trial's best median reopens the choice -- once per choice.
-RECHECK_N = 5
-RECHECK_FRAC = 0.15
+#: Steady-state re-check, for gross mistakes only: the winner's median over RECHECK_N steady
+#: samples more than RECHECK_FRAC above the RUNNER-UP's trial median reopens the choice --
+#: once per choice. Steady samples and trial samples are taken at different times, so on a
+#: shared host load swings alone move them apart: 15% over the trial's best reopened chain
+#: and Q15 locks within 14 segments at load ~45 on dev2. The M2 case (n=4096 locked, steady
+#: 142 ms against n=2048's 106) is 1.34x the runner-up and still reopens.
+RECHECK_N = 8
+RECHECK_FRAC = 0.30
 
 
 def sample_spread(v):
@@ -1214,6 +1218,11 @@ def observe_steady(state, value, on_reopen):
     if not steady_disagrees(st, state["median"], state["winner"]):
         return False
     state["rechecked"] = True
+    import os, sys
+    if os.environ.get("MF_AUTOTUNE_LOG", "0") != "0":
+        print("[MF_AUTOTUNE] RECHECK winner %s steady %s trial medians %s" % (
+            state.get("winner"), ["%.3g" % x for x in st[-RECHECK_N:]],
+            {k: "%.3g" % v for k, v in state["median"].items()}), file=sys.stderr, flush=True)
     on_reopen()
     return True
 
@@ -1225,7 +1234,8 @@ def steady_disagrees(steady, medians, winner, n=None, frac=None):
     frac = RECHECK_FRAC if frac is None else frac
     if len(steady) < n or not medians:
         return False
-    ref = min(float(v) for v in medians.values())
+    others = [float(v) for c, v in medians.items() if c != winner and np.isfinite(v)]
+    ref = min(others) if others else float(medians.get(winner, np.inf))
     return float(np.median(steady[-n:])) > ref * (1.0 + frac)
 
 
