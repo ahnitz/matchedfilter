@@ -899,6 +899,14 @@ def main():
         dev = sum(v[1] for v in d.values())
         print(f"  {stage}: device {dev / 1e3:.3f}s of wall {report['steady_s'][stage]:.3f}s; " +
               ", ".join(f"{l} {v[0]}x {v[1]:.1f}ms" for l, v in sorted(d.items(), key=lambda x: -x[1][1])))
+    from matchedfilter import time_domain as _td
+    for key in _td._BLOCK_TRIALS.unlocked():
+        # The steady segments ran inside a block-size trial: layouts switched between them,
+        # so times and roofline counts are not one layout's. The samples are kept in
+        # MF_COST_FILE; rerun (or run more segments) until the trial locks.
+        print(f"  WARNING: block-size trial {key} not locked yet (samples per rank "
+              f"{ {r: len(v) for r, v in _td._BLOCK_TRIALS.state[key]['samples'].items()} }); "
+              "these timings span layout switches -- rerun with the same MF_COST_FILE")
     if "roofline" in report:
         print(_roofline.format_report(report["roofline"]))
         if args.roofline_out:

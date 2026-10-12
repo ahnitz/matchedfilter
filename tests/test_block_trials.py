@@ -123,3 +123,41 @@ def test_no_trial_without_a_cost_file(monkeypatch):
     bank, _ = _inspiral_bank()
     assert getattr(bank, "_layouts", None) is None
     assert getattr(bank, "_layout_rank", 0) == 0
+
+
+def test_a_trial_continues_across_short_processes(monkeypatch, tmp_path):
+    """Processes each too short to finish the trial (one sample apiece) carry its samples in
+    MF_COST_FILE, so the trial completes and locks across them, as in one long process."""
+    monkeypatch.setenv("MF_COST_FILE", str(tmp_path / "costs.json"))
+    key, cost = "dev|model,2048,4096", {0: 1.0, 1: 0.7, 2: 1.2}
+    for proc in range(16):
+        tr = td._BlockTrials()                                     # a new process
+        if tr.winner(key) is not None:
+            break
+        assert tr.unlocked() == ([] if proc == 0 else [key])     # resumed from the file
+        r = tr.rank_for(key, 3)
+        tr.record(key, r, cost[r])                                 # one sample, then exit
+    assert proc == 6                    # 3 ranks x 2 samples, one per process, then locked
+    assert td._BlockTrials().winner(key) == 1
+    assert td._BlockTrials().unlocked() == []
+
+
+def test_two_short_ladder_processes_lock_the_trial(monkeypatch, tmp_path):
+    """Two processes on one cost file, each running fewer batches than the trial needs,
+    finish it between them: the second one locks."""
+    monkeypatch.setenv("MF_COST_FILE", str(tmp_path / "costs.json"))
+    rng = np.random.default_rng(3)
+    L = 1 << 15
+    data = ((rng.standard_normal(L) + 1j * rng.standard_normal(L)) / np.sqrt(2)).astype(np.complex64)
+    for proc in range(2):
+        monkeypatch.setattr(td, "_BLOCK_TRIALS", td._BlockTrials())   # a new process
+        bank, _ = _inspiral_bank()
+        if proc == 0 and len(getattr(bank, "_layouts", None) or []) < 2:
+            pytest.skip("the model offered one block size only")
+        for _ in range(6):                     # < 3 ranks x (settle + 2 samples) = 9
+            TimeDomainFilterBank.filter_series_many([(bank, data, {})])
+        if proc == 0:
+            assert td._BLOCK_TRIALS.unlocked() == [td._trial_key(bank)]
+    assert td._BLOCK_TRIALS.unlocked() == []
+    assert td._BLOCK_TRIALS.winner(td._trial_key(bank)) is not None
+    assert getattr(bank, "_layouts", None) is None
