@@ -128,6 +128,9 @@ def _seg_freed(start, nbytes):
             g.stale = True
 
 
+_SEG_TIMING = os.environ.get("MF_SEGMENT_TIMING", "0") not in ("", "0")
+
+
 class SegmentGraph:
     """One CUDA graph holding a whole segment's fine-stage device work, across every bank.
 
@@ -140,7 +143,13 @@ class SegmentGraph:
     set on the same buffers (the caller's signature) and while every allocation it touches
     is alive (_seg_freed marks a graph stale when one it touches is freed)."""
 
-    def __init__(self, ctx, nstreams=4):
+    #: MF_SEGMENT_TIMING=1: each launch's device time (s), from after it starts on the
+    #: device (the previous graph done) to its end.
+    device_s = []
+
+    def __init__(self, ctx, nstreams=None):
+        if nstreams is None:
+            nstreams = int(os.environ.get("MF_SEGMENT_STREAMS", "4"))
         self.ctx = ctx
         self.cuda = ctx.cuda
         ctx._bind()
@@ -248,10 +257,16 @@ class SegmentGraph:
         for args in self.prefetch:
             if hasattr(cu, "cuMemPrefetchAsync"):
                 cu.cuMemPrefetchAsync(args[0], args[1], args[2], s0)
+        if _SEG_TIMING:
+            if getattr(self, "t0", None) is None:
+                self.t0, self.t1 = self.ctx._new_event_timed(), self.ctx._new_event_timed()
+            check_cuda(cu.cuEventRecord(self.t0, s0), "cuEventRecord")
         check_cuda(cu.cuGraphLaunch(self.exec, s0), "cuGraphLaunch")
         if getattr(self, "done", None) is None:
             self.done = self.ctx._new_event()
         check_cuda(cu.cuEventRecord(self.done, s0), "cuEventRecord")
+        if _SEG_TIMING:
+            check_cuda(cu.cuEventRecord(self.t1, s0), "cuEventRecord")
         _SEG_LAST[0] = self
         _SEG_INFLIGHT.add(self)
         return True
@@ -261,6 +276,11 @@ class SegmentGraph:
         if self in _SEG_INFLIGHT:
             check_cuda(self.cuda.cuEventSynchronize(self.done), "cuEventSynchronize")
             _SEG_INFLIGHT.discard(self)
+            if _SEG_TIMING and getattr(self, "t1", None) is not None:
+                check_cuda(self.cuda.cuEventSynchronize(self.t1), "cuEventSynchronize")
+                ms = ctypes.c_float()
+                if self.cuda.cuEventElapsedTime(ctypes.byref(ms), self.t0, self.t1) == 0:
+                    SegmentGraph.device_s.append(ms.value / 1e3)
 
     @staticmethod
     def wait_all():
@@ -449,17 +469,29 @@ class _HostBuffer:
     to the GPU and back on every call.
     """
 
-    def __init__(self, ctx, nbytes, readback=False):
+    def __init__(self, ctx, nbytes, readback=False, host_input=False):
         self.ctx = ctx
         self.nbytes = max(int(nbytes), 4)
         self.dptr = ctypes.c_uint64(0)
         self.managed = hasattr(self.ctx.cuda, "cuMemAllocManaged")
+        self.host_input = False
         ctx._bind()
         if self.managed:
             check_cuda(
                 self.ctx.cuda.cuMemAllocManaged(ctypes.byref(self.dptr), self.nbytes, 1),
                 "cuMemAllocManaged",
             )
+            # host_input: an input the host rewrites every call and the device reads once
+            # (a segment's series). Kept in host memory and mapped by the device: the host
+            # writes it without faulting pages back from the device, no migration is issued
+            # before the kernels, and the kernels read it over the bus once.
+            if host_input and hasattr(self.ctx.cuda, "cuMemAdvise"):
+                cu = self.ctx.cuda
+                if (cu.cuMemAdvise(self.dptr.value, self.nbytes, _ADVISE_PREFERRED_LOCATION,
+                                   _CPU_DEVICE) == 0
+                        and cu.cuMemAdvise(self.dptr.value, self.nbytes, _ADVISE_ACCESSED_BY,
+                                           self.ctx.device.value) == 0):
+                    self.host_input = True
             # No placement advice, readback or not. Host-preferred placement made every GPU
             # write cross PCIe (the middle stage's 216 MB output: 33 ms, against 0.6 ms
             # device-resident); and a `readback` output is often consumed on the device
@@ -901,7 +933,7 @@ class Context(InputUploads):
         Host-written managed pages would otherwise be faulted in page by page by the
         kernel itself; already-resident pages make this nearly free."""
         if (_PREFETCH and isinstance(buf, _Borrowed) and getattr(buf.owner.buffer, "managed", False)
-                and nbytes > 0 and hasattr(self.cuda, "cuMemPrefetchAsync")):
+                and not getattr(buf.owner.buffer, "host_input", False) and nbytes > 0 and hasattr(self.cuda, "cuMemPrefetchAsync")):
             if _SEG is not None:               # not capturable: issued by SegmentGraph.replay
                 _SEG["prefetch"].append((buf.dptr.value + offset, nbytes, self.device.value))
                 _seg_note(buf.dptr.value + offset)
@@ -1105,8 +1137,9 @@ class Context(InputUploads):
         if tok is not None:
             self._close(tok, st, label or self._labels.get(hfunc.value, "kernel"))
 
-    def empty_shared(self, shape, dtype=np.complex64, *, readback=False):
-        factory = (lambda ctx, size: _HostBuffer(ctx, size, readback=True)) if readback else _HostBuffer
+    def empty_shared(self, shape, dtype=np.complex64, *, readback=False, host_input=False):
+        def factory(ctx, size):
+            return _HostBuffer(ctx, size, readback=readback, host_input=host_input)
         return empty_shared(self, factory, shape, dtype)
 
     # ---- cache ----------------------------------------------------------------

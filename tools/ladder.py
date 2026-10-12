@@ -186,6 +186,11 @@ class GpuSampler:
                     sclk_mhz_min=float(f.min()), sclk_mhz_max=float(f.max()), n=len(b))
 
 
+def _host_input():
+    """LADDER_HOST_INPUT=0: the graph middle's input buffers as ordinary shared memory."""
+    return os.environ.get("LADDER_HOST_INPUT", "1") != "0"
+
+
 def _timing():
     import os
     return os.environ.get("MF_GPU_TIMING", "0") not in ("", "0")
@@ -276,7 +281,8 @@ def run_device(device, tops, args, seed):
     counts = defaultdict(int)
     folded = []
     # --roofline: work counted over each top's steady segments (matchedfilter._roofline).
-    roof = dict(work=_roofline.Work(), ticks=defaultdict(int), problems=[], ctx=None) \
+    roof = dict(work=_roofline.Work(), ticks=defaultdict(int), problems=[], ctx=None,
+                followup_jobs=[], series_len=S) \
         if args.roofline else None
 
     def one_top(top):
@@ -345,7 +351,9 @@ def run_device(device, tops, args, seed):
                 """A segment's fine results: record them, and return its follow-up jobs."""
                 if roof is not None and seg >= args.warmup:
                     jobs = followups_of(seg, ser, mids, fine_out)
-                    _roofline.followup_work(roof["work"], jobs[0])
+                    # Counted at the report, outside the timed segments (only the jobs'
+                    # banks, windows and kwargs are read).
+                    roof["followup_jobs"].append([(b, None, kw) for b, _, kw in jobs[0]])
                     return jobs
                 return followups_of(seg, ser, mids, fine_out)
 
@@ -546,7 +554,8 @@ def run_device(device, tops, args, seed):
                     plans2 = [SegmentPlan(slot_half=0), SegmentPlan(slot_half=1)]
                     outs2 = [mid_out, {ifo: mid.empty_shared((len(top["mid_counts"]), S))
                                        for ifo in ("H1", "L1")}]
-                    ins2 = [{ifo: mid.empty_shared((S,)) for ifo in ("H1", "L1")} for _ in range(2)]
+                    ins2 = [{ifo: mid.empty_shared((S,), input=_host_input()) for ifo in ("H1", "L1")}
+                            for _ in range(2)]
                 pending = None
 
                 def collect(pend):
@@ -582,7 +591,8 @@ def run_device(device, tops, args, seed):
                             m_in, m_out = ins2[seg % 2], outs2[seg % 2]
                         else:
                             if top.get("_mid_in") is None:
-                                top["_mid_in"] = {ifo: mid.empty_shared((S,)) for ifo in ("H1", "L1")}
+                                top["_mid_in"] = {ifo: mid.empty_shared((S,), input=_host_input())
+                                                  for ifo in ("H1", "L1")}
                             m_in, m_out = top["_mid_in"], mid_out
                         t = time.perf_counter()
                         for ifo in ser:
@@ -628,14 +638,23 @@ def run_device(device, tops, args, seed):
                             spec = spec or FollowUp(pairs=[j ^ 1 for j in range(len(jobs))],
                                                     threshold=args.asym_threshold, dedupe=int(RATE),
                                                     half=half, binsize=bs)
+                            replays0 = plans2[seg % 2].replays
                             handle = plans2[seg % 2].submit(jobs, prelude=prelude,
                                                             prelude_key=("middle", top["top"], seg % 2),
                                                             followup=spec)
                             if pending is not None:
                                 collect(pending)
                             if seg == args.warmup:
-                                # The fine work is counted when collected: the warmup's last
-                                # segment just was, so the span holds the steady segments'.
+                                # Counters move when a segment is collected (a replay counts
+                                # its work as it is read): the steady span starts once the
+                                # last warmup segment is in. Segment k was submitted already;
+                                # if it ran outside a graph, its work is counted now.
+                                if plans2[seg % 2].replays == replays0:
+                                    if roof is not None:
+                                        roof["problems"].append(
+                                            "first steady segment did not replay: its work is "
+                                            "outside the counted span")
+                                roof_snap("mid")
                                 roof_snap("fine")
                             pending = (seg, ser, mids, handle, tm)
                             tm.add("fine", time.perf_counter() - t)
@@ -672,21 +691,25 @@ def run_device(device, tops, args, seed):
                     t = time.perf_counter()
                     collect(pending)
                     pending[4].add("segment", time.perf_counter() - t, n=0)
+                if prof is not None and inflight:
+                    prof.disable()
+                    prof.dump_stats(os.environ["LADDER_PROFILE"])
                 bsampler.stop()
                 bu = bsampler.busy_union()
                 if bu:
                     counts["gpu_busy_union"] = bu
+                if os.environ.get("MF_SEGMENT_TIMING") and os.environ.get("LADDER_REPLAY"):
+                    from matchedfilter._cudacompute import SegmentGraph
+                    d = SegmentGraph.device_s[-max(1, args.segments - args.warmup - 1):]
+                    if d:
+                        counts["graph_device_ms_median"] = float(np.median(d) * 1e3)
+                        counts["graph_device_ms_min"] = float(np.min(d) * 1e3)
                 if bsampler.samples:
                     counts["gpu_sampler"] = bsampler.report()
-                # A Vulkan segment replay advances the fine plans' work counters as the calls
-                # would (_vkcompute.read_dispatch_sparse); the CUDA graph does not yet.
-                rctx = _roofline.gpu_context(fine_banks)
-                vk_inflight = (inflight and not fold and rctx is not None
-                               and type(rctx).__module__.endswith("_vkcompute"))
-                if (fold or inflight) and not vk_inflight:
+                if fold:
                     if roof is not None:
                         roof["problems"].append("roofline counting is not wired for "
-                                                "LADDER_FOLD_TOPS / LADDER_INFLIGHT")
+                                                "LADDER_FOLD_TOPS")
                 else:
                     roof_close()
                 report_plan(seg_plan)
@@ -767,6 +790,8 @@ def run_device(device, tops, args, seed):
         if roof["ticks"]:
             rate = _roofline.cpu_tick_rate()
             measured.update({k: v / rate for k, v in roof["ticks"].items()})
+        for jobs in roof["followup_jobs"]:
+            _roofline.followup_work(roof["work"], jobs, series_len=roof["series_len"])
         pk = _roofline.peaks(device, ctx=roof["ctx"])
         rr = _roofline.report(roof["work"], pk, steady_segments, total,
                               {k: v for k, v in measured.items() if v is not None})

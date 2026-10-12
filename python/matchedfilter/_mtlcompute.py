@@ -963,7 +963,7 @@ class Context(InputUploads):
                         args=(_MTLSize(groups, 1, 1), _MTLSize(tg, 1, 1)),
                         argtypes=(_MTLSize, _MTLSize))
 
-    def empty_shared(self, shape, dtype=np.complex64, *, readback=False):
+    def empty_shared(self, shape, dtype=np.complex64, *, readback=False, host_input=False):
         return empty_shared(self, _Buffer, shape, dtype)
 
     #: Page size newBufferWithBytesNoCopy requires (16 KiB on Apple silicon).
