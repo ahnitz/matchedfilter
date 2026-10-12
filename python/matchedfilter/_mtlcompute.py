@@ -172,6 +172,16 @@ def coarse_ppg(band, pairs, override=None, simd_width=None):
     return max(shipped, default=1) if wg < target else 1
 
 
+#: Hierarchical calls that took the fused forward (for tests and the bench).
+_FUSED_FORWARDS = [0]
+
+
+def _fused_forward_enabled():
+    """forward_tier0.slang on the hierarchical fine stage (MF_METAL_FWD_TIER0=0: off)."""
+    import os
+    return os.environ.get("MF_METAL_FWD_TIER0", "1") != "0"
+
+
 #: Threads the coarse pass packs pairs up to when no pipeline width is known; the host passes
 #: the coarse pipeline's threadExecutionWidth (Context._simd_width).
 TARGET_THREADS = 32
@@ -484,6 +494,7 @@ class _FusedBatch:
         for ctx in self.holders:
             pending = ctx._pending_metal
             if pending is not None and pending[0] == cmd:
+                ctx._materialize_forward()
                 ctx._pending_metal = None
                 self.dev.o.call(cmd, b"release", restype=None)   # the forward's retain
         self.holders = []
@@ -671,6 +682,12 @@ class Context(InputUploads):
             return "pack_coarse"
         if entry == "seriesForward":
             return "forward_%d" % n
+        if entry == "forwardTier0":
+            return "forward_tier0_%d" % n
+        if entry == "seriesForwardListed":
+            return "forward_listed_%d" % n
+        if entry == "markBlocks":
+            return "markblocks"
         if entry.startswith("coarse16"):
             return "tierb_%d_c16%s" % (n, entry[len("coarse16"):])
         tierc = {"tcStage1": "corr1", "tcFullStage3": "corr2",
@@ -784,7 +801,7 @@ class Context(InputUploads):
                      "tcForwardStage1": "fwd1", "tcForwardStage3": "fwd2"}
             if entry_name in roles:
                 want = (_manifest()['full_tierc'][str(n)][roles[entry_name]]['local_size'][0])
-            elif entry_name == "compactPairs":
+            elif entry_name in ("compactPairs", "markBlocks"):
                 want = 256
             else:
                 want = n // _radix(n) * _ppg_of(entry_name)
@@ -874,6 +891,7 @@ class Context(InputUploads):
         after completion. An autoreleased command buffer would otherwise die
         with the pool of the method that made it, while still in flight.
         """
+        self._materialize_forward()
         pending = self._pending_metal
         if pending is None:
             cmd = self._new_cmd()
@@ -1008,7 +1026,35 @@ class Context(InputUploads):
             return None
         return self._commit(cmd, label)
 
+    def _materialize_forward(self, skip=None):
+        """Encode the deferred forwards still held lazily (forward()), except `skip`."""
+        lazy = self.__dict__.pop("_lazy_fwd", None)
+        for item in lazy or ():
+            if item is skip:
+                continue
+            n, pso, buffers, count, size, cmd = item
+            enc = self.o.call(cmd, b"computeCommandEncoder")
+            self._dispatch(enc, pso, (size,), buffers, n // _radix(n), groups=count)
+            self.o.call(enc, b"endEncoding", restype=None)
+
+    def _claim_forward(self, spectra_buf, rows):
+        """The lazy forward writing exactly `rows` rows of spectra_buf from row 0, taken
+        out of the pending list (its consumer encodes it), or None."""
+        lazy = getattr(self, "_lazy_fwd", None)
+        if not lazy:
+            return None
+        pending = self._pending_metal
+        for item in reversed(lazy):
+            sp = item[2][2]
+            if (sp.handle == spectra_buf.handle and getattr(sp, "offset", 0) ==
+                    getattr(spectra_buf, "offset", 0) and item[3] == rows
+                    and pending is not None and item[5] == pending[0]):
+                lazy.remove(item)
+                return item
+        return None
+
     def _flush_forward(self):
+        self._materialize_forward()
         pending = self._pending_metal
         if pending is not None:
             self._pending_metal = None
@@ -1038,6 +1084,16 @@ class Context(InputUploads):
         else:
             cmd = self._new_cmd()
             self.o.call(cmd, b"retain")
+        if defer and rows is None and _fused_forward_enabled():
+            # Encoded when its consumer is known (_materialize_forward): a hierarchical
+            # call reading these spectra takes it as forwardTier0 instead (hier_peaks).
+            if pending is None:
+                self._flush_forward()          # an earlier deferred forward nothing reads
+            self._lazy_fwd = list(getattr(self, "_lazy_fwd", None) or ()) + [
+                (n, pso, buffers, count, series.size, cmd)]
+            self._pending_metal = (cmd, (tuple(pending[1]) if pending is not None else ())
+                                   + tuple(buffers))
+            return None
         enc = self.o.call(cmd, b"computeCommandEncoder")
         self._dispatch(enc, pso, (series.size,), buffers, n // _radix(n), groups=count,
                        offsets=(0, r0 * 4, r0 * n * 8))
@@ -1109,6 +1165,7 @@ class Context(InputUploads):
 
     def cancel_forward(self, slot=None):
         """Drop a deferred forward that will not be committed."""
+        self.__dict__.pop("_lazy_fwd", None)
         pending = self._pending_metal
         if pending is not None:
             self._pending_metal = None
@@ -1662,6 +1719,28 @@ class Context(InputUploads):
         # open aborts the process (an encoder released without endEncoding).
         coarse0 = self.pipeline(tiers[0][0], centry)
         refine = self.pipeline(n, "refineListed", nbins == 1)
+        # Fused forward (forward_tier0.slang): when this call reads the spectra a deferred
+        # forward is about to write, that forward writes only the bands the tiers read, and
+        # the refine's blocks are recomputed in full (markBlocks + seriesForwardListed).
+        fwd = None
+        if (shared_data and half[0] and not any(half[1:]) and len(tiers) <= 2
+                and _fused_forward_enabled()):
+            fwd = self._claim_forward(bufs["data"], nd)
+            if fwd is not None:
+                try:
+                    fpso = (self.pipeline(n, "forwardTier0"), self.pipeline(n, "seriesForwardListed"),
+                            self.pipeline(n, "markBlocks"))
+                except (MetalError, UnsupportedSize, OSError):
+                    self._lazy_fwd = list(getattr(self, "_lazy_fwd", None) or ()) + [fwd]
+                    fwd = None
+            if fwd is not None:
+                _FUSED_FORWARDS[0] += 1
+                if "flags" not in bufs:
+                    bufs["flags"] = _Buffer(self, nd * 4)
+                    bufs["blist"] = _Buffer(self, nd * 4)
+                    bufs["bargs"] = _Buffer(self, 12)
+                bufs["flags"].write(np.zeros(nd, np.uint32))
+                bufs["bargs"].write(np.array([0, 1, 1], dtype=np.uint32))
         cmd = self._command_buffer()
         enc = self.o.call(cmd, b"computeCommandEncoder")
 
@@ -1671,7 +1750,16 @@ class Context(InputUploads):
         def bits(x):
             return int(np.float32(x).view(np.uint32))
 
-        if shared_data:
+        if fwd is not None:
+            # series, starts as the deferred forward bound them; bands straight into the
+            # tiers' inputs (band1 unused, and bound to cdata, for a one-tier chain).
+            _, _, (series_b, starts_b, _), _, size, _ = fwd
+            b1 = tiers[1][0] if len(tiers) > 1 else 0
+            self._dispatch(enc, fpso[0], (size, tiers[0][0], b1),
+                           [series_b, starts_b, bufs["cdata"],
+                            bufs["cdata1"] if len(tiers) > 1 else bufs["cdata"]],
+                           n // _radix(n), groups=nd)
+        elif shared_data:
             pack = self.pipeline(4096, "packCoarse")
             for i, ((b, _, _), h) in enumerate(zip(tiers, half)):
                 self._dispatch(enc, pack, (n, b, nd*b, int(h)),
@@ -1716,6 +1804,14 @@ class Context(InputUploads):
                            256, groups=(pairs + 255) // 256)
 
         last = sfx[-1]
+        if fwd is not None:
+            # The refine reads full spectra of its survivors' blocks only: recompute those.
+            self._dispatch(enc, fpso[2], (nt,),
+                           [bufs["surv" + last], bufs["args" + last], bufs["flags"],
+                            bufs["blist"], bufs["bargs"]], 256, groups=(pairs + 255) // 256)
+            self._dispatch(enc, fpso[1], (size,),
+                           [series_b, starts_b, bufs["data"], bufs["blist"]],
+                           n // _radix(n), indirect=bufs["bargs"])
         self._dispatch(enc, refine,
                        (nt, lo, hi, binsize, shift & 0xFFFFFFFF, nbins, bits(t2)),
                        use("data", "tmpl", "idx", "val", "surv" + last),
