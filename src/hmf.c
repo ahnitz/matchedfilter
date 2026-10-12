@@ -46,6 +46,7 @@ struct ap_hmf_plan {
   ap_plan *full_fft;
   float *fwd,*spec;
   const float **dspec;
+  int sparse;                 /* ap_hmf_set_sparse: rows that do not fire write counts only */
   char *dready,*tready;
   int ref_on;
   long pairs,trig;
@@ -274,6 +275,11 @@ int ap_hmf_set_reference(ap_hmf_plan *p,const float *power){
     p->ref_on=1;
   } else p->ref_on=0;
   for(int t=0;t<p->nt;t++) if(p->tready[t] && refresh_template(p,t)) return -1;
+  return 0;
+}
+int ap_hmf_set_sparse(ap_hmf_plan *p,int on){
+  if(!p) return -1;
+  p->sparse=on?1:0;
   return 0;
 }
 int ap_hmf_set_data(ap_hmf_plan *p,int d,const float *spec){
@@ -661,7 +667,8 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
         tr->fire_d[nnext]=d; tr->fire_t[nnext]=t; nnext++;
       } else {
         unsigned long long f0 = p->prof ? ap_ticks() : 0;
-        empty_row(peaks,counts,row,nb);
+        if(p->sparse && counts) counts[row]=0;
+        else empty_row(peaks,counts,row,nb);
         if(p->prof) p->c_fill += ap_ticks()-f0;
       }
     }

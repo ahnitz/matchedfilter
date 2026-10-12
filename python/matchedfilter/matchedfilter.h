@@ -257,6 +257,12 @@ int ap_hmf_run_series(ap_hmf_plan *p,
                       int t0, int nt, size_t binsize, float threshold,
                       ap_peak *peaks, int *counts);
 
+/* Sparse output for ap_hmf_run / ap_hmf_run_series (on != 0, counts required): a row
+   whose pair no tier passes gets counts[row] = 0 and its peaks are NOT written, so the
+   caller reads peaks only where counts[row] > 0. At a detection threshold almost every
+   pair is such a row; writing an empty peak into each was a pass over the whole table. */
+int ap_hmf_set_sparse(ap_hmf_plan *p, int on);
+
 /* Diagnostics: pairs examined and pairs that went to the full correlation.
    The ratio is the measured refine rate, which is what the speedup rides on. */
 void ap_hmf_stats(const ap_hmf_plan *p, long *pairs, long *refined);
