@@ -171,3 +171,38 @@ def test_replay_after_other_calls_on_the_same_plans(monkeypatch, replay_on):
             b.filter_series(rows[i], windows=slice(c0 - 4000, c0 + 4100), binsize=61,
                             threshold=0.0, template_index=int(rng.integers(0, 10)))
     assert plan.replays >= 3, plan.replays
+
+
+def test_chain_trial_locks_under_segment_replay(monkeypatch, replay_on, tmp_path):
+    """A GPU chain trial is judged on whole filter_series_many batches. Replayed segments
+    never run one, so a SegmentPlan must not replay while a plan of its job set is in a
+    trial (it stalled at one sample in 40 segments, plans held on their traced candidate)."""
+    import matchedfilter as mf
+    monkeypatch.setattr(mf, "_CHAIN_TRIALS", {})
+    monkeypatch.setattr(mf, "_CHAIN_CHOICE", {})
+    rng, banks = _setup(monkeypatch, nbanks=2, seed=88)
+    monkeypatch.delenv("MF_AUTOTUNE", raising=False)            # trials on
+    monkeypatch.setenv("MF_CHAIN_TRIALS", "2")
+    monkeypatch.setenv("MF_COST_FILE", str(tmp_path / "costs.json"))
+    S = 1 << 17
+    rows = banks[0][0].empty_shared((len(banks), S))
+    jobs = [(b, rows[i], dict(windows=slice(3000, S - 3000))) for i, (b, _, _) in enumerate(banks)]
+    plan = SegmentPlan()
+
+    def state():
+        return [(g.plan._chain_trial, tuple(g.plan._chain or ())) for b, _, _ in jobs
+                for g in b._groups]
+    compared = 0
+    for seg in range(30):
+        _loud(rng, rows, S)
+        before = state()
+        got = plan.run(jobs)
+        # Compared once the trial is over: a trial batch may run another candidate than the
+        # chain the plans hold afterwards (a lock switches them), and the reference runs now.
+        if all(t is None for t, _ in before) and state() == before:
+            _same(got, _want(jobs))
+            compared += 1
+    assert compared >= 5, compared
+    trials = [g.plan._chain_trial for b, _, _ in jobs for g in b._groups]
+    assert all(t is None for t in trials), "a chain trial never locked under replay"
+    assert plan.replays > 0
