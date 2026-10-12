@@ -84,7 +84,7 @@ def test_switching_layouts_is_exact_and_locks(monkeypatch, tmp_path):
     data[30000:30400] += 40 * np.exp(1j * np.linspace(0, 30, 400))
     ref = bank2.filter_series(data)
     seen = set()
-    for _ in range(16):
+    for _ in range(240):          # each layout's chain and Q15 trials settle before it samples
         out = TimeDomainFilterBank.filter_series_many([(bank, data, {})])[0]
         seen.add(bank._layout_rank)
         assert set(np.unique(out.template_indices)) == set(np.unique(ref.template_indices))
@@ -143,21 +143,123 @@ def test_a_trial_continues_across_short_processes(monkeypatch, tmp_path):
 
 
 def test_two_short_ladder_processes_lock_the_trial(monkeypatch, tmp_path):
-    """Two processes on one cost file, each running fewer batches than the trial needs,
-    finish it between them: the second one locks."""
+    """Two processes on one cost file, the first too short to finish the trial, finish it
+    between them: the second continues from the file (its chain and Q15 locks included) and
+    locks."""
     monkeypatch.setenv("MF_COST_FILE", str(tmp_path / "costs.json"))
     rng = np.random.default_rng(3)
     L = 1 << 15
     data = ((rng.standard_normal(L) + 1j * rng.standard_normal(L)) / np.sqrt(2)).astype(np.complex64)
-    for proc in range(2):
+    for proc, batches in ((0, 45), (1, 400)):
         monkeypatch.setattr(td, "_BLOCK_TRIALS", td._BlockTrials())   # a new process
         bank, _ = _inspiral_bank()
         if proc == 0 and len(getattr(bank, "_layouts", None) or []) < 2:
             pytest.skip("the model offered one block size only")
-        for _ in range(6):                     # < 3 ranks x (settle + 2 samples) = 9
+        for _ in range(batches):
             TimeDomainFilterBank.filter_series_many([(bank, data, {})])
+            if bank._layouts is None:
+                break
         if proc == 0:
-            assert td._BLOCK_TRIALS.unlocked() == [td._trial_key(bank)]
+            assert td._BLOCK_TRIALS.winner(td._trial_key(bank)) is None
     assert td._BLOCK_TRIALS.unlocked() == []
     assert td._BLOCK_TRIALS.winner(td._trial_key(bank)) is not None
     assert getattr(bank, "_layouts", None) is None
+
+
+class _FakeTimer:
+    """Deterministic batch times: rank r's true cost, plus a fixed noise sequence."""
+
+    def __init__(self, true, noise):
+        self.true, self.noise, self.k = true, noise, {}
+
+    def __call__(self, r):
+        k = self.k.get(r, 0)
+        self.k[r] = k + 1
+        return self.true[r] * (1.0 + self.noise[r][k % len(self.noise[r])])
+
+
+def _drive(tr, key, timer, nranks=3, limit=64):
+    for _ in range(limit):
+        if tr.winner(key) is not None:
+            break
+        r = tr.rank_for(key, nranks)
+        tr.record(key, r, timer(r))
+    return tr.winner(key)
+
+
+def test_two_noisy_samples_do_not_lock_a_slower_rank(monkeypatch, tmp_path):
+    """The M2 failure: rank 1 is 10% SLOWER in truth, but its first two samples are 5.7%
+    faster than rank 0's (just past TIE). The noise rule sees the gap is inside the samples'
+    own spread, samples further, and keeps rank 0. The old rule (median past TIE on two
+    samples) locked rank 1."""
+    monkeypatch.setenv("MF_COST_FILE", str(tmp_path / "costs.json"))
+    timer = _FakeTimer({0: 1.0, 1: 1.10, 2: 1.5},
+                       {0: [0.0, 0.10, 0.02, 0.03, -0.01, 0.0],
+                        1: [-0.155, -0.045, 0.01, 0.0, 0.02, -0.01],
+                        2: [0.0, 0.01]})
+    first = [timer.true[r] * (1 + timer.noise[r][k]) for r in (0, 1) for k in (0, 1)]
+    med0, med1 = np.median(first[:2]), np.median(first[2:])
+    assert med1 < med0 * (1 - 0.05)                       # the old rule would lock rank 1
+    assert _drive(td._BlockTrials(), "k", timer) == 0
+
+
+def test_a_clear_win_still_locks_on_two_samples(monkeypatch, tmp_path):
+    monkeypatch.setenv("MF_COST_FILE", str(tmp_path / "costs.json"))
+    timer = _FakeTimer({0: 1.0, 1: 0.7, 2: 1.3}, {r: [0.0, 0.01] for r in range(3)})
+    tr = td._BlockTrials()
+    assert _drive(tr, "k", timer) == 1
+    assert sum(timer.k.values()) == 6                     # 2 samples each, no extension
+
+
+def test_a_lock_steady_state_contradicts_is_reopened(monkeypatch, tmp_path):
+    """Rank 1 measured faster in its trial, then runs 30% slower than the trial's best in
+    steady state: the lock is reopened in the cost file, so the next process trials again."""
+    monkeypatch.setenv("MF_COST_FILE", str(tmp_path / "costs.json"))
+    timer = _FakeTimer({0: 1.0, 1: 0.7, 2: 1.3}, {r: [0.0, 0.01] for r in range(3)})
+    tr = td._BlockTrials()
+    assert _drive(tr, "k", timer) == 1
+    for _ in range(td._BLOCK_RECHECK_N - 1):
+        assert not tr.observe("k", 0.72)                  # agrees with the trial
+    assert not tr.observe("k", 0.72)
+    fresh = td._BlockTrials()                              # agreement keeps the lock
+    assert fresh.winner("k") == 1
+    for _ in range(td._BLOCK_RECHECK_N):
+        reopened = fresh.observe("k", 1.3)                 # 30% slower than rank 0's trial
+    assert reopened
+    again = td._BlockTrials()
+    assert again.winner("k") is None                      # next process trials again
+    assert _drive(again, "k", timer) == 1                  # (the fake timer still says 1)
+    final = td._BlockTrials()
+    for _ in range(2 * td._BLOCK_RECHECK_N):
+        assert not final.observe("k", 1.3)                # one re-check per key: no flapping
+    assert td._BlockTrials().winner("k") == 1
+
+
+class _FakeBank:
+    def __init__(self, calibrating):
+        self._layouts = [object(), object()]
+        self._layout_rank, self._layout_warm = 0, True
+        self.filters_f = [0]
+        self._choice_ns, self.device = (2048, 4096), "fake"
+        plan = type("P", (), {"calibrating": lambda s, c=calibrating: c})()
+        self._groups = [type("G", (), {"is_hier": True, "_plan": plan})()]
+
+    def _use_layout(self, r):
+        self._layout_rank = r
+
+    def _lock_layout(self, r):
+        self._layouts = None
+
+
+def test_no_block_sample_while_a_plan_calibrates(monkeypatch, tmp_path):
+    """A batch in which any of the bank's plans is still in a chain or Q15 trial is not a
+    block-size sample: those calls switch kernels between them."""
+    monkeypatch.setenv("MF_COST_FILE", str(tmp_path / "costs.json"))
+    monkeypatch.setattr(td, "_BLOCK_TRIALS", td._BlockTrials())
+    x = np.zeros(8, np.complex64)
+    for cal, expect in ((True, 0), (False, 1)):
+        b = _FakeBank(cal)
+        tok = td._trial_begin([(b, x, {})])
+        td._trial_end(tok)
+        n = sum(len(v) for v in td._BLOCK_TRIALS.state[td._trial_key(b)]["samples"].values())
+        assert n == expect
