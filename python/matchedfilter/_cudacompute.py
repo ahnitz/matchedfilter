@@ -129,13 +129,18 @@ def _seg_freed(start, nbytes):
 
 
 _SEG_TIMING = os.environ.get("MF_SEGMENT_TIMING", "0") not in ("", "0")
+# Spread each (context, slot) of a segment capture over the graph's fork streams in turn,
+# and order a dispatch after its own context's forwards only (MF_SEGMENT_SPREAD=0: the
+# slot k -> stream k % streams mapping and every stream's latest forward). Measured on the
+# L40S, ladder LADDER_INFLIGHT: graph device time 11.6 -> 10.0 ms, segment 13.0 -> 11.4 ms.
+_SEG_SPREAD = os.environ.get("MF_SEGMENT_SPREAD", "1") not in ("", "0")
 
 
 class SegmentGraph:
     """One CUDA graph holding a whole segment's fine-stage device work, across every bank.
 
     capture(run) calls run() with capture active: every Context on the device enqueues onto
-    this graph's fork streams (slot k -> stream k % 4, so independent calls keep running
+    this graph's fork streams (each (context, slot) on the next stream in turn, so independent calls keep running
     concurrently in the graph), per-call graphs are bypassed, and no host wait may occur (a
     wait fails the capture, and the caller falls back). replay() relaunches the whole
     segment with one cuGraphLaunch and one wait. The graph reads its host inputs (block
@@ -149,7 +154,9 @@ class SegmentGraph:
 
     def __init__(self, ctx, nstreams=None):
         if nstreams is None:
-            nstreams = int(os.environ.get("MF_SEGMENT_STREAMS", "4"))
+            # Enough independent branches for the banks of a segment to fill the device:
+            # 8 and 16 measured even on the L40S, 4 ~15% slower (MF_SEGMENT_STREAMS).
+            nstreams = int(os.environ.get("MF_SEGMENT_STREAMS", "8"))
         self.ctx = ctx
         self.cuda = ctx.cuda
         ctx._bind()
@@ -162,10 +169,20 @@ class SegmentGraph:
         self.prefetch = []
         self.ptrs = ()
 
-    def stream_for(self, slot):
-        if isinstance(slot, int):
+    def stream_for(self, slot, ctx=None):
+        """The fork stream of a slot. With ctx (MF_SEGMENT_SPREAD), each (context, slot)
+        gets the next stream in turn at its first use in the capture, so the banks of a
+        segment -- whose calls all start at the same slot -- spread over every stream
+        instead of stacking on the first few."""
+        if not isinstance(slot, int):
+            return self.streams[0]
+        if ctx is None:
             return self.streams[slot % len(self.streams)]
-        return self.streams[0]
+        m = _SEG.setdefault("spread", {})
+        k = (id(ctx), slot)
+        if k not in m:
+            m[k] = len(m) % len(self.streams)
+        return self.streams[m[k]]
 
     def capture(self, run):
         """Capture run() into this graph; returns run()'s value (its work is NOT executed:
@@ -790,7 +807,7 @@ class Context(InputUploads):
         # Integer slots spread over the streams; any other slot (e.g. a follow-up items
         # allocation) runs on the default stream, ordered with peaks_items.
         if _SEG is not None:                   # capturing a segment graph
-            return _SEG["graph"].stream_for(slot)
+            return _SEG["graph"].stream_for(slot, self if _SEG_SPREAD else None)
         if isinstance(slot, int) and self.streams:
             return self.streams[slot % len(self.streams)]
         return self.stream
@@ -816,8 +833,13 @@ class Context(InputUploads):
             # device sync, so nothing earlier is pending.
             self._after_writes(stream)
             for key, ev in _SEG["fwd"].items():
-                if key != stream.value:
-                    check_cuda(self.cuda.cuStreamWaitEvent(stream, ev, 0), "cuStreamWaitEvent")
+                if _SEG_SPREAD:
+                    # Only this context's forwards: its dispatches read its own spectra.
+                    if key[0] != id(self) or key[1] == stream.value:
+                        continue
+                elif key == stream.value:
+                    continue
+                check_cuda(self.cuda.cuStreamWaitEvent(stream, ev, 0), "cuStreamWaitEvent")
             return
         self._after_writes(stream)
         for key, ev in self._fwd_events.items():
@@ -2210,9 +2232,10 @@ class Context(InputUploads):
             # A consumer may run on another stream (a tiled or unslotted dispatch of these
             # spectra): it must wait for this forward. Recorded here, waited on in _after.
             table = _SEG["fwd"] if _SEG is not None else self._fwd_events
-            ev = table.get(stream.value)
+            key = (id(self), stream.value) if (_SEG is not None and _SEG_SPREAD) else stream.value
+            ev = table.get(key)
             if ev is None:
-                ev = table[stream.value] = self._new_event()
+                ev = table[key] = self._new_event()
             check_cuda(self.cuda.cuEventRecord(ev, stream), "cuEventRecord")
 
     def cancel_forward(self, slot=None):
