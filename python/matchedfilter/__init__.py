@@ -1068,11 +1068,9 @@ class MatchedFilter:
         if self._gpu is None:
             return None
         if isinstance(self, HierarchicalFilter):
-            # A plan under a chain trial is timed per run_series call (its trial records only
-            # there): a ragged call would never record, and the trial never locks -- every
-            # later call then runs synchronously, untimed, forever.
-            if (not getattr(self._gpu, "supports_ragged_hier", False)
-                    or getattr(self, "_chain_trial", None) is not None):
+            # (A GPU plan under a chain trial is judged per batch, not per call: it takes the
+            # same paths as any other -- ragged, deferred, replayed.)
+            if not getattr(self._gpu, "supports_ragged_hier", False):
                 return None
         elif (type(self) is not MatchedFilter
                 or not getattr(self._gpu, "supports_ragged_bins", False)):
@@ -1418,8 +1416,7 @@ class MatchedFilter:
         identity, resident input signatures) before anything is submitted; any stale handle
         falls back to the full path, which records afresh."""
         plans = self.__dict__.get("_call_plans")
-        if (not plans or not raw or self._tdirty or not getattr(self, "_defer_series", False)
-                or getattr(self, "_chain_trial", None) is not None):
+        if (not plans or not raw or self._tdirty or not getattr(self, "_defer_series", False)):
             return None
         d = self.__dict__
         vals = (int(binsize), float(threshold), t0, nt, d.get("_series_batch_bytes"),
@@ -1611,14 +1608,13 @@ class MatchedFilter:
                         and nb <= getattr(self._gpu, "max_grouped_bins", 0)
                         and nt <= self._gpu_pair_limit())
         # Deferred (TimeDomainFilterBank.filter_series_many): submit now, collect later, so the
-        # GPU works on this call while the host prepares the next bank's. Chain trials time
-        # their calls, so a plan under trial runs synchronously.
+        # GPU works on this call while the host prepares the next bank's. (A chain trial on the
+        # GPU is judged per batch, in the mode the search runs: deferred too.)
         # A grouped flat call defers too when it is one batch (a follow-up's window: one
         # submission for every bin count), on a backend that declares it can.
         defer = (getattr(self, "_defer_series", False) and can_pipeline
                  and (not grouped_flat or (nblk <= batch
-                                           and getattr(self._gpu, "defers_grouped", False)))
-                 and getattr(self, "_chain_trial", None) is None)
+                                           and getattr(self._gpu, "defers_grouped", False))))
         pipelined = can_pipeline and (not single or defer)
         queue_ahead = int(os.environ.get("MF_GPU_QUEUE_AHEAD", "8"))
         K = max(1, queue_ahead) if pipelined else 1
@@ -2328,6 +2324,83 @@ def _stored_chain_lock(tkey, shortlist):
     return chain if chain in tuple(tuple(c) for c in shortlist) else None
 
 
+def _chain_trial_next(tkey):
+    """The candidate a GPU chain trial's next batch runs on every plan of the trial: the one
+    with fewest batch samples, in shortlist order. None once the trial has a winner."""
+    with _AUTOTUNE_LOCK:
+        tr = _CHAIN_TRIALS.get(tkey)
+        if tr is None or tr["winner"] is not None:
+            return None
+        if "batch" not in tr:
+            tr["batch"] = {c: [] for c in tr["samples"]}
+            path = _gatechain._cost_file()
+            rec = (_gatechain._load_cost_file(path).get(_chain_lock_key(tkey) + "|batches")
+                   if path is not None else None)
+            if isinstance(rec, dict) and isinstance(rec.get("samples"), dict):
+                for k, v in rec["samples"].items():
+                    c = tuple(int(b) for b in k.split(",") if b)
+                    if c in tr["batch"]:            # still a candidate here
+                        tr["batch"][c] = [float(x) for x in v]
+        bs = tr["batch"]
+        for c in tr["samples"]:
+            bs.setdefault(c, [])
+        # Candidates in turn, each for a run of batches: a switch rebuilds thresholds and
+        # uploads (the batch after it is not a sample), so alternating every batch measured
+        # mostly the switching -- cheapest for the chain with fewest tiers.
+        need = int(os.environ.get("MF_CHAIN_TRIALS", _CHAIN_BATCH_TRIALS))
+        # Samples taken plus batches in flight that will be (a caller keeping batches in
+        # flight records them later than the next batch starts).
+        pend = tr.setdefault("batch_pending", {})
+        have = {c: len(bs[c]) + pend.get(c, 0) for c in bs}
+        cur = tr.get("batch_current")
+        if cur is not None and cur in bs and (have[cur] < need
+                                              or all(v >= need for v in have.values())):
+            return cur          # (all sampled, the last samples still in flight: no switch)
+        cur = tr["batch_current"] = min(bs, key=lambda c: (have[c] >= need, have[c],
+                                                          list(tr["samples"]).index(c)))
+        return cur
+
+
+def _chain_trial_pending(tkey, chain, delta):
+    """A settled batch of a GPU chain trial started (+1) or finished (-1) on chain."""
+    with _AUTOTUNE_LOCK:
+        tr = _CHAIN_TRIALS.get(tkey)
+        if tr is not None:
+            pend = tr.setdefault("batch_pending", {})
+            pend[tuple(chain)] = pend.get(tuple(chain), 0) + delta
+
+
+def _chain_trial_batch(tkey, chain, value):
+    """One sample of a GPU chain trial: a whole batch (every job of a segment, submission to
+    last result) per unit of work, with every plan of the trial on `chain`. Judged on what a
+    search pays -- host and device, readback, everything the chain changes -- not on one
+    call's time per pair. Locks the fastest once every candidate has MF_CHAIN_TRIALS samples
+    (a fixed order decides within the samples' noise, as for per-call trials)."""
+    with _AUTOTUNE_LOCK:
+        tr = _CHAIN_TRIALS.get(tkey)
+        if tr is None or tr["winner"] is not None:
+            return None if tr is None else tr["winner"]
+        bs = tr.setdefault("batch", {c: [] for c in tr["samples"]})
+        bs.setdefault(tuple(chain), []).append(float(value))
+        _log_autotune("CHAIN-TRIAL batch sample %s %.3g", tuple(chain), value)
+        need = int(os.environ.get("MF_CHAIN_TRIALS", _CHAIN_BATCH_TRIALS))
+        if not all(len(v) >= need for v in bs.values()):
+            # Unfinished: kept in MF_COST_FILE, so a shorter process than the trial
+            # continues it in the next (as block-size trials do).
+            path = _gatechain._cost_file()
+            if path is not None:
+                _gatechain._store_cost(path, _chain_lock_key(tkey) + "|batches",
+                                       {"samples": {",".join(map(str, c)): v
+                                                    for c, v in bs.items()}})
+        if all(len(v) >= need for v in bs.values()):
+            med = {c: float(np.median(v)) for c, v in bs.items()}
+            tr["winner"] = _gatechain.pick_stable(med, med.get, _gatechain.canonical_order)
+            _log_autotune("CHAIN-TRIAL (batches) locked %s  median s/unit %s", tr["winner"],
+                          {c: "%.3g" % v for c, v in med.items()})
+            _store_chain_lock(tkey, tr["winner"])
+        return tr["winner"]
+
+
 def _store_chain_lock(tkey, chain):
     path = _gatechain._cost_file()
     if path is not None and tkey is not None:
@@ -2345,7 +2418,12 @@ _CHAIN_TRIALS = {}
 #: ~25% in the consumer.
 _CHAIN_MARGIN = 0.30
 _CHAIN_SHORTLIST_MAX = 4
+#: GPU chain trials measure the model's best three, each over whole batches (see _choose).
+_CHAIN_SHORTLIST_GPU = 3
 _CHAIN_TRIALS_PER_CAND = 6
+#: Batch samples per candidate of a GPU chain trial (a batch is a whole segment's jobs; its
+#: first batch on a candidate builds recordings and is not counted).
+_CHAIN_BATCH_TRIALS = 4
 
 
 def _log_autotune(msg, *args):
@@ -2684,10 +2762,17 @@ class HierarchicalFilter(MatchedFilter):
             if best is None:
                 raise ValueError(_uncovered_message(self.n, self.snr, self.fd))
             margin = float(os.environ.get("MF_CHAIN_MARGIN", _CHAIN_MARGIN))
+            # On a GPU the trial runs on whole batches in the search's own mode, so its cost
+            # is a few segments: the model's best few are measured whatever their modelled
+            # gap. The model prices device work only, and missed the faster chain by 38%
+            # (n=2048: (256, 1024) priced 1.8 against 1.3, measured ~1.5 ms/segment faster).
+            near = (lambda q: True) if self.device.kind == "gpu" else (
+                lambda q: q["cost"] <= best["cost"] * (1.0 + margin))
             shortlist = tuple(q["chain"] for q in sorted(
-                (q for q in plans if q["cost"] <= best["cost"] * (1.0 + margin)),
+                (q for q in plans if near(q)),
                 key=lambda q: (q["chain"] != best["chain"], q["cost"])))
-            hit = (tuple(best["chain"]), shortlist[:_CHAIN_SHORTLIST_MAX])
+            hit = (tuple(best["chain"]), shortlist[:_CHAIN_SHORTLIST_MAX if self.device.kind != "gpu"
+                                                   else _CHAIN_SHORTLIST_GPU])
             with _AUTOTUNE_LOCK:
                 _Q15_MODEL[(key, tuple(best["chain"]))] = bool(best.get("q15", False))
             with _AUTOTUNE_LOCK:
@@ -2695,6 +2780,16 @@ class HierarchicalFilter(MatchedFilter):
             _log_autotune("CHAIN n=%d model=%s shortlist=%s ranking=%s", self.n, hit[0], hit[1],
                           [(q["chain"], round(q["cost"], 1)) for q in plans[:6]])
         model_best, shortlist = hit
+        forced = os.environ.get("MF_CHAIN_FORCE")
+        if forced:
+            # Measurement only (chain studies): every hierarchical plan of this n runs the
+            # given bands, outside any trial. "n:b1,b2;n2:b1" or "b1,b2" for every n.
+            for part in forced.split(";"):
+                pn, _, bands = part.rpartition(":")
+                if not pn or int(pn) == self.n:
+                    want = tuple(int(b) for b in bands.split(",") if b)
+                    if want and len(want) <= tiers and all(b < self.n for b in want):
+                        model_best, shortlist = want, (want,)
         if not _autotune_enabled():
             shortlist = shortlist[:1]
 
@@ -2825,7 +2920,8 @@ class HierarchicalFilter(MatchedFilter):
         dt = time.perf_counter() - t0
         full = templates is None or templates[1] >= self.ntemplates
         nblk = len(starts) if starts is not None else 1
-        if full and nblk >= 2 and self._chain_trial is not None:
+        if full and nblk >= 2 and self._chain_trial is not None and self._gpu is None:
+            # (GPU plans are judged per batch instead: time_domain._trial_begin/_trial_end.)
             self._chain_trial_record(dt, nblk * self.ntemplates * self.ndata)
         return res
 
