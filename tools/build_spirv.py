@@ -461,7 +461,8 @@ def build_items(slangc, n):
 def source_hashes():
     """Fingerprint all production shader dependencies for freshness checks."""
     names = ('tierb.slang', 'fft_transform.slang', 'coarse_tile.slang',
-             'series_forward.slang', 'series_bands.slang', 'pack_coarse.slang', 'twiddle.slang',
+             'series_forward.slang', 'series_bands.slang', 'forward_tier0.slang',
+             'pack_coarse.slang', 'twiddle.slang',
              'refine_bounded.slang')
     return {name: hashlib.sha256((KERNEL.parent / name).read_bytes()).hexdigest()
             for name in names}

@@ -57,9 +57,33 @@ def build_kernels(compiler, build_module=build):
                                 '-o', str(out)], check=True)
         entries[str(n)]['bands'] = f'forward_bands_{n}.spv'
         entries[str(n)]['listed'] = f'forward_listed_{n}.spv'
+        # The fused forward + tier-0 bands (forward_tier0.slang) and, on Metal, the survivor
+        # recompute it pairs with (series_bands.slang's markBlocks / seriesForwardListed).
+        # Built for every target; a host enables it after measuring (Metal: _mtlcompute).
+        with tempfile.TemporaryDirectory() as tmp:
+            src = pathlib.Path(tmp) / 'tier0.slang'
+            for target, folder, suffix in [('spirv', 'spirv', 'spv'), ('metal', 'metal', 'metal')]:
+                split = (build.metal_split(n, cap) if target == 'metal'
+                         and hasattr(build, 'metal_split') else 0)
+                src.write_text(defines + f'#define SPLIT_STAGE {split}\n' + source + '\n'
+                               + (build.ROOT / 'src/gpu/series_bands.slang').read_text() + '\n'
+                               + (build.ROOT / 'src/gpu/forward_tier0.slang').read_text())
+                todo = [('forwardTier0', 'forward_tier0')]
+                if target == 'metal':
+                    todo += [('seriesForwardListed', 'forward_listed')] + (
+                        [('markBlocks', 'markblocks')] if n == build.TIER_B[0] else [])
+                for entry, stem in todo:
+                    name = f'{stem}_{n}.{suffix}' if stem != 'markblocks' else f'markblocks.{suffix}'
+                    out = build.ROOT / 'python/matchedfilter' / folder / name
+                    subprocess.run([compiler, str(src), '-I', str(build.KERNEL.parent), '-target', target,
+                                    '-entry', entry, '-stage', 'compute', '-O3',
+                                    *(['-DMF_VULKAN=1'] if target == 'spirv' else []), '-o', str(out)],
+                                   check=True)
+        entries[str(n)]['tier0'] = f'forward_tier0_{n}.spv'
         print(n, flush=True)
     metal = build.ROOT / 'python/matchedfilter/metal'
-    for path in list(metal.glob('forward_*.metal')) + [metal / 'pack_coarse.metal']:
+    for path in (list(metal.glob('forward_*.metal')) + [metal / 'pack_coarse.metal']
+                 + list(metal.glob('markblocks.metal'))):
         path.write_text(path.read_text().rstrip() + '\n')
         build.compile_metallib(path)
     return dict(forward=entries, pack_coarse=dict(file='pack_coarse.spv',
