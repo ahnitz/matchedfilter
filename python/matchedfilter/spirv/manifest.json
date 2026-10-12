@@ -1136,7 +1136,8 @@
       ],
       "lds_cap": 512,
       "bands": "forward_bands_64.spv",
-      "listed": "forward_listed_64.spv"
+      "listed": "forward_listed_64.spv",
+      "tier0": "forward_tier0_64.spv"
     },
     "128": {
       "file": "forward_128.spv",
@@ -1148,7 +1149,8 @@
       ],
       "lds_cap": 512,
       "bands": "forward_bands_128.spv",
-      "listed": "forward_listed_128.spv"
+      "listed": "forward_listed_128.spv",
+      "tier0": "forward_tier0_128.spv"
     },
     "256": {
       "file": "forward_256.spv",
@@ -1160,7 +1162,8 @@
       ],
       "lds_cap": 512,
       "bands": "forward_bands_256.spv",
-      "listed": "forward_listed_256.spv"
+      "listed": "forward_listed_256.spv",
+      "tier0": "forward_tier0_256.spv"
     },
     "512": {
       "file": "forward_512.spv",
@@ -1172,7 +1175,8 @@
       ],
       "lds_cap": 512,
       "bands": "forward_bands_512.spv",
-      "listed": "forward_listed_512.spv"
+      "listed": "forward_listed_512.spv",
+      "tier0": "forward_tier0_512.spv"
     },
     "1024": {
       "file": "forward_1024.spv",
@@ -1184,7 +1188,8 @@
       ],
       "lds_cap": 512,
       "bands": "forward_bands_1024.spv",
-      "listed": "forward_listed_1024.spv"
+      "listed": "forward_listed_1024.spv",
+      "tier0": "forward_tier0_1024.spv"
     },
     "2048": {
       "file": "forward_2048.spv",
@@ -1196,7 +1201,8 @@
       ],
       "lds_cap": 1024,
       "bands": "forward_bands_2048.spv",
-      "listed": "forward_listed_2048.spv"
+      "listed": "forward_listed_2048.spv",
+      "tier0": "forward_tier0_2048.spv"
     },
     "4096": {
       "file": "forward_4096.spv",
@@ -1208,7 +1214,8 @@
       ],
       "lds_cap": 2048,
       "bands": "forward_bands_4096.spv",
-      "listed": "forward_listed_4096.spv"
+      "listed": "forward_listed_4096.spv",
+      "tier0": "forward_tier0_4096.spv"
     },
     "8192": {
       "file": "forward_8192.spv",
@@ -1220,7 +1227,8 @@
       ],
       "lds_cap": 4096,
       "bands": "forward_bands_8192.spv",
-      "listed": "forward_listed_8192.spv"
+      "listed": "forward_listed_8192.spv",
+      "tier0": "forward_tier0_8192.spv"
     },
     "16384": {
       "file": "forward_16384.spv",
@@ -1232,7 +1240,8 @@
       ],
       "lds_cap": 4096,
       "bands": "forward_bands_16384.spv",
-      "listed": "forward_listed_16384.spv"
+      "listed": "forward_listed_16384.spv",
+      "tier0": "forward_tier0_16384.spv"
     },
     "32768": {
       "file": "forward_32768.spv",
@@ -1244,7 +1253,8 @@
       ],
       "lds_cap": 4096,
       "bands": "forward_bands_32768.spv",
-      "listed": "forward_listed_32768.spv"
+      "listed": "forward_listed_32768.spv",
+      "tier0": "forward_tier0_32768.spv"
     },
     "65536": {
       "file": "forward_65536.spv",
@@ -1256,7 +1266,8 @@
       ],
       "lds_cap": 4096,
       "bands": "forward_bands_65536.spv",
-      "listed": "forward_listed_65536.spv"
+      "listed": "forward_listed_65536.spv",
+      "tier0": "forward_tier0_65536.spv"
     }
   },
   "pack_coarse": {
@@ -1565,6 +1576,7 @@
     "coarse_tile.slang": "8b1a3f9193e20b76cc02641e71b77023d544b0bd1bff8c4194f38371ad47fb47",
     "series_forward.slang": "1ed347cedae7d1f7543ccfbfd6a4ea1971f6be1eb4fdd504c9e6b0a17b849ee5",
     "series_bands.slang": "6948766ea903aef0c4039d2545e0a1611fd4a7ce0e7fd908ece7651aaca4d2b1",
+    "forward_tier0.slang": "84fb8da3b7ffd17619bcc05be242572af1e650f4e1a4426d68c519ae4718aaf9",
     "pack_coarse.slang": "6599e775732a3d54ef2517a469aaa311a38028b41a92a87e166fce94ef3076c2",
     "twiddle.slang": "b5be2ea75191cff650ca27da20975a078cacc131711aab125219601a80781134",
     "refine_bounded.slang": "48203de4ade278cc9f6a504810f328757515e918602ce92ea2c3c4469379e882"
