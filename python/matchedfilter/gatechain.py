@@ -1161,15 +1161,15 @@ RECHECK_FRAC = 0.15
 
 
 def sample_spread(v):
-    """Standard deviation of samples, conservatively: the larger of the MAD-based and the
-    plain estimate. MAD alone reads 0 when half the samples tie (timer quantisation, a
-    repeated cache state), which made a noisy contest look clear; an outlier inflating the
-    plain one only asks for more samples or lets the model's choice stand."""
+    """Standard deviation of samples: MAD-based (robust to the outliers a batch after a
+    switch or a host hiccup produces -- the plain estimate let one such spike keep a 26% gap
+    "unclear" until the model's slower chain stood), falling back to the plain estimate
+    when MAD reads 0 (half the samples tie: timer quantisation, a repeated cache state)."""
     v = np.asarray(v, float)
     if v.size < 2:
         return float("inf")
     mad = 1.4826 * float(np.median(np.abs(v - np.median(v))))
-    return max(mad, float(np.std(v, ddof=1)))
+    return mad if mad > 0 else float(np.std(v, ddof=1))
 
 
 def measured_choice(samples, model, cap, tie=None, z=None):

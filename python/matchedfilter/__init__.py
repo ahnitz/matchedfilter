@@ -2711,7 +2711,8 @@ class HierarchicalFilter(MatchedFilter):
     def _q15_before_call(self):
         """Pick the screen setting for this call; True when the call is a timed sample."""
         if (self.device.kind != "cpu" or self._mf is None or self._chain is None
-                or not _autotune_enabled() or not _q15_available(self._chain[0])):
+                or not _autotune_enabled() or not _q15_available(self._chain[0])
+                or getattr(self, "_trial_hold", False)):
             return False
         with _AUTOTUNE_LOCK:
             tr = self._q15_trial()
@@ -2727,8 +2728,12 @@ class HierarchicalFilter(MatchedFilter):
     def calibrating(self):
         """Whether this plan is still settling a measured choice -- its chain trial, or the Q15
         screen trial of its chain -- so that its calls alternate kernels. A block-size trial
-        does not sample batches while any of its plans is (time_domain._bank_calibrating)."""
-        if self._chain is None or self._chain_trial is not None:
+        does not sample batches while any of its plans is (time_domain._bank_calibrating).
+        A plan not built yet is not calibrating (its first batch is the trial's settle batch),
+        and a held plan (block-size trial open) runs no trial at all."""
+        if self._chain is None or getattr(self, "_trial_hold", False):
+            return False
+        if self._chain_trial is not None:
             return True
         if (self.device.kind == "cpu" and self._mf is not None and _autotune_enabled()
                 and _q15_available(self._chain[0])):
@@ -2817,6 +2822,21 @@ class HierarchicalFilter(MatchedFilter):
             plan.set_thresholds(list(self._thresholds(required=True)))
             self._thr_applied = True
         return plan
+
+    def release_trials(self):
+        """The bank's block-size trial locked on this plan's layout: start the measured choices
+        it held back (chain trial, then Q15) by choosing the chain again."""
+        if not getattr(self, "_trial_hold", False):
+            return
+        self._trial_hold = False
+        if self._chain is None or self._pending_ref is None:
+            return                              # chosen, unheld, at first use
+        chain = self._choose_chain()
+        if tuple(chain) != tuple(self._chain):
+            self._switch_chain(chain)
+        else:
+            self._q15 = bool(getattr(self, "_q15_pref", False)) and (
+                self._mf is None or bool(self._mf.set_q15(bool(getattr(self, "_q15_pref", False)))))
 
     def _switch_chain(self, chain):
         """Run a different configuration from now on, keeping loaded data and templates."""
@@ -3010,7 +3030,13 @@ class HierarchicalFilter(MatchedFilter):
             if w is not None and tuple(w) in feasible:
                 chain = tuple(w)
                 self._chain_monitor = tkey
-        if len(shortlist) > 1 and chain == model_best:
+        # While the bank's block-size trial is open (time_domain: _trial_hold), the plan runs
+        # the model's chain: chain and Q15 trials wait for the winning layout (release_trials).
+        # Trials nested per candidate layout -- each layout's own chain and Q15 trials before
+        # its block samples could count -- took ~100 segments on Vulkan to lock the block
+        # size, and on Metal never got past rank 0.
+        held = getattr(self, "_trial_hold", False)
+        if len(shortlist) > 1 and chain == model_best and not held:
             # One trial per configuration: plans whose references differ slightly (another
             # segment's PSD, another template group) have slightly different short lists, and
             # their union is what gets measured. Candidates arriving before the lock join it;

@@ -466,6 +466,19 @@ class _BlockTrials:
 _BLOCK_TRIALS = _BlockTrials()
 
 
+def _hold_trials(snap, on):
+    """Hold (on) or release the measured choices of every hierarchical plan of one candidate
+    layout (a _snapshot): see HierarchicalFilter.release_trials."""
+    for g in (snap or {}).get('_built') or ():
+        p = getattr(g, '_plan', None)
+        if p is None or not getattr(g, 'is_hier', False):
+            continue
+        if on:
+            p._trial_hold = True
+        elif hasattr(p, 'release_trials'):
+            p.release_trials()
+
+
 def _bank_calibrating(bank):
     """Whether any plan of the bank's live layout is still settling a measured choice (chain
     trial, Q15 trial, or a plan not built yet): such calls switch kernels between calls, so
@@ -475,7 +488,7 @@ def _bank_calibrating(bank):
             continue
         plan = getattr(g, '_plan', None)
         if plan is None:
-            return True
+            continue                  # not built: its first batch is the rank's settle batch
         cal = getattr(plan, 'calibrating', None)
         if cal is not None and cal():
             return True
@@ -1407,6 +1420,11 @@ class TimeDomainFilterBank:
                 self._layout_ref = (reference, delta_f)
                 if len(self._layouts) < 2:
                     self._layouts = None
+                else:
+                    # Calibrations in order: the block size first, each candidate layout at its
+                    # model chain; the chain and Q15 trials then on the winner (_lock_layout).
+                    for snap in self._layouts:
+                        _hold_trials(snap, True)
             self._groups
             self._n_chosen = True
             self._taps_list = None
@@ -1499,6 +1517,8 @@ class TimeDomainFilterBank:
         layout's spectra and recordings sit in its GPU context's caches, which LRU evicts only
         under pressure -- on a small shared-memory GPU, after re-uploading live data."""
         self._use_layout(rank)
+        if self._layouts is not None:
+            _hold_trials(self._layouts[rank], False)
         # only layouts this bank actually ran have anything on the device
         ran = getattr(self, '_ranks_run', set())
         dropped = [snap for i, snap in enumerate(self._layouts or []) if i != rank and i in ran]
