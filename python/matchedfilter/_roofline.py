@@ -63,7 +63,13 @@ Judgement calls (stated so that nobody tunes them to flatter a platform):
      with more survivors has more roofline work; that is the algorithm as run.
   3. The precision of a stage is the precision the backend executes it in. A packed fp16
      tier is compared with the fp16 peak.
-  4. Peaks are THEORETICAL (data-sheet formula), except the CPU's memory bandwidth: one
+  4. Peaks are THEORETICAL (data-sheet formula). The x86 int16 peak counts the vector
+     int16 MULTIPLY pipes, not the FMA ports: Haswell/Broadwell have one (int16 then peaks
+     at the fp32 rate, not twice it), Skylake+ and Zen 2-5 two (_x86_int16_mul_ports). The
+     clock is cpuinfo_max_freq: with turbo on, the single-core turbo; with turbo off
+     (intel_pstate no_turbo=1, as on the Haswell test node) the base clock, which the core
+     can exceed (E5-2698 v3: 2.3 GHz basis, ~2.45 GHz sustained AVX2 FMA, so its fractions
+     read ~6% high). The one measured peak is the CPU's memory bandwidth: one
      core cannot reach the socket's DRAM bandwidth, so a single-threaded CPU run uses one
      core's measured streaming bandwidth (a numpy copy, read + write bytes). Measured
      ceilings are recorded beside the theoretical ones but never used for the headline.
@@ -369,6 +375,23 @@ def cpu_bandwidth(nbytes=1 << 28, reps=5):
 
 
 #: x86 vector FMA datapath (bits) and FMA-capable ports, by vendor and family: not queryable.
+#: Vector int16 multiply pipes per core (vpmullw / vpmulhrsw / vpmaddwd), by microarchitecture:
+#: the int16 peak is set by these, not by the FMA ports. Data-sheet sources: Intel's
+#: optimization manual and uops.info port tables (Haswell/Broadwell: port 0 only; Skylake and
+#: later: ports 0 and 1); AMD's Software Optimization Guides for families 17h/19h/1Ah (Zen 2-5:
+#: two FP pipes take vector integer multiply). Confirmed by a 12-chain register-only loop of
+#: each instruction: Haswell E5-2698 v3 vpmulhrsw 2.44 G/s against vfmadd 4.78 G/s at the
+#: same clock (1 pipe vs 2); Zen 3 (5950X) and Zen 5 (Ryzen AI MAX+ 395) both at the vfmadd
+#: rate (2 pipes).
+def _x86_int16_mul_ports(vendor, fam, model):
+    if vendor == "AuthenticAMD":
+        return 2 if fam >= 0x17 else 1
+    if vendor == "GenuineIntel" and fam == 6:
+        # Haswell (0x3c 0x3f 0x45 0x46), Broadwell (0x3d 0x47 0x4f 0x56): one port.
+        return 1 if model in (0x3c, 0x3f, 0x45, 0x46, 0x3d, 0x47, 0x4f, 0x56) else 2
+    return 1
+
+
 def _x86_core(info):
     flags = set(info.get("flags", "").split())
     vendor = info.get("vendor_id", "")
@@ -384,7 +407,8 @@ def _x86_core(info):
         datapath = isa
         name = "Intel"
     datapath = int(os.environ.get("MF_ROOFLINE_DATAPATH", datapath))
-    return min(isa, datapath), ports, name
+    imul = _x86_int16_mul_ports(vendor, fam, int(info.get("model", "0")))
+    return min(isa, datapath), ports, name, imul
 
 
 #: Apple cores: (clock GHz, 128-bit FMA pipes) of a performance core.
@@ -427,18 +451,22 @@ def cpu_peaks(measure_bandwidth=True):
         out["measured"] = _MEASURED.get("Apple %s CPU" % chip)
     else:
         info = _cpuinfo()
-        width, pipes, uarch = _x86_core(info)
+        width, pipes, uarch, imul = _x86_core(info)
         khz = _read("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq")
         ghz = int(khz) / 1e6 if khz else float(info.get("cpu MHz", "3000")) / 1e3
         out["name"] = "%s (%s)" % (info.get("model name", "x86"), uarch)
         # No x86 FP16 arithmetic here (AVX512-FP16 aside): fp16 work runs at the fp32 rate.
         lanes = dict(fp32=width // 32, fp16=width // 32, int16=width // 16)
         out["formula"] = ("%d-bit datapath x %d FMA ports x lanes x 2 x %.3f GHz max clock "
-                          "(fp16 at the fp32 rate: no FP16 vector arithmetic; int16: %d lanes, "
-                          "multiply + add counted as one FMA)" % (width, pipes, ghz, width // 16))
+                          "(fp16 at the fp32 rate: no FP16 vector arithmetic; int16: %d lanes x "
+                          "%d int16 multiply pipe(s) x 2, multiply + add counted as one FMA; "
+                          "clock = cpuinfo_max_freq, the base clock where turbo is off)"
+                          % (width, pipes, ghz, width // 16, imul))
         out["measured"] = _MEASURED.get(uarch)
     out["clock_ghz"] = ghz
     out["flops"] = {p: lanes[p] * pipes * 2 * ghz * 1e9 for p in lanes}
+    if mach not in ("arm64", "aarch64"):
+        out["flops"]["int16"] = lanes["int16"] * imul * 2 * ghz * 1e9
     out["bandwidth"] = cpu_bandwidth() if measure_bandwidth else float("nan")
     out["bandwidth_formula"] = "one core's streaming copy (numpy, read + write), measured"
     return out
