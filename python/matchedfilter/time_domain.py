@@ -2647,9 +2647,10 @@ class SegmentPlan:
                     fine = h.result()
                     if followup is None:
                         return fine
-                    # On a side queue: the next segment's replay may already be queued on the
-                    # main one, and these need only this segment (finished: h waited for it).
-                    return fine, self._followups(jobs, fine, followup, side_queue=True)
+                    # On the main queue, behind whatever was submitted since (the next segment's
+                    # replay): a side queue let them read inputs another queue's work had not
+                    # made visible (test_device_followups_equal_the_host_rule failed 3 in 10).
+                    return fine, self._followups(jobs, fine, followup)
                 return _SegmentResult(collect)
             self._trace = None
         if prelude is not None:
