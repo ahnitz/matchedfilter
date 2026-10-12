@@ -37,7 +37,10 @@ bank = TimeDomainFilterBank(taps, tap_counts=counts, engine='hier', threshold=5.
 bank.set_reference(w, delta_f=df)
 L = 1 << 16
 out = []
-for seg in range(12):
+# Long enough for the first process to lock every trial it starts: the block-size trial
+# (ranks x (settle + samples) batches), then on a GPU the chain trial (candidates x (2 settle
+# + samples) batches, judged on whole batches since it runs per segment).
+for seg in range(20):
     r = np.random.default_rng(100 + seg)
     x = ((r.standard_normal(L) + 1j * r.standard_normal(L)) / np.sqrt(2)).astype(np.complex64)
     x[20000:20400] += 8 * np.exp(1j * np.linspace(0, 30, 400))

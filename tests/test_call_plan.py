@@ -370,7 +370,9 @@ def test_steady_segments_replay(monkeypatch, band, depth):
     S = 1 << 17
     sets = [banks[0][0].empty_shared((len(banks), S)) for _ in range(depth + 1)]
     inflight, deltas = [], []
-    for seg in range(16):
+    # A GPU chain trial runs each of its (up to 3) candidates for a run of batches -- 3 to
+    # settle after the switch, then MF_CHAIN_TRIALS samples -- before it locks.
+    for seg in range(32):
         rows = sets[seg % (depth + 1)]
         _fill(rng, rows, S)
         jobs = [(b, rows[i], dict(windows=slice(3001, S - 2999), binsize=500))
@@ -388,7 +390,7 @@ def test_steady_segments_replay(monkeypatch, band, depth):
             assert tk is None, ("a chain trial never locked", g.plan._chain,
                                 {c: len(v) for c, v in mf._CHAIN_TRIALS[tk]["samples"].items()},
                                 mf._CHAIN_TRIALS[tk]["assigned"])
-    assert all(d == want for d, want in deltas[-4:]), deltas
+    assert all(d == want for d, want in deltas[-4:]), str(deltas)
 
 
 def test_depth_one_keeps_one_set_of_recordings(monkeypatch):
