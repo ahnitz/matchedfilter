@@ -2707,7 +2707,13 @@ class SegmentPlan:
             self._trace = None
         if prelude is not None:
             prelude()
-        fine = self._trace_run(jobs, sig)
+        if self._seen != sig or _in_chain_trial(jobs):
+            # As the CUDA graph: the first run of a signature runs as usual (plans settle:
+            # calibration, uploads, records after a chain switch), the next is traced.
+            self._seen = None if _in_chain_trial(jobs) else sig
+            fine = TimeDomainFilterBank.filter_series_many(jobs)
+        else:
+            fine = self._trace_run(jobs, sig)
         out = (fine, self._followups(jobs, fine, followup)) if followup is not None else fine
         return _SegmentResult(lambda: out)
 
