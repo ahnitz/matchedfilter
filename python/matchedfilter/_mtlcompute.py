@@ -612,8 +612,15 @@ class Context(InputUploads):
         built elsewhere -- or one whose library is stale -- still runs,
         paying a compile on first use rather than refusing.
         """
+        raw = (stem.startswith("tierb_") and "_c16" in stem
+               and os.environ.get("MF_VK_C16_BOUND", "1") == "0")
         lib_path = _METAL_DIR / (stem + ".metallib")
-        if lib_path.is_file():
+        # A shipped .metallib is built with the compiler's defaults (tools/build_spirv.py):
+        # fast math, no macros. A kernel that needs other options -- the raw fp16 maximum
+        # (MF_C16_RAW) or IEEE math for the fail-open compaction -- compiles from source, or
+        # the library silently runs the default build instead (on the macOS runner the
+        # physics tests then measured the fp16 BOUND as if it were the raw statistic).
+        if lib_path.is_file() and not raw and not _ieee_kernel(stem):
             url_cls = self.o.objc.objc_getClass(b"NSURL")
             url = self.o.call(url_cls, b"fileURLWithPath:",
                               args=(self.o.nsstring(str(lib_path)),),
@@ -630,8 +637,6 @@ class Context(InputUploads):
                              % (stem, lib_path.name, src_path.name))
         err = ctypes.c_void_p()
         opts = None
-        raw = (stem.startswith("tierb_") and "_c16" in stem
-               and os.environ.get("MF_VK_C16_BOUND", "1") == "0")
         if raw:
             # The fp16 bound switch (gatechain._RAW_GATE_SWITCH; Vulkan's constant 77): the
             # raw fp16 maximum, for measuring the bound's margin only (twiddle.slang).
