@@ -154,11 +154,21 @@ class QGenClassic(SRGen):
         return o
 
 
-def build_q(n, name, tw=False, prod=False, fused=True):
+def build_q(n, name, tw=False, prod=False, fused=True, maxout=False):
+    """maxout: instead of storing the n outputs, accumulate max(|z|^2) of those with index
+    in [lo, hi) into mx[0] (even k) and mx[1] (odd k) -- the screen's window maximum fused
+    into its last pass, so the outputs never go back to memory. Same Q_MUL squares as the
+    separate maximum loop: bit-identical maxima."""
     g = (QGen if fused else QGenClassic)(n, name, tw, False, prod)
     X = g.rec(list(range(n)))
     for k in range(n):
-        g.emit("ar[S*%d]=%s; ai[S*%d]=%s;" % (k, X[k][0], k, X[k][1]))
+        if maxout:
+            g.emit("if(%d>=lo && %d<hi) M%d=hn::Max(M%d,hn::SaturatedAdd(Q_MUL(%s,%s),Q_MUL(%s,%s)));"
+                   % (k, k, k & 1, k & 1, X[k][0], X[k][0], X[k][1], X[k][1]))
+        else:
+            g.emit("ar[S*%d]=%s; ai[S*%d]=%s;" % (k, X[k][0], k, X[k][1]))
+    if maxout:
+        g.emit("mx[0]=M0; mx[1]=M1;")
     body = fold_negations("\n".join(g.L))
     body = re.sub(r"\bvf\b", "vq", body)
     body = body.replace("V_ADD(", "Q_ADD(").replace("V_SUB(", "Q_SUB(")
@@ -166,12 +176,18 @@ def build_q(n, name, tw=False, prod=False, fused=True):
     if prod:
         args = ("const int16_t*restrict dq,const int16_t*restrict tr,const int16_t*restrict ti,"
                 "vq*restrict ar,vq*restrict ai,const long S,const long DS,const long TS")
+    elif tw and maxout:
+        args = ("const vq*restrict ar,const vq*restrict ai,const long S,"
+                "const int16_t*restrict twr,const int16_t*restrict twi,"
+                "const long lo,const long hi,vq*restrict mx")
     elif tw:
         args = ("vq*restrict ar,vq*restrict ai,const long S,"
                 "const int16_t*restrict twr,const int16_t*restrict twi")
     else:
         args = "vq*restrict ar,vq*restrict ai,const long S"
     zero = "  const vq Z=Q_ZERO();\n" if re.search(r"\bZ\b", body) else ""
+    if maxout:
+        zero += "  vq M0=mx[0], M1=mx[1];\n"
     return ("static HWY_INLINE void %s(%s){\n%s%s\n%s\n}\n" % (name, args, zero, cdefs, body))
 
 
@@ -188,10 +204,12 @@ if __name__ == "__main__":
     for nn in (8, 16, 32):
         out.append(build_q(nn, "qsr%d_prod" % nn, prod=True))
         out.append(build_q(nn, "qsr%d_tw" % nn, tw=True))
+        out.append(build_q(nn, "qsr%d_twmax" % nn, tw=True, maxout=True))
     out.append("#else")
     for nn in (8, 16, 32):
         out.append(build_q(nn, "qsr%d_prod" % nn, prod=True, fused=False))
         out.append(build_q(nn, "qsr%d_tw" % nn, tw=True, fused=False))
+        out.append(build_q(nn, "qsr%d_twmax" % nn, tw=True, fused=False, maxout=True))
     out.append("#endif")
     out += ["}  // namespace HWY_NAMESPACE", "}  // namespace ap",
             "HWY_AFTER_NAMESPACE();", "", "#endif", ""]
