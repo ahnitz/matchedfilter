@@ -180,7 +180,7 @@ jobs:
       # here, which is why the macOS wheel is the one that can ship one.
       - name: Fetch slangc
         run: |
-          V=2026.12
+          V=2026.18.2
           curl -fsSL -o slang.zip \
             "https://github.com/shader-slang/slang/releases/download/v${V}/slang-${V}-macos-aarch64.zip" \
             || curl -fsSL -o slang.tgz \
