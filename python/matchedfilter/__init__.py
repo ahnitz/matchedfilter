@@ -2387,6 +2387,10 @@ def _stored_chain_lock(tkey, feasible):
     if not isinstance(rec, dict):
         return None
     chain = tuple(int(b) for b in rec.get("chain", ()))
+    if not chain:
+        return None
+    if feasible is None:
+        return chain                 # the key's lock, whichever plan asks (see _choose_chain)
     return chain if chain in tuple(tuple(c) for c in feasible) else None
 
 
@@ -3142,37 +3146,40 @@ class HierarchicalFilter(MatchedFilter):
         chain = model_best
         self._chain_trial = None
         tkey = (self.n, float(snr), float(self.fd), tiers, str(self.device))
+        # The key's lock -- reached in this process or read from MF_COST_FILE -- decides
+        # the chain of EVERY plan of the key: the plan runs it if it can (its feasible set),
+        # else its model's chain, and a locked key never opens a trial. The in-process
+        # record holds the file's lock unfiltered: filtered by the first plan's feasible set,
+        # a plan that could not run it cached "no lock" and every later plan of the key
+        # ignored the file and re-trialled (two processes on one file ended on different
+        # chains, L40S).
+        w = None
         if not pinned and _autotune_enabled():
-            # A lock this process (or an earlier one, on file) reached for the key applies to
-            # every plan of the key that can run it -- even one whose own shortlist is a
-            # single chain, which used to run the model's choice instead.
             with _AUTOTUNE_LOCK:
                 tr = _CHAIN_TRIALS.get(tkey)
-                w = tr["winner"] if tr is not None else _stored_chain_lock(tkey, feasible)
-            if w is not None and tuple(w) in feasible:
-                chain = tuple(w)
-                self._chain_monitor = tkey
+                if tr is None:
+                    tr = _CHAIN_TRIALS[tkey] = {"samples": {}, "assigned": {},
+                                                "winner": _stored_chain_lock(tkey, None)}
+                    tr["median"], tr["rechecked"] = _chain_lock_state(tkey)
+                w = tr["winner"]
+            if w is not None:
+                if tuple(w) in feasible:
+                    chain = tuple(w)
+                    self._chain_monitor = tkey
         # While the bank's block-size trial is open (time_domain: _trial_hold), the plan runs
         # the model's chain: chain and Q15 trials wait for the winning layout (release_trials).
-        # Trials nested per candidate layout -- each layout's own chain and Q15 trials before
-        # its block samples could count -- took ~100 segments on Vulkan to lock the block
-        # size, and on Metal never got past rank 0.
         held = getattr(self, "_trial_hold", False)
-        if len(shortlist) > 1 and chain == model_best and not held:
+        if w is None and len(shortlist) > 1 and not held and not pinned and _autotune_enabled():
             # One trial per configuration: plans whose references differ slightly (another
             # segment's PSD, another template group) have slightly different short lists, and
             # their union is what gets measured. Candidates arriving before the lock join it;
             # after the lock every plan adopts the winner.
             self._chain_monitor = tkey        # steady calls re-check the lock (_chain_steady)
             with _AUTOTUNE_LOCK:
-                tr = _CHAIN_TRIALS.get(tkey)
-                if tr is None:
-                    tr = _CHAIN_TRIALS[tkey] = {"samples": {}, "assigned": {},
-                                                "winner": _stored_chain_lock(tkey, feasible)}
-                    tr["median"], tr["rechecked"] = _chain_lock_state(tkey)
+                tr = _CHAIN_TRIALS[tkey]
                 if tr["winner"] is not None:
                     if tuple(tr["winner"]) in feasible:
-                        chain = tr["winner"]
+                        chain = tuple(tr["winner"])
                 else:
                     for c in shortlist:
                         tr["samples"].setdefault(c, []); tr["assigned"].setdefault(c, 0)

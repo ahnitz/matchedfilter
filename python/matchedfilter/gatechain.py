@@ -1151,11 +1151,11 @@ def pick_stable(items, cost, key):
 #: errors of the difference of the two medians.
 CHOICE_Z = 2.0
 #: Steady-state re-check, for gross mistakes only: the winner's median over RECHECK_N steady
-#: samples more than RECHECK_FRAC above the RUNNER-UP's trial median reopens the choice --
+#: samples more than RECHECK_FRAC above the winner's OWN trial median reopens the choice --
 #: once per choice. Steady samples and trial samples are taken at different times, so on a
 #: shared host load swings alone move them apart: 15% over the trial's best reopened chain
-#: and Q15 locks within 14 segments at load ~45 on dev2. The M2 case (n=4096 locked, steady
-#: 142 ms against n=2048's 106) is 1.34x the runner-up and still reopens.
+#: and Q15 locks within 14 segments at load ~45 on dev2. The M2 case (n=4096 locked on a
+#: 5.4% "win", steady 142 ms against the ~100 ms its trial measured) still reopens.
 RECHECK_N = 8
 RECHECK_FRAC = 0.30
 
@@ -1237,9 +1237,19 @@ def steady_disagrees(steady, medians, winner, n=None, frac=None):
     frac = RECHECK_FRAC if frac is None else frac
     if len(steady) < n or not medians:
         return False
-    others = [float(v) for c, v in medians.items() if c != winner and np.isfinite(v)]
-    ref = min(others) if others else float(medians.get(winner, np.inf))
-    return float(np.median(steady[-n:])) > ref * (1.0 + frac)
+    # Against what the trial measured for the WINNER itself: steady state far above that
+    # says the trial was wrong about it. Against the runner-up it contradicted the decision
+    # rule -- a model's chain that stood because the contest was unclear can have a worse
+    # trial median than the runner-up, and ordinary steady samples of it then reopened the
+    # lock in a later process (the L40S two-process flake). M2's case (n=4096 locked, steady
+    # 142 ms against ~100 ms measured for it in the trial) is still caught.
+    ref = medians.get(winner)
+    if ref is None or not np.isfinite(ref):
+        others = [float(v) for c, v in medians.items() if np.isfinite(v)]
+        if not others:
+            return False
+        ref = min(others)
+    return float(np.median(steady[-n:])) > float(ref) * (1.0 + frac)
 
 
 _REFINE_BLOCKS = {}
