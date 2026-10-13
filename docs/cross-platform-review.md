@@ -542,6 +542,12 @@ Behaviour-neutral commits, one per item:
 8. `docs/usage.md`: the measured choices and `MF_COST_FILE`, `MF_AUTOTUNE`, `MF_AUTOTUNE_LOG`,
    `MF_GPU_TIMING`, `MF_SEGMENT_REPLAY` (the guide named only `MF_DEVICE` and `MF_ISA`).
 
+Gates on the branch: full suite 1543 passed, 158 skipped; `ladder --check cpu` 264 calls, 0
+one-sided peaks, batched and `--pipeline`; `gate_margin --gate q15 gpu-c16 --loud` 46/46 ok.
+Neutral on the ladder (pipelined, 16 steady segments, primed cost file, 3 alternating rounds,
+~600 MHz): main 60.6 / 63.1 / 60.0 ms per segment, branch 58.1 / 62.5 / 54.4. It merges
+cleanly with `vk/replay-reads`, `parity/cuda-hostparse` and the three `xplat/*` branches.
+
 Found and deferred (each touches another agent's area, needs hardware not here, or is not
 behaviour-neutral):
 - `MF_REPLAY_DEBUG` prints to stdout in `_vkcompute.replay_fused` and `SegmentPlan` (Vulkan
