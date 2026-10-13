@@ -96,6 +96,18 @@ static HWY_INLINE void qcodelet_tw(int m, vq *restrict ar, vq *restrict ai, long
   }
 }
 
+#if HWY_MAX_BYTES >= 64
+static HWY_INLINE void qcodelet_twmax(int m, const vq *restrict ar, const vq *restrict ai, long S,
+                                      const int16_t *restrict twr, const int16_t *restrict twi,
+                                      long lo, long hi, vq *restrict mx){
+  switch(m){
+    case  8: qsr8_twmax (ar,ai,S,twr,twi,lo,hi,mx); return;
+    case 16: qsr16_twmax(ar,ai,S,twr,twi,lo,hi,mx); return;
+    default: qsr32_twmax(ar,ai,S,twr,twi,lo,hi,mx); return;
+  }
+}
+#endif
+
 /* N x QW pairs: pass 1 forms the product as it loads (M2-point codelets down
    the columns), pass 2 applies the four-step twiddle as it loads (M1-point
    codelets along the rows), then the window's maximum per lane.
@@ -114,12 +126,32 @@ static int q15_screen(size_t N, const int16_t *dq, const int16_t *tr, const int1
   for(int e1 = 0; e1 < M1; e1++)
     qcodelet_prod(M2, dq + 3 * e1, tr + (size_t)e1 * AP_QW, ti + (size_t)e1 * AP_QW,
                   X + e1, Xi + e1, st, 3L * M1, (long)M1 * AP_QW);
+  if(we > N) we = N;
+#if HWY_MAX_BYTES >= 64
+  /* 512-bit targets (32 vector registers): pass 2 takes the window's maximum as it
+     produces each row (qcodelet_twmax); output k = k2 + M2*k1 is row k2's k1-th, so row
+     k2 contributes its k1 in [lo, hi). The outputs never go back to the scratch: on
+     AVX-512 the scratch (2 x 17 x 16 x 64 B at N = 256) and a template group (32 KB)
+     overflow a 48 KB L1, and writing and re-reading the scratch for a separate maximum
+     cost Zen 5 12-32% of the screen's cycles. On 16-register targets the fused codelet's
+     extra live values spill (AVX2 on Zen 3: 11% SLOWER, IPC 3.5 -> 3.0), so they keep the
+     separate pass -- the register file decides, as for the 64-point split radix
+     (elemfft-inl.h). Bit-identical either way: the same Q_MUL squares, max is exact. */
+  vq mm[2] = {Q_ZERO(), Q_ZERO()};
+  for(int k2 = 0; k2 < M2; k2++){
+    const long lo = (long)ws > k2 ? ((long)ws - k2 + M2 - 1) / M2 : 0;
+    const long hi = (long)we > k2 ? ((long)we - k2 + M2 - 1) / M2 : 0;
+    if(lo >= hi) continue;
+    qcodelet_twmax(M1, X + (size_t)k2 * st, Xi + (size_t)k2 * st, 1,
+                   tw->re + (size_t)k2 * M1, tw->im + (size_t)k2 * M1, lo, hi, mm);
+  }
+  const vq m0 = mm[0], m1 = mm[1];
+#else
   for(int k2 = 0; k2 < M2; k2++)
     qcodelet_tw(M1, X + (size_t)k2 * st, Xi + (size_t)k2 * st, 1,
                 tw->re + (size_t)k2 * M1, tw->im + (size_t)k2 * M1);
   /* Output k = k2 + M2*k1 sits at X[k2*st + k1]; the maximum does not care
      about order, so walk memory and clip each row to the window. */
-  if(we > N) we = N;
   vq m0 = Q_ZERO(), m1 = Q_ZERO();
   for(int k2 = 0; k2 < M2; k2++){
     const long lo = (long)ws > k2 ? ((long)ws - k2 + M2 - 1) / M2 : 0;
@@ -136,6 +168,7 @@ static int q15_screen(size_t N, const int16_t *dq, const int16_t *tr, const int1
       m0 = hn::Max(m0, hn::SaturatedAdd(Q_MUL(a, a), Q_MUL(b, b)));
     }
   }
+#endif
   const vq mx = hn::Max(m0, m1);
   if(lanemax) hn::StoreU(mx, AP_DQ, lanemax);
   uint64_t b = 0;
