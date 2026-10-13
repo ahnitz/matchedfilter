@@ -218,8 +218,9 @@ class Executor:
             # two detectors' allocations uses two records rather than one per combination and
             # order of allocations, which would rarely repeat.
             gw = groups.setdefault((id(plan), bs, id(c[0])), dict(plan=plan, ctx=ctx, n=g.n, bs=bs,
-                                                        allocs=[], entries=[],
-                                                        rows=[[] for _ in range(REGIONS)]))
+                                                        allocs=[], entries=[], nent=0,
+                                                        rows=[[] for _ in range(REGIONS)],
+                                                        nrows=[0] * REGIONS))
             wid = [i for i, a in enumerate(gw["allocs"]) if a is c[0]]
             if not wid:
                 if len(gw["allocs"]) >= REGIONS:
@@ -227,16 +228,24 @@ class Executor:
                 gw["allocs"].append(c[0])
                 wid = [len(gw["allocs"]) - 1]
             a = wid[0]
-            first = len(gw["entries"])
+            first = gw["nent"]
             n = g.n
-            for k in range(int(st.size)):
-                row = len(gw["rows"][a])
-                if row >= REGION_ROWS:
-                    raise Unsupported("region full")
-                gw["rows"][a].append(min(int(st[k]), ser.size) + c[1])
-                lo, hi = min(int(ws[k]), n), min(int(we[k]), n)
-                gw["entries"].append((a * REGION_ROWS + row, tl, lo, hi))
-            if len(gw["entries"]) > MAX_ENTRIES:
+            # The job's blocks as arrays (one row and one entry per block), not per element:
+            # a segment's follow-ups are ~1000 blocks.
+            k = int(st.size)
+            row0 = gw["nrows"][a]
+            if row0 + k > REGION_ROWS:
+                raise Unsupported("region full")
+            gw["rows"][a].append(np.minimum(np.asarray(st, np.int64), ser.size) + c[1])
+            gw["nrows"][a] = row0 + k
+            ent = np.empty((k, 4), np.int64)
+            ent[:, 0] = a * REGION_ROWS + row0 + np.arange(k)
+            ent[:, 1] = tl
+            ent[:, 2] = np.minimum(np.asarray(ws, np.int64), n)
+            ent[:, 3] = np.minimum(np.asarray(we, np.int64), n)
+            gw["entries"].append(ent)
+            gw["nent"] += k
+            if gw["nent"] > MAX_ENTRIES:
                 raise Unsupported("too many entries")
             layout.append((gw, st, ws, we, first, g, tl, ti))
         if not groups:
@@ -245,7 +254,10 @@ class Executor:
         slots = {}
         for gw in groups.values():
             bs = gw["bs"]
-            nbins = max([1] + [-(-(hi - lo) // bs) for _, _, lo, hi in gw["entries"]])
+            gw["entries"] = (np.concatenate(gw["entries"]) if gw["entries"]
+                             else np.empty((0, 4), np.int64))
+            e = gw["entries"]
+            nbins = max(1, int((-(-(e[:, 3] - e[:, 2]) // bs)).max()) if e.size else 1)
             nbins = 1 << (nbins - 1).bit_length()      # few distinct recordings
             if nbins > MAX_BINS:
                 raise Unsupported("window has too many bins")
@@ -262,11 +274,14 @@ class Executor:
             ws.bind(gw["plan"], gw["allocs"], bs)
             rec = ws
             for a in range(len(gw["allocs"])):
-                rows = np.asarray(gw["rows"][a], np.uint32)
+                rows = (np.concatenate(gw["rows"][a]) if gw["rows"][a]
+                        else np.empty(0, np.int64)).astype(np.uint32)
                 rec.starts[a * REGION_ROWS:a * REGION_ROWS + rows.size] = rows
                 rec.args[a].write(np.array([rows.size, 1, 1], np.uint32))
-            ent = np.asarray([(d, t, lo, hi, s) for s, (d, t, lo, hi) in enumerate(gw["entries"])],
-                             np.uint32).reshape(-1, 5)
+            e = gw["entries"]
+            ent = np.empty((len(e), 5), np.uint32)
+            ent[:, :4] = e
+            ent[:, 4] = np.arange(len(e))
             rec.items.write(ent)
             rec.count.write(np.array([len(ent), 0, 0, 0], np.uint32))
             gw["rec"] = rec
@@ -322,15 +337,25 @@ class Executor:
                 r = reads[id(gw)] = (rec.idx.read(np.int32, m * nbins).reshape(m, nbins),
                                       rec.val.read(np.complex64, m * nbins).reshape(m, nbins))
             k = int(st.size)
-            idx = r[0][first:first + k].astype(np.int64).reshape(k, 1, nbins)
-            val = r[1][first:first + k].reshape(k, 1, nbins)
+            idx = r[0][first:first + k]
+            val = r[1][first:first + k]
             counts = ((we - ws + bs - 1) // bs).astype(np.int64)
-            lists = ([], [], [], [], [])
             stt = st.astype(np.int64)
-            for u in np.unique(counts):
-                mk = counts == u
-                _consume_into(lists, idx[mk][:, :, :u], val[mk][:, :, :u], stt[mk], g,
-                              (tl, 1), g.n, ti)
+            # Every bin of every block at once, in the order the per-bin-count calls give:
+            # bin counts ascending, then block, then bin (a stable sort by count of the
+            # block-major hits).
+            hit = (idx >= 0) & (np.arange(nbins)[None, :] < counts[:, None])
+            bi, bn = np.nonzero(hit)
+            if bi.size:
+                o = np.argsort(counts[bi], kind="stable")
+                bi, bn = bi[o], bn[o]
+            lists = ([], [], [], [], [])
+            if bi.size:
+                lists[0].append(np.full(bi.size, ti, dtype=np.int64))
+                lists[1].append(stt[bi] + idx[bi, bn].astype(np.int64))
+                lists[2].append(val[bi, bn])
+                lists[3].append(stt[bi])
+                lists[4].append(np.full(bi.size, g.n, dtype=np.int64))
             out.append(_results_from(lists))
         return out
 

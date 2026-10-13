@@ -676,6 +676,9 @@ def run_device(device, tops, args, seed):
                             tm.add("segment", time.perf_counter() - t_seg)
                             tm.add("wall", time.perf_counter() - t_seg, n=0)
                             tm.add("cpu", time.thread_time() - c_seg, n=0)
+                            if prof is not None and tm is steady:
+                                prof.disable()       # (LADDER_PROFILE on the in-flight path)
+                                prof.dump_stats(os.environ["LADDER_PROFILE"])
                             if next_ser is None and seg + 1 < args.segments:
                                 next_ser = new_series()
                             continue
