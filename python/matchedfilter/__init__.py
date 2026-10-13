@@ -2106,13 +2106,19 @@ class CorrelationFilter(MatchedFilter):
             if owner is not None:
                 self._gpu._keep_until_done.append(owner)
                 source = ser
+        cap = getattr(getattr(self._gpu, "_device_state", None), "__dict__", {}).get(
+            "prelude_capture")
         if source is staging:
             source[:] = ser
+            if cap is not None:
+                cap.refuse()                 # a per-call host copy: not replayable
         lo, hi = self.valid
         for b0 in range(0, starts.size, batch):
             b1 = min(b0 + batch, starts.size)
             count = b1 - b0
             offsets[:count] = np.minimum(starts[b0:b1], ser.size)
+            if cap is not None:
+                cap.write(offsets, offsets[:count])
             self._gpu.forward(self.n, source, offsets[:count], spec[:count], defer=True)
             try:
                 kw = dict(async_submit=True) if (defer and b1 == starts.size) else {}

@@ -792,6 +792,76 @@ class _ReplayLaunch:
                 rs.remove(self)
 
 
+class PreludeCapture:
+    """What a SegmentPlan prelude submits on a Vulkan device, kept to be submitted again by
+    a replay (CUDA captures the prelude into its segment graph; this is the same contract).
+
+    Every command buffer is held with the record that owns it -- (context, record table,
+    key, record), the record tuple itself held -- and is valid only while that context's
+    table still holds that same record (eviction frees it; a rebuilt record is a different
+    object). Host writes the prelude makes per call (block offsets) are kept as (array,
+    values) and rewritten before each replay. Anything else -- a command buffer no record
+    owns, a fused batch, a host copy of the input, timing -- makes the capture unusable,
+    and the replay calls the prelude instead."""
+
+    def __init__(self, dev):
+        self.dev, self.ok, self.cmds, self.owners, self.writes = dev, True, [], [], []
+        self.work = None                 # its work-counter log (time_domain._WORK_LOGS)
+
+    def add(self, ctx, commands, wait):
+        for c in commands:
+            owner = _record_owning(ctx, c)
+            if owner is None:
+                self.ok = False
+                return
+            self.cmds.append(c)
+            self.owners.append(owner)
+
+    def write(self, array, values):
+        self.writes.append((array, np.array(values, copy=True)))
+
+    def refuse(self):
+        self.ok = False
+
+    def valid(self):
+        for ctx, table, key, rec in self.owners:
+            if ctx.device is None or table.get(key) is not rec:
+                return False
+        return True
+
+    def rewrite(self):
+        for array, values in self.writes:
+            array[:values.size] = values
+
+
+def _record_owning(ctx, cmd):
+    """(context, table, key, record) of the cached record whose command buffer is cmd, or
+    None. Only for prelude capture (it scans the context's tables)."""
+    v = getattr(cmd, "value", cmd)
+    tables = list(ctx._record_tables().values())
+    zero = ctx.__dict__.get("_zero_recs")
+    if zero is not None:
+        tables.append(zero)
+    for table in tables:
+        for key, rec in table.items():
+            last = rec[-1] if isinstance(rec, (tuple, list)) else None
+            if last is not None and getattr(last, "value", last) == v:
+                return (ctx, table, key, rec)
+    return None
+
+
+def capture_prelude(dev, prelude):
+    """Run prelude() with its submissions and host writes captured: a PreludeCapture, its
+    .ok False if anything in it cannot be replayed."""
+    cap = PreludeCapture(dev)
+    prev, dev.prelude_capture = dev.__dict__.get("prelude_capture"), cap
+    try:
+        prelude()
+    finally:
+        dev.prelude_capture = prev
+    return cap
+
+
 def _settle_replays(dev, cmd=None):
     """Wait for the replays in flight on dev that execute cmd (every one, without cmd)."""
     v = getattr(cmd, "value", cmd)
@@ -800,7 +870,7 @@ def _settle_replays(dev, cmd=None):
             r.wait()
 
 
-def replay_fused(dev, keys, wait=True, before=None):
+def replay_fused(dev, keys, wait=True, before=None, pre=None):
     """Submit cached fused recordings again, in order, as one submission, and wait; False
     (nothing submitted) if any is gone or a constituent recording was evicted.
 
@@ -808,7 +878,8 @@ def replay_fused(dev, keys, wait=True, before=None):
     the results). The caller keeps the results' buffers alive until then: SegmentPlan
     registers the read as an in-flight readback on every context involved, so evicting a
     record reads the replay's results first (Pending, _drain). before: called once the
-    recordings are validated, just before the submission."""
+    recordings are validated, just before the submission. pre: a valid PreludeCapture whose
+    command buffers run first, in the same submission (its host writes are redone first)."""
     cache = dev.__dict__.get("fused_cache", {})
     cmds = []
     for key in keys:
@@ -825,6 +896,9 @@ def replay_fused(dev, keys, wait=True, before=None):
                     print("replay invalid: constituent recording gone", flush=True)
                 return False
         cmds.append(hit[0])
+    if pre is not None:
+        pre.rewrite()
+        cmds = list(pre.cmds) + cmds
     if before is not None:
         before()                                # e.g. the work producing the inputs
     launch = _ReplayLaunch(dev, cmds)
@@ -2793,6 +2867,9 @@ class Context(InputUploads):
             # A fused batch (filter_series_many): recorded with the others when first waited on.
             batch.add(self, commands, fence)
             return
+        cap = self._device_state.__dict__.get("prelude_capture")
+        if cap is not None:
+            cap.add(self, commands, wait)
         if self._timing:
             label = sys._getframe(1).f_code.co_name + ("+forward" if pending is not None or pre else "")
             begin, end = self._timestamp_pair(label)

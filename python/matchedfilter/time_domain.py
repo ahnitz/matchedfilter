@@ -2833,9 +2833,16 @@ class SegmentPlan:
                     for d, *_ in entries:
                         for arr, vals in d.trace.get("starts", ()):
                             arr[:len(vals)] = vals
-                if prelude is not None:
+                if prelude is not None and not pre_ok:
                     prelude()
-            launch = _vkcompute.replay_fused(tr["dev"], tr["keys"], wait=False, before=before)
+            # The prelude replayed from its capture when every record it used is still the
+            # one captured; else called (it then submits ahead of the replay, as before).
+            pcap = tr.get("prelude")
+            pre_ok = pcap is not None and pcap.ok and pcap.valid()
+            launch = _vkcompute.replay_fused(tr["dev"], tr["keys"], wait=False, before=before,
+                                             pre=pcap if pre_ok else None)
+            if launch and pre_ok:
+                _replay_work(getattr(pcap, "work", None))   # the replayed prelude's counters
             if launch:
                 self.replays += 1
                 h = self._vk_inflight = _VkReplay(self, tr, launch)
@@ -2853,15 +2860,46 @@ class SegmentPlan:
                     return fine, self._followups(jobs, fine, followup, side_queue=True)
                 return _SegmentResult(collect)
             self._trace = None
+        from . import _vkcompute
+        for dev in list(_vkcompute._DEVICES.values()):
+            # A prelude run here reuses workspaces a replay of another plan captured (the
+            # middle stage alternates them): none of those may still be in flight.
+            _vkcompute._settle_replays(dev)
+        tracing = self._seen == sig and not _in_chain_trial(jobs)
+        pcap = None
         if prelude is not None:
-            prelude()
-        if self._seen != sig or _in_chain_trial(jobs):
+            # The device of the job set's plans (other devices the process opened, e.g. by
+            # earlier banks, are not this segment's): the prelude is captured there.
+            devs = {}
+            for b, _, _ in jobs:
+                for g in b._groups:
+                    ctx = getattr(getattr(g, "_plan", None), "_gpu", None)
+                    st = getattr(ctx, "_device_state", None)
+                    if st is not None:
+                        devs[id(st)] = st
+            devs = list(devs.values())
+            if tracing and len(devs) == 1:
+                # Its work counters logged (as for the CUDA graph's prelude) and counted
+                # now; a replay of the capture counts the same again.
+                work_log = []
+                _WORK_LOGS.append(work_log)
+                try:
+                    pcap = _vkcompute.capture_prelude(devs[0], prelude)
+                finally:
+                    _WORK_LOGS.pop()
+                _replay_work(work_log)
+                pcap.work = work_log
+            else:
+                prelude()
+        if not tracing:
             # As the CUDA graph: the first run of a signature runs as usual (plans settle:
             # calibration, uploads, records after a chain switch), the next is traced.
             self._seen = None if _in_chain_trial(jobs) else sig
             fine = TimeDomainFilterBank.filter_series_many(jobs)
         else:
             fine = self._trace_run(jobs, sig)
+            if self._trace is not None:
+                self._trace["prelude"] = pcap
         out = (fine, self._followups(jobs, fine, followup)) if followup is not None else fine
         return _SegmentResult(lambda: out)
 
