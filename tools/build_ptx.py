@@ -291,6 +291,9 @@ def main():
     if not slangc:
         print("slangc not found", file=sys.stderr)
         return 1
+    sys.path.insert(0, str(HERE))
+    import build_spirv
+    build_spirv.check_slangc_version(slangc)    # the pinned version (build_spirv.SLANGC_VERSION)
 
     nvrtc = find_nvrtc()
     cuda_path = find_cuda_path()
