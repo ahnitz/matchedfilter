@@ -12,7 +12,10 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-ROOT = Path(__file__).resolve().parent.parent
+# The package under test, wherever it is installed. The source tree's python/ has no built
+# extension when the suite runs against an installed wheel or sdist, so it cannot stand in.
+import matchedfilter as _mf
+PKG_PARENT = Path(_mf.__file__).resolve().parent.parent
 
 SCRIPT = r'''
 import json, sys
@@ -56,7 +59,7 @@ print(json.dumps({"last": out[-4:], "layout": bank.chosen_layout,
 def _run(device, cost):
     env = dict(os.environ, MF_COST_FILE=str(cost), MF_AUTOTUNE="1", MF_CHAIN_TRIALS="1",
                MF_BLOCK_TRIALS="1", OMP_NUM_THREADS="1")
-    p = subprocess.run([sys.executable, "-c", SCRIPT, str(ROOT / "python"), device], env=env,
+    p = subprocess.run([sys.executable, "-c", SCRIPT, str(PKG_PARENT), device], env=env,
                        capture_output=True, text=True, timeout=900)
     assert p.returncode == 0, p.stderr[-3000:]
     return json.loads(p.stdout.strip().splitlines()[-1])
