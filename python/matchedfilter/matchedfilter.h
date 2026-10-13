@@ -200,6 +200,10 @@ int ap_hmf_series_group(const ap_hmf_plan *p);
    is the float tier's own.  Returns 0, or -1 when the first tier's band has no
    screen on this back end (the plan is then unchanged).  0 turns it off. */
 int ap_hmf_set_q15(ap_hmf_plan *p, int on);
+/* Behind the Q15 screen, tier 0 on the FP16 gate (1) or the pooled FP32 pass (0). */
+int ap_hmf_set_q15_tier0(ap_hmf_plan *p, int fp16);
+/* Its price per listed pair, in ticks (ap_ticks), both ways (fp16 -1 without the gate). */
+int ap_hmf_price_q15_tier0(size_t m, int nt, int reps, double *fp32, double *fp16);
 /* The block forward through the platform FFT (macOS: vDSP) instead of the engine's; -1 where
    there is none. Results differ by fp32 rounding only. */
 int ap_hmf_set_platform_fft(ap_hmf_plan *p, int on);

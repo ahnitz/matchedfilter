@@ -71,6 +71,10 @@ struct Gate {
   float *t2;               /* [group][element][lane] |T|^2 of the stored (rounded) templates */
   float *d2;               /* [slot][element] |D|^2 of the stored data */
   h16 *w1r, *w1i;          /* element split twiddles */
+  int *live;               /* storage slots of the window's lags (run_max), cached per window */
+  h16 *gtre, *gtim;        /* one gathered template group (run_pairs_max) */
+  float *gt2;
+  size_t live_n, live_ws, live_we;
   vf *bR, *bI, *sR, *sI;
 };
 
@@ -88,6 +92,7 @@ static void destroy(Gate *g) {
   if (!g) return;
   free(g->tre); free(g->tim); free(g->tinv); free(g->dre); free(g->dim); free(g->dinv);
   free(g->w1r); free(g->w1i); free(g->bR); free(g->bI); free(g->sR); free(g->sI);
+  free(g->live); free(g->gtre); free(g->gtim); free(g->gt2);
   free(g->t2); free(g->d2);
   free(g);
 }
@@ -275,6 +280,192 @@ static void pair_group(Gate *g, int d, int grp, size_t ws, size_t we,
   }
 }
 
+/* The gate decision alone: the window maximum of the FP16 powers, no argmax.
+
+   hmf.c reads only whether a tier-0 pair fires (index >= 0, magnitude >= thr); its lag and
+   value have no reader. Electing the lag (a compare and two selects per lag, plus the
+   output-order index of every lag) was most of pair_group's scan. Here the window's lags
+   are walked in storage order through a list built once per window, with one maximum per
+   lag. The bound uses the maximum itself: every FP16 power |a y|^2 (one exact scale, one
+   product, one FMA) is within (1 +- u)^2 of the FP16 transform's, so |y16|max <=
+   sqrt(Pmax)/a / (1 - u) < sqrt(Pmax)/a (1 + 2u) -- the guarantee pair_group's
+   |y(chosen)| (1 + 3u) gives. */
+static void live_list(Gate *g, size_t ws, size_t we) {
+  if (g->live && g->live_ws == ws && g->live_we == we) return;
+  if (!g->live) g->live = (int *)malloc(g->m * sizeof(int));
+  size_t n = 0;
+  for (size_t k = ws; k < we; k++) g->live[n++] = eidx(&g->ea, (int)k);
+  g->live_n = n; g->live_ws = ws; g->live_we = we;
+}
+
+static void pair_group_max_t(Gate *g, int d, const h16 *tre, const h16 *tim, const float *t2g,
+                             float *m2_out, float *pow_out);
+static void pair_group_max(Gate *g, int d, int grp, float *m2_out, float *pow_out) {
+  const size_t m = g->m;
+  pair_group_max_t(g, d, g->tre + (size_t)grp * m * AP_W, g->tim + (size_t)grp * m * AP_W,
+                   g->t2 + (size_t)grp * m * AP_W, m2_out, pow_out);
+}
+
+/* pair_group_max for one data slot against 8 templates given as one [element][lane] group
+   (a stored group, or one gathered from scattered templates: run_pairs_max). */
+static void pair_group_max_t(Gate *g, int d, const h16 *tre, const h16 *tim, const float *t2g,
+                             float *m2_out, float *pow_out) {
+  const size_t m = g->m;
+  efft_prod_broadcast((int)m, g->dre + (size_t)d * m, g->dim + (size_t)d * m,
+                      tre, tim, g->bR, g->bI, g->sR, g->sI, g->w1r, g->w1i);
+  const hn::ScalableTag<float> df;
+  using VF = hn::Vec<decltype(df)>;
+  VF pw0 = hn::Zero(df), pw1 = hn::Zero(df);
+  {
+    const float *d2 = g->d2 + (size_t)d * m, *t2 = t2g;
+    VF a0 = pw0, a1 = pw0, b0 = pw0, b1 = pw0, c0 = pw0, c1 = pw0;
+    size_t k = 0;
+    for (; k + 4 <= m; k += 4) {
+      const float *t = t2 + k * AP_W;
+      const VF d0 = hn::Set(df, d2[k]), d1 = hn::Set(df, d2[k + 1]);
+      const VF e0 = hn::Set(df, d2[k + 2]), e1 = hn::Set(df, d2[k + 3]);
+      pw0 = hn::MulAdd(d0, hn::LoadU(df, t), pw0);
+      pw1 = hn::MulAdd(d0, hn::LoadU(df, t + 4), pw1);
+      a0 = hn::MulAdd(d1, hn::LoadU(df, t + 8), a0);
+      a1 = hn::MulAdd(d1, hn::LoadU(df, t + 12), a1);
+      b0 = hn::MulAdd(e0, hn::LoadU(df, t + 16), b0);
+      b1 = hn::MulAdd(e0, hn::LoadU(df, t + 20), b1);
+      c0 = hn::MulAdd(e1, hn::LoadU(df, t + 24), c0);
+      c1 = hn::MulAdd(e1, hn::LoadU(df, t + 28), c1);
+    }
+    for (; k < m; k++) {
+      const VF dk = hn::Set(df, d2[k]);
+      pw0 = hn::MulAdd(dk, hn::LoadU(df, t2 + k * AP_W), pw0);
+      pw1 = hn::MulAdd(dk, hn::LoadU(df, t2 + k * AP_W + 4), pw1);
+    }
+    pw0 = hn::Add(hn::Add(pw0, a0), hn::Add(b0, c0));
+    pw1 = hn::Add(hn::Add(pw1, a1), hn::Add(b1, c1));
+    const VF mm = hn::Set(df, (float)m);
+    hn::StoreU(hn::Mul(pw0, mm), df, pow_out);
+    hn::StoreU(hn::Mul(pw1, mm), df, pow_out + 4);
+  }
+  float pmax = 0.f;
+  for (int l = 0; l < AP_W; l++) pmax = fmaxf(pmax, pow_out[l]);
+  int q = 0;
+  if (pmax > 0.f) {
+    int e2;
+    frexpf(16384.f / pmax, &e2);
+    q = (e2 - 1) >> 1;
+    if (q > 7) q = 7;
+    if (q < -7) q = -7;
+  }
+  const vf av = hn::Set(AP_D, hwy::F16FromF32(ldexpf(1.f, q)));
+  vf bm = hn::Zero(AP_D), cm = bm;
+  const vf *R = g->bR, *I = g->bI;
+  const int *L = g->live;
+  size_t j = 0;
+  for (; j + 2 <= g->live_n; j += 2) {
+    const int e = L[j], f = L[j + 1];
+    const vf r = hn::Mul(R[e], av), i = hn::Mul(I[e], av);
+    const vf s = hn::Mul(R[f], av), t = hn::Mul(I[f], av);
+    bm = hn::Max(bm, hn::MulAdd(r, r, hn::Mul(i, i)));
+    cm = hn::Max(cm, hn::MulAdd(s, s, hn::Mul(t, t)));
+  }
+  if (j < g->live_n) {
+    const int e = L[j];
+    const vf r = hn::Mul(R[e], av), i = hn::Mul(I[e], av);
+    cm = hn::Max(cm, hn::MulAdd(r, r, hn::Mul(i, i)));
+  }
+  bm = hn::Max(bm, cm);
+  alignas(16) h16 mx[AP_W];
+  hn::StoreU(bm, AP_D, mx);
+  const float ia2 = ldexpf(1.f, -2 * q);
+  for (int l = 0; l < AP_W; l++) m2_out[l] = hwy::F32FromF16(mx[l]) * ia2;
+}
+
+/* The gate over listed pairs (d0 + dsel[i], tsel[i]), in order: runs of up to 8 pairs that
+   share a data slot are correlated together, their templates gathered into one group.
+   out is indexed by pair row (d * nt_row + t), as hmf.c's tier buffers are. */
+static int run_pairs_max(Gate *g, int d0, int t0, const int *dsel, const int *tsel, int n,
+                         int nt_row, size_t ws, size_t we, ap_peak *out) {
+  if (we > g->m) we = g->m;
+  const float u = 1.0f / 2048.0f;
+  const float kappa = (float)GATE16_KAPPA;
+  const size_t m = g->m;
+  live_list(g, ws, we);
+  if (!g->gtre) {
+    g->gtre = (h16 *)ap_alloc64(m * AP_W * sizeof(h16));
+    g->gtim = (h16 *)ap_alloc64(m * AP_W * sizeof(h16));
+    g->gt2 = (float *)ap_alloc64(m * AP_W * sizeof(float));
+    if (!g->gtre || !g->gtim || !g->gt2) return -1;
+  }
+  alignas(16) float m2[AP_W], pw[AP_W];
+  for (int i = 0; i < n;) {
+    const int d = dsel[i];
+    int k = 1;
+    while (k < AP_W && i + k < n && dsel[i + k] == d) k++;
+    for (int l = 0; l < AP_W; l++) {          /* lanes past k repeat the last template */
+      const int t = t0 + tsel[i + (l < k ? l : k - 1)];
+      const size_t base = (size_t)(t / AP_W) * m * AP_W + (size_t)(t % AP_W);
+      const h16 *sr = g->tre + base, *si = g->tim + base;
+      const float *s2 = g->t2 + base;
+      for (size_t e = 0; e < m; e++) {
+        g->gtre[e * AP_W + l] = sr[e * AP_W];
+        g->gtim[e * AP_W + l] = si[e * AP_W];
+        g->gt2[e * AP_W + l] = s2[e * AP_W];
+      }
+    }
+    pair_group_max_t(g, d0 + d, g->gtre, g->gtim, g->gt2, m2, pw);
+    const float dinv = g->dinv[d0 + d];
+    for (int l = 0; l < k; l++) {
+      const int t = tsel[i + l];
+      ap_peak *o = out + (size_t)d * nt_row + t;
+      const float sc = dinv * g->tinv[t0 + t];
+      if (g->live_n == 0 || !(m2[l] > 0.f)) {
+        o->index = -1; o->re = o->im = o->magnitude = 0.f;
+        continue;
+      }
+      const float rms = sqrtf(pw[l] / (float)m);
+      o->index = 0;
+      o->re = o->im = 0.f;
+      o->magnitude = (sqrtf(m2[l]) * (1.f + 2.f * u) * 1.0001f + kappa * u * rms) * sc;
+    }
+    i += k;
+  }
+  return 0;
+}
+
+static int run_max(Gate *g, int d0, int nd, int t0, int nt, size_t ws, size_t we, ap_peak *out) {
+  if (d0 < 0 || d0 + nd > g->nd || t0 < 0 || t0 + nt > g->nt) return -1;
+  if (we > g->m) we = g->m;
+  const float u = 1.0f / 2048.0f;
+  /* MF_GATE16_DEBUG_MAX (measurement only, tools/gate16_error.py --scan max): kappa 0, and
+     im carries the pair's all-lag rms, as MF_GATE16_DEBUG does for the electing scan. */
+  static const int debug = getenv("MF_GATE16_DEBUG_MAX") != nullptr;
+  const float kappa = debug ? 0.f : (float)GATE16_KAPPA;
+  const size_t m = g->m;
+  live_list(g, ws, we);
+  alignas(16) float m2[AP_W], pw[AP_W];
+  const int g0 = t0 / AP_W, g1 = (t0 + nt - 1) / AP_W;
+  for (int grp = g0; grp <= g1; grp++) {
+    for (int d = 0; d < nd; d++) {
+      pair_group_max(g, d0 + d, grp, m2, pw);
+      const float dinv = g->dinv[d0 + d];
+      for (int l = 0; l < AP_W; l++) {
+        const int t = grp * AP_W + l;
+        if (t < t0 || t >= t0 + nt) continue;
+        ap_peak *o = out + (size_t)d * nt + (t - t0);
+        const float sc = dinv * g->tinv[t];
+        if (g->live_n == 0 || !(m2[l] > 0.f)) {      /* empty window, nothing, or NaN */
+          o->index = -1; o->re = o->im = o->magnitude = 0.f;
+          continue;
+        }
+        const float rms = sqrtf(pw[l] / (float)m);
+        o->index = 0;                               /* fires; the lag has no reader */
+        o->re = o->im = 0.f;
+        o->magnitude = (sqrtf(m2[l]) * (1.f + 2.f * u) * 1.0001f + kappa * u * rms) * sc;
+        if (debug) o->im = rms * sc;
+      }
+    }
+  }
+  return 0;
+}
+
 /* Upper bound on the FP32 gate's peak magnitude for each pair (see the header), one bin
    over [ws, we): out[d*nt + t] for d in [0,nd), t in [t0, t0+nt). index is the FP16
    argmax (or -1 for an empty window); magnitude is the BOUND; re/im the FP16 value. */
@@ -369,10 +560,25 @@ int ap_gate16_set_data(void *g, int d, const float *spec) {
 #endif
 }
 
+int ap_gate16_run_pairs(void *g, int d0, int t0, const int *dsel, const int *tsel, int n,
+                        int nt_row, size_t ws, size_t we, ap_peak *out) {
+#ifdef AP_GATE16
+  return g ? ap16::run_pairs_max((ap16::Gate *)g, d0, t0, dsel, tsel, n, nt_row, ws, we, out) : -1;
+#else
+  (void)g; (void)d0; (void)t0; (void)dsel; (void)tsel; (void)n; (void)nt_row; (void)ws; (void)we; (void)out;
+  return -1;
+#endif
+}
+
 int ap_gate16_run(void *g, int d0, int nd, int t0, int nt, size_t ws, size_t we,
                   ap_peak *out) {
 #ifdef AP_GATE16
-  return g ? ap16::run((ap16::Gate *)g, d0, nd, t0, nt, ws, we, out) : -1;
+  if (!g) return -1;
+  /* The elected lag and value only for the error tools (MF_GATE16_DEBUG, MF_GATE16_ELECT);
+     the gate itself needs only the bound (run_max). */
+  static const int elect = getenv("MF_GATE16_DEBUG") != nullptr || getenv("MF_GATE16_ELECT") != nullptr;
+  return elect ? ap16::run((ap16::Gate *)g, d0, nd, t0, nt, ws, we, out)
+               : ap16::run_max((ap16::Gate *)g, d0, nd, t0, nt, ws, we, out);
 #else
   (void)g; (void)d0; (void)nd; (void)t0; (void)nt; (void)ws; (void)we; (void)out;
   return -1;

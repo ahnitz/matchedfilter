@@ -106,6 +106,66 @@ class Q15:
         return ps.astype(bool), st
 
 
+class CpuG16:
+    """The CPU FP16 first gate (src/gate16.cc, run_max) through _core.gate16_bound: the bound
+    it reports, compared with the tier threshold as hmf.c does (fires when >= thr)."""
+    name = "cpu-g16"
+
+    def __init__(self, N, nt):
+        from matchedfilter import _core
+        self.core = _core
+        self.N, self.nt = N, nt
+        if not _core.gate16():
+            raise RuntimeError("no FP16 gate on this back end")
+
+    def load(self, D, T):
+        # set_template conjugates at ingest; the tier correlates D against conj(T), as Q15.
+        self.d = D.astype(np.complex64).tobytes()
+        self.t = T.astype(np.complex64).tobytes()
+        b = self.core.gate16_bound(self.N, self.d, self.t, self.nt)
+        if b is None:
+            raise RuntimeError("no FP16 gate on this back end")
+        self.b = np.frombuffer(b, np.float32)
+
+    def decide(self, thr):
+        return self.b >= thr, None
+
+
+def loud_cpu16():
+    """The CPU FP16 gate end to end on a batch with one loud injection: peaks with the gate
+    (MF_GATE16 default, Q15 screen off) against the FP32 tier (MF_GATE16=0). An overflowing
+    narrow tier must fail open and change nothing else."""
+    import os
+    import matchedfilter as mf
+    from matchedfilter.benchmark import _inspiral_power
+    n, nd, nt = 4096, 4, 16
+    power = _inspiral_power(n)
+    h = np.sqrt(power).astype(np.complex64)
+    rng = np.random.default_rng(2026)
+    tm = (h * np.exp(2j * np.pi * rng.random((nt, n)) * 0.05)).astype(np.complex64)
+    noise = (rng.standard_normal((nd, n)) + 1j * rng.standard_normal((nd, n))).astype(np.complex64)
+    rows = []
+    for snr in (100, 1000, 2000, 2500, 3000, 10000, 1e5):
+        data = noise.copy()
+        data[1] += snr * np.conj(tm[3]) / np.linalg.norm(tm[3]) * np.sqrt(n)
+        got = []
+        for g16 in ("0", "1"):
+            os.environ["MF_GATE16"] = g16
+            hf = mf.HierarchicalFilter(n, nd, nt, chain=(256,), snr=5.5, fd=1e-3)
+            hf._q15 = False
+            hf.set_reference(power)
+            hf.set_templates(np.conj(tm))
+            hf.set_data(data)
+            r = hf.run(binsize=n // 4, threshold=6.0 * np.sqrt(n))
+            got.append((int((r["index"] >= 0).sum()), float(np.abs(r["value"]).max()) / np.sqrt(n)))
+        os.environ.pop("MF_GATE16", None)
+        rows.append((snr, got[0], got[1]))
+        print("cpu-g16 loud snr %8g: fp32 %3d peaks (max %.0f)  fp16 %3d peaks (max %.0f)  %s"
+              % (snr, got[0][0], got[0][1], got[1][0], got[1][1],
+                 "ok" if got[0] == got[1] else "DIFFERS"))
+    return rows
+
+
 def gpu_backend(device):
     """(compute module, index) for a device spec, chosen exactly as the library chooses it:
     Metal on Apple, CUDA on NVIDIA, else Vulkan."""
@@ -217,7 +277,7 @@ def loud_end_to_end(device, snrs=(100, 1000, 2000, 2500, 3000, 10000)):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--gate", nargs="+", default=["q15"], choices=["q15", "gpu-c16"])
+    ap.add_argument("--gate", nargs="+", default=["q15"], choices=["q15", "gpu-c16", "cpu-g16"])
     ap.add_argument("--n", type=int, nargs="+", default=[128, 256, 512, 1024])
     ap.add_argument("--templates", type=int, default=64)
     ap.add_argument("--device", default="gpu:0")
@@ -228,12 +288,16 @@ def main():
     args = ap.parse_args()
     report = {}
     if args.loud:
-        report["loud"] = loud_end_to_end(args.device)
+        if "cpu-g16" in args.gate:
+            report["loud_cpu16"] = loud_cpu16()
+        if set(args.gate) - {"cpu-g16"}:
+            report["loud"] = loud_end_to_end(args.device)
     for g in args.gate:
         for N in args.n:
             rng = np.random.default_rng(args.seed + N)
             try:
                 gate = (Q15(N, args.templates) if g == "q15" else
+                        CpuG16(N, args.templates) if g == "cpu-g16" else
                         GpuC16(N, args.templates, args.device))
             except Exception as e:                       # noqa: BLE001
                 print("%-8s N=%-5d unavailable: %s" % (g, N, e))

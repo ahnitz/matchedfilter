@@ -2596,6 +2596,41 @@ _Q15_TRIALS = {}
 _CPU_FWD_PFFT = {}
 
 
+_Q15_TIER0 = {}
+
+
+def _q15_tier0_fp16(band):
+    """Whether tier 0 behind the Q15 screen runs on the FP16 gate at this band: both kernels
+    are timed once on a synthetic survivor list (_core.price_q15_tier0) and the cheaper is
+    kept ("q15-tier0|band" in MF_COST_FILE). The FP16 gate reports an upper bound on the
+    FP32 magnitude, so its survivors are a superset of the FP32 pass's and the next tier and
+    the refine decide them; only time is at stake, and a whole-call trial of a tier ~10% of
+    a call sits at the shared rule's tie (gatechain.measured_choice), so it is priced."""
+    band = int(band)
+    hit = _Q15_TIER0.get(band)
+    if hit is not None:
+        return hit
+    if not getattr(_core, "gate16", lambda: False)():
+        _Q15_TIER0[band] = False
+        return False
+    path = _gatechain._cost_file()
+    key = "q15-tier0|%d" % band
+    if path is not None:
+        rec = _gatechain._load_cost_file(path).get(key)
+        if isinstance(rec, dict) and "fp16" in rec:
+            _Q15_TIER0[band] = hit = bool(rec["fp16"])
+            return hit
+    try:
+        fp32, fp16 = _core.price_q15_tier0(band, 128)
+    except Exception:                      # noqa: BLE001 -- no price: keep the FP32 pass
+        fp32, fp16 = 1.0, -1.0
+    hit = bool(fp16 > 0 and fp16 < fp32)
+    _Q15_TIER0[band] = hit
+    if path is not None:
+        _gatechain._store_cost(path, key, {"fp16": hit, "ticks": {"fp32": fp32, "fp16": fp16}})
+    return hit
+
+
 def _cpu_forward_platform(n):
     """Whether the block forward at n is cheaper through the platform FFT. Both transforms
     are timed once on this size (_core.forward_cost: copy with 1/n and transform, best of a
@@ -2666,6 +2701,7 @@ def clear_autotune_cache():
         _CHAIN_TRIALS.clear()
         _Q15_TRIALS.clear()
         _CPU_FWD_PFFT.clear()
+        _Q15_TIER0.clear()
 
 
 class HierarchicalFilter(MatchedFilter):
@@ -2756,6 +2792,9 @@ class HierarchicalFilter(MatchedFilter):
         # The block forward's transform: a cost-model price (_cpu_forward_platform), not a
         # trial -- its effect is under the shared rule's tie margin of a whole call.
         self._pfft = _cpu_forward_platform(self.n) and plan.set_platform_fft(True)
+        # Tier 0 behind the Q15 screen: the FP16 gate over the screen's survivors where it is
+        # priced cheaper than the pooled FP32 pass (_q15_tier0_fp16).
+        plan.set_q15_tier0(_q15_tier0_fp16(int(chain[0])))
         return plan
 
     # ---- Q15 screen: a measured candidate, never a default ---------------------
