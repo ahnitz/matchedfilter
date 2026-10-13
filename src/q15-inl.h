@@ -96,7 +96,15 @@ static HWY_INLINE void qcodelet_tw(int m, vq *restrict ar, vq *restrict ai, long
   }
 }
 
-#if HWY_MAX_BYTES >= 64
+/* Vector registers of this target: the fused maximum keeps two more vectors and their
+   squares live through the codelet, which a 16-register file spills. */
+#undef AP_Q15_VREGS32                     /* this header is included once per target */
+#if (HWY_ARCH_X86 && HWY_MAX_BYTES >= 64) || HWY_ARCH_ARM_A64
+#define AP_Q15_VREGS32 1
+#else
+#define AP_Q15_VREGS32 0
+#endif
+#if AP_Q15_VREGS32
 static HWY_INLINE void qcodelet_twmax(int m, const vq *restrict ar, const vq *restrict ai, long S,
                                       const int16_t *restrict twr, const int16_t *restrict twi,
                                       long lo, long hi, vq *restrict mx){
@@ -138,16 +146,20 @@ static int q15_screen(size_t N, const int16_t *dq, const int16_t *tr, const int1
     qcodelet_prod(M2, dq + 3 * e1, tr + (size_t)e1 * AP_QW, ti + (size_t)e1 * AP_QW,
                   X + e1, Xi + e1, st, 3L * M1, (long)M1 * AP_QW);
   if(we > N) we = N;
-#if HWY_MAX_BYTES >= 64
-  /* 512-bit targets (32 vector registers): pass 2 takes the window's maximum as it
-     produces each row (qcodelet_twmax); output k = k2 + M2*k1 is row k2's k1-th, so row
-     k2 contributes its k1 in [lo, hi). The outputs never go back to the scratch: on
-     AVX-512 the scratch (2 x 17 x 16 x 64 B at N = 256) and a template group (32 KB)
-     overflow a 48 KB L1, and writing and re-reading the scratch for a separate maximum
-     cost Zen 5 12-32% of the screen's cycles. On 16-register targets the fused codelet's
-     extra live values spill (AVX2 on Zen 3: 11% SLOWER, IPC 3.5 -> 3.0), so they keep the
-     separate pass -- the register file decides, as for the 64-point split radix
-     (elemfft-inl.h). Bit-identical either way: the same Q_MUL squares, max is exact. */
+#if AP_Q15_VREGS32
+  /* The window's maximum fused into pass 2 (qcodelet_twmax): output k = k2 + M2*k1 is row
+     k2's k1-th, so row k2 contributes its k1 in [lo, hi), and the outputs never go back to
+     the scratch. Worth it only when the batch's working set (scratch + template group)
+     overflows L1D AND the target has 32 vector registers -- the rule all three measured
+     machines agree on (bit-identical either way: same Q_MUL squares, max is exact):
+       Zen 5 AVX-512: 67 KB vs 48 KB L1D, 32 regs: fused 12-32% fewer cycles;
+       M2 NEON: fits its 128 KB L1D: fused +51 ms/segment (slower);
+       Zen 3 AVX2: 33 KB vs 32 KB but 16 regs (spills): fused 11% slower (and Haswell
+       has the same shape), so 16-register targets never compile it.
+     L1D from the OS (ap_l1d_bytes); unknown, the 512-bit width stands in. */
+  const size_t l1d = ap_l1d_bytes();
+  const int fuse = l1d ? ap_q15_batch_bytes(N, AP_QW) > l1d : HWY_MAX_BYTES >= 64;
+  if(fuse){
   vq mm[2] = {Q_ZERO(), Q_ZERO()};
   for(int k2 = 0; k2 < M2; k2++){
     const long lo = (long)ws > k2 ? ((long)ws - k2 + M2 - 1) / M2 : 0;
@@ -156,8 +168,14 @@ static int q15_screen(size_t N, const int16_t *dq, const int16_t *tr, const int1
     qcodelet_twmax(M1, X + (size_t)k2 * st, Xi + (size_t)k2 * st, 1,
                    tw->re + (size_t)k2 * M1, tw->im + (size_t)k2 * M1, lo, hi, mm);
   }
-  const vq m0 = mm[0], m1 = mm[1];
-#else
+  const vq mx = hn::Max(mm[0], mm[1]);
+  if(lanemax) hn::StoreU(mx, AP_DQ, lanemax);
+  uint64_t bits_ = 0;
+  hn::StoreMaskBits(AP_DQ, hn::Ge(mx, hn::LoadU(AP_DQ, lanethr)), (uint8_t *)&bits_);
+  *bits = bits_;
+  return 0;
+  }
+#endif
   for(int k2 = 0; k2 < M2; k2++)
     qcodelet_tw(M1, X + (size_t)k2 * st, Xi + (size_t)k2 * st, 1,
                 tw->re + (size_t)k2 * M1, tw->im + (size_t)k2 * M1);
@@ -180,7 +198,6 @@ static int q15_screen(size_t N, const int16_t *dq, const int16_t *tr, const int1
       m0 = hn::Max(m0, hn::SaturatedAdd(Q_MUL(a, a), Q_MUL(b, b)));
     }
   }
-#endif
   const vq mx = hn::Max(m0, m1);
   if(lanemax) hn::StoreU(mx, AP_DQ, lanemax);
   uint64_t b = 0;

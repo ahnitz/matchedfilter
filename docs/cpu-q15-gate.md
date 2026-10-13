@@ -110,6 +110,28 @@ the first tier, not refine or forward: (a) the screen kernel's op count on AVX2
 (2 points of the 6.5%, ~9% of tier 0) that a smaller derived margin would cut, and (c)
 a cheaper 128-band screened first tier, which the model now prices.
 
+## Fused window maximum: when a pass's working set leaves L1 (2026-10-13)
+
+The four-step screen's pass 2 used to write every output back to its scratch and a third
+loop re-read the scratch for the window maximum. `qsr{8,16,32}_twmax` (gen_q15.py) take the
+maximum inside pass 2 instead; same Q_MUL squares, so the statistic is bit-identical.
+
+Counters (tools/perf_counters.py), N = 256, the ladder's band:
+
+| machine, target | batch working set / L1D | vector regs | IPC, L1 miss (separate) | fused vs separate |
+|---|---|---|---|---|
+| Zen 5, AVX-512 (32 lanes) | 67 KB / 48 KB | 32 | 1.4-2.7, 28-30% | 12-32% fewer cycles |
+| Apple M2, NEON | fits / 128 KB | 32 | -- | +51 ms/segment (slower; ARM agent) |
+| Zen 3, AVX2 (16 lanes) | 33 KB / 32 KB | 16 | 3.5, 7% | 11% slower (IPC 3.5 -> 3.0: spills) |
+
+**Transferable rule:** fusing a reduction into a transform's last pass pays only when the
+batch's working set overflows L1D *and* the register file can hold the extra live values
+without spilling. Neither condition alone decides: the M2 has the registers but nothing to
+save; Zen 3 overflows (barely, 7% misses) but spills. The selection computes the working
+set from N, the lanes and the template group (`ap_q15_batch_bytes`), compares it with L1D
+from the OS (`ap_l1d_bytes`: sysconf, sysfs, sysctl), and compiles the fused codelets only
+on 32-register targets (`AP_Q15_VREGS32`). With L1D unknown, the 512-bit width stands in.
+
 ## Margin: 5 sqrt(N) kept; a tighter Gaussian-tail margin rejected (2026-10-09)
 
 A 3.12 sqrt(N) margin was derived from a 4e-11 Gaussian tail (rms 0.46-0.47 sqrt(N),
