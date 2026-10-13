@@ -395,10 +395,6 @@ class CostModel:
             return 0.0
         return (self.forward_cost(chain, f) - self.forward) / float(ntemplates)
 
-    def chain_forward(self, chain, reach, ntemplates):
-        """Per-pair forward cost of this chain (>= 0): forward_cost shared by the templates."""
-        return self.forward / float(ntemplates) + self.chain_forward_delta(chain, reach, ntemplates)
-
     def chain_cost(self, chain, reach):
         """reach[i] = P(a pair reaches tier i+1) for i = 0..k-1, reach[k] = P(reaches refine)."""
         c = self.first_tier(chain[0], reach[1] if len(reach) > 1 else 1.0)[0]
