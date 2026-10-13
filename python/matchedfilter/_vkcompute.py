@@ -141,6 +141,10 @@ _DESC_STORAGE_BUFFER = 7
 _STAGE_COMPUTE = 0x20
 _BIND_POINT_COMPUTE = 1
 _ONE_TIME_SUBMIT = 0x1
+_SIMULTANEOUS_USE = 0x4    # VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT
+#: Zeroing recordings a context keeps (one per distinct set of ranges: a middle stage has one
+#: per output buffer and detector).
+_ZERO_RECS = 8
 _STAGE_COMPUTE_BIT = 0x800
 _STAGE_DRAW_INDIRECT_BIT, _STAGE_TRANSFER_BIT, _STAGE_HOST_BIT = 0x2, 0x1000, 0x4000
 _ACCESS_SHADER_READ, _ACCESS_SHADER_WRITE = 0x20, 0x40
@@ -3392,12 +3396,29 @@ class Context(InputUploads):
                 self.settle_writes()
             return
         vk = self.vk
+        # A middle stage zeroes the same ranges every segment (the same windows of the same
+        # output): its recording is kept and submitted again. Keyed by the allocations
+        # (held by the entry, so their ids stay theirs) and the byte ranges.
+        key = tuple((id(sb.owner), off, length) for sb, off, length in ranges)
+        cache = self.__dict__.setdefault("_zero_recs", OrderedDict())
+        hit = cache.get(key)
+        if hit is not None:
+            cache.move_to_end(key)
+            if not wait:
+                self._submit_pending(hit[1])
+                return
+            self._submit(hit[1])
+            self.settle_writes()
+            self._wait_queues()
+            return
         cmd = _vp()
         _check(vk.vkAllocateCommandBuffers(self.device, ctypes.byref(
             _CmdBufAlloc(40, None, self.command_pool, 0, 1)), ctypes.byref(cmd)), "allocate zero")
         try:
-            _check(vk.vkBeginCommandBuffer(cmd, ctypes.byref(_CmdBufBegin(42, None, _ONE_TIME_SUBMIT, None))),
-                   "begin zero")
+            # Simultaneous use: segment k's submission of it may still be in flight (wait=False)
+            # when segment k+1 submits it again.
+            _check(vk.vkBeginCommandBuffer(cmd, ctypes.byref(_CmdBufBegin(42, None, _SIMULTANEOUS_USE,
+                                                                          None))), "begin zero")
             mb = _MemBarrier(46, None, _ACCESS_SHADER_WRITE | _ACCESS_TRANSFER_WRITE,
                              _ACCESS_TRANSFER_WRITE)
             vk.vkCmdPipelineBarrier(cmd, _STAGE_COMPUTE_BIT | _STAGE_TRANSFER_BIT, _STAGE_TRANSFER_BIT,
@@ -3409,19 +3430,35 @@ class Context(InputUploads):
             vk.vkCmdPipelineBarrier(cmd, _STAGE_TRANSFER_BIT, _STAGE_HOST_BIT | _STAGE_COMPUTE_BIT,
                                     0, 1, ctypes.byref(mb), 0, None, 0, None)
             _check(vk.vkEndCommandBuffer(cmd), "end zero")
+            owners = tuple(sb.owner for sb, _, _ in ranges)
+            if len(cache) >= _ZERO_RECS:
+                # The oldest recording may still be in flight: settle before freeing it.
+                self.settle_writes()
+                _, (_, old) = cache.popitem(last=False)
+                vk.vkFreeCommandBuffers.argtypes = [_vp, _vp, _u32, ctypes.POINTER(_vp)]
+                vk.vkFreeCommandBuffers(self.device, self.command_pool, 1, (_vp * 1)(old))
+            cache[key] = (owners, cmd)
+            rec, cmd = cmd, None                 # kept (freed with the context's caches)
             if not wait:
-                self._submit_pending(cmd)
-                self._zero_cmds = getattr(self, "_zero_cmds", []) + [cmd]
-                cmd = None                       # freed once settled (_free_zero_cmds)
+                self._submit_pending(rec)
                 return
-            self._submit(cmd)                   # waits; same queue as the correlation
+            self._submit(rec)                   # waits; same queue as the correlation
             self.settle_writes()
             self._wait_queues()                 # and anything on the other queues
-            self._free_zero_cmds()
         finally:
             if cmd is not None:
                 vk.vkFreeCommandBuffers.argtypes = [_vp, _vp, _u32, ctypes.POINTER(_vp)]
                 vk.vkFreeCommandBuffers(self.device, self.command_pool, 1, (_vp * 1)(cmd))
+
+    def _free_zero_recs(self):
+        """Free the kept zeroing recordings (after settling everything in flight)."""
+        cache = self.__dict__.pop("_zero_recs", None)
+        if cache:
+            self.settle_writes()
+            cmds = [c for _, c in cache.values()]
+            vk = self.vk
+            vk.vkFreeCommandBuffers.argtypes = [_vp, _vp, _u32, ctypes.POINTER(_vp)]
+            vk.vkFreeCommandBuffers(self.device, self.command_pool, len(cmds), (_vp * len(cmds))(*cmds))
 
     def _free_zero_cmds(self):
         """Free zeroing command buffers left in flight, once their writes are settled."""
@@ -3671,6 +3708,7 @@ class Context(InputUploads):
     def clear_cache(self):
         """Release records and owned storage, preserving external shared arrays."""
         self._drain()
+        self._free_zero_recs()
         self._submit(None)
         self._wait_queues()
         self.vk.vkFreeCommandBuffers.argtypes = [_vp, _vp, _u32, ctypes.POINTER(_vp)]
