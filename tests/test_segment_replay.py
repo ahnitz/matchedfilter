@@ -206,3 +206,83 @@ def test_chain_trial_locks_under_segment_replay(monkeypatch, replay_on, tmp_path
     trials = [g.plan._chain_trial for b, _, _ in jobs for g in b._groups]
     assert all(t is None for t in trials), "a chain trial never locked under replay"
     assert plan.replays > 0
+
+
+def _prelude_setup(monkeypatch, seed):
+    """Fine banks reading rows a middle ('corr') bank writes on the device each segment, as
+    the ladder's middle stage does: the SegmentPlan prelude."""
+    from test_time_domain import _corr_bank_taps
+    rng, banks = _setup(monkeypatch, nbanks=2, seed=seed)
+    dev = banks[0][0].device
+    taps, counts = _corr_bank_taps("one", rng)
+    mid = TimeDomainFilterBank(taps[:2], tap_counts=counts[:2], engine='corr', device=dev,
+                               fft_lengths=[2048])
+    S = 1 << 17
+    m_in = mid.empty_shared((S,))
+    m_out = mid.empty_shared((2, S))
+    win = slice(2000, S - 2000)
+
+    def prelude():
+        mid.correlate_series(m_in, windows=win, out=m_out, wait=False)
+    jobs = [(b, m_out[i], dict(windows=slice(3000, S - 3000))) for i, (b, _, _) in enumerate(banks)]
+    return rng, banks, mid, m_in, m_out, prelude, jobs, S
+
+
+def test_prelude_replayed_from_its_capture(monkeypatch, replay_on):
+    """The middle stage (prelude) is captured with the trace and replayed in the same
+    submission; every segment equals its calls run one at a time on the middle's output."""
+    from matchedfilter import _vkcompute as V
+    used = []
+    orig = V.replay_fused
+    monkeypatch.setattr(V, "replay_fused", lambda *a, **k: used.append(k.get("pre") is not None)
+                        or orig(*a, **k))
+    rng, banks, mid, m_in, m_out, prelude, jobs, S = _prelude_setup(monkeypatch, 89)
+    plan = SegmentPlan()
+
+    def blocks():
+        return sum(w["blocks"] for w in getattr(mid, "_corr_work", {}).values())
+    steps = []
+    for seg in range(8):
+        X = np.fft.fft(rng.standard_normal(S)); X[S // 2:] = 0
+        m_in[:] = (np.fft.ifft(X) * 2).astype(np.complex64)
+        m_in[rng.integers(8000, S - 8000, 6)] += 25.0
+        b0 = blocks()
+        got = plan.submit(jobs, prelude=prelude, prelude_key=("mid", 0)).result()
+        mid.wait()
+        steps.append(blocks() - b0)
+        b1 = blocks()
+        _same(got, _want(jobs))
+        assert blocks() == b1                         # (the reference calls are not middle)
+    assert plan.replays >= 4 and sum(used) >= 4, (plan.replays, used)
+    # The middle's work counters (matchedfilter._roofline) advance the same on a replayed
+    # prelude as on a called one.
+    assert len(set(steps)) == 1 and steps[0] > 0, steps
+
+
+def test_prelude_capture_invalidated_by_eviction(monkeypatch, replay_on):
+    """The middle's records released between segments (clear_cache on its contexts): the
+    captured command buffers are freed, so the replay must call the prelude, not resubmit
+    them -- and the results stay exact."""
+    from matchedfilter import _vkcompute as V
+    used = []
+    orig = V.replay_fused
+    monkeypatch.setattr(V, "replay_fused", lambda *a, **k: used.append(k.get("pre") is not None)
+                        or orig(*a, **k))
+    rng, banks, mid, m_in, m_out, prelude, jobs, S = _prelude_setup(monkeypatch, 90)
+    plan = SegmentPlan()
+    for seg in range(10):
+        X = np.fft.fft(rng.standard_normal(S)); X[S // 2:] = 0
+        m_in[:] = (np.fft.ifft(X) * 2).astype(np.complex64)
+        m_in[rng.integers(8000, S - 8000, 6)] += 25.0
+        if seg == 6:
+            for g in mid._groups:
+                cp = g.get_correlation_plan()
+                if cp._gpu is not None:
+                    cp._gpu.clear_cache()
+            n_before = len(used)
+        got = plan.submit(jobs, prelude=prelude, prelude_key=("mid", 0)).result()
+        mid.wait()
+        _same(got, _want(jobs))
+        if seg == 6:
+            assert used[n_before:] in ([], [False]), used[n_before:]
+    assert any(used), used
