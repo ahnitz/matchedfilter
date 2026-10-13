@@ -8,6 +8,8 @@ are full-batch inverse-transform-only baselines: they do less computation
 but materialize the correlation. Plan creation and input upload are excluded.
 
 Run: python tools/teaser_figure.py --out docs/assets/teaser.svg
+ or, from saved tools/teaser_fleet.py reports of one host (no benchmarking):
+     python tools/teaser_figure.py --from-fleet CPU.json GPU.json --out docs/assets/teaser.svg
 Writes SVG, PNG and the underlying JSON measurements. Requires pyfftw,
 matplotlib and either AMD rocFFT/HIP or MLX (on macOS) for the GPU baseline.
 """
@@ -460,7 +462,8 @@ def plot(report, out):
              color=muted, size=10)
     fig.text(.04, .06, 'Setup excluded; FFTW PATIENT planning capped at 15 s. Full output reuses caller storage; GPU timing includes synchronization.',
              color=muted, size=9)
-    fig.text(.04, .023, report['date'] + ' · single CPU thread · ' + report['cpu'].split(' w/')[0] + ' / ' + report['gpu'],
+    stamp = report['date'] + (f" · revision {report['revision']}" if report.get('revision') else '')
+    fig.text(.04, .023, stamp + ' · single CPU thread · ' + report['cpu'].split(' w/')[0] + ' / ' + report['gpu'],
              color=muted, size=9)
     out = Path(out)
     fig.savefig(out, facecolor=bg)
@@ -524,6 +527,47 @@ def plot_comparison(reports, out):
     plt.close(fig)
 
 
+def report_from_fleet(cpu, gpu, snr=5.5):
+    """Build a teaser report from saved teaser_fleet.py CPU and GPU reports.
+
+    The fleet collector times the same public calls with the same bank and
+    noise, so the README figure can be drawn from a fleet measurement without
+    occupying the host again. Only the rows at `snr` are used.
+    """
+    shape = lambda r: (r['n'], r['data'], r['templates'])
+    if shape(cpu) != shape(gpu):
+        raise ValueError('CPU and GPU reports must use the same workload')
+    if (cpu['device'], gpu['device']) != ('cpu', 'gpu'):
+        raise ValueError('give the CPU report first, then the GPU report')
+    set_workload(n=cpu['n'], nd=cpu['data'], nt=cpu['templates'])
+    budget = {.01: '10⁻²', .001: '10⁻³', .0001: '10⁻⁴'}
+    rows = []
+    for source in (cpu, gpu):
+        by_key = {(r['kind'], r['fd']): r for r in source['rows']
+                  if r['kind'] != 'hier' or r.get('snr') == snr}
+        baseline = by_key.get(('baseline', None))
+        if baseline is None:
+            raise ValueError(f"{source['host']} {source['device']}: no FFT-only reference row")
+        keys = [('baseline', None), ('full', None), ('flat', None)] + [('hier', fd) for fd in BUDGETS]
+        labels = [baseline['label'] + '\nFFT only', 'Full', 'Peak'] + [
+            'Hier.\n' + budget[fd] for fd in BUDGETS]
+        for key, label in zip(keys, labels):
+            row = dict(by_key[key])
+            row['label'] = label
+            rows.append(row)
+    return dict(n=cpu['n'], data=cpu['data'], templates=cpu['templates'], snr=snr,
+                date=cpu['date'][:10], revision=cpu.get('revision'),
+                host=cpu['host'], cpu=cpu['cpu'], gpu=gpu['gpu'],
+                fftw_planning_limit_seconds=15,
+                gpu_baseline=next(r['label'] for r in gpu['rows'] if r['kind'] == 'baseline'),
+                cpu_backend=cpu.get('cpu_backend'), python=cpu.get('python'),
+                numpy=cpu.get('numpy'),
+                load_average={'cpu': [cpu.get('load_before'), cpu.get('load_after')],
+                              'gpu': [gpu.get('load_before'), gpu.get('load_after')]},
+                timing='0.5 s warmup, median of >=50 ms blocks; public API',
+                source='tools/teaser_fleet.py reports', rows=rows)
+
+
 def main(argv=None):
     from datetime import date
     ap = argparse.ArgumentParser(description=__doc__)
@@ -531,9 +575,20 @@ def main(argv=None):
     ap.add_argument('--data', type=int, default=ND, help='number of data segments (default: %(default)s)')
     ap.add_argument('--templates', type=int, default=NT, help='number of templates (default: %(default)s)')
     ap.add_argument('--compare', nargs=2, metavar='JSON', help='plot two existing teaser reports without benchmarking')
+    ap.add_argument('--from-fleet', nargs=2, metavar=('CPU_JSON', 'GPU_JSON'),
+                    help='draw the figure from saved teaser_fleet.py CPU and GPU reports '
+                         'of one host, without benchmarking')
     args = ap.parse_args(argv)
     if args.compare:
         plot_comparison([json.loads(Path(p).read_text()) for p in args.compare], args.out)
+        return 0
+    if args.from_fleet:
+        report = report_from_fleet(*(json.loads(Path(p).read_text()) for p in args.from_fleet))
+        out = Path(args.out)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.with_suffix('.json').write_text(json.dumps(report, indent=2)+'\n')
+        plot(report, out)
+        print('wrote', out, flush=True)
         return 0
     set_workload(nd=args.data, nt=args.templates)
     baseline, gpu_reference = ('MLX', mlx_ms) if sys.platform == 'darwin' else ('rocFFT', rocfft_ms)
