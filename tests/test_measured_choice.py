@@ -169,3 +169,46 @@ def test_a_batch_trial_locks_the_measured_best_through_outliers(monkeypatch, tmp
     assert tuple(w) == fast
     med = mf._CHAIN_TRIALS[tk]["median"]
     assert min(med, key=med.get) == fast                       # the lock is the measured best
+
+
+def _drive_batches(tk, true, never=(), limit=200):
+    """Drive a GPU chain trial batch by batch, as time_domain does: the scheduler picks a
+    candidate, its batches after a 2-batch warm-up are samples -- except for candidates in
+    `never`, whose batches never come back (a plan that cannot run them)."""
+    from matchedfilter.time_domain import _CHAIN_WARM_BATCHES as warm
+    last, run = None, 0
+    for i in range(limit):
+        c = mf._chain_trial_next(tk)
+        if c is None:
+            return mf._CHAIN_TRIALS[tk]["winner"], i
+        run = run + 1 if c == last else 1
+        last = c
+        if run > warm and c not in never:
+            mf._chain_trial_batch(tk, c, true[c])
+    return None, limit
+
+
+def test_a_candidate_that_never_runs_still_yields_a_lock(monkeypatch, tmp_path):
+    """Metal: the trial waited on a candidate whose batches never came. It is dropped after
+    its warm-up and samples (+2) without one, and the contest goes on without it."""
+    monkeypatch.setenv("MF_COST_FILE", str(tmp_path / "costs.json"))
+    mf.clear_autotune_cache()
+    tk = (2048, 6.0, 0.001, 2, "gpu:0")
+    a, b, c = (256, 512), (256, 1024), (256,)
+    mf._CHAIN_TRIALS[tk] = {"samples": {a: [], b: [], c: []}, "assigned": {}, "winner": None}
+    w, batches = _drive_batches(tk, {a: 1.0e-12, b: 1.3e-12, c: 0.8e-12}, never=(c,))
+    assert w == a
+    assert c in mf._CHAIN_TRIALS[tk]["dropped"]
+    base = mf._CHAIN_BATCH_TRIALS
+    assert batches <= 3 * (2 + base) + 6 + 1               # within the batch budget
+
+
+def test_a_full_trial_locks_within_its_batch_count(monkeypatch, tmp_path):
+    monkeypatch.setenv("MF_COST_FILE", str(tmp_path / "costs.json"))
+    mf.clear_autotune_cache()
+    tk = (2048, 6.0, 0.001, 2, "gpu:0")
+    a, b, c = (256, 512), (256, 1024), (256,)
+    mf._CHAIN_TRIALS[tk] = {"samples": {a: [], b: [], c: []}, "assigned": {}, "winner": None}
+    w, batches = _drive_batches(tk, {a: 1.0e-12, b: 1.3e-12, c: 0.8e-12})
+    assert w == c                                          # the measured best
+    assert batches <= 3 * (2 + mf._CHAIN_BATCH_TRIALS) + 1

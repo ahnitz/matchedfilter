@@ -2392,9 +2392,14 @@ def _chain_trial_next(tkey):
                 for k, v in (rec.get("need") or {}).items():
                     c = tuple(int(b) for b in k.split(",") if b)
                     tr.setdefault("batch_need", {})[c] = int(v)
+                tr["batches"] = int(rec.get("batches", 0))
+                tr["dropped"] = {tuple(int(b) for b in k.split(",") if b)
+                                 for k in rec.get("dropped", ())}
         bs = tr["batch"]
+        dropped = tr.setdefault("dropped", set())
         for c in tr["samples"]:
-            bs.setdefault(c, [])
+            if c not in dropped:
+                bs.setdefault(c, [])
         # Candidates in turn, each for a run of batches: a switch rebuilds thresholds and
         # uploads (the batch after it is not a sample), so alternating every batch measured
         # mostly the switching -- cheapest for the chain with fewest tiers.
@@ -2406,11 +2411,38 @@ def _chain_trial_next(tkey):
         pend = tr.setdefault("batch_pending", {})
         have = {c: len(bs[c]) + pend.get(c, 0) for c in bs}
         cur = tr.get("batch_current")
+        from .time_domain import _CHAIN_WARM_BATCHES as warm
+        # A candidate current for longer than its warm-up and samples (+2) without yielding
+        # one cannot or will not run here (a plan that does not switch to it, batches never
+        # recorded): it leaves the contest instead of being waited for.
+        if cur is not None and cur in bs:
+            run, got0 = tr.get("cur_run", (0, len(bs[cur])))
+            if len(bs[cur]) == got0 and run > warm + needs[cur] + 2:
+                bs.pop(cur)
+                dropped.add(cur)
+                _log_autotune("CHAIN-TRIAL %s: %s yielded no sample in %d batches: dropped",
+                              tkey, cur, run)
+                cur = None
+        tr["batches"] = tr.get("batches", 0) + 1
+        # Budget backstop: a bounded number of batches in all, then the shared rule decides
+        # among what was measured (_trial_budget_choice).
+        if tr["batches"] > len(tr["samples"]) * (warm + base) + 6 or not bs:
+            w = _trial_budget_choice(bs, next(iter(tr["samples"])), 2)
+            if w is not None:
+                med = {c: float(np.median(v)) for c, v in bs.items() if len(v)}
+                _chain_lock(tkey, tr, w, med)
+                _log_autotune("CHAIN-TRIAL %s budget of batches spent: locked %s", tkey, w)
+                return None
         if cur is not None and cur in bs and (have[cur] < needs[cur]
                                               or all(have[c] >= needs[c] for c in bs)):
+            r, g = tr.get("cur_run", (0, len(bs[cur])))
+            tr["cur_run"] = (r + 1, g)
             return cur          # (all sampled, the last samples still in flight: no switch)
+        if not bs:
+            return None
         cur = tr["batch_current"] = min(bs, key=lambda c: (have[c] >= needs[c], have[c],
                                                           list(tr["samples"]).index(c)))
+        tr["cur_run"] = (1, len(bs[cur]))
         return cur
 
 
@@ -2427,13 +2459,16 @@ def _chain_trial_batch(tkey, chain, value):
     """One sample of a GPU chain trial: a whole batch (every job of a segment, submission to
     last result) per unit of work, with every plan of the trial on `chain`. Judged on what a
     search pays -- host and device, readback, everything the chain changes -- not on one
-    call's time per pair. Locks the fastest once every candidate has MF_CHAIN_TRIALS samples
-    (a fixed order decides within the samples' noise, as for per-call trials)."""
+    call's time per pair. Decides by the shared rule (gatechain.measured_choice) once every
+    candidate still in the contest has MF_CHAIN_TRIALS samples; _chain_trial_next drops a
+    candidate that yields none and bounds the trial in batches."""
     with _AUTOTUNE_LOCK:
         tr = _CHAIN_TRIALS.get(tkey)
         if tr is None or tr["winner"] is not None:
             return None if tr is None else tr["winner"]
         bs = tr.setdefault("batch", {c: [] for c in tr["samples"]})
+        if tuple(chain) in tr.get("dropped", ()):
+            return None                     # left the contest (_chain_trial_next)
         bs.setdefault(tuple(chain), []).append(float(value))
         _log_autotune("CHAIN-TRIAL batch sample %s %.3g", tuple(chain), value)
         base = int(os.environ.get("MF_CHAIN_TRIALS", _CHAIN_BATCH_TRIALS))
@@ -2460,7 +2495,9 @@ def _chain_trial_batch(tkey, chain, value):
             if path is not None:
                 _gatechain._store_cost(path, _chain_lock_key(tkey) + "|batches",
                                        {"samples": {_chain_str(c): v for c, v in bs.items()},
-                                        "need": {_chain_str(c): v for c, v in bneed.items()}})
+                                        "need": {_chain_str(c): v for c, v in bneed.items()},
+                                        "batches": int(tr.get("batches", 0)),
+                                        "dropped": [_chain_str(c) for c in tr.get("dropped", ())]})
         else:
             med = {c: float(np.median(v)) for c, v in bs.items() if len(v)}
             _chain_lock(tkey, tr, w, med)
