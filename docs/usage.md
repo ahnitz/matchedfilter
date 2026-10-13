@@ -262,6 +262,27 @@ peaks use ordinary NumPy storage.
 The [CPU/GPU contract](https://github.com/ahnitz/matchedfilter/blob/main/docs/cpu-gpu-parity.md)
 describes buffer ownership, cache lifetime and interoperability limits.
 
+## Measured choices and reproducibility
+
+Some choices are made by timing on the machine at hand: the block size of a
+filter bank, the hierarchical gate chain, the CPU narrow screen, the fused
+GPU batch shape, and whether single-template calls run on the GPU or a CPU
+core. Each follows one rule: the cost model's choice stands unless another
+candidate is faster beyond the measurement noise.
+
+| Variable | Default | Effect |
+|---|---|---|
+| `MF_COST_FILE` | unset | A JSON file that keeps measured costs and every locked choice. A machine then measures each once, and later processes reuse it, so repeated runs make the same choices. The block-size trial, which costs a process its warm-up, runs only when this is set. |
+| `MF_AUTOTUNE` | `1` | `0` skips timed trials and keeps the cost model's choices (deterministic given a populated `MF_COST_FILE`). |
+| `MF_AUTOTUNE_LOG` | `0` | `1` prints each trial's samples and decisions to stderr. |
+| `MF_GPU_TIMING` | `0` | `1` records device time per kernel (for profiling; it adds overhead). |
+| `MF_SEGMENT_REPLAY` | `1` | Vulkan: a recurring job set (`SegmentPlan`) replays its recorded submissions; `0` runs it as ordinary batches. |
+
+Other `MF_*` variables force a single candidate for measurement (for example
+`MF_CHAIN_FORCE`, `MF_GPU_FUSE_INTERLEAVE`, `MF_VK_BAND_FORWARD`). They are not
+needed in normal use, and forcing one bypasses the choice it would otherwise
+measure.
+
 ## Platform checks
 
 Linux x86-64, Linux arm64 and macOS arm64 are exercised in CI. That coverage
