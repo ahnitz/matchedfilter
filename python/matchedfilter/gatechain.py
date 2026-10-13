@@ -1222,11 +1222,10 @@ def observe_steady(state, value, on_reopen):
     if not steady_disagrees(st, state["median"], state["winner"]):
         return False
     state["rechecked"] = True
-    import os, sys
-    if os.environ.get("MF_AUTOTUNE_LOG", "0") != "0":
-        print("[MF_AUTOTUNE] RECHECK winner %s steady %s trial medians %s" % (
-            state.get("winner"), ["%.3g" % x for x in st[-RECHECK_N:]],
-            {k: "%.3g" % v for k, v in state["median"].items()}), file=sys.stderr, flush=True)
+    from . import _log_autotune
+    _log_autotune("RECHECK winner %s steady %s trial medians %s", state.get("winner"),
+                  ["%.3g" % x for x in st[-RECHECK_N:]],
+                  {k: "%.3g" % v for k, v in state["median"].items()})
     on_reopen()
     return True
 
