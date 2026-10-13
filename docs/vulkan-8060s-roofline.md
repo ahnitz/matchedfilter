@@ -465,7 +465,7 @@ Today every forward of a chunk runs before a global barrier and all coarse0 afte
 the two never overlap. This is a recording-order change in `_FusedBatch.flush`, and it
 should capture most of the max(compute, memory) benefit.
 
-### Interleaved fused chunks (measured candidate, off by default)
+### Interleaved fused chunks (a measured choice per device and batch shape)
 `_FusedBatch.flush` can run the chunk's second half k phases behind its first
 (`MF_GPU_FUSE_INTERLEAVE=k`). With k = 3, forward(B) shares a barrier interval with
 coarse0(A).
