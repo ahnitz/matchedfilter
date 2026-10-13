@@ -291,7 +291,14 @@ def test_a_fresh_file_locks_the_block_size_within_a_bound(monkeypatch, tmp_path)
     L = 1 << 15
     data = ((rng.standard_normal(L) + 1j * rng.standard_normal(L)) / np.sqrt(2)).astype(np.complex64)
     nr = len(bank._layouts)
-    bound = nr * (1 + td._BLOCK_TRIAL_MAX) + 2      # every rank settled, contests to the cap
+    # The trial's own schedule, worst case: every rank settles once and takes its first
+    # samples; then each unclear round (gatechain.measured_choice) asks one more sample of the
+    # model's rank and of the best, alternating, so each costs a settle batch and a sample
+    # batch for both -- up to _BLOCK_TRIAL_MAX samples. Timing noise decides how many rounds
+    # run (a loaded shared runner reached the third), so the bound must allow all of them.
+    need = td._BLOCK_TRIALS._base_need()
+    rounds = max(0, td._BLOCK_TRIAL_MAX - need)
+    bound = nr * (1 + need) + 2 * 2 * rounds + 2
     for i in range(bound):
         TimeDomainFilterBank.filter_series_many([(bank, data, {})])
         if bank._layouts is None:
