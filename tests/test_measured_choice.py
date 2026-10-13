@@ -256,3 +256,48 @@ def test_single_template_device_unclear_contest_keeps_the_banks_device(monkeypat
     td, _, _, state = _single_contest(monkeypatch, tmp_path, lambda side, i: seq[side][i])
     assert state["winner"] == "gpu"
     assert len(state["gpu"]) - 1 == td._SINGLE_TRIALS_MAX
+
+
+def test_a_lock_the_model_kept_is_not_reopened_by_its_own_steady_state():
+    """The model's candidate stood because the contest was unclear, with a worse trial median
+    than the runner-up. Steady samples like its own trial median must not reopen it (they
+    did, against the runner-up's median: the L40S two-process flake)."""
+    st = {"winner": "model", "median": {"model": 2.23e-10, "other": 1.76e-10}}
+    for _ in range(3 * gc.RECHECK_N):
+        assert not gc.observe_steady(st, 2.3e-10, lambda: None)
+    st2 = {"winner": "model", "median": {"model": 2.23e-10, "other": 1.76e-10}}
+    got = [gc.observe_steady(st2, 3.2e-10, lambda: None) for _ in range(gc.RECHECK_N)]
+    assert got[-1]                                         # 43% over its own: a real mistake
+
+
+def test_a_stored_lock_decides_every_plan_of_the_key(monkeypatch, tmp_path):
+    """The first plan of the key cannot run the locked chain (not in its feasible set): it runs
+    its model's chain, opens no trial, and every later plan of the key still adopts the
+    lock. Before, the first plan cached "no lock" and the others re-trialled."""
+    monkeypatch.setenv("MF_COST_FILE", str(tmp_path / "costs.json"))
+    mf.clear_autotune_cache()
+    shape_a, shape_b = [300, 400, 500, 600] * 4, [700, 800, 850, 880] * 4
+    pb = _hier_plan(shape_b)                              # learn B's key and feasible chains
+    key_b = next(iter(mf._CHAIN_CHOICE))
+    model_b, shortlist_b, feasible_b = mf._CHAIN_CHOICE[key_b]
+    lock = next((c for c in feasible_b if c != model_b), None)
+    if lock is None:
+        pytest.skip("one feasible chain only")
+    pa = _hier_plan(shape_a)
+    key_a = next(k for k in mf._CHAIN_CHOICE if k != key_b)
+    tk = _tkey(pb)
+    assert _tkey(pa) == tk                                # one lock key, two group shapes
+    model_a, shortlist_a, feasible_a = mf._CHAIN_CHOICE[key_a]
+    mf._store_chain_lock(tk, lock)                         # what an earlier process locked
+    # A new process in which shape A's feasible set lacks the locked chain:
+    choices = {key_a: (model_a, tuple(c for c in shortlist_a if c != lock) or (model_a,),
+                       tuple(c for c in feasible_a if c != lock)),
+               key_b: (model_b, shortlist_b, feasible_b)}
+    mf.clear_autotune_cache()
+    monkeypatch.setattr(mf, "_CHAIN_CHOICE", dict(choices))
+    qa = _hier_plan(shape_a)                               # first plan of the key: cannot run it
+    assert qa._chain_trial is None                         # a locked key opens no trial
+    assert tuple(qa._chain) == tuple(choices[key_a][0])    # its model's chain
+    qb = _hier_plan(shape_b)                               # a later plan of the key
+    assert tuple(qb._chain) == tuple(lock)
+    assert qb._chain_trial is None
