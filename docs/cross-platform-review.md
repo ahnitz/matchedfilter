@@ -492,6 +492,19 @@ and third gives a trivial conflict there: keep both sides.
 6. Tables the builds already know (`_COARSE_TILE_T` x3) read from the build manifests (§3).
 7. One roofline bandwidth basis: a measured device copy on every GPU (§2.9).
 8. One `zero2d` kernel for every backend's strided clears (§2.7).
+9. Coverage that runs only on dev boxes: `test_regression_suite.py`, `test_replica_middle_critical.py`,
+   `test_replica_bandlimited.py` and `test_challenger_m3_adversarial.py` read three-level banks
+   from absolute paths under `/home/ahnitz/.../scale100k/` (and need h5py, which `.[test]` does
+   not install). They skip correctly in CI, so CI never runs them. Move them to a fetchable
+   fixture (a pinned release asset, downloaded and cached by a fixture that skips offline) or to
+   a small bank generated in the test, and make h5py an optional test dependency.
+10. Checked on merged main 5c64b7ed, CI-style (clean venv with numpy + pytest, installed
+    package, no GPU, no `MF_*` variables, default/AVX2/SSE4 and the sdist): no test needs
+    `MF_COST_FILE` in the environment (those that use it make one under `tmp_path`), none
+    imports scipy, h5py or pyfftw unconditionally, and the new tests pass CI-style. The two
+    failures found (`test_reproducible_choices` prepends the source tree, which has no built
+    `_core` in CI; `test_device_followups_equal_the_host_rule` counts a software Vulkan device)
+    went to the CI fix agent.
 
 ## 7. Areas other agents own (not touched)
 
