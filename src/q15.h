@@ -63,6 +63,53 @@ static inline size_t ap_q15_scratch_bytes(size_t N, int QW){
   return (size_t)2 * (M1 + 1) * M2 * QW * sizeof(int16_t);
 }
 
+/* Bytes one screen batch keeps hot: the scratch and the template group (tr, ti: N x QW
+   int16 each). */
+static inline size_t ap_q15_batch_bytes(size_t N, int QW){
+  return ap_q15_scratch_bytes(N, QW) + (size_t)2 * N * QW * sizeof(int16_t);
+}
+
+/* This CPU's L1 data cache, from the OS: sysconf, else Linux sysfs (the level-1 Data
+   cache entry), else macOS sysctl. 0 when the OS does not say. */
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+#if defined(__APPLE__)
+#include <sys/sysctl.h>
+#endif
+static inline size_t ap_l1d_bytes(void){
+  static long v = -2;
+  if(v == -2){
+    long r = -1;
+#ifdef _SC_LEVEL1_DCACHE_SIZE
+    r = sysconf(_SC_LEVEL1_DCACHE_SIZE);
+#endif
+    for(int idx = 0; r <= 0 && idx < 4; idx++){
+      char path[96], buf[32] = {0};
+      snprintf(path, sizeof path, "/sys/devices/system/cpu/cpu0/cache/index%d/level", idx);
+      FILE *f = fopen(path, "r"); int lvl = 0;
+      if(!f) break;
+      if(fscanf(f, "%d", &lvl) != 1) lvl = 0;
+      fclose(f);
+      snprintf(path, sizeof path, "/sys/devices/system/cpu/cpu0/cache/index%d/type", idx);
+      f = fopen(path, "r");
+      if(f){ if(!fgets(buf, sizeof buf, f)) buf[0] = 0; fclose(f); }
+      if(lvl != 1 || strncmp(buf, "Data", 4)) continue;
+      snprintf(path, sizeof path, "/sys/devices/system/cpu/cpu0/cache/index%d/size", idx);
+      f = fopen(path, "r");
+      if(f){ unsigned long kb = 0; char unit = 0;
+             if(fscanf(f, "%lu%c", &kb, &unit) >= 1) r = (long)kb * (unit == 'M' ? 1024L * 1024 : 1024L);
+             fclose(f); }
+    }
+#if defined(__APPLE__)
+    if(r <= 0){ unsigned long long b = 0; size_t len = sizeof b;
+                if(!sysctlbyname("hw.l1dcachesize", &b, &len, NULL, 0) && b) r = (long)b; }
+#endif
+    v = r > 0 ? r : 0;
+  }
+  return (size_t)v;
+}
+
 /* Four-step twiddles W_N^(e1*k2) in Q15, laid out [k2][e1] as pass 2 reads them. */
 typedef struct { int16_t re[1024], im[1024]; } ap_q15_twiddles;
 __attribute__((unused)) static ap_q15_twiddles ap_q15_tw_tab[5];
