@@ -2844,10 +2844,13 @@ class SegmentPlan:
                     fine = h.result()
                     if followup is None:
                         return fine
-                    # On the main queue, behind whatever was submitted since (the next segment's
-                    # replay): a side queue let them read inputs another queue's work had not
-                    # made visible (test_device_followups_equal_the_host_rule failed 3 in 10).
-                    return fine, self._followups(jobs, fine, followup)
+                    # On a side queue: on the main one they wait behind the next segment's
+                    # replay, already queued, and the host waits with them -- host and device
+                    # then run in series (replay ladder: wall 20.1 -> 15.5 ms/segment). They need
+                    # only this segment, finished (h waited for it). The failures once blamed on
+                    # the side queue (test_device_followups_equal_the_host_rule, 3 in 10) were
+                    # the reused-output race fixed in 127451c4: 0 in 20 with it.
+                    return fine, self._followups(jobs, fine, followup, side_queue=True)
                 return _SegmentResult(collect)
             self._trace = None
         if prelude is not None:
