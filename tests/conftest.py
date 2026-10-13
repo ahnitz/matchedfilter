@@ -224,3 +224,26 @@ def interleaved_speedup(slow, fast, reps=15):
         ts.append(pair[0])
         tf.append(pair[1])
     return statistics.median(ratios), statistics.median(ts), statistics.median(tf)
+
+
+# --- say which test failed where the public CI API can read it ---------------
+def pytest_terminal_summary(terminalreporter):
+    """On GitHub Actions, emit one ::error annotation per failed test.
+
+    A run's logs need a signed-in download, but its check-run annotations are
+    public. Without this a failing job says only "exit code 1" there; with it,
+    the failing test and the last lines of its message are readable by anyone
+    looking at the run. Annotations are capped per step, so only the first
+    few failures are named -- enough to start from.
+    """
+    import os
+    if os.environ.get("GITHUB_ACTIONS") != "true":
+        return
+    reports = (terminalreporter.stats.get("failed", []) +
+               terminalreporter.stats.get("error", []))
+    for rep in reports[:10]:
+        text = str(getattr(rep, "longreprtext", "") or rep.longrepr or "")
+        tail = "\n".join(text.strip().splitlines()[-12:])
+        tail = tail.replace("%", "%25").replace("\r", "").replace("\n", "%0A")
+        title = rep.nodeid.replace(",", ";").replace("::", " ")[:200]
+        terminalreporter.write_line("::error title=%s::%s" % (title, tail[:3000]))
