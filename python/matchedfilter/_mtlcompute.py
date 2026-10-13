@@ -435,12 +435,14 @@ class _FusedBatch:
     a result from it is waited on, or at close. Encoders are always ended before the
     methods that open them return, so contexts never interleave inside one encoder."""
 
-    #: Submissions per command buffer; MF_GPU_FUSE_CHUNK overrides (shared with Vulkan).
-    #: Metal commits are cheap and the device sat idle while the host filled a chunk:
-    #: M2 ladder (bank3, H1) 100.8 ms per segment at 16, 95.8 at 4, 92.6 at 2, 93.6 at 1;
-    #: with --pipeline 110.0 at 16, 96.9 at 1. Committing on device idle (status) instead,
-    #: 95.7. So 2.
-    chunk = int(__import__("os").environ.get("MF_GPU_FUSE_CHUNK", "2"))
+    #: Submissions per command buffer: the model's value of a measured choice
+    #: (time_domain._FUSE_CHUNK, shared with Vulkan: per device, by the shared rule, kept in
+    #: MF_COST_FILE; dev.fuse_chunk holds the device's current value). MF_GPU_FUSE_CHUNK
+    #: forces it. Metal commits are cheap and the device sat idle while the host filled a
+    #: chunk: M2 ladder (bank3, H1) 100.8 ms per segment at 16, 95.8 at 4, 92.6 at 2, 93.6
+    #: at 1; with --pipeline 110.0 at 16, 96.9 at 1. Committing on device idle (status)
+    #: instead, 95.7. So 2.
+    chunk = 2
 
     def __init__(self, dev):
         self.dev, self.cmd, self.count = dev, None, 0
@@ -482,7 +484,7 @@ class _FusedBatch:
         submission waits right away, so it is due now)."""
         self._release_holder(ctx)
         self.count += 1
-        if not async_submit or (self.count >= self.chunk and not self.holders):
+        if not async_submit or (self.count >= fuse_chunk(self.dev) and not self.holders):
             self.flush()
 
     def dropped(self, ctx):
@@ -505,6 +507,16 @@ class _FusedBatch:
         self.untimed.add(cmd)
         self.dev.o.call(cmd, b"commit", restype=None)
         self.dev.o.call(cmd, b"release", restype=None)
+
+
+def fuse_chunk(dev):
+    """Submissions per command buffer on dev: MF_GPU_FUSE_CHUNK when set, else the device's
+    measured choice (time_domain._FUSE_CHUNK), else the model's (_FusedBatch.chunk)."""
+    import os
+    forced = os.environ.get("MF_GPU_FUSE_CHUNK")
+    if forced:
+        return max(1, int(forced))
+    return getattr(dev, "fuse_chunk", None) or _FusedBatch.chunk
 
 
 def fused():

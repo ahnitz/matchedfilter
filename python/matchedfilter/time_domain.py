@@ -495,6 +495,132 @@ def _bank_calibrating(bank):
     return False
 
 
+#: Fused-batch chunk sizes (submissions per command buffer) a device is trialled at; the
+#: backend's own default (_FusedBatch.chunk) is the model and is always a candidate.
+_FUSE_CHUNK_CANDIDATES = (2, 16)
+#: Batches a chunk runs after a switch before its batches are samples (its first batch
+#: records the fused buffers of the new cut), samples per candidate, and the cap an unclear
+#: contest samples to before the model's chunk stands.
+_FUSE_CHUNK_WARM = 1
+_FUSE_CHUNK_SAMPLES = 4
+_FUSE_CHUNK_CAP = 8
+
+
+class _FuseChunkTrials:
+    """The fused-batch chunk as a measured choice, one per GPU device, for every backend with
+    fused batches (Vulkan, Metal: their fused() protocol).
+
+    Which chunk is best is not a device property: a smaller chunk starts the device sooner
+    while the host prepares the rest, a larger one puts more items in each phase barrier and
+    makes fewer submissions. The M2 is fastest at 2 (16: +9%), the 8060S at 16 (2: +10-25%
+    pipelined). So it is measured: the last of the ordered calibrations (after the block-size
+    and chain trials of the batch's banks lock), on whole batches timed from submission to
+    the last result per unit of work -- what a search pays -- and decided by the shared rule
+    (gatechain.measured_choice) with the backend's default as the model. The lock is kept in
+    MF_COST_FILE ('fuse-chunk|backend|device') and every later process reuses it; trials run
+    only where it can be kept, as block-size trials. MF_GPU_FUSE_CHUNK forces a chunk."""
+
+    def __init__(self):
+        self.state = {}
+
+    @staticmethod
+    def devices(jobs):
+        """{key: (device state, model chunk)} of the fused-batch GPU devices the jobs run on."""
+        out = {}
+        for bank, _, kw in jobs:
+            if (kw or {}).get("template_index") is not None:
+                continue
+            for g in getattr(bank, "_groups", ()) or ():
+                p = getattr(g, "_plan", None)
+                ctx = getattr(p, "_gpu", None) if p is not None else None
+                dev = getattr(ctx, "_device_state", None)
+                if dev is None:
+                    continue
+                mod = sys.modules.get(type(ctx).__module__)
+                fb = getattr(mod, "_FusedBatch", None)
+                if fb is None or not hasattr(mod, "fuse_chunk"):
+                    continue
+                key = "fuse-chunk|%s|%s" % (type(ctx).__module__.rsplit(".", 1)[-1].lstrip("_"),
+                                            getattr(dev, "index", 0))
+                out.setdefault(key, (dev, int(fb.chunk)))
+        return out
+
+    def _st(self, key, model):
+        st = self.state.get(key)
+        if st is None:
+            from . import gatechain
+            held = gatechain.stored_choice(key)
+            cands = tuple(sorted(set(_FUSE_CHUNK_CANDIDATES) | {model}))
+            st = self.state[key] = dict(
+                model=model, winner=int(held) if isinstance(held, int) else None,
+                samples={c: [] for c in cands}, need={c: _FUSE_CHUNK_SAMPLES for c in cands},
+                current=None, run=0, batches=0)
+        return st
+
+    def begin(self, jobs, busy):
+        """Set every device's chunk for this batch; returns [(key, chunk, settled)] of the
+        devices whose batch is a trial batch. busy: another trial of the batch is open."""
+        import os
+        from . import _autotune_enabled, gatechain
+        devs = self.devices(jobs)
+        if not devs or os.environ.get("MF_GPU_FUSE_CHUNK"):
+            return []
+        out = []
+        for key, (dev, model) in devs.items():
+            st = self._st(key, model)
+            if st["winner"] is not None:
+                dev.fuse_chunk = st["winner"]
+                continue
+            if busy or not _autotune_enabled() or gatechain._cost_file() is None:
+                dev.fuse_chunk = st["model"]
+                continue
+            # Candidates in turn, each for its warm-up and its samples in a row.
+            c = next((c for c in st["samples"] if len(st["samples"][c]) < st["need"][c]),
+                     st["current"] or st["model"])
+            st["run"] = st["run"] + 1 if st["current"] == c else 1
+            st["current"] = c
+            dev.fuse_chunk = c
+            out.append((key, c, st["run"] > _FUSE_CHUNK_WARM))
+        return out
+
+    def end(self, trials, value):
+        """One batch's time per unit of work for the devices begin() put on a trial chunk."""
+        from . import gatechain
+        for key, c, settled in trials:
+            st = self.state.get(key)
+            if st is None or st["winner"] is not None:
+                continue
+            st["batches"] += 1
+            if settled:
+                st["samples"][c].append(float(value))
+            budget = len(st["samples"]) * (_FUSE_CHUNK_WARM + _FUSE_CHUNK_CAP) + 2
+            if any(len(st["samples"][k]) < st["need"][k] for k in st["samples"]) \
+                    and st["batches"] < budget:
+                continue
+            smp = {k: v for k, v in st["samples"].items() if v}
+            w, more = (gatechain.measured_choice(smp, st["model"], _FUSE_CHUNK_CAP)
+                       if st["model"] in smp else (st["model"], {}))
+            if w is None and st["batches"] < budget:
+                st["need"].update(more)
+                continue
+            st["winner"] = int(w if w is not None else st["model"])
+            gatechain.store_choice(key, st["winner"])
+            from . import _log_autotune
+            _log_autotune("FUSE-CHUNK %s -> %d  median %s", key, st["winner"],
+                          {k: "%.3g" % float(np.median(v)) for k, v in smp.items()})
+
+    def open(self, jobs):
+        """Whether a device of the jobs is in a chunk trial (SegmentPlan runs them batched)."""
+        for key, (dev, model) in self.devices(jobs).items():
+            st = self.state.get(key)
+            if st is not None and st["winner"] is None and st["current"] is not None:
+                return True
+        return False
+
+
+_FUSE_CHUNK = _FuseChunkTrials()
+
+
 def _trial_begin(jobs):
     """Put every trialling bank of the batch on its key's current rank (or lock it, once its key
     has a winner). Returns [(key, rank, banks, settled, steady)]: banks still trialling, and
@@ -532,12 +658,17 @@ def _trial_begin(jobs):
     for key, bs in locked.items():
         if _BLOCK_TRIALS.winner(key) is not None and not any(_bank_calibrating(b) for b in bs):
             plan.append((key, _BLOCK_TRIALS.winner(key), bs, True, True))
-    if not plan and not chains:
+    # The fused chunk is trialled last: only while no block-size or chain trial of the batch
+    # is open and no bank calibrates (their batches switch layouts and kernels).
+    busy = (any(not st for *_, st in plan) or any(not st for *_, st in chains)
+            or any(_bank_calibrating(b) for b, _, _ in jobs))
+    chunks = _FUSE_CHUNK.begin(jobs, busy)
+    if not plan and not chains and not chunks:
         return None
     import time
     work = sum(len(b.filters_f) * int(np.asarray(x).size) for b, x, kw in jobs
                if (kw or {}).get("template_index") is None)
-    return (time.perf_counter(), plan, work, chains)
+    return (time.perf_counter(), plan, work, chains, chunks)
 
 
 #: Batches a GPU chain trial runs a candidate before it takes samples of it: after a switch
@@ -611,8 +742,10 @@ def _trial_end(tok):
     import time
     if tok is None:
         return
-    t0, plan, work, chains = tok
+    t0, plan, work, chains, chunks = tok
     dt = time.perf_counter() - t0
+    if chunks and work > 0:
+        _FUSE_CHUNK.end(chunks, dt / work)
     from . import _chain_trial_batch, _chain_trial_pending, _chain_steady
     for tk, c, plans, settled, steady in chains:
         if steady:
@@ -2670,7 +2803,10 @@ class _VkReplay:
 
 
 def _in_chain_trial(jobs):
-    """Whether a plan of the jobs' banks is in a GPU chain trial."""
+    """Whether a plan of the jobs' banks is in a GPU chain trial, or their device in a fused
+    chunk trial (both are judged on whole filter_series_many batches)."""
+    if _FUSE_CHUNK.open(jobs):
+        return True
     for bank, _, kw in jobs:
         for g in bank._groups:
             p = getattr(g, "_plan", None)

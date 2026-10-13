@@ -550,13 +550,17 @@ class _FusedBatch:
 
     #: Submissions per fused command buffer. The device starts on a chunk while the host
     #: prepares the next: fusing a whole segment into one buffer left the GPU idle through
-    #: all the host's preparation. MF_GPU_FUSE_CHUNK overrides.
-    chunk = int(os.environ.get("MF_GPU_FUSE_CHUNK", "16"))
+    #: all the host's preparation. This is the model's value of a measured choice
+    #: (time_domain._FUSE_CHUNK: per device, by the shared rule, kept in MF_COST_FILE;
+    #: dev.fuse_chunk holds the device's current value). dev2 8060S, pipelined ladder:
+    #: 16 beats 2 by 10-25% (more items per phase barrier, fewer submissions).
+    #: MF_GPU_FUSE_CHUNK forces it.
+    chunk = 16
 
     def add(self, ctx, commands, fence):
         self.items.append((ctx, [getattr(c, "value", c) for c in commands]))
         ctx.__dict__.setdefault("_collected", {})[getattr(fence, "value", fence)] = self
-        if len(self.items) >= self.chunk and self.dev.collector is self:
+        if len(self.items) >= fuse_chunk(self.dev) and self.dev.collector is self:
             nxt = _FusedBatch(self.dev)
             self.dev.collector = nxt
             self.flush()
@@ -731,6 +735,15 @@ class _FusedBatch:
                     gatechain.store_choice(_interleave_key(dev, shape), int(st["k"]))
                     # The losers' recordings are never submitted again; the cache's LRU
                     # retires them (another batch may still be executing one now).
+
+
+def fuse_chunk(dev):
+    """Submissions per fused command buffer on dev: MF_GPU_FUSE_CHUNK when set, else the
+    device's measured choice (time_domain._FUSE_CHUNK), else the model's (_FusedBatch.chunk)."""
+    forced = os.environ.get("MF_GPU_FUSE_CHUNK")
+    if forced:
+        return max(1, int(forced))
+    return getattr(dev, "fuse_chunk", None) or _FusedBatch.chunk
 
 
 def fused():

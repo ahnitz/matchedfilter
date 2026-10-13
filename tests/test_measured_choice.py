@@ -212,3 +212,72 @@ def test_a_full_trial_locks_within_its_batch_count(monkeypatch, tmp_path):
     w, batches = _drive_batches(tk, {a: 1.0e-12, b: 1.3e-12, c: 0.8e-12})
     assert w == c                                          # the measured best
     assert batches <= 3 * (2 + mf._CHAIN_BATCH_TRIALS) + 1
+
+
+def _fake_fused_jobs(monkeypatch, model=16, index=0):
+    """One job on a fake GPU backend with the fused-batch protocol (_FusedBatch, fuse_chunk)."""
+    import sys
+    import types
+    from types import SimpleNamespace
+    mod = types.ModuleType("mf_fake_fused")
+
+    class _FusedBatch:
+        chunk = model
+    mod._FusedBatch = _FusedBatch
+    mod.fuse_chunk = lambda dev: getattr(dev, "fuse_chunk", None) or _FusedBatch.chunk
+    Ctx = type("Context", (), {"__module__": "mf_fake_fused"})
+    monkeypatch.setitem(sys.modules, "mf_fake_fused", mod)
+    dev = SimpleNamespace(index=index)
+    ctx = Ctx()
+    ctx._device_state = dev
+    bank = SimpleNamespace(_groups=[SimpleNamespace(_plan=SimpleNamespace(_gpu=ctx))])
+    return [(bank, None, {})], dev
+
+
+def _drive_chunk(trials, jobs, dev, timer, batches=60, busy=False):
+    k = {}
+    for _ in range(batches):
+        tr = trials.begin(jobs, busy)
+        c = dev.fuse_chunk
+        trials.end(tr, timer(c, k.setdefault(c, 0)))
+        k[c] += 1
+    return k
+
+
+def test_fuse_chunk_trial_locks_a_clear_win_and_persists(monkeypatch, tmp_path):
+    """The fused-batch chunk is a measured choice per device: a chunk clearly faster than the
+    backend's default (the model) locks, is stored, and a new process uses it untimed."""
+    from matchedfilter import time_domain as td
+    monkeypatch.setenv("MF_COST_FILE", str(tmp_path / "costs.json"))
+    monkeypatch.setenv("MF_AUTOTUNE", "1")
+    monkeypatch.delenv("MF_GPU_FUSE_CHUNK", raising=False)
+    jobs, dev = _fake_fused_jobs(monkeypatch, model=16)
+    t = td._FuseChunkTrials()
+    _drive_chunk(t, jobs, dev, lambda c, i: (0.9 if c == 2 else 1.0) * (1 + 0.005 * (i % 3)))
+    (st,) = t.state.values()
+    assert st["winner"] == 2 and dev.fuse_chunk == 2
+    assert all(len(v) >= td._FUSE_CHUNK_SAMPLES for v in st["samples"].values())
+    dev.fuse_chunk = None
+    t2 = td._FuseChunkTrials()                     # a new process: the stored chunk, no trial
+    assert t2.begin(jobs, False) == [] and dev.fuse_chunk == 2
+
+
+def test_fuse_chunk_trial_noise_keeps_the_model(monkeypatch, tmp_path):
+    """A 'win' inside the noise samples to the cap, then the backend's default stands; the
+    trial does not run while another trial of the batch is open, nor without a cost file."""
+    from matchedfilter import time_domain as td
+    monkeypatch.setenv("MF_COST_FILE", str(tmp_path / "costs.json"))
+    monkeypatch.setenv("MF_AUTOTUNE", "1")
+    monkeypatch.delenv("MF_GPU_FUSE_CHUNK", raising=False)
+    jobs, dev = _fake_fused_jobs(monkeypatch, model=16)
+    noise = {2: [5.0, 0.8, 0.85, 1.3, 0.82, 1.35, 1.2, 1.3, 1.25, 1.1],     # first: warm-up
+             16: [5.0, 1.3, 0.8, 1.25, 0.85, 1.2, 0.95, 1.05, 1.1, 1.0]}
+    t = td._FuseChunkTrials()
+    k = _drive_chunk(t, jobs, dev, lambda c, i: noise[c][min(i, 9)])
+    (st,) = t.state.values()
+    assert st["winner"] == 16 and len(st["samples"][2]) > td._FUSE_CHUNK_SAMPLES
+    t3 = td._FuseChunkTrials()
+    jobs3, dev3 = _fake_fused_jobs(monkeypatch, model=2, index=1)   # another device
+    assert t3.begin(jobs3, True) == [] and dev3.fuse_chunk == 2       # busy: the model
+    monkeypatch.delenv("MF_COST_FILE")
+    assert t3.begin(jobs3, False) == [] and dev3.fuse_chunk == 2      # no file: the model
