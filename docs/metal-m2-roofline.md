@@ -8,6 +8,26 @@ average 2-4 from system daemons), warm, with outputs checked against the CPU.
 Sections 1-8 are phase 1, measured on the old generic bench data. **Phase 2 (section 0) is on
 realistic data and supersedes their bench numbers.**
 
+## 0d. Where Metal is parked (2026-10-13): ~92 ms per segment, 34.4%
+
+After the fused-batch chunk (main d09e07be): GPU busy 90%. Device time per segment
+against the roofline, from kernel replays of all fine banks (x2 detectors) and the
+in-ladder middle totals:
+
+| stage | device ms | roofline ms | measured ceiling of the remaining levers |
+|---|---:|---:|---|
+| tier-0 gate (coarse16p2t2) | 40.8 | 16.1 | FFT alone 66% of peak; transpose 2.7%, fp16 conversion 1.6%, input-side energy / overflow skip / fp32 / t4 / twiddle table all lost or flat |
+| middle (full_series_8192) | ~13.5 | 3.9 | stores 2.15 of 6.06 ms per call, at bandwidth; K pairs per group flat; n=4096 72 ms (4x pairs) |
+| fine forward (forwardTier0) | 11.5 | 7.6 | fusing it into tier 0: band reads 0.3 ms + band writes <=1.4 ms per segment |
+| tier 1 (refine_512, gate-only) | 7.2 | 1.7 | loads 2.7, transform 3.7 ms: data reuse <=1.3, a faster transform ~0.5-1 |
+| refine (refine_2048) | 5.2 | 2.3 | loads 1.5 (necessary), transform 2.7: <=1 |
+| recompute (listed + markBlocks) | 2.4 | - | - |
+| compaction | 1.6 | - | own-survivor listing in the gate: flat |
+| follow-ups (device) | ~2.3 | 0.2 | host-bound; message batching flat |
+
+Deletion bounds what each piece costs, not why the kernels stall; without GPU counters
+(no Xcode on the host) the epilogue and transform efficiency are not diagnosable here.
+
 ## 0c. Roofline fraction (2026-10-11, branch parity/metal-roofline)
 
 Metric: `tools/ladder.py --roofline` (python/matchedfilter/_roofline.py), bank3, H1 profiles,
