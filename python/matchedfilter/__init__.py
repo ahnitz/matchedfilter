@@ -392,8 +392,8 @@ class MatchedFilter:
             # counts itself, _vkcompute.read_dispatch_sparse): kept as the backend made it.
             return reader
 
-        def read():
-            r = reader()
+        def read(sort=True):
+            r = reader(sort=sort)
             shp = r.shape if isinstance(r, _SparsePeaks) else r[0].shape
             self._gpairs += shp[0] * shp[1]
             self._gtrig += gpu.last_refinements

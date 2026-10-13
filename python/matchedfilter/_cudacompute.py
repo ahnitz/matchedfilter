@@ -1239,7 +1239,7 @@ class Context(InputUploads):
                 if ncounts:
                     self._copy_d2h(host.ptr + out * 12, counts, 4 * ncounts, stream, "readback")
 
-            def collect():
+            def collect(sort=True):
                 self._sync(stream)
                 c = host.view(np.uint32, ncounts, offset=out * 12) if ncounts else None
                 return self._results(host, *shape), c
@@ -1262,7 +1262,9 @@ class Context(InputUploads):
                 self._copy_d2h(hp.ptr + coff, counts, 4 * ncounts, stream, "readback")
             self._copy_d2h(hp.ptr + loff, lst, cap * 16, stream, "readback")
 
-        def collect():
+        def collect(sort=True):
+            """sort=False: the records in the device's list order (a reader that sorts the
+            peaks itself, SegmentPlan's replay parse, skips the per-dispatch sort)."""
             from . import _SparsePeaks
             self._sync(stream)
             c = int(hp.view(np.uint32, 1)[0])
@@ -1274,8 +1276,8 @@ class Context(InputUploads):
                 self._copy_d2h(rec[cap:].ctypes.data, lst + cap * 16, (c - cap) * 16, stream,
                                "readback")
                 self._sync(stream)
-            k = np.argsort(rec[:, 0], kind="stable")
-            rec = rec[k]
+            if sort:
+                rec = rec[np.argsort(rec[:, 0], kind="stable")]
             val = rec[:, 2:4].copy().view(np.float32).view(np.complex64).reshape(-1)
             sp = _SparsePeaks(shape, rec[:, 0], rec[:, 1].view(np.int32), val)
             cts = hp.view(np.uint32, ncounts, offset=coff).copy() if ncounts else None
@@ -1406,8 +1408,8 @@ class Context(InputUploads):
         self._launch(hfunc, nd * nt, wg, params, stream=stream)
         collect = self._tail(bufs, out, (nd, nt, nbins), stream, sparse)
 
-        def readback():
-            return collect()[0]
+        def readback(sort=True):
+            return collect(sort)[0]
         readback.sparse_dev = getattr(locals().get("collect"), "sparse_dev", None)
         self._last_dispatch = readback        # SegmentPlan: the dispatch's result reader
         if async_submit:
@@ -1465,8 +1467,8 @@ class Context(InputUploads):
             self._launch(hfunc, (b - a) * nt, wg, params, stream=stream)
         collect = self._tail(bufs, out, (nd, nt, nb), stream, sparse)
 
-        def readback():
-            return collect()[0]
+        def readback(sort=True):
+            return collect(sort)[0]
         readback.sparse_dev = getattr(locals().get("collect"), "sparse_dev", None)
         self._last_dispatch = readback        # SegmentPlan: the dispatch's result reader
         if async_submit:
@@ -2001,8 +2003,8 @@ class Context(InputUploads):
                              float(raw_thr1) if cascade else None, band0, band1, nd, nt, ndp,
                              sparse, dsh is not None), stream, enqueue)
 
-        def readback():
-            res, counts = collect()
+        def readback(sort=True):
+            res, counts = collect(sort)
             self.last_refinements = int(counts[0])
             self.last_tier1_survivors = int(counts[1]) if cascade else int(counts[0])
             return res
@@ -2084,8 +2086,8 @@ class Context(InputUploads):
             bufs, n, nd, nt, nb, groups, offs, unit, (ppg, tile), cfn, cwg, band0, band1, c16, cb0, cascade,
             raw_thr, raw_thr1, binsize, t2, out, pairs, ng, sparse, stream))
 
-        def readback():
-            res, counts = collect()
+        def readback(sort=True):
+            res, counts = collect(sort)
             counts = counts.reshape(ng, 2)
             self.last_refinements = int(counts[:, 0].sum())
             self.last_tier1_survivors = int(counts[:, 1].sum()) if cascade else self.last_refinements
