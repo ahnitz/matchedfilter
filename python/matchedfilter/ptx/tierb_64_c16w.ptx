@@ -14,6 +14,114 @@
 .global .align 4 .u32 kSlangTorchTensorMaxDim = 5;
 .const .align 4 .u32 mf_c16_raw;
 // stg_0 has been demoted
+.global .align 4 .u32 _ZN21SlangCudaVectorTraitsI5bool2E6kWidthE = 2;
+.global .align 1 .u8 _ZN21SlangCudaVectorTraitsI5bool2E11kIsIntegralE = 1;
+.global .align 1 .u8 _ZN21SlangCudaVectorTraitsI5bool2E13kSupportsFmodE;
+.global .align 4 .u32 _ZN21SlangCudaVectorTraitsI5bool3E6kWidthE = 3;
+.global .align 1 .u8 _ZN21SlangCudaVectorTraitsI5bool3E11kIsIntegralE = 1;
+.global .align 1 .u8 _ZN21SlangCudaVectorTraitsI5bool3E13kSupportsFmodE;
+.global .align 4 .u32 _ZN21SlangCudaVectorTraitsI5bool4E6kWidthE = 4;
+.global .align 1 .u8 _ZN21SlangCudaVectorTraitsI5bool4E11kIsIntegralE = 1;
+.global .align 1 .u8 _ZN21SlangCudaVectorTraitsI5bool4E13kSupportsFmodE;
+.global .align 4 .u32 _ZN21SlangCudaVectorTraitsI4int2E6kWidthE = 2;
+.global .align 1 .u8 _ZN21SlangCudaVectorTraitsI4int2E11kIsIntegralE = 1;
+.global .align 1 .u8 _ZN21SlangCudaVectorTraitsI4int2E13kSupportsFmodE;
+.global .align 4 .u32 _ZN21SlangCudaVectorTraitsI4int3E6kWidthE = 3;
+.global .align 1 .u8 _ZN21SlangCudaVectorTraitsI4int3E11kIsIntegralE = 1;
+.global .align 1 .u8 _ZN21SlangCudaVectorTraitsI4int3E13kSupportsFmodE;
+.global .align 4 .u32 _ZN21SlangCudaVectorTraitsI4int4E6kWidthE = 4;
+.global .align 1 .u8 _ZN21SlangCudaVectorTraitsI4int4E11kIsIntegralE = 1;
+.global .align 1 .u8 _ZN21SlangCudaVectorTraitsI4int4E13kSupportsFmodE;
+.global .align 4 .u32 _ZN21SlangCudaVectorTraitsI5uint2E6kWidthE = 2;
+.global .align 1 .u8 _ZN21SlangCudaVectorTraitsI5uint2E11kIsIntegralE = 1;
+.global .align 1 .u8 _ZN21SlangCudaVectorTraitsI5uint2E13kSupportsFmodE;
+.global .align 4 .u32 _ZN21SlangCudaVectorTraitsI5uint3E6kWidthE = 3;
+.global .align 1 .u8 _ZN21SlangCudaVectorTraitsI5uint3E11kIsIntegralE = 1;
+.global .align 1 .u8 _ZN21SlangCudaVectorTraitsI5uint3E13kSupportsFmodE;
+.global .align 4 .u32 _ZN21SlangCudaVectorTraitsI5uint4E6kWidthE = 4;
+.global .align 1 .u8 _ZN21SlangCudaVectorTraitsI5uint4E11kIsIntegralE = 1;
+.global .align 1 .u8 _ZN21SlangCudaVectorTraitsI5uint4E13kSupportsFmodE;
+.global .align 4 .u32 _ZN21SlangCudaVectorTraitsI6short2E6kWidthE = 2;
+.global .align 1 .u8 _ZN21SlangCudaVectorTraitsI6short2E11kIsIntegralE = 1;
+.global .align 1 .u8 _ZN21SlangCudaVectorTraitsI6short2E13kSupportsFmodE;
+.global .align 4 .u32 _ZN21SlangCudaVectorTraitsI6short3E6kWidthE = 3;
+.global .align 1 .u8 _ZN21SlangCudaVectorTraitsI6short3E11kIsIntegralE = 1;
+.global .align 1 .u8 _ZN21SlangCudaVectorTraitsI6short3E13kSupportsFmodE;
+.global .align 4 .u32 _ZN21SlangCudaVectorTraitsI6short4E6kWidthE = 4;
+.global .align 1 .u8 _ZN21SlangCudaVectorTraitsI6short4E11kIsIntegralE = 1;
+.global .align 1 .u8 _ZN21SlangCudaVectorTraitsI6short4E13kSupportsFmodE;
+.global .align 4 .u32 _ZN21SlangCudaVectorTraitsI7ushort2E6kWidthE = 2;
+.global .align 1 .u8 _ZN21SlangCudaVectorTraitsI7ushort2E11kIsIntegralE = 1;
+.global .align 1 .u8 _ZN21SlangCudaVectorTraitsI7ushort2E13kSupportsFmodE;
+.global .align 4 .u32 _ZN21SlangCudaVectorTraitsI7ushort3E6kWidthE = 3;
+.global .align 1 .u8 _ZN21SlangCudaVectorTraitsI7ushort3E11kIsIntegralE = 1;
+.global .align 1 .u8 _ZN21SlangCudaVectorTraitsI7ushort3E13kSupportsFmodE;
+.global .align 4 .u32 _ZN21SlangCudaVectorTraitsI7ushort4E6kWidthE = 4;
+.global .align 1 .u8 _ZN21SlangCudaVectorTraitsI7ushort4E11kIsIntegralE = 1;
+.global .align 1 .u8 _ZN21SlangCudaVectorTraitsI7ushort4E13kSupportsFmodE;
+.global .align 4 .u32 _ZN21SlangCudaVectorTraitsI5char2E6kWidthE = 2;
+.global .align 1 .u8 _ZN21SlangCudaVectorTraitsI5char2E11kIsIntegralE = 1;
+.global .align 1 .u8 _ZN21SlangCudaVectorTraitsI5char2E13kSupportsFmodE;
+.global .align 4 .u32 _ZN21SlangCudaVectorTraitsI5char3E6kWidthE = 3;
+.global .align 1 .u8 _ZN21SlangCudaVectorTraitsI5char3E11kIsIntegralE = 1;
+.global .align 1 .u8 _ZN21SlangCudaVectorTraitsI5char3E13kSupportsFmodE;
+.global .align 4 .u32 _ZN21SlangCudaVectorTraitsI5char4E6kWidthE = 4;
+.global .align 1 .u8 _ZN21SlangCudaVectorTraitsI5char4E11kIsIntegralE = 1;
+.global .align 1 .u8 _ZN21SlangCudaVectorTraitsI5char4E13kSupportsFmodE;
+.global .align 4 .u32 _ZN21SlangCudaVectorTraitsI6uchar2E6kWidthE = 2;
+.global .align 1 .u8 _ZN21SlangCudaVectorTraitsI6uchar2E11kIsIntegralE = 1;
+.global .align 1 .u8 _ZN21SlangCudaVectorTraitsI6uchar2E13kSupportsFmodE;
+.global .align 4 .u32 _ZN21SlangCudaVectorTraitsI6uchar3E6kWidthE = 3;
+.global .align 1 .u8 _ZN21SlangCudaVectorTraitsI6uchar3E11kIsIntegralE = 1;
+.global .align 1 .u8 _ZN21SlangCudaVectorTraitsI6uchar3E13kSupportsFmodE;
+.global .align 4 .u32 _ZN21SlangCudaVectorTraitsI6uchar4E6kWidthE = 4;
+.global .align 1 .u8 _ZN21SlangCudaVectorTraitsI6uchar4E11kIsIntegralE = 1;
+.global .align 1 .u8 _ZN21SlangCudaVectorTraitsI6uchar4E13kSupportsFmodE;
+.global .align 4 .u32 _ZN21SlangCudaVectorTraitsI9longlong2E6kWidthE = 2;
+.global .align 1 .u8 _ZN21SlangCudaVectorTraitsI9longlong2E11kIsIntegralE = 1;
+.global .align 1 .u8 _ZN21SlangCudaVectorTraitsI9longlong2E13kSupportsFmodE;
+.global .align 4 .u32 _ZN21SlangCudaVectorTraitsI9longlong3E6kWidthE = 3;
+.global .align 1 .u8 _ZN21SlangCudaVectorTraitsI9longlong3E11kIsIntegralE = 1;
+.global .align 1 .u8 _ZN21SlangCudaVectorTraitsI9longlong3E13kSupportsFmodE;
+.global .align 4 .u32 _ZN21SlangCudaVectorTraitsI9longlong4E6kWidthE = 4;
+.global .align 1 .u8 _ZN21SlangCudaVectorTraitsI9longlong4E11kIsIntegralE = 1;
+.global .align 1 .u8 _ZN21SlangCudaVectorTraitsI9longlong4E13kSupportsFmodE;
+.global .align 4 .u32 _ZN21SlangCudaVectorTraitsI10ulonglong2E6kWidthE = 2;
+.global .align 1 .u8 _ZN21SlangCudaVectorTraitsI10ulonglong2E11kIsIntegralE = 1;
+.global .align 1 .u8 _ZN21SlangCudaVectorTraitsI10ulonglong2E13kSupportsFmodE;
+.global .align 4 .u32 _ZN21SlangCudaVectorTraitsI10ulonglong3E6kWidthE = 3;
+.global .align 1 .u8 _ZN21SlangCudaVectorTraitsI10ulonglong3E11kIsIntegralE = 1;
+.global .align 1 .u8 _ZN21SlangCudaVectorTraitsI10ulonglong3E13kSupportsFmodE;
+.global .align 4 .u32 _ZN21SlangCudaVectorTraitsI10ulonglong4E6kWidthE = 4;
+.global .align 1 .u8 _ZN21SlangCudaVectorTraitsI10ulonglong4E11kIsIntegralE = 1;
+.global .align 1 .u8 _ZN21SlangCudaVectorTraitsI10ulonglong4E13kSupportsFmodE;
+.global .align 4 .u32 _ZN21SlangCudaVectorTraitsI6float2E6kWidthE = 2;
+.global .align 1 .u8 _ZN21SlangCudaVectorTraitsI6float2E11kIsIntegralE;
+.global .align 1 .u8 _ZN21SlangCudaVectorTraitsI6float2E13kSupportsFmodE = 1;
+.global .align 4 .u32 _ZN21SlangCudaVectorTraitsI6float3E6kWidthE = 3;
+.global .align 1 .u8 _ZN21SlangCudaVectorTraitsI6float3E11kIsIntegralE;
+.global .align 1 .u8 _ZN21SlangCudaVectorTraitsI6float3E13kSupportsFmodE = 1;
+.global .align 4 .u32 _ZN21SlangCudaVectorTraitsI6float4E6kWidthE = 4;
+.global .align 1 .u8 _ZN21SlangCudaVectorTraitsI6float4E11kIsIntegralE;
+.global .align 1 .u8 _ZN21SlangCudaVectorTraitsI6float4E13kSupportsFmodE = 1;
+.global .align 4 .u32 _ZN21SlangCudaVectorTraitsI7double2E6kWidthE = 2;
+.global .align 1 .u8 _ZN21SlangCudaVectorTraitsI7double2E11kIsIntegralE;
+.global .align 1 .u8 _ZN21SlangCudaVectorTraitsI7double2E13kSupportsFmodE = 1;
+.global .align 4 .u32 _ZN21SlangCudaVectorTraitsI7double3E6kWidthE = 3;
+.global .align 1 .u8 _ZN21SlangCudaVectorTraitsI7double3E11kIsIntegralE;
+.global .align 1 .u8 _ZN21SlangCudaVectorTraitsI7double3E13kSupportsFmodE = 1;
+.global .align 4 .u32 _ZN21SlangCudaVectorTraitsI7double4E6kWidthE = 4;
+.global .align 1 .u8 _ZN21SlangCudaVectorTraitsI7double4E11kIsIntegralE;
+.global .align 1 .u8 _ZN21SlangCudaVectorTraitsI7double4E13kSupportsFmodE = 1;
+.global .align 4 .u32 _ZN21SlangCudaVectorTraitsI7__half2E6kWidthE = 2;
+.global .align 1 .u8 _ZN21SlangCudaVectorTraitsI7__half2E11kIsIntegralE;
+.global .align 1 .u8 _ZN21SlangCudaVectorTraitsI7__half2E13kSupportsFmodE;
+.global .align 4 .u32 _ZN21SlangCudaVectorTraitsI7__half3E6kWidthE = 3;
+.global .align 1 .u8 _ZN21SlangCudaVectorTraitsI7__half3E11kIsIntegralE;
+.global .align 1 .u8 _ZN21SlangCudaVectorTraitsI7__half3E13kSupportsFmodE;
+.global .align 4 .u32 _ZN21SlangCudaVectorTraitsI7__half4E6kWidthE = 4;
+.global .align 1 .u8 _ZN21SlangCudaVectorTraitsI7__half4E11kIsIntegralE;
+.global .align 1 .u8 _ZN21SlangCudaVectorTraitsI7__half4E13kSupportsFmodE;
 .global .align 4 .u32 _ZN15Slang_CUDA_WMMA13RegisterCountI6__halfLi16ELi16ELi16ELNS_9MatrixUseE0EE5valueE = 4;
 .global .align 4 .u32 _ZN15Slang_CUDA_WMMA13RegisterCountI6__halfLi16ELi16ELi16ELNS_9MatrixUseE1EE5valueE = 4;
 .global .align 4 .u32 _ZN15Slang_CUDA_WMMA13RegisterCountI6__halfLi16ELi16ELi16ELNS_9MatrixUseE2EE5valueE = 4;
@@ -4831,8 +4939,8 @@ $L__BB0_249:
 	setp.eq.s32 	%p542, %r1106, 1;
 	@%p542 bra 	$L__BB0_254;
 
-	fma.rn.f32 	%f642, %f759, %f759, 0f00000000;
-	fma.rn.f32 	%f643, %f760, %f760, %f642;
+	mul.f32 	%f642, %f760, %f760;
+	fma.rn.f32 	%f643, %f759, %f759, %f642;
 	sqrt.rn.f32 	%f61, %f643;
 	sqrt.rn.f32 	%f644, %f24;
 	mul.f32 	%f645, %f644, 0f3BB4154D;
@@ -4880,8 +4988,8 @@ $L__BB0_255:
 	setp.eq.s32 	%p545, %r1107, 1;
 	@%p545 bra 	$L__BB0_260;
 
-	fma.rn.f32 	%f649, %f761, %f761, 0f00000000;
-	fma.rn.f32 	%f650, %f762, %f762, %f649;
+	mul.f32 	%f649, %f762, %f762;
+	fma.rn.f32 	%f650, %f761, %f761, %f649;
 	sqrt.rn.f32 	%f73, %f650;
 	sqrt.rn.f32 	%f651, %f24;
 	mul.f32 	%f652, %f651, 0f3BB4154D;
@@ -4929,8 +5037,8 @@ $L__BB0_261:
 	setp.eq.s32 	%p548, %r1108, 1;
 	@%p548 bra 	$L__BB0_266;
 
-	fma.rn.f32 	%f656, %f763, %f763, 0f00000000;
-	fma.rn.f32 	%f657, %f764, %f764, %f656;
+	mul.f32 	%f656, %f764, %f764;
+	fma.rn.f32 	%f657, %f763, %f763, %f656;
 	sqrt.rn.f32 	%f85, %f657;
 	sqrt.rn.f32 	%f658, %f24;
 	mul.f32 	%f659, %f658, 0f3BB4154D;
@@ -4978,8 +5086,8 @@ $L__BB0_267:
 	setp.eq.s32 	%p551, %r1109, 1;
 	@%p551 bra 	$L__BB0_272;
 
-	fma.rn.f32 	%f663, %f765, %f765, 0f00000000;
-	fma.rn.f32 	%f664, %f766, %f766, %f663;
+	mul.f32 	%f663, %f766, %f766;
+	fma.rn.f32 	%f664, %f765, %f765, %f663;
 	sqrt.rn.f32 	%f97, %f664;
 	sqrt.rn.f32 	%f665, %f24;
 	mul.f32 	%f666, %f665, 0f3BB4154D;
@@ -5026,8 +5134,8 @@ $L__BB0_273:
 	setp.eq.s32 	%p554, %r1110, 1;
 	@%p554 bra 	$L__BB0_278;
 
-	fma.rn.f32 	%f670, %f767, %f767, 0f00000000;
-	fma.rn.f32 	%f671, %f768, %f768, %f670;
+	mul.f32 	%f670, %f768, %f768;
+	fma.rn.f32 	%f671, %f767, %f767, %f670;
 	sqrt.rn.f32 	%f109, %f671;
 	sqrt.rn.f32 	%f672, %f24;
 	mul.f32 	%f673, %f672, 0f3BB4154D;
@@ -5075,8 +5183,8 @@ $L__BB0_279:
 	setp.eq.s32 	%p557, %r1111, 1;
 	@%p557 bra 	$L__BB0_284;
 
-	fma.rn.f32 	%f677, %f769, %f769, 0f00000000;
-	fma.rn.f32 	%f678, %f770, %f770, %f677;
+	mul.f32 	%f677, %f770, %f770;
+	fma.rn.f32 	%f678, %f769, %f769, %f677;
 	sqrt.rn.f32 	%f121, %f678;
 	sqrt.rn.f32 	%f679, %f24;
 	mul.f32 	%f680, %f679, 0f3BB4154D;
@@ -5124,8 +5232,8 @@ $L__BB0_285:
 	setp.eq.s32 	%p560, %r1112, 1;
 	@%p560 bra 	$L__BB0_290;
 
-	fma.rn.f32 	%f684, %f771, %f771, 0f00000000;
-	fma.rn.f32 	%f685, %f772, %f772, %f684;
+	mul.f32 	%f684, %f772, %f772;
+	fma.rn.f32 	%f685, %f771, %f771, %f684;
 	sqrt.rn.f32 	%f133, %f685;
 	sqrt.rn.f32 	%f686, %f24;
 	mul.f32 	%f687, %f686, 0f3BB4154D;
@@ -5173,8 +5281,8 @@ $L__BB0_291:
 	setp.eq.s32 	%p563, %r1113, 1;
 	@%p563 bra 	$L__BB0_296;
 
-	fma.rn.f32 	%f691, %f773, %f773, 0f00000000;
-	fma.rn.f32 	%f692, %f774, %f774, %f691;
+	mul.f32 	%f691, %f774, %f774;
+	fma.rn.f32 	%f692, %f773, %f773, %f691;
 	sqrt.rn.f32 	%f145, %f692;
 	sqrt.rn.f32 	%f693, %f24;
 	mul.f32 	%f694, %f693, 0f3BB4154D;
@@ -5221,8 +5329,8 @@ $L__BB0_297:
 	setp.eq.s32 	%p566, %r1114, 1;
 	@%p566 bra 	$L__BB0_302;
 
-	fma.rn.f32 	%f698, %f775, %f775, 0f00000000;
-	fma.rn.f32 	%f699, %f776, %f776, %f698;
+	mul.f32 	%f698, %f776, %f776;
+	fma.rn.f32 	%f699, %f775, %f775, %f698;
 	sqrt.rn.f32 	%f157, %f699;
 	sqrt.rn.f32 	%f700, %f24;
 	mul.f32 	%f701, %f700, 0f3BB4154D;
@@ -5270,8 +5378,8 @@ $L__BB0_303:
 	setp.eq.s32 	%p569, %r1115, 1;
 	@%p569 bra 	$L__BB0_308;
 
-	fma.rn.f32 	%f705, %f777, %f777, 0f00000000;
-	fma.rn.f32 	%f706, %f778, %f778, %f705;
+	mul.f32 	%f705, %f778, %f778;
+	fma.rn.f32 	%f706, %f777, %f777, %f705;
 	sqrt.rn.f32 	%f169, %f706;
 	sqrt.rn.f32 	%f707, %f24;
 	mul.f32 	%f708, %f707, 0f3BB4154D;
@@ -5319,8 +5427,8 @@ $L__BB0_309:
 	setp.eq.s32 	%p572, %r1116, 1;
 	@%p572 bra 	$L__BB0_314;
 
-	fma.rn.f32 	%f712, %f779, %f779, 0f00000000;
-	fma.rn.f32 	%f713, %f780, %f780, %f712;
+	mul.f32 	%f712, %f780, %f780;
+	fma.rn.f32 	%f713, %f779, %f779, %f712;
 	sqrt.rn.f32 	%f181, %f713;
 	sqrt.rn.f32 	%f714, %f24;
 	mul.f32 	%f715, %f714, 0f3BB4154D;
@@ -5368,8 +5476,8 @@ $L__BB0_315:
 	setp.eq.s32 	%p575, %r1117, 1;
 	@%p575 bra 	$L__BB0_320;
 
-	fma.rn.f32 	%f719, %f781, %f781, 0f00000000;
-	fma.rn.f32 	%f720, %f782, %f782, %f719;
+	mul.f32 	%f719, %f782, %f782;
+	fma.rn.f32 	%f720, %f781, %f781, %f719;
 	sqrt.rn.f32 	%f193, %f720;
 	sqrt.rn.f32 	%f721, %f24;
 	mul.f32 	%f722, %f721, 0f3BB4154D;
@@ -5416,8 +5524,8 @@ $L__BB0_321:
 	setp.eq.s32 	%p578, %r1118, 1;
 	@%p578 bra 	$L__BB0_326;
 
-	fma.rn.f32 	%f726, %f783, %f783, 0f00000000;
-	fma.rn.f32 	%f727, %f784, %f784, %f726;
+	mul.f32 	%f726, %f784, %f784;
+	fma.rn.f32 	%f727, %f783, %f783, %f726;
 	sqrt.rn.f32 	%f205, %f727;
 	sqrt.rn.f32 	%f728, %f24;
 	mul.f32 	%f729, %f728, 0f3BB4154D;
@@ -5465,8 +5573,8 @@ $L__BB0_327:
 	setp.eq.s32 	%p581, %r1119, 1;
 	@%p581 bra 	$L__BB0_332;
 
-	fma.rn.f32 	%f733, %f785, %f785, 0f00000000;
-	fma.rn.f32 	%f734, %f786, %f786, %f733;
+	mul.f32 	%f733, %f786, %f786;
+	fma.rn.f32 	%f734, %f785, %f785, %f733;
 	sqrt.rn.f32 	%f217, %f734;
 	sqrt.rn.f32 	%f735, %f24;
 	mul.f32 	%f736, %f735, 0f3BB4154D;
@@ -5514,8 +5622,8 @@ $L__BB0_333:
 	setp.eq.s32 	%p584, %r1120, 1;
 	@%p584 bra 	$L__BB0_338;
 
-	fma.rn.f32 	%f740, %f787, %f787, 0f00000000;
-	fma.rn.f32 	%f741, %f788, %f788, %f740;
+	mul.f32 	%f740, %f788, %f788;
+	fma.rn.f32 	%f741, %f787, %f787, %f740;
 	sqrt.rn.f32 	%f229, %f741;
 	sqrt.rn.f32 	%f742, %f24;
 	mul.f32 	%f743, %f742, 0f3BB4154D;
@@ -5563,8 +5671,8 @@ $L__BB0_339:
 	setp.eq.s32 	%p587, %r1121, 1;
 	@%p587 bra 	$L__BB0_344;
 
-	fma.rn.f32 	%f747, %f789, %f789, 0f00000000;
-	fma.rn.f32 	%f748, %f790, %f790, %f747;
+	mul.f32 	%f747, %f790, %f790;
+	fma.rn.f32 	%f748, %f789, %f789, %f747;
 	sqrt.rn.f32 	%f241, %f748;
 	sqrt.rn.f32 	%f749, %f24;
 	mul.f32 	%f750, %f749, 0f3BB4154D;

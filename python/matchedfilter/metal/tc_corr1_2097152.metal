@@ -3,27 +3,27 @@
 #include <metal_texture>
 using namespace metal;
 
-#line 10912 "hlsl.meta.slang"
+#line 11218 "hlsl.meta.slang"
 uint firstbithigh_0(uint value_0)
 {
 
-#line 10925
+#line 11231
     if(value_0 == 0U)
     {
 
-#line 10926
+#line 11232
         return 4294967295U;
     }
 
-#line 10927
+#line 11233
     uint _S1 = clz(value_0);
 
-#line 10927
+#line 11233
     return 31U - _S1;
 }
 
 
-#line 262 "/home/ahnitz/projects/claude/searchdev/work/mf-metal-50/python/matchedfilter/metal/tc_corr1_2097152.slang"
+#line 262 "/home/ahnitz/projects/claude/searchdev/work/mf-cuda-50/python/matchedfilter/metal/tc_corr1_2097152.slang"
 float2 cmulConj_0(float2 a_0, float2 b_0)
 {
 
@@ -96,12 +96,12 @@ float2 cmul_0(float2 a_2, float2 b_2)
 #line 503
 void dft16_0(array<float2, int(16)> thread* r_0)
 {
-    float2 W1_0 = float2(0.92387950420379639, 0.38268342614173889);
-    float2 W2_0 = float2(0.70710676908493042, 0.70710676908493042);
-    float2 W3_0 = float2(0.38268342614173889, 0.92387950420379639);
-    float2 W4_0 = float2(0.0, 1.0);
-    float2 W6_0 = float2(-0.70710676908493042, 0.70710676908493042);
-    float2 W9_0 = float2(-0.92387950420379639, -0.38268342614173889);
+    float2 W1_0 = float2(0.92387950420379639f, 0.38268342614173889f);
+    float2 W2_0 = float2(0.70710676908493042f, 0.70710676908493042f);
+    float2 W3_0 = float2(0.38268342614173889f, 0.92387950420379639f);
+    float2 W4_0 = float2(0.0f, 1.0f);
+    float2 W6_0 = float2(-0.70710676908493042f, 0.70710676908493042f);
+    float2 W9_0 = float2(-0.92387950420379639f, -0.38268342614173889f);
 
 #line 510
     uint n1_0 = 0U;
@@ -223,7 +223,7 @@ void dft16_0(array<float2, int(16)> thread* r_0)
 }
 
 
-#line 64 "/home/ahnitz/projects/claude/searchdev/work/mf-metal-50/src/gpu/twiddle.slang"
+#line 64 "/home/ahnitz/projects/claude/searchdev/work/mf-cuda-50/src/gpu/twiddle.slang"
 float2 mfTwiddle_0(float angle_0)
 {
 
@@ -231,7 +231,7 @@ float2 mfTwiddle_0(float angle_0)
 }
 
 
-#line 263 "/home/ahnitz/projects/claude/searchdev/work/mf-metal-50/python/matchedfilter/metal/tc_corr1_2097152.slang"
+#line 263 "/home/ahnitz/projects/claude/searchdev/work/mf-cuda-50/python/matchedfilter/metal/tc_corr1_2097152.slang"
 uint computeWant_0(uint d_1, uint TB_0, uint len_0, uint blk_0, uint lane_0, uint per_0, uint TB2_0, uint len2_0, uint blk2_0, uint lane2_0)
 {
     uint _S11 = max(TB_0, 1U);
@@ -273,7 +273,7 @@ struct EntryPointParams_0
 };
 
 
-#line 250 "/home/ahnitz/projects/claude/searchdev/work/mf-metal-50/python/matchedfilter/metal/tc_corr1_2097152.slang"
+#line 250 "/home/ahnitz/projects/claude/searchdev/work/mf-cuda-50/python/matchedfilter/metal/tc_corr1_2097152.slang"
 struct KernelContext_0
 {
     EntryPointParams_0 constant* entryPointParams_0;
@@ -343,7 +343,7 @@ void exchange_0(array<float2, int(16)> thread* r_1, uint lgLen_0, uint lgSpan_0,
         }
 
 #line 705
-        out_0[z_0] = float2(0.0, 0.0);
+        out_0[z_0] = float2(0.0f, 0.0f);
 
 #line 705
         z_0 = z_0 + 1U;
@@ -555,7 +555,7 @@ void dft8_0(array<float2, int(16)> thread* r_2, uint o_0)
             uint _S22 = o_0 + j_2;
 
 #line 497
-            float2 t_6 = cmul_0(mfTwiddle_0(3.14159274101257324 * float(k_0) / float(s_0)), (*r_2)[_S22 + 4U]);
+            float2 t_6 = cmul_0(mfTwiddle_0(3.14159274101257324f * float(k_0) / float(s_0)), (*r_2)[_S22 + 4U]);
             uint _S23 = ((j_2 - k_0) << 1U) + k_0;
 
 #line 498
@@ -672,7 +672,7 @@ void transform_0(array<float2, int(16)> thread* r_4, uint tid_0, KernelContext_0
         for(;;)
         {
 
-#line 7 "/home/ahnitz/projects/claude/searchdev/work/mf-metal-50/src/gpu/fft_transform.slang"
+#line 7 "/home/ahnitz/projects/claude/searchdev/work/mf-cuda-50/src/gpu/fft_transform.slang"
             for(;;)
             {
 
@@ -689,7 +689,7 @@ void transform_0(array<float2, int(16)> thread* r_4, uint tid_0, KernelContext_0
                 dft16_0(r_4);
 
 #line 26
-                float2 tw_0 = mfTwiddle_0(6.28318548202514648 * float(lane_2) / 2048.0);
+                float2 tw_0 = mfTwiddle_0(6.28318548202514648f * float(lane_2) / 2048.0f);
                 float _S26 = tw_0.x;
 
 #line 27
@@ -699,10 +699,10 @@ void transform_0(array<float2, int(16)> thread* r_4, uint tid_0, KernelContext_0
                 k2_1 = 0U;
 
 #line 27
-                cr_0 = 1.0;
+                cr_0 = 1.0f;
 
 #line 27
-                ci_0 = 0.0;
+                ci_0 = 0.0f;
 
                 for(;;)
                 {
@@ -775,7 +775,7 @@ void transform_0(array<float2, int(16)> thread* r_4, uint tid_0, KernelContext_0
                 dft16_0(r_4);
 
 #line 26
-                float2 tw_1 = mfTwiddle_0(6.28318548202514648 * float(lane_3) / 128.0);
+                float2 tw_1 = mfTwiddle_0(6.28318548202514648f * float(lane_3) / 128.0f);
                 float _S30 = tw_1.x;
 
 #line 27
@@ -785,10 +785,10 @@ void transform_0(array<float2, int(16)> thread* r_4, uint tid_0, KernelContext_0
                 k2_1 = 0U;
 
 #line 27
-                cr_0 = 1.0;
+                cr_0 = 1.0f;
 
 #line 27
-                ci_0 = 0.0;
+                ci_0 = 0.0f;
 
                 for(;;)
                 {
@@ -847,7 +847,7 @@ void transform_0(array<float2, int(16)> thread* r_4, uint tid_0, KernelContext_0
 #line 43
     innermost_0(r_4);
 
-#line 785 "/home/ahnitz/projects/claude/searchdev/work/mf-metal-50/python/matchedfilter/metal/tc_corr1_2097152.slang"
+#line 785 "/home/ahnitz/projects/claude/searchdev/work/mf-cuda-50/python/matchedfilter/metal/tc_corr1_2097152.slang"
     return;
 }
 
@@ -1012,7 +1012,7 @@ uint slotToIndex_0(uint slot_0)
         uint k2_2 = slotToIndex_0(tid_1 * 16U + i_5);
 
 #line 1824
-        *((&kernelContext_4)->entryPointParams_scratch_0+(pair_0 * 2097152U + k2_2 * 1024U + _S36)) = packed_float2(cmul_0(r_5[i_5], mfTwiddle_0(6.28318548202514648 * float(_S36 * k2_2) / 2.097152e+06))) ;
+        *((&kernelContext_4)->entryPointParams_scratch_0+(pair_0 * 2097152U + k2_2 * 1024U + _S36)) = packed_float2(cmul_0(r_5[i_5], mfTwiddle_0(6.28318548202514648f * float(_S36 * k2_2) / 2.097152e+06f))) ;
 
 #line 1823
         i_5 = i_5 + 1U;

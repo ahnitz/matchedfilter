@@ -6,22 +6,22 @@ using namespace metal;
 #define MF_C16_RAW 0u
 #endif
 
-#line 10912 "hlsl.meta.slang"
+#line 11218 "hlsl.meta.slang"
 uint firstbithigh_0(uint value_0)
 {
 
-#line 10925
+#line 11231
     if(value_0 == 0U)
     {
 
-#line 10926
+#line 11232
         return 4294967295U;
     }
 
-#line 10927
+#line 11233
     uint _S1 = clz(value_0);
 
-#line 10927
+#line 11233
     return 31U - _S1;
 }
 
@@ -175,15 +175,15 @@ void dft16s_0(array<half2, int(16)> thread* re_2, array<half2, int(16)> thread* 
     }
 
 
-    cmulw_0(&(*re_2)[int(5)], &(*im_2)[int(5)], 0.923828125, 0.382568359375);
-    cmulw_0(&(*re_2)[int(9)], &(*im_2)[int(9)], 0.70703125, 0.70703125);
-    cmulw_0(&(*re_2)[int(13)], &(*im_2)[int(13)], 0.382568359375, 0.923828125);
-    cmulw_0(&(*re_2)[int(6)], &(*im_2)[int(6)], 0.70703125, 0.70703125);
-    cmulw_0(&(*re_2)[int(10)], &(*im_2)[int(10)], 0.0, 1.0);
-    cmulw_0(&(*re_2)[int(14)], &(*im_2)[int(14)], -0.70703125, 0.70703125);
-    cmulw_0(&(*re_2)[int(7)], &(*im_2)[int(7)], 0.382568359375, 0.923828125);
-    cmulw_0(&(*re_2)[int(11)], &(*im_2)[int(11)], -0.70703125, 0.70703125);
-    cmulw_0(&(*re_2)[int(15)], &(*im_2)[int(15)], -0.923828125, -0.382568359375);
+    cmulw_0(&(*re_2)[int(5)], &(*im_2)[int(5)], 0.923828125h, 0.382568359375h);
+    cmulw_0(&(*re_2)[int(9)], &(*im_2)[int(9)], 0.70703125h, 0.70703125h);
+    cmulw_0(&(*re_2)[int(13)], &(*im_2)[int(13)], 0.382568359375h, 0.923828125h);
+    cmulw_0(&(*re_2)[int(6)], &(*im_2)[int(6)], 0.70703125h, 0.70703125h);
+    cmulw_0(&(*re_2)[int(10)], &(*im_2)[int(10)], 0.0h, 1.0h);
+    cmulw_0(&(*re_2)[int(14)], &(*im_2)[int(14)], -0.70703125h, 0.70703125h);
+    cmulw_0(&(*re_2)[int(7)], &(*im_2)[int(7)], 0.382568359375h, 0.923828125h);
+    cmulw_0(&(*re_2)[int(11)], &(*im_2)[int(11)], -0.70703125h, 0.70703125h);
+    cmulw_0(&(*re_2)[int(15)], &(*im_2)[int(15)], -0.923828125h, -0.382568359375h);
 
 #line 407
     uint k2_0 = 0U;
@@ -262,15 +262,15 @@ void dft16s_1(array<half2, int(16)> thread* re_3, array<half2, int(16)> thread* 
     }
 
 
-    cmulw_0(&(*re_3)[int(5)], &(*im_3)[int(5)], 0.923828125, 0.382568359375);
-    cmulw_0(&(*re_3)[int(9)], &(*im_3)[int(9)], 0.70703125, 0.70703125);
-    cmulw_0(&(*re_3)[int(13)], &(*im_3)[int(13)], 0.382568359375, 0.923828125);
-    cmulw_0(&(*re_3)[int(6)], &(*im_3)[int(6)], 0.70703125, 0.70703125);
-    cmulw_0(&(*re_3)[int(10)], &(*im_3)[int(10)], 0.0, 1.0);
-    cmulw_0(&(*re_3)[int(14)], &(*im_3)[int(14)], -0.70703125, 0.70703125);
-    cmulw_0(&(*re_3)[int(7)], &(*im_3)[int(7)], 0.382568359375, 0.923828125);
-    cmulw_0(&(*re_3)[int(11)], &(*im_3)[int(11)], -0.70703125, 0.70703125);
-    cmulw_0(&(*re_3)[int(15)], &(*im_3)[int(15)], -0.923828125, -0.382568359375);
+    cmulw_0(&(*re_3)[int(5)], &(*im_3)[int(5)], 0.923828125h, 0.382568359375h);
+    cmulw_0(&(*re_3)[int(9)], &(*im_3)[int(9)], 0.70703125h, 0.70703125h);
+    cmulw_0(&(*re_3)[int(13)], &(*im_3)[int(13)], 0.382568359375h, 0.923828125h);
+    cmulw_0(&(*re_3)[int(6)], &(*im_3)[int(6)], 0.70703125h, 0.70703125h);
+    cmulw_0(&(*re_3)[int(10)], &(*im_3)[int(10)], 0.0h, 1.0h);
+    cmulw_0(&(*re_3)[int(14)], &(*im_3)[int(14)], -0.70703125h, 0.70703125h);
+    cmulw_0(&(*re_3)[int(7)], &(*im_3)[int(7)], 0.382568359375h, 0.923828125h);
+    cmulw_0(&(*re_3)[int(11)], &(*im_3)[int(11)], -0.70703125h, 0.70703125h);
+    cmulw_0(&(*re_3)[int(15)], &(*im_3)[int(15)], -0.923828125h, -0.382568359375h);
 
 #line 407
     uint k2_1 = 0U;
@@ -374,7 +374,7 @@ struct EntryPointParams_0
 };
 
 
-#line 246 "mm_256_fusedTierB_c16t2.slang"
+#line 5534 "core.meta.slang"
 struct KernelContext_0
 {
     EntryPointParams_0 constant* entryPointParams_0;
@@ -389,7 +389,7 @@ struct KernelContext_0
 };
 
 
-#line 246
+#line 246 "mm_256_fusedTierB_c16t2.slang"
 void stgPut_0(uint i_2, half2 v_0, KernelContext_0 thread* kernelContext_0)
 {
 
@@ -437,7 +437,7 @@ void exchangeS_0(array<half2, int(16)> thread* re_4, array<half2, int(16)> threa
         }
 
 #line 437
-        half2 _S9 = half2(float2(0.0) );
+        half2 _S9 = half2(float2(0.0f) );
 
 #line 437
         outr_0[z_0] = _S9;
@@ -791,8 +791,8 @@ void peakTwoGate_0(uint pairA_0, uint pairB_0, uint tid_0, const array<half2, in
 
     uint _S21 = slotToIndex_0(tid_0 * 16U) - winStart_2;
     uint _S22 = winEnd_2 - winStart_2;
-    half2 _S23 = half2(float2(0.0) );
-    half2 _S24 = half2(float2(0.015625) );
+    half2 _S23 = half2(float2(0.0f) );
+    half2 _S24 = half2(float2(0.015625f) );
 
 #line 1373
     uint i_5 = 0U;
@@ -953,7 +953,7 @@ void peakTwoGate_0(uint pairA_0, uint pairB_0, uint tid_0, const array<half2, in
     {
 
 #line 1394
-        _S41 = 12.66209983825683594;
+        _S41 = 12.66209983825683594f;
 
 #line 1394
     }
@@ -961,20 +961,20 @@ void peakTwoGate_0(uint pairA_0, uint pairB_0, uint tid_0, const array<half2, in
     {
 
 #line 1394
-        _S41 = 0.0;
+        _S41 = 0.0f;
 
 #line 1394
     }
 
 #line 1394
-    float k2_2 = _S41 * 0.00048828125 * 1.00010001659393311;
+    float k2_2 = _S41 * 0.00048828125f * 1.00010001659393311f;
     float mA_0 = sqrt(float(best_1.x));
 
 #line 1395
     float mB_0 = sqrt(float(best_1.y));
 
-    float bA_0 = mA_0 * 1.00107669830322266 + k2_2 * sqrt(float(en_5.x) * 16.0);
-    float bB_0 = mB_0 * 1.00107669830322266 + k2_2 * sqrt(float(en_5.y) * 16.0);
+    float bA_0 = mA_0 * 1.00107669830322266f + k2_2 * sqrt(float(en_5.x) * 16.0f);
+    float bB_0 = mB_0 * 1.00107669830322266f + k2_2 * sqrt(float(en_5.y) * 16.0f);
 
 #line 1398
     bool hitA_0;
@@ -990,7 +990,7 @@ void peakTwoGate_0(uint pairA_0, uint pairB_0, uint tid_0, const array<half2, in
     {
 
 #line 1399
-        if(mA_0 > 0.0)
+        if(mA_0 > 0.0f)
         {
 
 #line 1399
@@ -1024,7 +1024,7 @@ void peakTwoGate_0(uint pairA_0, uint pairB_0, uint tid_0, const array<half2, in
     {
 
 #line 1400
-        if(mB_0 > 0.0)
+        if(mB_0 > 0.0f)
         {
 
 #line 1400
@@ -1106,7 +1106,7 @@ void peakTwoGate_0(uint pairA_0, uint pairB_0, uint tid_0, const array<half2, in
         {
 
 #line 1403
-            _S45 = float2(3.40282306073709653e+38, 0.0);
+            _S45 = float2(3.40282306073709653e+38f, 0.0f);
 
 #line 1403
         }
@@ -1118,7 +1118,7 @@ void peakTwoGate_0(uint pairA_0, uint pairB_0, uint tid_0, const array<half2, in
             {
 
 #line 1403
-                _S45 = float2(bA_0, 0.0);
+                _S45 = float2(bA_0, 0.0f);
 
 #line 1403
             }
@@ -1126,7 +1126,7 @@ void peakTwoGate_0(uint pairA_0, uint pairB_0, uint tid_0, const array<half2, in
             {
 
 #line 1403
-                _S45 = float2(0.0, 0.0);
+                _S45 = float2(0.0f, 0.0f);
 
 #line 1403
             }
@@ -1193,7 +1193,7 @@ void peakTwoGate_0(uint pairA_0, uint pairB_0, uint tid_0, const array<half2, in
         {
 
 #line 1407
-            _S45 = float2(3.40282306073709653e+38, 0.0);
+            _S45 = float2(3.40282306073709653e+38f, 0.0f);
 
 #line 1407
         }
@@ -1205,7 +1205,7 @@ void peakTwoGate_0(uint pairA_0, uint pairB_0, uint tid_0, const array<half2, in
             {
 
 #line 1407
-                _S45 = float2(bB_0, 0.0);
+                _S45 = float2(bB_0, 0.0f);
 
 #line 1407
             }
@@ -1213,7 +1213,7 @@ void peakTwoGate_0(uint pairA_0, uint pairB_0, uint tid_0, const array<half2, in
             {
 
 #line 1407
-                _S45 = float2(0.0, 0.0);
+                _S45 = float2(0.0f, 0.0f);
 
 #line 1407
             }
@@ -1250,11 +1250,11 @@ float2 c16Bound_0(float2 v_2, float energy_0)
 
 #line 302
     float m_1 = length(v_2);
-    float b_3 = m_1 * 1.00146484375 + 0.00618266593664885 * sqrt(energy_0);
+    float b_3 = m_1 * 1.00146484375f + 0.00618266593664885f * sqrt(energy_0);
 
 #line 303
     float2 _S51;
-    if(m_1 > 0.0)
+    if(m_1 > 0.0f)
     {
 
 #line 304
@@ -1266,7 +1266,7 @@ float2 c16Bound_0(float2 v_2, float energy_0)
     {
 
 #line 304
-        _S51 = float2(b_3, 0.0);
+        _S51 = float2(b_3, 0.0f);
 
 #line 304
     }
@@ -1291,8 +1291,8 @@ void peakTwoWave_0(uint pairA_1, uint pairB_1, uint tid_1, const array<half2, in
     uint _S55 = winEnd_3 - winStart_3;
 
 #line 1259
-    half2 _S56 = half2(float2(0.0) );
-    half2 _S57 = half2(float2(0.015625) );
+    half2 _S56 = half2(float2(0.0f) );
+    half2 _S57 = half2(float2(0.015625f) );
 
 #line 1260
     uint i_6 = 0U;
@@ -1457,10 +1457,10 @@ void peakTwoWave_0(uint pairA_1, uint pairB_1, uint tid_1, const array<half2, in
 
 
 
-    float enA_0 = float(en_11.x) * 16.0;
+    float enA_0 = float(en_11.x) * 16.0f;
 
 #line 1296
-    float enB_0 = float(en_11.y) * 16.0;
+    float enB_0 = float(en_11.y) * 16.0f;
     uint slotA_0 = 65535U - (_S78 & 65535U);
 
 #line 1297
@@ -1534,16 +1534,16 @@ void peakTwoWave_0(uint pairA_1, uint pairB_1, uint tid_1, const array<half2, in
 
 #line 1317
     thread array<float, int(2)> vB_0;
-    vB_0[int(1)] = 0.0;
+    vB_0[int(1)] = 0.0f;
 
 #line 1318
-    vB_0[int(0)] = 0.0;
+    vB_0[int(0)] = 0.0f;
 
 #line 1318
-    vA_0[int(1)] = 0.0;
+    vA_0[int(1)] = 0.0f;
 
 #line 1318
-    vA_0[int(0)] = 0.0;
+    vA_0[int(0)] = 0.0f;
 
 #line 1318
     for(;;)
@@ -1877,7 +1877,7 @@ void peakTwoWave_0(uint pairA_1, uint pairB_1, uint tid_1, const array<half2, in
         {
 
 #line 1335
-            _S90 = float2(3.40282306073709653e+38, 0.0);
+            _S90 = float2(3.40282306073709653e+38f, 0.0f);
 
 #line 1335
         }
@@ -1900,7 +1900,7 @@ void peakTwoWave_0(uint pairA_1, uint pairB_1, uint tid_1, const array<half2, in
             {
 
 #line 1336
-                _S90 = float2(0.0, 0.0);
+                _S90 = float2(0.0f, 0.0f);
 
 #line 1336
             }
@@ -1966,7 +1966,7 @@ void peakTwoWave_0(uint pairA_1, uint pairB_1, uint tid_1, const array<half2, in
         {
 
 #line 1340
-            _S90 = float2(3.40282306073709653e+38, 0.0);
+            _S90 = float2(3.40282306073709653e+38f, 0.0f);
 
 #line 1340
         }
@@ -1989,7 +1989,7 @@ void peakTwoWave_0(uint pairA_1, uint pairB_1, uint tid_1, const array<half2, in
             {
 
 #line 1341
-                _S90 = float2(0.0, 0.0);
+                _S90 = float2(0.0f, 0.0f);
 
 #line 1341
             }
@@ -2073,7 +2073,7 @@ void filterTwo_0(uint pairA_2, uint pairB_2, uint tA_0, uint tB_0, uint tid_2, c
                 dft16s_0(&re_9, &im_9);
 
 #line 1456
-                float2 tw_0 = mfTwiddle_0(6.28318548202514648 * float(lane_2) / 256.0);
+                float2 tw_0 = mfTwiddle_0(6.28318548202514648f * float(lane_2) / 256.0f);
                 float _S100 = tw_0.x;
 
 #line 1457
@@ -2083,10 +2083,10 @@ void filterTwo_0(uint pairA_2, uint pairB_2, uint tA_0, uint tB_0, uint tid_2, c
                 uint k2_3 = 0U;
 
 #line 1457
-                float cr_0 = 1.0;
+                float cr_0 = 1.0f;
 
 #line 1457
-                float ci_0 = 0.0;
+                float ci_0 = 0.0f;
 
                 for(;;)
                 {
