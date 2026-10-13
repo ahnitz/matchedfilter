@@ -494,8 +494,9 @@ Metal (M2): the fine stage is device-bound (94% busy), ~85-100 ms per segment, ~
   fine stage ~25%).
 
 ### Falsified or parked
-- **SegmentPlan replay** (`MF_SEGMENT_REPLAY=1`, off by default) is still not usable on realistic
-  data. Most segments are not replayable (synchronous jobs), and with `LADDER_REPLAY` the check
+- **SegmentPlan replay** (`MF_SEGMENT_REPLAY=1`, then off by default) was still not usable on
+  realistic data on 2026-10-09. (Superseded: since 70d676df the Vulkan replay is exact and on by
+  default, `MF_SEGMENT_REPLAY=0` turns it off; CUDA replays through its segment graph.) Most segments are not replayable (synchronous jobs), and with `LADDER_REPLAY` the check
   lost 32 peaks. The fix for host cost is not replay. It is less host work per call, plus kernels
   fast enough that the device bounds the stage.
 - **Metal:**
