@@ -3,22 +3,22 @@
 #include <metal_texture>
 using namespace metal;
 
-#line 10912 "hlsl.meta.slang"
+#line 11218 "hlsl.meta.slang"
 uint firstbithigh_0(uint value_0)
 {
 
-#line 10925
+#line 11231
     if(value_0 == 0U)
     {
 
-#line 10926
+#line 11232
         return 4294967295U;
     }
 
-#line 10927
+#line 11233
     uint _S1 = clz(value_0);
 
-#line 10927
+#line 11233
     return 31U - _S1;
 }
 
@@ -114,12 +114,12 @@ float2 cmul_0(float2 a_2, float2 b_3)
 #line 509
 void dft16_0(array<float2, int(16)> thread* r_0)
 {
-    float2 W1_0 = float2(0.92387950420379639, 0.38268342614173889);
-    float2 W2_0 = float2(0.70710676908493042, 0.70710676908493042);
-    float2 W3_0 = float2(0.38268342614173889, 0.92387950420379639);
-    float2 W4_0 = float2(0.0, 1.0);
-    float2 W6_0 = float2(-0.70710676908493042, 0.70710676908493042);
-    float2 W9_0 = float2(-0.92387950420379639, -0.38268342614173889);
+    float2 W1_0 = float2(0.92387950420379639f, 0.38268342614173889f);
+    float2 W2_0 = float2(0.70710676908493042f, 0.70710676908493042f);
+    float2 W3_0 = float2(0.38268342614173889f, 0.92387950420379639f);
+    float2 W4_0 = float2(0.0f, 1.0f);
+    float2 W6_0 = float2(-0.70710676908493042f, 0.70710676908493042f);
+    float2 W9_0 = float2(-0.92387950420379639f, -0.38268342614173889f);
 
 #line 516
     uint n1_0 = 0U;
@@ -284,7 +284,7 @@ uint computeWant_0(uint d_2, uint TB_0, uint len_0, uint blk_0, uint lane_0, uin
 }
 
 
-#line 8028 "hlsl.meta.slang"
+#line 8225 "hlsl.meta.slang"
 struct EntryPointParams_0
 {
     uint ntmpl_0;
@@ -625,7 +625,7 @@ void transform_0(array<float2, int(16)> thread* r_4, uint tid_0, KernelContext_0
                 dft16_0(r_4);
 
 #line 26
-                float2 tw_0 = mfTwiddle_0(6.28318548202514648 * float(lane_2) / 8192.0);
+                float2 tw_0 = mfTwiddle_0(6.28318548202514648f * float(lane_2) / 8192.0f);
                 float _S19 = tw_0.x;
 
 #line 27
@@ -635,10 +635,10 @@ void transform_0(array<float2, int(16)> thread* r_4, uint tid_0, KernelContext_0
                 k2_1 = 0U;
 
 #line 27
-                cr_0 = 1.0;
+                cr_0 = 1.0f;
 
 #line 27
-                ci_0 = 0.0;
+                ci_0 = 0.0f;
 
                 for(;;)
                 {
@@ -714,7 +714,7 @@ void transform_0(array<float2, int(16)> thread* r_4, uint tid_0, KernelContext_0
                 dft16_0(r_4);
 
 #line 26
-                float2 tw_1 = mfTwiddle_0(6.28318548202514648 * float(lane_3) / 512.0);
+                float2 tw_1 = mfTwiddle_0(6.28318548202514648f * float(lane_3) / 512.0f);
                 float _S23 = tw_1.x;
 
 #line 27
@@ -724,10 +724,10 @@ void transform_0(array<float2, int(16)> thread* r_4, uint tid_0, KernelContext_0
                 k2_1 = 0U;
 
 #line 27
-                cr_0 = 1.0;
+                cr_0 = 1.0f;
 
 #line 27
-                ci_0 = 0.0;
+                ci_0 = 0.0f;
 
                 for(;;)
                 {
@@ -800,7 +800,7 @@ void transform_0(array<float2, int(16)> thread* r_4, uint tid_0, KernelContext_0
                 dft16_0(r_4);
 
 #line 26
-                float2 tw_2 = mfTwiddle_0(6.28318548202514648 * float(lane_4) / 32.0);
+                float2 tw_2 = mfTwiddle_0(6.28318548202514648f * float(lane_4) / 32.0f);
                 float _S27 = tw_2.x;
 
 #line 27
@@ -810,10 +810,10 @@ void transform_0(array<float2, int(16)> thread* r_4, uint tid_0, KernelContext_0
                 k2_1 = 0U;
 
 #line 27
-                cr_0 = 1.0;
+                cr_0 = 1.0f;
 
 #line 27
-                ci_0 = 0.0;
+                ci_0 = 0.0f;
 
                 for(;;)
                 {
@@ -1427,7 +1427,7 @@ void filterPair_0(uint pair_0, uint tid_1, packed_float2 device* data_0, packed_
             *(peakIdx_0+pair_0) = int(-1);
 
 #line 1102
-            *(peakVal_0+pair_0) = packed_float2(float2(0.0, 0.0)) ;
+            *(peakVal_0+pair_0) = packed_float2(float2(0.0f, 0.0f)) ;
 
 #line 1101
         }
@@ -1628,7 +1628,7 @@ void filterPair_0(uint pair_0, uint tid_1, packed_float2 device* data_0, packed_
                 *(peakIdx_0+_S45) = int(-1);
 
 #line 1128
-                *(peakVal_0+_S45) = packed_float2(float2(0.0, 0.0)) ;
+                *(peakVal_0+_S45) = packed_float2(float2(0.0f, 0.0f)) ;
 
 #line 1127
             }

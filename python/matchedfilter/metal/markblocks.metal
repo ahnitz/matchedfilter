@@ -3,14 +3,14 @@
 #include <metal_texture>
 using namespace metal;
 
-#line 90 "core"
+#line 2061 "/tmp/tmp8zbqgx60/tier0.slang"
 struct EntryPointParams_0
 {
     uint ntmpl_0;
 };
 
 
-#line 2061 "/tmp/tmpflbfbioo/tier0.slang"
+#line 2061
 struct KernelContext_0
 {
     EntryPointParams_0 constant* entryPointParams_0;

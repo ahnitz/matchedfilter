@@ -227,6 +227,28 @@ def build_full_tierc(slangc):
 _STORAGE_CLASS = {2: "Uniform", 9: "PushConstant", 12: "StorageBuffer"}
 
 
+#: The slangc every checked-in kernel (spirv/, ptx/, metal/) is built with. A different
+#: version emits different code (register numbering, scheduling), so a rebuild of unchanged
+#: source would not reproduce the shipped kernels and an identical-codegen proof would be
+#: meaningless. Official release shader-slang v2026.18.2,
+#: slang-2026.18.2-linux-x86_64.tar.gz, sha256
+#: 8a097d4365e1cab10265d0b0d77b461b5d30576f99ddc0521a35723c34cad816 (docs/gpu-handover.md).
+#: MF_SLANGC_ANY_VERSION=1 builds with another version anyway (for experiments only).
+SLANGC_VERSION = "2026.18.2"
+
+
+def check_slangc_version(slangc):
+    """Refuse a slangc other than SLANGC_VERSION (unless MF_SLANGC_ANY_VERSION=1)."""
+    import os
+    import subprocess
+    got = subprocess.run([slangc, "-v"], capture_output=True, text=True)
+    ver = (got.stdout + got.stderr).strip().splitlines()[0].strip() if (got.stdout + got.stderr).strip() else "?"
+    if ver != SLANGC_VERSION and os.environ.get("MF_SLANGC_ANY_VERSION", "0") == "0":
+        raise SystemExit("slangc %s is %s; the shipped kernels are built with %s "
+                         "(set MF_SLANGC_ANY_VERSION=1 to build anyway)" % (slangc, ver, SLANGC_VERSION))
+    return ver
+
+
 def find_slangc(explicit=None):
     """--slangc, then MF_SLANGC, then PATH.
 
@@ -484,6 +506,7 @@ def main(argv=None):
               "  https://github.com/shader-slang/slang/releases",
               file=sys.stderr)
         return 1
+    check_slangc_version(slangc)
 
     OUT.mkdir(parents=True, exist_ok=True)
     MSL.mkdir(parents=True, exist_ok=True)

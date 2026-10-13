@@ -3,7 +3,7 @@
 #include <metal_texture>
 using namespace metal;
 
-#line 70 "/home/ahnitz/projects/claude/searchdev/work/mf-metal-50/python/matchedfilter/spirv/ct_1024_m.slang"
+#line 70 "/home/ahnitz/projects/claude/searchdev/work/mf-cuda-50/python/matchedfilter/spirv/ct_1024_m.slang"
 float2 cmulConj_0(float2 a_0, float2 b_0)
 {
 
@@ -76,12 +76,12 @@ float2 cmul_0(float2 a_2, float2 b_2)
 #line 78
 void dft16_0(array<float2, int(16)> thread* r_0)
 {
-    float2 W1_0 = float2(0.92387950420379639, 0.38268342614173889);
-    float2 W2_0 = float2(0.70710676908493042, 0.70710676908493042);
-    float2 W3_0 = float2(0.38268342614173889, 0.92387950420379639);
-    float2 W4_0 = float2(0.0, 1.0);
-    float2 W6_0 = float2(-0.70710676908493042, 0.70710676908493042);
-    float2 W9_0 = float2(-0.92387950420379639, -0.38268342614173889);
+    float2 W1_0 = float2(0.92387950420379639f, 0.38268342614173889f);
+    float2 W2_0 = float2(0.70710676908493042f, 0.70710676908493042f);
+    float2 W3_0 = float2(0.38268342614173889f, 0.92387950420379639f);
+    float2 W4_0 = float2(0.0f, 1.0f);
+    float2 W6_0 = float2(-0.70710676908493042f, 0.70710676908493042f);
+    float2 W9_0 = float2(-0.92387950420379639f, -0.38268342614173889f);
 
 #line 85
     uint n1_0 = 0U;
@@ -203,7 +203,7 @@ void dft16_0(array<float2, int(16)> thread* r_0)
 }
 
 
-#line 64 "/home/ahnitz/projects/claude/searchdev/work/mf-metal-50/src/gpu/twiddle.slang"
+#line 64 "/home/ahnitz/projects/claude/searchdev/work/mf-cuda-50/src/gpu/twiddle.slang"
 float2 mfTwiddle_0(float angle_0)
 {
 
@@ -211,7 +211,7 @@ float2 mfTwiddle_0(float angle_0)
 }
 
 
-#line 108 "/home/ahnitz/projects/claude/searchdev/work/mf-metal-50/python/matchedfilter/spirv/ct_1024_m.slang"
+#line 108 "/home/ahnitz/projects/claude/searchdev/work/mf-cuda-50/python/matchedfilter/spirv/ct_1024_m.slang"
 void dft32_0(array<float2, int(32)> thread* r_1)
 {
     thread array<float2, int(16)> e_0;
@@ -267,7 +267,7 @@ void dft32_0(array<float2, int(32)> thread* r_1)
 #line 114
             break;
         }
-        float2 w_0 = cmul_0(o_0[k_0], mfTwiddle_0(6.28318548202514648 * float(k_0) / 32.0));
+        float2 w_0 = cmul_0(o_0[k_0], mfTwiddle_0(6.28318548202514648f * float(k_0) / 32.0f));
         (*r_1)[k_0] = e_0[k_0] + w_0;
         (*r_1)[k_0 + 16U] = e_0[k_0] - w_0;
 
@@ -311,7 +311,7 @@ struct EntryPointParams_0
 };
 
 
-#line 182 "/home/ahnitz/projects/claude/searchdev/work/mf-metal-50/python/matchedfilter/spirv/ct_1024_m.slang"
+#line 182 "/home/ahnitz/projects/claude/searchdev/work/mf-cuda-50/python/matchedfilter/spirv/ct_1024_m.slang"
 struct KernelContext_0
 {
     EntryPointParams_0 constant* entryPointParams_0;
@@ -417,7 +417,7 @@ struct KernelContext_0
 #line 176
             break;
         }
-        r_4[k2_1] = cmul_0(r_4[k2_1], mfTwiddle_0(6.28318548202514648 * float(lane_0 * k2_1) / 1024.0));
+        r_4[k2_1] = cmul_0(r_4[k2_1], mfTwiddle_0(6.28318548202514648f * float(lane_0 * k2_1) / 1024.0f));
 
 #line 176
         k2_1 = k2_1 + 1U;
@@ -484,7 +484,7 @@ struct KernelContext_0
     i_1 = 0U;
 
 #line 185
-    float best_0 = 0.0;
+    float best_0 = 0.0f;
 
 
     for(;;)
@@ -519,14 +519,14 @@ struct KernelContext_0
     uint _S14 = base_0 + lane_0;
 
 #line 193
-    (*(&kernelContext_0)->sh_0)[_S14] = float2(best_0, 0.0);
+    (*(&kernelContext_0)->sh_0)[_S14] = float2(best_0, 0.0f);
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     if(lane_0 < 16U)
     {
 
 #line 196
-        (*(&kernelContext_0)->sh_0)[_S14] = float2(max((*(&kernelContext_0)->sh_0)[_S14].x, (*(&kernelContext_0)->sh_0)[_S14 + 16U].x), 0.0);
+        (*(&kernelContext_0)->sh_0)[_S14] = float2(max((*(&kernelContext_0)->sh_0)[_S14].x, (*(&kernelContext_0)->sh_0)[_S14 + 16U].x), 0.0f);
 
 #line 196
     }
@@ -537,7 +537,7 @@ struct KernelContext_0
     {
 
 #line 196
-        (*(&kernelContext_0)->sh_0)[_S14] = float2(max((*(&kernelContext_0)->sh_0)[_S14].x, (*(&kernelContext_0)->sh_0)[_S14 + 8U].x), 0.0);
+        (*(&kernelContext_0)->sh_0)[_S14] = float2(max((*(&kernelContext_0)->sh_0)[_S14].x, (*(&kernelContext_0)->sh_0)[_S14 + 8U].x), 0.0f);
 
 #line 196
     }
@@ -548,7 +548,7 @@ struct KernelContext_0
     {
 
 #line 196
-        (*(&kernelContext_0)->sh_0)[_S14] = float2(max((*(&kernelContext_0)->sh_0)[_S14].x, (*(&kernelContext_0)->sh_0)[_S14 + 4U].x), 0.0);
+        (*(&kernelContext_0)->sh_0)[_S14] = float2(max((*(&kernelContext_0)->sh_0)[_S14].x, (*(&kernelContext_0)->sh_0)[_S14 + 4U].x), 0.0f);
 
 #line 196
     }
@@ -559,7 +559,7 @@ struct KernelContext_0
     {
 
 #line 196
-        (*(&kernelContext_0)->sh_0)[_S14] = float2(max((*(&kernelContext_0)->sh_0)[_S14].x, (*(&kernelContext_0)->sh_0)[_S14 + 2U].x), 0.0);
+        (*(&kernelContext_0)->sh_0)[_S14] = float2(max((*(&kernelContext_0)->sh_0)[_S14].x, (*(&kernelContext_0)->sh_0)[_S14 + 2U].x), 0.0f);
 
 #line 196
     }
@@ -570,7 +570,7 @@ struct KernelContext_0
     {
 
 #line 196
-        (*(&kernelContext_0)->sh_0)[_S14] = float2(max((*(&kernelContext_0)->sh_0)[_S14].x, (*(&kernelContext_0)->sh_0)[_S14 + 1U].x), 0.0);
+        (*(&kernelContext_0)->sh_0)[_S14] = float2(max((*(&kernelContext_0)->sh_0)[_S14].x, (*(&kernelContext_0)->sh_0)[_S14 + 1U].x), 0.0f);
 
 #line 196
     }
@@ -581,7 +581,7 @@ struct KernelContext_0
     {
 
 #line 203
-        *((&kernelContext_0)->entryPointParams_out_0+pair_0) = packed_float2(float2(sqrt((*(&kernelContext_0)->sh_0)[base_0].x), 0.0)) ;
+        *((&kernelContext_0)->entryPointParams_out_0+pair_0) = packed_float2(float2(sqrt((*(&kernelContext_0)->sh_0)[base_0].x), 0.0f)) ;
 
 #line 203
     }

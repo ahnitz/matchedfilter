@@ -3,27 +3,27 @@
 #include <metal_texture>
 using namespace metal;
 
-#line 10912 "hlsl.meta.slang"
+#line 11218 "hlsl.meta.slang"
 uint firstbithigh_0(uint value_0)
 {
 
-#line 10925
+#line 11231
     if(value_0 == 0U)
     {
 
-#line 10926
+#line 11232
         return 4294967295U;
     }
 
-#line 10927
+#line 11233
     uint _S1 = clz(value_0);
 
-#line 10927
+#line 11233
     return 31U - _S1;
 }
 
 
-#line 90 "core"
+#line 3 "/home/ahnitz/projects/claude/searchdev/work/mf-cuda-50/src/gpu/pack_coarse.slang"
 struct EntryPointParams_0
 {
     uint n_0;
@@ -33,7 +33,7 @@ struct EntryPointParams_0
 };
 
 
-#line 3 "/home/ahnitz/projects/claude/searchdev/work/mf-metal-50/src/gpu/pack_coarse.slang"
+#line 3
 struct KernelContext_0
 {
     EntryPointParams_0 constant* entryPointParams_0;

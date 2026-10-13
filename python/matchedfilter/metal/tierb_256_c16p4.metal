@@ -6,22 +6,22 @@ using namespace metal;
 #define MF_C16_RAW 0u
 #endif
 
-#line 10912 "hlsl.meta.slang"
+#line 11218 "hlsl.meta.slang"
 uint firstbithigh_0(uint value_0)
 {
 
-#line 10925
+#line 11231
     if(value_0 == 0U)
     {
 
-#line 10926
+#line 11232
         return 4294967295U;
     }
 
-#line 10927
+#line 11233
     uint _S1 = clz(value_0);
 
-#line 10927
+#line 11233
     return 31U - _S1;
 }
 
@@ -129,12 +129,12 @@ half2 cmul_0(half2 a_2, half2 b_4)
 #line 510
 void dft16_0(array<half2, int(16)> thread* r_0)
 {
-    half2 W1_0 = half2(0.923828125, 0.382568359375);
-    half2 W2_0 = half2(0.70703125, 0.70703125);
-    half2 W3_0 = half2(0.382568359375, 0.923828125);
-    half2 W4_0 = half2(0.0, 1.0);
-    half2 W6_0 = half2(-0.70703125, 0.70703125);
-    half2 W9_0 = half2(-0.923828125, -0.382568359375);
+    half2 W1_0 = half2(0.923828125h, 0.382568359375h);
+    half2 W2_0 = half2(0.70703125h, 0.70703125h);
+    half2 W3_0 = half2(0.382568359375h, 0.923828125h);
+    half2 W4_0 = half2(0.0h, 1.0h);
+    half2 W6_0 = half2(-0.70703125h, 0.70703125h);
+    half2 W9_0 = half2(-0.923828125h, -0.382568359375h);
 
 #line 517
     uint n1_0 = 0U;
@@ -259,12 +259,12 @@ void dft16_0(array<half2, int(16)> thread* r_0)
 #line 510
 void dft16_1(array<half2, int(16)> thread* r_1)
 {
-    half2 W1_1 = half2(0.923828125, 0.382568359375);
-    half2 W2_1 = half2(0.70703125, 0.70703125);
-    half2 W3_1 = half2(0.382568359375, 0.923828125);
-    half2 W4_1 = half2(0.0, 1.0);
-    half2 W6_1 = half2(-0.70703125, 0.70703125);
-    half2 W9_1 = half2(-0.923828125, -0.382568359375);
+    half2 W1_1 = half2(0.923828125h, 0.382568359375h);
+    half2 W2_1 = half2(0.70703125h, 0.70703125h);
+    half2 W3_1 = half2(0.382568359375h, 0.923828125h);
+    half2 W4_1 = half2(0.0h, 1.0h);
+    half2 W6_1 = half2(-0.70703125h, 0.70703125h);
+    half2 W9_1 = half2(-0.923828125h, -0.382568359375h);
 
 #line 517
     uint n1_1 = 0U;
@@ -504,7 +504,7 @@ void exchange_0(array<half2, int(16)> thread* r_2, uint lgLen_0, uint lgSpan_0, 
         }
 
 #line 712
-        out_0[z_0] = half2(0.0, 0.0);
+        out_0[z_0] = half2(0.0h, 0.0h);
 
 #line 712
         z_0 = z_0 + 1U;
@@ -674,7 +674,7 @@ void transform_0(array<half2, int(16)> thread* r_4, uint tid_0, KernelContext_0 
                 dft16_0(r_4);
 
 #line 26
-                float2 tw_0 = mfTwiddle_0(6.28318548202514648 * float(lane_2) / 256.0);
+                float2 tw_0 = mfTwiddle_0(6.28318548202514648f * float(lane_2) / 256.0f);
                 float _S18 = tw_0.x;
 
 #line 27
@@ -684,10 +684,10 @@ void transform_0(array<half2, int(16)> thread* r_4, uint tid_0, KernelContext_0 
                 uint k2_2 = 0U;
 
 #line 27
-                float cr_0 = 1.0;
+                float cr_0 = 1.0f;
 
 #line 27
-                float ci_0 = 0.0;
+                float ci_0 = 0.0f;
 
                 for(;;)
                 {
@@ -762,7 +762,7 @@ float pairSum_0(uint tid_1, float v_1, KernelContext_0 thread* kernelContext_4)
     uint k_0 = 0U;
 
 #line 313
-    float t_12 = 0.0;
+    float t_12 = 0.0f;
 
     for(;;)
     {
@@ -882,11 +882,11 @@ float2 c16Bound_0(float2 v_2, float energy_0)
 
 #line 302
     float m_1 = length(v_2);
-    float b_5 = m_1 * 1.00146484375 + 0.00618266593664885 * sqrt(energy_0);
+    float b_5 = m_1 * 1.00146484375f + 0.00618266593664885f * sqrt(energy_0);
 
 #line 303
     float2 _S25;
-    if(m_1 > 0.0)
+    if(m_1 > 0.0f)
     {
 
 #line 304
@@ -898,7 +898,7 @@ float2 c16Bound_0(float2 v_2, float energy_0)
     {
 
 #line 304
-        _S25 = float2(b_5, 0.0);
+        _S25 = float2(b_5, 0.0f);
 
 #line 304
     }
@@ -953,7 +953,7 @@ void filterOne_0(uint pair_0, uint d_4, uint t_14, uint tid_2, const array<half2
     uint i_5 = 0U;
 
 #line 842
-    float energy_1 = 0.0;
+    float energy_1 = 0.0f;
 
 #line 872
     for(;;)
@@ -991,7 +991,7 @@ void filterOne_0(uint pair_0, uint d_4, uint t_14, uint tid_2, const array<half2
 
 
 
-    float _S27 = _S26 / 256.0;
+    float _S27 = _S26 / 256.0f;
 
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -1350,7 +1350,7 @@ void filterOne_0(uint pair_0, uint d_4, uint t_14, uint tid_2, const array<half2
         *(peakIdx_0+pair_0) = int(-1);
 
 #line 1103
-        *(peakVal_0+pair_0) = packed_float2(float2(0.0, 0.0)) ;
+        *(peakVal_0+pair_0) = packed_float2(float2(0.0f, 0.0f)) ;
 
 #line 1102
     }

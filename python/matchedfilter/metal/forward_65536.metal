@@ -3,27 +3,27 @@
 #include <metal_texture>
 using namespace metal;
 
-#line 10912 "hlsl.meta.slang"
+#line 11218 "hlsl.meta.slang"
 uint firstbithigh_0(uint value_0)
 {
 
-#line 10925
+#line 11231
     if(value_0 == 0U)
     {
 
-#line 10926
+#line 11232
         return 4294967295U;
     }
 
-#line 10927
+#line 11233
     uint _S1 = clz(value_0);
 
-#line 10927
+#line 11233
     return 31U - _S1;
 }
 
 
-#line 468 "/tmp/tmp9w3qmhwo/forward.slang"
+#line 468 "/tmp/tmp2t7f993v/forward.slang"
 void r4_0(float2 thread* a_0, float2 thread* b_0, float2 thread* c_0, float2 thread* d_0)
 {
     float2 t0_0 = *a_0 + *c_0;
@@ -51,7 +51,7 @@ void r4_0(float2 thread* a_0, float2 thread* b_0, float2 thread* c_0, float2 thr
 }
 
 
-#line 64 "/home/ahnitz/projects/claude/searchdev/work/mf-metal-50/src/gpu/twiddle.slang"
+#line 64 "/home/ahnitz/projects/claude/searchdev/work/mf-cuda-50/src/gpu/twiddle.slang"
 float2 mfTwiddle_0(float angle_0)
 {
 
@@ -59,7 +59,7 @@ float2 mfTwiddle_0(float angle_0)
 }
 
 
-#line 262 "/tmp/tmp9w3qmhwo/forward.slang"
+#line 262 "/tmp/tmp2t7f993v/forward.slang"
 float2 cmul_0(float2 a_1, float2 b_1)
 {
 
@@ -83,12 +83,12 @@ float2 cmul_0(float2 a_1, float2 b_1)
 #line 504
 void dft16_0(array<float2, int(16)> thread* r_0)
 {
-    float2 W1_0 = float2(0.92387950420379639, 0.38268342614173889);
-    float2 W2_0 = float2(0.70710676908493042, 0.70710676908493042);
-    float2 W3_0 = float2(0.38268342614173889, 0.92387950420379639);
-    float2 W4_0 = float2(0.0, 1.0);
-    float2 W6_0 = float2(-0.70710676908493042, 0.70710676908493042);
-    float2 W9_0 = float2(-0.92387950420379639, -0.38268342614173889);
+    float2 W1_0 = float2(0.92387950420379639f, 0.38268342614173889f);
+    float2 W2_0 = float2(0.70710676908493042f, 0.70710676908493042f);
+    float2 W3_0 = float2(0.38268342614173889f, 0.92387950420379639f);
+    float2 W4_0 = float2(0.0f, 1.0f);
+    float2 W6_0 = float2(-0.70710676908493042f, 0.70710676908493042f);
+    float2 W9_0 = float2(-0.92387950420379639f, -0.38268342614173889f);
 
 #line 511
     uint n1_0 = 0U;
@@ -279,7 +279,7 @@ void dft64_0(array<float2, int(64)> thread* r_1)
 #line 577
                 break;
             }
-            b_2[j_0] = cmul_0((*r_1)[pp_0 * 16U + j_0], mfTwiddle_0(6.28318548202514648 * float(pp_0 * j_0) / 64.0));
+            b_2[j_0] = cmul_0((*r_1)[pp_0 * 16U + j_0], mfTwiddle_0(6.28318548202514648f * float(pp_0 * j_0) / 64.0f));
 
 #line 577
             j_0 = j_0 + 1U;
@@ -404,7 +404,7 @@ struct EntryPointParams_0
 };
 
 
-#line 251 "/tmp/tmp9w3qmhwo/forward.slang"
+#line 251 "/tmp/tmp2t7f993v/forward.slang"
 struct KernelContext_0
 {
     EntryPointParams_0 constant* entryPointParams_0;
@@ -474,7 +474,7 @@ void exchange_0(array<float2, int(64)> thread* r_3, uint lgLen_0, uint lgSpan_0,
         }
 
 #line 706
-        out_0[z_0] = float2(0.0, 0.0);
+        out_0[z_0] = float2(0.0f, 0.0f);
 
 #line 706
         z_0 = z_0 + 1U;
@@ -766,7 +766,7 @@ void forwardTransform_0(array<float2, int(64)> thread* r_6, uint tid_0, KernelCo
         for(;;)
         {
 
-#line 7 "/home/ahnitz/projects/claude/searchdev/work/mf-metal-50/src/gpu/fft_transform.slang"
+#line 7 "/home/ahnitz/projects/claude/searchdev/work/mf-cuda-50/src/gpu/fft_transform.slang"
             for(;;)
             {
 
@@ -783,7 +783,7 @@ void forwardTransform_0(array<float2, int(64)> thread* r_6, uint tid_0, KernelCo
                 dftR_0(r_6);
 
 #line 26
-                float2 tw_0 = mfTwiddle_0(6.28318548202514648 * float(lane_2) / 6.5536e+04);
+                float2 tw_0 = mfTwiddle_0(6.28318548202514648f * float(lane_2) / 6.5536e+04f);
                 float _S20 = tw_0.x;
 
 #line 27
@@ -793,10 +793,10 @@ void forwardTransform_0(array<float2, int(64)> thread* r_6, uint tid_0, KernelCo
                 k2_1 = 0U;
 
 #line 27
-                cr_0 = 1.0;
+                cr_0 = 1.0f;
 
 #line 27
-                ci_0 = 0.0;
+                ci_0 = 0.0f;
 
                 for(;;)
                 {
@@ -869,7 +869,7 @@ void forwardTransform_0(array<float2, int(64)> thread* r_6, uint tid_0, KernelCo
                 dftR_0(r_6);
 
 #line 26
-                float2 tw_1 = mfTwiddle_0(6.28318548202514648 * float(lane_3) / 1024.0);
+                float2 tw_1 = mfTwiddle_0(6.28318548202514648f * float(lane_3) / 1024.0f);
                 float _S24 = tw_1.x;
 
 #line 27
@@ -879,10 +879,10 @@ void forwardTransform_0(array<float2, int(64)> thread* r_6, uint tid_0, KernelCo
                 k2_1 = 0U;
 
 #line 27
-                cr_0 = 1.0;
+                cr_0 = 1.0f;
 
 #line 27
-                ci_0 = 0.0;
+                ci_0 = 0.0f;
 
                 for(;;)
                 {
@@ -941,7 +941,7 @@ void forwardTransform_0(array<float2, int(64)> thread* r_6, uint tid_0, KernelCo
 #line 43
     innermost_0(r_6);
 
-#line 1985 "/tmp/tmp9w3qmhwo/forward.slang"
+#line 1985 "/tmp/tmp2t7f993v/forward.slang"
     return;
 }
 
@@ -1064,7 +1064,7 @@ uint slotToIndex_0(uint slot_0)
 
 #line 2002
         uint offset_0 = tid_1 + 1024U * k_1;
-        float2 _S31 = float2(0.0, 0.0);
+        float2 _S31 = float2(0.0f, 0.0f);
 
 #line 2003
         bool _S32;
@@ -1107,7 +1107,7 @@ uint slotToIndex_0(uint slot_0)
 #line 2005
         }
 
-        r_7[k_1] = float2(x_1.x / 6.5536e+04, - x_1.y / 6.5536e+04);
+        r_7[k_1] = float2(x_1.x / 6.5536e+04f, - x_1.y / 6.5536e+04f);
 
 #line 2001
         k_1 = k_1 + 1U;

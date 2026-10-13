@@ -207,3 +207,25 @@ widening R was a parameter change rather than a rewrite.
 Do the same for Tier C. This kernel's failure mode is a peak reported at
 the wrong sample: magnitudes stay plausible, benchmarks stay fast, and only
 an index comparison notices.
+
+## Kernel toolchain (pinned)
+
+Every checked-in kernel -- `python/matchedfilter/ptx/`, `spirv/` and `metal/` -- is built
+with one compiler, so that a rebuild of unchanged source reproduces them byte for byte
+(apart from `#line` markers) and a codegen change can be proved identical:
+
+- **slangc 2026.18.2**, the official shader-slang release
+  `slang-2026.18.2-linux-x86_64.tar.gz` from github.com/shader-slang/slang/releases,
+  sha256 `8a097d4365e1cab10265d0b0d77b461b5d30576f99ddc0521a35723c34cad816`.
+  Unpack anywhere and point `MF_SLANGC` at `bin/slangc`. `tools/build_spirv.py` and
+  `tools/build_ptx.py` refuse any other version (`build_spirv.SLANGC_VERSION`;
+  `MF_SLANGC_ANY_VERSION=1` overrides, for experiments only).
+- **NVRTC 12.8.93** (pip `nvidia-cuda-nvrtc-cu12==12.8.93`; `MF_NVRTC`), with the CUDA 12
+  headers on `MF_CUDA_PATH`/include (`cuda_fp16.h` for `src/gpu/coarse_tc.cu`).
+
+    MF_SLANGC=.../slang-2026.18.2/bin/slangc MF_CUDA_PATH=<dir with include/cuda_fp16.h> \
+        python tools/build_ptx.py && python tools/build_spirv.py
+
+Before this pin the shipped kernels came from mixed compiler versions: neither 2026.12
+nor 2026.18.2 rebuilt them (75 and 403 files differed). They were regenerated once, all
+together, with the pinned toolchain.
