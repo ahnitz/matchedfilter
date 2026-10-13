@@ -662,6 +662,15 @@ _BATCH_TOKEN = 0
 #: TimeDomainFilterBank._single_device. The first sample of each side is discarded (warm-up).
 _SINGLE_CHOICE: Dict[Tuple[str, int, int], Dict[str, Any]] = {}
 _SINGLE_TRIALS = 4
+#: Samples per side (after the discarded first) an unclear contest may take before the bank's
+#: own device stands (gatechain.measured_choice).
+_SINGLE_TRIALS_MAX = 5
+
+
+def _single_key(key):
+    """MF_COST_FILE key of a single-template device choice (device, n, block-count bucket)."""
+    return "single-device|%s|%d|%d" % key
+
 
 _CORR_COSTS: Dict[Tuple[int, str], Tuple[float, float]] = {}
 
@@ -1988,7 +1997,8 @@ class TimeDomainFilterBank:
         fixed cost (submission, recording for its window, readback, the wake from idle),
         which a CPU core undercuts by far. Neither side is assumed: the first calls of a
         shape (device, block size, block count) alternate between the GPU plan and a CPU
-        plan, timed synchronously, and the faster is kept for every bank.
+        plan, timed synchronously, and the shared rule (gatechain.measured_choice) keeps one
+        for every bank, and for later processes through MF_COST_FILE.
         MF_AUTOTUNE=0 keeps the bank's device.
         """
         from .device import parse as _parse_device
@@ -1999,20 +2009,36 @@ class TimeDomainFilterBank:
         if (_parse_device(self.device).kind != 'gpu' or not _autotune_enabled()
                 or os.environ.get("MF_SINGLE_DEVICE", "auto") == "bank"):
             return False, None
+        from . import gatechain
         key = (str(self.device), int(g.n), 1 << max(0, int(nblocks) - 1).bit_length())
-        tr = _SINGLE_CHOICE.setdefault(key, {"gpu": [], "cpu": [], "winner": None})
+        tr = _SINGLE_CHOICE.get(key)
+        if tr is None:
+            # A side this machine already measured for the shape is reused untimed
+            # (MF_COST_FILE), as every other measured choice is.
+            held = gatechain.stored_choice(_single_key(key))
+            tr = _SINGLE_CHOICE[key] = {"gpu": [], "cpu": [],
+                                        "winner": held if held in ("gpu", "cpu") else None}
         if tr["winner"] is not None:
             return tr["winner"] == "cpu", None
         side = "gpu" if len(tr["gpu"]) <= len(tr["cpu"]) else "cpu"
 
         def record(dt, side=side):
             tr[side].append(dt)
-            if tr["winner"] is None and min(len(tr["gpu"]), len(tr["cpu"])) >= _SINGLE_TRIALS:
-                med = {k: float(np.median(tr[k][1:])) for k in ("gpu", "cpu")}
-                tr["winner"] = min(med, key=med.get)
+            if (tr["winner"] is None and len(tr["gpu"]) == len(tr["cpu"])
+                    and len(tr["gpu"]) >= _SINGLE_TRIALS):
+                # Decided on whole pairs (the sides alternate) by the shared rule
+                # (gatechain.measured_choice): the bank's own device stands unless the other
+                # is faster past the tie and the noise; an unclear contest samples both
+                # further, up to _SINGLE_TRIALS_MAX each. Kept in MF_COST_FILE.
+                smp = {k: tr[k][1:] for k in ("gpu", "cpu")}
+                w, _ = gatechain.measured_choice(smp, "gpu", _SINGLE_TRIALS_MAX)
+                if w is None:
+                    return
+                tr["winner"] = w
+                gatechain.store_choice(_single_key(key), w)
                 from . import _log_autotune
                 _log_autotune("SINGLE %s n=%d blocks~%d -> %s  median s %s", key[0], key[1],
-                              key[2], tr["winner"], {k: "%.3g" % v for k, v in med.items()})
+                              key[2], w, {k: "%.3g" % float(np.median(v)) for k, v in smp.items()})
         return side == "cpu", record
 
     @staticmethod
