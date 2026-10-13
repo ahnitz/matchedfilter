@@ -127,8 +127,7 @@ def test_revisited_window_receives_updated_inputs(ctx, hier, changed):
         target = buffers[changed]
         if changed == "tmpl":
             coarse = tmpl[:, :1024]
-            if (ctx._test_backend == "vulkan" and _vkcompute._use_c16(1024)
-                    and not _vkcompute._COARSE_TILE.get(1024)):
+            if ctx._test_backend == "vulkan" and _vkcompute._use_c16(1024):
                 coarse = _vkcompute._pack_half2(coarse)
             elif ctx._test_backend == "metal" and _mtlcompute._use_c16(1024):
                 coarse = _mtlcompute._pack_half2(coarse)

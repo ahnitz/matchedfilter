@@ -82,16 +82,6 @@ def test_both_entry_points_have_the_same_variants():
             % (n, "the flat kernel" if flat_small else "the refine kernel"))
 
 
-def test_the_tiled_coarse_kernels_selected_are_present():
-    """_COARSE_TILE is consulted at run time; what it names must exist."""
-    spirv, _ = _dirs()
-    from matchedfilter import _vkcompute as V
-    for band in V._COARSE_TILE:
-        assert (spirv / ("coarse_%d.spv" % band)).is_file(), (
-            "_COARSE_TILE selects band %d but coarse_%d.spv did not ship"
-            % (band, band))
-
-
 def test_forward_and_packing_kernels_ship():
     spirv, metal = _dirs()
     manifest = _manifest()

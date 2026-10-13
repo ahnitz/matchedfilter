@@ -98,34 +98,6 @@ _OFF_TIMESTAMP_PERIOD = 296 + 424
 _OFF_MAX_WORKGROUP_SIZE = 296 + 236
 _OFF_STORAGE_OFFSET_ALIGNMENT = 296 + 328
 
-#: Bands that USE the tiled coarse kernel. It is built and validated for
-#: 512 and 1024 as well, and deliberately not selected there.
-#:
-#: Tiling pays at 256 and only at 256, because the untiled workgroup is
-#: BAND/16 threads and 16 is HALF A WAVE -- the other half idles. At 512
-#: that is a full wave and at 1024 two, so there is no waste to recover,
-#: while the tile's shared memory grows to 16 and 32 KB against 4 and costs
-#: occupancy. Measured, hierarchical call, untiled against tiled:
-#:
-#:     n=8192  band 512   0.761 -> 0.730 ms   1.04x
-#:     n=8192  band 512   0.417 -> 0.539 ms   0.77x
-#:     n=16384 band 1024  0.973 -> 1.008 ms   0.97x
-#:     n=16384 band 512   2.007 -> 1.664 ms   1.21x
-#:
-#: Noise around one. The 1.8x the tile buys at 256 does not generalise, and
-#: assuming it did is what prompted the measurement.
-#:
-#: The tile must match the TILE the kernel was compiled with, or the
-#: dispatch covers the wrong number of pairs.
-#: EMPTY. This selected a separate fp32 tiled coarse kernel (coarse_N.spv)
-#: that predates the fp16 work, and band 256 was still routed to it -- so
-#: the band the teaser autotunes to ran with ZERO fp16 instructions while
-#: every other band had been converted. Disassembly found it: 4125
-#: instructions, 1351 fp32, no v_pk_* at all.
-#:
-#: On the converted kernel band 256 goes 1.109 -> 0.868 ms. Kept as an
-#: empty dict rather than deleted so the selection point stays visible.
-_COARSE_TILE = {}
 
 # --- enough of the Vulkan enums to dispatch -------------------------------
 _QUEUE_COMPUTE = 0x2
@@ -1522,7 +1494,7 @@ class Context(InputUploads):
                                      mode)
 
         bands = (self._band_source(n, band, nd, nt, data, slot)
-                 if _use_c16(band) and not _COARSE_TILE.get(band) else None)
+                 if _use_c16(band) else None)
         bkey = _band_key(bands)
         key = ("hier", n, band, nd, nt, nbins, binsize, shift, lo, hi,
                int(np.float32(t2).view(np.uint32)),
@@ -1562,14 +1534,14 @@ class Context(InputUploads):
             write_input(bufs["data"], data)
             if shared_buffer(data, self) is not None:
                 pass
-            elif _use_c16(band) and not _COARSE_TILE.get(band):
+            elif _use_c16(band):
                 pass                     # the coarse role reads `data` directly
             else:
                 bufs["cdata"].write(np.ascontiguousarray(data[:, :band], np.complex64))
             self._uploaded["data"][storage_key] = dsig
         if upload_tmpl:
             write_input(bufs["tmpl"], tmpl)
-            if _use_c16(band) and not _COARSE_TILE.get(band):
+            if _use_c16(band):
                 bufs["ct0"].write(_pack_half2(ct0))
             else:
                 bufs["ct0"].write(np.ascontiguousarray(ct0, np.complex64))
@@ -1865,16 +1837,12 @@ class Context(InputUploads):
     def _make_hier(self, key, n, band, nd, nt, nbins, binsize, shift, lo, hi,
                    t2, raw_thr, data=None, tmpl=None, clear_out=True, rowwin=None, bands=None):
         vk = self.vk
-        tile = _COARSE_TILE.get(band)
         _ppg = 1          # pairs per workgroup; raised only on the c16 path
         _ragged, _groups = False, nd * nt   # see _coarse_geometry
         _tile = 1         # templates per tile; compiled into the kernel,
                           # so it is chosen with the kernel, not later
-        direct = bool(_use_c16(band) and not tile)
-        if tile:
-            cpipe, clayout, cset_layout = self._build_pipeline(
-                ("coarse", band), "coarse_%d.spv" % band, 3, 8)
-        elif not _use_c16(band):
+        direct = bool(_use_c16(band))
+        if not _use_c16(band):
             cpipe, clayout, cset_layout = self.pipeline(band)
         else:
             # The coarse ROLE, reading packed cdata/ct0. Not self.pipeline()
@@ -1934,7 +1902,7 @@ class Context(InputUploads):
                 # The packed coarse role reads its band straight from `data` (stride n,
                 # rounded to half in the kernel): no band copy and no pack pass.
                 "cdata": _Buffer(self, 4 if direct else nd * band * 8),
-                "ct0":   _Buffer(self, nt * band * (4 if _use_c16(band) and not tile else 8)),
+                "ct0":   _Buffer(self, nt * band * (4 if _use_c16(band) else 8)),
                 "cidx":  _Buffer(self, pairs * 4),
                 "cval":  _Buffer(self, pairs * 8),
                 # The compacted survivor list and the indirect group count.
@@ -1957,17 +1925,10 @@ class Context(InputUploads):
                 self._band_storage(b, nd, bands[0])
             self._storage[key] = b
         rwb = [b["rowwin"]] if rowwin is not None else []
-        # The tiled coarse kernel reports a magnitude per pair and nothing
-        # else -- a maximum does not depend on the output ordering, so it
-        # needs no index and no digit reversal.
-        if tile:
-            ds_coarse = self._descriptor_set(cset_layout,
-                                           [b["cdata"], b["ct0"], b["cval"]])
-        else:
-            ds_coarse = self._descriptor_set(cset_layout,
-                                           [(b["bands"] if bands else b["data"]) if direct
-                                            else b["cdata"], b["ct0"],
-                                            b["cidx"], b["cval"]] + rwb)
+        ds_coarse = self._descriptor_set(cset_layout,
+                                       [(b["bands"] if bands else b["data"]) if direct
+                                        else b["cdata"], b["ct0"],
+                                        b["cidx"], b["cval"]] + rwb)
         ds_compact = self._descriptor_set(
             kset_layout, [b["cval"], b["surv"], b["args"]])
         ds_listed = self._descriptor_set(
@@ -1994,39 +1955,33 @@ class Context(InputUploads):
             sets = (_vp * 1)(ds)
             vk.vkCmdBindDescriptorSets(cmd, _BIND_POINT_COMPUTE, clayout, 0, 1,
                                        sets, 0, None)
-            if tile:
-                pc = (ctypes.c_uint32 * 2)(nt, pairs)
-                vk.vkCmdPushConstants(cmd, clayout, _STAGE_COMPUTE, 0, 8,
-                                      ctypes.byref(pc))
-                vk.vkCmdDispatch(cmd, (pairs + tile - 1) // tile, 1, 1)
-            else:
-                # One bin over the coarse window span: the reported peak IS
-                # the maximum, which is what the gate needs. Widen by one coarse
-                # sample so rounding the caller's window remains conservative.
-                R_coarse = n // band
-                cstart = lo // R_coarse
-                cend = (hi + R_coarse - 1) // R_coarse
-                if cend > band:
-                    cend = band
-                if cstart > 0:
-                    cstart -= 1
-                cend = max(cstart + 1, cend)
-                cspan = max(1, cend - cstart)
-                shift_c = (cspan.bit_length() - 1) if cspan & (cspan - 1) == 0 else -1
-                # A ragged-tile build reads the data row count where the
-                # (unused, one-bin) coarse bin size would go.
-                pc = (ctypes.c_uint32 * 7)(nt, cstart, cend, nd if _ragged else cspan,
-                                           shift_c & 0xFFFFFFFF, 1, 0)
-                vk.vkCmdPushConstants(cmd, clayout, _STAGE_COMPUTE, 0,
-                                      _PUSH_BYTES, ctypes.byref(pc))
-                # PPG pairs per workgroup and TILE_T templates per pair,
-                # so PPG*TILE_T times fewer groups.
-                #
-                # _tile is the one the KERNEL was compiled with -- it is
-                # chosen where the pipeline is chosen. Recomputing it here
-                # is what let the two disagree: the kernel carried tile 4
-                # while this dispatched for tile 1.
-                vk.vkCmdDispatch(cmd, _groups, 1, 1)
+            # One bin over the coarse window span: the reported peak IS
+            # the maximum, which is what the gate needs. Widen by one coarse
+            # sample so rounding the caller's window remains conservative.
+            R_coarse = n // band
+            cstart = lo // R_coarse
+            cend = (hi + R_coarse - 1) // R_coarse
+            if cend > band:
+                cend = band
+            if cstart > 0:
+                cstart -= 1
+            cend = max(cstart + 1, cend)
+            cspan = max(1, cend - cstart)
+            shift_c = (cspan.bit_length() - 1) if cspan & (cspan - 1) == 0 else -1
+            # A ragged-tile build reads the data row count where the
+            # (unused, one-bin) coarse bin size would go.
+            pc = (ctypes.c_uint32 * 7)(nt, cstart, cend, nd if _ragged else cspan,
+                                       shift_c & 0xFFFFFFFF, 1, 0)
+            vk.vkCmdPushConstants(cmd, clayout, _STAGE_COMPUTE, 0,
+                                  _PUSH_BYTES, ctypes.byref(pc))
+            # PPG pairs per workgroup and TILE_T templates per pair,
+            # so PPG*TILE_T times fewer groups.
+            #
+            # _tile is the one the KERNEL was compiled with -- it is
+            # chosen where the pipeline is chosen. Recomputing it here
+            # is what let the two disagree: the kernel carried tile 4
+            # while this dispatched for tile 1.
+            vk.vkCmdDispatch(cmd, _groups, 1, 1)
 
         def barrier(src_stage=_STAGE_COMPUTE_BIT, dst_stage=_STAGE_COMPUTE_BIT,
                     src_access=_ACCESS_SHADER_WRITE, dst_access=_ACCESS_SHADER_READ):
@@ -2061,7 +2016,7 @@ class Context(InputUploads):
             vk.vkCmdBindDescriptorSets(cmd, _BIND_POINT_COMPUTE, playout,
                                       0, 1, sets, 0, None)
             pc = (ctypes.c_uint32 * 4)(n, band, nd*band,
-                                      int(_use_c16(band) and not tile))
+                                      int(_use_c16(band)))
             vk.vkCmdPushConstants(cmd, playout, _STAGE_COMPUTE, 0, 16,
                                   ctypes.byref(pc))
             vk.vkCmdDispatch(cmd, (nd*band + 255)//256, 1, 1)
