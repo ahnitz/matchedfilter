@@ -1,5 +1,8 @@
 # CPU and GPU timings at every supported size
 
+> Historical: measured 2026-09-26 at bdfdad6. For current numbers see
+> [performance-status.md](performance-status.md).
+
 AMD Ryzen AI MAX+ 395 (one CPU thread, AVX3), Radeon 8060S. The CPU supports
 all 15 powers of two from 64 to 1048576; the GPU supports the first 11,
 through 65536, subject to device limits.
