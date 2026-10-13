@@ -59,8 +59,13 @@ def _device_followup_backends():
     except Exception:                                  # noqa: BLE001
         pass
     try:
-        from matchedfilter import _vulkan
-        if _vulkan.enumerate_devices()[0]:
+        # A hardware Vulkan device that runs a filter: enumeration alone also lists a software
+        # rasteriser (lavapipe), whose device timers record nothing, and a driver that cannot
+        # allocate (conftest.usable_gpu).
+        import matchedfilter as mf
+        from conftest import usable_gpu
+        if (any(str(d) == "gpu:0" and d.backend == "vulkan" and not d.is_software
+                for d in mf.devices()) and usable_gpu() is not None):
             out.append("gpu:0")
     except Exception:                                  # noqa: BLE001
         pass
