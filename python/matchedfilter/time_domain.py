@@ -579,6 +579,17 @@ def _chain_trials_begin(jobs):
     for tk, plans in by.items():
         c = _chain_trial_next(tk)
         if c is None:
+            # Locked (by samples, or by the budget inside _chain_trial_next): the plans adopt
+            # the winner now, not on a sample that will not come.
+            with _AUTOTUNE_LOCK:
+                tr = _CHAIN_TRIALS.get(tk)
+                w = tr.get("winner") if tr is not None else None
+            if w is not None:
+                for p in plans.values():
+                    p._chain_trial = None
+                    p.autotune_info.update(status="locked", winner=tuple(w))
+                    if tuple(w) != tuple(p._chain):
+                        p._switch_chain(w)
             continue
         settled = True
         for p in plans.values():
