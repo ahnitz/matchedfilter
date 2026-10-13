@@ -21,7 +21,7 @@ import numpy as np
 
 from . import _gputime, _vulkan
 from ._shared import empty_shared, shared_buffer, shared_key, shared_view, write_input
-from ._gpuhost import (bin_shift, plan_items, split_items, hier_tiers, hier_window,
+from ._gpuhost import (MAX_BINS, bin_shift, plan_items, split_items, hier_tiers, hier_window,
                        split_bins, hier_peaks_grouped as _hier_peaks_grouped)
 from ._shared import pack_half2 as _pack_half2, sparsified as _sparsified
 
@@ -43,7 +43,7 @@ def _manifest():
 #: The per-bin table aliases the 8 KB exchange staging: CAP=1024 complex =
 #: 2048 uints. Past that the kernel needs its own array and the LDS cost
 #: halves occupancy, so this refuses rather than silently getting slower.
-_MAX_BINS = 2048
+_MAX_BINS = MAX_BINS          # _gpuhost.MAX_BINS: one limit for every backend
 
 #: Must match COARSE_TILE_T in tools/build_spirv.py -- the kernel is
 #: compiled with the tile baked in, so the dispatch has to agree.

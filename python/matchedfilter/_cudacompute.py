@@ -27,7 +27,7 @@ from ._cuda import check_cuda
 from ._errors import UnsupportedSize
 from ._gpu_cache import InputUploads
 from ._shared import empty_shared, shared_buffer, shared_key, _Borrowed
-from ._gpuhost import (bin_shift, plan_items, split_items, hier_tiers, hier_window,
+from ._gpuhost import (MAX_BINS, bin_shift, plan_items, split_items, hier_tiers, hier_window,
                        split_bins, padded_rows, grouped_windows)
 from ._shared import pack_half2 as _pack_half2
 
@@ -87,7 +87,7 @@ def _manifest():
     return _manifest_cache
 
 
-_MAX_BINS = 2048
+_MAX_BINS = MAX_BINS          # _gpuhost.MAX_BINS: one limit for every backend
 # Sparse readback: peak records copied back with the count, before a second round trip.
 _SPARSE_HOST = 4096
 # The primary context this thread last made current (handles are stable: _DeviceShared retains
