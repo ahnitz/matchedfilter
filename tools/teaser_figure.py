@@ -220,15 +220,11 @@ def _filter_ms(kind, device, reps, fd, snr=5.5):
         _DETAILS[(device, kind, fd)] = details
         if kind == 'hier' and hasattr(f, 'config'):
             cfg = f.config
-            if hasattr(cfg, 'b0') and hasattr(cfg, 'b1'):
-                hinfo = {'cascade_band': cfg.b0, 'band': cfg.b1,
-                         'taps': cfg.taps, 'refine_rate': f.refine_rate}
-            elif len(cfg) == 3:
-                hinfo = {'cascade_band': cfg[0], 'band': cfg[1],
-                         'taps': cfg[2], 'refine_rate': f.refine_rate}
-            else:
-                hinfo = {'band': cfg[0], 'taps': cfg[1],
-                         'refine_rate': f.refine_rate}
+            # HierarchicalFilter.config is the gate chain, a tuple of bands.
+            chain = [int(b) for b in cfg]
+            hinfo = {'chain': chain, 'band': chain[-1], 'refine_rate': f.refine_rate}
+            if len(chain) > 1:
+                hinfo['cascade_band'] = chain[0]
             if hasattr(f, 'autotune_info') and f.autotune_info.get('winner') is not None:
                 winner = f.autotune_info['winner']
                 hinfo['autotune_winner'] = list(winner) if isinstance(winner, (tuple, list)) else winner
