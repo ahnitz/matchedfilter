@@ -1,5 +1,5 @@
-"""The block forward through the platform FFT (src/fft_accel.c: vDSP on macOS) is an autotuner
-candidate. Where it exists, a CPU search's peaks with it match those with the engine's
+"""The block forward through the platform FFT (src/fft_accel.c: vDSP on macOS) is a cost-model
+candidate (_cpu_forward_platform). Where it exists, a CPU search's peaks with it match those with the engine's
 transform (fp32 rounding apart); where it does not, asking for it says so."""
 import numpy as np
 
@@ -11,13 +11,8 @@ from test_time_domain import _whitened_inspiral_bank
 def _search(monkeypatch, platform):
     monkeypatch.setenv("MF_AUTOTUNE", "0")
 
-    def pick(self):                     # this test's choice instead of the trial's
-        if self._mf is not None and bool(self._pfft) != platform:
-            self._pfft = platform and self._mf.set_platform_fft(platform)
-            if not platform:
-                self._mf.set_platform_fft(False)
-        return False
-    monkeypatch.setattr(mf.HierarchicalFilter, "_pfft_before_call", pick)
+    # This test's choice instead of the price (_cpu_forward_platform).
+    monkeypatch.setattr(mf, "_cpu_forward_platform", lambda n: platform)
     rng = np.random.default_rng(5)
     counts = sorted(rng.integers(200, 1800, 16))
     taps, w, df = _whitened_inspiral_bank(rng, counts)
@@ -77,3 +72,10 @@ def test_continuous_correlation_platform_fft_matches_engine():
         out[on] = d
     a, b = out[False], out[True]
     assert np.abs(a - b).max() <= 1e-5 * np.abs(a).max()
+
+
+def test_forward_cost_prices_both():
+    native, platform = mf._core.forward_cost(2048, 3)
+    assert native > 0
+    import sys
+    assert (platform > 0) == (sys.platform == "darwin")
