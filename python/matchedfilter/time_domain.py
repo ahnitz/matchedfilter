@@ -3050,7 +3050,11 @@ class SegmentPlan:
         """Read every dispatch of a finished segment graph. Sparse results go straight
         into the job's peak lists, without dense tables, in the order filter_series gives:
         (block, template, bin), blocks in the caller's order. A dense dispatch (threshold 0,
-        or a fallback) takes the table route for its whole call."""
+        or a fallback) takes the table route for its whole call.
+
+        A dispatch's sparse groups are joined in one flat index over its (layout row,
+        template, bin) table -- group rows b0.. are row offsets into it -- and sorted once, so
+        the CUDA readers are asked for their records unsorted (sort=False)."""
         from . import _SparsePeaks
         results = []
         for entries, template_index in tr["jobs"]:
@@ -3058,23 +3062,33 @@ class SegmentPlan:
             for d, sub_starts, g, tmpl_arg, N in entries:
                 t = d.trace
                 nt, nb = t["shape"][1], t["shape"][2]
+                per = nt * nb
                 order = t["order"]
-                rows, tis, bns, idxs, vals = [], [], [], [], []
+                flats, idxs, vals = [], [], []
                 dense = None
                 for b0, b1, entry in t["groups"]:
-                    r = entry() if reader is None else reader(entry, t)
+                    if reader is not None:
+                        r = reader(entry, t)
+                    elif callable(entry):
+                        r = entry(sort=False)
+                    else:
+                        r = entry()
                     if isinstance(r, _SparsePeaks):
                         if r.flat.size == 0:
                             continue
-                        per = r.shape[1] * r.shape[2]
-                        keep = r.flat < (b1 - b0) * per          # padded rows dropped
-                        bi, rest = np.divmod(r.flat[keep].astype(np.int64), per)
-                        ti, bn = np.divmod(rest, r.shape[2])
-                        rows.append(bi + b0)                       # layout row
-                        tis.append(ti)
-                        bns.append(bn)
-                        idxs.append(r.idx[keep].astype(np.int64))
-                        vals.append(r.val[keep])
+                        f = r.flat
+                        gper = r.shape[1] * r.shape[2]
+                        keep = f < (b1 - b0) * gper                # padded rows dropped
+                        if not keep.all():
+                            f = f[keep]
+                        if r.shape[1:] == (nt, nb):
+                            flats.append(f + b0 * per)
+                        else:                                      # re-index into the trace's table
+                            bi, rest = np.divmod(f.astype(np.int64), gper)
+                            ti_, bn_ = np.divmod(rest, r.shape[2])
+                            flats.append((bi + b0) * per + ti_ * nb + bn_)
+                        idxs.append(r.idx if keep.all() else r.idx[keep])
+                        vals.append(r.val if keep.all() else r.val[keep])
                     else:
                         gi, gv = r
                         if not (gi >= 0).any():
@@ -3085,33 +3099,38 @@ class SegmentPlan:
                         dense[0][b0:b1], dense[1][b0:b1] = gi[:b1 - b0], gv[:b1 - b0]
                 if dense is not None:
                     idx, val = dense
-                    if rows:
-                        lr, ti, bn = (np.concatenate(x) for x in (rows, tis, bns))
-                        idx[lr, ti, bn] = np.concatenate(idxs)
-                        val[lr, ti, bn] = np.concatenate(vals)
+                    if flats:
+                        fl = np.concatenate(flats)
+                        idx.reshape(-1)[fl] = np.concatenate(idxs)
+                        val.reshape(-1)[fl] = np.concatenate(vals)
                     if order is not None:
                         ri, rv = np.empty_like(idx), np.empty_like(val)
                         ri[order], rv[order] = idx, val
                         idx, val = ri, rv
                     _consume_into(lists, idx, val, sub_starts, g, tmpl_arg, N, template_index)
                     continue
-                if not rows:
+                if not flats:
                     continue
-                row = np.concatenate(rows)
+                fl = np.concatenate(flats) if len(flats) > 1 else flats[0]
+                row, rest = np.divmod(fl, per)                     # layout row
                 if order is not None:
                     row = order[row]                               # the caller's block
-                ti, bn = np.concatenate(tis), np.concatenate(bns)
-                srt = np.argsort((row * nt + ti) * nb + bn, kind="stable")
-                row, ti = row[srt], ti[srt]
-                ii = np.concatenate(idxs)[srt]
-                vv = np.concatenate(vals)[srt]
+                    key = row * per + rest
+                else:
+                    key = fl
+                srt = np.argsort(key, kind="stable")
+                row = row[srt]
+                ti = rest[srt] // nb
+                ii = (np.concatenate(idxs) if len(idxs) > 1 else idxs[0])[srt].astype(np.int64)
+                vv = (np.concatenate(vals) if len(vals) > 1 else vals[0])[srt]
                 if tmpl_arg is not None:
                     lists[0].append(np.full(row.size, template_index, dtype=np.int64))
                 else:
                     lists[0].append(g.template_indices[ti])
-                lists[1].append(sub_starts[row] + ii)
+                st = sub_starts[row]
+                lists[1].append(st + ii)
                 lists[2].append(vv)
-                lists[3].append(sub_starts[row])
+                lists[3].append(st)
                 lists[4].append(np.full(row.size, N, dtype=np.int64))
             results.append(_results_from(lists))
         return results
