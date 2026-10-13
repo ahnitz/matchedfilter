@@ -16,6 +16,9 @@ consumer.**
 
 ## 1. Where it stands (measured today)
 
+> Historical: measured 2026-10-08, before the GPU parity work. For current numbers see
+> [performance-status.md](performance-status.md).
+
 The library alone: a fine-stage bank of 200 templates (200-400 taps), n=2048, an analytic 2^20
 series, threshold 5, FD 1e-3. Each column is one Zen 5 core or the whole GPU. Min of 3.
 
