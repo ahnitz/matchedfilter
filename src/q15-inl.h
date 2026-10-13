@@ -111,12 +111,24 @@ static int q15_screen(size_t N, const int16_t *dq, const int16_t *tr, const int1
   if(!tw) return -1;
   const int st = M1 + 1;
   vq *X = (vq *)scratch, *Xi = X + (size_t)st * M2;
+  if(M1 == 16 && M2 == 16){
+    /* N = 256, the band the screen runs at: strides as constants, so every element's
+       address is an immediate offset rather than a multiply-add per element (the generic
+       call spent ~60 integer adds per codelet on addressing). */
+    for(int e1 = 0; e1 < 16; e1++)
+      qsr16_prod(dq + 3 * e1, tr + (size_t)e1 * AP_QW, ti + (size_t)e1 * AP_QW,
+                 X + e1, Xi + e1, 17, 48, 16L * AP_QW);
+    for(int k2 = 0; k2 < 16; k2++)
+      qsr16_tw(X + (size_t)k2 * 17, Xi + (size_t)k2 * 17, 1,
+               tw->re + (size_t)k2 * 16, tw->im + (size_t)k2 * 16);
+  } else {
   for(int e1 = 0; e1 < M1; e1++)
     qcodelet_prod(M2, dq + 3 * e1, tr + (size_t)e1 * AP_QW, ti + (size_t)e1 * AP_QW,
                   X + e1, Xi + e1, st, 3L * M1, (long)M1 * AP_QW);
   for(int k2 = 0; k2 < M2; k2++)
     qcodelet_tw(M1, X + (size_t)k2 * st, Xi + (size_t)k2 * st, 1,
                 tw->re + (size_t)k2 * M1, tw->im + (size_t)k2 * M1);
+  }
   /* Output k = k2 + M2*k1 sits at X[k2*st + k1]; the maximum does not care
      about order, so walk memory and clip each row to the window. */
   if(we > N) we = N;

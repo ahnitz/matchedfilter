@@ -78,6 +78,9 @@ def main():
                     help="pinned chain, in Hz at 2048 Hz (bands in bins at n=2048)")
     ap.add_argument("--seed", type=int, default=3)
     ap.add_argument("--transient", action="store_true")
+    ap.add_argument("--scan", choices=("elect", "max"), default="max",
+                    help="the FP16 gate's scan: max (run_max, the gate's own: bound "
+                         "sqrt(Pmax)(1+2u)) or elect (run: the elected lag's |y|(1+3u))")
     ap.add_argument("--worker", action="store_true")
     a = ap.parse_args()
     if a.worker:
@@ -85,7 +88,8 @@ def main():
         return
     tmp = Path(tempfile.mkdtemp())
     recs = {}
-    for mode, env in (("f32", {"MF_GATE16": "0"}), ("f16", {"MF_GATE16_DEBUG": "1"})):
+    f16env = {"MF_GATE16_DEBUG": "1"} if a.scan == "elect" else {"MF_GATE16_DEBUG_MAX": "1"}
+    for mode, env in (("f32", {"MF_GATE16": "0"}), ("f16", f16env)):
         path = tmp / (mode + ".bin")
         e = dict(os.environ, MF_HMF_DUMP=str(path), MF_AUTOTUNE="0", **env)
         cmd = [sys.executable, __file__, "--worker", "--bank", a.bank, "--profiles", a.profiles,
@@ -104,7 +108,8 @@ def main():
     rel = np.abs(m16 - m32) / np.maximum(m32, 1e-30)
     q = np.quantile(np.abs(e), [0.5, 0.9, 0.99, 0.999, 0.9999, 1.0])
     print("pairs %d  rms(y) median %.3f  max|y32| median %.3f" % (n, np.median(rms), np.median(m32)))
-    print("normalised error e = (|y16|(1+3u)-|y32|)/(u*rms): mean %.3f std %.3f" % (e.mean(), e.std()))
+    print("scan %s; normalised error e = (B(kappa=0)-|y32|)/(u*rms): mean %.3f std %.3f"
+          % (a.scan, e.mean(), e.std()))
     print("|e| quantiles 50/90/99/99.9/99.99/max: " + " ".join("%.2f" % v for v in q))
     print("relative error of the maximum: median %.2e  max %.2e" % (np.median(rel), rel.max()))
     print("max |e| / std(e) = %.1f" % (np.abs(e).max() / e.std()))

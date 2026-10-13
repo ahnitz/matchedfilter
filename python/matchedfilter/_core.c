@@ -822,6 +822,10 @@ static PyObject *HMF_set_q15(HMFObject *self,PyObject *args){
   int on; if(!PyArg_ParseTuple(args,"p",&on)) return NULL;
   return PyBool_FromLong(ap_hmf_set_q15(self->p,on)==0);
 }
+static PyObject *HMF_set_q15_tier0(HMFObject *self,PyObject *args){
+  int on; if(!PyArg_ParseTuple(args,"p",&on)) return NULL;
+  return PyBool_FromLong(ap_hmf_set_q15_tier0(self->p,on)==0);
+}
 static PyObject *HMF_set_platform_fft(HMFObject *self,PyObject *args){
   int on; if(!PyArg_ParseTuple(args,"p",&on)) return NULL;
   return PyBool_FromLong(ap_hmf_set_platform_fft(self->p,on)==0);
@@ -847,6 +851,7 @@ static PyObject *HMF_set_hermitian(HMFObject *self,PyObject *args){
 
 static PyMethodDef HMF_methods[]={
   {"series_group",(PyCFunction)HMF_series_group,METH_NOARGS,"actual series block group"},
+  {"set_q15_tier0",(PyCFunction)HMF_set_q15_tier0,METH_VARARGS,"set_q15_tier0(fp16) -> True if tier 0 behind the Q15 screen now runs on the FP16 gate"},
   {"set_platform_fft",(PyCFunction)HMF_set_platform_fft,METH_VARARGS,"set_platform_fft(on) -> True if block forwards now run through the platform FFT"},
   {"set_q15",(PyCFunction)HMF_set_q15,METH_VARARGS,"set_q15(on) -> True if the first tier now runs behind the Q15 screen"},
   {"q15_stats",(PyCFunction)HMF_q15_stats,METH_NOARGS,"q15_stats() -> (on, pairs passed to the float tier, screen ticks)"},
@@ -1089,9 +1094,55 @@ static PyObject *M_forward_cost(PyObject *self, PyObject *args){
   return Py_BuildValue("(dd)", bn, a ? ba : -1.0);
 }
 
+
+/* gate16_bound(N, data, templates, nt) -> float32 array of nt: the FP16 first gate's
+   reported bound (ap_gate16_run, one data row, window [0, N)), or None where there is no
+   FP16 gate. Measurement only (tools/gate_margin.py --gate cpu-g16). data: N complex64,
+   templates: nt x N complex64, correlated as the tier does (templates conjugated at ingest). */
+void *ap_gate16_create(size_t m, int nd, int nt);
+void ap_gate16_destroy(void *g);
+int ap_gate16_set_template(void *g, int t, const float *spec);
+int ap_gate16_set_data(void *g, int d, const float *spec);
+int ap_gate16_run(void *g, int d0, int nd, int t0, int nt, size_t ws, size_t we, ap_peak *out);
+static PyObject *M_gate16_bound(PyObject *self, PyObject *args){
+  (void)self; Py_ssize_t N; Py_buffer bd, bt; int nt;
+  if(!PyArg_ParseTuple(args,"ny*y*i",&N,&bd,&bt,&nt)) return NULL;
+  PyObject *res=NULL;
+  void *g=ap_gate16_create((size_t)N,1,nt);
+  if(!g){ PyBuffer_Release(&bd); PyBuffer_Release(&bt); Py_RETURN_NONE; }
+  ap_peak *pk=calloc((size_t)nt,sizeof(ap_peak));
+  int ok = pk && bd.len>=(Py_ssize_t)(8*N) && bt.len>=(Py_ssize_t)(8*N*nt);
+  if(ok){
+    for(int t=0;t<nt&&ok;t++) ok = ap_gate16_set_template(g,t,(const float*)bt.buf+(size_t)t*2*N)==0;
+    ok = ok && ap_gate16_set_data(g,0,(const float*)bd.buf)==0;
+    ok = ok && ap_gate16_run(g,0,1,0,nt,0,(size_t)N,pk)==0;
+  }
+  if(ok){
+    PyObject *b=PyBytes_FromStringAndSize(NULL,(Py_ssize_t)nt*sizeof(float));
+    if(b){ float *f=(float*)PyBytes_AS_STRING(b);
+      for(int t=0;t<nt;t++) f[t]= pk[t].index>=0 ? pk[t].magnitude : -1.0f;
+      res=b; }
+  } else { PyErr_SetString(PyExc_ValueError,"gate16_bound failed"); }
+  free(pk); ap_gate16_destroy(g); PyBuffer_Release(&bd); PyBuffer_Release(&bt);
+  return res;
+}
+
+
+static PyObject *M_price_q15_tier0(PyObject *self, PyObject *args){
+  (void)self; Py_ssize_t m; int nt, reps=5; double a, b; int rc;
+  if(!PyArg_ParseTuple(args,"ni|i",&m,&nt,&reps)) return NULL;
+  Py_BEGIN_ALLOW_THREADS
+  rc=ap_hmf_price_q15_tier0((size_t)m,nt,reps,&a,&b);
+  Py_END_ALLOW_THREADS
+  if(rc){ PyErr_SetString(PyExc_RuntimeError,"price_q15_tier0 failed"); return NULL; }
+  return Py_BuildValue("(dd)",a,b);
+}
+
 static PyMethodDef methods[]={
   {"backend",M_backend,METH_NOARGS,"backend() -> name of the selected kernel"},
   {"forward_cost",M_forward_cost,METH_VARARGS,"forward_cost(n, reps=9) -> (engine s, platform s or -1) per block forward"},
+  {"gate16_bound",M_gate16_bound,METH_VARARGS,"gate16_bound(N, data, templates, nt) -> bytes of nt float32 bounds (-1: not fired), or None"},
+  {"price_q15_tier0",M_price_q15_tier0,METH_VARARGS,"price_q15_tier0(m, nt, reps=5) -> (fp32, fp16 or -1) ticks per listed pair"},
   {"gate16",M_gate16,METH_NOARGS,"gate16() -> whether new hierarchical plans run the FP16 first gate"},
   {"targets",M_targets,METH_NOARGS,"targets() -> names this build can run here"},
   {"set_target",M_set_target,METH_VARARGS,"set_target(name|None) -> narrow the choice"},
