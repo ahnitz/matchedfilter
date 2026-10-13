@@ -1179,6 +1179,14 @@ def sample_spread(v):
 def measured_choice(samples, model, cap, tie=None, z=None):
     """Decide a measured choice from samples {candidate: [cost, ...]} (lower is better).
 
+    For choices that change results or whose effect is a large share of what a sample
+    times. A choice whose effect on a whole call is under the tie margin -- a kernel that is
+    a small part of the call, with results equal to rounding -- is PRICED instead (timed
+    once on its own, the cheaper kept in MF_COST_FILE: _cpu_forward_platform, the corr-pfft
+    price in time_domain._corr_block_costs). Trialled over whole calls it sits at the tie
+    and the model's choice wins about half the time (cpu-fft on the M2: 4.6-5.2% per call
+    for a transform 30% faster).
+
     Returns (winner, more): winner is the candidate to lock, or None while more samples are
     needed, in which case `more` maps the candidates to measure further to the sample count
     each needs. The fastest median wins only if it is more than `tie` (TIE) below the model's

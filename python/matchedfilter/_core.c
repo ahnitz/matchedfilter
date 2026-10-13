@@ -10,6 +10,7 @@
 #include <limits.h>
 #include "matchedfilter.h"
 #include "transform.h"
+#include <time.h>
 
 /* Validate the extension boundary independently of the Python convenience API.
    Divide byte capacities instead of multiplying untrusted sizes. */
@@ -1058,8 +1059,39 @@ static PyObject *M_gate16(PyObject *self, PyObject *noargs){
   return PyBool_FromLong(ap_gate16_available());
 }
 
+
+/* forward_cost(n, reps) -> (engine s, platform s or -1): one block forward of n points as
+   the hierarchical series does it (copy with 1/n, transform), best of reps, both ways. */
+static double now_s(void){ struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t); return t.tv_sec+1e-9*t.tv_nsec; }
+static PyObject *M_forward_cost(PyObject *self, PyObject *args){
+  (void)self; Py_ssize_t n; int reps=9;
+  if(!PyArg_ParseTuple(args,"n|i",&n,&reps)) return NULL;
+  if(n<16||(n&(n-1))){ PyErr_SetString(PyExc_ValueError,"n must be a power of two >= 16"); return NULL; }
+  ap_plan *fft=ap_create((size_t)n); ap_accel *a=ap_accel_create((size_t)n);
+  float *src=malloc(2*n*sizeof(float)), *tmp=malloc(2*n*sizeof(float)), *out=malloc(2*n*sizeof(float));
+  double bn=1e30, ba=1e30;
+  if(fft&&src&&tmp&&out){
+    Py_BEGIN_ALLOW_THREADS
+    for(Py_ssize_t k=0;k<2*n;k++) src[k]=(float)((k*2654435761u)%1000)*1e-3f;
+    const float inv=1.0f/(float)n;
+    for(int r=0;r<reps;r++){
+      double t0=now_s();
+      for(int i=0;i<8;i++){ for(Py_ssize_t k=0;k<2*n;k++) tmp[k]=src[k]*inv; ap_fft(fft,tmp,out,AP_FORWARD); }
+      double t1=now_s();
+      if(a) for(int i=0;i<8;i++) ap_accel_forward(a,src,(size_t)n,inv,out);
+      double t2=now_s();
+      if((t1-t0)/8<bn) bn=(t1-t0)/8;
+      if(a && (t2-t1)/8<ba) ba=(t2-t1)/8;
+    }
+    Py_END_ALLOW_THREADS
+  }
+  free(src); free(tmp); free(out); ap_destroy(fft); ap_accel_destroy(a);
+  return Py_BuildValue("(dd)", bn, a ? ba : -1.0);
+}
+
 static PyMethodDef methods[]={
   {"backend",M_backend,METH_NOARGS,"backend() -> name of the selected kernel"},
+  {"forward_cost",M_forward_cost,METH_VARARGS,"forward_cost(n, reps=9) -> (engine s, platform s or -1) per block forward"},
   {"gate16",M_gate16,METH_NOARGS,"gate16() -> whether new hierarchical plans run the FP16 first gate"},
   {"targets",M_targets,METH_NOARGS,"targets() -> names this build can run here"},
   {"set_target",M_set_target,METH_VARARGS,"set_target(name|None) -> narrow the choice"},
