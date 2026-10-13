@@ -552,10 +552,12 @@ def gpu_peaks(device, ctx=None):
             if txt:
                 mhz = max([mhz] + [int(x) for x in re.findall(r"(\d+)Mhz", txt)])
         ghz = (mhz or 2900) / 1e3
-        # RDNA 3/3.5: 2 SIMD32 per CU, dual-issue fp32 (VOPD / wave64): 128 fp32 FMA per CU
-        # per clock; packed fp16 doubles it. (RDNA 2 and older: 64 / 128.)
-        rdna3 = arch.startswith("gfx11")
-        fp32 = 128 if rdna3 else 64
+        # RDNA 3/3.5 (gfx11) and RDNA 4 (gfx12): 2 SIMD32 per CU, dual-issue fp32 (VOPD /
+        # wave64): 128 fp32 FMA per CU per clock; packed fp16 doubles it. (RDNA 2 and older,
+        # gfx10 and below: 64 / 128.)
+        gen = re.match(r"gfx(\d+?)(\d{2})$", arch) if len(arch) >= 6 else None
+        dual_issue = gen is not None and int(gen.group(1)) >= 11
+        fp32 = 128 if dual_issue else 64
         bus, mts = _AMD_MEM.get(arch, (None, None))
         out.update(arch=arch, cus=cus, clock_ghz=ghz,
                    flops=dict(fp32=cus * fp32 * 2 * ghz * 1e9, fp16=cus * 2 * fp32 * 2 * ghz * 1e9,
