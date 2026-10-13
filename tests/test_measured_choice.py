@@ -212,3 +212,47 @@ def test_a_full_trial_locks_within_its_batch_count(monkeypatch, tmp_path):
     w, batches = _drive_batches(tk, {a: 1.0e-12, b: 1.3e-12, c: 0.8e-12})
     assert w == c                                          # the measured best
     assert batches <= 3 * (2 + mf._CHAIN_BATCH_TRIALS) + 1
+
+
+def _single_contest(monkeypatch, tmp_path, timer, calls=40):
+    """Drive TimeDomainFilterBank._single_device (the GPU-or-CPU choice of single-template
+    calls) on fake banks with a deterministic timer; returns the shape's state."""
+    from types import SimpleNamespace
+    from matchedfilter import device as _device
+    from matchedfilter import time_domain as td
+    monkeypatch.setenv("MF_COST_FILE", str(tmp_path / "costs.json"))
+    monkeypatch.setenv("MF_AUTOTUNE", "1")
+    monkeypatch.delenv("MF_SINGLE_DEVICE", raising=False)
+    monkeypatch.setattr(_device, "parse", lambda spec: SimpleNamespace(kind="gpu"))
+    td._SINGLE_CHOICE.clear()
+    bank, g = SimpleNamespace(device="gpu:0"), SimpleNamespace(n=2048)
+    k = {"gpu": 0, "cpu": 0}
+    for _ in range(calls):
+        on_cpu, rec = td.TimeDomainFilterBank._single_device(bank, g, 24)
+        if rec is None:
+            break
+        side = "cpu" if on_cpu else "gpu"
+        rec(timer(side, k[side]))
+        k[side] += 1
+    (state,) = td._SINGLE_CHOICE.values()
+    return td, bank, g, state
+
+
+def test_single_template_device_choice_follows_the_shared_rule_and_persists(monkeypatch, tmp_path):
+    """The GPU-or-CPU choice of single-template calls decides by measured_choice and keeps its
+    lock in MF_COST_FILE: a clear CPU win locks the CPU, and the next process reuses it untimed."""
+    td, bank, g, state = _single_contest(
+        monkeypatch, tmp_path, lambda side, i: (1.0 if side == "gpu" else 0.4) * (1 + 0.01 * (i % 3)))
+    assert state["winner"] == "cpu"
+    td._SINGLE_CHOICE.clear()                      # a new process: the stored side, no trial
+    assert td.TimeDomainFilterBank._single_device(bank, g, 24) == (True, None)
+
+
+def test_single_template_device_unclear_contest_keeps_the_banks_device(monkeypatch, tmp_path):
+    """A CPU 'win' inside the noise samples further, up to the cap, then the bank's own device
+    (the GPU) stands -- a bare median rule picked whichever side the noise favoured."""
+    seq = {"gpu": [5.0, 1.0, 1.3, 0.8, 1.25, 0.85, 1.0, 1.1],     # first: warm-up, dropped
+           "cpu": [5.0, 0.8, 1.2, 0.85, 1.3, 0.75, 1.15, 0.9]}
+    td, _, _, state = _single_contest(monkeypatch, tmp_path, lambda side, i: seq[side][i])
+    assert state["winner"] == "gpu"
+    assert len(state["gpu"]) - 1 == td._SINGLE_TRIALS_MAX
