@@ -1,8 +1,27 @@
 """Embed recorded teaser comparisons in the hardware comparison page."""
 import html
 import json
+from datetime import date
 from pathlib import Path
+import re
 from teaser_labels import hardware_label
+
+
+def _recorded(path):
+    """'October 13, 2026' from a dated measurement file name."""
+    found = re.search(r'(\d{4})(\d{2})(\d{2})', path.name)
+    if not found:
+        return 'on an unrecorded date'
+    day = date(*map(int, found.groups()))
+    return f'{day:%B} {day.day}, {day.year}'
+
+
+def _label(report):
+    """Hardware label, plus any carried-over or load note the report records."""
+    label = hardware_label(report)
+    if report.get('label_note'):
+        label += ' — ' + report['label_note']
+    return label
 
 
 def fleet_comparison(root):
@@ -18,7 +37,7 @@ def fleet_comparison(root):
     compact = [{k: r[k] for k in ('host', 'cpu', 'gpu', 'device', 'rows', 'errors')}
                for r in reports]
     for record, source in zip(compact, reports):
-        record['label'] = hardware_label(source)
+        record['label'] = _label(source)
     data = json.dumps(compact).replace('<', '\\u003c')
 
     gpu512_files = sorted(m_dir.glob('gpu-fleet-512x512-*.json')) if m_dir.is_dir() else []
@@ -30,7 +49,7 @@ def fleet_comparison(root):
         gpu512_compact = [{k: r.get(k) for k in ('host', 'cpu', 'gpu', 'device', 'rows', 'errors')}
                           for r in gpu512_reports]
         for record, source in zip(gpu512_compact, gpu512_reports):
-            record['label'] = hardware_label(source)
+            record['label'] = _label(source)
         gpu512_data = json.dumps(gpu512_compact).replace('<', '\\u003c')
 
     btn_actions = ('<span class="fleet-actions">'
@@ -59,9 +78,10 @@ def fleet_comparison(root):
 
     gpu512_fieldsets = ''
     if gpu512_compact:
-        gpu512_gpu_inputs = hardware_inputs(gpu512_compact, 'gpu', input_name='fleet-hardware-512')
-        if gpu512_gpu_inputs:
-            gpu512_fieldsets = '<fieldset><legend>GPUs ' + btn_actions + '</legend>' + gpu512_gpu_inputs + '</fieldset>'
+        for dev_type, legend in (('cpu', 'CPUs'), ('gpu', 'GPUs')):
+            inputs512 = hardware_inputs(gpu512_compact, dev_type, input_name='fleet-hardware-512')
+            if inputs512:
+                gpu512_fieldsets += '<fieldset><legend>' + legend + ' ' + btn_actions + '</legend>' + inputs512 + '</fieldset>'
 
     outputs = [('baseline', 'FFT only'), ('full', 'Full output'), ('flat', 'Peak only')]
     budgets = [('hier:0.01', 'FDR 10⁻²'), ('hier:0.001', 'FDR 10⁻³'),
@@ -89,14 +109,20 @@ def fleet_comparison(root):
 
     workload_fieldset = ''
     if gpu512_compact:
+        shown512 = [r for r in gpu512_compact if r['rows']]
+        devices512 = ' &amp; '.join(d.upper() for d in ('cpu', 'gpu')
+                                     if any(r['device'] == d for r in shown512))
+        hosts512 = len({r['host'] for r in shown512})
         workload_fieldset = (
             '<fieldset id="fleet-workload-fieldset"><legend>Workload</legend>'
             '<label><input type="radio" name="fleet-workload" value="teaser" checked> 16 &times; 512 (8,192 correlations &middot; CPU &amp; GPU fleet)</label>'
-            '<label><input type="radio" name="fleet-workload" value="prod512"> 512 &times; 512 (262,144 correlations &middot; GPU production fleet: A100, L40S, A40, 8060S, M2)</label>'
+            '<label><input type="radio" name="fleet-workload" value="prod512"> 512 &times; 512 (262,144 correlations &middot; '
+            + devices512 + ' &middot; ' + str(hosts512) + ' machines)</label>'
             '</fieldset>'
         )
 
-    date_str = 'October 3, 2026' if '20261003' in teaser_path.name else 'September 28, 2026'
+    date_str = _recorded(teaser_path)
+    date512 = _recorded(gpu512_path) if gpu512_path else ''
     download_links = f'<a href="assets/{teaser_path.name}" download>{teaser_path.name}</a>'
     if gpu512_path:
         download_links += f' and <a href="assets/{gpu512_path.name}" download>{gpu512_path.name}</a>'
@@ -111,7 +137,7 @@ def fleet_comparison(root):
 <p id="fleet-desc">8,192 correlations × 4,096 points: 16 data spectra and 512 templates.
 Warm public <code>run()</code> calls, one CPU thread, setup and upload excluded;
 GPU synchronization included. Hierarchical rows use the captured PyCBC reference
-profile and are recorded at several SNR thresholds. Recorded ''' + date_str + '''.</p>
+profile and are recorded at several SNR thresholds. Recorded ''' + date_str + '''; entries marked carried over keep their original date and revision.</p>
 <div class="fleet-controls">''' + workload_fieldset + hw_containers + '''
 <fieldset><legend>Outputs</legend>''' + choices + '''</fieldset>''' + hier_fieldset + '''
 <fieldset><legend>Display</legend>
@@ -186,11 +212,11 @@ recorded JSON (''' + download_links + ''').</p>
   if(wl==='prod512'&&hw512){
    if(hwTeaser)hwTeaser.style.display='none';
    hw512.style.display='block';
-   if(desc)desc.innerHTML='262,144 correlations × 4,096 points: 512 data spectra and 512 templates. Warm public <code>run()</code> calls, enterprise-scale GPU production workload with full plan burn-in and steady-state GPU clocks; setup and upload excluded; GPU synchronization included. Hierarchical rows use the captured PyCBC reference profile. Recorded October 3, 2026.';
+   if(desc)desc.innerHTML='262,144 correlations × 4,096 points: 512 data spectra and 512 templates. Warm public <code>run()</code> calls, one CPU thread, with full plan burn-in and steady-state GPU clocks; setup and upload excluded; GPU synchronization included. Hierarchical rows use the captured PyCBC reference profile. Recorded ''' + date512 + '''; entries marked carried over keep their original date and revision.';
   } else {
    if(hw512)hw512.style.display='none';
    if(hwTeaser)hwTeaser.style.display='block';
-   if(desc)desc.innerHTML='8,192 correlations × 4,096 points: 16 data spectra and 512 templates. Warm public <code>run()</code> calls, one CPU thread, setup and upload excluded; GPU synchronization included. Hierarchical rows use the captured PyCBC reference profile and are recorded at several SNR thresholds. Recorded ''' + date_str + '''.';
+   if(desc)desc.innerHTML='8,192 correlations × 4,096 points: 16 data spectra and 512 templates. Warm public <code>run()</code> calls, one CPU thread, setup and upload excluded; GPU synchronization included. Hierarchical rows use the captured PyCBC reference profile and are recorded at several SNR thresholds. Recorded ''' + date_str + '''; entries marked carried over keep their original date and revision.';
   }
  }
  function render(){

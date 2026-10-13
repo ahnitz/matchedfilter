@@ -167,6 +167,11 @@ def compare(paths, out):
     if len({(r['host'], r['device']) for r in reports}) != len(reports):
         raise ValueError('provide only one report per host and device')
     n, nd, nt, _ = next(iter(shapes))
+    # Reports carried over from an earlier measurement, or taken on a loaded
+    # host, say so in their axis label (`label_note`).
+    rates = [nd*nt/r['ms']/1000 for rep in reports for r in rep['rows']
+             if r.get('snr') in (None, DEFAULT_SNR)]
+    top = max([160] + [2.5*v for v in rates])
     colors = ['#a8b6c9', '#ad9aff', '#55b7ff', '#64e6ac', '#25b995', '#efbb64']
     # The static chart shows one SNR; the interactive page selects others.
     keys = [('baseline', None)] + [(k, fd) for _, k, fd, snr in MODES
@@ -187,11 +192,15 @@ def compare(paths, out):
             rows = {} if report is None else {
             (r['kind'], r['fd']): r for r in report['rows']
             if r.get('snr') in (None, DEFAULT_SNR)}
+            sibling = report or next(r for r in reports if r['host'] == host)
             name = report.get(device, '') if report else ''
-            processor = cpu_label(report['cpu']) if report else host
-            if report and report.get('virtualized'):
+            processor = cpu_label(sibling['cpu'])
+            if sibling.get('virtualized'):
                 processor += ' (VM)'
-            ticks.append(processor if device == 'cpu' else name.replace('AMD ', '').replace('Intel(R) ', '').replace('(TM)', ''))
+            tick = processor if device == 'cpu' or not name else name.replace('AMD ', '').replace('Intel(R) ', '').replace('(TM)', '')
+            if report and report.get('label_note'):
+                tick += '\n' + report['label_note']
+            ticks.append(tick)
             for ki, key in enumerate(keys):
                 row = rows.get(key)
                 if row is None:
@@ -210,14 +219,18 @@ def compare(paths, out):
                 ax.text(label_rate*1.04, y, f"{row['ms']:.2f} ms", color=fg, va='center', fontsize=7)
             if not rows:
                 errors = report.get('errors', []) if report else []
-                reason = ('Validation failed' if any('check failed' in e for e in errors)
+                # _gpu_name() records the fallback 'GPU' when no physical GPU is exposed.
+                reason = ('No physical GPU exposed' if report is None and device == 'gpu'
+                          and sibling.get('gpu') == 'GPU'
+                          else 'Not measured' if report is None
+                          else 'Validation failed' if any('check failed' in e for e in errors)
                           else 'No physical GPU exposed' if device == 'gpu' else 'Unavailable')
                 ax.text(.03, hi, reason, transform=ax.get_yaxis_transform(),
                         color=muted, va='center', fontsize=9)
         ax.set_yticks(range(len(hosts)), ticks, color=fg, fontsize=9)
         ax.set_ylim(len(hosts)-.5, -.6)
         ax.set_xscale('log')
-        ax.set_xlim(.01, 160)
+        ax.set_xlim(.01, top)
         ax.xaxis.set_major_formatter(FuncFormatter(lambda v, _: f'{v:g}M/s'))
         ax.tick_params(axis='x', colors=muted)
         ax.grid(axis='x', color='#263244', which='major', zorder=0)
