@@ -2,7 +2,18 @@
 
 Alpha releases may change the API. Pin a version for reproducible work.
 
-## Unreleased
+## 0.1.0a7
+
+- Re-measure the hardware comparison at `2b3cac13` on gravity-dev1,
+  gravity-dev2 (CPU and Radeon 8060S), gravity-dev3 (CPU), Apple M2 (CPU and
+  GPU), Haswell (CPU) and the NVIDIA L40S, at 16 × 512 and, new for the CPUs,
+  512 × 512. See [teaser-fleet-20261013](docs/measurements/teaser-fleet-20261013.md).
+  Entries not re-measured (A100 and A40 from 2026-10-04 at `2a33e8f`; the
+  gravity-dev3 GPU, gravity-dev4, sugwg-login2 and the EPYC 9845 CPU from
+  2026-10-03 at `50597f3`) are carried over and labelled with their date and
+  revision. Haswell ran at load 35-37 and its rows are indicative only. The
+  README teaser is redrawn from the gravity-dev2 512 × 512 reports with the
+  new `tools/teaser_figure.py --from-fleet`, without re-measuring.
 
 - Add the Haswell node (Xeon E5-2698 v3) to the hardware comparison. It had
   been in the PyCBC fleet benchmark from the start but never the hardware
@@ -54,6 +65,13 @@ Alpha releases may change the API. Pin a version for reproducible work.
   dev3 +3.3%, dev2 +1.1%, sugwg-login2 -0.2%, dev1 -1.2%. The Haswell gain is
   the first measured on that host in this line of work. Correctness for this
   revision is not yet established; the numbers are timing only.
+
+### Known issues
+
+- On CUDA, two processes sharing a cost file can occasionally lock different
+  gate chains (seen in 1 of 5 runs of `test_reproducible_choices[gpu:0]` on
+  the L40S). Results are correct; only borderline peaks may differ between
+  the processes. A fix is in progress.
 
 ## 0.1.0a6
 
