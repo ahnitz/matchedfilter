@@ -265,32 +265,63 @@ def read_followup_items(items, idx_all, val_all, nbins, bpi, groups, spec, serie
     items: (k, FOLLOWUP_ITEM_WORDS) uint32 records; idx_all/val_all: the per-slot peaks, slot
     (item index * bpi + block) holding nbins bins; groups[item.group]: the bank template group;
     series_len[j]: the length of job j's series. Assembled exactly as
-    TimeDomainFilterBank._items_batch does for the same calls."""
-    from .time_domain import TimeDomainFilterBank, _consume_into, _results_from
-    out = []
-    order = np.lexsort((items[:, 1], items[:, 0]))
-    bs = int(spec.binsize)
-    for it in order:
-        o = items[it]
-        j, rank = int(o[0]), int(o[1])
-        c0 = int(o[2]) | (int(o[3]) << 32)
-        ti = int(o[4]) | (int(o[5]) << 32)
-        g = groups[int(o[7])]
-        S = int(series_len[int(spec.pairs[j])])
-        W = np.array([[max(0, c0 - int(spec.half)), min(S, c0 + int(spec.half))]], np.int64)
-        st, ws, we = TimeDomainFilterBank._window_layout(g, W, S)
-        m = int(st.size)
-        if m != int(o[9]) or m > bpi:
+    TimeDomainFilterBank._items_batch does for the same calls: per item, its one window's
+    block layout (TimeDomainFilterBank._window_layout), and its hits ordered by the block's
+    bin count, then block, then bin (the per-bin-count calls' order). Every item's layout and
+    hits are computed in array passes, per template group, not per item and block."""
+    from .time_domain import FilterResults, _EMPTY_FILTER_RESULTS
+    k = int(items.shape[0])
+    if k == 0:
+        return []
+    it = items.astype(np.int64)
+    order = np.lexsort((it[:, 1], it[:, 0]))
+    bs, half = int(spec.binsize), int(spec.half)
+    c0 = it[:, 2] | (it[:, 3] << 32)
+    ti = it[:, 4] | (it[:, 5] << 32)
+    pairs = np.asarray(spec.pairs, np.int64)
+    S = np.asarray(series_len, np.int64)[pairs[it[:, 0]]]
+    v0 = np.maximum(0, c0 - half)
+    v1 = np.minimum(S, c0 + half)
+    idx3 = np.asarray(idx_all[:k * bpi * nbins]).reshape(k, bpi, nbins)
+    val3 = np.asarray(val_all[:k * bpi * nbins]).reshape(k, bpi, nbins)
+    res = [None] * k
+    gid = it[:, 7]
+    for gi in np.unique(gid):
+        sel = np.flatnonzero(gid == gi)
+        g = groups[int(gi)]
+        step, cbad, nv = int(g.n_valid), int(g.c_bad), int(g.n_valid)
+        # _window_layout for one window per item, every item of the group at once: blocks
+        # first, first + 1, ... while they reach the window and the series.
+        first = np.maximum(0, (v0[sel] - cbad) // step)
+        kk = np.arange(bpi + 1, dtype=np.int64)
+        ts = (first[:, None] + kk[None, :]) * step                     # (items, bpi + 1)
+        b0 = ts + cbad
+        rs = np.maximum(v0[sel][:, None], b0)
+        re = np.minimum(v1[sel][:, None], b0 + nv)
+        ok = ((ts < S[sel][:, None]) & (b0 < v1[sel][:, None]) & (b0 + nv > v0[sel][:, None])
+              & (re > rs))
+        m = ok.sum(axis=1)
+        if np.any(m != it[sel, 9]) or np.any(m > bpi) or np.any(ok[:, bpi]):
             return None
-        base = int(it) * bpi * nbins
-        idx = np.asarray(idx_all[base:base + m * nbins]).reshape(m, 1, nbins).astype(np.int64)
-        val = np.array(val_all[base:base + m * nbins]).reshape(m, 1, nbins)
-        counts = ((we - ws + bs - 1) // bs).astype(np.int64)
-        lists = ([], [], [], [], [])
-        stt = st.astype(np.int64)
-        for u in np.unique(counts):
-            mk = counts == u
-            _consume_into(lists, idx[mk][:, :, :u], val[mk][:, :, :u], stt[mk], g,
-                          (int(o[6]), 1), g.n, ti)
-        out.append((j, rank, c0, ti, _results_from(lists)))
-    return out
+        # Kept blocks are a prefix of each row: the layout's blocks are consecutive.
+        if np.any(ok[:, :-1].astype(np.int8) < ok[:, 1:].astype(np.int8)):
+            return None
+        counts = (re - rs + bs - 1) // bs                                 # bins per block
+        okb = ok[:, :bpi]
+        hit = ((idx3[sel] >= 0) & okb[:, :, None]
+               & (np.arange(nbins)[None, None, :] < counts[:, :bpi, None]))
+        for r, i in enumerate(sel):
+            bi, bn = np.nonzero(hit[r])
+            if not bi.size:
+                res[i] = _EMPTY_FILTER_RESULTS
+                continue
+            o = np.argsort(counts[r, bi], kind="stable")
+            bi, bn = bi[o], bn[o]
+            st = ts[r, bi]
+            res[i] = FilterResults(
+                template_indices=np.full(bi.size, ti[i], dtype=np.int64),
+                sample_indices=st + idx3[i, bi, bn].astype(np.int64),
+                snr=val3[i, bi, bn].astype(np.complex64),
+                block_starts=st,
+                block_lengths=np.full(bi.size, g.n, dtype=np.int64))
+    return [(int(it[i, 0]), int(it[i, 1]), int(c0[i]), int(ti[i]), res[i]) for i in order]
