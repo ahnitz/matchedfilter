@@ -19,6 +19,8 @@ void ap_gate16_destroy(void *g);
 int ap_gate16_set_template(void *g,int t,const float *spec);
 int ap_gate16_set_data(void *g,int d,const float *spec);
 int ap_gate16_run(void *g,int d0,int nd,int t0,int nt,size_t ws,size_t we,ap_peak *out);
+int ap_gate16_run_pairs(void *g,int d0,int t0,const int *dsel,const int *tsel,int n,int nt_row,
+                        size_t ws,size_t we,ap_peak *out);
 
 /* One coarse tier of the gate chain. Tier i runs on the survivors of tier i-1
    (tier 0 on every pair); the survivors of the last tier get the full refine. */
@@ -66,6 +68,8 @@ struct ap_hmf_plan {
   int q15;
   unsigned char *qpass;           /* [nd*nt] */
   int *qd,*qt;                    /* the screen's survivors */
+  int q15_g16;                    /* tier 0 behind the screen on the FP16 gate (a price:
+                                     ap_hmf_set_q15_tier0) instead of the pooled FP32 pass */
   long qpassed;
   unsigned long long qticks;
 };
@@ -177,6 +181,13 @@ void ap_hmf_destroy(ap_hmf_plan *p){
   if(p->dump) fclose(p->dump);
   free(p->qpass); free(p->qd); free(p->qt);
   free(p);
+}
+
+int ap_hmf_set_q15_tier0(ap_hmf_plan *p,int fp16){
+  if(!p) return -1;
+  if(fp16 && !p->tier[0].g16) return -1;
+  p->q15_g16=fp16?1:0;
+  return 0;
 }
 
 int ap_hmf_set_platform_fft(ap_hmf_plan *p,int on){
@@ -646,7 +657,12 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
       }
       p->qpassed+=k;
       p->qticks+=ap_ticks()-q0;
-      if(k && ap_mf_run_pairs_pooled(tr->mf,d0,p->qd,p->qt,k,t0,cspan,thr,tr->cebuf,NULL,
+      if(k && p->q15_g16 && tr->g16){
+        /* The FP16 gate over the screen's survivors: its magnitude bounds the FP32 one
+           (gate16.cc), so the survivors are a superset of the FP32 pass's; the next tier
+           and the refine decide them. */
+        if(ap_gate16_run_pairs(tr->g16,d0,t0,p->qd,p->qt,k,nt,cstart,cend,tr->cebuf)<0) return -1;
+      } else if(k && ap_mf_run_pairs_pooled(tr->mf,d0,p->qd,p->qt,k,t0,cspan,thr,tr->cebuf,NULL,
                                      cstart,cend,nt)<0) return -1;
     } else if(i==0){
       /* The first tier runs on every pair of the segment in one call: the data
@@ -699,4 +715,61 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
                      peaks, counts, start, end);
   p->c_ref += ap_ticks()-r0;
   return r;
+}
+
+/* The price of tier 0 behind the Q15 screen, per listed pair at band m: the pooled FP32 pass
+   (*fp32) and the FP16 gate over listed pairs (*fp16, -1 without one), timed on a
+   synthetic list of nd x ~1/12 of nt survivors (the screen's realistic pass rate; runs of
+   templates per data slot as hmf.c lists them), best of reps. Both results only decide
+   which survivors reach the next tier (the FP16 bound is an upper bound on the FP32
+   magnitude), so the choice is a cost, not a contest (HierarchicalFilter prices it). */
+int ap_hmf_price_q15_tier0(size_t m,int nt,int reps,double *fp32,double *fp16){
+  const int nd=8;
+  *fp32=*fp16=-1;
+  ap_mf_plan *mf=ap_mf_create_pairbatch(m,nd,nt);
+  if(!mf) mf=ap_mf_create(m,nd,nt);
+  void *g=ap_gate16_available()?ap_gate16_create(m,nd,nt):NULL;
+  float *spec=malloc(2*m*sizeof(float));
+  int *ds=malloc((size_t)nd*nt*sizeof(int)), *ts=malloc((size_t)nd*nt*sizeof(int));
+  ap_peak *out=calloc((size_t)nd*nt,sizeof(ap_peak));
+  int rc=-1;
+  if(!mf||!spec||!ds||!ts||!out) goto done;
+  unsigned s=12345u;
+  for(int t=0;t<nt;t++){
+    for(size_t k=0;k<2*m;k++){ s=s*1103515245u+12345u; spec[k]=((s>>9)&1023)/1024.0f-0.5f; }
+    if(ap_mf_set_template(mf,t,spec)) goto done;
+    if(g && ap_gate16_set_template(g,t,spec)) goto done;
+  }
+  float *dsp=malloc((size_t)nd*2*m*sizeof(float));
+  if(!dsp) goto done;
+  for(int d=0;d<nd;d++){
+    for(size_t k=0;k<2*m;k++){ s=s*1103515245u+12345u; dsp[(size_t)d*2*m+k]=((s>>9)&1023)/1024.0f-0.5f; }
+    if(ap_mf_set_data(mf,d,dsp+(size_t)d*2*m)){ free(dsp); goto done; }
+    if(g && ap_gate16_set_data(g,d,dsp+(size_t)d*2*m)){ free(dsp); goto done; }
+  }
+  int n=0;
+  for(int d=0;d<nd;d++) for(int t=0;t<nt;t++){
+    s=s*1103515245u+12345u;
+    if(((s>>8)%12)==0){ ds[n]=d; ts[n]=t; n++; }
+  }
+  if(n==0){ ds[0]=0; ts[0]=0; n=1; }
+  double b32=1e30,b16=1e30;
+  for(int r=0;r<reps;r++){
+    unsigned long long a=ap_ticks();
+    if(ap_mf_run_pairs_pooled(mf,0,ds,ts,n,0,m,1e30f,out,NULL,0,m,nt)<0){ free(dsp); goto done; }
+    unsigned long long b=ap_ticks();
+    if(g && ap_gate16_run_pairs(g,0,0,ds,ts,n,nt,0,m,out)<0){ free(dsp); goto done; }
+    unsigned long long c=ap_ticks();
+    if((double)(b-a)<b32) b32=(double)(b-a);
+    if(g && (double)(c-b)<b16) b16=(double)(c-b);
+  }
+  *fp32=b32/n;
+  if(g) *fp16=b16/n;
+  free(dsp);
+  rc=0;
+done:
+  if(mf) ap_mf_destroy(mf);
+  if(g) ap_gate16_destroy(g);
+  free(spec); free(ds); free(ts); free(out);
+  return rc;
 }
