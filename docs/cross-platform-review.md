@@ -319,7 +319,8 @@ dispatches are small enough to leave the GPU underfilled. Low-medium.
 | follow-up assembly | `_vkfollowup._assemble`, `_gpuhost.read_followup_items` | one per-item routine in `_gpuhost` (§2.6) |
 | band-forward rule | `_vkcompute._band_wanted`; Metal has none | `_gpuhost.band_forward_pays` (§2.3) |
 | zero fills | three hand-written | one `zero2d` kernel (§2.7) |
-| `_COARSE_TILE = {}` | `_vkcompute` l.128 | dead since the 10-09 review; delete |
+| `_COARSE_TILE = {}` | `_vkcompute` l.128 | dead since the 10-09 review; removed on `cleanup/alpha-hardening` (§10) |
+| `_MAX_BINS = 2048` | all three GPU modules | one `_gpuhost.MAX_BINS` on `cleanup/alpha-hardening` (§10) |
 | CUDA register cap `65536 // wg` | `_cudacompute` l.1072 | `CU_DEVICE_ATTRIBUTE_MAX_REGISTERS_PER_BLOCK` |
 
 ## 4. Gaps ranked by expected value per unit of complexity
@@ -429,8 +430,11 @@ changes), then:
 - `tools/gate_margin.py --gate q15 gpu-c16 --loud`: exit 0, 46/46 ok;
 - `tests/test_measured_choice.py` on each branch alone: 14 / 12 / 14 passed; the GPU
   single-template tests of `test_time_domain.py` on `xplat/single-device-rule`: 4 passed;
-- full suite on the stack: the first run was killed externally (SIGTERM) at 80% with no
-  failure up to then; the rerun result is in the hand-off report.
+- full suite on the stack: 1547 passed, 158 skipped (a first run was killed externally at 80%,
+  with no failure up to then).
+
+The three branches each append tests to `tests/test_measured_choice.py`, so merging the second
+and third gives a trivial conflict there: keep both sides.
 
 ## 6. Requests for the owning agents
 
@@ -518,3 +522,44 @@ changes), then:
   `_COARSE_TILE` dead dict: still open (§3).
 - One Slang source for CUDA: `forward_tier0`, `refineItems` and the series kernels are shared;
   the CUDA coarse gate is still its own (`coarse_tc.cu`, tensor cores, CUDA-only by nature).
+
+
+## 10. Cleanup and hardening pass (branch `cleanup/alpha-hardening`, on beff0a71)
+
+Behaviour-neutral commits, one per item:
+1. Vulkan: the empty `_COARSE_TILE` dict and the fp32 tiled-coarse branch it guarded in
+   `_make_hier` (unreachable since the fp16 coarse), with the test that looped over the empty
+   dict. The `coarse_<band>` builds and `test_coarse_tile.py` stay until the next regeneration.
+2. Roofline: dual-issue fp32 lanes for every RDNA generation from gfx11 (gfx12 was reported at
+   half its peak). Reporting only.
+3. One `MAX_BINS` (`_gpuhost`) for the three GPU modules (each had its own 2048).
+4. `CostModel.chain_forward`: no callers; removed.
+5. Docs: SegmentPlan replay is on by default (gpu-parity-plan said off and unusable); the
+   interleave heading in the Vulkan roofline doc.
+6. Test: the LLC streaming-store copy writes the same bytes as the ordinary copy (no test
+   existed for 6b15bb83).
+7. The steady re-check logs through `_log_autotune` (it printed on its own).
+8. `docs/usage.md`: the measured choices and `MF_COST_FILE`, `MF_AUTOTUNE`, `MF_AUTOTUNE_LOG`,
+   `MF_GPU_TIMING`, `MF_SEGMENT_REPLAY` (the guide named only `MF_DEVICE` and `MF_ISA`).
+
+Found and deferred (each touches another agent's area, needs hardware not here, or is not
+behaviour-neutral):
+- `MF_REPLAY_DEBUG` prints to stdout in `_vkcompute.replay_fused` and `SegmentPlan` (Vulkan
+  replay agent's code): route through a logger or drop.
+- `MF_VK_C16_BOUND` is read by the CUDA and Metal backends too: rename to `MF_GPU_C16_BOUND`
+  (keep the old name as an alias) when the kernel track next touches the bound.
+- `MF_CHAIN_TRIALS` has two defaults (4 per batch trial, 6 per call trial): two names.
+- C: `MF_PBMAX` is read in three places with three meanings and defaults (`matchfilt.c`,
+  `hmf.c`, `balanced-inl.h`); `MF_HMF_DUMP`, `MF_NOSTORE`, `MF_SERPAD` are debug switches.
+- Dead CUDA helpers: `Context.shares_memory_with`, `Context.kernel_info` (and the function
+  attributes only it reads), `_cuda.py`'s WARP_SIZE / MAX_THREADS / MAX_SHARED constants. The
+  last should be read (§3), not deleted: CUDA's `65536 // wg` register cap and 1024-thread
+  bound are still hard-coded.
+- `_vkcompute.read_dispatch` (no callers; replay agent's area).
+- `time_domain._page_aligned_empty` aligns to Apple's 16 KiB page on every platform: harmless
+  over-alignment; take the page size from the OS.
+- Duplicated helpers still to share through `_gpuhost`: `_manifest()` (x3), `_coarse_span`
+  (CUDA, Metal, inlined in Vulkan), `_radix` (CUDA, Metal), `_COARSE_TILE_T` (x3, §3).
+- Tests missing for: the stored CUDA coarse variant (`cuda-coarse|...`; needs CUDA), the
+  platform-FFT price records in `MF_COST_FILE` (`cpu-fft|n|cpu`, `corr-pfft,n`; ARM), and the
+  reload of a persisted "dropped" chain candidate and its batch budget.
