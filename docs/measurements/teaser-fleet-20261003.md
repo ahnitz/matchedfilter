@@ -7,6 +7,10 @@ include NVIDIA Ada Lovelace GPUs via the native CUDA Driver API and Slang PTX ba
 This recalculates [the September 28 comparison](teaser-fleet-20260928.md); earlier pages are
 kept for history. All timing blocks are preserved in the recorded JSON.
 
+> **Historical.** Superseded by [the October 13 comparison](teaser-fleet-20261013.md).
+> The figures below are shared assets and now show the October 13 data; this
+> page's tables and JSON keep the October 3 numbers.
+
 ![CPU and GPU throughput on eight machines](../assets/teaser-fleet.svg)
 
 [Machine-readable results](teaser-fleet-20261003.json) include hardware,
