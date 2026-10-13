@@ -178,3 +178,22 @@ The first FP16 rewrite was slower, at 2578 samples, because one FMA chain was bo
   transform's final pass, so the outputs are not re-read, is the remaining lever.
 - **The over-budget shapes need threshold work.** inspiral_canonical and bimodal_resonance
   exceed budget under both gates; that belongs to the threshold calibration, not to this gate.
+
+## Where the ARM CPU is parked (2026-10-13): ~960 ms per segment, 41.7%
+
+One M2 performance core, ladder bank3 / H1, steady segment, shared cost file:
+
+| stage | ms | roofline ms | what was measured |
+|---|---:|---:|---|
+| q15 screen b256 (int16) | 467 | 244 | 51% of the int16 peak; ~67% of SIMD issue: ~2.0 instructions per ALU op (16-point codelet keeps 32 vectors live: ~45 spill/fill per ~430), the int16 FFT is add-heavy (~8100 ALU ops vs 6500 FMA-equivalents per 8 pairs: ~80% of peak at perfect issue). Constant strides -1.5%; window max ~3%; data already broadcast across the 8 template lanes |
+| tier 1 b512 (fp32, pooled) | 138 | 48 | gathers on NEON 4x4 transposes |
+| tier 0 b256 behind the screen (fp32, pooled) | 102 | 32 | the FP16 gate over survivors is priced (q15-tier0) and loses: 1190 vs 833 ticks per pair (template gathers) |
+| middle (vDSP, priced corr-pfft) | ~86 | 39 | vDSP 103 vs 169 us per pair at n=65536 |
+| forward (vDSP, priced cpu-fft) | ~85 | 25 | vDSP 4.0 vs 7.0 us per 2048-point block |
+| refine + follow-ups | ~55 | ~16 | |
+| tier 2 b1024 | 25 | 9 | |
+
+FP16 gate alone (no screen): 589 ms (max-only scan; was 634), behind the screen + FP32
+tier 0 (569 ms), so the Q15 trial keeps the screen. Not built: an 8x8x4 Q15 factorisation
+to remove the spills (an extra memory pass of about the spills' traffic; a few percent).
+Reaching 50% (~800 ms) would need a cheaper screen algorithm, not a better kernel.
