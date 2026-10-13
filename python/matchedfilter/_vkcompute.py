@@ -845,11 +845,21 @@ def read_dispatch_sparse(entry, trace=None):
         plan._gtrig += count
         if cascade:
             plan._gt1 += int(bufs["args_tier1"].read(np.uint32, 1)[0])
+    from . import _SparsePeaks
     if count == 0:
-        from . import _SparsePeaks
         e = np.empty(0, np.int64)
         return _SparsePeaks((nd, nt, nbins), e, e, np.empty(0, np.complex64))
-    return Context._read_peaks(bufs, "surv1" if cascade else "surv", count, nd, nt, nbins, True)
+    # The hits in survivor-list order, not sorted: the replay's assembly sorts each job's
+    # peaks once (SegmentPlan._parse_dispatches), so a sort per dispatch was wasted work.
+    pairs = nd * nt
+    v = (bufs["surv1" if cascade else "surv"].view(np.uint32, count),
+         bufs["idx"].view(np.int32, pairs * nbins).reshape(pairs, nbins),
+         bufs["val"].view(np.complex64, pairs * nbins).reshape(pairs, nbins))
+    rows = v[0]
+    ri = v[1][rows]
+    k, b = np.nonzero(ri >= 0)
+    rk = rows[k].astype(np.int64)
+    return _SparsePeaks((nd, nt, nbins), rk * nbins + b, ri[k, b], v[2][rk, b])
 
 
 def read_dispatch(entry):

@@ -2284,10 +2284,12 @@ class TimeDomainFilterBank:
                     # Work counters for matchedfilter._roofline: per block length, the
                     # blocks transformed, (block, template) products and inverses, the
                     # output samples the windows ask for, and template spectra read.
+                    # (Stored bins per template without materialising a lazily planned
+                    # group's spectra: that stacked every template's filter, ~1 ms a call.)
                     _count_work(self._add_corr_work, g.n, dict(
                         blocks=int(st.size), pairs=int(st.size) * nt,
                         out_samples=int((keep[:, 1] - keep[:, 0]).sum()) * nt,
-                        tmpl_values=nt * int(np.shape(g.spectra)[1])))
+                        tmpl_values=nt * _stored_bins(g)))
         # Zero the complement by contiguous runs. Not dest[:, ~keep] = 0: boolean indexing
         # along axis 1 thrashes one cache set once 17+ rows sit 2^20 samples apart (see
         # _correlate_group); 27 rows took ~400 ms against ~10 ms by runs.
@@ -3156,6 +3158,18 @@ class SegmentPlan:
         read as sparse peaks, assembled exactly as a CUDA replay's (_parse_cuda)."""
         from . import _vkcompute
         return self._parse_cuda(tr, reader=_vkcompute.read_dispatch_sparse)
+
+
+def _stored_bins(g):
+    """Bins stored per template spectrum of group g (its spectra's second dimension), cached
+    on the group; a lazy group is asked for one template's filter, not all of them."""
+    k = g.__dict__.get("_stored_bins")
+    if k is None:
+        sp = g._spectra
+        if sp is None and getattr(g, "_spectra_source", None) is not None:
+            sp = g._spectra_source()
+        k = g._stored_bins = int(np.shape(sp)[1])
+    return k
 
 
 def _consume_into(lists, aidx, aval, sub_starts, g, tmpl_arg, N, template_index):
