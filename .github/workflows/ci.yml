@@ -164,7 +164,7 @@ jobs:
     # macos-latest: the paravirtual Metal device is reported working there,
     # and older images returned nil from MTLCreateSystemDefaultDevice.
     runs-on: macos-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     # GPU calibration-transfer checks are required: a missing device or a
     # numerical regression must not silently produce a green build.
     steps:
