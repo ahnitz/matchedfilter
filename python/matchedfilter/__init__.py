@@ -2591,9 +2591,36 @@ def _chain_steady(tkey, value):
 _CORR_PFFT = {}
 #: (n, snr, fd, chain, device) -> {"samples": {False: [...], True: [...]}, "winner": bool|None}
 _Q15_TRIALS = {}
-#: (n, device) -> {"samples": {False: [...], True: [...]}, "winner": bool|None}: the block
-#: forward through the platform FFT (macOS vDSP) against the engine's (HierarchicalFilter)
-_PFFT_TRIALS = {}
+#: n -> whether the hierarchical series' block forward runs through the platform FFT
+#: (vDSP on macOS): priced once per n (_cpu_forward_platform), kept in MF_COST_FILE.
+_CPU_FWD_PFFT = {}
+
+
+def _cpu_forward_platform(n):
+    """Whether the block forward at n is cheaper through the platform FFT. Both transforms
+    are timed once on this size (_core.forward_cost: copy with 1/n and transform, best of a
+    few repetitions) and the cheaper is kept ("cpu-fft|n|cpu" in MF_COST_FILE). Their
+    results differ by fp32 rounding only, so this is a price, not a contest: a trial over
+    whole calls dilutes a transform that is ~11% of a call below the shared tie margin
+    (gatechain.measured_choice), which kept the slower transform in half of fresh files."""
+    n = int(n)
+    hit = _CPU_FWD_PFFT.get(n)
+    if hit is not None:
+        return hit
+    path = _gatechain._cost_file()
+    key = "cpu-fft|%d|cpu" % n
+    if path is not None:
+        rec = _gatechain._load_cost_file(path).get(key)
+        if isinstance(rec, dict) and "platform" in rec:
+            _CPU_FWD_PFFT[n] = hit = bool(rec["platform"])
+            return hit
+    native, platform = _core.forward_cost(n)
+    hit = bool(platform > 0 and platform < native)
+    _CPU_FWD_PFFT[n] = hit
+    if path is not None:
+        _gatechain._store_cost(path, key, {"platform": hit, "seconds": {"engine": native,
+                                                                        "platform": platform}})
+    return hit
 #: (chain-choice key, chain) -> whether the cost model prices the Q15 screen cheaper
 _Q15_MODEL = {}
 #: (n, snr, fd, tiers, window, profile signature) -> (model's chain, shortlist)
@@ -2638,7 +2665,7 @@ def clear_autotune_cache():
         _CHAIN_CHOICE.clear()
         _CHAIN_TRIALS.clear()
         _Q15_TRIALS.clear()
-        _PFFT_TRIALS.clear()
+        _CPU_FWD_PFFT.clear()
 
 
 class HierarchicalFilter(MatchedFilter):
@@ -2703,7 +2730,6 @@ class HierarchicalFilter(MatchedFilter):
         self._mf = None
         self._chain_trial = None
         self._q15 = False
-        self._pfft = False
         self._pinned = None if chain is None else _normalize_chain(chain, self.n)
         if self._pinned is not None and len(self._pinned) > self._MAX_TIERS[self.device.kind]:
             raise ValueError("this device executes chains of at most %d tiers"
@@ -2727,7 +2753,9 @@ class HierarchicalFilter(MatchedFilter):
             plan.set_hermitian(True)
         if getattr(self, "_q15", False) and not plan.set_q15(True):
             self._q15 = False
-        self._pfft = bool(getattr(self, "_pfft", False)) and plan.set_platform_fft(True)
+        # The block forward's transform: a cost-model price (_cpu_forward_platform), not a
+        # trial -- its effect is under the shared rule's tie margin of a whole call.
+        self._pfft = _cpu_forward_platform(self.n) and plan.set_platform_fft(True)
         return plan
 
     # ---- Q15 screen: a measured candidate, never a default ---------------------
@@ -2796,12 +2824,7 @@ class HierarchicalFilter(MatchedFilter):
                 and _q15_available(self._chain[0])):
             with _AUTOTUNE_LOCK:
                 tr = self._q15_trial()
-            if tr["winner"] is None:
-                return True
-        if self._pfft_ready() and _autotune_enabled():
-            with _AUTOTUNE_LOCK:
-                pt = self._pfft_trial()
-            return pt["winner"] is None
+            return tr["winner"] is None
         return False
 
     def _q15_record(self, dt, pairs):
@@ -2836,93 +2859,6 @@ class HierarchicalFilter(MatchedFilter):
                 _gatechain._store_cost(path, key, {"q15": bool(w), "rechecked": bool(tr.get("rechecked")),
                                                    "median": {str(k): v for k, v in med.items()}})
             _log_autotune("Q15-TRIAL chain=%s locked q15=%s  median s/pair %s", self._chain,
-                          tr["winner"], {k: "%.3g" % v for k, v in med.items()})
-
-    # ---- platform FFT for the block forward: a measured candidate ---------------------
-    # The block forward through the platform FFT (src/fft_accel.c: vDSP on macOS) changes
-    # results by fp32 rounding only, so only time is at stake. Like the Q15 screen it
-    # alternates on and off over real calls, pooled per (n, device), and is decided by the
-    # shared rule (gatechain.measured_choice; the engine's transform is the model's
-    # choice). Ordered after the other calibrations: held while the block-size trial is
-    # open (_trial_hold), and run only once this plan's chain and Q15 trials are settled,
-    # so no two measured choices alternate in the same calls. Locks are kept in
-    # MF_COST_FILE ("cpu-fft|n|device"); MF_AUTOTUNE=0 keeps the engine's transform.
-    def _pfft_key(self):
-        return (self.n, str(self.device))
-
-    def _pfft_trial(self):
-        key = self._pfft_key()
-        tr = _PFFT_TRIALS.get(key)
-        if tr is None:
-            tr = _PFFT_TRIALS[key] = {"samples": {False: [], True: []}, "winner": None}
-            path = _gatechain._cost_file()
-            if path is not None:
-                rec = _gatechain._load_cost_file(path).get("cpu-fft|%d|%s" % key)
-                if isinstance(rec, dict) and "platform" in rec:
-                    tr["winner"] = bool(rec["platform"])
-        return tr
-
-    def _pfft_ready(self):
-        """Whether this plan's platform-FFT trial may run: a CPU plan, the block-size trial
-        not holding it, its chain and Q15 trials settled."""
-        if (self.device.kind != "cpu" or self._mf is None or self._chain is None
-                or getattr(self, "_trial_hold", False) or self._chain_trial is not None):
-            return False
-        if _autotune_enabled() and _q15_available(self._chain[0]):
-            with _AUTOTUNE_LOCK:
-                if self._q15_trial()["winner"] is None:
-                    return False
-        return True
-
-    def _pfft_before_call(self):
-        """Pick the block-forward transform for this call; True when the call is a sample.
-        Locked: the winner. Undecided and released (_pfft_ready): alternate. Otherwise the
-        engine's transform, the model's choice."""
-        if self.device.kind != "cpu" or self._mf is None:
-            return False
-        ready = _autotune_enabled() and self._pfft_ready()
-        with _AUTOTUNE_LOCK:
-            tr = self._pfft_trial()
-            win = tr["winner"]
-            sampling = win is None and ready
-            if win is not None:
-                want = win
-            elif sampling:
-                want = len(tr["samples"][True]) < len(tr["samples"][False])
-            else:
-                want = False
-        if bool(want) != bool(self._pfft):
-            ok = self._mf.set_platform_fft(bool(want))
-            self._pfft = bool(want) and ok
-            if want and not ok:                 # no platform FFT here: nothing to trial
-                with _AUTOTUNE_LOCK:
-                    tr["winner"] = False
-                return False
-        return sampling
-
-    def _pfft_record(self, dt, pairs):
-        """One timed call: a platform-FFT trial sample, decided by the shared rule."""
-        with _AUTOTUNE_LOCK:
-            tr = _PFFT_TRIALS.get(self._pfft_key())
-            if tr is None or tr["winner"] is not None or pairs <= 0:
-                return
-            tr["samples"][bool(self._pfft)].append(dt / pairs)
-            base = int(os.environ.get("MF_CHAIN_TRIALS", _CHAIN_TRIALS_PER_CAND))
-            need = tr.setdefault("need", {})
-            if not all(len(v) >= max(base, need.get(k, 0)) for k, v in tr["samples"].items()):
-                return
-            w, more = _gatechain.measured_choice(tr["samples"], False, 2 * base)
-            if w is None:
-                need.update(more)
-                return
-            med = {k: float(np.median(v)) for k, v in tr["samples"].items()}
-            tr["winner"] = bool(w)
-            path = _gatechain._cost_file()
-            if path is not None:
-                _gatechain._store_cost(path, "cpu-fft|%d|%s" % self._pfft_key(),
-                                       {"platform": bool(w),
-                                        "median": {str(k): v for k, v in med.items()}})
-            _log_autotune("PFFT-TRIAL n=%d locked platform=%s  median s/pair %s", self.n,
                           tr["winner"], {k: "%.3g" % v for k, v in med.items()})
 
     def _restore_into(self, plan):
@@ -3299,11 +3235,9 @@ class HierarchicalFilter(MatchedFilter):
                    decimated=None):
         if self._chain_trial is None and self.device.kind == "cpu" and self._mf is not None:
             q15_timed = self._q15_before_call()
-            # One timed candidate per call: the screen first, then the transform.
-            pfft_timed = (not q15_timed) and self._pfft_before_call()
             # (No steady re-check of a CPU chain lock: see _q15_record.)
             mon = None
-            if q15_timed or pfft_timed or mon is not None:
+            if q15_timed or mon is not None:
                 t0 = time.perf_counter()
                 res = super().run_series(series, starts=starts, win_start=win_start, win_end=win_end,
                                          binsize=binsize, threshold=threshold, templates=templates,
@@ -3318,8 +3252,6 @@ class HierarchicalFilter(MatchedFilter):
                     units = nblk * self.ntemplates * self.ndata
                     if q15_timed:
                         self._q15_record(dt, units)
-                    if pfft_timed:
-                        self._pfft_record(dt, units)
                     if mon is not None and _chain_steady(mon, dt / units):
                         self._chain_monitor = None
                 return res
