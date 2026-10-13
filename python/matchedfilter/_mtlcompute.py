@@ -22,7 +22,7 @@ from functools import lru_cache, wraps
 
 import numpy as np
 from ._shared import empty_shared, shared_buffer, shared_key, write_input
-from ._gpuhost import (bin_shift, plan_items, split_items, hier_tiers, hier_window,
+from ._gpuhost import (MAX_BINS, bin_shift, plan_items, split_items, hier_tiers, hier_window,
                        split_bins)
 from ._shared import pack_half2 as _pack_half2, sparsified as _sparsified
 
@@ -55,7 +55,7 @@ _STORAGE_SHARED = 0
 #: kernel cannot hold more bins than that. Identical to the SPIR-V build --
 #: same Slang source, same limit -- and the split below is how both stay
 #: correct past it rather than quietly writing off the end of the table.
-_MAX_BINS = 2048
+_MAX_BINS = MAX_BINS          # _gpuhost.MAX_BINS: one limit for every backend
 
 
 from ._errors import UnsupportedSize      # noqa: F401  (re-export)
