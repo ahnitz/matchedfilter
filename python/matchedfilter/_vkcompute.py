@@ -457,10 +457,11 @@ def _fused_valid(ctx, cmds, serials):
 #: Interleave depths a fused batch is timed at: 0 is lockstep; 3 puts the second half's
 #: forward (DRAM-bound) beside the first half's coarse0 (VALU-bound).
 _INTERLEAVE_CANDIDATES = (0, 3)
-#: An interleaved depth must beat lockstep by this factor to be chosen.
-_INTERLEAVE_MARGIN = 0.95
-#: Timed submissions per candidate before a batch shape's depth is decided.
+#: Timed submissions per candidate before a batch shape's depth is first judged, and the most
+#: an unclear contest takes before lockstep (the model's depth) stands
+#: (gatechain.measured_choice).
 _INTERLEAVE_TRIALS = 5
+_INTERLEAVE_TRIALS_MAX = 10
 
 
 def _interleave_key(dev, shape):
@@ -597,12 +598,14 @@ class _FusedBatch:
                 from . import gatechain
                 held = gatechain.stored_choice(_interleave_key(dev, shape))
                 st = choice[shape] = {"k": held if held in _INTERLEAVE_CANDIDATES else None,
-                                      "t": {c: [] for c in _INTERLEAVE_CANDIDATES}}
+                                      "t": {c: [] for c in _INTERLEAVE_CANDIDATES},
+                                      "need": {c: _INTERLEAVE_TRIALS
+                                               for c in _INTERLEAVE_CANDIDATES}}
             if st["k"] is not None:
                 k = st["k"]
             else:
                 pending = [c for c in _INTERLEAVE_CANDIDATES
-                           if len(st["t"][c]) < _INTERLEAVE_TRIALS]
+                           if len(st["t"][c]) < st["need"][c]] or list(_INTERLEAVE_CANDIDATES)
                 k = pending[int.from_bytes(os.urandom(1), "little") % len(pending)]
                 self.trial = (shape, k, work)
         key = (base, k)
@@ -725,14 +728,18 @@ class _FusedBatch:
             st = dev.__dict__.get("interleave_choice", {}).get(shape)
             if st is not None and st["k"] is None:
                 st["t"][k].append(dev.fuse_timer.ns(slot, dev._ts_period) / work)
-                if all(len(v) >= _INTERLEAVE_TRIALS for v in st["t"].values()):
-                    # Lockstep unless a deeper interleave is clearly faster: the timings
-                    # carry a few percent of clock and content noise, and a coin flip
-                    # between two equal choices only adds a barrier per phase.
-                    med = {c: float(np.median(v)) for c, v in st["t"].items()}
-                    st["k"] = min(med, key=lambda c: med[c] / (1.0 if c == 0 else _INTERLEAVE_MARGIN))
+                if all(len(v) >= st["need"][c] for c, v in st["t"].items()):
+                    # The shared rule (gatechain.measured_choice): lockstep (0) stands unless
+                    # a deeper interleave is faster past TIE and the noise -- the timings
+                    # carry clock and content noise, and a coin flip between two equal
+                    # choices only adds a barrier per phase. Unclear: sample both further.
                     from . import gatechain
-                    gatechain.store_choice(_interleave_key(dev, shape), int(st["k"]))
+                    w, more = gatechain.measured_choice(st["t"], 0, _INTERLEAVE_TRIALS_MAX)
+                    if w is None:
+                        st["need"].update(more)
+                    else:
+                        st["k"] = w
+                        gatechain.store_choice(_interleave_key(dev, shape), int(w))
                     # The losers' recordings are never submitted again; the cache's LRU
                     # retires them (another batch may still be executing one now).
 
