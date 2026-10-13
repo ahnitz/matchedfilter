@@ -892,6 +892,65 @@ int ap_mf_correlate_series(ap_mf_plan *p,const float *series,size_t nseries,
   return 0;
 }
 
+/* Copy a correlation row into the caller's output, with streaming (non-temporal) stores
+   when the call's whole output cannot stay in the last-level cache anyway.  The middle stage
+   writes nt x S complex values per call -- ~216 MB a detector in the ladder -- and an
+   ordinary store first reads each line it writes (read-for-ownership), doubling the DRAM
+   traffic of the stage's one unavoidable output.  A non-temporal store writes the line
+   without reading it: the 16k/32k correlate pair 18%/30% faster on Zen 5, 12%/10% on
+   Haswell.  But an output that fits the LLC is better left there for the fine stage that
+   reads it next: with a 21 MB output on a 32 MB-L3 Zen 3 streaming was 15% SLOWER.  So the
+   rule is the footprint against the LLC, the same on every machine, not a per-CPU switch. */
+#if defined(__x86_64__) || defined(__i386__)
+#include <immintrin.h>
+#endif
+#include <stdint.h>
+#include <unistd.h>
+/* The last-level cache of this CPU, from the OS: sysconf (glibc reads cpuid), else Linux
+   sysfs (index3, then index2), else macOS sysctl. 0 when the OS does not say: then nothing
+   streams (no size is assumed). */
+#include <stdio.h>
+#if defined(__APPLE__)
+#include <sys/sysctl.h>
+#endif
+static size_t llc_bytes(void){
+  static size_t v=(size_t)-1;
+  if(v==(size_t)-1){
+    long r=-1;
+#ifdef _SC_LEVEL3_CACHE_SIZE
+    r=sysconf(_SC_LEVEL3_CACHE_SIZE);
+#endif
+    for(int idx=3; r<=0 && idx>=2; idx--){
+      char path[96]; snprintf(path,sizeof path,"/sys/devices/system/cpu/cpu0/cache/index%d/size",idx);
+      FILE *f=fopen(path,"r");
+      if(f){ unsigned long kb=0; char unit=0;
+             if(fscanf(f,"%lu%c",&kb,&unit)>=1) r=(long)kb*(unit=='M'?1024L*1024:1024L);
+             fclose(f); }
+    }
+#if defined(__APPLE__)
+    if(r<=0){ unsigned long long b=0; size_t len=sizeof b;
+              if(!sysctlbyname("hw.l3cachesize",&b,&len,NULL,0) && b) r=(long)b;
+              else if(!sysctlbyname("hw.l2cachesize",&b,&len,NULL,0) && b) r=(long)b; }
+#endif
+    v = r>0 ? (size_t)r : 0;
+  }
+  return v;
+}
+static void out_copy(float *dst,const float *src,size_t bytes,int stream){
+#if defined(__x86_64__) || defined(__i386__)
+  if(stream){
+    size_t nf=bytes/sizeof(float);
+    while(nf && ((uintptr_t)dst&15u)){ *dst++=*src++; nf--; }
+    size_t v=nf/4;
+    for(size_t i=0;i<v;i++) _mm_stream_ps(dst+4*i,_mm_loadu_ps(src+4*i));
+    for(size_t i=4*v;i<nf;i++) dst[i]=src[i];
+    return;
+  }
+#endif
+  (void)stream;
+  memcpy(dst,src,bytes);
+}
+
 int ap_mf_correlate_series_continuous(ap_mf_plan *p,const float *series,
                                       size_t nseries,const size_t *starts,
                                       int nblocks,size_t lo,size_t hi,
@@ -900,6 +959,10 @@ int ap_mf_correlate_series_continuous(ap_mf_plan *p,const float *series,
      ||lo>=hi||hi>p->n) return -1;
   const size_t n=p->n;
   const int W=p->pb;
+  /* this call's output footprint: nt rows over the blocks' valid spans */
+  const size_t llc = llc_bytes();
+  const int stream = llc && (size_t)nt*(size_t)nblocks*(hi-lo)*8u > llc
+                     && !getenv("MF_CORR_NO_STREAM");
   if(W && !p->corrbuf){
     p->corrbuf=ap_alloc64(2*(size_t)W*n*sizeof(float));
     if(!p->corrbuf) return -1;
@@ -934,8 +997,8 @@ int ap_mf_correlate_series_continuous(ap_mf_plan *p,const float *series,
           }
           if(ap_corr_prod_batch(p->fft,Dr,Di,Tr,Ti,cnt,p->corrbuf)) return -1;
           for(int t=0;t<cnt;t++)
-            memcpy(out+2*((size_t)(tt+t)*nseries+start+lo),
-                   p->corrbuf+2*((size_t)t*n+lo),bytes);
+            out_copy(out+2*((size_t)(tt+t)*nseries+start+lo),
+                     p->corrbuf+2*((size_t)t*n+lo),bytes,stream);
         }
       }else{
         for(int t=0;t<nt;t++){
@@ -947,12 +1010,15 @@ int ap_mf_correlate_series_continuous(ap_mf_plan *p,const float *series,
             mulspec(Dr,Di,tr,ti,p->pr,p->pi,n);
             if(ap_corr_split(p->fft,p->pr,p->pi,p->scratch)) return -1;
           }
-          memcpy(out+2*((size_t)t*nseries+start+lo),p->scratch+2*lo,bytes);
+          out_copy(out+2*((size_t)t*nseries+start+lo),p->scratch+2*lo,bytes,stream);
         }
       }
     }
     b0+=g;
   }
+#if defined(__x86_64__) || defined(__i386__)
+  _mm_sfence();
+#endif
   return 0;
 }
 
