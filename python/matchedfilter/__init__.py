@@ -2586,17 +2586,14 @@ def _chain_steady(tkey, value):
                 _gatechain._store_cost(path, _chain_lock_key(tkey) + "|batches", {"samples": {}})
             _log_autotune("CHAIN-TRIAL %s steady state contradicts the trial: reopened", tkey)
         return _gatechain.observe_steady(tr, value, reopen)
-#: (n, snr, fd, chain, device) -> {"samples": {False: [...], True: [...]}, "winner": bool|None}
 #: n -> whether continuous correlation at n runs through the platform FFT (vDSP on macOS):
 #: set by time_domain._corr_block_costs, which prices both and keeps the cheaper.
 _CORR_PFFT = {}
+#: (n, snr, fd, chain, device) -> {"samples": {False: [...], True: [...]}, "winner": bool|None}
 _Q15_TRIALS = {}
 #: (n, device) -> {"samples": {False: [...], True: [...]}, "winner": bool|None}: the block
 #: forward through the platform FFT (macOS vDSP) against the engine's (HierarchicalFilter)
 _PFFT_TRIALS = {}
-#: n -> whether continuous correlation at n runs through the platform FFT: a cost-model
-#: price (time_domain._corr_block_costs prices both transforms and keeps the cheaper).
-_CORR_PFFT = {}
 #: (chain-choice key, chain) -> whether the cost model prices the Q15 screen cheaper
 _Q15_MODEL = {}
 #: (n, snr, fd, tiers, window, profile signature) -> (model's chain, shortlist)
@@ -2878,21 +2875,22 @@ class HierarchicalFilter(MatchedFilter):
         return True
 
     def _pfft_before_call(self):
-        """Pick the block-forward transform for this call; True when the call is a sample."""
+        """Pick the block-forward transform for this call; True when the call is a sample.
+        Locked: the winner. Undecided and released (_pfft_ready): alternate. Otherwise the
+        engine's transform, the model's choice."""
         if self.device.kind != "cpu" or self._mf is None:
             return False
+        ready = _autotune_enabled() and self._pfft_ready()
         with _AUTOTUNE_LOCK:
             tr = self._pfft_trial()
             win = tr["winner"]
-        if win is None and (not _autotune_enabled() or not self._pfft_ready()):
-            win = False if not _autotune_enabled() else None
-            if win is None:
-                want = False                    # held: the engine's transform meanwhile
-            else:
+            sampling = win is None and ready
+            if win is not None:
                 want = win
-        else:
-            with _AUTOTUNE_LOCK:
-                want = win if win is not None else len(tr["samples"][True]) < len(tr["samples"][False])
+            elif sampling:
+                want = len(tr["samples"][True]) < len(tr["samples"][False])
+            else:
+                want = False
         if bool(want) != bool(self._pfft):
             ok = self._mf.set_platform_fft(bool(want))
             self._pfft = bool(want) and ok
@@ -2900,7 +2898,7 @@ class HierarchicalFilter(MatchedFilter):
                 with _AUTOTUNE_LOCK:
                     tr["winner"] = False
                 return False
-        return win is None and self._pfft_ready()
+        return sampling
 
     def _pfft_record(self, dt, pairs):
         """One timed call: a platform-FFT trial sample, decided by the shared rule."""
