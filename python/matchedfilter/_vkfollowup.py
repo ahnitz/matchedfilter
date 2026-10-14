@@ -326,7 +326,7 @@ class Executor:
     @staticmethod
     def _assemble(layout):
         # Assemble as _items_batch does: per item, its blocks' bins, per bin count.
-        from .time_domain import _consume_into, _results_from
+        from ._gpuhost import window_results
         reads = {}
         out = []
         for gw, st, ws, we, first, g, tl, ti in layout:
@@ -340,27 +340,19 @@ class Executor:
             idx = r[0][first:first + k]
             val = r[1][first:first + k]
             counts = ((we - ws + bs - 1) // bs).astype(np.int64)
-            stt = st.astype(np.int64)
-            # Every bin of every block at once, in the order the per-bin-count calls give:
-            # bin counts ascending, then block, then bin (a stable sort by count of the
-            # block-major hits).
             hit = (idx >= 0) & (np.arange(nbins)[None, :] < counts[:, None])
-            bi, bn = np.nonzero(hit)
-            if bi.size:
-                o = np.argsort(counts[bi], kind="stable")
-                bi, bn = bi[o], bn[o]
-            lists = ([], [], [], [], [])
-            if bi.size:
-                lists[0].append(np.full(bi.size, ti, dtype=np.int64))
-                lists[1].append(stt[bi] + idx[bi, bn].astype(np.int64))
-                lists[2].append(val[bi, bn])
-                lists[3].append(stt[bi])
-                lists[4].append(np.full(bi.size, g.n, dtype=np.int64))
-            out.append(_results_from(lists))
+            out.append(window_results(hit, counts, st, idx, val, ti, g.n))
         return out
 
 
-_EXECUTORS = {}
+def _executor(ctx):
+    """The device's follow-up executor, held by the device state itself: a dict keyed by
+    id(device state) could hand a new device a dead one's executor at a reused address."""
+    ds = ctx._device_state
+    ex = getattr(ds, "followup_executor", None)
+    if ex is None:
+        ex = ds.followup_executor = Executor()
+    return ex
 
 
 def submit_jobs(jobs):
@@ -374,7 +366,7 @@ def submit_jobs(jobs):
         ctx = getattr(g.get_flat_plan(), "_gpu", None)
         if not isinstance(ctx, vkc.Context):
             return None
-        ex = _EXECUTORS.setdefault(id(ctx._device_state), Executor())
+        ex = _executor(ctx)
         return ex.submit_jobs(jobs)
     except (Unsupported, KeyError, TypeError):
         return None
@@ -390,7 +382,7 @@ def run_jobs(jobs, side_queue=False):
         ctx = getattr(g.get_flat_plan(), "_gpu", None)
         if not isinstance(ctx, vkc.Context):
             return None
-        ex = _EXECUTORS.setdefault(id(ctx._device_state), Executor())
+        ex = _executor(ctx)
         return ex.run_jobs(jobs, side_queue)
     except (Unsupported, KeyError, TypeError):
         return None
