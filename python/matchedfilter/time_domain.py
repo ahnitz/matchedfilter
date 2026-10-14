@@ -2307,14 +2307,22 @@ class TimeDomainFilterBank:
         cplan._data_ready = set()
         lo, hi = cplan.valid
         if cplan._gpu is None:
+            ep = cplan._continuous_plan()
+            run = (ep.correlate_series_continuous_real if ser.dtype == np.float32
+                   and hasattr(ep, "correlate_series_continuous_real")
+                   else ep.correlate_series_continuous)
+            if run is ep.correlate_series_continuous and ser.dtype != np.complex64:
+                ser = np.ascontiguousarray(ser, dtype=np.complex64)
             if dest.flags.c_contiguous and dest.flags.writeable:
-                cplan._continuous_plan().correlate_series_continuous(ser, st, lo, hi, t0, nt, dest)
+                run(ser, st, lo, hi, t0, nt, dest)
             else:
                 tmp = np.empty((nt, S), dtype=np.complex64)
-                cplan._continuous_plan().correlate_series_continuous(ser, st, lo, hi, t0, nt, tmp)
+                run(ser, st, lo, hi, t0, nt, tmp)
                 for a, b in self._block_coverage(S, st, lo, hi):
                     dest[:, a:b] = tmp[:, a:b]                # see below
             return
+        if ser.dtype != np.complex64:
+            ser = np.ascontiguousarray(ser, dtype=np.complex64)   # GPU plans read complex
         # Unified memory (Metal): write straight into dest, and read the series where it
         # is. A page-aligned destination needs no workspace and no copy-out.
         view = getattr(cplan._gpu, 'host_view', None)
@@ -2472,8 +2480,18 @@ class TimeDomainFilterBank:
             If `template_index` is specified: 1D complex64 array of shape `(len(series),)`.
         """
         from . import _from_any
+        from .device import parse as _parse_device
 
-        ser = np.ascontiguousarray(_from_any(series), dtype=np.complex64)
+        a = _from_any(series)
+        # A real series on the CPU stays real (a real-real-complex hierarchy's middle stage
+        # filtering the real top output): half-size block transforms
+        # (correlate_series_continuous_real). Elsewhere it is widened to complex.
+        if (isinstance(a, np.ndarray) and not np.iscomplexobj(a)
+                and _parse_device(self.device).kind == 'cpu'
+                and os.environ.get("MF_REAL_SERIES", "1") != "0"):
+            ser = np.ascontiguousarray(a, dtype=np.float32)
+        else:
+            ser = np.ascontiguousarray(a, dtype=np.complex64)
         if ser.ndim != 1:
             raise ValueError("series must be a 1D array")
         S = ser.size
