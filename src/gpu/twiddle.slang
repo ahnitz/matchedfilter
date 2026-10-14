@@ -18,10 +18,16 @@
 // The transform length behind the data rows when they are band rows (stride B < n) of
 // the band-only forward; 0: the stride is the length (mfDataStride).
 [[vk::constant_id(78)]] const uint mfFullLength = 0;
+// The fp16 coarse tier's data scale, as float bits (1.0 by default): an exact power of
+// two applied to each data element before it is rounded to half (tierb.slang dload), so
+// the tier's values sit where fp16 holds them whatever the caller's units. The host
+// scales the packed templates and the tier's threshold to match (_vkcompute._c16_scales).
+[[vk::constant_id(79)]] const uint mfDataScaleBits = 0x3f800000u;
 #elif defined(MF_CUDA)
 static const uint mfDataStride = 0;
 static const uint mfRowWindows = 0;
 static const uint mfFullLength = 0;
+static const uint mfDataScaleBits = 0x3f800000u;
 // The fp16 bound switch (constant 77 on Vulkan) as a module __constant__ the host writes
 // (cuModuleGetGlobal "mf_c16_raw"): zero-initialized, so the bound applies unless the host
 // asks for the raw maximum (MF_VK_C16_BOUND=0, for measuring the bound's margin).
@@ -39,6 +45,7 @@ static const uint mfSubgroupSize = 32;
 static const uint mfDataStride = 0;
 static const uint mfRowWindows = 0;
 static const uint mfFullLength = 0;
+static const uint mfDataScaleBits = 0x3f800000u;
 // The fp16 bound switch (constant 77 on Vulkan) as an MSL preprocessor macro the host sets
 // when it compiles the library (MTLCompileOptions.preprocessorMacros, MF_C16_RAW=1 when
 // MF_VK_C16_BOUND=0): the bound applies unless the raw maximum is asked for.
@@ -56,6 +63,7 @@ static const uint mfSubgroupSize = 32;
 static const uint mfDataStride = 0;
 static const uint mfRowWindows = 0;
 static const uint mfFullLength = 0;
+static const uint mfDataScaleBits = 0x3f800000u;
 static const uint mfC16Bound = 1;
 static const uint mfAccurateTrig = 0;
 static const uint mfSubgroupSize = 32;

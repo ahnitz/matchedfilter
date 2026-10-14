@@ -30,9 +30,12 @@ def _coarse(ctx, n, B, D, T):
     nt = T.shape[0]
     data = np.zeros((1, n), np.complex64); data[:, :B] = D
     tmpl = np.zeros((nt, n), np.complex64); tmpl[:, :B] = T
-    ctx.hier_peaks(n, B, data, tmpl, np.ascontiguousarray(tmpl[:, :B]), 1e30,
+    # The tier places its operands for the threshold (_vkcompute._c16_scales): the pairs'
+    # own scale (8, below), and its values come back divided by the scale it applied.
+    ctx.hier_peaks(n, B, data, tmpl, np.ascontiguousarray(tmpl[:, :B]), 8.0,
                    binsize=n, threshold=0.0)
-    return np.abs(ctx._last_dispatch[0]["cval"].read(np.complex64, nt).astype(np.complex128))
+    return (np.abs(ctx._last_dispatch[0]["cval"].read(np.complex64, nt).astype(np.complex128))
+            / ctx._last_c16_scale)
 
 
 @pytest.mark.parametrize("B", [64, 256, 1024, 2048])

@@ -115,6 +115,57 @@ def _fit_workgroup(sg, invocations, rng, max_subgroups):
     return sg
 
 
+#: Where the fp16 coarse tier's operands are put (_c16_scales): the packed templates' largest
+#: component in [2^C16_TEMPLATE_EXP, 2^(C16_TEMPLATE_EXP+1)), leaving fp16's lower 18 octaves
+#: for a template's own dynamic range, and the tier's threshold at 2^_c16_threshold_exp(band).
+C16_TEMPLATE_EXP = 3
+C16_THRESHOLD_EXP = 2
+#: The threshold over the band, at least 2^C16_BAND_EXP: a band-B transform's values at
+#: threshold are sums of B products, each ~thr/B, and those must stay well inside fp16's
+#: normal range. Measured on the Iris Xe (flushes subnormals): at band 2048 a threshold of 4
+#: left the bound 0.24% under the exact maximum and 8 used 72% of its margin; 16 and above
+#: pass (tests/test_gpu_c16_bound.py). Set one octave past that: thr/band >= 2^-6.
+C16_BAND_EXP = -6
+
+
+def _c16_threshold_exp(band):
+    """log2 of where the tier's threshold is put: 2^C16_THRESHOLD_EXP -- where production
+    banks already sit (log2 thresholds 1.0-3.0 on the test27 ladder), |y|^2 = 16 at
+    threshold, failing open only past 64x it -- raised with the band so thr/band stays at or
+    above 2^C16_BAND_EXP (8 at band 512, 32 at 2048)."""
+    return max(C16_THRESHOLD_EXP, int(band).bit_length() - 1 + C16_BAND_EXP)
+
+
+def _c16_scales(ct0, raw_thr, band=None):
+    """(template exponent, data exponent) for the fp16 coarse tier: ct0 is packed times
+    2^et, each data element is multiplied by 2^ed before it is rounded to half (constant 79),
+    and the tier compares against raw_thr * 2^(et+ed). Powers of two, so in range every
+    value is the unscaled one times an exact factor and the decision is unchanged; out of
+    range they are what keeps it: on an Iris Xe, which flushes fp16 subnormals, templates of
+    ~5e-5 (gate_margin's transient and injection families) were flushed to zero and every
+    pair dismissed. (0, 0) where there is nothing to place (no threshold, empty templates)."""
+    import math
+    a = np.asarray(ct0)
+    if a.size == 0 or not (0.0 < float(raw_thr) < math.inf):
+        return 0, 0
+    tm = float(np.abs(a.view(np.float32) if a.dtype == np.complex64 else
+                      np.asarray(a, np.complex64).view(np.float32)).max())
+    if not (0.0 < tm < math.inf):
+        return 0, 0
+    et = C16_TEMPLATE_EXP - math.floor(math.log2(tm))
+    band = a.shape[-1] if band is None else band
+    ed = int(round(_c16_threshold_exp(band) - math.log2(float(raw_thr)) - et))
+    return int(max(-100, min(100, et))), int(max(-100, min(100, ed)))
+
+
+def _pow2_scaled(a, e):
+    """a (complex) times 2^e, exactly (complex64); a itself when e is 0."""
+    a = np.ascontiguousarray(a, np.complex64)
+    if not e:
+        return a
+    return np.ldexp(a.view(np.float32), int(e)).view(np.complex64)
+
+
 from ._coarse import coarse_launch   # noqa: E402,F401  (shared with Metal; re-exported)
 from ._coarse import coarse_stem, shipped_tiles, forced_tile   # noqa: E402
 
@@ -1392,7 +1443,7 @@ class Context(InputUploads):
         return "tierb_%d.spv" % n
 
     def _build_pipeline(self, key, filename, nbind, push_bytes, data_stride=0, row_windows=0,
-                        subgroup=0, full_length=0):
+                        subgroup=0, full_length=0, data_scale=0):
         """data_stride: specialization constant 75 (mfDataStride), the data spectra's row
         stride when a hierarchical stage reads its band straight out of them.
         row_windows: constant 76 (mfRowWindows), per-row windows from the gRowWin binding.
@@ -1402,6 +1453,8 @@ class Context(InputUploads):
         dummy buffer."""
         if data_stride or row_windows or full_length:
             key = (key, "stride", data_stride, "rowwin", row_windows, "n", full_length)
+        if data_scale:
+            key = (key, "dscale", int(data_scale))
         raw_c16 = os.environ.get("MF_VK_C16_BOUND", "1") == "0"
         if raw_c16:
             key = (key, "raw-c16")
@@ -1495,6 +1548,11 @@ class Context(InputUploads):
             entries.append(_SpecializationEntry(78, offset, 4))
             data_vals.append(int(full_length))
             offset += 4
+        if data_scale:
+            # The fp16 coarse tier's data scale 2^data_scale, as float bits (constant 79).
+            entries.append(_SpecializationEntry(79, offset, 4))
+            data_vals.append(int(np.float32(2.0 ** int(data_scale)).view(np.uint32)))
+            offset += 4
         if raw_c16:
             # Raw fp16 coarse maxima, for measuring the error bound's margin use only.
             entries.append(_SpecializationEntry(77, offset, 4))
@@ -1587,6 +1645,9 @@ class Context(InputUploads):
                            bkey and bkey[0], *key[-3:])
             upload_data, upload_tmpl, dsig, tsig = self._input_uploads(
                 storage_key, data, tmpl, upload_data, upload_tmpl)
+            et, ed = self._c16_exponents(storage_key, ct0, thr0, upload_tmpl, band0)
+            key += (ed,)
+            self._last_c16_scale = 2.0 ** (et + ed)   # tier-0 values / this = unscaled
             batch = self._hier_cascade.get(key)
             if batch is None:
                 incoming = [b for b in (shared_buffer(data, self), shared_buffer(tmpl, self)) if b is not None]
@@ -1601,8 +1662,9 @@ class Context(InputUploads):
                 self._capture_begin()
                 try:
                     batch = self._make_hier_cascade(storage_key, n, band0, band1, nd, nt, nbins, binsize,
-                                                    shift, lo, hi, t2, thr0, thr1, data, tmpl,
-                                                    clear_out=not sparse, rowwin=rw, bands=bands)
+                                                    shift, lo, hi, t2, thr0 * 2.0 ** (et + ed), thr1,
+                                                    data, tmpl, clear_out=not sparse, rowwin=rw,
+                                                    bands=bands, data_scale=ed)
                 finally:
                     self._capture_end(batch[-1] if batch else None)
                 self._hier_cascade[key] = batch
@@ -1619,7 +1681,7 @@ class Context(InputUploads):
                 self._uploaded["data"][storage_key] = dsig
             if upload_tmpl:
                 write_input(bufs["tmpl"], tmpl)
-                bufs["ct0"].write(_pack_half2(ct0))
+                bufs["ct0"].write(_pack_half2(_pow2_scaled(ct0, et)))
                 bufs["ct1"].write(np.ascontiguousarray(ct1, np.complex64))
                 self._uploaded["tmpl"][storage_key] = tsig
 
@@ -1642,6 +1704,10 @@ class Context(InputUploads):
         storage_key = ("hier", n, band, nd, nt, nbins, rw_key, bkey and bkey[0], *key[-3:])
         upload_data, upload_tmpl, dsig, tsig = self._input_uploads(
             storage_key, data, tmpl, upload_data, upload_tmpl)
+        et, ed = (self._c16_exponents(storage_key, ct0, raw_thr, upload_tmpl, band)
+                  if _use_c16(band) else (0, 0))
+        key += (ed,)
+        self._last_c16_scale = 2.0 ** (et + ed)   # tier-0 values / this = unscaled
         batch = self._hier.get(key)
         if batch is None:
             incoming = [b for b in (shared_buffer(data, self), shared_buffer(tmpl, self)) if b is not None]
@@ -1656,8 +1722,9 @@ class Context(InputUploads):
             self._capture_begin()
             try:
                 batch = self._make_hier(storage_key, n, band, nd, nt, nbins, binsize,
-                                        shift, lo, hi, t2, raw_thr, data, tmpl,
-                                        clear_out=not sparse, rowwin=rw, bands=bands)
+                                        shift, lo, hi, t2, raw_thr * 2.0 ** (et + ed), data, tmpl,
+                                        clear_out=not sparse, rowwin=rw, bands=bands,
+                                        data_scale=ed)
             finally:
                 self._capture_end(batch[-1] if batch else None)
             self._hier[key] = batch
@@ -1681,7 +1748,7 @@ class Context(InputUploads):
         if upload_tmpl:
             write_input(bufs["tmpl"], tmpl)
             if _use_c16(band):
-                bufs["ct0"].write(_pack_half2(ct0))
+                bufs["ct0"].write(_pack_half2(_pow2_scaled(ct0, et)))
             else:
                 bufs["ct0"].write(np.ascontiguousarray(ct0, np.complex64))
             self._uploaded["tmpl"][storage_key] = tsig
@@ -1918,6 +1985,22 @@ class Context(InputUploads):
             n = self._INVOCATIONS[filename] = _module_invocations((_SPIRV / filename).read_bytes())
         return n
 
+    def _c16_exponents(self, storage_key, ct0, raw_thr, upload_tmpl, band):
+        """(template, data) exponents of the fp16 coarse tier (_c16_scales) for a record on
+        storage_key. The template exponent belongs to the templates in that storage: taken
+        from ct0 when they are (re)written, kept with the storage otherwise, so a record and
+        the packed templates it reads always agree; the data exponent follows from it and
+        the threshold."""
+        import math
+        held = self.__dict__.setdefault("_c16_template_exp", {})
+        if upload_tmpl or storage_key not in held:
+            held[storage_key] = _c16_scales(ct0, 1.0)[0]
+        et = held[storage_key]
+        if not (0.0 < float(raw_thr) < math.inf):
+            return et, 0
+        ed = int(round(_c16_threshold_exp(band) - math.log2(float(raw_thr)) - et))
+        return et, max(-100, min(100, ed))
+
     def _fit_subgroup(self, n):
         """The subgroup size to build a one-pair-per-group kernel of length n at: the
         smallest the device can be required to run that still holds the workgroup
@@ -2106,7 +2189,8 @@ class Context(InputUploads):
         return min(times) / (ndm * ntm)
 
     def _make_hier(self, key, n, band, nd, nt, nbins, binsize, shift, lo, hi,
-                   t2, raw_thr, data=None, tmpl=None, clear_out=True, rowwin=None, bands=None):
+                   t2, raw_thr, data=None, tmpl=None, clear_out=True, rowwin=None, bands=None,
+                   data_scale=0):
         vk = self.vk
         _ppg = 1          # pairs per workgroup; raised only on the c16 path
         _ragged, _groups = False, nd * nt   # see _coarse_geometry
@@ -2152,7 +2236,7 @@ class Context(InputUploads):
                     "t%d" % _tile if _tile > 1 else ""),
                 _NBIND, _PUSH_BYTES, data_stride=bands[0] if bands else n,
                 row_windows=2 if rowwin is not None else 0, full_length=n if bands else 0,
-                subgroup=_sg)
+                subgroup=_sg, data_scale=data_scale)
         # gatedTierB is NOT built. Its only caller was coarse_odd(), the
         # last remnant of the even/odd split, which was never invoked after
         # the odd half was removed -- so the kernel was compiled on every
@@ -2339,7 +2423,7 @@ class Context(InputUploads):
 
     def _make_hier_cascade(self, key, n, band0, band1, nd, nt, nbins, binsize, shift, lo, hi,
                            t2, raw_thr0, raw_thr1, data=None, tmpl=None, clear_out=True,
-                           rowwin=None, bands=None):
+                           rowwin=None, bands=None, data_scale=0):
         vk = self.vk
         rwc, rwr = (2, 1) if rowwin is not None else (0, 0)   # coarse / raw row windows
         # bands: the coarse tiers read band rows of width B (the band-only forward's) instead
@@ -2354,7 +2438,7 @@ class Context(InputUploads):
                 "p%d" % _ppg0 if _ppg0 > 1 else "",
                 "t%d" % _tile0 if _tile0 > 1 else ""),
             _NBIND, _PUSH_BYTES, data_stride=dstride, row_windows=rwc, full_length=flen,
-            subgroup=_sg0)
+            subgroup=_sg0, data_scale=data_scale)
 
         kpipe, klayout, kset_layout = self._build_pipeline(
             "compact", "compact.spv", 3, 12)
@@ -3900,6 +3984,7 @@ class Context(InputUploads):
         self._storage_users.pop(key, None)
         for resident in self._uploaded.values():
             resident.pop(key, None)
+        self.__dict__.get("_c16_template_exp", {}).pop(key, None)
 
     def _evict_record(self, kind, key, keep_storage=None):
         # An in-flight readback reads this record's buffers when collected.

@@ -105,13 +105,18 @@ def test_tiles_match_untiled_and_fail_open(ctx, band):
                                            err_msg=where)
 
 
+@pytest.mark.parametrize("K", [1.0, 32.0])
 @pytest.mark.parametrize("band", [128, 256, 512, 1024])
-def test_transient_fails_open_in_every_layout(ctx, band, monkeypatch):
+def test_transient_fails_open_in_every_layout(ctx, band, K, monkeypatch):
     """gate_margin's transient family through the production path (hier_peaks, the band read
     out of n-point spectra), in every layout the coarse choice can take -- each subgroup size
     the device allows, each packing and tile, forced: a loud broadband burst in the data and
     templates scaled so every pair's exact maximum is K, so a gate at 0.999 K must pass every
-    pair."""
+    pair.
+
+    K = 1 is gate_margin's scale: templates of ~5e-5, subnormal in fp16. A device that
+    flushes fp16 subnormals (the Iris Xe) dismissed every pair there until the tier placed
+    its operands by powers of two (_vkcompute._c16_scales); K = 32 sits in range either way."""
     from matchedfilter import _vkcompute as V
     n, nt = 4096, 16
     rng = np.random.default_rng(band + 7)
@@ -121,12 +126,6 @@ def test_transient_fails_open_in_every_layout(ctx, band, monkeypatch):
     D = (rng.standard_normal(band) + 1j * rng.standard_normal(band)) + np.fft.fft(burst)
     T = rng.standard_normal((nt, band)) + 1j * rng.standard_normal((nt, band))
     exact = np.abs(np.fft.ifft(D[None] * np.conj(T), axis=1) * band).max(1)
-    # Every pair's exact maximum is K = 32, inside fp16's comfortable range: at gate_margin's
-    # K = 1 the templates are ~5e-5, subnormal in fp16, and a device that flushes fp16
-    # subnormals (the Iris Xe; AMD, NVIDIA and Apple keep them) dismisses the pairs in every
-    # layout alike -- a range question for the packing (docs/cross-platform-review.md
-    # section 11), not for the layouts this test is about.
-    K = 32.0
     T = T / exact[:, None] * K
     data = (np.random.default_rng(0).standard_normal((1, n)) * 1e-3).astype(np.complex64)
     data[0, :band] = D
@@ -152,10 +151,4 @@ def test_transient_fails_open_in_every_layout(ctx, band, monkeypatch):
                     c.destroy()
                 where = "band %d subgroup %d ppg %d tile %d (ran %s)" % (band, sg, ppg, tile, geom[:3])
                 lost = int((idx.reshape(nt) < 0).sum())
-                if lost and band >= 1024 and getattr(ctx, "_accurate_trig", False):
-                    # Intel (the only vendor the trig switch flags): the fp16 bound's kappa,
-                    # measured on AMD, falls short at band 1024 in every layout, the device's
-                    # default included, and on code before the layout choice
-                    # (docs/cross-platform-review.md section 11). Open; reported, not hidden.
-                    pytest.xfail("%s: %d of %d dismissed -- Intel fp16 bound at band 1024" % (where, lost, nt))
                 assert not lost, "%s: gate dismissed %d of %d pairs" % (where, lost, nt)

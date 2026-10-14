@@ -632,23 +632,32 @@ and `peakTwoWave`'s scaled energy. `tests/test_vk_coarse_tiles.py` runs every ti
 every subgroup size the device allows; on the old band-1024 build at subgroup 32 it fails
 (loud row all -1).
 
-**Intel fp16 coarse gate: two open correctness gaps, older than this work.** `gate_margin
---loud` fails on the Iris Xe -- on main before the layout choice (5241d2c5) exactly as after,
-and at every subgroup size alike:
-1. *fp16 subnormals are flushed.* The transient family scales templates so each pair's
-   exact maximum is 1: ~5e-5, subnormal in fp16. AMD, NVIDIA and Apple keep subnormals; the
-   Iris Xe flushes them and the pairs are dismissed (226-256 of 256). Scaled by 2^10 every
-   build passes. Production templates (order 1) and data spectra (~0.02) sit far above the
-   normal minimum, and `ladder --check` is exact on dev4, but a gate must not depend on
-   that: pack each spectrum scaled by a power of two into fp16's range and undo it exactly,
-   as the CPU fp16 gate does (gate16.cc).
-2. *The bound's kappa is short at band 1024.* Injections show slack down to -0.08 and, with
-   templates in range, 5 of 16 transient pairs at band 1024 are dismissed in the device's
-   default layout. kappa (tools/coarse_layout.py C16_KAPPA) was measured on AMD; Intel's
-   fp16 arithmetic rounds differently. Measure it per vendor (tools/metal_c16_sigma.py's
-   method) or derive it from the device.
-`tests/test_vk_coarse_tiles.py::test_transient_fails_open_in_every_layout` keeps templates in
-range (K = 32) and reports gap 2 as an expected failure on Intel.
+**Intel fp16 coarse gate: fixed by placing the operands (one cause, not two).** `gate_margin
+--gate gpu-c16` failed on the Iris Xe (dev4) for the transient family at every band (226-256
+of 256 pairs dismissed) and for injections at bands 256-1024 (slack down to -0.08). Both
+families scale templates so each pair's exact maximum is 1: ~5e-5, subnormal in fp16, and
+the Iris Xe flushes fp16 subnormals (AMD, NVIDIA and Apple keep them). The band-1024
+injection shortfall looked like a kappa measured on AMD falling short on Intel; it was the
+same flush. Emulated on the host (data and templates scaled by powers of two, threshold to
+match) every family passed with the kernels unchanged, and scaling the templates alone did
+not: the data has to move too.
+
+The tier now places its operands as the CPU fp16 gate does (gate16.cc), by exact powers of
+two (`_vkcompute._c16_scales`): the packed templates' largest component in [8, 16), and the
+data -- multiplied in `dload` by specialization constant 79 before it is rounded to half --
+so the tier's threshold lands at 4, where production banks already sit (log2 thresholds
+1.0-3.0 on the test27 ladder), raised with the band so threshold/band stays at or above
+2^-6: a band-B transform's values at threshold are sums of B products of ~thr/B each. At
+band 2048 a threshold placed at 4 still left the bound 0.24% under the exact maximum on the
+Iris Xe and 8 used 72% of its margin; 16 passed, and the rule sits one octave past that (32).
+In range every value is the old one times an exact factor and the decision is unchanged;
+`ladder --check cpu` stays exact. dev4: gate_margin q15 + gpu-c16 `--loud` all ok
+(band-1024 injection slack min +0.0014), `tests/test_gpu_c16_bound.py` passes at every band
+(it failed at all four without the placement, down to -0.98 at band 1024); dev2 likewise.
+`test_transient_fails_open_in_every_layout` runs at gate_margin's K = 1 as well as K = 32,
+with no Intel exception. Metal and CUDA pack data on the host, unchanged here; their GPUs
+keep subnormals, so only data far outside fp16's range (below ~6e-8) would need the same
+placement there.
 
 **The subgroup of every other Vulkan pipeline: now a measured choice per device**
 (`_vksubgroup.py`). `_build_pipeline` required the device's default size whenever a range
