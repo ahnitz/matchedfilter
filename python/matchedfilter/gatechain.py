@@ -1211,10 +1211,21 @@ def measured_choice(samples, model, cap, tie=None, z=None):
     return model, {}
 
 
+def recheck_enabled():
+    """MF_TRIAL_RECHECK=1 turns the steady-state re-check on. Off by default: a verdict
+    reached from one process's steady timing reopens the lock for every later process, so
+    two processes on one cost file can end on different choices (L40S: 2 of 10 runs of
+    test_reproducible_choices; the macOS Metal CI wheel). With it off a stored lock is final
+    until the cost file is deleted."""
+    return os.environ.get("MF_TRIAL_RECHECK", "0").strip().lower() not in ("", "0", "false", "no", "off")
+
+
 def observe_steady(state, value, on_reopen):
     """One steady-state sample of a locked choice kept in `state` (a dict with "winner",
     "median" {candidate: trial median}, "steady" and "rechecked"). Calls on_reopen() and
     returns True when the steady samples contradict the trial -- once per choice."""
+    if not recheck_enabled():
+        return False
     if state.get("winner") is None or not state.get("median") or state.get("rechecked"):
         return False
     st = state.setdefault("steady", [])

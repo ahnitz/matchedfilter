@@ -57,8 +57,10 @@ print(json.dumps({"last": out[-4:], "layout": bank.chosen_layout,
 
 
 def _run(device, cost):
+    # MF_TRIAL_RECHECK=0 (the default, pinned): a steady re-check would reopen a lock on one
+    # process's timing, and two processes could then disagree by design.
     env = dict(os.environ, MF_COST_FILE=str(cost), MF_AUTOTUNE="1", MF_CHAIN_TRIALS="1",
-               MF_BLOCK_TRIALS="1", OMP_NUM_THREADS="1")
+               MF_BLOCK_TRIALS="1", OMP_NUM_THREADS="1", MF_TRIAL_RECHECK="0")
     p = subprocess.run([sys.executable, "-c", SCRIPT, str(PKG_PARENT), device], env=env,
                        capture_output=True, text=True, timeout=900)
     assert p.returncode == 0, p.stderr[-3000:]
@@ -95,7 +97,7 @@ def test_two_processes_sharing_a_cost_file_agree(device, tmp_path):
     # span processes (its samples persist): run until its lock is on file. From then on
     # every process reads the same choices back.
     # Run until the trial records reach a fixed point: no trial open, and a process changes
-    # none of them (a steady-state re-check may reopen a lock once; then it is final).
+    # none of them. With the steady re-check off a stored lock is final.
     prev = None
     for _ in range(10):
         first = _run(device, cost)
@@ -107,5 +109,6 @@ def test_two_processes_sharing_a_cost_file_agree(device, tmp_path):
     assert not _open_trials(rec) and now == prev
     second = _run(device, cost)                 # reads them back
     third = _run(device, cost)
+    assert _trial_records(json.loads(cost.read_text())) == now   # no lock moved
     assert second == third                      # reproducible from the file on
     assert second["layout"] == first["layout"] and second["chains"] == first["chains"]

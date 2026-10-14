@@ -215,6 +215,7 @@ def test_a_clear_win_still_locks_on_two_samples(monkeypatch, tmp_path):
 def test_a_lock_steady_state_contradicts_is_reopened(monkeypatch, tmp_path):
     """Rank 1 measured faster in its trial, then runs 30% slower than the trial's best in
     steady state: the lock is reopened in the cost file, so the next process trials again."""
+    monkeypatch.setenv("MF_TRIAL_RECHECK", "1")              # opt-in (off by default)
     monkeypatch.setenv("MF_COST_FILE", str(tmp_path / "costs.json"))
     timer = _FakeTimer({0: 1.0, 1: 0.7, 2: 1.3}, {r: [0.0, 0.01] for r in range(3)})
     tr = td._BlockTrials()
