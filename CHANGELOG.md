@@ -6,6 +6,16 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ### Performance
 
+- Real-real-complex hierarchies (`pycbc_fir_bank --complex-taps`): `TimeDomainFilterBank`
+  takes complex (quadrature) final taps -- the analytic version of each real filter -- and
+  filters a REAL middle series with them, same correlation convention as real taps. A CPU
+  hierarchical plan reads a real series itself, as a contiguous array or in place as one
+  lane (real or imaginary part) of a complex array -- a packed pair of real middle series
+  -- and transforms each block at half size into its exact full spectrum (SIMD split).
+  test27 full-data job (pycbc_inspiral_fir, 100k BNS bank, complex against the same
+  generator's all-real bank, paired): middle stage -40% (two real middle filters as one
+  complex one, in pycbc), fine stage -4 to -13% (load noise), total -6 to -10%; injection
+  SNRs agree to a median ratio 1.0000 +- 0.007 (5-95%) and the same injections are found.
 - CPU direct refine (docs/cpu-direct-refine.md): with one bin per pair, a survivor is
   refined by direct correlation with its real FIR taps at the lags around its last coarse
   tier's maximum -- a window the gate model sets per chain -- instead of a whole-block
