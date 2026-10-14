@@ -1022,6 +1022,13 @@ def _tap_spectra(taps: np.ndarray, counts: np.ndarray, n: int, rate_ratio: float
             out[row] = spec
 
 
+def _reads_real(plan) -> bool:
+    """Whether the plan reads a real (float32) series itself: a CPU hierarchical plan."""
+    from . import HierarchicalFilter
+    return (isinstance(plan, HierarchicalFilter) and plan.device.kind == "cpu"
+            and os.environ.get("MF_REAL_SERIES", "1") != "0")
+
+
 def _tap_dtype(taps) -> type:
     """complex64 for complex (quadrature) taps, float32 for real ones."""
     if isinstance(taps, (list, tuple)):
@@ -1954,9 +1961,18 @@ class TimeDomainFilterBank:
                         if getattr(active_plan, '_gpu', None) is not None:
                             active_plan._gpu._queue_offset = getattr(self, '_queue_offset', 0)
                     active_plan._want_sparse = True
+                    run_in, run_starts = data_in, sub_starts
+                    if data_in.dtype == np.float32 and not _reads_real(active_plan):
+                        # A plan without a real-series path (the ungated single-template plan
+                        # of a follow-up) widens to complex only the span its blocks read --
+                        # not the whole series, which was 4.7 s of copies over a test27 job.
+                        lo = int(sub_starts.min())
+                        hi = min(S, int(sub_starts.max()) + N)
+                        run_in = np.ascontiguousarray(data_in[lo:hi], dtype=np.complex64)
+                        run_starts = (sub_starts - lo).astype(sub_starts.dtype)
                     try:
                         res = active_plan.run_series(
-                            data_in, sub_starts, sub_bws, sub_bwe, binsize=bs,
+                            run_in, run_starts, sub_bws, sub_bwe, binsize=bs,
                             threshold=eff_threshold, templates=plan_templates, raw=True
                         )
                     finally:
