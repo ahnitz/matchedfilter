@@ -12,20 +12,16 @@ import pytest
 from matchedfilter import _automatic_series_layout, CorrelationFilter
 
 
-BANK_FILE = "/home/ahnitz/projects/claude/searchdev/work/scale100k/fir_three_level_opt501_v2.hdf"
 
 
 @pytest.fixture(scope="module")
 def bank_data():
-    if not os.path.exists(BANK_FILE):
-        pytest.skip(f"Bank file {BANK_FILE} not found")
-    h5py = pytest.importorskip("h5py")
-    f = h5py.File(BANK_FILE, "r")
-    g = f["fir_data/upper/0"]
-    taps = g["taps"][:]
-    counts = g["actual_tap_count"][:]
-    middle_ids = g["fine_bank_index"][:]
-    sigmas = g["sigmas"][:]
+    from conftest import bank_subset
+    b = bank_subset()
+    taps = b["upper_taps"]
+    counts = b["upper_counts"]
+    middle_ids = b["upper_fine_bank_index"]
+    sigmas = b["upper_sigmas"]
     ref_s = sigmas[:, 0]
     target_s = sigmas[:, 2]
     scales = np.asarray((ref_s / target_s) / 2048.0, dtype=np.float32)

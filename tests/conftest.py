@@ -29,6 +29,17 @@ except Exception:
 import pytest                                          # noqa: E402
 
 
+# --- a slice of a production FIR bank, for tests that need real taps --------
+def bank_subset():
+    """Real FIR taps without the 110 MB bank or h5py: tests/data/bank_subset_opt501_v2.npz,
+    written by tools/make_bank_subset.py from fir_three_level_opt501_v2.hdf (fine group 0's
+    first 128 templates; top template 0's middle filters, ids and sigmas)."""
+    import numpy as np
+    from pathlib import Path
+    with np.load(Path(__file__).parent / "data" / "bank_subset_opt501_v2.npz") as z:
+        return {k: z[k] for k in z.files}
+
+
 @pytest.fixture(autouse=True)
 def _clean_autotune_cache():
     try:

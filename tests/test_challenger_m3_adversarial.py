@@ -15,18 +15,13 @@ import pytest
 import matchedfilter as mf
 
 
-BANK_PATH = "/home/ahnitz/projects/claude/searchdev/work/scale100k/fir_three_level_opt501_v2.hdf"
 
 
 def load_real_bank_templates(n_max=32):
     """Load realistic template FIR taps from the production template bank."""
-    if not os.path.exists(BANK_PATH):
-        pytest.skip(f"Template bank not found: {BANK_PATH}")
-    h5py = pytest.importorskip("h5py")
-    with h5py.File(BANK_PATH, "r") as f:
-        taps = f["fir_data/0/taps"][:n_max]
-        counts = f["fir_data/0/actual_tap_count"][:n_max]
-    return taps, counts
+    from conftest import bank_subset
+    b = bank_subset()
+    return b["fine_taps"][:n_max], b["fine_counts"][:n_max]
 
 
 class TestEdgeFrequencyBins:
