@@ -818,6 +818,29 @@ static PyObject *HMF_set_thresholds(HMFObject *self,PyObject *args){
   Py_RETURN_NONE;
 }
 
+/* set_taps(taps, counts): taps float32 (nt, stride) C-contiguous, counts int64 (nt,). */
+static PyObject *HMF_set_taps(HMFObject *self,PyObject *args){
+  Py_buffer bt,bc; Py_ssize_t stride;
+  if(!PyArg_ParseTuple(args,"y*ny*",&bt,&stride,&bc)) return NULL;
+  int r=-1;
+  if(stride>0 && bt.len>=(Py_ssize_t)self->nt*stride*(Py_ssize_t)sizeof(float)
+     && bc.len>=(Py_ssize_t)self->nt*(Py_ssize_t)sizeof(int64_t))
+    r=ap_hmf_set_taps(self->p,(const float*)bt.buf,(size_t)stride,(const int64_t*)bc.buf);
+  PyBuffer_Release(&bt); PyBuffer_Release(&bc);
+  if(r<0){ PyErr_SetString(PyExc_ValueError,"matchedfilter: bad taps (need nt rows of float32 "
+                           "taps, int64 counts in [1, min(stride, n)])"); return NULL; }
+  Py_RETURN_NONE;
+}
+static PyObject *HMF_set_direct(HMFObject *self,PyObject *args){
+  int on,hw=1; if(!PyArg_ParseTuple(args,"p|i",&on,&hw)) return NULL;
+  return PyBool_FromLong(ap_hmf_set_direct(self->p,on,hw)==0);
+}
+static PyObject *HMF_direct_stats(HMFObject *self,PyObject *unused){
+  (void)unused; long pairs=0,lags=0,fft=0; double lt=0,fp=0;
+  ap_hmf_direct_stats(self->p,&pairs,&lags,&fft,&lt,&fp);
+  return Py_BuildValue("{s:l,s:l,s:l,s:d,s:d}","pairs",pairs,"lags",lags,"fft",fft,
+                       "ticks_per_lag_tap",lt,"ticks_per_fft_pair",fp);
+}
 static PyObject *HMF_set_q15(HMFObject *self,PyObject *args){
   int on; if(!PyArg_ParseTuple(args,"p",&on)) return NULL;
   return PyBool_FromLong(ap_hmf_set_q15(self->p,on)==0);
@@ -853,6 +876,9 @@ static PyMethodDef HMF_methods[]={
   {"series_group",(PyCFunction)HMF_series_group,METH_NOARGS,"actual series block group"},
   {"set_q15_tier0",(PyCFunction)HMF_set_q15_tier0,METH_VARARGS,"set_q15_tier0(fp16) -> True if tier 0 behind the Q15 screen now runs on the FP16 gate"},
   {"set_platform_fft",(PyCFunction)HMF_set_platform_fft,METH_VARARGS,"set_platform_fft(on) -> True if block forwards now run through the platform FFT"},
+  {"set_taps",(PyCFunction)HMF_set_taps,METH_VARARGS,"set_taps(taps float32 (nt, stride), stride, counts int64 (nt,)): each template's real FIR taps"},
+  {"set_direct",(PyCFunction)HMF_set_direct,METH_VARARGS,"set_direct(on, halfwidth=1) -> True if survivors are now refined by direct correlation where cheaper"},
+  {"direct_stats",(PyCFunction)HMF_direct_stats,METH_NOARGS,"direct refine counters and prices"},
   {"set_q15",(PyCFunction)HMF_set_q15,METH_VARARGS,"set_q15(on) -> True if the first tier now runs behind the Q15 screen"},
   {"q15_stats",(PyCFunction)HMF_q15_stats,METH_NOARGS,"q15_stats() -> (on, pairs passed to the float tier, screen ticks)"},
   {"set_data",(PyCFunction)HMF_set_data,METH_VARARGS,"set_data(i, buffer)"},
@@ -1128,6 +1154,10 @@ static PyObject *M_gate16_bound(PyObject *self, PyObject *args){
 }
 
 
+static PyObject *M_price_direct(PyObject *self,PyObject *unused){
+  (void)self; (void)unused;
+  return PyFloat_FromDouble(ap_hmf_price_direct());
+}
 static PyObject *M_price_q15_tier0(PyObject *self, PyObject *args){
   (void)self; Py_ssize_t m; int nt, reps=5; double a, b; int rc;
   if(!PyArg_ParseTuple(args,"ni|i",&m,&nt,&reps)) return NULL;
@@ -1142,6 +1172,7 @@ static PyMethodDef methods[]={
   {"backend",M_backend,METH_NOARGS,"backend() -> name of the selected kernel"},
   {"forward_cost",M_forward_cost,METH_VARARGS,"forward_cost(n, reps=9) -> (engine s, platform s or -1) per block forward"},
   {"gate16_bound",M_gate16_bound,METH_VARARGS,"gate16_bound(N, data, templates, nt) -> bytes of nt float32 bounds (-1: not fired), or None"},
+  {"price_direct",M_price_direct,METH_NOARGS,"price_direct() -> ticks per lag x tap of the direct refine's correlation"},
   {"price_q15_tier0",M_price_q15_tier0,METH_VARARGS,"price_q15_tier0(m, nt, reps=5) -> (fp32, fp16 or -1) ticks per listed pair"},
   {"gate16",M_gate16,METH_NOARGS,"gate16() -> whether new hierarchical plans run the FP16 first gate"},
   {"targets",M_targets,METH_NOARGS,"targets() -> names this build can run here"},

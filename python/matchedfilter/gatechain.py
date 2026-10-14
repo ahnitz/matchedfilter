@@ -318,7 +318,8 @@ class CostModel:
                                tuple(self._refine),
                                tuple((b, v["dense"], v["recheck"], tuple(v["excess"]))
                                      for b, v in sorted(self.screen.items())),
-                               tuple((b, tuple(r)) for b, r in sorted(self.excess.items())))
+                               tuple((b, tuple(r)) for b, r in sorted(self.excess.items())),
+                               tuple(sorted((getattr(self, "direct", None) or {}).items())))
         return sig
 
     def to_dict(self):
@@ -395,6 +396,25 @@ class CostModel:
             return 0.0
         return (self.forward_cost(chain, f) - self.forward) / float(ntemplates)
 
+    def with_direct(self, prices):
+        """A copy whose refine is the cheaper of the measured whole-block refine and a direct
+        refine priced at prices[b] ticks per refined pair for a chain whose last tier is band
+        b (HierarchicalFilter._direct_prices: the direct refine's window scales with
+        n / b, so it favours chains ending in a wider band)."""
+        import copy
+        cm = copy.copy(self)
+        cm.direct = {int(b): float(v) for b, v in prices.items()}
+        cm._sig = None
+        return cm
+
+    def refine_for(self, chain, f):
+        """Ticks per refined pair for this chain at refine density f."""
+        r = self.refine(f)
+        d = getattr(self, "direct", None)
+        if d and int(chain[-1]) in d:
+            r = min(r, d[int(chain[-1])])
+        return r
+
     def chain_cost(self, chain, reach):
         """reach[i] = P(a pair reaches tier i+1) for i = 0..k-1, reach[k] = P(reaches refine)."""
         c = self.first_tier(chain[0], reach[1] if len(reach) > 1 else 1.0)[0]
@@ -406,7 +426,7 @@ class CostModel:
             reach[1] = min(1.0, reach[1] * self.pass_excess(chain[0], reach[1]))
         for i in range(1, len(chain)):
             c += reach[i] * self.sparse(chain[i], reach[i])
-        c += reach[len(chain)] * self.refine(reach[len(chain)])
+        c += reach[len(chain)] * self.refine_for(chain, reach[len(chain)])
         return c
 
 
@@ -1342,6 +1362,63 @@ def _choose_chain(power, n, snr, fd, cost, max_tiers, floor, nsim, window, ntemp
 
 
 _PLAN_CACHE = OrderedDict()
+
+
+_DIRECT_CACHE = OrderedDict()
+
+
+def direct_halfwidth(power, n, chain, thresholds, snr, fd, window=None, nsim=20000, seed=31):
+    """Half-width, in last-tier coarse samples, of the direct refine's window around a pair's
+    largest last-tier coarse lag: the largest distance to the fine peak seen in nsim draws
+    the gate passes, rounded up (at least 1).
+
+    The draws are signal_draws' model over whole blocks: noise with spectrum _SIG^2 p, a
+    signal of strength snr whose output spectrum is snr p at a uniform lag in the window,
+    every tier's coarse statistic (its band of the product over sqrt(F_b)), kept when every
+    tier passes and the fine maximum reaches snr. Returns (halfwidth, distances' 99.99th
+    percentile, draws kept)."""
+    p = _norm_profile(power, n)
+    chain = tuple(int(b) for b in chain)
+    win = (0, n) if window is None else (int(window[0]), int(window[1]))
+    key = _key(p, n, chain, tuple(float(t) for t in thresholds), float(snr), float(fd), win,
+               int(nsim), int(seed))
+    hit = _DIRECT_CACHE.get(key)
+    if hit is not None:
+        return hit
+    rng = np.random.default_rng(seed)
+    F = [float(p[:b].sum()) for b in chain]
+    k = np.arange(n)
+    w0, w1 = win
+    kept, dist = 0, []
+    chunk = 1000
+    for c0 in range(0, nsim, chunk):
+        m = min(chunk, nsim - c0)
+        noise = (rng.standard_normal((m, n)) + 1j * rng.standard_normal((m, n))) / np.sqrt(2)
+        P = noise * (_SIG * np.sqrt(p))[None, :]
+        tau0 = rng.integers(w0, w1, m)
+        ph = np.exp(2j * np.pi * rng.random(m))
+        P += float(snr) * p[None, :] * ph[:, None] * np.exp(-2j * np.pi * np.outer(tau0, k) / n)
+        fine = np.abs(np.fft.ifft(P, axis=1) * n)[:, w0:w1]
+        ok = fine.max(1) >= float(snr)
+        am = None
+        for b, f, thr in zip(chain, F, thresholds):
+            R = n // b
+            cs = w0 // R
+            cs = cs - 1 if cs > 0 else cs
+            ce = min(-(-w1 // R), b)
+            co = np.abs(np.fft.ifft(P[:, :b], axis=1) * b / np.sqrt(f))[:, cs:ce]
+            ok &= co.max(1) >= float(thr)
+            am = (co.argmax(1) + cs) * R
+        fa = fine.argmax(1) + w0
+        d = np.abs(fa - am)
+        d = np.minimum(d, n - d) / (n // chain[-1])      # lags are circular in a block
+        dist.append(d[ok])
+        kept += int(ok.sum())
+    d = np.concatenate(dist) if dist else np.zeros(0)
+    hw = max(1, int(np.ceil(d.max()))) if len(d) else 1     # the caller adds its margin
+    out = (hw, float(np.percentile(d, 99.99)) if len(d) else 0.0, kept)
+    _cache_put(_DIRECT_CACHE, key, out)
+    return out
 
 
 def chain_thresholds(power, n, snr, fd, chain, cost=None, floor=_MIN_BAND, nsim=20000, window=None):

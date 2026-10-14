@@ -59,6 +59,10 @@ void ap_fft(ap_plan *p,const float *in,float *out,int sign){
   p->be->fft(p->h,in,out,sign==AP_BACKWARD);
 }
 
+void ap_td_corr(const float *x,const float *taps,int L,int nlag,float *out){
+  pick()->td_corr(x,taps,L,nlag,out);
+}
+
 size_t ap_nbins(const ap_plan *p,size_t binsize,size_t start,size_t end){
   if(!p||!binsize) return 0;
   if(end>p->n) end=p->n;

@@ -72,6 +72,19 @@ struct ap_hmf_plan {
                                      ap_hmf_set_q15_tier0) instead of the pooled FP32 pass */
   long qpassed;
   unsigned long long qticks;
+  /* Direct refine (ap_hmf_set_taps, ap_hmf_set_direct): a survivor is refined only at the
+     lags around its last tier's firing coarse lags, by direct correlation with its real
+     taps, where that is priced cheaper than the whole-block transform. */
+  float **taps;                   /* [nt] 64-byte aligned taps, or NULL */
+  int *tap_len;                   /* [nt] */
+  int direct, dir_hw;             /* on; half-width of a window, in last-tier coarse samples */
+  const float **dtime;            /* [nd] the block's complex samples (run_series only) */
+  size_t *dhave;                  /* [nd] samples present (the rest are zero) */
+  float *dx, *dout;               /* [2n] a zero-padded block copy; direct output */
+  int *dfd, *dft;                 /* [nd*nt] pairs the transform refines instead */
+  double dir_lagtap, dir_fftpair; /* priced: ticks per lag x tap, per whole-block refine */
+  long dir_pairs, dir_lags, dir_fft, dir_edge;
+  unsigned long long dir_ttd, dir_tfft;  /* ticks: direct, and the pairs it left to transform */
 };
 
 int ap_hmf_series_group(const ap_hmf_plan *p){ return p ? p->dgroup : 0; }
@@ -147,9 +160,12 @@ ap_hmf_plan *ap_hmf_create_chain(size_t n,size_t k,int ndata,int ntmpl,
   p->accel=ap_accel_create(n);           /* NULL where the platform has none */
   p->spec=ap_alloc64((size_t)grp*2*n*sizeof(float));
   p->dspec=calloc((size_t)p->nd,sizeof(*p->dspec));
+  p->dtime=calloc((size_t)p->nd,sizeof(*p->dtime));
+  p->dhave=calloc((size_t)p->nd,sizeof(*p->dhave));
   p->dready=calloc((size_t)p->nd,1);
   p->tready=calloc((size_t)ntmpl,1);
-  if(!p->full||!p->full_fft||!p->fwd||!p->spec||!p->dspec||!p->dready||!p->tready){
+  if(!p->full||!p->full_fft||!p->fwd||!p->spec||!p->dspec||!p->dready||!p->tready
+     ||!p->dtime||!p->dhave){
     ap_hmf_destroy(p); return NULL;
   }
   p->prof=getenv("MF_HMF_PROF")!=NULL;
@@ -180,7 +196,109 @@ void ap_hmf_destroy(ap_hmf_plan *p){
   if(p->dif_pk_o) free(p->dif_pk_o);
   if(p->dump) fclose(p->dump);
   free(p->qpass); free(p->qd); free(p->qt);
+  if(p->taps){ for(int t=0;t<p->nt;t++) free(p->taps[t]); free(p->taps); }
+  free(p->tap_len); free(p->dtime); free(p->dhave);  free(p->dx); free(p->dout); free(p->dfd); free(p->dft);
   free(p);
+}
+
+/* Each template's real FIR taps: row t holds counts[t] valid taps (stride floats per row),
+   centre tap counts[t]/2 at lag 0 -- the filter whose spectrum ap_hmf_set_template holds
+   (time_domain._tap_spectra, rate ratio 1). */
+int ap_hmf_set_taps(ap_hmf_plan *p,const float *taps,size_t stride,const int64_t *counts){
+  if(!p||!taps||!counts) return -1;
+  for(int t=0;t<p->nt;t++) if(counts[t]<1||(size_t)counts[t]>stride||(size_t)counts[t]>p->n) return -1;
+  if(!p->taps){
+    p->taps=calloc((size_t)p->nt,sizeof(*p->taps));
+    p->tap_len=calloc((size_t)p->nt,sizeof(int));
+    p->dx=ap_alloc64(2*p->n*sizeof(float));
+    p->dout=ap_alloc64(2*p->n*sizeof(float));
+    p->dfd=malloc((size_t)p->nd*p->nt*sizeof(int));
+    p->dft=malloc((size_t)p->nd*p->nt*sizeof(int));
+    if(!p->taps||!p->tap_len||!p->dx||!p->dout||!p->dfd||!p->dft) return -1;
+  }
+  for(int t=0;t<p->nt;t++){
+    free(p->taps[t]);
+    p->taps[t]=ap_alloc64((size_t)counts[t]*sizeof(float));
+    if(!p->taps[t]) return -1;
+    memcpy(p->taps[t],taps+(size_t)t*stride,(size_t)counts[t]*sizeof(float));
+    p->tap_len[t]=(int)counts[t];
+  }
+  return 0;
+}
+
+/* Ticks per lag x tap of the direct correlation on this core (best of a few reps): what
+   the cost model charges a direct refine (gatechain.CostModel.with_direct). */
+double ap_hmf_price_direct(void){
+  const int L=256, nl=32;
+  float *x=ap_alloc64(2*(size_t)(nl+L)*sizeof(float)), *tp=ap_alloc64((size_t)L*sizeof(float));
+  float *out=ap_alloc64(2*(size_t)nl*sizeof(float));
+  double best=-1;
+  if(x&&tp&&out){
+    for(int i=0;i<2*(nl+L);i++) x[i]=(float)((i*7919)%1000)/1000.f-0.5f;
+    for(int i=0;i<L;i++) tp[i]=(float)((i*104729)%1000)/1000.f-0.5f;
+    best=1e30;
+    for(int r=0;r<7;r++){
+      unsigned long long a=ap_ticks();
+      ap_td_corr(x,tp,L,nl,out);
+      unsigned long long b=ap_ticks();
+      if((double)(b-a)<best) best=(double)(b-a);
+    }
+    best/=(double)nl*L;
+  }
+  free(x); free(tp); free(out);
+  return best;
+}
+
+/* Price the direct correlation (ticks per lag x tap) and the whole-block refine (ticks per
+   pair: one inverse transform and its peak scan) on this core, best of a few reps. */
+static void price_direct(ap_hmf_plan *p){
+  const size_t n=p->n;
+  const int L=256, nl=32;
+  float *x=ap_alloc64(2*(size_t)(nl+L)*sizeof(float)), *tp=ap_alloc64((size_t)L*sizeof(float));
+  float *spec=ap_alloc64(2*n*sizeof(float));
+  ap_peak pk[4];
+  if(!x||!tp||!spec){ free(x); free(tp); free(spec); return; }
+  for(int i=0;i<2*(nl+L);i++) x[i]=(float)((i*7919)%1000)/1000.f-0.5f;
+  for(int i=0;i<L;i++) tp[i]=(float)((i*104729)%1000)/1000.f-0.5f;
+  for(size_t i=0;i<2*n;i++) spec[i]=(float)((i*31337)%1000)/1000.f-0.5f;
+  double best_d=1e30,best_f=1e30;
+  for(int r=0;r<5;r++){
+    unsigned long long a=ap_ticks();
+    ap_td_corr(x,tp,L,nl,p->dout);
+    unsigned long long b=ap_ticks();
+    int c=0;
+    ap_binmax(p->full_fft,spec,n,1,n,1e30f,pk,&c,AP_BACKWARD,0,n);
+    unsigned long long e=ap_ticks();
+    if((double)(b-a)<best_d) best_d=(double)(b-a);
+    if((double)(e-b)<best_f) best_f=(double)(e-b);
+  }
+  p->dir_lagtap=best_d/((double)nl*L);
+  p->dir_fftpair=best_f;
+  free(x); free(tp); free(spec);
+}
+
+int ap_hmf_set_direct(ap_hmf_plan *p,int on,int halfwidth){
+  if(!p) return -1;
+  if(!on){ p->direct=0; return 0; }
+  if(!p->taps||halfwidth<1) return -1;
+  p->direct=1; p->dir_hw=halfwidth;
+  if(p->dir_lagtap<=0) price_direct(p);
+  return 0;
+}
+
+int ap_hmf_direct_stats(const ap_hmf_plan *p,long *pairs,long *lags,long *fft,
+                        double *lagtap,double *fftpair){
+  if(!p) return -1;
+  if(getenv("MF_DIRECT_TRACE")) fprintf(stderr,"direct: %ld pairs to the transform for a maximum on a window edge\n",
+                                         p->dir_edge);
+  if(getenv("MF_DIRECT_TRACE")) fprintf(stderr,"direct ticks: direct %llu fallback %llu\n",
+                                         p->dir_ttd,p->dir_tfft);
+  if(pairs) *pairs=p->dir_pairs;
+  if(lags) *lags=p->dir_lags;
+  if(fft) *fft=p->dir_fft;
+  if(lagtap) *lagtap=p->dir_lagtap;
+  if(fftpair) *fftpair=p->dir_fftpair;
+  return 0;
 }
 
 int ap_hmf_set_q15_tier0(ap_hmf_plan *p,int fp16){
@@ -395,6 +513,7 @@ int ap_hmf_run_series(ap_hmf_plan *p,
       ap_fft(p->full_fft,p->fwd,sp,AP_FORWARD);
       }
       if(ap_hmf_set_data(p,j,sp)) return -1;
+      p->dtime[j]=have ? series+2*s0 : NULL; p->dhave[j]=have;
       /* The full spectrum is NOT ingested here.  Only the coarse band is read
          by every pair; the full one is read only when a pair fires, which at
          threshold 5.5 is 0.1% of pairs and so about 4% of blocks.  Ingesting
@@ -416,6 +535,7 @@ int ap_hmf_run_series(ap_hmf_plan *p,
     int r=ap_hmf_run(p,0,g,t0,nt,binsize,threshold,
                      peaks+(size_t)b0*nt*nb,counts?counts+(size_t)b0*nt:NULL,
                      win_start[b0],win_end[b0]);
+    for(int j=0;j<g;j++) p->dtime[j]=NULL;   /* the caller's series is not held past the call */
     if(r<0) return -1;
     total+=r;
     b0+=g;
@@ -426,7 +546,7 @@ int ap_hmf_run_series(ap_hmf_plan *p,
 
 unsigned long long ap_hmf_series_ticks(const ap_hmf_plan *p){ return p ? p->c_series : 0; }
 
-static int hmf_refine(ap_hmf_plan *p, const int *fire_d, const int *fire_t,
+static int hmf_refine_fft(ap_hmf_plan *p, const int *fire_d, const int *fire_t,
                       int d0, int t0, int nt, int nfire,
                       size_t binsize, float threshold,
                       ap_peak *peaks, int *counts, size_t start, size_t end){
@@ -602,6 +722,116 @@ static int hmf_refine(ap_hmf_plan *p, const int *fire_d, const int *fire_t,
                                   peaks, counts, start, end, nt);
     return r;
   }
+}
+
+/* One survivor by direct correlation: every lag within dir_hw coarse samples of the coarse
+   lags in loc (ncl entries; index < 0 skipped), binned exactly as the transform's scan bins
+   its lags. Returns the bins written above threshold, or -2 when the pair is priced cheaper
+   as a whole block (or its windows would read past the block). */
+static int refine_direct_pair(ap_hmf_plan *p,int d,int t,const ap_peak *loc,size_t ncl,
+                              size_t R,size_t binsize,float threshold,
+                              ap_peak *out,size_t nb,size_t start,size_t end){
+  const size_t n=p->n;
+  const int L=p->tap_len[t], c=L/2;
+  const long hw=(long)p->dir_hw*(long)R;
+  /* the windows: sorted (loc is in lag order), merged where they touch */
+  long lo[64], hi[64]; int nw=0; long nlag=0;
+  for(size_t j=0;j<ncl;j++){
+    if(loc[j].index<0) continue;
+    long a=(long)loc[j].index*(long)R-hw, b=(long)loc[j].index*(long)R+hw+1;
+    if(a<(long)start) a=(long)start;
+    if(b>(long)end) b=(long)end;
+    if(a>=b) continue;
+    if(nw && a<=hi[nw-1]){ if(b>hi[nw-1]) hi[nw-1]=b; continue; }
+    if(nw==64) return -2;
+    lo[nw]=a; hi[nw]=b; nw++;
+  }
+  for(int w=0;w<nw;w++) nlag+=hi[w]-lo[w];
+  if(p->trace) fprintf(stderr,"    [direct] pair d=%d t=%d coarse lag %ld R=%zu hw=%ld windows %d lags %ld L=%d"
+                       " price %.0f vs %.0f\n",d,t,loc[0].index,R,hw,nw,nlag,L,p->dir_lagtap*(double)nlag*L,
+                       p->dir_fftpair);
+  if(p->dir_lagtap*(double)nlag*L >= p->dir_fftpair) return -2;
+  /* the block's samples; a lag tau reads tau - c .. tau - c + L - 1 */
+  const float *x=p->dtime[d];
+  const size_t have=p->dhave[d];
+  for(int w=0;w<nw;w++)
+    if(lo[w]-c<0 || hi[w]-1-c+L>(long)n) return -2;     /* would wrap: the transform's answer */
+  if(have<n){
+    memcpy(p->dx,x,2*have*sizeof(float));
+    memset(p->dx+2*have,0,2*(n-have)*sizeof(float));
+    x=p->dx;
+  }
+  const float t2=threshold>0.f ? threshold*threshold : 0.f;
+  for(size_t b=0;b<nb;b++) out[b]=(ap_peak){-1,0.f,0.f,t2};
+  for(int w=0;w<nw;w++){
+    const int m=(int)(hi[w]-lo[w]);
+    ap_td_corr(x+2*(lo[w]-c),p->taps[t],L,m,p->dout);
+    for(int i=0;i<m;i++){
+      const float re=p->dout[2*i], im=p->dout[2*i+1], m2=re*re+im*im;
+      const long k=lo[w]+i;
+      const size_t b=(size_t)(k-(long)start)/binsize;
+      if(m2>out[b].magnitude){ out[b].magnitude=m2; out[b].index=k; out[b].re=re; out[b].im=im; }
+    }
+  }
+  /* A maximum on a window's edge (one the search window did not put there) may be the
+     shoulder of a peak outside it: the localisation the window rests on (the gate model's
+     draws) did not hold for this pair, and it takes the whole-block transform instead. On
+     data the model describes this never fires (captured consumer calls); on data it does
+     not, it is what keeps the answer the transform's. */
+  for(size_t b=0;b<nb;b++){
+    const long k=out[b].index;
+    if(k<0) continue;
+    for(int w=0;w<nw;w++)
+      if((k==lo[w] && lo[w]>(long)start) || (k==hi[w]-1 && hi[w]<(long)end)){ p->dir_edge++; return -2; }
+  }
+  int cnt=0;
+  for(size_t b=0;b<nb;b++){
+    if(out[b].index>=0){ out[b].magnitude=sqrtf(out[b].magnitude); cnt++; }
+    else out[b].magnitude=0.f;
+  }
+  p->dir_pairs++; p->dir_lags+=nlag;
+  return cnt;
+}
+
+static int hmf_refine(ap_hmf_plan *p, const int *fire_d, const int *fire_t,
+                      int d0, int t0, int nt, int nfire,
+                      size_t binsize, float threshold,
+                      ap_peak *peaks, int *counts, size_t start, size_t end){
+  if(nfire<=0) return 0;
+  const size_t nb=ap_hmf_nbins(p,binsize,start,end);
+  /* One bin per pair: the answer is the window's largest |z|, and it lies by its last tier's
+     largest coarse lag (ce.index) -- the window is dir_hw coarse samples either side of it.
+     Several bins ask for every bin's maximum above threshold, which one window cannot
+     promise: those refine by transform. */
+  int ok=p->direct && p->taps && nb==1;
+  for(int j=0;ok && j<nfire;j++) if(!p->dtime[d0+fire_d[j]]) ok=0;
+  if(!ok) return hmf_refine_fft(p,fire_d,fire_t,d0,t0,nt,nfire,binsize,threshold,
+                                peaks,counts,start,end);
+  hmf_tier *tr=&p->tier[p->ntiers-1];
+  const size_t R=p->n/tr->m;
+  unsigned long long q1=ap_ticks();
+  int total=0, nf=0;
+  for(int j=0;j<nfire;j++){
+    const int d=fire_d[j], t=fire_t[j];
+    const size_t row=(size_t)d*nt+t;
+    const ap_peak ce=tr->cebuf[row];
+    int c=-2;
+    if(ce.index>=0)
+      c=refine_direct_pair(p,d0+d,t0+t,&ce,1,R,binsize,threshold,peaks+row,1,start,end);
+    if(c==-2){ p->dfd[nf]=d; p->dft[nf]=t; nf++; continue; }
+    if(counts) counts[row]=c;
+    total+=c;
+  }
+  unsigned long long q2=ap_ticks();
+  p->dir_ttd+=q2-q1;
+  if(nf){
+    p->dir_fft+=nf;
+    int r=hmf_refine_fft(p,p->dfd,p->dft,d0,t0,nt,nf,binsize,threshold,peaks,counts,start,end);
+    if(r<0) return -1;
+    total+=r;
+    p->dir_tfft+=ap_ticks()-q2;
+  }
+  return total;
 }
 
 static void empty_row(ap_peak *peaks,int *counts,size_t row,size_t nb){
