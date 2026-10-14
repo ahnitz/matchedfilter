@@ -285,13 +285,18 @@ def main():
     ap.add_argument("--json")
     ap.add_argument("--loud", action="store_true",
                     help="also run the end-to-end loud-injection check on --device")
+    ap.add_argument("--allow-unavailable", action="store_true",
+                    help="a requested gate this machine cannot build is reported, not a failure")
     args = ap.parse_args()
     report = {}
+    failures = []
     if args.loud:
         if "cpu-g16" in args.gate:
             report["loud_cpu16"] = loud_cpu16()
+            failures += ["cpu-g16 loud snr %g" % r[0] for r in report["loud_cpu16"] if r[1] != r[2]]
         if set(args.gate) - {"cpu-g16"}:
             report["loud"] = loud_end_to_end(args.device)
+            failures += ["loud snr %g" % r[0] for r in report["loud"] if r[1][0] != r[2][0]]
     for g in args.gate:
         for N in args.n:
             rng = np.random.default_rng(args.seed + N)
@@ -301,6 +306,8 @@ def main():
                         GpuC16(N, args.templates, args.device))
             except Exception as e:                       # noqa: BLE001
                 print("%-8s N=%-5d unavailable: %s" % (g, N, e))
+                if not args.allow_unavailable:
+                    failures.append("%s N=%d unavailable" % (g, N))
                 continue
             res = measure(gate, families(N, rng, args.templates))
             report["%s/%d" % (gate.name, N)] = res
@@ -310,8 +317,13 @@ def main():
                       % (gate.name, N, fam, r["pairs"], r["dismissals"], r["slack_min"], r["slack_p001"],
                          r["slack_median"], "-" if r["use_max"] is None else "%.3f" % r["use_max"],
                          "ok" if r["ok"] else "FAIL"))
+                if not r["ok"]:
+                    failures.append("%s N=%d %s" % (gate.name, N, fam))
+    report["failures"] = failures
     if args.json:
         Path(args.json).write_text(json.dumps(report, indent=1))
+    print("gate_margin: %s" % ("FAILED: " + "; ".join(failures) if failures else "all ok"))
+    sys.exit(1 if failures else 0)
 
 
 if __name__ == "__main__":

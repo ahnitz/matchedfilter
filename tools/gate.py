@@ -1,0 +1,215 @@
+#!/usr/bin/env python
+"""The merge gate: every check a change must pass before it goes to main, in one command.
+
+    python tools/gate.py                       # every check this machine can run
+    python tools/gate.py --quick               # one suite run, short loops
+    python tools/gate.py --bank B.hdf --profiles P.npz   # include the ladder checks
+
+Checks, in order (each reports ok / FAIL / skip, and the gate fails on any FAIL):
+
+  suite        the full pytest suite, single-threaded, `--runs` times
+  check        `tools/ladder.py --check cpu`: the device against the CPU reference,
+               batched and with --pipeline; 0 peaks on one side only
+  replay       the same check after priming a fresh MF_COST_FILE (`--prime` segments) so
+               the trials lock and segment replay actually runs; it must replay
+  margin       `tools/gate_margin.py --loud`: narrow gates have no false dismissals and a
+               loud injection fails open
+  repro        tests/test_reproducible_choices.py, `--loops` times: processes sharing a
+               cost file make the same choices
+  followups    test_call_plan + test_followup_spec, `--loops` times (a past race)
+
+The ladder checks need a production-like bank and noise profiles, which are not in the
+repository; they run when --bank/--profiles (or MF_GATE_BANK/MF_GATE_PROFILES) are given and
+are skipped otherwise. A skipped check is reported as such, never as a pass. GPU checks run
+on --device (default: the first usable GPU, else the CPU only).
+"""
+import argparse
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+THREADS = {k: "1" for k in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
+                            "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS")}
+
+
+def _env(**extra):
+    env = dict(os.environ, **THREADS)
+    env["PYTHONPATH"] = os.pathsep.join(p for p in (str(ROOT / "python"), env.get("PYTHONPATH")) if p)
+    env.update({k: str(v) for k, v in extra.items()})
+    return env
+
+
+def _run(cmd, env=None, log=None):
+    t0 = time.time()
+    p = subprocess.run(cmd, cwd=ROOT, env=env or _env(), capture_output=True, text=True)
+    if log is not None:
+        Path(log).write_text(p.stdout + p.stderr)
+    return p.returncode, p.stdout + p.stderr, time.time() - t0
+
+
+def _usable_gpu():
+    code = ("import sys; sys.path.insert(0, 'tests'); from conftest import usable_gpu; "
+            "print(usable_gpu() or '')")
+    rc, out, _ = _run([sys.executable, "-c", code])
+    dev = out.strip().splitlines()[-1] if rc == 0 and out.strip() else ""
+    return dev or None
+
+
+class Gate:
+    def __init__(self, logdir):
+        self.results = []
+        self.logdir = Path(logdir)
+        self.logdir.mkdir(parents=True, exist_ok=True)
+
+    def record(self, name, status, detail):
+        self.results.append((name, status, detail))
+        print("%-10s %-5s %s" % (name, status, detail), flush=True)
+
+    @property
+    def failed(self):
+        return any(s == "FAIL" for _, s, _ in self.results)
+
+
+def suite(g, runs):
+    for i in range(runs):
+        rc, out, dt = _run([sys.executable, "-m", "pytest", "-q", "tests", "-p", "no:cacheprovider"],
+                           log=g.logdir / ("suite_%d.log" % i))
+        tail = out.strip().splitlines()[-1] if out.strip() else ""
+        failed = [l for l in out.splitlines() if l.startswith(("FAILED", "ERROR"))]
+        g.record("suite", "ok" if rc == 0 else "FAIL",
+                 "run %d/%d: %s (%.0fs)%s" % (i + 1, runs, tail, dt,
+                                               "" if rc == 0 else "; " + "; ".join(failed[:5])))
+
+
+def _ladder(args, device, extra, env=None, tag=""):
+    out_json = Path(tempfile.mkstemp(suffix=".json", dir=args.logdir)[1])
+    cmd = [sys.executable, "tools/ladder.py", "--bank", args.bank, "--profiles", args.profiles,
+           "--device", device, "--tops", "1", "--pure", "--out", str(out_json)] + extra
+    rc, out, dt = _run(cmd, env=env, log=Path(args.logdir) / ("ladder%s.log" % tag))
+    try:
+        report = json.loads(out_json.read_text())
+    except (OSError, ValueError):
+        report = None
+    return rc, report, dt
+
+
+def _check_ok(report):
+    c = (report or {}).get("check")
+    if not c:
+        return False, "no check in report"
+    ok = c.get("peaks_reference_only", 1) == 0 and c.get("peaks_device_only", 1) == 0
+    return ok, "%d calls, one-sided %d/%d, max SNR diff %.1e" % (
+        c.get("calls", 0), c.get("peaks_reference_only", -1), c.get("peaks_device_only", -1),
+        c.get("max_snr_diff", float("nan")))
+
+
+def check(g, args, device):
+    for mode, extra in (("batched", []), ("pipeline", ["--pipeline"])):
+        rc, report, dt = _ladder(args, device, ["--segments", "4", "--check", "cpu"] + extra,
+                                 tag="_" + mode)
+        ok, detail = _check_ok(report)
+        g.record("check", "ok" if rc == 0 and ok else "FAIL", "%s: %s (%.0fs)" % (mode, detail, dt))
+
+
+def replay(g, args, device):
+    cost = Path(args.logdir) / "replay_costs.json"
+    cost.unlink(missing_ok=True)
+    env = _env(MF_COST_FILE=cost)
+    rc, report, dt = _ladder(args, device, ["--segments", str(args.prime), "--pipeline"], env=env,
+                             tag="_prime")
+    if rc != 0:
+        g.record("replay", "FAIL", "prime run failed (%.0fs)" % dt)
+        return
+    env.update(LADDER_REPLAY="1", LADDER_GRAPH_MIDDLE="1", LADDER_INFLIGHT="1")
+    rc, report, dt = _ladder(args, device, ["--segments", "12", "--check", "cpu"], env=env,
+                             tag="_replay")
+    ok, detail = _check_ok(report)
+    counts = (report or {}).get("counts", {})
+    replays, failures = counts.get("segment_replays", 0), counts.get("segment_capture_failures", 0)
+    if not replays:
+        ok, detail = False, detail + "; no segment replays (trials not locked after %d segments?)" % args.prime
+    g.record("replay", "ok" if rc == 0 and ok else "FAIL",
+             "%s; %d replays, %d capture failures (%.0fs)" % (detail, replays, failures, dt))
+
+
+def margin(g, args, device):
+    gates = ["q15"] + (["gpu-c16"] if device else [])
+    if args.cpu_g16:
+        gates.append("cpu-g16")
+    cmd = [sys.executable, "tools/gate_margin.py", "--gate"] + gates + ["--loud"]
+    if device:
+        cmd += ["--device", device]
+    rc, out, dt = _run(cmd, log=g.logdir / "margin.log")
+    last = out.strip().splitlines()[-1] if out.strip() else ""
+    g.record("margin", "ok" if rc == 0 else "FAIL", "%s: %s (%.0fs)" % (" ".join(gates), last, dt))
+
+
+def loop(g, name, tests, n):
+    fails = 0
+    for i in range(n):
+        rc, _, _ = _run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider"] + tests,
+                        log=g.logdir / ("%s_%d.log" % (name, i)))
+        fails += rc != 0
+    g.record(name, "ok" if fails == 0 else "FAIL", "%d/%d runs failed" % (fails, n))
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--device", default="auto",
+                    help="GPU to gate (gpu:0, ...), 'cpu' for CPU only, or 'auto' (default)")
+    ap.add_argument("--bank", default=os.environ.get("MF_GATE_BANK"))
+    ap.add_argument("--profiles", default=os.environ.get("MF_GATE_PROFILES"))
+    ap.add_argument("--runs", type=int, default=1, help="full-suite runs (default 1)")
+    ap.add_argument("--loops", type=int, default=5, help="runs of each flake-prone test (default 5)")
+    ap.add_argument("--prime", type=int, default=40,
+                    help="segments that prime the replay check's fresh cost file (default 40)")
+    ap.add_argument("--cpu-g16", action="store_true", help="also gate the CPU fp16 tier (ARM)")
+    ap.add_argument("--quick", action="store_true", help="one suite run, 2 loops, no replay check")
+    ap.add_argument("--only", nargs="+",
+                    choices=["suite", "check", "replay", "margin", "repro", "followups"])
+    ap.add_argument("--logdir", default=None)
+    args = ap.parse_args(argv)
+    if args.quick:
+        args.runs, args.loops = 1, 2
+    args.logdir = args.logdir or tempfile.mkdtemp(prefix="mf-gate-")
+    g = Gate(args.logdir)
+
+    device = _usable_gpu() if args.device == "auto" else (None if args.device == "cpu" else args.device)
+    rc, out, _ = _run(["git", "rev-parse", "--short", "HEAD"])
+    print("gate: %s on %s, device %s, logs %s" % (out.strip(), os.uname().nodename, device or "cpu only",
+                                                  args.logdir), flush=True)
+    want = set(args.only or ["suite", "check", "replay", "margin", "repro", "followups"])
+    if args.quick and not args.only:
+        want.discard("replay")
+
+    if "suite" in want:
+        suite(g, args.runs)
+    ladder = bool(args.bank and args.profiles)
+    for name, fn in (("check", check), ("replay", replay)):
+        if name not in want:
+            continue
+        if not device:
+            g.record(name, "skip", "no GPU to compare against the CPU")
+        elif not ladder:
+            g.record(name, "skip", "needs --bank/--profiles (MF_GATE_BANK/MF_GATE_PROFILES)")
+        else:
+            fn(g, args, device)
+    if "margin" in want:
+        margin(g, args, device)
+    if "repro" in want:
+        loop(g, "repro", ["tests/test_reproducible_choices.py"], args.loops)
+    if "followups" in want:
+        loop(g, "followups", ["tests/test_call_plan.py", "tests/test_followup_spec.py"], args.loops)
+
+    print("gate: %s" % ("FAILED" if g.failed else "passed (%d skipped)"
+                       % sum(s == "skip" for _, s, _ in g.results)), flush=True)
+    return 1 if g.failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
