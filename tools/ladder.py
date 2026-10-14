@@ -935,6 +935,10 @@ def main():
     if args.out:
         Path(args.out).write_text(text)
     tirt = report.get("templates_in_real_time", {})
+    if "total" in tirt:
+        # The headline: template throughput through the representative stages.
+        print(f"throughput: {tirt['total']:.4g} templates in real time on {report['device']} "
+              "(fine templates x analysed seconds x 2 detectors / steady wall)")
     print(f"{report['device']}: {report['fine_templates']} fine templates, {len(tops)} tops x "
           f"{args.segments} segments; steady " + ", ".join(
               f"{k} {v:.2f}s" for k, v in report["steady_s"].items()) +
