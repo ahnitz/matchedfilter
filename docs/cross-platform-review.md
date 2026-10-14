@@ -650,8 +650,15 @@ and at every subgroup size alike:
 `tests/test_vk_coarse_tiles.py::test_transient_fails_open_in_every_layout` keeps templates in
 range (K = 32) and reports gap 2 as an expected failure on Intel.
 
-**Still frozen (next):** every other Vulkan pipeline is built at the device's default subgroup
-(`_build_pipeline` requires `self.subgroup_size` whenever a range exists), so on the Iris Xe
-the forward, refine and follow-up kernels all run at SIMD32. `LDS_CAP`, `COARSE_BANDS`,
+**Still frozen (next): the subgroup of every other Vulkan pipeline.** `_build_pipeline` requires
+the device's default size whenever a range exists, so on the Iris Xe the forward, refine and
+follow-up kernels all run at SIMD32. Measured with the `MF_VK_SUBGROUP` override (ladder,
+pipelined, dev4 idle): every pipeline at 16 runs 1.10e7 templates in real time against 2.96e6
+at the default -- 3.7x; the middle stage's forward 51 against 583 ms, the fine stage's 181
+against 767 -- with `--check` exact and gate_margin's failures the same set as at the default
+(the two Intel fp16 gaps above, nothing new). At 8 the device is lost. Next: the subgroup as a
+measured choice per kernel role, screened on a small dispatch first (as the coarse layout is),
+with every candidate checked against the default's answers. Until then `MF_VK_SUBGROUP=16`
+gets it on an Intel GPU. `LDS_CAP`, `COARSE_BANDS`,
 `METAL_C16_PPG` / `TARGET_THREADS`, `COARSE_TC_WPB`, `_TC_BLOCKS_PER_SM`, `_TILE_BYTES`,
 `_STATIC_SHARED_MAX`, `_SPARSE_HOST`; a roofline bandwidth source for GPUs not in its table.
