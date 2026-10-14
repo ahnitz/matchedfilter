@@ -100,3 +100,38 @@ def test_quadrature_taps_through_the_hierarchy(pack, device):
         if a.max() > thr * 1.05:
             hit = res.sample_indices[res.template_indices == i]
             assert hit.size, "template %d: a crossing at %.2f was not reported" % (i, a.max())
+
+
+@pytest.mark.parametrize("pack", [False, True])
+def test_a_real_series_is_transformed_at_half_size_exactly(pack, monkeypatch):
+    """A CPU hierarchical bank given a real series transforms its blocks as real ones
+    (half-size transforms giving the full spectrum, ap_hmf_set_real_series): the same
+    triggers and values, to float rounding, as the same series widened to complex."""
+    rng = np.random.default_rng(8)
+    counts = list(rng.integers(150, 401, 16))
+    taps, w, df = _quadrature_bank(rng, counts)
+    L = 1 << 18
+    x = np.fft.irfft(np.fft.rfft(rng.standard_normal(L)) *
+                     np.sqrt(np.interp(np.fft.rfftfreq(L, 1 / 2048.0), np.arange(w.size) * df, w)
+                             + 1e-12)).astype(np.float32)
+    x /= x.std()
+    for j, i in enumerate(range(0, len(counts), 3)):
+        c = counts[i]
+        pos = 20000 + j * (L - 40000) // 6
+        x[pos:pos + c] += 25.0 * np.real(taps[i, :c][::-1]) / np.linalg.norm(taps[i, :c])
+
+    def run(real):
+        monkeypatch.setenv("MF_REAL_SERIES", "1" if real else "0")
+        bank = TimeDomainFilterBank(taps, tap_counts=counts, engine="hier", threshold=5.5,
+                                    pack_templates=pack, binsize=2048)
+        bank.set_reference(w, delta_f=df)
+        r = bank.filter_series(x)
+        order = np.lexsort((r.sample_indices, r.template_indices))
+        return r.template_indices[order], r.sample_indices[order], r.snr[order]
+
+    t0, s0, z0 = run(False)
+    t1, s1, z1 = run(True)
+    assert z0.size > 3, "the injections must trigger"
+    np.testing.assert_array_equal(t0, t1)
+    np.testing.assert_array_equal(s0, s1)
+    np.testing.assert_allclose(z1, z0, rtol=1e-4, atol=1e-4 * np.abs(z0).max())

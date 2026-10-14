@@ -983,10 +983,12 @@ def _tap_spectra(taps: np.ndarray, counts: np.ndarray, n: int, rate_ratio: float
     """
     T, m = taps.shape
     cplx = np.iscomplexobj(taps)
-    if (rate_ratio == 1.0 and not cplx and _core is not None
-            and hasattr(_core, 'taps_to_spectra')):
+    if rate_ratio == 1.0 and _core is not None and hasattr(_core, 'taps_to_spectra'):
         try:
-            _core.taps_to_spectra(taps, counts, n, m, out)
+            if cplx:
+                _core.taps_to_spectra(np.ascontiguousarray(taps, np.complex64), counts, n, m, out, True)
+            else:
+                _core.taps_to_spectra(taps, counts, n, m, out)
             return
         except Exception:
             pass
@@ -1332,6 +1334,15 @@ class TimeDomainFilterBank:
             for ti_local, global_idx in enumerate(g.template_indices):
                 self._template_map[int(global_idx)] = (g, int(ti_local))
         self._current_ref_key = None
+
+    def _input_series(self, series) -> np.ndarray:
+        """The series as this bank filters it. A real series with complex (quadrature) taps
+        stays real -- the middle output of a real-real-complex hierarchy -- and a CPU
+        hierarchical plan transforms its blocks at half size; anything else is complex64."""
+        if (self.complex_taps and self.engine == 'hier' and isinstance(series, np.ndarray)
+                and not np.iscomplexobj(series)):
+            return np.ascontiguousarray(series, dtype=np.float32)
+        return np.ascontiguousarray(series, dtype=np.complex64)
 
     @staticmethod
     def _priced_window(c_bad: int, n: int) -> Tuple[int, int]:
@@ -1709,7 +1720,7 @@ class TimeDomainFilterBank:
                 block_starts: start sample of block containing each trigger
                 block_lengths: FFT block length used for each trigger
         """
-        ser = np.ascontiguousarray(series, dtype=np.complex64)
+        ser = self._input_series(series)
         if ser.ndim != 1:
             raise ValueError("series must be a 1D array")
         S = len(ser)
