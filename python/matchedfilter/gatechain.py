@@ -35,9 +35,11 @@ short list; the autotuner measures the short list on the real workload.
 The budget is split between the tiers by minimising that cost subject to the
 compound dismissal bound; the split is part of the chain's plan.
 """
+import hashlib
 import json
 import math
 import os
+import pathlib
 from collections import OrderedDict
 from itertools import combinations
 
@@ -485,6 +487,26 @@ def stored_choice(key):
         return None
     rec = _load_cost_file(path).get("choice|" + key)
     return rec.get("value") if isinstance(rec, dict) else None
+
+
+_GPU_KERNEL_ID = None
+
+
+def gpu_kernel_id():
+    """A short digest of the GPU kernel sources every shipped GPU build (SPIR-V, PTX, Metal)
+    was made from: spirv/manifest.json's source_hashes, which tests/test_kernels_ship.py holds
+    to the sources. A measured GPU kernel choice carries it in its MF_COST_FILE key, so a
+    build whose kernels differ measures afresh rather than reusing a choice timed on other
+    kernels: the Iris Xe's coarse subgroup went from 8 to 16 with an election change alone."""
+    global _GPU_KERNEL_ID
+    if _GPU_KERNEL_ID is None:
+        try:
+            path = pathlib.Path(__file__).with_name("spirv") / "manifest.json"
+            hashes = json.loads(path.read_text()).get("source_hashes", {})
+            _GPU_KERNEL_ID = hashlib.sha256(json.dumps(hashes, sort_keys=True).encode()).hexdigest()[:12]
+        except (OSError, ValueError):
+            _GPU_KERNEL_ID = ""
+    return _GPU_KERNEL_ID
 
 
 def store_choice(key, value):

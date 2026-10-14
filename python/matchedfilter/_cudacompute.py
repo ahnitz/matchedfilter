@@ -1787,8 +1787,8 @@ class Context(InputUploads):
         choice already made on this machine (gatechain.stored_choice) is reused untimed."""
         from . import gatechain
         labels = [self._labels.get(c[0].value, "") for c in cands]
-        ckey = "cuda-coarse|%s|%d|%s" % (getattr(self, "name", ""), int(band),
-                                         ",".join(sorted(labels)))
+        ckey = "cuda-coarse|%s|%d|%s|k%s" % (getattr(self, "name", ""), int(band),
+                                            ",".join(sorted(labels)), gatechain.gpu_kernel_id())
         held = gatechain.stored_choice(ckey)
         if held in labels:
             return cands[labels.index(held)]

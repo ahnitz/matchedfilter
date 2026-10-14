@@ -7,10 +7,23 @@ Alpha releases may change the API. Pin a version for reproducible work.
 ### Performance
 
 - fp16 coarse tier, untiled builds (every band on an Intel Iris Xe; bands 128 and 1024 on an
-  Apple M2): the peak election recomputes each register's magnitude where it compares it
-  instead of holding per-register magnitude arrays. Intel's compiler estimates 12-14% fewer
-  cycles at SIMD8; measured interleaved on the Iris Xe, the band-256 kernel is 7-8% faster
-  at the device's subgroup size (8), every packing. Same results; M2 throughput unchanged.
+  Apple M2): the peak election is one pass over the transform registers -- each thread keeps
+  its in-window maximum, that maximum's lowest slot and the register -- instead of holding
+  per-register magnitude arrays. A second pass that recomputed the magnitudes was folded back
+  into the first by Intel's compiler and spilled just as the arrays did (46 spills, 148 fills
+  at SIMD16). Band 256 on the Iris Xe, interleaved against 0.1.0a8 on the same device: at
+  subgroup 8, 0.87x the time per pair; at subgroup 16 the spills are gone (2574 -> 1303
+  instructions), and its best layout takes 0.71x the time of 0.1.0a8's best (subgroup 8),
+  1.41x coarse throughput. The layout measurement now picks subgroup 16 at every coarse band
+  there. Same results.
+
+### Fixed
+
+- Measured GPU kernel choices in `MF_COST_FILE` (coarse layout, tile and subgroup on Vulkan,
+  CUDA and Metal; the Vulkan pipeline subgroup and fused-batch interleave) are keyed by the
+  kernel sources they timed (`gatechain.gpu_kernel_id`). A cost file written by another
+  build was reused, so a kernel change that moves the best layout -- the Iris Xe's coarse
+  subgroup above -- never reached a machine that already had one.
 
 ## 0.1.0a8
 
