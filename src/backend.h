@@ -77,6 +77,8 @@ typedef struct {
   /* Direct correlation with real taps over nlag consecutive lags (td-inl.h):
      out[i] = sum_k taps[k] x[i+k], x and out interleaved complex. */
   void (*td_corr)(const float *x, const float *taps, int L, int nlag, float *out);
+  /* A real block's full spectrum from its half-size transform (rsplit-inl.h). */
+  void (*real_split)(const float *Z, const float *tw, size_t n, float *X);
 } ap_backend;
 
 /* The kernel for the target Highway's runtime dispatch selected, or NULL if

@@ -63,6 +63,10 @@ void ap_td_corr(const float *x,const float *taps,int L,int nlag,float *out){
   pick()->td_corr(x,taps,L,nlag,out);
 }
 
+void ap_real_split(const float *Z,const float *tw,size_t n,float *X){
+  pick()->real_split(Z,tw,n,X);
+}
+
 size_t ap_nbins(const ap_plan *p,size_t binsize,size_t start,size_t end){
   if(!p||!binsize) return 0;
   if(end>p->n) end=p->n;

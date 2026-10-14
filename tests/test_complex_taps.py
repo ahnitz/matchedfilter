@@ -122,8 +122,11 @@ def test_a_real_series_is_transformed_at_half_size_exactly(pack, monkeypatch):
 
     def run(real):
         monkeypatch.setenv("MF_REAL_SERIES", "1" if real else "0")
+        # One chain for both (in Hz): a chain chosen per bank from timed calibrations may
+        # differ between the two, and two chains may dismiss different borderline pairs.
         bank = TimeDomainFilterBank(taps, tap_counts=counts, engine="hier", threshold=5.5,
-                                    pack_templates=pack, binsize=2048)
+                                    pack_templates=pack, binsize=2048,
+                                    coarse_band_hz=(128.0, 256.0))
         bank.set_reference(w, delta_f=df)
         r = bank.filter_series(x)
         order = np.lexsort((r.sample_indices, r.template_indices))

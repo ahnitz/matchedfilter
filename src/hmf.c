@@ -515,22 +515,7 @@ static void hmf_forward_real(ap_hmf_plan *p,const float *x,size_t s0,size_t have
     for(size_t k=0;k<have;k++) z[k]=src[k]*inv; }
   if(have<n) memset(z+have,0,(n-have)*sizeof(float));
   ap_fft(p->half_fft,z,Z,AP_FORWARD);
-  const float * restrict tw=p->rtw;
-  float * restrict X=sp;
-  /* k = 0 and k = h: E, O real. */
-  X[0]=Z[0]+Z[1]; X[1]=0.f;
-  X[2*h]=Z[0]-Z[1]; X[2*h+1]=0.f;
-  /* 0 < k < h, branch-free: Z[k] against Z[h-k], X[k] and its mirror X[n-k]. */
-  for(size_t k=1;k<h;k++){
-    const size_t r=h-k;
-    const float zr=Z[2*k],zi=Z[2*k+1],cr=Z[2*r],ci=-Z[2*r+1];
-    const float er=0.5f*(zr+cr),ei=0.5f*(zi+ci);
-    const float orr=0.5f*(zi-ci),oi=-0.5f*(zr-cr);
-    const float c=tw[2*k],s_=tw[2*k+1];
-    const float xr=er+(orr*c+oi*s_),xi=ei+(oi*c-orr*s_);
-    X[2*k]=xr; X[2*k+1]=xi;
-    X[2*(n-k)]=xr; X[2*(n-k)+1]=-xi;
-  }
+  ap_real_split(Z,p->rtw,n,sp);
 }
 
 int ap_hmf_run_series(ap_hmf_plan *p,
