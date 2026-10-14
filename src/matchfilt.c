@@ -53,6 +53,11 @@ struct ap_mf_plan {
      the flat path skip the per-slot spectrum array the hierarchical
      one needs. */
   float *sfwd,*sspec;         /* [2n] each */
+  /* Real series (ap_mf_correlate_series_continuous_real): blocks of real samples transformed
+     at half size and split into their full spectrum (ap_real_split). */
+  int real_series;
+  ap_plan *half_fft;
+  float *rtw;                 /* [2(n/2+1)] cos, sin of 2 pi k/n */
   /* Pair-batched small-N path.  Below AP_W^2 the transform has no balanced
      split, so the back end puts AP_W independent PAIRS in a vector instead of
      AP_W frequencies of one transform -- see create_small() in
@@ -183,6 +188,8 @@ void ap_mf_destroy(ap_mf_plan *p){
   free(p->dre);free(p->dim);free(p->tre);free(p->tim);
   free(p->pr);free(p->pi);free(p->scratch);
   free(p->sfwd);free(p->sspec);
+  if(p->half_fft) ap_destroy(p->half_fft);
+  free(p->rtw);
   free(p->ebr);free(p->ebi);free(p->tsr);free(p->tsi);free(p->dsr);free(p->dsi);free(p->pkbuf);
   free(p->tmre);free(p->tmim);
   ap_accel_destroy(p->accel);
@@ -900,6 +907,21 @@ static int series_spectra(ap_mf_plan *p,const float *series,size_t nseries,
     if(!p->sfwd||!p->sspec) return -1;
   }
   const float inv=1.0f/(float)n;
+  if(p->real_series){
+    for(int j=0;j<count;j++){
+      size_t start=starts[j];
+      size_t have=start<nseries?nseries-start:0;
+      if(have>n) have=n;
+      float * restrict z=p->sfwd;           /* n reals = n/2 complex */
+      const float * restrict src=series+start;
+      for(size_t k=0;k<have;k++) z[k]=src[k]*inv;
+      if(have<n) memset(z+have,0,(n-have)*sizeof(float));
+      ap_fft(p->half_fft,z,p->sfwd+n,AP_FORWARD);
+      ap_real_split(p->sfwd+n,p->rtw,n,p->sspec);
+      if(ap_mf_set_data(p,j,p->sspec)) return -1;
+    }
+    return 0;
+  }
   for(int j=0;j<count;j++){
     size_t start=starts[j];
     size_t have=start<nseries?nseries-start:0;
@@ -1012,7 +1034,7 @@ int ap_mf_correlate_series_continuous(ap_mf_plan *p,const float *series,
     p->corrbuf=ap_alloc64(2*(size_t)W*n*sizeof(float));
     if(!p->corrbuf) return -1;
   }
-  if(p->use_accel){
+  if(p->use_accel && !p->real_series){
     /* The whole block through the platform FFT: its spectrum in natural order, then per
        template the product with the row-major (conjugated) copy and the inverse. The
        engine's own data rows are in its element order, so they are not reused. */
@@ -1084,6 +1106,39 @@ int ap_mf_correlate_series_continuous(ap_mf_plan *p,const float *series,
   _mm_sfence();
 #endif
   return 0;
+}
+
+/* The same correlation of a REAL series of nseries samples (float32): each block transformed
+   at half size and split into its full spectrum -- the middle stage of a real-real-complex
+   hierarchy, filtering the real top output. out is complex, as above. */
+int ap_mf_correlate_series_continuous_real(ap_mf_plan *p,const float *series,
+                                           size_t nseries,const size_t *starts,
+                                           int nblocks,size_t lo,size_t hi,
+                                           int t0,int nt,float *out){
+  if(!p||p->n<4) return -1;
+  if(!p->half_fft){
+    const size_t h=p->n/2;
+    if(!ap_supported(h)) return -1;
+    p->half_fft=ap_create(h);
+    p->rtw=malloc(2*(h+1)*sizeof(float));
+    if(!p->half_fft||!p->rtw){
+      if(p->half_fft) ap_destroy(p->half_fft);
+      free(p->rtw); p->half_fft=NULL; p->rtw=NULL; return -1;
+    }
+    for(size_t k=0;k<=h;k++){
+      const double a=2.0*3.14159265358979323846*(double)k/(double)p->n;
+      p->rtw[2*k]=(float)cos(a); p->rtw[2*k+1]=(float)sin(a);
+    }
+  }
+  if(!p->sfwd){
+    p->sfwd=ap_alloc64(2*p->n*sizeof(float));
+    p->sspec=ap_alloc64(2*p->n*sizeof(float));
+    if(!p->sfwd||!p->sspec) return -1;
+  }
+  p->real_series=1;
+  const int r=ap_mf_correlate_series_continuous(p,series,nseries,starts,nblocks,lo,hi,t0,nt,out);
+  p->real_series=0;
+  return r;
 }
 
 /* Filter a time series over a caller-supplied block layout.

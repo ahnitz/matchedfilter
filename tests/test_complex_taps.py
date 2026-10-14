@@ -196,3 +196,34 @@ def test_a_followup_on_a_real_series_reads_only_its_span():
         np.testing.assert_array_equal(got.sample_indices, ref.sample_indices)
         np.testing.assert_allclose(got.snr, ref.snr, rtol=1e-6, atol=1e-6 * np.abs(ref.snr).max())
         assert got.snr.size > 900
+
+
+def test_a_real_series_correlates_at_half_size_exactly(monkeypatch):
+    """correlate_series of a real series on the CPU (the middle stage of a real-real-complex
+    hierarchy) runs half-size block transforms: the same output, to float rounding, as the
+    series widened to complex -- for real taps and for packed (complex) pairs."""
+    def pack_real_pairs(taps, counts):
+        # two real filters as one complex filter, each keeping its own centre tap
+        npair = (len(counts) + 1) // 2
+        pc = np.array([max(counts[2 * q:2 * q + 2]) for q in range(npair)], dtype=np.int64)
+        out = np.zeros((npair, pc.max()), np.complex64)
+        for r, c in enumerate(counts):
+            q, lane = divmod(r, 2)
+            o = pc[q] // 2 - c // 2
+            out[q, o:o + c] += (1.0 if lane == 0 else -1j) * taps[r, :c]
+        return out, pc
+
+    rng = np.random.default_rng(12)
+    counts = np.sort(rng.integers(300, 3000, 9))
+    taps = np.zeros((counts.size, counts.max()), np.float32)
+    for i, c in enumerate(counts):
+        taps[i, :c] = rng.standard_normal(c)
+    L = 1 << 17
+    x = rng.standard_normal(L).astype(np.float32)
+    for t, c in ((taps, counts), pack_real_pairs(taps, counts)):
+        bank = TimeDomainFilterBank(t, tap_counts=c, engine="corr")
+        monkeypatch.setenv("MF_REAL_SERIES", "0")
+        ref = bank.correlate_series(x)
+        monkeypatch.setenv("MF_REAL_SERIES", "1")
+        got = bank.correlate_series(x)
+        np.testing.assert_allclose(got, ref, rtol=1e-5, atol=1e-5 * np.abs(ref).max())

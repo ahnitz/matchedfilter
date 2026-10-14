@@ -360,6 +360,39 @@ static PyObject *MF_correlate_series_continuous(MFObject *self,PyObject *args){
   if(r){PyErr_SetString(PyExc_RuntimeError,"continuous series correlation failed");return NULL;}
   Py_RETURN_NONE;
 }
+/* correlate_series_continuous_real(series float32, starts, lo, hi, t0, nt, out complex64):
+   correlate_series_continuous of a real series, at half-size block transforms. */
+static PyObject *MF_correlate_series_continuous_real(MFObject *self,PyObject *args){
+  Py_buffer ser,starts,out;
+  Py_ssize_t lo,hi;
+  int t0,nt;
+  if(!PyArg_ParseTuple(args,"y*y*nniiw*",&ser,&starts,&lo,&hi,&t0,&nt,&out)) return NULL;
+  size_t blocks=(size_t)starts.len/sizeof(size_t);
+  const size_t nseries=(size_t)ser.len/4;
+  int valid=ser.len%4==0 && starts.len%sizeof(size_t)==0
+    && blocks>0 && blocks<=INT_MAX && lo>=0 && lo<hi && hi<=self->n
+    && t0>=0 && nt>0 && nt<=self->nt && t0<=self->nt-nt
+    && nseries<=(size_t)PY_SSIZE_T_MAX/8/(size_t)nt
+    && (size_t)out.len==(size_t)nt*nseries*8;
+  if(valid){
+    const size_t *st=(const size_t*)starts.buf;
+    for(size_t i=0;i<blocks;i++) if(st[i]>SIZE_MAX-(size_t)self->n){valid=0;break;}
+  }
+  if(!valid){
+    PyBuffer_Release(&ser);PyBuffer_Release(&starts);PyBuffer_Release(&out);
+    PyErr_SetString(PyExc_ValueError,"invalid real continuous series output or block layout");
+    return NULL;
+  }
+  int r;
+  Py_BEGIN_ALLOW_THREADS
+  r=ap_mf_correlate_series_continuous_real(self->p,(const float*)ser.buf,nseries,
+                                           (const size_t*)starts.buf,(int)blocks,
+                                           (size_t)lo,(size_t)hi,t0,nt,(float*)out.buf);
+  Py_END_ALLOW_THREADS
+  PyBuffer_Release(&ser);PyBuffer_Release(&starts);PyBuffer_Release(&out);
+  if(r){PyErr_SetString(PyExc_RuntimeError,"real continuous series correlation failed");return NULL;}
+  Py_RETURN_NONE;
+}
 /* run_series(series, starts, wstart, wend, t0, nt, binsize, thr, idx,val,mag,cnt [, peaks]) */
 static PyObject *MF_run_series(MFObject *self,PyObject *args){
   Py_buffer bs,bst,bws,bwe,bidx,bval,bmag,bcnt,bpk = {0};
@@ -484,6 +517,7 @@ static PyObject *MF_nbins(MFObject *self,PyObject *args){
 }
 static PyMethodDef MF_methods[]={
   {"set_data",(PyCFunction)MF_set_data,METH_VARARGS,"set_data(i, buffer)"},
+  {"correlate_series_continuous_real",(PyCFunction)MF_correlate_series_continuous_real,METH_VARARGS,"correlate_series_continuous_real(series_f32, starts, lo, hi, t0, nt, out_c64): the same of a real series, half-size block transforms"},
   {"set_platform_fft",(PyCFunction)MF_set_platform_fft,METH_VARARGS,"set_platform_fft(on) -> True if correlate_series_continuous now runs through the platform FFT"},
   {"set_template",(PyCFunction)MF_set_template,METH_VARARGS,"set_template(i, buffer)"},
   {"set_data_batch",(PyCFunction)MF_set_data_batch,METH_VARARGS,"set_data_batch(i0, buffer)"},
