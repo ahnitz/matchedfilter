@@ -1591,8 +1591,11 @@ class Context(InputUploads):
                 memo[k] = held
             else:
                 times = self._time_coarse_tiles(band, ppg, cands)
-                memo[k] = min(cands, key=lambda t: (times[t], t))
-                gatechain.store_choice(ckey, int(memo[k]))
+                if times is None:
+                    memo[k] = cands[1]              # unmeasurable here: the smallest tile, unstored
+                else:
+                    memo[k] = min(cands, key=lambda t: (times[t], t))
+                    gatechain.store_choice(ckey, int(memo[k]))
         return memo[k]
 
     def _time_coarse_tiles(self, band, ppg, cands, pairs=65536, ntm=16, reps=4):
@@ -1622,15 +1625,24 @@ class Context(InputUploads):
                 for rep in range(reps):
                     cmd = self.o.call(self.queue, b"commandBuffer")
                     enc = self.o.call(cmd, b"computeCommandEncoder")
-                    self._dispatch(enc, pso, (ntm, 0, band, slot_val, shift, 1, thr), bufs, tg,
-                                   groups=groups)
+                    # Encoded here, not through _dispatch: the calibration is not the call's
+                    # work, and _dispatch is what per-kernel profilers and tests observe.
+                    self.o.call(enc, b"setComputePipelineState:", restype=None,
+                                args=(pso,), argtypes=(ctypes.c_void_p,))
+                    self._set_params(enc, (ntm, 0, band, slot_val, shift, 1, thr))
+                    self._set_buffers(enc, bufs)
+                    self.o.call(enc, b"dispatchThreadgroups:threadsPerThreadgroup:", restype=None,
+                                args=(_MTLSize(groups, 1, 1), _MTLSize(tg, 1, 1)),
+                                argtypes=(_MTLSize, _MTLSize))
                     self.o.call(enc, b"endEncoding", restype=None)
                     self.o.call(cmd, b"commit", restype=None)
                     self.o.call(cmd, b"waitUntilCompleted", restype=None)
                     if rep:
                         t0 = self.o.call(cmd, b"GPUStartTime", restype=ctypes.c_double)
                         t1 = self.o.call(cmd, b"GPUEndTime", restype=ctypes.c_double)
-                        times.append(float(t1) - float(t0))
+                        if not (isinstance(t0, float) and isinstance(t1, float) and t1 > t0):
+                            return None             # no device timestamps: nothing to choose by
+                        times.append(t1 - t0)
                 out[tile] = min(times) / pairs
         finally:
             for b in bufs:
