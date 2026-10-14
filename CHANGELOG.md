@@ -28,6 +28,13 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ### Fixed
 
+- Vulkan fp16 coarse tier on GPUs that flush fp16 subnormals (Intel Iris Xe): templates or
+  data far from unit scale were flushed to zero and every pair dismissed (`gate_margin
+  --gate gpu-c16`: the transient family at every band, injections at 256-1024). The tier
+  now places its operands by exact powers of two -- templates to a fixed range, data so the
+  threshold sits where production banks already do (raised with the band, so the products
+  a band-wide transform sums stay in fp16's normal range) -- as the CPU fp16 gate does.
+  In-range results are unchanged.
 - The tiled fp16 coarse kernel dismissed every pair of an overflowing (very loud) row when
   a pair spans more than one subgroup -- band 1024 on 32-wide subgroups (Intel, NVIDIA) --
   and its error bound overflowed to inf for ordinary pairs there. Every backend now uses

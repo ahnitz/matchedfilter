@@ -192,8 +192,10 @@ void rowWindow(uint d, inout uint winStart, inout uint winEnd) {}
 #if COARSE16
 C dload(StructuredBuffer<CVal> b, uint i)
 {
-    if (mfDataStride != 0u)
-        return C(CS(asfloat(b[2u * i])), CS(asfloat(b[2u * i + 1u])));
+    if (mfDataStride != 0u) {
+        const float s = asfloat(mfDataScaleBits);    // a power of two: exact (twiddle.slang)
+        return C(CS(asfloat(b[2u * i]) * s), CS(asfloat(b[2u * i + 1u]) * s));
+    }
     return cload(b, i);
 }
 #endif

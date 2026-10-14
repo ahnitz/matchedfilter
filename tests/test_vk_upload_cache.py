@@ -128,7 +128,9 @@ def test_revisited_window_receives_updated_inputs(ctx, hier, changed):
         if changed == "tmpl":
             coarse = tmpl[:, :1024]
             if ctx._test_backend == "vulkan" and _vkcompute._use_c16(1024):
-                coarse = _vkcompute._pack_half2(coarse)
+                # Packed at the tier's template scale (_vkcompute._c16_scales).
+                et = _vkcompute._c16_scales(coarse, 1.0)[0]
+                coarse = _vkcompute._pack_half2(_vkcompute._pow2_scaled(coarse, et))
             elif ctx._test_backend == "metal" and _mtlcompute._use_c16(1024):
                 coarse = _mtlcompute._pack_half2(coarse)
             np.testing.assert_array_equal(buffers["ct0"].value, coarse)
