@@ -19,6 +19,12 @@ Alpha releases may change the API. Pin a version for reproducible work.
   per-band tile table is gone. Radeon Vega iGPU (RENOIR, GCN; gravity-dev3): +15% throughput; Intel
   Iris Xe: the coarse kernel 10-17x faster at subgroup 8 than at its default 32; Apple M2:
   untiled wins at bands 128 and 1024.
+- Vulkan subgroup size of the remaining pipelines (transforms, refine, follow-ups) as a
+  measured per-device choice in `MF_COST_FILE`, each candidate run in a subprocess and
+  checked against the default size's triggers. Intel Iris Xe: SIMD32 by default, the
+  measured size (8) runs the ladder 4.4-4.7x faster, exact. Required sizes never exceed the device's
+  `maxComputeWorkgroupSubgroups` for a pipeline's workgroup (8 on the Iris Xe lost the device
+  for the 1024-invocation transforms).
 
 ### Fixed
 

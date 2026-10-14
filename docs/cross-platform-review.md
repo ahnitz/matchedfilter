@@ -650,15 +650,24 @@ and at every subgroup size alike:
 `tests/test_vk_coarse_tiles.py::test_transient_fails_open_in_every_layout` keeps templates in
 range (K = 32) and reports gap 2 as an expected failure on Intel.
 
-**Still frozen (next): the subgroup of every other Vulkan pipeline.** `_build_pipeline` requires
-the device's default size whenever a range exists, so on the Iris Xe the forward, refine and
-follow-up kernels all run at SIMD32. Measured with the `MF_VK_SUBGROUP` override (ladder,
-pipelined, dev4 idle): every pipeline at 16 runs 1.10e7 templates in real time against 2.96e6
-at the default -- 3.7x; the middle stage's forward 51 against 583 ms, the fine stage's 181
-against 767 -- with `--check` exact and gate_margin's failures the same set as at the default
-(the two Intel fp16 gaps above, nothing new). At 8 the device is lost. Next: the subgroup as a
-measured choice per kernel role, screened on a small dispatch first (as the coarse layout is),
-with every candidate checked against the default's answers. Until then `MF_VK_SUBGROUP=16`
-gets it on an Intel GPU. `LDS_CAP`, `COARSE_BANDS`,
+**The subgroup of every other Vulkan pipeline: now a measured choice per device**
+(`_vksubgroup.py`). `_build_pipeline` required the device's default size whenever a range
+exists, so on the Iris Xe the forward, refine and follow-up kernels all ran at SIMD32. With
+MF_COST_FILE set and autotune on, each size in the device's range runs a small
+representative workload (hierarchical series plus a full correlation) in a subprocess -- a
+size that loses the device must not take the caller with it -- its triggers are checked
+against the reported size's, and the shared rule (`gatechain.measured_choice`) keeps the
+reported size unless another is faster past the tie margin. The choice is stored per device
+name. Pipelines that pick their own size (the coarse layout, `_fit_subgroup`) are unaffected.
+
+Sizes 8 lost the device at first: the 1024-invocation transforms then split into 128
+subgroups and the Iris Xe allows 64 (`maxComputeWorkgroupSubgroups`). The library now reads
+that limit and each module's workgroup size (its SPIR-V LocalSize), and any required size --
+measured, forced (`MF_VK_SUBGROUP`) or a coarse layout's -- that would exceed it is raised to
+the smallest size in range that fits. Ladder, pipelined, dev4 idle, `--check cpu` exact in
+every case: default (32) 2.5-3.0e6 templates in real time, 16 everywhere 7.7-9.9e6, 8 (raised
+to 16 for the large transforms) 1.15-1.32e7, the measured choice (8) 1.17-1.32e7 -- 4.4-4.7x. On the Radeon
+8060S (32-64) the sizes tie and 64 stays. `MF_VK_SUBGROUP=size[:prefixes]` still forces a
+size for measurement. Still frozen: `LDS_CAP`, `COARSE_BANDS`,
 `METAL_C16_PPG` / `TARGET_THREADS`, `COARSE_TC_WPB`, `_TC_BLOCKS_PER_SM`, `_TILE_BYTES`,
 `_STATIC_SHARED_MAX`, `_SPARSE_HOST`; a roofline bandwidth source for GPUs not in its table.
