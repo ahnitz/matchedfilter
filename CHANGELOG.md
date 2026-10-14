@@ -2,7 +2,11 @@
 
 Alpha releases may change the API. Pin a version for reproducible work.
 
-## Unreleased
+## 0.1.0a8
+
+The `v0.1.0a7` tag was not published to PyPI: its macOS arm64 wheel job failed
+`test_reproducible_choices[gpu:0]` (a block-size lock reopened with the re-check off; fixed
+below), so the publish job did not run. This release includes the 0.1.0a7 changes.
 
 ### Performance
 
