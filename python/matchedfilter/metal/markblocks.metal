@@ -3,14 +3,14 @@
 #include <metal_texture>
 using namespace metal;
 
-#line 2069 "/tmp/tmpfmo3c3wc/tier0.slang"
+#line 2138 "/tmp/tmp723nqzuf/tier0.slang"
 struct EntryPointParams_0
 {
     uint ntmpl_0;
 };
 
 
-#line 2069
+#line 2138
 struct KernelContext_0
 {
     EntryPointParams_0 constant* entryPointParams_0;
@@ -22,41 +22,41 @@ struct KernelContext_0
 };
 
 
-#line 2069
+#line 2138
 [[kernel]] void markBlocks(uint3 gid_0 [[thread_position_in_grid]], EntryPointParams_0 constant* entryPointParams_1 [[buffer(0)]], uint device* entryPointParams_survivors_1 [[buffer(1)]], uint device* entryPointParams_countArgs_1 [[buffer(2)]], uint device* entryPointParams_flags_1 [[buffer(3)]], uint device* entryPointParams_blockList_1 [[buffer(4)]], uint device* entryPointParams_blockArgs_1 [[buffer(5)]])
 {
 
-#line 2069
+#line 2138
     thread KernelContext_0 kernelContext_0;
 
-#line 2069
+#line 2138
     (&kernelContext_0)->entryPointParams_0 = entryPointParams_1;
 
-#line 2069
+#line 2138
     (&kernelContext_0)->entryPointParams_survivors_0 = entryPointParams_survivors_1;
 
-#line 2069
+#line 2138
     (&kernelContext_0)->entryPointParams_countArgs_0 = entryPointParams_countArgs_1;
 
-#line 2069
+#line 2138
     (&kernelContext_0)->entryPointParams_flags_0 = entryPointParams_flags_1;
 
-#line 2069
+#line 2138
     (&kernelContext_0)->entryPointParams_blockList_0 = entryPointParams_blockList_1;
 
-#line 2069
+#line 2138
     (&kernelContext_0)->entryPointParams_blockArgs_0 = entryPointParams_blockArgs_1;
 
-#line 2077
+#line 2146
     uint k_0 = gid_0.x;
     if(k_0 >= entryPointParams_countArgs_1[int(0)])
     {
 
-#line 2079
+#line 2148
         return;
     }
 
-#line 2080
+#line 2149
     uint d_0 = (&kernelContext_0)->entryPointParams_survivors_0[k_0] / (&kernelContext_0)->entryPointParams_0->ntmpl_0;
 
     uint was_0 = atomic_exchange_explicit(((atomic_uint device*)((&kernelContext_0)->entryPointParams_flags_0+d_0)), 1U, memory_order_relaxed);
@@ -65,9 +65,9 @@ struct KernelContext_0
         uint slot_0 = atomic_fetch_add_explicit(((atomic_uint device*)((&kernelContext_0)->entryPointParams_blockArgs_0+int(0))), 1U, memory_order_relaxed);
         *((&kernelContext_0)->entryPointParams_blockList_0+slot_0) = d_0;
 
-#line 2083
+#line 2152
     }
 
-#line 2088
+#line 2157
     return;
 }
