@@ -2366,11 +2366,11 @@ _AUTOTUNE_LOCK = threading.Lock()
 
 def _chain_lock_key(tkey):
     n, snr, fd, tiers, device = tkey[:5]
-    # tkey[5]: the direct refine's rounded tap length when it is priced in, which changes
-    # what refining costs and so which chain wins (HierarchicalFilter._direct_prices).
+    # tkey[5]: present (1) when the direct refine is priced in, which changes what refining
+    # costs and so which chain wins (HierarchicalFilter._chain_trial_key).
     direct = tkey[5] if len(tkey) > 5 else None
     return "chain-trial|%d|%g|%g|%d|%s" % (n, snr, fd, tiers, device) + (
-        "|direct%d" % direct if direct is not None else "")
+        "|direct" if direct is not None else "")
 
 
 def _stored_chain_lock(tkey, feasible):
@@ -3151,6 +3151,23 @@ class HierarchicalFilter(MatchedFilter):
         prices = self._direct_prices(cm)
         return cm.with_direct(prices) if prices else cm
 
+    def _direct_key(self):
+        """The direct refine's rounded tap length when it is priced into this plan's chain
+        choice (HierarchicalFilter._direct_prices), else None: chain choices and locks are
+        kept apart by it, since a cheaper refine changes which chain wins."""
+        taps = getattr(self, "_taps", None)
+        if taps is None or not _direct_refine_enabled() or self.device.kind != "cpu":
+            return None
+        return int(round(float(np.mean(taps[1])) / 32.0))
+
+    def _chain_trial_key(self):
+        """The key this plan's chain trial and its stored lock are filed under."""
+        tiers = min(self.max_tiers, self._MAX_TIERS[self.device.kind])
+        tkey = (self.n, float(self._fs_snr or self.snr), float(self.fd), tiers, str(self.device))
+        # Whether the direct refine is priced in, not at which tap length: groups of every
+        # shape share one trial and its lock (each still prices its own taps in the model).
+        return tkey if self._direct_key() is None else tkey + (1,)
+
     def _choose_chain(self):
         """Pick a gate chain: the model prices every chain, measurement settles the close ones.
 
@@ -3172,9 +3189,7 @@ class HierarchicalFilter(MatchedFilter):
         tiers = min(self.max_tiers, self._MAX_TIERS[self.device.kind])
         ref = np.asarray(self._pending_ref, np.float64)
         prof = _gatechain._gm._profile_sig(ref / ref.sum())
-        taps = getattr(self, "_taps", None)
-        direct = (int(round(float(np.mean(taps[1])) / 32.0)) if taps is not None and
-                  _direct_refine_enabled() and self.device.kind == "cpu" else None)
+        direct = self._direct_key()
         key = (self.n, float(snr), float(self.fd), tiers, self.search_window, prof, str(self.device),
                _gatechain.cpu_gate_kind() if self.device.kind == "cpu" else None, direct)
         with _AUTOTUNE_LOCK:
@@ -3222,7 +3237,7 @@ class HierarchicalFilter(MatchedFilter):
 
         chain = model_best
         self._chain_trial = None
-        tkey = (self.n, float(snr), float(self.fd), tiers, str(self.device), direct)
+        tkey = self._chain_trial_key()
         # The key's lock -- reached in this process or read from MF_COST_FILE -- decides
         # the chain of EVERY plan of the key: the plan runs it if it can (its feasible set),
         # else its model's chain, and a locked key never opens a trial. The in-process
