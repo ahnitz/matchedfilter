@@ -34,6 +34,8 @@ typedef struct {
   long passed;                    /* pairs that passed this tier */
   unsigned long long ticks;       /* time spent in this tier */
   void *g16;                      /* FP16 gate for this tier (tier 0 only), or NULL */
+  int lagged;                     /* this call's cebuf index is the pair's largest coarse lag
+                                     (not under the FP16 gate, whose index has no reader) */
 } hmf_tier;
 
 struct ap_hmf_plan {
@@ -803,7 +805,7 @@ static int hmf_refine(ap_hmf_plan *p, const int *fire_d, const int *fire_t,
      largest coarse lag (ce.index) -- the window is dir_hw coarse samples either side of it.
      Several bins ask for every bin's maximum above threshold, which one window cannot
      promise: those refine by transform. */
-  int ok=p->direct && p->taps && nb==1;
+  int ok=p->direct && p->taps && nb==1 && p->tier[p->ntiers-1].lagged;
   for(int j=0;ok && j<nfire;j++) if(!p->dtime[d0+fire_d[j]]) ok=0;
   if(!ok) return hmf_refine_fft(p,fire_d,fire_t,d0,t0,nt,nfire,binsize,threshold,
                                 peaks,counts,start,end);
@@ -870,6 +872,7 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
     if(cstart>0) cstart--;
     const size_t cspan = cend>cstart ? cend-cstart : 1;
     const float thr=tr->thr;
+    tr->lagged = !(tr->g16 && (i==0 && (!p->q15 || p->q15_g16)));
     unsigned long long t_0=ap_ticks();
     if(i==0 && p->q15){
       /* Screen every pair in int16, then run the float tier on the pairs the

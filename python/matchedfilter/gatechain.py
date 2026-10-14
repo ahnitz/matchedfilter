@@ -319,7 +319,8 @@ class CostModel:
                                tuple((b, v["dense"], v["recheck"], tuple(v["excess"]))
                                      for b, v in sorted(self.screen.items())),
                                tuple((b, tuple(r)) for b, r in sorted(self.excess.items())),
-                               tuple(sorted((getattr(self, "direct", None) or {}).items())))
+                               tuple(sorted((getattr(self, "direct", None) or {}).items())),
+                               getattr(self, "direct_single", True))
         return sig
 
     def to_dict(self):
@@ -396,7 +397,7 @@ class CostModel:
             return 0.0
         return (self.forward_cost(chain, f) - self.forward) / float(ntemplates)
 
-    def with_direct(self, prices):
+    def with_direct(self, prices, single_tier=True):
         """A copy whose refine is the cheaper of the measured whole-block refine and a direct
         refine priced at prices[b] ticks per refined pair for a chain whose last tier is band
         b (HierarchicalFilter._direct_prices: the direct refine's window scales with
@@ -404,6 +405,9 @@ class CostModel:
         import copy
         cm = copy.copy(self)
         cm.direct = {int(b): float(v) for b, v in prices.items()}
+        # single_tier False: a one-tier chain's tier runs on the CPU's FP16 gate, which reports
+        # no lag, so its survivors refine by transform (hmf.c hmf_tier.lagged).
+        cm.direct_single = bool(single_tier)
         cm._sig = None
         return cm
 
@@ -411,7 +415,7 @@ class CostModel:
         """Ticks per refined pair for this chain at refine density f."""
         r = self.refine(f)
         d = getattr(self, "direct", None)
-        if d and int(chain[-1]) in d:
+        if d and int(chain[-1]) in d and (len(chain) > 1 or getattr(self, "direct_single", True)):
             r = min(r, d[int(chain[-1])])
         return r
 
@@ -1385,28 +1389,50 @@ def direct_halfwidth(power, n, chain, thresholds, snr, fd, window=None, nsim=200
     hit = _DIRECT_CACHE.get(key)
     if hit is not None:
         return hit
+    # Thresholds are rounded for the similarity key: plans of similar profiles (another
+    # segment's PSD, another template group) have thresholds equal to ~1e-3 and share draws.
+    sim_params = (n, chain, tuple(round(float(t), 2) for t in thresholds), float(snr),
+                  float(fd), win, int(nsim), int(seed))
+    unit, hit = _similar_get("direct", p, sim_params)
+    if hit is not None:
+        _cache_put(_DIRECT_CACHE, key, hit)
+        return hit
     rng = np.random.default_rng(seed)
     F = [float(p[:b].sum()) for b in chain]
-    k = np.arange(n)
     w0, w1 = win
+    # The signal in the lag domain: the fine output's is snr * A(tau - tau0), A the reference's
+    # correlation (peak 1), and tier b's at coarse lag j is snr * A_b(jR - tau0), A_b the
+    # correlation of its band over sqrt(F_b) -- tabulated once, so a draw costs one n-point
+    # transform of its noise plus one per tier.
+    A = np.fft.ifft(p) * n
+    Ab = []
+    for b, f in zip(chain, F):
+        q = np.zeros(n); q[:b] = p[:b]
+        Ab.append(np.fft.ifft(q) * n / np.sqrt(f))
+    tiers = []
+    for b in chain:
+        R = n // b
+        cs = w0 // R
+        cs = cs - 1 if cs > 0 else cs
+        ce = min(-(-w1 // R), b)
+        tiers.append((b, R, cs, ce))
+    lags = np.arange(w0, w1)
+    sq = _SIG * np.sqrt(p)
     kept, dist = 0, []
     chunk = 1000
     for c0 in range(0, nsim, chunk):
         m = min(chunk, nsim - c0)
-        noise = (rng.standard_normal((m, n)) + 1j * rng.standard_normal((m, n))) / np.sqrt(2)
-        P = noise * (_SIG * np.sqrt(p))[None, :]
+        N = (rng.standard_normal((m, n)) + 1j * rng.standard_normal((m, n))) * (sq / np.sqrt(2))
         tau0 = rng.integers(w0, w1, m)
-        ph = np.exp(2j * np.pi * rng.random(m))
-        P += float(snr) * p[None, :] * ph[:, None] * np.exp(-2j * np.pi * np.outer(tau0, k) / n)
-        fine = np.abs(np.fft.ifft(P, axis=1) * n)[:, w0:w1]
+        amp = float(snr) * np.exp(2j * np.pi * rng.random(m))
+        fine = np.fft.ifft(N, axis=1)[:, w0:w1] * n
+        fine = np.abs(fine + amp[:, None] * A[(lags[None, :] - tau0[:, None]) % n])
         ok = fine.max(1) >= float(snr)
         am = None
-        for b, f, thr in zip(chain, F, thresholds):
-            R = n // b
-            cs = w0 // R
-            cs = cs - 1 if cs > 0 else cs
-            ce = min(-(-w1 // R), b)
-            co = np.abs(np.fft.ifft(P[:, :b], axis=1) * b / np.sqrt(f))[:, cs:ce]
+        for (b, R, cs, ce), Abt, thr, f in zip(tiers, Ab, thresholds, F):
+            co = np.fft.ifft(N[:, :b], axis=1)[:, cs:ce] * b / np.sqrt(f)
+            cl = np.arange(cs, ce) * R
+            co = np.abs(co + amp[:, None] * Abt[(cl[None, :] - tau0[:, None]) % n])
             ok &= co.max(1) >= float(thr)
             am = (co.argmax(1) + cs) * R
         fa = fine.argmax(1) + w0
@@ -1418,6 +1444,7 @@ def direct_halfwidth(power, n, chain, thresholds, snr, fd, window=None, nsim=200
     hw = max(1, int(np.ceil(d.max()))) if len(d) else 1     # the caller adds its margin
     out = (hw, float(np.percentile(d, 99.99)) if len(d) else 0.0, kept)
     _cache_put(_DIRECT_CACHE, key, out)
+    _similar_put("direct", unit, sim_params, out)
     return out
 
 

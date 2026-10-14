@@ -2980,7 +2980,7 @@ class HierarchicalFilter(MatchedFilter):
             self._thr_applied = True
         return plan
 
-    def _direct_halfwidth(self, chain, thresholds):
+    def _direct_halfwidth(self, chain, thresholds, nsim=20000):
         """The direct refine's window half-width for this chain (gatechain.direct_halfwidth,
         plus one coarse sample), or None where it does not apply: off (MF_DIRECT_REFINE=0),
         or no reference to model it on."""
@@ -2988,7 +2988,7 @@ class HierarchicalFilter(MatchedFilter):
             return None
         hw, _, _ = _gatechain.direct_halfwidth(self._pending_ref, self.n, chain, thresholds,
                                                self._fs_snr or self.snr, self.fd,
-                                               window=self.search_window)
+                                               window=self.search_window, nsim=nsim)
         return hw + 1
 
     def _direct_prices(self, base):
@@ -3013,7 +3013,9 @@ class HierarchicalFilter(MatchedFilter):
                                                  self.fd, (b,), cost=base, window=self.search_window)
                 if pl is None:
                     continue
-                hw = self._direct_halfwidth((b,), pl["thresholds"])
+                # Pricing only ranks chains: a tenth of the draws. The chain that runs gets its
+                # window from the full draw count (_execution_plan).
+                hw = self._direct_halfwidth((b,), pl["thresholds"], nsim=2000)
                 lags = 2 * hw * (self.n // b) + 1
                 # the correlation, plus the per-lag binning around it (~4 ticks a lag)
                 prices[int(b)] = lagtap * L * lags + 4.0 * lags
@@ -3149,7 +3151,8 @@ class HierarchicalFilter(MatchedFilter):
         cm = _gatechain.calibrate_costs(self.n, self.ntemplates,
                                         group=policy.get('series_group', _gatechain.default_series_group(self.n)))
         prices = self._direct_prices(cm)
-        return cm.with_direct(prices) if prices else cm
+        return (cm.with_direct(prices, single_tier=_gatechain.cpu_gate_kind() != "f16")
+                if prices else cm)
 
     def _direct_key(self):
         """The direct refine's rounded tap length when it is priced into this plan's chain
