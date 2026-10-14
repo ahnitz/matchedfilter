@@ -86,6 +86,35 @@ def _module_bindings(blob):
     return top + 1
 
 
+def _module_invocations(blob):
+    """Invocations per workgroup a SPIR-V module declares (OpExecutionMode LocalSize; 0 if
+    it declares none that way)."""
+    import struct
+    words = struct.unpack("<%dI" % (len(blob) // 4), blob)
+    i = 5
+    while i < len(words):
+        op, count = words[i] & 0xFFFF, words[i] >> 16
+        if count == 0:
+            break
+        if op == 16 and count >= 6 and words[i + 2] == 17:      # OpExecutionMode LocalSize
+            return words[i + 3] * words[i + 4] * words[i + 5]
+        i += count
+    return 0
+
+
+def _fit_workgroup(sg, invocations, rng, max_subgroups):
+    """The subgroup size to require for a workgroup of `invocations`: sg, or -- when that
+    would split the group into more subgroups than the device allows
+    (maxComputeWorkgroupSubgroups; a required size past it lost the device on an Iris Xe at
+    8 for the 1024-invocation transforms) -- the smallest size in range that does not."""
+    if not max_subgroups or not invocations or -(-invocations // sg) <= max_subgroups:
+        return sg
+    for s in (4, 8, 16, 32, 64, 128):
+        if s > sg and rng[0] <= s <= rng[1] and -(-invocations // s) <= max_subgroups:
+            return s
+    return sg
+
+
 from ._coarse import coarse_launch   # noqa: E402,F401  (shared with Metal; re-exported)
 from ._coarse import coarse_stem, shipped_tiles, forced_tile   # noqa: E402
 
@@ -1057,6 +1086,7 @@ class _Device:
 
         self.subgroup_size = 32
         self.subgroup_range = None          # (min, max) when the size can be required
+        self.max_workgroup_subgroups = 0    # maxComputeWorkgroupSubgroups (0: unknown)
         try:
             if hasattr(vk, "vkGetPhysicalDeviceProperties2"):
                 ssc_props = _SSCProperties(1000225000, None, 0, 0, 0, 0)
@@ -1079,6 +1109,7 @@ class _Device:
                         and ssc_props.minSubgroupSize <= self.subgroup_size <= ssc_props.maxSubgroupSize:
                     self.subgroup_range = (int(ssc_props.minSubgroupSize),
                                            int(ssc_props.maxSubgroupSize))
+                    self.max_workgroup_subgroups = int(ssc_props.maxComputeWorkgroupSubgroups)
         except Exception:
             self.subgroup_size = 32
 
@@ -1241,7 +1272,7 @@ class Context(InputUploads):
 
     _SHARED = ("vk", "instance", "physical", "queue_family", "queues", "queue", "device",
                "_accurate_trig", "device_name", "max_shared_memory", "max_invocations", "max_dispatch_x",
-               "subgroup_size", "subgroup_range", "mem_props", "command_pool", "_ts_period",
+               "subgroup_size", "subgroup_range", "max_workgroup_subgroups", "mem_props", "command_pool", "_ts_period",
                "_reset_query",
                "storage_offset_alignment", "max_workgroup_size", "timestamp_bits")
 
@@ -1378,15 +1409,35 @@ class Context(InputUploads):
         # at instead of the default (specialization constant 74 follows it).
         rng = getattr(self, "subgroup_range", None)
         if not subgroup and rng:
-            # MF_VK_SUBGROUP: build every pipeline that does not choose its own at this size
-            # (within the device's range), for measurement -- e.g. an Intel GPU's 8 or 16
+            # MF_VK_SUBGROUP=size[:prefix,prefix...]: build every pipeline that does not
+            # choose its own -- or only those whose SPIR-V file starts with one of the
+            # prefixes (forward, tierb, refine, items, compact, full, corr, ...) -- at this
+            # size (within the device's range), for measurement: e.g. an Intel GPU's 8 or 16
             # against the 32 it reports.
-            forced = int(os.environ.get("MF_VK_SUBGROUP", "0") or 0)
-            if forced and rng[0] <= forced <= rng[1] and forced != self.subgroup_size:
-                subgroup = forced
+            spec = os.environ.get("MF_VK_SUBGROUP", "") or ""
+            size, _, roles = spec.partition(":")
+            forced = int(size or 0)
+            pick = not roles or any(str(filename).startswith(r) for r in roles.split(",") if r)
+            if forced:
+                if pick and rng[0] <= forced <= rng[1] and forced != self.subgroup_size:
+                    subgroup = forced
+            else:
+                # Otherwise this device's measured size (_vksubgroup.choose), once per device.
+                ds = self._device_state
+                chosen = ds.__dict__.get("pipeline_subgroup")
+                if chosen is None:
+                    from . import _vksubgroup
+                    chosen = ds.pipeline_subgroup = _vksubgroup.choose(self)
+                if chosen != self.subgroup_size and rng[0] <= chosen <= rng[1]:
+                    subgroup = chosen
         if subgroup and not (rng and rng[0] <= subgroup <= rng[1]):
             raise VulkanError("subgroup size %d cannot be required here" % subgroup)
         sg = int(subgroup or self.subgroup_size)
+        if rng:
+            # Never more subgroups per workgroup than the device allows.
+            sg = _fit_workgroup(sg, self._invocations(filename), rng,
+                                getattr(self, "max_workgroup_subgroups", 0))
+            subgroup = 0 if sg == self.subgroup_size else sg
         if subgroup:
             key = (key, "subgroup", sg)
         if key in self._pipelines:
@@ -1858,6 +1909,15 @@ class Context(InputUploads):
         vk.vkUpdateDescriptorSets(self.device, nbind, writes, 0, None)
         return dset
 
+    _INVOCATIONS = {}
+
+    def _invocations(self, filename):
+        """Invocations per workgroup of a shipped SPIR-V module (cached per file)."""
+        n = self._INVOCATIONS.get(filename)
+        if n is None:
+            n = self._INVOCATIONS[filename] = _module_invocations((_SPIRV / filename).read_bytes())
+        return n
+
     def _fit_subgroup(self, n):
         """The subgroup size to build a one-pair-per-group kernel of length n at: the
         smallest the device can be required to run that still holds the workgroup
@@ -1923,7 +1983,11 @@ class Context(InputUploads):
                     continue
                 if not _spv_shipped(coarse_stem(band, ppg, tile)):
                     continue
-                out.extend((sg, ppg, tile) for sg in sizes)
+                # Sizes that would split the group past maxComputeWorkgroupSubgroups are
+                # out (_build_pipeline would bump them to the next size anyway).
+                lim = getattr(self, "max_workgroup_subgroups", 0)
+                out.extend((sg, ppg, tile) for sg in sizes
+                           if not (lim and sg and -(-wg * ppg // sg) > lim))
         if not out:
             out = [(sizes[0], 1, 1)]
         return out
