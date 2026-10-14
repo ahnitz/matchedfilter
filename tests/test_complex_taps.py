@@ -173,3 +173,26 @@ def test_a_lane_of_a_complex_series_is_read_in_place():
         np.testing.assert_array_equal(t0, t1)
         np.testing.assert_array_equal(s0, s1)
         np.testing.assert_array_equal(z0, z1)
+
+
+def test_a_followup_on_a_real_series_reads_only_its_span():
+    """A single-template, threshold-0 call (a pycbc follow-up) on a real series -- or on one
+    lane of a packed pair -- gives what it gives on the same series as complex; its plan has
+    no real path, so only the window's blocks are widened."""
+    rng = np.random.default_rng(10)
+    counts = list(rng.integers(150, 401, 8))
+    taps, w, df = _quadrature_bank(rng, counts)
+    L = 1 << 18
+    a = rng.standard_normal(L).astype(np.float32)
+    packed = (a + 1j * rng.standard_normal(L)).astype(np.complex64)
+    bank = TimeDomainFilterBank(taps, tap_counts=counts, engine="hier", threshold=5.5,
+                                binsize=2048)
+    bank.set_reference(w, delta_f=df)
+    kw = dict(windows=slice(100000, 100000 + 1000 * 61), binsize=61, threshold=0.0,
+              template_index=3)
+    ref = bank.filter_series(a.astype(np.complex64), **kw)
+    for x in (a, packed.real):
+        got = bank.filter_series(x, **kw)
+        np.testing.assert_array_equal(got.sample_indices, ref.sample_indices)
+        np.testing.assert_allclose(got.snr, ref.snr, rtol=1e-6, atol=1e-6 * np.abs(ref.snr).max())
+        assert got.snr.size > 900
