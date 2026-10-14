@@ -189,7 +189,9 @@ jobs:
   deploy:
     name: Publish
     needs: page
-    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    # always(): the bench job is skipped on ordinary pushes, and a skipped job up
+    # the chain skips every dependant unless its condition says otherwise.
+    if: always() && !cancelled() && needs.page.result == 'success' && github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       pages: write
