@@ -1484,17 +1484,23 @@ void filterTwo(uint pairA, uint pairB, uint tA, uint tB, uint tid,
         peakTwoWave(pairA, pairB, tid, re, im, peakIdx, peakVal, winStart, winEnd, thrBits);
     } else {
         H magv[16];
-        float eA = 0.0f, eB = 0.0f;
+        // Energy from values scaled by 2^-6 (exact), as in peakTwoWave: the fp16 |v|^2
+        // overflows past |v| = 256, which ordinary pairs reach at bands >= 1024, and an
+        // inf energy made c16Bound report every such pair as +-inf -- passing it.
+        H en = H(0.0f);
+        const H esc = H(0.015625f);
         MF_UNROLL for (uint i = 0; i < R; ++i) {
             uint idx = slotToIndex(tid * R + i);
             bool live = (idx >= winStart && idx < winEnd);
             H mg = mag2s(re[i], im[i]);
-            eA += float(mg.x); eB += float(mg.y);
+            H sr = re[i] * esc, si = im[i] * esc;
+            en += sr * sr + si * si;
             magv[i] = live ? mg : H(0.0f);
-#if defined(MF_METAL)
             // FAIL OPEN on fp16 overflow, per lane (see filterOne): an exponent field of
-            // all ones in re or im makes that lane's magnitude +inf (a NaN would compare
-            // unpredictably under fast math), which peakLane elects and passes.
+            // all ones in re or im makes that lane's magnitude +inf, which peakLane elects
+            // and passes. An integer test, so no fast-math rule can fold it: peakLane's
+            // isnan(poison) did fold on Vulkan, and at band 1024 on a 32-wide subgroup
+            // (Intel, NVIDIA) every pair of an overflowing row was dismissed.
             if (live) {
                 uint ov = ((bit_cast<uint>(re[i]) & 0x7C007C00u) + 0x04000400u)
                         | ((bit_cast<uint>(im[i]) & 0x7C007C00u) + 0x04000400u);
@@ -1503,8 +1509,8 @@ void filterTwo(uint pairA, uint pairB, uint tA, uint tB, uint tid,
                 if ((ov & 0x80000000u) != 0u) mb = (mb & 0x0000FFFFu) | 0x7C000000u;
                 magv[i] = bit_cast<H>(mb);
             }
-#endif
         }
+        float eA = float(en.x) * 4096.0f, eB = float(en.y) * 4096.0f;
         eA = pairSum(tid, eA) / float(N);
         eB = pairSum(tid, eB) / float(N);
         peakLane(pairA, tid, 0u, magv, re, im, peakIdx, peakVal, winStart, winEnd, thrBits, eA);

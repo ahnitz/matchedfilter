@@ -237,9 +237,9 @@ def test_base_coarse_kernels_are_untiled():
     Traced at band 512, nt=2: 4 groups at p0 = 0, 4, 8, 12 with only pairs
     0 and 1 reachable, so half the injections vanished.
 
-    A tiled variant must exist alongside it for every band that has a tile,
-    and must be a DIFFERENT kernel -- if they compile identical the tile
-    is not reaching the source.
+    Every tile in build_spirv.COARSE_TILES must exist alongside it at every band, and
+    each must be a DIFFERENT kernel -- if they compile identical the tile is not reaching
+    the source.
     """
     import matchedfilter as mf
     spv = pathlib.Path(mf.__file__).parent / "spirv"
@@ -248,18 +248,21 @@ def test_base_coarse_kernels_are_untiled():
 
     import sys
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "tools"))
-    from build_spirv import COARSE_TILE_T
+    from build_spirv import COARSE_TILES
     checked = 0
-    for band, tile in COARSE_TILE_T.items():
+    for band in (64, 128, 256, 512, 1024):
         base = spv / ("tierb_%d_c16.spv" % band)
-        tiled = spv / ("tierb_%d_c16t%d.spv" % (band, tile))
         if not base.exists():
             continue
-        assert tiled.exists(), (
-            "band %d has tile %d but no %s: the untiled fallback would "
-            "select a tiled kernel" % (band, tile, tiled.name))
-        assert base.read_bytes() != tiled.read_bytes(), (
-            "band %d: base and tiled kernels are identical, so TILE_T is "
-            "not reaching the source" % band)
-        checked += 1
+        blobs = {base.read_bytes()}
+        for tile in COARSE_TILES:
+            tiled = spv / ("tierb_%d_c16t%d.spv" % (band, tile))
+            assert tiled.exists(), (
+                "band %d has no %s: the host could not offer tile %d" % (band, tiled.name, tile))
+            blob = tiled.read_bytes()
+            assert blob not in blobs, (
+                "band %d: tile %d compiles identical to another build, so TILE_T is "
+                "not reaching the source" % (band, tile))
+            blobs.add(blob)
+            checked += 1
     assert checked, "no band with a tile was checked"

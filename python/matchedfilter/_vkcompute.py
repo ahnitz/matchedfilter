@@ -27,6 +27,13 @@ from ._shared import pack_half2 as _pack_half2, sparsified as _sparsified
 
 _SPIRV = pathlib.Path(__file__).resolve().parent / "spirv"
 
+
+def _spv_shipped(stem, _seen={}):
+    """Whether spirv/<stem>.spv is built (cached: the build set is fixed for a process)."""
+    if stem not in _seen:
+        _seen[stem] = (_SPIRV / (stem + ".spv")).is_file()
+    return _seen[stem]
+
 _MANIFEST = None
 
 
@@ -45,9 +52,6 @@ def _manifest():
 #: halves occupancy, so this refuses rather than silently getting slower.
 _MAX_BINS = MAX_BINS          # _gpuhost.MAX_BINS: one limit for every backend
 
-#: Must match COARSE_TILE_T in tools/build_spirv.py -- the kernel is
-#: compiled with the tile baked in, so the dispatch has to agree.
-_COARSE_TILE_T = {64: 2, 128: 2, 256: 2, 512: 4, 1024: 2}
 
 
 def _use_c16(band):
@@ -83,6 +87,7 @@ def _module_bindings(blob):
 
 
 from ._coarse import coarse_launch   # noqa: E402,F401  (shared with Metal; re-exported)
+from ._coarse import coarse_stem, shipped_tiles, forced_tile   # noqa: E402
 
 
 #: Byte offsets into VkPhysicalDeviceProperties. The 5 leading uint32s, the
@@ -1023,6 +1028,8 @@ class _Device:
         # A pipeline specialization selects accurate twiddles without adding
         # a runtime branch or changing arithmetic on other vendors.
         self._accurate_trig = ctypes.cast(props, ctypes.POINTER(_u32))[2] == 0x8086
+        # deviceName follows the five leading uint32s: it keys this device's measured choices.
+        self.device_name = bytes(props[20:276]).split(b"\0")[0].decode("utf-8", "replace")
         self.max_shared_memory = int(ctypes.cast(
             ctypes.byref(props, _OFF_SHARED_MEMORY),
             ctypes.POINTER(_u32))[0])
@@ -1233,7 +1240,7 @@ class Context(InputUploads):
         self._prof = None
 
     _SHARED = ("vk", "instance", "physical", "queue_family", "queues", "queue", "device",
-               "_accurate_trig", "max_shared_memory", "max_invocations", "max_dispatch_x",
+               "_accurate_trig", "device_name", "max_shared_memory", "max_invocations", "max_dispatch_x",
                "subgroup_size", "subgroup_range", "mem_props", "command_pool", "_ts_period",
                "_reset_query",
                "storage_offset_alignment", "max_workgroup_size", "timestamp_bits")
@@ -1887,7 +1894,6 @@ class Context(InputUploads):
         if env_cap:
             want = min(want, env_cap)
         pairs = nd * nt
-        tile = _COARSE_TILE_T.get(band, 1)
 
         # Device limits, queried: a group of ppg pairs is (band/16)*ppg invocations and
         # holds ppg padded exchange stages (about 17/16 * band words each).
@@ -1896,17 +1902,114 @@ class Context(InputUploads):
                     and (band * 17 // 16 + 32) * 4 * ppg <= self.max_shared_memory)
         while want > 1 and not fits(want):
             want //= 2
-        if tile > 1:
-            for ppg in sorted({p for p in (want, 32, 16, 8, 4, 2, 1) if p <= want}, reverse=True):
-                name = "tierb_%d_c16%st%d.spv" % (band, "p%d" % ppg if ppg > 1 else "", tile)
-                if (_SPIRV / name).is_file():
+        ppgs = sorted({p for p in (want, 32, 16, 8, 4, 2, 1) if p <= want}, reverse=True)
+        # Tiled: the largest packing with a tiled build, at the tile measured for it here.
+        for ppg in ppgs:
+            tiles = shipped_tiles(band, ppg, _spv_shipped)
+            if tiles:
+                tile = self._coarse_tile(band, ppg, tiles)
+                if tile > 1:
                     return ppg, tile, coarse_launch(nd, nt, ppg, tile, 0)[1], True
-        for ppg in sorted({p for p in (want, 32, 16, 8, 4, 2, 1) if p <= want}, reverse=True):
-            name = "tierb_%d_c16%s.spv" % (band, "p%d" % ppg if ppg > 1 else "")
-            if pairs % ppg or not (_SPIRV / name).is_file():
+                break
+        for ppg in ppgs:
+            if pairs % ppg or not _spv_shipped(coarse_stem(band, ppg, 1)):
                 continue
             return ppg, 1, pairs // ppg, False
         return 1, 1, pairs, False
+
+    def _coarse_tile(self, band, ppg, tiles):
+        """Templates per pair slot for the coarse kernel at (band, ppg): the fastest of the
+        shipped tiles and the untiled build, timed on this device (the same choice CUDA's
+        _time_coarse makes). Priced, not trialled: a deterministic micro-benchmark, timed
+        once per device and layout and kept in MF_COST_FILE. A tile reuses each thread's data
+        slice across TILE_T templates at the price of registers, so where it pays depends on
+        the device's register file and wave width -- no table tuned on one GPU is right on
+        another. MF_VK_COARSE_TILE forces a tile (1 = untiled), for measurement and tests."""
+        cands = (1,) + tuple(tiles)
+        forced = forced_tile("MF_VK_COARSE_TILE")
+        if forced is not None:
+            return forced if forced in cands else 1
+        memo = self._device_state.__dict__.setdefault("coarse_tile", {})
+        k = (band, ppg, cands)
+        if k not in memo:
+            from . import gatechain
+            ckey = "vk-coarse-tile|%s|%d|p%d|%s" % (getattr(self, "device_name", ""), band,
+                                                    ppg, ",".join(map(str, cands)))
+            held = gatechain.stored_choice(ckey)
+            if held in cands:
+                memo[k] = held
+            else:
+                times = self._time_coarse_tiles(band, ppg, cands)
+                memo[k] = min(cands, key=lambda t: (times[t], t))
+                gatechain.store_choice(ckey, int(memo[k]))
+        return memo[k]
+
+    def _time_coarse_tiles(self, band, ppg, cands, pairs=65536, ntm=16, reps=4):
+        """Device ns per pair of each coarse build on synthetic data (min of reps - 1 after
+        a warm-up), in self.coarse_times[band] for reports."""
+        vk, ds = self.vk, self._device_state
+        ndm = pairs // ntm
+        rng = np.random.default_rng(0)
+        x = ((rng.standard_normal((ndm, band)) + 1j * rng.standard_normal((ndm, band)))
+             * 0.1).astype(np.complex64)
+        bufs = [_Buffer(self, x.nbytes), _Buffer(self, ntm * band * 4),
+                _Buffer(self, pairs * 4), _Buffer(self, pairs * 8)]
+        bufs[0].write(x)
+        bufs[1].write(_pack_half2(x[:ntm]))
+        timer = ds.__dict__.get("fuse_timer")
+        if timer is None:
+            timer = ds.fuse_timer = _DeviceTimer(ds)
+        shift = band.bit_length() - 1
+        out = {}
+        try:
+            for tile in cands:
+                pipe, layout, set_layout = self._build_pipeline(
+                    ("coarse16", band, ppg, tile), coarse_stem(band, ppg, tile) + ".spv",
+                    _NBIND, _PUSH_BYTES, data_stride=band)
+                dset = self._descriptor_set(set_layout, bufs)
+                slot_val, groups = coarse_launch(ndm, ntm, ppg, tile, band)
+                cmd = _vp()
+                _check(vk.vkAllocateCommandBuffers(self.device, ctypes.byref(
+                    _CmdBufAlloc(40, None, self.command_pool, 0, 1)), ctypes.byref(cmd)),
+                    "coarse timing cmd")
+                _check(vk.vkBeginCommandBuffer(cmd, ctypes.byref(_CmdBufBegin(42, None, 0, None))),
+                       "coarse timing begin")
+                vk.vkCmdBindPipeline(cmd, _BIND_POINT_COMPUTE, pipe)
+                vk.vkCmdBindDescriptorSets(cmd, _BIND_POINT_COMPUTE, layout, 0, 1,
+                                           (_vp * 1)(dset), 0, None)
+                pc = (ctypes.c_uint32 * 7)(ntm, 0, band, slot_val, shift, 1, 0)
+                vk.vkCmdPushConstants(cmd, layout, _STAGE_COMPUTE, 0, _PUSH_BYTES,
+                                      ctypes.byref(pc))
+                vk.vkCmdDispatch(cmd, groups, 1, 1)
+                _check(vk.vkEndCommandBuffer(cmd), "coarse timing end")
+                times = []
+                try:
+                    for rep in range(reps):
+                        slot, begin, end = timer.pair()
+                        cmds = (_vp * 3)(begin, cmd, end)
+                        fence = _vp()
+                        _check(vk.vkCreateFence(self.device, ctypes.byref(_FenceCreate(8, None, 0)),
+                                                None, ctypes.byref(fence)), "vkCreateFence")
+                        try:
+                            _check(vk.vkQueueSubmit(self.queue, 1, ctypes.byref(
+                                _SubmitInfo(4, None, 0, None, None, 3, cmds, 0, None)), fence),
+                                "vkQueueSubmit")
+                            _check(vk.vkWaitForFences(self.device, 1, (_vp * 1)(fence), 1,
+                                                      0xFFFFFFFFFFFFFFFF), "vkWaitForFences")
+                        finally:
+                            vk.vkDestroyFence(self.device, fence, None)
+                        if rep:
+                            times.append(timer.ns(slot, self._ts_period))
+                finally:
+                    vk.vkFreeCommandBuffers.argtypes = [_vp, _vp, _u32, ctypes.POINTER(_vp)]
+                    vk.vkFreeCommandBuffers(self.device, self.command_pool, 1, (_vp * 1)(cmd))
+                out[tile] = min(times) / pairs
+        finally:
+            for b in bufs:
+                b.destroy()
+        self.__dict__.setdefault("coarse_times", {}).setdefault(band, {}).update(
+            {coarse_stem(band, ppg, t): v for t, v in out.items()})
+        return out
 
     def _make_hier(self, key, n, band, nd, nt, nbins, binsize, shift, lo, hi,
                    t2, raw_thr, data=None, tmpl=None, clear_out=True, rowwin=None, bands=None):

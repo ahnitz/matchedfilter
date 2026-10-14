@@ -16,7 +16,7 @@ pytestmark = pytest.mark.skipif(not _cuda.enumerate_devices()[0], reason="no NVI
 
 
 def _variants(cc, ctx, band):
-    tiles = (1, cc._COARSE_TILE_T[band]) if band in cc._COARSE_TILE_T else (1,)
+    tiles = (1,) + cc.TILE_PROBE
     out = []
     for tile in tiles:
         for ppg in (1, 2, 4, 8, 16):

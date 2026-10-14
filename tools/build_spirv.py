@@ -150,22 +150,15 @@ COARSE_BANDS = {256: 16, 512: 32, 1024: 32}
 ENTRIES = ("fusedTierB", "compactPairs", "refineListed")
 ENTRY = ENTRIES[0]
 
-#: Templates per workgroup on the COARSE path, by band. The tile holds the
-#: thread's data slice in registers and reuses it across TILE_T templates,
-#: so loads per pair fall as 1/TILE_T -- but the registers come out of
-#: occupancy, and whether that is affordable depends on the band.
-#:
-#: Measured, coarse-only, 512x512 pairs:
-#:   band  T=1     T=2     T=4
-#:    128  0.735   0.751   0.811   -- no gain; already 87% issue efficient
-#:    256  1.118   1.099   1.102   -- flat
-#:    512  2.009   1.967   1.686   -- 1.19x, the clear win
-#:   1024  3.986   5.893   8.572   -- 2.1x WORSE
-#:
-#: Band 1024 is the one band already at 100% occupancy (WG=64 is a two-wave
-#: group), so every tile register comes straight out of waves. The model
-#: predicted exactly this and the measurement confirms it.
-COARSE_TILE_T = {64: 2, 128: 2, 256: 2, 512: 4, 1024: 2}
+#: Templates per pair slot built for the COARSE path, at every band and packing. The tile
+#: holds the thread's data slice in registers and reuses it across TILE_T templates, so
+#: loads per pair fall as 1/TILE_T -- but the registers come out of occupancy, and whether
+#: that is affordable depends on the band AND the device. A per-band table tuned on RDNA
+#: (2 everywhere, 4 at 512) was 11% slow in the fine stage on GCN at band 256 and 4% slow
+#: on the RDNA part itself; band 1024 measured 2.1x worse tiled there. So every tile is
+#: built and the host times the shipped builds on its device (_vkcompute._coarse_tile,
+#: _mtlcompute, _cudacompute._time_coarse). Spelled by _coarse.coarse_stem.
+COARSE_TILES = (2, 4, 8)
 #: Artifact prefix per entry point. Two entries used to be distinguished by
 #: `entry == ENTRY`, which silently collides the moment there is a third.
 STEMS = {"fusedTierB": "tierb",
@@ -650,8 +643,7 @@ def main(argv=None):
             # groups at p0 = 0, 4, 8, 12 left only pairs 0 and 1 reachable.
             #
             # Spelled exactly as the host spells it: "p1" is omitted.
-            _t = COARSE_TILE_T.get(n, 1)
-            if _t > 1:
+            for _t in COARSE_TILES:
                 for _p in (1, 2, 4, 8, 16):
                     if (n // 16) * _p > 1024:
                         continue
@@ -668,8 +660,7 @@ def main(argv=None):
             # register; _mtlcompute.coarse_geometry). No bank-model prelude: on the M2 the
             # padded exchange made the untiled build slower (1.24 -> 1.46 ms) and the tiled
             # one no faster (1.00 -> 0.99 ms), so Metal keeps the default stride.
-            _t = COARSE_TILE_T.get(n, 1)
-            if _t > 1:
+            for _t in COARSE_TILES:
                 for _p in (1,) + tuple(METAL_C16_PPG):
                     if (n // RADIX.get(n, 16)) * _p <= METAL_C16_MAX_THREADS:
                         compile_metal(slangc, n, mcap, centry, MSL, coarse16=1, ppg=_p, tile=_t,

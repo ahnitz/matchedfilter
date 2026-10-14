@@ -21,14 +21,12 @@ def ctx():
     c.destroy()
 
 
-@pytest.fixture(params=["tiled", "untiled"])
+@pytest.fixture(params=["t1", "t2", "t4", "t8"])
 def builds(request, monkeypatch):
-    """Both coarse build families. Production takes the tiled ones at every band, so the
-    untiled builds are a fallback the suite must exercise explicitly: they once ignored
-    per-row windows, which no other test could see."""
-    if request.param == "untiled":
-        from matchedfilter import _vkcompute
-        monkeypatch.setattr(_vkcompute, "_COARSE_TILE_T", {})
+    """Every coarse build family, forced (t1 = untiled). Which one runs is the device's
+    measured choice, so each must be right: the untiled builds once ignored per-row windows,
+    which no other test could see."""
+    monkeypatch.setenv("MF_VK_COARSE_TILE", request.param[1:])
     return request.param
 
 
@@ -91,7 +89,7 @@ def test_untiled_coarse_matches_tiled_under_a_real_gate(ctx, band, monkeypatch):
     gate, thr = 2.5, 4.0
     ref = ctx.hier_peaks_grouped(n, band, spec, h, h[:, :band], gate, groups, 2048, thr)
     assert (ref[0] >= 0).sum() >= 4
-    monkeypatch.setattr(_vkcompute, "_COARSE_TILE_T", {})
+    monkeypatch.setenv("MF_VK_COARSE_TILE", "1")
     for ppg in (1, 2, 4, 8, 16):
         monkeypatch.setenv("MF_VK_COARSE_PPG", str(ppg))
         got = ctx.hier_peaks_grouped(n, band, spec, h, h[:, :band], gate, groups, 2048, thr)

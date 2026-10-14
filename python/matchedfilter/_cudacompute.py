@@ -22,6 +22,7 @@ import threading
 
 import numpy as np
 
+from ._coarse import TILE_PROBE
 from . import _cuda, _gputime
 from ._cuda import check_cuda
 from ._errors import UnsupportedSize
@@ -330,7 +331,6 @@ _TC_BLOCKS_PER_SM = 8
 _PREFETCH = os.environ.get("MF_CUDA_PREFETCH", "1") != "0"
 # CUDA graphs for the hierarchical launch sequences (MF_CUDA_GRAPHS=0 issues them directly).
 _GRAPHS = os.environ.get("MF_CUDA_GRAPHS", "1") != "0"
-_COARSE_TILE_T = {128: 2, 256: 2, 512: 4, 1024: 2}
 # Device scratch bound per tile of a full correlation into a host array.
 _TILE_BYTES = 64 * 1024 * 1024
 
@@ -1731,7 +1731,9 @@ class Context(InputUploads):
         # Even tiles are ragged (tierb.slang RAGGED TILES): any template count keeps them.
         key = ("coarse_choice", band, True)
         if key not in self._pipelines:
-            tiles = (1, _COARSE_TILE_T[band]) if (band in _COARSE_TILE_T and key[2]) else (1,)
+            # Every shipped tile is a candidate (_coarse.TILE_PROBE; a missing build raises
+            # UnsupportedSize and is skipped): which one pays is the device's to say.
+            tiles = (1,) + TILE_PROBE
             cands = []
             for tile in tiles:
                 for ppg in (1, 2, 4, 8, 16):
