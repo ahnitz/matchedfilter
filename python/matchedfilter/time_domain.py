@@ -975,13 +975,16 @@ def _tap_spectra(taps: np.ndarray, counts: np.ndarray, n: int, rate_ratio: float
                  analytic: bool, out: np.ndarray) -> None:
     """Spectra of FIR taps on an n-sample data block, written into out (T, n).
 
-    taps is (T, m) float32 with each row's first counts[i] samples valid. The
-    centre tap is rolled to lag 0; with taps at a higher rate than the data
-    (rate_ratio > 1) the spectrum is cut at the data Nyquist, at a lower rate it
-    is zero-padded. Not conjugated: filters_f is the conjugate of this.
+    taps is (T, m) float32 -- or complex64, a quadrature filter (the analytic version of a
+    real one) that turns a real series into the complex SNR -- with each row's first
+    counts[i] samples valid. The centre tap is rolled to lag 0; with taps at a higher rate
+    than the data (rate_ratio > 1) the spectrum is cut at the data Nyquist, at a lower rate
+    it is zero-padded. Not conjugated: filters_f is the conjugate of this.
     """
     T, m = taps.shape
-    if rate_ratio == 1.0 and _core is not None and hasattr(_core, 'taps_to_spectra'):
+    cplx = np.iscomplexobj(taps)
+    if (rate_ratio == 1.0 and not cplx and _core is not None
+            and hasattr(_core, 'taps_to_spectra')):
         try:
             _core.taps_to_spectra(taps, counts, n, m, out)
             return
@@ -990,7 +993,7 @@ def _tap_spectra(taps: np.ndarray, counts: np.ndarray, n: int, rate_ratio: float
     N_taps = int(round(n * rate_ratio))
     for row in range(T):
         cnt = int(counts[row])
-        buf = np.zeros(N_taps, dtype=np.float32)
+        buf = np.zeros(N_taps, dtype=np.complex64 if cplx else np.float32)
         buf[:cnt] = taps[row, :cnt]
         # Center-tap circular roll alignment
         buf = np.roll(buf, -(cnt // 2))
@@ -1017,6 +1020,13 @@ def _tap_spectra(taps: np.ndarray, counts: np.ndarray, n: int, rate_ratio: float
             out[row] = spec
 
 
+def _tap_dtype(taps) -> type:
+    """complex64 for complex (quadrature) taps, float32 for real ones."""
+    if isinstance(taps, (list, tuple)):
+        return np.complex64 if any(np.iscomplexobj(t) for t in taps) else np.float32
+    return np.complex64 if np.iscomplexobj(taps) else np.float32
+
+
 def template_spectra(
     taps: np.ndarray,
     tap_counts: Optional[Sequence[int]],
@@ -1038,7 +1048,7 @@ def template_spectra(
     of lags in a block whose correlation is not wrapped by its own taps.
     Raises if a template does not fit the block.
     """
-    taps = np.ascontiguousarray(taps, dtype=np.float32)
+    taps = np.ascontiguousarray(taps, dtype=_tap_dtype(taps))
     if taps.ndim == 1:
         taps = taps[None, :]
     T = taps.shape[0]
@@ -1121,15 +1131,20 @@ class TimeDomainFilterBank:
             mode = 'dif'
         self.engine = mode
 
-        # Parse inputs
+        # Parse inputs. Complex taps are quadrature filters (complex_taps): the analytic
+        # version of a real filter, applied to a REAL series to give the complex SNR -- the
+        # same correlation (series against the conjugate tap spectrum) as real taps on an
+        # analytic series, without the analytic series.
         self._raw_taps = None
+        tdt = _tap_dtype(taps)
+        self.complex_taps = tdt is np.complex64
         if isinstance(taps, (list, tuple)):
             n_templates = len(taps)
             if tap_counts is None:
                 tap_counts = np.array([len(t) for t in taps], dtype=np.int64)
             else:
                 tap_counts = np.asarray(tap_counts, dtype=np.int64)
-            taps_list = [np.asarray(t, dtype=np.float32) for t in taps]
+            taps_list = [np.asarray(t, dtype=tdt) for t in taps]
         elif isinstance(taps, np.ndarray):
             if taps.ndim == 1:
                 taps = taps[None, :]
@@ -1138,8 +1153,8 @@ class TimeDomainFilterBank:
                 tap_counts = np.full(n_templates, taps.shape[1], dtype=np.int64)
             else:
                 tap_counts = np.asarray(tap_counts, dtype=np.int64)
-            taps_list = [taps[i, :tap_counts[i]].astype(np.float32) for i in range(n_templates)]
-            self._raw_taps = np.ascontiguousarray(taps, dtype=np.float32)
+            taps_list = [taps[i, :tap_counts[i]].astype(tdt) for i in range(n_templates)]
+            self._raw_taps = np.ascontiguousarray(taps, dtype=tdt)
         else:
             self._raw_taps = None
             raise TypeError("taps must be a numpy array or sequence of arrays")
@@ -1232,7 +1247,9 @@ class TimeDomainFilterBank:
             if self._raw_taps is not None and self._raw_taps.shape[1] >= orig_taps_max:
                 group_taps = np.ascontiguousarray(self._raw_taps[tmpl_indices, :orig_taps_max])
             else:
-                group_taps = np.zeros((T, orig_taps_max), dtype=np.float32)
+                group_taps = np.zeros((T, orig_taps_max), dtype=self._raw_taps.dtype
+                                      if self._raw_taps is not None else
+                                      (np.complex64 if self.complex_taps else np.float32))
                 for r, g_idx in enumerate(tmpl_indices):
                     cnt = min(int(self.tap_counts[g_idx]), orig_taps_max)
                     group_taps[r, :cnt] = self._taps_list[g_idx][:cnt]
@@ -1271,7 +1288,7 @@ class TimeDomainFilterBank:
                 )
                 if self.first_stage_snr > 0:
                     plan.set_first_stage(self.first_stage_snr)
-                if self.rate_ratio == 1.0 and hasattr(plan, "set_taps"):
+                if self.rate_ratio == 1.0 and hasattr(plan, "set_taps") and not self.complex_taps:
                     # The taps themselves, for the CPU's direct refine (survivors refined at
                     # the few lags their coarse tier points to, by direct correlation, where
                     # that is priced cheaper than a whole-block transform). At other rate
@@ -1281,7 +1298,8 @@ class TimeDomainFilterBank:
                 factory = (lambda n_=chosen_N, T_=T, dev=self.device:
                            MatchedFilter(n_, ndata=1, ntemplates=T_, device=dev))
                 plan = None
-            if self.engine == 'hier' and self.pack_templates and chosen_N >= 1024:
+            if (self.engine == 'hier' and self.pack_templates and chosen_N >= 1024
+                    and not self.complex_taps):     # Hermitian packing: real taps only
                 K = chosen_N // 2
                 grp_spectra = np.ascontiguousarray(spectra[:, :K])
                 grp_spectra[:, 0] = spectra[:, 0].real + 1j * spectra[:, K].real
