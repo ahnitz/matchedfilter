@@ -325,7 +325,7 @@ dispatches are small enough to leave the GPU underfilled. Low-medium.
 | What | Where | Proposal |
 |---|---|---|
 | `_FusedBatch` protocol | `_vkcompute`, `_mtlcompute` (different internals, same contract and same env var) | a shared `fused_chunk(dev)` decision (§5.3) |
-| `_COARSE_TILE_T` | `_vkcompute` l.50, `_mtlcompute` l.119, `_cudacompute` l.333 (CUDA lacks 64) | read from the build manifests: the builds define the tile |
+| `_COARSE_TILE_T` | `_vkcompute`, `_mtlcompute`, `_cudacompute`, `build_spirv`, `build_ptx` | **done (2026-10-14):** removed. Every tile 2/4/8 is built (`build_spirv.COARSE_TILES`); each host times the shipped builds on its device and stores the fastest (`vk-coarse-tile`, `mtl-coarse-tile`, `cuda-coarse` in `MF_COST_FILE`). The table was wrong on every GPU measured, its RDNA reference included (§11) |
 | follow-up assembly | `_vkfollowup._assemble`, `_gpuhost.read_followup_items` | one per-item routine in `_gpuhost` (§2.6) |
 | band-forward rule | `_vkcompute._band_wanted`; Metal has none | `_gpuhost.band_forward_pays` (§2.3) |
 | zero fills | three hand-written | one `zero2d` kernel (§2.7) |
@@ -499,7 +499,7 @@ and third gives a trivial conflict there: keep both sides.
 4. Metal device follow-ups, then a host-trace SegmentPlan (§2.4; R4).
 5. `hier_peaks` as one shared sequence in `_gpuhost` over per-backend primitives (still three
    copies; §9).
-6. Tables the builds already know (`_COARSE_TILE_T` x3) read from the build manifests (§3).
+6. ~~Tables the builds already know (`_COARSE_TILE_T` x3)~~: a measured per-device choice instead (§3, §11).
 7. One roofline bandwidth basis: a measured device copy on every GPU (§2.9).
 8. One `zero2d` kernel for every backend's strided clears (§2.7).
 9. Coverage that runs only on dev boxes: `test_regression_suite.py`, `test_replica_middle_critical.py`,
@@ -588,7 +588,49 @@ behaviour-neutral):
 - `time_domain._page_aligned_empty` aligns to Apple's 16 KiB page on every platform: harmless
   over-alignment; take the page size from the OS.
 - Duplicated helpers still to share through `_gpuhost`: `_manifest()` (x3), `_coarse_span`
-  (CUDA, Metal, inlined in Vulkan), `_radix` (CUDA, Metal), `_COARSE_TILE_T` (x3, §3).
+  (CUDA, Metal, inlined in Vulkan), `_radix` (CUDA, Metal).
 - Tests missing for: the stored CUDA coarse variant (`cuda-coarse|...`; needs CUDA), the
   platform-FFT price records in `MF_COST_FILE` (`cpu-fft|n|cpu`, `corr-pfft,n`; ARM), and the
   reload of a persisted "dropped" chain candidate and its batch budget.
+
+## 11. Frozen per-architecture constants (2026-10-14, branch `perf/coarse-tile-choice`)
+
+Work on the two neglected GPUs (gravity-dev3, Radeon RENOIR, GCN wave64; gravity-dev4, Intel
+Iris Xe, subgroup 8-32) as a test of generality. Constants measured once on one machine were
+probed on every reachable GPU.
+
+**Coarse layout.** The packed coarse kernel's layout was three fixed rules: templates per
+thread from a per-band table tuned on RDNA (`_COARSE_TILE_T`, five copies), pairs per group
+"fill one subgroup", and the subgroup the driver's default. All three are now one measured
+choice per device and band, timed on synthetic data and kept in `MF_COST_FILE`
+(`_vkcompute._coarse_choice`, `_mtlcompute._coarse_tile`, `_cudacompute._time_coarse`), over
+every shipped build (tiles 1/2/4/8 at every band, `build_spirv.COARSE_TILES`) and, on Vulkan,
+every subgroup size the device can require. The fastest layout, coarse kernel alone, ns per
+pair (the old fixed layout in brackets where it differs):
+
+| band | 8060S (RDNA 3.5) | RENOIR (GCN) | Iris Xe | M2 |
+|---|---|---|---|---|
+| 128 | p8 t2 0.7 | p8 t2 6.9 | sg8 p2 t1 123 | p4 t1 11.5 (t2: 16.9) |
+| 256 | p4 t2 1.2 | p4 t8 15.7 (t2: 16.0) | sg8 p1 t1 167 (sg32 p2 t2: ~2900) | p2 t2 14.9 |
+| 512 | p2 t4 2.4 | p2 t8 33.4 (t4: 44) | sg8 p1 t1 485 (sg32 t2: ~5000) | t8 24.5 (t4: 29.4) |
+| 1024 | t2 5.1 | t4 79 (t2: 117) | sg8 p1 t1 1482 (sg32 t8: ~20800) | t1 72 (t2: 115) |
+
+No two devices agree, and the table was wrong somewhere on each, its RDNA reference included
+(band 128 at load: t4 1.6x t2). The Iris Xe's default subgroup, 32, is its worst: 10-17x on
+the coarse kernel.
+
+**A tiled fail-open bug** that only some devices could reach. A tiled pair whose group spans
+more than one subgroup (band 1024 on a 32-wide subgroup -- Intel, NVIDIA -- or band >= 2048 on
+wave64) is elected across subgroups (`filterTwo` -> `peakLane`). That branch detected fp16
+overflow with `isnan(poison)`, which the compiler folded, so every pair of an overflowing row
+was dismissed; and it summed the bound's energy from fp16 |v|^2, which overflows past |v| = 256
+and reported ordinary pairs as inf. Fixed with the integer exponent test Metal already used
+and `peakTwoWave`'s scaled energy. `tests/test_vk_coarse_tiles.py` runs every tiled build at
+every subgroup size the device allows; on the old band-1024 build at subgroup 32 it fails
+(loud row all -1).
+
+**Still frozen (next):** every other Vulkan pipeline is built at the device's default subgroup
+(`_build_pipeline` requires `self.subgroup_size` whenever a range exists), so on the Iris Xe
+the forward, refine and follow-up kernels all run at SIMD32. `LDS_CAP`, `COARSE_BANDS`,
+`METAL_C16_PPG` / `TARGET_THREADS`, `COARSE_TC_WPB`, `_TC_BLOCKS_PER_SM`, `_TILE_BYTES`,
+`_STATIC_SHARED_MAX`, `_SPARSE_HOST`; a roofline bandwidth source for GPUs not in its table.

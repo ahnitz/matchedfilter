@@ -1,12 +1,12 @@
 """Every shipped Vulkan coarse tile, at every subgroup size the device can run it at, must
 elect what the untiled build elects and fail open on an overflowing row.
 
-Which tile runs is a per-device measured choice (_vkcompute._coarse_tile), and a tiled
+Which tile runs is a per-device measured choice (_vkcompute._coarse_choice), and a tiled
 pair takes the in-subgroup election (peakTwoWave) only when it fits one subgroup: at band
 1024 on a 32-wide subgroup (Intel, NVIDIA) it takes the cross-subgroup one instead. That
 branch tested overflow with isnan(), which the compiler folded, and every pair of a loud row
 was dismissed -- on a 64-wide Radeon the branch only ran at band 2048, where nothing used
-it. Requiring the narrowest subgroup the device allows runs that branch here as well.
+it. Requiring each narrower subgroup the device allows runs that branch here as well.
 """
 import ctypes
 
@@ -82,7 +82,9 @@ def test_tiles_match_untiled_and_fail_open(ctx, band):
     t = (rng.standard_normal((nt, band)) + 1j * rng.standard_normal((nt, band))).astype(np.complex64)
     x[1] *= 1e5                              # overflows fp16 in the transform
     rngs = getattr(ctx, "subgroup_range", None)
-    sizes = [0] + ([rngs[0]] if rngs and rngs[0] < ctx.subgroup_size else [])
+    # Every size the layout choice can pick (_coarse_layouts), the default first.
+    sizes = [0] + ([s for s in (4, 8, 16, 32, 64) if rngs[0] <= s < ctx.subgroup_size]
+                   if rngs else [])
     for sg in sizes:
         ref_idx, ref_val = _coarse(ctx, band, 1, x, t, sg)
         for tile in tiles:

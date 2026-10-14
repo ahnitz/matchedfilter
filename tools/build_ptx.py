@@ -93,7 +93,7 @@ def build_coarse_tc(nvrtc, outdir):
     from statistics import NormalDist
     import coarse_layout
     z = NormalDist().inv_cdf(1.0 - coarse_layout.C16_FAIL)
-    cuda_path = os.environ.get("MF_CUDA_PATH")
+    cuda_path = find_cuda_path()
     src = COARSE_TC_KERNEL.read_text()
     for band in COARSE_TC_BANDS:
         for wpb in COARSE_TC_WPB:
@@ -110,7 +110,7 @@ FOLLOWUP_KERNEL = ROOT / "src" / "gpu" / "followup.cu"
 def build_followup(nvrtc, outdir):
     """The device follow-up item builder (src/gpu/followup.cu)."""
     out = outdir / "followup.ptx"
-    out.write_bytes(nvrtc_ptx(nvrtc, os.environ.get("MF_CUDA_PATH"), FOLLOWUP_KERNEL.read_text(),
+    out.write_bytes(nvrtc_ptx(nvrtc, find_cuda_path(), FOLLOWUP_KERNEL.read_text(),
                               "followup.cu", {}, arch="compute_75"))
     print("  followup", flush=True)
 
@@ -131,7 +131,7 @@ COARSE_BANDS = {256: 16, 512: 16, 1024: 16}
 #: Every coarse tile, as for SPIR-V and Metal (build_spirv.COARSE_TILES): the host times the
 #: shipped builds per device (_cudacompute._time_coarse).
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-from build_spirv import COARSE_TILES  # noqa: E402
+from build_spirv import COARSE_TILES, MAX_TILED_BAND  # noqa: E402
 
 STEMS = {
     "fusedTierB": "tierb",
@@ -423,7 +423,7 @@ def main():
             # band 64); the CUDA host picks the variant with the best occupancy.
             for _p in (2, 4) + ((8, 16) if n <= 256 else ()):
                 compile_tierb(slangc, nvrtc, env, n, OUT, entry=centry, suffix="_c16p%d" % _p, coarse16=1, ppg=_p)
-            for _t in COARSE_TILES:
+            for _t in (COARSE_TILES if n <= MAX_TILED_BAND else ()):
                 for _p in (1, 2, 4) + ((8,) if n <= 256 else ()):
                     compile_tierb(slangc, nvrtc, env, n, OUT, entry=centry, coarse16=1,
                                   ppg=_p, tile=_t,

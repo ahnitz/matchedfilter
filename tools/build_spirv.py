@@ -159,6 +159,9 @@ ENTRY = ENTRIES[0]
 #: built and the host times the shipped builds on its device (_vkcompute._coarse_tile,
 #: _mtlcompute, _cudacompute._time_coarse). Spelled by _coarse.coarse_stem.
 COARSE_TILES = (2, 4, 8)
+#: Tiled builds stop here: these are the bands tiles always shipped at. Above it a tiled pair
+#: spans several subgroups on every device, and the CUDA builds alone would add ~48 MB.
+MAX_TILED_BAND = 1024
 #: Artifact prefix per entry point. Two entries used to be distinguished by
 #: `entry == ENTRY`, which silently collides the moment there is a third.
 STEMS = {"fusedTierB": "tierb",
@@ -643,7 +646,7 @@ def main(argv=None):
             # groups at p0 = 0, 4, 8, 12 left only pairs 0 and 1 reachable.
             #
             # Spelled exactly as the host spells it: "p1" is omitted.
-            for _t in COARSE_TILES:
+            for _t in (COARSE_TILES if n <= MAX_TILED_BAND else ()):
                 for _p in (1, 2, 4, 8, 16):
                     if (n // 16) * _p > 1024:
                         continue
@@ -660,7 +663,7 @@ def main(argv=None):
             # register; _mtlcompute.coarse_geometry). No bank-model prelude: on the M2 the
             # padded exchange made the untiled build slower (1.24 -> 1.46 ms) and the tiled
             # one no faster (1.00 -> 0.99 ms), so Metal keeps the default stride.
-            for _t in COARSE_TILES:
+            for _t in (COARSE_TILES if n <= MAX_TILED_BAND else ()):
                 for _p in (1,) + tuple(METAL_C16_PPG):
                     if (n // RADIX.get(n, 16)) * _p <= METAL_C16_MAX_THREADS:
                         compile_metal(slangc, n, mcap, centry, MSL, coarse16=1, ppg=_p, tile=_t,
