@@ -257,6 +257,28 @@ FOLLOWUP_DISPATCH_FIELDS = ("job", "entry", "nt", "nb", "b0", "rows", "row_calle
                             "row_sample", "template_global")
 
 
+def window_results(hit, counts, starts, idx, val, template, n):
+    """FilterResults of one follow-up window, as TimeDomainFilterBank._items_batch orders them:
+    the (block, bin) pairs where ``hit`` holds, by the block's bin count, then block, then bin.
+
+    hit: (blocks, nbins) bool; counts: bins per block; starts: block start samples; idx/val:
+    (blocks, nbins) peak lag and value; template: the global template index; n: block length.
+    The one ordering rule every device follow-up path assembles with."""
+    from .time_domain import FilterResults, _EMPTY_FILTER_RESULTS
+    bi, bn = np.nonzero(hit)
+    if not bi.size:
+        return _EMPTY_FILTER_RESULTS
+    o = np.argsort(np.asarray(counts)[bi], kind="stable")
+    bi, bn = bi[o], bn[o]
+    st = np.asarray(starts, dtype=np.int64)[bi]
+    return FilterResults(
+        template_indices=np.full(bi.size, template, dtype=np.int64),
+        sample_indices=st + np.asarray(idx)[bi, bn].astype(np.int64),
+        snr=np.asarray(val)[bi, bn].astype(np.complex64),
+        block_starts=st,
+        block_lengths=np.full(bi.size, n, dtype=np.int64))
+
+
 def read_followup_items(items, idx_all, val_all, nbins, bpi, groups, spec, series_len):
     """Host assembly of device follow-ups: [(job, rank, c0, ti, FilterResults)] in (job, rank)
     order, or None when the device and host block layouts disagree (the caller then runs the
@@ -269,7 +291,6 @@ def read_followup_items(items, idx_all, val_all, nbins, bpi, groups, spec, serie
     block layout (TimeDomainFilterBank._window_layout), and its hits ordered by the block's
     bin count, then block, then bin (the per-bin-count calls' order). Every item's layout and
     hits are computed in array passes, per template group, not per item and block."""
-    from .time_domain import FilterResults, _EMPTY_FILTER_RESULTS
     k = int(items.shape[0])
     if k == 0:
         return []
@@ -311,17 +332,6 @@ def read_followup_items(items, idx_all, val_all, nbins, bpi, groups, spec, serie
         hit = ((idx3[sel] >= 0) & okb[:, :, None]
                & (np.arange(nbins)[None, None, :] < counts[:, :bpi, None]))
         for r, i in enumerate(sel):
-            bi, bn = np.nonzero(hit[r])
-            if not bi.size:
-                res[i] = _EMPTY_FILTER_RESULTS
-                continue
-            o = np.argsort(counts[r, bi], kind="stable")
-            bi, bn = bi[o], bn[o]
-            st = ts[r, bi]
-            res[i] = FilterResults(
-                template_indices=np.full(bi.size, ti[i], dtype=np.int64),
-                sample_indices=st + idx3[i, bi, bn].astype(np.int64),
-                snr=val3[i, bi, bn].astype(np.complex64),
-                block_starts=st,
-                block_lengths=np.full(bi.size, g.n, dtype=np.int64))
+            res[i] = window_results(hit[r], counts[r, :bpi], ts[r, :bpi], idx3[i], val3[i],
+                                    ti[i], g.n)
     return [(int(it[i, 0]), int(it[i, 1]), int(c0[i]), int(ti[i]), res[i]) for i in order]

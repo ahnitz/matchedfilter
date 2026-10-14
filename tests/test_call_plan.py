@@ -565,7 +565,8 @@ def test_device_followups_steady_state_allocates_nothing(monkeypatch):
     segment([g[0] for g in per_group] * 2)
     warm = len(made)
     pools = len(getattr(ctx, "_pools", []))
-    workspaces = sum(len(ex.workspaces) for ex in _vkfollowup._EXECUTORS.values())
+    ex = getattr(ctx._device_state, "followup_executor", None)
+    workspaces = len(ex.workspaces) if ex is not None else 0
     assert workspaces, "the device follow-up path was not taken"
     for seg in range(6):
         for r in rows:
@@ -574,7 +575,7 @@ def test_device_followups_steady_state_allocates_nothing(monkeypatch):
                  for _ in range(int(rng.integers(1, 3)))])
     assert made[warm:] == [], made[warm:]
     assert len(getattr(ctx, "_pools", [])) == pools
-    assert sum(len(ex.workspaces) for ex in _vkfollowup._EXECUTORS.values()) == workspaces
+    assert len(ex.workspaces) == workspaces
 
 
 def test_more_batches_than_slots(monkeypatch):
