@@ -273,6 +273,7 @@ candidate is faster beyond the measurement noise.
 | Variable | Default | Effect |
 |---|---|---|
 | `MF_COST_FILE` | unset | A JSON file that keeps measured costs and every locked choice. A machine then measures each once, and later processes reuse it, so repeated runs make the same choices. The block-size trial, which costs a process its warm-up, runs only when this is set. |
+| `MF_TRIAL_RECHECK` | `0` | `1` re-checks each locked block-size and GPU chain choice once against steady-state timing and reopens it in `MF_COST_FILE` when steady state is more than 30% slower than its trial measured. Off by default: the verdict comes from one process's timing and reopens the lock for every later process, so two processes on one file could then make different choices. With it off a stored lock is final; delete the cost file (or its entry) to measure again. |
 | `MF_AUTOTUNE` | `1` | `0` skips timed trials and keeps the cost model's choices (deterministic given a populated `MF_COST_FILE`). |
 | `MF_AUTOTUNE_LOG` | `0` | `1` prints each trial's samples and decisions to stderr. |
 | `MF_GPU_TIMING` | `0` | `1` records device time per kernel (for profiling; it adds overhead). |

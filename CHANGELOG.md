@@ -4,6 +4,19 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ## 0.1.0a7
 
+### Fixed before release
+
+- Two processes sharing an `MF_COST_FILE` could end on different gate chains
+  (`test_reproducible_choices[gpu:0]` failed 1 in 5 on the L40S; the macOS Metal
+  CI wheel failed it too). Two causes. A stored chain lock was checked against
+  the first plan's own feasible chains, and when that plan could not run it the
+  process recorded "no lock" and re-trialled for every plan of the key; the lock
+  now decides every plan that can run it, the others run their model's chain,
+  and a locked key never opens a trial. And the steady-state re-check reopened a
+  lock on one process's timing, so the next process could lock another choice;
+  it is now opt-in (`MF_TRIAL_RECHECK=1`, see the usage guide), and a stored
+  lock is final until the cost file is deleted.
+
 - Re-measure the hardware comparison at `2b3cac13` on gravity-dev1,
   gravity-dev2 (CPU and Radeon 8060S), gravity-dev3 (CPU), Apple M2 (CPU and
   GPU), Haswell (CPU) and the NVIDIA L40S, at 16 × 512 and, new for the CPUs,

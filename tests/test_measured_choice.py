@@ -58,7 +58,8 @@ def test_an_unusable_model_candidate_never_stands():
     assert gc.measured_choice(smp, "a", 6) == ("b", {})
 
 
-def test_steady_state_reopens_a_contradicted_choice_once():
+def test_steady_state_reopens_a_contradicted_choice_once(monkeypatch):
+    monkeypatch.setenv("MF_TRIAL_RECHECK", "1")              # opt-in (off by default)
     st = {"winner": "b", "median": {"a": 1.0, "b": 0.7}}
     calls = []
     for _ in range(gc.RECHECK_N - 1):
@@ -258,10 +259,11 @@ def test_single_template_device_unclear_contest_keeps_the_banks_device(monkeypat
     assert len(state["gpu"]) - 1 == td._SINGLE_TRIALS_MAX
 
 
-def test_a_lock_the_model_kept_is_not_reopened_by_its_own_steady_state():
+def test_a_lock_the_model_kept_is_not_reopened_by_its_own_steady_state(monkeypatch):
     """The model's candidate stood because the contest was unclear, with a worse trial median
     than the runner-up. Steady samples like its own trial median must not reopen it (they
     did, against the runner-up's median: the L40S two-process flake)."""
+    monkeypatch.setenv("MF_TRIAL_RECHECK", "1")
     st = {"winner": "model", "median": {"model": 2.23e-10, "other": 1.76e-10}}
     for _ in range(3 * gc.RECHECK_N):
         assert not gc.observe_steady(st, 2.3e-10, lambda: None)
@@ -301,3 +303,15 @@ def test_a_stored_lock_decides_every_plan_of_the_key(monkeypatch, tmp_path):
     qb = _hier_plan(shape_b)                               # a later plan of the key
     assert tuple(qb._chain) == tuple(lock)
     assert qb._chain_trial is None
+
+
+def test_the_steady_recheck_is_off_by_default(monkeypatch):
+    """A re-check verdict from one process's timing reopens the lock for every later process,
+    so two processes on one cost file can disagree (L40S 2 of 10, macOS Metal CI): off unless
+    MF_TRIAL_RECHECK=1, and a stored lock is final until the cost file is deleted."""
+    monkeypatch.delenv("MF_TRIAL_RECHECK", raising=False)
+    st = {"winner": "b", "median": {"a": 1.0, "b": 0.7}}
+    calls = []
+    for _ in range(10 * gc.RECHECK_N):
+        assert not gc.observe_steady(st, 5.0, lambda: calls.append(1))
+    assert calls == [] and not st.get("rechecked")
