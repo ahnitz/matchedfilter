@@ -69,6 +69,26 @@ def analytic_series(rng, S, amp, df=DF, out=None):
     return x.astype(np.complex64)
 
 
+def real_series(rng, S, amp, df=DF, out=None):
+    """Real Gaussian series of length S, spectrum amp(f), unit variance: the top filter's
+    output in a real-real-complex hierarchy (complex, quadrature final taps), where the top
+    and middle filters are real and only the final filters make the complex SNR."""
+    X = np.fft.rfft(rng.standard_normal(S))
+    X *= np.interp(np.arange(X.size) * RATE / S, np.arange(amp.size) * df, amp)
+    x = np.fft.irfft(X, S)
+    x /= np.sqrt(np.mean(x ** 2))
+    if out is not None:
+        out[:] = x
+        return out
+    return x.astype(np.float32)
+
+
+def source_series(top, rng, S, amp, df=DF, out=None):
+    """The middle stage's input for this top: real for a bank whose final taps are complex
+    (quadrature), else analytic as the all-real hierarchy feeds it."""
+    return (real_series if top["quadrature"] else analytic_series)(rng, S, amp, df, out=out)
+
+
 def load_tops(path, ntops):
     """The ntops top templates with the most fine templates, with their middle and fine taps."""
     import h5py
@@ -92,9 +112,12 @@ def load_tops(path, ntops):
             for m in mids:
                 fg = fir[str(int(m))]
                 c = fg["actual_tap_count"][:]
-                fine.append((int(m), fg["taps"][:, :int(c.max())].astype(np.float32), c))
+                t = fg["taps"][:, :int(c.max())]
+                # Complex final taps: quadrature filters (real-real-complex hierarchy).
+                fine.append((int(m), t.astype(np.complex64 if np.iscomplexobj(t) else np.float32), c))
             out.append(dict(top=tid, mid_taps=g["taps"][:][order].astype(np.float32),
-                            mid_counts=counts[order], mids=mids, fine=fine, nfine=nfine))
+                            mid_counts=counts[order], mids=mids, fine=fine, nfine=nfine,
+                            quadrature=any(np.iscomplexobj(t) for _, t, _ in fine)))
     return out
 
 
@@ -310,14 +333,16 @@ def run_device(device, tops, args, seed):
             # Each middle filter's scale is folded into its taps, as pycbc does: here the scale that
             # makes noise unit variance per quadrature, measured once on an untimed series.
             probe = TimeDomainFilterBank(top["mid_taps"], tap_counts=top["mid_counts"], engine="corr")
-            x = analytic_series(rng, 1 << 18, amp, df)
+            x = source_series(top, rng, 1 << 18, amp, df)
             y = probe.correlate_series(x)[:, 1 << 15:-(1 << 15)]
-            scale = 1.0 / np.sqrt(np.mean(np.abs(y) ** 2, axis=1) / 2)
+            # Unit variance per quadrature of an analytic middle output; unit variance of a
+            # real one (quadrature final taps make the complex SNR from it).
+            scale = 1.0 / np.sqrt(np.mean(np.abs(y) ** 2, axis=1) / (1 if top["quadrature"] else 2))
             mid = TimeDomainFilterBank(top["mid_taps"] * scale[:, None].astype(np.float32),
                                        tap_counts=top["mid_counts"], engine="corr", device=device)
             # The fine taps are scaled likewise against a middle series, so a fine output in noise
             # is an SNR (pycbc gets this from the reference series' normalisation).
-            xm = probe.correlate_series(analytic_series(rng, 1 << 18, amp, df))
+            xm = probe.correlate_series(source_series(top, rng, 1 << 18, amp, df))
             xm = xm * scale[:, None].astype(np.float32)
             fine = []
             for row, (m, taps, c) in enumerate(top["fine"]):
@@ -445,7 +470,7 @@ def run_device(device, tops, args, seed):
                 # --shared-input: the producer writes into the middle bank's device-shared
                 # memory (empty_shared), as a search can whiten into it: the middle stage then
                 # reads the series in place instead of copying it to the device every call.
-                return {ifo: analytic_series(rng, S, amp, df,
+                return {ifo: source_series(top, rng, S, amp, df,
                                              out=mid.empty_shared((S,)) if args.shared_input
                                              else None) for ifo in ("H1", "L1")}
             pregen = [draw() for _ in range(args.segments)] if args.pregen else None
