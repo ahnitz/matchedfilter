@@ -754,92 +754,92 @@ uint slotToIndex_0(uint slot_0)
 }
 
 
-#line 1967
+#line 1965
 [[kernel]] void tcFullStage3(uint3 gid_0 [[threadgroup_position_in_grid]], uint3 lid_0 [[thread_position_in_threadgroup]], packed_float2 device* entryPointParams_scratch_1 [[buffer(0)]], packed_float2 device* entryPointParams_output_1 [[buffer(1)]])
 {
 
-#line 1967
+#line 1965
     thread KernelContext_0 kernelContext_4;
 
-#line 1967
+#line 1965
     (&kernelContext_4)->entryPointParams_scratch_0 = entryPointParams_scratch_1;
 
-#line 1967
+#line 1965
     (&kernelContext_4)->entryPointParams_output_0 = entryPointParams_output_1;
 
-#line 1967
+#line 1965
     threadgroup array<uint, int(1024)> stg_1;
 
-#line 1967
+#line 1965
     (&kernelContext_4)->stg_0 = &stg_1;
 
 
 
     uint _S26 = gid_0.x;
 
-#line 1971
+#line 1969
     uint _S27 = _S26 / 512U;
 
-#line 1971
+#line 1969
     uint _S28 = _S26 % 512U;
     uint tid_1 = lid_0.x;
     (&kernelContext_4)->_tid_0 = tid_1;
     (&kernelContext_4)->_stgBase_0 = 0U;
     thread array<float2, int(16)> r_5;
 
-#line 1975
+#line 1973
     uint m_1 = 0U;
     for(;;)
     {
 
-#line 1976
+#line 1974
         if(m_1 < 16U)
         {
         }
         else
         {
 
-#line 1976
+#line 1974
             break;
         }
 
-#line 1977
+#line 1975
         r_5[m_1] = float2(*((&kernelContext_4)->entryPointParams_scratch_0+(_S27 * 262144U + _S28 * 512U + tid_1 + 32U * m_1))) ;
 
-#line 1976
+#line 1974
         m_1 = m_1 + 1U;
 
-#line 1976
+#line 1974
     }
 
-#line 1976
+#line 1974
     transform_0(&r_5, tid_1, &kernelContext_4);
 
-#line 1976
+#line 1974
     uint i_3 = 0U;
 
 
     for(;;)
     {
 
-#line 1979
+#line 1977
         if(i_3 < 16U)
         {
         }
         else
         {
 
-#line 1979
+#line 1977
             break;
         }
 
-#line 1979
+#line 1977
         *((&kernelContext_4)->entryPointParams_output_0+(_S27 * 262144U + slotToIndex_0(tid_1 * 16U + i_3) * 512U + _S28)) = packed_float2(float2(r_5[i_3].x, r_5[i_3].y)) ;
 
-#line 1979
+#line 1977
         i_3 = i_3 + 1U;
 
-#line 1979
+#line 1977
     }
 
 

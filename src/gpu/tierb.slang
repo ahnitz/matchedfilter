@@ -997,11 +997,13 @@ void filterPair(uint pair, uint tid,
     GroupMemoryBarrierWithGroupSync();
 
 #if COARSE16
-    // The fp16 coarse role's election, one bin, without per-register magnitude arrays:
-    // each register's |v|^2 is recomputed where it is compared (c16Mag). Holding myMag[16]
-    // and myBin[16] beside the 16 transform registers spilled at subgroup 16 on an Iris Xe,
-    // where this election was 77% of the band-256 kernel. Same values, same window, same
-    // tie-break (lowest slot), same fail-open.
+    // The fp16 coarse role's election, one bin, in ONE pass over the registers: each
+    // thread keeps its in-window maximum, that maximum's lowest slot (strict >, and slots
+    // ascend with i) and the register itself, so r[] is dead once the loop ends. Holding
+    // myMag[16] and myBin[16] beside the 16 transform registers spilled at subgroup 16 on
+    // an Iris Xe; so did recomputing |v|^2 in a second pass, which the compiler folded
+    // into the first and held as 16 fp32 magnitudes across the barrier. Same values, same
+    // window, same tie-break (lowest slot overall), same fail-open.
 #if defined(MF_METAL)
     // FAIL OPEN on fp16 overflow (Metal compiles with fast math): an exponent field of all
     // ones anywhere in this thread's registers makes every in-window register +inf.
@@ -1013,24 +1015,22 @@ void filterPair(uint pair, uint tid,
     const bool ovRow = false;
 #endif
     {
-        uint bestBits = thrBits;
-        MF_UNROLL for (uint i = 0; i < R; ++i)
-            bestBits = max(bestBits, c16Mag(r[i], tid * R + i, winStart, winEnd, ovRow));
+        uint bestBits = thrBits, bestSlot = 0xffffffffu;
+        C bestV = C(0.0f, 0.0f);
+        MF_UNROLL for (uint i = 0; i < R; ++i) {
+            uint m = c16Mag(r[i], tid * R + i, winStart, winEnd, ovRow);
+            if (m > bestBits) { bestBits = m; bestSlot = tid * R + i; bestV = r[i]; }
+        }
 #if PPG == 1
         uint wm = WaveActiveMax(bestBits);
         if (WaveIsFirstLane() && wm > thrBits) InterlockedMax(stg[_stgBase], wm);
 #else
         if (bestBits > thrBits) InterlockedMax(stg[_stgBase], bestBits);
 #endif
-    }
-    GroupMemoryBarrierWithGroupSync();
-    {
-        uint winner = 0xffffffffu;
+        GroupMemoryBarrierWithGroupSync();
+        // A thread whose maximum is the pair's offers its lowest slot; the smallest wins.
         const uint best = stg[_stgBase];
-        MF_UNROLL for (uint i = 0; i < R; ++i) {
-            uint m = c16Mag(r[i], tid * R + i, winStart, winEnd, ovRow);
-            if (m > thrBits && m == best) winner = min(winner, tid * R + i);
-        }
+        const uint winner = (bestSlot != 0xffffffffu && bestBits == best) ? bestSlot : 0xffffffffu;
 #if PPG == 1
         uint waveWinner = WaveActiveMin(winner);
         if (WaveIsFirstLane() && waveWinner != 0xffffffffu)
@@ -1040,11 +1040,9 @@ void filterPair(uint pair, uint tid,
 #endif
         GroupMemoryBarrierWithGroupSync();
         const uint wslot = stg[_stgBase+1];
-        MF_UNROLL for (uint i = 0; i < R; ++i) {
-            if (tid * R + i == wslot) {
-                peakIdx[pair] = int(slotToIndex(tid * R + i));
-                peakVal[pair] = c16Bound(float2(float(r[i].x), float(r[i].y)), energy);
-            }
+        if (winner != 0xffffffffu && winner == wslot) {
+            peakIdx[pair] = int(slotToIndex(wslot));
+            peakVal[pair] = c16Bound(float2(float(bestV.x), float(bestV.y)), energy);
         }
         if (tid == 0 && wslot == 0xffffffffu) {
             peakIdx[pair] = -1;

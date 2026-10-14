@@ -763,38 +763,38 @@ uint slotToIndex_0(uint slot_0)
 }
 
 
-#line 2011
+#line 2009
 [[kernel]] void tcForwardStage1(uint3 gid_0 [[threadgroup_position_in_grid]], uint3 lid_0 [[thread_position_in_threadgroup]], EntryPointParams_0 constant* entryPointParams_1 [[buffer(0)]], packed_float2 device* entryPointParams_series_1 [[buffer(1)]], uint device* entryPointParams_starts_1 [[buffer(2)]], packed_float2 device* entryPointParams_scratch_1 [[buffer(3)]])
 {
 
-#line 2011
+#line 2009
     thread KernelContext_0 kernelContext_4;
 
-#line 2011
+#line 2009
     (&kernelContext_4)->entryPointParams_0 = entryPointParams_1;
 
-#line 2011
+#line 2009
     (&kernelContext_4)->entryPointParams_series_0 = entryPointParams_series_1;
 
-#line 2011
+#line 2009
     (&kernelContext_4)->entryPointParams_starts_0 = entryPointParams_starts_1;
 
-#line 2011
+#line 2009
     (&kernelContext_4)->entryPointParams_scratch_0 = entryPointParams_scratch_1;
 
-#line 2011
+#line 2009
     threadgroup array<uint, int(1024)> stg_1;
 
-#line 2011
+#line 2009
     (&kernelContext_4)->stg_0 = &stg_1;
 
-#line 2017
+#line 2015
     uint _S26 = gid_0.x;
 
-#line 2017
+#line 2015
     uint block_0 = _S26 / 256U;
 
-#line 2017
+#line 2015
     uint _S27 = _S26 % 256U;
     uint tid_1 = lid_0.x;
     uint _S28 = entryPointParams_starts_1[block_0];
@@ -802,107 +802,107 @@ uint slotToIndex_0(uint slot_0)
     (&kernelContext_4)->_stgBase_0 = 0U;
     thread array<float2, int(16)> r_5;
 
-#line 2022
+#line 2020
     uint m_1 = 0U;
     for(;;)
     {
 
-#line 2023
+#line 2021
         if(m_1 < 16U)
         {
         }
         else
         {
 
-#line 2023
+#line 2021
             break;
         }
 
-#line 2024
+#line 2022
         uint j_2 = _S27 + 256U * (tid_1 + 32U * m_1);
         float2 _S29 = float2(0.0f, 0.0f);
 
-#line 2025
+#line 2023
         bool _S30;
         if(_S28 < ((&kernelContext_4)->entryPointParams_0->seriesLength_0))
         {
 
-#line 2026
+#line 2024
             _S30 = j_2 < ((&kernelContext_4)->entryPointParams_0->seriesLength_0 - _S28);
 
-#line 2026
+#line 2024
         }
         else
         {
 
-#line 2026
+#line 2024
             _S30 = false;
 
-#line 2026
+#line 2024
         }
 
-#line 2026
+#line 2024
         float2 x_1;
 
-#line 2026
+#line 2024
         if(_S30)
         {
 
-#line 2026
+#line 2024
             x_1 = float2(*((&kernelContext_4)->entryPointParams_series_0+(_S28 + j_2))) ;
 
-#line 2026
+#line 2024
         }
         else
         {
 
-#line 2026
+#line 2024
             x_1 = _S29;
 
-#line 2026
+#line 2024
         }
 
         r_5[m_1] = float2(x_1.x / 1.31072e+05f, - x_1.y / 1.31072e+05f);
 
-#line 2023
+#line 2021
         m_1 = m_1 + 1U;
 
-#line 2023
+#line 2021
     }
 
-#line 2023
+#line 2021
     transform_0(&r_5, tid_1, &kernelContext_4);
 
-#line 2023
+#line 2021
     uint i_3 = 0U;
 
-#line 2031
+#line 2029
     for(;;)
     {
 
-#line 2031
+#line 2029
         if(i_3 < 16U)
         {
         }
         else
         {
 
-#line 2031
+#line 2029
             break;
         }
 
-#line 2032
+#line 2030
         uint k2_2 = slotToIndex_0(tid_1 * 16U + i_3);
 
-#line 2032
+#line 2030
         *((&kernelContext_4)->entryPointParams_scratch_0+(block_0 * 131072U + k2_2 * 256U + _S27)) = packed_float2(cmul_0(r_5[i_3], mfTwiddle_0(6.28318548202514648f * float(_S27 * k2_2) / 1.31072e+05f))) ;
 
-#line 2031
+#line 2029
         i_3 = i_3 + 1U;
 
-#line 2031
+#line 2029
     }
 
-#line 2036
+#line 2034
     return;
 }
