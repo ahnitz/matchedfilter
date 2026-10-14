@@ -1377,6 +1377,13 @@ class Context(InputUploads):
         # subgroup: a size within the device's required-size range to build this pipeline
         # at instead of the default (specialization constant 74 follows it).
         rng = getattr(self, "subgroup_range", None)
+        if not subgroup and rng:
+            # MF_VK_SUBGROUP: build every pipeline that does not choose its own at this size
+            # (within the device's range), for measurement -- e.g. an Intel GPU's 8 or 16
+            # against the 32 it reports.
+            forced = int(os.environ.get("MF_VK_SUBGROUP", "0") or 0)
+            if forced and rng[0] <= forced <= rng[1] and forced != self.subgroup_size:
+                subgroup = forced
         if subgroup and not (rng and rng[0] <= subgroup <= rng[1]):
             raise VulkanError("subgroup size %d cannot be required here" % subgroup)
         sg = int(subgroup or self.subgroup_size)
