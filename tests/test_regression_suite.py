@@ -48,14 +48,12 @@ def _generate_synthetic_bank(T=128, L=501, rng=None):
 
 def _load_or_generate_bank(T_req=128):
     """Attempt to load real search bank taps; fall back to synthetic bandlimited bank."""
-    bank_path = "/home/ahnitz/projects/claude/searchdev/work/scale100k/fir_three_level_opt501_v2.hdf"
-    if os.path.exists(bank_path):
+    if T_req <= 128:
         try:
-            import h5py
-            with h5py.File(bank_path, "r") as f:
-                g = f["fir_data/0"]
-                bank_taps = g["taps"][:T_req].astype(np.float32)
-                bank_counts = g["actual_tap_count"][:T_req].astype(np.int64)
+            from conftest import bank_subset
+            b = bank_subset()
+            bank_taps = b["fine_taps"][:T_req].astype(np.float32)
+            bank_counts = b["fine_counts"][:T_req].astype(np.int64)
             T = len(bank_taps)
             for i in range(T):
                 c = bank_counts[i]
