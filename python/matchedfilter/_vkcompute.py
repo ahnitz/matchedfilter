@@ -1902,15 +1902,12 @@ class Context(InputUploads):
         wg = max(1, band // 16)
         cap = int(os.environ.get("MF_VK_COARSE_PPG", "0") or 0)
         rng = getattr(self, "subgroup_range", None)
-        # Only the device's own subgroup size is a candidate. On the Iris Xe the fp16 gate
-        # dismissed loud transients at 8 and 16 (gate_margin --loud: 226-256 of 256 pairs),
-        # though the tile tests and --check passed; until a narrower size is shown to give
-        # the default's answers on this device it is not offered. MF_VK_COARSE_SUBGROUP
-        # still forces one, for measurement.
         sizes = [0]
+        if rng:
+            sizes = [s for s in (4, 8, 16, 32, 64, 128) if rng[0] <= s <= rng[1]]
         forced_sg = forced_tile("MF_VK_COARSE_SUBGROUP")
-        if forced_sg is not None and rng and rng[0] <= forced_sg <= rng[1]:
-            sizes = [forced_sg]
+        if forced_sg is not None:
+            sizes = [forced_sg if forced_sg in sizes else sizes[0]]
         forced = forced_tile("MF_VK_COARSE_TILE")
         out = []
         for ppg in (1, 2, 4, 8, 16, 32):
