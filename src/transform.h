@@ -34,6 +34,10 @@ int      ap_plan_split(const ap_plan *p, int *n1, int *n2);
 /* Full transform, AP_FORWARD or AP_BACKWARD.  Neither direction scales by 1/N. */
 void ap_fft(ap_plan *p, const float *in, float *out, int sign);
 
+/* Direct correlation of an interleaved complex series with real taps over nlag consecutive
+   lags: out[i] = sum_{k<L} taps[k] x[i+k] (td-inl.h). x holds nlag + L - 1 samples. */
+void ap_td_corr(const float *x, const float *taps, int L, int nlag, float *out);
+
 /* The platform's FFT for the block forward (fft_accel.c): NULL where there is none. */
 typedef struct ap_accel ap_accel;
 ap_accel *ap_accel_create(size_t n);

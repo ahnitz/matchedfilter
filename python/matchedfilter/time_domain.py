@@ -1264,6 +1264,12 @@ class TimeDomainFilterBank:
                 )
                 if self.first_stage_snr > 0:
                     plan.set_first_stage(self.first_stage_snr)
+                if self.rate_ratio == 1.0 and hasattr(plan, "set_taps"):
+                    # The taps themselves, for the CPU's direct refine (survivors refined at
+                    # the few lags their coarse tier points to, by direct correlation, where
+                    # that is priced cheaper than a whole-block transform). At other rate
+                    # ratios the spectra are cut or padded and the taps are not the filter.
+                    plan.set_taps(group_taps, group_counts)
             else:
                 factory = (lambda n_=chosen_N, T_=T, dev=self.device:
                            MatchedFilter(n_, ndata=1, ntemplates=T_, device=dev))

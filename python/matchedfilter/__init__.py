@@ -2365,8 +2365,12 @@ _AUTOTUNE_LOCK = threading.Lock()
 
 
 def _chain_lock_key(tkey):
-    n, snr, fd, tiers, device = tkey
-    return "chain-trial|%d|%g|%g|%d|%s" % (n, snr, fd, tiers, device)
+    n, snr, fd, tiers, device = tkey[:5]
+    # tkey[5]: the direct refine's rounded tap length when it is priced in, which changes
+    # what refining costs and so which chain wins (HierarchicalFilter._direct_prices).
+    direct = tkey[5] if len(tkey) > 5 else None
+    return "chain-trial|%d|%g|%g|%d|%s" % (n, snr, fd, tiers, device) + (
+        "|direct%d" % direct if direct is not None else "")
 
 
 def _stored_chain_lock(tkey, feasible):
@@ -2714,6 +2718,26 @@ def clear_autotune_cache():
         _Q15_TIER0.clear()
 
 
+
+
+def _direct_refine_enabled():
+    return os.environ.get("MF_DIRECT_REFINE", "1") != "0"
+
+
+def _direct_lagtap():
+    """Ticks per lag x tap of the direct refine on this machine: timed once and kept in
+    MF_COST_FILE, so every process sharing the file prices chains alike (the chain choice
+    depends on it)."""
+    key = "direct-lagtap|%s|%s" % (_core.backend() if hasattr(_core, "backend") else "", _gatechain.cpu_gate_kind())
+    held = _gatechain.stored_choice(key)
+    if isinstance(held, (int, float)) and held > 0:
+        return float(held)
+    v = float(_core.price_direct())
+    if v > 0:
+        _gatechain.store_choice(key, v)
+    return v
+
+
 class HierarchicalFilter(MatchedFilter):
     """Matched filter that gates on cheap coarse correlations and refines on demand.
 
@@ -2805,6 +2829,9 @@ class HierarchicalFilter(MatchedFilter):
         # Tier 0 behind the Q15 screen: the FP16 gate over the screen's survivors where it is
         # priced cheaper than the pooled FP32 pass (_q15_tier0_fp16).
         plan.set_q15_tier0(_q15_tier0_fp16(int(chain[0])))
+        taps = getattr(self, "_taps", None)
+        if taps is not None:
+            plan.set_taps(taps[0], taps[0].shape[1], taps[1])   # direct: with the thresholds
         return plan
 
     # ---- Q15 screen: a measured candidate, never a default ---------------------
@@ -2945,9 +2972,54 @@ class HierarchicalFilter(MatchedFilter):
     def _execution_plan(self):
         plan = self._ensure()
         if not self._thr_applied:
-            plan.set_thresholds(list(self._thresholds(required=True)))
+            thr = list(self._thresholds(required=True))
+            plan.set_thresholds(thr)
+            if getattr(self, "_taps", None) is not None:
+                hw = self._direct_halfwidth(tuple(self._chain), thr)
+                plan.set_direct(hw is not None, hw or 1)
             self._thr_applied = True
         return plan
+
+    def _direct_halfwidth(self, chain, thresholds):
+        """The direct refine's window half-width for this chain (gatechain.direct_halfwidth,
+        plus one coarse sample), or None where it does not apply: off (MF_DIRECT_REFINE=0),
+        or no reference to model it on."""
+        if not _direct_refine_enabled() or self._pending_ref is None:
+            return None
+        hw, _, _ = _gatechain.direct_halfwidth(self._pending_ref, self.n, chain, thresholds,
+                                               self._fs_snr or self.snr, self.fd,
+                                               window=self.search_window)
+        return hw + 1
+
+    def _direct_prices(self, base):
+        """{band: ticks per refined pair} of the direct refine with this plan's taps, for a
+        chain whose last tier is that band (window from the single-tier model at the band);
+        empty where the direct refine does not apply. Cached per reference and taps."""
+        taps = getattr(self, "_taps", None)
+        if taps is None or not _direct_refine_enabled() or self._pending_ref is None:
+            return {}
+        key = (float(self._fs_snr or self.snr), float(self.fd), self.search_window)
+        hit = getattr(self, "_dprice", None)
+        if (hit is not None and hit[0] == key and hit[2] is self._pending_ref
+                and hit[3] is taps[0]):
+            return hit[1]
+        lagtap = _direct_lagtap()
+        L = 32.0 * max(1, int(round(float(np.mean(taps[1])) / 32.0)))   # as the chain key rounds it
+        prices = {}
+        if lagtap > 0:
+            p = np.asarray(self._pending_ref, dtype=np.float64)
+            for b in _gatechain.usable_bands(p / p.sum(), self.n):
+                pl = _gatechain.chain_thresholds(self._pending_ref, self.n, self._fs_snr or self.snr,
+                                                 self.fd, (b,), cost=base, window=self.search_window)
+                if pl is None:
+                    continue
+                hw = self._direct_halfwidth((b,), pl["thresholds"])
+                lags = 2 * hw * (self.n // b) + 1
+                # the correlation, plus the per-lag binning around it (~4 ticks a lag)
+                prices[int(b)] = lagtap * L * lags + 4.0 * lags
+        self._dprice = (key, prices, self._pending_ref, taps[0])   # held: identity is the key
+        return prices
+
 
     def release_trials(self):
         """The bank's block-size trial locked on this plan's layout: start the measured choices
@@ -3074,8 +3146,10 @@ class HierarchicalFilter(MatchedFilter):
         if self.device.kind == "gpu":
             return _gatechain.calibrate_costs_gpu(self.n, str(self.device))
         policy = self._series_policy('hierarchical_series', 0, self.ntemplates) or {}
-        return _gatechain.calibrate_costs(self.n, self.ntemplates,
-                                          group=policy.get('series_group', _gatechain.default_series_group(self.n)))
+        cm = _gatechain.calibrate_costs(self.n, self.ntemplates,
+                                        group=policy.get('series_group', _gatechain.default_series_group(self.n)))
+        prices = self._direct_prices(cm)
+        return cm.with_direct(prices) if prices else cm
 
     def _choose_chain(self):
         """Pick a gate chain: the model prices every chain, measurement settles the close ones.
@@ -3098,8 +3172,11 @@ class HierarchicalFilter(MatchedFilter):
         tiers = min(self.max_tiers, self._MAX_TIERS[self.device.kind])
         ref = np.asarray(self._pending_ref, np.float64)
         prof = _gatechain._gm._profile_sig(ref / ref.sum())
+        taps = getattr(self, "_taps", None)
+        direct = (int(round(float(np.mean(taps[1])) / 32.0)) if taps is not None and
+                  _direct_refine_enabled() and self.device.kind == "cpu" else None)
         key = (self.n, float(snr), float(self.fd), tiers, self.search_window, prof, str(self.device),
-               _gatechain.cpu_gate_kind() if self.device.kind == "cpu" else None)
+               _gatechain.cpu_gate_kind() if self.device.kind == "cpu" else None, direct)
         with _AUTOTUNE_LOCK:
             hit = _CHAIN_CHOICE.get(key)
         if hit is None:
@@ -3145,7 +3222,7 @@ class HierarchicalFilter(MatchedFilter):
 
         chain = model_best
         self._chain_trial = None
-        tkey = (self.n, float(snr), float(self.fd), tiers, str(self.device))
+        tkey = (self.n, float(snr), float(self.fd), tiers, str(self.device), direct)
         # The key's lock -- reached in this process or read from MF_COST_FILE -- decides
         # the chain of EVERY plan of the key: the plan runs it if it can (its feasible set),
         # else its model's chain, and a locked key never opens a trial. The in-process
@@ -3348,6 +3425,36 @@ class HierarchicalFilter(MatchedFilter):
         if not rebuild:
             plan.set_template_batch(0, a)
         self._mark_ready("template", None)
+
+    def set_taps(self, taps, counts=None):
+        """Each template's real FIR taps, for the direct refine on the CPU.
+
+        taps (ntemplates, m) float32, row t's first counts[t] taps valid (all m when counts
+        is None), the centre tap counts[t] // 2 at lag 0 -- the filter whose spectrum
+        set_templates holds, at the data's sample rate (time_domain.template_spectra with
+        tap and data rates equal). run_series then refines a survivor by direct correlation
+        at the lags around its last tier's firing coarse lags wherever that is priced
+        cheaper than a whole-block transform; MF_DIRECT_REFINE=0 turns it off."""
+        taps = np.ascontiguousarray(taps, dtype=np.float32)
+        if taps.ndim != 2 or taps.shape[0] != self.ntemplates:
+            raise ValueError("taps must be (ntemplates, m) = (%d, m)" % self.ntemplates)
+        counts = (np.full(self.ntemplates, taps.shape[1], np.int64) if counts is None
+                  else np.ascontiguousarray(counts, dtype=np.int64))
+        if counts.shape != (self.ntemplates,) or counts.min() < 1 or counts.max() > min(taps.shape[1], self.n):
+            raise ValueError("counts must be (ntemplates,) in [1, min(m, n)]")
+        self._taps = (taps, counts)
+        self._dprice = None
+        if self._pinned is None and self._chain is not None and self.device.kind == "cpu":
+            # The model priced the chain without the direct refine: choose again (the plan is
+            # rebuilt on next use and replays reference, templates and data).
+            self._chain, self._mf, self._gcal = None, None, None
+        elif self._mf is not None:
+            self._mf.set_taps(taps, taps.shape[1], counts)
+            self._thr_applied = False           # the direct window is set with the thresholds
+
+    def direct_stats(self):
+        """Direct-refine counters of the CPU plan ({} before one exists)."""
+        return self._mf.direct_stats() if self._mf is not None else {}
 
     def set_hermitian(self, hermitian: bool):
         self._hermitian = bool(hermitian)

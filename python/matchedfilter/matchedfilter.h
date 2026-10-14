@@ -16,6 +16,7 @@
 #ifndef MATCHEDFILTER_H
 #define MATCHEDFILTER_H
 #include <stddef.h>
+#include <stdint.h>
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -271,6 +272,20 @@ int ap_hmf_run_series(ap_hmf_plan *p,
    caller reads peaks only where counts[row] > 0. At a detection threshold almost every
    pair is such a row; writing an empty peak into each was a pass over the whole table. */
 int ap_hmf_set_sparse(ap_hmf_plan *p, int on);
+
+/* Direct refine. ap_hmf_set_taps gives each template's real FIR taps (row t: counts[t]
+   taps, stride floats per row, centre tap counts[t]/2 at lag 0 -- the filter whose
+   spectrum ap_hmf_set_template holds). With ap_hmf_set_direct on, ap_hmf_run_series
+   refines a survivor only at the lags within `halfwidth` last-tier coarse samples of a
+   last-tier lag at or above that tier's threshold, by direct correlation, wherever that is
+   priced cheaper than its whole-block transform (both timed on this core when turned on);
+   the rest, and every ap_hmf_run call, refine by transform as before. */
+int ap_hmf_set_taps(ap_hmf_plan *p, const float *taps, size_t stride, const int64_t *counts);
+int ap_hmf_set_direct(ap_hmf_plan *p, int on, int halfwidth);
+/* Ticks per lag x tap of the direct correlation on this core (< 0 on failure). */
+double ap_hmf_price_direct(void);
+int ap_hmf_direct_stats(const ap_hmf_plan *p, long *pairs, long *lags, long *fft,
+                        double *ticks_per_lag_tap, double *ticks_per_fft_pair);
 
 /* Diagnostics: pairs examined and pairs that went to the full correlation.
    The ratio is the measured refine rate, which is what the speedup rides on. */

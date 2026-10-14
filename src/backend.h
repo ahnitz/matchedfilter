@@ -74,6 +74,9 @@ typedef struct {
   int (*q15_screen)(size_t N, const int16_t *dq, const int16_t *tr, const int16_t *ti,
                     size_t start, size_t end, const int16_t *lanethr, uint64_t *bits,
                     int16_t *lanemax, void *scratch);
+  /* Direct correlation with real taps over nlag consecutive lags (td-inl.h):
+     out[i] = sum_k taps[k] x[i+k], x and out interleaved complex. */
+  void (*td_corr)(const float *x, const float *taps, int L, int nlag, float *out);
 } ap_backend;
 
 /* The kernel for the target Highway's runtime dispatch selected, or NULL if
