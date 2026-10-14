@@ -101,8 +101,7 @@ def _hier_plan(counts, seed=5):
 
 
 def _tkey(p):
-    tiers = min(p.max_tiers, p._MAX_TIERS[p.device.kind])
-    return (p.n, float(p._fs_snr or p.snr), float(p.fd), tiers, str(p.device))
+    return p._chain_trial_key()
 
 
 @pytest.mark.parametrize("shape", [(300, 400, 500, 600), (700, 800, 850, 880)])
