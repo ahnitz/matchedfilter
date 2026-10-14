@@ -218,7 +218,11 @@ def _filter_ms(kind, device, reps, fd, snr=5.5):
                 else:
                     f.run(binsize=N, threshold=snr)
                 durations.append(ctx.last_gpu_time * 1000)
-            details['device_ms'] = float(np.median(durations))
+            # Record it only if the backend timed the calls: CUDA keeps device timers off
+            # unless MF_GPU_TIMING=1 is set when its context is made (they would perturb the
+            # timed runs), and then last_gpu_time stays 0 -- not a measurement.
+            if all(d > 0 for d in durations):
+                details['device_ms'] = float(np.median(durations))
         _DETAILS[(device, kind, fd)] = details
         if kind == 'hier' and hasattr(f, 'config'):
             cfg = f.config
