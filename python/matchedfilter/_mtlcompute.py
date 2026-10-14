@@ -114,34 +114,35 @@ def _ppg_of(entry):
     return int(entry[len("coarse16p"):].split("t")[0])
 
 
-#: Templates per pair slot of the tiled coarse builds; must match COARSE_TILE_T in
-#: tools/build_spirv.py (compiled into the kernel). Shared with _vkcompute._COARSE_TILE_T.
-_COARSE_TILE_T = {64: 2, 128: 2, 256: 2, 512: 4, 1024: 2}
-
-
-def coarse_geometry(band, nd, nt, simd_width=32):
+def coarse_geometry(band, nd, nt, simd_width=32, choose_tile=None):
     """(entry, pairs per threadgroup, tile, groups, ragged) for the half-width coarse pass.
 
-    A tiled build (two templates per lane, the fp16 pair in one register; ragged tiles,
-    so any template count) is preferred where one is shipped: its PPG is the smallest that
-    fills the pipeline's SIMD width (threadExecutionWidth). Otherwise coarse_ppg's untiled
-    packing, with the pair count padded to whole groups. MF_METAL_COARSE_TILE=0 disables
-    the tiled builds, for measurement."""
+    A tiled build (TILE_T templates per lane; ragged tiles, so any template count) runs at
+    the smallest packing that fills the pipeline's SIMD width (threadExecutionWidth), among
+    those shipped. Which tile -- or none -- is choose_tile(band, ppg, shipped tiles)'s, the
+    device's measured choice (Context._coarse_tile); without it the smallest shipped tile.
+    Untiled: coarse_ppg's packing, with the pair count padded to whole groups.
+    MF_METAL_COARSE_TILE forces a tile (0 or 1 = untiled) and MF_METAL_COARSE_PPG a packing,
+    for measurement."""
     import os
-    from ._coarse import coarse_launch
+    from ._coarse import coarse_launch, coarse_stem, shipped_tiles, forced_tile
     pairs = nd * nt
     wg = band // _radix(band)
-    tile = _COARSE_TILE_T.get(band, 1)
-    if tile > 1 and os.environ.get("MF_METAL_COARSE_TILE", "1") != "0":
-        want = os.environ.get("MF_METAL_COARSE_PPG") or None
-        built = [p for p in (1, 2, 4, 8, 16, 32)
-                 if _shipped("tierb_%d_c16%st%d" % (band, "p%d" % p if p > 1 else "", tile))]
-        if built:
-            if want is not None and int(want) in built:
-                ppg = int(want)
-            else:
-                ppg = next((p for p in built if wg * p >= simd_width), built[-1])
-            entry = "coarse16%st%d" % ("p%d" % ppg if ppg > 1 else "", tile)
+    forced = forced_tile("MF_METAL_COARSE_TILE")
+    want = os.environ.get("MF_METAL_COARSE_PPG") or None
+    built = [p for p in (1, 2, 4, 8, 16, 32) if shipped_tiles(band, p, _shipped)]
+    if built and (forced is None or forced > 1):
+        if want is not None and int(want) in built:
+            ppg = int(want)
+        else:
+            ppg = next((p for p in built if wg * p >= simd_width), built[-1])
+        tiles = shipped_tiles(band, ppg, _shipped)
+        if forced is not None:
+            tile = forced if forced in tiles else 1
+        else:
+            tile = choose_tile(band, ppg, tiles) if choose_tile else tiles[0]
+        if tile > 1:
+            entry = "coarse16" + coarse_stem(band, ppg, tile)[len("tierb_%d_c16" % band):]
             return entry, ppg, tile, coarse_launch(nd, nt, ppg, tile, 0)[1], True
     ppg = coarse_ppg(band, pairs, simd_width=simd_width)
     padded = -(-pairs // ppg) * ppg
@@ -1573,6 +1574,71 @@ class Context(InputUploads):
             cache[band] = int(width) if isinstance(width, int) and width > 0 else TARGET_THREADS
         return cache[band]
 
+    def _coarse_tile(self, band, ppg, tiles):
+        """Templates per lane for the coarse kernel at (band, ppg): the fastest of the shipped
+        tiles and the untiled build, timed on this device and kept in MF_COST_FILE (the
+        choice the Vulkan and CUDA hosts make; priced, not trialled -- a deterministic
+        micro-benchmark). Whether a tile's register reuse pays depends on the device."""
+        cands = (1,) + tuple(tiles)
+        memo = self.__dict__.setdefault("_coarse_tiles", {})
+        k = (band, ppg, cands)
+        if k not in memo:
+            from . import gatechain
+            ckey = "mtl-coarse-tile|%s|%d|p%d|%s" % (getattr(self, "name", ""), band, ppg,
+                                                     ",".join(map(str, cands)))
+            held = gatechain.stored_choice(ckey)
+            if held in cands:
+                memo[k] = held
+            else:
+                times = self._time_coarse_tiles(band, ppg, cands)
+                memo[k] = min(cands, key=lambda t: (times[t], t))
+                gatechain.store_choice(ckey, int(memo[k]))
+        return memo[k]
+
+    def _time_coarse_tiles(self, band, ppg, cands, pairs=65536, ntm=16, reps=4):
+        """Device seconds per pair of each coarse build on synthetic data (min of reps - 1
+        after a warm-up), in self.coarse_times[band] for reports."""
+        from ._coarse import coarse_launch, coarse_stem
+        ndm = pairs // ntm
+        rng = np.random.default_rng(0)
+        x = (rng.standard_normal((ndm, band)) + 1j * rng.standard_normal((ndm, band))) * 0.1
+        bufs = [_Buffer(self, ndm * band * 4), _Buffer(self, ntm * band * 4),
+                _Buffer(self, pairs * 4), _Buffer(self, pairs * 8)]
+        bufs[0].write(_pack_half2(x))
+        bufs[1].write(_pack_half2(x[:ntm]))
+        shift = band.bit_length() - 1
+        tg = band // _radix(band) * ppg
+        gate = (band // _radix(band) <= self._simd_width(band)
+                and os.environ.get("MF_VK_C16_BOUND", "1") != "0")
+        out = {}
+        try:
+            for tile in cands:
+                stem = coarse_stem(band, ppg, tile)
+                pso = self.pipeline(band, "coarse16" + stem[len("tierb_%d_c16" % band):])
+                slot_val, groups = coarse_launch(ndm, ntm, ppg, tile, band)
+                thr = (int(np.float32(1.1754944e-38).view(np.uint32))
+                       if gate and tile > 1 else 0)
+                times = []
+                for rep in range(reps):
+                    cmd = self.o.call(self.queue, b"commandBuffer")
+                    enc = self.o.call(cmd, b"computeCommandEncoder")
+                    self._dispatch(enc, pso, (ntm, 0, band, slot_val, shift, 1, thr), bufs, tg,
+                                   groups=groups)
+                    self.o.call(enc, b"endEncoding", restype=None)
+                    self.o.call(cmd, b"commit", restype=None)
+                    self.o.call(cmd, b"waitUntilCompleted", restype=None)
+                    if rep:
+                        t0 = self.o.call(cmd, b"GPUStartTime", restype=ctypes.c_double)
+                        t1 = self.o.call(cmd, b"GPUEndTime", restype=ctypes.c_double)
+                        times.append(float(t1) - float(t0))
+                out[tile] = min(times) / pairs
+        finally:
+            for b in bufs:
+                b.destroy()
+        self.__dict__.setdefault("coarse_times", {}).setdefault(band, {}).update(
+            {coarse_stem(band, ppg, t): v for t, v in out.items()})
+        return out
+
     @staticmethod
     def _coarse_span(n, band, lo, hi):
         """The gate's window in band samples: (start, end, span, shift).
@@ -1645,7 +1711,7 @@ class Context(InputUploads):
         # spare outputs, and no compaction ever lists them.
         if half[0]:
             centry, ppg, ctile, cgroups, ragged = coarse_geometry(
-                tiers[0][0], nd, nt, self._simd_width(tiers[0][0]))
+                tiers[0][0], nd, nt, self._simd_width(tiers[0][0]), self._coarse_tile)
         else:
             centry, ppg, ctile, cgroups, ragged = "fusedTierB", 1, 1, pairs, False
         # Ragged tiles clamp inside the kernel and write only real pairs; untiled builds

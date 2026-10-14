@@ -17,7 +17,7 @@ pytestmark = pytest.mark.skipif(sys.platform != "darwin", reason="Metal only")
 
 
 @pytest.mark.parametrize("chain", [(256,), (128, 512), (64,)])
-@pytest.mark.parametrize("tile", ["0", "1"])
+@pytest.mark.parametrize("tile", ["1", "2", "4", "8"])
 def test_loud_injection_peaks_match_cpu(monkeypatch, chain, tile):
     monkeypatch.setenv("MF_METAL_COARSE_TILE", tile)
     n, nd, nt = 4096, 4, 16

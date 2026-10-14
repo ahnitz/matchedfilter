@@ -58,7 +58,7 @@ def main():
     ctx = M.Context(0)
     for N in a.n:
         res = {}
-        for tile in ("0", "1"):
+        for tile in ("1", "2", "4", "8"):       # 1: untiled
             os.environ["MF_METAL_COARSE_TILE"] = tile
             es, eb, worst = [], [], (0.0, "")
             for rep in range(a.reps):

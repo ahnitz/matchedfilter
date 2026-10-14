@@ -23,7 +23,9 @@ def ctx():
                                         (256, 4, 16)])
 def test_tiled_coarse_matches_untiled(ctx, monkeypatch, band, nd, nt):
     from matchedfilter import _mtlcompute
-    if not _mtlcompute._shipped("tierb_%d_c16t%d" % (band, _mtlcompute._COARSE_TILE_T[band])):
+    from matchedfilter._coarse import TILE_PROBE, coarse_stem
+    tiles = [str(t) for t in TILE_PROBE if _mtlcompute._shipped(coarse_stem(band, 1, t))]
+    if not tiles:
         pytest.skip("no tiled build at this band")
     n = 4096
     rng = np.random.default_rng(band + nt)
@@ -36,14 +38,15 @@ def test_tiled_coarse_matches_untiled(ctx, monkeypatch, band, nd, nt):
     counts = []
     for raw_thr in (0.0, 1.0, 3.0, 10.0):
         out = {}
-        for tile in ("0", "1"):
+        for tile in ["1"] + tiles:              # "1": untiled, the reference
             monkeypatch.setenv("MF_METAL_COARSE_TILE", tile)
             ctx._hier.clear()
             idx, val = ctx.hier_peaks(n, band, d, h, h[:, :band], raw_thr, threshold=0.0)
             out[tile] = (idx.copy(), val.copy(), ctx.last_refinements)
-        np.testing.assert_array_equal(out["0"][0], out["1"][0])
-        np.testing.assert_array_equal(out["0"][1], out["1"][1])
-        assert out["0"][2] == out["1"][2]
+        for tile in tiles:
+            np.testing.assert_array_equal(out["1"][0], out[tile][0])
+            np.testing.assert_array_equal(out["1"][1], out[tile][1])
+            assert out["1"][2] == out[tile][2]
         if raw_thr == 0.0:
             assert out["1"][0][nd - 1, nt - 1, 0] == 700
         counts.append(out["1"][2])

@@ -128,7 +128,10 @@ LDS_CAP = {
 }
 
 COARSE_BANDS = {256: 16, 512: 16, 1024: 16}
-COARSE_TILE_T = {128: 2, 256: 2, 512: 4, 1024: 2}
+#: Every coarse tile, as for SPIR-V and Metal (build_spirv.COARSE_TILES): the host times the
+#: shipped builds per device (_cudacompute._time_coarse).
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from build_spirv import COARSE_TILES  # noqa: E402
 
 STEMS = {
     "fusedTierB": "tierb",
@@ -327,8 +330,7 @@ def main():
             for _p in (8, 16):
                 compile_tierb(slangc, nvrtc, env, n, OUT, entry="fusedTierB", suffix="_c16p%d" % _p,
                               coarse16=1, ppg=_p)
-            _t = COARSE_TILE_T.get(n, 1)
-            if _t > 1:
+            for _t in COARSE_TILES:
                 compile_tierb(slangc, nvrtc, env, n, OUT, entry="fusedTierB", coarse16=1, ppg=8,
                               tile=_t, suffix="_c16p8t%d" % _t)
             print("  coarse n=%d" % n, flush=True)
@@ -421,8 +423,7 @@ def main():
             # band 64); the CUDA host picks the variant with the best occupancy.
             for _p in (2, 4) + ((8, 16) if n <= 256 else ()):
                 compile_tierb(slangc, nvrtc, env, n, OUT, entry=centry, suffix="_c16p%d" % _p, coarse16=1, ppg=_p)
-            _t = COARSE_TILE_T.get(n, 1)
-            if _t > 1:
+            for _t in COARSE_TILES:
                 for _p in (1, 2, 4) + ((8,) if n <= 256 else ()):
                     compile_tierb(slangc, nvrtc, env, n, OUT, entry=centry, coarse16=1,
                                   ppg=_p, tile=_t,

@@ -19,14 +19,13 @@ def _gpu():
     return dev
 
 
-@pytest.fixture(params=["tiled", "untiled"])
+@pytest.fixture(params=["measured", "t1", "t2", "t4", "t8"])
 def builds(request, monkeypatch):
-    if request.param == "untiled":
-        try:
-            from matchedfilter import _vkcompute
-        except Exception:
-            pytest.skip("Vulkan build families only")
-        monkeypatch.setattr(_vkcompute, "_COARSE_TILE_T", {})
+    """The device's measured coarse tile and each shipped one forced (t1 = untiled): any of
+    them can be a device's choice, so each must fail open."""
+    if request.param != "measured":
+        monkeypatch.setenv("MF_VK_COARSE_TILE", request.param[1:])
+        monkeypatch.setenv("MF_METAL_COARSE_TILE", request.param[1:])
     return request.param
 
 
