@@ -506,30 +506,30 @@ void innermost_0(array<float2, int(16)> thread* r_3)
 }
 
 
-#line 784
+#line 796
 void transform_0(array<float2, int(16)> thread* r_4, uint tid_0, KernelContext_0 thread* kernelContext_3)
 {
 
-#line 784
+#line 796
     uint _S15;
 
-#line 784
+#line 796
     uint k2_1;
 
-#line 784
+#line 796
     float cr_0;
 
-#line 784
+#line 796
     float ci_0;
 
-#line 784
+#line 796
     uint _S16;
 
-#line 784
+#line 796
     for(;;)
     {
 
-#line 784
+#line 796
         for(;;)
         {
 
@@ -708,7 +708,7 @@ void transform_0(array<float2, int(16)> thread* r_4, uint tid_0, KernelContext_0
 #line 43
     innermost_0(r_4);
 
-#line 787 "/home/ahnitz/projects/claude/searchdev/work/mf-next/python/matchedfilter/metal/tc_fwd1_131072.slang"
+#line 799 "/home/ahnitz/projects/claude/searchdev/work/mf-next/python/matchedfilter/metal/tc_fwd1_131072.slang"
     return;
 }
 
@@ -763,38 +763,38 @@ uint slotToIndex_0(uint slot_0)
 }
 
 
-#line 1942
+#line 2011
 [[kernel]] void tcForwardStage1(uint3 gid_0 [[threadgroup_position_in_grid]], uint3 lid_0 [[thread_position_in_threadgroup]], EntryPointParams_0 constant* entryPointParams_1 [[buffer(0)]], packed_float2 device* entryPointParams_series_1 [[buffer(1)]], uint device* entryPointParams_starts_1 [[buffer(2)]], packed_float2 device* entryPointParams_scratch_1 [[buffer(3)]])
 {
 
-#line 1942
+#line 2011
     thread KernelContext_0 kernelContext_4;
 
-#line 1942
+#line 2011
     (&kernelContext_4)->entryPointParams_0 = entryPointParams_1;
 
-#line 1942
+#line 2011
     (&kernelContext_4)->entryPointParams_series_0 = entryPointParams_series_1;
 
-#line 1942
+#line 2011
     (&kernelContext_4)->entryPointParams_starts_0 = entryPointParams_starts_1;
 
-#line 1942
+#line 2011
     (&kernelContext_4)->entryPointParams_scratch_0 = entryPointParams_scratch_1;
 
-#line 1942
+#line 2011
     threadgroup array<uint, int(1024)> stg_1;
 
-#line 1942
+#line 2011
     (&kernelContext_4)->stg_0 = &stg_1;
 
-#line 1948
+#line 2017
     uint _S26 = gid_0.x;
 
-#line 1948
+#line 2017
     uint block_0 = _S26 / 256U;
 
-#line 1948
+#line 2017
     uint _S27 = _S26 % 256U;
     uint tid_1 = lid_0.x;
     uint _S28 = entryPointParams_starts_1[block_0];
@@ -802,107 +802,107 @@ uint slotToIndex_0(uint slot_0)
     (&kernelContext_4)->_stgBase_0 = 0U;
     thread array<float2, int(16)> r_5;
 
-#line 1953
+#line 2022
     uint m_1 = 0U;
     for(;;)
     {
 
-#line 1954
+#line 2023
         if(m_1 < 16U)
         {
         }
         else
         {
 
-#line 1954
+#line 2023
             break;
         }
 
-#line 1955
+#line 2024
         uint j_2 = _S27 + 256U * (tid_1 + 32U * m_1);
         float2 _S29 = float2(0.0f, 0.0f);
 
-#line 1956
+#line 2025
         bool _S30;
         if(_S28 < ((&kernelContext_4)->entryPointParams_0->seriesLength_0))
         {
 
-#line 1957
+#line 2026
             _S30 = j_2 < ((&kernelContext_4)->entryPointParams_0->seriesLength_0 - _S28);
 
-#line 1957
+#line 2026
         }
         else
         {
 
-#line 1957
+#line 2026
             _S30 = false;
 
-#line 1957
+#line 2026
         }
 
-#line 1957
+#line 2026
         float2 x_1;
 
-#line 1957
+#line 2026
         if(_S30)
         {
 
-#line 1957
+#line 2026
             x_1 = float2(*((&kernelContext_4)->entryPointParams_series_0+(_S28 + j_2))) ;
 
-#line 1957
+#line 2026
         }
         else
         {
 
-#line 1957
+#line 2026
             x_1 = _S29;
 
-#line 1957
+#line 2026
         }
 
         r_5[m_1] = float2(x_1.x / 1.31072e+05f, - x_1.y / 1.31072e+05f);
 
-#line 1954
+#line 2023
         m_1 = m_1 + 1U;
 
-#line 1954
+#line 2023
     }
 
-#line 1954
+#line 2023
     transform_0(&r_5, tid_1, &kernelContext_4);
 
-#line 1954
+#line 2023
     uint i_3 = 0U;
 
-#line 1962
+#line 2031
     for(;;)
     {
 
-#line 1962
+#line 2031
         if(i_3 < 16U)
         {
         }
         else
         {
 
-#line 1962
+#line 2031
             break;
         }
 
-#line 1963
+#line 2032
         uint k2_2 = slotToIndex_0(tid_1 * 16U + i_3);
 
-#line 1963
+#line 2032
         *((&kernelContext_4)->entryPointParams_scratch_0+(block_0 * 131072U + k2_2 * 256U + _S27)) = packed_float2(cmul_0(r_5[i_3], mfTwiddle_0(6.28318548202514648f * float(_S27 * k2_2) / 1.31072e+05f))) ;
 
-#line 1962
+#line 2031
         i_3 = i_3 + 1U;
 
-#line 1962
+#line 2031
     }
 
-#line 1967
+#line 2036
     return;
 }

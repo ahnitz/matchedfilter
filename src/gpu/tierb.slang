@@ -761,6 +761,18 @@ uint slotToIndex(uint slot)
     return idx;
 }
 
+//: Register v's |v|^2 bits as the coarse election compares them: 0 outside [ws, we),
+//: +inf in window when the thread's registers overflowed (ov; Metal's fail-open).
+uint c16Mag(C v, uint slot, uint ws, uint we, bool ov)
+{
+    uint idx = slotToIndex(slot);
+    bool live = (idx >= ws && idx < we);
+    float x = float(v.x), y = float(v.y);
+    uint m = live ? asuint(x * x + y * y) : 0u;
+    return (ov && live) ? 0x7F800000u : m;
+}
+
+
 //: The filter itself, as a plain function so more than one entry point can
 //: use it. Slang does not allow one entry point to call another, and the
 //: compacted refinement uses this same body.
@@ -984,6 +996,62 @@ void filterPair(uint pair, uint tid,
 #endif
     GroupMemoryBarrierWithGroupSync();
 
+#if COARSE16
+    // The fp16 coarse role's election, one bin, without per-register magnitude arrays:
+    // each register's |v|^2 is recomputed where it is compared (c16Mag). Holding myMag[16]
+    // and myBin[16] beside the 16 transform registers spilled at subgroup 16 on an Iris Xe,
+    // where this election was 77% of the band-256 kernel. Same values, same window, same
+    // tie-break (lowest slot), same fail-open.
+#if defined(MF_METAL)
+    // FAIL OPEN on fp16 overflow (Metal compiles with fast math): an exponent field of all
+    // ones anywhere in this thread's registers makes every in-window register +inf.
+    uint ovAcc = 0u;
+    MF_UNROLL for (uint i = 0; i < R; ++i)
+        ovAcc |= (bit_cast<uint>(r[i]) & 0x7C007C00u) + 0x04000400u;
+    const bool ovRow = (ovAcc & 0x80008000u) != 0u;
+#else
+    const bool ovRow = false;
+#endif
+    {
+        uint bestBits = thrBits;
+        MF_UNROLL for (uint i = 0; i < R; ++i)
+            bestBits = max(bestBits, c16Mag(r[i], tid * R + i, winStart, winEnd, ovRow));
+#if PPG == 1
+        uint wm = WaveActiveMax(bestBits);
+        if (WaveIsFirstLane() && wm > thrBits) InterlockedMax(stg[_stgBase], wm);
+#else
+        if (bestBits > thrBits) InterlockedMax(stg[_stgBase], bestBits);
+#endif
+    }
+    GroupMemoryBarrierWithGroupSync();
+    {
+        uint winner = 0xffffffffu;
+        const uint best = stg[_stgBase];
+        MF_UNROLL for (uint i = 0; i < R; ++i) {
+            uint m = c16Mag(r[i], tid * R + i, winStart, winEnd, ovRow);
+            if (m > thrBits && m == best) winner = min(winner, tid * R + i);
+        }
+#if PPG == 1
+        uint waveWinner = WaveActiveMin(winner);
+        if (WaveIsFirstLane() && waveWinner != 0xffffffffu)
+            InterlockedMin(stg[_stgBase+1], waveWinner);
+#else
+        if (winner != 0xffffffffu) InterlockedMin(stg[_stgBase+1], winner);
+#endif
+        GroupMemoryBarrierWithGroupSync();
+        const uint wslot = stg[_stgBase+1];
+        MF_UNROLL for (uint i = 0; i < R; ++i) {
+            if (tid * R + i == wslot) {
+                peakIdx[pair] = int(slotToIndex(tid * R + i));
+                peakVal[pair] = c16Bound(float2(float(r[i].x), float(r[i].y)), energy);
+            }
+        }
+        if (tid == 0 && wslot == 0xffffffffu) {
+            peakIdx[pair] = -1;
+            peakVal[pair] = float2(0, 0);
+        }
+    }
+#else
     uint myMag[RADIX];
     uint myBin[RADIX];
 #if defined(MF_METAL) && COARSE16
@@ -1123,6 +1191,7 @@ void filterPair(uint pair, uint tid,
             }
         }
     }
+#endif
 #endif
 #endif
 }

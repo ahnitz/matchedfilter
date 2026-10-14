@@ -569,36 +569,36 @@ void innermost_0(array<float2, int(16)> thread* r_3)
 }
 
 
-#line 790
+#line 802
 void transform_0(array<float2, int(16)> thread* r_4, uint tid_0, KernelContext_0 thread* kernelContext_3)
 {
 
-#line 790
+#line 802
     uint _S22;
 
-#line 790
+#line 802
     uint k2_1;
 
-#line 790
+#line 802
     float cr_0;
 
-#line 790
+#line 802
     float ci_0;
 
-#line 790
+#line 802
     uint _S23;
 
-#line 790
+#line 802
     uint _S24;
 
-#line 790
+#line 802
     uint _S25;
 
-#line 790
+#line 802
     for(;;)
     {
 
-#line 790
+#line 802
         for(;;)
         {
 
@@ -866,7 +866,7 @@ void transform_0(array<float2, int(16)> thread* r_4, uint tid_0, KernelContext_0
 #line 43
     innermost_0(r_4);
 
-#line 793 "mm_16384_fullCorrelation_lds32.slang"
+#line 805 "mm_16384_fullCorrelation_lds32.slang"
     return;
 }
 
@@ -931,99 +931,99 @@ uint slotToIndex_0(uint slot_0)
 }
 
 
-#line 1639
+#line 1708
 [[kernel]] void fullCorrelation(uint3 gid_0 [[threadgroup_position_in_grid]], uint3 lid_0 [[thread_position_in_threadgroup]], EntryPointParams_0 constant* entryPointParams_1 [[buffer(0)]], packed_float2 device* entryPointParams_data_1 [[buffer(1)]], packed_float2 device* entryPointParams_tmpl_1 [[buffer(2)]], packed_float2 device* entryPointParams_output_1 [[buffer(3)]])
 {
 
-#line 1639
+#line 1708
     thread KernelContext_0 kernelContext_4;
 
-#line 1639
+#line 1708
     (&kernelContext_4)->entryPointParams_0 = entryPointParams_1;
 
-#line 1639
+#line 1708
     (&kernelContext_4)->entryPointParams_data_0 = entryPointParams_data_1;
 
-#line 1639
+#line 1708
     (&kernelContext_4)->entryPointParams_tmpl_0 = entryPointParams_tmpl_1;
 
-#line 1639
+#line 1708
     (&kernelContext_4)->entryPointParams_output_0 = entryPointParams_output_1;
 
-#line 1639
+#line 1708
     threadgroup array<uint, int(8192)> stg_1;
 
-#line 1639
+#line 1708
     (&kernelContext_4)->stg_0 = &stg_1;
 
 
 
     uint pair_0 = gid_0.x;
 
-#line 1643
+#line 1712
     uint tid_1 = lid_0.x;
     uint _S39 = pair_0 / entryPointParams_1->ntmpl_0;
 
-#line 1644
+#line 1713
     uint _S40 = pair_0 % entryPointParams_1->ntmpl_0;
     (&kernelContext_4)->_tid_0 = tid_1;
     (&kernelContext_4)->_stgBase_0 = 0U;
     thread array<float2, int(16)> r_5;
 
-#line 1647
+#line 1716
     uint i_5 = 0U;
     for(;;)
     {
 
-#line 1648
+#line 1717
         if(i_5 < 16U)
         {
         }
         else
         {
 
-#line 1648
+#line 1717
             break;
         }
 
-#line 1649
+#line 1718
         uint idx_0 = tid_1 + 1024U * i_5;
         r_5[i_5] = cmulConj_0(cload_0((&kernelContext_4)->entryPointParams_data_0, _S39 * 16384U + idx_0), cload_0((&kernelContext_4)->entryPointParams_tmpl_0, _S40 * 16384U + idx_0));
 
-#line 1648
+#line 1717
         i_5 = i_5 + 1U;
 
-#line 1648
+#line 1717
     }
 
-#line 1648
+#line 1717
     transform_0(&r_5, tid_1, &kernelContext_4);
 
-#line 1648
+#line 1717
     i_5 = 0U;
 
-#line 1653
+#line 1722
     for(;;)
     {
 
-#line 1653
+#line 1722
         if(i_5 < 16U)
         {
         }
         else
         {
 
-#line 1653
+#line 1722
             break;
         }
 
-#line 1653
+#line 1722
         *((&kernelContext_4)->entryPointParams_output_0+(pair_0 * 16384U + slotToIndex_0(tid_1 * 16U + i_5))) = packed_float2(float2(r_5[i_5].x, r_5[i_5].y)) ;
 
-#line 1653
+#line 1722
         i_5 = i_5 + 1U;
 
-#line 1653
+#line 1722
     }
 
     return;

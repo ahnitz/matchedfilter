@@ -2,6 +2,16 @@
 
 Alpha releases may change the API. Pin a version for reproducible work.
 
+## Unreleased
+
+### Performance
+
+- fp16 coarse tier, untiled builds (every band on an Intel Iris Xe; bands 128 and 1024 on an
+  Apple M2): the peak election recomputes each register's magnitude where it compares it
+  instead of holding per-register magnitude arrays. Intel's compiler estimates 12-14% fewer
+  cycles at SIMD8; measured interleaved on the Iris Xe, the band-256 kernel is 7-8% faster
+  at the device's subgroup size (8), every packing. Same results; M2 throughput unchanged.
+
 ## 0.1.0a8
 
 The `v0.1.0a7` tag was not published to PyPI: its macOS arm64 wheel job failed
