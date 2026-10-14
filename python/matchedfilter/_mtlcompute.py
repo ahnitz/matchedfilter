@@ -1584,8 +1584,9 @@ class Context(InputUploads):
         k = (band, ppg, cands)
         if k not in memo:
             from . import gatechain
-            ckey = "mtl-coarse-tile|%s|%d|p%d|%s" % (getattr(self, "name", ""), band, ppg,
-                                                     ",".join(map(str, cands)))
+            ckey = "mtl-coarse-tile|%s|%d|p%d|%s|k%s" % (getattr(self, "name", ""), band, ppg,
+                                                        ",".join(map(str, cands)),
+                                                        gatechain.gpu_kernel_id())
             held = gatechain.stored_choice(ckey)
             if held in cands:
                 memo[k] = held

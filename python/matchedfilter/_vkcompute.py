@@ -522,7 +522,8 @@ _INTERLEAVE_TRIALS_MAX = 10
 
 
 def _interleave_key(dev, shape):
-    return "vk-interleave|%s|%r" % (getattr(dev, "index", 0), shape)
+    from . import gatechain
+    return "vk-interleave|%s|%r|k%s" % (getattr(dev, "index", 0), shape, gatechain.gpu_kernel_id())
 
 
 def _batch_shape(items):
@@ -2092,8 +2093,8 @@ class Context(InputUploads):
         if k not in memo:
             from . import gatechain
             labels = ["%d,%d,%d" % c for c in cands]
-            ckey = "vk-coarse|%s|%d|%s" % (getattr(self, "device_name", ""), band,
-                                           ";".join(labels))
+            ckey = "vk-coarse|%s|%d|%s|k%s" % (getattr(self, "device_name", ""), band,
+                                              ";".join(labels), gatechain.gpu_kernel_id())
             held = gatechain.stored_choice(ckey)
             if held in labels:
                 memo[k] = cands[labels.index(held)]

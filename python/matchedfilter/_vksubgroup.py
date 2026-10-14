@@ -138,7 +138,7 @@ def choose(ctx):
     if not rng or len(_candidates(rng)) < 2 or os.environ.get("MF_VK_SUBGROUP_MEASURING"):
         return reported
     from . import gatechain, _autotune_enabled
-    key = "vk-subgroup|%s" % getattr(ctx, "device_name", "")
+    key = "vk-subgroup|%s|k%s" % (getattr(ctx, "device_name", ""), gatechain.gpu_kernel_id())
     held = gatechain.stored_choice(key)
     if isinstance(held, int) and rng[0] <= held <= rng[1]:
         return held
