@@ -617,7 +617,10 @@ pair (the old fixed layout in brackets where it differs):
 
 No two devices agree, and the table was wrong somewhere on each, its RDNA reference included
 (band 128 at load: t4 1.6x t2). The Iris Xe's default subgroup, 32, is its worst: 10-17x on
-the coarse kernel.
+the coarse kernel. End to end (ladder, pipelined, chains and trials locked, interleaved
+rounds against main): RENOIR +15% (2.46e7 vs 2.14e7 templates in real time, check exact,
+gate_margin ok); M2 +0.8% (3.75e7 vs 3.72e7; its coarse share is small); every reachable GPU
+exact under `--check cpu` in both modes.
 
 **A tiled fail-open bug** that only some devices could reach. A tiled pair whose group spans
 more than one subgroup (band 1024 on a 32-wide subgroup -- Intel, NVIDIA -- or band >= 2048 on

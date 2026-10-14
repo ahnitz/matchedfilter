@@ -2,6 +2,31 @@
 
 Alpha releases may change the API. Pin a version for reproducible work.
 
+## Unreleased
+
+### Performance
+
+- CPU direct refine (docs/cpu-direct-refine.md): with one bin per pair, a survivor is
+  refined by direct correlation with its real FIR taps at the lags around its last coarse
+  tier's maximum -- a window the gate model sets per chain -- instead of a whole-block
+  transform. `TimeDomainFilterBank` hands its taps to hierarchical plans at a rate ratio of
+  1 (`HierarchicalFilter.set_taps`); the chain choice prices it. Captured
+  `pycbc_inspiral_fir` calls: identical peaks, 13.7% less wall on a Zen 5 core, mostly from
+  the cheaper chains it unlocks. `MF_DIRECT_REFINE=0` turns it off.
+- GPU coarse layout as a measured per-device choice: tile (templates per thread) on Vulkan,
+  Metal and CUDA from every shipped build, and on Vulkan the subgroup size and pairs per
+  workgroup too, timed once per device and band and kept in `MF_COST_FILE`. The fixed
+  per-band tile table is gone. Radeon Vega iGPU (RENOIR, GCN; gravity-dev3): +15% throughput; Intel
+  Iris Xe: the coarse kernel 10-17x faster at subgroup 8 than at its default 32; Apple M2:
+  untiled wins at bands 128 and 1024.
+
+### Fixed
+
+- The tiled fp16 coarse kernel dismissed every pair of an overflowing (very loud) row when
+  a pair spans more than one subgroup -- band 1024 on 32-wide subgroups (Intel, NVIDIA) --
+  and its error bound overflowed to inf for ordinary pairs there. Every backend now uses
+  the integer overflow test Metal had and the scaled energy of the single-subgroup path.
+
 ## 0.1.0a7
 
 ### Fixed before release
