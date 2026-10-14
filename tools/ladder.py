@@ -89,6 +89,35 @@ def source_series(top, rng, S, amp, df=DF, out=None):
     return (real_series if top["quadrature"] else analytic_series)(rng, S, amp, df, out=out)
 
 
+def pack_real_pairs(taps, counts):
+    """Two real filters as one complex filter, h_a - i h_b, each placed so its own centre
+    tap is the packed filter's centre (offset c//2 - c_i//2): correlated with a real series
+    it gives out_a + i out_b, exactly each filter's output (as pycbc_inspiral_fir packs its
+    middle filters for a bank with complex final taps). Returns (packed taps, counts)."""
+    n = len(counts)
+    npair = (n + 1) // 2
+    pc = np.array([int(max(counts[2 * q:2 * q + 2])) for q in range(npair)], dtype=np.int64)
+    out = np.zeros((npair, int(pc.max())), dtype=np.complex64)
+    for r in range(n):
+        q, lane = divmod(r, 2)
+        c = int(counts[r])
+        o = int(pc[q]) // 2 - c // 2
+        out[q, o:o + c] += (1.0 if lane == 0 else -1j) * taps[r, :c]
+    return out, pc
+
+
+class _Lanes:
+    """Rows of a packed middle output: row r is lane r % 2 (real, imaginary) of pair r // 2,
+    a strided real series the fine banks read in place."""
+
+    def __init__(self, out):
+        self.out = out
+
+    def __getitem__(self, r):
+        row = self.out[r // 2]
+        return row.real if r % 2 == 0 else row.imag
+
+
 def load_tops(path, ntops):
     """The ntops top templates with the most fine templates, with their middle and fine taps."""
     import h5py
@@ -338,8 +367,16 @@ def run_device(device, tops, args, seed):
             # Unit variance per quadrature of an analytic middle output; unit variance of a
             # real one (quadrature final taps make the complex SNR from it).
             scale = 1.0 / np.sqrt(np.mean(np.abs(y) ** 2, axis=1) / (1 if top["quadrature"] else 2))
-            mid = TimeDomainFilterBank(top["mid_taps"] * scale[:, None].astype(np.float32),
-                                       tap_counts=top["mid_counts"], engine="corr", device=device)
+            # Quadrature bank on the CPU: the middle filters run in packed real pairs, as pycbc
+            # does (the fine banks read each real series in place as one lane of its pair).
+            pack = top["quadrature"] and str(device).startswith("cpu") \
+                and os.environ.get("LADDER_PACK_MIDDLE", "1") != "0"
+            mtaps = top["mid_taps"] * scale[:, None].astype(np.float32)
+            mcounts = top["mid_counts"]
+            if pack:
+                mtaps, mcounts = pack_real_pairs(mtaps, mcounts)
+            mid = TimeDomainFilterBank(mtaps, tap_counts=mcounts, engine="corr", device=device)
+            lanes = (lambda o: _Lanes(o)) if pack else (lambda o: o)
             # The fine taps are scaled likewise against a middle series, so a fine output in noise
             # is an SNR (pycbc gets this from the reference series' normalisation).
             xm = probe.correlate_series(source_series(top, rng, 1 << 18, amp, df))
@@ -357,7 +394,7 @@ def run_device(device, tops, args, seed):
                 fine.append((m, b))
             # The middle output in device memory, reused every segment (as a pipeline would):
             # written in place by the middle stage and read in place by the fine banks.
-            mid_out = {ifo: mid.empty_shared((len(top["mid_counts"]), S)) for ifo in ("H1", "L1")}
+            mid_out = {ifo: mid.empty_shared((mid.n_templates, S)) for ifo in ("H1", "L1")}
             seg_plan = SegmentPlan()
             first.add("prep", time.perf_counter() - t0)
             fine_banks = [b for _, b in fine]
@@ -494,7 +531,7 @@ def run_device(device, tops, args, seed):
                 # buffers per detector: k's middle never overwrites what an uncollected
                 # segment's fine stage or follow-ups read.
                 depth = max(1, args.depth)
-                bufs = [mid_out] + [{ifo: mid.empty_shared((len(top["mid_counts"]), S))
+                bufs = [mid_out] + [{ifo: mid.empty_shared((mid.n_templates, S))
                                      for ifo in ("H1", "L1")} for _ in range(depth)]
                 from collections import deque
                 inflight = deque()
@@ -521,9 +558,9 @@ def run_device(device, tops, args, seed):
                         ser, next_ser = next_ser, None
                         out = bufs[seg % (depth + 1)]
                         t = time.perf_counter()
-                        mids = {ifo: mid.correlate_series(
+                        mids = {ifo: lanes(mid.correlate_series(
                             ser[ifo], windows=slice(max(0, a0 - args.pad), min(S, a1 + args.pad)),
-                            out=out[ifo], wait=False) for ifo in ser}
+                            out=out[ifo], wait=False)) for ifo in ser}
                         tm.add("middle", time.perf_counter() - t)
                     asym = None
                     pending = (inflight.popleft() if len(inflight) >= depth
@@ -588,7 +625,7 @@ def run_device(device, tops, args, seed):
                                 and os.environ.get("LADDER_GRAPH_MIDDLE") and not fold)
                 if inflight:
                     plans2 = [SegmentPlan(slot_half=0), SegmentPlan(slot_half=1)]
-                    outs2 = [mid_out, {ifo: mid.empty_shared((len(top["mid_counts"]), S))
+                    outs2 = [mid_out, {ifo: mid.empty_shared((mid.n_templates, S))
                                        for ifo in ("H1", "L1")}]
                     ins2 = [{ifo: mid.empty_shared((S,), input=_host_input()) for ifo in ("H1", "L1")}
                             for _ in range(2)]
@@ -637,7 +674,7 @@ def run_device(device, tops, args, seed):
                         t = time.perf_counter()
                         for ifo in ser:
                             m_in[ifo][:] = ser[ifo]
-                            mids[ifo] = m_out[ifo]
+                            mids[ifo] = lanes(m_out[ifo])
                         tm.add("middle", time.perf_counter() - t)
 
                         def prelude(ser=ser, m_in=m_in, m_out=m_out):
@@ -650,10 +687,7 @@ def run_device(device, tops, args, seed):
                         mids[ifo] = mid.correlate_series(ser[ifo], windows=slice(max(0, a0 - args.pad),
                                                                                  min(S, a1 + args.pad)),
                                                          out=mid_out[ifo])
-                        if top["quadrature"] and not np.iscomplexobj(ser[ifo]):
-                            # Real middle series (real-real-complex): the real part, as the
-                            # middle stage's own real output would be (counted as middle work).
-                            mids[ifo] = np.ascontiguousarray(mids[ifo].real)
+                        mids[ifo] = lanes(mids[ifo])
                         tm.add("middle", time.perf_counter() - t)
                     # The fine stage of a segment: every bank on its middle series, both detectors.
                     # Batched (default), the library sees the whole segment in one call.
