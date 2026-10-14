@@ -839,10 +839,22 @@ class MatchedFilter:
                               out=peaks)
 
 
+    def _series_array(self, series):
+        """The series as the engine reads it: complex64, or -- for a CPU hierarchical plan
+        given a real series (the middle output of a real-real-complex hierarchy, filtered
+        with complex quadrature templates) -- float32, transformed at half size into the
+        same full spectrum (ap_hmf_set_real_series). MF_REAL_SERIES=0 widens it to complex."""
+        a = _from_any(series)
+        if (not np.iscomplexobj(a) and isinstance(self, HierarchicalFilter)
+                and self.device.kind == "cpu" and self.n >= 4
+                and os.environ.get("MF_REAL_SERIES", "1") != "0"):
+            return np.ascontiguousarray(a, dtype=np.float32)
+        return np.ascontiguousarray(a, dtype=np.complex64)
+
     def _series_layout(self, series, starts, win_start, win_end, binsize, templates,
                        ragged=False):
         """Validate the shared series contract before either native backend."""
-        ser = np.ascontiguousarray(_from_any(series), dtype=np.complex64)
+        ser = self._series_array(series)
         st = np.ascontiguousarray(_from_any(starts), dtype=np.uintp)
         ws = np.ascontiguousarray(_from_any(win_start), dtype=np.uintp)
         we = np.ascontiguousarray(_from_any(win_end), dtype=np.uintp)
@@ -887,7 +899,7 @@ class MatchedFilter:
             cache = self.__dict__.get("_layout_cache")
             hit = cache.get(key) if cache is not None else None
             if hit is not None:
-                ser = np.ascontiguousarray(_from_any(series), dtype=np.complex64)
+                ser = self._series_array(series)
                 if ser.ndim != 1:
                     raise ValueError("series, starts, win_start and win_end must be one-dimensional")
                 layout, binsize, t0, nt = hit
@@ -1233,6 +1245,15 @@ class MatchedFilter:
         need = nblk * nt * nb
         shape = (nblk, nt, nb)
         ep = self._execution_plan()
+        real = ser.dtype == np.float32
+        held = self.__dict__.get("_ep_real")
+        if real or (held is not None and held[0] is ep and held[1]):
+            # The plan reads what it is given: real samples or complex ones.
+            if not ep.set_real_series(real) and real:
+                ser = ser.astype(np.complex64)
+                real = False
+                ep.set_real_series(False)
+            self._ep_real = (ep, real)
         if (raw and threshold > 0 and getattr(self, "_want_sparse", False)
                 and hasattr(ep, "run_series_sparse")):
             # Sparse (time_domain asks with _want_sparse): the engine writes peaks only for

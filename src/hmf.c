@@ -87,6 +87,12 @@ struct ap_hmf_plan {
   double dir_lagtap, dir_fftpair; /* priced: ticks per lag x tap, per whole-block refine */
   long dir_pairs, dir_lags, dir_fft, dir_edge;
   unsigned long long dir_ttd, dir_tfft;  /* ticks: direct, and the pairs it left to transform */
+  /* Real series (ap_hmf_set_real_series): ap_hmf_run_series reads real samples and
+     transforms each block as n/2 complex ones -- half the transform and half the input --
+     then splits that into the block's full (Hermitian) spectrum. */
+  int real_series;
+  ap_plan *half_fft;              /* n/2-point transform */
+  float *rtw;                     /* [2(n/2+1)] cos, sin of 2 pi k/n */
 };
 
 int ap_hmf_series_group(const ap_hmf_plan *p){ return p ? p->dgroup : 0; }
@@ -188,6 +194,8 @@ void ap_hmf_destroy(ap_hmf_plan *p){
     free(tr->fire_d); free(tr->fire_t);
   }
   ap_destroy(p->full_fft);
+  if(p->half_fft) ap_destroy(p->half_fft);
+  free(p->rtw);
   ap_accel_destroy(p->accel);
   free(p->fwd); free(p->spec); free(p->dspec); free(p->dready); free(p->tready);
   if(p->twiddles) free(p->twiddles);
@@ -473,6 +481,58 @@ int ap_hmf_set_template(ap_hmf_plan *p,int t,const float *spec){
   return refresh_template(p,t);
 }
 
+int ap_hmf_set_real_series(ap_hmf_plan *p,int on){
+  if(!p) return -1;
+  if(on && !p->half_fft){
+    const size_t h=p->n/2;
+    if(p->n<4 || !ap_supported(h)) return -1;
+    p->half_fft=ap_create(h);
+    p->rtw=malloc(2*(h+1)*sizeof(float));
+    if(!p->half_fft||!p->rtw){
+      if(p->half_fft) ap_destroy(p->half_fft);
+      free(p->rtw); p->half_fft=NULL; p->rtw=NULL; return -1;
+    }
+    for(size_t k=0;k<=h;k++){
+      const double a=2.0*3.14159265358979323846*(double)k/(double)p->n;
+      p->rtw[2*k]=(float)cos(a); p->rtw[2*k+1]=(float)sin(a);
+    }
+  }
+  p->real_series=on?1:0;
+  return 0;
+}
+int ap_hmf_get_real_series(const ap_hmf_plan *p){ return p ? p->real_series : 0; }
+
+/* The real block at x[s0 .. s0+have) zero-padded to n and scaled by 1/n, transformed into
+   its full n-point spectrum sp: the n reals read as n/2 complex z, Z = FFT_{n/2}(z), then
+   X[k] = E[k] + W^k O[k] with E = (Z[k] + conj Z[h-k]) / 2, O = (Z[k] - conj Z[h-k]) / 2i,
+   W = e^{-2 pi i / n}, for k = 0 .. h, and X[n-k] = conj X[k]. */
+static void hmf_forward_real(ap_hmf_plan *p,const float *x,size_t s0,size_t have,float *sp){
+  const size_t n=p->n,h=n/2;
+  const float inv=1.0f/(float)n;
+  float * restrict z=p->fwd;                 /* n reals = h complex */
+  float * restrict Z=p->fwd+n;               /* the h-point transform */
+  { const float * restrict src=x+s0;
+    for(size_t k=0;k<have;k++) z[k]=src[k]*inv; }
+  if(have<n) memset(z+have,0,(n-have)*sizeof(float));
+  ap_fft(p->half_fft,z,Z,AP_FORWARD);
+  const float * restrict tw=p->rtw;
+  float * restrict X=sp;
+  /* k = 0 and k = h: E, O real. */
+  X[0]=Z[0]+Z[1]; X[1]=0.f;
+  X[2*h]=Z[0]-Z[1]; X[2*h+1]=0.f;
+  /* 0 < k < h, branch-free: Z[k] against Z[h-k], X[k] and its mirror X[n-k]. */
+  for(size_t k=1;k<h;k++){
+    const size_t r=h-k;
+    const float zr=Z[2*k],zi=Z[2*k+1],cr=Z[2*r],ci=-Z[2*r+1];
+    const float er=0.5f*(zr+cr),ei=0.5f*(zi+ci);
+    const float orr=0.5f*(zi-ci),oi=-0.5f*(zr-cr);
+    const float c=tw[2*k],s_=tw[2*k+1];
+    const float xr=er+(orr*c+oi*s_),xi=ei+(oi*c-orr*s_);
+    X[2*k]=xr; X[2*k+1]=xi;
+    X[2*(n-k)]=xr; X[2*(n-k)+1]=-xi;
+  }
+}
+
 int ap_hmf_run_series(ap_hmf_plan *p,
                       const float *series,size_t nseries,
                       const size_t *start,const size_t *win_start,
@@ -495,6 +555,15 @@ int ap_hmf_run_series(ap_hmf_plan *p,
       const size_t s0=start[b0+j];
       size_t have = s0<nseries ? nseries-s0 : 0;
       if(have>n) have=n;
+      if(p->real_series){
+        /* A real series: the half-size transform, and no complex samples for the direct
+           refine (its NULL dtime sends refines to the transform). */
+        float *sp=p->spec+(size_t)j*2*n;
+        hmf_forward_real(p,series,s0,have,sp);
+        if(ap_hmf_set_data(p,j,sp)) return -1;
+        p->dtime[j]=NULL; p->dhave[j]=0;
+        continue;
+      }
       /* pycbc's inverse is unnormalised and so is matchedfilter's, so the
          caller's convention of pre-dividing the block spectrum by n is kept.
          Doing it on the way IN rather than to the result folds it into a copy

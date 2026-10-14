@@ -650,6 +650,10 @@ def run_device(device, tops, args, seed):
                         mids[ifo] = mid.correlate_series(ser[ifo], windows=slice(max(0, a0 - args.pad),
                                                                                  min(S, a1 + args.pad)),
                                                          out=mid_out[ifo])
+                        if top["quadrature"] and not np.iscomplexobj(ser[ifo]):
+                            # Real middle series (real-real-complex): the real part, as the
+                            # middle stage's own real output would be (counted as middle work).
+                            mids[ifo] = np.ascontiguousarray(mids[ifo].real)
                         tm.add("middle", time.perf_counter() - t)
                     # The fine stage of a segment: every bank on its middle series, both detectors.
                     # Batched (default), the library sees the whole segment in one call.

@@ -267,6 +267,13 @@ int ap_hmf_run_series(ap_hmf_plan *p,
                       int t0, int nt, size_t binsize, float threshold,
                       ap_peak *peaks, int *counts);
 
+/* Real series for ap_hmf_run_series (on != 0): series then holds nseries REAL samples (the
+   middle output of a real-real-complex hierarchy, filtered with complex quadrature
+   templates), each block is transformed at half size into its full Hermitian spectrum, and
+   refines are by transform. Fails (-1) where n/2 has no transform. */
+int ap_hmf_set_real_series(ap_hmf_plan *p, int on);
+int ap_hmf_get_real_series(const ap_hmf_plan *p);
+
 /* Sparse output for ap_hmf_run / ap_hmf_run_series (on != 0, counts required): a row
    whose pair no tier passes gets counts[row] = 0 and its peaks are NOT written, so the
    caller reads peaks only where counts[row] > 0. At a detection threshold almost every

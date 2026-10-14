@@ -58,11 +58,12 @@ static int run_shape(Py_ssize_t n,int maxd,int maxt,int d0,int nd,int t0,int nt,
   *rows=(Py_ssize_t)nd*nt;
   return 1;
 }
-static int series_shape(Py_ssize_t n,int maxt,int t0,int nt,Py_ssize_t binsize,
-                        Py_buffer *ser,Py_buffer *st,Py_buffer *ws,Py_buffer *we,
-                        int *blocks,size_t *nb,Py_ssize_t *rows){
+/* real: the series is real float32 samples (HMF set_real_series), else complex64. */
+static int series_shape_r(Py_ssize_t n,int maxt,int t0,int nt,Py_ssize_t binsize,int real,
+                          Py_buffer *ser,Py_buffer *st,Py_buffer *ws,Py_buffer *we,
+                          int *blocks,size_t *nb,Py_ssize_t *rows){
   const Py_ssize_t unit=(Py_ssize_t)sizeof(size_t);
-  if(ser->len%8 || st->len<unit || st->len%unit || st->len/unit>INT_MAX
+  if(ser->len%(real?4:8) || st->len<unit || st->len%unit || st->len/unit>INT_MAX
      || ws->len!=st->len || we->len!=st->len){
     PyErr_SetString(PyExc_ValueError,"invalid series or block-layout buffer lengths"); return 0;
   }
@@ -87,6 +88,11 @@ static int series_shape(Py_ssize_t n,int maxt,int t0,int nt,Py_ssize_t binsize,
     PyErr_SetString(PyExc_ValueError,"pair count overflows"); return 0;
   }
   *nb=first; *rows=(Py_ssize_t)*blocks*nt; return 1;
+}
+static int series_shape(Py_ssize_t n,int maxt,int t0,int nt,Py_ssize_t binsize,
+                        Py_buffer *ser,Py_buffer *st,Py_buffer *ws,Py_buffer *we,
+                        int *blocks,size_t *nb,Py_ssize_t *rows){
+  return series_shape_r(n,maxt,t0,nt,binsize,0,ser,st,ws,we,blocks,nb,rows);
 }
 static int series_shape_dif(Py_ssize_t n,int maxt,int t0,int nt,Py_ssize_t binsize,
                             int decimated,
@@ -507,7 +513,8 @@ static PyTypeObject MFType={
    only genuinely new surface is stats(), which reports the trigger rate - the
    quantity the whole speedup rides on, and the first thing to look at when the
    filter is slower than expected on a particular data set. */
-typedef struct { PyObject_HEAD ap_hmf_plan *p; Py_ssize_t n, k; int nd,nt; ap_peak *peaks; Py_ssize_t peak_capacity; } HMFObject;
+typedef struct { PyObject_HEAD ap_hmf_plan *p; Py_ssize_t n, k; int nd,nt; ap_peak *peaks; Py_ssize_t peak_capacity;
+                 int real; /* run_series reads a real series (set_real_series) */ } HMFObject;
 
 /* HMF(n, ndata, ntemplates, bands, series_group=8, k=0): a gate chain of coarse
    bands (strictly increasing), then the full refine. Thresholds come from Python. */
@@ -658,8 +665,8 @@ static PyObject *HMF_run_series(HMFObject *self,PyObject *args){
                        &t0,&nt,&binsize,&thr,&bidx,&bval,&bmag,&bcnt,&bpk)) return NULL;
   int nblocks; size_t nb;
   Py_ssize_t rows,need;
-  if(!series_shape(self->n,self->nt,t0,nt,binsize,&bs,&bst,&bws,&bwe,
-                   &nblocks,&nb,&rows)
+  if(!series_shape_r(self->n,self->nt,t0,nt,binsize,self->real,&bs,&bst,&bws,&bwe,
+                     &nblocks,&nb,&rows)
      || !output_shape(rows,nb,&bidx,&bval,&bmag,&bcnt,&bpk,&need)){
     PyBuffer_Release(&bs);PyBuffer_Release(&bst);PyBuffer_Release(&bws);
     PyBuffer_Release(&bwe);PyBuffer_Release(&bidx);PyBuffer_Release(&bval);
@@ -667,7 +674,7 @@ static PyObject *HMF_run_series(HMFObject *self,PyObject *args){
     if(bpk.buf) PyBuffer_Release(&bpk);
     return NULL;
   }
-  size_t nseries=(size_t)(bs.len/8);
+  size_t nseries=(size_t)(bs.len/(self->real?4:8));
   ap_peak *pk=reserve_peaks(&self->peaks,&self->peak_capacity,need);
   if(!pk){ PyBuffer_Release(&bs);PyBuffer_Release(&bst);PyBuffer_Release(&bws);
            PyBuffer_Release(&bwe);PyBuffer_Release(&bidx);PyBuffer_Release(&bval);
@@ -717,7 +724,7 @@ static PyObject *HMF_run_series_sparse(HMFObject *self,PyObject *args){
   int nblocks; size_t nb; Py_ssize_t rows;
   PyObject *ret=NULL;
   ap_peak *pk=NULL;
-  if(!series_shape(self->n,self->nt,t0,nt,binsize,&bs,&bst,&bws,&bwe,&nblocks,&nb,&rows))
+  if(!series_shape_r(self->n,self->nt,t0,nt,binsize,self->real,&bs,&bst,&bws,&bwe,&nblocks,&nb,&rows))
     goto done;
   if(bcnt.len<rows*(Py_ssize_t)sizeof(int)){
     PyErr_SetString(PyExc_ValueError,"counts buffer too small"); goto done; }
@@ -729,7 +736,7 @@ static PyObject *HMF_run_series_sparse(HMFObject *self,PyObject *args){
   int *cnt=(int*)bcnt.buf;
   Py_BEGIN_ALLOW_THREADS
   ap_hmf_set_sparse(self->p,1);
-  tot=ap_hmf_run_series(self->p,(const float*)bs.buf,(size_t)(bs.len/8),
+  tot=ap_hmf_run_series(self->p,(const float*)bs.buf,(size_t)(bs.len/(self->real?4:8)),
                         (const size_t*)bst.buf,(const size_t*)bws.buf,
                         (const size_t*)bwe.buf,nblocks,t0,nt,(size_t)binsize,
                         (float)thr,pk,cnt);
@@ -831,6 +838,14 @@ static PyObject *HMF_set_taps(HMFObject *self,PyObject *args){
                            "taps, int64 counts in [1, min(stride, n)])"); return NULL; }
   Py_RETURN_NONE;
 }
+/* set_real_series(on) -> True if run_series now reads real float32 series. */
+static PyObject *HMF_set_real_series(HMFObject *self,PyObject *args){
+  int on;
+  if(!PyArg_ParseTuple(args,"p",&on)) return NULL;
+  if(ap_hmf_set_real_series(self->p,on)) Py_RETURN_FALSE;
+  self->real=on;
+  Py_RETURN_TRUE;
+}
 static PyObject *HMF_set_direct(HMFObject *self,PyObject *args){
   int on,hw=1; if(!PyArg_ParseTuple(args,"p|i",&on,&hw)) return NULL;
   return PyBool_FromLong(ap_hmf_set_direct(self->p,on,hw)==0);
@@ -877,6 +892,7 @@ static PyMethodDef HMF_methods[]={
   {"set_q15_tier0",(PyCFunction)HMF_set_q15_tier0,METH_VARARGS,"set_q15_tier0(fp16) -> True if tier 0 behind the Q15 screen now runs on the FP16 gate"},
   {"set_platform_fft",(PyCFunction)HMF_set_platform_fft,METH_VARARGS,"set_platform_fft(on) -> True if block forwards now run through the platform FFT"},
   {"set_taps",(PyCFunction)HMF_set_taps,METH_VARARGS,"set_taps(taps float32 (nt, stride), stride, counts int64 (nt,)): each template's real FIR taps"},
+  {"set_real_series",(PyCFunction)HMF_set_real_series,METH_VARARGS,"set_real_series(on) -> True if run_series now reads real float32 series (half-size block transforms)"},
   {"set_direct",(PyCFunction)HMF_set_direct,METH_VARARGS,"set_direct(on, halfwidth=1) -> True if survivors are now refined by direct correlation where cheaper"},
   {"direct_stats",(PyCFunction)HMF_direct_stats,METH_NOARGS,"direct refine counters and prices"},
   {"set_q15",(PyCFunction)HMF_set_q15,METH_VARARGS,"set_q15(on) -> True if the first tier now runs behind the Q15 screen"},
@@ -1003,7 +1019,8 @@ static PyObject *M_pack_peaks(PyObject *self,PyObject *args){
 static PyObject *M_taps_to_spectra(PyObject *self, PyObject *args){
   Py_buffer btaps, bcnt, bout;
   Py_ssize_t n, max_taps;
-  if(!PyArg_ParseTuple(args, "y*y*nnw*", &btaps, &bcnt, &n, &max_taps, &bout)) return NULL;
+  int cplx = 0;     /* complex64 (quadrature) taps instead of float32 */
+  if(!PyArg_ParseTuple(args, "y*y*nnw*|p", &btaps, &bcnt, &n, &max_taps, &bout, &cplx)) return NULL;
 
   if(n <= 0 || max_taps <= 0){
     PyBuffer_Release(&btaps); PyBuffer_Release(&bcnt); PyBuffer_Release(&bout);
@@ -1011,7 +1028,7 @@ static PyObject *M_taps_to_spectra(PyObject *self, PyObject *args){
     return NULL;
   }
 
-  size_t n_elem_taps = (size_t)(btaps.len / sizeof(float));
+  size_t n_elem_taps = (size_t)(btaps.len / ((cplx ? 2 : 1) * sizeof(float)));
   if(n_elem_taps % (size_t)max_taps != 0){
     PyBuffer_Release(&btaps); PyBuffer_Release(&bcnt); PyBuffer_Release(&bout);
     PyErr_SetString(PyExc_ValueError, "invalid taps shape");
@@ -1067,12 +1084,23 @@ static PyObject *M_taps_to_spectra(PyObject *self, PyObject *args){
     if(count > (size_t)n) count = (size_t)n;
     size_t half = count / 2;
     memset(in_buf, 0, 2 * (size_t)n * sizeof(float));
+    if(cplx){
+      const float *row = taps + t * 2 * (size_t)max_taps;
+      for(size_t i = 0; i < count - half; i++){
+        in_buf[2 * i] = row[2 * (half + i)]; in_buf[2 * i + 1] = row[2 * (half + i) + 1];
+      }
+      for(size_t i = 0; i < half; i++){
+        in_buf[2 * ((size_t)n - half + i)] = row[2 * i];
+        in_buf[2 * ((size_t)n - half + i) + 1] = row[2 * i + 1];
+      }
+    } else {
     const float *row = taps + t * (size_t)max_taps;
     for(size_t i = 0; i < count - half; i++){
       in_buf[2 * i] = row[half + i];
     }
     for(size_t i = 0; i < half; i++){
       in_buf[2 * ((size_t)n - half + i)] = row[i];
+    }
     }
     ap_fft(plan, in_buf, out + t * 2 * (size_t)n, AP_FORWARD);
   }
@@ -1178,7 +1206,7 @@ static PyMethodDef methods[]={
   {"targets",M_targets,METH_NOARGS,"targets() -> names this build can run here"},
   {"set_target",M_set_target,METH_VARARGS,"set_target(name|None) -> narrow the choice"},
   {"pack_peaks",M_pack_peaks,METH_VARARGS,"pack_peaks(peaks, idx, val) -> copy into structured peaks"},
-  {"taps_to_spectra",M_taps_to_spectra,METH_VARARGS,"taps_to_spectra(taps, counts, n, max_taps, out_spectra)"},
+  {"taps_to_spectra",M_taps_to_spectra,METH_VARARGS,"taps_to_spectra(taps, counts, n, max_taps, out_spectra, complex=False)"},
   {NULL,NULL,0,NULL}};
 static struct PyModuleDef mod={PyModuleDef_HEAD_INIT,"matchedfilter._core",NULL,-1,methods};
 PyMODINIT_FUNC PyInit__core(void){
