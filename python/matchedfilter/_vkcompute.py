@@ -1865,89 +1865,97 @@ class Context(InputUploads):
         return rng[0] if wg <= rng[0] else 0
 
     def _coarse_geometry(self, band, nd, nt):
-        """(pairs per workgroup, templates per tile, groups, ragged) for the packed coarse kernel.
+        """(subgroup, pairs per workgroup, templates per tile, groups, ragged) for the packed
+        coarse kernel; subgroup 0 is the driver's default size.
 
-        A pair takes band/16 threads, so pairs are packed until a workgroup fills one wave of
-        THIS device. The rule was 512/band -- a wave32 -- and this Radeon runs wave64: band 128
-        filled half of every wave and band 64 a quarter. MF_VK_COARSE_PPG caps it, for
-        measurement.
-
-        A tiled build (TILE_T templates per pair slot) takes RAGGED tiles: each slot covers
-        TILE_T templates of one data row and the row's last tile is clamped inside the kernel,
-        so any template count and any group count work -- the host passes the row count and
-        dispatches ceil(rows * ceil(nt/TILE_T) / PPG) groups. The exact-tile rule it replaces
-        (nt % TILE_T == 0 and pairs % (PPG*TILE_T) == 0) sent every odd template count to the
-        untiled build: 52% of a realistic fine segment's coarse pairs, at 2.5x the cycles per
-        pair. Untiled builds keep exact geometry: the largest built PPG dividing the pair count.
+        The layout -- the subgroup size the pipeline is built at, pairs per workgroup (PPG)
+        and templates per pair slot (TILE_T) -- is this device's measured choice
+        (_coarse_choice). A tiled build takes RAGGED tiles: each slot covers TILE_T
+        templates of one data row and the row's last tile is clamped inside the kernel, so
+        any template count and any group count work -- the host passes the row count and
+        dispatches ceil(rows * ceil(nt/TILE_T) / PPG) groups. Untiled builds keep exact
+        geometry: the largest built PPG up to the chosen one that divides the pair count.
         """
-        wg = max(1, band // 16)
-        want = max(1, int(self.subgroup_size) // wg)
-        # Every build fills the subgroup; MF_VK_COARSE_PPG caps it, for measurement.
-        # There used to be a 4-pair cap on the untiled builds: the 8- and 16-pair builds
-        # "hung the GPU" on an older kernel, and later an untiled call lost every
-        # detection. The second was a binding bug (untiled builds ignored per-row windows,
-        # so their module declared no gRowWin and a grouped call gated everything out),
-        # fixed with a test; with it fixed, untiled 16-pair builds run the realistic ladder
-        # exact in both modes and ~330 back-to-back fine segments without a fault. The
-        # cap had been containing that bug, not a hang.
-        env_cap = int(os.environ.get("MF_VK_COARSE_PPG", "0") or 0)
-        if env_cap:
-            want = min(want, env_cap)
+        sg, ppg, tile = self._coarse_choice(band)
+        if tile > 1:
+            return sg, ppg, tile, coarse_launch(nd, nt, ppg, tile, 0)[1], True
         pairs = nd * nt
+        for p in (32, 16, 8, 4, 2, 1):
+            if p <= ppg and pairs % p == 0 and _spv_shipped(coarse_stem(band, p, 1)):
+                return sg, p, 1, pairs // p, False
+        return sg, 1, 1, pairs, False
 
-        # Device limits, queried: a group of ppg pairs is (band/16)*ppg invocations and
-        # holds ppg padded exchange stages (about 17/16 * band words each).
-        def fits(ppg):
-            return (wg * ppg <= self.max_invocations
-                    and (band * 17 // 16 + 32) * 4 * ppg <= self.max_shared_memory)
-        while want > 1 and not fits(want):
-            want //= 2
-        ppgs = sorted({p for p in (want, 32, 16, 8, 4, 2, 1) if p <= want}, reverse=True)
-        # Tiled: the largest packing with a tiled build, at the tile measured for it here.
-        for ppg in ppgs:
-            tiles = shipped_tiles(band, ppg, _spv_shipped)
-            if tiles:
-                tile = self._coarse_tile(band, ppg, tiles)
-                if tile > 1:
-                    return ppg, tile, coarse_launch(nd, nt, ppg, tile, 0)[1], True
-                break
-        for ppg in ppgs:
-            if pairs % ppg or not _spv_shipped(coarse_stem(band, ppg, 1)):
-                continue
-            return ppg, 1, pairs // ppg, False
-        return 1, 1, pairs, False
-
-    def _coarse_tile(self, band, ppg, tiles):
-        """Templates per pair slot for the coarse kernel at (band, ppg): the fastest of the
-        shipped tiles and the untiled build, timed on this device (the same choice CUDA's
-        _time_coarse makes). Priced, not trialled: a deterministic micro-benchmark, timed
-        once per device and layout and kept in MF_COST_FILE. A tile reuses each thread's data
-        slice across TILE_T templates at the price of registers, so where it pays depends on
-        the device's register file and wave width -- no table tuned on one GPU is right on
-        another. MF_VK_COARSE_TILE forces a tile (1 = untiled), for measurement and tests."""
-        cands = (1,) + tuple(tiles)
+    def _coarse_layouts(self, band):
+        """Every coarse layout (subgroup, ppg, tile) this device can run at this band: the
+        shipped builds whose group fits the device's invocation and shared-memory limits, at
+        each subgroup size it can require (VK_EXT_subgroup_size_control; the default size
+        only, 0, without it). MF_VK_COARSE_PPG caps the packing, MF_VK_COARSE_TILE and
+        MF_VK_COARSE_SUBGROUP fix the tile (1 = untiled) and subgroup, for measurement and
+        tests."""
+        wg = max(1, band // 16)
+        cap = int(os.environ.get("MF_VK_COARSE_PPG", "0") or 0)
+        rng = getattr(self, "subgroup_range", None)
+        sizes = [0]
+        if rng:
+            sizes = [s for s in (4, 8, 16, 32, 64, 128) if rng[0] <= s <= rng[1]]
+        forced_sg = forced_tile("MF_VK_COARSE_SUBGROUP")
+        if forced_sg is not None:
+            sizes = [forced_sg if forced_sg in sizes else sizes[0]]
         forced = forced_tile("MF_VK_COARSE_TILE")
-        if forced is not None:
-            return forced if forced in cands else 1
-        memo = self._device_state.__dict__.setdefault("coarse_tile", {})
-        k = (band, ppg, cands)
+        out = []
+        for ppg in (1, 2, 4, 8, 16, 32):
+            if cap and ppg > cap:
+                continue
+            # A group of ppg pairs is (band/16)*ppg invocations and holds ppg padded
+            # exchange stages (about 17/16 * band words each).
+            if (wg * ppg > self.max_invocations
+                    or (band * 17 // 16 + 32) * 4 * ppg > self.max_shared_memory):
+                continue
+            for tile in (1,) + shipped_tiles(band, ppg, _spv_shipped):
+                if forced is not None and tile != forced:
+                    continue
+                if not _spv_shipped(coarse_stem(band, ppg, tile)):
+                    continue
+                out.extend((sg, ppg, tile) for sg in sizes)
+        if not out:
+            out = [(sizes[0], 1, 1)]
+        return out
+
+    def _coarse_choice(self, band):
+        """The coarse layout (subgroup, ppg, tile) at this band: the fastest of
+        _coarse_layouts on this device, timed once (device timestamps, synthetic data) and
+        kept in MF_COST_FILE -- priced, not trialled: a deterministic micro-benchmark,
+        the choice CUDA's _time_coarse makes. All three are the device's to decide. A fixed
+        tile table (tuned on RDNA) was wrong on every GPU measured, RDNA included; filling
+        one subgroup with pairs was the packing rule; and the subgroup was the driver's
+        default, which on the Iris Xe (8-32 wide) is 32 -- the band-256 coarse kernel ran
+        at ~2.9 us per pair there against ~0.25 us at subgroup 8 or 16."""
+        cands = self._coarse_layouts(band)
+        if len(cands) == 1:
+            return cands[0]
+        memo = self._device_state.__dict__.setdefault("coarse_choice", {})
+        k = (band, tuple(cands))
         if k not in memo:
             from . import gatechain
-            ckey = "vk-coarse-tile|%s|%d|p%d|%s" % (getattr(self, "device_name", ""), band,
-                                                    ppg, ",".join(map(str, cands)))
+            labels = ["%d,%d,%d" % c for c in cands]
+            ckey = "vk-coarse|%s|%d|%s" % (getattr(self, "device_name", ""), band,
+                                           ";".join(labels))
             held = gatechain.stored_choice(ckey)
-            if held in cands:
-                memo[k] = held
+            if held in labels:
+                memo[k] = cands[labels.index(held)]
             else:
-                times = self._time_coarse_tiles(band, ppg, cands)
-                memo[k] = min(cands, key=lambda t: (times[t], t))
-                gatechain.store_choice(ckey, int(memo[k]))
+                times = self._time_coarse_layouts(band, cands)
+                memo[k] = min(times, key=lambda c: (times[c], c[2], c[1], c[0]))
+                gatechain.store_choice(ckey, "%d,%d,%d" % memo[k])
         return memo[k]
 
-    def _time_coarse_tiles(self, band, ppg, cands, pairs=65536, ntm=16, reps=4):
-        """Device ns per pair of each coarse build on synthetic data (min of reps - 1 after
-        a warm-up), in self.coarse_times[band] for reports."""
-        vk, ds = self.vk, self._device_state
+    def _time_coarse_layouts(self, band, cands, pairs=16384, screen=1024, ntm=16, reps=3):
+        """Device ns per pair of each coarse layout on synthetic data (min of reps - 1 after a
+        warm-up), in self.coarse_times[band] for reports. Every candidate is first timed on
+        `screen` pairs and only those within 4x of the fastest are timed on `pairs`: some
+        layouts are pathological on some devices (band 256 at subgroup 32 on the Iris Xe:
+        ~240 us per pair), and a full-size dispatch of one can run long enough for the
+        driver to reset the device."""
         ndm = pairs // ntm
         rng = np.random.default_rng(0)
         x = ((rng.standard_normal((ndm, band)) + 1j * rng.standard_normal((ndm, band)))
@@ -1956,60 +1964,75 @@ class Context(InputUploads):
                 _Buffer(self, pairs * 4), _Buffer(self, pairs * 8)]
         bufs[0].write(x)
         bufs[1].write(_pack_half2(x[:ntm]))
+        ds = self._device_state
         timer = ds.__dict__.get("fuse_timer")
         if timer is None:
             timer = ds.fuse_timer = _DeviceTimer(ds)
-        shift = band.bit_length() - 1
-        out = {}
+        def timed(cs):
+            small = {c: self._time_coarse_layout(band, c, bufs, timer, screen // ntm, ntm, reps)
+                     for c in cs}
+            best = min(small.values())
+            return {c: (self._time_coarse_layout(band, c, bufs, timer, ndm, ntm, reps)
+                        if t <= 4 * best else t) for c, t in small.items()}
         try:
-            for tile in cands:
-                pipe, layout, set_layout = self._build_pipeline(
-                    ("coarse16", band, ppg, tile), coarse_stem(band, ppg, tile) + ".spv",
-                    _NBIND, _PUSH_BYTES, data_stride=band)
-                dset = self._descriptor_set(set_layout, bufs)
-                slot_val, groups = coarse_launch(ndm, ntm, ppg, tile, band)
-                cmd = _vp()
-                _check(vk.vkAllocateCommandBuffers(self.device, ctypes.byref(
-                    _CmdBufAlloc(40, None, self.command_pool, 0, 1)), ctypes.byref(cmd)),
-                    "coarse timing cmd")
-                _check(vk.vkBeginCommandBuffer(cmd, ctypes.byref(_CmdBufBegin(42, None, 0, None))),
-                       "coarse timing begin")
-                vk.vkCmdBindPipeline(cmd, _BIND_POINT_COMPUTE, pipe)
-                vk.vkCmdBindDescriptorSets(cmd, _BIND_POINT_COMPUTE, layout, 0, 1,
-                                           (_vp * 1)(dset), 0, None)
-                pc = (ctypes.c_uint32 * 7)(ntm, 0, band, slot_val, shift, 1, 0)
-                vk.vkCmdPushConstants(cmd, layout, _STAGE_COMPUTE, 0, _PUSH_BYTES,
-                                      ctypes.byref(pc))
-                vk.vkCmdDispatch(cmd, groups, 1, 1)
-                _check(vk.vkEndCommandBuffer(cmd), "coarse timing end")
-                times = []
-                try:
-                    for rep in range(reps):
-                        slot, begin, end = timer.pair()
-                        cmds = (_vp * 3)(begin, cmd, end)
-                        fence = _vp()
-                        _check(vk.vkCreateFence(self.device, ctypes.byref(_FenceCreate(8, None, 0)),
-                                                None, ctypes.byref(fence)), "vkCreateFence")
-                        try:
-                            _check(vk.vkQueueSubmit(self.queue, 1, ctypes.byref(
-                                _SubmitInfo(4, None, 0, None, None, 3, cmds, 0, None)), fence),
-                                "vkQueueSubmit")
-                            _check(vk.vkWaitForFences(self.device, 1, (_vp * 1)(fence), 1,
-                                                      0xFFFFFFFFFFFFFFFF), "vkWaitForFences")
-                        finally:
-                            vk.vkDestroyFence(self.device, fence, None)
-                        if rep:
-                            times.append(timer.ns(slot, self._ts_period))
-                finally:
-                    vk.vkFreeCommandBuffers.argtypes = [_vp, _vp, _u32, ctypes.POINTER(_vp)]
-                    vk.vkFreeCommandBuffers(self.device, self.command_pool, 1, (_vp * 1)(cmd))
-                out[tile] = min(times) / pairs
+            # Staged, because building a pipeline is most of the cost (a tiled build took up
+            # to 50 s on the Iris Xe): every untiled (subgroup, ppg) first, then the tiles at
+            # the two fastest of those.
+            untiled = [c for c in cands if c[2] == 1]
+            out = timed(untiled or cands)
+            if untiled and len(untiled) < len(cands):
+                lead = {c[:2] for c in sorted(out, key=out.get)[:2]}
+                out.update(timed([c for c in cands if c[2] > 1 and c[:2] in lead]))
         finally:
             for b in bufs:
                 b.destroy()
         self.__dict__.setdefault("coarse_times", {}).setdefault(band, {}).update(
-            {coarse_stem(band, ppg, t): v for t, v in out.items()})
+            {"sg%d %s" % (c[0], coarse_stem(band, c[1], c[2])): v for c, v in out.items()})
         return out
+
+    def _time_coarse_layout(self, band, layout_, bufs, timer, ndm, ntm, reps):
+        vk = self.vk
+        sg, ppg, tile = layout_
+        pipe, layout, set_layout = self._build_pipeline(
+            ("coarse16", band, ppg, tile), coarse_stem(band, ppg, tile) + ".spv",
+            _NBIND, _PUSH_BYTES, data_stride=band, subgroup=sg)
+        dset = self._descriptor_set(set_layout, bufs)
+        slot_val, groups = coarse_launch(ndm, ntm, ppg, tile, band)
+        cmd = _vp()
+        _check(vk.vkAllocateCommandBuffers(self.device, ctypes.byref(
+            _CmdBufAlloc(40, None, self.command_pool, 0, 1)), ctypes.byref(cmd)),
+            "coarse timing cmd")
+        times = []
+        try:
+            _check(vk.vkBeginCommandBuffer(cmd, ctypes.byref(_CmdBufBegin(42, None, 0, None))),
+                   "coarse timing begin")
+            vk.vkCmdBindPipeline(cmd, _BIND_POINT_COMPUTE, pipe)
+            vk.vkCmdBindDescriptorSets(cmd, _BIND_POINT_COMPUTE, layout, 0, 1,
+                                       (_vp * 1)(dset), 0, None)
+            pc = (ctypes.c_uint32 * 7)(ntm, 0, band, slot_val, band.bit_length() - 1, 1, 0)
+            vk.vkCmdPushConstants(cmd, layout, _STAGE_COMPUTE, 0, _PUSH_BYTES, ctypes.byref(pc))
+            vk.vkCmdDispatch(cmd, groups, 1, 1)
+            _check(vk.vkEndCommandBuffer(cmd), "coarse timing end")
+            for rep in range(reps):
+                slot, begin, end = timer.pair()
+                cmds = (_vp * 3)(begin, cmd, end)
+                fence = _vp()
+                _check(vk.vkCreateFence(self.device, ctypes.byref(_FenceCreate(8, None, 0)),
+                                        None, ctypes.byref(fence)), "vkCreateFence")
+                try:
+                    _check(vk.vkQueueSubmit(self.queue, 1, ctypes.byref(
+                        _SubmitInfo(4, None, 0, None, None, 3, cmds, 0, None)), fence),
+                        "vkQueueSubmit")
+                    _check(vk.vkWaitForFences(self.device, 1, (_vp * 1)(fence), 1,
+                                              0xFFFFFFFFFFFFFFFF), "vkWaitForFences")
+                finally:
+                    vk.vkDestroyFence(self.device, fence, None)
+                if rep:
+                    times.append(timer.ns(slot, self._ts_period))
+        finally:
+            vk.vkFreeCommandBuffers.argtypes = [_vp, _vp, _u32, ctypes.POINTER(_vp)]
+            vk.vkFreeCommandBuffers(self.device, self.command_pool, 1, (_vp * 1)(cmd))
+        return min(times) / (ndm * ntm)
 
     def _make_hier(self, key, n, band, nd, nt, nbins, binsize, shift, lo, hi,
                    t2, raw_thr, data=None, tmpl=None, clear_out=True, rowwin=None, bands=None):
@@ -2037,7 +2060,7 @@ class Context(InputUploads):
             # PPG = 512/band fills a wave32 where WG < 32. Safe now
             # that the peak reduction is per-pair (see tierb.slang): each
             # lane maxes into its own slot, so tiles cannot mix.
-            _ppg, _tile, _groups, _ragged = self._coarse_geometry(band, nd, nt)
+            _sg, _ppg, _tile, _groups, _ragged = self._coarse_geometry(band, nd, nt)
 
             # TILE_T is COMPILED INTO the kernel, so it is part of kernel
             # identity and must be decided HERE, where the kernel is
@@ -2057,7 +2080,8 @@ class Context(InputUploads):
                     "p%d" % _ppg if _ppg > 1 else "",
                     "t%d" % _tile if _tile > 1 else ""),
                 _NBIND, _PUSH_BYTES, data_stride=bands[0] if bands else n,
-                row_windows=2 if rowwin is not None else 0, full_length=n if bands else 0)
+                row_windows=2 if rowwin is not None else 0, full_length=n if bands else 0,
+                subgroup=_sg)
         # gatedTierB is NOT built. Its only caller was coarse_odd(), the
         # last remnant of the even/odd split, which was never invoked after
         # the odd half was removed -- so the kernel was compiled on every
@@ -2251,14 +2275,15 @@ class Context(InputUploads):
         # of the full spectra, and the refine's survivor rows are recomputed first.
         dstride = bands[0] if bands else n
         flen = n if bands else 0
-        _ppg0, _tile0, _groups0, _ragged0 = self._coarse_geometry(band0, nd, nt)
+        _sg0, _ppg0, _tile0, _groups0, _ragged0 = self._coarse_geometry(band0, nd, nt)
 
         cpipe0, clayout0, cset_layout0 = self._build_pipeline(
             ("coarse16", band0, _ppg0, _tile0),
             "tierb_%d_c16%s%s.spv" % (band0,
                 "p%d" % _ppg0 if _ppg0 > 1 else "",
                 "t%d" % _tile0 if _tile0 > 1 else ""),
-            _NBIND, _PUSH_BYTES, data_stride=dstride, row_windows=rwc, full_length=flen)
+            _NBIND, _PUSH_BYTES, data_stride=dstride, row_windows=rwc, full_length=flen,
+            subgroup=_sg0)
 
         kpipe, klayout, kset_layout = self._build_pipeline(
             "compact", "compact.spv", 3, 12)
