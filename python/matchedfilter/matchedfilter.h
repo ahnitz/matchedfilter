@@ -272,6 +272,9 @@ int ap_hmf_run_series(ap_hmf_plan *p,
    templates), each block is transformed at half size into its full Hermitian spectrum, and
    refines are by transform. Fails (-1) where n/2 has no transform. */
 int ap_hmf_set_real_series(ap_hmf_plan *p, int on);
+/* Floats between a real series' samples: 1, or 2 to read one lane (real or imaginary part)
+   of a complex series in place -- a packed pair of real series. nseries counts samples. */
+int ap_hmf_set_real_stride(ap_hmf_plan *p, size_t stride);
 int ap_hmf_get_real_series(const ap_hmf_plan *p);
 
 /* Sparse output for ap_hmf_run / ap_hmf_run_series (on != 0, counts required): a row

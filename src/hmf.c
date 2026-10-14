@@ -91,6 +91,7 @@ struct ap_hmf_plan {
      transforms each block as n/2 complex ones -- half the transform and half the input --
      then splits that into the block's full (Hermitian) spectrum. */
   int real_series;
+  size_t real_stride;             /* floats between samples: 1, or 2 for a lane of a complex series */
   ap_plan *half_fft;              /* n/2-point transform */
   float *rtw;                     /* [2(n/2+1)] cos, sin of 2 pi k/n */
 };
@@ -498,6 +499,12 @@ int ap_hmf_set_real_series(ap_hmf_plan *p,int on){
     }
   }
   p->real_series=on?1:0;
+  if(!p->real_stride) p->real_stride=1;
+  return 0;
+}
+int ap_hmf_set_real_stride(ap_hmf_plan *p,size_t stride){
+  if(!p || stride<1 || stride>2) return -1;
+  p->real_stride=stride;
   return 0;
 }
 int ap_hmf_get_real_series(const ap_hmf_plan *p){ return p ? p->real_series : 0; }
@@ -511,8 +518,10 @@ static void hmf_forward_real(ap_hmf_plan *p,const float *x,size_t s0,size_t have
   const float inv=1.0f/(float)n;
   float * restrict z=p->fwd;                 /* n reals = h complex */
   float * restrict Z=p->fwd+n;               /* the h-point transform */
-  { const float * restrict src=x+s0;
-    for(size_t k=0;k<have;k++) z[k]=src[k]*inv; }
+  { const size_t st=p->real_stride ? p->real_stride : 1;
+    const float * restrict src=x+s0*st;
+    if(st==1) for(size_t k=0;k<have;k++) z[k]=src[k]*inv;
+    else for(size_t k=0;k<have;k++) z[k]=src[k*st]*inv; }
   if(have<n) memset(z+have,0,(n-have)*sizeof(float));
   ap_fft(p->half_fft,z,Z,AP_FORWARD);
   ap_real_split(Z,p->rtw,n,sp);

@@ -848,6 +848,9 @@ class MatchedFilter:
         if (not np.iscomplexobj(a) and isinstance(self, HierarchicalFilter)
                 and self.device.kind == "cpu" and self.n >= 4
                 and os.environ.get("MF_REAL_SERIES", "1") != "0"):
+            if (isinstance(a, np.ndarray) and a.dtype == np.float32 and a.ndim == 1
+                    and a.strides == (8,) and a.size > 0):
+                return a            # one lane of a complex series, read in place (stride 2)
             return np.ascontiguousarray(a, dtype=np.float32)
         return np.ascontiguousarray(a, dtype=np.complex64)
 
@@ -1246,14 +1249,20 @@ class MatchedFilter:
         shape = (nblk, nt, nb)
         ep = self._execution_plan()
         real = ser.dtype == np.float32
+        stride = 2 if real and ser.strides == (8,) else 1
         held = self.__dict__.get("_ep_real")
         if real or (held is not None and held[0] is ep and held[1]):
-            # The plan reads what it is given: real samples or complex ones.
-            if not ep.set_real_series(real) and real:
-                ser = ser.astype(np.complex64)
-                real = False
+            # The plan reads what it is given: real samples (one lane of a complex series,
+            # stride 2, in place) or complex ones.
+            if not ep.set_real_series(real, stride) and real:
+                ser = np.ascontiguousarray(ser, dtype=np.complex64)
+                real, stride = False, 1
                 ep.set_real_series(False)
             self._ep_real = (ep, real)
+        cser = ser
+        if stride == 2:
+            # The contiguous floats the lane lies in: the C plan reads every second one.
+            cser = np.lib.stride_tricks.as_strided(ser, shape=(2 * ser.size - 1,), strides=(4,))
         if (raw and threshold > 0 and getattr(self, "_want_sparse", False)
                 and hasattr(ep, "run_series_sparse")):
             # Sparse (time_domain asks with _want_sparse): the engine writes peaks only for
@@ -1262,7 +1271,7 @@ class MatchedFilter:
             cnt = getattr(self, "_scnt", None)
             if cnt is None or cnt.size < nblk * nt:
                 cnt = self._scnt = np.empty(nblk * nt, dtype=np.int32)
-            fl, ix, vl, tot = ep.run_series_sparse(ser, st, ws, we, t0, nt, binsize,
+            fl, ix, vl, tot = ep.run_series_sparse(cser, st, ws, we, t0, nt, binsize,
                                                    float(threshold), cnt[:nblk * nt])
             self._last_n_triggers = tot
             sp = _SparsePeaks(shape, np.frombuffer(fl, np.int64), np.frombuffer(ix, np.int64),
@@ -1278,7 +1287,7 @@ class MatchedFilter:
                                    np.empty(0, dtype=np.float32),
                                    np.empty(nblk * nt, dtype=np.int32))
             _, idx, val, mag, cnt = sb
-            tot = self._execution_plan().run_series(ser, st, ws, we, t0, nt, binsize,
+            tot = self._execution_plan().run_series(cser, st, ws, we, t0, nt, binsize,
                                                     float(threshold), idx, val, mag, cnt)
             self._last_n_triggers = tot
             if tot == 0 and layout.order is not None:
@@ -1294,7 +1303,7 @@ class MatchedFilter:
                                    np.empty(0, dtype=np.float32),
                                    np.empty(nblk * nt, dtype=np.int32))
         _, peaks, empty_idx, empty_val, mag, cnt = spbuf
-        tot = self._execution_plan().run_series(ser, st, ws, we, t0, nt, binsize,
+        tot = self._execution_plan().run_series(cser, st, ws, we, t0, nt, binsize,
                                                 float(threshold), empty_idx, empty_val, mag, cnt, peaks)
         self._last_n_triggers = tot
         return _format_result(None, None, raw=False, order=layout.order, out=peaks)

@@ -514,7 +514,8 @@ static PyTypeObject MFType={
    quantity the whole speedup rides on, and the first thing to look at when the
    filter is slower than expected on a particular data set. */
 typedef struct { PyObject_HEAD ap_hmf_plan *p; Py_ssize_t n, k; int nd,nt; ap_peak *peaks; Py_ssize_t peak_capacity;
-                 int real; /* run_series reads a real series (set_real_series) */ } HMFObject;
+                 int real; /* run_series reads a real series (set_real_series) */
+                 int real_stride; /* floats between its samples: 1, or 2 for a complex lane */ } HMFObject;
 
 /* HMF(n, ndata, ntemplates, bands, series_group=8, k=0): a gate chain of coarse
    bands (strictly increasing), then the full refine. Thresholds come from Python. */
@@ -674,7 +675,7 @@ static PyObject *HMF_run_series(HMFObject *self,PyObject *args){
     if(bpk.buf) PyBuffer_Release(&bpk);
     return NULL;
   }
-  size_t nseries=(size_t)(bs.len/(self->real?4:8));
+  size_t nseries=self->real ? ((size_t)(bs.len/4)+(size_t)self->real_stride-1)/(size_t)(self->real_stride?self->real_stride:1) : (size_t)(bs.len/8);
   ap_peak *pk=reserve_peaks(&self->peaks,&self->peak_capacity,need);
   if(!pk){ PyBuffer_Release(&bs);PyBuffer_Release(&bst);PyBuffer_Release(&bws);
            PyBuffer_Release(&bwe);PyBuffer_Release(&bidx);PyBuffer_Release(&bval);
@@ -736,7 +737,7 @@ static PyObject *HMF_run_series_sparse(HMFObject *self,PyObject *args){
   int *cnt=(int*)bcnt.buf;
   Py_BEGIN_ALLOW_THREADS
   ap_hmf_set_sparse(self->p,1);
-  tot=ap_hmf_run_series(self->p,(const float*)bs.buf,(size_t)(bs.len/(self->real?4:8)),
+  tot=ap_hmf_run_series(self->p,(const float*)bs.buf,(self->real ? ((size_t)(bs.len/4)+(size_t)self->real_stride-1)/(size_t)(self->real_stride?self->real_stride:1) : (size_t)(bs.len/8)),
                         (const size_t*)bst.buf,(const size_t*)bws.buf,
                         (const size_t*)bwe.buf,nblocks,t0,nt,(size_t)binsize,
                         (float)thr,pk,cnt);
@@ -840,10 +841,12 @@ static PyObject *HMF_set_taps(HMFObject *self,PyObject *args){
 }
 /* set_real_series(on) -> True if run_series now reads real float32 series. */
 static PyObject *HMF_set_real_series(HMFObject *self,PyObject *args){
-  int on;
-  if(!PyArg_ParseTuple(args,"p",&on)) return NULL;
-  if(ap_hmf_set_real_series(self->p,on)) Py_RETURN_FALSE;
-  self->real=on;
+  int on, stride=1;
+  if(!PyArg_ParseTuple(args,"p|i",&on,&stride)) return NULL;
+  if(stride<1||stride>2){ PyErr_SetString(PyExc_ValueError,"stride must be 1 or 2"); return NULL; }
+  if(ap_hmf_set_real_series(self->p,on) || ap_hmf_set_real_stride(self->p,(size_t)stride))
+    Py_RETURN_FALSE;
+  self->real=on; self->real_stride=stride;
   Py_RETURN_TRUE;
 }
 static PyObject *HMF_set_direct(HMFObject *self,PyObject *args){
@@ -892,7 +895,7 @@ static PyMethodDef HMF_methods[]={
   {"set_q15_tier0",(PyCFunction)HMF_set_q15_tier0,METH_VARARGS,"set_q15_tier0(fp16) -> True if tier 0 behind the Q15 screen now runs on the FP16 gate"},
   {"set_platform_fft",(PyCFunction)HMF_set_platform_fft,METH_VARARGS,"set_platform_fft(on) -> True if block forwards now run through the platform FFT"},
   {"set_taps",(PyCFunction)HMF_set_taps,METH_VARARGS,"set_taps(taps float32 (nt, stride), stride, counts int64 (nt,)): each template's real FIR taps"},
-  {"set_real_series",(PyCFunction)HMF_set_real_series,METH_VARARGS,"set_real_series(on) -> True if run_series now reads real float32 series (half-size block transforms)"},
+  {"set_real_series",(PyCFunction)HMF_set_real_series,METH_VARARGS,"set_real_series(on, stride=1) -> True if run_series now reads real float32 series (half-size block transforms); stride 2 reads one lane of a complex series"},
   {"set_direct",(PyCFunction)HMF_set_direct,METH_VARARGS,"set_direct(on, halfwidth=1) -> True if survivors are now refined by direct correlation where cheaper"},
   {"direct_stats",(PyCFunction)HMF_direct_stats,METH_NOARGS,"direct refine counters and prices"},
   {"set_q15",(PyCFunction)HMF_set_q15,METH_VARARGS,"set_q15(on) -> True if the first tier now runs behind the Q15 screen"},

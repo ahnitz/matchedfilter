@@ -1341,6 +1341,8 @@ class TimeDomainFilterBank:
         hierarchical plan transforms its blocks at half size; anything else is complex64."""
         if (self.complex_taps and self.engine == 'hier' and isinstance(series, np.ndarray)
                 and not np.iscomplexobj(series)):
+            if series.dtype == np.float32 and series.ndim == 1 and series.strides == (8,):
+                return series       # one lane of a complex series (a packed pair), in place
             return np.ascontiguousarray(series, dtype=np.float32)
         return np.ascontiguousarray(series, dtype=np.complex64)
 
