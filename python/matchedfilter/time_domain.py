@@ -431,8 +431,15 @@ class _BlockTrials:
 
     def observe(self, key, value):
         """A steady-state batch of a locked key (s/unit). Reopens the lock when steady state
-        clearly disagrees with the trial. Returns True when it reopened."""
+        clearly disagrees with the trial -- only with the re-check on (MF_TRIAL_RECHECK=1,
+        gatechain.recheck_enabled): off, as by default, a stored lock is final, as chain and
+        Q15 locks are. Returns True when it reopened."""
         from . import _log_autotune, gatechain
+        if not gatechain.recheck_enabled():
+            # One process's steady timing reopening the lock for every later one let two
+            # processes sharing a cost file end on different block sizes
+            # (test_reproducible_choices[gpu:0], 1 of 5 gate runs on gravity-dev2).
+            return False
         st = self._st(key)
         w, med = st["winner"], st["median"]
         if w is None or not med or w not in med or st["reopened"]:
@@ -1434,7 +1441,7 @@ class TimeDomainFilterBank:
                       if _gc._cost_file() is not None and _autotune_enabled() else 1)
                 # Locked or trialling, a bank whose block size is a measured choice keeps its
                 # batches timed for the re-check (_BlockTrials.observe).
-                self._trial_monitor = nr > 1
+                self._trial_monitor = nr > 1 and _gc.recheck_enabled()
                 w = _BLOCK_TRIALS.winner(_trial_key(self)) if nr > 1 else None
                 cands = _stored_cands(self) if w else None
                 if w == 0 or (w and cands and w < len(cands)):
