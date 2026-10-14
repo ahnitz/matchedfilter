@@ -82,12 +82,14 @@ def test_tiles_match_untiled_and_fail_open(ctx, band):
     t = (rng.standard_normal((nt, band)) + 1j * rng.standard_normal((nt, band))).astype(np.complex64)
     x[1] *= 1e5                              # overflows fp16 in the transform
     rngs = getattr(ctx, "subgroup_range", None)
-    # Every size the layout choice can pick (_coarse_layouts), the default first.
+    # Every size the device can be required to run, the default first. The reference is the
+    # untiled build at the DEFAULT size: on the Iris Xe every build at 8 and 16 went wrong
+    # together, so a same-size reference could not see it.
     sizes = [0] + ([s for s in (4, 8, 16, 32, 64) if rngs[0] <= s < ctx.subgroup_size]
                    if rngs else [])
+    ref_idx, ref_val = _coarse(ctx, band, 1, x, t, 0)
     for sg in sizes:
-        ref_idx, ref_val = _coarse(ctx, band, 1, x, t, sg)
-        for tile in tiles:
+        for tile in (1,) + tuple(tiles):
             idx, val = _coarse(ctx, band, tile, x, t, sg)
             where = "band %d tile %d subgroup %d" % (band, tile, sg or ctx.subgroup_size)
             # The loud row must pass the gate: a listed peak, its value not below any
@@ -101,3 +103,59 @@ def test_tiles_match_untiled_and_fail_open(ctx, band):
                 assert np.isfinite(val[r]).all(), "%s: row %d values %s" % (where, r, val[r])
                 np.testing.assert_allclose(val[r], ref_val[r], rtol=2e-2, atol=1.0,
                                            err_msg=where)
+
+
+@pytest.mark.parametrize("band", [128, 256, 512, 1024])
+def test_transient_fails_open_in_every_layout(ctx, band, monkeypatch):
+    """gate_margin's transient family through the production path (hier_peaks, the band read
+    out of n-point spectra), in every layout the coarse choice can take -- each subgroup size
+    the device allows, each packing and tile, forced: a loud broadband burst in the data and
+    templates scaled so every pair's exact maximum is K, so a gate at 0.999 K must pass every
+    pair."""
+    from matchedfilter import _vkcompute as V
+    n, nt = 4096, 16
+    rng = np.random.default_rng(band + 7)
+    burst = np.zeros(band, complex)
+    t0 = int(rng.integers(0, band - 8))
+    burst[t0:t0 + 8] = 200.0 * np.exp(1j * np.linspace(0, 6, 8))
+    D = (rng.standard_normal(band) + 1j * rng.standard_normal(band)) + np.fft.fft(burst)
+    T = rng.standard_normal((nt, band)) + 1j * rng.standard_normal((nt, band))
+    exact = np.abs(np.fft.ifft(D[None] * np.conj(T), axis=1) * band).max(1)
+    # Every pair's exact maximum is K = 32, inside fp16's comfortable range: at gate_margin's
+    # K = 1 the templates are ~5e-5, subnormal in fp16, and a device that flushes fp16
+    # subnormals (the Iris Xe; AMD, NVIDIA and Apple keep them) dismisses the pairs in every
+    # layout alike -- a range question for the packing (docs/cross-platform-review.md
+    # section 11), not for the layouts this test is about.
+    K = 32.0
+    T = T / exact[:, None] * K
+    data = (np.random.default_rng(0).standard_normal((1, n)) * 1e-3).astype(np.complex64)
+    data[0, :band] = D
+    tmpl = np.zeros((nt, n), np.complex64)
+    tmpl[:, :band] = T
+    ct0 = np.ascontiguousarray(tmpl[:, :band])
+    rngs = getattr(ctx, "subgroup_range", None)
+    sizes = [ctx.subgroup_size] + ([s for s in (8, 16, 32, 64) if rngs[0] <= s < ctx.subgroup_size]
+                                   if rngs else [])
+    for sg in sizes:
+        for ppg in (1, 2, 4, 8, 16):
+            for tile in (1,) + V.shipped_tiles(band, ppg, V._spv_shipped):
+                if not V._spv_shipped(V.coarse_stem(band, ppg, tile)):
+                    continue
+                monkeypatch.setenv("MF_VK_COARSE_SUBGROUP", str(sg))
+                monkeypatch.setenv("MF_VK_COARSE_PPG", str(ppg))
+                monkeypatch.setenv("MF_VK_COARSE_TILE", str(tile))
+                c = V.Context(0)              # recorded plans are cached per context, not per layout
+                try:
+                    idx, _ = c.hier_peaks(n, band, data, tmpl, ct0, 0.999 * K, binsize=n, threshold=0.0)
+                    geom = c._coarse_geometry(band, 1, nt)
+                finally:
+                    c.destroy()
+                where = "band %d subgroup %d ppg %d tile %d (ran %s)" % (band, sg, ppg, tile, geom[:3])
+                lost = int((idx.reshape(nt) < 0).sum())
+                if lost and band >= 1024 and getattr(ctx, "_accurate_trig", False):
+                    # Intel (the only vendor the trig switch flags): the fp16 bound's kappa,
+                    # measured on AMD, falls short at band 1024 in every layout, the device's
+                    # default included, and on code before the layout choice
+                    # (docs/cross-platform-review.md section 11). Open; reported, not hidden.
+                    pytest.xfail("%s: %d of %d dismissed -- Intel fp16 bound at band 1024" % (where, lost, nt))
+                assert not lost, "%s: gate dismissed %d of %d pairs" % (where, lost, nt)

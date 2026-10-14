@@ -632,6 +632,24 @@ and `peakTwoWave`'s scaled energy. `tests/test_vk_coarse_tiles.py` runs every ti
 every subgroup size the device allows; on the old band-1024 build at subgroup 32 it fails
 (loud row all -1).
 
+**Intel fp16 coarse gate: two open correctness gaps, older than this work.** `gate_margin
+--loud` fails on the Iris Xe -- on main before the layout choice (5241d2c5) exactly as after,
+and at every subgroup size alike:
+1. *fp16 subnormals are flushed.* The transient family scales templates so each pair's
+   exact maximum is 1: ~5e-5, subnormal in fp16. AMD, NVIDIA and Apple keep subnormals; the
+   Iris Xe flushes them and the pairs are dismissed (226-256 of 256). Scaled by 2^10 every
+   build passes. Production templates (order 1) and data spectra (~0.02) sit far above the
+   normal minimum, and `ladder --check` is exact on dev4, but a gate must not depend on
+   that: pack each spectrum scaled by a power of two into fp16's range and undo it exactly,
+   as the CPU fp16 gate does (gate16.cc).
+2. *The bound's kappa is short at band 1024.* Injections show slack down to -0.08 and, with
+   templates in range, 5 of 16 transient pairs at band 1024 are dismissed in the device's
+   default layout. kappa (tools/coarse_layout.py C16_KAPPA) was measured on AMD; Intel's
+   fp16 arithmetic rounds differently. Measure it per vendor (tools/metal_c16_sigma.py's
+   method) or derive it from the device.
+`tests/test_vk_coarse_tiles.py::test_transient_fails_open_in_every_layout` keeps templates in
+range (K = 32) and reports gap 2 as an expected failure on Intel.
+
 **Still frozen (next):** every other Vulkan pipeline is built at the device's default subgroup
 (`_build_pipeline` requires `self.subgroup_size` whenever a range exists), so on the Iris Xe
 the forward, refine and follow-up kernels all run at SIMD32. `LDS_CAP`, `COARSE_BANDS`,
