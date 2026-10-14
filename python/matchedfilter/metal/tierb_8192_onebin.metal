@@ -1355,49 +1355,49 @@ void filterPair_0(uint pair_0, uint tid_1, packed_float2 device* data_0, packed_
 #line 991
     }
 
-#line 1206
+#line 1204
     return;
 }
 
 
-#line 1676
+#line 1674
 [[kernel]] void fusedTierB(uint3 gid_0 [[threadgroup_position_in_grid]], uint3 lid_0 [[thread_position_in_threadgroup]], EntryPointParams_0 constant* entryPointParams_1 [[buffer(0)]], packed_float2 device* entryPointParams_data_1 [[buffer(1)]], packed_float2 device* entryPointParams_tmpl_1 [[buffer(2)]], int device* entryPointParams_peakIdx_1 [[buffer(3)]], packed_float2 device* entryPointParams_peakVal_1 [[buffer(4)]])
 {
 
-#line 1676
+#line 1674
     thread KernelContext_0 kernelContext_3;
 
-#line 1676
+#line 1674
     (&kernelContext_3)->entryPointParams_0 = entryPointParams_1;
 
-#line 1676
+#line 1674
     (&kernelContext_3)->entryPointParams_data_0 = entryPointParams_data_1;
 
-#line 1676
+#line 1674
     (&kernelContext_3)->entryPointParams_tmpl_0 = entryPointParams_tmpl_1;
 
-#line 1676
+#line 1674
     (&kernelContext_3)->entryPointParams_peakIdx_0 = entryPointParams_peakIdx_1;
 
-#line 1676
+#line 1674
     (&kernelContext_3)->entryPointParams_peakVal_0 = entryPointParams_peakVal_1;
 
-#line 1676
+#line 1674
     threadgroup array<uint, int(8192)> stg_1;
 
-#line 1676
+#line 1674
     (&kernelContext_3)->stg_0 = &stg_1;
 
-#line 1693
+#line 1691
     uint _pr_0 = gid_0.x;
 
-#line 1693
+#line 1691
     uint _t_0 = lid_0.x;
     (&kernelContext_3)->_stgBase_0 = 0U;
 
-#line 1694
+#line 1692
     filterPair_0(_pr_0, _t_0, entryPointParams_data_1, entryPointParams_tmpl_1, entryPointParams_peakIdx_1, entryPointParams_peakVal_1, entryPointParams_1->ntmpl_0, entryPointParams_1->winStart_0, entryPointParams_1->winEnd_0, entryPointParams_1->binsize_0, entryPointParams_1->binShift_0, entryPointParams_1->nbins_0, entryPointParams_1->thrBits_0, &kernelContext_3);
 
-#line 1702
+#line 1700
     return;
 }

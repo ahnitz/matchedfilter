@@ -245,7 +245,7 @@ uint computeWant_0(uint d_1, uint TB_0, uint len_0, uint blk_0, uint lane_0, uin
 }
 
 
-#line 1986
+#line 1984
 struct EntryPointParams_0
 {
     uint4 params_0;
@@ -763,42 +763,42 @@ uint slotToIndex_0(uint slot_0)
 }
 
 
-#line 1986
+#line 1984
 [[kernel]] void tcFullSeriesStage3(uint3 gid_0 [[threadgroup_position_in_grid]], uint3 lid_0 [[thread_position_in_threadgroup]], EntryPointParams_0 constant* entryPointParams_1 [[buffer(0)]], packed_float2 device* entryPointParams_scratch_1 [[buffer(1)]], uint device* entryPointParams_starts_1 [[buffer(2)]], packed_float2 device* entryPointParams_output_1 [[buffer(3)]])
 {
 
-#line 1986
+#line 1984
     thread KernelContext_0 kernelContext_4;
 
-#line 1986
+#line 1984
     (&kernelContext_4)->entryPointParams_0 = entryPointParams_1;
 
-#line 1986
+#line 1984
     (&kernelContext_4)->entryPointParams_scratch_0 = entryPointParams_scratch_1;
 
-#line 1986
+#line 1984
     (&kernelContext_4)->entryPointParams_starts_0 = entryPointParams_starts_1;
 
-#line 1986
+#line 1984
     (&kernelContext_4)->entryPointParams_output_0 = entryPointParams_output_1;
 
-#line 1986
+#line 1984
     threadgroup array<uint, int(1024)> stg_1;
 
-#line 1986
+#line 1984
     (&kernelContext_4)->stg_0 = &stg_1;
 
-#line 1991
+#line 1989
     uint _S26 = gid_0.x;
 
-#line 1991
+#line 1989
     uint pair_0 = _S26 / 512U;
 
-#line 1991
+#line 1989
     uint _S27 = _S26 % 512U;
     uint d_3 = pair_0 / entryPointParams_1->params_0.x;
 
-#line 1992
+#line 1990
     uint _S28 = pair_0 % entryPointParams_1->params_0.x;
     uint _S29 = (&kernelContext_4)->entryPointParams_starts_0[d_3];
     uint tid_1 = lid_0.x;
@@ -806,111 +806,111 @@ uint slotToIndex_0(uint slot_0)
     (&kernelContext_4)->_stgBase_0 = 0U;
     thread array<float2, int(16)> r_5;
 
-#line 1997
+#line 1995
     uint m_1 = 0U;
     for(;;)
     {
 
-#line 1998
+#line 1996
         if(m_1 < 16U)
         {
         }
         else
         {
 
-#line 1998
+#line 1996
             break;
         }
 
-#line 1999
+#line 1997
         r_5[m_1] = float2(*((&kernelContext_4)->entryPointParams_scratch_0+(pair_0 * 262144U + _S27 * 512U + tid_1 + 32U * m_1))) ;
 
-#line 1998
+#line 1996
         m_1 = m_1 + 1U;
 
-#line 1998
+#line 1996
     }
 
-#line 1998
+#line 1996
     transform_0(&r_5, tid_1, &kernelContext_4);
 
-#line 1998
+#line 1996
     uint i_3 = 0U;
 
 
     for(;;)
     {
 
-#line 2001
+#line 1999
         if(i_3 < 16U)
         {
         }
         else
         {
 
-#line 2001
+#line 1999
             break;
         }
 
-#line 2002
+#line 2000
         uint lag_0 = slotToIndex_0(tid_1 * 16U + i_3) * 512U + _S27;
 
-#line 2002
+#line 2000
         bool _S30;
         if(lag_0 >= (entryPointParams_1->params_0.z))
         {
 
-#line 2003
+#line 2001
             _S30 = lag_0 < (entryPointParams_1->params_0.w);
 
-#line 2003
+#line 2001
         }
         else
         {
 
-#line 2003
+#line 2001
             _S30 = false;
 
-#line 2003
+#line 2001
         }
 
-#line 2003
+#line 2001
         bool _S31;
 
-#line 2003
+#line 2001
         if(_S30)
         {
 
-#line 2003
+#line 2001
             _S31 = lag_0 < (entryPointParams_1->params_0.y - _S29);
 
-#line 2003
+#line 2001
         }
         else
         {
 
-#line 2003
+#line 2001
             _S31 = false;
 
-#line 2003
+#line 2001
         }
 
-#line 2003
+#line 2001
         if(_S31)
         {
 
-#line 2003
+#line 2001
             *((&kernelContext_4)->entryPointParams_output_0+(_S28 * entryPointParams_1->params_0.y + _S29 + lag_0)) = packed_float2(float2(r_5[i_3].x, r_5[i_3].y)) ;
 
-#line 2003
+#line 2001
         }
 
-#line 2001
+#line 1999
         i_3 = i_3 + 1U;
 
-#line 2001
+#line 1999
     }
 
-#line 2006
+#line 2004
     return;
 }
