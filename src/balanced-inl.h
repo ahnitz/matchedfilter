@@ -19,6 +19,7 @@
 #include "elemfft-inl.h"
 #include "q15-inl.h"
 #include "td-inl.h"
+#include "rsplit-inl.h"
 
 #if defined(AP_BALANCED_INL_H_) == defined(HWY_TARGET_TOGGLE)
 #ifdef AP_BALANCED_INL_H_
@@ -1705,7 +1706,7 @@ const ap_backend *Backend(void){
     create, destroy, fft, supported,
     binmax, binmax_split, has_prod, split, binmax_prod, corr_prod, corr_split, series_buf, series_stride, interp_max,
     pairbatch, binmax_prod_batch, binmax_prod_batch_lanes, corr_prod_batch, create_small, broadcast_data, (AP_W==8 || AP_W==16) ? binmax_prod_threshold : nullptr,
-    q15_lanes, q15_screen, td_corr
+    q15_lanes, q15_screen, td_corr, real_split
   };
   return &be;
 }

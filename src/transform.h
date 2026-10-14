@@ -38,6 +38,10 @@ void ap_fft(ap_plan *p, const float *in, float *out, int sign);
    lags: out[i] = sum_{k<L} taps[k] x[i+k] (td-inl.h). x holds nlag + L - 1 samples. */
 void ap_td_corr(const float *x, const float *taps, int L, int nlag, float *out);
 
+/* A real block's full n-point spectrum X from Z, the n/2-point transform of its samples read
+   as n/2 complex ones; tw: cos, sin of 2 pi k/n for k = 0 .. n/2 (rsplit-inl.h). */
+void ap_real_split(const float *Z, const float *tw, size_t n, float *X);
+
 /* The platform's FFT for the block forward (fft_accel.c): NULL where there is none. */
 typedef struct ap_accel ap_accel;
 ap_accel *ap_accel_create(size_t n);
