@@ -237,6 +237,21 @@ def test_a_lock_steady_state_contradicts_is_reopened(monkeypatch, tmp_path):
     assert td._BlockTrials().winner("k") == 1
 
 
+def test_a_lock_is_final_without_the_recheck(monkeypatch, tmp_path):
+    """By default (MF_TRIAL_RECHECK unset) steady state never reopens a block-size lock: a
+    lock reopened from one process's timing let two processes sharing a cost file end on
+    different block sizes."""
+    monkeypatch.delenv("MF_TRIAL_RECHECK", raising=False)
+    monkeypatch.setenv("MF_COST_FILE", str(tmp_path / "costs.json"))
+    timer = _FakeTimer({0: 1.0, 1: 0.7, 2: 1.3}, {r: [0.0, 0.01] for r in range(3)})
+    tr = td._BlockTrials()
+    assert _drive(tr, "k", timer) == 1
+    fresh = td._BlockTrials()
+    for _ in range(4 * gatechain.RECHECK_N):
+        assert not fresh.observe("k", 1.5)                # far slower: still not reopened
+    assert td._BlockTrials().winner("k") == 1
+
+
 class _FakeBank:
     def __init__(self, calibrating):
         self._layouts = [object(), object()]

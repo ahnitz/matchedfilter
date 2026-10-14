@@ -28,6 +28,11 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ### Fixed
 
+- A block-size lock could still be reopened from one process's steady-state timing with the
+  re-check off (its default since 0.1.0a7, as for chain and Q15 locks), so two processes
+  sharing an `MF_COST_FILE` could end on different block sizes
+  (`test_reproducible_choices[gpu:0]`, 1 of 5 gate runs). The block-size re-check now
+  runs only with `MF_TRIAL_RECHECK=1`.
 - Vulkan fp16 coarse tier on GPUs that flush fp16 subnormals (Intel Iris Xe): templates or
   data far from unit scale were flushed to zero and every pair dismissed (`gate_margin
   --gate gpu-c16`: the transient family at every band, injections at 256-1024). The tier
