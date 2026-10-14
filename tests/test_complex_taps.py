@@ -138,3 +138,38 @@ def test_a_real_series_is_transformed_at_half_size_exactly(pack, monkeypatch):
     np.testing.assert_array_equal(t0, t1)
     np.testing.assert_array_equal(s0, s1)
     np.testing.assert_allclose(z1, z0, rtol=1e-4, atol=1e-4 * np.abs(z0).max())
+
+
+def test_a_lane_of_a_complex_series_is_read_in_place():
+    """A real series that is one lane (real or imaginary part) of a complex array -- a packed
+    pair of real middle series -- is filtered in place, with exactly the results of the same
+    series made contiguous."""
+    rng = np.random.default_rng(9)
+    counts = list(rng.integers(150, 401, 12))
+    taps, w, df = _quadrature_bank(rng, counts)
+    L = 1 << 17
+    a = rng.standard_normal(L).astype(np.float32)
+    b = rng.standard_normal(L).astype(np.float32)
+    for x in (a, b):
+        for j, i in enumerate(range(0, len(counts), 3)):
+            c = counts[i]
+            pos = 10000 + j * (L - 20000) // 5
+            x[pos:pos + c] += 25.0 * np.real(taps[i, :c][::-1]) / np.linalg.norm(taps[i, :c])
+    packed = (a + 1j * b).astype(np.complex64)
+    bank = TimeDomainFilterBank(taps, tap_counts=counts, engine="hier", threshold=5.5,
+                                binsize=2048, coarse_band_hz=(128.0, 256.0))
+    bank.set_reference(w, delta_f=df)
+
+    def run(x):
+        r = bank.filter_series(x)
+        order = np.lexsort((r.sample_indices, r.template_indices))
+        return r.template_indices[order], r.sample_indices[order], r.snr[order]
+
+    for lane, ref in ((packed.real, a), (packed.imag, b)):
+        assert lane.strides == (8,)
+        t0, s0, z0 = run(np.ascontiguousarray(ref))
+        t1, s1, z1 = run(lane)
+        assert z0.size > 3
+        np.testing.assert_array_equal(t0, t1)
+        np.testing.assert_array_equal(s0, s1)
+        np.testing.assert_array_equal(z0, z1)
