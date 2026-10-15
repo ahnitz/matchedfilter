@@ -199,3 +199,9 @@ Stage 5's lessons land inside the stages that touch them. Each stage merges in g
   - New `test_coarse_ragged_groups.py` covers every backend. Vulkan SPIR-V is unchanged.
   - L40S: 41 + 131 tests pass, checks exact. M2: 1829 pass, checks exact. Paired
     throughput is measured once at the end of stage 1.
+- 2026-10-15: **Stage 1b (one coarse-choice engine).**
+  - `_coarse.stored_measured_choice` handles the memo, cost-file key with kernel id,
+    stored lock, unmeasurable fallback and deterministic tie-break.
+  - `_coarse.time_staged` handles staged screen and full timing, interleaved, with a paired
+    confirmation of each stage's best.
+  - Vulkan, CUDA and Metal supply only candidates, labels and a single-dispatch timer.

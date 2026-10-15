@@ -363,3 +363,39 @@ def test_interleaved_rounds_take_each_candidates_best_round():
     assert calls == ["a", "b", "b", "a", "a", "b"]          # the order reverses each round
     assert t == {"a": 3.0, "b": 1.0}
     assert _coarse.interleaved_min(["a"], lambda c: None, 2) is None
+
+
+def test_stored_measured_choice_measures_once_stores_and_breaks_ties(monkeypatch, tmp_path):
+    """Every backend's coarse choice (_coarse.stored_measured_choice): the fastest is stored
+    under its label and the kernels' identity; a later process reads it back untimed; an
+    unmeasurable device runs the first candidate, unstored; ties break deterministically."""
+    from matchedfilter import _coarse
+    monkeypatch.setenv("MF_COST_FILE", str(tmp_path / "c.json"))
+    calls = []
+
+    def measure(cs):
+        calls.append(list(cs))
+        return {"a": 2.0, "b": 1.0, "c": 1.0}
+    pick = lambda memo: _coarse.stored_measured_choice(
+        memo, "t-kind", "dev", 256, ["a", "b", "c"], str, "k1", measure,
+        tiebreak=lambda c: (-ord(c),))
+    assert pick({}) == "c" and len(calls) == 1          # tie b/c broken by the tiebreak
+    assert pick({}) == "c" and len(calls) == 1          # a new process: read back, untimed
+    memo = {}
+    assert _coarse.stored_measured_choice(memo, "t-kind", "dev", 256, ["a", "b"], str, "k2",
+                                          lambda cs: None) == "a"   # unmeasurable: first
+    assert _coarse.stored_measured_choice(memo, "t-kind", "dev", 256, ["a", "b"], str, "k2",
+                                          measure) == "a"          # memo by labels
+
+
+def test_time_staged_offers_later_stages_the_earlier_times():
+    from matchedfilter import _coarse
+    true = {"u1": 1.0, "u2": 2.0, "t1": 0.5, "t2": 3.0}
+    seen = []
+
+    def stage2(times):
+        seen.append(dict(times))
+        return ["t1", "t2"] if min(times, key=times.get) == "u1" else []
+    out = _coarse.time_staged([["u1", "u2"], stage2], lambda c: true[c],
+                              time_screen=lambda c: true[c], rounds=2)
+    assert set(seen[0]) == {"u1", "u2"} and min(out, key=out.get) == "t1"

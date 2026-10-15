@@ -1579,31 +1579,20 @@ class Context(InputUploads):
         tiles and the untiled build, timed on this device and kept in MF_COST_FILE (the
         choice the Vulkan and CUDA hosts make; priced, not trialled -- a deterministic
         micro-benchmark). Whether a tile's register reuse pays depends on the device."""
-        cands = (1,) + tuple(tiles)
-        memo = self.__dict__.setdefault("_coarse_tiles", {})
-        k = (band, ppg, cands)
-        if k not in memo:
-            from . import gatechain
-            ckey = "mtl-coarse-tile|%s|%d|p%d|%s|k%s" % (getattr(self, "name", ""), band, ppg,
-                                                        ",".join(map(str, cands)),
-                                                        gatechain.gpu_kernel_id("metal"))
-            held = gatechain.stored_choice(ckey)
-            if held in cands:
-                memo[k] = held
-            else:
-                times = self._time_coarse_tiles(band, ppg, cands)
-                if times is None:
-                    memo[k] = cands[1]              # unmeasurable here: the smallest tile, unstored
-                else:
-                    memo[k] = min(cands, key=lambda t: (times[t], t))
-                    gatechain.store_choice(ckey, int(memo[k]))
-        return memo[k]
+        from . import gatechain
+        from ._coarse import stored_measured_choice
+        return stored_measured_choice(
+            self.__dict__.setdefault("_coarse_tiles", {}), "mtl-coarse-tile|p%d" % ppg,
+            # The smallest tile first: it is what a device without timestamps runs.
+            getattr(self, "name", ""), band, list(tiles[:1]) + [1] + list(tiles[1:]), str,
+            gatechain.gpu_kernel_id("metal"),
+            lambda cs: self._time_coarse_tiles(band, ppg, cs), tiebreak=lambda t: (t,))
 
     def _time_coarse_tiles(self, band, ppg, cands, pairs=65536, ntm=16, reps=4):
         """Device seconds per pair of each coarse build on synthetic data (a warm-up, reps - 1
         interleaved rounds and a paired confirmation of the contenders: _coarse), in
         self.coarse_times[band] for reports."""
-        from ._coarse import coarse_launch, coarse_stem, confirm_fastest, interleaved_min
+        from ._coarse import coarse_launch, coarse_stem, time_staged
         ndm = pairs // ntm
         rng = np.random.default_rng(0)
         x = (rng.standard_normal((ndm, band)) + 1j * rng.standard_normal((ndm, band))) * 0.1
@@ -1652,8 +1641,7 @@ class Context(InputUploads):
             for tile in cands:
                 if time_one(tile) is None:
                     return None
-            times = interleaved_min(list(cands), time_one, reps - 1)
-            times = None if times is None else confirm_fastest(times, time_one)
+            times = time_staged([list(cands)], time_one, rounds=reps - 1)
             if times is None:
                 return None
             out = {t: v / pairs for t, v in times.items()}
