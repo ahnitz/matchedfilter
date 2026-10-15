@@ -22,7 +22,7 @@ import threading
 
 import numpy as np
 
-from ._coarse import TILE_PROBE, coarse_launch, confirm_fastest, interleaved_min
+from ._coarse import TILE_PROBE, coarse_launch, stored_measured_choice, time_staged
 from . import _cuda, _gputime
 from ._cuda import check_cuda
 from ._errors import UnsupportedSize
@@ -1867,18 +1867,13 @@ class Context(InputUploads):
             ent[1] = raw
 
     def _time_coarse(self, band, cands):
-        """The fastest of the coarse variants on synthetic data (device time, min of 3); a
-        choice already made on this machine (gatechain.stored_choice) is reused untimed."""
+        """The fastest of the coarse variants on synthetic data, the choice every backend makes
+        (_coarse.stored_measured_choice): measured once, kept in MF_COST_FILE."""
         from . import gatechain
-        labels = [self._labels.get(c[0].value, "") for c in cands]
-        ckey = "cuda-coarse|%s|%d|%s|k%s" % (getattr(self, "name", ""), int(band),
-                                            ",".join(sorted(labels)), gatechain.gpu_kernel_id("cuda"))
-        held = gatechain.stored_choice(ckey)
-        if held in labels:
-            return cands[labels.index(held)]
-        best = self._time_coarse_measure(band, cands)
-        gatechain.store_choice(ckey, self._labels.get(best[0].value, ""))
-        return best
+        return stored_measured_choice(
+            self.__dict__.setdefault("_coarse_memo", {}), "cuda-coarse", getattr(self, "name", ""),
+            int(band), list(cands), lambda c: self._labels.get(c[0].value, ""),
+            gatechain.gpu_kernel_id("cuda"), lambda cs: self._time_coarse_measure(band, cs))
 
     def _time_coarse_measure(self, band, cands):
         P, ntm = 65536, 16
@@ -1893,8 +1888,8 @@ class Context(InputUploads):
         e0, e1 = self._new_event_timed(), self._new_event_timed()
         ms = ctypes.c_float()
 
-        def time_one(i):
-            fn, wg, ppg, tile = cands[i]
+        def time_one(c):
+            fn, wg, ppg, tile = c
             check_cuda(self.cuda.cuEventRecord(e0, st), "cuEventRecord")
             grid, rowarg = self._coarse_grid_for(fn, ndm, ntm, ppg, tile)
             self._launch(fn, grid, wg,
@@ -1910,17 +1905,12 @@ class Context(InputUploads):
             return ms.value
 
         try:
-            # A warm-up launch each, then interleaved rounds and a paired confirmation of
-            # the contenders (_coarse: the GPU may be shared).
-            idx = list(range(len(cands)))
-            for i in idx:
-                time_one(i)
-            times = confirm_fastest(interleaved_min(idx, time_one, 3), time_one)
-            for i, t in times.items():
+            for c in cands:                 # a warm-up launch each (module load, first launch)
+                time_one(c)
+            times = time_staged([cands], time_one)
+            for c, t in times.items():
                 self.__dict__.setdefault("coarse_times", {}).setdefault(band, {})[
-                    self._labels.get(cands[i][0].value, "")] = t * 1e6 / P   # ns per pair, for reports
-            i = min(times, key=times.get)
-            best = (times[i],) + tuple(cands[i])
+                    self._labels.get(c[0].value, "")] = t * 1e6 / P   # ns per pair, for reports
         finally:
             self._sync(st)              # resolves any timed regions of the launches above
             if self._timing:            # the calibration is not the caller's work
@@ -1929,7 +1919,7 @@ class Context(InputUploads):
                 b.destroy()
             for e in (e0, e1):
                 self.cuda.cuEventDestroy_v2(e)
-        return best[1:]
+        return times
 
     def _new_event_timed(self):
         e = ctypes.c_void_p()

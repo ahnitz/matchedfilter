@@ -183,7 +183,7 @@ def _pow2_scaled(a, e):
 
 
 from ._coarse import coarse_launch   # noqa: E402,F401  (shared with Metal; re-exported)
-from ._coarse import confirm_fastest, interleaved_min   # noqa: E402
+from ._coarse import stored_measured_choice, time_staged   # noqa: E402
 from ._coarse import coarse_stem, shipped_tiles, forced_tile   # noqa: E402
 
 
@@ -2111,24 +2111,12 @@ class Context(InputUploads):
         one subgroup with pairs was the packing rule; and the subgroup was the driver's
         default, which on the Iris Xe (8-32 wide) is 32 -- the band-256 coarse kernel ran
         at ~2.9 us per pair there against ~0.25 us at subgroup 8 or 16."""
-        cands = self._coarse_layouts(band)
-        if len(cands) == 1:
-            return cands[0]
-        memo = self._device_state.__dict__.setdefault("coarse_choice", {})
-        k = (band, tuple(cands))
-        if k not in memo:
-            from . import gatechain
-            labels = ["%d,%d,%d,%d" % c for c in cands]
-            ckey = "vk-coarse|%s|%d|%s|k%s" % (getattr(self, "device_name", ""), band,
-                                              ";".join(labels), gatechain.gpu_kernel_id())
-            held = gatechain.stored_choice(ckey)
-            if held in labels:
-                memo[k] = cands[labels.index(held)]
-            else:
-                times = self._time_coarse_layouts(band, cands)
-                memo[k] = min(times, key=lambda c: (times[c], c[2], c[1], c[0]))
-                gatechain.store_choice(ckey, "%d,%d,%d,%d" % memo[k])
-        return memo[k]
+        from . import gatechain
+        return stored_measured_choice(
+            self._device_state.__dict__.setdefault("coarse_choice", {}), "vk-coarse",
+            getattr(self, "device_name", ""), band, self._coarse_layouts(band),
+            lambda c: "%d,%d,%d,%d" % c, gatechain.gpu_kernel_id(),
+            lambda cs: self._time_coarse_layouts(band, cs), tiebreak=lambda c: (c[2], c[1], c[0]))
 
     def _time_coarse_layouts(self, band, cands, pairs=16384, screen=1024, ntm=16, reps=3):
         """Device ns per pair of each coarse layout on synthetic data, in
@@ -2152,28 +2140,18 @@ class Context(InputUploads):
         if timer is None:
             timer = ds.fuse_timer = _DeviceTimer(ds)
         full = lambda c: self._time_coarse_layout(band, c, bufs, timer, ndm, ntm, 2)
-        def timed(cs):
-            small = interleaved_min(
-                cs, lambda c: self._time_coarse_layout(band, c, bufs, timer, screen // ntm, ntm, 2),
-                reps)
-            best = min(small.values())
-            small.update(interleaved_min([c for c in cs if small[c] <= 4 * best], full, reps))
-            return small
+        screen_ = lambda c: self._time_coarse_layout(band, c, bufs, timer, screen // ntm, ntm, 2)
+
+        def tiles(times):
+            # The tiles at the two fastest untiled (subgroup, ppg): building a pipeline is
+            # most of the cost (a tiled build took up to 50 s on the Iris Xe).
+            lead = {c[:2] for c in sorted(times, key=times.get)[:2]}
+            return [c for c in cands if c[2] > 1 and c[:2] in lead]
         try:
-            # Staged, because building a pipeline is most of the cost (a tiled build took up
-            # to 50 s on the Iris Xe): every untiled (subgroup, ppg) first, then the tiles at
-            # the two fastest of those.
             untiled = [c for c in cands if c[2] == 1]
-            out = timed(untiled or cands)
-            rivals = [min(out, key=out.get)]
-            if untiled and len(untiled) < len(cands):
-                lead = {c[:2] for c in sorted(out, key=out.get)[:2]}
-                tiles = [c for c in cands if c[2] > 1 and c[:2] in lead]
-                if tiles:
-                    tiled = timed(tiles)
-                    out.update(tiled)
-                    rivals.append(min(tiled, key=tiled.get))
-            out = confirm_fastest(out, full, rivals=rivals)
+            out = time_staged([untiled or cands] + ([tiles] if untiled and len(untiled) < len(cands)
+                                                     else []),
+                              full, time_screen=screen_, rounds=reps)
         finally:
             for b in bufs:
                 b.destroy()

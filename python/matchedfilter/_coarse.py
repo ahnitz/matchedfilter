@@ -91,3 +91,65 @@ def confirm_fastest(times, time_one, rivals=(), rounds=CONFIRM_ROUNDS, near=1.5)
     for c in cont:
         out[c] = times[ref] * statistics.median(a / b for a, b in zip(samples[c], samples[ref]))
     return out
+
+
+def time_staged(stages, time_full, time_screen=None, rounds=3, screen_cut=4.0):
+    """{candidate: time} over staged candidate sets, every backend's coarse timing rule.
+
+    stages: candidate lists, or callables given the times so far that return the next list
+    (the Vulkan tiles are offered at the two fastest untiled layouts only: building a
+    pipeline is most of the cost). Within a stage, candidates are screened with time_screen
+    (a short dispatch) and only those within screen_cut of the fastest get time_full, both
+    in interleaved rounds (interleaved_min); some layouts are pathological on some devices
+    (band 256 at subgroup 32 on an Iris Xe) and a full dispatch of one can run long enough
+    for a driver to reset the device. The fastest of each stage is then confirmed against
+    the overall fastest, paired (confirm_fastest). None when a timer is (no timestamps)."""
+    out, rivals = {}, []
+    for st in stages:
+        cs = list(st(out) if callable(st) else st)
+        if not cs:
+            continue
+        times = interleaved_min(cs, time_screen, rounds) if time_screen else {}
+        if times is None:
+            return None
+        keep = [c for c in cs if not times or times[c] <= screen_cut * min(times.values())]
+        full = interleaved_min(keep, time_full, rounds)
+        if full is None:
+            return None
+        times.update(full)
+        out.update(times)
+        rivals.append(min(times, key=times.get))
+    return confirm_fastest(out, time_full, rivals=rivals) if out else out
+
+
+def stored_measured_choice(memo, kind, device, band, cands, label, kernel_id, measure,
+                           tiebreak=None):
+    """The fastest of cands, measured once per process and kept in MF_COST_FILE under
+    kind|device|band|labels|k<kernel_id>, so every process sharing the file reproduces it
+    and a build with other kernels measures afresh (gatechain.gpu_kernel_id).
+
+    label(c) names a candidate in the file; measure(cands) returns {candidate: time}, or None
+    when the device cannot be timed (the first candidate is then used, unstored). Ties break
+    on tiebreak(c), then on the candidates' order."""
+    labels = [label(c) for c in cands]
+    k = (kind, band, tuple(labels))
+    if k in memo:
+        return memo[k]
+    if len(cands) == 1:
+        memo[k] = cands[0]
+        return memo[k]
+    from . import gatechain
+    ckey = "%s|%s|%d|%s|k%s" % (kind, device, band, ";".join(labels), kernel_id)
+    held = gatechain.stored_choice(ckey)
+    if held in labels:
+        memo[k] = cands[labels.index(held)]
+        return memo[k]
+    times = measure(cands)
+    if not times:
+        memo[k] = cands[0]
+        return memo[k]
+    rank = {c: i for i, c in enumerate(cands)}
+    memo[k] = min(times, key=lambda c: (times[c],) + (tuple(tiebreak(c)) if tiebreak else ())
+                  + (rank.get(c, 0),))
+    gatechain.store_choice(ckey, label(memo[k]))
+    return memo[k]
