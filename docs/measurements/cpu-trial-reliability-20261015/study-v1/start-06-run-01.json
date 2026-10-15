@@ -1,0 +1,92 @@
+{
+ "device": "cpu",
+ "segments": 6,
+ "tops": [
+  4
+ ],
+ "fine_templates": 4698,
+ "analysed_seconds_per_segment": 376.0,
+ "first_segment_s": {
+  "prep": 13.123831428587437,
+  "middle": 0.2312094233930111,
+  "fine": 5.001636564731598,
+  "asym": 0.011458482593297958,
+  "segment": 5.245236963033676,
+  "wall": 5.2452408112585545,
+  "cpu": 5.218009197999999
+ },
+ "steady_s": {
+  "middle": 0.4091906603425741,
+  "fine": 2.404657833278179,
+  "asym": 0.0480892825871706,
+  "segment": 2.864048533141613,
+  "wall": 2.86405535787344,
+  "cpu": 2.846999072999999
+ },
+ "steady_calls": {
+  "middle": 8,
+  "fine": 4,
+  "asym": 4,
+  "segment": 4,
+  "wall": 0,
+  "cpu": 0
+ },
+ "counts": {
+  "fine_triggers": 490,
+  "asym_calls": 95
+ },
+ "cpu_trial_work_in_steady": {
+  "calls": 0,
+  "seconds": 0.0
+ },
+ "steady_valid": true,
+ "templates_in_real_time": {
+  "middle": 34535451.0001989,
+  "fine": 5876754.607009907,
+  "asym": 293861401.95341706,
+  "segment": 4934128.677106906,
+  "wall": 4934116.919615931,
+  "cpu": 4963677.064042375,
+  "total": 4934128.677106906
+ },
+ "meta": {
+  "revision": "",
+  "host": "gravity-dev1.syr.edu",
+  "bank": "/home/ahnitz/mf-data/fir_three_level_modern_v1_bottomup_cap401.hdf",
+  "devices": [
+   "cpu:0"
+  ],
+  "args": {
+   "bank": "/home/ahnitz/mf-data/fir_three_level_modern_v1_bottomup_cap401.hdf",
+   "device": "cpu",
+   "tops": 1,
+   "pipeline": false,
+   "segments": 6,
+   "warmup": 2,
+   "seg_samples": 1048576,
+   "start_pad": 120.0,
+   "end_pad": 16.0,
+   "pad": 4096,
+   "threshold": 6.0,
+   "fd": 0.001,
+   "peak_window": 1.0,
+   "asym_threshold": 6.0,
+   "asym_bin_width": 0.03,
+   "asym_num_bins": 1000,
+   "profiles": "/home/ahnitz/mf-data/ladder_profiles_H1.npz",
+   "check": null,
+   "fft_length": 0,
+   "seed": 1,
+   "out": "/tmp/mf-cpu-trial-reliability-20261015/study-v1/start-06-run-01.json",
+   "pure": true,
+   "overlap": false,
+   "no_batch": false,
+   "pregen": true,
+   "shared_input": false,
+   "depth": 1,
+   "roofline": false,
+   "roofline_out": null,
+   "timing": false
+  }
+ }
+}

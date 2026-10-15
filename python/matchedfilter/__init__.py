@@ -2635,6 +2635,13 @@ def _chain_steady(tkey, value):
 _CORR_PFFT = {}
 #: (n, snr, fd, chain, device) -> {"samples": {False: [...], True: [...]}, "winner": bool|None}
 _Q15_TRIALS = {}
+# Cumulative host calibration work, for benchmark boundaries (not search timing).
+_CPU_TRIAL_WORK = {"calls": 0, "seconds": 0.0}
+
+
+def _record_cpu_trial(start):
+    _CPU_TRIAL_WORK["calls"] += 1
+    _CPU_TRIAL_WORK["seconds"] += time.perf_counter() - start
 #: n -> whether the hierarchical series' block forward runs through the platform FFT
 #: (vDSP on macOS): priced once per n (_cpu_forward_platform), kept in MF_COST_FILE.
 _CPU_FWD_PFFT = {}
@@ -2872,8 +2879,8 @@ class HierarchicalFilter(MatchedFilter):
     # The screen in front of the first tier (docs/cpu-q15-gate.md) changes no result -- the
     # float tier re-runs every pair it passes -- so only time is at stake, and time is
     # measured: plans whose chain's first band has a screen alternate it on and off over
-    # real calls, pooled per (n, snr, fd, chain), and every plan adopts the faster once
-    # each side has MF_CHAIN_TRIALS samples. MF_AUTOTUNE=0 keeps the cost model's choice
+    # identical-input pairs, pooled per (n, snr, fd, chain). Complete rounds persist
+    # across processes; every plan adopts the paired trial's winner. MF_AUTOTUNE=0 keeps the cost model's choice
     # (gatechain.CostModel.first_tier).
     def _q15_trial_key(self):
         return (self.n, float(self._fs_snr or self.snr), float(self.fd), tuple(self._chain), str(self.device))
@@ -2897,6 +2904,11 @@ class HierarchicalFilter(MatchedFilter):
                 rec = _gatechain._load_cost_file(path).get(self._q15_lock_key(tkey))
                 if isinstance(rec, dict):
                     tr["rechecked"] = bool(rec.get("rechecked"))
+                    if rec.get("method") == "paired-v1" and "q15" not in rec:
+                        smp = rec.get("samples", {})
+                        a, b = smp.get("False", []), smp.get("True", [])
+                        if len(a) == len(b) and all(np.isfinite(x) and x > 0 for x in a + b):
+                            tr["samples"] = {False: a, True: b}
                     if "q15" in rec:
                         tr["winner"] = bool(rec["q15"])
                         m = rec.get("median")
@@ -2937,39 +2949,52 @@ class HierarchicalFilter(MatchedFilter):
             return tr["winner"] is None
         return False
 
-    def _q15_record(self, dt, pairs):
-        """One timed call: a Q15 trial sample, decided by the shared rule
-        (gatechain.measured_choice). No steady re-check: per-call samples pool calls of plans
-        of every group size, so steady and trial medians are not like for like (it reopened
-        locks spuriously at load ~44 on dev2); the batch-measured trials re-check."""
+    def _q15_record_pair(self, timings, pairs):
+        """Persist only complete same-input rounds, never unrelated per-call samples."""
         with _AUTOTUNE_LOCK:
-            tr = _Q15_TRIALS.get(self._q15_trial_key())
-            if tr is None or pairs <= 0:
+            tr = self._q15_trial()
+            if tr["winner"] is not None or pairs <= 0:
                 return
-            key = self._q15_lock_key(self._q15_trial_key())
-            path = _gatechain._cost_file()
-            if tr["winner"] is not None:
+            if not all(np.isfinite(timings[c]) and timings[c] > 0 for c in (False, True)):
                 return
-            tr["samples"][bool(self._q15)].append(dt / pairs)
-            base = int(os.environ.get("MF_CHAIN_TRIALS", _CHAIN_TRIALS_PER_CAND))
-            need = tr.setdefault("need", {})
-            if not all(len(v) >= max(base, need.get(k, 0)) for k, v in tr["samples"].items()):
-                return
-            # The cost model's choice stands unless the other setting is clearly faster
-            # (a 6% "win" on noisy samples locked the screen off on dev2, and steady state
-            # ran 5% slower without it).
+            for c in (False, True):
+                tr["samples"][c].append(timings[c] / pairs)
+            base = max(5, int(os.environ.get("MF_CHAIN_TRIALS", _CHAIN_TRIALS_PER_CAND)))
             model = bool(getattr(self, "_q15_pref", False))
-            w, more = _gatechain.measured_choice(tr["samples"], model, 2 * base)
-            if w is None:
-                need.update(more)
-                return
-            med = {k: float(np.median(v)) for k, v in tr["samples"].items()}
-            tr["winner"], tr["median"] = bool(w), med
+            w, _ = _gatechain.paired_choice(tr["samples"], model, 2 * base, minimum=base)
+            med = {c: float(np.median(v)) for c, v in tr["samples"].items()}
+            record = {"method": "paired-v1", "samples": {str(c): v for c, v in tr["samples"].items()},
+                      "median": {str(c): v for c, v in med.items()},
+                      "rechecked": bool(tr.get("rechecked"))}
+            if w is not None:
+                tr["winner"], tr["median"] = bool(w), med
+                record["q15"] = bool(w)
+            path = _gatechain._cost_file()
             if path is not None:
-                _gatechain._store_cost(path, key, {"q15": bool(w), "rechecked": bool(tr.get("rechecked")),
-                                                   "median": {str(k): v for k, v in med.items()}})
-            _log_autotune("Q15-TRIAL chain=%s locked q15=%s  median s/pair %s", self._chain,
-                          tr["winner"], {k: "%.3g" % v for k, v in med.items()})
+                _gatechain._store_cost(path, self._q15_lock_key(self._q15_trial_key()), record)
+            _log_autotune("Q15-TRIAL paired chain=%s round=%d winner=%s timings=%s", self._chain,
+                          len(tr["samples"][False]), tr["winner"], timings)
+
+    def _q15_run_pair(self, run, pairs):
+        """Two settled timings on identical input; alternate which setting runs first.
+
+        Replays are calibration work, included in native work counters. Return only
+        the final call's result, whose buffers have not been overwritten by a replay.
+        """
+        begin = time.perf_counter()
+        with _AUTOTUNE_LOCK:
+            count = len(self._q15_trial()["samples"][False])
+        timings = {}
+        for on in ((False, True) if count % 2 == 0 else (True, False)):
+            self._q15 = on
+            self._mf.set_q15(on)
+            run()                           # settle switching and lazy ingestion
+            t0 = time.perf_counter()
+            result = run()
+            timings[on] = time.perf_counter() - t0
+        self._q15_record_pair(timings, pairs)
+        _record_cpu_trial(begin)
+        return result
 
     def _restore_into(self, plan):
         """Replay reference, templates and data into a freshly built plan."""
@@ -3424,31 +3449,27 @@ class HierarchicalFilter(MatchedFilter):
                    decimated=None):
         if self._chain_trial is None and self.device.kind == "cpu" and self._mf is not None:
             q15_timed = self._q15_before_call()
-            # (No steady re-check of a CPU chain lock: see _q15_record.)
-            mon = None
-            if q15_timed or mon is not None:
-                t0 = time.perf_counter()
-                res = super().run_series(series, starts=starts, win_start=win_start, win_end=win_end,
-                                         binsize=binsize, threshold=threshold, templates=templates,
-                                         raw=raw, decimated=decimated)
-                dt = time.perf_counter() - t0
-                full = templates is None or templates[1] >= self.ntemplates
-                try:
-                    nblk = len(starts) if starts is not None else 1
-                except TypeError:
-                    nblk = 0
-                if full and nblk >= 2:
-                    units = nblk * self.ntemplates * self.ndata
-                    if q15_timed:
-                        self._q15_record(dt, units)
-                    if mon is not None and _chain_steady(mon, dt / units):
-                        self._chain_monitor = None
-                return res
+            full = templates is None or templates[1] >= self.ntemplates
+            try:
+                nblk = len(starts) if starts is not None else 1
+            except TypeError:
+                nblk = 0
+            if q15_timed and full and nblk >= 2:
+                # Resolve thresholds before timing either arm, then replay exactly the
+                # same workload. Pool complete ratios across groups, not their raw costs.
+                self._execution_plan()
+                parent_run = super().run_series
+                def run():
+                    return parent_run(series, starts=starts, win_start=win_start, win_end=win_end,
+                                      binsize=binsize, threshold=threshold, templates=templates,
+                                      raw=raw, decimated=decimated)
+                return self._q15_run_pair(run, nblk * self.ntemplates * self.ndata)
         if self._chain_trial is None:
             return super().run_series(series, starts=starts, win_start=win_start, win_end=win_end,
                                       binsize=binsize, threshold=threshold, templates=templates,
                                       raw=raw, decimated=decimated)
         # One-off work (building the plan, calibrating its thresholds) is not the chain's cost.
+        trial_begin = time.perf_counter()
         self._execution_plan()
         t0 = time.perf_counter()
         res = super().run_series(series, starts=starts, win_start=win_start, win_end=win_end,
@@ -3460,6 +3481,8 @@ class HierarchicalFilter(MatchedFilter):
         if full and nblk >= 2 and self._chain_trial is not None and self._gpu is None:
             # (GPU plans are judged per batch instead: time_domain._trial_begin/_trial_end.)
             self._chain_trial_record(dt, nblk * self.ntemplates * self.ndata)
+        if self._gpu is None:
+            _record_cpu_trial(trial_begin)
         return res
 
     def set_templates(self, spectra, index=None):

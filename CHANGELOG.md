@@ -6,6 +6,15 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ### Performance
 
+- CPU Q15 and block-size trials compare identical workloads in interleaved rounds,
+  persist complete rounds across processes, and bound ambiguous contests. The dev1
+  ten-start study selected Q15 on 10/10 times; every second process had unchanged
+  trial locks and zero CPU trial work after the steady boundary. Calibration is
+  more expensive upfront. Forced-lock controls put median paired throughput about
+  0.2% below baseline; Q15 on was 25.0% faster than off on this workload.
+  Ladder reports now flag tuning in nominal steady windows,
+  and `tools/cpu_trial_check.py` separates calibration from accepted measurements.
+  See [trial policy and limitations](docs/gate-model.md#cpu-paired-trials-and-bounded-measurement-2026-10-15).
 - CPU Q15 screening can defer its float256 recheck until after float512 when
   the scheduling model favors that order on AVX3 N2048 chains. The same gates
   and thresholds remain; the representative Zen 5 ladder uses 3.5% less fine-stage

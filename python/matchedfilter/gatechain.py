@@ -1248,6 +1248,43 @@ def sample_spread(v):
     return mad if mad > 0 else float(np.std(v, ddof=1))
 
 
+def paired_choice(samples, model, cap, minimum=5, tie=None):
+    """Choose from complete, comparable rounds, using median ratios to the model.
+
+    Each index must describe the same workload for every candidate. Callers reverse
+    execution order between rounds and settle each candidate before timing it. A
+    majority of rounds must support a gain beyond TIE; an ambiguous contest collects
+    more complete rounds up to cap. This does not turn unrelated calls into pairs.
+    """
+    tie = TIE if tie is None else tie
+    if model not in samples or not samples:
+        raise ValueError("paired trial requires its model candidate")
+    lengths = {len(v) for v in samples.values()}
+    if len(lengths) != 1:
+        raise ValueError("paired trial requires complete rounds")
+    count = lengths.pop()
+    if count < minimum:
+        return None, {c: minimum for c in samples}
+    base = np.asarray(samples[model], float)
+    if any(not np.all(np.isfinite(v)) or np.any(np.asarray(v) <= 0)
+           for v in samples.values()):
+        raise ValueError("paired timings must be finite and positive")
+    ratios = {c: np.asarray(v, float) / base for c, v in samples.items()}
+    # Require agreement beyond a bare majority: one or two bursts must not decide
+    # a small trial. At the cap the model remains the explicit uncertainty fallback.
+    needed = int(np.ceil(0.75 * count))
+    supported = [c for c, r in ratios.items()
+                 if c != model and np.count_nonzero(r < 1.0 - tie) >= needed]
+    if supported:
+        return min(supported, key=lambda c: float(np.median(ratios[c]))), {}
+    if all(c == model or np.count_nonzero(r >= 1.0 - tie) >= needed
+           for c, r in ratios.items()):
+        return model, {}
+    if count < cap:
+        return None, {c: count + 1 for c in samples}
+    return model, {}
+
+
 def measured_choice(samples, model, cap, tie=None, z=None):
     """Decide a measured choice from samples {candidate: [cost, ...]} (lower is better).
 
