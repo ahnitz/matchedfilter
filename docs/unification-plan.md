@@ -227,3 +227,24 @@ Stage 5's lessons land inside the stages that touch them. Each stage merges in g
   - **dev4:** not measured; it is shared under load 16 (stage 1 changed only host code there).
   - **Next:** stage 2.1 (deterministic close calls), 2.2 (static compiler statistics),
     stage 4 probes, then 2.3 (the model, verified against timing).
+- 2026-10-15: **Stage 2.1 (close calls follow the preference).**
+  - `confirm_fastest` returns `Timings` with `.close`: contenders whose paired ratio to the
+    fastest is within max(0.5%, 3 MAD of the per-round ratios).
+  - `stored_measured_choice` then takes the backend's fixed preference among them, so a
+    difference the measurement cannot resolve no longer flips with the noise. A resolved
+    difference still picks the fastest.
+- 2026-10-15: **Stage 2 feasibility study (8060S, band 256, 22 coarse candidates).**
+  RADV static statistics against paired timings:
+  - Issue count per pair (instructions x waves per group / pairs per group) ranks them at
+    Spearman 0.95. It gets the structure right: one pair per group is worst, packed untiled
+    is in the middle, tiled is best.
+  - **The model alone would lose performance.** It ranks p4t8 best (131 issue cycles per
+    pair), but p4t8 measures 1.557 ns per pair against 1.17 for its neighbours, 33% slower.
+    Neither VGPRs nor code size explains it.
+  - The top five candidates are within 3% (1.174-1.208), inside any static model's error.
+
+  **Revised stage 2 end state.** Accounting shortlists, before building where it can
+  (one pair per group and the losing twiddle source are clearly slower). A short paired
+  timing of the shortlist decides, and close calls go to the preference.
+  `MF_COST_FILE` becomes an optional cache rather than a correctness or reproducibility
+  requirement. "No timing at all" contradicts "no performance lost" on this evidence.

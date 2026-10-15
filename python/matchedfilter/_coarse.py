@@ -48,6 +48,17 @@ def forced_tile(env_var):
 
 #: Interleaved rounds the contenders of a coarse layout choice are re-timed in.
 CONFIRM_ROUNDS = 5
+#: The smallest paired difference a choice acts on. A contender within this of the fastest,
+#: or within CLOSE_MADS median absolute deviations of its per-round ratios, is a close call:
+#: the backend's fixed preference decides it, not the noise (stored_measured_choice).
+CLOSE_FLOOR = 0.005
+CLOSE_MADS = 3.0
+
+
+class Timings(dict):
+    """{candidate: time} with `close`: the contenders a paired confirmation could not tell
+    from the fastest (confirm_fastest)."""
+    close = frozenset()
 
 
 def interleaved_min(cands, time_one, rounds):
@@ -78,7 +89,7 @@ def confirm_fastest(times, time_one, rivals=(), rounds=CONFIRM_ROUNDS, near=1.5)
     ref = min(times, key=times.get)
     cont = [c for c in times if c != ref and (times[c] <= near * times[ref] or c in rivals)]
     if not cont:
-        return times
+        return Timings(times)
     order = [ref] + cont
     samples = {c: [] for c in order}
     for r in range(rounds):
@@ -87,9 +98,16 @@ def confirm_fastest(times, time_one, rivals=(), rounds=CONFIRM_ROUNDS, near=1.5)
             if t is None:
                 return None
             samples[c].append(t)
-    out = dict(times)
+    out = Timings(times)
+    close = set()
     for c in cont:
-        out[c] = times[ref] * statistics.median(a / b for a, b in zip(samples[c], samples[ref]))
+        ratios = [a / b for a, b in zip(samples[c], samples[ref])]
+        med = statistics.median(ratios)
+        mad = statistics.median(abs(r - med) for r in ratios)
+        out[c] = times[ref] * med
+        if abs(med - 1.0) <= max(CLOSE_FLOOR, CLOSE_MADS * mad):
+            close.add(c)
+    out.close = frozenset(close)
     return out
 
 
@@ -128,9 +146,10 @@ def stored_measured_choice(memo, kind, device, band, cands, label, kernel_id, me
     kind|device|band|labels|k<kernel_id>, so every process sharing the file reproduces it
     and a build with other kernels measures afresh (gatechain.gpu_kernel_id).
 
-    label(c) names a candidate in the file; measure(cands) returns {candidate: time}, or None
-    when the device cannot be timed (the first candidate is then used, unstored). Ties break
-    on tiebreak(c), then on the candidates' order."""
+    label(c) names a candidate in the file; measure(cands) returns {candidate: time} (a
+    Timings, whose close calls are decided by preference), or None when the device cannot be
+    timed (the first candidate is then used, unstored). Preference is tiebreak(c), then the
+    candidates' order."""
     labels = [label(c) for c in cands]
     k = (kind, band, tuple(labels))
     if k in memo:
@@ -149,7 +168,12 @@ def stored_measured_choice(memo, kind, device, band, cands, label, kernel_id, me
         memo[k] = cands[0]
         return memo[k]
     rank = {c: i for i, c in enumerate(cands)}
-    memo[k] = min(times, key=lambda c: (times[c],) + (tuple(tiebreak(c)) if tiebreak else ())
-                  + (rank.get(c, 0),))
+    fastest = min(times, key=lambda c: (times[c], rank.get(c, 0)))
+    # Close calls (Timings.close: within the paired measurement's noise of the fastest) go
+    # to the backend's fixed preference, so a choice the measurement cannot resolve does not
+    # flip from process to process with the noise.
+    near = ({c for c in times if times[c] == times[fastest]}
+            | set(getattr(times, "close", ())))
+    memo[k] = min(near, key=lambda c: (tuple(tiebreak(c)) if tiebreak else ()) + (rank.get(c, 0),))
     gatechain.store_choice(ckey, label(memo[k]))
     return memo[k]

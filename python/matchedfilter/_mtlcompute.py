@@ -1593,7 +1593,7 @@ class Context(InputUploads):
         """Device seconds per pair of each coarse build on synthetic data (a warm-up, reps - 1
         interleaved rounds and a paired confirmation of the contenders: _coarse), in
         self.coarse_times[band] for reports."""
-        from ._coarse import coarse_launch, coarse_stem, time_staged
+        from ._coarse import Timings, coarse_launch, coarse_stem, time_staged
         ndm = pairs // ntm
         rng = np.random.default_rng(0)
         x = (rng.standard_normal((ndm, band)) + 1j * rng.standard_normal((ndm, band))) * 0.1
@@ -1645,7 +1645,8 @@ class Context(InputUploads):
             times = time_staged([list(cands)], time_one, rounds=reps - 1)
             if times is None:
                 return None
-            out = {t: v / pairs for t, v in times.items()}
+            out = Timings({t: v / pairs for t, v in times.items()})
+            out.close = times.close
         finally:
             for b in bufs:
                 b.destroy()
