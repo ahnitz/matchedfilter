@@ -30,6 +30,8 @@ typedef struct {
   float *ct0,*scratch,*fpow;      /* unscaled in-band templates, staging, per-template band fraction */
   float ref_f,thr;                /* reference band fraction; threshold (<0: unconfigured) */
   ap_peak *cebuf;
+  unsigned char *pending;         /* [nd] owned series spectrum awaits ingestion */
+  int npending;
   int *fire_d,*fire_t;            /* this tier's survivors */
   long passed;                    /* pairs that passed this tier */
   unsigned long long ticks;       /* time spent in this tier */
@@ -151,9 +153,10 @@ ap_hmf_plan *ap_hmf_create_chain(size_t n,size_t k,int ndata,int ntmpl,
       tr->scratch=ap_alloc64(2*tr->m*sizeof(float));
       tr->fpow=calloc((size_t)ntmpl,sizeof(float));
       tr->cebuf=calloc((size_t)p->nd*ntmpl,sizeof(ap_peak));
+      tr->pending=calloc((size_t)p->nd,1);
       tr->fire_d=calloc((size_t)p->nd*ntmpl,sizeof(int));
       tr->fire_t=calloc((size_t)p->nd*ntmpl,sizeof(int));
-      if(!tr->mf||!tr->ct0||!tr->scratch||!tr->fpow||!tr->cebuf||!tr->fire_d||!tr->fire_t){
+      if(!tr->mf||!tr->ct0||!tr->scratch||!tr->fpow||!tr->cebuf||!tr->pending||!tr->fire_d||!tr->fire_t){
         ap_hmf_destroy(p); return NULL;
       }
     }
@@ -185,7 +188,7 @@ void ap_hmf_destroy(ap_hmf_plan *p){
     hmf_tier *tr=&p->tier[i];
     if(tr->mf) ap_mf_destroy(tr->mf);
     if(tr->g16) ap_gate16_destroy(tr->g16);
-    free(tr->ct0); free(tr->scratch); free(tr->fpow); free(tr->cebuf);
+    free(tr->ct0); free(tr->scratch); free(tr->fpow); free(tr->cebuf); free(tr->pending);
     free(tr->fire_d); free(tr->fire_t);
   }
   ap_destroy(p->full_fft);
@@ -434,14 +437,25 @@ int ap_hmf_set_sparse(ap_hmf_plan *p,int on){
   p->sparse=on?1:0;
   return 0;
 }
-int ap_hmf_set_data(ap_hmf_plan *p,int d,const float *spec){
-  if(!p||d<0||d>=p->nd||!spec) return -1;
+static int set_data_tiers(ap_hmf_plan *p,int d,const float *spec,int eager){
   p->dspec[d]=spec; p->dready[d]=0;
   for(int i=0;i<p->ntiers;i++){
-    if(ap_mf_set_data(p->tier[i].mf,d,spec)) return -1;
-    if(p->tier[i].g16 && ap_gate16_set_data(p->tier[i].g16,d,spec)) return -1;
+    hmf_tier *tr=&p->tier[i];
+    if(i>=eager){
+      if(!tr->pending[d]){ tr->pending[d]=1; tr->npending++; }
+      continue;
+    }
+    if(ap_mf_set_data(tr->mf,d,spec)) return -1;
+    if(tr->g16 && ap_gate16_set_data(tr->g16,d,spec)) return -1;
+    if(tr->pending[d]){ tr->pending[d]=0; tr->npending--; }
   }
   return 0;
+}
+int ap_hmf_set_data(ap_hmf_plan *p,int d,const float *spec){
+  if(!p||d<0||d>=p->nd||!spec) return -1;
+  /* Preserve the public setter's eager coarse copies. Only series calls defer
+     them, because their source spectra live in the plan's own storage. */
+  return set_data_tiers(p,d,spec,p->ntiers);
 }
 int ap_hmf_set_template(ap_hmf_plan *p,int t,const float *spec){
   if(!p||t<0||t>=p->nt||!spec) return -1;
@@ -554,7 +568,7 @@ int ap_hmf_run_series(ap_hmf_plan *p,
            refine (its NULL dtime sends refines to the transform). */
         float *sp=p->spec+(size_t)j*2*n;
         hmf_forward_real(p,series,s0,have,sp);
-        if(ap_hmf_set_data(p,j,sp)) return -1;
+        if(set_data_tiers(p,j,sp,1)) return -1;
         p->dtime[j]=NULL; p->dhave[j]=0;
         continue;
       }
@@ -577,7 +591,7 @@ int ap_hmf_run_series(ap_hmf_plan *p,
       if(have<n) memset(p->fwd+2*have,0,2*(n-have)*sizeof(float));
       ap_fft(p->full_fft,p->fwd,sp,AP_FORWARD);
       }
-      if(ap_hmf_set_data(p,j,sp)) return -1;
+      if(set_data_tiers(p,j,sp,1)) return -1;
       p->dtime[j]=have ? series+2*s0 : NULL; p->dhave[j]=have;
       /* The full spectrum is NOT ingested here.  Only the coarse band is read
          by every pair; the full one is read only when a pair fires, which at
@@ -907,6 +921,15 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
       } else if(ap_mf_run(tr->mf,d0,nd,t0,nt,cspan,thr,tr->cebuf,NULL,cstart,cend)<0) return -1;
     } else {
       /* Later tiers run only on the previous tier's survivors, pooled across blocks. */
+      /* Series spectra remain owned by the plan until the next group overwrites
+         their slots. Prepare each needed slot once; eager callers skip this walk. */
+      for(int j=0;tr->npending && j<nfire;j++){
+        const int d=d0+fire_d[j];
+        if(tr->pending[d]){
+          if(ap_mf_set_data(tr->mf,d,p->dspec[d])) return -1;
+          tr->pending[d]=0; tr->npending--;
+        }
+      }
       if(ap_mf_run_pairs_pooled(tr->mf,d0,fire_d,fire_t,nfire,t0,cspan,thr,tr->cebuf,NULL,
                                 cstart,cend,nt)<0) return -1;
     }
