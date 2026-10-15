@@ -1,0 +1,120 @@
+{
+  "schema_version": 1,
+  "baseline": "/tmp/mf-perf-tail-baseline/python",
+  "candidate": "/tmp/mf-perf-tail-baseline/python",
+  "verify_only": false,
+  "rounds": 15,
+  "sample_ms": 50.0,
+  "case_seed": "8137 + templates",
+  "workers": {
+    "SSE4": [
+      {
+        "package": "/tmp/mf-perf-tail-baseline/python/matchedfilter/__init__.py",
+        "backend": "SSE4",
+        "core": "/tmp/mf-perf-tail-baseline/python/matchedfilter/_core.cpython-313-x86_64-linux-gnu.so",
+        "core_sha256": "ce7076733a62db4c115c9ce4572950b5460e19a30cc317d2eeb19e3dae6c2d0f",
+        "affinity": [
+          4
+        ],
+        "python": "3.13.5 | packaged by Anaconda, Inc. | (main, Jun 12 2025, 16:09:02) [GCC 11.2.0]",
+        "numpy": "2.5.3"
+      },
+      {
+        "package": "/tmp/mf-perf-tail-baseline/python/matchedfilter/__init__.py",
+        "backend": "SSE4",
+        "core": "/tmp/mf-perf-tail-baseline/python/matchedfilter/_core.cpython-313-x86_64-linux-gnu.so",
+        "core_sha256": "ce7076733a62db4c115c9ce4572950b5460e19a30cc317d2eeb19e3dae6c2d0f",
+        "affinity": [
+          4
+        ],
+        "python": "3.13.5 | packaged by Anaconda, Inc. | (main, Jun 12 2025, 16:09:02) [GCC 11.2.0]",
+        "numpy": "2.5.3"
+      }
+    ]
+  },
+  "results": [
+    {
+      "kind": "series",
+      "templates": 162,
+      "group": 4,
+      "blocks": 32,
+      "isa": "SSE4",
+      "digest": "c4b87c1a1fde44797fad8ed8734ff528d628ee02631381bc95c91a3fe6e5809a",
+      "detail": {
+        "pairs": 5184,
+        "blocks": 32,
+        "actual_group": 4,
+        "q15_passed": 411,
+        "tier_passed": [
+          312,
+          9,
+          2,
+          2
+        ],
+        "peaks": 2,
+        "chain": [
+          256,
+          512,
+          1024
+        ],
+        "thresholds": [
+          4.1,
+          4.76,
+          5.48
+        ],
+        "window": [
+          192,
+          1856
+        ],
+        "hop": 1664,
+        "injected_template": 161,
+        "injected_snr": 24.0
+      },
+      "repetitions": 35,
+      "samples": [
+        [
+          0.00130087414290756,
+          0.001378605285260294,
+          0.0013557627713972969,
+          0.0013310544292575548,
+          0.0013472261722199618,
+          0.00134627125724884,
+          0.0013037298007735185,
+          0.0013058208577734019,
+          0.0012974342580751648,
+          0.0013013942582931902,
+          0.001308917229263378,
+          0.0013248547994797783,
+          0.0013110062855828022,
+          0.0013671784279202777,
+          0.0013236634300223418
+        ],
+        [
+          0.0012977643154694566,
+          0.0013022670572224472,
+          0.0013177088578231633,
+          0.0013229632567215179,
+          0.001356501256980534,
+          0.0013502286564159606,
+          0.0013627790563207653,
+          0.0012937344860152475,
+          0.0013030760006846063,
+          0.0013159784571533757,
+          0.0012925642841894712,
+          0.0015789430854575976,
+          0.0012932080842022384,
+          0.0014087784004264644,
+          0.001324670485753034
+        ]
+      ],
+      "baseline_us": 1323.6634300223418,
+      "candidate_us": 1317.7088578231633,
+      "speedup": 0.9992397688772241
+    }
+  ],
+  "measurement": {
+    "completed_at": "2026-10-15T00:17:03.236829-04:00",
+    "reversed_build_arguments": false,
+    "note": "Identical baseline build in both workers"
+  }
+}

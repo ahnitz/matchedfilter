@@ -68,6 +68,28 @@ static_assert(HWY_MAX_LANES_D(ap_qtag) == 8, "Q_MLAH assumes a full 128-bit int1
 #define Q_MLSH(acc, a, b) Q_SUB((acc), Q_MUL((a), (b)))
 #endif
 
+/* Tail tiles retain each lane's arithmetic and quantised operands. Only the
+   product loads change: T templates are repeated for 32/T independent blocks. */
+#undef AP_Q15_TAIL
+#if HWY_ARCH_X86 && HWY_MAX_BYTES == 64
+#define AP_Q15_TAIL 1
+template<int T> static HWY_INLINE vq q15_tile_template(const int16_t *p){
+  if(T == 8) return hn::LoadDup128(AP_DQ, p);
+  /* Combine(v,v) emitted two loads on GCC; make the half-vector broadcast
+     explicit in this AVX-512-only loader. */
+  return vq{_mm512_broadcast_i64x4(_mm256_loadu_si256((const __m256i *)p))};
+}
+template<int T> static HWY_INLINE vq q15_tile_data(const int16_t *p){
+  __m512i v = _mm512_set1_epi16(p[0]);
+  if(T == 16) return vq{_mm512_mask_set1_epi16(v, 0xffff0000u, p[768])};
+  v = _mm512_mask_set1_epi16(v, 0x0000ff00u, p[768]);
+  v = _mm512_mask_set1_epi16(v, 0x00ff0000u, p[1536]);
+  return vq{_mm512_mask_set1_epi16(v, 0xff000000u, p[2304])};
+}
+#else
+#define AP_Q15_TAIL 0
+#endif
+
 }  // namespace HWY_NAMESPACE
 }  // namespace ap
 HWY_AFTER_NAMESPACE();
@@ -116,33 +138,12 @@ static HWY_INLINE void qcodelet_twmax(int m, const vq *restrict ar, const vq *re
 }
 #endif
 
-/* N x QW pairs: pass 1 forms the product as it loads (M2-point codelets down
-   the columns), pass 2 applies the four-step twiddle as it loads (M1-point
-   codelets along the rows), then the window's maximum per lane.
-   dq is [N][3] = (dr, di, -di); tr/ti are [N][QW].  Bit l of *bits is set
-   when lane l's maximum reaches lanethr[l]; lanemax, if not NULL, gets the
-   QW maxima. */
-static int q15_screen(size_t N, const int16_t *dq, const int16_t *tr, const int16_t *ti,
-                      size_t ws, size_t we, const int16_t *lanethr, uint64_t *bits,
-                      int16_t *lanemax, void *scratch){
-  int M1, M2;
-  if(ap_q15_factor(N, &M1, &M2)) return -1;
-  const ap_q15_twiddles *tw = ap_q15_twiddle_table(N);
-  if(!tw) return -1;
+/* Pass 2 and the maximum are identical for ordinary and tiled products. */
+static HWY_INLINE int q15_finish(size_t N, int M1, int M2,
+                                 const ap_q15_twiddles *tw, vq *X, vq *Xi,
+                                 size_t ws, size_t we, const int16_t *lanethr,
+                                 uint64_t *bits, int16_t *lanemax){
   const int st = M1 + 1;
-  vq *X = (vq *)scratch, *Xi = X + (size_t)st * M2;
-  if(M1 == 16 && M2 == 16){
-    /* N = 256, the band the screen runs at: strides as constants, so every element's
-       address is an immediate offset rather than a multiply-add per element (the generic
-       call spent ~60 integer adds per codelet on addressing). */
-    for(int e1 = 0; e1 < 16; e1++)
-      qsr16_prod(dq + 3 * e1, tr + (size_t)e1 * AP_QW, ti + (size_t)e1 * AP_QW,
-                 X + e1, Xi + e1, 17, 48, 16L * AP_QW);
-  } else {
-    for(int e1 = 0; e1 < M1; e1++)
-      qcodelet_prod(M2, dq + 3 * e1, tr + (size_t)e1 * AP_QW, ti + (size_t)e1 * AP_QW,
-                    X + e1, Xi + e1, st, 3L * M1, (long)M1 * AP_QW);
-  }
   if(we > N) we = N;
 #if AP_Q15_VREGS32
   /* The window's maximum fused into pass 2 (qcodelet_twmax): output k = k2 + M2*k1 is row
@@ -220,6 +221,56 @@ static int q15_screen(size_t N, const int16_t *dq, const int16_t *tr, const int1
   *bits = b;
   return 0;
 }
+
+/* N x QW pairs: pass 1 forms the product as it loads (M2-point codelets down
+   the columns), pass 2 applies the four-step twiddle as it loads (M1-point
+   codelets along the rows), then the window's maximum per lane.
+   dq is [N][3] = (dr, di, -di); tr/ti are [N][QW].  Bit l of *bits is set
+   when lane l's maximum reaches lanethr[l]; lanemax, if not NULL, gets the
+   QW maxima. */
+static int q15_screen(size_t N, const int16_t *dq, const int16_t *tr, const int16_t *ti,
+                      size_t ws, size_t we, const int16_t *lanethr, uint64_t *bits,
+                      int16_t *lanemax, void *scratch){
+  int M1, M2;
+  if(ap_q15_factor(N, &M1, &M2)) return -1;
+  const ap_q15_twiddles *tw = ap_q15_twiddle_table(N);
+  if(!tw) return -1;
+  const int st = M1 + 1;
+  vq *X = (vq *)scratch, *Xi = X + (size_t)st * M2;
+  if(M1 == 16 && M2 == 16){
+    /* N = 256, the band the screen runs at: strides as constants, so every element's
+       address is an immediate offset rather than a multiply-add per element (the generic
+       call spent ~60 integer adds per codelet on addressing). */
+    for(int e1 = 0; e1 < 16; e1++)
+      qsr16_prod(dq + 3 * e1, tr + (size_t)e1 * AP_QW, ti + (size_t)e1 * AP_QW,
+                 X + e1, Xi + e1, 17, 48, 16L * AP_QW);
+  } else {
+    for(int e1 = 0; e1 < M1; e1++)
+      qcodelet_prod(M2, dq + 3 * e1, tr + (size_t)e1 * AP_QW, ti + (size_t)e1 * AP_QW,
+                    X + e1, Xi + e1, st, 3L * M1, (long)M1 * AP_QW);
+  }
+  return q15_finish(N,M1,M2,tw,X,Xi,ws,we,lanethr,bits,lanemax);
+}
+
+#if AP_Q15_TAIL
+template<int T> static int q15_screen_tile_impl(const int16_t *dq,
+                         const int16_t *tr, const int16_t *ti,
+                         size_t ws, size_t we, const int16_t *lanethr,
+                         uint64_t *bits, int16_t *lanemax, void *scratch){
+  const ap_q15_twiddles *tw = ap_q15_twiddle_table(256);
+  vq *X = (vq *)scratch, *Xi = X + 17 * 16;
+  for(int e1 = 0; e1 < 16; e1++)
+    qsr16_prod_tile<T>(dq + 3 * e1, tr + e1 * 32, ti + e1 * 32,
+                      X + e1, Xi + e1, 17, 48, 512);
+  return q15_finish(256,16,16,tw,X,Xi,ws,we,lanethr,bits,lanemax);
+}
+static int q15_screen_tile(int T, const int16_t *dq, const int16_t *tr, const int16_t *ti,
+                           size_t ws, size_t we, const int16_t *lanethr,
+                           uint64_t *bits, int16_t *lanemax, void *scratch){
+  if(T == 8) return q15_screen_tile_impl<8>(dq,tr,ti,ws,we,lanethr,bits,lanemax,scratch);
+  return q15_screen_tile_impl<16>(dq,tr,ti,ws,we,lanethr,bits,lanemax,scratch);
+}
+#endif
 
 static int q15_lanes(void){ return AP_QW; }
 

@@ -1,0 +1,121 @@
+{
+  "schema_version": 1,
+  "baseline": "/tmp/mf-perf-tail-inline/python",
+  "candidate": "/tmp/mf-perf-tail-baseline/python",
+  "verify_only": false,
+  "rounds": 15,
+  "sample_ms": 50.0,
+  "case_seed": "8137 + templates",
+  "workers": {
+    "SSE4": [
+      {
+        "package": "/tmp/mf-perf-tail-inline/python/matchedfilter/__init__.py",
+        "backend": "SSE4",
+        "core": "/tmp/mf-perf-tail-inline/python/matchedfilter/_core.cpython-313-x86_64-linux-gnu.so",
+        "core_sha256": "b7fc2583ceea69e842eff7e35b25e0c9e17f77c72ebeb37f2e5164cadd71ede7",
+        "affinity": [
+          4
+        ],
+        "python": "3.13.5 | packaged by Anaconda, Inc. | (main, Jun 12 2025, 16:09:02) [GCC 11.2.0]",
+        "numpy": "2.5.3"
+      },
+      {
+        "package": "/tmp/mf-perf-tail-baseline/python/matchedfilter/__init__.py",
+        "backend": "SSE4",
+        "core": "/tmp/mf-perf-tail-baseline/python/matchedfilter/_core.cpython-313-x86_64-linux-gnu.so",
+        "core_sha256": "ce7076733a62db4c115c9ce4572950b5460e19a30cc317d2eeb19e3dae6c2d0f",
+        "affinity": [
+          4
+        ],
+        "python": "3.13.5 | packaged by Anaconda, Inc. | (main, Jun 12 2025, 16:09:02) [GCC 11.2.0]",
+        "numpy": "2.5.3"
+      }
+    ]
+  },
+  "results": [
+    {
+      "kind": "series",
+      "templates": 162,
+      "group": 4,
+      "blocks": 32,
+      "isa": "SSE4",
+      "digest": "c4b87c1a1fde44797fad8ed8734ff528d628ee02631381bc95c91a3fe6e5809a",
+      "detail": {
+        "pairs": 5184,
+        "blocks": 32,
+        "actual_group": 4,
+        "q15_passed": 411,
+        "tier_passed": [
+          312,
+          9,
+          2,
+          2
+        ],
+        "peaks": 2,
+        "chain": [
+          256,
+          512,
+          1024
+        ],
+        "thresholds": [
+          4.1,
+          4.76,
+          5.48
+        ],
+        "window": [
+          192,
+          1856
+        ],
+        "hop": 1664,
+        "injected_template": 161,
+        "injected_snr": 24.0
+      },
+      "repetitions": 37,
+      "samples": [
+        [
+          0.0013214532156927965,
+          0.001445936566105465,
+          0.0012981335670259352,
+          0.0015074629729890541,
+          0.001309023189949929,
+          0.0013127366216173647,
+          0.0013038754051022635,
+          0.0013397837834860627,
+          0.0014919701623856217,
+          0.001318624136163979,
+          0.00137039359400955,
+          0.0013021627579488464,
+          0.0014077815403406684,
+          0.001304219026949156,
+          0.0012948896477905077
+        ],
+        [
+          0.0012930635413205302,
+          0.0012868294064458962,
+          0.0013176840006348652,
+          0.0013207505674202097,
+          0.0012949075411401085,
+          0.0012887543778413453,
+          0.0013049097568098758,
+          0.0012970566765304553,
+          0.0013096145404553092,
+          0.0012879490811453277,
+          0.0012958866490579738,
+          0.0012904868108799328,
+          0.001359926162262422,
+          0.0012893178641821283,
+          0.001471194190073859
+        ]
+      ],
+      "baseline_us": 1318.624136163979,
+      "candidate_us": 1295.8866490579737,
+      "speedup": 1.021955359087206,
+      "final_speedup": 0.978516322761088
+    }
+  ],
+  "measurement": {
+    "completed_at": "2026-10-15T00:16:37.021718-04:00",
+    "reversed_build_arguments": true,
+    "note": "Fresh-process repeat of slower final-matrix controls"
+  }
+}

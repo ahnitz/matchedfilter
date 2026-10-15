@@ -14,6 +14,10 @@ template and once per data block (`matchfilt.c`) so that
 `|d_q|_2 |t_q|_2 / 2^15 + 1.5N <= 30000`, which bounds every intermediate (each
 is a unit-weight partial sum of products); adds saturate.
 
+For partial AVX-512 N256 template groups, [tail packing](cpu-q15-tail-packing.md)
+uses the spare lanes for additional data blocks with the same search window.
+Each useful lane retains the original quantized operands and arithmetic.
+
 It is a **screen, not a replacement**. A pair is rejected only if its int16
 maximum plus the error margin stays below the tier threshold; every other pair
 is re-run by the float tier (pooled, `hmf.c`). Survivors, peaks and triggers

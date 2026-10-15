@@ -13,6 +13,7 @@ some calibration tools need separately captured data.
 | Public performance | `python -m matchedfilter.benchmark`, `bench_series_workloads.py`, `bench_device_paths.py` | Spectral and series benchmarks; `bench_series_workloads.py --quick` runs in benchmark CI |
 | Targeted diagnosis | `audit_class_execution.py`, `bench_class_changes.py`, `bench_pairbatch.py`, `bench_stages.py`, `audit_kernel_binaries.py` | Run when investigating a specific scheduling or kernel cost |
 | Survivor batching | `bench_survivor_batches.py` | Alternate two native builds over pooled pair lists and full two-tier hierarchical calls; verify peak and count digests |
+| Q15 template tails | `bench_q15_tails.py` | Alternate two builds over direct Q15 screens and grouped hierarchical series calls; verify masks, statistics, peaks, and survivor counts |
 | CPU ladder profile | `profile_cpu_ladder.py` | Fix chain and thresholds, compare Q15 off/on or separate builds, and record stage costs and result hashes; requires a real bank and matching profiles |
 | Gate validation | `audit_gate_model.py`, `audit_threshold.py`, `score_fdr.py`, `verify_cascade_fdr.py` | Measure a gate chain's dismissal by injection against the flat filter; not part of normal installation |
 
@@ -32,6 +33,17 @@ python tools/bench_survivor_batches.py baseline/python candidate/python --output
 This covers shared or mixed data blocks, scattered or contiguous templates, partial
 batches, and two-tier hierarchical filtering. It reports alternating timing samples
 and matching output digests. `bench_cpu_broadcast.py` covers dense public calls.
+
+To isolate Q15 tail packing, including template counts 80, 103, 131, 140, 162,
+193 and controls 128/254, with native data groups 1, 2, 3, 4, and 32:
+
+```bash
+taskset -c 0 python tools/bench_q15_tails.py baseline/python candidate/python --output tails.json
+```
+
+Use `--verify-only` for untimed exact-output checks, or `--kinds screen` to isolate
+the coarse screen. The series cases keep the 256/512/1024 chain and thresholds fixed.
+The real-bank ladder remains the performance acceptance workload.
 
 To measure the effect of batching distinct Vulkan or Metal windows, with output equality
 checked before timing:

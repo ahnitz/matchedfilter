@@ -93,6 +93,7 @@ struct ap_mf_plan {
   /* Q15 coarse screen (ap_mf_q15_screen): int16 copies of the inputs, made on
      first use and invalidated by the setters. */
   int qw;                     /* int16 lanes per screen call; 0 until first use */
+  int qtail;                  /* retained backend supports N256 tail tiles */
   int16_t *qtr,*qti;          /* [group][n][qw] quantised templates, conjugated */
   float *qts;                 /* [nt] template scale: t_q = t * qts */
   unsigned char *qtok;        /* [nt] quantised copy current */
@@ -1565,6 +1566,7 @@ static int q15_prepare(ap_mf_plan *p){
   memset(p->qtr,0,ng*n*qw*sizeof(int16_t));
   memset(p->qti,0,ng*n*qw*sizeof(int16_t));
   p->qw=qw;
+  p->qtail=ap_q15_has_tile(p->fft);
   return 0;
 }
 
@@ -1608,7 +1610,9 @@ static void q15_template(ap_mf_plan *p,int t){
 /* |d_q|_2 is set so that |d_q|_2 * AP_Q15_TNORM / 2^15 + 1.5 n <= AP_Q15_L1:
    every template's |t_q|_2 is at most AP_Q15_TNORM, so this holds for every
    pair (the sqrt(n) is the rounding's worst growth of the norm). */
-static void q15_data(ap_mf_plan *p,int d){
+/* Keep preparation in its consumer's loop even with the separate tail caller;
+   outlining it changed the cost of ordinary series calls on narrow targets. */
+static inline __attribute__((always_inline)) void q15_data(ap_mf_plan *p,int d){
   const size_t n=p->n;
   const float *re=p->dre+(size_t)d*n, *im=p->dim+(size_t)d*n;
   int16_t *q=p->qd+(size_t)d*n*3;
@@ -1645,6 +1649,52 @@ static void q15_data(ap_mf_plan *p,int d){
   p->qdok[d]=1;
 }
 
+/* Keep tail scheduling separate so it does not expand the ordinary screen's
+   register allocation or data-quantization call sites on other backends. */
+static __attribute__((noinline)) int q15_tail_group(ap_mf_plan *p, int d0, int first,
+                      int t0, int nt, int g, int l1, float threshold,
+                      size_t start, size_t end, const float *bl,
+                      const int16_t *tr, const int16_t *ti,
+                      unsigned char *pass, float *stat){
+  const size_t n=256;
+  const int qw=32;
+  const float EQ=(float)ap_q15_margin(n);
+  int16_t lanethr[32], lanemax[32];
+  int total=0;
+  for(int d=d0;d<first;d++) if(!p->qdok[d]) q15_data(p,d);
+  for(int off=0;off<l1;){
+    const int width=l1-off<=8 ? 8 : 16;
+    const int blocks=32/width, active=l1-off<width ? l1-off : width;
+    for(int d=d0;d<first;d+=blocks){
+      for(int b=0;b<blocks;b++){
+        const float a=threshold*p->qds[d+b]*(float)(1.0/32768.0)*(1.0f-1e-4f);
+        for(int l=0;l<width;l++){
+          const float q=a*bl[off+l]-EQ;
+          const float T=q*q*(float)(1.0/32768.0)-1.0f;
+          lanethr[b*width+l]=!(q>0.f) ? (int16_t)-32768 : T>=32767.f ? (int16_t)32767 : (int16_t)ceilf(T);
+        }
+      }
+      uint64_t bits=0;
+      if(ap_q15_screen_tile(p->fft,width,p->qd+(size_t)d*n*3,tr+off,ti+off,
+                            start,end,lanethr,&bits,stat?lanemax:NULL,p->qscr)) return -1;
+      for(int b=0;b<blocks;b++){
+        const size_t row=(size_t)(d+b-d0)*nt+(size_t)(g*qw+off-t0);
+        for(int l=0;l<active;l++){
+          const int lane=b*width+l, ok=(int)((bits>>lane)&1u);
+          pass[row+l]=(unsigned char)ok;
+          total+=ok;
+          if(stat){
+            const double sdt=(double)p->qds[d+b]*bl[off+l]/32768.0;
+            stat[row+l]=sdt>0 ? (float)(sqrt((double)lanemax[lane]*32768.0)/sdt) : -1.0f;
+          }
+        }
+      }
+    }
+    off+=width;
+  }
+  return total;
+}
+
 int ap_mf_q15_screen(ap_mf_plan *p,int d0,int nd,int t0,int nt,float threshold,
                      size_t start,size_t end,unsigned char *pass,float *stat){
   if(!p||nd<1||nt<1) return 0;
@@ -1668,7 +1718,17 @@ int ap_mf_q15_screen(ap_mf_plan *p,int d0,int nd,int t0,int nt,float threshold,
       bl[l]=p->qts[t];
     }
     const int16_t *tr=p->qtr+(size_t)g*n*qw, *ti=p->qti+(size_t)g*n*qw;
-    for(int d=d0;d<d0+nd;d++){
+    int first=d0;
+    /* Only profitable aligned tails on the 32-lane N256 screen. A tile's
+       blocks all share this call's window. Complete groups and leftover
+       blocks retain the original broadcast path. */
+    if(p->qtail && l0==0 && l1<=24 && nd>=4){
+      first=d0+(nd/4)*4;
+      const int r=q15_tail_group(p,d0,first,t0,nt,g,l1,threshold,start,end,bl,tr,ti,pass,stat);
+      if(r<0) return -1;
+      total+=r;
+    }
+    for(int d=first;d<d0+nd;d++){
       if(!p->qdok[d]) q15_data(p,d);
       /* Lane l's int16 maximum m satisfies m >= |z_q|^2/2^15 - 1, and
          z_q = z * sd*st/2^15 to within EQ (ap_q15_margin).  So the float

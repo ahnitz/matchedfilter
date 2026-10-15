@@ -6,6 +6,11 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ### Performance
 
+- AVX-512 N256 Q15 screens fill partial template batches with independent data
+  blocks. A longer paired Zen 5 ladder comparison reduced Q15 time 4.3%, fine-stage
+  time 2.1%, and whole-segment time 1.8%, with identical outputs. Small data groups,
+  complete template batches, and other CPU targets retain the existing kernel.
+  See [Q15 tail packing](docs/cpu-q15-tail-packing.md) for controls and limits.
 - CPU hierarchical series calls prepare later-tier data only for blocks with incoming
   survivors. In a paired Zen 5 ladder comparison, fine-stage time fell 3.7% and total
   segment time 3.1%, with identical outputs. A steady segment avoided 41.8% of band-512
