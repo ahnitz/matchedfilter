@@ -20,7 +20,13 @@
 // the tier's values sit where fp16 holds them whatever the caller's units. The host
 // scales the packed templates and the tier's threshold to match (_vkcompute._c16_scales).
 [[vk::constant_id(79)]] const uint mfDataScaleBits = 0x3f800000u;
+// The untiled fp16 coarse transform's inter-level twiddles: 1 from the build's fp16 table
+// (COARSE_TWT), 0 from an fp32 recurrence. A measured per-device choice (_vkcompute
+// _coarse_layouts): the table was 7% faster on a Radeon 8060S and 1.3-7x slower on an
+// Iris Xe, whose table loads cost more than the recurrence's arithmetic.
+[[vk::constant_id(80)]] const uint mfCoarseTwt = 1;
 #elif defined(MF_CUDA)
+static const uint mfCoarseTwt = 1;
 static const uint mfDataStride = 0;
 static const uint mfRowWindows = 0;
 static const uint mfDataScaleBits = 0x3f800000u;
@@ -38,6 +44,7 @@ uint mfC16RawFlag()
 static const uint mfAccurateTrig = 0;
 static const uint mfSubgroupSize = 32;
 #elif defined(MF_METAL)
+static const uint mfCoarseTwt = 0;
 static const uint mfDataStride = 0;
 static const uint mfRowWindows = 0;
 static const uint mfDataScaleBits = 0x3f800000u;
@@ -55,6 +62,7 @@ uint mfC16RawFlag()
 static const uint mfAccurateTrig = 0;
 static const uint mfSubgroupSize = 32;
 #else
+static const uint mfCoarseTwt = 0;
 static const uint mfDataStride = 0;
 static const uint mfRowWindows = 0;
 static const uint mfDataScaleBits = 0x3f800000u;

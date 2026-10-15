@@ -18,6 +18,19 @@
 #else
         dftR(r);
 #endif
+#if COARSE16 && defined(COARSE_TWT)
+        // The fp16 coarse role: W_len^(lane*k2) from the build's table (filterTwo's),
+        // correctly rounded to half, where the device measured it faster (mfCoarseTwt):
+        // the fp32 recurrence and its two conversions per register were 13-18% of the
+        // band-256 untiled kernel on a Radeon 8060S and an Iris Xe, but the Iris Xe's table
+        // loads cost more than that.
+        if (mfCoarseTwt != 0u) {
+            const uint toff = (lvl == 0) ? 0u
+                : ((lvl == 1) ? WG * R : WG * R + (WG >> FFT_LOG_RADIX) * R);
+            [unroll] for (uint k2 = 0; k2 < R; ++k2)
+                r[k2] = cmul(r[k2], bit_cast<C>(COARSE_TWT[toff + lane * R + k2]));
+        } else
+#endif
         // Same recurrence as the SoA path: w_k = w_1^k, so one cos/sin per
         // level rather than sixteen. Every band except 512 runs THIS path,
         // so leaving it here would have confined the saving to one band.

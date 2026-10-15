@@ -35,7 +35,7 @@ def ctx():
 _SENTINEL = 0x5EED5EED
 
 
-def _coarse(ctx, band, tile, x, t, subgroup=0, ppg=1, tail=None):
+def _coarse(ctx, band, tile, x, t, subgroup=0, ppg=1, tail=None, twt=1):
     """(peak index, peak value) per (row, template) from one coarse build at `ppg` pairs per
     group, launched as the host launches it (coarse_launch). With `tail` (a list), the output
     buffers carry spare slots past the last pair, seeded with _SENTINEL; their contents after
@@ -54,7 +54,7 @@ def _coarse(ctx, band, tile, x, t, subgroup=0, ppg=1, tail=None):
             bufs[3].write(np.full(2 * (nd * nt + spare), _SENTINEL, np.uint32))
         pipe, layout, sl = ctx._build_pipeline(
             ("coarse16-test", band, ppg, tile), V.coarse_stem(band, ppg, tile) + ".spv",
-            V._NBIND, V._PUSH_BYTES, data_stride=band, subgroup=subgroup)
+            V._NBIND, V._PUSH_BYTES, data_stride=band, subgroup=subgroup, coarse_twt=twt)
         dset = ctx._descriptor_set(sl, bufs)
         slot_val, groups = V.coarse_launch(nd, nt, ppg, tile, band, ragged_groups=True)
         V._check(vk.vkAllocateCommandBuffers(ctx.device, ctypes.byref(
@@ -103,9 +103,9 @@ def test_tiles_match_untiled_and_fail_open(ctx, band):
                    if rngs else [])
     ref_idx, ref_val = _coarse(ctx, band, 1, x, t, 0)
     for sg in sizes:
-        for tile in (1,) + tuple(tiles):
-            idx, val = _coarse(ctx, band, tile, x, t, sg)
-            where = "band %d tile %d subgroup %d" % (band, tile, sg or ctx.subgroup_size)
+        for tile, twt in ((1, 1), (1, 0)) + tuple((tl, 1) for tl in tiles):
+            idx, val = _coarse(ctx, band, tile, x, t, sg, twt=twt)
+            where = "band %d tile %d twt %d subgroup %d" % (band, tile, twt, sg or ctx.subgroup_size)
             # The loud row must pass the gate: a listed peak, its value not below any
             # threshold (NaN or inf, which the compaction lists).
             mag = np.hypot(val[1, :, 0], val[1, :, 1])
@@ -185,18 +185,21 @@ def test_transient_fails_open_in_every_layout(ctx, band, K, monkeypatch):
                                    if rngs else [])
     for sg in sizes:
         for ppg in (1, 2, 4, 8, 16):
-            for tile in (1,) + V.shipped_tiles(band, ppg, V._spv_shipped):
+            for tile, twt in [(1, 1), (1, 0)] + [(t, 1) for t in
+                                                  V.shipped_tiles(band, ppg, V._spv_shipped)]:
                 if not V._spv_shipped(V.coarse_stem(band, ppg, tile)):
                     continue
                 monkeypatch.setenv("MF_VK_COARSE_SUBGROUP", str(sg))
                 monkeypatch.setenv("MF_VK_COARSE_PPG", str(ppg))
                 monkeypatch.setenv("MF_VK_COARSE_TILE", str(tile))
+                monkeypatch.setenv("MF_VK_COARSE_TWT", str(twt))   # untiled: table and recurrence
                 c = V.Context(0)              # recorded plans are cached per context, not per layout
                 try:
                     idx, _ = c.hier_peaks(n, band, data, tmpl, ct0, 0.999 * K, binsize=n, threshold=0.0)
                     geom = c._coarse_geometry(band, 1, nt)
                 finally:
                     c.destroy()
-                where = "band %d subgroup %d ppg %d tile %d (ran %s)" % (band, sg, ppg, tile, geom[:3])
+                where = "band %d subgroup %d ppg %d tile %d twt %d (ran %s)" % (
+                    band, sg, ppg, tile, twt, (geom[:3], geom[5]))
                 lost = int((idx.reshape(nt) < 0).sum())
                 assert not lost, "%s: gate dismissed %d of %d pairs" % (where, lost, nt)

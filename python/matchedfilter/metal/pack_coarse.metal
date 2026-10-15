@@ -23,7 +23,7 @@ uint firstbithigh_0(uint value_0)
 }
 
 
-#line 3 "/home/ahnitz/projects/claude/searchdev/work/mf-next/src/gpu/pack_coarse.slang"
+#line 3 "/home/ahnitz/projects/claude/searchdev/work/mf-gpu-c16/src/gpu/pack_coarse.slang"
 struct EntryPointParams_0
 {
     uint n_0;
