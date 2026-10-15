@@ -15,6 +15,12 @@ def _backend():
     return next(d for d in mf.devices() if str(d) == dev).backend
 
 
+def _drop_cuda_choice(ctx, band):
+    pipes = getattr(ctx, "_pipelines", None)
+    if isinstance(pipes, dict):
+        pipes.pop(("coarse_choice", band, True), None)
+
+
 def _forced_context(backend, band, ppg, monkeypatch):
     """A fresh context whose band-`band` coarse layout is untiled at `ppg` pairs per group."""
     if backend == "vulkan":
@@ -40,7 +46,11 @@ def _forced_context(backend, band, ppg, monkeypatch):
             return mine[0] if mine else orig(self, b, cands)
         monkeypatch.setattr(C.Context, "_time_coarse", pick)
         ctx = C.Context(0)
+        # The chosen kernel is cached per DEVICE (shared by every context): drop it so this
+        # forced choice is made, and drop the forced one after (_drop_cuda_choice).
+        ctx._pipelines.pop(("coarse_choice", band, True), None)
         if ctx._coarse_kernel(band, 5)[2] != ppg:
+            _drop_cuda_choice(ctx, band)
             return None
         return ctx
     pytest.skip("backend %s" % backend)
@@ -64,6 +74,8 @@ def test_packed_untiled_builds_elect_what_one_pair_per_group_does(band, monkeypa
             idx, val = ctx.hier_peaks(n, band, data, tmpl, ct0, 0.0, binsize=n, threshold=0.0)
             return np.asarray(idx).copy(), np.asarray(val).copy()
         finally:
+            if backend == "cuda":
+                _drop_cuda_choice(ctx, band)
             if hasattr(ctx, "destroy"):
                 ctx.destroy()
 
