@@ -420,6 +420,60 @@ def _reset_args(vk, cmd, buf):
     vk.vkCmdUpdateBuffer(cmd, buf.handle, 0, 12, ctypes.addressof(_ARGS_INIT))
 
 
+class _Recording:
+    """A primary command buffer being recorded: allocated from the context's pool and begun
+    with `flags` (a VkCommandBufferUsageFlags), with the steps every recording repeats.
+    end() finishes it and returns the handle; `cmd` takes any other command."""
+
+    def __init__(self, ctx, what, flags=0):
+        self.vk, self.ctx, self.what = ctx.vk, ctx, what
+        self.cmd = _vp()
+        _check(self.vk.vkAllocateCommandBuffers(ctx.device, ctypes.byref(
+            _CmdBufAlloc(40, None, ctx.command_pool, 0, 1)), ctypes.byref(self.cmd)),
+            what + " allocate")
+        _check(self.vk.vkBeginCommandBuffer(self.cmd, ctypes.byref(
+            _CmdBufBegin(42, None, flags, None))), what + " begin")
+
+    def bind(self, pipe, ds, words=(), size=None):
+        """Bind pipe, a (pipeline, layout, set layout) triple, with descriptor set ds, and
+        push `words` (uint32; negative values as their two's complement) as `size` bytes
+        (4 per word by default)."""
+        vk, cmd = self.vk, self.cmd
+        vk.vkCmdBindPipeline(cmd, _BIND_POINT_COMPUTE, pipe[0])
+        vk.vkCmdBindDescriptorSets(cmd, _BIND_POINT_COMPUTE, pipe[1], 0, 1, (_vp * 1)(ds),
+                                   0, None)
+        if words:
+            pc = (ctypes.c_uint32 * len(words))(*(int(w) & 0xFFFFFFFF for w in words))
+            vk.vkCmdPushConstants(cmd, pipe[1], _STAGE_COMPUTE, 0, size or 4 * len(words),
+                                  ctypes.byref(pc))
+
+    def dispatch(self, groups):
+        self.vk.vkCmdDispatch(self.cmd, groups, 1, 1)
+
+    def dispatch_indirect(self, buf):
+        self.vk.vkCmdDispatchIndirect(self.cmd, buf.handle, 0)
+
+    def barrier(self, src_stage=_STAGE_COMPUTE_BIT, dst_stage=_STAGE_COMPUTE_BIT,
+                src_access=_ACCESS_SHADER_WRITE, dst_access=_ACCESS_SHADER_READ, buffer=None):
+        """A memory barrier, or one on `buffer` alone (its whole range)."""
+        if buffer is None:
+            mb = _MemBarrier(46, None, src_access, dst_access)
+            self.vk.vkCmdPipelineBarrier(self.cmd, src_stage, dst_stage, 0, 1,
+                                         ctypes.byref(mb), 0, None, 0, None)
+        else:
+            bmb = _BufMemBarrier(44, None, src_access, dst_access, _QUEUE_FAMILY_IGNORED,
+                                 _QUEUE_FAMILY_IGNORED, buffer.handle, 0, _WHOLE_SIZE)
+            self.vk.vkCmdPipelineBarrier(self.cmd, src_stage, dst_stage, 0, 0, None, 1,
+                                         ctypes.byref(bmb), 0, None)
+
+    def stamp(self, name):
+        self.ctx._stamp(self.cmd, name)
+
+    def end(self):
+        _check(self.vk.vkEndCommandBuffer(self.cmd), self.what + " end")
+        return self.cmd
+
+
 class _Buffer:
     """A storage buffer plus its memory, mapped for the lifetime of the object.
 
@@ -2126,27 +2180,19 @@ class Context(InputUploads):
         vk = self.vk
         sg, ppg, tile = layout_[:3]
         twt = layout_[3] if len(layout_) > 3 else 1
-        pipe, layout, set_layout = self._build_pipeline(
+        pipe = self._build_pipeline(
             ("coarse16", band, ppg, tile), coarse_stem(band, ppg, tile) + ".spv",
             _NBIND, _PUSH_BYTES, data_stride=band, subgroup=sg, coarse_twt=twt)
-        dset = self._descriptor_set(set_layout, bufs)
+        dset = self._descriptor_set(pipe[2], bufs)
         slot_val, groups = coarse_launch(ndm, ntm, ppg, tile, band)
-        cmd = _vp()
-        _check(vk.vkAllocateCommandBuffers(self.device, ctypes.byref(
-            _CmdBufAlloc(40, None, self.command_pool, 0, 1)), ctypes.byref(cmd)),
-            "coarse timing cmd")
+        rec = _Recording(self, "coarse timing")
+        cmd = rec.cmd
         times = []
         try:
-            _check(vk.vkBeginCommandBuffer(cmd, ctypes.byref(_CmdBufBegin(42, None, 0, None))),
-                   "coarse timing begin")
-            vk.vkCmdBindPipeline(cmd, _BIND_POINT_COMPUTE, pipe)
-            vk.vkCmdBindDescriptorSets(cmd, _BIND_POINT_COMPUTE, layout, 0, 1,
-                                       (_vp * 1)(dset), 0, None)
-            pc = (ctypes.c_uint32 * 7)(ntm, 0, band, slot_val, band.bit_length() - 1, 1,
-                                       self._gate_bits(0.0, band, sg, tile))
-            vk.vkCmdPushConstants(cmd, layout, _STAGE_COMPUTE, 0, _PUSH_BYTES, ctypes.byref(pc))
-            vk.vkCmdDispatch(cmd, groups, 1, 1)
-            _check(vk.vkEndCommandBuffer(cmd), "coarse timing end")
+            rec.bind(pipe, dset, (ntm, 0, band, slot_val, band.bit_length() - 1, 1,
+                                  self._gate_bits(0.0, band, sg, tile)))
+            rec.dispatch(groups)
+            rec.end()
             for rep in range(reps):
                 slot, begin, end = timer.pair()
                 cmds = (_vp * 3)(begin, cmd, end)
@@ -2271,26 +2317,9 @@ class Context(InputUploads):
             ppipe = self._build_pipeline("pack_coarse", "pack_coarse.spv", 2, 16)
             ds_pack = self._descriptor_set(ppipe[2], [b["data"], b["cdata"]])
 
-        cmd = _vp()
-        _check(vk.vkAllocateCommandBuffers(self.device, ctypes.byref(
-            _CmdBufAlloc(40, None, self.command_pool, 0, 1)), ctypes.byref(cmd)),
-            "vkAllocateCommandBuffers")
-        _check(vk.vkBeginCommandBuffer(cmd, ctypes.byref(
-            _CmdBufBegin(42, None, 0, None))), "vkBeginCommandBuffer")
-        self._stamp(cmd, "start")
-
-        def barrier(src_stage=_STAGE_COMPUTE_BIT, dst_stage=_STAGE_COMPUTE_BIT,
-                    src_access=_ACCESS_SHADER_WRITE, dst_access=_ACCESS_SHADER_READ):
-            mb = _MemBarrier(46, None, src_access, dst_access)
-            vk.vkCmdPipelineBarrier(cmd, src_stage, dst_stage,
-                                    0, 1, ctypes.byref(mb), 0, None, 0, None)
-
-        def bind(pipe, ds, words, size=_PUSH_BYTES):
-            vk.vkCmdBindPipeline(cmd, _BIND_POINT_COMPUTE, pipe[0])
-            vk.vkCmdBindDescriptorSets(cmd, _BIND_POINT_COMPUTE, pipe[1], 0, 1,
-                                       (_vp * 1)(ds), 0, None)
-            pc = (ctypes.c_uint32 * len(words))(*words)
-            vk.vkCmdPushConstants(cmd, pipe[1], _STAGE_COMPUTE, 0, size, ctypes.byref(pc))
+        rec = _Recording(self, "hierarchical")
+        cmd, barrier, stamp = rec.cmd, rec.barrier, rec.stamp
+        stamp("start")
 
         # The counts start at zero. Pairs that do not survive are never visited, so dense
         # outputs are cleared up front (a sparse reader takes only listed pairs, every bin of
@@ -2309,13 +2338,13 @@ class Context(InputUploads):
         barrier(src_stage=_STAGE_TRANSFER_BIT, src_access=_ACCESS_TRANSFER_WRITE,
                 dst_stage=_STAGE_COMPUTE_BIT | _STAGE_DRAW_INDIRECT_BIT,
                 dst_access=_ACCESS_SHADER_READ | _ACCESS_SHADER_WRITE | _ACCESS_INDIRECT_READ)
-        self._stamp(cmd, "fill")
+        stamp("fill")
 
         if pack:
-            bind(ppipe, ds_pack, (n, band0, nd * band0, 0), 16)
-            vk.vkCmdDispatch(cmd, (nd * band0 + 255) // 256, 1, 1)
+            rec.bind(ppipe, ds_pack, (n, band0, nd * band0, 0))
+            rec.dispatch((nd * band0 + 255) // 256)
             barrier()
-            self._stamp(cmd, "pack")
+            stamp("pack")
 
         for i, (bi, thr) in enumerate(tiers):
             cstart, cend, cspan, cshift = coarse_span(n, bi, lo, hi)
@@ -2323,39 +2352,37 @@ class Context(InputUploads):
                 # A ragged build reads the data row count where the (unused, one-bin)
                 # coarse bin size would go; the last word is the gate threshold of a
                 # gate-only tiled build (_gate_bits).
-                bind(cpipe, sets[0], (nt, cstart, cend, nd if ragged else cspan,
-                                      cshift & 0xFFFFFFFF, 1,
-                                      self._gate_bits(thr, bi, sg, tile)))
-                vk.vkCmdDispatch(cmd, groups, 1, 1)
+                rec.bind(cpipe, sets[0], (nt, cstart, cend, nd if ragged else cspan, cshift, 1,
+                                          self._gate_bits(thr, bi, sg, tile)))
+                rec.dispatch(groups)
             else:
-                bind(tpipes[i], sets[i], (nt, cstart, cend, cspan, cshift & 0xFFFFFFFF, 1, 0))
-                vk.vkCmdDispatchIndirect(cmd, b[args(i - 1)].handle, 0)
+                rec.bind(tpipes[i], sets[i], (nt, cstart, cend, cspan, cshift, 1, 0))
+                rec.dispatch_indirect(b[args(i - 1)])
             barrier()
-            self._stamp(cmd, "coarse%d" % bi)
-            bind(kpipe if i == 0 else lpipe, csets[i],
-                 (pairs, int(np.float32(thr).view(np.uint32)), nbins), 12)
-            vk.vkCmdDispatch(cmd, (pairs + 255) // 256, 1, 1)
+            stamp("coarse%d" % bi)
+            rec.bind(kpipe if i == 0 else lpipe, csets[i],
+                     (pairs, int(np.float32(thr).view(np.uint32)), nbins))
+            rec.dispatch((pairs + 255) // 256)
             # The count is consumed by indirect-command fetch, not by a shader. Missing this
             # dependency made Intel use the previous dispatch count (zero on first use),
             # even while the host read the new count later.
             barrier(dst_stage=_STAGE_COMPUTE_BIT | _STAGE_DRAW_INDIRECT_BIT,
                     dst_access=_ACCESS_SHADER_READ | _ACCESS_SHADER_WRITE | _ACCESS_INDIRECT_READ)
-            self._stamp(cmd, "compact" if not last else "compact%d" % i)
+            stamp("compact" if not last else "compact%d" % i)
         if bands:
             self._band_recompute(vk, cmd, b, bands, nt, pairs, "surv", "args", barrier)
-            self._stamp(cmd, "recompute")
+            stamp("recompute")
 
-        bind(rpipe, ds_listed, (nt, lo, hi, binsize, shift & 0xFFFFFFFF, nbins,
-                                int(np.float32(t2).view(np.uint32))))
-        vk.vkCmdDispatchIndirect(cmd, b["args"].handle, 0)
+        rec.bind(rpipe, ds_listed, (nt, lo, hi, binsize, shift, nbins,
+                                    int(np.float32(t2).view(np.uint32))))
+        rec.dispatch_indirect(b["args"])
         # Host readback includes the survivor count, which remains a fill write when no pair
         # survives, as well as shader-written peaks.
         barrier(src_stage=_STAGE_COMPUTE_BIT | _STAGE_TRANSFER_BIT,
                 src_access=_ACCESS_SHADER_WRITE | _ACCESS_TRANSFER_WRITE,
                 dst_stage=_STAGE_HOST_BIT, dst_access=_ACCESS_HOST_READ)
-        self._stamp(cmd, "refine")
-        _check(vk.vkEndCommandBuffer(cmd), "vkEndCommandBuffer")
-        return b, cmd
+        stamp("refine")
+        return b, rec.end()
 
     # ---- band-only forward with survivor recompute (docs section 12, option (a)) ----------
     def _band_source(self, n, B, nd, nt, data, slot):
@@ -2432,28 +2459,21 @@ class Context(InputUploads):
         if rec is not None:
             self._cache_touch('forward', fkey)
             return fkey, rec
-        vk = self.vk
         pipe, layout, sl = self._build_pipeline(("bands", n), "forward_bands_%d.spv" % n, 3, 8)
         pool_start = len(getattr(self, '_pools', []))
         ds = self._descriptor_set(sl, [series_b, starts_b, b["bands"]],
                                   [0, r0 * 4, 0] if r0 else None)
-        cmd = _vp()
-        _check(vk.vkAllocateCommandBuffers(self.device, ctypes.byref(
-            _CmdBufAlloc(40, None, self.command_pool, 0, 1)), ctypes.byref(cmd)), "band forward")
-        vk = self._capture_begin()
+        self._capture_begin()
+        cmd = None
         try:
-            _check(vk.vkBeginCommandBuffer(cmd, ctypes.byref(_CmdBufBegin(42, None, 0, None))), "b")
-            self._stamp(cmd, "start")
-            vk.vkCmdBindPipeline(cmd, _BIND_POINT_COMPUTE, pipe)
-            vk.vkCmdBindDescriptorSets(cmd, _BIND_POINT_COMPUTE, layout, 0, 1, (_vp * 1)(ds), 0, None)
-            pc = (ctypes.c_uint32 * 2)(nser, B)
-            vk.vkCmdPushConstants(cmd, layout, _STAGE_COMPUTE, 0, 8, ctypes.byref(pc))
-            vk.vkCmdDispatch(cmd, nd, 1, 1)
-            mb = _MemBarrier(46, None, _ACCESS_SHADER_WRITE, _ACCESS_SHADER_READ)
-            vk.vkCmdPipelineBarrier(cmd, _STAGE_COMPUTE_BIT, _STAGE_COMPUTE_BIT, 0, 1,
-                                    ctypes.byref(mb), 0, None, 0, None)
-            self._stamp(cmd, "forward")
-            _check(vk.vkEndCommandBuffer(cmd), "e")
+            rec = _Recording(self, "band forward")
+            cmd = rec.cmd
+            rec.stamp("start")
+            rec.bind((pipe, layout), ds, (nser, B))
+            rec.dispatch(nd)
+            rec.barrier()
+            rec.stamp("forward")
+            rec.end()
         finally:
             self._capture_end(cmd)
         # A forward record like any other, tied to the storage whose band buffer it writes.
@@ -2512,7 +2532,6 @@ class Context(InputUploads):
         r0, count = rows if rows is not None else (0, spectra.shape[0])
         if r0 % 64:
             raise ValueError("forward row offsets must be multiples of 64")
-        vk = self.vk
         pipe, layout, sl = self._build_pipeline(
             ("forward", n), "forward_%d.spv" % n, 3, 4)
         buffers = [shared_buffer(a, self) for a in (series, starts, spectra)]
@@ -2528,33 +2547,18 @@ class Context(InputUploads):
             self._cache_room(0, incoming=buffers)
             pool_start = len(getattr(self, '_pools', []))
             ds = self._descriptor_set(sl, buffers, [0, r0 * 4, r0 * n * 8] if r0 else None)
-            cmd = _vp()
-            info = _CmdBufAlloc(40, None, self.command_pool, 0, 1)
-            _check(vk.vkAllocateCommandBuffers(self.device, ctypes.byref(info),
-                                               ctypes.byref(cmd)), "allocate forward")
-            vk = self._capture_begin()
-            begin = _CmdBufBegin(42, None, 0, None)
-            _check(vk.vkBeginCommandBuffer(cmd, ctypes.byref(begin)), "begin forward")
-            self._stamp(cmd, "start")
-            vk.vkCmdBindPipeline(cmd, _BIND_POINT_COMPUTE, pipe)
-            sets = (_vp * 1)(ds)
-            vk.vkCmdBindDescriptorSets(cmd, _BIND_POINT_COMPUTE, layout, 0, 1,
-                                      sets, 0, None)
-            params = _u32(series.size)
-            vk.vkCmdPushConstants(cmd, layout, _STAGE_COMPUTE, 0, 4,
-                                  ctypes.byref(params))
-            vk.vkCmdDispatch(cmd, count, 1, 1)
-            barrier = _BufMemBarrier(44, None, _ACCESS_SHADER_WRITE,
-                                     _ACCESS_SHADER_READ | 0x2000,
-                                     _QUEUE_FAMILY_IGNORED, _QUEUE_FAMILY_IGNORED,
-                                     buffers[2].handle, 0, _WHOLE_SIZE)
-            vk.vkCmdPipelineBarrier(cmd, _STAGE_COMPUTE_BIT,
-                                    _STAGE_COMPUTE_BIT | 0x4000,  # HOST
-                                    0, 0, None, 1, ctypes.byref(barrier), 0, None)
-            self._stamp(cmd, "forward")
-            _check(vk.vkEndCommandBuffer(cmd), "end forward")
+            self._capture_begin()
+            rec = _Recording(self, "forward")
+            cmd = rec.cmd
+            rec.stamp("start")
+            rec.bind((pipe, layout), ds, (series.size,))
+            rec.dispatch(count)
+            # The spectra are read next by shaders and by the host (0x2000, 0x4000).
+            rec.barrier(dst_stage=_STAGE_COMPUTE_BIT | 0x4000,
+                        dst_access=_ACCESS_SHADER_READ | 0x2000, buffer=buffers[2])
+            rec.stamp("forward")
+            rec.end()
             self._capture_end(cmd)
-            vk = self.vk
             batch = (*buffers, cmd)
             forwards[key] = batch
             self._register_record('forward', key, None, pool_start)
@@ -2606,38 +2610,16 @@ class Context(InputUploads):
                 scratch = _Buffer(self, spectra.nbytes)
             ds1 = self._descriptor_set(sl1, (buffers[0], buffers[1], scratch))
             ds2 = self._descriptor_set(sl2, (scratch, buffers[2]))
-            cmd = _vp()
-            ci = _CmdBufAlloc(40, None, self.command_pool, 0, 1)
-            _check(self.vk.vkAllocateCommandBuffers(self.device, ctypes.byref(ci),
-                                                    ctypes.byref(cmd)), 'two-stage forward allocate')
-            _check(self.vk.vkBeginCommandBuffer(cmd, ctypes.byref(
-                _CmdBufBegin(42, None, 0, None))), 'two-stage forward begin')
-            self.vk.vkCmdBindPipeline(cmd, _BIND_POINT_COMPUTE, p1)
-            sets = (_vp * 1)(ds1)
-            self.vk.vkCmdBindDescriptorSets(cmd, _BIND_POINT_COMPUTE, l1,
-                                            0, 1, sets, 0, None)
-            pc = ctypes.c_uint32(series.size)
-            self.vk.vkCmdPushConstants(cmd, l1, _STAGE_COMPUTE, 0, 4,
-                                        ctypes.byref(pc))
-            self.vk.vkCmdDispatch(cmd, spectra.shape[0]*info['n1'], 1, 1)
-            bmb = _BufMemBarrier(44, None, _ACCESS_SHADER_WRITE, _ACCESS_SHADER_READ,
-                                 _QUEUE_FAMILY_IGNORED, _QUEUE_FAMILY_IGNORED,
-                                 scratch.handle, 0, _WHOLE_SIZE)
-            self.vk.vkCmdPipelineBarrier(cmd, _STAGE_COMPUTE_BIT, _STAGE_COMPUTE_BIT,
-                                         0, 0, None, 1, ctypes.byref(bmb), 0, None)
-            self.vk.vkCmdBindPipeline(cmd, _BIND_POINT_COMPUTE, p2)
-            sets = (_vp * 1)(ds2)
-            self.vk.vkCmdBindDescriptorSets(cmd, _BIND_POINT_COMPUTE, l2,
-                                            0, 1, sets, 0, None)
-            self.vk.vkCmdDispatch(cmd, spectra.shape[0]*info['n2'], 1, 1)
-            barrier = _BufMemBarrier(44, None, _ACCESS_SHADER_WRITE,
-                                     _ACCESS_SHADER_READ | 0x2000,
-                                     _QUEUE_FAMILY_IGNORED, _QUEUE_FAMILY_IGNORED,
-                                     buffers[2].handle, 0, _WHOLE_SIZE)
-            self.vk.vkCmdPipelineBarrier(cmd, _STAGE_COMPUTE_BIT,
-                                         _STAGE_COMPUTE_BIT | 0x4000,
-                                         0, 0, None, 1, ctypes.byref(barrier), 0, None)
-            _check(self.vk.vkEndCommandBuffer(cmd), 'two-stage forward end')
+            rec = _Recording(self, "two-stage forward")
+            rec.bind((p1, l1), ds1, (series.size,))
+            rec.dispatch(spectra.shape[0] * info['n1'])
+            rec.barrier(buffer=scratch)
+            rec.bind((p2, l2), ds2)
+            rec.dispatch(spectra.shape[0] * info['n2'])
+            # The spectra are read next by shaders and by transfers (0x2000, 0x4000).
+            rec.barrier(dst_stage=_STAGE_COMPUTE_BIT | 0x4000,
+                        dst_access=_ACCESS_SHADER_READ | 0x2000, buffer=buffers[2])
+            cmd = rec.end()
             batch = (*buffers, scratch, cmd)
             forwards[key] = batch
             self._register_record('forward', key, None, pool_start)
@@ -2888,7 +2870,6 @@ class Context(InputUploads):
 
     def _make_batch(self, key, n, nd, nt, nbins, binsize, shift, lo, hi, t2, data=None, tmpl=None):
         """Buffers, descriptor set and a recorded command buffer for one shape."""
-        vk = self.vk
         filename = self._peak_file(n, nbins)
         pipe, layout, set_layout = self._build_pipeline(
             ("peaks", filename), filename, _NBIND, _PUSH_BYTES)
@@ -2903,52 +2884,26 @@ class Context(InputUploads):
         b_data, b_tmpl, b_idx, b_val = bufs
         dset = self._descriptor_set(set_layout, bufs)
 
-        cb_info = _CmdBufAlloc(40, None, self.command_pool, 0, 1)
-        cmd = _vp()
-        _check(vk.vkAllocateCommandBuffers(self.device, ctypes.byref(cb_info),
-                                           ctypes.byref(cmd)),
-               "vkAllocateCommandBuffers")
         # NOT one-time-submit: this recording is replayed on every call.
-        begin = _CmdBufBegin(42, None, 0, None)
-        _check(vk.vkBeginCommandBuffer(cmd, ctypes.byref(begin)),
-               "vkBeginCommandBuffer")
-        vk.vkCmdBindPipeline(cmd, _BIND_POINT_COMPUTE, pipe)
-        sets = (_vp * 1)(dset)
-        vk.vkCmdBindDescriptorSets(cmd, _BIND_POINT_COMPUTE, layout, 0, 1,
-                                   sets, 0, None)
-        pc = (ctypes.c_uint32 * 7)(
-            nt, lo, hi, binsize, shift & 0xFFFFFFFF, nbins,
-            int(np.float32(t2).view(np.uint32)))
-        vk.vkCmdPushConstants(cmd, layout, _STAGE_COMPUTE, 0, _PUSH_BYTES,
-                              ctypes.byref(pc))
-        vk.vkCmdDispatch(cmd, nd * nt, 1, 1)
-        _check(vk.vkEndCommandBuffer(cmd), "vkEndCommandBuffer")
-        return (b_data, b_tmpl, b_idx, b_val, cmd)
+        rec = _Recording(self, "peaks")
+        rec.bind((pipe, layout), dset, (nt, lo, hi, binsize, shift, nbins,
+                                        int(np.float32(t2).view(np.uint32))))
+        rec.dispatch(nd * nt)
+        return (b_data, b_tmpl, b_idx, b_val, rec.end())
 
     def _transient_peaks(self, storage_key, n, nd, nt, nbins, binsize, shift, lo, hi, t2):
         """(command buffer, descriptor pool) for one flat-peaks call on cached buffers."""
-        vk = self.vk
         filename = self._peak_file(n, nbins)
         pipe, layout, set_layout = self._build_pipeline(
             ("peaks", filename), filename, _NBIND, _PUSH_BYTES)
         pools = self.__dict__.setdefault("_pools", [])
         dset = self._descriptor_set(set_layout, self._storage[storage_key])
         pool = pools.pop()                       # owned by this call, not the cache
-        cmd = _vp()
-        info = _CmdBufAlloc(40, None, self.command_pool, 0, 1)
-        _check(vk.vkAllocateCommandBuffers(self.device, ctypes.byref(info), ctypes.byref(cmd)),
-               "allocate transient peaks")
-        _check(vk.vkBeginCommandBuffer(cmd, ctypes.byref(_CmdBufBegin(42, None, 1, None))),
-               "begin transient peaks")            # ONE_TIME_SUBMIT
-        vk.vkCmdBindPipeline(cmd, _BIND_POINT_COMPUTE, pipe)
-        vk.vkCmdBindDescriptorSets(cmd, _BIND_POINT_COMPUTE, layout, 0, 1, (_vp * 1)(dset),
-                                   0, None)
-        pc = (ctypes.c_uint32 * 7)(nt, lo, hi, binsize, shift & 0xFFFFFFFF, nbins,
-                                   int(np.float32(t2).view(np.uint32)))
-        vk.vkCmdPushConstants(cmd, layout, _STAGE_COMPUTE, 0, _PUSH_BYTES, ctypes.byref(pc))
-        vk.vkCmdDispatch(cmd, nd * nt, 1, 1)
-        _check(vk.vkEndCommandBuffer(cmd), "end transient peaks")
-        return cmd, pool
+        rec = _Recording(self, "transient peaks", flags=1)    # ONE_TIME_SUBMIT
+        rec.bind((pipe, layout), dset, (nt, lo, hi, binsize, shift, nbins,
+                                        int(np.float32(t2).view(np.uint32))))
+        rec.dispatch(nd * nt)
+        return rec.end(), pool
 
     def _release_transient(self, transient):
         cmd, pool = transient
@@ -2971,7 +2926,6 @@ class Context(InputUploads):
         ``threshold`` comes back with index -1 and a zero value.  No
         magnitude is produced anywhere -- it is ``abs(value)``.
         """
-        vk = self.vk
         nd, nt = data.shape[0], tmpl.shape[0]
         lo, hi = (0, n) if window is None else (int(window[0]), int(window[1]))
         lo = max(0, min(lo, n))
@@ -3262,35 +3216,14 @@ class Context(InputUploads):
             filename = self._peak_file(n, nb)
             pipe, layout, sl = self._build_pipeline(
                 ("peaks", filename), filename, _NBIND, _PUSH_BYTES)
-            cmd = _vp()
-            info = _CmdBufAlloc(40, None, self.command_pool, 0, 1)
-            vk = self.vk
-            _check(vk.vkAllocateCommandBuffers(self.device, ctypes.byref(info),
-                                              ctypes.byref(cmd)), "allocate grouped peaks")
-            begin = _CmdBufBegin(42, None, 0, None)
-            _check(vk.vkBeginCommandBuffer(cmd, ctypes.byref(begin)), "begin grouped peaks")
-            vk.vkCmdBindPipeline(cmd, _BIND_POINT_COMPUTE, pipe)
+            rec = _Recording(self, "grouped peaks")
             for (lo, hi, a, b), offset in zip(groups, offsets):
                 ds = self._descriptor_set(sl, bufs, (a*n*8, 0, offset*4, offset*8))
-                sets = (_vp * 1)(ds)
-                vk.vkCmdBindDescriptorSets(cmd, _BIND_POINT_COMPUTE, layout,
-                                          0, 1, sets, 0, None)
-                pc = (_u32 * 7)(nt, lo, hi, binsize, shift & 0xffffffff, nb, int(t2))
-                vk.vkCmdPushConstants(cmd, layout, _STAGE_COMPUTE, 0,
-                                      _PUSH_BYTES, ctypes.byref(pc))
-                vk.vkCmdDispatch(cmd, (b-a)*nt, 1, 1)
-            barriers = (_BufMemBarrier * 2)(
-                _BufMemBarrier(44, None, _ACCESS_SHADER_WRITE, 0x2000,
-                               _QUEUE_FAMILY_IGNORED, _QUEUE_FAMILY_IGNORED,
-                               bufs[2].handle, 0, _WHOLE_SIZE),
-                _BufMemBarrier(44, None, _ACCESS_SHADER_WRITE, 0x2000,
-                               _QUEUE_FAMILY_IGNORED, _QUEUE_FAMILY_IGNORED,
-                               bufs[3].handle, 0, _WHOLE_SIZE)
-            )
-            vk.vkCmdPipelineBarrier(cmd, _STAGE_COMPUTE_BIT, 0x4000, 0,
-                                    0, None, 2, ctypes.cast(barriers, _vp), 0, None)
-            _check(vk.vkEndCommandBuffer(cmd), "end grouped peaks")
-            batch = (*bufs, cmd)
+                rec.bind((pipe, layout), ds, (nt, lo, hi, binsize, shift, nb, int(t2)))
+                rec.dispatch((b - a) * nt)
+            for out in bufs[2:4]:                # the host reads the peaks (0x4000, 0x2000)
+                rec.barrier(dst_stage=0x4000, dst_access=0x2000, buffer=out)
+            batch = (*bufs, rec.end())
             self._batches[key] = batch
             self._register_record('flat', key, key, pool_start)
             upload_tmpl = True
@@ -3345,7 +3278,7 @@ class Context(InputUploads):
                 else info['file']
             if not filename:
                 raise UnsupportedSize('no portable full-correlation GPU kernel for n=%d' % n)
-            pipe, layout, sl = self._build_pipeline(('full', filename), filename, 3, 4)
+            pipe = self._build_pipeline(('full', filename), filename, 3, 4)
             external = [b for a in (data, tmpl, out)
                         if (b := shared_buffer(a, self)) is not None]
             estimate = sum(a.nbytes for a in (data, tmpl, out)
@@ -3355,23 +3288,10 @@ class Context(InputUploads):
             bufs = (shared_buffer(data, self) or _Buffer(self, data.nbytes),
                     shared_buffer(tmpl, self) or _Buffer(self, tmpl.nbytes),
                     shared_buffer(out, self) or _Buffer(self, out.nbytes, readback=True))
-            ds = self._descriptor_set(sl, bufs)
-            cmd = _vp()
-            info = _CmdBufAlloc(40, None, self.command_pool, 0, 1)
-            _check(self.vk.vkAllocateCommandBuffers(self.device, ctypes.byref(info),
-                                                    ctypes.byref(cmd)), 'full allocate')
-            _check(self.vk.vkBeginCommandBuffer(cmd, ctypes.byref(
-                _CmdBufBegin(42, None, 0, None))), 'full begin')
-            self.vk.vkCmdBindPipeline(cmd, _BIND_POINT_COMPUTE, pipe)
-            sets = (_vp * 1)(ds)
-            self.vk.vkCmdBindDescriptorSets(cmd, _BIND_POINT_COMPUTE, layout,
-                                            0, 1, sets, 0, None)
-            pc = ctypes.c_uint32(nt)
-            self.vk.vkCmdPushConstants(cmd, layout, _STAGE_COMPUTE, 0, 4,
-                                        ctypes.byref(pc))
-            self.vk.vkCmdDispatch(cmd, nd * nt, 1, 1)
-            _check(self.vk.vkEndCommandBuffer(cmd), 'full end')
-            batch = (*bufs, cmd)
+            rec = _Recording(self, "full")
+            rec.bind(pipe, self._descriptor_set(pipe[2], bufs), (nt,))
+            rec.dispatch(nd * nt)
+            batch = (*bufs, rec.end())
             self._full_batches[key] = batch
             self._register_record('full', key, None, pool_start)
             uploads = (True, True, *uploads[2:])
@@ -3406,32 +3326,13 @@ class Context(InputUploads):
             bo = shared_buffer(out, self) or _Buffer(self, out.nbytes, readback=True)
             ds1 = self._descriptor_set(sl1, (bd, bt, scratch))
             ds2 = self._descriptor_set(sl2, (scratch, bo))
-            cmd = _vp()
-            ci = _CmdBufAlloc(40, None, self.command_pool, 0, 1)
-            _check(self.vk.vkAllocateCommandBuffers(self.device, ctypes.byref(ci),
-                                                    ctypes.byref(cmd)), 'two-stage allocate')
-            _check(self.vk.vkBeginCommandBuffer(cmd, ctypes.byref(
-                _CmdBufBegin(42, None, 0, None))), 'two-stage begin')
-            self.vk.vkCmdBindPipeline(cmd, _BIND_POINT_COMPUTE, p1)
-            sets = (_vp * 1)(ds1)
-            self.vk.vkCmdBindDescriptorSets(cmd, _BIND_POINT_COMPUTE, l1,
-                                            0, 1, sets, 0, None)
-            pc = ctypes.c_uint32(nt)
-            self.vk.vkCmdPushConstants(cmd, l1, _STAGE_COMPUTE, 0, 4,
-                                        ctypes.byref(pc))
-            self.vk.vkCmdDispatch(cmd, nd*nt*info['n1'], 1, 1)
-            bmb = _BufMemBarrier(44, None, _ACCESS_SHADER_WRITE, _ACCESS_SHADER_READ,
-                                 _QUEUE_FAMILY_IGNORED, _QUEUE_FAMILY_IGNORED,
-                                 scratch.handle, 0, _WHOLE_SIZE)
-            self.vk.vkCmdPipelineBarrier(cmd, _STAGE_COMPUTE_BIT, _STAGE_COMPUTE_BIT,
-                                         0, 0, None, 1, ctypes.byref(bmb), 0, None)
-            self.vk.vkCmdBindPipeline(cmd, _BIND_POINT_COMPUTE, p2)
-            sets = (_vp * 1)(ds2)
-            self.vk.vkCmdBindDescriptorSets(cmd, _BIND_POINT_COMPUTE, l2,
-                                            0, 1, sets, 0, None)
-            self.vk.vkCmdDispatch(cmd, nd*nt*info['n2'], 1, 1)
-            _check(self.vk.vkEndCommandBuffer(cmd), 'two-stage end')
-            batch = (bd, bt, scratch, bo, cmd)
+            rec = _Recording(self, "two-stage")
+            rec.bind((p1, l1), ds1, (nt,))
+            rec.dispatch(nd * nt * info['n1'])
+            rec.barrier(buffer=scratch)
+            rec.bind((p2, l2), ds2)
+            rec.dispatch(nd * nt * info['n2'])
+            batch = (bd, bt, scratch, bo, rec.end())
             self._tierc_batches[key] = batch
             self._register_record('tierc', key, None, pool_start)
             uploads = (True, True, *uploads[2:])
@@ -3590,41 +3491,21 @@ class Context(InputUploads):
                 pipe, layout, sl = self._build_pipeline(('full-series', filename),
                                                          filename, 4, 16)
                 ds = self._descriptor_set(sl, (bd, bt, bs, bo), [0, 0, 0, bo.offset])
-            cmd = _vp()
-            ci = _CmdBufAlloc(40, None, self.command_pool, 0, 1)
-            _check(self.vk.vkAllocateCommandBuffers(self.device, ctypes.byref(ci),
-                                                    ctypes.byref(cmd)), 'continuous allocate')
-            _check(self.vk.vkBeginCommandBuffer(cmd, ctypes.byref(
-                _CmdBufBegin(42, None, 0, None))), 'continuous begin')
+            rec = _Recording(self, "continuous")
+            cmd = rec.cmd
             # Ordered against neighbouring work on this queue without a host wait: earlier
             # readers of `out` (last segment's fine stage) finish first, and later readers
             # see these writes (correlate_series(wait=False) leaves this in flight).
             _global_barrier(self.vk, cmd)
-            params = (_u32 * 4)(nt, length, lo, hi)
             if geometry:
-                self.vk.vkCmdBindPipeline(cmd, _BIND_POINT_COMPUTE, p1)
-                sets = (_vp * 1)(ds1)
-                self.vk.vkCmdBindDescriptorSets(cmd, _BIND_POINT_COMPUTE, l1,
-                                                0, 1, sets, 0, None)
-                count = _u32(nt)
-                self.vk.vkCmdPushConstants(cmd, l1, _STAGE_COMPUTE, 0, 4,
-                                            ctypes.byref(count))
-                self.vk.vkCmdDispatch(cmd, nd*nt*geometry['n1'], 1, 1)
-                bmb = _BufMemBarrier(44, None, _ACCESS_SHADER_WRITE, _ACCESS_SHADER_READ,
-                                     _QUEUE_FAMILY_IGNORED, _QUEUE_FAMILY_IGNORED,
-                                     scratch.handle, 0, _WHOLE_SIZE)
-                self.vk.vkCmdPipelineBarrier(cmd, _STAGE_COMPUTE_BIT, _STAGE_COMPUTE_BIT,
-                                             0, 0, None, 1, ctypes.byref(bmb), 0, None)
+                rec.bind((p1, l1), ds1, (nt,))
+                rec.dispatch(nd * nt * geometry['n1'])
+                rec.barrier(buffer=scratch)
                 pipe, layout, ds = p2, l2, ds2
-            self.vk.vkCmdBindPipeline(cmd, _BIND_POINT_COMPUTE, pipe)
-            sets = (_vp * 1)(ds)
-            self.vk.vkCmdBindDescriptorSets(cmd, _BIND_POINT_COMPUTE, layout,
-                                            0, 1, sets, 0, None)
-            self.vk.vkCmdPushConstants(cmd, layout, _STAGE_COMPUTE, 0, 16,
-                                        ctypes.byref(params))
-            self.vk.vkCmdDispatch(cmd, nd*nt*(geometry['n2'] if geometry else 1), 1, 1)
+            rec.bind((pipe, layout), ds, (nt, length, lo, hi))
+            rec.dispatch(nd * nt * (geometry['n2'] if geometry else 1))
             _global_barrier(self.vk, cmd)
-            _check(self.vk.vkEndCommandBuffer(cmd), 'continuous end')
+            rec.end()
             batch = ((bd, bt, scratch, bs, bo, cmd) if geometry
                      else (bd, bt, bs, bo, cmd))
             cache[key] = batch
