@@ -482,8 +482,9 @@ def _load_cost_file(path):
         return {}
 
 
-def stored_choice(key):
-    """A measured per-machine choice kept in MF_COST_FILE (None without a file or entry).
+def stored_choice(key, field="value"):
+    """A measured per-machine choice kept in MF_COST_FILE (None without a file or entry);
+    field names another part of its record (store_choice's extra fields).
 
     Measured choices -- a coarse kernel variant timed at first use, a fused batch's
     interleave depth, a chain or block-size trial -- are each valid, but made afresh per
@@ -494,7 +495,7 @@ def stored_choice(key):
     if path is None:
         return None
     rec = _load_cost_file(path).get("choice|" + key)
-    return rec.get("value") if isinstance(rec, dict) else None
+    return rec.get(field) if isinstance(rec, dict) else None
 
 
 def gpu_kernel_id(backend="vulkan"):
@@ -503,10 +504,10 @@ def gpu_kernel_id(backend="vulkan"):
     return identity(backend)
 
 
-def store_choice(key, value):
+def store_choice(key, value, **extra):
     path = _cost_file()
     if path is not None:
-        _store_cost(path, "choice|" + key, {"value": value})
+        _store_cost(path, "choice|" + key, {"value": value, **extra})
 
 
 @contextmanager

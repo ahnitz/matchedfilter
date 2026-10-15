@@ -170,6 +170,13 @@ def stored_measured_choice(memo, kind, device, band, cands, label, kernel_id, me
     timed (the first candidate is then used, unstored). Preference is tiebreak(c), then the
     candidates' order.
 
+    The two runners-up are stored with the choice, and a process that reads the choice back
+    first times it against them (measure over the three, a few milliseconds). If one is
+    faster beyond the measurement's noise, the stored choice is not trusted: everything is
+    measured again and the new choice stored. A measurement spoiled by a clock or power
+    transition then costs one process, not every process after it; on an 8060S one stored a
+    band-256 layout 1.6x slower than the best, and the file kept it.
+
     forced (a label, forced_layout's) is taken as it is, neither measured nor stored; a label
     that is not a candidate here raises ValueError naming the candidates."""
     labels = [label(c) for c in cands]
@@ -188,8 +195,13 @@ def stored_measured_choice(memo, kind, device, band, cands, label, kernel_id, me
     ckey = "%s|%s|%d|%s|k%s" % (kind, device, band, ";".join(labels), kernel_id)
     held = gatechain.stored_choice(ckey)
     if held in labels:
-        memo[k] = cands[labels.index(held)]
-        return memo[k]
+        choice = cands[labels.index(held)]
+        rivals = [cands[labels.index(r)]
+                  for r in (gatechain.stored_choice(ckey, "rivals") or "").split(";")
+                  if r in labels and r != held]
+        if not rivals or _still_fastest(choice, rivals, measure):
+            memo[k] = choice
+            return choice
     times = measure(cands)
     if not times:
         memo[k] = cands[0]
@@ -202,5 +214,17 @@ def stored_measured_choice(memo, kind, device, band, cands, label, kernel_id, me
     near = ({c for c in times if times[c] == times[fastest]}
             | set(getattr(times, "close", ())))
     memo[k] = min(near, key=lambda c: (tuple(tiebreak(c)) if tiebreak else ()) + (rank.get(c, 0),))
-    gatechain.store_choice(ckey, label(memo[k]))
+    runners = [c for c in sorted(times, key=lambda c: (times[c], rank.get(c, 0))) if c != memo[k]]
+    gatechain.store_choice(ckey, label(memo[k]), rivals=";".join(label(c) for c in runners[:2]))
     return memo[k]
+
+
+def _still_fastest(choice, rivals, measure):
+    """True unless a rival times faster than choice beyond the noise (measure over the
+    three; Timings.close holds the contenders within it of the fastest). A device that
+    cannot be timed keeps the choice."""
+    t = measure([choice] + list(rivals))
+    if not t:
+        return True
+    fastest = min(t, key=t.get)
+    return fastest == choice or t[choice] == t[fastest] or choice in getattr(t, "close", ())

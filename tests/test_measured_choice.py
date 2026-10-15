@@ -380,7 +380,8 @@ def test_stored_measured_choice_measures_once_stores_and_breaks_ties(monkeypatch
         memo, "t-kind", "dev", 256, ["a", "b", "c"], str, "k1", measure,
         tiebreak=lambda c: (-ord(c),))
     assert pick({}) == "c" and len(calls) == 1          # tie b/c broken by the tiebreak
-    assert pick({}) == "c" and len(calls) == 1          # a new process: read back, untimed
+    assert pick({}) == "c" and len(calls) == 2          # a new process: read back, re-checked
+    assert sorted(calls[1]) == ["a", "b", "c"]          # against the stored runners-up
     memo = {}
     assert _coarse.stored_measured_choice(memo, "t-kind", "dev", 256, ["a", "b"], str, "k2",
                                           lambda cs: None) == "a"   # unmeasurable: first
@@ -441,3 +442,26 @@ def test_a_forced_layout_is_taken_untimed_unstored_and_must_exist(monkeypatch, t
     with pytest.raises(ValueError, match="tierb_256_c16@16"):
         _coarse.stored_measured_choice(memo, "t-force", "dev", 256, names[:1], str, "k",
                                        measure, forced="tierb_256_c16p2t2w@16")
+
+
+def test_a_stored_choice_is_rechecked_against_its_runners_up(monkeypatch, tmp_path):
+    """A process reading a stored choice back times it against the two stored runners-up;
+    it keeps the choice when it is still the fastest, and measures everything again when a
+    runner-up is clearly faster (a measurement spoiled by a clock change is not kept)."""
+    from matchedfilter import _coarse, gatechain
+    monkeypatch.setenv("MF_COST_FILE", str(tmp_path / "c.json"))
+    true = {"a": 1.0, "b": 2.0, "c": 3.0, "d": 4.0}
+    calls = []
+
+    def measure(cs):
+        calls.append(sorted(cs))
+        return _coarse.Timings({c: true[c] for c in cs})
+    pick = lambda: _coarse.stored_measured_choice({}, "t-recheck", "dev", 256, list("abcd"),
+                                                  str, "k", measure)
+    assert pick() == "a" and calls == [list("abcd")]
+    assert pick() == "a" and calls[1:] == [list("abc")]          # re-checked, kept
+    ckey = "t-recheck|dev|256|a;b;c;d|kk"
+    gatechain.store_choice(ckey, "d", rivals="a;b")               # a spoiled measurement
+    calls.clear()
+    assert pick() == "a" and calls == [list("abd"), list("abcd")]   # re-measured
+    assert gatechain.stored_choice(ckey) == "a"
