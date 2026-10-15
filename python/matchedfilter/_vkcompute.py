@@ -1461,7 +1461,7 @@ class Context(InputUploads):
         return "tierb_%d.spv" % n
 
     def _build_pipeline(self, key, filename, nbind, push_bytes, data_stride=0, row_windows=0,
-                        subgroup=0, data_scale=0):
+                        subgroup=0, data_scale=0, coarse_twt=None):
         """data_stride: specialization constant 75 (mfDataStride), the data spectra's row
         stride when a hierarchical stage reads its band straight out of them.
         row_windows: constant 76 (mfRowWindows), per-row windows from the gRowWin binding.
@@ -1473,6 +1473,8 @@ class Context(InputUploads):
             key = (key, "stride", data_stride, "rowwin", row_windows)
         if data_scale:
             key = (key, "dscale", int(data_scale))
+        if coarse_twt is not None:
+            key = (key, "twt", int(coarse_twt))
         raw_c16 = os.environ.get("MF_VK_C16_BOUND", "1") == "0"
         if raw_c16:
             key = (key, "raw-c16")
@@ -1566,6 +1568,11 @@ class Context(InputUploads):
             # The fp16 coarse tier's data scale 2^data_scale, as float bits (constant 79).
             entries.append(_SpecializationEntry(79, offset, 4))
             data_vals.append(int(np.float32(2.0 ** int(data_scale)).view(np.uint32)))
+            offset += 4
+        if coarse_twt is not None:
+            # The untiled coarse transform's twiddles: table (1) or recurrence (0), constant 80.
+            entries.append(_SpecializationEntry(80, offset, 4))
+            data_vals.append(int(coarse_twt))
             offset += 4
         if raw_c16:
             # Raw fp16 coarse maxima, for measuring the error bound's margin use only.
@@ -2043,21 +2050,22 @@ class Context(InputUploads):
         divides the pair count -- ran 10 of a production segment's 27 fine groups (odd
         counts) at one pair per group, which on the Iris Xe cancelled a 1.45x coarse gain.
         """
-        sg, ppg, tile = self._coarse_choice(band)
+        sg, ppg, tile, twt = self._coarse_choice(band)
         if tile > 1:
-            return sg, ppg, tile, coarse_launch(nd, nt, ppg, tile, 0)[1], True
+            return sg, ppg, tile, coarse_launch(nd, nt, ppg, tile, 0)[1], True, twt
         for p in (32, 16, 8, 4, 2, 1):
             if p <= ppg and _spv_shipped(coarse_stem(band, p, 1)):
-                return sg, p, 1, coarse_launch(nd, nt, p, 1, 0, ragged_groups=True)[1], p > 1
-        return sg, 1, 1, nd * nt, False
+                return (sg, p, 1, coarse_launch(nd, nt, p, 1, 0, ragged_groups=True)[1], p > 1,
+                        twt)
+        return sg, 1, 1, nd * nt, False, twt
 
     def _coarse_layouts(self, band):
-        """Every coarse layout (subgroup, ppg, tile) this device can run at this band: the
+        """Every coarse layout (subgroup, ppg, tile, twt) this device can run at this band: the
         shipped builds whose group fits the device's invocation and shared-memory limits, at
         each subgroup size it can require (VK_EXT_subgroup_size_control; the default size
         only, 0, without it). MF_VK_COARSE_PPG caps the packing, MF_VK_COARSE_TILE and
-        MF_VK_COARSE_SUBGROUP fix the tile (1 = untiled) and subgroup, for measurement and
-        tests."""
+        MF_VK_COARSE_SUBGROUP fix the tile (1 = untiled) and subgroup, and MF_VK_COARSE_TWT an
+        untiled build's twiddles (1 table, 0 recurrence), for measurement and tests."""
         wg = max(1, band // 16)
         cap = int(os.environ.get("MF_VK_COARSE_PPG", "0") or 0)
         rng = getattr(self, "subgroup_range", None)
@@ -2068,6 +2076,7 @@ class Context(InputUploads):
         if forced_sg is not None:
             sizes = [forced_sg if forced_sg in sizes else sizes[0]]
         forced = forced_tile("MF_VK_COARSE_TILE")
+        forced_twt = forced_tile("MF_VK_COARSE_TWT")
         out = []
         for ppg in (1, 2, 4, 8, 16, 32):
             if cap and ppg > cap:
@@ -2085,10 +2094,12 @@ class Context(InputUploads):
                 # Sizes that would split the group past maxComputeWorkgroupSubgroups are
                 # out (_build_pipeline would bump them to the next size anyway).
                 lim = getattr(self, "max_workgroup_subgroups", 0)
-                out.extend((sg, ppg, tile) for sg in sizes
+                out.extend((sg, ppg, tile, twt) for sg in sizes
+                           for twt in ((1, 0) if tile == 1 else (1,))
+                           if forced_twt is None or tile > 1 or twt == forced_twt
                            if not (lim and sg and -(-wg * ppg // sg) > lim))
         if not out:
-            out = [(sizes[0], 1, 1)]
+            out = [(sizes[0], 1, 1, 0)]
         return out
 
     def _coarse_choice(self, band):
@@ -2107,7 +2118,7 @@ class Context(InputUploads):
         k = (band, tuple(cands))
         if k not in memo:
             from . import gatechain
-            labels = ["%d,%d,%d" % c for c in cands]
+            labels = ["%d,%d,%d,%d" % c for c in cands]
             ckey = "vk-coarse|%s|%d|%s|k%s" % (getattr(self, "device_name", ""), band,
                                               ";".join(labels), gatechain.gpu_kernel_id())
             held = gatechain.stored_choice(ckey)
@@ -2116,7 +2127,7 @@ class Context(InputUploads):
             else:
                 times = self._time_coarse_layouts(band, cands)
                 memo[k] = min(times, key=lambda c: (times[c], c[2], c[1], c[0]))
-                gatechain.store_choice(ckey, "%d,%d,%d" % memo[k])
+                gatechain.store_choice(ckey, "%d,%d,%d,%d" % memo[k])
         return memo[k]
 
     def _time_coarse_layouts(self, band, cands, pairs=16384, screen=1024, ntm=16, reps=3):
@@ -2167,15 +2178,17 @@ class Context(InputUploads):
             for b in bufs:
                 b.destroy()
         self.__dict__.setdefault("coarse_times", {}).setdefault(band, {}).update(
-            {"sg%d %s" % (c[0], coarse_stem(band, c[1], c[2])): v for c, v in out.items()})
+            {"sg%d %s%s" % (c[0], coarse_stem(band, c[1], c[2]), "" if c[3] else " recurrence"): v
+             for c, v in out.items()})
         return out
 
     def _time_coarse_layout(self, band, layout_, bufs, timer, ndm, ntm, reps):
         vk = self.vk
-        sg, ppg, tile = layout_
+        sg, ppg, tile = layout_[:3]
+        twt = layout_[3] if len(layout_) > 3 else 1
         pipe, layout, set_layout = self._build_pipeline(
             ("coarse16", band, ppg, tile), coarse_stem(band, ppg, tile) + ".spv",
-            _NBIND, _PUSH_BYTES, data_stride=band, subgroup=sg)
+            _NBIND, _PUSH_BYTES, data_stride=band, subgroup=sg, coarse_twt=twt)
         dset = self._descriptor_set(set_layout, bufs)
         slot_val, groups = coarse_launch(ndm, ntm, ppg, tile, band, ragged_groups=True)
         cmd = _vp()
@@ -2241,7 +2254,7 @@ class Context(InputUploads):
             # PPG = 512/band fills a wave32 where WG < 32. Safe now
             # that the peak reduction is per-pair (see tierb.slang): each
             # lane maxes into its own slot, so tiles cannot mix.
-            _sg, _ppg, _tile, _groups, _ragged = self._coarse_geometry(band, nd, nt)
+            _sg, _ppg, _tile, _groups, _ragged, _twt = self._coarse_geometry(band, nd, nt)
 
             # TILE_T is COMPILED INTO the kernel, so it is part of kernel
             # identity and must be decided HERE, where the kernel is
@@ -2262,7 +2275,7 @@ class Context(InputUploads):
                     "t%d" % _tile if _tile > 1 else ""),
                 _NBIND, _PUSH_BYTES, data_stride=bands[0] if bands else n,
                 row_windows=1 if rowwin is not None else 0, subgroup=_sg,
-                data_scale=data_scale)
+                data_scale=data_scale, coarse_twt=_twt)
         # gatedTierB is NOT built. Its only caller was coarse_odd(), the
         # last remnant of the even/odd split, which was never invoked after
         # the odd half was removed -- so the kernel was compiled on every
@@ -2461,7 +2474,7 @@ class Context(InputUploads):
         # bands: the coarse tiers read band rows of width B (the band-only forward's) instead
         # of the full spectra, and the refine's survivor rows are recomputed first.
         dstride = bands[0] if bands else n
-        _sg0, _ppg0, _tile0, _groups0, _ragged0 = self._coarse_geometry(band0, nd, nt)
+        _sg0, _ppg0, _tile0, _groups0, _ragged0, _twt0 = self._coarse_geometry(band0, nd, nt)
 
         cpipe0, clayout0, cset_layout0 = self._build_pipeline(
             ("coarse16", band0, _ppg0, _tile0),
@@ -2469,7 +2482,7 @@ class Context(InputUploads):
                 "p%d" % _ppg0 if _ppg0 > 1 else "",
                 "t%d" % _tile0 if _tile0 > 1 else ""),
             _NBIND, _PUSH_BYTES, data_stride=dstride, row_windows=rwc,
-            subgroup=_sg0, data_scale=data_scale)
+            subgroup=_sg0, data_scale=data_scale, coarse_twt=_twt0)
 
         kpipe, klayout, kset_layout = self._build_pipeline(
             "compact", "compact.spv", 3, 12)

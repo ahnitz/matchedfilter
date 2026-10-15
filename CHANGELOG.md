@@ -53,6 +53,14 @@ Alpha releases may change the API. Pin a version for reproducible work.
   in-kernel mapping made the band-256 kernel 1.47x slower at subgroup 16 on an Iris Xe (no
   effect at 8), so production never saw the subgroup-16 gain above.
 
+- fp16 coarse tier, untiled builds: the inter-level twiddles come from the build's fp16
+  table or from the fp32 recurrence, a measured per-device choice (Vulkan specialization
+  constant 80, a fourth field of the coarse layout; CUDA's table "w" builds). The
+  recurrence was 13-18% of the band-256 kernel on both a Radeon 8060S and an Iris Xe;
+  the table was 7-9% faster on the 8060S and 8.7x slower on the Iris Xe, whose table loads
+  are 64-bit global reads. The 8060S now takes the table (band 2048: 38.3 against 41.2 ns
+  per pair); the Iris Xe keeps the recurrence. Metal keeps the recurrence.
+
 ### Fixed
 
 - Existing Q15 plans retain their SIMD backend after `set_target()`, including lazy
