@@ -28,7 +28,7 @@ from ._cuda import check_cuda
 from ._errors import UnsupportedSize
 from ._gpu_cache import InputUploads
 from ._shared import empty_shared, shared_buffer, shared_key, _Borrowed
-from ._gpuhost import (MAX_BINS, bin_shift, plan_items, split_items, hier_tiers, hier_window,
+from ._gpuhost import (MAX_BINS, bin_shift, coarse_span, plan_items, split_items, hier_tiers, hier_window,
                        split_bins, grouped_windows)
 from ._shared import pack_half2 as _pack_half2
 
@@ -423,18 +423,6 @@ def _use_c16(band):
 
 
 _shift = bin_shift
-
-
-def _coarse_span(n, band, lo, hi):
-    """Coarse-sample window covering [lo, hi), widened by one sample at the start."""
-    r = n // band
-    cstart = lo // r
-    cend = min(band, (hi + r - 1) // r)
-    if cstart > 0:
-        cstart -= 1
-    cend = max(cstart + 1, cend)
-    cspan = max(1, cend - cstart)
-    return cstart, cend, cspan, _shift(cspan)
 
 
 def _coarse_grid(rows, nt, ppg, tile):
@@ -2063,7 +2051,7 @@ class Context(InputUploads):
                                   _u32(nd * b), _u32(packed)], stream=stream)
 
             # Tier 0: the coarse gate over every pair (and the padding rows' pairs).
-            cs, ce, csp, csh = _coarse_span(n, band0, lo, hi)
+            cs, ce, csp, csh = coarse_span(n, band0, lo, hi)
             grid, rowarg = self._coarse_grid_for(cfn, ndp, nt, ppg, tile)
             self._launch(cfn, grid, cwg,
                          [bufs["cdata0"].dptr, bufs["ct0"].dptr, bufs["cidx0"].dptr,
@@ -2081,7 +2069,7 @@ class Context(InputUploads):
                                              _u32(pairs), ctypes.c_float(float(raw_thr)), _u32(nbins)],
                              stream=stream)
                 r1, r1wg = self.pipeline(band1, "refineListed", one_bin=True)
-                cs1, ce1, csp1, csh1 = _coarse_span(n, band1, lo, hi)
+                cs1, ce1, csp1, csh1 = coarse_span(n, band1, lo, hi)
                 g1 = self._refine_grid(r1, r1wg, pairs)
                 self._launch(r1, g1, r1wg,
                              [bufs["cdata1"].dptr, bufs["ct1"].dptr, bufs["cidx1"].dptr,
@@ -2227,7 +2215,7 @@ class Context(InputUploads):
             self._launch(pack_fn, ((b - a) * band0 + 255) // 256, 256,
                          [_ptr(dptr + a * n * 8), _ptr(cd0 + off * band0 * cb0), _u32(n),
                           _u32(band0), _u32((b - a) * band0), _u32(int(c16))], stream=stream)
-            cs, ce, csp, csh = _coarse_span(n, band0, lo, hi)
+            cs, ce, csp, csh = coarse_span(n, band0, lo, hi)
             grid, rowarg = self._coarse_grid_for(cfn, rows, nt, *geom)
             self._launch(cfn, grid, cwg,
                          [_ptr(cd0 + off * band0 * cb0), bufs["ct0"].dptr, _ptr(ci0 + off * nt * 4),
@@ -2240,7 +2228,7 @@ class Context(InputUploads):
                 self._launch(kfn, cpt, 256, [_ptr(cv0 + off * nt * 8), _ptr(s0 + a * nt * 4), cnt_t1,
                                              _u32(gp), ctypes.c_float(float(raw_thr)), _u32(nb)],
                              stream=stream)
-                cs1, ce1, csp1, csh1 = _coarse_span(n, band1, lo, hi)
+                cs1, ce1, csp1, csh1 = coarse_span(n, band1, lo, hi)
                 g1 = self._refine_grid(r1, r1wg, gp)
                 self._launch(r1, g1, r1wg,
                              [_ptr(cd1 + a * band1 * 8), bufs["ct1"].dptr, _ptr(ci1 + a * nt * 4),

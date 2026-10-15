@@ -21,6 +21,21 @@ def bin_shift(binsize):
     return binsize.bit_length() - 1 if binsize & (binsize - 1) == 0 else -1
 
 
+def coarse_span(n, band, lo, hi):
+    """A gate tier's window in band samples, (start, end, span, shift): the caller's window
+    [lo, hi) at n, widened by one band sample at the start so rounding stays conservative.
+    The tier reduces it to ONE bin, so the reported peak is the window's maximum -- all a
+    gate needs. shift is bin_shift(span) (-1 when span is not a power of two)."""
+    r = n // band
+    cstart = lo // r
+    cend = min(band, (hi + r - 1) // r)
+    if cstart > 0:
+        cstart -= 1
+    cend = max(cstart + 1, cend)
+    cspan = max(1, cend - cstart)
+    return cstart, cend, cspan, bin_shift(cspan)
+
+
 def plan_items(items, binsize, align_words=1, max_bins=MAX_BINS):
     """Output layout of a peaks_items submission.
 

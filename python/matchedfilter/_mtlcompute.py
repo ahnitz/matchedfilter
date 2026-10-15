@@ -22,7 +22,7 @@ from functools import lru_cache, wraps
 
 import numpy as np
 from ._shared import empty_shared, shared_buffer, shared_key, write_input
-from ._gpuhost import (MAX_BINS, bin_shift, plan_items, split_items, hier_tiers, hier_window,
+from ._gpuhost import (MAX_BINS, bin_shift, coarse_span, plan_items, split_items, hier_tiers, hier_window,
                        split_bins)
 from ._shared import pack_half2 as _pack_half2, sparsified as _sparsified
 
@@ -1709,24 +1709,6 @@ class Context(InputUploads):
             {layout_label(band, *c): v for c, v in out.items()})
         return out
 
-    @staticmethod
-    def _coarse_span(n, band, lo, hi):
-        """The gate's window in band samples: (start, end, span, shift).
-
-        ONE bin over the span, so the reported peak IS the maximum -- all a
-        gate needs. Widened by one coarse sample so rounding the caller's
-        window remains conservative.
-        """
-        r = n // band
-        cstart = lo // r
-        cend = min((hi + r - 1) // r, band)
-        if cstart > 0:
-            cstart -= 1
-        cend = max(cstart + 1, cend)
-        cspan = max(1, cend - cstart)
-        shift = (cspan.bit_length() - 1) if cspan & (cspan - 1) == 0 else -1
-        return (cstart, cend, cspan, shift & 0xFFFFFFFF)
-
     @_autoreleased
     def hier_peaks(self, n, band, data, tmpl, ct0, raw_thr,
                    binsize=None, threshold=0.0, window=None,
@@ -1907,7 +1889,8 @@ class Context(InputUploads):
                                256, groups=(nd*b + 255)//256)
 
         for i, ((b, _, thr), h) in enumerate(zip(tiers, half)):
-            span = self._coarse_span(n, b, lo, hi)
+            cs, ce, csp, csh = coarse_span(n, b, lo, hi)
+            span = (cs, ce, csp, csh & 0xFFFFFFFF)
             if i == 0:
                 coarse = coarse0
                 # A ragged build reads the data row count from the binsize slot
