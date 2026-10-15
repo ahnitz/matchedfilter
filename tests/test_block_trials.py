@@ -151,7 +151,7 @@ def test_two_short_ladder_processes_lock_the_trial(monkeypatch, tmp_path):
     rng = np.random.default_rng(3)
     L = 1 << 15
     data = ((rng.standard_normal(L) + 1j * rng.standard_normal(L)) / np.sqrt(2)).astype(np.complex64)
-    for proc, batches in ((0, 5), (1, 400)):        # 5 < ranks x (settle + samples)
+    for proc, batches in ((0, 2), (1, 400)):        # fewer than five complete CPU rounds
         monkeypatch.setattr(td, "_BLOCK_TRIALS", td._BlockTrials())   # a new process
         bank, _ = _inspiral_bank()
         if proc == 0 and len(getattr(bank, "_layouts", None) or []) < 2:

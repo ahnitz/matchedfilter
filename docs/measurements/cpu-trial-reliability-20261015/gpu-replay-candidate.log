@@ -1,0 +1,51 @@
+replay: no trace
+replay: no trace
+replay: no trace
+replay: no trace
+replay: trace not replayable: devices 1 sync jobs 0 untraced 30
+replay: no trace
+replay: trace not replayable: devices 1 sync jobs 0 untraced 30
+replay: no trace
+replay: trace not replayable: devices 1 sync jobs 0 untraced 30
+replay: no trace
+replay: trace not replayable: devices 1 sync jobs 0 untraced 30
+replay: no trace
+replay: trace not replayable: devices 1 sync jobs 0 untraced 30
+replay: no trace
+replay: trace not replayable: devices 1 sync jobs 0 untraced 30
+replay: no trace
+replay: trace not replayable: devices 1 sync jobs 0 untraced 30
+replay: no trace
+replay: trace not replayable: devices 1 sync jobs 0 untraced 30
+replay: no trace
+replay: trace not replayable: devices 1 sync jobs 0 untraced 30
+replay: no trace
+replay: no trace
+replay: no trace
+replay: trace not replayable: devices 0 sync jobs 54 untraced 0
+replay: no trace
+replay: trace not replayable: devices 0 sync jobs 54 untraced 0
+replay: no trace
+replay: trace not replayable: devices 0 sync jobs 54 untraced 0
+replay: no trace
+replay: trace not replayable: devices 0 sync jobs 54 untraced 0
+replay: no trace
+replay: trace not replayable: devices 0 sync jobs 54 untraced 0
+replay: no trace
+replay: trace not replayable: devices 0 sync jobs 54 untraced 0
+replay: no trace
+replay: trace not replayable: devices 0 sync jobs 54 untraced 0
+replay: no trace
+replay: trace not replayable: devices 0 sync jobs 54 untraced 0
+replay: no trace
+replay: trace not replayable: devices 0 sync jobs 54 untraced 0
+replay: no trace
+replay: trace not replayable: devices 0 sync jobs 54 untraced 0
+throughput: 3.779e+07 templates in real time on gpu:0 (fine templates x analysed seconds x 2 detectors / steady wall)
+gpu:0: 4698 fine templates, 1 tops x 12 segments; steady middle 0.01s, fine 0.92s, segment 0.93s, wall 0.93s, cpu 0.87s; warmup (2 segments) 17.1s
+  templates-in-real-time: middle 2.92e+09, fine 3.84e+07, segment 3.78e+07, wall 3.78e+07, cpu 4.05e+07, total 3.78e+07
+  calls: middle 10, fine 10, segment 10, wall 0, cpu 0; fine_triggers 1002, asym_calls 206, segment_replays 0, segment_capture_failures 0, followups_device 12
+  gpu (sysfs, steady): busy 31%, sclk mean 2268 MHz (min 2028, max 2391), 42 samples
+  host: cpu 0.872s of steady wall 0.934s (93%)
+  reference cpu: steady middle 0.01s, fine 3.57s, segment 3.58s, wall 3.58s, cpu 3.57s
+  check: {"calls": 851, "max_snr_diff": 1.5852592696319334e-05, "gate_margin_peaks": 9, "peaks_reference_only": 0, "peaks_device_only": 0, "loudest": []}

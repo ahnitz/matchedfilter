@@ -1,0 +1,3 @@
+gate: 539266ed on gravity-dev2.syr.edu, device gpu:0, logs /tmp/mf-cpu-trial-final-suite
+suite      ok    run 1/1: 1948 passed, 165 skipped in 402.85s (0:06:42) (404s)
+gate: passed (0 skipped)

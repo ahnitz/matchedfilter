@@ -1,0 +1,9 @@
+gate: 539266ed on gravity-dev2.syr.edu, device gpu:0, logs /tmp/mf-cpu-trial-final-full-gate
+suite      ok    run 1/1: 1949 passed, 165 skipped in 393.28s (0:06:33) (394s)
+check      ok    batched: 264 calls, one-sided 0/0, max SNR diff 2.3e-05 (59s)
+check      ok    pipeline: 264 calls, one-sided 0/0, max SNR diff 1.6e-05 (57s)
+replay     FAIL  850 calls, one-sided 0/0, max SNR diff 1.6e-05; no segment replays (trials not locked after 40 segments?); 0 replays, 0 capture failures (83s)
+margin     ok    q15 gpu-c16: gate_margin: all ok (19s)
+repro      ok    0/5 runs failed
+followups  ok    0/5 runs failed
+gate: FAILED

@@ -1,0 +1,594 @@
+[
+  {
+    "arm": "baseline",
+    "q15": true,
+    "round": 0,
+    "throughput": 4919517.830133159,
+    "steady": {
+      "middle": 0.8190657701343298,
+      "fine": 4.821103565394878,
+      "asym": 0.10064012371003628,
+      "segment": 5.745109373703599,
+      "wall": 5.745124291628599,
+      "cpu": 5.718984011000003
+    },
+    "counts": {
+      "fine_triggers": 907,
+      "asym_calls": 181
+    },
+    "locks": {
+      "block-trial|cpu|2048,4096,8192": {
+        "winner": 0,
+        "rechecked": false
+      },
+      "chain-trial|2048|6|0.001|3|cpu:0|direct": {
+        "chain": [
+          256,
+          512,
+          1024
+        ],
+        "rechecked": false
+      },
+      "q15-trial|2048|6|0.001|256,512,1024|cpu:0": {
+        "q15": true,
+        "rechecked": false
+      }
+    },
+    "core_sha256": "a126c02a12c0a5092dfc528493d180d8773fd2e6779c4ae1c37fbafd00f16d7d"
+  },
+  {
+    "arm": "candidate",
+    "q15": true,
+    "round": 0,
+    "throughput": 4909215.084429903,
+    "steady": {
+      "middle": 0.8080000542104244,
+      "fine": 4.842075267806649,
+      "asym": 0.10268175788223743,
+      "segment": 5.757166372612119,
+      "wall": 5.757180610671639,
+      "cpu": 5.728158099999995
+    },
+    "counts": {
+      "fine_triggers": 907,
+      "asym_calls": 181
+    },
+    "locks": {
+      "block-trial|cpu|2048,4096,8192": {
+        "winner": 0,
+        "rechecked": false
+      },
+      "chain-trial|2048|6|0.001|3|cpu:0|direct": {
+        "chain": [
+          256,
+          512,
+          1024
+        ],
+        "rechecked": false
+      },
+      "q15-trial|2048|6|0.001|256,512,1024|cpu:0": {
+        "q15": true,
+        "rechecked": false
+      }
+    },
+    "core_sha256": "a126c02a12c0a5092dfc528493d180d8773fd2e6779c4ae1c37fbafd00f16d7d"
+  },
+  {
+    "arm": "candidate",
+    "q15": true,
+    "round": 1,
+    "throughput": 4917426.000396471,
+    "steady": {
+      "middle": 0.8105229623615742,
+      "fine": 4.830608401447535,
+      "asym": 0.10216148570179939,
+      "segment": 5.747553292661905,
+      "wall": 5.747567862272263,
+      "cpu": 5.721357491000006
+    },
+    "counts": {
+      "fine_triggers": 907,
+      "asym_calls": 181
+    },
+    "locks": {
+      "block-trial|cpu|2048,4096,8192": {
+        "winner": 0,
+        "rechecked": false
+      },
+      "chain-trial|2048|6|0.001|3|cpu:0|direct": {
+        "chain": [
+          256,
+          512,
+          1024
+        ],
+        "rechecked": false
+      },
+      "q15-trial|2048|6|0.001|256,512,1024|cpu:0": {
+        "q15": true,
+        "rechecked": false
+      }
+    },
+    "core_sha256": "a126c02a12c0a5092dfc528493d180d8773fd2e6779c4ae1c37fbafd00f16d7d"
+  },
+  {
+    "arm": "baseline",
+    "q15": true,
+    "round": 1,
+    "throughput": 4916220.66451349,
+    "steady": {
+      "middle": 0.8161024991422892,
+      "fine": 4.826398104429245,
+      "asym": 0.10221614688634872,
+      "segment": 5.748962450772524,
+      "wall": 5.748977230861783,
+      "cpu": 5.719636351000002
+    },
+    "counts": {
+      "fine_triggers": 907,
+      "asym_calls": 181
+    },
+    "locks": {
+      "block-trial|cpu|2048,4096,8192": {
+        "winner": 0,
+        "rechecked": false
+      },
+      "chain-trial|2048|6|0.001|3|cpu:0|direct": {
+        "chain": [
+          256,
+          512,
+          1024
+        ],
+        "rechecked": false
+      },
+      "q15-trial|2048|6|0.001|256,512,1024|cpu:0": {
+        "q15": true,
+        "rechecked": false
+      }
+    },
+    "core_sha256": "a126c02a12c0a5092dfc528493d180d8773fd2e6779c4ae1c37fbafd00f16d7d"
+  },
+  {
+    "arm": "baseline",
+    "q15": true,
+    "round": 2,
+    "throughput": 4938277.96124066,
+    "steady": {
+      "middle": 0.8041828274726868,
+      "fine": 4.81256565079093,
+      "asym": 0.10227610357105732,
+      "segment": 5.723284153267741,
+      "wall": 5.723299190402031,
+      "cpu": 5.697363748000004
+    },
+    "counts": {
+      "fine_triggers": 907,
+      "asym_calls": 181
+    },
+    "locks": {
+      "block-trial|cpu|2048,4096,8192": {
+        "winner": 0,
+        "rechecked": false
+      },
+      "chain-trial|2048|6|0.001|3|cpu:0|direct": {
+        "chain": [
+          256,
+          512,
+          1024
+        ],
+        "rechecked": false
+      },
+      "q15-trial|2048|6|0.001|256,512,1024|cpu:0": {
+        "q15": true,
+        "rechecked": false
+      }
+    },
+    "core_sha256": "a126c02a12c0a5092dfc528493d180d8773fd2e6779c4ae1c37fbafd00f16d7d"
+  },
+  {
+    "arm": "candidate",
+    "q15": true,
+    "round": 2,
+    "throughput": 4878338.182280432,
+    "steady": {
+      "middle": 0.8564646914601326,
+      "fine": 4.830630524083972,
+      "asym": 0.1021948866546154,
+      "segment": 5.793605720624328,
+      "wall": 5.793620135635138,
+      "cpu": 5.765546968999995
+    },
+    "counts": {
+      "fine_triggers": 907,
+      "asym_calls": 181
+    },
+    "locks": {
+      "block-trial|cpu|2048,4096,8192": {
+        "winner": 0,
+        "rechecked": false
+      },
+      "chain-trial|2048|6|0.001|3|cpu:0|direct": {
+        "chain": [
+          256,
+          512,
+          1024
+        ],
+        "rechecked": false
+      },
+      "q15-trial|2048|6|0.001|256,512,1024|cpu:0": {
+        "q15": true,
+        "rechecked": false
+      }
+    },
+    "core_sha256": "a126c02a12c0a5092dfc528493d180d8773fd2e6779c4ae1c37fbafd00f16d7d"
+  },
+  {
+    "arm": "candidate",
+    "q15": true,
+    "round": 3,
+    "throughput": 4920799.051291647,
+    "steady": {
+      "middle": 0.8146937265992165,
+      "fine": 4.82238432019949,
+      "asym": 0.10228450410068035,
+      "segment": 5.743613528087735,
+      "wall": 5.7436283472925425,
+      "cpu": 5.718593767999998
+    },
+    "counts": {
+      "fine_triggers": 907,
+      "asym_calls": 181
+    },
+    "locks": {
+      "block-trial|cpu|2048,4096,8192": {
+        "winner": 0,
+        "rechecked": false
+      },
+      "chain-trial|2048|6|0.001|3|cpu:0|direct": {
+        "chain": [
+          256,
+          512,
+          1024
+        ],
+        "rechecked": false
+      },
+      "q15-trial|2048|6|0.001|256,512,1024|cpu:0": {
+        "q15": true,
+        "rechecked": false
+      }
+    },
+    "core_sha256": "a126c02a12c0a5092dfc528493d180d8773fd2e6779c4ae1c37fbafd00f16d7d"
+  },
+  {
+    "arm": "baseline",
+    "q15": true,
+    "round": 3,
+    "throughput": 4930304.327277101,
+    "steady": {
+      "middle": 0.8122011255472898,
+      "fine": 4.813786961138248,
+      "asym": 0.10223553329706192,
+      "segment": 5.732540249824524,
+      "wall": 5.732556072995067,
+      "cpu": 5.701942210000002
+    },
+    "counts": {
+      "fine_triggers": 907,
+      "asym_calls": 181
+    },
+    "locks": {
+      "block-trial|cpu|2048,4096,8192": {
+        "winner": 0,
+        "rechecked": false
+      },
+      "chain-trial|2048|6|0.001|3|cpu:0|direct": {
+        "chain": [
+          256,
+          512,
+          1024
+        ],
+        "rechecked": false
+      },
+      "q15-trial|2048|6|0.001|256,512,1024|cpu:0": {
+        "q15": true,
+        "rechecked": false
+      }
+    },
+    "core_sha256": "a126c02a12c0a5092dfc528493d180d8773fd2e6779c4ae1c37fbafd00f16d7d"
+  },
+  {
+    "arm": "baseline",
+    "q15": false,
+    "round": 0,
+    "throughput": 3950227.709119505,
+    "steady": {
+      "middle": 0.8082200363278389,
+      "fine": 6.240325711667538,
+      "asym": 0.10200308822095394,
+      "segment": 7.154819944873452,
+      "wall": 7.154834274202585,
+      "cpu": 7.124667735999999
+    },
+    "counts": {
+      "fine_triggers": 907,
+      "asym_calls": 181
+    },
+    "locks": {
+      "block-trial|cpu|2048,4096,8192": {
+        "winner": 0,
+        "rechecked": false
+      },
+      "chain-trial|2048|6|0.001|3|cpu:0|direct": {
+        "chain": [
+          256,
+          512,
+          1024
+        ],
+        "rechecked": false
+      },
+      "q15-trial|2048|6|0.001|256,512,1024|cpu:0": {
+        "q15": false,
+        "rechecked": false
+      }
+    },
+    "core_sha256": "a126c02a12c0a5092dfc528493d180d8773fd2e6779c4ae1c37fbafd00f16d7d"
+  },
+  {
+    "arm": "candidate",
+    "q15": false,
+    "round": 0,
+    "throughput": 3932935.6641059676,
+    "steady": {
+      "middle": 0.8164994660764933,
+      "fine": 6.26369185000658,
+      "asym": 0.10186397470533848,
+      "segment": 7.186277735978365,
+      "wall": 7.186291966587305,
+      "cpu": 7.152579825
+    },
+    "counts": {
+      "fine_triggers": 907,
+      "asym_calls": 181
+    },
+    "locks": {
+      "block-trial|cpu|2048,4096,8192": {
+        "winner": 0,
+        "rechecked": false
+      },
+      "chain-trial|2048|6|0.001|3|cpu:0|direct": {
+        "chain": [
+          256,
+          512,
+          1024
+        ],
+        "rechecked": false
+      },
+      "q15-trial|2048|6|0.001|256,512,1024|cpu:0": {
+        "q15": false,
+        "rechecked": false
+      }
+    },
+    "core_sha256": "a126c02a12c0a5092dfc528493d180d8773fd2e6779c4ae1c37fbafd00f16d7d"
+  },
+  {
+    "arm": "candidate",
+    "q15": false,
+    "round": 1,
+    "throughput": 3946496.485229734,
+    "steady": {
+      "middle": 0.7986877169460058,
+      "fine": 6.256607653573155,
+      "asym": 0.10198134928941727,
+      "segment": 7.161584485322237,
+      "wall": 7.161599148064852,
+      "cpu": 7.127366511999998
+    },
+    "counts": {
+      "fine_triggers": 907,
+      "asym_calls": 181
+    },
+    "locks": {
+      "block-trial|cpu|2048,4096,8192": {
+        "winner": 0,
+        "rechecked": false
+      },
+      "chain-trial|2048|6|0.001|3|cpu:0|direct": {
+        "chain": [
+          256,
+          512,
+          1024
+        ],
+        "rechecked": false
+      },
+      "q15-trial|2048|6|0.001|256,512,1024|cpu:0": {
+        "q15": false,
+        "rechecked": false
+      }
+    },
+    "core_sha256": "a126c02a12c0a5092dfc528493d180d8773fd2e6779c4ae1c37fbafd00f16d7d"
+  },
+  {
+    "arm": "baseline",
+    "q15": false,
+    "round": 1,
+    "throughput": 3887552.5480149323,
+    "steady": {
+      "middle": 0.8202937375754118,
+      "fine": 6.344136916100979,
+      "asym": 0.10150156915187836,
+      "segment": 7.270170023664832,
+      "wall": 7.270184466615319,
+      "cpu": 7.222018048000006
+    },
+    "counts": {
+      "fine_triggers": 907,
+      "asym_calls": 181
+    },
+    "locks": {
+      "block-trial|cpu|2048,4096,8192": {
+        "winner": 0,
+        "rechecked": false
+      },
+      "chain-trial|2048|6|0.001|3|cpu:0|direct": {
+        "chain": [
+          256,
+          512,
+          1024
+        ],
+        "rechecked": false
+      },
+      "q15-trial|2048|6|0.001|256,512,1024|cpu:0": {
+        "q15": false,
+        "rechecked": false
+      }
+    },
+    "core_sha256": "a126c02a12c0a5092dfc528493d180d8773fd2e6779c4ae1c37fbafd00f16d7d"
+  },
+  {
+    "arm": "baseline",
+    "q15": false,
+    "round": 2,
+    "throughput": 3927692.817384666,
+    "steady": {
+      "middle": 0.8119568880647421,
+      "fine": 6.277845555916429,
+      "asym": 0.10180339775979519,
+      "segment": 7.195870276540518,
+      "wall": 7.195884691551328,
+      "cpu": 7.161649598000007
+    },
+    "counts": {
+      "fine_triggers": 907,
+      "asym_calls": 181
+    },
+    "locks": {
+      "block-trial|cpu|2048,4096,8192": {
+        "winner": 0,
+        "rechecked": false
+      },
+      "chain-trial|2048|6|0.001|3|cpu:0|direct": {
+        "chain": [
+          256,
+          512,
+          1024
+        ],
+        "rechecked": false
+      },
+      "q15-trial|2048|6|0.001|256,512,1024|cpu:0": {
+        "q15": false,
+        "rechecked": false
+      }
+    },
+    "core_sha256": "a126c02a12c0a5092dfc528493d180d8773fd2e6779c4ae1c37fbafd00f16d7d"
+  },
+  {
+    "arm": "candidate",
+    "q15": false,
+    "round": 2,
+    "throughput": 3932195.2683117604,
+    "steady": {
+      "middle": 0.8074450138956308,
+      "fine": 6.273686101660132,
+      "asym": 0.10215429216623306,
+      "segment": 7.187630845233798,
+      "wall": 7.187645373865962,
+      "cpu": 7.153768606
+    },
+    "counts": {
+      "fine_triggers": 907,
+      "asym_calls": 181
+    },
+    "locks": {
+      "block-trial|cpu|2048,4096,8192": {
+        "winner": 0,
+        "rechecked": false
+      },
+      "chain-trial|2048|6|0.001|3|cpu:0|direct": {
+        "chain": [
+          256,
+          512,
+          1024
+        ],
+        "rechecked": false
+      },
+      "q15-trial|2048|6|0.001|256,512,1024|cpu:0": {
+        "q15": false,
+        "rechecked": false
+      }
+    },
+    "core_sha256": "a126c02a12c0a5092dfc528493d180d8773fd2e6779c4ae1c37fbafd00f16d7d"
+  },
+  {
+    "arm": "candidate",
+    "q15": false,
+    "round": 3,
+    "throughput": 3894139.152094198,
+    "steady": {
+      "middle": 0.8273172210901976,
+      "fine": 6.324773110449314,
+      "asym": 0.10139392502605915,
+      "segment": 7.257873151451349,
+      "wall": 7.2578876577317715,
+      "cpu": 7.226477976000005
+    },
+    "counts": {
+      "fine_triggers": 907,
+      "asym_calls": 181
+    },
+    "locks": {
+      "block-trial|cpu|2048,4096,8192": {
+        "winner": 0,
+        "rechecked": false
+      },
+      "chain-trial|2048|6|0.001|3|cpu:0|direct": {
+        "chain": [
+          256,
+          512,
+          1024
+        ],
+        "rechecked": false
+      },
+      "q15-trial|2048|6|0.001|256,512,1024|cpu:0": {
+        "q15": false,
+        "rechecked": false
+      }
+    },
+    "core_sha256": "a126c02a12c0a5092dfc528493d180d8773fd2e6779c4ae1c37fbafd00f16d7d"
+  },
+  {
+    "arm": "baseline",
+    "q15": false,
+    "round": 3,
+    "throughput": 3924656.7241340596,
+    "steady": {
+      "middle": 0.8080315049737692,
+      "fine": 6.288068123161793,
+      "asym": 0.10102043859660625,
+      "segment": 7.201436962932348,
+      "wall": 7.201450761407614,
+      "cpu": 7.1680489519999995
+    },
+    "counts": {
+      "fine_triggers": 907,
+      "asym_calls": 181
+    },
+    "locks": {
+      "block-trial|cpu|2048,4096,8192": {
+        "winner": 0,
+        "rechecked": false
+      },
+      "chain-trial|2048|6|0.001|3|cpu:0|direct": {
+        "chain": [
+          256,
+          512,
+          1024
+        ],
+        "rechecked": false
+      },
+      "q15-trial|2048|6|0.001|256,512,1024|cpu:0": {
+        "q15": false,
+        "rechecked": false
+      }
+    },
+    "core_sha256": "a126c02a12c0a5092dfc528493d180d8773fd2e6779c4ae1c37fbafd00f16d7d"
+  }
+]

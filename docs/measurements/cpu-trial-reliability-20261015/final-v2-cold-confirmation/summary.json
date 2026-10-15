@@ -1,0 +1,83 @@
+[
+  {
+    "start": 0,
+    "settled": true,
+    "attempts": [
+      {
+        "returncode": 0,
+        "stable": false,
+        "before": {},
+        "after": {
+          "block-trial|cpu|2048,4096,8192": {
+            "winner": 0,
+            "rechecked": false
+          },
+          "chain-trial|2048|6|0.001|3|cpu:0|direct": {
+            "chain": [
+              256,
+              512,
+              1024
+            ],
+            "rechecked": false
+          },
+          "q15-trial|2048|6|0.001|256,512,1024|cpu:0": {
+            "q15": true,
+            "rechecked": false
+          }
+        },
+        "pending": [],
+        "trial_work": {
+          "calls": 48,
+          "seconds": 26.336572067812085
+        },
+        "throughput": 490722.53972220403
+      },
+      {
+        "returncode": 0,
+        "stable": true,
+        "before": {
+          "block-trial|cpu|2048,4096,8192": {
+            "winner": 0,
+            "rechecked": false
+          },
+          "chain-trial|2048|6|0.001|3|cpu:0|direct": {
+            "chain": [
+              256,
+              512,
+              1024
+            ],
+            "rechecked": false
+          },
+          "q15-trial|2048|6|0.001|256,512,1024|cpu:0": {
+            "q15": true,
+            "rechecked": false
+          }
+        },
+        "after": {
+          "block-trial|cpu|2048,4096,8192": {
+            "winner": 0,
+            "rechecked": false
+          },
+          "chain-trial|2048|6|0.001|3|cpu:0|direct": {
+            "chain": [
+              256,
+              512,
+              1024
+            ],
+            "rechecked": false
+          },
+          "q15-trial|2048|6|0.001|256,512,1024|cpu:0": {
+            "q15": true,
+            "rechecked": false
+          }
+        },
+        "pending": [],
+        "trial_work": {
+          "calls": 0,
+          "seconds": 0.0
+        },
+        "throughput": 4935316.035770194
+      }
+    ]
+  }
+]

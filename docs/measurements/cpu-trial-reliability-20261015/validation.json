@@ -1,0 +1,22 @@
+{
+  "full_suite": {
+    "passed": 1949,
+    "skipped": 165
+  },
+  "paired_trials": {
+    "AVX3": 15,
+    "AVX2": 15,
+    "SSE4": 15
+  },
+  "full_gate": {
+    "suite": "pass",
+    "batched_cpu_gpu": "pass",
+    "pipelined_cpu_gpu": "pass",
+    "replay": "fail: zero replays on selected 4096-point GPU configuration; baseline reproduces with identical trial locks",
+    "margin": "pass",
+    "reproducibility": "5/5 passed",
+    "followups": "5/5 passed"
+  },
+  "github_ci": "not dispatched: no authenticated GitHub CLI or browser session",
+  "merge_ready": false
+}

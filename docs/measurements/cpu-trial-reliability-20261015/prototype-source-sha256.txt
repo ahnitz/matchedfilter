@@ -1,0 +1,4 @@
+5ae50c03bcbd4b34fa1fe7a3f9054122ccba881e4a73ede2419b6ee36e5e98d8  python/matchedfilter/__init__.py
+1d5cab5c8452761e5e37bbd3aa38a8c6b3a766cc12018c9e22e04d4bc993b1a3  python/matchedfilter/gatechain.py
+ffa247048e59a194e1f41ce7830ad7b20a14aaa37dd5688d9bb3da3e1147d2fa  python/matchedfilter/time_domain.py
+a126c02a12c0a5092dfc528493d180d8773fd2e6779c4ae1c37fbafd00f16d7d  python/matchedfilter/_core.cpython-312-x86_64-linux-gnu.so

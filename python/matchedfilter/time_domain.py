@@ -358,6 +358,7 @@ class _BlockTrials:
 
     def __init__(self):
         self.state = {}
+        self.cpu_replaying = False
 
     def _st(self, key):
         st = self.state.get(key)
@@ -375,6 +376,7 @@ class _BlockTrials:
                     if isinstance(med, dict):
                         st["median"] = {int(r): float(v) for r, v in med.items()}
                 elif isinstance(rec, dict) and isinstance(rec.get("samples"), dict):
+                    st["method"] = rec.get("method")
                     st["reopened"] = st["reopened"] or "reopened" in rec
                     # An unfinished trial an earlier process left: continue it. Without this a
                     # process shorter than the trial (ranks x (settle + samples) batches)
@@ -434,6 +436,28 @@ class _BlockTrials:
         # a lock cannot flap between processes on noisy steady-state timings.
         self._store(key, {"winner": win, "median": {str(r): v for r, v in med.items()},
                           "rechecked": st["reopened"]})
+
+    def record_cpu_round(self, key, timings):
+        """CPU layouts measured on the same jobs, one complete interleaved round."""
+        from . import gatechain
+        st = self._st(key)
+        if st["winner"] is not None:
+            return
+        if st.get("method") != "paired-v1":
+            # Earlier partial records contain unrelated batches, not paired rounds.
+            st["samples"] = {r: [] for r in timings}
+            st["method"] = "paired-v1"
+        for r, t in timings.items():
+            st["samples"].setdefault(r, []).append(float(t))
+        base = max(5, self._base_need())
+        win, _ = gatechain.paired_choice(st["samples"], 0, max(2 * base, _BLOCK_TRIAL_MAX), minimum=base)
+        rec = {"method": "paired-v1", "samples": {str(r): v for r, v in st["samples"].items()},
+               "rechecked": st["reopened"]}
+        if win is not None:
+            st["winner"] = win
+            st["median"] = {r: float(np.median(v)) for r, v in st["samples"].items()}
+            rec.update(winner=win, median={str(r): v for r, v in st["median"].items()})
+        self._store(key, rec)
 
     def observe(self, key, value):
         """A steady-state batch of a locked key (s/unit). Reopens the lock when steady state
@@ -508,11 +532,74 @@ def _bank_calibrating(bank):
     return False
 
 
+def _cpu_block_round(jobs):
+    """Replay identical CPU jobs across every layout; return the final valid result.
+
+    Layout snapshots hold their inner chain/Q15 trials, so each timing measures a
+    fixed candidate. One warm batch per arm excludes switching and lazy setup.
+    The recursion guard only bypasses trial orchestration, not search execution.
+    """
+    from . import _autotune_enabled, gatechain
+    from .device import parse as _parse_device
+    if (_BLOCK_TRIALS.cpu_replaying or not jobs or not _autotune_enabled()
+            or gatechain._cost_file() is None
+            or any(_parse_device(b.device).kind != "cpu" for b, _, _ in jobs)):
+        return None
+    groups = {}
+    for bank, _, kw in jobs:
+        if (kw or {}).get("template_index") is not None:
+            return None
+        if getattr(bank, '_layouts', None):
+            key = _trial_key(bank)
+            if _BLOCK_TRIALS.winner(key) is None:
+                groups.setdefault(key, {})[id(bank)] = bank
+    if not groups:
+        return None
+    work = sum(len(b.filters_f) * int(np.asarray(x).size) for b, x, _ in jobs)
+    if work <= 0:
+        return None
+    import time
+    from . import _record_cpu_trial
+    begin = time.perf_counter()
+    result = None
+    locked = []
+    _BLOCK_TRIALS.cpu_replaying = True
+    try:
+        for key, byid in groups.items():
+            banks = list(byid.values())
+            nr = min(len(b._layouts) for b in banks)
+            st = _BLOCK_TRIALS._st(key)
+            count = len(st['samples'].get(0, ())) if st.get('method') == 'paired-v1' else 0
+            order = list(range(nr))
+            if count % 2:
+                order.reverse()
+            timings = {}
+            for rank in order:
+                for bank in banks:
+                    bank._use_layout(rank)
+                TimeDomainFilterBank.filter_series_many(jobs)
+                t0 = time.perf_counter()
+                result = TimeDomainFilterBank.filter_series_many(jobs)
+                timings[rank] = (time.perf_counter() - t0) / work
+            _BLOCK_TRIALS.record_cpu_round(key, timings)
+            winner = _BLOCK_TRIALS.winner(key)
+            if winner is not None:
+                locked.extend((bank, winner) for bank in banks)
+    finally:
+        _BLOCK_TRIALS.cpu_replaying = False
+    for bank, winner in locked:
+        bank._lock_layout(winner)
+    _record_cpu_trial(begin)
+    return result
+
+
 def _trial_begin(jobs):
     """Put every trialling bank of the batch on its key's current rank (or lock it, once its key
     has a winner). Returns [(key, rank, banks, settled, steady)]: banks still trialling, and
     locked banks whose batches are timed for the re-check (steady=True)."""
     from . import _autotune_enabled, gatechain
+    if _BLOCK_TRIALS.cpu_replaying:
+        return None
     groups, locked = {}, {}
     for bank, _, kw in jobs:
         if (kw or {}).get("template_index") is not None:
@@ -2214,6 +2301,9 @@ class TimeDomainFilterBank:
         from . import _Deferred
         import os
         global _BATCH_TOKEN
+        paired = _cpu_block_round(jobs)
+        if paired is not None:
+            return paired if wait else [_Deferred(lambda r=r: r) for r in paired]
         trial = _trial_begin(jobs)
         _BATCH_TOKEN += 1
         # On Vulkan the deferred submissions are also fused: one command buffer runs every
