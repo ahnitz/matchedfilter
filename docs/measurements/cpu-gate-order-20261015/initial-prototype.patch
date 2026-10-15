@@ -1,0 +1,71 @@
+diff --git a/src/hmf.c b/src/hmf.c
+index deb76be2..face0822 100644
+--- a/src/hmf.c
++++ b/src/hmf.c
+@@ -869,9 +869,12 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
+   for(int i=0;i<p->ntiers;i++)
+     if(!isfinite(p->tier[i].thr) || p->tier[i].thr < 0) return -1;
+ 
++  const int late_recheck=p->q15 && !p->q15_g16 && p->ntiers>=3 &&
++                         p->tier[0].m==256 && p->tier[1].m==512;
+   const int *fire_d=NULL,*fire_t=NULL;
+   int nfire=0;
+   for(int i=0;i<p->ntiers;i++){
++    if(i==1 && late_recheck) continue;
+     hmf_tier *tr=&p->tier[i];
+     /* Coarse sample j maps to full lag j*R. Widen by one coarse sample
+        so rounding the caller's window remains conservative. */
+@@ -884,7 +887,7 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
+     tr->lagged = !(tr->g16 && (i==0 && (!p->q15 || p->q15_g16)));
+     const int *checked_d=fire_d,*checked_t=fire_t;
+     int nchecked=i==0 ? nd*nt : nfire;
+-    unsigned long long t_0=ap_ticks();
++    unsigned long long t_0=ap_ticks(), moved_ticks=0;
+     if(i==0 && p->q15){
+       /* Screen every pair in int16, then run the float tier on the pairs the
+          screen could not reject, pooled as a later tier is.  A pair the screen
+@@ -904,6 +907,35 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
+       checked_d=p->qd; checked_t=p->qt; nchecked=k;
+       p->qpassed+=k;
+       p->qticks+=ap_ticks()-q0;
++      if(late_recheck){
++        hmf_tier *next=&p->tier[1];
++        const size_t r=n/next->m;
++        size_t lo=start/r, hi=(end+r-1)/r;
++        if(lo>0) lo--;
++        if(hi>next->m) hi=next->m;
++        const unsigned long long begin=ap_ticks();
++        for(int j=0;next->npending && j<k;j++){
++          const int d=d0+p->qd[j];
++          if(next->pending[d]){
++            if(ap_mf_set_data(next->mf,d,p->dspec[d])) return -1;
++            next->pending[d]=0; next->npending--;
++          }
++        }
++        if(k && ap_mf_run_pairs_pooled(next->mf,d0,p->qd,p->qt,k,t0,hi-lo,next->thr,
++                                      next->cebuf,NULL,lo,hi,nt)<0) return -1;
++        int kept=0;
++        for(int j=0;j<k;j++){
++          const int d=p->qd[j], t=p->qt[j];
++          const size_t row=(size_t)d*nt+t;
++          const ap_peak ce=next->cebuf[row];
++          if(ce.index>=0 && ce.magnitude>=next->thr){
++            p->qd[kept]=d; p->qt[kept]=t; kept++;
++          }else reject_row(p,peaks,counts,row,nb);
++        }
++        k=kept; nchecked=k;
++        next->passed+=k;
++        moved_ticks=ap_ticks()-begin; next->ticks+=moved_ticks;
++      }
+       if(k && p->q15_g16 && tr->g16){
+         /* The FP16 gate over the screen's survivors: its magnitude bounds the FP32 one
+            (gate16.cc), so the survivors are a superset of the FP32 pass's; the next tier
+@@ -933,7 +965,7 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
+       if(ap_mf_run_pairs_pooled(tr->mf,d0,fire_d,fire_t,nfire,t0,cspan,thr,tr->cebuf,NULL,
+                                 cstart,cend,nt)<0) return -1;
+     }
+-    tr->ticks += ap_ticks()-t_0;
++    tr->ticks += ap_ticks()-t_0-moved_ticks;
+     int nnext=0;
+     const long first_pair=p->pairs;
+     if(i==0) p->pairs+=(long)nd*nt;

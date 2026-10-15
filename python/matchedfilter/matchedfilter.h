@@ -210,6 +210,13 @@ int ap_hmf_series_group(const ap_hmf_plan *p);
 int ap_hmf_set_q15(ap_hmf_plan *p, int on);
 /* Behind the Q15 screen, tier 0 on the FP16 gate (1) or the pooled FP32 pass (0). */
 int ap_hmf_set_q15_tier0(ap_hmf_plan *p, int fp16);
+/* Scheduling only: Q15, tier 1, tier 0, remaining tiers. Requires at least three
+   tiers starting 256,512; ignored while Q15 is off or its recheck uses FP16.
+   Gate thresholds and logical tier identities are unchanged. */
+int ap_hmf_set_q15_recheck_late(ap_hmf_plan *p, int on);
+/* Cumulative inputs per logical tier and passes of the first executed float gate. */
+int ap_hmf_tier_inputs(const ap_hmf_plan *p, long *checked);
+long ap_hmf_first_gate_passed(const ap_hmf_plan *p);
 /* Its price per listed pair, in ticks (ap_ticks), both ways (fp16 -1 without the gate). */
 int ap_hmf_price_q15_tier0(size_t m, int nt, int reps, double *fp32, double *fp16);
 /* The block forward through the platform FFT (macOS: vDSP) instead of the engine's; -1 where

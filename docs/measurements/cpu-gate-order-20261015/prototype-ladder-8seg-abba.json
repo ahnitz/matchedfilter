@@ -1,0 +1,233 @@
+{
+  "baseline_commit": "702e6af8",
+  "order": [
+    "baseline",
+    "candidate",
+    "candidate",
+    "baseline"
+  ],
+  "cpu": 4,
+  "target": "AVX3",
+  "segments": 8,
+  "steady_segments": 7,
+  "builds": {
+    "baseline": {
+      "path": "/tmp/mf-perf-tail-inline/python",
+      "core_sha256": "b7fc2583ceea69e842eff7e35b25e0c9e17f77c72ebeb37f2e5164cadd71ede7"
+    },
+    "candidate": {
+      "path": "/tmp/mf-gate-order-late/python",
+      "core_sha256": "a762dcb7e7faf6cfac3cbd41183d78d35222178f54b53e01363f5d5853293bb0"
+    }
+  },
+  "cost_file": "/tmp/mf-profile-costs.json",
+  "cost_file_sha256_before": "923e1861a4702aedf8f260362645b389906fe2e6c094a742626a36f066f42794",
+  "rows": [
+    {
+      "variant": "baseline",
+      "command": [
+        "taskset",
+        "-c",
+        "4",
+        "/home/ahnitz/projects/claude/searchdev/pycbc-work/venv-apogee/bin/python",
+        "/home/ahnitz/projects/claude/searchdev/work/mf-next/tools/profile_cpu_ladder.py",
+        "--bank",
+        "/home/ahnitz/projects/claude/searchdev/tests/search_test/output_test27_ref/fir_three_level_modern_v1_bottomup_cap401.hdf",
+        "--profiles",
+        "/home/ahnitz/projects/claude/searchdev/tests/search_test/prod_job_test27/ladder_profiles_H1.npz",
+        "--target",
+        "AVX3",
+        "--runs",
+        "1",
+        "--segments",
+        "8",
+        "--q15",
+        "1",
+        "--output",
+        "/tmp/mf-gate-order-ladder8/0-baseline.json"
+      ],
+      "report": "/tmp/mf-gate-order-ladder8/0-baseline.json",
+      "log": "/tmp/mf-gate-order-ladder8/0-baseline.log",
+      "core_sha256": "b7fc2583ceea69e842eff7e35b25e0c9e17f77c72ebeb37f2e5164cadd71ede7",
+      "output_sha256": "fc13f0d0ec76107d9995385a20ea8662a95853213b0b2eaac4b48ebc23401f2b",
+      "times_ms": {
+        "middle": 59.49366330501756,
+        "fine": 295.05402941556116,
+        "asym": 8.574956129970294,
+        "segment": 363.6168098642624,
+        "wall": 363.618355876367,
+        "cpu": 350.04274042857116
+      }
+    },
+    {
+      "variant": "candidate",
+      "command": [
+        "taskset",
+        "-c",
+        "4",
+        "/home/ahnitz/projects/claude/searchdev/pycbc-work/venv-apogee/bin/python",
+        "/home/ahnitz/projects/claude/searchdev/work/mf-next/tools/profile_cpu_ladder.py",
+        "--bank",
+        "/home/ahnitz/projects/claude/searchdev/tests/search_test/output_test27_ref/fir_three_level_modern_v1_bottomup_cap401.hdf",
+        "--profiles",
+        "/home/ahnitz/projects/claude/searchdev/tests/search_test/prod_job_test27/ladder_profiles_H1.npz",
+        "--target",
+        "AVX3",
+        "--runs",
+        "1",
+        "--segments",
+        "8",
+        "--q15",
+        "1",
+        "--output",
+        "/tmp/mf-gate-order-ladder8/1-candidate.json"
+      ],
+      "report": "/tmp/mf-gate-order-ladder8/1-candidate.json",
+      "log": "/tmp/mf-gate-order-ladder8/1-candidate.log",
+      "core_sha256": "a762dcb7e7faf6cfac3cbd41183d78d35222178f54b53e01363f5d5853293bb0",
+      "output_sha256": "fc13f0d0ec76107d9995385a20ea8662a95853213b0b2eaac4b48ebc23401f2b",
+      "times_ms": {
+        "middle": 58.263540159844396,
+        "fine": 284.95332557109316,
+        "asym": 8.90688513339098,
+        "segment": 352.60989487038125,
+        "wall": 352.6115608567904,
+        "cpu": 342.42156328571434
+      }
+    },
+    {
+      "variant": "candidate",
+      "command": [
+        "taskset",
+        "-c",
+        "4",
+        "/home/ahnitz/projects/claude/searchdev/pycbc-work/venv-apogee/bin/python",
+        "/home/ahnitz/projects/claude/searchdev/work/mf-next/tools/profile_cpu_ladder.py",
+        "--bank",
+        "/home/ahnitz/projects/claude/searchdev/tests/search_test/output_test27_ref/fir_three_level_modern_v1_bottomup_cap401.hdf",
+        "--profiles",
+        "/home/ahnitz/projects/claude/searchdev/tests/search_test/prod_job_test27/ladder_profiles_H1.npz",
+        "--target",
+        "AVX3",
+        "--runs",
+        "1",
+        "--segments",
+        "8",
+        "--q15",
+        "1",
+        "--output",
+        "/tmp/mf-gate-order-ladder8/2-candidate.json"
+      ],
+      "report": "/tmp/mf-gate-order-ladder8/2-candidate.json",
+      "log": "/tmp/mf-gate-order-ladder8/2-candidate.log",
+      "core_sha256": "a762dcb7e7faf6cfac3cbd41183d78d35222178f54b53e01363f5d5853293bb0",
+      "output_sha256": "fc13f0d0ec76107d9995385a20ea8662a95853213b0b2eaac4b48ebc23401f2b",
+      "times_ms": {
+        "middle": 58.489055414351505,
+        "fine": 285.15831315391034,
+        "asym": 8.40557912930048,
+        "segment": 352.53080912765915,
+        "wall": 352.53222470471104,
+        "cpu": 340.80356014285707
+      }
+    },
+    {
+      "variant": "baseline",
+      "command": [
+        "taskset",
+        "-c",
+        "4",
+        "/home/ahnitz/projects/claude/searchdev/pycbc-work/venv-apogee/bin/python",
+        "/home/ahnitz/projects/claude/searchdev/work/mf-next/tools/profile_cpu_ladder.py",
+        "--bank",
+        "/home/ahnitz/projects/claude/searchdev/tests/search_test/output_test27_ref/fir_three_level_modern_v1_bottomup_cap401.hdf",
+        "--profiles",
+        "/home/ahnitz/projects/claude/searchdev/tests/search_test/prod_job_test27/ladder_profiles_H1.npz",
+        "--target",
+        "AVX3",
+        "--runs",
+        "1",
+        "--segments",
+        "8",
+        "--q15",
+        "1",
+        "--output",
+        "/tmp/mf-gate-order-ladder8/3-baseline.json"
+      ],
+      "report": "/tmp/mf-gate-order-ladder8/3-baseline.json",
+      "log": "/tmp/mf-gate-order-ladder8/3-baseline.log",
+      "core_sha256": "b7fc2583ceea69e842eff7e35b25e0c9e17f77c72ebeb37f2e5164cadd71ede7",
+      "output_sha256": "fc13f0d0ec76107d9995385a20ea8662a95853213b0b2eaac4b48ebc23401f2b",
+      "times_ms": {
+        "middle": 59.83797601324373,
+        "fine": 297.1381404287448,
+        "asym": 8.661558153107762,
+        "segment": 366.1404024377199,
+        "wall": 366.141827993228,
+        "cpu": 352.16449028571435
+      }
+    }
+  ],
+  "all_output_hashes_identical": true,
+  "bank_sha256": "da727c0858d7f0de025ba00b58dca22d86f70ba8f83e01c5a90da2410dce0719",
+  "profiles_sha256": "ff888dba0b4f849dc90cbdf5eb9dc6f1cd91599a68bc1bc81b193c3be521060a",
+  "cost_file_sha256_after": "923e1861a4702aedf8f260362645b389906fe2e6c094a742626a36f066f42794",
+  "comparison": {
+    "times_ms": {
+      "middle": {
+        "baseline": 59.66581965913065,
+        "candidate": 58.376297787097954,
+        "speedup": 1.0220898193430434
+      },
+      "fine": {
+        "baseline": 296.09608492215295,
+        "candidate": 285.0558193625018,
+        "speedup": 1.0387301882990552
+      },
+      "asym": {
+        "baseline": 8.61825714153903,
+        "candidate": 8.65623213134573,
+        "speedup": 0.9956129885115734
+      },
+      "segment": {
+        "baseline": 364.8786061509911,
+        "candidate": 352.5703519990202,
+        "speedup": 1.0349100656994696
+      },
+      "wall": {
+        "baseline": 364.8800919347975,
+        "candidate": 352.5718927807507,
+        "speedup": 1.0349097571476031
+      },
+      "cpu": {
+        "baseline": 351.10361535714276,
+        "candidate": 341.6125617142857,
+        "speedup": 1.0277830932071963
+      }
+    }
+  },
+  "note": "Initial always-enabled prototype, not final selective implementation. Stage metrics omitted: prototype predates explicit gate-input counters. Historical driver baseline label corrected to the actual supplied build.",
+  "config": {
+    "seg_samples": 1048576,
+    "start_pad": 120.0,
+    "end_pad": 16.0,
+    "profiles": "/home/ahnitz/projects/claude/searchdev/tests/search_test/prod_job_test27/ladder_profiles_H1.npz",
+    "asym_bin_width": 0.03,
+    "asym_num_bins": 1000,
+    "roofline": true,
+    "threshold": 6.0,
+    "fd": 0.001,
+    "peak_window": 1.0,
+    "fft_length": 2048,
+    "pad": 4096,
+    "segments": 8,
+    "warmup": 1,
+    "asym_threshold": 6.0,
+    "depth": 1,
+    "pregen": true,
+    "pipeline": false,
+    "overlap": false,
+    "no_batch": false,
+    "shared_input": false
+  }
+}

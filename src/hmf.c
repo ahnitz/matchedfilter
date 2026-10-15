@@ -33,7 +33,8 @@ typedef struct {
   unsigned char *pending;         /* [nd] owned series spectrum awaits ingestion */
   int npending;
   int *fire_d,*fire_t;            /* this tier's survivors */
-  long passed;                    /* pairs that passed this tier */
+  long passed;                    /* pairs that passed this tier when evaluated */
+  long checked;                   /* actual inputs; independent of execution order */
   unsigned long long ticks;       /* time spent in this tier */
   void *g16;                      /* FP16 gate for this tier (tier 0 only), or NULL */
   int lagged;                     /* this call's cebuf index is the pair's largest coarse lag
@@ -68,6 +69,8 @@ struct ap_hmf_plan {
   float *tmpls_half,*prod_scratch;
   /* Q15 screen in front of the first tier (ap_hmf_set_q15) */
   int q15;
+  int q15_recheck_late;           /* evaluate tier 1 before the Q15 float recheck */
+  long first_gate_passed;         /* passes of the first executed float gate */
   unsigned char *qpass;           /* [nd*nt] */
   int *qd,*qt;                    /* the screen's survivors */
   int q15_g16;                    /* tier 0 behind the screen on the FP16 gate (a price:
@@ -334,6 +337,18 @@ int ap_hmf_set_q15(ap_hmf_plan *p,int on){
   }
   p->q15=1;
   return 0;
+}
+int ap_hmf_set_q15_recheck_late(ap_hmf_plan *p,int on){
+  if(!p) return -1;
+  if(on && (p->ntiers<3 || p->tier[0].m!=256 || p->tier[1].m!=512)) return -1;
+  p->q15_recheck_late=!!on;
+  return 0;
+}
+long ap_hmf_first_gate_passed(const ap_hmf_plan *p){ return p ? p->first_gate_passed : 0; }
+int ap_hmf_tier_inputs(const ap_hmf_plan *p,long *checked){
+  if(!p) return 0;
+  if(checked) for(int i=0;i<p->ntiers;i++) checked[i]=p->tier[i].checked;
+  return p->ntiers;
 }
 int ap_hmf_get_q15(const ap_hmf_plan *p){ return p ? p->q15 : 0; }
 int ap_hmf_q15_stats(const ap_hmf_plan *p,long *passed,unsigned long long *ticks){
@@ -857,6 +872,25 @@ static void reject_row(ap_hmf_plan *p,ap_peak *peaks,int *counts,size_t row,size
   if(p->prof) p->c_fill += ap_ticks()-f0;
 }
 
+/* Evaluate an already selected pair list. Logical gate identity and thresholds
+   stay fixed even when its position in the execution order changes. */
+static int run_gate_pairs(ap_hmf_plan *p,hmf_tier *tr,int d0,int t0,int nt,
+                          const int *ds,const int *ts,int count,size_t start,size_t end){
+  const size_t r=p->n/tr->m;
+  size_t lo=start/r, hi=(end+r-1)/r;
+  if(lo>0) lo--;
+  if(hi>tr->m) hi=tr->m;
+  for(int j=0;tr->npending && j<count;j++){
+    const int d=d0+ds[j];
+    if(tr->pending[d]){
+      if(ap_mf_set_data(tr->mf,d,p->dspec[d])) return -1;
+      tr->pending[d]=0; tr->npending--;
+    }
+  }
+  return ap_mf_run_pairs_pooled(tr->mf,d0,ds,ts,count,t0,hi-lo,tr->thr,
+                                tr->cebuf,NULL,lo,hi,nt);
+}
+
 int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
                size_t binsize,float threshold,
                ap_peak *peaks,int *counts,size_t start,size_t end){
@@ -869,9 +903,11 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
   for(int i=0;i<p->ntiers;i++)
     if(!isfinite(p->tier[i].thr) || p->tier[i].thr < 0) return -1;
 
+  const int late_recheck=p->q15 && p->q15_recheck_late && !p->q15_g16;
   const int *fire_d=NULL,*fire_t=NULL;
   int nfire=0;
   for(int i=0;i<p->ntiers;i++){
+    if(i==1 && late_recheck) continue;
     hmf_tier *tr=&p->tier[i];
     /* Coarse sample j maps to full lag j*R. Widen by one coarse sample
        so rounding the caller's window remains conservative. */
@@ -884,7 +920,7 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
     tr->lagged = !(tr->g16 && (i==0 && (!p->q15 || p->q15_g16)));
     const int *checked_d=fire_d,*checked_t=fire_t;
     int nchecked=i==0 ? nd*nt : nfire;
-    unsigned long long t_0=ap_ticks();
+    unsigned long long t_0=ap_ticks(), moved_ticks=0;
     if(i==0 && p->q15){
       /* Screen every pair in int16, then run the float tier on the pairs the
          screen could not reject, pooled as a later tier is.  A pair the screen
@@ -904,6 +940,25 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
       checked_d=p->qd; checked_t=p->qt; nchecked=k;
       p->qpassed+=k;
       p->qticks+=ap_ticks()-q0;
+      if(late_recheck){
+        hmf_tier *next=&p->tier[1];
+        const unsigned long long begin=ap_ticks();
+        if(run_gate_pairs(p,next,d0,t0,nt,p->qd,p->qt,k,start,end)<0) return -1;
+        next->checked+=k;
+        int kept=0;
+        for(int j=0;j<k;j++){
+          const int d=p->qd[j], t=p->qt[j];
+          const size_t row=(size_t)d*nt+t;
+          const ap_peak ce=next->cebuf[row];
+          if(ce.index>=0 && ce.magnitude>=next->thr){
+            p->qd[kept]=d; p->qt[kept]=t; kept++;
+          }else reject_row(p,peaks,counts,row,nb);
+        }
+        k=kept; nchecked=k;
+        next->passed+=k;
+        p->first_gate_passed+=k;
+        moved_ticks=ap_ticks()-begin; next->ticks+=moved_ticks;
+      }
       if(k && p->q15_g16 && tr->g16){
         /* The FP16 gate over the screen's survivors: its magnitude bounds the FP32 one
            (gate16.cc), so the survivors are a superset of the FP32 pass's; the next tier
@@ -920,20 +975,9 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
         if(ap_gate16_run(tr->g16,d0,nd,t0,nt,cstart,cend,tr->cebuf)<0) return -1;
       } else if(ap_mf_run(tr->mf,d0,nd,t0,nt,cspan,thr,tr->cebuf,NULL,cstart,cend)<0) return -1;
     } else {
-      /* Later tiers run only on the previous tier's survivors, pooled across blocks. */
-      /* Series spectra remain owned by the plan until the next group overwrites
-         their slots. Prepare each needed slot once; eager callers skip this walk. */
-      for(int j=0;tr->npending && j<nfire;j++){
-        const int d=d0+fire_d[j];
-        if(tr->pending[d]){
-          if(ap_mf_set_data(tr->mf,d,p->dspec[d])) return -1;
-          tr->pending[d]=0; tr->npending--;
-        }
-      }
-      if(ap_mf_run_pairs_pooled(tr->mf,d0,fire_d,fire_t,nfire,t0,cspan,thr,tr->cebuf,NULL,
-                                cstart,cend,nt)<0) return -1;
+      if(run_gate_pairs(p,tr,d0,t0,nt,fire_d,fire_t,nfire,start,end)<0) return -1;
     }
-    tr->ticks += ap_ticks()-t_0;
+    tr->ticks += ap_ticks()-t_0-moved_ticks;
     int nnext=0;
     const long first_pair=p->pairs;
     if(i==0) p->pairs+=(long)nd*nt;
@@ -959,7 +1003,9 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
         reject_row(p,peaks,counts,row,nb);
       }
     }
+    tr->checked += nchecked;
     tr->passed += nnext;
+    if(i==0 && !late_recheck) p->first_gate_passed+=nnext;
     fire_d=tr->fire_d; fire_t=tr->fire_t; nfire=nnext;
     if(!nfire) return 0;
   }

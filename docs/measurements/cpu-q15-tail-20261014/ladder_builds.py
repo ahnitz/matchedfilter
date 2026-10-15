@@ -23,6 +23,7 @@ p.add_argument('--profiles', type=Path, required=True)
 p.add_argument('--cost-file', type=Path, required=True)
 p.add_argument('--output-dir', type=Path, required=True)
 p.add_argument('--harness', type=Path, required=True)
+p.add_argument('--baseline-commit', default='b3c1b022')
 p.add_argument('--baseline-sha', default='ce7076733a62db4c115c9ce4572950b5460e19a30cc317d2eeb19e3dae6c2d0f')
 p.add_argument('--candidate-sha')
 p.add_argument('--cpu', type=int, default=4)
@@ -60,7 +61,7 @@ for label,root in roots.items():
 for label,want in [('baseline',a.baseline_sha),('candidate',a.candidate_sha)]:
     if want and cores[label]!=want: raise RuntimeError(f'{label} core hash differs: {cores[label]} != {want}')
 a.output_dir.mkdir(parents=True,exist_ok=True)
-report=dict(baseline_commit='b3c1b022',order=order,cpu=a.cpu,target=a.target,segments=a.segments,
+report=dict(baseline_commit=a.baseline_commit,order=order,cpu=a.cpu,target=a.target,segments=a.segments,
             steady_segments=a.segments-1,builds={k:dict(path=str(roots[k]),core_sha256=cores[k]) for k in roots},
             cost_file=str(a.cost_file.resolve()),cost_file_sha256_before=digest(a.cost_file),rows=[])
 expected=None
