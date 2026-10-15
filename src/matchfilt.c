@@ -1439,11 +1439,33 @@ static int run_pairs_pooled_pb(ap_mf_plan *p, int d0,
   int total = 0;
   for(int tt = 0; tt < npairs; tt += W){
     const int cnt = (npairs - tt < W) ? npairs - tt : W;
-    gather_data_batch(p->dsr, p->dsi, p, d0, dsel, tt, cnt);
-    gather_template_batch(p->tsr, p->tsi, p, t0, tsel, tt, cnt);
-    if(ap_binmax_prod_batch_lanes_peaks(p->fft, p->dsr, p->dsi, p->tsr, p->tsi, cnt,
-                                        binsize, threshold, p->pkbuf, AP_BACKWARD, start, end) < 0){
-      return -1;
+    int same_data = !p->ebr;
+    const int base = t0 + tsel[tt];
+    int packed_templates = base % W == 0;
+    for(int l = 1; l < cnt; l++){
+      same_data &= dsel[tt+l] == dsel[tt];
+      packed_templates &= tsel[tt+l] == tsel[tt]+l;
+    }
+    const float *Tr, *Ti;
+    if(packed_templates){
+      Tr = p->tre + (size_t)(base/W)*n*W;
+      Ti = p->tim + (size_t)(base/W)*n*W;
+    } else {
+      gather_template_batch(p->tsr, p->tsi, p, t0, tsel, tt, cnt);
+      Tr = p->tsr; Ti = p->tsi;
+    }
+    /* Survivors retain their data-major order. A batch from one block can
+       read that spectrum directly; aligned template runs are already packed. */
+    if(same_data){
+      const size_t off = (size_t)(d0+dsel[tt])*n;
+      if(ap_binmax_prod_batch_peaks(p->fft, p->dre+off, p->dim+off, Tr, Ti, cnt,
+                                    binsize, threshold, p->pkbuf, AP_BACKWARD, start, end)<0)
+        return -1;
+    } else {
+      gather_data_batch(p->dsr, p->dsi, p, d0, dsel, tt, cnt);
+      if(ap_binmax_prod_batch_lanes_peaks(p->fft, p->dsr, p->dsi, Tr, Ti, cnt,
+                                          binsize, threshold, p->pkbuf, AP_BACKWARD, start, end)<0)
+        return -1;
     }
     for(int l = 0; l < cnt; l++){
       const int d = dsel[tt + l];

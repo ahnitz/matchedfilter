@@ -54,6 +54,25 @@ def test_screen_subrange_rows():
     np.testing.assert_array_equal(ps.reshape(2, 21), fs.reshape(4, 50)[1:3, 13:34])
 
 
+def test_screen_window_maximum_matches_individual_samples():
+    # Pass 2 stores row k2's sample k1 at time k2 + 16*k1. Fusing the
+    # maximum must select the same samples, including partial rows and lanes.
+    n, nd, nt = 256, 2, 35
+    m = _screen_case(n, nd, nt, np.random.default_rng(8751))
+    if m.q15_lanes() == 0:
+        pytest.skip("no Q15 screen on this back end")
+    ps = np.empty(nd * nt, np.uint8)
+    samples = np.empty((n, nd * nt), np.float32)
+    for k in range(n):
+        m.q15_screen(0, nd, 0, nt, 0.0, k, k + 1, ps, samples[k])
+    for start, end in [(0, n), (64, n), (3, 254), (20, 236),
+                       (32, 224), (33, 223), (15, 33),
+                       (127, 129), (201, 202), (255, 256)]:
+        stat = np.empty(nd * nt, np.float32)
+        m.q15_screen(0, nd, 0, nt, 0.0, start, end, ps, stat)
+        np.testing.assert_array_equal(stat, samples[start:end].max(axis=0))
+
+
 @pytest.mark.parametrize("chain", [(256,), (512,), (128, 512)])
 def test_hierarchical_results_identical_with_screen(chain, monkeypatch):
     # The screen guards the FP32 tier; the FP16 first gate (ARM, src/gate16.cc) replaces

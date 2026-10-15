@@ -1,0 +1,379 @@
+{
+  "schema_version": 1,
+  "measured_at_utc": "2026-10-15T03:13:09.130553+00:00",
+  "baseline_commit": "ff5911cd0a0db7936e1d818a77cd094fb6b75f2a",
+  "tool": "tools/profile_cpu_ladder.py",
+  "hardware": {
+    "cpu": "AMD RYZEN AI MAX+ 395 w/ Radeon 8060S",
+    "target": "AVX3",
+    "affinity": [
+      4
+    ]
+  },
+  "workload": {
+    "bank": "tests/search_test/output_test27_ref/fir_three_level_modern_v1_bottomup_cap401.hdf",
+    "bank_sha256": "da727c0858d7f0de025ba00b58dca22d86f70ba8f83e01c5a90da2410dce0719",
+    "profiles": "tests/search_test/prod_job_test27/ladder_profiles_H1.npz",
+    "profiles_sha256": "ff888dba0b4f849dc90cbdf5eb9dc6f1cd91599a68bc1bc81b193c3be521060a",
+    "top_template": 4,
+    "fine_templates": 4698,
+    "middle_filters": 27,
+    "fine_pairs_per_segment": 4337904,
+    "sample_rate": 2048,
+    "segment_samples": 1048576,
+    "analyzed_seconds_per_segment": 376,
+    "detectors": 2,
+    "n": 2048,
+    "chain": [
+      256,
+      512,
+      1024
+    ],
+    "threshold": 6,
+    "false_dismissal": 0.001,
+    "binsize": 2048,
+    "q15": true,
+    "autotune": false,
+    "direct_refinement": "default, supplied real FIR taps",
+    "seed": 1,
+    "warmup_segments": 1,
+    "common_band256_window_start": [
+      17,
+      23
+    ],
+    "common_band256_window_end": [
+      232,
+      238
+    ],
+    "steady_segments_per_sample": {
+      "interleaved_comparison": 3,
+      "promoted_tool_validation": 3,
+      "final_quiet_abba": 7
+    }
+  },
+  "validation": {
+    "scope": "All fine and followup template indices, sample indices, and complex SNR arrays, including warmup, compared bitwise within each fixed segment-count experiment. Four- and eight-segment output hashes differ because they include different segments.",
+    "four_segment_output_sha256": "1078f7cd28b749281935a9cc85a4ef7c9620d9dddd9fb4a3b89545cd9f238697",
+    "eight_segment_output_sha256": "fc13f0d0ec76107d9995385a20ea8662a95853213b0b2eaac4b48ebc23401f2b",
+    "fine_triggers_including_warmup_eight_segments": 588,
+    "asymmetric_followup_calls_including_warmup_eight_segments": 126,
+    "all_output_hashes_equal_within_each_segment_count": true,
+    "fine_triggers_including_warmup_four_segments": 211,
+    "asymmetric_followup_calls_including_warmup_four_segments": 48
+  },
+  "variants": {
+    "baseline": "ff5911cd",
+    "middle": "pooled data broadcast plus N256 middle-window Q15 codelet",
+    "compaction": "middle candidate plus survivor-only post-Q15 scan"
+  },
+  "interleaved_comparison": {
+    "order": [
+      "baseline",
+      "middle",
+      "compaction",
+      "compaction",
+      "middle",
+      "baseline"
+    ],
+    "samples": [
+      {
+        "variant": "baseline",
+        "core_sha256": "9a84717d570bfca611519d7ffda01eaf853110ef05df1107b821eca3b19e35c4",
+        "output_sha256": "1078f7cd28b749281935a9cc85a4ef7c9620d9dddd9fb4a3b89545cd9f238697",
+        "fine_ms_per_segment": 330.93789402240265,
+        "segment_ms": 396.3941359931293,
+        "stage_ms_per_segment": {
+          "middle": 57.46201268630102,
+          "forward": 74.1025792416038,
+          "q15 b256": 141.54143804436868,
+          "tier0 b256": 35.92233519897848,
+          "tier1 b512": 53.08170484440617,
+          "tier2 b1024": 18.733978350125565,
+          "refine n2048": 0.5941027250530087,
+          "followups": 7.522109992957364
+        },
+        "screen_plus_residual_ms": 215.6440172859725
+      },
+      {
+        "variant": "middle",
+        "core_sha256": "ef96f1c257838b98f606a51b0248a125135c08afa796d867d571e32e3c53dd78",
+        "output_sha256": "1078f7cd28b749281935a9cc85a4ef7c9620d9dddd9fb4a3b89545cd9f238697",
+        "fine_ms_per_segment": 315.3483949912091,
+        "segment_ms": 380.7729840045795,
+        "stage_ms_per_segment": {
+          "middle": 57.12052529755359,
+          "forward": 73.7095111625706,
+          "q15 b256": 134.79169413018255,
+          "tier0 b256": 31.981830496199148,
+          "tier1 b512": 47.72467949711511,
+          "tier2 b1024": 19.308170216948206,
+          "refine n2048": 0.458359286866325,
+          "followups": 7.537374971434474
+        },
+        "screen_plus_residual_ms": 208.50120529275316
+      },
+      {
+        "variant": "compaction",
+        "core_sha256": "2423fad75e51829bb5ab060686cd3952588a210d1ded385c6d5a18415b3a4123",
+        "output_sha256": "1078f7cd28b749281935a9cc85a4ef7c9620d9dddd9fb4a3b89545cd9f238697",
+        "fine_ms_per_segment": 307.14095997003216,
+        "segment_ms": 374.24744399807724,
+        "stage_ms_per_segment": {
+          "middle": 59.2963943296733,
+          "forward": 63.540523700716335,
+          "q15 b256": 138.54562036028986,
+          "tier0 b256": 30.883535988884557,
+          "tier1 b512": 47.8080848714997,
+          "tier2 b1024": 18.194818567763292,
+          "refine n2048": 0.577249157159043,
+          "followups": 7.1897430073780315
+        },
+        "screen_plus_residual_ms": 202.0861440610062
+      },
+      {
+        "variant": "compaction",
+        "core_sha256": "2423fad75e51829bb5ab060686cd3952588a210d1ded385c6d5a18415b3a4123",
+        "output_sha256": "1078f7cd28b749281935a9cc85a4ef7c9620d9dddd9fb4a3b89545cd9f238697",
+        "fine_ms_per_segment": 311.1697986605577,
+        "segment_ms": 377.1371189892913,
+        "stage_ms_per_segment": {
+          "middle": 57.773516998471074,
+          "forward": 65.06832293927648,
+          "q15 b256": 137.1106202753717,
+          "tier0 b256": 32.35577716634382,
+          "tier1 b512": 49.45350509965762,
+          "tier2 b1024": 19.12186638573241,
+          "refine n2048": 0.5982623964604418,
+          "followups": 7.725567653930436
+        },
+        "screen_plus_residual_ms": 202.1789432146482
+      },
+      {
+        "variant": "middle",
+        "core_sha256": "ef96f1c257838b98f606a51b0248a125135c08afa796d867d571e32e3c53dd78",
+        "output_sha256": "1078f7cd28b749281935a9cc85a4ef7c9620d9dddd9fb4a3b89545cd9f238697",
+        "fine_ms_per_segment": 310.63773702286807,
+        "segment_ms": 376.58858332239714,
+        "stage_ms_per_segment": {
+          "middle": 57.81566297324995,
+          "forward": 71.74145816215214,
+          "q15 b256": 134.18331555767267,
+          "tier0 b256": 30.473869025111576,
+          "tier1 b512": 48.47335515787093,
+          "tier2 b1024": 18.621638525212592,
+          "refine n2048": 0.44435644205585034,
+          "followups": 7.654871655783306
+        },
+        "screen_plus_residual_ms": 205.92477371982483
+      },
+      {
+        "variant": "baseline",
+        "core_sha256": "9a84717d570bfca611519d7ffda01eaf853110ef05df1107b821eca3b19e35c4",
+        "output_sha256": "1078f7cd28b749281935a9cc85a4ef7c9620d9dddd9fb4a3b89545cd9f238697",
+        "fine_ms_per_segment": 324.695352348499,
+        "segment_ms": 390.25355766837794,
+        "stage_ms_per_segment": {
+          "middle": 57.460810678700604,
+          "forward": 72.75778878830998,
+          "q15 b256": 139.04855112541088,
+          "tier0 b256": 36.17567170015604,
+          "tier1 b512": 52.55456547742896,
+          "tier2 b1024": 17.389397438020293,
+          "refine n2048": 0.5829655551689319,
+          "followups": 7.587849666985373
+        },
+        "screen_plus_residual_ms": 211.80633991372088
+      }
+    ],
+    "means": {
+      "baseline": {
+        "fine_ms_per_segment": 327.8166231854508,
+        "segment_ms": 393.3238468307536,
+        "screen_plus_residual_ms": 213.72517859984669
+      },
+      "middle": {
+        "fine_ms_per_segment": 312.9930660070386,
+        "segment_ms": 378.68078366348834,
+        "screen_plus_residual_ms": 207.21298950628898
+      },
+      "compaction": {
+        "fine_ms_per_segment": 309.1553793152949,
+        "segment_ms": 375.6922814936843,
+        "screen_plus_residual_ms": 202.1325436378272
+      }
+    },
+    "speedup_vs_baseline": {
+      "middle": {
+        "fine_ms_per_segment": 1.0473606567951217,
+        "segment_ms": 1.0386686195840287
+      },
+      "compaction": {
+        "fine_ms_per_segment": 1.0603620222021886,
+        "segment_ms": 1.0469308692394994
+      }
+    }
+  },
+  "promoted_tool_validation": {
+    "order": [
+      "baseline",
+      "compaction"
+    ],
+    "samples": [
+      {
+        "variant": "baseline",
+        "core_sha256": "9a84717d570bfca611519d7ffda01eaf853110ef05df1107b821eca3b19e35c4",
+        "output_sha256": "1078f7cd28b749281935a9cc85a4ef7c9620d9dddd9fb4a3b89545cd9f238697",
+        "fine_ms_per_segment": 330.46335600859794,
+        "segment_ms": 397.57892801814404,
+        "stage_ms_per_segment": {
+          "middle": 58.94942765977854,
+          "forward": 74.23807937404261,
+          "q15 b256": 139.58135077437174,
+          "tier0 b256": 34.57846340808546,
+          "tier1 b512": 52.959370157357846,
+          "tier2 b1024": 20.56926469262178,
+          "refine n2048": 0.46308365201047147,
+          "followups": 7.6768183304617805
+        },
+        "screen_plus_residual_ms": 213.81943014841437
+      },
+      {
+        "variant": "compaction",
+        "core_sha256": "2423fad75e51829bb5ab060686cd3952588a210d1ded385c6d5a18415b3a4123",
+        "output_sha256": "1078f7cd28b749281935a9cc85a4ef7c9620d9dddd9fb4a3b89545cd9f238697",
+        "fine_ms_per_segment": 328.90270865755156,
+        "segment_ms": 395.30586967399967,
+        "stage_ms_per_segment": {
+          "middle": 58.17406162774811,
+          "forward": 69.56600778898627,
+          "q15 b256": 144.03221771868982,
+          "tier0 b256": 33.69645449967753,
+          "tier1 b512": 50.96222846662697,
+          "tier2 b1024": 21.374337834624082,
+          "refine n2048": 0.4706362535319955,
+          "followups": 7.7402043001105385
+        },
+        "screen_plus_residual_ms": 213.5982255076761
+      }
+    ],
+    "speedup": {
+      "fine_ms_per_segment": 1.004745012156988,
+      "segment_ms": 1.005750125456065
+    }
+  },
+  "command_template": "PYTHONPATH=<frozen-build>/python MF_COST_FILE=<scratch-costs.json> taskset -c 4 <python> tools/profile_cpu_ladder.py --bank <bank.hdf> --profiles <profiles.npz> --target AVX3 --runs 1 --segments <4-or-8> --q15 1 --output <result.json>",
+  "notes": [
+    "Steady wall timings exclude bank construction, data generation, warmup, validation, and output serialization. Each sample is the mean of three or seven steady segments from a fresh process, as recorded per experiment.",
+    "Native stage times come from engine counters; forward is the residual series minus tiers and refine and includes ingestion, row clearing, and bookkeeping.",
+    "Compaction moves rejected-row clearing into Q15 timing. Compare screen_plus_residual_ms, not residual alone, when attributing its effect.",
+    "The first six interleaved runs show 1.060x fine and 1.047x whole-segment speedup. The initial promoted-tool pair shows about 1.005x and 1.006x. The final quieter, longer ABBA measurement is recorded separately. Performance varies with system conditions; these observations are not a universal speedup claim.",
+    "One largest-top workload with generated Gaussian input colored by the actual reference profile; this does not cover every production bank or transient distribution."
+  ],
+  "tool_sha256": "f4912c230305dde5c6e79fe1a92bd8dd1c45d74d19bafe606b7bd28be4c7e190",
+  "final_quiet_abba": {
+    "order": [
+      "baseline",
+      "compaction",
+      "compaction",
+      "baseline"
+    ],
+    "conditions": "Root CPU regression tests had completed; no other agent benchmark or test workloads active.",
+    "segments": 8,
+    "warmup_segments": 1,
+    "steady_segments": 7,
+    "samples": [
+      {
+        "variant": "baseline",
+        "core_sha256": "9a84717d570bfca611519d7ffda01eaf853110ef05df1107b821eca3b19e35c4",
+        "output_sha256": "fc13f0d0ec76107d9995385a20ea8662a95853213b0b2eaac4b48ebc23401f2b",
+        "fine_ms_per_segment": 321.7491028564317,
+        "segment_ms": 388.9196672826074,
+        "stage_ms_per_segment": {
+          "middle": 58.07103041193581,
+          "forward": 72.6194471579685,
+          "q15 b256": 136.89772813383723,
+          "tier0 b256": 34.151991610692775,
+          "tier1 b512": 50.74089585246625,
+          "tier2 b1024": 18.64322847420456,
+          "refine n2048": 0.6301469362735117,
+          "followups": 8.60477057618222
+        },
+        "screen_plus_residual_ms": 209.51717529180573
+      },
+      {
+        "variant": "compaction",
+        "core_sha256": "2423fad75e51829bb5ab060686cd3952588a210d1ded385c6d5a18415b3a4123",
+        "output_sha256": "fc13f0d0ec76107d9995385a20ea8662a95853213b0b2eaac4b48ebc23401f2b",
+        "fine_ms_per_segment": 311.5778278526185,
+        "segment_ms": 379.29476728563066,
+        "stage_ms_per_segment": {
+          "middle": 58.51888215069526,
+          "forward": 66.11020500845308,
+          "q15 b256": 139.34852993796278,
+          "tier0 b256": 31.3636872591662,
+          "tier1 b512": 47.12174081952132,
+          "tier2 b1024": 19.201230115322915,
+          "refine n2048": 0.47984812353738326,
+          "followups": 8.67579785075837
+        },
+        "screen_plus_residual_ms": 205.45873494641586
+      },
+      {
+        "variant": "compaction",
+        "core_sha256": "2423fad75e51829bb5ab060686cd3952588a210d1ded385c6d5a18415b3a4123",
+        "output_sha256": "fc13f0d0ec76107d9995385a20ea8662a95853213b0b2eaac4b48ebc23401f2b",
+        "fine_ms_per_segment": 310.08062142479633,
+        "segment_ms": 377.728418289085,
+        "stage_ms_per_segment": {
+          "middle": 58.53223258496395,
+          "forward": 65.38676265923863,
+          "q15 b256": 137.99401113152905,
+          "tier0 b256": 31.212279704675574,
+          "tier1 b512": 48.05881937420592,
+          "tier2 b1024": 18.798135503252105,
+          "refine n2048": 0.5991543135309693,
+          "followups": 8.627427159808576
+        },
+        "screen_plus_residual_ms": 203.38077379076768
+      },
+      {
+        "variant": "baseline",
+        "core_sha256": "9a84717d570bfca611519d7ffda01eaf853110ef05df1107b821eca3b19e35c4",
+        "output_sha256": "fc13f0d0ec76107d9995385a20ea8662a95853213b0b2eaac4b48ebc23401f2b",
+        "fine_ms_per_segment": 320.5113325717061,
+        "segment_ms": 386.5309465826223,
+        "stage_ms_per_segment": {
+          "middle": 57.19707899593881,
+          "forward": 72.30871760075944,
+          "q15 b256": 136.49446002494116,
+          "tier0 b256": 33.98753850899083,
+          "tier1 b512": 50.84935768883825,
+          "tier2 b1024": 18.533447253860054,
+          "refine n2048": 0.5985712730935073,
+          "followups": 8.330876714483436
+        },
+        "screen_plus_residual_ms": 208.80317762570058
+      }
+    ],
+    "means": {
+      "baseline": {
+        "fine_ms_per_segment": 321.13021771406886,
+        "segment_ms": 387.72530693261484,
+        "screen_plus_residual_ms": 209.16017645875314
+      },
+      "compaction": {
+        "fine_ms_per_segment": 310.8292246387074,
+        "segment_ms": 378.5115927873578,
+        "screen_plus_residual_ms": 204.41975436859178
+      }
+    },
+    "speedup": {
+      "fine_ms_per_segment": 1.0331403621629687,
+      "segment_ms": 1.0243419602485813
+    },
+    "wall_reduction_percent": {
+      "fine_ms_per_segment": 3.2077308540716,
+      "segment_ms": 2.3763509836767893
+    }
+  }
+}
