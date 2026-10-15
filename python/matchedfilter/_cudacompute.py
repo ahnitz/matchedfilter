@@ -1870,12 +1870,15 @@ class Context(InputUploads):
         """The fastest of the coarse variants on synthetic data, the choice every backend makes
         (_coarse.stored_measured_choice): measured once, kept in MF_COST_FILE."""
         from . import gatechain
-        return stored_measured_choice(
+        # By index: a candidate holds its kernel's ctypes handle, which is not hashable.
+        i = stored_measured_choice(
             self.__dict__.setdefault("_coarse_memo", {}), "cuda-coarse", getattr(self, "name", ""),
-            int(band), list(cands), lambda c: self._labels.get(c[0].value, ""),
-            gatechain.gpu_kernel_id("cuda"), lambda cs: self._time_coarse_measure(band, cs))
+            int(band), list(range(len(cands))), lambda i: self._labels.get(cands[i][0].value, ""),
+            gatechain.gpu_kernel_id("cuda"),
+            lambda idx: self._time_coarse_measure(band, cands, idx))
+        return cands[i]
 
-    def _time_coarse_measure(self, band, cands):
+    def _time_coarse_measure(self, band, cands, idx):
         P, ntm = 65536, 16
         ndm = P // ntm
         rng = np.random.default_rng(0)
@@ -1888,8 +1891,8 @@ class Context(InputUploads):
         e0, e1 = self._new_event_timed(), self._new_event_timed()
         ms = ctypes.c_float()
 
-        def time_one(c):
-            fn, wg, ppg, tile = c
+        def time_one(i):
+            fn, wg, ppg, tile = cands[i]
             check_cuda(self.cuda.cuEventRecord(e0, st), "cuEventRecord")
             grid, rowarg = self._coarse_grid_for(fn, ndm, ntm, ppg, tile)
             self._launch(fn, grid, wg,
@@ -1905,12 +1908,12 @@ class Context(InputUploads):
             return ms.value
 
         try:
-            for c in cands:                 # a warm-up launch each (module load, first launch)
-                time_one(c)
-            times = time_staged([cands], time_one)
-            for c, t in times.items():
+            for i in idx:                   # a warm-up launch each (module load, first launch)
+                time_one(i)
+            times = time_staged([idx], time_one)
+            for i, t in times.items():
                 self.__dict__.setdefault("coarse_times", {}).setdefault(band, {})[
-                    self._labels.get(c[0].value, "")] = t * 1e6 / P   # ns per pair, for reports
+                    self._labels.get(cands[i][0].value, "")] = t * 1e6 / P   # ns per pair, for reports
         finally:
             self._sync(st)              # resolves any timed regions of the launches above
             if self._timing:            # the calibration is not the caller's work
