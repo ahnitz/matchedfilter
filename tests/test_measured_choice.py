@@ -399,3 +399,21 @@ def test_time_staged_offers_later_stages_the_earlier_times():
     out = _coarse.time_staged([["u1", "u2"], stage2], lambda c: true[c],
                               time_screen=lambda c: true[c], rounds=2)
     assert set(seen[0]) == {"u1", "u2"} and min(out, key=out.get) == "t1"
+
+
+def test_a_close_call_goes_to_the_preference_not_the_noise():
+    """confirm_fastest marks a contender whose paired ratio to the fastest is within the
+    measurement's noise; stored_measured_choice then takes the backend's preference, so the
+    choice does not flip with the noise. A real difference still picks the fastest."""
+    from matchedfilter import _coarse
+    noise = iter([1.000, 1.002, 0.999, 1.001, 1.000, 0.998, 1.001, 1.000, 1.000, 1.001] * 4)
+    true = {"pref": 1.000, "fast": 0.999, "slow": 1.10}
+    t = _coarse.confirm_fastest({"pref": 1.0, "fast": 0.999, "slow": 1.1},
+                                lambda c: true[c] * next(noise), rivals=["slow"])
+    assert "pref" in t.close and "slow" not in t.close
+    pick = _coarse.stored_measured_choice({}, "t-close", "dev", 1, ["pref", "fast", "slow"],
+                                          str, "k", lambda cs: t)
+    assert pick == "pref"
+    real = _coarse.Timings({"pref": 1.0, "fast": 0.9})
+    assert _coarse.stored_measured_choice({}, "t-close2", "dev", 1, ["pref", "fast"], str, "k",
+                                          lambda cs: real) == "fast"
