@@ -912,7 +912,7 @@ class Context(InputUploads):
         self._cmd_prefix = "forward+"
         return pending[0]
 
-    def _commit(self, cmd, label, *, async_submit=False, finish=None):
+    def _commit(self, cmd, label, *, async_submit=False, finish=None, owner=None):
         """Commit an owned command buffer; ``finish()`` reads its outputs.
 
         Synchronous unless async_submit, in which case a _Pending is returned
@@ -949,7 +949,7 @@ class Context(InputUploads):
 
         if not async_submit:
             return complete()
-        return self._track(complete)
+        return self._track(complete, owner=owner)
 
     def _set_buffers(self, enc, buffers, start=1, offsets=None):
         for slot, buf in enumerate(buffers, start=start):
@@ -1256,6 +1256,7 @@ class Context(InputUploads):
             upload_data = upload_tmpl = True
         self._cache_touch("flat", key)
         b_data, b_tmpl, b_idx, b_val = batch
+        self._claim(b_idx)                       # an earlier result still reading these outputs
         if upload_data:
             write_input(b_data, data)
             self._uploaded["data"][key] = dsig
@@ -1282,7 +1283,7 @@ class Context(InputUploads):
         def finish():
             return (b_idx.read(np.int32, out).reshape(nd, nt, nbins),
                     b_val.read(np.complex64, out).reshape(nd, nt, nbins))
-        return self._commit(cmd, "flat", async_submit=async_submit, finish=finish)
+        return self._commit(cmd, "flat", async_submit=async_submit, finish=finish, owner=b_idx)
 
     #: peaks_items takes async_submit (MatchedFilter._items_gpu(wait=False)).
     items_async = True
@@ -1767,6 +1768,7 @@ class Context(InputUploads):
             # and every index came back -1.
             upload_data = upload_tmpl = True
         self._cache_touch("hier", key)
+        self._claim(bufs["idx"])                 # an earlier result still reading these outputs
         shared_data = shared_buffer(data, self) is not None
         if upload_data:
             write_input(bufs["data"], data)
@@ -1917,7 +1919,7 @@ class Context(InputUploads):
             val = bufs["val"].read(np.complex64, out).reshape(nd, nt, nbins)
             return idx, val
         return self._commit(cmd, "hier" if len(tiers) == 1 else "hier_cascade",
-                            async_submit=async_submit, finish=finish)
+                            async_submit=async_submit, finish=finish, owner=bufs["idx"])
 
     def _check_completed(self, cmd):
         """A command buffer that did not complete, said so.

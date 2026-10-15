@@ -78,6 +78,9 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ### Fixed
 
+- Vulkan and Metal async results own their output buffers until collected. A later call
+  of the same shape reused the record and overwrote them, so the earlier result returned
+  the later call's peaks; a call now collects the in-flight result first, as CUDA does.
 - Segment replay covers ragged layouts. When a call's blocks have several bin counts, its
   result is split per count; the parts now carry the call's trace, and a replay splits the
   replayed result the same way. Before, such segments never replayed: at n=4096 on test27
