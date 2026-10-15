@@ -1700,12 +1700,16 @@ class Context(InputUploads):
         shift = bin_shift(binsize)
         t2 = float(threshold) ** 2 if threshold > 0 else 0.0
 
-        # The gate tiers in order, [(band, threshold, templates)]: one, or a cascade of two.
-        tiers = [(int(band), float(raw_thr), ct0)] if cascade_band is None else [
-            (int(cascade_band), float(raw_thr), ct0), (int(band), float(raw_thr1), ct1)]
-        cascade = len(tiers) > 1
+        # The gate tiers in order -- bands tb, thresholds tthr, templates tct: one, or a
+        # cascade of two. Plain tuples: this runs on every call (a generator per field
+        # cost 1.7 us of a 43 us call).
+        cascade = cascade_band is not None
+        if cascade:
+            tb, tthr, tct = ((int(cascade_band), int(band)), (float(raw_thr), float(raw_thr1)),
+                             (ct0, ct1))
+        else:
+            tb, tthr, tct = (int(band),), (float(raw_thr),), (ct0,)
         kind = "hier_cascade" if cascade else "hier"
-        tb = tuple(t[0] for t in tiers)
         # Tier 0 is the packed fp16 coarse role where its band has one; a cascade's always is.
         half = cascade or bool(_use_c16(tb[0]))
         top = max(tb)
@@ -1713,9 +1717,8 @@ class Context(InputUploads):
         bkey = _band_key(bands)
         # A sparse caller reads only the refined pairs, which the refine writes in full: its
         # recording skips clearing the dense outputs (bool(sparse) in the key).
-        key = (kind, n, *tb, nd, nt, nbins, binsize, shift, lo, hi,
-               int(np.float32(t2).view(np.uint32)), *(t[1] for t in tiers), bool(sparse),
-               rw_key, bkey)
+        key = ((kind, n) + tb + (nd, nt, nbins, binsize, shift, lo, hi,
+               int(np.float32(t2).view(np.uint32))) + tthr + (bool(sparse), rw_key, bkey))
         key += (shared_key(data, self), shared_key(tmpl, self), slot)
         # Storage depends on the band widths only. The series/starts a band-mode record binds
         # (bkey) change with the follow-up pools every segment: keying the buffers on them
@@ -1723,7 +1726,7 @@ class Context(InputUploads):
         storage_key = (kind, n, *tb, nd, nt, nbins, rw_key, bkey and bkey[0], *key[-3:])
         upload_data, upload_tmpl, dsig, tsig = self._input_uploads(
             storage_key, data, tmpl, upload_data, upload_tmpl)
-        et, ed = (self._c16_exponents(storage_key, ct0, tiers[0][1], upload_tmpl, tb[0])
+        et, ed = (self._c16_exponents(storage_key, ct0, tthr[0], upload_tmpl, tb[0])
                   if half else (0, 0))
         key += (ed,)
         self._last_c16_scale = 2.0 ** (et + ed)   # tier-0 values / this = unscaled
@@ -1735,9 +1738,9 @@ class Context(InputUploads):
             estimate = 0
             if storage_key not in self._storage:
                 estimate = (8 * n * (nd + nt) - (nd * n * 8 if sd else 0) - (nt * n * 8 if st else 0)
-                            + sum((4 if i == 0 and cascade else 8) * t[0] * (nd + nt)
-                                  for i, t in enumerate(tiers))
-                            + nd * nt * (8 * len(tiers) + 8 + 12 * nbins) + 12 * len(tiers))
+                            + sum((4 if i == 0 and cascade else 8) * b * (nd + nt)
+                                  for i, b in enumerate(tb))
+                            + nd * nt * (8 * len(tb) + 8 + 12 * nbins) + 12 * len(tb))
             self._cache_room(estimate, incoming=incoming, keep_storage=storage_key)
             fresh = storage_key not in self._storage
             pool_start = len(getattr(self, '_pools', []))
@@ -1745,7 +1748,7 @@ class Context(InputUploads):
             try:
                 batch = self._make_hier(
                     storage_key, n, [(b, thr * (2.0 ** (et + ed) if i == 0 else 1.0))
-                                     for i, (b, thr, _) in enumerate(tiers)],
+                                     for i, (b, thr) in enumerate(zip(tb, tthr))],
                     nd, nt, nbins, binsize, shift, lo, hi, t2, data, tmpl,
                     clear_out=not sparse, rowwin=rw, bands=bands, data_scale=ed)
             finally:
@@ -1769,7 +1772,7 @@ class Context(InputUploads):
             self._uploaded["data"][storage_key] = dsig
         if upload_tmpl:
             write_input(bufs["tmpl"], tmpl)
-            for i, (_, _, ct) in enumerate(tiers):
+            for i, ct in enumerate(tct):
                 bufs["ct%d" % i].write(_pack_half2(_pow2_scaled(ct, et)) if i == 0 and half
                                        else np.ascontiguousarray(ct, np.complex64))
             self._uploaded["tmpl"][storage_key] = tsig
