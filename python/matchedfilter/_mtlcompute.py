@@ -121,7 +121,7 @@ def coarse_geometry(band, nd, nt, simd_width=32, choose_tile=None):
     the smallest packing that fills the pipeline's SIMD width (threadExecutionWidth), among
     those shipped. Which tile -- or none -- is choose_tile(band, ppg, shipped tiles)'s, the
     device's measured choice (Context._coarse_tile); without it the smallest shipped tile.
-    Untiled: coarse_ppg's packing, with the pair count padded to whole groups.
+    Untiled: coarse_ppg's packing, ragged like the tiles (_coarse.coarse_launch).
     MF_METAL_COARSE_TILE forces a tile (0 or 1 = untiled) and MF_METAL_COARSE_PPG a packing,
     for measurement."""
     import os
@@ -145,8 +145,8 @@ def coarse_geometry(band, nd, nt, simd_width=32, choose_tile=None):
             entry = "coarse16" + coarse_stem(band, ppg, tile)[len("tierb_%d_c16" % band):]
             return entry, ppg, tile, coarse_launch(nd, nt, ppg, tile, 0)[1], True
     ppg = coarse_ppg(band, pairs, simd_width=simd_width)
-    padded = -(-pairs // ppg) * ppg
-    return "coarse16" + ("p%d" % ppg if ppg > 1 else ""), ppg, 1, padded // ppg, False
+    return ("coarse16" + ("p%d" % ppg if ppg > 1 else ""), ppg, 1,
+            coarse_launch(nd, nt, ppg, 1, 0)[1], ppg > 1)
 
 
 def coarse_ppg(band, pairs, override=None, simd_width=None):
@@ -155,8 +155,8 @@ def coarse_ppg(band, pairs, override=None, simd_width=None):
     One pair is band/16 threads; an Apple SIMD group is 32 lanes. Pick the
     smallest packing that fills at least simd_width lanes (the pipeline's
     threadExecutionWidth; TARGET_THREADS when not given), from the
-    variants shipped. Partial groups are safe: the host pads the coarse
-    buffers to a whole number of groups. ``MF_METAL_COARSE_PPG`` overrides,
+    variants shipped. A partial last group is ragged: its spare slots compute
+    and write nothing (_coarse.coarse_launch). ``MF_METAL_COARSE_PPG`` overrides,
     for measurement.
     """
     import os
@@ -1731,18 +1731,13 @@ class Context(InputUploads):
         # precision refine kernel, which reads float2.
         half = [i == 0 and _use_c16(b) for i, (b, _, _) in enumerate(tiers)]
         sfx = ["" if i == 0 else str(i) for i in range(len(tiers))]
-        # Pairs per threadgroup for the first tier, and the pair count padded
-        # to whole groups: the padded pairs read a spare data row and write
-        # spare outputs, and no compaction ever lists them.
+        # Pairs per threadgroup and tile for the first tier. Every packed launch is
+        # ragged (_coarse.coarse_launch): no padded rows or spare outputs.
         if half[0]:
             centry, ppg, ctile, cgroups, ragged = coarse_geometry(
                 tiers[0][0], nd, nt, self._simd_width(tiers[0][0]), self._coarse_tile)
         else:
             centry, ppg, ctile, cgroups, ragged = "fusedTierB", 1, 1, pairs, False
-        # Ragged tiles clamp inside the kernel and write only real pairs; untiled builds
-        # run whole groups over a padded pair count (spare data rows, spare outputs).
-        padded = pairs if ragged else cgroups * ppg
-        rows0 = nd if ragged else (padded - 1) // nt + 1
 
         # In flight, a result owns its buffers: the slot is part of the key.
         slot = slot if async_submit else None
@@ -1768,11 +1763,10 @@ class Context(InputUploads):
             }
             for i, ((b, _, _), h) in enumerate(zip(tiers, half)):
                 cb = 4 if h else 8
-                rows, slots = (rows0, padded) if i == 0 else (nd, pairs)
-                bufs["cdata" + sfx[i]] = _Buffer(self, rows * b * cb)
+                bufs["cdata" + sfx[i]] = _Buffer(self, nd * b * cb)
                 bufs["ct" + str(i)] = _Buffer(self, nt * b * cb)
-                bufs["cidx" + sfx[i]] = _Buffer(self, slots * 4)
-                bufs["cval" + sfx[i]] = _Buffer(self, slots * 8)
+                bufs["cidx" + sfx[i]] = _Buffer(self, pairs * 4)
+                bufs["cval" + sfx[i]] = _Buffer(self, pairs * 8)
                 # Compacted survivors and the indirect threadgroup count:
                 # args is [groupsX, 1, 1] and the compaction bumps [0]
                 # atomically, so the count stays on the device.
@@ -1879,7 +1873,7 @@ class Context(InputUploads):
                 # passes the same pairs (a nonzero maximum). 0 elects every pair
                 # (peakTwoWave): the raw (unbounded) build, and every other build, which
                 # reads the slot as a squared seed.
-                gate = (h and ragged and b // _radix(b) <= self._simd_width(b)
+                gate = (h and ctile > 1 and b // _radix(b) <= self._simd_width(b)
                         and os.environ.get("MF_VK_C16_BOUND", "1") != "0")
                 cparams = (nt, span[0], span[1], nd if ragged else span[2], *span[3:], 1,
                            bits(max(float(thr), 1.1754944e-38)) if gate else 0)

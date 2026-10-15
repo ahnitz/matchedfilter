@@ -56,7 +56,7 @@ def _coarse(ctx, band, tile, x, t, subgroup=0, ppg=1, tail=None, twt=1):
             ("coarse16-test", band, ppg, tile), V.coarse_stem(band, ppg, tile) + ".spv",
             V._NBIND, V._PUSH_BYTES, data_stride=band, subgroup=subgroup, coarse_twt=twt)
         dset = ctx._descriptor_set(sl, bufs)
-        slot_val, groups = V.coarse_launch(nd, nt, ppg, tile, band, ragged_groups=True)
+        slot_val, groups = V.coarse_launch(nd, nt, ppg, tile, band)
         V._check(vk.vkAllocateCommandBuffers(ctx.device, ctypes.byref(
             V._CmdBufAlloc(40, None, ctx.command_pool, 0, 1)), ctypes.byref(cmd)), "alloc")
         V._check(vk.vkBeginCommandBuffer(cmd, ctypes.byref(V._CmdBufBegin(42, None, 0, None))),

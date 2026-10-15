@@ -70,6 +70,12 @@ Alpha releases may change the API. Pin a version for reproducible work.
   are 64-bit global reads. The 8060S now takes the table (band 2048: 38.3 against 41.2 ns
   per pair); the Iris Xe keeps the recurrence. Metal keeps the recurrence.
 
+### Changed
+
+- One coarse launch rule on every GPU backend (`_coarse.coarse_launch`): untiled builds with
+  several pairs per group take ragged groups on CUDA and Metal too (the kernel's spare slots
+  compute and write nothing), so neither host pads its data rows or outputs any more.
+
 ### Fixed
 
 - Segment replay covers ragged layouts. When a call's blocks have several bin counts, its

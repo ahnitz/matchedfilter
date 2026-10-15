@@ -1360,16 +1360,54 @@ void filterPair_0(uint pair_1, uint tid_3, uint device* data_1, uint device* tmp
 #line 1606
     kernelContext_6->_tid_0 = tid_3;
 
-#line 1648
-    uint d_5 = pair_1 / ntmpl_1;
+#line 1640
+    uint pairs_0 = binsize_2 * ntmpl_1;
+    bool slotOk_0 = pair_1 < pairs_0;
 
-#line 1648
-    uint _S41 = pair_1 % ntmpl_1;
+#line 1641
+    uint q_0;
+    if(slotOk_0)
+    {
 
-#line 1653
+#line 1642
+        q_0 = pair_1;
+
+#line 1642
+    }
+    else
+    {
+
+#line 1642
+        q_0 = pairs_0 - 1U;
+
+#line 1642
+    }
+
+#line 1642
+    uint _S41;
+    if(slotOk_0)
+    {
+
+#line 1643
+        _S41 = q_0;
+
+#line 1643
+    }
+    else
+    {
+
+#line 1643
+        _S41 = 4294967295U;
+
+#line 1643
+    }
+    uint d_5 = q_0 / ntmpl_1;
+
+#line 1644
+    uint _S42 = q_0 - d_5 * ntmpl_1;
     rowWindow_0(d_5, &_S39, &_S40);
 
-
+#line 1656
     thread array<half2, int(16)> dreg_1;
 
 #line 1656
@@ -1417,16 +1455,16 @@ void filterPair_0(uint pair_1, uint tid_3, uint device* data_1, uint device* tmp
         }
 
 #line 1679
-        uint _S42 = pair_1 + k_2;
-
-#line 1679
         uint _S43 = _S41 + k_2;
 
 #line 1679
-        thread array<half2, int(16)> _S44 = dreg_1;
+        uint _S44 = _S42 + k_2;
 
 #line 1679
-        filterOne_0(_S42, d_5, _S43, tid_3, &_S44, data_1, tmpl_1, peakIdx_1, peakVal_1, _S39, _S40, binsize_2, binShift_2, nbins_2, thrBits_2, kernelContext_6);
+        thread array<half2, int(16)> _S45 = dreg_1;
+
+#line 1679
+        filterOne_0(_S43, d_5, _S44, tid_3, &_S45, data_1, tmpl_1, peakIdx_1, peakVal_1, _S39, _S40, binsize_2, binShift_2, nbins_2, thrBits_2, kernelContext_6);
 
 #line 1678
         k_2 = k_2 + 1U;
@@ -1468,14 +1506,14 @@ void filterPair_0(uint pair_1, uint tid_3, uint device* data_1, uint device* tmp
     (&kernelContext_7)->stg_0 = &stg_1;
 
 #line 1706
-    uint _S45 = lid_0.x;
+    uint _S46 = lid_0.x;
 
 #line 1706
-    uint _sub_0 = _S45 / 8U;
+    uint _sub_0 = _S46 / 8U;
     uint _pr_0 = gid_0.x * 4U + _sub_0;
 
 #line 1707
-    uint _t_0 = _S45 % 8U;
+    uint _t_0 = _S46 % 8U;
     (&kernelContext_7)->_stgBase_0 = _sub_0 * 128U;
 
 #line 1708

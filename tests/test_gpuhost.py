@@ -4,7 +4,7 @@ import pytest
 
 from matchedfilter._errors import UnsupportedSize
 from matchedfilter._gpuhost import (bin_shift, plan_items, split_items, hier_tiers, hier_window,
-                                    split_bins, padded_rows, grouped_windows)
+                                    split_bins, grouped_windows)
 
 
 def test_bin_shift():
@@ -69,8 +69,7 @@ def test_split_bins_matches_one_call(sparse, async_submit):
         assert res[0].shape == (2, 3, 25)
 
 
-def test_padded_rows_and_grouped_windows():
-    assert padded_rows(5, 3, 4) == 8 and padded_rows(4, 2, 8) == 4 and padded_rows(7, 1, 1) == 7
+def test_grouped_windows():
     groups, nb = grouped_windows([(0, 100, 0, 2), (10, 90, 2, 5)], 4096, 5, 16)
     assert nb == 7 and groups[1] == (10, 90, 2, 5)
     with pytest.raises(ValueError):

@@ -102,15 +102,6 @@ def split_bins(call, lo, hi, binsize, max_bins, upload_data, upload_tmpl, sparse
     return (lambda: res) if async_submit else res
 
 
-def padded_rows(rows, nt, unit):
-    """Data rows padded so rows * nt pairs fill whole coarse groups of `unit` pairs (pairs
-    per group x templates per tile). Padding pairs land past the real ones and are never
-    listed by the compaction."""
-    while (rows * nt) % unit:
-        rows += 1
-    return rows
-
-
 def grouped_windows(groups, n, nd, binsize, max_bins=MAX_BINS, nbins=None):
     """Validated (lo, hi, a, b) groups of a grouped call, as ints, and their common bin count
     (the first group's, or nbins if larger; no group may need more)."""
