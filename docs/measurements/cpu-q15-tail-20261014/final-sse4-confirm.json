@@ -1,0 +1,121 @@
+{
+  "schema_version": 1,
+  "baseline": "/tmp/mf-perf-tail-baseline/python",
+  "candidate": "/tmp/mf-perf-tail-inline/python",
+  "verify_only": false,
+  "rounds": 15,
+  "sample_ms": 50.0,
+  "case_seed": "8137 + templates",
+  "workers": {
+    "SSE4": [
+      {
+        "package": "/tmp/mf-perf-tail-baseline/python/matchedfilter/__init__.py",
+        "backend": "SSE4",
+        "core": "/tmp/mf-perf-tail-baseline/python/matchedfilter/_core.cpython-313-x86_64-linux-gnu.so",
+        "core_sha256": "ce7076733a62db4c115c9ce4572950b5460e19a30cc317d2eeb19e3dae6c2d0f",
+        "affinity": [
+          4
+        ],
+        "python": "3.13.5 | packaged by Anaconda, Inc. | (main, Jun 12 2025, 16:09:02) [GCC 11.2.0]",
+        "numpy": "2.5.3"
+      },
+      {
+        "package": "/tmp/mf-perf-tail-inline/python/matchedfilter/__init__.py",
+        "backend": "SSE4",
+        "core": "/tmp/mf-perf-tail-inline/python/matchedfilter/_core.cpython-313-x86_64-linux-gnu.so",
+        "core_sha256": "b7fc2583ceea69e842eff7e35b25e0c9e17f77c72ebeb37f2e5164cadd71ede7",
+        "affinity": [
+          4
+        ],
+        "python": "3.13.5 | packaged by Anaconda, Inc. | (main, Jun 12 2025, 16:09:02) [GCC 11.2.0]",
+        "numpy": "2.5.3"
+      }
+    ]
+  },
+  "results": [
+    {
+      "kind": "series",
+      "templates": 162,
+      "group": 4,
+      "blocks": 32,
+      "isa": "SSE4",
+      "digest": "c4b87c1a1fde44797fad8ed8734ff528d628ee02631381bc95c91a3fe6e5809a",
+      "detail": {
+        "pairs": 5184,
+        "blocks": 32,
+        "actual_group": 4,
+        "q15_passed": 411,
+        "tier_passed": [
+          312,
+          9,
+          2,
+          2
+        ],
+        "peaks": 2,
+        "chain": [
+          256,
+          512,
+          1024
+        ],
+        "thresholds": [
+          4.1,
+          4.76,
+          5.48
+        ],
+        "window": [
+          192,
+          1856
+        ],
+        "hop": 1664,
+        "injected_template": 161,
+        "injected_snr": 24.0
+      },
+      "repetitions": 37,
+      "samples": [
+        [
+          0.0013201195129973662,
+          0.0012967768644385443,
+          0.0012827586741312534,
+          0.0014277109451516455,
+          0.0012915448924350377,
+          0.001460153648843737,
+          0.001296906837425824,
+          0.001331672541218231,
+          0.001362755405401962,
+          0.0013026735679296827,
+          0.0013692427026988888,
+          0.001300900540553738,
+          0.0012857049996209506,
+          0.0013581326756802563,
+          0.001330279405354648
+        ],
+        [
+          0.0012969368647129552,
+          0.0013043886771098383,
+          0.0013125241888259109,
+          0.0013170372694730759,
+          0.0012958599993883556,
+          0.0012985445131119843,
+          0.0013166145685858824,
+          0.0013248784329138092,
+          0.0013141775664218978,
+          0.0013102274592588278,
+          0.001298835568721532,
+          0.0012974212971843175,
+          0.001471426135017159,
+          0.0013404660543577898,
+          0.0014796298912827027
+        ]
+      ],
+      "baseline_us": 1320.1195129973662,
+      "candidate_us": 1312.5241888259109,
+      "speedup": 1.002681660442118,
+      "final_speedup": 1.002681660442118
+    }
+  ],
+  "measurement": {
+    "completed_at": "2026-10-15T00:17:16.361206-04:00",
+    "reversed_build_arguments": false,
+    "note": "Fresh-process confirmation of SSE4 nt162/group4 after a reversed repeat and an identical-baseline control"
+  }
+}

@@ -1,0 +1,1533 @@
+{
+  "baseline_commit": "b3c1b022",
+  "order": [
+    "candidate",
+    "baseline",
+    "baseline",
+    "candidate"
+  ],
+  "cpu": 4,
+  "target": "AVX3",
+  "segments": 24,
+  "steady_segments": 23,
+  "builds": {
+    "baseline": {
+      "path": "/tmp/mf-perf-tail-baseline/python",
+      "core_sha256": "ce7076733a62db4c115c9ce4572950b5460e19a30cc317d2eeb19e3dae6c2d0f"
+    },
+    "candidate": {
+      "path": "/tmp/mf-perf-tail-inline/python",
+      "core_sha256": "b7fc2583ceea69e842eff7e35b25e0c9e17f77c72ebeb37f2e5164cadd71ede7"
+    }
+  },
+  "cost_file": "/tmp/mf-profile-costs.json",
+  "cost_file_sha256_before": "923e1861a4702aedf8f260362645b389906fe2e6c094a742626a36f066f42794",
+  "rows": [
+    {
+      "variant": "candidate",
+      "command": [
+        "taskset",
+        "-c",
+        "4",
+        "/home/ahnitz/projects/claude/searchdev/pycbc-work/venv-apogee/bin/python",
+        "/home/ahnitz/projects/claude/searchdev/work/mf-next/tools/profile_cpu_ladder.py",
+        "--bank",
+        "/home/ahnitz/projects/claude/searchdev/tests/search_test/output_test27_ref/fir_three_level_modern_v1_bottomup_cap401.hdf",
+        "--profiles",
+        "/home/ahnitz/projects/claude/searchdev/tests/search_test/prod_job_test27/ladder_profiles_H1.npz",
+        "--target",
+        "AVX3",
+        "--runs",
+        "1",
+        "--segments",
+        "24",
+        "--q15",
+        "1",
+        "--output",
+        "/tmp/mf-q15-tail-final-ladder/0-candidate.json"
+      ],
+      "report": "/tmp/mf-q15-tail-final-ladder/0-candidate.json",
+      "log": "/tmp/mf-q15-tail-final-ladder/0-candidate.log",
+      "core_sha256": "b7fc2583ceea69e842eff7e35b25e0c9e17f77c72ebeb37f2e5164cadd71ede7",
+      "output_sha256": "5b9021cea7ed48fc5acd24e8bb755d54c045acd4c43cce4b0384d8ac9b4b6b19",
+      "times_ms": {
+        "middle": 55.90373655507827,
+        "fine": 288.9076921299262,
+        "asym": 8.04020238675825,
+        "segment": 353.3752072126726,
+        "wall": 353.3765289087213,
+        "cpu": 335.9307430000002
+      },
+      "native_stages_ms": {
+        "middle": 55.90373655507827,
+        "forward": 52.713209802019584,
+        "q15 b256": 131.1158472094978,
+        "tier0 b256": 30.607164687818297,
+        "tier1 b512": 48.53520387596172,
+        "tier2 b1024": 19.062831777184922,
+        "refine n2048": 0.6247484053400064,
+        "followups": 8.040202386758251
+      },
+      "stage_counts": {
+        "middle": 2214.0,
+        "forward": 24866.0,
+        "q15 b256": 4337904.0,
+        "tier0 b256": 292381.0869565217,
+        "tier1 b512": 197447.04347826086,
+        "tier2 b1024": 16515.130434782608,
+        "refine n2048": 916.8695652173913,
+        "followups": 616.695652173913
+      },
+      "observed_plans": [
+        [
+          2048,
+          214,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          183,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          169,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          179,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          178,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          224,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          131,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          121,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          210,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          194,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          215,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          103,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          187,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          219,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          187,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          159,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          196,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          159,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          254,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          140,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          156,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          156,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          173,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          156,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          193,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          80,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          162,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ]
+      ],
+      "counts": {
+        "fine_triggers": 1855,
+        "asym_calls": 384,
+        "gpu_sampler": {
+          "busy_pct": 0.0,
+          "sclk_mhz_mean": 600.0,
+          "sclk_mhz_min": 600.0,
+          "sclk_mhz_max": 600.0,
+          "n": 377
+        }
+      },
+      "input_sha256": {
+        "bank": "da727c0858d7f0de025ba00b58dca22d86f70ba8f83e01c5a90da2410dce0719",
+        "profiles": "ff888dba0b4f849dc90cbdf5eb9dc6f1cd91599a68bc1bc81b193c3be521060a"
+      }
+    },
+    {
+      "variant": "baseline",
+      "command": [
+        "taskset",
+        "-c",
+        "4",
+        "/home/ahnitz/projects/claude/searchdev/pycbc-work/venv-apogee/bin/python",
+        "/home/ahnitz/projects/claude/searchdev/work/mf-next/tools/profile_cpu_ladder.py",
+        "--bank",
+        "/home/ahnitz/projects/claude/searchdev/tests/search_test/output_test27_ref/fir_three_level_modern_v1_bottomup_cap401.hdf",
+        "--profiles",
+        "/home/ahnitz/projects/claude/searchdev/tests/search_test/prod_job_test27/ladder_profiles_H1.npz",
+        "--target",
+        "AVX3",
+        "--runs",
+        "1",
+        "--segments",
+        "24",
+        "--q15",
+        "1",
+        "--output",
+        "/tmp/mf-q15-tail-final-ladder/1-baseline.json"
+      ],
+      "report": "/tmp/mf-q15-tail-final-ladder/1-baseline.json",
+      "log": "/tmp/mf-q15-tail-final-ladder/1-baseline.log",
+      "core_sha256": "ce7076733a62db4c115c9ce4572950b5460e19a30cc317d2eeb19e3dae6c2d0f",
+      "output_sha256": "5b9021cea7ed48fc5acd24e8bb755d54c045acd4c43cce4b0384d8ac9b4b6b19",
+      "times_ms": {
+        "middle": 56.105411383728296,
+        "fine": 295.0246883480324,
+        "asym": 7.952018481497046,
+        "segment": 359.58358025907177,
+        "wall": 359.5850634383564,
+        "cpu": 342.02483660869524
+      },
+      "native_stages_ms": {
+        "middle": 56.105411383728296,
+        "forward": 53.227425861294925,
+        "q15 b256": 135.99180724682756,
+        "tier0 b256": 31.21141570409583,
+        "tier1 b512": 49.61837875459047,
+        "tier2 b1024": 18.33749623063295,
+        "refine n2048": 0.4623556642984308,
+        "followups": 7.952018481497046
+      },
+      "stage_counts": {
+        "middle": 2214.0,
+        "forward": 24866.0,
+        "q15 b256": 4337904.0,
+        "tier0 b256": 292381.0869565217,
+        "tier1 b512": 197447.04347826086,
+        "tier2 b1024": 16515.130434782608,
+        "refine n2048": 916.8695652173913,
+        "followups": 616.695652173913
+      },
+      "observed_plans": [
+        [
+          2048,
+          214,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          183,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          169,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          179,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          178,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          224,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          131,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          121,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          210,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          194,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          215,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          103,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          187,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          219,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          187,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          159,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          196,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          159,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          254,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          140,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          156,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          156,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          173,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          156,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          193,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          80,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          162,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ]
+      ],
+      "counts": {
+        "fine_triggers": 1855,
+        "asym_calls": 384,
+        "gpu_sampler": {
+          "busy_pct": 0.0,
+          "sclk_mhz_mean": 600.0,
+          "sclk_mhz_min": 600.0,
+          "sclk_mhz_max": 600.0,
+          "n": 385
+        }
+      },
+      "input_sha256": {
+        "bank": "da727c0858d7f0de025ba00b58dca22d86f70ba8f83e01c5a90da2410dce0719",
+        "profiles": "ff888dba0b4f849dc90cbdf5eb9dc6f1cd91599a68bc1bc81b193c3be521060a"
+      }
+    },
+    {
+      "variant": "baseline",
+      "command": [
+        "taskset",
+        "-c",
+        "4",
+        "/home/ahnitz/projects/claude/searchdev/pycbc-work/venv-apogee/bin/python",
+        "/home/ahnitz/projects/claude/searchdev/work/mf-next/tools/profile_cpu_ladder.py",
+        "--bank",
+        "/home/ahnitz/projects/claude/searchdev/tests/search_test/output_test27_ref/fir_three_level_modern_v1_bottomup_cap401.hdf",
+        "--profiles",
+        "/home/ahnitz/projects/claude/searchdev/tests/search_test/prod_job_test27/ladder_profiles_H1.npz",
+        "--target",
+        "AVX3",
+        "--runs",
+        "1",
+        "--segments",
+        "24",
+        "--q15",
+        "1",
+        "--output",
+        "/tmp/mf-q15-tail-final-ladder/2-baseline.json"
+      ],
+      "report": "/tmp/mf-q15-tail-final-ladder/2-baseline.json",
+      "log": "/tmp/mf-q15-tail-final-ladder/2-baseline.log",
+      "core_sha256": "ce7076733a62db4c115c9ce4572950b5460e19a30cc317d2eeb19e3dae6c2d0f",
+      "output_sha256": "5b9021cea7ed48fc5acd24e8bb755d54c045acd4c43cce4b0384d8ac9b4b6b19",
+      "times_ms": {
+        "middle": 56.23428877341844,
+        "fine": 295.45667548866373,
+        "asym": 8.080649994435193,
+        "segment": 360.2677210811121,
+        "wall": 360.26909581952447,
+        "cpu": 342.302928826087
+      },
+      "native_stages_ms": {
+        "middle": 56.23428877341845,
+        "forward": 52.74511201391405,
+        "q15 b256": 137.38127829385434,
+        "tier0 b256": 31.092875758135015,
+        "tier1 b512": 48.53124122465813,
+        "tier2 b1024": 19.073804053132157,
+        "refine n2048": 0.43279936087317655,
+        "followups": 8.080649994435195
+      },
+      "stage_counts": {
+        "middle": 2214.0,
+        "forward": 24866.0,
+        "q15 b256": 4337904.0,
+        "tier0 b256": 292381.0869565217,
+        "tier1 b512": 197447.04347826086,
+        "tier2 b1024": 16515.130434782608,
+        "refine n2048": 916.8695652173913,
+        "followups": 616.695652173913
+      },
+      "observed_plans": [
+        [
+          2048,
+          214,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          183,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          169,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          179,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          178,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          224,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          131,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          121,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          210,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          194,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          215,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          103,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          187,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          219,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          187,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          159,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          196,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          159,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          254,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          140,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          156,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          156,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          173,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          156,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          193,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          80,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          162,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ]
+      ],
+      "counts": {
+        "fine_triggers": 1855,
+        "asym_calls": 384,
+        "gpu_sampler": {
+          "busy_pct": 0.0,
+          "sclk_mhz_mean": 600.0,
+          "sclk_mhz_min": 600.0,
+          "sclk_mhz_max": 600.0,
+          "n": 385
+        }
+      },
+      "input_sha256": {
+        "bank": "da727c0858d7f0de025ba00b58dca22d86f70ba8f83e01c5a90da2410dce0719",
+        "profiles": "ff888dba0b4f849dc90cbdf5eb9dc6f1cd91599a68bc1bc81b193c3be521060a"
+      }
+    },
+    {
+      "variant": "candidate",
+      "command": [
+        "taskset",
+        "-c",
+        "4",
+        "/home/ahnitz/projects/claude/searchdev/pycbc-work/venv-apogee/bin/python",
+        "/home/ahnitz/projects/claude/searchdev/work/mf-next/tools/profile_cpu_ladder.py",
+        "--bank",
+        "/home/ahnitz/projects/claude/searchdev/tests/search_test/output_test27_ref/fir_three_level_modern_v1_bottomup_cap401.hdf",
+        "--profiles",
+        "/home/ahnitz/projects/claude/searchdev/tests/search_test/prod_job_test27/ladder_profiles_H1.npz",
+        "--target",
+        "AVX3",
+        "--runs",
+        "1",
+        "--segments",
+        "24",
+        "--q15",
+        "1",
+        "--output",
+        "/tmp/mf-q15-tail-final-ladder/3-candidate.json"
+      ],
+      "report": "/tmp/mf-q15-tail-final-ladder/3-candidate.json",
+      "log": "/tmp/mf-q15-tail-final-ladder/3-candidate.log",
+      "core_sha256": "b7fc2583ceea69e842eff7e35b25e0c9e17f77c72ebeb37f2e5164cadd71ede7",
+      "output_sha256": "5b9021cea7ed48fc5acd24e8bb755d54c045acd4c43cce4b0384d8ac9b4b6b19",
+      "times_ms": {
+        "middle": 56.26345761170935,
+        "fine": 288.967501000076,
+        "asym": 7.822480138755687,
+        "segment": 353.5410885208124,
+        "wall": 353.54242873955116,
+        "cpu": 336.5120943478258
+      },
+      "native_stages_ms": {
+        "middle": 56.26345761170935,
+        "forward": 53.658885981475876,
+        "q15 b256": 130.38149955212972,
+        "tier0 b256": 30.81163371347748,
+        "tier1 b512": 49.048069732557735,
+        "tier2 b1024": 18.487797884049936,
+        "refine n2048": 0.5830565218147625,
+        "followups": 7.8224801387556875
+      },
+      "stage_counts": {
+        "middle": 2214.0,
+        "forward": 24866.0,
+        "q15 b256": 4337904.0,
+        "tier0 b256": 292381.0869565217,
+        "tier1 b512": 197447.04347826086,
+        "tier2 b1024": 16515.130434782608,
+        "refine n2048": 916.8695652173913,
+        "followups": 616.695652173913
+      },
+      "observed_plans": [
+        [
+          2048,
+          214,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          183,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          169,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          179,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          178,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          224,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          131,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          121,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          210,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          194,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          215,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          103,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          187,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          219,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          187,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          159,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          196,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          159,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          254,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          140,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          156,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          156,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          173,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          156,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          193,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          80,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ],
+        [
+          2048,
+          162,
+          [
+            256,
+            512,
+            1024
+          ],
+          true
+        ]
+      ],
+      "counts": {
+        "fine_triggers": 1855,
+        "asym_calls": 384,
+        "gpu_sampler": {
+          "busy_pct": 0.0,
+          "sclk_mhz_mean": 600.0,
+          "sclk_mhz_min": 600.0,
+          "sclk_mhz_max": 600.0,
+          "n": 378
+        }
+      },
+      "input_sha256": {
+        "bank": "da727c0858d7f0de025ba00b58dca22d86f70ba8f83e01c5a90da2410dce0719",
+        "profiles": "ff888dba0b4f849dc90cbdf5eb9dc6f1cd91599a68bc1bc81b193c3be521060a"
+      }
+    }
+  ],
+  "all_output_hashes_identical": true,
+  "bank_sha256": "da727c0858d7f0de025ba00b58dca22d86f70ba8f83e01c5a90da2410dce0719",
+  "profiles_sha256": "ff888dba0b4f849dc90cbdf5eb9dc6f1cd91599a68bc1bc81b193c3be521060a",
+  "cost_file_sha256_after": "923e1861a4702aedf8f260362645b389906fe2e6c094a742626a36f066f42794",
+  "comparison": {
+    "times_ms": {
+      "middle": {
+        "baseline": 56.16985007857337,
+        "candidate": 56.08359708339381,
+        "speedup": 1.001537936217809
+      },
+      "fine": {
+        "baseline": 295.24068191834806,
+        "candidate": 288.9375965650011,
+        "speedup": 1.0218146943432782
+      },
+      "asym": {
+        "baseline": 8.01633423796612,
+        "candidate": 7.931341262756968,
+        "speedup": 1.0107160910611994
+      },
+      "segment": {
+        "baseline": 359.92565067009195,
+        "candidate": 353.4581478667425,
+        "speedup": 1.0182977895470322
+      },
+      "wall": {
+        "baseline": 359.9270796289404,
+        "candidate": 353.4594788241362,
+        "speedup": 1.0182979979100295
+      },
+      "cpu": {
+        "baseline": 342.1638827173911,
+        "candidate": 336.221418673913,
+        "speedup": 1.0176742578355529
+      }
+    },
+    "native_stages_ms": {
+      "middle": {
+        "baseline": 56.169850078573376,
+        "candidate": 56.08359708339381,
+        "speedup": 1.0015379362178092
+      },
+      "forward": {
+        "baseline": 52.98626893760449,
+        "candidate": 53.186047891747734,
+        "speedup": 0.9962437714012919
+      },
+      "q15 b256": {
+        "baseline": 136.68654277034096,
+        "candidate": 130.74867338081376,
+        "speedup": 1.0454143758096328
+      },
+      "tier0 b256": {
+        "baseline": 31.152145731115425,
+        "candidate": 30.709399200647887,
+        "speedup": 1.0144172970488525
+      },
+      "tier1 b512": {
+        "baseline": 49.0748099896243,
+        "candidate": 48.791636804259724,
+        "speedup": 1.0058037238328486
+      },
+      "tier2 b1024": {
+        "baseline": 18.705650141882554,
+        "candidate": 18.77531483061743,
+        "speedup": 0.9962895594900347
+      },
+      "refine n2048": {
+        "baseline": 0.4475775125858037,
+        "candidate": 0.6039024635773844,
+        "speedup": 0.7411420545206152
+      },
+      "followups": {
+        "baseline": 8.01633423796612,
+        "candidate": 7.93134126275697,
+        "speedup": 1.0107160910611992
+      }
+    }
+  },
+  "config": {
+    "seg_samples": 1048576,
+    "start_pad": 120.0,
+    "end_pad": 16.0,
+    "profiles": "/home/ahnitz/projects/claude/searchdev/tests/search_test/prod_job_test27/ladder_profiles_H1.npz",
+    "asym_bin_width": 0.03,
+    "asym_num_bins": 1000,
+    "roofline": true,
+    "threshold": 6.0,
+    "fd": 0.001,
+    "peak_window": 1.0,
+    "fft_length": 2048,
+    "pad": 4096,
+    "segments": 24,
+    "warmup": 1,
+    "asym_threshold": 6.0,
+    "depth": 1,
+    "pregen": true,
+    "pipeline": false,
+    "overlap": false,
+    "no_batch": false,
+    "shared_input": false,
+    "seed": 1,
+    "environment": {
+      "MF_COST_FILE": "/tmp/mf-profile-costs.json",
+      "MF_GATE16": "0",
+      "MF_AUTOTUNE": "0",
+      "MF_CHAIN_FORCE": "256,512,1024"
+    },
+    "target": "AVX3",
+    "top": 4,
+    "detectors": 2,
+    "sample_rate": 2048,
+    "fine_templates": 4698,
+    "initial_fine_plans": 27,
+    "bank_file": "fir_three_level_modern_v1_bottomup_cap401.hdf",
+    "profiles_file": "ladder_profiles_H1.npz"
+  },
+  "measurement": {
+    "baseline_commit": "b3c1b022",
+    "candidate_status": "Final build b7fc2583: isolated tail helper and original inlined ordinary data preparation",
+    "completed_at": "2026-10-15T00:14:00.893301-04:00",
+    "cpu": "AMD Ryzen AI Max+ 395 (Zen 5)",
+    "cpu_affinity": [
+      4
+    ],
+    "driver": "ladder_builds.py",
+    "harness": "tools/profile_cpu_ladder.py",
+    "harness_sha256": "f4912c230305dde5c6e79fe1a92bd8dd1c45d74d19bafe606b7bd28be4c7e190",
+    "source_json_sha256": "d719bea0c1c6d03145b6111345a6208ab427036019bc4d8211a4f157996af5ef",
+    "quiet": true,
+    "native_validation_scope": "CPU only; no GPU or ARM timing",
+    "timezone": "America/New_York"
+  }
+}

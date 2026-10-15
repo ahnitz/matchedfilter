@@ -7,9 +7,10 @@ N=2048 and chain 256/512/1024. The representative ladder uses synthetic data col
 by those real profiles; it is not the distinct captured-call replay fixture.
 See [the completed survivor pass](cpu-survivor-performance.md) for its measurements.
 
-The next native experiment should target **padding in Q15 template tails**. It can
-remove transforms whose lanes are currently unused while preserving the arithmetic
-of every useful lane. A broader change to Q15 cache layout is a separate experiment.
+The proposed **Q15 template-tail experiment** is now implemented and evaluated in
+[Q15 tail packing](cpu-q15-tail-packing.md). The section below retains the original
+padding estimate and its assumptions. A broader change to Q15 cache layout remains
+a separate experiment.
 Shared-subspace rejection has now failed a feasibility probe on this bank and should
 not proceed to native implementation on the strength of its optimistic oracle.
 
@@ -139,9 +140,10 @@ the remainder. Do not combine blocks with different valid windows merely to fill
    ladder does not improve. Require the implementation to fall back without a material
    regression on small groups, controls, AVX2 and SSE4.
 
-No tail kernel has been implemented or benchmarked in this assessment. The established
-padding arithmetic makes it a better first experiment than a large rewrite of all Q15
-batches, but it does not establish the cost of constructing multi-data vectors.
+At the time of this estimate, no tail kernel had been implemented or benchmarked.
+The [subsequent experiment](cpu-q15-tail-packing.md) measures the cost of constructing
+multi-data vectors and compares exact outputs with the original kernel. The broader
+cache-layout proposal below remains unimplemented.
 
 ### Broader cache-layout experiment, only after the tail result
 

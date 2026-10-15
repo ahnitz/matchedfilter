@@ -79,6 +79,9 @@ typedef struct {
   void (*td_corr)(const float *x, const float *taps, int L, int nlag, float *out);
   /* A real block's full spectrum from its half-size transform (rsplit-inl.h). */
   void (*real_split)(const float *Z, const float *tw, size_t n, float *X);
+  /* Optional N256 tile: T=8 or 16 templates repeated for 32/T data blocks. */
+  int (*q15_screen_tile)(int T, const int16_t *, const int16_t *, const int16_t *,
+                         size_t, size_t, const int16_t *, uint64_t *, int16_t *, void *);
 } ap_backend;
 
 /* The kernel for the target Highway's runtime dispatch selected, or NULL if

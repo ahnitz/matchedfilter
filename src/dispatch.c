@@ -240,3 +240,16 @@ int ap_q15_screen(const ap_plan *p, const int16_t *dq, const int16_t *tr, const 
   if(!b || !b->q15_screen || !dq || !tr || !ti || !lanethr || !bits || !scratch) return -1;
   return b->q15_screen(p->n,dq,tr,ti,start,end,lanethr,bits,lanemax,scratch);
 }
+
+int ap_q15_has_tile(const ap_plan *p){
+  return p && p->n==256 && p->be && p->be->q15_screen_tile;
+}
+
+int ap_q15_screen_tile(const ap_plan *p, int T, const int16_t *dq,
+                       const int16_t *tr, const int16_t *ti, size_t start, size_t end,
+                       const int16_t *lanethr, uint64_t *bits, int16_t *lanemax, void *scratch){
+  const ap_backend *b=p ? p->be : NULL;
+  if(!b || !b->q15_screen_tile || p->n!=256 || (T!=8 && T!=16) ||
+     !dq || !tr || !ti || !lanethr || !bits || !scratch) return -1;
+  return b->q15_screen_tile(T,dq,tr,ti,start,end,lanethr,bits,lanemax,scratch);
+}
