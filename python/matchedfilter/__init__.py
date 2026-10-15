@@ -288,11 +288,12 @@ class _Deferred:
     """A GPU result submitted but not yet collected; result() waits once and caches.
     empty: True once collected if the gates refined nothing (every slot is -1), so a
     consumer can skip scanning it."""
-    __slots__ = ("_finish", "_value", "_done", "empty", "trace")
+    __slots__ = ("_finish", "_value", "_done", "empty", "trace", "split")
 
     def __init__(self, finish):
         self._finish, self._value, self._done, self.empty = finish, None, False, False
         self.trace = None
+        self.split = None       # (_RaggedSplit, part): one part of a traced call's result
 
     def result(self):
         if not self._done:

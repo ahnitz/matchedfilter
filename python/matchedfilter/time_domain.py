@@ -86,7 +86,11 @@ class _RaggedSplit:
             if not cell:
                 cell.append(self.parts(d.result()))
             return cell[0][i]
-        return [_Deferred(lambda i=i: part(i)) for i in range(len(self.us))]
+        out = [_Deferred(lambda i=i: part(i)) for i in range(len(self.us))]
+        for i, p in enumerate(out):
+            # A segment replay reads the one traced call and splits its result the same way.
+            p.trace, p.split = d.trace, (self, i)
+        return out
 
 
 def _normalize_windows(windows, S: int) -> np.ndarray:
@@ -3275,82 +3279,23 @@ class SegmentPlan:
         template, bin) table -- group rows b0.. are row offsets into it -- and sorted once, so
         the CUDA readers are asked for their records unsorted (sort=False)."""
         from . import _SparsePeaks
-        results = []
+        results, full = [], {}
         for entries, template_index in tr["jobs"]:
             lists = ([], [], [], [], [])
             for d, sub_starts, g, tmpl_arg, N in entries:
-                t = d.trace
-                nt, nb = t["shape"][1], t["shape"][2]
-                per = nt * nb
-                order = t["order"]
-                flats, idxs, vals = [], [], []
-                dense = None
-                for b0, b1, entry in t["groups"]:
-                    if reader is not None:
-                        r = reader(entry, t)
-                    elif callable(entry):
-                        r = entry(sort=False)
-                    else:
-                        r = entry()
-                    if isinstance(r, _SparsePeaks):
-                        if r.flat.size == 0:
-                            continue
-                        f = r.flat
-                        gper = r.shape[1] * r.shape[2]
-                        keep = f < (b1 - b0) * gper                # padded rows dropped
-                        if not keep.all():
-                            f = f[keep]
-                        if r.shape[1:] == (nt, nb):
-                            flats.append(f + b0 * per)
-                        else:                                      # re-index into the trace's table
-                            bi, rest = np.divmod(f.astype(np.int64), gper)
-                            ti_, bn_ = np.divmod(rest, r.shape[2])
-                            flats.append((bi + b0) * per + ti_ * nb + bn_)
-                        idxs.append(r.idx if keep.all() else r.idx[keep])
-                        vals.append(r.val if keep.all() else r.val[keep])
-                    else:
-                        gi, gv = r
-                        if not (gi >= 0).any():
-                            continue
-                        if dense is None:
-                            dense = (np.full(t["shape"], -1, dtype=np.int64),
-                                     np.zeros(t["shape"], dtype=np.complex64))
-                        dense[0][b0:b1], dense[1][b0:b1] = gi[:b1 - b0], gv[:b1 - b0]
-                if dense is not None:
-                    idx, val = dense
-                    if flats:
-                        fl = np.concatenate(flats)
-                        idx.reshape(-1)[fl] = np.concatenate(idxs)
-                        val.reshape(-1)[fl] = np.concatenate(vals)
-                    if order is not None:
-                        ri, rv = np.empty_like(idx), np.empty_like(val)
-                        ri[order], rv[order] = idx, val
-                        idx, val = ri, rv
-                    _consume_into(lists, idx, val, sub_starts, g, tmpl_arg, N, template_index)
+                k = id(d.trace)
+                if k not in full:                   # parts of one split call share it
+                    full[k] = _read_traced(d.trace, reader)
+                r = full[k]
+                if r is not None and d.split is not None:
+                    split, part = d.split
+                    r = split.parts(r)[part]
+                if r is None:
                     continue
-                if not flats:
-                    continue
-                fl = np.concatenate(flats) if len(flats) > 1 else flats[0]
-                row, rest = np.divmod(fl, per)                     # layout row
-                if order is not None:
-                    row = order[row]                               # the caller's block
-                    key = row * per + rest
+                if isinstance(r, _SparsePeaks):
+                    _consume_sparse_into(lists, r, sub_starts, g, tmpl_arg, N, template_index)
                 else:
-                    key = fl
-                srt = np.argsort(key, kind="stable")
-                row = row[srt]
-                ti = rest[srt] // nb
-                ii = (np.concatenate(idxs) if len(idxs) > 1 else idxs[0])[srt].astype(np.int64)
-                vv = (np.concatenate(vals) if len(vals) > 1 else vals[0])[srt]
-                if tmpl_arg is not None:
-                    lists[0].append(np.full(row.size, template_index, dtype=np.int64))
-                else:
-                    lists[0].append(g.template_indices[ti])
-                st = sub_starts[row]
-                lists[1].append(st + ii)
-                lists[2].append(vv)
-                lists[3].append(st)
-                lists[4].append(np.full(row.size, N, dtype=np.int64))
+                    _consume_into(lists, r[0], r[1], sub_starts, g, tmpl_arg, N, template_index)
             results.append(_results_from(lists))
         return results
 
@@ -3392,9 +3337,12 @@ class SegmentPlan:
             # Likewise every slot (its starts and spectra, written by the host per batch):
             # a slot used twice in the segment holds only the later batch's starts, which a
             # replay would then read for both.
-            seen, slots = set(), set()
+            seen, slots, traces = set(), set(), set()
             for e in per_job:
                 for d, *_ in e[0]:
+                    if id(d.trace) in traces:          # another part of one split call
+                        continue
+                    traces.add(id(d.trace))
                     for _, _, entry in d.trace["groups"]:
                         if id(entry[0]) in seen:         # live objects: ids are unique here
                             replayable = False
@@ -3433,6 +3381,92 @@ def _stored_bins(g):
             sp = g._spectra_source()
         k = g._stored_bins = int(np.shape(sp)[1])
     return k
+
+
+def _read_traced(t, reader=None):
+    """A traced dispatch's whole result from a finished replay, as its live call returns it:
+    sparse peaks over (caller block, template, bin) in flat order, or dense (index, value)
+    tables when any group came back dense (threshold 0, or a fallback); None when empty.
+
+    A dispatch's sparse groups are joined in one flat index over its (layout row, template,
+    bin) table -- group rows b0.. are row offsets into it -- and sorted once, so the CUDA
+    readers are asked for their records unsorted (sort=False)."""
+    from . import _SparsePeaks
+    nt, nb = t["shape"][1], t["shape"][2]
+    per = nt * nb
+    order = t["order"]
+    flats, idxs, vals = [], [], []
+    dense = None
+    for b0, b1, entry in t["groups"]:
+        if reader is not None:
+            r = reader(entry, t)
+        elif callable(entry):
+            r = entry(sort=False)
+        else:
+            r = entry()
+        if isinstance(r, _SparsePeaks):
+            if r.flat.size == 0:
+                continue
+            f = r.flat
+            gper = r.shape[1] * r.shape[2]
+            keep = f < (b1 - b0) * gper                # padded rows dropped
+            if not keep.all():
+                f = f[keep]
+            if r.shape[1:] == (nt, nb):
+                flats.append(f + b0 * per)
+            else:                                      # re-index into the trace's table
+                bi, rest = np.divmod(f.astype(np.int64), gper)
+                ti_, bn_ = np.divmod(rest, r.shape[2])
+                flats.append((bi + b0) * per + ti_ * nb + bn_)
+            idxs.append(r.idx if keep.all() else r.idx[keep])
+            vals.append(r.val if keep.all() else r.val[keep])
+        else:
+            gi, gv = r
+            if not (gi >= 0).any():
+                continue
+            if dense is None:
+                dense = (np.full(t["shape"], -1, dtype=np.int64),
+                         np.zeros(t["shape"], dtype=np.complex64))
+            dense[0][b0:b1], dense[1][b0:b1] = gi[:b1 - b0], gv[:b1 - b0]
+    if dense is not None:
+        idx, val = dense
+        if flats:
+            fl = np.concatenate(flats)
+            idx.reshape(-1)[fl] = np.concatenate(idxs)
+            val.reshape(-1)[fl] = np.concatenate(vals)
+        if order is not None:
+            ri, rv = np.empty_like(idx), np.empty_like(val)
+            ri[order], rv[order] = idx, val
+            idx, val = ri, rv
+        return idx, val
+    if not flats:
+        return None
+    fl = np.concatenate(flats) if len(flats) > 1 else flats[0]
+    if order is not None:
+        row, rest = np.divmod(fl, per)                 # layout row
+        fl = order[row] * per + rest                   # the caller's block
+    srt = np.argsort(fl, kind="stable")
+    ii = (np.concatenate(idxs) if len(idxs) > 1 else idxs[0])[srt].astype(np.int64)
+    vv = (np.concatenate(vals) if len(vals) > 1 else vals[0])[srt]
+    return _SparsePeaks(tuple(t["shape"]), fl[srt], ii, vv)
+
+
+def _consume_sparse_into(lists, sp, sub_starts, g, tmpl_arg, N, template_index):
+    """Append the peaks of one sparse result (flat over block, template, bin) to lists."""
+    if sp.flat.size == 0:
+        return
+    nt, nb = sp.shape[1], sp.shape[2]
+    row, rest = np.divmod(sp.flat, nt * nb)
+    ti = rest // nb
+    if tmpl_arg is not None:
+        lists[0].append(np.full(row.size, template_index, dtype=np.int64))
+    else:
+        lists[0].append(g.template_indices[ti])
+    st = sub_starts[row]
+    lists[1].append(st + sp.idx)
+    lists[2].append(sp.val)
+    lists[3].append(st)
+    lists[4].append(np.full(row.size, N, dtype=np.int64))
 
 
 def _consume_into(lists, aidx, aval, sub_starts, g, tmpl_arg, N, template_index):

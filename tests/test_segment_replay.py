@@ -286,3 +286,47 @@ def test_prelude_capture_invalidated_by_eviction(monkeypatch, replay_on):
         if seg == 6:
             assert used[n_before:] in ([], [False]), used[n_before:]
     assert any(used), used
+
+
+def test_replay_of_a_ragged_layout(monkeypatch, replay_on):
+    """Blocks with different bin counts (bins narrower than a block, windows clipping the
+    blocks) run as one call whose result is split per bin count (_RaggedSplit). The parts
+    carry the call's trace, so the segment still replays, and the replay splits the call's
+    result the same way: every part equals the call-by-call result."""
+    from conftest import usable_gpu
+    from test_call_plan import _whitened_inspiral_bank
+    from matchedfilter import time_domain as td
+    monkeypatch.setenv("MF_AUTOTUNE", "0")
+    dev = usable_gpu()
+    if dev is None:
+        pytest.skip("no usable GPU")
+    rng = np.random.default_rng(97)
+    banks = []
+    for _ in range(2):
+        counts = list(rng.integers(200, 400, 33))
+        taps, w, df = _whitened_inspiral_bank(rng, counts)
+        b = TimeDomainFilterBank(taps, tap_counts=counts, engine='hier', threshold=4.5,
+                                 false_dismissal=1e-3, device=dev, fft_lengths=[4096],
+                                 binsize=1000)
+        b.set_reference(w, delta_f=df)
+        banks.append(b)
+    if not getattr(banks[0]._groups[0].plan._gpu, "supports_replay", False):
+        pytest.skip("this backend records no call plans")
+    splits = []
+    orig = td._RaggedSplit.deferred
+    monkeypatch.setattr(td._RaggedSplit, "deferred",
+                        lambda self, d: splits.append(len(self.us)) or orig(self, d))
+    S = 1 << 17
+    rows = banks[0].empty_shared((len(banks), S))
+    jobs = [(b, rows[i], dict(windows=[slice(3011, 61003), slice(70001, S - 2999)]))
+            for i, b in enumerate(banks)]
+    plan = SegmentPlan()
+    peaks = 0
+    for seg in range(6):
+        _loud(rng, rows, S)
+        got = plan.run(jobs)
+        _same(got, _want(jobs))
+        peaks += sum(len(r.snr) for r in got)
+    assert splits and max(splits) > 1, "no ragged split ran: %s" % splits
+    assert plan.replays >= 3, plan.replays
+    assert peaks > 0

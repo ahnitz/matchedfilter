@@ -63,6 +63,11 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ### Fixed
 
+- Segment replay covers ragged layouts. When a call's blocks have several bin counts, its
+  result is split per count; the parts now carry the call's trace, and a replay splits the
+  replayed result the same way. Before, such segments never replayed: at n=4096 on test27
+  (the GPU block size a trial can lock on a Radeon 8060S) the gate's replay check found
+  none. With the fix, 7 replays of 10 segments, exact against the CPU.
 - Existing Q15 plans retain their SIMD backend after `set_target()`, including lazy
   scratch allocation. Switching to a wider target previously allowed its kernel to
   overwrite buffers sized for the original plan.
