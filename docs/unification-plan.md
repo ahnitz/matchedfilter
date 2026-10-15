@@ -278,3 +278,15 @@ Stage 5's lessons land inside the stages that touch them. Each stage merges in g
     3.915-3.934e7 (+1.1-1.4%), pipelined 3.637-3.670e7 -> 3.713-3.719e7 (+1.3-2%).
     Gate passed (a48a482f).
   - 7447cc03 and a48a482f are held for L40S validation (cluster unreachable 2026-10-15).
+- 2026-10-15: **Stage 5 lesson: Metal measures its packing too.**
+  - The Metal coarse layout is one measured choice over (pairs per threadgroup, tile,
+    twiddle source), as on Vulkan. The SIMD-fill packing rule is now only the default when
+    nothing is measured.
+  - Why: the rule missed both ways on the M2. Band 512 untiled runs best at two pairs per
+    threadgroup (25.8 ns per pair, against 26.5 at one); band 1024 at one (52.7, against
+    54.8). One pair fills the SIMD group at both bands.
+  - M2 choices: band 64 p8t2w, 128 p4 untiled w (5.5 ns; the p4 tiles are 11-15 ns),
+    256 p2t2w, 512 p1t2, 1024 p1 untiled w.
+  - M2 end to end, paired against a48a482f (rounds 2-4): batched equal (3.92-3.93e7 both),
+    pipelined 3.72 -> 3.74e7. Suite 1834 passed, margin ok, both checks 0/0 one-sided
+    (cbbbed5e).
