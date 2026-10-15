@@ -116,7 +116,7 @@ int ap_mf_run_pairs_pooled(ap_mf_plan *p, int d0,
                            int nt);
 
 /* Q15 coarse screen.  ap_mf_q15_lanes: pairs per screen call for this plan's
-   length on the active back end, 0 when there is no screen.  ap_mf_q15_screen:
+   length on its own back end, 0 when there is no screen.  ap_mf_q15_screen:
    for the pairs [d0,d0+nd) x [t0,t0+nt), pass[(d-d0)*nt + t-t0] = 1 unless the
    pair's maximum over [start,end) certainly stays below `threshold` -- the
    pairs a float run at that threshold could report.  stat, if not NULL,
@@ -167,11 +167,12 @@ int ap_mf_run_series_dif(ap_mf_plan *p,
  * filter correlates only that part, on a coarse lag grid, and pays for the full
  * correlation only where the coarse result could plausibly become a detection.
  *
- * The guarantee is one-sided and exact: every peak this reports is bit-identical
- * to what ap_mf_run would report for the same inputs.  It never invents a peak
- * and never shifts one.  What it can do is MISS a peak, at a rate bounded by the
- * false-dismissal target given at construction.  If that trade is not acceptable,
- * use ap_mf_run.
+ * Surviving pairs normally receive a full correlation and binned peak search.
+ * Equivalent transform paths can differ by floating-point rounding. The gate
+ * can omit peaks; its false-dismissal target is supplied by the caller's model.
+ * With direct refinement enabled, a single-bin result is the maximum near the
+ * last coarse candidate, which can differ from the whole bin's maximum when
+ * several excursions occur. Use ap_mf_run for an ungated full-bin search.
  *
  * The caller supplies the chain of bands and one nonnegative threshold per
  * tier. The native engine derives no calibration; Python computes the

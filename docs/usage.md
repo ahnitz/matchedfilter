@@ -175,18 +175,33 @@ size per group. Pass `fft_lengths=` to pin the sizes; otherwise the bank decides
   tier costs, and the groups are built at the cheapest. `max_block_length`
   (default 8192) bounds the candidates and is available before the choice, for
   callers that pad their series by the longest block. Without `binsize` the
-  block size changes which peaks are reported, so the valid-fraction rule (the
-  smallest size with at least half its samples valid) stands.
+  bank uses the valid-fraction rule (the smallest size with at least half its
+  samples valid), keeping one peak per block by default.
 * Other engines use the valid-fraction rule.
 
 `filter_series` uses the bank's `binsize` unless the call passes its own.
+Bins begin at the start of each block's intersection with an analysis window;
+the final bin there can be shorter than `binsize`. They are not aligned to a
+global sample grid. Changing block sizes can therefore change which nearby
+peaks share a bin, even with a fixed `binsize`, and can change the reported
+trigger set. Pin `fft_lengths=` when comparing trigger sets across runs.
 
 ## Hierarchical filtering
 
 `HierarchicalFilter` screens pairs using a coarse frequency band and refines
-candidates with the full filter. Its output has the same format as `run()`;
-screening can omit detections. `snr` and `fd` specify the signal strength and
-requested false-dismissal budget used for calibration.
+candidates with the full filter. Transform refinement searches every lag in
+each requested bin. CPU plans supplied with real FIR taps can instead choose
+direct refinement, which evaluates the full correlation only near the coarse
+maximum. Each reported value is the full correlation at that lag, but a local
+search can select a smaller peak or miss a stronger excursion elsewhere in the
+bin. Set `MF_DIRECT_REFINE=0` to use transform refinement and recover exact bin
+maxima for pairs that pass the gates. `TimeDomainFilterBank` supplies real taps
+automatically when the tap and data sample rates match.
+
+The output has the same format as `run()`; screening can omit detections.
+`snr` and `fd` specify the signal strength and requested false-dismissal budget
+used for calibration. See [CPU direct refinement](cpu-direct-refine.md) for its
+selection rules and limits.
 
 `set_reference(power)` supplies the expected output-power spectrum, one value
 per frequency bin. Include the effect of the data's noise spectrum; a template's

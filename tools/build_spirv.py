@@ -486,7 +486,7 @@ def source_hashes():
             for name in names}
 
 
-def main(argv=None):
+def _build(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--slangc", default=None)
     ap.add_argument("--items-only", action="store_true",
@@ -719,6 +719,14 @@ def main(argv=None):
     (OUT / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     print("wrote %s" % (OUT / "manifest.json"))
     return 0
+
+
+def main(argv=None):
+    status = _build(argv)
+    if status == 0:
+        from kernel_build_id import stamp
+        stamp(ROOT / "python" / "matchedfilter", ("vulkan", "metal"))
+    return status
 
 
 if __name__ == "__main__":

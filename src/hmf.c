@@ -64,8 +64,6 @@ struct ap_hmf_plan {
   FILE *dump;
   float *twiddles,*tw_scratch;
   float *tmpls_half,*prod_scratch;
-  ap_peak *dif_pk_e,*dif_pk_o;
-  size_t dif_pkcap;
   /* Q15 screen in front of the first tier (ap_hmf_set_q15) */
   int q15;
   unsigned char *qpass;           /* [nd*nt] */
@@ -126,11 +124,7 @@ ap_hmf_plan *ap_hmf_create_chain(size_t n,size_t k,int ndata,int ntmpl,
     p->tw_scratch=ap_alloc64(2*p->k*sizeof(float));
     p->tmpls_half=ap_alloc64((size_t)ntmpl*2*p->k*sizeof(float));
     p->prod_scratch=ap_alloc64(2*p->n*sizeof(float));
-    p->dif_pkcap=16;
-    p->dif_pk_e=malloc(p->dif_pkcap*sizeof(ap_peak));
-    p->dif_pk_o=malloc(p->dif_pkcap*sizeof(ap_peak));
-    if(!p->twiddles || !p->tw_scratch || !p->dif_pk_e || !p->dif_pk_o
-       || !p->tmpls_half || !p->prod_scratch){
+    if(!p->twiddles || !p->tw_scratch || !p->tmpls_half || !p->prod_scratch){
       ap_hmf_destroy(p); return NULL;
     }
     const size_t N_tw = 2 * p->k;
@@ -203,8 +197,6 @@ void ap_hmf_destroy(ap_hmf_plan *p){
   if(p->tw_scratch) free(p->tw_scratch);
   if(p->tmpls_half) free(p->tmpls_half);
   if(p->prod_scratch) free(p->prod_scratch);
-  if(p->dif_pk_e) free(p->dif_pk_e);
-  if(p->dif_pk_o) free(p->dif_pk_o);
   if(p->dump) fclose(p->dump);
   free(p->qpass); free(p->qd); free(p->qt);
   if(p->taps){ for(int t=0;t<p->nt;t++) free(p->taps[t]); free(p->taps); }
@@ -350,7 +342,14 @@ int ap_hmf_q15_stats(const ap_hmf_plan *p,long *passed,unsigned long long *ticks
 
 int ap_hmf_set_hermitian(ap_hmf_plan *p,int hermitian){
   if(!p) return -1;
+  if(p->hermitian == !!hermitian) return 0;
   p->hermitian = hermitian ? 1 : 0;
+  /* The packed DC/Nyquist convention changes both the coarse normalization
+     and the refine's template layout. Replay rows already ingested. */
+  if(p->is_dif){
+    for(int t=0;t<p->nt;t++)
+      if(p->tready[t] && ap_hmf_set_template(p,t,p->tmpls_half+(size_t)t*2*p->k)) return -1;
+  }
   return 0;
 }
 
@@ -447,7 +446,8 @@ int ap_hmf_set_data(ap_hmf_plan *p,int d,const float *spec){
 int ap_hmf_set_template(ap_hmf_plan *p,int t,const float *spec){
   if(!p||t<0||t>=p->nt||!spec) return -1;
   if(p->is_dif){
-    if(p->tmpls_half) memcpy(p->tmpls_half+(size_t)t*2*p->k,spec,2*p->k*sizeof(float));
+    if(p->tmpls_half && spec!=p->tmpls_half+(size_t)t*2*p->k)
+      memcpy(p->tmpls_half+(size_t)t*2*p->k,spec,2*p->k*sizeof(float));
     if(!p->hermitian && ap_mf_set_template(p->full,t,spec)) return -1;
   } else {
     if(ap_mf_set_template(p->full,t,spec)) return -1;
@@ -687,90 +687,15 @@ static int hmf_refine_fft(ap_hmf_plan *p, const int *fire_d, const int *fire_t,
     }
 
     const size_t nb = ap_hmf_nbins(p, binsize, start, end);
-    size_t wk_s_e = (start + 1) / 2;
-    size_t wk_e_e = (end + 1) / 2;
-    if(wk_e_e > p->k) wk_e_e = p->k;
-    if(wk_s_e > wk_e_e) wk_s_e = wk_e_e;
-
-    size_t wk_s_o = start / 2;
-    size_t wk_e_o = end / 2;
-    if(wk_e_o > p->k) wk_e_o = p->k;
-    if(wk_s_o > wk_e_o) wk_s_o = wk_e_o;
-
-    size_t bs_k = (binsize >= p->n) ? p->k : (binsize / 2 > 0 ? binsize / 2 : 1);
-    size_t nb_e = (wk_e_e > wk_s_e) ? (wk_e_e - wk_s_e + bs_k - 1) / bs_k : 0;
-    size_t nb_o = (wk_e_o > wk_s_o) ? (wk_e_o - wk_s_o + bs_k - 1) / bs_k : 0;
-    size_t nb_alloc = nb > nb_e ? nb : nb_e;
-    if(nb_o > nb_alloc) nb_alloc = nb_o;
-    if(nb_alloc == 0) nb_alloc = 1;
-    if(p->dif_pkcap < nb_alloc){
-      free(p->dif_pk_e); free(p->dif_pk_o);
-      p->dif_pk_e = malloc(nb_alloc * sizeof(ap_peak));
-      p->dif_pk_o = malloc(nb_alloc * sizeof(ap_peak));
-      if(!p->dif_pk_e || !p->dif_pk_o){ p->dif_pkcap = 0; return -1; }
-      p->dif_pkcap = nb_alloc;
-    }
-
     int total = 0;
-
     for(int j = 0; j < nfire; j++){
-      int d = fire_d[j];
-      int t = fire_t[j];
+      const int d = fire_d[j], t = fire_t[j];
       const size_t row = (size_t)d * nt + t;
-
-      for(size_t b = 0; b < nb_alloc; b++){
-        p->dif_pk_e[b] = (ap_peak){-1, 0.f, 0.f, 0.f};
-        p->dif_pk_o[b] = (ap_peak){-1, 0.f, 0.f, 0.f};
-      }
-
-      int r_e = (wk_s_e < wk_e_e)
-        ? ap_mf_run(p->full, 2 * (d0 + d), 1, t0 + t, 1, bs_k, threshold,
-                    p->dif_pk_e, NULL, wk_s_e, wk_e_e)
-        : 0;
-      if(r_e < 0) return -1;
-
-      int r_o = (wk_s_o < wk_e_o)
-        ? ap_mf_run(p->full, 2 * (d0 + d) + 1, 1, t0 + t, 1, bs_k, threshold,
-                    p->dif_pk_o, NULL, wk_s_o, wk_e_o)
-        : 0;
-      if(r_o < 0) return -1;
-
-      int c = 0;
-      for(size_t b = 0; b < nb; b++){
-        ap_peak pke = (b < nb_e) ? p->dif_pk_e[b] : (ap_peak){-1, 0.f, 0.f, 0.f};
-        ap_peak pko = (b < nb_o) ? p->dif_pk_o[b] : (ap_peak){-1, 0.f, 0.f, 0.f};
-
-        int64_t idx_e = (pke.index >= 0) ? 2 * (int64_t)pke.index : -1;
-        if(idx_e >= 0 && ((size_t)idx_e < start || (size_t)idx_e >= end)) idx_e = -1;
-
-        int64_t idx_o = (pko.index >= 0) ? 2 * (int64_t)pko.index + 1 : -1;
-        if(idx_o >= 0 && ((size_t)idx_o < start || (size_t)idx_o >= end)) idx_o = -1;
-
-        float mag_e = (idx_e >= 0) ? ((pke.magnitude > 0.f) ? pke.magnitude : sqrtf(pke.re * pke.re + pke.im * pke.im)) : -1.0f;
-        float mag_o = (idx_o >= 0) ? ((pko.magnitude > 0.f) ? pko.magnitude : sqrtf(pko.re * pko.re + pko.im * pko.im)) : -1.0f;
-
-        ap_peak *outp = peaks + row * nb + b;
-        if(idx_e >= 0 && (idx_o < 0 || mag_e >= mag_o)){
-          outp->index = (long)idx_e;
-          outp->re = pke.re;
-          outp->im = pke.im;
-          outp->magnitude = (pke.magnitude > 0.f) ? pke.magnitude : mag_e;
-          c++;
-        } else if(idx_o >= 0){
-          outp->index = (long)idx_o;
-          outp->re = pko.re;
-          outp->im = pko.im;
-          outp->magnitude = (pko.magnitude > 0.f) ? pko.magnitude : mag_o;
-          c++;
-        } else {
-          outp->index = -1;
-          outp->re = 0.0f;
-          outp->im = 0.0f;
-          outp->magnitude = 0.0f;
-        }
-      }
-      if(counts) counts[row] = c;
-      total += c;
+      int r = ap_mf_run_dif(p->full, 2 * (d0 + d), t0 + t, 1,
+                            binsize, threshold, peaks + row * nb,
+                            counts ? counts + row : NULL, start, end);
+      if(r < 0) return -1;
+      total += r;
     }
     return total;
   } else {

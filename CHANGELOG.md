@@ -6,6 +6,10 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ### Performance
 
+- Sparse analysis-window planning bounds block candidates to each window instead of
+  constructing the remaining series for every window. In a local paired benchmark with
+  512 narrow windows over 2^26 samples, planning was 3.3x faster with identical layouts;
+  whole-series planning was unchanged within measurement noise.
 - fp16 coarse tier, untiled builds (every band on an Intel Iris Xe; bands 128 and 1024 on an
   Apple M2): the peak election is one pass over the transform registers -- each thread keeps
   its in-window maximum, that maximum's lowest slot and the register -- instead of holding
@@ -28,15 +32,40 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ### Fixed
 
+- Existing Q15 plans retain their SIMD backend after `set_target()`, including lazy
+  scratch allocation. Switching to a wider target previously allowed its kernel to
+  overwrite buffers sized for the original plan.
+- Half-spectrum DIF refinement respects full-rate bin boundaries for odd bin widths
+  and clipped windows, returns the correct flat-series output shape, and breaks exact
+  peak ties at the earliest lag. Changing Hermitian mode re-ingests existing templates
+  with the new normalization and layout.
+- Reference caches include the data sample rate and observe in-place reference, template
+  and PSD edits when their setter is called again. Weak references and bounded storage
+  release retired inputs instead of retaining every PSD from a long search.
+- CUDA asynchronous results, including submitted segment graphs, are materialized before
+  their cached output buffers are reused or freed. Early collection preserves each
+  dispatch's statistics; captured segment replays keep fresh result readers.
+- Concurrent `MF_COST_FILE` writers lock the read/merge/replace operation, preserving
+  unrelated records written by other processes or threads.
 - Coarse layout measurement (Vulkan, CUDA, Metal) times its candidates in interleaved rounds
   and confirms the contenders against the fastest, paired, instead of timing each
   candidate's repetitions back to back. On a shared GPU one burst of other work during the
   untiled stage stored a tiled layout 4.3x slower on an Iris Xe, and MF_COST_FILE kept it.
 - Measured GPU kernel choices in `MF_COST_FILE` (coarse layout, tile and subgroup on Vulkan,
   CUDA and Metal; the Vulkan pipeline subgroup and fused-batch interleave) are keyed by the
-  kernel sources they timed (`gatechain.gpu_kernel_id`). A cost file written by another
+  compiled artifacts they timed (`gatechain.gpu_kernel_id`), separately for each backend,
+  including CUDA-only kernels and compiled Metal libraries. Builders stamp these digests
+  into the manifests so startup reads a small identity rather than scanning the kernels.
+  A cost file written by another
   build was reused, so a kernel change that moves the best layout -- the Iris Xe's coarse
   subgroup above -- never reached a machine that already had one.
+
+### Documentation
+
+- Clarify that CPU direct refinement searches near the coarse maximum and can miss a
+  stronger excursion elsewhere in its bin; `MF_DIRECT_REFINE=0` uses full-bin transform
+  refinement for surviving pairs. Document that time-domain bins restart at block/window
+  intersections, so changing block sizes can change trigger grouping.
 
 ## 0.1.0a8
 

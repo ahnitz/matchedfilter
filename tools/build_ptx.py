@@ -282,7 +282,7 @@ def build_full_tierc(slangc, nvrtc, env, outdir):
     return entries
 
 
-def main():
+def _build():
     ap = argparse.ArgumentParser()
     ap.add_argument("--slangc", default=None)
     ap.add_argument("--only", choices=("all", "tierc", "refine", "coarse", "compact", "tc", "items"), default="all",
@@ -450,6 +450,14 @@ def main():
     (OUT / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     print("Wrote PTX manifest: %s" % (OUT / "manifest.json"))
     return 0
+
+
+def main():
+    status = _build()
+    if status == 0:
+        from kernel_build_id import stamp
+        stamp(ROOT / "python" / "matchedfilter", ("cuda",))
+    return status
 
 
 if __name__ == "__main__":

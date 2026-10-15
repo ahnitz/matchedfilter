@@ -114,7 +114,9 @@ def test_two_processes_sharing_a_cost_file_agree(device, tmp_path):
     assert second["layout"] == first["layout"] and second["chains"] == first["chains"]
     # Every GPU kernel choice on file is keyed by the kernels it timed (gpu_kernel_id).
     from matchedfilter import gatechain
-    kid = "|k" + gatechain.gpu_kernel_id()
     gpu_keys = [k for k in json.loads(cost.read_text())
                 if k.startswith(("choice|vk-", "choice|cuda-coarse", "choice|mtl-coarse"))]
-    assert all(k.endswith(kid) for k in gpu_keys), gpu_keys
+    for key in gpu_keys:
+        backend = ("cuda" if key.startswith("choice|cuda-") else
+                   "metal" if key.startswith("choice|mtl-") else "vulkan")
+        assert key.endswith("|k" + gatechain.gpu_kernel_id(backend)), key

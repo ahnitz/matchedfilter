@@ -1586,7 +1586,7 @@ class Context(InputUploads):
             from . import gatechain
             ckey = "mtl-coarse-tile|%s|%d|p%d|%s|k%s" % (getattr(self, "name", ""), band, ppg,
                                                         ",".join(map(str, cands)),
-                                                        gatechain.gpu_kernel_id())
+                                                        gatechain.gpu_kernel_id("metal"))
             held = gatechain.stored_choice(ckey)
             if held in cands:
                 memo[k] = held
