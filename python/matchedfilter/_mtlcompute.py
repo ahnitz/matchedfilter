@@ -108,10 +108,19 @@ def _use_c16(band):
 
 
 def _ppg_of(entry):
-    """Pairs per threadgroup an entry name carries: coarse16p8 -> 8, coarse16p8t2 -> 8."""
+    """Pairs per threadgroup an entry name carries: coarse16p8 -> 8, coarse16p8t2w -> 8 (a
+    trailing "w" asks for the twiddle table, _twt_entry)."""
     if not entry.startswith("coarse16p"):
         return 1
-    return int(entry[len("coarse16p"):].split("t")[0])
+    return int(entry[len("coarse16p"):].rstrip("w").split("t")[0])
+
+
+def _twt_entry(entry):
+    """(entry without its twiddle suffix, True when a coarse entry asks for the fp16 twiddle
+    table): "coarse16p4t2w" builds coarse16p4t2's library with MF_COARSE_TWT=1."""
+    if entry.startswith("coarse16") and entry.endswith("w"):
+        return entry[:-1], True
+    return entry, False
 
 
 def coarse_geometry(band, nd, nt, simd_width=32, choose_tile=None):
@@ -122,15 +131,19 @@ def coarse_geometry(band, nd, nt, simd_width=32, choose_tile=None):
     those shipped. Which tile -- or none -- is choose_tile(band, ppg, shipped tiles)'s, the
     device's measured choice (Context._coarse_tile); without it the smallest shipped tile.
     Untiled: coarse_ppg's packing, ragged like the tiles (_coarse.coarse_launch).
-    MF_METAL_COARSE_TILE forces a tile (0 or 1 = untiled) and MF_METAL_COARSE_PPG a packing,
-    for measurement."""
+    The choice also carries the twiddle source (a trailing "w" on the entry: the build's fp16
+    table rather than the fp32 recurrence, _twt_entry). MF_METAL_COARSE_TILE forces a tile
+    (0 or 1 = untiled), MF_METAL_COARSE_PPG a packing and MF_METAL_COARSE_TWT the twiddle
+    source, for measurement and tests."""
     import os
     from ._coarse import coarse_launch, coarse_stem, shipped_tiles, forced_tile
     pairs = nd * nt
     wg = band // _radix(band)
     forced = forced_tile("MF_METAL_COARSE_TILE")
     want = os.environ.get("MF_METAL_COARSE_PPG") or None
+    forced_twt = forced_tile("MF_METAL_COARSE_TWT")
     built = [p for p in (1, 2, 4, 8, 16, 32) if shipped_tiles(band, p, _shipped)]
+    twt = 0
     if built and (forced is None or forced > 1):
         if want is not None and int(want) in built:
             ppg = int(want)
@@ -139,13 +152,20 @@ def coarse_geometry(band, nd, nt, simd_width=32, choose_tile=None):
         tiles = shipped_tiles(band, ppg, _shipped)
         if forced is not None:
             tile = forced if forced in tiles else 1
+        elif choose_tile:
+            tile, twt = choose_tile(band, ppg, tiles)
         else:
-            tile = choose_tile(band, ppg, tiles) if choose_tile else tiles[0]
+            tile = tiles[0]
+        if forced_twt is not None:
+            twt = forced_twt
         if tile > 1:
-            entry = "coarse16" + coarse_stem(band, ppg, tile)[len("tierb_%d_c16" % band):]
+            entry = ("coarse16" + coarse_stem(band, ppg, tile)[len("tierb_%d_c16" % band):]
+                     + ("w" if twt else ""))
             return entry, ppg, tile, coarse_launch(nd, nt, ppg, tile, 0)[1], True
+    elif forced_twt is not None:
+        twt = forced_twt
     ppg = coarse_ppg(band, pairs, simd_width=simd_width)
-    return ("coarse16" + ("p%d" % ppg if ppg > 1 else ""), ppg, 1,
+    return ("coarse16" + ("p%d" % ppg if ppg > 1 else "") + ("w" if twt else ""), ppg, 1,
             coarse_launch(nd, nt, ppg, 1, 0)[1], ppg > 1)
 
 
@@ -605,7 +625,7 @@ class Context(InputUploads):
         self._uploaded = {"data": {}, "tmpl": {}}
 
     # ---- kernels ----------------------------------------------------------
-    def _library(self, stem):
+    def _library(self, stem, twt=False):
         """A compiled .metallib if one shipped, else compile the source.
 
         The library is what a macOS wheel carries, built by Apple's compiler
@@ -621,7 +641,7 @@ class Context(InputUploads):
         # (MF_C16_RAW) or IEEE math for the fail-open compaction -- compiles from source, or
         # the library silently runs the default build instead (on the macOS runner the
         # physics tests then measured the fp16 BOUND as if it were the raw statistic).
-        if lib_path.is_file() and not raw and not _ieee_kernel(stem):
+        if lib_path.is_file() and not raw and not twt and not _ieee_kernel(stem):
             url_cls = self.o.objc.objc_getClass(b"NSURL")
             url = self.o.call(url_cls, b"fileURLWithPath:",
                               args=(self.o.nsstring(str(lib_path)),),
@@ -638,18 +658,23 @@ class Context(InputUploads):
                              % (stem, lib_path.name, src_path.name))
         err = ctypes.c_void_p()
         opts = None
-        if raw:
-            # The fp16 bound switch (gatechain._RAW_GATE_SWITCH; Vulkan's constant 77): the
-            # raw fp16 maximum, for measuring the bound's margin only (twiddle.slang).
+        # Library macros (twiddle.slang): MF_C16_RAW=1 is the fp16 bound switch
+        # (gatechain._RAW_GATE_SWITCH; Vulkan's constant 77), the raw fp16 maximum, for
+        # measuring the bound's margin only; MF_COARSE_TWT=1 takes the coarse twiddles from
+        # the build's fp16 table (Vulkan's constant 80), a measured choice (_coarse_tile).
+        names = [k for k, on in (("MF_C16_RAW", raw), ("MF_COARSE_TWT", twt)) if on]
+        if names:
             o = self.o
             opts = o.call(o.call(o.objc.objc_getClass(b"MTLCompileOptions"), b"alloc"), b"init")
-            num = o.call(o.objc.objc_getClass(b"NSNumber"), b"numberWithInt:", args=(1,),
-                         argtypes=(ctypes.c_int,))
-            macros = o.call(o.objc.objc_getClass(b"NSDictionary"), b"dictionaryWithObject:forKey:",
-                            args=(num, o.nsstring("MF_C16_RAW")),
-                            argtypes=(ctypes.c_void_p, ctypes.c_void_p))
+            macros = o.call(o.call(o.objc.objc_getClass(b"NSMutableDictionary"), b"alloc"), b"init")
+            for name in names:
+                num = o.call(o.objc.objc_getClass(b"NSNumber"), b"numberWithInt:", args=(1,),
+                             argtypes=(ctypes.c_int,))
+                o.call(macros, b"setObject:forKey:", restype=None,
+                       args=(num, o.nsstring(name)), argtypes=(ctypes.c_void_p, ctypes.c_void_p))
             o.call(opts, b"setPreprocessorMacros:", restype=None, args=(macros,),
                    argtypes=(ctypes.c_void_p,))
+            o.call(macros, b"release", restype=None)
         if _ieee_kernel(stem):
             # Gates must fail open: a value that overflows fp16 becomes inf, and an
             # inf - inf in the transform becomes NaN. Under the default fast-math the
@@ -797,8 +822,9 @@ class Context(InputUploads):
             key = key + ("raw",)
         if key in self._pipelines:
             return self._pipelines[key]
-        stem = pathlib.Path(single["msl"]).stem if single else self._stem(n, entry_name)
-        lib = self._library(stem)
+        base, twt = _twt_entry(entry_name)
+        stem = pathlib.Path(single["msl"]).stem if single else self._stem(n, base)
+        lib = self._library(stem, twt=twt)
         fn = pso = None
         try:
             fn = self.o.call(lib, b"newFunctionWithName:",
@@ -1582,12 +1608,15 @@ class Context(InputUploads):
         micro-benchmark). Whether a tile's register reuse pays depends on the device."""
         from . import gatechain
         from ._coarse import stored_measured_choice
+        # (tile, twt) candidates. The smallest tile with the recurrence first: it is what a
+        # device without timestamps runs. Preference: fewer templates per lane, recurrence.
+        ts = list(tiles[:1]) + [1] + list(tiles[1:])
+        cands = [(t, w) for t in ts for w in (0, 1)]
         return stored_measured_choice(
             self.__dict__.setdefault("_coarse_tiles", {}), "mtl-coarse-tile|p%d" % ppg,
-            # The smallest tile first: it is what a device without timestamps runs.
-            getattr(self, "name", ""), band, list(tiles[:1]) + [1] + list(tiles[1:]), str,
+            getattr(self, "name", ""), band, cands, lambda c: "t%dw%d" % c,
             gatechain.gpu_kernel_id("metal"),
-            lambda cs: self._time_coarse_tiles(band, ppg, cs), tiebreak=lambda t: (t,))
+            lambda cs: self._time_coarse_tiles(band, ppg, cs), tiebreak=lambda c: c)
 
     def _time_coarse_tiles(self, band, ppg, cands, pairs=65536, ntm=16, reps=4):
         """Device seconds per pair of each coarse build on synthetic data (a warm-up, reps - 1
@@ -1607,8 +1636,8 @@ class Context(InputUploads):
                 and os.environ.get("MF_VK_C16_BOUND", "1") != "0")
         launch = {}
 
-        def time_one(tile):
-            pso, slot_val, groups, thr = launch[tile]
+        def time_one(c):
+            pso, slot_val, groups, thr = launch[c]
             cmd = self.o.call(self.queue, b"commandBuffer")
             enc = self.o.call(cmd, b"computeCommandEncoder")
             # Encoded here, not through _dispatch: the calibration is not the call's
@@ -1630,17 +1659,19 @@ class Context(InputUploads):
             return t1 - t0
 
         try:
-            for tile in cands:
+            for c in cands:                 # (tile, twt): twt 1 is the fp16 twiddle table
+                tile, twt = c
                 stem = coarse_stem(band, ppg, tile)
-                pso = self.pipeline(band, "coarse16" + stem[len("tierb_%d_c16" % band):])
+                pso = self.pipeline(band, "coarse16" + stem[len("tierb_%d_c16" % band):]
+                                    + ("w" if twt else ""))
                 slot_val, groups = coarse_launch(ndm, ntm, ppg, tile, band)
                 thr = (int(np.float32(1.1754944e-38).view(np.uint32))
                        if gate and tile > 1 else 0)
-                launch[tile] = (pso, slot_val, groups, thr)
+                launch[c] = (pso, slot_val, groups, thr)
             # A warm-up dispatch each, then interleaved rounds and a paired confirmation of
             # the contenders (_coarse: the GPU may be shared).
-            for tile in cands:
-                if time_one(tile) is None:
+            for c in cands:
+                if time_one(c) is None:
                     return None
             times = time_staged([list(cands)], time_one, rounds=reps - 1)
             if times is None:
@@ -1651,7 +1682,7 @@ class Context(InputUploads):
             for b in bufs:
                 b.destroy()
         self.__dict__.setdefault("coarse_times", {}).setdefault(band, {}).update(
-            {coarse_stem(band, ppg, t): v for t, v in out.items()})
+            {coarse_stem(band, ppg, c[0]) + ("w" if c[1] else ""): v for c, v in out.items()})
         return out
 
     @staticmethod

@@ -202,7 +202,7 @@ void dft16_0(array<float2, int(16)> thread* r_0)
 }
 
 
-#line 74 "/home/ahnitz/projects/claude/searchdev/work/mf-gpu-c16/src/gpu/twiddle.slang"
+#line 84 "/home/ahnitz/projects/claude/searchdev/work/mf-gpu-c16/src/gpu/twiddle.slang"
 float2 mfTwiddle_0(float angle_0)
 {
 
@@ -754,92 +754,92 @@ uint slotToIndex_0(uint slot_0)
 }
 
 
-#line 1974
+#line 1975
 [[kernel]] void tcFullStage3(uint3 gid_0 [[threadgroup_position_in_grid]], uint3 lid_0 [[thread_position_in_threadgroup]], packed_float2 device* entryPointParams_scratch_1 [[buffer(0)]], packed_float2 device* entryPointParams_output_1 [[buffer(1)]])
 {
 
-#line 1974
+#line 1975
     thread KernelContext_0 kernelContext_4;
 
-#line 1974
+#line 1975
     (&kernelContext_4)->entryPointParams_scratch_0 = entryPointParams_scratch_1;
 
-#line 1974
+#line 1975
     (&kernelContext_4)->entryPointParams_output_0 = entryPointParams_output_1;
 
-#line 1974
+#line 1975
     threadgroup array<uint, int(1024)> stg_1;
 
-#line 1974
+#line 1975
     (&kernelContext_4)->stg_0 = &stg_1;
 
 
 
     uint _S26 = gid_0.x;
 
-#line 1978
+#line 1979
     uint _S27 = _S26 / 512U;
 
-#line 1978
+#line 1979
     uint _S28 = _S26 % 512U;
     uint tid_1 = lid_0.x;
     (&kernelContext_4)->_tid_0 = tid_1;
     (&kernelContext_4)->_stgBase_0 = 0U;
     thread array<float2, int(16)> r_5;
 
-#line 1982
+#line 1983
     uint m_1 = 0U;
     for(;;)
     {
 
-#line 1983
+#line 1984
         if(m_1 < 16U)
         {
         }
         else
         {
 
-#line 1983
+#line 1984
             break;
         }
 
-#line 1984
+#line 1985
         r_5[m_1] = float2(*((&kernelContext_4)->entryPointParams_scratch_0+(_S27 * 262144U + _S28 * 512U + tid_1 + 32U * m_1))) ;
 
-#line 1983
+#line 1984
         m_1 = m_1 + 1U;
 
-#line 1983
+#line 1984
     }
 
-#line 1983
+#line 1984
     transform_0(&r_5, tid_1, &kernelContext_4);
 
-#line 1983
+#line 1984
     uint i_3 = 0U;
 
 
     for(;;)
     {
 
-#line 1986
+#line 1987
         if(i_3 < 16U)
         {
         }
         else
         {
 
-#line 1986
+#line 1987
             break;
         }
 
-#line 1986
+#line 1987
         *((&kernelContext_4)->entryPointParams_output_0+(_S27 * 262144U + slotToIndex_0(tid_1 * 16U + i_3) * 512U + _S28)) = packed_float2(float2(r_5[i_3].x, r_5[i_3].y)) ;
 
-#line 1986
+#line 1987
         i_3 = i_3 + 1U;
 
-#line 1986
+#line 1987
     }
 
 

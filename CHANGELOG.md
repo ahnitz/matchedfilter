@@ -6,6 +6,9 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ### Performance
 
+- Metal fp16 coarse builds carry the fp16 twiddle table, and the tile choice measures each
+  tile with each twiddle source. On an Apple M2 the table was 5-6% faster in the untiled
+  builds (its bands 128 and 1024) but slower in the tile-4 and tile-8 builds.
 - Vulkan and CUDA tiled fp16 coarse builds report each pair's gate decision and bound
   without electing a lag (`peakTwoGate`, Metal's since its tier-0 study): nothing reads
   tier 0's index. Radeon 8060S, band 256, interleaved: 0.91x the time per pair at the

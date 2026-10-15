@@ -44,7 +44,17 @@ uint mfC16RawFlag()
 static const uint mfAccurateTrig = 0;
 static const uint mfSubgroupSize = 32;
 #elif defined(MF_METAL)
-static const uint mfCoarseTwt = 0;
+// The coarse transform's twiddle source (constant 80 on Vulkan) as an MSL preprocessor macro
+// the host sets when it compiles a library (MF_COARSE_TWT=1 for a "w" coarse entry): 0 is
+// the fp32 recurrence, 1 the build's fp16 table. Measured per device and candidate.
+__target_intrinsic(metal, "(MF_COARSE_TWT)")
+uint mfCoarseTwtValue();
+uint mfCoarseTwtFlag()
+{
+    __requirePrelude("#ifndef MF_COARSE_TWT\n#define MF_COARSE_TWT 0u\n#endif");
+    return mfCoarseTwtValue();
+}
+#define mfCoarseTwt mfCoarseTwtFlag()
 static const uint mfDataStride = 0;
 static const uint mfRowWindows = 0;
 static const uint mfDataScaleBits = 0x3f800000u;

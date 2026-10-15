@@ -265,3 +265,12 @@ Stage 5's lessons land inside the stages that touch them. Each stage merges in g
   - The 96 MB of committed artifacts costs git-history churn on every kernel change.
     Building them in CI instead is a process change to propose, not one to make
     unilaterally.
+- 2026-10-15: **Stage 5 lesson: the measured twiddle source on Metal.**
+  - Metal's coarse builds now carry the fp16 twiddle table. Its use is the
+    `MF_COARSE_TWT` library macro (a "w" entry), and tiled `filterTwo` reads the same
+    runtime constant on every backend.
+  - The Metal tile choice measures (tile, twt) pairs.
+  - M2, separate processes: the table is 5-6% faster untiled (band 128: 8.69 -> 8.17-8.20
+    ns; band 1024: 57.8 -> 54.9) and 1.4% at band 512 t2, but 3-6% slower at t4/t8. Hence
+    the per-candidate choice.
+  - Vulkan tiled builds unchanged: 0.999x on the 8060S.

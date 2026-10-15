@@ -1494,6 +1494,7 @@ void filterTwo(uint pairA, uint pairB, uint tA, uint tB, uint tid,
 
         dft16s(re, im);
 #if defined(COARSE_TWT)
+        if (mfCoarseTwt != 0u)
         {
             // W_len^(lane*k2) from the build's table, correctly rounded to
             // half: one 64-byte row per lane, so four 128-bit loads at
@@ -1505,7 +1506,8 @@ void filterTwo(uint pairA, uint pairB, uint tA, uint tB, uint tid,
                 cmulw(re[k2], im[k2], w.x, w.y);
             }
         }
-#else
+        else
+#endif
         {
             float a1 = 2.0f * PI * float(lane) / float(len);
             float2 tw = mfTwiddle(a1);
@@ -1518,7 +1520,6 @@ void filterTwo(uint pairA, uint pairB, uint tA, uint tB, uint tid,
                 cr = nr;
             }
         }
-#endif
         const uint per  = R / max(TB, 1u);
         const uint TB2  = max(TB >> LGR, 1u), len2 = TB;
         uint blk2 = tid / TB2, lane2 = tid % TB2;
