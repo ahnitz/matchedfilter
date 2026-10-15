@@ -79,9 +79,9 @@ Alpha releases may change the API. Pin a version for reproducible work.
   compiled artifacts they timed (`gatechain.gpu_kernel_id`), separately for each backend,
   including CUDA-only kernels and compiled Metal libraries. Builders stamp these digests
   into the manifests so startup reads a small identity rather than scanning the kernels.
-  A cost file written by another
-  build was reused, so a kernel change that moves the best layout -- the Iris Xe's coarse
-  subgroup above -- never reached a machine that already had one.
+  A cost file written by another build was reused, so a kernel change that moves the best
+  layout -- the Iris Xe's coarse subgroup above -- never reached a machine that already
+  had one.
 
 ### Documentation
 
