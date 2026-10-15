@@ -145,12 +145,13 @@ before stage 2 needs them.
 **Lessons to carry to every device:**
 - ragged groups;
 - the one-pass election (done);
-- the measured twiddle source (not yet measured on the M2);
+- the measured twiddle source (done on the M2; Metal also measures its packing);
 - the result-ownership audit, applied to Vulkan;
 - interleaved timing (done).
 
 **Conformance:** one test suite parametrized over every backend replaces the per-backend
-copies, so a rule cannot drift on one platform again.
+copies, so a rule cannot drift on one platform again. First part done:
+`test_coarse_conformance.py` runs every coarse layout of the machine's backend.
 
 ## Kernel specialization inventory (2026-10-15)
 
@@ -290,3 +291,15 @@ Stage 5's lessons land inside the stages that touch them. Each stage merges in g
   - M2 end to end, paired against a48a482f (rounds 2-4): batched equal (3.92-3.93e7 both),
     pipelined 3.72 -> 3.74e7. Suite 1834 passed, margin ok, both checks 0/0 one-sided
     (cbbbed5e).
+- 2026-10-15: **Stage 5: one coarse conformance suite.**
+  - Every backend names a coarse layout one way (`_coarse.layout_label`: build stem, "w"
+    for the fp16 twiddle table, "@<size>" for a required subgroup size), lists them
+    (`Context.coarse_layouts`) and takes `MF_COARSE_LAYOUT` as a forced, untimed choice.
+  - `test_coarse_conformance.py` forces each layout through `hier_peaks`. The gate must
+    make the exact statistic's decisions at thresholds in wide gaps of the float64 maxima.
+    An overflowing row and gate_margin's transient (K = 1, 32) must pass.
+  - Layouts covered: 8060S 12-50 per band; M2 4-18. A 1.5x mis-scaled tiled gate
+    threshold fails it at the first tiled layout.
+  - It replaces four per-backend test files or tests. The Vulkan test file is now only
+    the direct-kernel tail check, and the 8060S tile tests drop from 200 s to 7 s.
+  - Gate passed on 2af3bfa7; M2 suite 1829 passed.
