@@ -152,6 +152,27 @@ before stage 2 needs them.
 **Conformance:** one test suite parametrized over every backend replaces the per-backend
 copies, so a rule cannot drift on one platform again.
 
+## Kernel specialization inventory (2026-10-15)
+
+The kernels are mostly shared. Slang source is 2,703 lines, and about 88% of it compiles
+unchanged to SPIR-V, PTX and Metal. About 315 lines sit in backend-specific blocks:
+
+- **Metal (about 210):** `peakTwoGate` (a gate-only election), SIMD-group barriers, and
+  fail-open tests by integer bit checks (Metal compiles with fast math).
+- **Vulkan (about 40):** specialization constants and the row-window binding.
+- **CUDA (about 35):** constants declared as statics, and dispatch details.
+
+There are 4 raw target intrinsics. Native CUDA kernels outside Slang total 463 lines
+(`coarse_tc.cu` tensor-core gate, `followup.cu`); these are kept as explicit exceptions.
+
+The duplication is in the hosts: about 8.6k lines across `_vkcompute`, `_cudacompute` and
+`_mtlcompute`, which stage 1 addresses. The kernel-side cleanup lands in stages 3 and 5:
+- `peakTwoGate` (about 25% of band-256 gate time on the M2) becomes a knob measured on every
+  backend;
+- the integer fail-open tests become universal;
+- constants use one mechanism: Vulkan specialization constants, Metal function constants
+  (check what Slang emits), and a small set of CUDA variants.
+
 ## Order
 
 Stage 0, then stage 1, then stage 4 (probes), then stage 2, then stage 3, then stage 5.
@@ -168,3 +189,13 @@ Stage 5's lessons land inside the stages that touch them. Each stage merges in g
   - Main at caf7f440.
   - `tools/gate.py` now holds a per-machine lock (`--lock`, default `/tmp/mf-gate-<uid>.lock`).
     A second gate waits instead of overlapping.
+- 2026-10-15: **Stage 1a (one launch rule).**
+  - Untiled packed coarse launches are ragged on CUDA and Metal too: kernel RAGGED GROUPS
+    on every target, and `_coarse.coarse_launch` as the single rule.
+  - CUDA's row padding (`padded_rows`, padded offsets) and Metal's padded rows and slots
+    are gone.
+  - Fixed on the way: Metal's gate-only path keyed on "ragged" to mean "tiled"; it now
+    tests `ctile > 1`.
+  - New `test_coarse_ragged_groups.py` covers every backend. Vulkan SPIR-V is unchanged.
+  - L40S: 41 + 131 tests pass, checks exact. M2: 1829 pass, checks exact. Paired
+    throughput is measured once at the end of stage 1.

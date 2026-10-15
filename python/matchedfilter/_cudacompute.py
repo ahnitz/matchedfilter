@@ -22,14 +22,14 @@ import threading
 
 import numpy as np
 
-from ._coarse import TILE_PROBE, confirm_fastest, interleaved_min
+from ._coarse import TILE_PROBE, coarse_launch, confirm_fastest, interleaved_min
 from . import _cuda, _gputime
 from ._cuda import check_cuda
 from ._errors import UnsupportedSize
 from ._gpu_cache import InputUploads
 from ._shared import empty_shared, shared_buffer, shared_key, _Borrowed
 from ._gpuhost import (MAX_BINS, bin_shift, plan_items, split_items, hier_tiers, hier_window,
-                       split_bins, padded_rows, grouped_windows)
+                       split_bins, grouped_windows)
 from ._shared import pack_half2 as _pack_half2
 
 def _borrowed_dptr(self):
@@ -438,15 +438,13 @@ def _coarse_span(n, band, lo, hi):
 
 
 def _coarse_grid(rows, nt, ppg, tile):
-    """(blocks, row argument) of a coarse launch over rows x nt pairs.
-
-    An even tile is ragged (tierb.slang RAGGED TILES): each slot takes `tile` templates of
-    one row, the row's last tile clamped, and the row count rides in the binsize argument
-    (the coarse span's slot, as on Vulkan); None keeps the span there.
-    Otherwise the pairs must fill whole PPG*TILE groups (the caller pads rows)."""
-    if tile % 2 == 0:
-        return -(-rows * (-(-nt // tile)) // ppg), rows
-    return rows * nt // (ppg * tile), None
+    """(blocks, row argument) of a coarse launch over rows x nt pairs: _coarse.coarse_launch's
+    rule. Tiled and packed builds are ragged (tierb.slang RAGGED TILES and RAGGED GROUPS):
+    the row count rides in the binsize argument (the coarse span's slot), and a block's
+    spare slots compute and write nothing, so rows are never padded. One pair per block
+    keeps the span there (None)."""
+    slot, blocks = coarse_launch(rows, nt, ppg, tile, None)
+    return blocks, slot
 
 
 def _u32(x):
@@ -1809,8 +1807,8 @@ class Context(InputUploads):
         synthetic pairs (a few ms, cached for the process). Picking by theoretical
         occupancy chose the untiled variants, 1.3-1.5x slower than the tiled ones at
         bands 256-1024 on the L40S. A tile walks TILE_T consecutive templates of one data
-        row, so it needs nt % TILE_T == 0; a partial PPG group is handled by padding the
-        data rows (hier_peaks)."""
+        row; tiled and packed launches are ragged (_coarse.coarse_launch), so any template
+        and row count keeps them."""
         if not _use_c16(band):
             fn, wg = self.pipeline(band, "fusedTierB")
             return fn, wg, 1, 1, False
@@ -1986,10 +1984,7 @@ class Context(InputUploads):
         cb0 = 4 if c16 else 8
         out = nd * nt * nbins
         cfn, cwg, ppg, tile, _ = self._coarse_kernel(band0, nt)
-        group = 1 if tile % 2 == 0 else ppg * tile      # even tiles are ragged: no padding
-        # Data rows padded so the pair count fills whole groups. The padding pairs'
-        # coarse values land past `pairs`, which the compaction never reads.
-        ndp = padded_rows(nd, nt, group)
+        ndp = nd                                        # ragged launches: no padded rows
         estimate = ((0 if dsh else nd * n * 8) + (0 if tsh else nt * n * 8)
                     + (nd + nt) * (band0 * cb0 + (band1 or 0) * 8) + pairs * 40 + out * 24)
         bufs, fresh = self._record("hier", self._hier, key, estimate, dict)
@@ -2135,14 +2130,11 @@ class Context(InputUploads):
         c16 = _use_c16(band0)
         cb0 = 4 if c16 else 8
         cfn, cwg, ppg, tile, _ = self._coarse_kernel(band0, nt)
-        unit = 1 if tile % 2 == 0 else ppg * tile       # even tiles are ragged: no padding
-        # Coarse rows in a padded layout: group g at rows off[g].., padded so its pairs
-        # fill whole PPG/tile groups. Padding rows hold whatever an earlier call left;
-        # their pairs land past the group's own pairs, which is all its compaction reads.
+        # Coarse rows of window group g at rows off[g].. (ragged launches: no padding).
         offs, ndp = [], 0
         for lo, hi, a, b in groups:
             offs.append(ndp)
-            ndp += padded_rows(b - a, nt, unit)
+            ndp += b - a
         ng = len(groups)
         out = nd * nt * nb
         pairs = nd * nt
@@ -2173,7 +2165,7 @@ class Context(InputUploads):
         gkey = ("grouped", groups, nb, binsize, t2, float(raw_thr),
                 float(raw_thr1) if cascade else None, band0, band1, sparse, nd, nt)
         self._graphed(bufs, gkey, stream, lambda: self._grouped_enqueue(
-            bufs, n, nd, nt, nb, groups, offs, unit, (ppg, tile), cfn, cwg, band0, band1, c16, cb0, cascade,
+            bufs, n, nd, nt, nb, groups, offs, (ppg, tile), cfn, cwg, band0, band1, c16, cb0, cascade,
             raw_thr, raw_thr1, binsize, t2, out, pairs, ng, sparse, stream))
 
         def readback(sort=True):
@@ -2185,7 +2177,7 @@ class Context(InputUploads):
         readback.sparse_dev = getattr(locals().get("collect"), "sparse_dev", None)
         return self._dispatch_result(bufs, readback, async_submit)
 
-    def _grouped_enqueue(self, bufs, n, nd, nt, nb, groups, offs, unit, geom, cfn, cwg, band0, band1,
+    def _grouped_enqueue(self, bufs, n, nd, nt, nb, groups, offs, geom, cfn, cwg, band0, band1,
                          c16, cb0, cascade, raw_thr, raw_thr1, binsize, t2, out, pairs, ng,
                          sparse, stream):
         """hier_peaks_grouped's device work, in stream order (captured into a graph)."""
@@ -2212,7 +2204,7 @@ class Context(InputUploads):
             s1 = bufs["surv1"].dptr.value
         for g, ((lo, hi, a, b), off) in enumerate(zip(groups, offs)):
             gp = (b - a) * nt
-            rows = next(r for r in range(b - a, b - a + unit + 1) if (r * nt) % unit == 0)
+            rows = b - a
             cnt_ref, cnt_t1 = _ptr(args + 8 * g), _ptr(args + 8 * g + 4)
             self._launch(pack_fn, ((b - a) * band0 + 255) // 256, 256,
                          [_ptr(dptr + a * n * 8), _ptr(cd0 + off * band0 * cb0), _u32(n),

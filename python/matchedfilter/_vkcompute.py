@@ -2055,7 +2055,7 @@ class Context(InputUploads):
             return sg, ppg, tile, coarse_launch(nd, nt, ppg, tile, 0)[1], True, twt
         for p in (32, 16, 8, 4, 2, 1):
             if p <= ppg and _spv_shipped(coarse_stem(band, p, 1)):
-                return (sg, p, 1, coarse_launch(nd, nt, p, 1, 0, ragged_groups=True)[1], p > 1,
+                return (sg, p, 1, coarse_launch(nd, nt, p, 1, 0)[1], p > 1,
                         twt)
         return sg, 1, 1, nd * nt, False, twt
 
@@ -2190,7 +2190,7 @@ class Context(InputUploads):
             ("coarse16", band, ppg, tile), coarse_stem(band, ppg, tile) + ".spv",
             _NBIND, _PUSH_BYTES, data_stride=band, subgroup=sg, coarse_twt=twt)
         dset = self._descriptor_set(set_layout, bufs)
-        slot_val, groups = coarse_launch(ndm, ntm, ppg, tile, band, ragged_groups=True)
+        slot_val, groups = coarse_launch(ndm, ntm, ppg, tile, band)
         cmd = _vp()
         _check(vk.vkAllocateCommandBuffers(self.device, ctypes.byref(
             _CmdBufAlloc(40, None, self.command_pool, 0, 1)), ctypes.byref(cmd)),

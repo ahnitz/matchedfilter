@@ -3,21 +3,21 @@ Metal hosts (docs/cross-platform-review.md: one launch rule, so hosts and harnes
 dispatch a coarse build directly cannot disagree)."""
 
 
-def coarse_launch(nd, nt, ppg, tile, cspan, ragged_groups=False):
-    """(binsize-slot value, workgroup count) for a packed coarse build.
+def coarse_launch(nd, nt, ppg, tile, cspan):
+    """(binsize-slot value, workgroup count) for a packed coarse build, on every backend.
 
     Tiled builds (tile > 1) take ragged tiles: the slot carries the data row count and
     ceil(nd * ceil(nt/tile) / ppg) groups run. Untiled builds with more than one pair per
-    group are ragged too where the kernel says so (ragged_groups: Vulkan, tierb.slang
-    RAGGED GROUPS): the row count again, and ceil(nd * nt / ppg) groups. Otherwise an
-    untiled build takes the coarse span and exact geometry (Metal and CUDA pad the pair
-    count to whole groups instead). The host and every harness that dispatches a coarse
-    build directly must use this, so the two cannot disagree."""
+    group take ragged groups (tierb.slang RAGGED GROUPS): the row count again, and
+    ceil(nd * nt / ppg) groups; a group's spare slots compute and write nothing, so no
+    backend pads its rows. One pair per group is exact geometry, with the coarse span in
+    the slot. The host and every harness that dispatches a coarse build directly must use
+    this, so the two cannot disagree."""
     if tile > 1:
         return nd, -(-(nd * -(-nt // tile)) // ppg)
-    if ragged_groups and ppg > 1:
+    if ppg > 1:
         return nd, -(-(nd * nt) // ppg)
-    return cspan, nd * nt // ppg
+    return cspan, nd * nt
 
 
 #: Templates per pair slot a tiled build may carry. The host never assumes one: it offers

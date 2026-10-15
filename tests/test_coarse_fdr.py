@@ -30,7 +30,7 @@ class VulkanCoarse:
         ppg, tile = (int(m[1] or 1), int(m[2] or 1)) if m else (1, 1)
         # BATCH data rows x 4 templates; the same launch rule the host uses.
         slot, groups = ((band, BATCH) if self.tiled
-                        else V.coarse_launch(BATCH, 4, ppg, tile, band, ragged_groups=True))
+                        else V.coarse_launch(BATCH, 4, ppg, tile, band))
         self.buffers = []
         try:
             size = 4 if self.half else 8

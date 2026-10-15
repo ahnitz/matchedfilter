@@ -1620,8 +1620,8 @@ void filterPair(uint pair, uint tid,
     uint d = q / tiles, t0 = (q - d * tiles) * TILE_T;
     uint p0 = d * ntmpl + t0;
     rowWindow(d, winStart, winEnd);
-#elif defined(MF_VULKAN) && COARSE16 && PPG > 1
-    // RAGGED GROUPS (Vulkan, untiled): the host passes the row count in `binsize` and
+#elif COARSE16 && PPG > 1
+    // RAGGED GROUPS (untiled, every backend): the host passes the row count in `binsize` and
     // dispatches ceil(rows * ntmpl / PPG) groups, so any pair count keeps the packing. A
     // slot past the last pair recomputes that pair (every barrier is the group's) and
     // writes nothing. The exact-divisor rule this replaces ran every odd pair count at one
