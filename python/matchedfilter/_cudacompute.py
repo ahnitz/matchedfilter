@@ -22,7 +22,7 @@ import threading
 
 import numpy as np
 
-from ._coarse import TILE_PROBE, coarse_launch, stored_measured_choice, time_staged
+from ._coarse import TILE_PROBE, coarse_launch, forced_layout, stored_measured_choice, time_staged
 from . import _cuda, _gputime
 from ._cuda import check_cuda
 from ._errors import UnsupportedSize
@@ -1813,37 +1813,50 @@ class Context(InputUploads):
             fn, wg = self.pipeline(band, "fusedTierB")
             return fn, wg, 1, 1, False
         # Even tiles are ragged (tierb.slang RAGGED TILES): any template count keeps them.
-        key = ("coarse_choice", band, True)
+        key = ("coarse_choice", band, True, forced_layout(band))
         if key not in self._pipelines:
-            # Every shipped tile is a candidate (_coarse.TILE_PROBE; a missing build raises
-            # UnsupportedSize and is skipped): which one pays is the device's to say.
-            tiles = (1,) + TILE_PROBE
-            cands = []
-            for tile in tiles:
-                for ppg in (1, 2, 4, 8, 16):
-                    if ppg > 1 and band // 16 * ppg > 1024:
-                        continue
-                    for twt in (False, True):
-                        try:
-                            fn, wg = self.pipeline(band, "fusedTierB", c16=True, ppg=ppg,
-                                                   tile=tile, twt=twt)
-                        except UnsupportedSize:
-                            continue
-                        cands.append((fn, wg, ppg, tile))
-            # The tensor-core gate (src/gpu/coarse_tc.cu): one warp per 2-template ragged
-            # slot, WPB warps per block, persistent (grid capped by _coarse_grid_for).
-            for wpb in (2, 4):
-                f = _PTX_DIR / ("coarse_tc_%d_w%d.ptx" % (band, wpb))
-                if f.is_file() and self.cc >= (8, 0):
-                    fn = self._load(f.stem, f, "fusedTierB", 32 * wpb)
-                    self._tc_persistent[fn.value] = self.sm_count * _TC_BLOCKS_PER_SM
-                    cands.append((fn, 32 * wpb, wpb, 2))
+            cands = self._coarse_candidates(band)
             if not cands:
                 raise UnsupportedSize(f"no coarse c16 kernel for band {band}")
             self._pipelines[key] = self._time_coarse(band, cands)
         fn, wg, ppg, tile = self._pipelines[key]
         self._c16_bound_flag(fn)
         return fn, wg, ppg, tile, True
+
+    def _coarse_candidates(self, band):
+        """Every coarse variant (fn, threads, ppg, tile) the choice may take at this band: each
+        shipped (packing, tile, twiddle source) build (_coarse.TILE_PROBE; a missing build
+        raises UnsupportedSize and is skipped), then the tensor-core gate
+        (src/gpu/coarse_tc.cu: one warp per 2-template ragged slot, WPB warps per block,
+        persistent, its grid capped by _coarse_grid_for). Which one pays is the device's to
+        say."""
+        cands = []
+        for tile in (1,) + TILE_PROBE:
+            for ppg in (1, 2, 4, 8, 16):
+                if ppg > 1 and band // 16 * ppg > 1024:
+                    continue
+                for twt in (False, True):
+                    try:
+                        fn, wg = self.pipeline(band, "fusedTierB", c16=True, ppg=ppg,
+                                               tile=tile, twt=twt)
+                    except UnsupportedSize:
+                        continue
+                    cands.append((fn, wg, ppg, tile))
+        for wpb in (2, 4):
+            f = _PTX_DIR / ("coarse_tc_%d_w%d.ptx" % (band, wpb))
+            if f.is_file() and self.cc >= (8, 0):
+                fn = self._load(f.stem, f, "fusedTierB", 32 * wpb)
+                self._tc_persistent[fn.value] = self.sm_count * _TC_BLOCKS_PER_SM
+                cands.append((fn, 32 * wpb, wpb, 2))
+        return cands
+
+    def coarse_layouts(self, band):
+        """The names (_coarse.layout_label; the tensor-core gate's coarse_tc_<band>_w<warps>)
+        of every coarse layout the choice may take at this band on this device;
+        MF_COARSE_LAYOUT forces one."""
+        if not _use_c16(band):
+            return []
+        return [self._labels.get(c[0].value, "") for c in self._coarse_candidates(band)]
 
     def _gate_bits(self, fn, thr, band, tile):
         """The coarse kernel's last argument: for a tiled build whose pair fits one warp, the
@@ -1885,7 +1898,7 @@ class Context(InputUploads):
             self.__dict__.setdefault("_coarse_memo", {}), "cuda-coarse", getattr(self, "name", ""),
             int(band), list(range(len(cands))), lambda i: self._labels.get(cands[i][0].value, ""),
             gatechain.gpu_kernel_id("cuda"),
-            lambda idx: self._time_coarse_measure(band, cands, idx))
+            lambda idx: self._time_coarse_measure(band, cands, idx), forced=forced_layout(band))
         return cands[i]
 
     def _time_coarse_measure(self, band, cands, idx):

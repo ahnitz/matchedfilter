@@ -185,6 +185,7 @@ def _pow2_scaled(a, e):
 from ._coarse import coarse_launch   # noqa: E402,F401  (shared with Metal; re-exported)
 from ._coarse import stored_measured_choice, time_staged   # noqa: E402
 from ._coarse import coarse_stem, shipped_tiles, forced_tile   # noqa: E402
+from ._coarse import forced_layout, layout_label   # noqa: E402
 
 
 #: Byte offsets into VkPhysicalDeviceProperties. The 5 leading uint32s, the
@@ -2129,8 +2130,14 @@ class Context(InputUploads):
         return stored_measured_choice(
             self._device_state.__dict__.setdefault("coarse_choice", {}), "vk-coarse",
             getattr(self, "device_name", ""), band, self._coarse_layouts(band),
-            lambda c: "%d,%d,%d,%d" % c, gatechain.gpu_kernel_id(),
-            lambda cs: self._time_coarse_layouts(band, cs), tiebreak=lambda c: (c[2], c[1], c[0]))
+            lambda c: layout_label(band, c[1], c[2], c[3], c[0]), gatechain.gpu_kernel_id(),
+            lambda cs: self._time_coarse_layouts(band, cs), tiebreak=lambda c: (c[2], c[1], c[0]),
+            forced=forced_layout(band))
+
+    def coarse_layouts(self, band):
+        """The names (_coarse.layout_label) of every coarse layout the choice may take at this
+        band on this device; MF_COARSE_LAYOUT forces one."""
+        return [layout_label(band, c[1], c[2], c[3], c[0]) for c in self._coarse_layouts(band)]
 
     def _time_coarse_layouts(self, band, cands, pairs=16384, screen=1024, ntm=16, reps=3):
         """Device ns per pair of each coarse layout on synthetic data, in
@@ -2170,7 +2177,7 @@ class Context(InputUploads):
             for b in bufs:
                 b.destroy()
         self.__dict__.setdefault("coarse_times", {}).setdefault(band, {}).update(
-            {"sg%d %s%s" % (c[0], coarse_stem(band, c[1], c[2]), "" if c[3] else " recurrence"): v
+            {layout_label(band, c[1], c[2], c[3], c[0]): v
              for c, v in out.items()})
         return out
 

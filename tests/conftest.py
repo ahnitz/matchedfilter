@@ -132,6 +132,30 @@ def usable_gpu():
     return _USABLE
 
 
+def gpu_backend():
+    """The backend ("vulkan", "metal", "cuda") of this machine's usable GPU; skips without one."""
+    import pytest
+    import matchedfilter as mf
+    dev = usable_gpu()
+    if dev is None:
+        pytest.skip("no usable GPU")
+    return next(d for d in mf.devices() if str(d) == dev).backend
+
+
+def gpu_context(backend):
+    """A fresh low-level context (device 0) of the backend; skips an unknown one."""
+    import pytest
+    if backend == "vulkan":
+        from matchedfilter import _vkcompute as M
+    elif backend == "metal":
+        from matchedfilter import _mtlcompute as M
+    elif backend == "cuda":
+        from matchedfilter import _cudacompute as M
+    else:
+        pytest.skip("backend %s" % backend)
+    return M.Context(0)
+
+
 def usable_gpu_reason():
     """Why there is no usable GPU, phrased so it does not mislead."""
     try:

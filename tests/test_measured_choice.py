@@ -417,3 +417,27 @@ def test_a_close_call_goes_to_the_preference_not_the_noise():
     real = _coarse.Timings({"pref": 1.0, "fast": 0.9})
     assert _coarse.stored_measured_choice({}, "t-close2", "dev", 1, ["pref", "fast"], str, "k",
                                           lambda cs: real) == "fast"
+
+
+def test_a_forced_layout_is_taken_untimed_unstored_and_must_exist(monkeypatch, tmp_path):
+    """MF_COARSE_LAYOUT names one layout per band (_coarse.forced_layout); the choice takes
+    it without timing or storing it, and a name that is not a candidate raises."""
+    from matchedfilter import _coarse
+    monkeypatch.setenv("MF_COST_FILE", str(tmp_path / "c.json"))
+    monkeypatch.setenv("MF_COARSE_LAYOUT", "tierb_256_c16p2t2w@16, coarse_tc_512_w4")
+    assert _coarse.forced_layout(256) == "tierb_256_c16p2t2w@16"
+    assert _coarse.forced_layout(512) == "coarse_tc_512_w4"
+    assert _coarse.forced_layout(1024) is None
+    assert _coarse.layout_label(256, 2, 2, 1, 16) == "tierb_256_c16p2t2w@16"
+    assert _coarse.layout_label(512, 1, 1, 0) == "tierb_512_c16"
+    names = ["tierb_256_c16@16", "tierb_256_c16p2t2w@16"]
+    memo = {}
+
+    def measure(cs):
+        raise AssertionError("a forced layout is not timed")
+    assert _coarse.stored_measured_choice(memo, "t-force", "dev", 256, names, str, "k", measure,
+                                          forced=_coarse.forced_layout(256)) == names[1]
+    assert not memo and not (tmp_path / "c.json").exists()
+    with pytest.raises(ValueError, match="tierb_256_c16@16"):
+        _coarse.stored_measured_choice(memo, "t-force", "dev", 256, names[:1], str, "k",
+                                       measure, forced="tierb_256_c16p2t2w@16")
