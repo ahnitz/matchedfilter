@@ -158,6 +158,21 @@ def loop(g, name, tests, n):
     g.record(name, "ok" if fails == 0 else "FAIL", "%d/%d runs failed" % (fails, n))
 
 
+def _machine_lock(path):
+    """Hold an exclusive lock on path for this process's life, waiting while another gate
+    holds it. Gates on one machine share its GPU and cores: two at once slowed each other
+    2-3x and could fail the timing-sensitive steps (repro, followups), so every gate --
+    whoever starts it -- runs alone."""
+    import fcntl
+    f = open(path, "a+")
+    try:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        print("gate: waiting for another gate on this machine (%s)" % path, flush=True)
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+    return f
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--device", default="auto",
@@ -173,10 +188,14 @@ def main(argv=None):
     ap.add_argument("--only", nargs="+",
                     choices=["suite", "check", "replay", "margin", "repro", "followups"])
     ap.add_argument("--logdir", default=None)
+    ap.add_argument("--lock", default="/tmp/mf-gate-%d.lock" % os.getuid(),
+                    help="per-machine lock file (fixed, not TMPDIR, so every session shares "
+                         "it); a gate waits for any other holding it")
     args = ap.parse_args(argv)
     if args.quick:
         args.runs, args.loops = 1, 2
     args.logdir = args.logdir or tempfile.mkdtemp(prefix="mf-gate-")
+    lock = _machine_lock(args.lock)
     g = Gate(args.logdir)
 
     device = _usable_gpu() if args.device == "auto" else (None if args.device == "cpu" else args.device)

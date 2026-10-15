@@ -18,8 +18,8 @@ end records progress.
   Each must be within noise (about 2%) of the previous main, or faster.
 - **Exact results.** The `--check cpu` ladders, `gate_margin --loud`, the full gate on dev2,
   and CI must all be green before every merge.
-- **One gate on dev2 at a time.** Use `scratchpad gate_run.sh`, which refuses to start while
-  another gate is running.
+- **One gate per machine at a time.** `tools/gate.py` takes an exclusive per-user lock,
+  `/tmp/mf-gate-<uid>.lock`, and a second gate waits for it.
 - **Merging means fast-forwarding origin/main.** After the C code changes, refresh
   `work/mf-dev-main` and rebuild it.
 - **Hardware properties, not device names.** A decision may use an API limit, a compiler
@@ -160,3 +160,11 @@ Stage 5's lessons land inside the stages that touch them. Each stage merges in g
 ## Log
 
 - 2026-10-15: plan recorded. Main at fd7ec6a4 (green). Stage 0 item 1 diagnosed.
+- 2026-10-15: **Stage 0 done.**
+  - Ragged-split replay fixed (b1f17b2e, caf7f440). The n=4096 test27 replay check went
+    from 0 to 7 replays, exact against the CPU.
+  - The paired CPU trials (afe10030, cherry-picked from 725267ed) are merged. Gate passed;
+    full suite on M2 (1826); CUDA L40S tests and checks pass.
+  - Main at caf7f440.
+  - `tools/gate.py` now holds a per-machine lock (`--lock`, default `/tmp/mf-gate-<uid>.lock`).
+    A second gate waits instead of overlapping.
