@@ -274,3 +274,7 @@ Stage 5's lessons land inside the stages that touch them. Each stage merges in g
     ns; band 1024: 57.8 -> 54.9) and 1.4% at band 512 t2, but 3-6% slower at t4/t8. Hence
     the per-candidate choice.
   - Vulkan tiled builds unchanged: 0.999x on the 8060S.
+  - M2 end to end, paired against main 8d6320e3 (rounds 2-4): batched 3.873-3.880e7 ->
+    3.915-3.934e7 (+1.1-1.4%), pipelined 3.637-3.670e7 -> 3.713-3.719e7 (+1.3-2%).
+    Gate passed (a48a482f).
+  - 7447cc03 and a48a482f are held for L40S validation (cluster unreachable 2026-10-15).
