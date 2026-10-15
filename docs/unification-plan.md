@@ -215,3 +215,15 @@ Stage 5's lessons land inside the stages that touch them. Each stage merges in g
   - Found by probe: on Vulkan, an async result read after a same-shaped call returned that
     call's peaks. `tests/test_async_result_ownership.py` runs on any backend; 2 of its 4
     cases fail without the claim.
+- 2026-10-15: **Stage 1 merged (main c805ac16; gates passed on c2b5ee06 and 423f30a7).**
+  Paired against caf7f440 (the last main before stage 1), with settled trial locks:
+  - **dev2 8060S:** batched 1.39-1.41e8 -> 1.40-1.43e8, pipelined 1.38-1.41e8 ->
+    1.43-1.45e8 templates in real time (rounds 2-4). Fine-stage device time unchanged
+    (0.059-0.061 s).
+  - **M2:** each round's pair is within 1% (e.g. 3.88e7 vs 3.86e7 batched, 3.87e7 vs 3.87e7
+    pipelined).
+  - **L40S:** device time unchanged (fine stage 0.074-0.094 s in both trees). Wall
+    throughput is host-bound and trial-noisy in both trees.
+  - **dev4:** not measured; it is shared under load 16 (stage 1 changed only host code there).
+  - **Next:** stage 2.1 (deterministic close calls), 2.2 (static compiler statistics),
+    stage 4 probes, then 2.3 (the model, verified against timing).
