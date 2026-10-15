@@ -348,6 +348,8 @@ def compile_metal(slangc, n, cap, entry, outdir, suffix="", coarse16=0, ppg=1, s
                    "#define SPLIT_STAGE %d\n"
                    % (n, cap, coarse16, ppg, tile, RADIX.get(n, 16), single_bin, split)
                    + (_metal_c16_kappa(n) if coarse16 else "")
+                   # The fp16 twiddle table, for a "w" entry's MF_COARSE_TWT=1 (twiddle.slang).
+                   + (_coarse_layout().twiddle_table_source(n) if coarse16 else "")
                    + prelude + KERNEL.read_text())
     stem = "%s_%d%s" % (STEMS[entry], n, suffix)
     msl = outdir / (stem + ".metal")
@@ -399,6 +401,11 @@ def lds_bytes(n, cap):
     wg = n // r
     ch = min(max(cap // wg, 1), r)
     return ch * wg * 8
+
+
+def _coarse_layout():
+    import coarse_layout
+    return coarse_layout
 
 
 def coarse_prelude(n, cap, ppg, model="rdna_wave64"):

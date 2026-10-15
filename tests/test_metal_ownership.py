@@ -54,7 +54,7 @@ def context(fail=None, limits=(1024, 1024)):
     c.device, c.queue, c.name = 1, 2, 'fake'
     c._pipelines, c._batches, c._hier = {}, {}, {}
     c._stem = lambda *args: 'test'
-    c._library = lambda stem: c.o.new(3)
+    c._library = lambda stem, **kw: c.o.new(3)
     c._error = lambda err: 'injected failure'
     return c
 
