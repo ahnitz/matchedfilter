@@ -1212,6 +1212,93 @@ int ap_mf_run_series(ap_mf_plan *p,
   return total;
 }
 
+/* The half-size transforms contain even and odd full-rate lags in separate
+   data rows. Even bin widths have regular half-size bins. Odd widths alternate
+   their parity boundaries, so retain individual reduced lags and place each
+   on the caller's full-rate grid. Bound their staging to one template tile. */
+int ap_mf_run_dif(ap_mf_plan *p,int d0,int t0,int nt,size_t binsize,float threshold,
+                  ap_peak *peaks,int *counts,size_t start,size_t end){
+  if(!p || !binsize || nt<1 || d0<0 || d0>p->nd-2 || t0<0 || t0>p->nt-nt) return -1;
+  if(end>2*p->n) end=2*p->n;
+  if(start>=end) return 0;
+  const size_t nb=1+(end-start-1)/binsize;
+  const int samples=(binsize&1) && nb>1;
+  const size_t reduced_bs=samples ? 1 : (nb==1 ? p->n : binsize/2);
+  const size_t lo[2]={(start+1)/2,start/2};
+  const size_t hi[2]={(end+1)/2,end/2};
+  const size_t nr[2]={ap_mf_nbins(p,reduced_bs,lo[0],hi[0]),
+                      ap_mf_nbins(p,reduced_bs,lo[1],hi[1])};
+  const int tile=samples && nt>p->tile ? p->tile : nt;
+  const size_t need=samples ? (size_t)tile*(nr[0]>nr[1]?nr[0]:nr[1])
+                            : (size_t)nt*(nr[0]+nr[1]);
+  if(need>p->dif_pkcap){
+    ap_peak *next=malloc(need*sizeof(ap_peak));
+    if(!next) return -1;
+    free(p->dif_pkbuf); p->dif_pkbuf=next; p->dif_pkcap=need;
+  }
+  if(!samples){
+    /* Regular reduced bins already align with output bins. Merge directly,
+       without clearing/scattering/rescanning the output or dividing per peak. */
+    const size_t odd_offset=(size_t)nt*nr[0];
+    if(lo[0]==lo[1] && hi[0]==hi[1]){
+      /* Preserve template-batch reuse across both parity rows. */
+      if(ap_mf_run(p,d0,2,t0,nt,reduced_bs,threshold,p->dif_pkbuf,NULL,lo[0],hi[0])<0)
+        return -1;
+    }else{
+      for(int parity=0;parity<2;parity++){
+        if(nr[parity] && ap_mf_run(p,d0+parity,1,t0,nt,reduced_bs,threshold,
+                                   p->dif_pkbuf+(parity?odd_offset:0),NULL,
+                                   lo[parity],hi[parity])<0) return -1;
+      }
+    }
+    int total=0;
+    const ap_peak empty={-1,0.f,0.f,0.f};
+    for(int t=0;t<nt;t++){
+      int count=0;
+      for(size_t b=0;b<nb;b++){
+        ap_peak even=b<nr[0]?p->dif_pkbuf[(size_t)t*nr[0]+b]:empty;
+        ap_peak odd=b<nr[1]?p->dif_pkbuf[odd_offset+(size_t)t*nr[1]+b]:empty;
+        if(even.index>=0) even.index*=2;
+        if(odd.index>=0) odd.index=2*odd.index+1;
+        ap_peak best=even;
+        if(odd.index>=0 && (even.index<0 || odd.magnitude>even.magnitude
+             || (odd.magnitude==even.magnitude && odd.index<even.index))) best=odd;
+        peaks[(size_t)t*nb+b]=best;
+        count+=best.index>=0;
+      }
+      if(counts) counts[t]=count;
+      total+=count;
+    }
+    return total;
+  }
+  for(size_t j=0;j<(size_t)nt*nb;j++) peaks[j]=(ap_peak){-1,0.f,0.f,0.f};
+  for(int parity=0;parity<2;parity++){
+    if(!nr[parity]) continue;
+    for(int tt=0;tt<nt;tt+=tile){
+      const int count=nt-tt<tile?nt-tt:tile;
+      if(ap_mf_run(p,d0+parity,1,t0+tt,count,reduced_bs,threshold,
+                   p->dif_pkbuf,NULL,lo[parity],hi[parity])<0) return -1;
+      for(int t=0;t<count;t++) for(size_t b=0;b<nr[parity];b++){
+        ap_peak pk=p->dif_pkbuf[(size_t)t*nr[parity]+b];
+        if(pk.index<0) continue;
+        pk.index=2*pk.index+parity;
+        const size_t bin=((size_t)pk.index-start)/binsize;
+        ap_peak *dst=peaks+(size_t)(tt+t)*nb+bin;
+        if(dst->index<0 || pk.magnitude>dst->magnitude
+           || (pk.magnitude==dst->magnitude && pk.index<dst->index)) *dst=pk;
+      }
+    }
+  }
+  int total=0;
+  for(int t=0;t<nt;t++){
+    int count=0;
+    for(size_t b=0;b<nb;b++) count+=peaks[(size_t)t*nb+b].index>=0;
+    if(counts) counts[t]=count;
+    total+=count;
+  }
+  return total;
+}
+
 int ap_mf_run_series_dif(ap_mf_plan *p,
                          const float *series, size_t nseries,
                          const size_t *start, const size_t *win_start,
@@ -1238,7 +1325,10 @@ int ap_mf_run_series_dif(ap_mf_plan *p,
     }
   }
 
-  size_t bs_k, wk_s0, wk_e0, nb0;
+  const size_t input_n=decimated?n:2*n;
+  const size_t first_end=win_end[0]<input_n?win_end[0]:input_n;
+  if(win_start[0]>=first_end) return -1;
+  const size_t nb0=1+(first_end-win_start[0]-1)/binsize;
   if(decimated){
     if(!p->fft_fwd_n){
       p->fft_fwd_n = ap_create(n);
@@ -1246,30 +1336,13 @@ int ap_mf_run_series_dif(ap_mf_plan *p,
       p->sspec_n = ap_alloc64(2 * n * sizeof(float));
       if(!p->fft_fwd_n || !p->sfwd_n || !p->sspec_n) return -1;
     }
-    bs_k = binsize >= n ? n : (binsize > 0 ? binsize : 1);
-    wk_s0 = win_start[0];
-    wk_e0 = win_end[0] > n ? n : win_end[0];
-    nb0 = ap_mf_nbins(p, bs_k, wk_s0, wk_e0);
   } else {
-    const size_t N = 2 * n;
     if(!p->fft_fwd){
-      p->fft_fwd = ap_create(N);
-      p->sfwd_2n = ap_alloc64(2 * N * sizeof(float));
-      p->sspec_2n = ap_alloc64(2 * N * sizeof(float));
+      p->fft_fwd = ap_create(input_n);
+      p->sfwd_2n = ap_alloc64(2 * input_n * sizeof(float));
+      p->sspec_2n = ap_alloc64(2 * input_n * sizeof(float));
       if(!p->fft_fwd || !p->sfwd_2n || !p->sspec_2n) return -1;
     }
-    bs_k = binsize >= N ? n : (binsize / 2 > 0 ? binsize / 2 : 1);
-    wk_s0 = win_start[0] / 2;
-    wk_e0 = (win_end[0] + 1) / 2 > n ? n : (win_end[0] + 1) / 2;
-    nb0 = ap_mf_nbins(p, bs_k, wk_s0, wk_e0);
-  }
-
-  size_t pk_need = (size_t)2 * (size_t)nt * nb0;
-  if(pk_need > p->dif_pkcap){
-    free(p->dif_pkbuf);
-    p->dif_pkbuf = malloc(pk_need * sizeof(ap_peak));
-    if(!p->dif_pkbuf){ p->dif_pkcap = 0; return -1; }
-    p->dif_pkcap = pk_need;
   }
 
   int total = 0;
@@ -1277,16 +1350,13 @@ int ap_mf_run_series_dif(ap_mf_plan *p,
   for(int b = 0; b < nblocks; b++){
     const size_t s0 = start[b];
     const size_t ws = win_start[b];
-    const size_t we = win_end[b];
-
-    size_t wk_s, wk_e, nb;
+    const size_t we = win_end[b]<input_n?win_end[b]:input_n;
+    if(ws>=we) return -1;
+    const size_t nb=1+(we-ws-1)/binsize;
+    if(nb!=nb0) return -1;
     const float * restrict d0_ptr;
 
     if(decimated){
-      wk_s = ws;
-      wk_e = we > n ? n : we;
-      nb = ap_mf_nbins(p, bs_k, wk_s, wk_e);
-      if(nb != nb0) return -1;
 
       size_t have = s0 < nseries ? nseries - s0 : 0;
       if(have > n) have = n;
@@ -1300,11 +1370,6 @@ int ap_mf_run_series_dif(ap_mf_plan *p,
       d0_ptr = p->sspec_n;
     } else {
       const size_t N = 2 * n;
-      wk_s = ws / 2;
-      wk_e = (we + 1) / 2 > n ? n : (we + 1) / 2;
-      nb = ap_mf_nbins(p, bs_k, wk_s, wk_e);
-      if(nb != nb0) return -1;
-
       size_t have = s0 < nseries ? nseries - s0 : 0;
       if(have > N) have = N;
       const float inv = 1.0f / (float)N;
@@ -1331,54 +1396,16 @@ int ap_mf_run_series_dif(ap_mf_plan *p,
     if(ap_mf_set_data(p, 0, d0_ptr)) return -1;
     if(ap_mf_set_data(p, 1, d1_ptr)) return -1;
 
-    int r = ap_mf_run(p, 0, 2, t0, nt, bs_k, threshold, p->dif_pkbuf, NULL, wk_s, wk_e);
-    if(r < 0) return -1;
-
     const size_t full_ws = decimated ? 2 * ws : ws;
     const size_t full_we = decimated ? 2 * we : we;
-
-    for(int j = 0; j < nt; j++){
-      const ap_peak *pk_e_row = p->dif_pkbuf + (size_t)j * nb;
-      const ap_peak *pk_o_row = p->dif_pkbuf + (size_t)(nt + j) * nb;
-      ap_peak *out_row = peaks + ((size_t)b * (size_t)nt + (size_t)j) * nb;
-      int c = 0;
-
-      for(size_t bin = 0; bin < nb; bin++){
-        const ap_peak *pke = pk_e_row + bin;
-        const ap_peak *pko = pk_o_row + bin;
-        ap_peak *outp = out_row + bin;
-
-        int64_t idx_e = pke->index >= 0 ? 2 * (int64_t)pke->index : -1;
-        if(idx_e >= 0 && ((size_t)idx_e < full_ws || (size_t)idx_e >= full_we)) idx_e = -1;
-
-        int64_t idx_o = pko->index >= 0 ? 2 * (int64_t)pko->index + 1 : -1;
-        if(idx_o >= 0 && ((size_t)idx_o < full_ws || (size_t)idx_o >= full_we)) idx_o = -1;
-
-        float mag_e = (idx_e >= 0) ? (pke->magnitude > 0.0f ? pke->magnitude : sqrtf(pke->re * pke->re + pke->im * pke->im)) : -1.0f;
-        float mag_o = (idx_o >= 0) ? (pko->magnitude > 0.0f ? pko->magnitude : sqrtf(pko->re * pko->re + pko->im * pko->im)) : -1.0f;
-
-        if(idx_e >= 0 && (idx_o < 0 || mag_e >= mag_o)){
-          outp->index = (long)idx_e;
-          outp->re = pke->re;
-          outp->im = pke->im;
-          outp->magnitude = (pke->magnitude > 0.0f) ? pke->magnitude : mag_e;
-          c++;
-        } else if(idx_o >= 0){
-          outp->index = (long)idx_o;
-          outp->re = pko->re;
-          outp->im = pko->im;
-          outp->magnitude = (pko->magnitude > 0.0f) ? pko->magnitude : mag_o;
-          c++;
-        } else {
-          outp->index = -1;
-          outp->re = 0.0f;
-          outp->im = 0.0f;
-          outp->magnitude = 0.0f;
-        }
-      }
-      if(counts) counts[(size_t)b * (size_t)nt + (size_t)j] = c;
-      total += c;
-    }
+    /* In decimated mode binsize is measured in input samples; indices still
+       describe the reconstructed full-rate output. */
+    const size_t full_bs = decimated ? (binsize>=n?2*n:2*binsize) : binsize;
+    int r=ap_mf_run_dif(p,0,t0,nt,full_bs,threshold,
+                        peaks+(size_t)b*nt*nb,counts?counts+(size_t)b*nt:NULL,
+                        full_ws,full_we);
+    if(r<0) return -1;
+    total+=r;
   }
   return total;
 }
@@ -1490,7 +1517,7 @@ int ap_mf_q15_lanes(const ap_mf_plan *p){
   if(!p) return 0;
   int M1,M2;
   if(ap_q15_factor(p->n,&M1,&M2)) return 0;
-  return ap_q15_lanes();
+  return ap_q15_lanes(p->fft);
 }
 
 static int q15_prepare(ap_mf_plan *p){
@@ -1634,7 +1661,7 @@ int ap_mf_q15_screen(ap_mf_plan *p,int d0,int nd,int t0,int nt,float threshold,
         lanethr[l] = !(q>0.f) ? (int16_t)-32768 : T>=32767.f ? (int16_t)32767 : (int16_t)ceilf(T);
       }
       uint64_t bits=0;
-      if(ap_q15_screen(n,p->qd+(size_t)d*n*3,tr,ti,start,end,lanethr,&bits,
+      if(ap_q15_screen(p->fft,p->qd+(size_t)d*n*3,tr,ti,start,end,lanethr,&bits,
                        stat?lanemax:NULL,p->qscr)) return -1;
       /* lanes l0..l1 are templates g*qw+l0-t0 .. in the caller's rows */
       unsigned char *row=pass+(size_t)(d-d0)*nt+(size_t)(g*qw+l0-t0);

@@ -316,22 +316,15 @@ def test_the_steady_recheck_is_off_by_default(monkeypatch):
     assert calls == [] and not st.get("rechecked")
 
 
-def test_gpu_kernel_choices_carry_the_shipped_kernel_sources(monkeypatch, tmp_path):
-    """A measured GPU kernel choice holds for the kernels it timed. Its key carries a digest of
-    the kernel sources (spirv/manifest.json source_hashes, held to src/gpu by
-    test_kernels_ship), so a cost file written by a build with other kernels is re-measured:
-    an election change alone moved the Iris Xe's coarse subgroup from 8 to 16."""
-    import hashlib, json, pathlib
-    manifest = pathlib.Path(gc.__file__).with_name("spirv") / "manifest.json"
-    hashes = json.loads(manifest.read_text())["source_hashes"]
-    want = hashlib.sha256(json.dumps(hashes, sort_keys=True).encode()).hexdigest()[:12]
-    assert gc.gpu_kernel_id() == want
-    fake = tmp_path / "spirv"
-    fake.mkdir()
-    (fake / "manifest.json").write_text(json.dumps({"source_hashes": dict(hashes, x="0")}))
-    monkeypatch.setattr(gc, "_GPU_KERNEL_ID", None)
-    monkeypatch.setattr(gc, "__file__", str(tmp_path / "gatechain.py"))
-    assert gc.gpu_kernel_id() not in ("", want)
+def test_gpu_kernel_choices_carry_their_backend_artifacts():
+    """CUDA-only kernels and compiled Metal libraries have their own build identity."""
+    import json, pathlib
+    package = pathlib.Path(gc.__file__).parent
+    for backend, folder, field in (("vulkan", "spirv", "build_id"),
+                                   ("cuda", "ptx", "build_id"),
+                                   ("metal", "spirv", "metal_build_id")):
+        manifest = json.loads((package / folder / "manifest.json").read_text())
+        assert gc.gpu_kernel_id(backend) == manifest[field][:16]
 
 
 def test_a_burst_during_one_stage_does_not_decide_a_coarse_layout():

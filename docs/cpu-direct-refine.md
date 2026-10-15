@@ -23,8 +23,9 @@ lag x tap on a Zen 5 core; a 33-lag window of a 215-tap filter is ~600 ticks aga
 
 ## Where it looks
 
-With one bin per pair (the consumer's mode: `binsize = n`), the answer is the window's
-largest |z|. The refine evaluates `halfwidth` coarse samples either side of the pair's
+With one bin per pair (the consumer's mode: `binsize = n`), direct refinement returns the
+largest |z| within its local refinement window. It does not establish the maximum over the
+whole requested output bin. The refine evaluates `halfwidth` coarse samples either side of the pair's
 largest last-tier coarse lag (the tier already reports it). `halfwidth` comes from the gate
 model itself (`gatechain.direct_halfwidth`): the same signal and noise the thresholds are
 calibrated on (`signal_draws`: output spectrum `snr * p`, noise `_SIG^2 p`), drawn over
@@ -56,6 +57,14 @@ at the last tier's coarse maximum, which need not be the larger fine one. Both a
 triggers; the transform reports the larger. In Gaussian data at threshold 6 the case is
 ~1e-9 per pair (34 triggers in 1.08M pairs); `tests/test_direct_refine.py` pins it down.
 Removing it needs the last tier to report every lag above threshold, not just its maximum.
+
+Set `MF_DIRECT_REFINE=0` before constructing the bank when downstream code requires the
+full-bin maximum for every surviving pair. This retains hierarchical screening and its
+calibrated dismissal behavior, but uses a full transform for refinement. The edge fallback
+only detects a local maximum running into the refinement-window boundary; it cannot exclude
+a stronger, disconnected excursion elsewhere in the bin. Values from direct correlation
+agree with the transform at the reported lag to floating-point rounding, rather than being
+bit-identical.
 
 ## What it buys
 

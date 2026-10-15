@@ -109,13 +109,19 @@ int ap_corr_split(ap_plan *p, const float *re, const float *im, float *out);
 int ap_corr_prod_batch(ap_plan *p, const float *dr, const float *di,
                        const float *tr, const float *ti, int nlane, float *out);
 
+/* Merge the even/odd correlations in consecutive data rows of a half-size
+   filter into bins on the full-rate lag grid. */
+int ap_mf_run_dif(ap_mf_plan *p, int d0, int t0, int nt,
+                  size_t binsize, float threshold, ap_peak *peaks, int *counts,
+                  size_t start, size_t end);
+
 /* Q15 coarse screen (q15-inl.h).  ap_q15_lanes: int16 lanes per screen call
-   on the active back end, 0 if it has none.  ap_q15_screen: for that many
+   on the plan's back end, 0 if it has none.  ap_q15_screen: for that many
    pairs, bit l of *bits is set when lane l's maximum of |z|^2/2^15 over
    [start,end) reaches lanethr[l]; lanemax (may be NULL) receives the maxima.
    dq is [N][3] = (dr, di, -di), tr/ti are [N][lanes].  0 on success. */
-int ap_q15_lanes(void);
-int ap_q15_screen(size_t N, const int16_t *dq, const int16_t *tr, const int16_t *ti,
+int ap_q15_lanes(const ap_plan *p);
+int ap_q15_screen(const ap_plan *p, const int16_t *dq, const int16_t *tr, const int16_t *ti,
                   size_t start, size_t end, const int16_t *lanethr, uint64_t *bits,
                   int16_t *lanemax, void *scratch);
 

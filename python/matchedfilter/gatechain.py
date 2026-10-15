@@ -35,11 +35,11 @@ short list; the autotuner measures the short list on the real workload.
 The budget is split between the tiers by minimising that cost subject to the
 compound dismissal bound; the split is part of the chain's plan.
 """
-import hashlib
 import json
 import math
 import os
-import pathlib
+import tempfile
+from contextlib import contextmanager
 from collections import OrderedDict
 from itertools import combinations
 
@@ -489,24 +489,10 @@ def stored_choice(key):
     return rec.get("value") if isinstance(rec, dict) else None
 
 
-_GPU_KERNEL_ID = None
-
-
-def gpu_kernel_id():
-    """A short digest of the GPU kernel sources every shipped GPU build (SPIR-V, PTX, Metal)
-    was made from: spirv/manifest.json's source_hashes, which tests/test_kernels_ship.py holds
-    to the sources. A measured GPU kernel choice carries it in its MF_COST_FILE key, so a
-    build whose kernels differ measures afresh rather than reusing a choice timed on other
-    kernels: the Iris Xe's coarse subgroup went from 8 to 16 with an election change alone."""
-    global _GPU_KERNEL_ID
-    if _GPU_KERNEL_ID is None:
-        try:
-            path = pathlib.Path(__file__).with_name("spirv") / "manifest.json"
-            hashes = json.loads(path.read_text()).get("source_hashes", {})
-            _GPU_KERNEL_ID = hashlib.sha256(json.dumps(hashes, sort_keys=True).encode()).hexdigest()[:12]
-        except (OSError, ValueError):
-            _GPU_KERNEL_ID = ""
-    return _GPU_KERNEL_ID
+def gpu_kernel_id(backend="vulkan"):
+    """Identity of the shipped kernels whose measured choices this backend stores."""
+    from ._kernel_id import gpu_kernel_id as identity
+    return identity(backend)
 
 
 def store_choice(key, value):
@@ -515,14 +501,50 @@ def store_choice(key, value):
         _store_cost(path, "choice|" + key, {"value": value})
 
 
+@contextmanager
+def _cost_file_lock(path):
+    # Lock a stable sidecar: locking the JSON inode would stop protecting it as soon as
+    # os.replace installs its successor. Keep the sidecar after releasing the lock.
+    with open(os.fspath(path) + ".lock", "a+b") as lock:
+        if os.name == "nt":
+            import msvcrt
+            if lock.seek(0, os.SEEK_END) == 0:
+                lock.write(b"\0")
+                lock.flush()
+            lock.seek(0)
+            msvcrt.locking(lock.fileno(), msvcrt.LK_LOCK, 1)
+            try:
+                yield
+            finally:
+                lock.seek(0)
+                msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
 def _store_cost(path, skey, cm):
-    """Add one model to the file; merges with what other processes wrote, replaces atomically."""
-    data = _load_cost_file(path)
-    data[skey] = cm.to_dict() if hasattr(cm, "to_dict") else cm
-    tmp = "%s.%d.tmp" % (path, os.getpid())
-    with open(tmp, "w") as f:
-        json.dump(data, f, indent=1, sort_keys=True)
-    os.replace(tmp, path)
+    """Merge one record under a writer lock, then publish atomically for unlocked readers."""
+    path = os.path.abspath(os.fspath(path))
+    value = cm.to_dict() if hasattr(cm, "to_dict") else cm
+    with _cost_file_lock(path):
+        data = _load_cost_file(path)
+        data[skey] = value
+        tmp = None
+        try:
+            with tempfile.NamedTemporaryFile(mode="w", dir=os.path.dirname(path),
+                                             prefix=os.path.basename(path) + ".",
+                                             suffix=".tmp", delete=False) as f:
+                tmp = f.name
+                json.dump(data, f, indent=1, sort_keys=True)
+            os.replace(tmp, path)
+        finally:
+            if tmp is not None and os.path.exists(tmp):
+                os.unlink(tmp)
 
 
 #: The template count calibrations run at. Per-pair tier and refine costs are flat in the

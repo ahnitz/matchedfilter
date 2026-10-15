@@ -1337,18 +1337,17 @@ class MatchedFilter:
         k_val = getattr(self, 'k', self.n)
         if decim:
             N = k_val
-            wk_s0 = int(ws[0])
-            wk_e0 = min(k_val, int(we[0]))
-            bs = N if binsize is None else int(binsize)
-            bs_k = k_val if bs >= k_val else max(1, int(bs))
         else:
             N = self.n if getattr(self, '_bandlimited', False) else self.n * 2
-            wk_s0 = int(ws[0] // 2)
-            wk_e0 = min(k_val, int((we[0] + 1) // 2))
-            bs = N if binsize is None else int(binsize)
-            bs_k = k_val if bs >= N else max(1, int(bs // 2))
+        bs = N if binsize is None else int(binsize)
         if bs < 1:
             raise ValueError("binsize must be >= 1")
+        ends = np.minimum(we, N)
+        if np.any(ws >= ends):
+            raise ValueError("invalid search window in DIF")
+        bin_counts = 1 + (ends - ws - 1) // bs
+        if np.any(bin_counts != bin_counts[0]):
+            raise ValueError("block windows must have equal bin counts")
         t0, nt = (0, self.ntemplates) if templates is None else (
             int(templates[0]), int(templates[1]))
         if nt < 1 or t0 < 0 or t0 + nt > self.ntemplates:
@@ -1356,7 +1355,7 @@ class MatchedFilter:
         self._require_templates(t0, nt)
 
         nblk = st.size
-        nb = 1 + (wk_e0 - wk_s0 - 1) // bs_k
+        nb = int(bin_counts[0])
         need = nblk * nt * nb
         shape = (nblk, nt, nb)
 
@@ -2784,10 +2783,14 @@ class HierarchicalFilter(MatchedFilter):
         >>> peaks = hf.run(binsize=1024, threshold=t)
         >>> hf.config, hf.refine_rate          # the chain in use, fraction refined
 
-    Every reported peak is refined by the full filter. The gate can omit
-    peaks; ``fd`` is its modelled false-dismissal target at strength ``snr``,
-    shared between the chain's tiers. Use :class:`MatchedFilter` to avoid
-    gate omissions.
+    Surviving pairs normally receive a full correlation and binned peak search;
+    equivalent transform paths can differ by floating-point rounding. With
+    :meth:`set_taps`, direct refinement can instead search near the last coarse
+    candidate for a single-bin result. With several excursions this can return
+    a smaller local maximum than the whole-bin search. ``MF_DIRECT_REFINE=0``
+    disables that approximation. The gate can omit peaks; ``fd`` is its modelled
+    false-dismissal target at strength ``snr``, shared between the chain's tiers.
+    Use :class:`MatchedFilter` for an ungated full-bin search.
 
     The chain is chosen automatically from the reference: every chain of up to
     ``max_tiers`` bands is priced by a model (gate thresholds from the profile,

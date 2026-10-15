@@ -54,6 +54,8 @@ jobs:
           rm -f *.air
           ls -la *.metallib
           echo "built $(ls *.metallib | wc -l) metallib files"
+          cd ../../..
+          python3 tools/kernel_build_id.py --backend metal
       - uses: pypa/cibuildwheel@v3.4.1
       - name: Check every promised Python wheel is present
         run: python3 tools/check_wheels.py wheelhouse --platform ${{ matrix.label }}

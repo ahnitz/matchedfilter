@@ -7,6 +7,8 @@ import os
 import time
 from typing import Any, NamedTuple, Optional, Sequence, Union, Tuple, List, Dict
 import sys
+import threading
+import weakref
 import numpy as np
 try:
     from . import _core
@@ -828,11 +830,74 @@ def _corr_layout(counts: np.ndarray, candidate_ns: Sequence[int], max_batch: Opt
     return groups[::-1], order
 
 
-# Keyed by object identity for speed; each entry also holds the objects it was keyed on, so
-# an id cannot be handed to a new object while its entry exists (a freed array's id is
-# reused, which would serve the new array the old one's profile).
-_REF_PROFILE_CACHE: Dict[Tuple[int, int, float, float, float], Tuple[Any, Any, np.ndarray]] = {}
-_REF_BINNED_CACHE: Dict[Tuple[int, int, float], Tuple[Any, Optional[np.ndarray]]] = {}
+class _ReferenceCache:
+    """Bounded derived profiles, invalidated when an input changes or dies.
+
+    Setters compare an input with its saved values: an explicit setter must observe
+    in-place edits. Filtering does no comparison or hashing. Weak references protect
+    identity keys without retaining every PSD/template from a long search; the LRU
+    also bounds snapshots and derived arrays while their inputs remain alive.
+    """
+
+    def __init__(self, max_entries=64, max_bytes=64 << 20):
+        self.max_entries = max_entries
+        self.max_bytes = max_bytes
+        self.entries = OrderedDict()
+        self.nbytes = 0
+        self._version = 0
+        self._lock = threading.RLock()
+
+    def _remove(self, key, version=None):
+        with self._lock:
+            entry = self.entries.get(key)
+            if entry is not None and (version is None or entry[0] == version):
+                self.nbytes -= entry[4]
+                del self.entries[key]
+
+    def get(self, key, sources):
+        # array_equal releases the GIL; another bank's setter must not evict the
+        # entry between its comparison and the LRU update.
+        with self._lock:
+            entry = self.entries.get(key)
+            if entry is None:
+                return None
+            _, refs, snapshots, _, _ = entry
+            if (len(sources) != len(refs)
+                    or any(ref() is not source or not np.array_equal(np.asarray(source), snapshot)
+                           for ref, source, snapshot in zip(refs, sources, snapshots))):
+                self._remove(key)
+                return None
+            self.entries.move_to_end(key)
+            return entry
+
+    def put(self, key, sources, value):
+        with self._lock:
+            self._remove(key)
+            self._version += 1
+            version = self._version
+            try:
+                refs = tuple(weakref.ref(source, lambda _, k=key, v=version: self._remove(k, v))
+                             for source in sources)
+            except TypeError:
+                return None         # non-weakrefable inputs (e.g. lists) work uncached
+            arrays = tuple(np.asarray(source) for source in sources)
+            values = value.values() if isinstance(value, dict) else (value,)
+            nbytes = sum(a.nbytes for a in arrays) + sum(
+                a.nbytes for a in values if a is not None)
+            if self.max_entries < 1 or nbytes > self.max_bytes:
+                return None
+            snapshots = tuple(a.copy() for a in arrays)
+            while self.entries and (len(self.entries) >= self.max_entries
+                                    or self.nbytes + nbytes > self.max_bytes):
+                self._remove(next(iter(self.entries)))
+            entry = (version, refs, snapshots, value, nbytes)
+            self.entries[key] = entry
+            self.nbytes += nbytes
+            return entry
+
+
+_REF_PROFILE_CACHE = _ReferenceCache()
+_REF_BINNED_CACHE = _ReferenceCache()
 
 
 class _TemplateGroup:
@@ -1199,8 +1264,8 @@ class TimeDomainFilterBank:
             engine=self.engine,
             device=self.device,
         )
-        # Block size by cost. With a stated peak granularity the block size no
-        # longer shapes the output, so it is the bank's to choose: the first
+        # Block size by cost. A stated peak granularity bounds each peak bin's
+        # width, though block boundaries still change bin alignment. The first
         # fine-grid reference prices every candidate per length batch (gate model,
         # calibrated tier costs) and the groups are built at the cheapest. Without
         # one, or with lengths or a chain pinned, the valid-fraction rule stands.
@@ -1544,36 +1609,38 @@ class TimeDomainFilterBank:
             self._state_version = getattr(self, '_state_version', 0) + 1
             return
 
-        ref_key = (id(reference), float(delta_f) if delta_f is not None else None)
-        if getattr(self, '_current_ref_key', None) == ref_key and all(g.templates_loaded for g in self._groups if g.is_hier):
+        fine_df = float(delta_f) if delta_f is not None and float(delta_f) > 0 else None
+        # All block sizes share one snapshot/comparison of the fine-grid input.
+        # The sample rate matters: a frequency maps to different bins at another rate.
+        cache_key = (id(reference), fine_df, self.data_sample_rate, tuple(hier_ns))
+        hit = _REF_BINNED_CACHE.get(cache_key, (reference,))
+        ref_key = (cache_key, hit[0]) if hit is not None else None
+        if (ref_key is not None and getattr(self, '_current_ref_key', None) == ref_key
+                and all(g.templates_loaded for g in self._groups if g.is_hier)):
             return
 
-        ref_arr = np.asarray(reference, dtype=np.float64)
-        if delta_f is not None and float(delta_f) > 0:
-            for g in self._groups:
-                if g.is_hier:
-                    b_key = (id(reference), g.n, float(delta_f))
-                    hit = _REF_BINNED_CACHE.get(b_key)
-                    if hit is not None and hit[0] is reference:
-                        ref_input = hit[1]
-                    else:
-                        from .gatechain import rebin_profile
-                        ref_g = rebin_profile(ref_arr, float(delta_f), self.data_sample_rate, g.n)
-                        ref_input = ref_g.astype(np.float32) if ref_g is not None else None
-                        _REF_BINNED_CACHE[b_key] = (reference, ref_input)
-                    if ref_input is not None:
-                        g.plan.set_reference(ref_input)
+        if hit is not None:
+            profiles = hit[3]
         else:
-            # A 1-D profile without delta_f is per-bin on one block size.  Applying
-            # it only to the groups it happens to fit left the others with no
-            # reference, which surfaced later as a misleading gate-model error.
-            wrong = [n for n in hier_ns if n != len(ref_arr)]
-            if wrong:
-                raise ValueError(f"1-D reference of length {len(ref_arr)} does not match hierarchical "
-                                 f"block size(s) {wrong} (bank block sizes: {hier_ns}); {accepted}")
-            for g in self._groups:
-                if g.is_hier:
-                    g.plan.set_reference(ref_arr.astype(np.float32))
+            ref_arr = np.asarray(reference, dtype=np.float64)
+            if fine_df is not None:
+                from .gatechain import rebin_profile
+                profiles = {}
+                for n in hier_ns:
+                    ref_g = rebin_profile(ref_arr, fine_df, self.data_sample_rate, n)
+                    profiles[n] = ref_g.astype(np.float32) if ref_g is not None else None
+            else:
+                # A per-bin profile without delta_f must cover every block size.
+                wrong = [n for n in hier_ns if n != len(ref_arr)]
+                if wrong:
+                    raise ValueError(f"1-D reference of length {len(ref_arr)} does not match hierarchical "
+                                     f"block size(s) {wrong} (bank block sizes: {hier_ns}); {accepted}")
+                profiles = {n: ref_arr.astype(np.float32) for n in hier_ns}
+            hit = _REF_BINNED_CACHE.put(cache_key, (reference,), profiles)
+            ref_key = (cache_key, hit[0]) if hit is not None else None
+        for g in self._groups:
+            if g.is_hier and profiles[g.n] is not None:
+                g.plan.set_reference(profiles[g.n])
 
         self._load_templates()
         self._current_ref_key = ref_key
@@ -1648,8 +1715,8 @@ class TimeDomainFilterBank:
         fhi = float(f_high or 0.0)
         df = float(stilde.delta_f)
         p_key = (id(ref_template), id(psd), flo, fhi, df)
-        hit = _REF_PROFILE_CACHE.get(p_key)
-        w = hit[2] if hit is not None and hit[0] is ref_template and hit[1] is psd else None
+        hit = _REF_PROFILE_CACHE.get(p_key, (ref_template, psd))
+        w = hit[3] if hit is not None else None
         if w is None:
             h = np.asarray(ref_template)
             S = np.asarray(psd)
@@ -1661,7 +1728,7 @@ class TimeDomainFilterBank:
             w[f < flo] = 0.0
             if fhi > 0:
                 w[f > fhi] = 0.0
-            _REF_PROFILE_CACHE[p_key] = (ref_template, psd, w)
+            _REF_PROFILE_CACHE.put(p_key, (ref_template, psd), w)
         self.set_reference(w, delta_f=df)
 
     @staticmethod
@@ -1678,7 +1745,10 @@ class TimeDomainFilterBank:
         parts_t, parts_s, parts_e = [], [], []
         for v_start, v_stop in W.tolist():
             first_block_idx = max(0, (v_start - c_bad) // STEP)
-            ts = np.arange(first_block_idx * STEP, S, STEP, dtype=np.int64)
+            # Only starts whose valid span can intersect this window. Building the
+            # whole remaining series per narrow window makes sparse layouts quadratic.
+            ts = np.arange(first_block_idx * STEP, min(S, v_stop - c_bad), STEP,
+                           dtype=np.int64)
             bvt0 = ts + c_bad
             keep = (bvt0 < v_stop) & (bvt0 + N_valid > v_start)
             ts = ts[keep]
@@ -2922,7 +2992,9 @@ class SegmentPlan:
             tr = self._trace
             if tr is not None and tr["sig"] == sig and self._graph.launch():
                 self.replays += 1
-                return _SegmentResult(lambda: self._collect_cuda(tr, followup))
+                graph = self._graph
+                return graph.track_result(
+                    _SegmentResult(lambda: self._collect_cuda(tr, followup, graph)))
             _cudacompute.SegmentGraph.wait_all()
         elif self._vk_replay_on():
             return self._submit_vk(jobs, prelude, prelude_key, followup)
@@ -3032,8 +3104,10 @@ class SegmentPlan:
         out = (fine, self._followups(jobs, fine, followup)) if followup is not None else fine
         return _SegmentResult(lambda: out)
 
-    def _collect_cuda(self, tr, followup):
-        self._graph.wait()
+    def _collect_cuda(self, tr, followup, graph=None):
+        graph = graph if graph is not None else self._graph
+        graph.wait()
+        graph.untrack_result()
         out = self._parse_cuda(tr)
         if followup is None:
             return out

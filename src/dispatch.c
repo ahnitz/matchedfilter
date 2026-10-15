@@ -228,15 +228,15 @@ int ap_lane_width(void){
   return b?b->lanes:0;
 }
 
-int ap_q15_lanes(void){
-  const ap_backend *b=pick();
+int ap_q15_lanes(const ap_plan *p){
+  const ap_backend *b=p ? p->be : NULL;
   return (b && b->q15_lanes && b->q15_screen) ? b->q15_lanes() : 0;
 }
 
-int ap_q15_screen(size_t N, const int16_t *dq, const int16_t *tr, const int16_t *ti,
+int ap_q15_screen(const ap_plan *p, const int16_t *dq, const int16_t *tr, const int16_t *ti,
                   size_t start, size_t end, const int16_t *lanethr, uint64_t *bits,
                   int16_t *lanemax, void *scratch){
-  const ap_backend *b=pick();
+  const ap_backend *b=p ? p->be : NULL;
   if(!b || !b->q15_screen || !dq || !tr || !ti || !lanethr || !bits || !scratch) return -1;
-  return b->q15_screen(N,dq,tr,ti,start,end,lanethr,bits,lanemax,scratch);
+  return b->q15_screen(p->n,dq,tr,ti,start,end,lanethr,bits,lanemax,scratch);
 }

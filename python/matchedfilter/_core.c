@@ -109,9 +109,6 @@ static int series_shape_dif(Py_ssize_t n,int maxt,int t0,int nt,Py_ssize_t binsi
   *blocks=(int)(st->len/unit);
   const size_t *starts=st->buf,*lo=ws->buf,*hi=we->buf;
   const size_t N = decimated ? (size_t)n : (size_t)(2 * n);
-  const size_t bs_k = decimated
-    ? ((size_t)binsize >= N ? (size_t)n : ((size_t)binsize > 0 ? (size_t)binsize : 1))
-    : ((size_t)binsize >= N ? (size_t)n : ((size_t)binsize / 2 > 0 ? (size_t)binsize / 2 : 1));
   size_t first=0;
   for(int i=0;i<*blocks;i++){
     if(starts[i]>SIZE_MAX-N || lo[i]>(size_t)PY_SSIZE_T_MAX
@@ -119,13 +116,7 @@ static int series_shape_dif(Py_ssize_t n,int maxt,int t0,int nt,Py_ssize_t binsi
       PyErr_SetString(PyExc_ValueError,"block offset or window overflows / invalid"); return 0;
     }
     size_t w_end = hi[i] > N ? N : hi[i];
-    size_t wk_s = decimated ? lo[i] : lo[i] / 2;
-    size_t wk_e = decimated ? w_end : (w_end + 1) / 2;
-    if(wk_e > (size_t)n) wk_e = (size_t)n;
-    if(wk_s >= wk_e){
-      PyErr_SetString(PyExc_ValueError,"invalid reduced search window in DIF"); return 0;
-    }
-    size_t bins = (wk_e - wk_s + bs_k - 1) / bs_k;
+    size_t bins = 1 + (w_end - lo[i] - 1) / (size_t)binsize;
     if(i && bins!=first){
       PyErr_SetString(PyExc_ValueError,"block windows must have equal bin counts"); return 0;
     }

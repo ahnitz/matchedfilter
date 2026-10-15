@@ -104,6 +104,8 @@ _SEG_LAST = [None]            # the segment graph launched last (the next waits 
 import weakref as _weakref
 _SEG_LIVE = _weakref.WeakSet()  # captured segment graphs (their address sets, for _seg_freed)
 _SEG_INFLIGHT = set()         # segment graphs launched and not yet waited for
+_SEG_RESULTS = set()          # launched graphs whose host results have not been collected
+_PENDING_CONTEXTS = _weakref.WeakSet()  # contexts with uncaptured async result readers
 
 
 def _seg_note(*addrs):
@@ -126,6 +128,7 @@ def _seg_freed(start, nbytes):
         ptrs = g.ptrs
         i = bisect.bisect_left(ptrs, lo)
         if i < len(ptrs) and ptrs[i] < hi:
+            g.collect()
             g.stale = True
 
 
@@ -194,12 +197,19 @@ class SegmentGraph:
         SegmentGraph.wait_all()
         check_cuda(cu.cuCtxSynchronize(), "cuCtxSynchronize")   # nothing in flight to order
         self.ctx.settle_writes()
+        # A segment spans several Contexts on one device. Materialize every earlier
+        # result before capture: reusing one of its records inside capture must not
+        # introduce the stream synchronization its collector needs.
+        for ctx in list(_PENDING_CONTEXTS):
+            if ctx.dev_idx == self.ctx.dev_idx:
+                ctx._drain()
+        self.ctx._bind()
         self.release()
         evs = []
         check_cuda(cu.cuStreamBeginCapture_v2(s0, 2), "cuStreamBeginCapture")  # relaxed
         graph = ctypes.c_void_p()
         _SEG = dict(graph=self, ptrs=set(), prefetch=[], fwd={}, writes=[], joins=[],
-                    staging=[])
+                    staging=[], records={})
         failed = None
         try:
             fork = self.ctx._new_event()
@@ -233,6 +243,7 @@ class SegmentGraph:
         self.staging = seg["staging"]           # the captured copies' host sources
         self.prefetch = seg["prefetch"]
         self.ptrs = tuple(sorted(seg["ptrs"]))
+        self.records = tuple(seg["records"].values())
         self.stale = False
         _SEG_LIVE.add(self)
         return out
@@ -262,7 +273,19 @@ class SegmentGraph:
         Segment graphs run one after another on the device -- each waits for the one launched
         before it -- so two graphs in flight never share the device's workspaces at once; the
         host works on one segment's results while the device runs the next."""
+        self.collect()
         if not self.valid():
+            return False
+        # Another graph can share these output records. Its device work finishing
+        # is not sufficient: save its host results before this launch overwrites them.
+        for ctx, token in getattr(self, "records", ()):
+            owner = ctx.__dict__.get("_segment_results", {}).get(token)
+            if owner is not None:
+                owner.collect()
+            pending = ctx.__dict__.get("_pending_records", {}).get(token)
+            if pending is not None:
+                pending()
+        if not self.valid():                 # collection can run host follow-ups and evict
             return False
         cu, s0 = self.cuda, self.streams[0]
         self.ctx._bind()
@@ -303,10 +326,36 @@ class SegmentGraph:
     @staticmethod
     def wait_all():
         """Wait for every segment graph in flight (before any work outside them)."""
+        for g in list(_SEG_RESULTS):
+            g.collect()
         for g in list(_SEG_INFLIGHT):
             g.wait()
 
+    def track_result(self, result):
+        """Keep a submitted result readable until its captured records can be reused."""
+        self._result = result
+        _SEG_RESULTS.add(self)
+        for ctx, token in getattr(self, "records", ()):
+            ctx.__dict__.setdefault("_segment_results", {})[token] = self
+        return result
+
+    def untrack_result(self):
+        result = self.__dict__.pop("_result", None)
+        _SEG_RESULTS.discard(self)
+        for ctx, token in getattr(self, "records", ()):
+            owners = ctx.__dict__.get("_segment_results", {})
+            if owners.get(token) is self:
+                del owners[token]
+        return result
+
+    def collect(self):
+        result = self.untrack_result()
+        if result is not None:
+            return result.result()
+
     def release(self):
+        self.collect()
+        self.wait()
         _SEG_LIVE.discard(self)
         if self.exec is not None:
             self.cuda.cuGraphExecDestroy(self.exec)
@@ -1171,6 +1220,10 @@ class Context(InputUploads):
                 yield from _owned(self._record_buffers(rec))
 
     def _evict_record(self, kind, key, keep_storage=None):
+        # Synchronizing only completes the copies into pinned host buffers. Their
+        # collectors still need to materialize the results before those buffers go.
+        self._drain()
+        self._drain_segments()
         rec = self._record_tables()[kind].pop(key, None)
         if rec is None:
             return
@@ -1185,13 +1238,52 @@ class Context(InputUploads):
     def _record(self, kind, table, key, estimate, make):
         """The cached record for ``key``, building it (after LRU eviction) if absent."""
         rec = table.get(key)
+        if rec is not None:
+            owner = self.__dict__.get("_segment_results", {}).get(id(rec))
+            if owner is not None:
+                owner.collect()
+                rec = table.get(key)        # a host follow-up may have evicted this record
         fresh = rec is None
         if fresh:
             self._cache_room(estimate)
             rec = make()
             table[key] = rec
+        else:
+            pending = self.__dict__.get("_pending_records", {}).pop(id(rec), None)
+            if pending is not None:
+                pending()                    # this record's outputs are about to be reused
         self._cache_touch(kind, key)
         return rec, fresh
+
+    def _dispatch_result(self, bufs, readback, async_submit):
+        """Keep async results alive across cache eviction and record reuse.
+
+        SegmentPlan retains the raw reader separately: every graph replay must read
+        new values. A captured call has not executed yet, and capture forbids the
+        synchronization eviction would require, so it must not be drained early.
+        """
+        self._last_dispatch = readback
+        if not async_submit:
+            return readback()
+        if _SEG is not None:
+            _SEG.setdefault("records", {})[id(bufs)] = (self, id(bufs))
+            return readback
+        pending_records = self.__dict__.setdefault("_pending_records", {})
+        token = id(bufs)
+
+        def finish():
+            try:
+                return readback()
+            finally:
+                pending_records.pop(token, None)
+                if not pending_records:
+                    _PENDING_CONTEXTS.discard(self)
+
+        finish.sparse_dev = getattr(readback, "sparse_dev", None)
+        pending = self._track(finish)
+        pending_records[token] = pending
+        _PENDING_CONTEXTS.add(self)
+        return pending
 
     def _grow(self, rec, name, nbytes, cls, stream):
         """Ensure rec[name] holds at least nbytes, growing geometrically. Returns True if
@@ -1411,10 +1503,7 @@ class Context(InputUploads):
         def readback(sort=True):
             return collect(sort)[0]
         readback.sparse_dev = getattr(locals().get("collect"), "sparse_dev", None)
-        self._last_dispatch = readback        # SegmentPlan: the dispatch's result reader
-        if async_submit:
-            return readback
-        return readback()
+        return self._dispatch_result(bufs, readback, async_submit)
 
     def peaks_grouped(self, n, data, tmpl, groups, binsize, threshold, *, upload_tmpl=True,
                       slot=None, async_submit=False, sparse=False):
@@ -1470,10 +1559,7 @@ class Context(InputUploads):
         def readback(sort=True):
             return collect(sort)[0]
         readback.sparse_dev = getattr(locals().get("collect"), "sparse_dev", None)
-        self._last_dispatch = readback        # SegmentPlan: the dispatch's result reader
-        if async_submit:
-            return readback
-        return readback()
+        return self._dispatch_result(bufs, readback, async_submit)
 
     # ---- full correlation --------------------------------------------------------
     def _full_inputs(self, kind, n, data, tmpl, upload_data, upload_tmpl, stream):
@@ -1788,7 +1874,7 @@ class Context(InputUploads):
         from . import gatechain
         labels = [self._labels.get(c[0].value, "") for c in cands]
         ckey = "cuda-coarse|%s|%d|%s|k%s" % (getattr(self, "name", ""), int(band),
-                                            ",".join(sorted(labels)), gatechain.gpu_kernel_id())
+                                            ",".join(sorted(labels)), gatechain.gpu_kernel_id("cuda"))
         held = gatechain.stored_choice(ckey)
         if held in labels:
             return cands[labels.index(held)]
@@ -2016,10 +2102,7 @@ class Context(InputUploads):
             self.last_tier1_survivors = int(counts[1]) if cascade else int(counts[0])
             return res
         readback.sparse_dev = getattr(locals().get("collect"), "sparse_dev", None)
-        self._last_dispatch = readback        # SegmentPlan: the dispatch's result reader
-        if async_submit:
-            return readback
-        return readback()
+        return self._dispatch_result(bufs, readback, async_submit)
 
     def hier_peaks_grouped(self, n, band, data, tmpl, ct0, raw_thr, groups, binsize, threshold,
                            *, upload_tmpl=True, cascade_band=None, ct1=None, raw_thr1=None,
@@ -2100,10 +2183,7 @@ class Context(InputUploads):
             self.last_tier1_survivors = int(counts[:, 1].sum()) if cascade else self.last_refinements
             return res
         readback.sparse_dev = getattr(locals().get("collect"), "sparse_dev", None)
-        self._last_dispatch = readback        # SegmentPlan: the dispatch's result reader
-        if async_submit:
-            return readback
-        return readback()
+        return self._dispatch_result(bufs, readback, async_submit)
 
     def _grouped_enqueue(self, bufs, n, nd, nt, nb, groups, offs, unit, geom, cfn, cwg, band0, band1,
                          c16, cb0, cascade, raw_thr, raw_thr1, binsize, t2, out, pairs, ng,
@@ -2309,7 +2389,13 @@ class Context(InputUploads):
         return collect()
 
     # ---- lifetime ----------------------------------------------------------------
+    def _drain_segments(self):
+        for graph in set(self.__dict__.get("_segment_results", {}).values()):
+            graph.collect()
+
     def clear_cache(self):
+        self._drain()
+        self._drain_segments()
         self._bind()
         if self.ctx.value:
             self.cuda.cuCtxSynchronize()
