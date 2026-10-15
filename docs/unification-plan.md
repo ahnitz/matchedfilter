@@ -303,3 +303,17 @@ Stage 5's lessons land inside the stages that touch them. Each stage merges in g
   - It replaces four per-backend test files or tests. The Vulkan test file is now only
     the direct-kernel tail check, and the 8060S tile tests drop from 200 s to 7 s.
   - Gate passed on 2af3bfa7; M2 suite 1829 passed.
+- 2026-10-15: **Stage 2 for GPU coarse choices: closed without a model.**
+  - The coarse choice costs 0.49 s per process on the 8060S (all six bands, 12-50
+    candidates each) and 1.68 s on the M2.
+  - The conformance suite shows every layout returns the same peaks and values. So a
+    coarse choice affects speed only, and the cost file is only a cache for it.
+  - An accounting shortlist would save under 2 s per process. It is not worth its code, so
+    it is not built.
+  - Cost tables still matter on the CPU, for a different reason. The chain choice already
+    has a close-call rule (`pick_stable`: within `TIE` of the cheapest, the canonical
+    chain). But `plan_chain` sets each tier's threshold from the calibrated prices. Two
+    processes that calibrate differently therefore trigger differently near threshold,
+    each within the false-dismissal budget. Making the split insensitive to price noise is
+    a change to the gating's semantics. It belongs with the gate-model owner and is not
+    part of this cleanup.
