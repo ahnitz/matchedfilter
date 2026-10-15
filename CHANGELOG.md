@@ -6,6 +6,10 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ### Performance
 
+- Vulkan and CUDA tiled fp16 coarse builds report each pair's gate decision and bound
+  without electing a lag (`peakTwoGate`, Metal's since its tier-0 study): nothing reads
+  tier 0's index. Radeon 8060S, band 256, interleaved: 0.91x the time per pair at the
+  tiled layouts. The tensor-core gate and untiled builds are unchanged.
 - CPU Q15 and block-size trials compare identical workloads in interleaved rounds,
   persist complete rounds across processes, and bound ambiguous contests. The dev1
   ten-start study selected Q15 on 10/10 times; every second process had unchanged

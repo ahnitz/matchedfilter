@@ -248,3 +248,20 @@ Stage 5's lessons land inside the stages that touch them. Each stage merges in g
   timing of the shortlist decides, and close calls go to the preference.
   `MF_COST_FILE` becomes an optional cache rather than a correctness or reproducibility
   requirement. "No timing at all" contradicts "no performance lost" on this evidence.
+- 2026-10-15: **Stage 5 lesson: gate-only coarse election on every backend.**
+  - `peakTwoGate` (Metal-only until now) reports each pair's pass and bound without
+    electing a lag: nothing reads tier 0's index, and the compaction reads only the values.
+  - Vulkan and CUDA tiled builds whose pair fits one subgroup now take it, through the
+    threshold in the last push slot (`_gate_bits`, Metal's rule). CUDA's tensor-core gate
+    keeps its own reporting.
+  - 8060S band 256, interleaved: 0.905-0.918x the time per pair at the tiled layouts.
+  - dev2: 209 tests pass, `gate_margin --loud` all ok, both checks exact.
+- 2026-10-15: **Stage 3 finding.** Slang 18 rejects specialization constants in
+  `numthreads`, but sizes `groupshared` arrays from them. Pairs per group as a runtime knob
+  therefore needs a SPIR-V `WorkgroupSize` spec-constant patch (Vulkan), dispatch-time
+  threads (Metal) and dynamic shared memory (CUDA). That is a kernel refactor for
+  package-size and maintenance gains, not speed, and is deferred behind stage 5's speed
+  lessons.
+  - The 96 MB of committed artifacts costs git-history churn on every kernel change.
+    Building them in CI instead is a process change to propose, not one to make
+    unilaterally.

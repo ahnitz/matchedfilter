@@ -1353,129 +1353,129 @@ void filterOne_0(uint pair_0, uint d_4, uint t_14, uint tid_2, const array<half2
 }
 
 
-#line 1600
+#line 1598
 void filterPair_0(uint pair_1, uint tid_3, uint device* data_1, uint device* tmpl_1, int device* peakIdx_1, packed_float2 device* peakVal_1, uint ntmpl_1, uint winStart_3, uint winEnd_3, uint binsize_2, int binShift_2, uint nbins_2, uint thrBits_2, KernelContext_0 thread* kernelContext_6)
 {
 
-#line 1600
+#line 1598
     thread uint _S38 = winStart_3;
 
-#line 1600
+#line 1598
     thread uint _S39 = winEnd_3;
 
-#line 1606
+#line 1604
     kernelContext_6->_tid_0 = tid_3;
 
-#line 1640
+#line 1638
     uint pairs_0 = binsize_2 * ntmpl_1;
     bool slotOk_0 = pair_1 < pairs_0;
 
-#line 1641
+#line 1639
     uint q_0;
     if(slotOk_0)
     {
 
-#line 1642
+#line 1640
         q_0 = pair_1;
 
-#line 1642
+#line 1640
     }
     else
     {
 
-#line 1642
+#line 1640
         q_0 = pairs_0 - 1U;
 
-#line 1642
+#line 1640
     }
 
-#line 1642
+#line 1640
     uint _S40;
     if(slotOk_0)
     {
 
-#line 1643
+#line 1641
         _S40 = q_0;
 
-#line 1643
+#line 1641
     }
     else
     {
 
-#line 1643
+#line 1641
         _S40 = 4294967295U;
 
-#line 1643
+#line 1641
     }
     uint d_5 = q_0 / ntmpl_1;
 
-#line 1644
+#line 1642
     uint _S41 = q_0 - d_5 * ntmpl_1;
     rowWindow_0(d_5, &_S38, &_S39);
 
-#line 1656
+#line 1654
     thread array<half2, int(16)> dreg_1;
 
-#line 1656
+#line 1654
     uint n2_1 = 0U;
 
     for(;;)
     {
 
-#line 1658
+#line 1656
         if(n2_1 < 16U)
         {
         }
         else
         {
 
-#line 1658
+#line 1656
             break;
         }
 
-#line 1659
+#line 1657
         dreg_1[n2_1] = dload_0(data_1, d_5 * 256U + tid_3 + 16U * n2_1);
 
-#line 1658
+#line 1656
         n2_1 = n2_1 + 1U;
 
-#line 1658
+#line 1656
     }
 
-#line 1658
+#line 1656
     uint k_1 = 0U;
 
-#line 1678
+#line 1676
     for(;;)
     {
 
-#line 1678
+#line 1676
         if(k_1 < 1U)
         {
         }
         else
         {
 
-#line 1678
+#line 1676
             break;
         }
 
-#line 1679
+#line 1677
         uint _S42 = _S40 + k_1;
 
-#line 1679
+#line 1677
         uint _S43 = _S41 + k_1;
 
-#line 1679
+#line 1677
         thread array<half2, int(16)> _S44 = dreg_1;
 
-#line 1679
+#line 1677
         filterOne_0(_S42, d_5, _S43, tid_3, &_S44, data_1, tmpl_1, peakIdx_1, peakVal_1, _S38, _S39, binsize_2, binShift_2, nbins_2, thrBits_2, kernelContext_6);
 
-#line 1678
+#line 1676
         k_1 = k_1 + 1U;
 
-#line 1678
+#line 1676
     }
 
 
@@ -1487,42 +1487,42 @@ void filterPair_0(uint pair_1, uint tid_3, uint device* data_1, uint device* tmp
 [[kernel]] void fusedTierB(uint3 gid_0 [[threadgroup_position_in_grid]], uint3 lid_0 [[thread_position_in_threadgroup]], EntryPointParams_0 constant* entryPointParams_1 [[buffer(0)]], uint device* entryPointParams_data_1 [[buffer(1)]], uint device* entryPointParams_tmpl_1 [[buffer(2)]], int device* entryPointParams_peakIdx_1 [[buffer(3)]], packed_float2 device* entryPointParams_peakVal_1 [[buffer(4)]])
 {
 
-#line 1686
+#line 1684
     thread KernelContext_0 kernelContext_7;
 
-#line 1686
+#line 1684
     (&kernelContext_7)->entryPointParams_0 = entryPointParams_1;
 
-#line 1686
+#line 1684
     (&kernelContext_7)->entryPointParams_data_0 = entryPointParams_data_1;
 
-#line 1686
+#line 1684
     (&kernelContext_7)->entryPointParams_tmpl_0 = entryPointParams_tmpl_1;
 
-#line 1686
+#line 1684
     (&kernelContext_7)->entryPointParams_peakIdx_0 = entryPointParams_peakIdx_1;
 
-#line 1686
+#line 1684
     (&kernelContext_7)->entryPointParams_peakVal_0 = entryPointParams_peakVal_1;
 
-#line 1686
+#line 1684
     threadgroup array<uint, int(2048)> stg_1;
 
-#line 1686
+#line 1684
     (&kernelContext_7)->stg_0 = &stg_1;
 
-#line 1706
+#line 1704
     uint _S45 = lid_0.x;
 
-#line 1706
+#line 1704
     uint _sub_0 = _S45 / 16U;
     uint _pr_0 = gid_0.x * 8U + _sub_0;
 
-#line 1707
+#line 1705
     uint _t_0 = _S45 % 16U;
     (&kernelContext_7)->_stgBase_0 = _sub_0 * 256U;
 
-#line 1708
+#line 1706
     filterPair_0(_pr_0, _t_0, entryPointParams_data_1, entryPointParams_tmpl_1, entryPointParams_peakIdx_1, entryPointParams_peakVal_1, entryPointParams_1->ntmpl_0, entryPointParams_1->winStart_1, entryPointParams_1->winEnd_1, entryPointParams_1->binsize_0, entryPointParams_1->binShift_0, entryPointParams_1->nbins_0, entryPointParams_1->thrBits_0, &kernelContext_7);
 
 

@@ -12,7 +12,7 @@ struct EntryPointParams_0
 };
 
 
-#line 1777 "mm_256_compactPairs.slang"
+#line 1775 "mm_256_compactPairs.slang"
 struct KernelContext_0
 {
     EntryPointParams_0 constant* entryPointParams_0;
@@ -22,33 +22,33 @@ struct KernelContext_0
 };
 
 
-#line 1777
+#line 1775
 [[kernel]] void compactPairs(uint3 gid_0 [[thread_position_in_grid]], EntryPointParams_0 constant* entryPointParams_1 [[buffer(0)]], packed_float2 device* entryPointParams_coarse_1 [[buffer(1)]], uint device* entryPointParams_survivors_1 [[buffer(2)]], uint device* entryPointParams_args_1 [[buffer(3)]])
 {
 
-#line 1777
+#line 1775
     thread KernelContext_0 kernelContext_0;
 
-#line 1777
+#line 1775
     (&kernelContext_0)->entryPointParams_0 = entryPointParams_1;
 
-#line 1777
+#line 1775
     (&kernelContext_0)->entryPointParams_coarse_0 = entryPointParams_coarse_1;
 
-#line 1777
+#line 1775
     (&kernelContext_0)->entryPointParams_survivors_0 = entryPointParams_survivors_1;
 
-#line 1777
+#line 1775
     (&kernelContext_0)->entryPointParams_args_0 = entryPointParams_args_1;
 
-#line 1783
+#line 1781
     uint pair_0 = gid_0.x;
 
-#line 1801
+#line 1799
     if(pair_0 >= (entryPointParams_1->pairs_0))
     {
 
-#line 1801
+#line 1799
         return;
     }
     if(!((length(float2(*((&kernelContext_0)->entryPointParams_coarse_0+pair_0)) )) < ((&kernelContext_0)->entryPointParams_0->thr_0)))
@@ -56,9 +56,9 @@ struct KernelContext_0
         uint slot_0 = atomic_fetch_add_explicit(((atomic_uint device*)((&kernelContext_0)->entryPointParams_args_0+int(0))), 1U, memory_order_relaxed);
         *((&kernelContext_0)->entryPointParams_survivors_0+slot_0) = pair_0;
 
-#line 1803
+#line 1801
     }
 
-#line 1809
+#line 1807
     return;
 }

@@ -2037,6 +2037,18 @@ class Context(InputUploads):
             return 0
         return rng[0] if wg <= rng[0] else 0
 
+    def _gate_bits(self, thr, band, sg, tile):
+        """The coarse tier's last push constant: for a tiled build whose pair fits one subgroup,
+        the gate threshold as magnitude bits (tierb.slang peakTwoGate: each pair reports only
+        its pass and bound, no election -- nothing reads tier 0's index, only the compaction
+        reads its values); 0 elects (peakTwoWave). Metal's rule. A threshold of 0 is passed
+        as the smallest normal float, which passes the same pairs (a nonzero maximum)."""
+        if tile <= 1 or os.environ.get("MF_VK_C16_BOUND", "1") == "0":
+            return 0
+        if band // 16 > (sg or self.subgroup_size):
+            return 0
+        return int(np.float32(max(float(thr), 1.1754944e-38)).view(np.uint32))
+
     def _coarse_geometry(self, band, nd, nt):
         """(subgroup, pairs per workgroup, templates per tile, groups, ragged) for the packed
         coarse kernel; subgroup 0 is the driver's default size.
@@ -2182,7 +2194,8 @@ class Context(InputUploads):
             vk.vkCmdBindPipeline(cmd, _BIND_POINT_COMPUTE, pipe)
             vk.vkCmdBindDescriptorSets(cmd, _BIND_POINT_COMPUTE, layout, 0, 1,
                                        (_vp * 1)(dset), 0, None)
-            pc = (ctypes.c_uint32 * 7)(ntm, 0, band, slot_val, band.bit_length() - 1, 1, 0)
+            pc = (ctypes.c_uint32 * 7)(ntm, 0, band, slot_val, band.bit_length() - 1, 1,
+                                       self._gate_bits(0.0, band, sg, tile))
             vk.vkCmdPushConstants(cmd, layout, _STAGE_COMPUTE, 0, _PUSH_BYTES, ctypes.byref(pc))
             vk.vkCmdDispatch(cmd, groups, 1, 1)
             _check(vk.vkEndCommandBuffer(cmd), "coarse timing end")
@@ -2350,7 +2363,8 @@ class Context(InputUploads):
             # A ragged-tile build reads the data row count where the
             # (unused, one-bin) coarse bin size would go.
             pc = (ctypes.c_uint32 * 7)(nt, cstart, cend, nd if _ragged else cspan,
-                                       shift_c & 0xFFFFFFFF, 1, 0)
+                                       shift_c & 0xFFFFFFFF, 1,
+                                       self._gate_bits(raw_thr, band, _sg, _tile))
             vk.vkCmdPushConstants(cmd, clayout, _STAGE_COMPUTE, 0,
                                   _PUSH_BYTES, ctypes.byref(pc))
             # PPG pairs per workgroup and TILE_T templates per pair,
@@ -2570,7 +2584,8 @@ class Context(InputUploads):
         cspan0 = max(1, cend0 - cstart0)
         shift_c0 = (cspan0.bit_length() - 1) if cspan0 & (cspan0 - 1) == 0 else -1
         pc0 = (ctypes.c_uint32 * 7)(nt, cstart0, cend0, nd if _ragged0 else cspan0,
-                                    shift_c0 & 0xFFFFFFFF, 1, 0)
+                                    shift_c0 & 0xFFFFFFFF, 1,
+                                    self._gate_bits(raw_thr0, band0, _sg0, _tile0))
         vk.vkCmdPushConstants(cmd, clayout0, _STAGE_COMPUTE, 0, _PUSH_BYTES, ctypes.byref(pc0))
         vk.vkCmdDispatch(cmd, _groups0, 1, 1)
         barrier()
