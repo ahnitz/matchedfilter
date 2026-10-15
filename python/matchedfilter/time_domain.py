@@ -3377,8 +3377,9 @@ class SegmentPlan:
                 if k not in full:                   # parts of one split call share it
                     full[k] = _read_traced(d.trace, reader)
                 r = full[k]
-                if r is not None and d.split is not None:
-                    split, part = d.split
+                sp = getattr(d, "split", None)
+                if r is not None and sp is not None:
+                    split, part = sp
                     r = split.parts(r)[part]
                 if r is None:
                     continue
