@@ -12,6 +12,8 @@ some calibration tools need separately captured data.
 | Website and figure | `build_report.py`, `teaser_figure.py`, `teaser_fleet.py` | Benchmark workflow builds the site; figure is regenerated deliberately |
 | Public performance | `python -m matchedfilter.benchmark`, `bench_series_workloads.py`, `bench_device_paths.py` | Spectral and series benchmarks; `bench_series_workloads.py --quick` runs in benchmark CI |
 | Targeted diagnosis | `audit_class_execution.py`, `bench_class_changes.py`, `bench_pairbatch.py`, `bench_stages.py`, `audit_kernel_binaries.py` | Run when investigating a specific scheduling or kernel cost |
+| Survivor batching | `bench_survivor_batches.py` | Alternate two native builds over pooled pair lists and full two-tier hierarchical calls; verify peak and count digests |
+| CPU ladder profile | `profile_cpu_ladder.py` | Fix chain and thresholds, compare Q15 off/on or separate builds, and record stage costs and result hashes; requires a real bank and matching profiles |
 | Gate validation | `audit_gate_model.py`, `audit_threshold.py`, `score_fdr.py`, `verify_cascade_fdr.py` | Measure a gate chain's dismissal by injection against the flat filter; not part of normal installation |
 
 For a quick CPU/GPU overlap-save comparison with output validation:
@@ -19,6 +21,17 @@ For a quick CPU/GPU overlap-save comparison with output validation:
 ```bash
 python tools/bench_series_workloads.py --quick --reps 5 --json series.json
 ```
+
+To compare survivor processing in two saved builds (each directory contains its own
+`matchedfilter` package and native extension):
+
+```bash
+python tools/bench_survivor_batches.py baseline/python candidate/python --output survivors.json
+```
+
+This covers shared or mixed data blocks, scattered or contiguous templates, partial
+batches, and two-tier hierarchical filtering. It reports alternating timing samples
+and matching output digests. `bench_cpu_broadcast.py` covers dense public calls.
 
 To measure the effect of batching distinct Vulkan or Metal windows, with output equality
 checked before timing:

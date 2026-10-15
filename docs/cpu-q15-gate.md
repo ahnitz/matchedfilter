@@ -132,6 +132,35 @@ set from N, the lanes and the template group (`ap_q15_batch_bytes`), compares it
 from the OS (`ap_l1d_bytes`: sysconf, sysfs, sysctl), and compiles the fused codelets only
 on 32-register targets (`AP_Q15_VREGS32`). With L1D unknown, the 512-bit width stands in.
 
+### N = 256 fixed-stride routing and broad windows
+
+The N = 256 fixed-stride branch bypassed the selection above and always ran a separate
+pass 2 and maximum. The earlier N = 256 fused measurements therefore did not describe
+the committed dispatch. Pass 1 now keeps its constant strides while pass 2 reaches the
+same cache/register policy; AVX2 and SSE4 retain the separate maximum.
+
+For a window containing `[32, 224)`, every 16-point row includes output indices 2..13.
+The generated `qsr16_twmax_middle` reduces those twelve outputs without tests, retaining
+four edge tests for the exact clipped window. Other windows use the general codelet.
+This covers the ladder's actual coarse windows (starts 17..23, ends 232..238), rather
+than assuming its valid region starts at N/4.
+
+Against ff5911cd on a Ryzen AI Max+ 395 (Zen 5), AVX3 pinned to one core, warm Q15
+calls with 32 data blocks, 80/128/254 templates and window `[20, 236)` improved
+1.015–1.031x over nine alternating rounds. A paired counter run at 128 templates
+measured about 2% fewer cycles (median 126.0 to 122.6 per pair) and fewer instructions
+(498.3 to 439.1); L1 misses were essentially unchanged. On a representative ladder workload
+(synthetic PSD-colored data with real bank/profiles, cap 401, one top bank [id 4],
+4698 fine templates across 27 middle banks, chain 256/512/1024, Q15 enabled), screen time
+fell from 136.16/138.44 to 132.19/134.15 ms per segment, about 3%. The larger historical
+12–32% figure above was not reproduced against the fixed-stride baseline.
+
+The fixed-point arithmetic and `5 sqrt(N)` margin are unchanged. Before/after screen
+statistics and decisions matched bit for bit across N = 64..1024, full/clipped/single-lag
+windows and partial lane groups on AVX3, AVX2 and SSE4. The window regression in
+`tests/test_coarse_q15.py` also compares each clipped maximum with the maximum of its
+individual single-lag statistics, including the specialized dispatch boundaries.
+
 ## Margin: 5 sqrt(N) kept; a tighter Gaussian-tail margin rejected (2026-10-09)
 
 A 3.12 sqrt(N) margin was derived from a 4e-11 Gaussian tail (rms 0.46-0.47 sqrt(N),

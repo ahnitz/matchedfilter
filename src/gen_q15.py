@@ -154,17 +154,20 @@ class QGenClassic(SRGen):
         return o
 
 
-def build_q(n, name, tw=False, prod=False, fused=True, maxout=False):
+def build_q(n, name, tw=False, prod=False, fused=True, maxout=False, max_interior=None):
     """maxout: instead of storing the n outputs, accumulate max(|z|^2) of those with index
     in [lo, hi) into mx[0] (even k) and mx[1] (odd k) -- the screen's window maximum fused
     into its last pass, so the outputs never go back to memory. Same Q_MUL squares as the
-    separate maximum loop: bit-identical maxima."""
+    separate maximum loop: bit-identical maxima. max_interior=(a,b) additionally
+    requires lo <= a and hi >= b, removing the output tests inside that interval."""
     g = (QGen if fused else QGenClassic)(n, name, tw, False, prod)
     X = g.rec(list(range(n)))
     for k in range(n):
         if maxout:
-            g.emit("if(%d>=lo && %d<hi) M%d=hn::Max(M%d,hn::SaturatedAdd(Q_MUL(%s,%s),Q_MUL(%s,%s)));"
-                   % (k, k, k & 1, k & 1, X[k][0], X[k][0], X[k][1], X[k][1]))
+            condition = "" if max_interior and max_interior[0] <= k < max_interior[1] else (
+                "if(%d>=lo && %d<hi) " % (k, k))
+            g.emit(condition + "M%d=hn::Max(M%d,hn::SaturatedAdd(Q_MUL(%s,%s),Q_MUL(%s,%s)));"
+                   % (k & 1, k & 1, X[k][0], X[k][0], X[k][1], X[k][1]))
         else:
             g.emit("ar[S*%d]=%s; ai[S*%d]=%s;" % (k, X[k][0], k, X[k][1]))
     if maxout:
@@ -205,11 +208,17 @@ if __name__ == "__main__":
         out.append(build_q(nn, "qsr%d_prod" % nn, prod=True))
         out.append(build_q(nn, "qsr%d_tw" % nn, tw=True))
         out.append(build_q(nn, "qsr%d_twmax" % nn, tw=True, maxout=True))
+        if nn == 16:
+            out.append(build_q(nn, "qsr16_twmax_middle", tw=True, maxout=True,
+                               max_interior=(2, 14)))
     out.append("#else")
     for nn in (8, 16, 32):
         out.append(build_q(nn, "qsr%d_prod" % nn, prod=True, fused=False))
         out.append(build_q(nn, "qsr%d_tw" % nn, tw=True, fused=False))
         out.append(build_q(nn, "qsr%d_twmax" % nn, tw=True, fused=False, maxout=True))
+        if nn == 16:
+            out.append(build_q(nn, "qsr16_twmax_middle", tw=True, fused=False,
+                               maxout=True, max_interior=(2, 14)))
     out.append("#endif")
     out += ["}  // namespace HWY_NAMESPACE", "}  // namespace ap",
             "HWY_AFTER_NAMESPACE();", "", "#endif", ""]

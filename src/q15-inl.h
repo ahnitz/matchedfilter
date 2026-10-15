@@ -138,13 +138,11 @@ static int q15_screen(size_t N, const int16_t *dq, const int16_t *tr, const int1
     for(int e1 = 0; e1 < 16; e1++)
       qsr16_prod(dq + 3 * e1, tr + (size_t)e1 * AP_QW, ti + (size_t)e1 * AP_QW,
                  X + e1, Xi + e1, 17, 48, 16L * AP_QW);
-    for(int k2 = 0; k2 < 16; k2++)
-      qsr16_tw(X + (size_t)k2 * 17, Xi + (size_t)k2 * 17, 1,
-               tw->re + (size_t)k2 * 16, tw->im + (size_t)k2 * 16);
   } else {
-  for(int e1 = 0; e1 < M1; e1++)
-    qcodelet_prod(M2, dq + 3 * e1, tr + (size_t)e1 * AP_QW, ti + (size_t)e1 * AP_QW,
-                  X + e1, Xi + e1, st, 3L * M1, (long)M1 * AP_QW);
+    for(int e1 = 0; e1 < M1; e1++)
+      qcodelet_prod(M2, dq + 3 * e1, tr + (size_t)e1 * AP_QW, ti + (size_t)e1 * AP_QW,
+                    X + e1, Xi + e1, st, 3L * M1, (long)M1 * AP_QW);
+  }
   if(we > N) we = N;
 #if AP_Q15_VREGS32
   /* The window's maximum fused into pass 2 (qcodelet_twmax): output k = k2 + M2*k1 is row
@@ -152,7 +150,8 @@ static int q15_screen(size_t N, const int16_t *dq, const int16_t *tr, const int1
      the scratch. Worth it only when the batch's working set (scratch + template group)
      overflows L1D AND the target has 32 vector registers -- the rule all three measured
      machines agree on (bit-identical either way: same Q_MUL squares, max is exact):
-       Zen 5 AVX-512: 67 KB vs 48 KB L1D, 32 regs: fused 12-32% fewer cycles;
+       Zen 5 AVX-512: 67 KB vs 48 KB L1D, 32 regs: the N=256 middle-window
+       codelet below is 1.5-3.1% faster on realistic broad windows;
        M2 NEON: fits its 128 KB L1D: fused +51 ms/segment (slower);
        Zen 3 AVX2: 33 KB vs 32 KB but 16 regs (spills): fused 11% slower (and Haswell
        has the same shape), so 16-register targets never compile it.
@@ -161,12 +160,23 @@ static int q15_screen(size_t N, const int16_t *dq, const int16_t *tr, const int1
   const int fuse = l1d ? ap_q15_batch_bytes(N, AP_QW) > l1d : HWY_MAX_BYTES >= 64;
   if(fuse){
   vq mm[2] = {Q_ZERO(), Q_ZERO()};
-  for(int k2 = 0; k2 < M2; k2++){
-    const long lo = (long)ws > k2 ? ((long)ws - k2 + M2 - 1) / M2 : 0;
-    const long hi = (long)we > k2 ? ((long)we - k2 + M2 - 1) / M2 : 0;
-    if(lo >= hi) continue;
-    qcodelet_twmax(M1, X + (size_t)k2 * st, Xi + (size_t)k2 * st, 1,
-                   tw->re + (size_t)k2 * M1, tw->im + (size_t)k2 * M1, lo, hi, mm);
+  if(M1 == 16 && M2 == 16 && ws <= 32 && we >= 224){
+    /* Every row includes k1 = 2..13. Reduce those outputs without tests,
+       retaining the four edge tests for each row's exact clipped window. */
+    for(int k2 = 0; k2 < 16; k2++){
+      const long lo = (long)ws > k2 ? ((long)ws - k2 + 15) / 16 : 0;
+      const long hi = ((long)we - k2 + 15) / 16;
+      qsr16_twmax_middle(X + (size_t)k2 * 17, Xi + (size_t)k2 * 17, 1,
+                         tw->re + (size_t)k2 * 16, tw->im + (size_t)k2 * 16, lo, hi, mm);
+    }
+  } else {
+    for(int k2 = 0; k2 < M2; k2++){
+      const long lo = (long)ws > k2 ? ((long)ws - k2 + M2 - 1) / M2 : 0;
+      const long hi = (long)we > k2 ? ((long)we - k2 + M2 - 1) / M2 : 0;
+      if(lo >= hi) continue;
+      qcodelet_twmax(M1, X + (size_t)k2 * st, Xi + (size_t)k2 * st, 1,
+                     tw->re + (size_t)k2 * M1, tw->im + (size_t)k2 * M1, lo, hi, mm);
+    }
   }
   const vq mx = hn::Max(mm[0], mm[1]);
   if(lanemax) hn::StoreU(mx, AP_DQ, lanemax);
@@ -176,9 +186,14 @@ static int q15_screen(size_t N, const int16_t *dq, const int16_t *tr, const int1
   return 0;
   }
 #endif
-  for(int k2 = 0; k2 < M2; k2++)
-    qcodelet_tw(M1, X + (size_t)k2 * st, Xi + (size_t)k2 * st, 1,
-                tw->re + (size_t)k2 * M1, tw->im + (size_t)k2 * M1);
+  if(M1 == 16 && M2 == 16){
+    for(int k2 = 0; k2 < 16; k2++)
+      qsr16_tw(X + (size_t)k2 * 17, Xi + (size_t)k2 * 17, 1,
+               tw->re + (size_t)k2 * 16, tw->im + (size_t)k2 * 16);
+  } else {
+    for(int k2 = 0; k2 < M2; k2++)
+      qcodelet_tw(M1, X + (size_t)k2 * st, Xi + (size_t)k2 * st, 1,
+                  tw->re + (size_t)k2 * M1, tw->im + (size_t)k2 * M1);
   }
   /* Output k = k2 + M2*k1 sits at X[k2*st + k1]; the maximum does not care
      about order, so walk memory and clip each row to the window. */

@@ -6,6 +6,13 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ### Performance
 
+- CPU survivor processing reuses shared data and packed templates, fuses the N256
+  Q15 window maximum when the cache/register policy permits, and skips rejected
+  pairs in the subsequent float decision loop. On a pinned Zen 5 core, alternating
+  representative ladder runs improved fine throughput 1.033x and whole-segment
+  throughput 1.024x with identical outputs. Gains varied across shorter runs on the
+  shared host. The Q15 margin and gate thresholds are unchanged. See
+  [measurements and reproduction](docs/cpu-survivor-performance.md).
 - Sparse analysis-window planning bounds block candidates to each window instead of
   constructing the remaining series for every window. In a local paired benchmark with
   512 narrow windows over 2^26 samples, planning was 3.3x faster with identical layouts;

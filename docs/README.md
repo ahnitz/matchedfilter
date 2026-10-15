@@ -19,6 +19,8 @@ short introduction.
 - Per-platform roofline studies: [Vulkan on the Radeon 8060S](vulkan-8060s-roofline.md),
   [Metal on the Apple M2](metal-m2-roofline.md), [CUDA on the NVIDIA L40S](cuda-l40s-roofline.md)
 - CPU first tiers: [x86 Q15 screen](cpu-q15-gate.md), [ARM NEON FP16 gate](cpu-neon-fp16-gate.md)
+- [CPU survivor processing](cpu-survivor-performance.md): paired kernel and ladder
+  measurements for pooled inputs, the Q15 maximum, and survivor compaction.
 - [Cross-platform review](cross-platform-review.md): which mechanisms each backend has and
   what transfers
 - [GPU parity plan](gpu-parity-plan.md) (2026-10-08 plan and its log)

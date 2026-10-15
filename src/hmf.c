@@ -836,6 +836,13 @@ static void empty_row(ap_peak *peaks,int *counts,size_t row,size_t nb){
   if(counts) counts[row]=0;
 }
 
+static void reject_row(ap_hmf_plan *p,ap_peak *peaks,int *counts,size_t row,size_t nb){
+  unsigned long long f0 = p->prof ? ap_ticks() : 0;
+  if(p->sparse && counts) counts[row]=0;
+  else empty_row(peaks,counts,row,nb);
+  if(p->prof) p->c_fill += ap_ticks()-f0;
+}
+
 int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
                size_t binsize,float threshold,
                ap_peak *peaks,int *counts,size_t start,size_t end){
@@ -861,6 +868,8 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
     const size_t cspan = cend>cstart ? cend-cstart : 1;
     const float thr=tr->thr;
     tr->lagged = !(tr->g16 && (i==0 && (!p->q15 || p->q15_g16)));
+    const int *checked_d=fire_d,*checked_t=fire_t;
+    int nchecked=i==0 ? nd*nt : nfire;
     unsigned long long t_0=ap_ticks();
     if(i==0 && p->q15){
       /* Screen every pair in int16, then run the float tier on the pairs the
@@ -874,8 +883,11 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
       for(int d=0;d<nd;d++) for(int t=0;t<nt;t++){
         const size_t row=(size_t)d*nt+t;
         if(p->qpass[row]){ p->qd[k]=d; p->qt[k]=t; k++; }
-        else tr->cebuf[row].index=-1;
+        else reject_row(p,peaks,counts,row,nb);
       }
+      /* Rejected rows are finished.  Revisit only the compacted survivors after
+         their float check, avoiding another scan of the full data/template grid. */
+      checked_d=p->qd; checked_t=p->qt; nchecked=k;
       p->qpassed+=k;
       p->qticks+=ap_ticks()-q0;
       if(k && p->q15_g16 && tr->g16){
@@ -900,12 +912,12 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
     }
     tr->ticks += ap_ticks()-t_0;
     int nnext=0;
-    const int npairs = i==0 ? nd*nt : nfire;
-    for(int j=0;j<npairs;j++){
-      const int d = i==0 ? j/nt : fire_d[j];
-      const int t = i==0 ? j%nt : fire_t[j];
+    const long first_pair=p->pairs;
+    if(i==0) p->pairs+=(long)nd*nt;
+    for(int j=0;j<nchecked;j++){
+      const int d = checked_d ? checked_d[j] : j/nt;
+      const int t = checked_t ? checked_t[j] : j%nt;
       const size_t row=(size_t)d*nt+t;
-      if(i==0) p->pairs++;
       ap_peak ce = tr->cebuf[row];
       int fire = ce.index>=0 && ce.magnitude>=thr;
       if(i==0 && fire){
@@ -914,16 +926,14 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
         if(p->dump){ float rec[8]={ce.magnitude,0.0f,tr->g16?ce.im:ce.magnitude,thr,thr,thr,
                                    (float)(d0+d),(float)(t0+t)};
                      fwrite(rec,sizeof rec,1,p->dump); }
-        if(p->trace && p->pairs<6)
-          fprintf(stderr,"    [trace] pair=%ld thr=%.3f coarse max=%.3f\n",p->pairs,thr,ce.magnitude);
+        const long pair=first_pair+(long)row+1;
+        if(p->trace && pair<6)
+          fprintf(stderr,"    [trace] pair=%ld thr=%.3f coarse max=%.3f\n",pair,thr,ce.magnitude);
       }
       if(fire){
         tr->fire_d[nnext]=d; tr->fire_t[nnext]=t; nnext++;
       } else {
-        unsigned long long f0 = p->prof ? ap_ticks() : 0;
-        if(p->sparse && counts) counts[row]=0;
-        else empty_row(peaks,counts,row,nb);
-        if(p->prof) p->c_fill += ap_ticks()-f0;
+        reject_row(p,peaks,counts,row,nb);
       }
     }
     tr->passed += nnext;
