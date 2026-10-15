@@ -255,6 +255,9 @@ def fine_work(work, before, after, fine_banks, device, binsize=None, problems=No
                   (blocks + nt) * b0 * CBYTES["int16"] + d["q15"] * 8, pairs)
             inputs = d["q15"]
         for i, band in enumerate(chain):
+            # Explicit CPU counts also cover reordered gates and Q15 on/off trials.
+            if d.get("checked") is not None:
+                inputs = d["checked"][i]
             # Behind the int16 screen the CPU's tier 0 is the pooled FP32 pass over the
             # screen's survivors (hmf.c), not the FP16 gate.
             prec = "fp32" if (i == 0 and screened) else tier_precision(device, i, band)

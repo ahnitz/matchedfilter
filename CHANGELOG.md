@@ -6,6 +6,12 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ### Performance
 
+- CPU Q15 screening can defer its float256 recheck until after float512 when
+  the scheduling model favors that order on AVX3 N2048 chains. The same gates
+  and thresholds remain; the representative Zen 5 ladder uses 3.5% less fine-stage
+  time and 2.9% less whole-segment time with identical outputs. Gate work counters
+  now record actual inputs, including reordered execution. See
+  [gate execution order](docs/cpu-gate-order.md).
 - AVX-512 N256 Q15 screens fill partial template batches with independent data
   blocks. A longer paired Zen 5 ladder comparison reduced Q15 time 4.3%, fine-stage
   time 2.1%, and whole-segment time 1.8%, with identical outputs. Small data groups,

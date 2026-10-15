@@ -821,6 +821,21 @@ static PyObject *HMF_tier_stats(HMFObject *self,PyObject *a){
   }
   return l;
 }
+static PyObject *HMF_tier_inputs(HMFObject *self,PyObject *unused){
+  long checked[AP_HMF_MAX_TIERS]; (void)unused;
+  const int n=ap_hmf_tier_inputs(self->p,checked);
+  PyObject *out=PyTuple_New(n);
+  if(!out) return NULL;
+  for(int i=0;i<n;i++) PyTuple_SET_ITEM(out,i,PyLong_FromLong(checked[i]));
+  return out;
+}
+static PyObject *HMF_first_gate_passed(HMFObject *self,PyObject *unused){
+  (void)unused; return PyLong_FromLong(ap_hmf_first_gate_passed(self->p));
+}
+static PyObject *HMF_set_q15_recheck_late(HMFObject *self,PyObject *args){
+  int on; if(!PyArg_ParseTuple(args,"p",&on)) return NULL;
+  return PyBool_FromLong(ap_hmf_set_q15_recheck_late(self->p,on)==0);
+}
 static PyObject *HMF_series_ticks(HMFObject *self,PyObject *a){
   (void)a; return PyLong_FromUnsignedLongLong(ap_hmf_series_ticks(self->p));
 }
@@ -942,6 +957,9 @@ static PyMethodDef HMF_methods[]={
   {"thresholds",(PyCFunction)HMF_thresholds,METH_NOARGS,"thresholds() -> per-tier thresholds in force"},
   {"series_ticks",(PyCFunction)HMF_series_ticks,METH_NOARGS,"series_ticks() -> ticks spent in run_series calls"},
   {"tier_stats",(PyCFunction)HMF_tier_stats,METH_NOARGS,"[(band, passed, ticks) per tier] + [(n, refined, ticks)]"},
+  {"tier_inputs",(PyCFunction)HMF_tier_inputs,METH_NOARGS,"Actual input counts per logical gate"},
+  {"first_gate_passed",(PyCFunction)HMF_first_gate_passed,METH_NOARGS,"Cumulative passes of the first executed float gate"},
+  {"set_q15_recheck_late",(PyCFunction)HMF_set_q15_recheck_late,METH_VARARGS,"Choose Q15, tier 1, tier 0, remaining tiers scheduling"},
   {NULL}
 };
 static PyObject *HMF_get_n(HMFObject *self, void *closure){

@@ -14,6 +14,15 @@ a separate experiment.
 Shared-subspace rejection has now failed a feasibility probe on this bank and should
 not proceed to native implementation on the strength of its optimistic oracle.
 
+## Completed: reorder decisions before adding new kernels
+
+[Delayed Q15 rechecking](cpu-gate-order.md) evaluates the existing 512 gate before
+rechecking Q15 survivors at 256 when the measured-cost model favors that order.
+The final gate remains last and every accepted pair still passes all original
+thresholds. On the representative Zen 5 ladder this avoids 94% of 256 rechecks,
+pays for more 512 checks, and reduces whole-segment time 2.9%. This is distinct
+from the earlier tail-packing and lazy-ingestion changes.
+
 ## Completed: prepare later tiers only for blocks that reach them
 
 The previous engine skipped later-tier transforms for rejected pairs, but prepared

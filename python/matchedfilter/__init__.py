@@ -3007,6 +3007,14 @@ class HierarchicalFilter(MatchedFilter):
         if not self._thr_applied:
             thr = list(self._thresholds(required=True))
             plan.set_thresholds(thr)
+            self._q15_order_choice = None
+            if (self.device.backend == 'AVX3' and self._pending_ref is not None
+                    and self.n == 2048 and tuple(self._chain) == (256, 512, 1024)):
+                self._q15_order_choice = _gatechain.q15_recheck_order(
+                    self._pending_ref, self.n, self._chain, thr, self._cost_model(),
+                    window=self.search_window)
+            plan.set_q15_recheck_late(bool(self._q15_order_choice
+                                          and self._q15_order_choice['late']))
             if getattr(self, "_taps", None) is not None:
                 hw = self._direct_halfwidth(tuple(self._chain), thr)
                 plan.set_direct(hw is not None, hw or 1)
@@ -3331,8 +3339,8 @@ class HierarchicalFilter(MatchedFilter):
             return None if n1 is None else n1 / pairs
         if self._mf is None:
             return None
-        st = self._mf.tier_stats()
-        prev, self._tier0_seen = getattr(self, "_tier0_seen", None), (st[0][1], self._mf.stats()[0])
+        prev, self._tier0_seen = getattr(self, "_tier0_seen", None), (
+            self._mf.first_gate_passed(), self._mf.stats()[0])
         if prev is None or self._tier0_seen[1] <= prev[1]:
             return None
         return (self._tier0_seen[0] - prev[0]) / (self._tier0_seen[1] - prev[1])
@@ -3669,7 +3677,8 @@ class HierarchicalFilter(MatchedFilter):
         pairs, refined = mf.stats()
         q_on, q_passed, q_ticks = mf.q15_stats()
         return dict(backend="cpu", chain=tuple(int(b) for b, _, _ in st[:-1]), pairs=int(pairs),
-                    passed=[int(p) for _, p, _ in st[:-1]], refined=int(refined),
+                    passed=[int(p) for _, p, _ in st[:-1]],
+                    checked=[int(c) for c in mf.tier_inputs()], refined=int(refined),
                     q15=int(q_passed), q15_on=bool(q_on),
                     ticks=dict(tiers=[int(t) for _, _, t in st[:-1]], refine=int(st[-1][2]),
                                q15=int(q_ticks), series=int(mf.series_ticks())),
@@ -3677,7 +3686,12 @@ class HierarchicalFilter(MatchedFilter):
 
     @property
     def tier_stats(self):
-        """Per tier ``(band, passed, ticks)``, then ``(n, refined, ticks)`` for the refine (CPU)."""
+        """Per logical tier ``(band, passed, ticks)``, then refine ``(n, refined, ticks)``.
+
+        Passed counts include only pairs evaluated at that gate. With reordered
+        gates they need not decrease in logical band order; work_counts()['checked']
+        gives each gate's actual input count.
+        """
         if self._gpu is not None:
             return None
         return self._ensure().tier_stats()

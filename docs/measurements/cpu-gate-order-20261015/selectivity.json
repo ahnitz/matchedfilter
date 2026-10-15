@@ -1,0 +1,211 @@
+{
+  "baseline_core": "b7fc2583ceea69e842eff7e35b25e0c9e17f77c72ebeb37f2e5164cadd71ede7",
+  "probe_core": "9f508379be52199fe4d63afebbda2e24304f25da4003054e176bc8dec9b9dbe1",
+  "output_sha256": "5879405235d5ef14017f6e43eb0990e5892ae3f1e8a83207ab7d9af2e224e935",
+  "outputs_identical": true,
+  "scope": "Two segments including warmup; diagnostic extra work, not performance timing",
+  "calls": 1820,
+  "totals": {
+    "q15": 585333,
+    "pass256": 395899,
+    "pass512": 33974,
+    "both": 31825
+  },
+  "pass512_fraction": 0.05804217428369834,
+  "baseline_commit": "702e6af8",
+  "target": "AVX3",
+  "cpu": "AMD Ryzen AI Max+ 395",
+  "affinity": [
+    4
+  ],
+  "args": {
+    "seg_samples": 1048576,
+    "start_pad": 120.0,
+    "end_pad": 16.0,
+    "profiles": "/home/ahnitz/projects/claude/searchdev/tests/search_test/prod_job_test27/ladder_profiles_H1.npz",
+    "asym_bin_width": 0.03,
+    "asym_num_bins": 1000,
+    "roofline": true,
+    "threshold": 6.0,
+    "fd": 0.001,
+    "peak_window": 1.0,
+    "fft_length": 2048,
+    "pad": 4096,
+    "segments": 2,
+    "warmup": 1,
+    "asym_threshold": 6.0,
+    "depth": 1,
+    "pregen": true,
+    "pipeline": false,
+    "overlap": false,
+    "no_batch": false,
+    "shared_input": false
+  },
+  "seed": 1,
+  "bank_sha256": "da727c0858d7f0de025ba00b58dca22d86f70ba8f83e01c5a90da2410dce0719",
+  "profiles_sha256": "ff888dba0b4f849dc90cbdf5eb9dc6f1cd91599a68bc1bc81b193c3be521060a",
+  "by_template_count": {
+    "80": {
+      "q15": 9246,
+      "pass256": 6238,
+      "pass512": 548,
+      "both": 516,
+      "calls": 64
+    },
+    "103": {
+      "q15": 12363,
+      "pass256": 8338,
+      "pass512": 604,
+      "both": 557,
+      "calls": 68
+    },
+    "121": {
+      "q15": 14533,
+      "pass256": 10190,
+      "pass512": 862,
+      "both": 811,
+      "calls": 68
+    },
+    "131": {
+      "q15": 16333,
+      "pass256": 11215,
+      "pass512": 880,
+      "both": 827,
+      "calls": 64
+    },
+    "140": {
+      "q15": 17086,
+      "pass256": 11591,
+      "pass512": 1157,
+      "both": 1089,
+      "calls": 68
+    },
+    "156": {
+      "q15": 56831,
+      "pass256": 39055,
+      "pass512": 3464,
+      "both": 3263,
+      "calls": 200
+    },
+    "159": {
+      "q15": 39315,
+      "pass256": 27012,
+      "pass512": 2150,
+      "both": 2015,
+      "calls": 136
+    },
+    "162": {
+      "q15": 20271,
+      "pass256": 13592,
+      "pass512": 1295,
+      "both": 1205,
+      "calls": 68
+    },
+    "169": {
+      "q15": 21319,
+      "pass256": 14583,
+      "pass512": 1230,
+      "both": 1146,
+      "calls": 68
+    },
+    "173": {
+      "q15": 21757,
+      "pass256": 14875,
+      "pass512": 1361,
+      "both": 1274,
+      "calls": 64
+    },
+    "178": {
+      "q15": 22268,
+      "pass256": 15042,
+      "pass512": 1181,
+      "both": 1095,
+      "calls": 68
+    },
+    "179": {
+      "q15": 22290,
+      "pass256": 14768,
+      "pass512": 1207,
+      "both": 1121,
+      "calls": 68
+    },
+    "183": {
+      "q15": 23631,
+      "pass256": 16010,
+      "pass512": 1490,
+      "both": 1391,
+      "calls": 68
+    },
+    "187": {
+      "q15": 47309,
+      "pass256": 31823,
+      "pass512": 2596,
+      "both": 2436,
+      "calls": 136
+    },
+    "193": {
+      "q15": 23782,
+      "pass256": 16299,
+      "pass512": 1470,
+      "both": 1371,
+      "calls": 68
+    },
+    "194": {
+      "q15": 24547,
+      "pass256": 16720,
+      "pass512": 1398,
+      "both": 1306,
+      "calls": 68
+    },
+    "196": {
+      "q15": 24153,
+      "pass256": 16123,
+      "pass512": 1274,
+      "both": 1175,
+      "calls": 68
+    },
+    "210": {
+      "q15": 26449,
+      "pass256": 17455,
+      "pass512": 1511,
+      "both": 1413,
+      "calls": 68
+    },
+    "214": {
+      "q15": 26115,
+      "pass256": 17538,
+      "pass512": 1311,
+      "both": 1229,
+      "calls": 68
+    },
+    "215": {
+      "q15": 27686,
+      "pass256": 18478,
+      "pass512": 1596,
+      "both": 1493,
+      "calls": 68
+    },
+    "219": {
+      "q15": 27159,
+      "pass256": 18091,
+      "pass512": 1631,
+      "both": 1528,
+      "calls": 68
+    },
+    "224": {
+      "q15": 28218,
+      "pass256": 19159,
+      "pass512": 1828,
+      "both": 1733,
+      "calls": 68
+    },
+    "254": {
+      "q15": 32672,
+      "pass256": 21704,
+      "pass512": 1930,
+      "both": 1831,
+      "calls": 68
+    }
+  },
+  "probe_patch_sha256": "f865295ef5fa5bf9309ccfb2e19dc7d22df02630736f26858f9a6b580825ee83"
+}

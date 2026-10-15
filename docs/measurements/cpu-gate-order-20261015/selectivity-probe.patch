@@ -1,0 +1,57 @@
+diff --git a/src/hmf.c b/src/hmf.c
+index deb76be2..1c763599 100644
+--- a/src/hmf.c
++++ b/src/hmf.c
+@@ -904,6 +904,32 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
+       checked_d=p->qd; checked_t=p->qt; nchecked=k;
+       p->qpassed+=k;
+       p->qticks+=ap_ticks()-q0;
++#ifdef AP_GATE_ORDER_PROBE
++      /* Diagnostic only: evaluate the second gate on every Q15 survivor.
++         This intentionally does extra work; none of its timing is an acceptance result. */
++      int probe512=-1;
++      if(p->ntiers==3 && tr->m==256 && p->tier[1].m==512 && !p->q15_g16){
++        hmf_tier *next=&p->tier[1];
++        const size_t r=n/next->m;
++        size_t lo=start/r, hi=(end+r-1)/r;
++        if(lo>0) lo--;
++        if(hi>next->m) hi=next->m;
++        for(int j=0;next->npending && j<k;j++){
++          const int d=d0+p->qd[j];
++          if(next->pending[d]){
++            if(ap_mf_set_data(next->mf,d,p->dspec[d])) return -1;
++            next->pending[d]=0; next->npending--;
++          }
++        }
++        if(k && ap_mf_run_pairs_pooled(next->mf,d0,p->qd,p->qt,k,t0,hi-lo,next->thr,
++                                      next->cebuf,NULL,lo,hi,nt)<0) return -1;
++        probe512=0;
++        for(int j=0;j<k;j++){
++          const ap_peak ce=next->cebuf[(size_t)p->qd[j]*nt+p->qt[j]];
++          probe512+=ce.index>=0 && ce.magnitude>=next->thr;
++        }
++      }
++#endif
+       if(k && p->q15_g16 && tr->g16){
+         /* The FP16 gate over the screen's survivors: its magnitude bounds the FP32 one
+            (gate16.cc), so the survivors are a superset of the FP32 pass's; the next tier
+@@ -911,6 +937,19 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
+         if(ap_gate16_run_pairs(tr->g16,d0,t0,p->qd,p->qt,k,nt,cstart,cend,tr->cebuf)<0) return -1;
+       } else if(k && ap_mf_run_pairs_pooled(tr->mf,d0,p->qd,p->qt,k,t0,cspan,thr,tr->cebuf,NULL,
+                                      cstart,cend,nt)<0) return -1;
++#ifdef AP_GATE_ORDER_PROBE
++      if(probe512>=0){
++        int pass256=0, both=0;
++        for(int j=0;j<k;j++){
++          const size_t row=(size_t)p->qd[j]*nt+p->qt[j];
++          const ap_peak a=tr->cebuf[row], b=p->tier[1].cebuf[row];
++          const int ok=a.index>=0 && a.magnitude>=thr;
++          pass256+=ok; both+=ok && b.index>=0 && b.magnitude>=p->tier[1].thr;
++        }
++        fprintf(stderr,"ORDER_PROBE {\"templates\":%d,\"data\":%d,\"q15\":%d,\"pass256\":%d,\"pass512\":%d,\"both\":%d}\n",
++                nt,nd,k,pass256,probe512,both);
++      }
++#endif
+     } else if(i==0){
+       /* The first tier runs on every pair of the segment in one call: the data
+          spectrum is read once and stays resident across the whole template sweep. */
