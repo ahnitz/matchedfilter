@@ -317,3 +317,25 @@ Stage 5's lessons land inside the stages that touch them. Each stage merges in g
     each within the false-dismissal budget. Making the split insensitive to price noise is
     a change to the gating's semantics. It belongs with the gate-model owner and is not
     part of this cleanup.
+- 2026-10-15: **Vulkan: one record builder (ba3b9cea).**
+  - `_make_hier` and `_make_hier_cascade` (430 lines, two buffer-naming schemes) are now
+    one loop over the tiers. Tier i writes `cidx<i>`/`cval<i>` from `ct<i>`. The last
+    tier's survivors are `surv`/`args`, and every reader takes those.
+  - `hier_peaks`' two branches are now one. The three copies of the coarse span are now
+    `_gpuhost.coarse_span`. Net -318 lines.
+  - Paired dev2 ladder: the new tree is at least as fast. In rounds 3-4, batched
+    1.38-1.41e8 against 1.31e8. The base process had stored a bad coarse choice; see the
+    next entry.
+- 2026-10-15: **Open: a stored coarse choice can be badly wrong, and it persists.**
+  - The base process of that ladder stored the untiled `tierb_256_c16p2w@32` at band 256.
+    Untiled layouts measure 1.54-1.76 ns per pair there and tiled ones 1.06-1.10, so it
+    ran the fine stage at 0.077 s against 0.058 s.
+  - Eleven fresh processes did not repeat it: six bare and five inside the ladder. All
+    chose a tiled layout at subgroup 64.
+  - The base was the first process after a gate run, so a clock or power transition on
+    the APU during the measurement is the likely cause. MF_COST_FILE then kept the choice
+    for every later run.
+  - Proposal: each process re-checks a stored choice once. It runs a short paired timing
+    against the best stored layout of the other stage, and re-measures if the stored
+    choice loses by more than the close-call margin. A bad choice then costs one process,
+    not every process after it.
