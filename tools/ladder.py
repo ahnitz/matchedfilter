@@ -322,14 +322,21 @@ def drive_folded(gens, args, first, steady, counts):
 #: Block-size trials open when the steady segments began (tools report: a trial that locks
 #: during them still means the steady timings span layout switches).
 _STEADY_OPEN_TRIALS = set()
+_STEADY_CPU_TRIAL_START = None
 
 
 def _note_open_trials():
+    global _STEADY_CPU_TRIAL_START
+    from matchedfilter import _CPU_TRIAL_WORK
     from matchedfilter import time_domain as _td
     _STEADY_OPEN_TRIALS.update(_td._BLOCK_TRIALS.open_keys())
+    if _STEADY_CPU_TRIAL_START is None:
+        _STEADY_CPU_TRIAL_START = dict(_CPU_TRIAL_WORK)
 
 
 def run_device(device, tops, args, seed):
+    global _STEADY_CPU_TRIAL_START
+    _STEADY_CPU_TRIAL_START = None
     rng = np.random.default_rng(seed)
     S = args.seg_samples
     a0 = int(args.start_pad * RATE)
@@ -859,6 +866,11 @@ def run_device(device, tops, args, seed):
         analysed_seconds_per_segment=analysed, first_segment_s=dict(first.t), steady_s=dict(steady.t),
         steady_calls=dict(steady.n), counts=dict(counts),
     )
+    from matchedfilter import _CPU_TRIAL_WORK
+    if _STEADY_CPU_TRIAL_START is not None:
+        report["cpu_trial_work_in_steady"] = {
+            k: _CPU_TRIAL_WORK[k] - v for k, v in _STEADY_CPU_TRIAL_START.items()}
+        report["steady_valid"] = report["cpu_trial_work_in_steady"]["calls"] == 0
     if steady.device:
         report["steady_device_ms"] = {k: {l: v for l, v in d.items()} for k, d in steady.device.items()}
     if steady_segments and total > 0:
@@ -998,6 +1010,10 @@ def main():
     if args.out:
         Path(args.out).write_text(text)
     tirt = report.get("templates_in_real_time", {})
+    if report.get("steady_valid") is False:
+        print("WARNING: CPU calibration occurred after the steady boundary: "
+              + str(report["cpu_trial_work_in_steady"])
+              + "; throughput includes tuning, rerun with the same MF_COST_FILE")
     if "total" in tirt:
         # The headline: template throughput through the representative stages.
         print(f"throughput: {tirt['total']:.4g} templates in real time on {report['device']} "

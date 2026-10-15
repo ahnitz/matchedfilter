@@ -443,3 +443,62 @@ jobs per segment. With a cost file a machine makes each choice once.
 `tests/test_reproducible_choices.py` runs three processes on one cost file, on the CPU and
 on gpu:0 where present, and requires identical triggers, layout and chains: the second and
 third processes against each other, and against the first process's locked segments.
+
+## CPU paired trials and bounded measurement (2026-10-15)
+
+CPU Q15 and block-size trials now use complete rounds on identical workloads.
+Q15 replays the same series call; block-size trials replay the same batch of jobs
+at every candidate layout, holding each layout's inner chain and Q15 trials.
+Each arm settles before timing, and execution order reverses between rounds.
+The decision uses per-round ratios against the model and requires 75% agreement
+beyond the existing 5% tie margin. A single contaminated round affecting only one arm cannot
+win a five-round trial. Sustained or systematically arm-correlated interference
+can still bias the result; this is robust sampling, not a guarantee under arbitrary load.
+
+CPU block trials take at least five complete rounds (or MF_BLOCK_TRIALS if larger)
+and cap an ambiguous contest at twice that minimum. Q15 takes at least six by
+default and caps at twelve. Complete partial rounds persist between processes.
+Old unpaired partial block samples are not valid paired evidence and are restarted;
+existing final locks are preserved. No additional candidate is excluded. The GPU
+measurement and decision paths retain their existing behavior.
+
+This increases first-run calibration work: each round executes every candidate,
+including an untimed settling call. It does not promise that two fixed warmup
+segments will suffice. `tools/ladder.py` reports `cpu_trial_work_in_steady` and
+`steady_valid`, with a warning if CPU trial work occurs after the first steady
+boundary. The counters include Q15 replays, CPU block rounds, and CPU chain calls
+(including chain switching); they do not measure all cost-model construction in
+initial setup. For multiple tops the first boundary is conservative: later tops'
+calibration also invalidates the report.
+
+Use the bounded study driver to keep calibration out of accepted CPU timing:
+
+```sh
+OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 \
+  taskset -c 6 python tools/cpu_trial_check.py \
+  --bank BANK.hdf --profiles PROFILES.npz --out NEW_DIRECTORY --starts 10
+```
+
+Each independent start uses a fresh cost file. By default it permits at most four
+six-segment processes, retaining every log, report, and lock transition. A run is
+accepted only if no CPU trial occurs after the steady boundary, no trial lock
+changes during that process, and no persisted trial remains unfinished. Failure
+to settle is reported as failure, not silently labelled steady. Compare two code
+versions only after comparing their complete trial-lock dictionaries; force the
+same locks when measuring execution overhead rather than choice quality.
+
+### Chain-trial audit and remaining limitation
+
+CPU chain trials still pool cost-per-pair observations from different calls and
+plan shapes. Their candidate union can grow as plans with different shortlists
+join; candidates need not be feasible on every plan. They therefore have the same
+comparability risk as the old Q15 trial. Unlike Q15, chains can change borderline
+outputs, and switching rebuilds plans, templates, and thresholds. This patch
+instruments that calibration work but does not change chain selection, feasibility,
+existing usefulness checks, or the shared GPU decision rule. A follow-up should
+pair each challenger with a feasible incumbent on the same input and preserve the
+candidate union explicitly; normalizing unrelated timings by pair count is not a
+substitute. Persisted chain locks and reproducibility behavior remain intact.
+
+Raw cold-start records, frozen-source identities, and controlled timing are in
+[the CPU trial measurement record](measurements/cpu-trial-reliability-20261015/README.md).

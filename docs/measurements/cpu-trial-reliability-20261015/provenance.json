@@ -1,0 +1,36 @@
+{
+  "baseline_commit": "539266edc4e9df4d22cca9797256a4f9ff2a8904",
+  "cpu_host": "gravity-dev1.syr.edu",
+  "cpu": "Ryzen 5950X, AVX2",
+  "affinity": 6,
+  "threads": {
+    "OMP_NUM_THREADS": 1,
+    "OPENBLAS_NUM_THREADS": 1,
+    "MKL_NUM_THREADS": 1
+  },
+  "cold_study": {
+    "starts": 10,
+    "segments_per_process": 6,
+    "maximum_processes_per_start": 4
+  },
+  "final_confirmation": {
+    "normalized_telemetry_build_starts": 1,
+    "final_decision_build_starts": 1,
+    "segments_per_process": 6
+  },
+  "throughput": {
+    "rounds": 4,
+    "segments_per_process": 10,
+    "warmup_segments": 2,
+    "q15": [
+      true,
+      false
+    ],
+    "same_native_binary": true,
+    "trial_locks_identical": "asserted before attribution for every process"
+  },
+  "scope": "test27 cap401 bank, top id 4, 4698 fine templates, H1 profiles, synthetic colored data; not a full production PyCBC job",
+  "prototype_difference": "The ten-start study stored block timing medians in seconds. Final source divides both arms by the identical batch-work count, preserving paired ratios and matching the units of the optional steady recheck. One additional cold start and all forced-lock throughput runs use the final source.",
+  "remote_artifacts": "/tmp/mf-cpu-trial-reliability-20261015",
+  "throughput_build_difference": "The final decision helper additionally handles three or more candidates: an unsupported noisy median cannot hide a consistently faster challenger. Forced-lock throughput executes no trial, so this helper is inactive in every timed run. A separate final-v2 fresh-cost-file confirmation exercises the final helper."
+}

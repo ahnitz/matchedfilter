@@ -1,0 +1,39 @@
+{
+  "starts": 10,
+  "settled": 10,
+  "q15_on": 10,
+  "processes_per_start": [
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2
+  ],
+  "steady_throughput": {
+    "median": 4939313.318384518,
+    "min": 4918503.731284887,
+    "max": 4952347.267716541
+  },
+  "first_process_trial_seconds_after_steady_boundary": {
+    "median": 26.26586786750704,
+    "min": 23.090151326730847,
+    "max": 26.393408151343465
+  },
+  "steady_trial_calls": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+  ]
+}
