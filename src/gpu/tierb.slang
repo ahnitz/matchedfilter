@@ -1399,8 +1399,7 @@ void peakTwoWave(uint pairA, uint pairB, uint tid, H re[16], H im[16],
     }
 }
 
-#if defined(MF_METAL)
-//: The gate decision alone, for a pair whose WG lanes sit in one SIMD group (Metal).
+//: The gate decision alone, for a pair whose WG lanes sit in one SIMD group (every backend).
 //:
 //: What the hierarchical gate consumes from tier 0 is whether a pair passes: the
 //: compaction lists a pair when the magnitude of its reported value reaches the gate
@@ -1464,7 +1463,6 @@ void peakTwoGate(uint pairA, uint pairB, uint tid, H re[16], H im[16],
         peakVal[pairB] = infB ? float2(3.402823e38f, 0.0f) : (hitB ? float2(bB, 0.0f) : float2(0.0f, 0.0f));
     }
 }
-#endif
 
 //: TWO pairs at once in split/SoA form. Both share the data row and differ
 //: only in template, so the data broadcasts to both lanes and the templates
@@ -1543,11 +1541,11 @@ void filterTwo(uint pairA, uint pairB, uint tA, uint tB, uint tid,
     const bool wavePeak = false;
 #endif
     if (wavePeak) {
-#if defined(MF_METAL)
+        // Every backend: the host passes the gate threshold (magnitude bits) when tier 0's
+        // index has no reader; 0 asks for the full election (peakTwoWave).
         if (thrBits != 0u)
             peakTwoGate(pairA, pairB, tid, re, im, peakIdx, peakVal, winStart, winEnd, asfloat(thrBits));
         else
-#endif
         peakTwoWave(pairA, pairB, tid, re, im, peakIdx, peakVal, winStart, winEnd, thrBits);
     } else {
         H magv[16];

@@ -1845,6 +1845,16 @@ class Context(InputUploads):
         self._c16_bound_flag(fn)
         return fn, wg, ppg, tile, True
 
+    def _gate_bits(self, fn, thr, band, tile):
+        """The coarse kernel's last argument: for a tiled build whose pair fits one warp, the
+        gate threshold as magnitude bits (tierb.slang peakTwoGate: the pass and bound only, no
+        election; nothing reads tier 0's index); 0 elects (peakTwoWave). The Vulkan and Metal
+        rule. The tensor-core gate (coarse_tc) keeps its own reporting."""
+        if (tile <= 1 or band // 16 > 32 or os.environ.get("MF_VK_C16_BOUND", "1") == "0"
+                or self._labels.get(fn.value, "").startswith("coarse_tc")):
+            return 0
+        return int(np.float32(max(float(thr), 1.1754944e-38)).view(np.uint32))
+
     def _coarse_grid_for(self, fn, rows, nt, ppg, tile):
         """_coarse_grid, with a persistent kernel's grid capped (its warps loop over slots)."""
         grid, rowarg = _coarse_grid(rows, nt, ppg, tile)
@@ -1899,7 +1909,8 @@ class Context(InputUploads):
                          [bufs[0].dptr, bufs[1].dptr, bufs[2].dptr, bufs[3].dptr,
                           _u32(ntm), _u32(0), _u32(band),
                           _u32(band if rowarg is None else rowarg),
-                          _i32(_shift(band)), _u32(1), _u32(0)], stream=st,
+                          _i32(_shift(band)), _u32(1), _u32(self._gate_bits(fn, 0.0, band, tile))],
+                         stream=st,
                          label="coarse_choice")
             check_cuda(self.cuda.cuEventRecord(e1, st), "cuEventRecord")
             check_cuda(self.cuda.cuEventSynchronize(e1), "cuEventSynchronize")
@@ -2045,7 +2056,8 @@ class Context(InputUploads):
                          [bufs["cdata0"].dptr, bufs["ct0"].dptr, bufs["cidx0"].dptr,
                           bufs["cval0"].dptr, _u32(nt), _u32(cs), _u32(ce),
                           _u32(csp if rowarg is None else rowarg),
-                          _i32(csh), _u32(1), _u32(0)], stream=stream)
+                          _i32(csh), _u32(1), _u32(self._gate_bits(cfn, raw_thr, band0, tile))],
+                         stream=stream)
             kfn, _ = self.pipeline(band0, "compactPairs")
             cpt = (pairs + 255) // 256
             if cascade:
@@ -2208,7 +2220,8 @@ class Context(InputUploads):
                          [_ptr(cd0 + off * band0 * cb0), bufs["ct0"].dptr, _ptr(ci0 + off * nt * 4),
                           _ptr(cv0 + off * nt * 8), _u32(nt), _u32(cs), _u32(ce),
                           _u32(csp if rowarg is None else rowarg),
-                          _i32(csh), _u32(1), _u32(0)], stream=stream)
+                          _i32(csh), _u32(1),
+                          _u32(self._gate_bits(cfn, raw_thr, band0, geom[1]))], stream=stream)
             cpt = (gp + 255) // 256
             if cascade:
                 self._launch(kfn, cpt, 256, [_ptr(cv0 + off * nt * 8), _ptr(s0 + a * nt * 4), cnt_t1,
