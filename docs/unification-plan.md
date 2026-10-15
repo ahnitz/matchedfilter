@@ -205,3 +205,13 @@ Stage 5's lessons land inside the stages that touch them. Each stage merges in g
   - `_coarse.time_staged` handles staged screen and full timing, interleaved, with a paired
     confirmation of each stage's best.
   - Vulkan, CUDA and Metal supply only candidates, labels and a single-dispatch timer.
+  - Fixed on the way: CUDA candidates hold unhashable ctypes handles, so the engine
+    raised TypeError on CUDA (found by the L40S run). The CUDA host now passes indices.
+- 2026-10-15: **Stage 1c (result ownership on every backend).**
+  - `InputUploads._track(fn, owner=)` and `_claim(owner)`: a call that reuses a record's
+    output buffers first collects the in-flight result reading them.
+  - Vulkan and Metal claim at each record reuse (hierarchical, flat, grouped), before
+    inputs are written. CUDA keeps its equivalent (`_dispatch_result`).
+  - Found by probe: on Vulkan, an async result read after a same-shaped call returned that
+    call's peaks. `tests/test_async_result_ownership.py` runs on any backend; 2 of its 4
+    cases fail without the claim.

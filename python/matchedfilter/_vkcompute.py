@@ -1694,6 +1694,7 @@ class Context(InputUploads):
                     upload_data = upload_tmpl = True
             self._cache_touch('hier_cascade', key)
             bufs, cmd = batch
+            self._claim(bufs["idx"])             # an earlier result still reading these outputs
             bfwd = self._band_forward(storage_key, bufs, bands, nd) if bands else None
             if bfwd is not None:
                 self._pending_forward[slot] = bfwd[1][-1]
@@ -1754,6 +1755,7 @@ class Context(InputUploads):
                 upload_data = upload_tmpl = True
         self._cache_touch('hier', key)
         bufs, cmd = batch
+        self._claim(bufs["idx"])                 # an earlier result still reading these outputs
         bfwd = self._band_forward(storage_key, bufs, bands, nd) if bands else None
         if bfwd is not None:
             self._pending_forward[slot] = bfwd[1][-1]
@@ -1846,7 +1848,7 @@ class Context(InputUploads):
                 return (np.full((nd, nt, nbins), -1, dtype=np.int32),
                         np.zeros((nd, nt, nbins), dtype=np.complex64))
             return v[3].reshape(nd, nt, nbins).copy(), v[4].reshape(nd, nt, nbins).copy()
-        return self._track(readback) if async_submit else readback()
+        return self._track(readback, owner=bufs["idx"]) if async_submit else readback()
 
     def _peak_views(self, bufs, cascade, nd, nt, nbins):
         """In-place views of a hierarchical record's outputs, made once per record: (refine
@@ -3335,6 +3337,7 @@ class Context(InputUploads):
         if transient is None:
             self._cache_touch('flat', key)
         b_data, b_tmpl, b_idx, b_val, cmd = batch
+        self._claim(b_idx)                       # an earlier result still reading these outputs
 
         if upload_data:
             write_input(b_data, data)
@@ -3359,7 +3362,7 @@ class Context(InputUploads):
                 if transient is not None:
                     self._release_transient(transient)
                 return idx, val
-            return self._track(readback)
+            return self._track(readback, owner=b_idx)
         if transient is not None:
             self._release_transient(transient)
 
@@ -3575,6 +3578,7 @@ class Context(InputUploads):
             upload_tmpl = True
         self._cache_touch('flat', key)
         _, b_tmpl, b_idx, b_val, cmd = batch
+        self._claim(b_idx)                       # an earlier result still reading these outputs
         if upload_tmpl:
             write_input(b_tmpl, tmpl)
             self._uploaded["tmpl"][key] = tsig
@@ -3596,7 +3600,7 @@ class Context(InputUploads):
                     idx[a:b] = indices[offset:offset+count].reshape(b-a, nt, nb)
                     val[a:b] = values[offset:offset+count].reshape(b-a, nt, nb)
                 return idx, val
-            return self._track(readback)
+            return self._track(readback, owner=b_idx)
         indices = b_idx.read(np.int32, size)
         values = b_val.read(np.complex64, size)
         idx = np.empty((nd, nt, nb), np.int32)

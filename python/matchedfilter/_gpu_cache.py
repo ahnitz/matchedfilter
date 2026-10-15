@@ -9,7 +9,7 @@ class Pending:
     cached buffers can finish them first -- a result is read from those
     buffers, and reading one after its release reads freed memory.
     """
-    __slots__ = ("ctx", "fn", "result", "done", "stats", "sparse_dev")
+    __slots__ = ("ctx", "fn", "result", "done", "stats", "sparse_dev", "owner")
 
     #: Per-dispatch statistics a finish leaves on the context (last_refinements, ...). A
     #: result can be materialised early -- _drain from timings(), a cache eviction, a slot
@@ -18,15 +18,18 @@ class Pending:
     #: deferred hierarchical call counted 0 refinements and marked itself empty.
     STATS = ("last_refinements", "last_tier1_survivors")
 
-    def __init__(self, ctx, fn):
+    def __init__(self, ctx, fn, owner=None):
         self.ctx, self.fn, self.result, self.done = ctx, fn, None, False
         self.stats = None
+        self.owner = owner
         self.sparse_dev = getattr(fn, "sparse_dev", None)
 
     def __call__(self):
         if not self.done:
             self.done = True
             self.ctx._inflight.pop(id(self), None)
+            if self.owner is not None and self.ctx.__dict__.get("_owned", {}).get(self.owner) is self:
+                del self.ctx._owned[self.owner]
             fn, self.fn = self.fn, None
             self.result = fn()
             self.stats = {k: getattr(self.ctx, k) for k in self.STATS if hasattr(self.ctx, k)}
@@ -37,12 +40,24 @@ class Pending:
 
 
 class InputUploads:
-    def _track(self, fn):
-        """Register an in-flight readback; see Pending."""
+    def _track(self, fn, owner=None):
+        """Register an in-flight readback; see Pending. owner: the output buffers the readback
+        reads, so a later call that reuses them collects this result first (_claim)."""
         inflight = self.__dict__.setdefault("_inflight", {})
-        pending = Pending(self, fn)
+        pending = Pending(self, fn, None if owner is None else id(owner))
         inflight[id(pending)] = pending
+        if owner is not None:
+            self.__dict__.setdefault("_owned", {})[id(owner)] = pending
         return pending
+
+    def _claim(self, owner):
+        """Collect the in-flight result reading `owner` (output buffers) before a call reuses
+        them: writes its inputs, or submits over its outputs. Without this an async result
+        read after a same-shaped call returned that call's peaks (CUDA has its own rule,
+        _cudacompute._dispatch_result)."""
+        pending = self.__dict__.get("_owned", {}).get(id(owner))
+        if pending is not None:
+            pending()
 
     def _drain(self):
         """Finish every in-flight dispatch, keeping its result for its caller."""
