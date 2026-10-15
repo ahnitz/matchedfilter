@@ -6,6 +6,11 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ### Performance
 
+- CPU hierarchical series calls prepare later-tier data only for blocks with incoming
+  survivors. In a paired Zen 5 ladder comparison, fine-stage time fell 3.7% and total
+  segment time 3.1%, with identical outputs. A steady segment avoided 41.8% of band-512
+  copies and 88.1% of band-1024 copies. Public spectral setters retain their eager copies.
+  See [work avoidance and further experiments](docs/cpu-work-avoidance.md).
 - CPU survivor processing reuses shared data and packed templates, fuses the N256
   Q15 window maximum when the cache/register policy permits, and skips rejected
   pairs in the subsequent float decision loop. On a pinned Zen 5 core, alternating

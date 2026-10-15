@@ -21,6 +21,8 @@ short introduction.
 - CPU first tiers: [x86 Q15 screen](cpu-q15-gate.md), [ARM NEON FP16 gate](cpu-neon-fp16-gate.md)
 - [CPU survivor processing](cpu-survivor-performance.md): paired kernel and ladder
   measurements for pooled inputs, the Q15 maximum, and survivor compaction.
+- [Avoiding CPU work](cpu-work-avoidance.md): preparing later tiers only when needed,
+  Q15 lane packing, and measurements that reject a shared-subspace screening approach.
 - [Cross-platform review](cross-platform-review.md): which mechanisms each backend has and
   what transfers
 - [GPU parity plan](gpu-parity-plan.md) (2026-10-08 plan and its log)

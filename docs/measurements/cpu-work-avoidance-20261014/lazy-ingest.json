@@ -1,0 +1,271 @@
+{
+  "baseline_commit": "c5994d1e98773ece70abd8cd8f98c00ac7b7b7b5",
+  "change": "Defer later coarse-tier data ingestion for owned run_series spectra until a surviving pair needs that data slot; keep the public spectral setter eager.",
+  "method": {
+    "harness": "tools/profile_cpu_ladder.py",
+    "order": [
+      "baseline",
+      "candidate",
+      "candidate",
+      "baseline"
+    ],
+    "quiet": true,
+    "description": "Four separate processes pinned to CPU4 with identical fixed configuration and deterministic input. Each process rebuilds banks, excludes its first warm segment, and averages seven steady segments. All other agent CPU workloads were idle. Whole segment includes middle, fine and followup work; setup is excluded.",
+    "command": "PYTHONPATH=<snapshot>/python MF_COST_FILE=<cost-file> taskset -c 4 python tools/profile_cpu_ladder.py --bank <bank> --profiles <profiles> --target AVX3 --runs 1 --segments 8 --q15 1 --output <result.json>"
+  },
+  "config": {
+    "cpu": "AMD RYZEN AI MAX+ 395 w/ Radeon 8060S (Zen 5)",
+    "cpu_affinity": [
+      4
+    ],
+    "target": "AVX3",
+    "bank_file": "fir_three_level_modern_v1_bottomup_cap401.hdf",
+    "bank_sha256": "da727c0858d7f0de025ba00b58dca22d86f70ba8f83e01c5a90da2410dce0719",
+    "profiles_file": "ladder_profiles_H1.npz",
+    "profiles_sha256": "ff888dba0b4f849dc90cbdf5eb9dc6f1cd91599a68bc1bc81b193c3be521060a",
+    "seed": 1,
+    "segments_per_process": 8,
+    "warm_segments_excluded": 1,
+    "steady_segments_per_process": 7,
+    "detectors": 2,
+    "fine_templates": 4698,
+    "middle_filters": 27,
+    "segment_samples": 1048576,
+    "sample_rate": 2048,
+    "analysed_seconds_per_segment": 376,
+    "fft_length": 2048,
+    "binsize": 2048,
+    "threshold": 6.0,
+    "fd": 0.001,
+    "chain": [
+      256,
+      512,
+      1024
+    ],
+    "q15": true,
+    "direct_refinement": true,
+    "autotune": false
+  },
+  "all_output_hashes_identical": true,
+  "rows": [
+    {
+      "variant": "baseline",
+      "rep": 0,
+      "core_sha256": "2423fad75e51829bb5ab060686cd3952588a210d1ded385c6d5a18415b3a4123",
+      "output_sha256": "fc13f0d0ec76107d9995385a20ea8662a95853213b0b2eaac4b48ebc23401f2b",
+      "times_ms": {
+        "fine": 301.77688285142983,
+        "segment": 367.6656800172558,
+        "middle": 57.31638056957828,
+        "asym": 8.119951742368617
+      },
+      "native_stages_ms": {
+        "forward": 62.85070683871265,
+        "q15 b256": 138.46158182279692,
+        "tier0 b256": 32.15517921961234,
+        "tier1 b512": 47.209630166715755,
+        "tier2 b1024": 15.23500245820753,
+        "refine n2048": 0.43166632652603926
+      }
+    },
+    {
+      "variant": "baseline",
+      "rep": 1,
+      "core_sha256": "2423fad75e51829bb5ab060686cd3952588a210d1ded385c6d5a18415b3a4123",
+      "output_sha256": "fc13f0d0ec76107d9995385a20ea8662a95853213b0b2eaac4b48ebc23401f2b",
+      "times_ms": {
+        "fine": 300.2477588431378,
+        "segment": 364.48583044278035,
+        "middle": 55.37789369866784,
+        "asym": 8.407897856419108
+      },
+      "native_stages_ms": {
+        "forward": 64.65771493857972,
+        "q15 b256": 136.62060793722642,
+        "tier0 b256": 31.29121270260187,
+        "tier1 b512": 46.25198818491511,
+        "tier2 b1024": 15.736617858148321,
+        "refine n2048": 0.40450839455802373
+      }
+    },
+    {
+      "variant": "candidate",
+      "rep": 0,
+      "core_sha256": "ce7076733a62db4c115c9ce4572950b5460e19a30cc317d2eeb19e3dae6c2d0f",
+      "output_sha256": "fc13f0d0ec76107d9995385a20ea8662a95853213b0b2eaac4b48ebc23401f2b",
+      "times_ms": {
+        "fine": 289.62635100054155,
+        "segment": 353.5000242991373,
+        "middle": 55.24486126211871,
+        "asym": 8.105914848524012
+      },
+      "native_stages_ms": {
+        "forward": 52.73384107400602,
+        "q15 b256": 135.42413847267767,
+        "tier0 b256": 30.3775691920607,
+        "tier1 b512": 47.18316797504509,
+        "tier2 b1024": 17.229318937658537,
+        "refine n2048": 0.6175006851395002
+      }
+    },
+    {
+      "variant": "candidate",
+      "rep": 1,
+      "core_sha256": "ce7076733a62db4c115c9ce4572950b5460e19a30cc317d2eeb19e3dae6c2d0f",
+      "output_sha256": "fc13f0d0ec76107d9995385a20ea8662a95853213b0b2eaac4b48ebc23401f2b",
+      "times_ms": {
+        "fine": 290.39778871395225,
+        "segment": 355.62492929498796,
+        "middle": 56.13065401225218,
+        "asym": 8.637675849188652
+      },
+      "native_stages_ms": {
+        "forward": 52.67061067469954,
+        "q15 b256": 136.0487258895671,
+        "tier0 b256": 30.237987354843074,
+        "tier1 b512": 48.123925092269005,
+        "tier2 b1024": 17.335767251014214,
+        "refine n2048": 0.5169923380988359
+      }
+    }
+  ],
+  "means_ms": {
+    "baseline": {
+      "fine": 301.01232084728383,
+      "segment": 366.0757552300181,
+      "middle": 56.34713713412306,
+      "asym": 8.263924799393862
+    },
+    "candidate": {
+      "fine": 290.0120698572469,
+      "segment": 354.56247679706263,
+      "middle": 55.68775763718544,
+      "asym": 8.371795348856331
+    }
+  },
+  "gains": {
+    "fine": {
+      "speedup": 1.0379303212981845,
+      "time_reduction_percent": 3.6544188487280582
+    },
+    "segment": {
+      "speedup": 1.0324717904076048,
+      "time_reduction_percent": 3.1450535219742393
+    }
+  },
+  "native_stage_means_ms": {
+    "baseline": {
+      "forward": 63.754210888646185,
+      "q15 b256": 137.54109488001166,
+      "tier0 b256": 31.72319596110711,
+      "tier1 b512": 46.73080917581544,
+      "tier2 b1024": 15.485810158177927,
+      "refine n2048": 0.4180873605420315,
+      "forward_plus_later_tiers": 125.97083022263955
+    },
+    "candidate": {
+      "forward": 52.70222587435278,
+      "q15 b256": 135.73643218112238,
+      "tier0 b256": 30.307778273451888,
+      "tier1 b512": 47.65354653365705,
+      "tier2 b1024": 17.282543094336376,
+      "refine n2048": 0.5672465116191681,
+      "forward_plus_later_tiers": 117.6383155023462
+    }
+  },
+  "counter_attribution": "The forward counter is series ticks minus tier/refine ticks and includes ingestion/bookkeeping. Lazy ingestion moves surviving copies from forward to later tier timers. Compare forward plus later tiers as well as whole fine/segment time; the 11.052ms forward reduction alone overstates saved ingestion work.",
+  "occupancy": {
+    "method": "Capture the first steady segment (two detector calls for each of 27 plans) with the same deterministic setup. Replay each block separately with identical input, plan, thresholds, windows and templates; a positive passed-count delta identifies a block needed by the following tier. Aggregate passed-pair counts are asserted equal to the ordinary grouped run. This instrumented replay is not timed.",
+    "captured_calls": 54,
+    "chain": [
+      256,
+      512,
+      1024
+    ],
+    "required_blocks": [
+      24866,
+      14473,
+      2947
+    ],
+    "passed_pairs": [
+      202332,
+      16867,
+      714
+    ],
+    "blocks": 24866,
+    "avoided_blocks": [
+      0,
+      10393,
+      21919
+    ],
+    "avoided_percent": [
+      0.0,
+      41.79602670312877,
+      88.14847583045122
+    ],
+    "minimum_avoided_split_store_bytes": 444260352,
+    "byte_estimate_note": "16 bytes per complex element: 8 read plus 8 written by split_store; excludes any alternate layout copies and does not measure cache or memory-bus traffic."
+  },
+  "public_spectral_control": {
+    "source": "/tmp/mf-lazy-public-final-control.json",
+    "purpose": "Guard against extra survivor-walk overhead when the public setter has already ingested every tier eagerly.",
+    "cases": 36,
+    "n": 4096,
+    "templates": [
+      37,
+      128,
+      512
+    ],
+    "chains": [
+      [
+        128,
+        256
+      ],
+      [
+        256,
+        512
+      ]
+    ],
+    "survival": [
+      0.05,
+      0.25
+    ],
+    "all_output_hashes_identical": true,
+    "by_isa": {
+      "AVX2": {
+        "cases": 12,
+        "median_speedup": 1.001723803583067,
+        "min_speedup": 0.9825543686664261,
+        "max_speedup": 1.0158266622391583
+      },
+      "AVX3": {
+        "cases": 12,
+        "median_speedup": 1.0058166886920437,
+        "min_speedup": 0.9895317510381805,
+        "max_speedup": 1.0238469421388048
+      },
+      "SSE4": {
+        "cases": 12,
+        "median_speedup": 1.0033639603276465,
+        "min_speedup": 0.992159463094022,
+        "max_speedup": 1.0245787798051773
+      }
+    },
+    "case_digest_set_sha256": "d7e4da7404f4e688f332bbc891d2dd11ff99161eda4667fb3b280ffe7ba2892a",
+    "speedup_note": "Median of the control harness per-case paired speedups; gains near 1x indicate no material public-path change."
+  },
+  "regression": {
+    "file": "tests/test_lazy_tier_ingest.py",
+    "focused_tests_passed": 14,
+    "coverage": [
+      "Q15 on/off",
+      "complex/real/strided-real input",
+      "series groups1/3",
+      "slot reuse across series calls",
+      "repeated starts with different windows",
+      "zero-padded final block",
+      "reject at each tier then all pass",
+      "public full and indexed spectral setters after series calls"
+    ]
+  }
+}

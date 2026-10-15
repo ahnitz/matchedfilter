@@ -1,0 +1,584 @@
+{
+  "schema_version": 1,
+  "kind": "arithmetic_only_no_kernel_benchmark",
+  "source_profile_name": "mf-ladder-quiet-compaction-1.json",
+  "source_profile_sha256": "53839ce777ac62e686f3bc3b7401b5d65bc33b7f78c974c1221fcfe848919f97",
+  "core_sha256": "2423fad75e51829bb5ab060686cd3952588a210d1ded385c6d5a18415b3a4123",
+  "observed_plans": [
+    [
+      2048,
+      214,
+      [
+        256,
+        512,
+        1024
+      ],
+      true
+    ],
+    [
+      2048,
+      183,
+      [
+        256,
+        512,
+        1024
+      ],
+      true
+    ],
+    [
+      2048,
+      169,
+      [
+        256,
+        512,
+        1024
+      ],
+      true
+    ],
+    [
+      2048,
+      179,
+      [
+        256,
+        512,
+        1024
+      ],
+      true
+    ],
+    [
+      2048,
+      178,
+      [
+        256,
+        512,
+        1024
+      ],
+      true
+    ],
+    [
+      2048,
+      224,
+      [
+        256,
+        512,
+        1024
+      ],
+      true
+    ],
+    [
+      2048,
+      131,
+      [
+        256,
+        512,
+        1024
+      ],
+      true
+    ],
+    [
+      2048,
+      121,
+      [
+        256,
+        512,
+        1024
+      ],
+      true
+    ],
+    [
+      2048,
+      210,
+      [
+        256,
+        512,
+        1024
+      ],
+      true
+    ],
+    [
+      2048,
+      194,
+      [
+        256,
+        512,
+        1024
+      ],
+      true
+    ],
+    [
+      2048,
+      215,
+      [
+        256,
+        512,
+        1024
+      ],
+      true
+    ],
+    [
+      2048,
+      103,
+      [
+        256,
+        512,
+        1024
+      ],
+      true
+    ],
+    [
+      2048,
+      187,
+      [
+        256,
+        512,
+        1024
+      ],
+      true
+    ],
+    [
+      2048,
+      219,
+      [
+        256,
+        512,
+        1024
+      ],
+      true
+    ],
+    [
+      2048,
+      187,
+      [
+        256,
+        512,
+        1024
+      ],
+      true
+    ],
+    [
+      2048,
+      159,
+      [
+        256,
+        512,
+        1024
+      ],
+      true
+    ],
+    [
+      2048,
+      196,
+      [
+        256,
+        512,
+        1024
+      ],
+      true
+    ],
+    [
+      2048,
+      159,
+      [
+        256,
+        512,
+        1024
+      ],
+      true
+    ],
+    [
+      2048,
+      254,
+      [
+        256,
+        512,
+        1024
+      ],
+      true
+    ],
+    [
+      2048,
+      140,
+      [
+        256,
+        512,
+        1024
+      ],
+      true
+    ],
+    [
+      2048,
+      156,
+      [
+        256,
+        512,
+        1024
+      ],
+      true
+    ],
+    [
+      2048,
+      156,
+      [
+        256,
+        512,
+        1024
+      ],
+      true
+    ],
+    [
+      2048,
+      173,
+      [
+        256,
+        512,
+        1024
+      ],
+      true
+    ],
+    [
+      2048,
+      156,
+      [
+        256,
+        512,
+        1024
+      ],
+      true
+    ],
+    [
+      2048,
+      193,
+      [
+        256,
+        512,
+        1024
+      ],
+      true
+    ],
+    [
+      2048,
+      80,
+      [
+        256,
+        512,
+        1024
+      ],
+      true
+    ],
+    [
+      2048,
+      162,
+      [
+        256,
+        512,
+        1024
+      ],
+      true
+    ]
+  ],
+  "assumptions": {
+    "isa": "AVX3",
+    "q15_lanes": 32,
+    "data_blocks_per_bank": 32,
+    "equal_full_groups_per_bank": true,
+    "note": "Not weighted by per-bank segment call counts, which this profile does not record. Partial groups need a fallback."
+  },
+  "formula": {
+    "current": "nd * ceil(nt / 32)",
+    "tiled": "(nd / 4) * ceil(nt / 8)",
+    "tail_only": "Keep complete 32-template groups; use 2x16 and/or 4x8 for a profitable remainder."
+  },
+  "totals": {
+    "banks": 27,
+    "templates": 4698,
+    "banks_with_reduction": 16,
+    "current_padded_templates": 5056,
+    "tiled_padded_templates": 4800,
+    "useful_pairs": 150336,
+    "current_vector_calls": 5056,
+    "tiled_vector_calls": 4800,
+    "current_executed_lane_pairs": 161792,
+    "tiled_executed_lane_pairs": 153600,
+    "current_unused_lane_pairs": 11456,
+    "tiled_unused_lane_pairs": 3264,
+    "work_reduction_fraction": 0.05063291139240506,
+    "padding_only_ideal_speedup": 1.0533333333333332
+  },
+  "bank_rows": [
+    {
+      "plan_index": 0,
+      "templates": 214,
+      "current_padded_templates": 224,
+      "tiled_padded_templates": 216,
+      "current_vector_calls_for_32_blocks": 224,
+      "tiled_vector_calls_for_32_blocks": 216,
+      "vector_calls_saved": 8,
+      "work_reduction_fraction": 0.03571428571428571
+    },
+    {
+      "plan_index": 1,
+      "templates": 183,
+      "current_padded_templates": 192,
+      "tiled_padded_templates": 184,
+      "current_vector_calls_for_32_blocks": 192,
+      "tiled_vector_calls_for_32_blocks": 184,
+      "vector_calls_saved": 8,
+      "work_reduction_fraction": 0.041666666666666664
+    },
+    {
+      "plan_index": 2,
+      "templates": 169,
+      "current_padded_templates": 192,
+      "tiled_padded_templates": 176,
+      "current_vector_calls_for_32_blocks": 192,
+      "tiled_vector_calls_for_32_blocks": 176,
+      "vector_calls_saved": 16,
+      "work_reduction_fraction": 0.08333333333333333
+    },
+    {
+      "plan_index": 3,
+      "templates": 179,
+      "current_padded_templates": 192,
+      "tiled_padded_templates": 184,
+      "current_vector_calls_for_32_blocks": 192,
+      "tiled_vector_calls_for_32_blocks": 184,
+      "vector_calls_saved": 8,
+      "work_reduction_fraction": 0.041666666666666664
+    },
+    {
+      "plan_index": 4,
+      "templates": 178,
+      "current_padded_templates": 192,
+      "tiled_padded_templates": 184,
+      "current_vector_calls_for_32_blocks": 192,
+      "tiled_vector_calls_for_32_blocks": 184,
+      "vector_calls_saved": 8,
+      "work_reduction_fraction": 0.041666666666666664
+    },
+    {
+      "plan_index": 5,
+      "templates": 224,
+      "current_padded_templates": 224,
+      "tiled_padded_templates": 224,
+      "current_vector_calls_for_32_blocks": 224,
+      "tiled_vector_calls_for_32_blocks": 224,
+      "vector_calls_saved": 0,
+      "work_reduction_fraction": 0.0
+    },
+    {
+      "plan_index": 6,
+      "templates": 131,
+      "current_padded_templates": 160,
+      "tiled_padded_templates": 136,
+      "current_vector_calls_for_32_blocks": 160,
+      "tiled_vector_calls_for_32_blocks": 136,
+      "vector_calls_saved": 24,
+      "work_reduction_fraction": 0.15
+    },
+    {
+      "plan_index": 7,
+      "templates": 121,
+      "current_padded_templates": 128,
+      "tiled_padded_templates": 128,
+      "current_vector_calls_for_32_blocks": 128,
+      "tiled_vector_calls_for_32_blocks": 128,
+      "vector_calls_saved": 0,
+      "work_reduction_fraction": 0.0
+    },
+    {
+      "plan_index": 8,
+      "templates": 210,
+      "current_padded_templates": 224,
+      "tiled_padded_templates": 216,
+      "current_vector_calls_for_32_blocks": 224,
+      "tiled_vector_calls_for_32_blocks": 216,
+      "vector_calls_saved": 8,
+      "work_reduction_fraction": 0.03571428571428571
+    },
+    {
+      "plan_index": 9,
+      "templates": 194,
+      "current_padded_templates": 224,
+      "tiled_padded_templates": 200,
+      "current_vector_calls_for_32_blocks": 224,
+      "tiled_vector_calls_for_32_blocks": 200,
+      "vector_calls_saved": 24,
+      "work_reduction_fraction": 0.10714285714285714
+    },
+    {
+      "plan_index": 10,
+      "templates": 215,
+      "current_padded_templates": 224,
+      "tiled_padded_templates": 216,
+      "current_vector_calls_for_32_blocks": 224,
+      "tiled_vector_calls_for_32_blocks": 216,
+      "vector_calls_saved": 8,
+      "work_reduction_fraction": 0.03571428571428571
+    },
+    {
+      "plan_index": 11,
+      "templates": 103,
+      "current_padded_templates": 128,
+      "tiled_padded_templates": 104,
+      "current_vector_calls_for_32_blocks": 128,
+      "tiled_vector_calls_for_32_blocks": 104,
+      "vector_calls_saved": 24,
+      "work_reduction_fraction": 0.1875
+    },
+    {
+      "plan_index": 12,
+      "templates": 187,
+      "current_padded_templates": 192,
+      "tiled_padded_templates": 192,
+      "current_vector_calls_for_32_blocks": 192,
+      "tiled_vector_calls_for_32_blocks": 192,
+      "vector_calls_saved": 0,
+      "work_reduction_fraction": 0.0
+    },
+    {
+      "plan_index": 13,
+      "templates": 219,
+      "current_padded_templates": 224,
+      "tiled_padded_templates": 224,
+      "current_vector_calls_for_32_blocks": 224,
+      "tiled_vector_calls_for_32_blocks": 224,
+      "vector_calls_saved": 0,
+      "work_reduction_fraction": 0.0
+    },
+    {
+      "plan_index": 14,
+      "templates": 187,
+      "current_padded_templates": 192,
+      "tiled_padded_templates": 192,
+      "current_vector_calls_for_32_blocks": 192,
+      "tiled_vector_calls_for_32_blocks": 192,
+      "vector_calls_saved": 0,
+      "work_reduction_fraction": 0.0
+    },
+    {
+      "plan_index": 15,
+      "templates": 159,
+      "current_padded_templates": 160,
+      "tiled_padded_templates": 160,
+      "current_vector_calls_for_32_blocks": 160,
+      "tiled_vector_calls_for_32_blocks": 160,
+      "vector_calls_saved": 0,
+      "work_reduction_fraction": 0.0
+    },
+    {
+      "plan_index": 16,
+      "templates": 196,
+      "current_padded_templates": 224,
+      "tiled_padded_templates": 200,
+      "current_vector_calls_for_32_blocks": 224,
+      "tiled_vector_calls_for_32_blocks": 200,
+      "vector_calls_saved": 24,
+      "work_reduction_fraction": 0.10714285714285714
+    },
+    {
+      "plan_index": 17,
+      "templates": 159,
+      "current_padded_templates": 160,
+      "tiled_padded_templates": 160,
+      "current_vector_calls_for_32_blocks": 160,
+      "tiled_vector_calls_for_32_blocks": 160,
+      "vector_calls_saved": 0,
+      "work_reduction_fraction": 0.0
+    },
+    {
+      "plan_index": 18,
+      "templates": 254,
+      "current_padded_templates": 256,
+      "tiled_padded_templates": 256,
+      "current_vector_calls_for_32_blocks": 256,
+      "tiled_vector_calls_for_32_blocks": 256,
+      "vector_calls_saved": 0,
+      "work_reduction_fraction": 0.0
+    },
+    {
+      "plan_index": 19,
+      "templates": 140,
+      "current_padded_templates": 160,
+      "tiled_padded_templates": 144,
+      "current_vector_calls_for_32_blocks": 160,
+      "tiled_vector_calls_for_32_blocks": 144,
+      "vector_calls_saved": 16,
+      "work_reduction_fraction": 0.1
+    },
+    {
+      "plan_index": 20,
+      "templates": 156,
+      "current_padded_templates": 160,
+      "tiled_padded_templates": 160,
+      "current_vector_calls_for_32_blocks": 160,
+      "tiled_vector_calls_for_32_blocks": 160,
+      "vector_calls_saved": 0,
+      "work_reduction_fraction": 0.0
+    },
+    {
+      "plan_index": 21,
+      "templates": 156,
+      "current_padded_templates": 160,
+      "tiled_padded_templates": 160,
+      "current_vector_calls_for_32_blocks": 160,
+      "tiled_vector_calls_for_32_blocks": 160,
+      "vector_calls_saved": 0,
+      "work_reduction_fraction": 0.0
+    },
+    {
+      "plan_index": 22,
+      "templates": 173,
+      "current_padded_templates": 192,
+      "tiled_padded_templates": 176,
+      "current_vector_calls_for_32_blocks": 192,
+      "tiled_vector_calls_for_32_blocks": 176,
+      "vector_calls_saved": 16,
+      "work_reduction_fraction": 0.08333333333333333
+    },
+    {
+      "plan_index": 23,
+      "templates": 156,
+      "current_padded_templates": 160,
+      "tiled_padded_templates": 160,
+      "current_vector_calls_for_32_blocks": 160,
+      "tiled_vector_calls_for_32_blocks": 160,
+      "vector_calls_saved": 0,
+      "work_reduction_fraction": 0.0
+    },
+    {
+      "plan_index": 24,
+      "templates": 193,
+      "current_padded_templates": 224,
+      "tiled_padded_templates": 200,
+      "current_vector_calls_for_32_blocks": 224,
+      "tiled_vector_calls_for_32_blocks": 200,
+      "vector_calls_saved": 24,
+      "work_reduction_fraction": 0.10714285714285714
+    },
+    {
+      "plan_index": 25,
+      "templates": 80,
+      "current_padded_templates": 96,
+      "tiled_padded_templates": 80,
+      "current_vector_calls_for_32_blocks": 96,
+      "tiled_vector_calls_for_32_blocks": 80,
+      "vector_calls_saved": 16,
+      "work_reduction_fraction": 0.16666666666666666
+    },
+    {
+      "plan_index": 26,
+      "templates": 162,
+      "current_padded_templates": 192,
+      "tiled_padded_templates": 168,
+      "current_vector_calls_for_32_blocks": 192,
+      "tiled_vector_calls_for_32_blocks": 168,
+      "vector_calls_saved": 24,
+      "work_reduction_fraction": 0.125
+    }
+  ],
+  "forced_4data_tile_small_group_cost_ratio": {
+    "1": 3.7974683544303796,
+    "2": 1.8987341772151898,
+    "3": 1.2658227848101267
+  }
+}
