@@ -170,18 +170,15 @@ C cload(StructuredBuffer<CVal> b, uint i) { return b[i]; }
 #else
 [[vk::binding(5, 0)]] StructuredBuffer<uint> gRowWin;
 #endif
-//: The window of data row d for this kernel: raw, or mapped onto the band
-//: exactly as the host maps one window (cstart/cend in _vkcompute).
+//: The window of data row d for this kernel, as the buffer holds it: a coarse tier's
+//: already mapped onto its band by the host (_vkcompute._band_windows). Mapping it here
+//: (a mode 2, since removed) made the band-256 coarse kernel 1.47x slower at SIMD16 on
+//: an Iris Xe, for a handful of integer operations per pair.
 void rowWindow(uint d, inout uint winStart, inout uint winEnd)
 {
     if (mfRowWindows == 0u) return;
-    uint lo = gRowWin[2u * d], hi = gRowWin[2u * d + 1u];
-    if (mfRowWindows == 1u) { winStart = lo; winEnd = hi; return; }
-    uint rr = ((mfFullLength != 0u) ? mfFullLength : mfDataStride) / N;
-    uint cs = lo / rr, ce = min(N, (hi + rr - 1u) / rr);
-    if (cs > 0u) cs -= 1u;
-    ce = max(cs + 1u, ce);
-    winStart = cs; winEnd = ce;
+    winStart = gRowWin[2u * d];
+    winEnd = gRowWin[2u * d + 1u];
 }
 #else
 void rowWindow(uint d, inout uint winStart, inout uint winEnd) {}
@@ -1040,11 +1037,12 @@ void filterPair(uint pair, uint tid,
 #endif
         GroupMemoryBarrierWithGroupSync();
         const uint wslot = stg[_stgBase+1];
-        if (winner != 0xffffffffu && winner == wslot) {
+        // NOPAIR: a ragged group's spare slot (filterPair), computed for its barriers only.
+        if (pair != NOPAIR && winner != 0xffffffffu && winner == wslot) {
             peakIdx[pair] = int(slotToIndex(wslot));
             peakVal[pair] = c16Bound(float2(float(bestV.x), float(bestV.y)), energy);
         }
-        if (tid == 0 && wslot == 0xffffffffu) {
+        if (pair != NOPAIR && tid == 0 && wslot == 0xffffffffu) {
             peakIdx[pair] = -1;
             peakVal[pair] = float2(0, 0);
         }
@@ -1621,6 +1619,19 @@ void filterPair(uint pair, uint tid,
     uint q = slotOk ? pair : slots - 1u;
     uint d = q / tiles, t0 = (q - d * tiles) * TILE_T;
     uint p0 = d * ntmpl + t0;
+    rowWindow(d, winStart, winEnd);
+#elif defined(MF_VULKAN) && COARSE16 && PPG > 1
+    // RAGGED GROUPS (Vulkan, untiled): the host passes the row count in `binsize` and
+    // dispatches ceil(rows * ntmpl / PPG) groups, so any pair count keeps the packing. A
+    // slot past the last pair recomputes that pair (every barrier is the group's) and
+    // writes nothing. The exact-divisor rule this replaces ran every odd pair count at one
+    // pair per group: 10 of 27 fine groups of a production segment, where sg16 ppg1 is
+    // 1.7x the time per pair of ppg4 on an Iris Xe.
+    uint pairs = binsize * ntmpl;
+    bool slotOk = pair < pairs;
+    uint q = slotOk ? pair : pairs - 1u;
+    uint p0 = slotOk ? q : NOPAIR;
+    uint d = q / ntmpl, t0 = q - d * ntmpl;
     rowWindow(d, winStart, winEnd);
 #else
     uint p0 = pair * TILE_T;

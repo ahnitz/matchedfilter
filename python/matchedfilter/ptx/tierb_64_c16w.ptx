@@ -171,7 +171,7 @@
 	.local .align 4 .b8 	__local_depot0[28];
 	.reg .b64 	%SP;
 	.reg .b64 	%SPL;
-	.reg .pred 	%p<251>;
+	.reg .pred 	%p<255>;
 	.reg .b16 	%rs<1121>;
 	.reg .f32 	%f<444>;
 	.reg .b32 	%r<963>;
@@ -4177,20 +4177,22 @@ $L__BB0_109:
 
 $L__BB0_111:
 	ld.param.u64 	%rd119, [fusedTierB_param_3];
-	mov.u32 	%r881, %ctaid.x;
 	ld.param.u64 	%rd118, [fusedTierB_param_2];
+	mov.u32 	%r881, %ctaid.x;
 	bar.sync 	0;
+	setp.eq.s32 	%p243, %r903, -1;
+	setp.eq.s32 	%p244, %r881, -1;
+	or.pred  	%p245, %p244, %p243;
 	ld.shared.u32 	%r212, [stg_0+4];
-	setp.ne.s32 	%p243, %r903, %r212;
-	setp.eq.s32 	%p244, %r903, -1;
+	setp.ne.s32 	%p246, %r903, %r212;
 	cvta.to.global.u64 	%rd113, %rd118;
 	mul.wide.u32 	%rd114, %r881, 4;
 	add.s64 	%rd14, %rd113, %rd114;
 	cvta.to.global.u64 	%rd115, %rd119;
 	mul.wide.u32 	%rd116, %r881, 8;
 	add.s64 	%rd15, %rd115, %rd116;
-	or.pred  	%p245, %p244, %p243;
-	@%p245 bra 	$L__BB0_117;
+	or.pred  	%p247, %p245, %p246;
+	@%p247 bra 	$L__BB0_117;
 
 	shr.u32 	%r872, %r903, 1;
 	and.b32  	%r873, %r903, 1;
@@ -4209,8 +4211,8 @@ $L__BB0_111:
 
 	// end inline asm
 	ld.const.u32 	%r879, [mf_c16_raw];
-	setp.eq.s32 	%p246, %r879, 1;
-	@%p246 bra 	$L__BB0_116;
+	setp.eq.s32 	%p248, %r879, 1;
+	@%p248 bra 	$L__BB0_116;
 
 	mul.f32 	%f429, %f443, %f443;
 	fma.rn.f32 	%f430, %f442, %f442, %f429;
@@ -4219,8 +4221,8 @@ $L__BB0_111:
 	sqrt.rn.f32 	%f432, %f431;
 	mul.f32 	%f433, %f432, 0f3BB4154D;
 	fma.rn.f32 	%f30, %f29, 0f3F803000, %f433;
-	setp.gt.f32 	%p247, %f29, 0f00000000;
-	@%p247 bra 	$L__BB0_115;
+	setp.gt.f32 	%p249, %f29, 0f00000000;
+	@%p249 bra 	$L__BB0_115;
 	bra.uni 	$L__BB0_114;
 
 $L__BB0_115:
@@ -4238,10 +4240,11 @@ $L__BB0_116:
 
 $L__BB0_117:
 	mov.u32 	%r886, %tid.x;
-	setp.ne.s32 	%p248, %r886, 0;
-	setp.ne.s32 	%p249, %r212, -1;
-	or.pred  	%p250, %p248, %p249;
-	@%p250 bra 	$L__BB0_119;
+	setp.ne.s32 	%p251, %r886, 0;
+	or.pred  	%p252, %p244, %p251;
+	setp.ne.s32 	%p253, %r212, -1;
+	or.pred  	%p254, %p252, %p253;
+	@%p254 bra 	$L__BB0_119;
 
 	mov.u32 	%r880, -1;
 	st.global.u32 	[%rd14], %r880;
