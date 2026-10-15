@@ -8,16 +8,13 @@
 // length. The hierarchical stages read their band straight out of the full
 // n-point spectra (stride n) instead of a packed band copy.
 [[vk::constant_id(75)]] const uint mfDataStride = 0;
-// Per-row search windows (hier_peaks_grouped): 0 off, 1 the row's raw window
-// [lo, hi), 2 that window mapped onto this kernel's coarse band. The rows'
-// (lo, hi) come from the gRowWin buffer.
+// Per-row search windows (hier_peaks_grouped): 0 off, 1 the row's window [lo, hi) from
+// the gRowWin buffer, in this kernel's own samples (a coarse tier's mapped onto its band
+// by the host).
 [[vk::constant_id(76)]] const uint mfRowWindows = 0;
 // The fp16 coarse tier's error bound (C16_KAPPA): 1 applies it (the default the host
 // uses), 0 reports the raw fp16 maximum -- for measuring the bound's margin use only.
 [[vk::constant_id(77)]] const uint mfC16Bound = 1;
-// The transform length behind the data rows when they are band rows (stride B < n) of
-// the band-only forward; 0: the stride is the length (mfDataStride).
-[[vk::constant_id(78)]] const uint mfFullLength = 0;
 // The fp16 coarse tier's data scale, as float bits (1.0 by default): an exact power of
 // two applied to each data element before it is rounded to half (tierb.slang dload), so
 // the tier's values sit where fp16 holds them whatever the caller's units. The host
@@ -26,7 +23,6 @@
 #elif defined(MF_CUDA)
 static const uint mfDataStride = 0;
 static const uint mfRowWindows = 0;
-static const uint mfFullLength = 0;
 static const uint mfDataScaleBits = 0x3f800000u;
 // The fp16 bound switch (constant 77 on Vulkan) as a module __constant__ the host writes
 // (cuModuleGetGlobal "mf_c16_raw"): zero-initialized, so the bound applies unless the host
@@ -44,7 +40,6 @@ static const uint mfSubgroupSize = 32;
 #elif defined(MF_METAL)
 static const uint mfDataStride = 0;
 static const uint mfRowWindows = 0;
-static const uint mfFullLength = 0;
 static const uint mfDataScaleBits = 0x3f800000u;
 // The fp16 bound switch (constant 77 on Vulkan) as an MSL preprocessor macro the host sets
 // when it compiles the library (MTLCompileOptions.preprocessorMacros, MF_C16_RAW=1 when
@@ -62,7 +57,6 @@ static const uint mfSubgroupSize = 32;
 #else
 static const uint mfDataStride = 0;
 static const uint mfRowWindows = 0;
-static const uint mfFullLength = 0;
 static const uint mfDataScaleBits = 0x3f800000u;
 static const uint mfC16Bound = 1;
 static const uint mfAccurateTrig = 0;

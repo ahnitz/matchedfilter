@@ -332,3 +332,41 @@ def test_gpu_kernel_choices_carry_the_shipped_kernel_sources(monkeypatch, tmp_pa
     monkeypatch.setattr(gc, "_GPU_KERNEL_ID", None)
     monkeypatch.setattr(gc, "__file__", str(tmp_path / "gatechain.py"))
     assert gc.gpu_kernel_id() not in ("", want)
+
+
+def test_a_burst_during_one_stage_does_not_decide_a_coarse_layout():
+    """The Iris Xe case: the untiled layouts were timed while other work held the shared
+    GPU, the tiled ones after it ended, and the store kept a tiled layout 4.3x slower.
+    Interleaved rounds put a burst into one round of every candidate, and the paired
+    confirmation of each stage's fastest undoes a burst that covered a whole stage."""
+    from matchedfilter import _coarse
+    true = {"u1": 1.0, "u2": 1.1, "t2": 4.3}
+    clock = {"n": 0, "burst": range(0, 6)}         # the first six timings run 5x slow
+
+    def time_one(c):
+        k = clock["n"]
+        clock["n"] += 1
+        return true[c] * (5.0 if k in clock["burst"] else 1.0)
+
+    untiled = _coarse.interleaved_min(["u1", "u2"], time_one, 3)   # 6 timings: all in the burst
+    assert untiled["u1"] > true["t2"]                               # the trap
+    tiled = _coarse.interleaved_min(["t2"], time_one, 3)
+    times = dict(untiled, **tiled)
+    assert min(times, key=times.get) == "t2"
+    times = _coarse.confirm_fastest(times, time_one, rivals=["u1", "t2"])
+    assert min(times, key=times.get) == "u1"
+    assert abs(times["u1"] / times["t2"] - true["u1"] / true["t2"]) < 1e-9
+
+
+def test_interleaved_rounds_take_each_candidates_best_round():
+    from matchedfilter import _coarse
+    seq, calls = iter([5.0, 2.0, 1.0, 3.0, 4.0, 4.0]), []
+
+    def time_one(c):
+        calls.append(c)
+        return next(seq)
+
+    t = _coarse.interleaved_min(["a", "b"], time_one, 3)
+    assert calls == ["a", "b", "b", "a", "a", "b"]          # the order reverses each round
+    assert t == {"a": 3.0, "b": 1.0}
+    assert _coarse.interleaved_min(["a"], lambda c: None, 2) is None

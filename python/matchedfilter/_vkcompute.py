@@ -136,6 +136,22 @@ def _c16_threshold_exp(band):
     return max(C16_THRESHOLD_EXP, int(band).bit_length() - 1 + C16_BAND_EXP)
 
 
+def _band_windows(rowwin, n, band):
+    """Per-row windows [lo, hi) in samples of an n-point transform, mapped onto a coarse band
+    as the host maps one window (cstart/cend): band samples [lo // R - 1, ceil(hi / R)) with
+    R = n // band, clamped to the band, at least one sample. The coarse tiers read these as
+    they are (row windows mode 1). Mapped in the kernel instead, the same arithmetic made the
+    band-256 coarse kernel 1.47x slower at SIMD16 on an Iris Xe, and its rows' windows are
+    fixed with the storage they belong to."""
+    rr = n // band
+    w = np.asarray(rowwin, np.uint32).reshape(-1, 2).astype(np.int64)
+    cs = w[:, 0] // rr
+    ce = np.minimum(band, (w[:, 1] + rr - 1) // rr)
+    cs = np.where(cs > 0, cs - 1, cs)
+    ce = np.maximum(cs + 1, ce)
+    return np.ascontiguousarray(np.stack([cs, ce], 1).astype(np.uint32))
+
+
 def _c16_scales(ct0, raw_thr, band=None):
     """(template exponent, data exponent) for the fp16 coarse tier: ct0 is packed times
     2^et, each data element is multiplied by 2^ed before it is rounded to half (constant 79),
@@ -167,6 +183,7 @@ def _pow2_scaled(a, e):
 
 
 from ._coarse import coarse_launch   # noqa: E402,F401  (shared with Metal; re-exported)
+from ._coarse import confirm_fastest, interleaved_min   # noqa: E402
 from ._coarse import coarse_stem, shipped_tiles, forced_tile   # noqa: E402
 
 
@@ -1444,7 +1461,7 @@ class Context(InputUploads):
         return "tierb_%d.spv" % n
 
     def _build_pipeline(self, key, filename, nbind, push_bytes, data_stride=0, row_windows=0,
-                        subgroup=0, full_length=0, data_scale=0):
+                        subgroup=0, data_scale=0):
         """data_stride: specialization constant 75 (mfDataStride), the data spectra's row
         stride when a hierarchical stage reads its band straight out of them.
         row_windows: constant 76 (mfRowWindows), per-row windows from the gRowWin binding.
@@ -1452,8 +1469,8 @@ class Context(InputUploads):
         The set layout covers every binding the MODULE declares, which can exceed the
         caller's count (gRowWin); _descriptor_set fills such trailing bindings with a
         dummy buffer."""
-        if data_stride or row_windows or full_length:
-            key = (key, "stride", data_stride, "rowwin", row_windows, "n", full_length)
+        if data_stride or row_windows:
+            key = (key, "stride", data_stride, "rowwin", row_windows)
         if data_scale:
             key = (key, "dscale", int(data_scale))
         raw_c16 = os.environ.get("MF_VK_C16_BOUND", "1") == "0"
@@ -1544,10 +1561,6 @@ class Context(InputUploads):
         if row_windows:
             entries.append(_SpecializationEntry(76, offset, 4))
             data_vals.append(int(row_windows))
-            offset += 4
-        if full_length:
-            entries.append(_SpecializationEntry(78, offset, 4))
-            data_vals.append(int(full_length))
             offset += 4
         if data_scale:
             # The fp16 coarse tier's data scale 2^data_scale, as float bits (constant 79).
@@ -2024,17 +2037,19 @@ class Context(InputUploads):
         (_coarse_choice). A tiled build takes RAGGED tiles: each slot covers TILE_T
         templates of one data row and the row's last tile is clamped inside the kernel, so
         any template count and any group count work -- the host passes the row count and
-        dispatches ceil(rows * ceil(nt/TILE_T) / PPG) groups. Untiled builds keep exact
-        geometry: the largest built PPG up to the chosen one that divides the pair count.
+        dispatches ceil(rows * ceil(nt/TILE_T) / PPG) groups. An untiled build with PPG > 1
+        takes RAGGED groups the same way (ceil(rows * nt / PPG) groups), so the chosen
+        packing holds at any pair count. The rule it replaces -- the largest PPG that
+        divides the pair count -- ran 10 of a production segment's 27 fine groups (odd
+        counts) at one pair per group, which on the Iris Xe cancelled a 1.45x coarse gain.
         """
         sg, ppg, tile = self._coarse_choice(band)
         if tile > 1:
             return sg, ppg, tile, coarse_launch(nd, nt, ppg, tile, 0)[1], True
-        pairs = nd * nt
         for p in (32, 16, 8, 4, 2, 1):
-            if p <= ppg and pairs % p == 0 and _spv_shipped(coarse_stem(band, p, 1)):
-                return sg, p, 1, pairs // p, False
-        return sg, 1, 1, pairs, False
+            if p <= ppg and _spv_shipped(coarse_stem(band, p, 1)):
+                return sg, p, 1, coarse_launch(nd, nt, p, 1, 0, ragged_groups=True)[1], p > 1
+        return sg, 1, 1, nd * nt, False
 
     def _coarse_layouts(self, band):
         """Every coarse layout (subgroup, ppg, tile) this device can run at this band: the
@@ -2105,12 +2120,14 @@ class Context(InputUploads):
         return memo[k]
 
     def _time_coarse_layouts(self, band, cands, pairs=16384, screen=1024, ntm=16, reps=3):
-        """Device ns per pair of each coarse layout on synthetic data (min of reps - 1 after a
-        warm-up), in self.coarse_times[band] for reports. Every candidate is first timed on
-        `screen` pairs and only those within 4x of the fastest are timed on `pairs`: some
-        layouts are pathological on some devices (band 256 at subgroup 32 on the Iris Xe:
-        ~240 us per pair), and a full-size dispatch of one can run long enough for the
-        driver to reset the device."""
+        """Device ns per pair of each coarse layout on synthetic data, in
+        self.coarse_times[band] for reports. Every candidate is first timed on `screen` pairs
+        and only those within 4x of the fastest are timed on `pairs`: some layouts are
+        pathological on some devices (band 256 at subgroup 32 on the Iris Xe: ~240 us per
+        pair), and a full-size dispatch of one can run long enough for the driver to reset
+        the device. Each stage times its candidates in `reps` interleaved rounds (a warm-up
+        and one timed dispatch each, min over rounds), and the contenders are then confirmed
+        against the fastest, paired (_coarse.confirm_fastest): the GPU may be shared."""
         ndm = pairs // ntm
         rng = np.random.default_rng(0)
         x = ((rng.standard_normal((ndm, band)) + 1j * rng.standard_normal((ndm, band)))
@@ -2123,21 +2140,29 @@ class Context(InputUploads):
         timer = ds.__dict__.get("fuse_timer")
         if timer is None:
             timer = ds.fuse_timer = _DeviceTimer(ds)
+        full = lambda c: self._time_coarse_layout(band, c, bufs, timer, ndm, ntm, 2)
         def timed(cs):
-            small = {c: self._time_coarse_layout(band, c, bufs, timer, screen // ntm, ntm, reps)
-                     for c in cs}
+            small = interleaved_min(
+                cs, lambda c: self._time_coarse_layout(band, c, bufs, timer, screen // ntm, ntm, 2),
+                reps)
             best = min(small.values())
-            return {c: (self._time_coarse_layout(band, c, bufs, timer, ndm, ntm, reps)
-                        if t <= 4 * best else t) for c, t in small.items()}
+            small.update(interleaved_min([c for c in cs if small[c] <= 4 * best], full, reps))
+            return small
         try:
             # Staged, because building a pipeline is most of the cost (a tiled build took up
             # to 50 s on the Iris Xe): every untiled (subgroup, ppg) first, then the tiles at
             # the two fastest of those.
             untiled = [c for c in cands if c[2] == 1]
             out = timed(untiled or cands)
+            rivals = [min(out, key=out.get)]
             if untiled and len(untiled) < len(cands):
                 lead = {c[:2] for c in sorted(out, key=out.get)[:2]}
-                out.update(timed([c for c in cands if c[2] > 1 and c[:2] in lead]))
+                tiles = [c for c in cands if c[2] > 1 and c[:2] in lead]
+                if tiles:
+                    tiled = timed(tiles)
+                    out.update(tiled)
+                    rivals.append(min(tiled, key=tiled.get))
+            out = confirm_fastest(out, full, rivals=rivals)
         finally:
             for b in bufs:
                 b.destroy()
@@ -2152,7 +2177,7 @@ class Context(InputUploads):
             ("coarse16", band, ppg, tile), coarse_stem(band, ppg, tile) + ".spv",
             _NBIND, _PUSH_BYTES, data_stride=band, subgroup=sg)
         dset = self._descriptor_set(set_layout, bufs)
-        slot_val, groups = coarse_launch(ndm, ntm, ppg, tile, band)
+        slot_val, groups = coarse_launch(ndm, ntm, ppg, tile, band, ragged_groups=True)
         cmd = _vp()
         _check(vk.vkAllocateCommandBuffers(self.device, ctypes.byref(
             _CmdBufAlloc(40, None, self.command_pool, 0, 1)), ctypes.byref(cmd)),
@@ -2205,9 +2230,9 @@ class Context(InputUploads):
             # -- that is the flat filter's full-precision build of the same
             # entry, and handing it packed buffers makes it read 4-byte
             # elements as 8-byte ones: every peak comes back -1.
-            # Four pairs per workgroup where the count allows it. A partial
-            # group would index past the data buffer, so the fallback is not
-            # optional -- it is what makes the fast build safe to ship.
+            # Several pairs per workgroup at any pair count: the last group is
+            # ragged (its spare slots recompute the last pair and write nothing),
+            # where an exact-divisor fallback once ran odd counts at one pair.
             # Fill exactly one wave32 and no more. WG = band/16, so
             # PPG = 32/WG = 512/band. Measured at band 128 (WG 8): 1.911 ->
             # 0.932 ms, 2.05x. Beyond a full wave it does not pay -- band
@@ -2236,8 +2261,8 @@ class Context(InputUploads):
                     "p%d" % _ppg if _ppg > 1 else "",
                     "t%d" % _tile if _tile > 1 else ""),
                 _NBIND, _PUSH_BYTES, data_stride=bands[0] if bands else n,
-                row_windows=2 if rowwin is not None else 0, full_length=n if bands else 0,
-                subgroup=_sg, data_scale=data_scale)
+                row_windows=1 if rowwin is not None else 0, subgroup=_sg,
+                data_scale=data_scale)
         # gatedTierB is NOT built. Its only caller was coarse_odd(), the
         # last remnant of the even/odd split, which was never invoked after
         # the odd half was removed -- so the kernel was compiled on every
@@ -2276,16 +2301,20 @@ class Context(InputUploads):
                     raise ValueError("per-row windows need the packed coarse role")
                 b["rowwin"] = _Buffer(self, rowwin.nbytes)
                 b["rowwin"].write(rowwin)
+                cw = _band_windows(rowwin, n, band)
+                b["rowwin_c"] = _Buffer(self, cw.nbytes)
+                b["rowwin_c"].write(cw)
             if bands:
                 if not direct:
                     raise ValueError("band rows need the packed coarse role")
                 self._band_storage(b, nd, bands[0])
             self._storage[key] = b
         rwb = [b["rowwin"]] if rowwin is not None else []
+        rwc = [b["rowwin_c"]] if rowwin is not None else []
         ds_coarse = self._descriptor_set(cset_layout,
                                        [(b["bands"] if bands else b["data"]) if direct
                                         else b["cdata"], b["ct0"],
-                                        b["cidx"], b["cval"]] + rwb)
+                                        b["cidx"], b["cval"]] + rwc)
         ds_compact = self._descriptor_set(
             kset_layout, [b["cval"], b["surv"], b["args"]])
         ds_listed = self._descriptor_set(
@@ -2426,11 +2455,12 @@ class Context(InputUploads):
                            t2, raw_thr0, raw_thr1, data=None, tmpl=None, clear_out=True,
                            rowwin=None, bands=None, data_scale=0):
         vk = self.vk
-        rwc, rwr = (2, 1) if rowwin is not None else (0, 0)   # coarse / raw row windows
+        # Row windows, mode 1 for every tier: the coarse tiers' mapped onto their band on the
+        # host (_band_windows), the refine's raw.
+        rwc, rwr = (1, 1) if rowwin is not None else (0, 0)
         # bands: the coarse tiers read band rows of width B (the band-only forward's) instead
         # of the full spectra, and the refine's survivor rows are recomputed first.
         dstride = bands[0] if bands else n
-        flen = n if bands else 0
         _sg0, _ppg0, _tile0, _groups0, _ragged0 = self._coarse_geometry(band0, nd, nt)
 
         cpipe0, clayout0, cset_layout0 = self._build_pipeline(
@@ -2438,7 +2468,7 @@ class Context(InputUploads):
             "tierb_%d_c16%s%s.spv" % (band0,
                 "p%d" % _ppg0 if _ppg0 > 1 else "",
                 "t%d" % _tile0 if _tile0 > 1 else ""),
-            _NBIND, _PUSH_BYTES, data_stride=dstride, row_windows=rwc, full_length=flen,
+            _NBIND, _PUSH_BYTES, data_stride=dstride, row_windows=rwc,
             subgroup=_sg0, data_scale=data_scale)
 
         kpipe, klayout, kset_layout = self._build_pipeline(
@@ -2447,7 +2477,7 @@ class Context(InputUploads):
         refine_file1 = self._peak_file(band1, 1, refine=True)
         cpipe1, clayout1, cset_layout1 = self._build_pipeline(
             ("refine", refine_file1), refine_file1, 5, _PUSH_BYTES, data_stride=dstride,
-            row_windows=rwc, subgroup=self._fit_subgroup(band1), full_length=flen)
+            row_windows=rwc, subgroup=self._fit_subgroup(band1))
 
         refine_file = self._peak_file(n, nbins, refine=True)
         rpipe, rlayout, rset_layout = self._build_pipeline(
@@ -2478,18 +2508,24 @@ class Context(InputUploads):
             if rowwin is not None:
                 b["rowwin"] = _Buffer(self, rowwin.nbytes)
                 b["rowwin"].write(rowwin)
+                for name, bb in (("rowwin_c0", band0), ("rowwin_c1", band1)):
+                    cw = _band_windows(rowwin, n, bb)
+                    b[name] = _Buffer(self, cw.nbytes)
+                    b[name].write(cw)
             if bands:
                 self._band_storage(b, nd, bands[0])
             self._storage[key] = b
         rwb = [b["rowwin"]] if rowwin is not None else []
+        rw0 = [b["rowwin_c0"]] if rowwin is not None else []
+        rw1 = [b["rowwin_c1"]] if rowwin is not None else []
         cdata = b["bands"] if bands else b["data"]
 
         ds_coarse0 = self._descriptor_set(
-            cset_layout0, [cdata, b["ct0"], b["cidx0"], b["cval0"]] + rwb)
+            cset_layout0, [cdata, b["ct0"], b["cidx0"], b["cval0"]] + rw0)
         ds_compact0 = self._descriptor_set(
             kset_layout, [b["cval0"], b["surv0"], b["args_tier1"]])
         ds_tier1 = self._descriptor_set(
-            cset_layout1, [cdata, b["ct1"], b["cidx1"], b["cval1"], b["surv0"]] + rwb)
+            cset_layout1, [cdata, b["ct1"], b["cidx1"], b["cval1"], b["surv0"]] + rw1)
         lpipe, llayout, lset_layout = self._build_pipeline(
             "compactl", "compactl.spv", 5, 12)
         ds_compact1 = self._descriptor_set(

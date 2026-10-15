@@ -16,9 +16,22 @@ Alpha releases may change the API. Pin a version for reproducible work.
   instructions), and its best layout takes 0.71x the time of 0.1.0a8's best (subgroup 8),
   1.41x coarse throughput. The layout measurement now picks subgroup 16 at every coarse band
   there. Same results.
+- Vulkan fp16 coarse tier, untiled builds with several pairs per workgroup: any pair count
+  keeps the chosen packing (ragged last group; its spare slots compute and write nothing).
+  The largest packing that divided the pair count ran every odd count -- 10 of 27 fine
+  groups of a test27 segment -- at one pair per workgroup: 1.95x the time per pair on a
+  Radeon 8060S (half-empty wave32s), 1.7x at subgroup 16 on an Iris Xe.
+- Vulkan coarse tiers with per-row windows (every fine-stage call): the windows are mapped
+  onto each coarse band on the host, once per storage set, instead of in the kernel. The
+  in-kernel mapping made the band-256 kernel 1.47x slower at subgroup 16 on an Iris Xe (no
+  effect at 8), so production never saw the subgroup-16 gain above.
 
 ### Fixed
 
+- Coarse layout measurement (Vulkan, CUDA, Metal) times its candidates in interleaved rounds
+  and confirms the contenders against the fastest, paired, instead of timing each
+  candidate's repetitions back to back. On a shared GPU one burst of other work during the
+  untiled stage stored a tiled layout 4.3x slower on an Iris Xe, and MF_COST_FILE kept it.
 - Measured GPU kernel choices in `MF_COST_FILE` (coarse layout, tile and subgroup on Vulkan,
   CUDA and Metal; the Vulkan pipeline subgroup and fused-batch interleave) are keyed by the
   kernel sources they timed (`gatechain.gpu_kernel_id`). A cost file written by another

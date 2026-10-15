@@ -171,7 +171,7 @@
 	.local .align 4 .b8 	__local_depot0[28];
 	.reg .b64 	%SP;
 	.reg .b64 	%SPL;
-	.reg .pred 	%p<335>;
+	.reg .pred 	%p<339>;
 	.reg .b16 	%rs<1675>;
 	.reg .f32 	%f<705>;
 	.reg .b32 	%r<1707>;
@@ -6450,20 +6450,22 @@ $L__BB0_261:
 
 $L__BB0_263:
 	ld.param.u64 	%rd268, [fusedTierB_param_3];
-	mov.u32 	%r1551, %ctaid.x;
 	ld.param.u64 	%rd267, [fusedTierB_param_2];
+	mov.u32 	%r1551, %ctaid.x;
 	bar.sync 	0;
+	setp.eq.s32 	%p327, %r1647, -1;
+	setp.eq.s32 	%p328, %r1551, -1;
+	or.pred  	%p329, %p328, %p327;
 	ld.shared.u32 	%r407, [stg_0+4];
-	setp.ne.s32 	%p327, %r1647, %r407;
-	setp.eq.s32 	%p328, %r1647, -1;
+	setp.ne.s32 	%p330, %r1647, %r407;
 	cvta.to.global.u64 	%rd263, %rd267;
 	mul.wide.u32 	%rd264, %r1551, 4;
 	add.s64 	%rd35, %rd263, %rd264;
 	cvta.to.global.u64 	%rd265, %rd268;
 	mul.wide.u32 	%rd266, %r1551, 8;
 	add.s64 	%rd36, %rd265, %rd266;
-	or.pred  	%p329, %p328, %p327;
-	@%p329 bra 	$L__BB0_269;
+	or.pred  	%p331, %p329, %p330;
+	@%p331 bra 	$L__BB0_269;
 
 	shr.u32 	%r1523, %r1647, 1;
 	and.b32  	%r1524, %r1647, 1;
@@ -6485,8 +6487,8 @@ $L__BB0_263:
 
 	// end inline asm
 	ld.const.u32 	%r1533, [mf_c16_raw];
-	setp.eq.s32 	%p330, %r1533, 1;
-	@%p330 bra 	$L__BB0_268;
+	setp.eq.s32 	%p332, %r1533, 1;
+	@%p332 bra 	$L__BB0_268;
 
 	mul.f32 	%f684, %f704, %f704;
 	fma.rn.f32 	%f685, %f703, %f703, %f684;
@@ -6495,8 +6497,8 @@ $L__BB0_263:
 	sqrt.rn.f32 	%f687, %f686;
 	mul.f32 	%f688, %f687, 0f3C0CB08A;
 	fma.rn.f32 	%f53, %f52, 0f3F803000, %f688;
-	setp.gt.f32 	%p331, %f52, 0f00000000;
-	@%p331 bra 	$L__BB0_267;
+	setp.gt.f32 	%p333, %f52, 0f00000000;
+	@%p333 bra 	$L__BB0_267;
 	bra.uni 	$L__BB0_266;
 
 $L__BB0_267:
@@ -6514,10 +6516,11 @@ $L__BB0_268:
 
 $L__BB0_269:
 	mov.u32 	%r1552, %tid.x;
-	setp.ne.s32 	%p332, %r1552, 0;
-	setp.ne.s32 	%p333, %r407, -1;
-	or.pred  	%p334, %p332, %p333;
-	@%p334 bra 	$L__BB0_271;
+	setp.ne.s32 	%p335, %r1552, 0;
+	or.pred  	%p336, %p328, %p335;
+	setp.ne.s32 	%p337, %r407, -1;
+	or.pred  	%p338, %p336, %p337;
+	@%p338 bra 	$L__BB0_271;
 
 	mov.u32 	%r1534, -1;
 	st.global.u32 	[%rd35], %r1534;

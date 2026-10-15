@@ -171,7 +171,7 @@
 	.local .align 4 .b8 	__local_depot0[28];
 	.reg .b64 	%SP;
 	.reg .b64 	%SPL;
-	.reg .pred 	%p<184>;
+	.reg .pred 	%p<188>;
 	.reg .b16 	%rs<1633>;
 	.reg .f32 	%f<705>;
 	.reg .b32 	%r<1470>;
@@ -5984,23 +5984,25 @@ $L__BB0_180:
 
 $L__BB0_182:
 	ld.param.u64 	%rd269, [fusedTierB_param_3];
+	ld.param.u64 	%rd268, [fusedTierB_param_2];
 	mov.u32 	%r1379, %ctaid.x;
 	mov.u32 	%r1378, %tid.x;
 	shr.u32 	%r1377, %r1378, 6;
 	shl.b32 	%r1376, %r1379, 2;
 	add.s32 	%r1375, %r1376, %r1377;
-	ld.param.u64 	%rd268, [fusedTierB_param_2];
 	bar.sync 	0;
+	setp.eq.s32 	%p176, %r1375, -1;
+	or.pred  	%p177, %p176, %p174;
 	ld.shared.u32 	%r256, [%rd35+4];
-	setp.ne.s32 	%p176, %r255, %r256;
+	setp.ne.s32 	%p178, %r255, %r256;
 	cvta.to.global.u64 	%rd264, %rd268;
 	mul.wide.u32 	%rd265, %r1375, 4;
 	add.s64 	%rd36, %rd264, %rd265;
 	cvta.to.global.u64 	%rd266, %rd269;
 	mul.wide.u32 	%rd267, %r1375, 8;
 	add.s64 	%rd37, %rd266, %rd267;
-	or.pred  	%p177, %p174, %p176;
-	@%p177 bra 	$L__BB0_188;
+	or.pred  	%p179, %p177, %p178;
+	@%p179 bra 	$L__BB0_188;
 
 	shr.u32 	%r1348, %r255, 1;
 	and.b32  	%r1349, %r255, 1;
@@ -6022,8 +6024,8 @@ $L__BB0_182:
 
 	// end inline asm
 	ld.const.u32 	%r1358, [mf_c16_raw];
-	setp.eq.s32 	%p178, %r1358, 1;
-	@%p178 bra 	$L__BB0_187;
+	setp.eq.s32 	%p180, %r1358, 1;
+	@%p180 bra 	$L__BB0_187;
 
 	mul.f32 	%f684, %f704, %f704;
 	fma.rn.f32 	%f685, %f703, %f703, %f684;
@@ -6032,8 +6034,8 @@ $L__BB0_182:
 	sqrt.rn.f32 	%f687, %f686;
 	mul.f32 	%f688, %f687, 0f3C0CB08A;
 	fma.rn.f32 	%f53, %f52, 0f3F803000, %f688;
-	setp.gt.f32 	%p179, %f52, 0f00000000;
-	@%p179 bra 	$L__BB0_186;
+	setp.gt.f32 	%p181, %f52, 0f00000000;
+	@%p181 bra 	$L__BB0_186;
 	bra.uni 	$L__BB0_185;
 
 $L__BB0_186:
@@ -6052,10 +6054,11 @@ $L__BB0_187:
 $L__BB0_188:
 	mov.u32 	%r1389, %tid.x;
 	and.b32  	%r1388, %r1389, 63;
-	setp.ne.s32 	%p183, %r1388, 0;
-	setp.ne.s32 	%p181, %r256, -1;
-	or.pred  	%p182, %p183, %p181;
-	@%p182 bra 	$L__BB0_190;
+	setp.ne.s32 	%p187, %r1388, 0;
+	or.pred  	%p184, %p187, %p176;
+	setp.ne.s32 	%p185, %r256, -1;
+	or.pred  	%p186, %p184, %p185;
+	@%p186 bra 	$L__BB0_190;
 
 	mov.u32 	%r1359, -1;
 	st.global.u32 	[%rd36], %r1359;

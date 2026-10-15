@@ -22,7 +22,7 @@ import threading
 
 import numpy as np
 
-from ._coarse import TILE_PROBE
+from ._coarse import TILE_PROBE, confirm_fastest, interleaved_min
 from . import _cuda, _gputime
 from ._cuda import check_cuda
 from ._errors import UnsupportedSize
@@ -1808,30 +1808,35 @@ class Context(InputUploads):
         bufs[1].write(_pack_half2(x[:ntm]), st)
         e0, e1 = self._new_event_timed(), self._new_event_timed()
         ms = ctypes.c_float()
-        best = None
+
+        def time_one(i):
+            fn, wg, ppg, tile = cands[i]
+            check_cuda(self.cuda.cuEventRecord(e0, st), "cuEventRecord")
+            grid, rowarg = self._coarse_grid_for(fn, ndm, ntm, ppg, tile)
+            self._launch(fn, grid, wg,
+                         [bufs[0].dptr, bufs[1].dptr, bufs[2].dptr, bufs[3].dptr,
+                          _u32(ntm), _u32(0), _u32(band),
+                          _u32(band if rowarg is None else rowarg),
+                          _i32(_shift(band)), _u32(1), _u32(0)], stream=st,
+                         label="coarse_choice")
+            check_cuda(self.cuda.cuEventRecord(e1, st), "cuEventRecord")
+            check_cuda(self.cuda.cuEventSynchronize(e1), "cuEventSynchronize")
+            check_cuda(self.cuda.cuEventElapsedTime(ctypes.byref(ms), e0, e1),
+                       "cuEventElapsedTime")
+            return ms.value
+
         try:
-            for fn, wg, ppg, tile in cands:
-                times = []
-                for rep in range(4):
-                    check_cuda(self.cuda.cuEventRecord(e0, st), "cuEventRecord")
-                    grid, rowarg = self._coarse_grid_for(fn, ndm, ntm, ppg, tile)
-                    self._launch(fn, grid, wg,
-                                 [bufs[0].dptr, bufs[1].dptr, bufs[2].dptr, bufs[3].dptr,
-                                  _u32(ntm), _u32(0), _u32(band),
-                                  _u32(band if rowarg is None else rowarg),
-                                  _i32(_shift(band)), _u32(1), _u32(0)], stream=st,
-                                 label="coarse_choice")
-                    check_cuda(self.cuda.cuEventRecord(e1, st), "cuEventRecord")
-                    check_cuda(self.cuda.cuEventSynchronize(e1), "cuEventSynchronize")
-                    check_cuda(self.cuda.cuEventElapsedTime(ctypes.byref(ms), e0, e1),
-                               "cuEventElapsedTime")
-                    if rep:
-                        times.append(ms.value)
-                t = min(times)
-                self.__dict__.setdefault("coarse_times", {}).setdefault(band, {})[self._labels.get(fn.value, "")] = (
-                    t * 1e6 / P)                         # ns per pair, for reports
-                if best is None or t < best[0]:
-                    best = (t, fn, wg, ppg, tile)
+            # A warm-up launch each, then interleaved rounds and a paired confirmation of
+            # the contenders (_coarse: the GPU may be shared).
+            idx = list(range(len(cands)))
+            for i in idx:
+                time_one(i)
+            times = confirm_fastest(interleaved_min(idx, time_one, 3), time_one)
+            for i, t in times.items():
+                self.__dict__.setdefault("coarse_times", {}).setdefault(band, {})[
+                    self._labels.get(cands[i][0].value, "")] = t * 1e6 / P   # ns per pair, for reports
+            i = min(times, key=times.get)
+            best = (times[i],) + tuple(cands[i])
         finally:
             self._sync(st)              # resolves any timed regions of the launches above
             if self._timing:            # the calibration is not the caller's work

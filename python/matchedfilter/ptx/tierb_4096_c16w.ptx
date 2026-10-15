@@ -171,7 +171,7 @@
 	.local .align 4 .b8 	__local_depot0[28];
 	.reg .b64 	%SP;
 	.reg .b64 	%SPL;
-	.reg .pred 	%p<336>;
+	.reg .pred 	%p<340>;
 	.reg .b16 	%rs<1925>;
 	.reg .f32 	%f<644>;
 	.reg .b32 	%r<1779>;
@@ -6828,15 +6828,17 @@ $L__BB0_263:
 $L__BB0_265:
 	mov.u32 	%r1617, %ctaid.x;
 	bar.sync 	0;
+	setp.eq.s32 	%p328, %r1719, -1;
+	setp.eq.s32 	%p329, %r1617, -1;
+	or.pred  	%p330, %p329, %p328;
 	ld.shared.u32 	%r403, [stg_0+4];
-	setp.ne.s32 	%p328, %r1719, %r403;
-	setp.eq.s32 	%p329, %r1719, -1;
+	setp.ne.s32 	%p331, %r1719, %r403;
 	mul.wide.u32 	%rd250, %r1617, 4;
 	add.s64 	%rd33, %rd29, %rd250;
 	mul.wide.u32 	%rd251, %r1617, 8;
 	add.s64 	%rd34, %rd30, %rd251;
-	or.pred  	%p330, %p329, %p328;
-	@%p330 bra 	$L__BB0_271;
+	or.pred  	%p332, %p330, %p331;
+	@%p332 bra 	$L__BB0_271;
 
 	shl.b32 	%r1595, %r1719, 8;
 	and.b32  	%r1596, %r1595, 3840;
@@ -6855,8 +6857,8 @@ $L__BB0_265:
 
 	// end inline asm
 	ld.const.u32 	%r1602, [mf_c16_raw];
-	setp.eq.s32 	%p331, %r1602, 1;
-	@%p331 bra 	$L__BB0_270;
+	setp.eq.s32 	%p333, %r1602, 1;
+	@%p333 bra 	$L__BB0_270;
 
 	mul.f32 	%f622, %f643, %f643;
 	fma.rn.f32 	%f623, %f642, %f642, %f622;
@@ -6865,8 +6867,8 @@ $L__BB0_265:
 	sqrt.rn.f32 	%f625, %f624;
 	mul.f32 	%f626, %f625, 0f3C39B5DD;
 	fma.rn.f32 	%f54, %f53, 0f3F803000, %f626;
-	setp.gt.f32 	%p332, %f53, 0f00000000;
-	@%p332 bra 	$L__BB0_269;
+	setp.gt.f32 	%p334, %f53, 0f00000000;
+	@%p334 bra 	$L__BB0_269;
 	bra.uni 	$L__BB0_268;
 
 $L__BB0_269:
@@ -6884,10 +6886,11 @@ $L__BB0_270:
 
 $L__BB0_271:
 	mov.u32 	%r1618, %tid.x;
-	setp.ne.s32 	%p333, %r1618, 0;
-	setp.ne.s32 	%p334, %r403, -1;
-	or.pred  	%p335, %p333, %p334;
-	@%p335 bra 	$L__BB0_273;
+	setp.ne.s32 	%p336, %r1618, 0;
+	or.pred  	%p337, %p329, %p336;
+	setp.ne.s32 	%p338, %r403, -1;
+	or.pred  	%p339, %p337, %p338;
+	@%p339 bra 	$L__BB0_273;
 
 	mov.u32 	%r1603, -1;
 	st.global.u32 	[%rd33], %r1603;

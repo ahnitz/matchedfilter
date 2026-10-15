@@ -171,7 +171,7 @@
 	.local .align 4 .b8 	__local_depot0[28];
 	.reg .b64 	%SP;
 	.reg .b64 	%SPL;
-	.reg .pred 	%p<120>;
+	.reg .pred 	%p<124>;
 	.reg .b16 	%rs<1585>;
 	.reg .f32 	%f<641>;
 	.reg .b32 	%r<1090>;
@@ -5313,23 +5313,25 @@ $L__BB0_52:
 
 $L__BB0_54:
 	ld.param.u64 	%rd197, [fusedTierB_param_3];
+	ld.param.u64 	%rd196, [fusedTierB_param_2];
 	mov.u32 	%r1065, %ctaid.x;
 	mov.u32 	%r1064, %tid.x;
 	shr.u32 	%r1063, %r1064, 5;
 	shl.b32 	%r1062, %r1065, 2;
 	add.s32 	%r1061, %r1062, %r1063;
-	ld.param.u64 	%rd196, [fusedTierB_param_2];
 	bar.sync 	0;
+	setp.eq.s32 	%p112, %r1061, -1;
+	or.pred  	%p113, %p112, %p110;
 	ld.shared.u32 	%r114, [%rd27+4];
-	setp.ne.s32 	%p112, %r113, %r114;
+	setp.ne.s32 	%p114, %r113, %r114;
 	cvta.to.global.u64 	%rd192, %rd196;
 	mul.wide.u32 	%rd193, %r1061, 4;
 	add.s64 	%rd28, %rd192, %rd193;
 	cvta.to.global.u64 	%rd194, %rd197;
 	mul.wide.u32 	%rd195, %r1061, 8;
 	add.s64 	%rd29, %rd194, %rd195;
-	or.pred  	%p113, %p110, %p112;
-	@%p113 bra 	$L__BB0_60;
+	or.pred  	%p115, %p113, %p114;
+	@%p115 bra 	$L__BB0_60;
 
 	shr.u32 	%r1046, %r113, 1;
 	and.b32  	%r1047, %r113, 1;
@@ -5348,8 +5350,8 @@ $L__BB0_54:
 
 	// end inline asm
 	ld.const.u32 	%r1053, [mf_c16_raw];
-	setp.eq.s32 	%p114, %r1053, 1;
-	@%p114 bra 	$L__BB0_59;
+	setp.eq.s32 	%p116, %r1053, 1;
+	@%p116 bra 	$L__BB0_59;
 
 	mul.f32 	%f620, %f640, %f640;
 	fma.rn.f32 	%f621, %f639, %f639, %f620;
@@ -5358,8 +5360,8 @@ $L__BB0_54:
 	sqrt.rn.f32 	%f623, %f622;
 	mul.f32 	%f624, %f623, 0f3BF79D49;
 	fma.rn.f32 	%f53, %f52, 0f3F803000, %f624;
-	setp.gt.f32 	%p115, %f52, 0f00000000;
-	@%p115 bra 	$L__BB0_58;
+	setp.gt.f32 	%p117, %f52, 0f00000000;
+	@%p117 bra 	$L__BB0_58;
 	bra.uni 	$L__BB0_57;
 
 $L__BB0_58:
@@ -5378,10 +5380,11 @@ $L__BB0_59:
 $L__BB0_60:
 	mov.u32 	%r1073, %tid.x;
 	and.b32  	%r1072, %r1073, 31;
-	setp.ne.s32 	%p119, %r1072, 0;
-	setp.ne.s32 	%p117, %r114, -1;
-	or.pred  	%p118, %p119, %p117;
-	@%p118 bra 	$L__BB0_62;
+	setp.ne.s32 	%p123, %r1072, 0;
+	or.pred  	%p120, %p123, %p112;
+	setp.ne.s32 	%p121, %r114, -1;
+	or.pred  	%p122, %p120, %p121;
+	@%p122 bra 	$L__BB0_62;
 
 	mov.u32 	%r1054, -1;
 	st.global.u32 	[%rd28], %r1054;

@@ -1600,9 +1600,10 @@ class Context(InputUploads):
         return memo[k]
 
     def _time_coarse_tiles(self, band, ppg, cands, pairs=65536, ntm=16, reps=4):
-        """Device seconds per pair of each coarse build on synthetic data (min of reps - 1
-        after a warm-up), in self.coarse_times[band] for reports."""
-        from ._coarse import coarse_launch, coarse_stem
+        """Device seconds per pair of each coarse build on synthetic data (a warm-up, reps - 1
+        interleaved rounds and a paired confirmation of the contenders: _coarse), in
+        self.coarse_times[band] for reports."""
+        from ._coarse import coarse_launch, coarse_stem, confirm_fastest, interleaved_min
         ndm = pairs // ntm
         rng = np.random.default_rng(0)
         x = (rng.standard_normal((ndm, band)) + 1j * rng.standard_normal((ndm, band))) * 0.1
@@ -1614,7 +1615,30 @@ class Context(InputUploads):
         tg = band // _radix(band) * ppg
         gate = (band // _radix(band) <= self._simd_width(band)
                 and os.environ.get("MF_VK_C16_BOUND", "1") != "0")
-        out = {}
+        launch = {}
+
+        def time_one(tile):
+            pso, slot_val, groups, thr = launch[tile]
+            cmd = self.o.call(self.queue, b"commandBuffer")
+            enc = self.o.call(cmd, b"computeCommandEncoder")
+            # Encoded here, not through _dispatch: the calibration is not the call's
+            # work, and _dispatch is what per-kernel profilers and tests observe.
+            self.o.call(enc, b"setComputePipelineState:", restype=None,
+                        args=(pso,), argtypes=(ctypes.c_void_p,))
+            self._set_params(enc, (ntm, 0, band, slot_val, shift, 1, thr))
+            self._set_buffers(enc, bufs)
+            self.o.call(enc, b"dispatchThreadgroups:threadsPerThreadgroup:", restype=None,
+                        args=(_MTLSize(groups, 1, 1), _MTLSize(tg, 1, 1)),
+                        argtypes=(_MTLSize, _MTLSize))
+            self.o.call(enc, b"endEncoding", restype=None)
+            self.o.call(cmd, b"commit", restype=None)
+            self.o.call(cmd, b"waitUntilCompleted", restype=None)
+            t0 = self.o.call(cmd, b"GPUStartTime", restype=ctypes.c_double)
+            t1 = self.o.call(cmd, b"GPUEndTime", restype=ctypes.c_double)
+            if not (isinstance(t0, float) and isinstance(t1, float) and t1 > t0):
+                return None                     # no device timestamps: nothing to choose by
+            return t1 - t0
+
         try:
             for tile in cands:
                 stem = coarse_stem(band, ppg, tile)
@@ -1622,29 +1646,17 @@ class Context(InputUploads):
                 slot_val, groups = coarse_launch(ndm, ntm, ppg, tile, band)
                 thr = (int(np.float32(1.1754944e-38).view(np.uint32))
                        if gate and tile > 1 else 0)
-                times = []
-                for rep in range(reps):
-                    cmd = self.o.call(self.queue, b"commandBuffer")
-                    enc = self.o.call(cmd, b"computeCommandEncoder")
-                    # Encoded here, not through _dispatch: the calibration is not the call's
-                    # work, and _dispatch is what per-kernel profilers and tests observe.
-                    self.o.call(enc, b"setComputePipelineState:", restype=None,
-                                args=(pso,), argtypes=(ctypes.c_void_p,))
-                    self._set_params(enc, (ntm, 0, band, slot_val, shift, 1, thr))
-                    self._set_buffers(enc, bufs)
-                    self.o.call(enc, b"dispatchThreadgroups:threadsPerThreadgroup:", restype=None,
-                                args=(_MTLSize(groups, 1, 1), _MTLSize(tg, 1, 1)),
-                                argtypes=(_MTLSize, _MTLSize))
-                    self.o.call(enc, b"endEncoding", restype=None)
-                    self.o.call(cmd, b"commit", restype=None)
-                    self.o.call(cmd, b"waitUntilCompleted", restype=None)
-                    if rep:
-                        t0 = self.o.call(cmd, b"GPUStartTime", restype=ctypes.c_double)
-                        t1 = self.o.call(cmd, b"GPUEndTime", restype=ctypes.c_double)
-                        if not (isinstance(t0, float) and isinstance(t1, float) and t1 > t0):
-                            return None             # no device timestamps: nothing to choose by
-                        times.append(t1 - t0)
-                out[tile] = min(times) / pairs
+                launch[tile] = (pso, slot_val, groups, thr)
+            # A warm-up dispatch each, then interleaved rounds and a paired confirmation of
+            # the contenders (_coarse: the GPU may be shared).
+            for tile in cands:
+                if time_one(tile) is None:
+                    return None
+            times = interleaved_min(list(cands), time_one, reps - 1)
+            times = None if times is None else confirm_fastest(times, time_one)
+            if times is None:
+                return None
+            out = {t: v / pairs for t, v in times.items()}
         finally:
             for b in bufs:
                 b.destroy()
