@@ -123,50 +123,47 @@ def _twt_entry(entry):
     return entry, False
 
 
-def coarse_geometry(band, nd, nt, simd_width=32, choose_tile=None):
+def coarse_geometry(band, nd, nt, simd_width=32, choose=None):
     """(entry, pairs per threadgroup, tile, groups, ragged) for the half-width coarse pass.
 
-    A tiled build (TILE_T templates per lane; ragged tiles, so any template count) runs at
-    the smallest packing that fills the pipeline's SIMD width (threadExecutionWidth), among
-    those shipped. Which tile -- or none -- is choose_tile(band, ppg, shipped tiles)'s, the
-    device's measured choice (Context._coarse_tile); without it the smallest shipped tile.
-    Untiled: coarse_ppg's packing, ragged like the tiles (_coarse.coarse_launch).
-    The choice also carries the twiddle source (a trailing "w" on the entry: the build's fp16
-    table rather than the fp32 recurrence, _twt_entry). MF_METAL_COARSE_TILE forces a tile
-    (0 or 1 = untiled), MF_METAL_COARSE_PPG a packing and MF_METAL_COARSE_TWT the twiddle
-    source, for measurement and tests."""
+    The layout -- pairs per threadgroup, templates per lane (TILE_T) and the twiddle source
+    (a trailing "w" on the entry: the build's fp16 table, _twt_entry) -- is choose(band)'s,
+    the device's measured choice (Context._coarse_layout). Without one: the smallest shipped
+    tile at the smallest packing that fills the SIMD width (threadExecutionWidth), else the
+    untiled build at coarse_ppg's packing, with the recurrence. Every launch is ragged
+    (_coarse.coarse_launch). MF_METAL_COARSE_TILE (0 or 1 = untiled), MF_METAL_COARSE_PPG and
+    MF_METAL_COARSE_TWT force a field, for measurement and tests."""
     import os
     from ._coarse import coarse_launch, coarse_stem, shipped_tiles, forced_tile
-    pairs = nd * nt
     wg = band // _radix(band)
-    forced = forced_tile("MF_METAL_COARSE_TILE")
-    want = os.environ.get("MF_METAL_COARSE_PPG") or None
-    forced_twt = forced_tile("MF_METAL_COARSE_TWT")
     built = [p for p in (1, 2, 4, 8, 16, 32) if shipped_tiles(band, p, _shipped)]
-    twt = 0
-    if built and (forced is None or forced > 1):
-        if want is not None and int(want) in built:
-            ppg = int(want)
-        else:
-            ppg = next((p for p in built if wg * p >= simd_width), built[-1])
-        tiles = shipped_tiles(band, ppg, _shipped)
-        if forced is not None:
-            tile = forced if forced in tiles else 1
-        elif choose_tile:
-            tile, twt = choose_tile(band, ppg, tiles)
-        else:
-            tile = tiles[0]
-        if forced_twt is not None:
-            twt = forced_twt
+    tp = next((p for p in built if wg * p >= simd_width), built[-1]) if built else None
+    if choose is not None:
+        ppg, tile, twt = choose(band)
+    elif tp is not None:
+        ppg, tile, twt = tp, shipped_tiles(band, tp, _shipped)[0], 0
+    else:
+        ppg, tile, twt = coarse_ppg(band, nd * nt, simd_width=simd_width), 1, 0
+    ft = forced_tile("MF_METAL_COARSE_TILE")
+    fp = os.environ.get("MF_METAL_COARSE_PPG") or None
+    fw = forced_tile("MF_METAL_COARSE_TWT")
+    if ft is not None:
+        tile = max(1, ft)
         if tile > 1:
-            entry = ("coarse16" + coarse_stem(band, ppg, tile)[len("tierb_%d_c16" % band):]
-                     + ("w" if twt else ""))
-            return entry, ppg, tile, coarse_launch(nd, nt, ppg, tile, 0)[1], True
-    elif forced_twt is not None:
-        twt = forced_twt
-    ppg = coarse_ppg(band, pairs, simd_width=simd_width)
-    return ("coarse16" + ("p%d" % ppg if ppg > 1 else "") + ("w" if twt else ""), ppg, 1,
-            coarse_launch(nd, nt, ppg, 1, 0)[1], ppg > 1)
+            ppg = tp if tp is not None else ppg
+        elif fp is None:
+            ppg = coarse_ppg(band, nd * nt, simd_width=simd_width)
+    if fp is not None:
+        ppg = int(fp)
+    if fw is not None:
+        twt = fw
+    if tile > 1 and tile not in shipped_tiles(band, ppg, _shipped):
+        tile = 1
+    if tile == 1 and ppg > 1 and not _shipped(coarse_stem(band, ppg, 1)):
+        ppg = 1
+    entry = ("coarse16" + coarse_stem(band, ppg, tile)[len("tierb_%d_c16" % band):]
+             + ("w" if twt else ""))
+    return entry, ppg, tile, coarse_launch(nd, nt, ppg, tile, 0)[1], tile > 1 or ppg > 1
 
 
 def coarse_ppg(band, pairs, override=None, simd_width=None):
@@ -661,7 +658,7 @@ class Context(InputUploads):
         # Library macros (twiddle.slang): MF_C16_RAW=1 is the fp16 bound switch
         # (gatechain._RAW_GATE_SWITCH; Vulkan's constant 77), the raw fp16 maximum, for
         # measuring the bound's margin only; MF_COARSE_TWT=1 takes the coarse twiddles from
-        # the build's fp16 table (Vulkan's constant 80), a measured choice (_coarse_tile).
+        # the build's fp16 table (Vulkan's constant 80), a measured choice (_coarse_layout).
         names = [k for k, on in (("MF_C16_RAW", raw), ("MF_COARSE_TWT", twt)) if on]
         if names:
             o = self.o
@@ -1601,27 +1598,39 @@ class Context(InputUploads):
             cache[band] = int(width) if isinstance(width, int) and width > 0 else TARGET_THREADS
         return cache[band]
 
-    def _coarse_tile(self, band, ppg, tiles):
-        """Templates per lane for the coarse kernel at (band, ppg): the fastest of the shipped
-        tiles and the untiled build, timed on this device and kept in MF_COST_FILE (the
-        choice the Vulkan and CUDA hosts make; priced, not trialled -- a deterministic
-        micro-benchmark). Whether a tile's register reuse pays depends on the device."""
+    def _coarse_layout(self, band):
+        """The coarse layout (ppg, tile, twt) at this band: the fastest on this device, timed
+        once and kept in MF_COST_FILE (the choice every backend makes, _coarse). Candidates:
+        the untiled build at every shipped packing with each twiddle source, then the tiles
+        at the packing that fills the SIMD width. A fixed packing rule missed both ways on an
+        M2: band 512 wants two pairs per threadgroup (25.7 against 26.4 ns per pair), band
+        1024 one (52.7 against 54.8), though one pair fills the SIMD group at both."""
         from . import gatechain
-        from ._coarse import stored_measured_choice
-        # (tile, twt) candidates. The smallest tile with the recurrence first: it is what a
-        # device without timestamps runs. Preference: fewer templates per lane, recurrence.
-        ts = list(tiles[:1]) + [1] + list(tiles[1:])
-        cands = [(t, w) for t in ts for w in (0, 1)]
+        from ._coarse import coarse_stem, shipped_tiles, stored_measured_choice
+        w = self._simd_width(band)
+        wg = band // _radix(band)
+        built = [p for p in (1, 2, 4, 8, 16, 32) if shipped_tiles(band, p, _shipped)]
+        tp = next((p for p in built if wg * p >= w), built[-1]) if built else None
+        tiles = shipped_tiles(band, tp, _shipped) if tp else ()
+        untiled = [(p, 1, t) for p in (1, 2, 4, 8, 16, 32)
+                   if (p == 1 or _shipped(coarse_stem(band, p, 1))) and wg * p <= 1024
+                   for t in (0, 1)]
+        tiled = [(tp, t, x) for t in tiles for x in (0, 1)]
+        # The no-timestamp default (coarse_geometry's) first.
+        first = tiled[:1] or [(coarse_ppg(band, 1 << 20, simd_width=w), 1, 0)]
+        cands = first + [c for c in untiled + tiled if c not in first]
         return stored_measured_choice(
-            self.__dict__.setdefault("_coarse_tiles", {}), "mtl-coarse-tile|p%d" % ppg,
-            getattr(self, "name", ""), band, cands, lambda c: "t%dw%d" % c,
+            self.__dict__.setdefault("_coarse_layouts", {}), "mtl-coarse",
+            getattr(self, "name", ""), band, cands, lambda c: "p%dt%dw%d" % c,
             gatechain.gpu_kernel_id("metal"),
-            lambda cs: self._time_coarse_tiles(band, ppg, cs), tiebreak=lambda c: c)
+            lambda cs: self._time_coarse_layouts(band, cs),
+            tiebreak=lambda c: (c[1], c[2], c[0]))
 
-    def _time_coarse_tiles(self, band, ppg, cands, pairs=65536, ntm=16, reps=4):
-        """Device seconds per pair of each coarse build on synthetic data (a warm-up, reps - 1
-        interleaved rounds and a paired confirmation of the contenders: _coarse), in
-        self.coarse_times[band] for reports."""
+    def _time_coarse_layouts(self, band, cands, pairs=65536, ntm=16, reps=4):
+        """Device seconds per pair of each coarse layout (ppg, tile, twt) on synthetic data: a
+        warm-up, then the untiled and the tiled layouts as two stages of reps - 1 interleaved
+        rounds, each stage's fastest confirmed against the fastest (_coarse.time_staged), in
+        self.coarse_times[band] for reports. A layout this device cannot build is dropped."""
         from ._coarse import Timings, coarse_launch, coarse_stem, time_staged
         ndm = pairs // ntm
         rng = np.random.default_rng(0)
@@ -1631,13 +1640,12 @@ class Context(InputUploads):
         bufs[0].write(_pack_half2(x))
         bufs[1].write(_pack_half2(x[:ntm]))
         shift = band.bit_length() - 1
-        tg = band // _radix(band) * ppg
         gate = (band // _radix(band) <= self._simd_width(band)
                 and os.environ.get("MF_VK_C16_BOUND", "1") != "0")
         launch = {}
 
         def time_one(c):
-            pso, slot_val, groups, thr = launch[c]
+            pso, slot_val, groups, thr, tg = launch[c]
             cmd = self.o.call(self.queue, b"commandBuffer")
             enc = self.o.call(cmd, b"computeCommandEncoder")
             # Encoded here, not through _dispatch: the calibration is not the call's
@@ -1659,21 +1667,26 @@ class Context(InputUploads):
             return t1 - t0
 
         try:
-            for c in cands:                 # (tile, twt): twt 1 is the fp16 twiddle table
-                tile, twt = c
+            for c in cands:                 # (ppg, tile, twt): twt 1 is the fp16 twiddle table
+                ppg, tile, twt = c
                 stem = coarse_stem(band, ppg, tile)
-                pso = self.pipeline(band, "coarse16" + stem[len("tierb_%d_c16" % band):]
-                                    + ("w" if twt else ""))
+                try:
+                    pso = self.pipeline(band, "coarse16" + stem[len("tierb_%d_c16" % band):]
+                                        + ("w" if twt else ""))
+                except (MetalError, UnsupportedSize):
+                    continue                # past this device's limits for the kernel
                 slot_val, groups = coarse_launch(ndm, ntm, ppg, tile, band)
                 thr = (int(np.float32(1.1754944e-38).view(np.uint32))
                        if gate and tile > 1 else 0)
-                launch[c] = (pso, slot_val, groups, thr)
+                launch[c] = (pso, slot_val, groups, thr, band // _radix(band) * ppg)
+            ok = [c for c in cands if c in launch]
             # A warm-up dispatch each, then interleaved rounds and a paired confirmation of
             # the contenders (_coarse: the GPU may be shared).
-            for c in cands:
+            for c in ok:
                 if time_one(c) is None:
                     return None
-            times = time_staged([list(cands)], time_one, rounds=reps - 1)
+            times = time_staged([[c for c in ok if c[1] == 1], [c for c in ok if c[1] > 1]],
+                                time_one, rounds=reps - 1)
             if times is None:
                 return None
             out = Timings({t: v / pairs for t, v in times.items()})
@@ -1682,7 +1695,7 @@ class Context(InputUploads):
             for b in bufs:
                 b.destroy()
         self.__dict__.setdefault("coarse_times", {}).setdefault(band, {}).update(
-            {coarse_stem(band, ppg, c[0]) + ("w" if c[1] else ""): v for c, v in out.items()})
+            {coarse_stem(band, c[0], c[1]) + ("w" if c[2] else ""): v for c, v in out.items()})
         return out
 
     @staticmethod
@@ -1756,7 +1769,7 @@ class Context(InputUploads):
         # ragged (_coarse.coarse_launch): no padded rows or spare outputs.
         if half[0]:
             centry, ppg, ctile, cgroups, ragged = coarse_geometry(
-                tiers[0][0], nd, nt, self._simd_width(tiers[0][0]), self._coarse_tile)
+                tiers[0][0], nd, nt, self._simd_width(tiers[0][0]), self._coarse_layout)
         else:
             centry, ppg, ctile, cgroups, ragged = "fusedTierB", 1, 1, pairs, False
 
