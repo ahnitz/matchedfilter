@@ -5,20 +5,7 @@ result read after a same-shaped call returned that call's peaks."""
 import numpy as np
 import pytest
 
-from test_coarse_ragged_groups import _backend
-
-
-def _context(backend):
-    if backend == "vulkan":
-        from matchedfilter import _vkcompute as V
-        return V.Context(0)
-    if backend == "metal":
-        from matchedfilter import _mtlcompute as M
-        return M.Context(0)
-    if backend == "cuda":
-        from matchedfilter import _cudacompute as C
-        return C.Context(0)
-    pytest.skip("backend %s" % backend)
+from conftest import gpu_backend as _backend, gpu_context as _context
 
 
 @pytest.mark.parametrize("cascade", [False, True])

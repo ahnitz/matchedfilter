@@ -34,6 +34,25 @@ def coarse_stem(band, ppg, tile):
                                  "t%d" % tile if tile > 1 else "")
 
 
+def layout_label(band, ppg, tile, twt, subgroup=0):
+    """A coarse layout's name on every backend: the build's stem, "w" when its twiddles come
+    from the fp16 table, and "@<size>" when the pipeline requires a subgroup size (Vulkan):
+    tierb_256_c16p2t2w, tierb_512_c16@16. The cost file keys and MF_COARSE_LAYOUT use it."""
+    return coarse_stem(band, ppg, tile) + ("w" if twt else "") + ("@%d" % subgroup if subgroup else "")
+
+
+def forced_layout(band):
+    """The layout MF_COARSE_LAYOUT names for this band (comma-separated layout_label names;
+    each names its own band), or None. The choice then takes it without timing, on every
+    backend, so tests and measurements can run each layout through the production path."""
+    import os
+    for name in os.environ.get("MF_COARSE_LAYOUT", "").split(","):
+        name = name.strip()
+        if next((t for t in name.split("_") if t.isdigit()), None) == str(band):
+            return name
+    return None
+
+
 def shipped_tiles(band, ppg, shipped):
     """The tiles (> 1) built for this band and pairs per group; shipped(stem) -> bool."""
     return tuple(t for t in TILE_PROBE if shipped(coarse_stem(band, ppg, t)))
@@ -141,7 +160,7 @@ def time_staged(stages, time_full, time_screen=None, rounds=3, screen_cut=4.0):
 
 
 def stored_measured_choice(memo, kind, device, band, cands, label, kernel_id, measure,
-                           tiebreak=None):
+                           tiebreak=None, forced=None):
     """The fastest of cands, measured once per process and kept in MF_COST_FILE under
     kind|device|band|labels|k<kernel_id>, so every process sharing the file reproduces it
     and a build with other kernels measures afresh (gatechain.gpu_kernel_id).
@@ -149,8 +168,16 @@ def stored_measured_choice(memo, kind, device, band, cands, label, kernel_id, me
     label(c) names a candidate in the file; measure(cands) returns {candidate: time} (a
     Timings, whose close calls are decided by preference), or None when the device cannot be
     timed (the first candidate is then used, unstored). Preference is tiebreak(c), then the
-    candidates' order."""
+    candidates' order.
+
+    forced (a label, forced_layout's) is taken as it is, neither measured nor stored; a label
+    that is not a candidate here raises ValueError naming the candidates."""
     labels = [label(c) for c in cands]
+    if forced is not None:
+        if forced not in labels:
+            raise ValueError("%s: no candidate %r at band %d on this device; candidates: %s"
+                             % (kind, forced, band, ", ".join(labels)))
+        return cands[labels.index(forced)]
     k = (kind, band, tuple(labels))
     if k in memo:
         return memo[k]

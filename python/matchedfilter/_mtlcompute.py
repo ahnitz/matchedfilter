@@ -1599,14 +1599,26 @@ class Context(InputUploads):
         return cache[band]
 
     def _coarse_layout(self, band):
-        """The coarse layout (ppg, tile, twt) at this band: the fastest on this device, timed
-        once and kept in MF_COST_FILE (the choice every backend makes, _coarse). Candidates:
-        the untiled build at every shipped packing with each twiddle source, then the tiles
-        at the packing that fills the SIMD width. A fixed packing rule missed both ways on an
-        M2: band 512 wants two pairs per threadgroup (25.7 against 26.4 ns per pair), band
-        1024 one (52.7 against 54.8), though one pair fills the SIMD group at both."""
+        """The coarse layout (ppg, tile, twt) at this band: the fastest of _coarse_candidates on
+        this device, timed once and kept in MF_COST_FILE (the choice every backend makes,
+        _coarse). A fixed packing rule missed both ways on an M2: band 512 wants two pairs per
+        threadgroup (25.7 against 26.4 ns per pair), band 1024 one (52.7 against 54.8),
+        though one pair fills the SIMD group at both."""
         from . import gatechain
-        from ._coarse import coarse_stem, shipped_tiles, stored_measured_choice
+        from ._coarse import forced_layout, layout_label, stored_measured_choice
+        return stored_measured_choice(
+            self.__dict__.setdefault("_coarse_layouts", {}), "mtl-coarse",
+            getattr(self, "name", ""), band, self._coarse_candidates(band),
+            lambda c: layout_label(band, *c), gatechain.gpu_kernel_id("metal"),
+            lambda cs: self._time_coarse_layouts(band, cs),
+            tiebreak=lambda c: (c[1], c[2], c[0]), forced=forced_layout(band))
+
+    def _coarse_candidates(self, band):
+        """Every coarse layout (ppg, tile, twt) the choice may take at this band: the untiled
+        build at every shipped packing that fits a threadgroup, with each twiddle source, then
+        the tiles at the packing that fills the SIMD width. The first is the default without
+        a measurement (coarse_geometry's)."""
+        from ._coarse import coarse_stem, shipped_tiles
         w = self._simd_width(band)
         wg = band // _radix(band)
         built = [p for p in (1, 2, 4, 8, 16, 32) if shipped_tiles(band, p, _shipped)]
@@ -1616,22 +1628,21 @@ class Context(InputUploads):
                    if (p == 1 or _shipped(coarse_stem(band, p, 1))) and wg * p <= 1024
                    for t in (0, 1)]
         tiled = [(tp, t, x) for t in tiles for x in (0, 1)]
-        # The no-timestamp default (coarse_geometry's) first.
         first = tiled[:1] or [(coarse_ppg(band, 1 << 20, simd_width=w), 1, 0)]
-        cands = first + [c for c in untiled + tiled if c not in first]
-        return stored_measured_choice(
-            self.__dict__.setdefault("_coarse_layouts", {}), "mtl-coarse",
-            getattr(self, "name", ""), band, cands, lambda c: "p%dt%dw%d" % c,
-            gatechain.gpu_kernel_id("metal"),
-            lambda cs: self._time_coarse_layouts(band, cs),
-            tiebreak=lambda c: (c[1], c[2], c[0]))
+        return first + [c for c in untiled + tiled if c not in first]
+
+    def coarse_layouts(self, band):
+        """The names (_coarse.layout_label) of every coarse layout the choice may take at this
+        band on this device; MF_COARSE_LAYOUT forces one."""
+        from ._coarse import layout_label
+        return [layout_label(band, *c) for c in self._coarse_candidates(band)]
 
     def _time_coarse_layouts(self, band, cands, pairs=65536, ntm=16, reps=4):
         """Device seconds per pair of each coarse layout (ppg, tile, twt) on synthetic data: a
         warm-up, then the untiled and the tiled layouts as two stages of reps - 1 interleaved
         rounds, each stage's fastest confirmed against the fastest (_coarse.time_staged), in
         self.coarse_times[band] for reports. A layout this device cannot build is dropped."""
-        from ._coarse import Timings, coarse_launch, coarse_stem, time_staged
+        from ._coarse import Timings, coarse_launch, coarse_stem, layout_label, time_staged
         ndm = pairs // ntm
         rng = np.random.default_rng(0)
         x = (rng.standard_normal((ndm, band)) + 1j * rng.standard_normal((ndm, band))) * 0.1
@@ -1695,7 +1706,7 @@ class Context(InputUploads):
             for b in bufs:
                 b.destroy()
         self.__dict__.setdefault("coarse_times", {}).setdefault(band, {}).update(
-            {coarse_stem(band, c[0], c[1]) + ("w" if c[2] else ""): v for c, v in out.items()})
+            {layout_label(band, *c): v for c, v in out.items()})
         return out
 
     @staticmethod
