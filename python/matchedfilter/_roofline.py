@@ -52,12 +52,8 @@ Counts come from what the run did, not from a model of it:
   * follow-ups: the ladder's job list, laid out with the bank's own _window_layout.
 Blocks of a fine group are pairs / templates in the group (every fine call takes the whole
 group; follow-ups use separate single-template plans and are not in these counters).
-A replayed CUDA segment graph (SegmentPlan) counts the same way: each captured dispatch's
-reader adds its pairs and survivors when the replay is read, and the captured prelude (the
-graph middle) re-applies the counter increments recorded at capture. Under two graphs in
-flight (ladder LADDER_INFLIGHT) counters move when a segment is collected, so the steady span
-starts once the last warmup segment is in; device follow-ups are counted from the host rule's
-job list, which the ladder checks against the device's items.
+Device follow-ups are counted from the host rule's job list, which the ladder checks
+against the device's items.
 
 Judgement calls (stated so that nobody tunes them to flatter a platform):
   1. Work the implementation does that the algorithm does not need -- zeroing the parts

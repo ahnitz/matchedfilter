@@ -200,9 +200,8 @@ class FollowupSpec:
     bank): filter_series(windows=slice(max(0, c - half), min(S, c + half)), binsize,
     threshold=0, template_index=ti).
 
-    TimeDomainFilterBank.filter_series_many(jobs, followups=spec) and
-    SegmentPlan.run(jobs, followup=spec) apply it: on the device where a backend can (the CUDA
-    segment graph, _cudafollowup), else on the host (run_host). Both give
+    TimeDomainFilterBank.filter_series_many(jobs, followups=spec) applies it: on the device
+    where a backend can (Vulkan, _vkfollowup), else on the host (run_host). Both give
     [(source job, rank, c, ti, FilterResults)] in (job, rank) order, and a device selection
     must equal select() exactly: same candidates (|snr| = hypot(re, im) >= threshold), same
     order (|snr| descending, ties by FOLLOWUP_KEY_SHIFTS), same dedupe."""

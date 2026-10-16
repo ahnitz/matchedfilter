@@ -292,7 +292,6 @@ candidate is faster beyond the measurement noise.
 | `MF_AUTOTUNE` | `1` | `0` skips timed trials and keeps the cost model's choices (deterministic given a populated `MF_COST_FILE`). |
 | `MF_AUTOTUNE_LOG` | `0` | `1` prints each trial's samples and decisions to stderr. |
 | `MF_GPU_TIMING` | `0` | `1` records device time per kernel (for profiling; it adds overhead). |
-| `MF_SEGMENT_REPLAY` | `1` | Vulkan: a recurring job set (`SegmentPlan`) replays its recorded submissions; `0` runs it as ordinary batches. |
 
 Other `MF_*` variables force a single candidate for measurement (for example
 `MF_CHAIN_FORCE`, `MF_GPU_FUSE_INTERLEAVE`, `MF_VK_BAND_FORWARD`). They are not

@@ -10,8 +10,8 @@ Checks, in order (each reports ok / FAIL / skip, and the gate fails on any FAIL)
   suite        the full pytest suite, single-threaded, `--runs` times
   check        `tools/ladder.py --check cpu`: the device against the CPU reference,
                batched and with --pipeline; 0 peaks on one side only
-  replay       the same check after priming a fresh MF_COST_FILE (`--prime` segments) so
-               the trials lock and segment replay actually runs; it must replay
+  settled      the same check, pipelined, after priming a fresh MF_COST_FILE (`--prime`
+               segments) so the trials have locked: the steady state a search runs in
   margin       `tools/gate_margin.py --loud`: narrow gates have no false dismissals and a
                loud injection fails open
   repro        tests/test_reproducible_choices.py, `--loops` times: processes sharing a
@@ -116,25 +116,19 @@ def check(g, args, device):
         g.record("check", "ok" if rc == 0 and ok else "FAIL", "%s: %s (%.0fs)" % (mode, detail, dt))
 
 
-def replay(g, args, device):
-    cost = Path(args.logdir) / "replay_costs.json"
+def settled(g, args, device):
+    cost = Path(args.logdir) / "settled_costs.json"
     cost.unlink(missing_ok=True)
     env = _env(MF_COST_FILE=cost)
     rc, report, dt = _ladder(args, device, ["--segments", str(args.prime), "--pipeline"], env=env,
                              tag="_prime")
     if rc != 0:
-        g.record("replay", "FAIL", "prime run failed (%.0fs)" % dt)
+        g.record("settled", "FAIL", "prime run failed (%.0fs)" % dt)
         return
-    env.update(LADDER_REPLAY="1", LADDER_GRAPH_MIDDLE="1", LADDER_INFLIGHT="1")
-    rc, report, dt = _ladder(args, device, ["--segments", "12", "--check", "cpu"], env=env,
-                             tag="_replay")
+    rc, report, dt = _ladder(args, device, ["--segments", "12", "--pipeline", "--check", "cpu"],
+                             env=env, tag="_settled")
     ok, detail = _check_ok(report)
-    counts = (report or {}).get("counts", {})
-    replays, failures = counts.get("segment_replays", 0), counts.get("segment_capture_failures", 0)
-    if not replays:
-        ok, detail = False, detail + "; no segment replays (trials not locked after %d segments?)" % args.prime
-    g.record("replay", "ok" if rc == 0 and ok else "FAIL",
-             "%s; %d replays, %d capture failures (%.0fs)" % (detail, replays, failures, dt))
+    g.record("settled", "ok" if rc == 0 and ok else "FAIL", "%s (%.0fs)" % (detail, dt))
 
 
 def margin(g, args, device):
@@ -182,11 +176,11 @@ def main(argv=None):
     ap.add_argument("--runs", type=int, default=1, help="full-suite runs (default 1)")
     ap.add_argument("--loops", type=int, default=5, help="runs of each flake-prone test (default 5)")
     ap.add_argument("--prime", type=int, default=40,
-                    help="segments that prime the replay check's fresh cost file (default 40)")
+                    help="segments that prime the settled check's fresh cost file (default 40)")
     ap.add_argument("--cpu-g16", action="store_true", help="also gate the CPU fp16 tier (ARM)")
-    ap.add_argument("--quick", action="store_true", help="one suite run, 2 loops, no replay check")
+    ap.add_argument("--quick", action="store_true", help="one suite run, 2 loops, no settled check")
     ap.add_argument("--only", nargs="+",
-                    choices=["suite", "check", "replay", "margin", "repro", "followups"])
+                    choices=["suite", "check", "settled", "margin", "repro", "followups"])
     ap.add_argument("--logdir", default=None)
     ap.add_argument("--lock", default="/tmp/mf-gate-%d.lock" % os.getuid(),
                     help="per-machine lock file (fixed, not TMPDIR, so every session shares "
@@ -202,14 +196,14 @@ def main(argv=None):
     rc, out, _ = _run(["git", "rev-parse", "--short", "HEAD"])
     print("gate: %s on %s, device %s, logs %s" % (out.strip(), os.uname().nodename, device or "cpu only",
                                                   args.logdir), flush=True)
-    want = set(args.only or ["suite", "check", "replay", "margin", "repro", "followups"])
+    want = set(args.only or ["suite", "check", "settled", "margin", "repro", "followups"])
     if args.quick and not args.only:
-        want.discard("replay")
+        want.discard("settled")
 
     if "suite" in want:
         suite(g, args.runs)
     ladder = bool(args.bank and args.profiles)
-    for name, fn in (("check", check), ("replay", replay)):
+    for name, fn in (("check", check), ("settled", settled)):
         if name not in want:
             continue
         if not device:
