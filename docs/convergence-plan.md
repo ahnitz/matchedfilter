@@ -309,6 +309,19 @@ Order: 1, then 2, then 4, then 3, then 5, then 6. Steps 1 and 6 do not depend on
     reaches them.
   - That group is a deletion candidate. It is left in place because removing it changes a
     public keyword.
+- 2026-10-16: **The follow-up rule removed** (at the user's decision): `FollowupSpec`,
+  `filter_series_many(followups=)`, `_run_followups`, `run_followups` and `FollowUp`. The
+  batched-calls test moved to `tests/test_followup_batch.py`.
+- 2026-10-16: **CI red on 86ca1d35 (Metal, paravirtual GPU):**
+  `test_fused_forward_matches_separate` asserted that the band forward and the separate
+  forward give identical peak lists. One peak swapped between them (1036 peaks).
+  - They are different float paths. On the M2 (three seeds) both match the CPU reference's
+    peak set exactly, with SNRs within 1.4-1.9e-5. The closest reference peaks sit 5e-5 to
+    1.6e-3 from the threshold.
+  - Exact equality between the two paths is not a property of either. The test now checks
+    each path against the CPU reference. A one-sided peak is allowed only within 1e-4 of
+    the threshold, or as a lag tie inside a bin. A missed loud peak, a spurious peak, or an
+    SNR off by 1e-3 fails (checked by mutation).
 - **Measurement lessons.**
   - A shared seed hides a change to pricing or candidates; use `--seed-per-tree`.
   - Metal's device timer overstates time when command buffers overlap.

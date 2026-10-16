@@ -12,13 +12,16 @@ Alpha releases may change the API. Pin a version for reproducible work.
   Vulkan's device follow-ups. `MF_SEGMENT_REPLAY`, `MF_CUDA_SEGMENT_GRAPH` and the ladder's
   `LADDER_REPLAY`, `LADDER_FOLD_TOPS` and `LADDER_INFLIGHT` modes are gone. The gate's
   replay step became `settled`: the same check after the trials have locked.
-- `FollowupSpec`'s `max_items` and `max_items_per_region` arguments, the capacities of that
-  device selection. `MF_VK_DEVICE_FOLLOWUPS` is now `MF_DEVICE_FOLLOWUPS` (Vulkan and CUDA).
+- `filter_series_many(followups=)`, `_gpuhost.FollowupSpec` and its alias
+  `time_domain.FollowUp`: the follow-up selection rule that `SegmentPlan` ran on the device.
+  Nothing else called them; a search selects its own follow-ups and passes them to
+  `filter_series_many` as single-template calls, which run on the device as before.
+  `MF_VK_DEVICE_FOLLOWUPS` is now `MF_DEVICE_FOLLOWUPS` (Vulkan and CUDA).
 
 ### Performance
 
-- CUDA runs follow-ups (`filter_series_many` with threshold-0 single-template calls, and
-  `followups=`) on the device: one table upload, per template group a forward and one
+- CUDA runs follow-ups (`filter_series_many` with threshold-0 single-template calls) on the
+  device: one table upload, per template group a forward and one
   `refineItems` launch, and one readback, as Vulkan does. The batch layout and result
   assembly are shared (`_gpuhost.followup_layout`, `assemble_followups`); each backend keeps
   only its executor. L40S, test27 ladder, paired on settled seeds: pipelined 1.25x, batched

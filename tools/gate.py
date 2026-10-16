@@ -16,7 +16,7 @@ Checks, in order (each reports ok / FAIL / skip, and the gate fails on any FAIL)
                loud injection fails open
   repro        tests/test_reproducible_choices.py, `--loops` times: processes sharing a
                cost file make the same choices
-  followups    test_call_plan + test_followup_spec, `--loops` times (a past race)
+  followups    test_call_plan + test_followup_batch, `--loops` times (a past race)
 
 The ladder checks need a production-like bank and noise profiles, which are not in the
 repository; they run when --bank/--profiles (or MF_GATE_BANK/MF_GATE_PROFILES) are given and
@@ -217,7 +217,7 @@ def main(argv=None):
     if "repro" in want:
         loop(g, "repro", ["tests/test_reproducible_choices.py"], args.loops)
     if "followups" in want:
-        loop(g, "followups", ["tests/test_call_plan.py", "tests/test_followup_spec.py"], args.loops)
+        loop(g, "followups", ["tests/test_call_plan.py", "tests/test_followup_batch.py"], args.loops)
 
     print("gate: %s" % ("FAILED" if g.failed else "passed (%d skipped)"
                        % sum(s == "skip" for _, s, _ in g.results)), flush=True)

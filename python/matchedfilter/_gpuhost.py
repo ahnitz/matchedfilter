@@ -251,59 +251,6 @@ def hier_peaks_grouped(ctx, n, band, data, tmpl, ct0, raw_thr, groups, binsize, 
                           **({} if handle_out is None else {"handle_out": handle_out}))
 
 
-# ---- device follow-up items (FollowupSpec), shared by the GPU backends -----------------------
-class FollowupSpec:
-    """A follow-up rule over a segment's fine results (pycbc's asymmetric follow-up).
-
-    For each job j: its peaks with |snr| >= threshold, by |snr| descending (ties in result
-    order), keeping the first in each interval of ``dedupe`` samples; each kept peak at
-    sample c with template ti is followed up on the PARTNER job's series (pairs[j], same
-    bank): filter_series(windows=slice(max(0, c - half), min(S, c + half)), binsize,
-    threshold=0, template_index=ti).
-
-    TimeDomainFilterBank.filter_series_many(jobs, followups=spec) applies it: the host selects
-    (select), and the selected calls run on the device where a backend can (submit_followups),
-    else on the host (run_host). Both give [(source job, rank, c, ti, FilterResults)] in
-    (job, rank) order."""
-
-    def __init__(self, pairs, threshold, dedupe, half, binsize):
-        self.pairs = [int(p) for p in pairs]
-        self.threshold, self.dedupe = float(threshold), int(dedupe)
-        self.half, self.binsize = int(half), int(binsize)
-
-    def key(self):
-        return (tuple(self.pairs), self.threshold, self.dedupe, self.half, self.binsize)
-
-    def select(self, jobs, fine_out):
-        """[(j, rank, c, ti, follow-up job)] by the rule, from host results."""
-        sel = []
-        for j, r in enumerate(fine_out):
-            a = np.abs(r.snr)
-            keep = np.flatnonzero(a >= self.threshold)
-            keep = keep[np.argsort(-a[keep], kind="stable")]
-            used = set()
-            bank = jobs[j][0]
-            partner = jobs[self.pairs[j]][1]
-            S = len(partner)
-            for rank, i in enumerate(keep):
-                sec = int(r.sample_indices[i] // self.dedupe)
-                if sec in used:
-                    continue
-                used.add(sec)
-                c0 = int(r.sample_indices[i])
-                ti = int(r.template_indices[i])
-                sel.append((j, rank, c0, ti, (bank, partner, dict(
-                    windows=slice(max(0, c0 - self.half), min(S, c0 + self.half)),
-                    binsize=self.binsize, threshold=0.0, template_index=ti))))
-        return sel
-
-    def run_host(self, jobs, fine_out):
-        sel = self.select(jobs, fine_out)
-        from .time_domain import TimeDomainFilterBank
-        res = TimeDomainFilterBank.filter_series_many([s[4] for s in sel])
-        return [(j, rank, c0, ti, r) for (j, rank, c0, ti, _), r in zip(sel, res)]
-
-
 def window_results(hit, counts, starts, idx, val, template, n):
     """FilterResults of one follow-up window, as TimeDomainFilterBank._items_batch orders them:
     the (block, bin) pairs where ``hit`` holds, by the block's bin count, then block, then bin.
@@ -327,8 +274,8 @@ def window_results(hit, counts, starts, idx, val, template, n):
 
 
 # ---- device follow-ups ---------------------------------------------------------------------
-# A batch of threshold-0 single-template calls (what FollowupSpec.select produces) as listed
-# entries for the refineItems kernel (src/gpu/refine_bounded.slang): per work group -- one
+# A batch of threshold-0 single-template calls (a search's follow-ups) as listed entries
+# for the refineItems kernel (src/gpu/refine_bounded.slang): per work group -- one
 # (template group, binsize, series allocation) -- the rows to forward (block starts as offsets
 # into the allocation) and one entry per row (row, local template, window start, window end,
 # output slot). The host lays the blocks out with TimeDomainFilterBank._window_layout, so the
@@ -446,11 +393,3 @@ def submit_followups(jobs):
         return executor().submit_jobs(jobs)
     except (FollowupUnsupported, KeyError, TypeError):
         return None
-
-
-def run_followups(spec, sel):
-    """FollowupSpec results for sel (FollowupSpec.select's list) on the device, or None."""
-    collect = submit_followups([s[4] for s in sel])
-    if collect is None:
-        return None
-    return [(j, rank, c0, ti, r) for (j, rank, c0, ti, _), r in zip(sel, collect())]

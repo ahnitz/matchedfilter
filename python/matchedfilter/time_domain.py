@@ -2254,19 +2254,7 @@ class TimeDomainFilterBank:
         return side == "cpu", record
 
     @staticmethod
-    def _run_followups(jobs, fine, spec):
-        """(follow-ups, "device" or "host"): on a backend with a follow-up executor (Vulkan,
-        CUDA: _gpuhost.submit_followups), else on the host."""
-        import os
-        if os.environ.get("MF_DEVICE_FOLLOWUPS", "1") != "0":
-            from ._gpuhost import run_followups
-            res = run_followups(spec, spec.select(jobs, fine))
-            if res is not None:
-                return res, "device"
-        return spec.run_host(jobs, fine), "host"
-
-    @staticmethod
-    def filter_series_many(jobs, wait=True, followups=None):
+    def filter_series_many(jobs, wait=True):
         """Several filter_series calls as one batch: jobs is [(bank, series, kwargs)], the
         result the list of their FilterResults, identical to calling each in turn.
 
@@ -2280,10 +2268,6 @@ class TimeDomainFilterBank:
         its clock up). The jobs' input series must not be overwritten until then. A later
         batch on the same banks first finishes whatever of this one it would overwrite.
         """
-        if followups is not None:
-            # The fine stage, then the follow-up rule on its results (_gpuhost.FollowupSpec).
-            fine = TimeDomainFilterBank.filter_series_many(jobs)
-            return fine, TimeDomainFilterBank._run_followups(jobs, fine, followups)[0]
         from . import _Deferred
         import os
         global _BATCH_TOKEN
@@ -2818,9 +2802,6 @@ class TimeDomainFilterBank:
                 result[g_indices] = g_dest
 
 
-from ._gpuhost import FollowupSpec                        # noqa: E402
-FollowUp = FollowupSpec                                       # the name the CUDA track used
-
 
 def _stored_bins(g):
     """Bins stored per template spectrum of group g (its spectra's second dimension), cached
@@ -2868,4 +2849,3 @@ def _results_from(lists):
         block_starts=np.concatenate(ts).astype(np.int64),
         block_lengths=np.concatenate(bl).astype(np.int64),
     )
-
