@@ -1,7 +1,7 @@
 > Historical development notes: the unused `hierarchical.slang` and
-> `hierarchical_fused.slang` prototypes referenced below now live in
-> `src/gpu/draft/`. Production dispatch uses coarse, compaction and listed
-> refinement kernels.
+> `hierarchical_fused.slang` prototypes referenced below were removed from the tree
+> (they are in git history before 1dc65f36, under `src/gpu/draft/`). Production dispatch uses
+> coarse, compaction and listed refinement kernels.
 
 # GPU notes
 

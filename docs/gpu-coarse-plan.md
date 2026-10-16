@@ -97,8 +97,8 @@ produced durable facts after five source-level models failed):
 
 ### Phase 2 -- the SoA rewrite. Highest expected value, highest risk.
 
-The only remaining change with direct ISA evidence. Draft is written at
-`src/gpu/draft/soa_core.slang`.
+The only remaining change with direct ISA evidence. The draft was
+`src/gpu/draft/soa_core.slang` (removed; in git history before 1dc65f36).
 
 Pair ACROSS two independent transforms, never within one:
 
