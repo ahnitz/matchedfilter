@@ -257,7 +257,7 @@ def _note_open_trials():
         _STEADY_CPU_TRIAL_START = dict(_CPU_TRIAL_WORK)
 
 
-def run_device(device, tops, args, seed):
+def run_device(device, tops, args, seed, fine_engine="hier"):
     global _STEADY_CPU_TRIAL_START
     _STEADY_CPU_TRIAL_START = None
     rng = np.random.default_rng(seed)
@@ -315,7 +315,7 @@ def run_device(device, tops, args, seed):
                 pf = TimeDomainFilterBank(taps, tap_counts=c, engine="corr")
                 yf = pf.correlate_series(xm[row])[:, 1 << 15:-(1 << 15)]
                 taps = taps / np.sqrt(np.mean(np.abs(yf) ** 2, axis=1) / 2)[:, None].astype(np.float32)
-                b = TimeDomainFilterBank(taps, tap_counts=c, engine="hier", threshold=args.threshold,
+                b = TimeDomainFilterBank(taps, tap_counts=c, engine=fine_engine, threshold=args.threshold,
                                          false_dismissal=args.fd, device=device,
                                          binsize=int(args.peak_window * RATE),
                                          fft_lengths=[args.fft_length] if args.fft_length else None)
@@ -658,6 +658,9 @@ def compare(ref, got, threshold, margin=0.25):
     differently by different chains or rounding); anything louder is a miss.
     """
     worst, calls, margin_only, missed = 0.0, 0, 0, []
+    # Reference fine peaks and the device's misses per |snr| band above the threshold.
+    edges = [threshold + e for e in (0.0, 0.25, 0.5, 1.0, 2.0, 4.0)] + [float("inf")]
+    by_snr = [[0, 0] for _ in edges[:-1]]
     for key, a in ref.items():
         b = got.get(key)
         if b is None:
@@ -668,17 +671,33 @@ def compare(ref, got, threshold, margin=0.25):
         for k in set(ka) & set(kb):
             worst = max(worst, abs(ka[k] - kb[k]) / max(abs(ka[k]), 1.0))
         if "fine" in key:
+            for k, v in ka.items():
+                i = next((j for j in range(len(edges) - 1) if abs(v) < edges[j + 1]), None)
+                if i is not None and abs(v) >= edges[0]:
+                    by_snr[i][0] += 1
+                    by_snr[i][1] += k not in kb
             for name, side, keys in (("reference only", ka, set(ka) - set(kb)),
                                      ("device only", kb, set(kb) - set(ka))):
+                other = kb if side is ka else ka
                 for k in keys:
                     if abs(side[k]) < threshold + margin:
                         margin_only += 1
                     else:
-                        missed.append((name, key, k, float(abs(side[k]))))
+                        # The other side's nearest peak of the same template: a peak one bin
+                        # elects differently shows up as a pair of one-sided peaks.
+                        near = min(((abs(s2 - k[1]), s2, float(abs(v)))
+                                    for (t2, s2), v in other.items() if t2 == k[0]),
+                                   default=None)
+                        missed.append((name, key, k, float(abs(side[k])),
+                                       near[1:] if near else None))
     return dict(calls=calls, max_snr_diff=worst, gate_margin_peaks=margin_only,
                 peaks_reference_only=sum(m[0] == "reference only" for m in missed),
                 peaks_device_only=sum(m[0] == "device only" for m in missed),
-                loudest=sorted(missed, key=lambda m: -m[3])[:5])
+                missed_by_snr={"%.2f-%.2f" % (edges[i], edges[i + 1]): "%d/%d" % (m, t)
+                               for i, (t, m) in enumerate(by_snr)},
+                loudest=sorted(missed, key=lambda m: -m[3])[:5],
+                device_only=sorted((m for m in missed if m[0] == "device only"),
+                                   key=lambda m: -m[3])[:5])
 
 
 def main():
@@ -699,6 +718,9 @@ def main():
     p.add_argument("--pad", type=int, default=4096, help="middle-series context either side")
     p.add_argument("--threshold", type=float, default=6.0)
     p.add_argument("--fd", type=float, default=1e-3)
+    p.add_argument("--check-engine", default="hier", choices=("hier", "flat"),
+                   help="the --check run's fine-bank engine: flat is the exact (ungated) filter, "
+                        "so the check measures the gates' dismissals; hier compares like with like")
     p.add_argument("--peak-window", type=float, default=1.0)
     p.add_argument("--asym-threshold", type=float, default=6.0)
     p.add_argument("--asym-bin-width", type=float, default=0.03)
@@ -748,7 +770,8 @@ def main():
     tops = load_tops(args.bank, args.tops)
     report, results = run_device(args.device, tops, args, args.seed)
     if args.check:
-        ref_report, ref_results = run_device(args.check, tops, args, args.seed)
+        ref_report, ref_results = run_device(args.check, tops, args, args.seed,
+                                             fine_engine=args.check_engine)
         report["reference"] = ref_report
         report["check"] = compare(ref_results, results, args.threshold)
     try:
