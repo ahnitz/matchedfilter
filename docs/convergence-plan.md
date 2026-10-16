@@ -260,7 +260,84 @@ Order: 1, then 2, then 4, then 3, then 5, then 6. Steps 1 and 6 do not depend on
   - It found a Metal bug on main: in a cascade, a tier-1 threshold of 0 passed the pairs tier 0
     had dismissed. Fixed on Metal and CUDA.
   - `docs/reduced-precision-gates.md` documents the three bounds.
+- 2026-10-16: **Step 5: `_run_series_gpu` split into its stages** (31310ebf): `_series_call`
+  (everything decided before dispatch), `_series_grouped` and `_series_by_group` (the two
+  dispatch shapes), `_series_submit`, `_series_deferred`, and `_SeriesOutput` (where batches
+  land). The 381-line function is now 22 lines.
+  - Found on the M2: deferred results kept the call's state, and with it a host array's
+    view owner, until collected. A later call then found its series unregistered. The owner
+    now lives for the call, as it did before the split.
+  - Paired: M2 1.000 / 1.024, L40S 1.052 / 1.010. Two 8060S pairings gave 1.001 / 0.989.
+    Their seeds settled at about 1.0e8 against 1.43e8 for another seed on the same tree.
+    On one settled 1.43e8 seed, host time per series call was the same in both trees
+    (1978-2050 us against 2006-2035 us, 162 calls). Throughput medians were 1.44e8 against
+    1.43e8. The split costs nothing measurable.
+- 2026-10-16: **Step 3: one device follow-up design; CUDA executor** (41ef1d9f).
+  - Step 0 had removed CUDA's follow-ups along with `SegmentPlan`. That left Vulkan's as
+    the only design, so step 3 shared it rather than merging two designs.
+  - `_gpuhost.followup_layout` lays a batch out as `refineItems` entries.
+    `assemble_followups` orders the results as `_items_batch` does. Each backend offers
+    `Context.followup_executor()`.
+  - Vulkan keeps its recording and submission (`_vkfollowup`: 392 -> 241 lines).
+    `_cudafollowup` (138 lines) does one table upload, then per group a forward and one
+    `refineItems` launch, then one readback.
+  - Measured share first, as planned. Host follow-ups were about 6% of an M2 segment and
+    16-20% of a pipelined L40S segment. Vulkan's device follow-ups gain 7% over its host
+    path on the 8060S.
+  - L40S, paired on settled seeds: pipelined 1.249, batched 1.029. The follow-up stage fell
+    from 0.05-0.06 s to 0.03 s per segment.
+  - 8060S: 0.990 / 1.015. Follow-up batches cost the same host time in both trees
+    (median 2.43 ms against 2.37 ms per 40-job batch).
+  - Metal keeps the host path.
+  - Removed with it, all unreachable since step 0: `followup.cu` and its PTX,
+    `read_followup_items`, the item-record constants, `FollowupSpec`'s capacities and
+    `supports_device_followups`. `MF_VK_DEVICE_FOLLOWUPS` became `MF_DEVICE_FOLLOWUPS`.
+  - The call-plan follow-up tests now also run on CUDA.
+- 2026-10-16: **Production coverage as a tool** (`tools/ladder_coverage.py`), run after
+  steps 3 and 5 on the 8060S (batched and pipelined), M2, L40S and CPU.
+  - 224 functions (2,331 statements) are reached by no backend's production ladder.
+  - Most are expected:
+    - public API the ladder does not call (`run`, `set_data`, `CorrelationFilter`, flat
+      peaks);
+    - calibration and trial code a settled seed skips;
+    - tier-C block lengths;
+    - error and teardown paths.
+  - One group has no consumer at all: `FollowupSpec`, `filter_series_many(followups=)`,
+    `_run_followups`, `run_followups`, and the `time_domain.FollowUp` alias. They were
+    `SegmentPlan`'s interface. pycbc does not call them, and neither does the ladder (it
+    passes single-template jobs to `filter_series_many`). Only `tests/test_followup_spec.py`
+    reaches them.
+  - That group is a deletion candidate. It is left in place because removing it changes a
+    public keyword.
 - **Measurement lessons.**
   - A shared seed hides a change to pricing or candidates; use `--seed-per-tree`.
   - Metal's device timer overstates time when command buffers overlap.
   - Never run tests on the machine under measurement.
+  - Seeds settled the same way on the same tree reach different throughput: 1.0e8 to
+    1.43e8 on the 8060S. One reached a 1.85 s fine stage. Compare host time per call when a
+    pairing's sign depends on the seed.
+
+## Assessment (2026-10-16)
+
+- **Done:** every step (0-6) is merged.
+- **Divergence removed:**
+  - `SegmentPlan` and its backend machinery: 2,817 lines.
+  - Padding and drafts.
+  - CUDA's own grouped hierarchical path (CUDA now uses the shared one).
+  - Two band-forward rules and switches, now one.
+  - Two follow-up designs, now one shared layout with two thin executors.
+  - The 381-line series function, now split into named stages.
+  - One tier conformance suite now covers CPU f32/q15/f16 and every GPU. It found a Metal
+    tier-1 bug that was on main.
+- **Performance:**
+  - Steps 0-1: up to +4.8% pipelined.
+  - Step 2: L40S fine stage -12% device time.
+  - Step 3: L40S pipelined +25%.
+  - Nothing measured a loss that survived a direct host-time check.
+- **Divergence that remains, by measurement:**
+  - Metal runs a call per window group: the grouped call was 6-10% slower in its ladder.
+  - Metal follow-ups run on the host: about 6% of its segment.
+  - CUDA has no band-only forward (new kernels, unpriced).
+- **The largest open issue is not divergence but seed variance.** Measured choices settle
+  at throughputs 30% apart on the same tree and machine. Tightening how trials lock would be
+  worth more than any remaining step here.
