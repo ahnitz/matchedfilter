@@ -16,8 +16,8 @@ Everything after `--` goes to tools/ladder.py. The method:
   * Rounds alternate the order (base first, then new first), after `--warmup` unrecorded
     runs of each tree.
 
-Each line reports the throughput (templates in real time), the fine stage's device time
-and the host CPU time for both modes; the summary gives each tree's range over the rounds.
+Each line reports the throughput (templates in real time), the host CPU time and, with
+--timing, the fine stage's device time, for both modes; the summary gives each tree's range over the rounds.
 Single-threaded (OMP_NUM_THREADS=1 and the BLAS variables) as every benchmark here.
 """
 import argparse
@@ -32,12 +32,12 @@ PATTERNS = {"tp": r"^throughput: ([0-9.e+]+)", "fine_dev": r"fine: device ([0-9.
             "host": r"host: cpu ([0-9.]+)s"}
 
 
-def run(tree, ladder_args, cost, extra, python):
+def run(tree, ladder_args, cost, extra, python, timing=False):
     env = dict(os.environ, OMP_NUM_THREADS="1", OPENBLAS_NUM_THREADS="1", MKL_NUM_THREADS="1",
                VECLIB_MAXIMUM_THREADS="1", PYTHONPATH=os.path.join(tree, "python"),
                MF_COST_FILE=cost)
     p = subprocess.run([python, os.path.join(tree, "tools", "ladder.py")] + ladder_args + extra
-                       + (["--timing"] if "--timing" not in ladder_args else []),
+                       + (["--timing"] if timing and "--timing" not in ladder_args else []),
                        cwd=tree, env=env, capture_output=True, text=True)
     out = {}
     for k, pat in PATTERNS.items():
@@ -63,6 +63,10 @@ def main(argv=None):
     ap.add_argument("--seed-cost", default=None,
                     help="an already settled cost file to start from instead of settling")
     ap.add_argument("--python", default=sys.executable)
+    ap.add_argument("--timing", action="store_true",
+                    help="device timers on (fine-stage device time per run). They change what "
+                         "a host-bound backend is limited by (on an M2 they hid a 14%% host "
+                         "saving), so throughput is compared without them by default")
     args = ap.parse_args(argv[:k])
     ladder = argv[k + 1:]
     trees = {"base": os.path.abspath(args.base), "new": os.path.abspath(args.new)}
@@ -78,7 +82,7 @@ def main(argv=None):
     def one(name, extra):
         cost = os.path.join(work, "%s.json" % name)
         shutil.copy(seed, cost)
-        return run(trees[name], ladder, cost, extra, args.python)
+        return run(trees[name], ladder, cost, extra, args.python, args.timing)
 
     for _ in range(args.warmup):
         for name in trees:
