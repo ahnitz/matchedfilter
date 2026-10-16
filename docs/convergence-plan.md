@@ -329,6 +329,30 @@ Order: 1, then 2, then 4, then 3, then 5, then 6. Steps 1 and 6 do not depend on
     flips each fail.
   - Open question: dismissals of |snr| 5-6 peaks near a delta input are far above the
     nominal 1e-3. A delta is not a signal the gate model covers, but this deserves a look.
+- 2026-10-16: **Gate dismissals measured against the exact filter.**
+  `tools/ladder.py --check cpu --check-engine flat` runs the reference with flat (ungated)
+  fine banks and reports misses per |snr| band. Pin `--fft-length` so both engines use one
+  block layout: otherwise the bin edges differ, and a peak elected in a neighbouring bin
+  looks like a miss plus an invention.
+  - test27, 2 tops, 755 calls, threshold 5, fd 1e-3, n = 2048. CPU / GPU misses:
+    - 5.00-5.25: 530 / 515 of 92,503 (0.57% / 0.56%);
+    - 5.25-5.50: 7 / 5 of 27,110;
+    - 5.50-6.00: 1 / 1 of 9,147;
+    - >= 6: 0 of 524.
+  - Neither device invents a peak. Common SNRs agree to 3e-7 (CPU) and 3e-5 (GPU).
+  - Above the threshold band, misses are below the nominal 1e-3. CPU and GPU miss the same
+    loudest peaks.
+  - pycbc_inspiral_fir on the smoke data (bank rebuilt for the 2026-10-15 layout): flat and
+    hierarchical, CPU and GPU, give identical triggers at snr 5.0-6.5. That is only 16
+    clustered triggers per run.
+  - The 5-6 misses in the synthetic Metal test come from a delta input, which the gate's
+    signal model does not cover.
+- 2026-10-16: **The cost-file variance was the machine, not the seed.** Read with
+  MF_COST_FILE set, the "slow" settled file ran as fast as the fast one (1.42e8 against
+  1.42e8 batched). Swapping its one differing lock (Vulkan interleave 3 against 0) changed
+  nothing beyond noise. Every file moved together between rounds (-10 to -25%): the APU
+  shares its power with a busy desktop. Only first runs on fresh files are slow, while
+  their trials run.
 - **Measurement lessons.**
   - A shared seed hides a change to pricing or candidates; use `--seed-per-tree`.
   - Metal's device timer overstates time when command buffers overlap.
