@@ -22,7 +22,8 @@ from functools import lru_cache, wraps
 
 import numpy as np
 from ._shared import empty_shared, shared_buffer, shared_key, write_input
-from ._gpuhost import (MAX_BINS, bin_shift, coarse_span, plan_items, split_items, hier_tiers, hier_window,
+from ._gpuhost import (MAX_BINS, band_forward_wanted, bin_shift, coarse_span, refine_block_fraction,
+                       plan_items, split_items, hier_tiers, hier_window,
                        split_bins)
 from ._shared import pack_half2 as _pack_half2, sparsified as _sparsified
 
@@ -195,9 +196,10 @@ _FUSED_FORWARDS = [0]
 
 
 def _fused_forward_enabled():
-    """forward_tier0.slang on the hierarchical fine stage (MF_METAL_FWD_TIER0=0: off)."""
+    """forward_tier0.slang may serve the hierarchical fine stage (MF_BAND_FORWARD=0: never).
+    Whether a call takes it is _gpuhost.band_forward_wanted's, every backend's rule."""
     import os
-    return os.environ.get("MF_METAL_FWD_TIER0", "1") != "0"
+    return os.environ.get("MF_BAND_FORWARD") != "0"
 
 
 #: Threads the coarse pass packs pairs up to when no pipeline width is known; the host passes
@@ -1845,8 +1847,13 @@ class Context(InputUploads):
         # forward is about to write, that forward writes only the bands the tiers read, and
         # the refine's blocks are recomputed in full (markBlocks + seriesForwardListed).
         fwd = None
-        if (shared_data and half[0] and not any(half[1:]) and len(tiers) <= 2
-                and _fused_forward_enabled()):
+        # The band forward (forward_tier0) when it moves fewer bytes than the full one for
+        # this call shape, by its refine-block fraction measured last time (finish, below).
+        top = max(b for b, _, _ in tiers)
+        band_ok = (shared_data and half[0] and not any(half[1:]) and len(tiers) <= 2
+                   and _fused_forward_enabled())
+        if band_ok and band_forward_wanted(
+                n, top, self.__dict__.get("_band_f", {}).get((n, top, nd, nt))):
             fwd = self._claim_forward(bufs["data"], nd)
             if fwd is not None:
                 try:
@@ -1946,6 +1953,13 @@ class Context(InputUploads):
             self.last_refinements = count
             if len(tiers) > 1:
                 self.last_tier1_survivors = int(bufs["args"].read(np.uint32, 1)[0])
+            if band_ok:
+                # This shape's refine-block fraction, for its next call's band/full choice
+                # and for the forward pricing (gatechain).
+                f = refine_block_fraction(bufs["surv" + last].view(np.uint32, count), nt, nd)
+                self.__dict__.setdefault("_band_f", {})[(n, top, nd, nt)] = f
+                from . import gatechain as _gc
+                _gc.note_refine_blocks(n, top, f)
             if sparse:
                 from . import _SparsePeaks
                 rows = np.sort(bufs["surv" + last].view(np.uint32, count).astype(np.int64))
