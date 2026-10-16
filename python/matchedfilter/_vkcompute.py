@@ -2162,10 +2162,13 @@ class Context(InputUploads):
         screen_ = lambda c: self._time_coarse_layout(band, c, bufs, timer, screen // ntm, ntm, 2)
 
         def tiles(times):
-            # The tiles at the two fastest untiled (subgroup, ppg): building a pipeline is
-            # most of the cost (a tiled build took up to 50 s on the Iris Xe).
+            # The tiles at the two fastest untiled (subgroup, ppg), and at any (subgroup, ppg)
+            # with no untiled layout among cands (a re-check's set): a tile is skipped only
+            # when its untiled sibling was measured and lost. Building a pipeline is most of
+            # the cost (a tiled build took up to 50 s on the Iris Xe).
             lead = {c[:2] for c in sorted(times, key=times.get)[:2]}
-            return [c for c in cands if c[2] > 1 and c[:2] in lead]
+            timed = {c[:2] for c in times}
+            return [c for c in cands if c[2] > 1 and (c[:2] in lead or c[:2] not in timed)]
         try:
             untiled = [c for c in cands if c[2] == 1]
             out = time_staged([untiled or cands] + ([tiles] if untiled and len(untiled) < len(cands)

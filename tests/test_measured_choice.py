@@ -465,3 +465,20 @@ def test_a_stored_choice_is_rechecked_against_its_runners_up(monkeypatch, tmp_pa
     calls.clear()
     assert pick() == "a" and calls == [list("abd"), list("abcd")]   # re-measured
     assert gatechain.stored_choice(ckey) == "a"
+
+
+def test_a_recheck_that_does_not_time_the_choice_measures_everything(monkeypatch, tmp_path):
+    """A backend's staged timing may skip a candidate; a re-check whose result lacks the
+    stored choice cannot vouch for it, so everything is measured again."""
+    from matchedfilter import _coarse, gatechain
+    monkeypatch.setenv("MF_COST_FILE", str(tmp_path / "c.json"))
+    calls = []
+
+    def measure(cs):
+        calls.append(sorted(cs))
+        return _coarse.Timings({c: 1.0 + ord(c) for c in cs if c != "c"})   # never times c
+    ckey = "t-untimed|dev|256|a;b;c|kk"
+    gatechain.store_choice(ckey, "c", rivals="a;b")
+    pick = _coarse.stored_measured_choice({}, "t-untimed", "dev", 256, list("abc"), str, "k",
+                                          measure)
+    assert pick == "a" and calls == [list("abc"), list("abc")]

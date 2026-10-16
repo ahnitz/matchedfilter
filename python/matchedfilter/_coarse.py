@@ -221,10 +221,12 @@ def stored_measured_choice(memo, kind, device, band, cands, label, kernel_id, me
 
 def _still_fastest(choice, rivals, measure):
     """True unless a rival times faster than choice beyond the noise (measure over the
-    three; Timings.close holds the contenders within it of the fastest). A device that
-    cannot be timed keeps the choice."""
+    three; Timings.close holds the contenders within it of the fastest), or choice was not
+    timed at all. A device that cannot be timed keeps the choice."""
     t = measure([choice] + list(rivals))
     if not t:
         return True
+    if choice not in t:
+        return False
     fastest = min(t, key=t.get)
     return fastest == choice or t[choice] == t[fastest] or choice in getattr(t, "close", ())
