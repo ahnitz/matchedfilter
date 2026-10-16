@@ -21,7 +21,8 @@ import numpy as np
 
 from . import _gputime, _vulkan
 from ._shared import empty_shared, shared_buffer, shared_key, shared_view, write_input
-from ._gpuhost import (MAX_BINS, band_windows, bin_shift, coarse_span, plan_items, split_items, hier_tiers, hier_window,
+from ._gpuhost import (MAX_BINS, band_forward_wanted, band_windows, bin_shift, coarse_span,
+                       refine_block_fraction, plan_items, split_items, hier_tiers, hier_window,
                        split_bins, hier_peaks_grouped as _hier_peaks_grouped)
 from ._shared import pack_half2 as _pack_half2, sparsified as _sparsified
 
@@ -1603,12 +1604,8 @@ class Context(InputUploads):
                 return _SparsePeaks((nd, nt, nbins), e, e, np.empty(0, np.complex64))
             rows = v[2][:surv_count] if (sparse or mode is not None) else None
             if mode is not None:
-                # The refine-block fraction: distinct survivor blocks, marked rather than
-                # sorted (the list is in device completion order).
-                seen = np.zeros(nd, np.bool_)
-                seen[rows // nt] = True
                 self.__dict__.setdefault("_band_f", {})[(mode[0], mode[1], nd, nt)] = (
-                    int(np.count_nonzero(seen)) / float(nd))
+                    refine_block_fraction(rows, nt, nd))
             if sparse:
                 from . import _SparsePeaks
                 # Gather and scan in completion order; only the hits are put in C order.
@@ -2176,7 +2173,7 @@ class Context(InputUploads):
         samples and the band forward B, while the recompute reads and writes n for each block
         with a refined pair, so bands move fewer bytes iff that fraction f < (n - B) / 2n.
         f is the one measured on this call shape's previous run; the first run is full."""
-        if os.environ.get("MF_VK_BAND_FORWARD") == "0" or n > 65536 or B >= n:
+        if os.environ.get("MF_BAND_FORWARD") == "0" or n > 65536 or B >= n:
             return None
         src = getattr(self, "_fwd_src", {}).get(data.ctypes.data)
         pend = getattr(self, "_pending_forward", None)
@@ -2188,15 +2185,9 @@ class Context(InputUploads):
         return (B, src)
 
     def _band_wanted(self, n, B, nd, nt):
-        """The band/full choice for this call shape from its measured refine-block fraction
-        (see _band_source); forced by MF_VK_BAND_FORWARD=0/1."""
-        env = os.environ.get("MF_VK_BAND_FORWARD")
-        if env == "0" or n > 65536 or B >= n:
-            return False
-        if env == "1":
-            return True
-        f = getattr(self, "_band_f", {}).get((n, B, nd, nt))
-        return f is not None and f < (n - B) / (2.0 * n)
+        """The band/full choice for this call shape (_gpuhost.band_forward_wanted, every
+        backend's rule) from its measured refine-block fraction."""
+        return band_forward_wanted(n, B, getattr(self, "_band_f", {}).get((n, B, nd, nt)))
 
     def _band_storage(self, b, nd, B):
         b["bands"] = _Buffer(self, nd * B * 8)
@@ -2268,10 +2259,7 @@ class Context(InputUploads):
 
     def _band_measure(self, n, B, nd, nt, bufs, surv_key, count):
         """The fraction of blocks the refine touched, for the next call's choice."""
-        if count <= 0:
-            f = 0.0
-        else:
-            f = len(np.unique(bufs[surv_key].view(np.uint32, count) // nt)) / float(nd)
+        f = refine_block_fraction(bufs[surv_key].view(np.uint32, max(count, 0)), nt, nd)
         self.__dict__.setdefault("_band_f", {})[(n, B, nd, nt)] = f
         from . import gatechain as _gc           # forward pricing uses the measured fraction
         _gc.note_refine_blocks(n, B, f)

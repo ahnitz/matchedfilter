@@ -314,7 +314,7 @@ def test_band_mode_flip_replays_exact(monkeypatch):
     jobs = [(b, rows[i], dict(windows=slice(3000, S - 3000))) for i, (b, _, _) in enumerate(banks)]
     seen = []
     for mode in ("1", "1", "1", "0", "0", "1", "1"):
-        monkeypatch.setenv("MF_VK_BAND_FORWARD", mode)
+        monkeypatch.setenv("MF_BAND_FORWARD", mode)
         before = _replays(banks)
         _fill(rng, rows, S)
         _check(jobs)
@@ -366,7 +366,7 @@ def test_steady_segments_replay(monkeypatch, band, depth):
     rng, banks = _setup(monkeypatch, nbanks=2, seed=79)
     monkeypatch.delenv("MF_AUTOTUNE", raising=False)
     monkeypatch.setenv("MF_CHAIN_TRIALS", "2")
-    monkeypatch.setenv("MF_VK_BAND_FORWARD", band)
+    monkeypatch.setenv("MF_BAND_FORWARD", band)
     S = 1 << 17
     sets = [banks[0][0].empty_shared((len(banks), S)) for _ in range(depth + 1)]
     inflight, deltas = [], []
@@ -424,7 +424,7 @@ def test_band_mode_allocates_nothing_in_steady_state(monkeypatch):
     set per call (1339 buffers in 38 steady ladder segments)."""
     rng, banks = _setup(monkeypatch, seed=74)
     from matchedfilter import _vkcompute as V
-    monkeypatch.setenv("MF_VK_BAND_FORWARD", "1")
+    monkeypatch.setenv("MF_BAND_FORWARD", "1")
     S = 1 << 17
     pools = [banks[0][0].empty_shared((len(banks), S)) for _ in range(3)]
     made = [0]

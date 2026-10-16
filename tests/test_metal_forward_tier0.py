@@ -13,7 +13,7 @@ def _run(monkeypatch, enabled, rng_seed=5):
     if dev is None:
         pytest.skip("no usable GPU")
     monkeypatch.setenv("MF_AUTOTUNE", "0")
-    monkeypatch.setenv("MF_METAL_FWD_TIER0", "1" if enabled else "0")
+    monkeypatch.setenv("MF_BAND_FORWARD", "1" if enabled else "0")
     rng = np.random.default_rng(rng_seed)
     counts = sorted(rng.integers(200, 1800, 24))
     taps, w, df = _whitened_inspiral_bank(rng, counts)

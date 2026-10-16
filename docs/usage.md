@@ -294,7 +294,7 @@ candidate is faster beyond the measurement noise.
 | `MF_GPU_TIMING` | `0` | `1` records device time per kernel (for profiling; it adds overhead). |
 
 Other `MF_*` variables force a single candidate for measurement (for example
-`MF_CHAIN_FORCE`, `MF_GPU_FUSE_INTERLEAVE`, `MF_VK_BAND_FORWARD`). They are not
+`MF_CHAIN_FORCE`, `MF_GPU_FUSE_INTERLEAVE`, `MF_BAND_FORWARD`). They are not
 needed in normal use, and forcing one bypasses the choice it would otherwise
 measure.
 
