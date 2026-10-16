@@ -34,7 +34,9 @@ def _coarse(ctx, n, B, D, T):
     # own scale (8, below), and its values come back divided by the scale it applied.
     ctx.hier_peaks(n, B, data, tmpl, np.ascontiguousarray(tmpl[:, :B]), 8.0,
                    binsize=n, threshold=0.0)
-    return (np.abs(ctx._last_dispatch[0]["cval0"].read(np.complex64, nt).astype(np.complex128))
+    kind, key = list(ctx._cache_order)[-1]     # the record this call ran (touched last)
+    bufs = ctx._hier[key][0]
+    return (np.abs(bufs["cval0"].read(np.complex64, nt).astype(np.complex128))
             / ctx._last_c16_scale)
 
 

@@ -86,11 +86,7 @@ class _RaggedSplit:
             if not cell:
                 cell.append(self.parts(d.result()))
             return cell[0][i]
-        out = [_Deferred(lambda i=i: part(i)) for i in range(len(self.us))]
-        for i, p in enumerate(out):
-            # A segment replay reads the one traced call and splits its result the same way.
-            p.trace, p.split = d.trace, (self, i)
-        return out
+        return [_Deferred(lambda i=i: part(i)) for i in range(len(self.us))]
 
 
 def _normalize_windows(windows, S: int) -> np.ndarray:
@@ -1993,9 +1989,6 @@ class TimeDomainFilterBank:
         from . import _Deferred, _SparsePeaks
         defer = getattr(self, '_defer', False)
         pending = []
-        sink = getattr(self, '_trace_sink', None)
-        if sink is not None:
-            sink.append((pending, template_index, [False]))
         for g, tmpl_arg in work_items:
             plan_templates = tmpl_arg
             trial = None
@@ -2147,8 +2140,6 @@ class TimeDomainFilterBank:
                             active_plan, getattr(active_plan, '_last_layout', None), None)
                     continue
                 aidx, aval = (res, None) if isinstance(res, _SparsePeaks) else res
-                if sink is not None:
-                    sink[-1][2][0] = True          # a synchronous result: not replayable
                 if getattr(active_plan, '_last_n_triggers', None) == 0:
                     continue
                 if pending:
@@ -2263,7 +2254,7 @@ class TimeDomainFilterBank:
         return side == "cpu", record
 
     @staticmethod
-    def _run_followups(jobs, fine, spec, side_queue=False):
+    def _run_followups(jobs, fine, spec):
         """(follow-ups, "device" or "host"): on a backend that runs selected follow-ups as
         one fixed recording per template group (Vulkan: _vkfollowup), else on the host."""
         import os
@@ -2273,7 +2264,7 @@ class TimeDomainFilterBank:
             except ImportError:
                 _vkfollowup = None
             if _vkfollowup is not None:
-                res = _vkfollowup.run(spec, spec.select(jobs, fine), side_queue)
+                res = _vkfollowup.run(spec, spec.select(jobs, fine))
                 if res is not None:
                     return res, "device"
         return spec.run_host(jobs, fine), "host"
@@ -2295,7 +2286,6 @@ class TimeDomainFilterBank:
         """
         if followups is not None:
             # The fine stage, then the follow-up rule on its results (_gpuhost.FollowupSpec).
-            # A CUDA segment graph runs both on the device: SegmentPlan.run(followup=...).
             fine = TimeDomainFilterBank.filter_series_many(jobs)
             return fine, TimeDomainFilterBank._run_followups(jobs, fine, followups)[0]
         from . import _Deferred
@@ -2569,7 +2559,7 @@ class TimeDomainFilterBank:
                     # output samples the windows ask for, and template spectra read.
                     # (Stored bins per template without materialising a lazily planned
                     # group's spectra: that stacked every template's filter, ~1 ms a call.)
-                    _count_work(self._add_corr_work, g.n, dict(
+                    self._add_corr_work(g.n, dict(
                         blocks=int(st.size), pairs=int(st.size) * nt,
                         out_samples=int((keep[:, 1] - keep[:, 0]).sum()) * nt,
                         tmpl_values=nt * _stored_bins(g)))
@@ -2662,7 +2652,7 @@ class TimeDomainFilterBank:
         nt = self.n_templates
         W = _normalize_windows(windows, S)
         # Input samples the windows read (matchedfilter._roofline), once per call.
-        _count_work(self._add_corr_in, int((W[:, 1] - W[:, 0]).sum()))
+        self._add_corr_in(int((W[:, 1] - W[:, 0]).sum()))
 
         if template_index is not None:
             if template_index < 0 or template_index >= nt:
@@ -2840,628 +2830,6 @@ from ._gpuhost import FollowupSpec                        # noqa: E402
 FollowUp = FollowupSpec                                       # the name the CUDA track used
 
 
-#: Work-counter logs being recorded (SegmentPlan capture). A counter increment made while a
-#: log is open is recorded instead of applied: captured work has not run. The graph applies
-#: the log each time it runs (the capture's own first run and every replay); a failed capture
-#: drops it, and the fallback that runs the work counts it.
-_WORK_LOGS = []
-
-
-def _count_work(fn, *args):
-    if _WORK_LOGS:
-        _WORK_LOGS[-1].append((fn, args))
-    else:
-        fn(*args)
-
-
-def _replay_work(log):
-    for fn, args in log or ():
-        fn(*args)
-
-
-class _SegmentResult:
-    """SegmentPlan.submit's handle: result() gives what SegmentPlan.run returns."""
-
-    def __init__(self, fn):
-        self._fn, self._done, self._value = fn, False, None
-
-    def result(self):
-        if not self._done:
-            self._value, self._done, self._fn = self._fn(), True, None
-        return self._value
-
-
-class _Same:
-    """An object compared by identity, held: a signature entry that cannot match another
-    object, because the one it names stays alive as long as the signature does (an id() or
-    an address can come back as a different object or allocation)."""
-    __slots__ = ("obj",)
-
-    def __init__(self, obj):
-        self.obj = obj
-
-    def __eq__(self, other):
-        return isinstance(other, _Same) and other.obj is self.obj
-
-    def __ne__(self, other):
-        return not self.__eq__(other)
-
-    def __hash__(self):
-        return id(self.obj)
-
-    def __repr__(self):
-        return "_Same(%s at %#x)" % (type(self.obj).__name__, id(self.obj))
-
-
-class _VkReplay:
-    """A Vulkan segment replay in flight (SegmentPlan.submit): its launch, and the read of its
-    results, done once. The read is registered as an in-flight readback on every context the
-    trace's records belong to, so evicting one of them (which frees result buffers) reads
-    this replay's results first instead of reading freed memory later."""
-
-    def __init__(self, plan, tr, launch):
-        self.plan, self.tr, self.launch = plan, tr, launch
-        self.out = None
-        self.pendings = [ctx._track(self.read) for ctx in tr["ctxs"]]
-        # And as the owner of every slot its dispatches use, on their fine plans: any later
-        # call on those plans that reuses a slot (a deferred one taking it, a synchronous one
-        # settling the plan first) reads this replay's results before overwriting them.
-        self.owned = []
-        for entries, _ in tr["jobs"]:
-            for d, *_ in entries:
-                fp = d.trace["plan"]
-                owners = fp.__dict__.setdefault("_slot_owner", {})
-                for sl in d.trace["slots"]:
-                    owners[sl] = self
-                    self.owned.append((owners, sl))
-
-    @property
-    def _done(self):                           # as a slot owner (MatchedFilter._slot_owner)
-        return self.out is not None
-
-    def read(self):
-        if self.out is None:
-            self.launch.wait()
-            self.out = self.plan._parse_vk(self.tr)
-        return self.out
-
-    def result(self):
-        out = self.read()
-        for p in self.pendings:                 # deregister from every context
-            p()
-        self.pendings = []
-        for owners, sl in self.owned:
-            if owners.get(sl) is self:
-                del owners[sl]
-        self.owned = []
-        return out
-
-
-def _in_chain_trial(jobs):
-    """Whether a plan of the jobs' banks is in a GPU chain trial."""
-    for bank, _, kw in jobs:
-        for g in bank._groups:
-            p = getattr(g, "_plan", None)
-            if p is not None and getattr(p, "_chain_trial", None) is not None:
-                return True
-    return False
-
-
-class SegmentPlan:
-    """filter_series_many for a job set that recurs, e.g. every segment of one top template.
-
-    The first run of a job set is traced: which fused GPU recordings it submitted and where
-    each job's results land. A later run with the same banks (same reference and thresholds),
-    the same windows and the same input buffers -- device memory the caller rewrites in place,
-    such as a reused correlate_series(out=...) -- replays the recordings as one submission,
-    waits once, and reads back only the jobs whose gates refined anything: the host no
-    longer rebuilds every call's layout, keys and submissions. Anything else (another job set,
-    an evicted recording, a non-Vulkan device, a CPU bank) runs filter_series_many as usual.
-    The results are identical either way.
-    """
-
-    def __init__(self, slot_half=None):
-        """slot_half (0 or 1): this plan's calls use that half of every fine plan's slots, so
-        two SegmentPlans can keep their segments in flight together (submit) without their
-        device records aliasing."""
-        self._trace = None
-        self.replays = 0
-        self.slot_half = slot_half
-        self._seen = None          # CUDA: the signature of the last untraced run
-        self._graph = None         # CUDA: this plan's SegmentGraph (its own fork streams)
-        self.capture_failures = 0
-
-    @staticmethod
-    def _cuda_context(jobs):
-        """The CUDA Context of a job set run wholly on one CUDA device, else None."""
-        ctx = None
-        for bank, _, _ in jobs:
-            for g in bank._groups:
-                gpu = getattr(g._plan, "_gpu", None) if getattr(g, "_plan", None) is not None else None
-                if gpu is None:
-                    continue
-                if (not type(gpu).__module__.endswith("_cudacompute")
-                        or getattr(gpu, "_device_state", None) is None):
-                    return None
-                if ctx is not None and gpu._device_state is not ctx._device_state:
-                    return None
-                ctx = ctx or gpu
-        return ctx
-
-    @staticmethod
-    def _signature(jobs):
-        sig = []
-        for bank, series, kw in jobs:
-            kw = kw or {}
-            items = []
-            for k in sorted(kw):
-                v = kw[k]
-                if isinstance(v, slice):
-                    v = ("slice", v.start, v.stop, v.step)
-                elif isinstance(v, np.ndarray):
-                    v = ("arr", v.tobytes())
-                items.append((k, v))
-            plans = tuple((_Same(g.plan), getattr(g.plan, '_chain', None),
-                           (getattr(g.plan, '_gcal', None) or (None,))[0])
-                          for g in bank._groups if g.is_hier)
-            # The series by the allocation that holds it and its place in it, both held:
-            # an address alone could come back as another allocation once this one is freed.
-            root = series
-            while isinstance(getattr(root, 'base', None), np.ndarray):
-                root = root.base
-            where = (series.ctypes.data - root.ctypes.data
-                     if isinstance(series, np.ndarray) else None)
-            sig.append((_Same(bank), getattr(bank, '_state_version', 0), plans,
-                        _Same(root), where, getattr(series, 'size', None), tuple(items)))
-        return tuple(sig)
-
-    def run(self, jobs, prelude=None, prelude_key=None, followup=None):
-        """filter_series_many(jobs), replayed when the job set recurs.
-
-        prelude (CUDA): a callable submitting the work that produces the jobs' input series
-        on the device -- e.g. the middle stage, correlate_series(..., out=<the jobs' series
-        buffer>, wait=False) from inputs the caller rewrites in place -- run before the jobs
-        and captured into the same graph. prelude_key identifies what it submits (the caller
-        guarantees the same key means the same submission: buffers, windows, banks); a
-        replay then runs it from the graph without calling it.
-
-        followup (FollowUp): also run its follow-ups, and return (fine results, follow-ups)."""
-        import os
-        ctx = self._cuda_context(jobs)
-        if ctx is not None and os.environ.get("MF_CUDA_SEGMENT_GRAPH", "1") != "0":
-            out = self._run_cuda(jobs, ctx, prelude, prelude_key, followup)
-            if followup is None:
-                return out
-            fine, fu = out
-            if fu is None:
-                fu = followup.run_host(jobs, fine)
-            return fine, fu
-        if self._vk_replay_on():
-            return self.submit(jobs, prelude=prelude, prelude_key=prelude_key,
-                               followup=followup).result()
-        if prelude is not None:
-            prelude()
-        if followup is not None:
-            fine = TimeDomainFilterBank.filter_series_many(jobs)
-            return fine, self._followups(jobs, fine, followup)
-        return TimeDomainFilterBank.filter_series_many(jobs)
-
-    @staticmethod
-    def _vk_replay_on():
-        """Vulkan segment replay: on unless MF_SEGMENT_REPLAY=0. Against the pipelined batched
-        path on the ladder (--profiles, n=2048, same measured chains), two segments in flight
-        replayed: wall 15.8 -> 14.7 ms per segment, host CPU equal, results identical."""
-        import os
-        return os.environ.get("MF_SEGMENT_REPLAY", "1") != "0"
-
-    def _followups(self, jobs, fine, followup, side_queue=False):
-        fu, how = TimeDomainFilterBank._run_followups(jobs, fine, followup, side_queue)
-        name = "followups_device" if how == "device" else "followups_host"
-        setattr(self, name, getattr(self, name, 0) + 1)
-        return fu
-
-    # ---- CUDA: the whole fine stage as one graph -----------------------------------------
-    def _halves(self, jobs, on):
-        if self.slot_half is None:
-            return
-        for bank, _, _ in jobs:
-            for g in bank._groups:
-                p = getattr(g, "_plan", None)
-                if p is not None:
-                    if on:
-                        p._force_slot_half = self.slot_half
-                    else:
-                        p.__dict__.pop("_force_slot_half", None)
-
-    def submit(self, jobs, prelude=None, prelude_key=None, followup=None):
-        """run(), started: a replayed segment graph is launched and not waited for, so the
-        host can collect the previous segment meanwhile. Returns an object whose result()
-        gives what run() returns. Any other path runs now (after the graphs in flight)."""
-        import os
-        ctx = self._cuda_context(jobs)
-        if ctx is not None and os.environ.get("MF_CUDA_SEGMENT_GRAPH", "1") != "0":
-            from . import _cudacompute
-            sig = (self._signature(jobs), prelude_key if prelude is not None else None,
-                   followup.key() if followup is not None else None)
-            tr = self._trace
-            if tr is not None and tr["sig"] == sig and self._graph.launch():
-                self.replays += 1
-                graph = self._graph
-                return graph.track_result(
-                    _SegmentResult(lambda: self._collect_cuda(tr, followup, graph)))
-            _cudacompute.SegmentGraph.wait_all()
-        elif self._vk_replay_on():
-            return self._submit_vk(jobs, prelude, prelude_key, followup)
-        out = self.run(jobs, prelude=prelude, prelude_key=prelude_key, followup=followup)
-        return _SegmentResult(lambda: out)
-
-    # ---- Vulkan: the fine stage's fused recordings, replayed ------------------------------
-    def _submit_vk(self, jobs, prelude, prelude_key, followup):
-        """The Vulkan replay, started. Same contract as the CUDA graph: the signature (jobs,
-        prelude key, follow-up rule) must match the traced run; the prelude is called each
-        time (its submission is not part of the recordings) after the trace has validated
-        and before the replay is submitted; follow-ups run when the result is collected."""
-        import os
-        sig = (self._signature(jobs), prelude_key if prelude is not None else None,
-               followup.key() if followup is not None else None)
-        tr = self._trace
-        if os.environ.get("MF_REPLAY_DEBUG"):
-            if tr is None:
-                print("replay: no trace", flush=True)
-            elif tr["sig"] != sig:
-                print("replay: signature differs", flush=True)
-        if _in_chain_trial(jobs):
-            # A chain trial runs (and is judged) on whole filter_series_many batches: a
-            # replay would keep the plans on one candidate and the trial would never lock.
-            tr = self._trace = None
-        if tr is not None and tr["sig"] == sig:
-            from . import _vkcompute
-            prev = self.__dict__.pop("_vk_inflight", None)
-            if prev is not None:
-                prev.read()                      # this plan's records and starts are reused
-
-            def before():
-                # The batches' block starts, written by the host when the segment was traced:
-                # any call on the same plans since (a synchronous one reuses slot 0, a host
-                # follow-up) may have rewritten them.
-                for entries, _ in tr["jobs"]:
-                    for d, *_ in entries:
-                        for arr, vals in d.trace.get("starts", ()):
-                            arr[:len(vals)] = vals
-                if prelude is not None and not pre_ok:
-                    prelude()
-            # The prelude replayed from its capture when every record it used is still the
-            # one captured; else called (it then submits ahead of the replay, as before).
-            pcap = tr.get("prelude")
-            pre_ok = pcap is not None and pcap.ok and pcap.valid()
-            launch = _vkcompute.replay_fused(tr["dev"], tr["keys"], wait=False, before=before,
-                                             pre=pcap if pre_ok else None)
-            if launch and pre_ok:
-                _replay_work(getattr(pcap, "work", None))   # the replayed prelude's counters
-            if launch:
-                self.replays += 1
-                h = self._vk_inflight = _VkReplay(self, tr, launch)
-
-                def collect():
-                    fine = h.result()
-                    if followup is None:
-                        return fine
-                    # On a side queue: on the main one they wait behind the next segment's
-                    # replay, already queued, and the host waits with them -- host and device
-                    # then run in series (replay ladder: wall 20.1 -> 15.5 ms/segment). They need
-                    # only this segment, finished (h waited for it). The failures once blamed on
-                    # the side queue (test_device_followups_equal_the_host_rule, 3 in 10) were
-                    # the reused-output race fixed in 127451c4: 0 in 20 with it.
-                    return fine, self._followups(jobs, fine, followup, side_queue=True)
-                return _SegmentResult(collect)
-            self._trace = None
-        from . import _vkcompute
-        for dev in list(_vkcompute._DEVICES.values()):
-            # A prelude run here reuses workspaces a replay of another plan captured (the
-            # middle stage alternates them): none of those may still be in flight.
-            _vkcompute._settle_replays(dev)
-        tracing = self._seen == sig and not _in_chain_trial(jobs)
-        pcap = None
-        if prelude is not None:
-            # The device of the job set's plans (other devices the process opened, e.g. by
-            # earlier banks, are not this segment's): the prelude is captured there.
-            devs = {}
-            for b, _, _ in jobs:
-                for g in b._groups:
-                    ctx = getattr(getattr(g, "_plan", None), "_gpu", None)
-                    st = getattr(ctx, "_device_state", None)
-                    if st is not None:
-                        devs[id(st)] = st
-            devs = list(devs.values())
-            if tracing and len(devs) == 1:
-                # Its work counters logged (as for the CUDA graph's prelude) and counted
-                # now; a replay of the capture counts the same again.
-                work_log = []
-                _WORK_LOGS.append(work_log)
-                try:
-                    pcap = _vkcompute.capture_prelude(devs[0], prelude)
-                finally:
-                    _WORK_LOGS.pop()
-                _replay_work(work_log)
-                pcap.work = work_log
-            else:
-                prelude()
-        if not tracing:
-            # As the CUDA graph: the first run of a signature runs as usual (plans settle:
-            # calibration, uploads, records after a chain switch), the next is traced.
-            self._seen = None if _in_chain_trial(jobs) else sig
-            fine = TimeDomainFilterBank.filter_series_many(jobs)
-        else:
-            fine = self._trace_run(jobs, sig)
-            if self._trace is not None:
-                self._trace["prelude"] = pcap
-        out = (fine, self._followups(jobs, fine, followup)) if followup is not None else fine
-        return _SegmentResult(lambda: out)
-
-    def _collect_cuda(self, tr, followup, graph=None):
-        graph = graph if graph is not None else self._graph
-        graph.wait()
-        graph.untrack_result()
-        out = self._parse_cuda(tr)
-        if followup is None:
-            return out
-        fu = self._read_followups(tr.get("fu"))
-        if fu is None:
-            fu = followup.run_host(self._jobs_of(tr), out)
-        return out, fu
-
-    def _run_cuda(self, jobs, ctx, prelude=None, prelude_key=None, followup=None):
-        """One CUDA graph per recurring job set: the first run of a signature runs as usual
-        (allocations, module loads, per-call graphs and plans settle), the second is captured
-        whole -- every bank's forwards, gates, compactions, refines and readbacks, across the
-        fork streams -- and later runs relaunch it with one cuGraphLaunch and one wait, then
-        read each dispatch's results. Any change (signature, a freed buffer, a failed
-        capture) falls back to filter_series_many."""
-        import os
-        from . import _cudacompute
-        sig = (self._signature(jobs), prelude_key if prelude is not None else None,
-               followup.key() if followup is not None else None)
-        wrap = (lambda out, fu=None: (out, fu)) if followup is not None else (lambda out, fu=None: out)
-        tr = self._trace
-        if tr is not None and tr["sig"] == sig:
-            out = self._replay_cuda(tr)
-            if out is not None:
-                self.replays += 1
-                return wrap(out, self._read_followups(tr.get("fu")))
-        self._trace = None
-        if self._seen != sig:
-            self._seen = sig
-            if prelude is not None:
-                prelude()
-            self._halves(jobs, True)
-            try:
-                return wrap(TimeDomainFilterBank.filter_series_many(jobs))
-            finally:
-                self._halves(jobs, False)
-        if self._graph is None:
-            self._graph = _cudacompute.SegmentGraph(ctx)
-        for bank, _, _ in jobs:
-            bank._trace_sink = []
-        built = {}
-
-        work_log = []
-
-        def submit():
-            if prelude is not None:
-                _WORK_LOGS.append(work_log)
-                try:
-                    prelude()
-                finally:
-                    _WORK_LOGS.pop()
-            futures = TimeDomainFilterBank.filter_series_many(jobs, wait=False)
-            if followup is not None:
-                built["fu"] = self._device_followups(ctx, jobs, followup)
-            return futures
-        # Settle every call still holding a slot of these plans before the capture begins:
-        # a call settles the previous owner of a slot it takes, and inside the capture that
-        # wait is illegal (the capture fails). Nothing is in flight to wait for at this point
-        # (capture syncs the context first), so each settle is only bookkeeping.
-        from . import _cudacompute
-        _cudacompute.SegmentGraph.wait_all()
-        for bank, _, _ in jobs:
-            for g in bank._groups:
-                p = getattr(g, "_plan", None)
-                owners = p.__dict__.get("_slot_owner") if p is not None else None
-                while owners:
-                    owners.popitem()[1].result()
-        self._halves(jobs, True)
-        try:
-            futures = self._graph.capture(submit)
-            sinks = [bank._trace_sink for bank, _, _ in jobs]
-        except RuntimeError as e:
-            self.capture_failures += 1
-            self.last_capture_error = str(e)
-            if os.environ.get("MF_REPLAY_DEBUG"):
-                import traceback
-                traceback.print_exc()
-            self._seen = None
-            if prelude is not None:
-                prelude()
-            return wrap(TimeDomainFilterBank.filter_series_many(jobs))
-        finally:
-            self._halves(jobs, False)
-            for bank, _, _ in jobs:
-                bank._trace_sink = None
-        self._graph.replay()
-        _replay_work(work_log)
-        out = [f.result() if hasattr(f, "result") else f for f in futures]
-        per_job, cursor = [], {}
-        for j, (bank, _, _) in enumerate(jobs):
-            k = cursor.get(id(bank), 0)
-            cursor[id(bank)] = k + 1
-            per_job.append(sinks[j][k] if k < len(sinks[j]) else None)
-        if all(e is not None and not e[2][0]
-               and all(getattr(d, "trace", None) is not None for d, *_ in e[0]) for e in per_job):
-            self._trace = dict(sig=sig, jobs=[(e[0], e[1]) for e in per_job], fu=built.get("fu"),
-                               all_jobs=jobs, work=work_log)
-        return wrap(out, self._read_followups(built.get("fu")))
-
-    def _read_followups(self, dfu):
-        """The device follow-ups' results, or None (the caller runs them on the host)."""
-        if dfu is None:
-            self.followups_host = getattr(self, "followups_host", 0) + 1
-            return None
-        res = dfu.read()
-        if res is None:
-            self.followups_overflow = getattr(self, "followups_overflow", 0) + 1
-        else:
-            self.followups_device = getattr(self, "followups_device", 0) + 1
-        return res
-
-    def _device_followups(self, ctx, jobs, followup):
-        """Inside the capture, after the fine stage: the follow-ups on the device, or None
-        (the host then runs them) when this job set cannot take that path."""
-        import os
-        try:
-            from . import _cudafollowup
-        except ImportError:                    # a build without the CUDA follow-up kernels
-            return None
-        if os.environ.get("MF_CUDA_DEVICE_FOLLOWUPS", "1") == "0":
-            return None
-        per_job, cursor = [], {}
-        for j, (bank, _, _) in enumerate(jobs):
-            k = cursor.get(id(bank), 0)
-            cursor[id(bank)] = k + 1
-            sink = bank._trace_sink
-            e = sink[k] if k < len(sink) else None
-            if e is None or e[2][0] or not all(getattr(d, "trace", None) is not None
-                                               for d, *_ in e[0]):
-                return None
-            per_job.append(e[0])
-        try:
-            dfu = _cudafollowup.DeviceFollowUps(ctx, self._graph, followup, jobs, per_job)
-        except _cudafollowup.Unsupported as e:
-            self.followup_unsupported = str(e)
-            return None
-        self._graph.join()
-        dfu.enqueue()
-        return dfu
-
-    @staticmethod
-    def _jobs_of(tr):
-        return tr["all_jobs"]
-
-    def _replay_cuda(self, tr):
-        """Relaunch the segment graph, wait, then read every dispatch (_parse_cuda)."""
-        if not self._graph.replay():
-            return None
-        return self._parse_cuda(tr)
-
-    def _parse_cuda(self, tr, reader=None):
-        # The replayed prelude's work counters (the fine stage's are counted by each
-        # dispatch's reader). A Vulkan replay passes its own reader and calls its prelude.
-        if reader is None:
-            _replay_work(tr.get("work"))
-        return self._parse_dispatches(tr, reader)
-
-    def _parse_dispatches(self, tr, reader=None):
-        """Read every dispatch of a finished segment graph. Sparse results go straight
-        into the job's peak lists, without dense tables, in the order filter_series gives:
-        (block, template, bin), blocks in the caller's order. A dense dispatch (threshold 0,
-        or a fallback) takes the table route for its whole call.
-
-        A dispatch's sparse groups are joined in one flat index over its (layout row,
-        template, bin) table -- group rows b0.. are row offsets into it -- and sorted once, so
-        the CUDA readers are asked for their records unsorted (sort=False)."""
-        from . import _SparsePeaks
-        results, full = [], {}
-        for entries, template_index in tr["jobs"]:
-            lists = ([], [], [], [], [])
-            for d, sub_starts, g, tmpl_arg, N in entries:
-                k = id(d.trace)
-                if k not in full:                   # parts of one split call share it
-                    full[k] = _read_traced(d.trace, reader)
-                r = full[k]
-                sp = getattr(d, "split", None)
-                if r is not None and sp is not None:
-                    split, part = sp
-                    r = split.parts(r)[part]
-                if r is None:
-                    continue
-                if isinstance(r, _SparsePeaks):
-                    _consume_sparse_into(lists, r, sub_starts, g, tmpl_arg, N, template_index)
-                else:
-                    _consume_into(lists, r[0], r[1], sub_starts, g, tmpl_arg, N, template_index)
-            results.append(_results_from(lists))
-        return results
-
-    def _trace_run(self, jobs, sig):
-        from . import _vkcompute
-        devs = list(_vkcompute._DEVICES.values())
-        for dev in devs:
-            dev.trace = []
-        sinks = []
-        for bank, _, _ in jobs:
-            bank._trace_sink = []
-        self._halves(jobs, True)
-        try:
-            out = TimeDomainFilterBank.filter_series_many(jobs)
-            sinks = [bank._trace_sink for bank, _, _ in jobs]
-        finally:
-            self._halves(jobs, False)
-            for bank, _, _ in jobs:
-                bank._trace_sink = None
-            keys = {id(dev): dev.trace for dev in devs}
-            for dev in devs:
-                dev.trace = None
-        # One sink entry per filter_series call, in job order; a bank appearing in several
-        # jobs logged each call in turn.
-        per_job, cursor = [], {}
-        for j, (bank, _, _) in enumerate(jobs):
-            k = cursor.get(id(bank), 0)
-            cursor[id(bank)] = k + 1
-            per_job.append(sinks[j][k] if k < len(sinks[j]) else None)
-        used = [dev for dev in devs if keys[id(dev)]]
-        replayable = (len(used) == 1
-                      and all(e is not None and not e[2][0]
-                              and all(getattr(d, "trace", None) is not None for d, *_ in e[0])
-                              for e in per_job))
-        if replayable:
-            # Every dispatch must own its result buffers for the whole segment: one that
-            # reused an earlier dispatch's record (more batches than slots) was read before
-            # the reuse when run call by call, but a replay runs both and reads after.
-            # Likewise every slot (its starts and spectra, written by the host per batch):
-            # a slot used twice in the segment holds only the later batch's starts, which a
-            # replay would then read for both.
-            seen, slots, traces = set(), set(), set()
-            for e in per_job:
-                for d, *_ in e[0]:
-                    if id(d.trace) in traces:          # another part of one split call
-                        continue
-                    traces.add(id(d.trace))
-                    for _, _, entry in d.trace["groups"]:
-                        if id(entry[0]) in seen:         # live objects: ids are unique here
-                            replayable = False
-                        seen.add(id(entry[0]))
-                    for sl in d.trace.get("slots", ()):
-                        k = (id(d.trace["plan"]), sl)    # the plan is alive (held by d)
-                        if k in slots:
-                            replayable = False
-                        slots.add(k)
-        # The contexts whose records hold the traced dispatches' result buffers (held here).
-        ctxs = list({id(c): c for c in (getattr(g.plan, '_gpu', None) for bank, _, _ in jobs
-                                         for g in bank._groups) if c is not None}.values())
-        self._trace = dict(sig=sig, dev=used[0], keys=list(keys[id(used[0])]), ctxs=ctxs,
-                           jobs=[(e[0], e[1]) for e in per_job]) if replayable else None
-        if os.environ.get("MF_REPLAY_DEBUG") and not replayable:
-            print("replay: trace not replayable: devices", len(used), "sync jobs",
-                  sum(1 for e in per_job if e is None or e[2][0]),
-                  "untraced", sum(1 for e in per_job if e is not None and not all(
-                      getattr(d, "trace", None) is not None for d, *_ in e[0])), flush=True)
-        return out
-
-    def _parse_vk(self, tr):
-        """Every job's results from a finished Vulkan replay: the dispatches' survivor lists
-        read as sparse peaks, assembled exactly as a CUDA replay's (_parse_cuda)."""
-        from . import _vkcompute
-        return self._parse_cuda(tr, reader=_vkcompute.read_dispatch_sparse)
-
-
 def _stored_bins(g):
     """Bins stored per template spectrum of group g (its spectra's second dimension), cached
     on the group; a lazy group is asked for one template's filter, not all of them."""
@@ -3473,91 +2841,6 @@ def _stored_bins(g):
         k = g._stored_bins = int(np.shape(sp)[1])
     return k
 
-
-def _read_traced(t, reader=None):
-    """A traced dispatch's whole result from a finished replay, as its live call returns it:
-    sparse peaks over (caller block, template, bin) in flat order, or dense (index, value)
-    tables when any group came back dense (threshold 0, or a fallback); None when empty.
-
-    A dispatch's sparse groups are joined in one flat index over its (layout row, template,
-    bin) table -- group rows b0.. are row offsets into it -- and sorted once, so the CUDA
-    readers are asked for their records unsorted (sort=False)."""
-    from . import _SparsePeaks
-    nt, nb = t["shape"][1], t["shape"][2]
-    per = nt * nb
-    order = t["order"]
-    flats, idxs, vals = [], [], []
-    dense = None
-    for b0, b1, entry in t["groups"]:
-        if reader is not None:
-            r = reader(entry, t)
-        elif callable(entry):
-            r = entry(sort=False)
-        else:
-            r = entry()
-        if isinstance(r, _SparsePeaks):
-            if r.flat.size == 0:
-                continue
-            f = r.flat
-            gper = r.shape[1] * r.shape[2]
-            keep = f < (b1 - b0) * gper                # padded rows dropped
-            if not keep.all():
-                f = f[keep]
-            if r.shape[1:] == (nt, nb):
-                flats.append(f + b0 * per)
-            else:                                      # re-index into the trace's table
-                bi, rest = np.divmod(f.astype(np.int64), gper)
-                ti_, bn_ = np.divmod(rest, r.shape[2])
-                flats.append((bi + b0) * per + ti_ * nb + bn_)
-            idxs.append(r.idx if keep.all() else r.idx[keep])
-            vals.append(r.val if keep.all() else r.val[keep])
-        else:
-            gi, gv = r
-            if not (gi >= 0).any():
-                continue
-            if dense is None:
-                dense = (np.full(t["shape"], -1, dtype=np.int64),
-                         np.zeros(t["shape"], dtype=np.complex64))
-            dense[0][b0:b1], dense[1][b0:b1] = gi[:b1 - b0], gv[:b1 - b0]
-    if dense is not None:
-        idx, val = dense
-        if flats:
-            fl = np.concatenate(flats)
-            idx.reshape(-1)[fl] = np.concatenate(idxs)
-            val.reshape(-1)[fl] = np.concatenate(vals)
-        if order is not None:
-            ri, rv = np.empty_like(idx), np.empty_like(val)
-            ri[order], rv[order] = idx, val
-            idx, val = ri, rv
-        return idx, val
-    if not flats:
-        return None
-    fl = np.concatenate(flats) if len(flats) > 1 else flats[0]
-    if order is not None:
-        row, rest = np.divmod(fl, per)                 # layout row
-        fl = order[row] * per + rest                   # the caller's block
-    srt = np.argsort(fl, kind="stable")
-    ii = (np.concatenate(idxs) if len(idxs) > 1 else idxs[0])[srt].astype(np.int64)
-    vv = (np.concatenate(vals) if len(vals) > 1 else vals[0])[srt]
-    return _SparsePeaks(tuple(t["shape"]), fl[srt], ii, vv)
-
-
-def _consume_sparse_into(lists, sp, sub_starts, g, tmpl_arg, N, template_index):
-    """Append the peaks of one sparse result (flat over block, template, bin) to lists."""
-    if sp.flat.size == 0:
-        return
-    nt, nb = sp.shape[1], sp.shape[2]
-    row, rest = np.divmod(sp.flat, nt * nb)
-    ti = rest // nb
-    if tmpl_arg is not None:
-        lists[0].append(np.full(row.size, template_index, dtype=np.int64))
-    else:
-        lists[0].append(g.template_indices[ti])
-    st = sub_starts[row]
-    lists[1].append(st + sp.idx)
-    lists[2].append(sp.val)
-    lists[3].append(st)
-    lists[4].append(np.full(row.size, N, dtype=np.int64))
 
 
 def _consume_into(lists, aidx, aval, sub_starts, g, tmpl_arg, N, template_index):
@@ -3581,6 +2864,7 @@ def _consume_into(lists, aidx, aval, sub_starts, g, tmpl_arg, N, template_index)
             bl_out.append(np.full(bi.size, N, dtype=np.int64))
 
 
+
 def _results_from(lists):
     ti, si, snr, ts, bl = lists
     if not ti:
@@ -3592,3 +2876,4 @@ def _results_from(lists):
         block_starts=np.concatenate(ts).astype(np.int64),
         block_lengths=np.concatenate(bl).astype(np.int64),
     )
+

@@ -741,8 +741,6 @@ class _FusedBatch:
         key = (base, k)
         cache = dev.__dict__.setdefault("fused_cache", OrderedDict())
         hit = cache.get(key)
-        if dev.trace is not None:
-            dev.trace.append(key)
         if hit is not None:
             # Serials are never reused, so a hit IS these recordings; they are live (add()
             # accepts only registered recordings, and eviction flushes the batch first).
@@ -811,7 +809,6 @@ class _FusedBatch:
 
     def _free(self, cmd):
         vk = self.dev.vk
-        _settle_replays(self.dev, cmd)          # a replay in flight may still execute it
         vk.vkFreeCommandBuffers.argtypes = [_vp, _vp, _u32, ctypes.POINTER(_vp)]
         vk.vkFreeCommandBuffers(self.dev.device, self.dev.command_pool, 1, (_vp * 1)(cmd))
 
@@ -891,205 +888,6 @@ def fused():
     return close
 
 
-class _ReplayLaunch:
-    """A replay_fused submission in flight: its fence, and the fused command buffers it
-    executes. Held on the device (dev.replays) until waited for, so freeing one of those
-    command buffers (the fused cache retiring it) waits for the replay first."""
-
-    def __init__(self, dev, cmds):
-        self.dev, self.cmds, self.done = dev, {getattr(c, "value", c) for c in cmds}, False
-        vk = dev.vk
-        if dev.collector is not None and dev.collector.items:
-            dev.collector.flush()               # work queued before the replay runs first
-        arr = (_vp * len(cmds))(*cmds)
-        submit = _SubmitInfo(4, None, 0, None, None, len(cmds), arr, 0, None)
-        self.fence = _vp()
-        _check(vk.vkCreateFence(dev.device, ctypes.byref(_FenceCreate(8, None, 0)), None,
-                                ctypes.byref(self.fence)), "vkCreateFence")
-        try:
-            _check(vk.vkQueueSubmit(dev.queue, 1, ctypes.byref(submit), self.fence),
-                   "vkQueueSubmit")
-        except BaseException:
-            vk.vkDestroyFence(dev.device, self.fence, None)
-            raise
-        dev.__dict__.setdefault("replays", []).append(self)
-
-    def wait(self):
-        if self.done:
-            return
-        self.done = True
-        vk, d = self.dev.vk, self.dev.device
-        try:
-            _check(vk.vkWaitForFences(d, 1, (_vp * 1)(self.fence), 1, 0xFFFFFFFFFFFFFFFF),
-                   "vkWaitForFences")
-        finally:
-            vk.vkDestroyFence(d, self.fence, None)
-            rs = self.dev.__dict__.get("replays", [])
-            if self in rs:
-                rs.remove(self)
-
-
-class PreludeCapture:
-    """What a SegmentPlan prelude submits on a Vulkan device, kept to be submitted again by
-    a replay (CUDA captures the prelude into its segment graph; this is the same contract).
-
-    Every command buffer is held with the record that owns it -- (context, record table,
-    key, record), the record tuple itself held -- and is valid only while that context's
-    table still holds that same record (eviction frees it; a rebuilt record is a different
-    object). Host writes the prelude makes per call (block offsets) are kept as (array,
-    values) and rewritten before each replay. Anything else -- a command buffer no record
-    owns, a fused batch, a host copy of the input, timing -- makes the capture unusable,
-    and the replay calls the prelude instead."""
-
-    def __init__(self, dev):
-        self.dev, self.ok, self.cmds, self.owners, self.writes = dev, True, [], [], []
-        self.work = None                 # its work-counter log (time_domain._WORK_LOGS)
-
-    def add(self, ctx, commands, wait):
-        for c in commands:
-            owner = _record_owning(ctx, c)
-            if owner is None:
-                self.ok = False
-                return
-            self.cmds.append(c)
-            self.owners.append(owner)
-
-    def write(self, array, values):
-        self.writes.append((array, np.array(values, copy=True)))
-
-    def refuse(self):
-        self.ok = False
-
-    def valid(self):
-        for ctx, table, key, rec in self.owners:
-            if ctx.device is None or table.get(key) is not rec:
-                return False
-        return True
-
-    def rewrite(self):
-        for array, values in self.writes:
-            array[:values.size] = values
-
-
-def _record_owning(ctx, cmd):
-    """(context, table, key, record) of the cached record whose command buffer is cmd, or
-    None. Only for prelude capture (it scans the context's tables)."""
-    v = getattr(cmd, "value", cmd)
-    tables = list(ctx._record_tables().values())
-    zero = ctx.__dict__.get("_zero_recs")
-    if zero is not None:
-        tables.append(zero)
-    for table in tables:
-        for key, rec in table.items():
-            last = rec[-1] if isinstance(rec, (tuple, list)) else None
-            if last is not None and getattr(last, "value", last) == v:
-                return (ctx, table, key, rec)
-    return None
-
-
-def capture_prelude(dev, prelude):
-    """Run prelude() with its submissions and host writes captured: a PreludeCapture, its
-    .ok False if anything in it cannot be replayed."""
-    cap = PreludeCapture(dev)
-    prev, dev.prelude_capture = dev.__dict__.get("prelude_capture"), cap
-    try:
-        prelude()
-    finally:
-        dev.prelude_capture = prev
-    return cap
-
-
-def _settle_replays(dev, cmd=None):
-    """Wait for the replays in flight on dev that execute cmd (every one, without cmd)."""
-    v = getattr(cmd, "value", cmd)
-    for r in list(dev.__dict__.get("replays", [])):
-        if cmd is None or v in r.cmds:
-            r.wait()
-
-
-def replay_fused(dev, keys, wait=True, before=None, pre=None):
-    """Submit cached fused recordings again, in order, as one submission, and wait; False
-    (nothing submitted) if any is gone or a constituent recording was evicted.
-
-    wait=False: leave it in flight and return its _ReplayLaunch (wait() it before reading
-    the results). The caller keeps the results' buffers alive until then: SegmentPlan
-    registers the read as an in-flight readback on every context involved, so evicting a
-    record reads the replay's results first (Pending, _drain). before: called once the
-    recordings are validated, just before the submission. pre: a valid PreludeCapture whose
-    command buffers run first, in the same submission (its host writes are redone first)."""
-    cache = dev.__dict__.get("fused_cache", {})
-    cmds = []
-    for key in keys:
-        hit = cache.get(key)
-        if hit is None:
-            if os.environ.get("MF_REPLAY_DEBUG"):
-                print("replay invalid: fused key not cached", flush=True)
-            return False
-        # Every constituent recording must still exist: eviction frees its descriptor sets
-        # and buffers, and replaying a recording built on them faults the device.
-        for (ctx_id, serials), rec in zip(key[0], hit[1]):
-            if not _fused_valid(_CONTEXTS_BY_ID.get(ctx_id), rec, serials):
-                if os.environ.get("MF_REPLAY_DEBUG"):
-                    print("replay invalid: constituent recording gone", flush=True)
-                return False
-        cmds.append(hit[0])
-    if pre is not None:
-        pre.rewrite()
-        cmds = list(pre.cmds) + cmds
-    if before is not None:
-        before()                                # e.g. the work producing the inputs
-    launch = _ReplayLaunch(dev, cmds)
-    if not wait:
-        return launch
-    launch.wait()
-    return True
-
-
-def read_dispatch_sparse(entry, trace=None):
-    """The refined peaks of one recorded hierarchical dispatch, as _SparsePeaks, read from
-    its survivor list (SegmentPlan replay: the same reader for every backend's trace).
-
-    trace (the call's trace): its fine plan's work counters advance as the call itself
-    would have advanced them (pairs, tier-0 passes of a cascade, refines), so
-    matchedfilter._roofline counts replayed segments like any other."""
-    bufs, nd, nt, nbins, cascade = entry
-    count = int(bufs["args"].read(np.uint32, 1)[0])
-    plan = (trace or {}).get("plan")
-    if plan is not None:
-        plan._gpairs += nd * nt
-        plan._gtrig += count
-        if cascade:
-            plan._gt1 += int(bufs["args0"].read(np.uint32, 1)[0])
-    from . import _SparsePeaks
-    if count == 0:
-        e = np.empty(0, np.int64)
-        return _SparsePeaks((nd, nt, nbins), e, e, np.empty(0, np.complex64))
-    # The hits in survivor-list order, not sorted: the replay's assembly sorts each job's
-    # peaks once (SegmentPlan._parse_dispatches), so a sort per dispatch was wasted work.
-    pairs = nd * nt
-    v = (bufs["surv"].view(np.uint32, count),
-         bufs["idx"].view(np.int32, pairs * nbins).reshape(pairs, nbins),
-         bufs["val"].view(np.complex64, pairs * nbins).reshape(pairs, nbins))
-    rows = v[0]
-    ri = v[1][rows]
-    k, b = np.nonzero(ri >= 0)
-    rk = rows[k].astype(np.int64)
-    return _SparsePeaks((nd, nt, nbins), rk * nbins + b, ri[k, b], v[2][rk, b])
-
-
-def read_dispatch(entry):
-    """(count, idx, val) of one recorded hierarchical dispatch, from its result buffers."""
-    bufs, nd, nt, nbins, cascade = entry
-    count = int(bufs["args"].read(np.uint32, 1)[0])
-    if count == 0:
-        return 0, None, None
-    # From the refined pairs (the survivor list): a sparse recording does not clear the
-    # dense tables, and the refine writes every bin of a listed pair.
-    idx, val = Context._read_peaks(bufs, "surv", count,
-                                   nd, nt, nbins, True).dense()
-    return count, idx, val
-
-
 #: One _Device per Vulkan device index, for the life of the process.
 _DEVICES = {}
 
@@ -1121,7 +919,6 @@ class _Device:
         # the main queue are ordered by the barriers those recordings carry; anything else
         # (another queue, a host write to their inputs, a host read) waits here first.
         self.pending_writes = []
-        self.trace = None            # fused-batch keys flushed while a SegmentPlan traces
         app = _vulkan._AppInfo(0, None, b"matchedfilter", 1, b"matchedfilter", 1,
                                (1 << 22) | (1 << 12))
         ci = _vulkan._InstInfo(1, None, 0, ctypes.pointer(app), 0, None, 0, None)
@@ -1789,8 +1586,6 @@ class Context(InputUploads):
                      mode=None):
         """Submit one hierarchical record and return its readback (tracked when async)."""
         bufs, cmd = batch
-        # What a traced segment (SegmentPlan) reads back on replay.
-        self._last_dispatch = (bufs, nd, nt, nbins, cascade)
         fence = self._get_fence(slot) if (async_submit and slot is not None) else None
         if async_submit and slot is not None:
             self._submit(cmd, fence=fence, wait=False, slot=slot)
@@ -2848,9 +2643,6 @@ class Context(InputUploads):
             # A fused batch (filter_series_many): recorded with the others when first waited on.
             batch.add(self, commands, fence)
             return
-        cap = self._device_state.__dict__.get("prelude_capture")
-        if cap is not None:
-            cap.add(self, commands, wait)
         if self._timing:
             label = sys._getframe(1).f_code.co_name + ("+forward" if pending is not None or pre else "")
             begin, end = self._timestamp_pair(label)

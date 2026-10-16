@@ -877,57 +877,6 @@ def test_single_template_calls_choose_the_faster_device_and_agree():
     assert state["winner"] in ("gpu", "cpu") and len(state["gpu"]) >= 4 and len(state["cpu"]) >= 4
 
 
-def test_segment_plan_replays_and_matches(monkeypatch):
-    """A recurring job set (same banks, windows and device input buffers, rewritten in place
-    each segment) is traced once and then replayed; every replay returns what
-    filter_series_many returns for the same data."""
-    from conftest import usable_gpu
-    from matchedfilter.time_domain import SegmentPlan
-    monkeypatch.setenv("MF_AUTOTUNE", "0")
-    monkeypatch.setenv("MF_SEGMENT_REPLAY", "1")      # experimental: exercised here
-    dev = usable_gpu()
-    if dev is None:
-        pytest.skip("no usable GPU")
-    from matchedfilter.device import parse
-    if parse(dev).backend != "vulkan":
-        # Replay reads back recorded Vulkan dispatches (_last_dispatch); no other backend
-        # traces them, so a job set is never replayable there (it also failed on main).
-        pytest.skip("SegmentPlan replay is implemented for Vulkan only")
-    rng = np.random.default_rng(31)
-    banks = []
-    for _ in range(3):
-        counts = list(rng.integers(200, 400, 37))           # odd: exercises dispatch padding
-        taps, w, df = _whitened_inspiral_bank(rng, counts)
-        b = TimeDomainFilterBank(taps, tap_counts=counts, engine='hier', threshold=4.5,
-                                 false_dismissal=1e-3, device=dev, fft_lengths=[2048], binsize=2048)
-        b.set_reference(w, delta_f=df)
-        banks.append(b)
-    S = 1 << 17
-    rows = banks[0].empty_shared((len(banks), S))
-    jobs = [(b, rows[i], dict(windows=slice(3000, S - 3000))) for i, b in enumerate(banks)]
-    plan = SegmentPlan()
-    total = 0
-    for seg in range(4):
-        for i in range(len(banks)):
-            X = np.fft.fft(rng.standard_normal(S))
-            X[S // 2:] = 0
-            rows[i] = (np.fft.ifft(X) * 2).astype(np.complex64)
-        got = plan.run(jobs)
-        want = TimeDomainFilterBank.filter_series_many(jobs)
-        for r1, r2 in zip(want, got):
-            for f in r1._fields:
-                np.testing.assert_array_equal(getattr(r1, f), getattr(r2, f))
-        total += sum(len(r.snr) for r in got)
-    if getattr(rows, 'ctypes', None) is not None and plan.replays == 0:
-        from matchedfilter._shared import shared_buffer
-        ctx = banks[0]._groups[0].plan._gpu
-        # Replay is implemented for Vulkan recordings only; elsewhere this is
-        # filter_series_many, which the comparison above already checks.
-        if shared_buffer(rows, ctx) is not None and type(ctx).__module__.endswith("_vkcompute"):
-            pytest.fail("a device-resident job set was never replayed")
-    assert total >= 5
-
-
 def test_filter_series_many_without_wait_overlaps_and_matches(monkeypatch):
     """wait=False hands back results to collect later; two batches in flight on the same banks
     (different input buffers) both come back exactly as synchronous calls give them."""

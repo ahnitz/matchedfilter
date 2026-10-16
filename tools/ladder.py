@@ -41,7 +41,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "python"))
 import matchedfilter as mf                                    # noqa: E402
 from matchedfilter import TimeDomainFilterBank, _gputime      # noqa: E402
 from matchedfilter import _roofline                           # noqa: E402
-from matchedfilter.time_domain import SegmentPlan             # noqa: E402
 
 RATE = 2048.0
 DF = 1.0 / 16
@@ -238,85 +237,9 @@ class GpuSampler:
                     sclk_mhz_min=float(f.min()), sclk_mhz_max=float(f.max()), n=len(b))
 
 
-def _host_input():
-    """LADDER_HOST_INPUT=0: the graph middle's input buffers as ordinary shared memory."""
-    return os.environ.get("LADDER_HOST_INPUT", "1") != "0"
-
-
 def _timing():
     import os
     return os.environ.get("MF_GPU_TIMING", "0") not in ("", "0")
-
-
-def report_counts(counts, seg_plan):
-    if os.environ.get("LADDER_REPLAY"):
-        counts["segment_replays"] += seg_plan.replays
-        counts["segment_capture_failures"] += getattr(seg_plan, "capture_failures", 0)
-        for k in ("followups_device", "followups_host", "followups_overflow"):
-            if getattr(seg_plan, k, 0):
-                counts[k] += getattr(seg_plan, k)
-
-
-def drive_folded(gens, args, first, steady, counts):
-    """LADDER_FOLD_TOPS: every top's segment k as ONE SegmentPlan request -- their middle
-    stages (preludes), fine stages and follow-ups in one capture, one graph per segment."""
-    from matchedfilter.time_domain import FollowUp
-    plan = SegmentPlan()
-    reqs = [next(g) for g in gens]
-    seg = 0
-    while reqs:
-        tm = first if seg < args.warmup else steady
-        t_seg = time.perf_counter()
-        jobs, offs, preludes, keys, pairs, spec0 = [], [], [], [], [], None
-        for jb, prelude, pkey, spec in reqs:
-            offs.append(len(jobs))
-            if spec is not None:
-                spec0 = spec
-                pairs += [p + len(jobs) for p in spec.pairs]
-            jobs += jb
-            if prelude is not None:
-                preludes.append(prelude)
-                keys.append(pkey)
-
-        def prelude_all(preludes=preludes):
-            for f in preludes:
-                f()
-        spec_all = (FollowUp(pairs, spec0.threshold, spec0.dedupe, spec0.half, spec0.binsize,
-                             max_items=spec0.max_items * len(reqs),
-                             max_items_per_region=spec0.max_items_per_region)
-                    if spec0 is not None else None)
-        t = time.perf_counter()
-        out = plan.run(jobs, prelude=prelude_all if preludes else None,
-                       prelude_key=tuple(keys) if preludes else None, followup=spec_all)
-        fine_out, fu = out if spec_all is not None else (out, None)
-        tm.add("fine", time.perf_counter() - t)
-        if os.environ.get("LADDER_DUMP"):
-            import pickle
-            with open(os.environ["LADDER_DUMP"] + ".%d" % seg, "wb") as fh:
-                pickle.dump([(a.template_indices, a.sample_indices, a.snr) for a in fine_out], fh)
-        if os.environ.get("LADDER_VERIFY_REPLAY"):
-            again = TimeDomainFilterBank.filter_series_many(jobs)
-            bad = [j for j, (a, b) in enumerate(zip(fine_out, again))
-                   if not (np.array_equal(a.sample_indices, b.sample_indices)
-                           and np.array_equal(a.snr, b.snr))]
-            print("verify folded seg %d: replays %d, mismatched jobs %s, peaks %d vs %d"
-                  % (seg, plan.replays, bad[:8], sum(len(a.snr) for a in fine_out),
-                     sum(len(a.snr) for a in again)), flush=True)
-        nxt = []
-        for k, g in enumerate(gens):
-            lo = offs[k]
-            hi = offs[k + 1] if k + 1 < len(offs) else len(jobs)
-            mine = None if fu is None else [(j - lo, r, c, ti, fr) for j, r, c, ti, fr in fu
-                                              if lo <= j < hi]
-            try:
-                nxt.append((g, g.send((fine_out[lo:hi], mine))))
-            except StopIteration:
-                pass
-        tm.add("segment", time.perf_counter() - t_seg)
-        gens = [g for g, _ in nxt]
-        reqs = [r for _, r in nxt]
-        seg += 1
-    report_counts(counts, plan)
 
 
 #: Block-size trials open when the steady segments began (tools report: a trial that locks
@@ -348,15 +271,14 @@ def run_device(device, tops, args, seed):
     first, steady = Timer(), Timer()
     results = {}
     counts = defaultdict(int)
-    folded = []
     # --roofline: work counted over each top's steady segments (matchedfilter._roofline).
     roof = dict(work=_roofline.Work(), ticks=defaultdict(int), problems=[], ctx=None,
                 followup_jobs=[], series_len=S) \
         if args.roofline else None
 
     def one_top(top):
-        # Each top template in its own scope: its segment loop (a generator under
-        # LADDER_FOLD_TOPS) keeps its own banks, buffers and data.
+        # Each top template in its own scope: its segment loop keeps its own banks, buffers
+        # and data.
             # The top template's own output profile |h|^2/S (tools/ladder_profiles.py) colours its
             # reference series and is the fine banks' reference, as in pycbc_inspiral_fir; without
             # it a generic inspiral-like profile stands in (and the gates refine far more).
@@ -402,7 +324,6 @@ def run_device(device, tops, args, seed):
             # The middle output in device memory, reused every segment (as a pipeline would):
             # written in place by the middle stage and read in place by the fine banks.
             mid_out = {ifo: mid.empty_shared((mid.n_templates, S)) for ifo in ("H1", "L1")}
-            seg_plan = SegmentPlan()
             first.add("prep", time.perf_counter() - t0)
             fine_banks = [b for _, b in fine]
             rsnap = {}
@@ -484,30 +405,11 @@ def run_device(device, tops, args, seed):
                     tm.add("asym", time.perf_counter() - t, n=0)
                 counts["asym_calls"] += len(asym_keys)
 
-            def finish(seg, ser, mids, fine_out, tm, fu=None):
-                """A segment's fine results: record them and run its follow-ups -- or, with fu
-                (SegmentPlan follow-ups, [(job, rank, c0, ti, result)]), record those."""
+            def finish(seg, ser, mids, fine_out, tm):
+                """A segment's fine results: record them and run its follow-ups."""
                 jobs, keys = followups(seg, ser, mids, fine_out)
-                if fu is None:
-                    collect_followups(keys, submit_followups(jobs, tm), tm)
-                    return
-                ifos = list(ser)
-                got = {}
-                for j, rank, c0, ti, fr in fu:
-                    row, other = j // len(ifos), ifos[(j % len(ifos)) ^ 1]
-                    got[(top["top"], seg, fine[row][0], other, "asym", c0, ti)] = fr
-                if set(got) != set(keys):
-                    raise RuntimeError("device follow-ups differ from the host rule: %d vs %d keys"
-                                       % (len(got), len(keys)))
-                results.update(got)
-                counts["asym_calls"] += len(got)
+                collect_followups(keys, submit_followups(jobs, tm), tm)
 
-            def followup_spec(ser):
-                from matchedfilter.time_domain import FollowUp
-                n = len(ser)
-                return FollowUp(pairs=[j ^ 1 for j in range(len(fine) * n)],
-                                threshold=args.asym_threshold, dedupe=int(RATE), half=half,
-                                binsize=bs)
             # --pregen draws every segment's data up front, in the same order (identical data):
             # the bench's own generation (~0.1 s a segment) then stays off the device's timeline.
             def draw():
@@ -617,40 +519,19 @@ def run_device(device, tops, args, seed):
             if os.environ.get("LADDER_PROFILE"):      # cProfile of the steady segments only
                 import cProfile
                 prof = cProfile.Profile()
-            def seg_loop(fold):
-                """The batched segment loop. It yields each segment's fine-stage request
-                (jobs, prelude, prelude key, follow-up spec) and is sent (fine results,
-                follow-ups): run here (run_request), or with every top's request of the
-                segment folded into one SegmentPlan run (LADDER_FOLD_TOPS)."""
+            def seg_loop():
+                """The batched segment loop: each segment's middle stage, then its fine stage
+                as one filter_series_many call over every bank and both detectors."""
                 nonlocal next_ser
                 bsampler = GpuSampler()                # device busy over the steady segments
                 bsampler.start()
-                # LADDER_INFLIGHT: two segment graphs in flight (SegmentPlan.submit): segment k
-                # is launched, then k-1 is collected while the device runs k. Double-buffered
-                # middle input and output; one SegmentPlan per buffer, on its own slot half.
-                inflight = bool(os.environ.get("LADDER_INFLIGHT") and os.environ.get("LADDER_REPLAY")
-                                and os.environ.get("LADDER_GRAPH_MIDDLE") and not fold)
-                if inflight:
-                    plans2 = [SegmentPlan(slot_half=0), SegmentPlan(slot_half=1)]
-                    outs2 = [mid_out, {ifo: mid.empty_shared((mid.n_templates, S))
-                                       for ifo in ("H1", "L1")}]
-                    ins2 = [{ifo: mid.empty_shared((S,), input=_host_input()) for ifo in ("H1", "L1")}
-                            for _ in range(2)]
-                pending = None
-
-                def collect(pend):
-                    pseg, pser, pmids, handle, ptm = pend
-                    fo, ff = handle.result()
-                    finish(pseg, pser, pmids, fo, ptm, fu=ff)
                 for seg in range(args.segments):
                     tm = first if seg < args.warmup else steady
                     bsampler.mark(args.warmup <= seg)
                     if seg == args.warmup:
                         _note_open_trials()
-                    if seg == args.warmup and not fold:
                         roof_snap("mid")             # the middle's work is counted at submit
-                        if not inflight:
-                            roof_snap("fine")
+                        roof_snap("fine")
                     if seg == args.warmup and os.environ.get("LADDER_GC_FREEZE"):
                         # What an application does after setup: move the setup heap out of the
                         # cyclic collector's view (a full collection of it measured ~11 ms here).
@@ -666,30 +547,7 @@ def run_device(device, tops, args, seed):
                     ser = next_ser
                     next_ser = None
                     mids = {}
-                    graph_middle = (os.environ.get("LADDER_REPLAY")
-                                    and os.environ.get("LADDER_GRAPH_MIDDLE"))
-                    if graph_middle:
-                        # The middle stage joins the segment graph (SegmentPlan prelude): its input in
-                        # device-visible memory the host rewrites each segment, read in place.
-                        if inflight:
-                            m_in, m_out = ins2[seg % 2], outs2[seg % 2]
-                        else:
-                            if top.get("_mid_in") is None:
-                                top["_mid_in"] = {ifo: mid.empty_shared((S,), input=_host_input())
-                                                  for ifo in ("H1", "L1")}
-                            m_in, m_out = top["_mid_in"], mid_out
-                        t = time.perf_counter()
-                        for ifo in ser:
-                            m_in[ifo][:] = ser[ifo]
-                            mids[ifo] = lanes(m_out[ifo])
-                        tm.add("middle", time.perf_counter() - t)
-
-                        def prelude(ser=ser, m_in=m_in, m_out=m_out):
-                            for ifo in ser:
-                                mid.correlate_series(m_in[ifo],
-                                                     windows=slice(max(0, a0 - args.pad), min(S, a1 + args.pad)),
-                                                     out=m_out[ifo], wait=False)
-                    for ifo in (() if graph_middle else ser):
+                    for ifo in ser:
                         t = time.perf_counter()
                         mids[ifo] = mid.correlate_series(ser[ifo], windows=slice(max(0, a0 - args.pad),
                                                                                  min(S, a1 + args.pad)),
@@ -701,7 +559,6 @@ def run_device(device, tops, args, seed):
                     jobs = [(b, mids[ifo][row], dict(windows=slice(a0, a1)))
                             for row, (m, b) in enumerate(fine) for ifo in ser]
                     t = time.perf_counter()
-                    fu = None
                     if args.no_batch:
                         fine_out = [b.filter_series(x, **kw) for b, x, kw in jobs]
                     elif args.overlap and seg + 1 < args.segments:
@@ -713,128 +570,26 @@ def run_device(device, tops, args, seed):
                         t = time.perf_counter() - submit
                         fine_out = [f.result() for f in futures]
                     else:
-                        # SegmentPlan replay (LADDER_REPLAY=1): with two segments in flight
-                        # (LADDER_GRAPH_MIDDLE=1 LADDER_INFLIGHT=1) it beats --pipeline on Vulkan.
-                        fu = None
-                        spec = (followup_spec(ser) if os.environ.get("LADDER_REPLAY")
-                                and os.environ.get("LADDER_DEVICE_FOLLOWUPS") else None)
-                        if inflight:
-                            from matchedfilter.time_domain import FollowUp
-                            spec = spec or FollowUp(pairs=[j ^ 1 for j in range(len(jobs))],
-                                                    threshold=args.asym_threshold, dedupe=int(RATE),
-                                                    half=half, binsize=bs)
-                            replays0 = plans2[seg % 2].replays
-                            handle = plans2[seg % 2].submit(jobs, prelude=prelude,
-                                                            prelude_key=("middle", top["top"], seg % 2),
-                                                            followup=spec)
-                            if pending is not None:
-                                collect(pending)
-                            if seg == args.warmup:
-                                # Counters move when a segment is collected (a replay counts
-                                # its work as it is read): the steady span starts once the
-                                # last warmup segment is in. Segment k was submitted already;
-                                # if it ran outside a graph, its work is counted now.
-                                if plans2[seg % 2].replays == replays0:
-                                    if roof is not None:
-                                        roof["problems"].append(
-                                            "first steady segment did not replay: its work is "
-                                            "outside the counted span")
-                                roof_snap("mid")
-                                roof_snap("fine")
-                            pending = (seg, ser, mids, handle, tm)
-                            tm.add("fine", time.perf_counter() - t)
-                            tm.add("segment", time.perf_counter() - t_seg)
-                            tm.add("wall", time.perf_counter() - t_seg, n=0)
-                            tm.add("cpu", time.thread_time() - c_seg, n=0)
-                            if prof is not None and tm is steady:
-                                prof.disable()       # (LADDER_PROFILE on the in-flight path)
-                                prof.dump_stats(os.environ["LADDER_PROFILE"])
-                            if next_ser is None and seg + 1 < args.segments:
-                                next_ser = new_series()
-                            continue
-                        fine_out, fu = yield (jobs, prelude if graph_middle else None,
-                                              ("middle", top["top"]) if graph_middle else None, spec)
-                        if os.environ.get("LADDER_VERIFY_REPLAY"):
-                            again = TimeDomainFilterBank.filter_series_many(jobs)
-                            bad = sum(not (np.array_equal(a.sample_indices, b.sample_indices)
-                                           and np.array_equal(a.snr, b.snr)) for a, b in zip(fine_out, again))
-                            in_trial = sum(getattr(g.plan, "_chain_trial", None) is not None
-                                           for _, bk in fine for g in bk._groups)
-                            print("verify replay seg %d: replays %d, mismatched jobs %d, peaks %d, plans in trial %d"
-                                  % (seg, seg_plan.replays, bad, sum(len(a.snr) for a in fine_out), in_trial),
-                                  flush=True)
-                    if not fold:
-                        tm.add("fine", time.perf_counter() - t)
-                    finish(seg, ser, mids, fine_out, tm, fu=fu)
-                    if not fold:
-                        tm.add("segment", time.perf_counter() - t_seg)
-                        tm.add("wall", time.perf_counter() - t_seg, n=0)
-                        tm.add("cpu", time.thread_time() - c_seg, n=0)
+                        fine_out = TimeDomainFilterBank.filter_series_many(jobs)
+                    tm.add("fine", time.perf_counter() - t)
+                    finish(seg, ser, mids, fine_out, tm)
+                    tm.add("segment", time.perf_counter() - t_seg)
+                    tm.add("wall", time.perf_counter() - t_seg, n=0)
+                    tm.add("cpu", time.thread_time() - c_seg, n=0)
                     if prof is not None and tm is steady:
                         prof.disable()
                         prof.dump_stats(os.environ["LADDER_PROFILE"])
                     if next_ser is None and seg + 1 < args.segments:
                         next_ser = new_series()
-                if pending is not None:              # the last segment in flight
-                    t = time.perf_counter()
-                    collect(pending)
-                    pending[4].add("segment", time.perf_counter() - t, n=0)
-                if prof is not None and inflight:
-                    prof.disable()
-                    prof.dump_stats(os.environ["LADDER_PROFILE"])
                 bsampler.stop()
                 bu = bsampler.busy_union()
                 if bu:
                     counts["gpu_busy_union"] = bu
-                if os.environ.get("MF_SEGMENT_TIMING") and os.environ.get("LADDER_REPLAY"):
-                    from matchedfilter._cudacompute import SegmentGraph
-                    d = SegmentGraph.device_s[-max(1, args.segments - args.warmup - 1):]
-                    if d:
-                        counts["graph_device_ms_median"] = float(np.median(d) * 1e3)
-                        counts["graph_device_ms_min"] = float(np.min(d) * 1e3)
                 if bsampler.samples:
                     counts["gpu_sampler"] = bsampler.report()
-                if fold:
-                    if roof is not None:
-                        roof["problems"].append("roofline counting is not wired for "
-                                                "LADDER_FOLD_TOPS")
-                else:
-                    roof_close()
-                report_plan(seg_plan)
-                if inflight:
-                    for sp in plans2:
-                        report_plan(sp)
+                roof_close()
 
-            def report_plan(seg_plan):
-                if os.environ.get("LADDER_REPLAY"):
-                    counts["segment_replays"] += seg_plan.replays
-                    counts["segment_capture_failures"] += getattr(seg_plan, "capture_failures", 0)
-                    for k in ("followups_device", "followups_host", "followups_overflow"):
-                        if getattr(seg_plan, k, 0):
-                            counts[k] += getattr(seg_plan, k)
-                    if getattr(seg_plan, "followup_unsupported", None):
-                        print("device follow-ups unsupported:", seg_plan.followup_unsupported, flush=True)
-
-            def run_request(req):
-                jobs, prelude, pkey, spec = req
-                if os.environ.get("LADDER_REPLAY"):
-                    out = seg_plan.run(jobs, prelude=prelude, prelude_key=pkey, followup=spec)
-                else:
-                    out = TimeDomainFilterBank.filter_series_many(jobs)
-                return out if spec is not None else (out, None)
-
-            if os.environ.get("LADDER_FOLD_TOPS") and os.environ.get("LADDER_REPLAY"):
-                # Every top's segment k runs as one SegmentPlan request (driven after every top
-                # is set up).
-                folded.append(seg_loop(True))
-                return
-            gen = seg_loop(False)
-            req = next(gen, None)
-            while req is not None:
-                try:
-                    req = gen.send(run_request(req))
-                except StopIteration:
-                    break
+            seg_loop()
 
             if os.environ.get("LADDER_CHAINS"):      # each fine bank's (n, chain) per template group
                 from collections import Counter
@@ -853,9 +608,6 @@ def run_device(device, tops, args, seed):
                                   flush=True)
     for top in tops:
         one_top(top)
-    if folded:
-        drive_folded(folded, args, first, steady, counts)
-        # One folded segment covers every top: the steady time is per folded segment.
     nfine = sum(t["nfine"] for t in tops)
     steady_segments = max(0, args.segments - args.warmup) * len(tops)
     # "segment" is the whole of each segment (the stages together, as the device is fed):

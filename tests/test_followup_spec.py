@@ -12,7 +12,7 @@ import pytest
 
 from matchedfilter import TimeDomainFilterBank
 from matchedfilter._gpuhost import FollowupSpec
-from matchedfilter.time_domain import FilterResults, SegmentPlan
+from matchedfilter.time_domain import FilterResults
 
 
 def _fr(ti, si, snr):
@@ -86,15 +86,16 @@ def test_device_followups_equal_the_host_rule(device, monkeypatch):
             for i, b in enumerate(banks) for d in range(2)]
     spec = FollowupSpec(pairs=[j ^ 1 for j in range(len(jobs))], threshold=5.0, dedupe=2048,
                         half=6000, binsize=61)
-    plan = SegmentPlan()
-    nfu = 0
+    nfu = ndevice = 0
     for seg in range(6):
         for r in rows:
             X = np.fft.fft(rng.standard_normal(S))
             X[S // 2:] = 0
             r[:] = (np.fft.ifft(X) * 2).astype(np.complex64)
             r[rng.integers(8000, S - 8000, 5)] += 30.0          # loud samples: follow-ups
-        fine, fu = plan.run(jobs, followup=spec)
+        fine = TimeDomainFilterBank.filter_series_many(jobs)
+        fu, how = TimeDomainFilterBank._run_followups(jobs, fine, spec)
+        ndevice += how == "device"
         # The reference: the fine stage as a batch, and each selected follow-up as its own
         # filter_series call (no batched or device path on either side).
         want_fine = TimeDomainFilterBank.filter_series_many(jobs)
@@ -108,7 +109,7 @@ def test_device_followups_equal_the_host_rule(device, monkeypatch):
             for f in a[4]._fields:
                 np.testing.assert_array_equal(getattr(a[4], f), getattr(b[4], f))
         nfu += len(fu)
-    assert getattr(plan, "followups_device", 0) >= 3, vars(plan).get("followup_unsupported")
+    assert ndevice >= 3
     assert nfu > 0
 
 

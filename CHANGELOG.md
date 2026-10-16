@@ -4,6 +4,15 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ## Unreleased
 
+### Removed
+
+- `time_domain.SegmentPlan` (segment replay: Vulkan recorded submissions and CUDA segment
+  graphs) and the CUDA device follow-ups it drove (`_cudafollowup`). Nothing outside the
+  library's own benchmark used it. `filter_series_many` is unchanged, including Vulkan's
+  device follow-ups. `MF_SEGMENT_REPLAY`, `MF_CUDA_SEGMENT_GRAPH` and the ladder's
+  `LADDER_REPLAY`, `LADDER_FOLD_TOPS` and `LADDER_INFLIGHT` modes are gone. The gate's
+  replay step became `settled`: the same check after the trials have locked.
+
 ### Performance
 
 - Metal fp16 coarse builds carry the fp16 twiddle table, and the tile choice measures each

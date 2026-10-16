@@ -182,10 +182,10 @@ class Executor:
     def __init__(self):
         self.workspaces = {}
 
-    def run_jobs(self, jobs, side_queue=False):
-        return self.submit_jobs(jobs, side_queue)()
+    def run_jobs(self, jobs):
+        return self.submit_jobs(jobs)()
 
-    def submit_jobs(self, jobs, side_queue=False):
+    def submit_jobs(self, jobs):
         """FilterResults of single-template follow-up jobs [(bank, series, kwargs)] -- each
         filter_series(series, windows=, binsize=, threshold=0, template_index=) -- as
         _items_batch gives them; raises Unsupported when they cannot all run here."""
@@ -295,11 +295,7 @@ class Executor:
         vkc._check(vk.vkCreateFence(dev.device, ctypes.byref(vkc._FenceCreate(8, None, 0)), None,
                                     ctypes.byref(fence)), "vkCreateFence")
         try:
-            # side_queue: on the device's last compute queue, not behind work queued on the
-            # main one since (a SegmentPlan's next segment, already submitted). The caller has
-            # waited for whatever wrote the inputs (the segment these follow up).
-            queue = dev.queues[-1] if side_queue and len(dev.queues) > 1 else dev.queue
-            vkc._check(vk.vkQueueSubmit(queue, 1, ctypes.byref(submit), fence),
+            vkc._check(vk.vkQueueSubmit(dev.queue, 1, ctypes.byref(submit), fence),
                        "vkQueueSubmit")
         except BaseException:
             vk.vkDestroyFence(dev.device, fence, None)
@@ -372,7 +368,7 @@ def submit_jobs(jobs):
         return None
 
 
-def run_jobs(jobs, side_queue=False):
+def run_jobs(jobs):
     """FilterResults for single-template follow-up jobs on Vulkan, or None (host path)."""
     if not jobs:
         return []
@@ -383,14 +379,14 @@ def run_jobs(jobs, side_queue=False):
         if not isinstance(ctx, vkc.Context):
             return None
         ex = _executor(ctx)
-        return ex.run_jobs(jobs, side_queue)
+        return ex.run_jobs(jobs)
     except (Unsupported, KeyError, TypeError):
         return None
 
 
-def run(spec, sel, side_queue=False):
+def run(spec, sel):
     """FollowupSpec results for sel (FollowupSpec.select's list) on Vulkan, or None."""
-    res = run_jobs([s[4] for s in sel], side_queue)
+    res = run_jobs([s[4] for s in sel])
     if res is None:
         return None
     return [(j, rank, c0, ti, r) for (j, rank, c0, ti, _), r in zip(sel, res)]

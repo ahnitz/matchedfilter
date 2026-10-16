@@ -288,12 +288,10 @@ class _Deferred:
     """A GPU result submitted but not yet collected; result() waits once and caches.
     empty: True once collected if the gates refined nothing (every slot is -1), so a
     consumer can skip scanning it."""
-    __slots__ = ("_finish", "_value", "_done", "empty", "trace", "split")
+    __slots__ = ("_finish", "_value", "_done", "empty")
 
     def __init__(self, finish):
         self._finish, self._value, self._done, self.empty = finish, None, False, False
-        self.trace = None
-        self.split = None       # (_RaggedSplit, part): one part of a traced call's result
 
     def result(self):
         if not self._done:
@@ -384,24 +382,6 @@ class MatchedFilter:
     _cpu_max_n = 1 << 20
 
 
-    def _counted(self, gpu, reader):
-        """A traced dispatch's result reader that also counts its work (pairs, tier
-        survivors, refines) as the direct call's finish does: a SegmentPlan replay reads
-        each dispatch through it, without that finish."""
-        if not callable(reader):
-            # None, or a backend's own dispatch record (Vulkan: a tuple its replay reads and
-            # counts itself, _vkcompute.read_dispatch_sparse): kept as the backend made it.
-            return reader
-
-        def read(sort=True):
-            r = reader(sort=sort)
-            shp = r.shape if isinstance(r, _SparsePeaks) else r[0].shape
-            self._gpairs += shp[0] * shp[1]
-            self._gtrig += gpu.last_refinements
-            self._gt1 += getattr(gpu, "last_tier1_survivors", 0) or 0
-            return r
-        read.sparse_dev = getattr(reader, "sparse_dev", None)
-        return read
     def __init__(self, n, ndata=1, ntemplates=1, device=None, *, valid=None):
         from .device import parse as _parse_device
         self.device = _parse_device(device)
@@ -1439,27 +1419,12 @@ class MatchedFilter:
         evictions and re-recording, every segment) for callers that never keep two batches
         in flight; a caller that does (a pipeline collecting k-2) gets disjoint slots for the
         batch still running."""
-        half = self.__dict__.get("_force_slot_half")
-        if half is not None and K >= 2:
-            # A SegmentPlan keeping two job sets in flight (slot_half): each set's calls
-            # use their own half of the slots, so their records never alias.
-            return (int(half) % 2) * (K // 2)
         prev = self.__dict__.get("_defer_base")
         if prev is None or K < 2:
             return 0
         owners = self.__dict__.get("_slot_owner") or {}
         busy = any(not getattr(d, "_done", True) for d in owners.values())
         return (prev + K // 2) % K if busy else prev
-
-    def _slot_span(self, K):
-        """(first, count): the slots this plan's deferred calls cycle through. All K, or the
-        half a SegmentPlan keeping two job sets in flight gave it (_force_slot_half): a call
-        with more batches than that wraps within its half, never into the other set's slots
-        (their records hold the other set's results until it is collected)."""
-        half = self.__dict__.get("_force_slot_half")
-        if half is not None and K >= 2:
-            return (int(half) % 2) * (K // 2), K // 2
-        return 0, K
 
     def _call_plan_state(self, layout, binsize, threshold, t0, nt):
         """Everything a recorded call plan was built under: (objects, values). Objects are
@@ -1518,7 +1483,7 @@ class MatchedFilter:
         slot0 = self._next_batch_base(K) if getattr(self, "_defer_token", None) != token else (
             getattr(self, "_defer_slot", 0) % K)
         parts = entry["slots"].get(slot0)
-        lo, span = self._slot_span(K)
+        lo, span = 0, K
         if parts is None or len(parts) > span:
             # More batches than slots: a batch would reuse an earlier one's slot (fence,
             # recordings, result buffers) while it is in flight. The full path collects the
@@ -1540,19 +1505,17 @@ class MatchedFilter:
         shape = (layout.starts.size, nt, layout.nbins)
         self._last_series_batch = entry["batch"]
         starts_pool = entry["starts_pool"]
-        in_flight, gtrace, gstarts = [], [], []
+        in_flight = []
         slot_idx = slot0
         for (begin, end, count, rebased), fh, hh in parts:
             slot = lo + (slot_idx - lo) % span
             slot_idx += 1
             starts_pool[slot][:count] = rebased
-            gstarts.append((starts_pool[slot], rebased))
             gpu.forward_replay(fh, slot)
             res = gpu.hier_replay(hh, slot, True, validated=True)
             if res is None:
                 raise RuntimeError("a validated call plan part was refused")
             in_flight.append((begin, end, res))
-            gtrace.append((begin, end, self._counted(gpu, getattr(gpu, "_last_dispatch", None))))
         idx = np.empty(shape, dtype=np.int64)
         val = np.empty(shape, dtype=np.complex64)
         sparse_parts = []
@@ -1575,10 +1538,6 @@ class MatchedFilter:
             return _format_result(idx, val, raw=True, order=layout.order)
         self._defer_slot = slot_idx
         deferred = _Deferred(finish_grouped)
-        if gtrace and all(t[2] is not None for t in gtrace):
-            deferred.trace = dict(groups=gtrace, shape=shape, order=layout.order, plan=self,
-                                  slots=[lo + (k - lo) % span for k in range(slot0, slot_idx)],
-                                  starts=gstarts)
         for k in range(slot0, slot_idx):
             owners[lo + (k - lo) % span] = deferred
         self.call_plan_replays = getattr(self, "call_plan_replays", 0) + 1
@@ -1695,13 +1654,6 @@ class MatchedFilter:
         pipelined = can_pipeline and (not single or defer)
         queue_ahead = int(os.environ.get("MF_GPU_QUEUE_AHEAD", "8"))
         K = max(1, queue_ahead) if pipelined else 1
-        if K > 1 and self.__dict__.get("_force_slot_half") is not None:
-            # A SegmentPlan slot half (_slot_span) holds a whole job set's calls -- a bank
-            # runs once per detector -- so each half gets queue_ahead slots, not half of
-            # them: wrapping within a half settles an earlier call of the same set, which
-            # inside a segment-graph capture is a wait the capture cannot take (every
-            # capture failed and the segment fell back to the per-call path).
-            K *= 2
         source_shared = shared_buffer(ser, self._gpu) is not None
         # Unified memory: read a page-aligned series where it is rather than copying the
         # span into the source buffer (a fine-stage call copied ~6 MB per call). The owner
@@ -1753,7 +1705,7 @@ class MatchedFilter:
             self._defer_token, self._defer_slot = self._defer_series, base
         slot0 = getattr(self, "_defer_slot", 0) % K if defer else 0
         # nslot, not span: `span` names the uploaded source span below.
-        slot_lo, nslot = self._slot_span(K) if defer else (0, K)
+        slot_lo, nslot = 0, K
 
         def slot_of(i, slot_lo=slot_lo, nslot=nslot):   # names of their own: lo is reused below
             return slot_lo + (i - slot_lo) % nslot
@@ -1834,7 +1786,6 @@ class MatchedFilter:
             and nt <= self._gpu_pair_limit())
         if grouped:
             in_flight = []
-            gtrace, gstarts = [], []
             slot_idx = slot0 if defer else 0
             # The batches' groups and rebased starts, per (layout, batch, series size, base):
             # the same every segment of a search.
@@ -1867,7 +1818,6 @@ class MatchedFilter:
                 starts = starts_pool[slot]
                 spec = spectra_pool[slot][:count]
                 starts[:count] = rebased
-                gstarts.append((starts, rebased))
                 fh, hh = [], []
                 self._gpu.forward(n, source, starts[:count], spec, defer=True,
                                   slot=slot if pipelined else None,
@@ -1888,8 +1838,6 @@ class MatchedFilter:
                     else:
                         record = False              # e.g. a split window: not one record
                 in_flight.append((begin, end, res))
-                if defer and is_hier:
-                    gtrace.append((begin, end, self._counted(self._gpu, getattr(self._gpu, "_last_dispatch", None))))
                 if len(in_flight) >= nslot:
                     b_start, b_end, item = in_flight.pop(0)
                     take_dense(b_start, b_end, item() if callable(item) else item)
@@ -1909,19 +1857,12 @@ class MatchedFilter:
                                        recorded, starts_pool)
             self._defer_slot = slot_idx
             deferred = _Deferred(finish_grouped)
-            if gtrace and all(t[2] is not None for t in gtrace) and raw:
-                # How to read this call's result again from its buffers (SegmentPlan replay),
-                # and the slots it used (a replay needs each slot used once per segment).
-                deferred.trace = dict(groups=gtrace, shape=shape, order=layout.order, plan=self,
-                                      slots=[slot_of(k) for k in range(slot0, slot_idx)],
-                                      starts=gstarts)
             owners = self.__dict__.setdefault("_slot_owner", {})
             for k in range(slot0, slot_idx):
                 owners[slot_of(k)] = deferred
             return deferred
         in_flight = []
         collected_early = [False]
-        trace_groups, tstarts = [], []
         slot_idx = slot0
         # The packed coarse kernel takes pairs in groups of up to 16 per workgroup and needs
         # the pair count to divide: pad a hierarchical dispatch with copies of its last block
@@ -1941,7 +1882,6 @@ class MatchedFilter:
                 starts[:count] = np.minimum(layout.starts[begin:end], ser.size).astype(np.int64) - base
                 if count_p > count:
                     starts[count:count_p] = starts[count - 1]
-                tstarts.append((starts, starts[:count_p].copy()))
                 self._gpu.forward(n, source, starts[:count_p], spec, defer=True,
                                   slot=slot if pipelined else None)
                 try:
@@ -1959,8 +1899,6 @@ class MatchedFilter:
                     else:
                         res = _head(res, count)
                 in_flight.append((begin, end, res))
-                if defer and is_hier:
-                    trace_groups.append((begin, end, self._counted(self._gpu, getattr(self._gpu, "_last_dispatch", None))))
                 if len(in_flight) >= nslot:
                     collected_early[0] = True
                     b_start, b_end, item = in_flight.pop(0)
@@ -2031,12 +1969,6 @@ class MatchedFilter:
                 deferred.empty = True
             return value
         deferred = _Deferred(finish_marking)
-        if trace_groups and all(t[2] is not None for t in trace_groups) and raw:
-            # How to read this call's result again from its buffers (SegmentPlan replay),
-            # and the slots it used (a replay needs each slot used once per segment).
-            deferred.trace = dict(groups=trace_groups, shape=shape, order=layout.order,
-                                  plan=self, slots=[slot_of(k) for k in range(slot0, slot_idx)],
-                                  starts=tstarts)
         owners = self.__dict__.setdefault("_slot_owner", {})
         for k in range(slot0, slot_idx):
             owners[slot_of(k)] = deferred
@@ -2148,19 +2080,13 @@ class CorrelationFilter(MatchedFilter):
             if owner is not None:
                 self._gpu._keep_until_done.append(owner)
                 source = ser
-        cap = getattr(getattr(self._gpu, "_device_state", None), "__dict__", {}).get(
-            "prelude_capture")
         if source is staging:
             source[:] = ser
-            if cap is not None:
-                cap.refuse()                 # a per-call host copy: not replayable
         lo, hi = self.valid
         for b0 in range(0, starts.size, batch):
             b1 = min(b0 + batch, starts.size)
             count = b1 - b0
             offsets[:count] = np.minimum(starts[b0:b1], ser.size)
-            if cap is not None:
-                cap.write(offsets, offsets[:count])
             self._gpu.forward(self.n, source, offsets[:count], spec[:count], defer=True)
             try:
                 kw = dict(async_submit=True) if (defer and b1 == starts.size) else {}
