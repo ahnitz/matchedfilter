@@ -312,16 +312,23 @@ Order: 1, then 2, then 4, then 3, then 5, then 6. Steps 1 and 6 do not depend on
 - 2026-10-16: **The follow-up rule removed** (at the user's decision): `FollowupSpec`,
   `filter_series_many(followups=)`, `_run_followups`, `run_followups` and `FollowUp`. The
   batched-calls test moved to `tests/test_followup_batch.py`.
-- 2026-10-16: **CI red on 86ca1d35 (Metal, paravirtual GPU):**
-  `test_fused_forward_matches_separate` asserted that the band forward and the separate
-  forward give identical peak lists. One peak swapped between them (1036 peaks).
-  - They are different float paths. On the M2 (three seeds) both match the CPU reference's
-    peak set exactly, with SNRs within 1.4-1.9e-5. The closest reference peaks sit 5e-5 to
-    1.6e-3 from the threshold.
-  - Exact equality between the two paths is not a property of either. The test now checks
-    each path against the CPU reference. A one-sided peak is allowed only within 1e-4 of
-    the threshold, or as a lag tie inside a bin. A missed loud peak, a spurious peak, or an
-    SNR off by 1e-3 fails (checked by mutation).
+- 2026-10-16: **CI red on 86ca1d35 and 336980d6 (Metal, paravirtual GPU).**
+  `test_fused_forward_matches_separate` compared GPU peak lists, first between the two
+  forwards and then against the CPU's hierarchical result.
+  - Against the exact flat filter, every hierarchical run reports only exact peaks. This
+    held on CPU and GPU, at every chain and every coarse layout. Each run also dismisses
+    some peaks: 36 of 1080 at the default chain, 44 with chain 512, and 18-28 with
+    128,512, some at |snr| 5-6 next to the injected delta. The gates are statistical
+    (`false_dismissal`), so the dismissed set depends on the chain.
+  - CI's device chose chain 512 where the CPU chose 256. On the M2, forcing one pair per
+    threadgroup changed the timing and with it the chain, and reproduced CI's 1036 peaks.
+    It is not a layout bug: with the chain forced, every layout agrees.
+  - The test now forces the chain (256,512). It requires every GPU peak to be an exact
+    peak with the exact SNR (within 1e-4), and at most 2 gate decisions to differ from the
+    CPU on the same chain. Mutation checks: an invented peak, an SNR off by 1e-3, and three
+    flips each fail.
+  - Open question: dismissals of |snr| 5-6 peaks near a delta input are far above the
+    nominal 1e-3. A delta is not a signal the gate model covers, but this deserves a look.
 - **Measurement lessons.**
   - A shared seed hides a change to pricing or candidates; use `--seed-per-tree`.
   - Metal's device timer overstates time when command buffers overlap.

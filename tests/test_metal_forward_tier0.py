@@ -11,19 +11,28 @@ from test_time_domain import _whitened_inspiral_bank
 #: reference on an M2 (three seeds); this is five times that.
 SNR_TOL = 1e-4
 THRESHOLD = 4.0
+#: The gate chain every run takes. The gates are statistical (false_dismissal), so which
+#: peaks a run dismisses depends on its chain, and an unforced chain is each device's
+#: measured choice: CI's paravirtual GPU chose 512 where the CPU chose 256 and dismissed
+#: a different 1036 of the 1080 exact peaks.
+CHAIN = "256,512"
+#: Gate decisions the two float paths may take differently: a pair whose coarse maximum
+#: sits within rounding of a gate threshold. CI saw one such swap in 1036 peaks.
+GATE_FLIPS = 2
 
 
-def _run(monkeypatch, enabled, device=None, rng_seed=5):
+def _run(monkeypatch, enabled, device=None, engine="hier", rng_seed=5):
     from conftest import usable_gpu
     dev = usable_gpu() if device is None else device
     if dev is None:
         pytest.skip("no usable GPU")
     monkeypatch.setenv("MF_AUTOTUNE", "0")
+    monkeypatch.setenv("MF_CHAIN_FORCE", CHAIN)
     monkeypatch.setenv("MF_BAND_FORWARD", "1" if enabled else "0")
     rng = np.random.default_rng(rng_seed)
     counts = sorted(rng.integers(200, 1800, 24))
     taps, w, df = _whitened_inspiral_bank(rng, counts)
-    bank = TimeDomainFilterBank(taps, tap_counts=counts, engine='hier', threshold=THRESHOLD,
+    bank = TimeDomainFilterBank(taps, tap_counts=counts, engine=engine, threshold=THRESHOLD,
                                 false_dismissal=1e-3, device=dev, fft_lengths=[2048])
     bank.set_reference(w, delta_f=df)
     S = 1 << 19
@@ -37,37 +46,27 @@ def _run(monkeypatch, enabled, device=None, rng_seed=5):
              zip(r.template_indices, r.sample_indices, r.snr)} for r in out]
 
 
-def _assert_same_peaks(got, want, n, label):
-    """Assert two peak sets {(template, sample): snr} agree to float precision.
+def _assert_consistent(got, same_chain, exact, label):
+    """Assert a GPU run's peaks {(template, sample): snr} are a correct hierarchical result.
 
-    A peak both sides report must have the same complex SNR within SNR_TOL. A peak only
-    one side reports is allowed only where rounding can decide it: its |snr| is within
-    SNR_TOL of the threshold, or the other side reports a peak of the same template within
-    one block whose |snr| ties it within SNR_TOL (two lags of one bin, elected differently).
-    Anything else is a missed or spurious peak, and the message lists them."""
-    common = set(got) & set(want)
-    worst = max((abs(got[k] - want[k]) for k in common), default=0.0)
-    assert worst <= SNR_TOL, "%s: SNR differs by %.2e on a common peak" % (label, worst)
-
-    def explained(k, mine, other):
-        a = abs(mine[k])
-        if abs(a - THRESHOLD) <= SNR_TOL:
-            return True
-        return any(t == k[0] and abs(i - k[1]) < n and abs(abs(v) - a) <= SNR_TOL
-                   for (t, i), v in other.items() if (t, i) not in mine)
-    bad = ([("only " + label, k, abs(got[k])) for k in set(got) - set(want)
-            if not explained(k, got, want)]
-           + [("missing from " + label, k, abs(want[k])) for k in set(want) - set(got)
-              if not explained(k, want, got)])
-    assert not bad, bad
+    Every peak it reports is an exact (ungated) peak with that SNR within SNR_TOL: a gate
+    can only dismiss, so anything else is a wrong refine or a misattributed pair. Against
+    the CPU on the same chain it may differ by at most GATE_FLIPS peaks, each a gate
+    decision taken at rounding margin; more is a gate computed on wrong data."""
+    invented = sorted(set(got) - set(exact))
+    assert not invented, "%s: peaks the exact filter does not have: %s" % (label, invented[:5])
+    worst = max((abs(got[k] - exact[k]) for k in got), default=0.0)
+    assert worst <= SNR_TOL, "%s: SNR differs from the exact filter by %.2e" % (label, worst)
+    flips = sorted(set(got) ^ set(same_chain))
+    assert len(flips) <= GATE_FLIPS, "%s: %d gate decisions differ from the CPU's: %s" % (
+        label, len(flips), [(k, round(abs(exact[k]), 4)) for k in flips[:6]])
 
 
 def test_fused_forward_matches_separate(monkeypatch):
-    """The band forward and the separate forward each give the CPU reference's peaks.
-
-    They are different float paths, so a peak within rounding of the threshold (or a lag
-    tie inside a bin) may fall either way; exact equality between them is not a property
-    of either. A peak missed or invented anywhere else fails."""
+    """The band forward and the separate forward each give a correct hierarchical result:
+    only exact peaks, at the exact SNR, and the CPU's gate decisions on the same chain up to
+    rounding-margin flips. Exact equality between the two GPU paths is not a property of
+    either: they round the coarse bands differently."""
     pytest.importorskip("matchedfilter._mtlcompute")
     try:
         from matchedfilter import _mtlcompute
@@ -78,9 +77,10 @@ def test_fused_forward_matches_separate(monkeypatch):
     before = _mtlcompute._FUSED_FORWARDS[0]
     b = _run(monkeypatch, True)
     assert _mtlcompute._FUSED_FORWARDS[0] > before, "the fused forward was not taken"
-    ref = _run(monkeypatch, False, device="cpu")
-    assert len(a) == len(b) == len(ref)
-    for ra, rb, rr in zip(a, b, ref):
-        assert len(rr) > 100
-        _assert_same_peaks(ra, rr, 2048, "separate forward")
-        _assert_same_peaks(rb, rr, 2048, "band forward")
+    cpu = _run(monkeypatch, False, device="cpu")
+    exact = _run(monkeypatch, False, device="cpu", engine="flat")
+    assert len(a) == len(b) == len(cpu) == len(exact)
+    for ra, rb, rc, rx in zip(a, b, cpu, exact):
+        assert len(rc) > 100
+        _assert_consistent(ra, rc, rx, "separate forward")
+        _assert_consistent(rb, rc, rx, "band forward")
