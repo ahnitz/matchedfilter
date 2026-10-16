@@ -212,3 +212,55 @@ check.
 | 6 | about 1-2 days | dev1 and the M2 |
 
 Order: 1, then 2, then 4, then 3, then 5, then 6. Steps 1 and 6 do not depend on the others.
+
+## Log
+
+- 2026-10-16: **Step 0: `SegmentPlan` removed** (1dc65f36). Its only users were the gate's
+  replay step and an opt-in ladder mode.
+  - Removed: 2,817 lines, including the Vulkan prelude-capture and replay machinery, CUDA's
+    `SegmentGraph` and every hook it had in CUDA's copy, launch and stream paths, the per-call
+    trace bookkeeping in `MatchedFilter`, slot halves, and CUDA's device follow-ups (reachable
+    only through it).
+  - The gate's replay step became `settled`: the same check after the trials have locked.
+- 2026-10-16: **Step 1: padding and drafts removed** (475c0ab7). Paired, steps 0-1 together
+  against 693b6a0b:
+  - M2: batched +3.8%, pipelined +4.5%; fine-stage device time 0.43 -> 0.40 s, from the
+    padded blocks Metal no longer dispatches.
+  - 8060S: batched +0.5%, pipelined +3.6%; host time 0.20-0.21 -> 0.195-0.199 s, from the
+    removed hooks.
+  - L40S: batched +0.4%, pipelined +4.8%.
+  - Pushed as 21afa4f9, CI green.
+  - `tools/ab_ladder.py` added: the paired-ladder method as a tool.
+- 2026-10-16: **A Metal host-time saving that lost throughput.** Memoising Metal's coarse
+  geometry cut host time 14% but cost pipelined throughput 1.3% (six rounds, repeated).
+  Reverted.
+  - cProfile had made the M2 look host-bound: 3.5e7 templates in real time under the
+    profiler against 4.08e7 without it.
+  - On the M2, less host work does not mean more throughput.
+- 2026-10-16: **Step 2: CUDA joins the shared grouped path; Metal stays per group**
+  (6e041aaa).
+  - CUDA and the tensor-core gate read per-row windows from a trailing table argument, under
+    a window start of `ROWWIN_ON`. Vulkan's SPIR-V is byte-identical.
+  - CUDA's own grouped implementation (147 lines) is gone. On the L40S the fine stage's device
+    time fell 12% (0.072-0.078 -> 0.063-0.068 s).
+  - Metal's grouped call was faster in isolation (device 99 against 145, wall 3x) but 6-10%
+    slower in the ladder. The work counts were identical, and Metal's command-buffer times
+    overlap, so its device timer cannot say why. Metal keeps a call per group, and its
+    kernels keep their signature.
+  - The per-group loop is not deletable after all. It is also the path for one window group
+    and for shapes past the grouped limits.
+- 2026-10-16: **Step 4: one band-forward rule for Vulkan and Metal** (fa74eff2).
+  `_gpuhost.band_forward_wanted` with the measured refine-block fraction, one switch
+  (`MF_BAND_FORWARD`), and Metal priced as it runs.
+  - M2: 1.000 / 1.004 for the rule; 0.998 / 0.999 for the pricing (a seed per tree).
+  - CUDA's band forward needs new kernels. It is left for when the forward's share of a CUDA
+    segment justifies them.
+- 2026-10-16: **Step 6: one tier conformance suite** (d29d0a30): CPU FP32, Q15 and FP16
+  (ARM), and the GPU, at exact gate decisions.
+  - It found a Metal bug on main: in a cascade, a tier-1 threshold of 0 passed the pairs tier 0
+    had dismissed. Fixed on Metal and CUDA.
+  - `docs/reduced-precision-gates.md` documents the three bounds.
+- **Measurement lessons.**
+  - A shared seed hides a change to pricing or candidates; use `--seed-per-tree`.
+  - Metal's device timer overstates time when command buffers overlap.
+  - Never run tests on the machine under measurement.
