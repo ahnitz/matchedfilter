@@ -915,14 +915,14 @@ def test_filter_series_many_without_wait_overlaps_and_matches(monkeypatch):
 @pytest.mark.parametrize("device_followups", ["1", "0"])
 def test_gpu_follow_up_batch_matches_direct_calls(monkeypatch, device_followups):
     """Single-template calls on device-resident rows go out as one forward and one item
-    submission per template group -- or, on Vulkan, as listed entries of one fixed recording
-    per template group, all in one submission (_vkfollowup; MF_VK_DEVICE_FOLLOWUPS=0 takes the
+    submission per template group -- or, on Vulkan and CUDA, as listed entries per template
+    group, all in one submission (_gpuhost.submit_followups; MF_DEVICE_FOLLOWUPS=0 takes the
     per-group path) -- and each job's FilterResults equal its direct call exactly, peak order
     included (one call per bin count), with edge blocks of fewer bins."""
     from conftest import usable_gpu
     monkeypatch.setenv("MF_AUTOTUNE", "0")
     monkeypatch.setenv("MF_SINGLE_DEVICE", "bank")
-    monkeypatch.setenv("MF_VK_DEVICE_FOLLOWUPS", device_followups)
+    monkeypatch.setenv("MF_DEVICE_FOLLOWUPS", device_followups)
     dev = usable_gpu()
     if dev is None:
         pytest.skip("no usable GPU")
@@ -952,13 +952,11 @@ def test_gpu_follow_up_batch_matches_direct_calls(monkeypatch, device_followups)
         orig = type(ctx).peaks_items
         monkeypatch.setattr(type(ctx), "peaks_items",
                             lambda self, *a, **k: used.append(1) or orig(self, *a, **k))
-    try:
-        from matchedfilter import _vkfollowup
-        orig_run = _vkfollowup.Executor.submit_jobs
-        monkeypatch.setattr(_vkfollowup.Executor, "submit_jobs",
+    if hasattr(ctx, "followup_executor"):
+        ex_type = type(ctx.followup_executor())
+        orig_run = ex_type.submit_jobs
+        monkeypatch.setattr(ex_type, "submit_jobs",
                             lambda self, js: used.append(1) or orig_run(self, js))
-    except ImportError:
-        pass
     many = TimeDomainFilterBank.filter_series_many(jobs)
     direct = [b.filter_series(x, **kw) for b, x, kw in jobs]
     for r1, r2 in zip(direct, many):

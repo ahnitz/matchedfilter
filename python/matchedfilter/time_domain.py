@@ -2255,18 +2255,14 @@ class TimeDomainFilterBank:
 
     @staticmethod
     def _run_followups(jobs, fine, spec):
-        """(follow-ups, "device" or "host"): on a backend that runs selected follow-ups as
-        one fixed recording per template group (Vulkan: _vkfollowup), else on the host."""
+        """(follow-ups, "device" or "host"): on a backend with a follow-up executor (Vulkan,
+        CUDA: _gpuhost.submit_followups), else on the host."""
         import os
-        if os.environ.get("MF_VK_DEVICE_FOLLOWUPS", "1") != "0":
-            try:
-                from . import _vkfollowup
-            except ImportError:
-                _vkfollowup = None
-            if _vkfollowup is not None:
-                res = _vkfollowup.run(spec, spec.select(jobs, fine))
-                if res is not None:
-                    return res, "device"
+        if os.environ.get("MF_DEVICE_FOLLOWUPS", "1") != "0":
+            from ._gpuhost import run_followups
+            res = run_followups(spec, spec.select(jobs, fine))
+            if res is not None:
+                return res, "device"
         return spec.run_host(jobs, fine), "host"
 
     @staticmethod
@@ -2392,19 +2388,15 @@ class TimeDomainFilterBank:
             groups.setdefault((id(bank), id(g), bs, thr), []).append(
                 (j, bank, g, ser, bstarts, bws, bwe, ti_local, ti))
         done = set()
-        # Threshold-0 follow-ups on Vulkan: every group's items as listed entries of one fixed
-        # recording per template group (_vkfollowup), all in one submission. None (another
-        # backend, past a capacity): the per-group path below.
-        if os.environ.get("MF_VK_DEVICE_FOLLOWUPS", "1") != "0":
+        # Threshold-0 follow-ups on a backend with a follow-up executor (Vulkan, CUDA): every
+        # group's items as listed entries, all in one submission (_gpuhost.submit_followups).
+        # None (another backend, past a capacity): the per-group path below.
+        if os.environ.get("MF_DEVICE_FOLLOWUPS", "1") != "0":
             fast = sorted(m[0] for (_, _, _, thr), members in groups.items() if thr == 0.0
                           for m in members)
             if fast:
-                try:
-                    from . import _vkfollowup
-                except ImportError:
-                    _vkfollowup = None
-                collect = (_vkfollowup.submit_jobs([jobs[j] for j in fast])
-                           if _vkfollowup else None)
+                from ._gpuhost import submit_followups
+                collect = submit_followups([jobs[j] for j in fast])
                 if collect is not None:
                     # Submitted, not waited on: each job's result is read when asked for, so a
                     # caller collecting later (filter_series_many(wait=False)) never waits here.

@@ -7,14 +7,23 @@ Alpha releases may change the API. Pin a version for reproducible work.
 ### Removed
 
 - `time_domain.SegmentPlan` (segment replay: Vulkan recorded submissions and CUDA segment
-  graphs) and the CUDA device follow-ups it drove (`_cudafollowup`). Nothing outside the
-  library's own benchmark used it. `filter_series_many` is unchanged, including Vulkan's
-  device follow-ups. `MF_SEGMENT_REPLAY`, `MF_CUDA_SEGMENT_GRAPH` and the ladder's
+  graphs) and the CUDA device follow-up selection it drove (`src/gpu/followup.cu`). Nothing
+  outside the library's own benchmark used it. `filter_series_many` is unchanged, including
+  Vulkan's device follow-ups. `MF_SEGMENT_REPLAY`, `MF_CUDA_SEGMENT_GRAPH` and the ladder's
   `LADDER_REPLAY`, `LADDER_FOLD_TOPS` and `LADDER_INFLIGHT` modes are gone. The gate's
   replay step became `settled`: the same check after the trials have locked.
+- `FollowupSpec`'s `max_items` and `max_items_per_region` arguments, the capacities of that
+  device selection. `MF_VK_DEVICE_FOLLOWUPS` is now `MF_DEVICE_FOLLOWUPS` (Vulkan and CUDA).
 
 ### Performance
 
+- CUDA runs follow-ups (`filter_series_many` with threshold-0 single-template calls, and
+  `followups=`) on the device: one table upload, per template group a forward and one
+  `refineItems` launch, and one readback, as Vulkan does. The batch layout and result
+  assembly are shared (`_gpuhost.followup_layout`, `assemble_followups`); each backend keeps
+  only its executor. L40S, test27 ladder, paired on settled seeds: pipelined 1.25x, batched
+  1.03x; the follow-up stage fell from 0.05-0.06 s to 0.03 s per segment. Results equal the
+  host path exactly. Metal keeps the host path: follow-ups are about 6% of its segment.
 - Metal fp16 coarse builds carry the fp16 twiddle table, and the tile choice measures each
   tile with each twiddle source. On an Apple M2 the table was 5-6% faster in the untiled
   builds (its bands 128 and 1024) but slower in the tile-4 and tile-8 builds.

@@ -12,7 +12,9 @@ from matchedfilter import TimeDomainFilterBank
 from test_time_domain import _whitened_inspiral_bank
 
 
-def _setup(monkeypatch, nbanks=2, seed=71):
+def _setup(monkeypatch, nbanks=2, seed=71, replay=True):
+    """(rng, banks); skipped without a GPU, and with replay=True (the call-plan tests) on a
+    backend that records no call plans."""
     from conftest import usable_gpu
     monkeypatch.setenv("MF_AUTOTUNE", "0")
     dev = usable_gpu()
@@ -27,7 +29,7 @@ def _setup(monkeypatch, nbanks=2, seed=71):
                                  false_dismissal=1e-3, device=dev, fft_lengths=[2048], binsize=2048)
         b.set_reference(w, delta_f=df)
         banks.append((b, w, df))
-    if not getattr(banks[0][0]._groups[0].plan._gpu, "supports_replay", False):
+    if replay and not getattr(banks[0][0]._groups[0].plan._gpu, "supports_replay", False):
         pytest.skip("this backend records no call plans")
     return rng, banks
 
@@ -445,18 +447,19 @@ def test_band_mode_allocates_nothing_in_steady_state(monkeypatch):
 
 @pytest.mark.parametrize("new_alloc", [False, True])
 def test_device_followups_track_their_buffers(monkeypatch, new_alloc):
-    """Vulkan follow-ups (_vkfollowup) replay one recording per template group, bound to the
-    series allocations and templates it was made for: rewritten data, or a new allocation each
+    """Device follow-ups (Vulkan: one recording per template group, replayed) are bound to the
+    series allocations and templates they were made for: rewritten data, or a new allocation each
     segment (perhaps at a freed one's address), must still give each job's direct result."""
     monkeypatch.setenv("MF_SINGLE_DEVICE", "bank")
-    rng, banks = _setup(monkeypatch, nbanks=1, seed=81)
+    rng, banks = _setup(monkeypatch, nbanks=1, seed=81, replay=False)
     bank = banks[0][0]
-    if not getattr(bank._groups[0].plan._gpu, "supports_device_followups", False):
+    ctx = bank._groups[0].plan._gpu
+    if not hasattr(ctx, "followup_executor"):
         pytest.skip("backend has no device follow-ups")
-    from matchedfilter import _vkfollowup
+    ex_type = type(ctx.followup_executor())
     calls = []
-    orig = _vkfollowup.Executor.submit_jobs
-    monkeypatch.setattr(_vkfollowup.Executor, "submit_jobs",
+    orig = ex_type.submit_jobs
+    monkeypatch.setattr(ex_type, "submit_jobs",
                         lambda self, js: calls.append(len(js)) or orig(self, js))
     S = 1 << 17
     rows = bank.empty_shared((2, S))
@@ -481,13 +484,13 @@ def test_device_followups_track_their_buffers(monkeypatch, new_alloc):
 
 
 def test_device_followups_in_flight(monkeypatch):
-    """Vulkan follow-ups are submitted without a wait (filter_series_many(wait=False)): a second
+    """Device follow-ups are submitted without a wait (filter_series_many(wait=False)): a second
     batch on the same records, submitted before the first is collected, must first finish the
     first (its tables and outputs are rewritten), and both must equal their direct calls."""
     monkeypatch.setenv("MF_SINGLE_DEVICE", "bank")
-    rng, banks = _setup(monkeypatch, nbanks=1, seed=82)
+    rng, banks = _setup(monkeypatch, nbanks=1, seed=82, replay=False)
     bank = banks[0][0]
-    if not getattr(bank._groups[0].plan._gpu, "supports_device_followups", False):
+    if not hasattr(bank._groups[0].plan._gpu, "followup_executor"):
         pytest.skip("backend has no device follow-ups")
     S = 1 << 17
     rows = bank.empty_shared((2, S))
@@ -512,11 +515,12 @@ def test_device_followups_in_flight(monkeypatch):
 
 
 def test_device_followups_steady_state_allocates_nothing(monkeypatch):
-    """After warm-up, Vulkan follow-ups whose jobs move between template groups and series
-    allocations every segment create no workspace, buffer or descriptor pool: a group's
-    templates and allocations are rebound in place on a pooled workspace."""
+    """After warm-up, device follow-ups whose jobs move between template groups and series
+    allocations every segment allocate nothing: on Vulkan a group's templates and allocations
+    are rebound in place on a pooled workspace (no workspace, buffer or descriptor pool), on
+    CUDA the executor's buffers have grown to the batch (no device or pinned buffer)."""
     monkeypatch.setenv("MF_SINGLE_DEVICE", "bank")
-    rng, banks = _setup(monkeypatch, nbanks=1, seed=83)
+    rng, banks = _setup(monkeypatch, nbanks=1, seed=83, replay=False)
     # Several template groups of one block length (they share workspaces), so jobs move
     # between groups and workspace slots.
     counts = list(rng.integers(200, 400, 33))
@@ -526,11 +530,17 @@ def test_device_followups_steady_state_allocates_nothing(monkeypatch):
                                 fft_lengths=[2048], binsize=2048, max_batch_size=8)
     bank.set_reference(w, delta_f=df)
     ctx = bank._groups[0].plan._gpu
-    if not getattr(ctx, "supports_device_followups", False):
+    if not hasattr(ctx, "followup_executor"):
         pytest.skip("backend has no device follow-ups")
-    from matchedfilter import _vkfollowup, _vkcompute as vkc
+    from matchedfilter import _vkcompute as vkc
+    if isinstance(ctx, vkc.Context):
+        from matchedfilter import _vkfollowup
+        watched = (_vkfollowup._Workspace, vkc._Buffer)
+    else:
+        from matchedfilter import _cudacompute as cc
+        watched = (cc._Buffer, cc._Pinned)
     made, on = [], [False]
-    for cls in (_vkfollowup._Workspace, vkc._Buffer):
+    for cls in watched:
         orig = cls.__init__
         monkeypatch.setattr(cls, "__init__", lambda self, *a, _o=orig, _c=cls, **k:
                             (on[0] and made.append(_c.__name__)) or _o(self, *a, **k))
@@ -565,8 +575,9 @@ def test_device_followups_steady_state_allocates_nothing(monkeypatch):
     segment([g[0] for g in per_group] * 2)
     warm = len(made)
     pools = len(getattr(ctx, "_pools", []))
-    ex = getattr(ctx._device_state, "followup_executor", None)
-    workspaces = len(ex.workspaces) if ex is not None else 0
+    ex = ctx.followup_executor()
+    held = getattr(ex, "workspaces", None) or getattr(ex, "rec", None) or {}
+    workspaces = len(held)
     assert workspaces, "the device follow-up path was not taken"
     for seg in range(6):
         for r in rows:
@@ -575,7 +586,7 @@ def test_device_followups_steady_state_allocates_nothing(monkeypatch):
                  for _ in range(int(rng.integers(1, 3)))])
     assert made[warm:] == [], made[warm:]
     assert len(getattr(ctx, "_pools", [])) == pools
-    assert len(ex.workspaces) == workspaces
+    assert len(held) == workspaces
 
 
 def test_more_batches_than_slots(monkeypatch):

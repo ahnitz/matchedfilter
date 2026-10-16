@@ -1943,6 +1943,11 @@ class Context(InputUploads):
         for graph in set(self.__dict__.get("_segment_results", {}).values()):
             graph.collect()
 
+    def followup_executor(self):
+        """This device's executor for _gpuhost.submit_followups (_cudafollowup: one stream, one readback)."""
+        from . import _cudafollowup
+        return _cudafollowup.executor(self)
+
     def clear_cache(self):
         self._drain()
         self._drain_segments()
