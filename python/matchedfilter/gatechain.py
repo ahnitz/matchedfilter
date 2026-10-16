@@ -1104,8 +1104,14 @@ def _smallest(col, m):
     return idx[np.argsort(col[idx], kind="stable")]
 
 
+#: plan_chain's candidate thresholds per (draws, chain): they do not depend on the cost model,
+#: so every template group pricing the same profile and window reuses them.
+_CAND_CACHE = OrderedDict()
+_CAND_CACHE_MAX = 4096
+
+
 def plan_chain(sig, noise, bands, chain, fd, cost, n, snr, prune=False, ntemplates=None,
-               model_f=False):
+               model_f=False, memo=None):
     """Thresholds for `chain` meeting compound dismissal <= fd at minimum modelled cost.
 
     sig, noise: signal_draws / noise_block_maxima over `bands`.
@@ -1116,7 +1122,44 @@ def plan_chain(sig, noise, bands, chain, fd, cost, n, snr, prune=False, ntemplat
     selection, not a sort, per column) and on the few dismissed draws' indices, instead
     of masking and sorting all M draws for every candidate split. Noise passes are
     carried down the split search, so candidates sharing a prefix share its work.
+
+    The search yields candidate (thresholds, reach) pairs that do not depend on the cost
+    model; only their pricing does. memo, a key naming the draws (_choose_chain passes the
+    profile, n, window and draw parameters), caches the candidates, so another template
+    group or cost model prices them without searching again. The cheapest candidate wins,
+    the earliest on a tie, as without the cache.
     """
+    key = None if memo is None else tuple(memo) + (tuple(int(b) for b in chain), bool(prune))
+    cands = _CAND_CACHE.get(key) if key is not None else None
+    if cands is None:
+        cands = _chain_candidates(sig, noise, bands, chain, fd, snr, prune)
+        if key is not None:
+            _CAND_CACHE[key] = cands
+            while len(_CAND_CACHE) > _CAND_CACHE_MAX:
+                _CAND_CACHE.popitem(last=False)
+    else:
+        _CAND_CACHE.move_to_end(key)
+    if cands is None:
+        return None
+    best = None
+    for th, reach in cands:
+        c = cost.chain_cost(chain, list(reach)) if cost is not None else _flop_cost(chain, list(reach), n)
+        if ntemplates and getattr(cost, "band_forward", False):
+            # only the change from the full forward (already in `block`), so a chain without
+            # a measured credit is priced exactly as before; pick_stable's tie window is
+            # absolute-valued, so a credit that takes a total below zero still compares
+            c += cost.chain_forward_delta(chain, list(reach), ntemplates, model_f=model_f)
+        if best is None or c < best["cost"]:
+            best = dict(chain=tuple(chain), thresholds=th, reach=reach, cost=float(c))
+    if best is not None:
+        best["q15"] = (bool(cost.first_tier(chain[0], best["reach"][1])[1])
+                       if hasattr(cost, "first_tier") else False)
+    return best
+
+
+def _chain_candidates(sig, noise, bands, chain, fd, snr, prune):
+    """plan_chain's search: every (thresholds, reach) it considers for `chain`, in its order,
+    or None when fd cannot be resolved."""
     cols = [bands.index(b) for b in chain]
     S = kept_draws(sig, bands, chain, snr)
     M = S.shape[0]
@@ -1136,11 +1179,10 @@ def plan_chain(sig, noise, bands, chain, fd, cost, n, snr, prune=False, ntemplat
     low_val = [S[o, i] for i, o in enumerate(low)]
     last_order = _smallest(S[:, k - 1], K + 1)
     last_val = S[last_order, k - 1]
-    best = None
+    out = []
 
     def consider(prefix, dead, nalive):
         """Given thresholds for tiers 0..k-2, the last uses the remaining budget."""
-        nonlocal best
         rem = K - dead.size
         if rem < 0 or rem >= M - dead.size:
             return
@@ -1158,16 +1200,7 @@ def plan_chain(sig, noise, bands, chain, fd, cost, n, snr, prune=False, ntemplat
             # own cost. (The last tier's pass rate into the refine is not judged here: at a
             # low snr every chain refines most pairs, and the cost already says so.)
             return
-        c = cost.chain_cost(chain, reach) if cost is not None else _flop_cost(chain, reach, n)
-        if ntemplates and getattr(cost, "band_forward", False):
-            # only the change from the full forward (already in `block`), so a chain without
-            # a measured credit is priced exactly as before; pick_stable's tie window is
-            # absolute-valued, so a credit that takes a total below zero still compares
-            c += cost.chain_forward_delta(chain, reach, ntemplates, model_f=model_f)
-        if best is None or c < best["cost"]:
-            q15 = bool(cost.first_tier(chain[0], reach[1])[1]) if hasattr(cost, "first_tier") else False
-            best = dict(chain=tuple(chain), thresholds=tuple(th), reach=tuple(reach), cost=float(c),
-                        q15=q15)
+        out.append((tuple(th), tuple(reach)))
 
     def rec(i, prefix, remaining, dead, alive_noise, fracs):
         # tier i takes a share of the budget still unallocated; the last tier gets what is left
@@ -1187,7 +1220,7 @@ def plan_chain(sig, noise, bands, chain, fd, cost, n, snr, prune=False, ntemplat
             rec(i + 1, prefix + [g], remaining - share, d, an, fracs + [float(an.mean())])
 
     rec(0, [], 1.0, np.empty(0, np.int64), np.ones(noise.shape[0], bool), [])
-    return best
+    return out
 
 
 #: A tier whose modelled noise pass rate exceeds this rejects too little to be worth running:
@@ -1475,10 +1508,12 @@ def _choose_chain(power, n, snr, fd, cost, max_tiers, floor, nsim, window, ntemp
     if sig is None:
         return None, []
     noise = noise_block_maxima(power, n, bands, nsim=nsim, window=window)
+    memo = ("choose", _gm._profile_sig(power), n, float(snr), float(fd), tuple(bands), window,
+            int(nsim), _gm._nsamp_for(fd))
     plans = []
     for chain in enumerate_chains(n, max_tiers, floor, bands=bands):
         pl = plan_chain(sig, noise, bands, list(chain), fd, cost, n, snr, prune=True,
-                        ntemplates=ntemplates, model_f=model_f)
+                        ntemplates=ntemplates, model_f=model_f, memo=memo)
         if pl is not None:
             plans.append(pl)
     plans.sort(key=lambda d: d["cost"])
