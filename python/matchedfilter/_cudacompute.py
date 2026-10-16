@@ -429,8 +429,6 @@ class Context(InputUploads):
     max_grouped_bins = _MAX_BINS
     # Results may come back sparse (see _tail); the series path asks with sparse=True.
     supports_sparse = True
-    # Coarse PPG/tile groups are padded inside the backend (hier_peaks pads its rows).
-    pads_coarse_groups = True
     # Follow-ups: peaks_items(async_submit=True) returns a collector; forward takes rows=.
     items_async = True
     forward_rows = True
@@ -448,10 +446,6 @@ class Context(InputUploads):
         """Device timers on. ``_timing`` is the attribute shared with the Vulkan backend:
         gatechain.calibrate_costs_gpu switches it on around its measurement runs."""
         return self._timing
-
-    def shares_memory_with(self, other):
-        """Contexts on one device share its primary context, hence every allocation."""
-        return isinstance(other, Context) and other.dev_idx == self.dev_idx
 
     def __init__(self, index=0):
         self.cuda = _cuda.get_cuda_lib()

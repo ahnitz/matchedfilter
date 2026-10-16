@@ -236,13 +236,6 @@ class _SparsePeaks:
         val.reshape(-1)[self.flat] = self.val
         return idx, val
 
-    def head(self, nblocks):
-        """The first nblocks blocks: a padded dispatch's extra rows dropped."""
-        per_block = self.shape[1] * self.shape[2]
-        keep = self.flat < nblocks * per_block
-        return _SparsePeaks((nblocks,) + self.shape[1:], self.flat[keep], self.idx[keep],
-                            self.val[keep])
-
     def blocks(self, mask, nbins):
         """The blocks selected by a boolean mask, with their first nbins bins: the sparse
         form of ``(idx[mask][:, :, :nbins], val[mask][:, :, :nbins])``."""
@@ -275,13 +268,6 @@ class _SparsePeaks:
             flat = np.asarray(order, np.int64)[rows] * per_block + rest
         k = np.argsort(flat, kind="stable")
         return _SparsePeaks(shape, flat[k], idx[k], val[k])
-
-
-def _head(r, count):
-    """The first count blocks of a dispatch's result (padding rows dropped)."""
-    if isinstance(r, _SparsePeaks):
-        return r.head(count)
-    return tuple(x[:count] for x in r)
 
 
 class _Deferred:
@@ -1864,25 +1850,16 @@ class MatchedFilter:
         in_flight = []
         collected_early = [False]
         slot_idx = slot0
-        # The packed coarse kernel takes pairs in groups of up to 16 per workgroup and needs
-        # the pair count to divide: pad a hierarchical dispatch with copies of its last block
-        # (results dropped) rather than fall back to an unpacked, half-idle kernel.
-        pad_unit = (16 // math.gcd(nt, 16)) if (is_hier and getattr(self._gpu, "_device_state", None)
-                                                 is not None
-                                                 and not getattr(self._gpu, "pads_coarse_groups", False)) else 1
         for w0, w1, a, b in layout.groups:
             for begin in range(a, b, batch):
                 end = min(begin + batch, b)
                 count = end - begin
-                count_p = -(-count // pad_unit) * pad_unit
                 slot = slot_of(slot_idx)
                 slot_idx += 1
                 starts = starts_pool[slot]
-                spec = spectra_pool[slot][:count_p]
+                spec = spectra_pool[slot][:count]
                 starts[:count] = np.minimum(layout.starts[begin:end], ser.size).astype(np.int64) - base
-                if count_p > count:
-                    starts[count:count_p] = starts[count - 1]
-                self._gpu.forward(n, source, starts[:count_p], spec, defer=True,
+                self._gpu.forward(n, source, starts[:count], spec, defer=True,
                                   slot=slot if pipelined else None)
                 try:
                     res = self._series_window(spec, H, binsize, threshold, w0, w1,
@@ -1893,11 +1870,6 @@ class MatchedFilter:
                     self._gpu.cancel_forward(slot=slot if pipelined else None)
                     raise
                 self._ddirty = self._tdirty = False
-                if count_p > count:
-                    if callable(res):
-                        res = (lambda r=res, c=count: _head(r(), c))
-                    else:
-                        res = _head(res, count)
                 in_flight.append((begin, end, res))
                 if len(in_flight) >= nslot:
                     collected_early[0] = True
