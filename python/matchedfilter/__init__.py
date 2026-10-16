@@ -25,6 +25,7 @@ device limits. Hierarchical calibration coverage is separate from transform supp
 """
 import hashlib
 import math
+from types import SimpleNamespace
 import operator
 import os
 import sys
@@ -283,6 +284,95 @@ class _Deferred:
         if not self._done:
             self._value, self._finish, self._done = self._finish(), None, True
         return self._value
+
+
+class _SeriesOutput:
+    """Where a series call's batches land (MatchedFilter._run_series_gpu): the aggregate
+    peak tables of a call with several batches (none for a single batch, whose own result is
+    returned), and the sparse pieces kept aside until the call is finished."""
+
+    def __init__(self, plan, c):
+        self.plan, self.c = plan, c
+        self.shape = shape = (c.nblk, c.nt, c.nb)
+        self.sparse_parts = []
+        self.dense_seen = False
+        self.idx = self.val = self.peaks = None
+        if c.single:
+            return
+        if c.defer:
+            # A deferred call's tables outlive this call: its own.
+            if c.raw:
+                self.idx = np.empty(shape, dtype=np.int64)
+                self.val = np.empty(shape, dtype=np.complex64)
+            else:
+                self.peaks = np.empty(shape, dtype=PEAK_DTYPE)
+        elif c.raw:
+            sb = getattr(plan, "_sbuf", None)
+            if sb is None or sb[0] != shape:
+                sb = plan._sbuf = (shape, np.empty(shape, dtype=np.int64),
+                                   np.empty(shape, dtype=np.complex64))
+            _, self.idx, self.val = sb
+        else:
+            spbuf = getattr(plan, "_spbuf", None)
+            if spbuf is None or spbuf[0] != shape:
+                spbuf = plan._spbuf = (shape, np.empty(shape, dtype=PEAK_DTYPE))
+            _, self.peaks = spbuf
+
+    def take(self, b_start, b_end, r):
+        """Store one batch's result (a grouped call: always several batches' tables); sparse
+        pieces are kept aside (see finish)."""
+        if isinstance(r, _SparsePeaks):
+            self.sparse_parts.append((b_start, r))
+            return
+        gi, gv = r
+        if self.c.raw:
+            self.idx[b_start:b_end], self.val[b_start:b_end] = gi, gv
+        else:
+            _core.pack_peaks(self.peaks[b_start:b_end], gi, gv)
+
+    def take_one(self, b_start, b_end, r, final=False):
+        """Store one batch's result of a call by window group; a single batch's result is
+        returned as the call's own (formatted). final: collected when the call finishes,
+        where a deferred single batch gets tables of its own."""
+        c = self.c
+        if isinstance(r, _SparsePeaks):
+            if c.single:
+                return r
+            self.sparse_parts.append((b_start, r))
+            return None
+        gi, gv = r
+        self.dense_seen = True
+        if c.single:
+            if c.raw:
+                return _format_result(gi, gv, raw=True)
+            if final and c.defer:
+                out = np.empty(self.shape, dtype=PEAK_DTYPE)
+            else:
+                spbuf = getattr(self.plan, '_spbuf', None)
+                if spbuf is None or spbuf[0] != self.shape:
+                    spbuf = self.plan._spbuf = (self.shape, np.empty(self.shape, dtype=PEAK_DTYPE))
+                out = spbuf[1]
+            return _format_result(gi, gv, raw=False, out=out)
+        if c.raw:
+            self.idx[b_start:b_end], self.val[b_start:b_end] = gi, gv
+        else:
+            _core.pack_peaks(self.peaks[b_start:b_end], gi, gv)
+        return None
+
+    def finish(self):
+        """The call's result from every batch taken."""
+        c = self.c
+        if not c.raw:
+            return _format_result(None, None, raw=False, order=c.layout.order, out=self.peaks)
+        if self.sparse_parts:
+            sp = _SparsePeaks.combine(self.sparse_parts, self.shape, c.layout.order)
+            if not self.dense_seen:
+                return sp
+            # Mixed (a tiled fallback came back dense): densify the sparse pieces.
+            for b0, part in self.sparse_parts:
+                pi, pv = part.dense()
+                self.idx[b0:b0 + part.shape[0]], self.val[b0:b0 + part.shape[0]] = pi, pv
+        return _format_result(self.idx, self.val, raw=True, order=c.layout.order)
 
 
 def _format_result(idx, val, *, raw=False, counts=None, out=None, order=None):
@@ -1566,14 +1656,37 @@ class MatchedFilter:
         return res
 
     def _run_series_gpu(self, ser, layout, binsize, threshold, t0, nt, raw):
-        """Execute shared layout groups with bounded FFT/gather storage."""
+        """Execute shared layout groups with bounded FFT/gather storage: a recorded call plan
+        when this call repeats one (_replay_call_plan); else the call's setup (_series_call),
+        then every batch -- one grouped dispatch over all window groups where the backend
+        has one (_series_grouped), else one dispatch per window group (_series_by_group)."""
         self._last_layout = layout
         replayed = self._replay_call_plan(ser, layout, binsize, threshold, t0, nt, raw)
         if replayed is not None:
             return replayed
-        n, nb, nblk = self.n, layout.nbins, layout.starts.size
-        H = self._gtmpl[t0:t0 + nt]
+        c = self._series_call(ser, layout, binsize, threshold, t0, nt, raw)
+        out = _SeriesOutput(self, c)
+        try:
+            if c.grouped:
+                return self._series_grouped(c, out)
+            return self._series_by_group(c, out)
+        finally:
+            # A viewed series' owner and the workspace this call started from live for the
+            # call, not for its deferred result (whose closures keep `c`): an owner kept
+            # until a later call collected the result unregistered a series that call had
+            # found already shared (and so had not viewed), and Metal's forward refused it.
+            c.series_owner = c.workspace = None
+
+    def _series_call(self, ser, layout, binsize, threshold, t0, nt, raw):
+        """Everything a series call decides before it dispatches: its batch size, whether it
+        is deferred, pipelined, sparse or grouped, its slots, and where the blocks read the
+        series from (in place, or a span uploaded to a slot's source buffer)."""
         from ._shared import shared_buffer
+        c = SimpleNamespace(ser=ser, layout=layout, binsize=binsize, threshold=threshold,
+                            t0=t0, nt=nt, raw=raw)
+        n, nb, nblk = self.n, layout.nbins, layout.starts.size
+        c.n, c.nb, c.nblk = n, nb, nblk
+        c.H = self._gtmpl[t0:t0 + nt]
         if ser.size > np.iinfo(np.uint32).max:
             raise ValueError("GPU series exceeds the 32-bit sample address range")
         budget = getattr(self, "_series_batch_bytes", 64 * 1024 * 1024)
@@ -1591,38 +1704,16 @@ class MatchedFilter:
             policy = pc[pkey] = self._series_policy(operation, band, nt)
         if policy:
             batch = min(batch, policy['series_group'])
-        single = len(layout.groups) == 1 and nblk <= batch
+        c.batch = batch
         self._last_series_batch = batch
+        # A single group needs no aggregate buffers or scatter.
+        c.single = single = len(layout.groups) == 1 and nblk <= batch
         # Sparse results (time_domain asks with _want_sparse): only the peaks come back.
         # At threshold 0 (follow-ups) every bin holds a peak: dense is cheaper there.
         sparse = bool(raw and threshold > 0 and getattr(self, "_want_sparse", False)
                       and getattr(self._gpu, "supports_sparse", False))
-        skw = {"sparse": True} if sparse else {}
-        sparse_parts = []
-
-        def take_dense(b_start, b_end, r):
-            """Store one batch's result; sparse pieces are kept aside (see finish)."""
-            if isinstance(r, _SparsePeaks):
-                sparse_parts.append((b_start, r))
-                return
-            gi, gv = r
-            if raw:
-                idx[b_start:b_end], val[b_start:b_end] = gi, gv
-            else:
-                _core.pack_peaks(peaks[b_start:b_end], gi, gv)
-
-        def finish_raw():
-            if sparse_parts:
-                sp = _SparsePeaks.combine(sparse_parts, shape, layout.order)
-                if not dense_seen[0]:
-                    return sp
-                # Mixed (a tiled fallback came back dense): densify the sparse pieces.
-                for b0, part in sparse_parts:
-                    pi, pv = part.dense()
-                    idx[b0:b0 + part.shape[0]], val[b0:b0 + part.shape[0]] = pi, pv
-            return _format_result(idx, val, raw=True, order=layout.order)
-        dense_seen = [False]
-        is_hier = isinstance(self, HierarchicalFilter)
+        c.skw = {"sparse": True} if sparse else {}
+        c.is_hier = isinstance(self, HierarchicalFilter)
         # A declared capability, not a probe for one backend's internals.
         can_pipeline = (getattr(self._gpu, "supports_async", False)
                         and getattr(self._gpu, "cache_limit_bytes", 10**9) > 1024 * 1024)
@@ -1634,12 +1725,24 @@ class MatchedFilter:
         # GPU is judged per batch, in the mode the search runs: deferred too.)
         # A grouped flat call defers too when it is one batch (a follow-up's window: one
         # submission for every bin count), on a backend that declares it can.
-        defer = (getattr(self, "_defer_series", False) and can_pipeline
-                 and (not grouped_flat or (nblk <= batch
-                                           and getattr(self._gpu, "defers_grouped", False))))
-        pipelined = can_pipeline and (not single or defer)
+        c.defer = defer = (getattr(self, "_defer_series", False) and can_pipeline
+                           and (not grouped_flat or (nblk <= batch
+                                                     and getattr(self._gpu, "defers_grouped",
+                                                                 False))))
+        c.pipelined = can_pipeline and (not single or defer)
         queue_ahead = int(os.environ.get("MF_GPU_QUEUE_AHEAD", "8"))
-        K = max(1, queue_ahead) if pipelined else 1
+        c.K = K = max(1, queue_ahead) if c.pipelined else 1
+        # Irregular flat windows share one forward FFT dispatch and submission per bounded
+        # batch. Hierarchical plans join when the backend submits grouped hierarchical windows
+        # (one dispatch per tier over every row, each in its own window). Deferred calls
+        # (filter_series_many) keep the one-submission grouped path: without it a deferred
+        # hierarchical call became one submission per window group (3x the submissions and
+        # launches of the synchronous call, measured 1.4x slower on CUDA).
+        c.grouped = grouped_flat or (
+            len(layout.groups) > 1 and c.is_hier
+            and hasattr(self._gpu, "hier_peaks_grouped")
+            and nb <= getattr(self._gpu, "max_grouped_bins", 0)
+            and nt <= self._gpu_pair_limit())
         source_shared = shared_buffer(ser, self._gpu) is not None
         # Unified memory: read a page-aligned series where it is rather than copying the
         # span into the source buffer (a fine-stage call copied ~6 MB per call). The owner
@@ -1657,6 +1760,8 @@ class MatchedFilter:
             contained = containing(ser, self._gpu)
             if contained is not None and int(layout.starts.max()) + n > ser.size:
                 contained = None
+        c.contained, c.source_shared, c.series_owner = contained, source_shared, series_owner
+        c.viewed = series_owner is not None
         # Pools are sized by capacity, not by this call's batch: windowed calls vary in
         # block count, and reallocating would also discard every recording built on them.
         # Capacity in both batch and slots: a call alternating unpipelined (K=1) and pipelined
@@ -1675,7 +1780,7 @@ class MatchedFilter:
             starts_pool = [self._gpu.empty_shared(cap_b, np.uint32) for _ in range(cap_k)]
             workspace = ((cap_b, n, cap_k), None if workspace is None else workspace[1],
                          spectra_pool, starts_pool)
-        _, source, spectra_pool, starts_pool = workspace
+        _, source, c.spectra_pool, c.starts_pool = workspace
         if not defer:
             # A synchronous call reuses slots (and their fences) from 0: finish whatever a
             # batch still has in flight on this plan first, or two submissions share a fence
@@ -1689,29 +1794,23 @@ class MatchedFilter:
             base = self._next_batch_base(K)
             self._defer_base = base
             self._defer_token, self._defer_slot = self._defer_series, base
-        slot0 = getattr(self, "_defer_slot", 0) % K if defer else 0
-        # nslot, not span: `span` names the uploaded source span below.
-        slot_lo, nslot = 0, K
-
-        def slot_of(i, slot_lo=slot_lo, nslot=nslot):   # names of their own: lo is reused below
-            return slot_lo + (i - slot_lo) % nslot
+        c.slot0 = slot0 = getattr(self, "_defer_slot", 0) % K if defer else 0
         if defer:
             # Settle whatever still holds the slots this call will use: its spectra, starts,
             # source and recordings are about to be rewritten.
             owners = self.__dict__.setdefault("_slot_owner", {})
-            nslots = min(nslot, -(-nblk // batch) + len(layout.groups))
-            for k in range(nslots):
-                prev = owners.pop(slot_of(slot0 + k), None)
+            for k in range(min(K, -(-nblk // batch) + len(layout.groups))):
+                prev = owners.pop((slot0 + k) % K, None)
                 if prev is not None:
                     prev.result()
         if contained is not None:
             source, base = contained[0], -contained[1]
-            self._series_workspace = (workspace[0], workspace[1], spectra_pool, starts_pool)
+            self._series_workspace = (workspace[0], workspace[1], c.spectra_pool, c.starts_pool)
         elif source_shared:
             source, base = ser, 0
             # A viewed series keeps the copy buffer for later calls that need one.
             self._series_workspace = (workspace[0], workspace[1] if series_owner is not None
-                                      else None, spectra_pool, starts_pool)
+                                      else None, c.spectra_pool, c.starts_pool)
         else:
             # Upload only the span the blocks read: a windowed call touches a small part
             # of a long series. Starts are rebased onto it; reads past the series end
@@ -1733,217 +1832,154 @@ class MatchedFilter:
                 # Capacity for the whole series: later windows need not reallocate.
                 src = sources[slot0] = self._gpu.empty_shared((max(ser.size, span),))
             src[:top - base] = ser[base:top]
-            self._series_workspace = (workspace[0], sources, spectra_pool, starts_pool)
+            self._series_workspace = (workspace[0], sources, c.spectra_pool, c.starts_pool)
             source = src[:top - base]
-        # A single group needs no aggregate buffers or scatter.
-        single = len(layout.groups) == 1 and nblk <= batch
-        shape = (nblk, nt, nb)
-        if not single and defer:
-            if raw:
-                idx = np.empty(shape, dtype=np.int64)
-                val = np.empty(shape, dtype=np.complex64)
-            else:
-                peaks = np.empty(shape, dtype=PEAK_DTYPE)
-        elif not single:
-            if raw:
-                sb = getattr(self, "_sbuf", None)
-                if sb is None or sb[0] != shape:
-                    sb = self._sbuf = (shape,
-                                       np.empty(shape, dtype=np.int64),
-                                       np.empty(shape, dtype=np.complex64))
-                _, idx, val = sb
-            else:
-                spbuf = getattr(self, "_spbuf", None)
-                if spbuf is None or spbuf[0] != shape:
-                    spbuf = self._spbuf = (shape, np.empty(shape, dtype=PEAK_DTYPE))
-                _, peaks = spbuf
-        # Irregular flat windows share one forward FFT dispatch and submission per
-        # bounded batch. Hierarchical and other backends keep their executor.
-        # Hierarchical plans join when the backend submits grouped hierarchical windows in one
-        # submission -- unless this call is deferred (filter_series_many), which overlaps
-        # whole calls instead.
-        # Deferred calls (filter_series_many) keep the one-submission grouped path: without
-        # it a deferred hierarchical call became one submission per window group (3x the
-        # submissions and launches of the synchronous call, measured 1.4x slower on CUDA).
-        grouped = grouped_flat or (
-            len(layout.groups) > 1 and isinstance(self, HierarchicalFilter)
-            and hasattr(self._gpu, "hier_peaks_grouped")
-            and nb <= getattr(self._gpu, "max_grouped_bins", 0)
-            and nt <= self._gpu_pair_limit())
-        if grouped:
-            in_flight = []
-            slot_idx = slot0 if defer else 0
-            # The batches' groups and rebased starts, per (layout, batch, series size, base):
-            # the same every segment of a search.
-            ckey = (id(layout), batch, ser.size, base)
-            bc = self.__dict__.setdefault("_batch_cache", {})
-            plan_b = bc.get(ckey)
-            if plan_b is None or plan_b[0] is not layout:
-                if len(bc) >= 32:
-                    bc.clear()
-                parts = []
-                for begin in range(0, nblk, batch):
-                    end = min(begin + batch, nblk)
-                    parts.append((begin, end, end - begin, tuple(
-                        (lo, hi, max(a, begin)-begin, min(b, end)-begin)
-                        for lo, hi, a, b in layout.groups if a < end and b > begin),
-                        (np.minimum(layout.starts[begin:end], ser.size).astype(np.int64)
-                         - base).astype(np.uint32)))
-                plan_b = bc[ckey] = (layout, parts)
-            # A deferred call reading a device allocation in place records its call plan
-            # (_replay_call_plan): every batch's forward and hierarchical record handles.
-            # Read in place means a row of an allocation (contained) or a whole one -- not a
-            # host array viewed for this call (series_owner).
-            record = (defer and is_hier and raw and pipelined
-                      and (contained is not None or (source_shared and series_owner is None))
-                      and getattr(self._gpu, "supports_replay", False))
-            recorded = []
-            for begin, end, count, groups, rebased in plan_b[1]:
-                slot = slot_of(slot_idx)
-                slot_idx += 1
-                starts = starts_pool[slot]
-                spec = spectra_pool[slot][:count]
-                starts[:count] = rebased
-                fh, hh = [], []
-                self._gpu.forward(n, source, starts[:count], spec, defer=True,
-                                  slot=slot if pipelined else None,
-                                  **({"handle_out": fh} if record else {}))
-                try:
-                    res = self._grouped_dispatch(
-                        n, spec, H, groups, binsize, threshold,
-                        slot=slot if pipelined else None, async_submit=pipelined,
-                        **({"nbins": nb} if getattr(layout, "ragged", False) else {}), **skw,
-                        **({"handle_out": hh} if record else {}))
-                    self._tdirty = False
-                except Exception:
-                    self._gpu.cancel_forward(slot=slot if pipelined else None)
-                    raise
-                if record:
-                    if len(fh) == 1 and len(hh) == 1:
-                        recorded.append(((begin, end, count, rebased), fh[0], hh[0]))
-                    else:
-                        record = False              # e.g. a split window: not one record
-                in_flight.append((begin, end, res))
-                if len(in_flight) >= nslot:
-                    b_start, b_end, item = in_flight.pop(0)
-                    take_dense(b_start, b_end, item() if callable(item) else item)
+        c.source, c.base = source, base
+        c.workspace = workspace          # held for the call (see _run_series_gpu)
+        return c
 
-            def finish_grouped():
-                while in_flight:
-                    b_start, b_end, item = in_flight.pop(0)
-                    take_dense(b_start, b_end, item() if callable(item) else item)
-                if raw:
-                    return finish_raw()
-                return _format_result(None, None, raw=False, order=layout.order, out=peaks)
-            if not defer:
-                return finish_grouped()
-            if record and recorded:
-                self._record_call_plan(ser, layout, binsize, threshold, t0, nt, K, batch, slot0,
-                                       contained[0] if contained is not None else ser,
-                                       recorded, starts_pool)
-            self._defer_slot = slot_idx
-            deferred = _Deferred(finish_grouped)
-            owners = self.__dict__.setdefault("_slot_owner", {})
-            for k in range(slot0, slot_idx):
-                owners[slot_of(k)] = deferred
-            return deferred
+    def _series_submit(self, c, slot_idx, begin, count, rebased, **forward_kw):
+        """A batch's slot and spectra, with its block starts written and its forward submitted
+        (deferred: the dispatch that reads the spectra takes it)."""
+        slot = slot_idx % c.K
+        starts = c.starts_pool[slot]
+        spec = c.spectra_pool[slot][:count]
+        starts[:count] = rebased
+        self._gpu.forward(c.n, c.source, starts[:count], spec, defer=True,
+                          slot=slot if c.pipelined else None, **forward_kw)
+        return slot, spec
+
+    def _series_deferred(self, c, slot_idx, finish):
+        """A deferred call's result: its next slot kept for the next call, and every slot it
+        used owned by it until it is collected."""
+        self._defer_slot = slot_idx
+        deferred = _Deferred(finish)
+        owners = self.__dict__.setdefault("_slot_owner", {})
+        for k in range(c.slot0, slot_idx):
+            owners[k % c.K] = deferred
+        return deferred
+
+    def _series_grouped(self, c, out):
+        """Every batch as one grouped dispatch over all its window groups."""
+        layout, nblk, batch, ser, base = c.layout, c.nblk, c.batch, c.ser, c.base
+        in_flight = []
+        slot_idx = c.slot0 if c.defer else 0
+        # The batches' groups and rebased starts, per (layout, batch, series size, base):
+        # the same every segment of a search.
+        ckey = (id(layout), batch, ser.size, base)
+        bc = self.__dict__.setdefault("_batch_cache", {})
+        plan_b = bc.get(ckey)
+        if plan_b is None or plan_b[0] is not layout:
+            if len(bc) >= 32:
+                bc.clear()
+            parts = []
+            for begin in range(0, nblk, batch):
+                end = min(begin + batch, nblk)
+                parts.append((begin, end, end - begin, tuple(
+                    (lo, hi, max(a, begin)-begin, min(b, end)-begin)
+                    for lo, hi, a, b in layout.groups if a < end and b > begin),
+                    (np.minimum(layout.starts[begin:end], ser.size).astype(np.int64)
+                     - base).astype(np.uint32)))
+            plan_b = bc[ckey] = (layout, parts)
+        # A deferred call reading a device allocation in place records its call plan
+        # (_replay_call_plan): every batch's forward and hierarchical record handles.
+        # Read in place means a row of an allocation (contained) or a whole one -- not a
+        # host array viewed for this call (series_owner).
+        record = (c.defer and c.is_hier and c.raw and c.pipelined
+                  and (c.contained is not None or (c.source_shared and not c.viewed))
+                  and getattr(self._gpu, "supports_replay", False))
+        recorded = []
+        for begin, end, count, groups, rebased in plan_b[1]:
+            fh, hh = [], []
+            slot, spec = self._series_submit(c, slot_idx, begin, count, rebased,
+                                             **({"handle_out": fh} if record else {}))
+            slot_idx += 1
+            try:
+                res = self._grouped_dispatch(
+                    c.n, spec, c.H, groups, c.binsize, c.threshold,
+                    slot=slot if c.pipelined else None, async_submit=c.pipelined,
+                    **({"nbins": c.nb} if getattr(layout, "ragged", False) else {}), **c.skw,
+                    **({"handle_out": hh} if record else {}))
+                self._tdirty = False
+            except Exception:
+                self._gpu.cancel_forward(slot=slot if c.pipelined else None)
+                raise
+            if record:
+                if len(fh) == 1 and len(hh) == 1:
+                    recorded.append(((begin, end, count, rebased), fh[0], hh[0]))
+                else:
+                    record = False              # e.g. a split window: not one record
+            in_flight.append((begin, end, res))
+            if len(in_flight) >= c.K:
+                b_start, b_end, item = in_flight.pop(0)
+                out.take(b_start, b_end, item() if callable(item) else item)
+
+        def finish_grouped():
+            while in_flight:
+                b_start, b_end, item = in_flight.pop(0)
+                out.take(b_start, b_end, item() if callable(item) else item)
+            return out.finish()
+        if not c.defer:
+            return finish_grouped()
+        if record and recorded:
+            self._record_call_plan(ser, layout, c.binsize, c.threshold, c.t0, c.nt, c.K, batch,
+                                   c.slot0, c.contained[0] if c.contained is not None else ser,
+                                   recorded, c.starts_pool)
+        return self._series_deferred(c, slot_idx, finish_grouped)
+
+    def _series_by_group(self, c, out):
+        """Every window group's batches as their own dispatches (one group, or a backend or
+        shape without a grouped dispatch)."""
+        layout, ser, base = c.layout, c.ser, c.base
         in_flight = []
         collected_early = [False]
-        slot_idx = slot0
+        slot_idx = c.slot0
         for w0, w1, a, b in layout.groups:
-            for begin in range(a, b, batch):
-                end = min(begin + batch, b)
+            for begin in range(a, b, c.batch):
+                end = min(begin + c.batch, b)
                 count = end - begin
-                slot = slot_of(slot_idx)
+                rebased = np.minimum(layout.starts[begin:end], ser.size).astype(np.int64) - base
+                slot, spec = self._series_submit(c, slot_idx, begin, count, rebased)
                 slot_idx += 1
-                starts = starts_pool[slot]
-                spec = spectra_pool[slot][:count]
-                starts[:count] = np.minimum(layout.starts[begin:end], ser.size).astype(np.int64) - base
-                self._gpu.forward(n, source, starts[:count], spec, defer=True,
-                                  slot=slot if pipelined else None)
                 try:
-                    res = self._series_window(spec, H, binsize, threshold, w0, w1,
-                                              slot=slot if pipelined else None,
-                                              async_submit=pipelined,
-                                              **skw)
+                    res = self._series_window(spec, c.H, c.binsize, c.threshold, w0, w1,
+                                              slot=slot if c.pipelined else None,
+                                              async_submit=c.pipelined, **c.skw)
                 except Exception:
-                    self._gpu.cancel_forward(slot=slot if pipelined else None)
+                    self._gpu.cancel_forward(slot=slot if c.pipelined else None)
                     raise
                 self._ddirty = self._tdirty = False
                 in_flight.append((begin, end, res))
-                if len(in_flight) >= nslot:
+                if len(in_flight) >= c.K:
                     collected_early[0] = True
                     b_start, b_end, item = in_flight.pop(0)
-                    r = item() if callable(item) else item
-                    if isinstance(r, _SparsePeaks):
-                        if single:
-                            return r
-                        sparse_parts.append((b_start, r))
-                        continue
-                    gi, gv = r
-                    dense_seen[0] = True
-                    if single:
-                        if raw:
-                            return _format_result(gi, gv, raw=True)
-                        spbuf = getattr(self, '_spbuf', None)
-                        if spbuf is None or spbuf[0] != shape:
-                            spbuf = self._spbuf = (shape, np.empty(shape, dtype=PEAK_DTYPE))
-                        _, peaks = spbuf
-                        return _format_result(gi, gv, raw=False, out=peaks)
-                    if raw:
-                        idx[b_start:b_end], val[b_start:b_end] = gi, gv
-                    else:
-                        _core.pack_peaks(peaks[b_start:b_end], gi, gv)
+                    r = out.take_one(b_start, b_end, item() if callable(item) else item)
+                    if r is not None:
+                        return r
         refined = [0]
-        hier = isinstance(self, HierarchicalFilter)
 
         def finish():
             while in_flight:
                 b_start, b_end, item = in_flight.pop(0)
                 r = item() if callable(item) else item
-                if hier:
+                if c.is_hier:
                     refined[0] += getattr(self._gpu, "last_refinements", 1)
-                if isinstance(r, _SparsePeaks):
-                    if single:
-                        return r
-                    sparse_parts.append((b_start, r))
-                    continue
-                gi, gv = r
-                dense_seen[0] = True
-                if single:
-                    if raw:
-                        return _format_result(gi, gv, raw=True)
-                    if defer:
-                        out = np.empty(shape, dtype=PEAK_DTYPE)
-                    else:
-                        spbuf = getattr(self, '_spbuf', None)
-                        if spbuf is None or spbuf[0] != shape:
-                            spbuf = self._spbuf = (shape, np.empty(shape, dtype=PEAK_DTYPE))
-                        out = spbuf[1]
-                    return _format_result(gi, gv, raw=False, out=out)
-                if raw:
-                    idx[b_start:b_end], val[b_start:b_end] = gi, gv
-                else:
-                    _core.pack_peaks(peaks[b_start:b_end], gi, gv)
-            if raw:
-                return finish_raw()
-            return _format_result(None, None, raw=False, order=layout.order, out=peaks)
+                r = out.take_one(b_start, b_end, r, final=True)
+                if r is not None:
+                    return r
+            return out.finish()
 
-        if not defer:
+        if not c.defer:
             return finish()
-        self._defer_slot = slot_idx
 
         def finish_marking():
             value = finish()
             # Refinements already collected mid-loop are not counted: only claim empty when
             # every batch was collected here.
-            if hier and refined[0] == 0 and not collected_early[0]:
+            if c.is_hier and refined[0] == 0 and not collected_early[0]:
                 deferred.empty = True
             return value
-        deferred = _Deferred(finish_marking)
-        owners = self.__dict__.setdefault("_slot_owner", {})
-        for k in range(slot0, slot_idx):
-            owners[slot_of(k)] = deferred
+        deferred = self._series_deferred(c, slot_idx, finish_marking)
         return deferred
 
     def empty_shared(self, shape, dtype=np.complex64, *, readback=False):
