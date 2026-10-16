@@ -353,6 +353,18 @@ Order: 1, then 2, then 4, then 3, then 5, then 6. Steps 1 and 6 do not depend on
   nothing beyond noise. Every file moved together between rounds (-10 to -25%): the APU
   shares its power with a busy desktop. Only first runs on fresh files are slow, while
   their trials run.
+- 2026-10-16: **No CUDA band forward.** test27 on the L40S, with `--timing` on a settled
+  cost file:
+  - The forward is 9% of the fine stage's device time batched (11.4 of 122 ms) and 10%
+    pipelined (8.6 of 87 ms).
+  - The device is busy 28-29% of the wall, with host CPU at 100%. The fine stage is
+    host-bound: 0.41 s of wall per segment against 0.12 s of device time.
+  - A band forward saves part of 9% of device time and nothing on the wall. The CUDA lever
+    is host time (1,350 small uploads and 972 readbacks per segment).
+- 2026-10-16: **Metal grouped call left as is.** Explaining its 6-10% ladder loss means
+  re-implementing the reverted Metal row-window path. The likely cause is padding every
+  group to the largest bin count, which inflates readback and host assembly on a host-bound
+  M2. That is not worth a day for a path measured slower.
 - **Measurement lessons.**
   - A shared seed hides a change to pricing or candidates; use `--seed-per-tree`.
   - Metal's device timer overstates time when command buffers overlap.
