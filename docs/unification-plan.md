@@ -339,3 +339,25 @@ Stage 5's lessons land inside the stages that touch them. Each stage merges in g
     against the best stored layout of the other stage, and re-measures if the stored
     choice loses by more than the close-call margin. A bad choice then costs one process,
     not every process after it.
+- 2026-10-15: **Stored coarse choices are re-checked (512f609b, b8dc6eb6).**
+  - The two runners-up are stored in the choice's record. Each process times the stored
+    choice against them once, and re-measures everything if a runner-up is faster beyond
+    the noise.
+  - Planted test: the stored choice was set to `tierb_256_c16p2w@32`. The next process
+    replaced it with p4t2w@64, and the one after kept it after a 0.05 s re-check.
+  - The first version broke when a tiled choice had no untiled sibling in the re-check
+    set: Vulkan's staging never timed it, and `test_reproducible_choices` raised a
+    KeyError. Now a tile is skipped only when its untiled sibling lost, and a re-check
+    that does not time the choice re-measures.
+- 2026-10-15: **Vulkan: one recording helper (65a7eb0a); per-call cost restored (fe15c4ba).**
+  - `_Recording` replaces the allocate/begin/bind/push/dispatch/barrier/end code that
+    eleven recordings each repeated (-119 lines).
+  - Paired dev2 ladder, both trees on one settled cost file: device time identical, but
+    the new tree was 2.0-2.5% slower. The cause was host time in `hier_peaks`: the merged
+    tier path built its key with generator expressions, 1.7 us of a 43 us call. Plain
+    tuples restore the base's call count.
+  - Re-paired against 91f7e189: pipelined equal (1.384-1.453e8 against
+    1.387-1.441e8); batched within 1% in rounds 1, 3 and 4.
+  - Lesson: paired ladders need trials settled in the shared seed file. A seed taken
+    after one run measured trial exploration (2.3e6 templates in real time) rather than
+    the code.
