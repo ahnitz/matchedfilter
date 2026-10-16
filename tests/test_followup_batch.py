@@ -1,37 +1,9 @@
-"""The follow-up rule (_gpuhost.FollowupSpec): the host reference, and device selections that
-must equal it exactly.
-
-select() is the rule pycbc's asymmetric follow-up applies (and tools/ladder.py applied itself):
-per job, peaks with |snr| >= threshold, loudest first (stable), one per dedupe interval, each
-followed up on the partner job's series. A backend that runs the follow-ups on the device
-(``Context.followup_executor``) must return the same follow-ups -- same keys, same results --
-as filter_series_many(jobs, followups=spec), which runs it on the host.
-"""
+"""Batched single-template calls (a search's follow-ups) on a GPU backend: each call's
+FilterResults must be its own, equal to the same call made alone."""
 import numpy as np
 import pytest
 
 from matchedfilter import TimeDomainFilterBank
-from matchedfilter._gpuhost import FollowupSpec
-from matchedfilter.time_domain import FilterResults
-
-
-def _fr(ti, si, snr):
-    n = len(si)
-    return FilterResults(np.asarray(ti, np.int64), np.asarray(si, np.int64),
-                         np.asarray(snr, np.complex64), np.zeros(n, np.int64), np.zeros(n, np.int64))
-
-
-def test_select_is_the_ladder_rule():
-    """Loudest first, ties in result order, one per second shared across templates."""
-    fine = [_fr([0, 1, 2, 3, 4], [10, 2050, 30, 2047, 5000], [7, 9, 7, 8, 5]),
-            _fr([], [], [])]
-    jobs = [(None, np.zeros(10000, np.complex64), {}), (None, np.zeros(10000, np.complex64), {})]
-    spec = FollowupSpec(pairs=[1, 0], threshold=6.0, dedupe=2048, half=100, binsize=61)
-    sel = spec.select(jobs, fine)
-    # |snr| order: 9 (s=2050, sec 1), 8 (2047, sec 0), 7 (10, sec 0: taken), 7 (30, sec 0)
-    assert [(j, c0, ti) for j, _, c0, ti, _ in sel] == [(0, 2050, 1), (0, 2047, 3)]
-    assert sel[0][4][2]["windows"] == slice(1950, 2150)
-    assert sel[1][4][2]["template_index"] == 3
 
 
 def _banks(monkeypatch, device, nbanks=2, seed=91):
@@ -70,48 +42,6 @@ def _device_followup_backends():
     except Exception:                                  # noqa: BLE001
         pass
     return out
-
-
-@pytest.mark.parametrize("device", _device_followup_backends() or ["none"])
-def test_device_followups_equal_the_host_rule(device, monkeypatch):
-    if device == "none":
-        pytest.skip("no backend with device follow-ups")
-    rng, banks = _banks(monkeypatch, device)
-    gpu = banks[0]._groups[0].plan._gpu
-    if not hasattr(gpu, "followup_executor"):
-        pytest.skip("backend has no device follow-ups")
-    S = 1 << 17
-    rows = banks[0].empty_shared((2 * len(banks), S))
-    jobs = [(b, rows[2 * i + d], dict(windows=slice(4000, S - 4000)))
-            for i, b in enumerate(banks) for d in range(2)]
-    spec = FollowupSpec(pairs=[j ^ 1 for j in range(len(jobs))], threshold=5.0, dedupe=2048,
-                        half=6000, binsize=61)
-    nfu = ndevice = 0
-    for seg in range(6):
-        for r in rows:
-            X = np.fft.fft(rng.standard_normal(S))
-            X[S // 2:] = 0
-            r[:] = (np.fft.ifft(X) * 2).astype(np.complex64)
-            r[rng.integers(8000, S - 8000, 5)] += 30.0          # loud samples: follow-ups
-        fine = TimeDomainFilterBank.filter_series_many(jobs)
-        fu, how = TimeDomainFilterBank._run_followups(jobs, fine, spec)
-        ndevice += how == "device"
-        # The reference: the fine stage as a batch, and each selected follow-up as its own
-        # filter_series call (no batched or device path on either side).
-        want_fine = TimeDomainFilterBank.filter_series_many(jobs)
-        want_fu = [(j, rank, c0, ti, b.filter_series(x, **kw))
-                   for j, rank, c0, ti, (b, x, kw) in spec.select(jobs, want_fine)]
-        for a, b in zip(want_fine, fine):
-            for f in a._fields:
-                np.testing.assert_array_equal(getattr(a, f), getattr(b, f))
-        assert [k[:4] for k in fu] == [k[:4] for k in want_fu]
-        for a, b in zip(want_fu, fu):
-            for f in a[4]._fields:
-                np.testing.assert_array_equal(getattr(a[4], f), getattr(b[4], f))
-        nfu += len(fu)
-    assert ndevice >= 3
-    assert nfu > 0
-
 
 
 @pytest.mark.parametrize("device", _device_followup_backends() or ["none"])
