@@ -129,3 +129,82 @@ def test_every_layout_passes_a_transient(band, K, monkeypatch):
         idx, _ = _run(backend, name, n, band, data, tmpl, 0.999 * K)
         lost = int((idx.reshape(nt) < 0).sum())
         assert not lost, "%s %s: gate dismissed %d of %d pairs" % (backend, name, lost, nt)
+
+
+def _grouped_case(ctx, band, cascade, sparse):
+    """(grouped result, [(rows, per-group result)]): hier_peaks_grouped over three window
+    groups against hier_peaks run on each group's rows, with loud injections near the
+    windows' edges. Each tier's gate sits between the noise-only pairs' exact maxima and the
+    injected pairs', so a tier that searched the wrong window would dismiss an injection
+    (two lie outside the first group's window, which a tier ignoring the per-row windows
+    would search)."""
+    n, nd, nt, bs = 2048, 23, 9, 512
+    rng = np.random.default_rng(band + cascade)
+    spec = ctx.empty_shared((nd, n))
+    spec[:] = ((rng.standard_normal((nd, n)) + 1j * rng.standard_normal((nd, n)))
+               / np.sqrt(2 * n)).astype(np.complex64)
+    h = (rng.standard_normal((nt, n)) + 1j * rng.standard_normal((nt, n))).astype(np.complex64)
+    h /= np.linalg.norm(h, axis=1, keepdims=True) / np.sqrt(n)
+    inj = ((0, 3, 300), (5, 1, 1900), (12, 7, 1000), (22, 0, 45), (21, 4, 2030))
+    for d, t, lag in inj:
+        spec[d] += 40 * h[t] * np.exp(-2j * np.pi * np.arange(n) * lag / n) / np.sqrt(n)
+    # The first group's window sets the bin count; the others must not need more.
+    groups = [(199, 1849, 0, 1), (40, 2040, 1, 22), (10, 1500, 22, 23)]
+
+    def gate_for(b):
+        ex = _exact(np.asarray(spec)[:, :b].astype(complex), h[:, :b].astype(complex))
+        noise = np.ones(ex.shape, bool)
+        for d, t, _ in inj:
+            noise[d, t] = False
+        lo_, hi_ = ex[noise].max(), min(ex[d, t] for d, t, _ in inj)
+        assert hi_ > 1.5 * lo_, "no gap between noise and injections at band %d" % b
+        return float(np.sqrt(lo_ * hi_))
+    gate, thr = gate_for(band), 3.0
+    kw = dict(cascade_band=band, ct1=h[:, :1024], raw_thr1=gate_for(1024)) if cascade else {}
+    top, ct0 = (1024, h[:, :band]) if cascade else (band, h[:, :band])
+    got = ctx.hier_peaks_grouped(n, top, spec, h, ct0, gate, groups, bs, thr, sparse=sparse, **kw)
+    got = got.dense() if sparse else got
+    parts = []
+    for lo, hi, a, b in groups:
+        sub = ctx.empty_shared((b - a, n))
+        sub[:] = spec[a:b]
+        parts.append(((a, b), ctx.hier_peaks(n, top, sub, h, ct0, gate, binsize=bs, threshold=thr,
+                                             window=(lo, hi), **kw)))
+    return got, parts
+
+
+@pytest.mark.parametrize("band,cascade", [(128, False), (512, False), (256, True)])
+@pytest.mark.parametrize("sparse", [False, True])
+def test_every_layout_runs_grouped_as_per_group(band, cascade, sparse, monkeypatch):
+    """One grouped call (every tier one dispatch over all rows, each row in its own window:
+    per-row windows in the kernels) equals hier_peaks on each group's rows, in every coarse
+    layout -- the untiled builds once ignored per-row windows, which no other test saw."""
+    backend = _backend()
+    monkeypatch.setenv("MF_COARSE_LAYOUT", "")
+    probe = _context(backend)
+    try:
+        if not hasattr(probe, "hier_peaks_grouped"):
+            pytest.skip("%s has no grouped hierarchical call" % backend)
+    finally:
+        probe.destroy()
+    names = _layouts(backend, band)
+    hits = None
+    for name in names:
+        import os
+        os.environ["MF_COARSE_LAYOUT"] = name
+        ctx = _context(backend)
+        try:
+            got, parts = _grouped_case(ctx, band, cascade, sparse)
+        finally:
+            ctx.destroy()
+        count = 0
+        for (a, b), (ri, rv) in parts:
+            k = ri.shape[2]
+            where = "%s %s rows %d-%d" % (backend, name, a, b)
+            np.testing.assert_array_equal(got[0][a:b, :, :k], ri, err_msg=where)
+            np.testing.assert_array_equal(got[1][a:b, :, :k], rv, err_msg=where)
+            assert (got[0][a:b, :, k:] == -1).all(), where
+            count += int((ri >= 0).sum())
+        assert count >= 5, "%s %s: the gates passed too little to compare" % (backend, name)
+        hits = count if hits is None else hits
+        assert count == hits, "%s %s: %d peaks against %d" % (backend, name, count, hits)
