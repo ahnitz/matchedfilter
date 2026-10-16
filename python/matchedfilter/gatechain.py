@@ -1492,6 +1492,96 @@ _PLAN_CACHE = OrderedDict()
 
 
 _DIRECT_CACHE = OrderedDict()
+#: Per-draw statistics of direct_halfwidth's model, shared by every chain and threshold set
+#: on one (profile, n, window, snr, seed): (sig, n, window, snr, seed) -> _DirectDraws.
+_DIRECT_DRAWS = OrderedDict()
+_DIRECT_DRAWS_MAX = 8
+_DIRECT_CHUNK = 1000
+
+
+class _DirectDraws:
+    """direct_halfwidth's draws, reduced to what any chain needs: per draw, whether the fine
+    maximum reaches snr and its lag, and per band the coarse maximum over the window and its
+    lag. A chain and its thresholds then select draws with masks. The draws are generated
+    chunk by chunk from one seeded generator, exactly as direct_halfwidth always drew them,
+    so the first k chunks are the same for any draw count: a call wanting fewer draws reads
+    a prefix, one wanting more continues the generator."""
+
+    def __init__(self, p, n, win, snr, seed, bands):
+        self.n, self.win, self.snr = n, win, float(snr)
+        self.rng = np.random.default_rng(seed)
+        self.bands = tuple(int(b) for b in bands)
+        w0, w1 = win
+        self.A = np.fft.ifft(p) * n
+        self.lags = np.arange(w0, w1)
+        self.sq = _SIG * np.sqrt(p)
+        self.tier = {}
+        for b in self.bands:
+            f = float(p[:b].sum())
+            q = np.zeros(n)
+            q[:b] = p[:b]
+            R = n // b
+            cs = w0 // R
+            cs = cs - 1 if cs > 0 else cs
+            ce = min(-(-w1 // R), b)
+            self.tier[b] = (f, np.fft.ifft(q) * n / np.sqrt(f), R, cs, ce)
+        self.fine_ok, self.fa = [], []
+        self.cmax = {b: [] for b in self.bands}
+        self.cam = {b: [] for b in self.bands}
+
+    def extend(self, nsim):
+        """Draw chunks until nsim draws are held."""
+        n, (w0, w1) = self.n, self.win
+        while len(self.fine_ok) * _DIRECT_CHUNK < nsim:
+            m = _DIRECT_CHUNK
+            N = (self.rng.standard_normal((m, n)) + 1j * self.rng.standard_normal((m, n))) \
+                * (self.sq / np.sqrt(2))
+            tau0 = self.rng.integers(w0, w1, m)
+            amp = self.snr * np.exp(2j * np.pi * self.rng.random(m))
+            fine = np.fft.ifft(N, axis=1)[:, w0:w1] * n
+            fine = np.abs(fine + amp[:, None] * self.A[(self.lags[None, :] - tau0[:, None]) % n])
+            self.fine_ok.append(fine.max(1) >= self.snr)
+            self.fa.append(fine.argmax(1) + w0)
+            for b in self.bands:
+                f, Abt, R, cs, ce = self.tier[b]
+                co = np.fft.ifft(N[:, :b], axis=1)[:, cs:ce] * b / np.sqrt(f)
+                cl = np.arange(cs, ce) * R
+                co = np.abs(co + amp[:, None] * Abt[(cl[None, :] - tau0[:, None]) % n])
+                self.cmax[b].append(co.max(1))
+                self.cam[b].append((co.argmax(1) + cs) * R)
+
+    def distances(self, chain, thresholds, nsim):
+        """direct_halfwidth's per-chunk kept distances for this chain, from the first nsim draws."""
+        self.extend(nsim)
+        n, out = self.n, []
+        for c in range(nsim // _DIRECT_CHUNK):
+            ok = self.fine_ok[c].copy()
+            for b, thr in zip(chain, thresholds):
+                ok &= self.cmax[b][c] >= float(thr)
+            d = np.abs(self.fa[c] - self.cam[chain[-1]][c])
+            d = np.minimum(d, n - d) / (n // chain[-1])
+            out.append(d[ok])
+        return out
+
+
+def _direct_draws(p, n, chain, win, snr, nsim, seed):
+    """The shared draws for this question, or None where they cannot answer it exactly (a
+    draw count that is not whole chunks, or a band outside the profile's usable bands)."""
+    if nsim % _DIRECT_CHUNK:
+        return None
+    bands = usable_bands(p, n)
+    if not set(chain) <= set(bands):
+        return None
+    key = (_gm._profile_sig(p), n, win, float(snr), int(seed))
+    hit = _DIRECT_DRAWS.get(key)
+    if hit is None:
+        hit = _DirectDraws(p, n, win, snr, seed, bands)
+        _DIRECT_DRAWS[key] = hit
+        while len(_DIRECT_DRAWS) > _DIRECT_DRAWS_MAX:
+            _DIRECT_DRAWS.popitem(last=False)
+    else:
+        _DIRECT_DRAWS.move_to_end(key)
+    return hit
 
 
 def direct_halfwidth(power, n, chain, thresholds, snr, fd, window=None, nsim=20000, seed=31):
@@ -1520,6 +1610,16 @@ def direct_halfwidth(power, n, chain, thresholds, snr, fd, window=None, nsim=200
     if hit is not None:
         _cache_put(_DIRECT_CACHE, key, hit)
         return hit
+    shared = _direct_draws(p, n, chain, win, snr, int(nsim), seed)
+    if shared is not None:
+        dist = shared.distances(chain, thresholds, int(nsim))
+        kept = int(sum(len(d) for d in dist))
+        d = np.concatenate(dist) if dist else np.zeros(0)
+        hw = max(1, int(np.ceil(d.max()))) if len(d) else 1     # the caller adds its margin
+        out = (hw, float(np.percentile(d, 99.99)) if len(d) else 0.0, kept)
+        _cache_put(_DIRECT_CACHE, key, out)
+        _similar_put("direct", unit, sim_params, out)
+        return out
     rng = np.random.default_rng(seed)
     F = [float(p[:b].sum()) for b in chain]
     w0, w1 = win
