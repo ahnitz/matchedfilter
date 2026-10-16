@@ -97,20 +97,17 @@ def test_untiled_coarse_matches_tiled_under_a_real_gate(ctx, band, monkeypatch):
         np.testing.assert_array_equal(got[1], ref[1])
 
 
-@novk
 def test_band_windows_map_as_one_window_does():
-    """_band_windows (the coarse tiers' per-row windows, mapped on the host) is the host's
-    one-window mapping (cstart/cend) applied row by row, at every coarse band."""
-    from matchedfilter import _vkcompute as V
+    """band_windows (the per-row windows of the coarse and listed tiers, mapped on the host,
+    every backend) is coarse_span (the host's one-window mapping) applied row by row, at
+    every coarse band."""
+    from matchedfilter._gpuhost import band_windows, coarse_span
     rng = np.random.default_rng(5)
     n = 4096
     lo = rng.integers(0, n - 1, 200)
     hi = np.minimum(n, lo + rng.integers(1, n, 200))
     lo[:3], hi[:3] = (0, 0, n - 1), (n, 1, n)          # whole, first sample, last sample
     for band in (64, 128, 256, 512, 1024, 2048):
-        got = V._band_windows(np.stack([lo, hi], 1).astype(np.uint32), n, band)
-        R = n // band
+        got = band_windows(np.stack([lo, hi], 1).astype(np.uint32), n, band)
         for (a, b), (cs, ce) in zip(zip(lo, hi), got):
-            s, e = a // R, min(band, (b + R - 1) // R)
-            s = s - 1 if s > 0 else s
-            assert (cs, ce) == (s, max(s + 1, e)), (band, a, b)
+            assert (cs, ce) == coarse_span(n, band, int(a), int(b))[:2], (band, a, b)

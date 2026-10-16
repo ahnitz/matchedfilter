@@ -21,7 +21,7 @@ import numpy as np
 
 from . import _gputime, _vulkan
 from ._shared import empty_shared, shared_buffer, shared_key, shared_view, write_input
-from ._gpuhost import (MAX_BINS, bin_shift, coarse_span, plan_items, split_items, hier_tiers, hier_window,
+from ._gpuhost import (MAX_BINS, band_windows, bin_shift, coarse_span, plan_items, split_items, hier_tiers, hier_window,
                        split_bins, hier_peaks_grouped as _hier_peaks_grouped)
 from ._shared import pack_half2 as _pack_half2, sparsified as _sparsified
 
@@ -134,22 +134,6 @@ def _c16_threshold_exp(band):
     threshold, failing open only past 64x it -- raised with the band so thr/band stays at or
     above 2^C16_BAND_EXP (8 at band 512, 32 at 2048)."""
     return max(C16_THRESHOLD_EXP, int(band).bit_length() - 1 + C16_BAND_EXP)
-
-
-def _band_windows(rowwin, n, band):
-    """Per-row windows [lo, hi) in samples of an n-point transform, mapped onto a coarse band
-    as the host maps one window (cstart/cend): band samples [lo // R - 1, ceil(hi / R)) with
-    R = n // band, clamped to the band, at least one sample. The coarse tiers read these as
-    they are (row windows mode 1). Mapped in the kernel instead, the same arithmetic made the
-    band-256 coarse kernel 1.47x slower at SIMD16 on an Iris Xe, and its rows' windows are
-    fixed with the storage they belong to."""
-    rr = n // band
-    w = np.asarray(rowwin, np.uint32).reshape(-1, 2).astype(np.int64)
-    cs = w[:, 0] // rr
-    ce = np.minimum(band, (w[:, 1] + rr - 1) // rr)
-    cs = np.where(cs > 0, cs - 1, cs)
-    ce = np.maximum(cs + 1, ce)
-    return np.ascontiguousarray(np.stack([cs, ce], 1).astype(np.uint32))
 
 
 def _c16_scales(ct0, raw_thr, band=None):
@@ -2091,7 +2075,7 @@ class Context(InputUploads):
                 b["rowwin"] = _Buffer(self, rowwin.nbytes)
                 b["rowwin"].write(rowwin)
                 for i, (bi, _) in enumerate(tiers):   # each tier's, mapped onto its band
-                    cw = _band_windows(rowwin, n, bi)
+                    cw = band_windows(rowwin, n, bi)
                     b["rowwin_c%d" % i] = _Buffer(self, cw.nbytes)
                     b["rowwin_c%d" % i].write(cw)
             if bands:

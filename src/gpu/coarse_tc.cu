@@ -95,8 +95,10 @@ extern "C" __global__ void __launch_bounds__(32 * WPB)
 fusedTierB(const __half2* __restrict__ data, const __half2* __restrict__ tmpl,
            int* __restrict__ peakIdx, float2* __restrict__ peakVal,
            unsigned ntmpl, unsigned winStart, unsigned winEnd, unsigned rows,
-           int binShift, unsigned nbins, unsigned thrBits)
+           int binShift, unsigned nbins, unsigned thrBits, const unsigned* __restrict__ rowWin)
 {
+    // Per-row windows (tierb.slang rowWindow): a window start of 0xFFFFFFFF reads each data
+    // row's (lo, hi) from rowWin, already mapped onto this band by the host.
     // DFT matrices, shared by the block: F_M (re, im, -im), F_16 (re, im, -im), twiddles.
     __shared__ __align__(16) __half fmr[M * M], fmi[M * M], fmn[M * M];
     __shared__ __align__(16) __half f16r[256], f16i[256], f16n[256];
@@ -157,6 +159,8 @@ fusedTierB(const __half2* __restrict__ data, const __half2* __restrict__ tmpl,
     // block, not per slot; any grid size is valid (whole warps leave together).
     for (unsigned slot = blockIdx.x * WPB + warp; slot < slots; slot += gridDim.x * WPB) {
     const unsigned d = slot / tiles, t0 = (slot - d * tiles) * 2u;
+    const unsigned ws = winStart == 0xFFFFFFFFu ? rowWin[2u * d] : winStart;
+    const unsigned we = winStart == 0xFFFFFFFFu ? rowWin[2u * d + 1u] : winEnd;
     const __half2* drow = data + (size_t)d * BAND;
     // The data row's elements this lane feeds into A, read once for both templates.
     float2 dv[M / 16][8];
@@ -242,7 +246,7 @@ fusedTierB(const __half2* __restrict__ data, const __half2* __restrict__ tmpl,
                 float m2 = zr[e] * zr[e] + zi[e] * zi[e];
                 bad |= !(m2 <= 3.0e38f);
                 energy += m2;
-                if (tau >= winStart && tau < winEnd && (m2 > best || (m2 == best && tau < bidx))) {
+                if (tau >= ws && tau < we && (m2 > best || (m2 == best && tau < bidx))) {
                     best = m2; bidx = tau; vre = zr[e]; vim = zi[e];
                 }
             }

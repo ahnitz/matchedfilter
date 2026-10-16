@@ -45,7 +45,7 @@ def launch(ctx, fn, wpb, band, D, T, raw=True):
         ctx._launch(fn, min(-(-slots // wpb), ctx.sm_count * GRID_PER_SM), 32 * wpb,
                     [bufs[0].dptr, bufs[1].dptr, bufs[2].dptr, bufs[3].dptr,
                      cc._u32(nt), cc._u32(0), cc._u32(band), cc._u32(rows),
-                     cc._i32(0), cc._u32(1), cc._u32(0)], stream=st)
+                     cc._i32(0), cc._u32(1), cc._u32(0), cc._NOROW], stream=st)
         ctx._sync(st)
         idx = bufs[2].read(np.int32, rows * nt)
         val = bufs[3].read(np.complex64, rows * nt)
@@ -130,7 +130,7 @@ def main():
             t = time_kernel(ctx, f, w, min(-(-(ndm * ntm // 2) // wpb), ctx.sm_count * GRID_PER_SM),
                             [bufs[0].dptr, bufs[1].dptr, bufs[2].dptr, bufs[3].dptr,
                              cc._u32(ntm), cc._u32(0), cc._u32(band), cc._u32(ndm),
-                             cc._i32(0), cc._u32(1), cc._u32(0)])
+                             cc._i32(0), cc._u32(1), cc._u32(0), cc._NOROW])
             # Flops of the matrix formulation actually issued (tensor-core MACs x 2):
             # stage 1: 4 real 16 x M x M products; stage 2: 4 real 16 x 16 x M; plus the
             # nothing else (the elected value comes from the accumulators).

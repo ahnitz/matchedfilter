@@ -168,6 +168,39 @@ def grouped_row_windows(groups, n, nd, binsize, max_bins=MAX_BINS, nbins=None):
     return hit
 
 
+#: A window start that tells the coarse and refine kernels to read each data row's window from
+#: their row-window table (tierb.slang ROWWIN_ON): CUDA and Metal, which have no
+#: specialization constant for it.
+ROWWIN_ON = 0xFFFFFFFF
+
+_BAND_WINDOWS = {}
+
+
+def band_windows(rowwin, n, band):
+    """Per-row windows [lo, hi) in samples of an n-point transform, mapped onto a coarse band
+    as coarse_span maps one window: band samples [lo // R - 1, ceil(hi / R)) with R = n // band,
+    clamped to the band, at least one sample. The coarse and listed tiers read these as they
+    are. Mapped in the kernel instead, the same arithmetic made the band-256 coarse kernel
+    1.47x slower at SIMD16 on an Iris Xe. Memoised per table (grouped_row_windows' tables
+    are memoised and read-only), as a call per segment maps the same few."""
+    import numpy as np
+    key = (id(rowwin), n, band)
+    hit = _BAND_WINDOWS.get(key)
+    if hit is not None and hit[0] is rowwin:
+        return hit[1]
+    rr = n // band
+    w = np.asarray(rowwin, np.uint32).reshape(-1, 2).astype(np.int64)
+    cs = w[:, 0] // rr
+    ce = np.minimum(band, (w[:, 1] + rr - 1) // rr)
+    cs = np.where(cs > 0, cs - 1, cs)
+    ce = np.maximum(cs + 1, ce)
+    out = np.ascontiguousarray(np.stack([cs, ce], 1).astype(np.uint32))
+    if len(_BAND_WINDOWS) > 4096:
+        _BAND_WINDOWS.clear()
+    _BAND_WINDOWS[key] = (rowwin, out)
+    return out
+
+
 def hier_peaks_grouped(ctx, n, band, data, tmpl, ct0, raw_thr, groups, binsize, threshold, *,
                        upload_tmpl=True, cascade_band=None, ct1=None, raw_thr1=None,
                        slot=None, async_submit=False, sparse=False, nbins=None, max_bins=MAX_BINS,

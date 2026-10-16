@@ -28,7 +28,8 @@ from ._cuda import check_cuda
 from ._errors import UnsupportedSize
 from ._gpu_cache import InputUploads
 from ._shared import empty_shared, shared_buffer, shared_key, _Borrowed
-from ._gpuhost import (MAX_BINS, bin_shift, coarse_span, plan_items, split_items, hier_tiers, hier_window,
+from ._gpuhost import hier_peaks_grouped as _hier_peaks_grouped  # noqa: E402
+from ._gpuhost import (MAX_BINS, ROWWIN_ON, band_windows, bin_shift, coarse_span, plan_items, split_items, hier_tiers, hier_window,
                        split_bins, grouped_windows)
 from ._shared import pack_half2 as _pack_half2
 
@@ -149,6 +150,11 @@ def _use_c16(band):
 
 
 _shift = bin_shift
+
+
+#: The per-row window table argument every fusedTierB and refineListedBounded launch ends with
+#: (tierb.slang ROWWIN_PARAM): read only under a window start of ROWWIN_ON, so null otherwise.
+_NOROW = ctypes.c_void_p(0)
 
 
 def _coarse_grid(rows, nt, ppg, tile):
@@ -429,6 +435,9 @@ class Context(InputUploads):
     max_grouped_bins = _MAX_BINS
     # Results may come back sparse (see _tail); the series path asks with sparse=True.
     supports_sparse = True
+    # hier_peaks_grouped runs per-row windows (each block's own [lo, hi)) under one record of
+    # the largest bin count (MatchedFilter._run_series_ragged).
+    supports_ragged_hier = True
     # Follow-ups: peaks_items(async_submit=True) returns a collector; forward takes rows=.
     items_async = True
     forward_rows = True
@@ -1145,7 +1154,7 @@ class Context(InputUploads):
         hfunc, wg = self.pipeline(n, "fusedTierB", one_bin=(nbins == 1))
         params = [bufs["data"].dptr, bufs["tmpl"].dptr, bufs["idx"].dptr, bufs["val"].dptr,
                   _u32(nt), _u32(lo), _u32(hi), _u32(binsize), _i32(_shift(binsize)),
-                  _u32(nbins), _f32bits(t2)]
+                  _u32(nbins), _f32bits(t2), _NOROW]
         self._launch(hfunc, nd * nt, wg, params, stream=stream)
         collect = self._tail(bufs, out, (nd, nt, nbins), stream, sparse)
 
@@ -1201,7 +1210,7 @@ class Context(InputUploads):
             params = [_ptr(d0 + a * n * 8), bufs["tmpl"].dptr,
                       _ptr(i0 + a * nt * nb * 4), _ptr(v0 + a * nt * nb * 8),
                       _u32(nt), _u32(lo), _u32(hi), _u32(binsize), _i32(_shift(binsize)),
-                      _u32(nb), _f32bits(t2)]
+                      _u32(nb), _f32bits(t2), _NOROW]
             self._launch(hfunc, (b - a) * nt, wg, params, stream=stream)
         collect = self._tail(bufs, out, (nd, nt, nb), stream, sparse)
 
@@ -1499,6 +1508,21 @@ class Context(InputUploads):
             return []
         return [self._labels.get(c[0].value, "") for c in self._coarse_candidates(band)]
 
+    def hier_peaks_grouped(self, n, band, data, tmpl, ct0, raw_thr, groups, binsize, threshold,
+                           *, upload_tmpl=True, cascade_band=None, ct1=None, raw_thr1=None,
+                           slot=None, async_submit=False, sparse=False, nbins=None):
+        """Hierarchical peaks over row ranges of one spectra batch, each with its own window,
+        in one launch per tier over every row, each row searched over its own window
+        (_gpuhost.hier_peaks_grouped, every backend's path).
+
+        ``groups`` holds (lo, hi, a, b): rows a..b of ``data`` are searched over [lo, hi).
+        Output bins follow the first group's bin count (or nbins)."""
+        return _hier_peaks_grouped(self, n, band, data, tmpl, ct0, raw_thr, groups, binsize,
+                                   threshold, upload_tmpl=upload_tmpl, cascade_band=cascade_band,
+                                   ct1=ct1, raw_thr1=raw_thr1, slot=slot,
+                                   async_submit=async_submit, sparse=sparse, nbins=nbins,
+                                   max_bins=_MAX_BINS)
+
     def _gate_bits(self, fn, thr, band, tile):
         """The coarse kernel's last argument: for a tiled build whose pair fits one warp, the
         gate threshold as magnitude bits (tierb.slang peakTwoGate: the pass and bound only, no
@@ -1563,9 +1587,8 @@ class Context(InputUploads):
                          [bufs[0].dptr, bufs[1].dptr, bufs[2].dptr, bufs[3].dptr,
                           _u32(ntm), _u32(0), _u32(band),
                           _u32(band if rowarg is None else rowarg),
-                          _i32(_shift(band)), _u32(1), _u32(self._gate_bits(fn, 0.0, band, tile))],
-                         stream=st,
-                         label="coarse_choice")
+                          _i32(_shift(band)), _u32(1), _u32(self._gate_bits(fn, 0.0, band, tile)),
+                          _NOROW], stream=st, label="coarse_choice")
             check_cuda(self.cuda.cuEventRecord(e1, st), "cuEventRecord")
             check_cuda(self.cuda.cuEventSynchronize(e1), "cuEventSynchronize")
             check_cuda(self.cuda.cuEventElapsedTime(ctypes.byref(ms), e0, e1),
@@ -1600,12 +1623,16 @@ class Context(InputUploads):
     def hier_peaks(self, n, band, data, tmpl, ct0, raw_thr, binsize=None,
                    threshold=0.0, window=None, upload_data=True, upload_tmpl=True,
                    cascade_band=None, ct1=None, raw_thr1=None,
-                   slot=None, async_submit=False, sparse=False):
+                   slot=None, async_submit=False, sparse=False, row_windows=None):
         """Hierarchical coarse-to-fine peaks, one or two coarse tiers, one sync.
 
         Single tier: ``band``/``ct0``/``raw_thr``. Two tiers (the Vulkan
         convention): tier 0 is ``cascade_band`` with ``ct0``/``raw_thr``, tier 1
         is ``band`` with ``ct1``/``raw_thr1``.
+
+        row_windows (hier_peaks_grouped): (groups, per-row uint32 [lo, hi] at n). Every
+        tier reads each data row's window from a table (tierb.slang rowWindow, under a
+        window start of ROWWIN_ON); the coarse tiers' tables are mapped onto their bands.
         """
         self._bind()
         band, ct0, raw_thr, cascade_band, ct1, raw_thr1 = hier_tiers(
@@ -1614,6 +1641,9 @@ class Context(InputUploads):
         nd, nt = data.shape[0], tmpl.shape[0]
         pairs = nd * nt
         lo, hi, binsize, nbins = hier_window(n, window, binsize)
+        rw = None if row_windows is None else row_windows[1]
+        if nbins > _MAX_BINS and rw is not None:
+            raise ValueError("grouped dispatch exceeds the kernel bin limit")
         if nbins > _MAX_BINS:
             return split_bins(
                 lambda w, ud, ut: self.hier_peaks(
@@ -1653,6 +1683,9 @@ class Context(InputUploads):
         if cascade:
             sizes += [("cdata1", nd * band1 * 8, _Buffer), ("cidx1", pairs * 4, _Buffer),
                       ("cval1", pairs * 8, _Buffer), ("surv1", pairs * 4, _Buffer)]
+        if rw is not None:
+            sizes += [("rw", nd * 8, _Buffer), ("rw0", nd * 8, _Buffer)]
+            sizes += [("rw1", nd * 8, _Buffer)] if cascade else []
         for name, nbytes, cls in sizes:
             if self._grow(bufs, name, nbytes, cls, stream) and name.startswith("cdata"):
                 upload_data = True           # its packed copy of the data is gone
@@ -1685,6 +1718,13 @@ class Context(InputUploads):
                 bufs["ct1"].write(np.ascontiguousarray(ct1, np.complex64), stream)
             self._uploaded["tmpl"][key] = tsig
 
+        if rw is not None:
+            bufs["rw"].write(np.ascontiguousarray(rw, np.uint32), stream)
+            bufs["rw0"].write(band_windows(rw, n, band0), stream)
+            if cascade:
+                bufs["rw1"].write(band_windows(rw, n, band1), stream)
+        table = (lambda name: bufs[name].dptr) if rw is not None else (lambda name: _NOROW)
+        start = (lambda first: ROWWIN_ON) if rw is not None else (lambda first: first)
         args = bufs["args"].dptr.value
         collect = self._tail(bufs, out, (nd, nt, nbins), stream, sparse, args, 2, enqueue=False)
 
@@ -1708,10 +1748,10 @@ class Context(InputUploads):
             grid, rowarg = self._coarse_grid_for(cfn, ndp, nt, ppg, tile)
             self._launch(cfn, grid, cwg,
                          [bufs["cdata0"].dptr, bufs["ct0"].dptr, bufs["cidx0"].dptr,
-                          bufs["cval0"].dptr, _u32(nt), _u32(cs), _u32(ce),
+                          bufs["cval0"].dptr, _u32(nt), _u32(start(cs)), _u32(ce),
                           _u32(csp if rowarg is None else rowarg),
-                          _i32(csh), _u32(1), _u32(self._gate_bits(cfn, raw_thr, band0, tile))],
-                         stream=stream)
+                          _i32(csh), _u32(1), _u32(self._gate_bits(cfn, raw_thr, band0, tile)),
+                          table("rw0")], stream=stream)
             kfn, _ = self.pipeline(band0, "compactPairs")
             cpt = (pairs + 255) // 256
             if cascade:
@@ -1727,8 +1767,8 @@ class Context(InputUploads):
                 self._launch(r1, g1, r1wg,
                              [bufs["cdata1"].dptr, bufs["ct1"].dptr, bufs["cidx1"].dptr,
                               bufs["cval1"].dptr, bufs["surv0"].dptr, _ptr(args + 4),
-                              _u32(nt), _u32(cs1), _u32(ce1), _u32(csp1), _i32(csh1), _u32(1),
-                              _u32(0), _u32(g1)], stream=stream, label=f"tier1_{band1}")
+                              _u32(nt), _u32(start(cs1)), _u32(ce1), _u32(csp1), _i32(csh1), _u32(1),
+                              _u32(0), _u32(g1), table("rw1")], stream=stream, label=f"tier1_{band1}")
                 self._launch(kfn, cpt, 256, [bufs["cval1"].dptr, bufs["surv1"].dptr, _ptr(args),
                                              _u32(pairs), ctypes.c_float(float(raw_thr1)), _u32(nbins)],
                              stream=stream)
@@ -1743,12 +1783,13 @@ class Context(InputUploads):
             g = self._refine_grid(rfn, rwg, pairs)
             self._launch(rfn, g, rwg,
                          [bufs["data"].dptr, bufs["tmpl"].dptr, bufs["idx"].dptr, bufs["val"].dptr,
-                          surv.dptr, _ptr(args), _u32(nt), _u32(lo), _u32(hi), _u32(binsize),
-                          _i32(_shift(binsize)), _u32(nbins), _f32bits(t2), _u32(g)], stream=stream)
+                          surv.dptr, _ptr(args), _u32(nt), _u32(start(lo)), _u32(hi), _u32(binsize),
+                          _i32(_shift(binsize)), _u32(nbins), _f32bits(t2), _u32(g), table("rw")],
+                         stream=stream)
             self._tail(bufs, out, (nd, nt, nbins), stream, sparse, args, 2)
         self._graphed(bufs, ("hier", lo, hi, binsize, nbins, t2, float(raw_thr),
                              float(raw_thr1) if cascade else None, band0, band1, nd, nt, ndp,
-                             sparse, dsh is not None), stream, enqueue)
+                             sparse, dsh is not None, rw is not None), stream, enqueue)
 
         def readback(sort=True):
             res, counts = collect(sort)
@@ -1757,153 +1798,6 @@ class Context(InputUploads):
             return res
         readback.sparse_dev = getattr(locals().get("collect"), "sparse_dev", None)
         return self._dispatch_result(bufs, readback, async_submit)
-
-    def hier_peaks_grouped(self, n, band, data, tmpl, ct0, raw_thr, groups, binsize, threshold,
-                           *, upload_tmpl=True, cascade_band=None, ct1=None, raw_thr1=None,
-                           slot=None, async_submit=False, sparse=False):
-        """Hierarchical peaks over row ranges of one spectra batch, each with its own
-        window -- every group in ONE submission and one sync (plan D2).
-
-        ``groups`` holds (lo, hi, a, b): rows a..b of ``data`` are searched over
-        [lo, hi). A series call has a first and a last block whose windows differ
-        from the interior blocks', so per-group calls cost two extra round trips per
-        call for one block of work each. Tiers as in hier_peaks.
-        """
-        self._bind()
-        band, ct0, raw_thr, cascade_band, ct1, raw_thr1 = hier_tiers(
-            n, band, ct0, raw_thr, cascade_band, ct1, raw_thr1)
-        cascade = cascade_band is not None
-        nd, nt = data.shape[0], tmpl.shape[0]
-        binsize = int(binsize)
-        groups, nb = grouped_windows(groups, n, nd, binsize, _MAX_BINS)
-        band0 = int(cascade_band) if cascade else int(band)
-        band1 = int(band) if cascade else None
-        if ct0.shape != (nt, band0) or (cascade and ct1.shape != (nt, band1)):
-            raise ValueError("coarse templates do not match the chain's bands")
-        t2 = float(threshold) ** 2 if threshold > 0 else 0.0
-        stream = self.get_stream(slot)
-        self._after_forwards(stream)
-        dsh, tsh = shared_buffer(data, self), shared_buffer(tmpl, self)
-        if dsh is None:
-            raise ValueError("grouped spectra must be GPU-shared (a forward batch)")
-        c16 = _use_c16(band0)
-        cb0 = 4 if c16 else 8
-        cfn, cwg, ppg, tile, _ = self._coarse_kernel(band0, nt)
-        # Coarse rows of window group g at rows off[g].. (ragged launches: no padding).
-        offs, ndp = [], 0
-        for lo, hi, a, b in groups:
-            offs.append(ndp)
-            ndp += b - a
-        ng = len(groups)
-        out = nd * nt * nb
-        pairs = nd * nt
-        key = ("grouped", n, band0, band1, nt, slot, data.ctypes.data, tsh and tmpl.ctypes.data)
-        tmpl_dirty = upload_tmpl
-        estimate = ((0 if tsh else nt * n * 8) + nt * (band0 * cb0 + (band1 or 0) * 8)
-                    + pairs * 40 + out * 24)
-        bufs, fresh = self._record("hier", self._hier, key, estimate, dict)
-        bufs["data"] = dsh
-        bufs["tmpl"] = tsh or self._resident("tmpl", tmpl, tmpl_dirty, stream)
-        bufs["ct0"] = self._resident(("ct", band0, c16), ct0, tmpl_dirty, stream,
-                                     _pack_half2 if c16 else None)
-        if cascade:
-            bufs["ct1"] = self._resident(("ct", band1, False), ct1, tmpl_dirty, stream)
-        sizes = [("surv0", pairs * 4, _Buffer),
-                 ("idx", out * 4, _Buffer), ("val", out * 8, _Buffer),
-                 ("cdata0", ndp * band0 * cb0, _Buffer), ("cidx0", ndp * nt * 4, _Buffer),
-                 ("cval0", ndp * nt * 8, _Buffer), ("args", 8 * ng, _Buffer),
-                 ("host", out * 12 + 8 * ng, _Pinned)]
-        if cascade:
-            sizes += [("cdata1", nd * band1 * 8, _Buffer),
-                      ("cidx1", pairs * 4, _Buffer), ("cval1", pairs * 8, _Buffer),
-                      ("surv1", pairs * 4, _Buffer)]
-        for name, nbytes, cls in sizes:
-            self._grow(bufs, name, nbytes, cls, stream)
-        args = bufs["args"].dptr.value
-        collect = self._tail(bufs, out, (nd, nt, nb), stream, sparse, args, 2 * ng, enqueue=False)
-        gkey = ("grouped", groups, nb, binsize, t2, float(raw_thr),
-                float(raw_thr1) if cascade else None, band0, band1, sparse, nd, nt)
-        self._graphed(bufs, gkey, stream, lambda: self._grouped_enqueue(
-            bufs, n, nd, nt, nb, groups, offs, (ppg, tile), cfn, cwg, band0, band1, c16, cb0, cascade,
-            raw_thr, raw_thr1, binsize, t2, out, pairs, ng, sparse, stream))
-
-        def readback(sort=True):
-            res, counts = collect(sort)
-            counts = counts.reshape(ng, 2)
-            self.last_refinements = int(counts[:, 0].sum())
-            self.last_tier1_survivors = int(counts[:, 1].sum()) if cascade else self.last_refinements
-            return res
-        readback.sparse_dev = getattr(locals().get("collect"), "sparse_dev", None)
-        return self._dispatch_result(bufs, readback, async_submit)
-
-    def _grouped_enqueue(self, bufs, n, nd, nt, nb, groups, offs, geom, cfn, cwg, band0, band1,
-                         c16, cb0, cascade, raw_thr, raw_thr1, binsize, t2, out, pairs, ng,
-                         sparse, stream):
-        """hier_peaks_grouped's device work, in stream order (captured into a graph)."""
-        dsh = bufs["data"]
-        args = bufs["args"].dptr.value
-        self._fill32(_ptr(args), 0, 2 * ng, stream)
-        self._fill32(bufs["idx"].dptr, 0xFFFFFFFF, out, stream)
-        self._fill32(bufs["val"].dptr, 0, out * 2, stream)
-        if cascade:
-            self._fill32(bufs["cval1"].dptr, 0, pairs * 2, stream)
-
-        dptr = dsh.dptr.value
-        cd0, ci0, cv0 = (bufs[k].dptr.value for k in ("cdata0", "cidx0", "cval0"))
-        s0, i0, v0 = bufs["surv0"].dptr.value, bufs["idx"].dptr.value, bufs["val"].dptr.value
-        pack_fn, _ = self.pipeline(4096, "packCoarse")
-        kfn, _ = self.pipeline(band0, "compactPairs")
-        rfn, rwg = self.pipeline(n, "refineListed", one_bin=(nb == 1))
-        if cascade:
-            self._launch(pack_fn, (nd * band1 + 255) // 256, 256,
-                         [_ptr(dptr), bufs["cdata1"].dptr, _u32(n), _u32(band1),
-                          _u32(nd * band1), _u32(0)], stream=stream)
-            r1, r1wg = self.pipeline(band1, "refineListed", one_bin=True)
-            cd1, ci1, cv1 = (bufs[k].dptr.value for k in ("cdata1", "cidx1", "cval1"))
-            s1 = bufs["surv1"].dptr.value
-        for g, ((lo, hi, a, b), off) in enumerate(zip(groups, offs)):
-            gp = (b - a) * nt
-            rows = b - a
-            cnt_ref, cnt_t1 = _ptr(args + 8 * g), _ptr(args + 8 * g + 4)
-            self._launch(pack_fn, ((b - a) * band0 + 255) // 256, 256,
-                         [_ptr(dptr + a * n * 8), _ptr(cd0 + off * band0 * cb0), _u32(n),
-                          _u32(band0), _u32((b - a) * band0), _u32(int(c16))], stream=stream)
-            cs, ce, csp, csh = coarse_span(n, band0, lo, hi)
-            grid, rowarg = self._coarse_grid_for(cfn, rows, nt, *geom)
-            self._launch(cfn, grid, cwg,
-                         [_ptr(cd0 + off * band0 * cb0), bufs["ct0"].dptr, _ptr(ci0 + off * nt * 4),
-                          _ptr(cv0 + off * nt * 8), _u32(nt), _u32(cs), _u32(ce),
-                          _u32(csp if rowarg is None else rowarg),
-                          _i32(csh), _u32(1),
-                          _u32(self._gate_bits(cfn, raw_thr, band0, geom[1]))], stream=stream)
-            cpt = (gp + 255) // 256
-            if cascade:
-                self._launch(kfn, cpt, 256, [_ptr(cv0 + off * nt * 8), _ptr(s0 + a * nt * 4), cnt_t1,
-                                             _u32(gp), ctypes.c_float(float(raw_thr)), _u32(nb)],
-                             stream=stream)
-                cs1, ce1, csp1, csh1 = coarse_span(n, band1, lo, hi)
-                g1 = self._refine_grid(r1, r1wg, gp)
-                self._launch(r1, g1, r1wg,
-                             [_ptr(cd1 + a * band1 * 8), bufs["ct1"].dptr, _ptr(ci1 + a * nt * 4),
-                              _ptr(cv1 + a * nt * 8), _ptr(s0 + a * nt * 4), cnt_t1,
-                              _u32(nt), _u32(cs1), _u32(ce1), _u32(csp1), _i32(csh1), _u32(1),
-                              _u32(0), _u32(g1)], stream=stream, label=f"tier1_{band1}")
-                self._launch(kfn, cpt, 256, [_ptr(cv1 + a * nt * 8), _ptr(s1 + a * nt * 4), cnt_ref,
-                                             _u32(gp), ctypes.c_float(float(raw_thr1)), _u32(nb)],
-                             stream=stream)
-                surv = s1
-            else:
-                self._launch(kfn, cpt, 256, [_ptr(cv0 + off * nt * 8), _ptr(s0 + a * nt * 4), cnt_ref,
-                                             _u32(gp), ctypes.c_float(float(raw_thr)), _u32(nb)],
-                             stream=stream)
-                surv = s0
-            g2 = self._refine_grid(rfn, rwg, gp)
-            self._launch(rfn, g2, rwg,
-                         [_ptr(dptr + a * n * 8), bufs["tmpl"].dptr, _ptr(i0 + a * nt * nb * 4),
-                          _ptr(v0 + a * nt * nb * 8), _ptr(surv + a * nt * 4), cnt_ref, _u32(nt),
-                          _u32(lo), _u32(hi), _u32(binsize), _i32(_shift(binsize)), _u32(nb),
-                          _f32bits(t2), _u32(g2)], stream=stream)
-        self._tail(bufs, out, (nd, nt, nb), stream, sparse, args, 2 * ng)
 
     # ---- series forward -----------------------------------------------------------
     def _forward_fused(self, n, series, starts, spectra, *, defer=False, slot=None):
@@ -2020,7 +1914,7 @@ class Context(InputUploads):
             self._launch(hfunc, b - a, wg,
                          [_ptr(d0 + a * n * 8), _ptr(tp + t * n * 8), _ptr(i0 + off * 4),
                           _ptr(v0 + off * 8), _u32(1), _u32(lo), _u32(hi), _u32(binsize),
-                          _i32(_shift(binsize)), _u32(nb), _f32bits(t2)], stream=stream)
+                          _i32(_shift(binsize)), _u32(nb), _f32bits(t2), _NOROW], stream=stream)
         if size:
             self._copy_d2h(host.ptr, i0, size * 4, stream, "readback")
             self._copy_d2h(host.ptr + size * 4, v0, size * 8, stream, "readback")

@@ -19,13 +19,15 @@ void refineListedBounded(uint3 gid: SV_GroupID, uint3 lid: SV_GroupThreadID,
                          StructuredBuffer<uint> count,
                          uniform uint ntmpl, uniform uint winStart, uniform uint winEnd,
                          uniform uint binsize, uniform int binShift, uniform uint nbins,
-                         uniform uint thrBits, uniform uint gridSize)
+                         uniform uint thrBits, uniform uint gridSize ROWWIN_PARAM)
 {
     uint total = count[0];
     for (uint i = gid.x; i < total; i += gridSize) {
         _stgBase = 0;
-        filterPair(survivors[i], lid.x, data, tmpl, peakIdx, peakVal, ntmpl,
-                   winStart, winEnd, binsize, binShift, nbins, thrBits);
+        uint pair = survivors[i], ws = winStart, we = winEnd;
+        rowWindow(pair / ntmpl, ws, we ROWWIN_ARG);       // per-row windows (tierb.slang)
+        filterPair(pair, lid.x, data, tmpl, peakIdx, peakVal, ntmpl,
+                   ws, we, binsize, binShift, nbins, thrBits ROWWIN_COARSE_ARG);
         GroupMemoryBarrierWithGroupSync();
     }
 }

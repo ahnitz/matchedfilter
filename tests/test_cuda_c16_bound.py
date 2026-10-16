@@ -56,7 +56,7 @@ def _coarse(cc, ctx, var, band, D, T):
         ctx._launch(fn, grid, wg, [bufs[0].dptr, bufs[1].dptr, bufs[2].dptr, bufs[3].dptr,
                                    cc._u32(nt), cc._u32(0), cc._u32(band),
                                    cc._u32(band if rowarg is None else rowarg),
-                                   cc._i32(cc._shift(band)), cc._u32(1), cc._u32(0)], stream=st)
+                                   cc._i32(cc._shift(band)), cc._u32(1), cc._u32(0), cc._NOROW], stream=st)
         ctx._sync(st)
         v = bufs[3].read(np.complex64, rows * nt)
     finally:

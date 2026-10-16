@@ -161,26 +161,45 @@ C cload(StructuredBuffer<CVal> b, uint i) { return b[i]; }
 //: The data row stride (see mfDataStride in twiddle.slang).
 #define DSTRIDE ((mfDataStride != 0u) ? mfDataStride : N)
 
+//: Per-row windows: (lo, hi) per data row, in this kernel's own samples (a coarse tier's
+//: already mapped onto its band by the host, _gpuhost.band_windows). Mapping them here (a
+//: mode 2, since removed) made the band-256 coarse kernel 1.47x slower at SIMD16 on an Iris
+//: Xe, for a handful of integer operations per pair.
+//:
+//: Vulkan: a binding after the entry's own (4 for the coarse role, 5 for the listed refine),
+//: read when the specialization constant mfRowWindows is set. CUDA has no specialization
+//: constants: the table is the entry's last argument (ROWWIN_PARAM, passed down as
+//: ROWWIN_ARG) and a window start of ROWWIN_ON switches it on. Metal takes no per-row
+//: windows: on the M2 one grouped call per tier ran 6% slower in the production ladder than
+//: a call per window group (docs/convergence-plan.md, step 2). Elsewhere both macros are
+//: empty, so those kernels are unchanged.
+#define ROWWIN_ON 0xFFFFFFFFu
 #if defined(MF_VULKAN)
-//: Per-row windows, (lo, hi) per data row, read when mfRowWindows != 0. A
-//: separate binding after the entry's own (4 for the coarse role, 5 for the
-//: listed refine), so no existing binding moves; Vulkan only.
 #if COARSE16
 [[vk::binding(4, 0)]] StructuredBuffer<uint> gRowWin;
 #else
 [[vk::binding(5, 0)]] StructuredBuffer<uint> gRowWin;
 #endif
-//: The window of data row d for this kernel, as the buffer holds it: a coarse tier's
-//: already mapped onto its band by the host (_vkcompute._band_windows). Mapping it here
-//: (a mode 2, since removed) made the band-256 coarse kernel 1.47x slower at SIMD16 on
-//: an Iris Xe, for a handful of integer operations per pair.
+#define ROWWIN_PARAM
+#define ROWWIN_ARG
 void rowWindow(uint d, inout uint winStart, inout uint winEnd)
 {
     if (mfRowWindows == 0u) return;
     winStart = gRowWin[2u * d];
     winEnd = gRowWin[2u * d + 1u];
 }
+#elif defined(MF_CUDA)
+#define ROWWIN_PARAM , StructuredBuffer<uint> rowWin
+#define ROWWIN_ARG , rowWin
+void rowWindow(uint d, inout uint winStart, inout uint winEnd, StructuredBuffer<uint> rowWin)
+{
+    if (winStart != ROWWIN_ON) return;
+    winStart = rowWin[2u * d];
+    winEnd = rowWin[2u * d + 1u];
+}
 #else
+#define ROWWIN_PARAM
+#define ROWWIN_ARG
 void rowWindow(uint d, inout uint winStart, inout uint winEnd) {}
 #endif
 //: A data element for the coarse role. With a stride set, the data buffer is
@@ -1590,7 +1609,7 @@ void filterPair(uint pair, uint tid,
                 StructuredBuffer<CVal> data, StructuredBuffer<CVal> tmpl,
                 RWStructuredBuffer<int> peakIdx, RWStructuredBuffer<float2> peakVal,
                 uint ntmpl, uint winStart, uint winEnd,
-                uint binsize, int binShift, uint nbins, uint thrBits)
+                uint binsize, int binShift, uint nbins, uint thrBits ROWWIN_PARAM)
 {
     _tid = tid;
     // The host dispatches pairs/TILE_T groups, so this group owns TILE_T
@@ -1618,7 +1637,7 @@ void filterPair(uint pair, uint tid,
     uint q = slotOk ? pair : slots - 1u;
     uint d = q / tiles, t0 = (q - d * tiles) * TILE_T;
     uint p0 = d * ntmpl + t0;
-    rowWindow(d, winStart, winEnd);
+    rowWindow(d, winStart, winEnd ROWWIN_ARG);
 #elif COARSE16 && PPG > 1
     // RAGGED GROUPS (untiled, every backend): the host passes the row count in `binsize` and
     // dispatches ceil(rows * ntmpl / PPG) groups, so any pair count keeps the packing. A
@@ -1631,7 +1650,7 @@ void filterPair(uint pair, uint tid,
     uint q = slotOk ? pair : pairs - 1u;
     uint p0 = slotOk ? q : NOPAIR;
     uint d = q / ntmpl, t0 = q - d * ntmpl;
-    rowWindow(d, winStart, winEnd);
+    rowWindow(d, winStart, winEnd ROWWIN_ARG);
 #else
     uint p0 = pair * TILE_T;
     uint d = p0 / ntmpl, t0 = p0 % ntmpl;
@@ -1639,7 +1658,7 @@ void filterPair(uint pair, uint tid,
     // Every coarse build honours per-row windows. The untiled builds once skipped
     // this: their module then declared no gRowWin, the host bound one past the
     // layout, and a grouped call gated every pair out (tests/test_vk_hier_grouped.py).
-    rowWindow(d, winStart, winEnd);
+    rowWindow(d, winStart, winEnd ROWWIN_ARG);
 #endif
 #endif
     C dreg[RADIX];
@@ -1671,6 +1690,15 @@ void filterPair(uint pair, uint tid,
 }
 #endif
 
+//: The fp16 coarse role (COARSE16) passes the per-row window table down to filterPair; the
+//: full-precision build applies it here, at one pair per group (CUDA runs its coarse tiers
+//: above its fp16 builds' bands, 1024, with it).
+#if COARSE16
+#define ROWWIN_COARSE_ARG ROWWIN_ARG
+#else
+#define ROWWIN_COARSE_ARG
+#endif
+
 [shader("compute")][numthreads(WG*PPG,1,1)]
 void fusedTierB(uint3 gid: SV_GroupID, uint3 lid: SV_GroupThreadID,
                 StructuredBuffer<CVal> data, StructuredBuffer<CVal> tmpl,
@@ -1678,7 +1706,7 @@ void fusedTierB(uint3 gid: SV_GroupID, uint3 lid: SV_GroupThreadID,
                 RWStructuredBuffer<float2> peakVal,
                 uniform uint ntmpl, uniform uint winStart, uniform uint winEnd,
                 uniform uint binsize, uniform int binShift, uniform uint nbins,
-                uniform uint thrBits)
+                uniform uint thrBits ROWWIN_PARAM)
 {
     // lid spans PPG pairs of WG threads. Each slice is one pair, and at
     // band 512 one pair is exactly one wave, so WaveActiveMax below still
@@ -1696,8 +1724,15 @@ void fusedTierB(uint3 gid: SV_GroupID, uint3 lid: SV_GroupThreadID,
     uint _pr = gid.x * PPG + _sub, _t = lid.x % WG;
     _stgBase = _sub * STGW;
 #endif
+#if !COARSE16 && defined(MF_CUDA) && PPG == 1 && TILE_T == 1
+    uint _ws = winStart, _we = winEnd;
+    rowWindow(_pr / ntmpl, _ws, _we ROWWIN_ARG);
     filterPair(_pr, _t, data, tmpl, peakIdx, peakVal, ntmpl,
-               winStart, winEnd, binsize, binShift, nbins, thrBits);
+               _ws, _we, binsize, binShift, nbins, thrBits);
+#else
+    filterPair(_pr, _t, data, tmpl, peakIdx, peakVal, ntmpl,
+               winStart, winEnd, binsize, binShift, nbins, thrBits ROWWIN_COARSE_ARG);
+#endif
 }
 
 // Full circular correlation in natural lag order. The same fused spectral
@@ -1839,7 +1874,7 @@ void refineListed(uint3 gid: SV_GroupID, uint3 lid: SV_GroupThreadID,
                   StructuredBuffer<uint> survivors,
                   uniform uint ntmpl, uniform uint winStart, uniform uint winEnd,
                   uniform uint binsize, uniform int binShift, uniform uint nbins,
-                  uniform uint thrBits)
+                  uniform uint thrBits ROWWIN_PARAM)
 {
     uint pair = survivors[gid.x];
     // MUST be set on every path that reaches filterPair. Leaving it unset
@@ -1849,9 +1884,9 @@ void refineListed(uint3 gid: SV_GroupID, uint3 lid: SV_GroupThreadID,
     // 12-sigma injection while Linux passed.
     _stgBase = 0;
     uint ws = winStart, we = winEnd;
-    rowWindow(pair / ntmpl, ws, we);
+    rowWindow(pair / ntmpl, ws, we ROWWIN_ARG);
     filterPair(pair, lid.x, data, tmpl, peakIdx, peakVal, ntmpl,
-               ws, we, binsize, binShift, nbins, thrBits);
+               ws, we, binsize, binShift, nbins, thrBits ROWWIN_COARSE_ARG);
 }
 
 // ---------------------------------------------------------------------

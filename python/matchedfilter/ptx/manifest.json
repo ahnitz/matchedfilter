@@ -4,7 +4,7 @@
   "modules": {
     "64": {
       "file": "tierb_64.ptx",
-      "bytes": 128423,
+      "bytes": 128648,
       "local_size": [
         4,
         1,
@@ -16,7 +16,7 @@
     },
     "128": {
       "file": "tierb_128.ptx",
-      "bytes": 147844,
+      "bytes": 148257,
       "local_size": [
         8,
         1,
@@ -28,7 +28,7 @@
     },
     "256": {
       "file": "tierb_256.ptx",
-      "bytes": 131888,
+      "bytes": 132163,
       "local_size": [
         16,
         1,
@@ -40,7 +40,7 @@
     },
     "512": {
       "file": "tierb_512.ptx",
-      "bytes": 151915,
+      "bytes": 152518,
       "local_size": [
         32,
         1,
@@ -52,7 +52,7 @@
     },
     "1024": {
       "file": "tierb_1024.ptx",
-      "bytes": 167209,
+      "bytes": 166918,
       "local_size": [
         64,
         1,
@@ -70,7 +70,7 @@
     },
     "2048": {
       "file": "tierb_2048.ptx",
-      "bytes": 188295,
+      "bytes": 188082,
       "local_size": [
         128,
         1,
@@ -88,7 +88,7 @@
     },
     "4096": {
       "file": "tierb_4096.ptx",
-      "bytes": 168529,
+      "bytes": 168426,
       "local_size": [
         256,
         1,
@@ -112,7 +112,7 @@
     },
     "8192": {
       "file": "tierb_8192.ptx",
-      "bytes": 172237,
+      "bytes": 172171,
       "local_size": [
         512,
         1,
@@ -156,7 +156,7 @@
     },
     "16384": {
       "file": "tierb_16384.ptx",
-      "bytes": 208749,
+      "bytes": 210486,
       "local_size": [
         1024,
         1,
@@ -200,7 +200,7 @@
     },
     "32768": {
       "file": "tierb_32768.ptx",
-      "bytes": 413077,
+      "bytes": 413300,
       "local_size": [
         1024,
         1,
@@ -244,7 +244,7 @@
     },
     "65536": {
       "file": "tierb_65536.ptx",
-      "bytes": 1296626,
+      "bytes": 1297131,
       "local_size": [
         1024,
         1,
@@ -553,5 +553,5 @@
       }
     }
   },
-  "build_id": "31b59e8b8f4ab1d629e293ceb69035e5d25df8babf8d337c54b27a3e6cbaf4d3"
+  "build_id": "d090b2b9825bb8bef3d3dd2f2815074caf97c43a99644f3720623c3c50e39865"
 }
