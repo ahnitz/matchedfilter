@@ -1929,7 +1929,12 @@ class Context(InputUploads):
                                use("cdata" + sfx[i], "ct" + str(i), "cidx" + sfx[i],
                                    "cval" + sfx[i], "surv" + sfx[i - 1]),
                                b // _radix(b), indirect=bufs["args" + sfx[i - 1]])
-            self._dispatch(enc, compact, (pairs, bits(thr), nbins),
+            # A later tier's compaction walks every pair, and the pairs tier 0 dismissed hold the
+            # zeros written above: at a threshold of 0 they would pass (!(0 < 0)). The smallest
+            # normal float dismisses them and passes every pair the tier saw with a nonzero
+            # maximum (tests/test_tier_conformance.py).
+            self._dispatch(enc, compact, (pairs, bits(thr if i == 0 else max(thr, 1.1754944e-38)),
+                                          nbins),
                            use("cval" + sfx[i], "surv" + sfx[i], "args" + sfx[i]),
                            256, groups=(pairs + 255) // 256)
 

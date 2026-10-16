@@ -1770,7 +1770,11 @@ class Context(InputUploads):
                               _u32(nt), _u32(start(cs1)), _u32(ce1), _u32(csp1), _i32(csh1), _u32(1),
                               _u32(0), _u32(g1), table("rw1")], stream=stream, label=f"tier1_{band1}")
                 self._launch(kfn, cpt, 256, [bufs["cval1"].dptr, bufs["surv1"].dptr, _ptr(args),
-                                             _u32(pairs), ctypes.c_float(float(raw_thr1)), _u32(nbins)],
+                                             _u32(pairs),
+                                             # cval1 holds zeros for the pairs tier 0 dismissed:
+                                             # never let a threshold of 0 pass them (as Metal).
+                                             ctypes.c_float(max(float(raw_thr1), 1.1754944e-38)),
+                                             _u32(nbins)],
                              stream=stream)
                 surv = bufs["surv1"]
             else:
