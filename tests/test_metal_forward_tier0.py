@@ -7,9 +7,15 @@ from matchedfilter import TimeDomainFilterBank
 from test_time_domain import _whitened_inspiral_bank
 
 
-def _run(monkeypatch, enabled, rng_seed=5):
+#: How far two float paths' |snr| may differ: the GPU paths are 1.4-1.9e-5 from the CPU
+#: reference on an M2 (three seeds); this is five times that.
+SNR_TOL = 1e-4
+THRESHOLD = 4.0
+
+
+def _run(monkeypatch, enabled, device=None, rng_seed=5):
     from conftest import usable_gpu
-    dev = usable_gpu()
+    dev = usable_gpu() if device is None else device
     if dev is None:
         pytest.skip("no usable GPU")
     monkeypatch.setenv("MF_AUTOTUNE", "0")
@@ -17,7 +23,7 @@ def _run(monkeypatch, enabled, rng_seed=5):
     rng = np.random.default_rng(rng_seed)
     counts = sorted(rng.integers(200, 1800, 24))
     taps, w, df = _whitened_inspiral_bank(rng, counts)
-    bank = TimeDomainFilterBank(taps, tap_counts=counts, engine='hier', threshold=4.0,
+    bank = TimeDomainFilterBank(taps, tap_counts=counts, engine='hier', threshold=THRESHOLD,
                                 false_dismissal=1e-3, device=dev, fft_lengths=[2048])
     bank.set_reference(w, delta_f=df)
     S = 1 << 19
@@ -27,10 +33,41 @@ def _run(monkeypatch, enabled, rng_seed=5):
     x[S // 3] += 40.0                        # a loud sample: refine survivors in many blocks
     jobs = [(bank, x, dict(windows=slice(4096, S - 4096)))] * 2
     out = TimeDomainFilterBank.filter_series_many(jobs)
-    return [(r.sample_indices, r.template_indices, r.snr) for r in out]
+    return [{(int(t), int(i)): complex(v) for t, i, v in
+             zip(r.template_indices, r.sample_indices, r.snr)} for r in out]
+
+
+def _assert_same_peaks(got, want, n, label):
+    """Assert two peak sets {(template, sample): snr} agree to float precision.
+
+    A peak both sides report must have the same complex SNR within SNR_TOL. A peak only
+    one side reports is allowed only where rounding can decide it: its |snr| is within
+    SNR_TOL of the threshold, or the other side reports a peak of the same template within
+    one block whose |snr| ties it within SNR_TOL (two lags of one bin, elected differently).
+    Anything else is a missed or spurious peak, and the message lists them."""
+    common = set(got) & set(want)
+    worst = max((abs(got[k] - want[k]) for k in common), default=0.0)
+    assert worst <= SNR_TOL, "%s: SNR differs by %.2e on a common peak" % (label, worst)
+
+    def explained(k, mine, other):
+        a = abs(mine[k])
+        if abs(a - THRESHOLD) <= SNR_TOL:
+            return True
+        return any(t == k[0] and abs(i - k[1]) < n and abs(abs(v) - a) <= SNR_TOL
+                   for (t, i), v in other.items() if (t, i) not in mine)
+    bad = ([("only " + label, k, abs(got[k])) for k in set(got) - set(want)
+            if not explained(k, got, want)]
+           + [("missing from " + label, k, abs(want[k])) for k in set(want) - set(got)
+              if not explained(k, want, got)])
+    assert not bad, bad
 
 
 def test_fused_forward_matches_separate(monkeypatch):
+    """The band forward and the separate forward each give the CPU reference's peaks.
+
+    They are different float paths, so a peak within rounding of the threshold (or a lag
+    tie inside a bin) may fall either way; exact equality between them is not a property
+    of either. A peak missed or invented anywhere else fails."""
     pytest.importorskip("matchedfilter._mtlcompute")
     try:
         from matchedfilter import _mtlcompute
@@ -41,9 +78,9 @@ def test_fused_forward_matches_separate(monkeypatch):
     before = _mtlcompute._FUSED_FORWARDS[0]
     b = _run(monkeypatch, True)
     assert _mtlcompute._FUSED_FORWARDS[0] > before, "the fused forward was not taken"
-    assert len(a) == len(b)
-    for (ia, ta, sa), (ib, tb, sb) in zip(a, b):
-        assert len(ia) > 0
-        np.testing.assert_array_equal(ia, ib)
-        np.testing.assert_array_equal(ta, tb)
-        np.testing.assert_array_equal(sa, sb)
+    ref = _run(monkeypatch, False, device="cpu")
+    assert len(a) == len(b) == len(ref)
+    for ra, rb, rr in zip(a, b, ref):
+        assert len(rr) > 100
+        _assert_same_peaks(ra, rr, 2048, "separate forward")
+        _assert_same_peaks(rb, rr, 2048, "band forward")
