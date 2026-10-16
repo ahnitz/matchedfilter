@@ -13,6 +13,8 @@ Everything after `--` goes to tools/ladder.py. The method:
     not the code (it once read 2.3e6 templates in real time where the settled value was 1.4e8).
   * Every run then starts from a copy of that seed, so both trees run the same choices and
     neither run's measurements leak into the next.
+  * --seed-per-tree settles one seed per tree instead, each on its own tree: for a change to
+    what the choices themselves are (pricing, candidates), which a shared seed would hide.
   * Rounds alternate the order (base first, then new first), after `--warmup` unrecorded
     runs of each tree.
 
@@ -62,6 +64,8 @@ def main(argv=None):
                     help="runs of each mode that settle the shared cost file (default 3)")
     ap.add_argument("--seed-cost", default=None,
                     help="an already settled cost file to start from instead of settling")
+    ap.add_argument("--seed-per-tree", action="store_true",
+                    help="settle a cost file per tree on that tree (a change to the choices)")
     ap.add_argument("--python", default=sys.executable)
     ap.add_argument("--timing", action="store_true",
                     help="device timers on (fine-stage device time per run). They change what "
@@ -71,17 +75,21 @@ def main(argv=None):
     ladder = argv[k + 1:]
     trees = {"base": os.path.abspath(args.base), "new": os.path.abspath(args.new)}
     work = tempfile.mkdtemp(prefix="ab-ladder-")
-    seed = os.path.join(work, "seed.json")
+    seeds = {name: os.path.join(work, "seed_%s.json" % name) for name in trees}
     if args.seed_cost:
-        shutil.copy(args.seed_cost, seed)
+        for name in trees:
+            shutil.copy(args.seed_cost, seeds[name])
     else:
-        for _ in range(args.settle):
-            for extra in ([], ["--pipeline"]):
-                run(trees["base"], ladder, seed, extra, args.python)
+        for name in (trees if args.seed_per_tree else ["base"]):
+            for _ in range(args.settle):
+                for extra in ([], ["--pipeline"]):
+                    run(trees[name], ladder, seeds[name], extra, args.python)
+        if not args.seed_per_tree:
+            shutil.copy(seeds["base"], seeds["new"])
 
     def one(name, extra):
         cost = os.path.join(work, "%s.json" % name)
-        shutil.copy(seed, cost)
+        shutil.copy(seeds[name], cost)
         return run(trees[name], ladder, cost, extra, args.python, args.timing)
 
     for _ in range(args.warmup):
