@@ -261,18 +261,15 @@ class FollowupSpec:
     bank): filter_series(windows=slice(max(0, c - half), min(S, c + half)), binsize,
     threshold=0, template_index=ti).
 
-    TimeDomainFilterBank.filter_series_many(jobs, followups=spec) applies it: on the device
-    where a backend can (Vulkan, _vkfollowup), else on the host (run_host). Both give
-    [(source job, rank, c, ti, FilterResults)] in (job, rank) order, and a device selection
-    must equal select() exactly: same candidates (|snr| = hypot(re, im) >= threshold), same
-    order (|snr| descending, ties by FOLLOWUP_KEY_SHIFTS), same dedupe."""
+    TimeDomainFilterBank.filter_series_many(jobs, followups=spec) applies it: the host selects
+    (select), and the selected calls run on the device where a backend can (submit_followups),
+    else on the host (run_host). Both give [(source job, rank, c, ti, FilterResults)] in
+    (job, rank) order."""
 
-    def __init__(self, pairs, threshold, dedupe, half, binsize, max_items=128,
-                 max_items_per_region=48):
+    def __init__(self, pairs, threshold, dedupe, half, binsize):
         self.pairs = [int(p) for p in pairs]
         self.threshold, self.dedupe = float(threshold), int(dedupe)
         self.half, self.binsize = int(half), int(binsize)
-        self.max_items, self.max_items_per_region = int(max_items), int(max_items_per_region)
 
     def key(self):
         return (tuple(self.pairs), self.threshold, self.dedupe, self.half, self.binsize)
@@ -307,22 +304,6 @@ class FollowupSpec:
         return [(j, rank, c0, ti, r) for (j, rank, c0, ti, _), r in zip(sel, res)]
 
 
-#: The device follow-up item record: FOLLOWUP_ITEM_WORDS uint32 words, in this order.
-#: c0 and the global template index are 64-bit (lo, hi). "rank" is the peak's position in the
-#: source job's candidates ordered by |snr| descending, ties by FOLLOWUP_KEY (result order).
-FOLLOWUP_ITEM_FIELDS = ("job", "rank", "c0_lo", "c0_hi", "ti_lo", "ti_hi", "t_local", "group",
-                        "slot", "nblocks")
-FOLLOWUP_ITEM_WORDS = len(FOLLOWUP_ITEM_FIELDS)
-#: The tie key a device selection ranks equal |snr| by (= FilterResults order of the job):
-#: entry (the job's sub-call) << 56 | caller block << 32 | local template << 16 | bin.
-FOLLOWUP_KEY_SHIFTS = dict(entry=56, row=32, template=16, bin=0)
-#: The logical per-dispatch descriptor a backend encodes into its own binding: the source job,
-#: its sub-call entry, (templates, bins) of the call, the dispatch's first layout row and row
-#: count, the layout-row -> caller-block map, the block start samples, the global templates.
-FOLLOWUP_DISPATCH_FIELDS = ("job", "entry", "nt", "nb", "b0", "rows", "row_caller",
-                            "row_sample", "template_global")
-
-
 def window_results(hit, counts, starts, idx, val, template, n):
     """FilterResults of one follow-up window, as TimeDomainFilterBank._items_batch orders them:
     the (block, bin) pairs where ``hit`` holds, by the block's bin count, then block, then bin.
@@ -345,59 +326,131 @@ def window_results(hit, counts, starts, idx, val, template, n):
         block_lengths=np.full(bi.size, n, dtype=np.int64))
 
 
-def read_followup_items(items, idx_all, val_all, nbins, bpi, groups, spec, series_len):
-    """Host assembly of device follow-ups: [(job, rank, c0, ti, FilterResults)] in (job, rank)
-    order, or None when the device and host block layouts disagree (the caller then runs the
-    follow-ups on the host).
+# ---- device follow-ups ---------------------------------------------------------------------
+# A batch of threshold-0 single-template calls (what FollowupSpec.select produces) as listed
+# entries for the refineItems kernel (src/gpu/refine_bounded.slang): per work group -- one
+# (template group, binsize, series allocation) -- the rows to forward (block starts as offsets
+# into the allocation) and one entry per row (row, local template, window start, window end,
+# output slot). The host lays the blocks out with TimeDomainFilterBank._window_layout, so the
+# windows are the host path's by construction, and assemble_followups orders the results as
+# _items_batch does. A backend supplies only the execution (Context.followup_executor()):
+# the forward of each group's rows, refineItems over its entries, and one wait.
 
-    items: (k, FOLLOWUP_ITEM_WORDS) uint32 records; idx_all/val_all: the per-slot peaks, slot
-    (item index * bpi + block) holding nbins bins; groups[item.group]: the bank template group;
-    series_len[j]: the length of job j's series. Assembled exactly as
-    TimeDomainFilterBank._items_batch does for the same calls: per item, its one window's
-    block layout (TimeDomainFilterBank._window_layout), and its hits ordered by the block's
-    bin count, then block, then bin (the per-bin-count calls' order). Every item's layout and
-    hits are computed in array passes, per template group, not per item and block."""
-    k = int(items.shape[0])
-    if k == 0:
-        return []
-    it = items.astype(np.int64)
-    order = np.lexsort((it[:, 1], it[:, 0]))
-    bs, half = int(spec.binsize), int(spec.half)
-    c0 = it[:, 2] | (it[:, 3] << 32)
-    ti = it[:, 4] | (it[:, 5] << 32)
-    pairs = np.asarray(spec.pairs, np.int64)
-    S = np.asarray(series_len, np.int64)[pairs[it[:, 0]]]
-    v0 = np.maximum(0, c0 - half)
-    v1 = np.minimum(S, c0 + half)
-    idx3 = np.asarray(idx_all[:k * bpi * nbins]).reshape(k, bpi, nbins)
-    val3 = np.asarray(val_all[:k * bpi * nbins]).reshape(k, bpi, nbins)
-    res = [None] * k
-    gid = it[:, 7]
-    for gi in np.unique(gid):
-        sel = np.flatnonzero(gid == gi)
-        g = groups[int(gi)]
-        step, cbad, nv = int(g.n_valid), int(g.c_bad), int(g.n_valid)
-        # _window_layout for one window per item, every item of the group at once: blocks
-        # first, first + 1, ... while they reach the window and the series.
-        first = np.maximum(0, (v0[sel] - cbad) // step)
-        kk = np.arange(bpi + 1, dtype=np.int64)
-        ts = (first[:, None] + kk[None, :]) * step                     # (items, bpi + 1)
-        b0 = ts + cbad
-        rs = np.maximum(v0[sel][:, None], b0)
-        re = np.minimum(v1[sel][:, None], b0 + nv)
-        ok = ((ts < S[sel][:, None]) & (b0 < v1[sel][:, None]) & (b0 + nv > v0[sel][:, None])
-              & (re > rs))
-        m = ok.sum(axis=1)
-        if np.any(m != it[sel, 9]) or np.any(m > bpi) or np.any(ok[:, bpi]):
+class FollowupUnsupported(Exception):
+    """Device follow-ups cannot take this batch; the caller runs it on the host."""
+
+
+def followup_layout(jobs, ctx_type, max_rows=None):
+    """(groups, layout) for single-template follow-up jobs [(bank, series, kwargs)], each a
+    filter_series(series, windows=, binsize=, threshold=0, template_index=) call.
+
+    groups: one dict per work group with plan, ctx, n, bs, alloc (the series allocation),
+    rows (uint32 block starts in the allocation), entries ((rows, 5) uint32) and nbins (the
+    widest window's bin count, rounded up to a power of two so few shapes occur).
+    layout: per job (group, starts, window starts, window ends, first entry, template group,
+    local template, global template). Raises FollowupUnsupported when a job is not such a
+    call, is not on a ctx_type device, has a series that is not device memory, has a block
+    reading past its series (the host path pads with zeros), or a group passes max_rows."""
+    from ._shared import containing
+    from .time_domain import TimeDomainFilterBank, _normalize_windows
+    groups = {}
+    layout = []
+    for (bank, ser, kw) in jobs:
+        kw = kw or {}
+        ti = kw.get("template_index")
+        if ti is None or kw.get("threshold") is None or float(kw["threshold"]) != 0.0 \
+                or set(kw) - {"windows", "binsize", "threshold", "template_index"}:
+            raise FollowupUnsupported("not a threshold-0 single-template call")
+        g, tl = bank._template_map[ti]
+        bs = int(kw["binsize"]) if kw.get("binsize") is not None else (bank.binsize or g.n)
+        if bs >= g.n:
+            raise FollowupUnsupported("binsize spans a block")
+        S = len(ser)
+        st, ws, we = TimeDomainFilterBank._window_layout(g, _normalize_windows(kw["windows"], S), S)
+        plan = g.get_flat_plan()
+        ctx = getattr(plan, "_gpu", None)
+        if not isinstance(ctx, ctx_type) or plan._gtmpl is None:
+            raise FollowupUnsupported("not a plan on this backend")
+        c = containing(np.ascontiguousarray(ser), ctx)
+        if c is None:
+            raise FollowupUnsupported("series not device-resident")
+        if st.size and int(st.max()) + g.n > ser.size:
+            raise FollowupUnsupported("a block reads past the series")
+        # One group per (template group, binsize, series allocation): a group searching two
+        # detectors' allocations is two groups, not one per combination of allocations.
+        gw = groups.setdefault((id(plan), bs, id(c[0])), dict(
+            plan=plan, ctx=ctx, n=g.n, bs=bs, alloc=c[0], rows=[], entries=[], nent=0))
+        # The job's blocks as arrays (one row and one entry per block): a segment's
+        # follow-ups are ~1000 blocks.
+        k = int(st.size)
+        first = gw["nent"]
+        if max_rows is not None and first + k > max_rows:
+            raise FollowupUnsupported("too many rows")
+        gw["rows"].append(np.asarray(st, np.int64) + c[1])
+        ent = np.empty((k, 5), np.int64)
+        ent[:, 0] = first + np.arange(k)
+        ent[:, 1] = tl
+        ent[:, 2] = np.minimum(np.asarray(ws, np.int64), g.n)
+        ent[:, 3] = np.minimum(np.asarray(we, np.int64), g.n)
+        ent[:, 4] = ent[:, 0]
+        gw["entries"].append(ent)
+        gw["nent"] = first + k
+        layout.append((gw, st, ws, we, first, g, tl, ti))
+    out = list(groups.values())
+    for gw in out:
+        e = (np.concatenate(gw["entries"]) if gw["entries"] else np.empty((0, 5), np.int64))
+        gw["rows"] = (np.concatenate(gw["rows"]) if gw["rows"]
+                      else np.empty(0, np.int64)).astype(np.uint32)
+        gw["entries"] = e.astype(np.uint32)
+        nbins = max(1, int((-(-(e[:, 3] - e[:, 2]) // gw["bs"])).max()) if e.size else 1)
+        nbins = 1 << (nbins - 1).bit_length()
+        if nbins > MAX_BINS:
+            raise FollowupUnsupported("window has too many bins")
+        gw["nbins"] = nbins
+    return out, layout
+
+
+def assemble_followups(layout, read):
+    """Each job's FilterResults from a device run of followup_layout's groups, ordered as
+    TimeDomainFilterBank._items_batch orders them. read(group) gives the group's (idx, val),
+    each (entries, nbins), read once per group."""
+    reads = {}
+    out = []
+    for gw, st, ws, we, first, g, tl, ti in layout:
+        r = reads.get(id(gw))
+        if r is None:
+            r = reads[id(gw)] = read(gw)
+        k = int(st.size)
+        idx = r[0][first:first + k]
+        val = r[1][first:first + k]
+        bs, nbins = gw["bs"], gw["nbins"]
+        counts = ((we - ws + bs - 1) // bs).astype(np.int64)
+        hit = (idx >= 0) & (np.arange(nbins)[None, :] < counts[:, None])
+        out.append(window_results(hit, counts, st, idx, val, ti, g.n))
+    return out
+
+
+def submit_followups(jobs):
+    """A collector giving the FilterResults of single-template follow-up jobs, submitted on
+    the jobs' device without waiting; or None (the backend has no executor, or the batch is
+    outside it: the caller runs the jobs on the host)."""
+    if not jobs:
+        return lambda: []
+    try:
+        bank, _, kw = jobs[0]
+        g, _ = bank._template_map[(kw or {}).get("template_index")]
+        ctx = getattr(g.get_flat_plan(), "_gpu", None)
+        executor = getattr(ctx, "followup_executor", None)
+        if executor is None:
             return None
-        # Kept blocks are a prefix of each row: the layout's blocks are consecutive.
-        if np.any(ok[:, :-1].astype(np.int8) < ok[:, 1:].astype(np.int8)):
-            return None
-        counts = (re - rs + bs - 1) // bs                                 # bins per block
-        okb = ok[:, :bpi]
-        hit = ((idx3[sel] >= 0) & okb[:, :, None]
-               & (np.arange(nbins)[None, None, :] < counts[:, :bpi, None]))
-        for r, i in enumerate(sel):
-            res[i] = window_results(hit[r], counts[r, :bpi], ts[r, :bpi], idx3[i], val3[i],
-                                    ti[i], g.n)
-    return [(int(it[i, 0]), int(it[i, 1]), int(c0[i]), int(ti[i]), res[i]) for i in order]
+        return executor().submit_jobs(jobs)
+    except (FollowupUnsupported, KeyError, TypeError):
+        return None
+
+
+def run_followups(spec, sel):
+    """FollowupSpec results for sel (FollowupSpec.select's list) on the device, or None."""
+    collect = submit_followups([s[4] for s in sel])
+    if collect is None:
+        return None
+    return [(j, rank, c0, ti, r) for (j, rank, c0, ti, _), r in zip(sel, collect())]

@@ -1119,9 +1119,6 @@ class Context(InputUploads):
     supports_async = True
     #: hier_peaks/forward take handle_out, and hier_replay/forward_replay resubmit them.
     supports_replay = True
-    #: Selected follow-ups (_gpuhost.FollowupSpec) run as one fixed recording per template
-    #: group (_vkfollowup), refineItems over listed entries.
-    supports_device_followups = True
     #: hier_peaks_grouped takes groups of different bin counts (nbins = the largest; per-row
     #: windows bound each block), so a hierarchical plan's ragged call is one submission.
     supports_ragged_hier = True
@@ -3429,6 +3426,11 @@ class Context(InputUploads):
             users.discard(token)
             if not users and storage != keep_storage:
                 self._drop_storage(storage)
+
+    def followup_executor(self):
+        """This device's executor for _gpuhost.submit_followups (_vkfollowup: one recording per group, replayed)."""
+        from . import _vkfollowup
+        return _vkfollowup.executor(self)
 
     def clear_cache(self):
         """Release records and owned storage, preserving external shared arrays."""

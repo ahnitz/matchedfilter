@@ -163,8 +163,8 @@ unchanged to SPIR-V, PTX and Metal. About 315 lines sit in backend-specific bloc
 - **Vulkan (about 40):** specialization constants and the row-window binding.
 - **CUDA (about 35):** constants declared as statics, and dispatch details.
 
-There are 4 raw target intrinsics. Native CUDA kernels outside Slang total 463 lines
-(`coarse_tc.cu` tensor-core gate, `followup.cu`); these are kept as explicit exceptions.
+There are 4 raw target intrinsics. The one native CUDA kernel outside Slang is
+`coarse_tc.cu` (the tensor-core gate, 285 lines), kept as an explicit exception.
 
 The duplication is in the hosts: about 8.6k lines across `_vkcompute`, `_cudacompute` and
 `_mtlcompute`, which stage 1 addresses. The kernel-side cleanup lands in stages 3 and 5:

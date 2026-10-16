@@ -104,17 +104,6 @@ def build_coarse_tc(nvrtc, outdir):
             print("  coarse_tc band=%d wpb=%d kappa=%s" % (band, wpb, kappa), flush=True)
 
 
-FOLLOWUP_KERNEL = ROOT / "src" / "gpu" / "followup.cu"
-
-
-def build_followup(nvrtc, outdir):
-    """The device follow-up item builder (src/gpu/followup.cu)."""
-    out = outdir / "followup.ptx"
-    out.write_bytes(nvrtc_ptx(nvrtc, find_cuda_path(), FOLLOWUP_KERNEL.read_text(),
-                              "followup.cu", {}, arch="compute_75"))
-    print("  followup", flush=True)
-
-
 COMPACT_PEAKS_KERNEL = ROOT / "src" / "gpu" / "compact_peaks.slang"
 
 TIER_B = (64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536)
@@ -323,7 +312,6 @@ def _build():
                 compile_tierb(slangc, nvrtc, env, n, OUT, "refineItems", cap=PORTABLE_CAP,
                               suffix="_lds32")
             print("  items n=%d" % n, flush=True)
-        build_followup(nvrtc, OUT)
         return 0
     if args.only == "coarse":
         for n in (64, 128, 256):
@@ -446,7 +434,6 @@ def _build():
     manifest["full_tierc"] = build_full_tierc(slangc, nvrtc, env, OUT)
     build_compact_peaks(slangc, nvrtc, env, OUT)
     build_coarse_tc(nvrtc, OUT)
-    build_followup(nvrtc, OUT)
     (OUT / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     print("Wrote PTX manifest: %s" % (OUT / "manifest.json"))
     return 0

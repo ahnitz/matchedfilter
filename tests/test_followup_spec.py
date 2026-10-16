@@ -3,8 +3,8 @@ must equal it exactly.
 
 select() is the rule pycbc's asymmetric follow-up applies (and tools/ladder.py applied itself):
 per job, peaks with |snr| >= threshold, loudest first (stable), one per dedupe interval, each
-followed up on the partner job's series. A backend that runs the rule on the device
-(``supports_device_followups``) must return the same follow-ups -- same keys, same results --
+followed up on the partner job's series. A backend that runs the follow-ups on the device
+(``Context.followup_executor``) must return the same follow-ups -- same keys, same results --
 as filter_series_many(jobs, followups=spec), which runs it on the host.
 """
 import numpy as np
@@ -78,7 +78,7 @@ def test_device_followups_equal_the_host_rule(device, monkeypatch):
         pytest.skip("no backend with device follow-ups")
     rng, banks = _banks(monkeypatch, device)
     gpu = banks[0]._groups[0].plan._gpu
-    if not getattr(gpu, "supports_device_followups", False):
+    if not hasattr(gpu, "followup_executor"):
         pytest.skip("backend has no device follow-ups")
     S = 1 << 17
     rows = banks[0].empty_shared((2 * len(banks), S))
@@ -127,7 +127,7 @@ def test_batched_single_template_calls_own_their_results(device, monkeypatch):
     if device == "none":
         pytest.skip("no GPU backend")
     monkeypatch.setenv("MF_GPU_ITEMS", "0")             # the per-call path, not the items batch
-    monkeypatch.setenv("MF_VK_DEVICE_FOLLOWUPS", "0")
+    monkeypatch.setenv("MF_DEVICE_FOLLOWUPS", "0")
     rng, banks = _banks(monkeypatch, device, nbanks=1)
     bank = banks[0]
     g = bank._groups[0]
