@@ -2259,7 +2259,8 @@ class Context(InputUploads):
 
     def _band_measure(self, n, B, nd, nt, bufs, surv_key, count):
         """The fraction of blocks the refine touched, for the next call's choice."""
-        f = refine_block_fraction(bufs[surv_key].view(np.uint32, max(count, 0)), nt, nd)
+        f = 0.0 if count <= 0 else refine_block_fraction(bufs[surv_key].view(np.uint32, count),
+                                                         nt, nd)
         self.__dict__.setdefault("_band_f", {})[(n, B, nd, nt)] = f
         from . import gatechain as _gc           # forward pricing uses the measured fraction
         _gc.note_refine_blocks(n, B, f)
