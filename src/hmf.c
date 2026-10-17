@@ -27,7 +27,7 @@ int ap_gate16_run_pairs(void *g,int d0,int t0,const int *dsel,const int *tsel,in
 typedef struct {
   size_t m;                       /* band: coarse transform length */
   ap_mf_plan *mf;
-  float *ct0,*scratch,*fpow;      /* unscaled in-band templates, staging, per-template band fraction */
+  float *scratch,*fpow;           /* staging, per-template band fraction */
   float ref_f,thr;                /* reference band fraction; threshold (<0: unconfigured) */
   ap_peak *cebuf;
   unsigned char *pending;         /* [nd] owned series spectrum awaits ingestion */
@@ -152,14 +152,13 @@ ap_hmf_plan *ap_hmf_create_chain(size_t n,size_t k,int ndata,int ntmpl,
       if(!tr->mf) tr->mf=ap_mf_create(tr->m,p->nd,ntmpl);
       /* The first tier sees every pair; it is the one worth halving (see gate16.cc). */
       if(i==0 && ap_gate16_available()) tr->g16=ap_gate16_create(tr->m,p->nd,ntmpl);
-      tr->ct0=ap_alloc64((size_t)ntmpl*2*tr->m*sizeof(float));
       tr->scratch=ap_alloc64(2*tr->m*sizeof(float));
       tr->fpow=calloc((size_t)ntmpl,sizeof(float));
       tr->cebuf=calloc((size_t)p->nd*ntmpl,sizeof(ap_peak));
       tr->pending=calloc((size_t)p->nd,1);
       tr->fire_d=calloc((size_t)p->nd*ntmpl,sizeof(int));
       tr->fire_t=calloc((size_t)p->nd*ntmpl,sizeof(int));
-      if(!tr->mf||!tr->ct0||!tr->scratch||!tr->fpow||!tr->cebuf||!tr->pending||!tr->fire_d||!tr->fire_t){
+      if(!tr->mf||!tr->scratch||!tr->fpow||!tr->cebuf||!tr->pending||!tr->fire_d||!tr->fire_t){
         ap_hmf_destroy(p); return NULL;
       }
     }
@@ -191,7 +190,7 @@ void ap_hmf_destroy(ap_hmf_plan *p){
     hmf_tier *tr=&p->tier[i];
     if(tr->mf) ap_mf_destroy(tr->mf);
     if(tr->g16) ap_gate16_destroy(tr->g16);
-    free(tr->ct0); free(tr->scratch); free(tr->fpow); free(tr->cebuf); free(tr->pending);
+    free(tr->scratch); free(tr->fpow); free(tr->cebuf); free(tr->pending);
     free(tr->fire_d); free(tr->fire_t);
   }
   ap_destroy(p->full_fft);
@@ -366,7 +365,7 @@ int ap_hmf_set_hermitian(ap_hmf_plan *p,int hermitian){
      and the refine's template layout. Replay rows already ingested. */
   if(p->is_dif){
     for(int t=0;t<p->nt;t++)
-      if(p->tready[t] && ap_hmf_set_template(p,t,p->tmpls_half+(size_t)t*2*p->k)) return -1;
+      if(p->tready[t]==1 && ap_hmf_set_template(p,t,p->tmpls_half+(size_t)t*2*p->k)) return -1;
   }
   return 0;
 }
@@ -419,13 +418,18 @@ int ap_hmf_set_thresholds(ap_hmf_plan *p,const float *thr,int ntiers){
   for(int i=0;i<ntiers;i++) p->tier[i].thr=thr[i];   /* negative marks unconfigured */
   return 0;
 }
-static int refresh_template(ap_hmf_plan *p,int t){
+/* Each tier's template t: the in-band part of spec (its first m bins; for a Hermitian-packed
+   spectrum the Nyquist value in DC's imaginary part is dropped), scaled to unit expected
+   power in the band -- by the reference's band fraction, or the template's own without one.
+   Nothing unscaled is kept: a later reference change marks the template stale, and the
+   caller loads it again (ap_hmf_set_reference). */
+static int load_tiers(ap_hmf_plan *p,int t,const float *spec){
   for(int i=0;i<p->ntiers;i++){
     hmf_tier *tr=&p->tier[i];
     double f=p->ref_on ? tr->ref_f : tr->fpow[t];
     double scale=f>0 ? 1/sqrt(f) : 0;
-    const float *original=tr->ct0+(size_t)t*2*tr->m;
-    for(size_t k=0;k<2*tr->m;k++) tr->scratch[k]=(float)(original[k]*scale);
+    for(size_t k=0;k<2*tr->m;k++) tr->scratch[k]=(float)(spec[k]*scale);
+    if(p->is_dif && p->hermitian) tr->scratch[1]=0.0f;
     if(ap_mf_set_template(tr->mf,t,tr->scratch)) return -1;
     if(tr->g16 && ap_gate16_set_template(tr->g16,t,tr->scratch)) return -1;
   }
@@ -444,7 +448,9 @@ int ap_hmf_set_reference(ap_hmf_plan *p,const float *power){
     for(int i=0;i<p->ntiers;i++) p->tier[i].ref_f=(float)(low[i]/total);
     p->ref_on=1;
   } else p->ref_on=0;
-  for(int t=0;t<p->nt;t++) if(p->tready[t] && refresh_template(p,t)) return -1;
+  /* The tier templates already loaded were scaled for the old reference: stale until set
+     again (a run over them fails rather than use the old scale). */
+  for(int t=0;t<p->nt;t++) if(p->tready[t]==1) p->tready[t]=2;
   return 0;
 }
 int ap_hmf_set_sparse(ap_hmf_plan *p,int on){
@@ -504,11 +510,9 @@ int ap_hmf_set_template(ap_hmf_plan *p,int t,const float *spec){
   for(int i=0;i<p->ntiers;i++){
     hmf_tier *tr=&p->tier[i];
     tr->fpow[t]=total>0 ? (float)(low[i]/total) : 0;
-    memcpy(tr->ct0+(size_t)t*2*tr->m,spec,2*tr->m*sizeof(float));
-    if(p->is_dif && p->hermitian) (tr->ct0+(size_t)t*2*tr->m)[1]=0.0f;
   }
   p->tready[t]=1;
-  return refresh_template(p,t);
+  return load_tiers(p,t,spec);
 }
 
 int ap_hmf_set_real_series(ap_hmf_plan *p,int on){
@@ -896,6 +900,7 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
                ap_peak *peaks,int *counts,size_t start,size_t end){
   if(!p||nd<1||nt<1||!binsize) return 0;
   if(d0<0||d0+nd>p->nd||t0<0||t0+nt>p->nt) return -1;
+  for(int t=t0;t<t0+nt;t++) if(p->tready[t]==2) return -1;   /* stale since a reference change */
   if(end>p->n) end=p->n;
   if(start>=end) return 0;
   const size_t n=p->n;

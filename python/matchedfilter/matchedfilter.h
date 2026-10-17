@@ -247,7 +247,9 @@ size_t ap_hmf_nbins(const ap_hmf_plan *p, size_t binsize, size_t start, size_t e
  * here rather than tuning per template.  Doing so also skips the per-template
  * measurement at ingest entirely.
  *
- * Pass NULL to use each template. Existing templates are rescaled on change. */
+ * Pass NULL to use each template. Templates already set are scaled for the old
+ * reference: they become stale, and a run over a stale template fails until it is
+ * set again (no unscaled copy is kept to rescale them from). */
 int    ap_hmf_set_reference(ap_hmf_plan *p, const float *power);
 int    ap_hmf_set_data    (ap_hmf_plan *p, int d, const float *spec);
 int    ap_hmf_set_template(ap_hmf_plan *p, int t, const float *spec);
