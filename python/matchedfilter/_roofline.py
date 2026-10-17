@@ -96,6 +96,8 @@ import time
 
 import numpy as np
 
+from .time_domain import _stored_bins
+
 #: Bytes per complex value at each precision.
 CBYTES = {"fp32": 8, "fp16": 4, "int16": 4}
 
@@ -230,7 +232,7 @@ def fine_work(work, before, after, fine_banks, device, binsize=None, problems=No
         if not pairs:
             continue
         n, nt = g.n, len(g.template_indices)
-        kt = int(np.shape(g.spectra)[1])
+        kt = _stored_bins(g)
         blocks = pairs / nt
         if abs(blocks - round(blocks)) > 1e-9:
             problems.append("group n=%d: pairs %d not a multiple of %d templates" % (n, pairs, nt))
@@ -308,7 +310,7 @@ def followup_work(work, jobs, series_len=None):
         blocks = np.unique(st).size
         bs = int(kw.get("binsize") or bank.binsize or g.n)
         nbins = int(((we.astype(np.int64) - ws.astype(np.int64) + bs - 1) // bs).sum())
-        kt = int(np.shape(g.spectra)[1])
+        kt = _stored_bins(g)
         s.add(blocks * (fft_flops(g.n) + pair_flops(g.n)),
               int((W[:, 1] - W[:, 0]).sum()) * 8 + kt * 8 + blocks * g.n * 8 + nbins * 12, blocks)
     return s

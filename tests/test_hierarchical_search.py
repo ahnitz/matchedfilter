@@ -137,7 +137,7 @@ def test_three_levels_match_the_filters_composed_by_hand():
     rng = np.random.default_rng(2)
     root = _tree(rng)
     inputs = _inputs(rng)
-    search = HierarchicalSearch([root], threshold=0.0, leaf_options=LEAF, min_pad=0)
+    search = HierarchicalSearch([root], threshold=0.0, leaf_options=LEAF)
     got = _collect(search, inputs)
     assert len(got) == 5 * 2 * 2                    # leaves x chunks x channels
     pad = search.pad(root)
@@ -162,7 +162,7 @@ def test_two_and_four_levels():
     root4 = Root(_spec(rng), BAND, children=[Inner(_real_taps(rng, 301), children=deep)])
     inputs = _inputs(rng, nblocks=1)
     for root in (root2, root4):
-        search = HierarchicalSearch([root], threshold=0.0, leaf_options=LEAF, min_pad=0)
+        search = HierarchicalSearch([root], threshold=0.0, leaf_options=LEAF)
         got = _collect(search, inputs)
         assert got
         pad = search.pad(root)
@@ -219,7 +219,16 @@ def test_threshold_envelope_keeps_exactly_the_peaks_above_it(floor):
     search = HierarchicalSearch([root], threshold=T, envelope_floor=floor, leaf_options=LEAF)
     for lf in search._leaves_below(root):
         assert search.leaf_bank(root, lf).threshold == pytest.approx(T * floor)
-    got = _collect(search, inputs, on_series=lambda ctx: {c: env for c in ctx.channels})
+    seen = []
+
+    def on_peaks(ctx):
+        for ch in ctx.channels:
+            p = ctx.peaks[ch]
+            t = np.clip(p.sample_indices - ctx.leaf.lags[p.template_indices], 0, N - 1)
+            np.testing.assert_array_equal(ctx.envelope(ch), env(t))   # the values it used
+            seen.append((ctx.leaf.node_id, ctx.chunk, ch, p, ctx.series(ch).copy()))
+    search.run(inputs, on_series=lambda ctx: {c: env for c in ctx.channels}, on_peaks=on_peaks)
+    got = seen
     for node_id, k, ch, peaks, parent in got:
         leaf = next(l for l in search._leaves_below(root) if l.node_id == node_id)
         ref = _leaf_ref(leaf, parent, [VALID], T * floor)
@@ -276,7 +285,7 @@ def test_nested_inner_series_cover_their_childrens_reach():
             for c in (1501, 1201)]
     root = Root(_spec(rng), BAND, children=[Inner(_real_taps(rng, 51), children=deep)])
     inputs = _inputs(rng, nblocks=1, channels=("A",))
-    search = HierarchicalSearch([root], threshold=0.0, leaf_options=LEAF, min_pad=0)
+    search = HierarchicalSearch([root], threshold=0.0, leaf_options=LEAF)
     pad = search.pad(root)
     # Put the deep series' span edge on a block boundary of the short filter above them, so
     # whole-block rounding gives that filter nothing past the span.
@@ -294,3 +303,8 @@ def test_nested_inner_series_cover_their_childrens_reach():
         np.testing.assert_allclose(parent[lo:hi], p[lo:hi], rtol=0, atol=2e-5 * np.abs(p).max())
         _assert_same_peaks(peaks, _leaf_ref(leaf, p, narrow, 0.0))
 
+
+
+def test_a_leaf_threshold_option_is_refused():
+    with pytest.raises(ValueError, match="leaf threshold"):
+        HierarchicalSearch([], threshold=6.0, leaf_options=dict(threshold=5.0))
