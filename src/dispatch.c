@@ -67,6 +67,11 @@ void ap_real_split(const float *Z,const float *tw,size_t n,float *X){
   pick()->real_split(Z,tw,n,X);
 }
 
+void ap_root_merge(const float *D,const float *T,size_t k0,size_t k1,float scale,
+                   const float *tw,size_t n,float *Z){
+  pick()->root_merge(D,T,k0,k1,scale,tw,n,Z);
+}
+
 size_t ap_nbins(const ap_plan *p,size_t binsize,size_t start,size_t end){
   if(!p||!binsize) return 0;
   if(end>p->n) end=p->n;

@@ -1766,3 +1766,47 @@ int ap_mf_q15_screen(ap_mf_plan *p,int d0,int nd,int t0,int nt,float threshold,
 
 /* Debug accessor: how many data slots the plan actually has. */
 int ap_mf_ndata(const ap_mf_plan *p){ return p ? p->nd : -1; }
+
+/* The root stage of a hierarchical search: one transformed input block against one root
+   filter, both one-sided spectra of n/2 + 1 bins, to the real n-point series
+   scale * C2R(conj(T) D) over bins [k0, k1). The product, the band and the scale are formed
+   in one pass that also merges the spectrum for a half-size backward transform
+   (ap_root_merge), so the series costs one n/2-point transform and one read of each input. */
+struct ap_root { size_t n; ap_plan *half; float *tw; float *Z; };
+
+ap_root *ap_root_create(size_t n){
+  if(n<128 || (n&(n-1)) || !ap_supported(n/2)) return NULL;
+  ap_root *r=calloc(1,sizeof(*r));
+  if(!r) return NULL;
+  const size_t h=n/2;
+  r->n=n;
+  r->half=ap_create(h);
+  r->tw=malloc(2*(h+1)*sizeof(float));
+  r->Z=ap_alloc64(n*sizeof(float));
+  if(!r->half||!r->tw||!r->Z){ ap_root_destroy(r); return NULL; }
+  for(size_t k=0;k<=h;k++){
+    const double a=2.0*3.14159265358979323846*(double)k/(double)n;
+    r->tw[2*k]=(float)cos(a); r->tw[2*k+1]=(float)sin(a);
+  }
+  return r;
+}
+
+void ap_root_destroy(ap_root *r){
+  if(!r) return;
+  if(r->half) ap_destroy(r->half);
+  free(r->tw);
+  free(r->Z);
+  free(r);
+}
+
+size_t ap_root_length(const ap_root *r){ return r ? r->n : 0; }
+
+int ap_root_real(ap_root *r,const float *D,const float *T,size_t nbins,
+                 size_t k0,size_t k1,float scale,float *out){
+  if(!r||!D||!T||!out) return -1;
+  const size_t h=r->n/2;
+  if(nbins<h+1 || k0>k1 || k1>h+1) return -1;
+  ap_root_merge(D,T,k0,k1,scale,r->tw,r->n,r->Z);
+  ap_fft(r->half,r->Z,out,AP_BACKWARD);
+  return 0;
+}

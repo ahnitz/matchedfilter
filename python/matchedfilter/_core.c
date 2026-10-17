@@ -1242,6 +1242,68 @@ static PyObject *M_price_q15_tier0(PyObject *self, PyObject *args){
   return Py_BuildValue("(dd)",a,b);
 }
 
+/* Root(n): the root stage of a hierarchical search (ap_root_real). */
+typedef struct { PyObject_HEAD ap_root *r; } RootObject;
+
+static PyObject *Root_new(PyTypeObject *type, PyObject *args, PyObject *kw){
+  (void)kw; Py_ssize_t n;
+  if(!PyArg_ParseTuple(args,"n",&n)) return NULL;
+  if(n<128 || (n&(n-1))){
+    PyErr_SetString(PyExc_ValueError,"n must be a power of two of at least 128"); return NULL;
+  }
+  RootObject *self=(RootObject*)type->tp_alloc(type,0);
+  if(!self) return NULL;
+  self->r=ap_root_create((size_t)n);
+  if(!self->r){
+    Py_DECREF(self);
+    PyErr_SetString(PyExc_ValueError,"unsupported root length"); return NULL;
+  }
+  return (PyObject*)self;
+}
+static void Root_dealloc(RootObject *self){
+  ap_root_destroy(self->r);
+  Py_TYPE(self)->tp_free((PyObject*)self);
+}
+/* real(D, T, k0, k1, scale, out): D, T complex64 one-sided spectra of at least n/2 + 1 bins,
+   out float32 of n samples (C-contiguous, writable). */
+static PyObject *Root_real(RootObject *self, PyObject *args){
+  Py_buffer bd, bt, bo; Py_ssize_t k0, k1; float scale;
+  if(!PyArg_ParseTuple(args,"y*y*nnfw*",&bd,&bt,&k0,&k1,&scale,&bo)) return NULL;
+  const size_t n=ap_root_length(self->r), nbins=(size_t)(bd.len/8);
+  int rc=-1;
+  if(bd.len%8==0 && bt.len>=bd.len && bo.len>=(Py_ssize_t)(n*sizeof(float))
+     && k0>=0 && k1>=k0){
+    Py_BEGIN_ALLOW_THREADS
+    rc=ap_root_real(self->r,(const float*)bd.buf,(const float*)bt.buf,nbins,
+                    (size_t)k0,(size_t)k1,scale,(float*)bo.buf);
+    Py_END_ALLOW_THREADS
+  }
+  PyBuffer_Release(&bd); PyBuffer_Release(&bt); PyBuffer_Release(&bo);
+  if(rc){
+    PyErr_SetString(PyExc_ValueError,"root: spectra shorter than n/2 + 1 bins, band outside "
+                    "[0, n/2 + 1), or output shorter than n samples"); return NULL;
+  }
+  Py_RETURN_NONE;
+}
+static PyObject *Root_length(RootObject *self, PyObject *unused){
+  (void)unused; return PyLong_FromSize_t(ap_root_length(self->r));
+}
+static PyMethodDef Root_methods[]={
+  {"real",(PyCFunction)Root_real,METH_VARARGS,
+   "real(D, T, k0, k1, scale, out): out = scale * C2R(conj(T) D over bins [k0, k1))"},
+  {"length",(PyCFunction)Root_length,METH_NOARGS,"length() -> n"},
+  {NULL,NULL,0,NULL}};
+static PyTypeObject RootType={
+  PyVarObject_HEAD_INIT(NULL,0)
+  .tp_name="matchedfilter._core.Root",
+  .tp_basicsize=sizeof(RootObject),
+  .tp_flags=Py_TPFLAGS_DEFAULT,
+  .tp_new=Root_new,
+  .tp_dealloc=(destructor)Root_dealloc,
+  .tp_methods=Root_methods,
+  .tp_doc="Root(n): the root stage of a hierarchical search, to a real series of n samples",
+};
+
 static PyMethodDef methods[]={
   {"backend",M_backend,METH_NOARGS,"backend() -> name of the selected kernel"},
   {"forward_cost",M_forward_cost,METH_VARARGS,"forward_cost(n, reps=9) -> (engine s, platform s or -1) per block forward"},
@@ -1258,9 +1320,11 @@ static struct PyModuleDef mod={PyModuleDef_HEAD_INIT,"matchedfilter._core",NULL,
 PyMODINIT_FUNC PyInit__core(void){
   if(PyType_Ready(&MFType)<0) return NULL;
   if(PyType_Ready(&HMFType)<0) return NULL;
+  if(PyType_Ready(&RootType)<0) return NULL;
   PyObject *m=PyModule_Create(&mod);
   if(!m) return NULL;
   Py_INCREF(&MFType);   PyModule_AddObject(m,"MF",(PyObject*)&MFType);
   Py_INCREF(&HMFType);  PyModule_AddObject(m,"HMF",(PyObject*)&HMFType);
+  Py_INCREF(&RootType); PyModule_AddObject(m,"Root",(PyObject*)&RootType);
   return m;
 }

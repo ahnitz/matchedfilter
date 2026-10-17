@@ -34,6 +34,23 @@ _EMPTY_FILTER_RESULTS = FilterResults(
 )
 
 
+def reference_profile(template, psd, f_low, f_high, delta_f) -> np.ndarray:
+    """The expected signal power spectrum |h|^2 / S (float64) on the template's frequency
+    grid, zero below f_low, above f_high (when positive) and where S is not positive: the
+    profile set_reference takes, for a template and a noise spectrum."""
+    h = np.asarray(template)
+    S = np.asarray(psd)
+    m = min(len(h), len(S))
+    w = np.zeros(m, dtype=np.float64)
+    good = S[:m] > 0
+    w[good] = (np.abs(h[:m][good]) ** 2) / S[:m][good]
+    f = np.arange(m) * float(delta_f)
+    w[f < float(f_low)] = 0.0
+    if f_high and float(f_high) > 0:
+        w[f > float(f_high)] = 0.0
+    return w
+
+
 def _is_index(x) -> bool:
     return isinstance(x, (int, np.integer)) and not isinstance(x, (bool, np.bool_))
 
@@ -1804,16 +1821,7 @@ class TimeDomainFilterBank:
         hit = _REF_PROFILE_CACHE.get(p_key, (ref_template, psd))
         w = hit[3] if hit is not None else None
         if w is None:
-            h = np.asarray(ref_template)
-            S = np.asarray(psd)
-            m = min(len(h), len(S))
-            w = np.zeros(m, dtype=np.float64)
-            good = S[:m] > 0
-            w[good] = (np.abs(h[:m][good]) ** 2) / S[:m][good]
-            f = np.arange(m) * df
-            w[f < flo] = 0.0
-            if fhi > 0:
-                w[f > fhi] = 0.0
+            w = reference_profile(ref_template, psd, flo, fhi, df)
             _REF_PROFILE_CACHE.put(p_key, (ref_template, psd), w)
         self.set_reference(w, delta_f=df)
 
