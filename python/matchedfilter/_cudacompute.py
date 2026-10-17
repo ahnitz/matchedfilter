@@ -51,10 +51,6 @@ class _DeviceShared:
 
     def __init__(self, cuda, device):
         self.ctx = ctypes.c_void_p()
-        if os.environ.get("MF_CUDA_BLOCKING_SYNC") and hasattr(cuda, "cuDevicePrimaryCtxSetFlags_v2"):
-            # Host waits sleep instead of spinning (CU_CTX_SCHED_BLOCKING_SYNC): process CPU
-            # time then counts host work only. A measurement setting.
-            cuda.cuDevicePrimaryCtxSetFlags_v2(device, 4)
         check_cuda(cuda.cuDevicePrimaryCtxRetain(ctypes.byref(self.ctx), device),
                    "cuDevicePrimaryCtxRetain")       # held for the process lifetime
         self.modules = {}
@@ -104,9 +100,9 @@ _BOUND = threading.local()
 #: 4-8 best; 16 within 5%.
 _TC_BLOCKS_PER_SM = 8
 
-_PREFETCH = os.environ.get("MF_CUDA_PREFETCH", "1") != "0"
-# CUDA graphs for the hierarchical launch sequences (MF_CUDA_GRAPHS=0 issues them directly).
-_GRAPHS = os.environ.get("MF_CUDA_GRAPHS", "1") != "0"
+_PREFETCH = True
+# CUDA graphs for the hierarchical launch sequences.
+_GRAPHS = True
 # Device scratch bound per tile of a full correlation into a host array.
 _TILE_BYTES = 64 * 1024 * 1024
 

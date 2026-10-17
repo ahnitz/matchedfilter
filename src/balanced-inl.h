@@ -70,7 +70,7 @@ typedef struct {
   vf *TLr,*TLi;
   float *w1r,*w1i,*w2r,*w2i;
   float *hr,*hi,*lr,*li;
-  float *ser; size_t serstride; int nostore;
+  float *ser; size_t serstride;
   float *scg;          /* [g][k2] scalar part of the stage-A twiddle, precomputed */
   vf *tw32r, *tw32i;   /* [g][k2] full vector twiddles for 32x32 path */
   int fuse;     /* 0 = staged, 1 = generic fused, 2 = unit-stride 32x32 product.
@@ -226,11 +226,6 @@ void *create(size_t N){
   if(m==11){ n1=128;  n2=16;  }
   if(m==12){ n1=128;  n2=32;  }
   if(m==18){ n1=1024; n2=256; }
-  { const char *e=getenv("MF_N1");
-    if(e){ int v=atoi(e);
-      if(v>=AP_W && v<=(int)(N/AP_W) && !(v&(v-1)) && esupported(v) && esupported((int)(N/v))){
-        n1=v; n2=(int)(N/v);
-      } } }
   /* The element transform only handles the sizes efactor knows.  A split it
      cannot compute used to be accepted and produce silently wrong answers - an
      impulse came back with error 1.0 - so refuse it instead. */
@@ -316,7 +311,6 @@ void *create(size_t N){
     else                       g = 32;   /* beyond L2: the stream shape is what matters */
     if(g>g_max) g=g_max;
     if(g<1) g=1;
-    { const char *e=getenv("MF_GBLK"); if(e){ long v=atol(e); if(v>0){ g=(size_t)v; if(g>g_max)g=g_max; } } }
     p->gblk=(int)g; p->bstride=me;
   }
   /* Stage B reads the intermediate at [n1][k2], walking n1 with stride istr while
@@ -367,7 +361,6 @@ void *create(size_t N){
     p->scg=ap_alloc64(g_n*(size_t)n2*2*sizeof(float)+64);
     p->ser=NULL;   /* set by series_buf() when a caller wants it */
     p->fuse = eprod_ok(p->N2);
-    { const char *e=getenv("MF_FUSE"); if(e) p->fuse = atoi(e) ? eprod_ok(p->N2) : 0; }
     if constexpr (AP_W == 8 || AP_W == 16) {
       if(p->fuse && n1==32 && n2==32 && ap_srprod()) p->fuse=2;
     }
@@ -1319,12 +1312,12 @@ static void binmax_core(BP*p,size_t binsize,float thr,ap_peak*out,int conj,
   if(nb==1){
     if constexpr (AP_W==8) {
       if(p->fuse==2 && p->ilay) {
-        if(p->ser && !p->nostore) binmax_one<true,true>(p,thr,out,conj,ws,we);
+        if(p->ser) binmax_one<true,true>(p,thr,out,conj,ws,we);
         else                    binmax_one<false,true>(p,thr,out,conj,ws,we);
         return;
       }
     }
-    if(p->ser && !p->nostore) binmax_one<true>(p,thr,out,conj,ws,we);
+    if(p->ser) binmax_one<true>(p,thr,out,conj,ws,we);
     else                    binmax_one<false>(p,thr,out,conj,ws,we);
     return;
   }
@@ -1518,13 +1511,11 @@ float interp_max(void *vp,size_t ws,size_t we,float evmax,
 float *series_buf(void *vp,int on){
   BP *p=(BP*)vp;
   if(!on){ p->ser=NULL; return NULL; }
-  if(getenv("MF_NOSTORE")) p->nostore=1;
   if(!p->ser){
     /* Offset the two halves off a power of two.  Landing them a multiple of
        4 KiB apart, or apart from the intermediate, makes every store collide
        with a stage-B load in the store-forwarding logic. */
     p->serstride=(size_t)p->N+2*AP_W+16;
-    { const char *e=getenv("MF_SERPAD"); if(e) p->serstride=(size_t)p->N+2*AP_W+(size_t)atoi(e); }
     p->ser=(float*)ap_alloc64(p->serstride*2*sizeof(float)+4096);
     if(p->ser) memset(p->ser,0,p->serstride*2*sizeof(float));
   }
@@ -1636,7 +1627,7 @@ static HWY_NOINLINE MF_PEAK_SECTION int binmax_prod_threshold(void *vp,const flo
   BP *p=(BP*)vp;
   if constexpr (AP_W==8 || AP_W==16) {
     if(__builtin_expect(thr>0.f && (we-ws)<=binsize && p->fuse==2 && p->ilay && p->bblk==1 && p->gmajor
-       && !(p->ser && !p->nostore), 1)) {
+       && !p->ser, 1)) {
       stageA_prod_32(p,dr,di,tr,ti);
       binmax_fused32(p,thr,out,conj,ws,we);
       return 0;
