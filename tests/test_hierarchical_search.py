@@ -205,8 +205,8 @@ def test_windows_skip_groups_and_reused_buffers_hold_no_stale_values():
         pad = search.pad(root)
         lo, hi = narrow[0][0] - 300 - pad, narrow[0][1] + 300 + pad
         np.testing.assert_allclose(parent[lo:hi], ref[lo:hi], rtol=0, atol=2e-5 * np.abs(ref).max())
-        reach = search._inner[id(root)].reach
-        assert not parent[:max(0, lo - reach)].any() and not parent[hi + reach:].any()
+        block = max(g.n for g, _, _ in search._inner[id(root)]._groups)
+        assert not parent[:max(0, lo - block)].any() and not parent[hi + block:].any()
 
 
 @pytest.mark.parametrize("floor", [1.0, 0.5])
@@ -281,7 +281,7 @@ def test_nested_inner_series_cover_their_childrens_reach():
     # Put the deep series' span edge on a block boundary of the short filter above them, so
     # whole-block rounding gives that filter nothing past the span.
     short = search._batch(root, N)               # the 51-tap filter's batch
-    lo_v, hi_v = short._plan[0][0].valid
+    lo_v, hi_v = short._groups[0][1]
     edge = 3 * (hi_v - lo_v) + lo_v              # a block boundary of its output
     start = edge + pad                           # the deep series' span starts there
     narrow = [(start, start + 400)]
@@ -293,3 +293,4 @@ def test_nested_inner_series_cover_their_childrens_reach():
         lo, hi = narrow[0][0] - pad, narrow[0][1] + pad
         np.testing.assert_allclose(parent[lo:hi], p[lo:hi], rtol=0, atol=2e-5 * np.abs(p).max())
         _assert_same_peaks(peaks, _leaf_ref(leaf, p, narrow, 0.0))
+

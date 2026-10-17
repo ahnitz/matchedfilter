@@ -1,6 +1,7 @@
 # Hierarchical search: memory and interface plan
 
-Status: plan, 2026-10-17, for review before any code. Three library changes, each
+Status (2026-10-17): B done (7ceff4e2). A built, measured and dropped (below). C open.
+Originally: plan, 2026-10-17, for review before any code. Three library changes, each
 measured first, each validated against the code it replaces before the next.
 
 Baseline (100k complex bank, 2048 s, two detectors, dev2, one core, branch
@@ -129,3 +130,23 @@ shows the follow-up larger.
 Each lands on `hier-search` as its own commit, gated (suite, ladder checks)
 before the next starts. Not covered here, next: the ~0.7 GB not returned between
 tops (allocator or cache: diagnose first), and the audit of `MF_*` switches.
+
+## Outcome of A (measured, dropped)
+
+Built as planned (C ingest/correlate split, held spectra, row batches from a budget) and
+bit-identical, but the "same work" did not hold for memory traffic: the held spectra (about
+10 MB a block size a detector) are written once and read back per row batch, where the fused
+path uses each block's spectrum for every row while it is in cache. Paired on dev2, identical
+triggers throughout:
+
+| middle rows held | steady | peak RSS |
+|---|---|---|
+| all (fused) | 12.68 / 12.70 M (baseline 12.66 / 12.69) | ~1.6 GB |
+| 8 (128 MB) | 12.49 M (-1.5%) | 1.48 GB |
+| 4 (64 MB) | 12.10 M (-4.5%) | 1.38 GB |
+| 2 (32 MB) | 11.98 M (-5.5%) | 1.36 GB |
+
+The budget also bounded only the middle rows, not the fine banks (the largest item), so it
+was not a memory budget in the sense a user would read it. Dropped for its complexity. Kept
+from the rewrite: the search's middle stage as a tree walk with exact slot clearing (a reused
+slot clears what its last row wrote outside its new coverage), on the fused path.
