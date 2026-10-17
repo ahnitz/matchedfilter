@@ -670,8 +670,8 @@ class _FusedBatch:
 
     #: Submissions per fused command buffer. The device starts on a chunk while the host
     #: prepares the next: fusing a whole segment into one buffer left the GPU idle through
-    #: all the host's preparation. MF_GPU_FUSE_CHUNK overrides.
-    chunk = int(os.environ.get("MF_GPU_FUSE_CHUNK", "16"))
+    #: all the host's preparation.
+    chunk = 16
 
     def add(self, ctx, commands, fence):
         self.items.append((ctx, [getattr(c, "value", c) for c in commands]))
@@ -787,7 +787,7 @@ class _FusedBatch:
         _check(vk.vkEndCommandBuffer(cmd), "end fused")
         self.prof = prof
         cache[key] = (cmd, [list(cmds) for _, cmds in self.items])
-        while len(cache) > int(os.environ.get("MF_GPU_FUSE_CACHE", "64")):
+        while len(cache) > 64:
             _, (old_cmd, _) = cache.popitem(last=False)
             self._free(old_cmd)
         self._submit_fused(cmd)
@@ -1053,8 +1053,7 @@ class _Device:
             vk.vkGetPhysicalDeviceFeatures2.restype = None
             vk.vkGetPhysicalDeviceFeatures2(self.physical, ctypes.byref(f2))
             names, chain = [], []
-            if (_SSC_EXT in have and ssc.subgroupSizeControl
-                    and not os.environ.get("MF_VK_NO_SUBGROUP_PIN")):
+            if _SSC_EXT in have and ssc.subgroupSizeControl:
                 ssc.computeFullSubgroups = 0
                 names.append(_SSC_EXT); chain.append(ssc)
             if _HQR_EXT in have and hqr.hostQueryReset:

@@ -1660,7 +1660,7 @@ class TimeDomainFilterBank:
                 from . import gatechain as _gc, _autotune_enabled
                 # Candidates only where a trial's lock can be kept (see _trial_begin); otherwise
                 # none are built, so the bank is the model's layout at no extra cost.
-                nr = (int(os.environ.get('MF_BLOCK_TRIAL_RANKS', _BLOCK_TRIAL_RANKS))
+                nr = (_BLOCK_TRIAL_RANKS
                       if _gc._cost_file() is not None and _autotune_enabled() else 1)
                 # Locked or trialling, a bank whose block size is a measured choice keeps its
                 # batches timed for the re-check (_BlockTrials.observe).
@@ -2302,9 +2302,8 @@ class TimeDomainFilterBank:
         _BATCH_TOKEN += 1
         # On Vulkan the deferred submissions are also fused: one command buffer runs every
         # job's forward transforms, then every job's first tier, ..., one barrier per phase
-        # (MF_GPU_FUSE=0 submits them separately, for comparison).
         close = None
-        if os.environ.get("MF_GPU_FUSE", "1") != "0" and any(
+        if any(
                 getattr(b, "device", None) is not None for b, _, _ in jobs):
             # Every GPU backend in use shares the protocol: fused() begins collecting on its
             # devices and returns a close (Vulkan: _vkcompute._FusedBatch; Metal: shared

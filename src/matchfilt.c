@@ -129,7 +129,6 @@ static ap_mf_plan *create_mf(size_t n, int ndata, int ntmpl, int pair){
      ap_mf_run once per pair rather than once per batch, which turned a
      per-batch getenv into a per-pair one. */
   p->tile = 8;
-  { const char *e=getenv("MF_MFTILE"); if(e){ int v=atoi(e); if(v>0) p->tile=v; } }
   p->pb = ap_plan_pairbatch(p->fft);
   const int broadcast_data = ap_plan_broadcast_data(p->fft);
   /* Only the measured x86 targets opt in. MF_PBMAX remains a way to force

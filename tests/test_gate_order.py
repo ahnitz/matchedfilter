@@ -151,7 +151,7 @@ def test_order_model_retains_unprofitable_and_uncovered_paths(monkeypatch):
 
 def test_roofline_uses_actual_gate_inputs():
     g = SimpleNamespace(n=N, n_valid=1536, template_indices=np.arange(10),
-                        spectra=np.zeros((10, N)), is_hier=True, _plan=object())
+                        _stored_bins=N, is_hier=True, _plan=object())
     bank = SimpleNamespace(_groups=[g])
     after = dict(backend='cpu', chain=CHAIN, pairs=1000, checked=[20, 100, 15],
                  passed=[15, 20, 3], refined=3, q15=100, ident=1,

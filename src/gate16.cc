@@ -574,9 +574,9 @@ int ap_gate16_run(void *g, int d0, int nd, int t0, int nt, size_t ws, size_t we,
                   ap_peak *out) {
 #ifdef AP_GATE16
   if (!g) return -1;
-  /* The elected lag and value only for the error tools (MF_GATE16_DEBUG, MF_GATE16_ELECT);
+  /* The elected lag and value only for the error tools (MF_GATE16_DEBUG);
      the gate itself needs only the bound (run_max). */
-  static const int elect = getenv("MF_GATE16_DEBUG") != nullptr || getenv("MF_GATE16_ELECT") != nullptr;
+  static const int elect = getenv("MF_GATE16_DEBUG") != nullptr;
   return elect ? ap16::run((ap16::Gate *)g, d0, nd, t0, nt, ws, we, out)
                : ap16::run_max((ap16::Gate *)g, d0, nd, t0, nt, ws, we, out);
 #else

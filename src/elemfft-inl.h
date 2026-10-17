@@ -116,15 +116,9 @@ static inline int codelet_tw(int m,vf*restrict ar,vf*restrict ai,vf*restrict br,
  * not read.  fft8_prod was the one exception; nothing asked for an 8-point
  * product codelet until the small-N path did, and band 128 came back as
  * noise.  If a new codelet is added here, check that it returns 0. */
-/* MF_SRPROD selects the split-radix product codelets, so the two forms can be
-   compared in ONE build -- this machine drifts ~18% between runs and a choice
-   argued from two binaries measures the room.  Read once; the branch is on a
-   value that never changes and predicts perfectly. */
-static inline int ap_srprod(void){
-  static int v = -1;
-  if(v < 0){ const char *e = getenv("MF_SRPROD"); v = e ? atoi(e) : 1; }
-  return v;
-}
+/* The split-radix product codelets (measured faster against the plain form, compared in
+   one build; see docs). */
+static inline int ap_srprod(void){ return 1; }
 /* Can the product be fused into this element size's first pass?
  *
  * Only when the transform is single-level.  Two-level means the first codelet

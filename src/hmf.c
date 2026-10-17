@@ -297,10 +297,6 @@ int ap_hmf_set_direct(ap_hmf_plan *p,int on,int halfwidth){
 int ap_hmf_direct_stats(const ap_hmf_plan *p,long *pairs,long *lags,long *fft,
                         double *lagtap,double *fftpair){
   if(!p) return -1;
-  if(getenv("MF_DIRECT_TRACE")) fprintf(stderr,"direct: %ld pairs to the transform for a maximum on a window edge\n",
-                                         p->dir_edge);
-  if(getenv("MF_DIRECT_TRACE")) fprintf(stderr,"direct ticks: direct %llu fallback %llu\n",
-                                         p->dir_ttd,p->dir_tfft);
   if(pairs) *pairs=p->dir_pairs;
   if(lags) *lags=p->dir_lags;
   if(fft) *fft=p->dir_fft;
@@ -547,7 +543,7 @@ int ap_hmf_get_real_series(const ap_hmf_plan *p){ return p ? p->real_series : 0;
    X[k] = E[k] + W^k O[k] with E = (Z[k] + conj Z[h-k]) / 2, O = (Z[k] - conj Z[h-k]) / 2i,
    W = e^{-2 pi i / n}, for k = 0 .. h, and X[n-k] = conj X[k]. */
 static void hmf_forward_real(ap_hmf_plan *p,const float *x,size_t s0,size_t have,float *sp){
-  const size_t n=p->n,h=n/2;
+  const size_t n=p->n;
   const float inv=1.0f/(float)n;
   float * restrict z=p->fwd;                 /* n reals = h complex */
   float * restrict Z=p->fwd+n;               /* the h-point transform */
