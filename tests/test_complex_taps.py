@@ -103,7 +103,7 @@ def test_quadrature_taps_through_the_hierarchy(pack, device):
 
 
 @pytest.mark.parametrize("pack", [False, True])
-def test_a_real_series_is_transformed_at_half_size_exactly(pack, monkeypatch):
+def test_a_real_series_is_transformed_at_half_size_exactly(pack):
     """A CPU hierarchical bank given a real series transforms its blocks as real ones
     (half-size transforms giving the full spectrum, ap_hmf_set_real_series): the same
     triggers and values, to float rounding, as the same series widened to complex."""
@@ -121,14 +121,13 @@ def test_a_real_series_is_transformed_at_half_size_exactly(pack, monkeypatch):
         x[pos:pos + c] += 25.0 * np.real(taps[i, :c][::-1]) / np.linalg.norm(taps[i, :c])
 
     def run(real):
-        monkeypatch.setenv("MF_REAL_SERIES", "1" if real else "0")
         # One chain for both (in Hz): a chain chosen per bank from timed calibrations may
         # differ between the two, and two chains may dismiss different borderline pairs.
         bank = TimeDomainFilterBank(taps, tap_counts=counts, engine="hier", threshold=5.5,
                                     pack_templates=pack, binsize=2048,
                                     coarse_band_hz=(128.0, 256.0))
         bank.set_reference(w, delta_f=df)
-        r = bank.filter_series(x)
+        r = bank.filter_series(x if real else x.astype(np.complex64))
         order = np.lexsort((r.sample_indices, r.template_indices))
         return r.template_indices[order], r.sample_indices[order], r.snr[order]
 
@@ -198,7 +197,7 @@ def test_a_followup_on_a_real_series_reads_only_its_span():
         assert got.snr.size > 900
 
 
-def test_a_real_series_correlates_at_half_size_exactly(monkeypatch):
+def test_a_real_series_correlates_at_half_size_exactly():
     """correlate_series of a real series on the CPU (the middle stage of a real-real-complex
     hierarchy) runs half-size block transforms: the same output, to float rounding, as the
     series widened to complex -- for real taps and for packed (complex) pairs."""
@@ -222,8 +221,6 @@ def test_a_real_series_correlates_at_half_size_exactly(monkeypatch):
     x = rng.standard_normal(L).astype(np.float32)
     for t, c in ((taps, counts), pack_real_pairs(taps, counts)):
         bank = TimeDomainFilterBank(t, tap_counts=c, engine="corr")
-        monkeypatch.setenv("MF_REAL_SERIES", "0")
-        ref = bank.correlate_series(x)
-        monkeypatch.setenv("MF_REAL_SERIES", "1")
+        ref = bank.correlate_series(x.astype(np.complex64))
         got = bank.correlate_series(x)
         np.testing.assert_allclose(got, ref, rtol=1e-5, atol=1e-5 * np.abs(ref).max())

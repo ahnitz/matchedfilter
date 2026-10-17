@@ -900,11 +900,10 @@ class MatchedFilter:
         """The series as the engine reads it: complex64, or -- for a CPU hierarchical plan
         given a real series (the middle output of a real-real-complex hierarchy, filtered
         with complex quadrature templates) -- float32, transformed at half size into the
-        same full spectrum (ap_hmf_set_real_series). MF_REAL_SERIES=0 widens it to complex."""
+        same full spectrum (ap_hmf_set_real_series). GPU plans widen it to complex."""
         a = _from_any(series)
         if (not np.iscomplexobj(a) and isinstance(self, HierarchicalFilter)
-                and self.device.kind == "cpu" and self.n >= 4
-                and os.environ.get("MF_REAL_SERIES", "1") != "0"):
+                and self.device.kind == "cpu" and self.n >= 4):
             if (isinstance(a, np.ndarray) and a.dtype == np.float32 and a.ndim == 1
                     and a.strides == (8,) and a.size > 0):
                 return a            # one lane of a complex series, read in place (stride 2)

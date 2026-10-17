@@ -1177,8 +1177,7 @@ def _tap_spectra(taps: np.ndarray, counts: np.ndarray, n: int, rate_ratio: float
 def _reads_real(plan) -> bool:
     """Whether the plan reads a real (float32) series itself: a CPU hierarchical plan."""
     from . import HierarchicalFilter
-    return (isinstance(plan, HierarchicalFilter) and plan.device.kind == "cpu"
-            and os.environ.get("MF_REAL_SERIES", "1") != "0")
+    return isinstance(plan, HierarchicalFilter) and plan.device.kind == "cpu"
 
 
 def _tap_dtype(taps) -> type:
@@ -2617,8 +2616,7 @@ class TimeDomainFilterBank:
         # filtering the real top output): half-size block transforms
         # (correlate_series_continuous_real). Elsewhere it is widened to complex.
         if (isinstance(a, np.ndarray) and not np.iscomplexobj(a)
-                and _parse_device(self.device).kind == 'cpu'
-                and os.environ.get("MF_REAL_SERIES", "1") != "0"):
+                and _parse_device(self.device).kind == 'cpu'):
             ser = np.ascontiguousarray(a, dtype=np.float32)
         else:
             ser = np.ascontiguousarray(a, dtype=np.complex64)
