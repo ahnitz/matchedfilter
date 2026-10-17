@@ -161,20 +161,22 @@ def _subtract(regions, covered):
 
 
 class _InnerBatch:
-    """The inner children of one node, filtered together over the node's output.
+    """The inner children of one node, filtered over the node's output in row batches.
 
     Real taps on a real series run as packed pairs: two filters as one complex filter
     h_a - i h_b, each placed so its own centre tap is the pair's centre, whose output is
     out_a + i out_b. Neighbours in tap count are paired. Other combinations run one row
-    per child (complex output). Rows are written into one buffer per channel, reused
-    across chunks: what a call does not compute is zero, as if the buffer were fresh."""
+    per child (complex output).
+
+    Each block's forward transform is used for every row while it is in cache (one call per
+    block size). Rows are written into a channel's slots, reused across chunks: a slot reads
+    as if fresh, the correlation over what it was computed for and zero elsewhere."""
 
     def __init__(self, children, length, real_input):
         self.children = children
         self.length = int(length)
         counts = np.array([c.count for c in children], dtype=np.int64)
         order = np.argsort(counts)               # the pairing pycbc's middle stage used
-        self.order = order                       # row r holds child order[r]
         cplx = any(np.iscomplexobj(c.taps) for c in children)
         self.packed = bool(real_input) and not cplx
         self.real_input = bool(real_input)
@@ -197,136 +199,119 @@ class _InnerBatch:
                 taps[r, :counts[ci]] = children[ci].taps[:counts[ci]]
             rows_counts = counts[order]
         self.n_rows = len(rows_counts)
-        self.bank = TimeDomainFilterBank(taps, tap_counts=rows_counts, engine="corr")
-        self._plan = []
-        for g in self.bank._groups:
-            cplan = g.get_correlation_plan()
-            st, _, _ = _automatic_series_layout(self.length, cplan.valid)
-            idx = g.template_indices
-            self._plan.append((cplan, slice(int(idx[0]), int(idx[0]) + len(idx)), st))
-        # A block writes up to a block past what it was asked for; an output depends on input
-        # within its filter's tap reach (centre tap to either end).
-        self.reach = max(int(p[0].n) for p in self._plan)
-        self.tap_reach = max(max(int(p[0].valid[0]), int(p[0].n) - int(p[0].valid[1]))
-                             for p in self._plan)
-        self._buffers = {}
+        # child position -> (row, lane: 0 real part, 1 imaginary part, None the whole row)
+        self.row_of = {}
+        for r, ci in enumerate(order):
+            self.row_of[int(ci)] = divmod(r, 2) if self.packed else (r, None)
+        # The bank only partitions the rows by block size (a cost choice: every lag is output
+        # whatever the blocking); its own plans are never built.
+        bank = TimeDomainFilterBank(taps, tap_counts=rows_counts, engine="corr")
+        self._groups = []
+        self._group_of = {}                      # row -> (group, row's index in its group)
+        for gi, g in enumerate(bank._groups):
+            valid = (g.c_bad, g.n - g.c_bad)
+            st, _, _ = _automatic_series_layout(self.length, valid)
+            self._groups.append((g, valid, st))
+            for li, r in enumerate(g.template_indices):
+                self._group_of[int(r)] = (gi, li)
+        # An output depends on input within its filter's tap reach (centre tap to either end).
+        self.tap_reach = max(max(v[0], g.n - v[1]) for g, v, _ in self._groups)
+        self._plans = {}                         # block size -> its correlation plan
+        self._chan = {}                          # channel -> per-chunk and slot state
 
-    def _row_of(self, child_pos):
-        """The buffer row and lane of the child at position child_pos in self.children."""
-        r = int(np.flatnonzero(self.order == child_pos)[0])
-        return divmod(r, 2) if self.packed else (r, None)
+    def _plan(self, gi):
+        """Block size gi's correlation plan (built on first use)."""
+        plan = self._plans.get(gi)
+        if plan is None:
+            from . import CorrelationFilter
+            g, valid, _ = self._groups[gi]
+            plan = CorrelationFilter(g.n, ndata=1, ntemplates=len(g.template_indices), valid=valid)
+            g.load_templates(plan)
+            self._plans[gi] = plan
+        return plan
 
-    def run(self, series, channel, wanted, regions):
-        """Filter series for the children at the positions in `wanted`, over `regions`
-        (merged (start, stop) spans in series coordinates). Returns position -> series."""
+    def prepare(self, channel, series, regions):
+        """The blocks of channel's series whose valid lags meet regions (merged (start, stop)
+        spans) this chunk."""
         L = self.length
         if len(series) != L:
             raise ValueError("an inner batch's input length changed between chunks")
-        want_child = np.zeros(len(self.children), dtype=bool)
-        want_child[list(wanted)] = True
-        want_row = want_child[self.order]
-        if self.packed:
-            padded = np.zeros(2 * self.n_rows, dtype=bool)
-            padded[:want_row.size] = want_row
-            want = padded[0::2] | padded[1::2]
-        else:
-            want = want_row
-        dtype = np.complex64
-        entry = self._buffers.get(channel)
-        if entry is None:
-            entry = self._buffers[channel] = [np.zeros((self.n_rows, L), dtype=dtype), []]
-        out, dirty = entry
-        kept_dirty, stale = [], []
-        for d_mask, d_regions in dirty:
-            hit = d_mask & want
-            if hit.any():
-                stale.append((hit, d_regions))
-            rest = d_mask & ~want
-            if rest.any():
-                kept_dirty.append((rest, d_regions))
-        dirty[:] = kept_dirty
-
-        ser_real = None
-        ser_cplx = None
-        if self.real_input:
-            ser_real = np.ascontiguousarray(series, dtype=np.float32)
-        else:
-            ser_cplx = np.ascontiguousarray(series, dtype=np.complex64)
-
-        def complex_series():
-            nonlocal ser_cplx
-            if ser_cplx is None:
-                ser_cplx = ser_real.astype(np.complex64)
-            return ser_cplx
-
-        work = []
-        for cplan, gs, st in self._plan:
-            lo, hi = cplan.valid
-            local = np.flatnonzero(want[gs])
-            if local.size == 0:
-                continue
-            cuts = np.flatnonzero(np.diff(local) != 1) + 1
-            runs = [(int(r[0]), int(r[-1]) + 1) for r in np.split(local, cuts)]
+        ser = np.ascontiguousarray(series, dtype=np.float32 if self.real_input else np.complex64)
+        per_group = []
+        for gi, (g, (lo, hi), st) in enumerate(self._groups):
             b_start = st + lo
             b_end = np.minimum(st + hi, L)
             keep = np.zeros(st.size, dtype=bool)
-            gaps = []
             for v0, v1 in regions:
-                k = (b_start < v1) & (b_end > v0)
-                if k.any():
-                    ki = np.flatnonzero(k)
-                    c0, c1 = b_start[ki[0]], b_end[ki[-1]]
-                    if c0 > v0:
-                        gaps.append((v0, int(c0)))
-                    if c1 < v1:
-                        gaps.append((int(c1), v1))
-                    keep |= k
-                else:
-                    gaps.append((v0, v1))
-            st_run = st[keep] if keep.any() else np.empty(0, dtype=np.uintp)
+                keep |= (b_start < v1) & (b_end > v0)
+            st_run = st[keep]
+            covered = []
             if st_run.size:
                 cov = np.stack([st_run + lo, np.minimum(st_run + hi, L)], axis=1).astype(np.int64)
                 brk = np.flatnonzero(cov[1:, 0] > cov[:-1, 1]) + 1
                 covered = [(int(c[0, 0]), int(c[-1, 1])) for c in np.split(cov, brk)]
-            else:
-                covered = []
-            work.append((cplan, gs.start, gs, st_run, lo, hi, runs, gaps, covered))
+            per_group.append((st_run, covered))
+        state = self._chan.setdefault(channel, {"slots": None, "cov": []})
+        state["groups"], state["series"] = per_group, ser
 
-        # What earlier calls wrote in these rows, minus what this call overwrites, back to zero.
-        for hit, d_regions in stale:
-            for cplan, g0, gs, st_run, lo, hi, runs, gaps, covered in work:
-                rows = g0 + np.flatnonzero(hit[gs])
-                if rows.size:
-                    for a, b in _subtract(d_regions, covered):
-                        out[rows, a:b] = 0
-        for cplan, g0, gs, st_run, lo, hi, runs, gaps, covered in work:
-            for r0, r1 in runs:
-                dest = out[g0 + r0:g0 + r1]
-                for a, b in gaps:
-                    dest[:, a:b] = 0
-                if st_run.size == 0:
-                    continue
-                if cplan._gpu is not None:
-                    cplan._continuous_gpu(complex_series(), st_run, r0, r1 - r0, dest)
-                elif ser_real is not None:
-                    cplan._execution_plan().correlate_series_continuous_real(
-                        ser_real, st_run, lo, hi, r0, r1 - r0, dest)
-                else:
-                    cplan._execution_plan().correlate_series_continuous(
-                        ser_cplx, st_run, lo, hi, r0, r1 - r0, dest)
-        # A block writes up to its full valid span, past the region by up to a block: record
-        # that reach as written, so a later call clears it.
-        written = [(max(0, a - self.reach), min(L, b + self.reach)) for a, b in regions]
-        dirty.append((want.copy(), written))
-
-        result = {}
-        for pos in wanted:
-            row, lane = self._row_of(pos)
-            if lane is None:
-                result[pos] = out[row]
+    def compute(self, channel, rows):
+        """Rows into channel's first len(rows) slots. Returns row -> slot."""
+        L = self.length
+        state = self._chan[channel]
+        k = len(rows)
+        if state["slots"] is None or state["slots"].shape[0] < k:
+            state["slots"] = np.zeros((k, L), dtype=np.complex64)
+            state["cov"] = [[] for _ in range(k)]
+        slots, cov = state["slots"], state["cov"]
+        slot_of = {}
+        runs = []                                # (group, first local row, first slot, count)
+        for j, r in enumerate(rows):
+            gi, li = self._group_of[r]
+            covered = state["groups"][gi][1]
+            for a, b in _subtract(cov[j], covered):      # what the slot's last row left there
+                slots[j, a:b] = 0
+            cov[j] = covered
+            slot_of[r] = j
+            if runs and runs[-1][0] == gi and runs[-1][1] + runs[-1][3] == li:
+                runs[-1][3] += 1
             else:
-                result[pos] = out[row].real if lane == 0 else out[row].imag
-        return result
+                runs.append([gi, li, j, 1])
+        # consecutive rows of one block size in one call: each block's forward transform serves
+        # all of them
+        for gi, li, j, nt in runs:
+            st_run = state["groups"][gi][0]
+            if not st_run.size:
+                continue
+            plan = self._plan(gi)
+            lo, hi = plan.valid
+            ep = plan._continuous_plan()
+            run = (ep.correlate_series_continuous_real if self.real_input
+                   else ep.correlate_series_continuous)
+            run(state["series"], st_run, lo, hi, li, nt, slots[j:j + nt])
+        return slot_of
+
+    def view(self, channel, slot, pos):
+        """Child pos's series in the slot its row was computed into."""
+        row = self._chan[channel]["slots"][slot]
+        lane = self.row_of[pos][1]
+        if lane is None:
+            return row
+        return row.real if lane == 0 else row.imag
+
+
+class _Step(NamedTuple):
+    """What one chunk of one root's walk carries."""
+    root: object
+    chunk: int
+    active: list
+    tags: dict
+    held: dict          # channel -> node id -> series
+    need: dict          # (leaf id, channel) -> spans its parent's series must hold
+    win: dict           # (leaf id, channel) -> searched windows
+    envelopes: dict
+    pad: int
+    live: set
+    on_peaks: Optional[Callable]
 
 
 class HierarchicalSearch:
@@ -493,54 +478,68 @@ class HierarchicalSearch:
                         while node is not root:
                             live.add(id(node))
                             node = self._parent[id(node)]
-                t0 = time.perf_counter()
-                for c in active:
-                    self._descend(root, c, held[c], need, pad, live)
-                self.timings["inner"] += time.perf_counter() - t0
-                for lf in leaves:
-                    if not any(win[(id(lf), c)] for c in active):
-                        continue
-                    peaks = {}
-                    t0 = time.perf_counter()
-                    for c in active:
-                        w = win[(id(lf), c)]
-                        if not w:
-                            peaks[c] = _EMPTY_FILTER_RESULTS
-                            continue
-                        parent = self._parent[id(lf)]
-                        # one window as a slice: filter_series memoises a slice's layout
-                        res = self._leaf_bank(root, lf).filter_series(
-                            held[c][id(parent)], windows=slice(*w[0]) if len(w) == 1 else w)
-                        peaks[c] = self._apply_envelope(res, lf, envelopes.get(c),
-                                                        len(held[c][id(parent)]))
-                    self.timings["leaf"] += time.perf_counter() - t0
-                    if on_peaks is not None:
-                        t0 = time.perf_counter()
-                        on_peaks(PeaksContext(self, root, lf, k, active, tags, peaks, held))
-                        self.timings["hooks"] += time.perf_counter() - t0
+                step = _Step(root, k, active, tags, held, need, win, envelopes, pad, live, on_peaks)
+                self._walk(root, step)
                 if on_chunk is not None:
                     on_chunk(ChunkContext(k, active, tags))
 
-    def _descend(self, node, channel, held, need, pad, live):
-        """Produce, below node, the series of every live inner node in channel, valid where
-        this channel's leaves (need[.., channel]) read them."""
-        if not self._kids[id(node)][0]:
+    def _walk(self, node, step):
+        """Search node's leaves, then produce its live inner children (every channel) and
+        walk each."""
+        inner, leaves = self._kids[id(node)]
+        for lf in leaves:
+            self._search_leaf(lf, step)
+        if not inner:
             return
-        batch = self._batch(node, len(held[id(node)]))
-        L = batch.length
-        spans, wanted = [], []
-        for pos, child in enumerate(batch.children):
-            if id(child) in live:
-                wanted.append(pos)
-                self._span(child, channel, need, pad, L, spans)
+        held = step.held
+        L = len(held[step.active[0]][id(node)])
+        batch = self._batch(node, L)
+        wanted = [pos for pos, ch in enumerate(batch.children) if id(ch) in step.live]
         if not wanted:
             return
-        regions = _clip(_merge(spans), 0, L)
-        series = batch.run(held[id(node)], channel, wanted, regions)
-        for pos, s in series.items():
+        t0 = time.perf_counter()
+        rows = sorted({batch.row_of[pos][0] for pos in wanted})
+        slot_of = {}
+        for c in step.active:
+            spans = []
+            for pos in wanted:
+                self._span(batch.children[pos], c, step.need, step.pad, L, spans)
+            batch.prepare(c, held[c][id(node)], _clip(_merge(spans), 0, L))
+            slot_of[c] = batch.compute(c, rows)
+        members = sorted(wanted, key=lambda p: batch.row_of[p])
+        for pos in members:
             child = batch.children[pos]
-            held[id(child)] = s
-            self._descend(child, channel, held, need, pad, live)
+            for c in step.active:
+                held[c][id(child)] = batch.view(c, slot_of[c][batch.row_of[pos][0]], pos)
+        self.timings["inner"] += time.perf_counter() - t0
+        for pos in members:
+            self._walk(batch.children[pos], step)
+        for pos in members:
+            for c in step.active:
+                del held[c][id(batch.children[pos])]
+
+    def _search_leaf(self, lf, step):
+        """lf's peak search in every channel of the step, and its on_peaks."""
+        if not any(step.win[(id(lf), c)] for c in step.active):
+            return
+        peaks = {}
+        t0 = time.perf_counter()
+        for c in step.active:
+            w = step.win[(id(lf), c)]
+            if not w:
+                peaks[c] = _EMPTY_FILTER_RESULTS
+                continue
+            series = step.held[c][id(self._parent[id(lf)])]
+            # one window as a slice: filter_series memoises a slice's layout
+            res = self._leaf_bank(step.root, lf).filter_series(
+                series, windows=slice(*w[0]) if len(w) == 1 else w)
+            peaks[c] = self._apply_envelope(res, lf, step.envelopes.get(c), len(series))
+        self.timings["leaf"] += time.perf_counter() - t0
+        if step.on_peaks is not None:
+            t0 = time.perf_counter()
+            step.on_peaks(PeaksContext(self, step.root, lf, step.chunk, step.active, step.tags,
+                                       peaks, step.held))
+            self.timings["hooks"] += time.perf_counter() - t0
 
     def _span(self, node, channel, need, pad, length, out):
         """Append to out where node's output must be valid in channel: its leaves' windows
