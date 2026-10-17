@@ -155,11 +155,13 @@ class Timer:
     def __init__(self):
         self.t = defaultdict(float)
         self.n = defaultdict(int)
+        self.samples = defaultdict(list)        # each add's seconds: a stall shows as one
         self.device = defaultdict(lambda: defaultdict(lambda: [0, 0.0]))
 
     def add(self, key, dt, n=1):
         self.t[key] += dt
         self.n[key] += n
+        self.samples[key].append(float(dt))
         if _timing():
             for label, (calls, ms) in _gputime.collect().items():
                 d = self.device[key][label]
@@ -616,6 +618,7 @@ def run_device(device, tops, args, seed, fine_engine="hier"):
     report = dict(
         device=str(device), segments=args.segments, tops=[t["top"] for t in tops], fine_templates=nfine,
         analysed_seconds_per_segment=analysed, first_segment_s=dict(first.t), steady_s=dict(steady.t),
+        steady_samples={k: list(v) for k, v in steady.samples.items()},
         steady_calls=dict(steady.n), counts=dict(counts),
     )
     from matchedfilter import _CPU_TRIAL_WORK
@@ -797,6 +800,12 @@ def main():
           f"{args.segments} segments; steady " + ", ".join(
               f"{k} {v:.2f}s" for k, v in report["steady_s"].items()) +
           f"; warmup ({args.warmup} segments) {sum(v for k, v in report['first_segment_s'].items() if k != 'segment'):.1f}s")
+    ss = report.get("steady_samples") or {}
+    if ss.get("segment"):
+        # Per steady segment: a run whose total is far above median x count holds stalls.
+        print("  per steady segment: " + ", ".join(
+            "%s median %.3fs max %.3fs" % (k, float(np.median(v)), max(v))
+            for k, v in ss.items() if k in ("segment", "fine", "asym", "middle") and v))
     if tirt:
         print("  templates-in-real-time: " + ", ".join(f"{k} {v:.3g}" for k, v in tirt.items()))
     print("  calls: " + ", ".join(f"{k} {v}" for k, v in report["steady_calls"].items()) +

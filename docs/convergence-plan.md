@@ -365,6 +365,24 @@ Order: 1, then 2, then 4, then 3, then 5, then 6. Steps 1 and 6 do not depend on
   re-implementing the reverted Metal row-window path. The likely cause is padding every
   group to the largest bin count, which inflates readback and host assembly on a host-bound
   M2. That is not worth a day for a path measured slower.
+- 2026-10-17: **Cold start: two exact model speed-ups merged** (565ec1ff, 8a33a19e).
+  - The direct-refine window's draws are shared across chains and draw counts, and
+    plan_chain's threshold search is cached per profile, window and chain.
+  - `tools/cold_decisions.py` shows the decisions are identical (test27 CPU 60/60, GPU 31/31).
+  - test27 cold GPU job: first segments of 27 tops 61.5 -> 30.3 s; job 103 -> 73 s.
+  - M2 paired ladder on a shared seed: 1.000 / 1.004.
+- 2026-10-17: **Cold block-size choice, measured.** Without MF_COST_FILE the block trial is
+  skipped by design, so a job's block size is the GPU cost model's choice.
+  - Per-segment medians (tools/ladder.py now reports them), settled per n:
+    - M2: 2048 0.085 s, 4096 0.106 s per segment (1.25x). The model said 1.16-1.25x: right.
+    - L40S: 2048 and 4096 equal (host-bound, the same calls and transfers). The model said
+      0.99-1.05x: right, and the tie rule keeps 2048.
+  - On the 8060S, in-job calibration varied 2x under load (the 4096/2048 block ratio 2.8 to
+    5.6 between identical processes). Its price for 4096 then flipped some jobs to 4096.
+  - Open: make the 8060S calibration robust (paired, interleaved timing of the candidates)
+    or keep a cost file there.
+  - Earlier "4096 is 1.3-1.6x slower" readings came from whole-run stalls and machine load,
+    not block size; per-segment medians separate them.
 - **Measurement lessons.**
   - A shared seed hides a change to pricing or candidates; use `--seed-per-tree`.
   - Metal's device timer overstates time when command buffers overlap.
