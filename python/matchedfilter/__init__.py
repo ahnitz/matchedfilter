@@ -2952,10 +2952,9 @@ class HierarchicalFilter(MatchedFilter):
         _record_cpu_trial(begin)
         return result
 
-    def _restore_into(self, plan):
-        """Replay reference, templates and data into a freshly built plan."""
-        if self._pending_ref is not None:
-            plan.set_reference(self._pending_ref)
+    def _load_held_templates(self, plan):
+        """Load into plan the templates this filter was given: from its template source, or
+        the copy it holds."""
         t = self._held_templates
         if t is None and getattr(self, "_template_source", None) is not None:
             t = np.ascontiguousarray(self._template_source(), dtype=np.complex64)
@@ -2965,6 +2964,12 @@ class HierarchicalFilter(MatchedFilter):
             for i, x in enumerate(t):
                 if x is not None:
                     plan.set_template(i, x)
+
+    def _restore_into(self, plan):
+        """Replay reference, templates and data into a freshly built plan."""
+        if self._pending_ref is not None:
+            plan.set_reference(self._pending_ref)
+        self._load_held_templates(plan)
         if self._held:
             if -1 in self._held:
                 plan.set_data_batch(0, self._held[-1])
@@ -3161,10 +3166,18 @@ class HierarchicalFilter(MatchedFilter):
             self._pending_ref = None
             if self._mf is not None:
                 self._mf.set_reference(None)
+                self._reload_templates()
             return
         self._pending_ref = p.copy()
         if self._mf is not None:
             self._mf.set_reference(p)
+            self._reload_templates()
+
+    def _reload_templates(self):
+        """After a reference change: the CPU plan's loaded templates were scaled for the old
+        reference and are stale (it keeps no unscaled copy); load them again."""
+        if self._template_ready is None or self._template_ready:
+            self._load_held_templates(self._mf)
 
     # ---- chain choice ----------------------------------------------------------
     def _cost_model(self):
