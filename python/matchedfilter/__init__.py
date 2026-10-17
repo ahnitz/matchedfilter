@@ -438,6 +438,19 @@ def _absolute_peak_indices(result, starts, raw):
     return result
 
 
+_SCRATCH = threading.local()
+
+
+def _scratch_counts(size):
+    """An int32 work buffer of size entries for one sparse series call, shared by every plan
+    on this thread: the per-(block, template) counts are read only inside the call, so a
+    plan holding its own (4 bytes a pair, ~11 KB a template) would keep it for nothing."""
+    buf = getattr(_SCRATCH, "counts", None)
+    if buf is None or buf.size < size:
+        buf = _SCRATCH.counts = np.empty(max(int(size), 1), dtype=np.int32)
+    return buf[:size]
+
+
 class MatchedFilter:
     """Correlate a set of data segments against a set of templates.
 
@@ -490,6 +503,7 @@ class MatchedFilter:
         # spectrum rather than copying it, so the wrapper must keep it alive.
         self._held = {}
         self._held_templates = None
+        self._template_source = None
         self.performance_stats = {
             "total_calls": 0,
             "total_time_s": 0.0,
@@ -666,6 +680,17 @@ class MatchedFilter:
         self._dataset = True
         self._mark_ready("data", None)
 
+    def set_template_source(self, source):
+        """Give a callable that returns the (ntemplates, n) spectra set_templates is called
+        with: the plan then keeps no copy of its own, and a rebuilt plan (a new chain, a
+        trial) reloads from the source."""
+        self._template_source = source
+
+    def _hold(self, a):
+        """What a rebuilt plan reloads its templates from: a copy, or nothing when a template
+        source can make them again."""
+        return None if getattr(self, "_template_source", None) is not None else a.copy()
+
     def set_templates(self, spectra, index=None):
         """Set one template spectrum (with ``index``) or all from a (ntemplates, n) array.
 
@@ -701,7 +726,7 @@ class MatchedFilter:
                 self._mf = _core.MF(self.k, 2, self.ntemplates)
         else:
             raise ValueError(f"expected shape ({self.ntemplates}, {self.n}) or ({self.ntemplates}, {self.n // 2}), got {a.shape}")
-        self._held_templates = a.copy()
+        self._held_templates = self._hold(a)
         plan = self._ensure()
         if hasattr(plan, 'set_template_batch'):
             plan.set_template_batch(0, a)
@@ -1324,11 +1349,9 @@ class MatchedFilter:
             # Sparse (time_domain asks with _want_sparse): the engine writes peaks only for
             # rows a tier passed, and only those come back -- no dense table written,
             # copied or scanned (at a detection threshold almost every row is empty).
-            cnt = getattr(self, "_scnt", None)
-            if cnt is None or cnt.size < nblk * nt:
-                cnt = self._scnt = np.empty(nblk * nt, dtype=np.int32)
+            cnt = _scratch_counts(nblk * nt)
             fl, ix, vl, tot = ep.run_series_sparse(cser, st, ws, we, t0, nt, binsize,
-                                                   float(threshold), cnt[:nblk * nt])
+                                                   float(threshold), cnt)
             self._last_n_triggers = tot
             sp = _SparsePeaks(shape, np.frombuffer(fl, np.int64), np.frombuffer(ix, np.int64),
                               np.frombuffer(vl, np.complex64))
@@ -2934,6 +2957,8 @@ class HierarchicalFilter(MatchedFilter):
         if self._pending_ref is not None:
             plan.set_reference(self._pending_ref)
         t = self._held_templates
+        if t is None and getattr(self, "_template_source", None) is not None:
+            t = np.ascontiguousarray(self._template_source(), dtype=np.complex64)
         if isinstance(t, np.ndarray):
             plan.set_template_batch(0, t)
         elif isinstance(t, list):
@@ -3434,7 +3459,7 @@ class HierarchicalFilter(MatchedFilter):
             raise ValueError(f"expected shape ({self.ntemplates}, {self.n}) or ({self.ntemplates}, {self.n // 2}), got {a.shape}")
         rebuild = self._mf is not None and getattr(self._mf, 'k', self.n) != k
         self.k = k
-        self._held_templates = a.copy()
+        self._held_templates = self._hold(a)
         if rebuild:
             self._mf = None
         plan = self._ensure()
