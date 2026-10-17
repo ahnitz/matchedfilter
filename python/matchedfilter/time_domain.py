@@ -3,6 +3,7 @@ automatically select optimal FFT block sizes, and filter continuous series."""
 
 import math
 from collections import OrderedDict
+import collections.abc as _abc
 import os
 import time
 from typing import Any, NamedTuple, Optional, Sequence, Union, Tuple, List, Dict
@@ -1017,6 +1018,7 @@ class _TemplateGroup:
         self.is_hier = plan_factory is None and type(plan).__name__ == 'HierarchicalFilter'
         self.kind = kind
         self._spectra_source = None
+        self._row_source = None
         self.n = int(n)
         self.template_indices = np.asarray(template_indices, dtype=np.int64)
         self.c_bad = int(c_bad)
@@ -1031,8 +1033,8 @@ class _TemplateGroup:
 
     @property
     def spectra(self):
-        # A lazily planned group keeps no copy of its spectra: the bank's filters_f holds them
-        # (conjugated), and the plan, if one is ever made, is loaded from those.
+        """The spectra the group's plan holds, (T, stored bins). A group built from taps keeps
+        none: they are made from its taps whenever asked for (plans load them once)."""
         if self._spectra is None and self._spectra_source is not None:
             return self._spectra_source()
         return self._spectra
@@ -1041,12 +1043,35 @@ class _TemplateGroup:
     def spectra(self, value):
         self._spectra = value
 
+    def full_spectra(self, rows=None):
+        """Full n-bin spectra (not conjugated, not packed) of the group's templates, or of the
+        local rows given: what an ungated plan is loaded with."""
+        if self._row_source is not None:
+            return self._row_source(rows)
+        sp = self.spectra if rows is None else self.spectra[rows]
+        if sp.shape[1] == self.n:
+            return sp
+        K = sp.shape[1]                        # Hermitian-packed: n/2 bins, Nyquist in DC's imag
+        full_sp = np.zeros((sp.shape[0], self.n), dtype=np.complex64)
+        full_sp[:, 0] = sp[:, 0].real
+        full_sp[:, K] = sp[:, 0].imag
+        full_sp[:, 1:K] = sp[:, 1:K]
+        full_sp[:, K + 1:] = np.conj(sp[:, K - 1:0:-1])
+        return full_sp
+
+    def load_templates(self, plan):
+        """Load the group's spectra into plan, which reloads from the same source (rather than
+        a copy of its own) if it is ever rebuilt."""
+        if self._spectra_source is not None and hasattr(plan, "set_template_source"):
+            plan.set_template_source(self._spectra_source)
+        plan.set_templates(self.spectra)
+
     @property
     def plan(self):
         if self._plan is None and self._plan_factory is not None:
             from . import CorrelationFilter
             plan = self._plan_factory()
-            plan.set_templates(self.spectra)
+            self.load_templates(plan)
             self.templates_loaded = True
             if isinstance(plan, CorrelationFilter):
                 self._corr_plan = plan
@@ -1062,16 +1087,7 @@ class _TemplateGroup:
                 self.n, ndata=1, ntemplates=len(self.template_indices),
                 device=self.device
             )
-            if self.spectra.shape[1] < self.n:
-                K = self.spectra.shape[1]
-                full_sp = np.zeros((self.spectra.shape[0], self.n), dtype=np.complex64)
-                full_sp[:, 0] = self.spectra[:, 0].real
-                full_sp[:, K] = self.spectra[:, 0].imag
-                full_sp[:, 1:K] = self.spectra[:, 1:K]
-                full_sp[:, K + 1:] = np.conj(self.spectra[:, K - 1:0:-1])
-                fp.set_templates(full_sp)
-            else:
-                fp.set_templates(self.spectra)
+            fp.set_templates(self.full_spectra())
             self._flat_plan = fp
         return self._flat_plan
 
@@ -1085,15 +1101,7 @@ class _TemplateGroup:
         if plan is not None:
             cache.move_to_end(int(ti))
             return plan
-        sp = self.spectra[int(ti):int(ti) + 1]
-        if sp.shape[1] < self.n:
-            K = sp.shape[1]
-            full_sp = np.zeros((1, self.n), dtype=np.complex64)
-            full_sp[:, 0] = sp[:, 0].real
-            full_sp[:, K] = sp[:, 0].imag
-            full_sp[:, 1:K] = sp[:, 1:K]
-            full_sp[:, K + 1:] = np.conj(sp[:, K - 1:0:-1])
-            sp = full_sp
+        sp = self.full_spectra(slice(int(ti), int(ti) + 1))
         from .device import parse as _parse_device
         if _parse_device(self.device).kind == 'gpu' and not on_cpu:
             # A GPU plan owns a device context (~10 ms to create): keep one and load the
@@ -1125,19 +1133,43 @@ class _TemplateGroup:
                     self.n, ndata=1, ntemplates=len(self.template_indices),
                     device=self.device, valid=(self.c_bad, self.n - self.c_bad)
                 )
-                if self.spectra.shape[1] < self.n:
-                    K = self.spectra.shape[1]
-                    full_sp = np.zeros((self.spectra.shape[0], self.n), dtype=np.complex64)
-                    full_sp[:, 0] = self.spectra[:, 0].real
-                    full_sp[:, K] = self.spectra[:, 0].imag
-                    full_sp[:, 1:K] = self.spectra[:, 1:K]
-                    full_sp[:, K + 1:] = np.conj(self.spectra[:, K - 1:0:-1])
-                    cp.set_templates(full_sp)
-                else:
-                    cp.set_templates(self.spectra)
+                cp.set_templates(self.full_spectra())
                 self._corr_plan = cp
         return self._corr_plan
 
+
+
+def _group_spectra(taps, counts, n, rate_ratio, analytic, rows=None, pack=False):
+    """Spectra of a group's taps on n-sample blocks (T or len(rows), n), not conjugated; with
+    pack, Hermitian-packed to n/2 bins with the Nyquist bin in DC's imaginary part (real taps)."""
+    if rows is not None:
+        taps, counts = taps[rows], counts[rows]
+    spectra = np.zeros((len(counts), n), dtype=np.complex64)
+    _tap_spectra(np.ascontiguousarray(taps), np.ascontiguousarray(counts), n, rate_ratio,
+                 analytic, spectra)
+    if not pack:
+        return spectra
+    K = n // 2
+    packed = np.ascontiguousarray(spectra[:, :K])
+    packed[:, 0] = spectra[:, 0].real + 1j * spectra[:, K].real
+    return packed
+
+
+class _Filters(_abc.Sequence):
+    """filters_f, made when read: each template's conjugated full spectrum from its group's
+    taps, so a bank holds no spectra of its own."""
+
+    def __init__(self, template_map):
+        self._map = template_map
+
+    def __len__(self):
+        return len(self._map)
+
+    def __getitem__(self, i):
+        if isinstance(i, slice):
+            return [self[j] for j in range(*i.indices(len(self)))]
+        g, ti = self._map[i]
+        return np.conj(g.full_spectra(slice(ti, ti + 1))[0])
 
 
 def _tap_spectra(taps: np.ndarray, counts: np.ndarray, n: int, rate_ratio: float,
@@ -1394,7 +1426,7 @@ class TimeDomainFilterBank:
             self.set_reference(reference)
             for g in self._groups:
                 if g.is_hier and not g.templates_loaded:
-                    g.plan.set_templates(g.spectra)
+                    g.load_templates(g.plan)
                     g.templates_loaded = True
         if not self._choose_n:
             self._taps_list = None
@@ -1406,7 +1438,6 @@ class TimeDomainFilterBank:
         n_templates = self.n_templates
         self._built = []
         self._built_layout = list(raw_groups)
-        self._filters_f_list = [None] * n_templates
         self._block_lengths_arr = np.zeros(n_templates, dtype=np.int64)
 
         for start_idx, end_idx, chosen_N, _ in raw_groups:
@@ -1419,8 +1450,6 @@ class TimeDomainFilterBank:
             c_bad = int(np.ceil((orig_taps_max // 2) / self.rate_ratio))
             n_valid = int(chosen_N - l_data_max + 1)
 
-            # Frequency domain conversion for each template in this group
-            spectra = np.zeros((T, chosen_N), dtype=np.complex64)
             if self._raw_taps is not None and self._raw_taps.shape[1] >= orig_taps_max:
                 group_taps = np.ascontiguousarray(self._raw_taps[tmpl_indices, :orig_taps_max])
             else:
@@ -1431,10 +1460,7 @@ class TimeDomainFilterBank:
                     cnt = min(int(self.tap_counts[g_idx]), orig_taps_max)
                     group_taps[r, :cnt] = self._taps_list[g_idx][:cnt]
             group_counts = np.ascontiguousarray(self.tap_counts[tmpl_indices], dtype=np.int64)
-            _tap_spectra(group_taps, group_counts, chosen_N, self.rate_ratio, self.analytic, spectra)
-            for row, g_idx in enumerate(tmpl_indices):
-                self._filters_f_list[g_idx] = np.conj(spectra[row])
-                self._block_lengths_arr[g_idx] = chosen_N
+            self._block_lengths_arr[tmpl_indices] = chosen_N
 
             # Create matchedfilter plan
             factory = None
@@ -1475,15 +1501,10 @@ class TimeDomainFilterBank:
                 factory = (lambda n_=chosen_N, T_=T, dev=self.device:
                            MatchedFilter(n_, ndata=1, ntemplates=T_, device=dev))
                 plan = None
-            if (self.engine == 'hier' and self.pack_templates and chosen_N >= 1024
-                    and not self.complex_taps):     # Hermitian packing: real taps only
-                K = chosen_N // 2
-                grp_spectra = np.ascontiguousarray(spectra[:, :K])
-                grp_spectra[:, 0] = spectra[:, 0].real + 1j * spectra[:, K].real
-                if hasattr(plan, 'set_hermitian'):
-                    plan.set_hermitian(True)
-            else:
-                grp_spectra = spectra
+            pack = (self.engine == 'hier' and self.pack_templates and chosen_N >= 1024
+                    and not self.complex_taps)      # Hermitian packing: real taps only
+            if pack and hasattr(plan, 'set_hermitian'):
+                plan.set_hermitian(True)
 
             grp = _TemplateGroup(
                 plan=plan,
@@ -1491,23 +1512,27 @@ class TimeDomainFilterBank:
                 template_indices=tmpl_indices,
                 c_bad=c_bad,
                 n_valid=n_valid,
-                spectra=grp_spectra,
+                spectra=None,
                 orig_taps_max=orig_taps_max,
                 device=self.device,
                 plan_factory=factory,
                 kind=self.engine,
             )
             grp.templates_loaded = False
-            if factory is not None:
-                grp._spectra_source = (lambda idx=tmpl_indices, ff=self._filters_f_list:
-                                       np.conj(np.stack([ff[int(i)] for i in idx])))
-                grp.spectra = None
+            # The group keeps its taps, not their spectra (T x n complex): those are made again
+            # from the taps whenever a plan is loaded or a filter is asked for.
+            src = dict(taps=group_taps, counts=group_counts, n=chosen_N,
+                       rate_ratio=self.rate_ratio, analytic=self.analytic)
+            grp._spectra_source = lambda s=src, p=pack: _group_spectra(pack=p, **s)
+            grp._row_source = lambda rows, s=src: _group_spectra(rows=rows, **s)
+            grp._stored_bins = chosen_N // 2 if pack else chosen_N
             self._built.append(grp)
 
         self._template_map = [None] * n_templates
         for g in self._built:
             for ti_local, global_idx in enumerate(g.template_indices):
                 self._template_map[int(global_idx)] = (g, int(ti_local))
+        self._filters_f_list = _Filters(self._template_map)
         self._current_ref_key = None
 
     def _input_series(self, series) -> np.ndarray:
@@ -1582,7 +1607,8 @@ class TimeDomainFilterBank:
 
     @property
     def filters_f(self) -> Sequence[np.ndarray]:
-        """Sequence of frequency-domain filters for each template."""
+        """Sequence of frequency-domain filters (conjugated n-bin spectra), one per template,
+        each made from the template's taps when read."""
         self._groups
         return self._filters_f_list
 
@@ -1803,7 +1829,7 @@ class TimeDomainFilterBank:
     def _load_templates(self) -> None:
         for g in self._groups:
             if g.is_hier and not g.templates_loaded:
-                g.plan.set_templates(g.spectra)
+                g.load_templates(g.plan)
                 g.templates_loaded = True
 
     def set_reference_from_template(
