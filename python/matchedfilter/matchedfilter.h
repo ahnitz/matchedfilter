@@ -317,6 +317,20 @@ void ap_hmf_stats(const ap_hmf_plan *p, long *pairs, long *refined);
 
 int ap_supported(size_t n);
 
+/* The root stage of a hierarchical search (docs/hierarchical-search-design.md): one
+   transformed input block D against one root filter T, both one-sided spectra of
+   nbins >= n/2 + 1 bins (interleaved complex), to the real n-point series
+       out = scale * C2R(P),  P[k] = conj(T[k]) D[k] for k0 <= k < k1, 0 otherwise,
+   with C2R the unnormalised complex-to-real transform (imaginary parts of P[0] and P[n/2]
+   ignored), i.e. twice the real part of the analytic series. n is a power of two, at least
+   128. A plan holds its own workspace: one plan per thread. */
+typedef struct ap_root ap_root;
+ap_root *ap_root_create(size_t n);
+void ap_root_destroy(ap_root *r);
+size_t ap_root_length(const ap_root *r);
+int ap_root_real(ap_root *r, const float *D, const float *T, size_t nbins,
+                 size_t k0, size_t k1, float scale, float *out);
+
 /* Which back end the CPU selected: "avx512", "avx2", or "unsupported". */
 const char *ap_isa(void);
 

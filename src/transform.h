@@ -42,6 +42,12 @@ void ap_td_corr(const float *x, const float *taps, int L, int nlag, float *out);
    as n/2 complex ones; tw: cos, sin of 2 pi k/n for k = 0 .. n/2 (rsplit-inl.h). */
 void ap_real_split(const float *Z, const float *tw, size_t n, float *X);
 
+/* The root stage's product scale * conj(T) D over bins [k0, k1) of two one-sided spectra of
+   n/2 + 1 bins, merged into the n/2-point spectrum Z whose backward transform is the real
+   series C2R(product) read as n/2 complex samples; tw as for ap_real_split (rsplit-inl.h). */
+void ap_root_merge(const float *D, const float *T, size_t k0, size_t k1, float scale,
+                   const float *tw, size_t n, float *Z);
+
 /* The platform's FFT for the block forward (fft_accel.c): NULL where there is none. */
 typedef struct ap_accel ap_accel;
 ap_accel *ap_accel_create(size_t n);
