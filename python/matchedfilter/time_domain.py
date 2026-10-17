@@ -889,6 +889,19 @@ def _batch_target(n: int, max_batch: Optional[int]) -> int:
     return min(512, max(32, 1048576 // (max(64, n // 8) * 8)))
 
 
+def _corr_partition(counts, candidate_ns=(2048, 4096, 8192, 16384, 32768, 65536),
+                    max_batch=None, device=None):
+    """The continuous correlation's partition of filters of these tap counts into block sizes:
+    by calibrated cost (_corr_layout), else by the valid-fraction rule. Continuous correlation
+    outputs every lag whatever the blocking, so this is a pure cost choice. Returns
+    (groups, order) as _partition_templates."""
+    layout = _corr_layout(counts, candidate_ns, max_batch, device)
+    if layout is not None:
+        return layout
+    return _partition_templates(counts, max_batch=max_batch, candidate_ns=candidate_ns,
+                                engine='corr', device=device)
+
+
 def _corr_layout(counts: np.ndarray, candidate_ns: Sequence[int], max_batch: Optional[int],
                  device: Optional[Any] = None):
     """Partition for continuous correlation by cost: contiguous runs of length-sorted templates,
@@ -1008,8 +1021,9 @@ _REF_BINNED_CACHE = _ReferenceCache()
 class _TemplateGroup:
     """Internal container for a homogeneous batch of templates sharing an FFT size."""
 
-    def __init__(self, plan, n, template_indices, c_bad, n_valid, spectra, orig_taps_max, device=None,
-                 plan_factory=None, kind=None):
+    def __init__(self, plan, n, template_indices, c_bad, n_valid, orig_taps_max, device=None,
+                 plan_factory=None, kind=None, spectra_source=None, row_source=None,
+                 stored_bins=None):
         # A hierarchical plan is made up front (references and templates load into it); a flat or
         # correlation plan only when something first filters with it, so a bank kept for its
         # spectra and layout alone costs no plan memory.
@@ -1017,13 +1031,13 @@ class _TemplateGroup:
         self._plan_factory = plan_factory
         self.is_hier = plan_factory is None and type(plan).__name__ == 'HierarchicalFilter'
         self.kind = kind
-        self._spectra_source = None
-        self._row_source = None
+        self._spectra_source = spectra_source
+        self._row_source = row_source
         self.n = int(n)
+        self._stored_bins = int(n if stored_bins is None else stored_bins)
         self.template_indices = np.asarray(template_indices, dtype=np.int64)
         self.c_bad = int(c_bad)
         self.n_valid = int(n_valid)
-        self.spectra = spectra
         self.orig_taps_max = int(orig_taps_max)
         self.device = device
         self.templates_loaded = False
@@ -1033,36 +1047,19 @@ class _TemplateGroup:
 
     @property
     def spectra(self):
-        """The spectra the group's plan holds, (T, stored bins). A group built from taps keeps
-        none: they are made from its taps whenever asked for (plans load them once)."""
-        if self._spectra is None and self._spectra_source is not None:
-            return self._spectra_source()
-        return self._spectra
-
-    @spectra.setter
-    def spectra(self, value):
-        self._spectra = value
+        """The spectra the group's plan holds, (T, stored bins): made from the group's taps
+        whenever asked for (a plan loads them once; the group keeps none)."""
+        return self._spectra_source()
 
     def full_spectra(self, rows=None):
         """Full n-bin spectra (not conjugated, not packed) of the group's templates, or of the
         local rows given: what an ungated plan is loaded with."""
-        if self._row_source is not None:
-            return self._row_source(rows)
-        sp = self.spectra if rows is None else self.spectra[rows]
-        if sp.shape[1] == self.n:
-            return sp
-        K = sp.shape[1]                        # Hermitian-packed: n/2 bins, Nyquist in DC's imag
-        full_sp = np.zeros((sp.shape[0], self.n), dtype=np.complex64)
-        full_sp[:, 0] = sp[:, 0].real
-        full_sp[:, K] = sp[:, 0].imag
-        full_sp[:, 1:K] = sp[:, 1:K]
-        full_sp[:, K + 1:] = np.conj(sp[:, K - 1:0:-1])
-        return full_sp
+        return self._row_source(rows)
 
     def load_templates(self, plan):
         """Load the group's spectra into plan, which reloads from the same source (rather than
         a copy of its own) if it is ever rebuilt."""
-        if self._spectra_source is not None and hasattr(plan, "set_template_source"):
+        if hasattr(plan, "set_template_source"):
             plan.set_template_source(self._spectra_source)
         plan.set_templates(self.spectra)
 
@@ -1413,13 +1410,8 @@ class TimeDomainFilterBank:
         self._built: Optional[List[_TemplateGroup]] = None
         from .device import parse as _parse_device
         if self.engine == 'corr' and fft_lengths is None:
-            # Continuous correlation outputs every sample whatever the blocking, so its layout is
-            # a pure cost choice: price partitions and transform sizes with block costs calibrated
-            # on the bank's own device.
-            layout = _corr_layout(self.effective_data_counts, candidate_ns, self.max_batch_size,
-                                  self.device)
-            if layout is not None:
-                self._legacy_layout = layout
+            self._legacy_layout = _corr_partition(self.effective_data_counts, candidate_ns,
+                                                  self.max_batch_size, self.device)
         if not self._choose_n:
             self._build(*self._legacy_layout)
         if reference is not None:
@@ -1506,26 +1498,25 @@ class TimeDomainFilterBank:
             if pack and hasattr(plan, 'set_hermitian'):
                 plan.set_hermitian(True)
 
+            # The group keeps its taps, not their spectra (T x n complex): those are made again
+            # from the taps whenever a plan is loaded or a filter is asked for.
+            src = dict(taps=group_taps, counts=group_counts, n=chosen_N,
+                       rate_ratio=self.rate_ratio, analytic=self.analytic)
             grp = _TemplateGroup(
                 plan=plan,
                 n=chosen_N,
                 template_indices=tmpl_indices,
                 c_bad=c_bad,
                 n_valid=n_valid,
-                spectra=None,
                 orig_taps_max=orig_taps_max,
                 device=self.device,
                 plan_factory=factory,
                 kind=self.engine,
+                spectra_source=lambda s=src, p=pack: _group_spectra(pack=p, **s),
+                row_source=lambda rows, s=src: _group_spectra(rows=rows, **s),
+                stored_bins=chosen_N // 2 if pack else chosen_N,
             )
             grp.templates_loaded = False
-            # The group keeps its taps, not their spectra (T x n complex): those are made again
-            # from the taps whenever a plan is loaded or a filter is asked for.
-            src = dict(taps=group_taps, counts=group_counts, n=chosen_N,
-                       rate_ratio=self.rate_ratio, analytic=self.analytic)
-            grp._spectra_source = lambda s=src, p=pack: _group_spectra(pack=p, **s)
-            grp._row_source = lambda rows, s=src: _group_spectra(rows=rows, **s)
-            grp._stored_bins = chosen_N // 2 if pack else chosen_N
             self._built.append(grp)
 
         self._template_map = [None] * n_templates
@@ -2836,15 +2827,8 @@ class TimeDomainFilterBank:
 
 
 def _stored_bins(g):
-    """Bins stored per template spectrum of group g (its spectra's second dimension), cached
-    on the group; a lazy group is asked for one template's filter, not all of them."""
-    k = g.__dict__.get("_stored_bins")
-    if k is None:
-        sp = g._spectra
-        if sp is None and getattr(g, "_spectra_source", None) is not None:
-            sp = g._spectra_source()
-        k = g._stored_bins = int(np.shape(sp)[1])
-    return k
+    """Bins stored per template spectrum of group g (n, or n/2 when Hermitian-packed)."""
+    return g._stored_bins
 
 
 

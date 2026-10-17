@@ -15,8 +15,9 @@ import time
 import numpy as np
 
 from . import _core
-from .time_domain import TimeDomainFilterBank, FilterResults, _EMPTY_FILTER_RESULTS
-from . import _automatic_series_layout
+from .time_domain import (TimeDomainFilterBank, FilterResults, _EMPTY_FILTER_RESULTS,
+                          _corr_partition, _group_spectra)
+from . import _automatic_series_layout, CorrelationFilter
 
 __all__ = ["Root", "Inner", "Leaf", "BlockInput", "HierarchicalSearch", "SeriesContext",
            "PeaksContext", "ChunkContext"]
@@ -62,9 +63,7 @@ class Root:
     block by the caller. profile: (w, delta_f), the expected signal power spectrum the leaf
     banks' gates are calibrated with (TimeDomainFilterBank.set_reference)."""
 
-    def __init__(self, spectrum, band, children=(), profile=None, node_id=None, real=True):
-        if not real:
-            raise NotImplementedError("only a real root output is implemented")
+    def __init__(self, spectrum, band, children=(), profile=None, node_id=None):
         self.spectrum = np.ascontiguousarray(spectrum, dtype=np.complex64)
         self.band = (int(band[0]), int(band[1]))
         self.children = list(children)
@@ -107,10 +106,15 @@ class SeriesContext(NamedTuple):
 class PeaksContext:
     """A leaf group's peaks for one chunk, with read access to its ancestors' series."""
 
-    def __init__(self, search, root, leaf, chunk, channels, tags, peaks, held):
+    def __init__(self, search, root, leaf, chunk, channels, tags, peaks, held, scales):
         self.root, self.leaf, self.chunk = root, leaf, chunk
         self.channels, self.tags, self.peaks = channels, tags, peaks
-        self._search, self._held = search, held
+        self._search, self._held, self._scales = search, held, scales
+
+    def envelope(self, channel):
+        """The threshold envelope's values at channel's peaks (aligned with them), as the
+        search evaluated them -- e(sample - lag) -- or None without an envelope."""
+        return self._scales.get(channel)
 
     def series(self, channel, node=None):
         """The output of node (default: this leaf's parent) in channel, for this chunk."""
@@ -203,32 +207,27 @@ class _InnerBatch:
         self.row_of = {}
         for r, ci in enumerate(order):
             self.row_of[int(ci)] = divmod(r, 2) if self.packed else (r, None)
-        # The bank only partitions the rows by block size (a cost choice: every lag is output
-        # whatever the blocking); its own plans are never built.
-        bank = TimeDomainFilterBank(taps, tap_counts=rows_counts, engine="corr")
-        self._groups = []
+        # Rows by block size (a cost choice: every lag is output whatever the blocking). Each
+        # block size's rows are one correlation plan, loaded from their taps.
+        groups, row_order = _corr_partition(rows_counts)
+        self._groups = []                        # (plan, valid, block starts)
         self._group_of = {}                      # row -> (group, row's index in its group)
-        for gi, g in enumerate(bank._groups):
-            valid = (g.c_bad, g.n - g.c_bad)
+        for gi, (start, end, n, _) in enumerate(groups):
+            rows = row_order[start:end]
+            c_bad = int(rows_counts[rows].max()) // 2
+            valid = (c_bad, int(n) - c_bad)
             st, _, _ = _automatic_series_layout(self.length, valid)
-            self._groups.append((g, valid, st))
-            for li, r in enumerate(g.template_indices):
+            plan = CorrelationFilter(int(n), ndata=1, ntemplates=len(rows), valid=valid)
+            source = (lambda t=np.ascontiguousarray(taps[rows]), c=rows_counts[rows], n_=int(n):
+                      _group_spectra(t, c, n_, 1.0, False))
+            plan.set_template_source(source)
+            plan.set_templates(source())
+            self._groups.append((plan, valid, st))
+            for li, r in enumerate(rows):
                 self._group_of[int(r)] = (gi, li)
         # An output depends on input within its filter's tap reach (centre tap to either end).
-        self.tap_reach = max(max(v[0], g.n - v[1]) for g, v, _ in self._groups)
-        self._plans = {}                         # block size -> its correlation plan
+        self.tap_reach = max(max(v[0], p.n - v[1]) for p, v, _ in self._groups)
         self._chan = {}                          # channel -> per-chunk and slot state
-
-    def _plan(self, gi):
-        """Block size gi's correlation plan (built on first use)."""
-        plan = self._plans.get(gi)
-        if plan is None:
-            from . import CorrelationFilter
-            g, valid, _ = self._groups[gi]
-            plan = CorrelationFilter(g.n, ndata=1, ntemplates=len(g.template_indices), valid=valid)
-            g.load_templates(plan)
-            self._plans[gi] = plan
-        return plan
 
     def prepare(self, channel, series, regions):
         """The blocks of channel's series whose valid lags meet regions (merged (start, stop)
@@ -238,7 +237,7 @@ class _InnerBatch:
             raise ValueError("an inner batch's input length changed between chunks")
         ser = np.ascontiguousarray(series, dtype=np.float32 if self.real_input else np.complex64)
         per_group = []
-        for gi, (g, (lo, hi), st) in enumerate(self._groups):
+        for gi, (_, (lo, hi), st) in enumerate(self._groups):
             b_start = st + lo
             b_end = np.minimum(st + hi, L)
             keep = np.zeros(st.size, dtype=bool)
@@ -282,8 +281,7 @@ class _InnerBatch:
             st_run = state["groups"][gi][0]
             if not st_run.size:
                 continue
-            plan = self._plan(gi)
-            lo, hi = plan.valid
+            plan, (lo, hi), _ = self._groups[gi]
             ep = plan._continuous_plan()
             run = (ep.correlate_series_continuous_real if self.real_input
                    else ep.correlate_series_continuous)
@@ -325,16 +323,17 @@ class HierarchicalSearch:
     fft_lengths, tap_sample_rate, data_sample_rate). context: samples beyond a leaf's
     windows over which hooks may read or refilter its parent's series."""
 
-    def __init__(self, roots, threshold, envelope_floor=1.0, leaf_options=None,
-                 context=0, min_pad=4096):
+    def __init__(self, roots, threshold, envelope_floor=1.0, leaf_options=None, context=0):
         self.roots = list(roots)
         self.threshold = float(threshold)
         self.envelope_floor = float(envelope_floor)
         if not self.envelope_floor > 0:
             raise ValueError("envelope_floor must be positive")
         self.leaf_options = dict(leaf_options or {})
+        if "threshold" in self.leaf_options:
+            raise ValueError("the leaf threshold is the search's (threshold, envelope_floor), "
+                             "not a leaf option")
         self.context = int(context)
-        self.min_pad = int(min_pad)
         self.timings = dict(root=0.0, inner=0.0, leaf=0.0, hooks=0.0, setup=0.0)
         self._parent = {}
         self._kids = {}                  # node -> (inner children, leaf children)
@@ -388,9 +387,9 @@ class HierarchicalSearch:
 
     def pad(self, root):
         """Samples a leaf's parent series holds past the leaf's windows: the longest block
-        any of the root's leaf banks uses or may still choose (at least min_pad)."""
-        return max([self.min_pad] + [int(self._leaf_bank(root, lf).max_block_length)
-                                     for lf in self._leaves_below(root)])
+        any of the root's leaf banks uses or may still choose."""
+        return max(int(self._leaf_bank(root, lf).max_block_length)
+                   for lf in self._leaves_below(root))
 
     def _batch(self, node, length):
         b = self._inner.get(id(node))
@@ -522,23 +521,28 @@ class HierarchicalSearch:
         """lf's peak search in every channel of the step, and its on_peaks."""
         if not any(step.win[(id(lf), c)] for c in step.active):
             return
-        peaks = {}
+        peaks, scales = {}, {}
         t0 = time.perf_counter()
         for c in step.active:
             w = step.win[(id(lf), c)]
+            envelope = step.envelopes.get(c)
             if not w:
                 peaks[c] = _EMPTY_FILTER_RESULTS
+                if envelope is not None:
+                    scales[c] = np.empty(0, dtype=np.float64)
                 continue
             series = step.held[c][id(self._parent[id(lf)])]
             # one window as a slice: filter_series memoises a slice's layout
             res = self._leaf_bank(step.root, lf).filter_series(
                 series, windows=slice(*w[0]) if len(w) == 1 else w)
-            peaks[c] = self._apply_envelope(res, lf, step.envelopes.get(c), len(series))
+            peaks[c], e = self._apply_envelope(res, lf, envelope, len(series))
+            if e is not None:
+                scales[c] = e
         self.timings["leaf"] += time.perf_counter() - t0
         if step.on_peaks is not None:
             t0 = time.perf_counter()
             step.on_peaks(PeaksContext(self, step.root, lf, step.chunk, step.active, step.tags,
-                                       peaks, step.held))
+                                       peaks, step.held, scales))
             self.timings["hooks"] += time.perf_counter() - t0
 
     def _span(self, node, channel, need, pad, length, out):
@@ -557,15 +561,18 @@ class HierarchicalSearch:
             out.extend((a - batch.tap_reach, b + batch.tap_reach) for a, b in sub)
 
     def _apply_envelope(self, res, leaf, envelope, length):
-        """Keep the peaks at or above T * envelope(sample - lag)."""
-        if envelope is None or res.snr.size == 0:
-            return res
+        """Keep the peaks at or above T * envelope(sample - lag). Returns the kept peaks and
+        the envelope's values at them (None without an envelope)."""
+        if envelope is None:
+            return res, None
+        if res.snr.size == 0:
+            return res, np.empty(0, dtype=np.float64)
         t = np.clip(res.sample_indices - leaf.lags[res.template_indices], 0, length - 1)
         e = np.asarray(envelope(t), dtype=np.float64)
-        if e.size and e.min() < self.envelope_floor * (1 - 1e-6):
+        if e.min() < self.envelope_floor * (1 - 1e-6):
             raise ValueError("a threshold envelope fell below envelope_floor (%g < %g)"
                              % (e.min(), self.envelope_floor))
         keep = np.abs(res.snr) >= self.threshold * e
         if keep.all():
-            return res
-        return FilterResults(*(f[keep] for f in res))
+            return res, e
+        return FilterResults(*(f[keep] for f in res)), e[keep]

@@ -28,8 +28,8 @@ caller's grid; never Hz, PSDs or detectors.
 series; a node's children filter that series. Any depth L >= 1.
 
 - A **root** filter is a spectrum on the input blocks' frequency grid, with
-  a band [k0, k1). Its output is real (the complex-to-real transform of the
-  one-sided product, i.e. twice the real part) or complex, as declared.
+  a band [k0, k1). Its output is real: the complex-to-real transform of the
+  one-sided product, i.e. twice the real part.
 - An **inner** node is an FIR filter (taps, count). Real taps on a real
   series give a real series; complex taps give a complex one.
 - A **leaf group** is a bank of FIR templates (taps, counts, per-template
@@ -101,6 +101,9 @@ and an accessor:
 - `ctx.series(channel, node=None)`: an ancestor's series (default: the
   leaf's parent) for this chunk (read only, valid over the required span),
   for chisq and auto-chisq.
+- `ctx.envelope(channel)`: the threshold envelope's values at the peaks, as the
+  search evaluated them (None without an envelope), so a hook renormalises with
+  them rather than evaluating its envelope again.
 - `ctx.refilter(channel, windows, binsize, threshold, template=None)`: run
   this leaf group's bank over its parent's series in other windows, bin
   size and threshold (the asym follow-up's threshold-0 scan of the other
@@ -220,8 +223,6 @@ the buffer bookkeeping are removed.
   kept-candidate batch, not per sample.
 - Decimation between levels (tap rate != data rate) exists in pycbc's
   ratio engine but is 1 in every bank in use; phase 1 requires equal rates.
-- A complex root output (complex-to-complex) is not implemented; the root is
-  real.
 - The memory budget belongs to phase 2 (chunks of several blocks) and is not
   a parameter yet.
 - Whether a GPU should compute the root (phase 3) or keep it on the host
