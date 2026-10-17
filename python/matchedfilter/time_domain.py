@@ -1264,12 +1264,8 @@ def template_spectra(
         raise ValueError(f"tap_counts must have one entry per template ({T})")
     n = int(block_length)
     rate_ratio = float(tap_sample_rate) / float(data_sample_rate)
-    data_counts = np.ceil(counts / rate_ratio).astype(np.int64)
-    start = np.ceil((counts // 2) / rate_ratio).astype(np.int64)
-    stop = start + n - data_counts + 1
-    if np.any(stop <= start):
-        raise ValueError(f"block_length {n} is shorter than the longest filter "
-                         f"({int(data_counts.max())} data samples)")
+    valid = template_valid(counts, n, tap_sample_rate=tap_sample_rate,
+                           data_sample_rate=data_sample_rate)
     if out is None:
         out = np.empty((T, n), dtype=np.complex64)
     elif (out.shape != (T, n) or out.dtype != np.complex64
@@ -1278,7 +1274,24 @@ def template_spectra(
     m = max(int(counts.max()), 1)
     _tap_spectra(taps[:, :m], counts, n, rate_ratio, analytic, out)
     np.conjugate(out, out=out)
-    return out, np.stack([start, stop], axis=1)
+    return out, valid
+
+
+def template_valid(tap_counts, block_length, *, tap_sample_rate=2048.0,
+                   data_sample_rate=2048.0):
+    """The lags where each template's correlation on a block of block_length is valid (not
+    wrapped by its own taps): (T, 2) int64 [start, stop), as template_spectra returns with
+    the filters, from the tap counts alone. Raises if a template does not fit the block."""
+    counts = np.ascontiguousarray(tap_counts, dtype=np.int64)
+    n = int(block_length)
+    rate_ratio = float(tap_sample_rate) / float(data_sample_rate)
+    data_counts = np.ceil(counts / rate_ratio).astype(np.int64)
+    start = np.ceil((counts // 2) / rate_ratio).astype(np.int64)
+    stop = start + n - data_counts + 1
+    if np.any(stop <= start):
+        raise ValueError(f"block_length {n} is shorter than the longest filter "
+                         f"({int(data_counts.max())} data samples)")
+    return np.stack([start, stop], axis=1)
 
 
 class TimeDomainFilterBank:
