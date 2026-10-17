@@ -69,9 +69,9 @@ __all__ = ["MatchedFilter", "CorrelationFilter", "HierarchicalFilter", "PEAK_DTY
            "targets", "set_target", "devices", "Device", "__version__",
            "get_autotune_state", "clear_autotune_cache",
            "TimeDomainFilterBank", "FilterResults", "taps_to_spectra",
-           "template_spectra"]
+           "template_spectra", "template_valid"]
 
-from .time_domain import TimeDomainFilterBank, FilterResults, template_spectra
+from .time_domain import TimeDomainFilterBank, FilterResults, template_spectra, template_valid
 
 
 def taps_to_spectra(taps, counts, n, max_taps=None, out=None):

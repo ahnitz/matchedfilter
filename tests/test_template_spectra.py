@@ -56,3 +56,13 @@ def test_rejects_bad_out_and_short_block():
         mf.template_spectra(taps, [600, 600], 2048, out=np.empty((2, 2048), np.complex128))
     with pytest.raises(ValueError):
         mf.template_spectra(taps, [600, 600], 2048, out=np.empty((2, 4096), np.complex64)[:, ::2])
+
+
+def test_template_valid_is_template_spectra_valid():
+    import matchedfilter as mf
+    rng = np.random.default_rng(3)
+    counts = rng.integers(50, 400, 12)
+    taps = rng.standard_normal((12, 400)).astype(np.float32)
+    _, valid = mf.template_spectra(taps, counts, 2048, tap_sample_rate=4096, data_sample_rate=2048)
+    np.testing.assert_array_equal(mf.template_valid(counts, 2048, tap_sample_rate=4096,
+                                                    data_sample_rate=2048), valid)
