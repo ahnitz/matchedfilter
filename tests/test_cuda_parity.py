@@ -317,22 +317,7 @@ def test_cache_is_bounded_and_results_survive_eviction(ctx):
         ctx.clear_cache()
 
 
-# ---- tiled correlate and two-stage lengths ------------------------------------------------
-def test_correlate_tiles_into_host_output(ctx, monkeypatch):
-    from matchedfilter import _cudacompute
-    n, nd, nt = 2048, 3, 5
-    rng = np.random.default_rng(4)
-    d, h = _complex(rng, (nd, n)), _complex(rng, (nt, n))
-    monkeypatch.setattr(_cudacompute, "_TILE_BYTES", 2 * n * 8)   # force 2-template tiles
-    out = np.zeros((nd, nt, n), np.complex64)
-    ctx.correlate(n, d, h, out)
-    ref = np.fft.ifft(d[:, None, :] * np.conj(h[None, :, :]), axis=-1) * n
-    np.testing.assert_allclose(out, ref, rtol=0, atol=2e-4 * np.abs(ref).max())
-    biggest = max(b.nbytes for rec in ctx._full_batches.values()
-                  for k, b in rec.items() if k in ("stage", "tierc"))
-    assert biggest <= 2 * n * 8
-
-
+# ---- two-stage lengths ------------------------------------------------
 @pytest.mark.parametrize("n", [131072, 262144])
 def test_two_stage_correlation_matches_numpy(n):
     rng = np.random.default_rng(n)

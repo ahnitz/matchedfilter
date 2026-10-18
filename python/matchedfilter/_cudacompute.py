@@ -27,7 +27,7 @@ from . import _cuda, _gputime
 from ._cuda import check_cuda
 from ._errors import UnsupportedSize
 from ._gpu_cache import InputUploads
-from ._gpuexec import Executor
+from ._gpuexec import Arg, Executor
 from ._shared import empty_shared, shared_buffer, shared_key, _Borrowed
 from ._gpuhost import hier_peaks_grouped as _hier_peaks_grouped  # noqa: E402
 from ._gpuhost import (MAX_BINS, ROWWIN_ON, band_windows, bin_shift, coarse_span, plan_items, split_items, hier_tiers, hier_window,
@@ -117,8 +117,6 @@ _TC_BLOCKS_PER_SM = 8
 _PREFETCH = True
 # CUDA graphs for the hierarchical launch sequences.
 _GRAPHS = True
-# Device scratch bound per tile of a full correlation into a host array.
-_TILE_BYTES = 64 * 1024 * 1024
 
 # cuFuncGetAttribute / cuMemAdvise / cuDeviceGetAttribute enums
 _FUNC_ATTR_MAX_THREADS = 0
@@ -445,25 +443,57 @@ def _owned(buffers):
             or isinstance(b, _GraphCache)]
 
 
+class _Staged:
+    """A device buffer the host rewrites before every run (_x_alloc(upload=True)). The values
+    go through page-locked staging in one asynchronous copy on the context's stream: a copy
+    from managed memory costs ~144 us, and a kernel reading a host-written managed page
+    faults it over (132 us a forward launch on the L40S, 15 us from device memory)."""
+
+    def __init__(self, ctx, nbytes):
+        self.ctx, self.nbytes = ctx, max(int(nbytes), 4)
+        self.device, self.pinned = _Buffer(ctx, self.nbytes), _Pinned(ctx, self.nbytes)
+        self.dptr = self.device.dptr
+
+    def write(self, array):
+        array = np.ascontiguousarray(array)
+        count = min(self.nbytes, array.nbytes)
+        if count:
+            ctypes.memmove(self.pinned.ptr, array.ctypes.data, count)
+            self.ctx._copy_h2d(self.dptr.value, self.pinned.ptr, count, None, "upload")
+
+    def destroy(self):
+        self.device.destroy()
+        self.pinned.destroy()
+
+
 class _CudaList:
     """A command list (_gpuexec's driver interface): launches in order on one stream, so a
-    barrier is the stream's own ordering. end() returns the launches."""
+    barrier is the stream's own ordering. Each launch's parameters are built when it is
+    recorded; an Arg is a parameter whose value _x_run sets (cuLaunchKernel copies them at
+    launch, so the next run may change it while this one is in flight)."""
 
     def __init__(self, label):
-        self.label, self.ops = label, []
+        self.label, self.ops, self.args = label, [], []
 
     def dispatch(self, kernel, groups, buffers, words=(), offsets=None):
-        # The launch's parameters are built here, once: a recording is replayed per call.
         offs = offsets or [0] * len(buffers)
-        params = ([_ptr(int(b.dptr.value) + int(o)) for b, o in zip(buffers, offs)]
-                  + [_u32(w) for w in words])
+        params = []
+        for b, o in zip(buffers, offs):
+            if isinstance(b, Arg):
+                p = ctypes.c_uint64(0)
+                self.args.append((p, b.name, int(o)))
+            else:
+                p = _ptr(int(b.dptr.value) + int(o))
+            params.append(p)
+        # A vector uniform (uint4) is ONE kernel parameter, not one per component.
+        params += [_uint4(*w) if isinstance(w, tuple) else _u32(w) for w in words]
         self.ops.append((kernel, int(groups), params, _param_ptrs(params)))
 
     def barrier(self):
         pass
 
     def end(self):
-        return self.ops, None
+        return self.ops, self.args
 
 
 class Context(Executor, InputUploads):
@@ -563,8 +593,6 @@ class Context(Executor, InputUploads):
         self._scratch_bufs = {}
         self._residents = {}
         self._batches = {}
-        self._full_batches = {}
-        self._tierc_batches = {}
         self._forwards = {}
         self._hier = {}
         self._uploaded = {"data": {}, "tmpl": {}}
@@ -1262,164 +1290,59 @@ class Context(Executor, InputUploads):
         return self._dispatch_result(bufs, readback, async_submit)
 
     # ---- full correlation --------------------------------------------------------
-    def _full_inputs(self, kind, n, data, tmpl, upload_data, upload_tmpl, stream):
-        nd, nt = data.shape[0], tmpl.shape[0]
-        dsh, tsh = shared_buffer(data, self), shared_buffer(tmpl, self)
-        key = (kind, n, nd, nt, dsh and data.ctypes.data, tsh and tmpl.ctypes.data)
-        upload_data, upload_tmpl, dsig, tsig = self._input_uploads(
-            key, data, tmpl, upload_data, upload_tmpl)
-        estimate = (0 if dsh else data.nbytes) + (0 if tsh else tmpl.nbytes)
-        bufs, fresh = self._record("full", self._full_batches, key, estimate, lambda: {
-            "data": dsh or _Buffer(self, nd * n * 8),
-            "tmpl": tsh or _Buffer(self, nt * n * 8),
-        })
-        if fresh:
-            upload_data = upload_tmpl = True
-        if upload_data:
-            self._upload(bufs["data"], data, stream)
-            self._uploaded["data"][key] = dsig
-        if upload_tmpl:
-            self._upload(bufs["tmpl"], tmpl, stream)
-            self._uploaded["tmpl"][key] = tsig
-        return key, bufs
-
-    def _scratch(self, key, name, nbytes):
-        """A reusable device scratch buffer in a full-correlation record."""
-        bufs = self._full_batches[key]
-        s = bufs.get(name)
-        if s is None or s.nbytes < nbytes:
-            if s is not None:
-                self._sync()
-                s.destroy()
-            s = bufs[name] = _Buffer(self, nbytes)
-        return s
-
     # ---- driver primitives (_gpuexec) -----------------------------------------------------
     #: The most blocks one launch takes (gridDim.x), and the byte alignment of a bound view:
     #: a device pointer plus offset, aligned for the widest element a kernel reads (float2).
     max_dispatch_x = 2 ** 31 - 1
     storage_offset_alignment = 16
+    #: Shared allocations are managed memory, which migrates between host and device.
+    stage_host_inputs = True
 
     def _x_kernel(self, name, n):
         if name == "full":
             return self.pipeline(n, "fullCorrelation")
-        fn, wg, _, _ = self._tierc(n, "corr1" if name == "tc1" else "corr2")
+        if name == "series":
+            return self.pipeline(n, "fullCorrelationSeries")
+        role = {"tc1": "corr1", "tc2": "corr2", "tcs2": "corr_series2"}[name]
+        fn, wg, _, _ = self._tierc(n, role)
         return fn, wg
 
     def _x_tierc(self, n):
         return self._tierc(n, "corr1")[2:]
 
-    def _x_alloc(self, nbytes, readback=False):
-        return _Buffer(self, nbytes)
+    def _x_alloc(self, nbytes, readback=False, upload=False):
+        return _Staged(self, nbytes) if upload else _Buffer(self, nbytes)
 
     def _x_list(self, label):
         return _CudaList(label)
 
-    def _x_run(self, native, wait):
+    def _x_run(self, native, wait, binds=None):
+        ops, args = native
+        for p, name, off in args:
+            p.value = binds[name].dptr.value + off
         self._bind()
         stream = self.get_stream(None)
         self._after_writes(stream)
-        for (fn, wg), groups, params, param_ptrs in native:
+        for (fn, wg), groups, params, param_ptrs in ops:
             self._launch(fn, groups, wg, params, stream=stream, param_ptrs=param_ptrs)
         if wait:
             self._sync(stream)
         else:
             self._pend_write(stream)
 
-    def _x_release(self, native, resources):
+    def _x_after_readers(self):
+        # Streams of different Contexts share no order: readers of an output this run
+        # rewrites (last segment's fine stage) may still be running on theirs.
+        self._bind()
+        check_cuda(self.cuda.cuCtxSynchronize(), "cuCtxSynchronize")
+
+    def _x_release(self, native):
         self._bind()
         check_cuda(self.cuda.cuCtxSynchronize(), "cuCtxSynchronize")
 
     @staticmethod
     def _x_read(buf, out):
         buf.read_into(out)
-
-    @staticmethod
-    def _tiles(nd, nt, pair_bytes):
-        """(d0, d1, t0, t1) tiles of at most _TILE_BYTES of per-pair working storage."""
-        row = nt * pair_bytes
-        if row <= _TILE_BYTES:
-            rows = max(1, _TILE_BYTES // row)
-            return [(d0, min(d0 + rows, nd), 0, nt) for d0 in range(0, nd, rows)]
-        per = max(1, _TILE_BYTES // pair_bytes)
-        return [(d, d + 1, t0, min(t0 + per, nt)) for d in range(nd) for t0 in range(0, nt, per)]
-
-    def correlate_continuous(self, n, data, tmpl, starts, out, lo, hi,
-                             *, upload_data=True, upload_tmpl=True, async_submit=False):
-        """Full correlation written at continuous absolute series offsets: out[t, start + lag].
-
-        async_submit (``defers_continuous``), for an in-place device output: leave the work
-        in flight; device consumers are ordered after it, the host settles it."""
-        if async_submit and shared_buffer(out, self) is not None:
-            # Write-after-read: readers of this output (last segment's fine stage, on other
-            # Contexts' streams) may still be in flight. Streams of different Contexts share
-            # no order, so the device is drained before the rewrite starts.
-            self._bind()
-            check_cuda(self.cuda.cuCtxSynchronize(), "cuCtxSynchronize")
-        self._bind()
-        nd, nt = data.shape[0], tmpl.shape[0]
-        if out.ndim != 2 or out.shape[0] != nt or out.dtype != np.complex64 or not out.flags.c_contiguous:
-            raise ValueError("out must be a C-contiguous complex64 (templates, samples) array")
-        stream = self.get_stream(None)
-        key, bufs = self._full_inputs("full_series", n, data, tmpl, upload_data, upload_tmpl, stream)
-        starts = np.ascontiguousarray(starts, np.uint32)
-        ssh = self._small_input("cstarts", starts, stream)
-        S = out.shape[1]
-        osh = shared_buffer(out, self)
-        tierc = n > 65536
-        if tierc:
-            s1, s1wg, n1, n2 = self._tierc(n, "corr1")
-            s3, s3wg, _, _ = self._tierc(n, "corr_series2")
-        else:
-            hfunc, wg = self.pipeline(n, "fullCorrelationSeries")
-        if osh is None:
-            # Into a host array: only the span these blocks write is staged and
-            # copied, so the rest of ``out`` (written by other calls) is untouched.
-            w0 = int(starts.min()) + int(lo)
-            w1 = min(S, int(starts.max()) + int(hi))
-            if w1 <= w0:
-                return out
-            span = w1 - w0
-            stage = self._scratch(key, "stage", nt * span * 8)
-            # Rebase the starts onto the span: the kernel writes at t*span + start + lag.
-            rebased = (starts.astype(np.int64) - (w0 - int(lo))).astype(np.uint32)
-            rb = bufs.get("rebased")
-            if rb is None or rb.nbytes < rebased.nbytes:
-                rb = bufs["rebased"] = _Buffer(self, max(rebased.nbytes, 4))
-            rb.write(rebased, stream)
-            for t in range(nt):     # lags outside [lo, hi) keep their current values
-                self._copy_h2d(stage.dptr.value + t * span * 8, out[t, w0:w1].ctypes.data,
-                               span * 8, stream, "upload")
-            dst, length, sptr = stage.dptr.value, span, rb.dptr.value
-        else:
-            dst, length, sptr = osh.dptr.value, S, ssh.dptr.value
-        dptr, tptr = bufs["data"].dptr.value, bufs["tmpl"].dptr.value
-        if tierc:
-            tiles = self._tiles(nd, nt, n * 8)
-            most = max((d1 - d0) * (t1 - t0) for d0, d1, t0, t1 in tiles) * n * 8
-            for d0, d1, t0, t1 in tiles:
-                k = t1 - t0
-                pairs = (d1 - d0) * k
-                mid = self._scratch(key, "tierc", most)
-                self._launch(s1, pairs * n1, s1wg,
-                             [_ptr(dptr + d0 * n * 8), _ptr(tptr + t0 * n * 8), mid.dptr, _u32(k)],
-                             stream=stream)
-                self._launch(s3, pairs * n2, s3wg,
-                             [mid.dptr, _ptr(sptr + d0 * 4), _ptr(dst + t0 * length * 8),
-                              _uint4(k, length, lo, hi)], stream=stream)
-        else:
-            self._launch(hfunc, nd * nt, wg,
-                         [_ptr(dptr), _ptr(tptr), _ptr(sptr), _ptr(dst),
-                          _uint4(nt, length, lo, hi)], stream=stream)
-        if osh is None:
-            for t in range(nt):
-                self._copy_d2h(out[t, w0:w1].ctypes.data, dst + t * length * 8,
-                               length * 8, stream, "readback")
-        if async_submit and osh is not None:
-            self._pend_write(stream)
-            return out
-        self._sync(stream)
-        return out
 
     def zero_columns(self, dest, a, b):
         """Zero dest[:, a:b] of a GPU-shared 2-D array on the device (enqueued).

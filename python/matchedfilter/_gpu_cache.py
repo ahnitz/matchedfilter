@@ -107,7 +107,6 @@ class InputUploads:
     #: (e.g. a grouped hierarchical record) is one line here, and eviction, clear_cache
     #: and the byte budget all see it.
     RECORD_TABLES = (('flat', '_batches'), ('hier', '_hier'), ('hier_cascade', '_hier_cascade'),
-                     ('full', '_full_batches'), ('tierc', '_tierc_batches'),
                      ('forward', '_forwards'), ('exec', '_exec_records'))
 
     def _record_tables(self):
@@ -140,16 +139,8 @@ class InputUploads:
         if storage is not None:
             for buffers in storage.values():
                 yield from (buffers.values() if isinstance(buffers, dict) else buffers)
-            for batch in getattr(self, '_full_batches', {}).values():
-                yield from batch[:3]
-            for batch in getattr(self, '_tierc_batches', {}).values():
-                yield from batch[:4]
         else:
             for batch in self._batches.values():
-                yield from batch
-            for batch in getattr(self, '_full_batches', {}).values():
-                yield from batch
-            for batch in getattr(self, '_tierc_batches', {}).values():
                 yield from batch
             for batch in self._hier.values():
                 yield from batch.values()
