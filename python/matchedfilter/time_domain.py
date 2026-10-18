@@ -1241,6 +1241,16 @@ def _tap_spectra(taps: np.ndarray, counts: np.ndarray, n: int, rate_ratio: float
             out[row] = spec
 
 
+def _host_copy(series, dtype):
+    """np.ascontiguousarray(series, dtype), first waiting for GPU writes left in flight
+    when it copies: the series may be a device row a correlation is still writing
+    (correlate_series(wait=False)), read here by the host. No copy, no wait."""
+    if not (isinstance(series, np.ndarray) and series.dtype == dtype
+            and series.flags.c_contiguous):
+        _settle_device_writes()
+    return np.ascontiguousarray(series, dtype=dtype)
+
+
 def _gpu_reads_real(gpu, n) -> bool:
     """Whether a GPU context's forward reads a real series at block length n."""
     return gpu is not None and bool(getattr(gpu, 'real_series', False)) and n <= 65536
@@ -1571,8 +1581,8 @@ class TimeDomainFilterBank:
                 and not np.iscomplexobj(series)):
             if series.dtype == np.float32 and series.ndim == 1 and series.strides == (8,):
                 return series       # one lane of a complex series (a packed pair), in place
-            return np.ascontiguousarray(series, dtype=np.float32)
-        return np.ascontiguousarray(series, dtype=np.complex64)
+            return _host_copy(series, np.float32)
+        return _host_copy(series, np.complex64)
 
     @staticmethod
     def _priced_window(c_bad: int, n: int) -> Tuple[int, int]:
@@ -2183,7 +2193,7 @@ class TimeDomainFilterBank:
                         # not the whole series, which was 4.7 s of copies over a test27 job.
                         lo = int(sub_starts.min())
                         hi = min(S, int(sub_starts.max()) + N)
-                        run_in = np.ascontiguousarray(data_in[lo:hi], dtype=np.complex64)
+                        run_in = _host_copy(data_in[lo:hi], np.complex64)
                         run_starts = (sub_starts - lo).astype(sub_starts.dtype)
                     try:
                         res = active_plan.run_series(
@@ -2413,7 +2423,7 @@ class TimeDomainFilterBank:
             if (ti is None or bank.engine != 'hier' or _parse_device(bank.device).kind != 'gpu'
                     or set(kw) - {"windows", "binsize", "threshold", "template_index"}):
                 continue
-            ser = np.ascontiguousarray(series, dtype=np.complex64)
+            ser = _host_copy(series, np.complex64)
             S = ser.size
             W = _normalize_windows(kw.get("windows"), S)
             bank._groups
@@ -2504,7 +2514,7 @@ class TimeDomainFilterBank:
                    and hasattr(ep, "correlate_series_continuous_real")
                    else ep.correlate_series_continuous)
             if run is ep.correlate_series_continuous and ser.dtype != np.complex64:
-                ser = np.ascontiguousarray(ser, dtype=np.complex64)
+                ser = _host_copy(ser, np.complex64)
             bnd = bounds
             if dest.flags.c_contiguous and dest.flags.writeable:
                 run(ser, st, lo, hi, t0, nt, dest, bnd)
@@ -2520,7 +2530,7 @@ class TimeDomainFilterBank:
                     dest[:, a:b] = tmp[:, a:b]                # see below
             return
         if ser.dtype != np.complex64 and not _gpu_reads_real(cplan._gpu, g.n):
-            ser = np.ascontiguousarray(ser, dtype=np.complex64)   # this plan reads complex
+            ser = _host_copy(ser, np.complex64)   # this plan reads complex
         # Unified memory (Metal): write straight into dest, and read the series where it
         # is. A page-aligned destination needs no workspace and no copy-out.
         view = getattr(cplan._gpu, 'host_view', None)
@@ -2749,7 +2759,7 @@ class TimeDomainFilterBank:
                     and _parse_device(self.device).kind != 'cpu')
             ser = a if lane else np.ascontiguousarray(a, np.float32)
         else:
-            ser = np.ascontiguousarray(a, dtype=np.complex64)
+            ser = _host_copy(a, np.complex64)
         if ser.ndim != 1:
             raise ValueError("series must be a 1D array")
         S = ser.size

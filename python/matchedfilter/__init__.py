@@ -451,6 +451,14 @@ def _scratch_counts(size):
     return buf[:size]
 
 
+
+def _host_copy(a, dtype):
+    """np.ascontiguousarray(a, dtype), first waiting for GPU writes left in flight when it
+    copies (time_domain._host_copy): the host is about to read a series a device may still
+    be writing."""
+    from .time_domain import _host_copy as copy
+    return copy(a, dtype)
+
 class MatchedFilter:
     """Correlate a set of data segments against a set of templates.
 
@@ -949,8 +957,8 @@ class MatchedFilter:
             if (isinstance(a, np.ndarray) and a.dtype == np.float32 and a.ndim == 1
                     and a.strides in ((8,), (4,)) and a.size > 0):
                 return a            # read in place: contiguous, or one lane of a complex row
-            return np.ascontiguousarray(a, dtype=np.float32)
-        return np.ascontiguousarray(a, dtype=np.complex64)
+            return _host_copy(a, np.float32)
+        return _host_copy(a, np.complex64)
 
     def _series_layout(self, series, starts, win_start, win_end, binsize, templates,
                        ragged=False):
