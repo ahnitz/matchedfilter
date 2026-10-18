@@ -374,3 +374,46 @@ def test_min_pad_and_support_bounds_checked_in_hooks():
             ctx.refilter("A", windows=slice(12000, 12500), binsize=64, threshold=0.0)
 
     search.run(inputs, windows=windows, on_peaks=on_peaks)
+
+
+def _has_gpu():
+    import matchedfilter as mf
+    try:
+        return any(str(d) == "gpu:0" for d in mf.devices())
+    except Exception:
+        return False
+
+
+@pytest.mark.skipif(not _has_gpu(), reason="needs a GPU")
+def test_a_gpu_search_gives_the_cpu_search():
+    """The whole search on a GPU -- middle correlations on the device, rows in device memory,
+    leaves reading their rows (and packed lanes) in place -- against the same search on the
+    CPU: every parent series to float rounding, exact zero wherever the CPU's is (outside
+    what a chunk computes, including a reused buffer's narrow second chunk), and the same
+    peaks."""
+    rng = np.random.default_rng(12)
+    root = _tree(rng)
+    inputs = _inputs(rng)
+    narrow = [(12000, 14000)]
+
+    def windows(leaf, chunk, ch, extra):
+        if chunk == 0:
+            return None
+        if leaf.node_id == ("leaf", 2) and ch == "B":
+            return [(a - extra, b + extra) for a, b in narrow]
+        return []
+    thr = 0.5 * _median_peak(root, inputs)
+    runs = {}
+    for device in ("cpu", "gpu:0"):
+        search = HierarchicalSearch([root], threshold=thr, context=300,
+                                    leaf_options=dict(LEAF, device=device))
+        runs[device] = {(g[0], g[1], g[2]): g for g in _collect(search, inputs, windows=windows)}
+    assert runs["cpu"].keys() == runs["gpu:0"].keys()
+    for key, (_, _, _, peaks, parent) in runs["cpu"].items():
+        gp, gparent = runs["gpu:0"][key][3], runs["gpu:0"][key][4]
+        np.testing.assert_allclose(gparent, parent, rtol=0, atol=2e-5 * max(np.abs(parent).max(), 1e-30))
+        assert not gparent[parent == 0].any()
+        if peaks.snr.size == 0:
+            assert key[1] == 1 and gp.snr.size == 0      # only the narrow chunk is empty
+        else:
+            _assert_same_peaks(gp, peaks)
