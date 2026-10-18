@@ -2146,23 +2146,48 @@ class CorrelationFilter(MatchedFilter):
             work = (None, self.empty_shared((cap[0],)), self.empty_shared((cap[1], self.n)),
                     self.empty_shared(cap[1], np.uint32), None)
         _, staging, spec, offsets, _ = work
-        staging = staging[:ser.size]
-        source = ser if shared_buffer(ser, self._gpu) is not None else staging
-        if source is staging and defer:
+        # A real series (a backend with real_series): the forward reads its samples from
+        # complex64 storage, by float offset and stride -- in place where it lies in a device
+        # allocation (then block starts move by the series' offset in it, so the forward
+        # takes its own copy of them; the output keeps the caller's), else copied as floats.
+        real, shift = None, 0
+        if ser.dtype == np.float32:
+            from ._shared import containing_samples
+            c = containing_samples(ser, self._gpu)
+            if c is not None and c[1] + c[2] * ser.size <= np.iinfo(np.uint32).max:
+                whole, off, stride = c
+                shift = off // stride
+                source, real = whole, (off % stride, stride, shift + ser.size)
+            else:
+                staging.view(np.float32)[:ser.size] = ser
+                source, real = staging[:max(1, (ser.size + 1) // 2)], (0, 1, ser.size)
+        else:
+            staging = staging[:ser.size]
+            source = ser if shared_buffer(ser, self._gpu) is not None else staging
+        fwd_offsets = offsets
+        if shift:
+            fo = self.__dict__.setdefault('_continuous_fwd_offsets', {})
+            fwd_offsets = fo.get(k)
+            if fwd_offsets is None or fwd_offsets.size < offsets.size:
+                fwd_offsets = fo[k] = self.empty_shared(offsets.size, np.uint32)
+        if real is None and source is staging and defer:
             # Unified memory: read the caller's series in place; the context keeps the
             # view until zero_columns_done has waited for the work that reads it.
             owner = getattr(self._gpu, 'host_view', lambda a: None)(ser)
             if owner is not None:
                 self._gpu._keep_until_done.append(owner)
                 source = ser
-        if source is staging:
+        if real is None and source is staging:
             source[:] = ser
         lo, hi = self.valid
         for b0 in range(0, starts.size, batch):
             b1 = min(b0 + batch, starts.size)
             count = b1 - b0
             offsets[:count] = np.minimum(starts[b0:b1], ser.size)
-            self._gpu.forward(self.n, source, offsets[:count], spec[:count], defer=True)
+            if shift:
+                fwd_offsets[:count] = offsets[:count] + np.uint32(shift)
+            self._gpu.forward(self.n, source, fwd_offsets[:count], spec[:count], defer=True,
+                              **({'real': real} if real is not None else {}))
             try:
                 kw = dict(async_submit=True) if (defer and b1 == starts.size) else {}
                 self._gpu.correlate_continuous(

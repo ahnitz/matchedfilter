@@ -1221,6 +1221,11 @@ def _tap_spectra(taps: np.ndarray, counts: np.ndarray, n: int, rate_ratio: float
             out[row] = spec
 
 
+def _gpu_reads_real(gpu, n) -> bool:
+    """Whether a GPU context's forward reads a real series at block length n."""
+    return gpu is not None and bool(getattr(gpu, 'real_series', False)) and n <= 65536
+
+
 def _reads_real(plan) -> bool:
     """Whether the plan reads a real (float32) series itself: a hierarchical plan whose
     engine does (HierarchicalFilter._reads_real_series)."""
@@ -2494,8 +2499,8 @@ class TimeDomainFilterBank:
                 for a, b in runs:
                     dest[:, a:b] = tmp[:, a:b]                # see below
             return
-        if ser.dtype != np.complex64:
-            ser = np.ascontiguousarray(ser, dtype=np.complex64)   # GPU plans read complex
+        if ser.dtype != np.complex64 and not _gpu_reads_real(cplan._gpu, g.n):
+            ser = np.ascontiguousarray(ser, dtype=np.complex64)   # this plan reads complex
         # Unified memory (Metal): write straight into dest, and read the series where it
         # is. A page-aligned destination needs no workspace and no copy-out.
         view = getattr(cplan._gpu, 'host_view', None)
@@ -2712,12 +2717,17 @@ class TimeDomainFilterBank:
         from .device import parse as _parse_device
 
         a = _from_any(series)
-        # A real series on the CPU stays real (a real-real-complex hierarchy's middle stage
-        # filtering the real top output): half-size block transforms
-        # (correlate_series_continuous_real). Elsewhere it is widened to complex.
+        # A real series stays real (a real-real-complex hierarchy's middle stage filtering
+        # the real top output) where every group reads one: on the CPU, half-size block
+        # transforms (correlate_series_continuous_real); on a GPU with real_series, a
+        # forward that reads the real samples in place. Elsewhere it is widened to complex.
         if (isinstance(a, np.ndarray) and not np.iscomplexobj(a)
-                and _parse_device(self.device).kind == 'cpu'):
-            ser = np.ascontiguousarray(a, dtype=np.float32)
+                and self._correlation_reads_real()):
+            # A GPU forward reads one lane of a complex row (stride 2) in place; the CPU's
+            # half-size transforms take a contiguous series.
+            lane = (a.dtype == np.float32 and a.ndim == 1 and a.strides == (8,)
+                    and _parse_device(self.device).kind != 'cpu')
+            ser = a if lane else np.ascontiguousarray(a, np.float32)
         else:
             ser = np.ascontiguousarray(a, dtype=np.complex64)
         if ser.ndim != 1:
@@ -2834,8 +2844,10 @@ class TimeDomainFilterBank:
             gpus.append(gpu)
         if len(gpus) < 2 or getattr(gpus[0], 'host_view', None) is not None:
             return ser                       # one group, or unified memory read in place
-        if all(shared_buffer(ser, gpu) is not None for gpu in gpus):
-            return ser
+        from ._shared import containing_samples
+        if all((containing_samples(ser, gpu) if ser.dtype == np.float32
+                else shared_buffer(ser, gpu)) is not None for gpu in gpus):
+            return ser                       # read in place (a real series by its layout)
         devs = {id(x): x for x in gpus}.values()
         double = all(hasattr(g, 'settle_until') and hasattr(g, 'write_token') for g in devs)
         bufs = self.__dict__.setdefault('_ser_stagings', [])
@@ -2854,9 +2866,9 @@ class TimeDomainFilterBank:
                     settle()                 # a call left in flight may still read it
         slot[1] = []
         staged = slot[0]
-        if staged is None or staged.shape != ser.shape or any(
+        if staged is None or staged.shape != ser.shape or staged.dtype != ser.dtype or any(
                 shared_buffer(staged, gpu) is None for gpu in gpus):
-            staged = gpus[0].empty_shared(ser.shape)
+            staged = gpus[0].empty_shared(ser.shape, ser.dtype)
             if any(shared_buffer(staged, gpu) is None for gpu in gpus):
                 return ser
             slot[0] = staged
@@ -2884,6 +2896,15 @@ class TimeDomainFilterBank:
             self._correlate_groups(ser, W, scales_arr, result, settle, support)
         finally:
             self._staging_done()
+
+    def _correlation_reads_real(self) -> bool:
+        """Whether every group's correlation plan reads a real series itself: the CPU's, or a
+        GPU's whose forward takes real samples (real_series; one-stage, n <= 65536)."""
+        from .device import parse as _parse_device
+        if _parse_device(self.device).kind == 'cpu':
+            return True
+        self._groups
+        return all(_gpu_reads_real(g.get_correlation_plan()._gpu, g.n) for g in self._groups)
 
     def _correlate_selected(self, ser, W, templates, scales, out, support=None):
         """correlate_series(templates=...): row j of the result is template templates[j]."""

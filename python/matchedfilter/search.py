@@ -356,6 +356,7 @@ class HierarchicalSearch:
         self._leaf_banks = {}
         self._inner = {}
         self._root_plans = {}
+        self._root_outs = {}             # (root, channel, n) -> output buffer, GPU searches
         for root in self.roots:
             if not isinstance(root, Root):
                 raise TypeError("roots must be Root nodes")
@@ -426,6 +427,20 @@ class HierarchicalSearch:
         for c in inner:
             self._batches(c, length, root)
 
+    def _root_output(self, root, channel, n):
+        """Where root's output for a chunk goes. On a GPU search: one buffer per root and
+        channel in the leaf device's memory, rewritten every chunk, which the middle stage
+        (and leaves directly below the root) read in place -- a hook reads it during its
+        chunk, as it does the inner series. Elsewhere a new host array."""
+        bank = self.leaf_bank(root, next(self._leaves_below(root)))
+        if getattr(bank, "device", None) is None or _parse_device(bank.device).kind != "gpu":
+            return np.empty(n, dtype=np.float32)
+        key = (id(root), channel, n)
+        out = self._root_outs.get(key)
+        if out is None:
+            out = self._root_outs[key] = bank.empty_shared((n,), np.float32)
+        return out
+
     def _real_output(self, node):
         """Whether node's output series is real: the root's is, and an inner node's is when
         its input is and its taps are."""
@@ -483,7 +498,7 @@ class HierarchicalSearch:
                 for c in active:
                     spec = inputs[c].spectra[k]
                     n = 2 * (len(spec) - 1)
-                    out = np.empty(n, dtype=np.float32)
+                    out = self._root_output(root, c, n)
                     k0, k1 = root.band
                     self._root_plan(n).real(np.ascontiguousarray(spec, dtype=np.complex64),
                                             root.spectrum, k0, k1,
