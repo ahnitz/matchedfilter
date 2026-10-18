@@ -69,9 +69,25 @@ static_assert(HWY_MAX_LANES_D(ap_qtag) == 8, "Q_MLAH assumes a full 128-bit int1
 #endif
 
 /* Tail tiles retain each lane's arithmetic and quantised operands. Only the
-   product loads change: T templates are repeated for 32/T independent blocks. */
+   product loads change: T templates are repeated for QW/T independent blocks
+   (block b's data at dq + 768 b, the next block's 256 x 3 entries). */
 #undef AP_Q15_TAIL
-#if HWY_ARCH_X86 && HWY_MAX_BYTES == 64
+#if HWY_ARCH_X86 && HWY_MAX_BYTES == 32 && HWY_TARGET <= HWY_AVX2
+/* AVX2, 16 lanes: T = 8 (two blocks) or 4 (four blocks). */
+#define AP_Q15_TAIL 1
+template<int T> static HWY_INLINE vq q15_tile_template(const int16_t *p){
+  if(T == 8) return vq{_mm256_broadcastsi128_si256(_mm_loadu_si128((const __m128i *)p))};
+  int64_t v;
+  memcpy(&v, p, sizeof v);
+  return vq{_mm256_set1_epi64x(v)};
+}
+template<int T> static HWY_INLINE vq q15_tile_data(const int16_t *p){
+  if(T == 8) return vq{_mm256_set_m128i(_mm_set1_epi16(p[768]), _mm_set1_epi16(p[0]))};
+  return vq{_mm256_setr_epi16(p[0], p[0], p[0], p[0], p[768], p[768], p[768], p[768],
+                              p[1536], p[1536], p[1536], p[1536],
+                              p[2304], p[2304], p[2304], p[2304])};
+}
+#elif HWY_ARCH_X86 && HWY_MAX_BYTES == 64
 #define AP_Q15_TAIL 1
 template<int T> static HWY_INLINE vq q15_tile_template(const int16_t *p){
   if(T == 8) return hn::LoadDup128(AP_DQ, p);
@@ -260,15 +276,20 @@ template<int T> static int q15_screen_tile_impl(const int16_t *dq,
   const ap_q15_twiddles *tw = ap_q15_twiddle_table(256);
   vq *X = (vq *)scratch, *Xi = X + 17 * 16;
   for(int e1 = 0; e1 < 16; e1++)
-    qsr16_prod_tile<T>(dq + 3 * e1, tr + e1 * 32, ti + e1 * 32,
-                      X + e1, Xi + e1, 17, 48, 512);
+    qsr16_prod_tile<T>(dq + 3 * e1, tr + e1 * AP_QW, ti + e1 * AP_QW,
+                      X + e1, Xi + e1, 17, 48, 16L * AP_QW);
   return q15_finish(256,16,16,tw,X,Xi,ws,we,lanethr,bits,lanemax);
 }
+/* T templates per block: the target's tile widths, QW/4 and QW/2 (8 and 16 on AVX-512, 4 and 8
+   on AVX2); any other T is refused. */
 static int q15_screen_tile(int T, const int16_t *dq, const int16_t *tr, const int16_t *ti,
                            size_t ws, size_t we, const int16_t *lanethr,
                            uint64_t *bits, int16_t *lanemax, void *scratch){
-  if(T == 8) return q15_screen_tile_impl<8>(dq,tr,ti,ws,we,lanethr,bits,lanemax,scratch);
-  return q15_screen_tile_impl<16>(dq,tr,ti,ws,we,lanethr,bits,lanemax,scratch);
+  if(T == AP_QW / 4)
+    return q15_screen_tile_impl<AP_QW / 4>(dq,tr,ti,ws,we,lanethr,bits,lanemax,scratch);
+  if(T == AP_QW / 2)
+    return q15_screen_tile_impl<AP_QW / 2>(dq,tr,ti,ws,we,lanethr,bits,lanemax,scratch);
+  return -1;
 }
 #endif
 
