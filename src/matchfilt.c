@@ -1662,14 +1662,15 @@ static __attribute__((noinline)) int q15_tail_group(ap_mf_plan *p, int d0, int f
                       const int16_t *tr, const int16_t *ti,
                       unsigned char *pass, float *stat){
   const size_t n=256;
-  const int qw=32;
+  const int qw=p->qw;                      /* 32 on AVX-512, 16 on AVX2 */
   const float EQ=(float)ap_q15_margin(n);
-  int16_t lanethr[32], lanemax[32];
+  int16_t lanethr[64], lanemax[64];
   int total=0;
   for(int d=d0;d<first;d++) if(!p->qdok[d]) q15_data(p,d);
   for(int off=0;off<l1;){
-    const int width=l1-off<=8 ? 8 : 16;
-    const int blocks=32/width, active=l1-off<width ? l1-off : width;
+    /* tiles of qw/4 or qw/2 templates, repeated for 4 or 2 blocks */
+    const int width=l1-off<=qw/4 ? qw/4 : qw/2;
+    const int blocks=qw/width, active=l1-off<width ? l1-off : width;
     for(int d=d0;d<first;d+=blocks){
       for(int b=0;b<blocks;b++){
         const float a=threshold*p->qds[d+b]*(float)(1.0/32768.0)*(1.0f-1e-4f);
@@ -1724,10 +1725,11 @@ int ap_mf_q15_screen(ap_mf_plan *p,int d0,int nd,int t0,int nt,float threshold,
     }
     const int16_t *tr=p->qtr+(size_t)g*n*qw, *ti=p->qti+(size_t)g*n*qw;
     int first=d0;
-    /* Only profitable aligned tails on the 32-lane N256 screen. A tile's
-       blocks all share this call's window. Complete groups and leftover
-       blocks retain the original broadcast path. */
-    if(p->qtail && l0==0 && l1<=24 && nd>=4){
+    /* An aligned tail of at most 3/4 of the lanes on the N256 screen runs as tiles that
+       repeat its templates for several blocks (q15_tail_group). A tile's blocks all
+       share this call's window. Complete groups and leftover blocks retain the
+       original broadcast path. */
+    if(p->qtail && l0==0 && l1<=3*qw/4 && nd>=4){
       first=d0+(nd/4)*4;
       const int r=q15_tail_group(p,d0,first,t0,nt,g,l1,threshold,start,end,bl,tr,ti,pass,stat);
       if(r<0) return -1;

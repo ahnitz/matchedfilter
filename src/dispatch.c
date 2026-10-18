@@ -254,7 +254,7 @@ int ap_q15_screen_tile(const ap_plan *p, int T, const int16_t *dq,
                        const int16_t *tr, const int16_t *ti, size_t start, size_t end,
                        const int16_t *lanethr, uint64_t *bits, int16_t *lanemax, void *scratch){
   const ap_backend *b=p ? p->be : NULL;
-  if(!b || !b->q15_screen_tile || p->n!=256 || (T!=8 && T!=16) ||
+  if(!b || !b->q15_screen_tile || p->n!=256 || (T!=4 && T!=8 && T!=16) ||
      !dq || !tr || !ti || !lanethr || !bits || !scratch) return -1;
   return b->q15_screen_tile(T,dq,tr,ti,start,end,lanethr,bits,lanemax,scratch);
 }
