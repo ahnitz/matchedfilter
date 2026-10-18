@@ -373,6 +373,7 @@ _BufMemBarrier = _struct("VkBufferMemoryBarrier",
 
 from ._errors import UnsupportedSize      # noqa: F401  (re-export)
 from ._gpu_cache import InputUploads
+from ._gpuexec import Executor
 
 
 class VulkanError(RuntimeError):
@@ -1119,8 +1120,35 @@ class _HierHandle:
         self.mode, self.bfwd = mode, bfwd
 
 
-class Context(InputUploads):
-    """One Vulkan device, its compute queue, and the pipelines built on it."""
+class _VkList:
+    """A command list being recorded (_gpuexec's driver interface): a primary command buffer
+    with a descriptor set per dispatch. end() returns (command buffer, descriptor pools)."""
+
+    def __init__(self, ctx, label):
+        self.ctx = ctx
+        self.pool_start = len(getattr(ctx, "_pools", []))
+        self.rec = _Recording(ctx, label)
+
+    def dispatch(self, kernel, groups, buffers, words=(), offsets=None):
+        if offsets is None and any(getattr(b, "offset", 0) for b in buffers):
+            offsets = [getattr(b, "offset", 0) for b in buffers]
+        ds = self.ctx._descriptor_set(kernel[2], buffers, offsets)
+        self.rec.bind(kernel, ds, words)
+        self.rec.dispatch(groups)
+
+    def barrier(self):
+        # Later dispatches and the host (after the fence) see these writes.
+        self.rec.barrier(dst_stage=_STAGE_COMPUTE_BIT | _STAGE_HOST_BIT,
+                         dst_access=_ACCESS_SHADER_READ | _ACCESS_HOST_READ)
+
+    def end(self):
+        cmd = self.rec.end()
+        return cmd, list(getattr(self.ctx, "_pools", [])[self.pool_start:])
+
+
+class Context(Executor, InputUploads):
+    """One Vulkan device, its compute queue, and the pipelines built on it: the Vulkan driver
+    under the shared GPU executor (_gpuexec)."""
 
     max_grouped_bins = _MAX_BINS
     #: Async submission with per-slot fences: the series loop keeps several
@@ -1141,8 +1169,6 @@ class Context(InputUploads):
     forward_rows = True
     #: forward takes real=(lane, stride, length): a real series read in place, not widened.
     real_series = True
-    #: correlate takes wait=False: shared output left in flight, ordered for device consumers.
-    async_correlate = True
 
     def __init__(self, index=0):
         vk, err = _vulkan._load()
@@ -3051,102 +3077,55 @@ class Context(InputUploads):
             val[a:b] = values[offset:offset+count].reshape(b-a, nt, nb)
         return idx, val
 
-    def _full_tile(self, n, data, tmpl, out, upload_data, upload_tmpl, wait=True):
-        nd, nt = data.shape[0], tmpl.shape[0]
-        keys = (shared_key(data, self), shared_key(tmpl, self),
-                shared_key(out, self))
-        key = (n, nd, nt, *keys)
-        uploads = self._input_uploads(key, data, tmpl, upload_data, upload_tmpl)
-        batch = self._full_batches.get(key)
-        if batch is None:
+    # ---- driver primitives (_gpuexec) -----------------------------------------------------
+    def _x_kernel(self, name, n):
+        if name == "full":
             info = (_manifest().get('modules', {}).get(str(n)) or {}).get('full')
             if info is None:
                 raise UnsupportedSize('no full-correlation GPU kernel for n=%d' % n)
-            filename = (info.get('portable') or {}).get('file') \
-                if _manifest()['modules'][str(n)].get('lds_bytes', 0) > self.max_shared_memory \
-                else info['file']
+            filename = ((info.get('portable') or {}).get('file')
+                        if _manifest()['modules'][str(n)].get('lds_bytes', 0) > self.max_shared_memory
+                        else info['file'])
             if not filename:
                 raise UnsupportedSize('no portable full-correlation GPU kernel for n=%d' % n)
-            pipe = self._build_pipeline(('full', filename), filename, 3, 4)
-            external = [b for a in (data, tmpl, out)
-                        if (b := shared_buffer(a, self)) is not None]
-            estimate = sum(a.nbytes for a in (data, tmpl, out)
-                           if shared_buffer(a, self) is None)
-            self._cache_room(estimate, incoming=external)
-            pool_start = len(getattr(self, '_pools', []))
-            bufs = (shared_buffer(data, self) or _Buffer(self, data.nbytes),
-                    shared_buffer(tmpl, self) or _Buffer(self, tmpl.nbytes),
-                    shared_buffer(out, self) or _Buffer(self, out.nbytes, readback=True))
-            rec = _Recording(self, "full")
-            rec.bind(pipe, self._descriptor_set(pipe[2], bufs), (nt,))
-            rec.dispatch(nd * nt)
-            rec.barrier()              # a consumer submitted after it (wait=False) reads `out`
-            batch = (*bufs, rec.end())
-            self._full_batches[key] = batch
-            self._register_record('full', key, None, pool_start)
-            uploads = (True, True, *uploads[2:])
-        self._cache_touch('full', key)
-        bdata, btmpl, bout, cmd = batch
-        if self._device_state.pending_writes and (
-                (uploads[0] and shared_buffer(data, self) is None)
-                or (uploads[1] and shared_buffer(tmpl, self) is None)):
-            self.settle_writes()       # a call left in flight (wait=False) may read these inputs
-        self._write_uploads(key, uploads, bdata, data, btmpl, tmpl)
-        if not wait and shared_buffer(out, self) is not None:
-            self._submit_pending(cmd)
-            return
-        self._submit(cmd)
-        if shared_buffer(out, self) is None:
-            bout.read_into(out)
-
-    def _tierc_tile(self, n, data, tmpl, out, upload_data, upload_tmpl, wait=True):
-        nd, nt = data.shape[0], tmpl.shape[0]
+            return self._build_pipeline(('full', filename), filename, 3, 4)
         info = _manifest().get('full_tierc', {}).get(str(n))
         if info is None:
             raise UnsupportedSize('no two-stage full-correlation kernel for n=%d' % n)
-        key = (n, nd, nt, shared_key(data, self), shared_key(tmpl, self),
-               shared_key(out, self))
-        uploads = self._input_uploads(key, data, tmpl, upload_data, upload_tmpl)
-        batch = self._tierc_batches.get(key)
-        if batch is None:
-            p1, l1, sl1 = self._build_pipeline(('tc-corr1', n), info['corr1']['file'], 3, 4)
-            p2, l2, sl2 = self._build_pipeline(('tc-corr2', n), info['corr2']['file'], 2, 0)
-            external = [b for a in (data, tmpl, out)
-                        if (b := shared_buffer(a, self)) is not None]
-            estimate = nd*nt*n*8 + sum(a.nbytes for a in (data, tmpl, out)
-                                       if shared_buffer(a, self) is None)
-            self._cache_room(estimate, incoming=external)
-            pool_start = len(getattr(self, '_pools', []))
-            bd = shared_buffer(data, self) or _Buffer(self, data.nbytes)
-            bt = shared_buffer(tmpl, self) or _Buffer(self, tmpl.nbytes)
-            scratch = _Buffer(self, nd*nt*n*8)
-            bo = shared_buffer(out, self) or _Buffer(self, out.nbytes, readback=True)
-            ds1 = self._descriptor_set(sl1, (bd, bt, scratch))
-            ds2 = self._descriptor_set(sl2, (scratch, bo))
-            rec = _Recording(self, "two-stage")
-            rec.bind((p1, l1), ds1, (nt,))
-            rec.dispatch(nd * nt * info['n1'])
-            rec.barrier(buffer=scratch)
-            rec.bind((p2, l2), ds2)
-            rec.dispatch(nd * nt * info['n2'])
-            rec.barrier()              # a consumer submitted after it (wait=False) reads `out`
-            batch = (bd, bt, scratch, bo, rec.end())
-            self._tierc_batches[key] = batch
-            self._register_record('tierc', key, None, pool_start)
-            uploads = (True, True, *uploads[2:])
-        self._cache_touch('tierc', key)
-        bd, bt, scratch, bo, cmd = batch
-        if self._device_state.pending_writes and (
-                (uploads[0] and shared_buffer(data, self) is None)
-                or (uploads[1] and shared_buffer(tmpl, self) is None)):
-            self.settle_writes()       # a call left in flight (wait=False) may read these inputs
-        self._write_uploads(key, uploads, bd, data, bt, tmpl)
-        if not wait and shared_buffer(out, self) is not None:
-            self._submit_pending(cmd)
-            return
-        self._submit(cmd)
-        if shared_buffer(out, self) is None:
-            bo.read_into(out)
+        if name == "tc1":
+            return self._build_pipeline(('tc-corr1', n), info['corr1']['file'], 3, 4)
+        return self._build_pipeline(('tc-corr2', n), info['corr2']['file'], 2, 0)
+
+    def _x_tierc(self, n):
+        info = _manifest().get('full_tierc', {}).get(str(n))
+        if info is None:
+            raise UnsupportedSize('no two-stage full-correlation kernel for n=%d' % n)
+        return info['n1'], info['n2']
+
+    def _x_alloc(self, nbytes, readback=False):
+        return _Buffer(self, nbytes, readback=readback)
+
+    def _x_list(self, label):
+        return _VkList(self, label)
+
+    def _x_run(self, native, wait):
+        if wait:
+            self._submit(native)
+        else:
+            self._submit_pending(native)
+
+    def _x_release(self, native, resources):
+        self._wait_queues()
+        self.vk.vkFreeCommandBuffers.argtypes = [_vp, _vp, _u32, ctypes.POINTER(_vp)]
+        self.vk.vkFreeCommandBuffers(self.device, self.command_pool, 1, (_vp * 1)(native))
+        dead = {pool.value for pool in resources}
+        for pool in resources:
+            self.vk.vkDestroyDescriptorPool(self.device, pool, None)
+        self._pools = [pool for pool in getattr(self, "_pools", []) if pool.value not in dead]
+
+    @staticmethod
+    def _x_read(buf, out):
+        buf.read_into(out)
 
     def zero_columns(self, dest, a, b):
         """Zero dest[:, a:b] of a device-shared 2-D array (or rows of one) on the device.
@@ -3374,40 +3353,6 @@ class Context(InputUploads):
     #: zero_columns_done(wait=False) leaves the zeroing in flight.
     async_zero = True
 
-    def correlate(self, n, data, tmpl, out, *, upload_data=True, upload_tmpl=True, wait=True):
-        """Write full correlations to caller storage with bounded GPU batches.
-
-        wait=False (async_correlate), with `out` device-shared and written in one batch: leave
-        the work in flight; device consumers are ordered after it, a host reader settles
-        first (settle_writes)."""
-        nd, nt = data.shape[0], tmpl.shape[0]
-        if out.shape != (nd, nt, n):
-            raise ValueError('full output shape does not match the banks')
-        budget = 64 * 1024 * 1024
-        per_pair = 8 * n
-        tierc = n > 65536
-        geom = _manifest().get('full_tierc', {}).get(str(n)) if tierc else None
-        if tierc and geom is None:
-            raise UnsupportedSize('no two-stage full-correlation kernel for n=%d' % n)
-        groups = max(geom['n1'], geom['n2']) if tierc else 1
-        fn = self._tierc_tile if tierc else self._full_tile
-        direct = shared_buffer(out, self) is not None
-        # Tier B writes directly to caller-owned shared output. Its size is
-        # not a temporary staging budget; splitting it forces host copies of
-        # every later row and defeats the point of shared output.
-        working_bytes = nd*nt*per_pair*((1 if direct else 2) if tierc else (0 if direct else 1))
-        if (working_bytes <= budget
-                and nd * nt * groups <= self.max_dispatch_x):
-            fn(n, data, tmpl, out, upload_data, upload_tmpl, **({} if wait else {'wait': False}))
-            return
-        tile = min(nt, max(1, budget // (per_pair*(2 if tierc else 1))),
-                   max(1, self.max_dispatch_x // groups))
-        for d in range(nd):
-            for t0 in range(0, nt, tile):
-                t1 = min(t0 + tile, nt)
-                fn(n, data[d:d+1], tmpl[t0:t1], out[d:d+1,t0:t1],
-                   upload_data, upload_tmpl)
-
     cache_limit_recordings = 256
 
     def _register_record(self, kind, key, storage, pool_start):
@@ -3427,6 +3372,8 @@ class Context(InputUploads):
         self.__dict__.get("_c16_template_exp", {}).pop(key, None)
 
     def _evict_record(self, kind, key, keep_storage=None):
+        if kind == "exec":
+            return self._exec_evict(key)
         # An in-flight readback reads this record's buffers when collected.
         self._drain()
         token = (kind, key)

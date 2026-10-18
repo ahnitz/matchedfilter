@@ -547,6 +547,15 @@ def gpu_peaks(device, ctx=None):
         cus = core[0] * core[1] * core[2] if core else None
         if cus is None:
             cus = {"gfx1151": 40}.get(arch)
+        if cus is None:
+            # No core count this API reports (VK_AMD_shader_core_properties is AMD's) and no
+            # table entry (e.g. Intel): peaks unknown, the fraction NaN, the report still made.
+            nan = float("nan")
+            out.update(arch=arch, cus=None, flops=dict(fp32=nan, fp16=nan, int16=nan),
+                       bandwidth=nan, formula="unknown (no shader-core count for this device)",
+                       bandwidth_formula="unknown")
+            out["measured"] = None
+            return out
         mhz = 0
         for card in sorted(os.listdir("/sys/class/drm")) if os.path.isdir("/sys/class/drm") else ():
             txt = _read("/sys/class/drm/%s/device/pp_dpm_sclk" % card)

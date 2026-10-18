@@ -229,6 +229,36 @@ name. The APIs differ only in mechanics, which live in a thin driver.
 - U4: kernel sources: switches become options; cooperative matrix becomes a feature.
 - U5: dead code and documentation.
 
+**U1 design (from reading the three hosts, 2026-10-18).**
+- **Kernel interfaces differ per target today, so they are unified first (U1a).** The same
+  Slang entry points compile to different signatures and constants:
+  - Vulkan specializes `mfDataStride`, `mfRowWindows`, `mfDataScaleBits`, `mfCoarseTwt`,
+    `mfAccurateTrig` and `mfSubgroupSize` (specialization constants); CUDA and Metal compile
+    most of them to fixed values (twiddle.slang), so their hosts compensate: a pack kernel
+    copies each band where Vulkan reads it in place through the stride;
+  - row windows are a binding plus a constant on Vulkan, a table pointer argument plus a
+    sentinel window start (ROWWIN_ON) on CUDA;
+  - survivor-listed kernels use indirect dispatch on Vulkan and Metal, grid-stride loops
+    reading the count from device memory on CUDA.
+  Target: one signature per entry point on every target, and one constants mechanism:
+  Vulkan specialization constants; Metal's runtime MSL compile with the same values as
+  definitions; CUDA by runtime NVRTC compile with definitions (cached), or launch arguments
+  where a value varies per call. Listed kernels take both forms (indirect dispatch where the
+  device has it, a grid-stride launch elsewhere), chosen by the feature.
+- **Decisions keyed on vendor or API today** (to become probed features): `_accurate_trig =
+  vendorID == Intel` (Vulkan), `gatechain._BAND_FORWARD = {"vulkan", "metal"}`, the c16 bound
+  flags per API in gatechain.
+- **The executor's command list** generalises Vulkan's captured, phased recordings (fused
+  batches already re-emit captured work phase by phase across calls): operations are
+  fill, set-indirect-args, dispatch, dispatch-indirect, copy (readback on a discrete
+  device; nothing on unified memory), barrier and phase. A driver emits a list natively:
+  a Vulkan command buffer, a CUDA graph or stream launches, a Metal command buffer.
+  Fusion, interleave, replay and async then exist once, for every backend.
+- **Incremental port.** Each backend's Context becomes driver primitives plus a shared
+  executor class it inherits; an operation is ported by deleting the backend's own method so
+  the shared one runs. The first slice is the forward transform (its kernel interface is
+  already one since eb4aa070), then the order of U2.
+
 **Risks.** Python per-call overhead (replay native recordings; host time per call is an
 acceptance metric); Metal command buffers are one-shot (re-encode as today); discrete vs
 unified memory (keep the L40S prefetch path as a feature decision); testing reach (L40S
@@ -424,3 +454,31 @@ Stage 5's lessons land inside the stages that touch them. Each stage merges in g
 - 2026-10-18: **Stage U adopted** (see "Stage U: true unification"). Starts from 912b01ac
   (gate passed on dev2; M2 suite 1854 passed; L40S suite 1889 passed). U0 begun.
 
+- 2026-10-18: **U0 baselines recorded; U2.1 full correlation runs on the shared executor.**
+  - U0, `MF_CHAIN_FORCE=2048:256,512`, three rounds each, in M templates in real time:
+    - dev2 8060S: 165.5 / 190.0 / 187.9;
+    - dev3 Renoir: 26.2 / 26.9 / 27.0;
+    - M2: 35.7 / 35.9 / 35.6;
+    - L40S: 96.9 / 98.0 / 81.9;
+    - dev4 Iris Xe: about 3.25 (r1 was the cold shader-cache run, so only r2 and r3 exist).
+  - `_roofline` gives NaN peaks for a device without a known shader-core count (Intel)
+    instead of raising.
+  - `_gpuexec.Executor.correlate` replaces three per-API copies, deleted in the same
+    change. The per-API code that remains is driver primitives (`_x_kernel`, `_x_alloc`,
+    `_x_list`, `_x_run`, `_x_release`, `_x_read`). The tiling rule tests reported limits
+    (`max_dispatch_x`, `storage_offset_alignment`); it does not branch on the API.
+    `async_correlate` holds on every backend.
+  - Goldens are bit-identical: 71/71 on dev2 (Vulkan), M2 (Metal) and L40S (CUDA).
+  - Suites: dev2 1979 passed; M2 154 focused tests passed; L40S 76 focused tests passed.
+  - Host CPU per call is lower on every backend:
+    - Vulkan: 19.1-19.6 -> 18.2-18.3 us (shared, n=4096).
+    - CUDA: 24.4 -> 23.5 us shared, 86-88 -> 84 us host, 41 -> 38 us two-stage.
+    - Metal: 79 -> 76 us shared.
+  - Two costs found and removed on the way:
+    - CUDA rebuilt the ctypes launch parameters on every call; `_CudaList` now builds
+      them when it records.
+    - `shared_view` looked an allocation up twice; it now does it once.
+  - Metal wall time per call is 240-315 us against 17-20 us of device time, identical
+    in both trees. It is submit-to-completion latency, and the latency is bimodal: both
+    trees show both modes. M2 search throughput is unchanged (35.4-35.7 against
+    35.5-36.0 M, paired).

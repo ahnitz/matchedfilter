@@ -108,7 +108,7 @@ class InputUploads:
     #: and the byte budget all see it.
     RECORD_TABLES = (('flat', '_batches'), ('hier', '_hier'), ('hier_cascade', '_hier_cascade'),
                      ('full', '_full_batches'), ('tierc', '_tierc_batches'),
-                     ('forward', '_forwards'))
+                     ('forward', '_forwards'), ('exec', '_exec_records'))
 
     def _record_tables(self):
         """{kind: table} for the record tables this context has."""
@@ -158,6 +158,9 @@ class InputUploads:
                 yield from batch[:-1]
             else:
                 yield batch
+        owned = getattr(self, '_exec_owned_buffers', None)
+        if owned is not None:
+            yield from owned()
 
     def _cache_bytes(self, incoming=()):
         """Bytes eviction could free: buffers the cache owns, and borrowed shared

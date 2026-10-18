@@ -62,6 +62,7 @@ _MAX_BINS = MAX_BINS          # _gpuhost.MAX_BINS: one limit for every backend
 from ._errors import UnsupportedSize      # noqa: F401  (re-export)
 from . import _gputime
 from ._gpu_cache import InputUploads, Pending as _Pending
+from ._gpuexec import Executor
 
 
 #: Points per thread, which is also how many threads carry a transform:
@@ -556,7 +557,27 @@ def _device(index):
     return dev
 
 
-class Context(InputUploads):
+class _MtlList:
+    """A command list (_gpuexec's driver interface): the dispatches, encoded into one compute
+    encoder per run (serial dispatch: each sees the previous one's writes)."""
+
+    def __init__(self, label):
+        self.label, self.ops = label, []
+
+    def dispatch(self, kernel, groups, buffers, words=(), offsets=None):
+        if offsets is not None:
+            raise ValueError("Metal command lists bind views, not offsets")
+        self.ops.append((kernel, int(groups), list(buffers),
+                         tuple(int(w) & 0xFFFFFFFF for w in words)))
+
+    def barrier(self):
+        pass
+
+    def end(self):
+        return (self.label, self.ops), None
+
+
+class Context(Executor, InputUploads):
     """A queue and dispatch caches on one process-wide Metal device (see _Device)."""
 
     max_grouped_bins = _MAX_BINS
@@ -1370,69 +1391,6 @@ class Context(InputUploads):
                           slot=slot, async_submit=async_submit, nbins=nbins, sparse=sparse)
 
     @_autoreleased
-    def _full_tile(self, n, data, tmpl, out, upload_data, upload_tmpl):
-        nd, nt = data.shape[0], tmpl.shape[0]
-        key = (n, nd, nt, shared_key(data, self), shared_key(tmpl, self),
-               shared_key(out, self))
-        uploads = self._input_uploads(key, data, tmpl, upload_data, upload_tmpl)
-        batch = self._full_batches.get(key)
-        if batch is None:
-            self._cache_room(sum(a.nbytes for a in (data, tmpl, out)
-                                 if shared_buffer(a, self) is None),
-                             incoming=[b for a in (data, tmpl, out)
-                                       if (b := shared_buffer(a, self)) is not None])
-            batch = (shared_buffer(data, self) or _Buffer(self, data.nbytes),
-                     shared_buffer(tmpl, self) or _Buffer(self, tmpl.nbytes),
-                     shared_buffer(out, self) or _Buffer(self, out.nbytes))
-            self._full_batches[key] = batch
-            uploads = (True, True, *uploads[2:])
-        self._cache_touch('full', key)
-        bd, bt, bo = batch
-        self._write_uploads(key, uploads, bd, data, bt, tmpl)
-        pso = self.pipeline(n, 'fullCorrelation')
-        cmd = self._command_buffer()
-        enc = self.o.call(cmd, b'computeCommandEncoder')
-        self._dispatch(enc, pso, (nt,), batch, n // _radix(n), groups=nd * nt)
-        self.o.call(enc, b'endEncoding', restype=None)
-        self._commit(cmd, 'full')
-        if shared_buffer(out, self) is None:
-            bo.read_into(out)
-
-    @_autoreleased
-    def _tierc_tile(self, n, data, tmpl, out, upload_data, upload_tmpl):
-        nd, nt = data.shape[0], tmpl.shape[0]
-        geometry = _manifest().get('full_tierc', {}).get(str(n))
-        if geometry is None:
-            raise UnsupportedSize('no two-stage full-correlation kernel for n=%d' % n)
-        key = (n, nd, nt, shared_key(data, self), shared_key(tmpl, self),
-               shared_key(out, self))
-        uploads = self._input_uploads(key, data, tmpl, upload_data, upload_tmpl)
-        batch = self._tierc_batches.get(key)
-        if batch is None:
-            external = [b for a in (data, tmpl, out)
-                        if (b := shared_buffer(a, self)) is not None]
-            estimate = nd*nt*n*8 + sum(a.nbytes for a in (data, tmpl, out)
-                                       if shared_buffer(a, self) is None)
-            self._cache_room(estimate, incoming=external)
-            batch = (shared_buffer(data, self) or _Buffer(self, data.nbytes),
-                     shared_buffer(tmpl, self) or _Buffer(self, tmpl.nbytes),
-                     _Buffer(self, nd*nt*n*8),
-                     shared_buffer(out, self) or _Buffer(self, out.nbytes))
-            self._tierc_batches[key] = batch
-            uploads = (True, True, *uploads[2:])
-        self._cache_touch('tierc', key)
-        bd, bt, scratch, bo = batch
-        self._write_uploads(key, uploads, bd, data, bt, tmpl)
-        cmd = self._command_buffer()
-        self._encode_tierc(cmd, n, 'corr1', (bd, bt, scratch),
-                           nd*nt*geometry['n1'], nt)
-        self._encode_tierc(cmd, n, 'corr2', (scratch, bo),
-                           nd*nt*geometry['n2'])
-        self._commit(cmd, 'tierc')
-        if shared_buffer(out, self) is None:
-            bo.read_into(out)
-
-    @_autoreleased
     def correlate_continuous(self, n, data, tmpl, starts, out, lo, hi,
                              *, upload_data=True, upload_tmpl=True, async_submit=False):
         """Write valid lags directly to a filter-owned continuous GPU buffer."""
@@ -1569,27 +1527,72 @@ class Context(InputUploads):
     #: zero_columns_done(wait=False) leaves the zeroing and the middle stage in flight.
     async_zero = True
 
-    def correlate(self, n, data, tmpl, out, *, upload_data=True, upload_tmpl=True):
-        nd, nt = data.shape[0], tmpl.shape[0]
-        if out.shape != (nd, nt, n):
-            raise ValueError('full output shape does not match the banks')
-        geometry = _manifest().get('full_tierc', {}).get(str(n)) if n > 65536 else None
-        if n > 65536 and geometry is None:
+    # ---- driver primitives (_gpuexec) -----------------------------------------------------
+    #: The most threadgroups one dispatch takes, and the byte alignment of a bound view
+    #: (setBuffer:offset: for the widest element a kernel reads, float2).
+    max_dispatch_x = 2 ** 32 - 1
+    storage_offset_alignment = 16
+
+    def _x_kernel(self, name, n):
+        if name == "full":
+            return self.pipeline(n, 'fullCorrelation'), n // _radix(n)
+        geometry = _manifest().get('full_tierc', {}).get(str(n))
+        if geometry is None:
             raise UnsupportedSize('no two-stage full-correlation kernel for n=%d' % n)
-        fn = self._tierc_tile if geometry else self._full_tile
-        per_pair = 8*n*(2 if geometry else 1)
-        budget = 64*1024*1024
-        direct = shared_buffer(out, self) is not None
-        working_bytes = nd*nt*8*n*((1 if direct else 2) if geometry else (0 if direct else 1))
-        if working_bytes <= budget:
-            fn(n, data, tmpl, out, upload_data, upload_tmpl)
+        role, entry = ('corr1', 'tcStage1') if name == "tc1" else ('corr2', 'tcFullStage3')
+        return self.pipeline(n, entry), geometry[role]['local_size'][0]
+
+    def _x_tierc(self, n):
+        geometry = _manifest().get('full_tierc', {}).get(str(n))
+        if geometry is None:
+            raise UnsupportedSize('no two-stage full-correlation kernel for n=%d' % n)
+        return geometry['n1'], geometry['n2']
+
+    def _x_alloc(self, nbytes, readback=False):
+        return _Buffer(self, nbytes)
+
+    def _x_list(self, label):
+        return _MtlList(label)
+
+    @_autoreleased
+    def _x_run(self, native, wait):
+        label, ops = native
+        cmd = self._command_buffer()
+        enc = self.o.call(cmd, b'computeCommandEncoder')
+        for (pso, tg), groups, buffers, words in ops:
+            if words:
+                self._dispatch(enc, pso, words, buffers, tg, groups=groups)
+            else:                    # no uniforms: the buffers bind from index 0
+                self.o.call(enc, b"setComputePipelineState:", restype=None,
+                            args=(pso,), argtypes=(ctypes.c_void_p,))
+                self._set_buffers(enc, buffers, start=0)
+                self.o.call(enc, b"dispatchThreadgroups:threadsPerThreadgroup:", restype=None,
+                            args=(_MTLSize(groups, 1, 1), _MTLSize(tg, 1, 1)),
+                            argtypes=(_MTLSize, _MTLSize))
+        self.o.call(enc, b'endEncoding', restype=None)
+        if wait:
+            self._commit(cmd, label)
             return
-        tile = min(nt, max(1, budget//per_pair))
-        for d in range(nd):
-            for t0 in range(0, nt, tile):
-                t1 = min(t0+tile, nt)
-                fn(n, data[d:d+1], tmpl[t0:t1], out[d:d+1,t0:t1],
-                   upload_data, upload_tmpl)
+        # Left in flight: it signals this context's event, which other contexts' command
+        # buffers wait on (_new_cmd), and settle_writes() waits on the host.
+        dev = self._device_state
+        if getattr(self, "_signal_event", None) is None:
+            self._signal_event = self.o.call(self.device, b"newSharedEvent")
+            self._signal_value = 0
+        self._signal_value += 1
+        self.o.call(cmd, b"encodeSignalEvent:value:", restype=None,
+                    args=(self._signal_event, self._signal_value),
+                    argtypes=(ctypes.c_void_p, ctypes.c_uint64))
+        self._commit(cmd, label, async_submit=True)
+        if self not in dev.pending_contexts:
+            dev.pending_contexts.append(self)
+
+    def _x_release(self, native, resources):
+        pass                        # nothing recorded: every run encodes afresh
+
+    @staticmethod
+    def _x_read(buf, out):
+        buf.read_into(out)
 
     # ---- hierarchical -----------------------------------------------------
     def _simd_width(self, band):
@@ -2002,6 +2005,8 @@ class Context(InputUploads):
                             else "no error object"))
 
     def _evict_record(self, kind, key, keep_storage=None):
+        if kind == "exec":
+            return self._exec_evict(key)
         # In-flight results read these buffers when they are collected.
         self._drain()
         if kind == 'forward':
@@ -2020,6 +2025,7 @@ class Context(InputUploads):
     def clear_cache(self):
         self._drain()
         self.cancel_forward()
+        self._exec_clear()
         for table in self._record_tables().values():
             for record in table.values():
                 for buf in self._record_buffers(record):

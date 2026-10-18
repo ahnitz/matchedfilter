@@ -27,6 +27,7 @@ from . import _cuda, _gputime
 from ._cuda import check_cuda
 from ._errors import UnsupportedSize
 from ._gpu_cache import InputUploads
+from ._gpuexec import Executor
 from ._shared import empty_shared, shared_buffer, shared_key, _Borrowed
 from ._gpuhost import hier_peaks_grouped as _hier_peaks_grouped  # noqa: E402
 from ._gpuhost import (MAX_BINS, ROWWIN_ON, band_windows, bin_shift, coarse_span, plan_items, split_items, hier_tiers, hier_window,
@@ -190,6 +191,12 @@ def _f32bits(x):
 
 def _ptr(v):
     return ctypes.c_uint64(int(v))
+
+
+def _param_ptrs(params):
+    """cuLaunchKernel's argument array: the address of each parameter (kept alive by the
+    caller with params)."""
+    return (ctypes.c_void_p * len(params))(*[ctypes.addressof(p) for p in params])
 
 
 def _uint4(*v):
@@ -438,7 +445,28 @@ def _owned(buffers):
             or isinstance(b, _GraphCache)]
 
 
-class Context(InputUploads):
+class _CudaList:
+    """A command list (_gpuexec's driver interface): launches in order on one stream, so a
+    barrier is the stream's own ordering. end() returns the launches."""
+
+    def __init__(self, label):
+        self.label, self.ops = label, []
+
+    def dispatch(self, kernel, groups, buffers, words=(), offsets=None):
+        # The launch's parameters are built here, once: a recording is replayed per call.
+        offs = offsets or [0] * len(buffers)
+        params = ([_ptr(int(b.dptr.value) + int(o)) for b, o in zip(buffers, offs)]
+                  + [_u32(w) for w in words])
+        self.ops.append((kernel, int(groups), params, _param_ptrs(params)))
+
+    def barrier(self):
+        pass
+
+    def end(self):
+        return self.ops, None
+
+
+class Context(Executor, InputUploads):
     """One NVIDIA CUDA device context, stream, and loaded PTX pipelines."""
 
     max_grouped_bins = _MAX_BINS
@@ -871,12 +899,13 @@ class Context(InputUploads):
             self._occupancy[key] = max(1, v.value)
         return self._occupancy[key]
 
-    def _launch(self, hfunc, grid_dim, block_dim, params, shared_mem=0, stream=None, label=None):
+    def _launch(self, hfunc, grid_dim, block_dim, params, shared_mem=0, stream=None, label=None,
+                param_ptrs=None):
+        """Launch hfunc; param_ptrs, when given, is _param_ptrs(params) built beforehand."""
         if (grid_dim if not isinstance(grid_dim, tuple) else grid_dim[0]) <= 0:
             return
-        param_ptrs = (ctypes.c_void_p * len(params))(
-            *[ctypes.c_void_p(ctypes.addressof(p)) for p in params]
-        )
+        if param_ptrs is None:
+            param_ptrs = _param_ptrs(params)
         gx, gy, gz = grid_dim if isinstance(grid_dim, tuple) else (grid_dim, 1, 1)
         bx, by, bz = block_dim if isinstance(block_dim, tuple) else (block_dim, 1, 1)
         st = self.get_stream(None) if stream is None else stream
@@ -901,6 +930,8 @@ class Context(InputUploads):
                 yield from _owned(self._record_buffers(rec))
 
     def _evict_record(self, kind, key, keep_storage=None):
+        if kind == "exec":
+            return self._exec_evict(key)
         # Synchronizing only completes the copies into pinned host buffers. Their
         # collectors still need to materialize the results before those buffers go.
         self._drain()
@@ -1263,56 +1294,45 @@ class Context(InputUploads):
             s = bufs[name] = _Buffer(self, nbytes)
         return s
 
-    def correlate(self, n, data, tmpl, out, *, upload_data=True, upload_tmpl=True):
-        """Full circular correlation in natural lag order: out[d, t, lag]."""
+    # ---- driver primitives (_gpuexec) -----------------------------------------------------
+    #: The most blocks one launch takes (gridDim.x), and the byte alignment of a bound view:
+    #: a device pointer plus offset, aligned for the widest element a kernel reads (float2).
+    max_dispatch_x = 2 ** 31 - 1
+    storage_offset_alignment = 16
+
+    def _x_kernel(self, name, n):
+        if name == "full":
+            return self.pipeline(n, "fullCorrelation")
+        fn, wg, _, _ = self._tierc(n, "corr1" if name == "tc1" else "corr2")
+        return fn, wg
+
+    def _x_tierc(self, n):
+        return self._tierc(n, "corr1")[2:]
+
+    def _x_alloc(self, nbytes, readback=False):
+        return _Buffer(self, nbytes)
+
+    def _x_list(self, label):
+        return _CudaList(label)
+
+    def _x_run(self, native, wait):
         self._bind()
-        nd, nt = data.shape[0], tmpl.shape[0]
-        if out.shape != (nd, nt, n) or out.dtype != np.complex64 or not out.flags.c_contiguous:
-            raise ValueError("out must be a C-contiguous complex64 (%d, %d, %d) array" % (nd, nt, n))
         stream = self.get_stream(None)
-        key, bufs = self._full_inputs("full", n, data, tmpl, upload_data, upload_tmpl, stream)
-        dptr, tptr = bufs["data"].dptr.value, bufs["tmpl"].dptr.value
-        osh = shared_buffer(out, self)
-        tierc = n > 65536
-        if tierc:
-            s1, s1wg, n1, n2 = self._tierc(n, "corr1")
-            s3, s3wg, _, _ = self._tierc(n, "corr2")
-        else:
-            hfunc, wg = self.pipeline(n, "fullCorrelation")
-        if osh is not None and not tierc:
-            self._launch(hfunc, nd * nt, wg,
-                         [_ptr(dptr), _ptr(tptr), osh.dptr, _u32(nt)], stream=stream)
+        self._after_writes(stream)
+        for (fn, wg), groups, params, param_ptrs in native:
+            self._launch(fn, groups, wg, params, stream=stream, param_ptrs=param_ptrs)
+        if wait:
             self._sync(stream)
-            return out
-        # Tiled, so device scratch stays bounded. A tile is a run of whole data
-        # rows, or a run of templates within one row; either way its output is
-        # one contiguous span of ``out``. Tier C also needs its inter-stage
-        # scratch per tile.
-        tiles = self._tiles(nd, nt, n * 8)
-        most = max((d1 - d0) * (t1 - t0) for d0, d1, t0, t1 in tiles) * n * 8
-        flat = out.reshape(-1)
-        for d0, d1, t0, t1 in tiles:
-            k = t1 - t0
-            pairs = (d1 - d0) * k
-            start = (d0 * nt + t0) * n
-            if osh is not None:
-                dst = osh.dptr.value + start * 8
-            else:
-                dst = self._scratch(key, "stage", most).dptr.value
-            args = [_ptr(dptr + d0 * n * 8), _ptr(tptr + t0 * n * 8)]
-            if tierc:
-                mid = self._scratch(key, "tierc", most)
-                self._launch(s1, pairs * n1, s1wg, args + [mid.dptr, _u32(k)], stream=stream)
-                self._launch(s3, pairs * n2, s3wg, [mid.dptr, _ptr(dst)], stream=stream)
-            else:
-                self._launch(hfunc, pairs, wg, args + [_ptr(dst), _u32(k)], stream=stream)
-            if osh is None:
-                self._copy_d2h(flat[start:start + pairs * n].ctypes.data, dst,
-                               pairs * n * 8, stream, "readback")
-                # The staging buffer is reused by the next tile.
-                self._sync(stream)
-        self._sync(stream)
-        return out
+        else:
+            self._pend_write(stream)
+
+    def _x_release(self, native, resources):
+        self._bind()
+        check_cuda(self.cuda.cuCtxSynchronize(), "cuCtxSynchronize")
+
+    @staticmethod
+    def _x_read(buf, out):
+        buf.read_into(out)
 
     @staticmethod
     def _tiles(nd, nt, pair_bytes):
@@ -1968,6 +1988,7 @@ class Context(InputUploads):
     def clear_cache(self):
         self._drain()
         self._drain_segments()
+        self._exec_clear()
         self._bind()
         if self.ctx.value:
             self.cuda.cuCtxSynchronize()
