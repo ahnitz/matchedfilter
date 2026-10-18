@@ -56,13 +56,14 @@ def _is_index(x) -> bool:
     return isinstance(x, (int, np.integer)) and not isinstance(x, (bool, np.bool_))
 
 
-def _settle_metal_writes():
-    """Wait for Metal writes left in flight (zero_columns_done(wait=False)) before a host
-    read. Metal orders its own contexts on the GPU, so only host readers wait."""
+def _settle_device_writes():
+    """Wait for GPU writes left in flight (correlate_series(wait=False)) before a host
+    read. Device consumers are ordered on the GPU, so only host readers wait."""
     import sys
-    mtl = sys.modules.get(__package__ + '._mtlcompute')
-    if mtl is not None:
-        mtl.settle_all()
+    for name in ('._mtlcompute', '._vkcompute'):
+        mod = sys.modules.get(__package__ + name)
+        if mod is not None and hasattr(mod, 'settle_all'):
+            mod.settle_all()
 
 
 class _RaggedSplit:
@@ -2050,7 +2051,7 @@ class TimeDomainFilterBank:
             if getattr(active_plan, '_gpu', None) is None:
                 # A host plan reads the series on the host: device writes left in flight
                 # to it (correlate_series(wait=False)) must land first.
-                _settle_metal_writes()
+                _settle_device_writes()
 
             N = g.n
             layout = g._cached_layout
@@ -2785,7 +2786,7 @@ class TimeDomainFilterBank:
         if templates is not None:
             if template_index is not None:
                 raise ValueError("give template_index or templates, not both")
-            return self._correlate_selected(ser, W, templates, scales, out, support)
+            return self._correlate_selected(ser, W, templates, scales, out, support, wait=wait)
 
         # Full bank correlation across all groups
         shape = (nt, S)
@@ -2906,7 +2907,7 @@ class TimeDomainFilterBank:
         self._groups
         return all(_gpu_reads_real(g.get_correlation_plan()._gpu, g.n) for g in self._groups)
 
-    def _correlate_selected(self, ser, W, templates, scales, out, support=None):
+    def _correlate_selected(self, ser, W, templates, scales, out, support=None, wait=True):
         """correlate_series(templates=...): row j of the result is template templates[j]."""
         from . import _from_any
         S = ser.size
@@ -2937,6 +2938,7 @@ class TimeDomainFilterBank:
             else:
                 runs.append([g, li, j, 1])
         settle = []
+        ok = False
         try:
             ser = self._stage_series(ser)
             try:
@@ -2945,9 +2947,14 @@ class TimeDomainFilterBank:
                                             support=support)
             finally:
                 self._staging_done()
+            ok = True
         finally:
+            # Scales are applied on the host below, so a scaled call finishes its work here.
             for gpu in {id(x): x for x in settle}.values():
-                gpu.zero_columns_done()
+                if ok and not wait and scales is None and getattr(gpu, 'async_zero', False):
+                    gpu.zero_columns_done(wait=False)
+                else:
+                    gpu.zero_columns_done()
         if scales is not None:
             np.multiply(result, sc[sel][:, None], out=result)
         return result
