@@ -51,7 +51,7 @@ class _Workspace:
         self.b_spec = shared_buffer(self.spec, ctx)
         self.b_starts = shared_buffer(self.starts, ctx)
         self.fpipe, self.flayout, fsl = ctx._build_pipeline(("forward", n), "forward_%d.spv" % n,
-                                                            3, 4)
+                                                            3, 8)
         info = (vkc._manifest().get("modules", {}).get(str(n)) or {}).get("items")
         if info is None:
             raise Unsupported("no refineItems module for n=%d" % n)
@@ -125,8 +125,8 @@ class _Workspace:
         vk.vkCmdBindPipeline(cmd, vkc._BIND_POINT_COMPUTE, self.fpipe)
         vk.vkCmdBindDescriptorSets(cmd, vkc._BIND_POINT_COMPUTE, self.flayout, 0, 1,
                                    (vkc._vp * 1)(self.fset), 0, None)
-        vk.vkCmdPushConstants(cmd, self.flayout, vkc._STAGE_COMPUTE, 0, 4,
-                              ctypes.byref(vkc._u32(alloc.size)))
+        vk.vkCmdPushConstants(cmd, self.flayout, vkc._STAGE_COMPUTE, 0, 8,
+                              ctypes.byref((ctypes.c_uint32 * 2)(alloc.size, 0)))
         vk.vkCmdDispatchIndirect(cmd, self.args.handle, 0)
         mb = vkc._MemBarrier(46, None, vkc._ACCESS_SHADER_WRITE, vkc._ACCESS_SHADER_READ)
         vk.vkCmdPipelineBarrier(cmd, vkc._STAGE_COMPUTE_BIT, vkc._STAGE_COMPUTE_BIT, 0, 1,

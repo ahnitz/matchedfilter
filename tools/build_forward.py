@@ -5,6 +5,11 @@ import subprocess
 import tempfile
 import build_spirv as build
 
+# The SPIR-V forwards Vulkan dispatches (full, bands, listed) also take a real series in place
+# (series_forward.slang, MF_SERIES_LAYOUT: one more uniform, seriesLayout). The Metal and CUDA
+# hosts, and forwardTier0 (dispatched on Metal only), do not pass it yet.
+VULKAN = ['-DMF_VULKAN=1', '-DMF_SERIES_LAYOUT=1']
+
 
 def build_kernels(compiler, build_module=build):
     """Build every series artifact and return its manifest entries."""
@@ -36,7 +41,7 @@ def build_kernels(compiler, build_module=build):
                 out = build.ROOT / 'python/matchedfilter' / folder / f'forward_{n}.{suffix}'
                 subprocess.run([compiler, str(src), '-I', str(build.KERNEL.parent), '-target', target,
                                 '-entry', 'seriesForward', '-stage', 'compute',
-                                '-O3', *(['-DMF_VULKAN=1'] if target == 'spirv' else []), '-o', str(out)], check=True)
+                                '-O3', *(VULKAN if target == 'spirv' else []), '-o', str(out)], check=True)
         blob = build.ROOT / 'python/matchedfilter/spirv' / f'forward_{n}.spv'
         info = build.reflect(blob.read_bytes())
         entries[str(n)] = dict(file=blob.name, metal=f'forward_{n}.metal',
@@ -53,7 +58,7 @@ def build_kernels(compiler, build_module=build):
                 out = build.ROOT / 'python/matchedfilter/spirv' / (
                     f'{stem}_{n}.spv' if stem != 'markblocks' else 'markblocks.spv')
                 subprocess.run([compiler, str(src), '-I', str(build.KERNEL.parent), '-target', 'spirv',
-                                '-entry', entry, '-stage', 'compute', '-O3', '-DMF_VULKAN=1',
+                                '-entry', entry, '-stage', 'compute', '-O3', *VULKAN,
                                 '-o', str(out)], check=True)
         entries[str(n)]['bands'] = f'forward_bands_{n}.spv'
         entries[str(n)]['listed'] = f'forward_listed_{n}.spv'

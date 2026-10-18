@@ -140,14 +140,40 @@ def containing(array, ctx):
     if not (addr + array.nbytes <= start + nbytes and (addr - start) % item == 0
             and _same_device(allocation.buffer.ctx, ctx)):
         return None
+    return _whole_view(start, allocation, array.dtype), (addr - start) // item
+
+
+def containing_samples(array, ctx):
+    """(whole allocation as complex64, float offset of the first sample, stride in floats)
+    when `array` is a real float32 series -- contiguous, or one lane of a complex row
+    (stride 8 bytes) -- lying inside a shared allocation usable by ctx, else None. Sample i
+    is float offset + stride * i of the allocation read as floats."""
+    if not (isinstance(array, np.ndarray) and array.dtype == np.float32 and array.ndim == 1
+            and array.size and array.strides[0] in (4, 8)):
+        return None
+    addr = array.ctypes.data
+    start, allocation = _containing(addr)
+    if allocation is None:
+        return None
+    nbytes = allocation.buffer.nbytes
+    end = addr + (array.size - 1) * array.strides[0] + 4
+    if not (end <= start + nbytes - nbytes % 8 and (addr - start) % 4 == 0
+            and _same_device(allocation.buffer.ctx, ctx)):
+        return None
+    return (_whole_view(start, allocation, np.dtype(np.complex64)), (addr - start) // 4,
+            array.strides[0] // 4)
+
+
+def _whole_view(start, allocation, dtype):
+    """The allocation starting at `start` as one 1-D array of dtype, cached."""
     whole = _whole.get(start)
-    if whole is None or whole.dtype != array.dtype:
+    if whole is None or whole.dtype != dtype:
+        nbytes, item = allocation.buffer.nbytes, dtype.itemsize
         storage = (ctypes.c_ubyte * (nbytes - nbytes % item)).from_address(start)
         storage._allocation = allocation
-        whole = np.ndarray(((nbytes - nbytes % item) // item,), dtype=array.dtype,
-                           buffer=storage)
+        whole = np.ndarray(((nbytes - nbytes % item) // item,), dtype=dtype, buffer=storage)
         _whole[start] = whole
-    return whole, (addr - start) // item
+    return whole
 
 
 #: One whole-allocation view per allocation, so recordings keyed on it repeat.
