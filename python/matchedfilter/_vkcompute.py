@@ -373,7 +373,7 @@ _BufMemBarrier = _struct("VkBufferMemoryBarrier",
 
 from ._errors import UnsupportedSize      # noqa: F401  (re-export)
 from ._gpu_cache import InputUploads
-from ._gpuexec import Executor
+from ._gpuexec import Arg, Executor
 
 
 class VulkanError(RuntimeError):
@@ -1121,29 +1121,80 @@ class _HierHandle:
 
 
 class _VkList:
-    """A command list being recorded (_gpuexec's driver interface): a primary command buffer
-    with a descriptor set per dispatch. end() returns (command buffer, descriptor pools)."""
+    """A command list being recorded (_gpuexec's driver interface). Descriptor sets fix the
+    buffers a command buffer binds, so the list is kept as its operations and recorded once
+    per binding of its Args (_VkNative)."""
 
     def __init__(self, ctx, label):
-        self.ctx = ctx
-        self.pool_start = len(getattr(ctx, "_pools", []))
-        self.rec = _Recording(ctx, label)
+        self.ctx, self.label, self.ops = ctx, label, []
 
     def dispatch(self, kernel, groups, buffers, words=(), offsets=None):
-        if offsets is None and any(getattr(b, "offset", 0) for b in buffers):
-            offsets = [getattr(b, "offset", 0) for b in buffers]
-        ds = self.ctx._descriptor_set(kernel[2], buffers, offsets)
-        self.rec.bind(kernel, ds, words)
-        self.rec.dispatch(groups)
+        flat = []
+        for w in words:
+            flat.extend(w if isinstance(w, tuple) else (w,))
+        self.ops.append((kernel, int(groups), list(buffers), offsets, flat))
 
     def barrier(self):
-        # Later dispatches and the host (after the fence) see these writes.
-        self.rec.barrier(dst_stage=_STAGE_COMPUTE_BIT | _STAGE_HOST_BIT,
-                         dst_access=_ACCESS_SHADER_READ | _ACCESS_HOST_READ)
+        self.ops.append(None)
 
     def end(self):
-        cmd = self.rec.end()
-        return cmd, list(getattr(self.ctx, "_pools", [])[self.pool_start:])
+        return _VkNative(self.ctx, self.label, self.ops)
+
+
+class _VkNative:
+    """A recorded list: a command buffer per binding of its Args (just one without Args),
+    the most recently used _BINDINGS kept. A command buffer holds the views it binds, so
+    no allocation can be freed and its handle reused under it."""
+    _BINDINGS = 8
+
+    def __init__(self, ctx, label, ops):
+        self.ctx, self.label, self.ops = ctx, label, ops
+        self.args = sorted({b.name for op in ops if op for b in op[2] if isinstance(b, Arg)})
+        self.cmds = {}                       # binding key -> (cmd, pools, held views)
+
+    def command(self, binds):
+        views = tuple(binds[name] for name in self.args)
+        key = tuple((id(v.owner), v.offset) for v in views)
+        entry = self.cmds.pop(key, None)
+        if entry is None:
+            if len(self.cmds) >= self._BINDINGS:
+                self.ctx._wait_queues()
+                self.release_one(next(iter(self.cmds)))
+            entry = self.record(dict(zip(self.args, views))) + (views,)
+        self.cmds[key] = entry               # most recently used last
+        return entry[0]
+
+    def record(self, binds):
+        ctx = self.ctx
+        pool_start = len(getattr(ctx, "_pools", []))
+        rec = _Recording(ctx, self.label)
+        for op in self.ops:
+            if op is None:
+                _global_barrier(ctx.vk, rec.cmd)
+                continue
+            kernel, groups, buffers, offsets, words = op
+            bound = [binds[b.name] if isinstance(b, Arg) else b for b in buffers]
+            offs = [getattr(b, "offset", 0) + (offsets[i] if offsets else 0)
+                    for i, b in enumerate(bound)]
+            ds = ctx._descriptor_set(kernel[2], bound, offs if any(offs) else None)
+            rec.bind(kernel, ds, words)
+            rec.dispatch(groups)
+        cmd = rec.end()
+        return cmd, list(getattr(ctx, "_pools", [])[pool_start:])
+
+    def release_one(self, key):
+        cmd, pools, _ = self.cmds.pop(key)
+        ctx = self.ctx
+        ctx.vk.vkFreeCommandBuffers.argtypes = [_vp, _vp, _u32, ctypes.POINTER(_vp)]
+        ctx.vk.vkFreeCommandBuffers(ctx.device, ctx.command_pool, 1, (_vp * 1)(cmd))
+        dead = {pool.value for pool in pools}
+        for pool in pools:
+            ctx.vk.vkDestroyDescriptorPool(ctx.device, pool, None)
+        ctx._pools = [pool for pool in getattr(ctx, "_pools", []) if pool.value not in dead]
+
+    def release(self):
+        for key in list(self.cmds):
+            self.release_one(key)
 
 
 class Context(Executor, InputUploads):
@@ -1184,8 +1235,6 @@ class Context(Executor, InputUploads):
         vk.vkCmdDispatchIndirect.argtypes = [ctypes.c_void_p, ctypes.c_void_p,
                                              ctypes.c_uint64]
         self._batches = {}
-        self._full_batches = {}
-        self._tierc_batches = {}
         self._storage = {}
         self._storage_users = {}
         self._record_storage = {}
@@ -3079,21 +3128,27 @@ class Context(Executor, InputUploads):
 
     # ---- driver primitives (_gpuexec) -----------------------------------------------------
     def _x_kernel(self, name, n):
-        if name == "full":
-            info = (_manifest().get('modules', {}).get(str(n)) or {}).get('full')
+        if name in ("full", "series"):
+            entry = "full" if name == "full" else "full_series"
+            module = _manifest().get('modules', {}).get(str(n)) or {}
+            info = module.get(entry)
             if info is None:
-                raise UnsupportedSize('no full-correlation GPU kernel for n=%d' % n)
+                raise UnsupportedSize('no %s GPU kernel for n=%d' % (entry, n))
             filename = ((info.get('portable') or {}).get('file')
-                        if _manifest()['modules'][str(n)].get('lds_bytes', 0) > self.max_shared_memory
-                        else info['file'])
+                        if module.get('lds_bytes', 0) > self.max_shared_memory else info['file'])
             if not filename:
-                raise UnsupportedSize('no portable full-correlation GPU kernel for n=%d' % n)
-            return self._build_pipeline(('full', filename), filename, 3, 4)
+                raise UnsupportedSize('no portable %s GPU kernel for n=%d' % (entry, n))
+            if name == "full":
+                return self._build_pipeline(('full', filename), filename, 3, 4)
+            return self._build_pipeline(('full-series', filename), filename, 4, 16)
         info = _manifest().get('full_tierc', {}).get(str(n))
         if info is None:
             raise UnsupportedSize('no two-stage full-correlation kernel for n=%d' % n)
         if name == "tc1":
             return self._build_pipeline(('tc-corr1', n), info['corr1']['file'], 3, 4)
+        if name == "tcs2":
+            return self._build_pipeline(('tc-corr-series2', n), info['corr_series2']['file'],
+                                        3, 16)
         return self._build_pipeline(('tc-corr2', n), info['corr2']['file'], 2, 0)
 
     def _x_tierc(self, n):
@@ -3102,26 +3157,25 @@ class Context(Executor, InputUploads):
             raise UnsupportedSize('no two-stage full-correlation kernel for n=%d' % n)
         return info['n1'], info['n2']
 
-    def _x_alloc(self, nbytes, readback=False):
+    def _x_alloc(self, nbytes, readback=False, upload=False):
         return _Buffer(self, nbytes, readback=readback)
 
     def _x_list(self, label):
         return _VkList(self, label)
 
-    def _x_run(self, native, wait):
+    def _x_run(self, native, wait, binds=None):
+        cmd = native.command(binds or {})
         if wait:
-            self._submit(native)
+            self._submit(cmd)
         else:
-            self._submit_pending(native)
+            self._submit_pending(cmd)
 
-    def _x_release(self, native, resources):
+    def _x_after_readers(self):
+        pass                # no wait added (open question: docs/unification-plan.md log)
+
+    def _x_release(self, native):
         self._wait_queues()
-        self.vk.vkFreeCommandBuffers.argtypes = [_vp, _vp, _u32, ctypes.POINTER(_vp)]
-        self.vk.vkFreeCommandBuffers(self.device, self.command_pool, 1, (_vp * 1)(native))
-        dead = {pool.value for pool in resources}
-        for pool in resources:
-            self.vk.vkDestroyDescriptorPool(self.device, pool, None)
-        self._pools = [pool for pool in getattr(self, "_pools", []) if pool.value not in dead]
+        native.release()
 
     @staticmethod
     def _x_read(buf, out):
@@ -3226,83 +3280,6 @@ class Context(Executor, InputUploads):
             vk.vkFreeCommandBuffers.argtypes = [_vp, _vp, _u32, ctypes.POINTER(_vp)]
             vk.vkFreeCommandBuffers(self.device, self.command_pool, len(cmds), (_vp * len(cmds))(*cmds))
 
-    def correlate_continuous(self, n, data, tmpl, starts, out, lo, hi,
-                             *, upload_data=True, upload_tmpl=True, async_submit=False):
-        """Write valid lags into template-major shared output on the GPU."""
-        nd, nt = data.shape[0], tmpl.shape[0]
-        length = out.shape[1]
-        # out may be rows inside a caller's shared output (continuous_out_views).
-        bs, bo = shared_buffer(starts, self), shared_view(out, self)
-        if bs is None or bo is None or starts.shape != (nd,) or out.shape[0] != nt:
-            raise ValueError('continuous output and starts must be shared GPU buffers')
-        geometry = _manifest().get('full_tierc', {}).get(str(n)) if n > 65536 else None
-        if n > 65536 and geometry is None:
-            raise UnsupportedSize('no two-stage continuous kernel for n=%d' % n)
-        # out by address, not shared_key: a view inside an allocation has no shared_key, and
-        # every row view sharing the key None replayed one view's recording into another's
-        # rows. The recording holds its _Borrowed, so the address cannot be reused under it.
-        key = ('series', n, nd, nt, length, lo, hi,
-               shared_key(data, self), shared_key(tmpl, self),
-               shared_key(starts, self), out.ctypes.data)
-        uploads = self._input_uploads(key, data, tmpl, upload_data, upload_tmpl)
-        cache = self._tierc_batches if geometry else self._full_batches
-        batch = cache.get(key)
-        if batch is None:
-            external = [b for a in (data, tmpl, starts, out)
-                        if (b := shared_buffer(a, self)) is not None]
-            estimate = (nd*nt*n*8 if geometry else 0) + sum(
-                a.nbytes for a in (data, tmpl) if shared_buffer(a, self) is None)
-            self._cache_room(estimate, incoming=external)
-            pool_start = len(getattr(self, '_pools', []))
-            bd = shared_buffer(data, self) or _Buffer(self, data.nbytes)
-            bt = shared_buffer(tmpl, self) or _Buffer(self, tmpl.nbytes)
-            if geometry:
-                p1, l1, sl1 = self._build_pipeline(('tc-corr1', n),
-                                                   geometry['corr1']['file'], 3, 4)
-                p2, l2, sl2 = self._build_pipeline(('tc-corr-series2', n),
-                                                   geometry['corr_series2']['file'], 3, 16)
-                scratch = _Buffer(self, nd*nt*n*8)
-                ds1 = self._descriptor_set(sl1, (bd, bt, scratch))
-                ds2 = self._descriptor_set(sl2, (scratch, bs, bo), [0, 0, bo.offset])
-            else:
-                info = _manifest()['modules'][str(n)]
-                entry = info['full_series']
-                filename = ((entry.get('portable') or {}).get('file')
-                            if info.get('lds_bytes', 0) > self.max_shared_memory
-                            else entry['file'])
-                if filename is None:
-                    raise UnsupportedSize('no portable continuous kernel for n=%d' % n)
-                pipe, layout, sl = self._build_pipeline(('full-series', filename),
-                                                         filename, 4, 16)
-                ds = self._descriptor_set(sl, (bd, bt, bs, bo), [0, 0, 0, bo.offset])
-            rec = _Recording(self, "continuous")
-            cmd = rec.cmd
-            # Ordered against neighbouring work on this queue without a host wait: earlier
-            # readers of `out` (last segment's fine stage) finish first, and later readers
-            # see these writes (correlate_series(wait=False) leaves this in flight).
-            _global_barrier(self.vk, cmd)
-            if geometry:
-                rec.bind((p1, l1), ds1, (nt,))
-                rec.dispatch(nd * nt * geometry['n1'])
-                rec.barrier(buffer=scratch)
-                pipe, layout, ds = p2, l2, ds2
-            rec.bind((pipe, layout), ds, (nt, length, lo, hi))
-            rec.dispatch(nd * nt * (geometry['n2'] if geometry else 1))
-            _global_barrier(self.vk, cmd)
-            rec.end()
-            batch = ((bd, bt, scratch, bs, bo, cmd) if geometry
-                     else (bd, bt, bs, bo, cmd))
-            cache[key] = batch
-            self._register_record('tierc' if geometry else 'full', key, None, pool_start)
-            uploads = (True, True, *uploads[2:])
-        self._cache_touch('tierc' if geometry else 'full', key)
-        bd, bt = batch[:2]
-        self._write_uploads(key, uploads, bd, data, bt, tmpl)
-        if async_submit:
-            self._submit_pending(batch[-1])
-        else:
-            self._submit(batch[-1])
-
     def _submit_pending(self, cmd):
         """Submit on the main queue and leave it in flight (see _Device.pending_writes)."""
         fence = _vp()
@@ -3398,7 +3375,7 @@ class Context(Executor, InputUploads):
         commands = (_vp * 1)(cmd)
         self.vk.vkFreeCommandBuffers.argtypes = [_vp, _vp, _u32, ctypes.POINTER(_vp)]
         self.vk.vkFreeCommandBuffers(self.device, self.command_pool, 1, commands)
-        if kind in ('full', 'tierc', 'forward'):
+        if kind == 'forward':
             p_bufs = set(self._persistent_scratch.values()) if isinstance(getattr(self, '_persistent_scratch', None), dict) else set()
             for buf in batch[:-1]:
                 if buf not in p_bufs and buf is not getattr(self, '_persistent_scratch', None) and not hasattr(buf, 'owner'):

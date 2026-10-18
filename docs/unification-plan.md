@@ -482,3 +482,44 @@ Stage 5's lessons land inside the stages that touch them. Each stage merges in g
     in both trees. It is submit-to-completion latency, and the latency is bimodal: both
     trees show both modes. M2 search throughput is unchanged (35.4-35.7 against
     35.5-36.0 M, paired).
+- 2026-10-18: **U2.2 continuous correlation runs on the shared executor.**
+  - The three copies are deleted, along with CUDA's `_full_inputs`, `_scratch`, `_tiles`
+    and the `_full_batches`/`_tierc_batches` tables.
+  - New in the driver interface:
+    - `Arg`: buffers bound per run. `out` and `starts` move between calls (Metal wraps a
+      caller's array per call with `host_view`), so the record is keyed on inputs only.
+      Templates are not re-uploaded when only the output moves, and no recording replays
+      a stale binding.
+      - Vulkan bakes bindings into descriptor sets: a command buffer per binding, the
+        last 8 kept, each holding its views.
+      - CUDA keeps a persistent parameter per Arg and sets it per run.
+      - Metal re-encodes on every run.
+    - `upload=True` buffers.
+    - The `stage_host_inputs` feature: CUDA's managed allocations migrate pages, so small
+      host-written inputs (block starts) go through pinned staging into device memory.
+      It is a feature, not an API check.
+    - `_x_after_readers`.
+    - Uniform words grouped as the kernel declares them: a vector is one tuple, so CUDA's
+      `uint4` is one parameter on every path that passes one.
+  - The two-stage form tiles its scratch by runs of whole data rows. This was CUDA's
+    rule, now everywhere; each run's starts are an uploaded copy.
+  - Vulkan binds template sub-ranges in place instead of copying them. Device time is
+    identical (dev2: 33.2-33.4 us per middle call either way).
+  - Goldens bit-identical on dev2. Two-stage continuous against CPU: 1.8e-6 relative
+    (dev2), 2.7e-6 (M2), 7.0e-7 (L40S), one run or three.
+  - Per call (correlate_continuous, root and middle shapes):
+    - dev2: device time identical; host CPU equal or lower (22.9-25.1 against
+      22.5-29.0 us).
+    - L40S: wall 53-57 against 54-56 us middle, 109-117 against 110-111 us root
+      (device time noisy on both).
+  - Paired dev2 search: 184-206 against 181-204 M.
+  - Found on the way: the U2.1 L40S check ran two test files only, and
+    `test_cuda_parity::test_correlate_tiles_into_host_output` failed at c5017af3 (it
+    patched CUDA internals). It is replaced by
+    `test_gpu_host_output_tiles_within_the_staging_budget`, which runs on every GPU.
+    Every port's L40S check now runs the full suite.
+  - **Open:** before an in-place output is rewritten with the call left in flight,
+    CUDA synchronizes the device: readers on other contexts' streams. Vulkan (several
+    queues under `filter_series_many`) and Metal (one queue per context) add no wait.
+    Whether a reader on another queue can still be running there is unverified; it is
+    unchanged by the port.

@@ -298,6 +298,27 @@ def test_gpu_shared_output_is_one_dispatch_past_staging_budget(monkeypatch):
         ctx.destroy()
 
 
+def test_gpu_host_output_tiles_within_the_staging_budget(monkeypatch):
+    """Into a host array, a correlation needing more staging than the budget runs in tiles
+    of templates, each staged within it, and agrees with numpy."""
+    device = _device('gpu')
+    from matchedfilter.device import parse
+    parsed = parse(device)
+    backend = __import__('matchedfilter._%s' % {'metal': 'mtlcompute', 'cuda': 'cudacompute'}
+                         .get(parsed.backend, 'vkcompute'), fromlist=['Context'])
+    ctx = backend.Context(parsed.index)
+    try:
+        n, nd, nt = 2048, 3, 5
+        data, tmpl = _spectra((nd, n), 4), _spectra((nt, n), 5)
+        monkeypatch.setattr(ctx, '_FULL_BUDGET', 2 * n * 8)    # two templates a tile
+        out = np.zeros((nd, nt, n), np.complex64)
+        ctx.correlate(n, data, tmpl, out)
+        _agrees(out, _reference(data, tmpl))
+        assert max(b.nbytes for b in ctx._exec_owned_buffers()) <= 2 * n * 8
+    finally:
+        ctx.destroy()
+
+
 @pytest.mark.parametrize('n', [65536, 131072, 1 << 22])
 def test_gpu_series_across_two_stage_boundary(n):
     device = _device('gpu')
