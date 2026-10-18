@@ -90,9 +90,10 @@ def test_forward_and_packing_kernels_ship():
         assert (spirv / entry['file']).is_file()
         assert (metal / entry['metal']).is_file()
         assert entry['local_size'] == manifest['modules'][str(n)]['local_size']
-    packing = manifest['pack_coarse']
-    assert (spirv / packing['file']).is_file()
-    assert (metal / packing['metal']).is_file()
+    for kernel in ('pack_coarse', 'compact_peaks'):
+        entry = manifest[kernel]
+        assert (spirv / entry['file']).is_file()
+        assert (metal / entry['metal']).is_file()
 
 
 def test_production_shader_sources_match_built_manifest():
@@ -104,7 +105,7 @@ def test_production_shader_sources_match_built_manifest():
     assert set(recorded) == {'tierb.slang', 'fft_transform.slang', 'coarse_tile.slang',
                              'series_forward.slang', 'series_bands.slang', 'forward_tier0.slang',
                              'pack_coarse.slang',
-                             'twiddle.slang', 'refine_bounded.slang'}
+                             'twiddle.slang', 'refine_bounded.slang', 'compact_peaks.slang'}
     for name, digest in recorded.items():
         assert hashlib.sha256((source / name).read_bytes()).hexdigest() == digest, (
             '%s changed: rebuild all kernels with tools/build_spirv.py' % name)

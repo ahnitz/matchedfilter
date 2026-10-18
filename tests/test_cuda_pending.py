@@ -1,6 +1,7 @@
-"""CUDA result lifetime without a device: real dispatch/cache/readback code, host-backed
+"""CUDA hierarchical result lifetime without a device: real cache/readback code, host-backed
 allocations whose reads fail after destroy. Completing a device copy does not make its
-pinned result safe to free while an async collector still needs it."""
+pinned result safe to free while an async collector still needs it. (Flat results go
+through the shared executor: tests/test_gpu_flat_results.py, on every GPU.)"""
 import ctypes
 from types import SimpleNamespace
 
@@ -75,40 +76,6 @@ def ctx(monkeypatch):
     c._launch = launch
     yield c
     c.clear_cache()
-
-
-def _submit(ctx, rows=1, slot=0, grouped=False):
-    data = np.zeros((rows, 1024), np.complex64)
-    if grouped:
-        return ctx.peaks_grouped(1024, data, data[:1], [(0, 1024, 0, rows)],
-                                 1024, 0.0, slot=slot, async_submit=True)
-    return ctx.peaks(1024, data, data[:1], slot=slot, async_submit=True)
-
-
-@pytest.mark.parametrize("grouped", [False, True])
-@pytest.mark.parametrize("release", ["evict", "clear"])
-def test_result_survives_pinned_buffer_release(ctx, grouped, release):
-    ctx.cache_limit_bytes = 1                 # next slot evicts this dispatch
-    first = _submit(ctx, grouped=grouped)
-    host = next(iter(ctx._batches.values()))["host"]
-    if release == "evict":
-        second = _submit(ctx, slot=1, grouped=grouped)
-        assert second()[0].item() == 2
-    else:
-        ctx.clear_cache()
-    assert not host.alive
-    idx, val = first()
-    assert idx.item() == 1 and val.item() == 1 - 1j
-    assert first()[0] is idx                    # materialized once, including early drain
-    assert not ctx._inflight and not ctx._pending_records
-
-
-@pytest.mark.parametrize("rows", [1, 2])
-def test_reusing_or_growing_a_record_keeps_its_pending_result(ctx, rows):
-    first = _submit(ctx)
-    second = _submit(ctx, rows=rows)
-    assert first()[0].tolist() == [[[1]]]
-    assert (second()[0] == 2).all()
 
 
 def test_early_collection_preserves_stats(ctx):

@@ -466,16 +466,56 @@ class _Staged:
         self.pinned.destroy()
 
 
+class _Readback:
+    """A device buffer the host reads (_x_alloc(readback=True)): a list's readback op copies
+    a prefix of it into page-locked memory on the stream, so the host reads it after the
+    run's one synchronization (a range past that prefix is copied when it is read)."""
+
+    def __init__(self, ctx, nbytes):
+        self.ctx, self.nbytes = ctx, max(int(nbytes), 4)
+        self.device = _Buffer(ctx, self.nbytes)
+        self.dptr = self.device.dptr
+        self.pinned, self.mirrored = None, 0
+
+    def mirror(self, nbytes):
+        nbytes = min(int(nbytes), self.nbytes)
+        if self.pinned is None or self.pinned.nbytes < nbytes:
+            if self.pinned is not None:
+                self.pinned.destroy()
+            self.pinned = _Pinned(self.ctx, nbytes)
+        self.mirrored = nbytes
+        return self.pinned
+
+    def read_into(self, out, offset=0):
+        dst, count = out.ctypes.data, out.nbytes
+        inside = max(0, min(count, self.mirrored - offset))
+        if inside:
+            ctypes.memmove(dst, self.pinned.ptr + offset, inside)
+        if count > inside:
+            self.ctx._bind()
+            check_cuda(self.ctx.cuda.cuMemcpyDtoH_v2(dst + inside,
+                                                     self.dptr.value + offset + inside,
+                                                     count - inside), "cuMemcpyDtoH")
+        return out
+
+    def destroy(self):
+        self.device.destroy()
+        if self.pinned is not None:
+            self.pinned.destroy()
+            self.pinned = None
+
+
 class _CudaList:
-    """A command list (_gpuexec's driver interface): launches in order on one stream, so a
-    barrier is the stream's own ordering. Each launch's parameters are built when it is
-    recorded; an Arg is a parameter whose value _x_run sets (cuLaunchKernel copies them at
-    launch, so the next run may change it while this one is in flight)."""
+    """A command list (_gpuexec's driver interface): launches, fills and copies in order on
+    one stream, so a barrier is the stream's own ordering. Each launch's parameters are
+    built when it is recorded; an Arg is a parameter whose value _x_run sets (cuLaunchKernel
+    copies them at launch, so the next run may change it while this one is in flight)."""
 
     def __init__(self, label):
         self.label, self.ops, self.args = label, [], []
 
     def dispatch(self, kernel, groups, buffers, words=(), offsets=None):
+        fn, wg, *tail = kernel
         offs = offsets or [0] * len(buffers)
         params = []
         for b, o in zip(buffers, offs):
@@ -485,15 +525,27 @@ class _CudaList:
             else:
                 p = _ptr(int(b.dptr.value) + int(o))
             params.append(p)
-        # A vector uniform (uint4) is ONE kernel parameter, not one per component.
-        params += [_uint4(*w) if isinstance(w, tuple) else _u32(w) for w in words]
-        self.ops.append((kernel, int(groups), params, _param_ptrs(params)))
+        for w in words:
+            if isinstance(w, Arg):         # k uniform words bound per run
+                ps = [ctypes.c_uint32(0) for _ in range(w.words)]
+                self.args.append((ps, w.name, None))
+                params += ps
+            else:                          # a vector uniform (uint4) is ONE parameter
+                params.append(_uint4(*w) if isinstance(w, tuple) else _u32(w))
+        params += list(tail[0]) if tail else []
+        self.ops.append(("launch", (fn, wg), int(groups), params, _param_ptrs(params)))
 
     def barrier(self):
         pass
 
     def stamp(self, name):
         pass
+
+    def fill(self, buf, word):
+        self.ops.append(("fill", buf, int(word) & 0xFFFFFFFF))
+
+    def readback(self, buf, nbytes):
+        self.ops.append(("readback", buf, buf.mirror(nbytes)))
 
     def end(self):
         return self.ops, self.args
@@ -822,9 +874,15 @@ class Context(Executor, InputUploads):
         self._pipelines[key] = res
         return res
 
-    def _load(self, stem, ptx_file, fn_name, wg):
-        """Load (once) a PTX module and return one of its functions."""
-        if stem not in self._modules:
+    def _load(self, stem, ptx_file, fn_name, wg, consts=()):
+        """Load (once) a PTX module and return one of its functions.
+
+        consts: (name, value) pairs for the module's __constant__ words (twiddle.slang:
+        mf_data_stride, mf_data_scale, mf_accurate_trig): a module is loaded once per set of
+        values and written once, the counterpart of a Vulkan pipeline's specialization."""
+        consts = tuple(sorted(consts))
+        mkey = (stem, consts) if consts else stem
+        if mkey not in self._modules:
             self._bind()
             mod = ctypes.c_void_p()
             ptx_bytes = ptx_file.read_bytes() + b"\0"
@@ -844,18 +902,26 @@ class Context(Executor, InputUploads):
                     self.cuda.cuModuleLoadData(ctypes.byref(mod), ptx_bytes),
                     f"cuModuleLoadData({stem})",
                 )
-            self._modules[stem] = mod
+            self._modules[mkey] = mod
             g, size = ctypes.c_uint64(), ctypes.c_size_t()
             if self.cuda.cuModuleGetGlobal_v2(ctypes.byref(g), ctypes.byref(size), mod,
                                               b"mf_c16_raw") == 0:
-                self._c16_flags[stem] = [g.value, 0]          # zero-initialized: bound on
+                self._c16_flags[mkey] = [g.value, 0]          # zero-initialized: bound on
+            for name, value in consts:
+                if self.cuda.cuModuleGetGlobal_v2(ctypes.byref(g), ctypes.byref(size), mod,
+                                                  name.encode()) != 0:
+                    raise UnsupportedSize("module %s has no constant %s" % (stem, name))
+                v = ctypes.c_uint32(int(value) & 0xFFFFFFFF)
+                check_cuda(self.cuda.cuMemcpyHtoD_v2(g.value, ctypes.byref(v), 4),
+                           "cuMemcpyHtoD(%s)" % name)
         hfunc = ctypes.c_void_p()
         check_cuda(
-            self.cuda.cuModuleGetFunction(ctypes.byref(hfunc), self._modules[stem],
+            self.cuda.cuModuleGetFunction(ctypes.byref(hfunc), self._modules[mkey],
                                           fn_name.encode("utf-8")),
             f"cuModuleGetFunction({fn_name})",
         )
         self._labels[hfunc.value] = stem
+        self.__dict__.setdefault("_fn_module", {})[hfunc.value] = mkey
         return hfunc
 
     _TC_ENTRY = {"corr1": "tcStage1", "corr2": "tcFullStage3",
@@ -998,25 +1064,6 @@ class Context(Executor, InputUploads):
         rec[name] = cls(self, max(int(nbytes), 64) if cur is None else max(int(nbytes), 2 * cur.nbytes))
         return True
 
-    def _flat_record(self, key, n, nd, nt, out, dsh, tsh, stream):
-        """The flat-filter record for (n, templates, slot, shared inputs), sized by
-        capacity: a call with another block or bin count reuses it (growing it if
-        needed) instead of allocating a record per shape. Returns (record, fresh)."""
-        estimate = (0 if dsh else nd * n * 8) + (0 if tsh else nt * n * 8) + out * 24
-        rec, fresh = self._record("flat", self._batches, key, estimate, _Record)
-        if dsh is not None:
-            rec["data"] = dsh
-        elif self._grow(rec, "data", nd * n * 8, _Buffer, stream):
-            fresh = True
-        if tsh is not None:
-            rec["tmpl"] = tsh
-        elif self._grow(rec, "tmpl", nt * n * 8, _Buffer, stream):
-            fresh = True
-        self._grow(rec, "idx", out * 4, _Buffer, stream)
-        self._grow(rec, "val", out * 8, _Buffer, stream)
-        self._grow(rec, "host", out * 12, _Pinned, stream)
-        return rec, fresh
-
     def _tail(self, bufs, out, shape, stream, sparse, counts=None, ncounts=0, enqueue=True):
         """Enqueue the result readback; returns collect() -> (result, counts or None).
 
@@ -1148,119 +1195,6 @@ class Context(Executor, InputUploads):
         return idx, val
 
     # ---- flat ------------------------------------------------------------------
-    def peaks(self, n, data, tmpl, binsize=None, threshold=0.0, window=None,
-              upload_data=True, upload_tmpl=True, _groups=None,
-              slot=None, async_submit=False, sparse=False):
-        self._bind()
-        nd, nt = data.shape[0], tmpl.shape[0]
-        lo, hi = (0, n) if window is None else (int(window[0]), int(window[1]))
-        lo, hi = max(0, min(lo, n)), max(0, min(hi, n))
-        if lo >= hi:
-            raise ValueError(f"empty window ({lo}, {hi})")
-        binsize = n if binsize is None else int(binsize)
-        if binsize < 1:
-            raise ValueError("binsize must be >= 1")
-        nbins = -(-(hi - lo) // binsize)
-        if nbins > _MAX_BINS:
-            span = _MAX_BINS * binsize
-            pi, pv = [], []
-            for a in range(lo, hi, span):
-                i2, v2 = self.peaks(n, data, tmpl, binsize=binsize,
-                                    threshold=threshold,
-                                    window=(a, min(a + span, hi)),
-                                    upload_data=upload_data,
-                                    upload_tmpl=upload_tmpl, slot=slot)
-                pi.append(i2)
-                pv.append(v2)
-                upload_data = upload_tmpl = False
-            res = (np.concatenate(pi, axis=2), np.concatenate(pv, axis=2))
-            return (lambda: res) if async_submit else res
-
-        t2 = float(threshold) ** 2 if threshold > 0 else 0.0
-        stream = self.get_stream(slot)
-        self._after_forwards(stream)
-        dsh, tsh = shared_buffer(data, self), shared_buffer(tmpl, self)
-        key = (n, nt, slot, dsh and data.ctypes.data, tsh and tmpl.ctypes.data)
-        upload_data, upload_tmpl, dsig, tsig = self._input_uploads(
-            key, data, tmpl, upload_data, upload_tmpl)
-        out = nd * nt * nbins
-        bufs, fresh = self._flat_record(key, n, nd, nt, out, dsh, tsh, stream)
-        if fresh:
-            upload_data = upload_tmpl = True
-        if upload_data:
-            self._upload(bufs["data"], data, stream)
-            self._uploaded["data"][key] = dsig
-        if upload_tmpl:
-            self._upload(bufs["tmpl"], tmpl, stream)
-            self._uploaded["tmpl"][key] = tsig
-
-        hfunc, wg = self.pipeline(n, "fusedTierB", one_bin=(nbins == 1))
-        params = [bufs["data"].dptr, bufs["tmpl"].dptr, bufs["idx"].dptr, bufs["val"].dptr,
-                  _u32(nt), _u32(lo), _u32(hi), _u32(binsize), _i32(_shift(binsize)),
-                  _u32(nbins), _f32bits(t2), _NOROW]
-        self._launch(hfunc, nd * nt, wg, params, stream=stream)
-        collect = self._tail(bufs, out, (nd, nt, nbins), stream, sparse)
-
-        def readback(sort=True):
-            return collect(sort)[0]
-        readback.sparse_dev = getattr(locals().get("collect"), "sparse_dev", None)
-        return self._dispatch_result(bufs, readback, async_submit)
-
-    def peaks_grouped(self, n, data, tmpl, groups, binsize, threshold, *, upload_tmpl=True,
-                      slot=None, async_submit=False, sparse=False):
-        """Distinct flat search windows over row ranges of one spectra batch: one sync.
-
-        ``groups`` holds (lo, hi, a, b): rows a..b of ``data`` are searched over
-        the window [lo, hi). Every group shares one bin count (the first group's).
-        """
-        self._bind()
-        nd, nt = data.shape[0], tmpl.shape[0]
-        groups = tuple((int(lo), int(hi), int(a), int(b)) for lo, hi, a, b in groups)
-        binsize = int(binsize)
-        nb = (groups[0][1] - groups[0][0] - 1) // binsize + 1
-        if nb > _MAX_BINS:
-            raise ValueError("grouped dispatch exceeds the kernel bin limit")
-        for lo, hi, a, b in groups:
-            if not (0 <= lo < hi <= n) or not (0 <= a < b <= nd):
-                raise ValueError(f"invalid group ({lo}, {hi}, {a}, {b})")
-            if (hi - lo - 1) // binsize + 1 > nb:
-                raise ValueError("grouped windows must not exceed the first group's bin count")
-        t2 = float(threshold) ** 2 if threshold > 0 else 0.0
-        stream = self.get_stream(slot)
-        self._after_forwards(stream)
-        dsh, tsh = shared_buffer(data, self), shared_buffer(tmpl, self)
-        key = (n, nt, slot, dsh and data.ctypes.data, tsh and tmpl.ctypes.data)
-        upload_data, upload_tmpl, dsig, tsig = self._input_uploads(
-            key, data, tmpl, True, upload_tmpl)
-        out = nd * nt * nb
-        bufs, fresh = self._flat_record(key, n, nd, nt, out, dsh, tsh, stream)
-        if fresh:
-            upload_tmpl = True
-        # Grouped spectra are a fresh forward batch on every call.
-        self._upload(bufs["data"], data, stream)
-        if upload_tmpl:
-            self._upload(bufs["tmpl"], tmpl, stream)
-            self._uploaded["tmpl"][key] = tsig
-        covered = np.zeros(nd, bool)
-        for _, _, a, b in groups:
-            covered[a:b] = True
-        if not covered.all():
-            self._fill32(bufs["idx"].dptr, 0xFFFFFFFF, out, stream)
-            self._fill32(bufs["val"].dptr, 0, out * 2, stream)
-        hfunc, wg = self.pipeline(n, "fusedTierB", one_bin=(nb == 1))
-        d0, i0, v0 = bufs["data"].dptr.value, bufs["idx"].dptr.value, bufs["val"].dptr.value
-        for lo, hi, a, b in groups:
-            params = [_ptr(d0 + a * n * 8), bufs["tmpl"].dptr,
-                      _ptr(i0 + a * nt * nb * 4), _ptr(v0 + a * nt * nb * 8),
-                      _u32(nt), _u32(lo), _u32(hi), _u32(binsize), _i32(_shift(binsize)),
-                      _u32(nb), _f32bits(t2), _NOROW]
-            self._launch(hfunc, (b - a) * nt, wg, params, stream=stream)
-        collect = self._tail(bufs, out, (nd, nt, nb), stream, sparse)
-
-        def readback(sort=True):
-            return collect(sort)[0]
-        readback.sparse_dev = getattr(locals().get("collect"), "sparse_dev", None)
-        return self._dispatch_result(bufs, readback, async_submit)
 
     # ---- full correlation --------------------------------------------------------
     # ---- driver primitives (_gpuexec) -----------------------------------------------------
@@ -1272,6 +1206,12 @@ class Context(Executor, InputUploads):
     stage_host_inputs = True
 
     def _x_kernel(self, name, n):
+        if name in ("peaks", "peaks1"):
+            # The flat filter's last argument is its per-row window table: none here.
+            fn, wg = self.pipeline(n, "fusedTierB", one_bin=(name == "peaks1"))
+            return fn, wg, (_NOROW,)
+        if name == "compact":
+            return self._compact_peaks()
         if name in ("full", "series", "forward"):
             return self.pipeline(n, {"full": "fullCorrelation", "series": "fullCorrelationSeries",
                                      "forward": "seriesForward"}[name])
@@ -1284,7 +1224,9 @@ class Context(Executor, InputUploads):
         return self._tierc(n, "corr1")[2:]
 
     def _x_alloc(self, nbytes, readback=False, upload=False):
-        return _Staged(self, nbytes) if upload else _Buffer(self, nbytes)
+        if upload:
+            return _Staged(self, nbytes)
+        return _Readback(self, nbytes) if readback else _Buffer(self, nbytes)
 
     def _x_list(self, label):
         return _CudaList(label)
@@ -1296,16 +1238,31 @@ class Context(Executor, InputUploads):
         else:
             self._pend_write(stream)
 
+    def _x_submit(self, native, binds, slot):
+        stream = self._x_launch(native, binds, slot)
+        return lambda: self._sync(stream)
+
     def _x_launch(self, native, binds, slot):
-        """Launch a recorded list on the slot's stream, after writes left in flight."""
+        """Issue a recorded list on the slot's stream, after writes left in flight."""
         ops, args = native
         for p, name, off in args:
-            p.value = binds[name].dptr.value + off
+            if off is None:
+                for q, w in zip(p, binds[name]):
+                    q.value = int(w) & 0xFFFFFFFF
+            else:
+                p.value = binds[name].dptr.value + off
         self._bind()
         stream = self.get_stream(slot)
         self._after_writes(stream)           # e.g. a series still being written by a middle stage
-        for (fn, wg), groups, params, param_ptrs in ops:
-            self._launch(fn, groups, wg, params, stream=stream, param_ptrs=param_ptrs)
+        for op in ops:
+            if op[0] == "launch":
+                _, (fn, wg), groups, params, param_ptrs = op
+                self._launch(fn, groups, wg, params, stream=stream, param_ptrs=param_ptrs)
+            elif op[0] == "fill":
+                self._fill32(op[1].dptr, op[2], op[1].nbytes // 4, stream)
+            else:
+                buf, pin = op[1], op[2]
+                self._copy_d2h(pin.ptr, buf.dptr.value, buf.mirrored, stream, "readback")
         return stream
 
     def _x_defer(self, native, binds, slot, source):
@@ -1334,8 +1291,8 @@ class Context(Executor, InputUploads):
         check_cuda(self.cuda.cuCtxSynchronize(), "cuCtxSynchronize")
 
     @staticmethod
-    def _x_read(buf, out):
-        buf.read_into(out)
+    def _x_read(buf, out, offset=0):
+        buf.read_into(out, offset)
 
     def zero_columns(self, dest, a, b):
         """Zero dest[:, a:b] of a GPU-shared 2-D array on the device (enqueued).
@@ -1490,7 +1447,7 @@ class Context(Executor, InputUploads):
         """Set the coarse module's fp16 bound switch (mf_c16_raw, Vulkan's constant 77):
         the bound applies unless MF_VK_C16_BOUND=0 asks for the raw fp16 maximum, which
         only the bound's own margin measurements and the physics checks use."""
-        ent = self._c16_flags.get(self._labels.get(fn.value))
+        ent = self._c16_flags.get(self.__dict__.get("_fn_module", {}).get(fn.value))
         if ent is None:
             return
         raw = 1 if os.environ.get("MF_VK_C16_BOUND", "1") == "0" else 0

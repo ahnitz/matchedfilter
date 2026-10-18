@@ -1,4 +1,5 @@
-// Sparse peak readback (CUDA build only; tools/build_ptx.py -> compact_peaks.ptx).
+// Sparse peak readback, on every GPU (spirv/ and metal/ by tools/build_forward.py,
+// ptx/ by tools/build_ptx.py).
 //
 // A fine-stage call writes a dense (blocks, templates, bins) table in which almost every
 // entry is -1 at a detection threshold. Reading the dense table back, widening it and

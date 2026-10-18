@@ -24,6 +24,11 @@ def plan(request):
     return f
 
 
+def flat_records(ctx):
+    """The shared executor's flat records (_gpuexec): one serves every window."""
+    return {k: r for k, r in getattr(ctx, '_exec_records', {}).items() if k[0] == 'flat'}
+
+
 def check(a, b):
     np.testing.assert_array_equal(a['index'], b['index'])
     np.testing.assert_allclose(a['value'], b['value'], rtol=3e-5, atol=3e-5)
@@ -33,10 +38,11 @@ def test_window_records_share_storage_and_refresh_inputs(plan):
     ctx = plan._gpu
     for offset in range(6):
         plan.run(window=(offset, 1000), binsize=1024)
-    if hasattr(ctx, '_storage'):
+    if flat_records(ctx):
+        assert len(flat_records(ctx)) == 1
+    elif hasattr(ctx, '_storage'):
         assert len(ctx._storage) == 1
-        records = ctx._batches or ctx._hier
-        assert len(records) == 6
+        assert len(ctx._hier) == 6
     # Shared allocations the caller still holds are not counted: evicting the recordings
     # that borrow them would free nothing.
     from matchedfilter._shared import _caller_holds
@@ -61,6 +67,18 @@ def test_window_records_share_storage_and_refresh_inputs(plan):
 
 def test_selective_record_eviction_preserves_hot_storage(plan):
     ctx = plan._gpu
+    if not isinstance(plan, mf.HierarchicalFilter):
+        # Flat: the window is bound per run, so every window reuses the one record and its
+        # uploaded inputs.
+        expected = plan.run(window=(0, 1000)).copy()
+        (original,) = flat_records(ctx).values()
+        for lo in range(1, 12):
+            plan.run(window=(lo, 1000))
+            assert list(flat_records(ctx).values()) == [original]
+        check(expected, plan.run(window=(0, 1000)))
+        plan.clear_cache()
+        assert not flat_records(ctx)
+        return
     if not hasattr(ctx, '_storage'):
         pytest.skip('Vulkan command recording cache')
     ctx.cache_limit_recordings = 3
@@ -98,6 +116,19 @@ def test_raw_counts_accept_numpy_boolean(plan):
 
 def test_storage_shape_cap_preserves_recent_shape(plan):
     ctx = plan._gpu
+    if not isinstance(plan, mf.HierarchicalFilter):
+        ctx.cache_limit_entries = 2
+        plan.run(templates=(0, 1))
+        plan.run(templates=(0, 2))
+        hot_key = next(k for k in flat_records(ctx) if k[3] == 2)
+        hot = flat_records(ctx)[hot_key]
+        plan.run(templates=(0, 3))
+        assert len(flat_records(ctx)) == 2
+        assert flat_records(ctx)[hot_key] is hot
+        actual = plan.run(templates=(0, 2)).copy()
+        plan.clear_cache()
+        check(actual, plan.run(templates=(0, 2)))
+        return
     if not hasattr(ctx, '_storage'):
         pytest.skip('Vulkan storage shape cache')
     ctx.cache_limit_entries = 2

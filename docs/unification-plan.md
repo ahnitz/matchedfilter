@@ -576,3 +576,64 @@ Stage 5's lessons land inside the stages that touch them. Each stage merges in g
     memory; indirect dispatch.
   - L40S U2.3 paired search, 4 alternating rounds: 98.6/105.0/101.6/104.0 M against
     110.2/96.6/96.3/110.5 M. Means 102.3 against 103.4; leaf ±8% in both.
+
+### Remaining stage-U work, in order (2026-10-18, revised for "unify optimizations")
+Each step: goldens and full suite on dev2 and M2; at milestones (after U2.5, after U2.6 and
+after U2.8) all five GPUs, including paired search throughput on quiet machines. Merge to
+main only when everything is done, gated and benchmarked.
+
+1. **U2.4 flat peaks** (one record per shape, per-run windows; grouped windows in place or
+   packed by alignment; ragged bins everywhere; one-round-trip readback).
+   - Device compaction, or a dense read scanned on the host: a measured per-shape choice
+     (`Measured`), since unified memory loses on compaction (M2: +40 us few hits, +50% all
+     hits).
+2. **U1a one kernel ABI**: data stride, data scale, row windows, twiddle source, fp16 bound,
+   accurate trig and subgroup are build-time constants everywhere.
+   - Vulkan: specialization constants.
+   - Metal: macros when its library compiles (it compiles at runtime).
+   - CUDA: launch uniforms (no runtime compiler): stride, scale, row-window table.
+   - The row-window table is an entry parameter on every target, Metal included.
+   - Listed kernels read their count from device memory and loop: indirect dispatch where
+     the device has it, a fixed grid elsewhere.
+   - Then every backend reads the coarse band in place (pack_coarse goes) and may use
+     per-row windows (a measured choice; Metal's by-name exclusion goes).
+3. **U2.5 follow-up items** on the executor (outputs per device, pending item forwards
+   taken into the same submission).
+4. **U2.6 hierarchical tiers** (single, cascade, grouped/ragged) on the executor.
+   - Coarse layout choice measured in one place.
+   - Fused forward+tier0 and band forward+recompute: one measured choice on every backend.
+5. **U2.7 one deferral model**: pending work per slot in the executor; a consumer runs it
+   first or claims it. Replaces `_x_defer`.
+6. **U2.8 record once, replay cheaply** (Vulkan fused batches, Metal collector, CUDA
+   graphs), with call-plan replay on every backend.
+7. **U2.9** zero_columns, pending writes and settle, timings.
+8. **U3** delete the capability flags made universal and every API- or vendor-name check
+   (gatechain `_BAND_FORWARD`, the Intel accurate-trig check).
+9. **U4** kernel-variant cleanup. **U5** dead code and documentation.
+10. **Merge**: full suites on dev2, M2, L40S, plus dev3/dev4 focused runs. Goldens. Paired
+    search on quiet machines (the dev2 forward-port slow-leaf observation under load must
+    be settled here). CI green. Then push, refresh mf-dev-main, and re-gate main.
+- 2026-10-18: **U2.4 flat peaks run on the shared executor.**
+  - peaks and peaks_grouped are written once; each backend's copy and its helpers are
+    deleted (Vulkan _make_batch/_transient_peaks, CUDA _flat_record, Metal _peaks).
+  - One record per (shape, slot, inputs). The search window, threshold and bin size are
+    per-run words (`Arg(words=k)`), so every window reuses the record and its uploaded
+    inputs. Vulkan, which bakes words into command buffers, records one-off command buffers
+    past 8 bindings, freed when they finish (as its transient peaks did).
+  - Records are bounded by cache_limit_entries, least recently used first (`_exec_room`).
+  - Grouped windows write in place when every group's offset meets the device alignment;
+    otherwise they are packed and gathered. Ragged bin counts (nbins covering every group,
+    Metal only before) work everywhere.
+  - Readback is a list op: an asynchronous copy into page-locked memory where the device
+    does not share it (CUDA `_Readback`), nothing where it does. Every device gets the
+    one-round-trip readback CUDA had.
+  - Sparse results: device compaction (CUDA only before) is built for every target. A
+    sparse call shape measures compaction against a dense read scanned on the host
+    (`Measured`: three warm calls each, re-checked every 256) and keeps the faster. On M2,
+    compaction loses: +40 us with few hits, 1.71 against 1.16 ms with every bin a hit.
+  - Tests:
+    - New: tests/test_gpu_flat_results.py on every GPU (result lifetime under eviction,
+      clear and reuse; sparse equals dense, packed and over the first read; upload
+      residency).
+    - Mocked tests of old flat internals were rewritten against the executor.
+  - Goldens bit-identical on dev2 and M2. Suites: dev2 1975 passed; M2 1856 passed.

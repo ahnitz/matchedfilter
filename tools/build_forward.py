@@ -14,10 +14,12 @@ def build_kernels(compiler, build_module=build):
     entries = {}
     for target, folder, suffix in [('spirv', 'spirv', 'spv'),
                                     ('metal', 'metal', 'metal')]:
-        out = build.ROOT / 'python/matchedfilter' / folder / f'pack_coarse.{suffix}'
-        subprocess.run([compiler, str(build.ROOT / 'src/gpu/pack_coarse.slang'),
-                        '-target', target, '-entry', 'packCoarse', '-stage',
-                        'compute', '-O3', *(['-DMF_VULKAN=1'] if target == 'spirv' else []), '-o', str(out)], check=True)
+        for stem, entry in (('pack_coarse', 'packCoarse'), ('compact_peaks', 'compactPeaks')):
+            out = build.ROOT / 'python/matchedfilter' / folder / f'{stem}.{suffix}'
+            subprocess.run([compiler, str(build.ROOT / f'src/gpu/{stem}.slang'),
+                            '-target', target, '-entry', entry, '-stage',
+                            'compute', '-O3', *(['-DMF_VULKAN=1'] if target == 'spirv' else []),
+                            '-o', str(out)], check=True)
     source = build.KERNEL.read_text() + '\n' + (
         build.ROOT / 'src/gpu/series_forward.slang').read_text()
     for n in build.TIER_B:
@@ -84,12 +86,14 @@ def build_kernels(compiler, build_module=build):
         entries[str(n)]['tier0'] = f'forward_tier0_{n}.spv'
         print(n, flush=True)
     metal = build.ROOT / 'python/matchedfilter/metal'
-    for path in (list(metal.glob('forward_*.metal')) + [metal / 'pack_coarse.metal']
+    for path in (list(metal.glob('forward_*.metal')) + [metal / 'pack_coarse.metal',
+                                                          metal / 'compact_peaks.metal']
                  + list(metal.glob('markblocks.metal'))):
         path.write_text(path.read_text().rstrip() + '\n')
         build.compile_metallib(path)
     return dict(forward=entries, pack_coarse=dict(file='pack_coarse.spv',
-                                                 metal='pack_coarse.metal'))
+                                                 metal='pack_coarse.metal'),
+                compact_peaks=dict(file='compact_peaks.spv', metal='compact_peaks.metal'))
 
 
 def main():

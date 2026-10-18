@@ -25,14 +25,22 @@ Driver primitives (a Context provides each):
                                 buffers are bound in order, each a device buffer or view or
                                 an Arg (bound per run); offsets (bytes) add to each binding's.
                                 words are the kernel's uniform parameters in declaration
-                                order: a uint32 (a float or signed value as its bits), or a
-                                tuple of them for a vector parameter (a uint4);
+                                order: a uint32 (a float or signed value as its bits), a
+                                tuple of them for a vector parameter (a uint4), or an Arg
+                                with words=k: k scalar parameters bound per run (binds[name]
+                                is then a tuple of k uint32);
                               barrier()      all earlier work before all later work, memory
                                              included;
                               stamp(name)    a phase boundary: the work since the previous
                                              stamp is phase `name` (fused batches interleave
                                              recordings phase by phase; MF_GPU_PROFILE times
                                              it);
+                              fill(buf, word) set every 32-bit word of an owned buffer to
+                                             word (0 or 0xFFFFFFFF: a byte pattern);
+                              readback(buf, nbytes)
+                                             the host reads the first nbytes of `buf` after
+                                             the run (a copy into host memory on a device
+                                             that does not share it; nothing where it does);
                               end()          -> native: what _x_run runs and _x_release frees.
   _x_run(native, wait, binds=None, slot=None)
                             run a recorded list, binding each Arg to binds[name] (a view), on
@@ -50,10 +58,15 @@ Driver primitives (a Context provides each):
   _x_prefetch(view, offset, nbytes, slot)
                             start moving a span of a shared allocation to the device ahead of
                             the kernel that reads it (memory that migrates).
+  _x_submit(native, binds, slot)
+                            run a recorded list on `slot` and return wait(): a call that
+                            blocks until it has finished (a result read later).
   _x_after_readers()        order the next run after earlier device work on this device that
                             may still read what it rewrites (another context's queue).
   _x_release(native)        free a recording (after its work has finished).
-  _x_read(buf, out)         copy a device buffer into a host array (synchronously).
+  _x_read(buf, out, offset=0)
+                            copy bytes of a readback buffer from `offset` into a host array,
+                            after the run that wrote them has finished.
 
 Features a driver reports (attributes): max_dispatch_x (the most groups one dispatch takes),
 storage_offset_alignment (a bound buffer's offset must be a multiple of this),
@@ -61,9 +74,12 @@ stage_host_inputs (shared allocations migrate between host and device: kernels m
 small host-written inputs from them, which are uploaded into device memory instead, and spans
 a kernel will read are prefetched).
 """
+import time
+
 import numpy as np
 
 from ._errors import UnsupportedSize
+from ._gpuhost import MAX_BINS
 from ._shared import shared_view
 
 
@@ -78,17 +94,55 @@ class Record:
 
 
 class Arg:
-    """A buffer a recording binds per run (_x_run's binds), not when it is recorded: a
-    caller's output or input that may lie elsewhere on every call. A record keyed on it
-    would re-upload its other inputs whenever it moved, and could replay one call's binding
-    into another's memory (handles are not identities)."""
-    __slots__ = ("name",)
+    """A value a recording binds per run (_x_run's binds), not when it is recorded.
 
-    def __init__(self, name):
-        self.name = name
+    A buffer: a caller's output or input that may lie elsewhere on every call. A record
+    keyed on it would re-upload its other inputs whenever it moved, and could replay one
+    call's binding into another's memory (handles are not identities).
+
+    words=k: k uniform words (a search window, a threshold) that change between calls on
+    the same buffers: one record serves every window."""
+    __slots__ = ("name", "words")
+
+    def __init__(self, name, words=0):
+        self.name, self.words = name, words
 
 
 _OUT, _STARTS, _SERIES, _SPECTRA = Arg("out"), Arg("starts"), Arg("series"), Arg("spectra")
+
+
+class Measured:
+    """A choice between ways of doing one call shape, made by timing them on this device.
+
+    Each way runs for `warm` timed calls (after one untimed call that may build its
+    record); then the way with the lower median is used, and the trial repeats every
+    `recheck` calls, so a choice made under other load does not stick."""
+    __slots__ = ("ways", "times", "calls", "current", "warm", "recheck")
+
+    def __init__(self, ways, warm=3, recheck=256):
+        self.ways, self.warm, self.recheck = tuple(ways), warm, recheck
+        self.times = {w: [] for w in self.ways}
+        self.calls, self.current = 0, None
+
+    def way(self):
+        """The way the next call uses, and whether to time it."""
+        self.calls += 1
+        if self.current is not None and self.calls % self.recheck:
+            return self.current, False
+        if self.current is not None:             # a recheck: forget the old trial
+            self.times = {w: [] for w in self.ways}
+            self.current = None
+        for w in self.ways:
+            if len(self.times[w]) < self.warm + 1:
+                return w, True
+        return self.current, False
+
+    def note(self, way, seconds):
+        t = self.times[way]
+        t.append(seconds)
+        if all(len(v) >= self.warm + 1 for v in self.times.values()):
+            # The first call of each way built its record: not counted.
+            self.current = min(self.ways, key=lambda w: float(np.median(self.times[w][1:])))
 
 
 class Executor:
@@ -97,6 +151,8 @@ class Executor:
 
     #: Working bytes one full-correlation dispatch may take before it is tiled.
     _FULL_BUDGET = 64 * 1024 * 1024
+    #: Peak records a sparse result reads back with the count; more take a second read.
+    _SPARSE_FIRST = 4096
     #: correlate takes wait=False on every backend (CorrelationFilter.run(wait=False)).
     async_correlate = True
     #: See the module docstring (a driver feature).
@@ -133,10 +189,32 @@ class Executor:
         for resident in self._uploaded.values():
             resident.pop(key, None)
 
+    def _exec_room(self, estimate, incoming=()):
+        """Room for a new record: at most cache_limit_entries records (the least recently
+        used evicted first), then the byte budget (_cache_room)."""
+        table, order = self._exec_table(), getattr(self, "_cache_order", {})
+        while len(table) >= self.cache_limit_entries:
+            key = next((k for kind, k in order if kind == "exec"), None)
+            if key is None:
+                break
+            order.pop(("exec", key))
+            self._exec_evict(key)
+        self._cache_room(estimate, incoming=incoming)
+
     def _exec_clear(self):
         """Evict every executor record (clear_cache)."""
         for key in list(self._exec_table()):
             self._exec_evict(key)
+
+    def _exec_upload(self, rec, key, uploads, data, tmpl, slot):
+        """Write the inputs _input_uploads found stale into the record's own buffers (a
+        shared input is read in place: nothing to write), ordered on `slot`."""
+        for i, (name, array) in enumerate((("data", data), ("tmpl", tmpl))):
+            if uploads[i] and name in rec.owned:
+                self._x_upload(rec.buffers[name], np.ascontiguousarray(array, np.complex64),
+                               slot)
+            if uploads[i]:
+                self._uploaded[name][key] = uploads[2 + i]
 
     def _exec_owned_buffers(self):
         for rec in self.__dict__.get("_exec_records", {}).values():
@@ -189,7 +267,7 @@ class Executor:
             views = [v for v in (dv, tv, ov) if v is not None]
             estimate = (sum(a.nbytes for a, v in ((data, dv), (tmpl, tv), (out, ov)) if v is None)
                         + (nd * nt * n * 8 if split else 0))
-            self._cache_room(estimate, incoming=views)
+            self._exec_room(estimate, incoming=views)
             rec = Record()
             bd = self._exec_buffer(rec, "data", dv, data.nbytes)
             bt = self._exec_buffer(rec, "tmpl", tv, tmpl.nbytes)
@@ -203,6 +281,8 @@ class Executor:
             else:
                 lst.dispatch(self._x_kernel("full", n), nd * nt, [bd, bt, bo], (nt,))
             lst.barrier()
+            if "out" in rec.owned:
+                lst.readback(bo, out.nbytes)
             rec.native = lst.end()
             table[key] = rec
             uploads = (True, True, *uploads[2:])
@@ -246,7 +326,7 @@ class Executor:
         if rec is None:
             estimate = (sum(a.nbytes for a, v in ((data, dv), (tmpl, tv)) if v is None)
                         + (rows * nt * n * 8 if split else 0))
-            self._cache_room(estimate, incoming=[v for v in (dv, tv) if v is not None])
+            self._exec_room(estimate, incoming=[v for v in (dv, tv) if v is not None])
             rec = Record()
             bd = self._exec_buffer(rec, "data", dv, data.nbytes)
             bt = self._exec_buffer(rec, "tmpl", tv, tmpl.nbytes)
@@ -325,7 +405,7 @@ class Executor:
         table = self._exec_table()
         rec = table.get(key)
         if rec is None:
-            self._cache_room(count * n * 8 if two else 0,
+            self._exec_room(count * n * 8 if two else 0,
                              incoming=[v for v in (sv, stv, pv) if v is not None])
             rec = Record()
             bs = (self._exec_buffer(rec, "starts", nbytes=count * 4, upload=True) if staged
@@ -379,3 +459,211 @@ class Executor:
         self._cache_touch("exec", h[0])
         self._x_defer(h[1].native, h[2], slot, None)
         return True
+
+    # ---- flat peaks ---------------------------------------------------------------------
+    def peaks(self, n, data, tmpl, binsize=None, threshold=0.0, window=None, upload_data=True,
+              upload_tmpl=True, slot=None, async_submit=False, sparse=False, nbins=None):
+        """The peak of every (data row, template) correlation in each bin of the search window.
+
+        Returns (idx, val), each shaped (data rows, templates, bins): the sample index of a
+        bin's largest |value| and that complex value, or -1 and 0 where it does not exceed
+        `threshold` -- or, sparse=True, a _SparsePeaks of the bins that do. Bins are
+        `binsize` samples from the window's start (the last may be short). async_submit:
+        returns a callable giving that result, while the work runs (on `slot`)."""
+        lo, hi = (0, n) if window is None else (int(window[0]), int(window[1]))
+        lo, hi = max(0, min(lo, n)), max(0, min(hi, n))
+        if lo >= hi:
+            raise ValueError("empty window (%d, %d)" % (lo, hi))
+        binsize = n if binsize is None else int(binsize)
+        if binsize < 1:
+            raise ValueError("binsize must be >= 1")
+        nbins = -(-(hi - lo) // binsize) if nbins is None else int(nbins)
+        if nbins > MAX_BINS:
+            # Bins are contiguous in the window: splitting the window on a bin boundary
+            # splits the bins exactly, and the pieces concatenate.
+            span = MAX_BINS * binsize
+            parts = []
+            for a in range(lo, hi, span):
+                parts.append(self.peaks(n, data, tmpl, binsize=binsize, threshold=threshold,
+                                        window=(a, min(a + span, hi)), upload_data=upload_data,
+                                        upload_tmpl=upload_tmpl, slot=slot))
+                upload_data = upload_tmpl = False
+            res = (np.concatenate([p[0] for p in parts], axis=2),
+                   np.concatenate([p[1] for p in parts], axis=2))
+            if sparse:
+                from ._shared import sparse_from_dense
+                res = sparse_from_dense(*res)
+            return (lambda: res) if async_submit else res
+        return self._flat(n, data, tmpl, ((lo, hi, 0, data.shape[0]),), nbins, binsize,
+                          threshold, upload_data, upload_tmpl, slot, async_submit, sparse)
+
+    def peaks_grouped(self, n, data, tmpl, groups, binsize, threshold, *, upload_tmpl=True,
+                      slot=None, async_submit=False, sparse=False, nbins=None):
+        """peaks over row ranges of one spectra batch, each with its own window, in one
+        submission. groups holds (lo, hi, a, b): rows a..b are searched over [lo, hi).
+        Every group's result has `nbins` bins (default: the most any group needs); a
+        shorter window leaves its last bins empty."""
+        nd = data.shape[0]
+        binsize = int(binsize)
+        groups = tuple((int(lo), int(hi), int(a), int(b)) for lo, hi, a, b in groups)
+        for lo, hi, a, b in groups:
+            if not (0 <= lo < hi <= n) or not (0 <= a < b <= nd):
+                raise ValueError("invalid group (%d, %d, %d, %d)" % (lo, hi, a, b))
+        need = max(-(-(hi - lo) // binsize) for lo, hi, _, _ in groups)
+        nbins = need if nbins is None else int(nbins)
+        if nbins < need:
+            raise ValueError("nbins must cover every grouped window's bins")
+        if nbins > MAX_BINS:
+            raise ValueError("grouped dispatch exceeds the kernel bin limit")
+        return self._flat(n, data, tmpl, groups, nbins, binsize, threshold, True, upload_tmpl,
+                          slot, async_submit, sparse)
+
+    def _flat(self, n, data, tmpl, groups, nbins, binsize, threshold, upload_data, upload_tmpl,
+              slot, async_submit, sparse):
+        if not sparse:
+            return self._flat_run(n, data, tmpl, groups, nbins, binsize, threshold,
+                                  upload_data, upload_tmpl, slot, async_submit, False)
+        # A sparse result is gathered on the device (compaction: the host reads the count
+        # and the records) or read dense and scanned on the host. Which is cheaper depends on
+        # how many bins clear the threshold and on what a byte of readback costs here (a
+        # bus, or nothing on unified memory): measured per call shape.
+        choices = self.__dict__.setdefault("_compact_choice", {})
+        shape = (n, data.shape[0], tmpl.shape[0], nbins, binsize, len(groups))
+        choice = choices.get(shape)
+        if choice is None:
+            choice = choices[shape] = Measured(("compact", "dense"))
+        way, timed = choice.way()
+        timed = timed and not async_submit
+        t0 = time.perf_counter()
+        res = self._flat_run(n, data, tmpl, groups, nbins, binsize, threshold, upload_data,
+                             upload_tmpl, slot, async_submit, way == "compact")
+        if way == "dense":
+            from ._shared import sparsified
+            res = sparsified(res, True)
+        if timed:
+            choice.note(way, time.perf_counter() - t0)
+        return res
+
+    def _flat_run(self, n, data, tmpl, groups, nbins, binsize, threshold, upload_data,
+                  upload_tmpl, slot, async_submit, sparse):
+        nd, nt = data.shape[0], tmpl.shape[0]
+        shift = (binsize.bit_length() - 1) if binsize & (binsize - 1) == 0 else -1
+        t2 = float(threshold) ** 2 if threshold > 0 else 0.0
+        t2bits = int(np.float32(t2).view(np.uint32))
+        slot = slot if async_submit else None      # a result in flight owns its slot's buffers
+        rows = tuple((a, b) for _, _, a, b in groups)
+        # Each group's results start at its rows' place in (rows, templates, bins) where that
+        # offset is a bound view's alignment; else every group is packed, aligned, and the
+        # host gathers the rows.
+        unit = max(1, self.storage_offset_alignment // 4)
+        natural = all((a * nt * nbins) % unit == 0 for a, _ in rows)
+        if natural:
+            offsets, size = [a * nt * nbins for a, _ in rows], nd * nt * nbins
+        else:
+            offsets, size = [], 0
+            for a, b in rows:
+                offsets.append(size)
+                size += -(-((b - a) * nt * nbins) // unit) * unit
+        covered = np.zeros(nd, bool)
+        for a, b in rows:
+            covered[a:b] = True
+        dv, tv = shared_view(data, self), shared_view(tmpl, self)
+        key = ("flat", n, nd, nt, nbins, rows, slot, sparse, dv is not None and data.ctypes.data,
+               tv is not None and tmpl.ctypes.data)
+        uploads = self._input_uploads(key, data, tmpl, upload_data, upload_tmpl)
+        table = self._exec_table()
+        rec = table.get(key)
+        if rec is None:
+            estimate = (sum(a.nbytes for a, v in ((data, dv), (tmpl, tv)) if v is None)
+                        + size * (28 if sparse else 12) + 16)
+            self._exec_room(estimate, incoming=[v for v in (dv, tv) if v is not None])
+            rec = Record()
+            bd = self._exec_buffer(rec, "data", dv, data.nbytes)
+            bt = self._exec_buffer(rec, "tmpl", tv, tmpl.nbytes)
+            bi = self._exec_buffer(rec, "idx", nbytes=size * 4, readback=True)
+            bv = self._exec_buffer(rec, "val", nbytes=size * 8, readback=True)
+            lst = self._x_list("flat")
+            if sparse:
+                cnt = self._exec_buffer(rec, "count", nbytes=16, readback=True)
+                out = self._exec_buffer(rec, "list", nbytes=size * 16, readback=True)
+                lst.fill(cnt, 0)
+            if not natural or not covered.all():
+                lst.fill(bi, 0xFFFFFFFF)          # bins no dispatch writes: empty
+                lst.fill(bv, 0)
+            lst.barrier()
+            kernel = self._x_kernel("peaks1" if nbins == 1 else "peaks", n)
+            for g, ((a, b), off) in enumerate(zip(rows, offsets)):
+                lst.dispatch(kernel, (b - a) * nt, [bd, bt, bi, bv], (Arg("w%d" % g, 7),),
+                             offsets=[a * n * 8, 0, off * 4, off * 8])
+            lst.barrier()
+            if sparse:
+                # The bins that cleared the threshold, gathered on the device: the host
+                # reads the count and those records, not the dense table.
+                lst.dispatch(self._x_kernel("compact", n), (size + 255) // 256,
+                             [bi, bv, cnt, out], (size, size))
+                lst.barrier()
+                lst.readback(cnt, 4)
+                lst.readback(out, min(size, self._SPARSE_FIRST) * 16)
+            else:
+                lst.readback(bi, size * 4)
+                lst.readback(bv, size * 8)
+            rec.native = lst.end()
+            table[key] = rec
+            uploads = (True, True, *uploads[2:])
+        self._cache_touch("exec", key)
+        self._claim(rec.buffers["idx"])          # an earlier result still reading these
+        self._exec_upload(rec, key, uploads, data, tmpl, slot)
+        binds = {"w%d" % g: (nt, lo, hi, binsize, shift & 0xFFFFFFFF, nbins, t2bits)
+                 for g, (lo, hi, _, _) in enumerate(groups)}
+        wait = self._x_submit(rec.native, binds, slot) if async_submit else None
+        if wait is None:
+            self._x_run(rec.native, True, binds, slot)
+        shape = (nd, nt, nbins)
+
+        def result():
+            if wait is not None:
+                wait()
+            if sparse:
+                return self._flat_sparse(rec, shape, rows, offsets, natural)
+            return self._flat_dense(rec, shape, rows, offsets, natural, size)
+        return self._track(result, owner=rec.buffers["idx"]) if async_submit else result()
+
+    def _flat_dense(self, rec, shape, rows, offsets, natural, size):
+        nd, nt, nb = shape
+        idx = np.empty(size, np.int32)
+        val = np.empty(size, np.complex64)
+        self._x_read(rec.buffers["idx"], idx)
+        self._x_read(rec.buffers["val"], val)
+        if natural:
+            return idx.reshape(shape), val.reshape(shape)
+        oi = np.full(shape, -1, np.int32)
+        ov = np.zeros(shape, np.complex64)
+        for (a, b), off in zip(rows, offsets):
+            count = (b - a) * nt * nb
+            oi[a:b] = idx[off:off + count].reshape(b - a, nt, nb)
+            ov[a:b] = val[off:off + count].reshape(b - a, nt, nb)
+        return oi, ov
+
+    def _flat_sparse(self, rec, shape, rows, offsets, natural):
+        from . import _SparsePeaks
+        nd, nt, nb = shape
+        head = np.empty(1, np.uint32)
+        self._x_read(rec.buffers["count"], head)
+        c = int(head[0])
+        recs = np.empty((c, 4), np.uint32)
+        self._x_read(rec.buffers["list"], recs)
+        # Atomics fill the list in no fixed order. Positions are unique, so they are put in
+        # order through a table of positions (linear) rather than sorted (c log c compares:
+        # ~2 ms at 24k records).
+        pos = recs[:, 0].astype(np.int64)
+        if not natural:                           # packed groups: back to row positions
+            starts = np.asarray(offsets, np.int64)
+            g = np.searchsorted(starts, pos, side="right") - 1
+            first = np.asarray([a for a, _ in rows], np.int64) * nt * nb
+            pos = pos - starts[g] + first[g]
+        where = np.full(nd * nt * nb, -1, np.int32)
+        where[pos] = np.arange(c, dtype=np.int32)
+        order = where[where >= 0]
+        flat, recs = pos[order], recs[order]
+        val = recs[:, 2:4].copy().view(np.float32).view(np.complex64).reshape(-1)
+        return _SparsePeaks(shape, flat, recs[:, 1].view(np.int32), val)
