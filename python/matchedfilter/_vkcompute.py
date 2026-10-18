@@ -604,9 +604,9 @@ def _band_key(bands):
     the recompute reads (the buffers and the row offset), or None in full mode."""
     if not bands:
         return None
-    B, (n, series_b, starts_b, r0, count, nser, _slot, _cmd) = bands
+    B, (n, series_b, starts_b, r0, count, nser, _slot, _cmd, code) = bands
     return (B, getattr(series_b.handle, "value", series_b.handle),
-            getattr(starts_b.handle, "value", starts_b.handle), r0, nser)
+            getattr(starts_b.handle, "value", starts_b.handle), r0, nser, code)
 
 
 def _fuse_interleave():
@@ -1129,6 +1129,8 @@ class Context(InputUploads):
     #: peaks_items(async_submit=True) returns a collector; forward takes rows=(r0, count).
     items_async = True
     forward_rows = True
+    #: forward takes real=(lane, stride, length): a real series read in place, not widened.
+    real_series = True
 
     def __init__(self, index=0):
         vk, err = _vulkan._load()
@@ -2198,7 +2200,7 @@ class Context(InputUploads):
     def _band_recompute(self, vk, cmd, b, bands, nt, pairs, surv_key, args_key, barrier):
         # Two phases ("mark", then "recompute"): the second reads what the first wrote.
         """The refine's survivor blocks, their full spectra recomputed into their rows."""
-        B, (n, series_b, starts_b, r0, count, nser, _slot, _cmd) = bands
+        B, (n, series_b, starts_b, r0, count, nser, _slot, _cmd, code) = bands
         mpipe, mlayout, msl = self._build_pipeline("markblocks", "markblocks.spv", 5, 4)
         ds = self._descriptor_set(msl, [b[surv_key], b[args_key], b["bflags"], b["blocks"],
                                         b["bargs"]])
@@ -2211,27 +2213,27 @@ class Context(InputUploads):
                 dst_access=_ACCESS_SHADER_READ | _ACCESS_SHADER_WRITE | _ACCESS_INDIRECT_READ)
         self._stamp(cmd, "mark")
         lname = "forward_listed_%d.spv" % n
-        lpipe, llayout, lsl = self._build_pipeline(("listed", n), lname, 4, 4)
+        lpipe, llayout, lsl = self._build_pipeline(("listed", n), lname, 4, 8)
         ds = self._descriptor_set(lsl, [series_b, starts_b, b["data"], b["blocks"]],
                                   [0, r0 * 4, 0, 0] if r0 else None)
         vk.vkCmdBindPipeline(cmd, _BIND_POINT_COMPUTE, lpipe)
         vk.vkCmdBindDescriptorSets(cmd, _BIND_POINT_COMPUTE, llayout, 0, 1, (_vp * 1)(ds), 0, None)
-        pc = (ctypes.c_uint32 * 1)(nser)
-        vk.vkCmdPushConstants(cmd, llayout, _STAGE_COMPUTE, 0, 4, ctypes.byref(pc))
+        pc = (ctypes.c_uint32 * 2)(nser, code)
+        vk.vkCmdPushConstants(cmd, llayout, _STAGE_COMPUTE, 0, 8, ctypes.byref(pc))
         vk.vkCmdDispatchIndirect(cmd, b["bargs"].handle, 0)
         barrier()
 
     def _band_forward(self, storage_key, b, bands, nd):
         """The band-only forward writing b["bands"]: a recording of its own (phase
         "forward"), swapped in for the pending full forward of the same spectra."""
-        B, (n, series_b, starts_b, r0, count, nser, slot, _cmd) = bands
+        B, (n, series_b, starts_b, r0, count, nser, slot, _cmd, code) = bands
         fkey = ("bandfwd", storage_key, _band_key(bands))
         forwards = self.__dict__.setdefault("_forwards", {})
         rec = forwards.get(fkey)
         if rec is not None:
             self._cache_touch('forward', fkey)
             return fkey, rec
-        pipe, layout, sl = self._build_pipeline(("bands", n), "forward_bands_%d.spv" % n, 3, 8)
+        pipe, layout, sl = self._build_pipeline(("bands", n), "forward_bands_%d.spv" % n, 3, 12)
         pool_start = len(getattr(self, '_pools', []))
         ds = self._descriptor_set(sl, [series_b, starts_b, b["bands"]],
                                   [0, r0 * 4, 0] if r0 else None)
@@ -2241,7 +2243,7 @@ class Context(InputUploads):
             rec = _Recording(self, "band forward")
             cmd = rec.cmd
             rec.stamp("start")
-            rec.bind((pipe, layout), ds, (nser, B))
+            rec.bind((pipe, layout), ds, (nser, B, code))
             rec.dispatch(nd)
             rec.barrier()
             rec.stamp("forward")
@@ -2287,10 +2289,15 @@ class Context(InputUploads):
         return self.forward(n, series, starts, spectra, defer=defer, slot=slot, fused=True)
 
     def forward(self, n, series, starts, spectra, *, defer=False, slot=None, fused=False, rows=None,
-                handle_out=None):
+                handle_out=None, real=None):
         """Gather and normalize forward FFTs directly into shared spectra.
 
         handle_out (a list): receives (key, record) for forward_replay.
+
+        real=(lane, stride, length) (real_series): series is complex64 storage holding a real
+        series of `length` samples, sample i at float lane + stride * i of it read as floats
+        (one lane of a packed complex row: stride 2; a real series: stride 1). Starts and
+        length are in samples.
 
         rows=(r0, count): only rows r0..r0+count of starts/spectra (r0 a multiple of 64, so
         the descriptor offsets stay aligned); lets several series allocations fill one
@@ -2302,12 +2309,15 @@ class Context(InputUploads):
         r0, count = rows if rows is not None else (0, spectra.shape[0])
         if r0 % 64:
             raise ValueError("forward row offsets must be multiples of 64")
+        code, nser = 0, int(series.size)
+        if real is not None:
+            code, nser = (int(real[0]) << 2) | int(real[1]), int(real[2])
         pipe, layout, sl = self._build_pipeline(
-            ("forward", n), "forward_%d.spv" % n, 3, 4)
+            ("forward", n), "forward_%d.spv" % n, 3, 8)
         buffers = [shared_buffer(a, self) for a in (series, starts, spectra)]
         if any(b is None for b in buffers):
             raise ValueError("forward buffers must belong to this GPU context")
-        key = (n, series.size, spectra.shape[0], fused, rows,
+        key = (n, nser, code, spectra.shape[0], fused, rows,
                *(a.ctypes.data for a in (series, starts, spectra)))
         forwards = getattr(self, "_forwards", None)
         if forwards is None:
@@ -2321,7 +2331,7 @@ class Context(InputUploads):
             rec = _Recording(self, "forward")
             cmd = rec.cmd
             rec.stamp("start")
-            rec.bind((pipe, layout), ds, (series.size,))
+            rec.bind((pipe, layout), ds, (nser, code))
             rec.dispatch(count)
             # The spectra are read next by shaders and by the host (0x2000, 0x4000).
             rec.barrier(dst_stage=_STAGE_COMPUTE_BIT | 0x4000,
@@ -2343,7 +2353,7 @@ class Context(InputUploads):
             # A hierarchical call on these spectra may swap this forward for the band-only
             # one (_band_source): what it needs to recompute survivor rows itself.
             self.__dict__.setdefault("_fwd_src", {})[spectra.ctypes.data + r0 * n * 8] = (
-                n, buffers[0], buffers[1], r0, count, int(series.size), slot, cmd)
+                n, buffers[0], buffers[1], r0, count, nser, slot, cmd, code)
         else:
             self._submit(cmd, slot=slot)
 

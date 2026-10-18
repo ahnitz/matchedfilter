@@ -938,16 +938,17 @@ class MatchedFilter:
 
 
     def _series_array(self, series):
-        """The series as the engine reads it: complex64, or -- for a CPU hierarchical plan
-        given a real series (the middle output of a real-real-complex hierarchy, filtered
-        with complex quadrature templates) -- float32, transformed at half size into the
-        same full spectrum (ap_hmf_set_real_series). GPU plans widen it to complex."""
+        """The series as the engine reads it: complex64, or -- for a hierarchical plan that
+        reads real series (_reads_real_series) given one (the middle output of a
+        real-real-complex hierarchy, filtered with complex quadrature templates) -- float32:
+        a CPU plan transforms it at half size into the same full spectrum
+        (ap_hmf_set_real_series), a GPU plan's forward reads the real samples."""
         a = _from_any(series)
         if (not np.iscomplexobj(a) and isinstance(self, HierarchicalFilter)
-                and self.device.kind == "cpu" and self.n >= 4):
+                and self._reads_real_series()):
             if (isinstance(a, np.ndarray) and a.dtype == np.float32 and a.ndim == 1
-                    and a.strides == (8,) and a.size > 0):
-                return a            # one lane of a complex series, read in place (stride 2)
+                    and a.strides in ((8,), (4,)) and a.size > 0):
+                return a            # read in place: contiguous, or one lane of a complex row
             return np.ascontiguousarray(a, dtype=np.float32)
         return np.ascontiguousarray(a, dtype=np.complex64)
 
@@ -1593,7 +1594,8 @@ class MatchedFilter:
                 or objs[7] is not ws[3]):
             return None
         lo_addr, hi_addr = entry["span"]
-        if not (lo_addr <= addr and addr + ser.nbytes <= hi_addr):
+        extent = (ser.size - 1) * ser.strides[0] + ser.itemsize if ser.size else 0
+        if not (lo_addr <= addr and addr + extent <= hi_addr):
             return None
         K = entry["K"]
         token = self._defer_series
@@ -1784,23 +1786,32 @@ class MatchedFilter:
             and hasattr(self._gpu, "hier_peaks_grouped")
             and nb <= getattr(self._gpu, "max_grouped_bins", 0)
             and nt <= self._gpu_pair_limit())
-        source_shared = shared_buffer(ser, self._gpu) is not None
+        # A real series (a backend with real_series): the forward reads its samples from
+        # complex64 storage, by float offset and stride (c.real), never widened on the host.
+        real = ser.dtype == np.float32
+        c.real = None
+        source_shared = not real and shared_buffer(ser, self._gpu) is not None
         # Unified memory: read a page-aligned series where it is rather than copying the
         # span into the source buffer (a fine-stage call copied ~6 MB per call). The owner
         # lives for this call; each command buffer retains what it reads.
         view = getattr(self._gpu, "host_view", None)
-        series_owner = view(ser) if (view is not None and not source_shared) else None
+        series_owner = view(ser) if (view is not None and not source_shared
+                                     and not real) else None
         if series_owner is not None:
             source_shared = True
         # A series inside a device allocation (a row of a device buffer a caller reuses, e.g.
-        # correlate_series(out=bank.empty_shared(...))) is read where it is, by offset --
-        # unless a block would read past its end, where the upload's zero padding is needed.
+        # correlate_series(out=bank.empty_shared(...)), or one real lane of such a row) is
+        # read where it is, by offset -- unless a block would read past its end, where the
+        # upload's zero padding is needed.
         contained = None
         if not source_shared and nblk:
-            from ._shared import containing
-            contained = containing(ser, self._gpu)
+            from ._shared import containing, containing_samples
+            contained = (containing_samples if real else containing)(ser, self._gpu)
             if contained is not None and int(layout.starts.max()) + n > ser.size:
                 contained = None
+            if real and contained is not None and (
+                    contained[1] + contained[2] * ser.size > np.iinfo(np.uint32).max):
+                contained = None            # float offsets past the kernel's 32-bit index
         c.contained, c.source_shared, c.series_owner = contained, source_shared, series_owner
         c.viewed = series_owner is not None
         # Pools are sized by capacity, not by this call's batch: windowed calls vary in
@@ -1844,7 +1855,12 @@ class MatchedFilter:
                 prev = owners.pop((slot0 + k) % K, None)
                 if prev is not None:
                     prev.result()
-        if contained is not None:
+        if contained is not None and real:
+            whole, offset, stride = contained
+            source, base = whole, -(offset // stride)
+            c.real = (offset % stride, stride, ser.size - base)
+            self._series_workspace = (workspace[0], workspace[1], c.spectra_pool, c.starts_pool)
+        elif contained is not None:
             source, base = contained[0], -contained[1]
             self._series_workspace = (workspace[0], workspace[1], c.spectra_pool, c.starts_pool)
         elif source_shared:
@@ -1872,9 +1888,14 @@ class MatchedFilter:
             if src is None or src.size < span:
                 # Capacity for the whole series: later windows need not reallocate.
                 src = sources[slot0] = self._gpu.empty_shared((max(ser.size, span),))
-            src[:top - base] = ser[base:top]
             self._series_workspace = (workspace[0], sources, c.spectra_pool, c.starts_pool)
-            source = src[:top - base]
+            if real:
+                src.view(np.float32)[:top - base] = ser[base:top]
+                source = src[:(top - base + 1) // 2]
+                c.real = (0, 1, top - base)
+            else:
+                src[:top - base] = ser[base:top]
+                source = src[:top - base]
         c.source, c.base = source, base
         c.workspace = workspace          # held for the call (see _run_series_gpu)
         return c
@@ -1886,6 +1907,8 @@ class MatchedFilter:
         starts = c.starts_pool[slot]
         spec = c.spectra_pool[slot][:count]
         starts[:count] = rebased
+        if c.real is not None:
+            forward_kw["real"] = c.real
         self._gpu.forward(c.n, c.source, starts[:count], spec, defer=True,
                           slot=slot if c.pipelined else None, **forward_kw)
         return slot, spec
@@ -2830,6 +2853,14 @@ class HierarchicalFilter(MatchedFilter):
             self._mf = self._new_cpu_plan(self._pinned)
 
     # ---- plan --------------------------------------------------------------
+    def _reads_real_series(self):
+        """Whether run_series reads a real (float32) series as it is: the CPU plan
+        transforms it at half size; a GPU forward declaring real_series reads its samples
+        (one-stage forwards only, n <= 65536). Elsewhere a real series is widened."""
+        if self._gpu is None:
+            return self.device.kind == "cpu" and self.n >= 4
+        return bool(getattr(self._gpu, "real_series", False)) and self.n <= 65536
+
     def _new_cpu_plan(self, chain):
         self._execution_policy = self._series_policy('hierarchical_series', chain[-1], self.ntemplates)
         grp = self._execution_policy.get('series_group', 32 if self.n <= 2048 else 16)

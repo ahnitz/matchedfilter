@@ -20,7 +20,7 @@ void forwardTier0(uint3 gid: SV_GroupID, uint3 lid: SV_GroupThreadID,
                   StructuredBuffer<uint> starts,
                   RWStructuredBuffer<uint> band0,
                   RWStructuredBuffer<float2> band1,
-                  uniform uint seriesLength, uniform uint B0, uniform uint B1)
+                  uniform uint seriesLength, uniform uint B0, uniform uint B1 SERIES_LAYOUT)
 {
     uint tid = lid.x;
     _tid = tid;
@@ -31,7 +31,7 @@ void forwardTier0(uint3 gid: SV_GroupID, uint3 lid: SV_GroupThreadID,
         uint offset = tid + WG*k;
         float2 x = float2(0, 0);
         if (start < seriesLength && offset < seriesLength - start)
-            x = series[start + offset];
+            x = SERIES_AT(start + offset);
         r[k] = C(x.x / float(N), -x.y / float(N));
     }
     forwardTransform(r, tid);

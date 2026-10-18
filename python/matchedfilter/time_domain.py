@@ -1222,9 +1222,10 @@ def _tap_spectra(taps: np.ndarray, counts: np.ndarray, n: int, rate_ratio: float
 
 
 def _reads_real(plan) -> bool:
-    """Whether the plan reads a real (float32) series itself: a CPU hierarchical plan."""
+    """Whether the plan reads a real (float32) series itself: a hierarchical plan whose
+    engine does (HierarchicalFilter._reads_real_series)."""
     from . import HierarchicalFilter
-    return isinstance(plan, HierarchicalFilter) and plan.device.kind == "cpu"
+    return isinstance(plan, HierarchicalFilter) and plan._reads_real_series()
 
 
 def _tap_dtype(taps) -> type:

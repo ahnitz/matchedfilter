@@ -174,6 +174,47 @@ def test_a_lane_of_a_complex_series_is_read_in_place():
         np.testing.assert_array_equal(z0, z1)
 
 
+@pytest.mark.skipif("gpu:0" not in _devices(), reason="needs a GPU")
+def test_a_gpu_bank_reads_a_real_series_as_its_complex_widening():
+    """A GPU hierarchical bank given a real series -- contiguous, one lane of a host complex
+    array, or one lane of a row of the bank's own device memory (read in place) -- reports
+    exactly what it reports for the series widened to complex: its forward reads the same
+    samples with zero imaginary parts, whatever the backend's real-series support."""
+    rng = np.random.default_rng(11)
+    counts = list(rng.integers(150, 401, 12))
+    taps, w, df = _quadrature_bank(rng, counts)
+    L = 1 << 17
+    a = rng.standard_normal(L).astype(np.float32)
+    b = rng.standard_normal(L).astype(np.float32)
+    for x in (a, b):
+        for j, i in enumerate(range(0, len(counts), 3)):
+            c = counts[i]
+            pos = 10000 + j * (L - 20000) // 5
+            x[pos:pos + c] += 25.0 * np.real(taps[i, :c][::-1]) / np.linalg.norm(taps[i, :c])
+    bank = TimeDomainFilterBank(taps, tap_counts=counts, engine="hier", threshold=5.5,
+                                binsize=2048, coarse_band_hz=(128.0, 256.0), device="gpu:0")
+    bank.set_reference(w, delta_f=df)
+    rows = bank.empty_shared((2, L))
+    rows[0] = (b + 1j * a).astype(np.complex64)
+    rows[1] = (a + 1j * b).astype(np.complex64)
+    host = (a + 1j * b).astype(np.complex64)
+
+    def run(x):
+        r = bank.filter_series(x)
+        order = np.lexsort((r.sample_indices, r.template_indices))
+        return r.template_indices[order], r.sample_indices[order], r.snr[order]
+
+    for ref, lanes in ((a, (a, host.real, rows[0].imag, rows[1].real)),
+                       (b, (b, host.imag, rows[0].real, rows[1].imag))):
+        t0, s0, z0 = run(ref.astype(np.complex64))
+        assert z0.size > 3
+        for x in lanes:
+            t1, s1, z1 = run(x)
+            np.testing.assert_array_equal(t0, t1)
+            np.testing.assert_array_equal(s0, s1)
+            np.testing.assert_array_equal(z0, z1)
+
+
 def test_a_followup_on_a_real_series_reads_only_its_span():
     """A single-template, threshold-0 call (a pycbc follow-up) on a real series -- or on one
     lane of a packed pair -- gives what it gives on the same series as complex; its plan has

@@ -16,7 +16,7 @@ void seriesForwardBands(uint3 gid: SV_GroupID, uint3 lid: SV_GroupThreadID,
                         StructuredBuffer<float2> series,
                         StructuredBuffer<uint> starts,
                         RWStructuredBuffer<float2> bands,
-                        uniform uint seriesLength, uniform uint B)
+                        uniform uint seriesLength, uniform uint B SERIES_LAYOUT)
 {
     uint tid = lid.x;
     _tid = tid;
@@ -27,7 +27,7 @@ void seriesForwardBands(uint3 gid: SV_GroupID, uint3 lid: SV_GroupThreadID,
         uint offset = tid + WG*k;
         float2 x = float2(0, 0);
         if (start < seriesLength && offset < seriesLength - start)
-            x = series[start + offset];
+            x = SERIES_AT(start + offset);
         r[k] = C(x.x / float(N), -x.y / float(N));
     }
     forwardTransform(r, tid);
@@ -71,7 +71,7 @@ void seriesForwardListed(uint3 gid: SV_GroupID, uint3 lid: SV_GroupThreadID,
                          StructuredBuffer<uint> starts,
                          RWStructuredBuffer<float2> spectra,
                          StructuredBuffer<uint> blockList,
-                         uniform uint seriesLength)
+                         uniform uint seriesLength SERIES_LAYOUT)
 {
     uint tid = lid.x;
     _tid = tid;
@@ -83,7 +83,7 @@ void seriesForwardListed(uint3 gid: SV_GroupID, uint3 lid: SV_GroupThreadID,
         uint offset = tid + WG*k;
         float2 x = float2(0, 0);
         if (start < seriesLength && offset < seriesLength - start)
-            x = series[start + offset];
+            x = SERIES_AT(start + offset);
         r[k] = C(x.x / float(N), -x.y / float(N));
     }
     forwardTransform(r, tid);
