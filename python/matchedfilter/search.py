@@ -16,6 +16,7 @@ import numpy as np
 
 from . import _core
 from .time_domain import TimeDomainFilterBank, FilterResults, _EMPTY_FILTER_RESULTS
+from .device import parse as _parse_device
 
 __all__ = ["Root", "Inner", "Leaf", "BlockInput", "HierarchicalSearch", "SeriesContext",
            "PeaksContext", "ChunkContext"]
@@ -216,9 +217,12 @@ class _InnerBatch:
     Rows are written into a channel's slots, reused across chunks. A slot reads as fresh:
     the correlation over the spans it was computed for and exact zero elsewhere. Each slot
     remembers those spans, and the bank clears only there (out_support), not the whole
-    row every chunk."""
+    row every chunk.
 
-    def __init__(self, children, length, real_input):
+    alloc(shape): the slots' storage -- on a GPU search, the leaf device's memory, so a
+    leaf reads its parent's row (or its lane of a packed row) where it is."""
+
+    def __init__(self, children, length, real_input, alloc=None):
         self.children = children
         self.length = int(length)
         counts = np.array([c.count for c in children], dtype=np.int64)
@@ -255,6 +259,7 @@ class _InnerBatch:
         # An output depends on input within its filter's tap reach (centre tap to either end).
         self.tap_reach = int(rows_counts.max()) // 2
         self._chan = {}                          # channel -> slots, series and regions
+        self._alloc = alloc
 
     def prepare(self, channel, series, regions):
         """channel's series and the merged (start, stop) spans its rows must hold this chunk."""
@@ -270,7 +275,11 @@ class _InnerBatch:
         state = self._chan[channel]
         k = len(rows)
         if state["slots"] is None or state["slots"].shape[0] < k:
-            state["slots"] = np.zeros((k, self.length), dtype=np.complex64)
+            if self._alloc is None:
+                state["slots"] = np.zeros((k, self.length), dtype=np.complex64)
+            else:
+                state["slots"] = self._alloc((k, self.length))
+                state["slots"][:] = 0
             state["support"] = [[] for _ in range(k)]      # where each slot may be nonzero
         support = state["support"]
         self.bank.correlate_series(state["series"], windows=state["regions"], templates=rows,
@@ -399,15 +408,23 @@ class HierarchicalSearch:
         return max([self.min_pad] + [int(self.leaf_bank(root, lf).max_block_length)
                                      for lf in self._leaves_below(root)])
 
-    def _batches(self, node, length):
-        """Build the inner batches of node's subtree for series of length samples (once)."""
+    def _batches(self, node, length, root=None):
+        """Build the inner batches of node's subtree for series of length samples (once).
+        On a GPU search their rows live in the leaf banks' device memory. root: the root
+        above node (default node itself), whose profile a leaf bank built here is given."""
+        root = node if root is None else root
         inner = self._kids[id(node)][0]
         if inner and id(node) not in self._inner:
             t0 = time.perf_counter()
-            self._inner[id(node)] = _InnerBatch(inner, length, self._real_output(node))
+            bank = self.leaf_bank(root, next(self._leaves_below(node)))
+            on_gpu = (getattr(bank, "device", None) is not None
+                      and _parse_device(bank.device).kind == "gpu")
+            alloc = bank.empty_shared if on_gpu else None
+            self._inner[id(node)] = _InnerBatch(inner, length, self._real_output(node),
+                                                alloc=alloc)
             self.timings["setup"] += time.perf_counter() - t0
         for c in inner:
-            self._batches(c, length)
+            self._batches(c, length, root)
 
     def _real_output(self, node):
         """Whether node's output series is real: the root's is, and an inner node's is when
