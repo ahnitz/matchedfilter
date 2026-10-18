@@ -289,7 +289,8 @@ def test_nested_inner_series_cover_their_childrens_reach():
     pad = search.pad(root)
     # Put the deep series' span edge on a block boundary of the short filter above them, so
     # whole-block rounding gives that filter nothing past the span.
-    short = search._batch(root, N)               # the 51-tap filter's batch
+    search._batches(root, N)
+    short = search._inner[id(root)]              # the 51-tap filter's batch
     lo_v, hi_v = short._groups[0][1]
     edge = 3 * (hi_v - lo_v) + lo_v              # a block boundary of its output
     start = edge + pad                           # the deep series' span starts there

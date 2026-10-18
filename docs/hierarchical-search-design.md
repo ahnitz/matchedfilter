@@ -1,7 +1,8 @@
 # Hierarchical search: design
 
 Status: phase 1 implemented (python/matchedfilter/search.py, root stage in C:
-ap_root_real), 2026-10-17. Phases 2 and 3 are proposals.
+ap_root_real) and used by pycbc_inspiral_fir, 2026-10-17. Phases 2 and 3 are
+proposals; "Next" lists what is planned now.
 
 ## Why
 
@@ -77,16 +78,17 @@ library asks with extra = 0 for the search and extra = `context` (samples
 hooks may read or re-filter beyond the windows) for what the parent series
 must hold; asking the caller to widen keeps windows that lie just outside
 the valid span but within reach. A leaf's parent series is exact over those
-widened windows plus the longest leaf block (`pad`); an inner series over its
+widened windows plus that leaf bank's longest block; an inner series over its
 children's spans plus their filters' tap reach. A node any channel needs in
 a chunk is produced in every channel (zero where that channel's own windows
 are empty), so a hook can read it in another channel.
 
 **Hooks.** Three, all optional:
 
-- `on_series(ctx)` when a node's output for a chunk is ready, for all
+- `on_series(ctx)` when the root's output for a chunk is ready, for all
   channels. May return a threshold envelope per channel, applying to every
-  leaf below that node in this chunk. pycbc uses it on the root to build
+  leaf below the root in this chunk. (Root only: inner series are read from
+  `on_peaks` through `ctx.series`.) pycbc uses it on the root to build
   the SNR renormalisation envelope from the root series.
 - `on_peaks(ctx)` per leaf group per chunk, after the peak search, while
   the group's ancestors' series for the chunk are still held. pycbc runs
@@ -104,7 +106,7 @@ and an accessor:
 - `ctx.envelope(channel)`: the threshold envelope's values at the peaks, as the
   search evaluated them (None without an envelope), so a hook renormalises with
   them rather than evaluating its envelope again.
-- `ctx.refilter(channel, windows, binsize, threshold, template=None)`: run
+- `ctx.refilter(channel, windows, binsize, threshold, template_index=None)`: run
   this leaf group's bank over its parent's series in other windows, bin
   size and threshold (the asym follow-up's threshold-0 scan of the other
   detector). An explicit threshold here ignores any envelope.
@@ -117,7 +119,7 @@ Phase 3 (device residency): a hook declares what it reads (`peaks`,
 ```python
 from matchedfilter import search as mfs
 
-tree = mfs.Root(top_spec, band=(k0, k1), profile=(w, delta_f), node_id=top_id,
+tree = mfs.Root(top_spec, (k0, k1), profile=(w, delta_f), node_id=top_id,
                 children=[mfs.Inner(mid_taps[i], count=mid_counts[i], node_id=mid_ids[i],
                                     children=[mfs.Leaf(fine_taps[i], fine_counts[i],
                                                        lags=fine_shifts[i], node_id=mid_ids[i])])
