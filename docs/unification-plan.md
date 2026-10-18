@@ -174,6 +174,66 @@ The duplication is in the hosts: about 8.6k lines across `_vkcompute`, `_cudacom
 - constants use one mechanism: Vulkan specialization constants, Metal function constants
   (check what Slang emits), and a small set of CUDA variants.
 
+## Stage U: true unification (revises stage 1; 2026-10-18)
+
+Stage 1 moved some helpers into `_gpuhost`, but the host logic still exists three times
+(`_vkcompute` 3,544 lines, `_cudacompute` 2,023, `_mtlcompute` 2,070, with 43/40/36
+methods and different method sets). That is why one backend can lack what another has:
+25 capability flags in the shared layers mark implementation gaps, not hardware
+differences, and 31 references name a backend (e.g. `gatechain._BAND_FORWARD =
+{"vulkan", "metal"}`). Measured consequences on 2026-10-18: real-series input existed on
+Vulkan only; CUDA launches each leaf call separately (1,380 launches per pass, 4.7% of the
+L40S roofline) while Vulkan fuses them into ~96 submissions.
+
+**Rule.** Decisions use queried hardware features and measured rates, never the API's
+name. The APIs differ only in mechanics, which live in a thin driver.
+
+**Design.**
+1. **Driver (the only per-API code, ~500-800 lines each):**
+   - buffers: allocate (device-local, host-visible, host-mapped), map, offset views,
+     fill, copy;
+   - kernels: load an artifact with constants; report its compiler statistics;
+   - command lists: dispatch, indirect dispatch, barrier, fill, copy, timestamp, recorded
+     once into the native replayable form (Vulkan command buffer, CUDA graph, Metal
+     encoding);
+   - submit and wait: fences or events, and ordering one submission after another;
+   - a feature query: unified memory, shared memory, subgroup sizes, workgroup limits,
+     indirect dispatch, queues, fp16/int16 rates, cooperative-matrix units, timestamps,
+     buffer alignment.
+2. **One executor** for every operation (forward, flat peaks, full and continuous
+   correlation, hierarchical tiers including cascade, grouped and band forward, follow-up
+   items, zeroing) and every mechanism (record caches, slots, fused batches, call-plan
+   replay, async with host settles, result ownership).
+3. **Decisions from features:** no indirect dispatch selects device-count kernels;
+   unified memory decides buffer placement; band forward follows its bytes model.
+4. **Kernels:** target switches only for intrinsics, inside helpers; other variants
+   become options set from features.
+
+**No regressions.**
+- **Baselines (U0)** on dev2 8060S, dev3 Renoir, dev4 Iris Xe, L40S and M2: throughput,
+  roofline, submissions per pass, host time, gate results.
+- **One operation per change**, all three drivers at once, old copies deleted in the same
+  commit. Acceptance: bit-identical outputs against the old implementation (differential
+  harness, same process); paired throughput within ~2% or better on every device;
+  structural counters no worse; full gate plus the M2 and L40S suites.
+- **The best existing implementation becomes the shared one** (Vulkan's fused batches
+  and replay; CUDA's result ownership; Metal's fused band forward where features allow).
+
+**Phases.**
+- U0: baselines, feature matrix, differential harness.
+- U1: driver interface, three drivers, driver conformance tests (no behaviour change).
+- U2: port operations, each merged separately: forward, full correlation, continuous
+  correlation, flat peaks and follow-ups, hierarchical tiers, then batching, replay and
+  async.
+- U3: delete flags made universal and every API-name check.
+- U4: kernel sources: switches become options; cooperative matrix becomes a feature.
+- U5: dead code and documentation.
+
+**Risks.** Python per-call overhead (replay native recordings; host time per call is an
+acceptance metric); Metal command buffers are one-shot (re-encode as today); discrete vs
+unified memory (keep the L40S prefetch path as a feature decision); testing reach (L40S
+via condor, M2); new GPU features pause during U1-U3 except fixes.
+
 ## Order
 
 Stage 0, then stage 1, then stage 4 (probes), then stage 2, then stage 3, then stage 5.
@@ -361,3 +421,6 @@ Stage 5's lessons land inside the stages that touch them. Each stage merges in g
   - Lesson: paired ladders need trials settled in the shared seed file. A seed taken
     after one run measured trial exploration (2.3e6 templates in real time) rather than
     the code.
+- 2026-10-18: **Stage U adopted** (see "Stage U: true unification"). Starts from 912b01ac
+  (gate passed on dev2; M2 suite 1854 passed; L40S suite 1889 passed). U0 begun.
+

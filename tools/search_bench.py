@@ -104,6 +104,9 @@ def main():
                     help="account the timed passes' work against the device's peaks "
                          "(matchedfilter._roofline; one segment = one pass over every capture)")
     ap.add_argument("--limit", type=int, default=0, help="first N tops only")
+    ap.add_argument("--json", default=None,
+                    help="write the results (throughput, stages, host CPU time, per-label device "
+                         "counts and time, roofline, device and kernel ids) to this file")
     ap.add_argument("--peaks", default=None,
                     help="also save every leaf's peaks from one extra (untimed) pass to this .npz, "
                          "to compare devices or builds")
@@ -132,10 +135,11 @@ def main():
         mids = [b.bank for b in search._inner.values()]
         fines = list(search._leaf_banks.values())
         before = rl.snapshot(mids, fines) if a.roofline else None
-        t0 = time.perf_counter()
+        t0, c0 = time.perf_counter(), time.process_time()
         for _ in range(a.repeats):
             search.run(inputs, windows=windows, on_series=noop, on_peaks=noop, on_chunk=noop)
         dt = (time.perf_counter() - t0) / a.repeats
+        tot["host_cpu_s"] = tot.get("host_cpu_s", 0.0) + (time.process_time() - c0) / a.repeats
         if a.roofline:
             after = rl.snapshot(mids, fines)
             rl.middle_work(roof["work"], before, after, mids)
@@ -168,11 +172,32 @@ def main():
               % (tot["device_s"], 100 * tot["device_s"] / s))
         for lab, (n, sec) in sorted(kernels.items(), key=lambda kv: -kv[1][1])[:12]:
             print("    %-28s %8.0f submissions/pass %8.3f s/pass" % (lab, n, sec))
+    r = None
     if a.roofline:
         r = rl.report(roof["work"], rl.peaks(a.device, ctx=roof["ctx"]), a.repeats,
                       s * a.repeats)
         r["problems"] = roof["problems"]
         print(rl.format_report(r))
+    if a.json:
+        import json
+        import platform
+        import matchedfilter as mf
+        dev = next((d for d in mf.devices() if str(d) == a.device), None)
+        out = dict(device=a.device, device_name=getattr(dev, "name", None),
+                   backend=getattr(dev, "backend", None), host=platform.node(),
+                   tops=len(files), repeats=a.repeats, warmup=a.warmup,
+                   steady_s=s, templates_real_time=tot["work"] / s,
+                   host_cpu_s=tot.get("host_cpu_s"), setup_s=tot["setup_s"],
+                   stages=stage, device_busy_s=tot.get("device_s"),
+                   labels={k: dict(per_pass=v[0], seconds=v[1]) for k, v in kernels.items()},
+                   roofline=r, env={k: v for k, v in os.environ.items() if k.startswith("MF_")})
+        try:
+            from matchedfilter._kernel_id import gpu_kernel_id
+            out["kernel_id"] = gpu_kernel_id(out["backend"]) if out["backend"] else None
+        except Exception as e:                      # recorded, not fatal
+            out["kernel_id"] = repr(e)
+        with open(a.json, "w") as fh:
+            json.dump(out, fh, indent=1, default=float)
     print("  other  %8.3f s/pass  %5.1f%%" % (s - sum(stage.get(k, 0) for k in ("root", "inner", "leaf", "hooks", "setup")),
                                             100 * (s - sum(stage.get(k, 0) for k in ("root", "inner", "leaf", "hooks", "setup"))) / s))
 
