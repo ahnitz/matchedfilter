@@ -413,6 +413,33 @@ def test_correlate_selected_real_series_on_cpu():
 
 
 @pytest.mark.parametrize("layout", ["contiguous", "interleaved"])
+def test_correlate_a_real_series_on_gpu_as_its_complex_widening(layout):
+    """A GPU bank given a real series -- contiguous, one lane of a host complex array, or one
+    lane of a row of device memory at an offset (its blocks' reads shift, its output does
+    not) -- correlates exactly what it does for the series widened to complex: the forward
+    reads the same samples with zero imaginary parts."""
+    gpu = _gpu()
+    if gpu is None:
+        pytest.skip("no usable GPU")
+    r = np.random.default_rng(14)
+    a = r.standard_normal(S).astype(np.float32)
+    b = r.standard_normal(S).astype(np.float32)
+    bank = _corr_bank(layout, device=gpu)
+    rows = bank.empty_shared((3, S))
+    rows[1] = (b + 1j * a).astype(np.complex64)
+    rows[2] = (a + 1j * b).astype(np.complex64)
+    host = (a + 1j * b).astype(np.complex64)
+    w = GEOMETRIES["narrow"]
+    for ref, lanes in ((a, (a, host.real, rows[1].imag, rows[2].real)),
+                       (b, (b, host.imag, rows[1].real, rows[2].imag))):
+        want = bank.correlate_series(ref.astype(np.complex64), windows=w)
+        for x in lanes:
+            np.testing.assert_array_equal(bank.correlate_series(x, windows=w), want)
+            np.testing.assert_array_equal(
+                bank.correlate_series(x, windows=w, templates=[4, 5, 9]), want[[4, 5, 9]])
+
+
+@pytest.mark.parametrize("layout", ["contiguous", "interleaved"])
 def test_correlate_on_gpu_including_stale_workspace(layout):
     gpu = _gpu()
     if gpu is None:
