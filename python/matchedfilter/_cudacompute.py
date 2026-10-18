@@ -50,6 +50,7 @@ class _DeviceShared:
     makes dozens of plans; each used to JIT-load its own copy of every kernel)."""
 
     def __init__(self, cuda, device):
+        self.cuda = cuda
         self.ctx = ctypes.c_void_p()
         check_cuda(cuda.cuDevicePrimaryCtxRetain(ctypes.byref(self.ctx), device),
                    "cuDevicePrimaryCtxRetain")       # held for the process lifetime
@@ -65,6 +66,18 @@ class _DeviceShared:
 
 
 _DEVICE_SHARED = {}
+
+
+def settle_all():
+    """Wait for every write left in flight on any CUDA device (a host read follows)."""
+    for shared in list(_DEVICE_SHARED.values()):
+        pend = shared.__dict__.get("pending_writes") or []
+        if pend:
+            check_cuda(shared.cuda.cuCtxSetCurrent(shared.ctx), "cuCtxSetCurrent")
+        while pend:
+            e = pend.pop(0)
+            check_cuda(shared.cuda.cuEventSynchronize(e), "cuEventSynchronize")
+            shared.cuda.cuEventDestroy_v2(e)
 
 
 _HERE = pathlib.Path(__file__).resolve().parent
@@ -437,6 +450,8 @@ class Context(InputUploads):
     # Follow-ups: peaks_items(async_submit=True) returns a collector; forward takes rows=.
     items_async = True
     forward_rows = True
+    #: forward takes real=(lane, stride, length): a real series read in place, not widened.
+    real_series = True
     cache_limit_bytes = 1024 * 1024 * 1024
     # Unified addressing: a view inside a shared allocation is a device pointer.
     shared_views = True
@@ -1805,12 +1820,17 @@ class Context(InputUploads):
         return self.forward(n, series, starts, spectra, defer=defer, slot=slot, fused=True)
 
     def forward(self, n, series, starts, spectra, *, defer=False, slot=None, fused=False,
-                rows=None):
+                rows=None, real=None):
         """Batch forward FFTs of series blocks into ``spectra`` (deferred: no sync).
 
         rows=(r0, count) (``forward_rows``): transform only blocks r0..r0+count, reading
         starts[r0:] and writing spectra[r0:] -- several series allocations share one
-        spectra workspace."""
+        spectra workspace. real=(lane, stride, length) (``real_series``): series is complex64
+        storage holding a real series of `length` samples, sample i at float lane + stride * i."""
+        if real is not None and n > 65536:
+            raise UnsupportedSize("a real series needs the one-stage forward")
+        nser, code = ((int(real[2]), (int(real[0]) << 2) | int(real[1])) if real is not None
+                      else (int(series.size), 0))
         self._bind()
         if rows is not None:
             r0, count = int(rows[0]), int(rows[1])
@@ -1857,7 +1877,8 @@ class Context(InputUploads):
             self._launch(f3, blocks * n2, f3wg, [mid.dptr, sh[2].dptr], stream=stream)
         else:
             self._launch(hfunc, blocks, wg,
-                         [sh[0].dptr, sh[1].dptr, sh[2].dptr, _u32(series.size)], stream=stream)
+                         [sh[0].dptr, sh[1].dptr, sh[2].dptr, _u32(nser), _u32(code)],
+                         stream=stream)
         if not isinstance(sh[2], _Borrowed):
             self._copy_d2h(spectra.ctypes.data, sh[2].dptr.value, spectra.nbytes, stream, "readback")
             self._sync(stream)

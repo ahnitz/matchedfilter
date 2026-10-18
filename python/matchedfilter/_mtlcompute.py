@@ -568,6 +568,8 @@ class Context(InputUploads):
     #: forward takes rows=(r0, count) (MatchedFilter._items_gpu: both detectors' series
     #: in one workspace and one submission).
     forward_rows = True
+    #: forward takes real=(lane, stride, length): a real series read in place, not widened.
+    real_series = True
     #: shared_buffer() may hand back a view inside an allocation (one row of a device-
     #: resident middle output); every binding adds its offset.
     shared_views = True
@@ -1067,9 +1069,9 @@ class Context(InputUploads):
         for item in lazy or ():
             if item is skip:
                 continue
-            n, pso, buffers, count, size, cmd = item
+            n, pso, buffers, count, (size, code), cmd = item
             enc = self.o.call(cmd, b"computeCommandEncoder")
-            self._dispatch(enc, pso, (size,), buffers, n // _radix(n), groups=count)
+            self._dispatch(enc, pso, (size, code), buffers, n // _radix(n), groups=count)
             self.o.call(enc, b"endEncoding", restype=None)
 
     def _claim_forward(self, spectra_buf, rows):
@@ -1098,16 +1100,20 @@ class Context(InputUploads):
 
     @_autoreleased
     def forward(self, n, series, starts, spectra, *, defer=False, fused=False, slot=None,
-                rows=None):
+                rows=None, real=None):
         """Gather and forward-transform blocks of `series` into `spectra`.
 
         rows=(r0, count): only rows r0..r0+count of starts/spectra -- several series
         allocations then fill one spectra workspace (forward_rows). A deferred forward
-        joins one still pending: the consumer's command buffer runs them all first."""
+        joins one still pending: the consumer's command buffer runs them all first.
+        real=(lane, stride, length) (real_series): series is complex64 storage holding a
+        real series of `length` samples, sample i at float lane + stride * i."""
         if n > 65536:
-            if rows is not None:
-                raise UnsupportedSize("row ranges need the one-stage forward")
+            if rows is not None or real is not None:
+                raise UnsupportedSize("row ranges and real series need the one-stage forward")
             return self._forward_tierc(n, series, starts, spectra, defer=defer, fused=fused)
+        layout = ((int(real[2]), (int(real[0]) << 2) | int(real[1])) if real is not None
+                  else (int(series.size), 0))
         pso = self.pipeline(n, "seriesForward")
         buffers = [shared_buffer(a, self) for a in (series, starts, spectra)]
         if any(b is None for b in buffers):
@@ -1125,12 +1131,12 @@ class Context(InputUploads):
             if pending is None:
                 self._flush_forward()          # an earlier deferred forward nothing reads
             self._lazy_fwd = list(getattr(self, "_lazy_fwd", None) or ()) + [
-                (n, pso, buffers, count, series.size, cmd)]
+                (n, pso, buffers, count, layout, cmd)]
             self._pending_metal = (cmd, (tuple(pending[1]) if pending is not None else ())
                                    + tuple(buffers))
             return None
         enc = self.o.call(cmd, b"computeCommandEncoder")
-        self._dispatch(enc, pso, (series.size,), buffers, n // _radix(n), groups=count,
+        self._dispatch(enc, pso, layout, buffers, n // _radix(n), groups=count,
                        offsets=(0, r0 * 4, r0 * n * 8))
         self.o.call(enc, b"endEncoding", restype=None)
         if pending is not None:
@@ -1882,9 +1888,9 @@ class Context(InputUploads):
         if fwd is not None:
             # series, starts as the deferred forward bound them; bands straight into the
             # tiers' inputs (band1 unused, and bound to cdata, for a one-tier chain).
-            _, _, (series_b, starts_b, _), _, size, _ = fwd
+            _, _, (series_b, starts_b, _), _, (size, code), _ = fwd
             b1 = tiers[1][0] if len(tiers) > 1 else 0
-            self._dispatch(enc, fpso[0], (size, tiers[0][0], b1),
+            self._dispatch(enc, fpso[0], (size, tiers[0][0], b1, code),
                            [series_b, starts_b, bufs["cdata"],
                             bufs["cdata1"] if len(tiers) > 1 else bufs["cdata"]],
                            n // _radix(n), groups=nd)
@@ -1944,7 +1950,7 @@ class Context(InputUploads):
             self._dispatch(enc, fpso[2], (nt,),
                            [bufs["surv" + last], bufs["args" + last], bufs["flags"],
                             bufs["blist"], bufs["bargs"]], 256, groups=(pairs + 255) // 256)
-            self._dispatch(enc, fpso[1], (size,),
+            self._dispatch(enc, fpso[1], (size, code),
                            [series_b, starts_b, bufs["data"], bufs["blist"]],
                            n // _radix(n), indirect=bufs["bargs"])
         self._dispatch(enc, refine,

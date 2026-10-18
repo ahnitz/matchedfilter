@@ -96,7 +96,8 @@ class Executor:
                 continue
             fn, wg = gw["fwd"]
             ctx._launch(fn, m, wg, [gw["b_alloc"].dptr, ptr(t0 + gw["t_rows"]),
-                                    ptr(s0 + gw["spec"]), u32(gw["alloc"].size)], stream=stream)
+                                    ptr(s0 + gw["spec"]), u32(gw["alloc"].size), u32(0)],
+                        stream=stream)
             fn, wg = gw["items_fn"]
             grid = min(m, grid_cap)
             bs = gw["bs"]
