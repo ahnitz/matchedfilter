@@ -553,3 +553,26 @@ Stage 5's lessons land inside the stages that touch them. Each stage merges in g
   - dev2 and L40S paired search: pending. dev2 was loaded by other sessions (load
     average 3-9; a 87 M round was that load). Counted on a clean run: no re-recording or
     binding eviction in steady state, only `destroy` clean-up.
+- 2026-10-18: **Course correction: unify optimizations, not behaviour.**
+  - U2.1-U2.3 moved code into `_gpuexec` but preserved each API's behaviour. `_x_defer`
+    hides three forward-fusion strategies.
+  - From here on, every optimization found on one backend gets one implementation for all
+    of them, on by default. An opt-out needs a measurement on that hardware, keyed on the
+    measured property and recorded here.
+  - Acceptance: correct (goldens, or CPU where results legitimately change) and throughput
+    equal or better on all five GPUs.
+  - Inventory, to be made universal in this order:
+    1. Device peak compaction (CUDA only).
+    2. One deferred forward any consumer can claim: fused first tier or band forward by the
+       bytes model, on every backend. Replaces `_x_defer`.
+    3. One record-once/replay-cheaply mechanism (Vulkan fused batches, Metal collector,
+       CUDA graphs), with call-plan replay (Vulkan only) on top.
+    4. Coarse band read in place through a stride; Metal/CUDA copy it with pack_coarse.
+    5. Per-row windows; Metal is excluded by name, from one 6% measurement.
+    6. Wrapping caller memory on unified memory (host_view, Metal only).
+    7. Record sizing: CUDA grows by capacity, Vulkan and Metal keep one record per shape.
+    8. Vendor/API keys: gatechain `_BAND_FORWARD`, the Intel accurate-trig check.
+  - Genuinely hardware, kept as probed features: staging and prefetch on migrating
+    memory; indirect dispatch.
+  - L40S U2.3 paired search, 4 alternating rounds: 98.6/105.0/101.6/104.0 M against
+    110.2/96.6/96.3/110.5 M. Means 102.3 against 103.4; leaf ±8% in both.
