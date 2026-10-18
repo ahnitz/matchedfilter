@@ -303,6 +303,7 @@ class _Step(NamedTuple):
     pads: dict          # leaf id -> samples its parent's series holds past its windows
     live: set
     on_peaks: Optional[Callable]
+    pending: list       # leaves in walk order, searched once the chunk's series exist
 
 
 class HierarchicalSearch:
@@ -491,17 +492,19 @@ class HierarchicalSearch:
                             live.add(id(node))
                             node = self._parent[id(node)]
                 step = _Step(root, k, active, tags, held, support, need, win, envelopes, pads,
-                             live, on_peaks)
+                             live, on_peaks, [])
                 self._walk(root, step)
+                self._search_leaves(step)
                 if on_chunk is not None:
                     on_chunk(ChunkContext(k, active, tags))
 
     def _walk(self, node, step):
-        """Search node's leaves, then produce its live inner children (every channel) and
-        walk each."""
+        """Queue node's leaves for the chunk's leaf search, then produce its live inner
+        children (every channel) and walk each. Every node has its own row slots, so all the
+        chunk's series coexist until the next chunk: the leaves are searched together once the
+        walk is done (_search_leaves), with their ancestors' series still held for the hooks."""
         inner, leaves = self._kids[id(node)]
-        for lf in leaves:
-            self._search_leaf(lf, step)
+        step.pending.extend(leaves)
         if not inner:
             return
         held = step.held
@@ -531,37 +534,52 @@ class HierarchicalSearch:
         self.timings["inner"] += time.perf_counter() - t0
         for pos in members:
             self._walk(batch.children[pos], step)
-        for pos in members:
-            for c in step.active:
-                del held[c][id(batch.children[pos])]
-                step.support[c].pop(id(batch.children[pos]), None)
 
-    def _search_leaf(self, lf, step):
-        """lf's peak search in every channel of the step, and its on_peaks."""
-        if not any(step.win[(id(lf), c)] for c in step.active):
+    def _search_leaves(self, step):
+        """The chunk's leaf searches, in every channel, then each leaf's on_peaks in walk order.
+
+        On a GPU the searches are one filter_series_many batch: every call submitted before any
+        is collected, so the device is not idle while the host prepares the next leaf. On the
+        CPU each runs in turn, as filter_series. The results are the same either way."""
+        leaves = [lf for lf in step.pending if any(step.win[(id(lf), c)] for c in step.active)]
+        if not leaves:
             return
-        peaks, scales = {}, {}
         t0 = time.perf_counter()
-        for c in step.active:
-            w = step.win[(id(lf), c)]
-            envelope = step.envelopes.get(c)
-            if not w:
-                peaks[c] = _EMPTY_FILTER_RESULTS
-                if envelope is not None:
-                    scales[c] = np.empty(0, dtype=np.float64)
-                continue
-            series = step.held[c][id(self._parent[id(lf)])]
-            # one window as a slice: filter_series memoises a slice's layout
-            res = self.leaf_bank(step.root, lf).filter_series(
-                series, windows=slice(*w[0]) if len(w) == 1 else w)
-            peaks[c], e = self._apply_envelope(res, lf, envelope, len(series))
-            if e is not None:
-                scales[c] = e
+        jobs, where = [], {}
+        for lf in leaves:
+            bank = self.leaf_bank(step.root, lf)
+            for c in step.active:
+                w = step.win[(id(lf), c)]
+                if w:
+                    series = step.held[c][id(self._parent[id(lf)])]
+                    # one window as a slice: filter_series memoises a slice's layout
+                    where[(id(lf), c)] = len(jobs)
+                    jobs.append((bank, series, dict(windows=slice(*w[0]) if len(w) == 1 else w)))
+        if any(getattr(b, "device", None) is not None for b, _, _ in jobs):
+            results = TimeDomainFilterBank.filter_series_many(jobs)
+        else:
+            results = [b.filter_series(ser, **kw) for b, ser, kw in jobs]
+        found = []
+        for lf in leaves:
+            peaks, scales = {}, {}
+            for c in step.active:
+                envelope = step.envelopes.get(c)
+                j = where.get((id(lf), c))
+                if j is None:
+                    peaks[c] = _EMPTY_FILTER_RESULTS
+                    if envelope is not None:
+                        scales[c] = np.empty(0, dtype=np.float64)
+                    continue
+                peaks[c], e = self._apply_envelope(results[j], lf, envelope, len(jobs[j][1]))
+                if e is not None:
+                    scales[c] = e
+            found.append((lf, peaks, scales))
         self.timings["leaf"] += time.perf_counter() - t0
         if step.on_peaks is not None:
             t0 = time.perf_counter()
-            step.on_peaks(PeaksContext(self, step.root, lf, step.chunk, step.active, step.tags,
-                                       peaks, step.held, scales, step.support))
+            for lf, peaks, scales in found:
+                step.on_peaks(PeaksContext(self, step.root, lf, step.chunk, step.active,
+                                           step.tags, peaks, step.held, scales, step.support))
             self.timings["hooks"] += time.perf_counter() - t0
 
     def _span(self, node, channel, need, pads, out):
