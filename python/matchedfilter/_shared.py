@@ -129,35 +129,25 @@ def containing(array, ctx):
     if not isinstance(array, np.ndarray) or not array.flags.c_contiguous or array.nbytes == 0:
         return None
     addr, item = array.ctypes.data, array.dtype.itemsize
-
-    def candidates():
-        # The allocations that held recent series first: a segment's rows are all in one or
-        # two, and scanning every live allocation per call cost ~5 ms a segment.
-        for st in list(_recent):
-            a = _allocations.get(st)
-            if a is not None:
-                yield st, a
-        yield from list(_allocations.items())
-    for start, allocation in candidates():
-        nbytes = allocation.buffer.nbytes
-        if (start <= addr and addr + array.nbytes <= start + nbytes
-                and (addr - start) % item == 0 and _same_device(allocation.buffer.ctx, ctx)):
-            whole = _whole.get(start)
-            if whole is None or whole.dtype != array.dtype:
-                storage = (ctypes.c_ubyte * (nbytes - nbytes % item)).from_address(start)
-                storage._allocation = allocation
-                whole = np.ndarray(((nbytes - nbytes % item) // item,), dtype=array.dtype,
-                                   buffer=storage)
-                _whole[start] = whole
-            if start in _recent:
-                _recent.remove(start)
-            _recent.insert(0, start)
-            del _recent[4:]
-            return whole, (addr - start) // item
-    return None
-
-
-_recent = []
+    # Allocations do not overlap, so the only one that can contain addr is the one starting
+    # last at or before it (a bisection over the sorted starts). Scanning every live
+    # allocation instead cost ~3.7 us per allocation per call: 1.6 s a pass of 432 leaf calls
+    # over host arrays, which are in none of them.
+    start, allocation = _containing(addr)
+    if allocation is None:
+        return None
+    nbytes = allocation.buffer.nbytes
+    if not (addr + array.nbytes <= start + nbytes and (addr - start) % item == 0
+            and _same_device(allocation.buffer.ctx, ctx)):
+        return None
+    whole = _whole.get(start)
+    if whole is None or whole.dtype != array.dtype:
+        storage = (ctypes.c_ubyte * (nbytes - nbytes % item)).from_address(start)
+        storage._allocation = allocation
+        whole = np.ndarray(((nbytes - nbytes % item) // item,), dtype=array.dtype,
+                           buffer=storage)
+        _whole[start] = whole
+    return whole, (addr - start) // item
 
 
 #: One whole-allocation view per allocation, so recordings keyed on it repeat.

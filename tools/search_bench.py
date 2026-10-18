@@ -28,7 +28,8 @@ from pathlib import Path
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "python"))
+# the repo's own python/ last, so a PYTHONPATH build (an A/B variant) wins
+sys.path.append(str(Path(__file__).resolve().parent.parent / "python"))
 
 
 def build(rec, device):
@@ -68,12 +69,37 @@ def build(rec, device):
     return search, inputs, windows, templates, seconds
 
 
+def save_peaks(files, a):
+    """One more pass per capture with a recording on_peaks; peaks keyed top/leaf/chunk/channel."""
+    out = {}
+    for fi, f in enumerate(files):
+        rec = pickle.load(open(f, "rb"))
+        search, inputs, windows, _, _ = build(rec, a.device)
+        names = {}
+
+        def on_peaks(ctx):
+            li = names.setdefault(id(ctx.leaf), len(names))
+            for c in ctx.channels:
+                p = ctx.peaks[c]
+                o = np.lexsort((p.sample_indices, p.template_indices))
+                key = "%d_%d_%d_%s" % (fi, li, ctx.chunk, c)
+                out[key + "_t"] = np.asarray(p.template_indices)[o]
+                out[key + "_s"] = np.asarray(p.sample_indices)[o]
+                out[key + "_z"] = np.asarray(p.snr)[o]
+        search.run(inputs, windows=windows, on_series=lambda ctx: None, on_peaks=on_peaks)
+    np.savez(a.peaks, **out)
+    print("saved %d peak arrays to %s" % (len(out) // 3, a.peaks))
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("capture")
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--repeats", type=int, default=2)
     ap.add_argument("--limit", type=int, default=0, help="first N tops only")
+    ap.add_argument("--peaks", default=None,
+                    help="also save every leaf's peaks from one extra (untimed) pass to this .npz, "
+                         "to compare devices or builds")
     a = ap.parse_args()
     files = sorted(glob.glob(os.path.join(a.capture, "*.pkl")))
     if a.limit:
@@ -81,6 +107,8 @@ def main():
     noop = lambda ctx: None
     tot = {"setup_s": 0.0, "steady_s": 0.0, "work": 0.0}
     stage = {}
+    kernels = {}
+    from matchedfilter import _gputime as gputime
     for f in files:
         rec = pickle.load(open(f, "rb"))
         search, inputs, windows, nt, secs = build(rec, a.device)
@@ -88,10 +116,20 @@ def main():
         search.run(inputs, windows=windows, on_series=noop, on_peaks=noop, on_chunk=noop)
         tot["setup_s"] += time.perf_counter() - t0
         base = dict(search.timings)
+        if gputime.enabled():
+            gputime.collect(clear=True)
+            gputime.busy(clear=True)
         t0 = time.perf_counter()
         for _ in range(a.repeats):
             search.run(inputs, windows=windows, on_series=noop, on_peaks=noop, on_chunk=noop)
         dt = (time.perf_counter() - t0) / a.repeats
+        if gputime.enabled():
+            dev_s = gputime.busy(clear=True)[0] / a.repeats
+            tot["device_s"] = tot.get("device_s", 0.0) + dev_s
+            for lab, (n, ms) in gputime.collect(clear=True).items():
+                k = kernels.setdefault(lab, [0, 0.0])
+                k[0] += n / a.repeats
+                k[1] += ms / 1e3 / a.repeats
         tot["steady_s"] += dt
         tot["work"] += nt * secs
         for k, v in search.timings.items():
@@ -99,12 +137,19 @@ def main():
         print("%s: %d fine templates, %.0f detector-s; first pass %.2f s, steady %.3f s/pass "
               "(%.2f M templates in real time)" % (os.path.basename(f), nt, secs,
                                                     tot["setup_s"], dt, nt * secs / dt / 1e6))
+    if a.peaks:
+        save_peaks(files, a)
     s = tot["steady_s"]
     print("device %s | %d tops | steady %.3f s/pass, %.2f M templates in real time | first passes %.1f s"
           % (a.device, len(files), s, tot["work"] / s / 1e6, tot["setup_s"]))
     for k in ("root", "inner", "leaf", "hooks", "setup"):
         if k in stage:
             print("  %-6s %8.3f s/pass  %5.1f%%" % (k, stage[k], 100 * stage[k] / s))
+    if "device_s" in tot:
+        print("  device busy (MF_GPU_TIMING) %.3f s/pass = %.1f%% of steady wall"
+              % (tot["device_s"], 100 * tot["device_s"] / s))
+        for lab, (n, sec) in sorted(kernels.items(), key=lambda kv: -kv[1][1])[:12]:
+            print("    %-28s %8.0f submissions/pass %8.3f s/pass" % (lab, n, sec))
     print("  other  %8.3f s/pass  %5.1f%%" % (s - sum(stage.get(k, 0) for k in ("root", "inner", "leaf", "hooks", "setup")),
                                             100 * (s - sum(stage.get(k, 0) for k in ("root", "inner", "leaf", "hooks", "setup"))) / s))
 
