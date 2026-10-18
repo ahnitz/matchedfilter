@@ -3,12 +3,11 @@ void forwardTransform(inout C r[RADIX], uint tid)
 #include "fft_transform.slang"
 }
 
-// A series sample. With MF_SERIES_LAYOUT the forwards also take a real series without the
+// A series sample. Every forward takes a sample layout, so a real series is read without the
 // host widening it: seriesLayout 0 reads complex samples; otherwise sample i is float
 // (seriesLayout >> 2) + (seriesLayout & 3) * i of the buffer read as floats, imaginary part
 // zero -- one lane of a packed complex row (stride 2, lane 0 or 1) or a real series
 // (stride 1). The layout is uniform across a dispatch, so the branch costs nothing.
-#ifdef MF_SERIES_LAYOUT
 float2 seriesSample(StructuredBuffer<float2> series, uint i, uint layout)
 {
     if (layout == 0)
@@ -19,10 +18,6 @@ float2 seriesSample(StructuredBuffer<float2> series, uint i, uint layout)
 }
 #define SERIES_LAYOUT , uniform uint seriesLayout
 #define SERIES_AT(i) seriesSample(series, (i), seriesLayout)
-#else
-#define SERIES_LAYOUT
-#define SERIES_AT(i) series[(i)]
-#endif
 
 // Appended to tierb.slang by build_forward.py: share its exact butterflies,
 // staging exchange, and output permutation. FFT(x)/N = conj(IFFT(conj(x)/N)).

@@ -60,7 +60,7 @@ def _settle_device_writes():
     """Wait for GPU writes left in flight (correlate_series(wait=False)) before a host
     read. Device consumers are ordered on the GPU, so only host readers wait."""
     import sys
-    for name in ('._mtlcompute', '._vkcompute'):
+    for name in ('._mtlcompute', '._vkcompute', '._cudacompute'):
         mod = sys.modules.get(__package__ + name)
         if mod is not None and hasattr(mod, 'settle_all'):
             mod.settle_all()

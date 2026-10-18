@@ -5,10 +5,7 @@ import subprocess
 import tempfile
 import build_spirv as build
 
-# The SPIR-V forwards Vulkan dispatches (full, bands, listed) also take a real series in place
-# (series_forward.slang, MF_SERIES_LAYOUT: one more uniform, seriesLayout). The Metal and CUDA
-# hosts, and forwardTier0 (dispatched on Metal only), do not pass it yet.
-VULKAN = ['-DMF_VULKAN=1', '-DMF_SERIES_LAYOUT=1']
+VULKAN = ['-DMF_VULKAN=1']
 
 
 def build_kernels(compiler, build_module=build):
@@ -82,7 +79,7 @@ def build_kernels(compiler, build_module=build):
                     out = build.ROOT / 'python/matchedfilter' / folder / name
                     subprocess.run([compiler, str(src), '-I', str(build.KERNEL.parent), '-target', target,
                                     '-entry', entry, '-stage', 'compute', '-O3',
-                                    *(['-DMF_VULKAN=1'] if target == 'spirv' else []), '-o', str(out)],
+                                    *(VULKAN if target == 'spirv' else []), '-o', str(out)],
                                    check=True)
         entries[str(n)]['tier0'] = f'forward_tier0_{n}.spv'
         print(n, flush=True)
