@@ -448,15 +448,18 @@ class HierarchicalSearch:
                 batch.bank.wait()
                 batch.in_flight = False
 
-    def _root_output(self, root, channel, n):
-        """Where root's output for a chunk goes. On a GPU search: one buffer per root and
-        channel in the leaf device's memory, rewritten every chunk, which the middle stage
+    def _root_output(self, root, channel, n, chunk):
+        """Where root's output for a chunk goes. On a GPU search: two buffers per root and
+        channel in the leaf device's memory, alternating by chunk, which the middle stage
         (and leaves directly below the root) read in place -- a hook reads it during its
-        chunk, as it does the inner series. Elsewhere a new host array."""
+        chunk, as it does the inner series. The next chunk's output is written while this
+        chunk's leaves run (run); the buffer it reuses was read by the chunk before, whose
+        leaves -- ordered after everything that read it -- have been collected. Elsewhere a
+        new host array."""
         bank = self.leaf_bank(root, next(self._leaves_below(root)))
         if getattr(bank, "device", None) is None or _parse_device(bank.device).kind != "gpu":
             return np.empty(n, dtype=np.float32)
-        key = (id(root), channel, n)
+        key = (id(root), channel, n, chunk % 2)
         out = self._root_outs.get(key)
         if out is None:
             out = self._root_outs[key] = bank.empty_shared((n,), np.float32)
@@ -494,6 +497,7 @@ class HierarchicalSearch:
             leaves = list(self._leaves_below(root))
             pads = {id(lf): max(self.min_pad, int(self.leaf_bank(root, lf).max_block_length))
                     for lf in leaves}
+            ahead = None                        # (chunk, channels, held, support) computed early
             for k in range(nchunks):
                 active = [c for c in channels if k < len(inputs[c].spectra)]
                 if not active:
@@ -513,22 +517,12 @@ class HierarchicalSearch:
                             need[(id(lf), c)] = wx
                 if not any(win.values()):
                     continue
-                held = {c: {} for c in active}
-                support = {c: {} for c in active}
-                self._settle()                  # the root outputs are about to be rewritten
-                t0 = time.perf_counter()
-                for c in active:
-                    spec = inputs[c].spectra[k]
-                    n = 2 * (len(spec) - 1)
-                    out = self._root_output(root, c, n)
-                    k0, k1 = root.band
-                    self._root_plan(n).real(np.ascontiguousarray(spec, dtype=np.complex64),
-                                            root.spectrum, k0, k1,
-                                            float(inputs[c].root_scale(root, k)), out)
-                    held[c][id(root)] = out
-                    support[c][id(root)] = [(0, n)]
-                self.timings["root"] += time.perf_counter() - t0
-                self._batches(root, len(out))
+                if ahead is not None and ahead[:2] == (k, active):
+                    held, support = ahead[2], ahead[3]
+                else:
+                    held, support = self._roots(root, inputs, k, active)
+                ahead = None
+                self._batches(root, len(held[active[0]][id(root)]))
                 envelopes = {}
                 if on_series is not None:
                     t0 = time.perf_counter()
@@ -548,7 +542,13 @@ class HierarchicalSearch:
                 step = _Step(root, k, active, tags, held, support, need, win, envelopes, pads,
                              live, on_peaks, [])
                 self._walk(root, step)
-                self._search_leaves(step)
+                submitted = self._submit_leaves(step)
+                # While the device searches this chunk's leaves, the next chunk's root outputs
+                # on the host (into the other of two buffers: this chunk's are still read).
+                nxt = [c for c in channels if k + 1 < len(inputs[c].spectra)]
+                if submitted is not None and submitted[3] and nxt:
+                    ahead = (k + 1, nxt) + self._roots(root, inputs, k + 1, nxt)
+                self._finish_leaves(step, submitted)
                 if on_chunk is not None:
                     on_chunk(ChunkContext(k, active, tags))
 
@@ -589,15 +589,39 @@ class HierarchicalSearch:
         for pos in members:
             self._walk(batch.children[pos], step)
 
-    def _search_leaves(self, step):
-        """The chunk's leaf searches, in every channel, then each leaf's on_peaks in walk order.
+    def _roots(self, root, inputs, k, active):
+        """Root's output for chunk k in every active channel: (held, support)."""
+        held = {c: {} for c in active}
+        support = {c: {} for c in active}
+        t0 = time.perf_counter()
+        for c in active:
+            spec = inputs[c].spectra[k]
+            n = 2 * (len(spec) - 1)
+            out = self._root_output(root, c, n, k)
+            k0, k1 = root.band
+            self._root_plan(n).real(np.ascontiguousarray(spec, dtype=np.complex64),
+                                    root.spectrum, k0, k1,
+                                    float(inputs[c].root_scale(root, k)), out)
+            held[c][id(root)] = out
+            support[c][id(root)] = [(0, n)]
+        self.timings["root"] += time.perf_counter() - t0
+        return held, support
 
-        On a GPU the searches are one filter_series_many batch: every call submitted before any
-        is collected, so the device is not idle while the host prepares the next leaf. On the
-        CPU each runs in turn, as filter_series. The results are the same either way."""
+    def _search_leaves(self, step):
+        """The chunk's leaf searches, in every channel, then each leaf's on_peaks in walk order."""
+        self._finish_leaves(step, self._submit_leaves(step))
+
+    def _submit_leaves(self, step):
+        """Start the chunk's leaf searches, in every channel: (leaves, jobs, where, deferred,
+        results), or None when no leaf is searched.
+
+        On a GPU the searches are one filter_series_many batch, submitted and left in flight
+        (deferred): every call submitted before any is collected, so the device is not idle
+        while the host prepares the next leaf -- or the next chunk's root. On the CPU each
+        runs in turn, as filter_series. The results are the same either way."""
         leaves = [lf for lf in step.pending if any(step.win[(id(lf), c)] for c in step.active)]
         if not leaves:
-            return
+            return None
         t0 = time.perf_counter()
         jobs, where = [], {}
         for lf in leaves:
@@ -609,10 +633,23 @@ class HierarchicalSearch:
                     # one window as a slice: filter_series memoises a slice's layout
                     where[(id(lf), c)] = len(jobs)
                     jobs.append((bank, series, dict(windows=slice(*w[0]) if len(w) == 1 else w)))
-        if any(getattr(b, "device", None) is not None for b, _, _ in jobs):
-            results = TimeDomainFilterBank.filter_series_many(jobs)
+        deferred = any(getattr(b, "device", None) is not None for b, _, _ in jobs)
+        if deferred:
+            results = TimeDomainFilterBank.filter_series_many(jobs, wait=False)
         else:
             results = [b.filter_series(ser, **kw) for b, ser, kw in jobs]
+        self.timings["leaf"] += time.perf_counter() - t0
+        return leaves, jobs, where, deferred, results
+
+    def _finish_leaves(self, step, submitted):
+        """Collect what _submit_leaves started, apply the envelopes, and run each leaf's
+        on_peaks in walk order."""
+        if submitted is None:
+            return
+        leaves, jobs, where, deferred, results = submitted
+        t0 = time.perf_counter()
+        if deferred:
+            results = [r.result() for r in results]
         found = []
         for lf in leaves:
             peaks, scales = {}, {}
