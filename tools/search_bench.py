@@ -8,8 +8,11 @@ and every windows() answer. The hooks are replaced by no-ops -- on_series return
 on_peaks and on_chunk do nothing -- so what is measured is the library's share of the search:
 root, middle, leaf search and their data movement, with the callbacks free.
 
-The first pass over a capture builds the banks, prices block sizes and runs the trials (setup);
-the next --repeats passes are timed (steady). Throughput is templates-in-real-time: fine
+The first --warmup passes over a capture (default 2) build the banks, price block sizes, run
+the trials and record the GPU's work (setup): a call shape's first run uses the full forward
+and its second the band forward its measured refine fraction chose -- a second recording, so
+a single setup pass left every recording of the first timed pass to be rebuilt. The next
+--repeats passes are timed (steady). Throughput is templates-in-real-time: fine
 templates x analysed seconds x detectors / steady seconds per pass.
 
     python tools/search_bench.py CAPTURE_DIR --device gpu:0
@@ -96,6 +99,7 @@ def main():
     ap.add_argument("capture")
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--repeats", type=int, default=2)
+    ap.add_argument("--warmup", type=int, default=2, help="untimed setup passes per capture")
     ap.add_argument("--limit", type=int, default=0, help="first N tops only")
     ap.add_argument("--peaks", default=None,
                     help="also save every leaf's peaks from one extra (untimed) pass to this .npz, "
@@ -113,7 +117,8 @@ def main():
         rec = pickle.load(open(f, "rb"))
         search, inputs, windows, nt, secs = build(rec, a.device)
         t0 = time.perf_counter()
-        search.run(inputs, windows=windows, on_series=noop, on_peaks=noop, on_chunk=noop)
+        for _ in range(max(1, a.warmup)):
+            search.run(inputs, windows=windows, on_series=noop, on_peaks=noop, on_chunk=noop)
         tot["setup_s"] += time.perf_counter() - t0
         base = dict(search.timings)
         if gputime.enabled():
@@ -134,13 +139,13 @@ def main():
         tot["work"] += nt * secs
         for k, v in search.timings.items():
             stage[k] = stage.get(k, 0.0) + (v - base.get(k, 0.0)) / a.repeats
-        print("%s: %d fine templates, %.0f detector-s; first pass %.2f s, steady %.3f s/pass "
+        print("%s: %d fine templates, %.0f detector-s; setup passes %.2f s, steady %.3f s/pass "
               "(%.2f M templates in real time)" % (os.path.basename(f), nt, secs,
                                                     tot["setup_s"], dt, nt * secs / dt / 1e6))
     if a.peaks:
         save_peaks(files, a)
     s = tot["steady_s"]
-    print("device %s | %d tops | steady %.3f s/pass, %.2f M templates in real time | first passes %.1f s"
+    print("device %s | %d tops | steady %.3f s/pass, %.2f M templates in real time | setup passes %.1f s"
           % (a.device, len(files), s, tot["work"] / s / 1e6, tot["setup_s"]))
     for k in ("root", "inner", "leaf", "hooks", "setup"):
         if k in stage:
