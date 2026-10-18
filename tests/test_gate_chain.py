@@ -484,7 +484,9 @@ def test_cascade_subset_semantics():
 
 
 def test_performance_tracking_and_summary():
-    """Verify lightweight performance self-tracking and performance_summary() output."""
+    """Verify lightweight performance self-tracking, docstring retention, and bounded timing history."""
+    assert mf.MatchedFilter.run.__doc__ is not None
+    assert "structured array" in mf.MatchedFilter.run.__doc__
     n = 2048
     f = mf.MatchedFilter(n, ndata=2, ntemplates=2)
     assert f.performance_stats["total_calls"] == 0
@@ -500,6 +502,8 @@ def test_performance_tracking_and_summary():
 
     summary = f.performance_summary()
     assert summary["total_calls"] == 2
+    assert summary["timed_calls"] == 2
+    assert summary["sampled_calls"] == 2
     assert summary["total_time_s"] > 0.0
     assert summary["min_batch_time_ms"] > 0.0
     assert summary["max_batch_time_ms"] >= summary["min_batch_time_ms"]
@@ -508,6 +512,11 @@ def test_performance_tracking_and_summary():
     assert "device" in summary
     assert "backend" in summary
     assert f.performance_info == summary
+
+    for _ in range(300):
+        f._record_batch_time(0.001)
+    assert len(f.performance_stats["batch_times_ms"]) == mf.MatchedFilter._MAX_BATCH_TIMINGS
+    assert f.performance_summary()["total_calls"] == 302
 
 
 
