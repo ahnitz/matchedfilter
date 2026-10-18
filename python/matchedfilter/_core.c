@@ -321,10 +321,14 @@ static PyObject *MF_correlate_series(MFObject *self,PyObject *args){
   Py_RETURN_NONE;
 }
 static PyObject *MF_correlate_series_continuous(MFObject *self,PyObject *args){
-  Py_buffer ser,starts,out;
+  Py_buffer ser,starts,out,bnd={0};
   Py_ssize_t lo,hi;
   int t0,nt;
-  if(!PyArg_ParseTuple(args,"y*y*nniiw*",&ser,&starts,&lo,&hi,&t0,&nt,&out)) return NULL;
+  PyObject *bobj=Py_None;
+  if(!PyArg_ParseTuple(args,"y*y*nniiw*|O",&ser,&starts,&lo,&hi,&t0,&nt,&out,&bobj)) return NULL;
+  if(bobj!=Py_None && PyObject_GetBuffer(bobj,&bnd,PyBUF_SIMPLE)){
+    PyBuffer_Release(&ser);PyBuffer_Release(&starts);PyBuffer_Release(&out);return NULL;
+  }
   size_t blocks=(size_t)starts.len/sizeof(size_t);
   int valid=ser.len%8==0 && starts.len%sizeof(size_t)==0
     && blocks>0 && blocks<=INT_MAX && lo>=0 && lo<hi && hi<=self->n
@@ -335,8 +339,11 @@ static PyObject *MF_correlate_series_continuous(MFObject *self,PyObject *args){
     const size_t *st=(const size_t*)starts.buf;
     for(size_t i=0;i<blocks;i++) if(st[i]>SIZE_MAX-(size_t)self->n){valid=0;break;}
   }
+  /* bounds: one [lo, hi) per block inside [lo, hi), checked again by the kernel */
+  if(valid && bnd.buf && (size_t)bnd.len!=2*blocks*sizeof(size_t)) valid=0;
   if(!valid){
     PyBuffer_Release(&ser);PyBuffer_Release(&starts);PyBuffer_Release(&out);
+    if(bnd.buf) PyBuffer_Release(&bnd);
     PyErr_SetString(PyExc_ValueError,"invalid continuous series output or block layout");
     return NULL;
   }
@@ -345,19 +352,24 @@ static PyObject *MF_correlate_series_continuous(MFObject *self,PyObject *args){
   r=ap_mf_correlate_series_continuous(self->p,(const float*)ser.buf,
                                       (size_t)ser.len/8,(const size_t*)starts.buf,
                                       (int)blocks,(size_t)lo,(size_t)hi,t0,nt,
-                                      (float*)out.buf);
+                                      (float*)out.buf,(const size_t*)bnd.buf);
   Py_END_ALLOW_THREADS
   PyBuffer_Release(&ser);PyBuffer_Release(&starts);PyBuffer_Release(&out);
+  if(bnd.buf) PyBuffer_Release(&bnd);
   if(r){PyErr_SetString(PyExc_RuntimeError,"continuous series correlation failed");return NULL;}
   Py_RETURN_NONE;
 }
 /* correlate_series_continuous_real(series float32, starts, lo, hi, t0, nt, out complex64):
    correlate_series_continuous of a real series, at half-size block transforms. */
 static PyObject *MF_correlate_series_continuous_real(MFObject *self,PyObject *args){
-  Py_buffer ser,starts,out;
+  Py_buffer ser,starts,out,bnd={0};
   Py_ssize_t lo,hi;
   int t0,nt;
-  if(!PyArg_ParseTuple(args,"y*y*nniiw*",&ser,&starts,&lo,&hi,&t0,&nt,&out)) return NULL;
+  PyObject *bobj=Py_None;
+  if(!PyArg_ParseTuple(args,"y*y*nniiw*|O",&ser,&starts,&lo,&hi,&t0,&nt,&out,&bobj)) return NULL;
+  if(bobj!=Py_None && PyObject_GetBuffer(bobj,&bnd,PyBUF_SIMPLE)){
+    PyBuffer_Release(&ser);PyBuffer_Release(&starts);PyBuffer_Release(&out);return NULL;
+  }
   size_t blocks=(size_t)starts.len/sizeof(size_t);
   const size_t nseries=(size_t)ser.len/4;
   int valid=ser.len%4==0 && starts.len%sizeof(size_t)==0
@@ -369,8 +381,11 @@ static PyObject *MF_correlate_series_continuous_real(MFObject *self,PyObject *ar
     const size_t *st=(const size_t*)starts.buf;
     for(size_t i=0;i<blocks;i++) if(st[i]>SIZE_MAX-(size_t)self->n){valid=0;break;}
   }
+  /* bounds: one [lo, hi) per block inside [lo, hi), checked again by the kernel */
+  if(valid && bnd.buf && (size_t)bnd.len!=2*blocks*sizeof(size_t)) valid=0;
   if(!valid){
     PyBuffer_Release(&ser);PyBuffer_Release(&starts);PyBuffer_Release(&out);
+    if(bnd.buf) PyBuffer_Release(&bnd);
     PyErr_SetString(PyExc_ValueError,"invalid real continuous series output or block layout");
     return NULL;
   }
@@ -378,9 +393,10 @@ static PyObject *MF_correlate_series_continuous_real(MFObject *self,PyObject *ar
   Py_BEGIN_ALLOW_THREADS
   r=ap_mf_correlate_series_continuous_real(self->p,(const float*)ser.buf,nseries,
                                            (const size_t*)starts.buf,(int)blocks,
-                                           (size_t)lo,(size_t)hi,t0,nt,(float*)out.buf);
+                                           (size_t)lo,(size_t)hi,t0,nt,(float*)out.buf,(const size_t*)bnd.buf);
   Py_END_ALLOW_THREADS
   PyBuffer_Release(&ser);PyBuffer_Release(&starts);PyBuffer_Release(&out);
+  if(bnd.buf) PyBuffer_Release(&bnd);
   if(r){PyErr_SetString(PyExc_RuntimeError,"real continuous series correlation failed");return NULL;}
   Py_RETURN_NONE;
 }

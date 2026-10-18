@@ -81,18 +81,21 @@ int ap_mf_correlate_series(ap_mf_plan *p,
                            int t0, int nt, float *out);
 /* Regular overlap-save layout: write only [lo,hi) from each block to the
    template-major continuous output, clipped to nseries. Other samples are
-   untouched. The caller supplies disjoint block starts. */
+   untouched. The caller supplies disjoint block starts. bounds, if not NULL,
+   gives each block its own [bounds[2b], bounds[2b+1]) inside [lo,hi) to write
+   (the block is computed the same; only its copy-out is narrower). */
 int ap_mf_correlate_series_continuous(ap_mf_plan *p,
                                       const float *series, size_t nseries,
                                       const size_t *starts, int nblocks,
                                       size_t lo, size_t hi, int t0, int nt,
-                                      float *out);
+                                      float *out, const size_t *bounds);
 /* The same of a REAL float32 series of nseries samples: half-size block transforms split
    into the full spectrum (a real-real-complex hierarchy's middle stage). out is complex. */
 int ap_mf_correlate_series_continuous_real(ap_mf_plan *p, const float *series,
                                            size_t nseries, const size_t *starts,
                                            int nblocks, size_t lo, size_t hi,
-                                           int t0, int nt, float *out);
+                                           int t0, int nt, float *out,
+                                           const size_t *bounds);
 
 /* Same, but for a scattered set of templates: tsel[0..nsel) are local indices
    into [0,nt).  Rows are still addressed by the local index, so the skipped
