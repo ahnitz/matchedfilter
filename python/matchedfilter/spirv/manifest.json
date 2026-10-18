@@ -1579,8 +1579,13 @@
     "forward_tier0.slang": "269bac3bd8075049ff4fae3546512ab6991f1e14ee0096abc596d288966b27b0",
     "pack_coarse.slang": "6599e775732a3d54ef2517a469aaa311a38028b41a92a87e166fce94ef3076c2",
     "twiddle.slang": "f88268b238d191f42291fac1dabbb201ffd667d9cbb8784dea888a219532d44d",
-    "refine_bounded.slang": "bf32ef397075682cc5d73464d656dca61d6f16c6174e223836940b86c039c83d"
+    "refine_bounded.slang": "bf32ef397075682cc5d73464d656dca61d6f16c6174e223836940b86c039c83d",
+    "compact_peaks.slang": "5c8bd90e54bbb422e6c60cfa3009074008a7d4039c9d44ce026e10c81df248d4"
   },
-  "build_id": "118ffa6b4b97b222351526b91c65ffc4262b678685cae4afd1572d35dfb3c05a",
-  "metal_build_id": "f31e878301e81fdd781c98f8df16d542cc92c27153f1b74b0f8a7f0c43284b96"
+  "build_id": "5a03ee77ba20ab84713ac20e21482dbd40881c472dbdf2ada0e0a9b24bbccdae",
+  "metal_build_id": "0bd14ca21c29d8462df4a5a59840cc2492a5074d679d064d528346d1b139b518",
+  "compact_peaks": {
+    "file": "compact_peaks.spv",
+    "metal": "compact_peaks.metal"
+  }
 }

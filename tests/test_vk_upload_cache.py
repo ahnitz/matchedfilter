@@ -98,7 +98,7 @@ def ctx(request, monkeypatch):
     return c
 
 
-@pytest.mark.parametrize("hier", [False, True])
+@pytest.mark.parametrize("hier", [True])   # flat: tests/test_gpu_flat_results.py
 @pytest.mark.parametrize("changed", ["data", "tmpl"])
 def test_revisited_window_receives_updated_inputs(ctx, hier, changed):
     n = 2048
@@ -142,7 +142,7 @@ def test_revisited_window_receives_updated_inputs(ctx, hier, changed):
     assert target.writes == writes  # unchanged input still avoids a transfer
 
 
-@pytest.mark.parametrize("hier", [False, True])
+@pytest.mark.parametrize("hier", [True])   # flat: tests/test_gpu_flat_results.py
 def test_split_dispatch_keeps_resident_inputs(ctx, hier):
     """More bins than fit in one kernel must not invalidate earlier pieces."""
     n = 8192  # three full splits plus a differently sized last piece
@@ -171,7 +171,7 @@ def test_split_dispatch_keeps_resident_inputs(ctx, hier):
         assert input_writes() == warm, "unchanged split call re-uploaded inputs"
 
 
-@pytest.mark.parametrize("hier", [False, True])
+@pytest.mark.parametrize("hier", [True])   # flat: tests/test_gpu_flat_results.py
 def test_changing_data_keeps_templates_resident(ctx, hier):
     n = 2048
     d, h = np.ones((1, n), np.complex64), np.ones((1, n), np.complex64)
@@ -197,7 +197,7 @@ def test_changing_data_keeps_templates_resident(ctx, hier):
         assert buffers[0].writes == 4
 
 
-@pytest.mark.parametrize("hier", [False, True])
+@pytest.mark.parametrize("hier", [True])   # flat: tests/test_gpu_flat_results.py
 @pytest.mark.parametrize("changed", ["data", "tmpl"])
 def test_revisited_window_matches_float64_on_gpu(hier, changed):
     device = vulkan_gpu()

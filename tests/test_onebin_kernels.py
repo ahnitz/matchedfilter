@@ -28,7 +28,7 @@ def test_compaction_has_one_canonical_artifact():
     files = {info['compact']['file'] for info in V._manifest()['modules'].values()}
     assert files == {'compact.spv'}
     assert (V._SPIRV / 'compact.spv').is_file()
-    assert not list(V._SPIRV.glob('compact_*.spv'))
+    assert not list(V._SPIRV.glob('compact_[0-9]*.spv'))     # compact_peaks is another kernel
 
 
 @pytest.mark.parametrize('n', [16384, 32768, 65536])

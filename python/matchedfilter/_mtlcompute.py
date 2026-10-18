@@ -558,9 +558,9 @@ def _device(index):
 
 
 class _MtlList:
-    """A command list (_gpuexec's driver interface): the dispatches, encoded into one compute
-    encoder per run (serial dispatch: each sees the previous one's writes), with each Arg
-    bound to that run's buffer."""
+    """A command list (_gpuexec's driver interface): the dispatches, encoded per run into
+    serial compute encoders (each sees the previous one's writes), with each Arg bound to
+    that run's buffer or words. A fill is a blit between them."""
 
     def __init__(self, label):
         self.label, self.ops = label, []
@@ -569,14 +569,21 @@ class _MtlList:
         flat = []
         for w in words:
             flat.extend(w if isinstance(w, tuple) else (w,))
-        self.ops.append((kernel, int(groups), list(buffers), offsets,
-                         tuple(int(w) & 0xFFFFFFFF for w in flat)))
+        self.ops.append((kernel, int(groups), list(buffers), offsets, flat))
 
     def barrier(self):
         pass
 
     def stamp(self, name):
         pass
+
+    def fill(self, buf, word):
+        if word not in (0, 0xFFFFFFFF):
+            raise ValueError("a fill is a byte pattern: 0 or 0xFFFFFFFF")
+        self.ops.append(("fill", buf, 0xFF if word else 0))
+
+    def readback(self, buf, nbytes):
+        pass                        # shared storage: the host reads it after the run
 
     def end(self):
         return self.label, self.ops
@@ -739,6 +746,8 @@ class Context(Executor, InputUploads):
         # assumption was in the build script's artifact naming.
         if entry == "packCoarse":
             return "pack_coarse"
+        if entry == "compactPeaks":
+            return "compact_peaks"
         if entry == "seriesForward":
             return "forward_%d" % n
         if entry == "forwardTier0":
@@ -861,7 +870,7 @@ class Context(Executor, InputUploads):
                      "tcForwardStage1": "fwd1", "tcForwardStage3": "fwd2"}
             if entry_name in roles:
                 want = (_manifest()['full_tierc'][str(n)][roles[entry_name]]['local_size'][0])
-            elif entry_name in ("compactPairs", "markBlocks"):
+            elif entry_name in ("compactPairs", "markBlocks", "compactPeaks"):
                 want = 256
             else:
                 want = n // _radix(n) * _ppg_of(entry_name)
@@ -1118,107 +1127,6 @@ class Context(Executor, InputUploads):
                 batch.dropped(self)
             self.o.call(pending[0], b"release", restype=None)
 
-    def peaks(self, n, data, tmpl, binsize=None, threshold=0.0, window=None,
-              upload_data=True, upload_tmpl=True, _groups=None,
-              slot=None, async_submit=False, nbins=None, sparse=False):
-        """See _peaks; sparse=True returns a _SparsePeaks (supports_sparse)."""
-        return _sparsified(self._peaks(n, data, tmpl, binsize, threshold, window,
-                                       upload_data, upload_tmpl, _groups, slot,
-                                       async_submit, nbins), sparse)
-
-    @_autoreleased
-    def _peaks(self, n, data, tmpl, binsize=None, threshold=0.0, window=None,
-               upload_data=True, upload_tmpl=True, _groups=None,
-               slot=None, async_submit=False, nbins=None):
-        """Peak index and complex value per (data, template, bin).
-
-        The same contract as the Vulkan path: bins counted from `start`, a
-        bin nothing clears reported as index -1 with a zero value.
-        """
-        nd, nt = data.shape[0], tmpl.shape[0]
-        lo, hi = (0, n) if window is None else (int(window[0]), int(window[1]))
-        lo, hi = max(0, min(lo, n)), max(0, min(hi, n))
-        if lo >= hi:
-            raise ValueError("empty window (%d, %d)" % (lo, hi))
-        binsize = n if binsize is None else int(binsize)
-        if nbins is None:
-            nbins = -(-(hi - lo) // binsize)
-        elif _groups is None or nbins < max(-(-(w1 - w0) // binsize) for w0, w1, _, _ in _groups):
-            raise ValueError("nbins must cover every grouped window's bins")
-        if nbins > _MAX_BINS:
-            # Bins are contiguous in the window, so cutting the window on a
-            # bin boundary cuts the bins exactly and the pieces concatenate.
-            span = _MAX_BINS * binsize
-            pi, pv = [], []
-            for a in range(lo, hi, span):
-                i2, v2 = self._peaks(n, data, tmpl, binsize=binsize,
-                                    threshold=threshold,
-                                    window=(a, min(a + span, hi)),
-                                    upload_data=upload_data,
-                                    upload_tmpl=upload_tmpl,
-                                    slot=slot, async_submit=False)
-                pi.append(i2)
-                pv.append(v2)
-                upload_data = upload_tmpl = False    # already on the device
-            idx_all = np.concatenate(pi, axis=2)
-            val_all = np.concatenate(pv, axis=2)
-            if async_submit:
-                return lambda: (idx_all, val_all)
-            return idx_all, val_all
-        shift = (binsize.bit_length() - 1) if binsize & (binsize - 1) == 0 else -1
-        t2 = float(threshold) ** 2 if threshold > 0 else 0.0
-
-        # In flight, a result owns its buffers: the slot is part of the key.
-        slot = slot if async_submit else None
-        key = (n, nd, nt, nbins)
-        key += (shared_key(data, self), shared_key(tmpl, self), slot)
-        upload_data, upload_tmpl, dsig, tsig = self._input_uploads(
-            key, data, tmpl, upload_data, upload_tmpl)
-        batch = self._batches.get(key)
-        if batch is None:
-            incoming = [b for a in (data, tmpl)
-                        if (b := shared_buffer(a, self)) is not None]
-            estimate = 8*n*(nd+nt) + 12*nd*nt*nbins
-            estimate -= sum(a.nbytes for a in (data, tmpl)
-                            if shared_buffer(a, self) is not None)
-            self._cache_room(estimate, incoming=incoming)
-            out = nd * nt * nbins
-            batch = (shared_buffer(data, self) or _Buffer(self, nd * n * 8),
-                     shared_buffer(tmpl, self) or _Buffer(self, nt * n * 8),
-                     _Buffer(self, out * 4), _Buffer(self, out * 8))
-            self._batches[key] = batch
-            upload_data = upload_tmpl = True
-        self._cache_touch("flat", key)
-        b_data, b_tmpl, b_idx, b_val = batch
-        self._claim(b_idx)                       # an earlier result still reading these outputs
-        if upload_data:
-            write_input(b_data, data)
-            self._uploaded["data"][key] = dsig
-        if upload_tmpl:
-            write_input(b_tmpl, tmpl)
-            self._uploaded["tmpl"][key] = tsig
-
-        pso = self.pipeline(n, "fusedTierB", nbins == 1)
-        cmd = self._command_buffer()
-        enc = self.o.call(cmd, b"computeCommandEncoder")
-        # Flat and mixed-window calls use the same kernels and encoding path.
-        # Metal buffer offsets let each dispatch address its rows and output
-        # directly, so no padded intermediates or host-side scatter are needed.
-        for w0, w1, first, last in (_groups or ((lo, hi, 0, nd),)):
-            params = (nt, w0, w1, binsize, shift & 0xFFFFFFFF, nbins,
-                      int(np.float32(t2).view(np.uint32)))
-            self._dispatch(enc, pso, params, batch, n // _radix(n),
-                           groups=(last - first) * nt,
-                           offsets=(first*n*8, 0, first*nt*nbins*4, first*nt*nbins*8))
-        self.o.call(enc, b"endEncoding", restype=None)
-
-        out = nd * nt * nbins
-
-        def finish():
-            return (b_idx.read(np.int32, out).reshape(nd, nt, nbins),
-                    b_val.read(np.complex64, out).reshape(nd, nt, nbins))
-        return self._commit(cmd, "flat", async_submit=async_submit, finish=finish, owner=b_idx)
-
     #: peaks_items takes async_submit (MatchedFilter._items_gpu(wait=False)).
     items_async = True
 
@@ -1261,16 +1169,6 @@ class Context(Executor, InputUploads):
         if async_submit:
             self._items_inflight = res
         return res
-
-    def peaks_grouped(self, n, data, tmpl, groups, binsize, threshold, *, upload_tmpl=True,
-                      slot=None, async_submit=False, nbins=None, sparse=False):
-        """Submit shared FFT rows with distinct flat windows in one command buffer."""
-        if shared_buffer(data, self) is None:
-            raise ValueError("grouped spectra must belong to this GPU context")
-        return self.peaks(n, data, tmpl, binsize=binsize, threshold=threshold,
-                          window=groups[0][:2], upload_data=False,
-                          upload_tmpl=upload_tmpl, _groups=groups,
-                          slot=slot, async_submit=async_submit, nbins=nbins, sparse=sparse)
 
     #: _continuous_gpu may leave its last batch in flight: zero_columns_done finishes it.
     defers_continuous = True
@@ -1368,6 +1266,10 @@ class Context(Executor, InputUploads):
     storage_offset_alignment = 16
 
     def _x_kernel(self, name, n):
+        if name in ("peaks", "peaks1"):
+            return self.pipeline(n, "fusedTierB", name == "peaks1"), n // _radix(n)
+        if name == "compact":
+            return self.pipeline(0, "compactPeaks"), 256
         if name in ("full", "series", "forward"):
             entry = {"full": 'fullCorrelation', "series": 'fullCorrelationSeries',
                      "forward": 'seriesForward'}[name]
@@ -1394,15 +1296,32 @@ class Context(Executor, InputUploads):
         return _MtlList(label)
 
     def _x_encode(self, cmd, ops, binds):
-        """Encode a recorded list into a command buffer: one serial compute encoder.
-        Returns the buffers it bound."""
-        enc = self.o.call(cmd, b'computeCommandEncoder')
-        used = []
-        for (pso, tg), groups, buffers, offsets, words in ops:
+        """Encode a recorded list into a command buffer: serial compute encoders, a blit for
+        a fill. Returns the buffers it bound."""
+        enc, used = None, []
+        for op in ops:
+            if op[0] == "fill":
+                if enc is not None:
+                    self.o.call(enc, b'endEncoding', restype=None)
+                    enc = None
+                blit = self.o.call(cmd, b'blitCommandEncoder')
+                self.o.call(blit, b'fillBuffer:range:value:', restype=None,
+                            args=(op[1].handle, _NSRange(getattr(op[1], "offset", 0),
+                                                         op[1].nbytes), op[2]),
+                            argtypes=(ctypes.c_void_p, _NSRange, ctypes.c_uint8))
+                self.o.call(blit, b'endEncoding', restype=None)
+                continue
+            if enc is None:
+                enc = self.o.call(cmd, b'computeCommandEncoder')
+            (pso, tg), groups, buffers, offsets, words = op
             bound = [binds[b.name] if isinstance(b, Arg) else b for b in buffers]
             used += bound
-            if words:
-                self._dispatch(enc, pso, words, bound, tg, groups=groups, offsets=offsets)
+            flat = []
+            for w in words:
+                flat.extend(binds[w.name] if isinstance(w, Arg) else (w,))
+            flat = tuple(int(w) & 0xFFFFFFFF for w in flat)
+            if flat:
+                self._dispatch(enc, pso, flat, bound, tg, groups=groups, offsets=offsets)
             else:                    # no uniforms: the buffers bind from index 0
                 self.o.call(enc, b"setComputePipelineState:", restype=None,
                             args=(pso,), argtypes=(ctypes.c_void_p,))
@@ -1410,7 +1329,8 @@ class Context(Executor, InputUploads):
                 self.o.call(enc, b"dispatchThreadgroups:threadsPerThreadgroup:", restype=None,
                             args=(_MTLSize(groups, 1, 1), _MTLSize(tg, 1, 1)),
                             argtypes=(_MTLSize, _MTLSize))
-        self.o.call(enc, b'endEncoding', restype=None)
+        if enc is not None:
+            self.o.call(enc, b'endEncoding', restype=None)
         return used
 
     @_autoreleased
@@ -1436,6 +1356,13 @@ class Context(Executor, InputUploads):
             dev.pending_contexts.append(self)
 
     @_autoreleased
+    def _x_submit(self, native, binds, slot):
+        label, ops = native
+        cmd = self._command_buffer()
+        self._x_encode(cmd, ops, binds)
+        return self._commit(cmd, label, async_submit=True)
+
+    @_autoreleased
     def _x_defer(self, native, binds, slot, source):
         """Held in the pending command buffer for the work that consumes it (several deferred
         forwards share it). A one-stage forward of a whole spectra workspace stays unencoded
@@ -1455,7 +1382,7 @@ class Context(Executor, InputUploads):
             # Its kernel reads block i's start at element i of starts and writes row i of
             # spectra from the binding's start: true of a whole-workspace forward.
             n, series, starts, _, count, nser, code, spectra, _ = source
-            (pso, _), _, _, _, _ = ops[0]
+            (pso, _), _, _, _, _ = ops[0]           # the forward dispatch
             buffers = [series, starts, spectra]
             self._lazy_fwd = list(getattr(self, "_lazy_fwd", None) or ()) + [
                 (n, pso, buffers, count, (nser, code), cmd)]
@@ -1481,8 +1408,8 @@ class Context(Executor, InputUploads):
             self._flush_forward()
 
     @staticmethod
-    def _x_read(buf, out):
-        buf.read_into(out)
+    def _x_read(buf, out, offset=0):
+        ctypes.memmove(out.ctypes.data, buf.ptr + offset, out.nbytes)
 
     # ---- hierarchical -----------------------------------------------------
     def _simd_width(self, band):

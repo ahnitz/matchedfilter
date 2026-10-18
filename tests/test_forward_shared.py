@@ -166,11 +166,11 @@ def test_shared_banks_bind_without_copy_and_survive_eviction(gpu, kind):
     assert np.shares_memory(plan._gdata, data)
     assert np.shares_memory(plan._gtmpl, templates)
     expected = plan.run().copy()
-    batches = plan._gpu._batches if kind == 'flat' else plan._gpu._hier
-    batch = next(iter(batches.values()))
     if kind == 'flat':
-        bound = batch[:2]
+        rec = next(r for k, r in plan._gpu._exec_records.items() if k[0] == 'flat')
+        bound = [rec.buffers['data'], rec.buffers['tmpl']]
     else:
+        batch = next(iter(plan._gpu._hier.values()))
         bufs = batch[0] if isinstance(batch, tuple) else batch
         bound = [bufs['data'], bufs['tmpl']]
     for array, buf in zip((data, templates), bound):

@@ -149,19 +149,23 @@ def test_series_keeps_unchanged_template_buffers_resident(plan, monkeypatch):
     plan.run_series(np.ones(2*n, np.complex64), **kw)
     ctx = plan._gpu
     protected = set()
-    for batch in ctx._batches.values():
-        protected.add(id(batch[1]))
+    in_place = False                     # templates in device memory: bound, never copied
+    for key, rec in getattr(ctx, "_exec_records", {}).items():
+        if key[0] == "flat" and "tmpl" in rec.owned:
+            protected.add(id(rec.buffers["tmpl"]))
+        elif key[0] == "flat":
+            in_place = True
     for batch in ctx._hier.values():
         bufs = batch[0] if plan.device.backend == "vulkan" else batch
         protected.update(id(bufs[name]) for name in ("tmpl", "ct0"))
-    assert protected
+    assert protected or in_place
     buffer_class = plan._backend()._Buffer
     write = buffer_class.write
     calls = []
-    def record(buffer, array):
+    def record(buffer, array, *args):
         if id(buffer) in protected:
             calls.append(array.nbytes)
-        return write(buffer, array)
+        return write(buffer, array, *args)
     monkeypatch.setattr(buffer_class, "write", record)
     plan.run_series(np.full(2*n, 2j, np.complex64), **kw)
     assert not calls, "a new data series re-uploaded the unchanged template bank"

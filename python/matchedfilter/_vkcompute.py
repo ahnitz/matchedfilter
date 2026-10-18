@@ -1121,9 +1121,9 @@ class _HierHandle:
 
 
 class _VkList:
-    """A command list being recorded (_gpuexec's driver interface). Descriptor sets fix the
-    buffers a command buffer binds, so the list is kept as its operations and recorded once
-    per binding of its Args (_VkNative)."""
+    """A command list being recorded (_gpuexec's driver interface). Descriptor sets and push
+    constants are fixed in a command buffer, so the list is kept as its operations and
+    recorded once per binding of its Args (_VkNative)."""
 
     def __init__(self, ctx, label):
         self.ctx, self.label, self.ops = ctx, label, []
@@ -1140,34 +1140,55 @@ class _VkList:
     def stamp(self, name):
         self.ops.append(name)
 
+    def fill(self, buf, word):
+        self.ops.append(("fill", buf, int(word)))
+
+    def readback(self, buf, nbytes):
+        pass                        # host-visible memory: the host reads it after the run
+
     def end(self):
         return _VkNative(self.ctx, self.label, self.ops)
 
 
 class _VkNative:
     """A recorded list: a command buffer per binding of its Args (just one without Args),
-    the most recently used _BINDINGS kept. A command buffer holds the views it binds, so
-    no allocation can be freed and its handle reused under it."""
+    the most recently used _BINDINGS kept, each holding the views it binds so no allocation
+    can be freed and its handle reused under it. Past _BINDINGS, a run that is waited for
+    records a one-off command buffer instead (a stream of new search windows), freed when
+    it has finished: evicting a cached one would idle every queue."""
     _BINDINGS = 8
 
     def __init__(self, ctx, label, ops):
         self.ctx, self.label, self.ops = ctx, label, ops
-        self.args = sorted({b.name for op in ops if isinstance(op, tuple) for b in op[2]
-                            if isinstance(b, Arg)})
+        names = set()
+        for op in ops:
+            if isinstance(op, tuple) and len(op) == 5:
+                names.update(b.name for b in op[2] if isinstance(b, Arg))
+                names.update(w.name for w in op[4] if isinstance(w, Arg))
+        self.args = sorted(names)
         # A list with phase stamps is captured, so fused batches can interleave it.
         self.captured = any(isinstance(op, str) for op in ops)
-        self.cmds = {}                       # binding key -> (cmd, pools, held views)
+        self.cmds = {}                       # binding key -> (cmd, pools, held values)
 
-    def command(self, binds):
-        views = tuple(binds[name] for name in self.args)
-        key = tuple((id(v.owner), v.offset) for v in views)
+    @staticmethod
+    def _key(value):
+        return (id(value.owner), value.offset) if hasattr(value, "owner") else value
+
+    def command(self, binds, transient=False):
+        """(command buffer, release): release() frees a one-off one once its run finished
+        (None for a cached one)."""
+        values = tuple(binds[name] for name in self.args)
+        key = tuple(self._key(v) for v in values)
         entry = self.cmds.pop(key, None)
         if entry is None:
+            if transient and len(self.cmds) >= self._BINDINGS:
+                cmd, pools = self.record(dict(zip(self.args, values)))
+                return cmd, lambda: self.free(cmd, pools)
             if len(self.cmds) >= self._BINDINGS:
                 self.release_one(next(iter(self.cmds)))
-            entry = self.record(dict(zip(self.args, views))) + (views,)
+            entry = self.record(dict(zip(self.args, values))) + (values,)
         self.cmds[key] = entry               # most recently used last
-        return entry[0]
+        return entry[0], None
 
     def record(self, binds):
         ctx = self.ctx
@@ -1183,7 +1204,8 @@ class _VkNative:
         finally:
             if self.captured:
                 ctx._capture_end(cmd)
-        return cmd, list(getattr(ctx, "_pools", [])[pool_start:])
+        pools = list(getattr(ctx, "_pools", [])[pool_start:])
+        return cmd, pools
 
     def _emit(self, rec, binds):
         ctx = self.ctx
@@ -1194,13 +1216,28 @@ class _VkNative:
             if isinstance(op, str):
                 rec.stamp(op)
                 continue
+            if op[0] == "fill":
+                ctx.vk.vkCmdFillBuffer(rec.cmd, op[1].handle, 0, _WHOLE_SIZE, op[2])
+                continue
             kernel, groups, buffers, offsets, words = op
             bound = [binds[b.name] if isinstance(b, Arg) else b for b in buffers]
             offs = [getattr(b, "offset", 0) + (offsets[i] if offsets else 0)
                     for i, b in enumerate(bound)]
+            flat = []
+            for w in words:
+                flat.extend(binds[w.name] if isinstance(w, Arg) else (w,))
             ds = ctx._descriptor_set(kernel[2], bound, offs if any(offs) else None)
-            rec.bind(kernel, ds, words)
+            rec.bind(kernel, ds, [int(w) & 0xFFFFFFFF for w in flat])
             rec.dispatch(groups)
+
+    def free(self, cmd, pools):
+        ctx = self.ctx
+        ctx.vk.vkFreeCommandBuffers.argtypes = [_vp, _vp, _u32, ctypes.POINTER(_vp)]
+        ctx.vk.vkFreeCommandBuffers(ctx.device, ctx.command_pool, 1, (_vp * 1)(cmd))
+        dead = {pool.value for pool in pools}
+        for pool in pools:
+            ctx.vk.vkDestroyDescriptorPool(ctx.device, pool, None)
+        ctx._pools = [pool for pool in getattr(ctx, "_pools", []) if pool.value not in dead]
 
     def release_one(self, key):
         cmd, pools, _ = self.cmds.pop(key)
@@ -1218,12 +1255,7 @@ class _VkNative:
             del src[k]
         getattr(ctx, "_phases", {}).pop(value, None)
         ctx._wait_queues()
-        ctx.vk.vkFreeCommandBuffers.argtypes = [_vp, _vp, _u32, ctypes.POINTER(_vp)]
-        ctx.vk.vkFreeCommandBuffers(ctx.device, ctx.command_pool, 1, (_vp * 1)(cmd))
-        dead = {pool.value for pool in pools}
-        for pool in pools:
-            ctx.vk.vkDestroyDescriptorPool(ctx.device, pool, None)
-        ctx._pools = [pool for pool in getattr(ctx, "_pools", []) if pool.value not in dead]
+        self.free(cmd, pools)
 
     def release(self):
         for key in list(self.cmds):
@@ -2622,186 +2654,6 @@ class Context(Executor, InputUploads):
             else:
                 _check(self.vk.vkQueueWaitIdle(queue), "vkQueueWaitIdle")
 
-    def _make_batch(self, key, n, nd, nt, nbins, binsize, shift, lo, hi, t2, data=None, tmpl=None):
-        """Buffers, descriptor set and a recorded command buffer for one shape."""
-        filename = self._peak_file(n, nbins)
-        pipe, layout, set_layout = self._build_pipeline(
-            ("peaks", filename), filename, _NBIND, _PUSH_BYTES)
-        out = nd * nt * nbins
-        bufs = self._storage.get(key)
-        if bufs is None:
-            bufs = (shared_buffer(data, self) or _Buffer(self, nd * n * 8),
-                    shared_buffer(tmpl, self) or _Buffer(self, nt * n * 8),
-                    _Buffer(self, out * 4, readback=True),
-                    _Buffer(self, out * 8, readback=True))
-            self._storage[key] = bufs
-        b_data, b_tmpl, b_idx, b_val = bufs
-        dset = self._descriptor_set(set_layout, bufs)
-
-        # NOT one-time-submit: this recording is replayed on every call.
-        rec = _Recording(self, "peaks")
-        rec.bind((pipe, layout), dset, (nt, lo, hi, binsize, shift, nbins,
-                                        int(np.float32(t2).view(np.uint32))))
-        rec.dispatch(nd * nt)
-        return (b_data, b_tmpl, b_idx, b_val, rec.end())
-
-    def _transient_peaks(self, storage_key, n, nd, nt, nbins, binsize, shift, lo, hi, t2):
-        """(command buffer, descriptor pool) for one flat-peaks call on cached buffers."""
-        filename = self._peak_file(n, nbins)
-        pipe, layout, set_layout = self._build_pipeline(
-            ("peaks", filename), filename, _NBIND, _PUSH_BYTES)
-        pools = self.__dict__.setdefault("_pools", [])
-        dset = self._descriptor_set(set_layout, self._storage[storage_key])
-        pool = pools.pop()                       # owned by this call, not the cache
-        rec = _Recording(self, "transient peaks", flags=1)    # ONE_TIME_SUBMIT
-        rec.bind((pipe, layout), dset, (nt, lo, hi, binsize, shift, nbins,
-                                        int(np.float32(t2).view(np.uint32))))
-        rec.dispatch(nd * nt)
-        return rec.end(), pool
-
-    def _release_transient(self, transient):
-        cmd, pool = transient
-        vk = self.vk
-        vk.vkFreeCommandBuffers.argtypes = [_vp, _vp, _u32, ctypes.POINTER(_vp)]
-        vk.vkFreeCommandBuffers(self.device, self.command_pool, 1, (_vp * 1)(cmd))
-        vk.vkDestroyDescriptorPool(self.device, pool, None)
-
-    def peaks(self, n, data, tmpl, binsize=None, threshold=0.0, window=None,
-              upload_data=True, upload_tmpl=True, slot=None, async_submit=False, sparse=False):
-        return _sparsified(self._peaks(n, data, tmpl, binsize, threshold, window, upload_data,
-                                       upload_tmpl, slot, async_submit), sparse)
-
-    def _peaks(self, n, data, tmpl, binsize=None, threshold=0.0, window=None,
-               upload_data=True, upload_tmpl=True, slot=None, async_submit=False):
-        """Peak index and complex value per (data, template, bin).
-
-        Mirrors MatchedFilter.run: bins are ``ceil((end-start)/binsize)``
-        counted from ``start``, and a bin whose maximum does not exceed
-        ``threshold`` comes back with index -1 and a zero value.  No
-        magnitude is produced anywhere -- it is ``abs(value)``.
-        """
-        nd, nt = data.shape[0], tmpl.shape[0]
-        lo, hi = (0, n) if window is None else (int(window[0]), int(window[1]))
-        lo = max(0, min(lo, n))
-        hi = max(0, min(hi, n))
-        if lo >= hi:
-            raise ValueError("empty window (%d, %d)" % (lo, hi))
-        binsize = n if binsize is None else int(binsize)
-        if binsize < 1:
-            raise ValueError("binsize must be >= 1")
-        nbins = -(-(hi - lo) // binsize)
-        if nbins > _MAX_BINS:
-            # The per-bin table lives in shared memory and holds _MAX_BINS
-            # entries. Bins are contiguous in the window, so splitting the
-            # WINDOW on a bin boundary splits the bins exactly -- each piece
-            # is an ordinary call and the results concatenate. No kernel
-            # change, and no limit left to explain to a caller.
-            span = _MAX_BINS * binsize
-            parts_i, parts_v = [], []
-            for start in range(lo, hi, span):
-                stop = min(start + span, hi)
-                pi, pv = self.peaks(n, data, tmpl, binsize=binsize,
-                                    threshold=threshold, window=(start, stop),
-                                    upload_data=upload_data,
-                                    upload_tmpl=upload_tmpl,
-                                    slot=slot, async_submit=False)
-                parts_i.append(pi)
-                parts_v.append(pv)
-                upload_data = upload_tmpl = False
-            return (np.concatenate(parts_i, axis=2),
-                    np.concatenate(parts_v, axis=2))
-        # Shift when the binsize is a power of two, divide when it is not --
-        # the same split the CPU makes, and why no restriction is needed.
-        shift = (binsize.bit_length() - 1) if binsize & (binsize - 1) == 0 else -1
-        t2 = float(threshold) ** 2 if threshold > 0 else 0.0
-
-        # Everything below the data itself is REUSED across calls. Rebuilding
-        # it cost 0.5 ms of the 0.65 ms a 1024-pair call took: buffers,
-        # descriptor pool and set, and the recorded command buffer. With them
-        # cached a call is a host copy, a submit and a read -- 0.14 ms, of
-        # which the dispatch is 0.07.
-        #
-        # The key carries the push constants because they are RECORDED into
-        # the command buffer. A call that changes the threshold or the window
-        # gets its own recording rather than silently running the previous
-        # one, which would be wrong rather than slow.
-        key = (n, nd, nt, nbins, binsize, shift, lo, hi,
-               int(np.float32(t2).view(np.uint32)))
-        key += (shared_key(data, self), shared_key(tmpl, self), slot)
-        storage_key = ("flat", n, nd, nt, nbins, *key[-3:])
-        upload_data, upload_tmpl, dsig, tsig = self._input_uploads(
-            storage_key, data, tmpl, upload_data, upload_tmpl)
-        batch = self._batches.get(key)
-        transient = None
-        windows = self.__dict__.setdefault("_flat_windows", {})
-        if batch is None and storage_key in self._storage and windows.get(storage_key, 0) >= 8:
-            # A stream of new windows (follow-ups): every one would be a cached recording,
-            # and once the cache filled each would evict another -- descriptor pools freed,
-            # every queue idled. Past 8 windows of a shape, record a one-off command
-            # buffer on the cached buffers instead (released after the call); the first
-            # windows of a shape stay cached, for callers that repeat them.
-            transient = self._transient_peaks(storage_key, n, nd, nt, nbins, binsize, shift,
-                                              lo, hi, t2)
-            batch = (*self._storage[storage_key], transient[0])
-        elif batch is None:
-            incoming = [b for b in (shared_buffer(data, self), shared_buffer(tmpl, self)) if b is not None]
-            estimate = (8*n*(nd+nt) + 12*nd*nt*nbins
-                        - (nd*n*8 if shared_buffer(data, self) else 0)
-                        - (nt*n*8 if shared_buffer(tmpl, self) else 0))
-            if storage_key in self._storage:
-                estimate = 0
-            self._cache_room(estimate, incoming=incoming, keep_storage=storage_key)
-            fresh = storage_key not in self._storage
-            pool_start = len(getattr(self, '_pools', []))
-            batch = self._make_batch(storage_key, n, nd, nt, nbins,
-                                     binsize, shift, lo, hi, t2, data, tmpl)
-            self._batches[key] = batch
-            self._register_record('flat', key, storage_key, pool_start)
-            windows[storage_key] = windows.get(storage_key, 0) + 1
-            if fresh:
-                upload_data = upload_tmpl = True
-        if transient is None:
-            self._cache_touch('flat', key)
-        b_data, b_tmpl, b_idx, b_val, cmd = batch
-        self._claim(b_idx)                       # an earlier result still reading these outputs
-
-        if upload_data:
-            write_input(b_data, data)
-            self._uploaded["data"][storage_key] = dsig
-        if upload_tmpl:
-            write_input(b_tmpl, tmpl)
-            self._uploaded["tmpl"][storage_key] = tsig
-
-        fence = self._get_fence(slot) if (async_submit and slot is not None) else None
-        if async_submit and slot is not None:
-            self._submit(cmd, fence=fence, wait=False, slot=slot)
-        else:
-            self._submit(cmd)
-
-        out = nd * nt * nbins
-        if async_submit:
-            def readback():
-                if fence is not None:
-                    self._wait_fence(fence)
-                idx = b_idx.read(np.int32, out).reshape(nd, nt, nbins)
-                val = b_val.read(np.complex64, out).reshape(nd, nt, nbins)
-                if transient is not None:
-                    self._release_transient(transient)
-                return idx, val
-            return self._track(readback, owner=b_idx)
-        if transient is not None:
-            self._release_transient(transient)
-
-        # int32 as the kernel wrote it. The caller's PEAK_DTYPE index is
-        # int64, and assigning int32 into that field widens it during the
-        # strided write that has to happen anyway -- so converting here
-        # first is a whole extra pass over the output and a whole extra
-        # allocation, for nothing. Measured at 65536 pairs: the host side of
-        # a call was 0.168 ms, five passes over 0.79 MB.
-        idx = b_idx.read(np.int32, out).reshape(nd, nt, nbins)
-        val = b_val.read(np.complex64, out).reshape(nd, nt, nbins)
-        return idx, val
-
     def peaks_items(self, n, data, tmpl, items, binsize, threshold, *, async_submit=False):
         """One submission over items (lo, hi, a, b, t): rows a:b of data against template row t,
         searched over [lo, hi) in bins of binsize. Returns per item (idx, val) shaped
@@ -2922,102 +2774,13 @@ class Context(Executor, InputUploads):
         return split_items(items, offs, nbs, b_idx.read(np.int32, size),
                            b_val.read(np.complex64, size))
 
-    def peaks_grouped(self, n, data, tmpl, groups, binsize, threshold, *, upload_tmpl=True,
-                      slot=None, async_submit=False, sparse=False):
-        return _sparsified(self._peaks_grouped(n, data, tmpl, groups, binsize, threshold,
-                                               upload_tmpl=upload_tmpl, slot=slot,
-                                               async_submit=async_submit), sparse)
-
-    def _peaks_grouped(self, n, data, tmpl, groups, binsize, threshold, *, upload_tmpl=True,
-                       slot=None, async_submit=False):
-        """Run distinct flat search windows in one synchronous submission.
-
-        Data is a shared forward-FFT batch. Descriptor offsets select each
-        group's rows; padded output offsets satisfy Vulkan's storage-buffer
-        alignment without changing the existing correlation kernels.
-        """
-        nd, nt = data.shape[0], tmpl.shape[0]
-        nb = (groups[0][1] - groups[0][0] - 1) // binsize + 1
-        if nb > _MAX_BINS:
-            raise ValueError("grouped dispatch exceeds the kernel bin limit")
-        groups = tuple(groups)
-        shift = binsize.bit_length() - 1 if binsize & (binsize - 1) == 0 else -1
-        t2 = np.float32(float(threshold) ** 2 if threshold > 0 else 0).view(np.uint32)
-        key = ("grouped", n, nd, nt, binsize, int(t2), groups,
-               shared_key(data, self), shared_key(tmpl, self), slot)
-        if key[-3] is None:
-            raise ValueError("grouped spectra must belong to this GPU context")
-        # Each group's results start at the device's storage-buffer offset alignment.
-        offsets, size, words = [], 0, self.storage_offset_alignment // 4
-        for _, _, a, b in groups:
-            offsets.append(size)
-            size += -(-((b - a) * nt * nb) // words) * words
-        _, upload_tmpl, _, tsig = self._input_uploads(
-            key, data, tmpl, False, upload_tmpl)
-        batch = self._batches.get(key)
-        if batch is None:
-            incoming = [shared_buffer(data, self)]
-            if shared_buffer(tmpl, self) is not None:
-                incoming.append(shared_buffer(tmpl, self))
-            self._cache_room(size * 12 + (0 if len(incoming) == 2 else tmpl.nbytes),
-                             incoming=incoming, keep_storage=key)
-            pool_start = len(getattr(self, '_pools', []))
-            bufs = (shared_buffer(data, self),
-                    shared_buffer(tmpl, self) or _Buffer(self, tmpl.nbytes),
-                    _Buffer(self, size * 4, readback=True),
-                    _Buffer(self, size * 8, readback=True))
-            self._storage[key] = bufs
-            filename = self._peak_file(n, nb)
-            pipe, layout, sl = self._build_pipeline(
-                ("peaks", filename), filename, _NBIND, _PUSH_BYTES)
-            rec = _Recording(self, "grouped peaks")
-            for (lo, hi, a, b), offset in zip(groups, offsets):
-                ds = self._descriptor_set(sl, bufs, (a*n*8, 0, offset*4, offset*8))
-                rec.bind((pipe, layout), ds, (nt, lo, hi, binsize, shift, nb, int(t2)))
-                rec.dispatch((b - a) * nt)
-            for out in bufs[2:4]:                # the host reads the peaks (0x4000, 0x2000)
-                rec.barrier(dst_stage=0x4000, dst_access=0x2000, buffer=out)
-            batch = (*bufs, rec.end())
-            self._batches[key] = batch
-            self._register_record('flat', key, key, pool_start)
-            upload_tmpl = True
-        self._cache_touch('flat', key)
-        _, b_tmpl, b_idx, b_val, cmd = batch
-        self._claim(b_idx)                       # an earlier result still reading these outputs
-        if upload_tmpl:
-            write_input(b_tmpl, tmpl)
-            self._uploaded["tmpl"][key] = tsig
-        fence = self._get_fence(slot) if (async_submit and slot is not None) else None
-        if async_submit and slot is not None:
-            self._submit(cmd, fence=fence, wait=False, slot=slot)
-        else:
-            self._submit(cmd)
-        if async_submit:
-            def readback():
-                if fence is not None:
-                    self._wait_fence(fence)
-                indices = b_idx.read(np.int32, size)
-                values = b_val.read(np.complex64, size)
-                idx = np.empty((nd, nt, nb), np.int32)
-                val = np.empty((nd, nt, nb), np.complex64)
-                for (_, _, a, b), offset in zip(groups, offsets):
-                    count = (b-a)*nt*nb
-                    idx[a:b] = indices[offset:offset+count].reshape(b-a, nt, nb)
-                    val[a:b] = values[offset:offset+count].reshape(b-a, nt, nb)
-                return idx, val
-            return self._track(readback, owner=b_idx)
-        indices = b_idx.read(np.int32, size)
-        values = b_val.read(np.complex64, size)
-        idx = np.empty((nd, nt, nb), np.int32)
-        val = np.empty((nd, nt, nb), np.complex64)
-        for (_, _, a, b), offset in zip(groups, offsets):
-            count = (b-a)*nt*nb
-            idx[a:b] = indices[offset:offset+count].reshape(b-a, nt, nb)
-            val[a:b] = values[offset:offset+count].reshape(b-a, nt, nb)
-        return idx, val
-
     # ---- driver primitives (_gpuexec) -----------------------------------------------------
     def _x_kernel(self, name, n):
+        if name in ("peaks", "peaks1"):
+            filename = self._peak_file(n, 1 if name == "peaks1" else 2)
+            return self._build_pipeline(("peaks", filename), filename, _NBIND, _PUSH_BYTES)
+        if name == "compact":
+            return self._build_pipeline(("compact",), _manifest()["compact_peaks"]["file"], 4, 8)
         if name == "forward":
             return self._build_pipeline(("forward", n), "forward_%d.spv" % n, 3, 8)
         if name in ("full", "series"):
@@ -3060,14 +2823,32 @@ class Context(Executor, InputUploads):
         return _VkList(self, label)
 
     def _x_run(self, native, wait, binds=None, slot=None):
-        cmd = native.command(binds or {})
+        cmd, release = native.command(binds or {}, transient=wait)
         if wait:
             self._submit(cmd, slot=slot)
+            if release is not None:
+                release()
         else:
             self._submit_pending(cmd)
 
+    def _x_submit(self, native, binds, slot):
+        cmd, release = native.command(binds, transient=True)
+        if slot is None:                    # per-slot fences: an unslotted run is waited now
+            self._submit(cmd)
+            if release is not None:
+                release()
+            return lambda: None
+        fence = self._get_fence(slot)
+        self._submit(cmd, fence=fence, wait=False, slot=slot)
+
+        def wait():
+            self._wait_fence(fence)
+            if release is not None:
+                release()
+        return wait
+
     def _x_defer(self, native, binds, slot, source):
-        cmd = native.command(binds)
+        cmd, _ = native.command(binds)
         if not isinstance(getattr(self, "_pending_forward", None), dict):
             self._pending_forward = {}
         self._pending_forward[slot] = cmd
@@ -3096,8 +2877,9 @@ class Context(Executor, InputUploads):
         native.release()
 
     @staticmethod
-    def _x_read(buf, out):
-        buf.read_into(out)
+    def _x_read(buf, out, offset=0):
+        ptr = buf.ptr.value if hasattr(buf.ptr, "value") else buf.ptr
+        ctypes.memmove(out.ctypes.data, ptr + offset, out.nbytes)
 
     def zero_columns(self, dest, a, b):
         """Zero dest[:, a:b] of a device-shared 2-D array (or rows of one) on the device.
