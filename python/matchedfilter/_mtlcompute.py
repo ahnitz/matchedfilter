@@ -575,6 +575,9 @@ class _MtlList:
     def barrier(self):
         pass
 
+    def stamp(self, name):
+        pass
+
     def end(self):
         return self.label, self.ops
 
@@ -609,7 +612,6 @@ class Context(Executor, InputUploads):
         self.device = self.queue = None
         self._pipelines = {}
         self._batches = {}
-        self._forwards = {}
         self._hier = {}
         self._inflight = {}
         #: Host memory a deferred command reads in place (host_view owners).
@@ -1070,20 +1072,6 @@ class Context(Executor, InputUploads):
         except MetalError:
             return None
 
-    def _forward_fused(self, n, series, starts, spectra, *, defer=False, slot=None):
-        """Dispatch fused forward FFT kernel path."""
-        return self.forward(n, series, starts, spectra, defer=defer, fused=True)
-
-    def _defer_or_submit(self, cmd, buffers, defer, label):
-        """Hold a forward's command for the dispatch that consumes it, or run it."""
-        if defer:
-            # Nothing reads an earlier deferred forward any more: replacing it
-            # without a commit would leak it, so run it first.
-            self._flush_forward()
-            self._pending_metal = (cmd, buffers)
-            return None
-        return self._commit(cmd, label)
-
     def _materialize_forward(self, skip=None):
         """Encode the deferred forwards still held lazily (forward()), except `skip`."""
         lazy = self.__dict__.pop("_lazy_fwd", None)
@@ -1118,112 +1106,6 @@ class Context(Executor, InputUploads):
             self._pending_metal = None
             self._cmd_prefix = ""
             self._commit(pending[0], "forward")
-
-    @_autoreleased
-    def forward(self, n, series, starts, spectra, *, defer=False, fused=False, slot=None,
-                rows=None, real=None):
-        """Gather and forward-transform blocks of `series` into `spectra`.
-
-        rows=(r0, count): only rows r0..r0+count of starts/spectra -- several series
-        allocations then fill one spectra workspace (forward_rows). A deferred forward
-        joins one still pending: the consumer's command buffer runs them all first.
-        real=(lane, stride, length) (real_series): series is complex64 storage holding a
-        real series of `length` samples, sample i at float lane + stride * i."""
-        if n > 65536:
-            if rows is not None or real is not None:
-                raise UnsupportedSize("row ranges and real series need the one-stage forward")
-            return self._forward_tierc(n, series, starts, spectra, defer=defer, fused=fused)
-        layout = ((int(real[2]), (int(real[0]) << 2) | int(real[1])) if real is not None
-                  else (int(series.size), 0))
-        pso = self.pipeline(n, "seriesForward")
-        buffers = [shared_buffer(a, self) for a in (series, starts, spectra)]
-        if any(b is None for b in buffers):
-            raise ValueError("forward buffers must belong to this GPU context")
-        r0, count = rows if rows is not None else (0, spectra.shape[0])
-        pending = self._pending_metal if defer else None
-        if pending is not None:
-            cmd = pending[0]
-        else:
-            cmd = self._new_cmd()
-            self.o.call(cmd, b"retain")
-        if defer and rows is None and _fused_forward_enabled():
-            # Encoded when its consumer is known (_materialize_forward): a hierarchical
-            # call reading these spectra takes it as forwardTier0 instead (hier_peaks).
-            if pending is None:
-                self._flush_forward()          # an earlier deferred forward nothing reads
-            self._lazy_fwd = list(getattr(self, "_lazy_fwd", None) or ()) + [
-                (n, pso, buffers, count, layout, cmd)]
-            self._pending_metal = (cmd, (tuple(pending[1]) if pending is not None else ())
-                                   + tuple(buffers))
-            return None
-        enc = self.o.call(cmd, b"computeCommandEncoder")
-        self._dispatch(enc, pso, layout, buffers, n // _radix(n), groups=count,
-                       offsets=(0, r0 * 4, r0 * n * 8))
-        self.o.call(enc, b"endEncoding", restype=None)
-        if pending is not None:
-            self._pending_metal = (cmd, tuple(pending[1]) + tuple(buffers))
-            return None
-        self._defer_or_submit(cmd, buffers, defer, "forward")
-
-    def _encode_tierc(self, cmd, n, role, buffers, groups, uniform=None):
-        entries = {'corr1': 'tcStage1', 'corr2': 'tcFullStage3',
-                   'corr_series2': 'tcFullSeriesStage3',
-                   'fwd1': 'tcForwardStage1', 'fwd2': 'tcForwardStage3'}
-        enc = self.o.call(cmd, b'computeCommandEncoder')
-        self.o.call(enc, b'setComputePipelineState:', restype=None,
-                    args=(self.pipeline(n, entries[role]),),
-                    argtypes=(ctypes.c_void_p,))
-        slot = 0
-        if uniform is not None:
-            value = ((ctypes.c_uint32 * len(uniform))(*uniform)
-                     if isinstance(uniform, tuple) else ctypes.c_uint32(uniform))
-            self.o.call(enc, b'setBytes:length:atIndex:', restype=None,
-                        args=(ctypes.byref(value), ctypes.sizeof(value), 0),
-                        argtypes=(ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong))
-            slot = 1
-        for buf in buffers:
-            self.o.call(enc, b'setBuffer:offset:atIndex:', restype=None,
-                        args=(buf.handle, getattr(buf, "offset", 0), slot),
-                        argtypes=(ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong))
-            slot += 1
-        width = _manifest()['full_tierc'][str(n)][role]['local_size'][0]
-        self.o.call(enc, b'dispatchThreadgroups:threadsPerThreadgroup:',
-                    restype=None,
-                    args=(_MTLSize(groups, 1, 1), _MTLSize(width, 1, 1)),
-                    argtypes=(_MTLSize, _MTLSize))
-        self.o.call(enc, b'endEncoding', restype=None)
-
-    @_autoreleased
-    def _forward_tierc(self, n, series, starts, spectra, *, defer=False, fused=False):
-        geometry = _manifest().get('full_tierc', {}).get(str(n))
-        if geometry is None:
-            raise UnsupportedSize('no two-stage series FFT for n=%d' % n)
-        buffers = [shared_buffer(a, self) for a in (series, starts, spectra)]
-        if any(b is None for b in buffers):
-            raise ValueError('two-stage forward buffers must belong to this GPU context')
-        key = (n, series.size, spectra.shape[0], fused,
-               *(a.ctypes.data for a in (series, starts, spectra)))
-        if spectra.shape[0] * n * 8 <= 64 * 1024 * 1024:
-            if getattr(self, "_persistent_scratch", None) is None or self._persistent_scratch.nbytes < spectra.nbytes:
-                self._drain()
-                if getattr(self, "_persistent_scratch", None) is not None:
-                    self._persistent_scratch.destroy()
-                self._persistent_scratch = _Buffer(self, max(spectra.nbytes, 64 * 1024 * 1024))
-            scratch = self._persistent_scratch
-        else:
-            scratch = self._forwards.get(key)
-            if scratch is None:
-                self._cache_room(spectra.nbytes, incoming=buffers)
-                scratch = _Buffer(self, spectra.nbytes)
-                self._forwards[key] = scratch
-        self._cache_touch('forward', key)
-        cmd = self._new_cmd()
-        self.o.call(cmd, b'retain')
-        self._encode_tierc(cmd, n, 'fwd1', (buffers[0], buffers[1], scratch),
-                           spectra.shape[0]*geometry['n1'], series.size)
-        self._encode_tierc(cmd, n, 'fwd2', (scratch, buffers[2]),
-                           spectra.shape[0]*geometry['n2'])
-        self._defer_or_submit(cmd, (*buffers, scratch), defer, "forward_tierc")
 
     def cancel_forward(self, slot=None):
         """Drop a deferred forward that will not be committed."""
@@ -1486,14 +1368,17 @@ class Context(Executor, InputUploads):
     storage_offset_alignment = 16
 
     def _x_kernel(self, name, n):
-        if name in ("full", "series"):
-            entry = 'fullCorrelation' if name == "full" else 'fullCorrelationSeries'
+        if name in ("full", "series", "forward"):
+            entry = {"full": 'fullCorrelation', "series": 'fullCorrelationSeries',
+                     "forward": 'seriesForward'}[name]
             return self.pipeline(n, entry), n // _radix(n)
         geometry = _manifest().get('full_tierc', {}).get(str(n))
         if geometry is None:
             raise UnsupportedSize('no two-stage full-correlation kernel for n=%d' % n)
         role, entry = {"tc1": ('corr1', 'tcStage1'), "tc2": ('corr2', 'tcFullStage3'),
-                       "tcs2": ('corr_series2', 'tcFullSeriesStage3')}[name]
+                       "tcs2": ('corr_series2', 'tcFullSeriesStage3'),
+                       "tf1": ('fwd1', 'tcForwardStage1'),
+                       "tf2": ('fwd2', 'tcForwardStage3')}[name]
         return self.pipeline(n, entry), geometry[role]['local_size'][0]
 
     def _x_tierc(self, n):
@@ -1508,13 +1393,14 @@ class Context(Executor, InputUploads):
     def _x_list(self, label):
         return _MtlList(label)
 
-    @_autoreleased
-    def _x_run(self, native, wait, binds=None):
-        label, ops = native
-        cmd = self._command_buffer()
+    def _x_encode(self, cmd, ops, binds):
+        """Encode a recorded list into a command buffer: one serial compute encoder.
+        Returns the buffers it bound."""
         enc = self.o.call(cmd, b'computeCommandEncoder')
+        used = []
         for (pso, tg), groups, buffers, offsets, words in ops:
             bound = [binds[b.name] if isinstance(b, Arg) else b for b in buffers]
+            used += bound
             if words:
                 self._dispatch(enc, pso, words, bound, tg, groups=groups, offsets=offsets)
             else:                    # no uniforms: the buffers bind from index 0
@@ -1525,6 +1411,13 @@ class Context(Executor, InputUploads):
                             args=(_MTLSize(groups, 1, 1), _MTLSize(tg, 1, 1)),
                             argtypes=(_MTLSize, _MTLSize))
         self.o.call(enc, b'endEncoding', restype=None)
+        return used
+
+    @_autoreleased
+    def _x_run(self, native, wait, binds=None, slot=None):
+        label, ops = native
+        cmd = self._command_buffer()
+        self._x_encode(cmd, ops, binds)
         if wait:
             self._commit(cmd, label)
             return
@@ -1542,11 +1435,50 @@ class Context(Executor, InputUploads):
         if self not in dev.pending_contexts:
             dev.pending_contexts.append(self)
 
+    @_autoreleased
+    def _x_defer(self, native, binds, slot, source):
+        """Held in the pending command buffer for the work that consumes it (several deferred
+        forwards share it). A one-stage forward of a whole spectra workspace stays unencoded
+        until its consumer is known: a hierarchical call reading these spectra takes it as
+        forwardTier0 instead (_claim_forward), else it is encoded (_materialize_forward)."""
+        label, ops = native
+        pending = self._pending_metal
+        if pending is not None:
+            cmd = pending[0]
+        else:
+            self._flush_forward()          # an earlier deferred forward nothing reads
+            cmd = self._new_cmd()
+            self.o.call(cmd, b"retain")
+        held = tuple(pending[1]) if pending is not None else ()
+        if (source is not None and source[3] == 0 and ops[0][3] in (None, [0, 0, 0])
+                and _fused_forward_enabled()):
+            # Its kernel reads block i's start at element i of starts and writes row i of
+            # spectra from the binding's start: true of a whole-workspace forward.
+            n, series, starts, _, count, nser, code, spectra, _ = source
+            (pso, _), _, _, _, _ = ops[0]
+            buffers = [series, starts, spectra]
+            self._lazy_fwd = list(getattr(self, "_lazy_fwd", None) or ()) + [
+                (n, pso, buffers, count, (nser, code), cmd)]
+            self._pending_metal = (cmd, held + tuple(buffers))
+            return
+        used = self._x_encode(cmd, ops, binds)
+        self._pending_metal = (cmd, held + tuple(used))
+
+    @staticmethod
+    def _x_upload(buf, array, slot):
+        buf.write(array)
+
+    def _x_prefetch(self, view, offset, nbytes, slot):
+        pass
+
     def _x_after_readers(self):
         pass                # no wait added (open question: docs/unification-plan.md log)
 
     def _x_release(self, native):
-        pass                # nothing recorded: every run encodes afresh
+        # Nothing recorded (every run encodes afresh); a deferred forward may still use the
+        # buffers about to be freed: finish it first.
+        if self._pending_metal is not None:
+            self._flush_forward()
 
     @staticmethod
     def _x_read(buf, out):
@@ -1967,13 +1899,6 @@ class Context(Executor, InputUploads):
             return self._exec_evict(key)
         # In-flight results read these buffers when they are collected.
         self._drain()
-        if kind == 'forward':
-            pending = self._pending_metal
-            if pending is not None and self._forwards[key] in pending[1]:
-                # A bounded correlation allocation can evict the prepared
-                # forward scratch. Finish that command before releasing it;
-                # the resulting spectra remain valid for the next command.
-                self._flush_forward()
         batch = self._record_tables()[kind].pop(key)
         for buf in self._record_buffers(batch):
             buf.destroy()
@@ -1989,9 +1914,6 @@ class Context(Executor, InputUploads):
                 for buf in self._record_buffers(record):
                     buf.destroy()
             table.clear()
-        if getattr(self, '_persistent_scratch', None) is not None:
-            self._persistent_scratch.destroy()
-            self._persistent_scratch = None
         self._uploaded = {"data": {}, "tmpl": {}}
         self._cache_order = {}
 

@@ -523,3 +523,33 @@ Stage 5's lessons land inside the stages that touch them. Each stage merges in g
     queues under `filter_series_many`) and Metal (one queue per context) add no wait.
     Whether a reader on another queue can still be running there is unverified; it is
     unchanged by the port.
+- 2026-10-18: **U2.3 forward transform runs on the shared executor.**
+  - `Executor.forward` (with `forward_valid`, `forward_replay` and `_forward_fused`)
+    replaces three implementations.
+  - Deleted with them:
+    - Vulkan's two-stage path and its per-slot persistent scratch;
+    - Metal's `_forwards` table and persistent scratch;
+    - CUDA's host-array fallback and `_small_input`.
+  - Two-stage scratch is owned by the record.
+  - Block starts are bound in place unless they lie outside device memory, or the device
+    stages host-written inputs. In those cases they are uploaded per call, on the slot's
+    stream (`_x_upload`). Records are keyed by slot, as `_small_input` was, so slots that
+    share a CUDA stream keep their own staged starts. A span is prefetched on migrating
+    memory (`_x_prefetch`).
+  - New list op `stamp(name)`: Vulkan captures stamped lists, so fused batches still take
+    the forward (96 fused submissions per pass on dev2, as before).
+  - Deferral stays a driver hook, `_x_defer`, until its consumers are ported:
+    - Vulkan: the pending command buffer and `_fwd_src`;
+    - Metal: the lazy forward a hierarchical call claims as forwardTier0. Claims per M2
+      bench run: 16,411 against 16,413 before;
+    - CUDA: an immediate launch plus the per-stream event.
+    The source tuple now names the bound starts and the row within them, and Vulkan folds
+    a view's offset into its absolute band offsets.
+  - Goldens bit-identical on dev2, dev3, dev4, M2 and L40S.
+  - Suites: dev2 1980 passed; M2 1855 passed (docs present).
+  - Focused tests: dev3/dev4 177 each; L40S 145, including test_docs with docs present.
+    The L40S U2.2 shards' 6 failures were test_docs without a docs directory.
+  - M2 paired search: 35.10-35.16 against 35.13-35.39 M; stage times equal to the ms.
+  - dev2 and L40S paired search: pending. dev2 was loaded by other sessions (load
+    average 3-9; a 87 M round was that load). Counted on a clean run: no re-recording or
+    binding eviction in steady state, only `destroy` clean-up.
