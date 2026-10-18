@@ -17,7 +17,9 @@ Driver primitives (a Context provides each):
   _x_alloc(nbytes, readback=False, upload=False)
                             a device buffer the context owns (write(array), read_into(out),
                             destroy(), nbytes). readback: the host reads it; upload: the host
-                            writes it before every run (ordered before the run's kernels).
+                            writes it before every run, through _x_upload.
+  _x_upload(buf, array, slot)
+                            write an upload buffer, ordered before the next work on `slot`.
   _x_list(label)            a command list being recorded:
                               dispatch(kernel, groups, buffers, words=(), offsets=None)
                                 buffers are bound in order, each a device buffer or view or
@@ -27,11 +29,27 @@ Driver primitives (a Context provides each):
                                 tuple of them for a vector parameter (a uint4);
                               barrier()      all earlier work before all later work, memory
                                              included;
+                              stamp(name)    a phase boundary: the work since the previous
+                                             stamp is phase `name` (fused batches interleave
+                                             recordings phase by phase; MF_GPU_PROFILE times
+                                             it);
                               end()          -> native: what _x_run runs and _x_release frees.
-  _x_run(native, wait, binds=None)
-                            run a recorded list, binding each Arg to binds[name] (a view);
-                            wait=False leaves it in flight as a pending write (device work is
-                            ordered after it, a host reader waits through settle_writes).
+  _x_run(native, wait, binds=None, slot=None)
+                            run a recorded list, binding each Arg to binds[name] (a view), on
+                            the queue or stream of pipelining slot `slot`, together with the
+                            work deferred for that slot; wait=False leaves it in flight as a
+                            pending write (device work is ordered after it, a host reader waits
+                            through settle_writes).
+  _x_defer(native, binds, slot, source)
+                            hold a recorded forward for the next work on `slot`, which runs it
+                            first. source (one-stage forwards, else None) = (n, series, starts,
+                            row, count, nser, code, spectra, spectra address): the bound series
+                            and block starts (block i's start at element row + i of starts),
+                            and the spectra view written -- what a hierarchical consumer needs
+                            to replace this forward with its own (band) forward.
+  _x_prefetch(view, offset, nbytes, slot)
+                            start moving a span of a shared allocation to the device ahead of
+                            the kernel that reads it (memory that migrates).
   _x_after_readers()        order the next run after earlier device work on this device that
                             may still read what it rewrites (another context's queue).
   _x_release(native)        free a recording (after its work has finished).
@@ -39,8 +57,9 @@ Driver primitives (a Context provides each):
 
 Features a driver reports (attributes): max_dispatch_x (the most groups one dispatch takes),
 storage_offset_alignment (a bound buffer's offset must be a multiple of this),
-stage_host_inputs (kernels must not read small host-written inputs from shared allocations,
-which migrate between host and device: they are uploaded into device memory instead).
+stage_host_inputs (shared allocations migrate between host and device: kernels must not read
+small host-written inputs from them, which are uploaded into device memory instead, and spans
+a kernel will read are prefetched).
 """
 import numpy as np
 
@@ -69,7 +88,7 @@ class Arg:
         self.name = name
 
 
-_OUT, _STARTS = Arg("out"), Arg("starts")
+_OUT, _STARTS, _SERIES, _SPECTRA = Arg("out"), Arg("starts"), Arg("series"), Arg("spectra")
 
 
 class Executor:
@@ -207,19 +226,20 @@ class Executor:
         write (device consumers are ordered after it, a host reader settles first)."""
         nd, nt = data.shape[0], tmpl.shape[0]
         ov, sv = shared_view(out, self), shared_view(starts, self)
-        if (ov is None or sv is None or out.ndim != 2 or out.shape[0] != nt
-                or starts.shape != (nd,)):
-            raise ValueError('continuous output and starts must be shared GPU buffers')
+        if ov is None or out.ndim != 2 or out.shape[0] != nt or starts.shape != (nd,):
+            raise ValueError('continuous output must be a shared GPU buffer of every template')
         length = out.shape[1]
         split = self._x_tierc(n) if n > 65536 else None
         # The two-stage form needs per-pair scratch: runs of whole data rows bound it (a row
         # past the budget is one run). Each run's starts are its own uploaded copy.
         rows = max(1, min(nd, self._FULL_BUDGET // (nt * n * 8))) if split else nd
         runs = [(d0, min(d0 + rows, nd)) for d0 in range(0, nd, rows)]
-        staged = self.stage_host_inputs or len(runs) > 1
+        # Block starts are uploaded where they lie outside device memory, where the device
+        # stages host-written inputs, or per run (each run's starts from its first row).
+        staged = self.stage_host_inputs or sv is None or len(runs) > 1
         dv, tv = shared_view(data, self), shared_view(tmpl, self)
         key = ("series", n, nd, nt, length, lo, hi, dv is not None and data.ctypes.data,
-               tv is not None and tmpl.ctypes.data)
+               tv is not None and tmpl.ctypes.data, staged)
         uploads = self._input_uploads(key, data, tmpl, upload_data, upload_tmpl)
         table = self._exec_table()
         rec = table.get(key)
@@ -257,8 +277,105 @@ class Executor:
         self._write_uploads(key, uploads, rec.buffers["data"], data, rec.buffers["tmpl"], tmpl)
         if staged:
             for i, (d0, d1) in enumerate(runs):
-                rec.buffers["starts%d" % i].write(starts[d0:d1])
+                self._x_upload(rec.buffers["starts%d" % i], starts[d0:d1], None)
         if async_submit:
             self._x_after_readers()
-        self._x_run(rec.native, not async_submit, {"out": ov, "starts": sv})
+        self._x_run(rec.native, not async_submit,
+                    {"out": ov} if staged else {"out": ov, "starts": sv})
         return out
+
+    # ---- forward transform --------------------------------------------------------------
+    def forward(self, n, series, starts, spectra, *, defer=False, slot=None, fused=False,
+                rows=None, real=None, handle_out=None):
+        """Gather a block of n samples of `series` at each start (zero past its end) and
+        forward-transform it, normalised by 1/n, into a row of `spectra`.
+
+        rows=(r0, count): only rows r0..r0+count of starts and spectra, so several series can
+        fill one spectra workspace. real=(lane, stride, length): series is complex64 storage
+        holding a real series of `length` samples, sample i at float lane + stride * i (one
+        lane of a packed complex row: stride 2; a real series: stride 1); starts and length
+        count samples. defer: held for the next work on `slot`, which runs it first; else run
+        and waited for. handle_out (a list) receives a handle forward_replay takes. `fused`
+        is accepted for the callers that pass it; it does not change the work."""
+        two = n > 65536
+        if two and (rows is not None or real is not None):
+            raise UnsupportedSize("row ranges and real series need the one-stage forward")
+        r0, count = rows if rows is not None else (0, spectra.shape[0])
+        nser, code = ((int(real[2]), (int(real[0]) << 2) | int(real[1])) if real is not None
+                      else (int(series.size), 0))
+        sv, pv = shared_view(series, self), shared_view(spectra, self)
+        if sv is None or pv is None:
+            raise ValueError("forward buffers must belong to this GPU context")
+        # Block starts are bound where they lie, unless they lie outside device memory or
+        # the device stages host-written inputs: then they are uploaded every call.
+        stv = shared_view(starts, self)
+        staged = self.stage_host_inputs or stv is None
+        if not staged and (r0 * 4) % self.storage_offset_alignment:
+            raise ValueError("forward row offsets must be multiples of %d"
+                             % (self.storage_offset_alignment // 4))
+        if self.stage_host_inputs and count:
+            st = starts[r0:r0 + count]
+            lo = int(min(int(st.min()), series.size))
+            hi = int(min(series.size, int(st.max()) + n))
+            if hi > lo:
+                self._x_prefetch(sv, lo * series.itemsize, (hi - lo) * series.itemsize, slot)
+        # Keyed by slot: a pipelined slot is reused only after its previous work completed,
+        # so its staged starts are never rewritten under a run in flight.
+        key = ("forward", n, nser, code, r0, count, slot, two, staged)
+        table = self._exec_table()
+        rec = table.get(key)
+        if rec is None:
+            self._cache_room(count * n * 8 if two else 0,
+                             incoming=[v for v in (sv, stv, pv) if v is not None])
+            rec = Record()
+            bs = (self._exec_buffer(rec, "starts", nbytes=count * 4, upload=True) if staged
+                  else _STARTS)
+            soff = 0 if staged else r0 * 4
+            lst = self._x_list("forward")
+            if two:
+                split = self._x_tierc(n)
+                scratch = self._exec_buffer(rec, "scratch", nbytes=count * n * 8)
+                lst.dispatch(self._x_kernel("tf1", n), count * split[0], [_SERIES, bs, scratch],
+                             (int(series.size),), offsets=[0, soff, 0])
+                lst.barrier()
+                lst.dispatch(self._x_kernel("tf2", n), count * split[1], [scratch, _SPECTRA])
+                lst.barrier()
+            else:
+                lst.stamp("start")
+                lst.dispatch(self._x_kernel("forward", n), count, [_SERIES, bs, _SPECTRA],
+                             (nser, code), offsets=[0, soff, r0 * n * 8])
+                lst.barrier()
+                lst.stamp("forward")
+            rec.native = lst.end()
+            table[key] = rec
+        self._cache_touch("exec", key)
+        binds = {"series": sv, "spectra": pv}
+        if staged:
+            self._x_upload(rec.buffers["starts"], starts[r0:r0 + count], slot)
+            bst, row = rec.buffers["starts"], 0
+        else:
+            binds["starts"] = bst = stv
+            row = r0
+        if handle_out is not None:
+            handle_out.append((key, rec, binds))
+        if defer:
+            self._x_defer(rec.native, binds, slot,
+                          None if two else (n, sv, bst, row, count, nser, code, pv,
+                                            spectra.ctypes.data + r0 * n * 8))
+        else:
+            self._x_run(rec.native, True, binds, slot)
+
+    def _forward_fused(self, n, series, starts, spectra, *, defer=False, slot=None):
+        return self.forward(n, series, starts, spectra, defer=defer, slot=slot, fused=True)
+
+    def forward_valid(self, h):
+        """Whether a forward handle (forward(handle_out=)) still names its cached record."""
+        return self._exec_table().get(h[0]) is h[1]
+
+    def forward_replay(self, h, slot):
+        """Queue a forward again from its handle; False if its record is gone."""
+        if not self.forward_valid(h):
+            return False
+        self._cache_touch("exec", h[0])
+        self._x_defer(h[1].native, h[2], slot, None)
+        return True

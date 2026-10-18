@@ -1137,6 +1137,9 @@ class _VkList:
     def barrier(self):
         self.ops.append(None)
 
+    def stamp(self, name):
+        self.ops.append(name)
+
     def end(self):
         return _VkNative(self.ctx, self.label, self.ops)
 
@@ -1149,7 +1152,10 @@ class _VkNative:
 
     def __init__(self, ctx, label, ops):
         self.ctx, self.label, self.ops = ctx, label, ops
-        self.args = sorted({b.name for op in ops if op for b in op[2] if isinstance(b, Arg)})
+        self.args = sorted({b.name for op in ops if isinstance(op, tuple) for b in op[2]
+                            if isinstance(b, Arg)})
+        # A list with phase stamps is captured, so fused batches can interleave it.
+        self.captured = any(isinstance(op, str) for op in ops)
         self.cmds = {}                       # binding key -> (cmd, pools, held views)
 
     def command(self, binds):
@@ -1158,7 +1164,6 @@ class _VkNative:
         entry = self.cmds.pop(key, None)
         if entry is None:
             if len(self.cmds) >= self._BINDINGS:
-                self.ctx._wait_queues()
                 self.release_one(next(iter(self.cmds)))
             entry = self.record(dict(zip(self.args, views))) + (views,)
         self.cmds[key] = entry               # most recently used last
@@ -1167,10 +1172,27 @@ class _VkNative:
     def record(self, binds):
         ctx = self.ctx
         pool_start = len(getattr(ctx, "_pools", []))
-        rec = _Recording(ctx, self.label)
+        if self.captured:
+            ctx._capture_begin()
+        cmd = None
+        try:
+            rec = _Recording(ctx, self.label)
+            cmd = rec.cmd
+            self._emit(rec, binds)
+            rec.end()
+        finally:
+            if self.captured:
+                ctx._capture_end(cmd)
+        return cmd, list(getattr(ctx, "_pools", [])[pool_start:])
+
+    def _emit(self, rec, binds):
+        ctx = self.ctx
         for op in self.ops:
             if op is None:
                 _global_barrier(ctx.vk, rec.cmd)
+                continue
+            if isinstance(op, str):
+                rec.stamp(op)
                 continue
             kernel, groups, buffers, offsets, words = op
             bound = [binds[b.name] if isinstance(b, Arg) else b for b in buffers]
@@ -1179,12 +1201,23 @@ class _VkNative:
             ds = ctx._descriptor_set(kernel[2], bound, offs if any(offs) else None)
             rec.bind(kernel, ds, words)
             rec.dispatch(groups)
-        cmd = rec.end()
-        return cmd, list(getattr(ctx, "_pools", [])[pool_start:])
 
     def release_one(self, key):
         cmd, pools, _ = self.cmds.pop(key)
         ctx = self.ctx
+        value = getattr(cmd, "value", cmd)
+        pending = getattr(ctx, "_pending_forward", None)
+        for s, pcmd in (list(pending.items()) if isinstance(pending, dict) else ()):
+            if getattr(pcmd, "value", pcmd) == value:
+                del pending[s]             # deferred and never consumed: run it now
+                ctx._submit(cmd, slot=s)
+        if isinstance(pending, dict) and not pending:
+            ctx._pending_forward = None
+        src = getattr(ctx, "_fwd_src", None)
+        for k in [k for k, v in (src or {}).items() if v[7] is cmd]:
+            del src[k]
+        getattr(ctx, "_phases", {}).pop(value, None)
+        ctx._wait_queues()
         ctx.vk.vkFreeCommandBuffers.argtypes = [_vp, _vp, _u32, ctypes.POINTER(_vp)]
         ctx.vk.vkFreeCommandBuffers(ctx.device, ctx.command_pool, 1, (_vp * 1)(cmd))
         dead = {pool.value for pool in pools}
@@ -1751,10 +1784,6 @@ class Context(Executor, InputUploads):
                 return False
         return True
 
-    def forward_valid(self, h):
-        forwards = getattr(self, "_forwards", None)
-        return forwards is not None and forwards.get(h[0]) is h[1]
-
     def hier_replay(self, h, slot, async_submit, validated=False):
         """Submit a hier_peaks call again from its handle, or None if the handle is stale.
 
@@ -1779,17 +1808,6 @@ class Context(Executor, InputUploads):
             self._pending_forward[slot] = h.bfwd[1][-1]
         return self._hier_submit(h.batch, h.kind == 'hier_cascade', h.nd, h.nt, h.nbins,
                                  h.sparse, slot, async_submit, h.mode)
-
-    def forward_replay(self, h, slot):
-        """Queue a forward call again from its handle (forward(..., handle_out=)); False if
-        the record is no longer the one the handle saw."""
-        if not self.forward_valid(h):
-            return False
-        self._cache_touch('forward', h[0])
-        if not isinstance(getattr(self, "_pending_forward", None), dict):
-            self._pending_forward = {}
-        self._pending_forward[slot] = h[1][-1]
-        return True
 
     @staticmethod
     def _read_peaks(bufs, surv_key, count, nd, nt, nbins, sparse):
@@ -2370,134 +2388,6 @@ class Context(Executor, InputUploads):
     def empty_shared(self, shape, dtype=np.complex64, *, readback=False, host_input=False):
         factory = (lambda ctx, size: _Buffer(ctx, size, readback=True)) if readback else _Buffer
         return empty_shared(self, factory, shape, dtype)
-
-    def _forward_fused(self, n, series, starts, spectra, *, defer=False, slot=None):
-        """Dispatch fused forward FFT kernel path."""
-        return self.forward(n, series, starts, spectra, defer=defer, slot=slot, fused=True)
-
-    def forward(self, n, series, starts, spectra, *, defer=False, slot=None, fused=False, rows=None,
-                handle_out=None, real=None):
-        """Gather and normalize forward FFTs directly into shared spectra.
-
-        handle_out (a list): receives (key, record) for forward_replay.
-
-        real=(lane, stride, length) (real_series): series is complex64 storage holding a real
-        series of `length` samples, sample i at float lane + stride * i of it read as floats
-        (one lane of a packed complex row: stride 2; a real series: stride 1). Starts and
-        length are in samples.
-
-        rows=(r0, count): only rows r0..r0+count of starts/spectra (r0 a multiple of 64, so
-        the descriptor offsets stay aligned); lets several series allocations fill one
-        spectra workspace."""
-        if n > 65536:
-            if rows is not None:
-                raise UnsupportedSize('row ranges need the one-stage forward')
-            return self._forward_tierc(n, series, starts, spectra, defer=defer, slot=slot, fused=fused)
-        r0, count = rows if rows is not None else (0, spectra.shape[0])
-        if r0 % 64:
-            raise ValueError("forward row offsets must be multiples of 64")
-        code, nser = 0, int(series.size)
-        if real is not None:
-            code, nser = (int(real[0]) << 2) | int(real[1]), int(real[2])
-        pipe, layout, sl = self._build_pipeline(
-            ("forward", n), "forward_%d.spv" % n, 3, 8)
-        buffers = [shared_buffer(a, self) for a in (series, starts, spectra)]
-        if any(b is None for b in buffers):
-            raise ValueError("forward buffers must belong to this GPU context")
-        key = (n, nser, code, spectra.shape[0], fused, rows,
-               *(a.ctypes.data for a in (series, starts, spectra)))
-        forwards = getattr(self, "_forwards", None)
-        if forwards is None:
-            forwards = self._forwards = {}
-        batch = forwards.get(key)
-        if batch is None:
-            self._cache_room(0, incoming=buffers)
-            pool_start = len(getattr(self, '_pools', []))
-            ds = self._descriptor_set(sl, buffers, [0, r0 * 4, r0 * n * 8] if r0 else None)
-            self._capture_begin()
-            rec = _Recording(self, "forward")
-            cmd = rec.cmd
-            rec.stamp("start")
-            rec.bind((pipe, layout), ds, (nser, code))
-            rec.dispatch(count)
-            # The spectra are read next by shaders and by the host (0x2000, 0x4000).
-            rec.barrier(dst_stage=_STAGE_COMPUTE_BIT | 0x4000,
-                        dst_access=_ACCESS_SHADER_READ | 0x2000, buffer=buffers[2])
-            rec.stamp("forward")
-            rec.end()
-            self._capture_end(cmd)
-            batch = (*buffers, cmd)
-            forwards[key] = batch
-            self._register_record('forward', key, None, pool_start)
-        self._cache_touch('forward', key)
-        cmd = batch[-1]
-        if handle_out is not None:
-            handle_out.append((key, batch))
-        if defer:
-            if not isinstance(getattr(self, "_pending_forward", None), dict):
-                self._pending_forward = {}
-            self._pending_forward[slot] = cmd
-            # A hierarchical call on these spectra may swap this forward for the band-only
-            # one (_band_source): what it needs to recompute survivor rows itself.
-            self.__dict__.setdefault("_fwd_src", {})[spectra.ctypes.data + r0 * n * 8] = (
-                n, buffers[0], buffers[1], r0, count, nser, slot, cmd, code)
-        else:
-            self._submit(cmd, slot=slot)
-
-    def _forward_tierc(self, n, series, starts, spectra, *, defer=False, slot=None, fused=False):
-        info = _manifest().get('full_tierc', {}).get(str(n))
-        if info is None:
-            raise UnsupportedSize('no two-stage series FFT for n=%d' % n)
-        buffers = [shared_buffer(a, self) for a in (series, starts, spectra)]
-        if any(b is None for b in buffers):
-            raise ValueError('two-stage forward buffers must belong to this GPU context')
-        key = ('tierc', n, series.size, spectra.shape[0], fused, slot,
-               *(a.ctypes.data for a in (series, starts, spectra)))
-        forwards = getattr(self, '_forwards', None)
-        if forwards is None:
-            forwards = self._forwards = {}
-        batch = forwards.get(key)
-        if batch is None:
-            p1, l1, sl1 = self._build_pipeline(('tc-fwd1', n), info['fwd1']['file'], 3, 4)
-            p2, l2, sl2 = self._build_pipeline(('tc-fwd2', n), info['fwd2']['file'], 2, 0)
-            self._cache_room(spectra.nbytes, incoming=buffers)
-            pool_start = len(getattr(self, '_pools', []))
-            slot_key = slot if slot is not None else 0
-            if getattr(self, '_persistent_scratch', None) is None:
-                self._persistent_scratch = {}
-            if spectra.shape[0] * n * 8 <= 64 * 1024 * 1024:
-                scratch_buf = self._persistent_scratch.get(slot_key)
-                if scratch_buf is None or scratch_buf.nbytes < spectra.nbytes:
-                    if scratch_buf is not None:
-                        scratch_buf.destroy()
-                    scratch_buf = _Buffer(self, max(spectra.nbytes, 64 * 1024 * 1024))
-                    self._persistent_scratch[slot_key] = scratch_buf
-                scratch = scratch_buf
-            else:
-                scratch = _Buffer(self, spectra.nbytes)
-            ds1 = self._descriptor_set(sl1, (buffers[0], buffers[1], scratch))
-            ds2 = self._descriptor_set(sl2, (scratch, buffers[2]))
-            rec = _Recording(self, "two-stage forward")
-            rec.bind((p1, l1), ds1, (series.size,))
-            rec.dispatch(spectra.shape[0] * info['n1'])
-            rec.barrier(buffer=scratch)
-            rec.bind((p2, l2), ds2)
-            rec.dispatch(spectra.shape[0] * info['n2'])
-            # The spectra are read next by shaders and by transfers (0x2000, 0x4000).
-            rec.barrier(dst_stage=_STAGE_COMPUTE_BIT | 0x4000,
-                        dst_access=_ACCESS_SHADER_READ | 0x2000, buffer=buffers[2])
-            cmd = rec.end()
-            batch = (*buffers, scratch, cmd)
-            forwards[key] = batch
-            self._register_record('forward', key, None, pool_start)
-        self._cache_touch('forward', key)
-        cmd = batch[-1]
-        if defer:
-            if not isinstance(getattr(self, "_pending_forward", None), dict):
-                self._pending_forward = {}
-            self._pending_forward[slot] = cmd
-        else:
-            self._submit(cmd, slot=slot)
 
     def cancel_forward(self, slot=None):
         if isinstance(getattr(self, "_pending_forward", None), dict):
@@ -3128,6 +3018,8 @@ class Context(Executor, InputUploads):
 
     # ---- driver primitives (_gpuexec) -----------------------------------------------------
     def _x_kernel(self, name, n):
+        if name == "forward":
+            return self._build_pipeline(("forward", n), "forward_%d.spv" % n, 3, 8)
         if name in ("full", "series"):
             entry = "full" if name == "full" else "full_series"
             module = _manifest().get('modules', {}).get(str(n)) or {}
@@ -3146,6 +3038,10 @@ class Context(Executor, InputUploads):
             raise UnsupportedSize('no two-stage full-correlation kernel for n=%d' % n)
         if name == "tc1":
             return self._build_pipeline(('tc-corr1', n), info['corr1']['file'], 3, 4)
+        if name == "tf1":
+            return self._build_pipeline(('tc-fwd1', n), info['fwd1']['file'], 3, 4)
+        if name == "tf2":
+            return self._build_pipeline(('tc-fwd2', n), info['fwd2']['file'], 2, 0)
         if name == "tcs2":
             return self._build_pipeline(('tc-corr-series2', n), info['corr_series2']['file'],
                                         3, 16)
@@ -3163,18 +3059,40 @@ class Context(Executor, InputUploads):
     def _x_list(self, label):
         return _VkList(self, label)
 
-    def _x_run(self, native, wait, binds=None):
+    def _x_run(self, native, wait, binds=None, slot=None):
         cmd = native.command(binds or {})
         if wait:
-            self._submit(cmd)
+            self._submit(cmd, slot=slot)
         else:
             self._submit_pending(cmd)
+
+    def _x_defer(self, native, binds, slot, source):
+        cmd = native.command(binds)
+        if not isinstance(getattr(self, "_pending_forward", None), dict):
+            self._pending_forward = {}
+        self._pending_forward[slot] = cmd
+        if source is not None:
+            # A hierarchical call on these spectra may swap this forward for the band-only
+            # one (_band_source): what it needs to recompute survivor rows itself.
+            n, series, starts, row, count, nser, code, _, address = source
+            # The band kernels bind starts at element r0 of its allocation (an absolute
+            # descriptor offset), so a view's own offset is folded in.
+            r0 = row + getattr(starts, "offset", 0) // 4
+            self.__dict__.setdefault("_fwd_src", {})[address] = (
+                n, series, starts, r0, count, nser, slot, cmd, code)
+
+    @staticmethod
+    def _x_upload(buf, array, slot):
+        buf.write(array)
+
+    def _x_prefetch(self, view, offset, nbytes, slot):
+        pass
 
     def _x_after_readers(self):
         pass                # no wait added (open question: docs/unification-plan.md log)
 
-    def _x_release(self, native):
-        self._wait_queues()
+    @staticmethod
+    def _x_release(native):
         native.release()
 
     @staticmethod
@@ -3375,11 +3293,6 @@ class Context(Executor, InputUploads):
         commands = (_vp * 1)(cmd)
         self.vk.vkFreeCommandBuffers.argtypes = [_vp, _vp, _u32, ctypes.POINTER(_vp)]
         self.vk.vkFreeCommandBuffers(self.device, self.command_pool, 1, commands)
-        if kind == 'forward':
-            p_bufs = set(self._persistent_scratch.values()) if isinstance(getattr(self, '_persistent_scratch', None), dict) else set()
-            for buf in batch[:-1]:
-                if buf not in p_bufs and buf is not getattr(self, '_persistent_scratch', None) and not hasattr(buf, 'owner'):
-                    buf.destroy()
         pools = self._record_pools.pop(token, [])
         for pool in pools:
             self.vk.vkDestroyDescriptorPool(self.device, pool, None)
@@ -3411,14 +3324,6 @@ class Context(Executor, InputUploads):
         for pool in getattr(self, '_pools', []):
             self.vk.vkDestroyDescriptorPool(self.device, pool, None)
         self._pools = []
-        if getattr(self, "_persistent_scratch", None) is not None:
-            if isinstance(self._persistent_scratch, dict):
-                for sbuf in self._persistent_scratch.values():
-                    sbuf.destroy()
-                self._persistent_scratch.clear()
-            else:
-                self._persistent_scratch.destroy()
-                self._persistent_scratch = None
         self._cache_order = {}
         self._uploaded = {"data": {}, "tmpl": {}}
 

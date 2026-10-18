@@ -454,12 +454,12 @@ class _Staged:
         self.device, self.pinned = _Buffer(ctx, self.nbytes), _Pinned(ctx, self.nbytes)
         self.dptr = self.device.dptr
 
-    def write(self, array):
+    def write(self, array, stream=None):
         array = np.ascontiguousarray(array)
         count = min(self.nbytes, array.nbytes)
         if count:
             ctypes.memmove(self.pinned.ptr, array.ctypes.data, count)
-            self.ctx._copy_h2d(self.dptr.value, self.pinned.ptr, count, None, "upload")
+            self.ctx._copy_h2d(self.dptr.value, self.pinned.ptr, count, stream, "upload")
 
     def destroy(self):
         self.device.destroy()
@@ -490,6 +490,9 @@ class _CudaList:
         self.ops.append((kernel, int(groups), params, _param_ptrs(params)))
 
     def barrier(self):
+        pass
+
+    def stamp(self, name):
         pass
 
     def end(self):
@@ -590,10 +593,8 @@ class Context(Executor, InputUploads):
             self._c16_flags = {}
             self._tc_persistent = {}
             self._shared_modules = False
-        self._scratch_bufs = {}
         self._residents = {}
         self._batches = {}
-        self._forwards = {}
         self._hier = {}
         self._uploaded = {"data": {}, "tmpl": {}}
 
@@ -714,34 +715,6 @@ class Context(Executor, InputUploads):
     def _fill32(self, dptr, value, count, stream):
         if count > 0:
             check_cuda(self.cuda.cuMemsetD32Async(dptr, value, count, stream), "cuMemsetD32Async")
-
-    def _small_input(self, name, array, stream, slot=None):
-        """A device copy of a small host-written input (block starts): one async copy.
-
-        Kernels must not read these from managed memory: the host rewrites them every
-        call, so each launch's first read page-faults them back onto the GPU (the
-        forward kernel took 132 us/launch on the L40S, 15 us with this). Nor may the
-        copy read managed memory (144 us per cuMemcpyAsync): the values go through a
-        pinned staging buffer, which the previous call's sync has released."""
-        array = np.ascontiguousarray(array)
-        nbytes = max(array.nbytes, 4)
-        # Keyed by SLOT, not stream: slots s and s+4 share a stream, and the host rewrites
-        # this pinned buffer before the stream has run the previous slot's copy from it.
-        # A slot is reused only after its readback synchronized, so per-slot is safe.
-        k = (name, slot, stream.value)
-        sc = self._scratch_bufs.get(k)
-        if sc is None or sc[0].nbytes < nbytes:
-            if sc is not None:
-                self._sync(stream)
-                sc[0].destroy()
-                sc[1].destroy()
-            size = max(nbytes, 4096)
-            sc = self._scratch_bufs[k] = (_Buffer(self, size), _Pinned(self, size))
-        dev, pin = sc
-        if array.nbytes:
-            ctypes.memmove(pin.ptr, array.ctypes.data, array.nbytes)
-            self._copy_h2d(dev.dptr.value, pin.ptr, array.nbytes, stream, "upload")
-        return dev
 
     def _prefetch(self, buf, offset, nbytes, stream):
         """Migrate a managed span to this device ahead of the kernel that reads it.
@@ -1299,11 +1272,11 @@ class Context(Executor, InputUploads):
     stage_host_inputs = True
 
     def _x_kernel(self, name, n):
-        if name == "full":
-            return self.pipeline(n, "fullCorrelation")
-        if name == "series":
-            return self.pipeline(n, "fullCorrelationSeries")
-        role = {"tc1": "corr1", "tc2": "corr2", "tcs2": "corr_series2"}[name]
+        if name in ("full", "series", "forward"):
+            return self.pipeline(n, {"full": "fullCorrelation", "series": "fullCorrelationSeries",
+                                     "forward": "seriesForward"}[name])
+        role = {"tc1": "corr1", "tc2": "corr2", "tcs2": "corr_series2",
+                "tf1": "fwd1", "tf2": "fwd2"}[name]
         fn, wg, _, _ = self._tierc(n, role)
         return fn, wg
 
@@ -1316,19 +1289,39 @@ class Context(Executor, InputUploads):
     def _x_list(self, label):
         return _CudaList(label)
 
-    def _x_run(self, native, wait, binds=None):
-        ops, args = native
-        for p, name, off in args:
-            p.value = binds[name].dptr.value + off
-        self._bind()
-        stream = self.get_stream(None)
-        self._after_writes(stream)
-        for (fn, wg), groups, params, param_ptrs in ops:
-            self._launch(fn, groups, wg, params, stream=stream, param_ptrs=param_ptrs)
+    def _x_run(self, native, wait, binds=None, slot=None):
+        stream = self._x_launch(native, binds, slot)
         if wait:
             self._sync(stream)
         else:
             self._pend_write(stream)
+
+    def _x_launch(self, native, binds, slot):
+        """Launch a recorded list on the slot's stream, after writes left in flight."""
+        ops, args = native
+        for p, name, off in args:
+            p.value = binds[name].dptr.value + off
+        self._bind()
+        stream = self.get_stream(slot)
+        self._after_writes(stream)           # e.g. a series still being written by a middle stage
+        for (fn, wg), groups, params, param_ptrs in ops:
+            self._launch(fn, groups, wg, params, stream=stream, param_ptrs=param_ptrs)
+        return stream
+
+    def _x_defer(self, native, binds, slot, source):
+        # Launched now (stream order is the deferral); a consumer on another stream (a
+        # tiled or unslotted dispatch of these spectra) waits for this event (_after_forwards).
+        stream = self._x_launch(native, binds, slot)
+        ev = self._fwd_events.get(stream.value)
+        if ev is None:
+            ev = self._fwd_events[stream.value] = self._new_event()
+        check_cuda(self.cuda.cuEventRecord(ev, stream), "cuEventRecord")
+
+    def _x_upload(self, buf, array, slot):
+        buf.write(array, self.get_stream(slot))
+
+    def _x_prefetch(self, view, offset, nbytes, slot):
+        self._prefetch(view, offset, nbytes, self.get_stream(slot))
 
     def _x_after_readers(self):
         # Streams of different Contexts share no order: readers of an output this run
@@ -1758,85 +1751,6 @@ class Context(Executor, InputUploads):
         return self._dispatch_result(bufs, readback, async_submit)
 
     # ---- series forward -----------------------------------------------------------
-    def _forward_fused(self, n, series, starts, spectra, *, defer=False, slot=None):
-        """Dispatch fused forward FFT kernel path."""
-        return self.forward(n, series, starts, spectra, defer=defer, slot=slot, fused=True)
-
-    def forward(self, n, series, starts, spectra, *, defer=False, slot=None, fused=False,
-                rows=None, real=None):
-        """Batch forward FFTs of series blocks into ``spectra`` (deferred: no sync).
-
-        rows=(r0, count) (``forward_rows``): transform only blocks r0..r0+count, reading
-        starts[r0:] and writing spectra[r0:] -- several series allocations share one
-        spectra workspace. real=(lane, stride, length) (``real_series``): series is complex64
-        storage holding a real series of `length` samples, sample i at float lane + stride * i."""
-        if real is not None and n > 65536:
-            raise UnsupportedSize("a real series needs the one-stage forward")
-        nser, code = ((int(real[2]), (int(real[0]) << 2) | int(real[1])) if real is not None
-                      else (int(series.size), 0))
-        self._bind()
-        if rows is not None:
-            r0, count = int(rows[0]), int(rows[1])
-            starts, spectra = starts[r0:r0 + count], spectra[r0:r0 + count]
-        stream = self.get_stream(slot)
-        self._after_writes(stream)           # the series may be a middle output still in flight
-        tierc = n > 65536
-        if tierc:
-            f1, f1wg, n1, n2 = self._tierc(n, "fwd1")
-            f3, f3wg, _, _ = self._tierc(n, "fwd2")
-        else:
-            hfunc, wg = self.pipeline(n, "seriesForward")
-        sh = [shared_buffer(a, self) for a in (series, starts, spectra)]
-        if sh[0] is not None and sh[2] is not None:
-            st = np.asarray(starts, dtype=np.int64)
-            if st.size:
-                lo_ = int(min(st.min(), series.size))
-                hi_ = int(min(series.size, st.max() + n))
-                self._prefetch(sh[0], lo_ * series.itemsize, (hi_ - lo_) * series.itemsize, stream)
-            sh[1] = self._small_input("starts", np.asarray(starts, np.uint32), stream, slot)
-        if any(b is None for b in sh):
-            key = ("forward", n, series.nbytes, starts.nbytes, spectra.nbytes, slot)
-            bufs, _ = self._record("forward", self._forwards, key,
-                                   series.nbytes + starts.nbytes + spectra.nbytes, lambda: {
-                                       "series": _Buffer(self, series.nbytes),
-                                       "starts": _Buffer(self, starts.nbytes),
-                                       "spectra": _Buffer(self, spectra.nbytes)})
-            sh = [s or bufs[k] for s, k in zip(sh, ("series", "starts", "spectra"))]
-            for b, a in zip(sh[:2], (series, starts)):
-                if not isinstance(b, _Borrowed):
-                    b.write(a, stream)
-        blocks = spectra.shape[0]
-        if tierc:
-            key = ("forward_tierc", n, slot)
-            rec, _ = self._record("forward", self._forwards, key, blocks * n * 8, lambda: {})
-            mid = rec.get("scratch")
-            if mid is None or mid.nbytes < blocks * n * 8:
-                if mid is not None:
-                    self._sync(stream)
-                    mid.destroy()
-                mid = rec["scratch"] = _Buffer(self, blocks * n * 8)
-            self._launch(f1, blocks * n1, f1wg,
-                         [sh[0].dptr, sh[1].dptr, mid.dptr, _u32(series.size)], stream=stream)
-            self._launch(f3, blocks * n2, f3wg, [mid.dptr, sh[2].dptr], stream=stream)
-        else:
-            self._launch(hfunc, blocks, wg,
-                         [sh[0].dptr, sh[1].dptr, sh[2].dptr, _u32(nser), _u32(code)],
-                         stream=stream)
-        if not isinstance(sh[2], _Borrowed):
-            self._copy_d2h(spectra.ctypes.data, sh[2].dptr.value, spectra.nbytes, stream, "readback")
-            self._sync(stream)
-        elif not defer:
-            self._sync(stream)
-        else:
-            # A consumer may run on another stream (a tiled or unslotted dispatch of these
-            # spectra): it must wait for this forward. Recorded here, waited on in _after.
-            table = self._fwd_events
-            key = stream.value
-            ev = table.get(key)
-            if ev is None:
-                ev = table[key] = self._new_event()
-            check_cuda(self.cuda.cuEventRecord(ev, stream), "cuEventRecord")
-
     def cancel_forward(self, slot=None):
         # Launches are already enqueued; the stream orders whatever follows.
         pass
