@@ -207,7 +207,8 @@ def _interval_runs(S: int, starts: np.ndarray, stops: np.ndarray) -> np.ndarray:
 
 
 def _intersect_runs(x: np.ndarray, y: np.ndarray) -> np.ndarray:
-    """Intersection of two sorted disjoint run lists."""
+    """Intersection of two sorted disjoint run lists (a merge walk: the lists are a few runs,
+    where numpy's per-call cost exceeds the loop's)."""
     out = []
     i = j = 0
     while i < len(x) and j < len(y):
@@ -806,7 +807,7 @@ def _corr_block_costs(n: int, device: Optional[Any] = None) -> Tuple[float, floa
     hit = _CORR_COSTS.get((n, dkey))
     if hit is not None:
         return hit
-    from . import CorrelationFilter, _automatic_series_layout, gatechain
+    from . import CorrelationFilter, gatechain
     path = gatechain._cost_file()
     key = "corr,%d" % n if dkey == "cpu" else "corr,%d,%s" % (n, dkey)
     from . import _CORR_PFFT
@@ -1326,8 +1327,6 @@ class TimeDomainFilterBank:
         binsize: Optional[int] = None,
         max_block_length: int = 8192,
     ):
-        from . import MatchedFilter, HierarchicalFilter
-
         self.tap_sample_rate = float(tap_sample_rate)
         self.data_sample_rate = float(data_sample_rate)
         self.threshold = float(threshold)
@@ -1421,7 +1420,6 @@ class TimeDomainFilterBank:
         legacy_max = max(g[2] for g in self._legacy_layout[0]) if self._legacy_layout[0] else 0
         self._choice_ns = tuple(n for n in candidate_ns if n <= max(int(max_block_length), legacy_max))
         self._built: Optional[List[_TemplateGroup]] = None
-        from .device import parse as _parse_device
         if self.engine == 'corr' and fft_lengths is None:
             self._legacy_layout = _corr_partition(self.effective_data_counts, candidate_ns,
                                                   self.max_batch_size, self.device)
@@ -2306,7 +2304,6 @@ class TimeDomainFilterBank:
         batch on the same banks first finishes whatever of this one it would overwrite.
         """
         from . import _Deferred
-        import os
         global _BATCH_TOKEN
         paired = _cpu_block_round(jobs)
         if paired is not None:
@@ -2456,10 +2453,13 @@ class TimeDomainFilterBank:
         return _interval_runs(S, b0, np.minimum(b0 + (hi - lo), S))
 
     def _correlate_group(self, g: "_TemplateGroup", ser: np.ndarray, st: np.ndarray,
-                         t0: int, nt: int, dest: np.ndarray) -> None:
+                         t0: int, nt: int, dest: np.ndarray, bounds=None) -> None:
         """Correlate rows [t0, t0+nt) of group g over blocks st into dest (nt, S).
 
-        Writes only the samples the blocks cover; leaves the rest of dest alone.
+        Writes only the samples the blocks cover; leaves the rest of dest alone. On the CPU,
+        bounds (nblocks, 2) narrows what block b writes to [st[b]+bounds[b,0],
+        st[b]+bounds[b,1]) within its valid span (the block is computed the same; only its
+        copy-out is shorter).
         The GPU path cannot write into caller memory, so it computes into a
         cached shared workspace and copies the covered samples out.  Mirrors
         what CorrelationFilter.run_series does before touching the execution
@@ -2479,12 +2479,18 @@ class TimeDomainFilterBank:
                    else ep.correlate_series_continuous)
             if run is ep.correlate_series_continuous and ser.dtype != np.complex64:
                 ser = np.ascontiguousarray(ser, dtype=np.complex64)
+            bnd = bounds
             if dest.flags.c_contiguous and dest.flags.writeable:
-                run(ser, st, lo, hi, t0, nt, dest)
+                run(ser, st, lo, hi, t0, nt, dest, bnd)
             else:
                 tmp = np.empty((nt, S), dtype=np.complex64)
-                run(ser, st, lo, hi, t0, nt, tmp)
-                for a, b in self._block_coverage(S, st, lo, hi):
+                run(ser, st, lo, hi, t0, nt, tmp, bnd)
+                if bounds is None:
+                    runs = self._block_coverage(S, st, lo, hi)
+                else:
+                    s64, bnd64 = st.astype(np.int64), bounds.astype(np.int64)
+                    runs = _interval_runs(S, s64 + bnd64[:, 0], s64 + bnd64[:, 1])
+                for a, b in runs:
                     dest[:, a:b] = tmp[:, a:b]                # see below
             return
         if ser.dtype != np.complex64:
@@ -2540,16 +2546,21 @@ class TimeDomainFilterBank:
     def _add_corr_in(self, samples):
         self._corr_in_samples = getattr(self, '_corr_in_samples', 0) + samples
 
-    def _correlate_windows(self, g: "_TemplateGroup", ser: np.ndarray, W: np.ndarray,
-                           t0: int, nt: int, dest: np.ndarray, settle=None) -> None:
-        """Fill dest (nt, S) for group rows [t0, t0+nt): the correlation inside the
-        union of W (where blocks compute it), exact zeros everywhere else.
-
-        Only blocks whose valid span intersects a window are computed, each once
-        even when several windows touch it."""
+    def _windows_layout(self, g: "_TemplateGroup", S: int, W: np.ndarray, support):
+        """What _correlate_windows does for group g, windows W and support over S samples:
+        (block starts, per-block copy-out bounds or None, the runs it fills, the flat
+        [a0, b0, a1, b1, ...] edges of the runs it clears). Cached per group for a few
+        recent (S, W, support): a search asks the same each chunk."""
+        key = (S, W.tobytes(), None if support is None else support.tobytes())
+        cache = g.__dict__.setdefault('_windows_layouts', OrderedDict())
+        hit_ = cache.get(key)
+        if hit_ is not None:
+            cache.move_to_end(key)
+            return hit_
         from . import _automatic_series_layout
-        S = ser.size
-        keep = np.empty((0, 2), np.int64)
+        st = np.empty(0, dtype=np.uintp)
+        bounds = None
+        keep = written = np.empty((0, 2), np.int64)
         if W.shape[0]:
             cplan = g.get_correlation_plan()
             lo, hi = cplan.valid
@@ -2563,22 +2574,60 @@ class TimeDomainFilterBank:
                 hit[hit] = W[j[hit], 0] < b1[hit]
                 st = st[hit]
                 if st.size:
-                    self._correlate_group(g, ser, st, t0, nt, dest)
-                    keep = _intersect_runs(_interval_runs(S, W[:, 0], W[:, 1]),
-                                           _interval_runs(S, b0[hit], b1[hit]))
-                    # Work counters for matchedfilter._roofline: per block length, the
-                    # blocks transformed, (block, template) products and inverses, the
-                    # output samples the windows ask for, and template spectra read.
-                    # (Stored bins per template without materialising a lazily planned
-                    # group's spectra: that stacked every template's filter, ~1 ms a call.)
-                    self._add_corr_work(g.n, dict(
-                        blocks=int(st.size), pairs=int(st.size) * nt,
-                        out_samples=int((keep[:, 1] - keep[:, 0]).sum()) * nt,
-                        tmpl_values=nt * _stored_bins(g)))
-        # Zero the complement by contiguous runs. Not dest[:, ~keep] = 0: boolean indexing
-        # along axis 1 thrashes one cache set once 17+ rows sit 2^20 samples apart (see
-        # _correlate_group); 27 rows took ~400 ms against ~10 ms by runs.
+                    c0, c1 = b0[hit], b1[hit]
+                    if cplan._gpu is None:
+                        # Each block writes only from the first window it meets to the end
+                        # of the last: no overhang computed into dest and then cleared.
+                        jl = np.searchsorted(W[:, 0], c1, side='left') - 1
+                        c0 = np.maximum(c0, W[j[hit], 0])
+                        c1 = np.minimum(c1, W[jl, 1])
+                        s64 = st.astype(np.int64)
+                        bounds = np.ascontiguousarray(np.stack([c0 - s64, c1 - s64], axis=1),
+                                                      dtype=np.uintp)
+                    # the blocks are in order and disjoint: runs break where one ends short
+                    brk = np.flatnonzero(c0[1:] > c1[:-1]) + 1
+                    written = np.stack([c0[np.concatenate(([0], brk))],
+                                        c1[np.concatenate((brk - 1, [c1.size - 1]))]], axis=1)
+                    keep = _intersect_runs(W, written)      # W: sorted, disjoint
+        # the complement of what is filled, as runs
         edges = np.concatenate(([0], keep.ravel(), [S]))
+        if support is not None:
+            dirty = _interval_runs(S, np.concatenate((support[:, 0], written[:, 0])),
+                                   np.concatenate((support[:, 1], written[:, 1])))
+            edges = _intersect_runs(edges.reshape(-1, 2), dirty).ravel()
+        out = (st, bounds, keep, edges)
+        cache[key] = out
+        while len(cache) > 8:
+            cache.popitem(last=False)
+        return out
+
+    def _correlate_windows(self, g: "_TemplateGroup", ser: np.ndarray, W: np.ndarray,
+                           t0: int, nt: int, dest: np.ndarray, settle=None,
+                           support=None) -> None:
+        """Fill dest (nt, S) for group rows [t0, t0+nt): the correlation inside the
+        union of W (where blocks compute it), exact zeros everywhere else. support:
+        (K, 2) runs outside which dest is already zero (None: dest may hold anything);
+        what is cleared is the complement of the result inside support and inside the
+        blocks this call wrote.
+
+        Only blocks whose valid span intersects a window are computed, each once
+        even when several windows touch it."""
+        S = ser.size
+        st, bounds, keep, edges = self._windows_layout(g, S, W, support)
+        if st.size:
+            self._correlate_group(g, ser, st, t0, nt, dest, bounds)
+            # Work counters for matchedfilter._roofline: per block length, the
+            # blocks transformed, (block, template) products and inverses, the
+            # output samples the windows ask for, and template spectra read.
+            # (Stored bins per template without materialising a lazily planned
+            # group's spectra: that stacked every template's filter, ~1 ms a call.)
+            self._add_corr_work(g.n, dict(
+                blocks=int(st.size), pairs=int(st.size) * nt,
+                out_samples=int((keep[:, 1] - keep[:, 0]).sum()) * nt,
+                tmpl_values=nt * _stored_bins(g)))
+        # Clear by contiguous runs. Not dest[:, ~keep] = 0: boolean indexing along axis 1
+        # thrashes one cache set once 17+ rows sit 2^20 samples apart (see _correlate_group);
+        # 27 rows took ~400 ms against ~10 ms by runs.
         # A GPU-shared dest is zeroed on the device: host writes would pull its pages
         # back to the CPU (CUDA managed memory) only for the next kernel to fault them in.
         gpu = getattr(g.get_correlation_plan(), '_gpu', None) if W.shape[0] else None
@@ -2611,8 +2660,11 @@ class TimeDomainFilterBank:
         template_index: Optional[int] = None,
         out: Optional[np.ndarray] = None,
         wait: bool = True,
+        templates: Optional[Sequence[int]] = None,
+        out_support=None,
     ) -> np.ndarray:
-        """Correlate a continuous series across all templates (or a specific template).
+        """Correlate a continuous series across all templates (or a specific template, or a
+        list of them).
 
         Templates are filtered using their dynamically partitioned FFT block sizes
         for optimal cache and SIMD efficiency. Returns continuous correlation series
@@ -2630,6 +2682,16 @@ class TimeDomainFilterBank:
                     (or 1 / length matching template if `template_index` is specified).
             template_index: Optional single template index to filter. If specified,
                             returns a 1D array of shape `(len(series),)`.
+            templates: Optional distinct template indices: output row j is template
+                       templates[j], shape `(len(templates), len(series))`. Templates
+                       adjacent both here and in a block-size group are correlated in one
+                       call, which transforms each block once for all of them; list them in
+                       bank order (ascending) to make those runs long.
+            out_support: With `out`: where `out` may hold nonzero values on entry, in the
+                     forms `windows` takes; elsewhere it is taken to be exact zero already
+                     and is not written. A caller reusing `out` passes the windows of the
+                     call that last filled it (after a call, `out` is zero outside its
+                     windows). None: `out` may hold anything, and all of it is written.
             out: Optional preallocated output array. If `template_index` is None, shape
                  must be `(n_templates, len(series))` and dtype `complex64`. If `template_index`
                  is specified, shape can be `(len(series),)` or `(1, len(series))`.
@@ -2662,6 +2724,12 @@ class TimeDomainFilterBank:
         S = ser.size
         nt = self.n_templates
         W = _normalize_windows(windows, S)
+        if out_support is not None:
+            if out is None:
+                raise ValueError("out_support describes out; pass out")
+            support = _normalize_windows(out_support, S)
+        else:
+            support = None
         # Input samples the windows read (matchedfilter._roofline), once per call.
         self._add_corr_in(int((W[:, 1] - W[:, 0]).sum()))
 
@@ -2695,13 +2763,18 @@ class TimeDomainFilterBank:
             else:
                 out_2d = np.empty((1, S), dtype=np.complex64)
 
-            self._correlate_windows(target_g, ser, W, ti_local, 1, out_2d)
+            self._correlate_windows(target_g, ser, W, ti_local, 1, out_2d, support=support)
             if single_scale is not None:
                 np.multiply(out_2d, single_scale[:, None], out=out_2d)
 
             if out is not None and out.ndim == 1:
                 return out
             return out_2d[0] if out is None else out_2d
+
+        if templates is not None:
+            if template_index is not None:
+                raise ValueError("give template_index or templates, not both")
+            return self._correlate_selected(ser, W, templates, scales, out, support)
 
         # Full bank correlation across all groups
         shape = (nt, S)
@@ -2724,7 +2797,7 @@ class TimeDomainFilterBank:
         settle = []
         ok = False
         try:
-            self._correlate_bank(ser, W, scales_arr, result, settle)
+            self._correlate_bank(ser, W, scales_arr, result, settle, support)
             ok = True
         finally:
             for gpu in {id(x): x for x in settle}.values():
@@ -2804,15 +2877,60 @@ class TimeDomainFilterBank:
     def _fill_staging(staged, ser):
         staged[:] = ser
 
-    def _correlate_bank(self, ser, W, scales_arr, result, settle):
-        S = ser.size
+    def _correlate_bank(self, ser, W, scales_arr, result, settle, support=None):
         ser = self._stage_series(ser)
         try:
-            self._correlate_groups(ser, W, scales_arr, result, settle)
+            self._correlate_groups(ser, W, scales_arr, result, settle, support)
         finally:
             self._staging_done()
 
-    def _correlate_groups(self, ser, W, scales_arr, result, settle):
+    def _correlate_selected(self, ser, W, templates, scales, out, support=None):
+        """correlate_series(templates=...): row j of the result is template templates[j]."""
+        from . import _from_any
+        S = ser.size
+        sel = np.asarray(templates, dtype=np.int64).ravel()
+        if sel.size and (sel.min() < 0 or sel.max() >= self.n_templates):
+            raise IndexError(f"templates out of range [0, {self.n_templates})")
+        if np.unique(sel).size != sel.size:
+            raise ValueError("templates must be distinct")
+        shape = (sel.size, S)
+        if out is not None:
+            if not isinstance(out, np.ndarray) or out.dtype != np.complex64 \
+               or out.shape != shape or not out.flags.c_contiguous or not out.flags.writeable:
+                raise ValueError(f"out must be a writable C-contiguous complex64 array of shape {shape}")
+            result = out
+        else:
+            result = _page_aligned_empty(shape)
+        if scales is not None:
+            sc = np.ascontiguousarray(_from_any(scales), dtype=np.float32)
+            if sc.ndim != 1 or sc.size != self.n_templates:
+                raise ValueError(f"scales must be a 1D array of length {self.n_templates}")
+        self._groups
+        # runs of rows adjacent in the result and in one group: (group, first local, first row, count)
+        runs = []
+        for j, t in enumerate(sel):
+            g, li = self._template_map[int(t)]
+            if runs and runs[-1][0] is g and runs[-1][1] + runs[-1][3] == li:
+                runs[-1][3] += 1
+            else:
+                runs.append([g, li, j, 1])
+        settle = []
+        try:
+            ser = self._stage_series(ser)
+            try:
+                for g, li, j, cnt in runs:
+                    self._correlate_windows(g, ser, W, li, cnt, result[j:j + cnt], settle,
+                                            support=support)
+            finally:
+                self._staging_done()
+        finally:
+            for gpu in {id(x): x for x in settle}.values():
+                gpu.zero_columns_done()
+        if scales is not None:
+            np.multiply(result, sc[sel][:, None], out=result)
+        return result
+
+    def _correlate_groups(self, ser, W, scales_arr, result, settle, support=None):
         S = ser.size
         for g in self._groups:
             g_indices = g.template_indices
@@ -2830,7 +2948,9 @@ class TimeDomainFilterBank:
                 g_dest = np.empty((g_cnt, S), dtype=np.complex64)
             # Only a group written in place with nothing to do after may stay in flight.
             late = is_contiguous_slice and scales_arr is None
-            self._correlate_windows(g, ser, W, 0, g_cnt, g_dest, settle if late else None)
+            # a scratch destination holds anything: all of it is written
+            self._correlate_windows(g, ser, W, 0, g_cnt, g_dest, settle if late else None,
+                                    support=support if is_contiguous_slice else None)
             if scales_arr is not None:
                 np.multiply(g_dest, scales_arr[g_indices][:, None], out=g_dest)
             if not is_contiguous_slice:

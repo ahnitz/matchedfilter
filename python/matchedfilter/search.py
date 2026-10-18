@@ -15,9 +15,7 @@ import time
 import numpy as np
 
 from . import _core
-from .time_domain import (TimeDomainFilterBank, FilterResults, _EMPTY_FILTER_RESULTS,
-                          _corr_partition, _group_spectra)
-from . import _automatic_series_layout, CorrelationFilter
+from .time_domain import TimeDomainFilterBank, FilterResults, _EMPTY_FILTER_RESULTS
 
 __all__ = ["Root", "Inner", "Leaf", "BlockInput", "HierarchicalSearch", "SeriesContext",
            "PeaksContext", "ChunkContext"]
@@ -145,36 +143,19 @@ def _clip(spans, lo, hi):
     return [(max(lo, a), min(hi, b)) for a, b in spans if min(hi, b) > max(lo, a)]
 
 
-def _subtract(regions, covered):
-    """Parts of regions that no covered interval contains."""
-    out = []
-    cov = sorted(covered)
-    for a, b in regions:
-        pos = a
-        for c0, c1 in cov:
-            if c1 <= pos or c0 >= b:
-                continue
-            if c0 > pos:
-                out.append((pos, c0))
-            pos = max(pos, c1)
-            if pos >= b:
-                break
-        if pos < b:
-            out.append((pos, b))
-    return out
-
-
 class _InnerBatch:
     """The inner children of one node, filtered over the node's output.
 
     Real taps on a real series run as packed pairs: two filters as one complex filter
     h_a - i h_b, each placed so its own centre tap is the pair's centre, whose output is
     out_a + i out_b. Neighbours in tap count are paired. Other combinations run one row
-    per child (complex output).
+    per child (complex output). The rows are a correlation bank (TimeDomainFilterBank,
+    engine 'corr'), which chooses their block sizes.
 
-    Each block's forward transform is used for every row while it is in cache (one call per
-    block size). Rows are written into a channel's slots, reused across chunks: a slot reads
-    as if fresh, the correlation over what it was computed for and zero elsewhere."""
+    Rows are written into a channel's slots, reused across chunks. A slot reads as fresh:
+    the correlation over the spans it was computed for and exact zero elsewhere. Each slot
+    remembers those spans, and the bank clears only there (out_support), not the whole
+    row every chunk."""
 
     def __init__(self, children, length, real_input):
         self.children = children
@@ -207,86 +188,34 @@ class _InnerBatch:
         self.row_of = {}
         for r, ci in enumerate(order):
             self.row_of[int(ci)] = divmod(r, 2) if self.packed else (r, None)
-        # Rows by block size (a cost choice: every lag is output whatever the blocking). Each
-        # block size's rows are one correlation plan, loaded from their taps.
-        groups, row_order = _corr_partition(rows_counts)
-        self._groups = []                        # (plan, valid, block starts)
-        self._group_of = {}                      # row -> (group, row's index in its group)
-        for gi, (start, end, n, _) in enumerate(groups):
-            rows = row_order[start:end]
-            c_bad = int(rows_counts[rows].max()) // 2
-            valid = (c_bad, int(n) - c_bad)
-            st, _, _ = _automatic_series_layout(self.length, valid)
-            plan = CorrelationFilter(int(n), ndata=1, ntemplates=len(rows), valid=valid)
-            source = (lambda t=np.ascontiguousarray(taps[rows]), c=rows_counts[rows], n_=int(n):
-                      _group_spectra(t, c, n_, 1.0, False))
-            plan.set_template_source(source)
-            plan.set_templates(source())
-            self._groups.append((plan, valid, st))
-            for li, r in enumerate(rows):
-                self._group_of[int(r)] = (gi, li)
+        self.bank = TimeDomainFilterBank(taps, rows_counts, engine="corr")
         # An output depends on input within its filter's tap reach (centre tap to either end).
-        self.tap_reach = max(max(v[0], p.n - v[1]) for p, v, _ in self._groups)
-        self._chan = {}                          # channel -> per-chunk and slot state
+        self.tap_reach = int(rows_counts.max()) // 2
+        self._chan = {}                          # channel -> slots, series and regions
 
     def prepare(self, channel, series, regions):
-        """The blocks of channel's series whose valid lags meet regions (merged (start, stop)
-        spans) this chunk."""
-        L = self.length
-        if len(series) != L:
+        """channel's series and the merged (start, stop) spans its rows must hold this chunk."""
+        if len(series) != self.length:
             raise ValueError("an inner batch's input length changed between chunks")
-        ser = np.ascontiguousarray(series, dtype=np.float32 if self.real_input else np.complex64)
-        per_group = []
-        for gi, (_, (lo, hi), st) in enumerate(self._groups):
-            b_start = st + lo
-            b_end = np.minimum(st + hi, L)
-            keep = np.zeros(st.size, dtype=bool)
-            for v0, v1 in regions:
-                keep |= (b_start < v1) & (b_end > v0)
-            st_run = st[keep]
-            covered = []
-            if st_run.size:
-                cov = np.stack([st_run + lo, np.minimum(st_run + hi, L)], axis=1).astype(np.int64)
-                brk = np.flatnonzero(cov[1:, 0] > cov[:-1, 1]) + 1
-                covered = [(int(c[0, 0]), int(c[-1, 1])) for c in np.split(cov, brk)]
-            per_group.append((st_run, covered))
-        state = self._chan.setdefault(channel, {"slots": None, "cov": []})
-        state["groups"], state["series"] = per_group, ser
+        state = self._chan.setdefault(channel, {"slots": None, "support": []})
+        state["series"] = np.ascontiguousarray(
+            series, dtype=np.float32 if self.real_input else np.complex64)
+        state["regions"] = regions
 
     def compute(self, channel, rows):
-        """Rows into channel's first len(rows) slots. Returns row -> slot."""
-        L = self.length
+        """Rows (ascending) into channel's first len(rows) slots. Returns row -> slot."""
         state = self._chan[channel]
         k = len(rows)
         if state["slots"] is None or state["slots"].shape[0] < k:
-            state["slots"] = np.zeros((k, L), dtype=np.complex64)
-            state["cov"] = [[] for _ in range(k)]
-        slots, cov = state["slots"], state["cov"]
-        slot_of = {}
-        runs = []                                # (group, first local row, first slot, count)
-        for j, r in enumerate(rows):
-            gi, li = self._group_of[r]
-            covered = state["groups"][gi][1]
-            for a, b in _subtract(cov[j], covered):      # what the slot's last row left there
-                slots[j, a:b] = 0
-            cov[j] = covered
-            slot_of[r] = j
-            if runs and runs[-1][0] == gi and runs[-1][1] + runs[-1][3] == li:
-                runs[-1][3] += 1
-            else:
-                runs.append([gi, li, j, 1])
-        # consecutive rows of one block size in one call: each block's forward transform serves
-        # all of them
-        for gi, li, j, nt in runs:
-            st_run = state["groups"][gi][0]
-            if not st_run.size:
-                continue
-            plan, (lo, hi), _ = self._groups[gi]
-            ep = plan._continuous_plan()
-            run = (ep.correlate_series_continuous_real if self.real_input
-                   else ep.correlate_series_continuous)
-            run(state["series"], st_run, lo, hi, li, nt, slots[j:j + nt])
-        return slot_of
+            state["slots"] = np.zeros((k, self.length), dtype=np.complex64)
+            state["support"] = [[] for _ in range(k)]      # where each slot may be nonzero
+        support = state["support"]
+        self.bank.correlate_series(state["series"], windows=state["regions"], templates=rows,
+                                   out=state["slots"][:k],
+                                   out_support=_merge([w for j in range(k) for w in support[j]]))
+        for j in range(k):
+            support[j] = state["regions"]
+        return {r: j for j, r in enumerate(rows)}
 
     def view(self, channel, slot, pos):
         """Child pos's series in the slot its row was computed into."""

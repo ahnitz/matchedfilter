@@ -114,6 +114,34 @@ def test_normalize_windows_rejects(bad, exc):
         _normalize_windows(bad, 100)
 
 
+def test_run_intersection_and_array_windows_match_sample_masks():
+    """_intersect_runs is the sample-wise AND of two run lists; an integer (K, 2) array of
+    windows normalises as the same pairs given one by one."""
+    from matchedfilter.time_domain import _intersect_runs, _interval_runs
+    rng = np.random.default_rng(0)
+    n = 3000
+    for _ in range(1000):
+        def runs():
+            k = rng.integers(0, 12)
+            a = rng.integers(0, n, k)
+            return _interval_runs(n, a, a + rng.integers(0, 400, k))
+        x, y = runs(), runs()
+        mx, my = np.zeros(n, bool), np.zeros(n, bool)
+        for a, b in x:
+            mx[a:b] = True
+        for a, b in y:
+            my[a:b] = True
+        got = np.zeros(n, bool)
+        for a, b in _intersect_runs(x, y):
+            assert a < b and not got[a:b].any()
+            got[a:b] = True
+        np.testing.assert_array_equal(got, mx & my)
+        w = rng.integers(0, n + 200, (rng.integers(0, 6), 2))
+        w[:, 1] = w[:, 0] + rng.integers(-5, 300, len(w))
+        np.testing.assert_array_equal(_normalize_windows(w, n),
+                                      _normalize_windows([tuple(r) for r in w.tolist()], n))
+
+
 # ------------------------------------------------------- 2. K=1 layout is today's layout
 
 def _old_narrow(S_, c_bad, N_valid, v_start, v_stop):
@@ -329,6 +357,62 @@ def test_correlate_overwrites_garbage_out():
 
 
 @pytest.mark.parametrize("layout", ["contiguous", "interleaved"])
+def test_correlate_selected_templates_are_the_full_banks_rows(layout):
+    """templates=[...]: row j is template templates[j] of the full-bank call, bit for bit, in
+    any order, for runs inside a group and across groups, writing every sample of out."""
+    ser = _analytic(12)
+    bank = _corr_bank(layout)
+    for w in (None, GEOMETRIES["narrow"], GEOMETRIES["edges"]):
+        full = bank.correlate_series(ser, windows=w)
+        for sel in ([0, 1, 2, 3], [3, 7, 8, 11], [11, 0, 5], [6]):
+            out = np.full((len(sel), S), 7 + 7j, np.complex64)
+            got = bank.correlate_series(ser, windows=w, templates=sel, out=out)
+            assert got is out
+            np.testing.assert_array_equal(got, full[sel])
+        assert np.count_nonzero(full) > 0
+    sc = np.linspace(0.5, 2.0, bank.n_templates).astype(np.float32)
+    np.testing.assert_array_equal(bank.correlate_series(ser, templates=[2, 9], scales=sc),
+                                  bank.correlate_series(ser, scales=sc)[[2, 9]])
+    with pytest.raises(ValueError):
+        bank.correlate_series(ser, templates=[1, 1])
+    with pytest.raises(IndexError):
+        bank.correlate_series(ser, templates=[bank.n_templates])
+
+
+@pytest.mark.parametrize("layout", ["contiguous", "interleaved"])
+def test_correlate_out_support_equals_a_fresh_call(layout):
+    """out reused with out_support = the windows of the call that filled it gives exactly a
+    fresh call's output: zero outside the new windows, block overhangs included."""
+    ser = _analytic(14)
+    bank = _corr_bank(layout)
+    seq = [None, GEOMETRIES["narrow"], GEOMETRIES["edges"], [], GEOMETRIES["touching"],
+           GEOMETRIES["narrow"]]
+    for kw in (dict(), dict(templates=[1, 2, 3, 9]), dict(template_index=5)):
+        out = None
+        prev = None
+        for w in seq:
+            fresh = bank.correlate_series(ser, windows=w, **kw)
+            if out is None:
+                out = np.zeros_like(fresh)
+                prev = []
+            got = bank.correlate_series(ser, windows=w, out=out, out_support=prev, **kw)
+            np.testing.assert_array_equal(got, fresh)
+            prev = [(0, S)] if w is None else w
+    with pytest.raises(ValueError):
+        bank.correlate_series(ser, out_support=[(0, 10)])
+
+
+def test_correlate_selected_real_series_on_cpu():
+    """A real series stays real (half-size transforms) for a selection too."""
+    r = np.random.default_rng(13)
+    ser = r.standard_normal(S).astype(np.float32)
+    bank = _corr_bank("contiguous")
+    full = bank.correlate_series(ser, windows=GEOMETRIES["narrow"])
+    np.testing.assert_array_equal(
+        bank.correlate_series(ser, windows=GEOMETRIES["narrow"], templates=[4, 5, 9]), full[[4, 5, 9]])
+
+
+@pytest.mark.parametrize("layout", ["contiguous", "interleaved"])
 def test_correlate_on_gpu_including_stale_workspace(layout):
     gpu = _gpu()
     if gpu is None:
@@ -382,9 +466,9 @@ def test_correlate_series_computes_only_intersecting_blocks(layout, monkeypatch)
     calls = []
     orig = TimeDomainFilterBank._correlate_group
 
-    def spy(self, g, ser, st, t0, nt, dest):
+    def spy(self, g, ser, st, t0, nt, dest, *bounds):
         calls.append((id(g), np.asarray(st).tolist()))      # per group: several may share a size
-        return orig(self, g, ser, st, t0, nt, dest)
+        return orig(self, g, ser, st, t0, nt, dest, *bounds)
 
     monkeypatch.setattr(TimeDomainFilterBank, "_correlate_group", spy)
     w = GEOMETRIES["narrow"]
@@ -396,8 +480,9 @@ def test_correlate_series_computes_only_intersecting_blocks(layout, monkeypatch)
         st, _, _ = _automatic_series_layout(S, cp.valid)
         want = [int(s) for s in st
                 if any(int(s) + lo < b and min(int(s) + hi, S) > a for a, b in W)]
-        got = [c[1] for c in calls if c[0] == id(g)]
-        assert got == [want] and 0 < len(want) < len(st) // 2
+        # every intersecting block once (edge blocks in calls of their own), no other block
+        got = sorted(b for c in calls if c[0] == id(g) for b in c[1])
+        assert got == want and 0 < len(want) < len(st) // 2
     calls.clear()
     assert not np.any(bank.correlate_series(_analytic(14), windows=[]))
     assert calls == []

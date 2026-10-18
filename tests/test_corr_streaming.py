@@ -54,3 +54,45 @@ def test_continuous_correlation_streaming_stores_are_bit_identical(monkeypatch):
         ep.correlate_series_continuous(ser, st, lo, hi, 0, nt, d)
         out[no_stream] = d
     assert np.array_equal(out[False].view(np.uint32), out[True].view(np.uint32))
+
+
+@pytest.mark.parametrize("real", [False, True])
+def test_per_block_bounds_narrow_only_the_copy_out(real):
+    """bounds (one [lo, hi) per block inside the valid span) writes exactly those samples of
+    each block, bit-identical to the unbounded call there, and leaves every other sample as it
+    was; a bound outside the valid span is refused."""
+    from matchedfilter import CorrelationFilter, _automatic_series_layout
+    n, nt, taps = 4096, 5, 301
+    rng = np.random.default_rng(4)
+    h = np.zeros((nt, n), np.complex64)
+    h[:, :taps] = rng.standard_normal((nt, taps)) + 1j * rng.standard_normal((nt, taps))
+    cf = CorrelationFilter(n, ndata=1, ntemplates=nt, valid=(taps // 2, n - taps // 2))
+    cf.set_templates(np.fft.fft(h, axis=1).astype(np.complex64))
+    lo, hi = cf.valid
+    L = 9 * n
+    ser = rng.standard_normal(L).astype(np.float32)
+    if not real:
+        ser = (ser + 1j * rng.standard_normal(L)).astype(np.complex64)
+    st, _, _ = _automatic_series_layout(L, cf.valid)
+    ep = cf._execution_plan()
+    run = ep.correlate_series_continuous_real if real else ep.correlate_series_continuous
+    full = np.zeros((nt, L), np.complex64)
+    run(ser, st, lo, hi, 0, nt, full)
+    bounds = np.empty((len(st), 2), np.uintp)
+    bounds[:, 0], bounds[:, 1] = lo, hi
+    bounds[0] = (lo + 37, hi)                     # a narrower start, an odd one
+    bounds[-1] = (lo, lo + 1001)                  # a narrower end
+    bounds[len(st) // 2] = (lo + 500, hi - 700)   # both
+    sentinel = np.complex64(7 + 7j)
+    got = np.full((nt, L), sentinel, np.complex64)
+    run(ser, st, lo, hi, 0, nt, got, bounds)
+    inside = np.zeros(L, bool)
+    for s, (a, b) in zip(st, bounds):
+        inside[int(s) + int(a):min(int(s) + int(b), L)] = True
+    assert np.array_equal(got.view(np.uint32)[:, np.repeat(inside, 2)],
+                          full.view(np.uint32)[:, np.repeat(inside, 2)])
+    assert np.all(got[:, ~inside] == sentinel) and (~inside).any()
+    bad = bounds.copy()
+    bad[1] = (lo - 1, hi)
+    with pytest.raises(RuntimeError):
+        run(ser, st, lo, hi, 0, nt, got, bad)

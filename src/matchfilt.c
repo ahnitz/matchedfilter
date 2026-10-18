@@ -1021,9 +1021,12 @@ static void out_copy(float *dst,const float *src,size_t bytes,int stream){
 int ap_mf_correlate_series_continuous(ap_mf_plan *p,const float *series,
                                       size_t nseries,const size_t *starts,
                                       int nblocks,size_t lo,size_t hi,
-                                      int t0,int nt,float *out){
+                                      int t0,int nt,float *out,const size_t *bounds){
   if(!p||!series||!starts||!out||nblocks<1||t0<0||nt<1||t0+nt>p->nt
      ||lo>=hi||hi>p->n) return -1;
+  if(bounds)
+    for(int b=0;b<nblocks;b++)
+      if(bounds[2*b]<lo||bounds[2*b]>=bounds[2*b+1]||bounds[2*b+1]>hi) return -1;
   const size_t n=p->n;
   const int W=p->pb;
   /* this call's output footprint: nt rows over the blocks' valid spans */
@@ -1040,15 +1043,16 @@ int ap_mf_correlate_series_continuous(ap_mf_plan *p,const float *series,
        engine's own data rows are in its element order, so they are not reused. */
     for(int b=0;b<nblocks;b++){
       const size_t start=starts[b];
-      if(start>=nseries||lo>=nseries-start) continue;
-      const size_t end=hi<nseries-start?hi:nseries-start;
+      const size_t blo=bounds?bounds[2*b]:lo, bhi=bounds?bounds[2*b+1]:hi;
+      if(start>=nseries||blo>=nseries-start) continue;
+      const size_t end=bhi<nseries-start?bhi:nseries-start;
       size_t have=nseries-start; if(have>n) have=n;
       if(ap_accel_block(p->accel,series+2*start,have,1.0f/(float)n)) return -1;
       for(int t=0;t<nt;t++){
         const float *tr,*ti;
         accel_template(p,t0+t,&tr,&ti);
-        if(ap_accel_corr(p->accel,NULL,NULL,tr,ti,lo,end-lo,
-                         out+2*((size_t)t*nseries+start+lo))) return -1;
+        if(ap_accel_corr(p->accel,NULL,NULL,tr,ti,blo,end-blo,
+                         out+2*((size_t)t*nseries+start+blo))) return -1;
       }
     }
     return 0;
@@ -1058,9 +1062,10 @@ int ap_mf_correlate_series_continuous(ap_mf_plan *p,const float *series,
     if(series_spectra(p,series,nseries,starts+b0,g)) return -1;
     for(int d=0;d<g;d++){
       const size_t start=starts[b0+d];
-      if(start>=nseries||lo>=nseries-start) continue;
-      const size_t end=hi<nseries-start?hi:nseries-start;
-      const size_t bytes=2*(end-lo)*sizeof(float);
+      const size_t blo=bounds?bounds[2*(b0+d)]:lo, bhi=bounds?bounds[2*(b0+d)+1]:hi;
+      if(start>=nseries||blo>=nseries-start) continue;
+      const size_t end=bhi<nseries-start?bhi:nseries-start;
+      const size_t bytes=2*(end-blo)*sizeof(float);
       const float *Dr=p->dre+(size_t)d*n, *Di=p->dim+(size_t)d*n;
       if(W){
         if(p->ebr){
@@ -1083,8 +1088,8 @@ int ap_mf_correlate_series_continuous(ap_mf_plan *p,const float *series,
           }
           if(ap_corr_prod_batch(p->fft,Dr,Di,Tr,Ti,cnt,p->corrbuf)) return -1;
           for(int t=0;t<cnt;t++)
-            out_copy(out+2*((size_t)(tt+t)*nseries+start+lo),
-                     p->corrbuf+2*((size_t)t*n+lo),bytes,stream);
+            out_copy(out+2*((size_t)(tt+t)*nseries+start+blo),
+                     p->corrbuf+2*((size_t)t*n+blo),bytes,stream);
         }
       }else{
         for(int t=0;t<nt;t++){
@@ -1096,7 +1101,7 @@ int ap_mf_correlate_series_continuous(ap_mf_plan *p,const float *series,
             mulspec(Dr,Di,tr,ti,p->pr,p->pi,n);
             if(ap_corr_split(p->fft,p->pr,p->pi,p->scratch)) return -1;
           }
-          out_copy(out+2*((size_t)t*nseries+start+lo),p->scratch+2*lo,bytes,stream);
+          out_copy(out+2*((size_t)t*nseries+start+blo),p->scratch+2*blo,bytes,stream);
         }
       }
     }
@@ -1114,7 +1119,7 @@ int ap_mf_correlate_series_continuous(ap_mf_plan *p,const float *series,
 int ap_mf_correlate_series_continuous_real(ap_mf_plan *p,const float *series,
                                            size_t nseries,const size_t *starts,
                                            int nblocks,size_t lo,size_t hi,
-                                           int t0,int nt,float *out){
+                                           int t0,int nt,float *out,const size_t *bounds){
   if(!p||p->n<4) return -1;
   if(!p->half_fft){
     const size_t h=p->n/2;
@@ -1136,7 +1141,8 @@ int ap_mf_correlate_series_continuous_real(ap_mf_plan *p,const float *series,
     if(!p->sfwd||!p->sspec) return -1;
   }
   p->real_series=1;
-  const int r=ap_mf_correlate_series_continuous(p,series,nseries,starts,nblocks,lo,hi,t0,nt,out);
+  const int r=ap_mf_correlate_series_continuous(p,series,nseries,starts,nblocks,lo,hi,t0,nt,out,
+                                                bounds);
   p->real_series=0;
   return r;
 }
