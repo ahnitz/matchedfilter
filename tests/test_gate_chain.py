@@ -827,3 +827,36 @@ def test_chain_trial_lock_persists(monkeypatch, tmp_path):
     mf._store_chain_lock(tkey, (256, 512))
     assert mf._stored_chain_lock(tkey, ((256, 512), (256, 1024))) == (256, 512)
     assert mf._stored_chain_lock(tkey, ((512,), (256, 1024))) is None     # not on this shortlist
+
+
+def test_price_block_sizes_stops_at_the_first_dearer_size(monkeypatch):
+    """A size dearer than the best -- even within TIE -- ends the search (it is still listed for
+    the tie-break): the next size is not priced, since pricing it means calibrating and
+    simulating at that n. With `ahead`, that many more dearer sizes are priced."""
+    from matchedfilter import gatechain as gc
+    priced = []
+    # modelled cost per valid sample and template for each n (choose_chain's cost / nvalid)
+    pair = {2048: 1.00, 4096: 1.00 * (1 + gc.TIE / 2), 8192: 0.5, 16384: 9.0}
+
+    class _Cost:
+        block = 0.0
+        host_block = 0.0
+
+    def fake_costs(n, device=None, ntemplates=None, group=None):
+        priced.append(n)
+        return _Cost()
+
+    monkeypatch.setattr(gc, "device_costs", fake_costs)
+    monkeypatch.setattr(gc, "rebin_profile", lambda fine, df, rate, n: np.ones(n))
+    monkeypatch.setattr(gc, "choose_chain",
+                        lambda ref, n, snr, fd, **kw: ({"cost": pair[n] * (n - 99), "chain": (n // 8,)}, []))
+    gc._PRICE_CACHE.clear()
+    fine = np.ones(2048)
+    out = gc.price_block_sizes(fine, 1.0, 2048.0, 100, 0, 64, 6.0, 1e-3, [2048, 4096, 8192, 16384])
+    assert priced == [2048, 4096] and [o[1] for o in out] == [2048, 4096]
+    gc._PRICE_CACHE.clear(); priced.clear()
+    out = gc.price_block_sizes(fine, 1.0, 2048.0, 100, 0, 64, 6.0, 1e-3, [2048, 4096, 8192, 16384],
+                               ahead=2)
+    # 4096 is the first dearer size, 8192 the new best, 16384 the second dearer one
+    assert priced == [2048, 4096, 8192, 16384] and out[0][1] == 8192
+    gc._PRICE_CACHE.clear()
