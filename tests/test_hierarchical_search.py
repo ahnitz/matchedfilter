@@ -309,3 +309,68 @@ def test_nested_inner_series_cover_their_childrens_reach():
 def test_a_leaf_threshold_option_is_refused():
     with pytest.raises(ValueError, match="leaf threshold"):
         HierarchicalSearch([], threshold=6.0, leaf_options=dict(threshold=5.0))
+
+
+def test_hierarchy_construction_and_envelope_contracts():
+    rng = np.random.default_rng(9)
+    with pytest.raises(ValueError, match="inner filter count"):
+        Inner(np.ones(5, np.float32), count=9)
+    with pytest.raises(ValueError, match="inner filter count"):
+        Inner(np.ones(5, np.float32), count=0)
+    with pytest.raises(ValueError, match="one tag per block"):
+        BlockInput([_spec(rng), _spec(rng)], [VALID, VALID], lambda r, b: 1.0, tags=["only_one"])
+    with pytest.raises(ValueError, match="envelope_floor"):
+        HierarchicalSearch([], threshold=6.0, envelope_floor=1e-6)
+    with pytest.raises(ValueError, match="envelope_floor"):
+        HierarchicalSearch([], threshold=6.0, envelope_floor=float("nan"))
+
+    shared_leaf = Leaf(_complex_taps(rng, (101,)), (101,))
+    p1 = Inner(_real_taps(rng, 51), children=[shared_leaf])
+    p2 = Inner(_real_taps(rng, 51), children=[shared_leaf])
+    root_shared = Root(_spec(rng), BAND, children=[p1, p2])
+    with pytest.raises(ValueError, match="shared across multiple parents"):
+        HierarchicalSearch([root_shared], threshold=5.0, leaf_options=LEAF)
+
+    root = _tree(rng, inner_counts=(301,))
+    inputs = _inputs(rng, nblocks=1)
+    search = HierarchicalSearch([root], threshold=0.0, leaf_options=LEAF)
+    with pytest.raises(ValueError, match="non-finite"):
+        _collect(search, inputs,
+                 on_series=lambda ctx: {c: (lambda t: np.full(t.shape, np.nan)) for c in ctx.channels})
+
+
+def test_min_pad_and_support_bounds_checked_in_hooks():
+    rng = np.random.default_rng(10)
+    lf = Leaf(_complex_taps(rng, (33,)), (33,), node_id="leaf")
+    inner = Inner(_real_taps(rng, 65), children=[lf], node_id="inner")
+    root = Root(_spec(rng), BAND, children=[inner], node_id="root")
+    inputs = _inputs(rng, nblocks=1, channels=("A", "B"))
+    narrow = [(12000, 13000)]
+
+    def windows(leaf, chunk, ch, extra):
+        if ch == "B":
+            return [(a - extra, b + extra) for a, b in narrow]
+        return []
+
+    search = HierarchicalSearch([root], threshold=0.0, leaf_options=LEAF, context=100,
+                                min_pad=4096)
+    assert search.pad(root) >= 4096
+
+    def on_peaks(ctx):
+        # Channel B has support covering narrow +- (100 + min_pad)
+        sup_b = ctx.support("B")
+        assert len(sup_b) == 1
+        assert sup_b[0][0] <= 12000 - 100 - 4096
+        assert sup_b[0][1] >= 13000 + 100 + 4096
+        ctx.series("B", span=(12000 - 2048, 13000 + 2048))
+        # Outside B's computed support raises ValueError
+        with pytest.raises(ValueError, match="outside computed support"):
+            ctx.series("B", span=(1000, 2000))
+        with pytest.raises(ValueError, match="outside computed series support"):
+            ctx.refilter("B", windows=slice(1000, 2000), binsize=64, threshold=0.0)
+        # Channel A had empty windows -> empty support -> refilter on A raises ValueError
+        assert ctx.support("A") == []
+        with pytest.raises(ValueError, match="outside computed series support"):
+            ctx.refilter("A", windows=slice(12000, 12500), binsize=64, threshold=0.0)
+
+    search.run(inputs, windows=windows, on_peaks=on_peaks)

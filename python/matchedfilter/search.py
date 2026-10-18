@@ -49,6 +49,9 @@ class Inner:
         if self.taps.ndim != 1:
             raise ValueError("an inner filter's taps are one row")
         self.count = int(len(self.taps) if count is None else count)
+        if not (1 <= self.count <= len(self.taps)):
+            raise ValueError("inner filter count (%d) must be in [1, %d]"
+                             % (self.count, len(self.taps)))
         self.children = list(children)
         self.node_id = node_id
 
@@ -83,6 +86,8 @@ class BlockInput:
         if len(self.valid) != len(self.spectra):
             raise ValueError("one valid span per block")
         self.tags = list(tags) if tags is not None else [None] * len(self.spectra)
+        if len(self.tags) != len(self.spectra):
+            raise ValueError("one tag per block")
         self.root_scale = root_scale
 
 
@@ -101,29 +106,85 @@ class SeriesContext(NamedTuple):
     series: Dict[str, np.ndarray]
 
 
+def _normalize_windows(windows, length):
+    if windows is None:
+        return [(0, length)]
+    if isinstance(windows, slice):
+        start, stop, _ = windows.indices(length)
+        return [(start, stop)] if stop > start else []
+    out = []
+    for w in windows:
+        if isinstance(w, slice):
+            a, b, _ = w.indices(length)
+        else:
+            a, b = int(w[0]), int(w[1])
+        if b > a:
+            out.append((a, b))
+    return out
+
+
+def _spans_cover(support, requested):
+    for a, b in requested:
+        if b <= a:
+            continue
+        if not any(sa <= a and b <= sb for sa, sb in support):
+            return False
+    return True
+
+
 class PeaksContext:
     """A leaf group's peaks for one chunk, with read access to its ancestors' series."""
 
-    def __init__(self, search, root, leaf, chunk, channels, tags, peaks, held, scales):
+    def __init__(self, search, root, leaf, chunk, channels, tags, peaks, held, scales,
+                 support=None):
         self.root, self.leaf, self.chunk = root, leaf, chunk
         self.channels, self.tags, self.peaks = channels, tags, peaks
         self._search, self._held, self._scales = search, held, scales
+        self._support = support or {}
 
     def envelope(self, channel):
         """The threshold envelope's values at channel's peaks (aligned with them), as the
         search evaluated them -- e(sample - lag) -- or None without an envelope."""
         return self._scales.get(channel)
 
-    def series(self, channel, node=None):
-        """The output of node (default: this leaf's parent) in channel, for this chunk."""
+    def support(self, channel, node=None):
+        """The computed (start, stop) intervals for node (default: this leaf's parent) in
+        channel for this chunk."""
         node = self._search._parent[id(self.leaf)] if node is None else node
-        return self._held[channel][id(node)]
+        chan_sup = self._support.get(channel)
+        if chan_sup is not None and id(node) in chan_sup:
+            return list(chan_sup[id(node)])
+        ser = self._held[channel][id(node)]
+        return [(0, len(ser))]
+
+    def series(self, channel, node=None, span=None):
+        """The output of node (default: this leaf's parent) in channel, for this chunk.
+        Note: returns a callback-scoped view; copy if retaining past the hook. If span=(start,
+        stop) is given, verifies that interval lies within the node's computed support."""
+        node = self._search._parent[id(self.leaf)] if node is None else node
+        ser = self._held[channel][id(node)]
+        if span is not None:
+            req = _clip([(int(span[0]), int(span[1]))], 0, len(ser))
+            sup = self.support(channel, node)
+            if not _spans_cover(sup, req):
+                raise ValueError("requested series span %r in channel %r lies outside "
+                                 "computed support %r" % (span, channel, sup))
+        return ser
 
     def refilter(self, channel, windows, binsize, threshold, template_index=None):
         """This leaf bank over its parent's series in channel, in other windows, bin size
-        and threshold. No envelope applies."""
+        and threshold. No envelope applies. Raises ValueError if windows fall outside the
+        parent series' computed support in channel."""
+        ser = self.series(channel)
+        req = _clip(_normalize_windows(windows, len(ser)), 0, len(ser))
+        if not req and windows is not None:
+            return _EMPTY_FILTER_RESULTS
+        sup = self.support(channel)
+        if not _spans_cover(sup, req):
+            raise ValueError("refilter windows %r in channel %r lie outside computed "
+                             "series support %r" % (windows, channel, sup))
         bank = self._search.leaf_bank(self.root, self.leaf)
-        return bank.filter_series(self.series(channel), windows=windows, binsize=binsize,
+        return bank.filter_series(ser, windows=windows, binsize=binsize,
                                   threshold=threshold, template_index=template_index)
 
 
@@ -189,6 +250,8 @@ class _InnerBatch:
         for r, ci in enumerate(order):
             self.row_of[int(ci)] = divmod(r, 2) if self.packed else (r, None)
         self.bank = TimeDomainFilterBank(taps, rows_counts, engine="corr")
+        for g in self.bank._groups:
+            g.get_correlation_plan()
         # An output depends on input within its filter's tap reach (centre tap to either end).
         self.tap_reach = int(rows_counts.max()) // 2
         self._chan = {}                          # channel -> slots, series and regions
@@ -233,6 +296,7 @@ class _Step(NamedTuple):
     active: list
     tags: dict
     held: dict          # channel -> node id -> series
+    support: dict       # channel -> node id -> list of computed (start, stop) spans
     need: dict          # (leaf id, channel) -> spans its parent's series must hold
     win: dict           # (leaf id, channel) -> searched windows
     envelopes: dict
@@ -250,19 +314,31 @@ class HierarchicalSearch:
     gates dismissed. leaf_options: keyword arguments for each leaf's TimeDomainFilterBank
     (engine, false_dismissal, binsize, coarse_band_hz, first_stage_snr, device,
     fft_lengths, tap_sample_rate, data_sample_rate). context: samples beyond a leaf's
-    windows over which hooks may read or refilter its parent's series."""
+    windows over which hooks may read or refilter its parent's series. min_pad: minimum
+    guard samples any leaf's parent series holds past its windows (e.g. for chisq blocks)."""
 
-    def __init__(self, roots, threshold, envelope_floor=1.0, leaf_options=None, context=0):
+    _MIN_ENVELOPE_FLOOR = 1e-3
+
+    def __init__(self, roots, threshold, envelope_floor=1.0, leaf_options=None, context=0,
+                 min_pad=0):
         self.roots = list(roots)
         self.threshold = float(threshold)
+        if not (np.isfinite(self.threshold) and self.threshold >= 0.0):
+            raise ValueError("threshold must be finite and non-negative")
         self.envelope_floor = float(envelope_floor)
-        if not self.envelope_floor > 0:
-            raise ValueError("envelope_floor must be positive")
+        if not (np.isfinite(self.envelope_floor) and self.envelope_floor >= self._MIN_ENVELOPE_FLOOR):
+            raise ValueError("envelope_floor (%g) must be finite and >= %g"
+                             % (self.envelope_floor, self._MIN_ENVELOPE_FLOOR))
         self.leaf_options = dict(leaf_options or {})
         if "threshold" in self.leaf_options:
             raise ValueError("the leaf threshold is the search's (threshold, envelope_floor), "
                              "not a leaf option")
         self.context = int(context)
+        if self.context < 0:
+            raise ValueError("context must be non-negative")
+        self.min_pad = int(min_pad)
+        if self.min_pad < 0:
+            raise ValueError("min_pad must be non-negative")
         self.timings = dict(root=0.0, inner=0.0, leaf=0.0, hooks=0.0, setup=0.0)
         self._parent = {}
         self._kids = {}                  # node -> (inner children, leaf children)
@@ -270,11 +346,18 @@ class HierarchicalSearch:
         self._inner = {}
         self._root_plans = {}
         for root in self.roots:
+            if not isinstance(root, Root):
+                raise TypeError("roots must be Root nodes")
             self._index(root)
 
     def _index(self, node):
+        if id(node) in self._kids:
+            raise ValueError("a node appears more than once in the hierarchy")
+        self._kids[id(node)] = None
         inner, leaves = [], []
         for child in node.children:
+            if id(child) in self._parent or id(child) in self._kids:
+                raise ValueError("a child node is shared across multiple parents or forms a cycle")
             self._parent[id(child)] = node
             if isinstance(child, Inner):
                 inner.append(child)
@@ -310,10 +393,10 @@ class HierarchicalSearch:
 
     def pad(self, root):
         """The most samples any leaf's parent series holds past the leaf's windows below root:
-        the longest block any of root's leaf banks uses or may still choose. Builds (and
-        calibrates) every leaf bank below root."""
-        return max(int(self.leaf_bank(root, lf).max_block_length)
-                   for lf in self._leaves_below(root))
+        the longest block any of root's leaf banks uses or may still choose (at least min_pad).
+        Builds (and calibrates) every leaf bank below root."""
+        return max([self.min_pad] + [int(self.leaf_bank(root, lf).max_block_length)
+                                     for lf in self._leaves_below(root)])
 
     def _batches(self, node, length):
         """Build the inner batches of node's subtree for series of length samples (once)."""
@@ -355,7 +438,8 @@ class HierarchicalSearch:
         nchunks = max(len(inputs[c].spectra) for c in channels) if channels else 0
         for root in self.roots:
             leaves = list(self._leaves_below(root))
-            pads = {id(lf): int(self.leaf_bank(root, lf).max_block_length) for lf in leaves}
+            pads = {id(lf): max(self.min_pad, int(self.leaf_bank(root, lf).max_block_length))
+                    for lf in leaves}
             for k in range(nchunks):
                 active = [c for c in channels if k < len(inputs[c].spectra)]
                 if not active:
@@ -376,6 +460,7 @@ class HierarchicalSearch:
                 if not any(win.values()):
                     continue
                 held = {c: {} for c in active}
+                support = {c: {} for c in active}
                 t0 = time.perf_counter()
                 for c in active:
                     spec = inputs[c].spectra[k]
@@ -386,6 +471,7 @@ class HierarchicalSearch:
                                             root.spectrum, k0, k1,
                                             float(inputs[c].root_scale(root, k)), out)
                     held[c][id(root)] = out
+                    support[c][id(root)] = [(0, n)]
                 self.timings["root"] += time.perf_counter() - t0
                 self._batches(root, len(out))
                 envelopes = {}
@@ -404,7 +490,8 @@ class HierarchicalSearch:
                         while node is not root:
                             live.add(id(node))
                             node = self._parent[id(node)]
-                step = _Step(root, k, active, tags, held, need, win, envelopes, pads, live, on_peaks)
+                step = _Step(root, k, active, tags, held, support, need, win, envelopes, pads,
+                             live, on_peaks)
                 self._walk(root, step)
                 if on_chunk is not None:
                     on_chunk(ChunkContext(k, active, tags))
@@ -426,23 +513,28 @@ class HierarchicalSearch:
         t0 = time.perf_counter()
         rows = sorted({batch.row_of[pos][0] for pos in wanted})
         slot_of = {}
+        regions_by_chan = {}
         for c in step.active:
             spans = []
             for pos in wanted:
                 self._span(batch.children[pos], c, step.need, step.pads, spans)
-            batch.prepare(c, held[c][id(node)], _clip(_merge(spans), 0, L))
+            regions = _clip(_merge(spans), 0, L)
+            regions_by_chan[c] = regions
+            batch.prepare(c, held[c][id(node)], regions)
             slot_of[c] = batch.compute(c, rows)
         members = sorted(wanted, key=lambda p: batch.row_of[p])
         for pos in members:
             child = batch.children[pos]
             for c in step.active:
                 held[c][id(child)] = batch.view(c, slot_of[c][batch.row_of[pos][0]], pos)
+                step.support[c][id(child)] = regions_by_chan[c]
         self.timings["inner"] += time.perf_counter() - t0
         for pos in members:
             self._walk(batch.children[pos], step)
         for pos in members:
             for c in step.active:
                 del held[c][id(batch.children[pos])]
+                step.support[c].pop(id(batch.children[pos]), None)
 
     def _search_leaf(self, lf, step):
         """lf's peak search in every channel of the step, and its on_peaks."""
@@ -469,7 +561,7 @@ class HierarchicalSearch:
         if step.on_peaks is not None:
             t0 = time.perf_counter()
             step.on_peaks(PeaksContext(self, step.root, lf, step.chunk, step.active, step.tags,
-                                       peaks, step.held, scales))
+                                       peaks, step.held, scales, step.support))
             self.timings["hooks"] += time.perf_counter() - t0
 
     def _span(self, node, channel, need, pads, out):
@@ -497,6 +589,11 @@ class HierarchicalSearch:
             return res, np.empty(0, dtype=np.float64)
         t = np.clip(res.sample_indices - leaf.lags[res.template_indices], 0, length - 1)
         e = np.asarray(envelope(t), dtype=np.float64)
+        if e.shape != t.shape:
+            raise ValueError("threshold envelope returned shape %s for %s samples"
+                             % (e.shape, t.shape))
+        if not np.isfinite(e).all():
+            raise ValueError("threshold envelope returned non-finite values")
         if e.min() < self.envelope_floor * (1 - 1e-6):
             raise ValueError("a threshold envelope fell below envelope_floor (%g < %g)"
                              % (e.min(), self.envelope_floor))

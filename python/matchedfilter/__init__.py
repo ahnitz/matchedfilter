@@ -506,8 +506,11 @@ class MatchedFilter:
         self._template_source = None
         self.performance_stats = {
             "total_calls": 0,
+            "timed_calls": 0,
             "total_time_s": 0.0,
-            "batch_times_ms": []
+            "min_batch_time_ms": None,
+            "max_batch_time_ms": None,
+            "batch_times_ms": [],
         }
         self._in_series_call = False
         self._gpu = None
@@ -516,6 +519,24 @@ class MatchedFilter:
         self._gt1 = 0          # GPU: pairs tier 0 passed (cascade chains), for _roofline
         self._ddirty = True
         self._tdirty = True
+
+    _MAX_BATCH_TIMINGS = 256
+
+    def _record_batch_time(self, dt):
+        stats = self.performance_stats
+        ms = dt * 1000.0
+        stats["total_calls"] = stats.get("total_calls", 0) + 1
+        timed = stats["timed_calls"] = stats.get("timed_calls", 0) + 1
+        stats["total_time_s"] = stats.get("total_time_s", 0.0) + dt
+        prev_min = stats.get("min_batch_time_ms")
+        stats["min_batch_time_ms"] = ms if prev_min is None or ms < prev_min else prev_min
+        prev_max = stats.get("max_batch_time_ms")
+        stats["max_batch_time_ms"] = ms if prev_max is None or ms > prev_max else prev_max
+        times = stats.setdefault("batch_times_ms", [])
+        if len(times) < self._MAX_BATCH_TIMINGS:
+            times.append(ms)
+        else:
+            times[(timed - 1) % self._MAX_BATCH_TIMINGS] = ms
 
     # ---- GPU -----------------------------------------------------------
     #
@@ -855,17 +876,12 @@ class MatchedFilter:
         example in ``matchedfilter.tutorial``, which compared a full run
         against a windowed one and printed the windowed answer twice.
         """
-    def run(self, binsize=None, threshold=0.0, window=None,
-            data=None, templates=None, counts=False, raw=False):
         t0 = time.perf_counter()
         try:
             return self._run_inner(binsize=binsize, threshold=threshold, window=window,
-                                  data=data, templates=templates, counts=counts, raw=raw)
+                                   data=data, templates=templates, counts=counts, raw=raw)
         finally:
-            dt = time.perf_counter() - t0
-            self.performance_stats["total_calls"] += 1
-            self.performance_stats["total_time_s"] += dt
-            self.performance_stats["batch_times_ms"].append(dt * 1000.0)
+            self._record_batch_time(time.perf_counter() - t0)
 
     def _run_inner(self, binsize=None, threshold=0.0, window=None,
                    data=None, templates=None, counts=False, raw=False):
@@ -1248,10 +1264,7 @@ class MatchedFilter:
         finally:
             if is_outer:
                 self._in_series_call = False
-                dt = time.perf_counter() - t0
-                self.performance_stats["total_calls"] += 1
-                self.performance_stats["total_time_s"] += dt
-                self.performance_stats["batch_times_ms"].append(dt * 1000.0)
+                self._record_batch_time(time.perf_counter() - t0)
 
     def _run_series_inner(self, series, starts=None, win_start=None, win_end=None,
                           binsize=None, threshold=0.0, templates=None, raw=False,
@@ -1473,19 +1486,25 @@ class MatchedFilter:
 
     def performance_summary(self):
         """Return a dictionary summarizing performance metrics and configuration."""
-        times = self.performance_stats.get("batch_times_ms", [])
-        total_calls = self.performance_stats.get("total_calls", 0)
-        total_time_s = self.performance_stats.get("total_time_s", 0.0)
+        stats = self.performance_stats
+        times = stats.get("batch_times_ms", [])
+        total_calls = stats.get("total_calls", 0)
+        timed_calls = stats.get("timed_calls", len(times))
+        total_time_s = stats.get("total_time_s", 0.0)
         if times:
-            min_ms = float(np.min(times))
-            max_ms = float(np.max(times))
+            min_ms = stats.get("min_batch_time_ms")
+            max_ms = stats.get("max_batch_time_ms")
+            min_ms = float(np.min(times)) if min_ms is None else float(min_ms)
+            max_ms = float(np.max(times)) if max_ms is None else float(max_ms)
             med_ms = float(np.median(times))
-            mean_ms = float(np.mean(times))
+            mean_ms = (total_time_s * 1000.0 / timed_calls) if timed_calls > 0 else float(np.mean(times))
         else:
             min_ms = max_ms = med_ms = mean_ms = 0.0
 
         summary = {
             "total_calls": total_calls,
+            "timed_calls": timed_calls,
+            "sampled_calls": len(times),
             "total_time_s": total_time_s,
             "min_batch_time_ms": min_ms,
             "max_batch_time_ms": max_ms,
