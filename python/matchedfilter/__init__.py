@@ -2119,7 +2119,6 @@ class CorrelationFilter(MatchedFilter):
         policy = self._series_policy('correlation_series', 0, nt)
         if policy:
             batch = min(batch, policy['series_group'])
-        key = (batch, nt, self.n, ser.size)
         # Two workspaces, alternating per call, each remembering the write it left in flight:
         # rewriting one waits only for the call two back, not for every write on the device
         # (the previous call -- another detector's middle stage -- keeps running).
@@ -2139,11 +2138,15 @@ class CorrelationFilter(MatchedFilter):
                 settle = getattr(self._gpu, 'settle_writes', None)
                 if settle is not None:
                     settle()       # a call left in flight still reads the workspaces below
-        if work is None or work[0] != key:
-            work = (key, self.empty_shared(ser.shape),
-                    self.empty_shared((batch, self.n)),
-                    self.empty_shared(batch, np.uint32), None)
+        # Reused while large enough: the block count follows each call's windows, and a
+        # workspace keyed on it was three new allocations (and new recordings) per call.
+        if work is None or work[1].size < ser.size or work[2].shape[0] < batch:
+            cap = (max(ser.size, work[1].size), max(batch, work[2].shape[0])) if work else (
+                ser.size, batch)
+            work = (None, self.empty_shared((cap[0],)), self.empty_shared((cap[1], self.n)),
+                    self.empty_shared(cap[1], np.uint32), None)
         _, staging, spec, offsets, _ = work
+        staging = staging[:ser.size]
         source = ser if shared_buffer(ser, self._gpu) is not None else staging
         if source is staging and defer:
             # Unified memory: read the caller's series in place; the context keeps the
