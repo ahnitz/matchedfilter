@@ -1574,9 +1574,9 @@
     "tierb.slang": "a89a3c7f0544deebc26f06bd0422ced249282016a13de1bf1fd39279f4daad13",
     "fft_transform.slang": "c7888ec7a8c0363d243e418adcdde320823ce190190b95448d762612cc4e61e9",
     "coarse_tile.slang": "8b1a3f9193e20b76cc02641e71b77023d544b0bd1bff8c4194f38371ad47fb47",
-    "series_forward.slang": "1ed347cedae7d1f7543ccfbfd6a4ea1971f6be1eb4fdd504c9e6b0a17b849ee5",
-    "series_bands.slang": "6948766ea903aef0c4039d2545e0a1611fd4a7ce0e7fd908ece7651aaca4d2b1",
-    "forward_tier0.slang": "84fb8da3b7ffd17619bcc05be242572af1e650f4e1a4426d68c519ae4718aaf9",
+    "series_forward.slang": "e9167ae1ffc20f41a1b6cbed09774be288bd21456a5e650fa19644540f9e2b10",
+    "series_bands.slang": "c4b778228e5bebff9163c6ea93eb367207f7e857fd8dd1cc0657dcec6209d515",
+    "forward_tier0.slang": "269bac3bd8075049ff4fae3546512ab6991f1e14ee0096abc596d288966b27b0",
     "pack_coarse.slang": "6599e775732a3d54ef2517a469aaa311a38028b41a92a87e166fce94ef3076c2",
     "twiddle.slang": "f88268b238d191f42291fac1dabbb201ffd667d9cbb8784dea888a219532d44d",
     "refine_bounded.slang": "bf32ef397075682cc5d73464d656dca61d6f16c6174e223836940b86c039c83d"
