@@ -881,6 +881,16 @@ import weakref as _weakref
 _CONTEXTS_BY_ID = _weakref.WeakValueDictionary()
 
 
+def settle_all():
+    """Wait for every write left in flight on any Vulkan device (a host read follows)."""
+    for dev in list(_DEVICES.values()):
+        while dev.pending_writes:
+            fence = dev.pending_writes.pop(0)
+            _check(dev.vk.vkWaitForFences(dev.device, 1, (_vp * 1)(fence), 1,
+                                          0xFFFFFFFFFFFFFFFF), "vkWaitForFences")
+            dev.vk.vkDestroyFence(dev.device, fence, None)
+
+
 class _Device:
     """A Vulkan instance and logical device, its compute queues, command pool and pipelines."""
 

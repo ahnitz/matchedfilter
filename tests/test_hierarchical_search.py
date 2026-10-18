@@ -403,16 +403,27 @@ def test_a_gpu_search_gives_the_cpu_search():
             return [(a - extra, b + extra) for a, b in narrow]
         return []
     thr = 0.5 * _median_peak(root, inputs)
-    runs = {}
+    runs, outside = {}, {}
     for device in ("cpu", "gpu:0"):
+        got = {}
+
+        def on_peaks(ctx, got=got):
+            for ch in ctx.channels:
+                ser = ctx.series(ch)
+                off = np.ones(ser.size, bool)            # outside what the chunk computed
+                for a, b in ctx.support(ch):
+                    off[a:b] = False
+                got[(ctx.leaf.node_id, ctx.chunk, ch)] = (ctx.peaks[ch], ser.copy(), off)
         search = HierarchicalSearch([root], threshold=thr, context=300,
                                     leaf_options=dict(LEAF, device=device))
-        runs[device] = {(g[0], g[1], g[2]): g for g in _collect(search, inputs, windows=windows)}
+        search.run(inputs, windows=windows, on_peaks=on_peaks)
+        runs[device] = got
     assert runs["cpu"].keys() == runs["gpu:0"].keys()
-    for key, (_, _, _, peaks, parent) in runs["cpu"].items():
-        gp, gparent = runs["gpu:0"][key][3], runs["gpu:0"][key][4]
+    for key, (peaks, parent, off) in runs["cpu"].items():
+        gp, gparent, goff = runs["gpu:0"][key]
+        np.testing.assert_array_equal(goff, off)
         np.testing.assert_allclose(gparent, parent, rtol=0, atol=2e-5 * max(np.abs(parent).max(), 1e-30))
-        assert not gparent[parent == 0].any()
+        assert not parent[off].any() and not gparent[off].any()
         if peaks.snr.size == 0:
             assert key[1] == 1 and gp.snr.size == 0      # only the narrow chunk is empty
         else:

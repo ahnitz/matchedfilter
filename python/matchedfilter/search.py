@@ -15,7 +15,8 @@ import time
 import numpy as np
 
 from . import _core
-from .time_domain import TimeDomainFilterBank, FilterResults, _EMPTY_FILTER_RESULTS
+from .time_domain import (TimeDomainFilterBank, FilterResults, _EMPTY_FILTER_RESULTS,
+                          _settle_device_writes)
 from .device import parse as _parse_device
 
 __all__ = ["Root", "Inner", "Leaf", "BlockInput", "HierarchicalSearch", "SeriesContext",
@@ -163,6 +164,7 @@ class PeaksContext:
         Note: returns a callback-scoped view; copy if retaining past the hook. If span=(start,
         stop) is given, verifies that interval lies within the node's computed support."""
         node = self._search._parent[id(self.leaf)] if node is None else node
+        self._search._settle()
         ser = self._held[channel][id(node)]
         if span is not None:
             req = _clip([(int(span[0]), int(span[1]))], 0, len(ser))
@@ -260,6 +262,7 @@ class _InnerBatch:
         # An output depends on input within its filter's tap reach (centre tap to either end).
         self.tap_reach = int(rows_counts.max()) // 2
         self._chan = {}                          # channel -> slots, series and regions
+        self.in_flight = False                   # rows written on the device, not yet waited for
         self._alloc = self.bank.empty_shared if device is not None else None
 
     def prepare(self, channel, series, regions):
@@ -267,8 +270,15 @@ class _InnerBatch:
         if len(series) != self.length:
             raise ValueError("an inner batch's input length changed between chunks")
         state = self._chan.setdefault(channel, {"slots": None, "support": []})
-        state["series"] = np.ascontiguousarray(
-            series, dtype=np.float32 if self.real_input else np.complex64)
+        dt = np.float32 if self.real_input else np.complex64
+        # On a device a parent's row -- or its lane of a packed row (stride 2) -- is read
+        # where it is; a host copy waits for the device's writes to it first.
+        lane = (self._alloc is not None and isinstance(series, np.ndarray) and series.dtype == dt
+                and series.ndim == 1 and series.strides in ((series.itemsize,), (8,)))
+        if not lane:
+            _settle_device_writes()
+            series = np.ascontiguousarray(series, dtype=dt)
+        state["series"] = series
         state["regions"] = regions
 
     def compute(self, channel, rows):
@@ -283,9 +293,13 @@ class _InnerBatch:
                 state["slots"][:] = 0
             state["support"] = [[] for _ in range(k)]      # where each slot may be nonzero
         support = state["support"]
+        # On a device the rows are left in flight: the leaves' forwards are ordered after them
+        # on the GPU, and a host reader settles them first (HierarchicalSearch._settle).
+        on_device = self._alloc is not None
         self.bank.correlate_series(state["series"], windows=state["regions"], templates=rows,
-                                   out=state["slots"][:k],
+                                   out=state["slots"][:k], wait=not on_device,
                                    out_support=_merge([w for j in range(k) for w in support[j]]))
+        self.in_flight = self.in_flight or on_device
         for j in range(k):
             support[j] = state["regions"]
         return {r: j for j, r in enumerate(rows)}
@@ -427,6 +441,13 @@ class HierarchicalSearch:
         for c in inner:
             self._batches(c, length, root)
 
+    def _settle(self):
+        """Wait for inner rows still being written on a device: a host reader follows."""
+        for batch in self._inner.values():
+            if batch.in_flight:
+                batch.bank.wait()
+                batch.in_flight = False
+
     def _root_output(self, root, channel, n):
         """Where root's output for a chunk goes. On a GPU search: one buffer per root and
         channel in the leaf device's memory, rewritten every chunk, which the middle stage
@@ -494,6 +515,7 @@ class HierarchicalSearch:
                     continue
                 held = {c: {} for c in active}
                 support = {c: {} for c in active}
+                self._settle()                  # the root outputs are about to be rewritten
                 t0 = time.perf_counter()
                 for c in active:
                     spec = inputs[c].spectra[k]
