@@ -12,7 +12,10 @@ four-step N = M1*M2 for N = 64..1024, Highway-generic with **twice the float
 lane count** (16 pairs on AVX2, 32 on AVX-512BW). Inputs are quantised once per
 template and once per data block (`matchfilt.c`) so that
 `|d_q|_2 |t_q|_2 / 2^15 + 1.5N <= 30000`, which bounds every intermediate (each
-is a unit-weight partial sum of products); adds saturate.
+is a unit-weight partial sum of products, and the codelets scale each component
+before adding, so no sum of re and im forms first). The transform's adds therefore
+wrap: within the contract they equal saturating adds bit for bit, and are cheaper
+(Zen 5: 72.7 to 69.2 TSC ticks per pair at N = 256). The final |z|^2 sum saturates.
 
 For partial AVX-512 N256 template groups, [tail packing](cpu-q15-tail-packing.md)
 uses the spare lanes for additional data blocks with the same search window.
