@@ -14,8 +14,13 @@
  * magnitude is at most L1 = sum_k |p_k| plus accumulated rounding; the caller
  * quantises the inputs so that sum_k |d_k||t_k| / 2^15 (Cauchy-Schwarz:
  * <= |d|_2 |t|_2 / 2^15) stays at Q15_L1 (q15.h), leaving the rest of the
- * int16 range as headroom for rounding. Adds saturate rather than wrap, so
- * even an input outside that contract cannot alias into a large value.
+ * int16 range as headroom for rounding. The codelets multiply each component
+ * by its constant before adding (re*c + im*c, never (re + im)*c, whose sum
+ * could reach sqrt(2) L1), so no intermediate leaves the int16 range and the
+ * transform's adds wrap: on the contract's inputs they equal saturating adds
+ * bit for bit (tools/gate_margin.py --gate q15, every family and N, gives the
+ * same output either way) and cost ~5% less of the screen on Zen 5. The final
+ * re^2 + im^2, which can exceed int16 by itself, still saturates.
  *
  * Error.  Each Q_MUL rounds to nearest; the error at the output is a sum of
  * those roundings over the transform -- the per-N margin in q15.h is set from
@@ -43,8 +48,8 @@ typedef hn::Vec<ap_qtag> vq;
 #define Q_ZERO()       hn::Zero(AP_DQ)
 #define Q_SET1(x)      hn::Set(AP_DQ, (int16_t)(x))
 #define Q_LOADU(p)     hn::LoadU(AP_DQ, (const int16_t *)(p))
-#define Q_ADD(a, b)    hn::SaturatedAdd((a), (b))
-#define Q_SUB(a, b)    hn::SaturatedSub((a), (b))
+#define Q_ADD(a, b)    hn::Add((a), (b))
+#define Q_SUB(a, b)    hn::Sub((a), (b))
 #define Q_MUL(a, b)    hn::MulFixedPoint15((a), (b))
 /* acc +- round(a*b / 2^15): AArch64 SQRDMLAH/SQRDMLSH (FEAT_RDM, every Apple core) in one
    instruction. acc is an integer, so rounding the sum rounds the product: Q_MLAH equals

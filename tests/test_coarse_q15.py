@@ -42,6 +42,39 @@ def test_screen_never_rejects_a_float_pass(n):
         np.testing.assert_allclose(st, mag, rtol=0.02, atol=0.05)
 
 
+@pytest.mark.parametrize("n", [64, 128, 256, 512, 1024])
+def test_screen_is_exact_at_the_top_of_its_range(n):
+    """Data equal to a conjugated template, delayed: every product has the same phase, so the
+    output peak is the whole L1 budget (q15.h) and the transform's intermediates reach the top
+    of the int16 range. The statistic still tracks the float maximum -- an add that wrapped
+    would be off by 2^16 LSB there -- and the screen passes every pair at its own maximum."""
+    rng = np.random.default_rng(100 + n)
+    nd, nt = 4, 40
+    t = (rng.standard_normal((nt, n)) + 1j * rng.standard_normal((nt, n))).astype(np.complex64)
+    t /= np.linalg.norm(t, axis=1, keepdims=True)
+    k = np.arange(n)
+    d = np.stack([1e3 * t[3 * j] * np.exp(-2j * np.pi * k * (n // 2 + 5 * j) / n)
+                  for j in range(nd)]).astype(np.complex64)
+    m = _core.MF(n, nd, nt)
+    if m.q15_lanes() == 0:
+        pytest.skip("no Q15 screen on this back end")
+    m.set_data_batch(0, d.view(np.float32).tobytes())
+    m.set_template_batch(0, t.view(np.float32).tobytes())
+    rows = nd * nt
+    idx = np.zeros(rows, np.int64); val = np.zeros(rows, np.complex64)
+    mag = np.zeros(rows, np.float32); cnt = np.zeros(rows, np.int32)
+    m.run(0, nd, 0, nt, n, 0.0, 0, n, idx, val, mag, cnt)
+    ps = np.zeros(rows, np.uint8); st = np.zeros(rows, np.float32)
+    m.q15_screen(0, nd, 0, nt, 0.0, 0, n, ps, st)
+    aligned = [j * nt + 3 * j for j in range(nd)]
+    assert np.all(mag[aligned] > 0.99 * mag.max())      # the aligned pairs are the loudest
+    np.testing.assert_allclose(st, mag, rtol=0.02, atol=0.05 * mag.max() / n)
+    for r in aligned:
+        one = np.zeros(rows, np.uint8)
+        m.q15_screen(0, nd, 0, nt, float(mag[r]), 0, n, one, np.empty(0, np.float32))
+        assert one[r] == 1
+
+
 def test_screen_subrange_rows():
     rng = np.random.default_rng(5)
     m = _screen_case(256, 4, 50, rng)
