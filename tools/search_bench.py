@@ -100,6 +100,9 @@ def main():
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--repeats", type=int, default=2)
     ap.add_argument("--warmup", type=int, default=2, help="untimed setup passes per capture")
+    ap.add_argument("--roofline", action="store_true",
+                    help="account the timed passes' work against the device's peaks "
+                         "(matchedfilter._roofline; one segment = one pass over every capture)")
     ap.add_argument("--limit", type=int, default=0, help="first N tops only")
     ap.add_argument("--peaks", default=None,
                     help="also save every leaf's peaks from one extra (untimed) pass to this .npz, "
@@ -113,6 +116,8 @@ def main():
     stage = {}
     kernels = {}
     from matchedfilter import _gputime as gputime
+    from matchedfilter import _roofline as rl
+    roof = dict(work=rl.Work(), problems=[], ctx=None)
     for f in files:
         rec = pickle.load(open(f, "rb"))
         search, inputs, windows, nt, secs = build(rec, a.device)
@@ -124,10 +129,18 @@ def main():
         if gputime.enabled():
             gputime.collect(clear=True)
             gputime.busy(clear=True)
+        mids = [b.bank for b in search._inner.values()]
+        fines = list(search._leaf_banks.values())
+        before = rl.snapshot(mids, fines) if a.roofline else None
         t0 = time.perf_counter()
         for _ in range(a.repeats):
             search.run(inputs, windows=windows, on_series=noop, on_peaks=noop, on_chunk=noop)
         dt = (time.perf_counter() - t0) / a.repeats
+        if a.roofline:
+            after = rl.snapshot(mids, fines)
+            rl.middle_work(roof["work"], before, after, mids)
+            rl.fine_work(roof["work"], before, after, fines, a.device, problems=roof["problems"])
+            roof["ctx"] = roof["ctx"] or rl.gpu_context(fines)
         if gputime.enabled():
             dev_s = gputime.busy(clear=True)[0] / a.repeats
             tot["device_s"] = tot.get("device_s", 0.0) + dev_s
@@ -155,6 +168,11 @@ def main():
               % (tot["device_s"], 100 * tot["device_s"] / s))
         for lab, (n, sec) in sorted(kernels.items(), key=lambda kv: -kv[1][1])[:12]:
             print("    %-28s %8.0f submissions/pass %8.3f s/pass" % (lab, n, sec))
+    if a.roofline:
+        r = rl.report(roof["work"], rl.peaks(a.device, ctx=roof["ctx"]), a.repeats,
+                      s * a.repeats)
+        r["problems"] = roof["problems"]
+        print(rl.format_report(r))
     print("  other  %8.3f s/pass  %5.1f%%" % (s - sum(stage.get(k, 0) for k in ("root", "inner", "leaf", "hooks", "setup")),
                                             100 * (s - sum(stage.get(k, 0) for k in ("root", "inner", "leaf", "hooks", "setup"))) / s))
 

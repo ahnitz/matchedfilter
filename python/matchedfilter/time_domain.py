@@ -788,19 +788,32 @@ def _single_key(key):
     return "single-device|%s|%d|%d" % key
 
 
-_CORR_COSTS: Dict[Tuple[int, str], Tuple[float, float]] = {}
+_CORR_COSTS: Dict[Tuple[int, str], Tuple[float, float, float]] = {}
 
 
-def _corr_block_costs(n: int, device: Optional[Any] = None) -> Tuple[float, float]:
-    """Seconds per block of continuous correlation at transform size n: (fixed, per template).
+def _corr_block_cost(n: int, templates: int, valid: int, device: Optional[Any] = None) -> float:
+    """Seconds for one block of continuous correlation at transform size n, for `templates`
+    templates and `valid` output samples each (_corr_block_costs: a + k (b + w valid))."""
+    a, b, w = _corr_block_costs(n, device)
+    return a + templates * (b + w * valid)
 
-    The fixed part is the block's forward transform and bookkeeping, the per-template part its
-    product and inverse transform. Measured once per process (or read from MF_COST_FILE) through
-    the engine at 2 and 16 templates -- the sizes the layout builds groups of, so the per-template
-    cost includes the cache footprint of a group's spectra -- taking the fastest of a few
-    repetitions, which is the least load-sensitive estimate of a fixed amount of work.
-    Measured on the device the bank runs on (a GPU's costs rank sizes differently), through
-    the same continuous path the bank uses there.
+
+def _corr_block_costs(n: int, device: Optional[Any] = None) -> Tuple[float, float, float]:
+    """Seconds per block of continuous correlation at transform size n: (fixed, per template,
+    per template per output sample).
+
+    The fixed part is the block's forward transform and bookkeeping; per template, its product
+    and inverse transform (b) and writing its valid output samples (w per sample). The write
+    is separate because it is most of a GPU's cost at these sizes (the stage is memory-bound),
+    and filters near the transform's length leave few valid samples per block: priced per
+    block at a quarter-length filter, n = 8192 cost 1.7x its measured cost for 5000-tap
+    filters and n = 32768 0.8x, and a GPU middle stage ran at 32768, 20% slower.
+    Measured once per process (or read from MF_COST_FILE) through the engine at 2 and 16
+    templates -- the sizes the layout builds groups of, so the per-template cost includes the
+    cache footprint of a group's spectra -- and at 16 templates over half the valid span,
+    taking the fastest of a few repetitions, which is the least load-sensitive estimate of a
+    fixed amount of work. Measured on the device the bank runs on (a GPU's costs rank sizes
+    differently), through the same continuous path the bank uses there.
     """
     n = int(n)
     from .device import parse as _parse_device
@@ -810,12 +823,12 @@ def _corr_block_costs(n: int, device: Optional[Any] = None) -> Tuple[float, floa
         return hit
     from . import CorrelationFilter, gatechain
     path = gatechain._cost_file()
-    key = "corr,%d" % n if dkey == "cpu" else "corr,%d,%s" % (n, dkey)
+    key = "corr3,%d" % n if dkey == "cpu" else "corr3,%d,%s" % (n, dkey)
     from . import _CORR_PFFT
     if path is not None:
         stored = gatechain._load_cost_file(path).get(key)
         if stored is not None:
-            _CORR_COSTS[(n, dkey)] = hit = (float(stored[0]), float(stored[1]))
+            _CORR_COSTS[(n, dkey)] = hit = tuple(float(v) for v in stored[:3])
             if dkey == "cpu":
                 _CORR_PFFT[n] = bool(gatechain._load_cost_file(path).get("corr-pfft,%d" % n, False))
             return hit
@@ -840,7 +853,7 @@ def _corr_block_costs(n: int, device: Optional[Any] = None) -> Tuple[float, floa
     for mode in modes:
         _CORR_PFFT[n] = mode
         hits[mode] = _corr_measure(n, device, dkey, rng, taps, nblocks, L, ser)
-    best_mode = min(hits, key=lambda m: hits[m][0] + 16 * hits[m][1])
+    best_mode = min(hits, key=lambda m: hits[m][0] + 16 * (hits[m][1] + hits[m][2] * (n - taps)))
     _CORR_PFFT[n] = best_mode
     hit = hits[best_mode]
     _CORR_COSTS[(n, dkey)] = hit
@@ -852,13 +865,16 @@ def _corr_block_costs(n: int, device: Optional[Any] = None) -> Tuple[float, floa
 
 
 def _corr_measure(n, device, dkey, rng, taps, nblocks, L, ser):
-    """(fixed, per template) seconds per block through the bank's continuous path."""
+    """(fixed, per template, per template per output sample) seconds per block through the
+    bank's continuous path: 2 and 16 templates with `taps`-tap filters, and 16 with filters
+    leaving half the valid span."""
     from . import CorrelationFilter, _automatic_series_layout
-    per_block = []
-    for nt in (2, 16):
+    per_block, valid = [], []
+    short = n - (n - taps) // 2
+    for nt, tp in ((2, taps), (16, taps), (16, short)):
         h = np.zeros((nt, n), np.complex64)
-        h[:, :taps] = rng.standard_normal((nt, taps))
-        cf = CorrelationFilter(n, ndata=1, ntemplates=nt, valid=(taps // 2, n - taps // 2), device=device)
+        h[:, :tp] = rng.standard_normal((nt, tp))
+        cf = CorrelationFilter(n, ndata=1, ntemplates=nt, valid=(tp // 2, n - tp // 2), device=device)
         cf.set_templates(np.fft.fft(h, axis=1).astype(np.complex64))
         lo, hi = cf.valid
         st, _, _ = _automatic_series_layout(L, cf.valid)
@@ -880,8 +896,11 @@ def _corr_measure(n, device, dkey, rng, taps, nblocks, L, ser):
             run()
             best = min(best, time.perf_counter() - t0)
         per_block.append(best / len(st))
-    b = max((per_block[1] - per_block[0]) / 14.0, 0.0)
-    return (max(per_block[0] - 2.0 * b, 0.0), b)
+        valid.append(hi - lo)
+    s1 = max((per_block[1] - per_block[0]) / 14.0, 0.0)        # per template at valid[0]
+    w = max((per_block[1] - per_block[2]) / (16.0 * (valid[1] - valid[2])), 0.0)
+    b = max(s1 - w * valid[0], 0.0)
+    return (max(per_block[0] - 2.0 * s1, 0.0), b, w)
 
 
 def _batch_target(n: int, max_batch: Optional[int]) -> int:
@@ -931,11 +950,11 @@ def _corr_layout(counts: np.ndarray, candidate_ns: Sequence[int], max_batch: Opt
             nv = n - L + 1
             if nv < 1:
                 continue
-            a, b = _corr_block_costs(n, device)
+            a, b, w = _corr_block_costs(n, device)
             cap = _batch_target(n, max_batch)
             i0 = max(0, j - cap)
             i = np.arange(i0, j)
-            c = best[i0:j] + (a + (j - i) * b) / nv
+            c = best[i0:j] + (a + (j - i) * (b + w * nv)) / nv
             k = int(np.argmin(c))
             if c[k] < best[j]:
                 best[j] = c[k]; arg[j] = (int(i[k]), n)

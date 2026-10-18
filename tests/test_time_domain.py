@@ -650,8 +650,7 @@ def test_correlation_layout_is_priced_and_exact():
         assert g['n'] > counts[g['template_indices']].max()
 
     def modelled(groups):
-        return sum((td._corr_block_costs(n)[0] + (j - i) * td._corr_block_costs(n)[1]) / (n - L + 1)
-                   for i, j, n, L in groups)
+        return sum(td._corr_block_cost(n, j - i, n - L + 1) / (n - L + 1) for i, j, n, L in groups)
     legacy, _ = td._partition_templates(counts, candidate_ns=(2048, 4096, 8192, 16384, 32768, 65536))
     legacy_eff = [(i, j, n, int(np.sort(counts)[j - 1])) for i, j, n, _ in legacy]
     assert modelled(td._corr_layout(counts, (2048, 4096, 8192, 16384, 32768, 65536), None)[0]) <= modelled(legacy_eff) * (1 + 1e-12)
