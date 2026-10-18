@@ -216,6 +216,35 @@ the buffer bookkeeping are removed.
    several roots in flight within the budget, the root stage on the device
    so the whole chain stays resident.
 
+## Next (planned 2026-10-17)
+
+**Per-call leaf threshold from the envelope.** Today every leaf call gates at
+T * envelope_floor, a bound for the whole run (pycbc: 1 / rf_max from the variance
+floor and max boost). Instead, each leaf call runs at T * e_w, where e_w is the least
+envelope value over the samples its peaks can be tested at: its windows shifted by its
+templates' lag range (t - lag for every searched t and every lag), clipped to the
+series. The banks stay calibrated at T * envelope_floor; a call's threshold is never
+below it.
+
+- Exact: a kept peak has |z| >= T * e(t - lag) >= T * e_w, so the call's gates and
+  threshold cannot dismiss it; the per-peak test of the exactness section is unchanged.
+- Cost: one minimum of the envelope per (leaf, chunk, channel) over the lag-widened
+  windows; the envelope callable gains a range minimum (pycbc's block sums give it
+  cheaply), or the search samples the envelope on the windows.
+- Effect: with boosting envelopes (floor < 1) most windows gate far above the run's
+  floor; with pycbc's default (floor 1, e >= 1) only loud stretches gain.
+- Validation: identical peaks with and without, at floors 1 and 0.5, and the
+  envelope tests; fine-stage time with a boosting envelope.
+
+**Open from the 2026-10-17 comparison** (phase 1 against the pre-search code; the
+cleanups changed none of them):
+- fine stage about 1% slower on dev1 and dev2; cause not yet measured;
+- chisq + follow-up about 10% slower (about 0.6% of steady time); cause not measured;
+- cold start: a bank whose 4096 price lands within TIE of 2048 also prices 8192, an
+  ~11 s calibration on dev1 for a size that does not win (gatechain.price_block_sizes).
+- GPU (dev2, chain pinned): steady fine about 10-15% slower than the pre-search code
+  (GPU rates vary about 15% run to run); cause not measured.
+
 ## Open questions
 
 - Envelope callback cost: pycbc's envelope is cheap to build (about 1 ms
