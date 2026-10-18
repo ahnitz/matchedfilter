@@ -9,7 +9,7 @@ Phase 1 of the design: one chunk per input block, each block filtered on its own
 valid span padded by the filters' reach, as a caller filtering block by block would),
 the root on the host.
 """
-from typing import Callable, Dict, List, NamedTuple, Optional, Sequence
+from typing import Callable, Dict, List, NamedTuple, Optional
 import time
 
 import numpy as np
@@ -124,7 +124,7 @@ class PeaksContext:
     def refilter(self, channel, windows, binsize, threshold, template_index=None):
         """This leaf bank over its parent's series in channel, in other windows, bin size
         and threshold. No envelope applies."""
-        bank = self._search._leaf_bank(self.root, self.leaf)
+        bank = self._search.leaf_bank(self.root, self.leaf)
         return bank.filter_series(self.series(channel), windows=windows, binsize=binsize,
                                   threshold=threshold, template_index=template_index)
 
@@ -165,7 +165,7 @@ def _subtract(regions, covered):
 
 
 class _InnerBatch:
-    """The inner children of one node, filtered over the node's output in row batches.
+    """The inner children of one node, filtered over the node's output.
 
     Real taps on a real series run as packed pairs: two filters as one complex filter
     h_a - i h_b, each placed so its own centre tap is the pair's centre, whose output is
@@ -307,7 +307,7 @@ class _Step(NamedTuple):
     need: dict          # (leaf id, channel) -> spans its parent's series must hold
     win: dict           # (leaf id, channel) -> searched windows
     envelopes: dict
-    pad: int
+    pads: dict          # leaf id -> samples its parent's series holds past its windows
     live: set
     on_peaks: Optional[Callable]
 
@@ -340,7 +340,6 @@ class HierarchicalSearch:
         self._leaf_banks = {}
         self._inner = {}
         self._root_plans = {}
-        self._referenced = set()
         for root in self.roots:
             self._index(root)
 
@@ -357,27 +356,22 @@ class HierarchicalSearch:
                 raise TypeError("children are Inner or Leaf nodes")
         self._kids[id(node)] = (inner, leaves)
 
-    def _leaf_bank(self, root, leaf):
+    def leaf_bank(self, root, leaf):
+        """The TimeDomainFilterBank that searches leaf, below root (built on first use, with
+        root's profile as its reference)."""
         bank = self._leaf_banks.get(id(leaf))
-        if bank is not None and id(leaf) in self._referenced:
-            return bank
-        t0 = time.perf_counter()
         if bank is None:
+            t0 = time.perf_counter()
             opts = dict(self.leaf_options)
             opts["threshold"] = self.threshold * self.envelope_floor
             bank = self._leaf_banks[id(leaf)] = TimeDomainFilterBank(
                 leaf.taps, leaf.counts, **opts)
-        if root.profile is not None:
-            # the first reference settles the bank's block sizes and calibrates its gates
-            w, df = root.profile
-            bank.set_reference(w, delta_f=df)
-        self._referenced.add(id(leaf))
-        self.timings["setup"] += time.perf_counter() - t0
+            if root.profile is not None:
+                # the first reference settles the bank's block sizes and calibrates its gates
+                w, df = root.profile
+                bank.set_reference(w, delta_f=df)
+            self.timings["setup"] += time.perf_counter() - t0
         return bank
-
-    def leaf_bank(self, root, leaf):
-        """The TimeDomainFilterBank that searches leaf (built on first use)."""
-        return self._leaf_bank(root, leaf)
 
     def _leaves_below(self, node):
         inner, leaves = self._kids[id(node)]
@@ -386,18 +380,21 @@ class HierarchicalSearch:
             yield from self._leaves_below(c)
 
     def pad(self, root):
-        """Samples a leaf's parent series holds past the leaf's windows: the longest block
-        any of the root's leaf banks uses or may still choose."""
-        return max(int(self._leaf_bank(root, lf).max_block_length)
+        """The most samples any leaf's parent series holds past the leaf's windows below root:
+        the longest block any of root's leaf banks uses or may still choose. Builds (and
+        calibrates) every leaf bank below root."""
+        return max(int(self.leaf_bank(root, lf).max_block_length)
                    for lf in self._leaves_below(root))
 
-    def _batch(self, node, length):
-        b = self._inner.get(id(node))
-        if b is None:
-            inner = self._kids[id(node)][0]
-            if inner:
-                b = self._inner[id(node)] = _InnerBatch(inner, length, self._real_output(node))
-        return b
+    def _batches(self, node, length):
+        """Build the inner batches of node's subtree for series of length samples (once)."""
+        inner = self._kids[id(node)][0]
+        if inner and id(node) not in self._inner:
+            t0 = time.perf_counter()
+            self._inner[id(node)] = _InnerBatch(inner, length, self._real_output(node))
+            self.timings["setup"] += time.perf_counter() - t0
+        for c in inner:
+            self._batches(c, length)
 
     def _real_output(self, node):
         """Whether node's output series is real: the root's is, and an inner node's is when
@@ -414,22 +411,22 @@ class HierarchicalSearch:
 
     def run(self, inputs: Dict[str, BlockInput], windows: Optional[Callable] = None,
             on_series: Optional[Callable] = None, on_peaks: Optional[Callable] = None,
-            on_chunk: Optional[Callable] = None, roots: Optional[Sequence] = None):
+            on_chunk: Optional[Callable] = None):
         """Filter every input block through each root's hierarchy.
 
         windows(leaf, chunk, channel, extra): where leaf peaks are searched, widened by
         extra samples: None (the block's valid span), a list of (start, stop), or empty
         (the leaf is skipped in this chunk and channel). Windows are clipped to the valid
-        span. on_series(SeriesContext) runs when a root's output for a chunk is ready and
-        may return {channel: envelope}: envelope(samples) -> threshold scale at those
+        span. on_series(SeriesContext) runs when a root's output for a chunk is ready (the
+        root only: inner nodes' series are read through PeaksContext.series) and may return
+        {channel: envelope}: envelope(samples) -> threshold scale at those
         samples (>= envelope_floor), applied to every leaf below the root. on_peaks
         (PeaksContext) runs per leaf per chunk; on_chunk(ChunkContext) after a chunk."""
-        roots = self.roots if roots is None else list(roots)
         channels = list(inputs)
         nchunks = max(len(inputs[c].spectra) for c in channels) if channels else 0
-        for root in roots:
-            pad = self.pad(root)
+        for root in self.roots:
             leaves = list(self._leaves_below(root))
+            pads = {id(lf): int(self.leaf_bank(root, lf).max_block_length) for lf in leaves}
             for k in range(nchunks):
                 active = [c for c in channels if k < len(inputs[c].spectra)]
                 if not active:
@@ -461,6 +458,7 @@ class HierarchicalSearch:
                                             float(inputs[c].root_scale(root, k)), out)
                     held[c][id(root)] = out
                 self.timings["root"] += time.perf_counter() - t0
+                self._batches(root, len(out))
                 envelopes = {}
                 if on_series is not None:
                     t0 = time.perf_counter()
@@ -477,7 +475,7 @@ class HierarchicalSearch:
                         while node is not root:
                             live.add(id(node))
                             node = self._parent[id(node)]
-                step = _Step(root, k, active, tags, held, need, win, envelopes, pad, live, on_peaks)
+                step = _Step(root, k, active, tags, held, need, win, envelopes, pads, live, on_peaks)
                 self._walk(root, step)
                 if on_chunk is not None:
                     on_chunk(ChunkContext(k, active, tags))
@@ -492,7 +490,7 @@ class HierarchicalSearch:
             return
         held = step.held
         L = len(held[step.active[0]][id(node)])
-        batch = self._batch(node, L)
+        batch = self._inner[id(node)]
         wanted = [pos for pos, ch in enumerate(batch.children) if id(ch) in step.live]
         if not wanted:
             return
@@ -502,7 +500,7 @@ class HierarchicalSearch:
         for c in step.active:
             spans = []
             for pos in wanted:
-                self._span(batch.children[pos], c, step.need, step.pad, L, spans)
+                self._span(batch.children[pos], c, step.need, step.pads, spans)
             batch.prepare(c, held[c][id(node)], _clip(_merge(spans), 0, L))
             slot_of[c] = batch.compute(c, rows)
         members = sorted(wanted, key=lambda p: batch.row_of[p])
@@ -533,7 +531,7 @@ class HierarchicalSearch:
                 continue
             series = step.held[c][id(self._parent[id(lf)])]
             # one window as a slice: filter_series memoises a slice's layout
-            res = self._leaf_bank(step.root, lf).filter_series(
+            res = self.leaf_bank(step.root, lf).filter_series(
                 series, windows=slice(*w[0]) if len(w) == 1 else w)
             peaks[c], e = self._apply_envelope(res, lf, envelope, len(series))
             if e is not None:
@@ -545,19 +543,20 @@ class HierarchicalSearch:
                                        peaks, step.held, scales))
             self.timings["hooks"] += time.perf_counter() - t0
 
-    def _span(self, node, channel, need, pad, length, out):
-        """Append to out where node's output must be valid in channel: its leaves' windows
-        (with context) padded by the longest leaf block, and its inner children's spans
-        padded by the tap reach of the batch that filters it. Unmerged."""
+    def _span(self, node, channel, need, pads, out):
+        """Append to out where node's output must be valid in channel: each leaf's windows
+        (with context) padded by that leaf bank's longest block, and its inner children's
+        spans padded by the tap reach of the batch that filters them. Unmerged."""
         inner, leaves = self._kids[id(node)]
         for c in leaves:
+            pad = pads[id(c)]
             for a, b in need.get((id(c), channel), ()):
                 out.append((a - pad, b + pad))
         if inner:
-            batch = self._batch(node, length)
+            batch = self._inner[id(node)]
             sub = []
             for c in inner:
-                self._span(c, channel, need, pad, length, sub)
+                self._span(c, channel, need, pads, sub)
             out.extend((a - batch.tap_reach, b + batch.tap_reach) for a, b in sub)
 
     def _apply_envelope(self, res, leaf, envelope, length):
