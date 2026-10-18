@@ -108,17 +108,24 @@ def shared_view(array, ctx, align=None):
     multiple of align (default: the context's queried storage_offset_alignment, else 256,
     the largest storage-buffer offset alignment Vulkan allows).
     For a backend call that applies the returned _Borrowed's offset itself."""
-    buf = shared_buffer(array, ctx)
-    if buf is not None or not isinstance(array, np.ndarray) or not array.flags.c_contiguous:
-        return buf
-    start, allocation = _containing(array.ctypes.data)
+    if not isinstance(array, np.ndarray) or not array.flags.c_contiguous:
+        return None
+    address = array.ctypes.data
+    allocation = _allocations.get(address)
+    start = address
+    if allocation is None:
+        start, allocation = _containing(address)
     if allocation is None or not _same_device(allocation.buffer.ctx, ctx):
         return None
-    if align is None:
-        align = getattr(ctx, 'storage_offset_alignment', 256)
-    offset = array.ctypes.data - start
-    if offset % align or offset + array.nbytes > allocation.buffer.nbytes:
+    offset = address - start
+    if offset + array.nbytes > allocation.buffer.nbytes:
         return None
+    # A backend declaring shared_views binds any offset (shared_buffer's rule).
+    if offset and not getattr(ctx, 'shared_views', False):
+        if align is None:
+            align = getattr(ctx, 'storage_offset_alignment', 256)
+        if offset % align:
+            return None
     return _Borrowed(allocation, offset)
 
 

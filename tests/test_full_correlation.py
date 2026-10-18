@@ -287,13 +287,9 @@ def test_gpu_shared_output_is_one_dispatch_past_staging_budget(monkeypatch):
         tmpl = np.empty((nt, n), np.complex64)
         out = ctx.empty_shared((1, nt, n))
         calls = []
-        if parsed.backend == 'cuda':
-            # No tile layer: count kernel launches, and their grid.
-            monkeypatch.setattr(ctx, '_launch', lambda fn, grid, *a, **k: calls.append(grid))
-            ctx.correlate(n, data, tmpl, out)
-            assert calls == [nt]
-            return
-        monkeypatch.setattr(ctx, '_full_tile', lambda *args: calls.append(args))
+        # One shared executor (_gpuexec) tiles for every backend: shared output past the
+        # host staging budget is still one tile, one dispatch.
+        monkeypatch.setattr(ctx, '_correlate_tile', lambda *args: calls.append(args))
         ctx.correlate(n, data, tmpl, out)
         assert len(calls) == 1
         assert calls[0][1].shape == data.shape
@@ -336,3 +332,24 @@ def test_gpu_run_left_in_flight_gives_the_waited_result(n):
     cf.wait()
     for w, o in zip(want, outs):
         np.testing.assert_array_equal(o, w)
+
+
+def test_gpu_run_into_views_of_one_allocation_writes_each_view():
+    """Outputs at different offsets of one shared allocation are bound in place, each by its
+    own recording: a recording keyed on the allocation alone wrote every call into the
+    first view and left the others untouched."""
+    device = _device('gpu')
+    n, nt = 4096, 3
+    rng = np.random.default_rng(7)
+    cf = CorrelationFilter(n, ndata=1, ntemplates=nt, device=device)
+    cf.set_templates((rng.standard_normal((nt, n)) + 1j * rng.standard_normal((nt, n)))
+                     .astype(np.complex64))
+    cf.set_data((rng.standard_normal((1, n)) + 1j * rng.standard_normal((1, n)))
+                .astype(np.complex64))
+    want = np.array(cf.run())
+    views = cf.empty_shared((4, 1, nt, n), readback=True)
+    views[:] = 0
+    for i in range(4):
+        cf.run(out=views[i])
+    for i in range(4):
+        np.testing.assert_array_equal(views[i], want)
