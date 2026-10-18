@@ -1807,9 +1807,14 @@ def price_block_sizes(fine, delta_f, data_rate, longest, margin, ntemplates, snr
         # between block sizes run to run (docs/gate-model.md, "Large-n pricing").
         h = 0.0
         c = (block / max(int(ntemplates), 1) + pair_cost) / nvalid
-        # `ahead` more sizes past the first dearer one are priced (block-size trial candidates)
-        stop = bool(out) and c > min(o[0] for o in out) * (1.0 + TIE) and \
-            sum(o[0] > min(x[0] for x in out) * (1.0 + TIE) for o in out) >= ahead
+        # Stop at the first size dearer than the best so far (it is still listed, so a size
+        # within TIE stays in the tie-break below), after `ahead` more dearer ones for
+        # block-size trial candidates. Continuing past a size merely within TIE priced the
+        # next size too -- a timed calibration at that n (about 11 s at 8192 on Zen 3) for a
+        # size that is dearer still.
+        best = min((o[0] for o in out), default=None)
+        stop = best is not None and c > best and \
+            sum(o[0] > best for o in out) + 1 > ahead
         out.append((c, n, chain))
         hosts[n] = h
         if stop:
