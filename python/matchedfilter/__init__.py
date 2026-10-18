@@ -2046,6 +2046,13 @@ class MatchedFilter:
         deferred = self._series_deferred(c, slot_idx, finish_marking)
         return deferred
 
+    def wait(self):
+        """Finish the device work this plan left in flight (run(wait=False)), before a
+        host read of what it writes. Nothing to do on the CPU."""
+        settle = getattr(self._gpu, 'settle_writes', None)
+        if settle is not None:
+            settle()
+
     def empty_shared(self, shape, dtype=np.complex64, *, readback=False):
         """Allocate a NumPy array backed by this filter's GPU shared memory.
 
@@ -2213,17 +2220,24 @@ class CorrelationFilter(MatchedFilter):
             raise ValueError("out must be a writable C-contiguous complex64 array of shape %s" % (shape,))
         return out
 
-    def run(self, data=None, templates=None, out=None, scales=None):
-        """Return the full unnormalised circular correlation for each pair."""
+    def run(self, data=None, templates=None, out=None, scales=None, wait=True):
+        """Return the full unnormalised circular correlation for each pair.
+
+        wait=False, with ``out`` from :meth:`empty_shared` and no ``scales``: a GPU backend
+        that can (Vulkan) leaves the work in flight. Work on the same device that reads
+        ``out`` is ordered after it; read it on the host only after :meth:`wait`.
+        Elsewhere the call finishes as with wait=True."""
         d0, nd, t0, nt = self._pair_range(data, templates)
         result = self._full_output((nd, nt, self.n), out)
         if self._gpu is None:
             self._execution_plan().correlate(d0, nd, t0, nt, result)
         else:
+            kw = ({'wait': False} if (not wait and scales is None
+                                      and getattr(self._gpu, 'async_correlate', False)) else {})
             self._gpu.correlate(self.n, self._gdata[d0:d0 + nd],
                                 self._gtmpl[t0:t0 + nt], result,
                                 upload_data=self._ddirty,
-                                upload_tmpl=self._tdirty)
+                                upload_tmpl=self._tdirty, **kw)
             self._ddirty = self._tdirty = False
         if scales is not None:
             sc = np.ascontiguousarray(_from_any(scales), dtype=np.float32)

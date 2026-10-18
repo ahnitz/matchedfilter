@@ -1141,6 +1141,8 @@ class Context(InputUploads):
     forward_rows = True
     #: forward takes real=(lane, stride, length): a real series read in place, not widened.
     real_series = True
+    #: correlate takes wait=False: shared output left in flight, ordered for device consumers.
+    async_correlate = True
 
     def __init__(self, index=0):
         vk, err = _vulkan._load()
@@ -3049,7 +3051,7 @@ class Context(InputUploads):
             val[a:b] = values[offset:offset+count].reshape(b-a, nt, nb)
         return idx, val
 
-    def _full_tile(self, n, data, tmpl, out, upload_data, upload_tmpl):
+    def _full_tile(self, n, data, tmpl, out, upload_data, upload_tmpl, wait=True):
         nd, nt = data.shape[0], tmpl.shape[0]
         keys = (shared_key(data, self), shared_key(tmpl, self),
                 shared_key(out, self))
@@ -3078,18 +3080,26 @@ class Context(InputUploads):
             rec = _Recording(self, "full")
             rec.bind(pipe, self._descriptor_set(pipe[2], bufs), (nt,))
             rec.dispatch(nd * nt)
+            rec.barrier()              # a consumer submitted after it (wait=False) reads `out`
             batch = (*bufs, rec.end())
             self._full_batches[key] = batch
             self._register_record('full', key, None, pool_start)
             uploads = (True, True, *uploads[2:])
         self._cache_touch('full', key)
         bdata, btmpl, bout, cmd = batch
+        if self._device_state.pending_writes and (
+                (uploads[0] and shared_buffer(data, self) is None)
+                or (uploads[1] and shared_buffer(tmpl, self) is None)):
+            self.settle_writes()       # a call left in flight (wait=False) may read these inputs
         self._write_uploads(key, uploads, bdata, data, btmpl, tmpl)
+        if not wait and shared_buffer(out, self) is not None:
+            self._submit_pending(cmd)
+            return
         self._submit(cmd)
         if shared_buffer(out, self) is None:
             bout.read_into(out)
 
-    def _tierc_tile(self, n, data, tmpl, out, upload_data, upload_tmpl):
+    def _tierc_tile(self, n, data, tmpl, out, upload_data, upload_tmpl, wait=True):
         nd, nt = data.shape[0], tmpl.shape[0]
         info = _manifest().get('full_tierc', {}).get(str(n))
         if info is None:
@@ -3119,13 +3129,21 @@ class Context(InputUploads):
             rec.barrier(buffer=scratch)
             rec.bind((p2, l2), ds2)
             rec.dispatch(nd * nt * info['n2'])
+            rec.barrier()              # a consumer submitted after it (wait=False) reads `out`
             batch = (bd, bt, scratch, bo, rec.end())
             self._tierc_batches[key] = batch
             self._register_record('tierc', key, None, pool_start)
             uploads = (True, True, *uploads[2:])
         self._cache_touch('tierc', key)
         bd, bt, scratch, bo, cmd = batch
+        if self._device_state.pending_writes and (
+                (uploads[0] and shared_buffer(data, self) is None)
+                or (uploads[1] and shared_buffer(tmpl, self) is None)):
+            self.settle_writes()       # a call left in flight (wait=False) may read these inputs
         self._write_uploads(key, uploads, bd, data, bt, tmpl)
+        if not wait and shared_buffer(out, self) is not None:
+            self._submit_pending(cmd)
+            return
         self._submit(cmd)
         if shared_buffer(out, self) is None:
             bo.read_into(out)
@@ -3356,8 +3374,12 @@ class Context(InputUploads):
     #: zero_columns_done(wait=False) leaves the zeroing in flight.
     async_zero = True
 
-    def correlate(self, n, data, tmpl, out, *, upload_data=True, upload_tmpl=True):
-        """Write full correlations to caller storage with bounded GPU batches."""
+    def correlate(self, n, data, tmpl, out, *, upload_data=True, upload_tmpl=True, wait=True):
+        """Write full correlations to caller storage with bounded GPU batches.
+
+        wait=False (async_correlate), with `out` device-shared and written in one batch: leave
+        the work in flight; device consumers are ordered after it, a host reader settles
+        first (settle_writes)."""
         nd, nt = data.shape[0], tmpl.shape[0]
         if out.shape != (nd, nt, n):
             raise ValueError('full output shape does not match the banks')
@@ -3376,7 +3398,7 @@ class Context(InputUploads):
         working_bytes = nd*nt*per_pair*((1 if direct else 2) if tierc else (0 if direct else 1))
         if (working_bytes <= budget
                 and nd * nt * groups <= self.max_dispatch_x):
-            fn(n, data, tmpl, out, upload_data, upload_tmpl)
+            fn(n, data, tmpl, out, upload_data, upload_tmpl, **({} if wait else {'wait': False}))
             return
         tile = min(nt, max(1, budget // (per_pair*(2 if tierc else 1))),
                    max(1, self.max_dispatch_x // groups))

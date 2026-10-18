@@ -314,3 +314,25 @@ def test_gpu_series_across_two_stage_boundary(n):
     block[0, :n] = series[7:]
     expected = _reference(np.fft.fft(block, axis=-1).astype(np.complex64) / n, tmpl)
     _agrees(got, expected, tol=_full_tol(f))
+
+
+@pytest.mark.parametrize("n", [4096, 1 << 20])
+def test_gpu_run_left_in_flight_gives_the_waited_result(n):
+    """run(wait=False) into shared output, then wait(): exactly the synchronous result, for a
+    one-stage and a two-stage size, with two calls in flight on different outputs."""
+    device = _device('gpu')
+    rng = np.random.default_rng(n)
+    cf = CorrelationFilter(n, ndata=1, ntemplates=1, device=device)
+    cf.set_templates((rng.standard_normal((1, n)) + 1j * rng.standard_normal((1, n))).astype(np.complex64))
+    want, outs = [], [cf.empty_shared((1, 1, n), readback=True) for _ in range(2)]
+    datas = [(rng.standard_normal((1, n)) + 1j * rng.standard_normal((1, n))).astype(np.complex64)
+             for _ in range(2)]
+    for d in datas:
+        cf.set_data(d)
+        want.append(cf.run().copy())
+    for d, o in zip(datas, outs):
+        cf.set_data(d)
+        cf.run(out=o, wait=False)
+    cf.wait()
+    for w, o in zip(want, outs):
+        np.testing.assert_array_equal(o, w)
