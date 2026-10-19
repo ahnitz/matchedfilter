@@ -117,6 +117,7 @@ the hierarchical tiers read the spectra in place at a stride and scale; else pac
 subgroup_size, kernel_family (whose kernel identity stored measured choices belong to).
 """
 import time
+import weakref
 
 import numpy as np
 
@@ -1052,6 +1053,134 @@ class Executor(HierOps):
         pending = self._track(result)
         holder.items_inflight = pending
         return pending
+
+    # ---- device follow-ups --------------------------------------------------------------
+    def submit_followups(self, jobs):
+        """A collector giving the FilterResults of single-template follow-up jobs [(bank,
+        series, kwargs)] (_gpuhost.followup_layout), submitted without waiting. Per group:
+        a forward of its rows from its series allocation, then refineItems over its entries
+        -- both listed over the row count, so a group's record (per shape and place in the
+        batch) is replayed whatever its rows; its tables are uploaded per run, its series,
+        templates and words bound per run. Every group goes in one submission. Raises
+        FollowupUnsupported when the jobs cannot all run here."""
+        # One context per device owns the follow-up records: every single-template plan is
+        # its own context, and records per context were rebuilt whenever a batch's first job
+        # moved to another template group. The owner passes on when it is destroyed.
+        holder = getattr(self, "_device_state", None) or self
+        ref = holder.__dict__.get("followup_owner")
+        owner = ref() if ref is not None else None
+        if owner is None:
+            owner = self
+            holder.followup_owner = weakref.ref(self)
+        return owner._submit_followups(jobs, holder)
+
+    def _submit_followups(self, jobs, holder):
+        from ._gpuhost import FollowupUnsupported, assemble_followups, followup_layout
+        groups, layout = followup_layout(jobs, self)
+        if not groups:
+            return lambda: []
+        prior = holder.__dict__.pop("followups_inflight", None)
+        if prior is not None:
+            prior()                       # its records' tables and outputs are rewritten below
+        runs, places = [], {}
+        for gw in groups:
+            n, nbins, m = gw["n"], gw["nbins"], int(gw["rows"].size)
+            tv, sv = shared_view(gw["plan"]._gtmpl, self), shared_view(gw["alloc"], self)
+            if tv is None or sv is None or not self._x_has_kernel("items", n) or n > 65536:
+                raise FollowupUnsupported("templates or series outside this device's reach, "
+                                          "or no refineItems build for n=%d" % n)
+            cap = 1 << max(6, (max(m, 1) - 1).bit_length())
+            shape = (n, nbins, cap)
+            place = places[shape] = places.get(shape, -1) + 1
+            rec, offs = self._followup_record(("followups",) + shape + (place,), n, nbins, cap)
+            tab = np.zeros(offs[-1] // 4, np.uint32)
+            tab[offs[0] // 4:offs[0] // 4 + m] = gw["rows"]
+            tab[offs[1] // 4:offs[1] // 4 + 5 * m] = gw["entries"].ravel()
+            tab[offs[2] // 4:offs[2] // 4 + cap] = np.arange(cap, dtype=np.uint32)
+            tab[offs[3] // 4:offs[3] // 4 + 3] = (m, 1, 1)
+            self._x_upload(rec.buffers["tab"], tab, None)
+            bs = gw["bs"]
+            binds = {"series": sv, "tmpl": tv, "fwd": (gw["nser"], gw["code"]),
+                     "items": (int(gw["plan"]._gtmpl.shape[0]), bs,
+                               bin_shift(bs) & 0xFFFFFFFF, nbins, 0)}
+            runs.append((rec, binds, gw))
+        reads = set()
+        for rec, binds, _ in runs:
+            reads |= self._reads(rec, binds)
+        *first, (rec, binds, _) = runs
+        wait = self._x_submit(rec.native, binds, None,
+                              pre=list(self._take(None, reads))
+                              + [(r.native, b) for r, b, _ in first])
+        done = []
+
+        def read(gw):
+            m, nbins = gw["rows"].size, gw["nbins"]
+            r = gw["_rec"]
+            return (np.array(self._x_view(r.buffers["idx"], np.int32, m * nbins)).reshape(m, nbins),
+                    np.array(self._x_view(r.buffers["val"], np.complex64, m * nbins))
+                    .reshape(m, nbins))
+
+        def collect():
+            """Wait for the submission and assemble every job's results (once)."""
+            if not done:
+                try:
+                    wait()
+                finally:
+                    if holder.__dict__.get("followups_inflight") is collect:
+                        holder.followups_inflight = None
+                for r, _, gw in runs:
+                    gw["_rec"] = r
+                done.append(assemble_followups(layout, read))
+            return done[0]
+        holder.followups_inflight = collect
+        return collect
+
+    def _retire(self):
+        """This context is being destroyed (a driver's destroy): the device's follow-ups
+        finish, and their ownership passes to the next context that runs them."""
+        holder = getattr(self, "_device_state", None) or self
+        ref = holder.__dict__.get("followup_owner")
+        if ref is not None and ref() is self:
+            prior = holder.__dict__.pop("followups_inflight", None)
+            if prior is not None:
+                prior()
+            del holder.followup_owner
+
+    def _followup_record(self, key, n, nbins, cap):
+        """(record, table offsets) of a follow-up group (submit_followups): its tables --
+        rows, entries, the identity list the listed forward walks, and the row count as
+        indirect arguments -- share one upload buffer."""
+        align = max(16, int(self.storage_offset_alignment))
+        offs, at = [], 0
+        for nbytes in (4 * cap, 20 * cap, 4 * cap, 16):
+            offs.append(at)
+            at = -(-(at + nbytes) // align) * align
+        offs.append(at)
+        table = self._exec_table()
+        rec = table.get(key)
+        if rec is None:
+            self._exec_room(cap * n * 8 + cap * nbins * 12)
+            rec = Record()
+            tab = self._exec_buffer(rec, "tab", nbytes=at, upload=True)
+            spec = self._exec_buffer(rec, "spec", nbytes=cap * n * 8)
+            bi = self._exec_buffer(rec, "idx", nbytes=cap * nbins * 4, readback=True)
+            bv = self._exec_buffer(rec, "val", nbytes=cap * nbins * 8, readback=True)
+            rows, ent, ids, args = (self._x_section(tab, o, b) for o, b in
+                                    zip(offs, (4 * cap, 20 * cap, 4 * cap, 16)))
+            lst = self._x_list("followups")
+            lst.barrier()                 # after writes in flight to the series (a middle stage)
+            lst.listed(self._x_kernel("fwd_listed", n), args, cap,
+                       [Arg("series"), rows, spec, ids, args], (Arg("fwd", 2),))
+            lst.barrier()
+            lst.listed(self._x_kernel("items", n), args, cap,
+                       [spec, Arg("tmpl"), bi, bv, ent, args], (Arg("items", 5),))
+            lst.barrier()
+            lst.readback(bi, cap * nbins * 4)
+            lst.readback(bv, cap * nbins * 8)
+            rec.native = lst.end()
+            table[key] = rec
+        self._cache_touch("exec", key)
+        return rec, offs
 
     # ---- grouped hierarchical calls -----------------------------------------------------
     def hier_peaks_grouped(self, n, band, data, tmpl, ct0, raw_thr, groups, binsize,

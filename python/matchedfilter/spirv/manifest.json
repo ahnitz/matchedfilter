@@ -65,6 +65,10 @@
         "compactListed": {
           "msl": "compactl_64.metal",
           "metallib": null
+        },
+        "refineItems": {
+          "msl": "items_64.metal",
+          "metallib": null
         }
       },
       "metal_lds_cap": 512,
@@ -134,6 +138,10 @@
         },
         "compactListed": {
           "msl": "compactl_128.metal",
+          "metallib": null
+        },
+        "refineItems": {
+          "msl": "items_128.metal",
           "metallib": null
         }
       },
@@ -218,6 +226,10 @@
         "compactListed": {
           "msl": "compactl_256.metal",
           "metallib": null
+        },
+        "refineItems": {
+          "msl": "items_256.metal",
+          "metallib": null
         }
       },
       "metal_lds_cap": 512,
@@ -300,6 +312,10 @@
         },
         "compactListed": {
           "msl": "compactl_512.metal",
+          "metallib": null
+        },
+        "refineItems": {
+          "msl": "items_512.metal",
           "metallib": null
         }
       },
@@ -398,6 +414,10 @@
         "fullCorrelationSeries": {
           "msl": "full_series_1024.metal",
           "metallib": null
+        },
+        "refineItems": {
+          "msl": "items_1024.metal",
+          "metallib": null
         }
       },
       "metal_lds_cap": 1024,
@@ -494,6 +514,10 @@
         },
         "fullCorrelationSeries": {
           "msl": "full_series_2048.metal",
+          "metallib": null
+        },
+        "refineItems": {
+          "msl": "items_2048.metal",
           "metallib": null
         }
       },
@@ -594,6 +618,10 @@
         },
         "fullCorrelationSeries": {
           "msl": "full_series_4096.metal",
+          "metallib": null
+        },
+        "refineItems": {
+          "msl": "items_4096.metal",
           "metallib": null
         }
       },
@@ -745,6 +773,15 @@
             "metallib": null,
             "lds_bytes": 32768
           }
+        },
+        "refineItems": {
+          "msl": "items_8192.metal",
+          "metallib": null,
+          "portable": {
+            "msl": "items_8192_lds32.metal",
+            "metallib": null,
+            "lds_bytes": 32768
+          }
         }
       },
       "metal_lds_cap": 8192,
@@ -886,6 +923,15 @@
           "metallib": null,
           "portable": {
             "msl": "full_series_16384_lds32.metal",
+            "metallib": null,
+            "lds_bytes": 32768
+          }
+        },
+        "refineItems": {
+          "msl": "items_16384.metal",
+          "metallib": null,
+          "portable": {
+            "msl": "items_16384_lds32.metal",
             "metallib": null,
             "lds_bytes": 32768
           }
@@ -1033,6 +1079,15 @@
             "metallib": null,
             "lds_bytes": 32768
           }
+        },
+        "refineItems": {
+          "msl": "items_32768.metal",
+          "metallib": null,
+          "portable": {
+            "msl": "items_32768_lds32.metal",
+            "metallib": null,
+            "lds_bytes": 32768
+          }
         }
       },
       "metal_lds_cap": 8192,
@@ -1174,6 +1229,15 @@
           "metallib": null,
           "portable": {
             "msl": "full_series_65536_lds32.metal",
+            "metallib": null,
+            "lds_bytes": 32768
+          }
+        },
+        "refineItems": {
+          "msl": "items_65536.metal",
+          "metallib": null,
+          "portable": {
+            "msl": "items_65536_lds32.metal",
             "metallib": null,
             "lds_bytes": 32768
           }
@@ -1650,6 +1714,6 @@
     "refine_bounded.slang": "bf32ef397075682cc5d73464d656dca61d6f16c6174e223836940b86c039c83d",
     "compact_peaks.slang": "5c8bd90e54bbb422e6c60cfa3009074008a7d4039c9d44ce026e10c81df248d4"
   },
-  "build_id": "7dafc7ede7b18c1e4a3025eec34a0978cfc833f2730e00043a1b7fe51184a83e",
-  "metal_build_id": "593455d7f873b4eef1b38ff9d1d547e6df852d4762c3fb071930276cbbbd5da4"
+  "build_id": "b732942c0f86612a2b7c53c4c1e581c0678572e601828db0829125985ddde824",
+  "metal_build_id": "8585a0c9dc56e33c3ad48a04f4dd7e8253a0c97b31189bf586dae4610487a06f"
 }

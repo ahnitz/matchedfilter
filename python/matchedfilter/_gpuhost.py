@@ -281,25 +281,27 @@ def window_results(hit, counts, starts, idx, val, template, n):
 # into the allocation) and one entry per row (row, local template, window start, window end,
 # output slot). The host lays the blocks out with TimeDomainFilterBank._window_layout, so the
 # windows are the host path's by construction, and assemble_followups orders the results as
-# _items_batch does. A backend supplies only the execution (Context.followup_executor()):
-# the forward of each group's rows, refineItems over its entries, and one wait.
+# _items_batch does. The executor runs them (Executor.submit_followups): the forward of each
+# group's rows, refineItems over its entries, and one wait.
 
 class FollowupUnsupported(Exception):
     """Device follow-ups cannot take this batch; the caller runs it on the host."""
 
 
-def followup_layout(jobs, ctx_type, max_rows=None):
+def followup_layout(jobs, ctx, max_rows=None):
     """(groups, layout) for single-template follow-up jobs [(bank, series, kwargs)], each a
     filter_series(series, windows=, binsize=, threshold=0, template_index=) call.
 
-    groups: one dict per work group with plan, ctx, n, bs, alloc (the series allocation),
-    rows (uint32 block starts in the allocation), entries ((rows, 5) uint32) and nbins (the
-    widest window's bin count, rounded up to a power of two so few shapes occur).
+    groups: one dict per work group with plan, n, bs, alloc (the series allocation, as
+    complex64), code and nser (the forward's sample layout and length in its units:
+    seriesSample), rows (uint32 block starts in those units), entries ((rows, 5) uint32) and
+    nbins (the widest window's bin count, rounded up to a power of two so few shapes occur).
+    A real series is read in place: contiguous floats, or one lane of a complex row.
     layout: per job (group, starts, window starts, window ends, first entry, template group,
     local template, global template). Raises FollowupUnsupported when a job is not such a
-    call, is not on a ctx_type device, has a series that is not device memory, has a block
+    call, is not on ctx's device, has a series that is not device memory, has a block
     reading past its series (the host path pads with zeros), or a group passes max_rows."""
-    from ._shared import containing
+    from ._shared import _same_device, containing, containing_samples
     from .time_domain import TimeDomainFilterBank, _normalize_windows
     groups = {}
     layout = []
@@ -316,25 +318,40 @@ def followup_layout(jobs, ctx_type, max_rows=None):
         S = len(ser)
         st, ws, we = TimeDomainFilterBank._window_layout(g, _normalize_windows(kw["windows"], S), S)
         plan = g.get_flat_plan()
-        ctx = getattr(plan, "_gpu", None)
-        if not isinstance(ctx, ctx_type) or plan._gtmpl is None:
-            raise FollowupUnsupported("not a plan on this backend")
-        c = containing(np.ascontiguousarray(ser), ctx)
-        if c is None:
-            raise FollowupUnsupported("series not device-resident")
+        pctx = getattr(plan, "_gpu", None)
+        if pctx is None or not _same_device(pctx, ctx) or plan._gtmpl is None:
+            raise FollowupUnsupported("not a plan on this device")
+        ser = np.asarray(ser)
+        if ser.dtype == np.complex64:
+            c = containing(np.ascontiguousarray(ser), ctx)
+            if c is None:
+                raise FollowupUnsupported("series not device-resident")
+            alloc, base, code, nser = c[0], c[1], 0, c[0].size
+        elif ser.dtype == np.float32:
+            c = containing_samples(ser, ctx)
+            if c is None:
+                raise FollowupUnsupported("series not device-resident")
+            alloc, foff, stride = c
+            if stride == 1:                 # floats, by their index in the allocation
+                base, code, nser = foff, 1, 2 * alloc.size
+            else:                           # one lane of complex samples
+                base, code, nser = foff >> 1, ((foff & 1) << 2) | 2, alloc.size
+        else:
+            raise FollowupUnsupported("series is neither complex64 nor float32")
         if st.size and int(st.max()) + g.n > ser.size:
             raise FollowupUnsupported("a block reads past the series")
-        # One group per (template group, binsize, series allocation): a group searching two
-        # detectors' allocations is two groups, not one per combination of allocations.
-        gw = groups.setdefault((id(plan), bs, id(c[0])), dict(
-            plan=plan, ctx=ctx, n=g.n, bs=bs, alloc=c[0], rows=[], entries=[], nent=0))
+        # One group per (template group, binsize, series allocation and layout): a group
+        # searching two detectors' allocations is two groups, not one per combination.
+        gw = groups.setdefault((id(plan), bs, id(alloc), code), dict(
+            plan=plan, n=g.n, bs=bs, alloc=alloc, code=code, nser=nser, rows=[], entries=[],
+            nent=0))
         # The job's blocks as arrays (one row and one entry per block): a segment's
         # follow-ups are ~1000 blocks.
         k = int(st.size)
         first = gw["nent"]
         if max_rows is not None and first + k > max_rows:
             raise FollowupUnsupported("too many rows")
-        gw["rows"].append(np.asarray(st, np.int64) + c[1])
+        gw["rows"].append(np.asarray(st, np.int64) + base)
         ent = np.empty((k, 5), np.int64)
         ent[:, 0] = first + np.arange(k)
         ent[:, 1] = tl
@@ -380,17 +397,16 @@ def assemble_followups(layout, read):
 
 def submit_followups(jobs):
     """A collector giving the FilterResults of single-template follow-up jobs, submitted on
-    the jobs' device without waiting; or None (the backend has no executor, or the batch is
-    outside it: the caller runs the jobs on the host)."""
+    the jobs' device without waiting (Executor.submit_followups); or None (not a GPU, or a
+    batch outside what the device path takes: the caller runs the jobs on the host)."""
     if not jobs:
         return lambda: []
     try:
         bank, _, kw = jobs[0]
         g, _ = bank._template_map[(kw or {}).get("template_index")]
         ctx = getattr(g.get_flat_plan(), "_gpu", None)
-        executor = getattr(ctx, "followup_executor", None)
-        if executor is None:
+        if ctx is None:
             return None
-        return executor().submit_jobs(jobs)
+        return ctx.submit_followups(jobs)
     except (FollowupUnsupported, KeyError, TypeError):
         return None

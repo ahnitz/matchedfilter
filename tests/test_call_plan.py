@@ -448,12 +448,9 @@ def test_device_followups_track_their_buffers(monkeypatch, new_alloc):
     rng, banks = _setup(monkeypatch, nbanks=1, seed=81, replay=False)
     bank = banks[0][0]
     ctx = bank._groups[0].plan._gpu
-    if not hasattr(ctx, "followup_executor"):
-        pytest.skip("backend has no device follow-ups")
-    ex_type = type(ctx.followup_executor())
     calls = []
-    orig = ex_type.submit_jobs
-    monkeypatch.setattr(ex_type, "submit_jobs",
+    orig = type(ctx).submit_followups
+    monkeypatch.setattr(type(ctx), "submit_followups",
                         lambda self, js: calls.append(len(js)) or orig(self, js))
     S = 1 << 17
     rows = bank.empty_shared((2, S))
@@ -484,8 +481,6 @@ def test_device_followups_in_flight(monkeypatch):
     monkeypatch.setenv("MF_SINGLE_DEVICE", "bank")
     rng, banks = _setup(monkeypatch, nbanks=1, seed=82, replay=False)
     bank = banks[0][0]
-    if not hasattr(bank._groups[0].plan._gpu, "followup_executor"):
-        pytest.skip("backend has no device follow-ups")
     S = 1 << 17
     rows = bank.empty_shared((2, S))
     _fill(rng, rows, S)
@@ -510,9 +505,9 @@ def test_device_followups_in_flight(monkeypatch):
 
 def test_device_followups_steady_state_allocates_nothing(monkeypatch):
     """After warm-up, device follow-ups whose jobs move between template groups and series
-    allocations every segment allocate nothing: on Vulkan a group's templates and allocations
-    are rebound in place on a pooled workspace (no workspace, buffer or descriptor pool), on
-    CUDA the executor's buffers have grown to the batch (no device or pinned buffer)."""
+    allocations every segment allocate nothing: a group's record (per shape and place in its
+    batch) binds its templates and series per run, so no record or buffer is made again, and
+    no descriptor pool is left behind."""
     monkeypatch.setenv("MF_SINGLE_DEVICE", "bank")
     rng, banks = _setup(monkeypatch, nbanks=1, seed=83, replay=False)
     # Several template groups of one block length (they share workspaces), so jobs move
@@ -524,20 +519,10 @@ def test_device_followups_steady_state_allocates_nothing(monkeypatch):
                                 fft_lengths=[2048], binsize=2048, max_batch_size=8)
     bank.set_reference(w, delta_f=df)
     ctx = bank._groups[0].plan._gpu
-    if not hasattr(ctx, "followup_executor"):
-        pytest.skip("backend has no device follow-ups")
-    from matchedfilter import _vkcompute as vkc
-    if isinstance(ctx, vkc.Context):
-        from matchedfilter import _vkfollowup
-        watched = (_vkfollowup._Workspace, vkc._Buffer)
-    else:
-        from matchedfilter import _cudacompute as cc
-        watched = (cc._Buffer, cc._Pinned)
     made, on = [], [False]
-    for cls in watched:
-        orig = cls.__init__
-        monkeypatch.setattr(cls, "__init__", lambda self, *a, _o=orig, _c=cls, **k:
-                            (on[0] and made.append(_c.__name__)) or _o(self, *a, **k))
+    orig = type(ctx)._x_alloc
+    monkeypatch.setattr(type(ctx), "_x_alloc", lambda self, *a, _o=orig, **k:
+                        (on[0] and made.append(a)) or _o(self, *a, **k))
     S = 1 << 17
     rows = [bank.empty_shared((2, S)) for _ in range(2)]
     groups = {}
@@ -569,9 +554,11 @@ def test_device_followups_steady_state_allocates_nothing(monkeypatch):
     segment([g[0] for g in per_group] * 2)
     warm = len(made)
     pools = len(getattr(ctx, "_pools", []))
-    ex = ctx.followup_executor()
-    held = getattr(ex, "workspaces", None) or getattr(ex, "rec", None) or {}
-    workspaces = len(held)
+    def held():
+        holder = getattr(ctx, "_device_state", None) or ctx
+        owner = holder.followup_owner()               # the device's follow-up records
+        return {k for k in owner._exec_table() if k[0] == "followups"}
+    workspaces = len(held())
     assert workspaces, "the device follow-up path was not taken"
     for seg in range(6):
         for r in rows:
@@ -580,7 +567,7 @@ def test_device_followups_steady_state_allocates_nothing(monkeypatch):
                  for _ in range(int(rng.integers(1, 3)))])
     assert made[warm:] == [], made[warm:]
     assert len(getattr(ctx, "_pools", [])) == pools
-    assert len(held) == workspaces
+    assert len(held()) == workspaces
 
 
 def test_more_batches_than_slots(monkeypatch):

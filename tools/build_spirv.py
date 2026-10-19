@@ -460,7 +460,10 @@ def compile_one(slangc, n, outdir, entry=ENTRY, cap=None, suffix="", coarse16=0,
     # CUDA, build_ptx.compile_tierb): one kernel whether the device dispatches indirectly.
     items = entry in ("refineItems", "refineListed")
     src.write_text(("#define MF_PAIR_OUT 1\n" if items else "")
-                   + ("#define MF_REFINE_BOUNDED 1\n" if entry == "refineListed" else "")
+                   # refine_bounded.slang's own buffers take bindings 0-5 (tierb.slang's
+                   # row-window table moves past them): the follow-up refine too, so every
+                   # target binds its buffers in its parameter order.
+                   + ("#define MF_REFINE_BOUNDED 1\n" if items else "")
                    + "#define NLEN %d\n#define LDS_CAP %d\n#define COARSE16 %d\n"
                    "#define PPG %d\n#define TILE_T %d\n#define RADIX %d\n#define SINGLE_BIN %d\n"
                    % (n, cap, coarse16, ppg, tile, RADIX.get(n, 16), single_bin)
@@ -489,6 +492,18 @@ def build_items(slangc, n):
     if lds_bytes(n, LDS_CAP[n]) > lds_bytes(n, PORTABLE_CAP):
         small = compile_one(slangc, n, OUT, "refineItems", cap=PORTABLE_CAP, suffix="_lds32")
         info["portable"] = dict(file=small.name, lds_bytes=lds_bytes(n, PORTABLE_CAP))
+    return info
+
+
+def build_metal_items(slangc, n):
+    """The follow-up refine for n in Metal (items_<n>.metal), as the Metal build makes it."""
+    mcap = metal_cap(n)
+    m, lib = compile_metal(slangc, n, mcap, "refineItems", MSL)
+    info = dict(msl=m.name, metallib=lib.name if lib else None)
+    if lds_bytes(n, mcap) > lds_bytes(n, PORTABLE_CAP):
+        sm, slib = compile_metal(slangc, n, PORTABLE_CAP, "refineItems", MSL, suffix="_lds32")
+        info["portable"] = dict(msl=sm.name, metallib=slib.name if slib else None,
+                                lds_bytes=lds_bytes(n, PORTABLE_CAP))
     return info
 
 
@@ -526,6 +541,8 @@ def _build(argv=None):
         manifest = json.loads((OUT / "manifest.json").read_text())
         for n in TIER_B:
             manifest["modules"][str(n)]["items"] = build_items(slangc, n)
+            manifest["modules"][str(n)].setdefault("metal", {})["refineItems"] = \
+                build_metal_items(slangc, n)
             print("  n=%-6d items %s" % (n, manifest["modules"][str(n)]["items"]["file"]))
         manifest["source_hashes"] = source_hashes()
         (OUT / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
@@ -685,7 +702,7 @@ def _build(argv=None):
                         compile_metal(slangc, n, mcap, centry, MSL, coarse16=1, ppg=_p, tile=_t,
                                       suffix="_c16%st%d" % ("p%d" % _p if _p > 1 else "", _t))
 
-        for entry in ENTRIES + ("compactListed",) + (
+        for entry in ENTRIES + ("compactListed", "refineItems") + (
                 ("fullCorrelation", "fullCorrelationSeries") if n >= 1024 else ()):
             m, lib = compile_metal(slangc, n, mcap, entry, MSL)
             metal[entry] = dict(msl=m.name,

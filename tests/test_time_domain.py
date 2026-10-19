@@ -959,10 +959,9 @@ def test_gpu_follow_up_batch_matches_direct_calls(monkeypatch, device_followups)
         orig = type(ctx).peaks_items
         monkeypatch.setattr(type(ctx), "peaks_items",
                             lambda self, *a, **k: used.append(1) or orig(self, *a, **k))
-    if hasattr(ctx, "followup_executor"):
-        ex_type = type(ctx.followup_executor())
-        orig_run = ex_type.submit_jobs
-        monkeypatch.setattr(ex_type, "submit_jobs",
+    if ctx is not None:
+        orig_run = type(ctx).submit_followups
+        monkeypatch.setattr(type(ctx), "submit_followups",
                             lambda self, js: used.append(1) or orig_run(self, js))
     many = TimeDomainFilterBank.filter_series_many(jobs)
     direct = [b.filter_series(x, **kw) for b, x, kw in jobs]

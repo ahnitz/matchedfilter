@@ -820,18 +820,25 @@ def settle_all():
 
 
 class _Write:
-    """A write left in flight (Executor._writes): the fence its submission signals."""
-    __slots__ = ("vk", "device", "fence")
+    """A run left in flight (Executor._writes): the fence its submission signals, or the
+    fused batch that took it (_FusedBatch.add), which settling submits first."""
+    __slots__ = ("vk", "device", "fence", "collected")
 
-    def __init__(self, vk, device, fence):
-        self.vk, self.device, self.fence = vk, device, fence
+    def __init__(self, ctx, fence):
+        self.vk, self.device, self.fence = ctx.vk, ctx.device, fence
+        self.collected = ctx.__dict__.setdefault("_collected", {})
 
     def settle(self):
-        if self.fence is not None:
+        if self.fence is None:
+            return
+        batch = self.collected.pop(getattr(self.fence, "value", self.fence), None)
+        if batch is not None:
+            batch.wait()
+        else:
             _check(self.vk.vkWaitForFences(self.device, 1, (_vp * 1)(self.fence), 1,
                                            0xFFFFFFFFFFFFFFFF), "vkWaitForFences")
-            self.vk.vkDestroyFence(self.device, self.fence, None)
-            self.fence = None
+        self.vk.vkDestroyFence(self.device, self.fence, None)
+        self.fence = None
 
 
 class _Device:
@@ -1918,6 +1925,17 @@ class Context(Executor, InputUploads):
             return self._build_pipeline(("refine", filename), filename, 6, 32,
                                         data_stride=stride, row_windows=rowwin,
                                         subgroup=self._fit_subgroup(n))
+        if name == "items":
+            # refineItems (refine_bounded.slang): data, tmpl, idx, val, entries and their
+            # count, then ntmpl, binsize, binShift, nbins, thrBits and the grid size.
+            module = _manifest().get("modules", {}).get(str(n)) or {}
+            info = module.get("items")
+            if info is None:
+                raise UnsupportedSize("no refineItems module for n=%d" % n)
+            filename = ((info.get("portable") or {}).get("file") or info["file"]
+                        if module.get("lds_bytes", 0) > self.max_shared_memory else info["file"])
+            return self._build_pipeline(("items", filename), filename, 6, 24,
+                                        subgroup=self._fit_subgroup(n))
         fixed = {"compact": ("compact.spv", 3, 12), "compactl": ("compactl.spv", 5, 12),
                  "mark": ("markblocks.spv", 5, 4),
                  "pack": (_manifest()["pack_coarse"]["file"], 2, 20),
@@ -1967,6 +1985,8 @@ class Context(Executor, InputUploads):
             return bool(info.get("one_bin"))
         if name == "fwd_tier0":
             return (_SPIRV / ("forward_tier0_%d.spv" % n)).is_file()
+        if name == "items":
+            return "items" in (_manifest().get("modules", {}).get(str(n)) or {})
         raise ValueError(name)
 
     def _x_coarse_candidates(self, band):
@@ -2079,11 +2099,18 @@ class Context(Executor, InputUploads):
         cmd, release = native.command(binds, transient=True)
         pcmds, frees = self._pre_commands(pre)
         frees = frees + ([release] if release is not None else [])
-        if slot is None:                    # per-slot fences: an unslotted run is waited now
-            self._submit(cmd, pre=pcmds, label=native.label)
-            for free in frees:
-                free()
-            return lambda: None
+        if slot is None:
+            # Its own fence, as a run left in flight: another queue's submission and a host
+            # reader settle it first (_submit, settle_writes).
+            self._submit_pending(cmd, pre=pcmds, label=native.label)
+            write = self._writes()[-1]
+
+            def settle():
+                write.settle()
+                for free in frees:
+                    free()
+                del frees[:]
+            return settle
         fence = self._get_fence(slot)
         self._submit(cmd, fence=fence, wait=False, slot=slot, pre=pcmds, label=native.label)
 
@@ -2138,15 +2165,10 @@ class Context(Executor, InputUploads):
         except BaseException:
             self.vk.vkDestroyFence(self.device, fence, None)
             raise
-        self._writes().append(_Write(self.vk, self.device, fence))
+        self._writes().append(_Write(self, fence))
 
 
 
-
-    def followup_executor(self):
-        """This device's executor for _gpuhost.submit_followups (_vkfollowup: one recording per group, replayed)."""
-        from . import _vkfollowup
-        return _vkfollowup.executor(self)
 
     def clear_cache(self):
         """Release records and owned storage, preserving external shared arrays."""
@@ -2164,6 +2186,7 @@ class Context(Executor, InputUploads):
     def destroy(self):
         if getattr(self, "device", None) is None:
             return
+        self._retire()
         self.clear_cache()
         vk = self.vk
         for fence in getattr(self, "_fences", {}).values():
