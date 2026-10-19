@@ -174,6 +174,60 @@ class HierOps:
             tiebreak=lambda c: (c[2], c[1], c[0]), forced=forced)
         return layout
 
+    def _gate_way(self, band):
+        """How a later gate tier reports at this band (tierb.slang gateOnly): "gate", the
+        window's maximum alone (the tier's nbins word 0), or "elect", the full one-bin
+        election (1) -- whichever this device runs faster, timed once on synthetic data and
+        kept in MF_COST_FILE (stored_measured_choice). Measured: the gate halves the tier on
+        a RENOIR (0.66 -> 0.30 ms a call) and is Metal's long-standing way; on the L40S the
+        election's shared-memory atomics beat the warp maximum (16 against 24 us)."""
+        from . import gatechain
+        from ._coarse import stored_measured_choice
+        holder = getattr(self, "_device_state", None) or self
+        made = holder.__dict__.setdefault("gate_way", {})
+        way = made.get(band)
+        if way is None:
+            memo = holder.__dict__.setdefault("gate_choice", {})
+            way = made[band] = stored_measured_choice(
+                memo, "gateway", getattr(self, "device_name", "") or getattr(self, "name", ""),
+                band, ("gate", "elect"), str, gatechain.gpu_kernel_id(self.kernel_family),
+                lambda cs: self._time_gate_ways(band, cs))
+        return way
+
+    def _time_gate_ways(self, band, ways):
+        """Device seconds per pair of the one-bin tier at this band in each way, over every
+        pair of a synthetic batch listed as a survivor (_coarse.time_staged)."""
+        from ._coarse import time_staged
+        ntm, pairs = self._COARSE_NT, self._COARSE_PAIRS
+        rng = np.random.default_rng(1)
+        x = ((rng.standard_normal((pairs // ntm, band))
+              + 1j * rng.standard_normal((pairs // ntm, band))) * 0.1).astype(np.complex64)
+        bufs = [self._x_alloc(x.nbytes), self._x_alloc(ntm * band * 8),
+                self._x_alloc(pairs * 4), self._x_alloc(pairs * 8),
+                self._x_alloc(pairs * 4), self._x_alloc(16)]
+        bufs[0].write(x)
+        bufs[1].write(x[:ntm])
+        bufs[4].write(np.arange(pairs, dtype=np.uint32))
+        bufs[5].write(np.array([pairs, 1, 1, 0], np.uint32))
+        kern = self._x_kernel("tier1", band, dict(stride=0, rowwin=False))
+        natives = []
+
+        def time_way(way):
+            lst = self._x_list("gate timing")
+            lst.listed(kern, bufs[5], pairs, bufs,
+                       (ntm, 0, band, band, bin_shift(band) & 0xFFFFFFFF,
+                        0 if way == "gate" else 1, 0))
+            native = lst.end()
+            natives.append(native)
+            return self._x_time(native, {}, 2) / pairs
+        try:
+            return time_staged([list(ways)], time_way, rounds=3)
+        finally:
+            for native in natives:
+                self._x_release(native)
+            for b in bufs:
+                b.destroy()
+
     def coarse_layouts(self, band):
         """The names (_coarse.layout_label) of every coarse layout the choice may take at this
         band on this device; MF_COARSE_LAYOUT forces one."""
@@ -598,8 +652,9 @@ class HierOps:
             b1, _, thr1 = tiers[1]
             cs1, ce1, csp1, csh1 = coarse_span(n, b1, lo, hi)
             # nbins 0 asks a one-bin build for the gate's decision alone (tierb.slang gateOnly).
-            one = self._shipped("tier1", b1)
-            binds["tier"] = (nt, start(cs1), ce1, csp1, csh1 & 0xFFFFFFFF, 0 if one else 1, 0)
+            # nbins 0 asks a one-bin build for the gate's decision alone, where it is faster.
+            gate = self._shipped("tier1", b1) and self._gate_way(b1) == "gate"
+            binds["tier"] = (nt, start(cs1), ce1, csp1, csh1 & 0xFFFFFFFF, 0 if gate else 1, 0)
             # The pairs tier 0 dismissed hold zeros: the smallest normal float dismisses them.
             binds["compact1"] = (pairs, _bits(max(thr1, _TINY)), nbins)
         binds["refine"] = (nt, start(lo), hi, binsize, shift & 0xFFFFFFFF, nbins, _bits(t2))
