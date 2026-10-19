@@ -809,9 +809,18 @@ def test_filter_series_many_matches_one_call_at_a_time(device, interleave, monke
     one = [b.filter_series(x, **kw) for b, x, kw in jobs]
     many = TimeDomainFilterBank.filter_series_many(jobs)
     assert sum(len(r.snr) for r in one[:-1]) >= 5
-    for r1, r2 in zip(one, many):
+    for j, (r1, r2) in enumerate(zip(one, many)):
+        # On a mismatch, say which job and which triggers (template, sample, |SNR|, block n)
+        # only one side reports: a CI runner's failure is then readable from its summary.
+        p1, p2 = ({(int(t), int(s)): (float(abs(z)), int(n)) for t, s, z, n in
+                   zip(r.template_indices, r.sample_indices, r.snr, r.block_lengths)}
+                  for r in (r1, r2))
+        only = "one call only %s; batch only %s" % (
+            sorted((k, p1[k]) for k in set(p1) - set(p2)),
+            sorted((k, p2[k]) for k in set(p2) - set(p1)))
         for f in r1._fields:
-            np.testing.assert_array_equal(getattr(r1, f), getattr(r2, f))
+            np.testing.assert_array_equal(getattr(r1, f), getattr(r2, f),
+                                          err_msg="job %d, %s: %s" % (j, f, only))
 
 
 def test_filter_series_many_mixes_deferred_and_synchronous_calls_on_one_plan(monkeypatch):
