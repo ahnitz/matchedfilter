@@ -961,39 +961,34 @@ def calibrate_costs_gpu(n, device, blocks=None, reps=5, seed=11, nt=256):
     host_call = max(0.0, hosts[1][1] - host_block * hosts[1][0])
     cm = CostModel(n, dense, sparse, refine, block=block, excess=excess,
                    host_call=host_call, host_block=host_block,
-                   forward=forward, band_forward=_gpu_backend(device) is not None)
+                   forward=forward, band_forward=_is_gpu(device))
     _COSTS[key] = cm
     if path is not None:
         _store_cost(path, skey, cm)
     return cm
 
 
-#: Per GPU backend: the environment switch that makes its first tier report the raw coarse
-#: statistic instead of an upper bound of it, read when its pipelines are built, and the gate
-#: kind it names for cost-file keys. A backend whose coarse kernel gains a bound adds a row.
-_RAW_GATE_SWITCH = {
-    "vulkan": ("MF_VK_C16_BOUND", "0", "c16b"),
-    # CUDA's coarse modules read the same switch (mf_c16_raw, _cudacompute._c16_bound_flag).
-    "cuda": ("MF_VK_C16_BOUND", "0", "c16b"),
-    # Metal compiles the same switch into its coarse libraries (MF_C16_RAW, _mtlcompute._library).
-    "metal": ("MF_VK_C16_BOUND", "0", "c16b"),
-}
+#: The environment switch that makes a GPU's first tier report the raw coarse statistic
+#: instead of an upper bound of it (read when its kernels are built: Vulkan's constant 77,
+#: CUDA's mf_c16_raw, Metal's MF_C16_RAW), its raw value, and the gate kind named in
+#: cost-file keys. Every GPU's coarse tier reports the bound.
+_RAW_GATE_SWITCH = ("MF_VK_C16_BOUND", "0", "c16b")
 
 
-def _gpu_backend(device):
+def _is_gpu(device):
+    """Whether `device` names a GPU (the cost model's band forward and fp16 gate)."""
     try:
         from .device import parse as _parse
-        d = _parse(device)
-        return str(getattr(d, "backend", "") or "").lower()
+        return _parse(device).kind == "gpu"
     except Exception:
-        return ""
+        return False
 
 
 def gpu_gate_kind(device):
-    """'f32' unless the device's first tier reports a bound (a _RAW_GATE_SWITCH row whose
-    switch is not set to raw); then that row's kind."""
-    row = _RAW_GATE_SWITCH.get(_gpu_backend(device))
-    if row is None or os.environ.get(row[0]) == row[1]:
+    """'f32' unless the device's first tier reports a bound (a GPU whose raw switch,
+    _RAW_GATE_SWITCH, is not set); then 'c16b'."""
+    row = _RAW_GATE_SWITCH
+    if not _is_gpu(device) or os.environ.get(row[0]) == row[1]:
         return "f32"
     return row[2]
 
@@ -1046,8 +1041,8 @@ def _raw_survivors_here(n, device, bands, blocks, nt, seed):
 
 
 def _raw_gate_survivors(n, device, bands, blocks, nt, seed):
-    row = _RAW_GATE_SWITCH.get(_gpu_backend(device))
-    if row is None:
+    row = _RAW_GATE_SWITCH
+    if not _is_gpu(device):
         return []
     import json, subprocess, sys
     env = dict(os.environ)

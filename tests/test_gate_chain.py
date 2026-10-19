@@ -735,13 +735,19 @@ def test_bounding_first_tier_excess_is_priced():
 
 def test_gpu_gate_kind_keys(monkeypatch):
     gc = mf._gatechain
-    monkeypatch.setattr(gc, "_gpu_backend", lambda d: "vulkan")
+    monkeypatch.setattr(gc, "_is_gpu", lambda d: d.startswith("gpu"))
     monkeypatch.delenv("MF_VK_C16_BOUND", raising=False)
     assert gc.gpu_gate_kind("gpu:0") == "c16b"
+    assert gc.gpu_gate_kind("cpu") == "f32"
     monkeypatch.setenv("MF_VK_C16_BOUND", "0")
     assert gc.gpu_gate_kind("gpu:0") == "f32"
-    monkeypatch.setattr(gc, "_gpu_backend", lambda d: "metal")
-    assert gc.gpu_gate_kind("gpu:0") == "f32"
+
+
+def test_the_band_forward_is_priced_on_gpus_only():
+    """Every GPU backend can claim its forward; a CPU never does (its device has a backend
+    name too, AVX2/AVX3, which the pricing once took for a GPU's)."""
+    gc = mf._gatechain
+    assert gc._is_gpu("cpu") is False
 
 
 def test_a_tier_that_passes_most_pairs_is_never_chosen():
