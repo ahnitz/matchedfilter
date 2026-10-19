@@ -560,7 +560,7 @@ def _built(banks):
     for bank in banks:
         for g in getattr(bank, '_groups', ()) or ():
             ctx = getattr(getattr(g, '_plan', None), '_gpu', None)     # built plans only
-            if ctx is not None and hasattr(ctx, 'built'):
+            if ctx is not None:
                 total += ctx.built()
     return total
 
@@ -1878,11 +1878,10 @@ class TimeDomainFilterBank:
         for snap in dropped:
             for g in snap.get('_built') or []:
                 ctx = getattr(getattr(g, 'plan', None), '_gpu', None)
-                if ctx is not None and hasattr(ctx, '_evict_all'):
+                if ctx is not None:
                     ctxs[id(ctx)] = ctx
         for ctx in ctxs.values():
-            if hasattr(ctx, '_drain'):
-                ctx._drain()
+            ctx._drain()
             ctx._evict_all()                 # live layouts re-upload once, on their next call
 
     def _load_templates(self) -> None:
@@ -2367,31 +2366,14 @@ class TimeDomainFilterBank:
             return paired if wait else [_Deferred(lambda r=r: r) for r in paired]
         trial = _trial_begin(jobs)
         _BATCH_TOKEN += 1
-        # On Vulkan the deferred submissions are also fused: one command buffer runs every
-        # job's forward transforms, then every job's first tier, ..., one barrier per phase
+        # The deferred submissions are also fused where a GPU driver batches them (Vulkan:
+        # one command buffer runs every job's forward transforms, then every job's first
+        # tier, ..., one barrier per phase; _gpuexec.fused).
         close = None
         if any(
                 getattr(b, "device", None) is not None for b, _, _ in jobs):
-            # Every GPU backend in use shares the protocol: fused() begins collecting on its
-            # devices and returns a close (Vulkan: _vkcompute._FusedBatch; Metal: shared
-            # command buffers, _mtlcompute._FusedBatch).
-            closes = []
-            for name in ('_vkcompute', '_mtlcompute'):
-                mod = sys.modules.get(__package__ + '.' + name)
-                if mod is None and name == '_vkcompute':
-                    try:
-                        from . import _vkcompute as mod
-                    except Exception:
-                        mod = None
-                if mod is not None and hasattr(mod, 'fused'):
-                    try:
-                        closes.append(mod.fused())
-                    except Exception:
-                        pass
-            if closes:
-                def close(closes=closes):
-                    for c in closes:
-                        c()
+            from ._gpuexec import fused
+            close = fused()
         out = [None] * len(jobs)
         # Single-template (follow-up) calls on a GPU bank, per template group: one forward
         # dispatch and one submission for all of them instead of a few submissions each.
@@ -2686,7 +2668,7 @@ class TimeDomainFilterBank:
         # A GPU-shared dest is zeroed on the device: host writes would pull its pages
         # back to the CPU (CUDA managed memory) only for the next kernel to fault them in.
         gpu = getattr(g.get_correlation_plan(), '_gpu', None) if W.shape[0] else None
-        zero = getattr(gpu, 'zero_columns', None)
+        zero = gpu.zero_columns if gpu is not None else None
         if zero is not None:
             from ._shared import shared_view
             held = shared_view(dest, gpu, align=4)
@@ -2767,8 +2749,8 @@ class TimeDomainFilterBank:
         a = _from_any(series)
         # A real series stays real (a real-real-complex hierarchy's middle stage filtering
         # the real top output) where every group reads one: on the CPU, half-size block
-        # transforms (correlate_series_continuous_real); on a GPU with real_series, a
-        # forward that reads the real samples in place. Elsewhere it is widened to complex.
+        # transforms (correlate_series_continuous_real); on a GPU, a forward that reads
+        # the real samples in place. Elsewhere it is widened to complex.
         if (isinstance(a, np.ndarray) and not np.iscomplexobj(a)
                 and self._correlation_reads_real()):
             # A GPU forward reads one lane of a complex row (stride 2) in place; the CPU's
@@ -2939,7 +2921,7 @@ class TimeDomainFilterBank:
 
     def _correlation_reads_real(self) -> bool:
         """Whether every group's correlation plan reads a real series itself: the CPU's, or a
-        GPU's whose forward takes real samples (real_series; one-stage, n <= 65536)."""
+        GPU's whose forward takes real samples (one-stage, n <= 65536)."""
         from .device import parse as _parse_device
         if _parse_device(self.device).kind == 'cpu':
             return True

@@ -29,8 +29,6 @@ def _setup(monkeypatch, nbanks=2, seed=71, replay=True):
                                  false_dismissal=1e-3, device=dev, fft_lengths=[2048], binsize=2048)
         b.set_reference(w, delta_f=df)
         banks.append((b, w, df))
-    if replay and not getattr(banks[0][0]._groups[0].plan._gpu, "supports_replay", False):
-        pytest.skip("this backend records no call plans")
     return rng, banks
 
 
@@ -126,8 +124,6 @@ def test_explicit_gate_thresholds_invalidate(monkeypatch):
                                 false_dismissal=1e-3, device=dev, fft_lengths=[2048], binsize=2048,
                                 coarse_band_hz=(256.0,))
     bank.set_reference(w, delta_f=df)
-    if not getattr(bank._groups[0].plan._gpu, "supports_replay", False):
-        pytest.skip("this backend records no call plans")
     S = 1 << 17
     rows = bank.empty_shared((1, S))
     jobs = [(bank, rows[0], dict(windows=slice(3000, S - 3000)))]

@@ -295,7 +295,7 @@ _BufMemBarrier = _struct("VkBufferMemoryBarrier",
 
 from ._errors import UnsupportedSize      # noqa: F401  (re-export)
 from ._gpu_cache import InputUploads
-from ._gpuexec import Arg, Executor, settle as _settle
+from ._gpuexec import Arg, Executor, register_fusion, settle as _settle
 
 
 class VulkanError(RuntimeError):
@@ -800,6 +800,9 @@ def fused():
             if b is not None and b.items:
                 b.flush()
     return close
+
+
+register_fusion(fused)
 
 
 #: One _Device per Vulkan device index, for the life of the process.
