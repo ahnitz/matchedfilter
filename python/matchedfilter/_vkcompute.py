@@ -1393,6 +1393,12 @@ class Context(Executor, InputUploads):
             return info["portable"]["file"]
         return "refine_%d.spv" % n
 
+    @staticmethod
+    def _gate_file(n):
+        """The one-bin listed refine's gate-only build at n (tierb.slang MF_GATE_ONLY), or None."""
+        info = (_manifest().get("modules", {}).get(str(n)) or {}).get("refine") or {}
+        return ((info.get("one_bin") or {}).get("gate") or {}).get("file")
+
     def _peak_file(self, n, nbins, refine=False):
         general = self._refine_file(n) if refine else self._kernel_file(n)
         info = _manifest().get("modules", {}).get(str(n), {})
@@ -1934,6 +1940,8 @@ class Context(Executor, InputUploads):
             # refineListedBounded (refine_bounded.slang): data, tmpl, idx, val, survivors and
             # their count, then the row-window table (binding 6).
             filename = self._peak_file(n, 1 if name.endswith("1") else 2, refine=True)
+            if c.get("gate"):                    # the one-bin build's gate-only variant
+                filename = self._gate_file(n) or filename
             return self._build_pipeline(("refine", filename), filename, 6, 32,
                                         data_stride=stride, row_windows=rowwin,
                                         subgroup=self._fit_subgroup(n))
@@ -1999,6 +2007,8 @@ class Context(Executor, InputUploads):
             return (_SPIRV / ("forward_tier0_%d.spv" % n)).is_file()
         if name == "items":
             return "items" in (_manifest().get("modules", {}).get(str(n)) or {})
+        if name == "tier1gate":
+            return Context._gate_file(n) is not None
         raise ValueError(name)
 
     def _x_coarse_candidates(self, band):

@@ -37,7 +37,10 @@
       "refine": {
         "file": "refine_256.ptx",
         "one_bin": {
-          "file": "refine_256_onebin.ptx"
+          "file": "refine_256_onebin.ptx",
+          "gate": {
+            "file": "refine_256_onebin_gate.ptx"
+          }
         }
       }
     },
@@ -52,7 +55,10 @@
       "refine": {
         "file": "refine_512.ptx",
         "one_bin": {
-          "file": "refine_512_onebin.ptx"
+          "file": "refine_512_onebin.ptx",
+          "gate": {
+            "file": "refine_512_onebin_gate.ptx"
+          }
         }
       }
     },
@@ -73,7 +79,10 @@
       "refine": {
         "file": "refine_1024.ptx",
         "one_bin": {
-          "file": "refine_1024_onebin.ptx"
+          "file": "refine_1024_onebin.ptx",
+          "gate": {
+            "file": "refine_1024_onebin_gate.ptx"
+          }
         }
       }
     },
@@ -565,5 +574,5 @@
       }
     }
   },
-  "build_id": "ecd9d9df456f2f4f3c3f98dd6ed3d8ece6cc4086322e0c89248e97f0f09cd862"
+  "build_id": "3f8621ff14ea194b3a41170a927f34e35f2ba4299cbd328e7899c7ad482f52ad"
 }

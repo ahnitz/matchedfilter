@@ -56,6 +56,11 @@
 #ifndef RADIX
 #define RADIX 16
 #endif
+//: MF_GATE_ONLY: a one-bin build that can also report a gate tier's decision alone (nbins 0,
+//: gateOnly) -- the "_gate" variant, chosen per device by measurement (_gpuhier._gate_way).
+#ifndef MF_GATE_ONLY
+#define MF_GATE_ONLY 0
+#endif
 static const uint N   = NLEN;
 static const uint R   = RADIX;
 static const uint LGR = (RADIX == 16) ? 4u : ((RADIX == 32) ? 5u : 6u);
@@ -851,10 +856,11 @@ void filterPair(uint pair, uint tid,
 {
 #if !COARSE16
 #if SINGLE_BIN
-#if NLEN <= 1024
+#if MF_GATE_ONLY && NLEN <= 1024
     // nbins == 0 (a later gate tier): report only the window's maximum |v|, the one number
-    // the compaction after it reads (gateOnly below). Built at gate bands only: at the fine
-    // lengths the unused branch cost the final refine ~2% on the M2 (register pressure).
+    // the compaction after it reads (gateOnly below). Its own build (_gate): compiled into
+    // the one-bin refine, the unused branch cost that kernel registers -- 102 -> 127 at
+    // n = 512 on the L40S, its tier 15% slower -- and ~2% on the M2.
     bool gateOnly = (nbins == 0u);
 #endif
     // The host selects this build only when the searched window has one
@@ -910,7 +916,7 @@ void filterPair(uint pair, uint tid,
 #endif
     GroupMemoryBarrierWithGroupSync();          // transform is done with stg
 #if SINGLE_BIN
-#if !COARSE16 && NLEN <= 1024
+#if MF_GATE_ONLY && !COARSE16 && NLEN <= 1024
     // GATE ONLY (a tier between the first and the refine). What follows such a tier is the
     // compaction, which lists a pair when |peakVal| reaches the tier threshold; the index
     // has no reader. So: the largest in-window |v|^2 per thread, a SIMD-group maximum, and

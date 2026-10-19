@@ -453,13 +453,15 @@ def fp32_xstride(n, cap):
     return wg + FP32_PAD if ch * (wg + FP32_PAD) * 8 <= PORTABLE_CAP * 8 else wg
 
 
-def compile_one(slangc, n, outdir, entry=ENTRY, cap=None, suffix="", coarse16=0, ppg=1, tile=1, single_bin=0):
+def compile_one(slangc, n, outdir, entry=ENTRY, cap=None, suffix="", coarse16=0, ppg=1, tile=1, single_bin=0,
+                gate_only=0):
     cap = LDS_CAP[n] if cap is None else cap
     src = outdir / ("mf_%d_%s%s.slang" % (n, entry, suffix))
     # The listed refine is refine_bounded.slang's refineListedBounded on every target (as on
     # CUDA, build_ptx.compile_tierb): one kernel whether the device dispatches indirectly.
     items = entry in ("refineItems", "refineListed")
     src.write_text(("#define MF_PAIR_OUT 1\n" if items else "")
+                   + ("#define MF_GATE_ONLY 1\n" if gate_only else "")
                    # refine_bounded.slang's own buffers take bindings 0-5 (tierb.slang's
                    # row-window table moves past them): the follow-up refine too, so every
                    # target binds its buffers in its parameter order.
@@ -631,6 +633,12 @@ def _build(argv=None):
         if 256 <= n < 4096:
             one = compile_one(slangc, n, OUT, "refineListed", suffix="_onebin", single_bin=1)
             info["refine"]["one_bin"] = dict(file=one.name)
+            # A later gate tier's decision alone (tierb.slang MF_GATE_ONLY), its own build:
+            # measured against the election per device (_gpuhier._gate_way).
+            if n <= 1024:
+                gate = compile_one(slangc, n, OUT, "refineListed", suffix="_onebin_gate",
+                                   single_bin=1, gate_only=1)
+                info["refine"]["one_bin"]["gate"] = dict(file=gate.name)
         if n >= 4096:
             for entry, target in (("fusedTierB", info), ("refineListed", info["refine"])):
                 one = compile_one(slangc, n, OUT, entry, suffix="_onebin", single_bin=1)
@@ -727,6 +735,12 @@ def _build(argv=None):
                 metal[entry]["one_bin"] = dict(
                     msl=one.name, metallib=lib.name if lib else None,
                     lds_bytes=lds_bytes(n, cap))
+                if entry == "refineListed" and n <= 1024:
+                    gate, glib = compile_metal(slangc, n, cap, entry, MSL, suffix="_onebin_gate",
+                                               single_bin=1, prelude="#define MF_GATE_ONLY 1\n")
+                    metal[entry]["one_bin"]["gate"] = dict(
+                        msl=gate.name, metallib=glib.name if glib else None,
+                        lds_bytes=lds_bytes(n, cap))
         info["metal"] = metal
         # Kept beside, not inside, "metal": the consumers of that key
         # iterate it as entry -> files and a scalar sibling would break

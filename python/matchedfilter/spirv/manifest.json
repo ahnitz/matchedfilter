@@ -197,7 +197,10 @@
         "file": "refine_256.spv",
         "descriptors": 7,
         "one_bin": {
-          "file": "refine_256_onebin.spv"
+          "file": "refine_256_onebin.spv",
+          "gate": {
+            "file": "refine_256_onebin_gate.spv"
+          }
         }
       },
       "metal": {
@@ -220,7 +223,12 @@
           "one_bin": {
             "msl": "refine_256_onebin.metal",
             "metallib": null,
-            "lds_bytes": 2048
+            "lds_bytes": 2048,
+            "gate": {
+              "msl": "refine_256_onebin_gate.metal",
+              "metallib": null,
+              "lds_bytes": 2048
+            }
           }
         },
         "compactListed": {
@@ -284,7 +292,10 @@
         "file": "refine_512.spv",
         "descriptors": 7,
         "one_bin": {
-          "file": "refine_512_onebin.spv"
+          "file": "refine_512_onebin.spv",
+          "gate": {
+            "file": "refine_512_onebin_gate.spv"
+          }
         }
       },
       "metal": {
@@ -307,7 +318,12 @@
           "one_bin": {
             "msl": "refine_512_onebin.metal",
             "metallib": null,
-            "lds_bytes": 4096
+            "lds_bytes": 4096,
+            "gate": {
+              "msl": "refine_512_onebin_gate.metal",
+              "metallib": null,
+              "lds_bytes": 4096
+            }
           }
         },
         "compactListed": {
@@ -377,7 +393,10 @@
         "file": "refine_1024.spv",
         "descriptors": 7,
         "one_bin": {
-          "file": "refine_1024_onebin.spv"
+          "file": "refine_1024_onebin.spv",
+          "gate": {
+            "file": "refine_1024_onebin_gate.spv"
+          }
         }
       },
       "metal": {
@@ -400,7 +419,12 @@
           "one_bin": {
             "msl": "refine_1024_onebin.metal",
             "metallib": null,
-            "lds_bytes": 8192
+            "lds_bytes": 8192,
+            "gate": {
+              "msl": "refine_1024_onebin_gate.metal",
+              "metallib": null,
+              "lds_bytes": 8192
+            }
           }
         },
         "compactListed": {
@@ -1703,7 +1727,7 @@
     }
   },
   "source_hashes": {
-    "tierb.slang": "886aca86e70375c529863d75a5a9c74f3b88079c3488c0c1cddfa65ca5645406",
+    "tierb.slang": "c34ecd44a982bfc5628d01d37c90c6818336ef0de31410a21301953c1a6c5db3",
     "fft_transform.slang": "c7888ec7a8c0363d243e418adcdde320823ce190190b95448d762612cc4e61e9",
     "coarse_tile.slang": "8b1a3f9193e20b76cc02641e71b77023d544b0bd1bff8c4194f38371ad47fb47",
     "series_forward.slang": "ed54d158b885a0d6c26009e4d636f8733df90fb7909f5d3fe9708aac05d5f4b6",
@@ -1714,6 +1738,6 @@
     "refine_bounded.slang": "bf32ef397075682cc5d73464d656dca61d6f16c6174e223836940b86c039c83d",
     "compact_peaks.slang": "5c8bd90e54bbb422e6c60cfa3009074008a7d4039c9d44ce026e10c81df248d4"
   },
-  "build_id": "585053fb6f65527a8bb97b406b247ba1ef9b44f6beead1104dab02049d3ddcfb",
-  "metal_build_id": "8585a0c9dc56e33c3ad48a04f4dd7e8253a0c97b31189bf586dae4610487a06f"
+  "build_id": "0ec6bf459c2b6c93f19dfdb11e94ac4fdf7454943327de94fd373334f5c31f73",
+  "metal_build_id": "713df127095576db1cab5fc2173c2512d4fe324085677ca6f1cce8efcf066e8b"
 }
