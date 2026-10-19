@@ -446,6 +446,21 @@ class CostModel:
 
 _COSTS = {}
 
+#: The engine's diagnostics, read by a plan when it is created (hmf.c).
+_PLAN_DIAGNOSTICS = ("MF_HMF_DUMP", "MF_HMF_TRACE")
+
+
+@contextmanager
+def _internal_plans():
+    """Off, while the library creates plans for itself (cost calibration): the diagnostic dump
+    and trace describe the caller's plans. A calibration plan would otherwise truncate the
+    caller's dump file and write its own pairs into it."""
+    held = {k: os.environ.pop(k) for k in _PLAN_DIAGNOSTICS if k in os.environ}
+    try:
+        yield
+    finally:
+        os.environ.update(held)
+
 
 def cpu_gate_kind():
     """'f16' when new CPU hierarchical plans run the FP16 first gate (gate16.cc: ARM with
@@ -637,7 +652,8 @@ def calibrate_costs(n, ntemplates, blocks=256, reps=5, seed=11, group=None):
     def run(chain, thr, reps=reps, q15=False, stats=False):
         """Pairs per call and per-tier (band, passed, ticks) per call: medians over repetitions.
         With stats, also the Q15 screen's (on, passed, ticks) per call."""
-        p = _core.HMF(n, 1, nt, list(chain), group, n)
+        with _internal_plans():
+            p = _core.HMF(n, 1, nt, list(chain), group, n)
         p.set_reference(ref); p.set_template_batch(0, spec); p.set_thresholds(list(thr))
         if q15:
             p.set_q15(True)
@@ -681,7 +697,8 @@ def calibrate_costs(n, ntemplates, blocks=256, reps=5, seed=11, group=None):
         dense[b] = st[0][2] / pairs
     # Per-block fixed work: a whole run_series call minus its tiers and refine (nothing passes), per block.
     for b in bands[:2]:
-        p = _core.HMF(n, 1, nt, [b], group, n)
+        with _internal_plans():
+            p = _core.HMF(n, 1, nt, [b], group, n)
         p.set_reference(ref); p.set_template_batch(0, spec); p.set_thresholds([big])
         p.run_series(ser, starts, ws, we, 0, nt, n, big, idx, val, mag, cnt)
         per = []
