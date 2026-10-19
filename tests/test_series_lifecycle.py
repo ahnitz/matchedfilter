@@ -148,24 +148,19 @@ def test_series_keeps_unchanged_template_buffers_resident(plan, monkeypatch):
     kw = dict(starts=[0, n], win_start=[0, 0], win_end=[n, n], binsize=n)
     plan.run_series(np.ones(2*n, np.complex64), **kw)
     ctx = plan._gpu
+    # The template bank's device copies: a flat record's own templates (none where they are
+    # bound in place), and a hierarchical record's templates and tier templates.
     protected = set()
-    in_place = False                     # templates in device memory: bound, never copied
-    for key, rec in getattr(ctx, "_exec_records", {}).items():
-        if key[0] == "flat" and "tmpl" in rec.owned:
-            protected.add(id(rec.buffers["tmpl"]))
-        elif key[0] == "flat":
-            in_place = True
-    for batch in ctx._hier.values():
-        bufs = batch[0] if plan.device.backend == "vulkan" else batch
-        protected.update(id(bufs[name]) for name in ("tmpl", "ct0"))
-    assert protected or in_place
-    buffer_class = plan._backend()._Buffer
-    write = buffer_class.write
+    for key, rec in ctx._exec_records.items():
+        names = [k for k in rec.buffers if k == "tmpl" or k.startswith("ct")]
+        protected.update(id(rec.buffers[k]) for k in names if k in rec.owned)
     calls = []
-    def record(buffer, array, *args):
-        if id(buffer) in protected:
+    upload = ctx._x_upload
+
+    def record(buf, array, slot):
+        if id(buf) in protected:
             calls.append(array.nbytes)
-        return write(buffer, array, *args)
-    monkeypatch.setattr(buffer_class, "write", record)
+        return upload(buf, array, slot)
+    monkeypatch.setattr(ctx, "_x_upload", record)
     plan.run_series(np.full(2*n, 2j, np.complex64), **kw)
     assert not calls, "a new data series re-uploaded the unchanged template bank"

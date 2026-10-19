@@ -15,6 +15,7 @@ import pathlib
 import pytest
 
 import matchedfilter
+from matchedfilter._shared import pack_half2
 
 METAL_DIR = pathlib.Path(matchedfilter.__file__).resolve().parent / "metal"
 MANIFEST = (pathlib.Path(matchedfilter.__file__).resolve().parent
@@ -88,7 +89,7 @@ def test_metal_fp16_helpers():
     # Values including subnormals, zeros, negative numbers, infinities, boundaries
     vals = np.array([0.0, -0.0, 1.0, -0.5, 2.0, -2.0, 65504.0, -65504.0, 2**-14], dtype=np.float32)
     c = (vals + 1j * vals[::-1]).astype(np.complex64)
-    packed = M._pack_half2(c)
+    packed = pack_half2(c)
     assert packed.dtype == np.uint32
     assert packed.shape == c.shape
     re = packed.view(np.uint16)[0::2].view(np.float16)

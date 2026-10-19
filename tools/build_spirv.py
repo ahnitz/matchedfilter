@@ -350,11 +350,16 @@ def compile_metal(slangc, n, cap, entry, outdir, suffix="", coarse16=0, ppg=1, s
                    + (_metal_c16_kappa(n) if coarse16 else "")
                    # The fp16 twiddle table, for a "w" entry's MF_COARSE_TWT=1 (twiddle.slang).
                    + (_coarse_layout().twiddle_table_source(n) if coarse16 else "")
-                   + prelude + KERNEL.read_text())
+                   + ("#define MF_PAIR_OUT 1\n" if entry in ("refineItems", "refineListed")
+                      else "")
+                   + prelude + KERNEL.read_text()
+                   + (ITEMS_KERNEL.read_text() if entry in ("refineItems", "refineListed")
+                      else ""))
     stem = "%s_%d%s" % (STEMS[entry], n, suffix)
     msl = outdir / (stem + ".metal")
     proc = subprocess.run(
-        [slangc, str(src), "-I", str(KERNEL.parent), "-target", "metal", "-entry", entry,
+        [slangc, str(src), "-I", str(KERNEL.parent), "-target", "metal",
+         "-entry", "refineListedBounded" if entry == "refineListed" else entry,
          "-stage", "compute", "-O3", "-o", str(msl)],
         capture_output=True, text=True)
     src.unlink()
@@ -451,8 +456,11 @@ def fp32_xstride(n, cap):
 def compile_one(slangc, n, outdir, entry=ENTRY, cap=None, suffix="", coarse16=0, ppg=1, tile=1, single_bin=0):
     cap = LDS_CAP[n] if cap is None else cap
     src = outdir / ("mf_%d_%s%s.slang" % (n, entry, suffix))
-    items = entry == "refineItems"
+    # The listed refine is refine_bounded.slang's refineListedBounded on every target (as on
+    # CUDA, build_ptx.compile_tierb): one kernel whether the device dispatches indirectly.
+    items = entry in ("refineItems", "refineListed")
     src.write_text(("#define MF_PAIR_OUT 1\n" if items else "")
+                   + ("#define MF_REFINE_BOUNDED 1\n" if entry == "refineListed" else "")
                    + "#define NLEN %d\n#define LDS_CAP %d\n#define COARSE16 %d\n"
                    "#define PPG %d\n#define TILE_T %d\n#define RADIX %d\n#define SINGLE_BIN %d\n"
                    % (n, cap, coarse16, ppg, tile, RADIX.get(n, 16), single_bin)
@@ -463,7 +471,8 @@ def compile_one(slangc, n, outdir, entry=ENTRY, cap=None, suffix="", coarse16=0,
     name = "%s_%d%s.spv" % (STEMS[entry], n, suffix)
     spv = outdir / name
     proc = subprocess.run(
-        [slangc, str(src), "-I", str(KERNEL.parent), "-target", "spirv", "-entry", entry,
+        [slangc, str(src), "-I", str(KERNEL.parent), "-target", "spirv",
+         "-entry", "refineListedBounded" if entry == "refineListed" else entry,
          "-stage", "compute", "-O3", "-DMF_VULKAN=1", "-o", str(spv)],
         capture_output=True, text=True)
     if proc.returncode != 0:
@@ -676,7 +685,8 @@ def _build(argv=None):
                         compile_metal(slangc, n, mcap, centry, MSL, coarse16=1, ppg=_p, tile=_t,
                                       suffix="_c16%st%d" % ("p%d" % _p if _p > 1 else "", _t))
 
-        for entry in ENTRIES + (("fullCorrelation", "fullCorrelationSeries") if n >= 1024 else ()):
+        for entry in ENTRIES + ("compactListed",) + (
+                ("fullCorrelation", "fullCorrelationSeries") if n >= 1024 else ()):
             m, lib = compile_metal(slangc, n, mcap, entry, MSL)
             metal[entry] = dict(msl=m.name,
                                 metallib=lib.name if lib else None)

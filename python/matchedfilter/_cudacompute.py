@@ -16,23 +16,22 @@ synchronization that completes it, ``(label, device_ms)`` is appended to
 ``self.timing_log``. With it off no event is recorded anywhere.
 """
 import ctypes
+import struct
 import os
 import pathlib
 import threading
 
 import numpy as np
 
-from ._coarse import TILE_PROBE, coarse_launch, forced_layout, stored_measured_choice, time_staged
+from ._coarse import TILE_PROBE
 from . import _cuda, _gputime
 from ._cuda import check_cuda
 from ._errors import UnsupportedSize
 from ._gpu_cache import InputUploads
 from ._gpuexec import Arg, Executor
-from ._shared import empty_shared, shared_buffer, shared_key, _Borrowed
-from ._gpuhost import hier_peaks_grouped as _hier_peaks_grouped  # noqa: E402
-from ._gpuhost import (MAX_BINS, ROWWIN_ON, band_windows, bin_shift, coarse_span, plan_items, split_items, hier_tiers, hier_window,
-                       split_bins, grouped_windows)
-from ._shared import pack_half2 as _pack_half2
+from ._shared import empty_shared, shared_buffer, _Borrowed
+from ._gpuhost import MAX_BINS, bin_shift
+
 
 def _borrowed_dptr(self):
     """Device address of a shared array, including a view's offset into its allocation."""
@@ -165,16 +164,6 @@ _shift = bin_shift
 _NOROW = ctypes.c_void_p(0)
 
 
-def _coarse_grid(rows, nt, ppg, tile):
-    """(blocks, row argument) of a coarse launch over rows x nt pairs: _coarse.coarse_launch's
-    rule. Tiled and packed builds are ragged (tierb.slang RAGGED TILES and RAGGED GROUPS):
-    the row count rides in the binsize argument (the coarse span's slot), and a block's
-    spare slots compute and write nothing, so rows are never padded. One pair per block
-    keeps the span there (None)."""
-    slot, blocks = coarse_launch(rows, nt, ppg, tile, None)
-    return blocks, slot
-
-
 def _u32(x):
     return ctypes.c_uint32(int(x) & 0xFFFFFFFF)
 
@@ -195,6 +184,18 @@ def _param_ptrs(params):
     """cuLaunchKernel's argument array: the address of each parameter (kept alive by the
     caller with params)."""
     return (ctypes.c_void_p * len(params))(*[ctypes.addressof(p) for p in params])
+
+
+_PACK_U64 = struct.Struct("Q").pack_into
+_WORDS = {}
+
+
+def _pack_words(k):
+    """pack_into for k uint32 words (an Arg(words=k)), made once per k."""
+    f = _WORDS.get(k)
+    if f is None:
+        f = _WORDS[k] = struct.Struct("%dI" % k).pack_into
+    return f
 
 
 def _uint4(*v):
@@ -347,10 +348,11 @@ class _Pinned:
         check_cuda(ctx.cuda.cuMemAllocHost_v2(ctypes.byref(p), self.nbytes), "cuMemAllocHost")
         self.ptr = p.value
         self.handle = p.value
-        self._raw = (ctypes.c_ubyte * self.nbytes).from_address(self.ptr)
+        self._raw = np.frombuffer((ctypes.c_ubyte * self.nbytes).from_address(self.ptr), np.uint8)
 
     def view(self, dtype, count, offset=0):
-        return np.frombuffer(self._raw, dtype=dtype, count=count, offset=offset)
+        size = np.dtype(dtype).itemsize
+        return self._raw[offset:offset + count * size].view(dtype)
 
     def destroy(self):
         if self.ptr:
@@ -466,6 +468,31 @@ class _Staged:
         self.pinned.destroy()
 
 
+class _WordSlots:
+    """Page-locked 16-byte slots for the words of list update ops (_CudaList.update): one
+    page-locked chunk per 256 of them. A page-locked allocation each cost a cuMemAllocHost
+    and a pinned page per update, four per hierarchical record."""
+    SLOT, PER = 16, 256
+
+    def __init__(self, ctx):
+        self.ctx, self.chunks, self.free = ctx, [], []
+
+    def take(self):
+        if not self.free:
+            chunk = _Pinned(self.ctx, self.SLOT * self.PER)
+            self.chunks.append(chunk)
+            self.free.extend(chunk.ptr + i * self.SLOT for i in range(self.PER))
+        return self.free.pop()
+
+    def give(self, ptr):
+        self.free.append(ptr)
+
+    def destroy(self):
+        for chunk in self.chunks:
+            chunk.destroy()
+        self.chunks, self.free = [], []
+
+
 class _Readback:
     """A device buffer the host reads (_x_alloc(readback=True)): a list's readback op copies
     a prefix of it into page-locked memory on the stream, so the host reads it after the
@@ -485,6 +512,14 @@ class _Readback:
             self.pinned = _Pinned(self.ctx, nbytes)
         self.mirrored = nbytes
         return self.pinned
+
+    def view(self, dtype, count):
+        """The first count elements: the page-locked mirror in place where the run copied
+        that far, else a copy."""
+        dtype = np.dtype(dtype)
+        if count * dtype.itemsize <= self.mirrored:
+            return self.pinned.view(dtype, count)
+        return self.read_into(np.empty(count, dtype))
 
     def read_into(self, out, offset=0):
         dst, count = out.ctypes.data, out.nbytes
@@ -509,31 +544,69 @@ class _CudaList:
     """A command list (_gpuexec's driver interface): launches, fills and copies in order on
     one stream, so a barrier is the stream's own ordering. Each launch's parameters are
     built when it is recorded; an Arg is a parameter whose value _x_run sets (cuLaunchKernel
-    copies them at launch, so the next run may change it while this one is in flight)."""
+    copies them at launch, so the next run may change it while this one is in flight).
 
-    def __init__(self, label):
-        self.label, self.ops, self.args = label, [], []
+    A kernel is (function, threads, leading buffers, trailing buffers): its first buffers,
+    then its uniforms, then -- the per-row window table (tierb.slang ROWWIN_PARAM) -- the
+    trailing ones, null where the caller binds none."""
+
+    def __init__(self, ctx, label):
+        self.ctx, self.label, self.ops, self.args = ctx, label, [], []
+
+    def _launch_op(self, kernel, groups, buffers, words, offsets):
+        """A launch, its parameters packed into one host block at their natural alignment:
+        two Python objects a launch, not one per parameter (a record's ctypes objects are
+        what the garbage collector walks: a search held ~100k of them, and collecting them
+        cost the L40S more time than its kernels). An Arg's slots are patched per run."""
+        fn, wg = kernel[0], kernel[1]
+        lead = kernel[2] if len(kernel) > 2 else len(buffers)
+        trail = kernel[3] if len(kernel) > 3 else 0
+        offs = offsets or [0] * len(buffers)
+        fields = []                # (struct format, values, Arg slot or None, parameters)
+
+        def pointer(b, o):
+            if isinstance(b, Arg):
+                fields.append(("Q", (0,), (b.name, int(o)), 1))
+            else:
+                fields.append(("Q", (int(b.dptr.value) + int(o),), None, 1))
+        for b, o in zip(buffers[:lead], offs[:lead]):
+            pointer(b, o)
+        for w in words:
+            if isinstance(w, Arg):         # k uniform words bound per run, one parameter each,
+                fields.append(("%dI" % w.words, (0,) * w.words, (w.name, -w.words), w.words))
+            elif isinstance(w, tuple):     # a vector uniform (uint4) is ONE parameter
+                fields.append(("4I", tuple(int(x) & 0xFFFFFFFF for x in w)
+                               + (0,) * (4 - len(w)), None, 1))
+            else:
+                fields.append(("I", (int(w) & 0xFFFFFFFF,), None, 1))
+        rest = list(zip(buffers[lead:], offs[lead:]))
+        for b, o in rest:
+            pointer(b, o)
+        fields += [("Q", (0,), None, 1)] * max(0, trail - len(rest))   # no row-window table
+        places, params, end = [], [], 0
+        for fmt, _, _, count in fields:
+            size = struct.calcsize(fmt)
+            align = min(size // count, 16)
+            end = -(-end // align) * align
+            places.append(end)
+            params += [end + i * (size // count) for i in range(count)]
+            end += size
+        block = (ctypes.c_char * max(end, 8))()
+        base = ctypes.addressof(block)
+        for (fmt, values, slot, _), at in zip(fields, places):
+            struct.pack_into(fmt, block, at, *values)
+            if slot is not None:            # (block, offset, name, byte offset or -words)
+                self.args.append((block, at, slot[0], slot[1]))
+        ptrs = (ctypes.c_void_p * len(params))(*[base + at for at in params])
+        return ("launch", (fn, wg), int(groups), block, ptrs)
 
     def dispatch(self, kernel, groups, buffers, words=(), offsets=None):
-        fn, wg, *tail = kernel
-        offs = offsets or [0] * len(buffers)
-        params = []
-        for b, o in zip(buffers, offs):
-            if isinstance(b, Arg):
-                p = ctypes.c_uint64(0)
-                self.args.append((p, b.name, int(o)))
-            else:
-                p = _ptr(int(b.dptr.value) + int(o))
-            params.append(p)
-        for w in words:
-            if isinstance(w, Arg):         # k uniform words bound per run
-                ps = [ctypes.c_uint32(0) for _ in range(w.words)]
-                self.args.append((ps, w.name, None))
-                params += ps
-            else:                          # a vector uniform (uint4) is ONE parameter
-                params.append(_uint4(*w) if isinstance(w, tuple) else _u32(w))
-        params += list(tail[0]) if tail else []
-        self.ops.append(("launch", (fn, wg), int(groups), params, _param_ptrs(params)))
+        self.ops.append(self._launch_op(kernel, groups, buffers, words, offsets))
+
+    def listed(self, kernel, count, max_groups, buffers, words=(), offsets=None):
+        # No indirect dispatch: a resident grid strides over the list (its gridSize word).
+        grid = self.ctx._refine_grid(kernel[0], kernel[1], int(max_groups))
+        self.ops.append(self._launch_op(kernel, grid, buffers, list(words) + [grid], offsets))
 
     def barrier(self):
         pass
@@ -544,11 +617,34 @@ class _CudaList:
     def fill(self, buf, word):
         self.ops.append(("fill", buf, int(word) & 0xFFFFFFFF))
 
+    def update(self, buf, words):
+        ptr = self.ctx._word_slots().take()
+        vals = (ctypes.c_uint32 * len(words))(*[int(w) & 0xFFFFFFFF for w in words])
+        ctypes.memmove(ptr, vals, 4 * len(words))
+        self.ops.append(("update", buf, ptr, 4 * len(words)))
+
     def readback(self, buf, nbytes):
         self.ops.append(("readback", buf, buf.mirror(nbytes)))
 
     def end(self):
-        return self.ops, self.args
+        return _CudaNative(self.ops, self.args, self.ctx.__dict__.get("_slots"))
+
+
+class _CudaNative:
+    """A recorded list: its launches, and the per-run parameters (Arg) they read; replayed as
+    a CUDA graph per binding (Context._x_launch). Owns its updates' word slots (_WordSlots)."""
+    __slots__ = ("ops", "args", "graphs", "slots")
+
+    def __init__(self, ops, args, slots=None):
+        self.ops, self.args, self.graphs, self.slots = ops, args, None, slots
+
+    def destroy(self):
+        if self.graphs is not None:
+            self.graphs.destroy()
+            self.graphs = None
+        for op in self.ops:
+            if op[0] == "update":
+                self.slots.give(op[2])
 
 
 class Context(Executor, InputUploads):
@@ -618,7 +714,6 @@ class Context(Executor, InputUploads):
         self.stream = self.streams[0]
 
         # The shared timing contract (_gputime): register, keep (label, device_ms).
-        self._fwd_events = {}
         self._timing = _gputime.enabled()
         self.timing_log = []
         self._event_pool = []
@@ -645,9 +740,6 @@ class Context(Executor, InputUploads):
             self._c16_flags = {}
             self._tc_persistent = {}
             self._shared_modules = False
-        self._residents = {}
-        self._batches = {}
-        self._hier = {}
         self._uploaded = {"data": {}, "tmpl": {}}
 
     # ---- device plumbing -----------------------------------------------------
@@ -700,14 +792,6 @@ class Context(Executor, InputUploads):
         e = ctypes.c_void_p()
         check_cuda(self.cuda.cuEventCreate(ctypes.byref(e), 2), "cuEventCreate")  # no timing
         return e
-
-    def _after_forwards(self, stream):
-        """Order ``stream`` after every deferred forward enqueued on other streams, and after
-        writes left in flight (correlate_series(wait=False))."""
-        self._after_writes(stream)
-        for key, ev in self._fwd_events.items():
-            if key != stream.value:
-                check_cuda(self.cuda.cuStreamWaitEvent(stream, ev, 0), "cuStreamWaitEvent")
 
     def _mark(self, stream):
         """Open a timed region on ``stream``; returns a token for _close (None when off)."""
@@ -777,48 +861,19 @@ class Context(Executor, InputUploads):
                 and not getattr(buf.owner.buffer, "host_input", False) and nbytes > 0 and hasattr(self.cuda, "cuMemPrefetchAsync")):
             self.cuda.cuMemPrefetchAsync(buf.dptr.value + offset, nbytes, self.device.value, stream)
 
-    def _resident(self, name, array, dirty, stream, pack=None):
-        """The context's one device copy of ``array`` (templates or a coarse band).
-
-        Re-uploaded only when the caller marks it dirty or a different array arrives.
-        Records keyed by slot or window shape used to hold a copy each and upload it on
-        first use: a plan alternating grouped and single-window calls, with K pipelined
-        slots, uploaded its bank up to 2K times."""
-        sig = (array.ctypes.data, array.shape, array.strides)
-        nbytes = array.size * (4 if pack is not None else 8)    # pack: half2, 4 B per sample
-        ent = self._residents.get(name)
-        if ent is None or ent[0].nbytes < nbytes:
-            if ent is not None:
-                self._bind()
-                check_cuda(self.cuda.cuCtxSynchronize(), "cuCtxSynchronize")
-                ent[0].destroy()
-            ent = [_Resident(self, nbytes), None]
-            self._residents[name] = ent
-        if dirty or ent[1] != sig:
-            # Packed only when uploaded: packing every call cost 0.2 ms per fine call.
-            data = pack(array) if pack is not None else np.ascontiguousarray(array, np.complex64)
-            ent[0].write(data, stream)
-            ent[1] = sig
-            # The copy is ordered on `stream` only, but later calls of this Context read the
-            # resident from their own slot streams without uploading (it is no longer dirty):
-            # order everything after it, as a write left in flight (a coarse kernel on
-            # another slot stream once read its band before the upload landed).
-            self._pend_write(stream)
-        return ent[0]
-
-    def _upload(self, buf, array, stream):
-        """Bring a host input onto the device, or verify a shared one is already there."""
-        if isinstance(buf, _Borrowed):
-            buf.write(array)
-        else:
-            buf.write(np.ascontiguousarray(array, np.complex64), stream)
-
     # ---- kernels -------------------------------------------------------------
     def _stem(self, n, entry, one_bin=False, c16=False, ppg=1, tile=1, twt=False):
         if entry == "packCoarse":
             return "pack_coarse"
         if entry == "compactPairs":
             return "compact"
+        if entry == "compactListed":
+            return "compactl"
+        if entry == "markBlocks":
+            return "markblocks"
+        if entry in ("seriesForwardBands", "seriesForwardListed", "forwardTier0"):
+            return {"seriesForwardBands": "forward_bands", "seriesForwardListed": "forward_listed",
+                    "forwardTier0": "forward_tier0"}[entry] + f"_{n}"
         if entry == "seriesForward":
             return f"forward_{n}"
         if entry == "coarseTile":
@@ -828,7 +883,8 @@ class Context(Executor, InputUploads):
             t_s = f"t{tile}" if tile > 1 else ""
             return f"tierb_{n}_c16{p_s}{t_s}{'w' if twt else ''}"
         if entry == "refineListed":
-            return f"refine_{n}_onebin" if (one_bin and n >= 4096) else f"refine_{n}"
+            one = f"refine_{n}_onebin"
+            return one if (one_bin and (_PTX_DIR / f"{one}.ptx").is_file()) else f"refine_{n}"
         if entry == "fullCorrelation":
             return f"full_{n}"
         if entry == "fullCorrelationSeries":
@@ -846,7 +902,7 @@ class Context(Executor, InputUploads):
 
         r = _radix(n)
         wg = (n // r) * ppg if entry in ("fusedTierB", "refineListed") else (
-            256 if entry in ("compactPairs", "packCoarse") else (
+            256 if entry in ("compactPairs", "compactListed", "markBlocks", "packCoarse") else (
                 64 if entry == "coarseTile" else (n // r)
             )
         )
@@ -874,14 +930,9 @@ class Context(Executor, InputUploads):
         self._pipelines[key] = res
         return res
 
-    def _load(self, stem, ptx_file, fn_name, wg, consts=()):
-        """Load (once) a PTX module and return one of its functions.
-
-        consts: (name, value) pairs for the module's __constant__ words (twiddle.slang:
-        mf_data_stride, mf_data_scale, mf_accurate_trig): a module is loaded once per set of
-        values and written once, the counterpart of a Vulkan pipeline's specialization."""
-        consts = tuple(sorted(consts))
-        mkey = (stem, consts) if consts else stem
+    def _load(self, stem, ptx_file, fn_name, wg):
+        """Load (once) a PTX module and return one of its functions."""
+        mkey = stem
         if mkey not in self._modules:
             self._bind()
             mod = ctypes.c_void_p()
@@ -907,21 +958,13 @@ class Context(Executor, InputUploads):
             if self.cuda.cuModuleGetGlobal_v2(ctypes.byref(g), ctypes.byref(size), mod,
                                               b"mf_c16_raw") == 0:
                 self._c16_flags[mkey] = [g.value, 0]          # zero-initialized: bound on
-            for name, value in consts:
-                if self.cuda.cuModuleGetGlobal_v2(ctypes.byref(g), ctypes.byref(size), mod,
-                                                  name.encode()) != 0:
-                    raise UnsupportedSize("module %s has no constant %s" % (stem, name))
-                v = ctypes.c_uint32(int(value) & 0xFFFFFFFF)
-                check_cuda(self.cuda.cuMemcpyHtoD_v2(g.value, ctypes.byref(v), 4),
-                           "cuMemcpyHtoD(%s)" % name)
         hfunc = ctypes.c_void_p()
         check_cuda(
             self.cuda.cuModuleGetFunction(ctypes.byref(hfunc), self._modules[mkey],
                                           fn_name.encode("utf-8")),
             f"cuModuleGetFunction({fn_name})",
         )
-        self._labels[hfunc.value] = stem
-        self.__dict__.setdefault("_fn_module", {})[hfunc.value] = mkey
+        self._labels[hfunc.value] = stem          # its module, for every Context on the device
         return hfunc
 
     _TC_ENTRY = {"corr1": "tcStage1", "corr2": "tcFullStage3",
@@ -991,66 +1034,9 @@ class Context(Executor, InputUploads):
         return empty_shared(self, factory, shape, dtype)
 
     # ---- cache ----------------------------------------------------------------
-    def _cached_buffers(self):
-        for table in self._record_tables().values():
-            for rec in table.values():
-                yield from _owned(self._record_buffers(rec))
-
     def _evict_record(self, kind, key, keep_storage=None):
-        if kind == "exec":
-            return self._exec_evict(key)
-        # Synchronizing only completes the copies into pinned host buffers. Their
-        # collectors still need to materialize the results before those buffers go.
-        self._drain()
         self._drain_segments()
-        rec = self._record_tables()[kind].pop(key, None)
-        if rec is None:
-            return
-        # A record may still be referenced by enqueued work on any stream.
-        self._bind()
-        check_cuda(self.cuda.cuCtxSynchronize(), "cuCtxSynchronize")
-        for b in _owned(rec.values() if hasattr(rec, "values") else rec):
-            b.destroy()
-        for name in ("data", "tmpl"):
-            self._uploaded[name].pop(key, None)
-
-    def _record(self, kind, table, key, estimate, make):
-        """The cached record for ``key``, building it (after LRU eviction) if absent."""
-        rec = table.get(key)
-        if rec is not None:
-            owner = self.__dict__.get("_segment_results", {}).get(id(rec))
-            if owner is not None:
-                owner.collect()
-                rec = table.get(key)        # a host follow-up may have evicted this record
-        fresh = rec is None
-        if fresh:
-            self._cache_room(estimate)
-            rec = make()
-            table[key] = rec
-        else:
-            pending = self.__dict__.get("_pending_records", {}).pop(id(rec), None)
-            if pending is not None:
-                pending()                    # this record's outputs are about to be reused
-        self._cache_touch(kind, key)
-        return rec, fresh
-
-    def _dispatch_result(self, bufs, readback, async_submit):
-        """Keep async results alive across cache eviction and record reuse."""
-        if not async_submit:
-            return readback()
-        pending_records = self.__dict__.setdefault("_pending_records", {})
-        token = id(bufs)
-
-        def finish():
-            try:
-                return readback()
-            finally:
-                pending_records.pop(token, None)
-
-        finish.sparse_dev = getattr(readback, "sparse_dev", None)
-        pending = self._track(finish)
-        pending_records[token] = pending
-        return pending
+        return self._exec_evict(key)
 
     def _grow(self, rec, name, nbytes, cls, stream):
         """Ensure rec[name] holds at least nbytes, growing geometrically. Returns True if
@@ -1064,121 +1050,6 @@ class Context(Executor, InputUploads):
         rec[name] = cls(self, max(int(nbytes), 64) if cur is None else max(int(nbytes), 2 * cur.nbytes))
         return True
 
-    def _tail(self, bufs, out, shape, stream, sparse, counts=None, ncounts=0, enqueue=True):
-        """Enqueue the result readback; returns collect() -> (result, counts or None).
-
-        Dense: the (blocks, templates, bins) index and value tables come back whole.
-        Sparse: compactPeaks gathers the peaks on the device, and only the count, the
-        first _SPARSE_HOST records and the survivor counters cross the bus."""
-        i0, v0 = bufs["idx"].dptr.value, bufs["val"].dptr.value
-        if not sparse:
-            host = bufs["host"]
-            if enqueue:
-                self._copy_d2h(host.ptr, i0, out * 4, stream, "readback")
-                self._copy_d2h(host.ptr + out * 4, v0, out * 8, stream, "readback")
-                if ncounts:
-                    self._copy_d2h(host.ptr + out * 12, counts, 4 * ncounts, stream, "readback")
-
-            def collect(sort=True):
-                self._sync(stream)
-                c = host.view(np.uint32, ncounts, offset=out * 12) if ncounts else None
-                return self._results(host, *shape), c
-            return collect
-        cap = min(_SPARSE_HOST, out)
-        self._grow(bufs, "sp_cnt", 16, _Buffer, stream)
-        self._grow(bufs, "sp_list", out * 16, _Buffer, stream)
-        loff = 16 + ((4 * ncounts + 15) // 16) * 16     # records 16-byte aligned after counts
-        self._grow(bufs, "sp_host", loff + cap * 16, _Pinned, stream)
-        cnt, lst, hp = bufs["sp_cnt"].dptr.value, bufs["sp_list"].dptr.value, bufs["sp_host"]
-        coff = 16
-        if enqueue:
-            self._fill32(_ptr(cnt), 0, 1, stream)
-            kfn, _ = self._compact_peaks()
-            self._launch(kfn, (out + 255) // 256, 256,
-                         [_ptr(i0), _ptr(v0), _ptr(cnt), _ptr(lst), _u32(out), _u32(out)],
-                         stream=stream)
-            self._copy_d2h(hp.ptr, cnt, 4, stream, "readback")
-            if ncounts:
-                self._copy_d2h(hp.ptr + coff, counts, 4 * ncounts, stream, "readback")
-            self._copy_d2h(hp.ptr + loff, lst, cap * 16, stream, "readback")
-
-        def collect(sort=True):
-            """sort=False: the records in the device's list order (for a reader that sorts
-            the peaks itself)."""
-            from . import _SparsePeaks
-            self._sync(stream)
-            c = int(hp.view(np.uint32, 1)[0])
-            if c <= cap:
-                rec = hp.view(np.uint32, 4 * c, offset=loff).reshape(c, 4).copy()
-            else:                              # more peaks than the first read held
-                rec = np.empty((c, 4), np.uint32)
-                rec[:cap] = hp.view(np.uint32, 4 * cap, offset=loff).reshape(cap, 4)
-                self._copy_d2h(rec[cap:].ctypes.data, lst + cap * 16, (c - cap) * 16, stream,
-                               "readback")
-                self._sync(stream)
-            if sort:
-                rec = rec[np.argsort(rec[:, 0], kind="stable")]
-            val = rec[:, 2:4].copy().view(np.float32).view(np.complex64).reshape(-1)
-            sp = _SparsePeaks(shape, rec[:, 0], rec[:, 1].view(np.int32), val)
-            cts = hp.view(np.uint32, ncounts, offset=coff).copy() if ncounts else None
-            return sp, cts
-        collect.sparse_dev = (cnt, lst)        # device count and records (device follow-ups)
-        return collect
-
-    def _graphed(self, bufs, gkey, stream, enqueue):
-        """Run enqueue() through a CUDA graph cached in the record.
-
-        A hierarchical call is ~20 launches, fills and copies; issued one by one through
-        ctypes they cost ~200 us of host per call, more than many of the kernels. Captured
-        once per (shape, windows, thresholds, buffers) and replayed with one cuGraphLaunch,
-        they cost one call. The key carries every buffer address, so a grown or replaced
-        buffer gets a new graph; a record keeps at most 8. Device timers (MF_GPU_TIMING)
-        need per-kernel events, so with timing on the launches are issued directly."""
-        if self._timing or not _GRAPHS:
-            enqueue()
-            return
-        ptrs = tuple(sorted((k, getattr(b, "ptr", 0)) for k, b in bufs.items()
-                            if k != "_graphs" and hasattr(b, "ptr")))
-        gkey = (gkey, ptrs, stream.value)
-        graphs = bufs.get("_graphs")
-        if graphs is None:
-            graphs = bufs["_graphs"] = _GraphCache(self)
-        ex = graphs.get(gkey)
-        if ex is None:
-            if graphs.seen.get(gkey, 0) < 1:
-                # First use runs directly: modules load and occupancy is queried outside any
-                # capture. A key that recurs is captured.
-                graphs.seen[gkey] = 1
-                enqueue()
-                return
-            if graphs.seen[gkey] > 1:          # capture failed once: stay direct
-                enqueue()
-                return
-            cu = self.cuda
-            graphs.seen[gkey] = 2
-            check_cuda(cu.cuStreamBeginCapture_v2(stream, 2), "cuStreamBeginCapture")  # relaxed
-            graph = ctypes.c_void_p()
-            failed = False
-            try:
-                enqueue()
-            except _cuda.CudaError:
-                failed = True                  # e.g. an operation that cannot be captured
-            finally:
-                rc = cu.cuStreamEndCapture(stream, ctypes.byref(graph))
-            if rc != 0 or failed:
-                # Nothing ran: the capture recorded only. Run the work directly.
-                if graph.value:
-                    cu.cuGraphDestroy(graph)
-                enqueue()
-                return
-            ex = ctypes.c_void_p()
-            check_cuda(cu.cuGraphInstantiateWithFlags(ctypes.byref(ex), graph, 0),
-                       "cuGraphInstantiateWithFlags")
-            cu.cuGraphDestroy(graph)
-            graphs.put(gkey, ex)
-            graphs.seen[gkey] = 1
-        check_cuda(self.cuda.cuGraphLaunch(ex, stream), "cuGraphLaunch")
-
     def _compact_peaks(self):
         key = ("compactPeaks",)
         if key not in self._pipelines:
@@ -1187,12 +1058,6 @@ class Context(Executor, InputUploads):
                 raise UnsupportedSize("compact_peaks.ptx not built")
             self._pipelines[key] = (self._load("compact_peaks", f, "compactPeaks", 256), 256)
         return self._pipelines[key]
-
-    def _results(self, host, nd, nt, nbins):
-        out = nd * nt * nbins
-        idx = host.view(np.int32, out).reshape(nd, nt, nbins).copy()
-        val = host.view(np.complex64, out, offset=out * 4).reshape(nd, nt, nbins).copy()
-        return idx, val
 
     # ---- flat ------------------------------------------------------------------
 
@@ -1204,21 +1069,111 @@ class Context(Executor, InputUploads):
     storage_offset_alignment = 16
     #: Shared allocations are managed memory, which migrates between host and device.
     stage_host_inputs = True
+    #: Kernels are prebuilt PTX with their row length fixed: a stride read from a module
+    #: constant made the refine and tier kernels 12-39% slower on an L40S (twiddle.slang), so
+    #: the tiers read packed bands (_gpuhier "pack" feed) rather than the spectra in place.
+    inplace_feed = False
+    #: Whose kernel identity stored measured choices are tied to (gatechain.gpu_kernel_id).
+    kernel_family = "cuda"
+    #: The warp.
+    subgroup_size = 32
 
-    def _x_kernel(self, name, n):
-        if name in ("peaks", "peaks1"):
-            # The flat filter's last argument is its per-row window table: none here.
+    def _x_kernel(self, name, n, consts=None):
+        c = consts or {}
+        if c.get("stride"):
+            raise UnsupportedSize("CUDA kernels read their own row length (inplace_feed)")
+        if name in ("peaks", "peaks1", "gate"):
             fn, wg = self.pipeline(n, "fusedTierB", one_bin=(name == "peaks1"))
-            return fn, wg, (_NOROW,)
-        if name == "compact":
+            return fn, wg, 4, 1
+        if name == "coarse":
+            if len(c.get("layout", ())) > 4:                 # the tensor-core gate
+                fn, wg = self._tc_kernel(n, c["ppg"])
+            else:
+                fn, wg = self.pipeline(n, "fusedTierB", c16=True, ppg=c["ppg"], tile=c["tile"],
+                                       twt=bool(c.get("twt")))
+            self._c16_bound_flag(fn)
+            return fn, wg, 4, 1
+        if name in ("tier", "tier1", "refine", "refine1"):
+            fn, wg = self.pipeline(n, "refineListed", one_bin=name.endswith("1"))
+            return fn, wg, 6, 1
+        if name == "compact_peaks":
             return self._compact_peaks()
-        if name in ("full", "series", "forward"):
-            return self.pipeline(n, {"full": "fullCorrelation", "series": "fullCorrelationSeries",
-                                     "forward": "seriesForward"}[name])
+        entries = {"compact": "compactPairs", "compactl": "compactListed", "mark": "markBlocks",
+                   "pack": "packCoarse", "fwd_tier0": "forwardTier0",
+                   "fwd_bands": "seriesForwardBands", "fwd_listed": "seriesForwardListed",
+                   "full": "fullCorrelation", "series": "fullCorrelationSeries",
+                   "forward": "seriesForward"}
+        if name in entries:
+            return self.pipeline(n, entries[name])
         role = {"tc1": "corr1", "tc2": "corr2", "tcs2": "corr_series2",
                 "tf1": "fwd1", "tf2": "fwd2"}[name]
         fn, wg, _, _ = self._tierc(n, role)
         return fn, wg
+
+    def _tc_kernel(self, band, wpb):
+        """The tensor-core coarse gate (src/gpu/coarse_tc.cu): one warp per 2-template ragged
+        slot, wpb warps per block, persistent (its grid capped, _x_coarse_groups)."""
+        f = _PTX_DIR / ("coarse_tc_%d_w%d.ptx" % (band, wpb))
+        fn = self._load(f.stem, f, "fusedTierB", 32 * wpb)
+        self._tc_persistent[fn.value] = self.sm_count * _TC_BLOCKS_PER_SM
+        return fn, 32 * wpb
+
+    def _x_coarse_groups(self, kernel, groups):
+        """A persistent kernel's grid is capped: its warps loop over slots."""
+        cap = self._tc_persistent.get(kernel[0].value)
+        return min(groups, cap) if cap else groups
+
+    @staticmethod
+    def _x_has_c16(band):
+        return (_PTX_DIR / f"tierb_{band}_c16.ptx").is_file()
+
+    @staticmethod
+    def _x_has_kernel(name, n):
+        if name == "tier1":
+            return (_PTX_DIR / f"refine_{n}_onebin.ptx").is_file()
+        if name == "fwd_tier0":
+            return (_PTX_DIR / f"forward_tier0_{n}.ptx").is_file()
+        raise ValueError(name)
+
+    def _x_coarse_candidates(self, band):
+        """Every coarse layout (subgroup 0: the warp, ppg, tile, twt) shipped at this band --
+        a missing build is skipped -- then the tensor-core gate, a fifth field marking it
+        ("tc"), on devices with tensor cores (compute capability 8.0 or later)."""
+        cands = []
+        for tile in (1,) + TILE_PROBE:
+            for ppg in (1, 2, 4, 8, 16):
+                if ppg > 1 and band // 16 * ppg > 1024:
+                    continue
+                for twt in (0, 1):
+                    if (_PTX_DIR / (self._stem(band, "fusedTierB", c16=True, ppg=ppg, tile=tile,
+                                               twt=bool(twt)) + ".ptx")).is_file():
+                        cands.append((0, ppg, tile, twt))
+        for wpb in (2, 4):
+            if (_PTX_DIR / ("coarse_tc_%d_w%d.ptx" % (band, wpb))).is_file() and self.cc >= (8, 0):
+                cands.append((0, wpb, 2, 0, "tc"))
+        return cands
+
+    def _x_time(self, native, binds, reps):
+        """The least device time of `reps` runs (stream events), after one warm-up run."""
+        self._bind()
+        stream = self.get_stream(None)
+        e0, e1 = self._new_event_timed(), self._new_event_timed()
+        times = []
+        try:
+            for rep in range(reps + 1):
+                check_cuda(self.cuda.cuEventRecord(e0, stream), "cuEventRecord")
+                self._enqueue(native, binds, stream, graph=False)
+                check_cuda(self.cuda.cuEventRecord(e1, stream), "cuEventRecord")
+                self._sync(stream)
+                ms = ctypes.c_float()
+                check_cuda(self.cuda.cuEventElapsedTime(ctypes.byref(ms), e0, e1),
+                           "cuEventElapsedTime")
+                if rep:
+                    times.append(ms.value * 1e-3)
+        finally:
+            self.cuda.cuEventDestroy_v2(e0)
+            self.cuda.cuEventDestroy_v2(e1)
+        return min(times)
 
     def _x_tierc(self, n):
         return self._tierc(n, "corr1")[2:]
@@ -1228,51 +1183,95 @@ class Context(Executor, InputUploads):
             return _Staged(self, nbytes)
         return _Readback(self, nbytes) if readback else _Buffer(self, nbytes)
 
-    def _x_list(self, label):
-        return _CudaList(label)
+    def _x_list(self, label, once=False):
+        return _CudaList(self, label)
 
-    def _x_run(self, native, wait, binds=None, slot=None):
-        stream = self._x_launch(native, binds, slot)
+    def _x_run(self, native, wait, binds=None, slot=None, pre=()):
+        stream = self._x_launch(native, binds, slot, pre)
         if wait:
             self._sync(stream)
         else:
             self._pend_write(stream)
 
-    def _x_submit(self, native, binds, slot):
-        stream = self._x_launch(native, binds, slot)
+    def _x_submit(self, native, binds, slot, pre=()):
+        stream = self._x_launch(native, binds, slot, pre)
         return lambda: self._sync(stream)
 
-    def _x_launch(self, native, binds, slot):
-        """Issue a recorded list on the slot's stream, after writes left in flight."""
-        ops, args = native
-        for p, name, off in args:
-            if off is None:
-                for q, w in zip(p, binds[name]):
-                    q.value = int(w) & 0xFFFFFFFF
-            else:
-                p.value = binds[name].dptr.value + off
+    def _x_launch(self, native, binds, slot, pre=()):
+        """Issue the deferred work, then a recorded list, on the slot's stream, after writes
+        left in flight (a series a middle stage is still writing)."""
         self._bind()
         stream = self.get_stream(slot)
-        self._after_writes(stream)           # e.g. a series still being written by a middle stage
+        self._after_writes(stream)
+        for nat, b in pre:
+            self._enqueue(nat, b, stream)
+        self._enqueue(native, binds, stream)
+        return stream
+
+    def _enqueue(self, native, binds, stream, graph=True):
+        """A recorded list's operations on `stream`: replayed as a CUDA graph per binding once
+        a binding recurs (a hierarchical call is ~20 launches, fills and copies, ~200 us of
+        host time issued one by one through ctypes, one call as a graph); issued directly
+        with device timers on (MF_GPU_TIMING needs per-kernel events), on a binding's first
+        use, or where capture failed once."""
+        values = []
+        for block, at, name, off in native.args:
+            if off < 0:                         # the -off words of a per-run word Arg
+                v = binds[name]
+                _pack_words(-off)(block, at, *v)
+            else:                               # a buffer bound per run, at a byte offset
+                v = binds[name].dptr.value + off
+                _PACK_U64(block, at, v)
+            values.append(v)
+        if not graph or self._timing or not _GRAPHS or len(native.ops) < 4:
+            self._issue(native.ops, stream)
+            return
+        if native.graphs is None:
+            native.graphs = _GraphCache(self)
+        graphs = native.graphs
+        gkey = (tuple(values), stream.value)
+        ex = graphs.get(gkey)
+        if ex is None:
+            seen = graphs.seen.get(gkey, 0)
+            graphs.seen[gkey] = seen + 1
+            if seen != 1:                       # first use, or a capture that failed: direct
+                self._issue(native.ops, stream)
+                return
+            cu = self.cuda
+            check_cuda(cu.cuStreamBeginCapture_v2(stream, 2), "cuStreamBeginCapture")  # relaxed
+            graph = ctypes.c_void_p()
+            failed = False
+            try:
+                self._issue(native.ops, stream)
+            except _cuda.CudaError:
+                failed = True                   # e.g. an operation that cannot be captured
+            finally:
+                rc = cu.cuStreamEndCapture(stream, ctypes.byref(graph))
+            if rc != 0 or failed:
+                if graph.value:
+                    cu.cuGraphDestroy(graph)
+                self._issue(native.ops, stream)  # the capture recorded only: run directly
+                return
+            ex = ctypes.c_void_p()
+            check_cuda(cu.cuGraphInstantiateWithFlags(ctypes.byref(ex), graph, 0),
+                       "cuGraphInstantiateWithFlags")
+            cu.cuGraphDestroy(graph)
+            graphs.put(gkey, ex)
+        check_cuda(self.cuda.cuGraphLaunch(ex, stream), "cuGraphLaunch")
+
+    def _issue(self, ops, stream):
         for op in ops:
-            if op[0] == "launch":
+            kind = op[0]
+            if kind == "launch":
                 _, (fn, wg), groups, params, param_ptrs = op
                 self._launch(fn, groups, wg, params, stream=stream, param_ptrs=param_ptrs)
-            elif op[0] == "fill":
+            elif kind == "fill":
                 self._fill32(op[1].dptr, op[2], op[1].nbytes // 4, stream)
+            elif kind == "update":
+                self._copy_h2d(op[1].dptr.value, op[2], op[3], stream, "upload")
             else:
                 buf, pin = op[1], op[2]
                 self._copy_d2h(pin.ptr, buf.dptr.value, buf.mirrored, stream, "readback")
-        return stream
-
-    def _x_defer(self, native, binds, slot, source):
-        # Launched now (stream order is the deferral); a consumer on another stream (a
-        # tiled or unslotted dispatch of these spectra) waits for this event (_after_forwards).
-        stream = self._x_launch(native, binds, slot)
-        ev = self._fwd_events.get(stream.value)
-        if ev is None:
-            ev = self._fwd_events[stream.value] = self._new_event()
-        check_cuda(self.cuda.cuEventRecord(ev, stream), "cuEventRecord")
 
     def _x_upload(self, buf, array, slot):
         buf.write(array, self.get_stream(slot))
@@ -1286,13 +1285,19 @@ class Context(Executor, InputUploads):
         self._bind()
         check_cuda(self.cuda.cuCtxSynchronize(), "cuCtxSynchronize")
 
-    def _x_release(self, native):
-        self._bind()
-        check_cuda(self.cuda.cuCtxSynchronize(), "cuCtxSynchronize")
+    def _x_release(self, native, done=False):
+        if not done:
+            self._bind()
+            check_cuda(self.cuda.cuCtxSynchronize(), "cuCtxSynchronize")
+        native.destroy()
 
     @staticmethod
     def _x_read(buf, out, offset=0):
         buf.read_into(out, offset)
+
+    @staticmethod
+    def _x_view(buf, dtype, count):
+        return buf.view(dtype, count)
 
     def zero_columns(self, dest, a, b):
         """Zero dest[:, a:b] of a GPU-shared 2-D array on the device (enqueued).
@@ -1353,101 +1358,12 @@ class Context(Executor, InputUploads):
     async_zero = True
 
     # ---- hierarchical ---------------------------------------------------------------
-    def _coarse_kernel(self, band, nt):
-        """The coarse gate kernel for ``band``: (fn, threads, ppg, tile, c16).
-
-        PPG pairs per block and TILE_T templates per pair-group are compiled in. The
-        choice is MEASURED: every shipped variant timed once per device and band on 16k
-        synthetic pairs (a few ms, cached for the process). Picking by theoretical
-        occupancy chose the untiled variants, 1.3-1.5x slower than the tiled ones at
-        bands 256-1024 on the L40S. A tile walks TILE_T consecutive templates of one data
-        row; tiled and packed launches are ragged (_coarse.coarse_launch), so any template
-        and row count keeps them."""
-        if not _use_c16(band):
-            fn, wg = self.pipeline(band, "fusedTierB")
-            return fn, wg, 1, 1, False
-        # Even tiles are ragged (tierb.slang RAGGED TILES): any template count keeps them.
-        key = ("coarse_choice", band, True, forced_layout(band))
-        if key not in self._pipelines:
-            cands = self._coarse_candidates(band)
-            if not cands:
-                raise UnsupportedSize(f"no coarse c16 kernel for band {band}")
-            self._pipelines[key] = self._time_coarse(band, cands)
-        fn, wg, ppg, tile = self._pipelines[key]
-        self._c16_bound_flag(fn)
-        return fn, wg, ppg, tile, True
-
-    def _coarse_candidates(self, band):
-        """Every coarse variant (fn, threads, ppg, tile) the choice may take at this band: each
-        shipped (packing, tile, twiddle source) build (_coarse.TILE_PROBE; a missing build
-        raises UnsupportedSize and is skipped), then the tensor-core gate
-        (src/gpu/coarse_tc.cu: one warp per 2-template ragged slot, WPB warps per block,
-        persistent, its grid capped by _coarse_grid_for). Which one pays is the device's to
-        say."""
-        cands = []
-        for tile in (1,) + TILE_PROBE:
-            for ppg in (1, 2, 4, 8, 16):
-                if ppg > 1 and band // 16 * ppg > 1024:
-                    continue
-                for twt in (False, True):
-                    try:
-                        fn, wg = self.pipeline(band, "fusedTierB", c16=True, ppg=ppg,
-                                               tile=tile, twt=twt)
-                    except UnsupportedSize:
-                        continue
-                    cands.append((fn, wg, ppg, tile))
-        for wpb in (2, 4):
-            f = _PTX_DIR / ("coarse_tc_%d_w%d.ptx" % (band, wpb))
-            if f.is_file() and self.cc >= (8, 0):
-                fn = self._load(f.stem, f, "fusedTierB", 32 * wpb)
-                self._tc_persistent[fn.value] = self.sm_count * _TC_BLOCKS_PER_SM
-                cands.append((fn, 32 * wpb, wpb, 2))
-        return cands
-
-    def coarse_layouts(self, band):
-        """The names (_coarse.layout_label; the tensor-core gate's coarse_tc_<band>_w<warps>)
-        of every coarse layout the choice may take at this band on this device;
-        MF_COARSE_LAYOUT forces one."""
-        if not _use_c16(band):
-            return []
-        return [self._labels.get(c[0].value, "") for c in self._coarse_candidates(band)]
-
-    def hier_peaks_grouped(self, n, band, data, tmpl, ct0, raw_thr, groups, binsize, threshold,
-                           *, upload_tmpl=True, cascade_band=None, ct1=None, raw_thr1=None,
-                           slot=None, async_submit=False, sparse=False, nbins=None):
-        """Hierarchical peaks over row ranges of one spectra batch, each with its own window,
-        in one launch per tier over every row, each row searched over its own window
-        (_gpuhost.hier_peaks_grouped, every backend's path).
-
-        ``groups`` holds (lo, hi, a, b): rows a..b of ``data`` are searched over [lo, hi).
-        Output bins follow the first group's bin count (or nbins)."""
-        return _hier_peaks_grouped(self, n, band, data, tmpl, ct0, raw_thr, groups, binsize,
-                                   threshold, upload_tmpl=upload_tmpl, cascade_band=cascade_band,
-                                   ct1=ct1, raw_thr1=raw_thr1, slot=slot,
-                                   async_submit=async_submit, sparse=sparse, nbins=nbins,
-                                   max_bins=_MAX_BINS)
-
-    def _gate_bits(self, fn, thr, band, tile):
-        """The coarse kernel's last argument: for a tiled build whose pair fits one warp, the
-        gate threshold as magnitude bits (tierb.slang peakTwoGate: the pass and bound only, no
-        election; nothing reads tier 0's index); 0 elects (peakTwoWave). The Vulkan and Metal
-        rule. The tensor-core gate (coarse_tc) keeps its own reporting."""
-        if (tile <= 1 or band // 16 > 32 or os.environ.get("MF_VK_C16_BOUND", "1") == "0"
-                or self._labels.get(fn.value, "").startswith("coarse_tc")):
-            return 0
-        return int(np.float32(max(float(thr), 1.1754944e-38)).view(np.uint32))
-
-    def _coarse_grid_for(self, fn, rows, nt, ppg, tile):
-        """_coarse_grid, with a persistent kernel's grid capped (its warps loop over slots)."""
-        grid, rowarg = _coarse_grid(rows, nt, ppg, tile)
-        cap = self._tc_persistent.get(fn.value)
-        return (min(grid, cap) if cap else grid), rowarg
 
     def _c16_bound_flag(self, fn):
         """Set the coarse module's fp16 bound switch (mf_c16_raw, Vulkan's constant 77):
         the bound applies unless MF_VK_C16_BOUND=0 asks for the raw fp16 maximum, which
         only the bound's own margin measurements and the physics checks use."""
-        ent = self._c16_flags.get(self.__dict__.get("_fn_module", {}).get(fn.value))
+        ent = self._c16_flags.get(self._labels.get(fn.value))
         if ent is None:
             return
         raw = 1 if os.environ.get("MF_VK_C16_BOUND", "1") == "0" else 0
@@ -1458,64 +1374,6 @@ class Context(Executor, InputUploads):
             check_cuda(self.cuda.cuMemcpyHtoD_v2(ent[0], ctypes.byref(v), 4), "cuMemcpyHtoD")
             ent[1] = raw
 
-    def _time_coarse(self, band, cands):
-        """The fastest of the coarse variants on synthetic data, the choice every backend makes
-        (_coarse.stored_measured_choice): measured once, kept in MF_COST_FILE."""
-        from . import gatechain
-        # By index: a candidate holds its kernel's ctypes handle, which is not hashable.
-        i = stored_measured_choice(
-            self.__dict__.setdefault("_coarse_memo", {}), "cuda-coarse", getattr(self, "name", ""),
-            int(band), list(range(len(cands))), lambda i: self._labels.get(cands[i][0].value, ""),
-            gatechain.gpu_kernel_id("cuda"),
-            lambda idx: self._time_coarse_measure(band, cands, idx), forced=forced_layout(band))
-        return cands[i]
-
-    def _time_coarse_measure(self, band, cands, idx):
-        P, ntm = 65536, 16
-        ndm = P // ntm
-        rng = np.random.default_rng(0)
-        x = (rng.standard_normal((ndm, band)) + 1j * rng.standard_normal((ndm, band))) * 0.1
-        bufs = [_Buffer(self, ndm * band * 4), _Buffer(self, ntm * band * 4),
-                _Buffer(self, P * 4), _Buffer(self, P * 8)]
-        st = self.stream
-        bufs[0].write(_pack_half2(x), st)
-        bufs[1].write(_pack_half2(x[:ntm]), st)
-        e0, e1 = self._new_event_timed(), self._new_event_timed()
-        ms = ctypes.c_float()
-
-        def time_one(i):
-            fn, wg, ppg, tile = cands[i]
-            check_cuda(self.cuda.cuEventRecord(e0, st), "cuEventRecord")
-            grid, rowarg = self._coarse_grid_for(fn, ndm, ntm, ppg, tile)
-            self._launch(fn, grid, wg,
-                         [bufs[0].dptr, bufs[1].dptr, bufs[2].dptr, bufs[3].dptr,
-                          _u32(ntm), _u32(0), _u32(band),
-                          _u32(band if rowarg is None else rowarg),
-                          _i32(_shift(band)), _u32(1), _u32(self._gate_bits(fn, 0.0, band, tile)),
-                          _NOROW], stream=st, label="coarse_choice")
-            check_cuda(self.cuda.cuEventRecord(e1, st), "cuEventRecord")
-            check_cuda(self.cuda.cuEventSynchronize(e1), "cuEventSynchronize")
-            check_cuda(self.cuda.cuEventElapsedTime(ctypes.byref(ms), e0, e1),
-                       "cuEventElapsedTime")
-            return ms.value
-
-        try:
-            for i in idx:                   # a warm-up launch each (module load, first launch)
-                time_one(i)
-            times = time_staged([idx], time_one)
-            for i, t in times.items():
-                self.__dict__.setdefault("coarse_times", {}).setdefault(band, {})[
-                    self._labels.get(cands[i][0].value, "")] = t * 1e6 / P   # ns per pair, for reports
-        finally:
-            self._sync(st)              # resolves any timed regions of the launches above
-            if self._timing:            # the calibration is not the caller's work
-                self.timing_log[:] = [e for e in self.timing_log if e[0] != "coarse_choice"]
-            for b in bufs:
-                b.destroy()
-            for e in (e0, e1):
-                self.cuda.cuEventDestroy_v2(e)
-        return times
-
     def _new_event_timed(self):
         e = ctypes.c_void_p()
         check_cuda(self.cuda.cuEventCreate(ctypes.byref(e), 0), "cuEventCreate")
@@ -1524,250 +1382,7 @@ class Context(Executor, InputUploads):
     def _refine_grid(self, fn, wg, pairs):
         return max(1, min(pairs, self._blocks_per_sm(fn, wg) * self.sm_count))
 
-    def hier_peaks(self, n, band, data, tmpl, ct0, raw_thr, binsize=None,
-                   threshold=0.0, window=None, upload_data=True, upload_tmpl=True,
-                   cascade_band=None, ct1=None, raw_thr1=None,
-                   slot=None, async_submit=False, sparse=False, row_windows=None):
-        """Hierarchical coarse-to-fine peaks, one or two coarse tiers, one sync.
-
-        Single tier: ``band``/``ct0``/``raw_thr``. Two tiers (the Vulkan
-        convention): tier 0 is ``cascade_band`` with ``ct0``/``raw_thr``, tier 1
-        is ``band`` with ``ct1``/``raw_thr1``.
-
-        row_windows (hier_peaks_grouped): (groups, per-row uint32 [lo, hi] at n). Every
-        tier reads each data row's window from a table (tierb.slang rowWindow, under a
-        window start of ROWWIN_ON); the coarse tiers' tables are mapped onto their bands.
-        """
-        self._bind()
-        band, ct0, raw_thr, cascade_band, ct1, raw_thr1 = hier_tiers(
-            n, band, ct0, raw_thr, cascade_band, ct1, raw_thr1)
-        cascade = cascade_band is not None
-        nd, nt = data.shape[0], tmpl.shape[0]
-        pairs = nd * nt
-        lo, hi, binsize, nbins = hier_window(n, window, binsize)
-        rw = None if row_windows is None else row_windows[1]
-        if nbins > _MAX_BINS and rw is not None:
-            raise ValueError("grouped dispatch exceeds the kernel bin limit")
-        if nbins > _MAX_BINS:
-            return split_bins(
-                lambda w, ud, ut: self.hier_peaks(
-                    n, band, data, tmpl, ct0, raw_thr, binsize=binsize, threshold=threshold,
-                    window=w, upload_data=ud, upload_tmpl=ut, cascade_band=cascade_band,
-                    ct1=ct1, raw_thr1=raw_thr1, slot=slot),
-                lo, hi, binsize, _MAX_BINS, upload_data, upload_tmpl, sparse, async_submit)
-
-        band0 = int(cascade_band) if cascade else int(band)
-        band1 = int(band) if cascade else None
-        if ct0.shape != (nt, band0):
-            raise ValueError(f"tier-0 coarse templates must be ({nt}, {band0}), got {ct0.shape}")
-        if cascade and ct1.shape != (nt, band1):
-            raise ValueError(f"tier-1 coarse templates must be ({nt}, {band1}), got {ct1.shape}")
-        t2 = float(threshold) ** 2 if threshold > 0 else 0.0
-        stream = self.get_stream(slot)
-        self._after_forwards(stream)
-        dsh, tsh = shared_buffer(data, self), shared_buffer(tmpl, self)
-        # Keyed without block or bin counts: buffers are sized by capacity and grow,
-        # so windowed calls of varying size reuse one record (no per-shape churn).
-        key = (n, band0, band1, nt, slot, dsh and data.ctypes.data, tsh and tmpl.ctypes.data)
-        tmpl_dirty = upload_tmpl
-        upload_data, upload_tmpl, dsig, tsig = self._input_uploads(
-            key, data, tmpl, upload_data, upload_tmpl)
-        c16 = _use_c16(band0)
-        cb0 = 4 if c16 else 8
-        out = nd * nt * nbins
-        cfn, cwg, ppg, tile, _ = self._coarse_kernel(band0, nt)
-        ndp = nd                                        # ragged launches: no padded rows
-        estimate = ((0 if dsh else nd * n * 8) + (0 if tsh else nt * n * 8)
-                    + (nd + nt) * (band0 * cb0 + (band1 or 0) * 8) + pairs * 40 + out * 24)
-        bufs, fresh = self._record("hier", self._hier, key, estimate, dict)
-        sizes = [("cdata0", ndp * band0 * cb0, _Buffer), ("cidx0", ndp * nt * 4, _Buffer),
-                 ("cval0", ndp * nt * 8, _Buffer), ("surv0", pairs * 4, _Buffer),
-                 ("args", 16, _Buffer), ("idx", out * 4, _Buffer), ("val", out * 8, _Buffer),
-                 ("host", out * 12 + 16, _Pinned)]
-        if cascade:
-            sizes += [("cdata1", nd * band1 * 8, _Buffer), ("cidx1", pairs * 4, _Buffer),
-                      ("cval1", pairs * 8, _Buffer), ("surv1", pairs * 4, _Buffer)]
-        if rw is not None:
-            sizes += [("rw", nd * 8, _Buffer), ("rw0", nd * 8, _Buffer)]
-            sizes += [("rw1", nd * 8, _Buffer)] if cascade else []
-        for name, nbytes, cls in sizes:
-            if self._grow(bufs, name, nbytes, cls, stream) and name.startswith("cdata"):
-                upload_data = True           # its packed copy of the data is gone
-        if dsh is not None:
-            bufs["data"] = dsh
-        elif self._grow(bufs, "data", nd * n * 8, _Buffer, stream):
-            fresh = True
-        if fresh:
-            upload_data = True
-        bufs["tmpl"] = tsh or self._resident("tmpl", tmpl, tmpl_dirty, stream)
-        bufs["ct0"] = self._resident(("ct", band0, c16), ct0, tmpl_dirty, stream,
-                                     _pack_half2 if c16 else None)
-        if cascade:
-            bufs["ct1"] = self._resident(("ct", band1, False), ct1, tmpl_dirty, stream)
-        upload_tmpl = False                  # the residents above handled the templates
-
-        if upload_data:
-            self._upload(bufs["data"], data, stream)
-            if dsh is None:
-                bufs["cdata0"].write(_pack_half2(data[:, :band0]) if c16
-                                     else np.ascontiguousarray(data[:, :band0], np.complex64), stream)
-                if cascade:
-                    bufs["cdata1"].write(np.ascontiguousarray(data[:, :band1], np.complex64), stream)
-            self._uploaded["data"][key] = dsig
-        if upload_tmpl:
-            self._upload(bufs["tmpl"], tmpl, stream)
-            bufs["ct0"].write(_pack_half2(ct0) if c16 else np.ascontiguousarray(ct0, np.complex64),
-                              stream)
-            if cascade:
-                bufs["ct1"].write(np.ascontiguousarray(ct1, np.complex64), stream)
-            self._uploaded["tmpl"][key] = tsig
-
-        if rw is not None:
-            bufs["rw"].write(np.ascontiguousarray(rw, np.uint32), stream)
-            bufs["rw0"].write(band_windows(rw, n, band0), stream)
-            if cascade:
-                bufs["rw1"].write(band_windows(rw, n, band1), stream)
-        table = (lambda name: bufs[name].dptr) if rw is not None else (lambda name: _NOROW)
-        start = (lambda first: ROWWIN_ON) if rw is not None else (lambda first: first)
-        args = bufs["args"].dptr.value
-        collect = self._tail(bufs, out, (nd, nt, nbins), stream, sparse, args, 2, enqueue=False)
-
-        def enqueue():
-            args = bufs["args"].dptr.value
-            self._fill32(_ptr(args), 0, 4, stream)
-            self._fill32(bufs["idx"].dptr, 0xFFFFFFFF, out, stream)
-            self._fill32(bufs["val"].dptr, 0, out * 2, stream)
-
-            if dsh is not None:
-                # Coarse bands straight from the device spectra.
-                pack_fn, pack_wg = self.pipeline(4096, "packCoarse")
-                for name, b, packed in (("cdata0", band0, int(c16)),) + (
-                        (("cdata1", band1, 0),) if cascade else ()):
-                    self._launch(pack_fn, (nd * b + 255) // 256, 256,
-                                 [bufs["data"].dptr, bufs[name].dptr, _u32(n), _u32(b),
-                                  _u32(nd * b), _u32(packed)], stream=stream)
-
-            # Tier 0: the coarse gate over every pair (and the padding rows' pairs).
-            cs, ce, csp, csh = coarse_span(n, band0, lo, hi)
-            grid, rowarg = self._coarse_grid_for(cfn, ndp, nt, ppg, tile)
-            self._launch(cfn, grid, cwg,
-                         [bufs["cdata0"].dptr, bufs["ct0"].dptr, bufs["cidx0"].dptr,
-                          bufs["cval0"].dptr, _u32(nt), _u32(start(cs)), _u32(ce),
-                          _u32(csp if rowarg is None else rowarg),
-                          _i32(csh), _u32(1), _u32(self._gate_bits(cfn, raw_thr, band0, tile)),
-                          table("rw0")], stream=stream)
-            kfn, _ = self.pipeline(band0, "compactPairs")
-            cpt = (pairs + 255) // 256
-            if cascade:
-                # Tier 0 compaction counts into args[1]; tier 1 refines those pairs at
-                # band1 (one bin over its coarse window) and compacts into args[0].
-                self._fill32(bufs["cval1"].dptr, 0, pairs * 2, stream)
-                self._launch(kfn, cpt, 256, [bufs["cval0"].dptr, bufs["surv0"].dptr, _ptr(args + 4),
-                                             _u32(pairs), ctypes.c_float(float(raw_thr)), _u32(nbins)],
-                             stream=stream)
-                r1, r1wg = self.pipeline(band1, "refineListed", one_bin=True)
-                cs1, ce1, csp1, csh1 = coarse_span(n, band1, lo, hi)
-                g1 = self._refine_grid(r1, r1wg, pairs)
-                self._launch(r1, g1, r1wg,
-                             [bufs["cdata1"].dptr, bufs["ct1"].dptr, bufs["cidx1"].dptr,
-                              bufs["cval1"].dptr, bufs["surv0"].dptr, _ptr(args + 4),
-                              _u32(nt), _u32(start(cs1)), _u32(ce1), _u32(csp1), _i32(csh1), _u32(1),
-                              _u32(0), _u32(g1), table("rw1")], stream=stream, label=f"tier1_{band1}")
-                self._launch(kfn, cpt, 256, [bufs["cval1"].dptr, bufs["surv1"].dptr, _ptr(args),
-                                             _u32(pairs),
-                                             # cval1 holds zeros for the pairs tier 0 dismissed:
-                                             # never let a threshold of 0 pass them (as Metal).
-                                             ctypes.c_float(max(float(raw_thr1), 1.1754944e-38)),
-                                             _u32(nbins)],
-                             stream=stream)
-                surv = bufs["surv1"]
-            else:
-                self._launch(kfn, cpt, 256, [bufs["cval0"].dptr, bufs["surv0"].dptr, _ptr(args),
-                                             _u32(pairs), ctypes.c_float(float(raw_thr)), _u32(nbins)],
-                             stream=stream)
-                surv = bufs["surv0"]
-
-            rfn, rwg = self.pipeline(n, "refineListed", one_bin=(nbins == 1))
-            g = self._refine_grid(rfn, rwg, pairs)
-            self._launch(rfn, g, rwg,
-                         [bufs["data"].dptr, bufs["tmpl"].dptr, bufs["idx"].dptr, bufs["val"].dptr,
-                          surv.dptr, _ptr(args), _u32(nt), _u32(start(lo)), _u32(hi), _u32(binsize),
-                          _i32(_shift(binsize)), _u32(nbins), _f32bits(t2), _u32(g), table("rw")],
-                         stream=stream)
-            self._tail(bufs, out, (nd, nt, nbins), stream, sparse, args, 2)
-        self._graphed(bufs, ("hier", lo, hi, binsize, nbins, t2, float(raw_thr),
-                             float(raw_thr1) if cascade else None, band0, band1, nd, nt, ndp,
-                             sparse, dsh is not None, rw is not None), stream, enqueue)
-
-        def readback(sort=True):
-            res, counts = collect(sort)
-            self.last_refinements = int(counts[0])
-            self.last_tier1_survivors = int(counts[1]) if cascade else int(counts[0])
-            return res
-        readback.sparse_dev = getattr(locals().get("collect"), "sparse_dev", None)
-        return self._dispatch_result(bufs, readback, async_submit)
-
     # ---- series forward -----------------------------------------------------------
-    def cancel_forward(self, slot=None):
-        # Launches are already enqueued; the stream orders whatever follows.
-        pass
-
-    def peaks_items(self, n, data, tmpl, items, binsize, threshold, *, async_submit=False):
-        """One submission over follow-up items (lo, hi, a, b, t): rows a:b of ``data`` against
-        template row t, searched over [lo, hi) in bins of ``binsize``. Returns per item
-        (idx, val) shaped (b - a, 1, nbins), or with async_submit a collector for that list.
-        Data and templates are device allocations; pointer offsets select each item's rows,
-        so nothing is copied, and the output comes back in one copy and one sync."""
-        self._bind()
-        stream = self.get_stream(None)
-        self._after_forwards(stream)
-        b_data, b_tmpl = shared_buffer(data, self), shared_buffer(tmpl, self)
-        if b_data is None or b_tmpl is None:
-            raise ValueError("item spectra and templates must be shared allocations")
-        binsize = int(binsize)
-        t2 = float(threshold) ** 2 if threshold > 0 else 0.0
-        offs, nbs, size = plan_items(items, binsize, 1, _MAX_BINS)    # pointer offsets
-        # Output buffers are per DEVICE, not per Context: follow-ups run on a single-template
-        # plan per bank, each its own Context, and per-Context buffers meant an allocation
-        # on nearly every call (a bank's follow-ups are rare). One collector may be pending.
-        st = self._device_state
-        holder = st if st is not None else self
-        prior = getattr(holder, "items_inflight", None)
-        holder.items_inflight = None
-        if prior is not None:
-            prior()                          # its output and host buffers are about to be reused
-        rec = holder.__dict__.setdefault("items_rec", {})
-        self._grow(rec, "idx", size * 4, _Buffer, stream)
-        self._grow(rec, "val", size * 8, _Buffer, stream)
-        self._grow(rec, "host", size * 12, _Pinned, stream)
-        i0, v0, host = rec["idx"].dptr.value, rec["val"].dptr.value, rec["host"]
-        d0, tp = b_data.dptr.value, b_tmpl.dptr.value
-        for (lo, hi, a, b, t), off, nb in zip(items, offs, nbs):
-            if b <= a:
-                continue
-            hfunc, wg = self.pipeline(n, "fusedTierB", one_bin=(nb == 1))
-            self._launch(hfunc, b - a, wg,
-                         [_ptr(d0 + a * n * 8), _ptr(tp + t * n * 8), _ptr(i0 + off * 4),
-                          _ptr(v0 + off * 8), _u32(1), _u32(lo), _u32(hi), _u32(binsize),
-                          _i32(_shift(binsize)), _u32(nb), _f32bits(t2), _NOROW], stream=stream)
-        if size:
-            self._copy_d2h(host.ptr, i0, size * 4, stream, "readback")
-            self._copy_d2h(host.ptr + size * 4, v0, size * 8, stream, "readback")
-        done = []
-
-        def collect():
-            if not done:
-                self._sync(stream)
-                idx = host.view(np.int32, size)
-                val = host.view(np.complex64, size, offset=size * 4)
-                done.append(split_items(items, offs, nbs, idx, val, copy=True))
-                if getattr(holder, "items_inflight", None) is collect:
-                    holder.items_inflight = None
-            return done[0]
-        if async_submit:
-            holder.items_inflight = collect
-            return collect
-        return collect()
 
     # ---- lifetime ----------------------------------------------------------------
     def _drain_segments(self):
@@ -1786,22 +1401,23 @@ class Context(Executor, InputUploads):
         self._bind()
         if self.ctx.value:
             self.cuda.cuCtxSynchronize()
-        for table in self._record_tables().values():
-            for rec in table.values():
-                for b in _owned(self._record_buffers(rec)):
-                    b.destroy()
-            table.clear()
-        for ent in self._residents.values():
-            ent[0].destroy()
-        self._residents.clear()
         self._uploaded = {"data": {}, "tmpl": {}}
         self._cache_order = {}
+
+    def _word_slots(self):
+        slots = self.__dict__.get("_slots")
+        if slots is None:
+            slots = self._slots = _WordSlots(self)
+        return slots
 
     def destroy(self):
         if not getattr(self, "ctx", None) or not self.ctx.value:
             return
         self._bind()
         self.clear_cache()
+        if self.__dict__.get("_slots") is not None:
+            self._slots.destroy()
+            self._slots = None
         if not self._shared_modules:
             for mod in self._modules.values():
                 self.cuda.cuModuleUnload(mod)
@@ -1814,10 +1430,6 @@ class Context(Executor, InputUploads):
         for e in self._event_pool:
             if e.value:
                 self.cuda.cuEventDestroy_v2(e)
-        for e in self._fwd_events.values():
-            if e.value:
-                self.cuda.cuEventDestroy_v2(e)
-        self._fwd_events.clear()
         self._event_pool.clear()
         for s in self.streams:
             if s.value:

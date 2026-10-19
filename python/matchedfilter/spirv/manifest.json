@@ -47,7 +47,7 @@
       },
       "refine": {
         "file": "refine_64.spv",
-        "descriptors": 6
+        "descriptors": 7
       },
       "metal": {
         "fusedTierB": {
@@ -60,6 +60,10 @@
         },
         "refineListed": {
           "msl": "refine_64.metal",
+          "metallib": null
+        },
+        "compactListed": {
+          "msl": "compactl_64.metal",
           "metallib": null
         }
       },
@@ -113,7 +117,7 @@
       },
       "refine": {
         "file": "refine_128.spv",
-        "descriptors": 6
+        "descriptors": 7
       },
       "metal": {
         "fusedTierB": {
@@ -126,6 +130,10 @@
         },
         "refineListed": {
           "msl": "refine_128.metal",
+          "metallib": null
+        },
+        "compactListed": {
+          "msl": "compactl_128.metal",
           "metallib": null
         }
       },
@@ -179,7 +187,7 @@
       },
       "refine": {
         "file": "refine_256.spv",
-        "descriptors": 6,
+        "descriptors": 7,
         "one_bin": {
           "file": "refine_256_onebin.spv"
         }
@@ -206,6 +214,10 @@
             "metallib": null,
             "lds_bytes": 2048
           }
+        },
+        "compactListed": {
+          "msl": "compactl_256.metal",
+          "metallib": null
         }
       },
       "metal_lds_cap": 512,
@@ -258,7 +270,7 @@
       },
       "refine": {
         "file": "refine_512.spv",
-        "descriptors": 6,
+        "descriptors": 7,
         "one_bin": {
           "file": "refine_512_onebin.spv"
         }
@@ -285,6 +297,10 @@
             "metallib": null,
             "lds_bytes": 4096
           }
+        },
+        "compactListed": {
+          "msl": "compactl_512.metal",
+          "metallib": null
         }
       },
       "metal_lds_cap": 512,
@@ -343,7 +359,7 @@
       },
       "refine": {
         "file": "refine_1024.spv",
-        "descriptors": 6,
+        "descriptors": 7,
         "one_bin": {
           "file": "refine_1024_onebin.spv"
         }
@@ -370,6 +386,10 @@
             "metallib": null,
             "lds_bytes": 8192
           }
+        },
+        "compactListed": {
+          "msl": "compactl_1024.metal",
+          "metallib": null
         },
         "fullCorrelation": {
           "msl": "full_1024.metal",
@@ -436,7 +456,7 @@
       },
       "refine": {
         "file": "refine_2048.spv",
-        "descriptors": 6,
+        "descriptors": 7,
         "one_bin": {
           "file": "refine_2048_onebin.spv"
         }
@@ -463,6 +483,10 @@
             "metallib": null,
             "lds_bytes": 16384
           }
+        },
+        "compactListed": {
+          "msl": "compactl_2048.metal",
+          "metallib": null
         },
         "fullCorrelation": {
           "msl": "full_2048.metal",
@@ -529,7 +553,7 @@
       },
       "refine": {
         "file": "refine_4096.spv",
-        "descriptors": 6,
+        "descriptors": 7,
         "one_bin": {
           "file": "refine_4096_onebin.spv"
         }
@@ -559,6 +583,10 @@
             "metallib": null,
             "lds_bytes": 32768
           }
+        },
+        "compactListed": {
+          "msl": "compactl_4096.metal",
+          "metallib": null
         },
         "fullCorrelation": {
           "msl": "full_4096.metal",
@@ -635,7 +663,7 @@
       },
       "refine": {
         "file": "refine_8192.spv",
-        "descriptors": 6,
+        "descriptors": 7,
         "portable": {
           "file": "refine_8192_lds32.spv",
           "lds_bytes": 32768
@@ -687,6 +715,15 @@
           },
           "one_bin": {
             "msl": "refine_8192_onebin.metal",
+            "metallib": null,
+            "lds_bytes": 32768
+          }
+        },
+        "compactListed": {
+          "msl": "compactl_8192.metal",
+          "metallib": null,
+          "portable": {
+            "msl": "compactl_8192_lds32.metal",
             "metallib": null,
             "lds_bytes": 32768
           }
@@ -780,7 +817,7 @@
       },
       "refine": {
         "file": "refine_16384.spv",
-        "descriptors": 6,
+        "descriptors": 7,
         "portable": {
           "file": "refine_16384_lds32.spv",
           "lds_bytes": 32768
@@ -822,6 +859,15 @@
           "metallib": null,
           "portable": {
             "msl": "refine_16384_lds32.metal",
+            "metallib": null,
+            "lds_bytes": 32768
+          }
+        },
+        "compactListed": {
+          "msl": "compactl_16384.metal",
+          "metallib": null,
+          "portable": {
+            "msl": "compactl_16384_lds32.metal",
             "metallib": null,
             "lds_bytes": 32768
           }
@@ -915,7 +961,7 @@
       },
       "refine": {
         "file": "refine_32768.spv",
-        "descriptors": 6,
+        "descriptors": 7,
         "portable": {
           "file": "refine_32768_lds32.spv",
           "lds_bytes": 32768
@@ -957,6 +1003,15 @@
           "metallib": null,
           "portable": {
             "msl": "refine_32768_lds32.metal",
+            "metallib": null,
+            "lds_bytes": 32768
+          }
+        },
+        "compactListed": {
+          "msl": "compactl_32768.metal",
+          "metallib": null,
+          "portable": {
+            "msl": "compactl_32768_lds32.metal",
             "metallib": null,
             "lds_bytes": 32768
           }
@@ -1050,7 +1105,7 @@
       },
       "refine": {
         "file": "refine_65536.spv",
-        "descriptors": 6,
+        "descriptors": 7,
         "portable": {
           "file": "refine_65536_lds32.spv",
           "lds_bytes": 32768
@@ -1092,6 +1147,15 @@
           "metallib": null,
           "portable": {
             "msl": "refine_65536_lds32.metal",
+            "metallib": null,
+            "lds_bytes": 32768
+          }
+        },
+        "compactListed": {
+          "msl": "compactl_65536.metal",
+          "metallib": null,
+          "portable": {
+            "msl": "compactl_65536_lds32.metal",
             "metallib": null,
             "lds_bytes": 32768
           }
@@ -1273,6 +1337,10 @@
   "pack_coarse": {
     "file": "pack_coarse.spv",
     "metal": "pack_coarse.metal"
+  },
+  "compact_peaks": {
+    "file": "compact_peaks.spv",
+    "metal": "compact_peaks.metal"
   },
   "full_tierc": {
     "131072": {
@@ -1571,21 +1639,17 @@
     }
   },
   "source_hashes": {
-    "tierb.slang": "a89a3c7f0544deebc26f06bd0422ced249282016a13de1bf1fd39279f4daad13",
+    "tierb.slang": "c6328021d442f6964efcdb396f3f8aa7d96c794a67c32e0065a05cb2d0c4aad9",
     "fft_transform.slang": "c7888ec7a8c0363d243e418adcdde320823ce190190b95448d762612cc4e61e9",
     "coarse_tile.slang": "8b1a3f9193e20b76cc02641e71b77023d544b0bd1bff8c4194f38371ad47fb47",
     "series_forward.slang": "ed54d158b885a0d6c26009e4d636f8733df90fb7909f5d3fe9708aac05d5f4b6",
-    "series_bands.slang": "c4b778228e5bebff9163c6ea93eb367207f7e857fd8dd1cc0657dcec6209d515",
-    "forward_tier0.slang": "269bac3bd8075049ff4fae3546512ab6991f1e14ee0096abc596d288966b27b0",
-    "pack_coarse.slang": "6599e775732a3d54ef2517a469aaa311a38028b41a92a87e166fce94ef3076c2",
-    "twiddle.slang": "f88268b238d191f42291fac1dabbb201ffd667d9cbb8784dea888a219532d44d",
+    "series_bands.slang": "26862d5296af0f3d0a73f2d5b47337dcceb5d0843e40b141179c99bb984f0e99",
+    "forward_tier0.slang": "87ded378c7cbb2893c2850963971f89f9f770dc059bfa62aa525401a87eb622f",
+    "pack_coarse.slang": "798e16259d5c1a37aaa634a731c0e08a816d5220d34325ad8be5c2e7007145ef",
+    "twiddle.slang": "cebfdf65915e700953afd5eff22e4ab3aa1dfd008c2dde0326ed446c2d50d18f",
     "refine_bounded.slang": "bf32ef397075682cc5d73464d656dca61d6f16c6174e223836940b86c039c83d",
     "compact_peaks.slang": "5c8bd90e54bbb422e6c60cfa3009074008a7d4039c9d44ce026e10c81df248d4"
   },
-  "build_id": "5a03ee77ba20ab84713ac20e21482dbd40881c472dbdf2ada0e0a9b24bbccdae",
-  "metal_build_id": "0bd14ca21c29d8462df4a5a59840cc2492a5074d679d064d528346d1b139b518",
-  "compact_peaks": {
-    "file": "compact_peaks.spv",
-    "metal": "compact_peaks.metal"
-  }
+  "build_id": "7dafc7ede7b18c1e4a3025eec34a0978cfc833f2730e00043a1b7fe51184a83e",
+  "metal_build_id": "593455d7f873b4eef1b38ff9d1d547e6df852d4762c3fb071930276cbbbd5da4"
 }

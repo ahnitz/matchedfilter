@@ -12,6 +12,8 @@ import numpy as np
 import pytest
 import matchedfilter as mf
 from conftest import usable_gpu, vulkan_runs
+from matchedfilter._coarse import coarse_launch
+from matchedfilter._shared import pack_half2
 
 TRIALS = 32768
 BATCH = 512
@@ -30,7 +32,7 @@ class VulkanCoarse:
         ppg, tile = (int(m[1] or 1), int(m[2] or 1)) if m else (1, 1)
         # BATCH data rows x 4 templates; the same launch rule the host uses.
         slot, groups = ((band, BATCH) if self.tiled
-                        else V.coarse_launch(BATCH, 4, ppg, tile, band))
+                        else coarse_launch(BATCH, 4, ppg, tile, band))
         self.buffers = []
         try:
             size = 4 if self.half else 8
@@ -63,7 +65,7 @@ class VulkanCoarse:
             raise
 
     def run(self, data, templates):
-        convert = self.v._pack_half2 if self.half else np.ascontiguousarray
+        convert = pack_half2 if self.half else np.ascontiguousarray
         self.buffers[0].write(convert(data))
         self.buffers[1].write(convert(templates))
         self.ctx._submit(self.cmd)

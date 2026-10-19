@@ -3,15 +3,34 @@
 A backend Context (Vulkan, CUDA, Metal) inherits Executor and supplies only driver
 primitives -- how to allocate, record, submit and read back on its API. Every decision an
 operation makes uses what the driver reports about the hardware, never which API it is, so
-a change made here reaches every GPU at once.
+a change made here reaches every GPU at once. The operations: full and continuous
+correlation, the forward transform, flat peaks and follow-up items (here), the hierarchical
+search (_gpuhier), and deferred work: a forward held for the next run on its slot, which runs
+it first in the same submission or, a hierarchical call, claims it (_pending, _take,
+_exec_claim).
 
 Driver primitives (a Context provides each):
 
-  _x_kernel(name, n)        the compiled kernel `name` at transform length n, or raise
+  _x_kernel(name, n, consts=None)
+                            the compiled kernel `name` at transform length n, or raise
                             UnsupportedSize: an opaque handle the context's command lists take.
-                            Names: "full" (fullCorrelation), "tc1"/"tc2" (the two stages of
-                            the two-stage full correlation), "series" (fullCorrelationSeries),
-                            "tcs2" (the two-stage continuous correlation's second stage).
+                            consts: build-time constants (twiddle.slang) -- stride (a data
+                            row stride in elements, 0 the kernel's own length), scale (the
+                            fp16 tier's data scale exponent), rowwin (per-row windows), and a
+                            coarse kernel's layout (sg, ppg, tile, twt). Names: peaks/peaks1
+                            (fusedTierB, one bin), gate (fusedTierB as a gate tier), coarse
+                            (the fp16 role), tier/tier1 and refine/refine1 (the bounded
+                            listed refine), compact, compactl, compact_peaks, mark, pack,
+                            forward, fwd_tier0, fwd_bands, fwd_listed, full, series, and the
+                            two-stage tc1/tc2/tcs2/tf1/tf2.
+  _x_has_c16(band), _x_has_kernel(name, n)
+                            whether an fp16 coarse build, or an optional kernel (tier1: a
+                            one-bin build; fwd_tier0) was shipped for this target.
+  _x_coarse_candidates(band)
+                            the coarse layouts (sg, ppg, tile, twt[, driver kind]) the device
+                            can run at this band, for the measured choice (_gpuhier).
+  _x_time(native, binds, reps)
+                            the least device time of reps runs, in seconds.
   _x_tierc(n)               (n1, n2): the two-stage transform's split at n (UnsupportedSize
                             if there is none).
   _x_alloc(nbytes, readback=False, upload=False)
@@ -20,7 +39,8 @@ Driver primitives (a Context provides each):
                             writes it before every run, through _x_upload.
   _x_upload(buf, array, slot)
                             write an upload buffer, ordered before the next work on `slot`.
-  _x_list(label)            a command list being recorded:
+  _x_list(label, once=False)
+                            a command list being recorded (once: run once, then freed):
                               dispatch(kernel, groups, buffers, words=(), offsets=None)
                                 buffers are bound in order, each a device buffer or view or
                                 an Arg (bound per run); offsets (bytes) add to each binding's.
@@ -29,57 +49,65 @@ Driver primitives (a Context provides each):
                                 tuple of them for a vector parameter (a uint4), or an Arg
                                 with words=k: k scalar parameters bound per run (binds[name]
                                 is then a tuple of k uint32);
+                              listed(kernel, count, max_groups, buffers, words=())
+                                a bounded kernel over a list whose length a kernel wrote to
+                                count[0]: indirect where the device dispatches that way,
+                                else a resident grid striding over it; the driver appends
+                                the kernel's gridSize word;
                               barrier()      all earlier work before all later work, memory
-                                             included;
+                                             and indirect arguments included;
                               stamp(name)    a phase boundary: the work since the previous
                                              stamp is phase `name` (fused batches interleave
-                                             recordings phase by phase; MF_GPU_PROFILE times
-                                             it);
+                                             recordings phase by phase, a phase's commands
+                                             unordered: dependent work needs its own phase;
+                                             MF_GPU_PROFILE times it);
                               fill(buf, word) set every 32-bit word of an owned buffer to
                                              word (0 or 0xFFFFFFFF: a byte pattern);
+                              update(buf, words) write a few words, in order with the work;
                               readback(buf, nbytes)
                                              the host reads the first nbytes of `buf` after
                                              the run (a copy into host memory on a device
                                              that does not share it; nothing where it does);
                               end()          -> native: what _x_run runs and _x_release frees.
-  _x_run(native, wait, binds=None, slot=None)
+  _x_run(native, wait, binds=None, slot=None, pre=())
                             run a recorded list, binding each Arg to binds[name] (a view), on
-                            the queue or stream of pipelining slot `slot`, together with the
-                            work deferred for that slot; wait=False leaves it in flight as a
-                            pending write (device work is ordered after it, a host reader waits
-                            through settle_writes).
-  _x_defer(native, binds, slot, source)
-                            hold a recorded forward for the next work on `slot`, which runs it
-                            first. source (one-stage forwards, else None) = (n, series, starts,
-                            row, count, nser, code, spectra, spectra address): the bound series
-                            and block starts (block i's start at element row + i of starts),
-                            and the spectra view written -- what a hierarchical consumer needs
-                            to replace this forward with its own (band) forward.
+                            the queue or stream of pipelining slot `slot`, after `pre`
+                            ((native, binds) deferred for it) in the same submission;
+                            wait=False leaves it in flight as a pending write (device work is
+                            ordered after it, a host reader waits through settle_writes).
+  _x_submit(native, binds, slot, pre=())
+                            _x_run, returning wait(): a call that blocks until it has finished
+                            (a result read later).
   _x_prefetch(view, offset, nbytes, slot)
                             start moving a span of a shared allocation to the device ahead of
                             the kernel that reads it (memory that migrates).
-  _x_submit(native, binds, slot)
-                            run a recorded list on `slot` and return wait(): a call that
-                            blocks until it has finished (a result read later).
   _x_after_readers()        order the next run after earlier device work on this device that
                             may still read what it rewrites (another context's queue).
-  _x_release(native)        free a recording (after its work has finished).
+  _x_release(native, done=False)
+                            free a recording (done: its runs are known to have finished).
   _x_read(buf, out, offset=0)
                             copy bytes of a readback buffer from `offset` into a host array,
                             after the run that wrote them has finished.
+  _x_view(buf, dtype, count)
+                            the first count elements of a readback buffer as a host array,
+                            read in place where the host sees that memory (valid until the
+                            buffer's next run: gather from it, do not keep it), else a copy.
 
 Features a driver reports (attributes): max_dispatch_x (the most groups one dispatch takes),
 storage_offset_alignment (a bound buffer's offset must be a multiple of this),
 stage_host_inputs (shared allocations migrate between host and device: kernels must not read
 small host-written inputs from them, which are uploaded into device memory instead, and spans
-a kernel will read are prefetched).
+a kernel will read are prefetched), inplace_feed (kernels are specialized when created, so
+the hierarchical tiers read the spectra in place at a stride and scale; else packed bands),
+subgroup_size, kernel_family (whose kernel identity stored measured choices belong to).
 """
 import time
 
 import numpy as np
 
 from ._errors import UnsupportedSize
-from ._gpuhost import MAX_BINS
+from ._gpuhier import HierOps
+from ._gpuhost import MAX_BINS, bin_shift, plan_items, split_items
 from ._shared import shared_view
 
 
@@ -145,7 +173,7 @@ class Measured:
             self.current = min(self.ways, key=lambda w: float(np.median(self.times[w][1:])))
 
 
-class Executor:
+class Executor(HierOps):
     """The operations every GPU backend runs, written once. See the module docstring for
     the driver primitives a backend supplies."""
 
@@ -176,6 +204,92 @@ class Executor:
         rec.buffers[name] = buf
         return buf
 
+    # ---- deferred work ------------------------------------------------------------------
+    def _pending(self):
+        """slot -> [(native, binds, source)]: recorded work held for the next run on that slot
+        (a deferred forward), which runs it first in the same submission -- or which a
+        hierarchical call may claim and replace (_exec_claim)."""
+        table = self.__dict__.get("_exec_pend")
+        if table is None:
+            table = self._exec_pend = {}
+        return table
+
+    def _defer(self, native, binds, slot, source):
+        self._pending().setdefault(slot, []).append((native, binds, source))
+
+    def _take(self, slot):
+        """The work held for `slot`, removed, for a run on `slot` to submit first. An
+        unslotted run cannot tell which other slot's work wrote what it reads: every slot's
+        work runs now, each on its own slot -- where its staged inputs were written -- as
+        pending writes the run is ordered after."""
+        table = self._pending()
+        if not table:
+            return ()
+        work = [(native, binds) for native, binds, _ in table.pop(slot, ())]
+        if slot is None:
+            for other in list(table):
+                *pre, (native, binds, _) = table.pop(other)
+                self._x_run(native, False, binds, other, pre=[(n, b) for n, b, _ in pre])
+        return work
+
+    def _take_items(self):
+        """The work every follow-up item slot (("items", i)) holds, in item order."""
+        table = self._pending()
+        keys = sorted((k for k in table if isinstance(k, tuple) and k and k[0] == "items"),
+                      key=lambda k: k[1:])
+        return [(native, binds) for k in keys for native, binds, _ in table.pop(k)]
+
+    def _exec_claim(self, slot, data, nd):
+        """A hierarchical call taking the deferred forward that writes `data` (all nd rows,
+        from row 0), to run its own feed in its place: (series, starts, row, count, nser,
+        code) of that forward, or None. data None (a replay): drop the slot's forward, which
+        the replayed record's own feed stands in for."""
+        table = self._pending()
+        key = slot if slot in table else (next(iter(table)) if slot is None and len(table) == 1
+                                          else None)
+        work = table.get(key)
+        if not work:
+            return None
+        for i, (native, binds, source) in enumerate(work):
+            if data is None:
+                hit = True
+            elif source is None:
+                continue
+            else:
+                n, series, starts, row, count, nser, code, spectra, address = source
+                hit = (address == data.ctypes.data and count == nd and row == 0)
+            if hit:
+                del work[i]
+                if not work:
+                    del table[key]
+                return None if data is None else (series, starts, row, count, nser, code)
+        return None
+
+    def _exec_run_holding(self, native):
+        """Run now, and wait for, the deferred work of every slot that holds a run of
+        `native`: an input of that recording is about to be rewritten."""
+        for slot, work in list(self._pending().items()):
+            if any(nat is native for nat, _, _ in work):
+                del self._pending()[slot]
+                *pre, (nat, binds, _) = work
+                self._x_run(nat, True, binds, slot, pre=[(n, b) for n, b, _ in pre])
+
+    def cancel_forward(self, slot=None):
+        """Drop deferred forwards that will not run: every slot's, or one slot's."""
+        table = self._pending()
+        if slot is None:
+            table.clear()
+        else:
+            table.pop(slot, None)
+
+    def _exec_run(self, native, wait, binds, slot):
+        """Run a recorded list on `slot`, after the work deferred for it (one submission)."""
+        self._x_run(native, wait, binds, slot, pre=self._take(slot))
+
+    def _exec_submit(self, native, binds, slot):
+        """_exec_run, left running: returns wait() (_x_submit)."""
+        return self._x_submit(native, binds, slot, pre=self._take(slot))
+
     def _exec_evict(self, key):
         """Drop one executor record: its in-flight results are collected first, then the
         driver frees its recording and the buffers it owns."""
@@ -183,11 +297,25 @@ class Executor:
         rec = self._exec_table().pop(key, None)
         if rec is None:
             return
+        # Work still deferred from this record runs now: it writes spectra a caller reads.
+        for slot, work in list(self._pending().items()):
+            mine = [(nat, b) for nat, b, _ in work if nat is rec.native]
+            if mine:
+                self._pending()[slot] = [w for w in work if w[0] is not rec.native]
+                if not self._pending()[slot]:
+                    del self._pending()[slot]
+                for nat, b in mine:
+                    self._x_run(nat, True, b, slot)
         self._x_release(rec.native)
         for name in rec.owned:
             rec.buffers[name].destroy()
         for resident in self._uploaded.values():
             resident.pop(key, None)
+
+    def _evict_record(self, kind, key, keep_storage=None):
+        """The cache's eviction hook (_gpu_cache._cache_room): every record is an executor
+        record."""
+        return self._exec_evict(key)
 
     def _exec_room(self, estimate, incoming=()):
         """Room for a new record: at most cache_limit_entries records (the least recently
@@ -290,7 +418,7 @@ class Executor:
         if (uploads[0] and "data" in rec.owned) or (uploads[1] and "tmpl" in rec.owned):
             self.settle_writes()       # a call left in flight may still read these inputs
         self._write_uploads(key, uploads, rec.buffers["data"], data, rec.buffers["tmpl"], tmpl)
-        self._x_run(rec.native, wait)
+        self._exec_run(rec.native, wait, None, None)
         if "out" in rec.owned:
             self._x_read(rec.buffers["out"], out)
 
@@ -360,8 +488,8 @@ class Executor:
                 self._x_upload(rec.buffers["starts%d" % i], starts[d0:d1], None)
         if async_submit:
             self._x_after_readers()
-        self._x_run(rec.native, not async_submit,
-                    {"out": ov} if staged else {"out": ov, "starts": sv})
+        self._exec_run(rec.native, not async_submit,
+                       {"out": ov} if staged else {"out": ov, "starts": sv}, None)
         return out
 
     # ---- forward transform --------------------------------------------------------------
@@ -431,6 +559,8 @@ class Executor:
         self._cache_touch("exec", key)
         binds = {"series": sv, "spectra": pv}
         if staged:
+            # A run of this record still deferred reads the starts about to be rewritten.
+            self._exec_run_holding(rec.native)
             self._x_upload(rec.buffers["starts"], starts[r0:r0 + count], slot)
             bst, row = rec.buffers["starts"], 0
         else:
@@ -439,11 +569,11 @@ class Executor:
         if handle_out is not None:
             handle_out.append((key, rec, binds))
         if defer:
-            self._x_defer(rec.native, binds, slot,
+            self._defer(rec.native, binds, slot,
                           None if two else (n, sv, bst, row, count, nser, code, pv,
                                             spectra.ctypes.data + r0 * n * 8))
         else:
-            self._x_run(rec.native, True, binds, slot)
+            self._exec_run(rec.native, True, binds, slot)
 
     def _forward_fused(self, n, series, starts, spectra, *, defer=False, slot=None):
         return self.forward(n, series, starts, spectra, defer=defer, slot=slot, fused=True)
@@ -457,7 +587,7 @@ class Executor:
         if not self.forward_valid(h):
             return False
         self._cache_touch("exec", h[0])
-        self._x_defer(h[1].native, h[2], slot, None)
+        self._defer(h[1].native, h[2], slot, None)
         return True
 
     # ---- flat peaks ---------------------------------------------------------------------
@@ -550,7 +680,9 @@ class Executor:
         shift = (binsize.bit_length() - 1) if binsize & (binsize - 1) == 0 else -1
         t2 = float(threshold) ** 2 if threshold > 0 else 0.0
         t2bits = int(np.float32(t2).view(np.uint32))
-        slot = slot if async_submit else None      # a result in flight owns its slot's buffers
+        # A result in flight owns its slot's buffers; a waited call shares one record across
+        # slots, but still runs on its slot (after the work deferred there).
+        kslot = slot if async_submit else None
         rows = tuple((a, b) for _, _, a, b in groups)
         # Each group's results start at its rows' place in (rows, templates, bins) where that
         # offset is a bound view's alignment; else every group is packed, aligned, and the
@@ -568,7 +700,7 @@ class Executor:
         for a, b in rows:
             covered[a:b] = True
         dv, tv = shared_view(data, self), shared_view(tmpl, self)
-        key = ("flat", n, nd, nt, nbins, rows, slot, sparse, dv is not None and data.ctypes.data,
+        key = ("flat", n, nd, nt, nbins, rows, kslot, sparse, dv is not None and data.ctypes.data,
                tv is not None and tmpl.ctypes.data)
         uploads = self._input_uploads(key, data, tmpl, upload_data, upload_tmpl)
         table = self._exec_table()
@@ -599,7 +731,7 @@ class Executor:
             if sparse:
                 # The bins that cleared the threshold, gathered on the device: the host
                 # reads the count and those records, not the dense table.
-                lst.dispatch(self._x_kernel("compact", n), (size + 255) // 256,
+                lst.dispatch(self._x_kernel("compact_peaks", n), (size + 255) // 256,
                              [bi, bv, cnt, out], (size, size))
                 lst.barrier()
                 lst.readback(cnt, 4)
@@ -615,9 +747,9 @@ class Executor:
         self._exec_upload(rec, key, uploads, data, tmpl, slot)
         binds = {"w%d" % g: (nt, lo, hi, binsize, shift & 0xFFFFFFFF, nbins, t2bits)
                  for g, (lo, hi, _, _) in enumerate(groups)}
-        wait = self._x_submit(rec.native, binds, slot) if async_submit else None
+        wait = self._exec_submit(rec.native, binds, slot) if async_submit else None
         if wait is None:
-            self._x_run(rec.native, True, binds, slot)
+            self._exec_run(rec.native, True, binds, slot)
         shape = (nd, nt, nbins)
 
         def result():
@@ -667,3 +799,81 @@ class Executor:
         flat, recs = pos[order], recs[order]
         val = recs[:, 2:4].copy().view(np.float32).view(np.complex64).reshape(-1)
         return _SparsePeaks(shape, flat, recs[:, 1].view(np.int32), val)
+
+    # ---- follow-up items ----------------------------------------------------------------
+    #: peaks_items takes async_submit (MatchedFilter._items_gpu(wait=False)).
+    items_async = True
+
+    def peaks_items(self, n, data, tmpl, items, binsize, threshold, *, async_submit=False):
+        """One submission over follow-up items (lo, hi, a, b, t): rows a:b of data against
+        template row t, searched over [lo, hi) in bins of binsize. Returns per item (idx, val)
+        shaped (b - a, 1, nbins), or with async_submit a callable giving that list. Data and
+        templates are device allocations, bound in place at each item's rows: nothing is
+        copied, and the outputs come back in one read."""
+        dv, tv = shared_view(data, self), shared_view(tmpl, self)
+        if dv is None or tv is None:
+            raise ValueError("item spectra and templates must be shared allocations")
+        binsize = int(binsize)
+        shift = bin_shift(binsize) & 0xFFFFFFFF
+        t2bits = int(np.float32(float(threshold) ** 2 if threshold > 0 else 0).view(np.uint32))
+        offs, nbs, size = plan_items(items, binsize, max(1, self.storage_offset_alignment // 4),
+                                     MAX_BINS)
+        # Outputs per DEVICE: follow-ups run on a single-template plan per bank, each its own
+        # context, and outputs per context meant an allocation on nearly every call. One
+        # result may be pending: its outputs are about to be reused.
+        holder = getattr(self, "_device_state", None) or self
+        prior = holder.__dict__.pop("items_inflight", None)
+        if prior is not None:
+            prior()
+        out = holder.__dict__.get("items_out")
+        if out is None or out[0].nbytes < max(size, 1) * 4:
+            cap = max(size, 1, 2 * (out[0].nbytes // 4 if out else 0))
+            if out is not None:
+                for b in out:
+                    b.destroy()
+            out = holder.items_out = (self._x_alloc(cap * 4, readback=True),
+                                      self._x_alloc(cap * 8, readback=True))
+        bi, bv = out
+        lst = self._x_list("items", once=True)
+        for (lo, hi, a, b, t), off, nb in zip(items, offs, nbs):
+            if b <= a:
+                continue
+            lst.dispatch(self._x_kernel("peaks1" if nb == 1 else "peaks", n), b - a,
+                         [dv, tv, bi, bv], (1, lo, hi, binsize, shift, nb, t2bits),
+                         offsets=[a * n * 8, t * n * 8, off * 4, off * 8])
+        lst.barrier()
+        lst.readback(bi, size * 4)
+        lst.readback(bv, size * 8)
+        native = lst.end()
+        wait = self._x_submit(native, {}, None, pre=self._take_items())
+
+        def result():
+            wait()
+            idx = np.empty(size, np.int32)
+            val = np.empty(size, np.complex64)
+            self._x_read(bi, idx)
+            self._x_read(bv, val)
+            self._x_release(native, done=True)
+            return split_items(items, offs, nbs, idx, val)
+        if not async_submit:
+            return result()
+        pending = self._track(result)
+        holder.items_inflight = pending
+        return pending
+
+    # ---- grouped hierarchical calls -----------------------------------------------------
+    def hier_peaks_grouped(self, n, band, data, tmpl, ct0, raw_thr, groups, binsize,
+                           threshold, *, upload_tmpl=True, cascade_band=None, ct1=None,
+                           raw_thr1=None, slot=None, async_submit=False, sparse=False,
+                           nbins=None, handle_out=None):
+        """Hierarchical peaks over row ranges of one spectra batch, each with its own window:
+        one recording, every tier one dispatch over all rows, each row's window read from a
+        table on the device (_gpuhost.hier_peaks_grouped). groups holds (lo, hi, a, b): rows
+        a..b searched over [lo, hi). Output bins follow the first group's bin count (or
+        nbins)."""
+        from ._gpuhost import hier_peaks_grouped
+        return hier_peaks_grouped(self, n, band, data, tmpl, ct0, raw_thr, groups, binsize,
+                                  threshold, upload_tmpl=upload_tmpl, cascade_band=cascade_band,
+                                  ct1=ct1, raw_thr1=raw_thr1, slot=slot,
+                                  async_submit=async_submit, sparse=sparse, nbins=nbins,
+                                  max_bins=MAX_BINS, handle_out=handle_out)

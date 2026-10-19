@@ -45,37 +45,22 @@ def build_kernels(compiler, build_module=build):
         info = build.reflect(blob.read_bytes())
         entries[str(n)] = dict(file=blob.name, metal=f'forward_{n}.metal',
                                local_size=info['local_size'], lds_cap=cap)
-        # The band-only forward and its survivor recompute (series_bands.slang), Vulkan:
-        # the hierarchical path reads a band of every block and full spectra of a few.
+        # The band-only forward and the survivor recompute (series_bands.slang), and the fused
+        # forward + tier-0 bands (forward_tier0.slang): every target, so every device chooses
+        # among the same ways of feeding the hierarchical tiers.
         with tempfile.TemporaryDirectory() as tmp:
             src = pathlib.Path(tmp) / 'bands.slang'
-            src.write_text(defines + '#define SPLIT_STAGE 0\n' + source + '\n'
-                           + (build.ROOT / 'src/gpu/series_bands.slang').read_text())
-            for entry, stem in (('seriesForwardBands', 'forward_bands'),
-                                ('seriesForwardListed', 'forward_listed')) + (
-                                    (('markBlocks', 'markblocks'),) if n == build.TIER_B[0] else ()):
-                out = build.ROOT / 'python/matchedfilter/spirv' / (
-                    f'{stem}_{n}.spv' if stem != 'markblocks' else 'markblocks.spv')
-                subprocess.run([compiler, str(src), '-I', str(build.KERNEL.parent), '-target', 'spirv',
-                                '-entry', entry, '-stage', 'compute', '-O3', *VULKAN,
-                                '-o', str(out)], check=True)
-        entries[str(n)]['bands'] = f'forward_bands_{n}.spv'
-        entries[str(n)]['listed'] = f'forward_listed_{n}.spv'
-        # The fused forward + tier-0 bands (forward_tier0.slang) and, on Metal, the survivor
-        # recompute it pairs with (series_bands.slang's markBlocks / seriesForwardListed).
-        # Built for every target; a host enables it after measuring (Metal: _mtlcompute).
-        with tempfile.TemporaryDirectory() as tmp:
-            src = pathlib.Path(tmp) / 'tier0.slang'
             for target, folder, suffix in [('spirv', 'spirv', 'spv'), ('metal', 'metal', 'metal')]:
                 split = (build.metal_split(n, cap) if target == 'metal'
                          and hasattr(build, 'metal_split') else 0)
                 src.write_text(defines + f'#define SPLIT_STAGE {split}\n' + source + '\n'
                                + (build.ROOT / 'src/gpu/series_bands.slang').read_text() + '\n'
                                + (build.ROOT / 'src/gpu/forward_tier0.slang').read_text())
-                todo = [('forwardTier0', 'forward_tier0')]
-                if target == 'metal':
-                    todo += [('seriesForwardListed', 'forward_listed')] + (
-                        [('markBlocks', 'markblocks')] if n == build.TIER_B[0] else [])
+                todo = [('seriesForwardBands', 'forward_bands'),
+                        ('seriesForwardListed', 'forward_listed'),
+                        ('forwardTier0', 'forward_tier0')]
+                if n == build.TIER_B[0]:
+                    todo.append(('markBlocks', 'markblocks'))
                 for entry, stem in todo:
                     name = f'{stem}_{n}.{suffix}' if stem != 'markblocks' else f'markblocks.{suffix}'
                     out = build.ROOT / 'python/matchedfilter' / folder / name
@@ -83,6 +68,8 @@ def build_kernels(compiler, build_module=build):
                                     '-entry', entry, '-stage', 'compute', '-O3',
                                     *(VULKAN if target == 'spirv' else []), '-o', str(out)],
                                    check=True)
+        entries[str(n)]['bands'] = f'forward_bands_{n}.spv'
+        entries[str(n)]['listed'] = f'forward_listed_{n}.spv'
         entries[str(n)]['tier0'] = f'forward_tier0_{n}.spv'
         print(n, flush=True)
     metal = build.ROOT / 'python/matchedfilter/metal'

@@ -102,26 +102,14 @@ class InputUploads:
     # (63 buffer allocations per call at n=4096). Memory is bounded by the byte limit.
     cache_limit_entries = 256
 
-    #: Record kind -> the attribute holding that kind's records, for every backend. A
-    #: backend that lacks an attribute simply has no records of that kind. A new kind
-    #: (e.g. a grouped hierarchical record) is one line here, and eviction, clear_cache
-    #: and the byte budget all see it.
-    RECORD_TABLES = (('flat', '_batches'), ('hier', '_hier'), ('hier_cascade', '_hier_cascade'),
-                     ('forward', '_forwards'), ('exec', '_exec_records'))
+    #: Record kind -> the attribute holding that kind's records. Every operation's records
+    #: are the shared executor's (_gpuexec), one table on every backend.
+    RECORD_TABLES = (('exec', '_exec_records'),)
 
     def _record_tables(self):
         """{kind: table} for the record tables this context has."""
         return {kind: getattr(self, attr) for kind, attr in self.RECORD_TABLES
                 if getattr(self, attr, None) is not None}
-
-    @staticmethod
-    def _record_buffers(record):
-        """The buffers one record holds: a dict's values, a tuple/list, or one buffer."""
-        if isinstance(record, dict):
-            return tuple(record.values())
-        if isinstance(record, (tuple, list)):
-            return tuple(record)
-        return (record,)
 
     def _evict_all(self):
         """Evict every record through the backend's _evict_record."""
@@ -135,23 +123,10 @@ class InputUploads:
         return owner.buffer if owner is not None else buf
 
     def _cached_buffers(self):
-        storage = getattr(self, '_storage', None)
-        if storage is not None:
-            for buffers in storage.values():
-                yield from (buffers.values() if isinstance(buffers, dict) else buffers)
-        else:
-            for batch in self._batches.values():
-                yield from batch
-            for batch in self._hier.values():
-                yield from batch.values()
-        for batch in getattr(self, '_forwards', {}).values():
-            if isinstance(batch, tuple):
-                yield from batch[:-1]
-            else:
-                yield batch
-        owned = getattr(self, '_exec_owned_buffers', None)
-        if owned is not None:
-            yield from owned()
+        """Every buffer a record binds: its own, and callers' shared allocations (which
+        _cache_bytes counts only once their caller has let go)."""
+        for rec in self.__dict__.get('_exec_records', {}).values():
+            yield from rec.buffers.values()
 
     def _cache_bytes(self, incoming=()):
         """Bytes eviction could free: buffers the cache owns, and borrowed shared
@@ -179,20 +154,13 @@ class InputUploads:
         order[token] = None
 
     def _cache_room(self, estimate, *, incoming=(), keep_storage=None):
-        """Evict least-recently used records, counting shared allocations once.
-
-        Vulkan separates storage shapes from command recordings. A single
-        oversized operation is still permitted; budgets bound retained work.
-        Incoming shared buffers stay counted even if their last old recording
-        is evicted while making room.
-        """
+        """Evict least-recently used records until estimate more bytes fit the budget,
+        counting shared allocations once. A single oversized operation is still permitted;
+        the budget bounds retained work. Incoming shared buffers stay counted even if their
+        last old record is evicted while making room."""
         order = getattr(self, '_cache_order', {})
-        record_limit = getattr(self, 'cache_limit_recordings', self.cache_limit_entries)
         while order:
-            storage = getattr(self, '_storage', None)
-            new_storage = storage is not None and keep_storage is not None and keep_storage not in storage
-            too_many_shapes = new_storage and len(storage) >= self.cache_limit_entries
-            if (len(order) < record_limit and not too_many_shapes
+            if (len(order) < self.cache_limit_entries
                     and self._cache_bytes(incoming) + estimate <= self.cache_limit_bytes):
                 break
             kind, key = next(iter(order))

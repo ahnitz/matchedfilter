@@ -125,6 +125,7 @@ from build_spirv import COARSE_TILES, MAX_TILED_BAND  # noqa: E402
 STEMS = {
     "fusedTierB": "tierb",
     "compactPairs": "compact",
+    "compactListed": "compactl",
     "refineListed": "refine",
     "refineItems": "items",
     "fullCorrelation": "full",
@@ -352,10 +353,12 @@ def _build():
     compile_ptx(slangc, nvrtc, env, pack_text, pack_ptx, "packCoarse")
     print("  pack_coarse %5d bytes" % pack_ptx.stat().st_size)
 
-    # 3. Compact pairs (single kernel for n=64)
+    # 3. Compact pairs and the listed compaction (band-independent: one kernel each, n=64)
     comp_ptx = OUT / "compact.ptx"
     compile_tierb(slangc, nvrtc, env, 64, OUT, "compactPairs")
     (OUT / "compact_64.ptx").replace(comp_ptx)
+    compile_tierb(slangc, nvrtc, env, 64, OUT, "compactListed")
+    (OUT / "compactl_64.ptx").replace(OUT / "compactl.ptx")
 
     # 4. Loop over lengths
     for n in TIER_B:
@@ -395,6 +398,12 @@ def _build():
                                    cap=PORTABLE_CAP, suffix="_lds32")
             info["refine"]["portable"] = dict(file=rsmall.name, lds_bytes=lds_bytes(n, PORTABLE_CAP))
 
+        # One-bin refine below 4096 as well, as on SPIR-V: a cascade's later tier and the gate
+        # band's decision-only mode (nbins 0) run one bin.
+        if 256 <= n < 4096:
+            one = compile_tierb(slangc, nvrtc, env, n, OUT, "refineListed", suffix="_onebin",
+                                single_bin=1)
+            info["refine"]["one_bin"] = dict(file=one.name)
         if n >= 4096:
             for entry, target in (("fusedTierB", info), ("refineListed", info["refine"])):
                 one = compile_tierb(slangc, nvrtc, env, n, OUT, entry, suffix="_onebin", single_bin=1)
@@ -427,6 +436,16 @@ def _build():
         fwd_ptx = OUT / f"forward_{n}.ptx"
         extra = ["-Xnvrtc", "-maxrregcount=64"] if wg >= 1024 else []
         compile_ptx(slangc, nvrtc, env, fwd_text, fwd_ptx, "seriesForward", extra_flags=extra)
+        # The band-only forward, the survivor recompute and the fused forward + tier-0 bands
+        # (series_bands.slang, forward_tier0.slang), as on every target.
+        bands_text = (fwd_text + "\n" + (KERNEL.parent / "series_bands.slang").read_text()
+                      + "\n" + (KERNEL.parent / "forward_tier0.slang").read_text())
+        for entry, stem in (("seriesForwardBands", "forward_bands"),
+                            ("seriesForwardListed", "forward_listed"),
+                            ("forwardTier0", "forward_tier0")) + (
+                                (("markBlocks", "markblocks"),) if n == TIER_B[0] else ()):
+            out = OUT / (f"{stem}_{n}.ptx" if stem != "markblocks" else "markblocks.ptx")
+            compile_ptx(slangc, nvrtc, env, bands_text, out, entry, extra_flags=extra)
 
         manifest["modules"][str(n)] = info
         print("  n=%-6d %-16s %5d bytes  wg=%-4d" % (n, ptx.name, info["bytes"], wg))

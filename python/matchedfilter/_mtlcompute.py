@@ -21,11 +21,8 @@ from contextlib import contextmanager
 from functools import lru_cache, wraps
 
 import numpy as np
-from ._shared import empty_shared, shared_buffer, shared_key, write_input
-from ._gpuhost import (MAX_BINS, band_forward_wanted, bin_shift, coarse_span, refine_block_fraction,
-                       plan_items, split_items, hier_tiers, hier_window,
-                       split_bins)
-from ._shared import pack_half2 as _pack_half2, sparsified as _sparsified
+from ._shared import empty_shared, shared_buffer
+from ._gpuhost import MAX_BINS
 
 _HERE = pathlib.Path(__file__).resolve().parent
 _METAL_DIR = _HERE / "metal"
@@ -61,7 +58,7 @@ _MAX_BINS = MAX_BINS          # _gpuhost.MAX_BINS: one limit for every backend
 
 from ._errors import UnsupportedSize      # noqa: F401  (re-export)
 from . import _gputime
-from ._gpu_cache import InputUploads, Pending as _Pending
+from ._gpu_cache import InputUploads
 from ._gpuexec import Arg, Executor
 
 
@@ -125,49 +122,6 @@ def _twt_entry(entry):
     return entry, False
 
 
-def coarse_geometry(band, nd, nt, simd_width=32, choose=None):
-    """(entry, pairs per threadgroup, tile, groups, ragged) for the half-width coarse pass.
-
-    The layout -- pairs per threadgroup, templates per lane (TILE_T) and the twiddle source
-    (a trailing "w" on the entry: the build's fp16 table, _twt_entry) -- is choose(band)'s,
-    the device's measured choice (Context._coarse_layout). Without one: the smallest shipped
-    tile at the smallest packing that fills the SIMD width (threadExecutionWidth), else the
-    untiled build at coarse_ppg's packing, with the recurrence. Every launch is ragged
-    (_coarse.coarse_launch). MF_METAL_COARSE_TILE (0 or 1 = untiled), MF_METAL_COARSE_PPG and
-    MF_METAL_COARSE_TWT force a field, for measurement and tests."""
-    import os
-    from ._coarse import coarse_launch, coarse_stem, shipped_tiles, forced_tile
-    wg = band // _radix(band)
-    built = [p for p in (1, 2, 4, 8, 16, 32) if shipped_tiles(band, p, _shipped)]
-    tp = next((p for p in built if wg * p >= simd_width), built[-1]) if built else None
-    if choose is not None:
-        ppg, tile, twt = choose(band)
-    elif tp is not None:
-        ppg, tile, twt = tp, shipped_tiles(band, tp, _shipped)[0], 0
-    else:
-        ppg, tile, twt = coarse_ppg(band, nd * nt, simd_width=simd_width), 1, 0
-    ft = forced_tile("MF_METAL_COARSE_TILE")
-    fp = os.environ.get("MF_METAL_COARSE_PPG") or None
-    fw = forced_tile("MF_METAL_COARSE_TWT")
-    if ft is not None:
-        tile = max(1, ft)
-        if tile > 1:
-            ppg = tp if tp is not None else ppg
-        elif fp is None:
-            ppg = coarse_ppg(band, nd * nt, simd_width=simd_width)
-    if fp is not None:
-        ppg = int(fp)
-    if fw is not None:
-        twt = fw
-    if tile > 1 and tile not in shipped_tiles(band, ppg, _shipped):
-        tile = 1
-    if tile == 1 and ppg > 1 and not _shipped(coarse_stem(band, ppg, 1)):
-        ppg = 1
-    entry = ("coarse16" + coarse_stem(band, ppg, tile)[len("tierb_%d_c16" % band):]
-             + ("w" if twt else ""))
-    return entry, ppg, tile, coarse_launch(nd, nt, ppg, tile, 0)[1], tile > 1 or ppg > 1
-
-
 def coarse_ppg(band, pairs, override=None, simd_width=None):
     """Pairs per threadgroup for the half-width coarse pass at this band.
 
@@ -192,15 +146,6 @@ def coarse_ppg(band, pairs, override=None, simd_width=None):
     return max(shipped, default=1) if wg < target else 1
 
 
-#: Hierarchical calls that took the fused forward (for tests and the bench).
-_FUSED_FORWARDS = [0]
-
-
-def _fused_forward_enabled():
-    """forward_tier0.slang may serve the hierarchical fine stage (MF_BAND_FORWARD=0: never).
-    Whether a call takes it is _gpuhost.band_forward_wanted's, every backend's rule."""
-    import os
-    return os.environ.get("MF_BAND_FORWARD") != "0"
 
 
 #: Threads the coarse pass packs pairs up to when no pipeline width is known; the host passes
@@ -317,11 +262,13 @@ class _Buffer:
         return out
 
     def view(self, dtype, count):
-        """The first `count` elements as a NumPy view of the buffer (no copy)."""
-        dtype = np.dtype(dtype)
-        raw = (ctypes.c_ubyte * (count * dtype.itemsize)).from_address(
-            self.ptr.value if hasattr(self.ptr, "value") else self.ptr)
-        return np.frombuffer(raw, dtype=dtype, count=count)
+        """The first `count` elements as a NumPy view of the buffer (no copy). The bytes are
+        wrapped once: a result reads several views per call."""
+        raw = self.__dict__.get("_bytes")
+        if raw is None:
+            raw = self._bytes = np.frombuffer((ctypes.c_ubyte * self.nbytes).from_address(
+                self.ptr.value if hasattr(self.ptr, "value") else self.ptr), np.uint8)
+        return raw[:count * np.dtype(dtype).itemsize].view(dtype)
 
     def read_into(self, out):
         """Zero-copy direct read into caller-provided contiguous array."""
@@ -510,18 +457,10 @@ class _FusedBatch:
         self._release_holder(ctx)
 
     def flush(self):
-        """Commit the current buffer. A context still holding it (a deferred forward
-        waiting for its consumer) has its forward committed with it: the consumer then
-        starts a new buffer on the same queue, which runs after this one."""
+        """Commit the current buffer."""
         if self.cmd is None:
             return
         cmd, self.cmd, self.count = self.cmd, None, 0
-        for ctx in self.holders:
-            pending = ctx._pending_metal
-            if pending is not None and pending[0] == cmd:
-                ctx._materialize_forward()
-                ctx._pending_metal = None
-                self.dev.o.call(cmd, b"release", restype=None)   # the forward's retain
         self.holders = []
         self.untimed.add(cmd)
         self.dev.o.call(cmd, b"commit", restype=None)
@@ -577,16 +516,38 @@ class _MtlList:
     def stamp(self, name):
         pass
 
+    def listed(self, kernel, count, max_groups, buffers, words=(), offsets=None):
+        # Indirect, sized by the count a kernel wrote; gridSize is the upper bound, so each
+        # threadgroup takes one item.
+        flat = []
+        for w in words:
+            flat.extend(w if isinstance(w, tuple) else (w,))
+        self.ops.append((kernel, ("indirect", count), list(buffers), offsets,
+                         flat + [int(max_groups)]))
+
     def fill(self, buf, word):
         if word not in (0, 0xFFFFFFFF):
             raise ValueError("a fill is a byte pattern: 0 or 0xFFFFFFFF")
         self.ops.append(("fill", buf, 0xFF if word else 0))
+
+    def update(self, buf, words):
+        # Shared storage: written by the host as the run is encoded. A record's earlier run
+        # has been collected by then (_claim), so nothing in flight still reads it.
+        self.ops.append(("update", buf, np.asarray(words, np.uint32)))
 
     def readback(self, buf, nbytes):
         pass                        # shared storage: the host reads it after the run
 
     def end(self):
         return self.label, self.ops
+
+
+def _function(entry):
+    """The function an entry's library declares: the coarse builds are fusedTierB's, and the
+    listed refine is refine_bounded.slang's on every target (tools/build_spirv.py)."""
+    if entry.startswith("coarse16"):
+        return "fusedTierB"
+    return "refineListedBounded" if entry == "refineListed" else entry
 
 
 class Context(Executor, InputUploads):
@@ -610,7 +571,6 @@ class Context(Executor, InputUploads):
     #: the series loop keeps several batches in flight. Declared, so callers
     #: test a capability instead of probing signatures for a TypeError.
     supports_async = True
-    _pending_metal = None
     _timing = False
 
     def __init__(self, index=0):
@@ -618,8 +578,6 @@ class Context(Executor, InputUploads):
             raise MetalError("Metal is only available on macOS")
         self.device = self.queue = None
         self._pipelines = {}
-        self._batches = {}
-        self._hier = {}
         self._inflight = {}
         #: Host memory a deferred command reads in place (host_view owners).
         self._keep_until_done = []
@@ -651,12 +609,10 @@ class Context(Executor, InputUploads):
         self.last_gpu_time = 0.0
         if not self.queue:
             raise MetalError("newCommandQueue failed")
-        self._batches = {}
-        self._hier = {}
         self._uploaded = {"data": {}, "tmpl": {}}
 
     # ---- kernels ----------------------------------------------------------
-    def _library(self, stem, twt=False):
+    def _library(self, stem, twt=False, macros=()):
         """A compiled .metallib if one shipped, else compile the source.
 
         The library is what a macOS wheel carries, built by Apple's compiler
@@ -672,7 +628,7 @@ class Context(Executor, InputUploads):
         # (MF_C16_RAW) or IEEE math for the fail-open compaction -- compiles from source, or
         # the library silently runs the default build instead (on the macOS runner the
         # physics tests then measured the fp16 BOUND as if it were the raw statistic).
-        if lib_path.is_file() and not raw and not twt and not _ieee_kernel(stem):
+        if lib_path.is_file() and not raw and not twt and not macros and not _ieee_kernel(stem):
             url_cls = self.o.objc.objc_getClass(b"NSURL")
             url = self.o.call(url_cls, b"fileURLWithPath:",
                               args=(self.o.nsstring(str(lib_path)),),
@@ -693,29 +649,34 @@ class Context(Executor, InputUploads):
         # (gatechain._RAW_GATE_SWITCH; Vulkan's constant 77), the raw fp16 maximum, for
         # measuring the bound's margin only; MF_COARSE_TWT=1 takes the coarse twiddles from
         # the build's fp16 table (Vulkan's constant 80), a measured choice (_coarse_layout).
-        names = [k for k, on in (("MF_C16_RAW", raw), ("MF_COARSE_TWT", twt)) if on]
-        if names:
-            o = self.o
+        # The build-time constants (twiddle.slang), Vulkan's specialization constants:
+        # MF_DATA_STRIDE, MF_DATA_SCALE_BITS and MF_ACCURATE_TRIG from the caller.
+        values = dict(macros)
+        if twt:
+            values["MF_COARSE_TWT"] = 1
+        if raw:
+            values["MF_C16_RAW"] = 1
+        o = self.o
+        if values or _ieee_kernel(stem):
             opts = o.call(o.call(o.objc.objc_getClass(b"MTLCompileOptions"), b"alloc"), b"init")
-            macros = o.call(o.call(o.objc.objc_getClass(b"NSMutableDictionary"), b"alloc"), b"init")
-            for name in names:
-                num = o.call(o.objc.objc_getClass(b"NSNumber"), b"numberWithInt:", args=(1,),
-                             argtypes=(ctypes.c_int,))
-                o.call(macros, b"setObject:forKey:", restype=None,
+        if values:
+            table = o.call(o.call(o.objc.objc_getClass(b"NSMutableDictionary"), b"alloc"), b"init")
+            for name, value in values.items():
+                num = o.call(o.objc.objc_getClass(b"NSNumber"), b"numberWithUnsignedInt:",
+                             args=(int(value) & 0xFFFFFFFF,), argtypes=(ctypes.c_uint32,))
+                o.call(table, b"setObject:forKey:", restype=None,
                        args=(num, o.nsstring(name)), argtypes=(ctypes.c_void_p, ctypes.c_void_p))
-            o.call(opts, b"setPreprocessorMacros:", restype=None, args=(macros,),
+            o.call(opts, b"setPreprocessorMacros:", restype=None, args=(table,),
                    argtypes=(ctypes.c_void_p,))
-            o.call(macros, b"release", restype=None)
+            o.call(table, b"release", restype=None)
         if _ieee_kernel(stem):
             # Gates must fail open: a value that overflows fp16 becomes inf, and an
             # inf - inf in the transform becomes NaN. Under the default fast-math the
             # compiler assumes neither exists and a NaN magnitude lost every comparison,
             # dismissing the loudest pair (tools/gate_margin.py --loud). IEEE semantics
             # make NaN and inf compare as the largest bit patterns, so they pass.
-            opts = self.o.call(self.o.call(self.o.objc.objc_getClass(b"MTLCompileOptions"),
-                                           b"alloc"), b"init")
-            self.o.call(opts, b"setFastMathEnabled:", restype=None, args=(False,),
-                        argtypes=(ctypes.c_bool,))
+            o.call(opts, b"setFastMathEnabled:", restype=None, args=(False,),
+                   argtypes=(ctypes.c_bool,))
         lib = self.o.call(self.device, b"newLibraryWithSource:options:error:",
                           args=(self.o.nsstring(src_path.read_text()), opts,
                                 ctypes.byref(err)),
@@ -754,6 +715,8 @@ class Context(Executor, InputUploads):
             return "forward_tier0_%d" % n
         if entry == "seriesForwardListed":
             return "forward_listed_%d" % n
+        if entry == "seriesForwardBands":
+            return "forward_bands_%d" % n
         if entry == "markBlocks":
             return "markblocks"
         if entry.startswith("coarse16"):
@@ -765,6 +728,7 @@ class Context(Executor, InputUploads):
             return "tc_%s_%d" % (tierc[entry], n)
         base = "%s_%d" % ({"fusedTierB": "tierb",
                            "compactPairs": "compact",
+                           "compactListed": "compactl",
                            "refineListed": "refine",
                            "fullCorrelation": "full",
                            "fullCorrelationSeries": "full_series"}[entry], n)
@@ -837,18 +801,20 @@ class Context(Executor, InputUploads):
                                     restype=ctypes.c_ulong))
 
     @_autoreleased
-    def pipeline(self, n, entry="fusedTierB", one_bin=False, c16=False):
+    def pipeline(self, n, entry="fusedTierB", one_bin=False, c16=False, macros=()):
+        """A compute pipeline for `entry` at length n; macros: (name, value) build-time
+        constants (twiddle.slang), one pipeline per set of values."""
+        macros = tuple(sorted(macros))
         if c16 or entry.startswith("coarse16"):
             entry_name = entry if entry.startswith("coarse16") else "coarse16"
-            fn_name = "fusedTierB"
         else:
             entry_name = entry
-            fn_name = entry
+        fn_name = _function(entry_name)
         single = (_manifest().get("modules", {}).get(str(n), {}).get("metal", {})
                   .get(entry_name, {}).get("one_bin")) if (one_bin and not entry_name.startswith("coarse16")) else None
         if single and single["lds_bytes"] > self.max_shared_memory:
             single = None
-        key = (n, entry_name, True) if single else (n, entry_name)
+        key = ((n, entry_name, True) if single else (n, entry_name)) + ((macros,) if macros else ())
         if entry_name.startswith("coarse16") and os.environ.get("MF_VK_C16_BOUND", "1") == "0":
             # The raw-maximum build (_library's MF_C16_RAW) is a different library: a process
             # that switches it (the physics tests) must not reuse the bound pipeline.
@@ -857,7 +823,7 @@ class Context(Executor, InputUploads):
             return self._pipelines[key]
         base, twt = _twt_entry(entry_name)
         stem = pathlib.Path(single["msl"]).stem if single else self._stem(n, base)
-        lib = self._library(stem, twt=twt)
+        lib = self._library(stem, twt=twt, macros=macros)
         fn = pso = None
         try:
             fn = self.o.call(lib, b"newFunctionWithName:",
@@ -870,7 +836,7 @@ class Context(Executor, InputUploads):
                      "tcForwardStage1": "fwd1", "tcForwardStage3": "fwd2"}
             if entry_name in roles:
                 want = (_manifest()['full_tierc'][str(n)][roles[entry_name]]['local_size'][0])
-            elif entry_name in ("compactPairs", "markBlocks", "compactPeaks"):
+            elif entry_name in ("compactPairs", "compactListed", "markBlocks", "compactPeaks"):
                 want = 256
             else:
                 want = n // _radix(n) * _ppg_of(entry_name)
@@ -953,23 +919,13 @@ class Context(Executor, InputUploads):
         return cmd
 
     def _command_buffer(self):
-        """An OWNED command buffer: the deferred forward's, or a new one.
-
-        The forward that deferred its commit retained its buffer; a fresh one
-        is retained here, so every path releases exactly once in _commit,
-        after completion. An autoreleased command buffer would otherwise die
-        with the pool of the method that made it, while still in flight.
-        """
-        self._materialize_forward()
-        pending = self._pending_metal
-        if pending is None:
-            cmd = self._new_cmd()
-            self.o.call(cmd, b"retain")
-            self._cmd_prefix = ""
-            return cmd
-        self._pending_metal = None
-        self._cmd_prefix = "forward+"
-        return pending[0]
+        """An OWNED command buffer: retained here, so every path releases it exactly once in
+        _commit, after completion (an autoreleased one would die with the pool of the method
+        that made it, while still in flight)."""
+        cmd = self._new_cmd()
+        self.o.call(cmd, b"retain")
+        self._cmd_prefix = ""
+        return cmd
 
     def _commit(self, cmd, label, *, async_submit=False, finish=None, owner=None):
         """Commit an owned command buffer; ``finish()`` reads its outputs.
@@ -1081,94 +1037,9 @@ class Context(Executor, InputUploads):
         except MetalError:
             return None
 
-    def _materialize_forward(self, skip=None):
-        """Encode the deferred forwards still held lazily (forward()), except `skip`."""
-        lazy = self.__dict__.pop("_lazy_fwd", None)
-        for item in lazy or ():
-            if item is skip:
-                continue
-            n, pso, buffers, count, (size, code), cmd = item
-            enc = self.o.call(cmd, b"computeCommandEncoder")
-            self._dispatch(enc, pso, (size, code), buffers, n // _radix(n), groups=count)
-            self.o.call(enc, b"endEncoding", restype=None)
-
-    def _claim_forward(self, spectra_buf, rows):
-        """The lazy forward writing exactly `rows` rows of spectra_buf from row 0, taken
-        out of the pending list (its consumer encodes it), or None."""
-        lazy = getattr(self, "_lazy_fwd", None)
-        if not lazy:
-            return None
-        pending = self._pending_metal
-        for item in reversed(lazy):
-            sp = item[2][2]
-            if (sp.handle == spectra_buf.handle and getattr(sp, "offset", 0) ==
-                    getattr(spectra_buf, "offset", 0) and item[3] == rows
-                    and pending is not None and item[5] == pending[0]):
-                lazy.remove(item)
-                return item
-        return None
-
-    def _flush_forward(self):
-        self._materialize_forward()
-        pending = self._pending_metal
-        if pending is not None:
-            self._pending_metal = None
-            self._cmd_prefix = ""
-            self._commit(pending[0], "forward")
-
-    def cancel_forward(self, slot=None):
-        """Drop a deferred forward that will not be committed."""
-        self.__dict__.pop("_lazy_fwd", None)
-        pending = self._pending_metal
-        if pending is not None:
-            self._pending_metal = None
-            batch = getattr(getattr(self, "_device_state", None), "collector", None)
-            if batch is not None and batch.owns(pending[0]):
-                batch.dropped(self)
-            self.o.call(pending[0], b"release", restype=None)
-
     #: peaks_items takes async_submit (MatchedFilter._items_gpu(wait=False)).
     items_async = True
 
-    @_autoreleased
-    def peaks_items(self, n, data, tmpl, items, binsize, threshold, async_submit=False):
-        """One command buffer over items (lo, hi, a, b, t): rows a:b of data against
-        template row t, searched over [lo, hi) in bins of binsize. Returns per item
-        (idx, val) shaped (b - a, 1, nbins). Data and templates are device allocations;
-        buffer offsets select each item's rows, so nothing is copied or recorded."""
-        b_data, b_tmpl = shared_buffer(data, self), shared_buffer(tmpl, self)
-        if b_data is None or b_tmpl is None:
-            raise ValueError("item spectra and templates must be shared allocations")
-        shift = bin_shift(binsize)
-        t2 = int(np.float32(float(threshold) ** 2 if threshold > 0 else 0).view(np.uint32))
-        offs, nbs, size = plan_items(items, binsize, 1, _MAX_BINS)    # buffer offsets: 4 B
-        prior = self.__dict__.pop("_items_inflight", None)
-        if prior is not None and not prior.done:
-            prior()                          # its output buffers are about to be reused
-        if getattr(self, "_items_cap", 0) < size:
-            self._drain()
-            cap = max(size, 2 * getattr(self, "_items_cap", 0))
-            for buf in getattr(self, "_items_out", ()):
-                buf.destroy()
-            self._items_out = (_Buffer(self, cap * 4), _Buffer(self, cap * 8))
-            self._items_cap = cap
-        b_idx, b_val = self._items_out
-        cmd = self._command_buffer()
-        enc = self.o.call(cmd, b"computeCommandEncoder")
-        for (lo, hi, a, b, t), off, nb in zip(items, offs, nbs):
-            self._dispatch(enc, self.pipeline(n, "fusedTierB", nb == 1),
-                           (1, lo, hi, binsize, shift & 0xFFFFFFFF, nb, t2),
-                           (b_data, b_tmpl, b_idx, b_val), n // _radix(n), groups=b - a,
-                           offsets=(a * n * 8, t * n * 8, off * 4, off * 8))
-        self.o.call(enc, b"endEncoding", restype=None)
-
-        def finish():
-            return split_items(items, offs, nbs, b_idx.read(np.int32, size),
-                               b_val.read(np.complex64, size))
-        res = self._commit(cmd, "items", async_submit=async_submit, finish=finish)
-        if async_submit:
-            self._items_inflight = res
-        return res
 
     #: _continuous_gpu may leave its last batch in flight: zero_columns_done finishes it.
     defers_continuous = True
@@ -1265,15 +1136,56 @@ class Context(Executor, InputUploads):
     max_dispatch_x = 2 ** 32 - 1
     storage_offset_alignment = 16
 
-    def _x_kernel(self, name, n):
-        if name in ("peaks", "peaks1"):
-            return self.pipeline(n, "fusedTierB", name == "peaks1"), n // _radix(n)
-        if name == "compact":
+    #: Libraries compile at run time, with the build-time constants as macros (twiddle.slang):
+    #: the tiers read the spectra in place, at a stride and a data scale (_gpuhier feeds).
+    inplace_feed = True
+    #: Whose kernel identity stored measured choices are tied to (gatechain.gpu_kernel_id).
+    kernel_family = "metal"
+
+    @property
+    def subgroup_size(self):
+        """The SIMD-group width (threadExecutionWidth of a coarse pipeline; 32 on Apple)."""
+        return self._simd_width(256)
+
+    @staticmethod
+    def _macros(c):
+        """Library macros for a kernel's build-time constants (twiddle.slang)."""
+        m = []
+        if c.get("stride"):
+            m.append(("MF_DATA_STRIDE", int(c["stride"])))
+        if c.get("scale"):
+            m.append(("MF_DATA_SCALE_BITS",
+                      int(np.float32(2.0 ** int(c["scale"])).view(np.uint32))))
+        if c.get("rowwin"):
+            m.append(("MF_ROW_WINDOWS", 1))
+        return tuple(m)
+
+    def _x_kernel(self, name, n, consts=None):
+        c = consts or {}
+        macros = self._macros(c)
+        if name in ("peaks", "peaks1", "gate"):
+            return (self.pipeline(n, "fusedTierB", name == "peaks1", macros=macros),
+                    n // _radix(n))
+        if name == "coarse":
+            from ._coarse import coarse_stem
+            entry = ("coarse16" + coarse_stem(n, c["ppg"], c["tile"])[len("tierb_%d_c16" % n):]
+                     + ("w" if c.get("twt") else ""))
+            return self.pipeline(n, entry, macros=macros), n // _radix(n) * c["ppg"]
+        if name in ("tier", "tier1", "refine", "refine1"):
+            return (self.pipeline(n, "refineListed", name.endswith("1"), macros=macros),
+                    n // _radix(n))
+        if name == "compact_peaks":
             return self.pipeline(0, "compactPeaks"), 256
-        if name in ("full", "series", "forward"):
-            entry = {"full": 'fullCorrelation', "series": 'fullCorrelationSeries',
-                     "forward": 'seriesForward'}[name]
-            return self.pipeline(n, entry), n // _radix(n)
+        fixed = {"compact": ("compactPairs", 256), "compactl": ("compactListed", 256),
+                 "mark": ("markBlocks", 256), "pack": ("packCoarse", 256)}
+        if name in fixed:
+            entry, tg = fixed[name]
+            return self.pipeline(4096 if name == "pack" else n, entry), tg
+        entries = {"fwd_tier0": "forwardTier0", "fwd_bands": "seriesForwardBands",
+                   "fwd_listed": "seriesForwardListed", "forward": "seriesForward",
+                   "full": "fullCorrelation", "series": "fullCorrelationSeries"}
+        if name in entries:
+            return self.pipeline(n, entries[name]), n // _radix(n)
         geometry = _manifest().get('full_tierc', {}).get(str(n))
         if geometry is None:
             raise UnsupportedSize('no two-stage full-correlation kernel for n=%d' % n)
@@ -1282,6 +1194,53 @@ class Context(Executor, InputUploads):
                        "tf1": ('fwd1', 'tcForwardStage1'),
                        "tf2": ('fwd2', 'tcForwardStage3')}[name]
         return self.pipeline(n, entry), geometry[role]['local_size'][0]
+
+    @staticmethod
+    def _x_has_c16(band):
+        return _use_c16(band)
+
+    @staticmethod
+    def _x_has_kernel(name, n):
+        if name == "tier1":
+            info = ((_manifest().get("modules", {}).get(str(n)) or {}).get("metal") or {})
+            return bool((info.get("refineListed") or {}).get("one_bin"))
+        if name == "fwd_tier0":
+            return _shipped("forward_tier0_%d" % n)
+        raise ValueError(name)
+
+    def _x_coarse_candidates(self, band):
+        """Every coarse layout (subgroup 0, ppg, tile, twt) the choice may take at this band:
+        the untiled build at every shipped packing that fits a threadgroup, with each twiddle
+        source, then the tiles at the packing that fills the SIMD width. The first is the
+        default without a measurement."""
+        from ._coarse import coarse_stem, shipped_tiles
+        w = self._simd_width(band)
+        wg = band // _radix(band)
+        built = [p for p in (1, 2, 4, 8, 16, 32) if shipped_tiles(band, p, _shipped)]
+        tp = next((p for p in built if wg * p >= w), built[-1]) if built else None
+        tiles = shipped_tiles(band, tp, _shipped) if tp else ()
+        untiled = [(0, p, 1, t) for p in (1, 2, 4, 8, 16, 32)
+                   if (p == 1 or _shipped(coarse_stem(band, p, 1))) and wg * p <= 1024
+                   for t in (0, 1)]
+        tiled = [(0, tp, t, x) for t in tiles for x in (0, 1)]
+        first = tiled[:1] or [(0, coarse_ppg(band, 1 << 20, simd_width=w), 1, 0)]
+        return first + [c for c in untiled + tiled if c not in first]
+
+    @_autoreleased
+    def _x_time(self, native, binds, reps):
+        """The least device time (GPUStartTime..GPUEndTime) of `reps` runs, after a warm-up."""
+        label, ops = native
+        times = []
+        for rep in range(reps + 1):
+            cmd = self.o.call(self.queue, b"commandBuffer")
+            self._x_encode(cmd, ops, binds or {})
+            self.o.call(cmd, b"commit", restype=None)
+            self.o.call(cmd, b"waitUntilCompleted", restype=None)
+            t0 = self.o.call(cmd, b"GPUStartTime", restype=ctypes.c_double)
+            t1 = self.o.call(cmd, b"GPUEndTime", restype=ctypes.c_double)
+            if rep and isinstance(t0, float) and isinstance(t1, float) and t1 > t0:
+                times.append(t1 - t0)
+        return min(times) if times else float("inf")
 
     def _x_tierc(self, n):
         geometry = _manifest().get('full_tierc', {}).get(str(n))
@@ -1292,7 +1251,7 @@ class Context(Executor, InputUploads):
     def _x_alloc(self, nbytes, readback=False, upload=False):
         return _Buffer(self, nbytes)
 
-    def _x_list(self, label):
+    def _x_list(self, label, once=False):
         return _MtlList(label)
 
     def _x_encode(self, cmd, ops, binds):
@@ -1300,6 +1259,9 @@ class Context(Executor, InputUploads):
         a fill. Returns the buffers it bound."""
         enc, used = None, []
         for op in ops:
+            if op[0] == "update":
+                op[1].write(op[2])
+                continue
             if op[0] == "fill":
                 if enc is not None:
                     self.o.call(enc, b'endEncoding', restype=None)
@@ -1320,8 +1282,11 @@ class Context(Executor, InputUploads):
             for w in words:
                 flat.extend(binds[w.name] if isinstance(w, Arg) else (w,))
             flat = tuple(int(w) & 0xFFFFFFFF for w in flat)
+            indirect = groups[1] if isinstance(groups, tuple) else None
             if flat:
-                self._dispatch(enc, pso, flat, bound, tg, groups=groups, offsets=offsets)
+                self._dispatch(enc, pso, flat, bound, tg,
+                               groups=None if indirect is not None else groups,
+                               indirect=indirect, offsets=offsets)
             else:                    # no uniforms: the buffers bind from index 0
                 self.o.call(enc, b"setComputePipelineState:", restype=None,
                             args=(pso,), argtypes=(ctypes.c_void_p,))
@@ -1334,10 +1299,12 @@ class Context(Executor, InputUploads):
         return used
 
     @_autoreleased
-    def _x_run(self, native, wait, binds=None, slot=None):
+    def _x_run(self, native, wait, binds=None, slot=None, pre=()):
         label, ops = native
         cmd = self._command_buffer()
-        self._x_encode(cmd, ops, binds)
+        for nat, b in pre:                      # deferred work first, in the same buffer
+            self._x_encode(cmd, nat[1], b or {})
+        self._x_encode(cmd, ops, binds or {})
         if wait:
             self._commit(cmd, label)
             return
@@ -1356,40 +1323,13 @@ class Context(Executor, InputUploads):
             dev.pending_contexts.append(self)
 
     @_autoreleased
-    def _x_submit(self, native, binds, slot):
+    def _x_submit(self, native, binds, slot, pre=()):
         label, ops = native
         cmd = self._command_buffer()
-        self._x_encode(cmd, ops, binds)
+        for nat, b in pre:
+            self._x_encode(cmd, nat[1], b or {})
+        self._x_encode(cmd, ops, binds or {})
         return self._commit(cmd, label, async_submit=True)
-
-    @_autoreleased
-    def _x_defer(self, native, binds, slot, source):
-        """Held in the pending command buffer for the work that consumes it (several deferred
-        forwards share it). A one-stage forward of a whole spectra workspace stays unencoded
-        until its consumer is known: a hierarchical call reading these spectra takes it as
-        forwardTier0 instead (_claim_forward), else it is encoded (_materialize_forward)."""
-        label, ops = native
-        pending = self._pending_metal
-        if pending is not None:
-            cmd = pending[0]
-        else:
-            self._flush_forward()          # an earlier deferred forward nothing reads
-            cmd = self._new_cmd()
-            self.o.call(cmd, b"retain")
-        held = tuple(pending[1]) if pending is not None else ()
-        if (source is not None and source[3] == 0 and ops[0][3] in (None, [0, 0, 0])
-                and _fused_forward_enabled()):
-            # Its kernel reads block i's start at element i of starts and writes row i of
-            # spectra from the binding's start: true of a whole-workspace forward.
-            n, series, starts, _, count, nser, code, spectra, _ = source
-            (pso, _), _, _, _, _ = ops[0]           # the forward dispatch
-            buffers = [series, starts, spectra]
-            self._lazy_fwd = list(getattr(self, "_lazy_fwd", None) or ()) + [
-                (n, pso, buffers, count, (nser, code), cmd)]
-            self._pending_metal = (cmd, held + tuple(buffers))
-            return
-        used = self._x_encode(cmd, ops, binds)
-        self._pending_metal = (cmd, held + tuple(used))
 
     @staticmethod
     def _x_upload(buf, array, slot):
@@ -1401,15 +1341,17 @@ class Context(Executor, InputUploads):
     def _x_after_readers(self):
         pass                # no wait added (open question: docs/unification-plan.md log)
 
-    def _x_release(self, native):
-        # Nothing recorded (every run encodes afresh); a deferred forward may still use the
-        # buffers about to be freed: finish it first.
-        if self._pending_metal is not None:
-            self._flush_forward()
+    @staticmethod
+    def _x_release(native, done=False):
+        pass                        # nothing recorded: every run encodes afresh
 
     @staticmethod
     def _x_read(buf, out, offset=0):
         ctypes.memmove(out.ctypes.data, buf.ptr + offset, out.nbytes)
+
+    @staticmethod
+    def _x_view(buf, dtype, count):
+        return buf.view(dtype, count)
 
     # ---- hierarchical -----------------------------------------------------
     def _simd_width(self, band):
@@ -1425,385 +1367,6 @@ class Context(Executor, InputUploads):
                 pass
             cache[band] = int(width) if isinstance(width, int) and width > 0 else TARGET_THREADS
         return cache[band]
-
-    def _coarse_layout(self, band):
-        """The coarse layout (ppg, tile, twt) at this band: the fastest of _coarse_candidates on
-        this device, timed once and kept in MF_COST_FILE (the choice every backend makes,
-        _coarse). A fixed packing rule missed both ways on an M2: band 512 wants two pairs per
-        threadgroup (25.7 against 26.4 ns per pair), band 1024 one (52.7 against 54.8),
-        though one pair fills the SIMD group at both."""
-        from . import gatechain
-        from ._coarse import forced_layout, layout_label, stored_measured_choice
-        return stored_measured_choice(
-            self.__dict__.setdefault("_coarse_layouts", {}), "mtl-coarse",
-            getattr(self, "name", ""), band, self._coarse_candidates(band),
-            lambda c: layout_label(band, *c), gatechain.gpu_kernel_id("metal"),
-            lambda cs: self._time_coarse_layouts(band, cs),
-            tiebreak=lambda c: (c[1], c[2], c[0]), forced=forced_layout(band))
-
-    def _coarse_candidates(self, band):
-        """Every coarse layout (ppg, tile, twt) the choice may take at this band: the untiled
-        build at every shipped packing that fits a threadgroup, with each twiddle source, then
-        the tiles at the packing that fills the SIMD width. The first is the default without
-        a measurement (coarse_geometry's)."""
-        from ._coarse import coarse_stem, shipped_tiles
-        w = self._simd_width(band)
-        wg = band // _radix(band)
-        built = [p for p in (1, 2, 4, 8, 16, 32) if shipped_tiles(band, p, _shipped)]
-        tp = next((p for p in built if wg * p >= w), built[-1]) if built else None
-        tiles = shipped_tiles(band, tp, _shipped) if tp else ()
-        untiled = [(p, 1, t) for p in (1, 2, 4, 8, 16, 32)
-                   if (p == 1 or _shipped(coarse_stem(band, p, 1))) and wg * p <= 1024
-                   for t in (0, 1)]
-        tiled = [(tp, t, x) for t in tiles for x in (0, 1)]
-        first = tiled[:1] or [(coarse_ppg(band, 1 << 20, simd_width=w), 1, 0)]
-        return first + [c for c in untiled + tiled if c not in first]
-
-    def coarse_layouts(self, band):
-        """The names (_coarse.layout_label) of every coarse layout the choice may take at this
-        band on this device; MF_COARSE_LAYOUT forces one."""
-        from ._coarse import layout_label
-        return [layout_label(band, *c) for c in self._coarse_candidates(band)]
-
-    def _time_coarse_layouts(self, band, cands, pairs=65536, ntm=16, reps=4):
-        """Device seconds per pair of each coarse layout (ppg, tile, twt) on synthetic data: a
-        warm-up, then the untiled and the tiled layouts as two stages of reps - 1 interleaved
-        rounds, each stage's fastest confirmed against the fastest (_coarse.time_staged), in
-        self.coarse_times[band] for reports. A layout this device cannot build is dropped."""
-        from ._coarse import Timings, coarse_launch, coarse_stem, layout_label, time_staged
-        ndm = pairs // ntm
-        rng = np.random.default_rng(0)
-        x = (rng.standard_normal((ndm, band)) + 1j * rng.standard_normal((ndm, band))) * 0.1
-        bufs = [_Buffer(self, ndm * band * 4), _Buffer(self, ntm * band * 4),
-                _Buffer(self, pairs * 4), _Buffer(self, pairs * 8)]
-        bufs[0].write(_pack_half2(x))
-        bufs[1].write(_pack_half2(x[:ntm]))
-        shift = band.bit_length() - 1
-        gate = (band // _radix(band) <= self._simd_width(band)
-                and os.environ.get("MF_VK_C16_BOUND", "1") != "0")
-        launch = {}
-
-        def time_one(c):
-            pso, slot_val, groups, thr, tg = launch[c]
-            cmd = self.o.call(self.queue, b"commandBuffer")
-            enc = self.o.call(cmd, b"computeCommandEncoder")
-            # Encoded here, not through _dispatch: the calibration is not the call's
-            # work, and _dispatch is what per-kernel profilers and tests observe.
-            self.o.call(enc, b"setComputePipelineState:", restype=None,
-                        args=(pso,), argtypes=(ctypes.c_void_p,))
-            self._set_params(enc, (ntm, 0, band, slot_val, shift, 1, thr))
-            self._set_buffers(enc, bufs)
-            self.o.call(enc, b"dispatchThreadgroups:threadsPerThreadgroup:", restype=None,
-                        args=(_MTLSize(groups, 1, 1), _MTLSize(tg, 1, 1)),
-                        argtypes=(_MTLSize, _MTLSize))
-            self.o.call(enc, b"endEncoding", restype=None)
-            self.o.call(cmd, b"commit", restype=None)
-            self.o.call(cmd, b"waitUntilCompleted", restype=None)
-            t0 = self.o.call(cmd, b"GPUStartTime", restype=ctypes.c_double)
-            t1 = self.o.call(cmd, b"GPUEndTime", restype=ctypes.c_double)
-            if not (isinstance(t0, float) and isinstance(t1, float) and t1 > t0):
-                return None                     # no device timestamps: nothing to choose by
-            return t1 - t0
-
-        try:
-            for c in cands:                 # (ppg, tile, twt): twt 1 is the fp16 twiddle table
-                ppg, tile, twt = c
-                stem = coarse_stem(band, ppg, tile)
-                try:
-                    pso = self.pipeline(band, "coarse16" + stem[len("tierb_%d_c16" % band):]
-                                        + ("w" if twt else ""))
-                except (MetalError, UnsupportedSize):
-                    continue                # past this device's limits for the kernel
-                slot_val, groups = coarse_launch(ndm, ntm, ppg, tile, band)
-                thr = (int(np.float32(1.1754944e-38).view(np.uint32))
-                       if gate and tile > 1 else 0)
-                launch[c] = (pso, slot_val, groups, thr, band // _radix(band) * ppg)
-            ok = [c for c in cands if c in launch]
-            # A warm-up dispatch each, then interleaved rounds and a paired confirmation of
-            # the contenders (_coarse: the GPU may be shared).
-            for c in ok:
-                if time_one(c) is None:
-                    return None
-            times = time_staged([[c for c in ok if c[1] == 1], [c for c in ok if c[1] > 1]],
-                                time_one, rounds=reps - 1)
-            if times is None:
-                return None
-            out = Timings({t: v / pairs for t, v in times.items()})
-            out.close = times.close
-        finally:
-            for b in bufs:
-                b.destroy()
-        self.__dict__.setdefault("coarse_times", {}).setdefault(band, {}).update(
-            {layout_label(band, *c): v for c, v in out.items()})
-        return out
-
-    @_autoreleased
-    def hier_peaks(self, n, band, data, tmpl, ct0, raw_thr,
-                   binsize=None, threshold=0.0, window=None,
-                   upload_data=True, upload_tmpl=True,
-                   cascade_band=None, ct1=None, raw_thr1=None,
-                   slot=None, async_submit=False, sparse=False):
-        """The whole hierarchical filter in ONE command buffer.
-
-        One or two gate tiers, then listed refinement at n. Tier 0 correlates
-        every pair at its band (half width where that kernel exists); a
-        compaction lists the pairs whose maximum clears the tier's threshold,
-        and that list's length lands in an indirect-dispatch argument, so the
-        survivor count never reaches the host. A second tier refines only the
-        listed pairs at its own band, at full precision, and is compacted the
-        same way before the final refine. Shared input uses a preceding GPU
-        coarse-band extraction per tier.
-
-        Two tiers are (cascade_band, ct0, raw_thr) then (band, ct1, raw_thr1),
-        the order HierarchicalFilter passes them. An incomplete cascade
-        raises: running one tier with another tier's threshold would be a
-        different computation, not a slower one.
-        """
-        band, ct0, raw_thr, cascade_band, ct1, raw_thr1 = hier_tiers(
-            n, band, ct0, raw_thr, cascade_band, ct1, raw_thr1)
-        if cascade_band is None:
-            tiers = ((int(band), ct0, float(raw_thr)),)
-        else:
-            tiers = ((int(cascade_band), ct0, float(raw_thr)),
-                     (int(band), ct1, float(raw_thr1)))
-            if not tiers[0][0] < tiers[1][0] < n:
-                raise ValueError("cascade bands must increase below n: %r"
-                                 % ((tiers[0][0], tiers[1][0]),))
-
-        nd, nt = data.shape[0], tmpl.shape[0]
-        pairs = nd * nt
-        lo, hi, binsize, nbins = hier_window(n, window, binsize)
-        if nbins > _MAX_BINS:
-            return split_bins(
-                lambda w, ud, ut: self.hier_peaks(
-                    n, band, data, tmpl, ct0, raw_thr, binsize=binsize, threshold=threshold,
-                    window=w, upload_data=ud, upload_tmpl=ut, cascade_band=cascade_band,
-                    ct1=ct1, raw_thr1=raw_thr1, slot=slot, async_submit=False),
-                lo, hi, binsize, _MAX_BINS, upload_data, upload_tmpl, sparse, async_submit)
-        shift = bin_shift(binsize)
-        t2 = float(threshold) ** 2 if threshold > 0 else 0.0
-        # Half width only for the first tier: a later tier is the full-
-        # precision refine kernel, which reads float2.
-        half = [i == 0 and _use_c16(b) for i, (b, _, _) in enumerate(tiers)]
-        sfx = ["" if i == 0 else str(i) for i in range(len(tiers))]
-        # Pairs per threadgroup and tile for the first tier. Every packed launch is
-        # ragged (_coarse.coarse_launch): no padded rows or spare outputs.
-        if half[0]:
-            centry, ppg, ctile, cgroups, ragged = coarse_geometry(
-                tiers[0][0], nd, nt, self._simd_width(tiers[0][0]), self._coarse_layout)
-        else:
-            centry, ppg, ctile, cgroups, ragged = "fusedTierB", 1, 1, pairs, False
-
-        # In flight, a result owns its buffers: the slot is part of the key.
-        slot = slot if async_submit else None
-        key = (n, tuple(b for b, _, _ in tiers), nd, nt, nbins, centry)
-        key += (shared_key(data, self), shared_key(tmpl, self), slot)
-        upload_data, upload_tmpl, dsig, tsig = self._input_uploads(
-            key, data, tmpl, upload_data, upload_tmpl)
-        bufs = self._hier.get(key)
-        if bufs is None:
-            incoming = [b for a in (data, tmpl)
-                        if (b := shared_buffer(a, self)) is not None]
-            estimate = 8*n*(nd+nt) + nd*nt*12*nbins
-            estimate += sum((4 if h else 8)*b*(nd+nt) + 16*nd*nt + 12
-                            for (b, _, _), h in zip(tiers, half))
-            estimate -= sum(a.nbytes for a in (data, tmpl)
-                            if shared_buffer(a, self) is not None)
-            self._cache_room(estimate, incoming=incoming)
-            bufs = {
-                "data":  shared_buffer(data, self) or _Buffer(self, nd * n * 8),
-                "tmpl":  shared_buffer(tmpl, self) or _Buffer(self, nt * n * 8),
-                "idx":   _Buffer(self, nd * nt * nbins * 4),
-                "val":   _Buffer(self, nd * nt * nbins * 8),
-            }
-            for i, ((b, _, _), h) in enumerate(zip(tiers, half)):
-                cb = 4 if h else 8
-                bufs["cdata" + sfx[i]] = _Buffer(self, nd * b * cb)
-                bufs["ct" + str(i)] = _Buffer(self, nt * b * cb)
-                bufs["cidx" + sfx[i]] = _Buffer(self, pairs * 4)
-                bufs["cval" + sfx[i]] = _Buffer(self, pairs * 8)
-                # Compacted survivors and the indirect threadgroup count:
-                # args is [groupsX, 1, 1] and the compaction bumps [0]
-                # atomically, so the count stays on the device.
-                bufs["surv" + sfx[i]] = _Buffer(self, pairs * 4)
-                bufs["args" + sfx[i]] = _Buffer(self, 12)
-            self._hier[key] = bufs
-            # Fresh buffers hold nothing, whatever the caller's dirty flags
-            # say. Trusting them here is exactly how the Vulkan path once
-            # served a previous call's data out of a newly allocated buffer,
-            # and every index came back -1.
-            upload_data = upload_tmpl = True
-        self._cache_touch("hier", key)
-        self._claim(bufs["idx"])                 # an earlier result still reading these outputs
-        shared_data = shared_buffer(data, self) is not None
-        if upload_data:
-            write_input(bufs["data"], data)
-            if not shared_data:
-                for i, ((b, _, _), h) in enumerate(zip(tiers, half)):
-                    bufs["cdata" + sfx[i]].write(
-                        _pack_half2(data[:, :b]) if h else
-                        np.ascontiguousarray(data[:, :b], np.complex64))
-            self._uploaded["data"][key] = dsig
-        if upload_tmpl:
-            write_input(bufs["tmpl"], tmpl)
-            for i, ((_, ct, _), h) in enumerate(zip(tiers, half)):
-                bufs["ct" + str(i)].write(_pack_half2(ct) if h else
-                                          np.ascontiguousarray(ct, np.complex64))
-            self._uploaded["tmpl"][key] = tsig
-
-        out = nd * nt * nbins
-        for i in range(len(tiers)):
-            bufs["args" + sfx[i]].write(np.array([0, 1, 1], dtype=np.uint32))
-        if len(tiers) > 1:
-            # Tier 1 visits only tier 0's survivors; every other pair must
-            # read as dismissed to the compaction after it.
-            bufs["cval1"].write(np.zeros(pairs * 2, dtype=np.float32))
-        if not sparse:
-            # Dense: every unrefined pair must read as dismissed. Sparse reads only the
-            # listed pairs, every bin of which the refine writes, so it skips this fill.
-            bufs["idx"].write(np.full(out, -1, dtype=np.int32))
-            bufs["val"].write(np.zeros(out * 2, dtype=np.float32))
-
-        compact = self.pipeline(tiers[0][0], "compactPairs")
-        # Every pipeline before the encoder opens: a build failure raised with an encoder
-        # open aborts the process (an encoder released without endEncoding).
-        coarse0 = self.pipeline(tiers[0][0], centry)
-        refine = self.pipeline(n, "refineListed", nbins == 1)
-        # Fused forward (forward_tier0.slang): when this call reads the spectra a deferred
-        # forward is about to write, that forward writes only the bands the tiers read, and
-        # the refine's blocks are recomputed in full (markBlocks + seriesForwardListed).
-        fwd = None
-        # The band forward (forward_tier0) when it moves fewer bytes than the full one for
-        # this call shape, by its refine-block fraction measured last time (finish, below).
-        top = max(b for b, _, _ in tiers)
-        band_ok = (shared_data and half[0] and not any(half[1:]) and len(tiers) <= 2
-                   and _fused_forward_enabled())
-        if band_ok and band_forward_wanted(
-                n, top, self.__dict__.get("_band_f", {}).get((n, top, nd, nt))):
-            fwd = self._claim_forward(bufs["data"], nd)
-            if fwd is not None:
-                try:
-                    fpso = (self.pipeline(n, "forwardTier0"), self.pipeline(n, "seriesForwardListed"),
-                            self.pipeline(n, "markBlocks"))
-                except (MetalError, UnsupportedSize, OSError):
-                    self._lazy_fwd = list(getattr(self, "_lazy_fwd", None) or ()) + [fwd]
-                    fwd = None
-            if fwd is not None:
-                _FUSED_FORWARDS[0] += 1
-                if "flags" not in bufs:
-                    bufs["flags"] = _Buffer(self, nd * 4)
-                    bufs["blist"] = _Buffer(self, nd * 4)
-                    bufs["bargs"] = _Buffer(self, 12)
-                bufs["flags"].write(np.zeros(nd, np.uint32))
-                bufs["bargs"].write(np.array([0, 1, 1], dtype=np.uint32))
-        cmd = self._command_buffer()
-        enc = self.o.call(cmd, b"computeCommandEncoder")
-
-        def use(*names):
-            return [bufs[nm] for nm in names]
-
-        def bits(x):
-            return int(np.float32(x).view(np.uint32))
-
-        if fwd is not None:
-            # series, starts as the deferred forward bound them; bands straight into the
-            # tiers' inputs (band1 unused, and bound to cdata, for a one-tier chain).
-            _, _, (series_b, starts_b, _), _, (size, code), _ = fwd
-            b1 = tiers[1][0] if len(tiers) > 1 else 0
-            self._dispatch(enc, fpso[0], (size, tiers[0][0], b1, code),
-                           [series_b, starts_b, bufs["cdata"],
-                            bufs["cdata1"] if len(tiers) > 1 else bufs["cdata"]],
-                           n // _radix(n), groups=nd)
-        elif shared_data:
-            pack = self.pipeline(4096, "packCoarse")
-            for i, ((b, _, _), h) in enumerate(zip(tiers, half)):
-                self._dispatch(enc, pack, (n, b, nd*b, int(h)),
-                               use("data", "cdata" + sfx[i]),
-                               256, groups=(nd*b + 255)//256)
-
-        for i, ((b, _, thr), h) in enumerate(zip(tiers, half)):
-            cs, ce, csp, csh = coarse_span(n, b, lo, hi)
-            span = (cs, ce, csp, csh & 0xFFFFFFFF)
-            if i == 0:
-                coarse = coarse0
-                # A ragged build reads the data row count from the binsize slot
-                # (coarse_launch), which the one-bin coarse role does not otherwise use.
-                # Tiled fp16 builds whose pair fits one SIMD group take the gate threshold
-                # (magnitude, > 0) in the last slot and report only the gate's decision and
-                # bound (tierb.slang peakTwoGate: no election; tier 0's index has no
-                # reader). A threshold of 0 is passed as the smallest normal float, which
-                # passes the same pairs (a nonzero maximum). 0 elects every pair
-                # (peakTwoWave): the raw (unbounded) build, and every other build, which
-                # reads the slot as a squared seed.
-                gate = (h and ctile > 1 and b // _radix(b) <= self._simd_width(b)
-                        and os.environ.get("MF_VK_C16_BOUND", "1") != "0")
-                cparams = (nt, span[0], span[1], nd if ragged else span[2], *span[3:], 1,
-                           bits(max(float(thr), 1.1754944e-38)) if gate else 0)
-                self._dispatch(enc, coarse, cparams,
-                               use("cdata", "ct0", "cidx", "cval"),
-                               b // _radix(b) * ppg, groups=cgroups)
-            else:
-                # The listed refine at this band over the previous tier's
-                # survivors; one bin, so cval holds each listed pair's maximum.
-                # nbins = 0 asks a single-bin build at a gate band (<= 1024) for the gate
-                # decision only (the window's maximum |v|; tierb.slang gateOnly): the
-                # compaction below is all that reads it. Other builds read nbins as the bin
-                # count: always 1.
-                listed = self.pipeline(b, "refineListed", True)
-                single = b <= 1024 and (b, "refineListed", True) in self._pipelines
-                self._dispatch(enc, listed, (nt, *span, 0 if single else 1, 0),
-                               use("cdata" + sfx[i], "ct" + str(i), "cidx" + sfx[i],
-                                   "cval" + sfx[i], "surv" + sfx[i - 1]),
-                               b // _radix(b), indirect=bufs["args" + sfx[i - 1]])
-            # A later tier's compaction walks every pair, and the pairs tier 0 dismissed hold the
-            # zeros written above: at a threshold of 0 they would pass (!(0 < 0)). The smallest
-            # normal float dismisses them and passes every pair the tier saw with a nonzero
-            # maximum (tests/test_tier_conformance.py).
-            self._dispatch(enc, compact, (pairs, bits(thr if i == 0 else max(thr, 1.1754944e-38)),
-                                          nbins),
-                           use("cval" + sfx[i], "surv" + sfx[i], "args" + sfx[i]),
-                           256, groups=(pairs + 255) // 256)
-
-        last = sfx[-1]
-        if fwd is not None:
-            # The refine reads full spectra of its survivors' blocks only: recompute those.
-            self._dispatch(enc, fpso[2], (nt,),
-                           [bufs["surv" + last], bufs["args" + last], bufs["flags"],
-                            bufs["blist"], bufs["bargs"]], 256, groups=(pairs + 255) // 256)
-            self._dispatch(enc, fpso[1], (size, code),
-                           [series_b, starts_b, bufs["data"], bufs["blist"]],
-                           n // _radix(n), indirect=bufs["bargs"])
-        self._dispatch(enc, refine,
-                       (nt, lo, hi, binsize, shift & 0xFFFFFFFF, nbins, bits(t2)),
-                       use("data", "tmpl", "idx", "val", "surv" + last),
-                       n // _radix(n), indirect=bufs["args" + last])
-        self.o.call(enc, b"endEncoding", restype=None)
-
-        def finish():
-            count = int(bufs["args" + last].read(np.uint32, 1)[0])
-            self.last_refinements = count
-            if len(tiers) > 1:
-                self.last_tier1_survivors = int(bufs["args"].read(np.uint32, 1)[0])
-            if band_ok:
-                # This shape's refine-block fraction, for its next call's band/full choice
-                # and for the forward pricing (gatechain).
-                f = refine_block_fraction(bufs["surv" + last].view(np.uint32, count), nt, nd)
-                self.__dict__.setdefault("_band_f", {})[(n, top, nd, nt)] = f
-                from . import gatechain as _gc
-                _gc.note_refine_blocks(n, top, f)
-            if sparse:
-                from . import _SparsePeaks
-                rows = np.sort(bufs["surv" + last].view(np.uint32, count).astype(np.int64))
-                ri = bufs["idx"].view(np.int32, out).reshape(pairs, nbins)[rows]
-                k, b = np.nonzero(ri >= 0)
-                vals = bufs["val"].view(np.complex64, out).reshape(pairs, nbins)
-                return _SparsePeaks((nd, nt, nbins), rows[k] * nbins + b, ri[k, b],
-                                    vals[rows[k], b])
-            idx = bufs["idx"].read(np.int32, out).reshape(nd, nt, nbins)
-            val = bufs["val"].read(np.complex64, out).reshape(nd, nt, nbins)
-            return idx, val
-        return self._commit(cmd, "hier" if len(tiers) == 1 else "hier_cascade",
-                            async_submit=async_submit, finish=finish, owner=bufs["idx"])
 
     def _check_completed(self, cmd):
         """A command buffer that did not complete, said so.
@@ -1821,26 +1384,10 @@ class Context(Executor, InputUploads):
                              self.o, ctypes.c_void_p(err)) if err
                             else "no error object"))
 
-    def _evict_record(self, kind, key, keep_storage=None):
-        if kind == "exec":
-            return self._exec_evict(key)
-        # In-flight results read these buffers when they are collected.
-        self._drain()
-        batch = self._record_tables()[kind].pop(key)
-        for buf in self._record_buffers(batch):
-            buf.destroy()
-        for resident in self._uploaded.values():
-            resident.pop(key, None)
-
     def clear_cache(self):
         self._drain()
         self.cancel_forward()
         self._exec_clear()
-        for table in self._record_tables().values():
-            for record in table.values():
-                for buf in self._record_buffers(record):
-                    buf.destroy()
-            table.clear()
         self._uploaded = {"data": {}, "tmpl": {}}
         self._cache_order = {}
 

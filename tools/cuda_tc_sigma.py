@@ -22,6 +22,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "python"))
 sys.path.insert(0, str(ROOT / "tests"))
 from matchedfilter import _cudacompute as cc          # noqa: E402
+from matchedfilter._shared import pack_half2  # noqa: E402
 
 U = 2.0 ** -11
 GRID_PER_SM = 16           # persistent warps: blocks per SM
@@ -35,8 +36,8 @@ def launch(ctx, fn, wpb, band, D, T, raw=True):
             cc._Buffer(ctx, rows * nt * 4), cc._Buffer(ctx, rows * nt * 8)]
     try:
         st = ctx.stream
-        bufs[0].write(cc._pack_half2(D), st)
-        bufs[1].write(cc._pack_half2(T), st)
+        bufs[0].write(pack_half2(D), st)
+        bufs[1].write(pack_half2(T), st)
         ent = ctx._c16_flags[ctx._labels[fn.value]]
         v = ctypes.c_uint32(1 if raw else 0)
         cc.check_cuda(ctx.cuda.cuMemcpyHtoD_v2(ent[0], ctypes.byref(v), 4), "flag")
@@ -123,8 +124,8 @@ def main():
         x = (rng.standard_normal((ndm, band)) + 1j * rng.standard_normal((ndm, band))) * 0.1
         bufs = [cc._Buffer(ctx, ndm * band * 4), cc._Buffer(ctx, ntm * band * 4),
                 cc._Buffer(ctx, P * 4), cc._Buffer(ctx, P * 8)]
-        bufs[0].write(cc._pack_half2(x), ctx.stream)
-        bufs[1].write(cc._pack_half2(x[:ntm]), ctx.stream)
+        bufs[0].write(pack_half2(x), ctx.stream)
+        bufs[1].write(pack_half2(x[:ntm]), ctx.stream)
         for wpb in (2, 4):
             f, w = tc_kernel(ctx, band, wpb), 32 * wpb
             t = time_kernel(ctx, f, w, min(-(-(ndm * ntm // 2) // wpb), ctx.sm_count * GRID_PER_SM),

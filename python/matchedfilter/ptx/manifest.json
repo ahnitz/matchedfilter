@@ -35,7 +35,10 @@
         1
       ],
       "refine": {
-        "file": "refine_256.ptx"
+        "file": "refine_256.ptx",
+        "one_bin": {
+          "file": "refine_256_onebin.ptx"
+        }
       }
     },
     "512": {
@@ -47,7 +50,10 @@
         1
       ],
       "refine": {
-        "file": "refine_512.ptx"
+        "file": "refine_512.ptx",
+        "one_bin": {
+          "file": "refine_512_onebin.ptx"
+        }
       }
     },
     "1024": {
@@ -65,7 +71,10 @@
         "file": "full_series_1024.ptx"
       },
       "refine": {
-        "file": "refine_1024.ptx"
+        "file": "refine_1024.ptx",
+        "one_bin": {
+          "file": "refine_1024_onebin.ptx"
+        }
       }
     },
     "2048": {
@@ -83,7 +92,10 @@
         "file": "full_series_2048.ptx"
       },
       "refine": {
-        "file": "refine_2048.ptx"
+        "file": "refine_2048.ptx",
+        "one_bin": {
+          "file": "refine_2048_onebin.ptx"
+        }
       }
     },
     "4096": {
@@ -553,5 +565,5 @@
       }
     }
   },
-  "build_id": "e152d378905f6ec633cb05b0b827c321184aad226ed4c33b9f649dd730da253e"
+  "build_id": "0e75ab9e4e543baa59b716604e19a1454837efb34d92ed105e99f7bf71361186"
 }

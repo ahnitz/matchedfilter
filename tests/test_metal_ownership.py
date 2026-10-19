@@ -52,7 +52,7 @@ def context(fail=None, limits=(1024, 1024)):
     c = M.Context.__new__(M.Context)
     c.o = ObjC(fail, limits)
     c.device, c.queue, c.name = 1, 2, 'fake'
-    c._pipelines, c._batches, c._hier = {}, {}, {}
+    c._pipelines = {}
     c._stem = lambda *args: 'test'
     c._library = lambda stem, **kw: c.o.new(3)
     c._error = lambda err: 'injected failure'
@@ -78,10 +78,13 @@ def test_pipeline_ownership(fail, limits):
     assert not +c.o.refs
 
 
-def test_pending_forward_ownership_is_released():
+def test_deferred_work_holds_no_references_past_teardown():
+    """A deferred forward is an executor recording (_gpuexec._pending): tearing the context
+    down with one still held leaves every Objective-C reference balanced."""
     c = context()
-    c._pending_metal = (c.o.new(8), [])
+    c._defer(("forward", []), {}, None, None)
     c.destroy()
+    assert not c._pending()
     assert not +c.o.refs
 
 

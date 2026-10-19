@@ -27,9 +27,19 @@
 [[vk::constant_id(80)]] const uint mfCoarseTwt = 1;
 #elif defined(MF_CUDA)
 static const uint mfCoarseTwt = 1;
+// The data stride and data scale stay build-time (Vulkan's constants 75 and 79): read from a
+// module __constant__ instead, the refine and tier kernels ran 12-39% slower on an L40S (the
+// row-index arithmetic of the unrolled loops is no longer a compile-time power of two). A
+// CUDA host therefore feeds the tiers packed bands (pack_coarse), not the spectra in place.
 static const uint mfDataStride = 0;
-static const uint mfRowWindows = 0;
 static const uint mfDataScaleBits = 0x3f800000u;
+// Accurate trig stays a build-time 0: CUDA builds without fast math, so its sin/cos are
+// already the accurate ones (a runtime switch changed how NVRTC compiled them, and the
+// two-stage transform's results with it).
+static const uint mfAccurateTrig = 0;
+// Per-row windows: CUDA takes the table as the entry's last argument and a window start of
+// ROWWIN_ON switches it on (tierb.slang rowWindow), so no constant is needed.
+static const uint mfRowWindows = 0;
 // The fp16 bound switch (constant 77 on Vulkan) as a module __constant__ the host writes
 // (cuModuleGetGlobal "mf_c16_raw"): zero-initialized, so the bound applies unless the host
 // asks for the raw maximum (MF_VK_C16_BOUND=0, for measuring the bound's margin).
@@ -41,7 +51,6 @@ uint mfC16RawFlag()
     return mfC16RawValue();
 }
 #define mfC16Bound (1u - mfC16RawFlag())
-static const uint mfAccurateTrig = 0;
 static const uint mfSubgroupSize = 32;
 #elif defined(MF_METAL)
 // The coarse transform's twiddle source (constant 80 on Vulkan) as an MSL preprocessor macro
@@ -55,9 +64,44 @@ uint mfCoarseTwtFlag()
     return mfCoarseTwtValue();
 }
 #define mfCoarseTwt mfCoarseTwtFlag()
-static const uint mfDataStride = 0;
-static const uint mfRowWindows = 0;
-static const uint mfDataScaleBits = 0x3f800000u;
+// The data stride, data scale, accurate trig and row windows (Vulkan's constants 75, 79, 73
+// and 76) as MSL macros the host sets when it compiles a library, like MF_COARSE_TWT: Metal compiles its
+// libraries at runtime, so these are compile-time values exactly as on Vulkan.
+__target_intrinsic(metal, "(MF_DATA_STRIDE)")
+uint mfDataStrideValue();
+uint mfDataStrideFlag()
+{
+    __requirePrelude("#ifndef MF_DATA_STRIDE\n#define MF_DATA_STRIDE 0u\n#endif");
+    return mfDataStrideValue();
+}
+#define mfDataStride mfDataStrideFlag()
+__target_intrinsic(metal, "(MF_DATA_SCALE_BITS)")
+uint mfDataScaleValue();
+uint mfDataScaleFlag()
+{
+    __requirePrelude("#ifndef MF_DATA_SCALE_BITS\n#define MF_DATA_SCALE_BITS 0x3f800000u\n#endif");
+    return mfDataScaleValue();
+}
+#define mfDataScaleBits mfDataScaleFlag()
+__target_intrinsic(metal, "(MF_ACCURATE_TRIG)")
+uint mfAccurateTrigValue();
+uint mfAccurateTrigFlag()
+{
+    __requirePrelude("#ifndef MF_ACCURATE_TRIG\n#define MF_ACCURATE_TRIG 0u\n#endif");
+    return mfAccurateTrigValue();
+}
+#define mfAccurateTrig mfAccurateTrigFlag()
+// Per-row windows (Vulkan's constant 76): MF_ROW_WINDOWS=1 reads each row's window from the
+// table, the entry's last argument (tierb.slang rowWindow); 0 compiles the read out, as a
+// specialization constant does, so the table is then an inactive argument nothing binds.
+__target_intrinsic(metal, "(MF_ROW_WINDOWS)")
+uint mfRowWindowsValue();
+uint mfRowWindowsFlag()
+{
+    __requirePrelude("#ifndef MF_ROW_WINDOWS\n#define MF_ROW_WINDOWS 0u\n#endif");
+    return mfRowWindowsValue();
+}
+#define mfRowWindows mfRowWindowsFlag()
 // The fp16 bound switch (constant 77 on Vulkan) as an MSL preprocessor macro the host sets
 // when it compiles the library (MTLCompileOptions.preprocessorMacros, MF_C16_RAW=1 when
 // MF_VK_C16_BOUND=0): the bound applies unless the raw maximum is asked for.
@@ -69,7 +113,6 @@ uint mfC16RawFlag()
     return mfC16RawValue();
 }
 #define mfC16Bound (1u - mfC16RawFlag())
-static const uint mfAccurateTrig = 0;
 static const uint mfSubgroupSize = 32;
 #else
 static const uint mfCoarseTwt = 0;
