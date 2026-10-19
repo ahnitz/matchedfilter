@@ -529,29 +529,57 @@ class _Staged:
         self.pinned.destroy(idle)
 
 
+class _Section:
+    """Bytes [offset, offset + nbytes) of a device buffer (Context._x_section): its own
+    device pointer; the host reads it through the base buffer's mirror."""
+    __slots__ = ("base", "dptr", "nbytes", "ptr", "handle", "offset")
+
+    def __init__(self, base, offset, nbytes):
+        self.base, self.offset, self.nbytes = base, offset, nbytes
+        self.dptr = ctypes.c_uint64(base.dptr.value + offset)
+        self.ptr = self.handle = self.dptr.value
+
+    def view(self, dtype, count):
+        dtype = np.dtype(dtype)
+        return self.base.view(np.uint8, self.offset + count * dtype.itemsize)[self.offset:].view(dtype)
+
+    def write(self, array, stream=None):
+        raise TypeError("a section is written through its base buffer")
+
+    def destroy(self, idle=False):
+        pass                                    # the base buffer owns the memory
+
+
 class _WordSlots:
-    """Page-locked 16-byte slots for the words of list update ops (_CudaList.update): one
-    page-locked chunk per 256 of them. A page-locked allocation each cost a cuMemAllocHost
-    and a pinned page per update, four per hierarchical record."""
-    SLOT, PER = 16, 256
+    """Page-locked slots for the words of list update ops (_CudaList.update), carved from
+    shared 4 KiB chunks and reused by size. A page-locked allocation each cost a
+    cuMemAllocHost and a pinned page per update."""
+    CHUNK = 4096
 
     def __init__(self, ctx):
-        self.ctx, self.chunks, self.free = ctx, [], []
+        self.ctx, self.chunks, self.free = ctx, [], {}
+        self.at, self.end = 0, 0
 
-    def take(self):
-        if not self.free:
-            chunk = _Pinned(self.ctx, self.SLOT * self.PER)
+    def take(self, nbytes):
+        size = -(-max(int(nbytes), 16) // 16) * 16
+        lst = self.free.get(size)
+        if lst:
+            return lst.pop(), size
+        if self.at + size > self.end:
+            chunk = _Pinned(self.ctx, max(self.CHUNK, size))
             self.chunks.append(chunk)
-            self.free.extend(chunk.ptr + i * self.SLOT for i in range(self.PER))
-        return self.free.pop()
+            self.at, self.end = chunk.ptr, chunk.ptr + chunk.nbytes
+        ptr, self.at = self.at, self.at + size
+        return ptr, size
 
-    def give(self, ptr):
-        self.free.append(ptr)
+    def give(self, ptr, size):
+        self.free.setdefault(size, []).append(ptr)
 
     def destroy(self):
         for chunk in self.chunks:
             chunk.destroy(idle=True)          # after the context's work (Context.destroy)
-        self.chunks, self.free = [], []
+        self.chunks, self.free = [], {}
+        self.at = self.end = 0
 
 
 class _Readback:
@@ -680,10 +708,10 @@ class _CudaList:
         self.ops.append(("fill", buf, int(word) & 0xFFFFFFFF))
 
     def update(self, buf, words):
-        ptr = self.ctx._word_slots().take()
+        ptr, size = self.ctx._word_slots().take(4 * len(words))
         vals = (ctypes.c_uint32 * len(words))(*[int(w) & 0xFFFFFFFF for w in words])
         ctypes.memmove(ptr, vals, 4 * len(words))
-        self.ops.append(("update", buf, ptr, 4 * len(words)))
+        self.ops.append(("update", buf, ptr, 4 * len(words), size))
 
     def readback(self, buf, nbytes):
         self.ops.append(("readback", buf, buf.mirror(nbytes)))
@@ -706,7 +734,7 @@ class _CudaNative:
             self.graphs = None
         for op in self.ops:
             if op[0] == "update":
-                self.slots.give(op[2])
+                self.slots.give(op[2], op[4])
 
 
 class Context(Executor, InputUploads):
@@ -1319,6 +1347,7 @@ class Context(Executor, InputUploads):
                        "cuGraphInstantiateWithFlags")
             cu.cuGraphDestroy(graph)
             graphs.put(gkey, ex)
+            self._x_built = self.__dict__.get("_x_built", 0) + 1      # Executor.built
         check_cuda(self.cuda.cuGraphLaunch(ex, stream), "cuGraphLaunch")
 
     def _issue(self, ops, stream):
@@ -1355,6 +1384,10 @@ class Context(Executor, InputUploads):
     @staticmethod
     def _x_free(buf):
         buf.destroy(idle=True)
+
+    @staticmethod
+    def _x_section(buf, offset, nbytes):
+        return _Section(buf, offset, nbytes)
 
     def _x_idle(self):
         # This context's streams only: cuCtxSynchronize waits for every Context on the shared

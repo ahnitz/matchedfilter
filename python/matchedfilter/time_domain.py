@@ -415,7 +415,12 @@ class _BlockTrials:
             return st["winner"]
         for r in range(nranks):
             st["samples"].setdefault(r, [])
-        return next((r for r in range(nranks) if len(st["samples"][r]) < self._need(st, r)), 0)
+        # Interleaved: the next sample goes to the rank with the fewest (a switch costs one
+        # warm batch, _trial_begin). Taken in turn, every sample of rank 0 came first, in the
+        # process's coldest batches: on the L40S a 2048 leaf sampled 3.5 where it runs ~2.2,
+        # and the trial locked a 4096 leaf that ran 20% slower.
+        want = [r for r in range(nranks) if len(st["samples"][r]) < self._need(st, r)]
+        return min(want, key=lambda r: (len(st["samples"][r]), r)) if want else 0
 
     def _store(self, key, rec):
         from . import gatechain
@@ -548,6 +553,18 @@ def _bank_calibrating(bank):
     return False
 
 
+def _built(banks):
+    """Recordings built so far by the GPU contexts of these banks' live layouts
+    (Executor.built): a batch that built one paid setup, which is not what a trial ranks."""
+    total = 0
+    for bank in banks:
+        for g in getattr(bank, '_groups', ()) or ():
+            ctx = getattr(getattr(g, '_plan', None), '_gpu', None)     # built plans only
+            if ctx is not None and hasattr(ctx, 'built'):
+                total += ctx.built()
+    return total
+
+
 def _cpu_block_round(jobs):
     """Replay identical CPU jobs across every layout; return the final valid result.
 
@@ -644,10 +661,10 @@ def _trial_begin(jobs):
             b._use_layout(r)
             b.__dict__.setdefault('_ranks_run', set()).add(r)
         settled = settled and not any(_bank_calibrating(b) for b in bs)
-        plan.append((key, r, bs, settled, False))
+        plan.append((key, r, bs, settled, False, _built(bs)))
     for key, bs in locked.items():
         if _BLOCK_TRIALS.winner(key) is not None and not any(_bank_calibrating(b) for b in bs):
-            plan.append((key, _BLOCK_TRIALS.winner(key), bs, True, True))
+            plan.append((key, _BLOCK_TRIALS.winner(key), bs, True, True, _built(bs)))
     if not plan and not chains:
         return None
     import time
@@ -747,9 +764,13 @@ def _trial_end(tok):
                 p.autotune_info.update(status="locked", winner=tuple(w))
                 if tuple(w) != tuple(p._chain):
                     p._switch_chain(w)
-    for key, r, bs, settled, steady in plan:
+    for key, r, bs, settled, steady, built in plan:
+        # A batch that built recordings (new call shapes, graphs) timed setup: no sample.
+        # Trials took such batches for candidates that ran after the model's own, which had
+        # built its recordings during calibration: a 2048 leaf sampled 2.7x slower than it ran.
+        settled = settled and _built(bs) == built
         if steady:
-            if work > 0 and _BLOCK_TRIALS.observe(key, dt / work):
+            if settled and work > 0 and _BLOCK_TRIALS.observe(key, dt / work):
                 for b in bs:
                     b._trial_monitor = False
             continue

@@ -282,6 +282,24 @@ def test_no_block_sample_while_a_plan_calibrates(monkeypatch, tmp_path):
         assert n == expect
 
 
+def test_no_block_sample_from_a_batch_that_built_recordings(monkeypatch, tmp_path):
+    """A batch during which the bank's GPU context built a recording (a call shape not seen
+    before, a CUDA graph) timed setup: it is not a sample. Trials took such batches for the
+    candidates run after the model's own and locked a 2048 leaf out as 2.7x slower."""
+    monkeypatch.setenv("MF_COST_FILE", str(tmp_path / "costs.json"))
+    monkeypatch.setattr(td, "_BLOCK_TRIALS", td._BlockTrials())
+    x = np.zeros(8, np.complex64)
+    for builds, expect in ((1, 0), (0, 1)):
+        b = _FakeBank(False)
+        count = [0]
+        b._groups[0]._plan._gpu = type("C", (), {"built": lambda s: count[0]})()
+        tok = td._trial_begin([(b, x, {})])
+        count[0] += builds                     # the batch runs
+        td._trial_end(tok)
+        n = sum(len(v) for v in td._BLOCK_TRIALS.state[td._trial_key(b)]["samples"].values())
+        assert n == expect
+
+
 def test_a_fresh_file_locks_the_block_size_within_a_bound(monkeypatch, tmp_path):
     """GPU-like plans: each candidate layout's plans would run a long chain trial (25 batches
     of calibrating after first use, like a per-batch GPU chain trial). Calibrations run in
@@ -322,3 +340,19 @@ def test_a_fresh_file_locks_the_block_size_within_a_bound(monkeypatch, tmp_path)
     assert bank._layouts is None, "block size not locked in %d batches" % bound
     held = [g.plan for g in bank._groups if g.is_hier and getattr(g.plan, "_trial_hold", False)]
     assert not held                                 # the winner's trials were released
+
+
+def test_ranks_are_sampled_in_turn_not_one_after_another(monkeypatch, tmp_path):
+    """The next sample goes to the rank with the fewest, so no rank takes all of its samples
+    in the process's coldest batches (rank 0, the model's, always ran first: on the L40S its
+    2048 leaf sampled 60% slower than it ran, and a slower 4096 leaf was locked)."""
+    monkeypatch.setenv("MF_COST_FILE", str(tmp_path / "costs.json"))
+    monkeypatch.setenv("MF_BLOCK_TRIALS", "2")
+    trials = td._BlockTrials()
+    order = []
+    for _ in range(6):
+        r = trials.rank_for("k", 3)
+        order.append(r)
+        trials.record("k", r, 1.0 + 0.1 * r)
+    assert order == [0, 1, 2, 0, 1, 2]
+    assert trials.winner("k") == 0

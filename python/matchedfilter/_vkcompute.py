@@ -351,7 +351,7 @@ class _Recording:
         self.vk.vkCmdDispatch(self.cmd, groups, 1, 1)
 
     def dispatch_indirect(self, buf):
-        self.vk.vkCmdDispatchIndirect(self.cmd, buf.handle, 0)
+        self.vk.vkCmdDispatchIndirect(self.cmd, buf.handle, getattr(buf, "offset", 0))
 
     def barrier(self, src_stage=_STAGE_COMPUTE_BIT, dst_stage=_STAGE_COMPUTE_BIT,
                 src_access=_ACCESS_SHADER_WRITE, dst_access=_ACCESS_SHADER_READ, buffer=None):
@@ -438,6 +438,27 @@ class _Buffer:
             vk.vkDestroyBuffer(dev, self.handle, None)
             vk.vkFreeMemory(dev, self.memory, None)
             self.handle = None
+
+
+class _Section:
+    """Bytes [offset, offset + nbytes) of a _Buffer (Context._x_section)."""
+    __slots__ = ("base", "handle", "offset", "nbytes", "ptr")
+
+    def __init__(self, base, offset, nbytes):
+        self.base, self.handle, self.offset, self.nbytes = base, base.handle, offset, nbytes
+        ptr = base.ptr.value if hasattr(base.ptr, "value") else base.ptr
+        self.ptr = ptr + offset
+
+    def write(self, array):
+        flat = np.ascontiguousarray(array)
+        ctypes.memmove(self.ptr, flat.ctypes.data, min(flat.nbytes, self.nbytes))
+
+    def view(self, dtype, count):
+        dtype = np.dtype(dtype)
+        return self.base.view(np.uint8, self.offset + count * dtype.itemsize)[self.offset:].view(dtype)
+
+    def destroy(self):
+        pass                                    # the base buffer owns the memory
 
 
 class _CaptureVK:
@@ -2053,6 +2074,10 @@ class Context(Executor, InputUploads):
     @staticmethod
     def _x_free(buf):
         buf.destroy()
+
+    @staticmethod
+    def _x_section(buf, offset, nbytes):
+        return _Section(buf, offset, nbytes)
 
     @staticmethod
     def _x_read(buf, out, offset=0):

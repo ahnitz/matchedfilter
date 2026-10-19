@@ -283,6 +283,26 @@ class _Buffer:
             self.handle = None
 
 
+class _Section:
+    """Bytes [offset, offset + nbytes) of a _Buffer (Context._x_section)."""
+    __slots__ = ("base", "handle", "offset", "nbytes", "ptr")
+
+    def __init__(self, base, offset, nbytes):
+        self.base, self.handle, self.offset, self.nbytes = base, base.handle, offset, nbytes
+        self.ptr = (base.ptr.value if hasattr(base.ptr, "value") else base.ptr) + offset
+
+    def write(self, array):
+        flat = np.ascontiguousarray(array)
+        ctypes.memmove(self.ptr, flat.ctypes.data, min(flat.nbytes, self.nbytes))
+
+    def view(self, dtype, count):
+        dtype = np.dtype(dtype)
+        return self.base.view(np.uint8, self.offset + count * dtype.itemsize)[self.offset:].view(dtype)
+
+    def destroy(self):
+        pass                                    # the base buffer owns the memory
+
+
 class _HostBuffer(_Buffer):
     """A device buffer over caller memory, without a copy (unified memory).
 
@@ -1000,7 +1020,7 @@ class Context(Executor, InputUploads):
                 b"dispatchThreadgroupsWithIndirectBuffer:"
                 b"indirectBufferOffset:threadsPerThreadgroup:",
                 restype=None,
-                args=(indirect.handle, 0, _MTLSize(tg, 1, 1)),
+                args=(indirect.handle, getattr(indirect, "offset", 0), _MTLSize(tg, 1, 1)),
                 argtypes=(ctypes.c_void_p, ctypes.c_ulong, _MTLSize))
         else:
             self.o.call(enc, b"dispatchThreadgroups:threadsPerThreadgroup:",
@@ -1354,6 +1374,10 @@ class Context(Executor, InputUploads):
     @staticmethod
     def _x_free(buf):
         buf.destroy()
+
+    @staticmethod
+    def _x_section(buf, offset, nbytes):
+        return _Section(buf, offset, nbytes)
 
     @staticmethod
     def _x_read(buf, out, offset=0):

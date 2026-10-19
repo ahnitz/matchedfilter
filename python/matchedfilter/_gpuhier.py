@@ -119,6 +119,18 @@ class HierHandle:
             setattr(self, k, v)
 
 
+def _count_names(ntiers, banded, compact):
+    """The words a hierarchical record keeps in its one counts buffer, in order: each tier's
+    survivor count (an indirect dispatch's [count, 1, 1]), the recompute's block count, and
+    the compacted-hit count."""
+    return (["args%d" % i for i in range(ntiers)] + (["bargs"] if banded else [])
+            + (["count"] if compact else []))
+
+
+def _rw_names(ntiers):
+    return ["rw"] + ["rw%d" % i for i in range(ntiers)]
+
+
 class HierOps:
     """The hierarchical operations of _gpuexec.Executor (a mixin of it)."""
 
@@ -344,9 +356,15 @@ class HierOps:
             uploads = (True, True, *uploads[2:])
         self._hier_upload(rec, storage_key, uploads, data, tmpl, tiers, half, et, slot)
         if rw is not None:
-            self._x_upload(rec.buffers["rw"], np.ascontiguousarray(rw, np.uint32), slot)
-            for i, b in enumerate(bands):
-                self._x_upload(rec.buffers["rw%d" % i], band_windows(rw, n, b), slot)
+            # Every row-window table in one upload, each at its section (_hier_record).
+            span = (self._section_offset(rec.buffers, "rw0")
+                    - self._section_offset(rec.buffers, "rw"))
+            tables = [np.ascontiguousarray(rw, np.uint32)] + [band_windows(rw, n, b)
+                                                              for b in bands]
+            packed = np.zeros((len(tables), span // 4), np.uint32)
+            for j, t in enumerate(tables):
+                packed[j, :t.size] = t.reshape(-1)
+            self._x_upload(rec.buffers["rws"], packed, slot)
 
         binds = self._hier_binds(n, tiers, nd, nt, nbins, lo, hi, binsize, shift, t2, half, ed,
                                  et, rw is not None, layout, claim, data)
@@ -406,13 +424,21 @@ class HierOps:
             buf("cidx%d" % i, pairs * 4)
             buf("cval%d" % i, pairs * 8)
             buf("surv%d" % i, pairs * 4, readback=i == last)
-            buf("args%d" % i, 16, readback=True)
+        # Small words share one buffer each way (one update, one readback; one upload of the
+        # row windows): a buffer each made 5 readbacks and 7 uploads a call where 1ccbbe4b's
+        # CUDA path made 3 and 4, 12% of the L40S fine stage at n=4096.
+        align = max(16, int(self.storage_offset_alignment))
+        names = _count_names(len(bands), feed in ("tier0", "bands"), way == "compact")
+        counts = buf("counts", align * len(names), readback=True)
+        for j, name in enumerate(names):
+            rec.buffers[name] = self._x_section(counts, j * align, 16)
         bi = buf("idx", out * 4, readback=True)
         bv = buf("val", out * 8, readback=True)
         if rowwin:
-            buf("rw", nd * 8, upload=True)
-            for i in range(len(bands)):
-                buf("rw%d" % i, nd * 8, upload=True)
+            span = -(-nd * 8 // align) * align
+            rws = buf("rws", span * (len(bands) + 1), upload=True)
+            for j, name in enumerate(_rw_names(len(bands))):
+                rec.buffers[name] = self._x_section(rws, j * span, nd * 8)
         if feed in ("tier0", "pack"):
             buf("band0", nd * bands[0] * cb0)
             buf("band1", nd * bands[1] * 8 if last else 16)
@@ -421,9 +447,7 @@ class HierOps:
         if feed in ("tier0", "bands"):
             buf("flags", nd * 4)
             buf("blist", nd * 4)
-            buf("bargs", 16)
         if way == "compact":
-            buf("count", 16, readback=True)
             buf("list", out * 16, readback=True)
 
         B = rec.buffers
@@ -443,17 +467,18 @@ class HierOps:
                          [Arg("series"), Arg("starts"), B["bands"]], (Arg("bands", 3),))
             lst.barrier()
             lst.stamp("forward")
-        # Counts to zero (an indirect dispatch's [count, 1, 1]); dense outputs to "nothing".
-        for i in range(len(bands)):
-            lst.update(B["args%d" % i], (0, 1, 1, 0))
+        # Counts to zero (an indirect dispatch's [count, 1, 1]), in one update; dense outputs
+        # to "nothing".
+        words = []
+        for name in names:
+            words += [0, 0, 0, 0] if name == "count" else [0, 1, 1, 0]
+            words += [0] * (align // 4 - 4)
+        lst.update(counts, words)
         if feed in ("tier0", "bands"):
-            lst.update(B["bargs"], (0, 1, 1, 0))
             lst.fill(B["flags"], 0)
         if way != "rows":
             lst.fill(bi, 0xFFFFFFFF)
             lst.fill(bv, 0)
-        if way == "compact":
-            lst.update(B["count"], (0, 0, 0, 0))
         lst.barrier()
         lst.stamp("fill")
         if feed == "pack":
@@ -528,8 +553,7 @@ class HierOps:
             lst.barrier()
             lst.stamp("peaks")
         # What the host reads: the counts, then the peaks as `way` reads them.
-        for i in range(len(bands)):
-            lst.readback(B["args%d" % i], 4)
+        lst.readback(counts, align * len(names))
         if dv is not None and way != "rows":
             # The survivors: the refine-block fraction every call on shared spectra notes.
             lst.readback(S(survs), pairs * 4)
@@ -541,7 +565,6 @@ class HierOps:
             lst.readback(bi, out * 4)
             lst.readback(bv, out * 8)
         else:
-            lst.readback(B["count"], 4)
             lst.readback(B["list"], min(out, self._SPARSE_FIRST) * 16)
         rec.native = lst.end()
         return rec
@@ -623,10 +646,12 @@ class HierOps:
         pairs, out = nd * nt, nd * nt * nbins
         B = rec.buffers
         last = 1 if cascade else 0
-        count = int(self._x_view(B["args%d" % last], np.uint32, 1)[0])
+        words = self._x_view(B["counts"], np.uint32, B["counts"].nbytes // 4)
+        at = lambda name: int(words[self._section_offset(B, name) // 4])
+        count = at("args%d" % last)
         self.last_refinements = count
         if cascade:
-            self.last_tier1_survivors = int(self._x_view(B["args0"], np.uint32, 1)[0])
+            self.last_tier1_survivors = at("args0")
         rows = None
         if frac_key is not None or (sparse and way == "rows"):
             rows = self._x_view(B["surv%d" % last], np.uint32, count)
@@ -656,13 +681,19 @@ class HierOps:
             order = np.argsort(flat)
             val = self._x_view(B["val"], np.complex64, out).reshape(pairs, nbins)
             return _SparsePeaks(shape, flat[order], ri[k, b][order], val[rk, b][order])
-        c = int(self._x_view(B["count"], np.uint32, 1)[0])
+        c = at("count")
         recs = self._x_view(B["list"], np.uint32, 4 * c).reshape(c, 4)
         pos = recs[:, 0].astype(np.int64)
         order = np.argsort(pos)                 # positions are distinct: C order
         recs = recs[order]
         v = recs[:, 2:4].copy().view(np.float32).view(np.complex64).reshape(-1)
         return _SparsePeaks(shape, pos[order], recs[:, 1].view(np.int32), v)
+
+    @staticmethod
+    def _section_offset(B, name):
+        sec = B[name]
+        off = getattr(sec, "offset", None)
+        return off if off is not None else sec[2]          # a driver section, or a test's
 
     # ---- replay --------------------------------------------------------------------------
     def hier_valid(self, h):
