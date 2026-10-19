@@ -809,6 +809,45 @@ def _single_key(key):
     return "single-device|%s|%d|%d" % key
 
 
+#: Where a batch's single-template GPU jobs run (filter_series_many): batched on the device or
+#: each call on a CPU plan, per device; see TimeDomainFilterBank._batch_device.
+_BATCH_CHOICE: Dict[Tuple[str], Dict[str, Any]] = {}
+
+
+def _device_trial(table, key, store_key, what):
+    """(side, record or None): the shared measured choice between a bank's GPU and a CPU
+    plan for one call shape. The first samples alternate the sides (record(seconds) after
+    each); the first of each side is discarded (warm-up), and the shared rule
+    (gatechain.measured_choice) keeps one -- the GPU stands unless the CPU is faster past
+    the tie and the noise; an unclear contest samples both further, up to
+    _SINGLE_TRIALS_MAX each -- for every bank, and for later processes through
+    MF_COST_FILE (store_key), whose held side is reused untimed."""
+    from . import gatechain
+    tr = table.get(key)
+    if tr is None:
+        held = gatechain.stored_choice(store_key)
+        tr = table[key] = {"gpu": [], "cpu": [],
+                           "winner": held if held in ("gpu", "cpu") else None}
+    if tr["winner"] is not None:
+        return tr["winner"], None
+    side = "gpu" if len(tr["gpu"]) <= len(tr["cpu"]) else "cpu"
+
+    def record(dt, side=side):
+        tr[side].append(dt)
+        if (tr["winner"] is None and len(tr["gpu"]) == len(tr["cpu"])
+                and len(tr["gpu"]) >= _SINGLE_TRIALS):
+            smp = {k: tr[k][1:] for k in ("gpu", "cpu")}
+            w, _ = gatechain.measured_choice(smp, "gpu", _SINGLE_TRIALS_MAX)
+            if w is None:
+                return
+            tr["winner"] = w
+            gatechain.store_choice(store_key, w)
+            from . import _log_autotune
+            _log_autotune("%s -> %s  median s %s", what, w,
+                          {k: "%.3g" % float(np.median(v)) for k, v in smp.items()})
+    return side, record
+
+
 _CORR_COSTS: Dict[Tuple[int, str], Tuple[float, float, float]] = {}
 
 
@@ -2307,42 +2346,35 @@ class TimeDomainFilterBank:
         from .device import parse as _parse_device
         from . import _autotune_enabled
         import os
+        force = self.__dict__.get("_single_force")
+        if force is not None:                # a batch's measured side (_batch_device)
+            return force == "cpu", None
         # MF_SINGLE_DEVICE=bank keeps every call on the bank's device: the pure-GPU path is a
         # product in its own right and is benchmarked as one (tools/ladder.py --pure).
         if (_parse_device(self.device).kind != 'gpu' or not _autotune_enabled()
                 or os.environ.get("MF_SINGLE_DEVICE", "auto") == "bank"):
             return False, None
-        from . import gatechain
         key = (str(self.device), int(g.n), 1 << max(0, int(nblocks) - 1).bit_length())
-        tr = _SINGLE_CHOICE.get(key)
-        if tr is None:
-            # A side this machine already measured for the shape is reused untimed
-            # (MF_COST_FILE), as every other measured choice is.
-            held = gatechain.stored_choice(_single_key(key))
-            tr = _SINGLE_CHOICE[key] = {"gpu": [], "cpu": [],
-                                        "winner": held if held in ("gpu", "cpu") else None}
-        if tr["winner"] is not None:
-            return tr["winner"] == "cpu", None
-        side = "gpu" if len(tr["gpu"]) <= len(tr["cpu"]) else "cpu"
-
-        def record(dt, side=side):
-            tr[side].append(dt)
-            if (tr["winner"] is None and len(tr["gpu"]) == len(tr["cpu"])
-                    and len(tr["gpu"]) >= _SINGLE_TRIALS):
-                # Decided on whole pairs (the sides alternate) by the shared rule
-                # (gatechain.measured_choice): the bank's own device stands unless the other
-                # is faster past the tie and the noise; an unclear contest samples both
-                # further, up to _SINGLE_TRIALS_MAX each. Kept in MF_COST_FILE.
-                smp = {k: tr[k][1:] for k in ("gpu", "cpu")}
-                w, _ = gatechain.measured_choice(smp, "gpu", _SINGLE_TRIALS_MAX)
-                if w is None:
-                    return
-                tr["winner"] = w
-                gatechain.store_choice(_single_key(key), w)
-                from . import _log_autotune
-                _log_autotune("SINGLE %s n=%d blocks~%d -> %s  median s %s", key[0], key[1],
-                              key[2], w, {k: "%.3g" % float(np.median(v)) for k, v in smp.items()})
+        side, record = _device_trial(_SINGLE_CHOICE, key, _single_key(key),
+                                     "SINGLE %s n=%d blocks~%d" % key)
         return side == "cpu", record
+
+    def _batch_device(self):
+        """(side, record or None) for a batch's single-template jobs on this bank's GPU
+        (filter_series_many): "gpu" runs them batched on the device (device follow-ups, one
+        items submission per template group), "cpu" each call on a CPU plan. Measured per
+        device (_device_trial), each batch timed from submission to its last result per
+        block. The per-call choice (_single_device) times one call on its own, a dispatch a
+        batch never makes: it once kept every batch off the device."""
+        from .device import parse as _parse_device
+        from . import _autotune_enabled
+        import os
+        if (_parse_device(self.device).kind != 'gpu' or not _autotune_enabled()
+                or os.environ.get("MF_SINGLE_DEVICE", "auto") == "bank"):
+            return "gpu", None
+        key = (str(self.device),)
+        return _device_trial(_BATCH_CHOICE, key, "single-batch|%s" % key,
+                             "BATCH %s" % key)
 
     @staticmethod
     def filter_series_many(jobs, wait=True):
@@ -2420,22 +2452,27 @@ class TimeDomainFilterBank:
         if os.environ.get("MF_GPU_ITEMS", "1") == "0":
             return set()
         groups = {}
+        side = record = device = None
         for j, (bank, series, kw) in enumerate(jobs):
             kw = kw or {}
             ti = kw.get("template_index")
             if (ti is None or bank.engine != 'hier' or _parse_device(bank.device).kind != 'gpu'
                     or set(kw) - {"windows", "binsize", "threshold", "template_index"}):
                 continue
-            ser = _host_copy(series, np.complex64)
-            S = ser.size
+            ser = series                     # widened only for the items path, below
+            S = len(ser)
             W = _normalize_windows(kw.get("windows"), S)
             bank._groups
             g, ti_local = bank._template_map[ti]
             bs = int(kw["binsize"]) if kw.get("binsize") is not None else (bank.binsize or g.n)
             if bs >= g.n or W.shape[0] == 0:
                 continue
-            on_cpu, trial = bank._single_device(g, 1)
-            if on_cpu or trial is not None:
+            # Where the batch runs: one measured side per device (_batch_device); a batch's
+            # jobs on another device run per call.
+            if side is None:
+                device = str(bank.device)
+                side, record = bank._batch_device()
+            elif str(bank.device) != device:
                 continue
             thr = bank.threshold if kw.get("threshold") is None else float(kw["threshold"])
             bstarts, bws, bwe = bank._window_layout(g, W, S)
@@ -2444,9 +2481,27 @@ class TimeDomainFilterBank:
             groups.setdefault((id(bank), id(g), bs, thr), []).append(
                 (j, bank, g, ser, bstarts, bws, bwe, ti_local, ti))
         done = set()
-        # Threshold-0 follow-ups on a backend with a follow-up executor (Vulkan, CUDA): every
-        # group's items as listed entries, all in one submission (_gpuhost.submit_followups).
-        # None (another backend, past a capacity): the per-group path below.
+        if not groups:
+            return done
+        import time
+        blocks = max(1, sum(m[4].size for members in groups.values() for m in members))
+        eligible = {m[0] for members in groups.values() for m in members}
+        t0 = time.perf_counter()
+        if side == "cpu":
+            for members in groups.values():
+                for j, bank, *_ in members:
+                    bank._single_force = "cpu"
+                    try:
+                        out[j] = bank.filter_series(jobs[j][1], **(jobs[j][2] or {}))
+                    finally:
+                        del bank._single_force
+                    done.add(j)
+            if record is not None:
+                record((time.perf_counter() - t0) / blocks)
+            return done
+        # Threshold-0 follow-ups: every group's items as listed entries, all in one
+        # submission (_gpuhost.submit_followups). None (past what the device path takes):
+        # the per-group path below.
         if os.environ.get("MF_DEVICE_FOLLOWUPS", "1") != "0":
             fast = sorted(m[0] for (_, _, _, thr), members in groups.items() if thr == 0.0
                           for m in members)
@@ -2461,13 +2516,16 @@ class TimeDomainFilterBank:
                         out[j] = _Deferred(lambda c=collect, i=i: c()[i])
                         done.add(j)
                     groups = {k: v for k, v in groups.items() if k[3] != 0.0}
+                    if record is not None:
+                        collect()             # a trial sample runs to the batch's last result
         # Submit every template group's items, then collect: a backend that can leaves each
         # submission in flight (wait=False), so the device runs them back to back.
         submitted = []
         for (_, _, bs, thr), members in groups.items():
             g = members[0][2]
             plan = g.get_flat_plan()
-            res = plan._items_gpu([(ser, st, ws, we, tl) for _, _, _, ser, st, ws, we, tl, _ in members],
+            res = plan._items_gpu([(_host_copy(ser, np.complex64), st, ws, we, tl)
+                                   for _, _, _, ser, st, ws, we, tl, _ in members],
                                   bs, thr, wait=False) if hasattr(plan, "_items_gpu") else None
             if res is not None:
                 submitted.append((bs, members, res))
@@ -2483,6 +2541,8 @@ class TimeDomainFilterBank:
                                   (tl, 1), g.n, ti)
                 out[j] = _results_from(lists)
                 done.add(j)
+        if record is not None and eligible <= done:
+            record((time.perf_counter() - t0) / blocks)   # all on the device: a sample
         return done
 
     @staticmethod
