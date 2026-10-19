@@ -421,7 +421,9 @@ def test_timing_log_off_records_nothing(ctx):
     assert not ctx._pending_events
 
 
-def test_timing_log_records_each_kernel():
+def test_timing_log_records_each_run_and_kernel():
+    """MF_GPU_TIMING=1 logs each run by its list label (as every backend does); with
+    MF_GPU_PROFILE=1 also each kernel and copy inside it, as "k:<name>"."""
     code = r"""
 import numpy as np
 from matchedfilter import _cudacompute
@@ -433,16 +435,18 @@ h = (rng.standard_normal((3, n)) + 1j*rng.standard_normal((3, n))).astype(np.com
 c.hier_peaks(n, 512, d, h, h[:, :512], 0.0)
 labels = [l for l, ms in c.timing_log]
 assert all(ms >= 0 for l, ms in c.timing_log), c.timing_log
+assert any(not l.startswith("k:") and l != "upload" for l in labels), labels   # the run
 for want in ("tierb_512_c16", "compact", "refine_2048", "readback", "upload"):
-    assert any(l.startswith(want) for l in labels), (want, labels)
+    assert any(l.startswith("k:" + want) or l == want for l in labels), (want, labels)
 from matchedfilter import _gputime
 c.peaks(n, d, h)
 agg = _gputime.collect()                  # the shared contract: settles and sums
-assert agg.get("tierb_2048", (0, 0))[0] == 1, agg
+assert agg.get("k:tierb_2048", (0, 0))[0] == 1, agg
+assert agg.get("flat", (0, 0))[0] == 1, agg
 assert c.timing_log == []                 # collect() cleared the context's own log
 print("OK", len(labels))
 """
-    env = dict(os.environ, MF_GPU_TIMING="1")
+    env = dict(os.environ, MF_GPU_TIMING="1", MF_GPU_PROFILE="1")
     r = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True)
     assert r.returncode == 0 and "OK" in r.stdout, r.stdout + r.stderr
 
