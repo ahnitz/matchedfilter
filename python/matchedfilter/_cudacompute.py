@@ -981,10 +981,11 @@ class Context(Executor, InputUploads):
             return f"tierb_{n}_onebin"
         return f"tierb_{n}"
 
-    def pipeline(self, n, entry="fusedTierB", one_bin=False, c16=False, ppg=1, tile=1, twt=False):
+    def pipeline(self, n, entry="fusedTierB", one_bin=False, c16=False, ppg=1, tile=1, twt=False,
+                 gate=False):
         """Retrieve or load the compiled PTX kernel function: (function, threads per block).
         twt: the coarse build with the fp16 twiddle table (tools/build_ptx.py)."""
-        key = (n, entry, one_bin, c16, ppg, tile, twt)
+        key = (n, entry, one_bin, c16, ppg, tile, twt, gate)
         if key in self._pipelines:
             return self._pipelines[key]
 
@@ -996,6 +997,8 @@ class Context(Executor, InputUploads):
         )
 
         stem = self._stem(n, entry, one_bin=one_bin, c16=c16, ppg=ppg, tile=tile, twt=twt)
+        if gate:                                 # the one-bin build's gate-only variant
+            stem += "_gate"
         ptx_file = _PTX_DIR / f"{stem}.ptx"
         if ptx_file.is_file() and _static_shared(ptx_file) > _STATIC_SHARED_MAX:
             # CUDA caps STATIC shared memory at 48 KB per block on every
@@ -1170,7 +1173,8 @@ class Context(Executor, InputUploads):
             self._c16_bound_flag(fn)
             return fn, wg, 4, 1
         if name in ("tier", "tier1", "refine", "refine1"):
-            fn, wg = self.pipeline(n, "refineListed", one_bin=name.endswith("1"))
+            fn, wg = self.pipeline(n, "refineListed", one_bin=name.endswith("1"),
+                                   gate=bool(c.get("gate")))
             return fn, wg, 6, 1
         if name == "compact_peaks":
             return self._compact_peaks()
@@ -1211,6 +1215,8 @@ class Context(Executor, InputUploads):
             return (_PTX_DIR / f"forward_tier0_{n}.ptx").is_file()
         if name == "items":
             return (_PTX_DIR / f"items_{n}.ptx").is_file()
+        if name == "tier1gate":
+            return (_PTX_DIR / f"refine_{n}_onebin_gate.ptx").is_file()
         raise ValueError(name)
 
     def _x_coarse_candidates(self, band):

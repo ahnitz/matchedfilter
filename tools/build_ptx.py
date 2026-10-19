@@ -199,7 +199,8 @@ def compile_ptx(slangc, nvrtc, env, src_text, out_path, entry, extra_flags=()):
     return out_path
 
 
-def compile_tierb(slangc, nvrtc, env, n, outdir, entry=ENTRY, cap=None, suffix="", coarse16=0, ppg=1, tile=1, single_bin=0, table=None):
+def compile_tierb(slangc, nvrtc, env, n, outdir, entry=ENTRY, cap=None, suffix="", coarse16=0, ppg=1, tile=1, single_bin=0, table=None,
+                  gate_only=0):
     if coarse16 and table is None:
         compile_tierb(slangc, nvrtc, env, n, outdir, entry, cap, suffix + "w", coarse16, ppg,
                       tile, single_bin, table=True)
@@ -214,6 +215,7 @@ def compile_tierb(slangc, nvrtc, env, n, outdir, entry=ENTRY, cap=None, suffix="
         "#define SLANG_CUDA_STRUCTURED_BUFFER_NO_COUNT 1\n"
         "#define TARGET_CUDA 1\n"
         % (n, cap, coarse16, ppg, tile, r, single_bin)
+        + ("#define MF_GATE_ONLY 1\n" if gate_only else "")
         + (_coarse_prelude(n, cap, ppg, table=bool(table)) if coarse16 else "")
         + kernel_text()
     )
@@ -404,6 +406,10 @@ def _build():
             one = compile_tierb(slangc, nvrtc, env, n, OUT, "refineListed", suffix="_onebin",
                                 single_bin=1)
             info["refine"]["one_bin"] = dict(file=one.name)
+            if n <= 1024:                           # the gate-only build (build_spirv.py)
+                gate = compile_tierb(slangc, nvrtc, env, n, OUT, "refineListed",
+                                     suffix="_onebin_gate", single_bin=1, gate_only=1)
+                info["refine"]["one_bin"]["gate"] = dict(file=gate.name)
         if n >= 4096:
             for entry, target in (("fusedTierB", info), ("refineListed", info["refine"])):
                 one = compile_tierb(slangc, nvrtc, env, n, OUT, entry, suffix="_onebin", single_bin=1)

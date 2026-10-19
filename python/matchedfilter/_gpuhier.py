@@ -174,13 +174,21 @@ class HierOps:
             tiebreak=lambda c: (c[2], c[1], c[0]), forced=forced)
         return layout
 
+    def _gate_use(self, band):
+        """Whether a later gate tier at this band runs the one-bin refine's gate-only build,
+        reporting the window's maximum alone (nbins word 0), rather than the one-bin
+        election."""
+        return (self._shipped("tier1", band) and self._shipped("tier1gate", band)
+                and self._gate_way(band) == "gate")
+
     def _gate_way(self, band):
-        """How a later gate tier reports at this band (tierb.slang gateOnly): "gate", the
-        window's maximum alone (the tier's nbins word 0), or "elect", the full one-bin
-        election (1) -- whichever this device runs faster, timed once on synthetic data and
-        kept in MF_COST_FILE (stored_measured_choice). Measured: the gate halves the tier on
-        a RENOIR (0.66 -> 0.30 ms a call) and is Metal's long-standing way; on the L40S the
-        election's shared-memory atomics beat the warp maximum (16 against 24 us)."""
+        """How a later gate tier reports at this band (tierb.slang MF_GATE_ONLY): "gate", the
+        window's maximum alone from its own build, or "elect", the one-bin election --
+        whichever this device runs faster, timed once on synthetic data and kept in
+        MF_COST_FILE (stored_measured_choice). Measured per pair: gate 10-13% faster on the
+        8060S, 12-18% on the M2, the tier halved on a RENOIR; within 1% on the L40S. The
+        gate is its own build: compiled into the one-bin refine it cost that kernel
+        registers (102 -> 127 at n = 512 on the L40S) and its tier 15%."""
         from . import gatechain
         from ._coarse import stored_measured_choice
         holder = getattr(self, "_device_state", None) or self
@@ -209,10 +217,11 @@ class HierOps:
         bufs[1].write(x[:ntm])
         bufs[4].write(np.arange(pairs, dtype=np.uint32))
         bufs[5].write(np.array([pairs, 1, 1, 0], np.uint32))
-        kern = self._x_kernel("tier1", band, dict(stride=0, rowwin=False))
         natives = []
 
         def time_way(way):
+            kern = self._x_kernel("tier1", band, dict(stride=0, rowwin=False,
+                                                      gate=(way == "gate")))
             lst = self._x_list("gate timing")
             lst.listed(kern, bufs[5], pairs, bufs,
                        (ntm, 0, band, band, bin_shift(band) & 0xFFFFFFFF,
@@ -580,7 +589,8 @@ class HierOps:
             else:
                 one = self._shipped("tier1", b)
                 kern = self._x_kernel("tier1" if one else "tier", b,
-                                      dict(stride=stride, rowwin=rowwin))
+                                      dict(stride=stride, rowwin=rowwin,
+                                           gate=one and self._gate_use(b)))
                 lst.listed(kern, S("args0"), pairs,
                            [sbuf, S("ct1"), S("cidx1"), S("cval1"), S("surv0"), S("args0")]
                            + rws("rw1"), (Arg("tier", 7),))
@@ -653,7 +663,7 @@ class HierOps:
             cs1, ce1, csp1, csh1 = coarse_span(n, b1, lo, hi)
             # nbins 0 asks a one-bin build for the gate's decision alone (tierb.slang gateOnly).
             # nbins 0 asks a one-bin build for the gate's decision alone, where it is faster.
-            gate = self._shipped("tier1", b1) and self._gate_way(b1) == "gate"
+            gate = self._gate_use(b1)
             binds["tier"] = (nt, start(cs1), ce1, csp1, csh1 & 0xFFFFFFFF, 0 if gate else 1, 0)
             # The pairs tier 0 dismissed hold zeros: the smallest normal float dismisses them.
             binds["compact1"] = (pairs, _bits(max(thr1, _TINY)), nbins)
