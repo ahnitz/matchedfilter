@@ -13,6 +13,7 @@
 #include "matchedfilter.h"
 #include "transform.h"
 #include "backend.h"
+#include "q15.h"
 
 struct ap_plan { const ap_backend *be; void *h; size_t n; };
 
@@ -247,14 +248,15 @@ int ap_q15_screen(const ap_plan *p, const int16_t *dq, const int16_t *tr, const 
 }
 
 int ap_q15_has_tile(const ap_plan *p){
-  return p && p->n==256 && p->be && p->be->q15_screen_tile;
+  int M1, M2;
+  return p && p->be && p->be->q15_screen_tile && !ap_q15_factor(p->n, &M1, &M2);
 }
 
 int ap_q15_screen_tile(const ap_plan *p, int T, const int16_t *dq,
                        const int16_t *tr, const int16_t *ti, size_t start, size_t end,
                        const int16_t *lanethr, uint64_t *bits, int16_t *lanemax, void *scratch){
   const ap_backend *b=p ? p->be : NULL;
-  if(!b || !b->q15_screen_tile || p->n!=256 || (T!=4 && T!=8 && T!=16) ||
+  if(!b || !b->q15_screen_tile || (T!=4 && T!=8 && T!=16) ||
      !dq || !tr || !ti || !lanethr || !bits || !scratch) return -1;
-  return b->q15_screen_tile(T,dq,tr,ti,start,end,lanethr,bits,lanemax,scratch);
+  return b->q15_screen_tile(p->n,T,dq,tr,ti,start,end,lanethr,bits,lanemax,scratch);
 }

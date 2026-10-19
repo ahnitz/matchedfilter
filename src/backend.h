@@ -83,8 +83,9 @@ typedef struct {
      (rsplit-inl.h). */
   void (*root_merge)(const float *D, const float *T, size_t k0, size_t k1, float scale,
                      const float *tw, size_t n, float *Z);
-  /* Optional N256 tile: T=8 or 16 templates repeated for 32/T data blocks. */
-  int (*q15_screen_tile)(int T, const int16_t *, const int16_t *, const int16_t *,
+  /* Optional N-point tile (any N q15_screen takes): T = QW/4 or QW/2 templates repeated for
+     QW/T data blocks. */
+  int (*q15_screen_tile)(size_t N, int T, const int16_t *, const int16_t *, const int16_t *,
                          size_t, size_t, const int16_t *, uint64_t *, int16_t *, void *);
 } ap_backend;
 
