@@ -385,6 +385,9 @@ class _Buffer:
     kind of code that looks right and halves throughput.
     """
 
+    #: Slotted: a search holds thousands, and every full garbage collection walks them.
+    __slots__ = ("ctx", "nbytes", "handle", "memory", "ptr", "_bytes")
+
     # TRANSFER_DST: any buffer may be cleared on the device (zero_columns, output fills).
     def __init__(self, ctx, nbytes, readback=False, usage=_BUF_STORAGE | _BUF_TRANSFER_DST):
         self.ctx, self.nbytes = ctx, max(int(nbytes), 4)
@@ -417,7 +420,7 @@ class _Buffer:
     def view(self, dtype, count):
         """The first count elements, in place (valid while the buffer lives). The bytes are
         wrapped once: a result reads several views per call."""
-        raw = self.__dict__.get("_bytes")
+        raw = getattr(self, "_bytes", None)
         if raw is None:
             raw = self._bytes = np.frombuffer((ctypes.c_char * self.nbytes).from_address(
                 int(self.ptr.value if hasattr(self.ptr, 'value') else self.ptr)), np.uint8)
@@ -2043,6 +2046,13 @@ class Context(Executor, InputUploads):
     @staticmethod
     def _x_release(native, done=False):
         native.release(done)
+
+    def _x_idle(self):
+        self._wait_queues()
+
+    @staticmethod
+    def _x_free(buf):
+        buf.destroy()
 
     @staticmethod
     def _x_read(buf, out, offset=0):

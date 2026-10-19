@@ -512,3 +512,22 @@ def test_clock_reference_reads_the_sm_clock(ctx):
         assert ref.time() == pytest.approx(ref.anchor / 2.0)
     finally:
         ref._mhz = (reader, mhz0)
+
+
+def test_a_cleared_context_keeps_its_memory_for_reuse(ctx):
+    """Freeing a record's buffers once its context is idle puts them in the device's pools
+    (cuMemFree and cuMemFreeHost synchronize the device); the next record takes them."""
+    from matchedfilter import _cudacompute as cc
+    rng = np.random.default_rng(31)
+    n = 1024
+    d, h = _complex(rng, (4, n)), _complex(rng, (2, n))
+    want = ctx.peaks(n, d, h, binsize=64)
+    dev, host = cc._pools(ctx)
+    before = dev.held, host.held
+    ctx.clear_cache()
+    after = dev.held, host.held
+    assert after[0] > before[0] and after[1] > before[1]
+    got = ctx.peaks(n, d, h, binsize=64)
+    assert dev.held < after[0] and host.held < after[1]
+    np.testing.assert_array_equal(got[0], want[0])
+    np.testing.assert_allclose(got[1], want[1], rtol=1e-6)

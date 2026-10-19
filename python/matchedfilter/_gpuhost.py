@@ -183,14 +183,15 @@ def band_forward_wanted(n, band, f):
     `band` (the widest band a tier reads), while the recompute reads and writes n for each
     block with a refined pair, so bands move fewer bytes iff that fraction f < (n - band) / 2n.
     f is the one measured on this call shape's previous run (refine_block_fraction); with
-    none yet, the call is full. MF_BAND_FORWARD=0/1 forces it off or on."""
+    none yet, the bands (a gate dismisses nearly every block, and a first call taken in full
+    left a record per call shape that ran once). MF_BAND_FORWARD=0/1 forces it off or on."""
     import os
     env = os.environ.get("MF_BAND_FORWARD")
     if env == "0" or n > 65536 or band >= n:
         return False
     if env == "1":
         return True
-    return f is not None and f < (n - band) / (2.0 * n)
+    return f is None or f < (n - band) / (2.0 * n)
 
 
 def refine_block_fraction(survivors, nt, nd):

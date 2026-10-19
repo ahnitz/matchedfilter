@@ -203,19 +203,70 @@ def _uint4(*v):
     return (ctypes.c_uint32 * 4)(*(int(x) & 0xFFFFFFFF for x in v))
 
 
+def _size_class(nbytes):
+    """The allocation a request of nbytes takes from a pool (_Pool): 4 KiB, or nbytes rounded
+    up to a quarter of its power of two (at most 25% more)."""
+    if nbytes <= 4096:
+        return 4096
+    step = 1 << (int(nbytes).bit_length() - 3)
+    return -(-int(nbytes) // step) * step
+
+
+class _Pool:
+    """Allocations of one kind (device or page-locked) freed while their context was idle,
+    kept by size class for the next allocation on the device. cuMemFree and cuMemFreeHost
+    synchronize the device: a dropped plan's context, freed between a search's calls, made
+    ~300 of them, each a stall of every pipeline on the device (L40S: a fifth of the fine
+    stage). Holds at most `cap` bytes; past that a free goes to the driver."""
+
+    def __init__(self, cap):
+        self.cap, self.held, self.free = cap, 0, {}
+
+    def take(self, size):
+        lst = self.free.get(size)
+        if lst:
+            self.held -= size
+            return lst.pop()
+        return None
+
+    def give(self, size, ptr):
+        if self.held + size > self.cap:
+            return False
+        self.free.setdefault(size, []).append(ptr)
+        self.held += size
+        return True
+
+
+def _pools(ctx):
+    holder = getattr(ctx, "_device_state", None) or ctx
+    pools = holder.__dict__.get("pools")
+    if pools is None:
+        pools = holder.pools = (_Pool(1 << 30), _Pool(256 << 20))       # device, page-locked
+    return pools
+
+
 class _Buffer:
-    """Device memory allocation managed via cuMemAlloc / cuMemFree."""
+    """Device memory: cuMemAlloc'd, or reused from the device's pool (_Pool). Slotted, as
+    are the other buffer kinds: a search holds thousands, which the garbage collector walks
+    at every full collection."""
+    __slots__ = ("ctx", "nbytes", "dptr", "_size", "ptr", "handle")
 
     def __init__(self, ctx, nbytes):
         self.ctx = ctx
         self.nbytes = int(nbytes)
         self.dptr = ctypes.c_uint64(0)
+        self._size = 0
         if self.nbytes > 0:
-            ctx._bind()
-            check_cuda(
-                self.ctx.cuda.cuMemAlloc_v2(ctypes.byref(self.dptr), self.nbytes),
-                "cuMemAlloc",
-            )
+            self._size = _size_class(self.nbytes)
+            ptr = _pools(ctx)[0].take(self._size)
+            if ptr is not None:
+                self.dptr.value = ptr
+            else:
+                ctx._bind()
+                check_cuda(
+                    self.ctx.cuda.cuMemAlloc_v2(ctypes.byref(self.dptr), self._size),
+                    "cuMemAlloc",
+                )
         self.ptr = self.dptr.value
         self.handle = self.dptr.value
 
@@ -243,10 +294,12 @@ class _Buffer:
             self.ctx._sync(st)
         return out
 
-    def destroy(self):
+    def destroy(self, idle=False):
+        """Free it; idle: no work of its context runs (it goes back to the pool)."""
         if self.dptr.value:
-            self.ctx._bind()
-            self.ctx.cuda.cuMemFree_v2(self.dptr)
+            if not (idle and _pools(self.ctx)[0].give(self._size, self.dptr.value)):
+                self.ctx._bind()
+                self.ctx.cuda.cuMemFree_v2(self.dptr)
             self.dptr.value = 0
             self.ptr = 0
             self.handle = 0
@@ -339,25 +392,32 @@ class _HostBuffer:
 
 class _Pinned:
     """Page-locked host staging for asynchronous readback (cuMemAllocHost)."""
+    __slots__ = ("ctx", "nbytes", "_size", "ptr", "handle", "_raw")
 
     def __init__(self, ctx, nbytes):
         self.ctx = ctx
         self.nbytes = max(int(nbytes), 16)
-        p = ctypes.c_void_p()
-        ctx._bind()
-        check_cuda(ctx.cuda.cuMemAllocHost_v2(ctypes.byref(p), self.nbytes), "cuMemAllocHost")
-        self.ptr = p.value
-        self.handle = p.value
+        self._size = _size_class(self.nbytes)
+        ptr = _pools(ctx)[1].take(self._size)
+        if ptr is None:
+            p = ctypes.c_void_p()
+            ctx._bind()
+            check_cuda(ctx.cuda.cuMemAllocHost_v2(ctypes.byref(p), self._size), "cuMemAllocHost")
+            ptr = p.value
+        self.ptr = ptr
+        self.handle = ptr
         self._raw = np.frombuffer((ctypes.c_ubyte * self.nbytes).from_address(self.ptr), np.uint8)
 
     def view(self, dtype, count, offset=0):
         size = np.dtype(dtype).itemsize
         return self._raw[offset:offset + count * size].view(dtype)
 
-    def destroy(self):
+    def destroy(self, idle=False):
+        """Free it; idle: no copy of its context reads or writes it (back to the pool)."""
         if self.ptr:
-            self.ctx._bind()
-            self.ctx.cuda.cuMemFreeHost(ctypes.c_void_p(self.ptr))
+            if not (idle and _pools(self.ctx)[1].give(self._size, self.ptr)):
+                self.ctx._bind()
+                self.ctx.cuda.cuMemFreeHost(ctypes.c_void_p(self.ptr))
             self.ptr = 0
             self.handle = 0
 
@@ -450,6 +510,7 @@ class _Staged:
     go through page-locked staging in one asynchronous copy on the context's stream: a copy
     from managed memory costs ~144 us, and a kernel reading a host-written managed page
     faults it over (132 us a forward launch on the L40S, 15 us from device memory)."""
+    __slots__ = ("ctx", "nbytes", "device", "pinned", "dptr")
 
     def __init__(self, ctx, nbytes):
         self.ctx, self.nbytes = ctx, max(int(nbytes), 4)
@@ -463,9 +524,9 @@ class _Staged:
             ctypes.memmove(self.pinned.ptr, array.ctypes.data, count)
             self.ctx._copy_h2d(self.dptr.value, self.pinned.ptr, count, stream, "upload")
 
-    def destroy(self):
-        self.device.destroy()
-        self.pinned.destroy()
+    def destroy(self, idle=False):
+        self.device.destroy(idle)
+        self.pinned.destroy(idle)
 
 
 class _WordSlots:
@@ -489,7 +550,7 @@ class _WordSlots:
 
     def destroy(self):
         for chunk in self.chunks:
-            chunk.destroy()
+            chunk.destroy(idle=True)          # after the context's work (Context.destroy)
         self.chunks, self.free = [], []
 
 
@@ -497,6 +558,7 @@ class _Readback:
     """A device buffer the host reads (_x_alloc(readback=True)): a list's readback op copies
     a prefix of it into page-locked memory on the stream, so the host reads it after the
     run's one synchronization (a range past that prefix is copied when it is read)."""
+    __slots__ = ("ctx", "nbytes", "device", "dptr", "pinned", "mirrored")
 
     def __init__(self, ctx, nbytes):
         self.ctx, self.nbytes = ctx, max(int(nbytes), 4)
@@ -533,10 +595,10 @@ class _Readback:
                                                      count - inside), "cuMemcpyDtoH")
         return out
 
-    def destroy(self):
-        self.device.destroy()
+    def destroy(self, idle=False):
+        self.device.destroy(idle)
         if self.pinned is not None:
-            self.pinned.destroy()
+            self.pinned.destroy(idle)
             self.pinned = None
 
 
@@ -598,7 +660,7 @@ class _CudaList:
             if slot is not None:            # (block, offset, name, byte offset or -words)
                 self.args.append((block, at, slot[0], slot[1]))
         ptrs = (ctypes.c_void_p * len(params))(*[base + at for at in params])
-        return ("launch", (fn, wg), int(groups), block, ptrs)
+        return ("launch", fn, wg, int(groups), block, ptrs)
 
     def dispatch(self, kernel, groups, buffers, words=(), offsets=None):
         self.ops.append(self._launch_op(kernel, groups, buffers, words, offsets))
@@ -1263,7 +1325,7 @@ class Context(Executor, InputUploads):
         for op in ops:
             kind = op[0]
             if kind == "launch":
-                _, (fn, wg), groups, params, param_ptrs = op
+                _, fn, wg, groups, params, param_ptrs = op
                 self._launch(fn, groups, wg, params, stream=stream, param_ptrs=param_ptrs)
             elif kind == "fill":
                 self._fill32(op[1].dptr, op[2], op[1].nbytes // 4, stream)
@@ -1287,9 +1349,20 @@ class Context(Executor, InputUploads):
 
     def _x_release(self, native, done=False):
         if not done:
-            self._bind()
-            check_cuda(self.cuda.cuCtxSynchronize(), "cuCtxSynchronize")
+            self._x_idle()
         native.destroy()
+
+    @staticmethod
+    def _x_free(buf):
+        buf.destroy(idle=True)
+
+    def _x_idle(self):
+        # This context's streams only: cuCtxSynchronize waits for every Context on the shared
+        # primary context, and a per-record wait of that kind drained their pipelines.
+        self._bind()
+        for s in self.streams:
+            if s.value:
+                check_cuda(self.cuda.cuStreamSynchronize(s), "cuStreamSynchronize")
 
     @staticmethod
     def _x_read(buf, out, offset=0):

@@ -121,7 +121,14 @@ class Driver(Executor, InputUploads):
         return np.zeros(count, dtype)
 
     def _x_release(self, native, done=False):
-        pass
+        self.__dict__.setdefault("released", []).append(done)
+
+    @staticmethod
+    def _x_free(buf):
+        buf.destroy()
+
+    def _x_idle(self):
+        self.__dict__["idles"] = self.__dict__.get("idles", 0) + 1
 
 
 def _names(ops):
@@ -348,27 +355,29 @@ def test_follow_up_items_pass_scalar_words(monkeypatch):
 
 
 # --- the band/full choice -------------------------------------------------------------
-def test_a_call_on_shared_spectra_lets_the_next_one_claim_its_forward(monkeypatch):
-    """Every call on shared spectra notes the fraction of blocks its refine read, banded or
-    not: the next call of its shape then forwards only the bands (no survivor: nothing to
-    recompute). Noted only on banded calls, the first call's "unknown, so full" held for
-    ever and no call claimed its forward."""
+def test_the_band_feed_follows_the_measured_refine_fraction(monkeypatch):
+    """A call on shared spectra claims its deferred forward and writes only the bands when
+    the blocks its shape refined last time make that the fewer bytes, or when nothing is
+    measured yet (a gate dismisses nearly every block); a measured large fraction takes the
+    full forward. Every call notes its fraction, banded or not."""
     monkeypatch.setattr(_gpuhier, "shared_view", lambda array, ctx: array)
     ctx = Driver()
     n = 4096
     d = np.ones((2, n), np.complex64)
     h = np.ones((3, n), np.complex64)
-    feeds = []
-    for _ in range(2):
+    claimed = []
+    for f in (None, 0.9, 0.0):
+        if f is not None:
+            ctx._band_f[(n, 128, 2, 3)] = f
         source = (n, None, None, 0, 2, 8 * n, 0, d, d.ctypes.data)
         ctx._defer("forward", {}, 0, source)
         claims = _gpuhier.CLAIMS[0]
         ctx.hier_peaks(n, 128, d, h, h[:, :128], 0.5, slot=0)
-        feeds.append(_gpuhier.CLAIMS[0] - claims)
+        claimed.append(_gpuhier.CLAIMS[0] - claims)
+        assert ctx._band_f[(n, 128, 2, 3)] == 0.0      # noted: no pair refined
         ctx.cancel_forward()
-    assert feeds == [0, 1]
-    ops = ctx.runs[-1][0]
-    assert ("dispatch", "fwd_bands") in _names(ops)
+    assert claimed == [1, 0, 1]
+    assert ("dispatch", "fwd_bands") in _names(ctx.runs[-1][0])
 
 
 @pytest.mark.parametrize("cascade", [False, True])
@@ -399,3 +408,44 @@ def test_no_phase_orders_work_inside_itself(monkeypatch, feed, way, cascade):
         kinds = [op[0] for op in work if op[0] != "readback"]
         assert "barrier" not in kinds[:-1] or all(k == "barrier" for k in
                                                   kinds[kinds.index("barrier"):]), (name, kinds)
+
+
+def test_an_unslotted_run_leaves_unrelated_deferred_work_for_its_consumer(monkeypatch):
+    """An unslotted run (a middle-stage correlation) runs only the deferred work that writes
+    what it binds: another slot's forward stays deferred, for its hierarchical call to claim.
+    Flushing every slot's work once cost each claim and made the host wait on it."""
+    monkeypatch.setattr(_gpuhier, "shared_view", lambda array, ctx: array)
+    from matchedfilter import _gpuexec
+    monkeypatch.setattr(_gpuexec, "shared_view", lambda array, ctx: array)
+    ctx = Driver()
+    n = 4096
+    d = np.ones((2, n), np.complex64)
+    other = np.ones((2, n), np.complex64)
+    h = np.ones((3, n), np.complex64)
+    ctx._defer("fwd-d", {}, 1, (n, None, None, 0, 2, 8 * n, 0, d, d.ctypes.data))
+    ctx._defer("fwd-other", {}, 2, (n, None, None, 0, 2, 8 * n, 0, other, other.ctypes.data))
+    ctx.peaks(n, other, h, binsize=n)              # unslotted, binds `other` only
+    ran = [r[0] for r in ctx.runs]
+    assert "fwd-other" in ran and "fwd-d" not in ran
+    assert list(ctx._pending()) == [1]
+    before = _gpuhier.CLAIMS[0]
+    ctx._band_f = {(n, 128, 2, 3): 0.0}           # the band feed is wanted
+    monkeypatch.setenv("MF_BAND_FORWARD", "1")
+    ctx.hier_peaks(n, 128, d, h, h[:, :128], 0.5, slot=1)
+    assert _gpuhier.CLAIMS[0] == before + 1 and not ctx._pending()
+
+
+def test_clearing_a_context_waits_once_then_frees_every_record():
+    """A cleared context (clear_cache, a dropped trial layout) waits for its own work once
+    and frees every record as finished: a device-wide wait per record stalled every other
+    plan sharing the device, once per record."""
+    ctx = Driver()
+    for nd in (1, 2, 3):
+        n = 4096
+        d = np.ones((nd, n), np.complex64)
+        h = np.ones((3, n), np.complex64)
+        ctx.hier_peaks(n, 128, d, h, h[:, :128], 0.5)
+    assert len(ctx._exec_table()) == 3
+    ctx._evict_all()
+    assert not ctx._exec_table()
+    assert ctx.idles == 1 and ctx.released == [True, True, True]
