@@ -947,6 +947,7 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
         hmf_tier *next=&p->tier[1];
         const unsigned long long begin=ap_ticks();
         if(run_gate_pairs(p,next,d0,t0,nt,p->qd,p->qt,k,start,end)<0) return -1;
+        next->lagged=1;              /* its cebuf holds each pair's largest coarse lag */
         next->checked+=k;
         int kept=0;
         for(int j=0;j<k;j++){
