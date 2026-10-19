@@ -177,7 +177,7 @@ ap_hmf_plan *ap_hmf_create_chain(size_t n,size_t k,int ndata,int ntmpl,
     ap_hmf_destroy(p); return NULL;
   }
   p->prof=getenv("MF_HMF_PROF")!=NULL;
-  p->trace=getenv("MF_HMF_TRACE")!=NULL;
+  { const char *e=getenv("MF_HMF_TRACE"); p->trace=e && *e && strcmp(e,"0")!=0; }   /* unset, empty or 0: off */
   const char *dump=getenv("MF_HMF_DUMP");
   p->dump=dump ? fopen(dump,"wb") : NULL;
   return p;
