@@ -8,6 +8,7 @@ import argparse
 from pathlib import Path
 import ctypes as C, numpy as np, time, json
 from matchedfilter import _vkcompute as V
+from matchedfilter._shared import pack_half2
 parser=argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--candidate-spv', type=Path, required=True)
 args=parser.parse_args()
@@ -35,7 +36,7 @@ try:
    c.vk.vkEndCommandBuffer(cmd);cmds.append(cmd)
    c._submit(cmd)
    got=dst.read(np.uint32,rows*band*(1 if packed else 2))
-   want=V._pack_half2(d[:,:band]).ravel() if packed else np.ascontiguousarray(d[:,:band]).view(np.uint32).ravel()
+   want=pack_half2(d[:,:band]).ravel() if packed else np.ascontiguousarray(d[:,:band]).view(np.uint32).ravel()
    np.testing.assert_array_equal(got,want)
   times=[[],[]]
   for rep in range(11):

@@ -64,31 +64,40 @@ void markBlocks(uint3 gid: SV_DispatchThreadID,
     }
 }
 
-//: seriesForward for the listed blocks only, each written to its own row.
+//: seriesForward for the listed blocks only, each written to its own row: blockList[0 ..
+//: blockArgs[0]) (markBlocks). The bounded form every target shares (refine_bounded.slang):
+//: a device with indirect dispatch launches blockArgs[0] groups with gridSize at least that,
+//: so each group takes one block; one without launches a fixed grid of gridSize groups that
+//: strides over the list. The loop bound is group-uniform, so the barriers inside stay legal.
 [shader("compute")][numthreads(WG,1,1)]
 void seriesForwardListed(uint3 gid: SV_GroupID, uint3 lid: SV_GroupThreadID,
                          StructuredBuffer<float2> series,
                          StructuredBuffer<uint> starts,
                          RWStructuredBuffer<float2> spectra,
                          StructuredBuffer<uint> blockList,
-                         uniform uint seriesLength SERIES_LAYOUT)
+                         StructuredBuffer<uint> blockArgs,
+                         uniform uint seriesLength SERIES_LAYOUT, uniform uint gridSize)
 {
     uint tid = lid.x;
     _tid = tid;
     _stgBase = 0;
-    uint row = blockList[gid.x];
-    uint start = starts[row];
-    C r[RADIX];
-    [unroll] for (uint k = 0; k < R; ++k) {
-        uint offset = tid + WG*k;
-        float2 x = float2(0, 0);
-        if (start < seriesLength && offset < seriesLength - start)
-            x = SERIES_AT(start + offset);
-        r[k] = C(x.x / float(N), -x.y / float(N));
-    }
-    forwardTransform(r, tid);
-    [unroll] for (uint k = 0; k < R; ++k) {
-        uint index = slotToIndex(tid * R + k);
-        spectra[row * N + index] = float2(r[k].x, -r[k].y);
+    uint total = blockArgs[0];
+    for (uint item = gid.x; item < total; item += gridSize) {
+        uint row = blockList[item];
+        uint start = starts[row];
+        C r[RADIX];
+        [unroll] for (uint k = 0; k < R; ++k) {
+            uint offset = tid + WG*k;
+            float2 x = float2(0, 0);
+            if (start < seriesLength && offset < seriesLength - start)
+                x = SERIES_AT(start + offset);
+            r[k] = C(x.x / float(N), -x.y / float(N));
+        }
+        forwardTransform(r, tid);
+        [unroll] for (uint k = 0; k < R; ++k) {
+            uint index = slotToIndex(tid * R + k);
+            spectra[row * N + index] = float2(r[k].x, -r[k].y);
+        }
+        GroupMemoryBarrierWithGroupSync();
     }
 }

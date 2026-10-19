@@ -169,14 +169,18 @@ C cload(StructuredBuffer<CVal> b, uint i) { return b[i]; }
 //: Vulkan: a binding after the entry's own (4 for the coarse role, 5 for the listed refine),
 //: read when the specialization constant mfRowWindows is set. CUDA has no specialization
 //: constants: the table is the entry's last argument (ROWWIN_PARAM, passed down as
-//: ROWWIN_ARG) and a window start of ROWWIN_ON switches it on. Metal takes no per-row
-//: windows: on the M2 one grouped call per tier ran 6% slower in the production ladder than
-//: a call per window group (docs/convergence-plan.md, step 2). Elsewhere both macros are
-//: empty, so those kernels are unchanged.
+//: ROWWIN_ARG) and a window start of ROWWIN_ON switches it on. Metal takes the table the same
+//: way, switched by the library macro MF_ROW_WINDOWS (compiled out when 0, like Vulkan's).
+//: Whether a grouped call uses per-row windows or a call per window group is the host's
+//: measured choice (on the M2 the grouped call once ran 6% slower in the production ladder,
+//: docs/convergence-plan.md step 2). Elsewhere both macros are empty.
 #define ROWWIN_ON 0xFFFFFFFFu
 #if defined(MF_VULKAN)
 #if COARSE16
 [[vk::binding(4, 0)]] StructuredBuffer<uint> gRowWin;
+#elif defined(MF_REFINE_BOUNDED)
+//: refineListedBounded's own buffers take bindings 0-5 (its count is 5).
+[[vk::binding(6, 0)]] StructuredBuffer<uint> gRowWin;
 #else
 [[vk::binding(5, 0)]] StructuredBuffer<uint> gRowWin;
 #endif
@@ -187,6 +191,15 @@ void rowWindow(uint d, inout uint winStart, inout uint winEnd)
     if (mfRowWindows == 0u) return;
     winStart = gRowWin[2u * d];
     winEnd = gRowWin[2u * d + 1u];
+}
+#elif defined(MF_METAL)
+#define ROWWIN_PARAM , StructuredBuffer<uint> rowWin
+#define ROWWIN_ARG , rowWin
+void rowWindow(uint d, inout uint winStart, inout uint winEnd, StructuredBuffer<uint> rowWin)
+{
+    if (mfRowWindows == 0u) return;
+    winStart = rowWin[2u * d];
+    winEnd = rowWin[2u * d + 1u];
 }
 #elif defined(MF_CUDA)
 #define ROWWIN_PARAM , StructuredBuffer<uint> rowWin
@@ -1853,6 +1866,7 @@ void compactListed(uint3 gid: SV_DispatchThreadID,
     uint count = listArgs[0];
     uint pair = (k < count) ? list[k] : 0u;
     bool active = (k < count) && !(length(coarse[pair]) < thr);
+#if defined(MF_VULKAN) || defined(MF_CUDA)
     uint waveCount = WaveActiveCountBits(active);
     uint waveOffset = WavePrefixCountBits(active);
     uint baseSlot = 0;
@@ -1861,6 +1875,14 @@ void compactListed(uint3 gid: SV_DispatchThreadID,
     baseSlot = WaveReadLaneFirst(baseSlot);
     if (active)
         survivors[baseSlot + waveOffset] = pair;
+#else
+    // No wave prefix count (Metal, as compactPairs): one atomic per survivor.
+    if (active) {
+        uint slot;
+        InterlockedAdd(args[0], 1u, slot);
+        survivors[slot] = pair;
+    }
+#endif
 }
 
 //: The refine, over a compacted list. Uses the same filtering body, except that

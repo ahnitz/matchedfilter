@@ -1,5 +1,7 @@
-"""The fused forward (forward_tier0.slang) on Metal: the hierarchical fine stage writes only the
-tiers' bands and recomputes its refine blocks; results must equal the separate forward+pack."""
+"""The band feed of the hierarchical fine stage, on every GPU (_gpuhier): a call that claims
+the deferred forward of its spectra writes only the tiers' bands (forward_tier0.slang for an
+fp16 first tier, else seriesForwardBands) and recomputes its refine blocks. Results must be a
+correct hierarchical result, as the separate forward's are."""
 import numpy as np
 import pytest
 
@@ -67,16 +69,11 @@ def test_fused_forward_matches_separate(monkeypatch):
     only exact peaks, at the exact SNR, and the CPU's gate decisions on the same chain up to
     rounding-margin flips. Exact equality between the two GPU paths is not a property of
     either: they round the coarse bands differently."""
-    pytest.importorskip("matchedfilter._mtlcompute")
-    try:
-        from matchedfilter import _mtlcompute
-        _mtlcompute.Context(0).destroy()
-    except Exception:
-        pytest.skip("Metal not available")
+    from matchedfilter import _gpuhier
     a = _run(monkeypatch, False)
-    before = _mtlcompute._FUSED_FORWARDS[0]
+    before = _gpuhier.CLAIMS[0]
     b = _run(monkeypatch, True)
-    assert _mtlcompute._FUSED_FORWARDS[0] > before, "the fused forward was not taken"
+    assert _gpuhier.CLAIMS[0] > before, "no call claimed its forward"
     cpu = _run(monkeypatch, False, device="cpu")
     exact = _run(monkeypatch, False, device="cpu", engine="flat")
     assert len(a) == len(b) == len(cpu) == len(exact)
@@ -84,3 +81,18 @@ def test_fused_forward_matches_separate(monkeypatch):
         assert len(rc) > 100
         _assert_consistent(ra, rc, rx, "separate forward")
         _assert_consistent(rb, rc, rx, "band forward")
+
+
+def test_every_sparse_way_gives_the_same_peaks(monkeypatch):
+    """A sparse hierarchical result read as survivors' rows or compacted on the device (a
+    measured choice) is the same result, through the fused batches of filter_series_many:
+    the device compaction once read the refine's output before it was written, losing peaks
+    only when its timing made it the choice."""
+    from matchedfilter import _gpuexec
+    out = {}
+    for way in ("rows", "compact"):
+        monkeypatch.setattr(_gpuexec.Measured, "way",
+                            lambda self, w=way: ((w if w in self.ways else self.ways[0]), False))
+        out[way] = _run(monkeypatch, False)
+    for a, b in zip(out["rows"], out["compact"]):
+        assert a == b

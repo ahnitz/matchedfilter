@@ -1,120 +1,20 @@
 """Metal backend: the guarantees the Vulkan tests give, on Apple hardware.
 
-The mocked tests run everywhere and pin what is DISPATCHED; the hardware
-tests run where a Metal device exists and compare against the CPU.
+What every backend dispatches is pinned once, on a recording driver
+(test_gpu_hier_plan); the hardware tests here run where a Metal device exists and compare
+against the CPU.
 """
 import os
 import re
 import pathlib
 import subprocess
 import sys
-from contextlib import nullcontext
-from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
 import matchedfilter as mf
 from matchedfilter import _mtlcompute
-
-
-# --- mocked: what a two-tier chain dispatches -------------------------------
-class _Buf:
-    def __init__(self, ctx=None, nbytes=16):
-        self.nbytes = nbytes
-        self.handle = object()
-        self.value = None
-
-    def write(self, value):
-        self.value = np.asarray(value).copy()
-
-    def read(self, dtype, count):
-        return np.zeros(count, dtype=dtype)
-
-    def destroy(self):
-        pass
-
-
-@pytest.fixture
-def mock_ctx(monkeypatch):
-    monkeypatch.setattr(_mtlcompute, "_Buffer", _Buf)
-    c = _mtlcompute.Context.__new__(_mtlcompute.Context)
-    c._batches, c._hier, c._inflight = {}, {}, {}
-    c._uploaded = {"data": {}, "tmpl": {}}
-    c._pipelines = {}
-    c.queue = None
-    c.o = SimpleNamespace(call=lambda *a, **k: None, autorelease_pool=nullcontext)
-    c.pipeline = lambda n, entry="fusedTierB", one_bin=False, c16=False: (n, entry, one_bin)
-    c._check_completed = lambda *a: None
-    c._record_gpu_time = lambda *a: None
-    c.dispatched = []
-
-    def dispatch(enc, pso, params, buffers, tg, groups=None, indirect=None):
-        c.dispatched.append(dict(pso=pso, params=tuple(params), tg=tg, groups=groups,
-                                 indirect=indirect is not None))
-    c._dispatch = dispatch
-    return c
-
-
-def test_metal_two_tier_chain_runs_both_tiers(mock_ctx):
-    """The cascade used to collapse to its second tier with its threshold."""
-    n, b0, b1 = 4096, 128, 512
-    d = np.ones((2, n), np.complex64)
-    h = np.ones((3, n), np.complex64)
-    mock_ctx.hier_peaks(n, b1, d, h, h[:, :b0], 0.25, cascade_band=b0,
-                        ct1=h[:, :b1], raw_thr1=0.75, threshold=5.0)
-    # The coarse entry may carry a pairs-per-group suffix (coarse16p8).
-    kinds = [(x["pso"][0], "coarse16" if x["pso"][1].startswith("coarse16") else x["pso"][1])
-             for x in mock_ctx.dispatched]
-    coarse = "coarse16" if _mtlcompute._use_c16(b0) else "fusedTierB"
-    assert kinds == [(b0, coarse), (b0, "compactPairs"), (b1, "refineListed"),
-                     (b0, "compactPairs"), (n, "refineListed")]
-    # Each tier is gated by its own threshold, in order.
-    thr = [np.uint32(x["params"][1]).view(np.float32) for x in mock_ctx.dispatched
-           if x["pso"][1] == "compactPairs"]
-    assert thr == [np.float32(0.25), np.float32(0.75)]
-    # The second tier and the refine run over the device-side survivor lists.
-    assert [x["indirect"] for x in mock_ctx.dispatched] == [False, False, True, False, True]
-    bufs = next(iter(mock_ctx._hier.values()))
-    np.testing.assert_array_equal(bufs["ct1"].value, h[:, :b1])
-    np.testing.assert_array_equal(bufs["cval1"].value, 0)
-
-
-def test_metal_one_tier_chain_is_unchanged(mock_ctx):
-    n, b = 4096, 256
-    d = np.ones((1, n), np.complex64)
-    h = np.ones((2, n), np.complex64)
-    mock_ctx.hier_peaks(n, b, d, h, h[:, :b], 0.5)
-    assert [("coarse16" if x["pso"][1].startswith("coarse16") else x["pso"][1])
-            for x in mock_ctx.dispatched] == [
-        "coarse16" if _mtlcompute._use_c16(b) else "fusedTierB", "compactPairs", "refineListed"]
-
-
-def test_metal_incomplete_cascade_raises(mock_ctx):
-    n = 4096
-    d = np.ones((1, n), np.complex64)
-    h = np.ones((1, n), np.complex64)
-    with pytest.raises(ValueError):
-        mock_ctx.hier_peaks(n, 512, d, h, h[:, :128], 0.5, cascade_band=128)
-    with pytest.raises(ValueError):
-        mock_ctx.hier_peaks(n, 128, d, h, h[:, :512], 0.5, cascade_band=512,
-                            ct1=h[:, :128], raw_thr1=0.5)
-
-
-def test_async_submission_is_deferred_and_keyed_by_slot(mock_ctx):
-    n, b = 4096, 256
-    d = np.ones((1, n), np.complex64)
-    h = np.ones((1, n), np.complex64)
-    pend = [mock_ctx.hier_peaks(n, b, d, h, h[:, :b], 0.5, slot=s, async_submit=True)
-            for s in (0, 1)]
-    # Nothing was waited on: both are in flight, each with its own buffers.
-    assert all(isinstance(p, _mtlcompute._Pending) for p in pend)
-    assert len(mock_ctx._inflight) == 2 and len(mock_ctx._hier) == 2
-    pend[0]()
-    assert len(mock_ctx._inflight) == 1
-    mock_ctx._drain()
-    assert not mock_ctx._inflight
-    assert pend[1].done
 
 
 def test_series_pipelining_is_a_declared_capability():
@@ -172,6 +72,40 @@ def test_every_selectable_metal_kernel_fits_32k_of_threadgroup_memory(n):
             src = (_mtlcompute._METAL_DIR / one["msl"]).read_text()
             assert (_threadgroup_bytes(src) <= 32768) == (one["lds_bytes"] <= 32768)
             assert _threadgroup_bytes(src) == one["lds_bytes"]
+
+
+def test_every_shipped_metal_library_declares_the_function_its_pipeline_asks_for():
+    """pipeline() looks a function up by name (_mtlcompute._function): a build that renames
+    an entry point fails only on a Mac, at the first call."""
+    manifest = _mtlcompute._manifest()
+    checked = 0
+    for n, info in manifest["modules"].items():
+        for entry, files in (info.get("metal") or {}).items():
+            for f in [files] + [files[k] for k in ("one_bin", "portable") if k in files]:
+                src = (_mtlcompute._METAL_DIR / f["msl"]).read_text()
+                want = _mtlcompute._function(entry)
+                assert re.search(r"\bvoid %s\(" % want, src), (n, entry, f["msl"], want)
+                checked += 1
+    assert checked > 50
+
+
+def test_every_entry_the_shared_layer_asks_for_has_a_metal_library():
+    """_x_kernel's entries (fixed, forward family, listed) resolve through _stem to a shipped
+    source at every length the build covers: a missing mapping fails only on a Mac."""
+    c = _mtlcompute.Context.__new__(_mtlcompute.Context)
+    c.max_shared_memory, c.name = 32768, "32 KB device"
+    manifest = _mtlcompute._manifest()
+    for n in map(int, manifest["modules"]):
+        entries = ["fusedTierB", "compactPairs", "compactListed", "refineListed"]
+        if (_mtlcompute._METAL_DIR / ("forward_%d.metal" % n)).is_file():
+            entries += ["seriesForward", "seriesForwardBands", "seriesForwardListed"]
+        if (_mtlcompute._METAL_DIR / ("forward_tier0_%d.metal" % n)).is_file():
+            entries.append("forwardTier0")
+        for entry in entries:
+            stem = c._stem(n, entry)
+            assert (_mtlcompute._METAL_DIR / (stem + ".metal")).is_file(), (n, entry, stem)
+    for entry in ("markBlocks", "packCoarse", "compactPeaks"):
+        assert (_mtlcompute._METAL_DIR / (c._stem(4096, entry) + ".metal")).is_file(), entry
 
 
 # --- hardware ---------------------------------------------------------------
@@ -345,7 +279,10 @@ def test_metal_one_bin_and_general_kernels_agree(n, hierarchical, monkeypatch):
         if not specialized:
             real = f._gpu.pipeline
             f._gpu.pipeline = (lambda n_, entry="fusedTierB", one_bin=False, c16=False,
-                               real=real: real(n_, entry, False, c16))
+                               macros=(), real=real: real(n_, entry, False, c16, macros))
+            # A cascade's tier 1 asks a one-bin build for its gate alone: none here.
+            f._gpu.__dict__.setdefault("_shipped_memo", {}).update(
+                {("tier1", b): False for b in (64, 128, 256, 512, 1024, 2048, 4096, 8192)})
         filters.append(f)
     for window in [(0, n), (11, n - 17)]:
         for threshold in (0., 1e10):

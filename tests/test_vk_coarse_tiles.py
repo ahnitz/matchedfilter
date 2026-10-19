@@ -8,6 +8,8 @@ import numpy as np
 import pytest
 
 from matchedfilter import _vulkan
+from matchedfilter._coarse import coarse_launch
+from matchedfilter._shared import pack_half2
 
 _devices, _reason = _vulkan.enumerate_devices()
 pytestmark = pytest.mark.skipif(not _devices, reason=_reason or "no Vulkan device")
@@ -42,7 +44,7 @@ def _coarse(ctx, band, tile, x, t, subgroup=0, ppg=1, tail=None, twt=1):
     vk, cmd = ctx.vk, V._vp()
     try:
         bufs[0].write(x)
-        bufs[1].write(V._pack_half2(t))
+        bufs[1].write(pack_half2(t))
         if spare:
             bufs[2].write(np.full(nd * nt + spare, _SENTINEL, np.uint32))
             bufs[3].write(np.full(2 * (nd * nt + spare), _SENTINEL, np.uint32))
@@ -50,7 +52,7 @@ def _coarse(ctx, band, tile, x, t, subgroup=0, ppg=1, tail=None, twt=1):
             ("coarse16-test", band, ppg, tile), V.coarse_stem(band, ppg, tile) + ".spv",
             V._NBIND, V._PUSH_BYTES, data_stride=band, subgroup=subgroup, coarse_twt=twt)
         dset = ctx._descriptor_set(sl, bufs)
-        slot_val, groups = V.coarse_launch(nd, nt, ppg, tile, band)
+        slot_val, groups = coarse_launch(nd, nt, ppg, tile, band)
         V._check(vk.vkAllocateCommandBuffers(ctx.device, ctypes.byref(
             V._CmdBufAlloc(40, None, ctx.command_pool, 0, 1)), ctypes.byref(cmd)), "alloc")
         V._check(vk.vkBeginCommandBuffer(cmd, ctypes.byref(V._CmdBufBegin(42, None, 0, None))),

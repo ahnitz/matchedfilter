@@ -20,11 +20,8 @@ import time
 import numpy as np
 
 from . import _gputime, _vulkan
-from ._shared import empty_shared, shared_buffer, shared_key, shared_view, write_input
-from ._gpuhost import (MAX_BINS, band_forward_wanted, band_windows, bin_shift, coarse_span,
-                       refine_block_fraction, plan_items, split_items, hier_tiers, hier_window,
-                       split_bins, hier_peaks_grouped as _hier_peaks_grouped)
-from ._shared import pack_half2 as _pack_half2, sparsified as _sparsified
+from ._shared import empty_shared, shared_view
+from ._gpuhost import MAX_BINS
 
 _SPIRV = pathlib.Path(__file__).resolve().parent / "spirv"
 
@@ -52,24 +49,6 @@ def _manifest():
 #: 2048 uints. Past that the kernel needs its own array and the LDS cost
 #: halves occupancy, so this refuses rather than silently getting slower.
 _MAX_BINS = MAX_BINS          # _gpuhost.MAX_BINS: one limit for every backend
-
-
-
-def _use_c16(band):
-    """Half-width coarse path, only where filling a wave pays for it.
-
-    WG = band/16, so a band under 512 gives a workgroup SMALLER than one
-    wave32 and packing PPG = 512/band pairs into it fills the idle lanes.
-    Measured at band 128 (WG 8, PPG 4): 1.911 -> 0.865 ms, 2.2x.
-
-    At band 512 the workgroup is already a full wave and there is nothing
-    to fill, so the half2 conversions in the stage are pure added cost --
-    2.239 -> 2.615 ms, 17% SLOWER, and band 1024 11% slower. Those are
-    means of three runs; single runs on this part vary by ~15% at band 128
-    and ~7% at 512, which is wide enough that one measurement either way
-    would have supported the wrong answer.
-    """
-    return True   # one-bin specialised coarse kernel; applies at every band
 
 
 def _module_bindings(blob):
@@ -116,61 +95,7 @@ def _fit_workgroup(sg, invocations, rng, max_subgroups):
     return sg
 
 
-#: Where the fp16 coarse tier's operands are put (_c16_scales): the packed templates' largest
-#: component in [2^C16_TEMPLATE_EXP, 2^(C16_TEMPLATE_EXP+1)), leaving fp16's lower 18 octaves
-#: for a template's own dynamic range, and the tier's threshold at 2^_c16_threshold_exp(band).
-C16_TEMPLATE_EXP = 3
-C16_THRESHOLD_EXP = 2
-#: The threshold over the band, at least 2^C16_BAND_EXP: a band-B transform's values at
-#: threshold are sums of B products, each ~thr/B, and those must stay well inside fp16's
-#: normal range. Measured on the Iris Xe (flushes subnormals): at band 2048 a threshold of 4
-#: left the bound 0.24% under the exact maximum and 8 used 72% of its margin; 16 and above
-#: pass (tests/test_gpu_c16_bound.py). Set one octave past that: thr/band >= 2^-6.
-C16_BAND_EXP = -6
-
-
-def _c16_threshold_exp(band):
-    """log2 of where the tier's threshold is put: 2^C16_THRESHOLD_EXP -- where production
-    banks already sit (log2 thresholds 1.0-3.0 on the test27 ladder), |y|^2 = 16 at
-    threshold, failing open only past 64x it -- raised with the band so thr/band stays at or
-    above 2^C16_BAND_EXP (8 at band 512, 32 at 2048)."""
-    return max(C16_THRESHOLD_EXP, int(band).bit_length() - 1 + C16_BAND_EXP)
-
-
-def _c16_scales(ct0, raw_thr, band=None):
-    """(template exponent, data exponent) for the fp16 coarse tier: ct0 is packed times
-    2^et, each data element is multiplied by 2^ed before it is rounded to half (constant 79),
-    and the tier compares against raw_thr * 2^(et+ed). Powers of two, so in range every
-    value is the unscaled one times an exact factor and the decision is unchanged; out of
-    range they are what keeps it: on an Iris Xe, which flushes fp16 subnormals, templates of
-    ~5e-5 (gate_margin's transient and injection families) were flushed to zero and every
-    pair dismissed. (0, 0) where there is nothing to place (no threshold, empty templates)."""
-    import math
-    a = np.asarray(ct0)
-    if a.size == 0 or not (0.0 < float(raw_thr) < math.inf):
-        return 0, 0
-    tm = float(np.abs(a.view(np.float32) if a.dtype == np.complex64 else
-                      np.asarray(a, np.complex64).view(np.float32)).max())
-    if not (0.0 < tm < math.inf):
-        return 0, 0
-    et = C16_TEMPLATE_EXP - math.floor(math.log2(tm))
-    band = a.shape[-1] if band is None else band
-    ed = int(round(_c16_threshold_exp(band) - math.log2(float(raw_thr)) - et))
-    return int(max(-100, min(100, et))), int(max(-100, min(100, ed)))
-
-
-def _pow2_scaled(a, e):
-    """a (complex) times 2^e, exactly (complex64); a itself when e is 0."""
-    a = np.ascontiguousarray(a, np.complex64)
-    if not e:
-        return a
-    return np.ldexp(a.view(np.float32), int(e)).view(np.complex64)
-
-
-from ._coarse import coarse_launch   # noqa: E402,F401  (shared with Metal; re-exported)
-from ._coarse import stored_measured_choice, time_staged   # noqa: E402
 from ._coarse import coarse_stem, shipped_tiles, forced_tile   # noqa: E402
-from ._coarse import forced_layout, layout_label   # noqa: E402
 
 
 #: Byte offsets into VkPhysicalDeviceProperties. The 5 leading uint32s, the
@@ -395,17 +320,6 @@ def _global_barrier(vk, cmd):
                             0, 1, ctypes.byref(mb), 0, None, 0, None)
 
 
-#: An indirect dispatch's initial (x, y, z) = (0, 1, 1): x counts survivors. One
-#: vkCmdUpdateBuffer per counter instead of two fills; small transfer commands cost ~2 us
-#: each on the device, and a segment records hundreds. Module-level because fused batches
-#: re-record captured calls later, and the command reads its data at record time.
-_ARGS_INIT = (ctypes.c_uint32 * 3)(0, 1, 1)
-
-
-def _reset_args(vk, cmd, buf):
-    vk.vkCmdUpdateBuffer(cmd, buf.handle, 0, 12, ctypes.addressof(_ARGS_INIT))
-
-
 class _Recording:
     """A primary command buffer being recorded: allocated from the context's pool and begun
     with `flags` (a VkCommandBufferUsageFlags), with the steps every recording repeats.
@@ -501,10 +415,13 @@ class _Buffer:
         return out
 
     def view(self, dtype, count):
-        """The first count elements, in place (valid while the buffer lives)."""
-        dtype = np.dtype(dtype)
-        return np.frombuffer((ctypes.c_char * (count * dtype.itemsize)).from_address(
-            int(self.ptr.value if hasattr(self.ptr, 'value') else self.ptr)), dtype, count)
+        """The first count elements, in place (valid while the buffer lives). The bytes are
+        wrapped once: a result reads several views per call."""
+        raw = self.__dict__.get("_bytes")
+        if raw is None:
+            raw = self._bytes = np.frombuffer((ctypes.c_char * self.nbytes).from_address(
+                int(self.ptr.value if hasattr(self.ptr, 'value') else self.ptr)), np.uint8)
+        return raw[:count * np.dtype(dtype).itemsize].view(dtype)
 
     def read_into(self, out):
         """Zero-copy direct read into caller-provided contiguous array."""
@@ -546,7 +463,7 @@ class _CaptureVK:
 #: depend on each other within a call (marking survivor blocks, then recomputing them) are
 #: therefore separate phases.
 _FUSED_PHASES = ("forward", "fill", "pack", "coarse0", "compact0", "coarse1", "compact1",
-                 "mark", "recompute", "refine")
+                 "mark", "recompute", "refine", "peaks")
 
 #: A unique number per captured recording. Fused recordings are cached by their constituents,
 #: and a command-buffer handle is no identity: once a recording is evicted the driver hands
@@ -598,16 +515,6 @@ def _batch_shape(items):
                     work += int(getattr(args[1], "value", args[1]))
         sig.append(tuple(names))
     return (len(items) > 1, tuple(sorted(set(sig)))), work
-
-
-def _band_key(bands):
-    """What a band-mode recording binds besides its storage: the band width and the series
-    the recompute reads (the buffers and the row offset), or None in full mode."""
-    if not bands:
-        return None
-    B, (n, series_b, starts_b, r0, count, nser, _slot, _cmd, code) = bands
-    return (B, getattr(series_b.handle, "value", series_b.handle),
-            getattr(starts_b.handle, "value", starts_b.handle), r0, nser, code)
 
 
 def _fuse_interleave():
@@ -1105,19 +1012,29 @@ class _Device:
         raise VulkanError("device exposes no compute queue")
 
 
-class _HierHandle:
-    """What hier_replay needs to submit one hier_peaks call again (see hier_peaks)."""
-    __slots__ = ("kind", "key", "batch", "storage_key", "dsig", "tsig", "nd", "nt", "nbins",
-                 "sparse", "mode", "bfwd")
+def _list_barrier(vk, cmd):
+    """A list's barrier (_gpuexec): every earlier compute or transfer write before every later
+    compute, transfer, indirect-argument or host access. Indirect fetch is in the scope: an
+    indirect dispatch reads a count a shader just wrote (missing it, Intel used the previous
+    dispatch's count)."""
+    mb = _MemBarrier(46, None, _ACCESS_SHADER_WRITE | _ACCESS_TRANSFER_WRITE,
+                     _ACCESS_SHADER_READ | _ACCESS_SHADER_WRITE | _ACCESS_TRANSFER_WRITE
+                     | _ACCESS_INDIRECT_READ | _ACCESS_HOST_READ)
+    vk.vkCmdPipelineBarrier(cmd, _STAGE_COMPUTE_BIT | _STAGE_TRANSFER_BIT,
+                            _STAGE_COMPUTE_BIT | _STAGE_TRANSFER_BIT | _STAGE_HOST_BIT
+                            | _STAGE_DRAW_INDIRECT_BIT, 0, 1, ctypes.byref(mb), 0, None, 0, None)
 
-    def __init__(self, kind, key, batch, storage_key, dsig, tsig, nd, nt, nbins, sparse,
-                 mode=None, bfwd=None):
-        self.kind, self.key, self.batch, self.storage_key = kind, key, batch, storage_key
-        self.dsig, self.tsig, self.nd, self.nt, self.nbins, self.sparse = (
-            dsig, tsig, nd, nt, nbins, sparse)
-        # mode: (n, B, nd, nt, band key or None): the band/full choice this record was made
-        # for. bfwd: (forward key, record) of its band-only forward, in band mode.
-        self.mode, self.bfwd = mode, bfwd
+
+def _flat_words(words, binds=None):
+    out = []
+    for w in words:
+        if isinstance(w, Arg):
+            out.extend(binds[w.name] if binds is not None else (w,))
+        elif isinstance(w, tuple):
+            out.extend(w)
+        else:
+            out.append(w)
+    return out
 
 
 class _VkList:
@@ -1125,29 +1042,38 @@ class _VkList:
     constants are fixed in a command buffer, so the list is kept as its operations and
     recorded once per binding of its Args (_VkNative)."""
 
-    def __init__(self, ctx, label):
-        self.ctx, self.label, self.ops = ctx, label, []
+    def __init__(self, ctx, label, once=False):
+        self.ctx, self.label, self.once, self.ops = ctx, label, once, []
 
     def dispatch(self, kernel, groups, buffers, words=(), offsets=None):
-        flat = []
-        for w in words:
-            flat.extend(w if isinstance(w, tuple) else (w,))
-        self.ops.append((kernel, int(groups), list(buffers), offsets, flat))
+        self.ops.append(("dispatch", kernel, int(groups), list(buffers), offsets, list(words)))
+
+    def listed(self, kernel, count, max_groups, buffers, words=(), offsets=None):
+        # Indirect, sized by the count a shader wrote; the bounded kernel's gridSize word is
+        # the upper bound, so each group takes one item.
+        self.ops.append(("listed", kernel, count, list(buffers), offsets,
+                         list(words) + [int(max_groups)]))
 
     def barrier(self):
-        self.ops.append(None)
+        self.ops.append(("barrier",))
 
     def stamp(self, name):
-        self.ops.append(name)
+        self.ops.append(("stamp", name))
 
     def fill(self, buf, word):
-        self.ops.append(("fill", buf, int(word)))
+        self.ops.append(("fill", buf, int(word) & 0xFFFFFFFF))
+
+    def update(self, buf, words):
+        # vkCmdUpdateBuffer reads its data when recorded -- and again whenever a fused batch
+        # re-records a captured call -- so the words live as long as the list.
+        data = (ctypes.c_uint32 * len(words))(*[int(w) & 0xFFFFFFFF for w in words])
+        self.ops.append(("update", buf, data))
 
     def readback(self, buf, nbytes):
         pass                        # host-visible memory: the host reads it after the run
 
     def end(self):
-        return _VkNative(self.ctx, self.label, self.ops)
+        return _VkNative(self.ctx, self.label, self.ops, self.once)
 
 
 class _VkNative:
@@ -1155,19 +1081,20 @@ class _VkNative:
     the most recently used _BINDINGS kept, each holding the views it binds so no allocation
     can be freed and its handle reused under it. Past _BINDINGS, a run that is waited for
     records a one-off command buffer instead (a stream of new search windows), freed when
-    it has finished: evicting a cached one would idle every queue."""
+    it has finished: evicting a cached one would idle every queue. A `once` list (follow-up
+    items) is recorded for its one run and freed when that run has finished."""
     _BINDINGS = 8
 
-    def __init__(self, ctx, label, ops):
-        self.ctx, self.label, self.ops = ctx, label, ops
+    def __init__(self, ctx, label, ops, once=False):
+        self.ctx, self.label, self.ops, self.once = ctx, label, ops, once
         names = set()
         for op in ops:
-            if isinstance(op, tuple) and len(op) == 5:
-                names.update(b.name for b in op[2] if isinstance(b, Arg))
-                names.update(w.name for w in op[4] if isinstance(w, Arg))
+            if op[0] in ("dispatch", "listed"):
+                names.update(b.name for b in op[3] if isinstance(b, Arg))
+                names.update(w.name for w in op[5] if isinstance(w, Arg))
         self.args = sorted(names)
         # A list with phase stamps is captured, so fused batches can interleave it.
-        self.captured = any(isinstance(op, str) for op in ops)
+        self.captured = any(op[0] == "stamp" for op in ops)
         self.cmds = {}                       # binding key -> (cmd, pools, held values)
 
     @staticmethod
@@ -1178,6 +1105,9 @@ class _VkNative:
         """(command buffer, release): release() frees a one-off one once its run finished
         (None for a cached one)."""
         values = tuple(binds[name] for name in self.args)
+        if self.once:
+            cmd, pools = self.record(dict(zip(self.args, values)))
+            return cmd, lambda: self.free(cmd, pools)
         key = tuple(self._key(v) for v in values)
         entry = self.cmds.pop(key, None)
         if entry is None:
@@ -1197,7 +1127,7 @@ class _VkNative:
             ctx._capture_begin()
         cmd = None
         try:
-            rec = _Recording(ctx, self.label)
+            rec = _Recording(ctx, self.label, flags=1 if self.once else 0)
             cmd = rec.cmd
             self._emit(rec, binds)
             rec.end()
@@ -1210,28 +1140,32 @@ class _VkNative:
     def _emit(self, rec, binds):
         ctx = self.ctx
         for op in self.ops:
-            if op is None:
-                _global_barrier(ctx.vk, rec.cmd)
-                continue
-            if isinstance(op, str):
-                rec.stamp(op)
-                continue
-            if op[0] == "fill":
-                ctx.vk.vkCmdFillBuffer(rec.cmd, op[1].handle, 0, _WHOLE_SIZE, op[2])
-                continue
-            kernel, groups, buffers, offsets, words = op
-            bound = [binds[b.name] if isinstance(b, Arg) else b for b in buffers]
-            offs = [getattr(b, "offset", 0) + (offsets[i] if offsets else 0)
-                    for i, b in enumerate(bound)]
-            flat = []
-            for w in words:
-                flat.extend(binds[w.name] if isinstance(w, Arg) else (w,))
-            ds = ctx._descriptor_set(kernel[2], bound, offs if any(offs) else None)
-            rec.bind(kernel, ds, [int(w) & 0xFFFFFFFF for w in flat])
-            rec.dispatch(groups)
+            kind = op[0]
+            if kind == "barrier":
+                _list_barrier(ctx.vk, rec.cmd)
+            elif kind == "stamp":
+                rec.stamp(op[1])
+            elif kind == "fill":
+                ctx.vk.vkCmdFillBuffer(rec.cmd, op[1].handle, getattr(op[1], "offset", 0),
+                                       _WHOLE_SIZE, op[2])
+            elif kind == "update":
+                ctx.vk.vkCmdUpdateBuffer(rec.cmd, op[1].handle, getattr(op[1], "offset", 0),
+                                         ctypes.sizeof(op[2]), ctypes.addressof(op[2]))
+            else:
+                _, kernel, groups, buffers, offsets, words = op
+                bound = [binds[b.name] if isinstance(b, Arg) else b for b in buffers]
+                offs = [getattr(b, "offset", 0) + (offsets[i] if offsets else 0)
+                        for i, b in enumerate(bound)]
+                ds = ctx._descriptor_set(kernel[2], bound, offs if any(offs) else None)
+                rec.bind(kernel, ds, [int(w) & 0xFFFFFFFF for w in _flat_words(words, binds)])
+                if kind == "dispatch":
+                    rec.dispatch(groups)
+                else:
+                    rec.dispatch_indirect(groups)
 
     def free(self, cmd, pools):
         ctx = self.ctx
+        getattr(ctx, "_phases", {}).pop(getattr(cmd, "value", cmd), None)
         ctx.vk.vkFreeCommandBuffers.argtypes = [_vp, _vp, _u32, ctypes.POINTER(_vp)]
         ctx.vk.vkFreeCommandBuffers(ctx.device, ctx.command_pool, 1, (_vp * 1)(cmd))
         dead = {pool.value for pool in pools}
@@ -1239,27 +1173,17 @@ class _VkNative:
             ctx.vk.vkDestroyDescriptorPool(ctx.device, pool, None)
         ctx._pools = [pool for pool in getattr(ctx, "_pools", []) if pool.value not in dead]
 
-    def release_one(self, key):
+    def release_one(self, key, done=False):
         cmd, pools, _ = self.cmds.pop(key)
-        ctx = self.ctx
-        value = getattr(cmd, "value", cmd)
-        pending = getattr(ctx, "_pending_forward", None)
-        for s, pcmd in (list(pending.items()) if isinstance(pending, dict) else ()):
-            if getattr(pcmd, "value", pcmd) == value:
-                del pending[s]             # deferred and never consumed: run it now
-                ctx._submit(cmd, slot=s)
-        if isinstance(pending, dict) and not pending:
-            ctx._pending_forward = None
-        src = getattr(ctx, "_fwd_src", None)
-        for k in [k for k, v in (src or {}).items() if v[7] is cmd]:
-            del src[k]
-        getattr(ctx, "_phases", {}).pop(value, None)
-        ctx._wait_queues()
+        if not done:
+            self.ctx._wait_queues()
         self.free(cmd, pools)
 
-    def release(self):
+    def release(self, done=False):
+        if self.cmds and not done:
+            self.ctx._wait_queues()
         for key in list(self.cmds):
-            self.release_one(key)
+            self.release_one(key, done=True)
 
 
 class Context(Executor, InputUploads):
@@ -1299,15 +1223,7 @@ class Context(Executor, InputUploads):
                                        ctypes.c_uint32]
         vk.vkCmdDispatchIndirect.argtypes = [ctypes.c_void_p, ctypes.c_void_p,
                                              ctypes.c_uint64]
-        self._batches = {}
-        self._storage = {}
-        self._storage_users = {}
-        self._record_storage = {}
-        self._record_pools = {}
-        self._hier = {}
-        self._hier_cascade = {}
         self._fences = {}
-        self._pending_forward = None
         self._uploaded = {"data": {}, "tmpl": {}}
         self._queue_offset = 0
 
@@ -1596,252 +1512,6 @@ class Context(Executor, InputUploads):
         self._pipelines[key] = (pipe, layout, set_layout)
         return self._pipelines[key]
 
-    def hier_peaks(self, n, band, data, tmpl, ct0, raw_thr,
-                   binsize=None, threshold=0.0, window=None,
-                   upload_data=True, upload_tmpl=True,
-                   cascade_band=None, ct1=None, raw_thr1=None,
-                   slot=None, async_submit=False, sparse=False, row_windows=None,
-                   handle_out=None):
-        """The whole hierarchical filter in ONE command buffer.
-
-        Coarse correlation, survivor compaction, then listed refinement.
-        Supports single-tier or two-tier cascade indirect execution.
-
-        handle_out (a list): receives a replay handle for this exact call -- the record it
-        submitted and the input signatures it was valid for. hier_replay(handle, ...) submits
-        that record again without any of the work above, or returns None when the handle
-        no longer holds (record evicted or rebuilt, inputs re-uploaded since).
-        """
-        band, ct0, raw_thr, cascade_band, ct1, raw_thr1 = hier_tiers(
-            n, band, ct0, raw_thr, cascade_band, ct1, raw_thr1)
-
-        nd, nt = data.shape[0], tmpl.shape[0]
-        lo, hi, binsize, nbins = hier_window(n, window, binsize)
-        # row_windows (hier_peaks_grouped): (groups, per-row uint32 [lo, hi] pairs).
-        rw_key = None if row_windows is None else row_windows[0]
-        rw = None if row_windows is None else row_windows[1]
-        if nbins > _MAX_BINS and rw is not None:
-            raise ValueError("grouped dispatch exceeds the kernel bin limit")
-        if nbins > _MAX_BINS:
-            return split_bins(
-                lambda w, ud, ut: self.hier_peaks(
-                    n, band, data, tmpl, ct0, raw_thr, binsize=binsize, threshold=threshold,
-                    window=w, upload_data=ud, upload_tmpl=ut, cascade_band=cascade_band,
-                    ct1=ct1, raw_thr1=raw_thr1, slot=slot, async_submit=False),
-                lo, hi, binsize, _MAX_BINS, upload_data, upload_tmpl, sparse, async_submit)
-        shift = bin_shift(binsize)
-        t2 = float(threshold) ** 2 if threshold > 0 else 0.0
-
-        # The gate tiers in order -- bands tb, thresholds tthr, templates tct: one, or a
-        # cascade of two. Plain tuples: this runs on every call (a generator per field
-        # cost 1.7 us of a 43 us call).
-        cascade = cascade_band is not None
-        if cascade:
-            tb, tthr, tct = ((int(cascade_band), int(band)), (float(raw_thr), float(raw_thr1)),
-                             (ct0, ct1))
-        else:
-            tb, tthr, tct = (int(band),), (float(raw_thr),), (ct0,)
-        kind = "hier_cascade" if cascade else "hier"
-        # Tier 0 is the packed fp16 coarse role where its band has one; a cascade's always is.
-        half = cascade or bool(_use_c16(tb[0]))
-        top = max(tb)
-        bands = self._band_source(n, top, nd, nt, data, slot) if half else None
-        bkey = _band_key(bands)
-        # A sparse caller reads only the refined pairs, which the refine writes in full: its
-        # recording skips clearing the dense outputs (bool(sparse) in the key).
-        key = ((kind, n) + tb + (nd, nt, nbins, binsize, shift, lo, hi,
-               int(np.float32(t2).view(np.uint32))) + tthr + (bool(sparse), rw_key, bkey))
-        key += (shared_key(data, self), shared_key(tmpl, self), slot)
-        # Storage depends on the band widths only. The series/starts a band-mode record binds
-        # (bkey) change with the follow-up pools every segment: keying the buffers on them
-        # allocated a new set per call (1339 buffers in 38 steady segments).
-        storage_key = (kind, n, *tb, nd, nt, nbins, rw_key, bkey and bkey[0], *key[-3:])
-        upload_data, upload_tmpl, dsig, tsig = self._input_uploads(
-            storage_key, data, tmpl, upload_data, upload_tmpl)
-        et, ed = (self._c16_exponents(storage_key, ct0, tthr[0], upload_tmpl, tb[0])
-                  if half else (0, 0))
-        key += (ed,)
-        self._last_c16_scale = 2.0 ** (et + ed)   # tier-0 values / this = unscaled
-        table = self._hier_cascade if cascade else self._hier
-        batch = table.get(key)
-        if batch is None:
-            sd, st = shared_buffer(data, self), shared_buffer(tmpl, self)
-            incoming = [x for x in (sd, st) if x is not None]
-            estimate = 0
-            if storage_key not in self._storage:
-                estimate = (8 * n * (nd + nt) - (nd * n * 8 if sd else 0) - (nt * n * 8 if st else 0)
-                            + sum((4 if i == 0 and cascade else 8) * b * (nd + nt)
-                                  for i, b in enumerate(tb))
-                            + nd * nt * (8 * len(tb) + 8 + 12 * nbins) + 12 * len(tb))
-            self._cache_room(estimate, incoming=incoming, keep_storage=storage_key)
-            fresh = storage_key not in self._storage
-            pool_start = len(getattr(self, '_pools', []))
-            self._capture_begin()
-            try:
-                batch = self._make_hier(
-                    storage_key, n, [(b, thr * (2.0 ** (et + ed) if i == 0 else 1.0))
-                                     for i, (b, thr) in enumerate(zip(tb, tthr))],
-                    nd, nt, nbins, binsize, shift, lo, hi, t2, data, tmpl,
-                    clear_out=not sparse, rowwin=rw, bands=bands, data_scale=ed)
-            finally:
-                self._capture_end(batch[-1] if batch else None)
-            table[key] = batch
-            self._register_record(kind, key, storage_key, pool_start)
-            if fresh:
-                upload_data = upload_tmpl = True
-        self._cache_touch(kind, key)
-        bufs, cmd = batch
-        self._claim(bufs["idx"])                 # an earlier result still reading these outputs
-        bfwd = self._band_forward(storage_key, bufs, bands, nd) if bands else None
-        if bfwd is not None:
-            self._pending_forward[slot] = bfwd[1][-1]
-        if upload_data:
-            write_input(bufs["data"], data)
-            if not half and shared_buffer(data, self) is None:
-                # The full-precision coarse role reads a band copy (the packed one reads
-                # `data` itself, and a shared buffer is packed on the device).
-                bufs["cdata"].write(np.ascontiguousarray(data[:, :tb[0]], np.complex64))
-            self._uploaded["data"][storage_key] = dsig
-        if upload_tmpl:
-            write_input(bufs["tmpl"], tmpl)
-            for i, ct in enumerate(tct):
-                bufs["ct%d" % i].write(_pack_half2(_pow2_scaled(ct, et)) if i == 0 and half
-                                       else np.ascontiguousarray(ct, np.complex64))
-            self._uploaded["tmpl"][storage_key] = tsig
-
-        mode = (n, top, nd, nt, bkey)
-        if handle_out is not None:
-            handle_out.append(_HierHandle(kind, key, batch, storage_key,
-                                          self._uploaded["data"].get(storage_key),
-                                          self._uploaded["tmpl"].get(storage_key),
-                                          nd, nt, nbins, sparse, mode, bfwd))
-        return self._hier_submit(batch, cascade, nd, nt, nbins, sparse, slot, async_submit, mode)
-
-    def _hier_submit(self, batch, cascade, nd, nt, nbins, sparse, slot, async_submit,
-                     mode=None):
-        """Submit one hierarchical record and return its readback (tracked when async)."""
-        bufs, cmd = batch
-        fence = self._get_fence(slot) if (async_submit and slot is not None) else None
-        if async_submit and slot is not None:
-            self._submit(cmd, fence=fence, wait=False, slot=slot)
-        else:
-            self._submit(cmd)
-
-        v = self._peak_views(bufs, cascade, nd, nt, nbins)
-
-        def readback():
-            if fence is not None:
-                self._wait_fence(fence)
-            if v is None:                       # buffers without in-place views
-                surv_count = int(bufs["args"].read(np.uint32, 1)[0])
-                self.last_refinements = surv_count
-                if mode is not None:
-                    self._band_measure(mode[0], mode[1], nd, nt, bufs, "surv", surv_count)
-                if cascade:
-                    self.last_tier1_survivors = int(bufs["args0"].read(np.uint32, 1)[0])
-                return self._read_peaks(bufs, "surv", surv_count,
-                                        nd, nt, nbins, sparse)
-            surv_count = int(v[0][0])
-            self.last_refinements = surv_count
-            if cascade:
-                self.last_tier1_survivors = int(v[1][0])
-            if surv_count == 0 and sparse:
-                # The common case at a detection threshold: nothing to sort, gather or scan.
-                if mode is not None:
-                    self.__dict__.setdefault("_band_f", {})[(mode[0], mode[1], nd, nt)] = 0.0
-                from . import _SparsePeaks
-                e = np.empty(0, np.int64)
-                return _SparsePeaks((nd, nt, nbins), e, e, np.empty(0, np.complex64))
-            rows = v[2][:surv_count] if (sparse or mode is not None) else None
-            if mode is not None:
-                self.__dict__.setdefault("_band_f", {})[(mode[0], mode[1], nd, nt)] = (
-                    refine_block_fraction(rows, nt, nd))
-            if sparse:
-                from . import _SparsePeaks
-                # Gather and scan in completion order; only the hits are put in C order.
-                ri = v[3][rows]
-                k, b = np.nonzero(ri >= 0)
-                if not k.size:
-                    e = np.empty(0, np.int64)
-                    return _SparsePeaks((nd, nt, nbins), e, e, np.empty(0, np.complex64))
-                rk = rows[k]
-                flat = rk.astype(np.int64) * nbins + b
-                order = np.argsort(flat)
-                return _SparsePeaks((nd, nt, nbins), flat[order], ri[k, b][order],
-                                    v[4][rk, b][order])
-            if surv_count == 0:
-                return (np.full((nd, nt, nbins), -1, dtype=np.int32),
-                        np.zeros((nd, nt, nbins), dtype=np.complex64))
-            return v[3].reshape(nd, nt, nbins).copy(), v[4].reshape(nd, nt, nbins).copy()
-        return self._track(readback, owner=bufs["idx"]) if async_submit else readback()
-
-    def _peak_views(self, bufs, cascade, nd, nt, nbins):
-        """In-place views of a hierarchical record's outputs, made once per record: (refine
-        count, tier-1 count or None, survivor list, idx (pairs, nbins), val (pairs, nbins)).
-        Results read through them are copied (np.sort, fancy indexing, .copy()) before the
-        record runs again. Dropped with the record (_evict_record)."""
-        views = self.__dict__.setdefault("_pviews", {})
-        hit = views.get(id(bufs))
-        if hit is not None and hit[0] is bufs and hit[1] == (nd, nt, nbins):
-            return hit[2]
-        pairs = nd * nt
-        names = ("args", "surv", "idx", "val") + (("args0",) if cascade else ())
-        if not all(hasattr(bufs[k], "view") for k in names):
-            return None
-        v = (bufs["args"].view(np.uint32, 1),
-             bufs["args0"].view(np.uint32, 1) if cascade else None,
-             bufs["surv"].view(np.uint32, pairs),
-             bufs["idx"].view(np.int32, pairs * nbins).reshape(pairs, nbins),
-             bufs["val"].view(np.complex64, pairs * nbins).reshape(pairs, nbins))
-        views[id(bufs)] = (bufs, (nd, nt, nbins), v)
-        return v
-
-    def hier_valid(self, h):
-        """Whether hier_replay(h) would submit: the record is the one the handle saw (an
-        evicted or rebuilt record is a new object) and both inputs are still resident under
-        the signatures it saw (nothing re-uploaded or invalidated them since)."""
-        table = self._hier_cascade if h.kind == 'hier_cascade' else self._hier
-        if not (table.get(h.key) is h.batch
-                and self._uploaded["data"].get(h.storage_key) == h.dsig
-                and self._uploaded["tmpl"].get(h.storage_key) == h.tsig):
-            return False
-        # The band/full choice is part of validity: a record made for one mode is never
-        # replayed once the measured refine-block fraction has flipped the choice.
-        if h.mode is not None:
-            n, B, nd, nt, bkey = h.mode
-            if self._band_wanted(n, B, nd, nt) != (bkey is not None):
-                return False
-            forwards = getattr(self, "_forwards", None) or {}
-            if h.bfwd is not None and forwards.get(h.bfwd[0]) is not h.bfwd[1]:
-                return False
-        return True
-
-    def hier_replay(self, h, slot, async_submit, validated=False):
-        """Submit a hier_peaks call again from its handle, or None if the handle is stale.
-
-        Valid exactly when the record is the one the handle saw (identity: an evicted or
-        rebuilt record is a new object) and both inputs are still resident under the
-        signatures it saw (nothing re-uploaded or invalidated them since).
-
-        validated=True: the caller checked hier_valid for every part of a call before
-        submitting any (a call's parts go out together or not at all). Submitting a part
-        cannot evict a record or re-upload an input, but it can move the measured band/full
-        choice (a flush collects measurements) -- a performance choice that must not leave a
-        call half submitted, so it is not re-checked here."""
-        if not validated and not self.hier_valid(h):
-            return None
-        self._cache_touch(h.kind, h.key)
-        if h.bfwd is not None:
-            # Band mode: the pending forward (queued by forward_replay) is the full one;
-            # this record reads the band-only forward's rows instead.
-            self._cache_touch('forward', h.bfwd[0])
-            if not isinstance(getattr(self, "_pending_forward", None), dict):
-                self._pending_forward = {}
-            self._pending_forward[slot] = h.bfwd[1][-1]
-        return self._hier_submit(h.batch, h.kind == 'hier_cascade', h.nd, h.nt, h.nbins,
-                                 h.sparse, slot, async_submit, h.mode)
-
-    @staticmethod
     def _read_peaks(bufs, surv_key, count, nd, nt, nbins, sparse):
         """The refined result: dense (idx, val), or a _SparsePeaks read from the refined
         pairs alone (the survivor list): the refine writes every bin of a listed pair."""
@@ -1918,22 +1588,6 @@ class Context(Executor, InputUploads):
             n = self._INVOCATIONS[filename] = _module_invocations((_SPIRV / filename).read_bytes())
         return n
 
-    def _c16_exponents(self, storage_key, ct0, raw_thr, upload_tmpl, band):
-        """(template, data) exponents of the fp16 coarse tier (_c16_scales) for a record on
-        storage_key. The template exponent belongs to the templates in that storage: taken
-        from ct0 when they are (re)written, kept with the storage otherwise, so a record and
-        the packed templates it reads always agree; the data exponent follows from it and
-        the threshold."""
-        import math
-        held = self.__dict__.setdefault("_c16_template_exp", {})
-        if upload_tmpl or storage_key not in held:
-            held[storage_key] = _c16_scales(ct0, 1.0)[0]
-        et = held[storage_key]
-        if not (0.0 < float(raw_thr) < math.inf):
-            return et, 0
-        ed = int(round(_c16_threshold_exp(band) - math.log2(float(raw_thr)) - et))
-        return et, max(-100, min(100, ed))
-
     def _fit_subgroup(self, n):
         """The subgroup size to build a one-pair-per-group kernel of length n at: the
         smallest the device can be required to run that still holds the workgroup
@@ -1947,490 +1601,11 @@ class Context(Executor, InputUploads):
             return 0
         return rng[0] if wg <= rng[0] else 0
 
-    def _gate_bits(self, thr, band, sg, tile):
-        """The coarse tier's last push constant: for a tiled build whose pair fits one subgroup,
-        the gate threshold as magnitude bits (tierb.slang peakTwoGate: each pair reports only
-        its pass and bound, no election -- nothing reads tier 0's index, only the compaction
-        reads its values); 0 elects (peakTwoWave). Metal's rule. A threshold of 0 is passed
-        as the smallest normal float, which passes the same pairs (a nonzero maximum)."""
-        if tile <= 1 or os.environ.get("MF_VK_C16_BOUND", "1") == "0":
-            return 0
-        if band // 16 > (sg or self.subgroup_size):
-            return 0
-        return int(np.float32(max(float(thr), 1.1754944e-38)).view(np.uint32))
-
-    def _coarse_geometry(self, band, nd, nt):
-        """(subgroup, pairs per workgroup, templates per tile, groups, ragged) for the packed
-        coarse kernel; subgroup 0 is the driver's default size.
-
-        The layout -- the subgroup size the pipeline is built at, pairs per workgroup (PPG)
-        and templates per pair slot (TILE_T) -- is this device's measured choice
-        (_coarse_choice). A tiled build takes RAGGED tiles: each slot covers TILE_T
-        templates of one data row and the row's last tile is clamped inside the kernel, so
-        any template count and any group count work -- the host passes the row count and
-        dispatches ceil(rows * ceil(nt/TILE_T) / PPG) groups. An untiled build with PPG > 1
-        takes RAGGED groups the same way (ceil(rows * nt / PPG) groups), so the chosen
-        packing holds at any pair count. The rule it replaces -- the largest PPG that
-        divides the pair count -- ran 10 of a production segment's 27 fine groups (odd
-        counts) at one pair per group, which on the Iris Xe cancelled a 1.45x coarse gain.
-        """
-        sg, ppg, tile, twt = self._coarse_choice(band)
-        if tile > 1:
-            return sg, ppg, tile, coarse_launch(nd, nt, ppg, tile, 0)[1], True, twt
-        for p in (32, 16, 8, 4, 2, 1):
-            if p <= ppg and _spv_shipped(coarse_stem(band, p, 1)):
-                return (sg, p, 1, coarse_launch(nd, nt, p, 1, 0)[1], p > 1,
-                        twt)
-        return sg, 1, 1, nd * nt, False, twt
-
-    def _coarse_layouts(self, band):
-        """Every coarse layout (subgroup, ppg, tile, twt) this device can run at this band: the
-        shipped builds whose group fits the device's invocation and shared-memory limits, at
-        each subgroup size it can require (VK_EXT_subgroup_size_control; the default size
-        only, 0, without it). MF_VK_COARSE_PPG caps the packing, MF_VK_COARSE_TILE and
-        MF_VK_COARSE_SUBGROUP fix the tile (1 = untiled) and subgroup, and MF_VK_COARSE_TWT an
-        untiled build's twiddles (1 table, 0 recurrence), for measurement and tests."""
-        wg = max(1, band // 16)
-        cap = int(os.environ.get("MF_VK_COARSE_PPG", "0") or 0)
-        rng = getattr(self, "subgroup_range", None)
-        sizes = [0]
-        if rng:
-            sizes = [s for s in (4, 8, 16, 32, 64, 128) if rng[0] <= s <= rng[1]]
-        forced_sg = forced_tile("MF_VK_COARSE_SUBGROUP")
-        if forced_sg is not None:
-            sizes = [forced_sg if forced_sg in sizes else sizes[0]]
-        forced = forced_tile("MF_VK_COARSE_TILE")
-        forced_twt = forced_tile("MF_VK_COARSE_TWT")
-        out = []
-        for ppg in (1, 2, 4, 8, 16, 32):
-            if cap and ppg > cap:
-                continue
-            # A group of ppg pairs is (band/16)*ppg invocations and holds ppg padded
-            # exchange stages (about 17/16 * band words each).
-            if (wg * ppg > self.max_invocations
-                    or (band * 17 // 16 + 32) * 4 * ppg > self.max_shared_memory):
-                continue
-            for tile in (1,) + shipped_tiles(band, ppg, _spv_shipped):
-                if forced is not None and tile != forced:
-                    continue
-                if not _spv_shipped(coarse_stem(band, ppg, tile)):
-                    continue
-                # Sizes that would split the group past maxComputeWorkgroupSubgroups are
-                # out (_build_pipeline would bump them to the next size anyway).
-                lim = getattr(self, "max_workgroup_subgroups", 0)
-                out.extend((sg, ppg, tile, twt) for sg in sizes
-                           for twt in ((1, 0) if tile == 1 else (1,))
-                           if forced_twt is None or tile > 1 or twt == forced_twt
-                           if not (lim and sg and -(-wg * ppg // sg) > lim))
-        if not out:
-            out = [(sizes[0], 1, 1, 0)]
-        return out
-
-    def _coarse_choice(self, band):
-        """The coarse layout (subgroup, ppg, tile) at this band: the fastest of
-        _coarse_layouts on this device, timed once (device timestamps, synthetic data) and
-        kept in MF_COST_FILE -- priced, not trialled: a deterministic micro-benchmark,
-        the choice CUDA's _time_coarse makes. All three are the device's to decide. A fixed
-        tile table (tuned on RDNA) was wrong on every GPU measured, RDNA included; filling
-        one subgroup with pairs was the packing rule; and the subgroup was the driver's
-        default, which on the Iris Xe (8-32 wide) is 32 -- the band-256 coarse kernel ran
-        at ~2.9 us per pair there against ~0.25 us at subgroup 8 or 16."""
-        from . import gatechain
-        return stored_measured_choice(
-            self._device_state.__dict__.setdefault("coarse_choice", {}), "vk-coarse",
-            getattr(self, "device_name", ""), band, self._coarse_layouts(band),
-            lambda c: layout_label(band, c[1], c[2], c[3], c[0]), gatechain.gpu_kernel_id(),
-            lambda cs: self._time_coarse_layouts(band, cs), tiebreak=lambda c: (c[2], c[1], c[0]),
-            forced=forced_layout(band))
-
-    def coarse_layouts(self, band):
-        """The names (_coarse.layout_label) of every coarse layout the choice may take at this
-        band on this device; MF_COARSE_LAYOUT forces one."""
-        return [layout_label(band, c[1], c[2], c[3], c[0]) for c in self._coarse_layouts(band)]
-
-    def _time_coarse_layouts(self, band, cands, pairs=16384, screen=1024, ntm=16, reps=3):
-        """Device ns per pair of each coarse layout on synthetic data, in
-        self.coarse_times[band] for reports. Every candidate is first timed on `screen` pairs
-        and only those within 4x of the fastest are timed on `pairs`: some layouts are
-        pathological on some devices (band 256 at subgroup 32 on the Iris Xe: ~240 us per
-        pair), and a full-size dispatch of one can run long enough for the driver to reset
-        the device. Each stage times its candidates in `reps` interleaved rounds (a warm-up
-        and one timed dispatch each, min over rounds), and the contenders are then confirmed
-        against the fastest, paired (_coarse.confirm_fastest): the GPU may be shared."""
-        ndm = pairs // ntm
-        rng = np.random.default_rng(0)
-        x = ((rng.standard_normal((ndm, band)) + 1j * rng.standard_normal((ndm, band)))
-             * 0.1).astype(np.complex64)
-        bufs = [_Buffer(self, x.nbytes), _Buffer(self, ntm * band * 4),
-                _Buffer(self, pairs * 4), _Buffer(self, pairs * 8)]
-        bufs[0].write(x)
-        bufs[1].write(_pack_half2(x[:ntm]))
-        ds = self._device_state
-        timer = ds.__dict__.get("fuse_timer")
-        if timer is None:
-            timer = ds.fuse_timer = _DeviceTimer(ds)
-        full = lambda c: self._time_coarse_layout(band, c, bufs, timer, ndm, ntm, 2)
-        screen_ = lambda c: self._time_coarse_layout(band, c, bufs, timer, screen // ntm, ntm, 2)
-
-        def tiles(times):
-            # The tiles at the two fastest untiled (subgroup, ppg), and at any (subgroup, ppg)
-            # with no untiled layout among cands (a re-check's set): a tile is skipped only
-            # when its untiled sibling was measured and lost. Building a pipeline is most of
-            # the cost (a tiled build took up to 50 s on the Iris Xe).
-            lead = {c[:2] for c in sorted(times, key=times.get)[:2]}
-            timed = {c[:2] for c in times}
-            return [c for c in cands if c[2] > 1 and (c[:2] in lead or c[:2] not in timed)]
-        try:
-            untiled = [c for c in cands if c[2] == 1]
-            out = time_staged([untiled or cands] + ([tiles] if untiled and len(untiled) < len(cands)
-                                                     else []),
-                              full, time_screen=screen_, rounds=reps)
-        finally:
-            for b in bufs:
-                b.destroy()
-        self.__dict__.setdefault("coarse_times", {}).setdefault(band, {}).update(
-            {layout_label(band, c[1], c[2], c[3], c[0]): v
-             for c, v in out.items()})
-        return out
-
-    def _time_coarse_layout(self, band, layout_, bufs, timer, ndm, ntm, reps):
-        vk = self.vk
-        sg, ppg, tile = layout_[:3]
-        twt = layout_[3] if len(layout_) > 3 else 1
-        pipe = self._build_pipeline(
-            ("coarse16", band, ppg, tile), coarse_stem(band, ppg, tile) + ".spv",
-            _NBIND, _PUSH_BYTES, data_stride=band, subgroup=sg, coarse_twt=twt)
-        dset = self._descriptor_set(pipe[2], bufs)
-        slot_val, groups = coarse_launch(ndm, ntm, ppg, tile, band)
-        rec = _Recording(self, "coarse timing")
-        cmd = rec.cmd
-        times = []
-        try:
-            rec.bind(pipe, dset, (ntm, 0, band, slot_val, band.bit_length() - 1, 1,
-                                  self._gate_bits(0.0, band, sg, tile)))
-            rec.dispatch(groups)
-            rec.end()
-            for rep in range(reps):
-                slot, begin, end = timer.pair()
-                cmds = (_vp * 3)(begin, cmd, end)
-                fence = _vp()
-                _check(vk.vkCreateFence(self.device, ctypes.byref(_FenceCreate(8, None, 0)),
-                                        None, ctypes.byref(fence)), "vkCreateFence")
-                try:
-                    _check(vk.vkQueueSubmit(self.queue, 1, ctypes.byref(
-                        _SubmitInfo(4, None, 0, None, None, 3, cmds, 0, None)), fence),
-                        "vkQueueSubmit")
-                    _check(vk.vkWaitForFences(self.device, 1, (_vp * 1)(fence), 1,
-                                              0xFFFFFFFFFFFFFFFF), "vkWaitForFences")
-                finally:
-                    vk.vkDestroyFence(self.device, fence, None)
-                if rep:
-                    times.append(timer.ns(slot, self._ts_period))
-        finally:
-            vk.vkFreeCommandBuffers.argtypes = [_vp, _vp, _u32, ctypes.POINTER(_vp)]
-            vk.vkFreeCommandBuffers(self.device, self.command_pool, 1, (_vp * 1)(cmd))
-        return min(times) / (ndm * ntm)
-
-    def _make_hier(self, key, n, tiers, nd, nt, nbins, binsize, shift, lo, hi, t2,
-                   data=None, tmpl=None, clear_out=True, rowwin=None, bands=None, data_scale=0):
-        """Record one hierarchical dispatch: the gate tiers, then the listed refine at n.
-
-        tiers is [(band, raw threshold)], one tier or a cascade of two. Tier 0 correlates every
-        pair at its band: the packed fp16 coarse role in a cascade or where the band has one
-        (_use_c16),
-        reading its band straight from the spectra (or the band rows, `bands`), and
-        otherwise the full-precision filter over a band copy (cdata). A later tier refines
-        only the previous tier's survivors at its own band, at full precision. Each tier is
-        compacted into a survivor list whose count lands in an indirect-dispatch argument, so
-        the count never reaches the host and the call stays one recorded command buffer.
-
-        Tier i writes cidx<i> and cval<i> from ct<i>; its survivors are surv<i> and args<i>,
-        except the last tier's: surv and args, which the refine and every reader take."""
-        vk = self.vk
-        pairs = nd * nt
-        last = len(tiers) - 1
-        surv = lambda i: "surv" if i == last else "surv%d" % i
-        args = lambda i: "args" if i == last else "args%d" % i
-        band0 = tiers[0][0]
-        direct = bool(last or _use_c16(band0))    # a cascade's tier 0 is always packed
-        dstride = bands[0] if bands else n
-        rwf = 1 if rowwin is not None else 0       # row windows, mode 1 for every tier
-        if direct:
-            # The coarse ROLE, reading packed cdata/ct0. Not self.pipeline(): that is the flat
-            # filter's full-precision build of the same entry, and handing it packed buffers
-            # makes it read 4-byte elements as 8-byte ones (every peak comes back -1). The
-            # layout -- subgroup, pairs per group, tile (compiled into the kernel, so decided
-            # here with the kernel) and twiddle source -- is the device's (_coarse_geometry).
-            sg, ppg, tile, groups, ragged, twt = self._coarse_geometry(band0, nd, nt)
-            cpipe = self._build_pipeline(
-                ("coarse16", band0, ppg, tile), coarse_stem(band0, ppg, tile) + ".spv",
-                _NBIND, _PUSH_BYTES, data_stride=dstride, row_windows=rwf, subgroup=sg,
-                data_scale=data_scale, coarse_twt=twt)
-        else:
-            sg, tile, groups, ragged = 0, 1, pairs, False
-            cpipe = self.pipeline(band0)
-        kpipe = self._build_pipeline("compact", "compact.spv", 3, 12)
-        lpipe = self._build_pipeline("compactl", "compactl.spv", 5, 12) if last else None
-        tpipes = [None]
-        for b1, _ in tiers[1:]:
-            f = self._peak_file(b1, 1, refine=True)
-            tpipes.append(self._build_pipeline(
-                ("refine", f), f, 5, _PUSH_BYTES, data_stride=dstride, row_windows=rwf,
-                subgroup=self._fit_subgroup(b1)))
-        refine_file = self._peak_file(n, nbins, refine=True)
-        rpipe = self._build_pipeline(
-            ("refine", refine_file), refine_file, 5, _PUSH_BYTES, row_windows=rwf,
-            subgroup=self._fit_subgroup(n))
-
-        b = self._storage.get(key)
-        if b is None:
-            indirect = _BUF_STORAGE | _BUF_INDIRECT | _BUF_TRANSFER_DST
-            b = {
-                "data": shared_buffer(data, self) or _Buffer(self, nd * n * 8),
-                "tmpl": shared_buffer(tmpl, self) or _Buffer(self, nt * n * 8),
-                "idx":  _Buffer(self, pairs * nbins * 4, readback=True, usage=_BUF_STORAGE | _BUF_TRANSFER_DST),
-                "val":  _Buffer(self, pairs * nbins * 8, readback=True, usage=_BUF_STORAGE | _BUF_TRANSFER_DST),
-            }
-            if not direct:
-                b["cdata"] = _Buffer(self, nd * band0 * 8)
-            for i, (bi, _) in enumerate(tiers):
-                b["ct%d" % i] = _Buffer(self, nt * bi * (4 if i == 0 and direct else 8))
-                b["cidx%d" % i] = _Buffer(self, pairs * 4)
-                b["cval%d" % i] = _Buffer(self, pairs * 8)
-                # The survivor list and the indirect group count [count, 1, 1]: the compaction
-                # bumps the count atomically.
-                b[surv(i)] = _Buffer(self, pairs * 4, readback=i == last)
-                b[args(i)] = _Buffer(self, 12, usage=indirect)
-            if rowwin is not None:
-                if not direct:
-                    raise ValueError("per-row windows need the packed coarse role")
-                b["rowwin"] = _Buffer(self, rowwin.nbytes)
-                b["rowwin"].write(rowwin)
-                for i, (bi, _) in enumerate(tiers):   # each tier's, mapped onto its band
-                    cw = band_windows(rowwin, n, bi)
-                    b["rowwin_c%d" % i] = _Buffer(self, cw.nbytes)
-                    b["rowwin_c%d" % i].write(cw)
-            if bands:
-                if not direct:
-                    raise ValueError("band rows need the packed coarse role")
-                self._band_storage(b, nd, bands[0])
-            self._storage[key] = b
-        rw = (lambda name: [b[name]]) if rowwin is not None else (lambda name: [])
-        src = (b["bands"] if bands else b["data"]) if direct else b["cdata"]
-        sets = [self._descriptor_set(cpipe[2], [src, b["ct0"], b["cidx0"], b["cval0"]]
-                                     + rw("rowwin_c0"))]
-        csets = [self._descriptor_set(kpipe[2], [b["cval0"], b[surv(0)], b[args(0)]])]
-        for i in range(1, last + 1):
-            sets.append(self._descriptor_set(
-                tpipes[i][2], [src, b["ct%d" % i], b["cidx%d" % i], b["cval%d" % i],
-                               b[surv(i - 1)]] + rw("rowwin_c%d" % i)))
-            csets.append(self._descriptor_set(
-                lpipe[2], [b["cval%d" % i], b[surv(i)], b[args(i)], b[surv(i - 1)],
-                           b[args(i - 1)]]))
-        ds_listed = self._descriptor_set(
-            rpipe[2], [b["data"], b["tmpl"], b["idx"], b["val"], b["surv"]] + rw("rowwin"))
-        pack = shared_buffer(data, self) is not None and not direct
-        if pack:
-            ppipe = self._build_pipeline("pack_coarse", "pack_coarse.spv", 2, 16)
-            ds_pack = self._descriptor_set(ppipe[2], [b["data"], b["cdata"]])
-
-        rec = _Recording(self, "hierarchical")
-        cmd, barrier, stamp = rec.cmd, rec.barrier, rec.stamp
-        stamp("start")
-
-        # The counts start at zero. Pairs that do not survive are never visited, so dense
-        # outputs are cleared up front (a sparse reader takes only listed pairs, every bin of
-        # which the refine writes). A later tier's cval needs no clear: its compaction reads
-        # only the pairs that tier wrote.
-        for i in range(last + 1):
-            _reset_args(vk, cmd, b[args(i)])                  # count 0, y = z = 1
-        if bands:
-            self._band_fill(vk, cmd, b)
-        if clear_out:
-            vk.vkCmdFillBuffer(cmd, b["idx"].handle, 0, _WHOLE_SIZE, 0xFFFFFFFF)
-            vk.vkCmdFillBuffer(cmd, b["val"].handle, 0, _WHOLE_SIZE, 0)
-        # The compaction updates the counts atomically and indirect fetch reads all three
-        # words. With zero survivors a count stays a transfer-only write, which the later
-        # shader-write barriers cannot cover.
-        barrier(src_stage=_STAGE_TRANSFER_BIT, src_access=_ACCESS_TRANSFER_WRITE,
-                dst_stage=_STAGE_COMPUTE_BIT | _STAGE_DRAW_INDIRECT_BIT,
-                dst_access=_ACCESS_SHADER_READ | _ACCESS_SHADER_WRITE | _ACCESS_INDIRECT_READ)
-        stamp("fill")
-
-        if pack:
-            rec.bind(ppipe, ds_pack, (n, band0, nd * band0, 0))
-            rec.dispatch((nd * band0 + 255) // 256)
-            barrier()
-            stamp("pack")
-
-        for i, (bi, thr) in enumerate(tiers):
-            cstart, cend, cspan, cshift = coarse_span(n, bi, lo, hi)
-            if i == 0:
-                # A ragged build reads the data row count where the (unused, one-bin)
-                # coarse bin size would go; the last word is the gate threshold of a
-                # gate-only tiled build (_gate_bits).
-                rec.bind(cpipe, sets[0], (nt, cstart, cend, nd if ragged else cspan, cshift, 1,
-                                          self._gate_bits(thr, bi, sg, tile)))
-                rec.dispatch(groups)
-            else:
-                rec.bind(tpipes[i], sets[i], (nt, cstart, cend, cspan, cshift, 1, 0))
-                rec.dispatch_indirect(b[args(i - 1)])
-            barrier()
-            stamp("coarse%d" % bi)
-            rec.bind(kpipe if i == 0 else lpipe, csets[i],
-                     (pairs, int(np.float32(thr).view(np.uint32)), nbins))
-            rec.dispatch((pairs + 255) // 256)
-            # The count is consumed by indirect-command fetch, not by a shader. Missing this
-            # dependency made Intel use the previous dispatch count (zero on first use),
-            # even while the host read the new count later.
-            barrier(dst_stage=_STAGE_COMPUTE_BIT | _STAGE_DRAW_INDIRECT_BIT,
-                    dst_access=_ACCESS_SHADER_READ | _ACCESS_SHADER_WRITE | _ACCESS_INDIRECT_READ)
-            stamp("compact" if not last else "compact%d" % i)
-        if bands:
-            self._band_recompute(vk, cmd, b, bands, nt, pairs, "surv", "args", barrier)
-            stamp("recompute")
-
-        rec.bind(rpipe, ds_listed, (nt, lo, hi, binsize, shift, nbins,
-                                    int(np.float32(t2).view(np.uint32))))
-        rec.dispatch_indirect(b["args"])
-        # Host readback includes the survivor count, which remains a fill write when no pair
-        # survives, as well as shader-written peaks.
-        barrier(src_stage=_STAGE_COMPUTE_BIT | _STAGE_TRANSFER_BIT,
-                src_access=_ACCESS_SHADER_WRITE | _ACCESS_TRANSFER_WRITE,
-                dst_stage=_STAGE_HOST_BIT, dst_access=_ACCESS_HOST_READ)
-        stamp("refine")
-        return b, rec.end()
-
     # ---- band-only forward with survivor recompute (docs section 12, option (a)) ----------
-    def _band_source(self, n, B, nd, nt, data, slot):
-        """(B, source) when this call should read band rows and recompute survivor rows,
-        else None. Chosen from bytes, not a switch: per block the full forward writes n
-        samples and the band forward B, while the recompute reads and writes n for each block
-        with a refined pair, so bands move fewer bytes iff that fraction f < (n - B) / 2n.
-        f is the one measured on this call shape's previous run; the first run is full."""
-        if os.environ.get("MF_BAND_FORWARD") == "0" or n > 65536 or B >= n:
-            return None
-        src = getattr(self, "_fwd_src", {}).get(data.ctypes.data)
-        pend = getattr(self, "_pending_forward", None)
-        if (src is None or src[0] != n or src[4] != nd or not isinstance(pend, dict)
-                or pend.get(slot) is not src[7]):
-            return None
-        if not self._band_wanted(n, B, nd, nt):
-            return None
-        return (B, src)
-
-    def _band_wanted(self, n, B, nd, nt):
-        """The band/full choice for this call shape (_gpuhost.band_forward_wanted, every
-        backend's rule) from its measured refine-block fraction."""
-        return band_forward_wanted(n, B, getattr(self, "_band_f", {}).get((n, B, nd, nt)))
-
-    def _band_storage(self, b, nd, B):
-        b["bands"] = _Buffer(self, nd * B * 8)
-        b["bflags"] = _Buffer(self, nd * 4, usage=_BUF_STORAGE | _BUF_TRANSFER_DST)
-        b["blocks"] = _Buffer(self, nd * 4)
-        b["bargs"] = _Buffer(self, 12, usage=_BUF_STORAGE | _BUF_INDIRECT | _BUF_TRANSFER_DST)
-
-    def _band_fill(self, vk, cmd, b):
-        vk.vkCmdFillBuffer(cmd, b["bflags"].handle, 0, _WHOLE_SIZE, 0)
-        _reset_args(vk, cmd, b["bargs"])
-
-    def _band_recompute(self, vk, cmd, b, bands, nt, pairs, surv_key, args_key, barrier):
-        # Two phases ("mark", then "recompute"): the second reads what the first wrote.
-        """The refine's survivor blocks, their full spectra recomputed into their rows."""
-        B, (n, series_b, starts_b, r0, count, nser, _slot, _cmd, code) = bands
-        mpipe, mlayout, msl = self._build_pipeline("markblocks", "markblocks.spv", 5, 4)
-        ds = self._descriptor_set(msl, [b[surv_key], b[args_key], b["bflags"], b["blocks"],
-                                        b["bargs"]])
-        vk.vkCmdBindPipeline(cmd, _BIND_POINT_COMPUTE, mpipe)
-        vk.vkCmdBindDescriptorSets(cmd, _BIND_POINT_COMPUTE, mlayout, 0, 1, (_vp * 1)(ds), 0, None)
-        pc = (ctypes.c_uint32 * 1)(nt)
-        vk.vkCmdPushConstants(cmd, mlayout, _STAGE_COMPUTE, 0, 4, ctypes.byref(pc))
-        vk.vkCmdDispatch(cmd, (pairs + 255) // 256, 1, 1)
-        barrier(dst_stage=_STAGE_COMPUTE_BIT | _STAGE_DRAW_INDIRECT_BIT,
-                dst_access=_ACCESS_SHADER_READ | _ACCESS_SHADER_WRITE | _ACCESS_INDIRECT_READ)
-        self._stamp(cmd, "mark")
-        lname = "forward_listed_%d.spv" % n
-        lpipe, llayout, lsl = self._build_pipeline(("listed", n), lname, 4, 8)
-        ds = self._descriptor_set(lsl, [series_b, starts_b, b["data"], b["blocks"]],
-                                  [0, r0 * 4, 0, 0] if r0 else None)
-        vk.vkCmdBindPipeline(cmd, _BIND_POINT_COMPUTE, lpipe)
-        vk.vkCmdBindDescriptorSets(cmd, _BIND_POINT_COMPUTE, llayout, 0, 1, (_vp * 1)(ds), 0, None)
-        pc = (ctypes.c_uint32 * 2)(nser, code)
-        vk.vkCmdPushConstants(cmd, llayout, _STAGE_COMPUTE, 0, 8, ctypes.byref(pc))
-        vk.vkCmdDispatchIndirect(cmd, b["bargs"].handle, 0)
-        barrier()
-
-    def _band_forward(self, storage_key, b, bands, nd):
-        """The band-only forward writing b["bands"]: a recording of its own (phase
-        "forward"), swapped in for the pending full forward of the same spectra."""
-        B, (n, series_b, starts_b, r0, count, nser, slot, _cmd, code) = bands
-        fkey = ("bandfwd", storage_key, _band_key(bands))
-        forwards = self.__dict__.setdefault("_forwards", {})
-        rec = forwards.get(fkey)
-        if rec is not None:
-            self._cache_touch('forward', fkey)
-            return fkey, rec
-        pipe, layout, sl = self._build_pipeline(("bands", n), "forward_bands_%d.spv" % n, 3, 12)
-        pool_start = len(getattr(self, '_pools', []))
-        ds = self._descriptor_set(sl, [series_b, starts_b, b["bands"]],
-                                  [0, r0 * 4, 0] if r0 else None)
-        self._capture_begin()
-        cmd = None
-        try:
-            rec = _Recording(self, "band forward")
-            cmd = rec.cmd
-            rec.stamp("start")
-            rec.bind((pipe, layout), ds, (nser, B, code))
-            rec.dispatch(nd)
-            rec.barrier()
-            rec.stamp("forward")
-            rec.end()
-        finally:
-            self._capture_end(cmd)
-        # A forward record like any other, tied to the storage whose band buffer it writes.
-        forwards[fkey] = (cmd,)          # buffers belong to the storage and the caller
-        self._register_record('forward', fkey, storage_key, pool_start)
-        return fkey, forwards[fkey]
-
-    def _band_measure(self, n, B, nd, nt, bufs, surv_key, count):
-        """The fraction of blocks the refine touched, for the next call's choice."""
-        f = 0.0 if count <= 0 else refine_block_fraction(bufs[surv_key].view(np.uint32, count),
-                                                         nt, nd)
-        self.__dict__.setdefault("_band_f", {})[(n, B, nd, nt)] = f
-        from . import gatechain as _gc           # forward pricing uses the measured fraction
-        _gc.note_refine_blocks(n, B, f)
-
-    def hier_peaks_grouped(self, n, band, data, tmpl, ct0, raw_thr, groups, binsize, threshold,
-                           *, upload_tmpl=True, cascade_band=None, ct1=None, raw_thr1=None,
-                           slot=None, async_submit=False, sparse=False, nbins=None,
-                           handle_out=None):
-        """Hierarchical peaks over row ranges of one spectra batch, each with its own window,
-        as ONE recording: every tier is a single dispatch over all rows.
-
-        ``groups`` holds (lo, hi, a, b): rows a..b of ``data`` are searched over [lo, hi).
-        The windows go to the kernels per row (gRowWin, mfRowWindows), so a series call's
-        first, interior and last block groups no longer cost three dispatches per stage.
-        Output bins follow the first group's bin count, as hier_peaks_grouped on CUDA."""
-        return _hier_peaks_grouped(self, n, band, data, tmpl, ct0, raw_thr, groups, binsize,
-                                   threshold, upload_tmpl=upload_tmpl, cascade_band=cascade_band,
-                                   ct1=ct1, raw_thr1=raw_thr1, slot=slot,
-                                   async_submit=async_submit, sparse=sparse, nbins=nbins,
-                                   max_bins=_MAX_BINS, handle_out=handle_out)
 
     def empty_shared(self, shape, dtype=np.complex64, *, readback=False, host_input=False):
         factory = (lambda ctx, size: _Buffer(ctx, size, readback=True)) if readback else _Buffer
         return empty_shared(self, factory, shape, dtype)
-
-    def cancel_forward(self, slot=None):
-        if isinstance(getattr(self, "_pending_forward", None), dict):
-            if slot is None:
-                self._pending_forward.clear()
-            else:
-                self._pending_forward.pop(slot, None)
-            if not self._pending_forward:
-                self._pending_forward = None
-        else:
-            self._pending_forward = None
 
     _TS_RING = 256
 
@@ -2504,6 +1679,12 @@ class Context(Executor, InputUploads):
                 name = "compact0"
             else:
                 name = label
+            kinds = [o[0] == "vkCmdPipelineBarrier" for o in ops]
+            if any(b and not later for b, later in
+                   zip(kinds, [all(kinds[i + 1:]) for i in range(len(kinds))])):
+                # A barrier between two of a phase's commands: the batch would run them
+                # unordered (it keeps a phase's barriers for its end). Never fused.
+                return
             phases[name] = ([o for o in ops if o[0] != "vkCmdPipelineBarrier"],
                             [o for o in ops if o[0] == "vkCmdPipelineBarrier"])
         if set(phases) - set(_FUSED_PHASES) - {"start"}:
@@ -2606,21 +1787,10 @@ class Context(Executor, InputUploads):
         return self.timing_log
 
     def _submit(self, cmd, fence=None, wait=True, slot=None, pre=()):
-        """Forward and correlation share one submit and completion wait (pre: commands to
-        run first, in the same submission)."""
+        """Submit commands (pre: run first, in the same submission -- the work the executor
+        deferred for this slot) and wait for them unless asked not to."""
         pending = None
-        if isinstance(getattr(self, "_pending_forward", None), dict):
-            if slot is not None:
-                pending = self._pending_forward.pop(slot, None)
-            elif len(self._pending_forward) == 1:
-                pending = next(iter(self._pending_forward.values()))
-                self._pending_forward.clear()
-            if not self._pending_forward:
-                self._pending_forward = None
-        else:
-            pending = getattr(self, "_pending_forward", None)
-            self._pending_forward = None
-        commands = list(pre) + ([pending] if pending is not None else [])
+        commands = list(pre)
         if cmd is not None:
             commands.append(cmd)
         if not commands:
@@ -2654,135 +1824,47 @@ class Context(Executor, InputUploads):
             else:
                 _check(self.vk.vkQueueWaitIdle(queue), "vkQueueWaitIdle")
 
-    def peaks_items(self, n, data, tmpl, items, binsize, threshold, *, async_submit=False):
-        """One submission over items (lo, hi, a, b, t): rows a:b of data against template row t,
-        searched over [lo, hi) in bins of binsize. Returns per item (idx, val) shaped
-        (b - a, 1, nbins). Data and templates are shared allocations; descriptor offsets select
-        each item's rows. A one-off recording (follow-up windows do not repeat), with one
-        descriptor pool for all its sets, released after the call.
-
-        Every forward deferred into data (forward(..., defer=True, slot=('items', i))) goes in
-        the same submission. async_submit=True submits and returns a function giving the results, so
-        several plans' follow-ups share one wait; this context's next call must come after it."""
-        wait = not async_submit
-        vk = self.vk
-        pending = getattr(self, "_items_finish", None)
-        if pending is not None:
-            pending()
-        b_data, b_tmpl = shared_buffer(data, self), shared_buffer(tmpl, self)
-        if b_data is None or b_tmpl is None:
-            raise ValueError("item spectra and templates must be shared allocations")
-        shift = bin_shift(binsize)
-        t2 = int(np.float32(float(threshold) ** 2 if threshold > 0 else 0).view(np.uint32))
-        # Each item's output starts at the storage-buffer offset alignment (descriptor offsets).
-        offs, nbs, size = plan_items(items, binsize, self.storage_offset_alignment // 4, _MAX_BINS)
-        cap = getattr(self, "_items_cap", 0)
-        if cap < size:
-            cap = max(size, 2 * cap)
-            self._items_out = (_Buffer(self, cap * 4, readback=True),
-                               _Buffer(self, cap * 8, readback=True))
-            self._items_cap = cap
-        b_idx, b_val = self._items_out
-        sizes = (_PoolSize * 1)(_PoolSize(_DESC_STORAGE_BUFFER, 4 * len(items)))
-        dp = _DescPoolCreate(33, None, 0, len(items), 1, sizes)
-        pool = _vp()
-        _check(vk.vkCreateDescriptorPool(self.device, ctypes.byref(dp), None, ctypes.byref(pool)),
-               "vkCreateDescriptorPool")
-        cmd = _vp()
-        try:
-            info = _CmdBufAlloc(40, None, self.command_pool, 0, 1)
-            _check(vk.vkAllocateCommandBuffers(self.device, ctypes.byref(info), ctypes.byref(cmd)),
-                   "allocate item peaks")
-            _check(vk.vkBeginCommandBuffer(cmd, ctypes.byref(_CmdBufBegin(42, None, 1, None))),
-                   "begin item peaks")
-            bufs = (b_data, b_tmpl, b_idx, b_val)
-            bound = None
-            for (lo, hi, a, b, t), off, nb in zip(items, offs, nbs):
-                filename = self._peak_file(n, nb)
-                pipe, layout, sl = self._build_pipeline(("peaks", filename), filename,
-                                                        _NBIND, _PUSH_BYTES)
-                if bound != pipe:
-                    vk.vkCmdBindPipeline(cmd, _BIND_POINT_COMPUTE, pipe)
-                    bound = pipe
-                layouts = (_vp * 1)(sl)
-                dset = _vp()
-                _check(vk.vkAllocateDescriptorSets(self.device, ctypes.byref(
-                    _DescSetAlloc(34, None, pool, 1, ctypes.cast(layouts, _vp))), ctypes.byref(dset)),
-                    "vkAllocateDescriptorSets")
-                offsets = (a * n * 8, t * n * 8, off * 4, off * 8)
-                infos = (_DescBufferInfo * 4)(*[_DescBufferInfo(bf.handle, o, bf.nbytes - o)
-                                                for bf, o in zip(bufs, offsets)])
-                writes = (_WriteDescSet * 4)(*[
-                    _WriteDescSet(35, None, dset, i, 0, 1, _DESC_STORAGE_BUFFER, None,
-                                  ctypes.pointer(infos[i]), None) for i in range(4)])
-                vk.vkUpdateDescriptorSets(self.device, 4, writes, 0, None)
-                vk.vkCmdBindDescriptorSets(cmd, _BIND_POINT_COMPUTE, layout, 0, 1,
-                                           (_vp * 1)(dset), 0, None)
-                pc = (_u32 * 7)(1, lo, hi, binsize, shift & 0xffffffff, nb, t2)
-                vk.vkCmdPushConstants(cmd, layout, _STAGE_COMPUTE, 0, _PUSH_BYTES, ctypes.byref(pc))
-                vk.vkCmdDispatch(cmd, b - a, 1, 1)
-            barriers = (_BufMemBarrier * 2)(
-                _BufMemBarrier(44, None, _ACCESS_SHADER_WRITE, 0x2000, _QUEUE_FAMILY_IGNORED,
-                               _QUEUE_FAMILY_IGNORED, b_idx.handle, 0, _WHOLE_SIZE),
-                _BufMemBarrier(44, None, _ACCESS_SHADER_WRITE, 0x2000, _QUEUE_FAMILY_IGNORED,
-                               _QUEUE_FAMILY_IGNORED, b_val.handle, 0, _WHOLE_SIZE))
-            vk.vkCmdPipelineBarrier(cmd, _STAGE_COMPUTE_BIT, 0x4000, 0, 0, None, 2,
-                                    ctypes.cast(barriers, _vp), 0, None)
-            _check(vk.vkEndCommandBuffer(cmd), "end item peaks")
-            fwd = self._pending_forward if isinstance(getattr(self, "_pending_forward", None), dict) else {}
-            pre = [fwd.pop(k) for k in sorted((k for k in fwd if isinstance(k, tuple)
-                                                and k[0] == 'items'), key=lambda k: k[1])]
-            if fwd is not None and not fwd:
-                self._pending_forward = None
-            fence = None
-            if not wait:
-                fence = _vp()
-                _check(vk.vkCreateFence(self.device, ctypes.byref(_FenceCreate(8, None, 0)), None,
-                                        ctypes.byref(fence)), "vkCreateFence")
-            self._submit(cmd, fence=fence, wait=wait, pre=pre)   # with the pending forwards
-        except BaseException:
-            self._items_release(cmd, pool, None)
-            raise
-        if wait:
-            self._items_release(cmd, pool, None)
-            return self._items_read(items, offs, nbs, size)
-        done = []
-
-        def finish():
-            if not done:
-                self._items_finish = None
-                try:
-                    self._wait_fence(fence)
-                finally:
-                    self._items_release(cmd, pool, fence)
-                done.append(self._items_read(items, offs, nbs, size))
-            return done[0]
-        self._items_finish = finish
-        return finish
-
-    def _items_release(self, cmd, pool, fence):
-        vk = self.vk
-        if cmd:
-            vk.vkFreeCommandBuffers.argtypes = [_vp, _vp, _u32, ctypes.POINTER(_vp)]
-            vk.vkFreeCommandBuffers(self.device, self.command_pool, 1, (_vp * 1)(cmd))
-        vk.vkDestroyDescriptorPool(self.device, pool, None)
-        if fence is not None:
-            vk.vkDestroyFence(self.device, fence, None)
-
-    def _items_read(self, items, offs, nbs, size):
-        b_idx, b_val = self._items_out
-        return split_items(items, offs, nbs, b_idx.read(np.int32, size),
-                           b_val.read(np.complex64, size))
-
     # ---- driver primitives (_gpuexec) -----------------------------------------------------
-    def _x_kernel(self, name, n):
+    #: Kernels are specialized when their pipeline is built (constants 75/76/79): the tiers
+    #: read the spectra in place, at a stride and a data scale (_gpuhier feeds).
+    inplace_feed = True
+    #: Whose kernel identity stored measured choices are tied to (gatechain.gpu_kernel_id).
+    kernel_family = "vulkan"
+
+    def _x_kernel(self, name, n, consts=None):
+        c = consts or {}
+        stride, rowwin = int(c.get("stride", 0) or 0), 1 if c.get("rowwin") else 0
         if name in ("peaks", "peaks1"):
             filename = self._peak_file(n, 1 if name == "peaks1" else 2)
             return self._build_pipeline(("peaks", filename), filename, _NBIND, _PUSH_BYTES)
-        if name == "compact":
-            return self._build_pipeline(("compact",), _manifest()["compact_peaks"]["file"], 4, 8)
-        if name == "forward":
-            return self._build_pipeline(("forward", n), "forward_%d.spv" % n, 3, 8)
+        if name == "gate":                    # the fp32 filter as a gate tier, at its band
+            filename = self._kernel_file(n)
+            return self._build_pipeline(("peaks", filename), filename, _NBIND, _PUSH_BYTES,
+                                        data_stride=stride, row_windows=rowwin)
+        if name == "coarse":
+            filename = coarse_stem(n, c["ppg"], c["tile"]) + ".spv"
+            return self._build_pipeline(
+                ("coarse16", n, c["ppg"], c["tile"]), filename, _NBIND, _PUSH_BYTES,
+                data_stride=stride, row_windows=rowwin, subgroup=c.get("sg", 0),
+                data_scale=c.get("scale", 0), coarse_twt=c.get("twt", 1))
+        if name in ("tier", "tier1", "refine", "refine1"):
+            # refineListedBounded (refine_bounded.slang): data, tmpl, idx, val, survivors and
+            # their count, then the row-window table (binding 6).
+            filename = self._peak_file(n, 1 if name.endswith("1") else 2, refine=True)
+            return self._build_pipeline(("refine", filename), filename, 6, 32,
+                                        data_stride=stride, row_windows=rowwin,
+                                        subgroup=self._fit_subgroup(n))
+        fixed = {"compact": ("compact.spv", 3, 12), "compactl": ("compactl.spv", 5, 12),
+                 "mark": ("markblocks.spv", 5, 4),
+                 "pack": (_manifest()["pack_coarse"]["file"], 2, 20),
+                 "compact_peaks": (_manifest()["compact_peaks"]["file"], 4, 8),
+                 "fwd_tier0": ("forward_tier0_%d.spv" % n, 4, 20),
+                 "fwd_bands": ("forward_bands_%d.spv" % n, 3, 12),
+                 "fwd_listed": ("forward_listed_%d.spv" % n, 5, 12),
+                 "forward": ("forward_%d.spv" % n, 3, 8)}
+        if name in fixed:
+            filename, nbind, push = fixed[name]
+            return self._build_pipeline((name, filename), filename, nbind, push)
         if name in ("full", "series"):
             entry = "full" if name == "full" else "full_series"
             module = _manifest().get('modules', {}).get(str(n)) or {}
@@ -2810,6 +1892,93 @@ class Context(Executor, InputUploads):
                                         3, 16)
         return self._build_pipeline(('tc-corr2', n), info['corr2']['file'], 2, 0)
 
+    @staticmethod
+    def _x_has_c16(band):
+        return _spv_shipped("tierb_%d_c16" % band)
+
+    @staticmethod
+    def _x_has_kernel(name, n):
+        if name == "tier1":
+            info = (_manifest().get("modules", {}).get(str(n)) or {}).get("refine") or {}
+            return bool(info.get("one_bin"))
+        if name == "fwd_tier0":
+            return (_SPIRV / ("forward_tier0_%d.spv" % n)).is_file()
+        raise ValueError(name)
+
+    def _x_coarse_candidates(self, band):
+        """Every coarse layout (subgroup, ppg, tile, twt) this device can run at this band: the
+        shipped builds whose group fits the device's invocation and shared-memory limits, at
+        each subgroup size it can require (VK_EXT_subgroup_size_control; the default size
+        only, 0, without it). MF_VK_COARSE_PPG caps the packing, MF_VK_COARSE_TILE and
+        MF_VK_COARSE_SUBGROUP fix the tile (1 = untiled) and subgroup, and MF_VK_COARSE_TWT an
+        untiled build's twiddles (1 table, 0 recurrence), for measurement and tests."""
+        wg = max(1, band // 16)
+        cap = int(os.environ.get("MF_VK_COARSE_PPG", "0") or 0)
+        rng = getattr(self, "subgroup_range", None)
+        sizes = [0]
+        if rng:
+            sizes = [s for s in (4, 8, 16, 32, 64, 128) if rng[0] <= s <= rng[1]]
+        forced_sg = forced_tile("MF_VK_COARSE_SUBGROUP")
+        if forced_sg is not None:
+            sizes = [forced_sg if forced_sg in sizes else sizes[0]]
+        forced = forced_tile("MF_VK_COARSE_TILE")
+        forced_twt = forced_tile("MF_VK_COARSE_TWT")
+        out = []
+        for ppg in (1, 2, 4, 8, 16, 32):
+            if cap and ppg > cap:
+                continue
+            # A group of ppg pairs is (band/16)*ppg invocations and holds ppg padded
+            # exchange stages (about 17/16 * band words each).
+            if (wg * ppg > self.max_invocations
+                    or (band * 17 // 16 + 32) * 4 * ppg > self.max_shared_memory):
+                continue
+            for tile in (1,) + shipped_tiles(band, ppg, _spv_shipped):
+                if forced is not None and tile != forced:
+                    continue
+                if not _spv_shipped(coarse_stem(band, ppg, tile)):
+                    continue
+                # Sizes that would split the group past maxComputeWorkgroupSubgroups are
+                # out (_build_pipeline would bump them to the next size anyway).
+                lim = getattr(self, "max_workgroup_subgroups", 0)
+                out.extend((sg, ppg, tile, twt) for sg in sizes
+                           for twt in ((1, 0) if tile == 1 else (1,))
+                           if forced_twt is None or tile > 1 or twt == forced_twt
+                           if not (lim and sg and -(-wg * ppg // sg) > lim))
+        if not out:
+            out = [(sizes[0], 1, 1, 0)]
+        return out
+
+    def _x_time(self, native, binds, reps):
+        """The least device time of `reps` runs of a recorded list (device timestamps)."""
+        vk = self.vk
+        ds = self._device_state
+        timer = ds.__dict__.get("fuse_timer")
+        if timer is None:
+            timer = ds.fuse_timer = _DeviceTimer(ds)
+        cmd, release = native.command(binds or {}, transient=True)
+        times = []
+        try:
+            for rep in range(reps + 1):
+                i, begin, end = timer.pair()
+                cmds = (_vp * 3)(begin, cmd, end)
+                fence = _vp()
+                _check(vk.vkCreateFence(self.device, ctypes.byref(_FenceCreate(8, None, 0)),
+                                        None, ctypes.byref(fence)), "vkCreateFence")
+                try:
+                    _check(vk.vkQueueSubmit(self.queue, 1, ctypes.byref(
+                        _SubmitInfo(4, None, 0, None, None, 3, cmds, 0, None)), fence),
+                        "vkQueueSubmit")
+                    _check(vk.vkWaitForFences(self.device, 1, (_vp * 1)(fence), 1,
+                                              0xFFFFFFFFFFFFFFFF), "vkWaitForFences")
+                finally:
+                    vk.vkDestroyFence(self.device, fence, None)
+                if rep:                          # the first run is a warm-up
+                    times.append(timer.ns(i, self._ts_period) * 1e-9)
+        finally:
+            if release is not None:
+                release()
+        return min(times)
+
     def _x_tierc(self, n):
         info = _manifest().get('full_tierc', {}).get(str(n))
         if info is None:
@@ -2819,48 +1988,47 @@ class Context(Executor, InputUploads):
     def _x_alloc(self, nbytes, readback=False, upload=False):
         return _Buffer(self, nbytes, readback=readback)
 
-    def _x_list(self, label):
-        return _VkList(self, label)
+    def _x_list(self, label, once=False):
+        return _VkList(self, label, once)
 
-    def _x_run(self, native, wait, binds=None, slot=None):
+    @staticmethod
+    def _pre_commands(pre):
+        out, frees = [], []
+        for native, binds in pre:
+            cmd, release = native.command(binds or {}, transient=True)
+            out.append(cmd)
+            if release is not None:
+                frees.append(release)
+        return out, frees
+
+    def _x_run(self, native, wait, binds=None, slot=None, pre=()):
         cmd, release = native.command(binds or {}, transient=wait)
+        pcmds, frees = self._pre_commands(pre)
         if wait:
-            self._submit(cmd, slot=slot)
-            if release is not None:
-                release()
+            self._submit(cmd, slot=slot, pre=pcmds)
+            for free in frees + ([release] if release is not None else []):
+                free()
         else:
-            self._submit_pending(cmd)
+            self._submit_pending(cmd, pre=pcmds)
 
-    def _x_submit(self, native, binds, slot):
+    def _x_submit(self, native, binds, slot, pre=()):
         cmd, release = native.command(binds, transient=True)
+        pcmds, frees = self._pre_commands(pre)
+        frees = frees + ([release] if release is not None else [])
         if slot is None:                    # per-slot fences: an unslotted run is waited now
-            self._submit(cmd)
-            if release is not None:
-                release()
+            self._submit(cmd, pre=pcmds)
+            for free in frees:
+                free()
             return lambda: None
         fence = self._get_fence(slot)
-        self._submit(cmd, fence=fence, wait=False, slot=slot)
+        self._submit(cmd, fence=fence, wait=False, slot=slot, pre=pcmds)
 
         def wait():
             self._wait_fence(fence)
-            if release is not None:
-                release()
+            for free in frees:
+                free()
+            del frees[:]
         return wait
-
-    def _x_defer(self, native, binds, slot, source):
-        cmd, _ = native.command(binds)
-        if not isinstance(getattr(self, "_pending_forward", None), dict):
-            self._pending_forward = {}
-        self._pending_forward[slot] = cmd
-        if source is not None:
-            # A hierarchical call on these spectra may swap this forward for the band-only
-            # one (_band_source): what it needs to recompute survivor rows itself.
-            n, series, starts, row, count, nser, code, _, address = source
-            # The band kernels bind starts at element r0 of its allocation (an absolute
-            # descriptor offset), so a view's own offset is folded in.
-            r0 = row + getattr(starts, "offset", 0) // 4
-            self.__dict__.setdefault("_fwd_src", {})[address] = (
-                n, series, starts, r0, count, nser, slot, cmd, code)
 
     @staticmethod
     def _x_upload(buf, array, slot):
@@ -2873,13 +2041,17 @@ class Context(Executor, InputUploads):
         pass                # no wait added (open question: docs/unification-plan.md log)
 
     @staticmethod
-    def _x_release(native):
-        native.release()
+    def _x_release(native, done=False):
+        native.release(done)
 
     @staticmethod
     def _x_read(buf, out, offset=0):
         ptr = buf.ptr.value if hasattr(buf.ptr, "value") else buf.ptr
         ctypes.memmove(out.ctypes.data, ptr + offset, out.nbytes)
+
+    @staticmethod
+    def _x_view(buf, dtype, count):
+        return buf.view(dtype, count)
 
     def zero_columns(self, dest, a, b):
         """Zero dest[:, a:b] of a device-shared 2-D array (or rows of one) on the device.
@@ -2980,13 +2152,13 @@ class Context(Executor, InputUploads):
             vk.vkFreeCommandBuffers.argtypes = [_vp, _vp, _u32, ctypes.POINTER(_vp)]
             vk.vkFreeCommandBuffers(self.device, self.command_pool, len(cmds), (_vp * len(cmds))(*cmds))
 
-    def _submit_pending(self, cmd):
+    def _submit_pending(self, cmd, pre=()):
         """Submit on the main queue and leave it in flight (see _Device.pending_writes)."""
         fence = _vp()
         _check(self.vk.vkCreateFence(self.device, ctypes.byref(_FenceCreate(8, None, 0)), None,
                                      ctypes.byref(fence)), "vkCreateFence")
         try:
-            self._submit(cmd, fence=fence, wait=False)
+            self._submit(cmd, fence=fence, wait=False, pre=pre)
         except BaseException:
             self.vk.vkDestroyFence(self.device, fence, None)
             raise
@@ -3030,62 +2202,6 @@ class Context(Executor, InputUploads):
     #: zero_columns_done(wait=False) leaves the zeroing in flight.
     async_zero = True
 
-    cache_limit_recordings = 256
-
-    def _register_record(self, kind, key, storage, pool_start):
-        token = (kind, key)
-        self._record_pools[token] = self._pools[pool_start:]
-        if storage is not None:
-            self._record_storage[token] = storage
-            self._storage_users.setdefault(storage, set()).add(token)
-
-    def _drop_storage(self, key):
-        buffers = self._storage.pop(key)
-        for buf in (buffers.values() if isinstance(buffers, dict) else buffers):
-            buf.destroy()
-        self._storage_users.pop(key, None)
-        for resident in self._uploaded.values():
-            resident.pop(key, None)
-        self.__dict__.get("_c16_template_exp", {}).pop(key, None)
-
-    def _evict_record(self, kind, key, keep_storage=None):
-        if kind == "exec":
-            return self._exec_evict(key)
-        # An in-flight readback reads this record's buffers when collected.
-        self._drain()
-        token = (kind, key)
-        batch = self._record_tables()[kind].pop(key)
-        if kind in ('hier', 'hier_cascade'):
-            self.__dict__.get("_pviews", {}).pop(id(batch[0]), None)
-        cmd = batch[-1]
-        getattr(self, "_phases", {}).pop(getattr(cmd, "value", cmd), None)
-        pf = getattr(self, '_pending_forward', None)
-        cmd_val = getattr(cmd, 'value', cmd)
-        if isinstance(pf, dict):
-            for s, pcmd in list(pf.items()):
-                if getattr(pcmd, 'value', pcmd) == cmd_val:
-                    del pf[s]
-                    self._submit(cmd, slot=s)
-            if not pf:
-                self._pending_forward = None
-        elif pf is not None and getattr(pf, 'value', pf) == cmd_val:
-            self._pending_forward = None
-            self._submit(cmd)
-        self._wait_queues()
-        commands = (_vp * 1)(cmd)
-        self.vk.vkFreeCommandBuffers.argtypes = [_vp, _vp, _u32, ctypes.POINTER(_vp)]
-        self.vk.vkFreeCommandBuffers(self.device, self.command_pool, 1, commands)
-        pools = self._record_pools.pop(token, [])
-        for pool in pools:
-            self.vk.vkDestroyDescriptorPool(self.device, pool, None)
-        dead = {pool.value for pool in pools}
-        self._pools = [pool for pool in self._pools if pool.value not in dead]
-        storage = self._record_storage.pop(token, None)
-        if storage is not None:
-            users = self._storage_users[storage]
-            users.discard(token)
-            if not users and storage != keep_storage:
-                self._drop_storage(storage)
 
     def followup_executor(self):
         """This device's executor for _gpuhost.submit_followups (_vkfollowup: one recording per group, replayed)."""
@@ -3096,13 +2212,10 @@ class Context(Executor, InputUploads):
         """Release records and owned storage, preserving external shared arrays."""
         self._drain()
         self._free_zero_recs()
-        self._submit(None)
         self._wait_queues()
         self.vk.vkFreeCommandBuffers.argtypes = [_vp, _vp, _u32, ctypes.POINTER(_vp)]
         self._evict_all()
-        # Also clean up storage/descriptors left by failed construction.
-        for key in list(self._storage):
-            self._drop_storage(key)
+        # Descriptor pools left by a failed construction.
         for pool in getattr(self, '_pools', []):
             self.vk.vkDestroyDescriptorPool(self.device, pool, None)
         self._pools = []

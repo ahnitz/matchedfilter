@@ -456,8 +456,9 @@ lag in u rms(y) units mean 0.76 / 0.71, std 0.40 / 0.39, max 3.31 / 5.19 (bands 
 -- smaller than the Slang radix-16 tier's (sigma 1.8 / 2.2), as the products accumulate in
 fp32. The error magnitude has a heavier tail than a Rayleigh fit, so its kappa is not z x
 std: it is set at twice the largest error seen (margin use < 0.5), kappa 7.0 / 10.5
-(`COARSE_TC_SIGMA`, `tools/cuda_tc_sigma.py`). `tests/test_cuda_c16_bound.py` checks the
-bound covers the exact maximum with margin use < 0.5 on these kernels too.
+(`COARSE_TC_SIGMA`, `tools/cuda_tc_sigma.py`). `tests/test_gpu_c16_bound.py` checks that
+the bound covers the exact maximum with margin use < 0.5 on every coarse layout a GPU may
+pick, these kernels included.
 
 **Speed** (ns per pair, 131k pairs; the mma.sync m16n8k16 f32-accumulate ceiling measured
 on this part: **365 TFLOP/s**):

@@ -159,7 +159,9 @@ def test_slots_sharing_a_stream_keep_their_own_block_starts(ctx):
     ctx.forward(n, series, np.arange(64, dtype=np.uint32) * (n // 2), busy, defer=True, slot=0)
     ctx.forward(n, series, starts[0], spec[0], defer=True, slot=0)
     ctx.forward(n, series, starts[1], spec[1], defer=True, slot=4)
-    ctx._sync(ctx.get_stream(0))
+    h = _complex(rng, (1, n))
+    for slot, s in ((0, spec[0]), (4, spec[1])):    # each slot's consumer runs its forwards
+        ctx.peaks(n, s, h, binsize=n, slot=slot)
     for s, st in zip(spec, starts):
         ref = np.fft.fft(np.stack([series[a:a + n] for a in st[:3]]), axis=1) / n
         np.testing.assert_allclose(s[:3], ref, rtol=0, atol=1e-5 * np.abs(ref).max())
@@ -311,7 +313,7 @@ def test_cache_is_bounded_and_results_survive_eviction(ctx):
             i2, v2 = ctx.peaks(n, d, h, binsize=64)
             np.testing.assert_array_equal(i2, expected[nd][0])
             np.testing.assert_allclose(v2, expected[nd][1], rtol=1e-6)
-        assert len(ctx._batches) < 39
+        assert len(ctx._exec_table()) < 39
     finally:
         ctx.cache_limit_bytes = old
         ctx.clear_cache()

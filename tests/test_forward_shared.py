@@ -166,13 +166,8 @@ def test_shared_banks_bind_without_copy_and_survive_eviction(gpu, kind):
     assert np.shares_memory(plan._gdata, data)
     assert np.shares_memory(plan._gtmpl, templates)
     expected = plan.run().copy()
-    if kind == 'flat':
-        rec = next(r for k, r in plan._gpu._exec_records.items() if k[0] == 'flat')
-        bound = [rec.buffers['data'], rec.buffers['tmpl']]
-    else:
-        batch = next(iter(plan._gpu._hier.values()))
-        bufs = batch[0] if isinstance(batch, tuple) else batch
-        bound = [bufs['data'], bufs['tmpl']]
+    rec = next(r for k, r in plan._gpu._exec_records.items() if k[0] == kind)
+    bound = [rec.buffers['data'], rec.buffers['tmpl']]
     for array, buf in zip((data, templates), bound):
         assert buf.handle == shared_buffer(array, plan._gpu).handle
     # DLPack's capsule and NumPy base chain must retain the actual allocation.
@@ -208,7 +203,7 @@ def test_shared_series_refresh_and_validation_failure(gpu):
     # Failure after preparing a forward command cannot leak into later work.
     with pytest.raises(ValueError):
         plan.run_series(series, *args)
-    assert getattr(plan._gpu, '_pending_forward', None) is None
+    assert not plan._gpu._pending()          # no deferred forward left behind
     plan.set_coarse_threshold(0.)
     first = plan.run_series(series, *args).copy()
     assert plan._series_workspace[1] is None  # no redundant source allocation
