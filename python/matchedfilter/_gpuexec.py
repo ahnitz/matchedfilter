@@ -85,6 +85,10 @@ Driver primitives (a Context provides each):
                             may still read what it rewrites (another context's queue).
   _x_release(native, done=False)
                             free a recording (done: its runs are known to have finished).
+  _x_idle()                 wait for every run this context submitted (its own queues or
+                            streams: not other contexts' work on the device).
+  _x_free(buf)              free an _x_alloc buffer no run of this context still uses (a
+                            driver whose frees synchronize the device keeps it for reuse).
   _x_read(buf, out, offset=0)
                             copy bytes of a readback buffer from `offset` into a host array,
                             after the run that wrote them has finished.
@@ -109,6 +113,12 @@ from ._errors import UnsupportedSize
 from ._gpuhier import HierOps
 from ._gpuhost import MAX_BINS, bin_shift, plan_items, split_items
 from ._shared import shared_view
+
+
+def _allocation(buf):
+    """The identity of the device allocation a buffer or view lies in."""
+    owner = getattr(buf, "owner", None)
+    return id(owner.buffer if owner is not None else buf)
 
 
 class Record:
@@ -217,20 +227,43 @@ class Executor(HierOps):
     def _defer(self, native, binds, slot, source):
         self._pending().setdefault(slot, []).append((native, binds, source))
 
-    def _take(self, slot):
+    def _take(self, slot, reads=None):
         """The work held for `slot`, removed, for a run on `slot` to submit first. An
-        unslotted run cannot tell which other slot's work wrote what it reads: every slot's
-        work runs now, each on its own slot -- where its staged inputs were written -- as
-        pending writes the run is ordered after."""
+        unslotted run also needs other slots' work that writes what it reads (reads: the
+        allocations it binds; None: unknown, so all of it): each such slot's work, up to its
+        last item the run reads, runs now on its own slot -- where its staged inputs were
+        written -- as pending writes the run is ordered after. The rest stays deferred for
+        its own consumer (which may claim it): a middle-stage correlation once flushed every
+        leaf forward, and its host reads then waited for them."""
         table = self._pending()
         if not table:
             return ()
         work = [(native, binds) for native, binds, _ in table.pop(slot, ())]
         if slot is None:
             for other in list(table):
-                *pre, (native, binds, _) = table.pop(other)
+                items = table[other]
+                cut = len(items)
+                if reads is not None:
+                    hit = [i for i, (_, _, src) in enumerate(items)
+                           if src is None or _allocation(src[7]) in reads]
+                    if not hit:
+                        continue
+                    cut = hit[-1] + 1
+                run, keep = items[:cut], items[cut:]
+                if keep:
+                    table[other] = keep
+                else:
+                    del table[other]
+                *pre, (native, binds, _) = run
                 self._x_run(native, False, binds, other, pre=[(n, b) for n, b, _ in pre])
         return work
+
+    @staticmethod
+    def _reads(rec, binds):
+        """The allocations a run of `rec` binds (its buffers and the per-run ones)."""
+        out = {_allocation(b) for b in rec.buffers.values()}
+        out.update(_allocation(b) for b in (binds or {}).values() if not isinstance(b, tuple))
+        return out
 
     def _take_items(self):
         """The work every follow-up item slot (("items", i)) holds, in item order."""
@@ -282,17 +315,20 @@ class Executor(HierOps):
         else:
             table.pop(slot, None)
 
-    def _exec_run(self, native, wait, binds, slot):
-        """Run a recorded list on `slot`, after the work deferred for it (one submission)."""
-        self._x_run(native, wait, binds, slot, pre=self._take(slot))
+    def _exec_run(self, native, wait, binds, slot, rec=None):
+        """Run a recorded list on `slot`, after the work deferred for it (one submission).
+        rec: the record it belongs to (what an unslotted run reads, _take)."""
+        reads = None if rec is None or slot is not None else self._reads(rec, binds)
+        self._x_run(native, wait, binds, slot, pre=self._take(slot, reads))
 
-    def _exec_submit(self, native, binds, slot):
+    def _exec_submit(self, native, binds, slot, rec=None):
         """_exec_run, left running: returns wait() (_x_submit)."""
-        return self._x_submit(native, binds, slot, pre=self._take(slot))
+        reads = None if rec is None or slot is not None else self._reads(rec, binds)
+        return self._x_submit(native, binds, slot, pre=self._take(slot, reads))
 
-    def _exec_evict(self, key):
+    def _exec_evict(self, key, done=False):
         """Drop one executor record: its in-flight results are collected first, then the
-        driver frees its recording and the buffers it owns."""
+        driver frees its recording and the buffers it owns (done: this context is idle)."""
         self._drain()
         rec = self._exec_table().pop(key, None)
         if rec is None:
@@ -306,9 +342,9 @@ class Executor(HierOps):
                     del self._pending()[slot]
                 for nat, b in mine:
                     self._x_run(nat, True, b, slot)
-        self._x_release(rec.native)
+        self._x_release(rec.native, done)        # waits for the record's runs unless done
         for name in rec.owned:
-            rec.buffers[name].destroy()
+            self._x_free(rec.buffers[name])
         for resident in self._uploaded.values():
             resident.pop(key, None)
 
@@ -330,9 +366,18 @@ class Executor(HierOps):
         self._cache_room(estimate, incoming=incoming)
 
     def _exec_clear(self):
-        """Evict every executor record (clear_cache)."""
-        for key in list(self._exec_table()):
-            self._exec_evict(key)
+        """Evict every executor record (clear_cache, a dropped layout): one wait for this
+        context's work, then every record freed as finished. A wait per record was a
+        device-wide synchronization each (CUDA's shared primary context, Vulkan's shared
+        queues): a context of 300 records stalled every other plan's pipeline 300 times."""
+        table = self._exec_table()
+        if not table:
+            return
+        self._drain()
+        self._x_idle()
+        for key in list(table):
+            # Deferred work of an evicted record runs (waited) before it is freed.
+            self._exec_evict(key, done=True)
 
     def _exec_upload(self, rec, key, uploads, data, tmpl, slot):
         """Write the inputs _input_uploads found stale into the record's own buffers (a
@@ -418,7 +463,7 @@ class Executor(HierOps):
         if (uploads[0] and "data" in rec.owned) or (uploads[1] and "tmpl" in rec.owned):
             self.settle_writes()       # a call left in flight may still read these inputs
         self._write_uploads(key, uploads, rec.buffers["data"], data, rec.buffers["tmpl"], tmpl)
-        self._exec_run(rec.native, wait, None, None)
+        self._exec_run(rec.native, wait, None, None, rec)
         if "out" in rec.owned:
             self._x_read(rec.buffers["out"], out)
 
@@ -489,7 +534,7 @@ class Executor(HierOps):
         if async_submit:
             self._x_after_readers()
         self._exec_run(rec.native, not async_submit,
-                       {"out": ov} if staged else {"out": ov, "starts": sv}, None)
+                       {"out": ov} if staged else {"out": ov, "starts": sv}, None, rec)
         return out
 
     # ---- forward transform --------------------------------------------------------------
@@ -566,14 +611,14 @@ class Executor(HierOps):
         else:
             binds["starts"] = bst = stv
             row = r0
+        source = None if two else (n, sv, bst, row, count, nser, code, pv,
+                                   spectra.ctypes.data + r0 * n * 8)
         if handle_out is not None:
-            handle_out.append((key, rec, binds))
+            handle_out.append((key, rec, binds, source))
         if defer:
-            self._defer(rec.native, binds, slot,
-                          None if two else (n, sv, bst, row, count, nser, code, pv,
-                                            spectra.ctypes.data + r0 * n * 8))
+            self._defer(rec.native, binds, slot, source)
         else:
-            self._exec_run(rec.native, True, binds, slot)
+            self._exec_run(rec.native, True, binds, slot, rec)
 
     def _forward_fused(self, n, series, starts, spectra, *, defer=False, slot=None):
         return self.forward(n, series, starts, spectra, defer=defer, slot=slot, fused=True)
@@ -587,7 +632,7 @@ class Executor(HierOps):
         if not self.forward_valid(h):
             return False
         self._cache_touch("exec", h[0])
-        self._defer(h[1].native, h[2], slot, None)
+        self._defer(h[1].native, h[2], slot, h[3])
         return True
 
     # ---- flat peaks ---------------------------------------------------------------------
@@ -747,9 +792,9 @@ class Executor(HierOps):
         self._exec_upload(rec, key, uploads, data, tmpl, slot)
         binds = {"w%d" % g: (nt, lo, hi, binsize, shift & 0xFFFFFFFF, nbins, t2bits)
                  for g, (lo, hi, _, _) in enumerate(groups)}
-        wait = self._exec_submit(rec.native, binds, slot) if async_submit else None
+        wait = self._exec_submit(rec.native, binds, slot, rec) if async_submit else None
         if wait is None:
-            self._exec_run(rec.native, True, binds, slot)
+            self._exec_run(rec.native, True, binds, slot, rec)
         shape = (nd, nt, nbins)
 
         def result():

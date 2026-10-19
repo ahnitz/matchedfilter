@@ -112,7 +112,10 @@ class InputUploads:
                 if getattr(self, attr, None) is not None}
 
     def _evict_all(self):
-        """Evict every record through the backend's _evict_record."""
+        """Evict every record (the executor's at once, _exec_clear)."""
+        if hasattr(self, "_exec_clear"):
+            self._exec_clear()
+            return
         for kind, table in self._record_tables().items():
             for key in list(table):
                 self._evict_record(kind, key)

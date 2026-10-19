@@ -236,7 +236,9 @@ class _MTLSize(ctypes.Structure):
 
 
 class _Buffer:
-    """A shared-storage buffer, mapped for the lifetime of the object."""
+    """A shared-storage buffer, mapped for the lifetime of the object. Slotted: a search
+    holds thousands, and every full garbage collection walks them."""
+    __slots__ = ("ctx", "nbytes", "handle", "ptr", "_bytes", "__dict__")
 
     def __init__(self, ctx, nbytes):
         self.ctx = ctx
@@ -264,7 +266,7 @@ class _Buffer:
     def view(self, dtype, count):
         """The first `count` elements as a NumPy view of the buffer (no copy). The bytes are
         wrapped once: a result reads several views per call."""
-        raw = self.__dict__.get("_bytes")
+        raw = getattr(self, "_bytes", None)
         if raw is None:
             raw = self._bytes = np.frombuffer((ctypes.c_ubyte * self.nbytes).from_address(
                 self.ptr.value if hasattr(self.ptr, "value") else self.ptr), np.uint8)
@@ -1344,6 +1346,14 @@ class Context(Executor, InputUploads):
     @staticmethod
     def _x_release(native, done=False):
         pass                        # nothing recorded: every run encodes afresh
+
+    @staticmethod
+    def _x_idle():
+        pass                        # a command buffer retains the buffers it encodes
+
+    @staticmethod
+    def _x_free(buf):
+        buf.destroy()
 
     @staticmethod
     def _x_read(buf, out, offset=0):

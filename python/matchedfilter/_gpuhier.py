@@ -28,6 +28,7 @@ a device with indirect dispatch sizes them by the count, one without strides a f
 """
 import math
 import os
+import struct
 
 import numpy as np
 
@@ -93,8 +94,18 @@ def pow2_scaled(a, e):
     return np.ldexp(a.view(np.float32), int(e)).view(np.complex64)
 
 
+_F32 = struct.Struct("<f")
+_U32 = struct.Struct("<I")
+
+
 def _bits(x):
-    return int(np.float32(x).view(np.uint32))
+    """A float's float32 bits as a uint32 word (every call passes several: struct, not a
+    NumPy scalar, which cost a fifth of a call's host time; out of float32 range, NumPy's
+    inf)."""
+    try:
+        return _U32.unpack(_F32.pack(x))[0]
+    except OverflowError:
+        return int(np.float32(x).view(np.uint32))
 
 
 class HierHandle:
@@ -590,9 +601,9 @@ class HierOps:
         import time
         timed = trial is not None and not async_submit
         t0 = time.perf_counter()
-        wait = self._exec_submit(rec.native, binds, slot) if async_submit else None
+        wait = self._exec_submit(rec.native, binds, slot, rec) if async_submit else None
         if wait is None:
-            self._exec_run(rec.native, True, binds, slot)
+            self._exec_run(rec.native, True, binds, slot, rec)
 
         def result():
             if wait is not None:

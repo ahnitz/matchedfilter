@@ -78,8 +78,9 @@ def test_a_staged_forward_deferred_twice_runs_the_first_before_restaging():
 def test_deferred_forwards_on_several_slots_run_before_their_consumers(consumer):
     """Forwards deferred on slots 0 (two of them) and 4 run before a waited call on their
     slot reads them -- a waited peaks call shares one record across slots but still runs on
-    its slot -- and an unslotted call runs every slot's deferred work first. A waited flat
-    call once dropped its slot, ran unslotted, took nothing, and read unwritten spectra."""
+    its slot -- and an unslotted call first runs the deferred work that writes what it
+    reads. A waited flat call once dropped its slot, ran unslotted, took nothing, and read
+    unwritten spectra."""
     import matchedfilter as mf
     from conftest import usable_gpu
     device = usable_gpu()
@@ -103,6 +104,10 @@ def test_deferred_forwards_on_several_slots_run_before_their_consumers(consumer)
             ctx.peaks(n, s, h, binsize=n, slot=slot)
     else:
         ctx.peaks(n, spec[0], h, binsize=n)
+        ref = np.fft.fft(np.stack([series[a:a + n] for a in starts[0]]), axis=1) / n
+        np.testing.assert_allclose(spec[0], ref, rtol=0, atol=1e-5 * np.abs(ref).max())
+        for slot, s in ((0, spec[1]), (4, spec[2])):     # the rest, for their consumers
+            ctx.peaks(n, s, h, binsize=n, slot=slot)
     assert not ctx._pending()
     for s, st in zip(spec, starts):
         ref = np.fft.fft(np.stack([series[a:a + n] for a in st]), axis=1) / n

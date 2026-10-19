@@ -961,17 +961,12 @@ def calibrate_costs_gpu(n, device, blocks=None, reps=5, seed=11, nt=256):
     host_call = max(0.0, hosts[1][1] - host_block * hosts[1][0])
     cm = CostModel(n, dense, sparse, refine, block=block, excess=excess,
                    host_call=host_call, host_block=host_block,
-                   forward=forward, band_forward=_gpu_backend(device) in _BAND_FORWARD)
+                   forward=forward, band_forward=_gpu_backend(device) is not None)
     _COSTS[key] = cm
     if path is not None:
         _store_cost(path, skey, cm)
     return cm
 
-
-#: GPU backends whose hierarchical call can run a band-only forward with survivor recompute
-#: (CostModel.forward_cost): Vulkan (forward_bands) and Metal (forward_tier0), both chosen by
-#: _gpuhost.band_forward_wanted. CUDA joins when its kernels do.
-_BAND_FORWARD = {"vulkan", "metal"}
 
 #: Per GPU backend: the environment switch that makes its first tier report the raw coarse
 #: statistic instead of an upper bound of it, read when its pipelines are built, and the gate
