@@ -1067,7 +1067,7 @@ class MatchedFilter:
                 return None                     # needs the upload's zero padding past the end
             allocs.setdefault(id(c[0]), [c[0], 0, 0])[2] += int(st.size)
             rows.append((id(c[0]), c[1]))
-        by_rows = getattr(gpu, "forward_rows", False) and n <= 65536
+        by_rows = n <= 65536                   # one-stage forwards take row ranges
         if len(allocs) > 1 and not by_rows:
             return self._items_by_allocation(jobs, rows, binsize, threshold, wait)
         total = 0
@@ -1118,7 +1118,7 @@ class MatchedFilter:
             whole = next(iter(allocs.values()))[0]
             gpu.forward(n, whole, starts[:total], spec[:total], defer=True)
             data = spec[:total]
-        async_ok = not wait and getattr(gpu, "items_async", False)
+        async_ok = not wait
         res = gpu.peaks_items(n, data, self._gtmpl, items, binsize, threshold,
                               **({"async_submit": True} if async_ok else {}))
 
@@ -1219,13 +1219,9 @@ class MatchedFilter:
         """
         if self._gpu is None:
             return None
-        if isinstance(self, HierarchicalFilter):
-            # (A GPU plan under a chain trial is judged per batch, not per call: it takes the
-            # same paths as any other -- ragged, deferred, replayed.)
-            if not getattr(self._gpu, "supports_ragged_hier", False):
-                return None
-        elif (type(self) is not MatchedFilter
-                or not getattr(self._gpu, "supports_ragged_bins", False)):
+        # (A GPU plan under a chain trial is judged per batch, not per call: it takes the
+        # same paths as any other -- ragged, deferred, replayed.)
+        if not isinstance(self, HierarchicalFilter) and type(self) is not MatchedFilter:
             return None
         # Cached per layout bytes (as run_series), so a repeated call keeps its layout and
         # with it its call plan.
@@ -1761,13 +1757,11 @@ class MatchedFilter:
         c.single = single = len(layout.groups) == 1 and nblk <= batch
         # Sparse results (time_domain asks with _want_sparse): only the peaks come back.
         # At threshold 0 (follow-ups) every bin holds a peak: dense is cheaper there.
-        sparse = bool(raw and threshold > 0 and getattr(self, "_want_sparse", False)
-                      and getattr(self._gpu, "supports_sparse", False))
+        sparse = bool(raw and threshold > 0 and getattr(self, "_want_sparse", False))
         c.skw = {"sparse": True} if sparse else {}
         c.is_hier = isinstance(self, HierarchicalFilter)
         # A declared capability, not a probe for one backend's internals.
-        can_pipeline = (getattr(self._gpu, "supports_async", False)
-                        and getattr(self._gpu, "cache_limit_bytes", 10**9) > 1024 * 1024)
+        can_pipeline = getattr(self._gpu, "cache_limit_bytes", 10**9) > 1024 * 1024
         grouped_flat = (len(layout.groups) > 1 and type(self) is MatchedFilter
                         and nb <= getattr(self._gpu, "max_grouped_bins", 0)
                         and nt <= self._gpu_pair_limit())
@@ -1775,11 +1769,9 @@ class MatchedFilter:
         # GPU works on this call while the host prepares the next bank's. (A chain trial on the
         # GPU is judged per batch, in the mode the search runs: deferred too.)
         # A grouped flat call defers too when it is one batch (a follow-up's window: one
-        # submission for every bin count), on a backend that declares it can.
+        # submission for every bin count).
         c.defer = defer = (getattr(self, "_defer_series", False) and can_pipeline
-                           and (not grouped_flat or (nblk <= batch
-                                                     and getattr(self._gpu, "defers_grouped",
-                                                                 False))))
+                           and (not grouped_flat or nblk <= batch))
         c.pipelined = can_pipeline and (not single or defer)
         queue_ahead = int(os.environ.get("MF_GPU_QUEUE_AHEAD", "8"))
         c.K = K = max(1, queue_ahead) if c.pipelined else 1
@@ -1958,8 +1950,7 @@ class MatchedFilter:
         # Read in place means a row of an allocation (contained) or a whole one -- not a
         # host array viewed for this call (series_owner).
         record = (c.defer and c.is_hier and c.raw and c.pipelined
-                  and (c.contained is not None or (c.source_shared and not c.viewed))
-                  and getattr(self._gpu, "supports_replay", False))
+                  and (c.contained is not None or (c.source_shared and not c.viewed)))
         recorded = []
         for begin, end, count, groups, rebased in plan_b[1]:
             fh, hh = [], []
@@ -2909,7 +2900,7 @@ class HierarchicalFilter(MatchedFilter):
         (one-stage forwards only, n <= 65536). Elsewhere a real series is widened."""
         if self._gpu is None:
             return self.device.kind == "cpu" and self.n >= 4
-        return bool(getattr(self._gpu, "real_series", False)) and self.n <= 65536
+        return self.n <= 65536
 
     def _new_cpu_plan(self, chain):
         self._execution_policy = self._series_policy('hierarchical_series', chain[-1], self.ntemplates)

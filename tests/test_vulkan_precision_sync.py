@@ -61,3 +61,27 @@ def test_first_dispatch_and_changing_survivor_counts(binsize):
                 assert np.max(np.abs(got['value']-want['value']))/scale < 1e-5
     finally:
         hier._gpu.destroy()
+
+
+def test_accurate_trig_is_measured_not_keyed_on_the_vendor(monkeypatch):
+    """Whether a device needs accurate twiddles is a forward transform's error with its
+    native trig (Context._probe_trig): an Iris Xe measured 9.4e-5, a Radeon 1.2e-6. The
+    probe's native pipelines are dropped when the answer is accurate."""
+    from conftest import vulkan_runs
+    ok, why = vulkan_runs()
+    if not ok:
+        pytest.skip(why)
+    from matchedfilter import _vkcompute as V
+    monkeypatch.delenv("MF_COST_FILE", raising=False)
+    c = V.Context(0)
+    try:
+        assert c._device_state.trig_probed
+        assert getattr(c, "_trig_probe_error", None) is None   # measured, not given up
+        monkeypatch.setattr(V.Context, "_TRIG_TOLERANCE", 0.0)
+        before = set(c._pipelines)
+        assert c._probe_trig() is True               # no transform is exact
+        assert set(c._pipelines) <= before | set()   # what the probe built is gone
+        monkeypatch.setattr(V.Context, "_TRIG_TOLERANCE", 1.0)
+        assert c._probe_trig() is False
+    finally:
+        c.destroy()
