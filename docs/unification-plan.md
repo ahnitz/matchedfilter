@@ -637,3 +637,46 @@ main only when everything is done, gated and benchmarked.
       residency).
     - Mocked tests of old flat internals were rewritten against the executor.
   - Goldens bit-identical on dev2 and M2. Suites: dev2 1975 passed; M2 1856 passed.
+- 2026-10-19: **U1a + U2.5-2.7: one hierarchical search and one deferral model.**
+  - The hierarchical tiers (single, cascade, grouped/ragged), follow-up items and deferred
+    forwards run on the executor (`_gpuexec`, `_gpuhier`); each backend's copy is gone.
+    The feed follows a driver feature: `inplace_feed` (kernels specialized when created:
+    Vulkan, Metal) reads the spectra at a stride and scale; otherwise packed bands (CUDA,
+    whose runtime stride/scale cost 12-39% on the L40S). A call claims its deferred forward
+    when the bands move fewer bytes (`band_forward_wanted`, now the band feed until a
+    fraction is measured) and recomputes its refine blocks. Metal's build-time constants are
+    library macros.
+  - Deferred work: `_pending` per slot; a run on the slot takes it into its submission, a
+    hierarchical call may claim it, an unslotted run first runs the deferred work that
+    writes what it binds (`_take(slot, reads)`), a restaged forward runs the earlier one
+    first (`_exec_run_holding`).
+  - New driver primitives: `_x_view` (counts, survivors and gathered rows read in place),
+    `_x_idle` (one wait for a context's own work; a clear frees every record as finished),
+    `_x_free` (CUDA keeps idle frees in per-device pools: cuMemFree/cuMemFreeHost
+    synchronize the device), `_x_section` (a record's counters share one buffer and its
+    row-window tables another: one update, one readback, one upload).
+  - Validation found, and the fixes are in: the claim never happened (fractions noted only
+    by banded calls); device compaction shared the refine's fused phase and read its output
+    half written (the fused capture now refuses a phase with an inner barrier); a waited
+    flat call dropped its slot; tuple words became one uint4 on CUDA; CUDA's fp16 bound
+    switch missed shared modules and the tensor-core gate; Metal's stems and function names
+    of the new kernels.
+  - Host cost on the L40S (fine stage 25-45% behind 1ccbbe4b at equal block size): GC of
+    twice the objects, and its full collections destroying dropped plans mid-search. Fixed
+    with slotted buffers on every backend, packed CUDA launch parameters, pooled CUDA
+    update words, the band-feed default (half the records), and block trials that skip
+    batches which built a recording and sample ranks in turn (a trial had locked a slower
+    leaf from setup-polluted samples).
+  - Throughput against 1ccbbe4b (U2.4), paired, MF_CHAIN_FORCE=2048:256,512:
+    - dev2 (8060S, quiet): 210-226 against 187-216 M.
+    - M2: 37.4-40.0 against 35.6-35.8 M; setup passes 20 s against 38-50 s.
+    - L40S (5 warm-up passes): n=2048 91.8 against 91.4 M, n=4096 85.2 against 86.9 M,
+      automatic choice 74/83 against 87/73 M (node shared with other jobs).
+    - dev3: 24.9-27.7 against 25.4-27.2 M (means 26.4 and 26.3); setup 43 s against 48-65 s.
+    - dev4 (Iris Xe): 3.12-3.19 against 3.15-3.27 M.
+  - Goldens bit-identical on all five GPUs. Suites: dev2 2013 passed, M2 1904 passed, L40S
+    CUDA-path set 143 passed, dev3 238 and dev4 focused sets passed.
+  - tests/test_gpu_c16_bound.py checks every coarse layout a GPU may pick, its operands
+    placed as a call places them (unplaced, a loud burst left fp16's range on dev4).
+  - gatechain: the band forward and the fp16 gate kind are a GPU's (device kind), not a
+    backend list; a CPU device's backend name (AVX3) had been taken for a GPU's.

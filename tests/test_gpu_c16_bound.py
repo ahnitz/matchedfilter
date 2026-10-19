@@ -70,21 +70,28 @@ def test_bound_covers_the_exact_maximum(B, monkeypatch):
         assert use.max() < 0.5, "margin use %.3f" % use.max()
 
 
-def _layout_values(ctx, layout, B, D, T):
+def _layout_values(ctx, layout, B, D, T, thr=8.0):
     """|coarse value| per template of one data row from one coarse layout, dispatched as the
-    layout choice times it (_gpuhier._time_coarse_layouts), electing each pair's maximum."""
+    layout choice times it (_gpuhier._time_coarse_layouts), electing each pair's maximum.
+    The operands are placed as a call places them for raw threshold thr (templates at 2^et,
+    data at 2^ed, _gpuhier.c16_template_exp/c16_data_exp) and the values returned unscaled:
+    unplaced, a loud burst left fp16's range on an Intel Iris Xe (every layout 0.93 low)."""
+    from matchedfilter import _gpuhier
     from matchedfilter._coarse import coarse_launch
     from matchedfilter._shared import pack_half2
     nt = T.shape[0]
-    rows = np.ascontiguousarray(D, np.complex64) if ctx.inplace_feed else pack_half2(D)
+    et = _gpuhier.c16_template_exp(T)
+    ed = _gpuhier.c16_data_exp(B, thr, et)
+    rows = (np.ascontiguousarray(D, np.complex64) if ctx.inplace_feed
+            else pack_half2(_gpuhier.pow2_scaled(D, ed)))
     bufs = [ctx._x_alloc(rows.nbytes), ctx._x_alloc(nt * B * 4),
             ctx._x_alloc(nt * 4 + 4096), ctx._x_alloc(nt * 8 + 4096, readback=True)]
     native = None
     try:
         bufs[0].write(rows)
-        bufs[1].write(pack_half2(T))
-        kernel = ctx._coarse_kernel(B, layout, stride=B if ctx.inplace_feed else 0, scale=0,
-                                    rowwin=False)
+        bufs[1].write(pack_half2(_gpuhier.pow2_scaled(T, et)))
+        kernel = ctx._coarse_kernel(B, layout, stride=B if ctx.inplace_feed else 0,
+                                    scale=ed if ctx.inplace_feed else 0, rowwin=False)
         slot, groups = coarse_launch(1, nt, layout[1], layout[2], B)
         lst = ctx._x_list("c16 bound", once=True)
         lst.dispatch(kernel, ctx._x_coarse_groups(kernel, groups), bufs,
@@ -100,7 +107,7 @@ def _layout_values(ctx, layout, B, D, T):
             ctx._x_release(native, done=True)
         for b in bufs:
             b.destroy()
-    return np.abs(v.astype(np.complex128))
+    return np.abs(v.astype(np.complex128)) / 2.0 ** (et + ed)
 
 
 @pytest.mark.parametrize("B", [64, 256, 1024, 2048])
