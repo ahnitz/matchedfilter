@@ -813,31 +813,76 @@ def _single_key(key):
 #: each call on a CPU plan, per device; see TimeDomainFilterBank._batch_device.
 _BATCH_CHOICE: Dict[Tuple[str], Dict[str, Any]] = {}
 
+#: Whether a batch's submissions are fused (_gpuexec.fused), per set of GPU devices: see
+#: _fuse_begin.
+_FUSE_CHOICE: Dict[Tuple[str, ...], Dict[str, Any]] = {}
 
-def _device_trial(table, key, store_key, what):
-    """(side, record or None): the shared measured choice between a bank's GPU and a CPU
-    plan for one call shape. The first samples alternate the sides (record(seconds) after
-    each); the first of each side is discarded (warm-up), and the shared rule
-    (gatechain.measured_choice) keeps one -- the GPU stands unless the CPU is faster past
-    the tie and the noise; an unclear contest samples both further, up to
-    _SINGLE_TRIALS_MAX each -- for every bank, and for later processes through
-    MF_COST_FILE (store_key), whose held side is reused untimed."""
+
+def _fuse_begin(jobs, trial):
+    """Fuse this batch's submissions (_gpuexec.fused) or not, measured per set of GPU
+    devices: (close or None, sample token or None for _fuse_end). Fusing interleaves every
+    job's phases in shared command buffers -- worth +16% on an M2, -3 to -6% on an 8060S,
+    nothing on a RENOIR (paired ladders, 2026-10-19) -- so neither is assumed. A batch is a
+    sample only when no other trial is trying candidates in it (a locked trial's steady
+    re-check changes nothing) and it builds no recording."""
+    from . import _autotune_enabled
+    from .device import parse as _parse_device
+    devs = tuple(sorted({"%s %s" % (d, d.name) for d in (
+        _parse_device(b.device) for b, _, _ in jobs if getattr(b, "device", None) is not None)
+        if d.kind == "gpu"}))
+    if not devs:
+        return None, None
+    side, record = ("fused", None)
+    if _autotune_enabled():
+        side, record = _device_trial(_FUSE_CHOICE, devs, "fused-batch|%s" % "+".join(devs),
+                                     "FUSE %s" % (devs,), sides=("fused", "unfused"))
+    from ._gpuexec import fused
+    close = fused() if side == "fused" else None
+    work = sum(len(b.filters_f) * int(np.asarray(x).size) for b, x, kw in jobs
+               if (kw or {}).get("template_index") is None)
+    trying = trial is not None and (any(not p[4] for p in trial[1])
+                                    or any(not c[4] for c in trial[3]))
+    if record is None or trying or work <= 0:
+        return close, None
+    import time
+    banks = [b for b, _, _ in jobs]
+    return close, (record, time.perf_counter(), work, banks, _built(banks))
+
+
+def _fuse_end(tok):
+    """Record a fusion sample (_fuse_begin), from the batch's submission to its last result."""
+    if tok is None:
+        return
+    import time
+    record, t0, work, banks, built = tok
+    if _built(banks) == built:
+        record((time.perf_counter() - t0) / work)
+
+
+def _device_trial(table, key, store_key, what, sides=("gpu", "cpu")):
+    """(side, record or None): the shared measured choice between two ways of running one
+    call shape -- a bank's GPU and a CPU plan, by default. The first samples alternate the
+    sides (record(seconds) after each); the first of each side is discarded (warm-up), and
+    the shared rule (gatechain.measured_choice) keeps one -- the first side stands unless
+    the other is faster past the tie and the noise; an unclear contest samples both
+    further, up to _SINGLE_TRIALS_MAX each -- for every bank, and for later processes
+    through MF_COST_FILE (store_key), whose held side is reused untimed."""
     from . import gatechain
+    a, b = sides
     tr = table.get(key)
     if tr is None:
         held = gatechain.stored_choice(store_key)
-        tr = table[key] = {"gpu": [], "cpu": [],
-                           "winner": held if held in ("gpu", "cpu") else None}
+        tr = table[key] = {a: [], b: [], "winner": held if held in sides else None}
     if tr["winner"] is not None:
         return tr["winner"], None
-    side = "gpu" if len(tr["gpu"]) <= len(tr["cpu"]) else "cpu"
+    side = a if len(tr[a]) <= len(tr[b]) else b
 
     def record(dt, side=side):
         tr[side].append(dt)
-        if (tr["winner"] is None and len(tr["gpu"]) == len(tr["cpu"])
-                and len(tr["gpu"]) >= _SINGLE_TRIALS):
-            smp = {k: tr[k][1:] for k in ("gpu", "cpu")}
-            w, _ = gatechain.measured_choice(smp, "gpu", _SINGLE_TRIALS_MAX)
+        if (tr["winner"] is None and len(tr[a]) == len(tr[b])
+                and len(tr[a]) >= _SINGLE_TRIALS):
+            smp = {k: tr[k][1:] for k in sides}
+            w, _ = gatechain.measured_choice(smp, a, _SINGLE_TRIALS_MAX)
             if w is None:
                 return
             tr["winner"] = w
@@ -2398,14 +2443,10 @@ class TimeDomainFilterBank:
             return paired if wait else [_Deferred(lambda r=r: r) for r in paired]
         trial = _trial_begin(jobs)
         _BATCH_TOKEN += 1
-        # The deferred submissions are also fused where a GPU driver batches them (Vulkan:
+        # The deferred submissions may also be fused where a GPU driver batches them (Vulkan:
         # one command buffer runs every job's forward transforms, then every job's first
-        # tier, ..., one barrier per phase; _gpuexec.fused).
-        close = None
-        if any(
-                getattr(b, "device", None) is not None for b, _, _ in jobs):
-            from ._gpuexec import fused
-            close = fused()
+        # tier, ..., one barrier per phase; _gpuexec.fused): a measured choice.
+        close, fuse = _fuse_begin(jobs, trial)
         out = [None] * len(jobs)
         # Single-template (follow-up) calls on a GPU bank, per template group: one forward
         # dispatch and one submission for all of them instead of a few submissions each.
@@ -2424,7 +2465,7 @@ class TimeDomainFilterBank:
                 close()
         if not wait:
             res = [r if isinstance(r, _Deferred) else _Deferred(lambda r=r: r) for r in out]
-            if trial is not None:
+            if trial is not None or fuse is not None:
                 # a trial sample runs from submission to the batch's last result
                 left = [len(res)]
                 def wrap(d):
@@ -2436,12 +2477,14 @@ class TimeDomainFilterBank:
                             left[0] -= 1
                             if left[0] == 0:
                                 _trial_end(trial)
+                                _fuse_end(fuse)
                         return v
                     return _Deferred(get)
                 res = [wrap(d) for d in res]
             return res
         res = [r.result() if isinstance(r, _Deferred) else r for r in out]
         _trial_end(trial)
+        _fuse_end(fuse)
         return res
 
     @staticmethod
