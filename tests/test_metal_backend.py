@@ -271,7 +271,8 @@ def test_metal_one_bin_and_general_kernels_agree(n, hierarchical, monkeypatch):
         if not specialized:
             real = f._gpu.pipeline
             f._gpu.pipeline = (lambda n_, entry="fusedTierB", one_bin=False, c16=False,
-                               macros=(), real=real: real(n_, entry, False, c16, macros))
+                               macros=(), gate=False, real=real: real(n_, entry, False, c16,
+                                                                      macros))
             # A cascade's tier 1 asks a one-bin build for its gate alone: none here.
             f._gpu.__dict__.setdefault("_shipped_memo", {}).update(
                 {("tier1", b): False for b in (64, 128, 256, 512, 1024, 2048, 4096, 8192)})
