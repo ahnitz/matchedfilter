@@ -5,9 +5,8 @@ Prints (and with --json writes) for one device:
   * device: the matchedfilter device entry (name, backend, arch);
   * properties: the hardware facts the backend's Context records (limits, subgroup sizes,
     queues, ...) -- the inputs a feature-keyed decision can use today;
-  * capabilities: the class-level flags the shared layers test (real_series, forward_rows,
-    supports_replay, ...). Under stage U these become universal (deleted) or hardware
-    features; this file is the "before" picture.
+  * capabilities: the class-level attributes of its Context (driver features such as
+    inplace_feed and stage_host_inputs, and limits).
 
     python tools/gpu_features.py --device gpu:0 --json features.json
 """

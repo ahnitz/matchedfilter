@@ -548,8 +548,7 @@ def test_correlate_series_gpu_writes_group_rows_of_shared_out_in_place(window):
             assert got is out or np.shares_memory(got, out)
     for out, cpu in zip(buf, cpus):
         assert np.max(np.abs(out - cpu)) <= 1e-5 * np.abs(cpu).max()
-    if len(gbank._groups) > 1 and getattr(gbank._groups[0].get_correlation_plan()._gpu,
-                                          'continuous_out_views', False):
+    if len(gbank._groups) > 1:
         assert all(getattr(g, '_corr_workspace', None) is None for g in gbank._groups)
 
 

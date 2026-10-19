@@ -59,7 +59,7 @@ _MAX_BINS = MAX_BINS          # _gpuhost.MAX_BINS: one limit for every backend
 from ._errors import UnsupportedSize      # noqa: F401  (re-export)
 from . import _gputime
 from ._gpu_cache import InputUploads
-from ._gpuexec import Arg, Executor, settle as _settle
+from ._gpuexec import Arg, Executor, register_fusion, settle as _settle
 
 
 #: Points per thread, which is also how many threads carry a transform:
@@ -502,6 +502,9 @@ def fused():
             if b is not None:
                 b.flush()
     return close
+
+
+register_fusion(fused)
 
 
 def settle_all():

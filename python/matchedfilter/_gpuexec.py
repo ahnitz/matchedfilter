@@ -126,6 +126,26 @@ from ._gpuhost import MAX_BINS, bin_shift, plan_items, split_items
 from ._shared import shared_view
 
 
+#: Drivers whose devices batch submissions across contexts (register_fusion).
+_FUSERS = []
+
+
+def register_fusion(begin):
+    """A driver's fused(): begin collecting on its devices; returns a close."""
+    _FUSERS.append(begin)
+
+
+def fused():
+    """Begin a fused batch on every device of every loaded driver that batches submissions
+    (filter_series_many); returns a callable that closes them."""
+    closes = [begin() for begin in _FUSERS]
+
+    def close():
+        for c in closes:
+            c()
+    return close
+
+
 def settle(pend):
     """Settle a device's writes left in flight (Executor._writes), oldest first."""
     while pend:
@@ -221,18 +241,6 @@ class Executor(HierOps):
     _FULL_BUDGET = 64 * 1024 * 1024
     #: Peak records a sparse result reads back with the count; more take a second read.
     _SPARSE_FIRST = 4096
-    #: correlate takes wait=False on every backend (CorrelationFilter.run(wait=False)).
-    async_correlate = True
-    #: What every GPU runs, because the operations are written here once: pipelined slots
-    #: (slot=, async_submit=), sparse results, call-plan replay (forward_replay,
-    #: hier_replay), ragged bin counts in a grouped call (flat and hierarchical), continuous
-    #: correlation into views of a caller's output and left in flight, follow-up items in
-    #: flight, forwards over row ranges and over real series read in place, grouped flat
-    #: calls in flight, and column zeroing left in flight.
-    supports_async = supports_sparse = supports_replay = True
-    supports_ragged_hier = supports_ragged_bins = True
-    continuous_out_views = defers_continuous = defers_grouped = async_zero = True
-    items_async = forward_rows = real_series = True
     #: See the module docstring (a driver feature).
     stage_host_inputs = False
 

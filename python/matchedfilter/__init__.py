@@ -218,8 +218,7 @@ def _unpack_half(a, n, hermitian):
 
 class _SparsePeaks:
     """The peaks of a (blocks, templates, bins) result, sparse: flat indices into that shape,
-    sample indices and values, in C order. What a backend with ``supports_sparse`` returns
-    when a caller asks (``_want_sparse``): at a detection threshold almost every bin is
+    sample indices and values, in C order. What a GPU returns when a caller asks (``_want_sparse``): at a detection threshold almost every bin is
     empty, and reading back, widening and scanning the dense table cost more host time than
     the device spent on the call."""
     __slots__ = ("shape", "flat", "idx", "val")
@@ -1046,10 +1045,8 @@ class MatchedFilter:
         in bins past a block's own count, or None when this plan or these inputs cannot take
         the path (the caller then makes the calls).
 
-        Several allocations share one spectra workspace on a backend whose forward takes a
-        row range (``forward_rows``); elsewhere each allocation is its own submission.
-        wait=False on a backend declaring ``items_async``: returns a callable giving that
-        list once the submission completes, so a caller submits every template group's
+        Several allocations share one spectra workspace (the forward takes a row range).
+        wait=False: returns a callable giving that list once the submission completes, so a caller submits every template group's
         items before waiting on any (an idle GPU takes ~1 ms to start each small submission
         on an M2 or an APU)."""
         from ._shared import containing
@@ -1209,8 +1206,7 @@ class MatchedFilter:
         distinct bin count costs a submission and a wait each -- most of a
         single-template follow-up's time on a GPU.
 
-        A hierarchical plan takes this path on a backend with ``supports_ragged_hier``:
-        its grouped call runs per-row windows (each block's own [lo, hi)) under one
+        A hierarchical plan takes this path too: its grouped call runs per-row windows (each block's own [lo, hi)) under one
         recording of the largest bin count, so a block's bins past its own count are
         empty exactly as for a flat plan.
 
@@ -1783,11 +1779,10 @@ class MatchedFilter:
         # launches of the synchronous call, measured 1.4x slower on CUDA).
         c.grouped = grouped_flat or (
             len(layout.groups) > 1 and c.is_hier
-            and hasattr(self._gpu, "hier_peaks_grouped")
             and nb <= getattr(self._gpu, "max_grouped_bins", 0)
             and nt <= self._gpu_pair_limit())
-        # A real series (a backend with real_series): the forward reads its samples from
-        # complex64 storage, by float offset and stride (c.real), never widened on the host.
+        # A real series: the GPU forward reads its samples from complex64 storage, by float
+        # offset and stride (c.real), never widened on the host.
         real = ser.dtype == np.float32
         c.real = None
         source_shared = not real and shared_buffer(ser, self._gpu) is not None
@@ -2144,8 +2139,8 @@ class CorrelationFilter(MatchedFilter):
             work = (None, self.empty_shared((cap[0],)), self.empty_shared((cap[1], self.n)),
                     self.empty_shared(cap[1], np.uint32), None)
         _, staging, spec, offsets, _ = work
-        # A real series (a backend with real_series): the forward reads its samples from
-        # complex64 storage, by float offset and stride -- in place where it lies in a device
+        # A real series: the forward reads its samples from complex64 storage, by float
+        # offset and stride -- in place where it lies in a device
         # allocation (then block starts move by the series' offset in it, so the forward
         # takes its own copy of them; the output keeps the caller's), else copied as floats.
         real, shift = None, 0
@@ -2223,8 +2218,7 @@ class CorrelationFilter(MatchedFilter):
         if self._gpu is None:
             self._execution_plan().correlate(d0, nd, t0, nt, result)
         else:
-            kw = ({'wait': False} if (not wait and scales is None
-                                      and getattr(self._gpu, 'async_correlate', False)) else {})
+            kw = {'wait': False} if not wait and scales is None else {}
             self._gpu.correlate(self.n, self._gdata[d0:d0 + nd],
                                 self._gtmpl[t0:t0 + nt], result,
                                 upload_data=self._ddirty,
@@ -2888,8 +2882,8 @@ class HierarchicalFilter(MatchedFilter):
     # ---- plan --------------------------------------------------------------
     def _reads_real_series(self):
         """Whether run_series reads a real (float32) series as it is: the CPU plan
-        transforms it at half size; a GPU forward declaring real_series reads its samples
-        (one-stage forwards only, n <= 65536). Elsewhere a real series is widened."""
+        transforms it at half size; a GPU forward reads its samples (one-stage forwards
+        only, n <= 65536). Elsewhere a real series is widened."""
         if self._gpu is None:
             return self.device.kind == "cpu" and self.n >= 4
         return self.n <= 65536

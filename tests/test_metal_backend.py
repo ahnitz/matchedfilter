@@ -17,14 +17,6 @@ import matchedfilter as mf
 from matchedfilter import _mtlcompute
 
 
-def test_series_pipelining_is_a_declared_capability():
-    from matchedfilter import _vkcompute, _cudacompute
-    assert _mtlcompute.Context.supports_async and _vkcompute.Context.supports_async
-    # CUDA declares it too: slots map to streams, readbacks sync their own stream, and
-    # consumers on another stream wait for deferred forwards (tests/test_cuda_parity.py).
-    assert _cudacompute.Context.supports_async
-
-
 def test_no_signature_probing_retries_in_the_dispatch_path():
     """A TypeError raised after a submit used to be retried: the same work twice."""
     root = pathlib.Path(mf.__file__).parent

@@ -190,7 +190,7 @@ def test_unslotted_consumer_waits_for_a_slot_forward(ctx):
 @pytest.mark.parametrize("tiled", [False, True])
 @pytest.mark.parametrize("kind", ["flat", "hier"])
 def test_pipelined_series_across_streams_matches_cpu(kind, tiled, monkeypatch):
-    """Many batches in flight on 4 streams (supports_async). With a dispatch limit the
+    """Many batches in flight on 4 streams. With a dispatch limit the
     window falls back to tiled, unslotted dispatches on the default stream, which must
     wait for the forward FFTs enqueued on the slot streams -- without that wait the
     tiled path read spectra still being written (wrong peaks, intermittently)."""
@@ -213,7 +213,6 @@ def test_pipelined_series_across_streams_matches_cpu(kind, tiled, monkeypatch):
             f.set_coarse_threshold(0.3)
         f.set_templates(h)
         if dev == DEV:
-            assert f._gpu.supports_async
             f.set_memory_limits(series_bytes=8 * n * 6)       # ~6 blocks per batch: many batches
             if tiled:
                 monkeypatch.setattr(f._gpu, "max_dispatch_x", nt // 2, raising=False)
