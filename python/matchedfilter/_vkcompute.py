@@ -127,9 +127,6 @@ _STAGE_COMPUTE = 0x20
 _BIND_POINT_COMPUTE = 1
 _ONE_TIME_SUBMIT = 0x1
 _SIMULTANEOUS_USE = 0x4    # VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT
-#: Zeroing recordings a context keeps (one per distinct set of ranges: a middle stage has one
-#: per output buffer and detector).
-_ZERO_RECS = 8
 _STAGE_COMPUTE_BIT = 0x800
 _STAGE_DRAW_INDIRECT_BIT, _STAGE_TRANSFER_BIT, _STAGE_HOST_BIT = 0x2, 0x1000, 0x4000
 _ACCESS_SHADER_READ, _ACCESS_SHADER_WRITE = 0x20, 0x40
@@ -298,7 +295,7 @@ _BufMemBarrier = _struct("VkBufferMemoryBarrier",
 
 from ._errors import UnsupportedSize      # noqa: F401  (re-export)
 from ._gpu_cache import InputUploads
-from ._gpuexec import Arg, Executor
+from ._gpuexec import Arg, Executor, settle as _settle
 
 
 class VulkanError(RuntimeError):
@@ -816,11 +813,22 @@ _CONTEXTS_BY_ID = _weakref.WeakValueDictionary()
 def settle_all():
     """Wait for every write left in flight on any Vulkan device (a host read follows)."""
     for dev in list(_DEVICES.values()):
-        while dev.pending_writes:
-            fence = dev.pending_writes.pop(0)
-            _check(dev.vk.vkWaitForFences(dev.device, 1, (_vp * 1)(fence), 1,
-                                          0xFFFFFFFFFFFFFFFF), "vkWaitForFences")
-            dev.vk.vkDestroyFence(dev.device, fence, None)
+        _settle(dev.pending_writes)
+
+
+class _Write:
+    """A write left in flight (Executor._writes): the fence its submission signals."""
+    __slots__ = ("vk", "device", "fence")
+
+    def __init__(self, vk, device, fence):
+        self.vk, self.device, self.fence = vk, device, fence
+
+    def settle(self):
+        if self.fence is not None:
+            _check(self.vk.vkWaitForFences(self.device, 1, (_vp * 1)(self.fence), 1,
+                                           0xFFFFFFFFFFFFFFFF), "vkWaitForFences")
+            self.vk.vkDestroyFence(self.device, self.fence, None)
+            self.fence = None
 
 
 class _Device:
@@ -1083,8 +1091,8 @@ class _VkList:
     def stamp(self, name):
         self.ops.append(("stamp", name))
 
-    def fill(self, buf, word):
-        self.ops.append(("fill", buf, int(word) & 0xFFFFFFFF))
+    def fill(self, buf, word, offset=0, nbytes=None, rows=1, pitch=0):
+        self.ops.append(("fill", buf, int(word) & 0xFFFFFFFF, offset, nbytes, rows, pitch))
 
     def update(self, buf, words):
         # vkCmdUpdateBuffer reads its data when recorded -- and again whenever a fused batch
@@ -1150,7 +1158,10 @@ class _VkNative:
             ctx._capture_begin()
         cmd = None
         try:
-            rec = _Recording(ctx, self.label, flags=1 if self.once else 0)
+            # A kept recording may be submitted again while an earlier run of it is still in
+            # flight (a run left pending: a middle stage's zeroing, segment after segment).
+            rec = _Recording(ctx, self.label,
+                             flags=_ONE_TIME_SUBMIT if self.once else _SIMULTANEOUS_USE)
             cmd = rec.cmd
             self._emit(rec, binds)
             rec.end()
@@ -1169,8 +1180,11 @@ class _VkNative:
             elif kind == "stamp":
                 rec.stamp(op[1])
             elif kind == "fill":
-                ctx.vk.vkCmdFillBuffer(rec.cmd, op[1].handle, getattr(op[1], "offset", 0),
-                                       _WHOLE_SIZE, op[2])
+                _, buf, word, offset, nbytes, rows, pitch = op
+                base = getattr(buf, "offset", 0) + offset
+                size = _WHOLE_SIZE if nbytes is None else nbytes
+                for r in range(rows):
+                    ctx.vk.vkCmdFillBuffer(rec.cmd, buf.handle, base + r * pitch, size, word)
             elif kind == "update":
                 ctx.vk.vkCmdUpdateBuffer(rec.cmd, op[1].handle, getattr(op[1], "offset", 0),
                                          ctypes.sizeof(op[2]), ctypes.addressof(op[2]))
@@ -1830,16 +1844,13 @@ class Context(Executor, InputUploads):
             else:
                 self.timing_log.append((label, ms))
 
-    def timings(self):
-        """Settle outstanding timestamps and return the timing log (MF_GPU_TIMING=1)."""
+    def _x_timings(self):
         self._timestamp_resolve()
         self._profile_resolve()
-        return self.timing_log
 
-    def _submit(self, cmd, fence=None, wait=True, slot=None, pre=()):
+    def _submit(self, cmd, fence=None, wait=True, slot=None, pre=(), label="run"):
         """Submit commands (pre: run first, in the same submission -- the work the executor
         deferred for this slot) and wait for them unless asked not to."""
-        pending = None
         commands = list(pre)
         if cmd is not None:
             commands.append(cmd)
@@ -1852,7 +1863,7 @@ class Context(Executor, InputUploads):
             batch.add(self, commands, fence)
             return
         if self._timing:
-            label = sys._getframe(1).f_code.co_name + ("+forward" if pending is not None or pre else "")
+            label += "+forward" if pre else ""
             begin, end = self._timestamp_pair(label)
             self._profile_submitted(commands)
             commands = [begin] + commands + [end]
@@ -2055,23 +2066,23 @@ class Context(Executor, InputUploads):
         cmd, release = native.command(binds or {}, transient=wait)
         pcmds, frees = self._pre_commands(pre)
         if wait:
-            self._submit(cmd, slot=slot, pre=pcmds)
+            self._submit(cmd, slot=slot, pre=pcmds, label=native.label)
             for free in frees + ([release] if release is not None else []):
                 free()
         else:
-            self._submit_pending(cmd, pre=pcmds)
+            self._submit_pending(cmd, pre=pcmds, label=native.label)
 
     def _x_submit(self, native, binds, slot, pre=()):
         cmd, release = native.command(binds, transient=True)
         pcmds, frees = self._pre_commands(pre)
         frees = frees + ([release] if release is not None else [])
         if slot is None:                    # per-slot fences: an unslotted run is waited now
-            self._submit(cmd, pre=pcmds)
+            self._submit(cmd, pre=pcmds, label=native.label)
             for free in frees:
                 free()
             return lambda: None
         fence = self._get_fence(slot)
-        self._submit(cmd, fence=fence, wait=False, slot=slot, pre=pcmds)
+        self._submit(cmd, fence=fence, wait=False, slot=slot, pre=pcmds, label=native.label)
 
         def wait():
             self._wait_fence(fence)
@@ -2114,148 +2125,18 @@ class Context(Executor, InputUploads):
     def _x_view(buf, dtype, count):
         return buf.view(dtype, count)
 
-    def zero_columns(self, dest, a, b):
-        """Zero dest[:, a:b] of a device-shared 2-D array (or rows of one) on the device.
-
-        Collected, and recorded by zero_columns_done() as fills in one submission behind a
-        barrier, so they land after the correlation writes they may overlap. A host memset
-        of a middle stage's complement is ~60 MB a call; the device clears it in ~0.3 ms."""
-        sb = shared_view(dest, self, align=4)
-        if sb is None or dest.ndim != 2 or b <= a or not dest.flags.c_contiguous:
-            raise ValueError("zero_columns needs a device-shared 2-D array and a nonempty range")
-        base = sb.offset + a * dest.itemsize
-        length = (b - a) * dest.itemsize
-        if base % 4 or length % 4:
-            raise ValueError("zero_columns ranges must be 4-byte aligned")
-        pending = self.__dict__.setdefault("_zero_ranges", [])
-        row = dest.strides[0]
-        pending.extend((sb, base + r * row, length) for r in range(dest.shape[0]))
-
-    def zero_columns_done(self, wait=True):
-        """Record and submit every collected zero_columns range, and wait for them and every
-        write left in flight -- or, wait=False, leave them in flight too."""
-        ranges, self._zero_ranges = getattr(self, "_zero_ranges", None) or [], []
-        if not ranges:
-            if wait:
-                self.settle_writes()
-            return
-        vk = self.vk
-        # A middle stage zeroes the same ranges every segment (the same windows of the same
-        # output): its recording is kept and submitted again. Keyed by the allocations
-        # (held by the entry, so their ids stay theirs) and the byte ranges.
-        key = tuple((id(sb.owner), off, length) for sb, off, length in ranges)
-        cache = self.__dict__.setdefault("_zero_recs", OrderedDict())
-        hit = cache.get(key)
-        if hit is not None:
-            cache.move_to_end(key)
-            if not wait:
-                self._submit_pending(hit[1])
-                return
-            self._submit(hit[1])
-            self.settle_writes()
-            self._wait_queues()
-            return
-        cmd = _vp()
-        _check(vk.vkAllocateCommandBuffers(self.device, ctypes.byref(
-            _CmdBufAlloc(40, None, self.command_pool, 0, 1)), ctypes.byref(cmd)), "allocate zero")
-        try:
-            # Simultaneous use: segment k's submission of it may still be in flight (wait=False)
-            # when segment k+1 submits it again.
-            _check(vk.vkBeginCommandBuffer(cmd, ctypes.byref(_CmdBufBegin(42, None, _SIMULTANEOUS_USE,
-                                                                          None))), "begin zero")
-            mb = _MemBarrier(46, None, _ACCESS_SHADER_WRITE | _ACCESS_TRANSFER_WRITE,
-                             _ACCESS_TRANSFER_WRITE)
-            vk.vkCmdPipelineBarrier(cmd, _STAGE_COMPUTE_BIT | _STAGE_TRANSFER_BIT, _STAGE_TRANSFER_BIT,
-                                    0, 1, ctypes.byref(mb), 0, None, 0, None)
-            for sb, off, length in ranges:
-                vk.vkCmdFillBuffer(cmd, sb.handle, off, length, 0)
-            mb = _MemBarrier(46, None, _ACCESS_TRANSFER_WRITE,
-                             _ACCESS_HOST_READ | _ACCESS_SHADER_READ)
-            vk.vkCmdPipelineBarrier(cmd, _STAGE_TRANSFER_BIT, _STAGE_HOST_BIT | _STAGE_COMPUTE_BIT,
-                                    0, 1, ctypes.byref(mb), 0, None, 0, None)
-            _check(vk.vkEndCommandBuffer(cmd), "end zero")
-            owners = tuple(sb.owner for sb, _, _ in ranges)
-            if len(cache) >= _ZERO_RECS:
-                # The oldest recording may still be in flight: settle before freeing it.
-                self.settle_writes()
-                _, (_, old) = cache.popitem(last=False)
-                vk.vkFreeCommandBuffers.argtypes = [_vp, _vp, _u32, ctypes.POINTER(_vp)]
-                vk.vkFreeCommandBuffers(self.device, self.command_pool, 1, (_vp * 1)(old))
-            cache[key] = (owners, cmd)
-            rec, cmd = cmd, None                 # kept (freed with the context's caches)
-            if not wait:
-                self._submit_pending(rec)
-                return
-            self._submit(rec)                   # waits; same queue as the correlation
-            self.settle_writes()
-            self._wait_queues()                 # and anything on the other queues
-        finally:
-            if cmd is not None:
-                vk.vkFreeCommandBuffers.argtypes = [_vp, _vp, _u32, ctypes.POINTER(_vp)]
-                vk.vkFreeCommandBuffers(self.device, self.command_pool, 1, (_vp * 1)(cmd))
-
-    def _free_zero_recs(self):
-        """Free the kept zeroing recordings (after settling everything in flight)."""
-        cache = self.__dict__.pop("_zero_recs", None)
-        if cache:
-            self.settle_writes()
-            cmds = [c for _, c in cache.values()]
-            vk = self.vk
-            vk.vkFreeCommandBuffers.argtypes = [_vp, _vp, _u32, ctypes.POINTER(_vp)]
-            vk.vkFreeCommandBuffers(self.device, self.command_pool, len(cmds), (_vp * len(cmds))(*cmds))
-
-    def _free_zero_cmds(self):
-        """Free zeroing command buffers left in flight, once their writes are settled."""
-        cmds, self._zero_cmds = getattr(self, "_zero_cmds", []), []
-        if cmds:
-            self.settle_writes()
-            vk = self.vk
-            vk.vkFreeCommandBuffers.argtypes = [_vp, _vp, _u32, ctypes.POINTER(_vp)]
-            vk.vkFreeCommandBuffers(self.device, self.command_pool, len(cmds), (_vp * len(cmds))(*cmds))
-
-    def _submit_pending(self, cmd, pre=()):
+    def _submit_pending(self, cmd, pre=(), label="run"):
         """Submit on the main queue and leave it in flight (see _Device.pending_writes)."""
         fence = _vp()
         _check(self.vk.vkCreateFence(self.device, ctypes.byref(_FenceCreate(8, None, 0)), None,
                                      ctypes.byref(fence)), "vkCreateFence")
         try:
-            self._submit(cmd, fence=fence, wait=False, pre=pre)
+            self._submit(cmd, fence=fence, wait=False, pre=pre, label=label)
         except BaseException:
             self.vk.vkDestroyFence(self.device, fence, None)
             raise
-        self._device_state.pending_writes.append(fence)
+        self._writes().append(_Write(self.vk, self.device, fence))
 
-    def settle_writes(self):
-        """Wait for every write left in flight on this device (correlate_series(wait=False))."""
-        dev = self._device_state
-        while dev.pending_writes:
-            fence = dev.pending_writes.pop(0)
-            fences = (_vp * 1)(fence)
-            _check(self.vk.vkWaitForFences(self.device, 1, fences, 1, 0xFFFFFFFFFFFFFFFF),
-                   "vkWaitForFences")
-            self.vk.vkDestroyFence(self.device, fence, None)
-
-    def write_token(self):
-        """A token for the writes left in flight so far on this device (the newest one), for
-        settle_until: None when nothing is in flight."""
-        dev = self._device_state
-        return dev.pending_writes[-1] if dev.pending_writes else None
-
-    def settle_until(self, token):
-        """Wait for the writes in flight up to and including token (write_token()), not
-        later ones. Each earlier write is waited on too (submissions may complete out of
-        order). A token already settled is a no-op."""
-        dev = self._device_state
-        if token is None or all(f is not token for f in dev.pending_writes):
-            return
-        while dev.pending_writes:
-            fence = dev.pending_writes.pop(0)
-            fences = (_vp * 1)(fence)
-            _check(self.vk.vkWaitForFences(self.device, 1, fences, 1, 0xFFFFFFFFFFFFFFFF),
-                   "vkWaitForFences")
-            self.vk.vkDestroyFence(self.device, fence, None)
-            if fence is token:
-                break
 
 
 
@@ -2267,7 +2148,6 @@ class Context(Executor, InputUploads):
     def clear_cache(self):
         """Release records and owned storage, preserving external shared arrays."""
         self._drain()
-        self._free_zero_recs()
         self._wait_queues()
         self.vk.vkFreeCommandBuffers.argtypes = [_vp, _vp, _u32, ctypes.POINTER(_vp)]
         self._evict_all()

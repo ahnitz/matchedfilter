@@ -2,7 +2,7 @@
 """Per-kernel roofline of the CUDA backend at the bench's production shapes.
 
 Runs tools/ladder.py's call pattern (1 top, N segments, --resident) on a CUDA
-device with MF_GPU_TIMING=1 and a launch recorder, so every kernel is measured at
+device with MF_GPU_TIMING=1 MF_GPU_PROFILE=1 and a launch recorder, so every kernel is measured at
 exactly the shapes the bench gives it. Per kernel label it reports device time,
 work (flops) and DRAM traffic from an analytic model, achieved rate against the
 MEASURED ceilings (an FMA loop and a device-to-device stream, tools/cuda_ceilings.cu),
@@ -134,6 +134,7 @@ def main():
     if a.build_ceilings:
         return build_ceilings()
     os.environ["MF_GPU_TIMING"] = "1"
+    os.environ["MF_GPU_PROFILE"] = "1"                   # per-kernel entries, "k:<kernel>"
     import numpy as np
     import ladder
     import matchedfilter as mf
@@ -182,8 +183,10 @@ def main():
     steady = defaultdict(lambda: [0, 0.0])
     for stage, d in report.get("steady_device_ms", {}).items():
         for lab, (calls, ms) in d.items():
-            steady[lab][0] += calls
-            steady[lab][1] += ms
+            if not lab.startswith("k:"):
+                continue                                 # a whole run: its kernels are below
+            steady[lab[2:]][0] += calls
+            steady[lab[2:]][1] += ms
     ctx = next(iter(_gputime._CONTEXTS))
     fma, bw = ceilings(ctx)
     smem_attr = ctypes.c_int()

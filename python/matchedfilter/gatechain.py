@@ -811,7 +811,7 @@ class _ClockRef:
             ctx.timings().clear()
             self.plan.run_series(self.ser, *self.args, threshold=1e6)
             log = ctx.timings()
-            t = sum(ms for _, ms in log) * 1e6
+            t = _run_ms(log) * 1e6
             log.clear()
         finally:
             ctx._timing = False
@@ -898,7 +898,7 @@ def calibrate_costs_gpu(n, device, blocks=None, reps=5, seed=11, nt=256):
             p.run_series(ser[:sub_len], starts[:nblk], ws[:nblk], we[:nblk], threshold=1e6)
             wall = (_time.perf_counter() - w0) * 1e9
             log = ctx.timings()
-            dev = sum(ms for _, ms in log) * 1e6
+            dev = _run_ms(log) * 1e6
             hostw.append(max(0.0, wall - dev))
             t.append(dev * (clock.anchor / ref_t if ref_t > 0 else 1.0))
             log.clear()
@@ -990,6 +990,12 @@ def calibrate_costs_gpu(n, device, blocks=None, reps=5, seed=11, nt=256):
 #: CUDA's mf_c16_raw, Metal's MF_C16_RAW), its raw value, and the gate kind named in
 #: cost-file keys. Every GPU's coarse tier reports the bound.
 _RAW_GATE_SWITCH = ("MF_VK_C16_BOUND", "0", "c16b")
+
+
+def _run_ms(log):
+    """Device milliseconds of the runs in a timing log (Executor.timings), without the
+    MF_GPU_PROFILE entries ("k:...") that lie inside them."""
+    return sum(ms for label, ms in log if not label.startswith("k:"))
 
 
 def _is_gpu(device):

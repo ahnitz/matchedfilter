@@ -66,8 +66,13 @@ Driver primitives (a Context provides each):
                                              recordings phase by phase, a phase's commands
                                              unordered: dependent work needs its own phase;
                                              MF_GPU_PROFILE times it);
-                              fill(buf, word) set every 32-bit word of an owned buffer to
-                                             word (0 or 0xFFFFFFFF: a byte pattern);
+                              fill(buf, word, offset=0, nbytes=None, rows=1, pitch=0)
+                                             set every 32-bit word of bytes [offset,
+                                             offset + nbytes) of a buffer or view (nbytes
+                                             None: to its end) to word (0 or 0xFFFFFFFF: a
+                                             byte pattern), in each of `rows` rows `pitch`
+                                             bytes apart (offset, nbytes, pitch: multiples
+                                             of 4);
                               update(buf, words) write a few words, in order with the work;
                               readback(buf, nbytes)
                                              the host reads the first nbytes of `buf` after
@@ -97,6 +102,7 @@ Driver primitives (a Context provides each):
   _x_read(buf, out, offset=0)
                             copy bytes of a readback buffer from `offset` into a host array,
                             after the run that wrote them has finished.
+  _x_timings()              finish every measurement still outstanding into timing_log.
   _x_view(buf, dtype, count)
                             the first count elements of a readback buffer as a host array,
                             read in place where the host sees that memory (valid until the
@@ -118,6 +124,12 @@ from ._errors import UnsupportedSize
 from ._gpuhier import HierOps
 from ._gpuhost import MAX_BINS, bin_shift, plan_items, split_items
 from ._shared import shared_view
+
+
+def settle(pend):
+    """Settle a device's writes left in flight (Executor._writes), oldest first."""
+    while pend:
+        pend.pop(0).settle()
 
 
 def _allocation(buf):
@@ -578,6 +590,93 @@ class Executor(HierOps):
         self._exec_run(rec.native, not async_submit,
                        {"out": ov} if staged else {"out": ov, "starts": sv}, None, rec)
         return out
+
+    # ---- device timers ------------------------------------------------------------------
+    def timings(self):
+        """The timing log (MF_GPU_TIMING=1; _gputime), outstanding measurements settled: a
+        (label, device ms) per run of a recorded list -- its _x_list label, "+forward" when
+        deferred work ran first in it -- and with MF_GPU_PROFILE=1 also ("k:<phase or
+        kernel>", device ms) inside it (count those only once: they lie within the run's)."""
+        self._x_timings()
+        return self.timing_log
+
+    # ---- writes left in flight ----------------------------------------------------------
+    def _writes(self):
+        """The device's writes left in flight (a run with wait=False), oldest first: driver
+        tokens, each with settle() -- wait for that run and free what it held. Device work
+        is ordered after them by the driver; a host reader settles them."""
+        holder = getattr(self, "_device_state", None) or self
+        pend = holder.__dict__.get("pending_writes")
+        if pend is None:
+            pend = holder.pending_writes = []
+        return pend
+
+    def settle_writes(self):
+        """Wait for every write left in flight on this device."""
+        settle(self._writes())
+
+    def write_token(self):
+        """A token for the writes left in flight so far on this device (the newest one), for
+        settle_until: None when nothing is in flight."""
+        pend = self._writes()
+        return pend[-1] if pend else None
+
+    def settle_until(self, token):
+        """Wait for the writes in flight up to and including token (write_token()), not
+        later ones. Each earlier write is waited on too (runs may complete out of order). A
+        token already settled is a no-op."""
+        pend = self._writes()
+        if token is None or all(w is not token for w in pend):
+            return
+        while pend:
+            w = pend.pop(0)
+            w.settle()
+            if w is token:
+                break
+
+    # ---- device zeroing -----------------------------------------------------------------
+    def zero_columns(self, dest, a, b):
+        """Zero dest[:, a:b] of a device-shared 2-D array on the device. Collected, and run by
+        zero_columns_done() as fills behind a barrier, so they land after the correlation
+        writes they may overlap. A host memset of a middle stage's complement is ~60 MB a
+        call; the device clears it in ~0.3 ms."""
+        sb = shared_view(dest, self, align=4)
+        if sb is None or dest.ndim != 2 or b <= a or not dest.flags.c_contiguous:
+            raise ValueError("zero_columns needs a device-shared 2-D array and a nonempty range")
+        offset, nbytes = a * dest.itemsize, (b - a) * dest.itemsize
+        if (sb.offset + offset) % 4 or nbytes % 4:
+            raise ValueError("zero_columns ranges must be 4-byte aligned")
+        self.__dict__.setdefault("_zero_ranges", []).append(
+            (sb, dest.ctypes.data, offset, nbytes, dest.shape[0], dest.strides[0]))
+
+    def zero_columns_done(self, wait=True):
+        """Run the collected zero_columns ranges, and wait for them, for this context's other
+        work and for every write left in flight on the device -- or, wait=False, leave them
+        in flight as a pending write (device consumers are ordered after it)."""
+        ranges, self._zero_ranges = self.__dict__.get("_zero_ranges") or [], []
+        if ranges:
+            # A middle stage zeroes the same ranges every segment: the recording is kept,
+            # keyed on the bytes it fills (its views hold their allocations, so the
+            # addresses stay theirs while it does).
+            key = ("zero",) + tuple(r[1:] for r in ranges)
+            table = self._exec_table()
+            rec = table.get(key)
+            if rec is None:
+                self._exec_room(0, incoming=[r[0] for r in ranges])
+                rec = Record()
+                lst = self._x_list("zero")
+                lst.barrier()
+                for i, (sb, _, offset, nbytes, rows, pitch) in enumerate(ranges):
+                    rec.buffers["dest%d" % i] = sb
+                    lst.fill(sb, 0, offset=offset, nbytes=nbytes, rows=rows, pitch=pitch)
+                lst.barrier()
+                rec.native = lst.end()
+                table[key] = rec
+            self._cache_touch("exec", key)
+            self._exec_run(rec.native, wait, None, None, rec)
+        if wait:
+            self.settle_writes()
+            self._x_idle()
 
     # ---- forward transform --------------------------------------------------------------
     def forward(self, n, series, starts, spectra, *, defer=False, slot=None, fused=False,

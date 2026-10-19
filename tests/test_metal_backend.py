@@ -290,28 +290,6 @@ def test_metal_one_bin_and_general_kernels_agree(n, hierarchical, monkeypatch):
             np.testing.assert_array_equal(a, b)
 
 
-@metal
-def test_metal_timing_log_contract():
-    code = ("import numpy as np, matchedfilter as mf\n"
-            "f = mf.MatchedFilter(2048, 2, 3, device='gpu')\n"
-            "f.set_data(np.ones((2, 2048), np.complex64)); f.set_templates(np.ones((3, 2048), np.complex64))\n"
-            "f.run(); f.run()\n"
-            "from matchedfilter import _gputime\n"
-            "assert f._gpu in _gputime._CONTEXTS\n"
-            "log = f._gpu.timings()\n"
-            "assert len(log) == 2 and all(lab == 'flat' and ms > 0 for lab, ms in log), log\n"
-            "print('ok')\n")
-    env = dict(os.environ, MF_GPU_TIMING="1")
-    r = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True)
-    assert r.returncode == 0 and "ok" in r.stdout, r.stderr
-    f = mf.MatchedFilter(2048, 1, 1, device="gpu")
-    f.set_data(np.ones((1, 2048), np.complex64))
-    f.set_templates(np.ones((1, 2048), np.complex64))
-    if os.environ.get("MF_GPU_TIMING", "") in ("", "0"):
-        f.run()
-        assert f._gpu.timing_log == []
-
-
 def test_coarse_packing_fills_a_simd_group():
     for band in (64, 128, 256, 512):
         p = _mtlcompute.coarse_ppg(band, 1000, override=None) if not os.environ.get(

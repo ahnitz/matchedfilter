@@ -2128,22 +2128,14 @@ class CorrelationFilter(MatchedFilter):
         # Two workspaces, alternating per call, each remembering the write it left in flight:
         # rewriting one waits only for the call two back, not for every write on the device
         # (the previous call -- another detector's middle stage -- keeps running).
-        until = getattr(self._gpu, 'settle_until', None)
-        token_of = getattr(self._gpu, 'write_token', None)
-        nws = 2 if until is not None and token_of is not None else 1
         pool = self.__dict__.setdefault('_continuous_workspaces', [])
-        k = self.__dict__.get('_continuous_next', 0) % nws
+        k = self.__dict__.get('_continuous_next', 0) % 2
         self._continuous_next = k + 1
         while len(pool) <= k:
             pool.append(None)
         work = pool[k]
         if work is not None:
-            if nws == 2:
-                until(work[4])     # the call that used this workspace has finished reading it
-            else:
-                settle = getattr(self._gpu, 'settle_writes', None)
-                if settle is not None:
-                    settle()       # a call left in flight still reads the workspaces below
+            self._gpu.settle_until(work[4])  # the call that used it has finished reading it
         # Reused while large enough: the block count follows each call's windows, and a
         # workspace keyed on it was three new allocations (and new recordings) per call.
         if work is None or work[1].size < ser.size or work[2].shape[0] < batch:
@@ -2203,7 +2195,7 @@ class CorrelationFilter(MatchedFilter):
             finally:
                 self._gpu.cancel_forward()
             self._tdirty = False
-        pool[k] = work[:4] + (token_of() if token_of is not None else None,)
+        pool[k] = work[:4] + (self._gpu.write_token(),)
 
     def _full_output(self, shape, out):
         nbytes = math.prod(shape) * np.dtype(np.complex64).itemsize

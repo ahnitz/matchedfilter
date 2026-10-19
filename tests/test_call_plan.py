@@ -227,11 +227,10 @@ def test_staged_series_in_flight(monkeypatch):
             for g in bank._groups}
     events = []
     for gpu in gpus.values():
-        if hasattr(gpu, "settle_until"):
-            orig = gpu.settle_until
-            monkeypatch.setattr(gpu, "settle_until",
-                                lambda token, orig=orig: events.append(("until", id(token)))
-                                or orig(token))
+        orig = gpu.settle_until
+        monkeypatch.setattr(gpu, "settle_until",
+                            lambda token, orig=orig: events.append(("until", id(token)))
+                            or orig(token))
         orig_s = gpu.settle_writes
         monkeypatch.setattr(gpu, "settle_writes",
                             lambda orig=orig_s: events.append(("settle", None)) or orig())
@@ -253,7 +252,6 @@ def test_staged_series_in_flight(monkeypatch):
         cw_tokens.append({id(p[i % len(p)][4]) for p in cws
                           if p and p[i % len(p)] is not None and p[i % len(p)][4] is not None})
     calls = [j for j, e in enumerate(events) if e[0] == "call"] + [len(events)]
-    double = len(bank.__dict__.get("_ser_stagings", [])) == 2
     # Unified memory (Metal: host_view): every group reads the caller's series in place
     # (_stage_series returns it), so no staging buffer exists to guard; the results below
     # are still checked call by call.
@@ -261,18 +259,18 @@ def test_staged_series_in_flight(monkeypatch):
     if in_place:
         assert "_ser_stagings" not in bank.__dict__ and not any(e[0] == "fill" for e in events)
         calls = []
+    else:
+        assert len(bank.__dict__["_ser_stagings"]) == 2
     for i, (a, b) in enumerate(zip(calls, calls[1:])):
         part = events[a:b]
         fi = [e[0] for e in part].index("fill")
         before = part[:fi]
-        if not double:
-            assert sum(e[0] == "settle" for e in before) >= len(gpus), events
-        elif i >= 2:
+        if i >= 2:
             waited = {e[1] for e in before if e[0] == "until"}
             assert tokens[i - 2] <= waited, (i, tokens[i - 2], events)
             # Each group's continuous workspace likewise waits for its call two back.
             assert cw_tokens[i - 2] <= {e[1] for e in part if e[0] == "until"}, (i, events)
-    if double:
+    if not in_place:
         assert any(cw_tokens[:1]) and any(tokens[:1]), "nothing was left in flight"
     bank.wait()
     for x, o in zip(xs, outs):

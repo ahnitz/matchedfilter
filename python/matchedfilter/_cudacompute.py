@@ -28,7 +28,7 @@ from . import _cuda, _gputime
 from ._cuda import check_cuda
 from ._errors import UnsupportedSize
 from ._gpu_cache import InputUploads
-from ._gpuexec import Arg, Executor
+from ._gpuexec import Arg, Executor, settle as _settle
 from ._shared import empty_shared, shared_buffer, _Borrowed
 from ._gpuhost import MAX_BINS, bin_shift
 
@@ -74,10 +74,28 @@ def settle_all():
         pend = shared.__dict__.get("pending_writes") or []
         if pend:
             check_cuda(shared.cuda.cuCtxSetCurrent(shared.ctx), "cuCtxSetCurrent")
-        while pend:
-            e = pend.pop(0)
-            check_cuda(shared.cuda.cuEventSynchronize(e), "cuEventSynchronize")
-            shared.cuda.cuEventDestroy_v2(e)
+        _settle(pend)
+
+
+class _Write:
+    """A write left in flight (Executor._writes): an event recorded after it."""
+    __slots__ = ("cuda", "event")
+
+    def __init__(self, cuda, event):
+        self.cuda, self.event = cuda, event
+
+    def done(self):
+        """Whether it has finished (the event is then freed)."""
+        if self.event is not None and self.cuda.cuEventQuery(self.event) == 0:
+            self.cuda.cuEventDestroy_v2(self.event)
+            self.event = None
+        return self.event is None
+
+    def settle(self):
+        if self.event is not None:
+            check_cuda(self.cuda.cuEventSynchronize(self.event), "cuEventSynchronize")
+            self.cuda.cuEventDestroy_v2(self.event)
+            self.event = None
 
 
 _HERE = pathlib.Path(__file__).resolve().parent
@@ -704,8 +722,9 @@ class _CudaList:
     def stamp(self, name):
         pass
 
-    def fill(self, buf, word):
-        self.ops.append(("fill", buf, int(word) & 0xFFFFFFFF))
+    def fill(self, buf, word, offset=0, nbytes=None, rows=1, pitch=0):
+        self.ops.append(("fill", buf, int(word) & 0xFFFFFFFF, offset,
+                         buf.nbytes - offset if nbytes is None else nbytes, rows, pitch))
 
     def update(self, buf, words):
         ptr, size = self.ctx._word_slots().take(4 * len(words))
@@ -717,16 +736,16 @@ class _CudaList:
         self.ops.append(("readback", buf, buf.mirror(nbytes)))
 
     def end(self):
-        return _CudaNative(self.ops, self.args, self.ctx.__dict__.get("_slots"))
+        return _CudaNative(self.label, self.ops, self.args, self.ctx.__dict__.get("_slots"))
 
 
 class _CudaNative:
     """A recorded list: its launches, and the per-run parameters (Arg) they read; replayed as
     a CUDA graph per binding (Context._x_launch). Owns its updates' word slots (_WordSlots)."""
-    __slots__ = ("ops", "args", "graphs", "slots")
+    __slots__ = ("label", "ops", "args", "graphs", "slots")
 
-    def __init__(self, ops, args, slots=None):
-        self.ops, self.args, self.graphs, self.slots = ops, args, None, slots
+    def __init__(self, label, ops, args, slots=None):
+        self.label, self.ops, self.args, self.graphs, self.slots = label, ops, args, None, slots
 
     def destroy(self):
         if self.graphs is not None:
@@ -742,6 +761,8 @@ class Context(Executor, InputUploads):
 
     max_grouped_bins = _MAX_BINS
     cache_limit_bytes = 1024 * 1024 * 1024
+    _profile = False                # MF_GPU_PROFILE (with MF_GPU_TIMING): per-kernel times
+    _in_run = False                 # inside a timed run: its kernels are timed with it
     # Unified addressing: a view inside a shared allocation is a device pointer.
     shared_views = True
     # Device memory is separate from host memory (residency matters for pricing).
@@ -792,6 +813,9 @@ class Context(Executor, InputUploads):
 
         # The shared timing contract (_gputime): register, keep (label, device_ms).
         self._timing = _gputime.enabled()
+        # MF_GPU_PROFILE=1 as well: each kernel and copy of a run is also timed, as
+        # ("k:<name>", device_ms), issued directly (not as a graph) to place its events.
+        self._profile = self._timing and os.environ.get("MF_GPU_PROFILE", "0") not in ("", "0")
         self.timing_log = []
         self._event_pool = []
         self._pending_events = {}
@@ -871,8 +895,9 @@ class Context(Executor, InputUploads):
         return e
 
     def _mark(self, stream):
-        """Open a timed region on ``stream``; returns a token for _close (None when off)."""
-        if not self._timing:
+        """Open a timed region on ``stream``; returns a token for _close (None when off, or
+        inside a timed run without MF_GPU_PROFILE)."""
+        if not self._timing or (self._in_run and not self._profile):
             return None
         e0 = self._event()
         check_cuda(self.cuda.cuEventRecord(e0, stream), "cuEventRecord")
@@ -881,6 +906,8 @@ class Context(Executor, InputUploads):
     def _close(self, token, stream, label):
         if token is None:
             return
+        if self._in_run:
+            label = "k:" + label
         e1 = self._event()
         check_cuda(self.cuda.cuEventRecord(e1, stream), "cuEventRecord")
         self._pending_events.setdefault(stream.value, []).append((label, token, e1))
@@ -905,13 +932,11 @@ class Context(Executor, InputUploads):
                 self._event_pool.extend((e0, e1))
             self.last_gpu_time = total * 1e-3
 
-    def timings(self):
-        """Settle every outstanding measurement and return timing_log (the _gputime contract)."""
+    def _x_timings(self):
         if self._pending_events:
             self._bind()
             for key in list(self._pending_events):
                 self._resolve(key)
-        return self.timing_log
 
     def _copy_h2d(self, dst, src, nbytes, stream, label):
         st = self.get_stream(None) if stream is None else stream
@@ -1280,9 +1305,15 @@ class Context(Executor, InputUploads):
         self._bind()
         stream = self.get_stream(slot)
         self._after_writes(stream)
-        for nat, b in pre:
-            self._enqueue(nat, b, stream)
-        self._enqueue(native, binds, stream)
+        tok = self._mark(stream)
+        self._in_run = tok is not None          # its kernels and copies are timed with it
+        try:
+            for nat, b in pre:
+                self._enqueue(nat, b, stream)
+            self._enqueue(native, binds, stream)
+        finally:
+            self._in_run = False
+        self._close(tok, stream, native.label + ("+forward" if pre else ""))
         return stream
 
     def _enqueue(self, native, binds, stream, graph=True):
@@ -1300,7 +1331,7 @@ class Context(Executor, InputUploads):
                 v = binds[name].dptr.value + off
                 _PACK_U64(block, at, v)
             values.append(v)
-        if not graph or self._timing or not _GRAPHS or len(native.ops) < 4:
+        if not graph or self._profile or not _GRAPHS or len(native.ops) < 4:
             self._issue(native.ops, stream)
             return
         if native.graphs is None:
@@ -1344,7 +1375,13 @@ class Context(Executor, InputUploads):
                 _, fn, wg, groups, params, param_ptrs = op
                 self._launch(fn, groups, wg, params, stream=stream, param_ptrs=param_ptrs)
             elif kind == "fill":
-                self._fill32(op[1].dptr, op[2], op[1].nbytes // 4, stream)
+                _, buf, word, offset, nbytes, rows, pitch = op
+                dptr = buf.dptr.value + offset
+                if rows == 1:
+                    self._fill32(dptr, word, nbytes // 4, stream)
+                else:
+                    check_cuda(self.cuda.cuMemsetD2D32Async(dptr, pitch, word, nbytes // 4, rows,
+                                                            stream), "cuMemsetD2D32Async")
             elif kind == "update":
                 self._copy_h2d(op[1].dptr.value, op[2], op[3], stream, "upload")
             else:
@@ -1392,58 +1429,19 @@ class Context(Executor, InputUploads):
     def _x_view(buf, dtype, count):
         return buf.view(dtype, count)
 
-    def zero_columns(self, dest, a, b):
-        """Zero dest[:, a:b] of a GPU-shared 2-D array on the device (enqueued).
-
-        Call zero_columns_done() after the last one: it waits, so work on another
-        Context's stream sees the zeros."""
-        sb = shared_buffer(dest, self)
-        if sb is None or dest.ndim != 2 or b <= a:
-            raise ValueError("zero_columns needs a GPU-shared 2-D array and a nonempty range")
-        width = (b - a) * dest.itemsize // 4
-        self._bind()
-        check_cuda(self.cuda.cuMemsetD2D32Async(sb.dptr.value + a * dest.itemsize, dest.strides[0],
-                                                0, width, dest.shape[0], self.get_stream(None)),
-                   "cuMemsetD2D32Async")
-
-    def zero_columns_done(self, wait=True):
-        """Finish the enqueued zeroing (and the correlation before it on this stream): wait,
-        or (``async_zero``) leave it in flight for the device consumers to order after."""
-        if wait:
-            self._sync(self.get_stream(None))
-            self.settle_writes()
-        else:
-            self._pend_write(self.get_stream(None))
-
     def _pend_write(self, stream):
         e = self._new_event()
         check_cuda(self.cuda.cuEventRecord(e, stream), "cuEventRecord")
-        holder = self._device_state if self._device_state is not None else self
-        holder.__dict__.setdefault("pending_writes", []).append(e)
-
-    def settle_writes(self):
-        """Wait for every write left in flight on this device (correlate_series(wait=False))."""
-        holder = self._device_state if self._device_state is not None else self
-        pend = holder.__dict__.get("pending_writes") or []
-        while pend:
-            e = pend.pop(0)
-            check_cuda(self.cuda.cuEventSynchronize(e), "cuEventSynchronize")
-            self.cuda.cuEventDestroy_v2(e)
+        self._writes().append(_Write(self.cuda, e))
 
     def _after_writes(self, stream):
         """Order ``stream`` after writes left in flight (dropping those already complete)."""
-        holder = self._device_state if self._device_state is not None else self
-        pend = holder.__dict__.get("pending_writes")
+        pend = self._writes()
         if not pend:
             return
-        keep = []
-        for e in pend:
-            if self.cuda.cuEventQuery(e) == 0:
-                self.cuda.cuEventDestroy_v2(e)
-            else:
-                check_cuda(self.cuda.cuStreamWaitEvent(stream, e, 0), "cuStreamWaitEvent")
-                keep.append(e)
-        pend[:] = keep
+        pend[:] = [w for w in pend if not w.done()]
+        for w in pend:
+            check_cuda(self.cuda.cuStreamWaitEvent(stream, w.event, 0), "cuStreamWaitEvent")
 
 
     # ---- hierarchical ---------------------------------------------------------------
