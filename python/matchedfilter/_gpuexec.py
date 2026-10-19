@@ -211,6 +211,16 @@ class Executor(HierOps):
     _SPARSE_FIRST = 4096
     #: correlate takes wait=False on every backend (CorrelationFilter.run(wait=False)).
     async_correlate = True
+    #: What every GPU runs, because the operations are written here once: pipelined slots
+    #: (slot=, async_submit=), sparse results, call-plan replay (forward_replay,
+    #: hier_replay), ragged bin counts in a grouped call (flat and hierarchical), continuous
+    #: correlation into views of a caller's output and left in flight, follow-up items in
+    #: flight, forwards over row ranges and over real series read in place, grouped flat
+    #: calls in flight, and column zeroing left in flight.
+    supports_async = supports_sparse = supports_replay = True
+    supports_ragged_hier = supports_ragged_bins = True
+    continuous_out_views = defers_continuous = defers_grouped = async_zero = True
+    items_async = forward_rows = real_series = True
     #: See the module docstring (a driver feature).
     stage_host_inputs = False
 
@@ -313,13 +323,20 @@ class Executor(HierOps):
             elif source is None:
                 continue
             else:
-                n, series, starts, row, count, nser, code, spectra, address = source
+                n, series, starts, row, count, nser, code, spectra, address = source[:9]
                 hit = (address == data.ctypes.data and count == nd and row == 0)
             if hit:
                 del work[i]
                 if not work:
                     del table[key]
-                return None if data is None else (series, starts, row, count, nser, code)
+                if data is None:
+                    return None
+                # The claimer binds the forward record's staged starts: that record stays
+                # until the claimer has run (_exec_hold; a tiny cache budget once evicted it
+                # while the claimer was recorded, and its kernels read freed memory).
+                if len(source) > 9:
+                    self.__dict__.setdefault("_exec_hold", set()).add(source[9])
+                return (series, starts, row, count, nser, code)
         return None
 
     def _exec_run_holding(self, native):
@@ -381,8 +398,9 @@ class Executor(HierOps):
         """Room for a new record: at most cache_limit_entries records (the least recently
         used evicted first), then the byte budget (_cache_room)."""
         table, order = self._exec_table(), getattr(self, "_cache_order", {})
+        hold = self.__dict__.get("_exec_hold", ())
         while len(table) >= self.cache_limit_entries:
-            key = next((k for kind, k in order if kind == "exec"), None)
+            key = next((k for kind, k in order if kind == "exec" and k not in hold), None)
             if key is None:
                 break
             order.pop(("exec", key))
@@ -636,7 +654,7 @@ class Executor(HierOps):
             binds["starts"] = bst = stv
             row = r0
         source = None if two else (n, sv, bst, row, count, nser, code, pv,
-                                   spectra.ctypes.data + r0 * n * 8)
+                                   spectra.ctypes.data + r0 * n * 8, key)
         if handle_out is not None:
             handle_out.append((key, rec, binds, source))
         if defer:
@@ -870,8 +888,6 @@ class Executor(HierOps):
         return _SparsePeaks(shape, flat, recs[:, 1].view(np.int32), val)
 
     # ---- follow-up items ----------------------------------------------------------------
-    #: peaks_items takes async_submit (MatchedFilter._items_gpu(wait=False)).
-    items_async = True
 
     def peaks_items(self, n, data, tmpl, items, binsize, threshold, *, async_submit=False):
         """One submission over follow-up items (lo, hi, a, b, t): rows a:b of data against

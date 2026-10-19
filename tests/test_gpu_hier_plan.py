@@ -453,3 +453,27 @@ def test_clearing_a_context_waits_once_then_frees_every_record():
     ctx._evict_all()
     assert not ctx._exec_table()
     assert ctx.idles == 1 and ctx.released == [True, True, True]
+
+
+def test_a_claimed_forward_record_outlives_its_claimers_recording(monkeypatch):
+    """The claimer binds the claimed forward's staged block starts: under a cache budget
+    of one byte, making room for the hierarchical record evicted that forward record and
+    its kernels read freed memory (a CUDA illegal address)."""
+    from matchedfilter import _gpuexec
+    monkeypatch.setattr(_gpuhier, "shared_view", lambda array, ctx: array)
+    monkeypatch.setattr(_gpuexec, "shared_view", lambda array, ctx: array)
+    ctx = Driver()
+    ctx.cache_limit_bytes = 1
+    n = 4096
+    series = np.ones(4 * n, np.complex64)
+    d = np.zeros((2, n), np.complex64)
+    h = np.ones((3, n), np.complex64)
+    ctx.forward(n, series, np.array([0, n], np.uint32), d, defer=True, slot=0)
+    fkey = next(k for k in ctx._exec_table() if k[0] == "forward")
+    evicted = []
+    real = ctx._exec_evict
+    ctx._exec_evict = lambda key, done=False: (evicted.append(key), real(key, done))[1]
+    claims = _gpuhier.CLAIMS[0]
+    ctx.hier_peaks(n, 128, d, h, h[:, :128], 0.5, slot=0)
+    assert _gpuhier.CLAIMS[0] == claims + 1
+    assert fkey not in evicted and "_exec_hold" not in ctx.__dict__

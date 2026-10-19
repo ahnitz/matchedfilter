@@ -265,7 +265,15 @@ class HierOps:
         return _bits(max(float(thr), _TINY))
 
     # ---- the call ------------------------------------------------------------------------
-    def hier_peaks(self, n, band, data, tmpl, ct0, raw_thr, binsize=None, threshold=0.0,
+    def hier_peaks(self, *args, **kwargs):
+        """See _hier_peaks. A forward record this call claims is held against eviction
+        until the call has submitted (_exec_claim)."""
+        try:
+            return self._hier_peaks(*args, **kwargs)
+        finally:
+            self.__dict__.pop("_exec_hold", None)
+
+    def _hier_peaks(self, n, band, data, tmpl, ct0, raw_thr, binsize=None, threshold=0.0,
                    window=None, upload_data=True, upload_tmpl=True, cascade_band=None, ct1=None,
                    raw_thr1=None, slot=None, async_submit=False, sparse=False, row_windows=None,
                    handle_out=None):
