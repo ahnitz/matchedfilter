@@ -190,16 +190,14 @@ def _sub(a, b):
 
 
 def _backend_c16(device):
-    """Whether the backend runs tier 0 at `band` in packed fp16: a function of band."""
+    """Whether the device runs tier 0 at `band` in packed fp16 (its driver's _x_has_c16: an
+    fp16 coarse build shipped for the band), as a function of band; None on a CPU."""
     from .device import parse
     d = parse(device)
     if d.kind != "gpu":
         return None
-    mod = {"vulkan": "_vkcompute", "cuda": "_cudacompute", "metal": "_mtlcompute"}.get(d.backend)
-    if mod is None:
-        return lambda band: False
-    import importlib
-    return getattr(importlib.import_module("matchedfilter." + mod), "_use_c16", lambda band: False)
+    from . import _compute_module
+    return _compute_module(d).Context._x_has_c16
 
 
 def tier_precision(device, tier, band):
@@ -485,123 +483,14 @@ def cpu_peaks(measure_bandwidth=True):
     return out
 
 
-def _vk_shader_core(ctx):
-    """VkPhysicalDeviceShaderCorePropertiesAMD: (engines, arrays/engine, CUs/array, SIMDs/CU,
-    wave size), or None."""
-    import ctypes
-    vk = ctx.vk
-    if not hasattr(vk, "vkGetPhysicalDeviceProperties2"):
-        return None
-
-    class Core(ctypes.Structure):
-        _fields_ = [("sType", ctypes.c_uint32), ("pNext", ctypes.c_void_p)] + [
-            (f, ctypes.c_uint32) for f in (
-                "shaderEngineCount", "shaderArraysPerEngineCount", "computeUnitsPerShaderArray",
-                "simdPerComputeUnit", "wavefrontsPerSimd", "wavefrontSize", "sgprsPerSimd",
-                "minSgprAllocation", "maxSgprAllocation", "sgprAllocationGranularity",
-                "vgprsPerSimd", "minVgprAllocation", "maxVgprAllocation",
-                "vgprAllocationGranularity")]
-
-    class Props2(ctypes.Structure):
-        _fields_ = [("sType", ctypes.c_uint32), ("pNext", ctypes.c_void_p),
-                    ("props", ctypes.c_ubyte * 1024)]
-    core = Core(1000185000, None)
-    p2 = Props2(1000059001, ctypes.cast(ctypes.pointer(core), ctypes.c_void_p))
-    vk.vkGetPhysicalDeviceProperties2.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
-    vk.vkGetPhysicalDeviceProperties2(ctx.physical, ctypes.byref(p2))
-    if not core.shaderEngineCount:
-        return None
-    return (core.shaderEngineCount, core.shaderArraysPerEngineCount,
-            core.computeUnitsPerShaderArray, core.simdPerComputeUnit, core.wavefrontSize)
-
-
 def gpu_peaks(device, ctx=None):
-    """Theoretical peaks of a GPU from API-queryable counts plus a stated formula."""
+    """Theoretical peaks of a GPU from API-queryable counts plus a stated formula: the
+    driver's peak model (Context._x_peaks), which ctx -- a context on the device -- runs."""
     from .device import parse
     d = parse(device)
-    out = dict(device=str(d), name=d.name, backend=d.backend)
-    if d.backend == "cuda":
-        a = ctx._attr
-        sms, khz = a(16), a(13)              # MULTIPROCESSOR_COUNT, CLOCK_RATE (kHz)
-        mem_khz, bus = a(36), a(37)          # MEMORY_CLOCK_RATE (kHz), GLOBAL_MEMORY_BUS_WIDTH
-        cc = (a(75), a(76))
-        # FP32 lanes per SM by compute capability (CUDA C Programming Guide, arithmetic
-        # instruction throughput); vector fp16 runs at the fp32 rate from 8.6 on.
-        fp32 = {(7, 0): 64, (7, 5): 64, (8, 0): 64, (8, 6): 128, (8, 7): 128, (8, 9): 128,
-                (9, 0): 128}.get(cc, 128)
-        fp16 = {(7, 0): 128, (7, 5): 128, (8, 0): 256}.get(cc, fp32)
-        ghz = khz / 1e6
-        out.update(sms=sms, cc=cc, clock_ghz=ghz,
-                   flops=dict(fp32=sms * fp32 * 2 * ghz * 1e9, fp16=sms * fp16 * 2 * ghz * 1e9,
-                              int16=sms * fp32 * 2 * ghz * 1e9),
-                   bandwidth=2 * mem_khz * 1e3 * bus / 8,
-                   formula="%d SMs x %d fp32 lanes (fp16 %d) x 2 x %.3f GHz boost; int16 at the "
-                           "fp32 rate; tensor cores not counted" % (sms, fp32, fp16, ghz),
-                   bandwidth_formula="2 x %.0f MHz memory clock x %d-bit bus / 8" % (mem_khz / 1e3, bus))
-        out["measured"] = _MEASURED.get("L40S") if "L40S" in (d.name or "") else None
-        return out
-    if d.backend == "vulkan":
-        m = re.search(r"gfx\d+", d.name or "", re.I)
-        arch = m.group(0).lower() if m else ""
-        core = _vk_shader_core(ctx) if ctx is not None else None
-        cus = core[0] * core[1] * core[2] if core else None
-        if cus is None:
-            cus = {"gfx1151": 40}.get(arch)
-        if cus is None:
-            # No core count this API reports (VK_AMD_shader_core_properties is AMD's) and no
-            # table entry (e.g. Intel): peaks unknown, the fraction NaN, the report still made.
-            nan = float("nan")
-            out.update(arch=arch, cus=None, flops=dict(fp32=nan, fp16=nan, int16=nan),
-                       bandwidth=nan, formula="unknown (no shader-core count for this device)",
-                       bandwidth_formula="unknown")
-            out["measured"] = None
-            return out
-        mhz = 0
-        for card in sorted(os.listdir("/sys/class/drm")) if os.path.isdir("/sys/class/drm") else ():
-            txt = _read("/sys/class/drm/%s/device/pp_dpm_sclk" % card)
-            if txt:
-                mhz = max([mhz] + [int(x) for x in re.findall(r"(\d+)Mhz", txt)])
-        ghz = (mhz or 2900) / 1e3
-        # RDNA 3/3.5 (gfx11) and RDNA 4 (gfx12): 2 SIMD32 per CU, dual-issue fp32 (VOPD /
-        # wave64): 128 fp32 FMA per CU per clock; packed fp16 doubles it. (RDNA 2 and older,
-        # gfx10 and below: 64 / 128.)
-        gen = re.match(r"gfx(\d+?)(\d{2})$", arch) if len(arch) >= 6 else None
-        dual_issue = gen is not None and int(gen.group(1)) >= 11
-        fp32 = 128 if dual_issue else 64
-        bus, mts = _AMD_MEM.get(arch, (None, None))
-        out.update(arch=arch, cus=cus, clock_ghz=ghz,
-                   flops=dict(fp32=cus * fp32 * 2 * ghz * 1e9, fp16=cus * 2 * fp32 * 2 * ghz * 1e9,
-                              int16=cus * 2 * fp32 * 2 * ghz * 1e9),
-                   bandwidth=(bus * mts * 1e6 / 8) if bus else float("nan"),
-                   formula="%d CUs (%s) x %d fp32 lanes (dual issue) x 2 x %.2f GHz max sclk; "
-                           "fp16/int16 packed: 2x" % (cus, "VK_AMD_shader_core_properties" if core
-                                                       else "table", fp32, ghz),
-                   bandwidth_formula=("%d-bit x %d MT/s / 8 (vendor figure; Vulkan does not "
-                                      "describe memory)" % (bus, mts)) if bus else "unknown")
-        out["measured"] = _MEASURED.get(arch)
-        return out
-    if d.backend == "metal":
-        chip = next((k for k in _APPLE_GPU if k in (d.name or "")), "M2")
-        ghz, cores, bus, mts = _APPLE_GPU[chip]
-        try:
-            import subprocess
-            txt = subprocess.run(["ioreg", "-rc", "AGXAccelerator"], capture_output=True,
-                                 text=True).stdout
-            m = re.search(r'"gpu-core-count"\s*=\s*(\d+)', txt)
-            if m:
-                cores = int(m.group(1))
-        except OSError:
-            pass
-        # 128 fp32 ALUs per core; Apple GPUs before M3 run fp16 at the fp32 rate.
-        f = cores * 128 * 2 * ghz * 1e9
-        out.update(cores=cores, clock_ghz=ghz, flops=dict(fp32=f, fp16=f, int16=f),
-                   bandwidth=bus * mts * 1e6 / 8,
-                   formula="%d cores (ioreg gpu-core-count) x 128 ALUs x 2 x %.3f GHz (vendor "
-                           "clock); fp16 at the fp32 rate" % (cores, ghz),
-                   bandwidth_formula="%d-bit LPDDR x %d MT/s / 8 (vendor figure)" % (bus, mts))
-        out["measured"] = _MEASURED.get("Apple %s GPU" % chip)
-        return out
-    raise ValueError("no peak model for %s" % device)
+    if ctx is None:
+        raise ValueError("no context on %s to ask for its peaks" % device)
+    return ctx._x_peaks(dict(device=str(d), name=d.name, backend=d.backend))
 
 
 def peaks(device, ctx=None, measure_bandwidth=True):

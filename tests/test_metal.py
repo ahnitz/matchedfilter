@@ -82,9 +82,9 @@ def test_metal_fp16_helpers():
     import numpy as np
     from matchedfilter import _mtlcompute as M
     for band in (64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384):
-        assert M._use_c16(band)
-    assert not M._use_c16(32768)
-    assert not M._use_c16(65536)
+        assert M.Context._x_has_c16(band)
+    assert not M.Context._x_has_c16(32768)
+    assert not M.Context._x_has_c16(65536)
 
     # Values including subnormals, zeros, negative numbers, infinities, boundaries
     vals = np.array([0.0, -0.0, 1.0, -0.5, 2.0, -2.0, 65504.0, -65504.0, 2**-14], dtype=np.float32)

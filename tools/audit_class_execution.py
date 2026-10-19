@@ -192,12 +192,12 @@ def cache_limits(rounds):
                   results=times(calls,rounds))
     accounting={}
     for label,f in plans.items():
-        buffers=[b for batch in f._gpu._batches.values() for b in batch[:-1]]
-        buffers += [b for batch in getattr(f._gpu,'_forwards',{}).values() for b in batch[:-1]]
-        unique={int(b.ptr.value if hasattr(b.ptr,'value') else b.ptr):b.nbytes for b in buffers}
+        records=f._gpu._exec_table()
+        buffers=[rec.buffers[name] for rec in records.values() for name in rec.owned]
+        unique={id(b):b.nbytes for b in buffers}
         accounting[label]={'counted_bytes':f._gpu._cache_bytes(),
                            'unique_allocation_bytes':sum(unique.values()),
-                           'dispatch_entries':len(f._gpu._batches)}
+                           'dispatch_entries':len(records)}
     result['memory_accounting']=accounting
     print(json.dumps(result),flush=True)
     return [result]
