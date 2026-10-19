@@ -3088,8 +3088,8 @@ class HierarchicalFilter(MatchedFilter):
             thr = list(self._thresholds(required=True))
             plan.set_thresholds(thr)
             self._q15_order_choice = None
-            if (self.device.backend == 'AVX3' and self._pending_ref is not None
-                    and self.n == 2048 and tuple(self._chain) == (256, 512, 1024)):
+            if (self.device.kind == 'cpu' and self._pending_ref is not None
+                    and len(self._chain) >= 2):
                 self._q15_order_choice = _gatechain.q15_recheck_order(
                     self._pending_ref, self.n, self._chain, thr, self._cost_model(),
                     window=self.search_window)
