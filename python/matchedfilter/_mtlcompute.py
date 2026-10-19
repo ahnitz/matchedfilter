@@ -762,6 +762,7 @@ class Context(Executor, InputUploads):
                            "compactPairs": "compact",
                            "compactListed": "compactl",
                            "refineListed": "refine",
+                           "refineItems": "items",
                            "fullCorrelation": "full",
                            "fullCorrelationSeries": "full_series"}[entry], n)
         info = _manifest().get("modules", {}).get(str(n), {})
@@ -1120,6 +1121,7 @@ class Context(Executor, InputUploads):
             return self.pipeline(4096 if name == "pack" else n, entry), tg
         entries = {"fwd_tier0": "forwardTier0", "fwd_bands": "seriesForwardBands",
                    "fwd_listed": "seriesForwardListed", "forward": "seriesForward",
+                   "items": "refineItems",
                    "full": "fullCorrelation", "series": "fullCorrelationSeries"}
         if name in entries:
             return self.pipeline(n, entries[name]), n // _radix(n)
@@ -1143,6 +1145,9 @@ class Context(Executor, InputUploads):
             return bool((info.get("refineListed") or {}).get("one_bin"))
         if name == "fwd_tier0":
             return _shipped("forward_tier0_%d" % n)
+        if name == "items":
+            info = ((_manifest().get("modules", {}).get(str(n)) or {}).get("metal") or {})
+            return "refineItems" in info
         raise ValueError(name)
 
     def _x_coarse_candidates(self, band):
@@ -1346,6 +1351,7 @@ class Context(Executor, InputUploads):
     def destroy(self):
         if getattr(self, "device", None) is None:
             return
+        self._retire()
         self.cancel_forward()
         dev = getattr(self, "_device_state", None)
         if dev is not None and any(w.ctx is self for w in dev.pending_writes):

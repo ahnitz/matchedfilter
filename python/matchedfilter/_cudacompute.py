@@ -978,6 +978,8 @@ class Context(Executor, InputUploads):
                     "forwardTier0": "forward_tier0"}[entry] + f"_{n}"
         if entry == "seriesForward":
             return f"forward_{n}"
+        if entry == "refineItems":
+            return f"items_{n}"
         if entry == "coarseTile":
             return f"coarse_{n}"
         if c16:
@@ -1140,18 +1142,6 @@ class Context(Executor, InputUploads):
         self._drain_segments()
         return self._exec_evict(key)
 
-    def _grow(self, rec, name, nbytes, cls, stream):
-        """Ensure rec[name] holds at least nbytes, growing geometrically. Returns True if
-        it was (re)allocated -- its contents are then undefined."""
-        cur = rec.get(name)
-        if cur is not None and (isinstance(cur, _Borrowed) or cur.nbytes >= nbytes):
-            return False
-        if cur is not None:
-            self._sync(stream)            # enqueued work may still use the old allocation
-            cur.destroy()
-        rec[name] = cls(self, max(int(nbytes), 64) if cur is None else max(int(nbytes), 2 * cur.nbytes))
-        return True
-
     def _compact_peaks(self):
         key = ("compactPeaks",)
         if key not in self._pipelines:
@@ -1204,7 +1194,7 @@ class Context(Executor, InputUploads):
                    "pack": "packCoarse", "fwd_tier0": "forwardTier0",
                    "fwd_bands": "seriesForwardBands", "fwd_listed": "seriesForwardListed",
                    "full": "fullCorrelation", "series": "fullCorrelationSeries",
-                   "forward": "seriesForward"}
+                   "forward": "seriesForward", "items": "refineItems"}
         if name in entries:
             return self.pipeline(n, entries[name])
         role = {"tc1": "corr1", "tc2": "corr2", "tcs2": "corr_series2",
@@ -1235,6 +1225,8 @@ class Context(Executor, InputUploads):
             return (_PTX_DIR / f"refine_{n}_onebin.ptx").is_file()
         if name == "fwd_tier0":
             return (_PTX_DIR / f"forward_tier0_{n}.ptx").is_file()
+        if name == "items":
+            return (_PTX_DIR / f"items_{n}.ptx").is_file()
         raise ValueError(name)
 
     def _x_coarse_candidates(self, band):
@@ -1476,11 +1468,6 @@ class Context(Executor, InputUploads):
         for graph in set(self.__dict__.get("_segment_results", {}).values()):
             graph.collect()
 
-    def followup_executor(self):
-        """This device's executor for _gpuhost.submit_followups (_cudafollowup: one stream, one readback)."""
-        from . import _cudafollowup
-        return _cudafollowup.executor(self)
-
     def clear_cache(self):
         self._drain()
         self._drain_segments()
@@ -1500,6 +1487,7 @@ class Context(Executor, InputUploads):
     def destroy(self):
         if not getattr(self, "ctx", None) or not self.ctx.value:
             return
+        self._retire()
         self._bind()
         self.clear_cache()
         if self.__dict__.get("_slots") is not None:

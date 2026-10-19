@@ -23,6 +23,8 @@ def _banks(monkeypatch, device, nbanks=2, seed=91):
 
 
 def _device_followup_backends():
+    """Every GPU backend the machine runs: CUDA where present, and the default GPU (a
+    hardware Vulkan or Metal device that runs a filter, conftest.usable_gpu)."""
     out = []
     try:
         from matchedfilter import _cuda
@@ -30,17 +32,10 @@ def _device_followup_backends():
             out.append("cuda:0")
     except Exception:                                  # noqa: BLE001
         pass
-    try:
-        # A hardware Vulkan device that runs a filter: enumeration alone also lists a software
-        # rasteriser (lavapipe), whose device timers record nothing, and a driver that cannot
-        # allocate (conftest.usable_gpu).
-        import matchedfilter as mf
-        from conftest import usable_gpu
-        if (any(str(d) == "gpu:0" and d.backend == "vulkan" and not d.is_software
-                for d in mf.devices()) and usable_gpu() is not None):
-            out.append("gpu:0")
-    except Exception:                                  # noqa: BLE001
-        pass
+    from conftest import usable_gpu
+    dev = usable_gpu()
+    if dev is not None and dev not in out:
+        out.append(dev)
     return out
 
 
@@ -91,5 +86,42 @@ def test_batched_single_template_calls_own_their_results(device, monkeypatch):
     got = TimeDomainFilterBank.filter_series_many(jobs)
     for (b, x, kw), r in zip(jobs, got):
         want = b.filter_series(x, **kw)
+        for f in want._fields:
+            np.testing.assert_array_equal(getattr(want, f), getattr(r, f))
+
+
+@pytest.mark.parametrize("layout", ["floats", "lane"])
+@pytest.mark.parametrize("device", _device_followup_backends() or ["none"])
+def test_device_followups_read_a_real_series_in_place(device, layout, monkeypatch):
+    """Device follow-ups on a real series lying in device memory -- contiguous floats, or one
+    lane of a complex row (a real-real-complex hierarchy's middle output) -- read it in
+    place through the forward's sample layout and equal the same calls made one by one."""
+    if device == "none":
+        pytest.skip("no GPU backend")
+    from matchedfilter import _gpuhost
+    rng, banks = _banks(monkeypatch, device, nbanks=1, seed=95)
+    bank = banks[0]
+    S = 1 << 17
+    if layout == "floats":
+        buf = bank.empty_shared((2 * S,)).view(np.float32).reshape(4, S)
+        rows = [buf[1], buf[2]]
+    else:
+        buf = bank.empty_shared((2, S))
+        rows = [buf[0].real, buf[1].imag]
+    for r in rows:
+        r[:] = rng.standard_normal(S).astype(np.float32)
+    taken = []
+    orig = _gpuhost.submit_followups
+    monkeypatch.setattr(_gpuhost, "submit_followups",
+                        lambda js: (lambda c: taken.append(c is not None) or c)(orig(js)))
+    jobs = []
+    for k in range(6):
+        c0 = int(rng.integers(20000, S - 20000))
+        jobs.append((bank, rows[k % 2], dict(windows=slice(c0 - 3000, c0 + 3100), binsize=61,
+                                             threshold=0.0, template_index=(7 * k) % 33)))
+    got = TimeDomainFilterBank.filter_series_many(jobs)
+    assert taken == [True], "the device follow-up path was not taken"
+    for (b, x, kw), r in zip(jobs, got):
+        want = b.filter_series(np.array(x), **kw)
         for f in want._fields:
             np.testing.assert_array_equal(getattr(want, f), getattr(r, f))
