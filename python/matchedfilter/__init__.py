@@ -216,6 +216,21 @@ def _unpack_half(a, n, hermitian):
     return full
 
 
+def _compute_module(device):
+    """The driver module for a GPU device: the one choice made by API, as a driver is one
+    API's implementation of the executor's primitives (Metal on Apple, CUDA on NVIDIA, else
+    Vulkan)."""
+    backend = getattr(device, "backend", None)
+    if backend == "metal":
+        from . import _mtlcompute
+        return _mtlcompute
+    if backend == "cuda":
+        from . import _cudacompute
+        return _cudacompute
+    from . import _vkcompute
+    return _vkcompute
+
+
 class _SparsePeaks:
     """The peaks of a (blocks, templates, bins) result, sparse: flat indices into that shape,
     sample indices and values, in C order. What a GPU returns when a caller asks (``_want_sparse``): at a detection threshold almost every bin is
@@ -571,15 +586,8 @@ class MatchedFilter:
         self._gtmpl = None
 
     def _backend(self):
-        """The compute module for this device: Metal on Apple, CUDA on NVIDIA, else Vulkan."""
-        if getattr(self.device, "backend", None) == "metal":
-            from . import _mtlcompute
-            return _mtlcompute
-        if getattr(self.device, "backend", None) == "cuda":
-            from . import _cudacompute
-            return _cudacompute
-        from . import _vkcompute
-        return _vkcompute
+        """The compute module for this device (_compute_module)."""
+        return _compute_module(self.device)
 
     # ---- ingest -------------------------------------------------------------
     def _ensure(self):

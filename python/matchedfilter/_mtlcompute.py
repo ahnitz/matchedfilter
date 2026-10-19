@@ -97,15 +97,6 @@ def _ieee_kernel(stem):
     return stem.startswith("compact_")
 
 
-def _use_c16(band):
-    """Half-width coarse path where the FP16 kernel is available.
-
-    Loads tierb_<band>_c16.metal. Applies at every coarse band where
-    a pre-compiled FP16 kernel exists.
-    """
-    return _shipped("tierb_%d_c16" % band)
-
-
 def _ppg_of(entry):
     """Pairs per threadgroup an entry name carries: coarse16p8 -> 8, coarse16p8t2w -> 8 (a
     trailing "w" asks for the twiddle table, _twt_entry)."""
@@ -275,6 +266,31 @@ class _Buffer:
     def read_into(self, out):
         """Zero-copy direct read into caller-provided contiguous array."""
         ctypes.memmove(out.ctypes.data, self.ptr, min(self.nbytes, out.nbytes))
+        return out
+
+    def _x_peaks(self, out):
+        """Theoretical peaks (_roofline.gpu_peaks): the core count plus a stated formula."""
+        import re as _re
+        from . import _roofline as _rl
+        chip = next((k for k in _rl._APPLE_GPU if k in (out["name"] or "")), "M2")
+        ghz, cores, bus, mts = _rl._APPLE_GPU[chip]
+        try:
+            import subprocess
+            txt = subprocess.run(["ioreg", "-rc", "AGXAccelerator"], capture_output=True,
+                                 text=True).stdout
+            m = _re.search(r'"gpu-core-count"\s*=\s*(\d+)', txt)
+            if m:
+                cores = int(m.group(1))
+        except OSError:
+            pass
+        # 128 fp32 ALUs per core; Apple GPUs before M3 run fp16 at the fp32 rate.
+        f = cores * 128 * 2 * ghz * 1e9
+        out.update(cores=cores, clock_ghz=ghz, flops=dict(fp32=f, fp16=f, int16=f),
+                   bandwidth=bus * mts * 1e6 / 8,
+                   formula="%d cores (ioreg gpu-core-count) x 128 ALUs x 2 x %.3f GHz (vendor "
+                           "clock); fp16 at the fp32 rate" % (cores, ghz),
+                   bandwidth_formula="%d-bit LPDDR x %d MT/s / 8 (vendor figure)" % (bus, mts))
+        out["measured"] = _rl._MEASURED.get("Apple %s GPU" % chip)
         return out
 
     def destroy(self):
@@ -1136,7 +1152,7 @@ class Context(Executor, InputUploads):
 
     @staticmethod
     def _x_has_c16(band):
-        return _use_c16(band)
+        return _shipped("tierb_%d_c16" % band)
 
     @staticmethod
     def _x_has_kernel(name, n):

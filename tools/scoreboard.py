@@ -73,8 +73,9 @@ def _submit_only(ctx, reps):
     if not hasattr(ctx, "vk"):
         raise _NoComputeOnly(type(ctx).__module__)
     vk = ctx.vk
-    cmds = [b[4] for b in ctx._batches.values()]
-    cmds += [b[1] for b in getattr(ctx, "_hier", {}).values()]
+    # Every kept command buffer of the executor's records (one per binding, _VkNative).
+    cmds = [e[0] for rec in ctx._exec_table().values() if rec.native is not None
+            for e in getattr(rec.native, "cmds", {}).values()]
     if not cmds:
         raise RuntimeError("nothing was recorded; the measurement would be a lie")
     arr = (V._vp * len(cmds))(*cmds)

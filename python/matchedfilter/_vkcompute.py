@@ -2169,6 +2169,80 @@ class Context(Executor, InputUploads):
 
 
 
+    def _shader_core(self):
+        """VkPhysicalDeviceShaderCorePropertiesAMD: (engines, arrays/engine, CUs/array, SIMDs/CU,
+        wave size), or None."""
+        import ctypes
+        vk = self.vk
+        if not hasattr(vk, "vkGetPhysicalDeviceProperties2"):
+            return None
+
+        class Core(ctypes.Structure):
+            _fields_ = [("sType", ctypes.c_uint32), ("pNext", ctypes.c_void_p)] + [
+                (f, ctypes.c_uint32) for f in (
+                    "shaderEngineCount", "shaderArraysPerEngineCount", "computeUnitsPerShaderArray",
+                    "simdPerComputeUnit", "wavefrontsPerSimd", "wavefrontSize", "sgprsPerSimd",
+                    "minSgprAllocation", "maxSgprAllocation", "sgprAllocationGranularity",
+                    "vgprsPerSimd", "minVgprAllocation", "maxVgprAllocation",
+                    "vgprAllocationGranularity")]
+
+        class Props2(ctypes.Structure):
+            _fields_ = [("sType", ctypes.c_uint32), ("pNext", ctypes.c_void_p),
+                        ("props", ctypes.c_ubyte * 1024)]
+        core = Core(1000185000, None)
+        p2 = Props2(1000059001, ctypes.cast(ctypes.pointer(core), ctypes.c_void_p))
+        vk.vkGetPhysicalDeviceProperties2.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        vk.vkGetPhysicalDeviceProperties2(self.physical, ctypes.byref(p2))
+        if not core.shaderEngineCount:
+            return None
+        return (core.shaderEngineCount, core.shaderArraysPerEngineCount,
+                core.computeUnitsPerShaderArray, core.simdPerComputeUnit, core.wavefrontSize)
+
+    def _x_peaks(self, out):
+        """Theoretical peaks (_roofline.gpu_peaks): API-queryable counts plus a stated formula."""
+        import os as _os
+        import re as _re
+        from . import _roofline as _rl
+        m = _re.search(r"gfx\d+", out["name"] or "", _re.I)
+        arch = m.group(0).lower() if m else ""
+        core = self._shader_core()
+        cus = core[0] * core[1] * core[2] if core else None
+        if cus is None:
+            cus = {"gfx1151": 40}.get(arch)
+        if cus is None:
+            # No core count this API reports (VK_AMD_shader_core_properties is AMD's) and no
+            # table entry (e.g. Intel): peaks unknown, the fraction NaN, the report still made.
+            nan = float("nan")
+            out.update(arch=arch, cus=None, flops=dict(fp32=nan, fp16=nan, int16=nan),
+                       bandwidth=nan, formula="unknown (no shader-core count for this device)",
+                       bandwidth_formula="unknown")
+            out["measured"] = None
+            return out
+        mhz = 0
+        for card in sorted(_os.listdir("/sys/class/drm")) if _os.path.isdir("/sys/class/drm") else ():
+            txt = _rl._read("/sys/class/drm/%s/device/pp_dpm_sclk" % card)
+            if txt:
+                mhz = max([mhz] + [int(x) for x in _re.findall(r"(\d+)Mhz", txt)])
+        ghz = (mhz or 2900) / 1e3
+        # RDNA 3/3.5 (gfx11) and RDNA 4 (gfx12): 2 SIMD32 per CU, dual-issue fp32 (VOPD /
+        # wave64): 128 fp32 FMA per CU per clock; packed fp16 doubles it. (RDNA 2 and older,
+        # gfx10 and below: 64 / 128.)
+        gen = _re.match(r"gfx(\d+?)(\d{2})$", arch) if len(arch) >= 6 else None
+        dual_issue = gen is not None and int(gen.group(1)) >= 11
+        fp32 = 128 if dual_issue else 64
+        bus, mts = _rl._AMD_MEM.get(arch, (None, None))
+        out.update(arch=arch, cus=cus, clock_ghz=ghz,
+                   flops=dict(fp32=cus * fp32 * 2 * ghz * 1e9, fp16=cus * 2 * fp32 * 2 * ghz * 1e9,
+                              int16=cus * 2 * fp32 * 2 * ghz * 1e9),
+                   bandwidth=(bus * mts * 1e6 / 8) if bus else float("nan"),
+                   formula="%d CUs (%s) x %d fp32 lanes (dual issue) x 2 x %.2f GHz max sclk; "
+                           "fp16/int16 packed: 2x" % (cus, "VK_AMD_shader_core_properties" if core
+                                                       else "table", fp32, ghz),
+                   bandwidth_formula=("%d-bit x %d MT/s / 8 (vendor figure; Vulkan does not "
+                                      "describe memory)" % (bus, mts)) if bus else "unknown")
+        out["measured"] = _rl._MEASURED.get(arch)
+        return out
+
     def clear_cache(self):
         """Release records and owned storage, preserving external shared arrays."""
         self._drain()

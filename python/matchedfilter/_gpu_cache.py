@@ -9,7 +9,7 @@ class Pending:
     cached buffers can finish them first -- a result is read from those
     buffers, and reading one after its release reads freed memory.
     """
-    __slots__ = ("ctx", "fn", "result", "done", "stats", "sparse_dev", "owner")
+    __slots__ = ("ctx", "fn", "result", "done", "stats", "owner")
 
     #: Per-dispatch statistics a finish leaves on the context (last_refinements, ...). A
     #: result can be materialised early -- _drain from timings(), a cache eviction, a slot
@@ -22,7 +22,6 @@ class Pending:
         self.ctx, self.fn, self.result, self.done = ctx, fn, None, False
         self.stats = None
         self.owner = owner
-        self.sparse_dev = getattr(fn, "sparse_dev", None)
 
     def __call__(self):
         if not self.done:
