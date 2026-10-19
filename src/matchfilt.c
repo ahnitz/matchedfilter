@@ -93,7 +93,7 @@ struct ap_mf_plan {
   /* Q15 coarse screen (ap_mf_q15_screen): int16 copies of the inputs, made on
      first use and invalidated by the setters. */
   int qw;                     /* int16 lanes per screen call; 0 until first use */
-  int qtail;                  /* retained backend supports N256 tail tiles */
+  int qtail;                  /* retained backend has tail tiles at this n */
   int16_t *qtr,*qti;          /* [group][n][qw] quantised templates, conjugated */
   float *qts;                 /* [nt] template scale: t_q = t * qts */
   unsigned char *qtok;        /* [nt] quantised copy current */
@@ -1661,7 +1661,7 @@ static __attribute__((noinline)) int q15_tail_group(ap_mf_plan *p, int d0, int f
                       size_t start, size_t end, const float *bl,
                       const int16_t *tr, const int16_t *ti,
                       unsigned char *pass, float *stat){
-  const size_t n=256;
+  const size_t n=p->n;
   const int qw=p->qw;                      /* 32 on AVX-512, 16 on AVX2 */
   const float EQ=(float)ap_q15_margin(n);
   int16_t lanethr[64], lanemax[64];
@@ -1725,7 +1725,7 @@ int ap_mf_q15_screen(ap_mf_plan *p,int d0,int nd,int t0,int nt,float threshold,
     }
     const int16_t *tr=p->qtr+(size_t)g*n*qw, *ti=p->qti+(size_t)g*n*qw;
     int first=d0;
-    /* An aligned tail of at most 3/4 of the lanes on the N256 screen runs as tiles that
+    /* An aligned tail of at most 3/4 of the lanes runs as tiles that
        repeat its templates for several blocks (q15_tail_group). A tile's blocks all
        share this call's window. Complete groups and leftover blocks retain the
        original broadcast path. */

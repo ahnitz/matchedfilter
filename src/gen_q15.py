@@ -178,7 +178,7 @@ def build_q(n, name, tw=False, prod=False, fused=True, maxout=False, max_interio
     if tile:
         body = re.sub(r"Q_LOADU\((t[ri]\+TS\*\d+)\)", r"q15_tile_template<T>(\1)", body)
         body = re.sub(r"Q_SET1\(dq\[(DS\*\d+(?:\+[12])?)\]\)",
-                      r"q15_tile_data<T>(dq+\1)", body)
+                      r"q15_tile_data<T, B>(dq+\1)", body)
     cdefs = "\n".join("  const vq %s=Q_SET1(%s);" % (v, k) for k, v in g.consts.items())
     if prod:
         args = ("const int16_t*restrict dq,const int16_t*restrict tr,const int16_t*restrict ti,"
@@ -195,7 +195,8 @@ def build_q(n, name, tw=False, prod=False, fused=True, maxout=False, max_interio
     zero = "  const vq Z=Q_ZERO();\n" if re.search(r"\bZ\b", body) else ""
     if maxout:
         zero += "  vq M0=mx[0], M1=mx[1];\n"
-    prefix = "template<int T>\n" if tile else ""
+    # tile: T templates per block, B int16 between consecutive blocks' data (3 N)
+    prefix = "template<int T, long B>\n" if tile else ""
     return prefix + ("static HWY_INLINE void %s(%s){\n%s%s\n%s\n}\n" % (name, args, zero, cdefs, body))
 
 
@@ -226,7 +227,8 @@ if __name__ == "__main__":
                                maxout=True, max_interior=(2, 14)))
     out.append("#endif")
     out.append("#if AP_Q15_TAIL")
-    out.append(build_q(16, "qsr16_prod_tile", prod=True, fused=False, tile=True))
+    for nn in (8, 16, 32):
+        out.append(build_q(nn, "qsr%d_prod_tile" % nn, prod=True, fused=False, tile=True))
     out.append("#endif")
     out += ["}  // namespace HWY_NAMESPACE", "}  // namespace ap",
             "HWY_AFTER_NAMESPACE();", "", "#endif", ""]

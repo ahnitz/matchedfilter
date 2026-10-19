@@ -131,9 +131,9 @@ int ap_q15_has_tile(const ap_plan *p);
 int ap_q15_screen(const ap_plan *p, const int16_t *dq, const int16_t *tr, const int16_t *ti,
                   size_t start, size_t end, const int16_t *lanethr, uint64_t *bits,
                   int16_t *lanemax, void *scratch);
-/* N256/32-lane tail only. dq has 32/T consecutive [256][3] blocks; tr/ti
-   retain stride 32 and contain at least T lanes from the selected offset.
-   Output lane b*T+l is data block b, template l. */
+/* A partial lane group's tile, at any N ap_q15_screen takes (ap_q15_has_tile). dq has QW/T
+   consecutive [N][3] blocks; tr/ti retain stride QW and contain at least T lanes from the
+   selected offset. Output lane b*T+l is data block b, template l. */
 int ap_q15_screen_tile(const ap_plan *p, int T, const int16_t *dq,
                        const int16_t *tr, const int16_t *ti, size_t start, size_t end,
                        const int16_t *lanethr, uint64_t *bits, int16_t *lanemax, void *scratch);
