@@ -1245,7 +1245,6 @@ class Context(Executor, InputUploads):
     @_autoreleased
     def _x_run(self, native, wait, binds=None, slot=None, pre=()):
         label, ops = native
-        label += "+forward" if pre else ""
         cmd = self._command_buffer()
         for nat, b in pre:                      # deferred work first, in the same buffer
             self._x_encode(cmd, nat[1], b or {})
@@ -1269,7 +1268,6 @@ class Context(Executor, InputUploads):
     @_autoreleased
     def _x_submit(self, native, binds, slot, pre=()):
         label, ops = native
-        label += "+forward" if pre else ""
         cmd = self._command_buffer()
         for nat, b in pre:
             self._x_encode(cmd, nat[1], b or {})

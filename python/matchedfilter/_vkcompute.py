@@ -1873,7 +1873,6 @@ class Context(Executor, InputUploads):
             batch.add(self, commands, fence)
             return
         if self._timing:
-            label += "+forward" if pre else ""
             begin, end = self._timestamp_pair(label)
             self._profile_submitted(commands)
             commands = [begin] + commands + [end]
