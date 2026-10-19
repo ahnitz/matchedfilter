@@ -438,8 +438,9 @@ def test_metal_sparse_readback_equals_dense(ctx, kind, level, gate):
 
 @metal
 def test_metal_follow_ups_across_allocations_are_one_submission(monkeypatch):
-    """Both detectors' rows (two device allocations) go out in one forward + item submission
-    (forward_rows), and every job equals its direct call."""
+    """Every template group's follow-ups, over both detectors' rows (two device allocations),
+    go out in one device follow-up submission (Executor.submit_followups), and every job
+    equals its direct call."""
     from matchedfilter import TimeDomainFilterBank
     monkeypatch.setenv("MF_AUTOTUNE", "0")
     monkeypatch.setenv("MF_SINGLE_DEVICE", "bank")
@@ -459,16 +460,16 @@ def test_metal_follow_ups_across_allocations_are_one_submission(monkeypatch):
         c0 = int(rng.integers(20000, S - 20000))
         jobs.append((bank, rows[k % 2][0], dict(windows=slice(c0 - 9000, c0 + 9100), binsize=61,
                                                 threshold=0.0, template_index=k % 12)))
-    ctxs = {id(g.get_flat_plan()._gpu): g.get_flat_plan()._gpu for g in bank._groups}
+    # Any context: the device's follow-up records belong to one owner (perhaps an earlier one).
+    cls = type(bank._groups[0].get_flat_plan()._gpu)
     commits = []
-    for c in ctxs.values():
-        real = c._commit
-        monkeypatch.setattr(c, "_commit", lambda cmd, label, real=real, **kw:
-                            (commits.append(label), real(cmd, label, **kw))[1])
+    real = cls._commit
+    monkeypatch.setattr(cls, "_commit", lambda self, cmd, label, **kw:
+                        (commits.append(label), real(self, cmd, label, **kw))[1])
     many = TimeDomainFilterBank.filter_series_many(jobs)
-    n_items = commits.count("items")
+    batch = list(commits)
     direct = [b.filter_series(x, **kw) for b, x, kw in jobs]
     for r1, r2 in zip(direct, many):
         for f in r1._fields:
             np.testing.assert_array_equal(getattr(r1, f), getattr(r2, f))
-    assert n_items == len(bank._groups)          # one per template group, not per detector
+    assert batch.count("followups") == 1 and "items" not in batch, batch

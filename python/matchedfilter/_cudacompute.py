@@ -1305,7 +1305,7 @@ class Context(Executor, InputUploads):
             self._enqueue(native, binds, stream)
         finally:
             self._in_run = False
-        self._close(tok, stream, native.label + ("+forward" if pre else ""))
+        self._close(tok, stream, native.label)
         return stream
 
     def _enqueue(self, native, binds, stream, graph=True):

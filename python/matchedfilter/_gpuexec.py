@@ -603,9 +603,10 @@ class Executor(HierOps):
     # ---- device timers ------------------------------------------------------------------
     def timings(self):
         """The timing log (MF_GPU_TIMING=1; _gputime), outstanding measurements settled: a
-        (label, device ms) per run of a recorded list -- its _x_list label, "+forward" when
-        deferred work ran first in it -- and with MF_GPU_PROFILE=1 also ("k:<phase or
-        kernel>", device ms) inside it (count those only once: they lie within the run's)."""
+        (label, device ms) per submission of a recorded list -- its _x_list label, the time
+        including work submitted ahead of it in the same submission -- and with
+        MF_GPU_PROFILE=1 also ("k:<phase or kernel>", device ms) inside it (count those only
+        once: they lie within the submission's)."""
         self._x_timings()
         return self.timing_log
 
