@@ -1419,35 +1419,38 @@ def measured_refine_blocks(n, chain):
 
 
 def q15_recheck_order(power, n, chain, thresholds, cost, window=None):
-    """Price moving the 256 float recheck behind 512, without changing any gate.
-
-    Restrict automatic use to the measured N2048 chain. The caller additionally
-    bounds the backend. Use unconditional 512 passes as an upper estimate of
-    recheck work: no independence assumption between gates or Q15 is needed.
-    This is a scheduling model, not a new rejection or dismissal model.
+    """Price moving the first tier's float recheck behind the second tier, without changing
+    any gate: the second tier then runs on the Q15 screen's survivors, and the recheck on
+    the second tier's. Use unconditional second-tier passes as an upper estimate of recheck
+    work: no independence assumption between gates or Q15 is needed. This is a scheduling
+    model, not a new rejection or dismissal model, and it holds for any chain with a second
+    tier, at any n, on any back end whose calibration measured the screen. (It was
+    restricted to n = 2048 with (256, 512, 1024) on AVX-512, the case first measured; the
+    n = 1024 chain (128, 256, 512) never got the ordering.)
     """
-    if int(n) != 2048 or tuple(chain) != (256, 512, 1024) or cost is None:
+    if cost is None or len(chain) < 2:
         return None
-    if 256 not in cost.screen or 512 not in cost._sparse:
+    b0, b1 = int(chain[0]), int(chain[1])
+    if b0 not in cost.screen or b1 not in cost._sparse:
         return None
     p = _norm_profile(power, n)
     bands = usable_bands(p, n)
     if not set(chain).issubset(bands):
         return None
     noise = noise_block_maxima(p, n, bands, window=window)
-    f0 = float((noise[:, bands.index(256)] >= thresholds[0]).mean())
-    f1 = float((noise[:, bands.index(512)] >= thresholds[1]).mean())
-    sq = cost.screen_reach(256, f0)
+    f0 = float((noise[:, bands.index(b0)] >= thresholds[0]).mean())
+    f1 = float((noise[:, bands.index(b1)] >= thresholds[1]).mean())
+    sq = cost.screen_reach(b0, f0)
     if sq is None or sq <= 0 or not np.isfinite(sq):
         return None
-    recheck = cost.screen[256]["recheck"]
-    ordinary = sq * recheck + f0 * cost.sparse(512, f0)
-    delayed = sq * cost.sparse(512, sq) + min(f1, sq) * recheck
+    recheck = cost.screen[b0]["recheck"]
+    ordinary = sq * recheck + f0 * cost.sparse(b1, f0)
+    delayed = sq * cost.sparse(b1, sq) + min(f1, sq) * recheck
     if not all(np.isfinite(x) and x > 0 for x in (recheck, ordinary, delayed)):
         return None
     return dict(late=delayed * (1.0 + TIE) < ordinary,
                 ordinary=float(ordinary), delayed=float(delayed),
-                q15_reach=float(sq), float256_reach=f0, float512_reach=f1)
+                q15_reach=float(sq), first_reach=f0, second_reach=f1)
 
 
 def _flop_cost(chain, reach, n):

@@ -335,7 +335,9 @@ int ap_hmf_set_q15(ap_hmf_plan *p,int on){
 }
 int ap_hmf_set_q15_recheck_late(ap_hmf_plan *p,int on){
   if(!p) return -1;
-  if(on && (p->ntiers<3 || p->tier[0].m!=256 || p->tier[1].m!=512)) return -1;
+  /* Any chain with a second tier: it runs on the screen's survivors before the float
+     recheck of the first, which then sees only what it kept. */
+  if(on && p->ntiers<2) return -1;
   p->q15_recheck_late=!!on;
   return 0;
 }

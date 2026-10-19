@@ -124,11 +124,43 @@ def test_reordered_direct_refine_keeps_last_gate_location():
         np.testing.assert_array_equal(got, want)
 
 
-def test_unsupported_order_is_rejected():
-    for chain in ([256], [256, 512], [128, 256, 512]):
+def test_a_single_tier_has_no_second_gate_to_move():
+    for chain in ([256], [512]):
         p = _core.HMF(N, 1, 1, chain, 1, N)
         assert not p.set_q15_recheck_late(True)
         assert p.set_q15_recheck_late(False)
+    for chain in ([256, 512], [128, 256, 512]):
+        assert _core.HMF(N, 1, 1, chain, 1, N).set_q15_recheck_late(True)
+
+
+@pytest.mark.parametrize('n,chain', [(1024, (128, 256, 512)), (1024, (128, 256)),
+                                     (2048, (256, 512)), (4096, (256, 512, 1024))])
+def test_late_recheck_keeps_every_peak_for_any_chain(n, chain):
+    """The second tier before the first tier's float recheck: the same pairs pass both,
+    so the same peaks come out, whatever the chain and block size."""
+    rng = np.random.default_rng(n + len(chain))
+    nt, nd = 40, 8
+    templates, data = noise(rng, (nt, n)), noise(rng, (nd, n))
+    thr = [3.4, 3.9, 4.4][:len(chain)]
+    results = []
+    for late in (False, True):
+        p = _core.HMF(n, nd, nt, list(chain), nd, n)
+        p.set_reference(np.ones(n, np.float32))
+        p.set_template_batch(0, templates)
+        p.set_data_batch(0, data)
+        if not p.set_q15(True):
+            pytest.skip('Q15 unavailable')
+        assert p.set_q15_recheck_late(late)
+        p.set_thresholds(thr)
+        lo, hi = 17, n - 31
+        shape = (nd, nt, 1)
+        idx, val = np.zeros(shape, np.int64), np.zeros(shape, np.complex64)
+        mag, cnt = np.zeros(shape, np.float32), np.zeros(shape[:2], np.int32)
+        p.run(0, nd, 0, nt, n, 0.0, lo, hi, idx, val, mag, cnt)
+        results.append((idx, val, mag, cnt))
+    assert (results[0][0] >= 0).sum() > 0, "the thresholds must let some pairs through"
+    for got, want in zip(results[1], results[0]):
+        np.testing.assert_array_equal(got, want)
 
 
 def test_order_model_retains_unprofitable_and_uncovered_paths(monkeypatch):
