@@ -57,3 +57,29 @@ def test_timestamps_read_in_flight_are_never_zero(monkeypatch):
     bad = [(label, ms) for label, ms in logged if not ms > 0]
     assert not bad, "%d of %d timestamp intervals were not real: %r" % (
         len(bad), len(logged), bad[:5])
+
+
+def test_a_context_timing_a_few_calls_records_a_few_timestamp_slots():
+    """Timing a call records only the ring slots used. The whole ring (512 command buffers)
+    was allocated in every context that ever timed one; the GPU cost calibration times a
+    call in each of dozens of contexts, and on an Iris Xe ANV ran out of command-buffer
+    memory (VK_ERROR_OUT_OF_DEVICE_MEMORY, or a crash in blorp while recording)."""
+    import matchedfilter as mf
+    from conftest import usable_gpu
+    dev = usable_gpu()
+    if dev is None:
+        pytest.skip("no usable GPU")
+    f = mf.MatchedFilter(2048, 1, 1, device=dev)
+    ctx = f._gpu
+    if not hasattr(ctx, "_timestamp_pair"):
+        pytest.skip("not a Vulkan context")
+    f.set_data(np.ones((1, 2048), np.complex64))
+    f.set_templates(np.ones((1, 2048), np.complex64))
+    ctx._timing = True
+    try:
+        for _ in range(3):
+            f.run()
+        assert len(ctx.timings()) == 3
+    finally:
+        ctx._timing = False
+    assert 0 < ctx._ts["made"] <= 3

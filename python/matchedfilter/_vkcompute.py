@@ -1683,6 +1683,27 @@ class Context(Executor, InputUploads):
 
     _TS_RING = 256
 
+    def _timestamp_slot(self, i):
+        """Record ring slot i: a reset and top-of-pipe timestamp, and a bottom-of-pipe one."""
+        vk, ts = self.vk, self._ts
+        pair = (_vp * 2)()
+        alloc = _CmdBufAlloc(40, None, self.command_pool, 0, 2)
+        _check(vk.vkAllocateCommandBuffers(self.device, ctypes.byref(alloc), pair),
+               "allocate timestamp buffers")
+        # As handles, not ints: indexing a c_void_p array yields a Python int, which ctypes
+        # passes to a function without argtypes as a 32-bit C int.
+        b, e = _vp(pair[0]), _vp(pair[1])
+        begin = _CmdBufBegin(42, None, 0, None)
+        _check(vk.vkBeginCommandBuffer(b, ctypes.byref(begin)), "begin timestamp")
+        vk.vkCmdResetQueryPool(b, ts["pool"], 2 * i, 2)
+        vk.vkCmdWriteTimestamp(b, 0x1, ts["pool"], 2 * i)            # TOP_OF_PIPE
+        _check(vk.vkEndCommandBuffer(b), "end timestamp")
+        _check(vk.vkBeginCommandBuffer(e, ctypes.byref(begin)), "begin timestamp")
+        vk.vkCmdWriteTimestamp(e, 0x2000, ts["pool"], 2 * i + 1)     # BOTTOM_OF_PIPE
+        _check(vk.vkEndCommandBuffer(e), "end timestamp")
+        ts["cmds"][2 * i], ts["cmds"][2 * i + 1] = pair[0], pair[1]
+        ts["made"] = i + 1
+
     def _timestamp_pair(self, label):
         """Two recorded command buffers bracketing a submission with timestamps."""
         vk = self.vk
@@ -1698,26 +1719,18 @@ class Context(Executor, InputUploads):
             pool = _vp()
             _check(vk.vkCreateQueryPool(self.device, ctypes.byref(info), None, ctypes.byref(pool)),
                    "vkCreateQueryPool")
-            cmds = (_vp * (2 * self._TS_RING))()
-            alloc = _CmdBufAlloc(40, None, self.command_pool, 0, 2 * self._TS_RING)
-            _check(vk.vkAllocateCommandBuffers(self.device, ctypes.byref(alloc), cmds),
-                   "allocate timestamp buffers")
-            for i in range(self._TS_RING):
-                # As handles, not ints: indexing a c_void_p array yields a Python int, which
-                # ctypes passes to a function without argtypes as a 32-bit C int.
-                b, e = _vp(cmds[2 * i]), _vp(cmds[2 * i + 1])
-                begin = _CmdBufBegin(42, None, 0, None)
-                _check(vk.vkBeginCommandBuffer(b, ctypes.byref(begin)), "begin timestamp")
-                vk.vkCmdResetQueryPool(b, pool, 2 * i, 2)
-                vk.vkCmdWriteTimestamp(b, 0x1, pool, 2 * i)            # TOP_OF_PIPE
-                _check(vk.vkEndCommandBuffer(b), "end timestamp")
-                _check(vk.vkBeginCommandBuffer(e, ctypes.byref(begin)), "begin timestamp")
-                vk.vkCmdWriteTimestamp(e, 0x2000, pool, 2 * i + 1)     # BOTTOM_OF_PIPE
-                _check(vk.vkEndCommandBuffer(e), "end timestamp")
-            self._ts = dict(pool=pool, cmds=cmds, next=0, pending={})
+            # A slot's two command buffers are recorded when it is first used: allocating the
+            # whole ring up front was 512 command buffers in every context that ever timed a
+            # call, and the GPU cost calibration times one in each of dozens -- on an Iris Xe
+            # ANV ran out of command-buffer memory (VK_ERROR_OUT_OF_DEVICE_MEMORY, and blorp
+            # crashing while recording).
+            self._ts = dict(pool=pool, cmds=(_vp * (2 * self._TS_RING))(), made=0, next=0,
+                            pending={})
         ts = self._ts
         i = ts["next"]
         ts["next"] = (i + 1) % self._TS_RING
+        if i >= ts["made"]:
+            self._timestamp_slot(i)
         if i in ts["pending"]:                 # the ring wrapped: settle that slot first
             self._timestamp_resolve(only=i)
         # The pair's queries are reset on the device when its command buffers run. Until
@@ -2269,8 +2282,9 @@ class Context(Executor, InputUploads):
             vk.vkDestroyQueryPool(self.device, self._prof["pool"], None)
             self._prof = None
         if self._ts is not None:
-            vk.vkFreeCommandBuffers(self.device, self.command_pool, 2 * self._TS_RING,
-                                    self._ts["cmds"])
+            if self._ts["made"]:
+                vk.vkFreeCommandBuffers(self.device, self.command_pool, 2 * self._ts["made"],
+                                        self._ts["cmds"])
             vk.vkDestroyQueryPool(self.device, self._ts["pool"], None)
             self._ts = None
         # The device, its pipelines and command pool are shared (_Device) and live as long
