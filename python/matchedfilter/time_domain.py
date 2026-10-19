@@ -1274,7 +1274,7 @@ def _host_copy(series, dtype):
 
 def _gpu_reads_real(gpu, n) -> bool:
     """Whether a GPU context's forward reads a real series at block length n."""
-    return gpu is not None and bool(getattr(gpu, 'real_series', False)) and n <= 65536
+    return gpu is not None and n <= 65536
 
 
 def _reads_real(plan) -> bool:
@@ -2565,14 +2565,12 @@ class TimeDomainFilterBank:
             return
         # A destination in device memory on this device (a caller's reused buffer) is
         # written in place: no workspace, no copy-out.
-        from ._shared import shared_buffer, shared_view
-        in_place = (shared_view(dest, cplan._gpu) if getattr(cplan._gpu, 'continuous_out_views', False)
-                    else shared_buffer(dest, cplan._gpu))
+        from ._shared import shared_view
+        in_place = shared_view(dest, cplan._gpu)
         if dest.flags.c_contiguous and in_place is not None:
             # A backend that zeroes on the device also finishes this work there
             # (zero_columns_done in _correlate_windows): leave it in flight meanwhile.
-            defer = getattr(cplan._gpu, 'defers_continuous', False)
-            cplan._continuous_gpu(ser, st, t0, nt, dest, **({'defer': True} if defer else {}))
+            cplan._continuous_gpu(ser, st, t0, nt, dest, defer=True)
             return
         shape = (nt, S)
         ws = getattr(g, '_corr_workspace', None)
@@ -2690,9 +2688,8 @@ class TimeDomainFilterBank:
         gpu = getattr(g.get_correlation_plan(), '_gpu', None) if W.shape[0] else None
         zero = getattr(gpu, 'zero_columns', None)
         if zero is not None:
-            from ._shared import shared_buffer, shared_view
-            held = (shared_view(dest, gpu, align=4) if getattr(gpu, 'continuous_out_views', False)
-                    else shared_buffer(dest, gpu))
+            from ._shared import shared_view
+            held = shared_view(dest, gpu, align=4)
             if held is None:
                 zero = None
         for a, b in zip(edges[::2], edges[1::2]):
@@ -2863,7 +2860,7 @@ class TimeDomainFilterBank:
             ok = True
         finally:
             for gpu in {id(x): x for x in settle}.values():
-                if ok and not wait and getattr(gpu, 'async_zero', False):
+                if ok and not wait:
                     gpu.zero_columns_done(wait=False)
                 else:
                     gpu.zero_columns_done()
@@ -3001,7 +2998,7 @@ class TimeDomainFilterBank:
         finally:
             # Scales are applied on the host below, so a scaled call finishes its work here.
             for gpu in {id(x): x for x in settle}.values():
-                if ok and not wait and scales is None and getattr(gpu, 'async_zero', False):
+                if ok and not wait and scales is None:
                     gpu.zero_columns_done(wait=False)
                 else:
                     gpu.zero_columns_done()

@@ -900,11 +900,10 @@ class _Device:
         # 32 KB and runs a 64 KB kernel regardless.
         props = (ctypes.c_ubyte * 2048)()
         vk.vkGetPhysicalDeviceProperties(self.physical, ctypes.byref(props))
-        # vendorID is the third uint32 in VkPhysicalDeviceProperties.
-        # Intel's native trig loses accuracy in repeated FFT rotations.
-        # A pipeline specialization selects accurate twiddles without adding
-        # a runtime branch or changing arithmetic on other vendors.
-        self._accurate_trig = ctypes.cast(props, ctypes.POINTER(_u32))[2] == 0x8086
+        # Whether native trig is accurate enough is measured when the first context attaches
+        # (Context._probe_trig); until then the probe's own pipelines use native trig.
+        self._accurate_trig = False
+        self.trig_probed = False
         # deviceName follows the five leading uint32s: it keys this device's measured choices.
         self.device_name = bytes(props[20:276]).split(b"\0")[0].decode("utf-8", "replace")
         self.max_shared_memory = int(ctypes.cast(
@@ -1247,6 +1246,11 @@ class Context(Executor, InputUploads):
         # recording, reported as ("k:<phase>", device_ms) in timing_log.
         self._profile = self._timing and os.environ.get("MF_GPU_PROFILE", "0") not in ("", "0")
         self._prof = None
+        dev = self._device_state
+        if not dev.trig_probed:            # the first context on the device, fully set up
+            dev.trig_probed = True
+            dev._accurate_trig = self._accurate_trig = self._probe_trig()
+            self.timing_log.clear()
 
     _SHARED = ("vk", "instance", "physical", "queue_family", "queues", "queue", "device",
                "_accurate_trig", "device_name", "max_shared_memory", "max_invocations", "max_dispatch_x",
@@ -1269,6 +1273,46 @@ class Context(Executor, InputUploads):
         for name in self._SHARED:
             setattr(self, name, getattr(dev, name))
         self._pipelines = dev.pipelines
+
+    #: The largest relative error a native-trig forward transform may have before every
+    #: pipeline is built with accurate twiddles (specialization constant 73). Measured
+    #: (n=4096): an Iris Xe 9.4e-5 (8.9e-4 at 65536), a Radeon 8060S 1.2e-6.
+    _TRIG_TOLERANCE = 1e-5
+
+    def _probe_trig(self):
+        """Whether this device needs accurate trig: a forward transform with its native
+        sin/cos, against NumPy's, once per device and process (MF_COST_FILE keeps it). The
+        pipelines built for the probe are dropped when the answer is yes."""
+        from . import gatechain
+        key = "trig|%s|k%s" % (self.device_name, gatechain.gpu_kernel_id("vulkan"))
+        held = gatechain.stored_choice(key)
+        if held is not None:
+            return bool(held)
+        before = set(self._pipelines)
+        n = 4096
+        rng = np.random.default_rng(73)
+        try:
+            series = self.empty_shared((2 * n,))
+            series[:] = (rng.standard_normal(2 * n)
+                         + 1j * rng.standard_normal(2 * n)).astype(np.complex64)
+            spec = self.empty_shared((2, n))
+            self.forward(n, series, np.array([0, n], np.uint32), spec)
+            ref = np.fft.fft(np.asarray(series, np.complex128).reshape(2, n), axis=1) / n
+            err = float(np.abs(spec - ref).max() / np.abs(ref).max())
+        except Exception as exc:           # cannot measure: the conservative choice
+            err = float("inf")
+            self._trig_probe_error = exc
+        finally:
+            self.clear_cache()
+        need = not err <= self._TRIG_TOLERANCE
+        if need:
+            for k in set(self._pipelines) - before:
+                pipe, layout, set_layout = self._pipelines.pop(k)
+                self.vk.vkDestroyPipeline(self.device, pipe, None)
+                self.vk.vkDestroyPipelineLayout(self.device, layout, None)
+                self.vk.vkDestroyDescriptorSetLayout(self.device, set_layout, None)
+        gatechain.store_choice(key, int(need), error=err)
+        return need
 
     def _get_fence(self, slot=0):
         if slot is None:
