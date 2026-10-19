@@ -15,8 +15,8 @@ def noise(rng, shape):
     return (rng.normal(size=shape) + 1j * rng.normal(size=shape)).astype(np.complex64)
 
 
-def native_plan(templates, group, late):
-    p = _core.HMF(N, 1, len(templates), list(CHAIN), group, N)
+def native_plan(templates, group, late, chain=CHAIN):
+    p = _core.HMF(N, 1, len(templates), list(chain), group, N)
     p.set_reference(np.ones(N, np.float32))
     p.set_template_batch(0, templates)
     assert p.set_q15_recheck_late(late)
@@ -100,10 +100,14 @@ def test_reordered_series_reuse_updates_and_counters(group, binsize, kind):
     assert saw_peaks
 
 
-def test_reordered_direct_refine_keeps_last_gate_location():
+@pytest.mark.parametrize("chain,thresholds", [(CHAIN, [4.1, 4.76, 5.48]), ((256, 512), [4.1, 5.48])])
+def test_reordered_direct_refine_keeps_last_gate_location(chain, thresholds):
+    """With the second gate run early (on the screen's survivors) the last tier still holds
+    each pair's coarse lag -- for a two-tier chain the early gate IS the last tier -- so the
+    direct refine runs in both orders and finds the same peaks."""
     from test_direct_refine import _bank
     n, taps, lengths, templates, series, layout, ref, _ = _bank(T=17, nblocks=16, nsig=8)
-    plans = [native_plan(templates, 3, late) for late in (False, True)]
+    plans = [native_plan(templates, 3, late, chain) for late in (False, True)]
     results = []
     for p in plans:
         p.set_reference(ref)
@@ -112,13 +116,14 @@ def test_reordered_direct_refine_keeps_last_gate_location():
         assert p.set_direct(True, 4)
         if not p.set_q15(True):
             pytest.skip('Q15 unavailable')
-        p.set_thresholds([4.1, 4.76, 5.48])
+        p.set_thresholds(thresholds)
         starts, lo, hi = (np.asarray(x, np.uintp) for x in layout)
         shape = (len(starts), len(templates), 1)
         idx, val = np.zeros(shape, np.int64), np.zeros(shape, np.complex64)
         mag, cnt = np.zeros(shape, np.float32), np.zeros(shape[:2], np.int32)
         p.run_series(series, starts, lo, hi, 0, len(templates), n, 6., idx, val, mag, cnt)
         results.append((idx, val, mag, cnt))
+        assert p.direct_stats()["pairs"] > 0, p.direct_stats()
     assert results[0][-1].sum() > 0
     for got, want in zip(results[1], results[0]):
         np.testing.assert_array_equal(got, want)
