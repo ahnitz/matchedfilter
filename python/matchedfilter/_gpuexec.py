@@ -37,6 +37,11 @@ Driver primitives (a Context provides each):
                             a device buffer the context owns (write(array), read_into(out),
                             destroy(), nbytes). readback: the host reads it; upload: the host
                             writes it before every run, through _x_upload.
+  _x_section(buf, offset, nbytes)
+                            a view of bytes [offset, offset + nbytes) of an _x_alloc buffer,
+                            bound, filled, updated and counted like a buffer (offset: a
+                            multiple of storage_offset_alignment). A record's small words
+                            share one buffer, so they move in one copy each way.
   _x_upload(buf, array, slot)
                             write an upload buffer, ordered before the next work on `slot`.
   _x_list(label, once=False)
@@ -183,6 +188,19 @@ class Measured:
             self.current = min(self.ways, key=lambda w: float(np.median(self.times[w][1:])))
 
 
+class _Records(dict):
+    """The executor's records, counting every one built (Executor.built)."""
+    __slots__ = ("built",)
+
+    def __init__(self):
+        super().__init__()
+        self.built = 0
+
+    def __setitem__(self, key, rec):
+        self.built += 1
+        super().__setitem__(key, rec)
+
+
 class Executor(HierOps):
     """The operations every GPU backend runs, written once. See the module docstring for
     the driver primitives a backend supplies."""
@@ -200,8 +218,14 @@ class Executor(HierOps):
     def _exec_table(self):
         table = self.__dict__.get("_exec_records")
         if table is None:
-            table = self._exec_records = {}
+            table = self._exec_records = _Records()
         return table
+
+    def built(self):
+        """How many recordings this context has built (records, and a driver's own, e.g.
+        CUDA graphs): a call that built one ran setup, not steady-state work, and a timing
+        that is to stand for steady state (a block-size trial) leaves it out."""
+        return self._exec_table().built + self.__dict__.get("_x_built", 0)
 
     def _exec_buffer(self, rec, name, view=None, nbytes=0, readback=False, upload=False):
         """Bind `view` -- an array's place in device memory (a caller's shared allocation, or

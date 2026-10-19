@@ -127,6 +127,10 @@ class Driver(Executor, InputUploads):
     def _x_free(buf):
         buf.destroy()
 
+    @staticmethod
+    def _x_section(buf, offset, nbytes):
+        return ("section", buf, offset, nbytes)
+
     def _x_idle(self):
         self.__dict__["idles"] = self.__dict__.get("idles", 0) + 1
 
