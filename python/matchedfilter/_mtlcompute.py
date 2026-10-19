@@ -59,7 +59,7 @@ _MAX_BINS = MAX_BINS          # _gpuhost.MAX_BINS: one limit for every backend
 from ._errors import UnsupportedSize      # noqa: F401  (re-export)
 from . import _gputime
 from ._gpu_cache import InputUploads
-from ._gpuexec import Arg, Executor
+from ._gpuexec import Arg, Executor, settle as _settle
 
 
 #: Points per thread, which is also how many threads carry a transform:
@@ -399,12 +399,12 @@ class _Device:
                 self.handle, b"maxThreadgroupMemoryLength", restype=ctypes.c_ulong))
         self.pipelines = {}
         self.pipeline_names = {}
-        #: Contexts holding writes left in flight by zero_columns_done(wait=False). Each
-        #: signals its own MTLSharedEvent after them (one event per queue: a shared one
-        #: could be set back by a later, lower signal from another queue). Contexts have
-        #: their own queues, so another context's command buffer waits on those events on
-        #: the GPU (Context._new_cmd) -- no host wait between the stages.
-        self.pending_contexts = []
+        #: Writes left in flight (a run with wait=False; Executor._writes), as _Write tokens.
+        #: Each context signals its own MTLSharedEvent after them (one event per queue: a
+        #: shared one could be set back by a later, lower signal from another queue).
+        #: Contexts have their own queues, so another context's command buffer waits on
+        #: those events on the GPU (Context._new_cmd) -- no host wait between the stages.
+        self.pending_writes = []
         #: A _FusedBatch while filter_series_many is collecting (fused()), else None.
         self.collector = None
 
@@ -447,7 +447,7 @@ class _FusedBatch:
             self.cmd = o.call(self.dev.batch_queue, b"commandBuffer")
             o.call(self.cmd, b"retain")
             self.waited = {}
-        for c in self.dev.pending_contexts:
+        for c in _writers(self.dev):
             # Writes another context left in flight: ordered here, between encoders, as
             # _new_cmd orders a fresh buffer.
             if self.waited.get(id(c), 0) < c._signal_value:
@@ -507,8 +507,28 @@ def fused():
 def settle_all():
     """Wait for every write left in flight on any Metal device (a host read follows)."""
     for dev in _DEVICES.values():
-        if dev.pending_contexts:
-            dev.pending_contexts[0].settle_writes()
+        _settle(dev.pending_writes)
+
+
+class _Write:
+    """A write left in flight (Executor._writes): a command buffer of `ctx` that signals
+    its event. Settling waits for everything that context has in flight and releases the
+    host memory those commands read in place."""
+    __slots__ = ("ctx",)
+
+    def __init__(self, ctx):
+        self.ctx = ctx
+
+    def settle(self):
+        try:
+            self.ctx._drain()
+        finally:
+            self.ctx._keep_until_done.clear()
+
+
+def _writers(dev):
+    """The contexts with writes left in flight on `dev`, once each."""
+    return list({id(w.ctx): w.ctx for w in dev.pending_writes}.values())
 
 
 def _device(index):
@@ -547,10 +567,11 @@ class _MtlList:
         self.ops.append((kernel, ("indirect", count), list(buffers), offsets,
                          flat + [int(max_groups)]))
 
-    def fill(self, buf, word):
+    def fill(self, buf, word, offset=0, nbytes=None, rows=1, pitch=0):
         if word not in (0, 0xFFFFFFFF):
             raise ValueError("a fill is a byte pattern: 0 or 0xFFFFFFFF")
-        self.ops.append(("fill", buf, 0xFF if word else 0))
+        self.ops.append(("fill", buf, 0xFF if word else 0, offset,
+                         buf.nbytes - offset if nbytes is None else nbytes, rows, pitch))
 
     def update(self, buf, words):
         # Shared storage: written by the host as the run is encoded. A record's earlier run
@@ -904,10 +925,8 @@ class Context(Executor, InputUploads):
             if t1 > t0 > 0:
                 _gputime.INTERVALS.append((float(t0), float(t1)))
 
-    def timings(self):
-        """Finish outstanding command buffers and return the timing log (MF_GPU_TIMING=1)."""
+    def _x_timings(self):
         self._drain()
-        return self.timing_log
 
     def _new_cmd(self, shared_ok=True):
         """A new (autoreleased) command buffer on this context's queue, ordered on the GPU
@@ -919,7 +938,7 @@ class Context(Executor, InputUploads):
         if batch is not None:
             return batch.acquire(self)
         cmd = self.o.call(self.queue, b"commandBuffer")
-        for c in (dev.pending_contexts if dev is not None else ()):
+        for c in (_writers(dev) if dev is not None else ()):
             if c is not self:
                 self.o.call(cmd, b"encodeWaitForEvent:value:", restype=None,
                             args=(c._signal_event, c._signal_value),
@@ -1044,90 +1063,6 @@ class Context(Executor, InputUploads):
             return _Allocation(_HostBuffer(self, array))
         except MetalError:
             return None
-
-
-
-
-    def zero_columns(self, dest, a, b):
-        """Zero dest[:, a:b] of a device-shared 2-D array on the device (enqueued after
-        whatever this context has submitted that writes it: tracked buffers order them).
-
-        Call zero_columns_done() after the last one: it commits and waits, for these and
-        for every command still in flight on this context."""
-        sb = shared_buffer(dest, self)
-        if sb is None or dest.ndim != 2 or b <= a or not dest.flags.c_contiguous:
-            raise ValueError("zero_columns needs a device-shared 2-D array and a nonempty range")
-        o = self.o
-        if getattr(self, "_zero_enc", None) is None:
-            with o.autorelease_pool():
-                cmd = self._new_cmd(shared_ok=False)   # its encoder stays open across calls
-                o.call(cmd, b"retain")
-                enc = o.call(cmd, b"blitCommandEncoder")
-                o.call(enc, b"retain")          # outlives this pool until zero_columns_done
-            self._zero_cmd, self._zero_enc = cmd, enc
-        row = dest.strides[0]
-        base = getattr(sb, "offset", 0) + a * dest.itemsize
-        length = (b - a) * dest.itemsize
-        fill = o.send(None, (ctypes.c_void_p, _NSRange, ctypes.c_ubyte))
-        sel = o.sel(b"fillBuffer:range:value:")
-        for r in range(dest.shape[0]):
-            fill(self._zero_enc, sel, sb.handle, _NSRange(base + r * row, length), 0)
-
-    def zero_columns_done(self, wait=True):
-        """Commit the collected zeroing and wait for it and every command still in flight on
-        this context -- or, wait=False, leave them in flight: the zeroing then signals this
-        context's event, which other contexts' command buffers wait on (_new_cmd), and
-        settle_writes() waits on the host."""
-        enc = getattr(self, "_zero_enc", None)
-        dev = getattr(self, "_device_state", None)
-        if not wait and dev is not None:
-            if enc is None:
-                with self.o.autorelease_pool():
-                    cmd = self._new_cmd(shared_ok=False)
-                    self.o.call(cmd, b"retain")
-                self._zero_cmd = cmd
-            else:
-                self._zero_enc = None
-                self.o.call(enc, b"endEncoding", restype=None)
-                self.o.call(enc, b"release", restype=None)
-            if getattr(self, "_signal_event", None) is None:
-                self._signal_event = self.o.call(self.device, b"newSharedEvent")
-                self._signal_value = 0
-            self._signal_value += 1
-            self.o.call(self._zero_cmd, b"encodeSignalEvent:value:", restype=None,
-                        args=(self._signal_event, self._signal_value),
-                        argtypes=(ctypes.c_void_p, ctypes.c_uint64))
-            self._cmd_prefix = ""
-            self._commit(self._zero_cmd, "zero", async_submit=True)
-            if self not in dev.pending_contexts:
-                dev.pending_contexts.append(self)
-            return
-        try:
-            if enc is not None:
-                self._zero_enc = None
-                self.o.call(enc, b"endEncoding", restype=None)
-                self.o.call(enc, b"release", restype=None)
-                self._cmd_prefix = ""
-                self._commit(self._zero_cmd, "zero")
-            self._drain()
-        finally:
-            self._keep_until_done.clear()
-        self.settle_writes()
-
-    def settle_writes(self):
-        """Wait for every write left in flight on this device (zero_columns_done(wait=False)),
-        and release the host memory those commands read in place."""
-        dev = getattr(self, "_device_state", None)
-        if dev is None:
-            self._drain()
-            return
-        ctxs, dev.pending_contexts = dev.pending_contexts, []
-        for ctx in ctxs:
-            try:
-                ctx._drain()
-            finally:
-                ctx._keep_until_done.clear()
-
 
     # ---- driver primitives (_gpuexec) -----------------------------------------------------
     #: The most threadgroups one dispatch takes, and the byte alignment of a bound view
@@ -1265,11 +1200,13 @@ class Context(Executor, InputUploads):
                 if enc is not None:
                     self.o.call(enc, b'endEncoding', restype=None)
                     enc = None
+                _, buf, byte, offset, nbytes, rows, pitch = op
+                base = getattr(buf, "offset", 0) + offset
                 blit = self.o.call(cmd, b'blitCommandEncoder')
-                self.o.call(blit, b'fillBuffer:range:value:', restype=None,
-                            args=(op[1].handle, _NSRange(getattr(op[1], "offset", 0),
-                                                         op[1].nbytes), op[2]),
-                            argtypes=(ctypes.c_void_p, _NSRange, ctypes.c_uint8))
+                fill = self.o.send(None, (ctypes.c_void_p, _NSRange, ctypes.c_ubyte))
+                sel = self.o.sel(b"fillBuffer:range:value:")
+                for r in range(rows):
+                    fill(blit, sel, buf.handle, _NSRange(base + r * pitch, nbytes), byte)
                 self.o.call(blit, b'endEncoding', restype=None)
                 continue
             if enc is None:
@@ -1300,6 +1237,7 @@ class Context(Executor, InputUploads):
     @_autoreleased
     def _x_run(self, native, wait, binds=None, slot=None, pre=()):
         label, ops = native
+        label += "+forward" if pre else ""
         cmd = self._command_buffer()
         for nat, b in pre:                      # deferred work first, in the same buffer
             self._x_encode(cmd, nat[1], b or {})
@@ -1318,12 +1256,12 @@ class Context(Executor, InputUploads):
                     args=(self._signal_event, self._signal_value),
                     argtypes=(ctypes.c_void_p, ctypes.c_uint64))
         self._commit(cmd, label, async_submit=True)
-        if self not in dev.pending_contexts:
-            dev.pending_contexts.append(self)
+        self._writes().append(_Write(self))
 
     @_autoreleased
     def _x_submit(self, native, binds, slot, pre=()):
         label, ops = native
+        label += "+forward" if pre else ""
         cmd = self._command_buffer()
         for nat, b in pre:
             self._x_encode(cmd, nat[1], b or {})
@@ -1344,9 +1282,9 @@ class Context(Executor, InputUploads):
     def _x_release(native, done=False):
         pass                        # nothing recorded: every run encodes afresh
 
-    @staticmethod
-    def _x_idle():
-        pass                        # a command buffer retains the buffers it encodes
+    def _x_idle(self):
+        self._drain()
+        self._keep_until_done.clear()   # the host memory those commands read in place
 
     @staticmethod
     def _x_free(buf):
@@ -1407,7 +1345,7 @@ class Context(Executor, InputUploads):
             return
         self.cancel_forward()
         dev = getattr(self, "_device_state", None)
-        if dev is not None and self in dev.pending_contexts:
+        if dev is not None and any(w.ctx is self for w in dev.pending_writes):
             self.settle_writes()
         self.clear_cache()
         if getattr(self, "_signal_event", None) is not None:

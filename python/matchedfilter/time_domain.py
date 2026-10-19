@@ -2881,8 +2881,7 @@ class TimeDomainFilterBank:
 
         Two staging buffers alternate per call. Each remembers, per device, the write its
         call left in flight (_staging_done): rewriting it waits for exactly that call (two
-        back), not for every write on the device. A backend without settle_until settles
-        all its writes, as before."""
+        back), not for every write on the device."""
         from ._shared import shared_buffer
         gpus = []
         for g in self._groups:
@@ -2897,21 +2896,14 @@ class TimeDomainFilterBank:
                 else shared_buffer(ser, gpu)) is not None for gpu in gpus):
             return ser                       # read in place (a real series by its layout)
         devs = {id(x): x for x in gpus}.values()
-        double = all(hasattr(g, 'settle_until') and hasattr(g, 'write_token') for g in devs)
         bufs = self.__dict__.setdefault('_ser_stagings', [])
-        k = self.__dict__.get('_ser_staging_next', 0) % (2 if double else 1)
+        k = self.__dict__.get('_ser_staging_next', 0) % 2
         self._ser_staging_next = k + 1
         while len(bufs) <= k:
             bufs.append([None, []])
         slot = bufs[k]
-        if double:
-            for gpu, token in slot[1]:
-                gpu.settle_until(token)      # the call that read this buffer has finished
-        else:
-            for gpu in devs:
-                settle = getattr(gpu, 'settle_writes', None)
-                if settle is not None:
-                    settle()                 # a call left in flight may still read it
+        for gpu, token in slot[1]:
+            gpu.settle_until(token)          # the call that read this buffer has finished
         slot[1] = []
         staged = slot[0]
         if staged is None or staged.shape != ser.shape or staged.dtype != ser.dtype or any(
@@ -2932,7 +2924,7 @@ class TimeDomainFilterBank:
             return
         devs = {id(g.get_correlation_plan()._gpu): g.get_correlation_plan()._gpu
                 for g in self._groups}.values()
-        slot[1] = [(gpu, gpu.write_token()) for gpu in devs if hasattr(gpu, 'write_token')]
+        slot[1] = [(gpu, gpu.write_token()) for gpu in devs]
 
     @staticmethod
     def _fill_staging(staged, ser):
