@@ -1160,12 +1160,15 @@ class Executor(HierOps):
         table = self._exec_table()
         rec = table.get(key)
         if rec is None:
-            self._exec_room(cap * n * 8 + cap * nbins * 12)
+            self._exec_room(cap * n * 8 + cap * nbins * 12 + align)
             rec = Record()
             tab = self._exec_buffer(rec, "tab", nbytes=at, upload=True)
             spec = self._exec_buffer(rec, "spec", nbytes=cap * n * 8)
-            bi = self._exec_buffer(rec, "idx", nbytes=cap * nbins * 4, readback=True)
-            bv = self._exec_buffer(rec, "val", nbytes=cap * nbins * 8, readback=True)
+            # Peak values, then indices, in one buffer: one readback.
+            vbytes = -(-cap * nbins * 8 // align) * align
+            out = self._exec_buffer(rec, "out", nbytes=vbytes + cap * nbins * 4, readback=True)
+            bv = rec.buffers["val"] = self._x_section(out, 0, cap * nbins * 8)
+            bi = rec.buffers["idx"] = self._x_section(out, vbytes, cap * nbins * 4)
             rows, ent, ids, args = (self._x_section(tab, o, b) for o, b in
                                     zip(offs, (4 * cap, 20 * cap, 4 * cap, 16)))
             lst = self._x_list("followups")
@@ -1176,8 +1179,7 @@ class Executor(HierOps):
             lst.listed(self._x_kernel("items", n), args, cap,
                        [spec, Arg("tmpl"), bi, bv, ent, args], (Arg("items", 5),))
             lst.barrier()
-            lst.readback(bi, cap * nbins * 4)
-            lst.readback(bv, cap * nbins * 8)
+            lst.readback(out, vbytes + cap * nbins * 4)
             rec.native = lst.end()
             table[key] = rec
         self._cache_touch("exec", key)
