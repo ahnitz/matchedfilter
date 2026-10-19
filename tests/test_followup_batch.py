@@ -125,3 +125,44 @@ def test_device_followups_read_a_real_series_in_place(device, layout, monkeypatc
         want = b.filter_series(np.array(x), **kw)
         for f in want._fields:
             np.testing.assert_array_equal(getattr(want, f), getattr(r, f))
+
+
+@pytest.mark.parametrize("device", _device_followup_backends() or ["none"])
+def test_batched_follow_ups_choose_their_device_by_batch(device, monkeypatch, tmp_path):
+    """With autotuning, where a batch's single-template jobs run is measured per batch: the
+    first batches alternate between the device (batched follow-ups) and per-call CPU plans,
+    and one side is kept. The per-call choice times a lone call, which a batch never makes,
+    and consulted a shape it never recorded, so it kept every batch off the device."""
+    if device == "none":
+        pytest.skip("no GPU backend")
+    from matchedfilter import time_domain as td
+    rng, banks = _banks(monkeypatch, device, nbanks=1, seed=97)
+    monkeypatch.setenv("MF_AUTOTUNE", "1")
+    monkeypatch.delenv("MF_SINGLE_DEVICE", raising=False)
+    monkeypatch.setenv("MF_COST_FILE", str(tmp_path / "costs.json"))
+    monkeypatch.setattr(td, "_BATCH_CHOICE", {})
+    bank = banks[0]
+    S = 1 << 17
+    rows = bank.empty_shared((2, S))
+    for r in rows:
+        r[:] = (rng.standard_normal(S) + 1j * rng.standard_normal(S)).astype(np.complex64)
+    sides = []
+    orig = TimeDomainFilterBank._batch_device
+    monkeypatch.setattr(TimeDomainFilterBank, "_batch_device",
+                        lambda self: (lambda r: sides.append(r[0]) or r)(orig(self)))
+    for _ in range(2 * td._SINGLE_TRIALS + 2):
+        jobs = []
+        for k in range(6):
+            c0 = int(rng.integers(20000, S - 20000))
+            jobs.append((bank, rows[k % 2], dict(windows=slice(c0 - 3000, c0 + 3100),
+                                                 binsize=61, threshold=0.0,
+                                                 template_index=int(rng.integers(0, 33)))))
+        got = TimeDomainFilterBank.filter_series_many(jobs)
+        for (b, x, kw), r in zip(jobs, got):
+            want = b.filter_series(x, **kw)
+            np.testing.assert_array_equal(want.sample_indices, r.sample_indices)
+            np.testing.assert_allclose(r.snr, want.snr, rtol=1e-4,
+                                       atol=1e-4 * np.abs(want.snr).max())
+    trial = td._BATCH_CHOICE[(str(bank.device),)]
+    assert sides[:4] == ["gpu", "cpu", "gpu", "cpu"], sides
+    assert trial["winner"] in ("gpu", "cpu") and len(trial["gpu"]) >= td._SINGLE_TRIALS
