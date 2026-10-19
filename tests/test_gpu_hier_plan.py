@@ -98,6 +98,9 @@ class Driver(Executor, InputUploads):
     def _coarse_layout(self, band):
         return (32, 2, 1, False)
 
+    def _gate_way(self, band):
+        return "gate"
+
     def _x_alloc(self, nbytes, readback=False, upload=False):
         return _Buf(nbytes)
 

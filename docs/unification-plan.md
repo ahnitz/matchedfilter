@@ -680,3 +680,48 @@ main only when everything is done, gated and benchmarked.
     placed as a call places them (unplaced, a loud burst left fp16's range on dev4).
   - gatechain: the band forward and the fp16 gate kind are a GPU's (device kind), not a
     backend list; a CPU device's backend name (AVX3) had been taken for a GPU's.
+- 2026-10-19: merged to main as a57c884a (U1a + U2.5-2.7, capabilities on the executor, the
+  Vulkan trig probe); CI green.
+- 2026-10-19: **U2.9, U3, device follow-ups, U5 (on unify).**
+  - zero_columns, writes in flight and device timers are the executor's. Zeroing is a list
+    fill over rows (one 2-D memset on CUDA, per-row fills on Vulkan and Metal), kept as a
+    record. A write in flight is a driver token on the device's list; settle_writes,
+    write_token and settle_until are shared, so CUDA and Metal double-buffer the staged series
+    and continuous workspaces as Vulkan did. timings(): one (list label, device ms) per
+    submission everywhere, per-kernel or per-phase "k:" entries only with MF_GPU_PROFILE; CUDA
+    timing keeps graphs on, so calibrations time the production dispatch.
+  - Vulkan kept recordings use SIMULTANEOUS_USE (a run left in flight may be resubmitted
+    before it finishes), and a run without a slot is left in flight on its own fence instead
+    of waited at submission.
+  - U3: the universal capability flags are deleted; filter_series_many opens fused batches
+    through _gpuexec.fused() (drivers register), with no module-name list.
+  - Device follow-ups are written once (Executor.submit_followups): per group a listed
+    forward and refineItems, records per shape and place in the batch, one owner context per
+    device, one readback per group. Metal gains them (items_<n>.metal); a real series is read
+    in place (the old paths took float offsets as complex samples). 64-job batch, forced to
+    the device: M2 10.9 -> 4.5 ms; L40S 3.89 -> 3.90 ms (parity).
+  - The per-call single-template trial kept every follow-up batch off the device: the batch
+    path consulted a one-block shape filter_series never records, so with autotuning no batch
+    ever ran batched. _batch_device measures the batched device path against per-call CPU
+    plans per batch. Auto mode: M2 29.9 -> 4.5 ms, L40S 35-38 -> 5.5 ms.
+  - U5: drivers own their peak models (_x_peaks); _roofline had reported Vulkan's fp16
+    coarse tier as fp32 (a module function Vulkan never had). Dead code from the old hosts
+    deleted; the audit tools read the executor's records.
+- 2026-10-19: **U4 kernel knobs, first one, and the tensor-core gate.**
+  - The gate-only report of a later gate tier (tierb.slang gateOnly: the window's maximum,
+    no election) was Metal-only. It is compiled for every target; the host asks for it per
+    device and band by measurement (HierOps._gate_way, stored). Per pair: 8060S gate 10-13%
+    faster, M2 12-18% faster, L40S within 1% (either way); RENOIR tier 1 0.66 -> 0.30 ms a
+    call. Both ways give identical peaks (tests/test_gate_way.py forces each).
+  - The CUDA tensor-core gate stays CUDA's, as a candidate: it loses by 25-40% on the L40S,
+    whose tensor units run 4x its packed-fp16 rate (the matrix DFT issues 5-9x the flops).
+    The 8060S's WMMA gives 2x and the M2's simdgroup matrices run on its ordinary ALUs, so
+    a cooperative-matrix port could only lose there. The hardware property that decides it is
+    that ratio, and no device we have exceeds the L40S's.
+  - Fused batches, measured (pinned chain, interleaved rounds): RENOIR fused 24.4 against
+    unfused 24.6 M (none); M2 3.19e7 against 2.74e7 (+16%, the Metal collector).
+  - The other Metal-only kernel code is hardware-bound, not an optimization to spread:
+    SIMD-scoped exchange barriers live in the SPLIT_STAGE builds, which exist because Apple
+    caps threadgroup memory at 32 KB (n = 8192), a build no other target needs; the integer
+    fail-open tests stand in for IEEE comparisons Metal's fast math does not keep.
+    peakTwoGate (tiled gates' pass without election) is compiled for every target already.
