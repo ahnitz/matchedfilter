@@ -576,23 +576,9 @@ class Context(Executor, InputUploads):
     """A queue and dispatch caches on one process-wide Metal device (see _Device)."""
 
     max_grouped_bins = _MAX_BINS
-    #: peaks_grouped takes nbins: window groups may give different bin counts.
-    supports_ragged_bins = True
-    #: peaks, peaks_grouped and hier_peaks take sparse=True and return a _SparsePeaks;
-    #: hier_peaks reads back only its refined pairs and skips the output fill.
-    supports_sparse = True
-    #: forward takes rows=(r0, count) (MatchedFilter._items_gpu: both detectors' series
-    #: in one workspace and one submission).
-    forward_rows = True
-    #: forward takes real=(lane, stride, length): a real series read in place, not widened.
-    real_series = True
     #: shared_buffer() may hand back a view inside an allocation (one row of a device-
     #: resident middle output); every binding adds its offset.
     shared_views = True
-    #: Commits return without waiting when asked (async_submit with a slot):
-    #: the series loop keeps several batches in flight. Declared, so callers
-    #: test a capability instead of probing signatures for a TypeError.
-    supports_async = True
     _timing = False
 
     def __init__(self, index=0):
@@ -1059,15 +1045,8 @@ class Context(Executor, InputUploads):
         except MetalError:
             return None
 
-    #: peaks_items takes async_submit (MatchedFilter._items_gpu(wait=False)).
-    items_async = True
 
 
-    #: _continuous_gpu may leave its last batch in flight: zero_columns_done finishes it.
-    defers_continuous = True
-    #: A grouped flat call may stay in flight (filter_series_many): peaks_grouped keys its
-    #: buffers by slot when asked to submit asynchronously.
-    defers_grouped = True
 
     def zero_columns(self, dest, a, b):
         """Zero dest[:, a:b] of a device-shared 2-D array on the device (enqueued after
@@ -1149,8 +1128,6 @@ class Context(Executor, InputUploads):
             finally:
                 ctx._keep_until_done.clear()
 
-    #: zero_columns_done(wait=False) leaves the zeroing and the middle stage in flight.
-    async_zero = True
 
     # ---- driver primitives (_gpuexec) -----------------------------------------------------
     #: The most threadgroups one dispatch takes, and the byte alignment of a bound view

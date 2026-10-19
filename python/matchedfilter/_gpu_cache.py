@@ -162,10 +162,14 @@ class InputUploads:
         the budget bounds retained work. Incoming shared buffers stay counted even if their
         last old record is evicted while making room."""
         order = getattr(self, '_cache_order', {})
+        hold = self.__dict__.get('_exec_hold', ())     # records a running call still binds
         while order:
             if (len(order) < self.cache_limit_entries
                     and self._cache_bytes(incoming) + estimate <= self.cache_limit_bytes):
                 break
-            kind, key = next(iter(order))
+            token = next((t for t in order if t[1] not in hold), None)
+            if token is None:
+                break
+            kind, key = token
             order.pop((kind, key))
             self._evict_record(kind, key, keep_storage)

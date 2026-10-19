@@ -741,24 +741,11 @@ class Context(Executor, InputUploads):
     """One NVIDIA CUDA device context, stream, and loaded PTX pipelines."""
 
     max_grouped_bins = _MAX_BINS
-    # Results may come back sparse (see _tail); the series path asks with sparse=True.
-    supports_sparse = True
-    # hier_peaks_grouped runs per-row windows (each block's own [lo, hi)) under one record of
-    # the largest bin count (MatchedFilter._run_series_ragged).
-    supports_ragged_hier = True
-    # Follow-ups: peaks_items(async_submit=True) returns a collector; forward takes rows=.
-    items_async = True
-    forward_rows = True
-    #: forward takes real=(lane, stride, length): a real series read in place, not widened.
-    real_series = True
     cache_limit_bytes = 1024 * 1024 * 1024
     # Unified addressing: a view inside a shared allocation is a device pointer.
     shared_views = True
     # Device memory is separate from host memory (residency matters for pricing).
     discrete = True
-    # forward/peaks/peaks_grouped/hier_peaks(_grouped) take slot= and async_submit=:
-    # a slot maps to one of 4 streams, and its readback callable syncs that stream only.
-    supports_async = True
 
     @property
     def timing(self):
@@ -1458,10 +1445,6 @@ class Context(Executor, InputUploads):
                 keep.append(e)
         pend[:] = keep
 
-    #: correlate_continuous(async_submit=True) leaves an in-place write in flight.
-    defers_continuous = True
-    #: zero_columns_done(wait=False) leaves the zeroing in flight.
-    async_zero = True
 
     # ---- hierarchical ---------------------------------------------------------------
 

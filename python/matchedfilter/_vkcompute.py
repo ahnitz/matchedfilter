@@ -1215,24 +1215,6 @@ class Context(Executor, InputUploads):
     under the shared GPU executor (_gpuexec)."""
 
     max_grouped_bins = _MAX_BINS
-    #: Async submission with per-slot fences: the series loop keeps several
-    #: batches in flight. A declared capability, not a signature probe.
-    supports_async = True
-    #: hier_peaks/forward take handle_out, and hier_replay/forward_replay resubmit them.
-    supports_replay = True
-    #: hier_peaks_grouped takes groups of different bin counts (nbins = the largest; per-row
-    #: windows bound each block), so a hierarchical plan's ragged call is one submission.
-    supports_ragged_hier = True
-    #: peaks, peaks_grouped and hier_peaks take sparse=True and return a _SparsePeaks;
-    #: hier_peaks reads only its refined pairs (the survivor list) back.
-    supports_sparse = True
-    #: correlate_continuous writes into rows of a caller's shared output, at an offset.
-    continuous_out_views = True
-    #: peaks_items(async_submit=True) returns a collector; forward takes rows=(r0, count).
-    items_async = True
-    forward_rows = True
-    #: forward takes real=(lane, stride, length): a real series read in place, not widened.
-    real_series = True
 
     def __init__(self, index=0):
         vk, err = _vulkan._load()
@@ -2231,11 +2213,6 @@ class Context(Executor, InputUploads):
             if fence is token:
                 break
 
-    #: correlate_continuous(async_submit=True) leaves the last batch in flight; a later call
-    #: settles it before rewriting the workspaces it reads (_continuous_gpu).
-    defers_continuous = True
-    #: zero_columns_done(wait=False) leaves the zeroing in flight.
-    async_zero = True
 
 
     def followup_executor(self):
