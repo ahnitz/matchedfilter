@@ -850,9 +850,10 @@ class Context(Executor, InputUploads):
                                     restype=ctypes.c_ulong))
 
     @_autoreleased
-    def pipeline(self, n, entry="fusedTierB", one_bin=False, c16=False, macros=()):
+    def pipeline(self, n, entry="fusedTierB", one_bin=False, c16=False, macros=(), gate=False):
         """A compute pipeline for `entry` at length n; macros: (name, value) build-time
-        constants (twiddle.slang), one pipeline per set of values."""
+        constants (twiddle.slang), one pipeline per set of values. gate: the one-bin build's
+        gate-only variant (tierb.slang MF_GATE_ONLY)."""
         macros = tuple(sorted(macros))
         if c16 or entry.startswith("coarse16"):
             entry_name = entry if entry.startswith("coarse16") else "coarse16"
@@ -861,9 +862,12 @@ class Context(Executor, InputUploads):
         fn_name = _function(entry_name)
         single = (_manifest().get("modules", {}).get(str(n), {}).get("metal", {})
                   .get(entry_name, {}).get("one_bin")) if (one_bin and not entry_name.startswith("coarse16")) else None
+        if single and gate:
+            single = single.get("gate")
         if single and single["lds_bytes"] > self.max_shared_memory:
             single = None
-        key = ((n, entry_name, True) if single else (n, entry_name)) + ((macros,) if macros else ())
+        key = ((n, entry_name, "gate" if gate else True) if single else (n, entry_name)) + (
+            (macros,) if macros else ())
         if entry_name.startswith("coarse16") and os.environ.get("MF_VK_C16_BOUND", "1") == "0":
             # The raw-maximum build (_library's MF_C16_RAW) is a different library: a process
             # that switches it (the physics tests) must not reuse the bound pipeline.
@@ -1126,8 +1130,8 @@ class Context(Executor, InputUploads):
                      + ("w" if c.get("twt") else ""))
             return self.pipeline(n, entry, macros=macros), n // _radix(n) * c["ppg"]
         if name in ("tier", "tier1", "refine", "refine1"):
-            return (self.pipeline(n, "refineListed", name.endswith("1"), macros=macros),
-                    n // _radix(n))
+            return (self.pipeline(n, "refineListed", name.endswith("1"), macros=macros,
+                                  gate=bool(c.get("gate"))), n // _radix(n))
         if name == "compact_peaks":
             return self.pipeline(0, "compactPeaks"), 256
         fixed = {"compact": ("compactPairs", 256), "compactl": ("compactListed", 256),
@@ -1164,6 +1168,9 @@ class Context(Executor, InputUploads):
         if name == "items":
             info = ((_manifest().get("modules", {}).get(str(n)) or {}).get("metal") or {})
             return "refineItems" in info
+        if name == "tier1gate":
+            info = ((_manifest().get("modules", {}).get(str(n)) or {}).get("metal") or {})
+            return bool(((info.get("refineListed") or {}).get("one_bin") or {}).get("gate"))
         raise ValueError(name)
 
     def _x_coarse_candidates(self, band):
@@ -1279,7 +1286,21 @@ class Context(Executor, InputUploads):
                     args=(self._signal_event, self._signal_value),
                     argtypes=(ctypes.c_void_p, ctypes.c_uint64))
         self._commit(cmd, label, async_submit=True)
-        self._writes().append(_Write(self))
+        self._pend_write()
+
+    def _pend_write(self):
+        """This context's write token moved to the newest place on the device's list. One
+        token per context: settling one drains the whole context, so a token per run only
+        lengthened the list every new command buffer scans (_writers)."""
+        token = self.__dict__.get("_write")
+        if token is None:
+            token = self._write = _Write(self)
+        pend = self._writes()
+        for i, w in enumerate(pend):
+            if w is token:
+                del pend[i]
+                break
+        pend.append(token)
 
     @_autoreleased
     def _x_submit(self, native, binds, slot, pre=()):
