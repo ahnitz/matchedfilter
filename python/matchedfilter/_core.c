@@ -768,11 +768,14 @@ static PyObject *HMF_run_series_sparse(HMFObject *self,PyObject *args){
   ap_peak *pk=NULL;
   if(!series_shape_r(self->n,self->nt,t0,nt,binsize,self->real,&bs,&bst,&bws,&bwe,&nblocks,&nb,&rows))
     goto done;
-  if(bcnt.len<rows*(Py_ssize_t)sizeof(int)){
+  if(bcnt.len/(Py_ssize_t)sizeof(int)<rows){
     PyErr_SetString(PyExc_ValueError,"counts buffer too small"); goto done; }
   if(nb>(size_t)PY_SSIZE_T_MAX/(size_t)rows){
     PyErr_SetString(PyExc_ValueError,"overflowing output shape"); goto done; }
-  pk=reserve_peaks(&self->peaks,&self->peak_capacity,rows*(Py_ssize_t)nb);
+  const Py_ssize_t need=rows*(Py_ssize_t)nb;
+  if(need>PY_SSIZE_T_MAX/(Py_ssize_t)sizeof(ap_peak)){
+    PyErr_SetString(PyExc_ValueError,"overflowing output shape"); goto done; }
+  pk=reserve_peaks(&self->peaks,&self->peak_capacity,need);
   if(!pk) goto done;
   int tot;
   int *cnt=(int*)bcnt.buf;
@@ -785,23 +788,36 @@ static PyObject *HMF_run_series_sparse(HMFObject *self,PyObject *args){
   ap_hmf_set_sparse(self->p,0);
   Py_END_ALLOW_THREADS
   if(tot<0){ PyErr_SetString(PyExc_RuntimeError,"matchedfilter: run_series failed"); goto done; }
-  Py_ssize_t m=0;
-  for(Py_ssize_t r=0;r<rows;r++) if(cnt[r]>0)
-    for(size_t b=0;b<nb;b++) if(pk[(size_t)r*nb+b].index>=0) m++;
+  /* The engine already counts final peaks. Trust its int total only when the
+     output shape bounds it; retain the recount for larger shapes. */
+  Py_ssize_t m=tot;
+  if(need>INT_MAX){
+    m=0;
+    for(Py_ssize_t r=0;r<rows;r++) if(cnt[r]>0)
+      for(size_t b=0;b<nb;b++) if(pk[(size_t)r*nb+b].index>=0) m++;
+  }
+  if(m>need){ PyErr_SetString(PyExc_RuntimeError,"inconsistent sparse peak count"); goto done; }
   PyObject *fl=PyBytes_FromStringAndSize(NULL,m*8), *ix=PyBytes_FromStringAndSize(NULL,m*8),
            *vl=PyBytes_FromStringAndSize(NULL,m*8);
   if(!fl||!ix||!vl){ Py_XDECREF(fl);Py_XDECREF(ix);Py_XDECREF(vl); goto done; }
-  { long long *F=(long long*)PyBytes_AS_STRING(fl), *I=(long long*)PyBytes_AS_STRING(ix);
+  if(m){ long long *F=(long long*)PyBytes_AS_STRING(fl), *I=(long long*)PyBytes_AS_STRING(ix);
     float *V=(float*)PyBytes_AS_STRING(vl);
     Py_ssize_t k=0;
     for(Py_ssize_t r=0;r<rows;r++) if(cnt[r]>0)
       for(size_t b=0;b<nb;b++){
         const ap_peak *q=&pk[(size_t)r*nb+b];
         if(q->index<0) continue;
+        if(k>=m) goto bad_count;
         F[k]=(long long)((size_t)r*nb+b); I[k]=(long long)q->index;
         V[2*k]=q->re; V[2*k+1]=q->im; k++;
-      } }
+      }
+    if(k!=m) goto bad_count;
+  }
   ret=Py_BuildValue("(NNNi)",fl,ix,vl,tot);
+  goto done;
+bad_count:
+  Py_DECREF(fl);Py_DECREF(ix);Py_DECREF(vl);
+  PyErr_SetString(PyExc_RuntimeError,"inconsistent sparse peak count");
 done:
   PyBuffer_Release(&bs);PyBuffer_Release(&bst);PyBuffer_Release(&bws);
   PyBuffer_Release(&bwe);PyBuffer_Release(&bcnt);
