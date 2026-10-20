@@ -22,6 +22,10 @@ CHAIN = "256,512"
 #: sits within rounding of a gate threshold. CI saw one such swap in 1036 peaks.
 GATE_FLIPS = 2
 
+#: Each run's gates, (chain, thresholds) per template group, by run label: a failure names
+#: the gates both sides ran, so a threshold split taken differently is told from wrong data.
+_GATES = {}
+
 
 def _run(monkeypatch, enabled, device=None, engine="hier", rng_seed=5):
     from conftest import usable_gpu
@@ -44,11 +48,14 @@ def _run(monkeypatch, enabled, device=None, engine="hier", rng_seed=5):
     x[S // 3] += 40.0                        # a loud sample: refine survivors in many blocks
     jobs = [(bank, x, dict(windows=slice(4096, S - 4096)))] * 2
     out = TimeDomainFilterBank.filter_series_many(jobs)
+    _GATES[(str(dev), engine, enabled)] = [
+        (tuple(g._plan._chain or ()), tuple(float(t) for t in g._plan._thresholds(required=False) or ()))
+        for g in bank._groups if g.is_hier and g._plan is not None]
     return [{(int(t), int(i)): complex(v) for t, i, v in
              zip(r.template_indices, r.sample_indices, r.snr)} for r in out]
 
 
-def _assert_consistent(got, same_chain, exact, label):
+def _assert_consistent(got, same_chain, exact, label, gates=""):
     """Assert a GPU run's peaks {(template, sample): snr} are a correct hierarchical result.
 
     Every peak it reports is an exact (ungated) peak with that SNR within SNR_TOL: a gate
@@ -60,27 +67,46 @@ def _assert_consistent(got, same_chain, exact, label):
     worst = max((abs(got[k] - exact[k]) for k in got), default=0.0)
     assert worst <= SNR_TOL, "%s: SNR differs from the exact filter by %.2e" % (label, worst)
     flips = sorted(set(got) ^ set(same_chain))
-    assert len(flips) <= GATE_FLIPS, "%s: %d gate decisions differ from the CPU's: %s" % (
-        label, len(flips), [(k, round(abs(exact[k]), 4)) for k in flips[:6]])
+    assert len(flips) <= GATE_FLIPS, "%s: %d gate decisions differ from the CPU's: %s; %s" % (
+        label, len(flips), [(k, round(abs(exact[k]), 4)) for k in flips[:6]], gates)
 
 
 def test_fused_forward_matches_separate(monkeypatch):
     """The band forward and the separate forward each give a correct hierarchical result:
     only exact peaks, at the exact SNR, and the CPU's gate decisions on the same chain up to
     rounding-margin flips. Exact equality between the two GPU paths is not a property of
-    either: they round the coarse bands differently."""
+    either: they round the coarse bands differently.
+
+    The GPU runs gate at the CPU run's thresholds. The model splits the dismissal budget
+    across a chain's tiers by each device's calibrated costs, so on a near-tie two devices
+    take different valid splits (in full suites dev2 and CI's Metal runner have split
+    (256, 512) as (3.03, 3.34) on the GPU against (3.25, 2.63) on the CPU), and then two
+    dozen pairs gate differently for that reason alone, not for the feed's numerics."""
+    import matchedfilter as mf
     from matchedfilter import _gpuhier
+    cpu = _run(monkeypatch, False, device="cpu")
+    pinned = {chain: thr for chain, thr in _GATES[("cpu", "hier", False)]}
+    model = mf.HierarchicalFilter._thresholds    # the library's own calibration plans keep it
+    monkeypatch.setattr(mf.HierarchicalFilter, "_thresholds",
+                        lambda self, required=True: pinned.get(tuple(self._chain or ()))
+                        or model(self, required=required))
     a = _run(monkeypatch, False)
     before = _gpuhier.CLAIMS[0]
     b = _run(monkeypatch, True)
     assert _gpuhier.CLAIMS[0] > before, "no call claimed its forward"
-    cpu = _run(monkeypatch, False, device="cpu")
+    from conftest import usable_gpu
+    for band in (False, True):                  # the GPU runs gated as the CPU's did
+        assert dict(_GATES[(str(usable_gpu()), "hier", band)]) == pinned
+    monkeypatch.undo()
     exact = _run(monkeypatch, False, device="cpu", engine="flat")
     assert len(a) == len(b) == len(cpu) == len(exact)
+    gates = "gates (chain, thresholds) per group: %s" % {
+        "%s %s band=%s" % k: [(c, tuple(round(t, 5) for t in thr)) for c, thr in v]
+        for k, v in _GATES.items() if k[1] == "hier"}
     for ra, rb, rc, rx in zip(a, b, cpu, exact):
         assert len(rc) > 100
-        _assert_consistent(ra, rc, rx, "separate forward")
-        _assert_consistent(rb, rc, rx, "band forward")
+        _assert_consistent(ra, rc, rx, "separate forward", gates)
+        _assert_consistent(rb, rc, rx, "band forward", gates)
 
 
 def test_every_sparse_way_gives_the_same_peaks(monkeypatch):
