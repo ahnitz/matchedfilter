@@ -863,7 +863,7 @@ def test_filter_series_many_mixes_deferred_and_synchronous_calls_on_one_plan(mon
         np.testing.assert_array_equal(r1.snr, r2.snr)
 
 
-def test_single_template_calls_choose_the_faster_device_and_agree():
+def test_single_template_calls_choose_the_faster_device_and_agree(monkeypatch):
     """A GPU bank's single-template calls are timed on the GPU and on a CPU plan for their
     first calls, then run on the faster; either way they give the GPU's answers to ~1e-5."""
     from conftest import usable_gpu
@@ -884,15 +884,17 @@ def test_single_template_calls_choose_the_faster_device_and_agree():
                                false_dismissal=1e-3, fft_lengths=[2048], binsize=2048)
     for b in (gpu, cpu):
         b.set_reference(w, delta_f=df)
-    td._SINGLE_CHOICE.clear()
+    from matchedfilter import _choice
+    monkeypatch.setattr(_choice, "_CHOICES", {})
     for k, c in enumerate(range(20000, 110000, 7000)):
         kw = dict(windows=slice(c - 9000, c + 9000), binsize=61, threshold=0.0, template_index=k % 5)
         r_g, r_c = gpu.filter_series(x, **kw), cpu.filter_series(x, **kw)
         np.testing.assert_array_equal(r_g.sample_indices, r_c.sample_indices)
         scale = np.maximum(np.abs(r_c.snr), 1.0)
         assert np.max(np.abs(r_g.snr - r_c.snr) / scale) < 1e-4
-    (state,) = td._SINGLE_CHOICE.values()
-    assert state["winner"] in ("gpu", "cpu") and len(state["gpu"]) >= 4 and len(state["cpu"]) >= 4
+    (state,) = _choice.of_kind("single-device").values()
+    assert state.winner in ("gpu", "cpu")
+    assert all(len(v) >= state.warmup + state.minimum for v in state.samples.values())
 
 
 def test_filter_series_many_without_wait_overlaps_and_matches(monkeypatch):

@@ -795,27 +795,9 @@ def _max_tiers(device) -> int:
 #: Identifies one filter_series_many batch to the plans it defers.
 _BATCH_TOKEN = 0
 
-#: Device choice for single-template calls, per (device, n, block-count bucket); see
-#: TimeDomainFilterBank._single_device. The first sample of each side is discarded (warm-up).
-_SINGLE_CHOICE: Dict[Tuple[str, int, int], Dict[str, Any]] = {}
-_SINGLE_TRIALS = 4
-#: Samples per side (after the discarded first) an unclear contest may take before the bank's
-#: own device stands (gatechain.measured_choice).
-_SINGLE_TRIALS_MAX = 5
-
-
 def _single_key(key):
     """MF_COST_FILE key of a single-template device choice (device, n, block-count bucket)."""
     return "single-device|%s|%d|%d" % key
-
-
-#: Where a batch's single-template GPU jobs run (filter_series_many): batched on the device or
-#: each call on a CPU plan, per device; see TimeDomainFilterBank._batch_device.
-_BATCH_CHOICE: Dict[Tuple[str], Dict[str, Any]] = {}
-
-#: Whether a batch's submissions are fused (_gpuexec.fused), per set of GPU devices: see
-#: _fuse_begin.
-_FUSE_CHOICE: Dict[Tuple[str, ...], Dict[str, Any]] = {}
 
 
 def _fuse_begin(jobs, trial):
@@ -834,8 +816,10 @@ def _fuse_begin(jobs, trial):
         return None, None
     side, record = ("fused", None)
     if _autotune_enabled():
-        side, record = _device_trial(_FUSE_CHOICE, devs, "fused-batch|%s" % "+".join(devs),
-                                     "FUSE %s" % (devs,), sides=("fused", "unfused"))
+        from . import _choice
+        side, record = _choice.choice("fused-batch", devs, ("fused", "unfused"),
+                                      store_key="fused-batch|%s" % "+".join(devs),
+                                      what="FUSE %s" % (devs,)).next()
     from ._gpuexec import fused
     close = fused() if side == "fused" else None
     work = sum(len(b.filters_f) * int(np.asarray(x).size) for b, x, kw in jobs
@@ -857,40 +841,6 @@ def _fuse_end(tok):
     record, t0, work, banks, built = tok
     if _built(banks) == built:
         record((time.perf_counter() - t0) / work)
-
-
-def _device_trial(table, key, store_key, what, sides=("gpu", "cpu")):
-    """(side, record or None): the shared measured choice between two ways of running one
-    call shape -- a bank's GPU and a CPU plan, by default. The first samples alternate the
-    sides (record(seconds) after each); the first of each side is discarded (warm-up), and
-    the shared rule (gatechain.measured_choice) keeps one -- the first side stands unless
-    the other is faster past the tie and the noise; an unclear contest samples both
-    further, up to _SINGLE_TRIALS_MAX each -- for every bank, and for later processes
-    through MF_COST_FILE (store_key), whose held side is reused untimed."""
-    from . import gatechain
-    a, b = sides
-    tr = table.get(key)
-    if tr is None:
-        held = gatechain.stored_choice(store_key)
-        tr = table[key] = {a: [], b: [], "winner": held if held in sides else None}
-    if tr["winner"] is not None:
-        return tr["winner"], None
-    side = a if len(tr[a]) <= len(tr[b]) else b
-
-    def record(dt, side=side):
-        tr[side].append(dt)
-        if (tr["winner"] is None and len(tr[a]) == len(tr[b])
-                and len(tr[a]) >= _SINGLE_TRIALS):
-            smp = {k: tr[k][1:] for k in sides}
-            w, _ = gatechain.measured_choice(smp, a, _SINGLE_TRIALS_MAX)
-            if w is None:
-                return
-            tr["winner"] = w
-            gatechain.store_choice(store_key, w)
-            from . import _log_autotune
-            _log_autotune("%s -> %s  median s %s", what, w,
-                          {k: "%.3g" % float(np.median(v)) for k, v in smp.items()})
-    return side, record
 
 
 _CORR_COSTS: Dict[Tuple[int, str], Tuple[float, float, float]] = {}
@@ -2398,16 +2348,18 @@ class TimeDomainFilterBank:
         if (_parse_device(self.device).kind != 'gpu' or not _autotune_enabled()
                 or os.environ.get("MF_SINGLE_DEVICE", "auto") == "bank"):
             return False, None
+        from . import _choice
         key = (str(self.device), int(g.n), 1 << max(0, int(nblocks) - 1).bit_length())
-        side, record = _device_trial(_SINGLE_CHOICE, key, _single_key(key),
-                                     "SINGLE %s n=%d blocks~%d" % key)
+        side, record = _choice.choice("single-device", key, ("gpu", "cpu"),
+                                      store_key=_single_key(key),
+                                      what="SINGLE %s n=%d blocks~%d" % key).next()
         return side == "cpu", record
 
     def _batch_device(self):
         """(side, record or None) for a batch's single-template jobs on this bank's GPU
         (filter_series_many): "gpu" runs them batched on the device (device follow-ups, one
         items submission per template group), "cpu" each call on a CPU plan. Measured per
-        device (_device_trial), each batch timed from submission to its last result per
+        device (_choice), each batch timed from submission to its last result per
         block. The per-call choice (_single_device) times one call on its own, a dispatch a
         batch never makes: it once kept every batch off the device."""
         from .device import parse as _parse_device
@@ -2416,9 +2368,10 @@ class TimeDomainFilterBank:
         if (_parse_device(self.device).kind != 'gpu' or not _autotune_enabled()
                 or os.environ.get("MF_SINGLE_DEVICE", "auto") == "bank"):
             return "gpu", None
+        from . import _choice
         key = (str(self.device),)
-        return _device_trial(_BATCH_CHOICE, key, "single-batch|%s" % key,
-                             "BATCH %s" % key)
+        return _choice.choice("single-batch", key, ("gpu", "cpu"),
+                              store_key="single-batch|%s" % key, what="BATCH %s" % key).next()
 
     @staticmethod
     def filter_series_many(jobs, wait=True):

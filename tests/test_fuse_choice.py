@@ -17,7 +17,8 @@ def test_batches_alternate_fused_and_unfused_then_keep_one(monkeypatch, tmp_path
     monkeypatch.setenv("MF_AUTOTUNE", "1")
     monkeypatch.setenv("MF_COST_FILE", str(tmp_path / "costs.json"))
     monkeypatch.setenv("MF_CHAIN_FORCE", "2048:256")
-    monkeypatch.setattr(td, "_FUSE_CHOICE", {})
+    from matchedfilter import _choice
+    monkeypatch.setattr(_choice, "_CHOICES", {})     # this test's choices only
     rng = np.random.default_rng(41)
     banks = []
     for _ in range(2):
@@ -30,16 +31,15 @@ def test_batches_alternate_fused_and_unfused_then_keep_one(monkeypatch, tmp_path
         banks.append(b)
     S = 1 << 17
     sides = []
-    orig = td._device_trial
-    monkeypatch.setattr(td, "_device_trial", lambda table, key, *a, **k:
-                        (lambda r: sides.append(r[0]) or r)(orig(table, key, *a, **k))
-                        if table is td._FUSE_CHOICE else orig(table, key, *a, **k))
+    orig = _choice.Choice.next
+    monkeypatch.setattr(_choice.Choice, "next", lambda self: (lambda r: (
+        sides.append(r[0]) if self.candidates == ("fused", "unfused") else None) or r)(orig(self)))
     # Batches until the trial locks: a batch is a sample only when no chain trial is trying
     # candidates in it and it builds no recording, and an unclear contest samples both
     # sides further (up to _SINGLE_TRIALS_MAX each), so the count needed is not fixed --
     # 2 * _SINGLE_TRIALS + 4 batches left CI's paravirtual M2 undecided. Bounded.
     for _ in range(40):
-        if sides and all(t["winner"] is not None for t in td._FUSE_CHOICE.values()):
+        if sides and all(t.winner is not None for t in _choice.of_kind("fused-batch").values()):
             break
         xs = []
         for _ in banks:
@@ -53,5 +53,5 @@ def test_batches_alternate_fused_and_unfused_then_keep_one(monkeypatch, tmp_path
             for f in want._fields:
                 np.testing.assert_array_equal(getattr(want, f), getattr(r, f))
     assert {"fused", "unfused"} <= set(sides), sides
-    trial = next(iter(td._FUSE_CHOICE.values()))
-    assert trial["winner"] in ("fused", "unfused"), trial
+    trial = next(iter(_choice.of_kind("fused-batch").values()))
+    assert trial.winner in ("fused", "unfused"), trial.samples

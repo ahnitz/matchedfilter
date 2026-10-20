@@ -264,6 +264,41 @@ acceptance metric); Metal command buffers are one-shot (re-encode as today); dis
 unified memory (keep the L40S prefetch path as a feature decision); testing reach (L40S
 via condor, M2); new GPU features pause during U1-U3 except fixes.
 
+## Stage C: one measured-choice mechanism (2026-10-20)
+
+About a dozen choices are made by timing: chain trials (per call and per batch), block-size
+and Q15 trials on the CPU; where single-template calls and batches run, and whether a batch
+is fused; the gate way, coarse layout, Vulkan subgroup size and interleave on a GPU; the CPU
+FFT and the sparse readback way. They share one decision rule (`gatechain.measured_choice`)
+and little else: each has its own sampling schedule and constants, warm-up, budget,
+candidate dropping, cross-process continuation and cost-file key format, and three of them
+(`_coarse.stored_measured_choice`, `_gpuexec.Measured`, `_vksubgroup.choose`) decide by
+other rules. On 2026-10-20 that variety caused or hid every fault found: three CI flakes
+(tests that could not know how many calls a trial needs), the Iris Xe at its reported
+subgroup without a cost file (5-30x slower full and peak calls), a RENOIR chain trial that
+locks a chain 2x slower in some processes, a stored coarse layout that persists when wrong
+(2026-10-15), and per-process calibration choosing different threshold splits on two
+devices (the forward-feed flake).
+
+**End state.** One `Choice` object (`_choice.py`) owns the lifecycle -- candidates with a
+preference, a stored lock taken untimed, alternating samples with a warm-up drop, the shared
+rule, a cap, lock and store, one registry -- and is the same with or without a cost file
+(in memory without one). Each existing choice becomes its candidates plus how a sample is
+timed. Lifecycle tests use injected timings, so no test depends on how many real calls a
+trial needs.
+
+**Steps**, each gated by the full suite, goldens and a paired ladder:
+1. `Choice` and the registry; the three choices on `_device_trial` (single-template
+   device, batch device, fused batch) move onto it with their schedule unchanged.
+2. The offline kernel choices (gate way, coarse layout with its stored-rivals re-check,
+   subgroup, interleave) and `Measured` (sparse way): one offline path in `Choice`
+   (measure every candidate, decide by the shared rule, store). The no-cost-file subgroup
+   question is decided here.
+3. The CPU and workload trials (chain per call and per batch, block size, Q15): online
+   choices with multi-candidate schedules, budgets and cross-process continuation.
+4. A resolved plan (chain, literal thresholds, layouts) recorded as one unit: the stage 2
+   direction, which removes per-process threshold splits.
+
 ## Order
 
 Stage 0, then stage 1, then stage 4 (probes), then stage 2, then stage 3, then stage 5.
@@ -747,3 +782,25 @@ main only when everything is done, gated and benchmarked.
     caps threadgroup memory at 32 KB (n = 8192), a build no other target needs; the integer
     fail-open tests stand in for IEEE comparisons Metal's fast math does not keep.
     peakTwoGate (tiled gates' pass without election) is compiled for every target already.
+- 2026-10-20: **Baseline after stage U, and what re-measuring found.**
+  - A Vulkan storage binding spans less than 4 GiB (`maxStorageBufferRange`): RADV (8060S,
+    RENOIR) wrote nothing for a full correlation of 4 GiB or more and returned normally, so
+    earlier 512 x 512 full-output rows timed a no-op (8060S 11.12 ms; 47.65 ms correct).
+    Bindings are clamped to the limit (rounded to 256: exactly 0xFFFFFFFF also failed) and
+    `correlate` / `correlate_continuous` split by it (4fd8b0d4).
+  - The hardware comparison now checks every timed row against numpy at the timed size,
+    and each row is the median of three runs, each its own process and cost file
+    (`teaser_fleet --merge`); single runs moved rows by up to 2x (RENOIR chain trials,
+    the loaded Haswell, one slow Iris Xe run).
+  - Found and fixed: Metal `_x_peaks` sat in `_Buffer` (`ladder --roofline` failed); the
+    benchmark crashed at n = 64 (no band); three tests stopped trials after a fixed count.
+  - Open: without `MF_COST_FILE` Vulkan builds at the reported subgroup (Iris Xe 5-30x
+    slower full/peak); `_x_after_readers` adds no wait on Vulkan and Metal (unverified);
+    RENOIR's chain trial locks a 2x slower chain in some processes; 8060S tiny calls cost
+    ~7 us more than on 2026-10-13. Stage C addresses the first and third.
+- 2026-10-20: **Stage C step 1: `_choice.Choice`.** The single-template device, batch device
+  and fused-batch choices run on one `Choice` (`_choice.py`: candidates, stored lock, the
+  alternating schedule with its warm-up drop, `measured_choice`, cap, lock and store, one
+  registry) instead of `_device_trial` and three module tables. Schedule unchanged (warm-up
+  1, decide at 3 kept samples each, cap 5). `tests/test_choice.py` drives the lifecycle with
+  injected timings; the tests that read the old tables use the `Choice` API.

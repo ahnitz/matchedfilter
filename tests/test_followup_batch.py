@@ -140,7 +140,8 @@ def test_batched_follow_ups_choose_their_device_by_batch(device, monkeypatch, tm
     monkeypatch.setenv("MF_AUTOTUNE", "1")
     monkeypatch.delenv("MF_SINGLE_DEVICE", raising=False)
     monkeypatch.setenv("MF_COST_FILE", str(tmp_path / "costs.json"))
-    monkeypatch.setattr(td, "_BATCH_CHOICE", {})
+    from matchedfilter import _choice
+    monkeypatch.setattr(_choice, "_CHOICES", {})     # this test's choices only
     bank = banks[0]
     S = 1 << 17
     rows = bank.empty_shared((2, S))
@@ -151,9 +152,9 @@ def test_batched_follow_ups_choose_their_device_by_batch(device, monkeypatch, tm
     monkeypatch.setattr(TimeDomainFilterBank, "_batch_device",
                         lambda self: (lambda r: sides.append(r[0]) or r)(orig(self)))
     # Enough batches for the trial to lock however noisy the timings: an unclear contest
-    # samples both sides up to _SINGLE_TRIALS_MAX each after the discarded first (CI's
-    # paravirtual M2 left it undecided after 2 * _SINGLE_TRIALS + 2 batches).
-    for _ in range(2 * (td._SINGLE_TRIALS_MAX + 1) + 2):
+    # samples both sides up to _choice.CAP each after the dropped warm-up (CI's
+    # paravirtual M2 left it undecided after 2 * 4 + 2 batches).
+    for _ in range(2 * (_choice.CAP + _choice.WARMUP) + 2):
         jobs = []
         for k in range(6):
             c0 = int(rng.integers(20000, S - 20000))
@@ -166,6 +167,7 @@ def test_batched_follow_ups_choose_their_device_by_batch(device, monkeypatch, tm
             np.testing.assert_array_equal(want.sample_indices, r.sample_indices)
             np.testing.assert_allclose(r.snr, want.snr, rtol=1e-4,
                                        atol=1e-4 * np.abs(want.snr).max())
-    trial = td._BATCH_CHOICE[(str(bank.device),)]
+    trial = _choice.of_kind("single-batch")[(str(bank.device),)]
     assert sides[:4] == ["gpu", "cpu", "gpu", "cpu"], sides
-    assert trial["winner"] in ("gpu", "cpu") and len(trial["gpu"]) >= td._SINGLE_TRIALS
+    assert trial.winner in ("gpu", "cpu")
+    assert len(trial.samples["gpu"]) >= trial.warmup + trial.minimum
