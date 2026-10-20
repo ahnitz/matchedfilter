@@ -182,9 +182,9 @@ def band_forward_wanted(n, band, f):
     Chosen from bytes: per block the full forward writes n samples and the band forward
     `band` (the widest band a tier reads), while the recompute reads and writes n for each
     block with a refined pair, so bands move fewer bytes iff that fraction f < (n - band) / 2n.
-    f is the one measured on this call shape's previous run (refine_block_fraction); with
-    none yet, the bands (a gate dismisses nearly every block, and a first call taken in full
-    left a record per call shape that ran once). MF_BAND_FORWARD=0/1 forces it off or on."""
+    f is the gate model's fraction for the call (_gpuhier._hier_peaks: from the chain's
+    modelled refine probability), so the choice depends on the call alone; with none
+    (thresholds set by hand, no reference), the bands. MF_BAND_FORWARD=0/1 forces it off or on."""
     import os
     env = os.environ.get("MF_BAND_FORWARD")
     if env == "0" or n > 65536 or band >= n:
@@ -233,7 +233,7 @@ def band_windows(rowwin, n, band):
 def hier_peaks_grouped(ctx, n, band, data, tmpl, ct0, raw_thr, groups, binsize, threshold, *,
                        upload_tmpl=True, cascade_band=None, ct1=None, raw_thr1=None,
                        slot=None, async_submit=False, sparse=False, nbins=None, max_bins=MAX_BINS,
-                       handle_out=None):
+                       handle_out=None, refine_reach=None):
     """hier_peaks_grouped for any backend whose hier_peaks accepts row_windows: one
     recording, each tier a single dispatch over all rows, per-row windows in the kernels.
 
@@ -248,7 +248,7 @@ def hier_peaks_grouped(ctx, n, band, data, tmpl, ct0, raw_thr, groups, binsize, 
                           threshold=threshold, window=window, upload_data=False,
                           upload_tmpl=upload_tmpl, cascade_band=cascade_band, ct1=ct1,
                           raw_thr1=raw_thr1, slot=slot, async_submit=async_submit,
-                          sparse=sparse, row_windows=(groups, win),
+                          sparse=sparse, row_windows=(groups, win), refine_reach=refine_reach,
                           **({} if handle_out is None else {"handle_out": handle_out}))
 
 

@@ -3171,6 +3171,7 @@ class HierarchicalFilter(MatchedFilter):
     # ---- thresholds ----------------------------------------------------------
     def _thresholds(self, *, required=True):
         """One threshold per tier: explicit, or from the reference model."""
+        self._refine_reach = None    # the model's per-pair refine probability (hier_peaks)
         if self._cal_thr is not None:
             if len(self._cal_thr) != len(self._chain):
                 raise ValueError("explicit thresholds %s do not match chain %s" % (self._cal_thr, self._chain))
@@ -3184,6 +3185,9 @@ class HierarchicalFilter(MatchedFilter):
                 for v in th:
                     if not np.isfinite(v) or v < 0 or v > float(np.finfo(np.float32).max):
                         raise ValueError("calibrated coarse threshold must be finite, nonnegative float32; got %r" % (th,))
+                reach = pl.get("reach")
+                if reach is not None and len(reach) > len(self._chain):
+                    self._refine_reach = float(reach[len(self._chain)])
                 return th
         if required:
             raise ValueError(
@@ -3673,7 +3677,9 @@ class HierarchicalFilter(MatchedFilter):
         ct = self._ct
         extra = {} if len(chain) == 1 else dict(cascade_band=chain[0], ct1=ct[1], raw_thr1=thr[1])
         res = self._gpu.hier_peaks_grouped(n, chain[-1], spec, H, ct[0], thr[0], groups, binsize,
-                                           threshold, upload_tmpl=self._tdirty, **extra, **kw)
+                                           threshold, upload_tmpl=self._tdirty,
+                                           refine_reach=getattr(self, "_refine_reach", None),
+                                           **extra, **kw)
 
         def account(r):
             shp = r.shape if isinstance(r, _SparsePeaks) else r[0].shape
@@ -3699,14 +3705,16 @@ class HierarchicalFilter(MatchedFilter):
                 self.n, chain[0], D, H, ct[0], thr[0],
                 binsize=binsize, threshold=threshold, window=(start, end),
                 upload_data=self._ddirty, upload_tmpl=self._tdirty,
-                slot=slot, async_submit=async_submit, **kw)
+                slot=slot, async_submit=async_submit,
+                refine_reach=getattr(self, "_refine_reach", None), **kw)
         else:
             res = self._gpu.hier_peaks(
                 self.n, chain[1], D, H, ct[0], thr[0],
                 binsize=binsize, threshold=threshold, window=(start, end),
                 upload_data=self._ddirty, upload_tmpl=self._tdirty,
                 cascade_band=chain[0], ct1=ct[1], raw_thr1=thr[1],
-                slot=slot, async_submit=async_submit, **kw)
+                slot=slot, async_submit=async_submit,
+                refine_reach=getattr(self, "_refine_reach", None), **kw)
         self._ddirty = self._tdirty = False
 
         def account(r):
