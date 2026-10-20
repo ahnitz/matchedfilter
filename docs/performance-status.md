@@ -34,7 +34,9 @@ rounds agreed to within 1% everywhere except the M2 GPU (8%) and the loaded Hasw
 
 Revisions: 4de7d2ec (gravity-dev3, gravity-dev4, Haswell), 9226028c (Apple M2) and 30486ecb
 (gravity-dev2). They differ only in error paths, tests and where the Metal
-driver defines its peak model; no measured code path changed between them.
+driver defines its peak model; no measured code path changed between them. `4fd8b0d4`, after them,
+splits GPU work whose output binding would reach 4 GiB; the ladder's largest binding (the
+middle stage's output, ~27 templates × 2^20 samples) is far below that.
 
 ## Per platform
 

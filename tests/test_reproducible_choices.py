@@ -98,8 +98,13 @@ def test_two_processes_sharing_a_cost_file_agree(device, tmp_path):
     # every process reads the same choices back.
     # Run until the trial records reach a fixed point: no trial open, and a process changes
     # none of them. With the steady re-check off a stored lock is final.
+    # The trials are bounded (an unclear contest samples further up to its budget, then the
+    # shared rule decides) and continue across processes from the file, but one process
+    # adds only a few batch samples: on CI's paravirtual M2 a chain trial's batches were
+    # still open after 10 processes. The loop ends at the fixed point, so the cap only
+    # costs time when a trial needs it.
     prev = None
-    for _ in range(10):
+    for _ in range(25):
         first = _run(device, cost)
         rec = json.loads(cost.read_text())
         now = _trial_records(rec)
