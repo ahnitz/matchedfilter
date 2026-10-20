@@ -634,27 +634,22 @@ class _FusedBatch:
         # Batches rarely recur exactly (a chunk's composition varies), so a per-batch
         # trial would seldom finish; the shape is what decides whether overlap can pay.
         forced = _fuse_interleave()
-        choice = dev.__dict__.setdefault("interleave_choice", {})
         if forced is not None or len(self.items) < 2:
             k = forced or 0
         else:
+            # An online _choice.Choice per batch shape, on this device: lockstep (0) stands
+            # unless a deeper interleave is faster past TIE and the noise -- the timings
+            # carry clock and content noise, and a coin flip between two equal choices only
+            # adds a barrier per phase. A depth this machine stored is reused untimed.
+            from . import _choice
             shape, work = _batch_shape(self.items)
-            st = choice.get(shape)
-            if st is None:
-                # a depth this machine already measured for the shape is reused untimed
-                from . import gatechain
-                held = gatechain.stored_choice(_interleave_key(dev, shape))
-                st = choice[shape] = {"k": held if held in _INTERLEAVE_CANDIDATES else None,
-                                      "t": {c: [] for c in _INTERLEAVE_CANDIDATES},
-                                      "need": {c: _INTERLEAVE_TRIALS
-                                               for c in _INTERLEAVE_CANDIDATES}}
-            if st["k"] is not None:
-                k = st["k"]
-            else:
-                pending = [c for c in _INTERLEAVE_CANDIDATES
-                           if len(st["t"][c]) < st["need"][c]] or list(_INTERLEAVE_CANDIDATES)
-                k = pending[int.from_bytes(os.urandom(1), "little") % len(pending)]
-                self.trial = (shape, k, work)
+            k, record = _choice.choice(
+                "interleave", shape, _INTERLEAVE_CANDIDATES, scope=dev.__dict__,
+                store_key=_interleave_key(dev, shape), label=int, warmup=0,
+                minimum=_INTERLEAVE_TRIALS, cap=_INTERLEAVE_TRIALS_MAX,
+                what="INTERLEAVE %s" % (shape,)).next()
+            if record is not None:
+                self.trial = (work, record)
         key = (base, k)
         cache = dev.__dict__.setdefault("fused_cache", OrderedDict())
         hit = cache.get(key)
@@ -767,25 +762,11 @@ class _FusedBatch:
         fences = (_vp * 1)(self.fence)
         _check(vk.vkWaitForFences(dev.device, 1, fences, 1, 0xFFFFFFFFFFFFFFFF), "vkWaitForFences")
         vk.vkDestroyFence(dev.device, self.fence, None)
-        if self.trial is not None and len(self.trial) == 4:
-            shape, k, work, slot = self.trial
-            st = dev.__dict__.get("interleave_choice", {}).get(shape)
-            if st is not None and st["k"] is None:
-                st["t"][k].append(dev.fuse_timer.ns(slot, dev._ts_period) / work)
-                if all(len(v) >= st["need"][c] for c, v in st["t"].items()):
-                    # The shared rule (gatechain.measured_choice): lockstep (0) stands unless
-                    # a deeper interleave is faster past TIE and the noise -- the timings
-                    # carry clock and content noise, and a coin flip between two equal
-                    # choices only adds a barrier per phase. Unclear: sample both further.
-                    from . import gatechain
-                    w, more = gatechain.measured_choice(st["t"], 0, _INTERLEAVE_TRIALS_MAX)
-                    if w is None:
-                        st["need"].update(more)
-                    else:
-                        st["k"] = w
-                        gatechain.store_choice(_interleave_key(dev, shape), int(w))
-                    # The losers' recordings are never submitted again; the cache's LRU
-                    # retires them (another batch may still be executing one now).
+        if self.trial is not None and len(self.trial) == 3:
+            # The losers' recordings are never submitted again once the choice locks; the
+            # cache's LRU retires them (another batch may still be executing one now).
+            work, record, slot = self.trial
+            record(dev.fuse_timer.ns(slot, dev._ts_period) / work)
 
 
 def fused():

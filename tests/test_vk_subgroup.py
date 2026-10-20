@@ -71,3 +71,51 @@ def test_smallest_size_runs_the_largest_transforms(monkeypatch):
     out = np.asarray(f.run())[0]
     ref = np.fft.ifft(np.conj(t) * d, axis=-1) * n
     assert np.allclose(out, ref, rtol=1e-3, atol=1e-3 * np.abs(ref).max())
+
+
+def _ctx(reported=32, rng=(8, 32)):
+    from types import SimpleNamespace
+    return SimpleNamespace(subgroup_size=reported, subgroup_range=rng, device_name="Fake Xe",
+                           index=0)
+
+
+@pytest.fixture
+def subgroup_choice(monkeypatch):
+    """choose() with a fake device and measurement: {size: [seconds]} (8 the fastest)."""
+    from matchedfilter import _choice, _vksubgroup
+    monkeypatch.setattr(_choice, "_CHOICES", {})
+    monkeypatch.setenv("MF_AUTOTUNE", "1")
+    monkeypatch.delenv("MF_VK_SUBGROUP_MEASURING", raising=False)
+    calls = []
+
+    def measure(index, reported, rng):
+        calls.append(reported)
+        return {32: [5.0] * 7, 16: [2.0] * 7, 8: [0.6] * 7}
+    monkeypatch.setattr(_vksubgroup, "measure", measure)
+    return _vksubgroup, calls
+
+
+def test_the_subgroup_is_measured_without_a_cost_file(subgroup_choice, monkeypatch):
+    """No MF_COST_FILE: still measured (once per process), not left at the reported size
+    -- on the Iris Xe that size ran full and peak calls 5-30x slower."""
+    sg, calls = subgroup_choice
+    monkeypatch.delenv("MF_COST_FILE", raising=False)
+    assert sg.choose(_ctx()) == 8
+    assert sg.choose(_ctx()) == 8 and len(calls) == 1     # the process's one measurement
+
+
+def test_a_stored_subgroup_is_reused_untimed(subgroup_choice, monkeypatch, tmp_path):
+    from matchedfilter import _choice
+    sg, calls = subgroup_choice
+    monkeypatch.setenv("MF_COST_FILE", str(tmp_path / "costs.json"))
+    assert sg.choose(_ctx()) == 8 and len(calls) == 1
+    _choice.reset()                                        # another process
+    assert sg.choose(_ctx()) == 8 and len(calls) == 1
+
+
+def test_autotune_off_or_one_size_keeps_the_reported_size(subgroup_choice, monkeypatch):
+    sg, calls = subgroup_choice
+    assert sg.choose(_ctx(reported=64, rng=(64, 64))) == 64      # nothing to choose
+    monkeypatch.setenv("MF_AUTOTUNE", "0")
+    assert sg.choose(_ctx()) == 32
+    assert calls == []
