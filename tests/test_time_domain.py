@@ -817,6 +817,17 @@ def test_filter_series_many_matches_one_call_at_a_time(device, interleave, monke
         only = "one call only %s; batch only %s" % (
             sorted((k, p1[k]) for k in set(p1) - set(p2)),
             sorted((k, p2[k]) for k in set(p2) - set(p1)))
+        if p1.keys() != p2.keys():
+            # Which way of running the job reports the differing triggers: the first call alone
+            # (a first-use effect), or every unbatched call against every batch (a path effect).
+            b, x, kw = jobs[j]
+            again = b.filter_series(x, **kw)
+            solo = TimeDomainFilterBank.filter_series_many([jobs[j]])[0]
+            diff = set(p1) ^ set(p2)
+            only += "; of those, a second call has %s, a one-job batch has %s" % tuple(
+                sorted(k for k in diff if k in set(zip(map(int, r.template_indices),
+                                                       map(int, r.sample_indices))))
+                for r in (again, solo))
         for f in r1._fields:
             np.testing.assert_array_equal(getattr(r1, f), getattr(r2, f),
                                           err_msg="job %d, %s: %s" % (j, f, only))
