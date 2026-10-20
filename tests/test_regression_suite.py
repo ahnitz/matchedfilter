@@ -198,6 +198,80 @@ def test_signal_injection_recovery(engine):
     assert pos_err <= 10, f"Engine {engine} peak sample error too large: {pos_err} samples"
 
 
+def test_lazy_template_load_has_one_generation_and_native_ingestion(monkeypatch):
+    """A newly built source-backed plan consumes its supplied batch once."""
+    from matchedfilter.time_domain import _TemplateGroup, _group_spectra
+
+    n, nt = 256, 3
+    hf = mf.HierarchicalFilter(n, ntemplates=nt)
+    hf.set_reference(np.ones(n, np.float32))
+    monkeypatch.setattr(hf, "_choose_chain", lambda: (64,))
+    monkeypatch.setattr(mf, "_cpu_forward_platform", lambda n: False)
+    metrics = dict(spectrum_generations=0, native_ingestions=0)
+    native_factory = hf._new_cpu_plan
+
+    class CountedPlan:
+        def __init__(self, chain):
+            self.native = native_factory(chain)
+
+        def __getattr__(self, name):
+            return getattr(self.native, name)
+
+        def set_template_batch(self, start, spectra):
+            metrics["native_ingestions"] += 1
+            return self.native.set_template_batch(start, spectra)
+
+    monkeypatch.setattr(hf, "_new_cpu_plan", CountedPlan)
+    taps = np.ones((nt, 9), np.float32)
+    counts = np.full(nt, taps.shape[1], np.int64)
+
+    def source():
+        metrics["spectrum_generations"] += 1
+        return _group_spectra(taps, counts, n, 1.0, False)
+
+    group = _TemplateGroup(hf, n, np.arange(nt), 0, n, 9, spectra_source=source)
+    group.load_templates(hf)
+    assert metrics == dict(spectrum_generations=1, native_ingestions=1)
+    assert hf._held_templates is None
+    hf._require_templates(0, nt)
+
+
+def test_sparse_series_compact_bytes_and_empty_reuse():
+    """Sparse payload size follows current peaks, including after a gated-empty call."""
+    from matchedfilter import _core
+
+    n, nt, binsize = 256, 2, 31
+    rng = np.random.default_rng(485)
+    templates = (rng.normal(size=(nt, n)) + 1j * rng.normal(size=(nt, n))).astype(np.complex64)
+    series = (rng.normal(size=2 * n) + 1j * rng.normal(size=2 * n)).astype(np.complex64)
+    plans = [_core.HMF(n, 1, nt, [64], 3, n) for _ in range(2)]
+    for plan in plans:
+        plan.set_reference(np.ones(n, np.float32))
+        plan.set_template_batch(0, templates)
+        plan.set_q15(False)
+    starts = np.array([0, n], np.uintp)
+    low, high = np.zeros(2, np.uintp), np.full(2, n, np.uintp)
+    shape = (2, nt, (n + binsize - 1) // binsize)
+    idx, val = np.empty(shape, np.int64), np.empty(shape, np.complex64)
+    mag = np.empty(shape, np.float32)
+    counts = [np.empty(shape[:2], np.int32) for _ in plans]
+    for gate, populated in ((0.0, True), (1e8, False)):
+        for plan in plans:
+            plan.set_thresholds([gate])
+        fl, ix, vl, total = plans[0].run_series_sparse(
+            series, starts, low, high, 0, nt, binsize, .2, counts[0])
+        dense_total = plans[1].run_series(
+            series, starts, low, high, 0, nt, binsize, .2, idx, val, mag, counts[1])
+        flat = np.flatnonzero(idx.ravel() >= 0)
+        assert total == dense_total == len(flat) == int(counts[0].sum())
+        assert (total > 0) == populated
+        assert len(fl) + len(ix) + len(vl) == 24 * total
+        np.testing.assert_array_equal(counts[0], counts[1])
+        np.testing.assert_array_equal(np.frombuffer(fl, np.int64), flat)
+        np.testing.assert_array_equal(np.frombuffer(ix, np.int64), idx.ravel()[flat])
+        np.testing.assert_array_equal(np.frombuffer(vl, np.complex64), val.ravel()[flat])
+
+
 # -----------------------------------------------------------------------------
 # Autotuning Verification Tests
 # -----------------------------------------------------------------------------
