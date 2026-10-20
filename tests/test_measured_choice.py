@@ -224,7 +224,8 @@ def _single_contest(monkeypatch, tmp_path, timer, calls=40):
     monkeypatch.setenv("MF_AUTOTUNE", "1")
     monkeypatch.delenv("MF_SINGLE_DEVICE", raising=False)
     monkeypatch.setattr(_device, "parse", lambda spec: SimpleNamespace(kind="gpu"))
-    td._SINGLE_CHOICE.clear()
+    from matchedfilter import _choice
+    monkeypatch.setattr(_choice, "_CHOICES", {})
     bank, g = SimpleNamespace(device="gpu:0"), SimpleNamespace(n=2048)
     k = {"gpu": 0, "cpu": 0}
     for _ in range(calls):
@@ -234,7 +235,7 @@ def _single_contest(monkeypatch, tmp_path, timer, calls=40):
         side = "cpu" if on_cpu else "gpu"
         rec(timer(side, k[side]))
         k[side] += 1
-    (state,) = td._SINGLE_CHOICE.values()
+    (state,) = _choice.of_kind("single-device").values()
     return td, bank, g, state
 
 
@@ -243,8 +244,9 @@ def test_single_template_device_choice_follows_the_shared_rule_and_persists(monk
     lock in MF_COST_FILE: a clear CPU win locks the CPU, and the next process reuses it untimed."""
     td, bank, g, state = _single_contest(
         monkeypatch, tmp_path, lambda side, i: (1.0 if side == "gpu" else 0.4) * (1 + 0.01 * (i % 3)))
-    assert state["winner"] == "cpu"
-    td._SINGLE_CHOICE.clear()                      # a new process: the stored side, no trial
+    assert state.winner == "cpu"
+    from matchedfilter import _choice
+    _choice.reset()                                # a new process: the stored side, no trial
     assert td.TimeDomainFilterBank._single_device(bank, g, 24) == (True, None)
 
 
@@ -254,8 +256,8 @@ def test_single_template_device_unclear_contest_keeps_the_banks_device(monkeypat
     seq = {"gpu": [5.0, 1.0, 1.3, 0.8, 1.25, 0.85, 1.0, 1.1],     # first: warm-up, dropped
            "cpu": [5.0, 0.8, 1.2, 0.85, 1.3, 0.75, 1.15, 0.9]}
     td, _, _, state = _single_contest(monkeypatch, tmp_path, lambda side, i: seq[side][i])
-    assert state["winner"] == "gpu"
-    assert len(state["gpu"]) - 1 == td._SINGLE_TRIALS_MAX
+    assert state.winner == "gpu"
+    assert len(state.samples["gpu"]) - state.warmup == state.cap
 
 
 def test_a_lock_the_model_kept_is_not_reopened_by_its_own_steady_state(monkeypatch):
