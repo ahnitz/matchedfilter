@@ -347,7 +347,7 @@ class HierOps:
     def _hier_peaks(self, n, band, data, tmpl, ct0, raw_thr, binsize=None, threshold=0.0,
                    window=None, upload_data=True, upload_tmpl=True, cascade_band=None, ct1=None,
                    raw_thr1=None, slot=None, async_submit=False, sparse=False, row_windows=None,
-                   handle_out=None):
+                   handle_out=None, refine_reach=None):
         """Hierarchical peaks: (idx, val) shaped (data rows, templates, bins) as peaks returns,
         or a _SparsePeaks when sparse, from one recording that gates every pair at a narrow
         band (one tier, or a cascade of two) and refines only the survivors at n.
@@ -370,7 +370,7 @@ class HierOps:
                 lambda w, ud, ut: self.hier_peaks(
                     n, band, data, tmpl, ct0, raw_thr, binsize=binsize, threshold=threshold,
                     window=w, upload_data=ud, upload_tmpl=ut, cascade_band=cascade_band,
-                    ct1=ct1, raw_thr1=raw_thr1, slot=slot),
+                    ct1=ct1, raw_thr1=raw_thr1, slot=slot, refine_reach=refine_reach),
                 lo, hi, binsize, MAX_BINS, upload_data, upload_tmpl, sparse, async_submit)
         if cascade_band is not None:
             tiers = ((int(cascade_band), ct0, float(raw_thr)), (int(band), ct1, float(raw_thr1)))
@@ -392,14 +392,23 @@ class HierOps:
 
         dv, tv = shared_view(data, self), shared_view(tmpl, self)
         # The feed: claim the deferred forward of these spectra when its bands move fewer
-        # bytes than the full spectra (band_forward_wanted, the refine-block fraction this
-        # shape measured last time).
+        # bytes than the full spectra (band_forward_wanted). It is a function of the call,
+        # never of earlier ones: the feeds round differently (different FFT routes before
+        # the fp16 step), so a fraction measured on an earlier call made a batch and the same
+        # calls made one by one disagree on pairs within an fp16 step of a gate's threshold.
+        # The call's refine-block fraction lies between refine_reach (a pair's modelled
+        # probability of reaching the refine; a block refines at least as often as any of its
+        # pairs) and 1 - (1 - reach)^templates (independent pairs). The lower bound prices
+        # it, so the full forward is taken only when it moves fewer bytes for certain: the
+        # upper bound took it on the production profile, where bank neighbours trigger
+        # together, and lost 3.8% on the 8060S ladder.
         feed = "inplace" if self.inplace_feed else "pack"
         claim = None
         frac_key = (n, top, nd, nt)
+        banded = band_forward_wanted(
+            n, top, None if refine_reach is None else min(max(float(refine_reach), 0.0), 1.0))
         tier0_ok = half and self._shipped("fwd_tier0", n)
-        if dv is not None and (tier0_ok or self.inplace_feed) and band_forward_wanted(
-                n, top, self.__dict__.get("_band_f", {}).get(frac_key)):
+        if dv is not None and (tier0_ok or self.inplace_feed) and banded:
             claim = self._exec_claim(slot, data, nd)
             if claim is not None:
                 CLAIMS[0] += 1
@@ -448,8 +457,7 @@ class HierOps:
         binds = self._hier_binds(n, tiers, nd, nt, nbins, lo, hi, binsize, shift, t2, half, ed,
                                  et, rw is not None, layout, claim, data)
         shape = (nd, nt, nbins)
-        mode = (frac_key, feed in ("tier0", "bands") or band_forward_wanted(
-            n, top, self.__dict__.get("_band_f", {}).get(frac_key))) if dv is not None else None
+        mode = (frac_key, feed in ("tier0", "bands") or banded) if dv is not None else None
         if handle_out is not None:
             handle_out.append(HierHandle(
                 key=key, rec=rec, binds=binds, dsig=self._uploaded["data"].get(storage_key),
@@ -738,9 +746,10 @@ class HierOps:
             rows = self._x_view(B["surv%d" % last], np.uint32, count)
         if frac_key is not None:
             from . import gatechain
-            f = refine_block_fraction(rows, nt, nd)
-            self.__dict__.setdefault("_band_f", {})[frac_key] = f
-            gatechain.note_refine_blocks(frac_key[0], frac_key[1], f)
+            # Measured for the cost model's forward pricing (not for the feed: see
+            # _hier_peaks).
+            gatechain.note_refine_blocks(frac_key[0], frac_key[1],
+                                         refine_block_fraction(rows, nt, nd))
         if not sparse:
             if count == 0:
                 return (np.full(shape, -1, np.int32), np.zeros(shape, np.complex64))
@@ -779,19 +788,11 @@ class HierOps:
     # ---- replay --------------------------------------------------------------------------
     def hier_valid(self, h):
         """Whether hier_replay(h) would submit: the record is the one the handle saw and both
-        inputs are still resident under the signatures it saw; and the measured band/full
-        choice has not flipped since (a record made for one feed is never replayed for the
-        other)."""
-        if not (self._exec_table().get(h.key) is h.rec
+        inputs are still resident under the signatures it saw. (The band/full feed is a
+        function of the call, so a replay of the same call takes the same one.)"""
+        return (self._exec_table().get(h.key) is h.rec
                 and self._uploaded["data"].get(h.storage) == h.dsig
-                and self._uploaded["tmpl"].get(h.storage) == h.tsig):
-            return False
-        if h.mode is not None:
-            frac_key, banded = h.mode
-            n, top = frac_key[0], frac_key[1]
-            if band_forward_wanted(n, top, self.__dict__.get("_band_f", {}).get(frac_key)) != banded:
-                return False
-        return True
+                and self._uploaded["tmpl"].get(h.storage) == h.tsig)
 
     def hier_replay(self, h, slot, async_submit, validated=False):
         """Submit a hier_peaks call again from its handle, or None if the handle is stale.
@@ -800,6 +801,7 @@ class HierOps:
             return None
         self._cache_touch("exec", h.key)
         if h.claim:
+            CLAIMS[0] += 1
             self._exec_claim(slot, None, h.shape[0])      # the replayed forward it replaces
         return self._hier_run(h.rec, h.binds, h.shape, h.sparse, h.way, "args1" in h.rec.buffers,
                               h.mode[0] if h.mode is not None else None, slot, async_submit)

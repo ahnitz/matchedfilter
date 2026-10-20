@@ -362,28 +362,28 @@ def test_follow_up_items_pass_scalar_words(monkeypatch):
 
 
 # --- the band/full choice -------------------------------------------------------------
-def test_the_band_feed_follows_the_measured_refine_fraction(monkeypatch):
+def test_the_band_feed_follows_the_calls_modelled_refine_fraction(monkeypatch):
     """A call on shared spectra claims its deferred forward and writes only the bands when
-    the blocks its shape refined last time make that the fewer bytes, or when nothing is
-    measured yet (a gate dismisses nearly every block); a measured large fraction takes the
-    full forward. Every call notes its fraction, banded or not."""
+    its modelled refine-block fraction (its lower bound, refine_reach) makes that the fewer
+    bytes, or with no model; a large modelled fraction takes the full forward. The
+    fraction an earlier call measured never decides it: the feeds round differently, and a
+    feed chosen from history made a batch disagree with the same calls made one by one."""
+    from matchedfilter import gatechain
     monkeypatch.setattr(_gpuhier, "shared_view", lambda array, ctx: array)
     ctx = Driver()
     n = 4096
     d = np.ones((2, n), np.complex64)
     h = np.ones((3, n), np.complex64)
     claimed = []
-    for f in (None, 0.9, 0.0):
-        if f is not None:
-            ctx._band_f[(n, 128, 2, 3)] = f
+    for reach in (None, 0.9, 0.0, None):
+        gatechain.note_refine_blocks(n, 128, 1.0)        # a measured fraction: ignored
         source = (n, None, None, 0, 2, 8 * n, 0, d, d.ctypes.data)
         ctx._defer("forward", {}, 0, source)
         claims = _gpuhier.CLAIMS[0]
-        ctx.hier_peaks(n, 128, d, h, h[:, :128], 0.5, slot=0)
+        ctx.hier_peaks(n, 128, d, h, h[:, :128], 0.5, slot=0, refine_reach=reach)
         claimed.append(_gpuhier.CLAIMS[0] - claims)
-        assert ctx._band_f[(n, 128, 2, 3)] == 0.0      # noted: no pair refined
         ctx.cancel_forward()
-    assert claimed == [1, 0, 1]
+    assert claimed == [1, 0, 1, 1]
     assert ("dispatch", "fwd_bands") in _names(ctx.runs[-1][0])
 
 
@@ -436,7 +436,6 @@ def test_an_unslotted_run_leaves_unrelated_deferred_work_for_its_consumer(monkey
     assert "fwd-other" in ran and "fwd-d" not in ran
     assert list(ctx._pending()) == [1]
     before = _gpuhier.CLAIMS[0]
-    ctx._band_f = {(n, 128, 2, 3): 0.0}           # the band feed is wanted
     monkeypatch.setenv("MF_BAND_FORWARD", "1")
     ctx.hier_peaks(n, 128, d, h, h[:, :128], 0.5, slot=1)
     assert _gpuhier.CLAIMS[0] == before + 1 and not ctx._pending()
