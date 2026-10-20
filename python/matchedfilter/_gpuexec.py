@@ -103,6 +103,9 @@ Driver primitives (a Context provides each):
                             copy bytes of a readback buffer from `offset` into a host array,
                             after the run that wrote them has finished.
   _x_timings()              finish every measurement still outstanding into timing_log.
+  _x_peaks(out)             the device's theoretical peaks for _roofline.gpu_peaks: out (the
+                            device, name, backend) updated with flops per precision, bandwidth
+                            and the formulas they come from.
   _x_view(buf, dtype, count)
                             the first count elements of a readback buffer as a host array,
                             read in place where the host sees that memory (valid until the
