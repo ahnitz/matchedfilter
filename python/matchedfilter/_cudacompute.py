@@ -1155,6 +1155,7 @@ class Context(Executor, InputUploads):
     #: The most blocks one launch takes (gridDim.x), and the byte alignment of a bound view:
     #: a device pointer plus offset, aligned for the widest element a kernel reads (float2).
     max_dispatch_x = 2 ** 31 - 1
+    max_binding_bytes = None        # no per-binding limit below the allocation
     storage_offset_alignment = 16
     #: Shared allocations are managed memory, which migrates between host and device.
     stage_host_inputs = True

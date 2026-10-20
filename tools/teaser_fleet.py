@@ -249,6 +249,44 @@ def compare(paths, out):
     plt.close(fig)
 
 
+def merge(paths, out):
+    """One report from several runs of the same host, device and workload, each its own
+    process (and, for a settled comparison, its own fresh MF_COST_FILE): a row's ms is the
+    median of the runs' medians, its timing blocks are every run's (so the whiskers show the
+    spread between runs, chain-trial outcomes included), and `runs` keeps each run's ms,
+    chain and refine rate. A single process times its blocks after one chain trial; on a
+    RENOIR one run in three locked a different chain at fd=1e-2 and moved that row 12%."""
+    reports = [json.loads(Path(p).read_text()) for p in paths]
+    keys = {(r['host'], r['device'], r['n'], r['data'], r['templates']) for r in reports}
+    if len(keys) != 1:
+        raise ValueError('merge needs runs of one host, device and workload: %s' % sorted(keys))
+    merged = dict(reports[0])
+    merged['date'] = min(r['date'] for r in reports)
+    merged['run_dates'] = [r['date'] for r in reports]
+    merged['load_before'] = [r['load_before'] for r in reports]
+    merged['load_after'] = [r.get('load_after') for r in reports]
+    merged['errors'] = sorted({e for r in reports for e in r['errors']})
+    rows = []
+    for row in reports[0]['rows']:
+        key = (row['kind'], row.get('fd'), row.get('snr'), row['label'])
+        same = [x for r in reports for x in r['rows']
+                if (x['kind'], x.get('fd'), x.get('snr'), x['label']) == key]
+        if len(same) != len(reports):
+            raise ValueError('row %s is missing from some runs' % (key,))
+        values = [x['ms'] for x in same]
+        mid = sorted(range(len(same)), key=lambda i: values[i])[len(same) // 2]
+        m = dict(same[mid])                   # the median run's chain and details
+        m['ms'] = float(np.median(values))
+        blocks = [b for x in same for b in x['timing']['block_ms']]
+        m['timing'] = dict(same[mid]['timing'], block_ms=blocks, min_ms=min(blocks),
+                           max_ms=max(blocks), scope='%d runs, each its own process' % len(same))
+        m['runs'] = [{k: x.get(k) for k in ('ms', 'chain', 'refine_rate')} for x in same]
+        rows.append(m)
+    merged['rows'] = rows
+    Path(out).write_text(json.dumps(merged, indent=2) + '\n')
+    return merged
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--out', required=True)
@@ -260,10 +298,14 @@ def main(argv=None):
     parser.add_argument('--data', type=int, default=512, help='Data series count (default: 512)')
     parser.add_argument('--templates', type=int, default=512, help='Template series count (default: 512)')
     parser.add_argument('--compare', nargs='+', metavar='JSON')
+    parser.add_argument('--merge', nargs='+', metavar='JSON',
+                        help='combine runs of one host and device: per-row median of runs')
     args = parser.parse_args(argv)
     if args.reps < 1:
         parser.error('--reps must be positive')
-    if args.compare:
+    if args.merge:
+        merge(args.merge, args.out)
+    elif args.compare:
         compare(args.compare, args.out)
     else:
         collect(args)

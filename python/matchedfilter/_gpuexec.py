@@ -471,19 +471,32 @@ class Executor(HierOps):
         nd, nt = data.shape[0], tmpl.shape[0]
         if out.shape != (nd, nt, n):
             raise ValueError('full output shape does not match the banks')
+        limit = getattr(self, "max_binding_bytes", None)
+        row = nt * n * 8
+        if limit and out.nbytes > limit and nd > 1 and row <= limit:
+            # One binding spans at most `limit` bytes (Vulkan's maxStorageBufferRange): runs
+            # of whole data rows, each a contiguous slice of `out`.
+            rows = max(1, limit // row)
+            for d0 in range(0, nd, rows):
+                d1 = min(d0 + rows, nd)
+                self.correlate(n, data[d0:d1], tmpl, out[d0:d1], upload_data=upload_data,
+                               upload_tmpl=upload_tmpl, wait=True)
+            return out
         tierc = n > 65536
         split = self._x_tierc(n) if tierc else None
         groups = max(split) if tierc else 1
         ov = shared_view(out, self)
         direct = ov is not None
         working = nd * nt * 8 * n * ((1 if direct else 2) if tierc else (0 if direct else 1))
-        if working <= self._FULL_BUDGET and nd * nt * groups <= self.max_dispatch_x:
+        if (working <= self._FULL_BUDGET and nd * nt * groups <= self.max_dispatch_x
+                and not (limit and out.nbytes > limit)):
             self._correlate_tile(n, data, tmpl, out, upload_data, upload_tmpl, split,
                                  wait or not direct, ov)
             return out
         per_pair = 8 * n * (2 if tierc else 1)
         tile = min(nt, max(1, self._FULL_BUDGET // per_pair),
-                   max(1, self.max_dispatch_x // groups))
+                   max(1, self.max_dispatch_x // groups),
+                   max(1, limit // (8 * n)) if limit else nt)
         for d in range(nd):
             for t0 in range(0, nt, tile):
                 t1 = min(t0 + tile, nt)
@@ -548,6 +561,20 @@ class Executor(HierOps):
         if ov is None or out.ndim != 2 or out.shape[0] != nt or starts.shape != (nd,):
             raise ValueError('continuous output must be a shared GPU buffer of every template')
         length = out.shape[1]
+        limit = getattr(self, "max_binding_bytes", None)
+        if limit and out.nbytes > limit and nt > 1 and length * 8 <= limit:
+            # One binding spans at most `limit` bytes: groups of whole templates, each a
+            # contiguous run of `out`'s rows (see correlate).
+            group = max(1, limit // (length * 8))
+            for t0 in range(0, nt, group):
+                t1 = min(t0 + group, nt)
+                self.correlate_continuous(n, data, tmpl[t0:t1], starts, out[t0:t1], lo, hi,
+                                          upload_data=upload_data, upload_tmpl=upload_tmpl,
+                                          async_submit=False)
+            return out
+        if limit and out.nbytes > limit:
+            raise ValueError("continuous output of %d bytes per template exceeds this device's "
+                             "%d-byte binding limit: correlate a shorter series" % (length * 8, limit))
         split = self._x_tierc(n) if n > 65536 else None
         # The two-stage form needs per-pair scratch: runs of whole data rows bound it (a row
         # past the budget is one run). Each run's starts are its own uploaded copy.

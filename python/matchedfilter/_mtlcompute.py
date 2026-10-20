@@ -1092,6 +1092,7 @@ class Context(Executor, InputUploads):
     #: The most threadgroups one dispatch takes, and the byte alignment of a bound view
     #: (setBuffer:offset: for the widest element a kernel reads, float2).
     max_dispatch_x = 2 ** 32 - 1
+    max_binding_bytes = None        # no per-binding limit below the allocation
     storage_offset_alignment = 16
 
     #: Libraries compile at run time, with the build-time constants as macros (twiddle.slang):
