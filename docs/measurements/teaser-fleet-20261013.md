@@ -22,6 +22,10 @@ load 35–37 throughout. Its timing blocks spread by up to 1.36× (16 × 512) an
 1.68× (512 × 512) within one mode, and its SNR sweep is not monotone at 16 ×
 512, so its rows are indicative only.
 
+> **Historical.** Superseded by [the October 20 comparison](teaser-fleet-20261020.md).
+> The figures below are shared assets and now show the October 20 data; this
+> page's tables and JSON keep the October 13 numbers.
+
 ![CPU and GPU throughput, 16 data × 512 templates](../assets/teaser-fleet.svg)
 
 [Machine-readable results, 16 × 512](teaser-fleet-20261013.json) and
