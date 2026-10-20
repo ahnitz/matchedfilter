@@ -3050,11 +3050,14 @@ class HierarchicalFilter(MatchedFilter):
                 if x is not None:
                     plan.set_template(i, x)
 
-    def _restore_into(self, plan):
+    def _restore_into(self, plan, templates=None):
         """Replay reference, templates and data into a freshly built plan."""
         if self._pending_ref is not None:
             plan.set_reference(self._pending_ref)
-        self._load_held_templates(plan)
+        if templates is None:
+            self._load_held_templates(plan)
+        else:
+            plan.set_template_batch(0, templates)
         if self._held:
             if -1 in self._held:
                 plan.set_data_batch(0, self._held[-1])
@@ -3063,7 +3066,7 @@ class HierarchicalFilter(MatchedFilter):
                     if d is not None and i >= 0:
                         plan.set_data(i, d)
 
-    def _ensure(self):
+    def _ensure(self, templates=None):
         """The live plan, built on first use once the chain is known."""
         if self._mf is not None:
             return self._mf
@@ -3073,7 +3076,7 @@ class HierarchicalFilter(MatchedFilter):
             self._chain = self._choose_chain(); self._q15 = getattr(self, "_q15_pref", False)
         self._mf = self._new_cpu_plan(self._chain)
         self._thr_applied = False
-        self._restore_into(self._mf)
+        self._restore_into(self._mf, templates)
         return self._mf
 
     def _execution_plan(self):
@@ -3563,12 +3566,14 @@ class HierarchicalFilter(MatchedFilter):
             self._bandlimited, k = True, self.n // 2
         else:
             raise ValueError(f"expected shape ({self.ntemplates}, {self.n}) or ({self.ntemplates}, {self.n // 2}), got {a.shape}")
-        rebuild = self._mf is not None and getattr(self._mf, 'k', self.n) != k
+        rebuild = self._mf is None or getattr(self._mf, 'k', self.n) != k
         self.k = k
         self._held_templates = self._hold(a)
         if rebuild:
             self._mf = None
-        plan = self._ensure()
+        # A new plan consumes this batch while restoring its state; regenerating it
+        # from the template source here would duplicate both generation and ingestion.
+        plan = self._ensure(templates=a)
         if not rebuild:
             plan.set_template_batch(0, a)
         self._mark_ready("template", None)
