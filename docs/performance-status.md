@@ -48,7 +48,7 @@ GPU (one device; the host's single CPU thread drives it):
 | Vulkan, Radeon RENOIR (Ryzen 5 5500U) | 2.33e7 / 2.63e7 (2.62–2.63e7) | 134 ms | 20.1% (batched 17.8%) | tier0 b256 (fp16 compute) | 256,512 | gravity-dev3, load ~1 |
 | Vulkan, Intel Iris Xe (i5-13500H) | 1.78e7 (1.78–1.79e7) / 1.83e7 | 193 ms | no peak model (no shader-core count for Intel) | — | 256,512 | gravity-dev4, load ~0.9; subgroup 8 measured |
 | Metal, Apple M2 (10-core GPU) | 2.95e7 (2.80–3.06e7) / 3.22e7 (3.17–3.24e7) | 108 ms | 28.2% (batched 26.2%) | tier0 b256 (fp16 compute) | 256,512 | empire, load ~2 |
-| CUDA, NVIDIA L40S | not re-measured | ~11.4 ms (2026-10-13) | no gated fraction | latency/launch: small grids per launch on 142 SMs | | 6e299074; [CUDA roofline](cuda-l40s-roofline.md) |
+| CUDA, NVIDIA L40S | 1.86e8 / 1.90e8 (1.76–1.92e8) | 19.6 ms | 11.3% (batched 11.6%) | forward (memory) | 512,2048 at n=4096 | condor job on OG-NODE-10-5-199-188, 8 cores; the node's other L40S ran another user's job at ~95% throughout; `2725cdcc` |
 
 CPU (one core):
 
@@ -56,12 +56,17 @@ CPU (one core):
 |---|---:|---:|---:|---|---|---|
 | x86, Zen 5 (Ryzen AI MAX+ 395) | 1.06e7 / 1.06e7 | 332 ms | 41.7% | q15 b256 (int16 compute) | 256,512,1024 + Q15 | gravity-dev2, CPU 2, load ~1.3 |
 | x86, Zen 3 (Ryzen 9 5950X) | not re-measured | | | | | gravity-dev1: another user's jobs held every core (load ~20) on 2026-10-20; the runs taken then were 6–21× slower and are not used |
+| x86, Zen 5c (EPYC 9845) | 8.03e6 (7.78–8.09e6) / 7.98e6 | 444 ms | 41.4% | q15 b256 (int16 compute) | 256,512,1024 + Q15 | the L40S node's CPU, core 0 of the job's 8, load ~2 |
 | x86, Raptor Lake P-core (i5-13500H) | 5.01e6 / 4.99e6 | 712 ms | 42.7% | q15 b256 (int16 compute) | 256,512 + Q15 | gravity-dev4, CPU 2, load ~1.2 |
 | x86, Zen 2 (Ryzen 5 5500U) | 3.71e6 / 3.70e6 | 959 ms | 36.6% | q15 b256 (int16 compute) | 256,512,1024 + Q15 | gravity-dev3, CPU 2, load ~1 |
 | ARM, Apple M2 performance core | 3.61e6 / 3.61e6 | 979 ms | 38.0% | tier0 b256 (NEON fp16 compute) | 256,512,1024 | empire, load ~2 (macOS schedules the thread) |
 | x86, Haswell (E5-2698 v3) | 1.41e6 (1.40–1.46e6) / 1.42e6 | 2515 ms | 40.6% | q15 b256 (int16 compute) | 256,512,1024 + Q15 | shared cluster node, CPU 50, load 29–42 |
 
-Against the previous page (2026-10-13), none of which is a paired comparison: the 8060S
+Against the previous page (2026-10-13), none of which is a paired comparison: the L40S
+is 19.6 ms per segment where that page had ~11.4 ms, but the 11.4 ms came from the
+ladder's `LADDER_INFLIGHT` mode (CUDA segment graphs, two segments in flight; 6e299074),
+a benchmark-only replay path removed on 2026-10-16 (1dc65f36) because production never
+used it; the default path measured here is the one pycbc runs; the 8060S
 pipelined segment is 16.2 ms (was ~15.5 ms, 40.9%, from 3 alternating rounds of another
 protocol; the stage U paired ladders found the current code at parity with the main before
 it on this machine); the M2 GPU is 108 ms at 28.2%

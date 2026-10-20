@@ -1,6 +1,7 @@
 # Hardware comparison at revision 4fd8b0d4
 
-Measured October 20, 2026 (UTC), at revision `4fd8b0d4` on `main`: the code after the
+Measured October 20, 2026 (UTC), at revision `4fd8b0d4` on `main` (the L40S node at
+`2725cdcc`, which changes only tests and benchmark data since): the code after the
 backend unification (stage U) and the Vulkan binding-limit fix below. This recalculates
 [the October 13 comparison](teaser-fleet-20261013.md); earlier pages are kept for
 history. Every run's timing blocks are in the recorded JSON.
@@ -41,12 +42,9 @@ Entries marked **†** are carried over unchanged from an earlier JSON, with the
 original date and revision, and are labelled as such in the figures and on the
 interactive page:
 
-- NVIDIA L40S (GPU) from October 13 at `2b3cac13`, and the EPYC 9845 CPU of that node
-  from October 3: the node is reached through a condor GPU job, which was not submitted
-  for this page. **Its 512 × 512 full-output row (12.16 ms) is from CUDA, which has no
-  binding limit, and is plausible (706 GB/s).**
-- NVIDIA A100 80GB and A40 from October 4 at `2a33e8f`: their login host did not
-  accept this session's key.
+- NVIDIA A100 80GB and A40 from October 4 at `2a33e8f`: on their login host
+  (its-og-login1) key authentication succeeds but every session exits at once with
+  status 1, so nothing could run there.
 - Xeon Platinum 8260 (sugwg-login2) from October 3: a login node, not used for
   benchmarks.
 - Ryzen 9 5950X (gravity-dev1) from October 13 at `2b3cac13`: re-measured on
@@ -88,6 +86,7 @@ correlation reuses output storage; GPU calls include synchronization.
 | gravity-dev4 | CPU, GPU | 2026-10-20 05:21–05:54 | 0.1–1.2 | 3.13.15 | native library built on gravity-dev2 (same sources); no rocFFT reference |
 | empire-m2 | CPU, GPU | 2026-10-20 05:22–05:52 | 2.0–4.8 | 3.13.3 | |
 | haswell | CPU | 2026-10-20 05:24–06:11 | 28.8–40.4 | 3.11.0 | shared cluster node; no pyFFTW |
+| sugwg-l40s | CPU, GPU | 2026-10-20 19:45–20:14 | 1.3–2.1 | 3.11.0 | condor job on OG-NODE-10-5-199-188, 8 cores; the node's other L40S ran another user's job at ~95% throughout; no pyFFTW |
 
 Hosts without a physical GPU (gravity-dev1, sugwg-login2, Haswell) have no GPU
 rows; software rendering is excluded.
@@ -105,7 +104,7 @@ Milliseconds per batch; smaller is faster. Hierarchical columns are at SNR 5.5.
 | Apple M2 (CPU) | 251.54 (FFTW) | 68.79 | 57.74 | 3.20 | 5.35 | 7.39 |
 | Xeon Platinum 8260 (CPU) † | unavailable | 127.20 | 78.89 | 6.68 | 12.36 | 14.87 |
 | Xeon CPU E5-2698 v3 @ 2.30GHz (CPU) ‡ | unavailable | 199.13 | 111.25 | 6.28 | 19.42 | 23.17 |
-| EPYC 9845 (CPU) † | unavailable | 41.96 | 29.64 | 2.52 | 4.67 | 5.48 |
+| EPYC 9845 (CPU) | unavailable | 43.01 | 30.71 | 1.34 | 3.20 | 4.82 |
 
 | GPU | FFT only | Full | Peak | Hier. 0.01 | Hier. 0.001 | Hier. 0.0001 |
 |---|---:|---:|---:|---:|---:|---:|
@@ -113,7 +112,7 @@ Milliseconds per batch; smaller is faster. Hierarchical columns are at SNR 5.5.
 | Radeon Graphics — Ryzen 5 5500U (GPU) | unavailable | 18.38 | 8.21 | 1.81 | 1.88 | 2.15 |
 | Iris Xe Graphics (GPU) | unavailable | 24.26 | 5.08 | 0.69 | 1.07 | 1.61 |
 | Apple M2 (GPU) | 11.92 (MLX) | 6.33 | 3.68 | 0.60 | 0.79 | 1.07 |
-| NVIDIA L40S (GPU) † | 0.81 (cuFFT) | 0.41 | 0.22 | 0.09 | 0.15 | 0.15 |
+| NVIDIA L40S (GPU) | 0.82 (cuFFT) | 0.42 | 0.23 | 0.11 | 0.12 | 0.13 |
 
 At `fd=1e-3`, varying the SNR threshold:
 
@@ -126,7 +125,7 @@ At `fd=1e-3`, varying the SNR threshold:
 | Apple M2 (CPU) | 11.33 | 5.35 | 3.56 | 2.82 | 1.65 |
 | Xeon Platinum 8260 (CPU) † | 22.35 | 12.36 | 10.12 | 6.62 | 4.76 |
 | Xeon CPU E5-2698 v3 @ 2.30GHz (CPU) ‡ | 30.85 | 19.42 | 7.00 | 5.15 | 3.21 |
-| EPYC 9845 (CPU) † | 7.59 | 4.67 | 3.13 | 2.34 | 1.56 |
+| EPYC 9845 (CPU) | 7.58 | 3.20 | 1.59 | 1.05 | 0.58 |
 
 | GPU | 5.0 | 5.5 | 5.75 | 6.0 | 6.5 |
 |---|---:|---:|---:|---:|---:|
@@ -134,7 +133,7 @@ At `fd=1e-3`, varying the SNR threshold:
 | Radeon Graphics — Ryzen 5 5500U (GPU) | 2.77 | 1.88 | 1.93 | 1.54 | 0.48 |
 | Iris Xe Graphics (GPU) | 2.09 | 1.07 | 0.93 | 0.72 | 0.58 |
 | Apple M2 (GPU) | 1.29 | 0.79 | 0.62 | 0.57 | 0.47 |
-| NVIDIA L40S (GPU) † | 0.17 | 0.15 | 0.14 | 0.09 | 0.09 |
+| NVIDIA L40S (GPU) | 0.15 | 0.12 | 0.11 | 0.11 | 0.10 |
 
 ## 512 data × 512 templates (262,144 pairs)
 
@@ -150,11 +149,12 @@ The RENOIR and Iris Xe GPUs and the i5-13500H CPU are new at this size.
 | Ryzen 5 5500U (CPU) | 2809.35 (FFTW) | 2352.72 | 1583.48 | 114.51 | 240.90 | 297.32 |
 | Xeon CPU E5-2698 v3 @ 2.30GHz (CPU) ‡ | unavailable | 6868.63 | 3831.52 | 222.61 | 416.89 | 773.98 |
 | Core i5-13500H (CPU) | 1451.63 (FFTW) | 1794.27 | 1166.41 | 73.92 | 132.19 | 220.20 |
+| EPYC 9845 (CPU) | unavailable | 1321.26 | 956.22 | 54.33 | 122.19 | 167.88 |
 
 | GPU | FFT only | Full | Peak | Hier. 0.01 | Hier. 0.001 | Hier. 0.0001 |
 |---|---:|---:|---:|---:|---:|---:|
 | NVIDIA A100 80GB PCIe (GPU) † | 10.41 (cuFFT) | 20.18 | 14.84 | 7.54 | 14.05 | 14.55 |
-| NVIDIA L40S (GPU) † | 26.19 (cuFFT) | 12.16 | 6.02 | 1.18 | 1.78 | 1.98 |
+| NVIDIA L40S (GPU) | 26.10 (cuFFT) | 12.27 | 5.96 | 0.87 | 1.17 | 1.72 |
 | NVIDIA A40 (GPU) † | 30.68 (cuFFT) | 39.75 | 16.88 | 9.44 | 17.79 | 18.42 |
 | Radeon 8060S (GPU) | 79.26 (rocFFT) | 47.65 | 10.45 | 1.37 | 2.00 | 2.40 |
 | Apple M2 (GPU) | 371.92 (MLX) | 186.67 | 106.90 | 8.49 | 13.29 | 22.38 |
@@ -171,16 +171,19 @@ At `fd=1e-3`, varying the SNR threshold:
 | Ryzen 5 5500U (CPU) | 576.89 | 240.90 | 135.05 | 90.91 | 52.90 |
 | Xeon CPU E5-2698 v3 @ 2.30GHz (CPU) ‡ | 1099.66 | 416.89 | 264.71 | 182.53 | 136.12 |
 | Core i5-13500H (CPU) | 318.05 | 132.19 | 84.53 | 61.35 | 37.82 |
+| EPYC 9845 (CPU) | 255.10 | 122.19 | 66.44 | 41.07 | 23.59 |
 
 | GPU | 5.0 | 5.5 | 5.75 | 6.0 | 6.5 |
 |---|---:|---:|---:|---:|---:|
 | NVIDIA A100 80GB PCIe (GPU) † | 15.73 | 14.05 | 7.99 | 7.50 | 7.21 |
-| NVIDIA L40S (GPU) † | 2.66 | 1.78 | 1.21 | 0.97 | 0.92 |
+| NVIDIA L40S (GPU) | 2.24 | 1.17 | 0.92 | 0.83 | 0.68 |
 | NVIDIA A40 (GPU) † | 19.39 | 17.79 | 9.77 | 9.44 | 9.18 |
 | Radeon 8060S (GPU) | 3.35 | 2.00 | 1.81 | 1.32 | 0.81 |
 | Apple M2 (GPU) | 31.41 | 13.29 | 9.34 | 7.77 | 4.52 |
 | Radeon Graphics — Ryzen 5 5500U (GPU) | 63.86 | 36.67 | 33.08 | 32.04 | 10.53 |
 | Iris Xe Graphics (GPU) | 61.74 | 31.13 | 24.55 | 17.98 | 11.25 |
+
+The EPYC 9845 CPU is new at this size too.
 
 ## Change since the previous measurement
 
@@ -204,11 +207,15 @@ not attributable to the library. **The Radeon 8060S 512 × 512 full-output chang
 | Apple M2 (CPU) | 69.65 → 68.79 | 58.46 → 57.74 | 3.26 → 3.20 | 5.46 → 5.35 | 7.55 → 7.39 |
 | Apple M2 (GPU) | 6.32 → 6.33 | 3.68 → 3.68 | 0.63 → 0.60 | 0.82 → 0.79 | 1.04 → 1.07 |
 | Xeon CPU E5-2698 v3 @ 2.30GHz (CPU) ‡ | 268.27 → 199.13 | 134.49 → 111.25 | 7.56 → 6.28 | 18.02 → 19.42 | 24.85 → 23.17 |
+| EPYC 9845 (CPU) | 41.96 → 43.01 | 29.64 → 30.71 | 2.52 → 1.34 | 4.67 → 3.20 | 5.48 → 4.82 |
+| NVIDIA L40S (GPU) | 0.41 → 0.42 | 0.22 → 0.23 | 0.09 → 0.11 | 0.15 → 0.12 | 0.15 → 0.13 |
 
 512 × 512:
 
+
 | Hardware | Full | Peak | Hier. 0.01 | Hier. 0.001 | Hier. 0.0001 |
 |---|---:|---:|---:|---:|---:|
+| NVIDIA L40S (GPU) | 12.16 → 12.27 | 6.02 → 5.96 | 1.18 → 0.87 | 1.78 → 1.17 | 1.98 → 1.72 |
 | Ryzen AI Max+ 395 (CPU) | 1119.53 → 1086.96 | 726.77 → 637.22 | 46.86 → 45.60 | 89.12 → 90.43 | 119.33 → 119.47 |
 | Radeon 8060S (GPU) | 11.12 → 47.65 | 10.97 → 10.45 | 1.40 → 1.37 | 2.15 → 2.00 | 2.60 → 2.40 |
 | Apple M2 (CPU) | 2221.52 → 2198.06 | 1867.55 → 1851.29 | 113.83 → 111.74 | 199.64 → 196.17 | 260.54 → 255.85 |
