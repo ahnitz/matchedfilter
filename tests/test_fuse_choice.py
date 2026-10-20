@@ -34,7 +34,13 @@ def test_batches_alternate_fused_and_unfused_then_keep_one(monkeypatch, tmp_path
     monkeypatch.setattr(td, "_device_trial", lambda table, key, *a, **k:
                         (lambda r: sides.append(r[0]) or r)(orig(table, key, *a, **k))
                         if table is td._FUSE_CHOICE else orig(table, key, *a, **k))
-    for _ in range(2 * td._SINGLE_TRIALS + 4):
+    # Batches until the trial locks: a batch is a sample only when no chain trial is trying
+    # candidates in it and it builds no recording, and an unclear contest samples both
+    # sides further (up to _SINGLE_TRIALS_MAX each), so the count needed is not fixed --
+    # 2 * _SINGLE_TRIALS + 4 batches left CI's paravirtual M2 undecided. Bounded.
+    for _ in range(40):
+        if sides and all(t["winner"] is not None for t in td._FUSE_CHOICE.values()):
+            break
         xs = []
         for _ in banks:
             X = np.fft.fft(rng.standard_normal(S))
