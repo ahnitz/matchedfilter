@@ -99,4 +99,5 @@ load ~12); Haswell is 2.51 s (was 2.50–2.57 s).
 - [Cross-platform review](cross-platform-review.md): which mechanisms each backend has,
   ranked gaps, and requests per backend.
 - [Hardware comparison](measurements/teaser-fleet-20261020.md): the public-call
-  workloads (16 and 512 data × 512 templates) on every machine.
+  workloads (16 and 512 data × 512 templates) on every machine, three runs per
+  machine and device, each row the median.
