@@ -101,23 +101,9 @@ class InputUploads:
     # (63 buffer allocations per call at n=4096). Memory is bounded by the byte limit.
     cache_limit_entries = 256
 
-    #: Record kind -> the attribute holding that kind's records. Every operation's records
-    #: are the shared executor's (_gpuexec), one table on every backend.
-    RECORD_TABLES = (('exec', '_exec_records'),)
-
-    def _record_tables(self):
-        """{kind: table} for the record tables this context has."""
-        return {kind: getattr(self, attr) for kind, attr in self.RECORD_TABLES
-                if getattr(self, attr, None) is not None}
-
     def _evict_all(self):
-        """Evict every record (the executor's at once, _exec_clear)."""
-        if hasattr(self, "_exec_clear"):
-            self._exec_clear()
-            return
-        for kind, table in self._record_tables().items():
-            for key in list(table):
-                self._evict_record(kind, key)
+        """Evict every executor record at once."""
+        self._exec_clear()
 
     @staticmethod
     def _allocation(buf):
@@ -147,15 +133,14 @@ class InputUploads:
             allocations[id(allocation)] = getattr(allocation, 'nbytes', 0)
         return sum(allocations.values())
 
-    def _cache_touch(self, kind, key):
+    def _cache_touch(self, key):
         order = getattr(self, '_cache_order', None)
         if order is None:
             order = self._cache_order = {}
-        token = (kind, key)
-        order.pop(token, None)
-        order[token] = None
+        order.pop(key, None)
+        order[key] = None
 
-    def _cache_room(self, estimate, *, incoming=(), keep_storage=None):
+    def _cache_room(self, estimate, *, incoming=()):
         """Evict least-recently used records until estimate more bytes fit the budget,
         counting shared allocations once. A single oversized operation is still permitted;
         the budget bounds retained work. Incoming shared buffers stay counted even if their
@@ -166,9 +151,8 @@ class InputUploads:
             if (len(order) < self.cache_limit_entries
                     and self._cache_bytes(incoming) + estimate <= self.cache_limit_bytes):
                 break
-            token = next((t for t in order if t[1] not in hold), None)
-            if token is None:
+            key = next((k for k in order if k not in hold), None)
+            if key is None:
                 break
-            kind, key = token
-            order.pop((kind, key))
-            self._evict_record(kind, key, keep_storage)
+            order.pop(key)
+            self._exec_evict(key)

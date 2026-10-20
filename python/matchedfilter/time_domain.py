@@ -1224,21 +1224,22 @@ class _TemplateGroup:
         if plan is not None:
             cache.move_to_end(int(ti))
             return plan
-        sp = self.full_spectra(slice(int(ti), int(ti) + 1))
         from .device import parse as _parse_device
         if _parse_device(self.device).kind == 'gpu' and not on_cpu:
             # A GPU plan owns a device context (~10 ms to create): keep one and load the
             # template into it. The caller runs the plan before asking for the next one.
             plan = self.__dict__.get('_single_gpu_plan')
-            if plan is None:
-                plan = self._single_gpu_plan = MatchedFilter(self.n, ndata=1, ntemplates=1,
-                                                             device=self.device)
             if self.__dict__.get('_single_gpu_ti') != int(ti):
+                sp = self.full_spectra(slice(int(ti), int(ti) + 1))
+                if plan is None:
+                    plan = self._single_gpu_plan = MatchedFilter(self.n, ndata=1, ntemplates=1,
+                                                                 device=self.device)
                 # Calls deferred in a batch still read the current template: let them finish.
                 plan._settle_deferred()
                 plan.set_templates(np.ascontiguousarray(sp))
                 self._single_gpu_ti = int(ti)
             return plan
+        sp = self.full_spectra(slice(int(ti), int(ti) + 1))
         plan = MatchedFilter(self.n, ndata=1, ntemplates=1, device=None if on_cpu else self.device)
         plan.set_templates(np.ascontiguousarray(sp))
         cache[int(ti)] = plan
@@ -2003,7 +2004,6 @@ class TimeDomainFilterBank:
         Per window this is the bank's established vectorised layout."""
         STEP = g.n_valid
         c_bad = g.c_bad
-        N_valid = g.n_valid
         parts_t, parts_s, parts_e = [], [], []
         for v_start, v_stop in W.tolist():
             first_block_idx = max(0, (v_start - c_bad) // STEP)
@@ -2011,15 +2011,14 @@ class TimeDomainFilterBank:
             # whole remaining series per narrow window makes sparse layouts quadratic.
             ts = np.arange(first_block_idx * STEP, min(S, v_stop - c_bad), STEP,
                            dtype=np.int64)
-            bvt0 = ts + c_bad
-            keep = (bvt0 < v_stop) & (bvt0 + N_valid > v_start)
-            ts = ts[keep]
             if not ts.size:
                 continue
-            rs = np.maximum(v_start, bvt0[keep])
-            re = np.minimum(v_stop, bvt0[keep] + N_valid)
-            good = re > rs
-            parts_t.append(ts[good]); parts_s.append((rs - ts)[good]); parts_e.append((re - ts)[good])
+            # The first block ends after v_start and the exclusive stop keeps every
+            # block's valid start before v_stop, so every generated block intersects.
+            bvt0 = ts + c_bad
+            rs = np.maximum(v_start, bvt0)
+            re = np.minimum(v_stop, bvt0 + STEP)
+            parts_t.append(ts); parts_s.append(rs - ts); parts_e.append(re - ts)
         if not parts_t:
             empty = np.empty(0, np.uintp)
             return empty, empty, empty

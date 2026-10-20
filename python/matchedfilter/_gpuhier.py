@@ -438,7 +438,7 @@ class HierOps:
             rec = self._hier_record(key, n, tiers, nd, nt, nbins, layout, half, feed, way, rw,
                                     ed, dv, tv, data, tmpl, claim)
             table[key] = rec
-        self._cache_touch("exec", key)
+        self._cache_touch(key)
         self._claim(rec.buffers["idx"])          # an earlier result still reading these outputs
         if fresh:
             uploads = (True, True, *uploads[2:])
@@ -799,7 +799,7 @@ class HierOps:
         validated=True: the caller checked hier_valid for every part of a call first."""
         if not validated and not self.hier_valid(h):
             return None
-        self._cache_touch("exec", h.key)
+        self._cache_touch(h.key)
         if h.claim:
             CLAIMS[0] += 1
             self._exec_claim(slot, None, h.shape[0])      # the replayed forward it replaces

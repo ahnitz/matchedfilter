@@ -207,6 +207,27 @@ def test_single_window_layout_matches_former_layouts():
     assert checked == 3 * 3 * 700
 
 
+def test_window_layout_small_boundaries():
+    """Every generated block intersects even at exact step/padding boundaries."""
+    from types import SimpleNamespace
+
+    S = 12
+    for step in range(1, 6):
+        for c_bad in range(0, 15):
+            g = SimpleNamespace(n_valid=step, c_bad=c_bad)
+            for a in range(S):
+                for b in range(a + 1, S + 1):
+                    actual = TimeDomainFilterBank._window_layout(
+                        g, np.array([[a, b]], np.int64), S)
+                    expected = []
+                    for start in range(0, S, step):
+                        lo, hi = max(a, start + c_bad), min(b, start + c_bad + step)
+                        if lo < hi:
+                            expected.append((start, lo - start, hi - start))
+                    assert list(zip(*(v.tolist() for v in actual))) == expected
+                    assert all(v.dtype == np.dtype(np.uintp) for v in actual)
+
+
 # ------------------------------------------------------------ 3. K-window equivalence
 
 GEOMETRIES = {

@@ -413,21 +413,16 @@ class Executor(HierOps):
         for resident in self._uploaded.values():
             resident.pop(key, None)
 
-    def _evict_record(self, kind, key, keep_storage=None):
-        """The cache's eviction hook (_gpu_cache._cache_room): every record is an executor
-        record."""
-        return self._exec_evict(key)
-
     def _exec_room(self, estimate, incoming=()):
         """Room for a new record: at most cache_limit_entries records (the least recently
         used evicted first), then the byte budget (_cache_room)."""
         table, order = self._exec_table(), getattr(self, "_cache_order", {})
         hold = self.__dict__.get("_exec_hold", ())
         while len(table) >= self.cache_limit_entries:
-            key = next((k for kind, k in order if kind == "exec" and k not in hold), None)
+            key = next((k for k in order if k not in hold), None)
             if key is None:
                 break
-            order.pop(("exec", key))
+            order.pop(key)
             self._exec_evict(key)
         self._cache_room(estimate, incoming=incoming)
 
@@ -538,7 +533,7 @@ class Executor(HierOps):
             rec.native = lst.end()
             table[key] = rec
             uploads = (True, True, *uploads[2:])
-        self._cache_touch("exec", key)
+        self._cache_touch(key)
         if (uploads[0] and "data" in rec.owned) or (uploads[1] and "tmpl" in rec.owned):
             self.settle_writes()       # a call left in flight may still read these inputs
         self._write_uploads(key, uploads, rec.buffers["data"], data, rec.buffers["tmpl"], tmpl)
@@ -617,7 +612,7 @@ class Executor(HierOps):
             rec.native = lst.end()
             table[key] = rec
             uploads = (True, True, *uploads[2:])
-        self._cache_touch("exec", key)
+        self._cache_touch(key)
         if staged or (uploads[0] and "data" in rec.owned) or (uploads[1] and "tmpl" in rec.owned):
             self.settle_writes()          # a call left in flight may still read these inputs
         self._write_uploads(key, uploads, rec.buffers["data"], data, rec.buffers["tmpl"], tmpl)
@@ -713,7 +708,7 @@ class Executor(HierOps):
                 lst.barrier()
                 rec.native = lst.end()
                 table[key] = rec
-            self._cache_touch("exec", key)
+            self._cache_touch(key)
             self._exec_run(rec.native, wait, None, None, rec)
         if wait:
             self.settle_writes()
@@ -783,7 +778,7 @@ class Executor(HierOps):
                 lst.stamp("forward")
             rec.native = lst.end()
             table[key] = rec
-        self._cache_touch("exec", key)
+        self._cache_touch(key)
         binds = {"series": sv, "spectra": pv}
         if staged:
             # A run of this record still deferred reads the starts about to be rewritten.
@@ -813,7 +808,7 @@ class Executor(HierOps):
         """Queue a forward again from its handle; False if its record is gone."""
         if not self.forward_valid(h):
             return False
-        self._cache_touch("exec", h[0])
+        self._cache_touch(h[0])
         self._defer(h[1].native, h[2], slot, h[3])
         return True
 
@@ -969,7 +964,7 @@ class Executor(HierOps):
             rec.native = lst.end()
             table[key] = rec
             uploads = (True, True, *uploads[2:])
-        self._cache_touch("exec", key)
+        self._cache_touch(key)
         self._claim(rec.buffers["idx"])          # an earlier result still reading these
         self._exec_upload(rec, key, uploads, data, tmpl, slot)
         binds = {"w%d" % g: (nt, lo, hi, binsize, shift & 0xFFFFFFFF, nbins, t2bits)
@@ -1213,7 +1208,7 @@ class Executor(HierOps):
             lst.readback(out, vbytes + cap * nbins * 4)
             rec.native = lst.end()
             table[key] = rec
-        self._cache_touch("exec", key)
+        self._cache_touch(key)
         return rec, offs
 
     # ---- grouped hierarchical calls -----------------------------------------------------

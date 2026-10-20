@@ -26,9 +26,9 @@ def test_cache_eviction_and_explicit_clear(plan):
         actual=plan.run(binsize=1,threshold=threshold)
         np.testing.assert_array_equal(actual['index'],expected['index'])
         np.testing.assert_allclose(actual['value'],expected['value'],rtol=1e-5,atol=1e-4)
-        assert sum(map(len, plan._gpu._record_tables().values()))==1
+        assert len(plan._gpu._exec_records)==1
     plan.clear_cache()
-    assert not sum(map(len, plan._gpu._record_tables().values()))
+    assert not plan._gpu._exec_records
     actual=plan.run(binsize=1)
     np.testing.assert_array_equal(actual['index'],expected['index'])
 
