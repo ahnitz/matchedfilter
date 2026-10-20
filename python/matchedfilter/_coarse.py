@@ -161,21 +161,14 @@ def time_staged(stages, time_full, time_screen=None, rounds=3, screen_cut=4.0):
 
 def stored_measured_choice(memo, kind, device, band, cands, label, kernel_id, measure,
                            tiebreak=None, forced=None):
-    """The fastest of cands, measured once per process and kept in MF_COST_FILE under
+    """The fastest of cands, measured once and kept in MF_COST_FILE under
     kind|device|band|labels|k<kernel_id>, so every process sharing the file reproduces it
-    and a build with other kernels measures afresh (gatechain.gpu_kernel_id).
-
-    label(c) names a candidate in the file; measure(cands) returns {candidate: time} (a
-    Timings, whose close calls are decided by preference), or None when the device cannot be
-    timed (the first candidate is then used, unstored). Preference is tiebreak(c), then the
-    candidates' order.
-
-    The two runners-up are stored with the choice, and a process that reads the choice back
-    first times it against them (measure over the three, a few milliseconds). If one is
-    faster beyond the measurement's noise, the stored choice is not trusted: everything is
-    measured again and the new choice stored. A measurement spoiled by a clock or power
-    transition then costs one process, not every process after it; on an 8060S one stored a
-    band-256 layout 1.6x slower than the best, and the file kept it.
+    and a build with other kernels measures afresh (gatechain.gpu_kernel_id). An offline
+    _choice.Choice kept in `memo` (the device's): label(c) names a candidate in the file;
+    measure(cands) returns {candidate: time} (a Timings, whose close calls go to the
+    preference: tiebreak(c), then the candidates' order), or None when the device cannot be
+    timed (the first candidate is then used, unstored). A stored choice is first timed
+    against the two runners-up stored with it (Choice.decide).
 
     forced (a label, forced_layout's) is taken as it is, neither measured nor stored; a label
     that is not a candidate here raises ValueError naming the candidates."""
@@ -185,48 +178,10 @@ def stored_measured_choice(memo, kind, device, band, cands, label, kernel_id, me
             raise ValueError("%s: no candidate %r at band %d on this device; candidates: %s"
                              % (kind, forced, band, ", ".join(labels)))
         return cands[labels.index(forced)]
-    k = (kind, band, tuple(labels))
-    if k in memo:
-        return memo[k]
     if len(cands) == 1:
-        memo[k] = cands[0]
-        return memo[k]
-    from . import gatechain
+        return cands[0]
+    from . import _choice
     ckey = "%s|%s|%d|%s|k%s" % (kind, device, band, ";".join(labels), kernel_id)
-    held = gatechain.stored_choice(ckey)
-    if held in labels:
-        choice = cands[labels.index(held)]
-        rivals = [cands[labels.index(r)]
-                  for r in (gatechain.stored_choice(ckey, "rivals") or "").split(";")
-                  if r in labels and r != held]
-        if not rivals or _still_fastest(choice, rivals, measure):
-            memo[k] = choice
-            return choice
-    times = measure(cands)
-    if not times:
-        memo[k] = cands[0]
-        return memo[k]
-    rank = {c: i for i, c in enumerate(cands)}
-    fastest = min(times, key=lambda c: (times[c], rank.get(c, 0)))
-    # Close calls (Timings.close: within the paired measurement's noise of the fastest) go
-    # to the backend's fixed preference, so a choice the measurement cannot resolve does not
-    # flip from process to process with the noise.
-    near = ({c for c in times if times[c] == times[fastest]}
-            | set(getattr(times, "close", ())))
-    memo[k] = min(near, key=lambda c: (tuple(tiebreak(c)) if tiebreak else ()) + (rank.get(c, 0),))
-    runners = [c for c in sorted(times, key=lambda c: (times[c], rank.get(c, 0))) if c != memo[k]]
-    gatechain.store_choice(ckey, label(memo[k]), rivals=";".join(label(c) for c in runners[:2]))
-    return memo[k]
-
-
-def _still_fastest(choice, rivals, measure):
-    """True unless a rival times faster than choice beyond the noise (measure over the
-    three; Timings.close holds the contenders within it of the fastest), or choice was not
-    timed at all. A device that cannot be timed keeps the choice."""
-    t = measure([choice] + list(rivals))
-    if not t:
-        return True
-    if choice not in t:
-        return False
-    fastest = min(t, key=t.get)
-    return fastest == choice or t[choice] == t[fastest] or choice in getattr(t, "close", ())
+    ch = _choice.choice(kind, (band, tuple(labels)), list(cands), scope=memo, store_key=ckey,
+                        label=label, recheck_stored=True, what="%s %s band %d" % (kind, device, band))
+    return ch.decide(measure, tiebreak)

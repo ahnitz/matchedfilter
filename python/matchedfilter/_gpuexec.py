@@ -190,38 +190,15 @@ class Arg:
 _OUT, _STARTS, _SERIES, _SPECTRA = Arg("out"), Arg("starts"), Arg("series"), Arg("spectra")
 
 
-class Measured:
-    """A choice between ways of doing one call shape, made by timing them on this device.
-
-    Each way runs for `warm` timed calls (after one untimed call that may build its
-    record); then the way with the lower median is used, and the trial repeats every
-    `recheck` calls, so a choice made under other load does not stick."""
-    __slots__ = ("ways", "times", "calls", "current", "warm", "recheck")
-
-    def __init__(self, ways, warm=3, recheck=256):
-        self.ways, self.warm, self.recheck = tuple(ways), warm, recheck
-        self.times = {w: [] for w in self.ways}
-        self.calls, self.current = 0, None
-
-    def way(self):
-        """The way the next call uses, and whether to time it."""
-        self.calls += 1
-        if self.current is not None and self.calls % self.recheck:
-            return self.current, False
-        if self.current is not None:             # a recheck: forget the old trial
-            self.times = {w: [] for w in self.ways}
-            self.current = None
-        for w in self.ways:
-            if len(self.times[w]) < self.warm + 1:
-                return w, True
-        return self.current, False
-
-    def note(self, way, seconds):
-        t = self.times[way]
-        t.append(seconds)
-        if all(len(v) >= self.warm + 1 for v in self.times.values()):
-            # The first call of each way built its record: not counted.
-            self.current = min(self.ways, key=lambda w: float(np.median(self.times[w][1:])))
+#: How a sparse result can be read (flat peaks: compacted on the device or read dense and
+#: scanned on the host; hierarchical: the survivors' rows gathered on the host, or the hits
+#: compacted on the device), the first the preference.
+SPARSE_WAYS = {"flat": ("compact", "dense"), "hier": ("rows", "compact")}
+#: The sparse-way choice (_choice.Choice, online, per call shape): after one dropped call
+#: (it may build the record), three timed calls of each way; the lower median is used
+#: (tie 0: the effect is the whole call's), and the trial repeats every 256 calls, so a
+#: choice made under other load does not stick.
+_SPARSE_SCHEDULE = dict(warmup=1, minimum=3, tie=0.0, z=0.0, retrial=256)
 
 
 class _Records(dict):
@@ -879,13 +856,11 @@ class Executor(HierOps):
         # and the records) or read dense and scanned on the host. Which is cheaper depends on
         # how many bins clear the threshold and on what a byte of readback costs here (a
         # bus, or nothing on unified memory): measured per call shape.
-        choices = self.__dict__.setdefault("_compact_choice", {})
+        from . import _choice
         shape = (n, data.shape[0], tmpl.shape[0], nbins, binsize, len(groups))
-        choice = choices.get(shape)
-        if choice is None:
-            choice = choices[shape] = Measured(("compact", "dense"))
-        way, timed = choice.way()
-        timed = timed and not async_submit
+        way, record = _choice.choice("sparse-way", ("flat",) + shape, SPARSE_WAYS["flat"],
+                                     scope=self.__dict__, **_SPARSE_SCHEDULE).next()
+        timed = record is not None and not async_submit
         t0 = time.perf_counter()
         res = self._flat_run(n, data, tmpl, groups, nbins, binsize, threshold, upload_data,
                              upload_tmpl, slot, async_submit, way == "compact")
@@ -893,7 +868,7 @@ class Executor(HierOps):
             from ._shared import sparsified
             res = sparsified(res, True)
         if timed:
-            choice.note(way, time.perf_counter() - t0)
+            record(time.perf_counter() - t0)
         return res
 
     def _flat_run(self, n, data, tmpl, groups, nbins, binsize, threshold, upload_data,

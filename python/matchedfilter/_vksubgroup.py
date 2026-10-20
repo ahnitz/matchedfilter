@@ -12,9 +12,9 @@ the shared rule (gatechain.measured_choice) keeps the reported size unless anoth
 faster past the tie margin. Pipelines that choose their own size (the coarse layout,
 _fit_subgroup) are unaffected.
 
-Measured only where the result can be kept -- MF_COST_FILE set -- and only with
-MF_AUTOTUNE on; otherwise the reported size stands. MF_VK_SUBGROUP forces a size (with an
-optional role filter, see _vkcompute._build_pipeline), for measurement.
+Measured with MF_AUTOTUNE on, whether or not MF_COST_FILE is set (without one the choice
+lasts the process); MF_AUTOTUNE=0 keeps the reported size. MF_VK_SUBGROUP forces a size
+(with an optional role filter, see _vkcompute._build_pipeline), for measurement.
 """
 import json
 import os
@@ -132,28 +132,23 @@ def measure(index, reported, rng):
 
 
 def choose(ctx):
-    """The size this device's pipelines are built at when they do not choose their own."""
+    """The size this device's pipelines are built at when they do not choose their own: an
+    offline _choice.Choice over the sizes the device can require, the reported size first
+    (the preference), kept in MF_COST_FILE when there is one and for the process otherwise.
+    Measured with or without a cost file (MF_AUTOTUNE=0 keeps the reported size): without
+    one the Iris Xe built at its reported 32 and ran full and peak calls 5-30x slower than
+    at the measured 8 (7.6 s of measuring, once per process)."""
     reported = int(ctx.subgroup_size)
     rng = getattr(ctx, "subgroup_range", None)
     if not rng or len(_candidates(rng)) < 2 or os.environ.get("MF_VK_SUBGROUP_MEASURING"):
         return reported
-    from . import gatechain, _autotune_enabled
-    key = "vk-subgroup|%s|k%s" % (getattr(ctx, "device_name", ""), gatechain.gpu_kernel_id())
-    held = gatechain.stored_choice(key)
-    if isinstance(held, int) and rng[0] <= held <= rng[1]:
-        return held
-    if not gatechain._cost_file() or not _autotune_enabled():
+    from . import gatechain, _autotune_enabled, _choice
+    if not _autotune_enabled():
         return reported
-    samples = measure(getattr(ctx, "index", 0), reported, rng)
-    if len(samples) < 2:
-        choice = reported
-    else:
-        w, _ = gatechain.measured_choice(samples, reported, len(samples[reported]))
-        choice = int(w) if w is not None else reported
-    # Another process may have measured meanwhile: its choice stands (first writer wins), so
-    # processes sharing a cost file build at one size.
-    held = gatechain.stored_choice(key)
-    if isinstance(held, int) and rng[0] <= held <= rng[1]:
-        return held
-    gatechain.store_choice(key, choice)
-    return choice
+    sizes = [reported] + [s for s in _candidates(rng) if s != reported]
+    name = getattr(ctx, "device_name", "")
+    ch = _choice.choice("vk-subgroup", name, sizes, label=int,
+                        store_key="vk-subgroup|%s|k%s" % (name, gatechain.gpu_kernel_id()),
+                        what="VK-SUBGROUP %s" % name)
+    measured = lambda cands: measure(getattr(ctx, "index", 0), reported, rng) or None
+    return int(ch.decide(measured))

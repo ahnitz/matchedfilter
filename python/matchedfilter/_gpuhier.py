@@ -694,22 +694,20 @@ class HierOps:
         return binds
 
     def _sparse_way(self, shape):
-        """How this shape reads a sparse result: its survivors' rows gathered on the host, or
-        the hits compacted on the device -- measured (_gpuexec.Measured), as for flat peaks."""
-        from ._gpuexec import Measured
-        choices = self.__dict__.setdefault("_hier_sparse_choice", {})
-        choice = choices.get(shape)
-        if choice is None:
-            choice = choices[shape] = Measured(("rows", "compact"))
-        way, timed = choice.way()
-        return way, (choice if timed else None)
+        """(way, record or None): how this shape reads a sparse result -- its survivors'
+        rows gathered on the host, or the hits compacted on the device -- an online
+        _choice.Choice per shape, as for flat peaks (_gpuexec.SPARSE_WAYS)."""
+        from . import _choice
+        from ._gpuexec import SPARSE_WAYS, _SPARSE_SCHEDULE
+        return _choice.choice("sparse-way", ("hier",) + tuple(shape), SPARSE_WAYS["hier"],
+                              scope=self.__dict__, **_SPARSE_SCHEDULE).next()
 
     def _hier_run(self, rec, binds, shape, sparse, way, cascade, frac_key, slot,
                   async_submit, trial=None):
         """Run a recorded call and return its result (a tracked collector when async).
         frac_key: where the call notes its refine-block fraction (a call on shared spectra,
         banded or not: the next call's band/full choice reads it), or None.
-        trial: the sparse-way choice this call times (a synchronous call only)."""
+        trial: the sparse-way choice's record for this call (a synchronous call only)."""
         import time
         timed = trial is not None and not async_submit
         t0 = time.perf_counter()
@@ -722,7 +720,7 @@ class HierOps:
                 wait()
             res = self._hier_result(rec, shape, sparse, way, cascade, frac_key)
             if timed:
-                trial.note(way, time.perf_counter() - t0)
+                trial(time.perf_counter() - t0)
             return res
         return self._track(result, owner=rec.buffers["idx"]) if async_submit else result()
 

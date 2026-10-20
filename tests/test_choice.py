@@ -101,3 +101,47 @@ def test_three_candidates_are_sampled_in_turn():
 def test_a_choice_needs_distinct_candidates(bad):
     with pytest.raises(ValueError):
         _choice.Choice(bad)
+
+
+def test_a_retrial_starts_the_contest_again_after_that_many_calls():
+    """A lock made under passing load does not stick: `retrial` calls later the candidates
+    are timed again, and the new contest can lock the other one."""
+    ch = _choice.Choice(("a", "b"), tie=0.0, z=0.0, retrial=10)
+    _drive(ch, lambda c, i: 1.0 if c == "a" else 2.0)
+    assert ch.winner == "a" and ch.calls == 1          # _drive's last call saw the lock
+    for _ in range(ch.retrial - 2):
+        assert ch.next() == ("a", None)
+    cand, record = ch.next()                            # the 10th: a new trial begins
+    assert record is not None and ch.winner is None
+    _drive(ch, lambda c, i: 3.0 if c == "a" else 2.0)
+    assert ch.winner == "b"
+
+
+def test_tie_zero_takes_the_lower_median_however_close():
+    """The sparse-way schedule (tie 0, z 0): whichever way's median is lower, even by 1%."""
+    ch = _choice.Choice(("rows", "compact"), tie=0.0, z=0.0)
+    _drive(ch, lambda c, i: 1.0 if c == "rows" else 0.99)
+    assert ch.winner == "compact"
+    default = _choice.Choice(("rows", "compact"))        # the shared rule's tie keeps rows
+    _drive(default, lambda c, i: 1.0 if c == "rows" else 0.99)
+    assert default.winner == "rows"
+
+
+def test_offline_seconds_pick_the_fastest_and_store_runners_up(monkeypatch, tmp_path):
+    cost = tmp_path / "costs.json"
+    monkeypatch.setenv("MF_COST_FILE", str(cost))
+    ch = _choice.Choice(("a", "b", "c", "d"), store_key="k", recheck_stored=True)
+    assert ch.decide(lambda cs: {"a": 3.0, "b": 1.0, "c": 2.0, "d": 4.0}) == "b"
+    rec = json.loads(cost.read_text())["choice|k"]
+    assert rec["value"] == "b" and rec["rivals"] == "c;a"
+    # A later process times the stored choice against its rivals: a rival now clearly
+    # faster (a spoiled first measurement) is remeasured and stored.
+    again = _choice.Choice(("a", "b", "c", "d"), store_key="k", recheck_stored=True)
+    assert again.decide(lambda cs: {c: {"a": 0.5, "b": 1.0, "c": 2.0, "d": 4.0}[c] for c in cs}) == "a"
+
+
+def test_offline_samples_decide_by_the_shared_rule():
+    ch = _choice.Choice((32, 16, 8))
+    assert ch.decide(lambda cs: {32: [5.0] * 5, 16: [2.0] * 5, 8: [0.6] * 5}) == 8
+    close = _choice.Choice((32, 8))                      # inside the tie: the preference
+    assert close.decide(lambda cs: {32: [1.0] * 5, 8: [0.98] * 5}) == 32
