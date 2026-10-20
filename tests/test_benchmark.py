@@ -1,6 +1,8 @@
 """Exercise CLI reporting without expensive timing or optional FFT engines."""
 import json
 
+import pytest
+
 import matchedfilter as mf
 from matchedfilter import benchmark
 
@@ -29,6 +31,14 @@ def test_hierarchical_cli_reports_two_field_config(monkeypatch, tmp_path, capsys
     for row in rows[1:]:
         assert row["chain"] == [128, 512]
         assert row["speedup"] == 2.0
+
+
+def test_a_length_without_a_band_is_reported_uncovered():
+    """At n = 64 no band fits below n/2, so the hierarchy has no chain: the benchmark's row
+    reports it uncovered (a ValueError) rather than stopping the run (the cost model's
+    calibration once raised IndexError on its empty band list)."""
+    with pytest.raises(ValueError, match="no gate chain for n=64"):
+        benchmark._bench_hier(64, 1, 4, 5.5, 1e-2, 1)
 
 
 def test_no_optional_engines_means_no_substitute_timing(monkeypatch):
