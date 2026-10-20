@@ -718,8 +718,30 @@ main only when everything is done, gated and benchmarked.
     The 8060S's WMMA gives 2x and the M2's simdgroup matrices run on its ordinary ALUs, so
     a cooperative-matrix port could only lose there. The hardware property that decides it is
     that ratio, and no device we have exceeds the L40S's.
-  - Fused batches, measured (pinned chain, interleaved rounds): RENOIR fused 24.4 against
-    unfused 24.6 M (none); M2 3.19e7 against 2.74e7 (+16%, the Metal collector).
+  - The gate is its own build (refine_<n>_onebin_gate, MF_GATE_ONLY): compiled into the
+    one-bin refine, its branch cost that kernel registers on CUDA (102 -> 127 at n = 512)
+    and the L40S search's leaf 15% whichever way was chosen. The plain one-bin builds are
+    back to their pre-gate bytes. The ways are timed on a sparse survivor list (one pair in
+    32, the grid sized for every pair, as calls dispatch them); ties keep the plain build.
+- 2026-10-19: **U2.8: fused batches by measurement.** Paired ladders, pinned chain: M2 +16%
+  fused, RENOIR none, Iris Xe +5%, 8060S -3 to -6%. filter_series_many now fuses a batch's
+  submissions or not by a measured choice per set of GPU devices (_fuse_begin, stored per
+  device name): 40-segment runs lock unfused on the 8060S and fused on the M2. The fusion
+  mechanisms themselves stay each driver's (Vulkan's phase interleave, Metal's shared
+  command buffers; CUDA has none: its streams and graphs already overlap).
+- 2026-10-19: **found while gating.**
+  - dev4 (Iris Xe) crashed every search after the first run: each context that ever timed
+    a call allocated its whole 512-buffer timestamp ring (16k idle command buffers in a
+    search) and ANV ran out of command-buffer memory (a blorp segfault or
+    VK_ERROR_OUT_OF_DEVICE_MEMORY). Predates stage U; slots are now recorded on first use.
+  - The per-call single-template trial kept every follow-up batch off the device (it asked
+    a shape nobody records); _batch_device measures the batch path. Auto mode, 64-job
+    follow-up batches: M2 29.9 -> 4.5 ms, L40S 35-38 -> 5.5 ms.
+  - CUDA run timings: a run issued launch by launch counted the host's gaps, the cost
+    calibration priced the L40S's blocks 25% low and chose a slower search; a CUDA run is
+    now the sum of its kernels' and copies' regions while timing.
+  - A/B method: stored choices are keyed by kernel identity, so a shared seed handicaps the
+    tree whose kernels changed; the final comparisons settle a seed per tree.
   - The other Metal-only kernel code is hardware-bound, not an optimization to spread:
     SIMD-scoped exchange barriers live in the SPLIT_STAGE builds, which exist because Apple
     caps threadgroup memory at 32 KB (n = 8192), a build no other target needs; the integer
