@@ -123,8 +123,8 @@ fraction of pairs requiring refinement.
 
 ![CPU and GPU matched-filter measurements at 4096 points](docs/assets/teaser.svg)
 
-Measured on a Ryzen AI MAX+ 395 / Radeon 8060S on 2026-10-13 at revision
-`2b3cac13`: 512 data segments × 512 templates (262,144 pairs), 4,096 points,
+Measured on a Ryzen AI MAX+ 395 / Radeon 8060S on 2026-10-20 at revision
+`30486ecb`: 512 data segments × 512 templates (262,144 pairs), 4,096 points,
 with the bank drawn from the captured PyCBC reference profile. The bars move from a general inverse FFT to
 fused full output, peak-only output and hierarchical screening. FFTW and
 rocFFT time only the inverse transform, so they do less work than the filter
@@ -138,7 +138,7 @@ workload example, not a speed guarantee.
 For CPU and GPU comparisons across eight machines at 16 × 512 and 512 × 512
 (including NVIDIA L40S, A100 and A40, AMD Radeon 8060S and Apple M2), with
 selectable thresholds and output modes, see the
-[hardware comparison](docs/measurements/teaser-fleet-20261013.md).
+[hardware comparison](docs/measurements/teaser-fleet-20261020.md).
 
 The [flat](https://ahnitz.github.io/matchedfilter/benchmarks.html) and
 [hierarchical](https://ahnitz.github.io/matchedfilter/hierarchical-benchmarks.html)

@@ -52,7 +52,8 @@ Measurements: [HIP versus Vulkan on the 8060S](measurements/hip-vulkan-20260927.
 [M2 and Zen 5 teaser](measurements/m2-teaser-headroom.md), teaser fleets
 ([09-26](measurements/teaser-fleet-20260926.md), [09-27](measurements/teaser-fleet-20260927.md),
 [09-28](measurements/teaser-fleet-20260928.md), [10-03](measurements/teaser-fleet-20261003.md),
-[10-13](measurements/teaser-fleet-20261013.md)),
+[10-13](measurements/teaser-fleet-20261013.md),
+[10-20](measurements/teaser-fleet-20261020.md)),
 and the PyCBC fleet benchmarks under `measurements/pycbc-*`.
 
 The design studies, `plans/`, `audits/`, and `measurements/` record experiments
