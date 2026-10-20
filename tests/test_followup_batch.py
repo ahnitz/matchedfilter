@@ -150,7 +150,10 @@ def test_batched_follow_ups_choose_their_device_by_batch(device, monkeypatch, tm
     orig = TimeDomainFilterBank._batch_device
     monkeypatch.setattr(TimeDomainFilterBank, "_batch_device",
                         lambda self: (lambda r: sides.append(r[0]) or r)(orig(self)))
-    for _ in range(2 * td._SINGLE_TRIALS + 2):
+    # Enough batches for the trial to lock however noisy the timings: an unclear contest
+    # samples both sides up to _SINGLE_TRIALS_MAX each after the discarded first (CI's
+    # paravirtual M2 left it undecided after 2 * _SINGLE_TRIALS + 2 batches).
+    for _ in range(2 * (td._SINGLE_TRIALS_MAX + 1) + 2):
         jobs = []
         for k in range(6):
             c0 = int(rng.integers(20000, S - 20000))
