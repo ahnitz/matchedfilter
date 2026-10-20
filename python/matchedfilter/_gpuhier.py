@@ -198,13 +198,20 @@ class HierOps:
             memo = holder.__dict__.setdefault("gate_choice", {})
             way = made[band] = stored_measured_choice(
                 memo, "gateway", getattr(self, "device_name", "") or getattr(self, "name", ""),
-                band, ("gate", "elect"), str, gatechain.gpu_kernel_id(self.kernel_family),
+                band, ("elect", "gate"), str, gatechain.gpu_kernel_id(self.kernel_family),
                 lambda cs: self._time_gate_ways(band, cs))
         return way
 
+    #: Tier-0 survivors per pair in the gate-way timing: a later tier runs over a sparse
+    #: list with its grid sized for every pair, as a call dispatches it. Every pair listed
+    #: timed only busy groups, and on the L40S picked the gate build (1-3% faster there)
+    #: whose registers cost the search's leaf 4%: the idle groups are the cost.
+    _GATE_SURVIVORS = 32
+
     def _time_gate_ways(self, band, ways):
-        """Device seconds per pair of the one-bin tier at this band in each way, over every
-        pair of a synthetic batch listed as a survivor (_coarse.time_staged)."""
+        """Device seconds of the one-bin tier at this band in each way, over a synthetic
+        batch whose survivors are one pair in _GATE_SURVIVORS, dispatched for every pair
+        (_coarse.time_staged)."""
         from ._coarse import time_staged
         ntm, pairs = self._COARSE_NT, self._COARSE_PAIRS
         rng = np.random.default_rng(1)
@@ -215,8 +222,9 @@ class HierOps:
                 self._x_alloc(pairs * 4), self._x_alloc(16)]
         bufs[0].write(x)
         bufs[1].write(x[:ntm])
-        bufs[4].write(np.arange(pairs, dtype=np.uint32))
-        bufs[5].write(np.array([pairs, 1, 1, 0], np.uint32))
+        surv = np.arange(0, pairs, self._GATE_SURVIVORS, dtype=np.uint32)
+        bufs[4].write(surv)
+        bufs[5].write(np.array([surv.size, 1, 1, 0], np.uint32))
         natives = []
 
         def time_way(way):
@@ -228,7 +236,7 @@ class HierOps:
                         0 if way == "gate" else 1, 0))
             native = lst.end()
             natives.append(native)
-            return self._x_time(native, {}, 2) / pairs
+            return self._x_time(native, {}, 2)
         try:
             return time_staged([list(ways)], time_way, rounds=3)
         finally:

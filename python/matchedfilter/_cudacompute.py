@@ -746,7 +746,7 @@ class Context(Executor, InputUploads):
     max_grouped_bins = _MAX_BINS
     cache_limit_bytes = 1024 * 1024 * 1024
     _profile = False                # MF_GPU_PROFILE (with MF_GPU_TIMING): per-kernel times
-    _in_run = False                 # inside a timed run: its kernels are timed with it
+    _in_run = None                  # inside a timed run: its kernels' and copies' regions
     # Unified addressing: a view inside a shared allocation is a device pointer.
     shared_views = True
     # Device memory is separate from host memory (residency matters for pricing).
@@ -797,8 +797,8 @@ class Context(Executor, InputUploads):
 
         # The shared timing contract (_gputime): register, keep (label, device_ms).
         self._timing = _gputime.enabled()
-        # MF_GPU_PROFILE=1 as well: each kernel and copy of a run is also timed, as
-        # ("k:<name>", device_ms), issued directly (not as a graph) to place its events.
+        # MF_GPU_PROFILE=1 as well: each kernel and copy of a run is also logged, as
+        # ("k:<name>", device_ms).
         self._profile = self._timing and os.environ.get("MF_GPU_PROFILE", "0") not in ("", "0")
         self.timing_log = []
         self._event_pool = []
@@ -879,9 +879,8 @@ class Context(Executor, InputUploads):
         return e
 
     def _mark(self, stream):
-        """Open a timed region on ``stream``; returns a token for _close (None when off, or
-        inside a timed run without MF_GPU_PROFILE)."""
-        if not self._timing or (self._in_run and not self._profile):
+        """Open a timed region on ``stream``; returns a token for _close (None when off)."""
+        if not self._timing:
             return None
         e0 = self._event()
         check_cuda(self.cuda.cuEventRecord(e0, stream), "cuEventRecord")
@@ -890,10 +889,11 @@ class Context(Executor, InputUploads):
     def _close(self, token, stream, label):
         if token is None:
             return
-        if self._in_run:
-            label = "k:" + label
         e1 = self._event()
         check_cuda(self.cuda.cuEventRecord(e1, stream), "cuEventRecord")
+        if self._in_run is not None:             # a kernel or copy of a timed run
+            self._in_run.append((label, token, e1))
+            return
         self._pending_events.setdefault(stream.value, []).append((label, token, e1))
 
     def _sync(self, stream=None):
@@ -908,12 +908,22 @@ class Context(Executor, InputUploads):
             total = 0.0
             ms = ctypes.c_float(0.0)
             for label, e0, e1 in pending:
-                check_cuda(self.cuda.cuEventSynchronize(e1), "cuEventSynchronize")
-                check_cuda(self.cuda.cuEventElapsedTime(ctypes.byref(ms), e0, e1),
-                           "cuEventElapsedTime")
-                self.timing_log.append((label, float(ms.value)))
-                total += float(ms.value)
-                self._event_pool.extend((e0, e1))
+                # A run is the sum of its kernels' and copies' regions: the device's busy
+                # time. Issued launch by launch from Python, its first-to-last interval also
+                # held the host's gaps between launches -- the GPU cost calibration then
+                # priced the L40S's blocks 25% low and chose a slower search (4-11% leaf).
+                regions = e1 if e0 is None else [(label, e0, e1)]
+                run = 0.0
+                for name, r0, r1 in regions:
+                    check_cuda(self.cuda.cuEventSynchronize(r1), "cuEventSynchronize")
+                    check_cuda(self.cuda.cuEventElapsedTime(ctypes.byref(ms), r0, r1),
+                               "cuEventElapsedTime")
+                    if e0 is None and self._profile:
+                        self.timing_log.append(("k:" + name, float(ms.value)))
+                    run += float(ms.value)
+                    self._event_pool.extend((r0, r1))
+                self.timing_log.append((label, run))
+                total += run
             self.last_gpu_time = total * 1e-3
 
     def _x_timings(self):
@@ -1287,15 +1297,17 @@ class Context(Executor, InputUploads):
         self._bind()
         stream = self.get_stream(slot)
         self._after_writes(stream)
-        tok = self._mark(stream)
-        self._in_run = tok is not None          # its kernels and copies are timed with it
+        regions = [] if self._timing else None  # its kernels' and copies' timed regions
+        self._in_run = regions
         try:
             for nat, b in pre:
                 self._enqueue(nat, b, stream)
             self._enqueue(native, binds, stream)
         finally:
-            self._in_run = False
-        self._close(tok, stream, native.label)
+            self._in_run = None
+        if regions:
+            self._pending_events.setdefault(stream.value, []).append(
+                (native.label, None, regions))
         return stream
 
     def _enqueue(self, native, binds, stream, graph=True):
@@ -1313,7 +1325,7 @@ class Context(Executor, InputUploads):
                 v = binds[name].dptr.value + off
                 _PACK_U64(block, at, v)
             values.append(v)
-        if not graph or self._profile or not _GRAPHS or len(native.ops) < 4:
+        if not graph or self._timing or not _GRAPHS or len(native.ops) < 4:
             self._issue(native.ops, stream)
             return
         if native.graphs is None:
