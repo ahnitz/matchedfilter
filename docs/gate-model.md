@@ -243,6 +243,16 @@ dev3 Renoir, Vulkan, load < 1, 3 interleaved processes each, autotune on (2 tops
 | host term off, fine | 1.90 s | 1.85 s | 1.73 s |
 | host term off, layout | 2048 | 2048 | 2048 + 69 templates at 4096 |
 
+### Unused host calibration removed (2026-10-20)
+
+The two measurement batches for that unused host fit have now been removed as
+well, along with its model fields and serialization. At the default five
+repetitions, this removes twelve calibration-plan calls and ten clock-reference
+measurements per uncached GPU cost model. This counts removed work, not a
+measured wall-time improvement. Device costs, gate thresholds, and the
+smaller-block tie break are unchanged; existing cost files still load, ignoring
+their obsolete `host_call` and `host_block` entries.
+
 ## Forward priced per chain (2026-10-10)
 
 Vulkan can write only the widest tier's band of each block's spectrum and recompute the

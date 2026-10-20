@@ -276,6 +276,15 @@ def test_sparse_series_compact_bytes_and_empty_reuse():
 # Autotuning Verification Tests
 # -----------------------------------------------------------------------------
 
+def test_gpu_cost_calibration_has_no_host_only_batches(monkeypatch):
+    """Calibration runs only workloads contributing to the active device cost model."""
+    from test_gpu_cost_calibration import _probe_calibration
+
+    _, metrics = _probe_calibration(monkeypatch)
+    assert metrics["device_calls"] > 0
+    assert metrics["host_only_calls"] == 0
+
+
 def test_chain_pool_excludes_nothing():
     """Every chain of up to max_tiers usable bands is priced; none is excluded by rule."""
     from matchedfilter import gatechain as gc

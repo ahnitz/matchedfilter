@@ -268,7 +268,7 @@ class CostModel:
     """
 
     def __init__(self, n, dense, sparse, refine, block=0.0, screen=None, excess=None,
-                 host_call=0.0, host_block=0.0, forward=0.0, band_forward=False):
+                 forward=0.0, band_forward=False):
         self.n = int(n)
         # forward: the full forward transform's share of `block`, per block. band_forward: the
         # backend can instead write only the widest tier's band and recompute the full
@@ -277,12 +277,6 @@ class CostModel:
         # fraction (forward_cost).
         self.forward = float(forward)
         self.band_forward = bool(band_forward)
-        # Host time a call spends outside the device (wall minus device time), as
-        # host_call + host_block * blocks: what a host-starved GPU pays on top of the device
-        # work. Measured on the host clock; zero where not measured (the CPU's ticks already
-        # include it).
-        self.host_call = float(host_call)
-        self.host_block = float(host_block)
         # excess[b]: [(modelled density, measured density)] for a first tier at band b whose
         # gate reports an upper bound of the FP32 statistic instead of the statistic itself
         # (GPU fp16 coarse with its error bound): it passes a superset of the pairs the gate
@@ -327,7 +321,6 @@ class CostModel:
 
     def to_dict(self):
         return {"n": self.n, "block": self.block, "dense": self.dense,
-                "host_call": self.host_call, "host_block": self.host_block,
                 "forward": self.forward, "band_forward": self.band_forward,
                 "sparse": self._sparse, "refine": self._refine, "screen": self.screen,
                 "excess": self.excess}
@@ -336,7 +329,6 @@ class CostModel:
     def from_dict(cls, d):
         return cls(d["n"], d["dense"], d["sparse"], d["refine"], block=d.get("block", 0.0),
                    screen=d.get("screen"), excess=d.get("excess"),
-                   host_call=d.get("host_call", 0.0), host_block=d.get("host_block", 0.0),
                    forward=d.get("forward", 0.0), band_forward=d.get("band_forward", False))
 
     def forward_cost(self, chain, f):
@@ -869,9 +861,6 @@ def calibrate_costs_gpu(n, device, blocks=None, reps=5, seed=11, nt=256):
     plans = {}
     import time as _time
 
-    last_host = [0.0]
-    nblk, sub_len = blocks, len(ser)
-
     def run(chain, thr, ntm=nt, reps=reps):
         """(device ns per call, first-tier survivors, refined pairs). The time is the median
         over repetitions of its ratio to the clock reference timed just before it, in the
@@ -888,24 +877,19 @@ def calibrate_costs_gpu(n, device, blocks=None, reps=5, seed=11, nt=256):
         p.run_series(ser, starts, ws, we, threshold=1e6)                 # warm-up, recording
         ctx.timings().clear()
         t, s1, r = [], [], []
-        hostw = []
         for _ in range(reps):
             ctx._timing = False
             ref_t = clock.time()             # the reference, just before: same clock state
             ctx._timing = True
             ctx.timings().clear()
-            w0 = _time.perf_counter()
-            p.run_series(ser[:sub_len], starts[:nblk], ws[:nblk], we[:nblk], threshold=1e6)
-            wall = (_time.perf_counter() - w0) * 1e9
+            p.run_series(ser, starts, ws, we, threshold=1e6)
             log = ctx.timings()
             dev = _run_ms(log) * 1e6
-            hostw.append(max(0.0, wall - dev))
             t.append(dev * (clock.anchor / ref_t if ref_t > 0 else 1.0))
             log.clear()
             s1.append(getattr(ctx, "last_tier1_survivors", 0))
             r.append(getattr(ctx, "last_refinements", 0))
         ctx._timing = False
-        last_host[0] = float(np.median(hostw))
         return float(np.median(t)), float(np.median(s1)), float(np.median(r))
 
     def thr_for(b, density):
@@ -967,17 +951,7 @@ def calibrate_costs_gpu(n, device, blocks=None, reps=5, seed=11, nt=256):
     # submission), and per-block fixed work on the GPU is the forward transform plus small
     # bookkeeping, so `block` stands for it (an upper estimate of what a band forward saves).
     forward = block
-    # Host per call and per block: the same call at two block counts (nothing passes).
-    hosts = []
-    for nb in (blocks // 4, blocks):
-        nblk, sub_len = nb, int(starts[nb - 1]) + n
-        run((b0,), (big,))
-        hosts.append((nb, last_host[0]))
-    nblk, sub_len = blocks, len(ser)
-    host_block = max(0.0, (hosts[1][1] - hosts[0][1]) / (hosts[1][0] - hosts[0][0]))
-    host_call = max(0.0, hosts[1][1] - host_block * hosts[1][0])
     cm = CostModel(n, dense, sparse, refine, block=block, excess=excess,
-                   host_call=host_call, host_block=host_block,
                    forward=forward, band_forward=_is_gpu(device))
     _COSTS[key] = cm
     if path is not None:
@@ -1789,7 +1763,6 @@ def price_block_sizes(fine, delta_f, data_rate, longest, margin, ntemplates, snr
     """
     sig = _gm._profile_sig(np.asarray(fine, np.float64))
     out = []
-    hosts = {}
     for n in sorted(int(c) for c in candidates):
         nvalid = n - int(longest) + 1
         if nvalid < 1:
@@ -1807,21 +1780,14 @@ def price_block_sizes(fine, delta_f, data_rate, longest, margin, ntemplates, snr
                 best, _ = choose_chain(ref, n, snr, fd, cost=cm, max_tiers=max_tiers, window=(lo, n - lo),
                                        ntemplates=ntemplates, model_f=model_f)
                 if best is not None:
-                    hit = (cm.block, best["cost"], best["chain"], getattr(cm, "host_block", 0.0))
+                    hit = (cm.block, best["cost"], best["chain"])
             _cache_put(_PRICE_CACHE, key, hit)
         else:
             _PRICE_CACHE.move_to_end(key)
-        block, pair_cost, chain, host_block = hit if len(hit) == 4 else hit + (0.0,)
+        block, pair_cost, chain = hit
         if pair_cost is None:
             continue
         # per valid output sample and template: the block's fixed work shared by the bank's templates
-        # The host term is NOT charged. Its fit (calibrate_costs_gpu) grows the series with the
-        # block count, so it measures a per-sample staging cost -- 5/10/20 us per block at
-        # n = 2048/4096/8192 on the 8060S -- that is the same per valid sample at every n and
-        # several times the device terms, under heavy load noisy by 2x. Added here it changed
-        # nothing real and swamped the device terms, so neighbouring length batches flipped
-        # between block sizes run to run (docs/gate-model.md, "Large-n pricing").
-        h = 0.0
         c = (block / max(int(ntemplates), 1) + pair_cost) / nvalid
         # Stop at the first size dearer than the best so far (it is still listed, so a size
         # within TIE stays in the tie-break below), after `ahead` more dearer ones for
@@ -1832,14 +1798,12 @@ def price_block_sizes(fine, delta_f, data_rate, longest, margin, ntemplates, snr
         stop = best is not None and c > best and \
             sum(o[0] > best for o in out) + 1 > ahead
         out.append((c, n, chain))
-        hosts[n] = h
         if stop:
             break
     out.sort()
-    # Within TIE of the cheapest, the block size with the smaller host term goes first (then
-    # the smaller n): the choice must not flip between processes on calibration noise (seen
-    # on CUDA: 4096 vs 2048 run to run).
-    first = pick_stable(out, lambda o: o[0], lambda o: (hosts.get(o[1], 0.0), o[1]))
+    # Within TIE of the cheapest, prefer the smaller n so calibration noise does not flip
+    # neighbouring block sizes between processes.
+    first = pick_stable(out, lambda o: o[0], lambda o: o[1])
     if first is not None:
         out.remove(first)
         out.insert(0, first)

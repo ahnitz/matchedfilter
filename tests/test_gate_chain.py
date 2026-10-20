@@ -773,15 +773,26 @@ def test_ties_break_deterministically():
                           lambda x: gc.canonical_order(x[0]))[0] == (512,)
 
 
-def test_host_terms_round_trip():
+def test_legacy_host_costs_do_not_change_chain_ranking():
     import json
     gc = mf._gatechain
-    cm = gc.CostModel(2048, {256: 1.0}, {256: [(0.01, 2.0)]}, [(0.01, 9.0)], block=3.0,
-                      host_call=100.0, host_block=7.0)
-    rt = gc.CostModel.from_dict(json.loads(json.dumps(cm.to_dict())))
-    assert (rt.host_call, rt.host_block) == (100.0, 7.0)
-    old = gc.CostModel.from_dict({k: v for k, v in cm.to_dict().items() if not k.startswith("host")})
-    assert (old.host_call, old.host_block) == (0.0, 0.0)     # files from before the term
+    cm = gc.CostModel(
+        2048, {256: 10.0, 512: 18.0}, {512: [(0.01, 20.0), (0.1, 18.0)]},
+        [(0.001, 100.0), (0.01, 80.0)], block=300.0, forward=250.0, band_forward=True,
+        screen={256: {"dense": 6.0, "recheck": 10.0, "excess": [(0.01, 0.02), (0.1, 0.15)]}},
+        excess={256: [(0.01, 0.02), (0.1, 0.15)]})
+    legacy = dict(cm.to_dict(), host_call=1e20, host_block=1e15)
+    rt = gc.CostModel.from_dict(json.loads(json.dumps(legacy)))
+    assert rt.to_dict() == cm.to_dict()
+    assert rt.signature() == cm.signature()
+    candidates = [((256,), [1.0, 0.01]), ((512,), [1.0, 0.002]),
+                  ((256, 512), [1.0, 0.1, 0.001])]
+
+    def rank(cost):
+        return sorted((cost.chain_cost(chain, reach), chain) for chain, reach in candidates)
+
+    assert rank(rt) == rank(cm)
+    assert rank(rt)[0][1] == (256,)
 
 
 def test_forward_priced_per_chain():
@@ -846,7 +857,6 @@ def test_price_block_sizes_stops_at_the_first_dearer_size(monkeypatch):
 
     class _Cost:
         block = 0.0
-        host_block = 0.0
 
     def fake_costs(n, device=None, ntemplates=None, group=None):
         priced.append(n)
