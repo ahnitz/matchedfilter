@@ -179,6 +179,43 @@ def _fftw_native_ms(lib, reps):
         if b: lib.fftwf_free(b)
 
 
+def _check_timed(kind, f, d, h, output, snr, pairs=12):
+    """The timed call's own result, at the timed size, against numpy on sampled pairs: every
+    lag of full output; and for peak-only and hierarchical calls, that every peak reported
+    (above the threshold) is the exact one -- index and value -- and for peak-only that
+    some are reported. The
+    small-size validation before timing cannot see faults that need the timed size: a Vulkan
+    full correlation over 4 GiB once returned in 10.8 ms having written nothing."""
+    rng = np.random.default_rng(23)
+    nd, nt = d.shape[0], h.shape[0]
+    if kind == 'full':
+        sel = [(0, 0), (nd - 1, nt - 1)] + [tuple(x) for x in rng.integers(0, (nd, nt), (pairs, 2))]
+        got = np.asarray(output)
+    else:
+        r = f.run(binsize=N, threshold=snr)
+        idx, val = np.asarray(r['index'])[..., 0], np.asarray(r['value'])[..., 0]
+        hits = np.argwhere(idx >= 0)
+        if kind == 'flat' and not len(hits):
+            raise AssertionError('peak-only call reported no peak above %g' % snr)
+        sel = [tuple(x) for x in hits[rng.permutation(len(hits))[:pairs]]]
+    for i, j in sel:
+        want = np.fft.ifft(d[i].astype(np.complex128) * np.conj(h[j]).astype(np.complex128)) * N
+        scale = np.abs(want).max()
+        if kind == 'full':
+            err = np.abs(got[i, j] - want).max() / scale
+            if not err < 1e-4:
+                raise AssertionError('full output pair (%d, %d) is wrong: relative error %.2e'
+                                     % (i, j, err))
+            continue
+        k = int(np.argmax(np.abs(want)))
+        at = int(idx[i, j])
+        # A tie within rounding may pick either lag; its value must still be the exact one.
+        if not (at == k or abs(abs(want[at]) - abs(want[k])) <= 1e-5 * scale) or \
+                not abs(val[i, j] - want[at]) <= 1e-4 * scale:
+            raise AssertionError('%s pair (%d, %d): peak %d %r, exact %d %r'
+                                 % (kind, i, j, at, val[i, j], k, want[k]))
+
+
 def _filter_ms(kind, device, reps, fd, snr=5.5):
     d, h = _case()
     if kind == 'full':
@@ -205,9 +242,13 @@ def _filter_ms(kind, device, reps, fd, snr=5.5):
 
         if kind == 'full':
             output = f.empty_shared((ND, NT, N))
+            output[...] = 0
             ms = _timed(lambda: f.run(out=output), reps)
         else:
             ms = _timed(lambda: f.run(binsize=N, threshold=snr), reps)
+        timed = dict(_timed.details)
+        _check_timed(kind, f, d, h, output if kind == 'full' else None, snr)
+        _timed.details = timed
         details = {}
         ctx = getattr(f, '_gpu', None)
         if ctx is not None and hasattr(ctx, 'last_gpu_time'):

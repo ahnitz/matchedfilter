@@ -75,3 +75,27 @@ def test_gpu_reference_samples_match_reported_units(fleet, monkeypatch, tmp_path
     assert np.median(row['timing']['block_ms']) == row['ms']
     assert row['timing']['min_ms'] == 1.
     assert row['timing']['max_ms'] == 3.
+
+
+def test_merged_runs_report_the_median_run_and_every_block(fleet, tmp_path):
+    """--merge: a row is the median of its runs, with that run's chain, every run's blocks,
+    and each run's ms and chain kept; runs of different hosts are refused."""
+    def report(ms, chain, host='h'):
+        return dict(host=host, device='gpu', n=4096, data=16, templates=512, date='2026-10-20T0%d' % ms,
+                    load_before=[1, 1, 1], load_after=[1, 1, 1], errors=[], rows=[
+                        dict(kind='hier', fd=0.01, snr=5.5, label='Hier', ms=float(ms), chain=chain,
+                             refine_rate=0.1, timing=dict(block_ms=[ms, ms + .5]))])
+    paths = []
+    for i, (ms, chain) in enumerate([(3, [512]), (1, [256, 512]), (2, [1024])]):
+        p = tmp_path / ('r%d.json' % i)
+        p.write_text(json.dumps(report(ms, chain)))
+        paths.append(str(p))
+    m = fleet.merge(paths, tmp_path / 'm.json')
+    row = m['rows'][0]
+    assert row['ms'] == 2.0 and row['chain'] == [1024]
+    assert sorted(row['timing']['block_ms']) == [1, 1.5, 2, 2.5, 3, 3.5]
+    assert [r['ms'] for r in row['runs']] == [3.0, 1.0, 2.0]
+    other = tmp_path / 'o.json'
+    other.write_text(json.dumps(report(2, [512], host='g')))
+    with pytest.raises(ValueError):
+        fleet.merge(paths + [str(other)], tmp_path / 'bad.json')

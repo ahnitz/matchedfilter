@@ -109,6 +109,9 @@ _OFF_TIMESTAMP_PERIOD = 296 + 424
 #: maxComputeWorkGroupSize[3] (uint32) sits 236 bytes into the limits, and
 #: minStorageBufferOffsetAlignment (VkDeviceSize) 328.
 _OFF_MAX_WORKGROUP_SIZE = 296 + 236
+#: maxStorageBufferRange (uint32) sits 28 bytes into the limits: the most bytes one storage
+#: buffer binding may span.
+_OFF_MAX_STORAGE_RANGE = 296 + 28
 _OFF_STORAGE_OFFSET_ALIGNMENT = 296 + 328
 
 
@@ -946,6 +949,15 @@ class _Device:
                                 ctypes.POINTER(_u64))[0])
         self.storage_offset_alignment = align if 0 < align <= 256 and align & (align - 1) == 0 \
             else 256
+        # One binding spans at most this many bytes: maxStorageBufferRange (a uint32 limit,
+        # so under 4 GiB on every device), rounded down to 256. A larger range is invalid:
+        # RADV then wrote nothing for a 4.29 GB full correlation (512 x 512 x 4096) while the
+        # call returned normally, and a range of exactly its reported 0xFFFFFFFF wrote
+        # nothing either. Bindings are clamped to it and work binding more is split
+        # (_gpuexec.correlate, correlate_continuous).
+        rng = int(ctypes.cast(ctypes.byref(props, _OFF_MAX_STORAGE_RANGE),
+                              ctypes.POINTER(_u32))[0]) or (1 << 31)
+        self.max_binding_bytes = rng - rng % 256
         self.max_workgroup_size = tuple(int(v) for v in ctypes.cast(
             ctypes.byref(props, _OFF_MAX_WORKGROUP_SIZE), ctypes.POINTER(_u32 * 3))[0])
 
@@ -1280,7 +1292,8 @@ class Context(Executor, InputUploads):
                "_accurate_trig", "device_name", "max_shared_memory", "max_invocations", "max_dispatch_x",
                "subgroup_size", "subgroup_range", "max_workgroup_subgroups", "mem_props", "command_pool", "_ts_period",
                "_reset_query",
-               "storage_offset_alignment", "max_workgroup_size", "timestamp_bits")
+               "storage_offset_alignment", "max_workgroup_size", "timestamp_bits",
+               "max_binding_bytes")
 
     def _attach_device(self, index):
         """Share the device, its queues, command pool and compiled pipelines per process.
@@ -1649,9 +1662,11 @@ class Context(Executor, InputUploads):
                                            ctypes.byref(dset)),
                "vkAllocateDescriptorSets")
         # A view's nbytes already excludes its own offset (_Borrowed): the range runs from
-        # the descriptor offset to the end of the whole buffer.
+        # the descriptor offset to the end of the whole buffer, at most max_binding_bytes.
+        limit = self.max_binding_bytes
         infos = (_DescBufferInfo * nbind)(
-            *[_DescBufferInfo(b.handle, offset, b.nbytes + getattr(b, 'offset', 0) - offset)
+            *[_DescBufferInfo(b.handle, offset,
+                              min(b.nbytes + getattr(b, 'offset', 0) - offset, limit))
               for b, offset in zip(bufs, offsets or [0] * nbind)])
         writes = (_WriteDescSet * nbind)(*[
             _WriteDescSet(35, None, dset, i, 0, 1, _DESC_STORAGE_BUFFER, None,

@@ -43,6 +43,9 @@ def test_teaser_times_public_run(monkeypatch, device, kind):
     monkeypatch.setattr(module, '_case', lambda: (np.zeros(1), np.zeros(1)))
     monkeypatch.setattr(module, '_reference', lambda: (np.ones(1), np.ones(1)))
     monkeypatch.setattr(module.time, 'perf_counter', lambda: elapsed[0])
+    # The fake filter computes nothing: this test is about the timing loop, and the result
+    # check is test_timed_results_are_checked_against_numpy's.
+    monkeypatch.setattr(module, '_check_timed', lambda *args: None)
     result = getattr(module, device + '_ms')(kind, reps=4)
     assert result == pytest.approx(2.0)
     assert len(calls) > 4  # warmup also uses the same API
@@ -50,6 +53,41 @@ def test_teaser_times_public_run(monkeypatch, device, kind):
         assert all(c['out'].shape == (module.ND, module.NT, module.N) for c in calls)
     else:
         assert all(c == {'binsize': module.N, 'threshold': 5.5} for c in calls)
+
+
+def test_timed_results_are_checked_against_numpy(monkeypatch):
+    """The timed call's result is checked at the timed size: a full output with a pair
+    left unwritten (Vulkan once wrote nothing past 4 GiB) or a peak at the wrong lag fails
+    the row; exact results pass."""
+    path = Path(__file__).resolve().parents[1] / 'tools' / 'teaser_figure.py'
+    spec = importlib.util.spec_from_file_location('teaser_check_test', path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    n = 64
+    monkeypatch.setattr(module, 'N', n)
+    rng = np.random.default_rng(2)
+    d = (rng.standard_normal((2, n)) + 1j * rng.standard_normal((2, n))).astype(np.complex64)
+    h = (rng.standard_normal((3, n)) + 1j * rng.standard_normal((3, n))).astype(np.complex64)
+    exact = (np.fft.ifft(d[:, None].astype(np.complex128) * h[None].conj(), axis=-1) * n)
+    module._check_timed('full', None, d, h, exact.astype(np.complex64), 5.5)
+    broken = exact.astype(np.complex64)
+    broken[1, 2] = 0
+    with pytest.raises(AssertionError, match='full output pair'):
+        module._check_timed('full', None, d, h, broken, 5.5)
+    peak = np.argmax(np.abs(exact), axis=-1)
+    value = np.take_along_axis(exact, peak[..., None], axis=-1).astype(np.complex64)
+
+    class Peaks:
+        def __init__(self, index):
+            self.result = dict(index=index[..., None], value=value)
+
+        def run(self, binsize, threshold):
+            return self.result
+    module._check_timed('flat', Peaks(peak), d, h, None, 5.5)
+    wrong = peak.copy()
+    wrong[0, 1] = (wrong[0, 1] + 7) % n
+    with pytest.raises(AssertionError, match='flat pair'):
+        module._check_timed('flat', Peaks(wrong), d, h, None, 5.5)
 
 
 def test_teaser_selects_metal_reference_and_records_machine(monkeypatch, tmp_path):
