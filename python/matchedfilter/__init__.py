@@ -3315,6 +3315,10 @@ class HierarchicalFilter(MatchedFilter):
                 "coarse pass to localise -- use MatchedFilter. A reference like this is "
                 "usually |h|^2 without the 1/S(f), or a spectrum with no low-frequency cutoff."
                 % (self.n, _BEFF_MIN))
+        if not _gatechain.candidate_bands(self.n):
+            # No band fits below n/2 (n = 64): no chain to price, and pricing one (the cost
+            # model's calibration) has no tier to time.
+            raise ValueError(_uncovered_message(self.n, self.snr, self.fd))
         snr = self._fs_snr or self.snr
         tiers = min(self.max_tiers, self._MAX_TIERS[self.device.kind])
         ref = np.asarray(self._pending_ref, np.float64)
