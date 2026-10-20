@@ -512,3 +512,74 @@ substitute. Persisted chain locks and reproducibility behavior remain intact.
 
 Raw cold-start records, frozen-source identities, and controlled timing are in
 [the CPU trial measurement record](measurements/cpu-trial-reliability-20261015/README.md).
+
+## Replacing cost planning: feasibility study (2026-10-20)
+
+The current infrastructure contains runtime price calibration, scientific gate
+selection, and several persisted execution trials. It also stores device
+capability decisions such as accurate GPU trigonometry. Removing price curves
+does not remove the need for valid gate thresholds, reproducible resolved plans,
+or those capability checks.
+
+Two study tools separate the questions:
+
+* `tools/cost_model_ablation.py` uses captured reference profiles and model
+  windows to compare measured-cost planning with the existing `cost=None`
+  operation-count proxy. Both price the same accuracy-valid candidates. It
+  reports thresholds, candidate counts, shortlist coverage, and setup phases.
+  Its regret is a **cost-model estimate**, not a runtime measurement.
+* `tools/real_probe_study.py` freezes the prepared production chain and
+  thresholds, then tests float-only, ordinary Q15, and delayed-recheck Q15 on
+  one native plan. It uses the full template bank and stratified whole native
+  groups of real input, validates sparse outputs and native output counts, and
+  separately times full calls. A duplicate baseline configuration measures
+  timing noise; it is not credited as a policy improvement.
+
+On the retained 72 CPU leaf captures, there is **one distinct reference profile**
+and two model windows, `[128,1920)` and `[192,1856)`. These are not 72 independent
+gate-model validations. Measurements used one pinned core, one numerical-library
+thread, fixed n=2048, production thresholds, and no `MF_HMF_PROF`.
+
+| Experiment | Observation |
+|---|---|
+| Fresh CPU n=2048 cost model | 1.31 s |
+| Signal draws, two windows' noise draws, candidate enumeration | 2.01 s additional setup |
+| Global operation-count top five | All start at band 128; exclude the current model's `(256,512,1024)` winner |
+| Best operation-count candidate per first band | Five representatives include that winner |
+| Same-source, interleaved full leaf replay of the proxy's choice | `(128,256,512)` without Q15 takes 1.304 times the baseline time |
+| Outputs in that chain comparison | 207 versus 205 peaks; one capture differs |
+| Fixed-science Q15 execution study | All three variants reproduce the prepared bank's 205 peaks exactly |
+
+For the two selected chains, operation-count and current-cost threshold vectors
+coincided. Thus the chain replay tests the proxy's selected chain and screen
+choice without an additional threshold-allocation difference. In general costs
+also select a threshold-budget split; changing them is not just rescheduling an
+unchanged decision.
+
+The 32-block pilot took a median 5.0 ms per bank, including switching, warm calls,
+validation and selection; 71 of its 72 samples had fewer than ten refinements.
+Starting its selector from float-only still chose a Q15 variant in every case,
+using the recorded pilot times alone. Distinguishing the two Q15 orders was much
+less reliable. Against the fastest of separately measured full-arm medians, the
+32-block choices had 0.62% aggregate apparent regret, with ten captures outside
+2%. Identical baseline configurations themselves differed by as much as 6.2%
+between measurements. These numbers do not establish a small speedup or a
+no-regression replacement. The full-arm minimum is also optimistic under noise.
+
+The probe still uses seeded costs to prepare its scientific plan. It does not
+remove calibration end to end, and none of these results is a whole-search
+benchmark or an independent false-dismissal bound. Larger 64- and 128-block
+pilots cost more and did not establish a better selector on this dataset.
+
+The promising replacement is a small, diverse menu of accuracy-valid complete
+plans, followed by one bounded real-input trial and an optional saved resolved
+plan. That record should contain literal thresholds and compatible execution
+settings, not a rank into a changing candidate list. First-band diversity is a
+useful starting point; coverage across other profiles, block sizes, devices and
+real GPU batch/fusion modes still needs measurement. Rare refinement choices
+need more evidence than a small dense-screen pilot supplies.
+
+Production selection remains unchanged in this branch. Only the unused host
+calibration described above is removed. This preserves active cost arithmetic
+and avoids introducing another production tuning mode before the replacement
+has passed cold-start and settled full-search comparisons.
