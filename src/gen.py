@@ -366,8 +366,6 @@ if __name__=="__main__":
          "#else","#define AP_CODELETS_INL_H_","#endif","",
          "HWY_BEFORE_NAMESPACE();","namespace ap {","namespace HWY_NAMESPACE {",""]
     out.append(build(8,[8],"fft8_42",preload=True))
-    out.append(build(32,[8,4],"fft32_84"))
-    out.append(build(16,[8,2],"fft16_44"))
     out.append(build(64,[8,8],"fft64_88"))
     # product-loading variants: the matched filter's first stage reads two
     # spectra and forms conj(d*t) inside the codelet, so the product never

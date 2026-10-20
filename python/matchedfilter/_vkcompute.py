@@ -1605,29 +1605,6 @@ class Context(Executor, InputUploads):
         self._pipelines[key] = (pipe, layout, set_layout)
         return self._pipelines[key]
 
-    def _read_peaks(bufs, surv_key, count, nd, nt, nbins, sparse):
-        """The refined result: dense (idx, val), or a _SparsePeaks read from the refined
-        pairs alone (the survivor list): the refine writes every bin of a listed pair."""
-        if sparse:
-            from . import _SparsePeaks
-            # Gathered and scanned in the list's (completion) order; only the hits are put
-            # in C order -- most refined pairs hold no peak.
-            rows = bufs[surv_key].view(np.uint32, count)
-            ri = bufs["idx"].view(np.int32, nd * nt * nbins).reshape(nd * nt, nbins)[rows]
-            k, b = np.nonzero(ri >= 0)
-            vals = bufs["val"].view(np.complex64, nd * nt * nbins).reshape(nd * nt, nbins)
-            rk = rows[k].astype(np.int64)
-            flat = rk * nbins + b
-            order = np.argsort(flat)
-            return _SparsePeaks((nd, nt, nbins), flat[order], ri[k, b][order],
-                                vals[rk, b][order])
-        if count == 0:
-            return (np.full((nd, nt, nbins), -1, dtype=np.int32),
-                    np.zeros((nd, nt, nbins), dtype=np.complex64))
-        out = nd * nt * nbins
-        return (bufs["idx"].read(np.int32, out).reshape(nd, nt, nbins),
-                bufs["val"].read(np.complex64, out).reshape(nd, nt, nbins))
-
     def _descriptor_set(self, set_layout, bufs, offsets=None):
         vk = self.vk
         # Bindings the module declares past the caller's list (gRowWin when per-row

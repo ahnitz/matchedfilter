@@ -442,33 +442,6 @@ class _Pinned:
             pass
 
 
-class _BatchTuple(tuple):
-    """Tuple supporting both dict key access and tuple slicing."""
-    def __new__(cls, data, tmpl, idx, val, *extra):
-        t = super().__new__(cls, (data, tmpl, idx, val, *extra))
-        t._dict = {"data": data, "tmpl": tmpl, "idx": idx, "val": val}
-        if extra:
-            t._dict["host"] = extra[0]
-        return t
-
-    def __getitem__(self, item):
-        if isinstance(item, str):
-            return self._dict[item]
-        return super().__getitem__(item)
-
-    def get(self, key, default=None):
-        return self._dict.get(key, default)
-
-    def values(self):
-        return self._dict.values()
-
-    def items(self):
-        return self._dict.items()
-
-    def keys(self):
-        return self._dict.keys()
-
-
 class _GraphCache:
     """Instantiated CUDA graphs of one record, LRU-bounded; destroyed with the record."""
     nbytes = 0          # host-side handles: nothing for the cache budget
@@ -493,18 +466,6 @@ class _GraphCache:
             if ex.value:
                 self.ctx.cuda.cuGraphExecDestroy(ex)
         self.items.clear()
-
-
-class _Record(dict):
-    """A cache record: named buffers, also indexable in the legacy tuple order."""
-    ORDER = ("data", "tmpl", "idx", "val", "host")
-
-    def __getitem__(self, item):
-        if isinstance(item, int):
-            return dict.__getitem__(self, self.ORDER[item])
-        if isinstance(item, slice):
-            return tuple(dict.__getitem__(self, k) for k in self.ORDER[item])
-        return dict.__getitem__(self, item)
 
 
 class _Staged:
@@ -1134,11 +1095,6 @@ class Context(Executor, InputUploads):
             return _HostBuffer(ctx, size, readback=readback, host_input=host_input)
         return empty_shared(self, factory, shape, dtype)
 
-    # ---- cache ----------------------------------------------------------------
-    def _evict_record(self, kind, key, keep_storage=None):
-        self._drain_segments()
-        return self._exec_evict(key)
-
     def _compact_peaks(self):
         key = ("compactPeaks",)
         if key not in self._pipelines:
@@ -1464,16 +1420,9 @@ class Context(Executor, InputUploads):
     def _refine_grid(self, fn, wg, pairs):
         return max(1, min(pairs, self._blocks_per_sm(fn, wg) * self.sm_count))
 
-    # ---- series forward -----------------------------------------------------------
-
     # ---- lifetime ----------------------------------------------------------------
-    def _drain_segments(self):
-        for graph in set(self.__dict__.get("_segment_results", {}).values()):
-            graph.collect()
-
     def clear_cache(self):
         self._drain()
-        self._drain_segments()
         self._exec_clear()
         self._bind()
         if self.ctx.value:
