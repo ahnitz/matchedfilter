@@ -1,5 +1,5 @@
-"""tools/migrate_cost_file.py: trial locks in the old record format are rewritten so the
-library reads them back as the same choices."""
+"""tools/migrate_cost_file.py: trial locks and unfinished trials in the old record format
+are rewritten so the library reads them back as the same choices and contests."""
 import importlib.util
 import json
 from pathlib import Path
@@ -36,7 +36,8 @@ def test_old_trial_locks_read_back_as_the_same_choices(monkeypatch, tmp_path):
     assert new["fft|2048"] == OLD["fft|2048"]
     assert not any(k.startswith(("block-trial|", "chain-trial|", "q15-trial|")) for k in new)
     assert set(k for k in new if k.startswith("choice|")) == {
-        "choice|block-trial|cpu:0|2048,4096", "choice|chain-trial|2048|6|0.001|2|cpu:0",
+        "choice|block-trial|cpu:0|2048,4096", "choice|block-trial|gpu:0|2048,8192",
+        "choice|chain-trial|2048|6|0.001|2|cpu:0", "choice|chain-trial|2048|6|0.001|2|gpu:0",
         "choice|q15-trial|2048|6|0.001|256,512|cpu:0"}
 
     monkeypatch.setenv("MF_COST_FILE", str(path))
@@ -44,7 +45,13 @@ def test_old_trial_locks_read_back_as_the_same_choices(monkeypatch, tmp_path):
     trials = td._BlockTrials()
     assert trials.winner("cpu:0|2048,4096") == 1
     assert trials._st("cpu:0|2048,4096").rechecked             # its re-check state kept
-    assert trials.winner("gpu:0|2048,8192") is None             # unfinished: trialled afresh
+    assert trials.winner("gpu:0|2048,8192") is None             # unfinished: it continues
+    assert trials.rank_for("gpu:0|2048,8192", 2) == 1           # from its rank-0 sample
+    assert trials._st("gpu:0|2048,8192").samples == {0: [1.0], 1: []}
+    gpu = mf._chain_trial((2048, 6.0, 0.001, 2, "gpu:0"))
+    gpu.add((256, 1024))
+    gpu.add((512,))
+    assert gpu.winner is None and gpu.samples[(512,)] == [1.0]
     tk = (2048, 6.0, 0.001, 2, "cpu:0")
     assert mf._stored_chain_lock(tk, None) == (256, 1024)
     assert mf._chain_trial(tk).median == {(256, 1024): 1e-9, (512,): 2e-9}
