@@ -1,0 +1,213 @@
+# Cleanup, robustness and CI plan (2026-10-21)
+
+Status: adopted 2026-10-21; decisions recorded at the end. Progress is logged in the Log section. It was built in four passes:
+
+1. Seven read-only surveys, which produced 102 findings, each with file:line evidence, plus a completeness critic.
+2. Three independent drafts: robustness-first, simplicity-first and CI-cost-first.
+3. A judged synthesis of the drafts.
+4. Two rounds of adversarial critique and revision (fact-check, CI design, sequencing, end-state quality, a skeptic, and a simulated dry run).
+
+I then checked the four most consequential bug claims myself, cut machinery that does not pay for itself (see "Cuts" below), and condensed the result. The full step specifications (files, line numbers, test cases) are kept with the plan's working files, and each step will be written out in full when it starts.
+
+## Why
+
+- **CI is slow, and some of its coverage isn't real.**
+  - It takes 38 min wall time and about 229 job-minutes per push.
+  - About 105 of those minutes are the whole suite re-run once per CPU target inside each of the five Python jobs, one re-run per job repeating the default target.
+  - One of the CPU target switches is undone part-way through the suite, so the SSE4 and AVX2 re-runs test their target only up to that point.
+  - The weekly Benchmark workflow has been red on every platform for two runs unseen, because a pipe through `tee` hides the failure.
+- **Real bugs, reproduced on main (31e37afd):**
+  - An invalid `MF_ISA` prints an error, then the next kernel call segfaults.
+  - `set_target(None)` drops `MF_ISA`: under `MF_ISA=SSE4` it switches back to AVX3.
+  - A damaged `MF_COST_FILE` is silently wiped at the next write. Every record is lost.
+  - Hierarchical `set_data` keeps the caller's array: zeroing it after `set_data` turns a peak of |v| = 79816 into none at all.
+  - Several C entry points have range checks that overflow.
+  - Two threads using one filter object corrupt memory silently.
+  - `MF_DEVICE` leaks into the library's own CPU plans.
+- **The code still has historical layers.**
+  - `__init__.py` is 3.7k lines and `time_domain.py` 3k; together they hold 147 function-level imports that work around cycles.
+  - There are 42 `MF_*` variables, parsed several different ways, some of them no-ops.
+  - Tools import names that no longer exist, and some docs describe removed mechanisms.
+
+## Milestones
+
+| Milestone | Goal | Exit criterion | Push CI (wall) |
+|---|---|---|---|
+| A. Honest CI | A failure is always visible; no wasted runs | Every step fails where it broke; releases need green CI | 38 → ~29 min |
+| B. Real bugs fixed | No silent data loss or memory errors | Each bug has a test that fails on 31e37afd | → ~18 min |
+| C. Tests that discriminate | Every test can fail on the bug it guards; nightly sanitizers | Trial tests bounded by the trial's own limit; ASan/UBSan nightly green | → ~13–16 min |
+| D. Fewer things | Delete dead paths, knobs, tools; one config registry | Every `MF_*` registered and documented; every tool imports | ~12–15 min |
+| E. One-way layers | Modules in layers; stage C step 4 | No upward imports; `__init__` is re-exports only | unchanged |
+
+After E come the CPU optimisations (tier 1, middle, forward), each as one `Choice` or priced value in one module.
+
+## Target CI
+
+- **On every push (~13–16 min wall, ~85–100 job-min).** Everything runs in parallel.
+  - **x86 tests:** seven jobs, one suite each:
+    - the widest target on 3.10, 3.11, 3.12, 3.13 and 3.14;
+    - `MF_ISA=SSE4` on the oldest Python, with the numpy floor;
+    - `MF_ISA=AVX2` on 3.14.
+
+    Each job prints its ISA and backend, and a mismatch fails the job.
+  - **The 3.12 job is also the sdist test.** It builds the sdist, checks it against the tracked files, installs from it and runs the tests.
+  - **Linux arm64 (NEON).** This is new; arm64 is tested today only on macOS and in the weekly benchmark.
+  - **Static checks:** regenerate both codelet files and diff them, plus ruff's undefined-name rules.
+  - **Metal:** compile the committed `.metal` sources, cached, instead of rebuilding every kernel from Slang each run; then run the suite and the CPU-against-GPU kernel run.
+  - **Wheels:** manylinux and macOS wheels run a smoke subset. The full wheel suites move to the weekly rehearsal and to release.
+- **Nightly (~65–100 job-min):**
+  - an ASan/UBSan build running the full suite, on x86 and on arm64;
+  - musllinux wheels with the full suite;
+  - the full suite in reverse module order, to catch tests that depend on order.
+- **Weekly:**
+  - benchmarks on Linux x86 and arm64, macOS CPU, and Metal, the Metal one moved off the push path where it took 14.4 min;
+  - a full release rehearsal (all wheels, full suites) that never publishes.
+- **Release:** refused unless CI for that exact SHA is green. Wheels build in parallel: about 35–45 min, against 80–92 today.
+- **Loud by construction:**
+  - every workflow runs under bash with pipefail; a tolerated diagnostic prints a `::warning`;
+  - every job has a timeout, and pytest's `faulthandler_timeout = 600` dumps a hung test's stack;
+  - strict markers;
+  - one `::error` annotation per failed test, including inside the cibuildwheel containers;
+  - a skip table in every job's summary;
+  - `gate.py` gains a `ci` check (main's latest run and every workflow's latest scheduled run are green), so a red schedule blocks the next merge.
+
+## Steps
+
+Each step is one push, behind the usual gate:
+
+- the dev2 suite and `gate.py`;
+- the GPU machines for GPU-touching steps;
+- paired ladders on dev1 and dev2 for hot-path steps;
+- green CI afterwards.
+
+A step that changes C or workflows is first pushed to a `ci/<topic>` branch and must be green there before main.
+
+**A. Honest CI**
+
+- **A1. Workflow hygiene.**
+  - Applies: pipefail, timeouts, faulthandler, strict markers, pinned images and SHA-pinned actions, single-thread environment variables at workflow level, and `environment-pass` for `GITHUB_ACTIONS` and `MF_ISA` inside cibuildwheel.
+  - The per-CPU-target loop skips the default target.
+  - The advisory benchmarks leave the push path.
+  - Verify: a planted `false | tee` fails its step on a `ci/` branch.
+- **A2. CI status tool.** `tools/ci_status.py` reads the public API and prints a verdict per job for a SHA or branch, plus the latest scheduled runs. `gate.py` gains a `ci` check, and `release.yml` refuses a SHA whose CI is not green. Verify: offline tests on recorded API responses (the 10-19 red Benchmark run, a green CI run, a red one, a cancelled one).
+- **A3. Safety nets before behaviour changes.**
+  - `test_consumer_contract.py` replays the calls pycbc_inspiral_fir makes (imports, window forms, `template_spectra`, `template_valid`) on the committed bank slice.
+  - `test_public_api.py` pins the public names.
+  - A float64 check of the SNR the bank path reports, for both engines and both refines.
+  - `tools/sanitize.sh`, the local ASan/UBSan recipe.
+
+**B. Real bugs** (each with a test that fails on 31e37afd)
+
+- **B1. Cost file never loses data.**
+  - A damaged file is moved aside with a warning, and an unreadable one is never replaced.
+  - One atomic rewrite helper is shared with `migrate_cost_file.py`.
+  - Cost models and one-shot prices are first-writer-wins.
+  - Legacy record names are reported once.
+- **B2. The test session leaves your environment alone.**
+  - It scrubs `MF_*` except `MF_ISA` and the tool variables.
+  - The header prints ISA, backend and devices.
+  - `clear_autotune_cache` clears what its docstring says.
+  - A `--reverse-modules` option checks order dependence.
+- **B3. `MF_ISA` is a real restriction.**
+  - It is applied at import, and `set_target(None)` restores it.
+  - An invalid value raises `ValueError` at import, not `ImportError`, which pycbc would report as "not installed".
+  - Lazily built sub-plans use the parent plan's backend.
+  - Verify: the suite under each of the three targets, bit-identical goldens, paired ladders.
+- **B4. Restructure the push gate:**
+  - the seven-job matrix, the arm64 job, the sdist folded into the 3.12 job;
+  - the Metal job tests the committed kernels;
+  - wheel smoke tests;
+  - the Q15 codelet check.
+
+  B3 must land first, otherwise the forced-target jobs keep testing the wrong thing. B4a, which strips build paths and a sync-conflict copy from the shipped Metal sources, lands just before, so the Metal kernel id changes once.
+- **B5. Hierarchical `set_data` copies the data,** in C as the flat filter does: 8n bytes per row and one memcpy per call.
+- **B6. Every C entry point validates its arguments.**
+  - Range checks cannot overflow.
+  - Size checks use division instead of products.
+  - Thresholds must be finite.
+  - Every error path sets an exception.
+  - One boundary test covers every `_core` entry point, with sentinel outputs that must stay untouched.
+- **B7. One filter per thread.**
+  - A busy flag makes a second thread get `RuntimeError` instead of corrupting memory.
+  - Constructors and lazy allocations either succeed completely or free what they took.
+- **B8. Internal CPU plans name the CPU,** so `MF_DEVICE` cannot move them.
+- **B9. One series group** for a plan, its calibration and its block pricing. Calibration is stored under the group the C plan actually ran, not the requested one.
+
+**C. Tests that discriminate**
+
+- **C1. Skips are visible.**
+  - Every job prints a skip table.
+  - A GPU job fails if GPU tests skip, as `--require-coarse-gpu` already does on Metal.
+  - A probe failure is its own skip reason, so "no GPU" and "GPU broken" read differently.
+- **C2. Releases build in parallel from one reusable wheel workflow,** with a weekly rehearsal and a nightly musl build.
+- **C3. Trial tests stop restating schedules.**
+  - `Choice.limit` gives the most calls after which a contest must have locked.
+  - Loops drive "until a winner, at most `limit + 1`".
+  - The cross-process test cannot pass on a trial that never advances.
+  - The 218 s reproducibility test and the 84 s block-switching test get cheaper without losing what they check.
+- **C4. No timing outside the `performance` marker.**
+  - Tests that cannot fail are rewritten or deleted.
+  - The FDR tool and its CI job become one test that also counts at the production budget.
+  - `test_regression_suite.py` dissolves into the files it overlaps.
+- **C5. Nightly ASan/UBSan** on x86 and arm64, and a reverse-order run. Suppressions live in one committed file, each with its reason.
+- **C6. GPU tests force real layouts** through `MF_COARSE_LAYOUT`.
+  - The no-op per-backend coarse knobs are deleted.
+  - The Metal sigma tool is repaired, since it is the only way to re-derive a compiled-in constant.
+- **C7. One writer per open contest.** A second process sampling the same open contest prints a warning.
+
+**D. Fewer things**
+
+- **D1. Measure, then delete the default-off CPU layouts** (`MF_BBLK` stage-B blocking, `MF_ILAY=0`) on dev1 and the M2. A layout that wins anywhere becomes a measured candidate in the CPU phase instead. Then one gcov and coverage.py run drives further dead-code deletion.
+- **D2. One configuration registry.**
+  - `_config.py` lists every `MF_*` variable: kind, type, default, when it is read, and its doc.
+  - Every variable gets one parse rule: unset or empty means the default, 0/false/no/off and 1/true/yes/on mean what they say, anything else raises. The rule lands one variable per commit, each with a CHANGELOG line.
+  - Removed names and near misses warn at import.
+  - `docs/environment.md` is generated from the registry, and a test checks that code, C and docs agree.
+- **D3. Tools and docs say what is true.**
+  - A repository test imports every tool and example and resolves their names.
+  - Broken tools are fixed and dead ones pruned.
+  - `docs/README` lists current references and historical logs separately.
+- **D4. Wheels carry only loadable artifacts.** No PTX on macOS, no MSL on Linux. CUDA stops offering 8 coarse builds it cannot load. A reachability test lists every shipped kernel file.
+
+**E. One-way layers** (behaviour-neutral moves; each checked by a move comparator and a layer test)
+
+- **E0. A half-page design note on the resolved plan:** what it holds, what it guarantees with and without a shared cost file, and what is public.
+- **E1. Guards before any move:**
+  - a layer test, whose allowlist is seeded from today's 147 function-level imports and shrinks with each move;
+  - `tools/check_move.py`, deleted after E3.
+- **E2. Foundation modules:** `_costfile`, the decision rules in `_choice`, and `_results`.
+- **E4. `_chains`** owns the chain and Q15 trials. The side tables disappear, and the tests drive it with injected timings.
+- **E5. `_layout` and `_prices`:** bank layouts in one module, one helper for the four price-once copies, and a reset scope declared by each `Choice` kind.
+- **E6. Stage C step 4:** one `resolve()` per filter replaces today's six resolution sites. A persisted record is added only if a divergence remains after B1.
+- **E7. One window parser** for the bank and `HierarchicalSearch`. Optional; see decisions.
+- **E3, last.** The filter classes move out of `__init__`, which becomes about 150 lines of re-exports. Public `__module__` values and pickle paths stay.
+
+## Cuts I made to the agents' final plan
+
+- **Premerge proofs.** The agents built `ci_status` staleness rules, ack flags, a run cache and a premerge mode. I keep a small `ci_status` and a procedure: risky changes go to a `ci/<topic>` branch first.
+- **Skip allowlists and a CI time budget.** The agents proposed per-job and per-host skip allowlists (`tests/ci_policy.py`) and a time-budget table. I keep the printed skip table and require-GPU flags on GPU jobs. Allowlists of regexes are upkeep that blocks merges for cosmetic changes.
+- **C switches as plan options (deferred).** The agents' step routes every C switch through an options struct passed to every entry point, so the shipped C library reads only `MF_ISA`. That is a large change for C header users who don't exist yet. The registry covers the Python side.
+- **Allocation fault injection (decide at B7).** I keep the NULL checks and all-or-nothing allocation, and decide on the private countdown hook when B7 starts.
+
+## Deferred, with reasons
+
+- **A compile-time guard for pathological driver compiles** (dev4's Intel ANV). It needs a design: a worker thread or a child process, deadlines, and expiring records keyed by driver version.
+- **Vulkan via lavapipe in CI.** Hierarchical cost calibration took over 9 minutes in one lavapipe test, so the job needs its own design. The first candidate is a nightly flat-path job.
+- **Per-push sanitizer subset.** Decided once the nightly has measured its time.
+- **GPU kernel-table work (unification stage 3)** and datacenter GPU throughput. Out of scope for now.
+- **Merging concurrent contest samples.** C7 only warns; this returns if concurrent writers turn out to be supported.
+
+## Decisions (2026-10-21)
+
+1. **Python 3.10 is dropped.** The minimum Python is 3.11. The numpy floor becomes 1.23.2, the first release with Python 3.11 wheels; pycbc's runtime asks for numpy 1.16 or newer, and production runs 2.2.3. The SSE4 job installs exactly the floor version, so the floor is tested.
+2. **Hierarchical `set_data` copies in C** (B5).
+3. **`MF_TRIAL_RECHECK` is deleted,** with `Choice.observe` and the steady re-check.
+4. **One PyPI release after milestone D,** with the behaviour changes batched in CHANGELOG.
+5. **The public surface** is the package root, `time_domain`, `search`, `device`, `precision`, and gatechain's documented `chain_thresholds`, `calibrate_costs`, `choose_chain` and `direct_halfwidth`. Private names may move without re-exports.
+6. **E7 is adopted:** `HierarchicalSearch` uses the bank's window parser.
+7. **Concurrent writers to one `MF_COST_FILE` are not supported;** C7's warning is enough. Production does not set `MF_COST_FILE`. The long-term goal is to need no cost file at all, with no performance loss (unification stage 2's direction). New persisted state therefore needs a strong reason.
+8. **A read-only GitHub token** is set up on the dev hosts for `ci_status`.
+
+## Log
+
+- 2026-10-21: plan adopted.
