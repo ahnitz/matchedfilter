@@ -2513,15 +2513,20 @@ def _chain_trial_next(tkey):
                               tkey, cur, run)
                 cur = None
         tr["batches"] = tr.get("batches", 0) + 1
+        # The count is kept with the trial in MF_COST_FILE, sample or not: processes too
+        # short to take a sample (CI's paravirtual M2 ran two trial batches a process, inside
+        # the warm-up) otherwise each restarted the count and the trial never ended.
+        _store_batch_trial(tkey, tr)
         # Budget backstop: a bounded number of batches in all, then the shared rule decides
-        # among what was measured (_trial_budget_choice).
+        # among what was measured (_trial_budget_choice); with too few samples to judge, the
+        # preference (the model's chain) stands, as when any measured choice reaches its cap.
         if tr["batches"] > len(tr["samples"]) * (warm + base) + 6 or not bs:
-            w = _trial_budget_choice(bs, next(iter(tr["samples"])), 2)
-            if w is not None:
-                med = {c: float(np.median(v)) for c, v in bs.items() if len(v)}
-                _chain_lock(tkey, tr, w, med)
-                _log_autotune("CHAIN-TRIAL %s budget of batches spent: locked %s", tkey, w)
-                return None
+            model = next(iter(tr["samples"]))
+            w = _trial_budget_choice(bs, model, 2) or model
+            med = {c: float(np.median(v)) for c, v in bs.items() if len(v)}
+            _chain_lock(tkey, tr, w, med)
+            _log_autotune("CHAIN-TRIAL %s budget of batches spent: locked %s", tkey, w)
+            return None
         if cur is not None and cur in bs and (have[cur] < needs[cur]
                                               or all(have[c] >= needs[c] for c in bs)):
             r, g = tr.get("cur_run", (0, len(bs[cur])))
@@ -2533,6 +2538,20 @@ def _chain_trial_next(tkey):
                                                           list(tr["samples"]).index(c)))
         tr["cur_run"] = (1, len(bs[cur]))
         return cur
+
+
+def _store_batch_trial(tkey, tr):
+    """Keep an unfinished GPU chain trial (its batch samples, needs, batch count and
+    dropped candidates) in MF_COST_FILE, so the next process continues it."""
+    path = _gatechain._cost_file()
+    if path is None:
+        return
+    bs = tr.get("batch", {})
+    _gatechain._store_cost(path, _chain_lock_key(tkey) + "|batches",
+                           {"samples": {_chain_str(c): v for c, v in bs.items()},
+                            "need": {_chain_str(c): v for c, v in tr.get("batch_need", {}).items()},
+                            "batches": int(tr.get("batches", 0)),
+                            "dropped": [_chain_str(c) for c in tr.get("dropped", ())]})
 
 
 def _chain_trial_pending(tkey, chain, delta):
@@ -2580,13 +2599,7 @@ def _chain_trial_batch(tkey, chain, value):
         if not done:
             # Unfinished: kept in MF_COST_FILE, so a shorter process than the trial
             # continues it in the next (as block-size trials do).
-            path = _gatechain._cost_file()
-            if path is not None:
-                _gatechain._store_cost(path, _chain_lock_key(tkey) + "|batches",
-                                       {"samples": {_chain_str(c): v for c, v in bs.items()},
-                                        "need": {_chain_str(c): v for c, v in bneed.items()},
-                                        "batches": int(tr.get("batches", 0)),
-                                        "dropped": [_chain_str(c) for c in tr.get("dropped", ())]})
+            _store_batch_trial(tkey, tr)
         else:
             med = {c: float(np.median(v)) for c, v in bs.items() if len(v)}
             _chain_lock(tkey, tr, w, med)
