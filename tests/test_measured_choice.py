@@ -214,6 +214,29 @@ def test_a_full_trial_locks_within_its_batch_count(monkeypatch, tmp_path):
     assert batches <= 3 * (2 + mf._CHAIN_BATCH_TRIALS) + 1
 
 
+@pytest.mark.parametrize("per_process", [2, 3])
+def test_a_trial_spread_over_short_processes_still_locks(monkeypatch, tmp_path, per_process):
+    """CI's M2 ran two trial batches a process, both inside the warm-up: no sample was ever
+    taken, the batch count was not kept, and the trial was still open after 25 processes.
+    The count is kept with the trial in MF_COST_FILE, so the budget ends it: with no sample
+    to judge, the preference (the model's chain) stands."""
+    monkeypatch.setenv("MF_COST_FILE", str(tmp_path / "costs.json"))
+    tk = (2048, 5.0, 0.001, 2, "gpu:0")
+    a, b, c = (256, 512), (256, 1024), (512,)
+    for proc in range(30):
+        mf.clear_autotune_cache()                          # a new process sharing the file
+        held = mf._stored_chain_lock(tk, None)
+        if held is not None:
+            break
+        mf._CHAIN_TRIALS[tk] = {"samples": {a: [], b: [], c: []}, "assigned": {}, "winner": None}
+        _drive_batches(tk, {a: 1.0e-12, b: 1.3e-12, c: 0.9e-12}, limit=per_process)
+    assert held is not None
+    budget = 3 * (2 + mf._CHAIN_BATCH_TRIALS) + 6
+    assert proc * per_process <= budget + per_process
+    if per_process == 2:
+        assert held == a                                   # never sampled: the preference
+
+
 def _single_contest(monkeypatch, tmp_path, timer, calls=40):
     """Drive TimeDomainFilterBank._single_device (the GPU-or-CPU choice of single-template
     calls) on fake banks with a deterministic timer; returns the shape's state."""
