@@ -804,3 +804,37 @@ main only when everything is done, gated and benchmarked.
   registry) instead of `_device_trial` and three module tables. Schedule unchanged (warm-up
   1, decide at 3 kept samples each, cap 5). `tests/test_choice.py` drives the lifecycle with
   injected timings; the tests that read the old tables use the `Choice` API.
+- 2026-10-20: **Stage C step 2 (d771e125).** The offline kernel choices (gate way, coarse
+  layout with its stored-rivals re-check, Vulkan subgroup size) decide through
+  `Choice.decide`; the interleave depth and the sparse readback ways are online `Choice`s,
+  and `_gpuexec.Measured` is gone. The subgroup size is measured with or without a cost file
+  (the Iris Xe at its reported 32 ran full and peak calls 5-30x slower). Full suite on dev2
+  (2109), dev3, dev4 and M2; shared-seed paired ladder 1.016 / 1.006.
+- 2026-10-21: **A GPU chain trial that never ended (2e9bfc8a).** CI's M2 ran two trial
+  batches a process, both inside the warm-up: no sample was ever taken, and the batch count
+  was stored only with a sample, so every process restarted the budget, and the budget
+  locked nothing without samples. The count is stored every batch and the spent budget keeps
+  the model's chain. Fixed ahead of step 3, which makes every trial end by construction.
+- 2026-10-21: **Stage C step 3: the workload trials on `Choice`.** Chain trials (per call on
+  the CPU, per batch on a GPU), block-size trials and Q15 trials are `Choice`s, and
+  `_choice.Choice` is the one lifecycle every measured choice follows:
+  - `persist`: an open contest keeps its samples, needs, attempts and dropped candidates in
+    MF_COST_FILE as they come, so it continues across short processes (block and GPU chain
+    trials did this each their own way; CPU chain trials did not at all). A lock another
+    process wrote first is adopted, also mid-contest (`gatechain._update_cost` reads and
+    writes under the file lock).
+  - `budget`: every trial counts its attempts (a call or a batch that could have been a
+    sample) and ends at per-candidate x candidates + slack. When it ends, the shared rule runs
+    over the candidates with two samples or more, and the preference stands unless one of
+    them is clearly faster than it. Q15 trials count calls that cannot be paired, so a trial
+    whose rounds never come no longer keeps the block trials from sampling for good.
+  - `pick` (fewest samples next, counting samples in flight and the caller's placed work;
+    `stay` for a caller for whom switching costs), `drop`, `judge` (one plan's shortlist),
+    `round` (paired rounds), `observe` (the steady re-check, MF_TRIAL_RECHECK=1).
+  - One record format: "choice|<key>" holding `value` once locked, the open contest
+    otherwise. Old records (`block-trial|`, `chain-trial|`, `q15-trial|`, `|batches`) are not
+    read: `tools/migrate_cost_file.py` rewrites a cost file's locks, and
+    `tools/ab_ladder.py --seed-convert` applies it to the new tree's copy of a shared seed.
+  - Removed: `_trial_budget_choice`, `_chain_lock`, `_chain_lock_state`,
+    `_store_batch_trial`, the per-trial dicts and their own need/budget/persistence code.
+

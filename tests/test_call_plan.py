@@ -386,8 +386,8 @@ def test_steady_segments_replay(monkeypatch, band, depth):
         for g in b._groups:
             tk = getattr(g.plan, "_chain_trial", None)
             assert tk is None, ("a chain trial never locked", g.plan._chain,
-                                {c: len(v) for c, v in mf._CHAIN_TRIALS[tk]["samples"].items()},
-                                mf._CHAIN_TRIALS[tk]["assigned"])
+                                {c: len(v) for c, v in mf._CHAIN_TRIALS[tk].samples.items()},
+                                mf._CHAIN_TRIALS[tk].attempts)
     assert all(d == want for d, want in deltas[-4:]), str(deltas)
 
 

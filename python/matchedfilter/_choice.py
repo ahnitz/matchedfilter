@@ -1,31 +1,45 @@
 """Measured choices: one lifecycle for every choice the library makes by timing.
 
 A choice picks one of a few candidates for a call shape on this machine (a GPU plan or a
-CPU plan for single-template calls, fused batches or not, a coarse kernel layout, ...).
-Every one follows the same lifecycle, written here once:
+CPU plan for single-template calls, fused batches or not, a coarse kernel layout, a gate
+chain, a block size, the Q15 screen, ...). Every one follows the same lifecycle, written
+here once:
 
   * candidates[0] is the preference: it stands unless another is clearly faster;
   * a lock already kept in MF_COST_FILE (store_key) is reused, so every process sharing
-    the file makes the same choice;
+    the file makes the same choice; the first lock written stands (a process that finds
+    another's lock on file adopts it);
   * the choice is made whether or not there is a cost file: without one it is kept for
     the process only;
-  * the winner is locked for the process and stored for later processes.
+  * the winner is locked for the process and stored for later processes;
+  * every choice ends: an unclear contest samples up to `cap`, and a choice whose samples
+    do not come (candidates nobody runs, processes too short to take one) ends at its
+    `budget` of attempts. Either way, without a clear win the preference stands.
 
-How candidates are timed differs, and a choice is made one of two ways:
+How candidates are timed differs, and a choice is made one of three ways:
 
-  * online (next/record): the next calls alternate the candidates (the one with the fewest
-    samples goes next, ties in candidate order), each timed by the caller; the first
-    `warmup` samples of each are dropped; once every candidate has the same count, at
-    least `minimum` past the warm-up, the shared rule decides (gatechain.measured_choice:
-    past `tie` and `z` standard errors, else more samples up to `cap` each, then the
-    preference stands). `retrial` calls after a lock, the contest starts again (a choice
-    made under passing load does not stick).
+  * online (next/record, or pick/record when the caller places the work): the candidate
+    with the fewest samples goes next, ties in candidate order; each process drops its
+    first `warmup` samples of each; once every candidate has its `minimum` (or the more an
+    unclear contest asked for), the shared rule decides (gatechain.measured_choice: past
+    `tie` and `z` standard errors, else more samples up to `cap` each, then the preference
+    stands). `retrial` calls after a lock, the contest starts again (a choice made under
+    passing load does not stick). With `persist`, the samples are kept in MF_COST_FILE as
+    they come, so a contest longer than one process continues in the next.
+  * paired rounds (round): every candidate timed on the same input in one round; decided
+    by gatechain.paired_choice over complete rounds.
   * offline (decide): `measure` times every candidate at once. A stored lock is first
     timed against the runners-up stored with it, and remeasured when one beats it beyond
     the noise (a clock or power transition spoils one process, not every later one).
 
+A locked choice can be re-checked against steady-state samples (observe, with
+MF_TRIAL_RECHECK=1): steady state far from what the trial measured reopens it on file, once.
+
 The state lives in a scope: the process registry by default, or the dict a caller passes
 (a device's, for choices that belong to one device object); tests clear it with reset().
+
+On file, a choice is one record "choice|<store_key>": {"value": label, ...} once locked,
+or, while a persisted contest is open, {"samples", "need", "attempts", "dropped"} by label.
 """
 from typing import Any, Callable, Dict, Hashable, Optional, Sequence, Tuple
 
@@ -37,44 +51,119 @@ import numpy as np
 WARMUP = 1
 MINIMUM = 3
 CAP = 5
+#: The fewest samples a candidate needs to count when a budget runs out.
+BUDGET_MINIMUM = 2
 
 
 class Choice:
-    """One measured choice between candidates (see the module docstring)."""
+    """One measured choice between candidates (see the module docstring).
 
-    __slots__ = ("candidates", "samples", "winner", "held", "store_key", "what", "label",
-                 "warmup", "minimum", "cap", "tie", "z", "retrial", "calls")
+    label(c) is how a candidate is kept on file (a str or int); parse(text) maps a label's
+    text back to a candidate -- needed when candidates are added later (add) than a stored
+    lock is read. budget = (per_candidate, slack): the contest ends after per_candidate x
+    candidates + slack attempts (tick)."""
 
-    def __init__(self, candidates: Sequence[Hashable], store_key: Optional[str] = None,
+    def __init__(self, candidates: Sequence[Hashable] = (), store_key: Optional[str] = None,
                  what: Optional[str] = None, warmup: int = WARMUP, minimum: int = MINIMUM,
                  cap: int = CAP, tie: Optional[float] = None, z: Optional[float] = None,
                  retrial: Optional[int] = None, label: Optional[Callable[[Any], Any]] = None,
-                 recheck_stored: bool = False):
-        if len(candidates) < 2 or len(set(candidates)) != len(candidates):
-            raise ValueError("a choice needs two or more distinct candidates: %r" % (candidates,))
-        self.candidates = tuple(candidates)
-        self.samples: Dict[Hashable, list] = {c: [] for c in self.candidates}
+                 parse: Optional[Callable[[str], Any]] = None, recheck_stored: bool = False,
+                 persist: bool = False, budget: Optional[Tuple[int, int]] = None,
+                 paired: bool = False):
+        if len(set(candidates)) != len(candidates):
+            raise ValueError("a choice needs distinct candidates: %r" % (candidates,))
+        self.candidates: tuple = ()
+        self.samples: Dict[Hashable, list] = {}
+        self.need: Dict[Hashable, int] = {}
+        self.pending: Dict[Hashable, int] = {}
+        self.dropped: set = set()
+        self.attempts = 0
         self.store_key, self.what = store_key, what or store_key or "choice"
         self.label = label if label is not None else (lambda c: c)
+        self._parse = parse
         self.warmup, self.minimum, self.cap = int(warmup), int(minimum), int(cap)
         self.tie, self.z, self.retrial, self.calls = tie, z, retrial, 0
+        self.persist, self.budget, self.paired = bool(persist), budget, bool(paired)
         self.winner = None
-        self.held = self._stored()
+        self.median: Optional[dict] = None
+        self.rechecked = False
+        self.steady: list = []
+        self._warm: Dict[Hashable, int] = {}
+        # A persisted contest's samples, needs and drops for candidates not added yet.
+        self._pool: dict = {}
+        self._need_pool: dict = {}
+        self._drop_pool: set = set()
+        self._replace = False
+        self.candidates = tuple(candidates)  # (parse falls back to matching these)
+        rec = self._record()
+        self.held = None
+        if isinstance(rec, dict):
+            self.rechecked = bool(rec.get("rechecked"))
+            if "value" in rec:
+                self.held = self.parse(rec["value"])
+                if self.held is not None:
+                    self.median = self._by_label(rec.get("median"), float) or None
+            elif self.persist and isinstance(rec.get("samples"), dict) \
+                    and rec.get("method") == self._method():
+                self._pool = {str(k): [float(x) for x in v] for k, v in rec["samples"].items()}
+                self._need_pool = {str(k): int(v) for k, v in (rec.get("need") or {}).items()}
+                self._drop_pool = {str(k) for k in rec.get("dropped", ())}
+                self.attempts = int(rec.get("attempts", 0))
+        self.candidates = ()
+        for c in candidates:
+            self.add(c)
         if not recheck_stored:
             self.winner = self.held
 
     @property
     def preference(self):
-        return self.candidates[0]
+        return self.candidates[0] if self.candidates else None
 
-    def _stored(self):
-        """The candidate stored under store_key, or None (no file, no entry, or a value that
-        names no candidate here)."""
-        if self.store_key is None:
+    def parse(self, value):
+        """The candidate a stored label names, or None (a value that names no candidate)."""
+        if value is None:
             return None
-        from . import gatechain
-        held = gatechain.stored_choice(self.store_key)
-        return next((c for c in self.candidates if self.label(c) == held), None)
+        if self._parse is not None:
+            return self._parse(str(value))
+        return next((c for c in self.candidates if str(self.label(c)) == str(value)), None)
+
+    def _by_label(self, d, conv):
+        if not isinstance(d, dict):
+            return {}
+        out = {}
+        for k, v in d.items():
+            c = self.parse(k)
+            if c is not None:
+                out[c] = conv(v)
+        return out
+
+    def _method(self):
+        return "paired" if self.paired else None
+
+    def add(self, cand) -> None:
+        """A candidate joins the contest (another plan's shortlist, another rank), with any
+        samples a persisted contest kept for it."""
+        if cand in self.samples:
+            return
+        self.candidates += (cand,)
+        key = str(self.label(cand))
+        self.samples[cand] = list(self._pool.pop(key, ()))
+        n = self._need_pool.pop(key, None)
+        if n is not None:
+            self.need[cand] = n
+        if key in self._drop_pool:
+            self.dropped.add(cand)
+
+    @property
+    def sampled(self) -> bool:
+        """Whether the contest has samples (of candidates added or still to be)."""
+        return any(self.samples.values()) or any(self._pool.values())
+
+    def needs(self, cand) -> int:
+        return max(self.minimum, self.need.get(cand, 0))
+
+    def live(self):
+        return [c for c in self.candidates if c not in self.dropped]
 
     # ---- online -------------------------------------------------------------------------
     def next(self) -> Tuple[Hashable, Optional[Callable[[float], None]]]:
@@ -84,25 +173,123 @@ class Choice:
             self.calls += 1
             if not self.retrial or self.calls % self.retrial:
                 return self.winner, None
-            self.winner = None                           # a re-trial: start afresh
-            self.samples = {c: [] for c in self.candidates}
-        cand = min(self.candidates, key=lambda c: (len(self.samples[c]),
-                                                    self.candidates.index(c)))
+            self.restart()
+        cand = self.pick()
         return cand, lambda seconds, cand=cand: self.record(cand, seconds)
 
-    def record(self, cand, seconds: float) -> None:
-        """One sample of `cand`; decides once the contest is complete enough."""
-        if self.winner is not None:
-            return
+    def restart(self) -> None:
+        """A re-trial: the contest starts afresh, and its lock replaces the stored one."""
+        self.winner, self.median, self.attempts = None, None, 0
+        self.samples = {c: [] for c in self.candidates}
+        self.need, self.pending, self._warm, self.dropped = {}, {}, {}, set()
+        self._replace = True
+
+    def pick(self, among: Optional[Sequence] = None, stay=None, placed: Optional[dict] = None):
+        """The candidate the next sample should come from (None when none is live): `stay`
+        while it still needs samples (a caller for whom switching costs), else the one with
+        the fewest, counting samples in flight (pending) and the caller's `placed` work,
+        candidates still short of their samples first, ties in candidate order. `among`
+        limits it to some candidates (one plan's shortlist)."""
+        pool = self.candidates if among is None else [c for c in among if c in self.samples]
+        live = [c for c in pool if c not in self.dropped]
+        if not live:
+            return None
+        placed = placed or {}
+        have = {c: len(self.samples[c]) + self.pending.get(c, 0) + placed.get(c, 0) for c in live}
+        full = {c: have[c] >= self.needs(c) for c in live}
+        if stay in live and (not full[stay] or all(full.values())):
+            return stay
+        return min(live, key=lambda c: (full[c], have[c] + self._warm.get(c, 0),
+                                        self.candidates.index(c)))
+
+    def record(self, cand, seconds: float):
+        """One sample of `cand`; decides once the contest is complete enough. Returns the
+        winner (None while open). A paired choice takes rounds only (round)."""
+        if self.winner is not None or cand in self.dropped or self.paired:
+            return self.winner
+        self.add(cand)
+        if self._warm.get(cand, 0) < self.warmup:
+            self._warm[cand] = self._warm.get(cand, 0) + 1
+            return None
         self.samples[cand].append(float(seconds))
-        counts = {len(v) for v in self.samples.values()}
-        if len(counts) != 1 or counts.pop() - self.warmup < self.minimum:
-            return
+        live = self.live()
+        if all(len(self.samples[c]) >= self.needs(c) for c in live):
+            w = self.judge(live)
+            if w is not None:
+                self.lock(w)
+                return self.winner
+        self._save()
+        return self.winner
+
+    def judge(self, among: Sequence):
+        """The shared rule over `among` (its first the preference) once each has its samples:
+        the winner, or None -- then the candidates it asks about need more (need). Locks
+        nothing: a caller may settle a part of the contest on its own (one plan's shortlist)."""
+        among = list(among)
+        if not among or any(len(self.samples[c]) < self.needs(c) for c in among):
+            return None
         from . import gatechain
-        kept = {c: v[self.warmup:] for c, v in self.samples.items()}
-        w, _ = gatechain.measured_choice(kept, self.preference, self.cap, tie=self.tie, z=self.z)
+        w, more = gatechain.measured_choice({c: self.samples[c] for c in among}, among[0],
+                                            self.cap, tie=self.tie, z=self.z)
+        if w is None:
+            self.need.update(more)
+            from . import _log_autotune
+            _log_autotune("%s unclear, sampling further %s", self.what,
+                          {str(self.label(c)): n for c, n in more.items()})
+        return w
+
+    def tick(self):
+        """One attempt at a sample (a call or batch run for the contest, sampled or not):
+        once the budget is spent, the contest ends (expire). Returns the winner."""
+        if self.winner is not None:
+            return self.winner
+        self.attempts += 1
+        if self.budget is not None and \
+                self.attempts > self.budget[0] * max(1, len(self.candidates)) + self.budget[1]:
+            self.expire()
+        else:
+            self._save()
+        return self.winner
+
+    def expire(self) -> None:
+        """End the contest on what was measured: the shared rule over the candidates with at
+        least BUDGET_MINIMUM samples, the preference standing unless one of them is clearly
+        faster than it -- and standing outright when it has too few to compare."""
+        live = self.live()
+        pref = live[0] if live else self.preference
+        sub = {c: self.samples[c] for c in live if len(self.samples[c]) >= BUDGET_MINIMUM}
+        w = pref
+        if pref in sub and len(sub) > 1:
+            from . import gatechain
+            w = gatechain.measured_choice(sub, pref, 0, tie=self.tie, z=self.z)[0] or pref
+        from . import _log_autotune
+        _log_autotune("%s budget of %d attempts spent", self.what, self.attempts)
+        self.lock(w)
+
+    def drop(self, cand) -> None:
+        """`cand` leaves the contest (it cannot or will not run here)."""
+        if cand in self.samples and cand not in self.dropped:
+            self.dropped.add(cand)
+            self._save()
+
+    # ---- paired rounds ------------------------------------------------------------------
+    def round(self, timings: Dict[Hashable, float]):
+        """One complete round: every candidate timed on the same input. Returns the winner."""
+        if self.winner is not None:
+            return self.winner
+        for c in timings:
+            self.add(c)
+        for c in self.candidates:
+            self.samples[c].append(float(timings[c]))
+        from . import gatechain
+        w, _ = gatechain.paired_choice({c: self.samples[c] for c in self.candidates},
+                                       self.preference, self.cap, minimum=self.minimum,
+                                       tie=self.tie)
         if w is not None:
-            self.lock(w, kept)
+            self.lock(w)
+        else:
+            self._save()
+        return self.winner
 
     # ---- offline ------------------------------------------------------------------------
     def decide(self, measure: Callable[[list], Any],
@@ -118,7 +305,7 @@ class Choice:
             return self.winner
         if self.held is not None:
             rivals = [c for c in self.candidates
-                      if c != self.held and self.label(c) in self._stored_rivals()]
+                      if c != self.held and str(self.label(c)) in self._stored_rivals()]
             if not rivals or _still_fastest(self.held, rivals, measure):
                 self.winner = self.held
                 return self.winner
@@ -132,6 +319,7 @@ class Choice:
         if other is not None and other != self.held:
             self.winner = other
             return other
+        self._replace = self.held is not None          # the stale lock is replaced
         rank = {c: i for i, c in enumerate(self.candidates)}
         if all(isinstance(v, (list, tuple)) for v in times.values()):
             from . import gatechain
@@ -143,28 +331,119 @@ class Choice:
         near = {c for c in times if times[c] == times[fastest]} | set(getattr(times, "close", ()))
         w = min(near, key=lambda c: (tuple(tiebreak(c)) if tiebreak else ()) + (rank.get(c, 0),))
         runners = [c for c in sorted(times, key=lambda c: (times[c], rank.get(c, 0))) if c != w]
-        self.lock(w, rivals=";".join(str(self.label(c)) for c in runners[:2]))
+        self.lock(w, times, rivals=";".join(str(self.label(c)) for c in runners[:2]))
         return self.winner
 
     def _stored_rivals(self):
-        if self.store_key is None:
-            return set()
-        from . import gatechain
-        return set((gatechain.stored_choice(self.store_key, "rivals") or "").split(";")) - {""}
+        rec = self._record()
+        rivals = rec.get("rivals") if isinstance(rec, dict) else None
+        return set((rivals or "").split(";")) - {""}
 
-    # ---- both ---------------------------------------------------------------------------
+    # ---- steady state -------------------------------------------------------------------
+    def observe(self, value: float) -> bool:
+        """A steady-state sample of the locked winner (the trial's own unit). With the
+        re-check on (gatechain.recheck_enabled), steady state far above what the trial
+        measured for the winner reopens the choice on file -- the next process trials again
+        -- once per choice. This process keeps its winner. Returns True when it reopened."""
+        from . import gatechain
+        if not gatechain.recheck_enabled():
+            return False
+        if self.winner is None or not self.median or self.rechecked:
+            return False
+        self.steady.append(float(value))
+        if not gatechain.steady_disagrees(self.steady, self.median, self.winner):
+            return False
+        self.rechecked = True
+        steady = float(np.median(self.steady[-gatechain.RECHECK_N:]))
+        from . import _log_autotune
+        _log_autotune("%s %s steady %.3g vs trial %s: reopened", self.what,
+                      self.label(self.winner), steady,
+                      {str(self.label(c)): "%.3g" % v for c, v in self.median.items()})
+        self._write({"samples": {}, "rechecked": True, "method": self._method(),
+                     "reopened": {"winner": str(self.label(self.winner)), "steady": steady,
+                                  "trial": {str(self.label(c)): v for c, v in self.median.items()}}},
+                    replace=True)
+        return True
+
+    # ---- the record on file -------------------------------------------------------------
     def lock(self, winner, kept=None, **extra) -> None:
-        """Lock `winner` for this process and store it (with `extra` fields) for later ones."""
+        """Lock `winner` for this process and store it (with `extra` fields) for later ones.
+        A lock another process stored first stands: this process adopts it."""
         self.winner = winner
-        if self.store_key is not None:
-            from . import gatechain
-            gatechain.store_choice(self.store_key, self.label(winner), **extra)
+        med = {c: float(np.median(v)) for c, v in self.samples.items() if len(v)}
+        if med:
+            self.median = med
+        rec = {"value": self.label(winner), **extra}
+        if med:
+            rec["median"] = {str(self.label(c)): v for c, v in med.items()}
+        if self.rechecked:
+            rec["rechecked"] = True
+        on_file = self._write(rec, replace=self._replace)
+        self._replace = False
+        if on_file is not rec:
+            self._adopt(on_file)
         from . import _log_autotune
         if kept is None:
-            kept = {c: v[self.warmup:] for c, v in self.samples.items()}
-        _log_autotune("%s -> %s  %s", self.what, self.label(winner),
+            kept = self.samples
+        _log_autotune("%s -> %s  %s", self.what, self.label(self.winner),
                       {str(self.label(c)): "%.3g" % float(np.median(v if isinstance(v, (list, tuple)) else [v]))
                        for c, v in kept.items() if (v if isinstance(v, (list, tuple)) else [v])})
+
+    def _adopt(self, rec) -> None:
+        w = self.parse(rec.get("value")) if isinstance(rec, dict) else None
+        if w is not None:
+            self.winner = w
+            self.median = self._by_label(rec.get("median"), float) or self.median
+
+    def _save(self) -> None:
+        """Keep an open persisted contest on file (its samples, needs, attempts, dropped
+        candidates), so the next process continues it; adopt a lock found there instead."""
+        if not self.persist or self.winner is not None:
+            return
+        lbl = lambda c: str(self.label(c))     # noqa: E731
+        rec = {"samples": {**self._pool, **{lbl(c): v for c, v in self.samples.items()}},
+               "need": {lbl(c): n for c, n in self.need.items()},
+               "attempts": int(self.attempts),
+               "dropped": sorted(lbl(c) for c in self.dropped)}
+        if self._method():
+            rec["method"] = self._method()
+        if self.rechecked:
+            rec["rechecked"] = True
+        on_file = self._write(rec)
+        if on_file is not rec:
+            self._adopt(on_file)
+
+    def _record(self):
+        if self.store_key is None:
+            return None
+        from . import gatechain
+        path = gatechain._cost_file()
+        if path is None:
+            return None
+        return gatechain._load_cost_file(path).get("choice|" + self.store_key)
+
+    def _stored(self):
+        """The candidate a lock on file names, or None (no file, no lock, or a value that
+        names no candidate here)."""
+        rec = self._record()
+        return self.parse(rec.get("value")) if isinstance(rec, dict) else None
+
+    def _write(self, rec, replace=False):
+        """Store rec unless a valid lock is on file (and replace is off); returns the record
+        on file afterwards (rec itself when it was written)."""
+        if self.store_key is None:
+            return rec
+        from . import gatechain
+        path = gatechain._cost_file()
+        if path is None:
+            return rec
+
+        def merge(old):
+            if (not replace and isinstance(old, dict) and "value" in old
+                    and self.parse(old["value"]) is not None):
+                return None                                  # a lock on file stands
+            return rec
+        return gatechain._update_cost(path, "choice|" + self.store_key, merge)
 
 
 def _still_fastest(choice, rivals, measure):
@@ -182,11 +461,23 @@ def _still_fastest(choice, rivals, measure):
     return fastest == choice or t[choice] == t[fastest] or choice in getattr(t, "close", ())
 
 
+def stored_lock(store_key: str, parse: Callable[[str], Any]):
+    """The candidate (parse(label)) a lock on file names under store_key, or None."""
+    from . import gatechain
+    path = gatechain._cost_file()
+    if path is None:
+        return None
+    rec = gatechain._load_cost_file(path).get("choice|" + store_key)
+    if not isinstance(rec, dict) or "value" not in rec:
+        return None
+    return parse(str(rec["value"]))
+
+
 #: Every measured choice of this process: (kind, key) -> Choice.
 _CHOICES: Dict[Tuple[str, Hashable], Choice] = {}
 
 
-def choice(kind: str, key: Hashable, candidates: Sequence[Hashable],
+def choice(kind: str, key: Hashable, candidates: Sequence[Hashable] = (),
            scope: Optional[dict] = None, **kw: Any) -> Choice:
     """The choice of `kind` for `key`, made on first use (Choice(candidates, **kw); kw
     applies only then), kept in the process registry or in `scope` (a dict: choices that

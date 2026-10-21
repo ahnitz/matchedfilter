@@ -170,4 +170,4 @@ def test_batched_follow_ups_choose_their_device_by_batch(device, monkeypatch, tm
     trial = _choice.of_kind("single-batch")[(str(bank.device),)]
     assert sides[:4] == ["gpu", "cpu", "gpu", "cpu"], sides
     assert trial.winner in ("gpu", "cpu")
-    assert len(trial.samples["gpu"]) >= trial.warmup + trial.minimum
+    assert len(trial.samples["gpu"]) >= trial.minimum            # kept samples, after the warm-up

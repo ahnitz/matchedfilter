@@ -366,8 +366,8 @@ Not shippable as is.
   state, timed from submission to its last result, per template x series sample. A rank's first
   batch after a switch only settles (it uploads). There are 2 samples per rank. Rank r > 0 wins
   only if its median beats rank 0's by more than gatechain.TIE, so a tie keeps the model's layout.
-- **Persisted lock.** The winner is stored in MF_COST_FILE under `block-trial|<device>|<candidate
-  set>`. A bank whose key is on file adopts it at its first reference with no trial, and only
+- **Persisted lock.** The winner is stored in MF_COST_FILE under `choice|block-trial|<device>|<candidate
+  set>` (`block-trial|...` before 2026-10-21). A bank whose key is on file adopts it at its first reference with no trial, and only
   layouts that ran are evicted from the device at a lock.
 - **Only where the lock can be kept.** Without MF_COST_FILE (or with MF_AUTOTUNE=0) no candidates
   are built and no trial runs. The bank is the model's layout, exactly main's behaviour. A trial in
@@ -415,8 +415,8 @@ candidate set, not once per process.
     the lock's rank to the bank's size without pricing proposals, and builds only the winner.
   - Pricing extra sizes (`ahead`) happens only when proposing. Keys per bank fragmented the trial,
     so the first version re-ran trials and paid ~30 s of warm-up in every process.
-- **Chain-trial locks are persisted too** (`chain-trial|n|snr|fd|tiers|device`, used only if the
-  stored chain is on the plan's shortlist).
+- **Chain-trial locks are persisted too** (`choice|chain-trial|n|snr|fd|tiers|device` since
+  2026-10-21, used only if the stored chain is on the plan's shortlist).
 
 **The unexplained 4-10% gain, isolated.** It was not the block-size layout. In matched processes
 with the same layout and the same chain, (2048, (256, 512)), main's steady fine stage was 1.08-1.12 s

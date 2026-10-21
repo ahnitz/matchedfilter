@@ -55,8 +55,8 @@ def test_complete_q15_rounds_resume_across_processes(monkeypatch, tmp_path):
         p = _plan(monkeypatch, path)
         p._q15_record_pair({False: 1 + i, True: 0.8 * (1 + i)}, 100)
     p = _plan(monkeypatch, path)
-    assert p._q15_trial()['winner'] is True
-    assert len(p._q15_trial()['samples'][False]) == 0  # locked: no more sampling
+    assert p._q15_trial().winner is True
+    assert len(p._q15_trial().samples[False]) == 0  # locked: no more sampling
 
 
 def test_q15_replay_reverses_order_and_excludes_settle_time(monkeypatch, tmp_path):
@@ -72,8 +72,8 @@ def test_q15_replay_reverses_order_and_excludes_settle_time(monkeypatch, tmp_pat
     assert p._q15_run_pair(run, 1) == 4
     assert p._q15_run_pair(run, 1) == 8
     assert calls == [False, False, True, True, True, True, False, False]
-    np.testing.assert_allclose(p._q15_trial()['samples'][False], [1, 1])
-    np.testing.assert_allclose(p._q15_trial()['samples'][True], [0.8, 0.8])
+    np.testing.assert_allclose(p._q15_trial().samples[False], [1, 1])
+    np.testing.assert_allclose(p._q15_trial().samples[True], [0.8, 0.8])
 
 
 def test_block_complete_rounds_persist_and_reject_unpaired_history(monkeypatch, tmp_path):
@@ -81,7 +81,7 @@ def test_block_complete_rounds_persist_and_reject_unpaired_history(monkeypatch, 
     path = tmp_path / 'costs.json'
     monkeypatch.setenv('MF_COST_FILE', str(path))
     key = 'cpu|2048,4096'
-    gc._store_cost(path, 'block-trial|' + key, {'samples': {'0': [100] * 4, '1': [1] * 4}})
+    gc._store_cost(path, 'choice|block-trial|' + key, {'samples': {'0': [100] * 4, '1': [1] * 4}})
     for i in range(5):
         trial = td._BlockTrials()
         trial.record_cpu_round(key, {0: 1, 1: 1.2})
@@ -109,7 +109,7 @@ def test_block_pair_runner_reverses_and_settles_each_layout(monkeypatch, tmp_pat
     assert td._cpu_block_round(jobs) == [8]
     assert calls == [0, 0, 1, 1, 1, 1, 0, 0]
     assert not td._BLOCK_TRIALS.cpu_replaying
-    np.testing.assert_allclose(td._BLOCK_TRIALS._st(td._trial_key(bank))['samples'][0], [0.05, 0.05])
+    np.testing.assert_allclose(td._BLOCK_TRIALS._st(td._trial_key(bank)).samples[0], [0.05, 0.05])
 
 
 def test_block_replay_exception_releases_guard(monkeypatch, tmp_path):
@@ -124,7 +124,7 @@ def test_block_replay_exception_releases_guard(monkeypatch, tmp_path):
     with pytest.raises(RuntimeError, match='failure'):
         td._cpu_block_round([(bank, np.zeros(10), {})])
     assert not td._BLOCK_TRIALS.cpu_replaying
-    assert not td._BLOCK_TRIALS._st(td._trial_key(bank))['samples']
+    assert not td._BLOCK_TRIALS._st(td._trial_key(bank)).sampled
 
 
 @pytest.mark.parametrize('raw', [False, True])
@@ -154,7 +154,7 @@ def test_q15_replays_return_the_same_real_series_results(monkeypatch, tmp_path, 
                 np.testing.assert_array_equal(a, b)
         else:
             np.testing.assert_array_equal(got, ref)
-    assert len(p._q15_trial()['samples'][False]) == 2
+    assert len(p._q15_trial().samples[False]) == 2
 
 
 def test_noisy_fast_median_does_not_hide_a_consistent_challenger():

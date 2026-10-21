@@ -104,6 +104,14 @@ def _tkey(p):
     return p._chain_trial_key()
 
 
+def _new_trial(tk, candidates):
+    """A chain trial of tk with these candidates, the first the model's chain."""
+    tr = mf._chain_trial(tk)
+    for c in candidates:
+        tr.add(c)
+    return tr
+
+
 @pytest.mark.parametrize("shape", [(300, 400, 500, 600), (700, 800, 850, 880)])
 def test_a_stored_lock_applies_whatever_this_groups_shortlist(monkeypatch, tmp_path, shape):
     """Two processes, different group shapes, one lock key: the second adopts the chain the
@@ -127,20 +135,24 @@ def test_a_stored_lock_applies_whatever_this_groups_shortlist(monkeypatch, tmp_p
 
 def test_a_batch_trial_with_a_never_run_candidate_still_locks(monkeypatch, tmp_path):
     """A GPU batch trial whose third candidate no live plan runs (another process's shortlist)
-    decides once its budget is spent, on the candidates it measured."""
+    decides once its budget of batches is spent, on the candidates it measured."""
     monkeypatch.setenv("MF_COST_FILE", str(tmp_path / "costs.json"))
     mf.clear_autotune_cache()
     tk = (2048, 6.0, 0.001, 2, "gpu:0")
     a, b, c = (256, 1024), (512,), (128, 512)
-    mf._CHAIN_TRIALS[tk] = {"samples": {a: [], b: [], c: []}, "assigned": {}, "winner": None}
+    _new_trial(tk, (a, b, c))
     base = mf._CHAIN_BATCH_TRIALS
     w = None
+    from matchedfilter.time_domain import _CHAIN_WARM_BATCHES as warm
     for i in range(10 * base):
+        w = mf._CHAIN_TRIALS[tk].tick()                    # a batch run for the trial
+        if w is not None:
+            break
         w = mf._chain_trial_batch(tk, a if i % 2 else b, 1.0 if i % 2 else 1.3)
         if w is not None:
             break
     assert w == a                                          # clearly faster than b
-    assert i + 1 <= mf._TRIAL_BUDGET * base * 3            # within the budget
+    assert i <= 3 * (warm + base) + 6                      # within the budget
 
 
 def test_a_batch_trial_locks_the_measured_best_through_outliers(monkeypatch, tmp_path):
@@ -152,8 +164,7 @@ def test_a_batch_trial_locks_the_measured_best_through_outliers(monkeypatch, tmp
     mf.clear_autotune_cache()
     tk = (2048, 6.0, 0.001, 2, "gpu:0")
     model, fast, third = (512, 1024), (256, 512), (128, 512)
-    mf._CHAIN_TRIALS[tk] = {"samples": {model: [], fast: [], third: []}, "assigned": {},
-                            "winner": None}
+    _new_trial(tk, (model, fast, third))
     true = {model: 4.05e-12, fast: 3.0e-12, third: 5.0e-12}
     noise = [0.9, 0.02, -0.03, 0.01, 0.6, -0.02, 0.03, 0.0]     # spikes at samples 0 and 4
     k = {c: 0 for c in true}
@@ -167,7 +178,7 @@ def test_a_batch_trial_locks_the_measured_best_through_outliers(monkeypatch, tmp
         if w is not None:
             break
     assert tuple(w) == fast
-    med = mf._CHAIN_TRIALS[tk]["median"]
+    med = mf._CHAIN_TRIALS[tk].median
     assert min(med, key=med.get) == fast                       # the lock is the measured best
 
 
@@ -180,7 +191,7 @@ def _drive_batches(tk, true, never=(), limit=200):
     for i in range(limit):
         c = mf._chain_trial_next(tk)
         if c is None:
-            return mf._CHAIN_TRIALS[tk]["winner"], i
+            return mf._CHAIN_TRIALS[tk].winner, i
         run = run + 1 if c == last else 1
         last = c
         if run > warm and c not in never:
@@ -195,10 +206,10 @@ def test_a_candidate_that_never_runs_still_yields_a_lock(monkeypatch, tmp_path):
     mf.clear_autotune_cache()
     tk = (2048, 6.0, 0.001, 2, "gpu:0")
     a, b, c = (256, 512), (256, 1024), (256,)
-    mf._CHAIN_TRIALS[tk] = {"samples": {a: [], b: [], c: []}, "assigned": {}, "winner": None}
+    _new_trial(tk, (a, b, c))
     w, batches = _drive_batches(tk, {a: 1.0e-12, b: 1.3e-12, c: 0.8e-12}, never=(c,))
     assert w == a
-    assert c in mf._CHAIN_TRIALS[tk]["dropped"]
+    assert c in mf._CHAIN_TRIALS[tk].dropped
     base = mf._CHAIN_BATCH_TRIALS
     assert batches <= 3 * (2 + base) + 6 + 1               # within the batch budget
 
@@ -208,7 +219,7 @@ def test_a_full_trial_locks_within_its_batch_count(monkeypatch, tmp_path):
     mf.clear_autotune_cache()
     tk = (2048, 6.0, 0.001, 2, "gpu:0")
     a, b, c = (256, 512), (256, 1024), (256,)
-    mf._CHAIN_TRIALS[tk] = {"samples": {a: [], b: [], c: []}, "assigned": {}, "winner": None}
+    _new_trial(tk, (a, b, c))
     w, batches = _drive_batches(tk, {a: 1.0e-12, b: 1.3e-12, c: 0.8e-12})
     assert w == c                                          # the measured best
     assert batches <= 3 * (2 + mf._CHAIN_BATCH_TRIALS) + 1
@@ -228,7 +239,7 @@ def test_a_trial_spread_over_short_processes_still_locks(monkeypatch, tmp_path, 
         held = mf._stored_chain_lock(tk, None)
         if held is not None:
             break
-        mf._CHAIN_TRIALS[tk] = {"samples": {a: [], b: [], c: []}, "assigned": {}, "winner": None}
+        _new_trial(tk, (a, b, c))
         _drive_batches(tk, {a: 1.0e-12, b: 1.3e-12, c: 0.9e-12}, limit=per_process)
     assert held is not None
     budget = 3 * (2 + mf._CHAIN_BATCH_TRIALS) + 6
@@ -280,7 +291,7 @@ def test_single_template_device_unclear_contest_keeps_the_banks_device(monkeypat
            "cpu": [5.0, 0.8, 1.2, 0.85, 1.3, 0.75, 1.15, 0.9]}
     td, _, _, state = _single_contest(monkeypatch, tmp_path, lambda side, i: seq[side][i])
     assert state.winner == "gpu"
-    assert len(state.samples["gpu"]) - state.warmup == state.cap
+    assert len(state.samples["gpu"]) == state.cap        # (warm-up samples are not kept)
 
 
 def test_a_lock_the_model_kept_is_not_reopened_by_its_own_steady_state(monkeypatch):

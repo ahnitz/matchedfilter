@@ -15,6 +15,8 @@ Everything after `--` goes to tools/ladder.py. The method:
     neither run's measurements leak into the next.
   * --seed-per-tree settles one seed per tree instead, each on its own tree: for a change to
     what the choices themselves are (pricing, candidates), which a shared seed would hide.
+  * --seed-convert rewrites the new tree's copy of the shared seed, for a change to how the
+    cost file keeps the same choices (tools/migrate_cost_file.py).
   * Rounds alternate the order (base first, then new first), after `--warmup` unrecorded
     runs of each tree.
 
@@ -66,6 +68,10 @@ def main(argv=None):
                     help="an already settled cost file to start from instead of settling")
     ap.add_argument("--seed-per-tree", action="store_true",
                     help="settle a cost file per tree on that tree (a change to the choices)")
+    ap.add_argument("--seed-convert", default=None, metavar="SCRIPT",
+                    help="a script run on the new tree's copy of the shared seed (python SCRIPT "
+                         "seed.json), for a change to the cost file's record format: e.g. "
+                         "tools/migrate_cost_file.py")
     ap.add_argument("--python", default=sys.executable)
     ap.add_argument("--timing", action="store_true",
                     help="device timers on (fine-stage device time per run). They change what "
@@ -86,6 +92,8 @@ def main(argv=None):
                     run(trees[name], ladder, seeds[name], extra, args.python)
         if not args.seed_per_tree:
             shutil.copy(seeds["base"], seeds["new"])
+    if args.seed_convert and not args.seed_per_tree:
+        subprocess.run([args.python, os.path.abspath(args.seed_convert), seeds["new"]], check=True)
 
     def one(name, extra):
         cost = os.path.join(work, "%s.json" % name)

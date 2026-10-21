@@ -13,25 +13,19 @@ import subprocess
 import sys
 
 
+_TRIALS = ('choice|block-trial|', 'choice|chain-trial|', 'choice|q15-trial|')
+
+
 def locks(records):
-    return {k: {f: v[f] for f in ('winner', 'chain', 'q15', 'rechecked') if f in v}
-            for k, v in records.items()
-            if k.startswith(('block-trial|', 'chain-trial|', 'q15-trial|'))
-            and not k.endswith('|batches')}
+    return {k: {f: v[f] for f in ('value', 'rechecked') if f in v}
+            for k, v in records.items() if k.startswith(_TRIALS)}
 
 
 def pending(records):
-    out = []
-    for k, v in records.items():
-        if not isinstance(v, dict) or not any(v.get('samples', {}).values()):
-            continue
-        if k.startswith('block-trial|') and 'winner' not in v:
-            out.append(k)
-        if k.startswith('q15-trial|') and 'q15' not in v:
-            out.append(k)
-        if k.startswith('chain-trial|') and k.endswith('|batches') and 'chain' not in records.get(k[:-8], {}):
-            out.append(k)
-    return sorted(out)
+    """Trials on file with samples and no lock."""
+    return sorted(k for k, v in records.items()
+                  if k.startswith(_TRIALS) and isinstance(v, dict) and 'value' not in v
+                  and any(v.get('samples', {}).values()))
 
 
 def read(path):

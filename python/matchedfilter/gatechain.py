@@ -545,10 +545,20 @@ def _cost_file_lock(path):
 
 def _store_cost(path, skey, cm):
     """Merge one record under a writer lock, then publish atomically for unlocked readers."""
-    path = os.path.abspath(os.fspath(path))
     value = cm.to_dict() if hasattr(cm, "to_dict") else cm
+    _update_cost(path, skey, lambda old: value)
+
+
+def _update_cost(path, skey, merge):
+    """Replace one record by merge(old record or None), read and written under the writer
+    lock (so a lock another process stored in between is seen); merge returns None to keep
+    the record on file. Returns the record on file afterwards."""
+    path = os.path.abspath(os.fspath(path))
     with _cost_file_lock(path):
         data = _load_cost_file(path)
+        value = merge(data.get(skey))
+        if value is None:
+            return data.get(skey)
         data[skey] = value
         tmp = None
         try:

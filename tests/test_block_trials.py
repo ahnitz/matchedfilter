@@ -105,7 +105,7 @@ def test_a_bank_adopts_a_persisted_lock(monkeypatch, tmp_path):
     key = td._trial_key(bank)
     from matchedfilter import gatechain
     cands = list(bank._candidate_sig)
-    gatechain._store_cost(str(tmp_path / "costs.json"), "block-trial|" + key, {"winner": 1})
+    gatechain._store_cost(str(tmp_path / "costs.json"), "choice|block-trial|" + key, {"value": 1})
     monkeypatch.setattr(td, "_BLOCK_TRIALS", td._BlockTrials())       # a new process
     again, rng = _inspiral_bank()
     assert td._trial_key(again) == key
@@ -278,7 +278,7 @@ def test_no_block_sample_while_a_plan_calibrates(monkeypatch, tmp_path):
         b = _FakeBank(cal)
         tok = td._trial_begin([(b, x, {})])
         td._trial_end(tok)
-        n = sum(len(v) for v in td._BLOCK_TRIALS.state[td._trial_key(b)]["samples"].values())
+        n = sum(len(v) for v in td._BLOCK_TRIALS.state[td._trial_key(b)].samples.values())
         assert n == expect
 
 
@@ -296,7 +296,7 @@ def test_no_block_sample_from_a_batch_that_built_recordings(monkeypatch, tmp_pat
         tok = td._trial_begin([(b, x, {})])
         count[0] += builds                     # the batch runs
         td._trial_end(tok)
-        n = sum(len(v) for v in td._BLOCK_TRIALS.state[td._trial_key(b)]["samples"].values())
+        n = sum(len(v) for v in td._BLOCK_TRIALS.state[td._trial_key(b)].samples.values())
         assert n == expect
 
 

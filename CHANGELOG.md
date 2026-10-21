@@ -100,12 +100,23 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ### Changed
 
+- Every measured choice (chain, block-size and Q15 trials, the device and fusion choices,
+  kernel layouts, subgroup size, interleave, sparse readback) follows one lifecycle,
+  `_choice.Choice`, and ends by construction: an unclear contest samples up to a cap, and a
+  trial whose samples do not come ends at its budget of attempts, the model's choice standing
+  without a clear win. Open trials persist across processes, CPU chain trials included.
+- Trial locks are kept in MF_COST_FILE as `choice|<key>` records. Older `block-trial|`,
+  `chain-trial|` and `q15-trial|` records are not read: a machine runs those trials once more,
+  or `python tools/migrate_cost_file.py costs.json` rewrites the locks.
 - One coarse launch rule on every GPU backend (`_coarse.coarse_launch`): untiled builds with
   several pairs per group take ragged groups on CUDA and Metal too (the kernel's spare slots
   compute and write nothing), so neither host pads its data rows or outputs any more.
 
 ### Fixed
 
+- A GPU chain trial spread over processes too short to take a sample never ended (macOS
+  Metal CI): its batch count is kept every batch, and the spent budget keeps the model's
+  chain.
 - Vulkan and Metal async results own their output buffers until collected. A later call
   of the same shape reused the record and overwrote them, so the earlier result returned
   the later call's peaks; a call now collects the in-flight result first, as CUDA does.

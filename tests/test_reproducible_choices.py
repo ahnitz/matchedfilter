@@ -67,23 +67,19 @@ def _run(device, cost):
     return json.loads(p.stdout.strip().splitlines()[-1])
 
 
+_TRIALS = ("choice|block-trial|", "choice|chain-trial|", "choice|q15-trial|")
+
+
 def _trial_records(rec):
     """The trial locks on file (what a process reads back), without timings."""
-    out = {}
-    for k, v in rec.items():
-        if k.startswith(("block-trial|", "chain-trial|", "q15-trial|")) and not k.endswith("|batches"):
-            out[k] = (v.get("winner"), tuple(v.get("chain", ())), v.get("q15"), v.get("rechecked"))
-    return out
+    return {k: (v.get("value"), v.get("rechecked")) for k, v in rec.items()
+            if k.startswith(_TRIALS) and "value" in v}
 
 
 def _open_trials(rec):
-    """Trials on file that have samples but no lock: a block-size trial without a winner, or a
-    chain trial's batch samples without the chain's lock."""
-    open_ = [k for k, v in rec.items() if k.startswith("block-trial|") and "winner" not in v
-             and any(v.get("samples", {}).values())]
-    open_ += [k for k, v in rec.items() if k.endswith("|batches") and any(v.get("samples", {}).values())
-              and "chain" not in rec.get(k[:-len("|batches")], {})]
-    return open_
+    """Trials on file that have samples but no lock."""
+    return [k for k, v in rec.items() if k.startswith(_TRIALS) and "value" not in v
+            and any(v.get("samples", {}).values())]
 
 
 @pytest.mark.parametrize("device", ["cpu", "gpu:0"])
