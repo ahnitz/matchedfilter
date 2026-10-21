@@ -72,6 +72,9 @@ def test_middle_critical_rate_exact_parity(bank_data):
 
 
 
+# A timing ratio, so an opt-in performance check (--run-performance, on an idle machine):
+# on a shared CI runner it read 1.18x where dev2 reads 2.1x (Linux wheel job, 2026-10-21).
+@pytest.mark.performance
 def test_middle_critical_rate_speedup_and_memory(bank_data):
     """Benchmark full rate vs critical rate convolution across all upper templates."""
     taps, counts, middle_ids, scales = bank_data

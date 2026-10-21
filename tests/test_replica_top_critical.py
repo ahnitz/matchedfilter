@@ -68,6 +68,9 @@ def test_top_critical_rate_noise_normalization():
     assert 0.90 < var_im < 1.10, f"Imag variance {var_im} not normalized"
 
 
+# A timing ratio, so an opt-in performance check (--run-performance, on an idle machine), as
+# its middle-stage twin (test_replica_middle_critical) is: a shared CI runner read that 1.18x.
+@pytest.mark.performance
 def test_top_critical_rate_speedup_benchmark():
     """Benchmark full N vs critical N/2 IFFT on dev2."""
     N = 1048576
