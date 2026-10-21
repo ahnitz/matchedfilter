@@ -30,8 +30,9 @@ def test_candidates_alternate_from_the_preference_and_a_clear_win_locks():
     seen = _drive(ch, lambda c, i: 1.0 if c == "gpu" else 0.4)
     assert seen[:4] == ["gpu", "cpu", "gpu", "cpu"]
     assert ch.winner == "cpu"
-    # A decision needs every candidate past the warm-up by `minimum` samples, no sooner.
-    assert all(len(v) == ch.warmup + ch.minimum for v in ch.samples.values())
+    # A decision needs every candidate past the warm-up by `minimum` samples, no sooner:
+    # the warm-up samples are not kept.
+    assert all(len(v) == ch.minimum for v in ch.samples.values())
     assert ch.next() == ("cpu", None)
 
 
@@ -50,7 +51,7 @@ def test_an_unclear_contest_samples_to_the_cap_then_keeps_the_preference():
     ch = _choice.Choice(("gpu", "cpu"))
     _drive(ch, lambda c, i: seq[c][i])
     assert ch.winner == "gpu"
-    assert len(ch.samples["gpu"]) - ch.warmup == ch.cap
+    assert len(ch.samples["gpu"]) == ch.cap
 
 
 def test_the_lock_is_stored_and_a_later_process_reuses_it_untimed(monkeypatch, tmp_path):
@@ -97,10 +98,9 @@ def test_three_candidates_are_sampled_in_turn():
     assert ch.winner == "b"
 
 
-@pytest.mark.parametrize("bad", [("a",), ("a", "a")])
-def test_a_choice_needs_distinct_candidates(bad):
+def test_a_choice_needs_distinct_candidates():
     with pytest.raises(ValueError):
-        _choice.Choice(bad)
+        _choice.Choice(("a", "a"))
 
 
 def test_a_retrial_starts_the_contest_again_after_that_many_calls():
@@ -145,3 +145,78 @@ def test_offline_samples_decide_by_the_shared_rule():
     assert ch.decide(lambda cs: {32: [5.0] * 5, 16: [2.0] * 5, 8: [0.6] * 5}) == 8
     close = _choice.Choice((32, 8))                      # inside the tie: the preference
     assert close.decide(lambda cs: {32: [1.0] * 5, 8: [0.98] * 5}) == 32
+
+
+def test_a_persisted_contest_continues_across_processes(monkeypatch, tmp_path):
+    """One sample a process: the samples are kept on file, so the contest completes across
+    processes as in one long one."""
+    monkeypatch.setenv("MF_COST_FILE", str(tmp_path / "costs.json"))
+    cost = {"a": 1.0, "b": 0.5}
+    for proc in range(20):
+        ch = _choice.Choice(("a", "b"), store_key="p", warmup=0, persist=True)
+        if ch.winner is not None:
+            break
+        cand, record = ch.next()
+        record(cost[cand])
+    assert ch.winner == "b" and proc == 2 * ch.minimum
+
+
+def test_the_budget_ends_a_contest_whose_samples_never_come(monkeypatch, tmp_path):
+    """Attempts that yield no sample still count, across processes: the contest ends at its
+    budget, and with nothing to compare the preference stands."""
+    monkeypatch.setenv("MF_COST_FILE", str(tmp_path / "costs.json"))
+    for proc in range(50):
+        ch = _choice.Choice(("a", "b"), store_key="q", persist=True, budget=(2, 1))
+        if ch.winner is not None:
+            break
+        ch.tick()
+    assert ch.winner == "a" and proc == 2 * 2 + 1 + 1
+
+
+def test_at_the_budget_a_clearly_faster_candidate_still_wins():
+    ch = _choice.Choice(("a", "b", "c"), warmup=0, minimum=6, budget=(1, 0))
+    for _ in range(2):
+        ch.record("a", 1.0)
+        ch.record("b", 0.5)                    # c never runs
+    for _ in range(3):
+        ch.tick()
+    assert ch.winner is None
+    ch.tick()
+    assert ch.winner == "b"
+
+
+def test_at_the_budget_the_preference_stands_when_it_has_too_few_samples():
+    ch = _choice.Choice(("a", "b"), warmup=0, budget=(1, 0))
+    ch.record("b", 0.1)
+    ch.record("b", 0.1)
+    for _ in range(3):
+        ch.tick()
+    assert ch.winner == "a"                    # b was never compared with it
+
+
+def test_a_lock_another_process_stored_first_is_adopted(monkeypatch, tmp_path):
+    monkeypatch.setenv("MF_COST_FILE", str(tmp_path / "costs.json"))
+    mine = _choice.Choice(("a", "b"), store_key="r", warmup=0, persist=True)
+    other = _choice.Choice(("a", "b"), store_key="r", warmup=0, persist=True)
+    _drive(other, lambda c, i: 1.0 if c == "a" else 3.0)
+    assert other.winner == "a"
+    mine.record("a", 3.0)                      # mid-contest: the file's lock is seen
+    assert mine.winner == "a"
+    _drive(mine, lambda c, i: 3.0 if c == "a" else 1.0)
+    assert mine.winner == "a"
+
+
+def test_a_dropped_candidate_leaves_the_contest():
+    ch = _choice.Choice(("a", "b", "c"), warmup=0, minimum=2)
+    ch.drop("c")
+    seen = _drive(ch, lambda c, i: 1.0 if c == "a" else 0.5)
+    assert "c" not in seen and ch.winner == "b"
+
+
+def test_paired_rounds_decide_and_ignore_unpaired_samples():
+    ch = _choice.Choice((False, True), warmup=0, minimum=5, cap=10, paired=True)
+    ch.record(True, 0.1)                       # not a round: ignored
+    assert ch.samples[True] == []
+    for i in range(5):
+        ch.round({False: 1.0 + i, True: 0.8 * (1.0 + i)})
+    assert ch.winner is True

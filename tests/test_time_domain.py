@@ -894,7 +894,7 @@ def test_single_template_calls_choose_the_faster_device_and_agree(monkeypatch):
         assert np.max(np.abs(r_g.snr - r_c.snr) / scale) < 1e-4
     (state,) = _choice.of_kind("single-device").values()
     assert state.winner in ("gpu", "cpu")
-    assert all(len(v) >= state.warmup + state.minimum for v in state.samples.values())
+    assert all(len(v) >= state.minimum for v in state.samples.values())
 
 
 def test_filter_series_many_without_wait_overlaps_and_matches(monkeypatch):
