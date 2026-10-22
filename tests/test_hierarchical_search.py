@@ -428,3 +428,15 @@ def test_a_gpu_search_gives_the_cpu_search():
             assert key[1] == 1 and gp.snr.size == 0      # only the narrow chunk is empty
         else:
             _assert_same_peaks(gp, peaks)
+
+
+def test_refilter_parses_windows_as_the_bank_does():
+    """refilter checks its windows against the parent's support with the bank's own parser
+    (time_domain._normalize_windows), so a form the bank refuses is refused up front and
+    overlapping windows are merged before the support check (robustness-plan E7)."""
+    from matchedfilter import search as S
+    from matchedfilter.time_domain import _normalize_windows
+    assert S._normalize_windows is _normalize_windows
+    with pytest.raises(ValueError, match="ambiguous"):
+        _normalize_windows([10, 20], 100)
+    assert _normalize_windows([(0, 30), (20, 50)], 100).tolist() == [[0, 50]]

@@ -16,7 +16,7 @@ import numpy as np
 
 from . import _core
 from .time_domain import (TimeDomainFilterBank, FilterResults, _EMPTY_FILTER_RESULTS,
-                          _settle_device_writes)
+                          _normalize_windows, _settle_device_writes)
 from .device import parse as _parse_device
 
 __all__ = ["Root", "Inner", "Leaf", "BlockInput", "HierarchicalSearch", "SeriesContext",
@@ -108,23 +108,6 @@ class SeriesContext(NamedTuple):
     series: Dict[str, np.ndarray]
 
 
-def _normalize_windows(windows, length):
-    if windows is None:
-        return [(0, length)]
-    if isinstance(windows, slice):
-        start, stop, _ = windows.indices(length)
-        return [(start, stop)] if stop > start else []
-    out = []
-    for w in windows:
-        if isinstance(w, slice):
-            a, b, _ = w.indices(length)
-        else:
-            a, b = int(w[0]), int(w[1])
-        if b > a:
-            out.append((a, b))
-    return out
-
-
 def _spans_cover(support, requested):
     for a, b in requested:
         if b <= a:
@@ -179,7 +162,9 @@ class PeaksContext:
         and threshold. No envelope applies. Raises ValueError if windows fall outside the
         parent series' computed support in channel."""
         ser = self.series(channel)
-        req = _clip(_normalize_windows(windows, len(ser)), 0, len(ser))
+        # The bank's parser (time_domain._normalize_windows): the windows filter_series takes,
+        # parsed as it parses them, so the support check and the call cannot disagree.
+        req = [(int(a), int(b)) for a, b in _normalize_windows(windows, len(ser))]
         if not req and windows is not None:
             return _EMPTY_FILTER_RESULTS
         sup = self.support(channel)
