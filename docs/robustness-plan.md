@@ -245,3 +245,8 @@ A step that changes C or workflows is first pushed to a `ci/<topic>` branch and 
   - The Metal job compiles the committed sources with tools/precompile_metal.sh (the release's script), cached, instead of fetching slangc and rebuilding every kernel.
   - The CI wheels run a smoke subset; the release keeps the full suite.
   - MANIFEST.in ships CHANGELOG.md, examples/, src/gpu/*.cu and the tool scripts and sources the sdist lacked.
+- 2026-10-22: **B5: hierarchical plans own their data.**
+  - `ap_hmf_set_data` copies into plan memory, and the header documents the copy for both setters. The Python layer holds copies for replay.
+  - tests/test_data_ownership.py: the two hierarchical cases fail on 542aeed1.
+  - test_lazy_tier_ingest's eager-copy test asserted the old behaviour, that a refine reads a buffer mutated after set_data. It now asserts that the data is read as set.
+  - The ladder runs the series path, which already used plan memory.

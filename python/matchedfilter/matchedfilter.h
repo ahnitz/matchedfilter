@@ -60,6 +60,7 @@ size_t      ap_mf_nbins(const ap_mf_plan *p, size_t binsize, size_t start, size_
 
 /* Ingest.  spec is the segment's SPECTRUM: n interleaved complex float32, the
    unnormalised forward transform of the segment, in natural frequency order.
+   It is copied: the caller's buffer may be reused or freed once this returns.
    Returns 0, or -1 on error. */
 int ap_mf_set_data    (ap_mf_plan *p, int d, const float *spec);
 int ap_mf_set_template(ap_mf_plan *p, int t, const float *spec);
@@ -254,6 +255,8 @@ size_t ap_hmf_nbins(const ap_hmf_plan *p, size_t binsize, size_t start, size_t e
  * reference: they become stale, and a run over a stale template fails until it is
  * set again (no unscaled copy is kept to rescale them from). */
 int    ap_hmf_set_reference(ap_hmf_plan *p, const float *power);
+/* Ingest, as ap_mf_set_data: spec (n interleaved complex float32) is copied, so the
+   caller's buffer may be reused or freed once this returns. */
 int    ap_hmf_set_data    (ap_hmf_plan *p, int d, const float *spec);
 int    ap_hmf_set_template(ap_hmf_plan *p, int t, const float *spec);
 
