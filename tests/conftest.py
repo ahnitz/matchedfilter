@@ -74,6 +74,18 @@ def bank_subset():
 
 
 @pytest.fixture(autouse=True)
+def _restore_sys_path():
+    """A test that changes sys.path (a tool's main() run in-process) changes it for itself
+    only. Until 2026-10-22 tools/migrate_cost_file.py's main() left the source tree on it,
+    and every spawned process a later test started imported that unbuilt tree and died:
+    in the reverse-order run only, and only where the tree has no built extension (CI)."""
+    import sys
+    saved = list(sys.path)
+    yield
+    sys.path[:] = saved
+
+
+@pytest.fixture(autouse=True)
 def _clean_autotune_cache():
     """Every test starts without the workload choices an earlier test made."""
     import matchedfilter as mf
@@ -276,13 +288,34 @@ def pytest_addoption(parser):
                           'session removes every other one but MF_ISA and the tool paths')
     parser.addoption('--reverse-modules', action='store_true', default=False,
                      help='run the test modules in reverse order (finds order dependence)')
+    parser.addoption('--shard', metavar='K/N',
+                     help='run the K-th of N parts of the suite (whole modules, dealt in turn '
+                          'by name), so a slow run (the sanitizers) splits across jobs')
     parser.addoption('--run-performance', action='store_true', default=False,
                      help='Run opt-in performance regression checks on an idle machine')
     parser.addoption('--performance-baseline', help='Compare timings with a saved same-host JSON baseline')
     parser.addoption('--performance-record', help='Save timings after a successful performance run')
 
 
+def shard_modules(modules, k, n):
+    """The modules of the k-th (1-based) of n shards: sorted by name and dealt in turn, so
+    each module is in exactly one shard and the shards differ by at most one module."""
+    if not (n >= 1 and 1 <= k <= n):
+        raise pytest.UsageError('--shard K/N needs 1 <= K <= N')
+    return set(sorted(set(modules))[k - 1::n])
+
+
 def pytest_collection_modifyitems(config, items):
+    shard = config.getoption('--shard')
+    if shard:
+        try:
+            k, n = (int(x) for x in shard.split('/'))
+        except ValueError:
+            raise pytest.UsageError('--shard takes K/N, e.g. 2/4: %r' % shard)
+        keep = shard_modules((item.module.__name__ for item in items), k, n)
+        dropped = [item for item in items if item.module.__name__ not in keep]
+        items[:] = [item for item in items if item.module.__name__ in keep]
+        config.hook.pytest_deselected(items=dropped)
     if config.getoption('--reverse-modules'):
         order = list(dict.fromkeys(item.module.__name__ for item in items))[::-1]
         rank = {m: i for i, m in enumerate(order)}
