@@ -26,7 +26,6 @@ def test_sparse_series_matches_dense_with_reused_storage(kind, binsize, q15):
             pytest.skip("Q15 unavailable")
         if not q15:
             plan.set_q15(False)
-        assert plan.set_q15_recheck_late(q15)
         if kind != "complex":
             assert plan.set_real_series(True, 2 if kind == "strided_real" else 1)
 

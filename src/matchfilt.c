@@ -94,6 +94,7 @@ struct ap_mf_plan {
      first use and invalidated by the setters. */
   int qw;                     /* int16 lanes per screen call; 0 until first use */
   int qtail;                  /* retained backend has tail tiles at this n */
+  int qnomargin;              /* decide on the int16 maximum itself (ap_mf_set_q15_margin) */
   int16_t *qtr,*qti;          /* [group][n][qw] quantised templates, conjugated */
   float *qts;                 /* [nt] template scale: t_q = t * qts */
   unsigned char *qtok;        /* [nt] quantised copy current */
@@ -1663,7 +1664,7 @@ static __attribute__((noinline)) int q15_tail_group(ap_mf_plan *p, int d0, int f
                       unsigned char *pass, float *stat){
   const size_t n=p->n;
   const int qw=p->qw;                      /* 32 on AVX-512, 16 on AVX2 */
-  const float EQ=(float)ap_q15_margin(n);
+  const float EQ=p->qnomargin ? 0.0f : (float)ap_q15_margin(n);
   int16_t lanethr[64], lanemax[64];
   int total=0;
   for(int d=d0;d<first;d++) if(!p->qdok[d]) q15_data(p,d);
@@ -1709,7 +1710,7 @@ int ap_mf_q15_screen(ap_mf_plan *p,int d0,int nd,int t0,int nt,float threshold,
   if(start>=end) return 0;
   if(q15_prepare(p)) return -1;
   const size_t n=p->n; const int qw=p->qw;
-  const float EQ=(float)ap_q15_margin(n);
+  const float EQ=p->qnomargin ? 0.0f : (float)ap_q15_margin(n);
   float bl[64];
   int16_t lanethr[64], lanemax[64];
   int total=0;
@@ -1769,6 +1770,15 @@ int ap_mf_q15_screen(ap_mf_plan *p,int d0,int nd,int t0,int nt,float threshold,
     }
   }
   return total;
+}
+
+/* With the margin (the default) a pair the screen rejects cannot reach `threshold` in the
+   float tier: the screen stands in for that tier.  Without it the screen decides on its own
+   int16 maximum, as a gate in its own right whose threshold the chain's model sets. */
+int ap_mf_set_q15_margin(ap_mf_plan *p,int on){
+  if(!p) return -1;
+  p->qnomargin=!on;
+  return 0;
 }
 
 /* Debug accessor: how many data slots the plan actually has. */

@@ -16,12 +16,13 @@ not proceed to native implementation on the strength of its optimistic oracle.
 
 ## Completed: reorder decisions before adding new kernels
 
-[Delayed Q15 rechecking](cpu-gate-order.md) evaluates the existing 512 gate before
-rechecking Q15 survivors at 256 when the measured-cost model favors that order.
-The final gate remains last and every accepted pair still passes all original
-thresholds. On the representative Zen 5 ladder this avoids 94% of 256 rechecks,
-pays for more 512 checks, and reduces whole-segment time 2.9%. This is distinct
-from the earlier tail-packing and lazy-ingestion changes.
+[Delayed Q15 rechecking](cpu-gate-order.md) evaluated the existing 512 gate before
+rechecking Q15 survivors at 256 when the measured-cost model favored that order.
+On the representative Zen 5 ladder this avoided 94% of 256 rechecks, paid for more
+512 checks, and reduced whole-segment time 2.9%. It is superseded: the Q15 screen
+is now the first tier's gate ([reduced-precision-gates.md](reduced-precision-gates.md)),
+so there are no rechecks, and tier 1 no longer sees the margin's extra passes
+(25% fewer tier-1 inputs on the production replica).
 
 ## Completed: prepare later tiers only for blocks that reach them
 

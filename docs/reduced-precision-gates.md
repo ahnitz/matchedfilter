@@ -1,14 +1,29 @@
 # Reduced-precision gates: one error model
 
-Three first tiers run in reduced precision. Each gates on an estimate of a pair's coarse maximum
-that never falls below the exact (FP32) maximum by more than its margin allows. Every survivor
-is then refined exactly, in FP32, so a gate can only add work, never change a reported peak.
-This page states the three bounds side by side; each kernel's own page has the derivation and
-the measurements.
+Every tier of a chain is a screener, and what it answers to is the chain's false-dismissal
+budget against the flat filter, not the decisions of an FP32 tier at the same band: any
+screener that keeps the chain within that budget is acceptable. Every survivor is refined
+exactly, in FP32, so each reported peak is the flat filter's; which pairs reach the refine is
+what the budget governs.
+
+**The Q15 screen is the first tier itself** (since 2026-10-22). It gates on its own int16
+maximum, with no margin and no FP32 run of the tier behind it, at the threshold the gate model
+sets for the tier. Its rounding (rms 0.46 sqrt(N) LSB, about 0.2% of the threshold at the
+production bands) is small beside the band's own loss. Measured against the flat filter by
+injection (`tools/chain_fdr_vs_flat.py`: n = 2048, chain 256/512/1024, SNR 6, fd 1e-3, 400k
+injections per profile), the
+chain dismisses 168 and 184 of ~228,600 flat detections with the gate, against 171 and 185
+with the FP32 first tier. On 221,607 captured production pairs the gate passes 1.00x as many
+pairs as the FP32 tier would, where the screen with its 5 sqrt(N) margin passed 1.37x at band
+256 (1.62x and 2.35x had it run at 512 and 1024).
+
+The FP16 gates below still report an upper bound of the FP32 maximum and so pass a superset of
+its pairs; they could be calibrated the same way. This page states their bounds and the Q15
+screen's error side by side; each kernel's own page has the derivation and the measurements.
 
 | Gate | Where | Estimate the gate compares | Margin | Page |
 |---|---|---|---|---|
-| Q15 screen | CPU, x86 (in front of the FP32 tier) | the int16 transform's maximum plus a margin | **absolute**: 5 sqrt(N) LSB of the int16 output | [cpu-q15-gate.md](cpu-q15-gate.md), `src/q15.h` |
+| Q15 screen | CPU, x86 (the first tier) | the int16 transform's maximum | none in the chain; `ap_mf_q15_screen` alone keeps a 5 sqrt(N) LSB margin by default (`ap_mf_set_q15_margin`) | [cpu-q15-gate.md](cpu-q15-gate.md), `src/q15.h` |
 | FP16 gate | CPU, ARM with FP16 vectors (replaces the FP32 tier) | B = \|y16(k')\| (1 + 3u) + κ u rms(y) | κ = 16 (`GATE16_KAPPA`) | [cpu-neon-fp16-gate.md](cpu-neon-fp16-gate.md), `src/gate16.cc` |
 | fp16 coarse tier | GPU (Vulkan, CUDA, Metal; Slang) | B = \|c16\| (1 + 3u) + κ u rms(y) | κ per band, 12.7 / 15.5 at bands 256 / 512 (`C16_KAPPA`, `tools/coarse_layout.py`; Apple builds use their own σ table) | `src/gpu/tierb.slang` (c16Bound) |
 | tensor-core gate | GPU, CUDA (sm_80+) | as the fp16 tier | κ 7.0 / 10.5 at bands 256 / 512 (`COARSE_TC_SIGMA`, `tools/build_ptx.py`) | `src/gpu/coarse_tc.cu` |
@@ -23,8 +38,12 @@ u = 2^-11 throughout; rms(y) is the pair's output rms over all lags (Parseval).
   - κ u rms(y) covers the transform's own rounding. It scales with the pair's energy, not
     with its peak.
 - **Absolute (Q15).** int16 rounding is absolute. The screen's error is a sum of independent
-  roundings with rms 0.44-0.47 sqrt(N) LSB, the same for noise and loud injections. So the
-  margin is a fixed 5 sqrt(N), about 10.7 rms, with no peak-proportional term.
+  roundings with rms 0.44-0.47 sqrt(N) LSB, the same for noise and loud injections. Where the
+  screen must pass every pair the FP32 maximum could pass (`ap_mf_q15_screen` with its margin
+  on), the margin is a fixed 5 sqrt(N), about 10.7 rms, with no peak-proportional term. As the
+  chain's first tier it uses no margin; the error is part of its statistic.
+- **Range.** Inputs are quantised so that no intermediate of the int16 transform can overflow
+  (`docs/cpu-q15-gate.md`), and the final |z|^2 saturates upward, so a loud pair always passes.
 
 ## How each constant was set
 
@@ -42,6 +61,9 @@ u = 2^-11 throughout; rms(y) is the pair's output rms over all lags (Parseval).
 
 - **`tools/gate_margin.py --loud`** (every merge, in `tools/gate.py`): margin use and the
   loud-injection fail-open, per gate.
+- **The chain against the flat filter, by injection** (`tools/chain_fdr_vs_flat.py`, and
+  `tools/verify_cascade_fdr.py` across spectral shapes): the acceptance test for any first
+  tier, Q15 included.
 - **`tests/test_tier_conformance.py`:** each CPU tier kind (FP32, Q15, FP16 on ARM) and the
   machine's GPU, at thresholds in wide gaps of the exact maxima, refines exactly the pairs
   above them and reports the same peaks.

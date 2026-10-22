@@ -270,10 +270,10 @@ class CostModel:
     dense[b]          first tier at band b, per pair
     sparse[b]         [(density, ticks per survivor)] for a later tier at band b
     refine            [(density, ticks per refined pair)]
-    screen[b]         Q15 screen in front of a first tier at band b (q15-inl.h), when the
-                      back end has one: {"dense": ticks per pair screened,
+    screen[b]         Q15 screen as the first tier at band b (q15-inl.h), when the back
+                      end has one: {"dense": ticks per pair screened,
                       "excess": [(float density, screen density)], "recheck": ticks per
-                      pair the screen passes back to the float tier}
+                      pair it passes beyond the screen itself (compaction)}
     """
 
     def __init__(self, n, dense, sparse, refine, block=0.0, screen=None, excess=None,
@@ -377,9 +377,9 @@ class CostModel:
 
     def first_tier(self, b, reach1):
         """(cost per pair, q15) of the cheaper first tier at band b, where reach1 is the float
-        tier's pass rate. Screened: the screen on every pair, plus the float tier re-run on
-        what the screen passes -- reach1 scaled by the measured excess (the screen passes a
-        superset: the float passes plus pairs within its error margin of the threshold)."""
+        tier's pass rate. Screened: the screen on every pair, plus its per-pass cost beyond
+        the screen, at reach1 scaled by the measured excess (about 1 now that the screen is
+        the tier's gate on its own statistic; larger for a screen with a margin)."""
         c = self.dense[int(b)]
         sc = self.screen.get(int(b))
         if sc is None or not sc["excess"]:
@@ -746,41 +746,6 @@ def note_refine_blocks(n, band, f):
 
 def measured_refine_blocks(n, chain):
     return _REFINE_BLOCKS.get((int(n), int(max(chain))))
-
-
-def q15_recheck_order(power, n, chain, thresholds, cost, window=None):
-    """Price moving the first tier's float recheck behind the second tier, without changing
-    any gate: the second tier then runs on the Q15 screen's survivors, and the recheck on
-    the second tier's. Use unconditional second-tier passes as an upper estimate of recheck
-    work: no independence assumption between gates or Q15 is needed. This is a scheduling
-    model, not a new rejection or dismissal model, and it holds for any chain with a second
-    tier, at any n, on any back end whose calibration measured the screen. (It was
-    restricted to n = 2048 with (256, 512, 1024) on AVX-512, the case first measured; the
-    n = 1024 chain (128, 256, 512) never got the ordering.)
-    """
-    if cost is None or len(chain) < 2:
-        return None
-    b0, b1 = int(chain[0]), int(chain[1])
-    if b0 not in cost.screen or b1 not in cost._sparse:
-        return None
-    p = _norm_profile(power, n)
-    bands = usable_bands(p, n)
-    if not set(chain).issubset(bands):
-        return None
-    noise = noise_block_maxima(p, n, bands, window=window)
-    f0 = float((noise[:, bands.index(b0)] >= thresholds[0]).mean())
-    f1 = float((noise[:, bands.index(b1)] >= thresholds[1]).mean())
-    sq = cost.screen_reach(b0, f0)
-    if sq is None or sq <= 0 or not np.isfinite(sq):
-        return None
-    recheck = cost.screen[b0]["recheck"]
-    ordinary = sq * recheck + f0 * cost.sparse(b1, f0)
-    delayed = sq * cost.sparse(b1, sq) + min(f1, sq) * recheck
-    if not all(np.isfinite(x) and x > 0 for x in (recheck, ordinary, delayed)):
-        return None
-    return dict(late=delayed * (1.0 + TIE) < ordinary,
-                ordinary=float(ordinary), delayed=float(delayed),
-                q15_reach=float(sq), first_reach=f0, second_reach=f1)
 
 
 def _flop_cost(chain, reach, n):

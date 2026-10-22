@@ -111,7 +111,6 @@ class _Resolved(NamedTuple):
     thresholds: tuple
     reach: Optional[float]           # the model's per-pair refine probability, or None
     fractions: Optional[tuple]       # each tier's share of the reference's power, or None
-    q15_order: Optional[dict]        # the CPU's Q15 recheck order, or None
     direct_hw: Optional[int]         # the CPU direct refine's window half-width, or None
 
 
@@ -216,9 +215,6 @@ class HierarchicalFilter(MatchedFilter):
         # The block forward's transform: a cost-model price (_cpu_forward_platform), not a
         # trial -- its effect is under the shared rule's tie margin of a whole call.
         self._pfft = _prices._cpu_forward_platform(self.n) and plan.set_platform_fft(True)
-        # Tier 0 behind the Q15 screen: the FP16 gate over the screen's survivors where it is
-        # priced cheaper than the pooled FP32 pass (_q15_tier0_fp16).
-        plan.set_q15_tier0(_prices._q15_tier0_fp16(int(chain[0])))
         taps = getattr(self, "_taps", None)
         if taps is not None:
             plan.set_taps(taps[0], taps[0].shape[1], taps[1])   # direct: with the thresholds
@@ -375,7 +371,6 @@ class HierarchicalFilter(MatchedFilter):
         d = self.__dict__
         if d.get("_applied_plan") is not plan or d.get("_applied_res") is not r:
             plan.set_thresholds(list(r.thresholds))
-            plan.set_q15_recheck_late(bool(r.q15_order and r.q15_order['late']))
             if getattr(self, "_taps", None) is not None:
                 plan.set_direct(r.direct_hw is not None, r.direct_hw or 1)
             self._applied_plan, self._applied_res = plan, r
@@ -383,8 +378,8 @@ class HierarchicalFilter(MatchedFilter):
 
     def _resolve(self):
         """The resolved plan (docs/resolved-plan.md): chain, one threshold per tier, the
-        model's refine reach, per-tier reference band fractions, and on the CPU the Q15
-        recheck order and the direct refine's half-width. Computed once, and again only
+        model's refine reach, per-tier reference band fractions, and on the CPU the direct
+        refine's half-width. Computed once, and again only
         after an input changes (every setter that changes one drops it)."""
         r = self.__dict__.get("_resolved")
         if r is not None:
@@ -395,27 +390,17 @@ class HierarchicalFilter(MatchedFilter):
             self._chain = self._choose_chain(); self._q15 = getattr(self, "_q15_pref", False)
         chain = tuple(self._chain)
         thr = tuple(self._thresholds(required=True))
-        f = q15_order = hw = None
+        f = hw = None
         if self._pending_ref is not None:
             ref = np.asarray(self._pending_ref, dtype=np.float64)
             tot = ref.sum()
             f = tuple(float(ref[:b].sum() / tot) if tot > 0 else 0.0 for b in chain)
         if self.device.kind == 'cpu':
-            if self._pending_ref is not None and len(chain) >= 2:
-                q15_order = _gatechain.q15_recheck_order(
-                    self._pending_ref, self.n, chain, list(thr), self._cost_model(),
-                    window=self.search_window)
             if getattr(self, "_taps", None) is not None:
                 hw = self._direct_halfwidth(chain, list(thr))
         r = self._resolved = _Resolved(chain, thr, getattr(self, "_refine_reach", None), f,
-                                       q15_order, hw)
+                                       hw)
         return r
-
-    @property
-    def _q15_order_choice(self):
-        """The resolved plan's Q15 recheck order (None before it is resolved)."""
-        r = self.__dict__.get("_resolved")
-        return None if r is None else r.q15_order
 
     def _direct_halfwidth(self, chain, thresholds, nsim=20000):
         """The direct refine's window half-width for this chain (gatechain.direct_halfwidth,

@@ -3,20 +3,21 @@
 
 This is a feasibility study, NOT a table-free planner. Existing seeded costs and
 locks prepare the baseline scientific thresholds, chain and native plan. That
-preparation is excluded and reported separately. Only the Q15 enable/order flags
-change afterwards; all arms use the same plan, templates, thresholds and input.
+preparation is excluded and reported separately. Only the Q15 flag changes
+afterwards; all arms use the same plan, templates, thresholds and input.
 
 Example, from the checkout with its extension built:
   python tools/real_probe_study.py --captures /path/to/captures/leaves \
       --costs /path/to/seeded-costs.json --output /path/to/probe.json --limit 3
 
 Pilots retain whole homogeneous-window 32-block groups, stratified over the
-captured layout, and the entire template bank. Three rotated rounds race float,
-ordinary Q15 and delayed Q15. Selection uses ONLY pilot timings. A separate full
-call race includes those three arms and a duplicate locked-baseline control.
-Every switch has an untimed warm call; its cost is INCLUDED in the probe budget.
-Sparse outputs and native final row counts must agree exactly. Validation is
-outside execution timers but inside the pilot budget.
+captured layout, and the entire template bank. Rotated rounds race the float first
+tier and the Q15 gate. Selection uses ONLY pilot timings. A separate full call race
+includes both arms and a duplicate locked-baseline control. Every switch has an
+untimed warm call; its cost is INCLUDED in the probe budget. Within each arm, sparse
+outputs and native final row counts must agree exactly across repeats; the two arms
+gate on different statistics, so they agree only to the chain's false-dismissal
+budget. Validation is outside execution timers but inside the pilot budget.
 
 This measures public plan.run_series, not the entire PyCBC search. Repeated
 timings of one input do not add independent survivor observations. Sparse pilots
@@ -39,10 +40,9 @@ import time
 import traceback
 
 
-ARMS = ("float", "q15_ordinary", "q15_delayed")
-FLAGS = {"float": (False, False), "q15_ordinary": (True, False),
-         "q15_delayed": (True, True)}
-COMPARISON_VERSION = 2
+ARMS = ("float", "q15")
+FLAGS = {"float": False, "q15": True}
+COMPARISON_VERSION = 3
 THREAD_VARS = ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
                "BLIS_NUM_THREADS", "VECLIB_MAXIMUM_THREADS", "NUMEXPR_NUM_THREADS")
 
@@ -198,10 +198,7 @@ def prepare(file, args, mf, td, np, seed_path, seed):
     if p.n != 2048 or tuple(p.config) != (256, 512, 1024) or p._chain_trial is not None:
         raise RuntimeError("fixed scientific chain/block was not preserved")
     ep = p._execution_plan()                       # resolve thresholds BEFORE flags
-    if mf._prices._Q15_TIER0.get(256, False):
-        raise RuntimeError("this study expects x86 FP32 tier 0, not the ARM FP16 gate")
-    late = bool(getattr(p, "_q15_order_choice", None) and p._q15_order_choice["late"])
-    baseline = "q15_delayed" if p._q15 and late else "q15_ordinary" if p._q15 else "float"
+    baseline = "q15" if p._q15 else "float"
     lock = mf._chains._Q15_TRIALS.get(p._q15_trial_key())
     if lock is None or lock.winner is None or bool(lock.winner) != bool(p._q15):
         raise RuntimeError("baseline Q15 choice is not a settled seeded lock")
@@ -218,10 +215,10 @@ def prepare(file, args, mf, td, np, seed_path, seed):
         baseline_threshold_preparation_excluded_ns=time.perf_counter_ns() - start,
         preparation_calls=warm + 2, n=2048, chain=list(p.config), thresholds=list(thresholds),
         native_plan_id=id(ep), native_group=int(ep.series_group()), ntemplates=p.ntemplates,
-        nblocks=len(layout[0]), baseline=baseline, baseline_flags=[bool(p._q15), late],
+        nblocks=len(layout[0]), baseline=baseline, baseline_flags=[bool(p._q15)],
         baseline_bank_output_sha256=[hashlib.sha256(a.tobytes()).hexdigest()
                                      for a in baseline_result],
-        baseline_q15_lock=lock, baseline_order_choice=getattr(p, "_q15_order_choice", None),
+        baseline_q15_lock=lock,
         forward_platform=bool(p._pfft), execution_policy=dict(p._execution_policy),
         full_layout_sha256=[hashlib.sha256(a.tobytes()).hexdigest() for a in layout])
     return bank, p, ep, series, layout, provenance
@@ -232,9 +229,9 @@ class Race:
         self.p, self.ep, self.series, self.layout = p, ep, series, layout
         self.threshold, self.baseline, self.mf, self.np = threshold, baseline, mf, np
         self.thresholds = tuple(ep.thresholds())
-        self.reference = None
-        self.reference_counts = None
-        self.reference_refined = None
+        self.reference = {}           # per arm: the two arms gate on different statistics
+        self.reference_counts = {}
+        self.reference_refined = {}
         self.validation_ns = 0
         self.switch_warm_ns = 0
         self.samples = []
@@ -243,7 +240,7 @@ class Race:
         return self.p.run_series(self.series, *self.layout, binsize=2048,
                                  threshold=self.threshold, raw=True)
 
-    def check_result(self, results):
+    def check_result(self, results, arm):
         """Native counts describe the LAST call; all calls use identical input."""
         begin = time.perf_counter_ns()
         np, p = self.np, self.p
@@ -261,18 +258,18 @@ class Race:
             payload = (result.shape, result.flat.tobytes(), result.idx.tobytes(), result.val.tobytes())
             if result.shape != shape:
                 raise AssertionError(f"unexpected result shape: {result.shape}, expected {shape}")
-            if self.reference is None:
-                self.reference = payload
-            elif payload != self.reference:
-                raise AssertionError("exact sparse output mismatch between same-input arms/repeats")
+            if arm not in self.reference:
+                self.reference[arm] = payload
+            elif payload != self.reference[arm]:
+                raise AssertionError("exact sparse output mismatch between same-input repeats")
         from_sparse = np.bincount(last.flat // shape[2], minlength=counts.size).reshape(counts.shape)
         if (not np.array_equal(counts, from_sparse) or int(counts.sum()) != p._last_n_triggers
                 or p._last_n_triggers != len(last.flat)):
             raise AssertionError("native row counts do not match sparse peaks and returned total")
-        if self.reference_counts is None:
-            self.reference_counts = counts
-        elif not np.array_equal(counts, self.reference_counts):
-            raise AssertionError("native final row counts changed across same-input arms")
+        if arm not in self.reference_counts:
+            self.reference_counts[arm] = counts
+        elif not np.array_equal(counts, self.reference_counts[arm]):
+            raise AssertionError("native final row counts changed across same-input repeats")
         if (p._execution_plan() is not self.ep or tuple(self.ep.thresholds()) != self.thresholds
                 or not p._trial_hold or p._chain_trial is not None):
             raise AssertionError("native plan, thresholds or adaptive hold changed during race")
@@ -280,14 +277,15 @@ class Race:
 
     def sample(self, arm, round_index, position, repeats):
         start = time.perf_counter_ns()
-        q15, late = FLAGS[self.baseline if arm == "baseline" else arm]
+        config = self.baseline if arm == "baseline" else arm
+        q15 = FLAGS[config]
         self.p._q15 = q15
-        if not self.ep.set_q15(q15) or not self.ep.set_q15_recheck_late(late):
+        if not self.ep.set_q15(q15):
             raise RuntimeError(f"native plan rejected {arm}")
         warm = self.call()
         warm_ns = time.perf_counter_ns() - start
         self.switch_warm_ns += warm_ns
-        self.check_result([warm])
+        self.check_result([warm], config)
         before = self.p.work_counts()
         start = time.perf_counter_ns()
         results = [self.call() for _ in range(repeats)]
@@ -298,15 +296,15 @@ class Race:
                    elapsed_ns=elapsed, ns_per_call=elapsed / repeats,
                    switch_and_warm_ns=warm_ns, work=work, validated=False)
         self.samples.append(row)
-        self.check_result(results)
+        self.check_result(results, config)
         expected_pairs = len(self.layout[0]) * self.p.ntemplates * repeats
         if work["pairs"] != expected_pairs or work["refined"] % repeats:
             raise AssertionError("unexpected native work count: an adaptive replay may have run")
         refined = work["refined"] // repeats
-        if self.reference_refined is None:
-            self.reference_refined = refined
-        elif refined != self.reference_refined:
-            raise AssertionError("same-input variants produced different final refinement counts")
+        if config not in self.reference_refined:
+            self.reference_refined[config] = refined
+        elif refined != self.reference_refined[config]:
+            raise AssertionError("same-input repeats produced different final refinement counts")
         ticks = work["ticks"]
         work["ticks"]["tier0_without_q15"] = ticks["tiers"][0] - ticks["q15"]
         work["ticks"]["series_remainder"] = ticks["series"] - sum(ticks["tiers"]) - ticks["refine"]
@@ -314,15 +312,20 @@ class Race:
         return elapsed / repeats
 
     def result(self):
-        digest = hashlib.sha256()
-        for payload in self.reference[1:]:
-            digest.update(payload)
-        return dict(samples=self.samples, exact_sparse_and_counts_equal=True,
-                    output_sha256=digest.hexdigest(),
-                    counts_sha256=hashlib.sha256(self.reference_counts.tobytes()).hexdigest(),
-                    peaks_per_call=int(self.reference_counts.sum()),
-                    refinements_per_distinct_input=self.reference_refined,
-                    rare_survivor_warning=self.reference_refined < 10,
+        digests = {}
+        for arm, payload in self.reference.items():
+            digest = hashlib.sha256()
+            for part in payload[1:]:
+                digest.update(part)
+            digests[arm] = digest.hexdigest()
+        base = self.baseline
+        return dict(samples=self.samples, exact_sparse_and_counts_equal_within_arm=True,
+                    output_sha256=digests,
+                    counts_sha256={arm: hashlib.sha256(c.tobytes()).hexdigest()
+                                   for arm, c in self.reference_counts.items()},
+                    peaks_per_call=int(self.reference_counts[base].sum()),
+                    refinements_per_distinct_input=self.reference_refined[base],
+                    rare_survivor_warning=min(self.reference_refined.values()) < 10,
                     switch_and_warm_ns=self.switch_warm_ns, validation_ns=self.validation_ns)
 
 
@@ -366,7 +369,7 @@ def study_capture(file, index, args, mf, td, np, seed_path, seed, row):
                 baseline_alias_ratio=medians[info["baseline"]] / medians["baseline"])
     row["full"] = full
     # Link the direct public-plan replay back to the prepared production bank.
-    _, flat_bytes, idx_bytes, val_bytes = race.reference
+    _, flat_bytes, idx_bytes, val_bytes = race.reference[info["baseline"]]
     flat, idx = np.frombuffer(flat_bytes, np.int64), np.frombuffer(idx_bytes, np.int64)
     bi, ti = np.divmod(flat, p.ntemplates)  # binsize=2048 gives exactly one bin
     starts = np.asarray(layout[0], np.int64)[bi]
@@ -472,7 +475,7 @@ def main():
             comparison_version=COMPARISON_VERSION,
             interpretation=[
                 "Baseline threshold preparation excluded; existing costs still determine science.",
-                "Same native plan and full template bank; only Q15 enable/recheck order varies.",
+                "Same native plan and full template bank; only the Q15 first-tier gate varies.",
                 "Pilot budget includes switches, warm calls, validation and selection overhead.",
                 "Warm prepared-plan study: initial native creation is not charged to the probe.",
                 "Pilot sizes are separate races; later races reuse the already warmed plan.",

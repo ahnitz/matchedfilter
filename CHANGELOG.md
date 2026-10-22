@@ -6,6 +6,16 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ### Changed
 
+- The CPU Q15 screen is now the first tier's gate: a pair passes when its int16 maximum
+  reaches the tier's threshold, with no margin and no float run of the tier behind it
+  ([reduced-precision-gates.md](docs/reduced-precision-gates.md)). The chain stays within
+  its false-dismissal budget against the flat filter (measured by injection), and on the
+  production replica tier 1 sees 25% fewer pairs. Results with the screen on are no longer
+  bit-identical to the float first tier's; reported peaks are still exact. The late
+  recheck order (`set_q15_recheck_late`, `gatechain.q15_recheck_order`) and the FP16
+  tier 0 behind the screen (`set_q15_tier0`, `price_q15_tier0`) are removed: there is no
+  recheck left to order or price.
+
 - Every `MF_*` environment variable follows one rule (`docs/environment.md`, generated
   from `matchedfilter/_config.py`): unset or empty gives the default; a switch takes
   0/false/no/off or 1/true/yes/on (any case); a number must parse; anything else raises

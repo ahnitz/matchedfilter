@@ -127,6 +127,9 @@ int ap_mf_run_pairs_pooled(ap_mf_plan *p, int d0,
    receives the screen's estimate of each maximum.  Returns the number passed,
    or -1 when the plan has no screen. */
 int ap_mf_q15_lanes(const ap_mf_plan *p);
+/* With the margin (1, the default) the screen passes every pair whose float maximum can
+   reach the threshold; without it (0) it decides on its own int16 maximum. */
+int ap_mf_set_q15_margin(ap_mf_plan *p, int on);
 int ap_mf_q15_screen(ap_mf_plan *p, int d0, int nd, int t0, int nt, float threshold,
                      size_t start, size_t end, unsigned char *pass, float *stat);
 
@@ -210,22 +213,16 @@ int ap_hmf_series_group(const ap_hmf_plan *p);
 /* The series group a plan of size n would run when asked for `requested` (MF_DGROUP,
    then halved until its held spectra fit 4 MB): what ap_hmf_series_group reports. */
 int ap_hmf_effective_group(size_t n, int requested);
-/* Run the first tier through the Q15 screen (ap_mf_q15_screen): the float
-   tier then runs only on the pairs the screen cannot reject, so every result
-   is the float tier's own.  Returns 0, or -1 when the first tier's band has no
-   screen on this back end (the plan is then unchanged).  0 turns it off. */
+/* Run the first tier as the Q15 screen (ap_mf_q15_screen, without its margin): a pair
+   passes when its int16 maximum reaches the tier's threshold, and no float run of the
+   tier follows.  The tier then answers to the chain's false-dismissal budget, as every
+   tier does; survivors' peaks are still refined exactly.  Returns 0, or -1 when the
+   first tier's band has no screen on this back end (the plan is then unchanged).
+   0 turns it off. */
 int ap_hmf_set_q15(ap_hmf_plan *p, int on);
-/* Behind the Q15 screen, tier 0 on the FP16 gate (1) or the pooled FP32 pass (0). */
-int ap_hmf_set_q15_tier0(ap_hmf_plan *p, int fp16);
-/* Scheduling only: Q15, tier 1, tier 0, remaining tiers. Requires at least three
-   tiers starting 256,512; ignored while Q15 is off or its recheck uses FP16.
-   Gate thresholds and logical tier identities are unchanged. */
-int ap_hmf_set_q15_recheck_late(ap_hmf_plan *p, int on);
-/* Cumulative inputs per logical tier and passes of the first executed float gate. */
+/* Cumulative inputs per tier and passes of the first tier. */
 int ap_hmf_tier_inputs(const ap_hmf_plan *p, long *checked);
 long ap_hmf_first_gate_passed(const ap_hmf_plan *p);
-/* Its price per listed pair, in ticks (ap_ticks), both ways (fp16 -1 without the gate). */
-int ap_hmf_price_q15_tier0(size_t m, int nt, int reps, double *fp32, double *fp16);
 /* The block forward through the platform FFT (macOS: vDSP) instead of the engine's; -1 where
    there is none. Results differ by fp32 rounding only. */
 int ap_hmf_set_platform_fft(ap_hmf_plan *p, int on);

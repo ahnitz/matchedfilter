@@ -180,9 +180,20 @@ def test_q15_compaction_preserves_trace_and_dump_order(native, target, monkeypat
             native.ap_hmf_destroy(plan)       # close and flush the diagnostic dump
         traces.append(capfd.readouterr().err)
         dumps.append(np.fromfile(path, dtype=np.float32).reshape(-1, 8))
-    assert traces[0] and traces[0] == traces[1]
-    assert "pair=1 " in traces[0] and "pair=3 " in traces[0] and "pair=5 " in traces[0]
-    np.testing.assert_array_equal(dumps[0], dumps[1])
+    # The screen is the first tier's gate: it reports the pairs it passes, in the same
+    # order, with its own int16 maximum. Half the templates are scaled by .01, so every
+    # pair's maximum is far from the threshold and both tiers pass the same pairs.
+    import re
+    def traced(text):
+        return [(int(p), float(v)) for p, v in re.findall(r"pair=(\d+) thr=\S+ coarse max=(\S+)", text)]
+    assert traced(traces[0]) and [p for p, _ in traced(traces[0])] == [p for p, _ in traced(traces[1])]
+    assert {1, 3, 5} <= {p for p, _ in traced(traces[0])}
+    np.testing.assert_allclose([v for _, v in traced(traces[1])], [v for _, v in traced(traces[0])],
+                               rtol=1e-2)
+    assert dumps[0].shape == dumps[1].shape
+    np.testing.assert_array_equal(dumps[0][:, 3:], dumps[1][:, 3:])     # thresholds, pair ids
+    np.testing.assert_allclose(dumps[1][:, 0], dumps[0][:, 0], rtol=1e-2)
+    np.testing.assert_allclose(dumps[1][:, 2], dumps[1][:, 0])          # repeats the maximum
     pairs = [(int(row[6]), int(row[7])) for row in dumps[1]]
     assert pairs and pairs == sorted(pairs)   # local compaction preserves data-major order
     assert all(1 <= d < 4 and 7 <= t < 26 for d, t in pairs)

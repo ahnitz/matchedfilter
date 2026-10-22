@@ -21,10 +21,18 @@ For partial AVX-512 N256 template groups, [tail packing](cpu-q15-tail-packing.md
 uses the spare lanes for additional data blocks with the same search window.
 Each useful lane retains the original quantized operands and arithmetic.
 
-It is a **screen, not a replacement**. A pair is rejected only if its int16
-maximum plus the error margin stays below the tier threshold; every other pair
-is re-run by the float tier (pooled, `hmf.c`). Survivors, peaks and triggers
-are the float path's; the screen can only cost time, never change a result.
+**Since 2026-10-22 the screen is the first tier itself** (`hmf.c`,
+[reduced-precision-gates.md](reduced-precision-gates.md)): a pair passes when its
+int16 maximum reaches the tier's threshold, with no margin and no float run of the
+tier behind it. Survivors' peaks are still refined exactly. What it answers to is
+the chain's false-dismissal budget against the flat filter, as every tier does.
+
+Before that it was a **screen in front of the float tier**: a pair was rejected only
+if its int16 maximum plus the error margin stayed below the tier threshold, and
+every other pair was re-run by the float tier, so survivors, peaks and triggers were
+the float path's. The sections below describe that design and its measurements;
+the margin still applies to `ap_mf_q15_screen` called on its own
+(`ap_mf_set_q15_margin`).
 
 ## Accuracy evidence
 

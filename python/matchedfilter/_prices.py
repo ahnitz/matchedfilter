@@ -32,32 +32,6 @@ def price_once(memo, mkey, file_key, measure, read):
 _CPU_FWD_PFFT = {}
 
 
-_Q15_TIER0 = {}
-
-
-def _q15_tier0_fp16(band):
-    """Whether tier 0 behind the Q15 screen runs on the FP16 gate at this band: both kernels
-    are timed once on a synthetic survivor list (_core.price_q15_tier0) and the cheaper is
-    kept ("q15-tier0|band" in MF_COST_FILE). The FP16 gate reports an upper bound on the
-    FP32 magnitude, so its survivors are a superset of the FP32 pass's and the next tier and
-    the refine decide them; only time is at stake, and a whole-call trial of a tier ~10% of
-    a call sits at the shared rule's tie (gatechain.measured_choice), so it is priced."""
-    band = int(band)
-    if not getattr(_core, "gate16", lambda: False)():
-        _Q15_TIER0[band] = False
-        return False
-
-    def measure():
-        try:
-            fp32, fp16 = _core.price_q15_tier0(band, 128)
-        except Exception:                      # noqa: BLE001 -- no price: keep the FP32 pass
-            fp32, fp16 = 1.0, -1.0
-        hit = bool(fp16 > 0 and fp16 < fp32)
-        return hit, {"fp16": hit, "ticks": {"fp32": fp32, "fp16": fp16}}
-    return price_once(_Q15_TIER0, band, "q15-tier0|%d" % band, measure,
-                      lambda r: bool(r["fp16"]) if isinstance(r, dict) and "fp16" in r else None)
-
-
 def _cpu_forward_platform(n):
     """Whether the block forward at n is cheaper through the platform FFT. Both transforms
     are timed once on this size (_core.forward_cost: copy with 1/n and transform, best of a

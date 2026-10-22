@@ -109,8 +109,10 @@ def test_screen_window_maximum_matches_individual_samples():
 
 @pytest.mark.parametrize("chain", [(256,), (512,), (128, 512)])
 def test_hierarchical_results_identical_with_screen(chain, monkeypatch):
-    # The screen guards the FP32 tier; the FP16 first gate (ARM, src/gate16.cc) replaces
-    # that tier and admits a superset of its pairs, so exact identity is an FP32 property.
+    # The screen is the first tier's gate on its own int16 maximum: it decides as the FP32
+    # tier would except for pairs within its rounding of a threshold, and these inputs have
+    # none, so results and counters agree exactly. (The FP16 first gate on ARM reports a
+    # bound and admits a superset, so it is off here.)
     monkeypatch.setenv("MF_GATE16", "0")
     n, nd, nt = 4096, 8, 40
     power = _inspiral_power(n)
@@ -142,7 +144,7 @@ def test_cost_model_prices_the_screen():
         pytest.skip("no Q15 screen on this back end")
     for b, ent in cm.screen.items():
         assert ent["dense"] > 0 and ent["recheck"] > 0
-        assert all(q >= f for f, q in ent["excess"])          # the screen passes a superset
+        assert all(q == f for f, q in ent["excess"])          # the screen is the tier: same passes
         c, on = cm.first_tier(b, 0.01)
         assert on == (c < cm.dense[b])
     import json

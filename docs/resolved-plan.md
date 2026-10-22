@@ -12,7 +12,7 @@ For one `HierarchicalFilter` (and each plan of a `TimeDomainFilterBank`):
 
 - **chain**: the coarse bands, one per tier;
 - **thresholds**: one per tier, from the reference model for that chain (or explicit);
-- **Q15**: whether the CPU int16 screen runs, and whether its recheck runs late;
+- **Q15**: whether the CPU int16 screen runs as the first tier;
 - **direct refine**: on or off, and its window half-width;
 - **GPU**: each tier's coarse layout and the calibrated gate;
 - **bank**: the block layout (`TimeDomainFilterBank.chosen_layout`).
@@ -28,7 +28,6 @@ machine-level facts: the measured cost models and the locks of the measured choi
 | chain | `_choose_chain`: model ranking, chain trial, a stored lock, `MF_CHAIN_FORCE` |
 | thresholds | `_thresholds` (via `gatechain.chain_thresholds`) |
 | Q15 | the Q15 trial (`_q15_trial`) |
-| Q15 recheck order | `_execution_plan` (`gatechain.q15_recheck_order`) |
 | direct refine | `_execution_plan` (`_direct_halfwidth`) |
 | GPU calibration | `_gpu_calibration` |
 | bank layout | `time_domain` (block-size trial) |
