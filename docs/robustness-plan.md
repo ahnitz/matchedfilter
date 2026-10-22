@@ -395,3 +395,4 @@ A step that changes C or workflows is first pushed to a `ci/<topic>` branch and 
   - Fixed on the way: _direct_lagtap had no memo, so without a cost file it re-timed the direct refine on every call.
   - Fixed on the way: the correlation price accepted any stored record, so a malformed one raised; it is now replaced.
   - tests/test_prices.py covers the rule: memo, file, first writer, invalid record, failed price.
+- 2026-10-22: **E5b: each Choice kind declares its reset scope.** _choice.SCOPES names every kind: workload (single-device, single-batch, fused-batch), which clear_autotune_cache forgets; or machine (sparse-way, vk-subgroup, coarse, gateway, interleave), which outlive it. _choice.choice refuses an undeclared kind, and reset(scope=...) replaces clear_autotune_cache's hard-coded list of three kinds. Tests declare their own kinds.

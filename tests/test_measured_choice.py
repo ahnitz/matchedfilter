@@ -63,6 +63,14 @@ def test_an_unusable_model_candidate_never_stands():
 import pytest                                   # noqa: E402
 
 import matchedfilter as mf                      # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _test_kinds(monkeypatch):
+    """The test-only choice kinds below, declared as every kind must be (_choice.SCOPES)."""
+    from matchedfilter import _choice
+    for kind in ("t-kind", "t-force", "t-close", "t-close2", "t-recheck", "t-untimed"):
+        monkeypatch.setitem(_choice.SCOPES, kind, "machine")
 from matchedfilter import TimeDomainFilterBank  # noqa: E402
 
 
