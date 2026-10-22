@@ -122,6 +122,9 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ### Fixed
 
+- Shipped Metal sources no longer name the build machine's paths in `#line` directives,
+  and a stray sync-conflict copy is gone. The Metal kernel identity changes once, so
+  stored Metal choices are re-measured once.
 - `MF_ISA` restricts the process to its target. An invalid value raises `ValueError` at
   import, naming the build's targets; it used to print an error and segfault at the next
   kernel call. `targets()` lists only that target from the start, `set_target(None)`

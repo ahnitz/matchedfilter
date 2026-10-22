@@ -23,7 +23,7 @@ uint firstbithigh_0(uint value_0)
 }
 
 
-#line 498 "/home/ahnitz/projects/claude/searchdev/work/mf-backends/python/matchedfilter/metal/tc_corr2_262144.slang"
+#line 498 "tc_corr2_262144.slang"
 void r4_0(float2 thread* a_0, float2 thread* b_0, float2 thread* c_0, float2 thread* d_0)
 {
     float2 t0_0 = *a_0 + *c_0;
@@ -202,7 +202,7 @@ void dft16_0(array<float2, int(16)> thread* r_0)
 }
 
 
-#line 127 "/home/ahnitz/projects/claude/searchdev/work/mf-backends/src/gpu/twiddle.slang"
+#line 127 "twiddle.slang"
 float2 mfTwiddle_0(float angle_0)
 {
 
@@ -210,7 +210,7 @@ float2 mfTwiddle_0(float angle_0)
 }
 
 
-#line 294 "/home/ahnitz/projects/claude/searchdev/work/mf-backends/python/matchedfilter/metal/tc_corr2_262144.slang"
+#line 294 "tc_corr2_262144.slang"
 uint computeWant_0(uint d_1, uint TB_0, uint len_0, uint blk_0, uint lane_0, uint per_0, uint TB2_0, uint len2_0, uint blk2_0, uint lane2_0)
 {
     uint _S7 = max(TB_0, 1U);
@@ -524,7 +524,7 @@ void transform_0(array<float2, int(16)> thread* r_4, uint tid_0, KernelContext_0
         for(;;)
         {
 
-#line 7 "/home/ahnitz/projects/claude/searchdev/work/mf-backends/src/gpu/fft_transform.slang"
+#line 7 "fft_transform.slang"
             for(;;)
             {
 
@@ -699,7 +699,7 @@ void transform_0(array<float2, int(16)> thread* r_4, uint tid_0, KernelContext_0
 #line 56
     innermost_0(r_4);
 
-#line 828 "/home/ahnitz/projects/claude/searchdev/work/mf-backends/python/matchedfilter/metal/tc_corr2_262144.slang"
+#line 828 "tc_corr2_262144.slang"
     return;
 }
 

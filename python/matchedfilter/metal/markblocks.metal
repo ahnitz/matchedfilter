@@ -3,7 +3,7 @@
 #include <metal_texture>
 using namespace metal;
 
-#line 2219 "/tmp/tmp1_wuf12q/bands.slang"
+#line 2219 "bands.slang"
 struct EntryPointParams_0
 {
     uint ntmpl_0;

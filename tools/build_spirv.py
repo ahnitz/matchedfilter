@@ -210,7 +210,7 @@ def build_full_tierc(slangc):
                 if proc.returncode:
                     raise RuntimeError(f'slangc {target} {entry} n={n}:\n{proc.stderr}')
                 if target == 'metal':
-                    dst.write_text(dst.read_text().rstrip() + '\n')
+                    write_msl(dst)
                 files[target] = dst.name
                 if target == 'metal':
                     compile_metallib(dst)
@@ -366,11 +366,16 @@ def compile_metal(slangc, n, cap, entry, outdir, suffix="", coarse16=0, ppg=1, s
     if proc.returncode != 0:
         raise RuntimeError("slangc -target metal failed for n=%d %s:\n%s"
                            % (n, entry, proc.stderr))
-    # Keep generated diagnostics useful without embedding build-machine paths.
-    source = re.sub(r'(?m)^(#line\s+\d+\s+)"[^"\n]*/([^/"\n]+)"',
-                    r'\1"\2"', msl.read_text())
-    msl.write_text(source.rstrip() + '\n')
+    write_msl(msl)
     return msl, compile_metallib(msl)
+
+
+def write_msl(msl):
+    """Normalise an emitted Metal source in place: #line directives name the file only, not
+    the build machine's path to it (so the shipped source, and the Metal kernel identity
+    hashed from it, do not depend on where it was built), and one trailing newline."""
+    source = re.sub(r'(?m)^(#line\s+\d+\s+)"[^"\n]*/([^/"\n]+)"', r'\1"\2"', msl.read_text())
+    msl.write_text(source.rstrip() + '\n')
 
 
 def compile_metallib(msl):
@@ -574,6 +579,7 @@ def _build(argv=None):
         csrc.unlink()
         if r.returncode != 0:
             raise RuntimeError("coarse metal band=%d:\n%s" % (band, r.stderr))
+        write_msl(cm)
         print("  coarse band=%-4d %-16s %5d bytes  tiled R=%d TP=%d (+ %s)"
               % (band, spv.name, spv.stat().st_size, rpt, band // rpt, cm.name))
     manifest = dict(entry=ENTRY, kernel=KERNEL.name, modules={})

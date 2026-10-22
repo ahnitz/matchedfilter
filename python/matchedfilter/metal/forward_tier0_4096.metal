@@ -23,7 +23,7 @@ uint firstbithigh_0(uint value_0)
 }
 
 
-#line 2134 "/tmp/tmp5gbk8w5o/bands.slang"
+#line 2134 "bands.slang"
 float2 seriesSample_0(packed_float2 device* series_0, uint i_0, uint layout_0)
 {
     if(layout_0 == 0U)
@@ -373,7 +373,7 @@ void dft16_1(array<float2, int(16)> thread* r_1)
 }
 
 
-#line 127 "/home/ahnitz/projects/claude/searchdev/work/mf-backends/src/gpu/twiddle.slang"
+#line 127 "twiddle.slang"
 float2 mfTwiddle_0(float angle_0)
 {
 
@@ -381,7 +381,7 @@ float2 mfTwiddle_0(float angle_0)
 }
 
 
-#line 295 "/tmp/tmp5gbk8w5o/bands.slang"
+#line 295 "bands.slang"
 uint computeWant_0(uint d_1, uint TB_0, uint len_0, uint blk_0, uint lane_0, uint per_0, uint TB2_0, uint len2_0, uint blk2_0, uint lane2_0)
 {
     uint _S10 = max(TB_0, 1U);
@@ -427,7 +427,7 @@ struct EntryPointParams_0
 };
 
 
-#line 714 "/tmp/tmp5gbk8w5o/bands.slang"
+#line 714 "bands.slang"
 struct KernelContext_0
 {
     EntryPointParams_0 constant* entryPointParams_0;
@@ -628,7 +628,7 @@ void forwardTransform_0(array<float2, int(16)> thread* r_4, uint tid_0, KernelCo
         for(;;)
         {
 
-#line 7 "/home/ahnitz/projects/claude/searchdev/work/mf-backends/src/gpu/fft_transform.slang"
+#line 7 "fft_transform.slang"
             for(;;)
             {
 
@@ -803,7 +803,7 @@ void forwardTransform_0(array<float2, int(16)> thread* r_4, uint tid_0, KernelCo
 #line 56
     innermost_0(r_4);
 
-#line 2127 "/tmp/tmp5gbk8w5o/bands.slang"
+#line 2127 "bands.slang"
     return;
 }
 
