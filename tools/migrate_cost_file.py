@@ -9,11 +9,11 @@ The library does not read the older records ("block-trial|...", "chain-trial|...
 "q15-trial|..." and "chain-trial|...|batches"): without migration, a machine runs those
 trials once more and stores the new records. This rewrites the locks (with their trial
 medians and re-check state) and the unfinished trials (their samples, needs and batch
-counts), so both continue as they were. Every other record is copied unchanged. Writes in place unless --out is given; run it while no
-process is using the file.
+counts), so both continue as they were. Every other record is copied unchanged. Writes in place unless --out is given, under the library's
+writer lock and atomically.
 """
 import argparse
-import json
+import os
 import sys
 
 OLD = ("block-trial|", "chain-trial|", "q15-trial|")
@@ -84,11 +84,18 @@ def main(argv=None):
     ap.add_argument("path")
     ap.add_argument("--out", default=None)
     args = ap.parse_args(argv)
-    with open(args.path) as f:
-        records = json.load(f)
-    out, moved = migrate(records)
-    with open(args.out or args.path, "w") as f:
-        json.dump(out, f, indent=1, sort_keys=True)
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "python"))
+    from matchedfilter import gatechain
+    dest = os.path.abspath(args.out or args.path)
+    # Under the library's writer lock and published atomically, as the library writes it:
+    # a process using the file meanwhile sees the old file or the new one, never half.
+    with gatechain._cost_file_lock(dest):
+        records, state = gatechain._read_cost_file(os.path.abspath(args.path))
+        if state != "ok":
+            print("%s: %s; nothing written" % (args.path, state))
+            return 1
+        out, moved = migrate(records)
+        gatechain._write_cost_file(dest, out)
     for k, v in sorted(moved.items()):
         print("%-6s %s" % (v[1] if v else "drop", k))
     locks = sum(1 for v in moved.values() if v and v[1] == "lock")

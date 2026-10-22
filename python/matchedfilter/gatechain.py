@@ -36,6 +36,7 @@ The budget is split between the tiers by minimising that cost subject to the
 compound dismissal bound; the split is part of the chain's plan.
 """
 import json
+import warnings
 import math
 import os
 import tempfile
@@ -481,12 +482,50 @@ def _cost_file():
     return os.environ.get("MF_COST_FILE") or None
 
 
-def _load_cost_file(path):
+#: Record-name prefixes of the trial format before 2026-10-21, which nothing reads now.
+_LEGACY_PREFIXES = ("block-trial|", "chain-trial|", "q15-trial|")
+#: (path, what) already warned about in this process.
+_COST_WARNED = set()
+
+
+def _cost_warn(path, what, msg):
+    if (path, what) not in _COST_WARNED:
+        _COST_WARNED.add((path, what))
+        warnings.warn("MF_COST_FILE %s: %s" % (path, msg), RuntimeWarning, stacklevel=3)
+
+
+def _read_cost_file(path):
+    """(records, state): state is 'ok', 'missing' (no such file), 'damaged' (not a JSON
+    object) or 'unreadable' (any other OSError); records is {} unless 'ok'."""
     try:
-        with open(path) as f:
-            return json.load(f)
-    except (OSError, ValueError):
-        return {}
+        with open(path, "rb") as f:
+            raw = f.read()
+    except FileNotFoundError:
+        return {}, "missing"
+    except OSError:
+        return {}, "unreadable"
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except ValueError:                  # (UnicodeDecodeError is a ValueError)
+        return {}, "damaged"
+    return (data, "ok") if isinstance(data, dict) else ({}, "damaged")
+
+
+def _load_cost_file(path):
+    """The records of the cost file at path ({} when missing). A damaged or unreadable
+    file reads as empty, with a warning; trial records in the old format are reported
+    once (tools/migrate_cost_file.py rewrites them)."""
+    data, state = _read_cost_file(path)
+    if state == "damaged":
+        _cost_warn(path, state, "not a JSON object; read as empty (the next write keeps it "
+                   "aside as %s.corrupt.<pid>)" % path)
+    elif state == "unreadable":
+        _cost_warn(path, state, "cannot be read; read as empty and never written")
+    elif any(k.startswith(_LEGACY_PREFIXES) for k in data):
+        _cost_warn(path, "legacy", "holds trial records in the format before 2026-10-21 "
+                   "(block-trial|, chain-trial|, q15-trial|), which are not read; "
+                   "python tools/migrate_cost_file.py %s rewrites them" % path)
+    return data
 
 
 def stored_choice(key, field="value"):
@@ -549,28 +588,81 @@ def _store_cost(path, skey, cm):
     _update_cost(path, skey, lambda old: value)
 
 
+def _write_cost_file(path, data):
+    """Publish data at path atomically (a temporary file in the same directory, then
+    os.replace); the caller holds the writer lock."""
+    tmp = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", dir=os.path.dirname(path),
+                                         prefix=os.path.basename(path) + ".",
+                                         suffix=".tmp", delete=False) as f:
+            tmp = f.name
+            json.dump(data, f, indent=1, sort_keys=True)
+        os.replace(tmp, path)
+    finally:
+        if tmp is not None and os.path.exists(tmp):
+            os.unlink(tmp)
+
+
 def _update_cost(path, skey, merge):
     """Replace one record by merge(old record or None), read and written under the writer
-    lock (so a lock another process stored in between is seen); merge returns None to keep
-    the record on file. Returns the record on file afterwards."""
+    lock (so a record another process stored in between is seen); merge returns None to
+    keep the record on file. Returns the record on file afterwards, or None when the file
+    cannot be read: then nothing is written, so a file that is there but unreadable (EIO,
+    a permission change, a stale NFS handle) is never replaced. A damaged file (not a
+    JSON object) is kept aside as <path>.corrupt.<pid>, with a warning, before a fresh one
+    is written."""
     path = os.path.abspath(os.fspath(path))
     with _cost_file_lock(path):
-        data = _load_cost_file(path)
+        data, state = _read_cost_file(path)
+        if state == "unreadable":
+            _cost_warn(path, state, "cannot be read; this record is not stored")
+            return None
+        if state == "damaged":
+            aside = "%s.corrupt.%d" % (path, os.getpid())
+            os.replace(path, aside)
+            _cost_warn(path, "kept-aside", "not a JSON object; kept as %s and replaced by a "
+                       "new file" % aside)
         value = merge(data.get(skey))
         if value is None:
             return data.get(skey)
         data[skey] = value
-        tmp = None
-        try:
-            with tempfile.NamedTemporaryFile(mode="w", dir=os.path.dirname(path),
-                                             prefix=os.path.basename(path) + ".",
-                                             suffix=".tmp", delete=False) as f:
-                tmp = f.name
-                json.dump(data, f, indent=1, sort_keys=True)
-            os.replace(tmp, path)
-        finally:
-            if tmp is not None and os.path.exists(tmp):
-                os.unlink(tmp)
+        _write_cost_file(path, data)
+        return value
+
+
+def _cost_model_ok(record):
+    """Whether a stored record is a cost model CostModel.from_dict can read."""
+    try:
+        CostModel.from_dict(record)
+        return True
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return False
+
+
+def _stored_cost_model(path, skey):
+    """The cost model stored under skey, or None (none stored, or a record that is not
+    one: then it is reported, and a fresh calibration replaces it)."""
+    stored = _load_cost_file(path).get(skey)
+    if stored is None:
+        return None
+    if not _cost_model_ok(stored):
+        _cost_warn(path, "model:" + skey, "record %r is not a cost model; recalibrating" % skey)
+        return None
+    return CostModel.from_dict(stored)
+
+
+def _store_first(path, skey, value, valid=None):
+    """Store value under skey unless a valid record is already on file (valid(record), or
+    any record without valid), and return the record on file -- this process's value, or
+    the one another process measured first, which the caller uses instead of its own, so
+    every process sharing the file prices alike. Without a readable file: value."""
+    def merge(old):
+        if old is not None and (valid is None or valid(old)):
+            return None
+        return value
+    on_file = _update_cost(path, skey, merge)
+    return value if on_file is None else on_file
 
 
 #: The template count calibrations run at. Per-pair tier and refine costs are flat in the
@@ -629,9 +721,9 @@ def calibrate_costs(n, ntemplates, blocks=256, reps=5, seed=11, group=None):
     # it) must not be reused by one that has it, or the screen is never priced.
     skey = "%d,%d,%d" % key[:3] + (",g16" if g16 else "") + (",q15" if not g16 and _q15_band(64) else "")
     if path is not None:
-        stored = _load_cost_file(path).get(skey)
-        if stored is not None:
-            _COSTS[key] = cm = CostModel.from_dict(stored)
+        cm = _stored_cost_model(path, skey)
+        if cm is not None:
+            _COSTS[key] = cm
             return cm
     rng = np.random.default_rng(seed)
     bands = candidate_bands(n)
@@ -743,9 +835,9 @@ def calibrate_costs(n, ntemplates, blocks=256, reps=5, seed=11, group=None):
                 ent["recheck"] = float(np.median(rc))
                 screen[b] = ent
     cm = CostModel(n, dense, sparse, refine, block=float(np.median(block)), screen=screen)
+    if path is not None:          # another process's model, stored first, is the one used
+        cm = CostModel.from_dict(_store_first(path, skey, cm.to_dict(), _cost_model_ok))
     _COSTS[key] = cm
-    if path is not None:
-        _store_cost(path, skey, cm)
     return cm
 
 
@@ -861,9 +953,9 @@ def calibrate_costs_gpu(n, device, blocks=None, reps=5, seed=11, nt=256):
     # different first tier, and must not be reused for this one.
     skey = "gpu,%d,%s" % (int(n), str(device)) + ("" if kind == "f32" else "," + kind)
     if path is not None:
-        stored = _load_cost_file(path).get(skey)
-        if stored is not None:
-            _COSTS[key] = cm = CostModel.from_dict(stored)
+        cm = _stored_cost_model(path, skey)
+        if cm is not None:
+            _COSTS[key] = cm
             return cm
     bands = candidate_bands(n)
     spec, ser, starts, ws, we = _gpu_cal_inputs(n, blocks, nt, seed)
@@ -963,9 +1055,9 @@ def calibrate_costs_gpu(n, device, blocks=None, reps=5, seed=11, nt=256):
     forward = block
     cm = CostModel(n, dense, sparse, refine, block=block, excess=excess,
                    forward=forward, band_forward=_is_gpu(device))
+    if path is not None:          # another process's model, stored first, is the one used
+        cm = CostModel.from_dict(_store_first(path, skey, cm.to_dict(), _cost_model_ok))
     _COSTS[key] = cm
-    if path is not None:
-        _store_cost(path, skey, cm)
     return cm
 
 
