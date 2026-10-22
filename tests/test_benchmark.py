@@ -76,6 +76,22 @@ def test_default_sweep_covers_every_supported_length(monkeypatch, tmp_path):
     assert [r['n'] for r in json.loads(output.read_text())['flat']] == expected
 
 
+def test_the_hierarchical_table_runs_at_its_own_lengths(monkeypatch, tmp_path):
+    flat, hier = [], []
+    monkeypatch.setattr(benchmark, '_one',
+                        lambda n, *args: flat.append(n) or (1.0, {}, 'indices match', None))
+    monkeypatch.setattr(benchmark, '_bench_hier',
+                        lambda n, *args: hier.append(n) or (2.0, 1.0, 0.1, (n // 4,), 2.0))
+    monkeypatch.setattr(benchmark, 'available_engines', lambda: [])
+    monkeypatch.setattr(benchmark, '_plan_seconds', {})
+    output = tmp_path / 'out.json'
+    assert benchmark.main(['--n', '256', '1024', '4096', '--hier-n', '1024',
+                           '--json', str(output)]) == 0
+    assert flat == [256, 1024, 4096]
+    assert set(hier) == {1024}
+    assert {r['n'] for r in json.loads(output.read_text())['hierarchical']} == {1024}
+
+
 def test_default_batches_respect_input_memory_budget():
     for n in benchmark.SUPPORTED_LENGTHS:
         nd, nt = benchmark.default_shape(n)

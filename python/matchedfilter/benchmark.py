@@ -626,6 +626,10 @@ def main(argv=None):
                     help="skip the numpy cross-check (much faster for large n)")
     ap.add_argument("--no-hier", action="store_true",
                     help="skip the hierarchical table")
+    ap.add_argument("--hier-n", type=int, nargs="+", metavar="N",
+                    help="lengths for the hierarchical table (default: those of --n); it "
+                         "calibrates and trials fifteen cells per length, so it, not the "
+                         "flat table, sets the run time")
     ap.add_argument("--backends", nargs="*", metavar="ISA",
                     help="compare SIMD back ends on a ratio-filter-shaped "
                          "hierarchical workload and exit, e.g. --backends "
@@ -743,7 +747,7 @@ def main(argv=None):
               f"requested false-dismissal budgets {FD_SWEEP}")
         print(f"  {'n':>8} {'fd':>7} {'snr':>5} {'flat':>11} {'hierarchical':>11} "
               f"{'speedup':>9} {'triggered':>10} {'chosen':>14}")
-        for n in a.n:
+        for n in (a.hier_n or a.n):
           hnd, hnt = (a.data, a.templates) if (a.data and a.templates) \
               else default_shape(n, cap=_HIER_MAX_PAIRS)
           for fd in FD_SWEEP:
