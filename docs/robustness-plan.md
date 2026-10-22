@@ -250,3 +250,8 @@ A step that changes C or workflows is first pushed to a `ci/<topic>` branch and 
   - tests/test_data_ownership.py: the two hierarchical cases fail on 542aeed1.
   - test_lazy_tier_ingest's eager-copy test asserted the old behaviour, that a refine reads a buffer mutated after set_data. It now asserts that the data is read as set.
   - The ladder runs the series path, which already used plan memory.
+- 2026-10-22: **B6: C entry points validate their arguments.**
+  - `ap_range_ok` (transform.h) replaces 17 range checks that formed lo + count in int (matchfilt.c, hmf.c, _core.c q15_screen). `buf_holds` replaces the size products of caller counts (set_taps' stride, taps_to_spectra, gate16_bound).
+  - The public run methods refuse NaN thresholds. MF and HMF refuse a second `__init__`. forward_cost refuses an unsupported size and reports a failed allocation.
+  - tests/test_core_boundary.py: every case fails on 542aeed1.
+  - Left for later, with nothing found to depend on them: an exception on every -1 setter path, checked Py_BuildValue results, taps_to_spectra's copy-back into a converted out, and the scales check of CorrelationFilter.run.
