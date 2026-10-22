@@ -12,11 +12,11 @@ import threading
 import weakref
 import numpy as np
 from . import _config
+from ._chains import _CHAIN_WARM_BATCHES
 try:
     from . import _core
 except ImportError:
     _core = None
-
 
 
 class FilterResults(NamedTuple):
@@ -494,7 +494,8 @@ def _cpu_block_round(jobs):
     fixed candidate. One warm batch per arm excludes switching and lazy setup.
     The recursion guard only bypasses trial orchestration, not search execution.
     """
-    from . import _autotune_enabled, gatechain
+    from . import gatechain
+    from ._choice import _autotune_enabled
     from .device import parse as _parse_device
     if (_BLOCK_TRIALS.cpu_replaying or not jobs or not _autotune_enabled()
             or gatechain._cost_file() is None
@@ -550,7 +551,8 @@ def _cpu_block_round(jobs):
 def _trial_begin(jobs):
     """Put every trialling bank of the batch on its key's current rank (or lock it, once its key
     has a winner). Returns [(key, rank, banks, settled, built)] for the banks still trialling."""
-    from . import _autotune_enabled, gatechain
+    from . import gatechain
+    from ._choice import _autotune_enabled
     if _BLOCK_TRIALS.cpu_replaying:
         return None
     groups = {}
@@ -591,19 +593,14 @@ def _trial_begin(jobs):
     return (time.perf_counter(), plan, work, chains)
 
 
-#: Batches a GPU chain trial runs a candidate before it takes samples of it: after a switch
-#: the ladder's fine stage took 150, 55, then 17 ms for a 17 ms segment, so the third batch
-#: is the first sample.
-_CHAIN_WARM_BATCHES = 2
-
-
 def _chain_trials_begin(jobs):
     """GPU chain trials judged per batch: every hierarchical GPU plan of the batch in a chain
     trial is put on its trial's candidate for this batch (_chain_trial_next), so the batch's
     time is that candidate's. Returns [(trial key, chain, plans, settled)]; settled when every
     plan already ran that chain in an earlier batch (its first batch builds recordings and
     calibrates: one-off costs, not the chain's)."""
-    from . import _chain_trial_next, _chain_trial_pending, _CHAIN_TRIALS, _AUTOTUNE_LOCK
+    from ._choice import _AUTOTUNE_LOCK
+    from ._chains import _chain_trial_next, _chain_trial_pending, _CHAIN_TRIALS
     by = {}
     for bank, _, kw in jobs:
         if (kw or {}).get("template_index") is not None:
@@ -653,11 +650,11 @@ def _trial_end(tok):
         return
     t0, plan, work, chains = tok
     dt = time.perf_counter() - t0
-    from . import _chain_trial_batch, _chain_trial_pending
+    from ._chains import _chain_trial_batch, _chain_trial_pending
     for tk, c, plans, settled in chains:
         if settled:
             _chain_trial_pending(tk, c, -1)
-        from . import _log_autotune
+        from ._choice import _log_autotune
         _log_autotune("CHAIN-TRIAL batch %s settled=%s dt=%.4f work=%d", c, settled, dt, work)
         w = _chain_trial_batch(tk, c, dt / work) if (settled and work > 0) else None
         if w is not None:
@@ -704,7 +701,7 @@ def _fuse_begin(jobs, trial):
     nothing on a RENOIR (paired ladders, 2026-10-19) -- so neither is assumed. A batch is a
     sample only when no other trial is trying candidates in it and it builds no
     recording."""
-    from . import _autotune_enabled
+    from ._choice import _autotune_enabled
     from .device import parse as _parse_device
     devs = tuple(sorted({"%s %s" % (d, d.name) for d in (
         _parse_device(b.device) for b, _, _ in jobs if getattr(b, "device", None) is not None)
@@ -1111,7 +1108,6 @@ class _TemplateGroup:
                 cp.set_templates(self.full_spectra())
                 self._corr_plan = cp
         return self._corr_plan
-
 
 
 def _group_spectra(taps, counts, n, rate_ratio, analytic, rows=None, pack=False):
@@ -1567,7 +1563,8 @@ class TimeDomainFilterBank:
         """Partition with each length batch at its cheapest modelled block size -- or, with
         single_n, every batch at that one size (a block-size trial candidate, _BlockTrials).
         Also leaves self._single_ns: the sizes every batch can use, cheapest total first."""
-        from . import gatechain, _log_autotune
+        from . import gatechain
+        from ._choice import _log_autotune
         groups, order = self._legacy_layout
         counts = self.effective_data_counts[order]
         n_sorted = np.empty(len(order), dtype=np.int64)
@@ -1661,7 +1658,8 @@ class TimeDomainFilterBank:
                 self._model_sig += "|" + ",".join(str(n) for n in self._choice_ns)
                 # Candidates (_BlockTrials): the model's layout, then the whole bank at each of
                 # its _BLOCK_TRIAL_RANKS - 1 cheapest single block sizes.
-                from . import gatechain as _gc, _autotune_enabled
+                from . import gatechain as _gc
+                from ._choice import _autotune_enabled
                 # Candidates only where a trial's lock can be kept (see _trial_begin); otherwise
                 # none are built, so the bank is the model's layout at no extra cost.
                 nr = (_BLOCK_TRIAL_RANKS
@@ -2236,7 +2234,7 @@ class TimeDomainFilterBank:
         MF_AUTOTUNE=0 keeps the bank's device.
         """
         from .device import parse as _parse_device
-        from . import _autotune_enabled
+        from ._choice import _autotune_enabled
         import os
         force = self.__dict__.get("_single_force")
         if force is not None:                # a batch's measured side (_batch_device)
@@ -2261,7 +2259,7 @@ class TimeDomainFilterBank:
         block. The per-call choice (_single_device) times one call on its own, a dispatch a
         batch never makes: it once kept every batch off the device."""
         from .device import parse as _parse_device
-        from . import _autotune_enabled
+        from ._choice import _autotune_enabled
         import os
         if (_parse_device(self.device).kind != 'gpu' or not _autotune_enabled()
                 or _config.get("MF_SINGLE_DEVICE") == "bank"):
@@ -2960,11 +2958,9 @@ class TimeDomainFilterBank:
                 result[g_indices] = g_dest
 
 
-
 def _stored_bins(g):
     """Bins stored per template spectrum of group g (n, or n/2 when Hermitian-packed)."""
     return g._stored_bins
-
 
 
 def _consume_into(lists, aidx, aval, sub_starts, g, tmpl_arg, N, template_index):
@@ -2986,7 +2982,6 @@ def _consume_into(lists, aidx, aval, sub_starts, g, tmpl_arg, N, template_index)
             snr_out.append(aval[bi, ti, bini])
             ts_out.append(sub_starts[bi])
             bl_out.append(np.full(bi.size, N, dtype=np.int64))
-
 
 
 def _results_from(lists):

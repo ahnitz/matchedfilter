@@ -357,8 +357,8 @@ def test_steady_segments_replay(monkeypatch, band, depth):
     import matchedfilter as mf
     # Trials are process-wide per configuration: start from none, as a fresh search does
     # (another test's dead plans hold candidates of the same configuration).
-    monkeypatch.setattr(mf, "_CHAIN_TRIALS", {})
-    monkeypatch.setattr(mf, "_CHAIN_CHOICE", {})
+    monkeypatch.setattr(mf._chains, "_CHAIN_TRIALS", {})
+    monkeypatch.setattr(mf._chains, "_CHAIN_CHOICE", {})
     monkeypatch.delenv("MF_AUTOTUNE", raising=False)      # trials on
     rng, banks = _setup(monkeypatch, nbanks=2, seed=79)
     monkeypatch.delenv("MF_AUTOTUNE", raising=False)
@@ -387,8 +387,8 @@ def test_steady_segments_replay(monkeypatch, band, depth):
         for g in b._groups:
             tk = getattr(g.plan, "_chain_trial", None)
             assert tk is None, ("a chain trial never locked", g.plan._chain,
-                                {c: len(v) for c, v in mf._CHAIN_TRIALS[tk].samples.items()},
-                                mf._CHAIN_TRIALS[tk].attempts)
+                                {c: len(v) for c, v in mf._chains._CHAIN_TRIALS[tk].samples.items()},
+                                mf._chains._CHAIN_TRIALS[tk].attempts)
     assert all(d == want for d, want in deltas[-4:]), str(deltas)
 
 

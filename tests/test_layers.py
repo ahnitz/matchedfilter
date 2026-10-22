@@ -20,7 +20,7 @@ LAYERS = (
                     "_gputime", "_coarse", "_shared", "_execution_policy", "_choice",
                     "_costfile", "_results"}),
     ("platform", {"_cuda", "_metal", "_vulkan", "device", "_vksubgroup"}),
-    ("models", {"gatemodel", "gatechain"}),
+    ("models", {"gatemodel", "gatechain", "_chains"}),
     ("gpu host", {"_gpuhost", "_gpuhier", "_gpuexec"}),
     ("backends", {"_vkcompute", "_cudacompute", "_mtlcompute"}),
     ("workloads", {"time_domain", "search", "_roofline", "__init__"}),
@@ -31,10 +31,10 @@ LEVEL.update({m: -1 for m in EXTENSIONS})
 
 #: (importer, imported) upward edges still allowed. Remove an entry when its import goes.
 UPWARD = {
-    ('_choice', '__init__'), ('_cudacompute', '_roofline'),
+    ('_cudacompute', '_roofline'),
     ('_gpuhost', 'time_domain'),
     ('_mtlcompute', '_roofline'), ('_vkcompute', '_roofline'),
-    ('_vksubgroup', '__init__'), ('_vksubgroup', 'gatechain'), ('device', '__init__'),
+    ('_vksubgroup', 'gatechain'), ('device', '__init__'),
     ('gatechain', '__init__'),
 }
 

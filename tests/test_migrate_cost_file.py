@@ -47,13 +47,13 @@ def test_old_trial_locks_read_back_as_the_same_choices(monkeypatch, tmp_path):
     assert trials.winner("gpu:0|2048,8192") is None             # unfinished: it continues
     assert trials.rank_for("gpu:0|2048,8192", 2) == 1           # from its rank-0 sample
     assert trials._st("gpu:0|2048,8192").samples == {0: [1.0], 1: []}
-    gpu = mf._chain_trial((2048, 6.0, 0.001, 2, "gpu:0"))
+    gpu = mf._chains._chain_trial((2048, 6.0, 0.001, 2, "gpu:0"))
     gpu.add((256, 1024))
     gpu.add((512,))
     assert gpu.winner is None and gpu.samples[(512,)] == [1.0]
     tk = (2048, 6.0, 0.001, 2, "cpu:0")
-    assert mf._stored_chain_lock(tk, None) == (256, 1024)
-    assert mf._chain_trial(tk).median == {(256, 1024): 1e-9, (512,): 2e-9}
+    assert mf._chains._stored_chain_lock(tk, None) == (256, 1024)
+    assert mf._chains._chain_trial(tk).median == {(256, 1024): 1e-9, (512,): 2e-9}
     p = object.__new__(mf.HierarchicalFilter)
     p.n, p._fs_snr, p.snr, p.fd = 2048, None, 6, 0.001
     p._chain, p._q15_pref, p.device = (256, 512), False, "cpu:0"

@@ -91,7 +91,7 @@ def _tkey(p):
 
 def _new_trial(tk, candidates):
     """A chain trial of tk with these candidates, the first the model's chain."""
-    tr = mf._chain_trial(tk)
+    tr = mf._chains._chain_trial(tk)
     for c in candidates:
         tr.add(c)
     return tr
@@ -105,13 +105,13 @@ def test_a_stored_lock_applies_whatever_this_groups_shortlist(monkeypatch, tmp_p
     monkeypatch.setenv("MF_COST_FILE", str(tmp_path / "costs.json"))
     mf.clear_autotune_cache()
     p = _hier_plan(list(shape) * 4)
-    key = next(k for k in mf._CHAIN_CHOICE)
-    model, shortlist, feasible = mf._CHAIN_CHOICE[key]
+    key = next(k for k in mf._chains._CHAIN_CHOICE)
+    model, shortlist, feasible = mf._chains._CHAIN_CHOICE[key]
     off = [c for c in feasible if c not in shortlist]
     if not off:
         pytest.skip("every feasible chain is on the shortlist here")
     lock = off[-1]
-    mf._store_chain_lock(_tkey(p), lock)                  # what another process locked
+    mf._chains._store_chain_lock(_tkey(p), lock)                  # what another process locked
     mf.clear_autotune_cache()                             # a new process
     q = _hier_plan(list(shape) * 4)
     assert tuple(q._chain) == tuple(lock)
@@ -126,14 +126,14 @@ def test_a_batch_trial_with_a_never_run_candidate_still_locks(monkeypatch, tmp_p
     tk = (2048, 6.0, 0.001, 2, "gpu:0")
     a, b, c = (256, 1024), (512,), (128, 512)
     _new_trial(tk, (a, b, c))
-    base = mf._CHAIN_BATCH_TRIALS
+    base = mf._chains._CHAIN_BATCH_TRIALS
     w = None
-    from matchedfilter.time_domain import _CHAIN_WARM_BATCHES as warm
+    from matchedfilter._chains import _CHAIN_WARM_BATCHES as warm
     for i in range(10 * base):
-        w = mf._CHAIN_TRIALS[tk].tick()                    # a batch run for the trial
+        w = mf._chains._CHAIN_TRIALS[tk].tick()                    # a batch run for the trial
         if w is not None:
             break
-        w = mf._chain_trial_batch(tk, a if i % 2 else b, 1.0 if i % 2 else 1.3)
+        w = mf._chains._chain_trial_batch(tk, a if i % 2 else b, 1.0 if i % 2 else 1.3)
         if w is not None:
             break
     assert w == a                                          # clearly faster than b
@@ -155,15 +155,15 @@ def test_a_batch_trial_locks_the_measured_best_through_outliers(monkeypatch, tmp
     k = {c: 0 for c in true}
     w = None
     for _ in range(100):
-        c = mf._chain_trial_next(tk)
+        c = mf._chains._chain_trial_next(tk)
         if c is None:
             break
-        w = mf._chain_trial_batch(tk, c, true[c] * (1 + noise[k[c] % len(noise)]))
+        w = mf._chains._chain_trial_batch(tk, c, true[c] * (1 + noise[k[c] % len(noise)]))
         k[c] += 1
         if w is not None:
             break
     assert tuple(w) == fast
-    med = mf._CHAIN_TRIALS[tk].median
+    med = mf._chains._CHAIN_TRIALS[tk].median
     assert min(med, key=med.get) == fast                       # the lock is the measured best
 
 
@@ -171,16 +171,16 @@ def _drive_batches(tk, true, never=(), limit=200):
     """Drive a GPU chain trial batch by batch, as time_domain does: the scheduler picks a
     candidate, its batches after a 2-batch warm-up are samples -- except for candidates in
     `never`, whose batches never come back (a plan that cannot run them)."""
-    from matchedfilter.time_domain import _CHAIN_WARM_BATCHES as warm
+    from matchedfilter._chains import _CHAIN_WARM_BATCHES as warm
     last, run = None, 0
     for i in range(limit):
-        c = mf._chain_trial_next(tk)
+        c = mf._chains._chain_trial_next(tk)
         if c is None:
-            return mf._CHAIN_TRIALS[tk].winner, i
+            return mf._chains._CHAIN_TRIALS[tk].winner, i
         run = run + 1 if c == last else 1
         last = c
         if run > warm and c not in never:
-            mf._chain_trial_batch(tk, c, true[c])
+            mf._chains._chain_trial_batch(tk, c, true[c])
     return None, limit
 
 
@@ -194,8 +194,8 @@ def test_a_candidate_that_never_runs_still_yields_a_lock(monkeypatch, tmp_path):
     _new_trial(tk, (a, b, c))
     w, batches = _drive_batches(tk, {a: 1.0e-12, b: 1.3e-12, c: 0.8e-12}, never=(c,))
     assert w == a
-    assert c in mf._CHAIN_TRIALS[tk].dropped
-    base = mf._CHAIN_BATCH_TRIALS
+    assert c in mf._chains._CHAIN_TRIALS[tk].dropped
+    base = mf._chains._CHAIN_BATCH_TRIALS
     assert batches <= 3 * (2 + base) + 6 + 1               # within the batch budget
 
 
@@ -207,7 +207,7 @@ def test_a_full_trial_locks_within_its_batch_count(monkeypatch, tmp_path):
     _new_trial(tk, (a, b, c))
     w, batches = _drive_batches(tk, {a: 1.0e-12, b: 1.3e-12, c: 0.8e-12})
     assert w == c                                          # the measured best
-    assert batches <= 3 * (2 + mf._CHAIN_BATCH_TRIALS) + 1
+    assert batches <= 3 * (2 + mf._chains._CHAIN_BATCH_TRIALS) + 1
 
 
 @pytest.mark.parametrize("per_process", [2, 3])
@@ -221,13 +221,13 @@ def test_a_trial_spread_over_short_processes_still_locks(monkeypatch, tmp_path, 
     a, b, c = (256, 512), (256, 1024), (512,)
     for proc in range(30):
         mf.clear_autotune_cache()                          # a new process sharing the file
-        held = mf._stored_chain_lock(tk, None)
+        held = mf._chains._stored_chain_lock(tk, None)
         if held is not None:
             break
         _new_trial(tk, (a, b, c))
         _drive_batches(tk, {a: 1.0e-12, b: 1.3e-12, c: 0.9e-12}, limit=per_process)
     assert held is not None
-    budget = 3 * (2 + mf._CHAIN_BATCH_TRIALS) + 6
+    budget = 3 * (2 + mf._chains._CHAIN_BATCH_TRIALS) + 6
     assert proc * per_process <= budget + per_process
     if per_process == 2:
         assert held == a                                   # never sampled: the preference
@@ -287,23 +287,23 @@ def test_a_stored_lock_decides_every_plan_of_the_key(monkeypatch, tmp_path):
     mf.clear_autotune_cache()
     shape_a, shape_b = [300, 400, 500, 600] * 4, [700, 800, 850, 880] * 4
     pb = _hier_plan(shape_b)                              # learn B's key and feasible chains
-    key_b = next(iter(mf._CHAIN_CHOICE))
-    model_b, shortlist_b, feasible_b = mf._CHAIN_CHOICE[key_b]
+    key_b = next(iter(mf._chains._CHAIN_CHOICE))
+    model_b, shortlist_b, feasible_b = mf._chains._CHAIN_CHOICE[key_b]
     lock = next((c for c in feasible_b if c != model_b), None)
     if lock is None:
         pytest.skip("one feasible chain only")
     pa = _hier_plan(shape_a)
-    key_a = next(k for k in mf._CHAIN_CHOICE if k != key_b)
+    key_a = next(k for k in mf._chains._CHAIN_CHOICE if k != key_b)
     tk = _tkey(pb)
     assert _tkey(pa) == tk                                # one lock key, two group shapes
-    model_a, shortlist_a, feasible_a = mf._CHAIN_CHOICE[key_a]
-    mf._store_chain_lock(tk, lock)                         # what an earlier process locked
+    model_a, shortlist_a, feasible_a = mf._chains._CHAIN_CHOICE[key_a]
+    mf._chains._store_chain_lock(tk, lock)                         # what an earlier process locked
     # A new process in which shape A's feasible set lacks the locked chain:
     choices = {key_a: (model_a, tuple(c for c in shortlist_a if c != lock) or (model_a,),
                        tuple(c for c in feasible_a if c != lock)),
                key_b: (model_b, shortlist_b, feasible_b)}
     mf.clear_autotune_cache()
-    monkeypatch.setattr(mf, "_CHAIN_CHOICE", dict(choices))
+    monkeypatch.setattr(mf._chains, "_CHAIN_CHOICE", dict(choices))
     qa = _hier_plan(shape_a)                               # first plan of the key: cannot run it
     assert qa._chain_trial is None                         # a locked key opens no trial
     assert tuple(qa._chain) == tuple(choices[key_a][0])    # its model's chain

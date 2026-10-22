@@ -202,7 +202,7 @@ def prepare(file, args, mf, td, np, seed_path, seed):
         raise RuntimeError("this study expects x86 FP32 tier 0, not the ARM FP16 gate")
     late = bool(getattr(p, "_q15_order_choice", None) and p._q15_order_choice["late"])
     baseline = "q15_delayed" if p._q15 and late else "q15_ordinary" if p._q15 else "float"
-    lock = mf._Q15_TRIALS.get(p._q15_trial_key())
+    lock = mf._chains._Q15_TRIALS.get(p._q15_trial_key())
     if lock is None or lock.winner is None or bool(lock.winner) != bool(p._q15):
         raise RuntimeError("baseline Q15 choice is not a settled seeded lock")
     thresholds = tuple(ep.thresholds())
