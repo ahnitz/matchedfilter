@@ -218,3 +218,8 @@ A step that changes C or workflows is first pushed to a `ci/<topic>` branch and 
 - 2026-10-21: **A2: tools/ci_status.py**, a `ci` check in tools/gate.py, and the release `ci-green` job.
   - ci_status: public API; verdicts green/red/unknown; failed jobs with their steps and annotations; schedules judged by their latest run and staleness; a red schedule cleared by a green ci/** proof of its fix.
   - The release's ci-green job is exercised only by a real release or a dispatch.
+- 2026-10-21: **A3: safety nets before behaviour changes.**
+  - tests/test_consumer_contract.py replays pycbc_inspiral_fir's calls (imports, the search construction with its leaf options, BlockInput, the three hooks and the context attributes they read, refilter, pad, timings, the chisq bank's template_valid and template_spectra), and a degenerate-PSD reference.
+  - tests/test_public_api.py pins `__all__` (gaining include_dir and UnsupportedSize) and the public submodules (decision 5).
+  - tests/test_bank_path_precision.py compares every reported |SNR| with a float64 direct correlation at its lag, through three chains with and without the direct refine, on the flat filter and on a usable GPU. The observed worst case is 8e-7, the bound 1e-5; a planted 1e-3 error in the direct refine's taps fails it (3.1e-3).
+  - tools/sanitize.sh, the ASan/UBSan recipe. No dev host has the sanitizer runtimes installed (the libasan and libubsan packages), so it is first exercised by the nightly CI job (C5).

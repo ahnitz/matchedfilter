@@ -70,7 +70,7 @@ __all__ = ["MatchedFilter", "CorrelationFilter", "HierarchicalFilter", "PEAK_DTY
            "targets", "set_target", "devices", "Device", "__version__",
            "get_autotune_state", "clear_autotune_cache",
            "TimeDomainFilterBank", "FilterResults", "taps_to_spectra",
-           "template_spectra", "template_valid"]
+           "template_spectra", "template_valid", "include_dir", "UnsupportedSize"]
 
 from .time_domain import TimeDomainFilterBank, FilterResults, template_spectra, template_valid
 
