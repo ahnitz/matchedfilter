@@ -328,3 +328,4 @@ A step that changes C or workflows is first pushed to a `ci/<topic>` branch and 
 
   audit_class_execution.py's `del f` inside loops whose lambdas close over f read as an undefined name; it is now `f = None`. No tool imports a third-party module but numpy at module level.
 - 2026-10-22: **First sanitized pass.** In four shards, x86_64 ran the whole suite under ASan and UBSan clean (32-58 minutes a shard); every arm64 quarter reached 75 minutes. x86_64 now runs six shards and arm64 twelve.
+- 2026-10-22: **arm64 sanitizers time out at every size.** In twelfths, every arm64 shard still reached 75 minutes while x86_64 sixths took 21-70. A twelfth of the suite that never finishes is not a sizing problem: something on arm64 (the sanitized build of Highway's arm targets, or a hang) takes the whole limit. The step now stops itself at 65 minutes and reports the build time and the tail of its output as an error annotation; sanitize.sh prints build and run times.
