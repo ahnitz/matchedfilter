@@ -23,10 +23,20 @@ on:
         type: choice
         options: [testpypi, pypi, none]
 
+
+# bash with pipefail in every run step.
+defaults:
+  run:
+    shell: bash
+
+permissions:
+  contents: read
+
 jobs:
   wheels:
     name: Wheels (${{ matrix.label }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 150
     strategy:
       fail-fast: false
       matrix:
@@ -56,7 +66,7 @@ jobs:
           echo "built $(ls *.metallib | wc -l) metallib files"
           cd ../../..
           python3 tools/kernel_build_id.py --backend metal
-      - uses: pypa/cibuildwheel@v3.4.1
+      - uses: pypa/cibuildwheel@8d2b08b68458a16aeb24b64e68a09ab1c8e82084  # v3.4.1
       - name: Check every promised Python wheel is present
         run: python3 tools/check_wheels.py wheelhouse --platform ${{ matrix.label }}
       - uses: actions/upload-artifact@v4
@@ -68,7 +78,8 @@ jobs:
 
   sdist:
     name: Source distribution
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with: { submodules: true }   # third_party/highway
@@ -110,7 +121,8 @@ jobs:
     name: Publish
     needs: [wheels, sdist]
     if: github.event_name == 'release' || inputs.target != 'none'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
     environment:
       name: ${{ (github.event_name == 'release' || inputs.target == 'pypi') && 'pypi' || 'testpypi' }}
     permissions:
@@ -125,10 +137,10 @@ jobs:
 
       - name: Publish to TestPyPI
         if: github.event_name == 'workflow_dispatch' && inputs.target == 'testpypi'
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086  # v1.14.3
         with:
           repository-url: https://test.pypi.org/legacy/
 
       - name: Publish to PyPI
         if: github.event_name == 'release' || inputs.target == 'pypi'
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086  # v1.14.3

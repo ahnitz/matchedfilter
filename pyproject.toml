@@ -13,10 +13,10 @@ name = "matchedfilter"
 version = "0.1.0a8"
 description = "Batched CPU and GPU matched filtering with peak or full correlation output"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = "MIT"
 license-files = ["LICENSE"]
-dependencies = ["numpy>=1.20"]
+dependencies = ["numpy>=1.23.2"]
 keywords = ["matched-filter", "correlation", "fft", "gpu", "signal-processing"]
 classifiers = [
   "Development Status :: 3 - Alpha",
@@ -26,7 +26,6 @@ classifiers = [
   "Intended Audience :: Science/Research",
   "Programming Language :: C",
   "Programming Language :: Python :: 3",
-  "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
@@ -36,7 +35,7 @@ classifiers = [
 
 [project.optional-dependencies]
 test = ["pytest"]
-bench = ["numpy>=1.20"]
+bench = ["numpy>=1.23.2"]
 
 [project.urls]
 Homepage = "https://github.com/ahnitz/matchedfilter"
@@ -71,6 +70,12 @@ matchedfilter = ["*.h", "*.txt", "execution-policy.json", "spirv/*.spv", "spirv/
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 markers = ["performance: opt-in warm-call performance regression checks"]
+# An unknown marker or ini key fails collection; a test that passes against its
+# xfail fails; a test still running after 600 s has every thread's stack dumped,
+# so a hang (a driver compile, a deadlock) names where it is.
+addopts = "--strict-markers --strict-config -ra"
+xfail_strict = true
+faulthandler_timeout = 600
 
 # Wheels are built only for the platforms CI actually exercises.  Linux
 # aarch64 is deliberately absent: it builds and passes there, but producing
@@ -81,19 +86,24 @@ markers = ["performance: opt-in warm-call performance regression checks"]
 # Free-threaded builds (cp313t, cp314t) are deliberately NOT here. The
 # extension releases the GIL around the filter and would need its plan
 # state auditing for concurrent use before claiming to support them.
-build = "cp310-* cp311-* cp312-* cp313-* cp314-*"
+build = "cp311-* cp312-* cp313-* cp314-*"
 skip = "*-musllinux_i686 *_i686"
 build-frontend = "build"
 test-requires = "pytest"
 # Run from {package} so the tests import the installed wheel rather than the
 # source tree next to them.
 test-command = "python -m pytest {package}/tests -q -rs"
+# Single-threaded, as every test run here; GITHUB_ACTIONS reaches the Linux build
+# container so failed tests are annotated there too, and MF_ISA so a forced target
+# applies inside it.
+environment = { OMP_NUM_THREADS = "1", OPENBLAS_NUM_THREADS = "1", MKL_NUM_THREADS = "1", NUMEXPR_NUM_THREADS = "1", VECLIB_MAXIMUM_THREADS = "1" }
 
 [tool.cibuildwheel.linux]
 archs = ["x86_64"]
 # manylinux2014's default toolchain is too old for Highway's AVX-512 targets;
 # the _2_28 image ships a compiler that has them.
 manylinux-x86_64-image = "manylinux_2_28"
+environment-pass = ["GITHUB_ACTIONS", "MF_ISA"]
 
 [tool.cibuildwheel.macos]
 # Apple Silicon only.  Intel Macs are untested -- the hosted runners for them

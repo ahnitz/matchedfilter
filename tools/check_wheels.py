@@ -2,6 +2,10 @@
 import argparse
 from pathlib import Path
 
+#: The CPython minor versions a release ships wheels for (pyproject's
+#: [tool.cibuildwheel] build list; requires-python >= 3.11).
+SUPPORTED = range(11, 15)
+
 
 def check(directory, platform):
     wheels = [p.name for p in Path(directory).glob('matchedfilter-*.whl')]
@@ -9,7 +13,7 @@ def check(directory, platform):
             'macos-arm64': ('macosx',)}[platform]
     arch = 'arm64' if platform == 'macos-arm64' else 'x86_64'
     missing = []
-    for minor in range(10, 15):
+    for minor in SUPPORTED:
         for tag in tags:
             if not any(f'-cp3{minor}-cp3{minor}-' in w and
                        tag in w.rsplit('-', 1)[1] and

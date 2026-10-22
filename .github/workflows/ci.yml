@@ -2,14 +2,35 @@ name: CI
 
 on:
   push:
-    branches: [ main, master ]
+    # ci/** branches prove a change to C or to the workflows before it reaches
+    # main (docs/robustness-plan.md); ci/bench/** proves benchmark.yml instead.
+    branches: [ main, master, 'ci/**', '!ci/bench/**' ]
   pull_request:
   workflow_dispatch:
+
+# Every run step is bash with pipefail: a failing command inside a pipe (`x | tee`)
+# fails its step instead of passing as the pipe's last command. A diagnostic that
+# may fail says so with a ::warning, never a bare `|| true`.
+defaults:
+  run:
+    shell: bash
+
+permissions:
+  contents: read
+
+# Single-threaded, as every test and benchmark here.
+env:
+  OMP_NUM_THREADS: "1"
+  OPENBLAS_NUM_THREADS: "1"
+  MKL_NUM_THREADS: "1"
+  NUMEXPR_NUM_THREADS: "1"
+  VECLIB_MAXIMUM_THREADS: "1"
 
 jobs:
   sdist:
     name: Test the source distribution
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
         with: { submodules: true }
@@ -26,11 +47,12 @@ jobs:
           python -m pytest tests -q -rs
 
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
-        python: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+        python: ["3.11", "3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@v4
         with: { submodules: true }   # third_party/highway
@@ -61,11 +83,14 @@ jobs:
       - name: Test again on every other target in the build
         # Highway's dispatch picks the widest target the host supports, so on
         # an AVX-512 runner the AVX2 and SSE4 kernels would otherwise never
-        # run.  The list comes from the build rather than from here.
+        # run.  The list comes from the build rather than from here, without
+        # the default target, which the step above already ran.
         if: always()
         run: |
           mkdir -p /tmp/run && cd /tmp/run
-          for isa in $(python -c "import matchedfilter; print(' '.join(matchedfilter.targets()))"); do
+          others=$(python -c "import matchedfilter as mf; print(' '.join(t for t in mf.targets() if t != mf.backend()))")
+          echo "default target $(python -c 'import matchedfilter as mf; print(mf.backend())'); re-runs: ${others:-none}"
+          for isa in $others; do
             echo "::group::MF_ISA=$isa"
             MF_ISA=$isa python -m pytest -q "$GITHUB_WORKSPACE/tests" -rs
             echo "::endgroup::"
@@ -73,7 +98,8 @@ jobs:
 
   generated-files:
     # Generated CPU codelets are committed and must match their generator.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with: { submodules: true }   # third_party/highway
@@ -90,7 +116,8 @@ jobs:
 
   fdr-verification:
     name: Multi-shape False Dismissal Rate (FDR) verification
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
         with: { submodules: true }
@@ -104,43 +131,20 @@ jobs:
         run: |
           python tools/verify_cascade_fdr.py --injections 5000 --shapes all
 
-  benchmark:
-    # Advisory only.  A shared runner's timings are too noisy to margin a merge
-    # on; this is here so the numbers stay visible and an order-of-magnitude
-    # regression is obvious in the log.
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with: { submodules: true }   # third_party/highway
-      - uses: actions/setup-python@v5
-        with: { python-version: "3.12" }
-      - run: python -m pip install --upgrade pip && python -m pip install .
-
-      - name: Benchmark
-        run: |
-          cd /tmp
-          python -m matchedfilter.benchmark --n 4096 16384 --reps 3 \
-            | tee /tmp/bench.txt
-
-      - name: Publish to the run summary
-        if: always()
-        run: |
-          { echo '## Benchmark'; echo; echo '```'; cat /tmp/bench.txt; echo '```'; } \
-            >> "$GITHUB_STEP_SUMMARY"
-
   wheel:
     # Exercise the newest supported interpreter on both release platforms.
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
         include:
-          - {os: ubuntu-latest, build: cp314-manylinux_x86_64, label: linux}
+          - {os: ubuntu-24.04, build: cp314-manylinux_x86_64, label: linux}
           - {os: macos-14, build: cp314-macosx_arm64, label: macos}
     steps:
       - uses: actions/checkout@v4
         with: { submodules: true }   # third_party/highway
-      - uses: pypa/cibuildwheel@v3.4.1
+      - uses: pypa/cibuildwheel@8d2b08b68458a16aeb24b64e68a09ab1c8e82084  # v3.4.1
         env:
           CIBW_BUILD: ${{ matrix.build }}
 
@@ -164,7 +168,7 @@ jobs:
     # macos-latest: the paravirtual Metal device is reported working there,
     # and older images returned nil from MTLCreateSystemDefaultDevice.
     runs-on: macos-latest
-    timeout-minutes: 60
+    timeout-minutes: 45
     # GPU calibration-transfer checks are required: a missing device or a
     # numerical regression must not silently produce a green build.
     steps:
@@ -191,9 +195,6 @@ jobs:
 
       # The question this job exists to answer: does a hosted runner give
       # the guest a GPU at all? These are virtual machines, and a Metal
-      # device is not guaranteed. Everything else here is downstream of it.
-      # The question this job exists to answer: does a hosted runner give
-      # the guest a GPU at all? These are virtual machines, and a Metal
       # device is not guaranteed.
       #
       # Ask BOTH ways, and note which one matters. Compute needs no
@@ -207,7 +208,8 @@ jobs:
           sw_vers
           xcrun -sdk macosx metal --version || echo "no Apple metal compiler"
           echo "--- displays ---"
-          system_profiler SPDisplaysDataType 2>/dev/null | head -30 || true
+          system_profiler SPDisplaysDataType 2>/dev/null | head -30 \
+            || echo "::warning::system_profiler failed or was cut short"
           echo "--- Metal ---"
           python - <<'EOF'
           import ctypes
@@ -278,9 +280,12 @@ jobs:
       - name: What can this device do?
         if: always()
         run: |
-          python tools/metal_probe.py
+          # A diagnostic: the suite below is the gate. A kernel the probe
+          # cannot run is named in a warning instead of hidden by the pipe.
+          python tools/metal_probe.py || echo "::warning::metal_probe failed"
           for lib in python/matchedfilter/metal/*.metallib; do
-            python tools/metal_probe.py "$lib" | tail -n +2
+            python tools/metal_probe.py "$lib" | tail -n +2 \
+              || echo "::warning::metal_probe failed on $(basename "$lib")"
           done
 
       - name: Run the suite
@@ -317,11 +322,3 @@ jobs:
           print("indices match:", same, " max |value| difference:", err)
           assert same, "the Metal kernel disagreed with the CPU"
           EOF
-
-      # Bounded advisory measurements on a shared VM. The full default sweep
-      # can exhaust this job's budget after the complete suite has passed.
-      - name: Benchmark what runs
-        run: |
-          python -m matchedfilter.benchmark --n 1024 4096 16384 65536 \
-            --data 8 --templates 16 --reps 3 --fftw-plan measure || true
-          python tools/scoreboard.py --pairs 128 || true

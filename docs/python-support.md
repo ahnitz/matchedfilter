@@ -12,3 +12,11 @@ Package metadata requires Python >=3.10, release wheels cover CPython
 3.10–3.14, and the CI matrix tests each of those versions. Python 3.10
 replaces 3.9 as the oldest supported CI target. Historical test reports retain
 the versions they actually tested.
+
+## 2026-10-21: Python 3.11 is the minimum
+
+Python 3.10 reaches end of life in October 2026, and support was dropped by project
+decision (docs/robustness-plan.md, decision 1). Package metadata requires Python
+>=3.11, release wheels cover CPython 3.11–3.14, and CI tests each of them. The numpy
+floor is 1.23.2, the first numpy with Python 3.11 wheels; pycbc's runtime asks for
+numpy 1.16 or newer, and its production environment runs 2.2.3.
