@@ -122,6 +122,10 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ### Fixed
 
+- `MF_DEVICE` no longer moves the library's own CPU plans (a GPU group's CPU plan for
+  single-template calls, the correlation price probe) to another device: a
+  single-device lock stored under `MF_DEVICE=gpu...` timed a GPU against a GPU; such
+  seeds should drop their `single-device` records.
 - One filter object per thread: a call on an object while another thread's call on it is
   running raises `RuntimeError` ("use one filter per thread"); it used to corrupt the
   plan's buffers silently. Lazily allocated scratch (series spectra, the DIF forwards,
