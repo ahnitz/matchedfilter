@@ -33,6 +33,23 @@ permissions:
   contents: read
 
 jobs:
+  ci-green:
+    # A release publishes only a commit whose CI run on main concluded success
+    # (tools/ci_status.py: unknown and in-progress are not green; it waits up to an
+    # hour for a run still going). 2026-10 history: a release went out from a red run.
+    name: CI is green for this commit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 70
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Require a green CI run of this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 tools/ci_status.py --sha "$GITHUB_SHA" --workflow CI --wait 3600
+
   wheels:
     name: Wheels (${{ matrix.label }})
     runs-on: ${{ matrix.os }}
@@ -119,7 +136,7 @@ jobs:
 
   publish:
     name: Publish
-    needs: [wheels, sdist]
+    needs: [ci-green, wheels, sdist]
     if: github.event_name == 'release' || inputs.target != 'none'
     runs-on: ubuntu-24.04
     timeout-minutes: 30

@@ -17,6 +17,10 @@ Checks, in order (each reports ok / FAIL / skip, and the gate fails on any FAIL)
   repro        tests/test_reproducible_choices.py, `--loops` times: processes sharing a
                cost file make the same choices
   followups    test_call_plan + test_followup_batch, `--loops` times (a past race)
+  ci           tools/ci_status.py --schedules: main's latest run of every workflow, and
+               every scheduled workflow's latest scheduled run, are green (a red schedule
+               clears with a green ci/** proof of its fix); unknown (API unreachable,
+               a run in progress) is reported as skip, never as ok
 
 The ladder checks need a production-like bank and noise profiles, which are not in the
 repository; they run when --bank/--profiles (or MF_GATE_BANK/MF_GATE_PROFILES) are given and
@@ -152,6 +156,16 @@ def loop(g, name, tests, n):
     g.record(name, "ok" if fails == 0 else "FAIL", "%d/%d runs failed" % (fails, n))
 
 
+def ci(g):
+    rc, out, dt = _run([sys.executable, "tools/ci_status.py", "--schedules"],
+                       log=g.logdir / "ci.log")
+    lines = [l for l in out.strip().splitlines() if l and not l.startswith("(")]
+    bad = [" ".join(l.split()[:3]) for l in lines if l.startswith(("red", "unknown"))]
+    status = {0: "ok", 1: "FAIL"}.get(rc, "skip")
+    g.record("ci", status, ("%d runs and schedules green" % len(lines)) if rc == 0
+             else "; ".join(bad[:6]) + " (tools/ci_status.py --schedules)")
+
+
 def _machine_lock(path):
     """Hold an exclusive lock on path for this process's life, waiting while another gate
     holds it. Gates on one machine share its GPU and cores: two at once slowed each other
@@ -180,7 +194,7 @@ def main(argv=None):
     ap.add_argument("--cpu-g16", action="store_true", help="also gate the CPU fp16 tier (ARM)")
     ap.add_argument("--quick", action="store_true", help="one suite run, 2 loops, no settled check")
     ap.add_argument("--only", nargs="+",
-                    choices=["suite", "check", "settled", "margin", "repro", "followups"])
+                    choices=["suite", "check", "settled", "margin", "repro", "followups", "ci"])
     ap.add_argument("--logdir", default=None)
     ap.add_argument("--lock", default="/tmp/mf-gate-%d.lock" % os.getuid(),
                     help="per-machine lock file (fixed, not TMPDIR, so every session shares "
@@ -196,7 +210,7 @@ def main(argv=None):
     rc, out, _ = _run(["git", "rev-parse", "--short", "HEAD"])
     print("gate: %s on %s, device %s, logs %s" % (out.strip(), os.uname().nodename, device or "cpu only",
                                                   args.logdir), flush=True)
-    want = set(args.only or ["suite", "check", "settled", "margin", "repro", "followups"])
+    want = set(args.only or ["suite", "check", "settled", "margin", "repro", "followups", "ci"])
     if args.quick and not args.only:
         want.discard("settled")
 
@@ -218,6 +232,8 @@ def main(argv=None):
         loop(g, "repro", ["tests/test_reproducible_choices.py"], args.loops)
     if "followups" in want:
         loop(g, "followups", ["tests/test_call_plan.py", "tests/test_followup_batch.py"], args.loops)
+    if "ci" in want:
+        ci(g)
 
     print("gate: %s" % ("FAILED" if g.failed else "passed (%d skipped)"
                        % sum(s == "skip" for _, s, _ in g.results)), flush=True)
