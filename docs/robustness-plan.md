@@ -211,3 +211,10 @@ A step that changes C or workflows is first pushed to a `ci/<topic>` branch and 
 ## Log
 
 - 2026-10-21: plan adopted.
+- 2026-10-21: **A1 merged (94a2b50b, 8a33d64a).**
+  - What changed: workflows under bash with pipefail; timeouts on every job; pinned images and actions; strict pytest config with a 600 s faulthandler dump; the session checks MF_ISA against the backend; the duplicate default-target re-run is gone; the advisory benchmarks left CI; Python 3.10 is dropped.
+  - Proof run (ci/a1): all green; Metal 21 min (was 36), longest test job 28 min (was 38).
+  - The weekly benchmark, unmasked, no longer crashed but ran past its 60-min timeout on every platform: the hierarchical table trials every (n, budget, SNR) cell. Its sweep is bounded to seven lengths with a 120-min timeout. Making that table cheaper is a benchmark-tool item.
+- 2026-10-21: **A2: tools/ci_status.py**, a `ci` check in tools/gate.py, and the release `ci-green` job.
+  - ci_status: public API; verdicts green/red/unknown; failed jobs with their steps and annotations; schedules judged by their latest run and staleness; a red schedule cleared by a green ci/** proof of its fix.
+  - The release's ci-green job is exercised only by a real release or a dispatch.
