@@ -122,6 +122,10 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ### Fixed
 
+- CPU cost models are stored under the series group the plans run (after `MF_DGROUP` and
+  the 4 MB cap at long transforms), not the one requested: a model calibrated under
+  `MF_DGROUP` was stored under the default group's key and adopted at the default.
+  Calibrations at n >= 65536, where the cap applies, are re-measured once.
 - `MF_DEVICE` no longer moves the library's own CPU plans (a GPU group's CPU plan for
   single-template calls, the correlation price probe) to another device: a
   single-device lock stored under `MF_DEVICE=gpu...` timed a GPU against a GPU; such

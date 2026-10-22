@@ -207,6 +207,9 @@ int ap_hmf_tier_stats(const ap_hmf_plan *p, int tier, long *passed, unsigned lon
    gives the per-block fixed work (forward transform, ingest) in the same units. */
 unsigned long long ap_hmf_series_ticks(const ap_hmf_plan *p);
 int ap_hmf_series_group(const ap_hmf_plan *p);
+/* The series group a plan of size n would run when asked for `requested` (MF_DGROUP,
+   then halved until its held spectra fit 4 MB): what ap_hmf_series_group reports. */
+int ap_hmf_effective_group(size_t n, int requested);
 /* Run the first tier through the Q15 screen (ap_mf_q15_screen): the float
    tier then runs only on the pairs the screen cannot reject, so every result
    is the float tier's own.  Returns 0, or -1 when the first tier's band has no

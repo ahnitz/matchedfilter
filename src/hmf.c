@@ -102,6 +102,16 @@ struct ap_hmf_plan {
 
 int ap_hmf_series_group(const ap_hmf_plan *p){ return p ? p->dgroup : 0; }
 
+/* The series group a plan of size n runs when asked for `requested`: MF_DGROUP overrides
+   it (a diagnostic), and it is halved until the held spectra fit 4 MB. Calibrations key
+   their models by this, the group that ran, not the one asked for. */
+int ap_hmf_effective_group(size_t n,int requested){
+  int grp = requested;
+  { const char *e=getenv("MF_DGROUP"); if(e){ int v=atoi(e); if(v>0) grp=v; } }
+  while(grp>1 && (size_t)grp*2*n*sizeof(float) > (size_t)4*1024*1024) grp>>=1;
+  return grp;
+}
+
 ap_hmf_plan *ap_hmf_create_chain(size_t n,size_t k,int ndata,int ntmpl,
                                  const size_t *bands,int ntiers,int series_group){
   if(series_group<1||series_group>65535||ndata<1||ntmpl<1||!ap_supported(n)
@@ -118,11 +128,7 @@ ap_hmf_plan *ap_hmf_create_chain(size_t n,size_t k,int ndata,int ntmpl,
   p->k=(k>0) ? k : n;
   p->is_dif=(p->k == n/2);
   p->nt=ntmpl; p->ntiers=ntiers;
-  /* Execution policy belongs to the caller; the environment is diagnostic. */
-  int grp = series_group;
-  { const char *e=getenv("MF_DGROUP"); if(e){ int v=atoi(e); if(v>0) grp=v; } }
-  /* bounded by what the held spectra cost, which is what bites at long n */
-  while(grp>1 && (size_t)grp*2*n*sizeof(float) > (size_t)4*1024*1024) grp>>=1;
+  const int grp = ap_hmf_effective_group(n, series_group);
   p->dgroup=grp; p->nd=ndata>grp ? ndata : grp;
   if(p->is_dif){
     p->full=ap_mf_create(p->k, 2*p->nd, ntmpl);

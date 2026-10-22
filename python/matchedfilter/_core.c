@@ -1108,6 +1108,12 @@ static PyTypeObject HMFType={
   .tp_methods=HMF_methods, .tp_getset=HMF_getset, .tp_doc="matchedfilter hierarchical matched filter (opaque)",
 };
 
+static PyObject *M_series_group(PyObject *self,PyObject *args){
+  (void)self; Py_ssize_t n; int req;
+  if(!PyArg_ParseTuple(args,"ni",&n,&req)) return NULL;
+  if(n<1||req<1){ PyErr_SetString(PyExc_ValueError,"n and the requested group must be positive"); return NULL; }
+  return PyLong_FromLong(ap_hmf_effective_group((size_t)n,req));
+}
 static PyObject *M_backend(PyObject *self,PyObject *args){
   (void)self;(void)args;
   return PyUnicode_FromString(ap_isa());
@@ -1429,6 +1435,7 @@ static PyTypeObject RootType={
 
 static PyMethodDef methods[]={
   {"backend",M_backend,METH_NOARGS,"backend() -> name of the selected kernel"},
+  {"series_group",M_series_group,METH_VARARGS,"series_group(n, requested) -> the series group a hierarchical plan of size n runs"},
   {"forward_cost",M_forward_cost,METH_VARARGS,"forward_cost(n, reps=9) -> (engine s, platform s or -1) per block forward"},
   {"gate16_bound",M_gate16_bound,METH_VARARGS,"gate16_bound(N, data, templates, nt) -> bytes of nt float32 bounds (-1: not fired), or None"},
   {"price_direct",M_price_direct,METH_NOARGS,"price_direct() -> ticks per lag x tap of the direct refine's correlation"},

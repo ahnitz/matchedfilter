@@ -710,6 +710,10 @@ def calibrate_costs(n, ntemplates, blocks=256, reps=5, seed=11, group=None):
     # The series group must be the plans' own: the first tier batches its work over the blocks in a
     # group, so calibrating at a smaller group overstates its cost (2x at n=1024 with 8 vs 32).
     group = int(group or default_series_group(n))
+    # Keyed by the group the plans actually run (MF_DGROUP, the 4 MB cap at long n), not the
+    # one asked for: a model measured at a forced group stored under the default's key was
+    # adopted by every later process at the default group.
+    group = _core.series_group(int(n), group)
     # The FP16 first gate (ARM, gate16.cc) changes what tier 0 costs: priced and cached
     # apart from the FP32 gate, so neither is ranked with the other's numbers.
     g16 = cpu_gate_kind() == "f16"
