@@ -33,7 +33,8 @@ def busy(clear=True):
 
 
 def enabled():
-    return os.environ.get("MF_GPU_TIMING", "0") not in ("", "0")
+    from . import _config
+    return _config.get("MF_GPU_TIMING")
 
 
 def register(ctx):

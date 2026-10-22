@@ -45,8 +45,8 @@ def forced_layout(band):
     """The layout MF_COARSE_LAYOUT names for this band (comma-separated layout_label names;
     each names its own band), or None. The choice then takes it without timing, on every
     backend, so tests and measurements can run each layout through the production path."""
-    import os
-    for name in os.environ.get("MF_COARSE_LAYOUT", "").split(","):
+    from . import _config
+    for name in (_config.get("MF_COARSE_LAYOUT") or "").split(","):
         name = name.strip()
         if next((t for t in name.split("_") if t.isdigit()), None) == str(band):
             return name
@@ -60,9 +60,8 @@ def shipped_tiles(band, ppg, shipped):
 
 def forced_tile(env_var):
     """A tile forced by the environment (for measurement and the tests), or None."""
-    import os
-    v = os.environ.get(env_var, "")
-    return int(v) if v.strip() else None
+    from . import _config
+    return _config.get(env_var)
 
 
 #: Interleaved rounds the contenders of a coarse layout choice are re-timed in.

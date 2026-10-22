@@ -57,7 +57,7 @@ _MAX_BINS = MAX_BINS          # _gpuhost.MAX_BINS: one limit for every backend
 
 
 from ._errors import UnsupportedSize      # noqa: F401  (re-export)
-from . import _gputime
+from . import _config, _gputime
 from ._gpu_cache import InputUploads
 from ._gpuexec import Arg, Executor, register_fusion, settle as _settle
 
@@ -87,8 +87,7 @@ def _ieee_kernel(stem):
     """Whether a kernel library compiles with IEEE (not fast) math: the survivor compaction,
     which must list a NaN coarse value (see Context._library). MF_METAL_IEEE=all|none
     overrides, for measurement."""
-    import os
-    mode = os.environ.get("MF_METAL_IEEE", "default")
+    mode = _config.get("MF_METAL_IEEE")
     if mode in ("all", "none"):
         return mode == "all"
     # The coarse kernels keep fast math (IEEE cost the band-256 tiled kernel 1.00 -> 1.23 ms)
@@ -123,8 +122,7 @@ def coarse_ppg(band, pairs, override=None, simd_width=None):
     and write nothing (_coarse.coarse_launch). ``MF_METAL_COARSE_PPG`` overrides,
     for measurement.
     """
-    import os
-    want = override if override is not None else (os.environ.get("MF_METAL_COARSE_PPG") or None)
+    want = override if override is not None else _config.get("MF_METAL_COARSE_PPG")
     shipped = [p for p in (32, 16, 8, 4, 2) if _shipped("tierb_%d_c16p%d" % (band, p))]
     if want is not None:
         want = int(want)
@@ -669,7 +667,7 @@ class Context(Executor, InputUploads):
         paying a compile on first use rather than refusing.
         """
         raw = (stem.startswith("tierb_") and "_c16" in stem
-               and os.environ.get("MF_VK_C16_BOUND", "1") == "0")
+               and not _config.get("MF_VK_C16_BOUND"))
         lib_path = _METAL_DIR / (stem + ".metallib")
         # A shipped .metallib is built with the compiler's defaults (tools/build_spirv.py):
         # fast math, no macros. A kernel that needs other options -- the raw fp16 maximum
@@ -868,7 +866,7 @@ class Context(Executor, InputUploads):
             single = None
         key = ((n, entry_name, "gate" if gate else True) if single else (n, entry_name)) + (
             (macros,) if macros else ())
-        if entry_name.startswith("coarse16") and os.environ.get("MF_VK_C16_BOUND", "1") == "0":
+        if entry_name.startswith("coarse16") and not _config.get("MF_VK_C16_BOUND"):
             # The raw-maximum build (_library's MF_C16_RAW) is a different library: a process
             # that switches it (the physics tests) must not reuse the bound pipeline.
             key = key + ("raw",)

@@ -12,6 +12,7 @@
 #include <string.h>
 #include <math.h>
 #include "alloc.h"
+#include "env.h"
 #include "matchedfilter.h"
 #include "transform.h"
 #include "q15.h"
@@ -136,7 +137,7 @@ static ap_mf_plan *create_mf(size_t n, int ndata, int ntmpl, int pair, const ap_
         hard-coding n!=1024 silently cost the AVX2 path its fused product. */
     p->gmajor = (p->w>0 && p->n1>0 && p->n1%p->w==0
                  && (size_t)p->n1*p->n2==n && ap_has_fused_prod(p->fft)) ? 1 : 0;
-    const char *e=getenv("MF_GMAJOR"); if(e && !atoi(e)) p->gmajor=0;
+    if(!ap_env_flag("MF_GMAJOR",1)) p->gmajor=0;
   }
   /* Read once here, not inside ap_mf_run.  The hierarchical filter calls
      ap_mf_run once per pair rather than once per batch, which turned a
@@ -149,7 +150,7 @@ static ap_mf_plan *create_mf(size_t n, int ndata, int ntmpl, int pair, const ap_
   const char *isa=ap_plan_backend(p->fft);
   const size_t alt_max_n = (!strcmp(isa,"AVX3") && ap_plan_lanes(p->fft) >= 16) ? 1024u : 512u;
   p->allow_pair_alt = !pair && !p->pb && n>=256 && n<=alt_max_n && p->w>0 && ntmpl>=(size_t)p->w
-    && !getenv("MF_PBMAX")
+    && ap_env_int("MF_PBMAX",-1) < 0
     && (!strcmp(isa,"AVX3") || !strcmp(isa,"AVX2") || !strcmp(isa,"SSE4"));
   p->ntpad = p->pb ? ((ntmpl + p->pb - 1)/p->pb)*p->pb : ntmpl;
   p->dre=ap_alloc64((size_t)ndata*n*sizeof(float));
@@ -1041,7 +1042,7 @@ int ap_mf_correlate_series_continuous(ap_mf_plan *p,const float *series,
   /* this call's output footprint: nt rows over the blocks' valid spans */
   const size_t llc = llc_bytes();
   const int stream = llc && (size_t)nt*(size_t)nblocks*(hi-lo)*8u > llc
-                     && !getenv("MF_CORR_NO_STREAM");
+                     && !ap_env_flag("MF_CORR_NO_STREAM",0);
   if(W && !p->corrbuf){
     p->corrbuf=ap_alloc64(2*(size_t)W*n*sizeof(float));
     if(!p->corrbuf) return -1;

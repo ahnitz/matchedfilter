@@ -24,7 +24,7 @@ import threading
 import numpy as np
 
 from ._coarse import TILE_PROBE
-from . import _cuda, _gputime
+from . import _config, _cuda, _gputime
 from ._cuda import check_cuda
 from ._errors import UnsupportedSize
 from ._gpu_cache import InputUploads
@@ -760,7 +760,7 @@ class Context(Executor, InputUploads):
         self._timing = _gputime.enabled()
         # MF_GPU_PROFILE=1 as well: each kernel and copy of a run is also logged, as
         # ("k:<name>", device_ms).
-        self._profile = self._timing and os.environ.get("MF_GPU_PROFILE", "0") not in ("", "0")
+        self._profile = self._timing and _config.get("MF_GPU_PROFILE")
         self.timing_log = []
         self._event_pool = []
         self._pending_events = {}
@@ -1404,7 +1404,7 @@ class Context(Executor, InputUploads):
         ent = self._c16_flags.get(self._labels.get(fn.value))
         if ent is None:
             return
-        raw = 1 if os.environ.get("MF_VK_C16_BOUND", "1") == "0" else 0
+        raw = 0 if _config.get("MF_VK_C16_BOUND") else 1
         if ent[1] != raw:
             self._bind()
             check_cuda(self.cuda.cuCtxSynchronize(), "cuCtxSynchronize")

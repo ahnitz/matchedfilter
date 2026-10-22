@@ -4,6 +4,24 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ## Unreleased
 
+### Changed
+
+- Every `MF_*` environment variable follows one rule (`docs/environment.md`, generated
+  from `matchedfilter/_config.py`): unset or empty gives the default; a switch takes
+  0/false/no/off or 1/true/yes/on (any case); a number must parse; anything else raises
+  `ValueError` naming the variable when the package is imported. Before, each reader had
+  its own rule, and some values meant the opposite of what they say:
+  - `MF_HMF_PROF`, `MF_CORR_NO_STREAM`, `MF_GATE16_DEBUG` and `MF_GATE16_DEBUG_MAX` were
+    on whenever set, `=0` included;
+  - `MF_GATE16=abc` turned the FP16 gate off, and `MF_GMAJOR=2` or `MF_ILAY=2` counted as
+    on;
+  - `MF_AUTOTUNE_LOG=` (empty), `MF_GPU_TIMING=false` and `MF_GPU_PROFILE=no` counted as
+    on, and `MF_DIRECT_REFINE`, `MF_GPU_ITEMS`, `MF_DEVICE_FOLLOWUPS` and
+    `MF_VK_C16_BOUND` were off only for exactly `0`;
+  - a C integer that did not parse (`MF_PBMAX=big`) read as 0.
+- An `MF_*` name the package does not know warns at import, with the nearest known name;
+  a removed one warns with when and why it was removed.
+
 ### Removed
 
 - `MF_BBLK` (stage-B blocking of the balanced transform): slower than the default at

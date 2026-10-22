@@ -13,14 +13,20 @@ Sections:
 - ``diagnostic``: output only; results never depend on one.
 - ``override``: changes what runs (and so, for the statistical gates, which peaks a chain
   dismisses); for measurement and tests.
+- ``tools``: read by tools/, the builds or the tests, never by the package (side
+  ``tools``); each parses its own, so the package only knows the names.
 """
+import difflib
+import os
+import warnings
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Any, Optional, Tuple
 
 SECTIONS = (
     ("config", "Configuration"),
     ("diagnostic", "Diagnostics (output only)"),
     ("override", "Measurement overrides (change what runs)"),
+    ("tools", "Tools, builds and tests (read outside the package)"),
 )
 
 
@@ -28,8 +34,12 @@ SECTIONS = (
 class Var:
     """One environment variable. ``usage`` is how the document names it (with its value
     when that is the point, e.g. ``MF_AUTOTUNE=0``); ``default`` is what unset means, as
-    the document says it; ``side`` is ``py``, ``c`` or ``both``. ``row`` names the variable
-    whose row of the document also covers this one (siblings documented together)."""
+    the document says it; ``side`` is ``py``, ``c``, ``both`` or ``tools``. ``row`` names the variable
+    whose row of the document also covers this one (siblings documented together).
+
+    ``kind`` is how a value parses (``get``): ``flag``, ``int``, ``float``, ``choice``
+    (one of ``choices``) or ``text`` (checked by its reader); ``value`` is what unset or
+    empty gives (None: the reader's own built-in or measured choice)."""
     name: str
     section: str
     side: str
@@ -37,97 +47,121 @@ class Var:
     doc: str = ""
     usage: Optional[str] = None
     row: Optional[str] = None
+    kind: str = "text"
+    value: Any = None
+    choices: Tuple[str, ...] = ()
 
 
 VARS: Tuple[Var, ...] = (
     # Configuration
     Var("MF_DEVICE", "config", "py", "`cpu`",
-        "Device for plans built without one (`device.parse(None)`)."),
+        "Device for plans built without one (`device.parse(None)`).", kind="text", value="cpu"),
     Var("MF_COST_FILE", "config", "py", "unset",
         "JSON file of measured cost models and trial locks, kept between processes. Unset: "
         "cold start, no trials kept. One writer per open contest: processes sharing a file "
-        "while a trial is open overwrite each other's samples (said once per contest)."),
+        "while a trial is open overwrite each other's samples (said once per contest).", kind="text"),
     Var("MF_EXECUTION_POLICY", "config", "py", "the shipped `execution-policy.json`",
-        "Another execution-policy table."),
+        "Another execution-policy table.", kind="text"),
     Var("MF_ISA", "config", "both", "best the CPU supports",
-        "SIMD target (also `matchedfilter.set_target`)."),
+        "SIMD target (also `matchedfilter.set_target`).", kind="text"),
     # Diagnostics
     Var("MF_AUTOTUNE_LOG", "diagnostic", "py", "", "Log block-size, chain and trial decisions.",
-        usage="MF_AUTOTUNE_LOG=1"),
+        usage="MF_AUTOTUNE_LOG=1", kind="flag", value=False),
     Var("MF_HMF_PROF", "diagnostic", "c", "", "Per-tier CPU tick counters in hierarchical plans.",
-        usage="MF_HMF_PROF=1"),
+        usage="MF_HMF_PROF=1", kind="flag", value=False),
     Var("MF_HMF_TRACE", "diagnostic", "c", "", "Trace hierarchical plan runs to stderr.",
-        usage="MF_HMF_TRACE=1"),
+        usage="MF_HMF_TRACE=1", kind="flag", value=False),
     Var("MF_HMF_DUMP", "diagnostic", "c", "", "Dump coarse-pass data for the GPU mirror tests.",
-        usage="MF_HMF_DUMP=<file>"),
+        usage="MF_HMF_DUMP=<file>", kind="text"),
     Var("MF_GATE16_DEBUG", "diagnostic", "c", "",
         "FP16 gate error data for tools/gate16_error.py.",
-        usage="MF_GATE16_DEBUG`, `MF_GATE16_DEBUG_MAX"),
-    Var("MF_GATE16_DEBUG_MAX", "diagnostic", "c", row="MF_GATE16_DEBUG"),
+        usage="MF_GATE16_DEBUG`, `MF_GATE16_DEBUG_MAX", kind="flag", value=False),
+    Var("MF_GATE16_DEBUG_MAX", "diagnostic", "c", row="MF_GATE16_DEBUG", kind="flag", value=False),
     Var("MF_GPU_TIMING", "diagnostic", "py", "", "Device-time collection across GPU contexts.",
-        usage="MF_GPU_TIMING=1"),
+        usage="MF_GPU_TIMING=1", kind="flag", value=False),
     Var("MF_GPU_PROFILE", "diagnostic", "py", "", "Phase timestamps in recorded Vulkan plans.",
-        usage="MF_GPU_PROFILE=1"),
+        usage="MF_GPU_PROFILE=1", kind="flag", value=False),
     Var("MF_ROOFLINE_DATAPATH", "diagnostic", "py", "",
         "SIMD datapath width for `_roofline` where detection is wrong (e.g. 256 on Strix "
-        "Point).", usage="MF_ROOFLINE_DATAPATH=<bits>"),
+        "Point).", usage="MF_ROOFLINE_DATAPATH=<bits>", kind="int"),
     Var("MF_VK_SUBGROUP_MEASURING", "diagnostic", "py", "",
-        "Internal: marks the subprocess that measures Vulkan subgroup sizes."),
+        "Internal: marks the subprocess that measures Vulkan subgroup sizes.", kind="flag", value=False),
     # Measurement overrides
     Var("MF_AUTOTUNE", "override", "py", "on", "No timed trials: the model's choices stand.",
-        usage="MF_AUTOTUNE=0"),
+        usage="MF_AUTOTUNE=0", kind="flag", value=True),
     Var("MF_CHAIN_FORCE", "override", "py", "unset",
         "Pin the gate chain (cross-device comparisons; results depend on the chain).",
-        usage="MF_CHAIN_FORCE=b1,b2` or `n:b1,b2;..."),
+        usage="MF_CHAIN_FORCE=b1,b2` or `n:b1,b2;...", kind="text"),
     Var("MF_CHAIN_MARGIN", "override", "py", "built-in",
         "Chain shortlist margin; batches per chain trial.",
-        usage="MF_CHAIN_MARGIN`, `MF_CHAIN_TRIALS"),
-    Var("MF_CHAIN_TRIALS", "override", "py", row="MF_CHAIN_MARGIN"),
-    Var("MF_BLOCK_TRIALS", "override", "py", "built-in", "Samples per block-size trial."),
+        usage="MF_CHAIN_MARGIN`, `MF_CHAIN_TRIALS", kind="float"),
+    Var("MF_CHAIN_TRIALS", "override", "py", row="MF_CHAIN_MARGIN", kind="int"),
+    Var("MF_BLOCK_TRIALS", "override", "py", "built-in", "Samples per block-size trial.", kind="int"),
     Var("MF_DIRECT_REFINE", "override", "py", "on",
-        "CPU refines by transform only (no direct correlation).", usage="MF_DIRECT_REFINE=0"),
+        "CPU refines by transform only (no direct correlation).", usage="MF_DIRECT_REFINE=0", kind="flag", value=True),
     Var("MF_GATE16", "override", "c", "on where built", "No FP16 first gate on the CPU.",
-        usage="MF_GATE16=0"),
+        usage="MF_GATE16=0", kind="flag", value=True),
     Var("MF_DGROUP", "override", "c", "the plan's series group",
-        "Blocks per hierarchical series batch.", usage="MF_DGROUP=<n>"),
+        "Blocks per hierarchical series batch.", usage="MF_DGROUP=<n>", kind="int"),
     Var("MF_PBMAX", "override", "c", "built-in",
-        "Largest n run as pair-batched transforms.", usage="MF_PBMAX=<n>"),
+        "Largest n run as pair-batched transforms.", usage="MF_PBMAX=<n>", kind="int"),
     Var("MF_GMAJOR", "override", "c", "1", "Unfused product path (cross-check).",
-        usage="MF_GMAJOR=0"),
+        usage="MF_GMAJOR=0", kind="flag", value=True),
     Var("MF_ILAY", "override", "c", "1",
         "Strided intermediate layout. Slower on Zen 3 and Zen 5, faster on the M2 at "
-        "n >= 2^18 (4-9%); to become a measured candidate.", usage="MF_ILAY=0"),
+        "n >= 2^18 (4-9%); to become a measured candidate.", usage="MF_ILAY=0", kind="flag", value=True),
     Var("MF_CORR_NO_STREAM", "override", "c", "off",
-        "No non-temporal stores in continuous correlation.", usage="MF_CORR_NO_STREAM=1"),
+        "No non-temporal stores in continuous correlation.", usage="MF_CORR_NO_STREAM=1", kind="flag", value=False),
     Var("MF_BAND_FORWARD", "override", "py", "measured", "GPU band forward off/on.",
-        usage="MF_BAND_FORWARD=0/1"),
+        usage="MF_BAND_FORWARD=0/1", kind="flag"),
     Var("MF_COARSE_LAYOUT", "override", "py", "measured", "Force GPU coarse layouts by label.",
-        usage="MF_COARSE_LAYOUT=<labels>"),
+        usage="MF_COARSE_LAYOUT=<labels>", kind="text"),
     Var("MF_VK_COARSE_PPG", "override", "py", "measured", "Fix a Vulkan coarse layout field.",
-        usage="MF_VK_COARSE_PPG`, `_TILE`, `_SUBGROUP`, `_TWT"),
-    Var("MF_VK_COARSE_TILE", "override", "py", row="MF_VK_COARSE_PPG"),
-    Var("MF_VK_COARSE_SUBGROUP", "override", "py", row="MF_VK_COARSE_PPG"),
-    Var("MF_VK_COARSE_TWT", "override", "py", row="MF_VK_COARSE_PPG"),
+        usage="MF_VK_COARSE_PPG`, `_TILE`, `_SUBGROUP`, `_TWT", kind="int"),
+    Var("MF_VK_COARSE_TILE", "override", "py", row="MF_VK_COARSE_PPG", kind="int"),
+    Var("MF_VK_COARSE_SUBGROUP", "override", "py", row="MF_VK_COARSE_PPG", kind="int"),
+    Var("MF_VK_COARSE_TWT", "override", "py", row="MF_VK_COARSE_PPG", kind="int"),
     Var("MF_METAL_COARSE_PPG", "override", "py", "measured", "Fix a Metal coarse layout field.",
-        usage="MF_METAL_COARSE_PPG"),
+        usage="MF_METAL_COARSE_PPG", kind="int"),
     Var("MF_VK_SUBGROUP", "override", "py", "measured", "Force a Vulkan subgroup size.",
-        usage="MF_VK_SUBGROUP=<size>"),
+        usage="MF_VK_SUBGROUP=<size>", kind="text"),
     Var("MF_VK_C16_BOUND", "override", "py", "1",
-        "Electing coarse kernel instead of the bound-only one.", usage="MF_VK_C16_BOUND=0"),
+        "Electing coarse kernel instead of the bound-only one.", usage="MF_VK_C16_BOUND=0", kind="flag", value=True),
     Var("MF_METAL_IEEE", "override", "py", "per kernel",
-        "IEEE math for all or no Metal kernels.", usage="MF_METAL_IEEE=all/none"),
+        "IEEE math for all or no Metal kernels.", usage="MF_METAL_IEEE=all/none", kind="choice", choices=("default", "all", "none")),
     Var("MF_GPU_FUSE_INTERLEAVE", "override", "py", "measured",
-        "Fixed Vulkan fusion interleave depth.", usage="MF_GPU_FUSE_INTERLEAVE=<n>"),
+        "Fixed Vulkan fusion interleave depth.", usage="MF_GPU_FUSE_INTERLEAVE=<n>", kind="int"),
     Var("MF_GPU_ITEMS", "override", "py", "on",
-        "Single-template GPU jobs of a batch run one by one.", usage="MF_GPU_ITEMS=0"),
+        "Single-template GPU jobs of a batch run one by one.", usage="MF_GPU_ITEMS=0", kind="flag", value=True),
     Var("MF_GPU_QUEUE_AHEAD", "override", "py", "8", "GPU submissions in flight.",
-        usage="MF_GPU_QUEUE_AHEAD=<n>"),
+        usage="MF_GPU_QUEUE_AHEAD=<n>", kind="int", value=8),
     Var("MF_DEVICE_FOLLOWUPS", "override", "py", "on",
         "Threshold-0 follow-ups per group rather than in one device submission.",
-        usage="MF_DEVICE_FOLLOWUPS=0"),
+        usage="MF_DEVICE_FOLLOWUPS=0", kind="flag", value=True),
     Var("MF_SINGLE_DEVICE", "override", "py", "auto",
         "Keep every call on the bank's device (the pure-GPU ladder).",
-        usage="MF_SINGLE_DEVICE=bank"),
+        usage="MF_SINGLE_DEVICE=bank", kind="choice", choices=("auto", "bank")),
+    # Tools, builds and tests
+    Var("MF_SLANGC", "tools", "tools", "`slangc` on PATH",
+        "The Slang compiler tools/build_spirv.py and build_ptx.py use."),
+    Var("MF_SLANGC_ANY_VERSION", "tools", "tools", "0",
+        "Build with a slangc other than the pinned version (experiments only).",
+        usage="MF_SLANGC_ANY_VERSION=1"),
+    Var("MF_NVRTC", "tools", "tools", "`libnvrtc.so.12`", "NVRTC library for the PTX build."),
+    Var("MF_CUDA_PATH", "tools", "tools", "found", "CUDA installation for the PTX build."),
+    Var("MF_TC_KAPPA", "tools", "tools", "from the measured sigma",
+        "Tensor-core coarse bound constant for tools/build_ptx.py."),
+    Var("MF_GATE_BANK", "tools", "tools", "unset",
+        "Template bank for tools/gate.py's end-to-end checks (also `--bank`).",
+        usage="MF_GATE_BANK`, `MF_GATE_PROFILES"),
+    Var("MF_GATE_PROFILES", "tools", "tools", row="MF_GATE_BANK"),
+    Var("MF_CAPTURE", "tools", "tools", "unset",
+        "Directory a pycbc run captures filter calls into, for tools/hier_bench.py replays."),
+    Var("MF_TEASER_N", "tools", "tools", "4096, 16, 512",
+        "Shape of tools/teaser_figure.py's run.",
+        usage="MF_TEASER_N`, `MF_TEASER_NDATA`, `MF_TEASER_NTMPL"),
+    Var("MF_TEASER_NDATA", "tools", "tools", row="MF_TEASER_N"),
+    Var("MF_TEASER_NTMPL", "tools", "tools", row="MF_TEASER_N"),
 )
 
 #: Names in the code that are not environment variables: Metal shader macros the package
@@ -179,3 +213,65 @@ def markdown() -> str:
                        else "| %s | %s |" % (cell, v.doc))
         out.append("")
     return "\n".join(out)
+
+
+#: The one rule for a flag's value (any case, surrounding space ignored); unset or empty
+#: gives the variable's default.
+TRUE = ("1", "true", "yes", "on")
+FALSE = ("0", "false", "no", "off")
+
+
+def parse(var: Var, raw: str):
+    """A variable's value from its text: the default when the text is empty, else as its
+    kind says; ValueError naming the variable and what it accepts otherwise."""
+    s = raw.strip()
+    if not s:
+        return var.value
+    if var.kind == "flag":
+        if s.lower() in TRUE:
+            return True
+        if s.lower() in FALSE:
+            return False
+        accepts = "/".join(FALSE[:1] + TRUE[:1]) + ", false/true, no/yes or off/on"
+    elif var.kind in ("int", "float"):
+        try:
+            return int(s) if var.kind == "int" else float(s)
+        except ValueError:
+            accepts = "an integer" if var.kind == "int" else "a number"
+    elif var.kind == "choice":
+        if s.lower() in var.choices:
+            return s.lower()
+        accepts = "one of " + ", ".join(var.choices)
+    else:
+        return s
+    raise ValueError("%s=%s: %s takes %s (unset or empty: the default)"
+                     % (var.name, raw, var.name, accepts))
+
+
+def get(name: str, builtin=None):
+    """The value of a registered variable in this process's environment, read now; a
+    variable whose default is the reader's own (value None) gives builtin when unset."""
+    v = parse(BY_NAME[name], os.environ.get(name, ""))
+    return builtin if v is None else v
+
+
+_REMOVED = {n: (when, why) for when, why, group in REMOVED for n in group}
+
+
+def check_environment(environ=None):
+    """At import: every registered MF_* variable set must parse (ValueError otherwise, so a
+    typo in a value is not silently the default); a removed or unknown MF_* name warns,
+    with the reason or the nearest registered name."""
+    environ = os.environ if environ is None else environ
+    for name in sorted(k for k in environ if k.startswith("MF_")):
+        if name in BY_NAME:
+            parse(BY_NAME[name], environ[name])
+        elif name in _REMOVED:
+            when, why = _REMOVED[name]
+            warnings.warn("%s was removed on %s (%s); it has no effect" % (name, when, why),
+                          RuntimeWarning, stacklevel=2)
+        elif name not in SHADER_MACROS:
+            near = difflib.get_close_matches(name, BY_NAME, 1, 0.8)
+            warnings.warn("%s is not a matchedfilter variable%s; it has no effect"
+                          % (name, "; did you mean %s?" % near[0] if near else ""),
+                          RuntimeWarning, stacklevel=2)

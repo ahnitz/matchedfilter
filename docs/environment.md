@@ -72,3 +72,16 @@ Older notes in docs/ that mention a removed variable describe past studies.
 | `MF_GPU_QUEUE_AHEAD=<n>` | 8 | GPU submissions in flight. |
 | `MF_DEVICE_FOLLOWUPS=0` | on | Threshold-0 follow-ups per group rather than in one device submission. |
 | `MF_SINGLE_DEVICE=bank` | auto | Keep every call on the bank's device (the pure-GPU ladder). |
+
+## Tools, builds and tests (read outside the package)
+
+| Variable | Default | Effect |
+|---|---|---|
+| `MF_SLANGC` | `slangc` on PATH | The Slang compiler tools/build_spirv.py and build_ptx.py use. |
+| `MF_SLANGC_ANY_VERSION=1` | 0 | Build with a slangc other than the pinned version (experiments only). |
+| `MF_NVRTC` | `libnvrtc.so.12` | NVRTC library for the PTX build. |
+| `MF_CUDA_PATH` | found | CUDA installation for the PTX build. |
+| `MF_TC_KAPPA` | from the measured sigma | Tensor-core coarse bound constant for tools/build_ptx.py. |
+| `MF_GATE_BANK`, `MF_GATE_PROFILES` | unset | Template bank for tools/gate.py's end-to-end checks (also `--bank`). |
+| `MF_CAPTURE` | unset | Directory a pycbc run captures filter calls into, for tools/hier_bench.py replays. |
+| `MF_TEASER_N`, `MF_TEASER_NDATA`, `MF_TEASER_NTMPL` | 4096, 16, 512 | Shape of tools/teaser_figure.py's run. |

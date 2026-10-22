@@ -479,7 +479,8 @@ def _cost_file():
     missing one is measured once and added; with the file populated and
     MF_AUTOTUNE=0 (no timed trials), the chain choice is deterministic.
     """
-    return os.environ.get("MF_COST_FILE") or None
+    from . import _config
+    return _config.get("MF_COST_FILE")
 
 
 #: Record-name prefixes of the trial format before 2026-10-21, which nothing reads now.
@@ -1069,7 +1070,7 @@ def calibrate_costs_gpu(n, device, blocks=None, reps=5, seed=11, nt=256):
 #: instead of an upper bound of it (read when its kernels are built: Vulkan's constant 77,
 #: CUDA's mf_c16_raw, Metal's MF_C16_RAW), its raw value, and the gate kind named in
 #: cost-file keys. Every GPU's coarse tier reports the bound.
-_RAW_GATE_SWITCH = ("MF_VK_C16_BOUND", "0", "c16b")
+_RAW_GATE_SWITCH = ("MF_VK_C16_BOUND", "0", "c16b")   # (variable, its raw setting, gate kind)
 
 
 def _run_ms(log):
@@ -1091,7 +1092,8 @@ def gpu_gate_kind(device):
     """'f32' unless the device's first tier reports a bound (a GPU whose raw switch,
     _RAW_GATE_SWITCH, is not set); then 'c16b'."""
     row = _RAW_GATE_SWITCH
-    if not _is_gpu(device) or os.environ.get(row[0]) == row[1]:
+    from . import _config
+    if not _is_gpu(device) or not _config.get(row[0]):
         return "f32"
     return row[2]
 

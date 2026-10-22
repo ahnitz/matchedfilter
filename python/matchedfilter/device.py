@@ -187,7 +187,8 @@ def parse(spec):
     if isinstance(spec, Device):
         return spec
     if spec is None:
-        spec = os.environ.get("MF_DEVICE") or "cpu"
+        from . import _config
+        spec = _config.get("MF_DEVICE")
     if not isinstance(spec, str):
         raise TypeError("device must be a string or Device, got %r" % (spec,))
 
