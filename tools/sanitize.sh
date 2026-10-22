@@ -101,7 +101,7 @@ set +e
 env LD_PRELOAD="$ASAN_LIB" PYTHONMALLOC=malloc PYTHONPATH="$WORK/python" \
     ASAN_OPTIONS=detect_leaks=0:abort_on_error=1:allocator_may_return_null=1:handle_abort=1 \
     UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
-    OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 \
+    OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 TEST_TIMEOUT_SCALE=10 \
     "$PY" -m pytest -q -p no:cacheprovider "$@"
 rc=$?
 set -e
