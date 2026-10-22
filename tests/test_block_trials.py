@@ -5,6 +5,7 @@ import pytest
 from matchedfilter import TimeDomainFilterBank
 from matchedfilter import time_domain as td
 from matchedfilter import gatechain
+from matchedfilter import _costfile
 
 
 def _run(factors, samples=2, seed=0, noise=0.05):
@@ -103,9 +104,8 @@ def test_a_bank_adopts_a_persisted_lock(monkeypatch, tmp_path):
     if not getattr(bank, "_layouts", None):
         pytest.skip("the model offered one block size only")
     key = td._trial_key(bank)
-    from matchedfilter import gatechain
     cands = list(bank._candidate_sig)
-    gatechain._store_cost(str(tmp_path / "costs.json"), "choice|block-trial|" + key, {"value": 1})
+    _costfile._store_cost(str(tmp_path / "costs.json"), "choice|block-trial|" + key, {"value": 1})
     monkeypatch.setattr(td, "_BLOCK_TRIALS", td._BlockTrials())       # a new process
     again, rng = _inspiral_bank()
     assert td._trial_key(again) == key

@@ -81,20 +81,20 @@ def main(argv=None):
     ap.add_argument("--out", default=None)
     args = ap.parse_args(argv)
     try:
-        from matchedfilter import gatechain
+        from matchedfilter import _costfile
     except ImportError:          # run from a checkout without the package installed
         sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "python"))
-        from matchedfilter import gatechain
+        from matchedfilter import _costfile
     dest = os.path.abspath(args.out or args.path)
     # Under the library's writer lock and published atomically, as the library writes it:
     # a process using the file meanwhile sees the old file or the new one, never half.
-    with gatechain._cost_file_lock(dest):
-        records, state = gatechain._read_cost_file(os.path.abspath(args.path))
+    with _costfile._cost_file_lock(dest):
+        records, state = _costfile._read_cost_file(os.path.abspath(args.path))
         if state != "ok":
             print("%s: %s; nothing written" % (args.path, state))
             return 1
         out, moved = migrate(records)
-        gatechain._write_cost_file(dest, out)
+        _costfile._write_cost_file(dest, out)
     for k, v in sorted(moved.items()):
         print("%-6s %s" % (v[1] if v else "drop", k))
     locks = sum(1 for v in moved.values() if v and v[1] == "lock")

@@ -47,6 +47,14 @@ from itertools import combinations
 import numpy as np
 
 from . import gatemodel as _gm
+# The decision rules live in _choice; gatechain's callers keep them by these names.
+from ._choice import CHOICE_Z, TIE, measured_choice, paired_choice, sample_spread  # noqa: F401
+# The cost file lives in _costfile; these names stay importable from here for the callers
+# that use them through gatechain.
+from ._costfile import (_COST_WARNED, _LEGACY_PREFIXES, _cost_file, _cost_file_lock,  # noqa: F401
+                        _cost_warn, _load_cost_file, _read_cost_file, _store_cost,
+                        _store_first, _update_cost, _write_cost_file, store_choice,
+                        stored_choice)
 
 _SIG = _gm._SIG
 _NB, _W = _gm._NB, _gm._W
@@ -469,167 +477,10 @@ def _cost_sig(cost):
 _CAL_DENSITIES = (0.1, 0.01)
 
 
-def _cost_file():
-    """MF_COST_FILE: a JSON file of measured cost models, for reproducible runs.
-
-    Calibration times the engine, so under varying machine load two runs can
-    measure different costs and choose different chains or budget splits --
-    each within the false-dismissal budget, but not the same triggers near
-    threshold. With MF_COST_FILE set, models are read from the file and any
-    missing one is measured once and added; with the file populated and
-    MF_AUTOTUNE=0 (no timed trials), the chain choice is deterministic.
-    """
-    from . import _config
-    return _config.get("MF_COST_FILE")
-
-
-#: Record-name prefixes of the trial format before 2026-10-21, which nothing reads now.
-_LEGACY_PREFIXES = ("block-trial|", "chain-trial|", "q15-trial|")
-#: (path, what) already warned about in this process.
-_COST_WARNED = set()
-
-
-def _cost_warn(path, what, msg):
-    if (path, what) not in _COST_WARNED:
-        _COST_WARNED.add((path, what))
-        warnings.warn("MF_COST_FILE %s: %s" % (path, msg), RuntimeWarning, stacklevel=3)
-
-
-def _read_cost_file(path):
-    """(records, state): state is 'ok', 'missing' (no such file), 'damaged' (not a JSON
-    object) or 'unreadable' (any other OSError); records is {} unless 'ok'."""
-    try:
-        with open(path, "rb") as f:
-            raw = f.read()
-    except FileNotFoundError:
-        return {}, "missing"
-    except OSError:
-        return {}, "unreadable"
-    try:
-        data = json.loads(raw.decode("utf-8"))
-    except ValueError:                  # (UnicodeDecodeError is a ValueError)
-        return {}, "damaged"
-    return (data, "ok") if isinstance(data, dict) else ({}, "damaged")
-
-
-def _load_cost_file(path):
-    """The records of the cost file at path ({} when missing). A damaged or unreadable
-    file reads as empty, with a warning; trial records in the old format are reported
-    once (tools/migrate_cost_file.py rewrites them)."""
-    data, state = _read_cost_file(path)
-    if state == "damaged":
-        _cost_warn(path, state, "not a JSON object; read as empty (the next write keeps it "
-                   "aside as %s.corrupt.<pid>)" % path)
-    elif state == "unreadable":
-        _cost_warn(path, state, "cannot be read; read as empty and never written")
-    elif any(k.startswith(_LEGACY_PREFIXES) for k in data):
-        _cost_warn(path, "legacy", "holds trial records in the format before 2026-10-21 "
-                   "(block-trial|, chain-trial|, q15-trial|), which are not read; "
-                   "python tools/migrate_cost_file.py %s rewrites them" % path)
-    return data
-
-
-def stored_choice(key, field="value"):
-    """A measured per-machine choice kept in MF_COST_FILE (None without a file or entry);
-    field names another part of its record (store_choice's extra fields).
-
-    Measured choices -- a coarse kernel variant timed at first use, a fused batch's
-    interleave depth, a chain or block-size trial -- are each valid, but made afresh per
-    process they differ on noise, and borderline pairs then gate differently from run to
-    run. Kept with the cost models, a machine makes each once and every later process
-    reproduces it."""
-    path = _cost_file()
-    if path is None:
-        return None
-    rec = _load_cost_file(path).get("choice|" + key)
-    return rec.get(field) if isinstance(rec, dict) else None
-
-
 def gpu_kernel_id(backend="vulkan"):
     """Identity of the shipped kernels whose measured choices this backend stores."""
     from ._kernel_id import gpu_kernel_id as identity
     return identity(backend)
-
-
-def store_choice(key, value, **extra):
-    path = _cost_file()
-    if path is not None:
-        _store_cost(path, "choice|" + key, {"value": value, **extra})
-
-
-@contextmanager
-def _cost_file_lock(path):
-    # Lock a stable sidecar: locking the JSON inode would stop protecting it as soon as
-    # os.replace installs its successor. Keep the sidecar after releasing the lock.
-    with open(os.fspath(path) + ".lock", "a+b") as lock:
-        if os.name == "nt":
-            import msvcrt
-            if lock.seek(0, os.SEEK_END) == 0:
-                lock.write(b"\0")
-                lock.flush()
-            lock.seek(0)
-            msvcrt.locking(lock.fileno(), msvcrt.LK_LOCK, 1)
-            try:
-                yield
-            finally:
-                lock.seek(0)
-                msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
-        else:
-            import fcntl
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-            try:
-                yield
-            finally:
-                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
-
-
-def _store_cost(path, skey, cm):
-    """Merge one record under a writer lock, then publish atomically for unlocked readers."""
-    value = cm.to_dict() if hasattr(cm, "to_dict") else cm
-    _update_cost(path, skey, lambda old: value)
-
-
-def _write_cost_file(path, data):
-    """Publish data at path atomically (a temporary file in the same directory, then
-    os.replace); the caller holds the writer lock."""
-    tmp = None
-    try:
-        with tempfile.NamedTemporaryFile(mode="w", dir=os.path.dirname(path),
-                                         prefix=os.path.basename(path) + ".",
-                                         suffix=".tmp", delete=False) as f:
-            tmp = f.name
-            json.dump(data, f, indent=1, sort_keys=True)
-        os.replace(tmp, path)
-    finally:
-        if tmp is not None and os.path.exists(tmp):
-            os.unlink(tmp)
-
-
-def _update_cost(path, skey, merge):
-    """Replace one record by merge(old record or None), read and written under the writer
-    lock (so a record another process stored in between is seen); merge returns None to
-    keep the record on file. Returns the record on file afterwards, or None when the file
-    cannot be read: then nothing is written, so a file that is there but unreadable (EIO,
-    a permission change, a stale NFS handle) is never replaced. A damaged file (not a
-    JSON object) is kept aside as <path>.corrupt.<pid>, with a warning, before a fresh one
-    is written."""
-    path = os.path.abspath(os.fspath(path))
-    with _cost_file_lock(path):
-        data, state = _read_cost_file(path)
-        if state == "unreadable":
-            _cost_warn(path, state, "cannot be read; this record is not stored")
-            return None
-        if state == "damaged":
-            aside = "%s.corrupt.%d" % (path, os.getpid())
-            os.replace(path, aside)
-            _cost_warn(path, "kept-aside", "not a JSON object; kept as %s and replaced by a "
-                       "new file" % aside)
-        value = merge(data.get(skey))
-        if value is None:
-            return data.get(skey)
-        data[skey] = value
-        _write_cost_file(path, data)
-        return value
 
 
 def _cost_model_ok(record):
@@ -651,19 +502,6 @@ def _stored_cost_model(path, skey):
         _cost_warn(path, "model:" + skey, "record %r is not a cost model; recalibrating" % skey)
         return None
     return CostModel.from_dict(stored)
-
-
-def _store_first(path, skey, value, valid=None):
-    """Store value under skey unless a valid record is already on file (valid(record), or
-    any record without valid), and return the record on file -- this process's value, or
-    the one another process measured first, which the caller uses instead of its own, so
-    every process sharing the file prices alike. Without a readable file: value."""
-    def merge(old):
-        if old is not None and (valid is None or valid(old)):
-            return None
-        return value
-    on_file = _update_cost(path, skey, merge)
-    return value if on_file is None else on_file
 
 
 #: The template count calibrations run at. Per-pair tier and refine costs are flat in the
@@ -844,7 +682,6 @@ def calibrate_costs(n, ntemplates, blocks=256, reps=5, seed=11, group=None):
         cm = CostModel.from_dict(_store_first(path, skey, cm.to_dict(), _cost_model_ok))
     _COSTS[key] = cm
     return cm
-
 
 
 #: Per device: the fixed reference call and its first warmed device time (see _ClockRef).
@@ -1324,12 +1161,6 @@ def _chain_candidates(sig, noise, bands, chain, fd, snr, prune):
 #: pairs, at 2-3x the segment time of every other choice.)
 _USELESS_PASS = 0.5
 
-#: Relative cost inside which two candidates are treated as tied, and the tie broken by a
-#: fixed order (canonical_order) instead of by which calibration or trial read faster: cost
-#: calibration and timed trials move by about this much between processes on a busy host,
-#: and a choice that flips with them makes runs incomparable.
-TIE = 0.05
-
 
 def canonical_order(chain):
     """Deterministic preference among tied chains: fewer tiers, then the smaller bands."""
@@ -1344,106 +1175,6 @@ def pick_stable(items, cost, key):
     lo = min(cost(x) for x in items)
     return min((x for x in items if cost(x) <= lo + TIE * abs(lo)), key=key)
 
-
-# ---- the one rule every measured choice follows ---------------------------------------
-#
-# Block-size trials (time_domain._BlockTrials), Q15 screen trials, and chain trials on the CPU
-# (per call) and GPU (per batch) all decide with measured_choice (through _choice.Choice).
-# History: M2 locked n=4096 on two samples 5.4% faster than n=2048 -- past
-# TIE, inside the noise -- and ran 34% slower in steady state; dev2 locked the Q15 screen off
-# on a 6% "win" and ran 5% slower without it.
-
-#: A candidate beats the model's choice only by more than TIE and by more than Z standard
-#: errors of the difference of the two medians.
-CHOICE_Z = 2.0
-
-
-def sample_spread(v):
-    """Standard deviation of samples: MAD-based (robust to the outliers a batch after a
-    switch or a host hiccup produces -- the plain estimate let one such spike keep a 26% gap
-    "unclear" until the model's slower chain stood), falling back to the plain estimate
-    when MAD reads 0 (half the samples tie: timer quantisation, a repeated cache state)."""
-    v = np.asarray(v, float)
-    if v.size < 2:
-        return float("inf")
-    mad = 1.4826 * float(np.median(np.abs(v - np.median(v))))
-    return mad if mad > 0 else float(np.std(v, ddof=1))
-
-
-def paired_choice(samples, model, cap, minimum=5, tie=None):
-    """Choose from complete, comparable rounds, using median ratios to the model.
-
-    Each index must describe the same workload for every candidate. Callers reverse
-    execution order between rounds and settle each candidate before timing it. A
-    majority of rounds must support a gain beyond TIE; an ambiguous contest collects
-    more complete rounds up to cap. This does not turn unrelated calls into pairs.
-    """
-    tie = TIE if tie is None else tie
-    if model not in samples or not samples:
-        raise ValueError("paired trial requires its model candidate")
-    lengths = {len(v) for v in samples.values()}
-    if len(lengths) != 1:
-        raise ValueError("paired trial requires complete rounds")
-    count = lengths.pop()
-    if count < minimum:
-        return None, {c: minimum for c in samples}
-    base = np.asarray(samples[model], float)
-    if any(not np.all(np.isfinite(v)) or np.any(np.asarray(v) <= 0)
-           for v in samples.values()):
-        raise ValueError("paired timings must be finite and positive")
-    ratios = {c: np.asarray(v, float) / base for c, v in samples.items()}
-    # Require agreement beyond a bare majority: one or two bursts must not decide
-    # a small trial. At the cap the model remains the explicit uncertainty fallback.
-    needed = int(np.ceil(0.75 * count))
-    supported = [c for c, r in ratios.items()
-                 if c != model and np.count_nonzero(r < 1.0 - tie) >= needed]
-    if supported:
-        return min(supported, key=lambda c: float(np.median(ratios[c]))), {}
-    if all(c == model or np.count_nonzero(r >= 1.0 - tie) >= needed
-           for c, r in ratios.items()):
-        return model, {}
-    if count < cap:
-        return None, {c: count + 1 for c in samples}
-    return model, {}
-
-
-def measured_choice(samples, model, cap, tie=None, z=None):
-    """Decide a measured choice from samples {candidate: [cost, ...]} (lower is better).
-
-    For choices that change results or whose effect is a large share of what a sample
-    times. A choice whose effect on a whole call is under the tie margin -- a kernel that is
-    a small part of the call, with results equal to rounding -- is PRICED instead (timed
-    once on its own, the cheaper kept in MF_COST_FILE: _cpu_forward_platform, the corr-pfft
-    price in time_domain._corr_block_costs). Trialled over whole calls it sits at the tie
-    and the model's choice wins about half the time (cpu-fft on the M2: 4.6-5.2% per call
-    for a transform 30% faster).
-
-    Returns (winner, more): winner is the candidate to lock, or None while more samples are
-    needed, in which case `more` maps the candidates to measure further to the sample count
-    each needs. The fastest median wins only if it is more than `tie` (TIE) below the model's
-    candidate's AND the gap exceeds `z` (CHOICE_Z) standard errors of the two medians'
-    difference; an unclear contest asks for one more sample of both, up to `cap` each, then
-    the model's choice stands. A candidate missing from samples is the model's when model is
-    None (the first key)."""
-    tie = TIE if tie is None else tie
-    z = CHOICE_Z if z is None else z
-    if model not in samples:
-        model = next(iter(samples))
-    med = {c: float(np.median(v)) for c, v in samples.items() if len(v)}
-    if model not in med:
-        return None, {model: 1}
-    best = min(med, key=lambda c: (med[c], c != model))
-    if not np.isfinite(med[model]) and np.isfinite(med[best]):
-        return best, {}                 # the model's candidate is unusable (priced at inf)
-    if best == model or not med[best] < med[model] * (1.0 - tie):
-        return model, {}
-    a, b = samples[model], samples[best]
-    se = float(np.sqrt(sample_spread(a) ** 2 / len(a) + sample_spread(b) ** 2 / len(b)))
-    if med[model] - med[best] > z * se:
-        return best, {}
-    if min(len(a), len(b)) < cap:
-        return None, {model: len(a) + 1, best: len(b) + 1}
-    return model, {}
 
 
 _REFINE_BLOCKS = {}
@@ -1774,8 +1505,6 @@ def chain_thresholds(power, n, snr, fd, chain, cost=None, floor=_MIN_BAND, nsim=
     _cache_put(_PLAN_CACHE, key, out)
     _similar_put("plan", unit, sim_params, out)
     return out
-
-
 
 
 def rebin_profile(fine, delta_f, data_rate, n):
