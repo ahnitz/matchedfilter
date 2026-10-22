@@ -419,3 +419,8 @@ A step that changes C or workflows is first pushed to a `ci/<topic>` branch and 
   - No module imports upward, with an empty allowlist that test_layers keeps empty.
   - tools/check_move.py, which checked every E move, is deleted as planned.
   - Modules added in E: _costfile, _results, _windows, _peaks (foundation); _chains, _prices (models); _layout, _filter, _hierarchical, _calibration (workloads).
+- 2026-10-22: **D4b, measured on Vulkan.** A plugin wrapping Vulkan's _build_pipeline recorded the SPIR-V each pipeline came from over the full suite on the 8060S: 212 of 281 shipped files.
+  - The other 69 are variants this device does not select: _lds32 builds for 32 KB of shared memory, tier-C files (tc_*) for n above 65536, and packings past its limits.
+  - Also among them: forward_bands_* and pack_coarse, which the backend requests (_vkcompute's fwd_bands and pack) but no test drives here. A test gap, not dead files.
+  - No shipped SPIR-V file is unreachable by name.
+  - Still open, on a CUDA device: the CUDA coarse builds a device cannot load, and the same measurement for PTX. Metal's files are checked against its manifest by test_metal.
