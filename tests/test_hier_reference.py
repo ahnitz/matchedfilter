@@ -63,11 +63,18 @@ def test_even_coarse_maximum_matches_the_c_implementation(tmp_path):
     # (tools/gate16_error.py, tests/test_gate16.py).
     old16 = os.environ.get("MF_GATE16")
     os.environ["MF_GATE16"] = "0"
+    oldtune = os.environ.get("MF_AUTOTUNE")
+    os.environ["MF_AUTOTUNE"] = "0"
     try:
         hf = mf.HierarchicalFilter(n, ndata=nd, ntemplates=nt, snr=5.0, fd=1e-2)
         hf.set_reference(reference)
         hf.set_data(D)
         hf.set_templates(H)
+        # The Q15 screen, where it is the first tier, gates on its own int16 statistic
+        # (docs/reduced-precision-gates.md); this checks the FP32 kernel.
+        hf._ensure()
+        hf._mf.set_q15(False)
+        hf._q15 = False
         hf.run(binsize=n, threshold=5.0)
         band = hf.config[0]
         del hf                       # closes the dump
@@ -80,6 +87,10 @@ def test_even_coarse_maximum_matches_the_c_implementation(tmp_path):
             os.environ.pop("MF_GATE16", None)
         else:
             os.environ["MF_GATE16"] = old16
+        if oldtune is None:
+            os.environ.pop("MF_AUTOTUNE", None)
+        else:
+            os.environ["MF_AUTOTUNE"] = oldtune
 
     if not dump.exists() or dump.stat().st_size == 0:
         pytest.skip("no pair survived the early-out, so nothing was dumped")

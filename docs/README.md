@@ -23,7 +23,7 @@ short introduction. Every document in this directory is listed below, once;
 - [Reduced-precision gates: one error model](reduced-precision-gates.md)
 - [The CPU direct refine](cpu-direct-refine.md)
 - CPU first tiers: [x86 Q15 screen](cpu-q15-gate.md), [ARM NEON FP16 gate](cpu-neon-fp16-gate.md)
-- [Gate execution order](cpu-gate-order.md): defer float rechecks until a more selective gate has run.
+- [Gate execution order](cpu-gate-order.md): defer float rechecks until a more selective gate has run (superseded: the Q15 screen is now the first tier's gate).
 - [Q15 tail packing](cpu-q15-tail-packing.md): fill partial AVX-512 template batches
   with independent data blocks while preserving exact screen decisions.
 - [CPU survivor processing](cpu-survivor-performance.md): paired kernel and ladder

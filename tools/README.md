@@ -15,7 +15,7 @@ some calibration tools need separately captured data.
 | Survivor batching | `bench_survivor_batches.py` | Alternate two native builds over pooled pair lists and full two-tier hierarchical calls; verify peak and count digests |
 | Q15 template tails | `bench_q15_tails.py` | Alternate two builds over direct Q15 screens and grouped hierarchical series calls; verify masks, statistics, peaks, and survivor counts |
 | CPU ladder profile | `profile_cpu_ladder.py` | Fix chain and thresholds, compare Q15 off/on or separate builds, and record stage costs and result hashes; requires a real bank and matching profiles |
-| Gate validation | `audit_gate_model.py`, `audit_threshold.py`, `score_fdr.py`, `verify_cascade_fdr.py` | Measure a gate chain's dismissal by injection against the flat filter; not part of normal installation |
+| Gate validation | `audit_gate_model.py`, `audit_threshold.py`, `chain_fdr_vs_flat.py`, `score_fdr.py`, `verify_cascade_fdr.py` | Measure a gate chain's dismissal by injection against the flat filter; not part of normal installation |
 
 For a quick CPU/GPU overlap-save comparison with output validation:
 
@@ -136,7 +136,7 @@ annotations), `migrate_cost_file.py` (cost-file format migration).
 **Gate accuracy and bounds**: `gate_margin.py` (every narrow first tier), `c16_sigma.py`
 (GPU fp16 rounding, for its bound), `cuda_tc_sigma.py`, `gate16_error.py`, `gate16_check.py`,
 `coarse_precision.py`, `coarse_fixed.py`, `audit_gate_model.py`, `audit_threshold.py`,
-`score_fdr.py`, `verify_cascade_fdr.py`, `audit_gpu_bands.py`.
+`chain_fdr_vs_flat.py`, `score_fdr.py`, `verify_cascade_fdr.py`, `audit_gpu_bands.py`.
 
 **GPU devices**: `gpu_features.py`, `gpu_roofline.py`, `cuda_roofline.py`,
 `metal_roofline.py`, `metal_probe.py`, `metal_bank_probe.py`, `bench_pack_indexing.py`,

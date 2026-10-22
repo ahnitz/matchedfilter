@@ -141,8 +141,8 @@ def calibrate_costs(n, ntemplates, blocks=256, reps=5, seed=11, group=None):
             if not _gc._q15_band(b):
                 continue
             # screen alone: at an unreachable threshold nothing passes, so the tier's ticks are
-            # the screen's; then at calibrated densities, how many pairs it passes to the float
-            # tier and what re-running them costs
+            # the screen's; then at calibrated densities, how many pairs it passes and what
+            # each costs beyond the screen (compaction: the screen is the tier's gate)
             pairs, st = run((b,), (big,), q15=True)
             ent = {"dense": st[0][2] / pairs, "excess": [], "recheck": 0.0}
             rc = []

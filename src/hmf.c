@@ -69,14 +69,12 @@ struct ap_hmf_plan {
   FILE *dump;
   float *twiddles,*tw_scratch;
   float *tmpls_half,*prod_scratch;
-  /* Q15 screen in front of the first tier (ap_hmf_set_q15) */
+  /* Q15 screen as the first tier's gate (ap_hmf_set_q15) */
   int q15;
-  int q15_recheck_late;           /* evaluate tier 1 before the Q15 float recheck */
-  long first_gate_passed;         /* passes of the first executed float gate */
+  long first_gate_passed;         /* passes of the first tier */
   unsigned char *qpass;           /* [nd*nt] */
   int *qd,*qt;                    /* the screen's survivors */
-  int q15_g16;                    /* tier 0 behind the screen on the FP16 gate (a price:
-                                     ap_hmf_set_q15_tier0) instead of the pooled FP32 pass */
+  float *qstat;                   /* [nd*nt] the screen's maximum, for MF_HMF_DUMP/TRACE */
   long qpassed;
   unsigned long long qticks;
   /* Direct refine (ap_hmf_set_taps, ap_hmf_set_direct): a survivor is refined only at the
@@ -211,7 +209,7 @@ void ap_hmf_destroy(ap_hmf_plan *p){
   if(p->tmpls_half) free(p->tmpls_half);
   if(p->prod_scratch) free(p->prod_scratch);
   if(p->dump) fclose(p->dump);
-  free(p->qpass); free(p->qd); free(p->qt);
+  free(p->qpass); free(p->qd); free(p->qt); free(p->qstat);
   if(p->taps){ for(int t=0;t<p->nt;t++) free(p->taps[t]); free(p->taps); }
   free(p->tap_len); free(p->dtime); free(p->dhave);  free(p->dx); free(p->dout); free(p->dfd); free(p->dft);
   free(p);
@@ -313,13 +311,6 @@ int ap_hmf_direct_stats(const ap_hmf_plan *p,long *pairs,long *lags,long *fft,
   return 0;
 }
 
-int ap_hmf_set_q15_tier0(ap_hmf_plan *p,int fp16){
-  if(!p) return -1;
-  if(fp16 && !p->tier[0].g16) return -1;
-  p->q15_g16=fp16?1:0;
-  return 0;
-}
-
 int ap_hmf_set_platform_fft(ap_hmf_plan *p,int on){
   if(!p) return -1;
   if(on && !p->accel) return -1;
@@ -334,19 +325,15 @@ int ap_hmf_set_q15(ap_hmf_plan *p,int on){
   if(!p->qpass){
     const size_t np=(size_t)p->nd*p->nt;
     p->qpass=malloc(np); p->qd=malloc(np*sizeof(int)); p->qt=malloc(np*sizeof(int));
-    if(!p->qpass||!p->qd||!p->qt){
-      free(p->qpass); free(p->qd); free(p->qt); p->qpass=NULL; p->qd=p->qt=NULL; return -1;
+    p->qstat=malloc(np*sizeof(float));
+    if(!p->qpass||!p->qd||!p->qt||!p->qstat){
+      free(p->qpass); free(p->qd); free(p->qt); free(p->qstat);
+      p->qpass=NULL; p->qd=p->qt=NULL; p->qstat=NULL; return -1;
     }
   }
+  /* The screen decides on its own int16 maximum: no margin (ap_mf_set_q15_margin). */
+  ap_mf_set_q15_margin(p->tier[0].mf,0);
   p->q15=1;
-  return 0;
-}
-int ap_hmf_set_q15_recheck_late(ap_hmf_plan *p,int on){
-  if(!p) return -1;
-  /* Any chain with a second tier: it runs on the screen's survivors before the float
-     recheck of the first, which then sees only what it kept. */
-  if(on && p->ntiers<2) return -1;
-  p->q15_recheck_late=!!on;
   return 0;
 }
 long ap_hmf_first_gate_passed(const ap_hmf_plan *p){ return p ? p->first_gate_passed : 0; }
@@ -924,11 +911,9 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
   for(int i=0;i<p->ntiers;i++)
     if(!isfinite(p->tier[i].thr) || p->tier[i].thr < 0) return -1;
 
-  const int late_recheck=p->q15 && p->q15_recheck_late && !p->q15_g16;
   const int *fire_d=NULL,*fire_t=NULL;
   int nfire=0;
   for(int i=0;i<p->ntiers;i++){
-    if(i==1 && late_recheck) continue;
     hmf_tier *tr=&p->tier[i];
     /* Coarse sample j maps to full lag j*R. Widen by one coarse sample
        so rounding the caller's window remains conservative. */
@@ -938,17 +923,21 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
     if(cstart>0) cstart--;
     const size_t cspan = cend>cstart ? cend-cstart : 1;
     const float thr=tr->thr;
-    tr->lagged = !(tr->g16 && (i==0 && (!p->q15 || p->q15_g16)));
+    tr->lagged = !(tr->g16 && i==0 && !p->q15);
     const int *checked_d=fire_d,*checked_t=fire_t;
     int nchecked=i==0 ? nd*nt : nfire;
-    unsigned long long t_0=ap_ticks(), moved_ticks=0;
+    unsigned long long t_0=ap_ticks();
+    float *qstat=NULL;               /* set: the screen decided, and this is its maximum */
     if(i==0 && p->q15){
-      /* Screen every pair in int16, then run the float tier on the pairs the
-         screen could not reject, pooled as a later tier is.  A pair the screen
-         rejects cannot reach thr in the float tier (ap_mf_q15_screen), so the
-         survivors -- and everything downstream -- are the float tier's. */
+      /* The screen is the first tier: a pair passes when its int16 maximum reaches the
+         tier's threshold, and no float run of the tier follows.  Like every tier it answers
+         to the chain's false-dismissal budget against the flat filter, not to the float
+         tier's decisions; its rounding (rms 0.46 sqrt(N) LSB, about 0.2% of the threshold)
+         is small beside the band's own loss (docs/reduced-precision-gates.md). */
       unsigned long long q0=ap_ticks();
-      int ns=ap_mf_q15_screen(tr->mf,d0,nd,t0,nt,thr,cstart,cend,p->qpass,NULL);
+      qstat=p->qstat;
+      int ns=ap_mf_q15_screen(tr->mf,d0,nd,t0,nt,thr,cstart,cend,p->qpass,
+                              (p->dump||p->trace) ? qstat : NULL);
       if(ns<0) return -1;
       int k=0;
       for(int d=0;d<nd;d++) for(int t=0;t<nt;t++){
@@ -956,38 +945,12 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
         if(p->qpass[row]){ p->qd[k]=d; p->qt[k]=t; k++; }
         else reject_row(p,peaks,counts,row,nb);
       }
-      /* Rejected rows are finished.  Revisit only the compacted survivors after
-         their float check, avoiding another scan of the full data/template grid. */
+      /* Rejected rows are finished; the next tier sees only the compacted survivors,
+         without another scan of the full data/template grid. */
       checked_d=p->qd; checked_t=p->qt; nchecked=k;
       p->qpassed+=k;
       p->qticks+=ap_ticks()-q0;
-      if(late_recheck){
-        hmf_tier *next=&p->tier[1];
-        const unsigned long long begin=ap_ticks();
-        if(run_gate_pairs(p,next,d0,t0,nt,p->qd,p->qt,k,start,end)<0) return -1;
-        next->lagged=1;              /* its cebuf holds each pair's largest coarse lag */
-        next->checked+=k;
-        int kept=0;
-        for(int j=0;j<k;j++){
-          const int d=p->qd[j], t=p->qt[j];
-          const size_t row=(size_t)d*nt+t;
-          const ap_peak ce=next->cebuf[row];
-          if(ce.index>=0 && ce.magnitude>=next->thr){
-            p->qd[kept]=d; p->qt[kept]=t; kept++;
-          }else reject_row(p,peaks,counts,row,nb);
-        }
-        k=kept; nchecked=k;
-        next->passed+=k;
-        p->first_gate_passed+=k;
-        moved_ticks=ap_ticks()-begin; next->ticks+=moved_ticks;
-      }
-      if(k && p->q15_g16 && tr->g16){
-        /* The FP16 gate over the screen's survivors: its magnitude bounds the FP32 one
-           (gate16.cc), so the survivors are a superset of the FP32 pass's; the next tier
-           and the refine decide them. */
-        if(ap_gate16_run_pairs(tr->g16,d0,t0,p->qd,p->qt,k,nt,cstart,cend,tr->cebuf)<0) return -1;
-      } else if(k && ap_mf_run_pairs_pooled(tr->mf,d0,p->qd,p->qt,k,t0,cspan,thr,tr->cebuf,NULL,
-                                     cstart,cend,nt)<0) return -1;
+      tr->lagged=0;                  /* the screen reports no coarse lag */
     } else if(i==0){
       /* The first tier runs on every pair of the segment in one call: the data
          spectrum is read once and stays resident across the whole template sweep. */
@@ -999,7 +962,7 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
     } else {
       if(run_gate_pairs(p,tr,d0,t0,nt,fire_d,fire_t,nfire,start,end)<0) return -1;
     }
-    tr->ticks += ap_ticks()-t_0-moved_ticks;
+    tr->ticks += ap_ticks()-t_0;
     int nnext=0;
     const long first_pair=p->pairs;
     if(i==0) p->pairs+=(long)nd*nt;
@@ -1007,12 +970,13 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
       const int d = checked_d ? checked_d[j] : j/nt;
       const int t = checked_t ? checked_t[j] : j%nt;
       const size_t row=(size_t)d*nt+t;
-      ap_peak ce = tr->cebuf[row];
-      int fire = ce.index>=0 && ce.magnitude>=thr;
+      ap_peak ce = qstat ? (ap_peak){.index=0, .magnitude=(p->dump||p->trace) ? qstat[row] : 0.0f}
+                         : tr->cebuf[row];
+      int fire = qstat || (ce.index>=0 && ce.magnitude>=thr);
       if(i==0 && fire){
         /* rec[2] repeats the maximum, except under the FP16 gate, where it carries what
            MF_GATE16_DEBUG puts in im: the pair's all-lag rms (tools/gate16_error.py). */
-        if(p->dump){ float rec[8]={ce.magnitude,0.0f,tr->g16?ce.im:ce.magnitude,thr,thr,thr,
+        if(p->dump){ float rec[8]={ce.magnitude,0.0f,(tr->g16&&!qstat)?ce.im:ce.magnitude,thr,thr,thr,
                                    (float)(d0+d),(float)(t0+t)};
                      fwrite(rec,sizeof rec,1,p->dump); }
         const long pair=first_pair+(long)row+1;
@@ -1025,9 +989,9 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
         reject_row(p,peaks,counts,row,nb);
       }
     }
-    tr->checked += nchecked;
+    tr->checked += i==0 ? (long)nd*nt : nchecked;
     tr->passed += nnext;
-    if(i==0 && !late_recheck) p->first_gate_passed+=nnext;
+    if(i==0) p->first_gate_passed+=nnext;
     fire_d=tr->fire_d; fire_t=tr->fire_t; nfire=nnext;
     if(!nfire) return 0;
   }
@@ -1039,59 +1003,3 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
   return r;
 }
 
-/* The price of tier 0 behind the Q15 screen, per listed pair at band m: the pooled FP32 pass
-   (*fp32) and the FP16 gate over listed pairs (*fp16, -1 without one), timed on a
-   synthetic list of nd x ~1/12 of nt survivors (the screen's realistic pass rate; runs of
-   templates per data slot as hmf.c lists them), best of reps. Both results only decide
-   which survivors reach the next tier (the FP16 bound is an upper bound on the FP32
-   magnitude), so the choice is a cost, not a contest (HierarchicalFilter prices it). */
-int ap_hmf_price_q15_tier0(size_t m,int nt,int reps,double *fp32,double *fp16){
-  const int nd=8;
-  *fp32=*fp16=-1;
-  ap_mf_plan *mf=ap_mf_create_pairbatch(m,nd,nt);
-  if(!mf) mf=ap_mf_create(m,nd,nt);
-  void *g=ap_gate16_available()?ap_gate16_create(m,nd,nt):NULL;
-  float *spec=malloc(2*m*sizeof(float));
-  int *ds=malloc((size_t)nd*nt*sizeof(int)), *ts=malloc((size_t)nd*nt*sizeof(int));
-  ap_peak *out=calloc((size_t)nd*nt,sizeof(ap_peak));
-  int rc=-1;
-  if(!mf||!spec||!ds||!ts||!out) goto done;
-  unsigned s=12345u;
-  for(int t=0;t<nt;t++){
-    for(size_t k=0;k<2*m;k++){ s=s*1103515245u+12345u; spec[k]=((s>>9)&1023)/1024.0f-0.5f; }
-    if(ap_mf_set_template(mf,t,spec)) goto done;
-    if(g && ap_gate16_set_template(g,t,spec)) goto done;
-  }
-  float *dsp=malloc((size_t)nd*2*m*sizeof(float));
-  if(!dsp) goto done;
-  for(int d=0;d<nd;d++){
-    for(size_t k=0;k<2*m;k++){ s=s*1103515245u+12345u; dsp[(size_t)d*2*m+k]=((s>>9)&1023)/1024.0f-0.5f; }
-    if(ap_mf_set_data(mf,d,dsp+(size_t)d*2*m)){ free(dsp); goto done; }
-    if(g && ap_gate16_set_data(g,d,dsp+(size_t)d*2*m)){ free(dsp); goto done; }
-  }
-  int n=0;
-  for(int d=0;d<nd;d++) for(int t=0;t<nt;t++){
-    s=s*1103515245u+12345u;
-    if(((s>>8)%12)==0){ ds[n]=d; ts[n]=t; n++; }
-  }
-  if(n==0){ ds[0]=0; ts[0]=0; n=1; }
-  double b32=1e30,b16=1e30;
-  for(int r=0;r<reps;r++){
-    unsigned long long a=ap_ticks();
-    if(ap_mf_run_pairs_pooled(mf,0,ds,ts,n,0,m,1e30f,out,NULL,0,m,nt)<0){ free(dsp); goto done; }
-    unsigned long long b=ap_ticks();
-    if(g && ap_gate16_run_pairs(g,0,0,ds,ts,n,nt,0,m,out)<0){ free(dsp); goto done; }
-    unsigned long long c=ap_ticks();
-    if((double)(b-a)<b32) b32=(double)(b-a);
-    if(g && (double)(c-b)<b16) b16=(double)(c-b);
-  }
-  *fp32=b32/n;
-  if(g) *fp16=b16/n;
-  free(dsp);
-  rc=0;
-done:
-  if(mf) ap_mf_destroy(mf);
-  if(g) ap_gate16_destroy(g);
-  free(spec); free(ds); free(ts); free(out);
-  return rc;
-}

@@ -910,10 +910,6 @@ static PyObject *HMF_tier_inputs(HMFObject *self,PyObject *unused){
 static PyObject *HMF_first_gate_passed(HMFObject *self,PyObject *unused){
   (void)unused; return PyLong_FromLong(ap_hmf_first_gate_passed(self->p));
 }
-static PyObject *HMF_set_q15_recheck_late(HMFObject *self,PyObject *args){
-  int on; if(!PyArg_ParseTuple(args,"p",&on)) return NULL;
-  return PyBool_FromLong(ap_hmf_set_q15_recheck_late(self->p,on)==0);
-}
 static PyObject *HMF_series_ticks(HMFObject *self,PyObject *a){
   (void)a; return PyLong_FromUnsignedLongLong(ap_hmf_series_ticks(self->p));
 }
@@ -981,10 +977,6 @@ static PyObject *HMF_set_q15(HMFObject *self,PyObject *args){
   int on; if(!PyArg_ParseTuple(args,"p",&on)) return NULL;
   return PyBool_FromLong(ap_hmf_set_q15(self->p,on)==0);
 }
-static PyObject *HMF_set_q15_tier0(HMFObject *self,PyObject *args){
-  int on; if(!PyArg_ParseTuple(args,"p",&on)) return NULL;
-  return PyBool_FromLong(ap_hmf_set_q15_tier0(self->p,on)==0);
-}
 static PyObject *HMF_set_platform_fft(HMFObject *self,PyObject *args){
   int on; if(!PyArg_ParseTuple(args,"p",&on)) return NULL;
   return PyBool_FromLong(ap_hmf_set_platform_fft(self->p,on)==0);
@@ -1009,7 +1001,6 @@ static PyObject *HMF_set_hermitian(HMFObject *self,PyObject *args){
 }
 
 GUARDED(HMFObject,HMF_series_group)
-GUARDED(HMFObject,HMF_set_q15_tier0)
 GUARDED(HMFObject,HMF_set_platform_fft)
 GUARDED(HMFObject,HMF_set_taps)
 GUARDED(HMFObject,HMF_set_real_series)
@@ -1035,10 +1026,8 @@ GUARDED(HMFObject,HMF_series_ticks)
 GUARDED(HMFObject,HMF_tier_stats)
 GUARDED(HMFObject,HMF_tier_inputs)
 GUARDED(HMFObject,HMF_first_gate_passed)
-GUARDED(HMFObject,HMF_set_q15_recheck_late)
 static PyMethodDef HMF_methods[]={
   {"series_group",(PyCFunction)HMF_series_group_g,METH_NOARGS,"actual series block group"},
-  {"set_q15_tier0",(PyCFunction)HMF_set_q15_tier0_g,METH_VARARGS,"set_q15_tier0(fp16) -> True if tier 0 behind the Q15 screen now runs on the FP16 gate"},
   {"set_platform_fft",(PyCFunction)HMF_set_platform_fft_g,METH_VARARGS,"set_platform_fft(on) -> True if block forwards now run through the platform FFT"},
   {"set_taps",(PyCFunction)HMF_set_taps_g,METH_VARARGS,"set_taps(taps float32 (nt, stride), stride, counts int64 (nt,)): each template's real FIR taps"},
   {"set_real_series",(PyCFunction)HMF_set_real_series_g,METH_VARARGS,"set_real_series(on, stride=1) -> True if run_series now reads real float32 series (half-size block transforms); stride 2 reads one lane of a complex series"},
@@ -1065,7 +1054,6 @@ static PyMethodDef HMF_methods[]={
   {"tier_stats",(PyCFunction)HMF_tier_stats_g,METH_NOARGS,"[(band, passed, ticks) per tier] + [(n, refined, ticks)]"},
   {"tier_inputs",(PyCFunction)HMF_tier_inputs_g,METH_NOARGS,"Actual input counts per logical gate"},
   {"first_gate_passed",(PyCFunction)HMF_first_gate_passed_g,METH_NOARGS,"Cumulative passes of the first executed float gate"},
-  {"set_q15_recheck_late",(PyCFunction)HMF_set_q15_recheck_late_g,METH_VARARGS,"Choose Q15, tier 1, tier 0, remaining tiers scheduling"},
   {NULL}
 };
 static PyObject *HMF_get_n(HMFObject *self, void *closure){
@@ -1359,15 +1347,6 @@ static PyObject *M_price_direct(PyObject *self,PyObject *unused){
   (void)self; (void)unused;
   return PyFloat_FromDouble(ap_hmf_price_direct());
 }
-static PyObject *M_price_q15_tier0(PyObject *self, PyObject *args){
-  (void)self; Py_ssize_t m; int nt, reps=5; double a, b; int rc;
-  if(!PyArg_ParseTuple(args,"ni|i",&m,&nt,&reps)) return NULL;
-  Py_BEGIN_ALLOW_THREADS
-  rc=ap_hmf_price_q15_tier0((size_t)m,nt,reps,&a,&b);
-  Py_END_ALLOW_THREADS
-  if(rc){ PyErr_SetString(PyExc_RuntimeError,"price_q15_tier0 failed"); return NULL; }
-  return Py_BuildValue("(dd)",a,b);
-}
 
 /* Root(n): the root stage of a hierarchical search (ap_root_real). */
 typedef struct { PyObject_HEAD ap_root *r; int busy; /* GUARDED */ } RootObject;
@@ -1439,7 +1418,6 @@ static PyMethodDef methods[]={
   {"forward_cost",M_forward_cost,METH_VARARGS,"forward_cost(n, reps=9) -> (engine s, platform s or -1) per block forward"},
   {"gate16_bound",M_gate16_bound,METH_VARARGS,"gate16_bound(N, data, templates, nt) -> bytes of nt float32 bounds (-1: not fired), or None"},
   {"price_direct",M_price_direct,METH_NOARGS,"price_direct() -> ticks per lag x tap of the direct refine's correlation"},
-  {"price_q15_tier0",M_price_q15_tier0,METH_VARARGS,"price_q15_tier0(m, nt, reps=5) -> (fp32, fp16 or -1) ticks per listed pair"},
   {"gate16",M_gate16,METH_NOARGS,"gate16() -> whether new hierarchical plans run the FP16 first gate"},
   {"targets",M_targets,METH_NOARGS,"targets() -> names this build can run here"},
   {"set_target",M_set_target,METH_VARARGS,"set_target(name|None) -> narrow the choice"},

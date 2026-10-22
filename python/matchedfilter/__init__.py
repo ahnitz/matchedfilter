@@ -192,7 +192,6 @@ def clear_autotune_cache():
         _chains._Q15_TRIALS.clear()
         _chains._Q15_MODEL.clear()
         _prices._CPU_FWD_PFFT.clear()
-        _prices._Q15_TIER0.clear()
         _prices._DIRECT_LAGTAP.clear()
     _td._BLOCK_TRIALS.state.clear()
     _choice.reset(scope="workload")

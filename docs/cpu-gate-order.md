@@ -1,5 +1,11 @@
 # Defer the Q15 float recheck until after the next gate
 
+**Superseded 2026-10-22.** The Q15 screen is now the first tier's gate
+([reduced-precision-gates.md](reduced-precision-gates.md)): there is no float
+recheck of its survivors left to order. Its late order removed 94% of the 256
+rechecks; the gate removes the rest, and with them the 512 work the margin's
+extra passes caused. This page is kept as the record of that step.
+
 This change starts from `702e6af8`, after Q15 tail packing. It changes the order
 of existing decisions, rather than the transform arithmetic or gate thresholds.
 The representative Zen 5 ladder uses 3.5% less fine-stage time and 2.9% less

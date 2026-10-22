@@ -34,30 +34,30 @@ def test_invalid_or_oversized_pilot_rejected(blocks, group):
 
 
 def test_rotated_pilot_has_balanced_positions():
-    orders = [probe.arm_order(probe.ARMS, r, 1) for r in range(3)]
+    k = len(probe.ARMS)
+    orders = [probe.arm_order(probe.ARMS, r, 1) for r in range(k)]
     assert all(set(order) == set(probe.ARMS) for order in orders)
     assert all(set(order[position] for order in orders) == set(probe.ARMS)
-               for position in range(3))
+               for position in range(k))
 
 
 def test_selection_uses_paired_ratios_and_keeps_baseline_for_small_gain():
-    rounds = [dict(float=scale * 1.4, q15_ordinary=scale, q15_delayed=scale * .99)
-              for scale in (100, 200, 80)]
-    assert probe.select_pilot(rounds, "q15_ordinary", .02)["selected"] == "q15_ordinary"
+    rounds = [dict(float=scale * .99, q15=scale) for scale in (100, 200, 80)]
+    assert probe.select_pilot(rounds, "q15", .02)["selected"] == "q15"
     for row in rounds:
-        row["q15_delayed"] *= .8
-    assert probe.select_pilot(rounds, "q15_ordinary", .02)["selected"] == "q15_delayed"
+        row["float"] *= .8
+    assert probe.select_pilot(rounds, "q15", .02)["selected"] == "float"
 
 
 def test_one_fast_outlier_does_not_choose_new_arm():
-    rounds = [dict(float=200, q15_ordinary=100, q15_delayed=x) for x in (1, 110, 110)]
-    assert probe.select_pilot(rounds, "q15_ordinary", .02)["selected"] == "q15_ordinary"
+    rounds = [dict(float=x, q15=100) for x in (1, 110, 110)]
+    assert probe.select_pilot(rounds, "q15", .02)["selected"] == "q15"
 
 
 @pytest.mark.parametrize("alias", [80, 120])
 def test_unchanged_policy_has_no_savings_despite_alias_noise(alias):
-    medians = dict(float=200, q15_ordinary=100, q15_delayed=90, baseline=alias)
-    result = probe.compare_full_call(medians, "q15_ordinary", "q15_ordinary", 900)
+    medians = dict(float=90, q15=100, baseline=alias)
+    result = probe.compare_full_call(medians, "q15", "q15", 900)
     assert result["baseline_median_ns"] == 100
     assert result["saved_ns_per_call"] == 0
     assert result["selected_over_baseline"] == 1
@@ -67,8 +67,8 @@ def test_unchanged_policy_has_no_savings_despite_alias_noise(alias):
 
 
 def test_changed_policy_savings_use_canonical_baseline():
-    medians = dict(float=200, q15_ordinary=100, q15_delayed=90, baseline=80)
-    result = probe.compare_full_call(medians, "q15_ordinary", "q15_delayed", 900)
+    medians = dict(float=90, q15=100, baseline=80)
+    result = probe.compare_full_call(medians, "q15", "float", 900)
     assert result["saved_ns_per_call"] == 10
     assert result["selected_over_baseline"] == .9
     assert result["full_calls_to_amortize_probe"] == 90
@@ -77,13 +77,13 @@ def test_changed_policy_savings_use_canonical_baseline():
 def test_aggregate_unchanged_policy_has_zero_savings():
     rows = []
     for alias in (80, 120):
-        medians = dict(float=200, q15_ordinary=100, q15_delayed=90, baseline=alias)
+        medians = dict(float=90, q15=100, baseline=alias)
         rows.append(dict(
             complete=True, nblocks=320, ntemplates=100, full=dict(peaks_per_call=0),
             baseline_threshold_preparation_excluded_ns=200,
             pilots=[dict(blocks=32, probe_elapsed_ns=900, rare_survivor_warning=True,
                          full_comparison=probe.compare_full_call(
-                             medians, "q15_ordinary", "q15_ordinary", 900))]))
+                             medians, "q15", "q15", 900))]))
     result = probe.aggregate(rows, [32])["pilots"]["32"]
     assert result["saved_ns_per_pass"] == 0
     assert result["selected_over_baseline"] == 1
