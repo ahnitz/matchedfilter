@@ -4,10 +4,11 @@
     python3 tools/sanitize_report.py --crashing-test LOG    # the test running at a crash
 
 With pytest -v the log names each test as it starts, so a crash is placed even when no
-stack names it. The annotation leads with what matters when a shard fails: the sanitizer report (the
-AddressSanitizer ERROR block, or UndefinedBehaviorSanitizer's "runtime error" lines with
-the stack that follows) or, for another abort, the lines before faulthandler's "Fatal
-Python error"; then the test faulthandler shows running, then the end of the log.
+stack names it. The annotation leads with what matters when a shard fails: the crashing
+test; the sanitizer report (the AddressSanitizer ERROR block, or UndefinedBehaviorSanitizer's
+"runtime error" lines with the stack that follows), interpreter frames dropped, or, for
+another abort, the lines before faulthandler's "Fatal Python error"; the test frames
+faulthandler shows; the gdb re-run's stack and registers; then the end of the log.
 The public API shows annotations; the job log needs a token.
 """
 import re
@@ -31,12 +32,20 @@ def crashing_test(text):
     return None
 
 
+#: Stack frames inside the Python interpreter: they fill an annotation and name nothing of ours.
+INTERPRETER = re.compile(r"^\s*#\d+ .*(Objects/|Python/|Include/|Modules/|libpython)")
+
+
 def summary(text, limit=3800):
     lines = text.splitlines()
     parts = []
+    node = crashing_test(text)
+    if node:
+        parts.append("crashing test: " + node)
     for i, line in enumerate(lines):
         if "ERROR: AddressSanitizer" in line or "runtime error:" in line:
-            parts.append("\n".join(lines[max(0, i - 2): i + 40]))
+            block = [l for l in lines[max(0, i - 2): i + 60] if not INTERPRETER.search(l)]
+            parts.append("\n".join(block[:24]))
             break
     else:
         # No sanitizer report: an abort() of another kind (an assert, a library check)
@@ -49,6 +58,10 @@ def summary(text, limit=3800):
     test = [l for l in lines if re.search(r"File .*/tests/test_\w+\.py", l)]
     if test:
         parts.append("test frames:\n" + "\n".join(test[:6]))
+    gdb = [i for i, l in enumerate(lines) if l.startswith("=== gdb: ")]
+    if gdb:
+        g = [l for l in lines[gdb[-1]:] if not INTERPRETER.search(l)]
+        parts.append("\n".join(g[:40]))
     head = "\n--\n".join(parts)
     tail = text[-max(0, limit - len(head) - 20):] if len(head) < limit else ""
     return (head + "\n-- end of log --\n" + tail)[:limit]
