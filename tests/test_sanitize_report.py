@@ -83,3 +83,12 @@ def test_annotation_names_the_test_drops_interpreter_frames_and_keeps_gdb(tmp_pa
     assert "MF_run python/matchedfilter/_core.c:5" in head
     assert "bytecodes.c" not in head
     assert "r15            0x7ffd6b464e90" in head
+
+
+def test_annotation_carries_the_rerun_without_the_fake_stack(tmp_path):
+    log = tmp_path / "san.log"
+    log.write_text(VERBOSE_LOG + "=== without use-after-return detection: rc=0 ===\n")
+    out = subprocess.run([sys.executable, str(TOOL), str(log), "134"], capture_output=True,
+                         text=True)
+    head = out.stdout.replace("%0A", "\n").split("-- end of log --")[0]
+    assert "=== without use-after-return detection: rc=0 ===" in head
