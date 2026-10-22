@@ -255,3 +255,7 @@ A step that changes C or workflows is first pushed to a `ci/<topic>` branch and 
   - The public run methods refuse NaN thresholds. MF and HMF refuse a second `__init__`. forward_cost refuses an unsupported size and reports a failed allocation.
   - tests/test_core_boundary.py: every case fails on 542aeed1.
   - Left for later, with nothing found to depend on them: an exception on every -1 setter path, checked Py_BuildValue results, taps_to_spectra's copy-back into a converted out, and the scales check of CorrelationFilter.run.
+- 2026-10-22: **B7: one filter per thread, all-or-nothing allocation.**
+  - Every method of _core's MF, HMF and Root objects is wrapped (GUARDED): the busy flag is read and set with the GIL held, so a concurrent call raises RuntimeError. `_busy` is exposed read-only for the test. The full suite passes, so the library never shares one object between threads.
+  - matchfilt.c's lazy scratch allocations (`alloc_pair`; the DIF plan with its two buffers) allocate all or nothing. Before, a guard on the first pointer took a half-allocated set as ready.
+  - Decided at B7: no fault-injection hook, to avoid test-only C code. The allocation fix is by construction and is exercised under the sanitizers (C5).
