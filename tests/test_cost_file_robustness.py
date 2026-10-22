@@ -82,14 +82,14 @@ def test_a_price_another_process_stored_first_is_the_one_used(cost, monkeypatch)
     the first one's price instead of keeping its own."""
     n = 4096
     key = "cpu-fft|%d|cpu" % n
-    monkeypatch.setattr(mf, "_CPU_FWD_PFFT", {})
+    monkeypatch.setattr(mf._prices, "_CPU_FWD_PFFT", {})
 
     def forward_cost(size):
         # The other process finishes first and stores "platform: true" meanwhile...
         _costfile._store_cost(str(cost), key, {"platform": True, "seconds": {}})
         return 1.0, 2.0                    # ...while this one measures the engine faster
     monkeypatch.setattr(mf._core, "forward_cost", forward_cost)
-    assert mf._cpu_forward_platform(n) is True
+    assert mf._prices._cpu_forward_platform(n) is True
     assert json.loads(cost.read_text())[key]["platform"] is True
 
 

@@ -12,7 +12,7 @@ def _search(monkeypatch, platform):
     monkeypatch.setenv("MF_AUTOTUNE", "0")
 
     # This test's choice instead of the price (_cpu_forward_platform).
-    monkeypatch.setattr(mf, "_cpu_forward_platform", lambda n: platform)
+    monkeypatch.setattr(mf._prices, "_cpu_forward_platform", lambda n: platform)
     rng = np.random.default_rng(5)
     counts = sorted(rng.integers(200, 1800, 16))
     taps, w, df = _whitened_inspiral_bank(rng, counts)

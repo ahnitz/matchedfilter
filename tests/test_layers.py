@@ -20,7 +20,7 @@ LAYERS = (
                     "_gputime", "_coarse", "_shared", "_execution_policy", "_choice",
                     "_costfile", "_results"}),
     ("platform", {"_cuda", "_metal", "_vulkan", "device", "_vksubgroup"}),
-    ("models", {"gatemodel", "gatechain", "_chains"}),
+    ("models", {"gatemodel", "gatechain", "_chains", "_prices"}),
     ("gpu host", {"_gpuhost", "_gpuhier", "_gpuexec"}),
     ("backends", {"_vkcompute", "_cudacompute", "_mtlcompute"}),
     ("workloads", {"time_domain", "search", "_roofline", "__init__"}),

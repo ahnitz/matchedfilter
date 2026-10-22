@@ -766,53 +766,52 @@ def _corr_block_costs(n: int, device: Optional[Any] = None) -> Tuple[float, floa
     n = int(n)
     from .device import parse as _parse_device
     dkey = "cpu" if _parse_device(device).kind == "cpu" else str(device)
-    hit = _CORR_COSTS.get((n, dkey))
-    if hit is not None:
-        return hit
     from . import CorrelationFilter, gatechain
+    from ._prices import price_once
     path = gatechain._cost_file()
     key = "corr3,%d" % n if dkey == "cpu" else "corr3,%d,%s" % (n, dkey)
     from . import _CORR_PFFT
-    if path is not None:
-        stored = gatechain._load_cost_file(path).get(key)
-        if stored is not None:
-            _CORR_COSTS[(n, dkey)] = hit = tuple(float(v) for v in stored[:3])
-            if dkey == "cpu":
-                _CORR_PFFT[n] = bool(gatechain._load_cost_file(path).get("corr-pfft,%d" % n, False))
-            return hit
-    rng = np.random.default_rng(7)
-    taps = n // 4
-    # A GPU call carries a fixed submit-and-wait cost (~0.2 ms on an M2) that production
-    # spreads over a whole series of blocks. Over 8 blocks it was most of a(n) and noisy enough
-    # to flip the middle bank between n=8192 and 16384 run to run (16384 runs 2.3x slower
-    # there), so a GPU is priced over about half a million samples, as the bank calls it.
-    nblocks = 8 if dkey == "cpu" else max(8, (1 << 19) // (n - taps))
-    L = nblocks * (n - taps) + n
-    ser = ((rng.standard_normal(L) + 1j * rng.standard_normal(L)) / np.sqrt(2)).astype(np.complex64)
-    # CPU: the engine's transform and the platform FFT (vDSP on macOS) are both priced, and
-    # the cheaper at a group of 16 templates is the one this n runs (_CORR_PFFT).
-    modes = [False]
-    if dkey == "cpu":
-        probe = CorrelationFilter(n, ndata=1, ntemplates=1, valid=(taps // 2, n - taps // 2),
-                                  device='cpu')      # the CPU's price, whatever MF_DEVICE says
-        probe.set_templates(np.zeros((1, n), np.complex64))
-        if probe._execution_plan().set_platform_fft(True):
-            modes.append(True)
-    hits = {}
-    for mode in modes:
-        _CORR_PFFT[n] = mode
-        hits[mode] = _corr_measure(n, device, dkey, rng, taps, nblocks, L, ser)
-    best_mode = min(hits, key=lambda m: hits[m][0] + 16 * (hits[m][1] + hits[m][2] * (n - taps)))
-    hit = hits[best_mode]
-    if path is not None:          # prices another process stored first are the ones used
+    if (n, dkey) in _CORR_COSTS:
+        return _CORR_COSTS[(n, dkey)]
+    measured = []
+
+    def measure():
+        measured.append(True)
+        rng = np.random.default_rng(7)
+        taps = n // 4
+        # A GPU call carries a fixed submit-and-wait cost (~0.2 ms on an M2) that production
+        # spreads over a whole series of blocks. Over 8 blocks it was most of a(n) and noisy enough
+        # to flip the middle bank between n=8192 and 16384 run to run (16384 runs 2.3x slower
+        # there), so a GPU is priced over about half a million samples, as the bank calls it.
+        nblocks = 8 if dkey == "cpu" else max(8, (1 << 19) // (n - taps))
+        L = nblocks * (n - taps) + n
+        ser = ((rng.standard_normal(L) + 1j * rng.standard_normal(L)) / np.sqrt(2)).astype(np.complex64)
+        # CPU: the engine's transform and the platform FFT (vDSP on macOS) are both priced, and
+        # the cheaper at a group of 16 templates is the one this n runs (_CORR_PFFT).
+        modes = [False]
         if dkey == "cpu":
+            probe = CorrelationFilter(n, ndata=1, ntemplates=1, valid=(taps // 2, n - taps // 2),
+                                      device='cpu')      # the CPU's price, whatever MF_DEVICE says
+            probe.set_templates(np.zeros((1, n), np.complex64))
+            if probe._execution_plan().set_platform_fft(True):
+                modes.append(True)
+        hits = {}
+        for mode in modes:
+            _CORR_PFFT[n] = mode
+            hits[mode] = _corr_measure(n, device, dkey, rng, taps, nblocks, L, ser)
+        best_mode = min(hits, key=lambda m: hits[m][0] + 16 * (hits[m][1] + hits[m][2] * (n - taps)))
+        hit = hits[best_mode]
+        if path is not None and dkey == "cpu":    # a mode another process stored first is used
             best_mode = bool(gatechain._store_first(path, "corr-pfft,%d" % n, bool(best_mode),
                                                     lambda r: isinstance(r, bool)))
             hit = hits.get(best_mode, hit)  # this process timed that mode too
-        hit = tuple(float(v) for v in gatechain._store_first(
-            path, key, list(hit), lambda r: isinstance(r, list) and len(r) >= 3)[:3])
-    _CORR_PFFT[n] = best_mode
-    _CORR_COSTS[(n, dkey)] = hit
+        _CORR_PFFT[n] = best_mode
+        return hit, list(hit)
+    hit = price_once(_CORR_COSTS, (n, dkey), key, measure,
+                     lambda r: tuple(float(v) for v in r[:3]) if isinstance(r, list)
+                     and len(r) >= 3 else None)
+    if dkey == "cpu" and not measured and path is not None:   # the price came from the file
+        _CORR_PFFT[n] = bool(gatechain._load_cost_file(path).get("corr-pfft,%d" % n, False))
     return hit
 
 
