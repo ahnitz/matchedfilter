@@ -1,7 +1,7 @@
 """Every tool and example imports and names only what exists.
 
 Until 2026-10-22 tools/audit_threshold.py imported hmf_tune, folded into tests/_gatelib.py
-months before; score_fdr.py, bench_stages.py and bench_coarse_quality.py found tests/ only
+months before; score_fdr.py, bench_stages.py and bench_coarse_quality.py (since removed) found tests/ only
 from the checkout root; verify_cuda.py and bench_pack_indexing.py ran their whole body on
 import. Nothing ran them, so nothing said.
 

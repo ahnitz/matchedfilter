@@ -99,3 +99,54 @@ from recorded results, with independent CPU/GPU choices and linear/log axes.
 `[tool.cibuildwheel]`: `--matrix` prints the one-wheel-per-job build matrix
 `.github/workflows/wheels.yml` runs, and given a directory it fails unless every
 promised wheel is there (the release checks this before publishing).
+
+## Every tool
+
+Each program here, by what it is for; its docstring has the detail. `tests/test_docs_index.py`
+checks that this list names every tool, and `tests/test_repository_tools.py` that each one
+imports and resolves its names.
+
+**Builds and shipped artifacts**: `build_spirv.py`, `build_ptx.py`, `build_forward.py`
+(GPU kernels); `precompile_metal.sh` (Metal libraries); `kernel_build_id.py` (artifact
+identities); `coarse_layout.py` (the fp16 coarse kernel's build-time layout);
+`gen_environment_doc.py` (docs/environment.md); `check_wheels.py` (release wheels);
+`make_bank_subset.py` (the test bank slice).
+
+**Merge gate and CI**: `gate.py` (every pre-merge check), `ci_status.py` (Actions
+verdicts), `sanitize.sh` and `sanitize_report.py` (ASan/UBSan runs and their
+annotations), `migrate_cost_file.py` (cost-file format migration).
+
+**Production-like benchmarks**: `ladder.py`, `ab_ladder.py`, `ladder_diff.py`,
+`ladder_coverage.py`, `ladder_profiles.py`, `profile_cpu_ladder.py`, `hier_bench.py`,
+`hier_all.sh`, `search_bench.py`, `scoreboard.py`, `health.py`.
+
+**Public-API benchmarks and figures**: `bench_series_workloads.py`, `bench_device_paths.py`,
+`teaser_figure.py`, `teaser_fleet.py`, `teaser_labels.py`, `teaser_web.py`, `build_report.py`.
+
+**Comparing two builds**: `compare_builds.py`, `compare_captured_series.py`,
+`bench_class_changes.py`, `bench_cpu_broadcast.py`, `bench_q15_tails.py`,
+`bench_survivor_batches.py`.
+
+**Targeted CPU measurements**: `bench_stages.py`, `bench_pairbatch.py`,
+`bench_refine_density.py`, `bench_cpu_peak_native.py`, `bench_captured_series.py`,
+`perf_counters.py`, `cpu_trial_check.py`, `cold_decisions.py`, `cost_model_ablation.py`,
+`real_probe_study.py`, `replay_captured_groups.py`, `replay_partitions.py`,
+`audit_class_execution.py`, `audit_execution_contracts.py`, `audit_kernel_binaries.py`.
+
+**Gate accuracy and bounds**: `gate_margin.py` (every narrow first tier), `c16_sigma.py`
+(GPU fp16 rounding, for its bound), `cuda_tc_sigma.py`, `gate16_error.py`, `gate16_check.py`,
+`coarse_precision.py`, `coarse_fixed.py`, `audit_gate_model.py`, `audit_threshold.py`,
+`score_fdr.py`, `verify_cascade_fdr.py`, `audit_gpu_bands.py`.
+
+**GPU devices**: `gpu_features.py`, `gpu_roofline.py`, `cuda_roofline.py`,
+`metal_roofline.py`, `metal_probe.py`, `metal_bank_probe.py`, `bench_pack_indexing.py`,
+`verify_cuda.py`, `unify_golden.py` and `unify_baseline.sh` (GPU host exactness).
+
+**Research records** (how a kernel was derived; kept because a design note cites them):
+`gpu_decomposition.py`, `gpu_regmodel.py`, `gpu_output_order.py`, `gpu_tierc_model.py`,
+`gpu_hier_reference.py` (also the tests' numpy reference), `stream_search.py`, and the
+`int8/` and `narrow_cpu/` studies.
+
+Removed 2026-10-22, as measuring what the library no longer has: `band_select.py` and
+`calibrate_cascade.py` (prototypes the gate model replaced), `coarse_stage_value.py` and
+`bench_coarse_quality.py` (the even/odd coarse split, since removed).
