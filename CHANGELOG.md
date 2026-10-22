@@ -6,6 +6,10 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ### Removed
 
+- Python 3.10 support: matchedfilter needs Python 3.11 or newer, and numpy 1.23.2 or
+  newer (the first numpy with Python 3.11 wheels). Release wheels cover CPython
+  3.11-3.14.
+
 - `time_domain.SegmentPlan` (segment replay: Vulkan recorded submissions and CUDA segment
   graphs) and the CUDA device follow-up selection it drove (`src/gpu/followup.cu`). Nothing
   outside the library's own benchmark used it. `filter_series_many` is unchanged, including

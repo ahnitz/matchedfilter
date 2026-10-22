@@ -15,11 +15,11 @@ spec.loader.exec_module(checker)
     ('macos-arm64', ('macosx_11_0',), 'arm64'),
 ])
 def test_release_requires_all_supported_interpreters(tmp_path, platform, tags, arch):
-    for minor in range(10, 15):
+    for minor in checker.SUPPORTED:
         for tag in tags:
             wheel = tmp_path/f'matchedfilter-0.1.0a2-cp3{minor}-cp3{minor}-{tag}_{arch}.whl'
             wheel.touch()
-    assert len(checker.check(tmp_path, platform)) == 5*len(tags)
+    assert len(checker.check(tmp_path, platform)) == len(checker.SUPPORTED)*len(tags)
     wheel.unlink()
     with pytest.raises(ValueError, match='cp314'):
         checker.check(tmp_path, platform)

@@ -29,6 +29,34 @@ except Exception:
 import pytest                                          # noqa: E402
 
 
+# --- which CPU kernels this session runs -------------------------------------
+def _cpu_target():
+    """(requested MF_ISA or None, the backend running, the build's targets)."""
+    import os
+    import matchedfilter as mf
+    return os.environ.get("MF_ISA") or None, mf.backend(), tuple(mf.targets())
+
+
+def pytest_report_header(config):
+    want, have, targets = _cpu_target()
+    return "matchedfilter CPU: backend %s, targets %s, MF_ISA %s" % (
+        have, ",".join(targets), want or "unset")
+
+
+def pytest_sessionstart(session):
+    """A forced target (MF_ISA) that is not the backend at session start fails the
+    session: the run would test a different kernel than the job claims. On Actions
+    the session also names its target in a notice, readable without a signed-in
+    log download."""
+    import os
+    want, have, targets = _cpu_target()
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        print("::notice title=CPU target::backend %s (MF_ISA %s; targets %s)"
+              % (have, want or "unset", ",".join(targets)))
+    if want is not None and want != have:
+        raise pytest.UsageError("MF_ISA=%s requested, but the backend is %s" % (want, have))
+
+
 # --- a slice of a production FIR bank, for tests that need real taps --------
 def bank_subset():
     """Real FIR taps without the 110 MB bank or h5py: tests/data/bank_subset_opt501_v2.npz,

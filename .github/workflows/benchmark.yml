@@ -7,16 +7,27 @@ name: Benchmark
 
 on:
   push:
-    branches: [ main, portable ]
+    branches: [ main, portable, 'ci/bench/**' ]
   pull_request:
   workflow_dispatch:
   schedule:
     - cron: "0 6 * * 1"     # Monday, so drift in the runner fleet is visible
 
+# bash with pipefail: a benchmark that crashes inside `| tee` fails its own step.
+# (Until 2026-10-21 the pipe hid such a crash, and the run failed later, at the
+# upload of a result that was never written.)
+defaults:
+  run:
+    shell: bash
+
+permissions:
+  contents: read
+
 jobs:
   bench:
     name: ${{ matrix.label }}
-    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    # On push, only a ci/bench/** branch (a proof of this workflow) benchmarks.
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || startsWith(github.ref, 'refs/heads/ci/bench/')
     runs-on: ${{ matrix.os }}
     # A job that never gets a runner would otherwise sit for hours and block
     # the page build behind it.
@@ -29,7 +40,7 @@ jobs:
           # Each matrix entry is a separate runner VM with its own CPU model
           # and its own neighbours, so comparing targets across entries would
           # compare machines as much as kernels.
-          - {os: ubuntu-latest,    label: "linux-x86_64"}
+          - {os: ubuntu-24.04,     label: "linux-x86_64"}
           - {os: ubuntu-24.04-arm, label: "linux-arm64"}
           - {os: macos-14,         label: "macos-arm64"}
           # Intel macOS is deliberately absent: the hosted fleet is retiring
@@ -46,13 +57,13 @@ jobs:
         run: |
           python -c "import platform;print(platform.platform(), platform.machine())"
           if [ -r /proc/cpuinfo ]; then
-            grep -m1 'model name' /proc/cpuinfo || true
+            grep -m1 'model name' /proc/cpuinfo || echo "::warning::no model name in /proc/cpuinfo"
             for f in avx2 avx512f avx512vl neon asimd; do
               echo "$f: $(grep -qm1 $f /proc/cpuinfo && echo yes || echo no)"
             done
           else
-            sysctl -n machdep.cpu.brand_string 2>/dev/null || true
-            sysctl -n hw.optional.avx2_0 2>/dev/null || true
+            sysctl -n machdep.cpu.brand_string 2>/dev/null || echo "::warning::no CPU brand string"
+            sysctl -n hw.optional.avx2_0 2>/dev/null || echo "hw.optional.avx2_0: not reported"
           fi
           cc --version | head -1
 
@@ -133,11 +144,56 @@ jobs:
           path: bench-${{ matrix.label }}*.json
           if-no-files-found: error
 
+  bench-metal:
+    # The Metal benchmark and scoreboard, moved here from CI's Metal job, where
+    # they ran on every push for 14 min under `|| true`. Advisory numbers, but a
+    # crash now fails this job.
+    name: macos-metal
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || startsWith(github.ref, 'refs/heads/ci/bench/')
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with: { submodules: recursive }
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: Fetch slangc
+        run: |
+          V=2026.18.2
+          curl -fsSL -o slang.zip \
+            "https://github.com/shader-slang/slang/releases/download/v${V}/slang-${V}-macos-aarch64.zip" \
+            || curl -fsSL -o slang.tgz \
+            "https://github.com/shader-slang/slang/releases/download/v${V}/slang-${V}-macos-aarch64.tar.gz"
+          mkdir -p slangsdk
+          if [ -f slang.zip ]; then unzip -q slang.zip -d slangsdk; else tar xzf slang.tgz -C slangsdk; fi
+          echo "MF_SLANGC=$(find "$PWD/slangsdk" -name slangc -type f | head -1)" >> "$GITHUB_ENV"
+      - name: Build the kernels, including .metallib
+        run: |
+          python -m pip install -U pip numpy
+          python tools/build_spirv.py
+      - name: Install
+        run: python -m pip install -e . pytest
+      - name: Benchmark and scoreboard
+        run: |
+          export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 VECLIB_MAXIMUM_THREADS=1
+          python -m matchedfilter.benchmark --n 1024 4096 16384 65536 \
+            --data 8 --templates 16 --reps 3 --fftw-plan measure | tee bench-metal.txt
+          python tools/scoreboard.py --pairs 128 | tee -a bench-metal.txt
+      - name: Publish to the run summary
+        if: always()
+        run: |
+          [ -e bench-metal.txt ] || exit 0
+          { echo "## macos-metal"; echo; echo '```'; cat bench-metal.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
   page:
     name: Build the documentation page
     needs: bench
     if: always() && !cancelled()
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      pages: read          # configure-pages reads the repository's Pages settings
     steps:
       - uses: actions/checkout@v4
         with: { submodules: true }   # third_party/highway
@@ -192,7 +248,8 @@ jobs:
     # always(): the bench job is skipped on ordinary pushes, and a skipped job up
     # the chain skips every dependant unless its condition says otherwise.
     if: always() && !cancelled() && needs.page.result == 'success' && github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     permissions:
       pages: write
       id-token: write
