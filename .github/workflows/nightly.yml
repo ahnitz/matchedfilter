@@ -28,20 +28,28 @@ env:
 
 jobs:
   sanitize:
-    name: sanitize (${{ matrix.label }}, ${{ matrix.shard }}/4)
+    name: sanitize (${{ matrix.label }}, ${{ matrix.shard }}/${{ matrix.of }})
     runs-on: ${{ matrix.os }}
     # The whole suite under ASan did not finish in 90 minutes on one runner (2026-10-22), so
-    # each architecture runs it in four shards (conftest --shard: whole modules, each in
-    # exactly one shard).
+    # it runs in shards (conftest --shard: whole modules, each in exactly one shard). In
+    # quarters x86_64 took 32-58 minutes and arm64 over 75, so x86_64 runs sixths and
+    # arm64 twelfths.
     timeout-minutes: 75
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-24.04, ubuntu-24.04-arm]
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+        exclude:
+          - {os: ubuntu-24.04, shard: 7}
+          - {os: ubuntu-24.04, shard: 8}
+          - {os: ubuntu-24.04, shard: 9}
+          - {os: ubuntu-24.04, shard: 10}
+          - {os: ubuntu-24.04, shard: 11}
+          - {os: ubuntu-24.04, shard: 12}
         include:
-          - {os: ubuntu-24.04,     label: x86_64}
-          - {os: ubuntu-24.04-arm, label: arm64}
+          - {os: ubuntu-24.04,     label: x86_64, of: 6}
+          - {os: ubuntu-24.04-arm, label: arm64, of: 12}
     steps:
       - uses: actions/checkout@v4
         with: { submodules: true }   # third_party/highway
@@ -57,7 +65,7 @@ jobs:
       - name: Install the test dependencies
         run: python -m pip install --upgrade pip setuptools wheel numpy pytest
       - name: The suite under ASan and UBSan
-        run: tools/sanitize.sh --python python -- tests -q -rs --durations=15 --shard ${{ matrix.shard }}/4
+        run: tools/sanitize.sh --python python -- tests -q -rs --durations=15 --shard ${{ matrix.shard }}/${{ matrix.of }}
 
   order:
     name: suite in reverse module order
