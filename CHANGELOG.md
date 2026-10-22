@@ -122,6 +122,11 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ### Fixed
 
+- `HierarchicalFilter.set_data` (and C `ap_hmf_set_data`) copies the data, as the flat
+  filter does: the refine ingests the full spectrum lazily, so a caller that reused its
+  buffer after `set_data` changed what the refine read (a loud peak read as none). The
+  Python layer also keeps a copy, not the caller's array, for replay into a rebuilt plan.
+  Costs 8n bytes per data row and one copy per call.
 - Shipped Metal sources no longer name the build machine's paths in `#line` directives,
   and a stray sync-conflict copy is gone. The Metal kernel identity changes once, so
   stored Metal choices are re-measured once.

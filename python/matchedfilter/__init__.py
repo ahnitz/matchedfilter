@@ -694,21 +694,18 @@ class MatchedFilter:
             self._mark_ready("data", index)
             return
         if index is not None:
-            a = _as_c64(spectra, self.n, "spectrum")
-            # The plan keeps this pointer -- the coarse band is read straight
-            # out of it during run(), and the full spectrum is ingested lazily
-            # only if a pair fires. A caller passing a temporary would have it
-            # freed before either happens, which is a use-after-free that only
-            # shows when the refine path runs. Hold a reference.
+            # A copy, not the caller's array: it is replayed into a rebuilt plan, which
+            # must see the data as it was set, whatever the caller did to its array since.
+            a = np.array(_as_c64(spectra, self.n, "spectrum"), copy=True)
             self._held[int(index)] = a
             self._ensure().set_data(int(index), a)
             self._dataset = True
             self._mark_ready("data", index)
             return
-        a = np.ascontiguousarray(_from_any(spectra), dtype=np.complex64)
+        a = np.array(_from_any(spectra), dtype=np.complex64, order="C", copy=True)
         if a.ndim != 2 or a.shape != (self.ndata, self.n):
             raise ValueError(f"expected shape ({self.ndata}, {self.n}), got {a.shape}")
-        self._held[-1] = a                      # see the note above
+        self._held[-1] = a                      # a copy: see the note above
         plan = self._ensure()
         if hasattr(plan, 'set_data_batch'):
             plan.set_data_batch(0, a)

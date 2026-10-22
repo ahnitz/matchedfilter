@@ -90,8 +90,8 @@ def test_public_set_data_after_series_keeps_eager_coarse_copies(monkeypatch, q15
     monkeypatch.setenv("MF_GATE16", "0")
     plan = make_plan(q15, [0.5] * 3)
     # Leave later series tiers unused, then replace the public frequency-domain
-    # inputs. The full refine retains the input pointer, but every coarse tier
-    # has historically copied it immediately at set_data.
+    # inputs. Every coarse tier copies them at set_data, and so (since B5) does the
+    # full refine: the caller's array is free to change afterwards.
     plan.run_series(np.zeros(4 * N, np.complex64),
                     np.arange(4, dtype=np.uintp) * N,
                     np.zeros(4, np.uintp), np.full(4, N, np.uintp),
@@ -102,10 +102,10 @@ def test_public_set_data_after_series_keeps_eager_coarse_copies(monkeypatch, q15
     spectra[:] = 0
     before = plan.stats
     indices, _ = plan.run(binsize=N, threshold=0.25, raw=True)
-    # Old nonzero coarse copies pass every pair. The lazy full refine reads the
-    # now-zero spectrum, so no peak is reported. Deferring public coarse copies
-    # would incorrectly skip refinement too.
-    assert (indices < 0).all()
+    # The coarse copies made at set_data pass every pair, and the refine reads the
+    # data as it was set (not the caller's zeroed array), so every pair reports its
+    # peak. Deferring the public coarse copies would skip refinement instead.
+    assert (indices >= 0).all()
     assert tuple(a - b for a, b in zip(plan.stats, before)) == (9, 9)
     # The indexed setter must refresh the same state after another series call.
     plan.run_series(np.zeros(2 * N, np.complex64),

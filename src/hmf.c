@@ -57,6 +57,7 @@ struct ap_hmf_plan {
   int use_accel;
   float *fwd,*spec;
   const float **dspec;
+  float *dcopy;               /* [nd][2n]: ap_hmf_set_data's own copy of each data spectrum */
   int sparse;                 /* ap_hmf_set_sparse: rows that do not fire write counts only */
   char *dready,*tready;
   int ref_on;
@@ -197,7 +198,7 @@ void ap_hmf_destroy(ap_hmf_plan *p){
   if(p->half_fft) ap_destroy(p->half_fft);
   free(p->rtw);
   ap_accel_destroy(p->accel);
-  free(p->fwd); free(p->spec); free(p->dspec); free(p->dready); free(p->tready);
+  free(p->fwd); free(p->spec); free(p->dspec); free(p->dcopy); free(p->dready); free(p->tready);
   if(p->twiddles) free(p->twiddles);
   if(p->tw_scratch) free(p->tw_scratch);
   if(p->tmpls_half) free(p->tmpls_half);
@@ -472,9 +473,19 @@ static int set_data_tiers(ap_hmf_plan *p,int d,const float *spec,int eager){
 }
 int ap_hmf_set_data(ap_hmf_plan *p,int d,const float *spec){
   if(!p||d<0||d>=p->nd||!spec) return -1;
+  /* The plan owns what it reads: the refine ingests the full spectrum lazily, long
+     after this returns, so it is copied here (as the flat plan copies), not kept as the
+     caller's pointer -- a caller that reused its buffer changed the refine's data. */
+  const size_t row=2*p->n;
+  if(!p->dcopy){
+    p->dcopy=malloc((size_t)p->nd*row*sizeof(float));
+    if(!p->dcopy) return -1;
+  }
+  float *own=p->dcopy+(size_t)d*row;
+  memcpy(own,spec,row*sizeof(float));
   /* Preserve the public setter's eager coarse copies. Only series calls defer
      them, because their source spectra live in the plan's own storage. */
-  return set_data_tiers(p,d,spec,p->ntiers);
+  return set_data_tiers(p,d,own,p->ntiers);
 }
 int ap_hmf_set_template(ap_hmf_plan *p,int t,const float *spec){
   if(!p||t<0||t>=p->nt||!spec) return -1;
