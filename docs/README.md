@@ -19,6 +19,7 @@ short introduction. Every document in this directory is listed below, once;
 
 - [Batched matched filter design](design.md) and [the SIMD layer](simd.md)
 - [Hierarchical search design](hierarchical-search-design.md)
+- [The resolved plan](resolved-plan.md): what a hierarchical filter settles before it runs, and what it guarantees with and without a shared cost file
 - [Reduced-precision gates: one error model](reduced-precision-gates.md)
 - [The CPU direct refine](cpu-direct-refine.md)
 - CPU first tiers: [x86 Q15 screen](cpu-q15-gate.md), [ARM NEON FP16 gate](cpu-neon-fp16-gate.md)
