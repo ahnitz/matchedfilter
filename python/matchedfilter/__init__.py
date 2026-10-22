@@ -38,7 +38,7 @@ from . import _config
 _config.check_environment()   # before _core reads any of it
 from . import _core
 from . import gatechain as _gatechain
-from . import _chains, _choice
+from . import _chains, _choice, _prices
 from ._choice import _AUTOTUNE_LOCK, _autotune_enabled, _log_autotune  # noqa: F401
 from ._results import PEAK_DTYPE, _Deferred, _SparsePeaks  # noqa: F401  (public, and root names)
 
@@ -2369,74 +2369,6 @@ _CPU_TRIAL_WORK = {"calls": 0, "seconds": 0.0}
 def _record_cpu_trial(start):
     _CPU_TRIAL_WORK["calls"] += 1
     _CPU_TRIAL_WORK["seconds"] += time.perf_counter() - start
-#: n -> whether the hierarchical series' block forward runs through the platform FFT
-#: (vDSP on macOS): priced once per n (_cpu_forward_platform), kept in MF_COST_FILE.
-_CPU_FWD_PFFT = {}
-
-
-_Q15_TIER0 = {}
-
-
-def _q15_tier0_fp16(band):
-    """Whether tier 0 behind the Q15 screen runs on the FP16 gate at this band: both kernels
-    are timed once on a synthetic survivor list (_core.price_q15_tier0) and the cheaper is
-    kept ("q15-tier0|band" in MF_COST_FILE). The FP16 gate reports an upper bound on the
-    FP32 magnitude, so its survivors are a superset of the FP32 pass's and the next tier and
-    the refine decide them; only time is at stake, and a whole-call trial of a tier ~10% of
-    a call sits at the shared rule's tie (gatechain.measured_choice), so it is priced."""
-    band = int(band)
-    hit = _Q15_TIER0.get(band)
-    if hit is not None:
-        return hit
-    if not getattr(_core, "gate16", lambda: False)():
-        _Q15_TIER0[band] = False
-        return False
-    path = _gatechain._cost_file()
-    key = "q15-tier0|%d" % band
-    if path is not None:
-        rec = _gatechain._load_cost_file(path).get(key)
-        if isinstance(rec, dict) and "fp16" in rec:
-            _Q15_TIER0[band] = hit = bool(rec["fp16"])
-            return hit
-    try:
-        fp32, fp16 = _core.price_q15_tier0(band, 128)
-    except Exception:                      # noqa: BLE001 -- no price: keep the FP32 pass
-        fp32, fp16 = 1.0, -1.0
-    hit = bool(fp16 > 0 and fp16 < fp32)
-    if path is not None:          # a price another process stored first is the one used
-        hit = bool(_gatechain._store_first(
-            path, key, {"fp16": hit, "ticks": {"fp32": fp32, "fp16": fp16}},
-            lambda r: isinstance(r, dict) and "fp16" in r)["fp16"])
-    _Q15_TIER0[band] = hit
-    return hit
-
-
-def _cpu_forward_platform(n):
-    """Whether the block forward at n is cheaper through the platform FFT. Both transforms
-    are timed once on this size (_core.forward_cost: copy with 1/n and transform, best of a
-    few repetitions) and the cheaper is kept ("cpu-fft|n|cpu" in MF_COST_FILE). Their
-    results differ by fp32 rounding only, so this is a price, not a contest: a trial over
-    whole calls dilutes a transform that is ~11% of a call below the shared tie margin
-    (gatechain.measured_choice), which kept the slower transform in half of fresh files."""
-    n = int(n)
-    hit = _CPU_FWD_PFFT.get(n)
-    if hit is not None:
-        return hit
-    path = _gatechain._cost_file()
-    key = "cpu-fft|%d|cpu" % n
-    if path is not None:
-        rec = _gatechain._load_cost_file(path).get(key)
-        if isinstance(rec, dict) and "platform" in rec:
-            _CPU_FWD_PFFT[n] = hit = bool(rec["platform"])
-            return hit
-    native, platform = _core.forward_cost(n)
-    hit = bool(platform > 0 and platform < native)
-    if path is not None:          # a price another process stored first is the one used
-        hit = bool(_gatechain._store_first(
-            path, key, {"platform": hit, "seconds": {"engine": native, "platform": platform}},
-            lambda r: isinstance(r, dict) and "platform" in r)["platform"])
-    _CPU_FWD_PFFT[n] = hit
-    return hit
 
 
 def get_autotune_state():
@@ -2450,7 +2382,8 @@ def get_autotune_state():
 def clear_autotune_cache():
     """Forget every workload choice and trial this process made: chain choices and their
     trials, Q15 trials and the model's Q15 shortlist, block-size trials, the single-device,
-    single-batch and fused-batch device choices, and the CPU forward and Q15 tier-0 prices.
+    single-batch and fused-batch device choices, and the CPU forward, Q15 tier-0 and direct-refine
+    prices.
     The next use starts afresh from MF_COST_FILE. Machine state is kept: cost models
     (gatechain._COSTS), correlation prices and the kernel choices a GPU device holds."""
     from . import time_domain as _td
@@ -2459,8 +2392,9 @@ def clear_autotune_cache():
         _chains._CHAIN_TRIALS.clear()
         _chains._Q15_TRIALS.clear()
         _chains._Q15_MODEL.clear()
-        _CPU_FWD_PFFT.clear()
-        _Q15_TIER0.clear()
+        _prices._CPU_FWD_PFFT.clear()
+        _prices._Q15_TIER0.clear()
+        _prices._DIRECT_LAGTAP.clear()
     _td._BLOCK_TRIALS.state.clear()
     for kind in ("single-device", "single-batch", "fused-batch"):
         _choice.reset(kind)
@@ -2468,24 +2402,6 @@ def clear_autotune_cache():
 
 def _direct_refine_enabled():
     return _config.get("MF_DIRECT_REFINE")
-
-
-def _direct_lagtap():
-    """Ticks per lag x tap of the direct refine on this machine: timed once and kept in
-    MF_COST_FILE, so every process sharing the file prices chains alike (the chain choice
-    depends on it)."""
-    key = "direct-lagtap|%s|%s" % (_core.backend() if hasattr(_core, "backend") else "", _gatechain.cpu_gate_kind())
-    held = _gatechain.stored_choice(key)
-    if isinstance(held, (int, float)) and held > 0:
-        return float(held)
-    v = float(_core.price_direct())
-    path = _gatechain._cost_file()
-    if v > 0 and path is not None:  # a price another process stored first is the one used
-        v = float(_gatechain._store_first(
-            path, "choice|" + key, {"value": v},
-            lambda r: isinstance(r, dict) and isinstance(r.get("value"), (int, float))
-            and r["value"] > 0)["value"])
-    return v
 
 
 class HierarchicalFilter(MatchedFilter):
@@ -2587,10 +2503,10 @@ class HierarchicalFilter(MatchedFilter):
             self._q15 = False
         # The block forward's transform: a cost-model price (_cpu_forward_platform), not a
         # trial -- its effect is under the shared rule's tie margin of a whole call.
-        self._pfft = _cpu_forward_platform(self.n) and plan.set_platform_fft(True)
+        self._pfft = _prices._cpu_forward_platform(self.n) and plan.set_platform_fft(True)
         # Tier 0 behind the Q15 screen: the FP16 gate over the screen's survivors where it is
         # priced cheaper than the pooled FP32 pass (_q15_tier0_fp16).
-        plan.set_q15_tier0(_q15_tier0_fp16(int(chain[0])))
+        plan.set_q15_tier0(_prices._q15_tier0_fp16(int(chain[0])))
         taps = getattr(self, "_taps", None)
         if taps is not None:
             plan.set_taps(taps[0], taps[0].shape[1], taps[1])   # direct: with the thresholds
@@ -2781,7 +2697,7 @@ class HierarchicalFilter(MatchedFilter):
         if (hit is not None and hit[0] == key and hit[2] is self._pending_ref
                 and hit[3] is taps[0]):
             return hit[1]
-        lagtap = _direct_lagtap()
+        lagtap = _prices._direct_lagtap()
         L = 32.0 * max(1, int(round(float(np.mean(taps[1])) / 32.0)))   # as the chain key rounds it
         prices = {}
         if lagtap > 0:

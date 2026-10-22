@@ -198,7 +198,7 @@ def prepare(file, args, mf, td, np, seed_path, seed):
     if p.n != 2048 or tuple(p.config) != (256, 512, 1024) or p._chain_trial is not None:
         raise RuntimeError("fixed scientific chain/block was not preserved")
     ep = p._execution_plan()                       # resolve thresholds BEFORE flags
-    if mf._Q15_TIER0.get(256, False):
+    if mf._prices._Q15_TIER0.get(256, False):
         raise RuntimeError("this study expects x86 FP32 tier 0, not the ARM FP16 gate")
     late = bool(getattr(p, "_q15_order_choice", None) and p._q15_order_choice["late"])
     baseline = "q15_delayed" if p._q15 and late else "q15_ordinary" if p._q15 else "float"

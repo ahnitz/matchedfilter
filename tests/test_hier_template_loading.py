@@ -167,7 +167,7 @@ def test_invalid_batch_does_not_build_or_invoke_source(deferred_filter, shape):
 def test_lazy_native_ingestion_matches_prebuilt_plan(monkeypatch, source_backed):
     """Real native results agree through replacements, rebuilds and subset runs."""
     monkeypatch.setenv("MF_AUTOTUNE", "0")
-    monkeypatch.setattr(mf, "_cpu_forward_platform", lambda n: False)
+    monkeypatch.setattr(mf._prices, "_cpu_forward_platform", lambda n: False)
     n, nt, nd = 256, 3, 2
     rng = np.random.default_rng(826)
     templates = (rng.normal(size=(nt, n)) + 1j * rng.normal(size=(nt, n))).astype(np.complex64)

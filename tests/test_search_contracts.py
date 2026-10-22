@@ -152,7 +152,7 @@ def test_lazy_template_load_has_one_generation_and_native_ingestion(monkeypatch)
     hf = mf.HierarchicalFilter(n, ntemplates=nt)
     hf.set_reference(np.ones(n, np.float32))
     monkeypatch.setattr(hf, "_choose_chain", lambda: (64,))
-    monkeypatch.setattr(mf, "_cpu_forward_platform", lambda n: False)
+    monkeypatch.setattr(mf._prices, "_cpu_forward_platform", lambda n: False)
     metrics = dict(spectrum_generations=0, native_ingestions=0)
     native_factory = hf._new_cpu_plan
 
