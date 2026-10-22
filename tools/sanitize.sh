@@ -113,7 +113,8 @@ cat > "$WORK/align_probe.c" <<'PROBE'
 #include <stdio.h>
 __attribute__((noinline)) int check(volatile int depth){
   _Alignas(64) float t[16];
-  int bad = ((uintptr_t)t & 63) != 0;
+  void *volatile seen = t;      /* opaque: the compiler may not fold the test to 0 */
+  int bad = ((uintptr_t)seen & 63) != 0;
   if(depth > 0) bad |= check(depth - 1);
   t[0] = (float)depth;
   return bad;
