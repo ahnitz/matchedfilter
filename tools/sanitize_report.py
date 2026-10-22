@@ -21,10 +21,11 @@ def summary(text, limit=3800):
             break
     else:
         # No sanitizer report: an abort() of another kind (an assert, a library check)
-        # prints its message just before faulthandler's "Fatal Python error".
+        # prints its message just before faulthandler's stack, whose first line ends
+        # "(most recent call first):" (its "Fatal Python error" line can land after it).
         for i, line in enumerate(lines):
-            if line.startswith("Fatal Python error"):
-                parts.append("before the abort:\n" + "\n".join(lines[max(0, i - 30): i + 2]))
+            if "most recent call first" in line:
+                parts.append("before the abort:\n" + "\n".join(lines[max(0, i - 30): i + 1]))
                 break
     test = [l for l in lines if re.search(r"File .*/tests/test_\w+\.py", l)]
     if test:
