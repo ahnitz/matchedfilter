@@ -1,0 +1,86 @@
+name: Wheels
+
+# The one wheel build, called by CI (two smoke-tested wheels on every push), the nightly
+# run (the musllinux wheel and its suite) and the release (every wheel, each with the
+# full suite). The wheels are pyproject's [tool.cibuildwheel] list, narrowed by `select`;
+# each builds in its own job, so a release takes as long as its slowest wheel.
+
+on:
+  workflow_call:
+    inputs:
+      select:
+        description: "cibuildwheel identifier patterns (space separated)"
+        type: string
+        default: "*"
+      test:
+        description: "full: pyproject's test-command (the whole suite); smoke: the API, kernel and consumer tests"
+        type: string
+        default: full
+      metal:
+        description: "Precompile the committed Metal sources into the macOS wheels"
+        type: boolean
+        default: false
+      artifact:
+        description: "Upload artifact name prefix (one artifact per wheel)"
+        type: string
+        default: wheel
+
+defaults:
+  run:
+    shell: bash
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    name: Which wheels
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.m.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: m
+        run: echo "matrix=$(python3 tools/check_wheels.py --matrix '${{ inputs.select }}')" >> "$GITHUB_OUTPUT"
+
+  wheel:
+    name: wheel (${{ matrix.build }})
+    needs: plan
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { submodules: true }   # third_party/highway
+      # The committed .metal sources compiled to .metallib, so the wheel carries kernels
+      # rather than a compile on first use. Only Apple's toolchain does this, so it
+      # happens on the macOS runner; a failure means Apple rejected a kernel.
+      - name: Precompile the Metal kernels
+        if: inputs.metal && runner.os == 'macOS'
+        run: tools/precompile_metal.sh
+      - name: Smoke test only
+        if: inputs.test == 'smoke'
+        # It imports, ships its kernels and serves the public API and pycbc's calls; the
+        # test jobs of ci.yml run the suite on every push.
+        run: |
+          echo "CIBW_TEST_COMMAND=python -m pytest -q -rs {package}/tests/test_api.py {package}/tests/test_public_api.py {package}/tests/test_kernels_ship.py {package}/tests/test_consumer_contract.py {package}/tests/test_isa_selection.py" >> "$GITHUB_ENV"
+      - uses: pypa/cibuildwheel@8d2b08b68458a16aeb24b64e68a09ab1c8e82084  # v3.4.1
+        env:
+          CIBW_BUILD: ${{ matrix.build }}
+      - uses: actions/setup-python@v5
+        if: matrix.native
+        with: { python-version: "${{ matrix.python }}" }
+      - name: The shipped header must compile on its own
+        if: matrix.native
+        run: |
+          python -m pip install wheelhouse/*.whl
+          printf '#include "matchedfilter.h"\nint main(void){ return ap_supported(1024) ? 0 : 1; }\n' > /tmp/hdr.c
+          cc -I"$(python -c 'import matchedfilter; print(matchedfilter.include_dir())')" -fsyntax-only /tmp/hdr.c
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.artifact }}-${{ matrix.build }}
+          path: wheelhouse/*.whl
+          if-no-files-found: error
