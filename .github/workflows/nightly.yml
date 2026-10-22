@@ -90,8 +90,13 @@ jobs:
           - {os: ubuntu-24.04, shard: 11}
           - {os: ubuntu-24.04, shard: 12}
         include:
-          - {os: ubuntu-24.04,     label: x86_64, of: 6}
-          - {os: ubuntu-24.04-arm, label: arm64, of: 12}
+          # x86_64 runs without ASan's fake stack (its use-after-return detection): Ubuntu
+          # 24.04's gcc 13 runtime gives a fake frame 32-byte alignment where -O3 AVX-512 code
+          # stores to a 64-byte-aligned local, which faulted in fft() at random (2026-10-22: both
+          # crashing tests passed re-run with only this off). No unsanitized build has a fake
+          # stack. arm64 keeps it.
+          - {os: ubuntu-24.04,     label: x86_64, of: 6, asan: detect_stack_use_after_return=0}
+          - {os: ubuntu-24.04-arm, label: arm64, of: 12, asan: ""}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -116,7 +121,8 @@ jobs:
         run: |
           tar -C "$RUNNER_TEMP" -xf "$RUNNER_TEMP/san.tar"
           set +e
-          timeout 65m tools/sanitize.sh --python python --prebuilt "$RUNNER_TEMP/san" -- \
+          timeout 65m tools/sanitize.sh --python python --prebuilt "$RUNNER_TEMP/san" \
+            --asan-options "${{ matrix.asan }}" -- \
             tests -v -rs --durations=15 --shard ${{ matrix.shard }}/${{ matrix.of }} \
             > "$RUNNER_TEMP/san.log" 2>&1
           rc=$?
@@ -129,7 +135,8 @@ jobs:
             if [ -n "$node" ]; then
               sudo apt-get install -y -q gdb > /dev/null
               echo "=== gdb: $node ===" >> "$RUNNER_TEMP/san.log"
-              timeout 20m tools/sanitize.sh --python python --prebuilt "$RUNNER_TEMP/san" --gdb -- \
+              timeout 20m tools/sanitize.sh --python python --prebuilt "$RUNNER_TEMP/san" --gdb \
+                --asan-options "${{ matrix.asan }}" -- \
                 "$node" 2>&1 | tail -60 >> "$RUNNER_TEMP/san.log" || true
               # And once with ASan's fake stack off (its use-after-return detection): a crash
               # that goes away is the fake stack's, which no unsanitized build has.
