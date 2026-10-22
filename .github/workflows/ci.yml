@@ -3,9 +3,9 @@ name: CI
 on:
   push:
     # ci/** branches prove a change to C or to the workflows before it reaches
-    # main (docs/robustness-plan.md); ci/bench/** proves benchmark.yml and ci/nightly/**
-    # nightly.yml instead.
-    branches: [ main, master, 'ci/**', '!ci/bench/**', '!ci/nightly/**' ]
+    # main (docs/robustness-plan.md); ci/bench/** proves benchmark.yml, ci/nightly/**
+    # nightly.yml and ci/release/** release.yml instead.
+    branches: [ main, master, 'ci/**', '!ci/bench/**', '!ci/nightly/**', '!ci/release/**' ]
   pull_request:
   workflow_dispatch:
 
@@ -163,43 +163,12 @@ jobs:
             || { echo "::error::src/codelets-q15-inl.h is stale; re-run 'python3 src/gen_q15.py'"; exit 1; }
 
   wheel:
-    # Exercise the newest supported interpreter on both release platforms.
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 40
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - {os: ubuntu-24.04, build: cp314-manylinux_x86_64, label: linux}
-          - {os: macos-14, build: cp314-macosx_arm64, label: macos}
-    steps:
-      - uses: actions/checkout@v4
-        with: { submodules: true }   # third_party/highway
-      - uses: pypa/cibuildwheel@8d2b08b68458a16aeb24b64e68a09ab1c8e82084  # v3.4.1
-        env:
-          CIBW_BUILD: ${{ matrix.build }}
-          # A smoke test of the built wheel: it imports, ships its kernels and serves the
-          # public API and pycbc's calls. The full suite runs on every wheel at release;
-          # the test jobs above run it on every push.
-          CIBW_TEST_COMMAND: >-
-            python -m pytest -q -rs {package}/tests/test_api.py {package}/tests/test_public_api.py
-            {package}/tests/test_kernels_ship.py {package}/tests/test_consumer_contract.py
-            {package}/tests/test_isa_selection.py
-
-      - uses: actions/setup-python@v5
-        with: { python-version: "3.14" }
-
-      - name: The shipped header must compile on its own
-        run: |
-          python -m pip install wheelhouse/*.whl
-          printf '#include "matchedfilter.h"\nint main(void){ return ap_supported(1024) ? 0 : 1; }\n' > /tmp/hdr.c
-          cc -I"$(python -c 'import matchedfilter; print(matchedfilter.include_dir())')" -fsyntax-only /tmp/hdr.c
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: wheel-${{ matrix.label }}
-          path: wheelhouse/*.whl
-          if-no-files-found: error
+    # The newest supported interpreter on both release platforms, smoke-tested: the
+    # release builds every wheel with this same workflow and runs the full suite on each.
+    uses: ./.github/workflows/wheels.yml
+    with:
+      select: cp314-manylinux_x86_64 cp314-macosx_arm64
+      test: smoke
 
   metal:
     name: macOS GPU (Metal)

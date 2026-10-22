@@ -73,12 +73,7 @@ jobs:
           python -m pytest -q "$GITHUB_WORKSPACE/tests" -rs --reverse-modules
 
   musl:
-    name: wheel (musllinux, cp312)
-    runs-on: ubuntu-24.04
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v4
-        with: { submodules: true }
-      - uses: pypa/cibuildwheel@8d2b08b68458a16aeb24b64e68a09ab1c8e82084  # v3.4.1
-        env:
-          CIBW_BUILD: cp312-musllinux_x86_64     # the full suite: pyproject's test-command
+    # The musllinux wheel with its full suite (pyproject's test-command), in its container.
+    uses: ./.github/workflows/wheels.yml
+    with:
+      select: cp312-musllinux_x86_64

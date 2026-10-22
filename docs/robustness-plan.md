@@ -291,3 +291,12 @@ A step that changes C or workflows is first pushed to a `ci/<topic>` branch and 
   - the cp312 musllinux wheel with its full suite (from C2).
 
   tools/ci_status.py --schedules picks it up from its cron line, so a red nightly fails gate.py's 'ci' check.
+- 2026-10-22: **C7: a second writer is said.** Choice._save, under the cost-file lock, compares the open record on file with how far along (attempts, samples) this process last read or wrote it. A record further along means another process is sampling the same contest; it warns once per contest and writes as before. A record of another trial method, which this choice replaces rather than continues, is not a second writer (the paired CPU block trial replacing unpaired history showed this). docs/environment.md states the rule.
+- 2026-10-22: **C4 sdist fix.** The C4 fixture tests/data/cost_model_2048_zen5.json was not in the sdist (MANIFEST.in named only .npy and .npz there); the sdist CI check caught it.
+- 2026-10-22: **First nightly proof.** The reverse-order run failed in test_cost_file_concurrency: the spawned first writer did not signal within 15 s on the runner. It passes reversed locally, with no environment or threads leaked from earlier modules. The wait is now 120 s and fails at once with the writer's exit code if it dies, so a recurrence says whether it was slow or broken.
+- 2026-10-22: **C2: one wheel workflow.** .github/workflows/wheels.yml (workflow_call) builds pyproject's [tool.cibuildwheel] list, narrowed by a select pattern, one wheel per job; tools/check_wheels.py --matrix derives the matrix and also checks a directory holds every promised wheel. Callers:
+  - ci.yml: the cp314 manylinux and macOS wheels, smoke-tested, with the header check;
+  - nightly.yml: the cp312 musllinux wheel with the full suite;
+  - release.yml: all 12 wheels in parallel, each with the full suite, Metal precompiled; a `complete` job checks the set before publish.
+
+  release.yml rehearses every Monday at 04:41 UTC (it never publishes on a schedule or a push), and a ci/release/** push proves it; ci_status --schedules counts the rehearsal like the nightly.

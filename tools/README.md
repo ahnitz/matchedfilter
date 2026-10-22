@@ -95,5 +95,7 @@ python tools/teaser_fleet.py --compare docs/measurements/teaser-fleet-20260928.j
 
 `teaser_web.py` and `teaser_labels.py` render the Hardware comparison page
 from recorded results, with independent CPU/GPU choices and linear/log axes.
-`check_wheels.py` gates release uploads on a complete CPython 3.10–3.14
-wheel set for each release platform.
+`check_wheels.py` reads the wheels a release ships from pyproject's
+`[tool.cibuildwheel]`: `--matrix` prints the one-wheel-per-job build matrix
+`.github/workflows/wheels.yml` runs, and given a directory it fails unless every
+promised wheel is there (the release checks this before publishing).
