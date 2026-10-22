@@ -123,6 +123,16 @@ jobs:
           set -e
           tail -80 "$RUNNER_TEMP/san.log"
           echo "::notice::$(grep -m1 'pytest ran' "$RUNNER_TEMP/san.log" || echo 'sanitize: pytest did not finish'); rc=$rc"
+          if [ $rc -eq 134 ] || [ $rc -eq 139 ]; then
+            # A crash: run the test it was in again under gdb, for the native stack.
+            node=$(python3 tools/sanitize_report.py --crashing-test "$RUNNER_TEMP/san.log" || true)
+            if [ -n "$node" ]; then
+              sudo apt-get install -y -q gdb > /dev/null
+              echo "=== gdb: $node ===" >> "$RUNNER_TEMP/san.log"
+              timeout 20m tools/sanitize.sh --python python --prebuilt "$RUNNER_TEMP/san" --gdb -- \
+                "$node" 2>&1 | tail -60 >> "$RUNNER_TEMP/san.log" || true
+            fi
+          fi
           if [ $rc -ne 0 ]; then
             python3 tools/sanitize_report.py "$RUNNER_TEMP/san.log" $rc
           fi
