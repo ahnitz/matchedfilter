@@ -38,9 +38,14 @@ def _cpu_target():
 
 
 def pytest_report_header(config):
+    import numpy as np
+    import matchedfilter as mf
     want, have, targets = _cpu_target()
-    return "matchedfilter CPU: backend %s, targets %s, MF_ISA %s" % (
-        have, ",".join(targets), want or "unset")
+    return ["matchedfilter CPU: backend %s, targets %s, MF_ISA %s; numpy %s" % (
+                have, ",".join(targets), want or "unset", np.__version__),
+            "matchedfilter devices: %s" % ", ".join(str(d) for d in mf.devices()),
+            "MF_* environment: removed %s; kept %s" % (
+                ",".join(_SCRUBBED["removed"]) or "none", ",".join(_SCRUBBED["kept"]) or "none")]
 
 
 def pytest_sessionstart(session):
@@ -70,17 +75,33 @@ def bank_subset():
 
 @pytest.fixture(autouse=True)
 def _clean_autotune_cache():
-    try:
-        import matchedfilter as mf
-        mf.clear_autotune_cache()
-    except Exception:
-        pass
+    """Every test starts without the workload choices an earlier test made."""
+    import matchedfilter as mf
+    mf.clear_autotune_cache()
     yield
-    try:
-        import matchedfilter as mf
-        mf.clear_autotune_cache()
-    except Exception:
-        pass
+    mf.clear_autotune_cache()
+
+
+# --- the session leaves the developer's environment alone -------------------
+#: MF_* variables the suite keeps from the environment: the forced CPU target (CI's
+#: per-target jobs) and the tool locations and inputs that some tests read. Every other
+#: MF_* variable would change what the library does under test (a developer's
+#: MF_COST_FILE, a forced chain), so it is removed before collection; --keep-mf-env NAME
+#: keeps one deliberately.
+_KEPT_MF = {"MF_ISA", "MF_SLANGC", "MF_SLANGC_ANY_VERSION", "MF_NVRTC", "MF_CUDA_PATH",
+            "MF_GATE_BANK", "MF_GATE_PROFILES", "MF_TC_KAPPA", "MF_CAPTURE"}
+_SCRUBBED = {"removed": [], "kept": []}
+
+
+def pytest_configure(config):
+    import os
+    keep = _KEPT_MF | set(config.getoption("--keep-mf-env") or ())
+    for name in sorted(n for n in os.environ if n.startswith("MF_")):
+        if name in keep or name.startswith("MF_TEASER_"):
+            _SCRUBBED["kept"].append(name)
+        else:
+            _SCRUBBED["removed"].append(name)
+            del os.environ[name]
 
 
 @pytest.hookimpl(hookwrapper=True)
@@ -239,6 +260,11 @@ def pytest_addoption(parser):
     parser.addoption('--require-coarse-gpu', action='store_true', default=False,
                      help='Fail rather than skip missing coarse-calibration GPU coverage')
 
+    parser.addoption('--keep-mf-env', action='append', metavar='NAME',
+                     help='keep this MF_* variable from the environment (repeatable); the '
+                          'session removes every other one but MF_ISA and the tool paths')
+    parser.addoption('--reverse-modules', action='store_true', default=False,
+                     help='run the test modules in reverse order (finds order dependence)')
     parser.addoption('--run-performance', action='store_true', default=False,
                      help='Run opt-in performance regression checks on an idle machine')
     parser.addoption('--performance-baseline', help='Compare timings with a saved same-host JSON baseline')
@@ -246,6 +272,10 @@ def pytest_addoption(parser):
 
 
 def pytest_collection_modifyitems(config, items):
+    if config.getoption('--reverse-modules'):
+        order = list(dict.fromkeys(item.module.__name__ for item in items))[::-1]
+        rank = {m: i for i, m in enumerate(order)}
+        items.sort(key=lambda item: rank[item.module.__name__])     # stable within a module
     baseline = config.getoption('--performance-baseline')
     output = config.getoption('--performance-record')
     if baseline and output:
@@ -300,8 +330,20 @@ def pytest_terminal_summary(terminalreporter):
     few failures are named -- enough to start from.
     """
     import os
+    import collections
+    skips = collections.Counter()
+    for rep in terminalreporter.stats.get("skipped", []):
+        reason = rep.longrepr[2] if isinstance(rep.longrepr, tuple) else str(rep.longrepr)
+        skips[reason.replace("Skipped: ", "")[:120]] += 1
+    if skips:
+        terminalreporter.write_sep("-", "skips by reason")
+        for reason, n in skips.most_common():
+            terminalreporter.write_line("%5d  %s" % (n, reason))
     if os.environ.get("GITHUB_ACTIONS") != "true":
         return
+    if skips:
+        lines = "%0A".join("%d  %s" % (n, r.replace("%", "%25")) for r, n in skips.most_common(15))
+        terminalreporter.write_line("::notice title=Skips (%d)::%s" % (sum(skips.values()), lines))
     reports = (terminalreporter.stats.get("failed", []) +
                terminalreporter.stats.get("error", []))
     for rep in reports[:10]:

@@ -104,6 +104,10 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ### Changed
 
+- `clear_autotune_cache()` forgets every workload choice the process made, as its
+  docstring now lists: also block-size trials, the single-device, single-batch and
+  fused-batch device choices and the model's Q15 shortlist. Machine state (cost models,
+  correlation prices, a GPU's kernel choices) is kept.
 - Every measured choice (chain, block-size and Q15 trials, the device and fusion choices,
   kernel layouts, subgroup size, interleave, sparse readback) follows one lifecycle,
   `_choice.Choice`, and ends by construction: an unclear contest samples up to a cap, and a
