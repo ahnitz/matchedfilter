@@ -124,7 +124,7 @@ jobs:
           tail -80 "$RUNNER_TEMP/san.log"
           echo "::notice::$(grep -m1 'pytest ran' "$RUNNER_TEMP/san.log" || echo 'sanitize: pytest did not finish'); rc=$rc"
           if [ $rc -ne 0 ]; then
-            tail -c 3500 "$RUNNER_TEMP/san.log" | python3 -c "import sys; t=sys.stdin.read(); print('::error::rc=$rc%0A' + t.replace('%', '%25').replace('\r', '').replace('\n', '%0A'))"
+            python3 tools/sanitize_report.py "$RUNNER_TEMP/san.log" $rc
           fi
           exit $rc
 
