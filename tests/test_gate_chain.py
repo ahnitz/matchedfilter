@@ -424,16 +424,11 @@ def test_cascade_signal_retention_and_scalloping():
     )
 
 
-def test_cascade_subset_semantics():
-    """Document and test intra-plan subset semantics vs cross-configuration behavior.
+def test_a_cascades_first_gate_is_looser_than_the_single_tier_gate():
+    """A two-tier cascade's first gate is looser than the single-tier gate at its last band.
 
-    Intra-Plan Semantics:
-      Within a single execution plan (fixed b0, b1, g0, g1), Tier 1 is an
-      intra-plan refinement filter of Tier 0. Any pair that evaluates Tier 1
-      has strictly passed Tier 0 (c0 >= g0), and any pair refined to the fine
-      filter has strictly passed both Tier 0 and Tier 1 (c0 >= g0 and c1 >= g1).
-      Thus, candidate survivors form a nested subset:
-          Survivors(Fine) <= Survivors(Tier 1) <= Survivors(Tier 0).
+    (Within one plan the survivors nest, tier by tier -- tested on the engine's own counters
+    in test_gate_chain's tier_stats test.)
 
     Cross-Configuration Non-Subset Behavior:
       Across distinct configurations (e.g. two-tier cascade vs single-tier filter,
@@ -458,29 +453,6 @@ def test_cascade_subset_semantics():
 
     # Cross-configuration: Tier 0 gate is strictly looser than single-tier gate
     assert g0 < g_single, f"Tier 0 gate {g0:.3f} should be looser than single gate {g_single:.3f}"
-
-    # Intra-plan verification:
-    rng = np.random.default_rng(777)
-    ndata = 8
-    noise = (rng.standard_normal((ndata, n), dtype=np.float32)
-             + 1j * rng.standard_normal((ndata, n), dtype=np.float32)).astype(np.complex64)
-    k = np.arange(n)
-    noise[0] += (5.5 * h_freq * np.exp(2j * np.pi * 512 * k / n)).astype(np.complex64)
-
-    survived_t0 = []
-    survived_t1 = []
-    for d in range(ndata):
-        c0_vals = np.abs(np.fft.ifft(noise[d, :m0] * np.conj(h_freq[:m0])) * m0)
-        c0_max = float(c0_vals.max())
-        if c0_max >= g0:
-            survived_t0.append(d)
-            c1_vals = np.abs(np.fft.ifft(noise[d, :m1] * np.conj(h_freq[:m1])) * m1)
-            c1_max = float(c1_vals.max())
-            if c1_max >= g1:
-                survived_t1.append(d)
-
-    # Intra-plan: survivors of Tier 1 are a strict subset of Tier 0 survivors
-    assert set(survived_t1).issubset(set(survived_t0)), "Intra-plan subset violated!"
 
 
 def test_performance_tracking_and_summary():
@@ -574,7 +546,7 @@ def test_o2_noise_curve_prefers_a_multi_tier_chain():
     from pathlib import Path
     p = np.load(Path(__file__).parent / "data" / "reference_profile_o2_h1l1_2048.npy")
     gc = mf._gatechain
-    best, plans = gc.choose_chain(p, 2048, 6.0, 1e-3, cost=gc.calibrate_costs(2048, 64), max_tiers=2,
+    best, plans = gc.choose_chain(p, 2048, 6.0, 1e-3, cost=_recorded_model(), max_tiers=2,
                                   window=(150, 1898))
     assert best is not None and len(best["chain"]) == 2, [(q["chain"], round(q["cost"])) for q in plans[:5]]
 
@@ -625,11 +597,25 @@ def test_trials_lock_one_winner_and_every_plan_switches(monkeypatch):
     assert all(p.autotune_info["status"] == "locked" and p.config == trial["winner"] for p in plans)
 
 
+def _recorded_model():
+    """A cost model measured once (tests/data/cost_model_2048_zen5.json): tests that rank
+    chains or compare costs use it, so their outcome is not this machine's timing."""
+    import json
+    from pathlib import Path
+    rec = json.loads((Path(__file__).parent / "data" / "cost_model_2048_zen5.json").read_text())
+    return mf._gatechain.CostModel.from_dict(rec["model"])
+
+
 def test_cost_calibration_is_sane():
+    """A live calibration's structure (every band priced, finite and positive); the cost
+    relations are checked on the recorded model, not on this host's timing."""
     cm = mf._gatechain.calibrate_costs(2048, 32)
-    assert all(v > 0 for v in cm.dense.values())
-    assert cm.dense[64] < cm.dense[1024]               # wider first tiers cost more per pair
-    assert cm.refine(0.05) > cm.dense[256]             # a refine costs more than a coarse evaluation
+    assert set(cm.dense) >= {64, 128, 256, 512, 1024}
+    assert all(np.isfinite(v) and v > 0 for v in cm.dense.values())
+    assert np.isfinite(cm.refine(0.05)) and cm.refine(0.05) > 0
+    rec = _recorded_model()
+    assert rec.dense[64] < rec.dense[1024]             # wider first tiers cost more per pair
+    assert rec.refine(0.05) > rec.dense[256]           # a refine costs more than a coarse evaluation
 
 
 def test_cost_file_reproduces_the_measured_models(monkeypatch, tmp_path):

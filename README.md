@@ -205,19 +205,13 @@ historical research scripts.
 The [performance checks](https://github.com/ahnitz/matchedfilter/blob/main/docs/testing-coverage.md#performance-regression-checks)
 include opt-in timing gates and comparison with a saved baseline.
 
-### Regression Benchmark Suite & Invariant Verification
+### Search contracts
 
-To safeguard against throughput drops, threshold contract violations, and autotuning regressions across key interfaces:
-
-```bash
-# Run via pytest (asserts invariants, noise contracts, and injection recovery fidelity in < 2s):
-pytest tests/test_regression_suite.py
-
-# Or run directly for detailed latency, throughput, and status reporting:
-python tests/test_regression_suite.py
-```
-
-**Development Procedure**: Whenever an issue (fidelity bug, threshold contract violation, autotuning failure, or performance regression) is identified and resolved, add a dedicated regression test case and metric assertion to `tests/test_regression_suite.py` to permanently lock in the improvement.
+`tests/test_search_contracts.py` pins the search-level contracts (noise and injection
+behaviour per engine, lazy template loading, the gate chain's pool and thresholds,
+autotuning). The standard benchmark is the ladder, `tools/ladder.py`. When a fidelity bug,
+threshold contract violation or autotuning failure is fixed, add a test that fails on the
+old code to the file that covers that behaviour.
 
 ## License
 

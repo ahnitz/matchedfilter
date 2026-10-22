@@ -121,21 +121,3 @@ def test_fine_dif_noise_invariants():
     aidx, aval = mf_dif.run(binsize=8, threshold=3.0, raw=True)
     n_trigs = np.sum(aidx >= 0)
     assert n_trigs == 0, f"Expected 0 triggers on pure noise at threshold=6.0, got {n_trigs}"
-
-
-def test_fine_dif_memory_benchmark():
-    """Benchmark full rate N=2048 vs critical rate 2-data DIF K=1024 memory reduction."""
-    N = 2048
-    K = N // 2
-    n_templates = 495
-
-    mem_full_mb = n_templates * N * 8 / (1024 * 1024)
-    mem_dif_mb = n_templates * K * 8 / (1024 * 1024)
-    reduction = (1.0 - mem_dif_mb / mem_full_mb) * 100.0
-
-    print(f"\n[Step 3 Benchmark] 495 templates active-band memory:")
-    print(f"  Full rate N=2048: {mem_full_mb:.2f} MB")
-    print(f"  DIF K=1024:       {mem_dif_mb:.2f} MB")
-    print(f"  RAM Reduction:    {reduction:.1f}%")
-
-    assert reduction >= 49.9, f"Expected 50% memory reduction, got {reduction:.1f}%"
