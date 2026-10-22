@@ -341,3 +341,4 @@ A step that changes C or workflows is first pushed to a `ci/<topic>` branch and 
   | ASan+UBSan at -O1 | 390 s |
 
   The sanitized build drops use-after-scope checking (every other check stays, at the shipped -O3). The nightly builds once per architecture (sanitize-build, 150-minute limit, an artifact) and the shards test that build (sanitize.sh --keep DIR --build-only, then --prebuilt DIR).
+- 2026-10-22: **D3b: the docs index lists everything.** docs/README.md linked 36 of the 71 documents; environment.md, the active plans, the search design and the SIMD layer were among the missing. It now lists every document once: using the library, how it works, performance, development, plans, and a dated history of studies, audits and retired plans. tests/test_docs_index.py checks that every docs/*.md is listed and every link resolves.
