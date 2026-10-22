@@ -424,3 +424,7 @@ A step that changes C or workflows is first pushed to a `ci/<topic>` branch and 
   - Also among them: forward_bands_* and pack_coarse, which the backend requests (_vkcompute's fwd_bands and pack) but no test drives here. A test gap, not dead files.
   - No shipped SPIR-V file is unreachable by name.
   - Still open, on a CUDA device: the CUDA coarse builds a device cannot load, and the same measurement for PTX. Metal's files are checked against its manifest by test_metal.
+- 2026-10-22: **A nightly crash left no report.** x86 shard 4/6 (Intel AVX3) aborted at rc=134, 48 s in, with no sanitizer report and no test named. Shard 4/6 ran clean twice on dev2 (Zen 5 AVX3) under the same build.
+  - ASan wrote its report to fd 2, which pytest captures into a temporary file during each test, so the abort lost it. ASan and UBSan now write to log_path files, which sanitize.sh prints after the run.
+  - The -q log named no test, so the gdb re-run had nothing to run. The shards now run -v, and sanitize_report's --crashing-test falls back to the last node id with no outcome (tests/test_sanitize_report.py).
+  - sanitize.sh put its own -q before the caller's arguments, which cancels a -v. It now passes the caller's verbosity unchanged.

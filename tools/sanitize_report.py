@@ -3,7 +3,8 @@
     python3 tools/sanitize_report.py LOG RC
     python3 tools/sanitize_report.py --crashing-test LOG    # the test running at a crash
 
-The annotation leads with what matters when a shard fails: the sanitizer report (the
+With pytest -v the log names each test as it starts, so a crash is placed even when no
+stack names it. The annotation leads with what matters when a shard fails: the sanitizer report (the
 AddressSanitizer ERROR block, or UndefinedBehaviorSanitizer's "runtime error" lines with
 the stack that follows) or, for another abort, the lines before faulthandler's "Fatal
 Python error"; then the test faulthandler shows running, then the end of the log.
@@ -13,12 +14,21 @@ import re
 import sys
 
 
+#: The outcomes pytest -v prints after a test's node id.
+OUTCOMES = ("PASSED", "FAILED", "SKIPPED", "XFAIL", "XPASS", "ERROR")
+
+
 def crashing_test(text):
-    """The pytest node (tests/test_x.py::test_y) faulthandler shows running at a crash, or
-    None."""
-    import re as _re
-    m = _re.findall(r'File "[^"]*/(tests/test_\w+\.py)", line \d+ in (test_\w+)', text)
-    return "%s::%s" % m[0] if m else None
+    """The pytest node (tests/test_x.py::test_y) running at a crash, or None: the one
+    faulthandler shows, else the last node id pytest -v printed with no outcome after it
+    (under ASan, ASan's abort handler runs instead of faulthandler's)."""
+    m = re.findall(r'File "[^"]*/(tests/test_\w+\.py)", line \d+ in (test_\w+)', text)
+    if m:
+        return "%s::%s" % m[0]
+    started = re.findall(r"^(tests/test_\w+\.py::\S+)(.*)$", text, re.M)
+    if started and not any(o in started[-1][1] for o in OUTCOMES):
+        return started[-1][0]
+    return None
 
 
 def summary(text, limit=3800):
