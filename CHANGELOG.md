@@ -122,6 +122,11 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ### Fixed
 
+- One filter object per thread: a call on an object while another thread's call on it is
+  running raises `RuntimeError` ("use one filter per thread"); it used to corrupt the
+  plan's buffers silently. Lazily allocated scratch (series spectra, the DIF forwards,
+  the platform-FFT buffers) is allocated all-or-nothing: one failed allocation used to
+  leave a half-set state that the next call took as ready and dereferenced.
 - C entry points check caller ranges and sizes without overflow: a subrange near the
   int maximum, a tap stride or an output size whose product wrapped used to pass the check
   and read or write out of bounds. A NaN threshold raises `ValueError`; a filter object

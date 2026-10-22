@@ -103,6 +103,18 @@ struct ap_mf_plan {
   void *qscr;                 /* kernel scratch */
 };
 
+/* Two scratch buffers of `bytes` each, allocated together: both or neither. A guard on the
+   first alone took a half-allocated pair as ready after one failed allocation, and the next
+   call dereferenced the missing one. */
+static int alloc_pair(float **a,float **b,size_t bytes){
+  if(*a && *b) return 0;
+  free(*a); free(*b);
+  *a=ap_alloc64(bytes); *b=ap_alloc64(bytes);
+  if(*a && *b) return 0;
+  free(*a); free(*b); *a=*b=NULL;
+  return -1;
+}
+
 /* like: the plan whose back end a sub-plan uses (NULL: the active target). */
 static ap_mf_plan *create_mf(size_t n, int ndata, int ntmpl, int pair, const ap_plan *like){
   if(ndata<1||ntmpl<1) return NULL;
@@ -280,11 +292,11 @@ int ap_mf_set_platform_fft(ap_mf_plan *p, int on){
   if(p->pb && !p->tmre) return -1;
   if(!p->accel) p->accel=ap_accel_create(p->n);
   if(!p->accel) return -1;
-  if(!p->pb && !p->anr){
-    p->anr=ap_alloc64((size_t)p->nt*p->n*sizeof(float));
-    p->ani=ap_alloc64((size_t)p->nt*p->n*sizeof(float));
+  if(!p->pb && !(p->anr && p->ani && p->aready)){
+    free(p->aready); p->aready=NULL;
+    if(alloc_pair(&p->anr,&p->ani,(size_t)p->nt*p->n*sizeof(float))) return -1;
     p->aready=calloc((size_t)p->nt,1);
-    if(!p->anr||!p->ani||!p->aready) return -1;
+    if(!p->aready){ free(p->anr); free(p->ani); p->anr=p->ani=NULL; return -1; }
   }
   p->use_accel=1;
   return 0;
@@ -902,11 +914,7 @@ int ap_mf_correlate(ap_mf_plan *p,int d0,int nd,int t0,int nt,float *out){
 static int series_spectra(ap_mf_plan *p,const float *series,size_t nseries,
                           const size_t *starts,int count){
   const size_t n=p->n;
-  if(!p->sfwd){
-    p->sfwd=ap_alloc64(2*n*sizeof(float));
-    p->sspec=ap_alloc64(2*n*sizeof(float));
-    if(!p->sfwd||!p->sspec) return -1;
-  }
+  if(alloc_pair(&p->sfwd,&p->sspec,2*n*sizeof(float))) return -1;
   const float inv=1.0f/(float)n;
   if(p->real_series){
     for(int j=0;j<count;j++){
@@ -1136,11 +1144,7 @@ int ap_mf_correlate_series_continuous_real(ap_mf_plan *p,const float *series,
       p->rtw[2*k]=(float)cos(a); p->rtw[2*k+1]=(float)sin(a);
     }
   }
-  if(!p->sfwd){
-    p->sfwd=ap_alloc64(2*p->n*sizeof(float));
-    p->sspec=ap_alloc64(2*p->n*sizeof(float));
-    if(!p->sfwd||!p->sspec) return -1;
-  }
+  if(alloc_pair(&p->sfwd,&p->sspec,2*p->n*sizeof(float))) return -1;
   p->real_series=1;
   const int r=ap_mf_correlate_series_continuous(p,series,nseries,starts,nblocks,lo,hi,t0,nt,out,
                                                 bounds);
@@ -1173,11 +1177,7 @@ int ap_mf_run_series(ap_mf_plan *p,
   if(!series||!start||!win_start||!win_end) return -1;
   if(!ap_range_ok(t0,nt,p->nt)) return -1;
   const size_t n=p->n;
-  if(!p->sfwd){
-    p->sfwd=ap_alloc64(2*n*sizeof(float));
-    p->sspec=ap_alloc64(2*n*sizeof(float));
-    if(!p->sfwd||!p->sspec) return -1;
-  }
+  if(alloc_pair(&p->sfwd,&p->sspec,2*n*sizeof(float))) return -1;
   const size_t nb0=ap_mf_nbins(p,binsize,win_start[0],win_end[0]);
   int total=0;
   for(int b0=0;b0<nblocks;){
@@ -1337,18 +1337,18 @@ int ap_mf_run_series_dif(ap_mf_plan *p,
   if(win_start[0]>=first_end) return -1;
   const size_t nb0=1+(first_end-win_start[0]-1)/binsize;
   if(decimated){
-    if(!p->fft_fwd_n){
-      p->fft_fwd_n = ap_create_like(p->fft,n);
-      p->sfwd_n = ap_alloc64(2 * n * sizeof(float));
-      p->sspec_n = ap_alloc64(2 * n * sizeof(float));
-      if(!p->fft_fwd_n || !p->sfwd_n || !p->sspec_n) return -1;
+    if(!(p->fft_fwd_n && p->sfwd_n && p->sspec_n)){   /* all three, or none */
+      ap_destroy(p->fft_fwd_n); p->fft_fwd_n = ap_create_like(p->fft,n);
+      if(!p->fft_fwd_n || alloc_pair(&p->sfwd_n,&p->sspec_n,2 * n * sizeof(float))){
+        ap_destroy(p->fft_fwd_n); p->fft_fwd_n = NULL; return -1;
+      }
     }
   } else {
-    if(!p->fft_fwd){
-      p->fft_fwd = ap_create_like(p->fft,input_n);
-      p->sfwd_2n = ap_alloc64(2 * input_n * sizeof(float));
-      p->sspec_2n = ap_alloc64(2 * input_n * sizeof(float));
-      if(!p->fft_fwd || !p->sfwd_2n || !p->sspec_2n) return -1;
+    if(!(p->fft_fwd && p->sfwd_2n && p->sspec_2n)){   /* all three, or none */
+      ap_destroy(p->fft_fwd); p->fft_fwd = ap_create_like(p->fft,input_n);
+      if(!p->fft_fwd || alloc_pair(&p->sfwd_2n,&p->sspec_2n,2 * input_n * sizeof(float))){
+        ap_destroy(p->fft_fwd); p->fft_fwd = NULL; return -1;
+      }
     }
   }
 

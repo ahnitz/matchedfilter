@@ -146,7 +146,21 @@ static ap_peak *reserve_peaks(ap_peak **storage,Py_ssize_t *capacity,Py_ssize_t 
 }
 
 /* ---------------- matched filter ---------------- */
-typedef struct { PyObject_HEAD ap_mf_plan *p; Py_ssize_t n; int nd,nt; ap_peak *peaks; Py_ssize_t peak_capacity; } MFObject;
+typedef struct { PyObject_HEAD ap_mf_plan *p; Py_ssize_t n; int nd,nt; ap_peak *peaks; Py_ssize_t peak_capacity;
+                 int busy; /* a method is running (GUARDED) */ } MFObject;
+
+/* One filter object per thread. Methods release the GIL while the kernels run, and a
+   plan's buffers are not safe for two calls at once: a second thread calling into the
+   same object would corrupt them. GUARDED wraps a method so that a call while another is
+   in flight raises instead; the flag is read and set with the GIL held, so the check
+   itself cannot race. */
+#define GUARDED(T,f) \
+  static PyObject *f##_g(T *self,PyObject *args){ \
+    if(self->busy){ PyErr_SetString(PyExc_RuntimeError,"matchedfilter: filter in use by " \
+                                    "another thread; use one filter per thread"); return NULL; } \
+    self->busy=1; PyObject *r=f(self,args); self->busy=0; return r; }
+#define BUSY_GETTER(T) \
+  static PyObject *T##_get_busy(T *self,void *closure){ (void)closure; return PyBool_FromLong(self->busy); }
 
 static int MF_init(MFObject *self,PyObject *args,PyObject *kw){
   if(self->p){ PyErr_SetString(PyExc_RuntimeError,"matchedfilter: filter already initialised"); return -1; }
@@ -532,23 +546,43 @@ static PyObject *MF_nbins(MFObject *self,PyObject *args){
   if(!PyArg_ParseTuple(args,"nnn",&bs,&st,&en)) return NULL;
   return PyLong_FromSize_t(ap_mf_nbins(self->p,(size_t)bs,(size_t)st,(size_t)en));
 }
+GUARDED(MFObject,MF_set_data)
+GUARDED(MFObject,MF_correlate_series_continuous_real)
+GUARDED(MFObject,MF_set_platform_fft)
+GUARDED(MFObject,MF_set_template)
+GUARDED(MFObject,MF_set_data_batch)
+GUARDED(MFObject,MF_set_template_batch)
+GUARDED(MFObject,MF_run)
+GUARDED(MFObject,MF_correlate)
+GUARDED(MFObject,MF_correlate_series)
+GUARDED(MFObject,MF_correlate_series_continuous)
+GUARDED(MFObject,MF_run_series)
+GUARDED(MFObject,MF_run_series_dif)
+GUARDED(MFObject,MF_nbins)
+GUARDED(MFObject,MF_q15_screen)
+GUARDED(MFObject,MF_q15_lanes)
 static PyMethodDef MF_methods[]={
-  {"set_data",(PyCFunction)MF_set_data,METH_VARARGS,"set_data(i, buffer)"},
-  {"correlate_series_continuous_real",(PyCFunction)MF_correlate_series_continuous_real,METH_VARARGS,"correlate_series_continuous_real(series_f32, starts, lo, hi, t0, nt, out_c64): the same of a real series, half-size block transforms"},
-  {"set_platform_fft",(PyCFunction)MF_set_platform_fft,METH_VARARGS,"set_platform_fft(on) -> True if correlate_series_continuous now runs through the platform FFT"},
-  {"set_template",(PyCFunction)MF_set_template,METH_VARARGS,"set_template(i, buffer)"},
-  {"set_data_batch",(PyCFunction)MF_set_data_batch,METH_VARARGS,"set_data_batch(i0, buffer)"},
-  {"set_template_batch",(PyCFunction)MF_set_template_batch,METH_VARARGS,"set_template_batch(i0, buffer)"},
-  {"run",(PyCFunction)MF_run,METH_VARARGS,"run(...) -> total crossings"},
-  {"correlate",(PyCFunction)MF_correlate,METH_VARARGS,"correlate(...) -> full correlation"},
-  {"correlate_series",(PyCFunction)MF_correlate_series,METH_VARARGS,"correlate_series(...) -> full correlation"},
-  {"correlate_series_continuous",(PyCFunction)MF_correlate_series_continuous,METH_VARARGS,
+  {"set_data",(PyCFunction)MF_set_data_g,METH_VARARGS,"set_data(i, buffer)"},
+  {"correlate_series_continuous_real",(PyCFunction)MF_correlate_series_continuous_real_g,METH_VARARGS,"correlate_series_continuous_real(series_f32, starts, lo, hi, t0, nt, out_c64): the same of a real series, half-size block transforms"},
+  {"set_platform_fft",(PyCFunction)MF_set_platform_fft_g,METH_VARARGS,"set_platform_fft(on) -> True if correlate_series_continuous now runs through the platform FFT"},
+  {"set_template",(PyCFunction)MF_set_template_g,METH_VARARGS,"set_template(i, buffer)"},
+  {"set_data_batch",(PyCFunction)MF_set_data_batch_g,METH_VARARGS,"set_data_batch(i0, buffer)"},
+  {"set_template_batch",(PyCFunction)MF_set_template_batch_g,METH_VARARGS,"set_template_batch(i0, buffer)"},
+  {"run",(PyCFunction)MF_run_g,METH_VARARGS,"run(...) -> total crossings"},
+  {"correlate",(PyCFunction)MF_correlate_g,METH_VARARGS,"correlate(...) -> full correlation"},
+  {"correlate_series",(PyCFunction)MF_correlate_series_g,METH_VARARGS,"correlate_series(...) -> full correlation"},
+  {"correlate_series_continuous",(PyCFunction)MF_correlate_series_continuous_g,METH_VARARGS,
    "correlate_series_continuous(...) -> continuous valid correlation"},
-  {"run_series",(PyCFunction)MF_run_series,METH_VARARGS,"run_series(...)"},
-  {"run_series_dif",(PyCFunction)MF_run_series_dif,METH_VARARGS,"run_series_dif(...)"},
-  {"nbins",(PyCFunction)MF_nbins,METH_VARARGS,"nbins(binsize, start, end)"},
-  {"q15_screen",(PyCFunction)MF_q15_screen,METH_VARARGS,"q15_screen(d0,nd,t0,nt,thr,start,end,pass,stat) -> passed"},
-  {"q15_lanes",(PyCFunction)MF_q15_lanes,METH_NOARGS,"q15_lanes() -> pairs per Q15 screen call, 0 if none"},
+  {"run_series",(PyCFunction)MF_run_series_g,METH_VARARGS,"run_series(...)"},
+  {"run_series_dif",(PyCFunction)MF_run_series_dif_g,METH_VARARGS,"run_series_dif(...)"},
+  {"nbins",(PyCFunction)MF_nbins_g,METH_VARARGS,"nbins(binsize, start, end)"},
+  {"q15_screen",(PyCFunction)MF_q15_screen_g,METH_VARARGS,"q15_screen(d0,nd,t0,nt,thr,start,end,pass,stat) -> passed"},
+  {"q15_lanes",(PyCFunction)MF_q15_lanes_g,METH_NOARGS,"q15_lanes() -> pairs per Q15 screen call, 0 if none"},
+  {NULL}
+};
+BUSY_GETTER(MFObject)
+static PyGetSetDef MF_getset[] = {
+  {"_busy", (getter)MFObject_get_busy, NULL, "a method is running on this object", NULL},
   {NULL}
 };
 static PyTypeObject MFType={
@@ -556,7 +590,7 @@ static PyTypeObject MFType={
   .tp_name="matchedfilter._core.MF", .tp_basicsize=sizeof(MFObject),
   .tp_flags=Py_TPFLAGS_DEFAULT, .tp_new=PyType_GenericNew,
   .tp_init=(initproc)MF_init, .tp_dealloc=(destructor)MF_dealloc,
-  .tp_methods=MF_methods, .tp_doc="matchedfilter matched filter (opaque)",
+  .tp_methods=MF_methods, .tp_getset=MF_getset, .tp_doc="matchedfilter matched filter (opaque)",
 };
 
 /* ---------------- hierarchical matched filter ---------------- */
@@ -566,7 +600,8 @@ static PyTypeObject MFType={
    filter is slower than expected on a particular data set. */
 typedef struct { PyObject_HEAD ap_hmf_plan *p; Py_ssize_t n, k; int nd,nt; ap_peak *peaks; Py_ssize_t peak_capacity;
                  int real; /* run_series reads a real series (set_real_series) */
-                 int real_stride; /* floats between its samples: 1, or 2 for a complex lane */ } HMFObject;
+                 int real_stride; /* floats between its samples: 1, or 2 for a complex lane */
+                 int busy; /* a method is running (GUARDED) */ } HMFObject;
 
 /* HMF(n, ndata, ntemplates, bands, series_group=8, k=0): a gate chain of coarse
    bands (strictly increasing), then the full refine. Thresholds come from Python. */
@@ -973,36 +1008,64 @@ static PyObject *HMF_set_hermitian(HMFObject *self,PyObject *args){
   Py_RETURN_NONE;
 }
 
+GUARDED(HMFObject,HMF_series_group)
+GUARDED(HMFObject,HMF_set_q15_tier0)
+GUARDED(HMFObject,HMF_set_platform_fft)
+GUARDED(HMFObject,HMF_set_taps)
+GUARDED(HMFObject,HMF_set_real_series)
+GUARDED(HMFObject,HMF_set_direct)
+GUARDED(HMFObject,HMF_direct_stats)
+GUARDED(HMFObject,HMF_set_q15)
+GUARDED(HMFObject,HMF_q15_stats)
+GUARDED(HMFObject,HMF_set_data)
+GUARDED(HMFObject,HMF_set_template)
+GUARDED(HMFObject,HMF_set_data_batch)
+GUARDED(HMFObject,HMF_set_template_batch)
+GUARDED(HMFObject,HMF_set_reference)
+GUARDED(HMFObject,HMF_set_thresholds)
+GUARDED(HMFObject,HMF_set_hermitian)
+GUARDED(HMFObject,HMF_run)
+GUARDED(HMFObject,HMF_nbins)
+GUARDED(HMFObject,HMF_run_series)
+GUARDED(HMFObject,HMF_run_series_sparse)
+GUARDED(HMFObject,HMF_stats)
+GUARDED(HMFObject,HMF_chain)
+GUARDED(HMFObject,HMF_thresholds)
+GUARDED(HMFObject,HMF_series_ticks)
+GUARDED(HMFObject,HMF_tier_stats)
+GUARDED(HMFObject,HMF_tier_inputs)
+GUARDED(HMFObject,HMF_first_gate_passed)
+GUARDED(HMFObject,HMF_set_q15_recheck_late)
 static PyMethodDef HMF_methods[]={
-  {"series_group",(PyCFunction)HMF_series_group,METH_NOARGS,"actual series block group"},
-  {"set_q15_tier0",(PyCFunction)HMF_set_q15_tier0,METH_VARARGS,"set_q15_tier0(fp16) -> True if tier 0 behind the Q15 screen now runs on the FP16 gate"},
-  {"set_platform_fft",(PyCFunction)HMF_set_platform_fft,METH_VARARGS,"set_platform_fft(on) -> True if block forwards now run through the platform FFT"},
-  {"set_taps",(PyCFunction)HMF_set_taps,METH_VARARGS,"set_taps(taps float32 (nt, stride), stride, counts int64 (nt,)): each template's real FIR taps"},
-  {"set_real_series",(PyCFunction)HMF_set_real_series,METH_VARARGS,"set_real_series(on, stride=1) -> True if run_series now reads real float32 series (half-size block transforms); stride 2 reads one lane of a complex series"},
-  {"set_direct",(PyCFunction)HMF_set_direct,METH_VARARGS,"set_direct(on, halfwidth=1) -> True if survivors are now refined by direct correlation where cheaper"},
-  {"direct_stats",(PyCFunction)HMF_direct_stats,METH_NOARGS,"direct refine counters and prices"},
-  {"set_q15",(PyCFunction)HMF_set_q15,METH_VARARGS,"set_q15(on) -> True if the first tier now runs behind the Q15 screen"},
-  {"q15_stats",(PyCFunction)HMF_q15_stats,METH_NOARGS,"q15_stats() -> (on, pairs passed to the float tier, screen ticks)"},
-  {"set_data",(PyCFunction)HMF_set_data,METH_VARARGS,"set_data(i, buffer)"},
-  {"set_template",(PyCFunction)HMF_set_template,METH_VARARGS,"set_template(i, buffer)"},
-  {"set_data_batch",(PyCFunction)HMF_set_data_batch,METH_VARARGS,"set_data_batch(i0, buffer)"},
-  {"set_template_batch",(PyCFunction)HMF_set_template_batch,METH_VARARGS,"set_template_batch(i0, buffer)"},
-  {"set_reference",(PyCFunction)HMF_set_reference,METH_VARARGS,"set_reference(buffer|None)"},
-  {"set_thresholds",(PyCFunction)HMF_set_thresholds,METH_VARARGS,"set_thresholds([t per tier]); negative = unconfigured"},
-  {"set_hermitian",(PyCFunction)HMF_set_hermitian,METH_VARARGS,"set_hermitian(bool)"},
-  {"run",(PyCFunction)HMF_run,METH_VARARGS,"run(...) -> total crossings"},
-  {"nbins",(PyCFunction)HMF_nbins,METH_VARARGS,"nbins(binsize, start, end)"},
-  {"run_series",(PyCFunction)HMF_run_series,METH_VARARGS,"run_series(...)"},
-  {"run_series_sparse",(PyCFunction)HMF_run_series_sparse,METH_VARARGS,
+  {"series_group",(PyCFunction)HMF_series_group_g,METH_NOARGS,"actual series block group"},
+  {"set_q15_tier0",(PyCFunction)HMF_set_q15_tier0_g,METH_VARARGS,"set_q15_tier0(fp16) -> True if tier 0 behind the Q15 screen now runs on the FP16 gate"},
+  {"set_platform_fft",(PyCFunction)HMF_set_platform_fft_g,METH_VARARGS,"set_platform_fft(on) -> True if block forwards now run through the platform FFT"},
+  {"set_taps",(PyCFunction)HMF_set_taps_g,METH_VARARGS,"set_taps(taps float32 (nt, stride), stride, counts int64 (nt,)): each template's real FIR taps"},
+  {"set_real_series",(PyCFunction)HMF_set_real_series_g,METH_VARARGS,"set_real_series(on, stride=1) -> True if run_series now reads real float32 series (half-size block transforms); stride 2 reads one lane of a complex series"},
+  {"set_direct",(PyCFunction)HMF_set_direct_g,METH_VARARGS,"set_direct(on, halfwidth=1) -> True if survivors are now refined by direct correlation where cheaper"},
+  {"direct_stats",(PyCFunction)HMF_direct_stats_g,METH_NOARGS,"direct refine counters and prices"},
+  {"set_q15",(PyCFunction)HMF_set_q15_g,METH_VARARGS,"set_q15(on) -> True if the first tier now runs behind the Q15 screen"},
+  {"q15_stats",(PyCFunction)HMF_q15_stats_g,METH_NOARGS,"q15_stats() -> (on, pairs passed to the float tier, screen ticks)"},
+  {"set_data",(PyCFunction)HMF_set_data_g,METH_VARARGS,"set_data(i, buffer)"},
+  {"set_template",(PyCFunction)HMF_set_template_g,METH_VARARGS,"set_template(i, buffer)"},
+  {"set_data_batch",(PyCFunction)HMF_set_data_batch_g,METH_VARARGS,"set_data_batch(i0, buffer)"},
+  {"set_template_batch",(PyCFunction)HMF_set_template_batch_g,METH_VARARGS,"set_template_batch(i0, buffer)"},
+  {"set_reference",(PyCFunction)HMF_set_reference_g,METH_VARARGS,"set_reference(buffer|None)"},
+  {"set_thresholds",(PyCFunction)HMF_set_thresholds_g,METH_VARARGS,"set_thresholds([t per tier]); negative = unconfigured"},
+  {"set_hermitian",(PyCFunction)HMF_set_hermitian_g,METH_VARARGS,"set_hermitian(bool)"},
+  {"run",(PyCFunction)HMF_run_g,METH_VARARGS,"run(...) -> total crossings"},
+  {"nbins",(PyCFunction)HMF_nbins_g,METH_VARARGS,"nbins(binsize, start, end)"},
+  {"run_series",(PyCFunction)HMF_run_series_g,METH_VARARGS,"run_series(...)"},
+  {"run_series_sparse",(PyCFunction)HMF_run_series_sparse_g,METH_VARARGS,
    "run_series_sparse(series,starts,wstart,wend,t0,nt,binsize,thr,cnt) -> (flat,index,value bytes,total)"},
-  {"stats",(PyCFunction)HMF_stats,METH_NOARGS,"stats() -> (pairs, refined)"},
-  {"chain",(PyCFunction)HMF_chain,METH_NOARGS,"chain() -> bands"},
-  {"thresholds",(PyCFunction)HMF_thresholds,METH_NOARGS,"thresholds() -> per-tier thresholds in force"},
-  {"series_ticks",(PyCFunction)HMF_series_ticks,METH_NOARGS,"series_ticks() -> ticks spent in run_series calls"},
-  {"tier_stats",(PyCFunction)HMF_tier_stats,METH_NOARGS,"[(band, passed, ticks) per tier] + [(n, refined, ticks)]"},
-  {"tier_inputs",(PyCFunction)HMF_tier_inputs,METH_NOARGS,"Actual input counts per logical gate"},
-  {"first_gate_passed",(PyCFunction)HMF_first_gate_passed,METH_NOARGS,"Cumulative passes of the first executed float gate"},
-  {"set_q15_recheck_late",(PyCFunction)HMF_set_q15_recheck_late,METH_VARARGS,"Choose Q15, tier 1, tier 0, remaining tiers scheduling"},
+  {"stats",(PyCFunction)HMF_stats_g,METH_NOARGS,"stats() -> (pairs, refined)"},
+  {"chain",(PyCFunction)HMF_chain_g,METH_NOARGS,"chain() -> bands"},
+  {"thresholds",(PyCFunction)HMF_thresholds_g,METH_NOARGS,"thresholds() -> per-tier thresholds in force"},
+  {"series_ticks",(PyCFunction)HMF_series_ticks_g,METH_NOARGS,"series_ticks() -> ticks spent in run_series calls"},
+  {"tier_stats",(PyCFunction)HMF_tier_stats_g,METH_NOARGS,"[(band, passed, ticks) per tier] + [(n, refined, ticks)]"},
+  {"tier_inputs",(PyCFunction)HMF_tier_inputs_g,METH_NOARGS,"Actual input counts per logical gate"},
+  {"first_gate_passed",(PyCFunction)HMF_first_gate_passed_g,METH_NOARGS,"Cumulative passes of the first executed float gate"},
+  {"set_q15_recheck_late",(PyCFunction)HMF_set_q15_recheck_late_g,METH_VARARGS,"Choose Q15, tier 1, tier 0, remaining tiers scheduling"},
   {NULL}
 };
 static PyObject *HMF_get_n(HMFObject *self, void *closure){
@@ -1025,9 +1088,13 @@ static int HMF_set_hermitian_prop(HMFObject *self, PyObject *value, void *closur
   }
   int h = PyObject_IsTrue(value);
   if(h < 0) return -1;
+  if(self->busy){ PyErr_SetString(PyExc_RuntimeError,"matchedfilter: filter in use by another "
+                                  "thread; use one filter per thread"); return -1; }
   return ap_hmf_set_hermitian(self->p, h);
 }
+BUSY_GETTER(HMFObject)
 static PyGetSetDef HMF_getset[] = {
+  {"_busy", (getter)HMFObject_get_busy, NULL, "a method is running on this object", NULL},
   {"n", (getter)HMF_get_n, NULL, "full FFT size", NULL},
   {"k", (getter)HMF_get_k, NULL, "template bins", NULL},
   {"hermitian", (getter)HMF_get_hermitian, (setter)HMF_set_hermitian_prop, "Hermitian symmetry mode for real filters", NULL},
@@ -1297,7 +1364,7 @@ static PyObject *M_price_q15_tier0(PyObject *self, PyObject *args){
 }
 
 /* Root(n): the root stage of a hierarchical search (ap_root_real). */
-typedef struct { PyObject_HEAD ap_root *r; } RootObject;
+typedef struct { PyObject_HEAD ap_root *r; int busy; /* GUARDED */ } RootObject;
 
 static PyObject *Root_new(PyTypeObject *type, PyObject *args, PyObject *kw){
   (void)kw; Py_ssize_t n;
@@ -1342,10 +1409,12 @@ static PyObject *Root_real(RootObject *self, PyObject *args){
 static PyObject *Root_length(RootObject *self, PyObject *unused){
   (void)unused; return PyLong_FromSize_t(ap_root_length(self->r));
 }
+GUARDED(RootObject,Root_real)
+GUARDED(RootObject,Root_length)
 static PyMethodDef Root_methods[]={
-  {"real",(PyCFunction)Root_real,METH_VARARGS,
+  {"real",(PyCFunction)Root_real_g,METH_VARARGS,
    "real(D, T, k0, k1, scale, out): out = scale * C2R(conj(T) D over bins [k0, k1))"},
-  {"length",(PyCFunction)Root_length,METH_NOARGS,"length() -> n"},
+  {"length",(PyCFunction)Root_length_g,METH_NOARGS,"length() -> n"},
   {NULL,NULL,0,NULL}};
 static PyTypeObject RootType={
   PyVarObject_HEAD_INIT(NULL,0)
