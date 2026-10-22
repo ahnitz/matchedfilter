@@ -349,3 +349,19 @@ A step that changes C or workflows is first pushed to a `ci/<topic>` branch and 
   - sanitize.sh now finds the real runtime through a probe program's ldd. On Fedora, -print-file-name=libasan.so names a linker script, which LD_PRELOAD ignored, so every run aborted at start.
   - On CI, x86_64 shards aborted (rc 134) twice in the forced pair-batch tests (MF_PBMAX=1024: test_forced_cpu_pair_batch, test_continuous_forced_pair_batch_and_fir_bank) and passed in two other runs. No sanitizer report or message preceded the aborts. The tests pass locally under ASan, for every target and in their shard. ASan now runs with handle_abort=1, so a recurrence prints the native stack.
 - 2026-10-22: **D4a proofs.** The release rehearsal is green with the platform-filtered wheels, and the macOS wheel passes the full suite on the M2. The macOS release wheels first failed in test_measured_choice, which read ptx/manifest.json from the install; that is fixed. One CI run's Metal job reported a paravirtual GPU hang (kIOGPUCommandBufferCallbackErrorHang) one commit after a green run whose only change was that test; re-proving.
+- 2026-10-22: **C6: GPU tests force real layouts.**
+  - conftest's forced_coarse_layouts names, per band, the first of the device's own layouts (ctx.coarse_layouts, parsed by the new _coarse.parse_label) that a test asks for. The tests force it through MF_COARSE_LAYOUT, which raises for a name the device lacks.
+  - test_gpu_loud_overflow and test_vk_hier_grouped (tiles), the packed-coarse partial-group test on Metal and the untiled-packing test on Vulkan (now required to run at least two packings) use it.
+  - Before, the Metal tile cases ran one layout under five names, and a Vulkan tile the device lacked fell back to untiled without saying so.
+  - Removed: MF_VK_COARSE_PPG/_TILE/_SUBGROUP/_TWT, MF_METAL_COARSE_PPG and _coarse.forced_tile.
+  - MF_VK_C16_BOUND=0 is MF_COARSE_RAW=1 on every backend; the old names are in the removed list and warn.
+- 2026-10-22: **C6: the sigma tool repaired.** tools/metal_c16_sigma.py had three faults:
+  - it iterated tiles through a variable nothing read;
+  - it printed res["0"] from keys "1".."8" (a KeyError);
+  - it read buffers through ctx._hier, which no longer exists.
+
+  tools/c16_sigma.py dispatches each of the device's coarse layouts directly, as the host's coarse timer does, on any backend. It reproduces the tables:
+  - Vulkan on the 8060S: sigma 1.46-1.49 / 1.79-1.81 / 2.12-2.15 at bands 64 / 256 / 1024 over 36-50 layouts each (C16_SIGMA 1.6 / 1.8 / 2.5);
+  - Metal on the M2: 1.72-1.78 at 256 over 16 layouts (C16_SIGMA_APPLE 1.8).
+
+  Gates: the full suite on dev2 (Vulkan) and on the M2 (Metal). The CUDA changes are the rename only and were not run on a CUDA device.

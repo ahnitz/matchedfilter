@@ -20,6 +20,14 @@ could make processes sharing a cost file choose differently: MF_TRIAL_RECHECK.
 Removed 2026-10-22: stage-B blocking measured slower at every length on Zen 3, Zen 5 and
 the M2: MF_BBLK.
 
+Removed 2026-10-22: per-backend coarse layout fields; MF_COARSE_LAYOUT forces a whole
+layout by name on every backend: MF_VK_COARSE_PPG, MF_VK_COARSE_TILE,
+MF_VK_COARSE_SUBGROUP, MF_VK_COARSE_TWT, MF_METAL_COARSE_PPG, MF_METAL_COARSE_TILE,
+MF_METAL_COARSE_TWT.
+
+Removed 2026-10-22: renamed MF_COARSE_RAW (MF_COARSE_RAW=1 is what MF_VK_C16_BOUND=0
+did, on every GPU backend): MF_VK_C16_BOUND.
+
 Older notes in docs/ that mention a removed variable describe past studies.
 
 ## Configuration
@@ -62,10 +70,8 @@ Older notes in docs/ that mention a removed variable describe past studies.
 | `MF_CORR_NO_STREAM=1` | off | No non-temporal stores in continuous correlation. |
 | `MF_BAND_FORWARD=0/1` | measured | GPU band forward off/on. |
 | `MF_COARSE_LAYOUT=<labels>` | measured | Force GPU coarse layouts by label. |
-| `MF_VK_COARSE_PPG`, `_TILE`, `_SUBGROUP`, `_TWT` | measured | Fix a Vulkan coarse layout field. |
-| `MF_METAL_COARSE_PPG` | measured | Fix a Metal coarse layout field. |
 | `MF_VK_SUBGROUP=<size>` | measured | Force a Vulkan subgroup size. |
-| `MF_VK_C16_BOUND=0` | 1 | Electing coarse kernel instead of the bound-only one. |
+| `MF_COARSE_RAW=1` | 0 | The fp16 coarse tier reports its raw maximum instead of an upper bound (every GPU backend; the physics tests and tools/c16_sigma.py). |
 | `MF_METAL_IEEE=all/none` | per kernel | IEEE math for all or no Metal kernels. |
 | `MF_GPU_FUSE_INTERLEAVE=<n>` | measured | Fixed Vulkan fusion interleave depth. |
 | `MF_GPU_ITEMS=0` | on | Single-template GPU jobs of a batch run one by one. |

@@ -58,10 +58,16 @@ def shipped_tiles(band, ppg, shipped):
     return tuple(t for t in TILE_PROBE if shipped(coarse_stem(band, ppg, t)))
 
 
-def forced_tile(env_var):
-    """A tile forced by the environment (for measurement and the tests), or None."""
-    from . import _config
-    return _config.get(env_var)
+def parse_label(label):
+    """(band, ppg, tile, twt, subgroup) of a coarse layout's name (layout_label's inverse),
+    or None for a name that is not a packed fp16 build (a driver's own gate, such as CUDA's
+    coarse_tc_512_w4)."""
+    import re
+    m = re.fullmatch(r"tierb_(\d+)_c16(?:p(\d+))?(?:t(\d+))?(w?)(?:@(\d+))?", label)
+    if m is None:
+        return None
+    band, ppg, tile, twt, sg = m.groups()
+    return int(band), int(ppg or 1), int(tile or 1), int(bool(twt)), int(sg or 0)
 
 
 #: Interleaved rounds the contenders of a coarse layout choice are re-timed in.

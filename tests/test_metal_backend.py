@@ -285,11 +285,9 @@ def test_metal_one_bin_and_general_kernels_agree(n, hierarchical, monkeypatch):
 
 def test_coarse_packing_fills_a_simd_group():
     for band in (64, 128, 256, 512):
-        p = _mtlcompute.coarse_ppg(band, 1000, override=None) if not os.environ.get(
-            "MF_METAL_COARSE_PPG") else None
-        if p is not None:
-            assert band // 16 * p >= _mtlcompute.TARGET_THREADS
-            assert (_mtlcompute._METAL_DIR / ("tierb_%d_c16p%d.metal" % (band, p))).is_file()
+        p = _mtlcompute.coarse_ppg(band, 1000)
+        assert band // 16 * p >= _mtlcompute.TARGET_THREADS
+        assert (_mtlcompute._METAL_DIR / ("tierb_%d_c16p%d.metal" % (band, p))).is_file()
     assert _mtlcompute.coarse_ppg(64, 10, override=3) == 1     # not shipped: unpacked
 
 
@@ -302,8 +300,11 @@ def test_metal_packed_coarse_handles_partial_groups(ctx, band, monkeypatch):
     lag = 77
     d[2] += 30.0 * h[4] * np.exp(-2j * np.pi * np.arange(n) * lag / n).astype(np.complex64)
     results = {}
+    from conftest import forced_coarse_layouts
     for p in (1, 2, 4, 8, 16):
-        monkeypatch.setenv("MF_METAL_COARSE_PPG", str(p))
+        value = forced_coarse_layouts(ctx, (band,), lambda f: f[1] == p and f[2] == 1)
+        assert value, "band %d has no untiled %d-pair layout on this device" % (band, p)
+        monkeypatch.setenv("MF_COARSE_LAYOUT", value)
         idx, val = ctx.hier_peaks(n, band, d, h, h[:, :band], {64: 0.75, 128: 1.2}[band],
                                   threshold=0.0)
         results[p] = (idx.copy(), val.copy(), ctx.last_refinements)

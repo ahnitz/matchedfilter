@@ -107,7 +107,7 @@ def assert_transfer(cpu, gpu, label):
 def test_coarse_kernel_fdr_transfer(band, backend, record_property, request, monkeypatch):
     # The transfer compares the coarse STATISTIC with the CPU's; the Vulkan fp16 tier
     # reports an upper bound on it unless told not to (tests/test_gpu_c16_bound.py).
-    monkeypatch.setenv("MF_VK_C16_BOUND", "0")
+    monkeypatch.setenv("MF_COARSE_RAW", "1")
     dev = usable_gpu() if backend == 'gpu' else None
     if backend == 'gpu' and dev is None:
         if request.config.getoption('--require-coarse-gpu'):

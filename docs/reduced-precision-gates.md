@@ -34,7 +34,7 @@ u = 2^-11 throughout; rms(y) is the pair's output rms over all lags (Parseval).
   criterion: margin use < 0.5.
 - **Measurement tools:**
   - `tools/gate16_error.py` for the CPU fp16 gate;
-  - `tools/metal_c16_sigma.py` and `tools/coarse_layout.py` for the GPU fp16 tier;
+  - `tools/c16_sigma.py` and `tools/coarse_layout.py` for the GPU fp16 tier;
   - `tools/cuda_tc_sigma.py` for the tensor-core gate;
   - `tools/gate_margin.py` for all of them (`--gate q15 gpu-c16 cpu-g16`).
 

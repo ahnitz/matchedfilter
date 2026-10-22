@@ -116,17 +116,12 @@ VARS: Tuple[Var, ...] = (
         usage="MF_BAND_FORWARD=0/1", kind="flag"),
     Var("MF_COARSE_LAYOUT", "override", "py", "measured", "Force GPU coarse layouts by label.",
         usage="MF_COARSE_LAYOUT=<labels>", kind="text"),
-    Var("MF_VK_COARSE_PPG", "override", "py", "measured", "Fix a Vulkan coarse layout field.",
-        usage="MF_VK_COARSE_PPG`, `_TILE`, `_SUBGROUP`, `_TWT", kind="int"),
-    Var("MF_VK_COARSE_TILE", "override", "py", row="MF_VK_COARSE_PPG", kind="int"),
-    Var("MF_VK_COARSE_SUBGROUP", "override", "py", row="MF_VK_COARSE_PPG", kind="int"),
-    Var("MF_VK_COARSE_TWT", "override", "py", row="MF_VK_COARSE_PPG", kind="int"),
-    Var("MF_METAL_COARSE_PPG", "override", "py", "measured", "Fix a Metal coarse layout field.",
-        usage="MF_METAL_COARSE_PPG", kind="int"),
     Var("MF_VK_SUBGROUP", "override", "py", "measured", "Force a Vulkan subgroup size.",
         usage="MF_VK_SUBGROUP=<size>", kind="text"),
-    Var("MF_VK_C16_BOUND", "override", "py", "1",
-        "Electing coarse kernel instead of the bound-only one.", usage="MF_VK_C16_BOUND=0", kind="flag", value=True),
+    Var("MF_COARSE_RAW", "override", "py", "0",
+        "The fp16 coarse tier reports its raw maximum instead of an upper bound (every GPU "
+        "backend; the physics tests and tools/c16_sigma.py).",
+        usage="MF_COARSE_RAW=1", kind="flag", value=False),
     Var("MF_METAL_IEEE", "override", "py", "per kernel",
         "IEEE math for all or no Metal kernels.", usage="MF_METAL_IEEE=all/none", kind="choice", choices=("default", "all", "none")),
     Var("MF_GPU_FUSE_INTERLEAVE", "override", "py", "measured",
@@ -180,6 +175,13 @@ REMOVED = (
      "make processes sharing a cost file choose differently", ("MF_TRIAL_RECHECK",)),
     ("2026-10-22", "stage-B blocking measured slower at every length on Zen 3, Zen 5 and "
      "the M2", ("MF_BBLK",)),
+    ("2026-10-22", "per-backend coarse layout fields; MF_COARSE_LAYOUT forces a whole "
+     "layout by name on every backend", ("MF_VK_COARSE_PPG", "MF_VK_COARSE_TILE",
+                                        "MF_VK_COARSE_SUBGROUP", "MF_VK_COARSE_TWT",
+                                        "MF_METAL_COARSE_PPG", "MF_METAL_COARSE_TILE",
+                                        "MF_METAL_COARSE_TWT")),
+    ("2026-10-22", "renamed MF_COARSE_RAW (MF_COARSE_RAW=1 is what MF_VK_C16_BOUND=0 did, "
+     "on every GPU backend)", ("MF_VK_C16_BOUND",)),
 )
 
 BY_NAME = {v.name: v for v in VARS}
