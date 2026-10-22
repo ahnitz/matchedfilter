@@ -27,32 +27,27 @@ env:
   VECLIB_MAXIMUM_THREADS: "1"
 
 jobs:
-  sdist:
-    name: Test the source distribution
-    runs-on: ubuntu-24.04
-    timeout-minutes: 25
-    steps:
-      - uses: actions/checkout@v4
-        with: { submodules: true }
-      - uses: actions/setup-python@v5
-        with: { python-version: "3.12" }
-      - run: python -m pip install --upgrade pip build pytest
-      - run: python -m build --sdist
-      - name: Install and test outside the checkout
-        run: |
-          python -m pip install dist/*.tar.gz
-          mkdir -p "$RUNNER_TEMP/sdist-check"
-          cd "$RUNNER_TEMP/sdist-check"
-          tar xf "$GITHUB_WORKSPACE"/dist/*.tar.gz --strip-components=1
-          python -m pytest tests -q -rs
-
   test:
+    # One suite per job. Python never reaches the C kernels, and MF_ISA restricts the
+    # process to one Highway target (B3), so the targets are spread across the Python
+    # versions instead of crossed with them: the forced SSE4 and AVX2 jobs, and the
+    # widest target (AVX3 on an AVX-512 runner) on every Python. Each job's session
+    # names its backend in a notice and fails if it is not the one asked for.
+    name: test (${{ matrix.python }}, ${{ matrix.isa || 'widest' }}${{ matrix.sdist && ', sdist' || '' }})
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        python: ["3.11", "3.12", "3.13", "3.14"]
+        include:
+          - {python: "3.11", isa: SSE4, numpy: "1.23.2"}     # the oldest Python, the numpy floor
+          - {python: "3.11"}
+          - {python: "3.12", sdist: true}
+          - {python: "3.13"}
+          - {python: "3.14", isa: AVX2}
+          - {python: "3.14"}
+    env:
+      MF_ISA: ${{ matrix.isa }}
     steps:
       - uses: actions/checkout@v4
         with: { submodules: true }   # third_party/highway
@@ -60,41 +55,86 @@ jobs:
         with: { python-version: "${{ matrix.python }}" }
 
       - name: Report the runner's CPU
-        # Which back end runs depends entirely on this, so record it: a green
-        # run on a host without AVX-512 has not exercised that path at all.
+        # Which back end runs depends on this: a widest job on a runner without
+        # AVX-512 has not exercised AVX3.
         run: |
           grep -m1 'model name' /proc/cpuinfo
           for f in avx2 avx512f avx512vl; do
             echo "$f: $(grep -qm1 $f /proc/cpuinfo && echo yes || echo no)"
           done
+          grep -qm1 avx512f /proc/cpuinfo || [ -n "$MF_ISA" ] \
+            || echo "::notice title=CPU target::no AVX-512 on this runner: AVX3 not exercised here"
 
+      - name: Install
+        if: ${{ !matrix.sdist }}
+        run: |
+          python -m pip install --upgrade pip build
+          python -m pip install .[test] ${{ matrix.numpy && format('numpy=={0}', matrix.numpy) || '' }}
+
+      - name: Build, check and install the source distribution
+        # The sdist must carry every tracked file the build and the tests need: the
+        # tracked files and the archive are compared, then the sdist is installed and
+        # its own tests run (below) from outside the checkout.
+        if: ${{ matrix.sdist }}
+        run: |
+          python -m pip install --upgrade pip build pytest
+          python -m build --sdist
+          sd=$(ls dist/*.tar.gz)
+          tar tzf "$sd" | sed 's|^[^/]*/||' | grep -v '/$' | sort > /tmp/sdist.txt
+          git ls-files | sort > /tmp/tracked.txt
+          # Not shipped on purpose: CI configuration, git metadata, the docs' data and
+          # notes (the docs' Markdown ships), measurement JSON and prebuilt PTX under
+          # tools/, and Highway's gitlink, whose sources are checked separately.
+          comm -23 /tmp/tracked.txt /tmp/sdist.txt \
+            | { grep -vE '^(\.github/|\.gitignore$|\.gitmodules$|notes/|third_party/highway$|tools/.*\.(json|ptx)$)' || true; } \
+            | awk '!/^docs\// || /\.md$/' > /tmp/missing.txt
+          grep -q 'third_party/highway/hwy/highway.h$' /tmp/sdist.txt \
+            || echo "third_party/highway/hwy/highway.h (the vendored Highway)" >> /tmp/missing.txt
+          if [ -s /tmp/missing.txt ]; then
+            echo "::error::tracked files missing from the sdist: $(head -20 /tmp/missing.txt | tr '\n' ' ')"
+            exit 1
+          fi
+          python -m pip install "$sd"
+
+      - name: Test
+        # From a scratch directory, so the tests import the installed package rather
+        # than the source tree next to them; the sdist job runs the sdist's own tests,
+        # which must be every test the checkout has.
+        run: |
+          if [ "${{ matrix.sdist }}" = "true" ]; then
+            mkdir -p "$RUNNER_TEMP/sdist-check" && cd "$RUNNER_TEMP/sdist-check"
+            tar xf "$GITHUB_WORKSPACE"/dist/*.tar.gz --strip-components=1
+            count() { python -m pytest --collect-only -q tests | grep -oE '^[0-9]+ tests? collected'; }
+            want=$(cd "$GITHUB_WORKSPACE" && count)
+            have=$(count)
+            echo "collected in the checkout: $want; in the sdist: $have"
+            [ "$want" = "$have" ] || { echo "::error::the sdist's tests differ from the checkout's ($have vs $want)"; exit 1; }
+            python -m pytest -q tests -rs --durations=15
+          else
+            mkdir -p /tmp/run && cd /tmp/run
+            python -m pytest -q "$GITHUB_WORKSPACE/tests" -rs --durations=15
+          fi
+
+  test-arm:
+    # Linux on arm64 (NEON, GCC): the build flags and the FP32 gate path differ from
+    # the macOS wheel's, which is the only other ARM coverage.
+    name: test (3.12, linux-arm64)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with: { submodules: true }
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: lscpu | head -20
       - name: Install
         run: |
           python -m pip install --upgrade pip build
           python -m pip install .[test]
-
       - name: Test
-        # Run from a scratch directory so the tests import the installed
-        # package rather than the source tree next to them.
         run: |
           mkdir -p /tmp/run && cd /tmp/run
-          python -m pytest -q "$GITHUB_WORKSPACE/tests" -rs
-
-      - name: Test again on every other target in the build
-        # Highway's dispatch picks the widest target the host supports, so on
-        # an AVX-512 runner the AVX2 and SSE4 kernels would otherwise never
-        # run.  The list comes from the build rather than from here, without
-        # the default target, which the step above already ran.
-        if: always()
-        run: |
-          mkdir -p /tmp/run && cd /tmp/run
-          others=$(python -c "import matchedfilter as mf; print(' '.join(t for t in mf.targets() if t != mf.backend()))")
-          echo "default target $(python -c 'import matchedfilter as mf; print(mf.backend())'); re-runs: ${others:-none}"
-          for isa in $others; do
-            echo "::group::MF_ISA=$isa"
-            MF_ISA=$isa python -m pytest -q "$GITHUB_WORKSPACE/tests" -rs
-            echo "::endgroup::"
-          done
+          python -m pytest -q "$GITHUB_WORKSPACE/tests" -rs --durations=15
 
   generated-files:
     # Generated CPU codelets are committed and must match their generator.
@@ -113,6 +153,13 @@ jobs:
           (cd src && python3 gen.py)
           diff -u /tmp/committed.h src/codelets-inl.h \
             || { echo "::error::src/codelets-inl.h is stale; re-run 'python3 src/gen.py'"; exit 1; }
+
+      - name: src/codelets-q15-inl.h must match src/gen_q15.py
+        run: |
+          cp src/codelets-q15-inl.h /tmp/committed-q15.h
+          (cd src && python3 gen_q15.py)
+          diff -u /tmp/committed-q15.h src/codelets-q15-inl.h \
+            || { echo "::error::src/codelets-q15-inl.h is stale; re-run 'python3 src/gen_q15.py'"; exit 1; }
 
   fdr-verification:
     name: Multi-shape False Dismissal Rate (FDR) verification
@@ -147,6 +194,13 @@ jobs:
       - uses: pypa/cibuildwheel@8d2b08b68458a16aeb24b64e68a09ab1c8e82084  # v3.4.1
         env:
           CIBW_BUILD: ${{ matrix.build }}
+          # A smoke test of the built wheel: it imports, ships its kernels and serves the
+          # public API and pycbc's calls. The full suite runs on every wheel at release;
+          # the test jobs above run it on every push.
+          CIBW_TEST_COMMAND: >-
+            python -m pytest -q -rs {package}/tests/test_api.py {package}/tests/test_public_api.py
+            {package}/tests/test_kernels_ship.py {package}/tests/test_consumer_contract.py
+            {package}/tests/test_isa_selection.py
 
       - uses: actions/setup-python@v5
         with: { python-version: "3.14" }
@@ -178,20 +232,6 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-
-      # Slang's release carries slangc, which emits the MSL. Apple's own
-      # compiler then turns it into a .metallib -- that step exists only
-      # here, which is why the macOS wheel is the one that can ship one.
-      - name: Fetch slangc
-        run: |
-          V=2026.18.2
-          curl -fsSL -o slang.zip \
-            "https://github.com/shader-slang/slang/releases/download/v${V}/slang-${V}-macos-aarch64.zip" \
-            || curl -fsSL -o slang.tgz \
-            "https://github.com/shader-slang/slang/releases/download/v${V}/slang-${V}-macos-aarch64.tar.gz"
-          mkdir -p slangsdk
-          if [ -f slang.zip ]; then unzip -q slang.zip -d slangsdk; else tar xzf slang.tgz -C slangsdk; fi
-          echo "MF_SLANGC=$(find "$PWD/slangsdk" -name slangc -type f | head -1)" >> "$GITHUB_ENV"
 
       # The question this job exists to answer: does a hosted runner give
       # the guest a GPU at all? These are virtual machines, and a Metal
@@ -255,11 +295,25 @@ jobs:
               print("system default is:", name_of(d))
           EOF
 
-      - name: Build the kernels, including .metallib
-        run: |
-          python -m pip install -U pip numpy
-          python tools/build_spirv.py
-          ls -la python/matchedfilter/metal/
+      # The committed Metal sources, compiled by Apple's toolchain as the release does
+      # (tools/precompile_metal.sh): what ships is what is tested. The .metallib files are
+      # cached on the sources, the script and the compiler's version, so an unchanged
+      # kernel set is not recompiled; test_kernels_ship's source hashes catch a committed
+      # kernel that no longer matches its Slang.
+      - name: Metal compiler version
+        id: metalver
+        run: echo "v=$(xcrun -sdk macosx metal --version | head -1 | tr -cd '[:alnum:]._-')" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        id: metallib
+        with:
+          path: python/matchedfilter/metal/*.metallib
+          key: metallib-${{ steps.metalver.outputs.v }}-${{ hashFiles('python/matchedfilter/metal/*.metal', 'tools/precompile_metal.sh') }}
+      - name: Compile the Metal kernels
+        if: steps.metallib.outputs.cache-hit != 'true'
+        run: tools/precompile_metal.sh
+      - name: Stamp the Metal kernel identity
+        # On a cache hit too: the identity hashes the .metallib bytes.
+        run: python3 tools/kernel_build_id.py --backend metal
 
       - name: Install
         run: |

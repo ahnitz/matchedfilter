@@ -1,13 +1,14 @@
 # setuptools only guesses at Python files, so every C source the build needs
 # has to be named here.  Without this the sdist builds fine and then fails to
 # install: the extension sources are simply absent.
-include README.md LICENSE
+include README.md LICENSE CHANGELOG.md
+recursive-include examples *.py
 recursive-include src *.c *.cc *.h *.py
 recursive-include python *.c *.h
 recursive-include tests *.c *.h *.py
 # Reference spectra used by the tests shipped in the source archive.
 recursive-include tests/data *.npy *.npz
-recursive-include tools *.py
+recursive-include tools *.py *.sh *.cpp *.cu README.md
 recursive-include docs *.md
 # Highway is vendored as a submodule, and the build needs it: an sdist without
 # it installs only where Highway is already present.
@@ -27,4 +28,4 @@ include python/matchedfilter/execution-policy.json
 recursive-include python/matchedfilter/spirv *.spv manifest.json
 recursive-include python/matchedfilter/ptx *.ptx manifest.json
 recursive-include python/matchedfilter/metal *.metal *.metallib
-recursive-include src/gpu *.slang
+recursive-include src/gpu *.slang *.cu
