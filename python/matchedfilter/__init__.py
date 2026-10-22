@@ -2396,8 +2396,7 @@ def clear_autotune_cache():
         _prices._Q15_TIER0.clear()
         _prices._DIRECT_LAGTAP.clear()
     _td._BLOCK_TRIALS.state.clear()
-    for kind in ("single-device", "single-batch", "fused-batch"):
-        _choice.reset(kind)
+    _choice.reset(scope="workload")
 
 
 def _direct_refine_enabled():

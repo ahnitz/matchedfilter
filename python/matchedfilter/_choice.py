@@ -594,12 +594,23 @@ def stored_lock(store_key: str, parse: Callable[[str], Any]):
 #: Every measured choice of this process: (kind, key) -> Choice.
 _CHOICES: Dict[Tuple[str, Hashable], Choice] = {}
 
+#: Each kind of choice and what forgets it: "workload" choices depend on what runs (which
+#: calls, on which device) and clear_autotune_cache forgets them; "machine" choices are a
+#: property of the hardware and outlive it. A kind must be declared here before use.
+SCOPES: Dict[str, str] = {
+    "single-device": "workload", "single-batch": "workload", "fused-batch": "workload",
+    "sparse-way": "machine", "vk-subgroup": "machine", "coarse": "machine", "gateway": "machine",
+    "interleave": "machine",
+}
+
 
 def choice(kind: str, key: Hashable, candidates: Sequence[Hashable] = (),
            scope: Optional[dict] = None, **kw: Any) -> Choice:
     """The choice of `kind` for `key`, made on first use (Choice(candidates, **kw); kw
     applies only then), kept in the process registry or in `scope` (a dict: choices that
     belong to one device object live in its state)."""
+    if kind not in SCOPES:
+        raise ValueError("declare choice kind %r in _choice.SCOPES (workload or machine)" % kind)
     table = _CHOICES if scope is None else scope.setdefault("_choices", {})
     ch = table.get((kind, key))
     if ch is None:
@@ -613,8 +624,10 @@ def of_kind(kind: str, scope: Optional[dict] = None) -> Dict[Hashable, Choice]:
     return {k: ch for (t, k), ch in table.items() if t == kind}
 
 
-def reset(kind: Optional[str] = None) -> None:
-    """Forget the process registry's choices (of one kind): the next use starts afresh,
-    from MF_COST_FILE's locks."""
-    for k in [k for k in _CHOICES if kind is None or k[0] == kind]:
+def reset(kind: Optional[str] = None, scope: Optional[str] = None) -> None:
+    """Forget the process registry's choices -- every one, those of one kind, or those of
+    every kind declared with this reset scope (SCOPES): the next use starts afresh, from
+    MF_COST_FILE's locks."""
+    for k in [k for k in _CHOICES if (kind is None or k[0] == kind)
+              and (scope is None or SCOPES.get(k[0]) == scope)]:
         del _CHOICES[k]

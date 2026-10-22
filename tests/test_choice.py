@@ -8,6 +8,13 @@ from matchedfilter import _choice
 
 
 @pytest.fixture(autouse=True)
+def _test_kinds(monkeypatch):
+    """The kinds these tests make, declared as every kind must be (_choice.SCOPES)."""
+    for kind in ("demo", "x", "y"):
+        monkeypatch.setitem(_choice.SCOPES, kind, "workload")
+
+
+@pytest.fixture(autouse=True)
 def fresh(monkeypatch):
     monkeypatch.setattr(_choice, "_CHOICES", {})
 
@@ -278,3 +285,15 @@ def test_replacing_another_methods_record_is_not_a_second_writer(monkeypatch, tm
         warnings.simplefilter("always")
         c.round({"x": 1.0, "y": 1.1})
     assert not [x for x in w if "another process" in str(x.message)]
+
+
+def test_a_kind_declares_its_reset_scope(monkeypatch):
+    with pytest.raises(ValueError, match="declare choice kind 'undeclared'"):
+        _choice.choice("undeclared", 1, ("a", "b"))
+    monkeypatch.setitem(_choice.SCOPES, "hw", "machine")
+    w = _choice.choice("x", 1, ("p", "q"))
+    m = _choice.choice("hw", 1, ("p", "q"))
+    _choice.reset(scope="workload")
+    assert _choice.of_kind("x") == {} and _choice.of_kind("hw") == {1: m}
+    _choice.reset("hw")
+    assert w is not _choice.choice("x", 1, ("p", "q"))
