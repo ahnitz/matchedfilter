@@ -153,6 +153,18 @@ class Choice:
         """Whether the contest has samples (of candidates added or still to be)."""
         return any(self.samples.values()) or any(self._pool.values())
 
+    @property
+    def limit(self) -> int:
+        """The most calls after which this contest has certainly locked, whatever the
+        timings and whether or not its calls yield samples: with a budget, its attempts
+        (each call ticks once); else every candidate sampled to the cap after its warm-up
+        (complete rounds, for a paired contest). For tests and tools that drive a contest,
+        instead of restating its schedule. Read it once the candidates are known."""
+        n = max(1, len(self.candidates))
+        if self.budget is not None:
+            return self.budget[0] * n + self.budget[1] + 1
+        return self.cap if self.paired else n * (self.warmup + self.cap)
+
     def needs(self, cand) -> int:
         return max(self.minimum, self.need.get(cand, 0))
 
