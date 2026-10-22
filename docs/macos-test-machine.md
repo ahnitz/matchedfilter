@@ -11,7 +11,7 @@ are historical measurements of that kernel, not current size limits.
 
 ## Run the tests
 
-Use a checkout with submodules and Python 3.10 or newer. From its root:
+Use a checkout with submodules and Python 3.11 or newer. From its root:
 
 ```bash
 python3 -m venv .local/metal-venv

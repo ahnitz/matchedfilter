@@ -1,22 +1,19 @@
 # Python version support
 
-As of 2026-09-26, the minimum supported Python version is 3.10. Python 3.9
-support was dropped by project decision after its CI test job failed; the
-failure was reproduced in `test_metal_ownership.py`. Its reference-count
-assertion compares a `Counter` containing a zero-count entry with one that
-omits the entry. Python 3.9 considers these unequal; Python 3.10 and newer
-consider them equal. This was a test compatibility issue, not a filtering or
-GPU ownership defect. The Python 3.11–3.14 jobs passed on commit f48a32e.
+The minimum supported Python is 3.11. Package metadata requires Python >=3.11 and
+numpy >=1.23.2 (the first numpy with Python 3.11 wheels). Release wheels cover CPython
+3.11–3.14 on Linux x86-64 (manylinux and musllinux) and macOS arm64, the list in
+pyproject's `[tool.cibuildwheel]`, and CI tests each of those versions. Free-threaded
+builds are not supported. Historical test reports retain the versions they actually
+tested.
 
-Package metadata requires Python >=3.10, release wheels cover CPython
-3.10–3.14, and the CI matrix tests each of those versions. Python 3.10
-replaces 3.9 as the oldest supported CI target. Historical test reports retain
-the versions they actually tested.
+## History
 
-## 2026-10-21: Python 3.11 is the minimum
-
-Python 3.10 reaches end of life in October 2026, and support was dropped by project
-decision (docs/robustness-plan.md, decision 1). Package metadata requires Python
->=3.11, release wheels cover CPython 3.11–3.14, and CI tests each of them. The numpy
-floor is 1.23.2, the first numpy with Python 3.11 wheels; pycbc's runtime asks for
-numpy 1.16 or newer, and its production environment runs 2.2.3.
+- 2026-10-21: Python 3.10 dropped. It reaches end of life in October 2026, and support
+  was dropped by project decision (docs/robustness-plan.md, decision 1). pycbc's runtime
+  asks for numpy 1.16 or newer, and its production environment runs 2.2.3.
+- 2026-09-26: Python 3.9 dropped, by project decision after its CI test job failed. The
+  failure was reproduced in `test_metal_ownership.py`: its reference-count assertion
+  compares a `Counter` containing a zero-count entry with one that omits the entry.
+  Python 3.9 considers these unequal; Python 3.10 and newer consider them equal. This
+  was a test compatibility issue, not a filtering or GPU ownership defect.
