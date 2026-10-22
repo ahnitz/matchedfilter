@@ -403,3 +403,9 @@ A step that changes C or workflows is first pushed to a `ci/<topic>` branch and 
   - This replaces the _thr_applied flag, the GPU's separately keyed _gcal, and the Q15 order and direct half-width computed inside _execution_plan. That _gcal key left out the reference and relied on set_reference clearing it.
   - A persisted record was not added: no divergence remains to need one.
 - 2026-10-22: **E7: one window parser.** HierarchicalSearch's refilter checked its windows against the parent's support with its own lenient parser. That parser accepted a bare [a, b] pair, did not merge overlapping windows, and took negative ints in pairs literally. It then handed the same windows to bank.filter_series, which parses them strictly, so the check and the call could disagree. refilter now uses the bank's parser (time_domain._normalize_windows), and search's copy is deleted.
+- 2026-10-22: **E3: the filters leave __init__.**
+  - MatchedFilter, CorrelationFilter and their helpers moved to _filter; HierarchicalFilter, _Resolved and theirs moved to _hierarchical (workloads layer).
+  - __init__ is down from 3384 lines to 214: the public functions (taps_to_spectra, backend, targets, set_target, devices, include_dir, choose_threshold, get_autotune_state, clear_autotune_cache) and re-exports.
+  - The public classes keep __module__ = "matchedfilter", so reprs and pickle paths are unchanged. The private names stay importable from the root, so lookups through it (and tests' patches of root names) work as before.
+  - The six isinstance(self, HierarchicalFilter) checks in MatchedFilter's shared code became a class attribute (_is_hierarchical), so _filter needs no import of _hierarchical and the hot path adds no call.
+  - Remaining for the exit criterion: the 7 upward edges in tests/test_layers.py.
