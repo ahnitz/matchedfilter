@@ -2,6 +2,7 @@
 
 import numpy as np
 import pytest
+from conftest import usable_gpu_reason
 from matchedfilter import TimeDomainFilterBank, FilterResults
 from matchedfilter.time_domain import _partition_templates
 
@@ -498,7 +499,7 @@ def test_correlate_series_gpu_matches_cpu_for_every_group_layout(layout, window)
     from conftest import usable_gpu
     gpu = usable_gpu()
     if gpu is None:
-        pytest.skip("no usable GPU")
+        pytest.skip(usable_gpu_reason())
     rng = np.random.default_rng(7)
     taps, counts = _corr_bank_taps(layout, rng)
     S = 32 * 4096
@@ -528,7 +529,7 @@ def test_correlate_series_gpu_writes_group_rows_of_shared_out_in_place(window):
     from conftest import usable_gpu
     gpu = usable_gpu()
     if gpu is None:
-        pytest.skip("no usable GPU")
+        pytest.skip(usable_gpu_reason())
     rng = np.random.default_rng(11)
     taps, counts = _corr_bank_taps("two", rng)
     S = 32 * 4096
@@ -713,7 +714,7 @@ def test_gpu_correlation_bank_prices_its_own_layout_and_matches_cpu():
     from conftest import usable_gpu
     gpu = usable_gpu()
     if gpu is None:
-        pytest.skip("no usable GPU")
+        pytest.skip(usable_gpu_reason())
     rng = np.random.default_rng(21)
     counts = np.sort(rng.integers(15, 5000, 24))
     taps = np.zeros((len(counts), counts.max()), np.float32)
@@ -739,7 +740,7 @@ def test_gpu_hierarchical_bank_matches_cpu_including_packed_templates(pack):
     from conftest import usable_gpu
     gpu = usable_gpu()
     if gpu is None:
-        pytest.skip("no usable GPU")
+        pytest.skip(usable_gpu_reason())
     rng = np.random.default_rng(4)
     counts = list(rng.integers(200, 400, 24))
     taps, w, df = _whitened_inspiral_bank(rng, counts)
@@ -786,7 +787,7 @@ def test_filter_series_many_matches_one_call_at_a_time(device, interleave, monke
     if device == "gpu":
         dev = usable_gpu()
         if dev is None:
-            pytest.skip("no usable GPU")
+            pytest.skip(usable_gpu_reason())
     rng = np.random.default_rng(8)
     banks = []
     for _ in range(3):
@@ -842,7 +843,7 @@ def test_filter_series_many_mixes_deferred_and_synchronous_calls_on_one_plan(mon
     monkeypatch.setenv("MF_AUTOTUNE", "0")     # keep the follow-ups on the GPU plan
     dev = usable_gpu()
     if dev is None:
-        pytest.skip("no usable GPU")
+        pytest.skip(usable_gpu_reason())
     rng = np.random.default_rng(12)
     counts = list(rng.integers(200, 400, 30))
     taps, w, df = _whitened_inspiral_bank(rng, counts)
@@ -870,7 +871,7 @@ def test_single_template_calls_choose_the_faster_device_and_agree(monkeypatch):
     from matchedfilter import time_domain as td
     dev = usable_gpu()
     if dev is None:
-        pytest.skip("no usable GPU")
+        pytest.skip(usable_gpu_reason())
     rng = np.random.default_rng(14)
     counts = list(rng.integers(200, 400, 20))
     taps, w, df = _whitened_inspiral_bank(rng, counts)
@@ -904,7 +905,7 @@ def test_filter_series_many_without_wait_overlaps_and_matches(monkeypatch):
     monkeypatch.setenv("MF_AUTOTUNE", "0")
     dev = usable_gpu()
     if dev is None:
-        pytest.skip("no usable GPU")
+        pytest.skip(usable_gpu_reason())
     rng = np.random.default_rng(41)
     banks = []
     for _ in range(2):
@@ -945,7 +946,7 @@ def test_gpu_follow_up_batch_matches_direct_calls(monkeypatch, device_followups)
     monkeypatch.setenv("MF_DEVICE_FOLLOWUPS", device_followups)
     dev = usable_gpu()
     if dev is None:
-        pytest.skip("no usable GPU")
+        pytest.skip(usable_gpu_reason())
     rng = np.random.default_rng(53)
     counts = list(rng.integers(200, 400, 25))
     taps, w, df = _whitened_inspiral_bank(rng, counts)
@@ -996,7 +997,7 @@ def test_gpu_workspace_growth_settles_calls_in_flight(monkeypatch):
     monkeypatch.setenv("MF_AUTOTUNE", "0")
     dev = usable_gpu()
     if dev is None:
-        pytest.skip("no usable GPU")
+        pytest.skip(usable_gpu_reason())
     rng = np.random.default_rng(71)
     counts = list(rng.integers(200, 400, 16))
     taps, w, df = _whitened_inspiral_bank(rng, counts)

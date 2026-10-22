@@ -3,6 +3,7 @@ election (HierOps._gate_way, measured per device): both ways must give the same 
 the measured choice can only change speed. Each way is forced here."""
 import numpy as np
 import pytest
+from conftest import usable_gpu_reason
 
 from matchedfilter import TimeDomainFilterBank
 
@@ -14,7 +15,7 @@ def test_both_gate_ways_give_the_same_peaks(way, monkeypatch):
     from matchedfilter import _gpuhier
     dev = usable_gpu()
     if dev is None:
-        pytest.skip("no usable GPU")
+        pytest.skip(usable_gpu_reason())
     monkeypatch.setenv("MF_AUTOTUNE", "0")
     monkeypatch.setenv("MF_CHAIN_FORCE", "2048:256,512")
     rng = np.random.default_rng(31)

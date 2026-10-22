@@ -159,6 +159,7 @@ def usable_gpu():
     if _USABLE != "unset":
         return _USABLE
     _USABLE = None
+    _PROBE_FAILURES.clear()
     try:
         import numpy as np
         import matchedfilter as mf
@@ -174,11 +175,17 @@ def usable_gpu():
             f.set_data(z)
             f.set_templates(z)
             f.run(binsize=1024, threshold=0.0)
-        except Exception:
+        except Exception as e:
+            _PROBE_FAILURES.append("%s failed its probe: %s: %s"
+                                   % (d, type(e).__name__, str(e).splitlines()[0][:120] if str(e) else ""))
             continue
         _USABLE = str(d)
         break
     return _USABLE
+
+
+#: Why each enumerated GPU was rejected by usable_gpu's probe, in order.
+_PROBE_FAILURES = []
 
 
 def gpu_backend():
@@ -187,7 +194,7 @@ def gpu_backend():
     import matchedfilter as mf
     dev = usable_gpu()
     if dev is None:
-        pytest.skip("no usable GPU")
+        pytest.skip(usable_gpu_reason())
     return next(d for d in mf.devices() if str(d) == dev).backend
 
 
@@ -206,7 +213,11 @@ def gpu_context(backend):
 
 
 def usable_gpu_reason():
-    """Why there is no usable GPU, phrased so it does not mislead."""
+    """Why there is no usable GPU, phrased so it does not mislead: a GPU that enumerated and
+    failed the probe is named with its error, apart from there being no GPU at all."""
+    usable_gpu()
+    if _PROBE_FAILURES:
+        return "no usable GPU: " + "; ".join(_PROBE_FAILURES)
     try:
         from matchedfilter import _vulkan
         ok, why = _vulkan.available()

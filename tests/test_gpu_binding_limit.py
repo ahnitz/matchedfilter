@@ -6,6 +6,7 @@ descriptor ranges are clamped to it too, so a tile reaching past its binding wou
 write outside it."""
 import numpy as np
 import pytest
+from conftest import usable_gpu_reason
 
 import matchedfilter as mf
 
@@ -14,7 +15,7 @@ def _gpu():
     from conftest import usable_gpu
     dev = usable_gpu()
     if dev is None:
-        pytest.skip("no usable GPU")
+        pytest.skip(usable_gpu_reason())
     return dev
 
 

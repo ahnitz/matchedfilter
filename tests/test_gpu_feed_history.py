@@ -5,6 +5,7 @@ chosen from an earlier call's measured refine fraction made results depend on ca
 gate's threshold)."""
 import numpy as np
 import pytest
+from conftest import usable_gpu_reason
 
 from matchedfilter import TimeDomainFilterBank
 
@@ -15,7 +16,7 @@ def test_a_call_repeated_after_a_different_one_takes_the_same_feed(monkeypatch):
     from matchedfilter import _gpuhier
     dev = usable_gpu()
     if dev is None:
-        pytest.skip("no usable GPU")
+        pytest.skip(usable_gpu_reason())
     monkeypatch.setenv("MF_AUTOTUNE", "0")
     monkeypatch.delenv("MF_BAND_FORWARD", raising=False)
     rng = np.random.default_rng(21)

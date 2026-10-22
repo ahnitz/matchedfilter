@@ -3,7 +3,7 @@ import numpy as np
 import pytest
 
 import matchedfilter as mf
-from conftest import usable_gpu
+from conftest import usable_gpu, usable_gpu_reason
 
 
 @pytest.fixture(params=["cpu", "gpu"])
@@ -12,7 +12,7 @@ def device(request):
         return "cpu"
     value = usable_gpu()
     if value is None:
-        pytest.skip("no usable GPU")
+        pytest.skip(usable_gpu_reason())
     return value
 
 
@@ -119,7 +119,7 @@ def test_invalid_series_layout_fails_clearly(plan, case, monkeypatch):
 def test_reference_update_recalibrates_a_reused_gpu_filter():
     device = usable_gpu()
     if device is None:
-        pytest.skip("no usable GPU")
+        pytest.skip(usable_gpu_reason())
     n, band = 2048, 512
     f = mf.HierarchicalFilter(n, chain=band, snr=5.5, fd=1e-2, device=device)
     # The coarse peak is 0.5 at f=1/4 and 0.293 at f=8/11. A threshold

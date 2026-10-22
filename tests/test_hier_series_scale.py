@@ -32,6 +32,7 @@ compared two empty selections. That fixture is fixed and guarded.
 """
 import numpy as np
 import pytest
+from conftest import usable_gpu_reason
 
 import matchedfilter as mf
 
@@ -60,7 +61,7 @@ def test_pure_noise_is_dismissed_on_both_devices(nblk):
     from conftest import usable_gpu
     gpu = usable_gpu()
     if gpu is None:
-        pytest.skip("no usable GPU")
+        pytest.skip(usable_gpu_reason())
     n, nt, p, H, ser, st, ws, we = _case(nblk)
     got = {}
     for dev in ("cpu", gpu):

@@ -12,6 +12,7 @@ non-trivial trigger count, because empty == empty proves nothing.
 """
 import numpy as np
 import pytest
+from conftest import usable_gpu_reason
 
 from matchedfilter import TimeDomainFilterBank
 from matchedfilter.time_domain import _normalize_windows
@@ -288,7 +289,7 @@ def test_merged_equals_separate_heterogeneous_bank():
 def test_merged_equals_separate_on_gpu(engine):
     gpu = _gpu()
     if gpu is None:
-        pytest.skip("no usable GPU")
+        pytest.skip(usable_gpu_reason())
     ser = _analytic(3)
     bank = _bank(engine, device=gpu)
     n = sum(_equivalence(bank, ser, w, binsize=256) for w in GEOMETRIES.values())
@@ -441,7 +442,7 @@ def test_correlate_a_real_series_on_gpu_as_its_complex_widening(layout):
     reads the same samples with zero imaginary parts."""
     gpu = _gpu()
     if gpu is None:
-        pytest.skip("no usable GPU")
+        pytest.skip(usable_gpu_reason())
     r = np.random.default_rng(14)
     a = r.standard_normal(S).astype(np.float32)
     b = r.standard_normal(S).astype(np.float32)
@@ -464,7 +465,7 @@ def test_correlate_a_real_series_on_gpu_as_its_complex_widening(layout):
 def test_correlate_on_gpu_including_stale_workspace(layout):
     gpu = _gpu()
     if gpu is None:
-        pytest.skip("no usable GPU")
+        pytest.skip(usable_gpu_reason())
     ser = _analytic(12)
     cpu = _corr_bank(layout)
     gbank = _corr_bank(layout, device=gpu)

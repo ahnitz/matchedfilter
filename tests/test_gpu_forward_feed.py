@@ -4,6 +4,7 @@ fp16 first tier, else seriesForwardBands) and recomputes its refine blocks. Resu
 correct hierarchical result, as the separate forward's are."""
 import numpy as np
 import pytest
+from conftest import usable_gpu_reason
 
 from matchedfilter import TimeDomainFilterBank
 from test_time_domain import _whitened_inspiral_bank
@@ -31,7 +32,7 @@ def _run(monkeypatch, enabled, device=None, engine="hier", rng_seed=5):
     from conftest import usable_gpu
     dev = usable_gpu() if device is None else device
     if dev is None:
-        pytest.skip("no usable GPU")
+        pytest.skip(usable_gpu_reason())
     monkeypatch.setenv("MF_AUTOTUNE", "0")
     monkeypatch.setenv("MF_CHAIN_FORCE", CHAIN)
     monkeypatch.setenv("MF_BAND_FORWARD", "1" if enabled else "0")

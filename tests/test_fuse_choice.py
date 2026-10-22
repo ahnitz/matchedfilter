@@ -3,6 +3,7 @@
 and every batch equals its direct calls either way."""
 import numpy as np
 import pytest
+from conftest import usable_gpu_reason
 
 from matchedfilter import TimeDomainFilterBank
 
@@ -13,7 +14,7 @@ def test_batches_alternate_fused_and_unfused_then_keep_one(monkeypatch, tmp_path
     from matchedfilter import time_domain as td
     dev = usable_gpu()
     if dev is None:
-        pytest.skip("no usable GPU")
+        pytest.skip(usable_gpu_reason())
     monkeypatch.setenv("MF_AUTOTUNE", "1")
     monkeypatch.setenv("MF_COST_FILE", str(tmp_path / "costs.json"))
     monkeypatch.setenv("MF_CHAIN_FORCE", "2048:256")

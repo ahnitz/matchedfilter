@@ -8,6 +8,7 @@ when handed out (VK_EXT_host_query_reset), so a waiting read waits for this use'
 """
 import numpy as np
 import pytest
+from conftest import usable_gpu_reason
 
 from matchedfilter import TimeDomainFilterBank
 from test_time_domain import _whitened_inspiral_bank
@@ -20,7 +21,7 @@ def test_timestamps_read_in_flight_are_never_zero(monkeypatch):
     monkeypatch.setenv("MF_GPU_PROFILE", "1")
     dev = usable_gpu()
     if dev is None:
-        pytest.skip("no usable GPU")
+        pytest.skip(usable_gpu_reason())
     rng = np.random.default_rng(91)
     banks = []
     for _ in range(3):
@@ -68,7 +69,7 @@ def test_a_context_timing_a_few_calls_records_a_few_timestamp_slots():
     from conftest import usable_gpu
     dev = usable_gpu()
     if dev is None:
-        pytest.skip("no usable GPU")
+        pytest.skip(usable_gpu_reason())
     f = mf.MatchedFilter(2048, 1, 1, device=dev)
     ctx = f._gpu
     if not hasattr(ctx, "_timestamp_pair"):
