@@ -89,6 +89,9 @@ class Choice:
         self._need_pool: dict = {}
         self._drop_pool: set = set()
         self._replace = False
+        # (attempts, samples) of the open record on file as this process last read or wrote
+        # it; one further along was written by another process meanwhile (_write says so).
+        self._seen = (0, 0)
         self.candidates = tuple(candidates)  # (parse falls back to matching these)
         rec = self._record()
         self.held = None
@@ -103,6 +106,7 @@ class Choice:
                 self._need_pool = {str(k): int(v) for k, v in (rec.get("need") or {}).items()}
                 self._drop_pool = {str(k) for k in rec.get("dropped", ())}
                 self.attempts = int(rec.get("attempts", 0))
+                self._seen = _progress(rec)
         self.candidates = ()
         for c in candidates:
             self.add(c)
@@ -385,9 +389,11 @@ class Choice:
                "dropped": sorted(lbl(c) for c in self.dropped)}
         if self._method():
             rec["method"] = self._method()
-        on_file = self._write(rec)
+        on_file = self._write(rec, check_writer=True)
         if on_file is not rec:
             self._adopt(on_file)
+        else:
+            self._seen = _progress(rec)
 
     def _record(self):
         if self.store_key is None:
@@ -404,9 +410,12 @@ class Choice:
         rec = self._record()
         return self.parse(rec.get("value")) if isinstance(rec, dict) else None
 
-    def _write(self, rec, replace=False):
+    def _write(self, rec, replace=False, check_writer=False):
         """Store rec unless a valid lock is on file (and replace is off); returns the record
-        on file afterwards (rec itself when it was written)."""
+        on file afterwards (rec itself when it was written). With check_writer, an open
+        record on file further along than this process last saw it means another process is
+        sampling the same contest: that is said once per contest, and rec is written as
+        before (replacing the other's samples; one writer per open contest keeps them all)."""
         if self.store_key is None:
             return rec
         from . import gatechain
@@ -418,8 +427,22 @@ class Choice:
             if (not replace and isinstance(old, dict) and "value" in old
                     and self.parse(old["value"]) is not None):
                 return None                                  # a lock on file stands
+            if (check_writer and isinstance(old, dict) and "value" not in old
+                    and old.get("method") == self._method()):   # one this choice continues
+                on_file = _progress(old)
+                if on_file[0] > self._seen[0] or on_file[1] > self._seen[1]:
+                    gatechain._cost_warn(path, "writer|" + self.store_key,
+                                         "another process is sampling %s; one writer per "
+                                         "open contest keeps all samples" % self.what)
             return rec
         return gatechain._update_cost(path, "choice|" + self.store_key, merge)
+
+
+def _progress(rec) -> Tuple[int, int]:
+    """(attempts, samples) of an open contest's record: how far along it is."""
+    samples = rec.get("samples")
+    return (int(rec.get("attempts", 0)),
+            sum(len(v) for v in samples.values()) if isinstance(samples, dict) else 0)
 
 
 def _still_fastest(choice, rivals, measure):

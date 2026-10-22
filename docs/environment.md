@@ -16,7 +16,7 @@ MF_VK_NO_SUBGROUP_PIN. Older notes in docs/ that mention them describe past stud
 | Variable | Default | Effect |
 |---|---|---|
 | `MF_DEVICE` | `cpu` | Device for plans built without one (`device.parse(None)`). |
-| `MF_COST_FILE` | unset | JSON file of measured cost models and trial locks, kept between processes. Unset: cold start, no trials kept. |
+| `MF_COST_FILE` | unset | JSON file of measured cost models and trial locks, kept between processes. Unset: cold start, no trials kept. One writer per open contest: processes sharing a file while a trial is open overwrite each other's samples (said once per contest). |
 | `MF_EXECUTION_POLICY` | the shipped `execution-policy.json` | Another execution-policy table. |
 | `MF_ISA` | best the CPU supports | SIMD target (also `matchedfilter.set_target`). |
 

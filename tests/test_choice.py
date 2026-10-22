@@ -242,3 +242,38 @@ def test_a_contest_that_never_resolves_locks_within_its_limit(kw):
         cand, record = ch.next()
         record(0.5 if i % 2 else 2.0)
     assert ch.winner is not None, (kw, ch.limit)
+
+
+def test_a_second_writer_in_an_open_contest_is_reported(monkeypatch, tmp_path):
+    """Two processes sampling one open contest overwrite each other's samples: the one that
+    finds the record further along than it left it says so, once (decision 7: one file is
+    not written by concurrent processes; this is the signal if it is)."""
+    import warnings
+    monkeypatch.setenv("MF_COST_FILE", str(tmp_path / "costs.json"))
+    a = _choice.Choice(("x", "y"), store_key="w", warmup=0, minimum=4, persist=True)
+    b = _choice.Choice(("x", "y"), store_key="w", warmup=0, minimum=4, persist=True)
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        a.record("x", 1.0)                   # a writes first
+        a.record("y", 1.0)                   # a alone: no warning
+        assert not [x for x in w if "another process" in str(x.message)]
+        b.record("x", 2.0)                   # b finds a's samples it never saw
+        b.record("y", 2.0)
+    hits = [x for x in w if "another process" in str(x.message)]
+    assert len(hits) == 1
+
+
+def test_replacing_another_methods_record_is_not_a_second_writer(monkeypatch, tmp_path):
+    """A paired contest replaces an unpaired record it cannot continue; nobody else is
+    sampling, so nothing is said."""
+    import warnings
+    from matchedfilter import gatechain
+    path = tmp_path / "costs.json"
+    monkeypatch.setenv("MF_COST_FILE", str(path))
+    gatechain._store_cost(path, "choice|w", {"samples": {"x": [1.0] * 4, "y": [2.0] * 4},
+                                             "attempts": 3})
+    c = _choice.Choice(("x", "y"), store_key="w", persist=True, paired=True)
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        c.round({"x": 1.0, "y": 1.1})
+    assert not [x for x in w if "another process" in str(x.message)]
