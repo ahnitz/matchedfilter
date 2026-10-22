@@ -151,10 +151,16 @@ def test_batched_follow_ups_choose_their_device_by_batch(device, monkeypatch, tm
     orig = TimeDomainFilterBank._batch_device
     monkeypatch.setattr(TimeDomainFilterBank, "_batch_device",
                         lambda self: (lambda r: sides.append(r[0]) or r)(orig(self)))
-    # Enough batches for the trial to lock however noisy the timings: an unclear contest
-    # samples both sides up to _choice.CAP each after the dropped warm-up (CI's
-    # paravirtual M2 left it undecided after 2 * 4 + 2 batches).
-    for _ in range(2 * (_choice.CAP + _choice.WARMUP) + 2):
+    # Batches until the trial locks, at most its own limit (Choice.limit: every candidate
+    # sampled to the cap after its warm-up), however noisy the timings: a fixed count
+    # restated the schedule, and CI's paravirtual M2 once outlasted 2 * 4 + 2 batches.
+    batches = 0
+    while True:
+        trial = _choice.of_kind("single-batch").get((str(bank.device),))
+        if trial is not None and (trial.winner is not None or batches > trial.limit):
+            break
+        assert batches < 100, "the single-batch choice was never made"
+        batches += 1
         jobs = []
         for k in range(6):
             c0 = int(rng.integers(20000, S - 20000))
@@ -167,7 +173,6 @@ def test_batched_follow_ups_choose_their_device_by_batch(device, monkeypatch, tm
             np.testing.assert_array_equal(want.sample_indices, r.sample_indices)
             np.testing.assert_allclose(r.snr, want.snr, rtol=1e-4,
                                        atol=1e-4 * np.abs(want.snr).max())
-    trial = _choice.of_kind("single-batch")[(str(bank.device),)]
     assert sides[:4] == ["gpu", "cpu", "gpu", "cpu"], sides
     assert trial.winner in ("gpu", "cpu")
     assert len(trial.samples["gpu"]) >= trial.minimum            # kept samples, after the warm-up

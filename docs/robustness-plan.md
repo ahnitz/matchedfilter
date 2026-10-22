@@ -270,3 +270,7 @@ A step that changes C or workflows is first pushed to a `ci/<topic>` branch and 
 - 2026-10-22: **C3a: MF_TRIAL_RECHECK deleted (decision 3).**
   - Removed: `Choice.observe`, the steady flags and paths in the trial loop, `_chain_steady`, `_chain_monitor`, `_trial_monitor`, `_BlockTrials.observe`, and gatechain's recheck_enabled, observe_steady, steady_disagrees and RECHECK_*. Five tests went with them. Records no longer carry `rechecked`.
   - `_fuse_begin`'s "a trial is trying" now means any open chain or block trial in the batch.
+- 2026-10-22: **C3b: trial tests bounded by the trial's own limit.**
+  - `Choice.limit` is the most calls after which a contest has locked, whatever the timings: its budget of attempts, else every candidate sampled to the cap after its warm-up (rounds, for a paired contest). test_choice proves the bound on contests that never resolve.
+  - test_followup_batch and test_gate_chain's trial test drive until the choice locks, up to its limit, instead of restating its schedule.
+  - Not done here: making the two slowest tests cheaper (test_reproducible_choices, 218 s on a loaded host; test_switching_layouts_is_exact_and_locks, 84 s). Deferred to C4 with the other test-cost work.

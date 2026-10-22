@@ -220,3 +220,25 @@ def test_paired_rounds_decide_and_ignore_unpaired_samples():
     for i in range(5):
         ch.round({False: 1.0 + i, True: 0.8 * (1.0 + i)})
     assert ch.winner is True
+
+
+@pytest.mark.parametrize("kw", [dict(), dict(warmup=2, cap=7), dict(budget=(2, 1)),
+                                dict(budget=(50, 0)), dict(paired=True, minimum=3, cap=6)])
+def test_a_contest_that_never_resolves_locks_within_its_limit(kw):
+    """limit is a bound, not a guess: a contest whose samples never separate (alternating
+    0.5/2.0 on both sides, a coin-flip contest) and one whose samples never come both lock
+    within it."""
+    ch = _choice.Choice(("a", "b"), **kw)
+    for i in range(ch.limit):
+        if ch.winner is not None:
+            break
+        if ch.paired:
+            ch.round({"a": 1.0 + (i % 2), "b": 2.0 - (i % 2)})
+            continue
+        if ch.budget is not None:
+            if ch.tick() is not None:
+                break
+            continue                      # an attempt that yields no sample
+        cand, record = ch.next()
+        record(0.5 if i % 2 else 2.0)
+    assert ch.winner is not None, (kw, ch.limit)

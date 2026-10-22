@@ -611,7 +611,13 @@ def test_trials_lock_one_winner_and_every_plan_switches(monkeypatch):
         plans.append(hf)
     assert len({p.config for p in plans}) > 1                # the shortlist is spread over the plans
     shortlist = plans[0].autotune_info["shortlist"]
-    for _ in range(len(shortlist) * 2 + 2):
+    # Until the trial locks, at most its own limit (Choice.limit: its budget of calls, each
+    # plan's call one attempt), not a restated schedule.
+    trial_choice = mf._CHAIN_TRIALS[plans[0]._chain_trial_key()]
+    for _ in range(trial_choice.limit // len(plans) + 1):
+        if trial_choice.winner is not None and all(p.autotune_info["status"] == "locked"
+                                                   for p in plans):
+            break
         for p in plans:
             p.run_series(ser, starts, ws, we, binsize=n, threshold=6.0)
     (trial,) = mf.get_autotune_state()["trials"].values()
