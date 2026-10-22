@@ -414,3 +414,8 @@ A step that changes C or workflows is first pushed to a `ci/<topic>` branch and 
   - FilterResults and _EMPTY_FILTER_RESULTS moved to _results (FilterResults keeps __module__ matchedfilter.time_domain, so pickles load), and the window parser and block layout to a new foundation module _windows;
   - the device peak tables the backends report moved from _roofline to a new foundation module _peaks;
   - the cost calibrations that run hierarchical plans (calibrate_costs, calibrate_costs_gpu, device_costs, price_block_sizes and their clock reference) moved from gatechain to _calibration (workloads). Inside it gatechain's names are qualified (_gc.NAME), so patches of gatechain still apply. gatechain.calibrate_costs stays public as a documented entry point that _calibration registers itself behind, not as an upward import.
+- 2026-10-22: **E complete.**
+  - __init__ is 214 lines of public functions and re-exports.
+  - No module imports upward, with an empty allowlist that test_layers keeps empty.
+  - tools/check_move.py, which checked every E move, is deleted as planned.
+  - Modules added in E: _costfile, _results, _windows, _peaks (foundation); _chains, _prices (models); _layout, _filter, _hierarchical, _calibration (workloads).

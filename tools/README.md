@@ -113,7 +113,7 @@ identities); `coarse_layout.py` (the fp16 coarse kernel's build-time layout);
 `make_bank_subset.py` (the test bank slice).
 
 **Merge gate and CI**: `gate.py` (every pre-merge check), `ci_status.py` (Actions
-verdicts), `check_move.py` (a module move changes no definition; until robustness E3), `sanitize.sh` and `sanitize_report.py` (ASan/UBSan runs and their
+verdicts), `sanitize.sh` and `sanitize_report.py` (ASan/UBSan runs and their
 annotations), `migrate_cost_file.py` (cost-file format migration).
 
 **Production-like benchmarks**: `ladder.py`, `ab_ladder.py`, `ladder_diff.py`,
