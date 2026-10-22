@@ -305,3 +305,13 @@ A step that changes C or workflows is first pushed to a `ci/<topic>` branch and 
   - the hierarchical table is the whole cost: 15 cells per length at about 6 s a cell at n = 4096 and about 30 s at n = 65536, mostly calibration.
 
   The benchmark gains --hier-n, and the workflow runs the hierarchical table at 1024 and 16384 (about 4 min per target here). Open for the CPU phase: about 30 s to calibrate one hierarchical plan at n = 65536 with no cost file is a user-facing cost, not only a benchmark one.
+- 2026-10-22: **D1: MF_BBLK deleted; MF_ILAY kept as a candidate.** Flat-kernel A/B, three interleaved rounds, medians against the default (and the production ladder on dev1, four rounds):
+
+  | variant | Zen 3 (dev1) | Zen 5 (dev2) | M2 |
+  |---|---|---|---|
+  | MF_ILAY=0 | +7% / +7% / +18% at 4096 / 2^18 / 2^20 | +9% / +2% / +14% | +3% at 4096, **-9% at 2^18, -4% at 2^20** |
+  | MF_BBLK=2 | +3% / +5% / +3% | +8% / +3% / +7% | +4-7% at every length |
+  | MF_BBLK=4 | +5% / +3% / +1% | — | +5-6% |
+  | dev1 ladder (segment median) | ILAY=0 +1.3%, BBLK=2 -0.4%: noise | | |
+
+  Stage-B blocking loses everywhere and is removed (balanced-inl.h, -66 lines; timings unchanged). The strided layout wins on the M2 at large n, so per the rule it becomes a measured candidate in the CPU phase rather than a deletion; MF_ILAY stays until then.

@@ -47,8 +47,7 @@ MF_VK_NO_SUBGROUP_PIN. Older notes in docs/ that mention them describe past stud
 | `MF_DGROUP=<n>` | the plan's series group | Blocks per hierarchical series batch. |
 | `MF_PBMAX=<n>` | built-in | Largest n run as pair-batched transforms. |
 | `MF_GMAJOR=0` | 1 | Unfused product path (cross-check). |
-| `MF_ILAY=0` | 1 | Previous intermediate layout (comparison). |
-| `MF_BBLK=<n>` | 1 | Stage-B blocking (measured no gain; kept for comparison). |
+| `MF_ILAY=0` | 1 | Strided intermediate layout. Slower on Zen 3 and Zen 5, faster on the M2 at n >= 2^18 (4-9%); to become a measured candidate. |
 | `MF_CORR_NO_STREAM=1` | off | No non-temporal stores in continuous correlation. |
 | `MF_BAND_FORWARD=0/1` | measured | GPU band forward off/on. |
 | `MF_COARSE_LAYOUT=<labels>` | measured | Force GPU coarse layouts by label. |

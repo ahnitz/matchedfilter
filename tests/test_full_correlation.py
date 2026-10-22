@@ -42,12 +42,11 @@ def _full_tol(f):
 
 
 @pytest.mark.parametrize('n', [1024, 4096])
-@pytest.mark.parametrize('blocking,layout', [(1, 1), (2, 1), (3, 1), (4, 1), (1, 0), (2, 0)])
-def test_reused_coarse_geometry_preserves_full_output_and_binned_peaks(n, blocking, layout, monkeypatch):
+@pytest.mark.parametrize('layout', [1, 0])
+def test_reused_coarse_geometry_preserves_full_output_and_binned_peaks(n, layout, monkeypatch):
     """Consuming an intermediate in place must preserve every public output."""
     import os
     import matchedfilter as mf
-    monkeypatch.setenv('MF_BBLK', str(blocking))
     monkeypatch.setenv('MF_ILAY', str(layout))
     monkeypatch.setenv('MF_PBMAX', '128')
     mf.backend()  # Apply the process's ISA environment before overriding it.

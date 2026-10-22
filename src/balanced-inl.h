@@ -58,7 +58,6 @@ typedef struct {
   float *scl;          /* [n1*(N2/W) + b] dequant scale            */
   float *ire,*iim;     /* fp32 intermediate, used when quantising would not pay */
   int gblk;            /* stage-A groups loaded per pass over the input          */
-  int bblk;            /* stage-B column blocks loaded per pass over the intermediate */
   int gmajor;          /* 1 = fused-product inputs are stored group-major     */
   int ilay;            /* 1 = intermediate as [k2 block][n1][lane]           */
   vf *bmx,*bre,*bim;   /* per-bin running max, and the winner's value            */
@@ -313,26 +312,13 @@ void *create(size_t N){
     if(g<1) g=1;
     p->gblk=(int)g; p->bstride=me;
   }
-  /* Stage B reads the intermediate at [n1][k2], walking n1 with stride istr while
-     using only AP_W floats of each row: 64 bytes out of 4 KiB at 2^20, which is
-     the same 7.6 GB/s shape the stage-A blocking was introduced to fix.  Loading
-     several column blocks per pass widens the touched run to BB*64 bytes at no
-     change in total bytes read.  Same L2 tradeoff, so it is sized the same way. */
-  { size_t bmaxn=(size_t)n2/AP_W;
-    /* Measured: no gain, 1.02-1.05x worse at 2^18 and 2^20.  Stage B's walk is a
-       constant 4 KiB stride, which the hardware prefetcher already handles - the
-       stage-A input walk it was modelled on is not equivalent.  Default off; the
-       mechanism stays behind MF_BBLK. */
-    size_t bb = 1;
-    if(bb>bmaxn) bb=bmaxn;
-    if(bb<1) bb=1;
-    { const char *e=getenv("MF_BBLK"); if(e){ long v=atol(e); if(v>0){ bb=(size_t)v; if(bb>bmaxn)bb=bmaxn; } } }
-    p->bblk=(int)bb;
-  }
+  /* Stage B reads the intermediate one column block per pass. Loading several per
+     pass (MF_BBLK, the stage-A blocking's mirror) measured slower at every length
+     on Zen 3, Zen 5 and the M2 (2026-10-22: 1-7%); its walk is a constant stride
+     the prefetcher already handles. Removed. */
   { const char *e=getenv("MF_GMAJOR"); p->gmajor = e?atoi(e):1; }
-  { size_t nbuf = (size_t)p->gblk > (size_t)p->bblk ? (size_t)p->gblk : (size_t)p->bblk;
-    p->bR=ap_alloc64(me*nbuf*sizeof(vf));
-    p->bI=ap_alloc64(me*nbuf*sizeof(vf)); }
+  p->bR=ap_alloc64(me*(size_t)p->gblk*sizeof(vf));
+  p->bI=ap_alloc64(me*(size_t)p->gblk*sizeof(vf));
   p->sR=ap_alloc64(me*sizeof(vf)); p->sI=ap_alloc64(me*sizeof(vf));
   p->TLr=ap_alloc64((size_t)n2*sizeof(vf)); p->TLi=ap_alloc64((size_t)n2*sizeof(vf));
   for(int k2=0;k2<n2;k2++){
@@ -804,35 +790,6 @@ static void stageA(BP*p,const float*in,int conj){
   }
 }
 
-/* Load BB consecutive column blocks in one walk over the intermediate rows, so
-   each row contributes BB*AP_W contiguous floats instead of AP_W.  Only the fp32
-   intermediate is blocked; the quantised path is off by default. */
-static void stageB_load_many(BP*p,int b0,int bb){
-  const int N1=p->N1;
-  const int M1=p->ea.single?N1:p->a1, M2=p->ea.single?1:p->a2, st=p->ea.st;
-  const size_t step=p->ilay ? AP_W : p->istr;
-  const size_t blockstep=p->ilay ? (size_t)N1*AP_W : AP_W;
-  for(int e2=0;e2<M2;e2++){
-    const float *sr=p->ire+(size_t)e2*M1*step+(size_t)b0*blockstep;
-    const float *si=p->iim+(size_t)e2*M1*step+(size_t)b0*blockstep;
-    for(int e1=0;e1<M1;e1++){
-      for(int j=0;j<bb;j++){
-        vf *dR=p->bR+(size_t)j*p->bstride+(size_t)e2*st;
-        vf *dI=p->bI+(size_t)j*p->bstride+(size_t)e2*st;
-        dR[e1]=V_LOADU(sr+(size_t)j*blockstep); dI[e1]=V_LOADU(si+(size_t)j*blockstep);
-      }
-      sr+=step; si+=step;
-    }
-  }
-}
-/* transform the j-th buffer that stageB_load_many filled */
-static void stageB_run(BP*p,int j,vf**RR,vf**RI){
-  const int N1=p->N1;
-  vf *bR=p->bR+(size_t)j*p->bstride, *bI=p->bI+(size_t)j*p->bstride;
-  efft(N1,bR,bI,p->sR,p->sI,p->w1r,p->w1i);
-  *RR=bR; *RI=bI;
-}
-
 /* Keep the specialized DAG out of the generic stage-B stack frame. */
 static HWY_NOINLINE void stageB_inplace32(BP*p,int b,vf**RR,vf**RI){
   float *ar=p->ire+(size_t)b*32*AP_W;
@@ -1183,19 +1140,15 @@ static void binmax_one(BP*p,float thr,ap_peak*out,int conj,size_t ws,size_t we){
   (void)ser; (void)sstr;
 
     vf am=V_SET1(t2), arr=V_ZERO(), aii=V_ZERO(); vi axx=VI_SET1(-1);
-    const int NBK=N2/AP_W, BB=p->bblk;
-    for(int b0=0;b0<NBK;b0+=BB){
-     const int bbn=(NBK-b0<BB)?NBK-b0:BB;
-     if(bbn>1) stageB_load_many(p,b0,bbn);
-     for(int jj=0;jj<bbn;jj++){
-      const int b=b0+jj;
+    const int NBK=N2/AP_W;
+    for(int b=0;b<NBK;b++){
       long base=(long)AP_W*b;
       long lo=((long)ws-base-(AP_W-1)+N2-1)/N2, hi=((long)we-1-base)/N2;
       if(lo<0) lo=0;
       if(hi>N1-1) hi=N1-1;
       if(lo>hi) continue;
       vf *RR,*RI;
-      if(bbn>1) stageB_run(p,jj,&RR,&RI); else if constexpr (INPLACE) stageB_inplace32(p,b,&RR,&RI);
+      if constexpr (INPLACE) stageB_inplace32(p,b,&RR,&RI);
       else stageB_generic(p,b,&RR,&RI,1);
       long lo_in = ((long)ws > base) ? (((long)ws - base + N2 - 1) / N2) : 0;
       long hi_in = ((long)we >= base + AP_W) ? (((long)we - base - AP_W) / N2) : -1;
@@ -1277,7 +1230,6 @@ static void binmax_one(BP*p,float thr,ap_peak*out,int conj,size_t ws,size_t we){
         for(long k1=lo; k1<=hi; k1++) process_boundary(k1);
       }
      }
-    }
     float mv[AP_W],rv[AP_W],iv[AP_W]; int xv[AP_W];
     V_STOREU(mv,am); V_STOREU(rv,arr); V_STOREU(iv,aii); VI_STOREU(xv,axx);
     int bl=-1;
@@ -1336,19 +1288,15 @@ static void binmax_core(BP*p,size_t binsize,float thr,ap_peak*out,int conj,
   const ap_peak empty_peak = {-1, 0.f, 0.f, 0.f};
   ap_peak * restrict out_p = out;
   for(size_t i=0;i<nb;i++) out_p[i] = empty_peak;
-  const int NBK2=N2/AP_W, BB2=p->bblk;
-  for(int b0=0;b0<NBK2;b0+=BB2){
-   const int bbn=(NBK2-b0<BB2)?NBK2-b0:BB2;
-   if(bbn>1) stageB_load_many(p,b0,bbn);
-   for(int jj=0;jj<bbn;jj++){
-    const int b=b0+jj;
+  const int NBK2=N2/AP_W;
+  for(int b=0;b<NBK2;b++){
     long base=(long)AP_W*b;
     long lo=((long)ws-base-(AP_W-1)+N2-1)/N2, hi=((long)we-1-base)/N2;
     if(lo<0) lo=0;
     if(hi>N1-1) hi=N1-1;
     if(lo>hi) continue;
     vf *RR,*RI;
-    if(bbn>1) stageB_run(p,jj,&RR,&RI); else stageB(p,b,&RR,&RI,1);
+    stageB(p,b,&RR,&RI,1);
     long lo_in = ((long)ws > base) ? (((long)ws - base + N2 - 1) / N2) : 0;
     long hi_in = ((long)we >= base + AP_W) ? (((long)we - base - AP_W) / N2) : -1;
     if(lo_in < lo) lo_in = lo;
@@ -1424,7 +1372,6 @@ static void binmax_core(BP*p,size_t binsize,float thr,ap_peak*out,int conj,
       for(long k1=lo; k1<=hi; k1++) process_boundary(k1);
     }
    }
-  }
   /* magnitude carried squared to keep the hot loop free of sqrt */
   for(size_t j=0;j<nb;j++) if(out[j].index>=0) out[j].magnitude=sqrtf(out[j].magnitude);
 #undef BINOF
@@ -1626,7 +1573,7 @@ static HWY_NOINLINE MF_PEAK_SECTION int binmax_prod_threshold(void *vp,const flo
                     float thr,ap_peak*out,int conj,size_t ws,size_t we){
   BP *p=(BP*)vp;
   if constexpr (AP_W==8 || AP_W==16) {
-    if(__builtin_expect(thr>0.f && (we-ws)<=binsize && p->fuse==2 && p->ilay && p->bblk==1 && p->gmajor
+    if(__builtin_expect(thr>0.f && (we-ws)<=binsize && p->fuse==2 && p->ilay && p->gmajor
        && !p->ser, 1)) {
       stageA_prod_32(p,dr,di,tr,ti);
       binmax_fused32(p,thr,out,conj,ws,we);
