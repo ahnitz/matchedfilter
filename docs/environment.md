@@ -1,15 +1,26 @@
 # Environment variables
 
 Every environment variable matchedfilter reads, by kind. None is needed for normal use:
-unset, each gives the library's default behaviour. Results never depend on a
-diagnostic; the overrides change what runs (and so, for the statistical gates, which
-peaks a chain dismisses), and exist for measurement and tests.
+unset, each gives the library's default behaviour. Results never depend on a diagnostic;
+the overrides change what runs (and so, for the statistical gates, which peaks a chain
+dismisses), and exist for measurement and tests.
 
-Audited 2026-10-17: switches no tool, test or CI job used were removed (their defaults
+Generated from `python/matchedfilter/_config.py` by `tools/gen_environment_doc.py`; edit
+the table there.
+
+Removed 2026-10-17: switches no tool, test or CI job used were removed (their defaults
 kept): MF_BLOCK_TRIAL_RANKS, MF_CUDA_BLOCKING_SYNC, MF_CUDA_GRAPHS, MF_CUDA_PREFETCH,
 MF_DIRECT_TRACE, MF_FUSE, MF_GATE16_ELECT, MF_GBLK, MF_GPU_FUSE, MF_GPU_FUSE_CACHE,
 MF_GPU_FUSE_CHUNK, MF_MFTILE, MF_N1, MF_NOSTORE, MF_SERPAD, MF_SRPROD,
-MF_VK_NO_SUBGROUP_PIN. Older notes in docs/ that mention them describe past studies.
+MF_VK_NO_SUBGROUP_PIN.
+
+Removed 2026-10-22: a stored trial lock is final; the steady re-check it switched on
+could make processes sharing a cost file choose differently: MF_TRIAL_RECHECK.
+
+Removed 2026-10-22: stage-B blocking measured slower at every length on Zen 3, Zen 5 and
+the M2: MF_BBLK.
+
+Older notes in docs/ that mention a removed variable describe past studies.
 
 ## Configuration
 
@@ -52,7 +63,7 @@ MF_VK_NO_SUBGROUP_PIN. Older notes in docs/ that mention them describe past stud
 | `MF_BAND_FORWARD=0/1` | measured | GPU band forward off/on. |
 | `MF_COARSE_LAYOUT=<labels>` | measured | Force GPU coarse layouts by label. |
 | `MF_VK_COARSE_PPG`, `_TILE`, `_SUBGROUP`, `_TWT` | measured | Fix a Vulkan coarse layout field. |
-| `MF_METAL_COARSE_PPG`, `_TILE`, `_TWT` | measured | Fix a Metal coarse layout field. |
+| `MF_METAL_COARSE_PPG` | measured | Fix a Metal coarse layout field. |
 | `MF_VK_SUBGROUP=<size>` | measured | Force a Vulkan subgroup size. |
 | `MF_VK_C16_BOUND=0` | 1 | Electing coarse kernel instead of the bound-only one. |
 | `MF_METAL_IEEE=all/none` | per kernel | IEEE math for all or no Metal kernels. |
