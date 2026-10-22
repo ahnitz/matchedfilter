@@ -451,7 +451,7 @@ def main():
     for name in THREAD_VARS:
         os.environ[name] = "1"
     os.environ.update(MF_CHAIN_FORCE="2048:256,512,1024", MF_AUTOTUNE="1",
-                      MF_TRIAL_RECHECK="0", VK_ICD_FILENAMES="/dev/null")
+                      VK_ICD_FILENAMES="/dev/null")
     for name in ("MF_HMF_PROF", "MF_HMF_TRACE", "MF_HMF_DUMP"):
         os.environ.pop(name, None)
     root = Path(__file__).resolve().parents[1]

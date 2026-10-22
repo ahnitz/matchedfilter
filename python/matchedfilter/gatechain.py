@@ -1346,22 +1346,14 @@ def pick_stable(items, cost, key):
 # ---- the one rule every measured choice follows ---------------------------------------
 #
 # Block-size trials (time_domain._BlockTrials), Q15 screen trials, and chain trials on the CPU
-# (per call) and GPU (per batch) all decide with measured_choice and re-check with
-# steady_disagrees. History: M2 locked n=4096 on two samples 5.4% faster than n=2048 -- past
+# (per call) and GPU (per batch) all decide with measured_choice (through _choice.Choice).
+# History: M2 locked n=4096 on two samples 5.4% faster than n=2048 -- past
 # TIE, inside the noise -- and ran 34% slower in steady state; dev2 locked the Q15 screen off
 # on a 6% "win" and ran 5% slower without it.
 
 #: A candidate beats the model's choice only by more than TIE and by more than Z standard
 #: errors of the difference of the two medians.
 CHOICE_Z = 2.0
-#: Steady-state re-check, for gross mistakes only: the winner's median over RECHECK_N steady
-#: samples more than RECHECK_FRAC above the winner's OWN trial median reopens the choice --
-#: once per choice. Steady samples and trial samples are taken at different times, so on a
-#: shared host load swings alone move them apart: 15% over the trial's best reopened chain
-#: and Q15 locks within 14 segments at load ~45 on dev2. The M2 case (n=4096 locked on a
-#: 5.4% "win", steady 142 ms against the ~100 ms its trial measured) still reopens.
-RECHECK_N = 8
-RECHECK_FRAC = 0.30
 
 
 def sample_spread(v):
@@ -1450,58 +1442,6 @@ def measured_choice(samples, model, cap, tie=None, z=None):
     if min(len(a), len(b)) < cap:
         return None, {model: len(a) + 1, best: len(b) + 1}
     return model, {}
-
-
-def recheck_enabled():
-    """MF_TRIAL_RECHECK=1 turns the steady-state re-check on. Off by default: a verdict
-    reached from one process's steady timing reopens the lock for every later process, so
-    two processes on one cost file can end on different choices (L40S: 2 of 10 runs of
-    test_reproducible_choices; the macOS Metal CI wheel). With it off a stored lock is final
-    until the cost file is deleted."""
-    return os.environ.get("MF_TRIAL_RECHECK", "0").strip().lower() not in ("", "0", "false", "no", "off")
-
-
-def observe_steady(state, value, on_reopen):
-    """One steady-state sample of a locked choice kept in `state` (a dict with "winner",
-    "median" {candidate: trial median}, "steady" and "rechecked"). Calls on_reopen() and
-    returns True when the steady samples contradict the trial -- once per choice."""
-    if not recheck_enabled():
-        return False
-    if state.get("winner") is None or not state.get("median") or state.get("rechecked"):
-        return False
-    st = state.setdefault("steady", [])
-    st.append(float(value))
-    if not steady_disagrees(st, state["median"], state["winner"]):
-        return False
-    state["rechecked"] = True
-    from . import _log_autotune
-    _log_autotune("RECHECK winner %s steady %s trial medians %s", state.get("winner"),
-                  ["%.3g" % x for x in st[-RECHECK_N:]],
-                  {k: "%.3g" % v for k, v in state["median"].items()})
-    on_reopen()
-    return True
-
-
-def steady_disagrees(steady, medians, winner, n=None, frac=None):
-    """Whether steady-state samples of a locked `winner` (the last n) contradict the trial
-    that chose it: their median more than frac above the trial's best median."""
-    n = RECHECK_N if n is None else n
-    frac = RECHECK_FRAC if frac is None else frac
-    if len(steady) < n or not medians:
-        return False
-    # Against what the trial measured for the WINNER itself: steady state far above that
-    # says the trial was wrong about it. Against the runner-up it contradicted the decision
-    # rule -- a model's chain that stood because the contest was unclear can have a worse
-    # trial median than the runner-up, and ordinary steady samples of it then reopened the
-    # lock in a later process (the L40S two-process flake). M2's case (n=4096 locked, steady
-    # 142 ms against ~100 ms measured for it in the trial) is still caught.
-    ref = medians.get(winner)
-    if ref is None or not np.isfinite(ref):
-        others = [float(v) for c, v in medians.items() if np.isfinite(v)]
-        if not others:
-            return False
-        ref = min(others)
-    return float(np.median(steady[-n:])) > float(ref) * (1.0 + frac)
 
 
 _REFINE_BLOCKS = {}

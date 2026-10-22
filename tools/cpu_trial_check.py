@@ -17,7 +17,7 @@ _TRIALS = ('choice|block-trial|', 'choice|chain-trial|', 'choice|q15-trial|')
 
 
 def locks(records):
-    return {k: {f: v[f] for f in ('value', 'rechecked') if f in v}
+    return {k: {f: v[f] for f in ('value',) if f in v}
             for k, v in records.items() if k.startswith(_TRIALS)}
 
 
@@ -46,7 +46,7 @@ def main():
     args.out.mkdir(parents=True, exist_ok=False)
     root = Path(__file__).resolve().parents[1]
     env = dict(os.environ, OMP_NUM_THREADS='1', OPENBLAS_NUM_THREADS='1', MKL_NUM_THREADS='1',
-               PYTHONPATH=str(root / 'python'), MF_AUTOTUNE='1', MF_TRIAL_RECHECK='0')
+               PYTHONPATH=str(root / 'python'), MF_AUTOTUNE='1')
     results = []
     for cold in range(args.starts):
         cost = args.out / ('cost-%02d.json' % cold)

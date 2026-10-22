@@ -42,7 +42,6 @@ MF_VK_NO_SUBGROUP_PIN. Older notes in docs/ that mention them describe past stud
 | `MF_CHAIN_FORCE=b1,b2` or `n:b1,b2;...` | unset | Pin the gate chain (cross-device comparisons; results depend on the chain). |
 | `MF_CHAIN_MARGIN`, `MF_CHAIN_TRIALS` | built-in | Chain shortlist margin; batches per chain trial. |
 | `MF_BLOCK_TRIALS` | built-in | Samples per block-size trial. |
-| `MF_TRIAL_RECHECK=1` | off | Steady-state re-check of locked trials. |
 | `MF_DIRECT_REFINE=0` | on | CPU refines by transform only (no direct correlation). |
 | `MF_GATE16=0` | on where built | No FP16 first gate on the CPU. |
 | `MF_DGROUP=<n>` | the plan's series group | Blocks per hierarchical series batch. |

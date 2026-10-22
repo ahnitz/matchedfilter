@@ -212,46 +212,6 @@ def test_a_clear_win_still_locks_on_two_samples(monkeypatch, tmp_path):
     assert sum(timer.k.values()) == 6                     # 2 samples each, no extension
 
 
-def test_a_lock_steady_state_contradicts_is_reopened(monkeypatch, tmp_path):
-    """Rank 1 measured faster in its trial, then runs 30% slower than the trial's best in
-    steady state: the lock is reopened in the cost file, so the next process trials again."""
-    monkeypatch.setenv("MF_TRIAL_RECHECK", "1")              # opt-in (off by default)
-    monkeypatch.setenv("MF_COST_FILE", str(tmp_path / "costs.json"))
-    timer = _FakeTimer({0: 1.0, 1: 0.7, 2: 1.3}, {r: [0.0, 0.01] for r in range(3)})
-    tr = td._BlockTrials()
-    assert _drive(tr, "k", timer) == 1
-    for _ in range(gatechain.RECHECK_N - 1):
-        assert not tr.observe("k", 0.72)                  # agrees with the trial
-    assert not tr.observe("k", 0.72)
-    fresh = td._BlockTrials()                              # agreement keeps the lock
-    assert fresh.winner("k") == 1
-    for _ in range(gatechain.RECHECK_N):
-        reopened = fresh.observe("k", 1.5)                 # 50% slower than the runner-up
-    assert reopened
-    again = td._BlockTrials()
-    assert again.winner("k") is None                      # next process trials again
-    assert _drive(again, "k", timer) == 1                  # (the fake timer still says 1)
-    final = td._BlockTrials()
-    for _ in range(2 * gatechain.RECHECK_N):
-        assert not final.observe("k", 1.5)                # one re-check per key: no flapping
-    assert td._BlockTrials().winner("k") == 1
-
-
-def test_a_lock_is_final_without_the_recheck(monkeypatch, tmp_path):
-    """By default (MF_TRIAL_RECHECK unset) steady state never reopens a block-size lock: a
-    lock reopened from one process's timing let two processes sharing a cost file end on
-    different block sizes."""
-    monkeypatch.delenv("MF_TRIAL_RECHECK", raising=False)
-    monkeypatch.setenv("MF_COST_FILE", str(tmp_path / "costs.json"))
-    timer = _FakeTimer({0: 1.0, 1: 0.7, 2: 1.3}, {r: [0.0, 0.01] for r in range(3)})
-    tr = td._BlockTrials()
-    assert _drive(tr, "k", timer) == 1
-    fresh = td._BlockTrials()
-    for _ in range(4 * gatechain.RECHECK_N):
-        assert not fresh.observe("k", 1.5)                # far slower: still not reopened
-    assert td._BlockTrials().winner("k") == 1
-
-
 class _FakeBank:
     def __init__(self, calibrating):
         self._layouts = [object(), object()]

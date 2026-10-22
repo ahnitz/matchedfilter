@@ -267,3 +267,6 @@ A step that changes C or workflows is first pushed to a `ci/<topic>` branch and 
   - Every run prints its skips grouped by reason (B2).
   - The GPU probe records why each enumerated GPU was rejected. `usable_gpu_reason()` names the device and error, so "no GPU" and "a GPU that failed its probe" read differently. The 14 test files that skipped with a bare "no usable GPU" use it.
   - The Metal job already fails rather than skips its coarse GPU tests (`--require-coarse-gpu`).
+- 2026-10-22: **C3a: MF_TRIAL_RECHECK deleted (decision 3).**
+  - Removed: `Choice.observe`, the steady flags and paths in the trial loop, `_chain_steady`, `_chain_monitor`, `_trial_monitor`, `_BlockTrials.observe`, and gatechain's recheck_enabled, observe_steady, steady_disagrees and RECHECK_*. Five tests went with them. Records no longer carry `rechecked`.
+  - `_fuse_begin`'s "a trial is trying" now means any open chain or block trial in the batch.

@@ -57,10 +57,8 @@ print(json.dumps({"last": out[-4:], "layout": bank.chosen_layout,
 
 
 def _run(device, cost):
-    # MF_TRIAL_RECHECK=0 (the default, pinned): a steady re-check would reopen a lock on one
-    # process's timing, and two processes could then disagree by design.
     env = dict(os.environ, MF_COST_FILE=str(cost), MF_AUTOTUNE="1", MF_CHAIN_TRIALS="1",
-               MF_BLOCK_TRIALS="1", OMP_NUM_THREADS="1", MF_TRIAL_RECHECK="0")
+               MF_BLOCK_TRIALS="1", OMP_NUM_THREADS="1")
     p = subprocess.run([sys.executable, "-c", SCRIPT, str(PKG_PARENT), device], env=env,
                        capture_output=True, text=True, timeout=900)
     assert p.returncode == 0, p.stderr[-3000:]
@@ -72,7 +70,7 @@ _TRIALS = ("choice|block-trial|", "choice|chain-trial|", "choice|q15-trial|")
 
 def _trial_records(rec):
     """The trial locks on file (what a process reads back), without timings."""
-    return {k: (v.get("value"), v.get("rechecked")) for k, v in rec.items()
+    return {k: v.get("value") for k, v in rec.items()
             if k.startswith(_TRIALS) and "value" in v}
 
 
@@ -93,7 +91,7 @@ def test_two_processes_sharing_a_cost_file_agree(device, tmp_path):
     # span processes (its samples persist): run until its lock is on file. From then on
     # every process reads the same choices back.
     # Run until the trial records reach a fixed point: no trial open, and a process changes
-    # none of them. With the steady re-check off a stored lock is final.
+    # none of them: a stored lock is final.
     # The trials are bounded (an unclear contest samples further up to its budget, then the
     # shared rule decides) and continue across processes from the file, but one process
     # adds only a few batch samples: on CI's paravirtual M2 a chain trial's batches were

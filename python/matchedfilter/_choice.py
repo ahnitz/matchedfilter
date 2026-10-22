@@ -32,9 +32,6 @@ How candidates are timed differs, and a choice is made one of three ways:
     timed against the runners-up stored with it, and remeasured when one beats it beyond
     the noise (a clock or power transition spoils one process, not every later one).
 
-A locked choice can be re-checked against steady-state samples (observe, with
-MF_TRIAL_RECHECK=1): steady state far from what the trial measured reopens it on file, once.
-
 The state lives in a scope: the process registry by default, or the dict a caller passes
 (a device's, for choices that belong to one device object); tests clear it with reset().
 
@@ -86,8 +83,6 @@ class Choice:
         self.persist, self.budget, self.paired = bool(persist), budget, bool(paired)
         self.winner = None
         self.median: Optional[dict] = None
-        self.rechecked = False
-        self.steady: list = []
         self._warm: Dict[Hashable, int] = {}
         # A persisted contest's samples, needs and drops for candidates not added yet.
         self._pool: dict = {}
@@ -98,7 +93,6 @@ class Choice:
         rec = self._record()
         self.held = None
         if isinstance(rec, dict):
-            self.rechecked = bool(rec.get("rechecked"))
             if "value" in rec:
                 self.held = self.parse(rec["value"])
                 if self.held is not None:
@@ -339,32 +333,6 @@ class Choice:
         rivals = rec.get("rivals") if isinstance(rec, dict) else None
         return set((rivals or "").split(";")) - {""}
 
-    # ---- steady state -------------------------------------------------------------------
-    def observe(self, value: float) -> bool:
-        """A steady-state sample of the locked winner (the trial's own unit). With the
-        re-check on (gatechain.recheck_enabled), steady state far above what the trial
-        measured for the winner reopens the choice on file -- the next process trials again
-        -- once per choice. This process keeps its winner. Returns True when it reopened."""
-        from . import gatechain
-        if not gatechain.recheck_enabled():
-            return False
-        if self.winner is None or not self.median or self.rechecked:
-            return False
-        self.steady.append(float(value))
-        if not gatechain.steady_disagrees(self.steady, self.median, self.winner):
-            return False
-        self.rechecked = True
-        steady = float(np.median(self.steady[-gatechain.RECHECK_N:]))
-        from . import _log_autotune
-        _log_autotune("%s %s steady %.3g vs trial %s: reopened", self.what,
-                      self.label(self.winner), steady,
-                      {str(self.label(c)): "%.3g" % v for c, v in self.median.items()})
-        self._write({"samples": {}, "rechecked": True, "method": self._method(),
-                     "reopened": {"winner": str(self.label(self.winner)), "steady": steady,
-                                  "trial": {str(self.label(c)): v for c, v in self.median.items()}}},
-                    replace=True)
-        return True
-
     # ---- the record on file -------------------------------------------------------------
     def lock(self, winner, kept=None, **extra) -> None:
         """Lock `winner` for this process and store it (with `extra` fields) for later ones.
@@ -376,8 +344,6 @@ class Choice:
         rec = {"value": self.label(winner), **extra}
         if med:
             rec["median"] = {str(self.label(c)): v for c, v in med.items()}
-        if self.rechecked:
-            rec["rechecked"] = True
         on_file = self._write(rec, replace=self._replace)
         self._replace = False
         if on_file is not rec:
@@ -407,8 +373,6 @@ class Choice:
                "dropped": sorted(lbl(c) for c in self.dropped)}
         if self._method():
             rec["method"] = self._method()
-        if self.rechecked:
-            rec["rechecked"] = True
         on_file = self._write(rec)
         if on_file is not rec:
             self._adopt(on_file)
