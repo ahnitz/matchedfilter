@@ -327,3 +327,4 @@ A step that changes C or workflows is first pushed to a `ci/<topic>` branch and 
   - verify_cuda.py and bench_pack_indexing.py ran their whole body on import (now main()).
 
   audit_class_execution.py's `del f` inside loops whose lambdas close over f read as an undefined name; it is now `f = None`. No tool imports a third-party module but numpy at module level.
+- 2026-10-22: **First sanitized pass.** In four shards, x86_64 ran the whole suite under ASan and UBSan clean (32-58 minutes a shard); every arm64 quarter reached 75 minutes. x86_64 now runs six shards and arm64 twelve.
