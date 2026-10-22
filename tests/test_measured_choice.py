@@ -482,3 +482,19 @@ def test_a_recheck_that_does_not_time_the_choice_measures_everything(monkeypatch
     pick = _coarse.stored_measured_choice({}, "t-untimed", "dev", 256, list("abc"), str, "k",
                                           measure)
     assert pick == "a" and calls == [list("abc"), list("abc")]
+
+
+def test_a_chain_trial_owns_its_placement_and_batch_run():
+    """The bookkeeping that sat in side tables keyed like the trial (plans placed on each
+    candidate; a GPU trial's current run of batches) is the trial's own, so it starts and
+    ends with it."""
+    tk = (2048, 6.0, 0.001, 2, "gpu:0")
+    tr = mf._chains._chain_trial(tk)
+    assert isinstance(tr, mf._chains.ChainTrial) and tr.placed == {}
+    assert tr.batch_run == (None, 0, 0)
+    tr.add((256,)); tr.add((512,))
+    c = mf._chains._chain_trial_next(tk)
+    assert tr.batch_run[0] == c and tr.batch_run[1] == 1
+    mf.clear_autotune_cache()
+    fresh = mf._chains._chain_trial(tk)
+    assert fresh is not tr and fresh.batch_run == (None, 0, 0) and fresh.placed == {}
