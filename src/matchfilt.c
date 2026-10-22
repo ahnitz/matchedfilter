@@ -45,7 +45,6 @@ struct ap_mf_plan {
   float *tre,*tim;     /* [nt][n], already conjugated */
   float *pr,*pi;       /* scratch for one product, split */
   float *scratch;      /* interleaved staging for ingest */
-  /* Interpolated coarse maximum, when a caller asks for it.  See interp_max. */
   /* run_series staging, allocated on first use so a plan that never
      filters a series does not carry 4n floats it will not touch.
      ONE buffer pair serves a whole group: ap_mf_set_data split_stores
@@ -54,7 +53,7 @@ struct ap_mf_plan {
      one needs. */
   float *sfwd,*sspec;         /* [2n] each */
   /* Real series (ap_mf_correlate_series_continuous_real): blocks of real samples transformed
-     at half size and split into their full spectrum (ap_real_split). */
+     at half size and split into their full spectrum (ap_real_split_on). */
   int real_series;
   ap_plan *half_fft;
   float *rtw;                 /* [2(n/2+1)] cos, sin of 2 pi k/n */
@@ -629,7 +628,6 @@ static inline void gather_data_batch(float * restrict dsr, float * restrict dsi,
 }
 
 static int run_pairs_pb(ap_mf_plan *p, int d0, int nd, int t0, int nt,
-                        const int *tsel, int nsel,
                         size_t binsize, float threshold,
                         ap_peak *peaks, int *counts, size_t start, size_t end){
   const size_t n=p->n, nb=(end-start+binsize-1)/binsize;
@@ -648,15 +646,15 @@ static int run_pairs_pb(ap_mf_plan *p, int d0, int nd, int t0, int nt,
      hierarchical coarse pass (2026-10): the gain grows once a group's coarse
      templates outgrow L2. */
   if(!p->ebr && nd>1){
-    for(int tt=0; tt<nsel; tt+=W){
-      const int cnt=(nsel-tt<W)?nsel-tt:W;
+    for(int tt=0; tt<nt; tt+=W){
+      const int cnt=(nt-tt<W)?nt-tt:W;
       const int base=t0+tt;
       const float *Tr,*Ti;
-      if(!tsel && (base%W)==0){
+      if((base%W)==0){
         Tr=p->tre+(size_t)(base/W)*n*W;
         Ti=p->tim+(size_t)(base/W)*n*W;
       } else {
-        gather_template_batch(p->tsr, p->tsi, p, t0, tsel, tt, cnt);
+        gather_template_batch(p->tsr, p->tsi, p, t0, NULL, tt, cnt);
         Tr=p->tsr; Ti=p->tsi;
       }
       for(int d=0;d<nd;d++){
@@ -664,7 +662,7 @@ static int run_pairs_pb(ap_mf_plan *p, int d0, int nd, int t0, int nt,
         if(ap_binmax_prod_batch_peaks(p->fft,Dr,Di,Tr,Ti,cnt,binsize,threshold,
                                 p->pkbuf,AP_BACKWARD,start,end)<0) return -1;
         for(int l=0;l<cnt;l++){
-          const int t = tsel ? tsel[tt+l] : (tt+l);
+          const int t = tt+l;
           const size_t row=(size_t)d*nt+t;
           int c=0;
           for(size_t j=0;j<nb;j++){
@@ -690,21 +688,21 @@ static int run_pairs_pb(ap_mf_plan *p, int d0, int nd, int t0, int nt,
       Dr=p->ebr; Di=p->ebi;
     }
     int tt=0;
-    for(; tt+2*W<=nsel; tt+=2*W){
+    for(; tt+2*W<=nt; tt+=2*W){
       const int base0=t0+tt;
       const int base1=base0+W;
       const float *Tr0, *Ti0, *Tr1, *Ti1;
-      if(!tsel && (base0%W)==0){
+      if((base0%W)==0){
         Tr0=p->tre+(size_t)(base0/W)*n*W;
         Ti0=p->tim+(size_t)(base0/W)*n*W;
         Tr1=p->tre+(size_t)(base1/W)*n*W;
         Ti1=p->tim+(size_t)(base1/W)*n*W;
       } else {
-        gather_template_batch(p->tsr, p->tsi, p, t0, tsel, tt, W);
+        gather_template_batch(p->tsr, p->tsi, p, t0, NULL, tt, W);
         Tr0=p->tsr; Ti0=p->tsi;
         if(ap_binmax_prod_batch_peaks(p->fft,Dr,Di,Tr0,Ti0,W,binsize,threshold,
                                 p->pkbuf,AP_BACKWARD,start,end)<0) return -1;
-        gather_template_batch(p->tsr, p->tsi, p, t0, tsel, tt+W, W);
+        gather_template_batch(p->tsr, p->tsi, p, t0, NULL, tt+W, W);
         Tr1=p->tsr; Ti1=p->tsi;
         if(ap_binmax_prod_batch_peaks(p->fft,Dr,Di,Tr1,Ti1,W,binsize,threshold,
                                 p->pkbuf+(size_t)W*nb,AP_BACKWARD,start,end)<0) return -1;
@@ -716,7 +714,7 @@ static int run_pairs_pb(ap_mf_plan *p, int d0, int nd, int t0, int nt,
                               p->pkbuf+(size_t)W*nb,AP_BACKWARD,start,end)<0) return -1;
 place_peaks:
       for(int l=0;l<2*W;l++){
-        const int t = tsel ? tsel[tt+l] : (tt+l);
+        const int t = tt+l;
         const size_t row=(size_t)d*nt+t;
         int c=0;
         for(size_t j=0;j<nb;j++){
@@ -728,21 +726,21 @@ place_peaks:
         total+=c;
       }
     }
-    for(; tt<nsel; tt+=W){
-      const int cnt=(nsel-tt<W)?nsel-tt:W;
+    for(; tt<nt; tt+=W){
+      const int cnt=(nt-tt<W)?nt-tt:W;
       const int base=t0+tt;
       const float *Tr,*Ti;
-      if(!tsel && (base%W)==0){
+      if((base%W)==0){
         Tr=p->tre+(size_t)(base/W)*n*W;
         Ti=p->tim+(size_t)(base/W)*n*W;
       } else {
-        gather_template_batch(p->tsr, p->tsi, p, t0, tsel, tt, cnt);
+        gather_template_batch(p->tsr, p->tsi, p, t0, NULL, tt, cnt);
         Tr=p->tsr; Ti=p->tsi;
       }
       if(ap_binmax_prod_batch_peaks(p->fft,Dr,Di,Tr,Ti,cnt,binsize,threshold,
                               p->pkbuf,AP_BACKWARD,start,end)<0) return -1;
       for(int l=0;l<cnt;l++){
-        const int t = tsel ? tsel[tt+l] : (tt+l);
+        const int t = tt+l;
         const size_t row=(size_t)d*nt+t;
         int c=0;
         for(size_t j=0;j<nb;j++){
@@ -759,19 +757,18 @@ place_peaks:
 }
 
 static int run_pairs(ap_mf_plan *p, int d0, int nd, int t0, int nt,
-                     const int *tsel, int nsel,
                      size_t binsize, float threshold,
                      ap_peak *peaks, int *counts, size_t start, size_t end){
-  if(p->pb) return run_pairs_pb(p,d0,nd,t0,nt,tsel,nsel,binsize,threshold,
+  if(p->pb) return run_pairs_pb(p,d0,nd,t0,nt,binsize,threshold,
                                 peaks,counts,start,end);
   /* Lanes span templates, not D*T: 32x1 cannot fill one vector. Require
      >=75% occupancy, aligned contiguous templates, and a broad single bin.
      Unmeasured sparse/multi-bin/narrow-window cases keep the original path. */
-  if(p->allow_pair_alt && !tsel && nd>=4 && p->w>0 && nt>=p->w && t0%p->w==0
+  if(p->allow_pair_alt && nd>=4 && p->w>0 && nt>=p->w && t0%p->w==0
      && 4*(size_t)nt>=3*((nt+p->w-1)/p->w)*(size_t)p->w
      && end-start>=p->n/2 && binsize>=end-start){
     ap_mf_plan *q=pair_alternate(p,d0,nd,t0,nt);
-    if(q) return run_pairs_pb(q,d0,nd,t0,nt,NULL,nt,binsize,threshold,
+    if(q) return run_pairs_pb(q,d0,nd,t0,nt,binsize,threshold,
                              peaks,counts,start,end);
   }
   const size_t n=p->n, nb=(end-start+binsize-1)/binsize;
@@ -788,9 +785,9 @@ static int run_pairs(ap_mf_plan *p, int d0, int nd, int t0, int nt,
   const int tile = p->tile;
   int total=0;
 
-  if(p->gmajor && prod.run && !tsel && nb == 1){
-    for(int dt=0;dt<nd;dt+=tile) for(int tt=0;tt<nsel;tt+=tile){
-      const int dend=(nd-dt<tile)?nd:dt+tile, tend=(nsel-tt<tile)?nsel:tt+tile;
+  if(p->gmajor && prod.run && nb == 1){
+    for(int dt=0;dt<nd;dt+=tile) for(int tt=0;tt<nt;tt+=tile){
+      const int dend=(nd-dt<tile)?nd:dt+tile, tend=(nt-tt<tile)?nt:tt+tile;
       for(int d=dt;d<dend;d++){
         const float *Dr=p->dre+(size_t)(d0+d)*n, *Di=p->dim+(size_t)(d0+d)*n;
         ap_peak *pk_row = peaks + (size_t)d * nt + tt;
@@ -808,12 +805,12 @@ static int run_pairs(ap_mf_plan *p, int d0, int nd, int t0, int nt,
     return total;
   }
 
-  for(int dt=0;dt<nd;dt+=tile) for(int tt=0;tt<nsel;tt+=tile){
-   const int dend=(nd-dt<tile)?nd:dt+tile, tend=(nsel-tt<tile)?nsel:tt+tile;
+  for(int dt=0;dt<nd;dt+=tile) for(int tt=0;tt<nt;tt+=tile){
+   const int dend=(nd-dt<tile)?nd:dt+tile, tend=(nt-tt<tile)?nt:tt+tile;
    for(int d=dt;d<dend;d++){
     const float *Dr=p->dre+(size_t)(d0+d)*n, *Di=p->dim+(size_t)(d0+d)*n;
     for(int j=tt;j<tend;j++){
-      const int t = tsel ? tsel[j] : j;
+      const int t = j;
       const float *Hr=p->tre+(size_t)(t0+t)*n, *Hi=p->tim+(size_t)(t0+t)*n;
       size_t row=(size_t)d*nt+t;
       int c=0;
@@ -849,7 +846,7 @@ int ap_mf_run(ap_mf_plan *p, int d0, int nd, int t0, int nt,
   if(!ap_range_ok(d0,nd,p->nd)||!ap_range_ok(t0,nt,p->nt)) return -1;
   if(end>p->n) end=p->n;
   if(start>=end) return 0;
-  return run_pairs(p,d0,nd,t0,nt,NULL,nt,binsize,threshold,
+  return run_pairs(p,d0,nd,t0,nt,binsize,threshold,
                    peaks,counts,start,end);
 }
 
@@ -1416,19 +1413,6 @@ int ap_mf_run_series_dif(ap_mf_plan *p,
   return total;
 }
 
-int ap_mf_run_sel(ap_mf_plan *p, int d0, int nd, int t0, int nt,
-                  const int *tsel, int nsel,
-                  size_t binsize, float threshold,
-                  ap_peak *peaks, int *counts, size_t start, size_t end){
-  if(!p||nd<1||nsel<1||!binsize) return 0;
-  if(!ap_range_ok(d0,nd,p->nd)||!ap_range_ok(t0,nt,p->nt)) return -1;
-  for(int j=0;j<nsel;j++) if(tsel[j]<0||tsel[j]>=nt) return -1;
-  if(end>p->n) end=p->n;
-  if(start>=end) return 0;
-  return run_pairs(p,d0,nd,t0,nt,tsel,nsel,binsize,threshold,
-                   peaks,counts,start,end);
-}
-
 static int run_pairs_pooled_pb(ap_mf_plan *p, int d0,
                                const int *dsel, const int *tsel, int npairs,
                                int t0, size_t binsize, float threshold,
@@ -1772,13 +1756,12 @@ int ap_mf_q15_screen(ap_mf_plan *p,int d0,int nd,int t0,int nt,float threshold,
 }
 
 /* Debug accessor: how many data slots the plan actually has. */
-int ap_mf_ndata(const ap_mf_plan *p){ return p ? p->nd : -1; }
 
 /* The root stage of a hierarchical search: one transformed input block against one root
    filter, both one-sided spectra of n/2 + 1 bins, to the real n-point series
    scale * C2R(conj(T) D) over bins [k0, k1). The product, the band and the scale are formed
    in one pass that also merges the spectrum for a half-size backward transform
-   (ap_root_merge), so the series costs one n/2-point transform and one read of each input. */
+   (ap_root_merge_on), so the series costs one n/2-point transform and one read of each input. */
 struct ap_root { size_t n; ap_plan *half; float *tw; float *Z; };
 
 ap_root *ap_root_create(size_t n){

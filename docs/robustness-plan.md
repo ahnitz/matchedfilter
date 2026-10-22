@@ -428,3 +428,7 @@ A step that changes C or workflows is first pushed to a `ci/<topic>` branch and 
   - ASan wrote its report to fd 2, which pytest captures into a temporary file during each test, so the abort lost it. ASan and UBSan now write to log_path files, which sanitize.sh prints after the run.
   - The -q log named no test, so the gdb re-run had nothing to run. The shards now run -v, and sanitize_report's --crashing-test falls back to the last node id with no outcome (tests/test_sanitize_report.py).
   - sanitize.sh put its own -q before the caller's arguments, which cancels a -v. It now passes the caller's verbosity unchanged.
+- 2026-10-22: **Unused C entry points removed** (user decision). Removed: ap_binmax_prod, ap_interp_max, ap_series_buf, ap_series_stride, ap_mf_run_sel, ap_nbins, ap_root_merge, ap_real_split, ap_mf_ndata, ap_hmf_get_real_series, ap_hmf_get_hermitian.
+  - With them went what only they reached: the backend's series store (the series and series_stride slots, binmax_one's STORE instantiations), its interp slot (interp_max), run_pairs' template selection (tsel, always NULL without ap_mf_run_sel), and _core's hermitian property, which nothing read (callers use set_hermitian).
+  - Two on the list were in use and stay: ap_hmf_price_q15_tier0 (_core.price_q15_tier0, the Q15 pricing in _prices) and ap_binmax_split (matchfilt.c's fallback when the bank is not group-major).
+  - No pycbc tree references any of them.

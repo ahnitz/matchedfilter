@@ -34,17 +34,6 @@ typedef struct {
   int   (*corr_prod)(void *, const float *dr, const float *di,
                      const float *tr, const float *ti, float *out);
   int   (*corr_split)(void *, const float *re, const float *im, float *out);
-  /* Keep the output series in a plan-owned buffer, laid out [k][re lanes][im
-     lanes] as the scan writes it, so a caller can look at lags the peak scan
-     discards.  NULL turns it off; returns the buffer. */
-  float *(*series)(void *, int on);
-  size_t (*series_stride)(void *);
-  /* Interpolated maximum from the stored series: bounds the peak between grid
-     samples without a second transform.  Compiled per target, so its scan
-     vectorises. */
-  float (*interp)(void *, size_t ws, size_t we, float evmax,
-                  const float *hlo, const float *hhi, int K, int ncand,
-                  float frac);
   /* Lane count when this plan batches PAIRS instead of frequencies -- the
      small-N path, where no balanced split exists.  0 for every other plan. */
   int   (*pairbatch)(void *);

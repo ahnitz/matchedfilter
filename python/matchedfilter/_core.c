@@ -1076,28 +1076,11 @@ static PyObject *HMF_get_k(HMFObject *self, void *closure){
   (void)closure;
   return PyLong_FromSsize_t(self->k);
 }
-static PyObject *HMF_get_hermitian(HMFObject *self, void *closure){
-  (void)closure;
-  return PyBool_FromLong(ap_hmf_get_hermitian(self->p));
-}
-static int HMF_set_hermitian_prop(HMFObject *self, PyObject *value, void *closure){
-  (void)closure;
-  if(!value){
-    PyErr_SetString(PyExc_AttributeError, "cannot delete attribute 'hermitian'");
-    return -1;
-  }
-  int h = PyObject_IsTrue(value);
-  if(h < 0) return -1;
-  if(self->busy){ PyErr_SetString(PyExc_RuntimeError,"matchedfilter: filter in use by another "
-                                  "thread; use one filter per thread"); return -1; }
-  return ap_hmf_set_hermitian(self->p, h);
-}
 BUSY_GETTER(HMFObject)
 static PyGetSetDef HMF_getset[] = {
   {"_busy", (getter)HMFObject_get_busy, NULL, "a method is running on this object", NULL},
   {"n", (getter)HMF_get_n, NULL, "full FFT size", NULL},
   {"k", (getter)HMF_get_k, NULL, "template bins", NULL},
-  {"hermitian", (getter)HMF_get_hermitian, (setter)HMF_set_hermitian_prop, "Hermitian symmetry mode for real filters", NULL},
   {NULL}
 };
 static PyTypeObject HMFType={

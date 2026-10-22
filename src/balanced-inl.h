@@ -69,7 +69,6 @@ typedef struct {
   vf *TLr,*TLi;
   float *w1r,*w1i,*w2r,*w2i;
   float *hr,*hi,*lr,*li;
-  float *ser; size_t serstride;
   float *scg;          /* [g][k2] scalar part of the stage-A twiddle, precomputed */
   vf *tw32r, *tw32i;   /* [g][k2] full vector twiddles for 32x32 path */
   int fuse;     /* 0 = staged, 1 = generic fused, 2 = unit-stride 32x32 product.
@@ -345,7 +344,6 @@ void *create(size_t N){
      because the loop is no longer short of ALU and the table is extra traffic. */
   { size_t g_n=(size_t)n1/AP_W;
     p->scg=ap_alloc64(g_n*(size_t)n2*2*sizeof(float)+64);
-    p->ser=NULL;   /* set by series_buf() when a caller wants it */
     p->fuse = eprod_ok(p->N2);
     if constexpr (AP_W == 8 || AP_W == 16) {
       if(p->fuse && n1==32 && n2==32 && ap_srprod()) p->fuse=2;
@@ -392,7 +390,7 @@ void destroy(void *vp){
   free(p->ire);free(p->iim);free(p->bR);free(p->bI);free(p->sR);free(p->sI);
   free(p->TLr);free(p->TLi);free(p->w1r);free(p->w1i);free(p->w2r);free(p->w2i);
   free(p->hr);free(p->hi);free(p->lr);free(p->li);
-  free(p->ser);free(p->scg);free(p->tw32r);free(p->tw32i);free(p);
+  free(p->scg);free(p->tw32r);free(p->tw32i);free(p);
 }
 
 /* ---- the small sizes: lanes are PAIRS, not frequencies -------------------
@@ -494,7 +492,7 @@ static AP_ALWAYS_INLINE void stageA_tail(BP*p,int g,vf*restrict TR,vf*restrict T
      measured its own branch: the ablated build came out SLOWER than the
      normal one in one round and faster in the next, because a test on a
      plan field inside this loop stops the compiler scheduling it. That is
-     the same finding that made binmax_one's STORE a template parameter,
+     the same finding that made binmax_one's series store (since removed) a template parameter,
      one screen down in this file. */
 #if AP_NOXPOSE
   for(int i=0;i<AP_W;i++){ OR[i]=TR[i]; OI[i]=TI[i]; }
@@ -1065,7 +1063,7 @@ static HWY_NOINLINE MF_PEAK_SECTION void binmax_fused32(BP*p,float thr,ap_peak*o
   }
 }
 
-template <bool STORE, bool INPLACE=false>
+template <bool INPLACE=false>
 static void binmax_one(BP*p,float thr,ap_peak*out,int conj,size_t ws,size_t we){
   const int N1=p->N1,N2=p->N2;
   /* Seeded at 0, not -1: a maximum of exactly zero is not a peak. With -1
@@ -1077,8 +1075,6 @@ static void binmax_one(BP*p,float thr,ap_peak*out,int conj,size_t ws,size_t we){
   const float t2 = thr>0.f ? thr*thr : 0.f;
   const vf NEG=V_SET1(-1.f);
   const unsigned allm=(unsigned)((1ull<<AP_W)-1ull);
-  float *const ser=p->ser; const size_t sstr=p->serstride;
-  (void)ser; (void)sstr;
 
     vf am=V_SET1(t2), arr=V_ZERO(), aii=V_ZERO(); vi axx=VI_SET1(-1);
     const int NBK=N2/AP_W;
@@ -1104,8 +1100,6 @@ static void binmax_one(BP*p,float thr,ap_peak*out,int conj,size_t ws,size_t we){
         if(!inw) return;
         int e=eidx(&p->ea,(int)k1);
         vf m2=V_FMADD(RR[e],RR[e],V_MUL(RI[e],RI[e]));
-        if(STORE){ V_STOREU(ser+(size_t)k0,RR[e]);
-                   V_STOREU(ser+sstr+(size_t)k0,RI[e]); }
         if(inw!=allm) m2=V_SEL(V_MASK_FROM_BITS(inw),NEG,m2);
         vm g=V_CMP_GT(m2,am);
         if(__builtin_expect(V_MASK_ANY(g),0)){
@@ -1128,12 +1122,6 @@ static void binmax_one(BP*p,float thr,ap_peak*out,int conj,size_t ws,size_t we){
           vf rr1=RR[e1], ri1=RI[e1];
           vf m2_0=V_FMADD(rr0,rr0,V_MUL(ri0,ri0));
           vf m2_1=V_FMADD(rr1,rr1,V_MUL(ri1,ri1));
-          if(STORE){
-            V_STOREU(ser+(size_t)k0_0,rr0);
-            V_STOREU(ser+sstr+(size_t)k0_0,ri0);
-            V_STOREU(ser+(size_t)k0_1,rr1);
-            V_STOREU(ser+sstr+(size_t)k0_1,ri1);
-          }
           vm g0=V_CMP_GT(m2_0,am);
           if(__builtin_expect(V_MASK_ANY(g0),0)){
             am =V_SEL(g0,am,m2_0);
@@ -1154,10 +1142,6 @@ static void binmax_one(BP*p,float thr,ap_peak*out,int conj,size_t ws,size_t we){
           long k0=k1*N2+base;
           vf rr=RR[e], ri=RI[e];
           vf m2=V_FMADD(rr,rr,V_MUL(ri,ri));
-          if(STORE){
-            V_STOREU(ser+(size_t)k0,rr);
-            V_STOREU(ser+sstr+(size_t)k0,ri);
-          }
           vm g=V_CMP_GT(m2,am);
           if(__builtin_expect(V_MASK_ANY(g),0)){
             am =V_SEL(g,am,m2);
@@ -1205,13 +1189,11 @@ static void binmax_core(BP*p,size_t binsize,float thr,ap_peak*out,int conj,
   if(nb==1){
     if constexpr (AP_W==8) {
       if(p->fuse==2 && p->ilay) {
-        if(p->ser) binmax_one<true,true>(p,thr,out,conj,ws,we);
-        else                    binmax_one<false,true>(p,thr,out,conj,ws,we);
+        binmax_one<true>(p,thr,out,conj,ws,we);
         return;
       }
     }
-    if(p->ser) binmax_one<true>(p,thr,out,conj,ws,we);
-    else                    binmax_one<false>(p,thr,out,conj,ws,we);
+    binmax_one(p,thr,out,conj,ws,we);
     return;
   }
   if(0){ }
@@ -1336,80 +1318,6 @@ int binmax(void *vp,const float*in,size_t binsize,float thr,ap_peak*out,
    its spectra group-major for a split that does not exist. */
 int has_prod(void *vp){ return !((BP*)vp)->small; }
 
-/* Hand back a buffer holding the output series, or NULL to stop capturing it.
-   The scan already has every output sample in registers, so keeping it is one
-   store per vector into a buffer that stays in L1 -- measured at 5.6% of the
-   pass.  The lag window is scanned strided (k1 inner within a k2 block), so a
-   neighbourhood of consecutive lags is not available as a sliding window;
-   this is what makes it available. */
-size_t series_stride(void *vp){ return ((BP*)vp)->serstride; }
-
-/* Interpolated maximum over the stored output series.
- *
- * The coarse pass samples the correlation on a stride-R lag grid; the peak
- * between samples is what the second transform exists to find.  This bounds
- * it instead, from the series the first transform already produced.
- *
- * Candidates are the grid samples within `frac` of the largest, which is a
- * vector compare per AP_W lags and almost never hits.  Each survivor gets two
- * short complex convolutions, for the two half-sample offsets.  It lives here
- * rather than in matchfilt.c because this file is compiled once per SIMD
- * target -- matchfilt.c is built at the baseline ISA so it can be loaded
- * before the CPU is interrogated, and the scan ran scalar there, costing more
- * than the transform it saves. */
-float interp_max(void *vp,size_t ws,size_t we,float evmax,
-                 const float *hlo,const float *hhi,int K,int ncand,float frac){
-  BP *p=(BP*)vp;
-  if(!p->ser||evmax<=0.f) return evmax;
-  const float *sr=p->ser, *si=p->ser+p->serstride;
-  const float lim=frac*evmax;
-  const vf vlim=V_SET1(lim*lim);
-  int cand[64]; int nc=0;
-  const size_t k0=ws&~(size_t)(AP_W-1);
-  for(size_t k=k0;k<we && nc<ncand;k+=AP_W){
-    const vf re=V_LOADU(sr+k), im=V_LOADU(si+k);
-    const vf m2=V_FMADD(re,re,V_MUL(im,im));
-    if(!V_MASK_ANY(V_CMP_GT(m2,vlim))) continue;
-    for(int l=0;l<AP_W && nc<ncand;l++){
-      const size_t kk=k+l;
-      if(kk<ws||kk>=we) continue;
-      const float a=sr[kk],b=si[kk];
-      if(a*a+b*b>lim*lim) cand[nc++]=(int)kk;
-    }
-  }
-  float best=evmax*evmax;
-  for(int i=0;i<nc;i++){
-    const long j=cand[i];
-    float ar=0,ai=0,br=0,bi=0;
-    for(int t=-K;t<=K;t++){
-      const long kk=j+t;
-      if(kk<0||(size_t)kk>=p->serstride) continue;
-      const float re=sr[kk],im=si[kk];
-      const float lr=hlo[2*(t+K)],li=hlo[2*(t+K)+1];
-      const float hr=hhi[2*(t+K)],hi2=hhi[2*(t+K)+1];
-      ar+=re*lr-im*li; ai+=re*li+im*lr;
-      br+=re*hr-im*hi2; bi+=re*hi2+im*hr;
-    }
-    const float m1=ar*ar+ai*ai, m2=br*br+bi*bi;
-    if(m1>best) best=m1;
-    if(m2>best) best=m2;
-  }
-  return sqrtf(best);
-}
-float *series_buf(void *vp,int on){
-  BP *p=(BP*)vp;
-  if(!on){ p->ser=NULL; return NULL; }
-  if(!p->ser){
-    /* Offset the two halves off a power of two.  Landing them a multiple of
-       4 KiB apart, or apart from the intermediate, makes every store collide
-       with a stage-B load in the store-forwarding logic. */
-    p->serstride=(size_t)p->N+2*AP_W+16;
-    p->ser=(float*)ap_alloc64(p->serstride*2*sizeof(float)+4096);
-    if(p->ser) memset(p->ser,0,p->serstride*2*sizeof(float));
-  }
-  return p->ser;
-}
-
 int split(void *vp,int *n1,int *n2){
   BP *p=(BP*)vp;
   if(p->small) return 0;                 /* no four-step, so no split to report */
@@ -1513,8 +1421,7 @@ static HWY_NOINLINE MF_PEAK_SECTION int binmax_prod_threshold(void *vp,const flo
                     float thr,ap_peak*out,int conj,size_t ws,size_t we){
   BP *p=(BP*)vp;
   if constexpr (AP_W==8 || AP_W==16) {
-    if(__builtin_expect(thr>0.f && (we-ws)<=binsize && p->fuse==2 && p->ilay && p->gmajor
-       && !p->ser, 1)) {
+    if(__builtin_expect(thr>0.f && (we-ws)<=binsize && p->fuse==2 && p->ilay && p->gmajor, 1)) {
       stageA_prod_32(p,dr,di,tr,ti);
       binmax_fused32(p,thr,out,conj,ws,we);
       return 0;
@@ -1580,7 +1487,7 @@ const ap_backend *Backend(void){
   static const ap_backend be = {
     hwy::TargetName(HWY_TARGET), AP_W,
     create, destroy, fft, supported,
-    binmax, binmax_split, has_prod, split, binmax_prod, corr_prod, corr_split, series_buf, series_stride, interp_max,
+    binmax, binmax_split, has_prod, split, binmax_prod, corr_prod, corr_split,
     pairbatch, binmax_prod_batch, binmax_prod_batch_lanes, corr_prod_batch, create_small, broadcast_data, (AP_W==8 || AP_W==16) ? binmax_prod_threshold : nullptr,
     q15_lanes, q15_screen, td_corr, real_split, root_merge,
 #if AP_Q15_TAIL
