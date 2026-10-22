@@ -603,8 +603,8 @@ def run_device(device, tops, args, seed, fine_engine="hier"):
                 if os.environ.get("LADDER_CHAINS") == "2":   # and every group's gate thresholds
                     for m, b in fine:
                         for gi, g in enumerate(b._groups):
-                            gc_ = getattr(g.plan, "_gcal", None)
-                            thr = gc_[1][2] if gc_ else None
+                            res = g.plan.__dict__.get("_resolved")
+                            thr = res.thresholds if res else None
                             print("gate", m, gi, getattr(g.plan, "_chain", None),
                                   None if thr is None else tuple(float("%.9g" % x) for x in thr),
                                   flush=True)
