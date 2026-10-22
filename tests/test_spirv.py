@@ -73,7 +73,8 @@ def test_every_tier_b_size_is_present(manifest):
 
 
 def test_full_output_artifacts_cover_the_public_sizes(manifest):
-    metal_dir = SPIRV_DIR.parent / 'metal'
+    from conftest import kernel_dir
+    metal_dir = kernel_dir('metal')
     for n in sorted(matchedfilter.CorrelationFilter._gpu_sizes):
         if n <= 65536:
             info = manifest['modules'][str(n)]

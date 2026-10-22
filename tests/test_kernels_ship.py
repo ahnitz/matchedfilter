@@ -21,6 +21,7 @@ import pathlib
 import pytest
 
 import matchedfilter as mf
+from matchedfilter import _kernel_dirs
 
 
 def _dirs():
@@ -57,6 +58,8 @@ def test_every_file_the_manifest_names_exists():
                        ((refine.get("portable") or {}).get("file"), "refine 32 KB")):
             if f and not (spirv / f).is_file():
                 missing.append("n=%s %s: %s" % (n, why, f))
+        if "metal" not in _kernel_dirs.shipped():
+            continue                      # an install off macOS carries no Metal
         for entry, m in (info.get("metal") or {}).items():
             for f, why in ((m.get("msl"), entry),
                            ((m.get("portable") or {}).get("msl"),
@@ -85,15 +88,16 @@ def test_both_entry_points_have_the_same_variants():
 def test_forward_and_packing_kernels_ship():
     spirv, metal = _dirs()
     manifest = _manifest()
+    with_metal = "metal" in _kernel_dirs.shipped()
     for n in mf._GPU_SIZES:
         entry = manifest['forward'][str(n)]
         assert (spirv / entry['file']).is_file()
-        assert (metal / entry['metal']).is_file()
+        assert not with_metal or (metal / entry['metal']).is_file()
         assert entry['local_size'] == manifest['modules'][str(n)]['local_size']
     for kernel in ('pack_coarse', 'compact_peaks'):
         entry = manifest[kernel]
         assert (spirv / entry['file']).is_file()
-        assert (metal / entry['metal']).is_file()
+        assert not with_metal or (metal / entry['metal']).is_file()
 
 
 def test_production_shader_sources_match_built_manifest():
@@ -128,3 +132,16 @@ def test_shipped_kernels_carry_no_build_paths_or_stray_files():
             elif p.suffix in (".metal", ".json") and absolute.search(p.read_bytes()):
                 found.append("%s/%s: names an absolute path" % (sub, p.name))
     assert not found, found
+
+
+def test_the_install_holds_its_platforms_kernel_directories():
+    """Each directory _kernel_dirs says this platform ships is present and not empty."""
+    root = pathlib.Path(mf.__file__).resolve().parent
+    for d in _kernel_dirs.shipped():
+        assert any((root / d).glob("*")), "%s/ is missing from this install" % d
+
+
+@pytest.mark.parametrize("platform,want", [("darwin", ("spirv", "metal")),
+                                           ("linux", ("spirv", "ptx"))])
+def test_a_wheel_carries_only_what_its_platform_loads(platform, want):
+    assert _kernel_dirs.shipped(platform) == want
