@@ -300,3 +300,8 @@ A step that changes C or workflows is first pushed to a `ci/<topic>` branch and 
   - release.yml: all 12 wheels in parallel, each with the full suite, Metal precompiled; a `complete` job checks the set before publish.
 
   release.yml rehearses every Monday at 04:41 UTC (it never publishes on a schedule or a push), and a ci/release/** push proves it; ci_status --schedules counts the rehearsal like the nightly.
+- 2026-10-22: **Weekly benchmark still over its limit.** The ci/bench/a1 and ci/bench/b4 proofs had failed and were not followed up: macOS hit the 2-hour limit, linux-arm64 lost its runner at 114 min, linux-x86_64 was cancelled at 58 min. Timed on a Zen 5 desktop, one target:
+  - the flat table takes seconds at every length (3–4 s at n = 2^18 and 2^20, 1.2 GB);
+  - the hierarchical table is the whole cost: 15 cells per length at about 6 s a cell at n = 4096 and about 30 s at n = 65536, mostly calibration.
+
+  The benchmark gains --hier-n, and the workflow runs the hierarchical table at 1024 and 16384 (about 4 min per target here). Open for the CPU phase: about 30 s to calibrate one hierarchical plan at n = 65536 with no cost file is a user-facing cost, not only a benchmark one.

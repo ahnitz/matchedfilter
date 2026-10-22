@@ -31,8 +31,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     # A job that never gets a runner would otherwise sit for hours and block
     # the page build behind it. The hierarchical table calibrates and trials
-    # every (n, budget, SNR) cell; at every power of two that ran past 60 min
-    # per target on 2026-10-21, so the sweep below takes every other one.
+    # fifteen (budget, SNR) cells per length, about 30 s a cell at n = 65536
+    # on a Zen 5 desktop; on every length of the flat sweep it ran past the
+    # 2-hour limit on 2026-10-22, so it runs at two (--hier-n below). The
+    # flat table takes seconds at every length.
     timeout-minutes: 120
     strategy:
       fail-fast: false
@@ -107,6 +109,7 @@ jobs:
               "$GITHUB_WORKSPACE/tests/test_benchmark.py" -rs
             python -m matchedfilter.benchmark \
               --n 256 1024 4096 16384 65536 262144 1048576 \
+              --hier-n 1024 16384 \
               --reps 7 --fd 1e-3 \
               --label "$name" \
               --json "$GITHUB_WORKSPACE/bench-$name.json" \
