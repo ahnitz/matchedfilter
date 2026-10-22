@@ -11,7 +11,8 @@ from matchedfilter import gatechain
 
 def _write_cost(path, key, started, done, release=None):
     if release is not None:
-        original = gatechain._load_cost_file
+        # Pause the writer after it has read the file under the lock (_update_cost's read).
+        original = gatechain._read_cost_file
 
         def paused_read(filename):
             data = original(filename)
@@ -20,7 +21,7 @@ def _write_cost(path, key, started, done, release=None):
                 raise RuntimeError("writer was not released")
             return data
 
-        gatechain._load_cost_file = paused_read
+        gatechain._read_cost_file = paused_read
     else:
         started.set()
     gatechain._store_cost(path, key, {"value": key})

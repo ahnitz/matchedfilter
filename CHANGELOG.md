@@ -118,6 +118,14 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ### Fixed
 
+- MF_COST_FILE never loses data. A damaged file (truncated, not JSON, not a JSON object)
+  read as empty and the next write replaced it, losing every stored model and choice: it
+  is now kept aside as `<path>.corrupt.<pid>` with a warning. A file that exists but cannot
+  be read is never replaced. Cost models and one-shot prices are stored first-writer-wins:
+  processes calibrating or pricing at once adopt the first stored result, so they choose
+  the same chains and thresholds. A stored record that is not a cost model is reported and
+  recalibrated; trial records in the format before 2026-10-21 are reported once, naming
+  `tools/migrate_cost_file.py`, which now writes under the library's lock, atomically.
 - A GPU chain trial spread over processes too short to take a sample never ended (macOS
   Metal CI): its batch count is kept every batch, and the spent budget keeps the model's
   chain.

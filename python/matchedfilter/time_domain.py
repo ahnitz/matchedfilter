@@ -841,13 +841,16 @@ def _corr_block_costs(n: int, device: Optional[Any] = None) -> Tuple[float, floa
         _CORR_PFFT[n] = mode
         hits[mode] = _corr_measure(n, device, dkey, rng, taps, nblocks, L, ser)
     best_mode = min(hits, key=lambda m: hits[m][0] + 16 * (hits[m][1] + hits[m][2] * (n - taps)))
-    _CORR_PFFT[n] = best_mode
     hit = hits[best_mode]
-    _CORR_COSTS[(n, dkey)] = hit
-    if path is not None:
-        gatechain._store_cost(path, key, list(hit))
+    if path is not None:          # prices another process stored first are the ones used
         if dkey == "cpu":
-            gatechain._store_cost(path, "corr-pfft,%d" % n, bool(best_mode))
+            best_mode = bool(gatechain._store_first(path, "corr-pfft,%d" % n, bool(best_mode),
+                                                    lambda r: isinstance(r, bool)))
+            hit = hits.get(best_mode, hit)  # this process timed that mode too
+        hit = tuple(float(v) for v in gatechain._store_first(
+            path, key, list(hit), lambda r: isinstance(r, list) and len(r) >= 3)[:3])
+    _CORR_PFFT[n] = best_mode
+    _CORR_COSTS[(n, dkey)] = hit
     return hit
 
 

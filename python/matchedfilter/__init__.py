@@ -2613,9 +2613,11 @@ def _q15_tier0_fp16(band):
     except Exception:                      # noqa: BLE001 -- no price: keep the FP32 pass
         fp32, fp16 = 1.0, -1.0
     hit = bool(fp16 > 0 and fp16 < fp32)
+    if path is not None:          # a price another process stored first is the one used
+        hit = bool(_gatechain._store_first(
+            path, key, {"fp16": hit, "ticks": {"fp32": fp32, "fp16": fp16}},
+            lambda r: isinstance(r, dict) and "fp16" in r)["fp16"])
     _Q15_TIER0[band] = hit
-    if path is not None:
-        _gatechain._store_cost(path, key, {"fp16": hit, "ticks": {"fp32": fp32, "fp16": fp16}})
     return hit
 
 
@@ -2639,10 +2641,11 @@ def _cpu_forward_platform(n):
             return hit
     native, platform = _core.forward_cost(n)
     hit = bool(platform > 0 and platform < native)
+    if path is not None:          # a price another process stored first is the one used
+        hit = bool(_gatechain._store_first(
+            path, key, {"platform": hit, "seconds": {"engine": native, "platform": platform}},
+            lambda r: isinstance(r, dict) and "platform" in r)["platform"])
     _CPU_FWD_PFFT[n] = hit
-    if path is not None:
-        _gatechain._store_cost(path, key, {"platform": hit, "seconds": {"engine": native,
-                                                                        "platform": platform}})
     return hit
 #: (chain-choice key, chain) -> whether the cost model prices the Q15 screen cheaper
 _Q15_MODEL = {}
@@ -2715,8 +2718,12 @@ def _direct_lagtap():
     if isinstance(held, (int, float)) and held > 0:
         return float(held)
     v = float(_core.price_direct())
-    if v > 0:
-        _gatechain.store_choice(key, v)
+    path = _gatechain._cost_file()
+    if v > 0 and path is not None:  # a price another process stored first is the one used
+        v = float(_gatechain._store_first(
+            path, "choice|" + key, {"value": v},
+            lambda r: isinstance(r, dict) and isinstance(r.get("value"), (int, float))
+            and r["value"] > 0)["value"])
     return v
 
 
