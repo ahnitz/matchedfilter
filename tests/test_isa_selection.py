@@ -15,6 +15,7 @@ import numpy as np
 import pytest
 
 import matchedfilter as mf
+from conftest import scaled
 
 #: Where the matchedfilter under test was imported from (the source tree, or an installed
 #: wheel in CI): the subprocesses import the same one.
@@ -24,7 +25,7 @@ PACKAGE_PARENT = os.path.dirname(os.path.dirname(os.path.abspath(mf.__file__)))
 def _python(code, **env):
     e = dict(os.environ, PYTHONPATH=PACKAGE_PARENT, **env)
     return subprocess.run([sys.executable, "-c", code], env=e, capture_output=True, text=True,
-                          timeout=120)
+                          timeout=scaled(120))
 
 
 def test_an_invalid_mf_isa_is_refused_at_import():

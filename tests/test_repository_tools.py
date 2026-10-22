@@ -20,6 +20,7 @@ from pathlib import Path
 import pytest
 
 import matchedfilter as mf
+from conftest import scaled
 
 ROOT = Path(__file__).resolve().parents[1]
 FILES = sorted((ROOT / "tools").glob("*.py")) + sorted((ROOT / "examples").glob("*.py"))
@@ -62,7 +63,7 @@ def imported(tmp_path_factory):
     local = [str(ROOT / d) + os.sep for d in ("tools", "tests", "examples")]
     p = subprocess.run([sys.executable, "-c", DRIVER, json.dumps([str(f) for f in FILES]),
                         json.dumps(local)],
-                       capture_output=True, text=True, timeout=600, env=env,
+                       capture_output=True, text=True, timeout=scaled(600), env=env,
                        stdin=subprocess.DEVNULL, cwd=str(tmp_path_factory.mktemp("cwd")))
     assert p.returncode == 0, p.stderr[-2000:]
     return json.loads(p.stdout.strip().splitlines()[-1])

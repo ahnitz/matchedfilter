@@ -62,6 +62,15 @@ def pytest_sessionstart(session):
         raise pytest.UsageError("MF_ISA=%s requested, but the backend is %s" % (want, have))
 
 
+# --- time limits in a slow environment ---------------------------------------
+def scaled(seconds):
+    """A subprocess time limit, scaled by TEST_TIMEOUT_SCALE (default 1): tools/sanitize.sh
+    sets 10, since ASan slows Python-heavy work about that much. The same test runs; only
+    its patience changes."""
+    import os
+    return seconds * float(os.environ.get("TEST_TIMEOUT_SCALE") or 1)
+
+
 # --- kernel files an install for another platform carries -------------------
 def kernel_dir(name):
     """The directory of ahead-of-time kernels `name` (spirv, ptx, metal): the install's,

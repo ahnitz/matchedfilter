@@ -132,8 +132,9 @@ def test_an_invalid_value_fails_the_import():
     import subprocess
     import sys
     import matchedfilter as mf
+    from conftest import scaled
     parent = os.path.dirname(os.path.dirname(os.path.abspath(mf.__file__)))
     p = subprocess.run([sys.executable, "-c", "import matchedfilter"], capture_output=True,
-                       text=True, timeout=120,
+                       text=True, timeout=scaled(120),
                        env=dict(os.environ, PYTHONPATH=parent, MF_DIRECT_REFINE="nope"))
     assert p.returncode == 1 and "ValueError: MF_DIRECT_REFINE=nope" in p.stderr, p.stderr[-500:]
