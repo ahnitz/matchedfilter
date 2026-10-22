@@ -1,6 +1,7 @@
 """Print a GitHub Actions error annotation for a failed sanitizer run's log.
 
     python3 tools/sanitize_report.py LOG RC
+    python3 tools/sanitize_report.py --crashing-test LOG    # the test running at a crash
 
 The annotation leads with what matters when a shard fails: the sanitizer report (the
 AddressSanitizer ERROR block, or UndefinedBehaviorSanitizer's "runtime error" lines with
@@ -10,6 +11,14 @@ The public API shows annotations; the job log needs a token.
 """
 import re
 import sys
+
+
+def crashing_test(text):
+    """The pytest node (tests/test_x.py::test_y) faulthandler shows running at a crash, or
+    None."""
+    import re as _re
+    m = _re.findall(r'File "[^"]*/(tests/test_\w+\.py)", line \d+ in (test_\w+)', text)
+    return "%s::%s" % m[0] if m else None
 
 
 def summary(text, limit=3800):
@@ -36,6 +45,10 @@ def summary(text, limit=3800):
 
 
 if __name__ == "__main__":
+    if sys.argv[1] == "--crashing-test":
+        node = crashing_test(open(sys.argv[2], errors="replace").read())
+        print(node or "")
+        sys.exit(0 if node else 1)
     log, rc = sys.argv[1], sys.argv[2]
     body = summary(open(log, errors="replace").read())
     esc = body.replace("%", "%25").replace("\r", "").replace("\n", "%0A")

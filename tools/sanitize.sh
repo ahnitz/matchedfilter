@@ -5,6 +5,8 @@
 #     tools/sanitize.sh -- tests/test_native_buffers.py
 #     tools/sanitize.sh --keep DIR --build-only        # build once into DIR ...
 #     tools/sanitize.sh --prebuilt DIR -- <pytest args>  # ... and test from it, many times
+#     tools/sanitize.sh --prebuilt DIR --gdb -- TEST     # one test under gdb: the native
+#                                                        # stack where a signal stops it
 #
 # Needs a compiler with the ASan and UBSan runtimes (the libasan and libubsan packages);
 # it says so and exits 2 where they are missing. Highway comes from third_party/highway
@@ -26,13 +28,15 @@ PY=${PYTHON:-python3}
 KEEP=""
 PREBUILT=""
 BUILD_ONLY=0
-USAGE="usage: $0 [--python PY] [--keep DIR [--build-only] | --prebuilt DIR] -- <pytest args>"
+GDB=0
+USAGE="usage: $0 [--python PY] [--keep DIR [--build-only] | --prebuilt DIR [--gdb]] -- <pytest args>"
 while [ $# -gt 0 ]; do
   case "$1" in
     --python) PY=$2; shift 2 ;;
     --keep) KEEP=$2; shift 2 ;;
     --build-only) BUILD_ONLY=1; shift ;;
     --prebuilt) PREBUILT=$2; shift 2 ;;
+    --gdb) GDB=1; shift ;;
     --) shift; break ;;
     *) echo "$USAGE" >&2; exit 2 ;;
   esac
@@ -99,12 +103,22 @@ ASAN_LIB=$(ldd "$WORK/asan_probe" | awk '/libasan/ {print $3; exit}')
 [ -e "$ASAN_LIB" ] || { echo "sanitize: no libasan for ${CC:-cc}"; exit 1; }
 cd "$WORK"
 T1=$SECONDS
+RUN=()
+if [ "$GDB" = 1 ]; then
+  # gdb stops at the first SIGSEGV/SIGBUS/SIGABRT, before any handler (ASan's or Python's)
+  # runs, and prints the native stack there; ASan's own SEGV checks are off for it.
+  command -v gdb >/dev/null || { echo "sanitize: --gdb needs gdb"; exit 2; }
+  RUN=(gdb -batch -nx -ex "set pagination off" -ex "set startup-with-shell off"
+       -ex "handle SIGSEGV stop print" -ex "handle SIGBUS stop print"
+       -ex "handle SIGABRT stop print" -ex run -ex "bt 40" -ex "info registers rip"
+       -ex "x/4i \$pc" --args)
+fi
 set +e
 env LD_PRELOAD="$ASAN_LIB" PYTHONMALLOC=malloc PYTHONPATH="$WORK/python" \
     ASAN_OPTIONS=detect_leaks=0:abort_on_error=1:allocator_may_return_null=1:handle_abort=1:handle_segv=1:allow_user_segv_handler=0 \
     UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
     OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 TEST_TIMEOUT_SCALE=10 \
-    "$PY" -m pytest -q -p no:cacheprovider "$@"
+    "${RUN[@]}" "$PY" -m pytest -q -p no:cacheprovider "$@"
 rc=$?
 set -e
 echo "sanitize: pytest ran $((SECONDS - T1)) s"
