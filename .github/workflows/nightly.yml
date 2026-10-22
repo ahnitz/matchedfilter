@@ -117,7 +117,7 @@ jobs:
           tar -C "$RUNNER_TEMP" -xf "$RUNNER_TEMP/san.tar"
           set +e
           timeout 65m tools/sanitize.sh --python python --prebuilt "$RUNNER_TEMP/san" -- \
-            tests -q -rs --durations=15 --shard ${{ matrix.shard }}/${{ matrix.of }} \
+            tests -v -rs --durations=15 --shard ${{ matrix.shard }}/${{ matrix.of }} \
             > "$RUNNER_TEMP/san.log" 2>&1
           rc=$?
           set -e

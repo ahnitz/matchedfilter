@@ -113,14 +113,24 @@ if [ "$GDB" = 1 ]; then
        -ex "handle SIGABRT stop print" -ex run -ex "bt 40" -ex "info registers rip"
        -ex "x/4i \$pc" --args)
 fi
+# The sanitizers write their reports to files, not to stderr: pytest captures fd 2 into a
+# temporary file during each test, and a report written there is lost when the process
+# aborts (nightly 2026-10-22: rc=134 and no report). Printed below after the run.
+SANLOG="$WORK/sanitizer-logs"
+rm -rf "$SANLOG"; mkdir -p "$SANLOG"
 set +e
 env LD_PRELOAD="$ASAN_LIB" PYTHONMALLOC=malloc PYTHONPATH="$WORK/python" \
-    ASAN_OPTIONS=detect_leaks=0:abort_on_error=1:allocator_may_return_null=1:handle_abort=1:handle_segv=1:allow_user_segv_handler=0 \
-    UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
+    ASAN_OPTIONS=detect_leaks=0:abort_on_error=1:allocator_may_return_null=1:handle_abort=1:handle_segv=1:allow_user_segv_handler=0:log_path="$SANLOG/asan" \
+    UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1:log_path="$SANLOG/ubsan" \
     OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 TEST_TIMEOUT_SCALE=10 \
-    "${RUN[@]}" "$PY" -m pytest -q -p no:cacheprovider "$@"
+    "${RUN[@]}" "$PY" -m pytest -p no:cacheprovider "$@"
 rc=$?
 set -e
+for f in "$SANLOG"/*; do
+  [ -e "$f" ] || continue
+  echo "=== sanitizer report $(basename "$f") ==="
+  cat "$f"
+done
 echo "sanitize: pytest ran $((SECONDS - T1)) s"
 echo "sanitize: pytest rc=$rc ($([ $rc -eq 0 ] && echo clean || echo FAILED))"
 exit $rc
