@@ -26,6 +26,7 @@ device limits. Hierarchical calibration coverage is separate from transform supp
 import hashlib
 import math
 from types import SimpleNamespace
+from typing import NamedTuple, Optional
 import operator
 import os
 import sys
@@ -513,7 +514,7 @@ class MatchedFilter:
         # Only the Context differs. Everything after it is shared, and it is
         # written once for that reason: when this was a branch per backend
         # with its own copy of the tail, the hierarchical version's early
-        # return skipped the _gcal it was supposed to set, and every Metal
+        # return skipped the calibration it was supposed to set, and every Metal
         # call died in _gpu_calibration on a missing attribute.
         if self.n not in self._gpu_sizes:
             raise ValueError(
@@ -1497,7 +1498,7 @@ class MatchedFilter:
         submit changes one of them: new templates or coarse templates, a recalibrated chain,
         replaced pools, another backend context, the queue depth, the batch budget."""
         ws = self.__dict__.get("_series_workspace")
-        objs = (layout, self._gpu, self._gtmpl, self.__dict__.get("_gcal"),
+        objs = (layout, self._gpu, self._gtmpl, self.__dict__.get("_resolved"),
                 self.__dict__.get("_ct"), self.__dict__.get("_ckey"),
                 None if ws is None else ws[2], None if ws is None else ws[3])
         vals = (int(binsize), float(threshold), t0, nt, self.__dict__.get("_series_batch_bytes"),
@@ -1535,7 +1536,7 @@ class MatchedFilter:
         objs = entry["state"][0]
         ws = d.get("_series_workspace")
         if (objs[0] is not layout or objs[1] is not self._gpu or objs[2] is not self._gtmpl
-                or objs[3] is not d.get("_gcal") or objs[4] is not d.get("_ct")
+                or objs[3] is not d.get("_resolved") or objs[4] is not d.get("_ct")
                 or objs[5] is not d.get("_ckey") or ws is None or objs[6] is not ws[2]
                 or objs[7] is not ws[3]):
             return None
@@ -2403,6 +2404,17 @@ def _direct_refine_enabled():
     return _config.get("MF_DIRECT_REFINE")
 
 
+class _Resolved(NamedTuple):
+    """A hierarchical filter's resolved plan (docs/resolved-plan.md), immutable: one is
+    computed per set of inputs (HierarchicalFilter._resolve)."""
+    chain: tuple
+    thresholds: tuple
+    reach: Optional[float]           # the model's per-pair refine probability, or None
+    fractions: Optional[tuple]       # each tier's share of the reference's power, or None
+    q15_order: Optional[dict]        # the CPU's Q15 recheck order, or None
+    direct_hw: Optional[int]         # the CPU direct refine's window half-width, or None
+
+
 class HierarchicalFilter(MatchedFilter):
     """Matched filter that gates on cheap coarse correlations and refines on demand.
 
@@ -2463,7 +2475,7 @@ class HierarchicalFilter(MatchedFilter):
         self._init_state()
         self._pending_ref = None
         self._cal_thr = None           # explicit per-tier thresholds, bypassing the model
-        self._thr_applied = False
+        self._resolved = None          # the resolved plan (_resolve), until an input changes
         self._fs_snr = None
         self._hermitian = False
         self._mf = None
@@ -2650,28 +2662,59 @@ class HierarchicalFilter(MatchedFilter):
                 raise ValueError("set a reference first (set_reference), or pin a chain")
             self._chain = self._choose_chain(); self._q15 = getattr(self, "_q15_pref", False)
         self._mf = self._new_cpu_plan(self._chain)
-        self._thr_applied = False
+        self._resolved = None
         self._restore_into(self._mf, templates)
         return self._mf
 
     def _execution_plan(self):
+        """The CPU plan, with the resolved plan (_resolve) applied to it: once per plan and
+        resolution (a new plan, or a changed input, applies it again)."""
         plan = self._ensure()
-        if not self._thr_applied:
-            thr = list(self._thresholds(required=True))
-            plan.set_thresholds(thr)
-            self._q15_order_choice = None
-            if (self.device.kind == 'cpu' and self._pending_ref is not None
-                    and len(self._chain) >= 2):
-                self._q15_order_choice = _gatechain.q15_recheck_order(
-                    self._pending_ref, self.n, self._chain, thr, self._cost_model(),
-                    window=self.search_window)
-            plan.set_q15_recheck_late(bool(self._q15_order_choice
-                                          and self._q15_order_choice['late']))
+        r = self._resolve()
+        d = self.__dict__
+        if d.get("_applied_plan") is not plan or d.get("_applied_res") is not r:
+            plan.set_thresholds(list(r.thresholds))
+            plan.set_q15_recheck_late(bool(r.q15_order and r.q15_order['late']))
             if getattr(self, "_taps", None) is not None:
-                hw = self._direct_halfwidth(tuple(self._chain), thr)
-                plan.set_direct(hw is not None, hw or 1)
-            self._thr_applied = True
+                plan.set_direct(r.direct_hw is not None, r.direct_hw or 1)
+            self._applied_plan, self._applied_res = plan, r
         return plan
+
+    def _resolve(self):
+        """The resolved plan (docs/resolved-plan.md): chain, one threshold per tier, the
+        model's refine reach, per-tier reference band fractions, and on the CPU the Q15
+        recheck order and the direct refine's half-width. Computed once, and again only
+        after an input changes (every setter that changes one drops it)."""
+        r = self.__dict__.get("_resolved")
+        if r is not None:
+            return r
+        if self._chain is None:
+            if self._pending_ref is None:
+                raise ValueError("set a reference first (set_reference), or pin a chain")
+            self._chain = self._choose_chain(); self._q15 = getattr(self, "_q15_pref", False)
+        chain = tuple(self._chain)
+        thr = tuple(self._thresholds(required=True))
+        f = q15_order = hw = None
+        if self._pending_ref is not None:
+            ref = np.asarray(self._pending_ref, dtype=np.float64)
+            tot = ref.sum()
+            f = tuple(float(ref[:b].sum() / tot) if tot > 0 else 0.0 for b in chain)
+        if self.device.kind == 'cpu':
+            if self._pending_ref is not None and len(chain) >= 2:
+                q15_order = _gatechain.q15_recheck_order(
+                    self._pending_ref, self.n, chain, list(thr), self._cost_model(),
+                    window=self.search_window)
+            if getattr(self, "_taps", None) is not None:
+                hw = self._direct_halfwidth(chain, list(thr))
+        r = self._resolved = _Resolved(chain, thr, getattr(self, "_refine_reach", None), f,
+                                       q15_order, hw)
+        return r
+
+    @property
+    def _q15_order_choice(self):
+        """The resolved plan's Q15 recheck order (None before it is resolved)."""
+        r = self.__dict__.get("_resolved")
+        return None if r is None else r.q15_order
 
     def _direct_halfwidth(self, chain, thresholds, nsim=20000):
         """The direct refine's window half-width for this chain (gatechain.direct_halfwidth,
@@ -2734,9 +2777,8 @@ class HierarchicalFilter(MatchedFilter):
     def _switch_chain(self, chain):
         """Run a different configuration from now on, keeping loaded data and templates."""
         self._chain, self._q15 = tuple(chain), False
-        self._thr_applied = False
+        self._resolved = None
         if self._gpu is not None:
-            self._gcal = None
             self._tdirty = True
             # A host plan built for the old chain (_execution_plan builds one for a timed
             # trial call) would take the new chain's thresholds: one per tier of a chain it
@@ -2783,7 +2825,7 @@ class HierarchicalFilter(MatchedFilter):
         """
         if value is None:
             self._cal_thr = None
-            self._thr_applied = False
+            self._resolved = None
             return
         vals = (value,) if np.isscalar(value) else tuple(value)
         vals = tuple(float(v) for v in vals)
@@ -2795,8 +2837,7 @@ class HierarchicalFilter(MatchedFilter):
         if len(vals) != len(self._pinned):
             raise ValueError("chain %s needs %d thresholds" % (self._pinned, len(self._pinned)))
         self._cal_thr = vals
-        self._thr_applied = False
-        self._gcal = None
+        self._resolved = None
 
     def set_first_stage(self, snr):
         """Calibrate the gate against `snr` rather than the constructor's.
@@ -2806,8 +2847,7 @@ class HierarchicalFilter(MatchedFilter):
         Pass ``None`` or a non-positive value to use the constructor's SNR.
         """
         self._fs_snr = float(snr) if snr is not None and float(snr) > 0 else None
-        self._thr_applied = False
-        self._gcal = None
+        self._resolved = None
 
     def set_reference(self, power):
         """Set the reference SNR distribution: expected power per bin of the filter output.
@@ -2825,9 +2865,8 @@ class HierarchicalFilter(MatchedFilter):
                 raise ValueError("reference must be finite, nonnegative, with positive total power")
             if self._pending_ref is not None and np.array_equal(p, self._pending_ref):
                 return
-        self._thr_applied = False
+        self._resolved = None
         if self._gpu is not None:
-            self._gcal = None
             self._tdirty = True
         if power is None:
             self._pending_ref = None
@@ -3138,10 +3177,10 @@ class HierarchicalFilter(MatchedFilter):
         if self._pinned is None and self._chain is not None and self.device.kind == "cpu":
             # The model priced the chain without the direct refine: choose again (the plan is
             # rebuilt on next use and replays reference, templates and data).
-            self._chain, self._mf, self._gcal = None, None, None
+            self._chain, self._mf, self._resolved = None, None, None
         elif self._mf is not None:
             self._mf.set_taps(taps, taps.shape[1], counts)
-            self._thr_applied = False           # the direct window is set with the thresholds
+            self._resolved = None               # the direct window is part of the resolved plan
 
     def direct_stats(self):
         """Direct-refine counters of the CPU plan ({} before one exists)."""
@@ -3178,27 +3217,13 @@ class HierarchicalFilter(MatchedFilter):
         self._gpu = self._backend().Context(self.device.index)
         self._gdata = None  # series execution uses its own workspace
         self._gtmpl = None
-        self._gcal = None
+        self._resolved = None
 
     def _gpu_calibration(self, threshold):
-        """(chain, per-tier reference band fractions or None, per-tier thresholds)."""
-        key = (self.snr, self.fd, self._fs_snr, self._chain, self._cal_thr)
-        if self._gcal is not None and self._gcal[0] == key:
-            return self._gcal[1]
-        if self._chain is None:
-            if self._pending_ref is None:
-                raise ValueError("set a reference first (set_reference), or pin a chain")
-            self._chain = self._choose_chain(); self._q15 = getattr(self, "_q15_pref", False)
-            key = (self.snr, self.fd, self._fs_snr, self._chain, self._cal_thr)
-        thr = self._thresholds(required=True)
-        f = None
-        if self._pending_ref is not None:
-            ref = np.asarray(self._pending_ref, dtype=np.float64)
-            tot = ref.sum()
-            f = tuple(float(ref[:b].sum() / tot) if tot > 0 else 0.0 for b in self._chain)
-        out = (self._chain, f, thr)
-        self._gcal = (key, out)
-        return out
+        """(chain, per-tier reference band fractions or None, per-tier thresholds), from the
+        resolved plan (_resolve)."""
+        r = self._resolve()
+        return r.chain, r.fractions, r.thresholds
 
     def _coarse_templates(self, H, bands, f):
         """Coarse templates per tier: the first b bins scaled by 1/sqrt(band fraction)."""

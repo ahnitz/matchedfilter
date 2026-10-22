@@ -396,3 +396,9 @@ A step that changes C or workflows is first pushed to a `ci/<topic>` branch and 
   - Fixed on the way: the correlation price accepted any stored record, so a malformed one raised; it is now replaced.
   - tests/test_prices.py covers the rule: memo, file, first writer, invalid record, failed price.
 - 2026-10-22: **E5b: each Choice kind declares its reset scope.** _choice.SCOPES names every kind: workload (single-device, single-batch, fused-batch), which clear_autotune_cache forgets; or machine (sparse-way, vk-subgroup, coarse, gateway, interleave), which outlive it. _choice.choice refuses an undeclared kind, and reset(scope=...) replaces clear_autotune_cache's hard-coded list of three kinds. Tests declare their own kinds.
+- 2026-10-22: **E5c: the bank's layout planning in _layout.** The template partition, the transform-size layout, the batch target, and the continuous correlation's block prices with their memo moved verbatim from time_domain to _layout (workloads layer; check_move: no definition changed). time_domain imports the names back. The test that patched the price memo patches _layout.
+- 2026-10-22: **E6: one resolve().**
+  - HierarchicalFilter._resolve computes the resolved plan once (an immutable _Resolved: chain, thresholds, refine reach, band fractions, Q15 recheck order, direct half-width) and again only after an input changes. Every setter that changes one drops it.
+  - The CPU plan applies it once per plan and resolution; the GPU path (_gpu_calibration) reads it. The call-plan replay keys on it.
+  - This replaces the _thr_applied flag, the GPU's separately keyed _gcal, and the Q15 order and direct half-width computed inside _execution_plan. That _gcal key left out the reference and relied on set_reference clearing it.
+  - A persisted record was not added: no divergence remains to need one.
