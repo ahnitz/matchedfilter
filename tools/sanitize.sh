@@ -15,7 +15,8 @@
 # use-after-scope, see FLAGS; setup.py's
 # own flags still apply; UBSan reports are fatal), and pytest runs from that copy with the
 # ASan runtime preloaded into the interpreter, which is not itself built with ASan. Leak
-# detection is off: CPython's arenas read as leaks. Exit status is pytest's; a sanitizer
+# detection is off: CPython's arenas read as leaks. handle_abort: any abort() prints ASan's
+# native stack, so an abort that prints nothing of its own still says where it came from. Exit status is pytest's; a sanitizer
 # report aborts the test process, so it fails the run. The verdict line names the build.
 set -euo pipefail
 
@@ -88,13 +89,17 @@ echo "sanitize: built in $((SECONDS - T0)) s"
 [ "$BUILD_ONLY" = 1 ] && { echo "sanitize: build kept in $WORK"; exit 0; }
 fi
 
-ASAN_LIB=$(${CC:-cc} -print-file-name=libasan.so)
-[ -e "$ASAN_LIB" ] || { echo "sanitize: no libasan.so from ${CC:-cc}"; exit 1; }
+# The runtime a sanitized program loads, by asking one: -print-file-name=libasan.so can
+# name a linker script (Fedora), which LD_PRELOAD ignores.
+printf 'int main(void){return 0;}\n' > "$WORK/asan_probe.c"
+${CC:-cc} -fsanitize=address "$WORK/asan_probe.c" -o "$WORK/asan_probe"
+ASAN_LIB=$(ldd "$WORK/asan_probe" | awk '/libasan/ {print $3; exit}')
+[ -e "$ASAN_LIB" ] || { echo "sanitize: no libasan for ${CC:-cc}"; exit 1; }
 cd "$WORK"
 T1=$SECONDS
 set +e
 env LD_PRELOAD="$ASAN_LIB" PYTHONMALLOC=malloc PYTHONPATH="$WORK/python" \
-    ASAN_OPTIONS=detect_leaks=0:abort_on_error=1:allocator_may_return_null=1 \
+    ASAN_OPTIONS=detect_leaks=0:abort_on_error=1:allocator_may_return_null=1:handle_abort=1 \
     UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
     OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 \
     "$PY" -m pytest -q -p no:cacheprovider "$@"
