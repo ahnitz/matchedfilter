@@ -144,14 +144,14 @@ def choose(ctx):
     rng = getattr(ctx, "subgroup_range", None)
     if not rng or len(_candidates(rng)) < 2 or _config.get("MF_VK_SUBGROUP_MEASURING"):
         return reported
-    from . import gatechain, _choice
+    from . import _choice, _kernel_id
     from ._choice import _autotune_enabled
     if not _autotune_enabled():
         return reported
     sizes = [reported] + [s for s in _candidates(rng) if s != reported]
     name = getattr(ctx, "device_name", "")
     ch = _choice.choice("vk-subgroup", name, sizes, label=int,
-                        store_key="vk-subgroup|%s|k%s" % (name, gatechain.gpu_kernel_id()),
+                        store_key="vk-subgroup|%s|k%s" % (name, _kernel_id.gpu_kernel_id("vulkan")),
                         what="VK-SUBGROUP %s" % name)
     measured = lambda cands: measure(getattr(ctx, "index", 0), reported, rng) or None
     return int(ch.decide(measured))

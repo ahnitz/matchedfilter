@@ -76,8 +76,10 @@ def record(out, cost_file, ladder_args):
                               args=_digest(list(a)), kwargs=_digest(k), result=_digest(r)))
             return r
         return w
+    from matchedfilter import _calibration
     for name in WRAPPED:
-        setattr(gatechain, name, wrap(name, getattr(gatechain, name)))
+        home = _calibration if hasattr(_calibration, name) else gatechain
+        setattr(home, name, wrap(name, getattr(home, name)))
     t0 = time.perf_counter()
     sys.argv = ["ladder.py"] + ladder_args
     try:

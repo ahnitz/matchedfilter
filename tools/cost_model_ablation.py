@@ -275,7 +275,7 @@ def main(argv=None):
         parser.error("--out must not overwrite --cost-file")
 
     import matchedfilter as mf
-    from matchedfilter import _core, gatechain as gc, time_domain as td
+    from matchedfilter import _calibration, _core, gatechain as gc, time_domain as td
     from matchedfilter.device import parse
     from matchedfilter._execution_policy import select
 
@@ -329,7 +329,7 @@ def main(argv=None):
                 if group not in models:
                     before = json.loads(working_cost.read_text())
                     start = time.perf_counter()
-                    models[group] = gc.calibrate_costs(args.n, gc._CAL_TEMPLATES, group=group)
+                    models[group] = _calibration.calibrate_costs(args.n, gc._CAL_TEMPLATES, group=group)
                     elapsed = time.perf_counter() - start
                     after = json.loads(working_cost.read_text())
                     added = {k: v for k, v in after.items() if k not in before or before[k] != v}

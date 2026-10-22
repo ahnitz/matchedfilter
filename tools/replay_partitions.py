@@ -17,6 +17,7 @@ usage: replay_partitions.py DIR [--reps 5] [--ns 1024 2048 4096]
 import argparse, glob, time
 import numpy as np
 from matchedfilter import _core, gatechain
+from matchedfilter import _calibration
 
 
 def load(path):
@@ -79,7 +80,7 @@ class Plan:
         if self.blocks is None or len(self.blocks[0]) == 0:
             self.ok = False; return
         win = (int(self.blocks[1][len(self.blocks[1]) // 2]), int(self.blocks[2][len(self.blocks[2]) // 2]))
-        best, _ = gatechain.choose_chain(ref_n, n, snr, 1e-3, cost=gatechain.calibrate_costs(n, self.nt),
+        best, _ = gatechain.choose_chain(ref_n, n, snr, 1e-3, cost=_calibration.calibrate_costs(n, self.nt),
                                          max_tiers=3, window=win)
         if best is None:
             self.ok = False; return

@@ -409,3 +409,8 @@ A step that changes C or workflows is first pushed to a `ci/<topic>` branch and 
   - The public classes keep __module__ = "matchedfilter", so reprs and pickle paths are unchanged. The private names stay importable from the root, so lookups through it (and tests' patches of root names) work as before.
   - The six isinstance(self, HierarchicalFilter) checks in MatchedFilter's shared code became a class attribute (_is_hierarchical), so _filter needs no import of _hierarchical and the hot path adds no call.
   - Remaining for the exit criterion: the 7 upward edges in tests/test_layers.py.
+- 2026-10-22: **E: no upward imports.** The last seven upward edges are gone; tests/test_layers.py's allowlist is empty:
+  - device and _vksubgroup call _core and _kernel_id directly;
+  - FilterResults and _EMPTY_FILTER_RESULTS moved to _results (FilterResults keeps __module__ matchedfilter.time_domain, so pickles load), and the window parser and block layout to a new foundation module _windows;
+  - the device peak tables the backends report moved from _roofline to a new foundation module _peaks;
+  - the cost calibrations that run hierarchical plans (calibrate_costs, calibrate_costs_gpu, device_costs, price_block_sizes and their clock reference) moved from gatechain to _calibration (workloads). Inside it gatechain's names are qualified (_gc.NAME), so patches of gatechain still apply. gatechain.calibrate_costs stays public as a documented entry point that _calibration registers itself behind, not as an upward import.

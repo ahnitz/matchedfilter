@@ -12,6 +12,7 @@ import numpy as np
 import pytest
 
 import matchedfilter as mf
+from matchedfilter import _calibration
 from matchedfilter import TimeDomainFilterBank
 
 
@@ -228,7 +229,7 @@ def test_chain_pool_excludes_nothing():
     bank_taps, bank_counts = _load_or_generate_bank(T_req=64)
     for nfft in (2048, 8192):
         ref = _compute_reference_spectrum(bank_taps, bank_counts, nfft=nfft)
-        best, plans = gc.choose_chain(ref, nfft, 5.5, 1e-2, cost=gc.calibrate_costs(nfft, 64), max_tiers=3)
+        best, plans = gc.choose_chain(ref, nfft, 5.5, 1e-2, cost=_calibration.calibrate_costs(nfft, 64), max_tiers=3)
         assert best is not None
         priced = {q["chain"] for q in plans}
         pool = set(gc.enumerate_chains(nfft, 3, bands=gc.usable_bands(ref, nfft)))

@@ -8,13 +8,14 @@ import numpy as np
 import pytest
 
 import matchedfilter as mf
+from matchedfilter import _calibration
 from matchedfilter import gatechain as gc
 
 
 def _probe_calibration(monkeypatch, kind="f32"):
     """Exercise the real calibration with deterministic device times and survivor counts."""
     n, blocks, nt = 256, 16, 64
-    inputs = gc._gpu_cal_inputs(n, blocks, nt, 11)
+    inputs = _calibration._gpu_cal_inputs(n, blocks, nt, 11)
     calls, raw_calls = [], []
     dense = {64: 2.0, 128: 4.0}
     bound = 2.0 if kind != "f32" else 1.0
@@ -57,15 +58,15 @@ def _probe_calibration(monkeypatch, kind="f32"):
     monkeypatch.setattr(mf, "HierarchicalFilter", Plan)
     monkeypatch.setattr(gc, "_COSTS", {})
     monkeypatch.setattr(gc, "_cost_file", lambda: None)
-    monkeypatch.setattr(gc, "_gpu_cal_inputs", lambda *args: inputs)
+    monkeypatch.setattr(_calibration, "_gpu_cal_inputs", lambda *args: inputs)
     monkeypatch.setattr(gc, "gpu_gate_kind", lambda device: kind)
     monkeypatch.setattr(gc, "_is_gpu", lambda device: True)
-    monkeypatch.setattr(gc, "_raw_gate_survivors", raw_survivors)
-    monkeypatch.setattr(gc, "_clock_ref", lambda device: SimpleNamespace(anchor=2.0, time=lambda: 4.0))
+    monkeypatch.setattr(_calibration, "_raw_gate_survivors", raw_survivors)
+    monkeypatch.setattr(_calibration, "_clock_ref", lambda device: SimpleNamespace(anchor=2.0, time=lambda: 4.0))
     # Skip the wall-clock warm-up wait; this probe has no physical device to warm.
     with monkeypatch.context() as clock_patch:
         clock_patch.setattr(time, "perf_counter", itertools.count().__next__)
-        cm = gc.calibrate_costs_gpu(n, "probe", blocks=blocks, reps=2, nt=nt)
+        cm = _calibration.calibrate_costs_gpu(n, "probe", blocks=blocks, reps=2, nt=nt)
     expected_shape = (len(inputs[1]), blocks)
     metrics = {"device_calls": len(calls),
                "host_only_calls": sum(shape != expected_shape for shape in calls),

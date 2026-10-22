@@ -4,6 +4,7 @@ import pytest
 
 from matchedfilter import _core
 import matchedfilter as mf
+from matchedfilter import _calibration
 from matchedfilter.benchmark import _inspiral_power
 
 
@@ -136,7 +137,7 @@ def test_hierarchical_results_identical_with_screen(chain, monkeypatch):
 
 
 def test_cost_model_prices_the_screen():
-    cm = mf._gatechain.calibrate_costs(2048, 64)
+    cm = _calibration.calibrate_costs(2048, 64)
     if not cm.screen:
         pytest.skip("no Q15 screen on this back end")
     for b, ent in cm.screen.items():

@@ -1,5 +1,7 @@
 """The result containers every layer hands back: the structured peak dtype, a sparse
 peak table, and a submitted-but-uncollected result."""
+from typing import NamedTuple
+
 import numpy as np
 
 
@@ -79,3 +81,25 @@ class _Deferred:
         if not self._done:
             self._value, self._finish, self._done = self._finish(), None, True
         return self._value
+
+
+class FilterResults(NamedTuple):
+    template_indices: np.ndarray   # int64: index into original input templates
+    sample_indices: np.ndarray     # int64: sample index in continuous series
+    snr: np.ndarray                # complex64: peak complex SNR
+    block_starts: np.ndarray       # int64: start sample index of the block
+    block_lengths: np.ndarray      # int64: FFT block length used for this template
+
+
+_EMPTY_FILTER_RESULTS = FilterResults(
+    template_indices=np.empty(0, dtype=np.int64),
+    sample_indices=np.empty(0, dtype=np.int64),
+    snr=np.empty(0, dtype=np.complex64),
+    block_starts=np.empty(0, dtype=np.int64),
+    block_lengths=np.empty(0, dtype=np.int64),
+)
+
+
+# FilterResults is public as matchedfilter.FilterResults and was defined in time_domain:
+# its pickles and repr name that module, which still exports it.
+FilterResults.__module__ = "matchedfilter.time_domain"
