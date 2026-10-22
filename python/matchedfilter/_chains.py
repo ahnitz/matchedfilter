@@ -11,6 +11,19 @@ from ._choice import _AUTOTUNE_LOCK, _log_autotune
 _CHAIN_WARM_BATCHES = 2
 
 
+class ChainTrial(_choice.Choice):
+    """A chain trial: the measured choice of a chain trial key, plus the trial's own
+    bookkeeping that once sat in side tables keyed like it. placed (chain -> plans on it)
+    spreads a CPU trial's plans over its candidates; batch_run (the current candidate, the
+    batches run on it, its samples when it became current) is a GPU trial's run of batches
+    (_chain_trial_next)."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.placed = {}
+        self.batch_run = (None, 0, 0)
+
+
 def _chain_lock_key(tkey):
     """The chain trial's key in MF_COST_FILE (its record is "choice|" + this)."""
     n, snr, fd, tiers, device = tkey[:5]
@@ -47,7 +60,7 @@ def _chain_trial(tkey):
             warm = _CHAIN_WARM_BATCHES
             base = _config.get("MF_CHAIN_TRIALS", _CHAIN_BATCH_TRIALS)
             budget = (warm + base, 6)
-        tr = _CHAIN_TRIALS[tkey] = _choice.Choice(
+        tr = _CHAIN_TRIALS[tkey] = ChainTrial(
             store_key=_chain_lock_key(tkey), what="CHAIN-TRIAL %s" % (tkey,), warmup=0,
             minimum=base, cap=2 * base, budget=budget, persist=True,
             label=_chain_str, parse=_parse_chain)
@@ -94,7 +107,7 @@ def _chain_trial_next(tkey):
         if tr is None or tr.winner is not None:
             return None
         warm = _CHAIN_WARM_BATCHES
-        cur, run, got0 = _CHAIN_BATCH_RUN.get(tkey, (None, 0, 0))
+        cur, run, got0 = tr.batch_run
         # A candidate current for longer than its warm-up and samples (+2) without yielding
         # one cannot or will not run here (a plan that does not switch to it, batches never
         # recorded): it leaves the contest instead of being waited for.
@@ -109,7 +122,7 @@ def _chain_trial_next(tkey):
         if c is None:
             tr.expire()                     # every candidate dropped: the preference stands
             return None
-        _CHAIN_BATCH_RUN[tkey] = (c, run + 1, got0) if c == cur else (c, 1, len(tr.samples[c]))
+        tr.batch_run = (c, run + 1, got0) if c == cur else (c, 1, len(tr.samples[c]))
         return c
 
 
@@ -161,13 +174,8 @@ _CHAIN_CHOICE = {}
 _CHAIN_TRIALS = {}
 
 
-#: chain-trial key -> {chain: plans placed on it}, for spreading a CPU trial's plans
-_CHAIN_PLACED = {}
 
 
-#: chain-trial key -> (current candidate, batches run on it, its samples when it became
-#: current): a GPU trial's run of batches (_chain_trial_next)
-_CHAIN_BATCH_RUN = {}
 
 
 #: Relative cost margin inside which modelled chains are measured rather than decided by the

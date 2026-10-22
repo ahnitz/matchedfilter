@@ -2457,8 +2457,6 @@ def clear_autotune_cache():
     with _AUTOTUNE_LOCK:
         _chains._CHAIN_CHOICE.clear()
         _chains._CHAIN_TRIALS.clear()
-        _chains._CHAIN_PLACED.clear()
-        _chains._CHAIN_BATCH_RUN.clear()
         _chains._Q15_TRIALS.clear()
         _chains._Q15_MODEL.clear()
         _CPU_FWD_PFFT.clear()
@@ -3065,7 +3063,7 @@ class HierarchicalFilter(MatchedFilter):
                     if tuple(tr.winner) in feasible:
                         chain = tuple(tr.winner)
                 else:
-                    placed = _chains._CHAIN_PLACED.setdefault(tkey, {})
+                    placed = tr.placed
                     for c in shortlist:
                         tr.add(c)
                     chain = tr.pick(among=shortlist, placed=placed) or shortlist[0]
@@ -3124,7 +3122,7 @@ class HierarchicalFilter(MatchedFilter):
                             _log_autotune("CHAIN-TRIAL plan locked %s on its own shortlist", winner)
                         lacking = [c for c in own if len(tr.samples[c]) < tr.needs(c)]
                     if winner is None and lacking:
-                        placed = _chains._CHAIN_PLACED.setdefault(self._chain_trial, {})
+                        placed = tr.placed
                         move = tr.pick(among=lacking, placed=placed)
                         placed[move] = placed.get(move, 0) + 1
                         placed[mine] = max(0, placed.get(mine, 1) - 1)
