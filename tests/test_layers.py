@@ -23,7 +23,7 @@ LAYERS = (
     ("models", {"gatemodel", "gatechain", "_chains", "_prices"}),
     ("gpu host", {"_gpuhost", "_gpuhier", "_gpuexec"}),
     ("backends", {"_vkcompute", "_cudacompute", "_mtlcompute"}),
-    ("workloads", {"time_domain", "search", "_roofline", "__init__"}),
+    ("workloads", {"time_domain", "search", "_roofline", "__init__", "_layout"}),
     ("applications", {"benchmark", "tutorial", "demo", "precision"}),
 )
 LEVEL = {m: i for i, (_, mods) in enumerate(LAYERS) for m in mods}
