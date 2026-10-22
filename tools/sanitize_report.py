@@ -58,6 +58,7 @@ def summary(text, limit=3800):
     test = [l for l in lines if re.search(r"File .*/tests/test_\w+\.py", l)]
     if test:
         parts.append("test frames:\n" + "\n".join(test[:6]))
+    parts += [l for l in lines if l.startswith("=== without use-after-return detection")]
     gdb = [i for i, l in enumerate(lines) if l.startswith("=== gdb: ")]
     if gdb:
         g = [l for l in lines[gdb[-1]:] if not INTERPRETER.search(l)]
