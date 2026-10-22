@@ -259,3 +259,4 @@ A step that changes C or workflows is first pushed to a `ci/<topic>` branch and 
   - Every method of _core's MF, HMF and Root objects is wrapped (GUARDED): the busy flag is read and set with the GIL held, so a concurrent call raises RuntimeError. `_busy` is exposed read-only for the test. The full suite passes, so the library never shares one object between threads.
   - matchfilt.c's lazy scratch allocations (`alloc_pair`; the DIF plan with its two buffers) allocate all or nothing. Before, a guard on the first pointer took a half-allocated set as ready.
   - Decided at B7: no fault-injection hook, to avoid test-only C code. The allocation fix is by construction and is exercised under the sanitizers (C5).
+- 2026-10-22: **B8: internal CPU plans name the CPU.** time_domain's single-template CPU plan and the correlation price probe pass `device='cpu'`. With None, MF_DEVICE moved them. tests/test_cpu_plans_name_the_cpu.py fails on 542aeed1.

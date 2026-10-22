@@ -832,7 +832,8 @@ def _corr_block_costs(n: int, device: Optional[Any] = None) -> Tuple[float, floa
     # the cheaper at a group of 16 templates is the one this n runs (_CORR_PFFT).
     modes = [False]
     if dkey == "cpu":
-        probe = CorrelationFilter(n, ndata=1, ntemplates=1, valid=(taps // 2, n - taps // 2))
+        probe = CorrelationFilter(n, ndata=1, ntemplates=1, valid=(taps // 2, n - taps // 2),
+                                  device='cpu')      # the CPU's price, whatever MF_DEVICE says
         probe.set_templates(np.zeros((1, n), np.complex64))
         if probe._execution_plan().set_platform_fft(True):
             modes.append(True)
@@ -1125,7 +1126,8 @@ class _TemplateGroup:
                 self._single_gpu_ti = int(ti)
             return plan
         sp = self.full_spectra(slice(int(ti), int(ti) + 1))
-        plan = MatchedFilter(self.n, ndata=1, ntemplates=1, device=None if on_cpu else self.device)
+        # 'cpu', not None: None means MF_DEVICE, which would move the CPU's own plan to a GPU.
+        plan = MatchedFilter(self.n, ndata=1, ntemplates=1, device='cpu' if on_cpu else self.device)
         plan.set_templates(np.ascontiguousarray(sp))
         cache[int(ti)] = plan
         while len(cache) > 8:
