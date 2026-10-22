@@ -2692,15 +2692,24 @@ def get_autotune_state():
 
 
 def clear_autotune_cache():
-    """Forget every chain choice and trial in this process."""
+    """Forget every workload choice and trial this process made: chain choices and their
+    trials, Q15 trials and the model's Q15 shortlist, block-size trials, the single-device,
+    single-batch and fused-batch device choices, and the CPU forward and Q15 tier-0 prices.
+    The next use starts afresh from MF_COST_FILE. Machine state is kept: cost models
+    (gatechain._COSTS), correlation prices and the kernel choices a GPU device holds."""
+    from . import time_domain as _td
     with _AUTOTUNE_LOCK:
         _CHAIN_CHOICE.clear()
         _CHAIN_TRIALS.clear()
         _CHAIN_PLACED.clear()
         _CHAIN_BATCH_RUN.clear()
         _Q15_TRIALS.clear()
+        _Q15_MODEL.clear()
         _CPU_FWD_PFFT.clear()
         _Q15_TIER0.clear()
+    _td._BLOCK_TRIALS.state.clear()
+    for kind in ("single-device", "single-batch", "fused-batch"):
+        _choice.reset(kind)
 
 
 

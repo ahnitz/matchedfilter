@@ -224,3 +224,8 @@ A step that changes C or workflows is first pushed to a `ci/<topic>` branch and 
   - tests/test_bank_path_precision.py compares every reported |SNR| with a float64 direct correlation at its lag, through three chains with and without the direct refine, on the flat filter and on a usable GPU. The observed worst case is 8e-7, the bound 1e-5; a planted 1e-3 error in the direct refine's taps fails it (3.1e-3).
   - tools/sanitize.sh, the ASan/UBSan recipe. No dev host has the sanitizer runtimes installed (the libasan and libubsan packages), so it is first exercised by the nightly CI job (C5).
 - 2026-10-21: **B1: MF_COST_FILE never loses data.** Reads distinguish missing, damaged and unreadable files. A damaged file is kept aside and reported; an unreadable one is never written. `_update_cost` returns the record it wrote. `_store_first` makes cost models and the one-shot prices (q15-tier0, cpu-fft, direct-lagtap, corr3/corr-pfft) first-writer-wins. Legacy trial records are reported once. The migrate tool writes under the library's lock, atomically. All ten new tests fail on 7acdc7f5.
+- 2026-10-21: **B2: the test session leaves the developer's environment alone.**
+  - conftest removes every MF_* variable before collection, except MF_ISA, the tool paths and `--keep-mf-env NAME`. The header names what was removed and kept, the CPU backend and targets, the devices and numpy.
+  - `clear_autotune_cache` clears what its docstring says; the autouse fixture no longer swallows errors.
+  - Every run prints a skip table (a ::notice on Actions). `--reverse-modules` reverses module order.
+  - Forward and reversed suites both pass: 2155 passed, 141 skipped.
