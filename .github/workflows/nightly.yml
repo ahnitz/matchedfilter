@@ -27,13 +27,55 @@ env:
   VECLIB_MAXIMUM_THREADS: "1"
 
 jobs:
+  sanitize-build:
+    # One sanitized build per architecture, which every shard of it tests. Built in each
+    # shard it took 13-19 minutes of a shard's time on x86_64, and never finished on arm64
+    # within 65 minutes (2026-10-22, before use-after-scope checking was dropped).
+    name: sanitized build (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: ubuntu-24.04,     label: x86_64}
+          - {os: ubuntu-24.04-arm, label: arm64}
+    steps:
+      - uses: actions/checkout@v4
+        with: { submodules: true }   # third_party/highway
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: Sanitizer runtimes
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q libasan8 libubsan1
+      - name: Build dependencies
+        run: python -m pip install --upgrade pip setuptools wheel numpy
+      - name: The sanitized build
+        run: |
+          set +e
+          timeout 140m tools/sanitize.sh --python python --keep "$RUNNER_TEMP/san" --build-only \
+            > "$RUNNER_TEMP/build.log" 2>&1
+          rc=$?
+          set -e
+          tail -20 "$RUNNER_TEMP/build.log"
+          echo "::notice::$(grep -m1 'sanitize: built in' "$RUNNER_TEMP/build.log" || echo 'sanitize: build did not finish'); rc=$rc"
+          [ $rc -eq 0 ] || { echo "::error::sanitized build rc=$rc"; exit $rc; }
+          tar -C "$RUNNER_TEMP" -cf "$RUNNER_TEMP/san.tar" san
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sanitized-${{ matrix.label }}
+          path: ${{ runner.temp }}/san.tar
+          retention-days: 1
+          if-no-files-found: error
+
   sanitize:
     name: sanitize (${{ matrix.label }}, ${{ matrix.shard }}/${{ matrix.of }})
+    needs: sanitize-build
     runs-on: ${{ matrix.os }}
     # The whole suite under ASan did not finish in 90 minutes on one runner (2026-10-22), so
-    # it runs in shards (conftest --shard: whole modules, each in exactly one shard). In
-    # quarters x86_64 took 32-58 minutes and arm64 over 75, so x86_64 runs sixths and
-    # arm64 twelfths.
+    # it runs in shards (conftest --shard: whole modules, each in exactly one shard), each
+    # testing its architecture's one build.
     timeout-minutes: 75
     strategy:
       fail-fast: false
@@ -52,7 +94,6 @@ jobs:
           - {os: ubuntu-24.04-arm, label: arm64, of: 12}
     steps:
       - uses: actions/checkout@v4
-        with: { submodules: true }   # third_party/highway
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
       - name: Sanitizer runtimes
@@ -63,19 +104,25 @@ jobs:
           sudo apt-get install -y -q libasan8 libubsan1
           sudo sysctl vm.mmap_rnd_bits=28
       - name: Install the test dependencies
-        run: python -m pip install --upgrade pip setuptools wheel numpy pytest
+        run: python -m pip install --upgrade pip numpy pytest
+      - uses: actions/download-artifact@v4
+        with:
+          name: sanitized-${{ matrix.label }}
+          path: ${{ runner.temp }}
       - name: The suite under ASan and UBSan
         # Stopped before the job limit so a slow or hung shard still reports: the tail of its
-        # output (the build time, faulthandler's stacks, the last tests) becomes an error
-        # annotation, which the public API shows (the job log needs a token).
+        # output (faulthandler's stacks, the last tests) becomes an error annotation, which
+        # the public API shows (the job log needs a token).
         run: |
+          tar -C "$RUNNER_TEMP" -xf "$RUNNER_TEMP/san.tar"
           set +e
-          timeout 65m tools/sanitize.sh --python python -- tests -q -rs --durations=15 \
-            --shard ${{ matrix.shard }}/${{ matrix.of }} > "$RUNNER_TEMP/san.log" 2>&1
+          timeout 65m tools/sanitize.sh --python python --prebuilt "$RUNNER_TEMP/san" -- \
+            tests -q -rs --durations=15 --shard ${{ matrix.shard }}/${{ matrix.of }} \
+            > "$RUNNER_TEMP/san.log" 2>&1
           rc=$?
           set -e
           tail -80 "$RUNNER_TEMP/san.log"
-          echo "::notice::$(grep -m1 'sanitize: built in' "$RUNNER_TEMP/san.log" || echo 'sanitize: build did not finish'); rc=$rc"
+          echo "::notice::$(grep -m1 'pytest ran' "$RUNNER_TEMP/san.log" || echo 'sanitize: pytest did not finish'); rc=$rc"
           if [ $rc -ne 0 ]; then
             tail -c 3500 "$RUNNER_TEMP/san.log" | python3 -c "import sys; t=sys.stdin.read(); print('::error::rc=$rc%0A' + t.replace('%', '%25').replace('\r', '').replace('\n', '%0A'))"
           fi

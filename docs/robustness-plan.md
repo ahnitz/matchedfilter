@@ -329,3 +329,15 @@ A step that changes C or workflows is first pushed to a `ci/<topic>` branch and 
   audit_class_execution.py's `del f` inside loops whose lambdas close over f read as an undefined name; it is now `f = None`. No tool imports a third-party module but numpy at module level.
 - 2026-10-22: **First sanitized pass.** In four shards, x86_64 ran the whole suite under ASan and UBSan clean (32-58 minutes a shard); every arm64 quarter reached 75 minutes. x86_64 now runs six shards and arm64 twelve.
 - 2026-10-22: **arm64 sanitizers time out at every size.** In twelfths, every arm64 shard still reached 75 minutes while x86_64 sixths took 21-70. A twelfth of the suite that never finishes is not a sizing problem: something on arm64 (the sanitized build of Highway's arm targets, or a hang) takes the whole limit. The step now stops itself at 65 minutes and reports the build time and the tail of its output as an error annotation; sanitize.sh prints build and run times.
+- 2026-10-22: **The arm64 time was the build.** The reporting step showed every arm64 shard still building when it stopped at 65 minutes. On x86_64 the build took 13-19 minutes of every shard. Timed locally (gcc, src/kernel.cc, which is the whole build: every other file takes about 10 s):
+
+  | flags | compile time |
+  |---|---|
+  | plain | 30 s |
+  | ASan+UBSan | 679 s |
+  | without use-after-scope | 225 s |
+  | ASan alone | 613 s |
+  | UBSan alone | 126 s |
+  | ASan+UBSan at -O1 | 390 s |
+
+  The sanitized build drops use-after-scope checking (every other check stays, at the shipped -O3). The nightly builds once per architecture (sanitize-build, 150-minute limit, an artifact) and the shards test that build (sanitize.sh --keep DIR --build-only, then --prebuilt DIR).
