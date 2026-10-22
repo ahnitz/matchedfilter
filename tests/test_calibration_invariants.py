@@ -23,7 +23,7 @@ def test_gate_matches_reference_under_scaling_and_bank_partition(device, band, m
     # Likewise the Vulkan fp16 coarse tier reports an upper bound (c16Bound) and admits a
     # superset; its raw statistic is what this checks. tests/test_gpu_c16_bound.py covers
     # the bound.
-    monkeypatch.setenv("MF_VK_C16_BOUND", "0")
+    monkeypatch.setenv("MF_COARSE_RAW", "1")
     n, nd, nt = 1024, 12, 4
     rng = np.random.default_rng(810 + band)
     data = (rng.normal(size=(nd, n)) + 1j*rng.normal(size=(nd, n))).astype(np.complex64)

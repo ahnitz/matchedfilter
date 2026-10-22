@@ -289,7 +289,7 @@ def test_every_device_matches_the_model(thr, monkeypatch):
     # The physics check is on the coarse STATISTIC. The Vulkan fp16 tier reports an upper
     # bound on it (c16Bound), a deliberate superset whose margin only lowers dismissals --
     # tests/test_gpu_c16_bound.py checks that bound; here it is switched off.
-    monkeypatch.setenv("MF_VK_C16_BOUND", "0")
+    monkeypatch.setenv("MF_COARSE_RAW", "1")
     p = profile()
     want = model(p, thr)
     got = filter_mc(p, thr, device=dev)

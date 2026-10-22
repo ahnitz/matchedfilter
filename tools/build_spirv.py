@@ -321,7 +321,7 @@ def metal_split(n, cap, coarse16=0):
 
 def _metal_c16_kappa(n):
     """The derived fp16 bound's kappa for a Metal coarse build, from Apple's measured error
-    table (tools/coarse_layout.py C16_SIGMA_APPLE; tools/metal_c16_sigma.py)."""
+    table (tools/coarse_layout.py C16_SIGMA_APPLE; tools/c16_sigma.py)."""
     import coarse_layout
     return "#define C16_KAPPA %.4f\n" % coarse_layout.c16_kappa(n, coarse_layout.C16_SIGMA_APPLE)
 

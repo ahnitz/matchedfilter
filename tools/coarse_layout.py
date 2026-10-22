@@ -172,7 +172,7 @@ if __name__ == "__main__":
 C16_SIGMA = {64: 1.6, 128: 1.7, 256: 1.8, 512: 2.2, 1024: 2.5, 2048: 3.3}
 
 #: The same, measured on the Apple M2 through the Metal builds (tiled and untiled, the
-#: larger), by tools/metal_c16_sigma.py with the bound switched off (MF_VK_C16_BOUND=0):
+#: larger), by tools/c16_sigma.py --backend metal with the raw maximum (MF_COARSE_RAW=1):
 #: 8192 pairs per band. The worst residual after the proven (1+3u) factor was 4.9 u rms
 #: (band 2048, loud transient), against kappa 18.3 there.
 C16_SIGMA_APPLE = {64: 1.5, 128: 1.7, 256: 1.8, 512: 2.0, 1024: 2.2, 2048: 2.6}

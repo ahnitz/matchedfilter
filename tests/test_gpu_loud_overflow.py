@@ -22,12 +22,23 @@ def _gpu():
 
 @pytest.fixture(params=["measured", "t1", "t2", "t4", "t8"])
 def builds(request, monkeypatch):
-    """The device's measured coarse tile and each shipped one forced (t1 = untiled): any of
-    them can be a device's choice, so each must fail open."""
-    if request.param != "measured":
-        monkeypatch.setenv("MF_VK_COARSE_TILE", request.param[1:])
-        monkeypatch.setenv("MF_METAL_COARSE_TILE", request.param[1:])
-    return request.param
+    """The device's measured coarse layout, or one with each tile forced (t1 = untiled) at
+    every band the device has one: any of them can be a device's choice, so each must fail
+    open. Returns a function of the chain that sets MF_COARSE_LAYOUT."""
+    def force(chain):
+        if request.param == "measured":
+            return
+        from conftest import forced_coarse_layouts, gpu_backend, gpu_context
+        tile = int(request.param[1:])
+        ctx = gpu_context(gpu_backend())
+        try:
+            value = forced_coarse_layouts(ctx, chain, lambda f: f[2] == tile)
+        finally:
+            ctx.destroy()
+        if not value:
+            pytest.skip("no tile-%d coarse layout at %s on this device" % (tile, chain))
+        monkeypatch.setenv("MF_COARSE_LAYOUT", value)
+    return force
 
 
 @pytest.mark.parametrize("chain", [(64,), (128,), (256,), (512,), (1024,), (2048,),
@@ -35,6 +46,7 @@ def builds(request, monkeypatch):
 @pytest.mark.parametrize("snr", [2000, 3000, 1e5])
 def test_loud_injection_matches_cpu(chain, snr, builds):
     dev = _gpu()
+    builds(chain)
     from matchedfilter.benchmark import _inspiral_power
     n, nd, nt = 4096, 4, 16
     power = _inspiral_power(n)

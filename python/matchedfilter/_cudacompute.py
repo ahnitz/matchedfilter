@@ -1399,12 +1399,12 @@ class Context(Executor, InputUploads):
 
     def _c16_bound_flag(self, fn):
         """Set the coarse module's fp16 bound switch (mf_c16_raw, Vulkan's constant 77):
-        the bound applies unless MF_VK_C16_BOUND=0 asks for the raw fp16 maximum, which
+        the bound applies unless MF_COARSE_RAW=1 asks for the raw fp16 maximum, which
         only the bound's own margin measurements and the physics checks use."""
         ent = self._c16_flags.get(self._labels.get(fn.value))
         if ent is None:
             return
-        raw = 0 if _config.get("MF_VK_C16_BOUND") else 1
+        raw = 1 if _config.get("MF_COARSE_RAW") else 0
         if ent[1] != raw:
             self._bind()
             check_cuda(self.cuda.cuCtxSynchronize(), "cuCtxSynchronize")

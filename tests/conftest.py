@@ -240,6 +240,21 @@ def gpu_backend():
     return next(d for d in mf.devices() if str(d) == dev).backend
 
 
+def forced_coarse_layouts(ctx, bands, keep):
+    """An MF_COARSE_LAYOUT value naming, at each band, the first of the device's own coarse
+    layouts (ctx.coarse_layouts) whose fields (_coarse.parse_label: band, ppg, tile, twt,
+    subgroup) keep accepts; a band with none is left to its measured choice. A layout is
+    forced by name on every backend, so a test never asks for one the device lacks."""
+    from matchedfilter._coarse import parse_label
+    names = []
+    for band in bands:
+        hit = [s for s in ctx.coarse_layouts(band)
+               if parse_label(s) is not None and keep(parse_label(s))]
+        if hit:
+            names.append(hit[0])
+    return ",".join(names)
+
+
 def gpu_context(backend):
     """A fresh low-level context (device 0) of the backend; skips an unknown one."""
     import pytest

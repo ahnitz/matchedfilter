@@ -95,7 +95,7 @@ def _fit_workgroup(sg, invocations, rng, max_subgroups):
     return sg
 
 
-from ._coarse import coarse_stem, shipped_tiles, forced_tile   # noqa: E402
+from ._coarse import coarse_stem, shipped_tiles   # noqa: E402
 
 
 #: Byte offsets into VkPhysicalDeviceProperties. The 5 leading uint32s, the
@@ -1450,7 +1450,7 @@ class Context(Executor, InputUploads):
             key = (key, "dscale", int(data_scale))
         if coarse_twt is not None:
             key = (key, "twt", int(coarse_twt))
-        raw_c16 = not _config.get("MF_VK_C16_BOUND")
+        raw_c16 = _config.get("MF_COARSE_RAW")
         if raw_c16:
             key = (key, "raw-c16")
         # subgroup: a size within the device's required-size range to build this pipeline
@@ -1986,32 +1986,20 @@ class Context(Executor, InputUploads):
         """Every coarse layout (subgroup, ppg, tile, twt) this device can run at this band: the
         shipped builds whose group fits the device's invocation and shared-memory limits, at
         each subgroup size it can require (VK_EXT_subgroup_size_control; the default size
-        only, 0, without it). MF_VK_COARSE_PPG caps the packing, MF_VK_COARSE_TILE and
-        MF_VK_COARSE_SUBGROUP fix the tile (1 = untiled) and subgroup, and MF_VK_COARSE_TWT an
-        untiled build's twiddles (1 table, 0 recurrence), for measurement and tests."""
+        only, 0, without it). MF_COARSE_LAYOUT forces one of them by name, on every backend."""
         wg = max(1, band // 16)
-        cap = _config.get("MF_VK_COARSE_PPG") or 0
         rng = getattr(self, "subgroup_range", None)
         sizes = [0]
         if rng:
             sizes = [s for s in (4, 8, 16, 32, 64, 128) if rng[0] <= s <= rng[1]]
-        forced_sg = forced_tile("MF_VK_COARSE_SUBGROUP")
-        if forced_sg is not None:
-            sizes = [forced_sg if forced_sg in sizes else sizes[0]]
-        forced = forced_tile("MF_VK_COARSE_TILE")
-        forced_twt = forced_tile("MF_VK_COARSE_TWT")
         out = []
         for ppg in (1, 2, 4, 8, 16, 32):
-            if cap and ppg > cap:
-                continue
             # A group of ppg pairs is (band/16)*ppg invocations and holds ppg padded
             # exchange stages (about 17/16 * band words each).
             if (wg * ppg > self.max_invocations
                     or (band * 17 // 16 + 32) * 4 * ppg > self.max_shared_memory):
                 continue
             for tile in (1,) + shipped_tiles(band, ppg, _spv_shipped):
-                if forced is not None and tile != forced:
-                    continue
                 if not _spv_shipped(coarse_stem(band, ppg, tile)):
                     continue
                 # Sizes that would split the group past maxComputeWorkgroupSubgroups are
@@ -2019,7 +2007,6 @@ class Context(Executor, InputUploads):
                 lim = getattr(self, "max_workgroup_subgroups", 0)
                 out.extend((sg, ppg, tile, twt) for sg in sizes
                            for twt in ((1, 0) if tile == 1 else (1,))
-                           if forced_twt is None or tile > 1 or twt == forced_twt
                            if not (lim and sg and -(-wg * ppg // sg) > lim))
         if not out:
             out = [(sizes[0], 1, 1, 0)]

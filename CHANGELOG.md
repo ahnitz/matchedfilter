@@ -24,6 +24,13 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ### Removed
 
+- The per-backend coarse layout fields `MF_VK_COARSE_PPG`, `MF_VK_COARSE_TILE`,
+  `MF_VK_COARSE_SUBGROUP`, `MF_VK_COARSE_TWT` and `MF_METAL_COARSE_PPG` (and the
+  documented `MF_METAL_COARSE_TILE`/`_TWT`, which nothing read): `MF_COARSE_LAYOUT`
+  forces a whole layout by name on every backend.
+- `MF_VK_C16_BOUND` is renamed `MF_COARSE_RAW`: `MF_COARSE_RAW=1` is what
+  `MF_VK_C16_BOUND=0` did, on every GPU backend.
+- `tools/metal_c16_sigma.py` is `tools/c16_sigma.py --backend metal|vulkan|cuda`.
 - `MF_BBLK` (stage-B blocking of the balanced transform): slower than the default at
   every length measured on Zen 3, Zen 5 and an Apple M2 (1-7%).
 - `MF_TRIAL_RECHECK` and the steady-state re-check it switched on (`Choice.observe`,

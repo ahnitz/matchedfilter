@@ -52,7 +52,7 @@ def test_bound_covers_the_exact_maximum(B, monkeypatch):
     cases = _families(B, rng, nt)
     raws, bnds = [], []
     for flag, out in (("0", raws), ("1", bnds)):
-        monkeypatch.setenv("MF_VK_C16_BOUND", flag)
+        monkeypatch.setenv("MF_COARSE_RAW", "1" if flag == "0" else "0")   # flag: the bound on
         ctx = _vkcompute.Context(0)
         try:
             for D, T in cases:
@@ -129,7 +129,7 @@ def test_every_coarse_layout_bounds_the_exact_maximum(B, monkeypatch):
                                                axis=1) * B).max(axis=1)))
     out = {}
     for flag in ("0", "1"):
-        monkeypatch.setenv("MF_VK_C16_BOUND", flag)
+        monkeypatch.setenv("MF_COARSE_RAW", "1" if flag == "0" else "0")   # flag: the bound on
         ctx = gpu_context(backend)
         try:
             if not ctx._x_has_c16(B):

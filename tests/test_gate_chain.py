@@ -728,10 +728,10 @@ def test_bounding_first_tier_excess_is_priced():
 def test_gpu_gate_kind_keys(monkeypatch):
     gc = mf._gatechain
     monkeypatch.setattr(gc, "_is_gpu", lambda d: d.startswith("gpu"))
-    monkeypatch.delenv("MF_VK_C16_BOUND", raising=False)
+    monkeypatch.delenv("MF_COARSE_RAW", raising=False)
     assert gc.gpu_gate_kind("gpu:0") == "c16b"
     assert gc.gpu_gate_kind("cpu") == "f32"
-    monkeypatch.setenv("MF_VK_C16_BOUND", "0")
+    monkeypatch.setenv("MF_COARSE_RAW", "1")
     assert gc.gpu_gate_kind("gpu:0") == "f32"
 
 

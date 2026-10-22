@@ -22,11 +22,16 @@ def ctx():
 
 
 @pytest.fixture(params=["t1", "t2", "t4", "t8"])
-def builds(request, monkeypatch):
-    """Every coarse build family, forced (t1 = untiled). Which one runs is the device's
-    measured choice, so each must be right: the untiled builds once ignored per-row windows,
-    which no other test could see."""
-    monkeypatch.setenv("MF_VK_COARSE_TILE", request.param[1:])
+def builds(request, monkeypatch, ctx):
+    """Every coarse build family, forced at every band (t1 = untiled). Which one runs is the
+    device's measured choice, so each must be right: the untiled builds once ignored per-row
+    windows, which no other test could see."""
+    from conftest import forced_coarse_layouts
+    tile = int(request.param[1:])
+    value = forced_coarse_layouts(ctx, (64, 128, 256, 512, 1024, 2048), lambda f: f[2] == tile)
+    if not value:
+        pytest.skip("no tile-%d coarse layout on this device" % tile)
+    monkeypatch.setenv("MF_COARSE_LAYOUT", value)
     return request.param
 
 
@@ -89,12 +94,18 @@ def test_untiled_coarse_matches_tiled_under_a_real_gate(ctx, band, monkeypatch):
     gate, thr = 2.5, 4.0
     ref = ctx.hier_peaks_grouped(n, band, spec, h, h[:, :band], gate, groups, 2048, thr)
     assert (ref[0] >= 0).sum() >= 4
-    monkeypatch.setenv("MF_VK_COARSE_TILE", "1")
+    from conftest import forced_coarse_layouts
+    ran = []
     for ppg in (1, 2, 4, 8, 16):
-        monkeypatch.setenv("MF_VK_COARSE_PPG", str(ppg))
+        value = forced_coarse_layouts(ctx, (band,), lambda f: f[1] == ppg and f[2] == 1)
+        if not value:
+            continue                       # not built at this band, or too big for the device
+        monkeypatch.setenv("MF_COARSE_LAYOUT", value)
         got = ctx.hier_peaks_grouped(n, band, spec, h, h[:, :band], gate, groups, 2048, thr)
         np.testing.assert_array_equal(got[0], ref[0])
         np.testing.assert_array_equal(got[1], ref[1])
+        ran.append(ppg)
+    assert 1 in ran and len(ran) >= 2, "untiled packings run at band %d: %s" % (band, ran)
 
 
 def test_band_windows_map_as_one_window_does():
