@@ -57,9 +57,11 @@ if ! ${CC:-cc} $FLAGS "$WORK/probe.c" -o "$WORK/probe" 2>"$WORK/probe.log" || ! 
 fi
 # LDSHARED: link with the system compiler, not the one a conda Python names (its ld does not
 # find the system's sanitizer runtimes).
+T0=$SECONDS
 ( cd "$WORK" && CFLAGS="$FLAGS" CXXFLAGS="$FLAGS" LDFLAGS="-fsanitize=address,undefined" \
     LDSHARED="${CXX:-c++} -shared" "$PY" setup.py build_ext --inplace > build.log 2>&1 ) \
   || { echo "sanitize: build FAILED (see $WORK/build.log)"; exit 1; }
+echo "sanitize: built in $((SECONDS - T0)) s"
 
 ASAN_LIB=$(${CC:-cc} -print-file-name=libasan.so)
 [ -e "$ASAN_LIB" ] || { echo "sanitize: no libasan.so from ${CC:-cc}"; exit 1; }
@@ -72,5 +74,6 @@ env LD_PRELOAD="$ASAN_LIB" PYTHONMALLOC=malloc PYTHONPATH="$WORK/python" \
     "$PY" -m pytest -q -p no:cacheprovider "$@"
 rc=$?
 set -e
+echo "sanitize: pytest ran $((SECONDS - T0)) s since the build started"
 echo "sanitize: pytest rc=$rc ($([ $rc -eq 0 ] && echo clean || echo FAILED))"
 exit $rc

@@ -65,7 +65,21 @@ jobs:
       - name: Install the test dependencies
         run: python -m pip install --upgrade pip setuptools wheel numpy pytest
       - name: The suite under ASan and UBSan
-        run: tools/sanitize.sh --python python -- tests -q -rs --durations=15 --shard ${{ matrix.shard }}/${{ matrix.of }}
+        # Stopped before the job limit so a slow or hung shard still reports: the tail of its
+        # output (the build time, faulthandler's stacks, the last tests) becomes an error
+        # annotation, which the public API shows (the job log needs a token).
+        run: |
+          set +e
+          timeout 65m tools/sanitize.sh --python python -- tests -q -rs --durations=15 \
+            --shard ${{ matrix.shard }}/${{ matrix.of }} > "$RUNNER_TEMP/san.log" 2>&1
+          rc=$?
+          set -e
+          tail -80 "$RUNNER_TEMP/san.log"
+          echo "::notice::$(grep -m1 'sanitize: built in' "$RUNNER_TEMP/san.log" || echo 'sanitize: build did not finish'); rc=$rc"
+          if [ $rc -ne 0 ]; then
+            tail -c 3500 "$RUNNER_TEMP/san.log" | python3 -c "import sys; t=sys.stdin.read(); print('::error::rc=$rc%0A' + t.replace('%', '%25').replace('\r', '').replace('\n', '%0A'))"
+          fi
+          exit $rc
 
   order:
     name: suite in reverse module order
