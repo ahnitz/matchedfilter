@@ -22,7 +22,8 @@ def test_a_single_template_cpu_plan_ignores_mf_device(monkeypatch):
 
 def test_the_correlation_price_probe_ignores_mf_device(monkeypatch):
     monkeypatch.delenv("MF_COST_FILE", raising=False)
-    monkeypatch.setattr(td, "_CORR_COSTS", {})
+    from matchedfilter import _layout
+    monkeypatch.setattr(_layout, "_CORR_COSTS", {})
     monkeypatch.setenv("MF_DEVICE", "gpu:99")
-    costs = td._corr_block_costs(1024, "cpu")
+    costs = _layout._corr_block_costs(1024, "cpu")
     assert len(costs) == 3 and all(np.isfinite(costs))
