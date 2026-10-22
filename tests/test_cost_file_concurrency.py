@@ -8,6 +8,20 @@ import pytest
 
 from matchedfilter import gatechain
 
+#: Seconds a spawned writer may take to start: it imports numpy and the package afresh,
+#: which on a loaded CI runner has taken more than 15 s.
+START = 120
+
+
+def _started(event, proc):
+    """Wait for a writer to signal; a writer that exits first fails with its exit code."""
+    for _ in range(START * 10):
+        if event.wait(0.1):
+            return
+        assert proc.is_alive() or event.is_set(), \
+            "the writer exited (%s) before it signalled" % proc.exitcode
+    pytest.fail("the writer did not signal within %d s" % START)
+
 
 def _write_cost(path, key, started, done, release=None):
     if release is not None:
@@ -17,7 +31,7 @@ def _write_cost(path, key, started, done, release=None):
         def paused_read(filename):
             data = original(filename)
             started.set()
-            if not release.wait(15):
+            if not release.wait(START):
                 raise RuntimeError("writer was not released")
             return data
 
@@ -40,15 +54,15 @@ def test_overlapping_process_writers_preserve_both_records(tmp_path):
              for i, key in enumerate(("first", "second"))]
     try:
         procs[0].start()
-        assert started[0].wait(15)  # first writer has read its snapshot
+        _started(started[0], procs[0])   # the first writer has read its snapshot
         procs[1].start()
-        assert started[1].wait(15)
+        _started(started[1], procs[1])
         # With only atomic replacement the second writer finishes against the old
         # snapshot, then its record is lost when the paused first writer resumes.
         done[1].wait(1)
         release.set()
         for proc in procs:
-            proc.join(15)
+            proc.join(START)
             assert proc.exitcode == 0
     finally:
         release.set()
