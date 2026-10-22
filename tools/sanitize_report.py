@@ -4,7 +4,8 @@
 
 The annotation leads with what matters when a shard fails: the sanitizer report (the
 AddressSanitizer ERROR block, or UndefinedBehaviorSanitizer's "runtime error" lines with
-the stack that follows), the test faulthandler shows running, then the end of the log.
+the stack that follows) or, for another abort, the lines before faulthandler's "Fatal
+Python error"; then the test faulthandler shows running, then the end of the log.
 The public API shows annotations; the job log needs a token.
 """
 import re
@@ -18,6 +19,13 @@ def summary(text, limit=3800):
         if "ERROR: AddressSanitizer" in line or "runtime error:" in line:
             parts.append("\n".join(lines[max(0, i - 2): i + 40]))
             break
+    else:
+        # No sanitizer report: an abort() of another kind (an assert, a library check)
+        # prints its message just before faulthandler's "Fatal Python error".
+        for i, line in enumerate(lines):
+            if line.startswith("Fatal Python error"):
+                parts.append("before the abort:\n" + "\n".join(lines[max(0, i - 30): i + 2]))
+                break
     test = [l for l in lines if re.search(r"File .*/tests/test_\w+\.py", l)]
     if test:
         parts.append("test frames:\n" + "\n".join(test[:6]))
