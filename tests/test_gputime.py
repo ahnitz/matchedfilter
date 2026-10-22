@@ -2,6 +2,7 @@
 counter wrap within timestampValidBits is still the right interval."""
 import numpy as np
 import pytest
+from conftest import usable_gpu_reason
 
 from matchedfilter import _gputime
 
@@ -27,7 +28,7 @@ def test_vulkan_timings_are_sane(monkeypatch):
     monkeypatch.setenv("MF_GPU_TIMING", "1")
     dev = usable_gpu()
     if dev is None:
-        pytest.skip("no usable GPU")
+        pytest.skip(usable_gpu_reason())
     import matchedfilter as mf
     from matchedfilter.device import parse
     if parse(dev).backend != "vulkan":

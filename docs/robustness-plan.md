@@ -263,3 +263,7 @@ A step that changes C or workflows is first pushed to a `ci/<topic>` branch and 
 - 2026-10-22: **B9a: cost models keyed by the series group that ran.**
   - The C helper `ap_hmf_effective_group` (MF_DGROUP, then the 4 MB cap) is what the plan applies and `_core.series_group` exposes. `calibrate_costs` keys its cache and record by it. tests/test_series_group_key.py.
   - **B9b deferred to the CPU phase.** The plan resolves its execution-policy row with its chain's last band, the cost model with band 0. On Haswell-EP at n=4096, the one row, the plan therefore runs at group 4 while the cost model is calibrated at 16. Making the row band-independent changes Haswell's chain choice and needs Haswell paired ladders. The CPU phase replaces the frozen row with a measured Choice for the series group anyway, so the fix belongs there.
+- 2026-10-22: **C1: skips are visible.**
+  - Every run prints its skips grouped by reason (B2).
+  - The GPU probe records why each enumerated GPU was rejected. `usable_gpu_reason()` names the device and error, so "no GPU" and "a GPU that failed its probe" read differently. The 14 test files that skipped with a bare "no usable GPU" use it.
+  - The Metal job already fails rather than skips its coarse GPU tests (`--require-coarse-gpu`).

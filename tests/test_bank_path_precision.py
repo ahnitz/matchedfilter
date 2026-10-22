@@ -16,7 +16,7 @@ import numpy as np
 import pytest
 
 import matchedfilter as mf
-from conftest import usable_gpu
+from conftest import usable_gpu, usable_gpu_reason
 from test_direct_refine import _bank
 
 RTOL = 1e-5
@@ -72,6 +72,6 @@ def test_flat_peaks_are_the_float64_correlation():
 def test_gpu_hierarchical_peaks_are_the_float64_correlation(monkeypatch):
     device = usable_gpu()
     if device is None:
-        pytest.skip("no usable GPU")
+        pytest.skip(usable_gpu_reason())
     data = _bank()
     _check(*_hier(data, (256, 512), False, device, monkeypatch), data)

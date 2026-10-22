@@ -7,6 +7,7 @@ import gc
 
 import numpy as np
 import pytest
+from conftest import usable_gpu_reason
 
 from matchedfilter import TimeDomainFilterBank
 from test_time_domain import _whitened_inspiral_bank
@@ -19,7 +20,7 @@ def _setup(monkeypatch, nbanks=2, seed=71, replay=True):
     monkeypatch.setenv("MF_AUTOTUNE", "0")
     dev = usable_gpu()
     if dev is None:
-        pytest.skip("no usable GPU")
+        pytest.skip(usable_gpu_reason())
     rng = np.random.default_rng(seed)
     banks = []
     for _ in range(nbanks):
@@ -116,7 +117,7 @@ def test_explicit_gate_thresholds_invalidate(monkeypatch):
     monkeypatch.setenv("MF_AUTOTUNE", "0")
     dev = usable_gpu()
     if dev is None:
-        pytest.skip("no usable GPU")
+        pytest.skip(usable_gpu_reason())
     rng = np.random.default_rng(75)
     counts = list(rng.integers(200, 400, 33))
     taps, w, df = _whitened_inspiral_bank(rng, counts)
@@ -199,7 +200,7 @@ def test_staged_series_in_flight(monkeypatch):
     monkeypatch.setenv("MF_AUTOTUNE", "0")
     dev = usable_gpu()
     if dev is None:
-        pytest.skip("no usable GPU")
+        pytest.skip(usable_gpu_reason())
     rng = np.random.default_rng(77)
     # Sorted: each template group is a contiguous slice, so its work stays in flight.
     counts = sorted(list(rng.integers(200, 400, 20)) + list(rng.integers(1300, 1800, 20)))

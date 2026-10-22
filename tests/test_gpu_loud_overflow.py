@@ -7,6 +7,7 @@ and Vulkan returned 0 peaks for a batch where the CPU returned 62 (SNR >= 2500).
 """
 import numpy as np
 import pytest
+from conftest import usable_gpu_reason
 
 import matchedfilter as mf
 
@@ -15,7 +16,7 @@ def _gpu():
     from conftest import usable_gpu
     dev = usable_gpu()
     if dev is None:
-        pytest.skip("no usable GPU")
+        pytest.skip(usable_gpu_reason())
     return dev
 
 
