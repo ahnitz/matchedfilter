@@ -58,14 +58,11 @@ void ap_td_corr_on(const ap_plan *p, const float *x, const float *taps, int L, i
 
 /* A real block's full n-point spectrum X from Z, the n/2-point transform of its samples read
    as n/2 complex ones; tw: cos, sin of 2 pi k/n for k = 0 .. n/2 (rsplit-inl.h). */
-void ap_real_split(const float *Z, const float *tw, size_t n, float *X);
 void ap_real_split_on(const ap_plan *p, const float *Z, const float *tw, size_t n, float *X);
 
 /* The root stage's product scale * conj(T) D over bins [k0, k1) of two one-sided spectra of
    n/2 + 1 bins, merged into the n/2-point spectrum Z whose backward transform is the real
-   series C2R(product) read as n/2 complex samples; tw as for ap_real_split (rsplit-inl.h). */
-void ap_root_merge(const float *D, const float *T, size_t k0, size_t k1, float scale,
-                   const float *tw, size_t n, float *Z);
+   series C2R(product) read as n/2 complex samples; tw as for ap_real_split_on (rsplit-inl.h). */
 void ap_root_merge_on(const ap_plan *p, const float *D, const float *T, size_t k0, size_t k1,
                       float scale, const float *tw, size_t n, float *Z);
 
@@ -78,11 +75,9 @@ int ap_accel_block(ap_accel *a, const float *src, size_t have, float scale);
 int ap_accel_corr(ap_accel *a, const float *dr, const float *di, const float *tr,
                   const float *ti, size_t lo, size_t len, float *out);
 
-size_t ap_nbins(const ap_plan *p, size_t binsize, size_t start, size_t end);
-
-/* Binned maximum over one transform, and the two variants the matched filter
-   uses: split input (consumed in place, input not conjugated), and the fused
-   product form that builds conj(D*T) inside the transform's load. */
+/* Binned maximum over one transform, and the split-input variant the matched
+   filter uses (consumed in place, input not conjugated); the fused product form
+   that builds conj(D*T) inside the transform's load is ap_plan_prod_kernel. */
 int ap_binmax(ap_plan *p, const float *in, size_t dist, int B,
               size_t binsize, float threshold, ap_peak *peaks, int *counts,
               int sign, size_t start, size_t end);
@@ -93,14 +88,6 @@ int ap_binmax_split(ap_plan *p, const float *re, const float *im,
    before ingest, because group-major storage is only correct if the fused
    loader will consume it. */
 int ap_has_fused_prod(const ap_plan *p);
-
-/* Ask the back end to keep the output series in a plan-owned buffer, so a
-   caller can examine lags the peak scan discards.  NULL if unsupported. */
-float *ap_series_buf(ap_plan *p, int on);
-size_t ap_series_stride(ap_plan *p);
-float ap_interp_max(ap_plan *p, size_t ws, size_t we, float evmax,
-                    const float *hlo, const float *hhi, int K, int ncand,
-                    float frac);
 
 /* AP_W when this plan runs the pair-batched small-N path, 0 otherwise.  A
    caller that gets a non-zero answer must store its template bank
@@ -118,10 +105,6 @@ int ap_binmax_prod_batch_lanes_peaks(ap_plan *p, const float *dr, const float *d
                                      size_t binsize, float threshold, ap_peak *peaks,
                                      int sign, size_t start, size_t end);
 
-int ap_binmax_prod(ap_plan *p, const float *dr, const float *di,
-                   const float *tr, const float *ti,
-                   size_t binsize, float threshold, ap_peak *peaks, int *count,
-                   int sign, size_t start, size_t end);
 /* Bind once after bank-level argument validation. run returns 0 on success;
    the caller counts nonnegative peak indices. Valid only while the plan lives. */
 typedef struct {

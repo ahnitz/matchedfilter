@@ -77,27 +77,13 @@ void ap_td_corr_on(const ap_plan *p,const float *x,const float *taps,int L,int n
   be_of(p)->td_corr(x,taps,L,nlag,out);
 }
 
-void ap_real_split(const float *Z,const float *tw,size_t n,float *X){
-  pick()->real_split(Z,tw,n,X);
-}
 void ap_real_split_on(const ap_plan *p,const float *Z,const float *tw,size_t n,float *X){
   be_of(p)->real_split(Z,tw,n,X);
 }
 
-void ap_root_merge(const float *D,const float *T,size_t k0,size_t k1,float scale,
-                   const float *tw,size_t n,float *Z){
-  pick()->root_merge(D,T,k0,k1,scale,tw,n,Z);
-}
 void ap_root_merge_on(const ap_plan *p,const float *D,const float *T,size_t k0,size_t k1,
                       float scale,const float *tw,size_t n,float *Z){
   be_of(p)->root_merge(D,T,k0,k1,scale,tw,n,Z);
-}
-
-size_t ap_nbins(const ap_plan *p,size_t binsize,size_t start,size_t end){
-  if(!p||!binsize) return 0;
-  if(end>p->n) end=p->n;
-  if(start>=end) return 0;
-  return (end-start+binsize-1)/binsize;
 }
 
 /* split-input binned max, for callers that already hold re/im apart */
@@ -161,22 +147,6 @@ int ap_binmax_prod_batch_lanes_peaks(ap_plan *p,const float *dr,const float *di,
                                        peaks,sign==AP_BACKWARD,start,end);
 }
 
-int ap_binmax_prod(ap_plan *p,const float *dr,const float *di,
-                   const float *tr,const float *ti,
-                   size_t binsize,float threshold,ap_peak *peaks,int *count,
-                   int sign,size_t start,size_t end){
-  if(!p||!binsize) return -1;
-  if(end>p->n) end=p->n;
-  if(start>=end) return 0;
-  if(!p->be->binmax_prod) return -1;
-  const size_t nb=(end-start+binsize-1)/binsize;
-  if(p->be->binmax_prod(p->h,dr,di,tr,ti,binsize,threshold,peaks,
-                        sign==AP_BACKWARD,start,end)<0) return -1;
-  int c=0; for(size_t j=0;j<nb;j++) if(peaks[j].index>=0) c++;
-  if(count) *count=c;
-  return c;
-}
-
 ap_prod_kernel ap_plan_prod_kernel(const ap_plan *p,float threshold){
   ap_prod_kernel k={NULL,NULL};
   if(p){
@@ -200,22 +170,6 @@ int ap_corr_prod_batch(ap_plan *p,const float *dr,const float *di,
                        const float *tr,const float *ti,int nlane,float *out){
   if(!p||!p->be->corr_prod_batch) return -1;
   return p->be->corr_prod_batch(p->h,dr,di,tr,ti,nlane,out);
-}
-
-float ap_interp_max(ap_plan *p,size_t ws,size_t we,float evmax,
-                    const float *hlo,const float *hhi,int K,int ncand,float frac){
-  if(!p||!p->be->interp) return evmax;
-  return p->be->interp(p->h,ws,we,evmax,hlo,hhi,K,ncand,frac);
-}
-
-size_t ap_series_stride(ap_plan *p){
-  if(!p||!p->be->series_stride) return 0;
-  return p->be->series_stride(p->h);
-}
-
-float *ap_series_buf(ap_plan *p,int on){
-  if(!p||!p->be->series) return NULL;
-  return p->be->series(p->h,on);
 }
 
 int ap_binmax(ap_plan *p,const float *in,size_t dist,int B,
