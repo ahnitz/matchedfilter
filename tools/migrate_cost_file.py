@@ -80,8 +80,11 @@ def main(argv=None):
     ap.add_argument("path")
     ap.add_argument("--out", default=None)
     args = ap.parse_args(argv)
-    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "python"))
-    from matchedfilter import gatechain
+    try:
+        from matchedfilter import gatechain
+    except ImportError:          # run from a checkout without the package installed
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "python"))
+        from matchedfilter import gatechain
     dest = os.path.abspath(args.out or args.path)
     # Under the library's writer lock and published atomically, as the library writes it:
     # a process using the file meanwhile sees the old file or the new one, never half.
