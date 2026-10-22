@@ -38,9 +38,13 @@ The state lives in a scope: the process registry by default, or the dict a calle
 On file, a choice is one record "choice|<store_key>": {"value": label, ...} once locked,
 or, while a persisted contest is open, {"samples", "need", "attempts", "dropped"} by label.
 """
+import sys
+import threading
 from typing import Any, Callable, Dict, Hashable, Optional, Sequence, Tuple
 
 import numpy as np
+
+from . import _config
 
 #: Samples kept per candidate before a first decision, and the most an unclear contest
 #: takes, after the dropped warm-up sample (the single-template device choice's schedule,
@@ -50,6 +54,20 @@ MINIMUM = 3
 CAP = 5
 #: The fewest samples a candidate needs to count when a budget runs out.
 BUDGET_MINIMUM = 2
+
+
+_AUTOTUNE_LOCK = threading.Lock()
+
+
+def _log_autotune(msg, *args):
+    if _config.get("MF_AUTOTUNE_LOG"):
+        text = msg % args if args else msg
+        print(f"[MF_AUTOTUNE] {text}", file=sys.stderr, flush=True)
+
+
+def _autotune_enabled():
+    """MF_AUTOTUNE=0 keeps the model's choice (deterministic); otherwise close calls are measured."""
+    return _config.get("MF_AUTOTUNE")
 
 
 # ---- the one rule every measured choice follows ---------------------------------------
@@ -350,7 +368,6 @@ class Choice:
                                   self.cap, tie=self.tie, z=self.z)
         if w is None:
             self.need.update(more)
-            from . import _log_autotune
             _log_autotune("%s unclear, sampling further %s", self.what,
                           {str(self.label(c)): n for c, n in more.items()})
         return w
@@ -378,7 +395,6 @@ class Choice:
         w = pref
         if pref in sub and len(sub) > 1:
             w = measured_choice(sub, pref, 0, tie=self.tie, z=self.z)[0] or pref
-        from . import _log_autotune
         _log_autotune("%s budget of %d attempts spent", self.what, self.attempts)
         self.lock(w)
 
@@ -468,7 +484,6 @@ class Choice:
         self._replace = False
         if on_file is not rec:
             self._adopt(on_file)
-        from . import _log_autotune
         if kept is None:
             kept = self.samples
         _log_autotune("%s -> %s  %s", self.what, self.label(self.winner),

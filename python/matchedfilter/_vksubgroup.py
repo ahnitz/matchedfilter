@@ -144,7 +144,8 @@ def choose(ctx):
     rng = getattr(ctx, "subgroup_range", None)
     if not rng or len(_candidates(rng)) < 2 or _config.get("MF_VK_SUBGROUP_MEASURING"):
         return reported
-    from . import gatechain, _autotune_enabled, _choice
+    from . import gatechain, _choice
+    from ._choice import _autotune_enabled
     if not _autotune_enabled():
         return reported
     sizes = [reported] + [s for s in _candidates(rng) if s != reported]

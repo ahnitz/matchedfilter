@@ -41,7 +41,7 @@ def test_partial_round_is_not_a_pair():
 
 def _plan(monkeypatch, path):
     monkeypatch.setenv('MF_COST_FILE', str(path))
-    monkeypatch.setattr(mf, '_Q15_TRIALS', {})
+    monkeypatch.setattr(mf._chains, '_Q15_TRIALS', {})
     p = object.__new__(mf.HierarchicalFilter)
     p.n, p._fs_snr, p.snr, p.fd = 2048, None, 6, 0.001
     p._chain, p._q15_pref = (256, 512, 1024), False

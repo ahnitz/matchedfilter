@@ -585,7 +585,7 @@ def test_trials_lock_one_winner_and_every_plan_switches(monkeypatch):
     shortlist = plans[0].autotune_info["shortlist"]
     # Until the trial locks, at most its own limit (Choice.limit: its budget of calls, each
     # plan's call one attempt), not a restated schedule.
-    trial_choice = mf._CHAIN_TRIALS[plans[0]._chain_trial_key()]
+    trial_choice = mf._chains._CHAIN_TRIALS[plans[0]._chain_trial_key()]
     for _ in range(trial_choice.limit // len(plans) + 1):
         if trial_choice.winner is not None and all(p.autotune_info["status"] == "locked"
                                                    for p in plans):
@@ -833,9 +833,9 @@ def test_model_f_credit_is_proposal_only():
 def test_chain_trial_lock_persists(monkeypatch, tmp_path):
     monkeypatch.setenv("MF_COST_FILE", str(tmp_path / "c.json"))
     tkey = (4096, 5.5, 1e-3, 3, "cpu:0")
-    mf._store_chain_lock(tkey, (256, 512))
-    assert mf._stored_chain_lock(tkey, ((256, 512), (256, 1024))) == (256, 512)
-    assert mf._stored_chain_lock(tkey, ((512,), (256, 1024))) is None     # not on this shortlist
+    mf._chains._store_chain_lock(tkey, (256, 512))
+    assert mf._chains._stored_chain_lock(tkey, ((256, 512), (256, 1024))) == (256, 512)
+    assert mf._chains._stored_chain_lock(tkey, ((512,), (256, 1024))) is None     # not on this shortlist
 
 
 def test_price_block_sizes_stops_at_the_first_dearer_size(monkeypatch):

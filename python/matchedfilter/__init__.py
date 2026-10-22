@@ -38,7 +38,8 @@ from . import _config
 _config.check_environment()   # before _core reads any of it
 from . import _core
 from . import gatechain as _gatechain
-from . import _choice
+from . import _chains, _choice
+from ._choice import _AUTOTUNE_LOCK, _autotune_enabled, _log_autotune  # noqa: F401
 from ._results import PEAK_DTYPE, _Deferred, _SparsePeaks  # noqa: F401  (public, and root names)
 
 try:
@@ -2358,144 +2359,9 @@ def _q15_available(band):
     return _Q15_BANDS[band]
 
 
-_AUTOTUNE_LOCK = threading.Lock()
-
-
-def _chain_lock_key(tkey):
-    """The chain trial's key in MF_COST_FILE (its record is "choice|" + this)."""
-    n, snr, fd, tiers, device = tkey[:5]
-    # tkey[5]: present (1) when the direct refine is priced in, which changes what refining
-    # costs and so which chain wins (HierarchicalFilter._chain_trial_key).
-    direct = tkey[5] if len(tkey) > 5 else None
-    return "chain-trial|%d|%g|%g|%d|%s" % (n, snr, fd, tiers, device) + (
-        "|direct" if direct is not None else "")
-
-
-def _chain_str(c):
-    return ",".join(str(int(b)) for b in c)
-
-
-def _parse_chain(s):
-    c = tuple(int(b) for b in str(s).split(",") if b)
-    return c or None
-
-
-def _chain_trial(tkey):
-    """The chain trial of tkey (caller holds _AUTOTUNE_LOCK): one measured choice
-    (_choice.Choice) per key, its candidates the union of the shortlists of the plans that
-    join it, the first (the first plan's model chain) the preference. Its samples persist in
-    MF_COST_FILE, so a trial longer than a process continues in the next, and it ends at its
-    budget whatever runs. On the CPU a sample is one call (s/pair); on a GPU, one whole batch
-    (s/unit: every job of a segment, submission to last result), after _CHAIN_WARM_BATCHES
-    on the candidate -- judged on what a search pays, host and device, not one call's time."""
-    tr = _CHAIN_TRIALS.get(tkey)
-    if tr is None:
-        if str(tkey[4]).split(":")[0] == "cpu":
-            base = _config.get("MF_CHAIN_TRIALS", _CHAIN_TRIALS_PER_CAND)
-            budget = (_TRIAL_BUDGET * base, 0)
-        else:
-            from .time_domain import _CHAIN_WARM_BATCHES as warm
-            base = _config.get("MF_CHAIN_TRIALS", _CHAIN_BATCH_TRIALS)
-            budget = (warm + base, 6)
-        tr = _CHAIN_TRIALS[tkey] = _choice.Choice(
-            store_key=_chain_lock_key(tkey), what="CHAIN-TRIAL %s" % (tkey,), warmup=0,
-            minimum=base, cap=2 * base, budget=budget, persist=True,
-            label=_chain_str, parse=_parse_chain)
-    return tr
-
-
-def _stored_chain_lock(tkey, feasible):
-    """A chain-trial winner kept in MF_COST_FILE by an earlier process, if this plan can run it
-    (`feasible`: every chain the gate model covers for it). Deliberately NOT only when it is
-    on this process's shortlist: the lock key is the trial's identity, and in-process every
-    plan with the key adopts the winner whatever its own shortlist -- the shortlist is a
-    per-process pruning of what to measure (the model's best few for this group's shape),
-    not of what is valid. Filtered by it, a group whose shortlist missed the winner ignored
-    the lock and the chain varied between processes. Chain trials, like block-size trials
-    (time_domain._BlockTrials) and the cost models themselves, are per machine: re-run in
-    every process they lock differently on noise, and that was the remaining
-    process-to-process variation of a pinned layout (docs/gate-model.md, "Block-size
-    trials, round 3")."""
-    chain = _choice.stored_lock(_chain_lock_key(tkey), _parse_chain)
-    if chain is None or feasible is None:
-        return chain                 # the key's lock, whichever plan asks (see _choose_chain)
-    return chain if chain in tuple(tuple(c) for c in feasible) else None
-
-
-def _store_chain_lock(tkey, chain, median=None):
-    """Store a chain lock for tkey, as its trial would."""
-    path = _gatechain._cost_file()
-    if path is not None and tkey is not None:
-        rec = {"value": _chain_str(chain)}
-        if median:
-            rec["median"] = {_chain_str(c): float(v) for c, v in median.items()}
-        _gatechain._store_cost(path, "choice|" + _chain_lock_key(tkey), rec)
-
-
-def _chain_trial_next(tkey):
-    """The candidate a GPU chain trial's next batch runs on every plan of the trial: the
-    current one until it has its samples (a switch rebuilds thresholds and uploads, and the
-    batches after it are not samples: alternating every batch measured mostly the switching,
-    cheapest for the chain with fewest tiers), then the one with the fewest. None once the
-    trial has a winner -- by its samples, or by its budget of batches (Choice.tick), which
-    every batch counts, sampled or not."""
-    with _AUTOTUNE_LOCK:
-        tr = _CHAIN_TRIALS.get(tkey)
-        if tr is None or tr.winner is not None:
-            return None
-        from .time_domain import _CHAIN_WARM_BATCHES as warm
-        cur, run, got0 = _CHAIN_BATCH_RUN.get(tkey, (None, 0, 0))
-        # A candidate current for longer than its warm-up and samples (+2) without yielding
-        # one cannot or will not run here (a plan that does not switch to it, batches never
-        # recorded): it leaves the contest instead of being waited for.
-        if cur in tr.live() and len(tr.samples[cur]) == got0 and run > warm + tr.needs(cur) + 2:
-            _log_autotune("CHAIN-TRIAL %s: %s yielded no sample in %d batches: dropped",
-                          tkey, cur, run)
-            tr.drop(cur)
-            cur = None
-        if tr.tick() is not None:
-            return None
-        c = tr.pick(stay=cur)
-        if c is None:
-            tr.expire()                     # every candidate dropped: the preference stands
-            return None
-        _CHAIN_BATCH_RUN[tkey] = (c, run + 1, got0) if c == cur else (c, 1, len(tr.samples[c]))
-        return c
-
-
-def _chain_trial_pending(tkey, chain, delta):
-    """A settled batch of a GPU chain trial started (+1) or finished (-1) on chain."""
-    with _AUTOTUNE_LOCK:
-        tr = _CHAIN_TRIALS.get(tkey)
-        if tr is not None:
-            c = tuple(chain)
-            tr.pending[c] = tr.pending.get(c, 0) + delta
-
-
-def _chain_trial_batch(tkey, chain, value):
-    """One sample of a GPU chain trial (s/unit of a whole batch with every plan of the
-    trial on `chain`). Returns the winner once the trial has one."""
-    with _AUTOTUNE_LOCK:
-        tr = _CHAIN_TRIALS.get(tkey)
-        if tr is None:
-            return None
-        _log_autotune("CHAIN-TRIAL batch sample %s %.3g", tuple(chain), value)
-        return tr.record(tuple(chain), value)
-
-
-#: A CPU chain trial ends after this many times its per-candidate samples in calls: candidates
-#: some live plan never runs -- another process's shortlist, a group that stopped calling --
-#: must not keep a trial open for good.
-_TRIAL_BUDGET = 3
-
 #: n -> whether continuous correlation at n runs through the platform FFT (vDSP on macOS):
 #: set by time_domain._corr_block_costs, which prices both and keeps the cheaper.
 _CORR_PFFT = {}
-#: (n, snr, fd, chain, device) -> the Q15 screen's paired trial (_choice.Choice: False, True)
-_Q15_TRIALS = {}
-#: A Q15 trial ends after this many times its rounds in calls (each call of a plan in the
-#: trial counts, paired or not).
-_Q15_TRIAL_BUDGET = 8
 # Cumulative host calibration work, for benchmark boundaries (not search timing).
 _CPU_TRIAL_WORK = {"calls": 0, "seconds": 0.0}
 
@@ -2571,48 +2437,14 @@ def _cpu_forward_platform(n):
             lambda r: isinstance(r, dict) and "platform" in r)["platform"])
     _CPU_FWD_PFFT[n] = hit
     return hit
-#: (chain-choice key, chain) -> whether the cost model prices the Q15 screen cheaper
-_Q15_MODEL = {}
-#: (n, snr, fd, tiers, window, profile signature) -> (model's chain, shortlist)
-_CHAIN_CHOICE = {}
-#: chain-trial key (HierarchicalFilter._chain_trial_key) -> its _choice.Choice, shared by
-#: every plan with the key (_chain_trial)
-_CHAIN_TRIALS = {}
-#: chain-trial key -> {chain: plans placed on it}, for spreading a CPU trial's plans
-_CHAIN_PLACED = {}
-#: chain-trial key -> (current candidate, batches run on it, its samples when it became
-#: current): a GPU trial's run of batches (_chain_trial_next)
-_CHAIN_BATCH_RUN = {}
-#: Relative cost margin inside which modelled chains are measured rather than decided by the
-#: model. It is the model's demonstrated error: tier costs agreed with the engine counters to
-#: ~25% in the consumer.
-_CHAIN_MARGIN = 0.30
-_CHAIN_SHORTLIST_MAX = 4
-#: GPU chain trials measure the model's best three, each over whole batches (see _choose).
-_CHAIN_SHORTLIST_GPU = 3
-_CHAIN_TRIALS_PER_CAND = 6
-#: Batch samples per candidate of a GPU chain trial (a batch is a whole segment's jobs; its
-#: first batch on a candidate builds recordings and is not counted).
-_CHAIN_BATCH_TRIALS = 4
-
-
-def _log_autotune(msg, *args):
-    if _config.get("MF_AUTOTUNE_LOG"):
-        text = msg % args if args else msg
-        print(f"[MF_AUTOTUNE] {text}", file=sys.stderr, flush=True)
-
-
-def _autotune_enabled():
-    """MF_AUTOTUNE=0 keeps the model's choice (deterministic); otherwise close calls are measured."""
-    return _config.get("MF_AUTOTUNE")
 
 
 def get_autotune_state():
     """Snapshot of the process's chain choices and measured trials."""
     with _AUTOTUNE_LOCK:
-        return {"choices": dict(_CHAIN_CHOICE),
+        return {"choices": dict(_chains._CHAIN_CHOICE),
                 "trials": {k: {"winner": v.winner, "samples": {c: list(s) for c, s in v.samples.items()}}
-                           for k, v in _CHAIN_TRIALS.items()}}
+                           for k, v in _chains._CHAIN_TRIALS.items()}}
 
 
 def clear_autotune_cache():
@@ -2623,12 +2455,12 @@ def clear_autotune_cache():
     (gatechain._COSTS), correlation prices and the kernel choices a GPU device holds."""
     from . import time_domain as _td
     with _AUTOTUNE_LOCK:
-        _CHAIN_CHOICE.clear()
-        _CHAIN_TRIALS.clear()
-        _CHAIN_PLACED.clear()
-        _CHAIN_BATCH_RUN.clear()
-        _Q15_TRIALS.clear()
-        _Q15_MODEL.clear()
+        _chains._CHAIN_CHOICE.clear()
+        _chains._CHAIN_TRIALS.clear()
+        _chains._CHAIN_PLACED.clear()
+        _chains._CHAIN_BATCH_RUN.clear()
+        _chains._Q15_TRIALS.clear()
+        _chains._Q15_MODEL.clear()
         _CPU_FWD_PFFT.clear()
         _Q15_TIER0.clear()
     _td._BLOCK_TRIALS.state.clear()
@@ -2790,14 +2622,14 @@ class HierarchicalFilter(MatchedFilter):
         rounds persist; calls that cannot be paired count toward its budget, so a trial whose
         rounds do not come ends on the model's setting."""
         tkey = self._q15_trial_key()
-        tr = _Q15_TRIALS.get(tkey)
+        tr = _chains._Q15_TRIALS.get(tkey)
         if tr is None:
-            base = max(5, _config.get("MF_CHAIN_TRIALS", _CHAIN_TRIALS_PER_CAND))
+            base = max(5, _config.get("MF_CHAIN_TRIALS", _chains._CHAIN_TRIALS_PER_CAND))
             pref = bool(getattr(self, "_q15_pref", False))
-            tr = _Q15_TRIALS[tkey] = _choice.Choice(
+            tr = _chains._Q15_TRIALS[tkey] = _choice.Choice(
                 (pref, not pref), store_key=self._q15_lock_key(tkey),
                 what="Q15-TRIAL %s" % (tkey,), warmup=0, minimum=base, cap=2 * base,
-                budget=(_Q15_TRIAL_BUDGET * base, 0), paired=True, persist=True,
+                budget=(_chains._Q15_TRIAL_BUDGET * base, 0), paired=True, persist=True,
                 label=str, parse=lambda t: t == "True")
         return tr
 
@@ -3160,14 +2992,14 @@ class HierarchicalFilter(MatchedFilter):
         key = (self.n, float(snr), float(self.fd), tiers, self.search_window, prof, str(self.device),
                _gatechain.cpu_gate_kind() if self.device.kind == "cpu" else None, direct)
         with _AUTOTUNE_LOCK:
-            hit = _CHAIN_CHOICE.get(key)
+            hit = _chains._CHAIN_CHOICE.get(key)
         if hit is None:
             best, plans = _gatechain.choose_chain(self._pending_ref, self.n, snr, self.fd, ntemplates=self.ntemplates,
                                                   cost=self._cost_model(), max_tiers=tiers,
                                                   window=self.search_window)
             if best is None:
                 raise ValueError(_uncovered_message(self.n, self.snr, self.fd))
-            margin = _config.get("MF_CHAIN_MARGIN", _CHAIN_MARGIN)
+            margin = _config.get("MF_CHAIN_MARGIN", _chains._CHAIN_MARGIN)
             # On a GPU the trial runs on whole batches in the search's own mode, so its cost
             # is a few segments: the model's best few are measured whatever their modelled
             # gap. The model prices device work only, and missed the faster chain by 38%
@@ -3177,13 +3009,13 @@ class HierarchicalFilter(MatchedFilter):
             shortlist = tuple(q["chain"] for q in sorted(
                 (q for q in plans if near(q)),
                 key=lambda q: (q["chain"] != best["chain"], q["cost"])))
-            hit = (tuple(best["chain"]), shortlist[:_CHAIN_SHORTLIST_MAX if self.device.kind != "gpu"
-                                                   else _CHAIN_SHORTLIST_GPU],
+            hit = (tuple(best["chain"]), shortlist[:_chains._CHAIN_SHORTLIST_MAX if self.device.kind != "gpu"
+                                                   else _chains._CHAIN_SHORTLIST_GPU],
                    tuple(tuple(q["chain"]) for q in plans))
             with _AUTOTUNE_LOCK:
-                _Q15_MODEL[(key, tuple(best["chain"]))] = bool(best.get("q15", False))
+                _chains._Q15_MODEL[(key, tuple(best["chain"]))] = bool(best.get("q15", False))
             with _AUTOTUNE_LOCK:
-                _CHAIN_CHOICE[key] = hit
+                _chains._CHAIN_CHOICE[key] = hit
             _log_autotune("CHAIN n=%d model=%s shortlist=%s ranking=%s", self.n, hit[0], hit[1],
                           [(q["chain"], round(q["cost"], 1)) for q in plans[:6]])
         model_best, shortlist, feasible = hit
@@ -3215,7 +3047,7 @@ class HierarchicalFilter(MatchedFilter):
         w = None
         if not pinned and _autotune_enabled():
             with _AUTOTUNE_LOCK:
-                w = _chain_trial(tkey).winner
+                w = _chains._chain_trial(tkey).winner
             if w is not None:
                 if tuple(w) in feasible:
                     chain = tuple(w)
@@ -3228,12 +3060,12 @@ class HierarchicalFilter(MatchedFilter):
             # their union is what gets measured. Candidates arriving before the lock join it;
             # after the lock every plan adopts the winner.
             with _AUTOTUNE_LOCK:
-                tr = _chain_trial(tkey)
+                tr = _chains._chain_trial(tkey)
                 if tr.winner is not None:
                     if tuple(tr.winner) in feasible:
                         chain = tuple(tr.winner)
                 else:
-                    placed = _CHAIN_PLACED.setdefault(tkey, {})
+                    placed = _chains._CHAIN_PLACED.setdefault(tkey, {})
                     for c in shortlist:
                         tr.add(c)
                     chain = tr.pick(among=shortlist, placed=placed) or shortlist[0]
@@ -3243,7 +3075,7 @@ class HierarchicalFilter(MatchedFilter):
                               "winner": tuple(chain), "shortlist": shortlist, "model": model_best}
         # The model's screen choice for this chain; with MF_AUTOTUNE on, trials override it.
         with _AUTOTUNE_LOCK:
-            self._q15_pref = _Q15_MODEL.get((key, tuple(chain)), False)
+            self._q15_pref = _chains._Q15_MODEL.get((key, tuple(chain)), False)
         return tuple(chain)
 
     def _first_tier_pass(self, pairs):
@@ -3265,7 +3097,7 @@ class HierarchicalFilter(MatchedFilter):
         """Record one measured call for this plan's trial chain (s/pair); the trial locks
         once every candidate has its samples and the shared rule is clear, or at its budget."""
         with _AUTOTUNE_LOCK:
-            tr = _CHAIN_TRIALS.get(self._chain_trial)
+            tr = _chains._CHAIN_TRIALS.get(self._chain_trial)
             if tr is None:
                 return
             mine = tuple(self._chain)
@@ -3292,7 +3124,7 @@ class HierarchicalFilter(MatchedFilter):
                             _log_autotune("CHAIN-TRIAL plan locked %s on its own shortlist", winner)
                         lacking = [c for c in own if len(tr.samples[c]) < tr.needs(c)]
                     if winner is None and lacking:
-                        placed = _CHAIN_PLACED.setdefault(self._chain_trial, {})
+                        placed = _chains._CHAIN_PLACED.setdefault(self._chain_trial, {})
                         move = tr.pick(among=lacking, placed=placed)
                         placed[move] = placed.get(move, 0) + 1
                         placed[mine] = max(0, placed.get(mine, 1) - 1)

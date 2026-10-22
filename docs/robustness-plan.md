@@ -385,3 +385,8 @@ A step that changes C or workflows is first pushed to a `ci/<topic>` branch and 
   - _results: PEAK_DTYPE, _SparsePeaks and _Deferred, from the package root.
 
   Each was moved verbatim (tools/check_move.py: no definition changed but the import lines that point at the new modules). The old homes import the names back. Upward edges: 13 -> 9 (_choice -> gatechain, and _gpuexec, _gpuhier and _shared -> the root, are gone). The layer test now treats the compiled _core as the lowest layer; `from . import _core` had counted as an import of the root.
+- 2026-10-22: **E4a: the chain trials in _chains.**
+  - The chain-trial and Q15-trial machinery moved verbatim from the package root to _chains (models layer): keys, the trial's Choice, the GPU batch schedule (next, pending, batch), the stored lock, the tables and constants. _CHAIN_WARM_BATCHES came from time_domain.
+  - _AUTOTUNE_LOCK, _log_autotune and _autotune_enabled moved to _choice.
+  - The root refers to the tables as _chains.NAME, so a test that replaces one is seen everywhere. Tests and tools that patched or read them through the root now go through mf._chains.
+  - Upward edges: 9 -> 7 (_choice and _vksubgroup no longer reach into the root). Still to come in E4: folding the side tables (_CHAIN_PLACED, _CHAIN_BATCH_RUN) into the trial, with tests driven by injected timings.
