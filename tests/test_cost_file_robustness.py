@@ -15,13 +15,14 @@ import pytest
 
 import matchedfilter as mf
 from matchedfilter import gatechain
+from matchedfilter import _costfile
 
 
 @pytest.fixture
 def cost(tmp_path, monkeypatch):
     path = tmp_path / "costs.json"
     monkeypatch.setenv("MF_COST_FILE", str(path))
-    monkeypatch.setattr(gatechain, "_COST_WARNED", set())
+    monkeypatch.setattr(_costfile, "_COST_WARNED", set())
     return path
 
 
@@ -30,9 +31,9 @@ def cost(tmp_path, monkeypatch):
 def test_a_damaged_file_is_kept_aside_reported_and_replaced(cost, damage):
     cost.write_bytes(damage)
     with pytest.warns(RuntimeWarning, match="not a JSON object"):
-        assert gatechain._load_cost_file(str(cost)) == {}
+        assert _costfile._load_cost_file(str(cost)) == {}
     with pytest.warns(RuntimeWarning, match="kept as"):
-        gatechain._store_cost(str(cost), "new|rec", {"x": 1})
+        _costfile._store_cost(str(cost), "new|rec", {"x": 1})
     aside = [p for p in cost.parent.iterdir() if ".corrupt." in p.name]
     assert len(aside) == 1 and aside[0].read_bytes() == damage       # nothing lost
     assert json.loads(cost.read_text()) == {"new|rec": {"x": 1}}
@@ -48,14 +49,14 @@ def test_an_unreadable_file_is_never_replaced(cost, monkeypatch):
         return real_open(file, mode, *a, **kw)
     monkeypatch.setattr(builtins, "open", failing_open)
     with pytest.warns(RuntimeWarning, match="cannot be read"):
-        assert gatechain._update_cost(str(cost), "new|rec", lambda old: {"x": 1}) is None
+        assert _costfile._update_cost(str(cost), "new|rec", lambda old: {"x": 1}) is None
     monkeypatch.setattr(builtins, "open", real_open)
     assert json.loads(cost.read_text()) == {"keep|me": {"value": 1}}
 
 
 def test_an_update_returns_the_record_now_on_file(cost):
-    assert gatechain._update_cost(str(cost), "k", lambda old: {"v": 1}) == {"v": 1}
-    assert gatechain._update_cost(str(cost), "k", lambda old: None) == {"v": 1}
+    assert _costfile._update_cost(str(cost), "k", lambda old: {"v": 1}) == {"v": 1}
+    assert _costfile._update_cost(str(cost), "k", lambda old: None) == {"v": 1}
 
 
 def test_the_first_valid_record_stands(cost):
@@ -85,7 +86,7 @@ def test_a_price_another_process_stored_first_is_the_one_used(cost, monkeypatch)
 
     def forward_cost(size):
         # The other process finishes first and stores "platform: true" meanwhile...
-        gatechain._store_cost(str(cost), key, {"platform": True, "seconds": {}})
+        _costfile._store_cost(str(cost), key, {"platform": True, "seconds": {}})
         return 1.0, 2.0                    # ...while this one measures the engine faster
     monkeypatch.setattr(mf._core, "forward_cost", forward_cost)
     assert mf._cpu_forward_platform(n) is True
@@ -96,8 +97,8 @@ def test_legacy_trial_records_are_reported_once(cost):
     cost.write_text(json.dumps({"block-trial|cpu|2048": {"winner": 0}, "x": 1}))
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
-        gatechain._load_cost_file(str(cost))
-        gatechain._load_cost_file(str(cost))
+        _costfile._load_cost_file(str(cost))
+        _costfile._load_cost_file(str(cost))
     hits = [x for x in w if "migrate_cost_file" in str(x.message)]
     assert len(hits) == 1
 

@@ -21,13 +21,13 @@ How candidates are timed differs, and a choice is made one of three ways:
   * online (next/record, or pick/record when the caller places the work): the candidate
     with the fewest samples goes next, ties in candidate order; each process drops its
     first `warmup` samples of each; once every candidate has its `minimum` (or the more an
-    unclear contest asked for), the shared rule decides (gatechain.measured_choice: past
+    unclear contest asked for), the shared rule decides (measured_choice: past
     `tie` and `z` standard errors, else more samples up to `cap` each, then the preference
     stands). `retrial` calls after a lock, the contest starts again (a choice made under
     passing load does not stick). With `persist`, the samples are kept in MF_COST_FILE as
     they come, so a contest longer than one process continues in the next.
   * paired rounds (round): every candidate timed on the same input in one round; decided
-    by gatechain.paired_choice over complete rounds.
+    by paired_choice over complete rounds.
   * offline (decide): `measure` times every candidate at once. A stored lock is first
     timed against the runners-up stored with it, and remeasured when one beats it beyond
     the noise (a clock or power transition spoils one process, not every later one).
@@ -50,6 +50,114 @@ MINIMUM = 3
 CAP = 5
 #: The fewest samples a candidate needs to count when a budget runs out.
 BUDGET_MINIMUM = 2
+
+
+# ---- the one rule every measured choice follows ---------------------------------------
+#
+# Block-size trials (time_domain._BlockTrials), Q15 screen trials, and chain trials on the CPU
+# (per call) and GPU (per batch) all decide with measured_choice (through Choice).
+# History: M2 locked n=4096 on two samples 5.4% faster than n=2048 -- past
+# TIE, inside the noise -- and ran 34% slower in steady state; dev2 locked the Q15 screen off
+# on a 6% "win" and ran 5% slower without it.
+
+#: Relative cost inside which two candidates are treated as tied, and the tie broken by a
+#: fixed order (canonical_order) instead of by which calibration or trial read faster: cost
+#: calibration and timed trials move by about this much between processes on a busy host,
+#: and a choice that flips with them makes runs incomparable.
+TIE = 0.05
+
+
+#: A candidate beats the model's choice only by more than TIE and by more than Z standard
+#: errors of the difference of the two medians.
+CHOICE_Z = 2.0
+
+
+def sample_spread(v):
+    """Standard deviation of samples: MAD-based (robust to the outliers a batch after a
+    switch or a host hiccup produces -- the plain estimate let one such spike keep a 26% gap
+    "unclear" until the model's slower chain stood), falling back to the plain estimate
+    when MAD reads 0 (half the samples tie: timer quantisation, a repeated cache state)."""
+    v = np.asarray(v, float)
+    if v.size < 2:
+        return float("inf")
+    mad = 1.4826 * float(np.median(np.abs(v - np.median(v))))
+    return mad if mad > 0 else float(np.std(v, ddof=1))
+
+
+def paired_choice(samples, model, cap, minimum=5, tie=None):
+    """Choose from complete, comparable rounds, using median ratios to the model.
+
+    Each index must describe the same workload for every candidate. Callers reverse
+    execution order between rounds and settle each candidate before timing it. A
+    majority of rounds must support a gain beyond TIE; an ambiguous contest collects
+    more complete rounds up to cap. This does not turn unrelated calls into pairs.
+    """
+    tie = TIE if tie is None else tie
+    if model not in samples or not samples:
+        raise ValueError("paired trial requires its model candidate")
+    lengths = {len(v) for v in samples.values()}
+    if len(lengths) != 1:
+        raise ValueError("paired trial requires complete rounds")
+    count = lengths.pop()
+    if count < minimum:
+        return None, {c: minimum for c in samples}
+    base = np.asarray(samples[model], float)
+    if any(not np.all(np.isfinite(v)) or np.any(np.asarray(v) <= 0)
+           for v in samples.values()):
+        raise ValueError("paired timings must be finite and positive")
+    ratios = {c: np.asarray(v, float) / base for c, v in samples.items()}
+    # Require agreement beyond a bare majority: one or two bursts must not decide
+    # a small trial. At the cap the model remains the explicit uncertainty fallback.
+    needed = int(np.ceil(0.75 * count))
+    supported = [c for c, r in ratios.items()
+                 if c != model and np.count_nonzero(r < 1.0 - tie) >= needed]
+    if supported:
+        return min(supported, key=lambda c: float(np.median(ratios[c]))), {}
+    if all(c == model or np.count_nonzero(r >= 1.0 - tie) >= needed
+           for c, r in ratios.items()):
+        return model, {}
+    if count < cap:
+        return None, {c: count + 1 for c in samples}
+    return model, {}
+
+
+def measured_choice(samples, model, cap, tie=None, z=None):
+    """Decide a measured choice from samples {candidate: [cost, ...]} (lower is better).
+
+    For choices that change results or whose effect is a large share of what a sample
+    times. A choice whose effect on a whole call is under the tie margin -- a kernel that is
+    a small part of the call, with results equal to rounding -- is PRICED instead (timed
+    once on its own, the cheaper kept in MF_COST_FILE: _cpu_forward_platform, the corr-pfft
+    price in time_domain._corr_block_costs). Trialled over whole calls it sits at the tie
+    and the model's choice wins about half the time (cpu-fft on the M2: 4.6-5.2% per call
+    for a transform 30% faster).
+
+    Returns (winner, more): winner is the candidate to lock, or None while more samples are
+    needed, in which case `more` maps the candidates to measure further to the sample count
+    each needs. The fastest median wins only if it is more than `tie` (TIE) below the model's
+    candidate's AND the gap exceeds `z` (CHOICE_Z) standard errors of the two medians'
+    difference; an unclear contest asks for one more sample of both, up to `cap` each, then
+    the model's choice stands. A candidate missing from samples is the model's when model is
+    None (the first key)."""
+    tie = TIE if tie is None else tie
+    z = CHOICE_Z if z is None else z
+    if model not in samples:
+        model = next(iter(samples))
+    med = {c: float(np.median(v)) for c, v in samples.items() if len(v)}
+    if model not in med:
+        return None, {model: 1}
+    best = min(med, key=lambda c: (med[c], c != model))
+    if not np.isfinite(med[model]) and np.isfinite(med[best]):
+        return best, {}                 # the model's candidate is unusable (priced at inf)
+    if best == model or not med[best] < med[model] * (1.0 - tie):
+        return model, {}
+    a, b = samples[model], samples[best]
+    se = float(np.sqrt(sample_spread(a) ** 2 / len(a) + sample_spread(b) ** 2 / len(b)))
+    if med[model] - med[best] > z * se:
+        return best, {}
+    if min(len(a), len(b)) < cap:
+        return None, {model: len(a) + 1, best: len(b) + 1}
+    return model, {}
 
 
 class Choice:
@@ -238,9 +346,8 @@ class Choice:
         among = list(among)
         if not among or any(len(self.samples[c]) < self.needs(c) for c in among):
             return None
-        from . import gatechain
-        w, more = gatechain.measured_choice({c: self.samples[c] for c in among}, among[0],
-                                            self.cap, tie=self.tie, z=self.z)
+        w, more = measured_choice({c: self.samples[c] for c in among}, among[0],
+                                  self.cap, tie=self.tie, z=self.z)
         if w is None:
             self.need.update(more)
             from . import _log_autotune
@@ -270,8 +377,7 @@ class Choice:
         sub = {c: self.samples[c] for c in live if len(self.samples[c]) >= BUDGET_MINIMUM}
         w = pref
         if pref in sub and len(sub) > 1:
-            from . import gatechain
-            w = gatechain.measured_choice(sub, pref, 0, tie=self.tie, z=self.z)[0] or pref
+            w = measured_choice(sub, pref, 0, tie=self.tie, z=self.z)[0] or pref
         from . import _log_autotune
         _log_autotune("%s budget of %d attempts spent", self.what, self.attempts)
         self.lock(w)
@@ -291,10 +397,9 @@ class Choice:
             self.add(c)
         for c in self.candidates:
             self.samples[c].append(float(timings[c]))
-        from . import gatechain
-        w, _ = gatechain.paired_choice({c: self.samples[c] for c in self.candidates},
-                                       self.preference, self.cap, minimum=self.minimum,
-                                       tie=self.tie)
+        w, _ = paired_choice({c: self.samples[c] for c in self.candidates},
+                             self.preference, self.cap, minimum=self.minimum,
+                             tie=self.tie)
         if w is not None:
             self.lock(w)
         else:
@@ -332,8 +437,7 @@ class Choice:
         self._replace = self.held is not None          # the stale lock is replaced
         rank = {c: i for i, c in enumerate(self.candidates)}
         if all(isinstance(v, (list, tuple)) for v in times.values()):
-            from . import gatechain
-            w, _ = gatechain.measured_choice(
+            w, _ = measured_choice(
                 times, self.preference, min(len(v) for v in times.values()), tie=self.tie, z=self.z)
             self.lock(w if w is not None else self.preference, times)
             return self.winner
@@ -398,11 +502,11 @@ class Choice:
     def _record(self):
         if self.store_key is None:
             return None
-        from . import gatechain
-        path = gatechain._cost_file()
+        from . import _costfile
+        path = _costfile._cost_file()
         if path is None:
             return None
-        return gatechain._load_cost_file(path).get("choice|" + self.store_key)
+        return _costfile._load_cost_file(path).get("choice|" + self.store_key)
 
     def _stored(self):
         """The candidate a lock on file names, or None (no file, no lock, or a value that
@@ -418,8 +522,8 @@ class Choice:
         before (replacing the other's samples; one writer per open contest keeps them all)."""
         if self.store_key is None:
             return rec
-        from . import gatechain
-        path = gatechain._cost_file()
+        from . import _costfile
+        path = _costfile._cost_file()
         if path is None:
             return rec
 
@@ -431,11 +535,11 @@ class Choice:
                     and old.get("method") == self._method()):   # one this choice continues
                 on_file = _progress(old)
                 if on_file[0] > self._seen[0] or on_file[1] > self._seen[1]:
-                    gatechain._cost_warn(path, "writer|" + self.store_key,
+                    _costfile._cost_warn(path, "writer|" + self.store_key,
                                          "another process is sampling %s; one writer per "
                                          "open contest keeps all samples" % self.what)
             return rec
-        return gatechain._update_cost(path, "choice|" + self.store_key, merge)
+        return _costfile._update_cost(path, "choice|" + self.store_key, merge)
 
 
 def _progress(rec) -> Tuple[int, int]:
@@ -462,11 +566,11 @@ def _still_fastest(choice, rivals, measure):
 
 def stored_lock(store_key: str, parse: Callable[[str], Any]):
     """The candidate (parse(label)) a lock on file names under store_key, or None."""
-    from . import gatechain
-    path = gatechain._cost_file()
+    from . import _costfile
+    path = _costfile._cost_file()
     if path is None:
         return None
-    rec = gatechain._load_cost_file(path).get("choice|" + store_key)
+    rec = _costfile._load_cost_file(path).get("choice|" + store_key)
     if not isinstance(rec, dict) or "value" not in rec:
         return None
     return parse(str(rec["value"]))

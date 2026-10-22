@@ -10,6 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 from matchedfilter import gatechain
+from matchedfilter import _costfile
 
 #: Seconds a spawned writer may take to start: it imports numpy and the package afresh,
 #: which on a loaded CI runner has taken more than 15 s.
@@ -36,7 +37,7 @@ def _started(event, proc):
 def _write_cost(path, key, started, done, release=None):
     if release is not None:
         # Pause the writer after it has read the file under the lock (_update_cost's read).
-        original = gatechain._read_cost_file
+        original = _costfile._read_cost_file
 
         def paused_read(filename):
             data = original(filename)
@@ -45,10 +46,10 @@ def _write_cost(path, key, started, done, release=None):
                 raise RuntimeError("writer was not released")
             return data
 
-        gatechain._read_cost_file = paused_read
+        _costfile._read_cost_file = paused_read
     else:
         started.set()
-    gatechain._store_cost(path, key, {"value": key})
+    _costfile._store_cost(path, key, {"value": key})
     done.set()
 
 
@@ -92,7 +93,7 @@ def test_thread_writers_do_not_share_a_temporary_file(tmp_path):
     def write(worker):
         barrier.wait(timeout=10)
         for i in range(8):
-            gatechain._store_cost(path, f"{worker}:{i}", worker * 8 + i)
+            _costfile._store_cost(path, f"{worker}:{i}", worker * 8 + i)
 
     with ThreadPoolExecutor(max_workers=4) as pool:
         list(pool.map(write, range(4)))
@@ -103,10 +104,10 @@ def test_thread_writers_do_not_share_a_temporary_file(tmp_path):
 
 def test_failed_write_preserves_existing_file_and_releases_lock(tmp_path):
     path = tmp_path / "costs.json"
-    gatechain._store_cost(path, "existing", 1)
+    _costfile._store_cost(path, "existing", 1)
     with pytest.raises(TypeError):
-        gatechain._store_cost(path, "bad", object())
+        _costfile._store_cost(path, "bad", object())
     assert json.loads(path.read_text()) == {"existing": 1}
     assert not list(tmp_path.glob("*.tmp"))
-    gatechain._store_cost(path, "next", 2)
+    _costfile._store_cost(path, "next", 2)
     assert json.loads(path.read_text()) == {"existing": 1, "next": 2}

@@ -268,9 +268,10 @@ def test_replacing_another_methods_record_is_not_a_second_writer(monkeypatch, tm
     sampling, so nothing is said."""
     import warnings
     from matchedfilter import gatechain
+    from matchedfilter import _costfile
     path = tmp_path / "costs.json"
     monkeypatch.setenv("MF_COST_FILE", str(path))
-    gatechain._store_cost(path, "choice|w", {"samples": {"x": [1.0] * 4, "y": [2.0] * 4},
+    _costfile._store_cost(path, "choice|w", {"samples": {"x": [1.0] * 4, "y": [2.0] * 4},
                                              "attempts": 3})
     c = _choice.Choice(("x", "y"), store_key="w", persist=True, paired=True)
     with warnings.catch_warnings(record=True) as w:
