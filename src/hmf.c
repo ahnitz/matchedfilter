@@ -363,10 +363,6 @@ int ap_hmf_set_hermitian(ap_hmf_plan *p,int hermitian){
   return 0;
 }
 
-int ap_hmf_get_hermitian(const ap_hmf_plan *p){
-  return p ? p->hermitian : 0;
-}
-
 size_t ap_hmf_nbins(const ap_hmf_plan *p,size_t bs,size_t lo,size_t hi){
   if(!p || !bs) return 0;
   if(hi > p->n) hi = p->n;
@@ -543,7 +539,6 @@ int ap_hmf_set_real_stride(ap_hmf_plan *p,size_t stride){
   p->real_stride=stride;
   return 0;
 }
-int ap_hmf_get_real_series(const ap_hmf_plan *p){ return p ? p->real_series : 0; }
 
 /* The real block at x[s0 .. s0+have) zero-padded to n and scaled by 1/n, transformed into
    its full n-point spectrum sp: the n reals read as n/2 complex z, Z = FFT_{n/2}(z), then
