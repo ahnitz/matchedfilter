@@ -12,6 +12,12 @@
 
 typedef struct ap_plan ap_plan;
 
+/* Whether [lo, lo + cnt) lies in [0, max), without forming lo + cnt (which overflows int for
+   a caller's lo near INT_MAX, and the check then passes). */
+static inline int ap_range_ok(int lo, int cnt, int max){
+  return lo >= 0 && cnt >= 0 && lo <= max && cnt <= max - lo;
+}
+
 ap_plan *ap_create(size_t N);
 ap_plan *ap_create_pairbatch(size_t N);
 void     ap_destroy(ap_plan *p);

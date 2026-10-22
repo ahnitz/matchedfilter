@@ -193,6 +193,13 @@ def devices():
     return _devices()
 
 
+def _check_threshold(threshold):
+    """Refuse a NaN threshold: every comparison with it is false, so a run would report
+    nothing (or everything) without saying why. Infinite thresholds are legal."""
+    if threshold is not None and np.isnan(np.float64(threshold)):
+        raise ValueError("threshold is NaN")
+
+
 def _as_c64(a, n, what):
     a = np.ascontiguousarray(_from_any(a), dtype=np.complex64)
     if a.ndim != 1 or a.size != n:
@@ -892,6 +899,7 @@ class MatchedFilter:
         example in ``matchedfilter.tutorial``, which compared a full run
         against a windowed one and printed the windowed answer twice.
         """
+        _check_threshold(threshold)
         t0 = time.perf_counter()
         try:
             return self._run_inner(binsize=binsize, threshold=threshold, window=window,
@@ -1262,6 +1270,7 @@ class MatchedFilter:
         A later run() requires set_data() again because series execution
         uses the plan's data slots. This rule applies on both devices.
         """
+        _check_threshold(threshold)
         is_outer = not getattr(self, '_in_series_call', False)
         if is_outer:
             self._in_series_call = True
@@ -1425,6 +1434,7 @@ class MatchedFilter:
                        binsize=None, threshold=0.0, templates=None, raw=False,
                        decimated=False):
         """Filter a full-rate series using 2-channel decimation-in-frequency (DIF)."""
+        _check_threshold(threshold)
         ser = np.ascontiguousarray(_from_any(series), dtype=np.complex64)
         st = np.ascontiguousarray(_from_any(starts), dtype=np.uintp)
         ws = np.ascontiguousarray(_from_any(win_start), dtype=np.uintp)

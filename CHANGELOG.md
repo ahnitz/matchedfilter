@@ -122,6 +122,11 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ### Fixed
 
+- C entry points check caller ranges and sizes without overflow: a subrange near the
+  int maximum, a tap stride or an output size whose product wrapped used to pass the check
+  and read or write out of bounds. A NaN threshold raises `ValueError`; a filter object
+  cannot be initialised twice; `_core.forward_cost` refuses a size the engine does not
+  support (it returned 1e30 s) and reports a failed allocation as MemoryError.
 - `HierarchicalFilter.set_data` (and C `ap_hmf_set_data`) copies the data, as the flat
   filter does: the refine ingests the full spectrum lazily, so a caller that reused its
   buffer after `set_data` changed what the refine read (a loud peak read as none). The

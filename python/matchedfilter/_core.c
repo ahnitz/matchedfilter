@@ -10,6 +10,15 @@
 #include <limits.h>
 #include "matchedfilter.h"
 #include "transform.h"
+
+/* Whether a buffer of len bytes holds a x b elements of elem bytes, computed by division:
+   the product of caller-supplied counts can overflow, and the check then passes. */
+static int buf_holds(Py_ssize_t len,Py_ssize_t a,Py_ssize_t b,Py_ssize_t elem){
+  if(a<0||b<0||elem<=0||len<0) return 0;
+  if(a==0||b==0) return 1;
+  return len/elem/a >= b;
+}
+
 #include <time.h>
 
 /* Validate the extension boundary independently of the Python convenience API.
@@ -140,6 +149,7 @@ static ap_peak *reserve_peaks(ap_peak **storage,Py_ssize_t *capacity,Py_ssize_t 
 typedef struct { PyObject_HEAD ap_mf_plan *p; Py_ssize_t n; int nd,nt; ap_peak *peaks; Py_ssize_t peak_capacity; } MFObject;
 
 static int MF_init(MFObject *self,PyObject *args,PyObject *kw){
+  if(self->p){ PyErr_SetString(PyExc_RuntimeError,"matchedfilter: filter already initialised"); return -1; }
   Py_ssize_t n; int nd,nt; (void)kw;
   if(!PyArg_ParseTuple(args,"nii",&n,&nd,&nt)) return -1;
   self->p=ap_mf_create((size_t)n,nd,nt);
@@ -250,7 +260,7 @@ static PyObject *MF_run(MFObject *self,PyObject *args){
 static PyObject *MF_q15_screen(MFObject *self,PyObject *args){
   int d0,nd,t0,nt; double thr; Py_ssize_t start,end; Py_buffer bp,bs;
   if(!PyArg_ParseTuple(args,"iiiidnnw*w*",&d0,&nd,&t0,&nt,&thr,&start,&end,&bp,&bs)) return NULL;
-  if(d0<0||nd<1||t0<0||nt<1||d0+nd>self->nd||t0+nt>self->nt||start<0||end<=start
+  if(nd<1||nt<1||!ap_range_ok(d0,nd,self->nd)||!ap_range_ok(t0,nt,self->nt)||start<0||end<=start
      ||bp.len<(Py_ssize_t)nd*nt||(bs.len && bs.len<(Py_ssize_t)nd*nt*(Py_ssize_t)sizeof(float))){
     PyBuffer_Release(&bp);PyBuffer_Release(&bs);
     PyErr_SetString(PyExc_ValueError,"invalid q15_screen arguments"); return NULL;
@@ -561,6 +571,7 @@ typedef struct { PyObject_HEAD ap_hmf_plan *p; Py_ssize_t n, k; int nd,nt; ap_pe
 /* HMF(n, ndata, ntemplates, bands, series_group=8, k=0): a gate chain of coarse
    bands (strictly increasing), then the full refine. Thresholds come from Python. */
 static int HMF_init(HMFObject *self,PyObject *args,PyObject *kw){
+  if(self->p){ PyErr_SetString(PyExc_RuntimeError,"matchedfilter: filter already initialised"); return -1; }
   Py_ssize_t n; int nd,nt; PyObject *bands_obj; (void)kw;
   int group=8; Py_ssize_t k_bins=0;
   if(!PyArg_ParseTuple(args,"niiO|in",&n,&nd,&nt,&bands_obj,&group,&k_bins)) return -1;
@@ -903,7 +914,7 @@ static PyObject *HMF_set_taps(HMFObject *self,PyObject *args){
   Py_buffer bt,bc; Py_ssize_t stride;
   if(!PyArg_ParseTuple(args,"y*ny*",&bt,&stride,&bc)) return NULL;
   int r=-1;
-  if(stride>0 && bt.len>=(Py_ssize_t)self->nt*stride*(Py_ssize_t)sizeof(float)
+  if(stride>0 && buf_holds(bt.len,self->nt,stride,(Py_ssize_t)sizeof(float))
      && bc.len>=(Py_ssize_t)self->nt*(Py_ssize_t)sizeof(int64_t))
     r=ap_hmf_set_taps(self->p,(const float*)bt.buf,(size_t)stride,(const int64_t*)bc.buf);
   PyBuffer_Release(&bt); PyBuffer_Release(&bc);
@@ -1114,7 +1125,7 @@ static PyObject *M_taps_to_spectra(PyObject *self, PyObject *args){
     return NULL;
   }
   size_t T = n_elem_taps / (size_t)max_taps;
-  if(bout.len < (Py_ssize_t)(T * (size_t)n * 2 * sizeof(float))){
+  if(!buf_holds(bout.len,(Py_ssize_t)T,n,(Py_ssize_t)(2*sizeof(float)))){
     PyBuffer_Release(&btaps); PyBuffer_Release(&bcnt); PyBuffer_Release(&bout);
     PyErr_SetString(PyExc_ValueError, "output buffer too small");
     return NULL;
@@ -1205,10 +1216,20 @@ static PyObject *M_forward_cost(PyObject *self, PyObject *args){
   (void)self; Py_ssize_t n; int reps=9;
   if(!PyArg_ParseTuple(args,"n|i",&n,&reps)) return NULL;
   if(n<16||(n&(n-1))){ PyErr_SetString(PyExc_ValueError,"n must be a power of two >= 16"); return NULL; }
+  if(!ap_supported((size_t)n)){
+    PyErr_Format(PyExc_ValueError,"forward_cost: n=%zd is not a size the engine supports",n);
+    return NULL;
+  }
   ap_plan *fft=ap_create((size_t)n); ap_accel *a=ap_accel_create((size_t)n);
   float *src=malloc(2*n*sizeof(float)), *tmp=malloc(2*n*sizeof(float)), *out=malloc(2*n*sizeof(float));
   double bn=1e30, ba=1e30;
-  if(fft&&src&&tmp&&out){
+  if(!fft||!src||!tmp||!out){
+    /* A plan or buffer that could not be allocated: no price, said so -- not 1e30 s,
+       which a caller would read as "the engine is slow" and store. */
+    free(src); free(tmp); free(out); ap_destroy(fft); ap_accel_destroy(a);
+    return PyErr_NoMemory();
+  }
+  {
     Py_BEGIN_ALLOW_THREADS
     for(Py_ssize_t k=0;k<2*n;k++) src[k]=(float)((k*2654435761u)%1000)*1e-3f;
     const float inv=1.0f/(float)n;
@@ -1244,7 +1265,7 @@ static PyObject *M_gate16_bound(PyObject *self, PyObject *args){
   void *g=ap_gate16_create((size_t)N,1,nt);
   if(!g){ PyBuffer_Release(&bd); PyBuffer_Release(&bt); Py_RETURN_NONE; }
   ap_peak *pk=calloc((size_t)nt,sizeof(ap_peak));
-  int ok = pk && bd.len>=(Py_ssize_t)(8*N) && bt.len>=(Py_ssize_t)(8*N*nt);
+  int ok = pk && N>0 && nt>0 && buf_holds(bd.len,N,1,8) && buf_holds(bt.len,N,nt,8);
   if(ok){
     for(int t=0;t<nt&&ok;t++) ok = ap_gate16_set_template(g,t,(const float*)bt.buf+(size_t)t*2*N)==0;
     ok = ok && ap_gate16_set_data(g,0,(const float*)bd.buf)==0;

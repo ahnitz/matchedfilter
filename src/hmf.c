@@ -576,7 +576,7 @@ int ap_hmf_run_series(ap_hmf_plan *p,
                       int t0,int nt,size_t binsize,float threshold,
                       ap_peak *peaks,int *counts){
   if(!p||nblocks<1||nt<1||!binsize) return 0;
-  if(t0<0||t0+nt>p->nt) return -1;
+  if(!ap_range_ok(t0,nt,p->nt)) return -1;
   const unsigned long long call0=ap_ticks();
   const size_t n=p->n;
   const size_t nb0=ap_hmf_nbins(p,binsize,win_start[0],win_end[0]);
@@ -908,7 +908,7 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
                size_t binsize,float threshold,
                ap_peak *peaks,int *counts,size_t start,size_t end){
   if(!p||nd<1||nt<1||!binsize) return 0;
-  if(d0<0||d0+nd>p->nd||t0<0||t0+nt>p->nt) return -1;
+  if(!ap_range_ok(d0,nd,p->nd)||!ap_range_ok(t0,nt,p->nt)) return -1;
   for(int t=t0;t<t0+nt;t++) if(p->tready[t]==2) return -1;   /* stale since a reference change */
   if(end>p->n) end=p->n;
   if(start>=end) return 0;

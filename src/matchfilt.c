@@ -835,7 +835,7 @@ int ap_mf_run(ap_mf_plan *p, int d0, int nd, int t0, int nt,
               size_t binsize, float threshold,
               ap_peak *peaks, int *counts, size_t start, size_t end){
   if(!p||nd<1||nt<1||!binsize) return 0;
-  if(d0<0||d0+nd>p->nd||t0<0||t0+nt>p->nt) return -1;
+  if(!ap_range_ok(d0,nd,p->nd)||!ap_range_ok(t0,nt,p->nt)) return -1;
   if(end>p->n) end=p->n;
   if(start>=end) return 0;
   return run_pairs(p,d0,nd,t0,nt,NULL,nt,binsize,threshold,
@@ -843,7 +843,7 @@ int ap_mf_run(ap_mf_plan *p, int d0, int nd, int t0, int nt,
 }
 
 int ap_mf_correlate(ap_mf_plan *p,int d0,int nd,int t0,int nt,float *out){
-  if(!p||!out||d0<0||nd<1||d0+nd>p->nd||t0<0||nt<1||t0+nt>p->nt)
+  if(!p||!out||nd<1||!ap_range_ok(d0,nd,p->nd)||nt<1||!ap_range_ok(t0,nt,p->nt))
     return -1;
   if(p->pb){
     const size_t n=p->n; const int W=p->pb;
@@ -948,7 +948,7 @@ static int series_spectra(ap_mf_plan *p,const float *series,size_t nseries,
 
 int ap_mf_correlate_series(ap_mf_plan *p,const float *series,size_t nseries,
                            const size_t *starts,int nblocks,int t0,int nt,float *out){
-  if(!p||!series||!starts||!out||nblocks<1||t0<0||nt<1||t0+nt>p->nt)
+  if(!p||!series||!starts||!out||nblocks<1||nt<1||!ap_range_ok(t0,nt,p->nt))
     return -1;
   const size_t n=p->n;
   for(int b0=0;b0<nblocks;){
@@ -1023,7 +1023,7 @@ int ap_mf_correlate_series_continuous(ap_mf_plan *p,const float *series,
                                       size_t nseries,const size_t *starts,
                                       int nblocks,size_t lo,size_t hi,
                                       int t0,int nt,float *out,const size_t *bounds){
-  if(!p||!series||!starts||!out||nblocks<1||t0<0||nt<1||t0+nt>p->nt
+  if(!p||!series||!starts||!out||nblocks<1||nt<1||!ap_range_ok(t0,nt,p->nt)
      ||lo>=hi||hi>p->n) return -1;
   if(bounds)
     for(int b=0;b<nblocks;b++)
@@ -1171,7 +1171,7 @@ int ap_mf_run_series(ap_mf_plan *p,
                      ap_peak *peaks,int *counts){
   if(!p||nblocks<1||nt<1||!binsize) return 0;
   if(!series||!start||!win_start||!win_end) return -1;
-  if(t0<0||t0+nt>p->nt) return -1;
+  if(!ap_range_ok(t0,nt,p->nt)) return -1;
   const size_t n=p->n;
   if(!p->sfwd){
     p->sfwd=ap_alloc64(2*n*sizeof(float));
@@ -1315,7 +1315,7 @@ int ap_mf_run_series_dif(ap_mf_plan *p,
                          ap_peak *peaks, int *counts){
   if(!p || nblocks < 1 || nt < 1 || !binsize) return 0;
   if(!series || !start || !win_start || !win_end || !peaks) return -1;
-  if(t0 < 0 || t0 + nt > p->nt) return -1;
+  if(!ap_range_ok(t0,nt,p->nt)) return -1;
   if(p->nd < 2) return -1;
 
   const size_t n = p->n;
@@ -1422,7 +1422,7 @@ int ap_mf_run_sel(ap_mf_plan *p, int d0, int nd, int t0, int nt,
                   size_t binsize, float threshold,
                   ap_peak *peaks, int *counts, size_t start, size_t end){
   if(!p||nd<1||nsel<1||!binsize) return 0;
-  if(d0<0||d0+nd>p->nd||t0<0||t0+nt>p->nt) return -1;
+  if(!ap_range_ok(d0,nd,p->nd)||!ap_range_ok(t0,nt,p->nt)) return -1;
   for(int j=0;j<nsel;j++) if(tsel[j]<0||tsel[j]>=nt) return -1;
   if(end>p->n) end=p->n;
   if(start>=end) return 0;
@@ -1497,7 +1497,7 @@ int ap_mf_run_pairs_pooled(ap_mf_plan *p, int d0,
                            ap_peak *peaks, int *counts, size_t start, size_t end,
                            int nt){
   if(!p || npairs < 1 || !binsize) return 0;
-  if(d0 < 0 || d0 >= p->nd || t0 < 0 || t0 + nt > p->nt) return -1;
+  if(d0 < 0 || d0 >= p->nd || !ap_range_ok(t0,nt,p->nt)) return -1;
   for(int j = 0; j < npairs; j++){
     if(dsel[j] < 0 || d0 + dsel[j] >= p->nd) return -1;
     if(tsel[j] < 0 || tsel[j] >= nt) return -1;
@@ -1705,7 +1705,7 @@ static __attribute__((noinline)) int q15_tail_group(ap_mf_plan *p, int d0, int f
 int ap_mf_q15_screen(ap_mf_plan *p,int d0,int nd,int t0,int nt,float threshold,
                      size_t start,size_t end,unsigned char *pass,float *stat){
   if(!p||nd<1||nt<1) return 0;
-  if(d0<0||d0+nd>p->nd||t0<0||t0+nt>p->nt) return -1;
+  if(!ap_range_ok(d0,nd,p->nd)||!ap_range_ok(t0,nt,p->nt)) return -1;
   if(end>p->n) end=p->n;
   if(start>=end) return 0;
   if(q15_prepare(p)) return -1;
