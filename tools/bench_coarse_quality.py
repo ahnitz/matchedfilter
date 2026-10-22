@@ -18,11 +18,12 @@ because the minimum over offset is what sets the threshold.
 
 Run:  python tools/bench_coarse_quality.py
 """
+import os
 import sys
 
 import numpy as np
 
-sys.path.insert(0, "tests")
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tests"))
 from test_api import inspiral_power, template_with_power
 
 

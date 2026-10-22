@@ -132,7 +132,7 @@ def layout(device, rounds):
             shared = f.empty_shared(ser.shape); shared[:] = ser
             row['shared_source'] = times({'structured':lambda:f.run_series(shared,st,lo,hi)},rounds)
         rows.append(row); print(json.dumps(row),flush=True)
-        del f; gc.collect()
+        f = None; gc.collect()          # (the lambdas above hold f by its cell)
     return rows
 
 
@@ -175,7 +175,7 @@ def cache(rounds):
                 f.run_series(ser,st,lo,hi,threshold=float(threshold))
         row['threshold_sweep_40']=times({'sweep':sweep},3)
         rows.append(row);print(json.dumps(row),flush=True)
-        del f;gc.collect()
+        f=None;gc.collect()          # (the closures above hold f by its cell)
     return rows
 
 
