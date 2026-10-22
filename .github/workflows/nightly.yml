@@ -122,6 +122,9 @@ jobs:
           rc=$?
           set -e
           tail -80 "$RUNNER_TEMP/san.log"
+          # sanitize.sh's own workflow commands (the toolchain probe's notice) are in the log,
+          # which the runner does not read: repeat them.
+          grep '^::notice title=sanitizer toolchain::' "$RUNNER_TEMP/san.log" | head -1 || true
           echo "::notice::$(grep -m1 'pytest ran' "$RUNNER_TEMP/san.log" || echo 'sanitize: pytest did not finish'); rc=$rc"
           if [ $rc -eq 134 ] || [ $rc -eq 139 ]; then
             # A crash: run the test it was in again under gdb, for the native stack.
