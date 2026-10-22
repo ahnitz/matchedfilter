@@ -23,3 +23,11 @@ def test_every_document_is_listed():
 def test_every_link_resolves():
     broken = [l for l in LINKS if not l.startswith("http") and not (DOCS / l).exists()]
     assert not broken, broken
+
+
+def test_every_tool_is_listed_in_the_tools_map():
+    tools = DOCS.parent / "tools"
+    readme = (tools / "README.md").read_text()
+    missing = sorted(p.name for p in list(tools.glob("*.py")) + list(tools.glob("*.sh"))
+                     if "`%s`" % p.name not in readme)
+    assert not missing, "not in tools/README.md: %s" % ", ".join(missing)
