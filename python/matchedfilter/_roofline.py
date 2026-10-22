@@ -415,7 +415,8 @@ def _x86_core(info):
     else:
         datapath = isa
         name = "Intel"
-    datapath = int(os.environ.get("MF_ROOFLINE_DATAPATH", datapath))
+    from . import _config
+    datapath = _config.get("MF_ROOFLINE_DATAPATH", datapath)
     imul = _x86_int16_mul_ports(vendor, fam, int(info.get("model", "0")))
     return min(isa, datapath), ports, name, imul
 

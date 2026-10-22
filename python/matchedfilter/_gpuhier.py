@@ -28,6 +28,8 @@ a device with indirect dispatch sizes them by the count, one without strides a f
 """
 import math
 import os
+
+from . import _config
 import struct
 
 import numpy as np
@@ -329,7 +331,7 @@ class HierOps:
         gate threshold as magnitude bits (tierb.slang peakTwoGate: only the pass and its
         bound, no election -- nothing reads tier 0's index); 0 elects (peakTwoWave)."""
         sg, _, tile, _ = layout[:4]
-        if len(layout) > 4 or tile <= 1 or os.environ.get("MF_VK_C16_BOUND", "1") == "0":
+        if len(layout) > 4 or tile <= 1 or not _config.get("MF_VK_C16_BOUND"):
             return 0
         if band // 16 > (sg or self.subgroup_size):
             return 0

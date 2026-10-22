@@ -101,7 +101,7 @@ typedef struct {
 static inline int pairbatch_size(size_t N){
   if(N>2048u||!esupported((int)N)) return 0;
   size_t lim = 128u;
-  { const char *e=getenv("MF_PBMAX"); if(e) lim=(size_t)atol(e); }
+  { long v=ap_env_int("MF_PBMAX",-1); if(v>=0) lim=(size_t)v; }
   return N<=lim;
 }
 
@@ -273,7 +273,7 @@ void *create(size_t N){
        flat  n=16384      1.085, faster in 5 of 6
      19 of 24 pairs, every size faster on the mean. MF_ILAY=0 restores the
      old layout for comparison. */
-  { const char *e=getenv("MF_ILAY"); p->ilay = e?atoi(e):1; }
+  p->ilay = ap_env_flag("MF_ILAY",1);
   {
     { size_t sz=(size_t)n1*p->istr;
       size_t alt=(size_t)(n2/AP_W)*n1*AP_W;        /* [k2 block][n1][lane] */
@@ -316,7 +316,7 @@ void *create(size_t N){
      pass (MF_BBLK, the stage-A blocking's mirror) measured slower at every length
      on Zen 3, Zen 5 and the M2 (2026-10-22: 1-7%); its walk is a constant stride
      the prefetcher already handles. Removed. */
-  { const char *e=getenv("MF_GMAJOR"); p->gmajor = e?atoi(e):1; }
+  p->gmajor = ap_env_flag("MF_GMAJOR",1);
   p->bR=ap_alloc64(me*(size_t)p->gblk*sizeof(vf));
   p->bI=ap_alloc64(me*(size_t)p->gblk*sizeof(vf));
   p->sR=ap_alloc64(me*sizeof(vf)); p->sI=ap_alloc64(me*sizeof(vf));

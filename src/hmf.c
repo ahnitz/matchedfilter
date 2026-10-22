@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include "ticks.h"
 #include "alloc.h"
+#include "env.h"
 #include "matchedfilter.h"
 #include "transform.h"
 
@@ -107,7 +108,7 @@ int ap_hmf_series_group(const ap_hmf_plan *p){ return p ? p->dgroup : 0; }
    their models by this, the group that ran, not the one asked for. */
 int ap_hmf_effective_group(size_t n,int requested){
   int grp = requested;
-  { const char *e=getenv("MF_DGROUP"); if(e){ int v=atoi(e); if(v>0) grp=v; } }
+  { long v=ap_env_int("MF_DGROUP",0); if(v>0) grp=(int)v; }
   while(grp>1 && (size_t)grp*2*n*sizeof(float) > (size_t)4*1024*1024) grp>>=1;
   return grp;
 }
@@ -148,8 +149,8 @@ ap_hmf_plan *ap_hmf_create_chain(size_t n,size_t k,int ndata,int ntmpl,
   } else {
     p->full=ap_mf_create(n, p->nd, ntmpl);
   }
-  { const char *pbmax=getenv("MF_PBMAX");
-    size_t pblim = pbmax ? (size_t)atol(pbmax) : 512u;
+  { long pbmax=ap_env_int("MF_PBMAX",-1);
+    size_t pblim = pbmax>=0 ? (size_t)pbmax : 512u;
     int lw = ap_lane_width();
     size_t min_ntmpl = (lw > 0) ? (size_t)lw : 16u;
     for(int i=0;i<ntiers;i++){
@@ -183,9 +184,9 @@ ap_hmf_plan *ap_hmf_create_chain(size_t n,size_t k,int ndata,int ntmpl,
      ||!p->dtime||!p->dhave){
     ap_hmf_destroy(p); return NULL;
   }
-  p->prof=getenv("MF_HMF_PROF")!=NULL;
-  { const char *e=getenv("MF_HMF_TRACE"); p->trace=e && *e && strcmp(e,"0")!=0; }   /* unset, empty or 0: off */
-  const char *dump=getenv("MF_HMF_DUMP");
+  p->prof=ap_env_flag("MF_HMF_PROF",0);
+  p->trace=ap_env_flag("MF_HMF_TRACE",0);
+  const char *dump=ap_env_text("MF_HMF_DUMP");
   p->dump=dump ? fopen(dump,"wb") : NULL;
   return p;
 }

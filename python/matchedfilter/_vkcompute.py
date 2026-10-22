@@ -19,7 +19,7 @@ import time
 
 import numpy as np
 
-from . import _gputime, _vulkan
+from . import _config, _gputime, _vulkan
 from ._shared import empty_shared, shared_view
 from ._gpuhost import MAX_BINS
 
@@ -543,10 +543,8 @@ def _batch_shape(items):
 
 def _fuse_interleave():
     """A forced interleave depth (MF_GPU_FUSE_INTERLEAVE), or None: measured per batch."""
-    v = os.environ.get("MF_GPU_FUSE_INTERLEAVE")
-    if v is not None and v != "":
-        return max(0, int(v))
-    return None
+    v = _config.get("MF_GPU_FUSE_INTERLEAVE")
+    return None if v is None else max(0, v)
 
 
 class _DeviceTimer:
@@ -1261,7 +1259,7 @@ class Context(Executor, InputUploads):
         self._ts = None
         # MF_GPU_PROFILE=1 (set when plans are recorded): timestamps between the phases of a
         # recording, reported as ("k:<phase>", device_ms) in timing_log.
-        self._profile = self._timing and os.environ.get("MF_GPU_PROFILE", "0") not in ("", "0")
+        self._profile = self._timing and _config.get("MF_GPU_PROFILE")
         self._prof = None
         dev = self._device_state
         if not dev.trig_probed:            # the first context on the device, fully set up
@@ -1452,7 +1450,7 @@ class Context(Executor, InputUploads):
             key = (key, "dscale", int(data_scale))
         if coarse_twt is not None:
             key = (key, "twt", int(coarse_twt))
-        raw_c16 = os.environ.get("MF_VK_C16_BOUND", "1") == "0"
+        raw_c16 = not _config.get("MF_VK_C16_BOUND")
         if raw_c16:
             key = (key, "raw-c16")
         # subgroup: a size within the device's required-size range to build this pipeline
@@ -1464,7 +1462,7 @@ class Context(Executor, InputUploads):
             # prefixes (forward, tierb, refine, items, compact, full, corr, ...) -- at this
             # size (within the device's range), for measurement: e.g. an Intel GPU's 8 or 16
             # against the 32 it reports.
-            spec = os.environ.get("MF_VK_SUBGROUP", "") or ""
+            spec = _config.get("MF_VK_SUBGROUP") or ""
             size, _, roles = spec.partition(":")
             forced = int(size or 0)
             pick = not roles or any(str(filename).startswith(r) for r in roles.split(",") if r)
@@ -1992,7 +1990,7 @@ class Context(Executor, InputUploads):
         MF_VK_COARSE_SUBGROUP fix the tile (1 = untiled) and subgroup, and MF_VK_COARSE_TWT an
         untiled build's twiddles (1 table, 0 recurrence), for measurement and tests."""
         wg = max(1, band // 16)
-        cap = int(os.environ.get("MF_VK_COARSE_PPG", "0") or 0)
+        cap = _config.get("MF_VK_COARSE_PPG") or 0
         rng = getattr(self, "subgroup_range", None)
         sizes = [0]
         if rng:

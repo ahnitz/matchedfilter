@@ -34,6 +34,8 @@ import time
 import warnings
 
 import numpy as np
+from . import _config
+_config.check_environment()   # before _core reads any of it
 from . import _core
 from . import gatechain as _gatechain
 from . import _choice
@@ -1574,7 +1576,7 @@ class MatchedFilter:
                 self.__dict__.get("_ct"), self.__dict__.get("_ckey"),
                 None if ws is None else ws[2], None if ws is None else ws[3])
         vals = (int(binsize), float(threshold), t0, nt, self.__dict__.get("_series_batch_bytes"),
-                os.environ.get("MF_GPU_QUEUE_AHEAD", "8"),
+                _config.get("MF_GPU_QUEUE_AHEAD"),
                 bool(self.__dict__.get("_want_sparse", False)))
         return objs, vals
 
@@ -1599,7 +1601,7 @@ class MatchedFilter:
             return None
         d = self.__dict__
         vals = (int(binsize), float(threshold), t0, nt, d.get("_series_batch_bytes"),
-                os.environ.get("MF_GPU_QUEUE_AHEAD", "8"), bool(d.get("_want_sparse", False)))
+                _config.get("MF_GPU_QUEUE_AHEAD"), bool(d.get("_want_sparse", False)))
         addr = ser.ctypes.data
         entry = plans.get((addr, ser.size, vals, id(layout)))
         if entry is None:
@@ -1788,7 +1790,7 @@ class MatchedFilter:
         c.defer = defer = (getattr(self, "_defer_series", False) and can_pipeline
                            and (not grouped_flat or nblk <= batch))
         c.pipelined = can_pipeline and (not single or defer)
-        queue_ahead = int(os.environ.get("MF_GPU_QUEUE_AHEAD", "8"))
+        queue_ahead = _config.get("MF_GPU_QUEUE_AHEAD")
         c.K = K = max(1, queue_ahead) if c.pipelined else 1
         # Irregular flat windows share one forward FFT dispatch and submission per bounded
         # batch. Hierarchical plans join when the backend submits grouped hierarchical windows
@@ -2468,11 +2470,11 @@ def _chain_trial(tkey):
     tr = _CHAIN_TRIALS.get(tkey)
     if tr is None:
         if str(tkey[4]).split(":")[0] == "cpu":
-            base = int(os.environ.get("MF_CHAIN_TRIALS", _CHAIN_TRIALS_PER_CAND))
+            base = _config.get("MF_CHAIN_TRIALS", _CHAIN_TRIALS_PER_CAND)
             budget = (_TRIAL_BUDGET * base, 0)
         else:
             from .time_domain import _CHAIN_WARM_BATCHES as warm
-            base = int(os.environ.get("MF_CHAIN_TRIALS", _CHAIN_BATCH_TRIALS))
+            base = _config.get("MF_CHAIN_TRIALS", _CHAIN_BATCH_TRIALS)
             budget = (warm + base, 6)
         tr = _CHAIN_TRIALS[tkey] = _choice.Choice(
             store_key=_chain_lock_key(tkey), what="CHAIN-TRIAL %s" % (tkey,), warmup=0,
@@ -2674,14 +2676,14 @@ _CHAIN_BATCH_TRIALS = 4
 
 
 def _log_autotune(msg, *args):
-    if os.environ.get("MF_AUTOTUNE_LOG", "0") != "0":
+    if _config.get("MF_AUTOTUNE_LOG"):
         text = msg % args if args else msg
         print(f"[MF_AUTOTUNE] {text}", file=sys.stderr, flush=True)
 
 
 def _autotune_enabled():
     """MF_AUTOTUNE=0 keeps the model's choice (deterministic); otherwise close calls are measured."""
-    return os.environ.get("MF_AUTOTUNE", "1").strip().lower() not in ("0", "false", "no", "off")
+    return _config.get("MF_AUTOTUNE")
 
 
 def get_autotune_state():
@@ -2716,7 +2718,7 @@ def clear_autotune_cache():
 
 
 def _direct_refine_enabled():
-    return os.environ.get("MF_DIRECT_REFINE", "1") != "0"
+    return _config.get("MF_DIRECT_REFINE")
 
 
 def _direct_lagtap():
@@ -2871,7 +2873,7 @@ class HierarchicalFilter(MatchedFilter):
         tkey = self._q15_trial_key()
         tr = _Q15_TRIALS.get(tkey)
         if tr is None:
-            base = max(5, int(os.environ.get("MF_CHAIN_TRIALS", _CHAIN_TRIALS_PER_CAND)))
+            base = max(5, _config.get("MF_CHAIN_TRIALS", _CHAIN_TRIALS_PER_CAND))
             pref = bool(getattr(self, "_q15_pref", False))
             tr = _Q15_TRIALS[tkey] = _choice.Choice(
                 (pref, not pref), store_key=self._q15_lock_key(tkey),
@@ -3246,7 +3248,7 @@ class HierarchicalFilter(MatchedFilter):
                                                   window=self.search_window)
             if best is None:
                 raise ValueError(_uncovered_message(self.n, self.snr, self.fd))
-            margin = float(os.environ.get("MF_CHAIN_MARGIN", _CHAIN_MARGIN))
+            margin = _config.get("MF_CHAIN_MARGIN", _CHAIN_MARGIN)
             # On a GPU the trial runs on whole batches in the search's own mode, so its cost
             # is a few segments: the model's best few are measured whatever their modelled
             # gap. The model prices device work only, and missed the faster chain by 38%
@@ -3266,7 +3268,7 @@ class HierarchicalFilter(MatchedFilter):
             _log_autotune("CHAIN n=%d model=%s shortlist=%s ranking=%s", self.n, hit[0], hit[1],
                           [(q["chain"], round(q["cost"], 1)) for q in plans[:6]])
         model_best, shortlist, feasible = hit
-        forced = os.environ.get("MF_CHAIN_FORCE")
+        forced = _config.get("MF_CHAIN_FORCE")
         pinned = False
         if forced:
             # Measurement only (chain studies): every hierarchical plan of this n runs the

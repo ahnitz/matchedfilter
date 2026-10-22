@@ -35,6 +35,7 @@
 
 #include "hwy/highway.h"
 #include "alloc.h"
+#include "env.h"
 #include "matchedfilter.h"
 
 #if HWY_HAVE_FLOAT16 && HWY_ARCH_ARM_A64 && !defined(AP_NO_GATE16)
@@ -436,7 +437,7 @@ static int run_max(Gate *g, int d0, int nd, int t0, int nt, size_t ws, size_t we
   const float u = 1.0f / 2048.0f;
   /* MF_GATE16_DEBUG_MAX (measurement only, tools/gate16_error.py --scan max): kappa 0, and
      im carries the pair's all-lag rms, as MF_GATE16_DEBUG does for the electing scan. */
-  static const int debug = getenv("MF_GATE16_DEBUG_MAX") != nullptr;
+  static const int debug = ap_env_flag("MF_GATE16_DEBUG_MAX", 0);
   const float kappa = debug ? 0.f : (float)GATE16_KAPPA;
   const size_t m = g->m;
   live_list(g, ws, we);
@@ -475,7 +476,7 @@ static int run(Gate *g, int d0, int nd, int t0, int nt, size_t ws, size_t we, ap
   const float u = 1.0f / 2048.0f;
   /* MF_GATE16_DEBUG (measurement only, tools/gate16_error.py): kappa 0, so the magnitude
      is the FP16 maximum with only its proven lag-selection factor, and im carries the pair's all-lag rms instead of a value. */
-  static const int debug = getenv("MF_GATE16_DEBUG") != nullptr;
+  static const int debug = ap_env_flag("MF_GATE16_DEBUG", 0);
   const float kappa = debug ? 0.f : (float)GATE16_KAPPA;
   const size_t m = g->m;
   alignas(16) float m2[AP_W], re[AP_W], im[AP_W], pw[AP_W];
@@ -519,8 +520,7 @@ extern "C" {
 
 int ap_gate16_available(void) {
 #ifdef AP_GATE16
-  const char *e = getenv("MF_GATE16");
-  return !(e && !atoi(e));
+  return ap_env_flag("MF_GATE16", 1);
 #else
   return 0;
 #endif
@@ -576,7 +576,7 @@ int ap_gate16_run(void *g, int d0, int nd, int t0, int nt, size_t ws, size_t we,
   if (!g) return -1;
   /* The elected lag and value only for the error tools (MF_GATE16_DEBUG);
      the gate itself needs only the bound (run_max). */
-  static const int elect = getenv("MF_GATE16_DEBUG") != nullptr;
+  static const int elect = ap_env_flag("MF_GATE16_DEBUG", 0);
   return elect ? ap16::run((ap16::Gate *)g, d0, nd, t0, nt, ws, we, out)
                : ap16::run_max((ap16::Gate *)g, d0, nd, t0, nt, ws, we, out);
 #else

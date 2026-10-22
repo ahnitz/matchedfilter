@@ -11,6 +11,7 @@ import sys
 import threading
 import weakref
 import numpy as np
+from . import _config
 try:
     from . import _core
 except ImportError:
@@ -404,7 +405,7 @@ class _BlockTrials:
 
     @staticmethod
     def _base_need():
-        return int(os.environ.get("MF_BLOCK_TRIALS", _BLOCK_TRIAL_SAMPLES))
+        return _config.get("MF_BLOCK_TRIALS", _BLOCK_TRIAL_SAMPLES)
 
     def rank_for(self, key, nranks):
         """The rank the key's next batch runs (its winner once locked)."""
@@ -2243,7 +2244,7 @@ class TimeDomainFilterBank:
         # MF_SINGLE_DEVICE=bank keeps every call on the bank's device: the pure-GPU path is a
         # product in its own right and is benchmarked as one (tools/ladder.py --pure).
         if (_parse_device(self.device).kind != 'gpu' or not _autotune_enabled()
-                or os.environ.get("MF_SINGLE_DEVICE", "auto") == "bank"):
+                or _config.get("MF_SINGLE_DEVICE") == "bank"):
             return False, None
         from . import _choice
         key = (str(self.device), int(g.n), 1 << max(0, int(nblocks) - 1).bit_length())
@@ -2263,7 +2264,7 @@ class TimeDomainFilterBank:
         from . import _autotune_enabled
         import os
         if (_parse_device(self.device).kind != 'gpu' or not _autotune_enabled()
-                or os.environ.get("MF_SINGLE_DEVICE", "auto") == "bank"):
+                or _config.get("MF_SINGLE_DEVICE") == "bank"):
             return "gpu", None
         from . import _choice
         key = (str(self.device),)
@@ -2341,7 +2342,7 @@ class TimeDomainFilterBank:
         """Run eligible single-template GPU jobs of a batch together; returns their indices."""
         import os
         from .device import parse as _parse_device
-        if os.environ.get("MF_GPU_ITEMS", "1") == "0":
+        if not _config.get("MF_GPU_ITEMS"):
             return set()
         groups = {}
         side = record = device = None
@@ -2394,7 +2395,7 @@ class TimeDomainFilterBank:
         # Threshold-0 follow-ups: every group's items as listed entries, all in one
         # submission (_gpuhost.submit_followups). None (past what the device path takes):
         # the per-group path below.
-        if os.environ.get("MF_DEVICE_FOLLOWUPS", "1") != "0":
+        if _config.get("MF_DEVICE_FOLLOWUPS"):
             fast = sorted(m[0] for (_, _, _, thr), members in groups.items() if thr == 0.0
                           for m in members)
             if fast:

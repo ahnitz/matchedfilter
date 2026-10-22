@@ -18,6 +18,8 @@ lasts the process); MF_AUTOTUNE=0 keeps the reported size. MF_VK_SUBGROUP forces
 """
 import json
 import os
+
+from . import _config
 import subprocess
 import sys
 
@@ -140,7 +142,7 @@ def choose(ctx):
     at the measured 8 (7.6 s of measuring, once per process)."""
     reported = int(ctx.subgroup_size)
     rng = getattr(ctx, "subgroup_range", None)
-    if not rng or len(_candidates(rng)) < 2 or os.environ.get("MF_VK_SUBGROUP_MEASURING"):
+    if not rng or len(_candidates(rng)) < 2 or _config.get("MF_VK_SUBGROUP_MEASURING"):
         return reported
     from . import gatechain, _autotune_enabled, _choice
     if not _autotune_enabled():

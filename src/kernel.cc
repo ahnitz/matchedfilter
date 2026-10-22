@@ -17,6 +17,7 @@
 #include <strings.h>
 
 #include "alloc.h"
+#include "env.h"
 #include "matchedfilter.h"
 #include "backend.h"
 

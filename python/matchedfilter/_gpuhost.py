@@ -185,11 +185,11 @@ def band_forward_wanted(n, band, f):
     f is the gate model's fraction for the call (_gpuhier._hier_peaks: from the chain's
     modelled refine probability), so the choice depends on the call alone; with none
     (thresholds set by hand, no reference), the bands. MF_BAND_FORWARD=0/1 forces it off or on."""
-    import os
-    env = os.environ.get("MF_BAND_FORWARD")
-    if env == "0" or n > 65536 or band >= n:
+    from . import _config
+    forced = _config.get("MF_BAND_FORWARD")
+    if forced is False or n > 65536 or band >= n:
         return False
-    if env == "1":
+    if forced:
         return True
     return f is None or f < (n - band) / (2.0 * n)
 

@@ -46,10 +46,22 @@ def test_every_name_the_code_reads_is_registered():
     assert not unknown, "unregistered MF_* names (add them to _config.VARS): %r" % unknown
 
 
+def _outside():
+    """Text of the tools, builds and tests (their names may sit in prose or a shell line)."""
+    paths = (sorted((ROOT / "tools").glob("*.py")) + sorted((ROOT / "tools").glob("*.sh"))
+             + sorted((ROOT / "tests").glob("*.py")) + [ROOT / "setup.py"])
+    return "\n".join(p.read_text(errors="replace") for p in paths if p.exists())
+
+
 def test_everything_registered_is_read_where_it_says():
     py, c = _names(_python()), _names(_c())
+    outside = _outside()
     wrong = []
     for v in config.VARS:
+        if v.side == "tools":
+            if v.name in py or v.name in c or not re.search(r"\b%s\b" % v.name, outside):
+                wrong.append((v.name, v.side, v.name in py, v.name in c))
+            continue
         want = {"py": [py], "c": [c], "both": [py, c]}[v.side]
         if not all(v.name in names for names in want):
             wrong.append((v.name, v.side, v.name in py, v.name in c))
@@ -63,7 +75,8 @@ def test_the_registry_is_well_formed():
     removed = {n for _, _, group in config.REMOVED for n in group}
     assert not set(names) & removed, "a removed name is still registered"
     for v in config.VARS:
-        assert v.section in dict(config.SECTIONS) and v.side in ("py", "c", "both")
+        assert v.section in dict(config.SECTIONS) and v.side in ("py", "c", "both", "tools")
+        assert (v.section == "tools") == (v.side == "tools"), v.name
         if v.row is None:
             assert v.doc, "%s has no description" % v.name
         else:
@@ -73,3 +86,54 @@ def test_the_registry_is_well_formed():
 
 def test_the_document_is_generated_from_the_registry():
     assert gen.main(["--check"]) == 0, "docs/environment.md is stale"
+
+
+@pytest.mark.parametrize("raw,want", [("", True), ("  ", True), ("1", True), ("yes", True),
+                                      ("On", True), (" TRUE ", True), ("0", False),
+                                      ("false", False), ("no", False), ("OFF", False)])
+def test_a_flag_follows_the_one_rule(raw, want):
+    assert config.parse(config.BY_NAME["MF_AUTOTUNE"], raw) is want
+
+
+@pytest.mark.parametrize("name,raw", [("MF_AUTOTUNE", "2"), ("MF_AUTOTUNE", "enabled"),
+                                      ("MF_GPU_QUEUE_AHEAD", "8.5"), ("MF_CHAIN_MARGIN", "x"),
+                                      ("MF_METAL_IEEE", "fast")])
+def test_anything_else_is_refused_by_name(name, raw):
+    with pytest.raises(ValueError, match="%s=%s" % (name, re.escape(raw))):
+        config.parse(config.BY_NAME[name], raw)
+
+
+def test_values_and_defaults_by_kind():
+    v = config.BY_NAME
+    assert config.parse(v["MF_GPU_QUEUE_AHEAD"], "") == 8
+    assert config.parse(v["MF_GPU_QUEUE_AHEAD"], " 3 ") == 3
+    assert config.parse(v["MF_CHAIN_MARGIN"], "") is None
+    assert config.parse(v["MF_CHAIN_MARGIN"], "1.25") == 1.25
+    assert config.parse(v["MF_BAND_FORWARD"], "") is None      # unset: measured
+    assert config.parse(v["MF_METAL_IEEE"], "ALL") == "all"
+    assert config.parse(v["MF_CHAIN_FORCE"], "256,512") == "256,512"
+
+
+def test_removed_and_misspelled_names_warn_and_invalid_values_raise():
+    with pytest.warns(RuntimeWarning, match="MF_BBLK was removed on 2026-10-22"):
+        config.check_environment({"MF_BBLK": "2"})
+    with pytest.warns(RuntimeWarning, match="did you mean MF_AUTOTUNE"):
+        config.check_environment({"MF_AUTOTUNES": "0"})
+    with pytest.raises(ValueError, match="MF_GPU_ITEMS=maybe"):
+        config.check_environment({"MF_GPU_ITEMS": "maybe"})
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        config.check_environment({"MF_AUTOTUNE": "off", "PATH": "/bin"})
+
+
+def test_an_invalid_value_fails_the_import():
+    import os
+    import subprocess
+    import sys
+    import matchedfilter as mf
+    parent = os.path.dirname(os.path.dirname(os.path.abspath(mf.__file__)))
+    p = subprocess.run([sys.executable, "-c", "import matchedfilter"], capture_output=True,
+                       text=True, timeout=120,
+                       env=dict(os.environ, PYTHONPATH=parent, MF_DIRECT_REFINE="nope"))
+    assert p.returncode == 1 and "ValueError: MF_DIRECT_REFINE=nope" in p.stderr, p.stderr[-500:]
