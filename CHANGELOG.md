@@ -6,6 +6,8 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ### Removed
 
+- `MF_BBLK` (stage-B blocking of the balanced transform): slower than the default at
+  every length measured on Zen 3, Zen 5 and an Apple M2 (1-7%).
 - `MF_TRIAL_RECHECK` and the steady-state re-check it switched on (`Choice.observe`,
   `gatechain.recheck_enabled`, `observe_steady`, `steady_disagrees`, `RECHECK_*`): off by
   default, it let one process's steady timing reopen a lock for every later process, so
