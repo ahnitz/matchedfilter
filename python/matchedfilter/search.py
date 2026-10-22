@@ -556,7 +556,7 @@ class HierarchicalSearch:
         """Queue node's leaves for the chunk's leaf search, then produce its live inner
         children (every channel) and walk each. Every node has its own row slots, so all the
         chunk's series coexist until the next chunk: the leaves are searched together once the
-        walk is done (_search_leaves), with their ancestors' series still held for the hooks."""
+        walk is done (_submit_leaves, then _finish_leaves), with their ancestors' series still held for the hooks."""
         inner, leaves = self._kids[id(node)]
         step.pending.extend(leaves)
         if not inner:
@@ -606,10 +606,6 @@ class HierarchicalSearch:
             support[c][id(root)] = [(0, n)]
         self.timings["root"] += time.perf_counter() - t0
         return held, support
-
-    def _search_leaves(self, step):
-        """The chunk's leaf searches, in every channel, then each leaf's on_peaks in walk order."""
-        self._finish_leaves(step, self._submit_leaves(step))
 
     def _submit_leaves(self, step):
         """Start the chunk's leaf searches, in every channel: (leaves, jobs, where, deferred,

@@ -16,7 +16,9 @@
 # own flags still apply; UBSan reports are fatal), and pytest runs from that copy with the
 # ASan runtime preloaded into the interpreter, which is not itself built with ASan. Leak
 # detection is off: CPython's arenas read as leaks. handle_abort: any abort() prints ASan's
-# native stack, so an abort that prints nothing of its own still says where it came from. Exit status is pytest's; a sanitizer
+# native stack, so an abort that prints nothing of its own still says where it came from.
+# allow_user_segv_handler=0: pytest's faulthandler would otherwise replace ASan's SEGV handler, so
+# a segfault printed only Python's stack (CI, 2026-10-22). Exit status is pytest's; a sanitizer
 # report aborts the test process, so it fails the run. The verdict line names the build.
 set -euo pipefail
 
@@ -99,7 +101,7 @@ cd "$WORK"
 T1=$SECONDS
 set +e
 env LD_PRELOAD="$ASAN_LIB" PYTHONMALLOC=malloc PYTHONPATH="$WORK/python" \
-    ASAN_OPTIONS=detect_leaks=0:abort_on_error=1:allocator_may_return_null=1:handle_abort=1 \
+    ASAN_OPTIONS=detect_leaks=0:abort_on_error=1:allocator_may_return_null=1:handle_abort=1:handle_segv=1:allow_user_segv_handler=0 \
     UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
     OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 TEST_TIMEOUT_SCALE=10 \
     "$PY" -m pytest -q -p no:cacheprovider "$@"

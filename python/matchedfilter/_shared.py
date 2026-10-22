@@ -187,11 +187,6 @@ def _whole_view(start, allocation, dtype):
 _whole = weakref.WeakValueDictionary()
 
 
-def shared_key(array, ctx):
-    buf = shared_buffer(array, ctx)
-    return array.ctypes.data if buf is not None else None
-
-
 def empty_shared(ctx, buffer_type, shape, dtype=np.complex64):
     dtype = np.dtype(dtype)
     if dtype.hasobject:

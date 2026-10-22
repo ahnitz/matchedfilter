@@ -230,14 +230,21 @@ def test_forced_cpu_pair_batch(monkeypatch):
     _agrees(got, _reference(block, tmpl[1:5]))
 
 
-def test_cpu_non_group_major_fallback(monkeypatch):
-    monkeypatch.setenv('MF_GMAJOR', '0')
-    n = 4096
+@pytest.mark.parametrize('n', [1024, 4096])
+def test_cpu_group_major_and_fallback_products_agree(n):
+    """Each target's product path at these lengths: the fused group-major loader, or the
+    unfused product where the plan's geometry has none (AVX-512 at 1024)."""
+    import matchedfilter as mf
     data, tmpl = _spectra((2, n), 85), _spectra((3, n), 86)
-    f = CorrelationFilter(n, 2, 3)
-    f.set_data(data)
-    f.set_templates(tmpl)
-    _agrees(f.run(), _reference(data, tmpl))
+    try:
+        for target in mf.targets():
+            mf.set_target(target)
+            f = CorrelationFilter(n, 2, 3, device='cpu')
+            f.set_data(data)
+            f.set_templates(tmpl)
+            _agrees(f.run(), _reference(data, tmpl))
+    finally:
+        mf.set_target(None)
 
 
 def test_gpu_shared_output_and_changed_banks():
