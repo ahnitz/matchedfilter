@@ -310,16 +310,6 @@ def _check(rc, what):
         raise VulkanError("%s failed with VkResult %d" % (what, rc))
 
 
-def _global_barrier(vk, cmd):
-    """All earlier compute/transfer work before all later work, memory included."""
-    mb = _MemBarrier(46, None, _ACCESS_SHADER_WRITE | _ACCESS_TRANSFER_WRITE | _ACCESS_SHADER_READ,
-                     _ACCESS_SHADER_READ | _ACCESS_SHADER_WRITE | _ACCESS_TRANSFER_WRITE
-                     | _ACCESS_HOST_READ)
-    vk.vkCmdPipelineBarrier(cmd, _STAGE_COMPUTE_BIT | _STAGE_TRANSFER_BIT,
-                            _STAGE_COMPUTE_BIT | _STAGE_TRANSFER_BIT | _STAGE_HOST_BIT,
-                            0, 1, ctypes.byref(mb), 0, None, 0, None)
-
-
 class _Recording:
     """A primary command buffer being recorded: allocated from the context's pool and begun
     with `flags` (a VkCommandBufferUsageFlags), with the steps every recording repeats.

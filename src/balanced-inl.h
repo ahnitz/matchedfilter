@@ -316,7 +316,7 @@ void *create(size_t N){
      pass (MF_BBLK, the stage-A blocking's mirror) measured slower at every length
      on Zen 3, Zen 5 and the M2 (2026-10-22: 1-7%); its walk is a constant stride
      the prefetcher already handles. Removed. */
-  p->gmajor = ap_env_flag("MF_GMAJOR",1);
+  p->gmajor = 1;     /* inputs arrive group-major (matchfilt.c decides when to send them) */
   p->bR=ap_alloc64(me*(size_t)p->gblk*sizeof(vf));
   p->bI=ap_alloc64(me*(size_t)p->gblk*sizeof(vf));
   p->sR=ap_alloc64(me*sizeof(vf)); p->sI=ap_alloc64(me*sizeof(vf));
@@ -636,6 +636,13 @@ static void stageA_prod_32(BP*p,const float*dr,const float*di,
   }
 }
 
+/* Stage A that forms the matched-filter product on the way in, from group-major inputs.
+ *
+ * The product of two spectra is otherwise written to memory and read straight
+ * back by this very loop - 1 MiB of L2 traffic per pair at 2^16.  Computing it
+ * here costs the same four FMAs and touches no intermediate at all.
+ * Output is conj(D*T), which is what the backward transform wants. (A row-major
+ * variant, reached only through MF_GMAJOR=0, was removed on 2026-10-22.) */
 static void stageA_prod_gm(BP*p,const float*dr,const float*di,
                            const float*tr,const float*ti){
   if constexpr (AP_W==8) {
@@ -680,72 +687,6 @@ static void stageA_prod_gm(BP*p,const float*dr,const float*di,
       efft(N2,p->bR,p->bI,p->sR,p->sI,p->w2r,p->w2i);
     }
     stageA_tail(p,g,TR,TI,OR,OI,p->bR,p->bI);
-  }
-}
-
-/* Stage A that forms the matched-filter product on the way in.
- *
- * The product of two spectra is otherwise written to memory and read straight
- * back by this very loop - 1 MiB of L2 traffic per pair at 2^16.  Computing it
- * here costs the same four FMAs and touches no intermediate at all.
- * Output is conj(D*T), which is what the backward transform wants. */
-static void stageA_prod(BP*p,const float*dr,const float*di,
-                        const float*tr,const float*ti){
-  const int N1=p->N1,N2=p->N2,NG=N1/AP_W,G=p->gblk;
-  vf TR[AP_W],TI[AP_W],OR[AP_W],OI[AP_W];
-  const int M1=p->eb.single?N2:p->b1, M2=p->eb.single?1:p->b2, st=p->eb.st;
-  for(int g0=0;g0<NG;g0+=G){
-    const int GG = (NG-g0<G)?NG-g0:G;
-    if(GG==1){
-      for(int e2=0;e2<M2;e2++){
-        const size_t off0=(size_t)AP_W*g0+(size_t)e2*M1*N1;
-        const float * restrict ar=dr+off0,* restrict ai=di+off0;
-        const float * restrict br=tr+off0,* restrict bi=ti+off0;
-        vf * restrict dR=p->bR+(size_t)e2*st;
-        vf * restrict dI=p->bI+(size_t)e2*st;
-        int e1=0;
-        for(;e1+1<M1;e1+=2){
-          vf x0=V_LOADU(ar), y0=V_LOADU(ai);
-          vf u0=V_LOADU(br), v0=V_LOADU(bi);
-          vf x1=V_LOADU(ar+N1), y1=V_LOADU(ai+N1);
-          vf u1=V_LOADU(br+N1), v1=V_LOADU(bi+N1);
-          dR[e1]   = V_FMSUB(x0,u0,V_MUL(y0,v0));
-          dI[e1]   = V_FNMSUB(x0,v0,V_MUL(y0,u0));
-          dR[e1+1] = V_FMSUB(x1,u1,V_MUL(y1,v1));
-          dI[e1+1] = V_FNMSUB(x1,v1,V_MUL(y1,u1));
-          ar+=2*N1; ai+=2*N1; br+=2*N1; bi+=2*N1;
-        }
-        for(;e1<M1;e1++){
-          vf x=V_LOADU(ar), y=V_LOADU(ai);
-          vf u=V_LOADU(br), v=V_LOADU(bi);
-          dR[e1]=V_FMSUB(x,u,V_MUL(y,v));
-          dI[e1]=V_FNMSUB(x,v,V_MUL(y,u));
-          ar+=N1; ai+=N1; br+=N1; bi+=N1;
-        }
-      }
-      stageA_body(p,g0,TR,TI,OR,OI,p->bR,p->bI);
-      continue;
-    }
-    for(int e2=0;e2<M2;e2++){
-      const size_t off0=(size_t)AP_W*g0+(size_t)e2*M1*N1;
-      const float *ar=dr+off0,*ai=di+off0,*br=tr+off0,*bi=ti+off0;
-      for(int e1=0;e1<M1;e1++){
-        for(int gg=0;gg<GG;gg++){
-          const size_t o=(size_t)AP_W*gg;
-          vf x=V_LOADU(ar+o), y=V_LOADU(ai+o);
-          vf u=V_LOADU(br+o), v=V_LOADU(bi+o);
-          vf pr=V_FMSUB(x,u,V_MUL(y,v));
-          vf pi=V_FNMSUB(x,v,V_MUL(y,u));     /* conj(product), free here */
-          vf *dR=p->bR+(size_t)gg*p->bstride+(size_t)e2*st;
-          vf *dI=p->bI+(size_t)gg*p->bstride+(size_t)e2*st;
-          dR[e1]=pr; dI[e1]=pi;
-        }
-        ar+=N1; ai+=N1; br+=N1; bi+=N1;
-      }
-    }
-    for(int gg=0;gg<GG;gg++)
-      stageA_body(p,g0+gg,TR,TI,OR,OI,
-                  p->bR+(size_t)gg*p->bstride,p->bI+(size_t)gg*p->bstride);
   }
 }
 
@@ -1562,8 +1503,7 @@ int binmax_prod(void *vp,const float*dr,const float*di,
   if(p->small) return -1;        /* use binmax_prod_batch */
   size_t nb=(we-ws+binsize-1)/binsize;
   if(bins_reserve(p,nb)) return -1;
-  if(p->gmajor) stageA_prod_gm(p,dr,di,tr,ti);
-  else          stageA_prod(p,dr,di,tr,ti);
+  stageA_prod_gm(p,dr,di,tr,ti);
   binmax_core(p,binsize,thr,out,conj,ws,we);
   return 0;
 }
@@ -1583,8 +1523,7 @@ static HWY_NOINLINE MF_PEAK_SECTION int binmax_prod_threshold(void *vp,const flo
   if(p->small) return -1;        /* use binmax_prod_batch */
   size_t nb=(we-ws+binsize-1)/binsize;
   if(bins_reserve(p,nb)) return -1;
-  if(p->gmajor) stageA_prod_gm(p,dr,di,tr,ti);
-  else          stageA_prod(p,dr,di,tr,ti);
+  stageA_prod_gm(p,dr,di,tr,ti);
   binmax_core(p,binsize,thr,out,conj,ws,we);
   return 0;
 }
@@ -1607,8 +1546,7 @@ int corr_prod(void *vp,const float*dr,const float*di,
               const float*tr,const float*ti,float*out){
   BP *p=(BP*)vp;
   if(p->small) return -1;
-  if(p->gmajor) stageA_prod_gm(p,dr,di,tr,ti);
-  else          stageA_prod(p,dr,di,tr,ti);
+  stageA_prod_gm(p,dr,di,tr,ti);
   corr_store(p,out);
   return 0;
 }

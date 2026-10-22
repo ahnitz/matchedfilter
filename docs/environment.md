@@ -20,6 +20,9 @@ could make processes sharing a cost file choose differently: MF_TRIAL_RECHECK.
 Removed 2026-10-22: stage-B blocking measured slower at every length on Zen 3, Zen 5 and
 the M2: MF_BBLK.
 
+Removed 2026-10-22: the unfused stage-A product it forced measured slower at every
+length on Zen 3, Zen 5 and the M2: MF_GMAJOR.
+
 Removed 2026-10-22: per-backend coarse layout fields; MF_COARSE_LAYOUT forces a whole
 layout by name on every backend: MF_VK_COARSE_PPG, MF_VK_COARSE_TILE,
 MF_VK_COARSE_SUBGROUP, MF_VK_COARSE_TWT, MF_METAL_COARSE_PPG, MF_METAL_COARSE_TILE,
@@ -65,7 +68,6 @@ Older notes in docs/ that mention a removed variable describe past studies.
 | `MF_GATE16=0` | on where built | No FP16 first gate on the CPU. |
 | `MF_DGROUP=<n>` | the plan's series group | Blocks per hierarchical series batch. |
 | `MF_PBMAX=<n>` | built-in | Largest n run as pair-batched transforms. |
-| `MF_GMAJOR=0` | 1 | Unfused product path (cross-check). |
 | `MF_ILAY=0` | 1 | Strided intermediate layout. Slower on Zen 3 and Zen 5, faster on the M2 at n >= 2^18 (4-9%); to become a measured candidate. |
 | `MF_CORR_NO_STREAM=1` | off | No non-temporal stores in continuous correlation. |
 | `MF_BAND_FORWARD=0/1` | measured | GPU band forward off/on. |

@@ -105,8 +105,6 @@ VARS: Tuple[Var, ...] = (
         "Blocks per hierarchical series batch.", usage="MF_DGROUP=<n>", kind="int"),
     Var("MF_PBMAX", "override", "c", "built-in",
         "Largest n run as pair-batched transforms.", usage="MF_PBMAX=<n>", kind="int"),
-    Var("MF_GMAJOR", "override", "c", "1", "Unfused product path (cross-check).",
-        usage="MF_GMAJOR=0", kind="flag", value=True),
     Var("MF_ILAY", "override", "c", "1",
         "Strided intermediate layout. Slower on Zen 3 and Zen 5, faster on the M2 at "
         "n >= 2^18 (4-9%); to become a measured candidate.", usage="MF_ILAY=0", kind="flag", value=True),
@@ -175,6 +173,8 @@ REMOVED = (
      "make processes sharing a cost file choose differently", ("MF_TRIAL_RECHECK",)),
     ("2026-10-22", "stage-B blocking measured slower at every length on Zen 3, Zen 5 and "
      "the M2", ("MF_BBLK",)),
+    ("2026-10-22", "the unfused stage-A product it forced measured slower at every length "
+     "on Zen 3, Zen 5 and the M2", ("MF_GMAJOR",)),
     ("2026-10-22", "per-backend coarse layout fields; MF_COARSE_LAYOUT forces a whole "
      "layout by name on every backend", ("MF_VK_COARSE_PPG", "MF_VK_COARSE_TILE",
                                         "MF_VK_COARSE_SUBGROUP", "MF_VK_COARSE_TWT",

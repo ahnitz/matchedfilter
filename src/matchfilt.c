@@ -18,11 +18,10 @@
 #include "q15.h"
 #define AP_MF_MAXCAND 64
 
-/* Unfused product, for a back end with no fused stage-A loader.  Every
-   Highway build has one, so this runs only when MF_GMAJOR=0 disables the
-   fused path for a cross-check.  It had hand-written AVX-512 and AVX2
-   variants; the compiler vectorises this loop, and keeping two intrinsic
-   kernels alive for a diagnostic path was not worth it. */
+/* Unfused product, for a plan whose geometry the fused stage-A loader cannot take
+   (p->gmajor 0: see where it is set). It had hand-written AVX-512 and AVX2 variants;
+   the compiler vectorises this loop. The MF_GMAJOR switch that also forced it was
+   removed on 2026-10-22: the fused path won at every length on Zen 3, Zen 5 and the M2. */
 static void mulspec(const float *ar,const float *ai,const float *br,const float *bi,
                     float *or_,float *oi,size_t n){
   for(size_t k=0;k<n;k++){
@@ -137,7 +136,6 @@ static ap_mf_plan *create_mf(size_t n, int ndata, int ntmpl, int pair, const ap_
         hard-coding n!=1024 silently cost the AVX2 path its fused product. */
     p->gmajor = (p->w>0 && p->n1>0 && p->n1%p->w==0
                  && (size_t)p->n1*p->n2==n && ap_has_fused_prod(p->fft)) ? 1 : 0;
-    if(!ap_env_flag("MF_GMAJOR",1)) p->gmajor=0;
   }
   /* Read once here, not inside ap_mf_run.  The hierarchical filter calls
      ap_mf_run once per pair rather than once per batch, which turned a
