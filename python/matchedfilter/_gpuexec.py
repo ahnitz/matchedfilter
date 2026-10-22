@@ -974,7 +974,7 @@ class Executor(HierOps):
         return oi, ov
 
     def _flat_sparse(self, rec, shape, rows, offsets, natural):
-        from . import _SparsePeaks
+        from ._results import _SparsePeaks
         nd, nt, nb = shape
         head = np.empty(1, np.uint32)
         self._x_read(rec.buffers["count"], head)

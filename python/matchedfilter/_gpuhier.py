@@ -730,7 +730,7 @@ class HierOps:
         """The call's peaks from its readback buffers. Counts, survivors and the rows a
         sparse result gathers are read in place where the host sees the buffers (_x_view):
         only a dense result copies its outputs whole."""
-        from . import _SparsePeaks
+        from ._results import _SparsePeaks
         nd, nt, nbins = shape
         pairs, out = nd * nt, nd * nt * nbins
         B = rec.buffers

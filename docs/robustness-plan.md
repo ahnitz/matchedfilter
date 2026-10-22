@@ -379,3 +379,9 @@ A step that changes C or workflows is first pushed to a `ci/<topic>` branch and 
   - docs/resolved-plan.md describes the resolved plan: what it holds, the seven places it is resolved today, its guarantees with and without a cost file, and what is public.
   - tests/test_layers.py places every module in seven layers (foundation, platform, models, GPU host, backends, workloads, applications). It fails on any new upward import, `from . import name` of the root's names included, and on any allowlist entry no longer needed. Its allowlist was computed, not written by hand: 13 upward edges (the plan's estimate counted 147 function-level imports, most of them downward).
   - tools/check_move.py checks that every definition at a base revision is still in the package with an identical syntax tree, wherever it moved (tests/test_check_move.py).
+- 2026-10-22: **E2: the foundation modules.**
+  - _costfile: the cost file's read, lock, atomic write, update and first-writer store, from gatechain.
+  - _choice: the decision rules (TIE, CHOICE_Z, sample_spread, paired_choice, measured_choice), from gatechain.
+  - _results: PEAK_DTYPE, _SparsePeaks and _Deferred, from the package root.
+
+  Each was moved verbatim (tools/check_move.py: no definition changed but the import lines that point at the new modules). The old homes import the names back. Upward edges: 13 -> 9 (_choice -> gatechain, and _gpuexec, _gpuhier and _shared -> the root, are gone). The layer test now treats the compiled _core as the lowest layer; `from . import _core` had counted as an import of the root.
