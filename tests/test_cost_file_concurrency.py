@@ -1,6 +1,9 @@
 """Concurrent calibration writers preserve each other's records and valid JSON."""
 import json
 import multiprocessing
+import os
+import subprocess
+import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
@@ -14,12 +17,19 @@ START = 120
 
 
 def _started(event, proc):
-    """Wait for a writer to signal; a writer that exits first fails with its exit code."""
+    """Wait for a writer to signal. A writer that exits first fails the test with its exit
+    code and the error of importing this module as the spawned child does (its own
+    stderr reaches only the job log)."""
     for _ in range(START * 10):
         if event.wait(0.1):
             return
-        assert proc.is_alive() or event.is_set(), \
-            "the writer exited (%s) before it signalled" % proc.exitcode
+        if not proc.is_alive() and not event.is_set():
+            probe = subprocess.run(
+                [sys.executable, "-c", "import sys; sys.path[:0] = %r; import %s"
+                 % (sys.path, __name__)], capture_output=True, text=True, timeout=START)
+            pytest.fail("the writer exited (%s) before it signalled; importing %s as it "
+                        "does: rc %d, cwd %s\n%s" % (proc.exitcode, __name__, probe.returncode,
+                                                     os.getcwd(), probe.stderr[-3000:]))
     pytest.fail("the writer did not signal within %d s" % START)
 
 
