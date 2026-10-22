@@ -5,6 +5,8 @@
 #     tools/sanitize.sh -- tests/test_native_buffers.py
 #     tools/sanitize.sh --keep DIR --build-only        # build once into DIR ...
 #     tools/sanitize.sh --prebuilt DIR -- <pytest args>  # ... and test from it, many times
+#     tools/sanitize.sh --prebuilt DIR --asan-options detect_stack_use_after_return=0 -- TEST
+#                                                        # extra ASAN_OPTIONS, appended
 #     tools/sanitize.sh --prebuilt DIR --gdb -- TEST     # one test under gdb: the native
 #                                                        # stack where a signal stops it
 #
@@ -29,7 +31,8 @@ KEEP=""
 PREBUILT=""
 BUILD_ONLY=0
 GDB=0
-USAGE="usage: $0 [--python PY] [--keep DIR [--build-only] | --prebuilt DIR [--gdb]] -- <pytest args>"
+ASAN_EXTRA=""
+USAGE="usage: $0 [--python PY] [--keep DIR [--build-only] | --prebuilt DIR [--gdb]] [--asan-options OPTS] -- <pytest args>"
 while [ $# -gt 0 ]; do
   case "$1" in
     --python) PY=$2; shift 2 ;;
@@ -37,6 +40,7 @@ while [ $# -gt 0 ]; do
     --build-only) BUILD_ONLY=1; shift ;;
     --prebuilt) PREBUILT=$2; shift 2 ;;
     --gdb) GDB=1; shift ;;
+    --asan-options) ASAN_EXTRA=$2; shift 2 ;;
     --) shift; break ;;
     *) echo "$USAGE" >&2; exit 2 ;;
   esac
@@ -101,32 +105,6 @@ printf 'int main(void){return 0;}\n' > "$WORK/asan_probe.c"
 ${CC:-cc} -fsanitize=address "$WORK/asan_probe.c" -o "$WORK/asan_probe"
 ASAN_LIB=$(ldd "$WORK/asan_probe" | awk '/libasan/ {print $3; exit}')
 [ -e "$ASAN_LIB" ] || { echo "sanitize: no libasan for ${CC:-cc}"; exit 1; }
-# Does this toolchain keep an over-aligned local aligned in ASan's fake stack frames (its
-# use-after-return detection)? Some do not (GCC PR 110027), and then any 64-byte-aligned
-# local -- which -O3 stores with aligned AVX-512 moves -- faults at random. Nightly
-# 2026-10-22, gcc 13 on Ubuntu 24.04: vmovaps to a float[16] in fft() raised SEGV. Where the
-# probe fails, use-after-return detection is off for the run and says so; every other check
-# stays.
-UAR=""
-cat > "$WORK/align_probe.c" <<'PROBE'
-#include <stdint.h>
-#include <stdio.h>
-__attribute__((noinline)) int check(volatile int depth){
-  _Alignas(64) float t[16];
-  void *volatile seen = t;      /* opaque: the compiler may not fold the test to 0 */
-  int bad = ((uintptr_t)seen & 63) != 0;
-  if(depth > 0) bad |= check(depth - 1);
-  t[0] = (float)depth;
-  return bad;
-}
-int main(void){ int bad = 0; for(int i = 0; i < 64; i++) bad |= check(i % 8); return bad; }
-PROBE
-${CC:-cc} -O2 -fsanitize=address "$WORK/align_probe.c" -o "$WORK/align_probe"
-if ! "$WORK/align_probe"; then
-  UAR=":detect_stack_use_after_return=0"
-  echo "::notice title=sanitizer toolchain::${CC:-cc} misaligns 64-byte-aligned locals in ASan's fake stack (GCC PR 110027): use-after-return detection is off for this run"
-  echo "sanitize: $(${CC:-cc} --version | head -1) misaligns over-aligned locals in ASan's fake stack; detect_stack_use_after_return=0"
-fi
 cd "$WORK"
 T1=$SECONDS
 RUN=()
@@ -146,7 +124,7 @@ SANLOG="$WORK/sanitizer-logs"
 rm -rf "$SANLOG"; mkdir -p "$SANLOG"
 set +e
 env LD_PRELOAD="$ASAN_LIB" PYTHONMALLOC=malloc PYTHONPATH="$WORK/python" \
-    ASAN_OPTIONS=detect_leaks=0:abort_on_error=1:allocator_may_return_null=1:handle_abort=1:handle_segv=1:allow_user_segv_handler=0$UAR:log_path="$SANLOG/asan" \
+    ASAN_OPTIONS=detect_leaks=0:abort_on_error=1:allocator_may_return_null=1:handle_abort=1:handle_segv=1:allow_user_segv_handler=0${ASAN_EXTRA:+:$ASAN_EXTRA}:log_path="$SANLOG/asan" \
     UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1:log_path="$SANLOG/ubsan" \
     OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 TEST_TIMEOUT_SCALE=10 \
     "${RUN[@]}" "$PY" -m pytest -p no:cacheprovider "$@"
