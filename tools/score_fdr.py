@@ -9,10 +9,10 @@ really dismisses on the reference it was chosen for.
 Deliberately not a test of the table. The table can be right cell by cell
 and the rule still wrong, which is exactly what happened before.
 """
-import sys, argparse
+import os, sys, argparse
 import numpy as np
 import multiprocessing as mp
-sys.path.insert(0, 'tests')
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tests"))
 import _gatelib as t
 import matchedfilter as mf
 from matchedfilter import gatechain

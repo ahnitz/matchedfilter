@@ -14,12 +14,13 @@ batch is the reference for "refine every pair with no gate at all".
 
 Run:  python tools/bench_stages.py [n] [ndata] [ntmpl]
 """
+import os
 import sys
 import time
 
 import numpy as np
 
-sys.path.insert(0, "tests")
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tests"))
 import matchedfilter as mf
 from test_api import inspiral_power, template_with_power
 

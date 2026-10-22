@@ -78,7 +78,7 @@ jobs:
         # its own tests run (below) from outside the checkout.
         if: ${{ matrix.sdist }}
         run: |
-          python -m pip install --upgrade pip build pytest
+          python -m pip install --upgrade pip build pytest pyflakes
           python -m build --sdist
           sd=$(ls dist/*.tar.gz)
           tar tzf "$sd" | sed 's|^[^/]*/||' | grep -v '/$' | sort > /tmp/sdist.txt

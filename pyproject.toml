@@ -34,7 +34,7 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
-test = ["pytest"]
+test = ["pytest", "pyflakes"]
 bench = ["numpy>=1.23.2"]
 
 [project.urls]

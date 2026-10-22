@@ -2,7 +2,7 @@
 """Independently check the profile-model coarse gate against filter injections.
 
 Bisection estimates the largest empirical gate meeting the requested budget.
-This implementation is deliberately independent of hmf_tune.measure and the
+This implementation is deliberately independent of _gatelib.measure and the
 model sampler. Rare budgets require enough detected injections: 100 events
 below the gate give roughly 10% relative counting uncertainty.
 
@@ -25,7 +25,7 @@ for _p in (os.path.join(os.path.dirname(_HERE), "tests"), _HERE):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 import matchedfilter as mf                                   # noqa: E402
-import hmf_tune as ht                                        # noqa: E402
+import _gatelib as ht                                        # noqa: E402
 from test_api import inspiral_power, template_with_power, noise  # noqa: E402
 
 
