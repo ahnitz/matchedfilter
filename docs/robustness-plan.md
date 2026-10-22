@@ -285,3 +285,9 @@ A step that changes C or workflows is first pushed to a `ci/<topic>` branch and 
   - Timing turned into counts: Python calls per run() (sys.setprofile) are equal at 1, 16 and 64 pairs; an equal set_reference reloads nothing. Chain ranking and cost relations use a committed cost model (tests/data/cost_model_2048_zen5.json), and the live calibration keeps structural checks.
   - The tautological half of the cascade subset test is gone.
   - The fdr-verification CI job is gone; it duplicated test_fdr_multishape at low power. tools/verify_cascade_fdr.py stays as the large-sample audit tool.
+- 2026-10-22: **C5: nightly workflow.** .github/workflows/nightly.yml runs at 03:17 UTC, and on ci/nightly/** pushes and dispatch:
+  - the suite under ASan and UBSan with tools/sanitize.sh, on x86_64 and arm64;
+  - the suite in reverse module order;
+  - the cp312 musllinux wheel with its full suite (from C2).
+
+  tools/ci_status.py --schedules picks it up from its cron line, so a red nightly fails gate.py's 'ci' check.
