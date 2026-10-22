@@ -160,20 +160,10 @@ jobs:
         with: { submodules: recursive }
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
-      - name: Fetch slangc
-        run: |
-          V=2026.18.2
-          curl -fsSL -o slang.zip \
-            "https://github.com/shader-slang/slang/releases/download/v${V}/slang-${V}-macos-aarch64.zip" \
-            || curl -fsSL -o slang.tgz \
-            "https://github.com/shader-slang/slang/releases/download/v${V}/slang-${V}-macos-aarch64.tar.gz"
-          mkdir -p slangsdk
-          if [ -f slang.zip ]; then unzip -q slang.zip -d slangsdk; else tar xzf slang.tgz -C slangsdk; fi
-          echo "MF_SLANGC=$(find "$PWD/slangsdk" -name slangc -type f | head -1)" >> "$GITHUB_ENV"
-      - name: Build the kernels, including .metallib
+      - name: Compile the committed Metal kernels
         run: |
           python -m pip install -U pip numpy
-          python tools/build_spirv.py
+          tools/precompile_metal.sh
       - name: Install
         run: python -m pip install -e . pytest
       - name: Benchmark and scoreboard

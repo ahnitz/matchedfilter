@@ -235,3 +235,13 @@ A step that changes C or workflows is first pushed to a `ci/<topic>` branch and 
   - Tools that pick a target refuse a conflicting MF_ISA. The benchmark's backend comparison names the targets it could not compare.
   - tests/test_isa_selection.py: three in-process tests fail on the old library. The invalid-MF_ISA crash and the dropped restriction were reproduced by hand on it.
 - 2026-10-22: **B4a: Metal sources without build paths.** One `write_msl` helper in tools/build_spirv.py normalises every Metal emitter's output, including the tier-C, coarse and forward emitters that skipped it. The 80 committed sources that named /home/... paths are stripped (only `#line` strings and trailing newlines change), the sync-conflict copy is deleted, and the Metal build id is restamped. test_kernels_ship fails on any absolute path or conflict copy in the installed kernel directories.
+- 2026-10-22: **B4: the push gate runs one suite per job.**
+  - Six x86 test jobs, each running the suite once:
+    - the widest target on 3.11–3.14, the 3.12 job also building, checking and testing the sdist;
+    - MF_ISA=SSE4 on 3.11 with numpy 1.23.2, the floor;
+    - MF_ISA=AVX2 on 3.14.
+  - A Linux arm64 test job.
+  - The generated-files job also diffs the Q15 codelets.
+  - The Metal job compiles the committed sources with tools/precompile_metal.sh (the release's script), cached, instead of fetching slangc and rebuilding every kernel.
+  - The CI wheels run a smoke subset; the release keeps the full suite.
+  - MANIFEST.in ships CHANGELOG.md, examples/, src/gpu/*.cu and the tool scripts and sources the sdist lacked.
