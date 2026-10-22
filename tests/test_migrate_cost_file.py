@@ -17,9 +17,9 @@ def _tool():
 
 
 OLD = {
-    "block-trial|cpu:0|2048,4096": {"winner": 1, "median": {"0": 2.0, "1": 1.5}, "rechecked": True},
+    "block-trial|cpu:0|2048,4096": {"winner": 1, "median": {"0": 2.0, "1": 1.5}},
     "block-trial|gpu:0|2048,8192": {"samples": {"0": [1.0], "1": []}},          # unfinished
-    "chain-trial|2048|6|0.001|2|cpu:0": {"chain": [256, 1024], "rechecked": False,
+    "chain-trial|2048|6|0.001|2|cpu:0": {"chain": [256, 1024],
                                          "median": {"256,1024": 1e-9, "512": 2e-9}},
     "chain-trial|2048|6|0.001|2|gpu:0|batches": {"samples": {"512": [1.0]}},     # unfinished
     "q15-trial|2048|6|0.001|256,512|cpu:0": {"method": "paired-v1", "q15": True,
@@ -44,7 +44,6 @@ def test_old_trial_locks_read_back_as_the_same_choices(monkeypatch, tmp_path):
     mf.clear_autotune_cache()
     trials = td._BlockTrials()
     assert trials.winner("cpu:0|2048,4096") == 1
-    assert trials._st("cpu:0|2048,4096").rechecked             # its re-check state kept
     assert trials.winner("gpu:0|2048,8192") is None             # unfinished: it continues
     assert trials.rank_for("gpu:0|2048,8192", 2) == 1           # from its rank-0 sample
     assert trials._st("gpu:0|2048,8192").samples == {0: [1.0], 1: []}

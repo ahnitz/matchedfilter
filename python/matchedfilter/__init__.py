@@ -2560,15 +2560,6 @@ def _chain_trial_batch(tkey, chain, value):
         return tr.record(tuple(chain), value)
 
 
-def _chain_steady(tkey, value):
-    """A steady-state sample (s/unit, the trial's own unit) of a locked chain trial: reopens
-    the lock on file -- the next process trials again -- when steady state contradicts the
-    trial, once per key (Choice.observe)."""
-    with _AUTOTUNE_LOCK:
-        tr = _CHAIN_TRIALS.get(tkey)
-        return tr is not None and tr.observe(value)
-
-
 #: A CPU chain trial ends after this many times its per-candidate samples in calls: candidates
 #: some live plan never runs -- another process's shortlist, a group that stopped calling --
 #: must not keep a trial open for good.
@@ -3307,7 +3298,6 @@ class HierarchicalFilter(MatchedFilter):
             if w is not None:
                 if tuple(w) in feasible:
                     chain = tuple(w)
-                    self._chain_monitor = tkey
         # While the bank's block-size trial is open (time_domain: _trial_hold), the plan runs
         # the model's chain: chain and Q15 trials wait for the winning layout (release_trials).
         held = getattr(self, "_trial_hold", False)
@@ -3316,7 +3306,6 @@ class HierarchicalFilter(MatchedFilter):
             # segment's PSD, another template group) have slightly different short lists, and
             # their union is what gets measured. Candidates arriving before the lock join it;
             # after the lock every plan adopts the winner.
-            self._chain_monitor = tkey        # steady calls re-check the lock (_chain_steady)
             with _AUTOTUNE_LOCK:
                 tr = _chain_trial(tkey)
                 if tr.winner is not None:

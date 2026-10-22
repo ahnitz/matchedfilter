@@ -6,6 +6,10 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ### Removed
 
+- `MF_TRIAL_RECHECK` and the steady-state re-check it switched on (`Choice.observe`,
+  `gatechain.recheck_enabled`, `observe_steady`, `steady_disagrees`, `RECHECK_*`): off by
+  default, it let one process's steady timing reopen a lock for every later process, so
+  processes sharing a cost file could make different choices. A stored lock is final.
 - Python 3.10 support: matchedfilter needs Python 3.11 or newer, and numpy 1.23.2 or
   newer (the first numpy with Python 3.11 wheels). Release wheels cover CPython
   3.11-3.14.

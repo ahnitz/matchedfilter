@@ -32,8 +32,6 @@ def _lock(k, v):
     rec = {"value": value}
     if isinstance(v.get("median"), dict):
         rec["median"] = {str(c): float(m) for c, m in v["median"].items()}
-    if v.get("rechecked"):
-        rec["rechecked"] = True
     return rec
 
 
@@ -48,8 +46,6 @@ def _open(k, v):
            "dropped": sorted(str(c) for c in v.get("dropped", ()))}
     if v.get("method") == "paired-v1":
         rec["method"] = "paired"
-    if v.get("rechecked"):
-        rec["rechecked"] = True
     return rec
 
 

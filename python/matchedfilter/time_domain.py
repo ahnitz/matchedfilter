@@ -370,8 +370,6 @@ class _BlockTrials:
       * a rank r > 0 wins only by more than gatechain.TIE AND by more than the samples' own
         noise (gatechain.measured_choice: 2 standard errors); unclear contests sample further, up to
         _BLOCK_TRIAL_MAX, then keep the model's layout;
-      * with MF_TRIAL_RECHECK=1, a locked winner is re-checked against steady-state batches
-        (observe) and reopened when steady state clearly disagrees with the trial.
     On the CPU, layouts are timed in paired rounds on the same jobs (_cpu_block_round).
     Samples persist in MF_COST_FILE, so a trial carries across short processes, and a trial
     ends at its budget of batches that could sample. Trials are keyed by _trial_key, so
@@ -429,13 +427,6 @@ class _BlockTrials:
     def record_cpu_round(self, key, timings):
         """CPU layouts measured on the same jobs, one complete interleaved round."""
         self._st(key).round(timings)
-
-    def observe(self, key, value):
-        """A steady-state batch of a locked key (s/unit); True when it reopened the lock
-        (Choice.observe: only with MF_TRIAL_RECHECK=1 -- off, as by default, a stored lock is
-        final: one process's steady timing reopening the lock for every later one let two
-        processes sharing a cost file end on different block sizes)."""
-        return self._st(key).observe(value)
 
     def winner(self, key):
         return self._st(key).winner
@@ -557,19 +548,16 @@ def _cpu_block_round(jobs):
 
 def _trial_begin(jobs):
     """Put every trialling bank of the batch on its key's current rank (or lock it, once its key
-    has a winner). Returns [(key, rank, banks, settled, steady)]: banks still trialling, and
-    locked banks whose batches are timed for the re-check (steady=True)."""
+    has a winner). Returns [(key, rank, banks, settled, built)] for the banks still trialling."""
     from . import _autotune_enabled, gatechain
     if _BLOCK_TRIALS.cpu_replaying:
         return None
-    groups, locked = {}, {}
+    groups = {}
     for bank, _, kw in jobs:
         if (kw or {}).get("template_index") is not None:
             continue
         if getattr(bank, '_layouts', None):
             groups.setdefault(_trial_key(bank), []).append(bank)
-        elif getattr(bank, '_trial_monitor', False):
-            locked.setdefault(_trial_key(bank), []).append(bank)
     plan = []
     chains = _chain_trials_begin(jobs)
     for key, bs in groups.items():
@@ -593,10 +581,7 @@ def _trial_begin(jobs):
             settled = False
         else:
             _BLOCK_TRIALS.tick(key)
-        plan.append((key, r, bs, settled, False, _built(bs)))
-    for key, bs in locked.items():
-        if _BLOCK_TRIALS.winner(key) is not None and not any(_bank_calibrating(b) for b in bs):
-            plan.append((key, _BLOCK_TRIALS.winner(key), bs, True, True, _built(bs)))
+        plan.append((key, r, bs, settled, _built(bs)))
     if not plan and not chains:
         return None
     import time
@@ -618,7 +603,7 @@ def _chain_trials_begin(jobs):
     plan already ran that chain in an earlier batch (its first batch builds recordings and
     calibrates: one-off costs, not the chain's)."""
     from . import _chain_trial_next, _chain_trial_pending, _CHAIN_TRIALS, _AUTOTUNE_LOCK
-    by, watch = {}, {}
+    by = {}
     for bank, _, kw in jobs:
         if (kw or {}).get("template_index") is not None:
             continue
@@ -629,18 +614,7 @@ def _chain_trials_begin(jobs):
             tk = getattr(p, "_chain_trial", None)
             if tk is not None:
                 by.setdefault(tk, {})[id(p)] = p
-            elif getattr(p, "_chain_monitor", None) is not None:
-                watch.setdefault(p._chain_monitor, {})[id(p)] = p
     out = []
-    for tk, plans in watch.items():
-        # Locked GPU chain trials: whole batches re-check the lock (_chain_steady), once.
-        with _AUTOTUNE_LOCK:
-            tr = _CHAIN_TRIALS.get(tk)
-            ok = (tr is not None and tr.winner is not None and tr.median
-                  and not tr.rechecked and tk not in by
-                  and all(tuple(p._chain) == tuple(tr.winner) for p in plans.values()))
-        if ok:
-            out.append((tk, tuple(tr.winner), list(plans.values()), True, True))
     for tk, plans in by.items():
         c = _chain_trial_next(tk)
         if c is None:
@@ -668,7 +642,7 @@ def _chain_trials_begin(jobs):
             p._chain_last_batch = (tuple(c), run)
         if settled:
             _chain_trial_pending(tk, c, +1)
-        out.append((tk, tuple(c), list(plans.values()), settled, False))
+        out.append((tk, tuple(c), list(plans.values()), settled))
     return out
 
 
@@ -678,13 +652,8 @@ def _trial_end(tok):
         return
     t0, plan, work, chains = tok
     dt = time.perf_counter() - t0
-    from . import _chain_trial_batch, _chain_trial_pending, _chain_steady
-    for tk, c, plans, settled, steady in chains:
-        if steady:
-            if work > 0 and _chain_steady(tk, dt / work):
-                for p in plans:
-                    p._chain_monitor = None
-            continue
+    from . import _chain_trial_batch, _chain_trial_pending
+    for tk, c, plans, settled in chains:
         if settled:
             _chain_trial_pending(tk, c, -1)
         from . import _log_autotune
@@ -696,16 +665,11 @@ def _trial_end(tok):
                 p.autotune_info.update(status="locked", winner=tuple(w))
                 if tuple(w) != tuple(p._chain):
                     p._switch_chain(w)
-    for key, r, bs, settled, steady, built in plan:
+    for key, r, bs, settled, built in plan:
         # A batch that built recordings (new call shapes, graphs) timed setup: no sample.
         # Trials took such batches for candidates that ran after the model's own, which had
         # built its recordings during calibration: a 2048 leaf sampled 2.7x slower than it ran.
         settled = settled and _built(bs) == built
-        if steady:
-            if settled and work > 0 and _BLOCK_TRIALS.observe(key, dt / work):
-                for b in bs:
-                    b._trial_monitor = False
-            continue
         if settled and work > 0:
             _BLOCK_TRIALS.record(key, r, dt / work)
         for b in bs:
@@ -737,8 +701,8 @@ def _fuse_begin(jobs, trial):
     devices: (close or None, sample token or None for _fuse_end). Fusing interleaves every
     job's phases in shared command buffers -- worth +16% on an M2, -3 to -6% on an 8060S,
     nothing on a RENOIR (paired ladders, 2026-10-19) -- so neither is assumed. A batch is a
-    sample only when no other trial is trying candidates in it (a locked trial's steady
-    re-check changes nothing) and it builds no recording."""
+    sample only when no other trial is trying candidates in it and it builds no
+    recording."""
     from . import _autotune_enabled
     from .device import parse as _parse_device
     devs = tuple(sorted({"%s %s" % (d, d.name) for d in (
@@ -756,8 +720,7 @@ def _fuse_begin(jobs, trial):
     close = fused() if side == "fused" else None
     work = sum(len(b.filters_f) * int(np.asarray(x).size) for b, x, kw in jobs
                if (kw or {}).get("template_index") is None)
-    trying = trial is not None and (any(not p[4] for p in trial[1])
-                                    or any(not c[4] for c in trial[3]))
+    trying = trial is not None and bool(trial[1] or trial[3])
     if record is None or trying or work <= 0:
         return close, None
     import time
@@ -1702,9 +1665,6 @@ class TimeDomainFilterBank:
                 # none are built, so the bank is the model's layout at no extra cost.
                 nr = (_BLOCK_TRIAL_RANKS
                       if _gc._cost_file() is not None and _autotune_enabled() else 1)
-                # Locked or trialling, a bank whose block size is a measured choice keeps its
-                # batches timed for the re-check (_BlockTrials.observe).
-                self._trial_monitor = nr > 1 and _gc.recheck_enabled()
                 w = _BLOCK_TRIALS.winner(_trial_key(self)) if nr > 1 else None
                 cands = _stored_cands(self) if w else None
                 if w == 0 or (w and cands and w < len(cands)):
