@@ -313,12 +313,16 @@ def test_a_stored_lock_decides_every_plan_of_the_key(monkeypatch, tmp_path):
 
 
 def test_gpu_kernel_choices_carry_their_backend_artifacts():
-    """CUDA-only kernels and compiled Metal libraries have their own build identity."""
+    """CUDA-only kernels and compiled Metal libraries have their own build identity, for
+    each backend this install carries (_kernel_dirs: no PTX on macOS, no Metal elsewhere)."""
     import json, pathlib
+    from matchedfilter import _kernel_dirs
     package = pathlib.Path(gc.__file__).parent
-    for backend, folder, field in (("vulkan", "spirv", "build_id"),
-                                   ("cuda", "ptx", "build_id"),
-                                   ("metal", "spirv", "metal_build_id")):
+    for backend, files, folder, field in (("vulkan", "spirv", "spirv", "build_id"),
+                                          ("cuda", "ptx", "ptx", "build_id"),
+                                          ("metal", "metal", "spirv", "metal_build_id")):
+        if files not in _kernel_dirs.shipped():
+            continue
         manifest = json.loads((package / folder / "manifest.json").read_text())
         assert gc.gpu_kernel_id(backend) == manifest[field][:16]
 
