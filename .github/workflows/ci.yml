@@ -161,23 +161,6 @@ jobs:
           diff -u /tmp/committed-q15.h src/codelets-q15-inl.h \
             || { echo "::error::src/codelets-q15-inl.h is stale; re-run 'python3 src/gen_q15.py'"; exit 1; }
 
-  fdr-verification:
-    name: Multi-shape False Dismissal Rate (FDR) verification
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-        with: { submodules: true }
-      - uses: actions/setup-python@v5
-        with: { python-version: "3.12" }
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip build
-          python -m pip install .[test]
-      - name: Run multi-shape FDR verification
-        run: |
-          python tools/verify_cascade_fdr.py --injections 5000 --shapes all
-
   wheel:
     # Exercise the newest supported interpreter on both release platforms.
     runs-on: ${{ matrix.os }}

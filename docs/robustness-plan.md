@@ -274,3 +274,14 @@ A step that changes C or workflows is first pushed to a `ci/<topic>` branch and 
   - `Choice.limit` is the most calls after which a contest has locked, whatever the timings: its budget of attempts, else every candidate sampled to the cap after its warm-up (rounds, for a paired contest). test_choice proves the bound on contests that never resolve.
   - test_followup_batch and test_gate_chain's trial test drive until the choice locks, up to its limit, instead of restating its schedule.
   - Not done here: making the two slowest tests cheaper (test_reproducible_choices, 218 s on a loaded host; test_switching_layouts_is_exact_and_locks, 84 s). Deferred to C4 with the other test-cost work.
+- 2026-10-22: **C4: tests that fail on the bug they guard.**
+  - Deleted 28 tests that could not fail:
+    - toggles of the removed MF_BRACKET and MF_GCAL;
+    - a constant-arithmetic memory "benchmark";
+    - test_replica_top_critical.py, which never imported the library;
+    - the temporary-data smoke test that B5's ownership test supersedes;
+    - test_regression_suite's 16 `is not None` smoke cases, its duplicate calibration probe, its two tests of the maintainer's local banks, and its 360-line standalone benchmark.
+  - The rest of that file is tests/test_search_contracts.py.
+  - Timing turned into counts: Python calls per run() (sys.setprofile) are equal at 1, 16 and 64 pairs; an equal set_reference reloads nothing. Chain ranking and cost relations use a committed cost model (tests/data/cost_model_2048_zen5.json), and the live calibration keeps structural checks.
+  - The tautological half of the cascade subset test is gone.
+  - The fdr-verification CI job is gone; it duplicated test_fdr_multishape at low power. tools/verify_cascade_fdr.py stays as the large-sample audit tool.

@@ -12,7 +12,6 @@ and only at the calibrated rate.  Tests that assert closeness rather than
 identity would pass while the refinement path quietly diverged, so they assert
 identity.
 """
-import time
 
 import os
 import numpy as np
@@ -399,43 +398,6 @@ def test_run_series_matches_block_by_block():
         np.testing.assert_array_equal(got["value"][b, :, 0], want["value"][0, :, 0])
 
 
-def test_bracket_does_not_change_what_is_reported():
-    """The bracket settles pairs without the second coarse transform.
-
-    It is allowed to do that only where the interpolated statistic's bracket
-    does not straddle the coarse threshold, so every pair it settles it settles the way
-    the transform would have.  Turning it off must therefore change the time
-    taken and nothing else.  The reject side is the one that can cost a
-    trigger if its margin is too tight, which is why this asserts identity
-    rather than a tolerance -- a bracket that is merely close is a bracket
-    that is silently dismissing signals.
-    """
-    n, nseries, ntaps, nt = 4096, 1 << 16, 451, 6
-    rng = np.random.default_rng(11)
-    power = inspiral_power(n)
-    H = np.stack([template_with_power(n, power) for _ in range(nt)])
-    ser = coloured_series(nseries, -7 / 3.0, rng)
-    starts, ws, we = overlap_save_layout(nseries, n, ntaps)
-
-    def go(on):
-        old = os.environ.get("MF_BRACKET")
-        os.environ["MF_BRACKET"] = str(on)
-        try:
-            hf = mf.HierarchicalFilter(n, ndata=1, ntemplates=nt, snr=5.0, fd=1e-2)
-            hf.set_reference(power)
-            hf.set_templates(H)
-            r = hf.run_series(ser, starts, ws, we, binsize=n, threshold=0.0)
-            return r["index"].copy(), r["value"].copy()
-        finally:
-            if old is None: del os.environ["MF_BRACKET"]
-            else: os.environ["MF_BRACKET"] = old
-
-    oi, ov = go(0)
-    bi, bv = go(1)
-    np.testing.assert_array_equal(bi, oi)
-    np.testing.assert_array_equal(bv, ov)
-
-
 def test_run_series_grouping_is_invisible():
     """How many blocks are filtered together must not change any output.
 
@@ -723,63 +685,32 @@ def _ratio_filter_shaped_workload(pin=True, seeds=(22, 23, 24)):
     assert omitted / detected <= 3e-2, f"omitted {omitted}/{detected}"
 
 
-def test_autotuned_calibration_meets_the_budget_where_the_default_does_not():
-    """`MF_GCAL=1` is what makes the false-dismissal budget hold.
-
-    g and graw are derived from a noiseless autocorrelation of the
-    reference's MEAN spectrum, which is not a bound on any individual
-    realisation, so the modelled threshold sits too high.  That is what made
-    `test_ratio_filter_shaped_workload` above xfail while the pinned path had
-    nothing but the model: 8 of 140 omitted against a 3% budget.  This
-    calibration re-measures both over realisations and the budget then holds.
-
-    The measured margin now fixes the same workload more cheaply, so this is
-    no longer the only route to it -- but the calibration is still the only
-    thing that helps where the tables have no row, and nothing else in the
-    suite exercises it, so it is pinned here to stop it rotting.  It is off
-    by default because it over-corrects: ~9% more than tuning the coarse
-    threshold by hand, 14.43 against 13.29 ms/segment on the captures, both
-    at zero loss.
-    """
-    old = os.environ.get("MF_GCAL")
-    os.environ["MF_GCAL"] = "1"
-    try:
-        _ratio_filter_shaped_workload()
-    finally:
-        if old is None: del os.environ["MF_GCAL"]
-        else: os.environ["MF_GCAL"] = old
-
-
 def test_python_overhead_stays_off_the_hot_path():
-    """The whole D x T pair loop is one call into C, so per-pair cost must not
-    scale with how much Python ran.
-
-    Compare one pair against the amortised cost of 64.  If the glue dominated,
-    the single pair would carry the entire call overhead and the ratio would
-    blow up.  The bound is deliberately loose -- this is guarding against a
-    structural regression (per-pair Python work creeping back in), not
-    measuring anything, and it has to survive a noisy shared CI runner.
-    """
-    n, nd, nt = 4096, 8, 8
+    """The whole D x T pair loop is one call into C, so the Python run() executes does not
+    grow with the pair count. Counted, not timed (sys.setprofile counts Python calls), so
+    a per-pair Python loop creeping back in fails here deterministically, on any runner."""
+    import sys
+    n = 4096
     rng = np.random.default_rng(13)
     h = template_with_power(n, inspiral_power(n))
-    filt = mf.MatchedFilter(n, nd, nt)
-    filt.set_data(noise((nd, n), rng))
-    filt.set_templates(np.repeat(h[None, :], nt, axis=0))
+    counts = {}
+    for nd in (1, 4, 8):
+        filt = mf.MatchedFilter(n, nd, nd)
+        filt.set_data(noise((nd, n), rng))
+        filt.set_templates(np.repeat(h[None, :], nd, axis=0))
+        filt.run(binsize=1024)                       # warm: lazy setup is not the hot path
+        calls = [0]
 
-    one = all_pairs = float("inf")
-    for _ in range(5):
-        t0 = time.perf_counter()
-        filt.run(binsize=1024, data=(0, 1), templates=(0, 1))
-        one = min(one, time.perf_counter() - t0)
-        t0 = time.perf_counter()
-        filt.run(binsize=1024)
-        all_pairs = min(all_pairs, time.perf_counter() - t0)
-
-    per_pair = all_pairs / (nd * nt)
-    assert one < 40 * per_pair, (
-        "one pair costs %.1f us against %.1f us amortised; Python overhead is "
-        "back on the per-pair path" % (one * 1e6, per_pair * 1e6))
+        def prof(frame, event, arg):
+            if event == "call":
+                calls[0] += 1
+        sys.setprofile(prof)
+        try:
+            filt.run(binsize=1024)
+        finally:
+            sys.setprofile(None)
+        counts[nd * nd] = calls[0]
+    assert counts[1] == counts[16] == counts[64], counts
 
 
 def test_first_stage_threshold_is_independent_of_configuration():
