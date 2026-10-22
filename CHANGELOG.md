@@ -122,6 +122,15 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ### Fixed
 
+- `MF_ISA` restricts the process to its target. An invalid value raises `ValueError` at
+  import, naming the build's targets; it used to print an error and segfault at the next
+  kernel call. `targets()` lists only that target from the start, `set_target(None)`
+  restores it (it used to switch back to the widest target), and selecting another target
+  raises. A failed `set_target` changes nothing (it used to leave the default selected).
+- A plan keeps its kernel for every call: the sub-plans it builds lazily (the real-series
+  half transform, the DIF forwards, the pair-batch alternate, the direct refine's
+  correlation, the root merge) use the plan's own target, not the one selected when they
+  are built.
 - MF_COST_FILE never loses data. A damaged file (truncated, not JSON, not a JSON object)
   read as empty and the next write replaced it, losing every stored model and choice: it
   is now kept aside as `<path>.corrupt.<pid>` with a warning. A file that exists but cannot

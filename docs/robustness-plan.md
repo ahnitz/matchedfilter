@@ -229,3 +229,8 @@ A step that changes C or workflows is first pushed to a `ci/<topic>` branch and 
   - `clear_autotune_cache` clears what its docstring says; the autouse fixture no longer swallows errors.
   - Every run prints a skip table (a ::notice on Actions). `--reverse-modules` reverses module order.
   - Forward and reversed suites both pass: 2155 passed, 141 skipped.
+- 2026-10-21: **B3: MF_ISA restricts the process; plans keep their kernel.**
+  - kernel.cc: MF_ISA is the baseline that `ap_set_target(NULL)` restores. A failed `ap_set_target` restores the previous selection. `ap_isa_init` lets the extension raise ValueError at import.
+  - dispatch.c: `*_like` and `*_on` variants run on a plan's back end. matchfilt.c and hmf.c build lazy sub-plans and run their direct correlation, real split and root merge with them.
+  - Tools that pick a target refuse a conflicting MF_ISA. The benchmark's backend comparison names the targets it could not compare.
+  - tests/test_isa_selection.py: three in-process tests fail on the old library. The invalid-MF_ISA crash and the dropped restriction were reproduced by hand on it.

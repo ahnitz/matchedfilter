@@ -451,7 +451,10 @@ def compare_backends(isas, reps, n=4096, ntmpl=64, ntaps=1024,
         try:
             mf.set_target(isa)
         except ValueError:
-            continue                    # not in this build, or not runnable here
+            # Not in this build, not runnable here, or outside MF_ISA: said, not skipped silently.
+            print("  %s: not compared (not one of this session's targets %s)"
+                  % (isa, ",".join(mf.targets())))
+            continue
         def build():
             q = mf.HierarchicalFilter(n, ndata=1, ntemplates=ntmpl, snr=threshold, fd=1e-3, chain=512)
             q.set_reference(power); q.set_templates(h)

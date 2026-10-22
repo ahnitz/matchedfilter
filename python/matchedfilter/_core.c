@@ -1051,7 +1051,8 @@ static PyObject *M_set_target(PyObject *self,PyObject *args){
   const char *name=NULL;
   if(!PyArg_ParseTuple(args,"z",&name)) return NULL;
   if(ap_set_target(name)){
-    PyErr_Format(PyExc_ValueError,"no such target in this build: %s",name);
+    PyErr_Format(PyExc_ValueError,"cannot select target %s: it is not a target this build "
+                 "holds and this CPU runs, or it is outside MF_ISA's restriction",name);
     return NULL;
   }
   Py_RETURN_NONE;
@@ -1350,6 +1351,22 @@ static PyMethodDef methods[]={
   {NULL,NULL,0,NULL}};
 static struct PyModuleDef mod={PyModuleDef_HEAD_INIT,"matchedfilter._core",NULL,-1,methods};
 PyMODINIT_FUNC PyInit__core(void){
+  /* An MF_ISA that names no target of this build leaves the library without a back end:
+     refuse at import, naming the targets, rather than fail later in a kernel call. Not
+     ImportError, which a consumer would report as "not installed". */
+  if(ap_isa_init()){
+    PyObject *names=PyUnicode_FromString("");
+    for(int i=0;names && i<ap_target_count();i++){
+      PyObject *nx=PyUnicode_FromFormat("%U %s",names,ap_target_name(i));
+      Py_DECREF(names); names=nx;
+    }
+    if(names){
+      PyErr_Format(PyExc_ValueError,"MF_ISA=%s is not one of this build's targets:%U",
+                   getenv("MF_ISA"),names);
+      Py_DECREF(names);
+    }
+    return NULL;
+  }
   if(PyType_Ready(&MFType)<0) return NULL;
   if(PyType_Ready(&HMFType)<0) return NULL;
   if(PyType_Ready(&RootType)<0) return NULL;

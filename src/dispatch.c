@@ -26,8 +26,11 @@ int ap_supported(size_t N){
   return b && b->supported(N);
 }
 
-ap_plan *ap_create(size_t N){
-  const ap_backend *b=pick();
+/* A sub-plan takes its parent's back end, not whatever is selected when it is built
+   (lazily, possibly after set_target): a plan keeps one kernel for every call. */
+static const ap_backend *be_of(const ap_plan *like){ return like ? like->be : pick(); }
+
+static ap_plan *create_on(const ap_backend *b,size_t N){
   if(!b || !b->supported(N)) return NULL;
   void *h=b->create(N);
   if(!h) return NULL;
@@ -37,10 +40,12 @@ ap_plan *ap_create(size_t N){
   return p;
 }
 
+ap_plan *ap_create(size_t N){ return create_on(pick(),N); }
+ap_plan *ap_create_like(const ap_plan *like,size_t N){ return create_on(be_of(like),N); }
+
 const char *ap_plan_backend(const ap_plan *p){ return p?p->be->name:"none"; }
 
-ap_plan *ap_create_pairbatch(size_t N){
-  const ap_backend *b=pick();
+static ap_plan *create_pairbatch_on(const ap_backend *b,size_t N){
   if(!b || N<64 || N>2048 || !b->supported(N) || !b->create_pairbatch) return NULL;
   void *h=b->create_pairbatch(N);
   if(!h) return NULL;
@@ -48,6 +53,11 @@ ap_plan *ap_create_pairbatch(size_t N){
   if(!p){ b->destroy(h); return NULL; }
   p->be=b; p->h=h; p->n=N;
   return p;
+}
+
+ap_plan *ap_create_pairbatch(size_t N){ return create_pairbatch_on(pick(),N); }
+ap_plan *ap_create_pairbatch_like(const ap_plan *like,size_t N){
+  return create_pairbatch_on(be_of(like),N);
 }
 
 void ap_destroy(ap_plan *p){
@@ -63,14 +73,24 @@ void ap_fft(ap_plan *p,const float *in,float *out,int sign){
 void ap_td_corr(const float *x,const float *taps,int L,int nlag,float *out){
   pick()->td_corr(x,taps,L,nlag,out);
 }
+void ap_td_corr_on(const ap_plan *p,const float *x,const float *taps,int L,int nlag,float *out){
+  be_of(p)->td_corr(x,taps,L,nlag,out);
+}
 
 void ap_real_split(const float *Z,const float *tw,size_t n,float *X){
   pick()->real_split(Z,tw,n,X);
+}
+void ap_real_split_on(const ap_plan *p,const float *Z,const float *tw,size_t n,float *X){
+  be_of(p)->real_split(Z,tw,n,X);
 }
 
 void ap_root_merge(const float *D,const float *T,size_t k0,size_t k1,float scale,
                    const float *tw,size_t n,float *Z){
   pick()->root_merge(D,T,k0,k1,scale,tw,n,Z);
+}
+void ap_root_merge_on(const ap_plan *p,const float *D,const float *T,size_t k0,size_t k1,
+                      float scale,const float *tw,size_t n,float *Z){
+  be_of(p)->root_merge(D,T,k0,k1,scale,tw,n,Z);
 }
 
 size_t ap_nbins(const ap_plan *p,size_t binsize,size_t start,size_t end){
@@ -231,6 +251,10 @@ int ap_binmax(ap_plan *p,const float *in,size_t dist,int B,
    came out wrong. */
 int ap_lane_width(void){
   const ap_backend *b=pick();
+  return b?b->lanes:0;
+}
+int ap_plan_lanes(const ap_plan *p){
+  const ap_backend *b=be_of(p);
   return b?b->lanes:0;
 }
 

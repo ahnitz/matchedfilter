@@ -103,12 +103,13 @@ struct ap_mf_plan {
   void *qscr;                 /* kernel scratch */
 };
 
-static ap_mf_plan *create_mf(size_t n, int ndata, int ntmpl, int pair){
+/* like: the plan whose back end a sub-plan uses (NULL: the active target). */
+static ap_mf_plan *create_mf(size_t n, int ndata, int ntmpl, int pair, const ap_plan *like){
   if(ndata<1||ntmpl<1) return NULL;
   ap_mf_plan *p = calloc(1,sizeof(*p));
   if(!p) return NULL;
   p->n=n; p->nd=ndata; p->nt=ntmpl;
-  p->fft = pair ? ap_create_pairbatch(n) : ap_create(n);
+  p->fft = pair ? ap_create_pairbatch_like(like,n) : ap_create_like(like,n);
   if(!p->fft){ free(p); return NULL; }
   /* Ask the plan for its split rather than recomputing it.  Deriving it
      independently means the two disagree the moment the heuristic changes, and
@@ -116,7 +117,7 @@ static ap_mf_plan *create_mf(size_t n, int ndata, int ntmpl, int pair){
      split through MF_N1 used to produce silently wrong answers. */
   { p->n1=p->n2=0;
     if(!ap_plan_split(p->fft,&p->n1,&p->n2)){ p->n1=p->n2=0; }
-    p->w = ap_lane_width();
+    p->w = ap_plan_lanes(p->fft);
     /* Group-major storage is only correct if the fused loader consumes it, so
         ask the plan rather than assuming.  The AVX-512 1024 kernel has no fused
         variant, but AVX2 at 1024 runs on the generic back end, which does - and
@@ -134,7 +135,7 @@ static ap_mf_plan *create_mf(size_t n, int ndata, int ntmpl, int pair){
   /* Only the measured x86 targets opt in. MF_PBMAX remains a way to force
      either implementation in one build, without changing process state here. */
   const char *isa=ap_plan_backend(p->fft);
-  const size_t alt_max_n = (!strcmp(isa,"AVX3") && ap_lane_width() >= 16) ? 1024u : 512u;
+  const size_t alt_max_n = (!strcmp(isa,"AVX3") && ap_plan_lanes(p->fft) >= 16) ? 1024u : 512u;
   p->allow_pair_alt = !pair && !p->pb && n>=256 && n<=alt_max_n && p->w>0 && ntmpl>=(size_t)p->w
     && !getenv("MF_PBMAX")
     && (!strcmp(isa,"AVX3") || !strcmp(isa,"AVX2") || !strcmp(isa,"SSE4"));
@@ -173,11 +174,11 @@ static ap_mf_plan *create_mf(size_t n, int ndata, int ntmpl, int pair){
 }
 
 ap_mf_plan *ap_mf_create(size_t n, int ndata, int ntmpl){
-  return create_mf(n,ndata,ntmpl,0);
+  return create_mf(n,ndata,ntmpl,0,NULL);
 }
 
 ap_mf_plan *ap_mf_create_pairbatch(size_t n, int ndata, int ntmpl){
-  return create_mf(n,ndata,ntmpl,1);
+  return create_mf(n,ndata,ntmpl,1,NULL);
 }
 
 void ap_mf_destroy(ap_mf_plan *p){
@@ -360,7 +361,7 @@ static void restore_spectrum(ap_mf_plan *p,const float *re,const float *im,int c
 
 static ap_mf_plan *pair_alternate(ap_mf_plan *p,int d0,int nd,int t0,int nt){
   if(!p->pair_alt){
-    ap_mf_plan *q=create_mf(p->n,p->nd,p->nt,1);
+    ap_mf_plan *q=create_mf(p->n,p->nd,p->nt,1,p->fft);  /* on the plan's own kernel */
     unsigned char *dr=calloc((size_t)p->nd,1), *tr=calloc((size_t)p->nt,1);
     if(!q || !dr || !tr){ ap_mf_destroy(q); free(dr); free(tr); return NULL; }
     p->pair_alt=q; p->alt_dready=dr; p->alt_tready=tr;
@@ -917,7 +918,7 @@ static int series_spectra(ap_mf_plan *p,const float *series,size_t nseries,
       for(size_t k=0;k<have;k++) z[k]=src[k]*inv;
       if(have<n) memset(z+have,0,(n-have)*sizeof(float));
       ap_fft(p->half_fft,z,p->sfwd+n,AP_FORWARD);
-      ap_real_split(p->sfwd+n,p->rtw,n,p->sspec);
+      ap_real_split_on(p->fft,p->sfwd+n,p->rtw,n,p->sspec);
       if(ap_mf_set_data(p,j,p->sspec)) return -1;
     }
     return 0;
@@ -1124,7 +1125,7 @@ int ap_mf_correlate_series_continuous_real(ap_mf_plan *p,const float *series,
   if(!p->half_fft){
     const size_t h=p->n/2;
     if(!ap_supported(h)) return -1;
-    p->half_fft=ap_create(h);
+    p->half_fft=ap_create_like(p->fft,h);
     p->rtw=malloc(2*(h+1)*sizeof(float));
     if(!p->half_fft||!p->rtw){
       if(p->half_fft) ap_destroy(p->half_fft);
@@ -1337,14 +1338,14 @@ int ap_mf_run_series_dif(ap_mf_plan *p,
   const size_t nb0=1+(first_end-win_start[0]-1)/binsize;
   if(decimated){
     if(!p->fft_fwd_n){
-      p->fft_fwd_n = ap_create(n);
+      p->fft_fwd_n = ap_create_like(p->fft,n);
       p->sfwd_n = ap_alloc64(2 * n * sizeof(float));
       p->sspec_n = ap_alloc64(2 * n * sizeof(float));
       if(!p->fft_fwd_n || !p->sfwd_n || !p->sspec_n) return -1;
     }
   } else {
     if(!p->fft_fwd){
-      p->fft_fwd = ap_create(input_n);
+      p->fft_fwd = ap_create_like(p->fft,input_n);
       p->sfwd_2n = ap_alloc64(2 * input_n * sizeof(float));
       p->sspec_2n = ap_alloc64(2 * input_n * sizeof(float));
       if(!p->fft_fwd || !p->sfwd_2n || !p->sspec_2n) return -1;
@@ -1813,7 +1814,7 @@ int ap_root_real(ap_root *r,const float *D,const float *T,size_t nbins,
   if(!r||!D||!T||!out) return -1;
   const size_t h=r->n/2;
   if(nbins<h+1 || k0>k1 || k1>h+1) return -1;
-  ap_root_merge(D,T,k0,k1,scale,r->tw,r->n,r->Z);
+  ap_root_merge_on(r->half,D,T,k0,k1,scale,r->tw,r->n,r->Z);
   ap_fft(r->half,r->Z,out,AP_BACKWARD);
   return 0;
 }
