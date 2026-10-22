@@ -82,7 +82,7 @@ class _RaggedSplit:
             self.rank[m] = np.arange(int(m.sum()))
 
     def parts(self, r):
-        from . import _SparsePeaks
+        from ._results import _SparsePeaks
         if not isinstance(r, _SparsePeaks):
             return [(r[0][m][:, :, :u], r[1][m][:, :, :u]) for m, u in zip(self.masks, self.us)]
         nt, nb = r.shape[1], r.shape[2]
@@ -99,7 +99,7 @@ class _RaggedSplit:
 
     def deferred(self, d):
         """One _Deferred per part of the deferred result d, sharing one split."""
-        from . import _Deferred
+        from ._results import _Deferred
         cell = []
 
         def part(i):
@@ -2008,7 +2008,7 @@ class TimeDomainFilterBank:
                         out_tstarts.append(sub_starts[bi])
                         out_block_lens.append(np.full(bi.size, N, dtype=np.int64))
 
-        from . import _Deferred, _SparsePeaks
+        from ._results import _Deferred, _SparsePeaks
         defer = getattr(self, '_defer', False)
         pending = []
         for g, tmpl_arg in work_items:
@@ -2286,7 +2286,7 @@ class TimeDomainFilterBank:
         its clock up). The jobs' input series must not be overwritten until then. A later
         batch on the same banks first finishes whatever of this one it would overwrite.
         """
-        from . import _Deferred
+        from ._results import _Deferred
         global _BATCH_TOKEN
         paired = _cpu_block_round(jobs)
         if paired is not None:
@@ -2404,7 +2404,7 @@ class TimeDomainFilterBank:
                 if collect is not None:
                     # Submitted, not waited on: each job's result is read when asked for, so a
                     # caller collecting later (filter_series_many(wait=False)) never waits here.
-                    from . import _Deferred
+                    from ._results import _Deferred
                     for i, j in enumerate(fast):
                         out[j] = _Deferred(lambda c=collect, i=i: c()[i])
                         done.add(j)

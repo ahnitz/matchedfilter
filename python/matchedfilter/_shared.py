@@ -233,7 +233,7 @@ def pack_half2(a):
 
 def sparse_from_dense(idx, val):
     """A dense (idx, val) peak result as a _SparsePeaks (entries with idx >= 0)."""
-    from . import _SparsePeaks
+    from ._results import _SparsePeaks
     flat = np.flatnonzero(idx >= 0)
     return _SparsePeaks(idx.shape, flat, idx.reshape(-1)[flat], val.reshape(-1)[flat])
 
