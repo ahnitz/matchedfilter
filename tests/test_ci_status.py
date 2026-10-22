@@ -68,6 +68,9 @@ def test_the_worst_verdict_wins():
     assert ci._worse("red", "green") == "red"
 
 
-def test_the_scheduled_workflows_are_read_from_the_repository():
-    got = ci.scheduled_workflows(Path(__file__).resolve().parents[1])
-    assert got.get("Benchmark") == "0 6 * * 1"
+def test_the_scheduled_workflows_are_read_from_workflow_files(tmp_path):
+    wf = tmp_path / ".github" / "workflows"
+    wf.mkdir(parents=True)
+    (wf / "bench.yml").write_text('name: Benchmark\non:\n  schedule:\n    - cron: "0 6 * * 1"\n')
+    (wf / "ci.yml").write_text("name: CI\non:\n  push:\n")
+    assert ci.scheduled_workflows(tmp_path) == {"Benchmark": "0 6 * * 1"}
