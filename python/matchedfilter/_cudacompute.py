@@ -1432,7 +1432,7 @@ class Context(Executor, InputUploads):
 
     def _x_peaks(self, out):
         """Theoretical peaks (_roofline.gpu_peaks): driver attributes plus a stated formula."""
-        from . import _roofline as _rl
+        from . import _peaks as _pk
         a = self._attr
         sms, khz = a(16), a(13)              # MULTIPROCESSOR_COUNT, CLOCK_RATE (kHz)
         mem_khz, bus = a(36), a(37)          # MEMORY_CLOCK_RATE (kHz), GLOBAL_MEMORY_BUS_WIDTH
@@ -1450,7 +1450,7 @@ class Context(Executor, InputUploads):
                    formula="%d SMs x %d fp32 lanes (fp16 %d) x 2 x %.3f GHz boost; int16 at the "
                            "fp32 rate; tensor cores not counted" % (sms, fp32, fp16, ghz),
                    bandwidth_formula="2 x %.0f MHz memory clock x %d-bit bus / 8" % (mem_khz / 1e3, bus))
-        out["measured"] = _rl._MEASURED.get("L40S") if "L40S" in (out["name"] or "") else None
+        out["measured"] = _pk._MEASURED.get("L40S") if "L40S" in (out["name"] or "") else None
         return out
 
     def _word_slots(self):

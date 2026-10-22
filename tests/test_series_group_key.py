@@ -5,6 +5,7 @@ model measured at a forced group was adopted by later processes at the default."
 import json
 
 from matchedfilter import _core, gatechain
+from matchedfilter import _calibration
 
 
 def test_the_effective_group_follows_the_plan(monkeypatch):
@@ -22,6 +23,6 @@ def test_a_calibration_under_mf_dgroup_is_stored_under_the_group_that_ran(monkey
     monkeypatch.setenv("MF_COST_FILE", str(cost))
     monkeypatch.setenv("MF_DGROUP", "8")
     monkeypatch.setattr(gatechain, "_COSTS", {})
-    gatechain.calibrate_costs(1024, 16, group=32)
+    _calibration.calibrate_costs(1024, 16, group=32)
     keys = [k for k in json.loads(cost.read_text()) if k.startswith("1024,")]
     assert keys and all(k.split(",")[2] == "8" for k in keys), keys

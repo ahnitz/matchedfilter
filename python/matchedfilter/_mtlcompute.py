@@ -597,9 +597,9 @@ class Context(Executor, InputUploads):
     def _x_peaks(self, out):
         """Theoretical peaks (_roofline.gpu_peaks): the core count plus a stated formula."""
         import re as _re
-        from . import _roofline as _rl
-        chip = next((k for k in _rl._APPLE_GPU if k in (out["name"] or "")), "M2")
-        ghz, cores, bus, mts = _rl._APPLE_GPU[chip]
+        from . import _peaks as _pk
+        chip = next((k for k in _pk._APPLE_GPU if k in (out["name"] or "")), "M2")
+        ghz, cores, bus, mts = _pk._APPLE_GPU[chip]
         try:
             import subprocess
             txt = subprocess.run(["ioreg", "-rc", "AGXAccelerator"], capture_output=True,
@@ -616,7 +616,7 @@ class Context(Executor, InputUploads):
                    formula="%d cores (ioreg gpu-core-count) x 128 ALUs x 2 x %.3f GHz (vendor "
                            "clock); fp16 at the fp32 rate" % (cores, ghz),
                    bandwidth_formula="%d-bit LPDDR x %d MT/s / 8 (vendor figure)" % (bus, mts))
-        out["measured"] = _rl._MEASURED.get("Apple %s GPU" % chip)
+        out["measured"] = _pk._MEASURED.get("Apple %s GPU" % chip)
         return out
 
     def __init__(self, index=0):

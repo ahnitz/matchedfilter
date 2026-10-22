@@ -14,6 +14,7 @@ import math
 
 import numpy as np
 import matchedfilter as mf
+from matchedfilter import _calibration
 import os
 import sys
 from matchedfilter import gatechain, gatemodel
@@ -49,7 +50,7 @@ def main(argv=None):
         if a.chain:
             chain = tuple(a.chain)
         else:
-            best, _ = gatechain.choose_chain(power, a.n, a.snr, fd, cost=gatechain.calibrate_costs(a.n, 64))
+            best, _ = gatechain.choose_chain(power, a.n, a.snr, fd, cost=_calibration.calibrate_costs(a.n, 64))
             if best is None:
                 raise ValueError('no chain with a resolvable gate')
             chain = best["chain"]

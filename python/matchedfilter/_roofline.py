@@ -97,6 +97,7 @@ import time
 import numpy as np
 
 from .time_domain import _stored_bins
+from ._peaks import _AMD_MEM, _APPLE_GPU, _MEASURED, _read  # noqa: F401
 
 #: Bytes per complex value at each precision.
 CBYTES = {"fp32": 8, "fp16": 4, "int16": 4}
@@ -353,13 +354,6 @@ def cpu_tick_rate():
 
 # ---- platform peaks -------------------------------------------------------------------------
 
-def _read(path):
-    try:
-        with open(path) as f:
-            return f.read()
-    except OSError:
-        return None
-
 
 def _cpuinfo():
     txt = _read("/proc/cpuinfo") or ""
@@ -423,21 +417,6 @@ def _x86_core(info):
 
 #: Apple cores: (clock GHz, 128-bit FMA pipes) of a performance core.
 _APPLE_CPU = {"M1": (3.2, 4), "M2": (3.49, 4), "M3": (4.05, 4), "M4": (4.4, 4)}
-#: Apple GPUs: (clock GHz, cores by default, LPDDR bus bits, MT/s).
-_APPLE_GPU = {"M1": (1.278, 8, 128, 4266), "M2": (1.398, 10, 128, 6400),
-              "M3": (1.38, 10, 128, 6400), "M4": (1.47, 10, 128, 7500)}
-#: AMD GPUs whose memory Vulkan does not describe: (bus bits, MT/s), the vendor's figure.
-_AMD_MEM = {"gfx1151": (256, 8000)}
-#: Measured ceilings already in the repository (source doc), for the report only.
-_MEASURED = {
-    "gfx1151": dict(fp16=28.2e12, fp32=22.1e12, bandwidth=198e9, source="docs/vulkan-8060s-roofline.md §1, §5"),
-    "L40S": dict(fp32=72.7e12, bandwidth=623e9, source="docs/cuda-l40s-roofline.md (tools/cuda_ceilings.cu)"),
-    "Apple M2 GPU": dict(fp32=3.23e12, fp16=3.33e12, bandwidth=93.4e9,
-                         source="docs/metal-m2-roofline.md §0c (8 chains x 4 unrolled FMAs)"),
-    "Apple M2 CPU": dict(fp32=111.5e9, fp16=223.0e9, int16=223.1e9,
-                         source="docs/metal-m2-roofline.md §0c (20 FMLA/MLA chains, asm)"),
-    "Zen 5": dict(fp32=324e9, source="memory note: AVX-512 FMA chains, idle core"),
-}
 
 
 def cpu_peaks(measure_bandwidth=True):

@@ -259,7 +259,7 @@ def window_results(hit, counts, starts, idx, val, template, n):
     hit: (blocks, nbins) bool; counts: bins per block; starts: block start samples; idx/val:
     (blocks, nbins) peak lag and value; template: the global template index; n: block length.
     The one ordering rule every device follow-up path assembles with."""
-    from .time_domain import FilterResults, _EMPTY_FILTER_RESULTS
+    from ._results import FilterResults, _EMPTY_FILTER_RESULTS
     bi, bn = np.nonzero(hit)
     if not bi.size:
         return _EMPTY_FILTER_RESULTS
@@ -302,7 +302,7 @@ def followup_layout(jobs, ctx, max_rows=None):
     call, is not on ctx's device, has a series that is not device memory, has a block
     reading past its series (the host path pads with zeros), or a group passes max_rows."""
     from ._shared import _same_device, containing, containing_samples
-    from .time_domain import TimeDomainFilterBank, _normalize_windows
+    from ._windows import _normalize_windows, _window_layout
     groups = {}
     layout = []
     for (bank, ser, kw) in jobs:
@@ -316,7 +316,7 @@ def followup_layout(jobs, ctx, max_rows=None):
         if bs >= g.n:
             raise FollowupUnsupported("binsize spans a block")
         S = len(ser)
-        st, ws, we = TimeDomainFilterBank._window_layout(g, _normalize_windows(kw["windows"], S), S)
+        st, ws, we = _window_layout(g, _normalize_windows(kw["windows"], S), S)
         plan = g.get_flat_plan()
         pctx = getattr(plan, "_gpu", None)
         if pctx is None or not _same_device(pctx, ctx) or plan._gtmpl is None:

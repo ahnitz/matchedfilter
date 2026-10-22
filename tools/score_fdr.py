@@ -15,6 +15,7 @@ import multiprocessing as mp
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tests"))
 import _gatelib as t
 import matchedfilter as mf
+from matchedfilter import _calibration
 from matchedfilter import gatechain
 
 
@@ -34,7 +35,7 @@ def references(n):
 def one(job):
     n, snr, fd, name, p, trials = job
     try:
-        best, _ = gatechain.choose_chain(p, n, snr, fd, cost=gatechain.calibrate_costs(n, 64))
+        best, _ = gatechain.choose_chain(p, n, snr, fd, cost=_calibration.calibrate_costs(n, 64))
     except Exception as e:
         return dict(n=n, snr=snr, fd=fd, ref=name, cfg=None, err=str(e))
     if best is None:

@@ -102,8 +102,8 @@ _CPU_DEVICES = {}
 def _cpu_device():
     """The CPU Device for the current backend. Cached: it reads /proc/cpuinfo, and plans parse
     their device often (28k times in one bench run, 1.1 s)."""
-    from . import backend as _backend
-    b = _backend()
+    from . import _core
+    b = _core.backend()
     hit = _CPU_DEVICES.get(b)
     if hit is None:
         hit = _CPU_DEVICES[b] = _read_cpu_device(b)

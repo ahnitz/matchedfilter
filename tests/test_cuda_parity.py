@@ -23,6 +23,7 @@ import numpy as np
 import pytest
 
 import matchedfilter as mf
+from matchedfilter import _calibration
 from matchedfilter import _cuda
 
 _DEVICES = _cuda.enumerate_devices()[0]
@@ -452,12 +453,12 @@ print("OK", len(labels))
 
 
 def test_gpu_cost_calibration_measures_on_cuda():
-    """gatechain.calibrate_costs_gpu switches the device timers on through ctx._timing.
+    """_calibration.calibrate_costs_gpu switches the device timers on through ctx._timing.
     CUDA kept its own flag, so every measurement was 0 ns: the bank priced every chain at
     zero and picked n=8192 banks with 1024-4096 bins of coarse band (2x slower fine stage,
     and loud peaks dismissed). The model must carry real, positive, ordered costs."""
     from matchedfilter import gatechain
-    cm = gatechain.calibrate_costs_gpu(2048, DEV, blocks=256, reps=2, nt=64)
+    cm = _calibration.calibrate_costs_gpu(2048, DEV, blocks=256, reps=2, nt=64)
     assert cm.block > 0
     assert all(v > 0 for v in cm.dense.values()), cm.dense
     assert cm.refine(1e-2) > 0
@@ -506,7 +507,7 @@ def test_clock_reference_reads_the_sm_clock(ctx):
         pytest.skip("NVML unavailable")
     assert 100.0 < mhz < 10000.0
     from matchedfilter import gatechain
-    ref = gatechain._clock_ref("gpu:0")
+    ref = _calibration._clock_ref("gpu:0")
     assert ref._mhz is not None
     # At an unchanged clock the reference is the anchor; it scales inversely with the clock.
     reader, mhz0 = ref._mhz

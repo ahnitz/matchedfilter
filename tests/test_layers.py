@@ -18,26 +18,20 @@ EXTENSIONS = {"_core"}
 LAYERS = (
     ("foundation", {"_config", "_errors", "_kernel_dirs", "_kernel_id", "_series", "_gpu_cache",
                     "_gputime", "_coarse", "_shared", "_execution_policy", "_choice",
-                    "_costfile", "_results"}),
+                    "_costfile", "_results", "_windows", "_peaks"}),
     ("platform", {"_cuda", "_metal", "_vulkan", "device", "_vksubgroup"}),
     ("models", {"gatemodel", "gatechain", "_chains", "_prices"}),
     ("gpu host", {"_gpuhost", "_gpuhier", "_gpuexec"}),
     ("backends", {"_vkcompute", "_cudacompute", "_mtlcompute"}),
     ("workloads", {"time_domain", "search", "_roofline", "__init__", "_layout", "_filter",
-                   "_hierarchical"}),
+                   "_hierarchical", "_calibration"}),
     ("applications", {"benchmark", "tutorial", "demo", "precision"}),
 )
 LEVEL = {m: i for i, (_, mods) in enumerate(LAYERS) for m in mods}
 LEVEL.update({m: -1 for m in EXTENSIONS})
 
 #: (importer, imported) upward edges still allowed. Remove an entry when its import goes.
-UPWARD = {
-    ('_cudacompute', '_roofline'),
-    ('_gpuhost', 'time_domain'),
-    ('_mtlcompute', '_roofline'), ('_vkcompute', '_roofline'),
-    ('_vksubgroup', 'gatechain'), ('device', '__init__'),
-    ('gatechain', '__init__'),
-}
+UPWARD: set = set()     # empty since 2026-10-22: keep it so (move code, or import down)
 
 
 def _edges():

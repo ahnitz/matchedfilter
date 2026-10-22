@@ -13,6 +13,8 @@ from typing import NamedTuple, Optional
 
 import numpy as np
 
+from . import _calibration
+
 from . import _config
 from . import _core
 from . import gatechain as _gatechain
@@ -589,9 +591,9 @@ class HierarchicalFilter(MatchedFilter):
         """The costs of the device this plan runs on: chains rank differently on a GPU (a refined
         pair costs ~30 coarse pairs there against ~100 on a CPU core)."""
         if self.device.kind == "gpu":
-            return _gatechain.calibrate_costs_gpu(self.n, str(self.device))
+            return _calibration.calibrate_costs_gpu(self.n, str(self.device))
         policy = self._series_policy('hierarchical_series', 0, self.ntemplates) or {}
-        cm = _gatechain.calibrate_costs(self.n, self.ntemplates,
+        cm = _calibration.calibrate_costs(self.n, self.ntemplates,
                                         group=policy.get('series_group', _gatechain.default_series_group(self.n)))
         prices = self._direct_prices(cm)
         return (cm.with_direct(prices, single_tier=_gatechain.cpu_gate_kind() != "f16")

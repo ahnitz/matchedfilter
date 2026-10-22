@@ -2,6 +2,7 @@ import os
 import numpy as np
 import pytest
 import matchedfilter as mf
+from matchedfilter import _calibration
 import matchedfilter._core as _core
 
 
@@ -609,7 +610,7 @@ def _recorded_model():
 def test_cost_calibration_is_sane():
     """A live calibration's structure (every band priced, finite and positive); the cost
     relations are checked on the recorded model, not on this host's timing."""
-    cm = mf._gatechain.calibrate_costs(2048, 32)
+    cm = _calibration.calibrate_costs(2048, 32)
     assert set(cm.dense) >= {64, 128, 256, 512, 1024}
     assert all(np.isfinite(v) and v > 0 for v in cm.dense.values())
     assert np.isfinite(cm.refine(0.05)) and cm.refine(0.05) > 0
@@ -623,11 +624,11 @@ def test_cost_file_reproduces_the_measured_models(monkeypatch, tmp_path):
     path = tmp_path / "costs.json"
     monkeypatch.setenv("MF_COST_FILE", str(path))
     monkeypatch.setattr(gc, "_COSTS", {})
-    measured = gc.calibrate_costs(1024, 24)
+    measured = _calibration.calibrate_costs(1024, 24)
     assert path.exists()
     monkeypatch.setattr(gc, "_COSTS", {})
     monkeypatch.setattr(gc.np.random, "default_rng", None)    # a reload must not measure
-    loaded = gc.calibrate_costs(1024, 24)
+    loaded = _calibration.calibrate_costs(1024, 24)
     assert loaded.to_dict() == measured.to_dict()
     reach = [1.0, 0.05, 0.01]
     assert loaded.chain_cost((128, 512), reach) == measured.chain_cost((128, 512), reach)
@@ -675,7 +676,7 @@ def test_plan_chain_matches_the_plain_split_search():
     gc = mf._gatechain
     prof = np.load(os.path.join(os.path.dirname(__file__), "data", "reference_profile_o2_h1l1_2048.npy"))
     n = 2048
-    cm = gc.calibrate_costs(n, 32)
+    cm = _calibration.calibrate_costs(n, 32)
     bands = gc.usable_bands(prof, n)
     sig = gc.signal_draws(prof, n, bands, 6.0, gc._gm._nsamp_for(1e-3))
     noise = gc.noise_block_maxima(prof, n, bands, window=(192, n - 192))
@@ -692,7 +693,7 @@ def test_choice_cache_keys_on_cost_content_not_identity(monkeypatch):
     """A new cost model must not inherit cached choices of an old one that happened to share its id."""
     gc = mf._gatechain
     prof = np.load(os.path.join(os.path.dirname(__file__), "data", "reference_profile_o2_h1l1_2048.npy"))
-    cm = gc.calibrate_costs(2048, 32)
+    cm = _calibration.calibrate_costs(2048, 32)
     d = cm.to_dict()
     cheap_refine = gc.CostModel.from_dict(dict(d, refine=[(f, v * 1e-3) for f, v in d["refine"]]))
     dear_refine = gc.CostModel.from_dict(dict(d, refine=[(f, v * 1e3) for f, v in d["refine"]]))
@@ -854,16 +855,16 @@ def test_price_block_sizes_stops_at_the_first_dearer_size(monkeypatch):
         priced.append(n)
         return _Cost()
 
-    monkeypatch.setattr(gc, "device_costs", fake_costs)
+    monkeypatch.setattr(_calibration, "device_costs", fake_costs)
     monkeypatch.setattr(gc, "rebin_profile", lambda fine, df, rate, n: np.ones(n))
     monkeypatch.setattr(gc, "choose_chain",
                         lambda ref, n, snr, fd, **kw: ({"cost": pair[n] * (n - 99), "chain": (n // 8,)}, []))
     gc._PRICE_CACHE.clear()
     fine = np.ones(2048)
-    out = gc.price_block_sizes(fine, 1.0, 2048.0, 100, 0, 64, 6.0, 1e-3, [2048, 4096, 8192, 16384])
+    out = _calibration.price_block_sizes(fine, 1.0, 2048.0, 100, 0, 64, 6.0, 1e-3, [2048, 4096, 8192, 16384])
     assert priced == [2048, 4096] and [o[1] for o in out] == [2048, 4096]
     gc._PRICE_CACHE.clear(); priced.clear()
-    out = gc.price_block_sizes(fine, 1.0, 2048.0, 100, 0, 64, 6.0, 1e-3, [2048, 4096, 8192, 16384],
+    out = _calibration.price_block_sizes(fine, 1.0, 2048.0, 100, 0, 64, 6.0, 1e-3, [2048, 4096, 8192, 16384],
                                ahead=2)
     # 4096 is the first dearer size, 8192 the new best, 16384 the second dearer one
     assert priced == [2048, 4096, 8192, 16384] and out[0][1] == 8192

@@ -2,6 +2,7 @@
 import numpy as np
 import pytest
 import matchedfilter as mf
+from matchedfilter import _calibration
 from conftest import usable_gpu
 
 
@@ -42,7 +43,7 @@ def test_explicit_configuration_needs_no_model_or_reference(device, monkeypatch)
         raise AssertionError('explicit configuration consulted the gate model')
     monkeypatch.setattr(mf._gatechain, 'chain_thresholds', forbidden)
     monkeypatch.setattr(mf._gatechain, 'choose_chain', forbidden)
-    monkeypatch.setattr(mf._gatechain, 'calibrate_costs', forbidden)
+    monkeypatch.setattr(_calibration, 'calibrate_costs', forbidden)
     d, h = inputs()
     flat = mf.MatchedFilter(1024, 2, 2, device=device)
     hier = mf.HierarchicalFilter(1024, 2, 2, chain=256, device=device)

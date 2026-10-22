@@ -2173,7 +2173,7 @@ class Context(Executor, InputUploads):
         """Theoretical peaks (_roofline.gpu_peaks): API-queryable counts plus a stated formula."""
         import os as _os
         import re as _re
-        from . import _roofline as _rl
+        from . import _peaks as _pk
         m = _re.search(r"gfx\d+", out["name"] or "", _re.I)
         arch = m.group(0).lower() if m else ""
         core = self._shader_core()
@@ -2191,7 +2191,7 @@ class Context(Executor, InputUploads):
             return out
         mhz = 0
         for card in sorted(_os.listdir("/sys/class/drm")) if _os.path.isdir("/sys/class/drm") else ():
-            txt = _rl._read("/sys/class/drm/%s/device/pp_dpm_sclk" % card)
+            txt = _pk._read("/sys/class/drm/%s/device/pp_dpm_sclk" % card)
             if txt:
                 mhz = max([mhz] + [int(x) for x in _re.findall(r"(\d+)Mhz", txt)])
         ghz = (mhz or 2900) / 1e3
@@ -2201,7 +2201,7 @@ class Context(Executor, InputUploads):
         gen = _re.match(r"gfx(\d+?)(\d{2})$", arch) if len(arch) >= 6 else None
         dual_issue = gen is not None and int(gen.group(1)) >= 11
         fp32 = 128 if dual_issue else 64
-        bus, mts = _rl._AMD_MEM.get(arch, (None, None))
+        bus, mts = _pk._AMD_MEM.get(arch, (None, None))
         out.update(arch=arch, cus=cus, clock_ghz=ghz,
                    flops=dict(fp32=cus * fp32 * 2 * ghz * 1e9, fp16=cus * 2 * fp32 * 2 * ghz * 1e9,
                               int16=cus * 2 * fp32 * 2 * ghz * 1e9),
@@ -2211,7 +2211,7 @@ class Context(Executor, InputUploads):
                                                        else "table", fp32, ghz),
                    bandwidth_formula=("%d-bit x %d MT/s / 8 (vendor figure; Vulkan does not "
                                       "describe memory)" % (bus, mts)) if bus else "unknown")
-        out["measured"] = _rl._MEASURED.get(arch)
+        out["measured"] = _pk._MEASURED.get(arch)
         return out
 
     def clear_cache(self):
