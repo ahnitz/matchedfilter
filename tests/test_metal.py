@@ -17,12 +17,15 @@ import pytest
 import matchedfilter
 from matchedfilter._shared import pack_half2
 
+#: The install's Metal kernels, or off macOS (whose installs carry none) the checkout's.
 METAL_DIR = pathlib.Path(matchedfilter.__file__).resolve().parent / "metal"
+if not METAL_DIR.is_dir():
+    METAL_DIR = pathlib.Path(__file__).resolve().parents[1] / "python" / "matchedfilter" / "metal"
 MANIFEST = (pathlib.Path(matchedfilter.__file__).resolve().parent
             / "spirv" / "manifest.json")
 
 pytestmark = pytest.mark.skipif(not METAL_DIR.is_dir(),
-                                reason="Metal kernels not built into this tree")
+                                reason="no Metal kernels in this install or a checkout beside it")
 
 
 @pytest.fixture(scope="module")

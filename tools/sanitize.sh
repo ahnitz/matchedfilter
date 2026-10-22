@@ -50,7 +50,6 @@ if [ -n "$PREBUILT" ]; then
   ls "$WORK"/python/matchedfilter/_core*.so >/dev/null 2>&1 \
     || { echo "sanitize: no built extension in $WORK"; exit 1; }
   echo "sanitize: testing the build in $WORK"
-  T0=$SECONDS
 else
 WORK=${KEEP:-$(mktemp -d "${TMPDIR:-/tmp}/mf-sanitize.XXXXXX")}
 mkdir -p "$WORK"

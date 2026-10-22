@@ -94,8 +94,9 @@ def test_successful_partial_or_full_build_stamps_output(package, stamp, monkeypa
 
 
 def test_shipped_build_ids_match_every_compiled_program():
-    package = Path(_kernel_id.__file__).resolve().parent
-    for backend, (_, _, folder, field) in _kernel_id.BACKENDS.items():
+    from conftest import kernel_dir
+    for backend, (files, _, folder, field) in _kernel_id.BACKENDS.items():
+        package = kernel_dir(files).parent     # off macOS, Metal's are the checkout's
         manifest = json.loads((package / folder / "manifest.json").read_text())
         assert manifest[field] == _kernel_id.artifact_digest(package, backend), (
             "GPU artifacts changed: run tools/kernel_build_id.py after rebuilding")

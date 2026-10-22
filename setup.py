@@ -17,6 +17,7 @@ import sysconfig
 
 from setuptools import setup, Extension
 from setuptools.command.build_ext import build_ext
+from setuptools.command.build_py import build_py
 
 BASE = ["-O3", "-fno-math-errno"]
 CXX = BASE + ["-std=c++17"]
@@ -137,11 +138,36 @@ class BuildExt(build_ext):
         )
 
 
+def _kernel_dirs():
+    """python/matchedfilter/_kernel_dirs.py, read by path (the package is not built yet)."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "_mf_kernel_dirs", os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                        "python", "matchedfilter", "_kernel_dirs.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+class BuildPy(build_py):
+    """A wheel carries the kernel directories its platform can load (_kernel_dirs): no
+    PTX on macOS, where CUDA does not run, and no Metal elsewhere. The sdist keeps all."""
+
+    def find_data_files(self, package, src_dir):
+        files = super().find_data_files(package, src_dir)
+        if package != "matchedfilter":
+            return files
+        dirs = _kernel_dirs()
+        drop = set(dirs.ALL) - set(dirs.shipped())
+        keep = lambda f: os.path.relpath(f, src_dir).split(os.sep)[0] not in drop  # noqa: E731
+        return [f for f in files if keep(f)]
+
+
 setup(
     ext_modules=[Extension(
         "matchedfilter._core", sources=[],
         include_dirs=["python/matchedfilter", "src", HWY_INC])],
-    cmdclass={"build_ext": BuildExt},
+    cmdclass={"build_ext": BuildExt, "build_py": BuildPy},
     # The tuning tables ship with the library and are read at run time.
     # Cost tables contain machine timings; accuracy is computed from the
     # reference profile. The text costs can be inspected and regenerated.

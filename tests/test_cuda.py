@@ -14,11 +14,14 @@ import matchedfilter
 from matchedfilter.device import Device
 from matchedfilter import _cuda
 
+#: The install's PTX, or on macOS (whose installs carry none) the checkout's.
 PTX_DIR = pathlib.Path(matchedfilter.__file__).resolve().parent / "ptx"
+if not PTX_DIR.is_dir():
+    PTX_DIR = pathlib.Path(__file__).resolve().parents[1] / "python" / "matchedfilter" / "ptx"
 MANIFEST = PTX_DIR / "manifest.json"
 
 pytestmark = pytest.mark.skipif(not PTX_DIR.is_dir(),
-                                reason="PTX kernels not built into this tree")
+                                reason="no PTX kernels in this install or a checkout beside it")
 
 
 @pytest.fixture(scope="module")

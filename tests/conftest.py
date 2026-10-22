@@ -62,6 +62,36 @@ def pytest_sessionstart(session):
         raise pytest.UsageError("MF_ISA=%s requested, but the backend is %s" % (want, have))
 
 
+# --- kernel files an install for another platform carries -------------------
+def kernel_dir(name):
+    """The directory of ahead-of-time kernels `name` (spirv, ptx, metal): the install's,
+    or for one this platform's install leaves out (matchedfilter._kernel_dirs) the
+    checkout's, so the static checks of every backend's committed kernels still run off
+    their platform. Skips when neither has it."""
+    from pathlib import Path
+    import matchedfilter as mf
+    own = Path(mf.__file__).resolve().parent / name
+    if own.is_dir():
+        return own
+    repo = Path(__file__).resolve().parents[1] / "python" / "matchedfilter" / name
+    if repo.is_dir():
+        return repo
+    pytest.skip("no %s/ kernels in this install or a checkout beside it" % name)
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _metal_sources_off_macos():
+    """Metal's static checks read _mtlcompute._METAL_DIR; off macOS an install carries no
+    Metal, so they read the checkout's (kernel_dir)."""
+    from matchedfilter import _mtlcompute
+    if not _mtlcompute._METAL_DIR.is_dir():
+        from pathlib import Path
+        repo = Path(__file__).resolve().parents[1] / "python" / "matchedfilter" / "metal"
+        if repo.is_dir():
+            _mtlcompute._METAL_DIR = repo
+    yield
+
+
 # --- a slice of a production FIR bank, for tests that need real taps --------
 def bank_subset():
     """Real FIR taps without the 110 MB bank or h5py: tests/data/bank_subset_opt501_v2.npz,
