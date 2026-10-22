@@ -3,7 +3,7 @@
 #include <metal_texture>
 using namespace metal;
 
-#line 10 "/home/ahnitz/projects/claude/searchdev/work/mf-backends/src/gpu/compact_peaks.slang"
+#line 10 "compact_peaks.slang"
 struct EntryPointParams_0
 {
     uint total_0;

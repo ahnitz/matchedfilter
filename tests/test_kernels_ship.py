@@ -109,3 +109,22 @@ def test_production_shader_sources_match_built_manifest():
     for name, digest in recorded.items():
         assert hashlib.sha256((source / name).read_bytes()).hexdigest() == digest, (
             '%s changed: rebuild all kernels with tools/build_spirv.py' % name)
+
+
+def test_shipped_kernels_carry_no_build_paths_or_stray_files():
+    """The kernel directories of the installed package hold build outputs only: no source
+    naming the machine it was built on (an absolute #line path in a Metal source also
+    changes the Metal kernel identity from build host to build host) and no sync-conflict
+    copies."""
+    import re
+    import matchedfilter
+    pkg = pathlib.Path(matchedfilter.__file__).resolve().parent
+    absolute = re.compile(rb'(/home/|/Users/)')
+    found = []
+    for sub in ("metal", "spirv", "ptx"):
+        for p in sorted((pkg / sub).glob("*")):
+            if "conflict" in p.name.lower():
+                found.append("%s/%s: a sync-conflict copy" % (sub, p.name))
+            elif p.suffix in (".metal", ".json") and absolute.search(p.read_bytes()):
+                found.append("%s/%s: names an absolute path" % (sub, p.name))
+    assert not found, found

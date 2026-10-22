@@ -76,7 +76,7 @@ def build_kernels(compiler, build_module=build):
     for path in (list(metal.glob('forward_*.metal')) + [metal / 'pack_coarse.metal',
                                                           metal / 'compact_peaks.metal']
                  + list(metal.glob('markblocks.metal'))):
-        path.write_text(path.read_text().rstrip() + '\n')
+        build.write_msl(path)
         build.compile_metallib(path)
     return dict(forward=entries, pack_coarse=dict(file='pack_coarse.spv',
                                                  metal='pack_coarse.metal'),
