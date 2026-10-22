@@ -63,3 +63,23 @@ def test_annotation_leads_with_the_asan_report(tmp_path):
     assert body.startswith("::error::rc=134")
     head = body.split("-- end of log --")[0]
     assert "heap-buffer-overflow" in head and "ap_example src/kernel.cc:10" in head
+
+
+def test_annotation_names_the_test_drops_interpreter_frames_and_keeps_gdb(tmp_path):
+    frames = "".join("    #%d 0x7f in _PyEval_EvalFrameDefault Python/bytecodes.c:2715\n" % i
+                     for i in range(2, 60))
+    log = tmp_path / "san.log"
+    log.write_text(VERBOSE_LOG.replace("    #0 0x7f in ap_example src/kernel.cc:10\n",
+                                       "    #0 0x7f in ap_example src/kernel.cc:10\n"
+                                       "    #1 0x7f in MF_run python/matchedfilter/_core.c:5\n"
+                                       + frames)
+                   + "=== gdb: tests/test_b.py::test_four[1024-x] ===\n"
+                   "Thread 1 received signal SIGSEGV\n#0  0x7f in ap::N_AVX3::fft ()\n"
+                   "r15            0x7ffd6b464e90\n")
+    out = subprocess.run([sys.executable, str(TOOL), str(log), "134"], capture_output=True,
+                         text=True)
+    head = out.stdout.replace("%0A", "\n").split("-- end of log --")[0]
+    assert "crashing test: tests/test_b.py::test_four[1024-x]" in head
+    assert "MF_run python/matchedfilter/_core.c:5" in head
+    assert "bytecodes.c" not in head
+    assert "r15            0x7ffd6b464e90" in head
