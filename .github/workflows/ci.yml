@@ -3,8 +3,9 @@ name: CI
 on:
   push:
     # ci/** branches prove a change to C or to the workflows before it reaches
-    # main (docs/robustness-plan.md); ci/bench/** proves benchmark.yml instead.
-    branches: [ main, master, 'ci/**', '!ci/bench/**' ]
+    # main (docs/robustness-plan.md); ci/bench/** proves benchmark.yml and ci/nightly/**
+    # nightly.yml instead.
+    branches: [ main, master, 'ci/**', '!ci/bench/**', '!ci/nightly/**' ]
   pull_request:
   workflow_dispatch:
 

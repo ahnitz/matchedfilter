@@ -1,0 +1,84 @@
+name: Nightly
+
+# Slower checks that would make the push gate wait: the suite under AddressSanitizer and
+# UndefinedBehaviorSanitizer (x86 and arm64), the suite in reverse module order (finds tests
+# that depend on what ran before them), and the musllinux wheel with its full suite. A red
+# run is reported by tools/ci_status.py --schedules and fails tools/gate.py's 'ci' check, so
+# it blocks the next merge until a green ci/nightly/** proof of the fix.
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  push:
+    branches: [ 'ci/nightly/**' ]
+  workflow_dispatch:
+
+defaults:
+  run:
+    shell: bash
+
+permissions:
+  contents: read
+
+env:
+  OMP_NUM_THREADS: "1"
+  OPENBLAS_NUM_THREADS: "1"
+  MKL_NUM_THREADS: "1"
+  NUMEXPR_NUM_THREADS: "1"
+  VECLIB_MAXIMUM_THREADS: "1"
+
+jobs:
+  sanitize:
+    name: sanitize (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: ubuntu-24.04,     label: x86_64}
+          - {os: ubuntu-24.04-arm, label: arm64}
+    steps:
+      - uses: actions/checkout@v4
+        with: { submodules: true }   # third_party/highway
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: Sanitizer runtimes
+        # ASan's shadow mapping fails with the 32 bits of mmap randomisation recent Ubuntu
+        # kernels use; 28 is the documented workaround.
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q libasan8 libubsan1
+          sudo sysctl vm.mmap_rnd_bits=28
+      - name: Install the test dependencies
+        run: python -m pip install --upgrade pip setuptools wheel numpy pytest
+      - name: The suite under ASan and UBSan
+        run: tools/sanitize.sh --python python -- tests -q -rs --durations=15
+
+  order:
+    name: suite in reverse module order
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with: { submodules: true }
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip build
+          python -m pip install .[test]
+      - name: Test, modules reversed
+        run: |
+          mkdir -p /tmp/run && cd /tmp/run
+          python -m pytest -q "$GITHUB_WORKSPACE/tests" -rs --reverse-modules
+
+  musl:
+    name: wheel (musllinux, cp312)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with: { submodules: true }
+      - uses: pypa/cibuildwheel@8d2b08b68458a16aeb24b64e68a09ab1c8e82084  # v3.4.1
+        env:
+          CIBW_BUILD: cp312-musllinux_x86_64     # the full suite: pyproject's test-command
