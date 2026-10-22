@@ -121,7 +121,8 @@ def backend():
 
 
 def targets():
-    """SIMD targets this build contains that this CPU can run, widest first.
+    """SIMD targets this build contains that this CPU can run, widest first -- only
+    ``MF_ISA``'s target when it is set, since ``MF_ISA`` restricts the process to it.
 
     What a build contains is decided by the compiler, not by matchedfilter, so
     this is the only reliable list -- a machine without AVX-512 will not
@@ -131,10 +132,12 @@ def targets():
 
 
 def set_target(name):
-    """Narrow the choice to one target, or restore the default with ``None``.
+    """Narrow the choice to one of :func:`targets`, or restore the default with ``None``
+    (``MF_ISA``'s target when it is set, else the hardware's choice).
 
-    For comparing targets in one process.  Plans already created keep the
-    kernel they were built with, so create the plan after setting this.
+    For comparing targets in one process.  Plans already created keep the kernel they
+    were built with, so create the plan after setting this.  Raises ValueError for a
+    target that is not in :func:`targets`, and then changes nothing.
     """
     _core.set_target(name)
 

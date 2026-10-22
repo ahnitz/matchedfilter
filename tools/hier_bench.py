@@ -328,6 +328,10 @@ def main(argv=None):
         os.environ["MF_HMF_PROF"] = "1"       # read when the plan is created
     import matchedfilter as mf
     if a.isa:
+        want = os.environ.get("MF_ISA")
+        if want and want.upper() != a.isa.upper():
+            raise SystemExit("--isa %s conflicts with MF_ISA=%s, which restricts the process "
+                             "to its target: unset MF_ISA or drop --isa" % (a.isa, want))
         mf.set_target(a.isa)
 
     if a.fixture:

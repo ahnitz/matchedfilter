@@ -272,7 +272,7 @@ static void price_direct(ap_hmf_plan *p){
   double best_d=1e30,best_f=1e30;
   for(int r=0;r<5;r++){
     unsigned long long a=ap_ticks();
-    ap_td_corr(x,tp,L,nl,p->dout);
+    ap_td_corr_on(p->full_fft,x,tp,L,nl,p->dout);
     unsigned long long b=ap_ticks();
     int c=0;
     ap_binmax(p->full_fft,spec,n,1,n,1e30f,pk,&c,AP_BACKWARD,0,n);
@@ -518,7 +518,7 @@ int ap_hmf_set_real_series(ap_hmf_plan *p,int on){
   if(on && !p->half_fft){
     const size_t h=p->n/2;
     if(p->n<4 || !ap_supported(h)) return -1;
-    p->half_fft=ap_create(h);
+    p->half_fft=ap_create_like(p->full_fft,h);     /* the plan's own kernel */
     p->rtw=malloc(2*(h+1)*sizeof(float));
     if(!p->half_fft||!p->rtw){
       if(p->half_fft) ap_destroy(p->half_fft);
@@ -555,7 +555,7 @@ static void hmf_forward_real(ap_hmf_plan *p,const float *x,size_t s0,size_t have
     else for(size_t k=0;k<have;k++) z[k]=src[k*st]*inv; }
   if(have<n) memset(z+have,0,(n-have)*sizeof(float));
   ap_fft(p->half_fft,z,Z,AP_FORWARD);
-  ap_real_split(Z,p->rtw,n,sp);
+  ap_real_split_on(p->half_fft,Z,p->rtw,n,sp);
 }
 
 int ap_hmf_run_series(ap_hmf_plan *p,
@@ -786,7 +786,7 @@ static int refine_direct_pair(ap_hmf_plan *p,int d,int t,const ap_peak *loc,size
   for(size_t b=0;b<nb;b++) out[b]=(ap_peak){-1,0.f,0.f,t2};
   for(int w=0;w<nw;w++){
     const int m=(int)(hi[w]-lo[w]);
-    ap_td_corr(x+2*(lo[w]-c),p->taps[t],L,m,p->dout);
+    ap_td_corr_on(p->full_fft,x+2*(lo[w]-c),p->taps[t],L,m,p->dout);
     for(int i=0;i<m;i++){
       const float re=p->dout[2*i], im=p->dout[2*i+1], m2=re*re+im*im;
       const long k=lo[w]+i;

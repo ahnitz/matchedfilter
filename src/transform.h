@@ -18,9 +18,19 @@ void     ap_destroy(ap_plan *p);
 const char *ap_plan_backend(const ap_plan *p);
 int      ap_lane_width(void);
 
-/* The SIMD targets this build holds that this CPU can run, widest first, and
-   a way to narrow the choice to one of them for a comparison.  NULL restores
-   the default. */
+/* The same on a given plan's back end (the active one when like is NULL): a plan's
+   sub-plans and kernel calls use the kernel the plan was built with, whatever target is
+   selected when they are made. */
+ap_plan *ap_create_like(const ap_plan *like, size_t N);
+ap_plan *ap_create_pairbatch_like(const ap_plan *like, size_t N);
+int      ap_plan_lanes(const ap_plan *p);
+
+/* The SIMD targets this build holds that this CPU can run, widest first (only MF_ISA's
+   when it is set), and a way to narrow the choice to one of them for a comparison.
+   NULL restores the baseline: MF_ISA's target, else the hardware's choice.  A target
+   outside that list returns -1 and changes nothing.  ap_isa_init applies MF_ISA and
+   returns -1 when it names no target of this build. */
+int         ap_isa_init(void);
 int         ap_target_count(void);
 const char *ap_target_name(int i);
 int         ap_set_target(const char *name);
@@ -37,16 +47,21 @@ void ap_fft(ap_plan *p, const float *in, float *out, int sign);
 /* Direct correlation of an interleaved complex series with real taps over nlag consecutive
    lags: out[i] = sum_{k<L} taps[k] x[i+k] (td-inl.h). x holds nlag + L - 1 samples. */
 void ap_td_corr(const float *x, const float *taps, int L, int nlag, float *out);
+void ap_td_corr_on(const ap_plan *p, const float *x, const float *taps, int L, int nlag,
+                   float *out);
 
 /* A real block's full n-point spectrum X from Z, the n/2-point transform of its samples read
    as n/2 complex ones; tw: cos, sin of 2 pi k/n for k = 0 .. n/2 (rsplit-inl.h). */
 void ap_real_split(const float *Z, const float *tw, size_t n, float *X);
+void ap_real_split_on(const ap_plan *p, const float *Z, const float *tw, size_t n, float *X);
 
 /* The root stage's product scale * conj(T) D over bins [k0, k1) of two one-sided spectra of
    n/2 + 1 bins, merged into the n/2-point spectrum Z whose backward transform is the real
    series C2R(product) read as n/2 complex samples; tw as for ap_real_split (rsplit-inl.h). */
 void ap_root_merge(const float *D, const float *T, size_t k0, size_t k1, float scale,
                    const float *tw, size_t n, float *Z);
+void ap_root_merge_on(const ap_plan *p, const float *D, const float *T, size_t k0, size_t k1,
+                      float scale, const float *tw, size_t n, float *Z);
 
 /* The platform's FFT for the block forward (fft_accel.c): NULL where there is none. */
 typedef struct ap_accel ap_accel;

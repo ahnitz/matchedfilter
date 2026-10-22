@@ -55,8 +55,11 @@ def main():
     os.environ.pop("MF_HMF_PROF", None)  # per-row instrumentation distorts this workload
     import matchedfilter as mf
     from matchedfilter import _core
-    mf.backend()  # Apply MF_ISA once before an explicit --target overrides it.
     if cli.target is not None:
+        want = os.environ.get("MF_ISA")
+        if want and want.upper() != cli.target.upper():
+            raise SystemExit("--target %s conflicts with MF_ISA=%s, which restricts the process "
+                             "to its target: unset MF_ISA or drop --target" % (cli.target, want))
         mf.set_target(cli.target)
     spec = importlib.util.spec_from_file_location("ladder", Path(__file__).with_name("ladder.py"))
     ladder = importlib.util.module_from_spec(spec)
