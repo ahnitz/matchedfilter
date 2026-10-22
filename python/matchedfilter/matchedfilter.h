@@ -55,7 +55,6 @@ typedef struct ap_mf_plan ap_mf_plan;
 ap_mf_plan *ap_mf_create(size_t n, int ndata, int ntmpl);
 ap_mf_plan *ap_mf_create_pairbatch(size_t n, int ndata, int ntmpl);
 void        ap_mf_destroy(ap_mf_plan *p);
-int         ap_mf_ndata(const ap_mf_plan *p);
 size_t      ap_mf_nbins(const ap_mf_plan *p, size_t binsize, size_t start, size_t end);
 
 /* Ingest.  spec is the segment's SPECTRUM: n interleaved complex float32, the
@@ -97,16 +96,6 @@ int ap_mf_correlate_series_continuous_real(ap_mf_plan *p, const float *series,
                                            int nblocks, size_t lo, size_t hi,
                                            int t0, int nt, float *out,
                                            const size_t *bounds);
-
-/* Same, but for a scattered set of templates: tsel[0..nsel) are local indices
-   into [0,nt).  Rows are still addressed by the local index, so the skipped
-   ones are left as the caller set them.  This exists because the hierarchical
-   filter's second stage runs whichever templates fired, and one call per
-   template re-reads the data spectrum every time. */
-int ap_mf_run_sel(ap_mf_plan *p, int d0, int nd, int t0, int nt,
-                  const int *tsel, int nsel,
-                  size_t binsize, float threshold,
-                  ap_peak *peaks, int *counts, size_t start, size_t end);
 
 /* Run a pooled list of (data, template) pairs.
    dsel[0..npairs) are data block indices relative to d0.
@@ -232,7 +221,6 @@ int ap_hmf_get_q15(const ap_hmf_plan *p);
 /* Pairs the screen passed to the float first tier, and ticks spent screening. */
 int ap_hmf_q15_stats(const ap_hmf_plan *p, long *passed, unsigned long long *ticks);
 int ap_hmf_set_hermitian(ap_hmf_plan *p, int hermitian);
-int ap_hmf_get_hermitian(const ap_hmf_plan *p);
 void         ap_hmf_destroy(ap_hmf_plan *p);
 
 size_t ap_hmf_nbins(const ap_hmf_plan *p, size_t binsize, size_t start, size_t end);
@@ -297,7 +285,6 @@ int ap_hmf_set_real_series(ap_hmf_plan *p, int on);
 /* Floats between a real series' samples: 1, or 2 to read one lane (real or imaginary part)
    of a complex series in place -- a packed pair of real series. nseries counts samples. */
 int ap_hmf_set_real_stride(ap_hmf_plan *p, size_t stride);
-int ap_hmf_get_real_series(const ap_hmf_plan *p);
 
 /* Sparse output for ap_hmf_run / ap_hmf_run_series (on != 0, counts required): a row
    whose pair no tier passes gets counts[row] = 0 and its peaks are NOT written, so the
