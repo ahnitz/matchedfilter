@@ -855,9 +855,16 @@ static int hmf_refine(ap_hmf_plan *p, const int *fire_d, const int *fire_t,
   /* One bin per pair: the answer is the window's largest |z|, and it lies by its last tier's
      largest coarse lag (ce.index) -- the window is dir_hw coarse samples either side of it.
      Several bins ask for every bin's maximum above threshold, which one window cannot
-     promise: those refine by transform. */
-  int ok=p->direct && p->taps && nb==1 && p->tier[p->ntiers-1].lagged;
-  for(int j=0;ok && j<nfire;j++) if(!p->dtime[d0+fire_d[j]]) ok=0;
+     promise: those refine by transform. "One bin" is the bins the row's samples touch: a
+     bin phase pads a row with empty bins (a call's rows share one bin count), and a padded
+     row whose window lies in one bin is still a one-bin pair -- refined as its unpadded
+     call would refine it, not by transform. */
+  const size_t hi=end>p->n ? p->n : end;
+  int ok=p->direct && p->taps && start<hi && p->tier[p->ntiers-1].lagged;
+  for(int j=0;ok && j<nfire;j++){
+    const size_t ph=hmf_row_phase(p,d0+fire_d[j]);
+    if(!p->dtime[d0+fire_d[j]] || ph/binsize!=(hi-1-start+ph)/binsize) ok=0;
+  }
   if(!ok) return hmf_refine_fft(p,fire_d,fire_t,d0,t0,nt,nfire,binsize,threshold,
                                 peaks,counts,start,end);
   hmf_tier *tr=&p->tier[p->ntiers-1];
@@ -868,10 +875,12 @@ static int hmf_refine(ap_hmf_plan *p, const int *fire_d, const int *fire_t,
     const int d=fire_d[j], t=fire_t[j];
     const size_t row=(size_t)d*nt+t;
     const ap_peak ce=tr->cebuf[row];
+    const size_t jb=hmf_row_phase(p,d0+d)/binsize;      /* the row's one touched bin */
     int c=-2;
     if(ce.index>=0)
-      c=refine_direct_pair(p,d0+d,t0+t,&ce,1,R,binsize,threshold,peaks+row,1,start,end);
+      c=refine_direct_pair(p,d0+d,t0+t,&ce,1,R,binsize,threshold,peaks+row*nb+jb,1,start,end);
     if(c==-2){ p->dfd[nf]=d; p->dft[nf]=t; nf++; continue; }
+    for(size_t b=0;b<nb;b++) if(b!=jb) peaks[row*nb+b]=(ap_peak){-1,0.f,0.f,0.f};
     if(counts) counts[row]=c;
     total+=c;
   }
