@@ -2,6 +2,13 @@
 
 Alpha releases may change the API. Pin a version for reproducible work.
 
+## Unreleased
+
+### Added
+
+- CPython 3.15: release wheels (Linux x86-64 manylinux and musllinux, macOS arm64) and CI
+  test jobs. Wheels build with cibuildwheel 4.3.4.
+
 ## 0.1.0a9
 
 ### Fixed

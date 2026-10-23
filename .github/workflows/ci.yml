@@ -45,8 +45,9 @@ jobs:
           - {python: "3.11"}
           - {python: "3.12", sdist: true}
           - {python: "3.13"}
-          - {python: "3.14", isa: AVX2}
           - {python: "3.14"}
+          - {python: "3.15", isa: AVX2}
+          - {python: "3.15"}
     env:
       MF_ISA: ${{ matrix.isa }}
     steps:
@@ -167,7 +168,7 @@ jobs:
     # release builds every wheel with this same workflow and runs the full suite on each.
     uses: ./.github/workflows/wheels.yml
     with:
-      select: cp314-manylinux_x86_64 cp314-macosx_arm64
+      select: cp315-manylinux_x86_64 cp315-macosx_arm64
       test: smoke
 
   metal:

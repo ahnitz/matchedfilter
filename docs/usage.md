@@ -11,7 +11,7 @@ pip install matchedfilter
 ```
 
 The current release is alpha. Pin its version for reproducible work.
-Wheels target CPython 3.11–3.14 on Linux x86-64 (glibc and musl) and macOS arm64. Source
+Wheels target CPython 3.11–3.15 on Linux x86-64 (glibc and musl) and macOS arm64. Source
 installation requires NumPy and a C compiler.
 
 ## Inputs and normalization
