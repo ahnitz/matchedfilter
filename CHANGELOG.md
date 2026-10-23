@@ -2,6 +2,16 @@
 
 Alpha releases may change the API. Pin a version for reproducible work.
 
+## Unreleased
+
+### Performance
+
+- The gate model finds a result it reused for a similar profile again by that profile's own
+  signature. Before, every lookup of a segment's reference took the similarity search
+  (~1 ms, against ~0.03 ms), and a hierarchical filter looks its plan and chain choice up
+  several times per reference. On the O2 production replica (one core, dev2) the run takes
+  5% less wall time (73.9 s to 70.2 s); its thresholds and triggers are unchanged.
+
 ## 0.1.0a9
 
 ### Fixed
