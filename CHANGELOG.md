@@ -4,6 +4,16 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ## Unreleased
 
+### Fixed
+
+- The gate model no longer hands one profile another's plan. Its exact cache key was a 24-bin,
+  1%-quantised signature, and its reuse took any profile within cosine 0.985. An A+ reference
+  planned after an O4 one (cosine 0.995) took O4's thresholds and dismissed 2.3-4.6x its
+  false-dismissal budget against the flat filter. The key is now the profile to float rounding.
+  Reuse also requires every candidate band's signal response, sqrt(f_b) g_b, to agree within
+  0.3% (`gatechain._similar_get`). A reference that changes between calls (per-segment PSDs)
+  is planned anew more often: about 1-3 s each, then cached.
+
 ### Changed
 
 - The CPU Q15 screen is now the first tier's gate: a pair passes when its int16 maximum
