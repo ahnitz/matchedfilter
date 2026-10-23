@@ -1885,8 +1885,10 @@ class Context(Executor, InputUploads):
         c = consts or {}
         stride, rowwin = int(c.get("stride", 0) or 0), 1 if c.get("rowwin") else 0
         if name in ("peaks", "peaks1"):
+            # rowwin: each row's window and bin phase from the table (a phased series call).
             filename = self._peak_file(n, 1 if name == "peaks1" else 2)
-            return self._build_pipeline(("peaks", filename), filename, _NBIND, _PUSH_BYTES)
+            return self._build_pipeline(("peaks", filename), filename, _NBIND, _PUSH_BYTES,
+                                        row_windows=rowwin)
         if name == "gate":                    # the fp32 filter as a gate tier, at its band
             filename = self._kernel_file(n)
             return self._build_pipeline(("peaks", filename), filename, _NBIND, _PUSH_BYTES,

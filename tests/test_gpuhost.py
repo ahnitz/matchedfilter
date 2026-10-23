@@ -82,8 +82,14 @@ def test_grouped_row_windows():
     from matchedfilter._gpuhost import grouped_row_windows
     g, nb, win, (lo0, hi0) = grouped_row_windows([(100, 900, 0, 2), (0, 1024, 2, 5)], 1024, 5, 256)
     assert nb == 4 and (lo0, hi0) == (100, 1024)           # clipped to n, still 4 bins
-    assert win.tolist() == [100, 900, 100, 900, 0, 1024, 0, 1024, 0, 1024]
+    # (lo, hi, bin phase) per row (tierb.slang ROWWIN_WORDS); no phases: 0.
+    assert win.tolist() == [100, 900, 0, 100, 900, 0, 0, 1024, 0, 0, 1024, 0, 0, 1024, 0]
     assert not win.flags.writeable
     assert grouped_row_windows([(100, 900, 0, 2), (0, 1024, 2, 5)], 1024, 5, 256)[2] is win
     g, nb, win, w = grouped_row_windows([(0, 300, 0, 1)], 1024, 1, 256, nbins=3)
     assert nb == 3 and w == (0, 768)
+    # A row's phase rides in its third word and counts toward the bins: 1000 lags from a
+    # phase of 100 span bins [-100, 156), ..., [668, 924), [924, 1180): five.
+    g, nb, win, w = grouped_row_windows([(24, 1024, 0, 2)], 1024, 2, 256,
+                                        phase=np.array([0, 100], np.uint32))
+    assert nb == 5 and win.tolist() == [24, 1024, 0, 24, 1024, 100]

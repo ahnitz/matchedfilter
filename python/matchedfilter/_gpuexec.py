@@ -827,31 +827,38 @@ class Executor(HierOps):
                           threshold, upload_data, upload_tmpl, slot, async_submit, sparse)
 
     def peaks_grouped(self, n, data, tmpl, groups, binsize, threshold, *, upload_tmpl=True,
-                      slot=None, async_submit=False, sparse=False, nbins=None):
+                      slot=None, async_submit=False, sparse=False, nbins=None, phase=None):
         """peaks over row ranges of one spectra batch, each with its own window, in one
         submission. groups holds (lo, hi, a, b): rows a..b are searched over [lo, hi).
         Every group's result has `nbins` bins (default: the most any group needs); a
-        shorter window leaves its last bins empty."""
+        shorter window leaves its last bins empty. phase: the rows' bin phases ([rows], or
+        None): row d's bins are numbered from its window's start minus phase[d]
+        (run_series' bin_phase), and every row then reads its window from a row table."""
         nd = data.shape[0]
         binsize = int(binsize)
         groups = tuple((int(lo), int(hi), int(a), int(b)) for lo, hi, a, b in groups)
         for lo, hi, a, b in groups:
             if not (0 <= lo < hi <= n) or not (0 <= a < b <= nd):
                 raise ValueError("invalid group (%d, %d, %d, %d)" % (lo, hi, a, b))
-        need = max(-(-(hi - lo) // binsize) for lo, hi, _, _ in groups)
+        top = (lambda a, b: 0) if phase is None else (lambda a, b: int(np.max(phase[a:b])))
+        need = max((hi - lo + top(a, b) + binsize - 1) // binsize for lo, hi, a, b in groups)
         nbins = need if nbins is None else int(nbins)
         if nbins < need:
             raise ValueError("nbins must cover every grouped window's bins")
         if nbins > MAX_BINS:
             raise ValueError("grouped dispatch exceeds the kernel bin limit")
+        rowtab = None
+        if phase is not None:
+            from ._gpuhost import grouped_row_windows
+            rowtab = grouped_row_windows(groups, n, nd, binsize, nbins=nbins, phase=phase)[2]
         return self._flat(n, data, tmpl, groups, nbins, binsize, threshold, True, upload_tmpl,
-                          slot, async_submit, sparse)
+                          slot, async_submit, sparse, rowtab)
 
     def _flat(self, n, data, tmpl, groups, nbins, binsize, threshold, upload_data, upload_tmpl,
-              slot, async_submit, sparse):
+              slot, async_submit, sparse, rowtab=None):
         if not sparse:
             return self._flat_run(n, data, tmpl, groups, nbins, binsize, threshold,
-                                  upload_data, upload_tmpl, slot, async_submit, False)
+                                  upload_data, upload_tmpl, slot, async_submit, False, rowtab)
         # A sparse result is gathered on the device (compaction: the host reads the count
         # and the records) or read dense and scanned on the host. Which is cheaper depends on
         # how many bins clear the threshold and on what a byte of readback costs here (a
@@ -863,7 +870,7 @@ class Executor(HierOps):
         timed = record is not None and not async_submit
         t0 = time.perf_counter()
         res = self._flat_run(n, data, tmpl, groups, nbins, binsize, threshold, upload_data,
-                             upload_tmpl, slot, async_submit, way == "compact")
+                             upload_tmpl, slot, async_submit, way == "compact", rowtab)
         if way == "dense":
             from ._shared import sparsified
             res = sparsified(res, True)
@@ -872,8 +879,12 @@ class Executor(HierOps):
         return res
 
     def _flat_run(self, n, data, tmpl, groups, nbins, binsize, threshold, upload_data,
-                  upload_tmpl, slot, async_submit, sparse):
+                  upload_tmpl, slot, async_submit, sparse, rowtab=None):
+        """rowtab: a row table ((lo, hi, bin phase) per data row, tierb.slang ROWWIN_WORDS):
+        then one dispatch over every row reads its window from it, in place of one per group."""
         nd, nt = data.shape[0], tmpl.shape[0]
+        if rowtab is not None:
+            groups = ((0, n, 0, nd),)
         shift = (binsize.bit_length() - 1) if binsize & (binsize - 1) == 0 else -1
         t2 = float(threshold) ** 2 if threshold > 0 else 0.0
         t2bits = int(np.float32(t2).view(np.uint32))
@@ -898,7 +909,7 @@ class Executor(HierOps):
             covered[a:b] = True
         dv, tv = shared_view(data, self), shared_view(tmpl, self)
         key = ("flat", n, nd, nt, nbins, rows, kslot, sparse, dv is not None and data.ctypes.data,
-               tv is not None and tmpl.ctypes.data)
+               tv is not None and tmpl.ctypes.data, rowtab is not None)
         uploads = self._input_uploads(key, data, tmpl, upload_data, upload_tmpl)
         table = self._exec_table()
         rec = table.get(key)
@@ -911,6 +922,8 @@ class Executor(HierOps):
             bt = self._exec_buffer(rec, "tmpl", tv, tmpl.nbytes)
             bi = self._exec_buffer(rec, "idx", nbytes=size * 4, readback=True)
             bv = self._exec_buffer(rec, "val", nbytes=size * 8, readback=True)
+            btab = (self._exec_buffer(rec, "rowtab", nbytes=max(16, nd * 12), upload=True)
+                    if rowtab is not None else None)
             lst = self._x_list("flat")
             if sparse:
                 cnt = self._exec_buffer(rec, "count", nbytes=16, readback=True)
@@ -920,10 +933,12 @@ class Executor(HierOps):
                 lst.fill(bi, 0xFFFFFFFF)          # bins no dispatch writes: empty
                 lst.fill(bv, 0)
             lst.barrier()
-            kernel = self._x_kernel("peaks1" if nbins == 1 else "peaks", n)
+            kernel = self._x_kernel("peaks1" if nbins == 1 else "peaks", n,
+                                    {"rowwin": rowtab is not None})
             for g, ((a, b), off) in enumerate(zip(rows, offsets)):
-                lst.dispatch(kernel, (b - a) * nt, [bd, bt, bi, bv], (Arg("w%d" % g, 7),),
-                             offsets=[a * n * 8, 0, off * 4, off * 8])
+                lst.dispatch(kernel, (b - a) * nt, [bd, bt, bi, bv] + ([btab] if btab else []),
+                             (Arg("w%d" % g, 7),),
+                             offsets=[a * n * 8, 0, off * 4, off * 8] + ([0] if btab else []))
             lst.barrier()
             if sparse:
                 # The bins that cleared the threshold, gathered on the device: the host
@@ -942,6 +957,10 @@ class Executor(HierOps):
         self._cache_touch(key)
         self._claim(rec.buffers["idx"])          # an earlier result still reading these
         self._exec_upload(rec, key, uploads, data, tmpl, slot)
+        if rowtab is not None:
+            from ._gpuhost import ROWWIN_ON
+            self._x_upload(rec.buffers["rowtab"], np.ascontiguousarray(rowtab, np.uint32), slot)
+            groups = ((ROWWIN_ON, n, 0, nd),)        # every row's window from the table
         binds = {"w%d" % g: (nt, lo, hi, binsize, shift & 0xFFFFFFFF, nbins, t2bits)
                  for g, (lo, hi, _, _) in enumerate(groups)}
         wait = self._exec_submit(rec.native, binds, slot, rec) if async_submit else None
@@ -999,20 +1018,35 @@ class Executor(HierOps):
 
     # ---- follow-up items ----------------------------------------------------------------
 
-    def peaks_items(self, n, data, tmpl, items, binsize, threshold, *, async_submit=False):
+    def peaks_items(self, n, data, tmpl, items, binsize, threshold, *, async_submit=False,
+                    phase=None):
         """One submission over follow-up items (lo, hi, a, b, t): rows a:b of data against
         template row t, searched over [lo, hi) in bins of binsize. Returns per item (idx, val)
         shaped (b - a, 1, nbins), or with async_submit a callable giving that list. Data and
         templates are device allocations, bound in place at each item's rows: nothing is
-        copied, and the outputs come back in one read."""
+        copied, and the outputs come back in one read. phase: the data rows' bin phases (or
+        None; run_series' bin_phase): each item then reads its rows' windows and phases from
+        its own aligned section of a row table."""
         dv, tv = shared_view(data, self), shared_view(tmpl, self)
         if dv is None or tv is None:
             raise ValueError("item spectra and templates must be shared allocations")
         binsize = int(binsize)
         shift = bin_shift(binsize) & 0xFFFFFFFF
         t2bits = int(np.float32(float(threshold) ** 2 if threshold > 0 else 0).view(np.uint32))
-        offs, nbs, size = plan_items(items, binsize, max(1, self.storage_offset_alignment // 4),
-                                     MAX_BINS)
+        align_words = max(1, self.storage_offset_alignment // 4)
+        offs, nbs, size = plan_items(items, binsize, align_words, MAX_BINS, phase)
+        tab = tab_offs = None
+        if phase is not None:
+            # Each item's rows (lo, hi, phase) at an aligned section: a table bound at the
+            # item's own offset, as its data and outputs are (tierb.slang ROWWIN_WORDS).
+            tab_offs, at = [], 0
+            for lo, hi, a, b, t in items:
+                tab_offs.append(at)
+                at += -(-(3 * max(b - a, 1)) // align_words) * align_words
+            tab = np.zeros(max(at, 4), np.uint32)
+            for (lo, hi, a, b, t), o in zip(items, tab_offs):
+                rows = tab[o:o + 3 * (b - a)].reshape(-1, 3)
+                rows[:, 0], rows[:, 1], rows[:, 2] = lo, hi, phase[a:b]
         # Outputs per DEVICE: follow-ups run on a single-template plan per bank, each its own
         # context, and outputs per context meant an allocation on nearly every call. One
         # result may be pending: its outputs are about to be reused.
@@ -1029,13 +1063,24 @@ class Executor(HierOps):
             out = holder.items_out = (self._x_alloc(cap * 4, readback=True),
                                       self._x_alloc(cap * 8, readback=True))
         bi, bv = out
+        btab = None
+        if tab is not None:
+            from ._gpuhost import ROWWIN_ON
+            btab = self._x_alloc(tab.nbytes, upload=True)
+            self._x_upload(btab, tab, None)
         lst = self._x_list("items", once=True)
-        for (lo, hi, a, b, t), off, nb in zip(items, offs, nbs):
+        for i, ((lo, hi, a, b, t), off, nb) in enumerate(zip(items, offs, nbs)):
             if b <= a:
                 continue
-            lst.dispatch(self._x_kernel("peaks1" if nb == 1 else "peaks", n), b - a,
-                         [dv, tv, bi, bv], (1, lo, hi, binsize, shift, nb, t2bits),
-                         offsets=[a * n * 8, t * n * 8, off * 4, off * 8])
+            if btab is None:
+                lst.dispatch(self._x_kernel("peaks1" if nb == 1 else "peaks", n), b - a,
+                             [dv, tv, bi, bv], (1, lo, hi, binsize, shift, nb, t2bits),
+                             offsets=[a * n * 8, t * n * 8, off * 4, off * 8])
+            else:
+                lst.dispatch(self._x_kernel("peaks1" if nb == 1 else "peaks", n,
+                                            {"rowwin": True}), b - a,
+                             [dv, tv, bi, bv, btab], (1, ROWWIN_ON, hi, binsize, shift, nb, t2bits),
+                             offsets=[a * n * 8, t * n * 8, off * 4, off * 8, tab_offs[i] * 4])
         lst.barrier()
         lst.readback(bi, size * 4)
         lst.readback(bv, size * 8)
@@ -1049,6 +1094,8 @@ class Executor(HierOps):
             self._x_read(bi, idx)
             self._x_read(bv, val)
             self._x_release(native, done=True)
+            if btab is not None:
+                btab.destroy()
             return split_items(items, offs, nbs, idx, val)
         if not async_submit:
             return result()
@@ -1097,7 +1144,7 @@ class Executor(HierOps):
             rec, offs = self._followup_record(("followups",) + shape + (place,), n, nbins, cap)
             tab = np.zeros(offs[-1] // 4, np.uint32)
             tab[offs[0] // 4:offs[0] // 4 + m] = gw["rows"]
-            tab[offs[1] // 4:offs[1] // 4 + 5 * m] = gw["entries"].ravel()
+            tab[offs[1] // 4:offs[1] // 4 + 6 * m] = gw["entries"].ravel()
             tab[offs[2] // 4:offs[2] // 4 + cap] = np.arange(cap, dtype=np.uint32)
             tab[offs[3] // 4:offs[3] // 4 + 3] = (m, 1, 1)
             self._x_upload(rec.buffers["tab"], tab, None)
@@ -1154,7 +1201,7 @@ class Executor(HierOps):
         indirect arguments -- share one upload buffer."""
         align = max(16, int(self.storage_offset_alignment))
         offs, at = [], 0
-        for nbytes in (4 * cap, 20 * cap, 4 * cap, 16):
+        for nbytes in (4 * cap, 24 * cap, 4 * cap, 16):      # entries: six words (refineItems)
             offs.append(at)
             at = -(-(at + nbytes) // align) * align
         offs.append(at)
@@ -1171,7 +1218,7 @@ class Executor(HierOps):
             bv = rec.buffers["val"] = self._x_section(out, 0, cap * nbins * 8)
             bi = rec.buffers["idx"] = self._x_section(out, vbytes, cap * nbins * 4)
             rows, ent, ids, args = (self._x_section(tab, o, b) for o, b in
-                                    zip(offs, (4 * cap, 20 * cap, 4 * cap, 16)))
+                                    zip(offs, (4 * cap, 24 * cap, 4 * cap, 16)))
             lst = self._x_list("followups")
             lst.barrier()                 # after writes in flight to the series (a middle stage)
             lst.listed(self._x_kernel("fwd_listed", n), args, cap,
@@ -1190,7 +1237,7 @@ class Executor(HierOps):
     def hier_peaks_grouped(self, n, band, data, tmpl, ct0, raw_thr, groups, binsize,
                            threshold, *, upload_tmpl=True, cascade_band=None, ct1=None,
                            raw_thr1=None, slot=None, async_submit=False, sparse=False,
-                           nbins=None, handle_out=None, refine_reach=None):
+                           nbins=None, handle_out=None, refine_reach=None, phase=None):
         """Hierarchical peaks over row ranges of one spectra batch, each with its own window:
         one recording, every tier one dispatch over all rows, each row's window read from a
         table on the device (_gpuhost.hier_peaks_grouped). groups holds (lo, hi, a, b): rows
@@ -1201,5 +1248,5 @@ class Executor(HierOps):
                                   threshold, upload_tmpl=upload_tmpl, cascade_band=cascade_band,
                                   ct1=ct1, raw_thr1=raw_thr1, slot=slot,
                                   async_submit=async_submit, sparse=sparse, nbins=nbins,
-                                  max_bins=MAX_BINS, handle_out=handle_out,
+                                  max_bins=MAX_BINS, handle_out=handle_out, phase=phase,
                                   refine_reach=refine_reach)

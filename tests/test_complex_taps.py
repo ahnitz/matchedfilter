@@ -135,8 +135,12 @@ def test_a_real_series_is_transformed_at_half_size_exactly(pack):
     t1, s1, z1 = run(True)
     assert z0.size > 3, "the injections must trigger"
     np.testing.assert_array_equal(t0, t1)
-    np.testing.assert_array_equal(s0, s1)
-    np.testing.assert_allclose(z1, z0, rtol=1e-4, atol=1e-4 * np.abs(z0).max())
+    # A bin's peak may move to an adjacent sample whose |z| ties it to float rounding (the
+    # two paths round differently: 8.800278 against 8.800279 at 5698/5699 once): only there.
+    moved = s0 != s1
+    assert np.all(np.abs(s0[moved].astype(np.int64) - s1[moved]) == 1)
+    np.testing.assert_allclose(np.abs(z1[moved]), np.abs(z0[moved]), rtol=1e-5)
+    np.testing.assert_allclose(z1[~moved], z0[~moved], rtol=1e-4, atol=1e-4 * np.abs(z0).max())
 
 
 def test_a_lane_of_a_complex_series_is_read_in_place():

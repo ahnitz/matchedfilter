@@ -137,8 +137,10 @@ def test_host_binding_contract(manifest, n):
     buffers the module never reads, so this is pinned where it can be seen.
     """
     info = manifest["modules"][str(n)]
+    # data, tmpl, peakIdx, peakVal, then the row-window table (gRowWin: each row's window and
+    # bin phase, read when specialization constant 76 is set; a dummy is bound otherwise).
     assert [(d["set"], d["binding"]) for d in info["descriptors"]] == [
-        (0, 0), (0, 1), (0, 2), (0, 3)]     # data, tmpl, peakIdx, peakVal
+        (0, 0), (0, 1), (0, 2), (0, 3), (0, 4)]
     assert all(d["kind"] == "StorageBuffer" for d in info["descriptors"])
     assert info["push_constant"] is True
 

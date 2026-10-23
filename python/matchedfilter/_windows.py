@@ -95,3 +95,46 @@ def _window_layout(g, W: np.ndarray, S: int):
         return empty, empty, empty
     cat = (lambda xs: np.ascontiguousarray(np.concatenate(xs), dtype=np.uintp))
     return cat(parts_t), cat(parts_s), cat(parts_e)
+
+
+def _window_bin_phases(W: np.ndarray, starts: np.ndarray, ws: np.ndarray, binsize: int):
+    """Each block entry's bin phase on its window's bin grid, or None if every one is 0.
+
+    Window [v0, v1) has bins v0 + k*binsize; an entry searching from absolute sample
+    a = starts + ws numbers its bins from a - phase, phase = (a - v0) mod binsize, so its
+    bins are the window's (matchedfilter.h, ap_mf_run_series' bin_phase)."""
+    a = starts.astype(np.int64) + ws.astype(np.int64)
+    v0 = W[np.searchsorted(W[:, 0], a, side='right') - 1, 0]
+    ph = ((a - v0) % int(binsize)).astype(np.uint32)
+    return ph if ph.any() else None
+
+
+def _merge_window_bins(W: np.ndarray, binsize: int, t, s, v, *rest):
+    """The peaks of partial bins merged into their window bins: per (template, window,
+    bin) the largest |v|, the earlier sample on a tie (the scans' own rule). The arrays
+    (and any in rest, aligned with them) come back filtered, in their original order."""
+    if s.size < 2:
+        return (t, s, v) + rest
+    wi = np.searchsorted(W[:, 0], s, side='right') - 1
+    b = (s - W[wi, 0]) // int(binsize)
+    if t[0] == t[-1] and np.all(t == t[0]) and np.all(s[1:] > s[:-1]):
+        # One template, samples ascending (a follow-up window): a window bin's partial bins
+        # are adjacent runs, at most a few long -- no sort.
+        same = (b[1:] == b[:-1]) & (wi[1:] == wi[:-1])
+        if not same.any():
+            return (t, s, v) + rest
+        keep = np.ones(s.size, bool)
+        a = np.abs(v)
+        starts = np.flatnonzero(np.r_[True, ~same])
+        ends = np.r_[starts[1:], s.size]
+        for i, j in zip(starts[ends - starts > 1], ends[ends - starts > 1]):
+            keep[i:j] = False
+            keep[i + int(np.argmax(a[i:j]))] = True        # the first of equal maxima
+        return tuple(x[keep] for x in (t, s, v) + rest)
+    order = np.lexsort((s, -np.abs(v), b, wi, t))
+    key = np.stack((t[order], wi[order], b[order]))
+    first = np.r_[True, np.any(key[:, 1:] != key[:, :-1], axis=0)]
+    keep = np.sort(order[first])
+    if keep.size == s.size:
+        return (t, s, v) + rest
+    return tuple(a[keep] for a in (t, s, v) + rest)

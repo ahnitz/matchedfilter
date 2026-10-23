@@ -349,7 +349,7 @@ class HierOps:
     def _hier_peaks(self, n, band, data, tmpl, ct0, raw_thr, binsize=None, threshold=0.0,
                    window=None, upload_data=True, upload_tmpl=True, cascade_band=None, ct1=None,
                    raw_thr1=None, slot=None, async_submit=False, sparse=False, row_windows=None,
-                   handle_out=None, refine_reach=None):
+                   handle_out=None, refine_reach=None, nbins=None):
         """Hierarchical peaks: (idx, val) shaped (data rows, templates, bins) as peaks returns,
         or a _SparsePeaks when sparse, from one recording that gates every pair at a narrow
         band (one tier, or a cascade of two) and refines only the survivors at n.
@@ -358,11 +358,13 @@ class HierOps:
         a cascade's tier 0 is cascade_band/ct0/raw_thr and tier 1 band/ct1/raw_thr1
         (_gpuhost.hier_tiers also takes pairs). row_windows (hier_peaks_grouped): (groups,
         uint32 [lo, hi] per data row) narrows each row's window on the device. handle_out (a
-        list): receives a handle hier_replay takes."""
+        list): receives a handle hier_replay takes. nbins: at least this many bins (a grouped
+        call's rows with bin phases can need more than any window of n holds)."""
         band, ct0, raw_thr, cascade_band, ct1, raw_thr1 = hier_tiers(
             n, band, ct0, raw_thr, cascade_band, ct1, raw_thr1)
         nd, nt = data.shape[0], tmpl.shape[0]
-        lo, hi, binsize, nbins = hier_window(n, window, binsize)
+        lo, hi, binsize, wbins = hier_window(n, window, binsize)
+        nbins = wbins if nbins is None else max(wbins, int(nbins))
         rw_key = None if row_windows is None else row_windows[0]
         rw = None if row_windows is None else row_windows[1]
         if nbins > MAX_BINS:
@@ -524,10 +526,11 @@ class HierOps:
         bi = buf("idx", out * 4, readback=True)
         bv = buf("val", out * 8, readback=True)
         if rowwin:
-            span = -(-nd * 8 // align) * align
+            # (lo, hi, bin phase) per row: tierb.slang ROWWIN_WORDS.
+            span = -(-nd * 12 // align) * align
             rws = buf("rws", span * (len(bands) + 1), upload=True)
             for j, name in enumerate(_rw_names(len(bands))):
-                rec.buffers[name] = self._x_section(rws, j * span, nd * 8)
+                rec.buffers[name] = self._x_section(rws, j * span, nd * 12)
         if feed in ("tier0", "pack"):
             buf("band0", nd * bands[0] * cb0)
             buf("band1", nd * bands[1] * 8 if last else 16)

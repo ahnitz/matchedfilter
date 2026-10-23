@@ -98,7 +98,8 @@ fusedTierB(const __half2* __restrict__ data, const __half2* __restrict__ tmpl,
            int binShift, unsigned nbins, unsigned thrBits, const unsigned* __restrict__ rowWin)
 {
     // Per-row windows (tierb.slang rowWindow): a window start of 0xFFFFFFFF reads each data
-    // row's (lo, hi) from rowWin, already mapped onto this band by the host.
+    // row's (lo, hi) from rowWin (three words a row: lo, hi and a bin phase this one-bin
+    // gate ignores), already mapped onto this band by the host.
     // DFT matrices, shared by the block: F_M (re, im, -im), F_16 (re, im, -im), twiddles.
     __shared__ __align__(16) __half fmr[M * M], fmi[M * M], fmn[M * M];
     __shared__ __align__(16) __half f16r[256], f16i[256], f16n[256];
@@ -159,8 +160,8 @@ fusedTierB(const __half2* __restrict__ data, const __half2* __restrict__ tmpl,
     // block, not per slot; any grid size is valid (whole warps leave together).
     for (unsigned slot = blockIdx.x * WPB + warp; slot < slots; slot += gridDim.x * WPB) {
     const unsigned d = slot / tiles, t0 = (slot - d * tiles) * 2u;
-    const unsigned ws = winStart == 0xFFFFFFFFu ? rowWin[2u * d] : winStart;
-    const unsigned we = winStart == 0xFFFFFFFFu ? rowWin[2u * d + 1u] : winEnd;
+    const unsigned ws = winStart == 0xFFFFFFFFu ? rowWin[3u * d] : winStart;
+    const unsigned we = winStart == 0xFFFFFFFFu ? rowWin[3u * d + 1u] : winEnd;
     const __half2* drow = data + (size_t)d * BAND;
     // The data row's elements this lane feeds into A, read once for both templates.
     float2 dv[M / 16][8];

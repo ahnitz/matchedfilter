@@ -47,6 +47,10 @@ typedef struct {
 struct ap_hmf_plan {
   size_t n;
   size_t k;
+  /* Each data row's bin phase during an ap_hmf_run_series call ([nd]), NULL otherwise: the
+     refine numbers row d's bins from start - bph[d] (ap_mf_run_series). The tiers each take
+     one maximum over their window and never see it. */
+  const unsigned *bph;
   int is_dif;
   int hermitian;
   int nd,nt,dgroup;
@@ -283,7 +287,7 @@ static void price_direct(ap_hmf_plan *p){
     ap_td_corr_on(p->full_fft,x,tp,L,nl,p->dout);
     unsigned long long b=ap_ticks();
     int c=0;
-    ap_binmax(p->full_fft,spec,n,1,n,1e30f,pk,&c,AP_BACKWARD,0,n);
+    ap_binmax(p->full_fft,spec,n,1,n,1e30f,pk,&c,AP_BACKWARD,0,n,NULL);
     unsigned long long e=ap_ticks();
     if((double)(b-a)<best_d) best_d=(double)(b-a);
     if((double)(e-b)<best_f) best_f=(double)(e-b);
@@ -382,6 +386,13 @@ size_t ap_hmf_nbins(const ap_hmf_plan *p,size_t bs,size_t lo,size_t hi){
   if(lo >= hi) return 0;
   return (hi - lo + bs - 1) / bs;
 }
+/* The same for bins numbered from lo - ph; and row d's phase. */
+static size_t hmf_nbins_phased(const ap_hmf_plan *p,size_t bs,size_t lo,size_t hi,unsigned ph){
+  if(!p || !bs) return 0;
+  if(hi > p->n) hi = p->n;
+  return ap_bin_count(bs,lo,hi,ph);
+}
+static inline unsigned hmf_row_phase(const ap_hmf_plan *p,int d){ return p->bph ? p->bph[d] : 0u; }
 void ap_hmf_stats(const ap_hmf_plan *p,long *pairs,long *refined){
   if(!p) return;
   if(pairs) *pairs=p->pairs;
@@ -574,14 +585,15 @@ static void hmf_forward_real(ap_hmf_plan *p,const float *x,size_t s0,size_t have
 int ap_hmf_run_series(ap_hmf_plan *p,
                       const float *series,size_t nseries,
                       const size_t *start,const size_t *win_start,
-                      const size_t *win_end,int nblocks,
+                      const size_t *win_end,const unsigned *bin_phase,int nblocks,
                       int t0,int nt,size_t binsize,float threshold,
                       ap_peak *peaks,int *counts){
   if(!p||nblocks<1||nt<1||!binsize) return 0;
   if(!ap_range_ok(t0,nt,p->nt)) return -1;
   const unsigned long long call0=ap_ticks();
   const size_t n=p->n;
-  const size_t nb0=ap_hmf_nbins(p,binsize,win_start[0],win_end[0]);
+  const size_t nb0=hmf_nbins_phased(p,binsize,win_start[0],win_end[0],
+                                    bin_phase?bin_phase[0]:0u);
   int total=0;
   /* Filter several blocks together where they share a window.  Blocks differ
      only at a segment's edges, so runs of equal windows are long. */
@@ -632,7 +644,6 @@ int ap_hmf_run_series(ap_hmf_plan *p,
          per slot removes that and lets ap_hmf_run's existing lazy path do it
          on demand.  dready stays 0 to say so. */
     }
-    size_t nb=ap_hmf_nbins(p,binsize,win_start[b0],win_end[b0]);
     /* peaks is addressed at a single stride, so every window must produce the
        same bin count. A shorter one at a segment's edge does not: it writes
        where the next block's row begins and runs off the end of the caller's
@@ -640,10 +651,14 @@ int ap_hmf_run_series(ap_hmf_plan *p,
        blocks are exactly the ragged ones this call exists to accept.
        Refusing is the honest answer; the shape the API returns has one nbins
        in it and cannot express two. */
-    if(nb!=nb0) return -1;
+    for(int j=0;j<g;j++)
+      if(hmf_nbins_phased(p,binsize,win_start[b0+j],win_end[b0+j],
+                          bin_phase?bin_phase[b0+j]:0u)!=nb0) return -1;
+    p->bph = bin_phase ? bin_phase+b0 : NULL;    /* rows 0..g-1 are blocks b0..b0+g-1 */
     int r=ap_hmf_run(p,0,g,t0,nt,binsize,threshold,
-                     peaks+(size_t)b0*nt*nb,counts?counts+(size_t)b0*nt:NULL,
+                     peaks+(size_t)b0*nt*nb0,counts?counts+(size_t)b0*nt:NULL,
                      win_start[b0],win_end[b0]);
+    p->bph = NULL;
     for(int j=0;j<g;j++) p->dtime[j]=NULL;   /* the caller's series is not held past the call */
     if(r<0) return -1;
     total+=r;
@@ -662,7 +677,7 @@ static int hmf_refine_fft(ap_hmf_plan *p, const int *fire_d, const int *fire_t,
   if(nfire <= 0) return 0;
 
   if(p->is_dif && p->hermitian){
-    const size_t nb = ap_hmf_nbins(p, binsize, start, end);
+    const size_t nb = hmf_nbins_phased(p, binsize, start, end, hmf_row_phase(p, d0 + fire_d[0]));
     const size_t K = p->k;
     const size_t N = p->n;
     int total = 0;
@@ -704,7 +719,8 @@ static int hmf_refine_fft(ap_hmf_plan *p, const int *fire_d, const int *fire_t,
 
       int c = 0;
       int r = ap_binmax(p->full_fft, prod, N, 1, binsize, threshold,
-                        peaks + row * nb, &c, AP_BACKWARD, start, end);
+                        peaks + row * nb, &c, AP_BACKWARD, start, end,
+                        p->bph ? p->bph + d0 + d : NULL);
       if(r < 0) return -1;
       if(counts) counts[row] = c;
       total += c;
@@ -730,14 +746,15 @@ static int hmf_refine_fft(ap_hmf_plan *p, const int *fire_d, const int *fire_t,
       }
     }
 
-    const size_t nb = ap_hmf_nbins(p, binsize, start, end);
+    const size_t nb = hmf_nbins_phased(p, binsize, start, end, hmf_row_phase(p, d0 + fire_d[0]));
     int total = 0;
     for(int j = 0; j < nfire; j++){
       const int d = fire_d[j], t = fire_t[j];
       const size_t row = (size_t)d * nt + t;
       int r = ap_mf_run_dif(p->full, 2 * (d0 + d), t0 + t, 1,
                             binsize, threshold, peaks + row * nb,
-                            counts ? counts + row : NULL, start, end);
+                            counts ? counts + row : NULL, start, end,
+                            hmf_row_phase(p, d0 + d));
       if(r < 0) return -1;
       total += r;
     }
@@ -751,9 +768,11 @@ static int hmf_refine_fft(ap_hmf_plan *p, const int *fire_d, const int *fire_t,
         p->dready[d0 + d] = 1;
       }
     }
+    ap_mf_set_bin_phase(p->full, p->bph);        /* the full plan's rows are ours */
     int r = ap_mf_run_pairs_pooled(p->full, d0, fire_d, fire_t, nfire,
                                   t0, binsize, threshold,
                                   peaks, counts, start, end, nt);
+    ap_mf_set_bin_phase(p->full, NULL);
     return r;
   }
 }
@@ -832,7 +851,7 @@ static int hmf_refine(ap_hmf_plan *p, const int *fire_d, const int *fire_t,
                       size_t binsize, float threshold,
                       ap_peak *peaks, int *counts, size_t start, size_t end){
   if(nfire<=0) return 0;
-  const size_t nb=ap_hmf_nbins(p,binsize,start,end);
+  const size_t nb=hmf_nbins_phased(p,binsize,start,end,hmf_row_phase(p,d0+fire_d[0]));
   /* One bin per pair: the answer is the window's largest |z|, and it lies by its last tier's
      largest coarse lag (ce.index) -- the window is dir_hw coarse samples either side of it.
      Several bins ask for every bin's maximum above threshold, which one window cannot
@@ -919,7 +938,7 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
   if(end>p->n) end=p->n;
   if(start>=end) return 0;
   const size_t n=p->n;
-  const size_t nb=ap_hmf_nbins(p,binsize,start,end);
+  const size_t nb=hmf_nbins_phased(p,binsize,start,end,hmf_row_phase(p,d0));
   for(int i=0;i<p->ntiers;i++)
     if(!isfinite(p->tier[i].thr) || p->tier[i].thr < 0) return -1;
 

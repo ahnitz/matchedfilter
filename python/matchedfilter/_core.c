@@ -67,16 +67,42 @@ static int run_shape(Py_ssize_t n,int maxd,int maxt,int d0,int nd,int t0,int nt,
   *rows=(Py_ssize_t)nd*nt;
   return 1;
 }
-/* real: the series is real float32 samples (HMF set_real_series), else complex64. */
+/* A block layout's bin phases (run_series' bin_phase): uint32 per block, each below 2^24 (a
+   bound on the bins it can add); no buffer (ph->buf NULL) is every phase 0. */
+static int phase_ok(const Py_buffer *ph,int blocks,Py_ssize_t binsize){
+  if(!ph || !ph->buf) return 1;
+  if(ph->len!=(Py_ssize_t)blocks*(Py_ssize_t)sizeof(unsigned)){
+    PyErr_SetString(PyExc_ValueError,"bin_phase needs one uint32 per block"); return 0;
+  }
+  const unsigned *v=ph->buf;
+  (void)binsize;
+  for(int i=0;i<blocks;i++) if(v[i]>=(1u<<24)){
+    PyErr_SetString(PyExc_ValueError,"bin_phase must be below 2**24"); return 0;
+  }
+  return 1;
+}
+static const unsigned *phase_of(const Py_buffer *ph){ return ph && ph->buf ? ph->buf : NULL; }
+/* The optional bin_phase argument: None (or absent) for none. */
+static int phase_arg(PyObject *o,Py_buffer *ph){
+  ph->buf=NULL;
+  if(!o || o==Py_None) return 1;
+  return PyObject_GetBuffer(o,ph,PyBUF_C_CONTIGUOUS)==0;
+}
+static void phase_release(Py_buffer *ph){ if(ph->buf) PyBuffer_Release(ph); ph->buf=NULL; }
+
+/* real: the series is real float32 samples (HMF set_real_series), else complex64. ph: the
+   blocks' bin phases (or no buffer), which set each block's bin count. */
 static int series_shape_r(Py_ssize_t n,int maxt,int t0,int nt,Py_ssize_t binsize,int real,
                           Py_buffer *ser,Py_buffer *st,Py_buffer *ws,Py_buffer *we,
-                          int *blocks,size_t *nb,Py_ssize_t *rows){
+                          const Py_buffer *ph,int *blocks,size_t *nb,Py_ssize_t *rows){
   const Py_ssize_t unit=(Py_ssize_t)sizeof(size_t);
   if(ser->len%(real?4:8) || st->len<unit || st->len%unit || st->len/unit>INT_MAX
      || ws->len!=st->len || we->len!=st->len){
     PyErr_SetString(PyExc_ValueError,"invalid series or block-layout buffer lengths"); return 0;
   }
   *blocks=(int)(st->len/unit);
+  if(!phase_ok(ph,*blocks,binsize)) return 0;
+  const unsigned *phv=phase_of(ph);
   const size_t *starts=st->buf,*lo=ws->buf,*hi=we->buf;
   size_t first=0;
   for(int i=0;i<*blocks;i++){
@@ -88,6 +114,7 @@ static int series_shape_r(Py_ssize_t n,int maxt,int t0,int nt,Py_ssize_t binsize
     size_t bins;
     if(!run_shape(n,1,maxt,0,1,t0,nt,binsize,(Py_ssize_t)lo[i],
                   (Py_ssize_t)hi[i],&bins,&ignored)) return 0;
+    if(phv) bins=ap_bin_count((size_t)binsize,lo[i],hi[i]>(size_t)n?(size_t)n:hi[i],phv[i]);
     if(i && bins!=first){
       PyErr_SetString(PyExc_ValueError,"block windows must have equal bin counts"); return 0;
     }
@@ -100,13 +127,13 @@ static int series_shape_r(Py_ssize_t n,int maxt,int t0,int nt,Py_ssize_t binsize
 }
 static int series_shape(Py_ssize_t n,int maxt,int t0,int nt,Py_ssize_t binsize,
                         Py_buffer *ser,Py_buffer *st,Py_buffer *ws,Py_buffer *we,
-                        int *blocks,size_t *nb,Py_ssize_t *rows){
-  return series_shape_r(n,maxt,t0,nt,binsize,0,ser,st,ws,we,blocks,nb,rows);
+                        const Py_buffer *ph,int *blocks,size_t *nb,Py_ssize_t *rows){
+  return series_shape_r(n,maxt,t0,nt,binsize,0,ser,st,ws,we,ph,blocks,nb,rows);
 }
 static int series_shape_dif(Py_ssize_t n,int maxt,int t0,int nt,Py_ssize_t binsize,
                             int decimated,
                             Py_buffer *ser,Py_buffer *st,Py_buffer *ws,Py_buffer *we,
-                            int *blocks,size_t *nb,Py_ssize_t *rows){
+                            const Py_buffer *ph,int *blocks,size_t *nb,Py_ssize_t *rows){
   const Py_ssize_t unit=(Py_ssize_t)sizeof(size_t);
   if(ser->len%8 || st->len<unit || st->len%unit || st->len/unit>INT_MAX
      || ws->len!=st->len || we->len!=st->len){
@@ -116,6 +143,8 @@ static int series_shape_dif(Py_ssize_t n,int maxt,int t0,int nt,Py_ssize_t binsi
     PyErr_SetString(PyExc_ValueError,"invalid template subrange or binsize"); return 0;
   }
   *blocks=(int)(st->len/unit);
+  if(!phase_ok(ph,*blocks,binsize)) return 0;
+  const unsigned *phv=phase_of(ph);
   const size_t *starts=st->buf,*lo=ws->buf,*hi=we->buf;
   const size_t N = decimated ? (size_t)n : (size_t)(2 * n);
   size_t first=0;
@@ -125,7 +154,7 @@ static int series_shape_dif(Py_ssize_t n,int maxt,int t0,int nt,Py_ssize_t binsi
       PyErr_SetString(PyExc_ValueError,"block offset or window overflows / invalid"); return 0;
     }
     size_t w_end = hi[i] > N ? N : hi[i];
-    size_t bins = 1 + (w_end - lo[i] - 1) / (size_t)binsize;
+    size_t bins = ap_bin_count((size_t)binsize, lo[i], w_end, phv ? phv[i] : 0u);
     if(i && bins!=first){
       PyErr_SetString(PyExc_ValueError,"block windows must have equal bin counts"); return 0;
     }
@@ -424,21 +453,34 @@ static PyObject *MF_correlate_series_continuous_real(MFObject *self,PyObject *ar
   if(r){PyErr_SetString(PyExc_RuntimeError,"real continuous series correlation failed");return NULL;}
   Py_RETURN_NONE;
 }
-/* run_series(series, starts, wstart, wend, t0, nt, binsize, thr, idx,val,mag,cnt [, peaks]) */
+/* run_series(series, starts, wstart, wend, t0, nt, binsize, thr, idx,val,mag,cnt
+   [, peaks or None [, bin_phase: uint32 per block, or None]]) */
 static PyObject *MF_run_series(MFObject *self,PyObject *args){
   Py_buffer bs,bst,bws,bwe,bidx,bval,bmag,bcnt,bpk = {0};
   int t0,nt; Py_ssize_t binsize; double thr;
-  if(!PyArg_ParseTuple(args,"y*y*y*y*iindw*w*w*w*|w*",&bs,&bst,&bws,&bwe,
-                       &t0,&nt,&binsize,&thr,&bidx,&bval,&bmag,&bcnt,&bpk)) return NULL;
+  PyObject *pk_arg=NULL,*ph_arg=NULL;
+  Py_buffer bph={0};
+  if(!PyArg_ParseTuple(args,"y*y*y*y*iindw*w*w*w*|OO",&bs,&bst,&bws,&bwe,
+                       &t0,&nt,&binsize,&thr,&bidx,&bval,&bmag,&bcnt,&pk_arg,&ph_arg)) return NULL;
+  if((pk_arg && pk_arg!=Py_None && PyObject_GetBuffer(pk_arg,&bpk,PyBUF_WRITABLE)<0)
+     || !phase_arg(ph_arg,&bph)){
+    PyBuffer_Release(&bs);PyBuffer_Release(&bst);PyBuffer_Release(&bws);
+    PyBuffer_Release(&bwe);PyBuffer_Release(&bidx);PyBuffer_Release(&bval);
+    PyBuffer_Release(&bmag);PyBuffer_Release(&bcnt);
+    if(bpk.buf) PyBuffer_Release(&bpk);
+  phase_release(&bph);
+    return NULL;
+  }
   int nblocks; size_t nb;
   Py_ssize_t rows,need;
-  if(!series_shape(self->n,self->nt,t0,nt,binsize,&bs,&bst,&bws,&bwe,
+  if(!series_shape(self->n,self->nt,t0,nt,binsize,&bs,&bst,&bws,&bwe,&bph,
                    &nblocks,&nb,&rows)
      || !output_shape(rows,nb,&bidx,&bval,&bmag,&bcnt,&bpk,&need)){
     PyBuffer_Release(&bs);PyBuffer_Release(&bst);PyBuffer_Release(&bws);
     PyBuffer_Release(&bwe);PyBuffer_Release(&bidx);PyBuffer_Release(&bval);
     PyBuffer_Release(&bmag);PyBuffer_Release(&bcnt);
     if(bpk.buf) PyBuffer_Release(&bpk);
+  phase_release(&bph);
     return NULL;
   }
   size_t nseries=(size_t)(bs.len/8);
@@ -447,12 +489,13 @@ static PyObject *MF_run_series(MFObject *self,PyObject *args){
            PyBuffer_Release(&bwe);PyBuffer_Release(&bidx);PyBuffer_Release(&bval);
            PyBuffer_Release(&bmag);PyBuffer_Release(&bcnt);
            if(bpk.buf) PyBuffer_Release(&bpk);
+  phase_release(&bph);
            return NULL; }
   int tot;
   Py_BEGIN_ALLOW_THREADS
   tot=ap_mf_run_series(self->p,(const float*)bs.buf,nseries,
                        (const size_t*)bst.buf,(const size_t*)bws.buf,
-                       (const size_t*)bwe.buf,nblocks,t0,nt,(size_t)binsize,
+                       (const size_t*)bwe.buf,phase_of(&bph),nblocks,t0,nt,(size_t)binsize,
                        (float)thr,pk,(int*)bcnt.buf);
   Py_END_ALLOW_THREADS
   if(tot>=0){
@@ -475,6 +518,7 @@ static PyObject *MF_run_series(MFObject *self,PyObject *args){
   PyBuffer_Release(&bwe);PyBuffer_Release(&bidx);PyBuffer_Release(&bval);
   PyBuffer_Release(&bmag);PyBuffer_Release(&bcnt);
   if(bpk.buf) PyBuffer_Release(&bpk);
+  phase_release(&bph);
   if(tot<0){ PyErr_SetString(PyExc_RuntimeError,"matchedfilter: run_series failed"); return NULL; }
   return PyLong_FromLong(tot);
 }
@@ -482,11 +526,20 @@ static PyObject *MF_run_series(MFObject *self,PyObject *args){
 static PyObject *MF_run_series_dif(MFObject *self,PyObject *args){
   Py_buffer bs,bst,bws,bwe,bidx,bval,bmag,bcnt,bpk = {0};
   int t0,nt; Py_ssize_t binsize; double thr; int decimated = 0;
-  PyObject *pk_arg = NULL;
-  if(!PyArg_ParseTuple(args,"y*y*y*y*iindw*w*w*w*|Oi",&bs,&bst,&bws,&bwe,
-                       &t0,&nt,&binsize,&thr,&bidx,&bval,&bmag,&bcnt,&pk_arg,&decimated)) return NULL;
+  PyObject *pk_arg = NULL, *ph_arg = NULL;
+  Py_buffer bph={0};
+  if(!PyArg_ParseTuple(args,"y*y*y*y*iindw*w*w*w*|OiO",&bs,&bst,&bws,&bwe,
+                       &t0,&nt,&binsize,&thr,&bidx,&bval,&bmag,&bcnt,&pk_arg,&decimated,
+                       &ph_arg)) return NULL;
+  if(!phase_arg(ph_arg,&bph)){
+    PyBuffer_Release(&bs);PyBuffer_Release(&bst);PyBuffer_Release(&bws);
+    PyBuffer_Release(&bwe);PyBuffer_Release(&bidx);PyBuffer_Release(&bval);
+    PyBuffer_Release(&bmag);PyBuffer_Release(&bcnt);
+    return NULL;
+  }
   if(pk_arg && pk_arg != Py_None){
     if(PyObject_GetBuffer(pk_arg,&bpk,PyBUF_WRITABLE)<0){
+      phase_release(&bph);
       PyBuffer_Release(&bs);PyBuffer_Release(&bst);PyBuffer_Release(&bws);
       PyBuffer_Release(&bwe);PyBuffer_Release(&bidx);PyBuffer_Release(&bval);
       PyBuffer_Release(&bmag);PyBuffer_Release(&bcnt);
@@ -495,13 +548,14 @@ static PyObject *MF_run_series_dif(MFObject *self,PyObject *args){
   }
   int nblocks; size_t nb;
   Py_ssize_t rows,need;
-  if(!series_shape_dif(self->n,self->nt,t0,nt,binsize,decimated,&bs,&bst,&bws,&bwe,
+  if(!series_shape_dif(self->n,self->nt,t0,nt,binsize,decimated,&bs,&bst,&bws,&bwe,&bph,
                        &nblocks,&nb,&rows)
      || !output_shape(rows,nb,&bidx,&bval,&bmag,&bcnt,&bpk,&need)){
     PyBuffer_Release(&bs);PyBuffer_Release(&bst);PyBuffer_Release(&bws);
     PyBuffer_Release(&bwe);PyBuffer_Release(&bidx);PyBuffer_Release(&bval);
     PyBuffer_Release(&bmag);PyBuffer_Release(&bcnt);
     if(bpk.buf) PyBuffer_Release(&bpk);
+  phase_release(&bph);
     return NULL;
   }
   size_t nseries=(size_t)(bs.len/8);
@@ -510,12 +564,13 @@ static PyObject *MF_run_series_dif(MFObject *self,PyObject *args){
            PyBuffer_Release(&bwe);PyBuffer_Release(&bidx);PyBuffer_Release(&bval);
            PyBuffer_Release(&bmag);PyBuffer_Release(&bcnt);
            if(bpk.buf) PyBuffer_Release(&bpk);
+  phase_release(&bph);
            return NULL; }
   int tot;
   Py_BEGIN_ALLOW_THREADS
   tot=ap_mf_run_series_dif(self->p,(const float*)bs.buf,nseries,
                            (const size_t*)bst.buf,(const size_t*)bws.buf,
-                           (const size_t*)bwe.buf,nblocks,t0,nt,(size_t)binsize,
+                           (const size_t*)bwe.buf,phase_of(&bph),nblocks,t0,nt,(size_t)binsize,
                            (float)thr,decimated,pk,(int*)bcnt.buf);
   Py_END_ALLOW_THREADS
   if(tot>=0){
@@ -538,6 +593,7 @@ static PyObject *MF_run_series_dif(MFObject *self,PyObject *args){
   PyBuffer_Release(&bwe);PyBuffer_Release(&bidx);PyBuffer_Release(&bval);
   PyBuffer_Release(&bmag);PyBuffer_Release(&bcnt);
   if(bpk.buf) PyBuffer_Release(&bpk);
+  phase_release(&bph);
   if(tot<0){ PyErr_SetString(PyExc_RuntimeError,"matchedfilter: run_series_dif failed"); return NULL; }
   return PyLong_FromLong(tot);
 }
@@ -745,21 +801,34 @@ static PyObject *HMF_run(HMFObject *self,PyObject *args){
   if(tot<0){ PyErr_SetString(PyExc_RuntimeError,"matchedfilter: hierarchical filter failed"); return NULL; }
   return PyLong_FromLong(tot);
 }
-/* run_series(series, starts, wstart, wend, t0, nt, binsize, thr, idx,val,mag,cnt [, peaks]) */
+/* run_series(series, starts, wstart, wend, t0, nt, binsize, thr, idx,val,mag,cnt
+   [, peaks or None [, bin_phase: uint32 per block, or None]]) */
 static PyObject *HMF_run_series(HMFObject *self,PyObject *args){
   Py_buffer bs,bst,bws,bwe,bidx,bval,bmag,bcnt,bpk = {0};
   int t0,nt; Py_ssize_t binsize; double thr;
-  if(!PyArg_ParseTuple(args,"y*y*y*y*iindw*w*w*w*|w*",&bs,&bst,&bws,&bwe,
-                       &t0,&nt,&binsize,&thr,&bidx,&bval,&bmag,&bcnt,&bpk)) return NULL;
+  PyObject *pk_arg=NULL,*ph_arg=NULL;
+  Py_buffer bph={0};
+  if(!PyArg_ParseTuple(args,"y*y*y*y*iindw*w*w*w*|OO",&bs,&bst,&bws,&bwe,
+                       &t0,&nt,&binsize,&thr,&bidx,&bval,&bmag,&bcnt,&pk_arg,&ph_arg)) return NULL;
+  if((pk_arg && pk_arg!=Py_None && PyObject_GetBuffer(pk_arg,&bpk,PyBUF_WRITABLE)<0)
+     || !phase_arg(ph_arg,&bph)){
+    PyBuffer_Release(&bs);PyBuffer_Release(&bst);PyBuffer_Release(&bws);
+    PyBuffer_Release(&bwe);PyBuffer_Release(&bidx);PyBuffer_Release(&bval);
+    PyBuffer_Release(&bmag);PyBuffer_Release(&bcnt);
+    if(bpk.buf) PyBuffer_Release(&bpk);
+  phase_release(&bph);
+    return NULL;
+  }
   int nblocks; size_t nb;
   Py_ssize_t rows,need;
-  if(!series_shape_r(self->n,self->nt,t0,nt,binsize,self->real,&bs,&bst,&bws,&bwe,
+  if(!series_shape_r(self->n,self->nt,t0,nt,binsize,self->real,&bs,&bst,&bws,&bwe,&bph,
                      &nblocks,&nb,&rows)
      || !output_shape(rows,nb,&bidx,&bval,&bmag,&bcnt,&bpk,&need)){
     PyBuffer_Release(&bs);PyBuffer_Release(&bst);PyBuffer_Release(&bws);
     PyBuffer_Release(&bwe);PyBuffer_Release(&bidx);PyBuffer_Release(&bval);
     PyBuffer_Release(&bmag);PyBuffer_Release(&bcnt);
     if(bpk.buf) PyBuffer_Release(&bpk);
+  phase_release(&bph);
     return NULL;
   }
   size_t nseries=self->real ? ((size_t)(bs.len/4)+(size_t)self->real_stride-1)/(size_t)(self->real_stride?self->real_stride:1) : (size_t)(bs.len/8);
@@ -768,12 +837,13 @@ static PyObject *HMF_run_series(HMFObject *self,PyObject *args){
            PyBuffer_Release(&bwe);PyBuffer_Release(&bidx);PyBuffer_Release(&bval);
            PyBuffer_Release(&bmag);PyBuffer_Release(&bcnt);
            if(bpk.buf) PyBuffer_Release(&bpk);
+  phase_release(&bph);
            return NULL; }
   int tot;
   Py_BEGIN_ALLOW_THREADS
   tot=ap_hmf_run_series(self->p,(const float*)bs.buf,nseries,
                         (const size_t*)bst.buf,(const size_t*)bws.buf,
-                        (const size_t*)bwe.buf,nblocks,t0,nt,(size_t)binsize,
+                        (const size_t*)bwe.buf,phase_of(&bph),nblocks,t0,nt,(size_t)binsize,
                         (float)thr,pk,(int*)bcnt.buf);
   Py_END_ALLOW_THREADS
   if(tot>=0){
@@ -796,6 +866,7 @@ static PyObject *HMF_run_series(HMFObject *self,PyObject *args){
   PyBuffer_Release(&bwe);PyBuffer_Release(&bidx);PyBuffer_Release(&bval);
   PyBuffer_Release(&bmag);PyBuffer_Release(&bcnt);
   if(bpk.buf) PyBuffer_Release(&bpk);
+  phase_release(&bph);
   if(tot<0){ PyErr_SetString(PyExc_RuntimeError,"matchedfilter: run_series failed"); return NULL; }
   return PyLong_FromLong(tot);
 }
@@ -805,14 +876,18 @@ static PyObject *HMF_run_series(HMFObject *self,PyObject *args){
    sparse (ap_hmf_set_sparse): rows no tier passes write only cnt, and only rows with
    cnt > 0 are read back -- no pass over the dense table at either end. */
 static PyObject *HMF_run_series_sparse(HMFObject *self,PyObject *args){
-  Py_buffer bs,bst,bws,bwe,bcnt;
+  Py_buffer bs,bst,bws,bwe,bcnt,bph={0};
   int t0,nt; Py_ssize_t binsize; double thr;
-  if(!PyArg_ParseTuple(args,"y*y*y*y*iindw*",&bs,&bst,&bws,&bwe,&t0,&nt,&binsize,&thr,&bcnt))
+  PyObject *ph_arg=NULL;
+  if(!PyArg_ParseTuple(args,"y*y*y*y*iindw*|O",&bs,&bst,&bws,&bwe,&t0,&nt,&binsize,&thr,&bcnt,
+                       &ph_arg))
     return NULL;
   int nblocks; size_t nb; Py_ssize_t rows;
   PyObject *ret=NULL;
   ap_peak *pk=NULL;
-  if(!series_shape_r(self->n,self->nt,t0,nt,binsize,self->real,&bs,&bst,&bws,&bwe,&nblocks,&nb,&rows))
+  if(!phase_arg(ph_arg,&bph)) goto done;
+  if(!series_shape_r(self->n,self->nt,t0,nt,binsize,self->real,&bs,&bst,&bws,&bwe,&bph,
+                     &nblocks,&nb,&rows))
     goto done;
   if(bcnt.len/(Py_ssize_t)sizeof(int)<rows){
     PyErr_SetString(PyExc_ValueError,"counts buffer too small"); goto done; }
@@ -829,7 +904,7 @@ static PyObject *HMF_run_series_sparse(HMFObject *self,PyObject *args){
   ap_hmf_set_sparse(self->p,1);
   tot=ap_hmf_run_series(self->p,(const float*)bs.buf,(self->real ? ((size_t)(bs.len/4)+(size_t)self->real_stride-1)/(size_t)(self->real_stride?self->real_stride:1) : (size_t)(bs.len/8)),
                         (const size_t*)bst.buf,(const size_t*)bws.buf,
-                        (const size_t*)bwe.buf,nblocks,t0,nt,(size_t)binsize,
+                        (const size_t*)bwe.buf,phase_of(&bph),nblocks,t0,nt,(size_t)binsize,
                         (float)thr,pk,cnt);
   ap_hmf_set_sparse(self->p,0);
   Py_END_ALLOW_THREADS
@@ -867,6 +942,7 @@ bad_count:
 done:
   PyBuffer_Release(&bs);PyBuffer_Release(&bst);PyBuffer_Release(&bws);
   PyBuffer_Release(&bwe);PyBuffer_Release(&bcnt);
+  phase_release(&bph);
   return ret;
 }
 static PyObject *HMF_nbins(HMFObject *self,PyObject *args){

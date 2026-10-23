@@ -78,6 +78,8 @@ typedef decltype(hn::Gt(hn::Zero(AP_D), hn::Zero(AP_D))) vm;
    used to cost. */
 #define V_CMP_GT(a, b)  hn::Gt((a), (b))
 #define V_MASK_ANY(m)   (!hn::AllFalse(AP_D, (m)))
+#define V_MASK_AND(a, b)    hn::And((a), (b))
+#define V_MASK_ANDNOT(a, b) hn::AndNot((a), (b))   /* ~a & b */
 /* select b where the mask is set, a where clear */
 #define V_SEL(m, a, b)  hn::IfThenElse((m), (b), (a))
 #define VI_SEL(m, a, b) hn::IfThenElse(hn::RebindMask(AP_DI, (m)), (b), (a))

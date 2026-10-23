@@ -467,6 +467,10 @@ def compile_one(slangc, n, outdir, entry=ENTRY, cap=None, suffix="", coarse16=0,
     items = entry in ("refineItems", "refineListed")
     src.write_text(("#define MF_PAIR_OUT 1\n" if items else "")
                    + ("#define MF_GATE_ONLY 1\n" if gate_only else "")
+                   # The binned fusedTierB build reads its row-window table at binding 4,
+                   # after its own four buffers (tierb.slang gRowWin).
+                   + ("#define MF_TIERB_PEAKS 1\n" if entry == "fusedTierB" and not coarse16
+                      else "")
                    # refine_bounded.slang's own buffers take bindings 0-5 (tierb.slang's
                    # row-window table moves past them): the follow-up refine too, so every
                    # target binds its buffers in its parameter order.

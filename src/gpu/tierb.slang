@@ -166,12 +166,18 @@ C cload(StructuredBuffer<CVal> b, uint i) { return b[i]; }
 //: The data row stride (see mfDataStride in twiddle.slang).
 #define DSTRIDE ((mfDataStride != 0u) ? mfDataStride : N)
 
-//: Per-row windows: (lo, hi) per data row, in this kernel's own samples (a coarse tier's
-//: already mapped onto its band by the host, _gpuhost.band_windows). Mapping them here (a
-//: mode 2, since removed) made the band-256 coarse kernel 1.47x slower at SIMD16 on an Iris
-//: Xe, for a handful of integer operations per pair.
+//: Per-row windows: (lo, hi, phase) per data row, in this kernel's own samples (a coarse
+//: tier's already mapped onto its band by the host, _gpuhost.band_windows). Mapping them
+//: here (a mode 2, since removed) made the band-256 coarse kernel 1.47x slower at SIMD16 on
+//: an Iris Xe, for a handful of integer operations per pair.
 //:
-//: Vulkan: a binding after the entry's own (4 for the coarse role, 5 for the listed refine),
+//: phase is the row's bin phase (ap_mf_run_series' bin_phase): the binned roles number the
+//: row's bins from lo - phase, so a window spanning several blocks keeps its own bin grid.
+//: rowWindow leaves it in _binPhase (0 when the table is off), which the bin index adds;
+//: the one-bin roles never read it.
+//:
+//: Vulkan: a binding after the entry's own (4 for fusedTierB, coarse or binned -- the binned
+//: builds define MF_TIERB_PEAKS; 6 for the bounded listed refine),
 //: read when the specialization constant mfRowWindows is set. CUDA has no specialization
 //: constants: the table is the entry's last argument (ROWWIN_PARAM, passed down as
 //: ROWWIN_ARG) and a window start of ROWWIN_ON switches it on. Metal takes the table the same
@@ -180,45 +186,58 @@ C cload(StructuredBuffer<CVal> b, uint i) { return b[i]; }
 //: measured choice (on the M2 the grouped call once ran 6% slower in the production ladder,
 //: docs/convergence-plan.md step 2). Elsewhere both macros are empty.
 #define ROWWIN_ON 0xFFFFFFFFu
+//: Words per row of the row-window table.
+#define ROWWIN_WORDS 3u
+static uint _binPhase = 0u;
 #if defined(MF_VULKAN)
 #if COARSE16
 [[vk::binding(4, 0)]] StructuredBuffer<uint> gRowWin;
 #elif defined(MF_REFINE_BOUNDED)
 //: refineListedBounded's own buffers take bindings 0-5 (its count is 5).
 [[vk::binding(6, 0)]] StructuredBuffer<uint> gRowWin;
+#elif defined(MF_TIERB_PEAKS)
+//: The binned fusedTierB builds (flat peaks, the fp32 gate tier): after their own four.
+[[vk::binding(4, 0)]] StructuredBuffer<uint> gRowWin;
 #else
+//: Past every binding of the modules that include this file without reading the table.
 [[vk::binding(5, 0)]] StructuredBuffer<uint> gRowWin;
 #endif
 #define ROWWIN_PARAM
 #define ROWWIN_ARG
 void rowWindow(uint d, inout uint winStart, inout uint winEnd)
 {
+    _binPhase = 0u;
     if (mfRowWindows == 0u) return;
-    winStart = gRowWin[2u * d];
-    winEnd = gRowWin[2u * d + 1u];
+    winStart = gRowWin[ROWWIN_WORDS * d];
+    winEnd = gRowWin[ROWWIN_WORDS * d + 1u];
+    _binPhase = gRowWin[ROWWIN_WORDS * d + 2u];
 }
 #elif defined(MF_METAL)
 #define ROWWIN_PARAM , StructuredBuffer<uint> rowWin
 #define ROWWIN_ARG , rowWin
 void rowWindow(uint d, inout uint winStart, inout uint winEnd, StructuredBuffer<uint> rowWin)
 {
+    _binPhase = 0u;
     if (mfRowWindows == 0u) return;
-    winStart = rowWin[2u * d];
-    winEnd = rowWin[2u * d + 1u];
+    winStart = rowWin[ROWWIN_WORDS * d];
+    winEnd = rowWin[ROWWIN_WORDS * d + 1u];
+    _binPhase = rowWin[ROWWIN_WORDS * d + 2u];
 }
 #elif defined(MF_CUDA)
 #define ROWWIN_PARAM , StructuredBuffer<uint> rowWin
 #define ROWWIN_ARG , rowWin
 void rowWindow(uint d, inout uint winStart, inout uint winEnd, StructuredBuffer<uint> rowWin)
 {
+    _binPhase = 0u;
     if (winStart != ROWWIN_ON) return;
-    winStart = rowWin[2u * d];
-    winEnd = rowWin[2u * d + 1u];
+    winStart = rowWin[ROWWIN_WORDS * d];
+    winEnd = rowWin[ROWWIN_WORDS * d + 1u];
+    _binPhase = rowWin[ROWWIN_WORDS * d + 2u];
 }
 #else
 #define ROWWIN_PARAM
 #define ROWWIN_ARG
-void rowWindow(uint d, inout uint winStart, inout uint winEnd) {}
+void rowWindow(uint d, inout uint winStart, inout uint winEnd) { _binPhase = 0u; }
 #endif
 //: A data element for the coarse role. With a stride set, the data buffer is
 //: the full fp32 spectra (two words per element) and is rounded to half here,
@@ -1106,7 +1125,7 @@ void filterPair(uint pair, uint tid,
         // field: two integer ops per register, exact under any math mode.
         ovAcc |= (bit_cast<uint>(r[i]) & 0x7C007C00u) + 0x04000400u;
 #endif
-        uint off = idx - winStart;
+        uint off = idx - winStart + _binPhase;   // bins from the row's origin (rowWindow)
         // Shift when the binsize is a power of two, divide when it is not --
         // the same split the CPU makes, and the reason no restriction on
         // binsize is needed. A real division here is ~20 cycles.
@@ -1743,7 +1762,9 @@ void fusedTierB(uint3 gid: SV_GroupID, uint3 lid: SV_GroupThreadID,
     uint _pr = gid.x * PPG + _sub, _t = lid.x % WG;
     _stgBase = _sub * STGW;
 #endif
-#if !COARSE16 && defined(MF_CUDA) && PPG == 1 && TILE_T == 1
+#if !COARSE16
+    // The binned role reads its row's window and bin phase from the table when it is on
+    // (rowWindow): a phased series call, or per-row windows.
     uint _ws = winStart, _we = winEnd;
     rowWindow(_pr / ntmpl, _ws, _we ROWWIN_ARG);
     filterPair(_pr, _t, data, tmpl, peakIdx, peakVal, ntmpl,

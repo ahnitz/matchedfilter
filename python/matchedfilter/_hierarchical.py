@@ -777,7 +777,7 @@ class HierarchicalFilter(MatchedFilter):
     # ---- run ----------------------------------------------------------------
     def run_series(self, series, starts=None, win_start=None, win_end=None,
                    binsize=None, threshold=0.0, templates=None, raw=False,
-                   decimated=None):
+                   decimated=None, bin_phase=None):
         if self._chain_trial is None and self.device.kind == "cpu" and self._mf is not None:
             q15_timed = self._q15_before_call()
             full = templates is None or templates[1] >= self.ntemplates
@@ -793,19 +793,19 @@ class HierarchicalFilter(MatchedFilter):
                 def run():
                     return parent_run(series, starts=starts, win_start=win_start, win_end=win_end,
                                       binsize=binsize, threshold=threshold, templates=templates,
-                                      raw=raw, decimated=decimated)
+                                      raw=raw, decimated=decimated, bin_phase=bin_phase)
                 return self._q15_run_pair(run, nblk * self.ntemplates * self.ndata)
         if self._chain_trial is None:
             return super().run_series(series, starts=starts, win_start=win_start, win_end=win_end,
                                       binsize=binsize, threshold=threshold, templates=templates,
-                                      raw=raw, decimated=decimated)
+                                      raw=raw, decimated=decimated, bin_phase=bin_phase)
         # One-off work (building the plan, calibrating its thresholds) is not the chain's cost.
         trial_begin = time.perf_counter()
         self._execution_plan()
         t0 = time.perf_counter()
         res = super().run_series(series, starts=starts, win_start=win_start, win_end=win_end,
                                  binsize=binsize, threshold=threshold, templates=templates,
-                                 raw=raw, decimated=decimated)
+                                 raw=raw, decimated=decimated, bin_phase=bin_phase)
         dt = time.perf_counter() - t0
         full = templates is None or templates[1] >= self.ntemplates
         nblk = len(starts) if starts is not None else 1

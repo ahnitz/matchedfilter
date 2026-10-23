@@ -36,16 +36,19 @@ def coarse_span(n, band, lo, hi):
     return cstart, cend, cspan, bin_shift(cspan)
 
 
-def plan_items(items, binsize, align_words=1, max_bins=MAX_BINS):
+def plan_items(items, binsize, align_words=1, max_bins=MAX_BINS, phase=None):
     """Output layout of a peaks_items submission.
 
     items are (lo, hi, a, b, t): rows a:b against template t over [lo, hi). Each item's
     (b - a, nbins) results start at a multiple of align_words 4-byte words -- a backend
     that selects them by descriptor offset passes its storage-offset alignment, one that
-    uses pointers passes 1. Returns (offsets, nbins per item, total words)."""
+    uses pointers passes 1. phase: the rows' bin phases (or None), which count toward an
+    item's bins (the most any of its rows needs). Returns (offsets, nbins per item, total
+    words)."""
     offs, nbs, size = [], [], 0
     for lo, hi, a, b, t in items:
-        nb = -(-(hi - lo) // binsize)
+        top = 0 if phase is None or b <= a else int(np.max(phase[a:b]))
+        nb = -(-(hi - lo + top) // binsize)
         if nb > max_bins:
             raise UnsupportedSize("an item's window exceeds the kernel bin limit")
         offs.append(size)
@@ -117,12 +120,15 @@ def split_bins(call, lo, hi, binsize, max_bins, upload_data, upload_tmpl, sparse
     return (lambda: res) if async_submit else res
 
 
-def grouped_windows(groups, n, nd, binsize, max_bins=MAX_BINS, nbins=None):
+def grouped_windows(groups, n, nd, binsize, max_bins=MAX_BINS, nbins=None, phase=None):
     """Validated (lo, hi, a, b) groups of a grouped call, as ints, and their common bin count
-    (the first group's, or nbins if larger; no group may need more)."""
+    (the first group's, or nbins if larger; no group may need more). phase: the rows' bin
+    phases ([nd], or None), which count toward a row's bins (ap_bin_count)."""
     groups = tuple((int(lo), int(hi), int(a), int(b)) for lo, hi, a, b in groups)
     binsize = int(binsize)
-    nb = (groups[0][1] - groups[0][0] - 1) // binsize + 1
+    top = (lambda a, b: 0) if phase is None else (lambda a, b: int(np.max(phase[a:b])))
+    need = lambda lo, hi, a, b: (hi - lo + top(a, b) + binsize - 1) // binsize
+    nb = need(*groups[0])
     if nbins is not None:
         nb = max(nb, int(nbins))
     if nb > max_bins:
@@ -130,7 +136,7 @@ def grouped_windows(groups, n, nd, binsize, max_bins=MAX_BINS, nbins=None):
     for lo, hi, a, b in groups:
         if not (0 <= lo < hi <= n) or not (0 <= a < b <= nd):
             raise ValueError("invalid group (%d, %d, %d, %d)" % (lo, hi, a, b))
-        if (hi - lo - 1) // binsize + 1 > nb:
+        if need(lo, hi, a, b) > nb:
             raise ValueError("grouped windows must not exceed the first group's bin count")
     return groups, nb
 
@@ -138,24 +144,27 @@ def grouped_windows(groups, n, nd, binsize, max_bins=MAX_BINS, nbins=None):
 _ROW_WINDOWS = {}
 
 
-def grouped_row_windows(groups, n, nd, binsize, max_bins=MAX_BINS, nbins=None):
+def grouped_row_windows(groups, n, nd, binsize, max_bins=MAX_BINS, nbins=None, phase=None):
     """The per-row form of a grouped call, for a backend whose hier_peaks takes row_windows:
     (groups, nb, win, (lo0, hi0)).
 
-    win is uint32 [lo, hi] per data row; (lo0, hi0) is the recording's window, nb bins from
-    the first group's start (clipped to n), which the per-row windows narrow on the device.
-    A series call repeats the same few group layouts, so results are memoised (win is
-    read-only)."""
-    key = (tuple(tuple(g) for g in groups), n, nd, int(binsize), max_bins, nbins)
+    win is uint32 [lo, hi, bin phase] per data row (tierb.slang ROWWIN_WORDS), phase the
+    rows' bin phases ([nd], or None for 0: run_series' bin_phase); (lo0, hi0) is the
+    recording's window, nb bins from the first group's start (clipped to n), which the
+    per-row windows narrow on the device. A series call repeats the same few group layouts,
+    so results are memoised (win is read-only)."""
+    key = (tuple(tuple(g) for g in groups), n, nd, int(binsize), max_bins, nbins,
+           None if phase is None else bytes(memoryview(np.ascontiguousarray(phase, np.uint32))))
     hit = _ROW_WINDOWS.get(key)
     if hit is not None:
         return hit
-    import numpy as np
-    groups, nb = grouped_windows(groups, n, nd, binsize, max_bins, nbins)
-    win = np.zeros(2 * nd, np.uint32)
+    groups, nb = grouped_windows(groups, n, nd, binsize, max_bins, nbins, phase)
+    win = np.zeros(3 * nd, np.uint32)
     for lo, hi, a, b in groups:
-        win[2 * a:2 * b:2] = lo
-        win[2 * a + 1:2 * b:2] = hi
+        win[3 * a:3 * b:3] = lo
+        win[3 * a + 1:3 * b:3] = hi
+    if phase is not None:
+        win[2::3] = np.asarray(phase, np.uint32)
     win.flags.writeable = False
     binsize = int(binsize)
     lo0 = groups[0][0]
@@ -218,12 +227,13 @@ def band_windows(rowwin, n, band):
     if hit is not None and hit[0] is rowwin:
         return hit[1]
     rr = n // band
-    w = np.asarray(rowwin, np.uint32).reshape(-1, 2).astype(np.int64)
+    w = np.asarray(rowwin, np.uint32).reshape(-1, 3)[:, :2].astype(np.int64)
     cs = w[:, 0] // rr
     ce = np.minimum(band, (w[:, 1] + rr - 1) // rr)
     cs = np.where(cs > 0, cs - 1, cs)
     ce = np.maximum(cs + 1, ce)
-    out = np.ascontiguousarray(np.stack([cs, ce], 1).astype(np.uint32))
+    # A coarse tier is one bin: its rows' bin phase is 0.
+    out = np.ascontiguousarray(np.stack([cs, ce, np.zeros_like(cs)], 1).astype(np.uint32))
     if len(_BAND_WINDOWS) > 4096:
         _BAND_WINDOWS.clear()
     _BAND_WINDOWS[key] = (rowwin, out)
@@ -233,28 +243,31 @@ def band_windows(rowwin, n, band):
 def hier_peaks_grouped(ctx, n, band, data, tmpl, ct0, raw_thr, groups, binsize, threshold, *,
                        upload_tmpl=True, cascade_band=None, ct1=None, raw_thr1=None,
                        slot=None, async_submit=False, sparse=False, nbins=None, max_bins=MAX_BINS,
-                       handle_out=None, refine_reach=None):
+                       handle_out=None, refine_reach=None, phase=None):
     """hier_peaks_grouped for any backend whose hier_peaks accepts row_windows: one
     recording, each tier a single dispatch over all rows, per-row windows in the kernels.
 
     groups holds (lo, hi, a, b): rows a..b of data searched over [lo, hi). Output bins
-    follow the first group's bin count (or nbins)."""
+    follow the first group's bin count (or nbins). phase: the rows' bin phases (run_series'
+    bin_phase), which the refine's row table carries."""
     from ._shared import shared_buffer
     if shared_buffer(data, ctx) is None:
         raise ValueError("grouped spectra must be GPU-shared (a forward batch)")
     groups, nb, win, window = grouped_row_windows(groups, n, data.shape[0], binsize,
-                                                  max_bins, nbins)
+                                                  max_bins, nbins, phase)
     return ctx.hier_peaks(n, band, data, tmpl, ct0, raw_thr, binsize=int(binsize),
-                          threshold=threshold, window=window, upload_data=False,
+                          threshold=threshold, window=window, upload_data=False, nbins=nb,
                           upload_tmpl=upload_tmpl, cascade_band=cascade_band, ct1=ct1,
                           raw_thr1=raw_thr1, slot=slot, async_submit=async_submit,
                           sparse=sparse, row_windows=(groups, win), refine_reach=refine_reach,
                           **({} if handle_out is None else {"handle_out": handle_out}))
 
 
-def window_results(hit, counts, starts, idx, val, template, n):
+def window_results(hit, counts, starts, idx, val, template, n, by_count=True):
     """FilterResults of one follow-up window, as TimeDomainFilterBank._items_batch orders them:
-    the (block, bin) pairs where ``hit`` holds, by the block's bin count, then block, then bin.
+    the (block, bin) pairs where ``hit`` holds, by the block's bin count, then block, then bin
+    -- the order filter_series' one call per bin count gives -- or, by_count False (a window
+    whose blocks carry bin phases: filter_series makes one call), by block, then bin.
 
     hit: (blocks, nbins) bool; counts: bins per block; starts: block start samples; idx/val:
     (blocks, nbins) peak lag and value; template: the global template index; n: block length.
@@ -263,8 +276,9 @@ def window_results(hit, counts, starts, idx, val, template, n):
     bi, bn = np.nonzero(hit)
     if not bi.size:
         return _EMPTY_FILTER_RESULTS
-    o = np.argsort(np.asarray(counts)[bi], kind="stable")
-    bi, bn = bi[o], bn[o]
+    if by_count:
+        o = np.argsort(np.asarray(counts)[bi], kind="stable")
+        bi, bn = bi[o], bn[o]
     st = np.asarray(starts, dtype=np.int64)[bi]
     return FilterResults(
         template_indices=np.full(bi.size, template, dtype=np.int64),
@@ -302,7 +316,7 @@ def followup_layout(jobs, ctx, max_rows=None):
     call, is not on ctx's device, has a series that is not device memory, has a block
     reading past its series (the host path pads with zeros), or a group passes max_rows."""
     from ._shared import _same_device, containing, containing_samples
-    from ._windows import _normalize_windows, _window_layout
+    from ._windows import _normalize_windows, _window_bin_phases, _window_layout
     groups = {}
     layout = []
     for (bank, ser, kw) in jobs:
@@ -316,7 +330,11 @@ def followup_layout(jobs, ctx, max_rows=None):
         if bs >= g.n:
             raise FollowupUnsupported("binsize spans a block")
         S = len(ser)
-        st, ws, we = _window_layout(g, _normalize_windows(kw["windows"], S), S)
+        W = _normalize_windows(kw["windows"], S)
+        st, ws, we = _window_layout(g, W, S)
+        # The window's bins (filter_series): each block's bins numbered from its window's grid.
+        ph = _window_bin_phases(W, st, ws, bs)
+        ph = np.zeros(st.size, np.uint32) if ph is None else ph
         plan = g.get_flat_plan()
         pctx = getattr(plan, "_gpu", None)
         if pctx is None or not _same_device(pctx, ctx) or plan._gtmpl is None:
@@ -352,22 +370,24 @@ def followup_layout(jobs, ctx, max_rows=None):
         if max_rows is not None and first + k > max_rows:
             raise FollowupUnsupported("too many rows")
         gw["rows"].append(np.asarray(st, np.int64) + base)
-        ent = np.empty((k, 5), np.int64)
+        ent = np.empty((k, 6), np.int64)               # refineItems' six words
         ent[:, 0] = first + np.arange(k)
         ent[:, 1] = tl
         ent[:, 2] = np.minimum(np.asarray(ws, np.int64), g.n)
         ent[:, 3] = np.minimum(np.asarray(we, np.int64), g.n)
         ent[:, 4] = ent[:, 0]
+        ent[:, 5] = ph
         gw["entries"].append(ent)
         gw["nent"] = first + k
-        layout.append((gw, st, ws, we, first, g, tl, ti))
+        layout.append((gw, st, ws, we, first, g, tl, ti, W, ph))
     out = list(groups.values())
     for gw in out:
-        e = (np.concatenate(gw["entries"]) if gw["entries"] else np.empty((0, 5), np.int64))
+        e = (np.concatenate(gw["entries"]) if gw["entries"] else np.empty((0, 6), np.int64))
         gw["rows"] = (np.concatenate(gw["rows"]) if gw["rows"]
                       else np.empty(0, np.int64)).astype(np.uint32)
         gw["entries"] = e.astype(np.uint32)
-        nbins = max(1, int((-(-(e[:, 3] - e[:, 2]) // gw["bs"])).max()) if e.size else 1)
+        nbins = max(1, int(((e[:, 3] - e[:, 2] + e[:, 5] + gw["bs"] - 1) // gw["bs"]).max())
+                    if e.size else 1)
         nbins = 1 << (nbins - 1).bit_length()
         if nbins > MAX_BINS:
             raise FollowupUnsupported("window has too many bins")
@@ -379,9 +399,11 @@ def assemble_followups(layout, read):
     """Each job's FilterResults from a device run of followup_layout's groups, ordered as
     TimeDomainFilterBank._items_batch orders them. read(group) gives the group's (idx, val),
     each (entries, nbins), read once per group."""
+    from ._results import FilterResults
+    from ._windows import _merge_window_bins
     reads = {}
     out = []
-    for gw, st, ws, we, first, g, tl, ti in layout:
+    for gw, st, ws, we, first, g, tl, ti, W, ph in layout:
         r = reads.get(id(gw))
         if r is None:
             r = reads[id(gw)] = read(gw)
@@ -389,9 +411,14 @@ def assemble_followups(layout, read):
         idx = r[0][first:first + k]
         val = r[1][first:first + k]
         bs, nbins = gw["bs"], gw["nbins"]
-        counts = ((we - ws + bs - 1) // bs).astype(np.int64)
+        counts = ((we.astype(np.int64) - ws.astype(np.int64) + ph.astype(np.int64) + bs - 1)
+                  // bs)
         hit = (idx >= 0) & (np.arange(nbins)[None, :] < counts[:, None])
-        out.append(window_results(hit, counts, st, idx, val, ti, g.n))
+        res = window_results(hit, counts, st, idx, val, ti, g.n, by_count=not ph.any())
+        if ph.any():
+            # A bin a block edge cut is two partial bins: one per window bin (filter_series).
+            res = FilterResults(*_merge_window_bins(W, bs, *res))
+        out.append(res)
     return out
 
 

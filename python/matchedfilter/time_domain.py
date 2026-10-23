@@ -15,6 +15,7 @@ from . import _calibration, _config
 from ._chains import _CHAIN_WARM_BATCHES
 from ._results import FilterResults, _EMPTY_FILTER_RESULTS  # noqa: F401  (public here)
 from ._windows import _is_index, _normalize_windows, _window_layout  # noqa: F401
+from ._windows import _merge_window_bins, _window_bin_phases
 # The bank's layout planning lives in _layout; these names stay importable from here.
 from ._layout import (_CORR_COSTS, _batch_target, _corr_block_cost,  # noqa: F401
                       _corr_block_costs, _corr_layout, _corr_measure, _corr_partition,
@@ -1567,6 +1568,12 @@ class TimeDomainFilterBank:
         out_snrs = []
         out_tstarts = []
         out_block_lens = []
+        # A bin size the caller (or the bank) gives is each window's: its bins start at the
+        # window's start, wherever the blocks fall (_window_bin_phases). A bin a block edge
+        # cuts comes back as two partial bins, merged in build(). Without one, a bin is the
+        # block's span (the documented default, one bin per block).
+        aligned = binsize is not None or self.binsize is not None
+        merge_bs = []
 
 
         if template_index is not None:
@@ -1671,6 +1678,30 @@ class TimeDomainFilterBank:
             data_in = ser
 
             bs = int(binsize) if binsize is not None else (self.binsize or N)
+            bph = None
+            if aligned:
+                pkey = ('_bin_phase', cache_key, bs)
+                memo = g.__dict__.setdefault('_phase_memo', {})
+                if pkey not in memo:
+                    if len(memo) >= 16:
+                        memo.clear()
+                    ph = _window_bin_phases(W, bstarts, bws, bs)
+                    if ph is not None:
+                        # Every entry at the call's bin count: one with fewer bins starts its
+                        # numbering whole bins earlier (empty bins before its window), so the
+                        # bank is one call rather than one per bin count -- each call pays its
+                        # setup and the Q15 screen's preparation again.
+                        w_end = (np.minimum(bwe, N)
+                                 if getattr(active_plan, '_bandlimited', False)
+                                 and type(active_plan).__name__ != 'HierarchicalFilter'
+                                 else bwe).astype(np.int64)
+                        counts = (w_end - bws.astype(np.int64) + ph.astype(np.int64)
+                                  + bs - 1) // bs
+                        ph = (ph.astype(np.int64) + bs * (counts.max() - counts)).astype(np.uint32)
+                    memo[pkey] = ph
+                bph = memo[pkey]
+                if bph is not None and bs not in merge_bs:
+                    merge_bs.append(bs)
             # A repeat of a deferred call this group's plan has made before goes straight to
             # the plan's recorded call plan: no bin grouping, layout or key building. The
             # plan validates everything (layout identity, state, series memory, records);
@@ -1693,30 +1724,33 @@ class TimeDomainFilterBank:
                             for d, st_part in zip(split.deferred(res), starts_parts):
                                 pending.append((d, st_part, g, tmpl_arg, N))
                         continue
-            if getattr(active_plan, '_bandlimited', False) and type(active_plan).__name__ != 'HierarchicalFilter':
+            if bph is not None:
+                # One call: the phases pad every entry to the same bin count (above).
+                groups_bins = [(bstarts, bws, bwe, bph)]
+            elif getattr(active_plan, '_bandlimited', False) and type(active_plan).__name__ != 'HierarchicalFilter':
                 bs_k = max(1, bs // 2) if bs < N else g.n // 2
                 wk_s = (bws // 2).astype(np.int64)
                 w_end = np.minimum(bwe, N)
                 wk_e = ((w_end + 1) // 2).astype(np.int64)
                 bin_counts = np.maximum(1, (wk_e - wk_s + bs_k - 1) // bs_k)
                 if len(bstarts) <= 1 or np.all(bin_counts == bin_counts[0]):
-                    groups_bins = [(bstarts, bws, bwe)]
+                    groups_bins = [(bstarts, bws, bwe, None)]
                 else:
                     groups_bins = []
                     for u_cnt in np.unique(bin_counts):
                         mask = (bin_counts == u_cnt)
-                        groups_bins.append((bstarts[mask], bws[mask], bwe[mask]))
+                        groups_bins.append((bstarts[mask], bws[mask], bwe[mask], None))
             elif bs >= N:
-                groups_bins = [(bstarts, bws, bwe)]
+                groups_bins = [(bstarts, bws, bwe, None)]
             else:
                 bin_counts = ((bwe - bws + bs - 1) // bs).astype(np.int64)
                 if len(bstarts) <= 1 or np.all(bin_counts == bin_counts[0]):
-                    groups_bins = [(bstarts, bws, bwe)]
+                    groups_bins = [(bstarts, bws, bwe, None)]
                 else:
                     groups_bins = []
                     for u_cnt in np.unique(bin_counts):
                         mask = (bin_counts == u_cnt)
-                        groups_bins.append((bstarts[mask], bws[mask], bwe[mask]))
+                        groups_bins.append((bstarts[mask], bws[mask], bwe[mask], None))
 
             # Every bin count in one GPU submission where the backend can, instead of a
             # submission and a wait per count (see MatchedFilter._run_series_ragged).
@@ -1734,7 +1768,8 @@ class TimeDomainFilterBank:
                 try:
                     res = active_plan._run_series_ragged(
                         data_in, bstarts, bws, bwe, binsize=bs,
-                        threshold=eff_threshold, templates=plan_templates)
+                        threshold=eff_threshold, templates=plan_templates,
+                        **({} if bph is None else {'bin_phase': bph}))
                 finally:
                     if defer and trial is None:
                         active_plan._defer_series = False
@@ -1743,9 +1778,11 @@ class TimeDomainFilterBank:
                 if res is not None:
                     # Split back into the per-count groups, in their order, so the result
                     # is the one per-count calls give (peak order included).
-                    bc = ((bwe - bws + bs - 1) // bs).astype(np.int64)
+                    bc = ((bwe.astype(np.int64) - bws.astype(np.int64)
+                           + (0 if bph is None else bph.astype(np.int64)) + bs - 1) // bs)
                     split = _RaggedSplit(bc)
-                    subs = [(bstarts[m], bws[m], bwe[m]) for m in split.masks]
+                    subs = [(bstarts[m], bws[m], bwe[m], None if bph is None else bph[m])
+                            for m in split.masks]
                     if fast_key is not None and isinstance(res, _Deferred):
                         g.__dict__.setdefault('_fast_calls', {})[fast_key] = (
                             active_plan, getattr(active_plan, '_last_layout', None),
@@ -1754,7 +1791,7 @@ class TimeDomainFilterBank:
                              else split.parts(res))
                     work = list(zip(subs, parts))
             t_trial = time.perf_counter()
-            for (sub_starts, sub_bws, sub_bwe), res in work:
+            for (sub_starts, sub_bws, sub_bwe, sub_ph), res in work:
                 if res is None:
                     if defer and trial is None:
                         active_plan._defer_series = defer       # the batch's token
@@ -1773,7 +1810,8 @@ class TimeDomainFilterBank:
                     try:
                         res = active_plan.run_series(
                             run_in, run_starts, sub_bws, sub_bwe, binsize=bs,
-                            threshold=eff_threshold, templates=plan_templates, raw=True
+                            threshold=eff_threshold, templates=plan_templates, raw=True,
+                            **({} if sub_ph is None else {'bin_phase': sub_ph})
                         )
                     finally:
                         active_plan._want_sparse = False
@@ -1809,6 +1847,15 @@ class TimeDomainFilterBank:
                 if not d.empty:
                     consume(*((res, None) if isinstance(res, _SparsePeaks) else res),
                             sub_starts, g, tmpl_arg, N)
+            if merge_bs and out_template_indices:
+                # Partial bins (a block edge inside a window bin) into their window bins.
+                cols = [np.concatenate(c) for c in (out_template_indices, out_sample_indices,
+                                                    out_snrs, out_tstarts, out_block_lens)]
+                for bs_m in merge_bs:
+                    cols = list(_merge_window_bins(W, bs_m, *cols))
+                for lst, c in zip((out_template_indices, out_sample_indices, out_snrs,
+                                   out_tstarts, out_block_lens), cols):
+                    lst[:] = [c]
             if out_template_indices:
                 if len(out_template_indices) == 1:
                     return FilterResults(
@@ -1995,8 +2042,10 @@ class TimeDomainFilterBank:
             bstarts, bws, bwe = bank._window_layout(g, W, S)
             if bstarts.size == 0:
                 continue
+            # The window's bins (filter_series): each block's phase on its window's grid.
+            ph = _window_bin_phases(W, bstarts, bws, bs)
             groups.setdefault((id(bank), id(g), bs, thr), []).append(
-                (j, bank, g, ser, bstarts, bws, bwe, ti_local, ti))
+                (j, bank, g, ser, bstarts, bws, bwe, ti_local, ti, W, ph))
         done = set()
         if not groups:
             return done
@@ -2041,22 +2090,31 @@ class TimeDomainFilterBank:
         for (_, _, bs, thr), members in groups.items():
             g = members[0][2]
             plan = g.get_flat_plan()
-            res = plan._items_gpu([(_host_copy(ser, np.complex64), st, ws, we, tl)
-                                   for _, _, _, ser, st, ws, we, tl, _ in members],
+            res = plan._items_gpu([(_host_copy(ser, np.complex64), st, ws, we, tl, ph)
+                                   for _, _, _, ser, st, ws, we, tl, _, _, ph in members],
                                   bs, thr, wait=False) if hasattr(plan, "_items_gpu") else None
             if res is not None:
                 submitted.append((bs, members, res))
         for bs, members, res in submitted:
             res = res()
-            for (j, bank, g, ser, st, ws, we, tl, ti), (idx, val) in zip(members, res):
+            for (j, bank, g, ser, st, ws, we, tl, ti, W, ph), (idx, val) in zip(members, res):
                 lists = ([], [], [], [], [])
-                # Peaks in the order one call per bin count gives them.
-                counts = ((we - ws + bs - 1) // bs).astype(np.int64)
-                for u in np.unique(counts):
-                    m = counts == u
-                    _consume_into(lists, idx[m][:, :, :u], val[m][:, :, :u], st[m], g,
-                                  (tl, 1), g.n, ti)
-                out[j] = _results_from(lists)
+                if ph is None:
+                    # Peaks in the order one call per bin count gives them.
+                    counts = ((we - ws + bs - 1) // bs).astype(np.int64)
+                    for u in np.unique(counts):
+                        m = counts == u
+                        _consume_into(lists, idx[m][:, :, :u], val[m][:, :, :u], st[m], g,
+                                      (tl, 1), g.n, ti)
+                else:
+                    # A phased window is one filter_series call: peaks by block, then bin
+                    # (bins a block does not have are empty).
+                    _consume_into(lists, idx, val, st, g, (tl, 1), g.n, ti)
+                res_j = _results_from(lists)
+                if ph is not None:
+                    # Partial bins (a block edge inside a window bin) into their window bins.
+                    res_j = FilterResults(*_merge_window_bins(W, bs, *res_j))
+                out[j] = res_j
                 done.add(j)
         if record is not None and eligible <= done:
             record((time.perf_counter() - t0) / blocks)   # all on the device: a sample
