@@ -30,6 +30,7 @@ classifiers = [
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
   "Programming Language :: Python :: 3.14",
+  "Programming Language :: Python :: 3.15",
   "Topic :: Scientific/Engineering",
 ]
 
@@ -82,11 +83,11 @@ faulthandler_timeout = 600
 # those wheels needs QEMU and is slow enough to want its own decision.  Users
 # on it get the sdist, which compiles.
 [tool.cibuildwheel]
-# Standard CPython builds; CI exercises 3.14 wheels on both platforms.
-# Free-threaded builds (cp313t, cp314t) are deliberately NOT here. The
+# Standard CPython builds; CI exercises 3.15 wheels on both platforms.
+# Free-threaded builds (cp314t, cp315t) are deliberately NOT here. The
 # extension releases the GIL around the filter and would need its plan
 # state auditing for concurrent use before claiming to support them.
-build = "cp311-* cp312-* cp313-* cp314-*"
+build = "cp311-* cp312-* cp313-* cp314-* cp315-*"
 skip = "*-musllinux_i686 *_i686"
 build-frontend = "build"
 test-requires = "pytest"
