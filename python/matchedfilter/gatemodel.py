@@ -60,22 +60,20 @@ _SIG = np.sqrt(2.0)
 
 
 def _profile_sig(power):
-    """Quantised signature of a profile, invariant to small PSD-estimation jitter."""
+    """Signature of a profile's shape: its normalised bins to 2^-32 of the total, so only
+    profiles equal to float rounding share it. (A 24-bin, 1%-quantised signature let profiles
+    whose gates differ share a plan: an A+ reference took an O4 one's thresholds and dismissed
+    4x its budget.) Near-identical profiles share plans through gatechain's reuse instead,
+    which compares what the gates depend on (gatechain._similar_get)."""
     if power is None:
         return b""
     p = np.asarray(power, dtype=np.float64)
     tot = float(np.sum(p))
     if tot <= 0:
         return b""
-    p_norm = p / tot
-    m = 24
-    step = len(p_norm) // m
-    if step >= 1:
-        binned = p_norm[:m * step].reshape(m, step).sum(axis=1)
-    else:
-        binned = p_norm
-    quant = (binned * 100.0).round().astype(np.int32)
-    return quant.tobytes()
+    import hashlib
+    quant = np.round(p / tot * 2.0 ** 32).astype(np.int64)
+    return hashlib.sha1(quant.tobytes()).digest() + len(p).to_bytes(4, "little")
 
 
 def _nsamp_for(fd):

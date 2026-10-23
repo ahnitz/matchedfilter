@@ -111,15 +111,51 @@ def _cache_put(cache, key, value):
         cache.popitem(last=False)
 
 
-_SIMILAR = {}           # (kind, n, bands, params) -> [(unit profile, value)]
+_SIMILAR = {}           # (kind, n, bands, params) -> [((unit profile, gate features), value)]
+
+#: Reuse tolerances: a profile takes a cached result of another only if their shapes agree
+#: (cosine, a cheap first test) AND every candidate band's signal response sqrt(f_b) g_b
+#: (in-band power fraction times the worst coarse-grid loss, _gate_features) agrees to this
+#: relative tolerance. The response is what sets a gate's dismissal: 3% of it at band 128
+#: (an O4 against an A+ reference, cosine 0.995) put a borrowed plan at 4.3x its budget, and
+#: 5% PSD jitter moves it as much, so the cosine alone cannot tell them apart.
+_REUSE_COS = 0.985
+_REUSE_RESPONSE = 3e-3
+
+
+def _gate_features(p, n, m=17):
+    """Per candidate band b of n: sqrt(f_b) * g_b, f_b the band's share of the profile and g_b
+    the smallest normalised in-band correlation over half a coarse step (the worst sub-grid
+    offset). Cheap (a band's bins times m offsets)."""
+    p = np.asarray(p, np.float64)
+    tot = p.sum()
+    out = []
+    for b in candidate_bands(int(n)):
+        q = p[:b]
+        f = q.sum() / tot if tot > 0 else 0.0
+        if f <= 0:
+            out.append(0.0)
+            continue
+        ds = np.linspace(0.0, (n // b) / 2.0, m)
+        g = np.abs(np.exp(2j * np.pi * np.outer(ds, np.arange(b)) / n) @ (q / q.sum())).min()
+        out.append(float(np.sqrt(f) * g))
+    return np.array(out)
 
 
 def _similar_get(kind, p, params):
     u = (p / np.linalg.norm(p)).astype(np.float32)
-    for v, val in _SIMILAR.get((kind,) + params, []):
-        if float(np.dot(u, v)) >= 0.985:        # the reuse criterion gatemodel applies to its draws
-            return u, val
-    return u, None
+    feats = None
+    for (v, fv), val in _SIMILAR.get((kind,) + params, []):
+        if float(np.dot(u, v)) < _REUSE_COS:
+            continue
+        if feats is None:
+            feats = _gate_features(p, params[0])
+        if fv.shape == feats.shape and np.all(
+                np.abs(fv - feats) <= _REUSE_RESPONSE * np.maximum(np.abs(feats), 1e-12)):
+            return (u, feats), val
+    if feats is None:
+        feats = _gate_features(p, params[0])
+    return (u, feats), None
 
 
 def _similar_put(kind, u, params, value):
