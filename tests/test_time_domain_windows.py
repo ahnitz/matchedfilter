@@ -241,13 +241,49 @@ GEOMETRIES = {
 }
 
 
+def _plan_state(bank):
+    """What each group's plan ran with: the chain, Q15 and the forward transform (a
+    timed or priced choice can differ between machines and between calls)."""
+    out = []
+    for g in getattr(bank, "_groups", ()):
+        for name in ("plan", "_flat_plan"):
+            pl = getattr(g, name, None)
+            if pl is not None:
+                out.append("%s n=%d chain=%s q15=%s pfft=%s" % (
+                    name, g.n, getattr(pl, "_chain", None), getattr(pl, "_q15", None),
+                    getattr(pl, "_pfft", None)))
+    return "; ".join(out)
+
+
 def _equivalence(bank, ser, windows, **kw):
     W = _normalize_windows(windows, ser.size)
+    before = _plan_state(bank)
     merged = _sorted(bank.filter_series(ser, windows=windows, **kw))
+    mid = _plan_state(bank)
     separate = _concat([bank.filter_series(ser, windows=slice(int(a), int(b)), **kw) for a, b in W])
-    for m, s_ in zip(merged, separate):
-        np.testing.assert_array_equal(m, s_)
-    return len(merged[0])
+    if all(np.array_equal(m, s_) for m, s_ in zip(merged, separate)):
+        return len(merged[0])
+    # Report enough to tell a different computation from a different choice: the plans'
+    # state around the calls, a repeat of the merged call, and the differing peaks.
+    again = _sorted(bank.filter_series(ser, windows=windows, **kw))
+    lines = ["windows %s kw %s" % (W.tolist(), kw),
+             "plans before merged: " + before, "after merged: " + mid,
+             "after separate: " + _plan_state(bank),
+             "merged repeat equal to merged: %s, to separate: %s" % (
+                 all(np.array_equal(a, b) for a, b in zip(again, merged)),
+                 all(np.array_equal(a, b) for a, b in zip(again, separate)))]
+    if merged[0].shape != separate[0].shape:
+        lines.append("peak counts %d merged, %d separate" % (merged[0].size, separate[0].size))
+    else:
+        bad = np.flatnonzero((merged[0] != separate[0]) | (merged[1] != separate[1])
+                             | (merged[2] != separate[2]))
+        for i in bad[:12]:
+            w = int(np.searchsorted(W[:, 0], merged[1][i], side="right") - 1)
+            lines.append("  t=%d s=%s (window %d, +%s) merged %r separate %r" % (
+                merged[0][i], merged[1][i], w, merged[1][i] - W[w, 0], complex(merged[2][i]),
+                complex(separate[2][i])))
+        lines.append("  %d of %d peaks differ" % (bad.size, merged[0].size))
+    raise AssertionError("merged and separate calls differ\n" + "\n".join(lines))
 
 
 @pytest.mark.parametrize("engine", ["matchedfilter", "hier"])

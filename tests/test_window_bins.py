@@ -188,3 +188,40 @@ def test_small_blocks_have_the_window_bins(device, engine, binsize, monkeypatch)
     assert set(got) == set(want), "%d bins differ" % len(set(got) ^ set(want))
     for k, v in want.items():
         assert got[k] == pytest.approx(v, rel=2e-5, abs=1e-6)
+
+
+def test_merge_keeps_each_window_bins_first_largest_peak():
+    """_merge_window_bins against a brute-force rule: per (template, window, window bin) the
+    peak of largest |v|, the earliest sample among equal ones. The inputs come in the order
+    the C one-pass merge takes (template, then sample) and shuffled (the sort fallback), with
+    deliberate ties: integer components give equal |v| at different samples. Samples are int64
+    or, as interpolated follow-up peaks are, float64."""
+    from matchedfilter._windows import _merge_window_bins
+    rng = np.random.default_rng(5)
+    W = np.array([[100, 5000], [6000, 9000]], np.int64)
+    for trial in range(300):
+        bs = int(rng.integers(5, 400))
+        s = rng.choice(np.r_[100:5000, 6000:9000], int(rng.integers(2, 200)), replace=False)
+        t = rng.integers(0, 4, s.size).astype(np.int64)
+        o = np.lexsort((s, t))
+        t, s = t[o], s[o].astype(np.int64)
+        v = (rng.integers(0, 5, s.size) + 1j * rng.integers(0, 3, s.size)).astype(np.complex64)
+        if trial % 2:
+            s = s + rng.random(s.size) * 0.99      # interpolated (float64) peak samples
+        if trial % 3 == 0:
+            p = rng.permutation(s.size)
+            t, s, v = t[p], s[p], v[p]
+        extra = np.arange(s.size)
+        gt, gs, gv, ge = _merge_window_bins(W, bs, t, s, v, extra)
+        best = {}
+        for i in range(s.size):
+            w = int(np.searchsorted(W[:, 0], s[i], side="right") - 1)
+            k = (int(t[i]), w, int(np.floor_divide(s[i] - W[w, 0], bs)))
+            j = best.get(k)
+            if j is None or abs(v[i]) > abs(v[j]) or (abs(v[i]) == abs(v[j]) and s[i] < s[j]):
+                best[k] = i
+        want = np.sort(np.array(list(best.values())))
+        np.testing.assert_array_equal(ge, want, err_msg="trial %d" % trial)
+        np.testing.assert_array_equal(gs, s[want])
+        np.testing.assert_array_equal(gt, t[want])
+        np.testing.assert_array_equal(gv, v[want])
