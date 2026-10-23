@@ -188,6 +188,7 @@ def signal_draws(power, n, bands, snr, nsamp, seed=13):
     sim_params = (n, tuple(bands), float(snr), int(nsamp), int(seed))
     unit, hit = _similar_get("signal", p, sim_params)
     if hit is not None:
+        _cache_put(_SIGNAL_CACHE, key, hit)
         return hit
     F = np.array([p[:b].sum() for b in bands])
     if F[0] <= 0:
@@ -283,6 +284,7 @@ def noise_block_maxima(power, n, bands, nsim=20000, seed=29, chunk=2000, window=
     sim_params = (n, tuple(bands), int(nsim), int(seed), counts)
     unit, hit = _similar_get("noise", p, sim_params)
     if hit is not None:
+        _cache_put(_NOISE_CACHE, key, hit)
         return hit
     bmax = bands[-1]
     sd = np.sqrt(p[:bmax]).astype(np.float32)
@@ -817,6 +819,7 @@ def choose_chain(power, n, snr, fd, cost=None, max_tiers=3, floor=_MIN_BAND, nsi
         return hit
     unit, hit = _similar_get("choice", p, params)
     if hit is not None:
+        _cache_put(_CHOICE_CACHE, key, hit)
         return hit
     out = _choose_chain(p, n, snr, fd, cost, max_tiers, floor, nsim, win, ntemplates, model_f)
     _cache_put(_CHOICE_CACHE, key, out)
@@ -1061,6 +1064,7 @@ def chain_thresholds(power, n, snr, fd, chain, cost=None, floor=_MIN_BAND, nsim=
     sim_params = (n, chain, float(snr), float(fd), win, int(nsim), _cost_sig(cost))
     unit, hit = _similar_get("plan", p, sim_params)
     if hit is not None:
+        _cache_put(_PLAN_CACHE, key, hit)
         return hit
     bands = usable_bands(p, n, floor)
     if not set(chain) <= set(bands):

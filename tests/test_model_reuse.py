@@ -71,3 +71,15 @@ def test_no_reuse_past_the_response_tolerance(empty_model):
     assert np.max(np.abs(fa - fb) / np.maximum(fa, 1e-12)) > gc._REUSE_RESPONSE
     sa = gc.signal_draws(a, N, [256, 512, 1024], 6.0, 20000)
     assert gc.signal_draws(b, N, [256, 512, 1024], 6.0, 20000) is not sa
+
+
+def test_a_reused_result_is_found_again_by_its_own_signature(empty_model):
+    """A profile that took another's result finds it again without the similarity search
+    (which costs ~1 ms a lookup against ~0.03 ms; a filter asks once per tier and resolution)."""
+    a = np.load(DATA / "reference_profile_o2_h1l1_2048.npy").astype(np.float64)
+    b = a * (1.0 + 1e-5 * np.random.default_rng(2).standard_normal(N))
+    chain = (256, 512, 1024)
+    first = gc.chain_thresholds(a, N, 6.0, 1e-3, chain, window=WIN)
+    assert gc.chain_thresholds(b, N, 6.0, 1e-3, chain, window=WIN) is first
+    gc._SIMILAR.clear()                 # only b's own signature can find it now
+    assert gc.chain_thresholds(b, N, 6.0, 1e-3, chain, window=WIN) is first
