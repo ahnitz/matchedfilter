@@ -2,10 +2,25 @@
 
 Alpha releases may change the API. Pin a version for reproducible work.
 
-## Unreleased
+## 0.1.0a9
 
 ### Fixed
 
+- Peak bins are the window's, on every engine, block size and device: a `binsize` (the
+  call's or the bank's) numbers each analysis window's bins from the window's start,
+  wherever the blocks fall. Before, each block numbered its bins from its own span, so a
+  window of exactly 1000 bins of 61 samples (pycbc's asymmetric follow-up) came back as 1021
+  peaks at block size 2048 and 1002 at 4096. The hierarchical bank picks its block size by
+  a timed trial, so follow-up triggers changed from run to run and did not match the flat
+  filter's. Every scan now takes a bin phase per block (CPU kernels, the Vulkan, CUDA and
+  Metal shaders, the hierarchical refine), and a bin a block edge cuts comes back as two
+  partial bins merged by largest |snr|, the earlier sample on a tie. Without a binsize a bin
+  is still the block's span. `run_series` (flat and hierarchical) takes `bin_phase`; phase 0
+  is the old behaviour, bit for bit. Flat CPU cost on pycbc's test27 job: follow-up level
+  with 0.1.0a8, fine stage +1.5% (half its blocks scan and report two window bins).
+- The CPU direct refine applies to a row whose window lies in one bin even when a bin phase
+  pads the row with empty bins. Such rows used to take the whole-block transform, which
+  differs by fp32 rounding (4e-7) and costs more.
 - A coarse tier's window now reaches one coarse sample past the end of the caller's window,
   as it already did before the start, on the CPU (hmf.c), the GPUs (`_gpuhost.coarse_span`,
   `band_windows`) and in the gate model. Without it, a signal in a search window's last R lags
@@ -55,6 +70,11 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ### Removed
 
+- C entry points nothing called: `ap_binmax_prod`, `ap_interp_max`, `ap_series_buf`,
+  `ap_series_stride`, `ap_mf_run_sel`, `ap_nbins`, `ap_root_merge`, `ap_real_split`,
+  `ap_mf_ndata`, `ap_hmf_get_real_series`, `ap_hmf_get_hermitian` and
+  `ap_hmf_price_q15_tier0`, with the backend series store and interpolated maximum only
+  they reached.
 - The per-backend coarse layout fields `MF_VK_COARSE_PPG`, `MF_VK_COARSE_TILE`,
   `MF_VK_COARSE_SUBGROUP`, `MF_VK_COARSE_TWT` and `MF_METAL_COARSE_PPG` (and the
   documented `MF_METAL_COARSE_TILE`/`_TWT`, which nothing read): `MF_COARSE_LAYOUT`
@@ -270,8 +290,7 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 - Clarify that CPU direct refinement searches near the coarse maximum and can miss a
   stronger excursion elsewhere in its bin; `MF_DIRECT_REFINE=0` uses full-bin transform
-  refinement for surviving pairs. Document that time-domain bins restart at block/window
-  intersections, so changing block sizes can change trigger grouping.
+  refinement for surviving pairs.
 
 ## 0.1.0a8
 
