@@ -799,9 +799,16 @@ static void small_load1(BP*p,const float*re,const float*im,int conj,int inter){
    lane's bins can be a window's rather than this block's: bin j covers
    [ws - ph + j*binsize, ws - ph + (j+1)*binsize) clipped to [ws, we). Every lane has the
    same bin count, ap_bin_count(binsize, ws, we, ph). */
-static void small_scan_phased(BP*p,size_t binsize,float thr,ap_peak*out,size_t ostride,
-                              int conj,size_t ws,size_t we,int nlane,const unsigned*ph,
-                              size_t nb);
+/* Out of the hot kernels' text section (see MF_PEAK_SECTION below): a new body beside them
+   perturbs their layout. */
+#if defined(__ELF__) && (defined(__GNUC__) || defined(__clang__))
+#define MF_PHASED_SECTION __attribute__((section(".text.mf_phased")))
+#else
+#define MF_PHASED_SECTION
+#endif
+static HWY_NOINLINE MF_PHASED_SECTION void small_scan_phased(BP*p,size_t binsize,float thr,
+                              ap_peak*out,size_t ostride,int conj,size_t ws,size_t we,int nlane,
+                              const unsigned*ph,size_t nb);
 static void small_scan(BP*p,size_t binsize,float thr,ap_peak*out,size_t ostride,
                        int conj,size_t ws,size_t we,int nlane,const unsigned*ph){
   unsigned ph0 = ph ? ph[0] : 0u;
@@ -942,9 +949,9 @@ static void small_scan(BP*p,size_t binsize,float thr,ap_peak*out,size_t ostride,
    (k - ws) mod binsize reaches binsize - p[l]. One compare per lag gives that mask, and each
    lag updates bin j for the lanes behind and j+1 for those ahead; the output shifts each
    lane by its q[l]. */
-static void small_scan_phased(BP*p,size_t binsize,float thr,ap_peak*out,size_t ostride,
-                              int conj,size_t ws,size_t we,int nlane,const unsigned*ph,
-                              size_t nb){
+static HWY_NOINLINE MF_PHASED_SECTION void small_scan_phased(BP*p,size_t binsize,float thr,
+                              ap_peak*out,size_t ostride,int conj,size_t ws,size_t we,int nlane,
+                              const unsigned*ph,size_t nb){
   const float t2 = thr>0.f ? thr*thr : 0.f;
   const vf seed=V_SET1(t2), zero=V_ZERO(); const vi nix=VI_SET1(-1);
   float lim[AP_W];
@@ -1059,13 +1066,21 @@ static int bins_reserve(BP*p,size_t nb){
 #define MF_PEAK_SECTION
 #endif
 
-static HWY_NOINLINE MF_PEAK_SECTION void binmax_fused32(BP*p,float thr,ap_peak*out,int conj,size_t ws,size_t we){
+/* TWO: two bins split at kb (out[0] below kb, out[1] from it): a window bin edge inside the
+   block, as binmax_one's. */
+template <bool TWO=false>
+static HWY_NOINLINE MF_PEAK_SECTION void binmax_fused32(BP*p,float thr,ap_peak*out,int conj,
+                                                       size_t ws,size_t we,size_t kb=0){
   const float t2 = thr>0.f ? thr*thr : 0.f;
   vf am = V_SET1(t2), arr = V_ZERO(), aii = V_ZERO();
   vi axx = VI_SET1(-1);
+  vf am1 = V_SET1(t2), arr1 = V_ZERO(), aii1 = V_ZERO();
+  vi axx1 = VI_SET1(-1);
+  (void)am1; (void)arr1; (void)aii1; (void)axx1; (void)kb;
 
   if (__builtin_expect(ws >= we || ws >= 1024 || we <= 0, 0)) {
     out->index = -1; out->re = 0.f; out->im = 0.f; out->magnitude = 0.f;
+    if constexpr (TWO) { out[1] = out[0]; }
     return;
   }
 
@@ -1112,9 +1127,30 @@ static HWY_NOINLINE MF_PEAK_SECTION void binmax_fused32(BP*p,float thr,ap_peak*o
       if(__builtin_expect(k1 == chi && need_mask_chi, 0)){
         m = V_SEL(vmask_chi, V_SET1(-1.f), m);
       }
+      const int k = k1 * 32 + base;
+      if constexpr (TWO) {
+        if (k >= (long)kb) {
+          vm g1 = V_CMP_GT(m, am1);
+          if(__builtin_expect(V_MASK_ANY(g1),0)){
+            am1 = V_SEL(g1, am1, m); arr1 = V_SEL(g1, arr1, rr); aii1 = V_SEL(g1, aii1, ii);
+            axx1 = VI_SEL(g1, axx1, VI_SET1(k));
+          }
+          return;
+        }
+        if (k + AP_W > (long)kb) {             /* straddles kb: lanes from kb - k are bin 1 */
+          const unsigned hi1 = (unsigned)((1ull<<AP_W)-1ull) & ~((1u<<((long)kb-k))-1u);
+          const vm in1 = V_MASK_FROM_BITS(hi1);
+          const vf m0 = V_SEL(in1, m, V_SET1(-1.f)), mb = V_SEL(in1, V_SET1(-1.f), m);
+          vm g0 = V_CMP_GT(m0, am), g1 = V_CMP_GT(mb, am1);
+          if (V_MASK_ANY(g0)) { am = V_SEL(g0, am, m0); arr = V_SEL(g0, arr, rr);
+                                aii = V_SEL(g0, aii, ii); axx = VI_SEL(g0, axx, VI_SET1(k)); }
+          if (V_MASK_ANY(g1)) { am1 = V_SEL(g1, am1, mb); arr1 = V_SEL(g1, arr1, rr);
+                                aii1 = V_SEL(g1, aii1, ii); axx1 = VI_SEL(g1, axx1, VI_SET1(k)); }
+          return;
+        }
+      }
       vm g = V_CMP_GT(m, am);
       if(__builtin_expect(V_MASK_ANY(g),0)){
-        const int k = k1 * 32 + base;
         am = V_SEL(g, am, m);
         arr = V_SEL(g, arr, rr);
         aii = V_SEL(g, aii, ii);
@@ -1123,24 +1159,35 @@ static HWY_NOINLINE MF_PEAK_SECTION void binmax_fused32(BP*p,float thr,ap_peak*o
     });
   }
 
-  float mv[AP_W], rv[AP_W], iv[AP_W]; int xv[AP_W];
-  V_STOREU(mv, am); V_STOREU(rv, arr); V_STOREU(iv, aii); VI_STOREU(xv, axx);
-  int bl = -1;
-  for(int l=0;l<AP_W;l++){
-    if(xv[l]>=0 && (bl<0 || mv[l]>mv[bl])) bl = l;
-  }
-  if(bl<0){
-    out->index = -1; out->re = 0.f; out->im = 0.f; out->magnitude = 0.f;
-  } else {
-    out->index = (long)xv[bl] + bl;
-    out->re = rv[bl];
-    out->im = conj ? -iv[bl] : iv[bl];
-    out->magnitude = sqrtf(mv[bl]);
-  }
+  auto emit = [&](vf A, vf R, vf I, vi X, ap_peak *o){
+    if(!V_MASK_ANY(V_CMP_GT(A, V_SET1(t2)))){                /* no lane left its seed */
+      o->index = -1; o->re = 0.f; o->im = 0.f; o->magnitude = 0.f; return;
+    }
+    float mv[AP_W], rv[AP_W], iv[AP_W]; int xv[AP_W];
+    V_STOREU(mv, A); V_STOREU(rv, R); V_STOREU(iv, I); VI_STOREU(xv, X);
+    int bl = -1;
+    for(int l=0;l<AP_W;l++){
+      if(xv[l]>=0 && (bl<0 || mv[l]>mv[bl])) bl = l;
+    }
+    if(bl<0){
+      o->index = -1; o->re = 0.f; o->im = 0.f; o->magnitude = 0.f;
+    } else {
+      o->index = (long)xv[bl] + bl;
+      o->re = rv[bl];
+      o->im = conj ? -iv[bl] : iv[bl];
+      o->magnitude = sqrtf(mv[bl]);
+    }
+  };
+  emit(am, arr, aii, axx, out);
+  if constexpr (TWO) emit(am1, arr1, aii1, axx1, out + 1);
 }
 
-template <bool INPLACE=false>
-static void binmax_one(BP*p,float thr,ap_peak*out,int conj,size_t ws,size_t we){
+/* One bin over [ws, we); TWO: two, split at kb (samples below kb are bin 0, the rest bin 1,
+   out[0] and out[1]) -- a window bin edge inside a block, with the accumulators still in
+   registers. The lanes of a vector are consecutive samples, so a vector is wholly one bin's
+   but for the one row per stage-B column that kb falls in. */
+template <bool INPLACE=false, bool TWO=false>
+static void binmax_one(BP*p,float thr,ap_peak*out,int conj,size_t ws,size_t we,size_t kb=0){
   const int N1=p->N1,N2=p->N2;
   /* Seeded at 0, not -1: a maximum of exactly zero is not a peak. With -1
      a bin whose every |v|^2 underflowed to zero still reported index 0 and
@@ -1153,6 +1200,40 @@ static void binmax_one(BP*p,float thr,ap_peak*out,int conj,size_t ws,size_t we){
   const unsigned allm=(unsigned)((1ull<<AP_W)-1ull);
 
     vf am=V_SET1(t2), arr=V_ZERO(), aii=V_ZERO(); vi axx=VI_SET1(-1);
+    vf am1=V_SET1(t2), arr1=V_ZERO(), aii1=V_ZERO(); vi axx1=VI_SET1(-1);
+    (void)am1; (void)arr1; (void)aii1; (void)axx1; (void)kb;
+    /* m2 at row start k0 into its bin's accumulators. */
+    auto upd=[&](vf m2, vf rr, vf ri, long k0){
+      if constexpr (TWO) {
+        if(k0 >= (long)kb){
+          vm g=V_CMP_GT(m2,am1);
+          if(__builtin_expect(V_MASK_ANY(g),0)){
+            am1=V_SEL(g,am1,m2); arr1=V_SEL(g,arr1,rr); aii1=V_SEL(g,aii1,ri);
+            axx1=VI_SEL(g,axx1,VI_SET1((int)k0));
+          }
+          return;
+        }
+        if(k0 + AP_W > (long)kb){           /* straddles kb: lanes from kb - k0 are bin 1 */
+          const unsigned hi1 = (unsigned)((1ull<<AP_W)-1ull) & ~((1u<<((long)kb-k0))-1u);
+          const vm in1 = V_MASK_FROM_BITS(hi1);
+          const vf NEG1 = V_SET1(-1.f);
+          vf m0 = V_SEL(in1, m2, NEG1), m1 = V_SEL(in1, NEG1, m2);
+          vm g0=V_CMP_GT(m0,am), g1=V_CMP_GT(m1,am1);
+          if(V_MASK_ANY(g0)){ am=V_SEL(g0,am,m0); arr=V_SEL(g0,arr,rr); aii=V_SEL(g0,aii,ri);
+                              axx=VI_SEL(g0,axx,VI_SET1((int)k0)); }
+          if(V_MASK_ANY(g1)){ am1=V_SEL(g1,am1,m1); arr1=V_SEL(g1,arr1,rr); aii1=V_SEL(g1,aii1,ri);
+                              axx1=VI_SEL(g1,axx1,VI_SET1((int)k0)); }
+          return;
+        }
+      }
+      vm g=V_CMP_GT(m2,am);
+      if(__builtin_expect(V_MASK_ANY(g),0)){
+        am =V_SEL(g,am,m2);
+        arr=V_SEL(g,arr,rr);
+        aii=V_SEL(g,aii,ri);
+        axx=VI_SEL(g,axx,VI_SET1((int)k0));
+      }
+    };
     const int NBK=N2/AP_W;
     for(int b=0;b<NBK;b++){
       long base=(long)AP_W*b;
@@ -1177,19 +1258,13 @@ static void binmax_one(BP*p,float thr,ap_peak*out,int conj,size_t ws,size_t we){
         int e=eidx(&p->ea,(int)k1);
         vf m2=V_FMADD(RR[e],RR[e],V_MUL(RI[e],RI[e]));
         if(inw!=allm) m2=V_SEL(V_MASK_FROM_BITS(inw),NEG,m2);
-        vm g=V_CMP_GT(m2,am);
-        if(__builtin_expect(V_MASK_ANY(g),0)){
-          am =V_SEL(g,am,m2);
-          arr=V_SEL(g,arr,RR[e]);
-          aii=V_SEL(g,aii,RI[e]);
-          axx=VI_SEL(g,axx,VI_SET1((int)k0));
-        }
+        upd(m2,RR[e],RI[e],k0);
       };
 
-      if(lo_in <= hi_in){
-        for(long k1=lo; k1<lo_in; k1++) process_boundary(k1);
-        long k1=lo_in;
-        for(; k1+1<=hi_in; k1+=2){
+      /* Interior rows k1 in [a, b] through u: two at a time. */
+      auto rows=[&](long a, long z, auto &&u){
+        long k1=a;
+        for(; k1+1<=z; k1+=2){
           int e0=eidx(&p->ea,(int)k1);
           int e1=eidx(&p->ea,(int)(k1+1));
           long k0_0=k1*N2+base;
@@ -1198,51 +1273,80 @@ static void binmax_one(BP*p,float thr,ap_peak*out,int conj,size_t ws,size_t we){
           vf rr1=RR[e1], ri1=RI[e1];
           vf m2_0=V_FMADD(rr0,rr0,V_MUL(ri0,ri0));
           vf m2_1=V_FMADD(rr1,rr1,V_MUL(ri1,ri1));
-          vm g0=V_CMP_GT(m2_0,am);
-          if(__builtin_expect(V_MASK_ANY(g0),0)){
-            am =V_SEL(g0,am,m2_0);
-            arr=V_SEL(g0,arr,rr0);
-            aii=V_SEL(g0,aii,ri0);
-            axx=VI_SEL(g0,axx,VI_SET1((int)k0_0));
-          }
-          vm g1=V_CMP_GT(m2_1,am);
-          if(__builtin_expect(V_MASK_ANY(g1),0)){
-            am =V_SEL(g1,am,m2_1);
-            arr=V_SEL(g1,arr,rr1);
-            aii=V_SEL(g1,aii,ri1);
-            axx=VI_SEL(g1,axx,VI_SET1((int)k0_1));
-          }
+          u(m2_0,rr0,ri0,k0_0);
+          u(m2_1,rr1,ri1,k0_1);
         }
-        if(k1<=hi_in){
+        if(k1<=z){
           int e=eidx(&p->ea,(int)k1);
           long k0=k1*N2+base;
           vf rr=RR[e], ri=RI[e];
           vf m2=V_FMADD(rr,rr,V_MUL(ri,ri));
-          vm g=V_CMP_GT(m2,am);
-          if(__builtin_expect(V_MASK_ANY(g),0)){
-            am =V_SEL(g,am,m2);
-            arr=V_SEL(g,arr,rr);
-            aii=V_SEL(g,aii,ri);
-            axx=VI_SEL(g,axx,VI_SET1((int)k0));
-          }
+          u(m2,rr,ri,k0);
+        }
+      };
+      if(lo_in <= hi_in){
+        for(long k1=lo; k1<lo_in; k1++) process_boundary(k1);
+        if constexpr (TWO) {
+          /* A column's samples rise with k1, so kb splits its rows: wholly bin 0 up to
+             last0, wholly bin 1 from first1, and at most one row between that straddles
+             kb. Each run takes one accumulator set with no per-row bin test. */
+          const long r=(long)kb-base;
+          const long last0 = r-AP_W>=0 ? (r-AP_W)/N2 : -1;
+          const long first1 = r>0 ? (r+N2-1)/N2 : 0;
+          auto u0=[&](vf m2, vf rr, vf ri, long k0){
+            vm g=V_CMP_GT(m2,am);
+            if(__builtin_expect(V_MASK_ANY(g),0)){
+              am=V_SEL(g,am,m2); arr=V_SEL(g,arr,rr); aii=V_SEL(g,aii,ri);
+              axx=VI_SEL(g,axx,VI_SET1((int)k0));
+            }
+          };
+          auto u1=[&](vf m2, vf rr, vf ri, long k0){
+            vm g=V_CMP_GT(m2,am1);
+            if(__builtin_expect(V_MASK_ANY(g),0)){
+              am1=V_SEL(g,am1,m2); arr1=V_SEL(g,arr1,rr); aii1=V_SEL(g,aii1,ri);
+              axx1=VI_SEL(g,axx1,VI_SET1((int)k0));
+            }
+          };
+          const long e0=last0<hi_in ? last0 : hi_in, s1=first1>lo_in ? first1 : lo_in;
+          rows(lo_in, e0, u0);
+          rows(e0+1>lo_in ? e0+1 : lo_in, s1-1<hi_in ? s1-1 : hi_in, upd);
+          rows(s1, hi_in, u1);
+        } else {
+          rows(lo_in, hi_in, upd);
         }
         for(long k1=hi_in+1; k1<=hi; k1++) process_boundary(k1);
       } else {
         for(long k1=lo; k1<=hi; k1++) process_boundary(k1);
       }
      }
-    float mv[AP_W],rv[AP_W],iv[AP_W]; int xv[AP_W];
-    V_STOREU(mv,am); V_STOREU(rv,arr); V_STOREU(iv,aii); VI_STOREU(xv,axx);
-    int bl=-1;
-    for(int l=0;l<AP_W;l++) if(xv[l]>=0 && (bl<0 || mv[l]>mv[bl])) bl=l;
-    if(bl<0){ out[0].index=-1; out[0].re=0.f; out[0].im=0.f; out[0].magnitude=0.f; }
-    else { out[0].index=(long)xv[bl]+bl; out[0].re=rv[bl];
-           out[0].im=conj?-iv[bl]:iv[bl]; out[0].magnitude=sqrtf(mv[bl]); }
+    auto emit=[&](vf A, vf R, vf I, vi X, ap_peak *o){
+      /* A lane only moves off its seed t2 when it takes a sample above it: none moved is
+         an empty bin, the common case above a detection threshold, with no spill. */
+      if(!V_MASK_ANY(V_CMP_GT(A,V_SET1(t2)))){ o->index=-1; o->re=0.f; o->im=0.f; o->magnitude=0.f; return; }
+      float mv[AP_W],rv[AP_W],iv[AP_W]; int xv[AP_W];
+      V_STOREU(mv,A); V_STOREU(rv,R); V_STOREU(iv,I); VI_STOREU(xv,X);
+      int bl=-1;
+      /* the lowest index among equal maxima: lanes are consecutive samples of a row */
+      for(int l=0;l<AP_W;l++) if(xv[l]>=0 && (bl<0 || mv[l]>mv[bl])) bl=l;
+      if(bl<0){ o->index=-1; o->re=0.f; o->im=0.f; o->magnitude=0.f; }
+      else { o->index=(long)xv[bl]+bl; o->re=rv[bl];
+             o->im=conj?-iv[bl]:iv[bl]; o->magnitude=sqrtf(mv[bl]); }
+    };
+    emit(am,arr,aii,axx,out);
+    if constexpr (TWO) emit(am1,arr1,aii1,axx1,out+1);
     return;
   }
 
 /* Bins are numbered from org <= ws (bin j covers [org + j*binsize, org + (j+1)*binsize)
    clipped to [ws, we)); org = ws numbers them from the window's own start. */
+/* The two-bin scan out of line and out of the hot section: inlined, it grew binmax_core by
+   a third and cost the one-bin path ~2% (layout, not work). */
+template <bool INPLACE>
+static HWY_NOINLINE MF_PHASED_SECTION void binmax_two(BP*p,float thr,ap_peak*out,int conj,
+                                                      size_t ws,size_t we,size_t kb){
+  binmax_one<INPLACE,true>(p,thr,out,conj,ws,we,kb);
+}
+
 static void binmax_core(BP*p,size_t binsize,float thr,ap_peak*out,int conj,
                             size_t ws,size_t we,size_t org){
   const int N1=p->N1,N2=p->N2;
@@ -1262,16 +1366,26 @@ static void binmax_core(BP*p,size_t binsize,float thr,ap_peak*out,int conj,
   const int bpow = (binsize & (binsize-1)) ? -1 : (int)__builtin_ctzl(binsize);
 #define BINOF(k) (bpow>=0 ? (((k)-(long)org)>>bpow) : (((k)-(long)org)/(long)binsize))
 
-  /* One bin over the whole window is the common case at the small sizes, and then
-     the accumulators live in registers. */
-  if(nb==1){
-    if constexpr (AP_W==8) {
-      if(p->fuse==2 && p->ilay) {
-        binmax_one<true>(p,thr,out,conj,ws,we);
-        return;
+  /* One or two touched bins (j0..j1) are the common cases at the small sizes, and then
+     the accumulators live in registers. Padding phases leave empty bins ahead of them,
+     so a call's bin count can overstate what the samples touch. */
+  const size_t j0=ws<we ? (ws-org)/binsize : 0, j1=ws<we ? (we-1-org)/binsize : 0;
+  if(j1<=j0+1){
+    for(size_t j=0;j<nb;j++) if(j<j0 || j>j1){ out[j].index=-1; out[j].re=0.f; out[j].im=0.f; out[j].magnitude=0.f; }
+    ap_peak *o=out+j0;
+    if(j0==j1){
+      if constexpr (AP_W==8) {
+        if(p->fuse==2 && p->ilay) { binmax_one<true>(p,thr,o,conj,ws,we); return; }
       }
+      binmax_one(p,thr,o,conj,ws,we);
+      return;
     }
-    binmax_one(p,thr,out,conj,ws,we);
+    /* A window bin edge inside the block (bin phases): still in registers. */
+    const size_t kb=org+(j0+1)*binsize;
+    if constexpr (AP_W==8) {
+      if(p->fuse==2 && p->ilay) { binmax_two<true>(p,thr,o,conj,ws,we,kb); return; }
+    }
+    binmax_two<false>(p,thr,o,conj,ws,we,kb);
     return;
   }
   if(0){ }
@@ -1503,9 +1617,15 @@ static HWY_NOINLINE MF_PEAK_SECTION int binmax_prod_threshold(void *vp,const flo
   BP *p=(BP*)vp;
   const size_t org=ws-(ph?ph[0]:0u);
   if constexpr (AP_W==8 || AP_W==16) {
-    if(__builtin_expect(thr>0.f && (we-org)<=binsize && p->fuse==2 && p->ilay && p->gmajor, 1)) {
+    const size_t nbf=(we-org+binsize-1)/binsize;    /* bins from org (ap_bin_count) */
+    /* Padding phases leave empty bins, so the call's bin count overstates the bins the
+       samples touch: j0..j1. One touched bin takes the one-bin kernel. */
+    const size_t j0=ws<we ? (ws-org)/binsize : 0, j1=ws<we ? (we-1-org)/binsize : 0;
+    if(__builtin_expect(thr>0.f && j1<=j0+1 && p->fuse==2 && p->ilay && p->gmajor, 1)) {
       stageA_prod_32(p,dr,di,tr,ti);
-      binmax_fused32(p,thr,out,conj,ws,we);
+      for(size_t j=0;j<nbf;j++) if(j<j0 || j>j1){ out[j].index=-1; out[j].re=0.f; out[j].im=0.f; out[j].magnitude=0.f; }
+      if(j0==j1) binmax_fused32(p,thr,out+j0,conj,ws,we);
+      else binmax_fused32<true>(p,thr,out+j0,conj,ws,we,org+(j0+1)*binsize);
       return 0;
     }
   }

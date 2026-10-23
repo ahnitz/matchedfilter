@@ -2,6 +2,8 @@
 how a template group's blocks are laid out to cover them (_window_layout)."""
 import numpy as np
 
+from . import _core
+
 
 def _is_index(x) -> bool:
     return isinstance(x, (int, np.integer)) and not isinstance(x, (bool, np.bool_))
@@ -115,22 +117,22 @@ def _merge_window_bins(W: np.ndarray, binsize: int, t, s, v, *rest):
     (and any in rest, aligned with them) come back filtered, in their original order."""
     if s.size < 2:
         return (t, s, v) + rest
+    if t.dtype == np.int64 and s.dtype in (np.int64, np.float64) and v.dtype == np.complex64:
+        # Ordered by template, then sample (a follow-up window; a bank's peaks in template
+        # order): a window bin's partial bins are adjacent runs, merged in one pass. This
+        # runs once per follow-up window, where a dozen array operations cost more than the
+        # filtering.
+        keep = np.empty(s.size, np.int64)
+        kept = _core.window_bin_keep(np.ascontiguousarray(W[:, 0], np.int64), int(binsize),
+                                     np.ascontiguousarray(t), np.ascontiguousarray(s),
+                                     np.ascontiguousarray(v), keep, s.dtype == np.float64)
+        if kept == s.size:
+            return (t, s, v) + rest
+        if kept >= 0:
+            keep = keep[:kept]
+            return tuple(x[keep] for x in (t, s, v) + rest)
     wi = np.searchsorted(W[:, 0], s, side='right') - 1
     b = (s - W[wi, 0]) // int(binsize)
-    if t[0] == t[-1] and np.all(t == t[0]) and np.all(s[1:] > s[:-1]):
-        # One template, samples ascending (a follow-up window): a window bin's partial bins
-        # are adjacent runs, at most a few long -- no sort.
-        same = (b[1:] == b[:-1]) & (wi[1:] == wi[:-1])
-        if not same.any():
-            return (t, s, v) + rest
-        keep = np.ones(s.size, bool)
-        a = np.abs(v)
-        starts = np.flatnonzero(np.r_[True, ~same])
-        ends = np.r_[starts[1:], s.size]
-        for i, j in zip(starts[ends - starts > 1], ends[ends - starts > 1]):
-            keep[i:j] = False
-            keep[i + int(np.argmax(a[i:j]))] = True        # the first of equal maxima
-        return tuple(x[keep] for x in (t, s, v) + rest)
     order = np.lexsort((s, -np.abs(v), b, wi, t))
     key = np.stack((t[order], wi[order], b[order]))
     first = np.r_[True, np.any(key[:, 1:] != key[:, :-1], axis=0)]

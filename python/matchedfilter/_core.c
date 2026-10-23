@@ -7,6 +7,7 @@
 #include <Python.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <math.h>
 #include <limits.h>
 #include "matchedfilter.h"
 #include "transform.h"
@@ -1226,6 +1227,56 @@ static PyObject *M_pack_peaks(PyObject *self,PyObject *args){
   PyBuffer_Release(&bpk);PyBuffer_Release(&bidx);PyBuffer_Release(&bval);
   Py_RETURN_NONE;
 }
+/* window_bin_keep(win_starts, binsize, t, s, v, keep, is_float) -> kept count, or -1.
+   Peaks ordered by template, then sample: the partial bins of one window bin (a block edge
+   inside it) are adjacent runs. keep receives, in order, the index of each run's first
+   peak at the run's largest |v|; the count is len(t) when nothing merged. -1: not in that
+   order (the caller sorts). win_starts: the ascending window starts, every peak at or after
+   the first. s is int64, or float64 when is_float (interpolated samples); a float sample's
+   bin is numpy's floor division, so the result matches the array form. */
+static inline int64_t wbk_bin_f(double a, double b){
+  /* numpy's float floor_divide (npy_divmod), for a >= 0, b > 0 */
+  const double mod=fmod(a,b), div=(a-mod)/b;
+  double q=floor(div);
+  if(div-q>0.5) q+=1.0;
+  return (int64_t)q;
+}
+static PyObject *M_window_bin_keep(PyObject *self,PyObject *args){
+  (void)self;
+  Py_buffer bw,bt,bs,bv,bk; long long binsize; int isf;
+  if(!PyArg_ParseTuple(args,"y*Ly*y*y*w*p",&bw,&binsize,&bt,&bs,&bv,&bk,&isf)) return NULL;
+  const Py_ssize_t n=bt.len/8, nw=bw.len/8;
+  long long r=-2;
+  if(binsize>0 && nw>0 && bt.len==n*8 && bs.len==n*8 && bv.len==n*8 && bk.len>=n*8){
+    const int64_t *W=(const int64_t*)bw.buf, *t=(const int64_t*)bt.buf;
+    const int64_t *si=(const int64_t*)bs.buf; const double *sf=(const double*)bs.buf;
+    const float *v=(const float*)bv.buf; int64_t *keep=(int64_t*)bk.buf;
+    Py_ssize_t w=0, kept=0, best=-1; float bestm=0.f;
+    int64_t kt=0, kw=0, kb=0;
+    r=0;
+    for(Py_ssize_t i=0;i<n;i++){
+      const double x = isf ? sf[i] : (double)si[i];
+      if(i>0 && (t[i]<t[i-1] || (t[i]==t[i-1] && (isf ? sf[i]<=sf[i-1] : si[i]<=si[i-1])))){ r=-1; break; }
+      if(i==0 || t[i]!=t[i-1]) w=0;
+      while(w+1<nw && (isf ? (double)W[w+1]<=x : W[w+1]<=si[i])) w++;
+      if(isf ? !(x>=(double)W[w]) : si[i]<W[w]){ r=-2; break; }
+      const int64_t b = isf ? wbk_bin_f(x-(double)W[w],(double)binsize) : (si[i]-W[w])/binsize;
+      const float m=hypotf(v[2*i],v[2*i+1]);
+      if(i>0 && t[i]==kt && (int64_t)w==kw && b==kb){
+        if(m>bestm){ bestm=m; best=i; }
+        continue;
+      }
+      if(best>=0) keep[kept++]=best;
+      kt=t[i]; kw=w; kb=b; best=i; bestm=m;
+    }
+    if(r==0){ if(best>=0) keep[kept++]=best; r=kept; }
+  }
+  PyBuffer_Release(&bw);PyBuffer_Release(&bt);PyBuffer_Release(&bs);
+  PyBuffer_Release(&bv);PyBuffer_Release(&bk);
+  if(r==-2){ PyErr_SetString(PyExc_ValueError,"window_bin_keep: mismatched buffers, binsize < 1 "
+                             "or a peak before the first window"); return NULL; }
+  return PyLong_FromLongLong(r);
+}
 static PyObject *M_taps_to_spectra(PyObject *self, PyObject *args){
   Py_buffer btaps, bcnt, bout;
   Py_ssize_t n, max_taps;
@@ -1481,6 +1532,7 @@ static PyMethodDef methods[]={
   {"targets",M_targets,METH_NOARGS,"targets() -> names this build can run here"},
   {"set_target",M_set_target,METH_VARARGS,"set_target(name|None) -> narrow the choice"},
   {"pack_peaks",M_pack_peaks,METH_VARARGS,"pack_peaks(peaks, idx, val) -> copy into structured peaks"},
+  {"window_bin_keep",M_window_bin_keep,METH_VARARGS,"window_bin_keep(win_starts, binsize, t, s, v, keep, is_float) -> kept count, or -1 when not ordered by template then sample"},
   {"taps_to_spectra",M_taps_to_spectra,METH_VARARGS,"taps_to_spectra(taps, counts, n, max_taps, out_spectra, complex=False)"},
   {NULL,NULL,0,NULL}};
 static struct PyModuleDef mod={PyModuleDef_HEAD_INIT,"matchedfilter._core",NULL,-1,methods};
