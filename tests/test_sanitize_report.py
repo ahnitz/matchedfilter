@@ -103,3 +103,19 @@ def test_annotation_lists_failed_tests(tmp_path):
                          text=True)
     head = out.stdout.replace("%0A", "\n").split("-- end of log --")[0]
     assert "FAILED tests/test_q.py::test_same[chain0] - AssertionError: Mismatch" in head
+
+
+def test_annotation_carries_the_failure_messages(tmp_path):
+    # The one-line summary cuts a multi-line assertion to its first line; the "E" lines of
+    # the failures section are what a CI-only failure is diagnosed from.
+    log = tmp_path / "san.log"
+    log.write_text("tests/test_q.py::test_same[256] FAILED\n"
+                   "E   AssertionError: merged and separate calls differ\n"
+                   "E     t=3 s=20228 merged (1+2j) separate (1.000001+2j)\n"
+                   + "SKIPPED [1] tests/x.py:1: no GPU\n" * 200
+                   + "FAILED tests/test_q.py::test_same[256] - AssertionError: merged and...\n"
+                   "sanitize: pytest rc=1 (FAILED)\n")
+    out = subprocess.run([sys.executable, str(TOOL), str(log), "1"], capture_output=True,
+                         text=True)
+    head = out.stdout.replace("%0A", "\n").split("-- end of log --")[0]
+    assert "E     t=3 s=20228 merged (1+2j) separate (1.000001+2j)" in head
