@@ -23,43 +23,43 @@ uint firstbithigh_0(uint value_0)
 }
 
 
-#line 2134 "bands.slang"
+#line 2161 "bands.slang"
 float2 seriesSample_0(packed_float2 device* series_0, uint i_0, uint layout_0)
 {
     if(layout_0 == 0U)
     {
 
-#line 2137
+#line 2164
         return float2(*(series_0+i_0)) ;
     }
 
-#line 2138
+#line 2165
     uint f_0 = (layout_0 >> 2U) + (layout_0 & 3U) * i_0;
 
-#line 2138
+#line 2165
     float2 _S2 = float2(*(series_0+(f_0 >> 1U))) ;
 
-#line 2138
+#line 2165
     float _S3;
 
     if((f_0 & 1U) != 0U)
     {
 
-#line 2140
+#line 2167
         _S3 = _S2.y;
 
-#line 2140
+#line 2167
     }
     else
     {
 
-#line 2140
+#line 2167
         _S3 = _S2.x;
 
-#line 2140
+#line 2167
     }
 
-#line 2140
+#line 2167
     return float2(_S3, 0.0f);
 }
 
@@ -72,56 +72,56 @@ float2 mfTwiddle_0(float angle_0)
 }
 
 
-#line 293 "bands.slang"
+#line 317 "bands.slang"
 float2 cmul_0(float2 a_0, float2 b_0)
 {
 
-#line 293
+#line 317
     float _S4 = a_0.x;
 
-#line 293
+#line 317
     float _S5 = b_0.x;
 
-#line 293
+#line 317
     float _S6 = a_0.y;
 
-#line 293
+#line 317
     float _S7 = b_0.y;
 
-#line 293
+#line 317
     return float2(_S4 * _S5 - _S6 * _S7, _S4 * _S7 + _S6 * _S5);
 }
 
 
-#line 499
+#line 523
 void r4_0(float2 thread* a_1, float2 thread* b_1, float2 thread* c_0, float2 thread* d_0)
 {
     float2 t0_0 = *a_1 + *c_0;
 
-#line 501
+#line 525
     float2 t1_0 = *a_1 - *c_0;
 
-#line 501
+#line 525
     float2 t2_0 = *b_1 + *d_0;
 
-#line 501
+#line 525
     float2 t3_0 = *b_1 - *d_0;
     float2 j3_0 = float2(- t3_0.y, t3_0.x);
     *a_1 = t0_0 + t2_0;
 
-#line 503
+#line 527
     *b_1 = t1_0 + j3_0;
 
-#line 503
+#line 527
     *c_0 = t0_0 - t2_0;
 
-#line 503
+#line 527
     *d_0 = t1_0 - j3_0;
     return;
 }
 
 
-#line 535
+#line 559
 void dft16_0(array<float2, int(16)> thread* r_0)
 {
     float2 W1_0 = float2(0.92387950420379639f, 0.38268342614173889f);
@@ -131,198 +131,198 @@ void dft16_0(array<float2, int(16)> thread* r_0)
     float2 W6_0 = float2(-0.70710676908493042f, 0.70710676908493042f);
     float2 W9_0 = float2(-0.92387950420379639f, -0.38268342614173889f);
 
-#line 542
+#line 566
     uint n1_0 = 0U;
     for(;;)
     {
 
-#line 543
+#line 567
         if(n1_0 < 4U)
         {
         }
         else
         {
 
-#line 543
+#line 567
             break;
         }
 
-#line 543
+#line 567
         r4_0(&(*r_0)[n1_0], &(*r_0)[n1_0 + 4U], &(*r_0)[n1_0 + 8U], &(*r_0)[n1_0 + 12U]);
 
-#line 543
+#line 567
         n1_0 = n1_0 + 1U;
 
-#line 543
+#line 567
     }
     (*r_0)[int(5)] = cmul_0((*r_0)[int(5)], W1_0);
 
-#line 544
+#line 568
     (*r_0)[int(9)] = cmul_0((*r_0)[int(9)], W2_0);
 
-#line 544
+#line 568
     (*r_0)[int(13)] = cmul_0((*r_0)[int(13)], W3_0);
     (*r_0)[int(6)] = cmul_0((*r_0)[int(6)], W2_0);
 
-#line 545
+#line 569
     (*r_0)[int(10)] = cmul_0((*r_0)[int(10)], W4_0);
 
-#line 545
+#line 569
     (*r_0)[int(14)] = cmul_0((*r_0)[int(14)], W6_0);
     (*r_0)[int(7)] = cmul_0((*r_0)[int(7)], W3_0);
 
-#line 546
+#line 570
     (*r_0)[int(11)] = cmul_0((*r_0)[int(11)], W6_0);
 
-#line 546
+#line 570
     (*r_0)[int(15)] = cmul_0((*r_0)[int(15)], W9_0);
 
-#line 546
+#line 570
     uint k2_0 = 0U;
     for(;;)
     {
 
-#line 547
+#line 571
         if(k2_0 < 4U)
         {
         }
         else
         {
 
-#line 547
+#line 571
             break;
         }
 
-#line 547
+#line 571
         uint _S8 = 4U * k2_0;
 
-#line 547
+#line 571
         r4_0(&(*r_0)[_S8], &(*r_0)[_S8 + 1U], &(*r_0)[_S8 + 2U], &(*r_0)[_S8 + 3U]);
 
-#line 547
+#line 571
         k2_0 = k2_0 + 1U;
 
-#line 547
+#line 571
     }
 
     float2 t_0 = (*r_0)[int(1)];
 
-#line 549
+#line 573
     (*r_0)[int(1)] = (*r_0)[int(4)];
 
-#line 549
+#line 573
     (*r_0)[int(4)] = t_0;
     float2 t_1 = (*r_0)[int(2)];
 
-#line 550
+#line 574
     (*r_0)[int(2)] = (*r_0)[int(8)];
 
-#line 550
+#line 574
     (*r_0)[int(8)] = t_1;
     float2 t_2 = (*r_0)[int(3)];
 
-#line 551
+#line 575
     (*r_0)[int(3)] = (*r_0)[int(12)];
 
-#line 551
+#line 575
     (*r_0)[int(12)] = t_2;
     float2 t_3 = (*r_0)[int(6)];
 
-#line 552
+#line 576
     (*r_0)[int(6)] = (*r_0)[int(9)];
 
-#line 552
+#line 576
     (*r_0)[int(9)] = t_3;
     float2 t_4 = (*r_0)[int(7)];
 
-#line 553
+#line 577
     (*r_0)[int(7)] = (*r_0)[int(13)];
 
-#line 553
+#line 577
     (*r_0)[int(13)] = t_4;
     float2 t_5 = (*r_0)[int(11)];
 
-#line 554
+#line 578
     (*r_0)[int(11)] = (*r_0)[int(14)];
 
-#line 554
+#line 578
     (*r_0)[int(14)] = t_5;
     return;
 }
 
 
-#line 581
+#line 605
 void dft32_0(array<float2, int(32)> thread* r_1)
 {
     thread array<float2, int(16)> u_0;
 
-#line 583
+#line 607
     thread array<float2, int(16)> v_0;
 
-#line 583
+#line 607
     uint j_0 = 0U;
     for(;;)
     {
 
-#line 584
+#line 608
         if(j_0 < 16U)
         {
         }
         else
         {
 
-#line 584
+#line 608
             break;
         }
         u_0[j_0] = (*r_1)[j_0] + (*r_1)[j_0 + 16U];
 
         v_0[j_0] = cmul_0((*r_1)[j_0] - (*r_1)[j_0 + 16U], mfTwiddle_0(6.28318548202514648f * float(j_0) / 32.0f));
 
-#line 584
+#line 608
         j_0 = j_0 + 1U;
 
-#line 584
+#line 608
     }
 
-#line 590
+#line 614
     dft16_0(&u_0);
     dft16_0(&v_0);
 
-#line 591
+#line 615
     uint k_0 = 0U;
     for(;;)
     {
 
-#line 592
+#line 616
         if(k_0 < 16U)
         {
         }
         else
         {
 
-#line 592
+#line 616
             break;
         }
 
-#line 592
+#line 616
         uint _S9 = 2U * k_0;
 
-#line 592
+#line 616
         (*r_1)[_S9] = u_0[k_0];
 
-#line 592
+#line 616
         (*r_1)[_S9 + 1U] = v_0[k_0];
 
-#line 592
+#line 616
         k_0 = k_0 + 1U;
 
-#line 592
+#line 616
     }
     return;
 }
 
 
-#line 620
+#line 644
 void dftR_0(array<float2, int(32)> thread* r_2)
 {
 
@@ -336,37 +336,37 @@ void dftR_0(array<float2, int(32)> thread* r_2)
 }
 
 
-#line 295
+#line 319
 uint computeWant_0(uint d_1, uint TB_0, uint len_0, uint blk_0, uint lane_0, uint per_0, uint TB2_0, uint len2_0, uint blk2_0, uint lane2_0)
 {
     uint _S10 = max(TB_0, 1U);
 
-#line 297
+#line 321
     uint j_1 = d_1 / _S10;
 
-#line 297
+#line 321
     uint m_0 = d_1 % _S10;
 
-#line 297
+#line 321
     uint _S11;
     if(TB_0 <= 32U)
     {
 
-#line 298
+#line 322
         _S11 = blk_0 * len_0 + (lane_0 * per_0 + j_1) * TB_0 + m_0;
 
-#line 298
+#line 322
     }
     else
     {
 
-#line 298
+#line 322
         _S11 = blk2_0 * len2_0 + lane2_0 + TB2_0 * d_1;
 
-#line 298
+#line 322
     }
 
-#line 298
+#line 322
     return _S11;
 }
 
@@ -380,7 +380,7 @@ struct EntryPointParams_0
 };
 
 
-#line 282 "bands.slang"
+#line 306 "bands.slang"
 struct KernelContext_0
 {
     EntryPointParams_0 constant* entryPointParams_0;
@@ -393,69 +393,69 @@ struct KernelContext_0
 };
 
 
-#line 282
+#line 306
 void stgPut_0(uint i_1, float2 v_1, KernelContext_0 thread* kernelContext_0)
 {
 
-#line 282
+#line 306
     uint _S12 = 2U * i_1;
 
-#line 282
+#line 306
     (*kernelContext_0->stg_0)[kernelContext_0->_stgBase_0 + _S12] = (as_type<uint>((v_1.x)));
 
-#line 282
+#line 306
     (*kernelContext_0->stg_0)[kernelContext_0->_stgBase_0 + _S12 + 1U] = (as_type<uint>((v_1.y)));
 
-#line 282
+#line 306
     return;
 }
 
 
-#line 283
+#line 307
 float2 stgGet_0(uint i_2, KernelContext_0 thread* kernelContext_1)
 {
 
-#line 283
+#line 307
     uint _S13 = 2U * i_2;
 
-#line 283
+#line 307
     return float2((as_type<float>(((*kernelContext_1->stg_0)[kernelContext_1->_stgBase_0 + _S13]))), (as_type<float>(((*kernelContext_1->stg_0)[kernelContext_1->_stgBase_0 + _S13 + 1U]))));
 }
 
 
-#line 724
+#line 748
 void exchange_0(array<float2, int(32)> thread* r_3, uint lgLen_0, uint lgSpan_0, uint TB_1, uint len_1, uint blk_1, uint lane_1, uint per_1, uint TB2_1, uint len2_1, uint blk2_1, uint lane2_1, KernelContext_0 thread* kernelContext_2)
 {
 
-#line 725
+#line 749
     uint j_2;
 
-#line 736
+#line 760
     thread array<float2, int(32)> out_0;
 
-#line 736
+#line 760
     uint z_0 = 0U;
     for(;;)
     {
 
-#line 737
+#line 761
         if(z_0 < 32U)
         {
         }
         else
         {
 
-#line 737
+#line 761
             break;
         }
 
-#line 737
+#line 761
         out_0[z_0] = float2(0.0f, 0.0f);
 
-#line 737
+#line 761
         z_0 = z_0 + 1U;
 
-#line 737
+#line 761
     }
     uint spanMask_0 = (1U << lgSpan_0) - 1U;
     uint lenMask_0 = (1U << lgLen_0) - 1U;
@@ -464,193 +464,193 @@ void exchange_0(array<float2, int(32)> thread* r_3, uint lgLen_0, uint lgSpan_0,
     uint p0_0 = computeWant_0(0U, TB_1, len_1, blk_1, lane_1, per_1, TB2_1, len2_1, blk2_1, lane2_1);
     uint _S14 = p0_0 & lenMask_0;
 
-#line 743
+#line 767
     uint _S15 = _S14 >> lgSpan_0;
 
-#line 743
+#line 767
     uint _S16 = _S15 * 1024U + ((p0_0 >> lgLen_0) << lgSpan_0) + (_S14 & spanMask_0);
 
-#line 743
+#line 767
     uint c_1 = 0U;
 
     for(;;)
     {
 
-#line 745
+#line 769
         if(c_1 < 8U)
         {
         }
         else
         {
 
-#line 745
+#line 769
             break;
         }
 
-#line 746
+#line 770
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
-#line 746
+#line 770
         j_2 = 0U;
         for(;;)
         {
 
-#line 747
+#line 771
             if(j_2 < 4U)
             {
             }
             else
             {
 
-#line 747
+#line 771
                 break;
             }
 
-#line 747
+#line 771
             stgPut_0(j_2 * 1024U + kernelContext_2->_tid_0, (*r_3)[c_1 * 4U + j_2], kernelContext_2);
 
-#line 747
+#line 771
             j_2 = j_2 + 1U;
 
-#line 747
+#line 771
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
-#line 748
+#line 772
         uint d_2 = 0U;
         for(;;)
         {
 
-#line 749
+#line 773
             if(d_2 < 32U)
             {
             }
             else
             {
 
-#line 749
+#line 773
                 break;
             }
 
-#line 750
+#line 774
             uint pz_0 = computeWant_0(d_2, TB_1, len_1, 0U, 0U, per_1, TB2_1, len2_1, 0U, 0U);
             uint _S17 = pz_0 & lenMask_0;
 
-#line 751
+#line 775
             uint iz_0 = _S17 >> lgSpan_0;
             uint az_0 = iz_0 * 1024U + ((pz_0 >> lgLen_0) << lgSpan_0) + (_S17 & spanMask_0);
             uint i_3 = _S15 + iz_0;
             uint _S18 = c_1 * 4U;
 
-#line 754
+#line 778
             bool _S19;
 
-#line 754
+#line 778
             if(i_3 >= _S18)
             {
 
-#line 754
+#line 778
                 _S19 = i_3 < ((c_1 + 1U) * 4U);
 
-#line 754
+#line 778
             }
             else
             {
 
-#line 754
+#line 778
                 _S19 = false;
 
-#line 754
+#line 778
             }
 
-#line 754
+#line 778
             if(_S19)
             {
 
-#line 754
+#line 778
                 float2 _S20 = stgGet_0(_S16 + az_0 - _S18 * 1024U, kernelContext_2);
                 out_0[d_2] = _S20;
 
-#line 754
+#line 778
             }
 
-#line 749
+#line 773
             d_2 = d_2 + 1U;
 
-#line 749
+#line 773
         }
 
-#line 745
+#line 769
         c_1 = c_1 + 1U;
 
-#line 745
+#line 769
     }
 
-#line 745
+#line 769
     j_2 = 0U;
 
-#line 758
+#line 782
     for(;;)
     {
 
-#line 758
+#line 782
         if(j_2 < 32U)
         {
         }
         else
         {
 
-#line 758
+#line 782
             break;
         }
 
-#line 758
+#line 782
         (*r_3)[j_2] = out_0[j_2];
 
-#line 758
+#line 782
         j_2 = j_2 + 1U;
 
-#line 758
+#line 782
     }
     return;
 }
 
 
-#line 638
+#line 662
 void innermost_0(array<float2, int(32)> thread* r_4)
 {
 
     dft32_0(r_4);
 
-#line 650
+#line 674
     return;
 }
 
 
-#line 2124
+#line 2151
 void forwardTransform_0(array<float2, int(32)> thread* r_5, uint tid_0, KernelContext_0 thread* kernelContext_3)
 {
 
-#line 2124
+#line 2151
     uint _S21;
 
-#line 2124
+#line 2151
     uint k2_1;
 
-#line 2124
+#line 2151
     float cr_0;
 
-#line 2124
+#line 2151
     float ci_0;
 
-#line 2124
+#line 2151
     uint _S22;
 
-#line 2124
+#line 2151
     for(;;)
     {
 
-#line 2124
+#line 2151
         for(;;)
         {
 
@@ -829,57 +829,57 @@ void forwardTransform_0(array<float2, int(32)> thread* r_5, uint tid_0, KernelCo
 #line 56
     innermost_0(r_5);
 
-#line 2127 "bands.slang"
+#line 2154 "bands.slang"
     return;
 }
 
 
-#line 783
+#line 807
 uint lgOf_0(uint i_4)
 {
 
-#line 783
+#line 807
     uint _S31;
 
-#line 783
+#line 807
     if(i_4 < 2U)
     {
 
-#line 783
+#line 807
         _S31 = 5U;
 
-#line 783
+#line 807
     }
     else
     {
 
-#line 783
+#line 807
         if(i_4 == 2U)
         {
 
-#line 783
+#line 807
             _S31 = 5U;
 
-#line 783
+#line 807
         }
         else
         {
 
-#line 783
+#line 807
             _S31 = 1U;
 
-#line 783
+#line 807
         }
 
-#line 783
+#line 807
     }
 
-#line 783
+#line 807
     return _S31;
 }
 
 
-#line 785
+#line 809
 uint slotToIndex_0(uint slot_0)
 {
 
@@ -888,158 +888,158 @@ uint slotToIndex_0(uint slot_0)
 
     uint x_0 = slot_0 >> lg_0;
 
-#line 789
+#line 813
     uint lg_1 = lgOf_0(1U);
 
-#line 789
+#line 813
     uint lg_2 = lgOf_0(0U);
 
-#line 794
+#line 818
     return (((((0U << lg_0) | (slot_0 & ((1U << lg_0) - 1U))) << lg_1) | (x_0 & ((1U << lg_1) - 1U))) << lg_2) | ((x_0 >> lg_1) & ((1U << lg_2) - 1U));
 }
 
 
-#line 2188
+#line 2215
 [[kernel]] void seriesForwardBands(uint3 gid_0 [[threadgroup_position_in_grid]], uint3 lid_0 [[thread_position_in_threadgroup]], EntryPointParams_0 constant* entryPointParams_1 [[buffer(0)]], packed_float2 device* entryPointParams_series_1 [[buffer(1)]], uint device* entryPointParams_starts_1 [[buffer(2)]], packed_float2 device* entryPointParams_bands_1 [[buffer(3)]])
 {
 
-#line 2188
+#line 2215
     thread KernelContext_0 kernelContext_4;
 
-#line 2188
+#line 2215
     (&kernelContext_4)->entryPointParams_0 = entryPointParams_1;
 
-#line 2188
+#line 2215
     (&kernelContext_4)->entryPointParams_series_0 = entryPointParams_series_1;
 
-#line 2188
+#line 2215
     (&kernelContext_4)->entryPointParams_starts_0 = entryPointParams_starts_1;
 
-#line 2188
+#line 2215
     (&kernelContext_4)->entryPointParams_bands_0 = entryPointParams_bands_1;
 
-#line 2188
+#line 2215
     threadgroup array<uint, int(8192)> stg_1;
 
-#line 2188
+#line 2215
     (&kernelContext_4)->stg_0 = &stg_1;
 
-#line 2194
+#line 2221
     uint tid_1 = lid_0.x;
     (&kernelContext_4)->_tid_0 = tid_1;
     (&kernelContext_4)->_stgBase_0 = 0U;
     uint _S32 = gid_0.x;
 
-#line 2197
+#line 2224
     uint _S33 = entryPointParams_starts_1[_S32];
     thread array<float2, int(32)> r_6;
 
-#line 2198
+#line 2225
     uint k_1 = 0U;
     for(;;)
     {
 
-#line 2199
+#line 2226
         if(k_1 < 32U)
         {
         }
         else
         {
 
-#line 2199
+#line 2226
             break;
         }
 
-#line 2200
+#line 2227
         uint offset_0 = tid_1 + 1024U * k_1;
         float2 _S34 = float2(0.0f, 0.0f);
 
-#line 2201
+#line 2228
         bool _S35;
         if(_S33 < ((&kernelContext_4)->entryPointParams_0->seriesLength_0))
         {
 
-#line 2202
+#line 2229
             _S35 = offset_0 < ((&kernelContext_4)->entryPointParams_0->seriesLength_0 - _S33);
 
-#line 2202
+#line 2229
         }
         else
         {
 
-#line 2202
+#line 2229
             _S35 = false;
 
-#line 2202
+#line 2229
         }
 
-#line 2202
+#line 2229
         float2 x_1;
 
-#line 2202
+#line 2229
         if(_S35)
         {
 
-#line 2202
+#line 2229
             x_1 = seriesSample_0((&kernelContext_4)->entryPointParams_series_0, _S33 + offset_0, (&kernelContext_4)->entryPointParams_0->seriesLayout_0);
 
-#line 2202
+#line 2229
         }
         else
         {
 
-#line 2202
+#line 2229
             x_1 = _S34;
 
-#line 2202
+#line 2229
         }
 
         r_6[k_1] = float2(x_1.x / 32768.0f, - x_1.y / 32768.0f);
 
-#line 2199
+#line 2226
         k_1 = k_1 + 1U;
 
-#line 2199
+#line 2226
     }
 
-#line 2199
+#line 2226
     forwardTransform_0(&r_6, tid_1, &kernelContext_4);
 
-#line 2199
+#line 2226
     k_1 = 0U;
 
-#line 2207
+#line 2234
     for(;;)
     {
 
-#line 2207
+#line 2234
         if(k_1 < 32U)
         {
         }
         else
         {
 
-#line 2207
+#line 2234
             break;
         }
 
-#line 2208
+#line 2235
         uint index_0 = slotToIndex_0(tid_1 * 32U + k_1);
         if(index_0 < ((&kernelContext_4)->entryPointParams_0->B_0))
         {
 
-#line 2209
+#line 2236
             *((&kernelContext_4)->entryPointParams_bands_0+(_S32 * (&kernelContext_4)->entryPointParams_0->B_0 + index_0)) = packed_float2(float2(r_6[k_1].x, - r_6[k_1].y)) ;
 
-#line 2209
+#line 2236
         }
 
-#line 2207
+#line 2234
         k_1 = k_1 + 1U;
 
-#line 2207
+#line 2234
     }
 
-#line 2212
+#line 2239
     return;
 }

@@ -33,6 +33,10 @@ static void mulspec(const float *ar,const float *ai,const float *br,const float 
 struct ap_mf_plan {
   size_t n;
   int nd, nt;
+  /* Each data row's bin phase during an ap_mf_run_series call ([nd], the call's bin_phase
+     for the blocks in the rows), NULL otherwise: the scans number row d's bins from
+     start - bph[d] (backend.h, binmax). */
+  const unsigned *bph;
   int tile;            /* pair-loop tile; read once, not per run */
   ap_plan *fft;        /* shared transform plan: forward at ingest, backward per pair */
   int n1,n2,w;         /* the transform's split and lane count, for group-major storage */
@@ -106,6 +110,22 @@ struct ap_mf_plan {
   int *qord; int qordcap;     /* listed pairs' bucket order and keys (ap_mf_q15_pairs) */
   float *qzero;               /* [n] zeros: a slab lane past the plan's blocks */
 };
+
+/* Set the rows' bin phases for the calls that follow ([nd], or NULL): for a plan another
+   one drives (the hierarchical refine's full plan), which owns the array meanwhile. */
+void ap_mf_set_bin_phase(ap_mf_plan *p, const unsigned *bph){ if(p) p->bph = bph; }
+
+/* Row d's bin phase, and the forms the scans take: one value, or a lane array of it for a
+   pair batch whose lanes are templates over that one row. */
+static inline unsigned row_phase(const ap_mf_plan *p, int d){ return p->bph ? p->bph[d] : 0u; }
+static inline const unsigned *one_phase(const ap_mf_plan *p, int d){
+  return p->bph ? p->bph + d : NULL;
+}
+static inline const unsigned *lane_phases(const ap_mf_plan *p, int d, unsigned *buf){
+  if(!p->bph) return NULL;
+  for(int l=0;l<AP_MAX_LANES;l++) buf[l]=p->bph[d];
+  return buf;
+}
 
 /* Two scratch buffers of `bytes` each, allocated together: both or neither. A guard on the
    first alone took a half-allocated pair as ready after one failed allocation, and the next
@@ -226,6 +246,14 @@ size_t ap_mf_nbins(const ap_mf_plan *p, size_t binsize, size_t start, size_t end
   if(end>p->n) end=p->n;
   if(start>=end) return 0;
   return (end-start+binsize-1)/binsize;
+}
+
+/* The same with the bins numbered from start - ph (ap_bin_count). */
+static size_t ap_mf_nbins_phased(const ap_mf_plan *p, size_t binsize, size_t start,
+                                 size_t end, unsigned ph){
+  if(!p||!binsize) return 0;
+  if(end>p->n) end=p->n;
+  return ap_bin_count(binsize,start,end,ph);
 }
 
 /* Store a spectrum split AND group-major: [n1 block][n2][lane], n1 = g*W + l,
@@ -636,8 +664,9 @@ static inline void gather_data_batch(float * restrict dsr, float * restrict dsi,
 static int run_pairs_pb(ap_mf_plan *p, int d0, int nd, int t0, int nt,
                         size_t binsize, float threshold,
                         ap_peak *peaks, int *counts, size_t start, size_t end){
-  const size_t n=p->n, nb=(end-start+binsize-1)/binsize;
+  const size_t n=p->n, nb=ap_bin_count(binsize,start,end,row_phase(p,d0));
   const int W=p->pb;
+  unsigned lph[AP_MAX_LANES];
   if(p->pkcap < (size_t)2*W*nb){
     free(p->pkbuf);
     p->pkbuf=ap_alloc64((size_t)2*W*nb*sizeof(ap_peak));
@@ -666,7 +695,8 @@ static int run_pairs_pb(ap_mf_plan *p, int d0, int nd, int t0, int nt,
       for(int d=0;d<nd;d++){
         const float *Dr=p->dre+(size_t)(d0+d)*n, *Di=p->dim+(size_t)(d0+d)*n;
         if(ap_binmax_prod_batch_peaks(p->fft,Dr,Di,Tr,Ti,cnt,binsize,threshold,
-                                p->pkbuf,AP_BACKWARD,start,end)<0) return -1;
+                                p->pkbuf,AP_BACKWARD,start,end,lane_phases(p,d0+d,lph))<0)
+          return -1;
         for(int l=0;l<cnt;l++){
           const int t = tt+l;
           const size_t row=(size_t)d*nt+t;
@@ -707,17 +737,21 @@ static int run_pairs_pb(ap_mf_plan *p, int d0, int nd, int t0, int nt,
         gather_template_batch(p->tsr, p->tsi, p, t0, NULL, tt, W);
         Tr0=p->tsr; Ti0=p->tsi;
         if(ap_binmax_prod_batch_peaks(p->fft,Dr,Di,Tr0,Ti0,W,binsize,threshold,
-                                p->pkbuf,AP_BACKWARD,start,end)<0) return -1;
+                                p->pkbuf,AP_BACKWARD,start,end,lane_phases(p,d0+d,lph))<0)
+          return -1;
         gather_template_batch(p->tsr, p->tsi, p, t0, NULL, tt+W, W);
         Tr1=p->tsr; Ti1=p->tsi;
         if(ap_binmax_prod_batch_peaks(p->fft,Dr,Di,Tr1,Ti1,W,binsize,threshold,
-                                p->pkbuf+(size_t)W*nb,AP_BACKWARD,start,end)<0) return -1;
+                                p->pkbuf+(size_t)W*nb,AP_BACKWARD,start,end,
+                                lane_phases(p,d0+d,lph))<0) return -1;
         goto place_peaks;
       }
       if(ap_binmax_prod_batch_peaks(p->fft,Dr,Di,Tr0,Ti0,W,binsize,threshold,
-                              p->pkbuf,AP_BACKWARD,start,end)<0) return -1;
+                              p->pkbuf,AP_BACKWARD,start,end,lane_phases(p,d0+d,lph))<0)
+        return -1;
       if(ap_binmax_prod_batch_peaks(p->fft,Dr,Di,Tr1,Ti1,W,binsize,threshold,
-                              p->pkbuf+(size_t)W*nb,AP_BACKWARD,start,end)<0) return -1;
+                              p->pkbuf+(size_t)W*nb,AP_BACKWARD,start,end,
+                              lane_phases(p,d0+d,lph))<0) return -1;
 place_peaks:
       for(int l=0;l<2*W;l++){
         const int t = tt+l;
@@ -744,7 +778,8 @@ place_peaks:
         Tr=p->tsr; Ti=p->tsi;
       }
       if(ap_binmax_prod_batch_peaks(p->fft,Dr,Di,Tr,Ti,cnt,binsize,threshold,
-                              p->pkbuf,AP_BACKWARD,start,end)<0) return -1;
+                              p->pkbuf,AP_BACKWARD,start,end,lane_phases(p,d0+d,lph))<0)
+        return -1;
       for(int l=0;l<cnt;l++){
         const int t = tt+l;
         const size_t row=(size_t)d*nt+t;
@@ -770,14 +805,18 @@ static int run_pairs(ap_mf_plan *p, int d0, int nd, int t0, int nt,
   /* Lanes span templates, not D*T: 32x1 cannot fill one vector. Require
      >=75% occupancy, aligned contiguous templates, and a broad single bin.
      Unmeasured sparse/multi-bin/narrow-window cases keep the original path. */
+  const size_t n=p->n, nb=ap_bin_count(binsize,start,end,row_phase(p,d0));
   if(p->allow_pair_alt && nd>=4 && p->w>0 && nt>=p->w && t0%p->w==0
      && 4*(size_t)nt>=3*((nt+p->w-1)/p->w)*(size_t)p->w
-     && end-start>=p->n/2 && binsize>=end-start){
+     && end-start>=p->n/2 && nb==1){
     ap_mf_plan *q=pair_alternate(p,d0,nd,t0,nt);
-    if(q) return run_pairs_pb(q,d0,nd,t0,nt,binsize,threshold,
-                             peaks,counts,start,end);
+    if(q){
+      q->bph=p->bph;
+      int r=run_pairs_pb(q,d0,nd,t0,nt,binsize,threshold,peaks,counts,start,end);
+      q->bph=NULL;
+      return r;
+    }
   }
-  const size_t n=p->n, nb=(end-start+binsize-1)/binsize;
   /* Tile the pair loop.  Running d outer already keeps one data spectrum resident
      across the t loop, but every template then streams once per d: D*(1+T)
      spectrum reads.  A tile of nd x nt reads nd+nt spectra and does nd*nt pairs,
@@ -800,7 +839,8 @@ static int run_pairs(ap_mf_plan *p, int d0, int nd, int t0, int nt,
         int *cnt_row = counts ? (counts + (size_t)d * nt + tt) : NULL;
         for(int j=tt;j<tend;j++, pk_row++){
           const float *Hr=p->tre+(size_t)(t0+j)*n, *Hi=p->tim+(size_t)(t0+j)*n;
-          int r = prod.run(prod.context,Dr,Di,Hr,Hi,binsize,threshold,pk_row,1,start,end);
+          int r = prod.run(prod.context,Dr,Di,Hr,Hi,binsize,threshold,pk_row,1,start,end,
+                           one_phase(p,d0+d));
           if(__builtin_expect(r<0, 0)) return -1;
           int c = (pk_row->index >= 0);
           if(cnt_row) *cnt_row++ = c;
@@ -824,12 +864,12 @@ static int run_pairs(ap_mf_plan *p, int d0, int nd, int t0, int nt,
          the materialized-product path. The bank selects its consumer once. */
       int r = p->gmajor && prod.run
           ? prod.run(prod.context,Dr,Di,Hr,Hi,binsize,threshold,
-                     peaks+row*nb,1,start,end) : -1;
+                     peaks+row*nb,1,start,end,one_phase(p,d0+d)) : -1;
       if(r>=0) for(size_t b=0;b<nb;b++) if(peaks[row*nb+b].index>=0) c++;
       if(r<0){
         mulspec(Dr,Di,Hr,Hi,p->pr,p->pi,n);
         r = ap_binmax_split(p->fft,p->pr,p->pi,binsize,threshold,
-                            peaks+row*nb,&c,AP_BACKWARD,start,end);
+                            peaks+row*nb,&c,AP_BACKWARD,start,end,one_phase(p,d0+d));
       }
       if(r<0) return -1;
       /* The interpolation block that stood here was unreachable: p->ihlo is
@@ -1172,7 +1212,7 @@ int ap_mf_correlate_series_continuous_real(ap_mf_plan *p,const float *series,
 int ap_mf_run_series(ap_mf_plan *p,
                      const float *series,size_t nseries,
                      const size_t *start,const size_t *win_start,
-                     const size_t *win_end,int nblocks,
+                     const size_t *win_end,const unsigned *bin_phase,int nblocks,
                      int t0,int nt,size_t binsize,float threshold,
                      ap_peak *peaks,int *counts){
   if(!p||nblocks<1||nt<1||!binsize) return 0;
@@ -1180,7 +1220,8 @@ int ap_mf_run_series(ap_mf_plan *p,
   if(!ap_range_ok(t0,nt,p->nt)) return -1;
   const size_t n=p->n;
   if(alloc_pair(&p->sfwd,&p->sspec,2*n*sizeof(float))) return -1;
-  const size_t nb0=ap_mf_nbins(p,binsize,win_start[0],win_end[0]);
+  const size_t nb0=ap_mf_nbins_phased(p,binsize,win_start[0],win_end[0],
+                                      bin_phase?bin_phase[0]:0u);
   int total=0;
   for(int b0=0;b0<nblocks;){
     int g=1;
@@ -1202,7 +1243,6 @@ int ap_mf_run_series(ap_mf_plan *p,
       ap_fft(p->fft,p->sfwd,p->sspec,AP_FORWARD);
       if(ap_mf_set_data(p,j,p->sspec)) return -1;
     }
-    size_t nb=ap_mf_nbins(p,binsize,win_start[b0],win_end[b0]);
     /* peaks is addressed at a single stride, so every window must produce the
        same bin count. A shorter one at a segment's edge does not: it writes
        where the next block's row begins and runs off the end of the caller's
@@ -1210,10 +1250,14 @@ int ap_mf_run_series(ap_mf_plan *p,
        blocks are exactly the ragged ones this call exists to accept.
        Refusing is the honest answer; the shape the API returns has one nbins
        in it and cannot express two. */
-    if(nb!=nb0) return -1;
+    for(int j=0;j<g;j++)
+      if(ap_mf_nbins_phased(p,binsize,win_start[b0+j],win_end[b0+j],
+                            bin_phase?bin_phase[b0+j]:0u)!=nb0) return -1;
+    p->bph = bin_phase ? bin_phase+b0 : NULL;    /* rows 0..g-1 are blocks b0..b0+g-1 */
     int r=ap_mf_run(p,0,g,t0,nt,binsize,threshold,
-                    peaks+(size_t)b0*nt*nb,counts?counts+(size_t)b0*nt:NULL,
+                    peaks+(size_t)b0*nt*nb0,counts?counts+(size_t)b0*nt:NULL,
                     win_start[b0],win_end[b0]);
+    p->bph = NULL;
     if(r<0) return -1;
     total+=r;
     b0+=g;
@@ -1226,12 +1270,15 @@ int ap_mf_run_series(ap_mf_plan *p,
    their parity boundaries, so retain individual reduced lags and place each
    on the caller's full-rate grid. Bound their staging to one template tile. */
 int ap_mf_run_dif(ap_mf_plan *p,int d0,int t0,int nt,size_t binsize,float threshold,
-                  ap_peak *peaks,int *counts,size_t start,size_t end){
+                  ap_peak *peaks,int *counts,size_t start,size_t end,unsigned ph){
   if(!p || !binsize || nt<1 || d0<0 || d0>p->nd-2 || t0<0 || t0>p->nt-nt) return -1;
   if(end>2*p->n) end=2*p->n;
   if(start>=end) return 0;
-  const size_t nb=1+(end-start-1)/binsize;
-  const int samples=(binsize&1) && nb>1;
+  const size_t org=start-ph;            /* bins numbered from here (ap_bin_count) */
+  const size_t nb=ap_bin_count(binsize,start,end,ph);
+  /* Odd widths, and bins not numbered from start, keep each reduced lag and place it on
+     the full-rate grid; the regular reduced bins below align only from start. */
+  const int samples=((binsize&1) || ph) && nb>1;
   const size_t reduced_bs=samples ? 1 : (nb==1 ? p->n : binsize/2);
   const size_t lo[2]={(start+1)/2,start/2};
   const size_t hi[2]={(end+1)/2,end/2};
@@ -1291,7 +1338,7 @@ int ap_mf_run_dif(ap_mf_plan *p,int d0,int t0,int nt,size_t binsize,float thresh
         ap_peak pk=p->dif_pkbuf[(size_t)t*nr[parity]+b];
         if(pk.index<0) continue;
         pk.index=2*pk.index+parity;
-        const size_t bin=((size_t)pk.index-start)/binsize;
+        const size_t bin=((size_t)pk.index-org)/binsize;
         ap_peak *dst=peaks+(size_t)(tt+t)*nb+bin;
         if(dst->index<0 || pk.magnitude>dst->magnitude
            || (pk.magnitude==dst->magnitude && pk.index<dst->index)) *dst=pk;
@@ -1311,7 +1358,7 @@ int ap_mf_run_dif(ap_mf_plan *p,int d0,int t0,int nt,size_t binsize,float thresh
 int ap_mf_run_series_dif(ap_mf_plan *p,
                          const float *series, size_t nseries,
                          const size_t *start, const size_t *win_start,
-                         const size_t *win_end, int nblocks,
+                         const size_t *win_end, const unsigned *bin_phase, int nblocks,
                          int t0, int nt, size_t binsize, float threshold,
                          int decimated,
                          ap_peak *peaks, int *counts){
@@ -1337,7 +1384,7 @@ int ap_mf_run_series_dif(ap_mf_plan *p,
   const size_t input_n=decimated?n:2*n;
   const size_t first_end=win_end[0]<input_n?win_end[0]:input_n;
   if(win_start[0]>=first_end) return -1;
-  const size_t nb0=1+(first_end-win_start[0]-1)/binsize;
+  const size_t nb0=ap_bin_count(binsize,win_start[0],first_end,bin_phase?bin_phase[0]:0u);
   if(decimated){
     if(!(p->fft_fwd_n && p->sfwd_n && p->sspec_n)){   /* all three, or none */
       ap_destroy(p->fft_fwd_n); p->fft_fwd_n = ap_create_like(p->fft,n);
@@ -1361,7 +1408,8 @@ int ap_mf_run_series_dif(ap_mf_plan *p,
     const size_t ws = win_start[b];
     const size_t we = win_end[b]<input_n?win_end[b]:input_n;
     if(ws>=we) return -1;
-    const size_t nb=1+(we-ws-1)/binsize;
+    const unsigned ph=bin_phase?bin_phase[b]:0u;
+    const size_t nb=ap_bin_count(binsize,ws,we,ph);
     if(nb!=nb0) return -1;
     const float * restrict d0_ptr;
 
@@ -1412,7 +1460,7 @@ int ap_mf_run_series_dif(ap_mf_plan *p,
     const size_t full_bs = decimated ? (binsize>=n?2*n:2*binsize) : binsize;
     int r=ap_mf_run_dif(p,0,t0,nt,full_bs,threshold,
                         peaks+(size_t)b*nt*nb,counts?counts+(size_t)b*nt:NULL,
-                        full_ws,full_we);
+                        full_ws,full_we,decimated?2*ph:ph);
     if(r<0) return -1;
     total+=r;
   }
@@ -1424,8 +1472,9 @@ static int run_pairs_pooled_pb(ap_mf_plan *p, int d0,
                                int t0, size_t binsize, float threshold,
                                ap_peak *peaks, int *counts, size_t start, size_t end,
                                int nt){
-  const size_t n = p->n, nb = (end - start + binsize - 1) / binsize;
+  const size_t n = p->n, nb = ap_bin_count(binsize, start, end, row_phase(p, d0 + dsel[0]));
   const int W = p->pb;
+  unsigned lph[AP_MAX_LANES];
   if(p->pkcap < (size_t)W * nb){
     free(p->pkbuf);
     p->pkbuf = ap_alloc64((size_t)W * nb * sizeof(ap_peak));
@@ -1455,12 +1504,19 @@ static int run_pairs_pooled_pb(ap_mf_plan *p, int d0,
     if(same_data){
       const size_t off = (size_t)(d0+dsel[tt])*n;
       if(ap_binmax_prod_batch_peaks(p->fft, p->dre+off, p->dim+off, Tr, Ti, cnt,
-                                    binsize, threshold, p->pkbuf, AP_BACKWARD, start, end)<0)
+                                    binsize, threshold, p->pkbuf, AP_BACKWARD, start, end,
+                                    lane_phases(p, d0+dsel[tt], lph))<0)
         return -1;
     } else {
       gather_data_batch(p->dsr, p->dsi, p, d0, dsel, tt, cnt);
+      const unsigned *ph = NULL;          /* lanes are pairs: each its own row's phase */
+      if(p->bph){
+        for(int l = 0; l < AP_MAX_LANES; l++) lph[l] = l < cnt ? p->bph[d0+dsel[tt+l]] : 0u;
+        ph = lph;
+      }
       if(ap_binmax_prod_batch_lanes_peaks(p->fft, p->dsr, p->dsi, Tr, Ti, cnt,
-                                          binsize, threshold, p->pkbuf, AP_BACKWARD, start, end)<0)
+                                          binsize, threshold, p->pkbuf, AP_BACKWARD, start, end,
+                                          ph)<0)
         return -1;
     }
     for(int l = 0; l < cnt; l++){
@@ -1497,7 +1553,7 @@ int ap_mf_run_pairs_pooled(ap_mf_plan *p, int d0,
     return run_pairs_pooled_pb(p, d0, dsel, tsel, npairs, t0, binsize, threshold,
                                peaks, counts, start, end, nt);
   }
-  const size_t nb = (end - start + binsize - 1) / binsize;
+  const size_t nb = ap_bin_count(binsize, start, end, row_phase(p, d0 + dsel[0]));
   int total = 0;
   for(int i = 0; i < npairs; i++){
     int d = dsel[i];

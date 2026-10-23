@@ -32,11 +32,17 @@
           "kind": "StorageBuffer",
           "set": 0,
           "binding": 3
+        },
+        {
+          "name": "gRowWin",
+          "kind": "StorageBuffer",
+          "set": 0,
+          "binding": 4
         }
       ],
       "push_constant": true,
       "file": "tierb_64.spv",
-      "bytes": 19852,
+      "bytes": 20568,
       "compact": {
         "file": "compact.spv",
         "descriptors": 3
@@ -106,11 +112,17 @@
           "kind": "StorageBuffer",
           "set": 0,
           "binding": 3
+        },
+        {
+          "name": "gRowWin",
+          "kind": "StorageBuffer",
+          "set": 0,
+          "binding": 4
         }
       ],
       "push_constant": true,
       "file": "tierb_128.spv",
-      "bytes": 21516,
+      "bytes": 22232,
       "compact": {
         "file": "compact.spv",
         "descriptors": 3
@@ -180,11 +192,17 @@
           "kind": "StorageBuffer",
           "set": 0,
           "binding": 3
+        },
+        {
+          "name": "gRowWin",
+          "kind": "StorageBuffer",
+          "set": 0,
+          "binding": 4
         }
       ],
       "push_constant": true,
       "file": "tierb_256.spv",
-      "bytes": 22316,
+      "bytes": 23032,
       "compact": {
         "file": "compact.spv",
         "descriptors": 3
@@ -275,11 +293,17 @@
           "kind": "StorageBuffer",
           "set": 0,
           "binding": 3
+        },
+        {
+          "name": "gRowWin",
+          "kind": "StorageBuffer",
+          "set": 0,
+          "binding": 4
         }
       ],
       "push_constant": true,
       "file": "tierb_512.spv",
-      "bytes": 26932,
+      "bytes": 27648,
       "compact": {
         "file": "compact.spv",
         "descriptors": 3
@@ -370,11 +394,17 @@
           "kind": "StorageBuffer",
           "set": 0,
           "binding": 3
+        },
+        {
+          "name": "gRowWin",
+          "kind": "StorageBuffer",
+          "set": 0,
+          "binding": 4
         }
       ],
       "push_constant": true,
       "file": "tierb_1024.spv",
-      "bytes": 28160,
+      "bytes": 28876,
       "full": {
         "file": "full_1024.spv"
       },
@@ -431,16 +461,16 @@
           "msl": "compactl_1024.metal",
           "metallib": null
         },
+        "refineItems": {
+          "msl": "items_1024.metal",
+          "metallib": null
+        },
         "fullCorrelation": {
           "msl": "full_1024.metal",
           "metallib": null
         },
         "fullCorrelationSeries": {
           "msl": "full_series_1024.metal",
-          "metallib": null
-        },
-        "refineItems": {
-          "msl": "items_1024.metal",
           "metallib": null
         }
       },
@@ -479,11 +509,17 @@
           "kind": "StorageBuffer",
           "set": 0,
           "binding": 3
+        },
+        {
+          "name": "gRowWin",
+          "kind": "StorageBuffer",
+          "set": 0,
+          "binding": 4
         }
       ],
       "push_constant": true,
       "file": "tierb_2048.spv",
-      "bytes": 29824,
+      "bytes": 30540,
       "full": {
         "file": "full_2048.spv"
       },
@@ -532,16 +568,16 @@
           "msl": "compactl_2048.metal",
           "metallib": null
         },
+        "refineItems": {
+          "msl": "items_2048.metal",
+          "metallib": null
+        },
         "fullCorrelation": {
           "msl": "full_2048.metal",
           "metallib": null
         },
         "fullCorrelationSeries": {
           "msl": "full_series_2048.metal",
-          "metallib": null
-        },
-        "refineItems": {
-          "msl": "items_2048.metal",
           "metallib": null
         }
       },
@@ -580,11 +616,17 @@
           "kind": "StorageBuffer",
           "set": 0,
           "binding": 3
+        },
+        {
+          "name": "gRowWin",
+          "kind": "StorageBuffer",
+          "set": 0,
+          "binding": 4
         }
       ],
       "push_constant": true,
       "file": "tierb_4096.spv",
-      "bytes": 30624,
+      "bytes": 31340,
       "full": {
         "file": "full_4096.spv"
       },
@@ -636,16 +678,16 @@
           "msl": "compactl_4096.metal",
           "metallib": null
         },
+        "refineItems": {
+          "msl": "items_4096.metal",
+          "metallib": null
+        },
         "fullCorrelation": {
           "msl": "full_4096.metal",
           "metallib": null
         },
         "fullCorrelationSeries": {
           "msl": "full_series_4096.metal",
-          "metallib": null
-        },
-        "refineItems": {
-          "msl": "items_4096.metal",
           "metallib": null
         }
       },
@@ -684,11 +726,17 @@
           "kind": "StorageBuffer",
           "set": 0,
           "binding": 3
+        },
+        {
+          "name": "gRowWin",
+          "kind": "StorageBuffer",
+          "set": 0,
+          "binding": 4
         }
       ],
       "push_constant": true,
       "file": "tierb_8192.spv",
-      "bytes": 34672,
+      "bytes": 35388,
       "full": {
         "file": "full_8192.spv",
         "portable": {
@@ -780,6 +828,15 @@
             "lds_bytes": 32768
           }
         },
+        "refineItems": {
+          "msl": "items_8192.metal",
+          "metallib": null,
+          "portable": {
+            "msl": "items_8192_lds32.metal",
+            "metallib": null,
+            "lds_bytes": 32768
+          }
+        },
         "fullCorrelation": {
           "msl": "full_8192.metal",
           "metallib": null,
@@ -794,15 +851,6 @@
           "metallib": null,
           "portable": {
             "msl": "full_series_8192_lds32.metal",
-            "metallib": null,
-            "lds_bytes": 32768
-          }
-        },
-        "refineItems": {
-          "msl": "items_8192.metal",
-          "metallib": null,
-          "portable": {
-            "msl": "items_8192_lds32.metal",
             "metallib": null,
             "lds_bytes": 32768
           }
@@ -847,11 +895,17 @@
           "kind": "StorageBuffer",
           "set": 0,
           "binding": 3
+        },
+        {
+          "name": "gRowWin",
+          "kind": "StorageBuffer",
+          "set": 0,
+          "binding": 4
         }
       ],
       "push_constant": true,
       "file": "tierb_16384.spv",
-      "bytes": 36184,
+      "bytes": 36900,
       "full": {
         "file": "full_16384.spv",
         "portable": {
@@ -933,6 +987,15 @@
             "lds_bytes": 32768
           }
         },
+        "refineItems": {
+          "msl": "items_16384.metal",
+          "metallib": null,
+          "portable": {
+            "msl": "items_16384_lds32.metal",
+            "metallib": null,
+            "lds_bytes": 32768
+          }
+        },
         "fullCorrelation": {
           "msl": "full_16384.metal",
           "metallib": null,
@@ -947,15 +1010,6 @@
           "metallib": null,
           "portable": {
             "msl": "full_series_16384_lds32.metal",
-            "metallib": null,
-            "lds_bytes": 32768
-          }
-        },
-        "refineItems": {
-          "msl": "items_16384.metal",
-          "metallib": null,
-          "portable": {
-            "msl": "items_16384_lds32.metal",
             "metallib": null,
             "lds_bytes": 32768
           }
@@ -1000,11 +1054,17 @@
           "kind": "StorageBuffer",
           "set": 0,
           "binding": 3
+        },
+        {
+          "name": "gRowWin",
+          "kind": "StorageBuffer",
+          "set": 0,
+          "binding": 4
         }
       ],
       "push_constant": true,
       "file": "tierb_32768.spv",
-      "bytes": 49296,
+      "bytes": 50012,
       "full": {
         "file": "full_32768.spv",
         "portable": {
@@ -1086,6 +1146,15 @@
             "lds_bytes": 32768
           }
         },
+        "refineItems": {
+          "msl": "items_32768.metal",
+          "metallib": null,
+          "portable": {
+            "msl": "items_32768_lds32.metal",
+            "metallib": null,
+            "lds_bytes": 32768
+          }
+        },
         "fullCorrelation": {
           "msl": "full_32768.metal",
           "metallib": null,
@@ -1100,15 +1169,6 @@
           "metallib": null,
           "portable": {
             "msl": "full_series_32768_lds32.metal",
-            "metallib": null,
-            "lds_bytes": 32768
-          }
-        },
-        "refineItems": {
-          "msl": "items_32768.metal",
-          "metallib": null,
-          "portable": {
-            "msl": "items_32768_lds32.metal",
             "metallib": null,
             "lds_bytes": 32768
           }
@@ -1153,11 +1213,17 @@
           "kind": "StorageBuffer",
           "set": 0,
           "binding": 3
+        },
+        {
+          "name": "gRowWin",
+          "kind": "StorageBuffer",
+          "set": 0,
+          "binding": 4
         }
       ],
       "push_constant": true,
       "file": "tierb_65536.spv",
-      "bytes": 38556,
+      "bytes": 39272,
       "full": {
         "file": "full_65536.spv",
         "portable": {
@@ -1239,6 +1305,15 @@
             "lds_bytes": 32768
           }
         },
+        "refineItems": {
+          "msl": "items_65536.metal",
+          "metallib": null,
+          "portable": {
+            "msl": "items_65536_lds32.metal",
+            "metallib": null,
+            "lds_bytes": 32768
+          }
+        },
         "fullCorrelation": {
           "msl": "full_65536.metal",
           "metallib": null,
@@ -1253,15 +1328,6 @@
           "metallib": null,
           "portable": {
             "msl": "full_series_65536_lds32.metal",
-            "metallib": null,
-            "lds_bytes": 32768
-          }
-        },
-        "refineItems": {
-          "msl": "items_65536.metal",
-          "metallib": null,
-          "portable": {
-            "msl": "items_65536_lds32.metal",
             "metallib": null,
             "lds_bytes": 32768
           }
@@ -1727,7 +1793,7 @@
     }
   },
   "source_hashes": {
-    "tierb.slang": "c34ecd44a982bfc5628d01d37c90c6818336ef0de31410a21301953c1a6c5db3",
+    "tierb.slang": "3cff6842a6865348c75d7d33fe36930e2d037ec8a9746a3e51c8f61b7eb902eb",
     "fft_transform.slang": "c7888ec7a8c0363d243e418adcdde320823ce190190b95448d762612cc4e61e9",
     "coarse_tile.slang": "8b1a3f9193e20b76cc02641e71b77023d544b0bd1bff8c4194f38371ad47fb47",
     "series_forward.slang": "ed54d158b885a0d6c26009e4d636f8733df90fb7909f5d3fe9708aac05d5f4b6",
@@ -1735,9 +1801,9 @@
     "forward_tier0.slang": "87ded378c7cbb2893c2850963971f89f9f770dc059bfa62aa525401a87eb622f",
     "pack_coarse.slang": "798e16259d5c1a37aaa634a731c0e08a816d5220d34325ad8be5c2e7007145ef",
     "twiddle.slang": "cebfdf65915e700953afd5eff22e4ab3aa1dfd008c2dde0326ed446c2d50d18f",
-    "refine_bounded.slang": "bf32ef397075682cc5d73464d656dca61d6f16c6174e223836940b86c039c83d",
+    "refine_bounded.slang": "9081e2f8f41a823b0293c3cec7df7eae289c1b16e1a94d8e815902ee8d2d3bdc",
     "compact_peaks.slang": "5c8bd90e54bbb422e6c60cfa3009074008a7d4039c9d44ce026e10c81df248d4"
   },
-  "build_id": "0ec6bf459c2b6c93f19dfdb11e94ac4fdf7454943327de94fd373334f5c31f73",
-  "metal_build_id": "be0d18cd557d79047d5dc4c060dca907706beba8f71d04d35e66a4d59ebb7778"
+  "build_id": "4a5f50a1e5d737db9123c9670093d858d35690b2411e13c6c4a333f6c19d8b0c",
+  "metal_build_id": "85afca4a9e50b28269c6e80e6bb1a43810472884297e1db2555a812cb37cf3af"
 }

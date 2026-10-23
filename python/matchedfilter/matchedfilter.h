@@ -132,20 +132,28 @@ int ap_mf_q15_screen(ap_mf_plan *p, int d0, int nd, int t0, int nt, float thresh
    series[start[b] ...] and reports lags [win_start[b], win_end[b]).  Windows
    are per block, so the ragged ones at a segment's edges need no grouping.
 
-   peaks is [block][template][bin] with bins as ap_mf_run.  A block whose
+   Block b's bins are numbered from win_start[b] - bin_phase[b] (bin_phase NULL: from
+   win_start[b], as ap_mf_run): bin j covers [win_start[b] - bin_phase[b] + j*binsize,
+   ... + (j+1)*binsize) clipped to the window, so a bin wholly before win_start[b] is empty
+   (a phase of a whole bin or more pads a block to its neighbours' bin count).
+   A caller whose windows span several blocks gives each block the phase that puts its
+   bins on the window's grid; a bin split between two blocks is then two partial bins,
+   one in each, whose larger peak is the window bin's.
+
+   peaks is [block][template][bin], every block with the same bin count (-1 otherwise).  A block whose
    transform would run past nseries is zero-padded.  Blocks sharing a window
    are filtered together, up to the plan's own ndata -- which is the grouping
    knob, there being no second one.  Returns total crossings, or -1. */
 int ap_mf_run_series(ap_mf_plan *p,
                      const float *series, size_t nseries,
                      const size_t *start, const size_t *win_start,
-                     const size_t *win_end, int nblocks,
+                     const size_t *win_end, const unsigned *bin_phase, int nblocks,
                      int t0, int nt, size_t binsize, float threshold,
                      ap_peak *peaks, int *counts);
 int ap_mf_run_series_dif(ap_mf_plan *p,
                          const float *series, size_t nseries,
                          const size_t *start, const size_t *win_start,
-                         const size_t *win_end, int nblocks,
+                         const size_t *win_end, const unsigned *bin_phase, int nblocks,
                          int t0, int nt, size_t binsize, float threshold,
                          int decimated,
                          ap_peak *peaks, int *counts);
@@ -273,13 +281,15 @@ int ap_hmf_run(ap_hmf_plan *p, int d0, int nd, int t0, int nt,
  * lags [win_start[b], win_end[b]) within that block.  Windows are per block, so
  * the ragged ones at a segment's edges need no special handling.
  *
+ * Block b's bins are numbered from win_start[b] - bin_phase[b], as ap_mf_run_series.
+ *
  * peaks is [block][template][bin] with bins as ap_hmf_run.  A block whose
  * transform would run past nseries is zero-padded.
  */
 int ap_hmf_run_series(ap_hmf_plan *p,
                       const float *series, size_t nseries,
                       const size_t *start, const size_t *win_start,
-                      const size_t *win_end, int nblocks,
+                      const size_t *win_end, const unsigned *bin_phase, int nblocks,
                       int t0, int nt, size_t binsize, float threshold,
                       ap_peak *peaks, int *counts);
 

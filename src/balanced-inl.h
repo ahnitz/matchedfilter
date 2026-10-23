@@ -793,10 +793,23 @@ static void small_load1(BP*p,const float*re,const float*im,int conj,int inter){
 
 /* Binned maximum over the transformed element buffers, one result per lane.
    `out` is dense [nlane][nb] with row stride `ostride`; the caller places the
-   rows, because a scattered template selection has no single stride. */
+   rows, because a scattered template selection has no single stride.
+
+   Bins are numbered from each lane's origin ws - ph[l] (ph NULL: every phase 0), so a
+   lane's bins can be a window's rather than this block's: bin j covers
+   [ws - ph + j*binsize, ws - ph + (j+1)*binsize) clipped to [ws, we). Every lane has the
+   same bin count, ap_bin_count(binsize, ws, we, ph). */
+static void small_scan_phased(BP*p,size_t binsize,float thr,ap_peak*out,size_t ostride,
+                              int conj,size_t ws,size_t we,int nlane,const unsigned*ph,
+                              size_t nb);
 static void small_scan(BP*p,size_t binsize,float thr,ap_peak*out,size_t ostride,
-                       int conj,size_t ws,size_t we,int nlane){
-  const size_t nb=(we-ws+binsize-1)/binsize;
+                       int conj,size_t ws,size_t we,int nlane,const unsigned*ph){
+  unsigned ph0 = ph ? ph[0] : 0u;
+  int uniform = 1;
+  if(ph) for(int l=1;l<nlane;l++) if(ph[l]!=ph0){ uniform=0; break; }
+  const size_t org=ws-ph0;
+  const size_t nb=(we-org+binsize-1)/binsize;
+  if(!uniform && nb>1){ small_scan_phased(p,binsize,thr,out,ostride,conj,ws,we,nlane,ph,nb); return; }
   const float t2 = thr>0.f ? thr*thr : 0.f;
   const vf seed=V_SET1(t2), zero=V_ZERO(); const vi nix=VI_SET1(-1);
 
@@ -874,8 +887,8 @@ static void small_scan(BP*p,size_t binsize,float thr,ap_peak*out,size_t ostride,
   const int bpow=(binsize&(binsize-1))?-1:(int)__builtin_ctzl(binsize);
   size_t k=ws;
   for(;k+1<we;k+=2){
-    const size_t j0 = bpow>=0 ? ((k-ws)>>bpow) : ((k-ws)/binsize);
-    const size_t j1 = bpow>=0 ? ((k+1-ws)>>bpow) : ((k+1-ws)/binsize);
+    const size_t j0 = bpow>=0 ? ((k-org)>>bpow) : ((k-org)/binsize);
+    const size_t j1 = bpow>=0 ? ((k+1-org)>>bpow) : ((k+1-org)/binsize);
     const int e0=eidx(&p->ea,(int)k);
     const int e1=eidx(&p->ea,(int)(k+1));
     const vf xr0=p->bR[e0], xi0=p->bI[e0];
@@ -898,7 +911,7 @@ static void small_scan(BP*p,size_t binsize,float thr,ap_peak*out,size_t ostride,
     }
   }
   for(;k<we;k++){
-    const size_t j = bpow>=0 ? ((k-ws)>>bpow) : ((k-ws)/binsize);
+    const size_t j = bpow>=0 ? ((k-org)>>bpow) : ((k-org)/binsize);
     const int e=eidx(&p->ea,(int)k);
     const vf xr=p->bR[e], xi=p->bI[e];
     const vf m2=V_FMADD(xr,xr,V_MUL(xi,xi));
@@ -921,6 +934,68 @@ static void small_scan(BP*p,size_t binsize,float thr,ap_peak*out,size_t ostride,
              o->im=conj?-iv[l]:iv[l]; o->magnitude=sqrtf(mv[l]); }
     }
   }
+}
+
+/* small_scan with lanes at different origins (a batch of pairs from different blocks). Lane
+   l's phase is q[l] whole bins and p[l] < binsize more: its first q[l] bins lie before ws and
+   are empty, and past them its bin at lag k is the p-phase-0 bin j or j+1 -- one ahead once
+   (k - ws) mod binsize reaches binsize - p[l]. One compare per lag gives that mask, and each
+   lag updates bin j for the lanes behind and j+1 for those ahead; the output shifts each
+   lane by its q[l]. */
+static void small_scan_phased(BP*p,size_t binsize,float thr,ap_peak*out,size_t ostride,
+                              int conj,size_t ws,size_t we,int nlane,const unsigned*ph,
+                              size_t nb){
+  const float t2 = thr>0.f ? thr*thr : 0.f;
+  const vf seed=V_SET1(t2), zero=V_ZERO(); const vi nix=VI_SET1(-1);
+  float lim[AP_W];
+  size_t q[AP_W];
+  for(int l=0;l<AP_W;l++){
+    const unsigned pl = l<nlane ? ph[l] : 0u;
+    q[l]=pl/binsize;
+    lim[l]=(float)binsize-(float)(pl%binsize)-0.5f;
+  }
+  const vf vlim=V_LOADU(lim);
+  vf *const bmx=p->bmx,*const bre=p->bre,*const bim=p->bim; vi *const bix=p->bix;
+  for(size_t j=0;j<=nb;j++){ bmx[j]=seed; bre[j]=zero; bim[j]=zero; bix[j]=nix; }
+  size_t j=0, r=0;
+  for(size_t k=ws;k<we;k++){
+    const int e=eidx(&p->ea,(int)k);
+    const vf xr=p->bR[e], xi=p->bI[e];
+    const vf m2=V_FMADD(xr,xr,V_MUL(xi,xi));
+    const vm ahead=V_CMP_GT(V_SET1((float)r),vlim);
+    const vm g0=V_MASK_ANDNOT(ahead,V_CMP_GT(m2,bmx[j]));
+    if(__builtin_expect(V_MASK_ANY(g0),0)){
+      bmx[j]=V_SEL(g0,bmx[j],m2);
+      bre[j]=V_SEL(g0,bre[j],xr);
+      bim[j]=V_SEL(g0,bim[j],xi);
+      bix[j]=VI_SEL(g0,bix[j],VI_SET1((int)k));
+    }
+    const vm g1=V_MASK_AND(ahead,V_CMP_GT(m2,bmx[j+1]));
+    if(__builtin_expect(V_MASK_ANY(g1),0)){
+      bmx[j+1]=V_SEL(g1,bmx[j+1],m2);
+      bre[j+1]=V_SEL(g1,bre[j+1],xr);
+      bim[j+1]=V_SEL(g1,bim[j+1],xi);
+      bix[j+1]=VI_SEL(g1,bix[j+1],VI_SET1((int)k));
+    }
+    if(++r==binsize){ r=0; j++; }
+  }
+  for(size_t jj=0;jj<nb;jj++){
+    float mv[AP_W],rv[AP_W],iv[AP_W]; int xv[AP_W];
+    V_STOREU(mv,bmx[jj]); V_STOREU(rv,bre[jj]); V_STOREU(iv,bim[jj]);
+    VI_STOREU(xv,bix[jj]);
+    for(int l=0;l<nlane;l++){
+      if(jj+q[l]>=nb) continue;                       /* past this lane's bins */
+      ap_peak *o=out+(size_t)l*ostride+jj+q[l];
+      if(xv[l]<0){ o->index=-1; o->re=0.f; o->im=0.f; o->magnitude=0.f; }
+      else { o->index=xv[l]; o->re=rv[l];
+             o->im=conj?-iv[l]:iv[l]; o->magnitude=sqrtf(mv[l]); }
+    }
+  }
+  for(int l=0;l<nlane;l++)                            /* the bins before each lane's ws */
+    for(size_t jj=0;jj<q[l] && jj<nb;jj++){
+      ap_peak *o=out+(size_t)l*ostride+jj;
+      o->index=-1; o->re=0.f; o->im=0.f; o->magnitude=0.f;
+    }
 }
 
 static void small_efft(BP*p){
@@ -966,6 +1041,7 @@ void fft(void *vp,const float*in,float*out,int conj){
 /* The bin accumulators depend on binsize, which is a call argument, so they are
    grown on demand and kept for later calls rather than sized at plan time. */
 static int bins_reserve(BP*p,size_t nb){
+  nb+=1;                     /* one spare: small_scan_phased reads bin j+1 at the last bin */
   if(nb<=p->nbcap) return 0;
   free(p->bmx);free(p->bre);free(p->bim);free(p->bix);
   p->bmx=ap_alloc64(nb*sizeof(vf)); p->bre=ap_alloc64(nb*sizeof(vf));
@@ -1165,10 +1241,12 @@ static void binmax_one(BP*p,float thr,ap_peak*out,int conj,size_t ws,size_t we){
     return;
   }
 
+/* Bins are numbered from org <= ws (bin j covers [org + j*binsize, org + (j+1)*binsize)
+   clipped to [ws, we)); org = ws numbers them from the window's own start. */
 static void binmax_core(BP*p,size_t binsize,float thr,ap_peak*out,int conj,
-                            size_t ws,size_t we){
+                            size_t ws,size_t we,size_t org){
   const int N1=p->N1,N2=p->N2;
-  const size_t nb=(we-ws+binsize-1)/binsize;
+  const size_t nb=(we-org+binsize-1)/binsize;
   /* Seeded at 0, not -1: a maximum of exactly zero is not a peak. With -1
      a bin whose every |v|^2 underflowed to zero still reported index 0 and
      the value there, which is the WRONG sample -- the old `magnitude` field
@@ -1178,11 +1256,11 @@ static void binmax_core(BP*p,size_t binsize,float thr,ap_peak*out,int conj,
   const float t2 = thr>0.f ? thr*thr : 0.f;
   const vf NEG=V_SET1(-1.f);
   const unsigned allm=(unsigned)((1ull<<AP_W)-1ull);  /* all lanes in window */
-  /* Bin index is (k - ws)/binsize, and a runtime divide is ~20 cycles in a loop
+  /* Bin index is (k - org)/binsize, and a runtime divide is ~20 cycles in a loop
      whose whole body is three instructions.  Bin sizes are powers of two in every
      realistic use, so shift instead and keep the divide only as a fallback. */
   const int bpow = (binsize & (binsize-1)) ? -1 : (int)__builtin_ctzl(binsize);
-#define BINOF(k) (bpow>=0 ? (((k)-(long)ws)>>bpow) : (((k)-(long)ws)/(long)binsize))
+#define BINOF(k) (bpow>=0 ? (((k)-(long)org)>>bpow) : (((k)-(long)org)/(long)binsize))
 
   /* One bin over the whole window is the common case at the small sizes, and then
      the accumulators live in registers. */
@@ -1301,14 +1379,15 @@ static void binmax_core(BP*p,size_t binsize,float thr,ap_peak*out,int conj,
 }
 
 int binmax(void *vp,const float*in,size_t binsize,float thr,ap_peak*out,
-               int conj,size_t ws,size_t we){
+               int conj,size_t ws,size_t we,const unsigned*ph){
   BP *p=(BP*)vp;
-  size_t nb=(we-ws+binsize-1)/binsize;
+  const size_t org=ws-(ph?ph[0]:0u);
+  size_t nb=(we-org+binsize-1)/binsize;
   if(bins_reserve(p,nb)) return -1;
   if(p->small){ small_load1(p,in,NULL,conj,1); small_efft(p);
-                small_scan(p,binsize,thr,out,0,conj,ws,we,1); return 0; }
+                small_scan(p,binsize,thr,out,0,conj,ws,we,1,ph); return 0; }
   stageA(p,in,conj);
-  binmax_core(p,binsize,thr,out,conj,ws,we);
+  binmax_core(p,binsize,thr,out,conj,ws,we,org);
   return 0;
 }
 
@@ -1344,28 +1423,29 @@ static inline int broadcast_data(void *vp){
    and their results simply not written out. */
 int binmax_prod_batch(void *vp,const float*dr,const float*di,
                       const float*tr,const float*ti,int nlane,size_t binsize,
-                      float thr,ap_peak*out,int conj,size_t ws,size_t we){
+                      float thr,ap_peak*out,int conj,size_t ws,size_t we,const unsigned*ph){
   BP *p=(BP*)vp;
   if(!p->small||nlane<1||nlane>AP_W) return -1;
-  const size_t nb=(we-ws+binsize-1)/binsize;
+  const size_t nb=(we-(ws-(ph?ph[0]:0u))+binsize-1)/binsize;
   if(bins_reserve(p,nb)) return -1;
   if(broadcast_data(p))
     efft_prod_broadcast((int)p->N,dr,di,tr,ti,p->bR,p->bI,p->sR,p->sI,p->w1r,p->w1i);
   else
     efft_prod((int)p->N,dr,di,tr,ti,p->bR,p->bI,p->sR,p->sI,p->w1r,p->w1i);
-  small_scan(p,binsize,thr,out,nb,conj,ws,we,nlane);
+  small_scan(p,binsize,thr,out,nb,conj,ws,we,nlane,ph);
   return 0;
 }
 
 int binmax_prod_batch_lanes(void *vp, const float *dr, const float *di,
                             const float *tr, const float *ti, int nlane, size_t binsize,
-                            float thr, ap_peak *out, int conj, size_t ws, size_t we){
+                            float thr, ap_peak *out, int conj, size_t ws, size_t we,
+                            const unsigned *ph){
   BP *p = (BP*)vp;
   if(!p->small || nlane < 1 || nlane > AP_W) return -1;
-  const size_t nb = (we - ws + binsize - 1) / binsize;
+  const size_t nb = (we - (ws - (ph ? ph[0] : 0u)) + binsize - 1) / binsize;
   if(bins_reserve(p, nb)) return -1;
   efft_prod((int)p->N, dr, di, tr, ti, p->bR, p->bI, p->sR, p->sI, p->w1r, p->w1i);
-  small_scan(p, binsize, thr, out, nb, conj, ws, we, nlane);
+  small_scan(p, binsize, thr, out, nb, conj, ws, we, nlane, ph);
   return 0;
 }
 
@@ -1406,32 +1486,34 @@ int corr_prod_batch(void *vp,const float *dr,const float *di,
 
 int binmax_prod(void *vp,const float*dr,const float*di,
                     const float*tr,const float*ti,size_t binsize,
-                    float thr,ap_peak*out,int conj,size_t ws,size_t we){
+                    float thr,ap_peak*out,int conj,size_t ws,size_t we,const unsigned*ph){
   BP *p=(BP*)vp;
   if(p->small) return -1;        /* use binmax_prod_batch */
-  size_t nb=(we-ws+binsize-1)/binsize;
+  const size_t org=ws-(ph?ph[0]:0u);
+  size_t nb=(we-org+binsize-1)/binsize;
   if(bins_reserve(p,nb)) return -1;
   stageA_prod_gm(p,dr,di,tr,ti);
-  binmax_core(p,binsize,thr,out,conj,ws,we);
+  binmax_core(p,binsize,thr,out,conj,ws,we,org);
   return 0;
 }
 
 static HWY_NOINLINE MF_PEAK_SECTION int binmax_prod_threshold(void *vp,const float*dr,const float*di,
                     const float*tr,const float*ti,size_t binsize,
-                    float thr,ap_peak*out,int conj,size_t ws,size_t we){
+                    float thr,ap_peak*out,int conj,size_t ws,size_t we,const unsigned*ph){
   BP *p=(BP*)vp;
+  const size_t org=ws-(ph?ph[0]:0u);
   if constexpr (AP_W==8 || AP_W==16) {
-    if(__builtin_expect(thr>0.f && (we-ws)<=binsize && p->fuse==2 && p->ilay && p->gmajor, 1)) {
+    if(__builtin_expect(thr>0.f && (we-org)<=binsize && p->fuse==2 && p->ilay && p->gmajor, 1)) {
       stageA_prod_32(p,dr,di,tr,ti);
       binmax_fused32(p,thr,out,conj,ws,we);
       return 0;
     }
   }
   if(p->small) return -1;        /* use binmax_prod_batch */
-  size_t nb=(we-ws+binsize-1)/binsize;
+  size_t nb=(we-org+binsize-1)/binsize;
   if(bins_reserve(p,nb)) return -1;
   stageA_prod_gm(p,dr,di,tr,ti);
-  binmax_core(p,binsize,thr,out,conj,ws,we);
+  binmax_core(p,binsize,thr,out,conj,ws,we,org);
   return 0;
 }
 
@@ -1467,14 +1549,15 @@ int corr_split(void *vp,const float *re,const float *im,float *out){
 }
 
 int binmax_split(void *vp,const float*inr,const float*ini,size_t binsize,
-                     float thr,ap_peak*out,int conj,size_t ws,size_t we){
+                     float thr,ap_peak*out,int conj,size_t ws,size_t we,const unsigned*ph){
   BP *p=(BP*)vp;
-  size_t nb=(we-ws+binsize-1)/binsize;
+  const size_t org=ws-(ph?ph[0]:0u);
+  size_t nb=(we-org+binsize-1)/binsize;
   if(bins_reserve(p,nb)) return -1;
   if(p->small){ small_load1(p,inr,ini,0,0); small_efft(p);
-                small_scan(p,binsize,thr,out,0,conj,ws,we,1); return 0; }
+                small_scan(p,binsize,thr,out,0,conj,ws,we,1,ph); return 0; }
   stageA_split(p,inr,ini,0);     /* caller already folded any input conjugation */
-  binmax_core(p,binsize,thr,out,conj,ws,we);
+  binmax_core(p,binsize,thr,out,conj,ws,we,org);
   return 0;
 }
 

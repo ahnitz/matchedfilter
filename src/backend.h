@@ -11,9 +11,13 @@ typedef struct {
   void  (*destroy)(void *);
   void  (*fft)(void *, const float *in, float *out, int conj);
   int   (*supported)(size_t N);
-  /* binned maximum; writes exactly nbins dense entries */
+  /* Binned maximum; writes exactly nbins dense entries. Every scan takes ph: NULL numbers
+     the bins from start; otherwise ph[0] (ph[l] for lane l of a pair batch) puts the bin
+     origin at start - ph, so bin j covers [start - ph + j*binsize, start - ph + (j+1)*binsize)
+     clipped to [start, end) -- a window's bins rather than the block's (ap_bin_count). A
+     whole bin or more of phase leaves that many empty bins first. */
   int   (*binmax)(void *, const float *in, size_t binsize, float thr,
-                  ap_peak *out, int conj, size_t start, size_t end);
+                  ap_peak *out, int conj, size_t start, size_t end, const unsigned *ph);
   /* Same, but the input is already split into re/im.  Two contract differences
      that exist to keep the matched filter's pair loop free of copies:
        - re/im are CONSUMED IN PLACE and left undefined on return;
@@ -21,7 +25,8 @@ typedef struct {
          that into however it produced the data (for a product it is free), and
          conj here only sets the sign of the reported imaginary parts. */
   int   (*binmax_split)(void *, const float *re, const float *im, size_t binsize,
-                        float thr, ap_peak *out, int conj, size_t start, size_t end);
+                        float thr, ap_peak *out, int conj, size_t start, size_t end,
+                        const unsigned *ph);
   /* matched filter: form conj(D*T) inside stage A's load, so the product never
      reaches memory.  Inputs are read-only here, unlike binmax_split. */
   /* 1 if binmax_prod works for this plan's length */
@@ -30,7 +35,8 @@ typedef struct {
   int   (*split)(void *, int *n1, int *n2);
   int   (*binmax_prod)(void *, const float *dr, const float *di,
                        const float *tr, const float *ti, size_t binsize,
-                       float thr, ap_peak *out, int conj, size_t start, size_t end);
+                       float thr, ap_peak *out, int conj, size_t start, size_t end,
+                       const unsigned *ph);
   int   (*corr_prod)(void *, const float *dr, const float *di,
                      const float *tr, const float *ti, float *out);
   int   (*corr_split)(void *, const float *re, const float *im, float *out);
@@ -42,11 +48,11 @@ typedef struct {
   int   (*binmax_prod_batch)(void *, const float *dr, const float *di,
                              const float *tr, const float *ti, int nlane,
                              size_t binsize, float thr, ap_peak *out, int conj,
-                             size_t start, size_t end);
+                             size_t start, size_t end, const unsigned *ph);
   int   (*binmax_prod_batch_lanes)(void *, const float *dr, const float *di,
                                    const float *tr, const float *ti, int nlane,
                                    size_t binsize, float thr, ap_peak *out, int conj,
-                                   size_t start, size_t end);
+                                   size_t start, size_t end, const unsigned *ph);
   int   (*corr_prod_batch)(void *, const float *dr, const float *di,
                            const float *tr, const float *ti, int nlane,
                            float *out);
@@ -55,7 +61,7 @@ typedef struct {
   /* Optional positive-threshold peak consumer; other calls retain binmax_prod. */
   int (*binmax_prod_threshold)(void *, const float *, const float *,
                               const float *, const float *, size_t,
-                              float, ap_peak *, int, size_t, size_t);
+                              float, ap_peak *, int, size_t, size_t, const unsigned *);
   /* Q15 coarse screen (q15-inl.h): int16 lanes per call; for that many pairs,
      bit l of *bits set when lane l's maximum of |z|^2/2^15 over [start,end)
      reaches lanethr[l] (and the maxima in lanemax, when not NULL). */

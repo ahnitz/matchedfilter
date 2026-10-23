@@ -75,15 +75,28 @@ int ap_accel_block(ap_accel *a, const float *src, size_t have, float scale);
 int ap_accel_corr(ap_accel *a, const float *dr, const float *di, const float *tr,
                   const float *ti, size_t lo, size_t len, float *out);
 
+/* The widest CPU vector, in floats: lane arrays (a pair batch's bin phases) are this long. */
+#define AP_MAX_LANES 16
+
+/* Bins of a peak search over [start, end) whose bins are numbered from start - ph: ph = 0
+   numbers them from start, the block's own window; a window's bins put the origin where
+   the window's bin grid does (backend.h, binmax), and a whole bin or more of phase leaves
+   empty bins before start. (Differences are modular, so start - ph may wrap.) */
+static inline size_t ap_bin_count(size_t binsize, size_t start, size_t end, unsigned ph){
+  return end > start ? (end - start + ph + binsize - 1) / binsize : 0;
+}
+
 /* Binned maximum over one transform, and the split-input variant the matched
    filter uses (consumed in place, input not conjugated); the fused product form
-   that builds conj(D*T) inside the transform's load is ap_plan_prod_kernel. */
+   that builds conj(D*T) inside the transform's load is ap_plan_prod_kernel. Every scan
+   takes ph, the bin origin's offset before start: NULL for 0, else one per transform
+   (ap_binmax: B of them) or per lane (the pair batches). */
 int ap_binmax(ap_plan *p, const float *in, size_t dist, int B,
               size_t binsize, float threshold, ap_peak *peaks, int *counts,
-              int sign, size_t start, size_t end);
+              int sign, size_t start, size_t end, const unsigned *ph);
 int ap_binmax_split(ap_plan *p, const float *re, const float *im,
                     size_t binsize, float threshold, ap_peak *peaks, int *count,
-                    int sign, size_t start, size_t end);
+                    int sign, size_t start, size_t end, const unsigned *ph);
 /* Does this plan have a fused product path?  The matched filter needs to know
    before ingest, because group-major storage is only correct if the fused
    loader will consume it. */
@@ -99,18 +112,18 @@ int ap_plan_broadcast_data(const ap_plan *p);
 int ap_binmax_prod_batch_peaks(ap_plan *p, const float *dr, const float *di,
                          const float *tr, const float *ti, int nlane,
                          size_t binsize, float threshold, ap_peak *peaks,
-                         int sign, size_t start, size_t end);
+                         int sign, size_t start, size_t end, const unsigned *ph);
 int ap_binmax_prod_batch_lanes_peaks(ap_plan *p, const float *dr, const float *di,
                                      const float *tr, const float *ti, int nlane,
                                      size_t binsize, float threshold, ap_peak *peaks,
-                                     int sign, size_t start, size_t end);
+                                     int sign, size_t start, size_t end, const unsigned *ph);
 
 /* Bind once after bank-level argument validation. run returns 0 on success;
    the caller counts nonnegative peak indices. Valid only while the plan lives. */
 typedef struct {
   void *context;
   int (*run)(void *,const float *,const float *,const float *,const float *,
-             size_t,float,ap_peak *,int,size_t,size_t);
+             size_t,float,ap_peak *,int,size_t,size_t,const unsigned *);
 } ap_prod_kernel;
 ap_prod_kernel ap_plan_prod_kernel(const ap_plan *,float threshold);
 int ap_corr_prod(ap_plan *p, const float *dr, const float *di,
@@ -121,9 +134,13 @@ int ap_corr_prod_batch(ap_plan *p, const float *dr, const float *di,
 
 /* Merge the even/odd correlations in consecutive data rows of a half-size
    filter into bins on the full-rate lag grid. */
+/* Bin phases of a matched filter's data rows for the calls that follow, NULL to clear:
+   row d's bins are numbered from start - bph[d] (ap_mf_run_series' bin_phase). */
+void ap_mf_set_bin_phase(ap_mf_plan *p, const unsigned *bph);
+
 int ap_mf_run_dif(ap_mf_plan *p, int d0, int t0, int nt,
                   size_t binsize, float threshold, ap_peak *peaks, int *counts,
-                  size_t start, size_t end);
+                  size_t start, size_t end, unsigned ph);
 
 /* Q15 coarse screen (q15-inl.h).  ap_q15_lanes: int16 lanes per screen call
    on the plan's back end, 0 if it has none.  ap_q15_screen: for that many

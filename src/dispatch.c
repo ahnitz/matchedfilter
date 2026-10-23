@@ -89,13 +89,13 @@ void ap_root_merge_on(const ap_plan *p,const float *D,const float *T,size_t k0,s
 /* split-input binned max, for callers that already hold re/im apart */
 int ap_binmax_split(ap_plan *p,const float *re,const float *im,
                     size_t binsize,float threshold,ap_peak *peaks,int *count,
-                    int sign,size_t start,size_t end){
+                    int sign,size_t start,size_t end,const unsigned *ph){
   if(!p||!binsize) return -1;
   if(end>p->n) end=p->n;
   if(start>=end) return 0;
   if(!p->be->binmax_split) return -1;
-  const size_t nb=(end-start+binsize-1)/binsize;
-  if(p->be->binmax_split(p->h,re,im,binsize,threshold,peaks,sign==AP_BACKWARD,start,end)<0)
+  const size_t nb=ap_bin_count(binsize,start,end,ph?ph[0]:0u);
+  if(p->be->binmax_split(p->h,re,im,binsize,threshold,peaks,sign==AP_BACKWARD,start,end,ph)<0)
     return -1;
   int c=0; for(size_t j=0;j<nb;j++) if(peaks[j].index>=0) c++;
   if(count) *count=c;
@@ -125,26 +125,26 @@ int ap_plan_broadcast_data(const ap_plan *p){
 int ap_binmax_prod_batch_peaks(ap_plan *p,const float *dr,const float *di,
                          const float *tr,const float *ti,int nlane,
                          size_t binsize,float threshold,ap_peak *peaks,
-                         int sign,size_t start,size_t end){
+                         int sign,size_t start,size_t end,const unsigned *ph){
   if(!p||!binsize||nlane<1) return -1;
   if(end>p->n) end=p->n;
   if(start>=end) return 0;
   if(!p->be->binmax_prod_batch) return -1;
   /* The bank counts while scattering these peaks; do not scan them twice. */
   return p->be->binmax_prod_batch(p->h,dr,di,tr,ti,nlane,binsize,threshold,
-                                 peaks,sign==AP_BACKWARD,start,end);
+                                 peaks,sign==AP_BACKWARD,start,end,ph);
 }
 
 int ap_binmax_prod_batch_lanes_peaks(ap_plan *p,const float *dr,const float *di,
                                      const float *tr,const float *ti,int nlane,
                                      size_t binsize,float threshold,ap_peak *peaks,
-                                     int sign,size_t start,size_t end){
+                                     int sign,size_t start,size_t end,const unsigned *ph){
   if(!p||!binsize||nlane<1) return -1;
   if(end>p->n) end=p->n;
   if(start>=end) return 0;
   if(!p->be->binmax_prod_batch_lanes) return -1;
   return p->be->binmax_prod_batch_lanes(p->h,dr,di,tr,ti,nlane,binsize,threshold,
-                                       peaks,sign==AP_BACKWARD,start,end);
+                                       peaks,sign==AP_BACKWARD,start,end,ph);
 }
 
 ap_prod_kernel ap_plan_prod_kernel(const ap_plan *p,float threshold){
@@ -174,17 +174,19 @@ int ap_corr_prod_batch(ap_plan *p,const float *dr,const float *di,
 
 int ap_binmax(ap_plan *p,const float *in,size_t dist,int B,
               size_t binsize,float threshold,ap_peak *peaks,int *counts,
-              int sign,size_t start,size_t end){
+              int sign,size_t start,size_t end,const unsigned *ph){
   if(B<1||!binsize) return 0;
   if(end>p->n) end=p->n;
   if(start>=end) return 0;
   if(!p->be->binmax) return -1;
-  const size_t nb=(end-start+binsize-1)/binsize;
+  const size_t nb=ap_bin_count(binsize,start,end,ph?ph[0]:0u);
   const int conj = sign==AP_BACKWARD;
   int total=0;
   for(int b=0;b<B;b++){
     ap_peak *o=peaks+(size_t)b*nb;
-    if(p->be->binmax(p->h,in+2*(size_t)b*dist,binsize,threshold,o,conj,start,end)<0)
+    if(ap_bin_count(binsize,start,end,ph?ph[b]:0u)!=nb) return -1;   /* one stride */
+    if(p->be->binmax(p->h,in+2*(size_t)b*dist,binsize,threshold,o,conj,start,end,
+                     ph?ph+b:NULL)<0)
       return -1;
     int c=0;
     for(size_t j=0;j<nb;j++) if(o[j].index>=0) c++;

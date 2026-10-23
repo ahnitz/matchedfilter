@@ -797,7 +797,7 @@ class MatchedFilter:
         return _host_copy(a, np.complex64)
 
     def _series_layout(self, series, starts, win_start, win_end, binsize, templates,
-                       ragged=False):
+                       ragged=False, bin_phase=None):
         """Validate the shared series contract before either native backend."""
         ser = self._series_array(series)
         st = np.ascontiguousarray(_from_any(starts), dtype=np.uintp)
@@ -822,11 +822,12 @@ class MatchedFilter:
             raise ValueError("templates sub-range out of bounds")
         self._require_templates(t0, nt)
         from ._series import SeriesLayout
-        layout = SeriesLayout(self.n, st, ws, we, binsize, ragged=ragged)
+        layout = SeriesLayout(self.n, st, ws, we, binsize, ragged=ragged,
+                              phase=None if bin_phase is None else _from_any(bin_phase))
         return ser, layout, binsize, t0, nt
 
     def _grouped_layout(self, series, starts, win_start, win_end, binsize, templates,
-                        ragged=False):
+                        ragged=False, bin_phase=None):
         """_series_layout, grouped, cached per layout signature.
 
         A search calls the same plan with the same blocks every segment: validating and
@@ -840,7 +841,8 @@ class MatchedFilter:
             key = (starts.dtype.char, starts.tobytes(), win_start.dtype.char, win_start.tobytes(),
                    win_end.dtype.char, win_end.tobytes(), binsize,
                    None if templates is None else (int(templates[0]), int(templates[1])),
-                   group, self._gpu is not None, ragged)
+                   group, self._gpu is not None, ragged,
+                   None if bin_phase is None else np.asarray(bin_phase, np.uint32).tobytes())
             cache = self.__dict__.get("_layout_cache")
             hit = cache.get(key) if cache is not None else None
             if hit is not None:
@@ -851,7 +853,8 @@ class MatchedFilter:
                 self._require_templates(t0, nt)
                 return ser, layout, binsize, t0, nt
         ser, layout, binsize, t0, nt = self._series_layout(
-            series, starts, win_start, win_end, binsize, templates, ragged=ragged)
+            series, starts, win_start, win_end, binsize, templates, ragged=ragged,
+            bin_phase=bin_phase)
         if group:
             layout.group(materialize=self._gpu is not None)
         if ragged:
@@ -892,8 +895,10 @@ class MatchedFilter:
                 or self._gtmpl is None or not jobs):
             return None
         n = self.n
+        # A job may carry its blocks' bin phases (filter_series' window bins) as a sixth item.
+        jobs = [j if len(j) == 6 else tuple(j) + (None,) for j in jobs]
         allocs, rows = {}, []                 # id(whole) -> [whole, row0 in the workspace, rows]
-        for ser, st, ws, we, t in jobs:
+        for ser, st, ws, we, t, _ in jobs:
             c = containing(np.ascontiguousarray(ser), gpu)
             if c is None:
                 return None
@@ -923,11 +928,15 @@ class MatchedFilter:
         cap = self._items_checkout(gpu, n, total)
         spec, starts = cap
         items, place, fill = [], [], {k: a[1] for k, a in allocs.items()}
-        for (ser, st, ws, we, t), (k_alloc, row) in zip(jobs, rows):
+        phase = (np.zeros(max(total, 1), np.uint32)
+                 if any(j[5] is not None for j in jobs) else None)
+        for (ser, st, ws, we, t, ph), (k_alloc, row) in zip(jobs, rows):
             k = int(st.size)
             pos = fill[k_alloc]
             fill[k_alloc] += k
             place.append(pos)
+            if ph is not None:
+                phase[pos:pos + k] = ph
             starts[pos:pos + k] = np.minimum(st, ser.size).astype(np.int64) + row
             lo_hi = np.stack([np.minimum(ws, n), np.minimum(we, n)], 1).astype(np.int64)
             j = 0
@@ -954,11 +963,12 @@ class MatchedFilter:
             data = spec[:total]
         async_ok = not wait
         res = gpu.peaks_items(n, data, self._gtmpl, items, binsize, threshold,
-                              **({"async_submit": True} if async_ok else {}))
+                              **({"async_submit": True} if async_ok else {}),
+                              **({} if phase is None else {"phase": phase}))
 
         def assemble(res):
             out, it = [], 0
-            for (ser, st, ws, we, t), pos in zip(jobs, place):
+            for (ser, st, ws, we, t, _), pos in zip(jobs, place):
                 k = int(st.size)
                 mine = []
                 while it < len(items) and items[it][3] <= pos + k and items[it][2] >= pos:
@@ -1034,7 +1044,7 @@ class MatchedFilter:
         return out if wait else (lambda: out)
 
     def _run_series_ragged(self, series, starts, win_start, win_end, binsize=None,
-                           threshold=0.0, templates=None):
+                           threshold=0.0, templates=None, bin_phase=None):
         """run_series(raw=True) over blocks whose windows give DIFFERENT bin counts.
 
         The result is (nblocks, nt, max bins); a block's bins past its own count are
@@ -1059,8 +1069,10 @@ class MatchedFilter:
         # Cached per layout bytes (as run_series), so a repeated call keeps its layout and
         # with it its call plan.
         ser, layout, binsize, t0, nt = self._grouped_layout(
-            series, starts, win_start, win_end, binsize, templates, ragged=True)
-        if (len(layout.groups) < 2 or layout.nbins > getattr(self._gpu, "max_grouped_bins", 0)
+            series, starts, win_start, win_end, binsize, templates, ragged=True,
+            bin_phase=bin_phase)
+        if ((len(layout.groups) < 2 and layout.phase is None)
+                or layout.nbins > getattr(self._gpu, "max_grouped_bins", 0)
                 or nt > self._gpu_pair_limit()):
             return None
         self._dataset = False
@@ -1069,13 +1081,19 @@ class MatchedFilter:
 
     def run_series(self, series, starts=None, win_start=None, win_end=None,
                    binsize=None, threshold=0.0, templates=None, raw=False,
-                   decimated=None):
+                   decimated=None, bin_phase=None):
         """Filter a series using this filter's ``valid`` overlap-save window.
 
         ``run_series(series)`` derives contiguous blocks and returns peak
         indices in series coordinates. ``run_blocks`` accepts explicit block
         starts and windows, returning block-local lag indices. Passing those
         arguments here remains supported for existing callers.
+
+        ``bin_phase`` (explicit blocks only): one value per block, numbering block b's
+        bins from ``win_start[b] - bin_phase[b]`` rather than from ``win_start[b]``, so that
+        a window spanning several blocks keeps its own bin grid; a bin cut by a block edge is
+        then two partial bins, one per block. Bins before ``win_start[b]`` are empty, which
+        lets blocks with fewer bins share one call with the rest.
 
         Returns a structured array of shape
         ``(nblocks, ntemplates, nbins)``, or with ``raw=True`` the two plain
@@ -1099,7 +1117,7 @@ class MatchedFilter:
             return self._run_series_inner(series, starts=starts, win_start=win_start,
                                           win_end=win_end, binsize=binsize,
                                           threshold=threshold, templates=templates,
-                                          raw=raw, decimated=decimated)
+                                          raw=raw, decimated=decimated, bin_phase=bin_phase)
         finally:
             if is_outer:
                 self._in_series_call = False
@@ -1107,10 +1125,10 @@ class MatchedFilter:
 
     def _run_series_inner(self, series, starts=None, win_start=None, win_end=None,
                           binsize=None, threshold=0.0, templates=None, raw=False,
-                          decimated=None):
+                          decimated=None, bin_phase=None):
         if starts is None:
-            if win_start is not None or win_end is not None:
-                raise ValueError('win_start and win_end require explicit starts')
+            if win_start is not None or win_end is not None or bin_phase is not None:
+                raise ValueError('win_start, win_end and bin_phase require explicit starts')
             ser = np.ascontiguousarray(_from_any(series), dtype=np.complex64)
             if ser.ndim != 1:
                 raise ValueError('series must be one-dimensional')
@@ -1165,10 +1183,10 @@ class MatchedFilter:
             return self.run_series_dif(
                 series, starts, win_start, win_end, binsize=binsize,
                 threshold=threshold, templates=templates, raw=raw,
-                decimated=decim
+                decimated=decim, bin_phase=bin_phase
             )
         ser, layout, binsize, t0, nt = self._grouped_layout(
-            series, starts, win_start, win_end, binsize, templates)
+            series, starts, win_start, win_end, binsize, templates, bin_phase=bin_phase)
         st, ws, we = layout.starts, layout.low, layout.high
         nblk = st.size
         # CPU series execution reuses the data slots. Require fresh spectra
@@ -1178,6 +1196,7 @@ class MatchedFilter:
         if self._gpu is not None:
             return self._run_series_gpu(ser, layout, binsize, threshold, t0, nt, raw)
         nb = layout.nbins
+        ph = layout.phase
         need = nblk * nt * nb
         shape = (nblk, nt, nb)
         ep = self._execution_plan()
@@ -1203,7 +1222,7 @@ class MatchedFilter:
             # copied or scanned (at a detection threshold almost every row is empty).
             cnt = _scratch_counts(nblk * nt)
             fl, ix, vl, tot = ep.run_series_sparse(cser, st, ws, we, t0, nt, binsize,
-                                                   float(threshold), cnt)
+                                                   float(threshold), cnt, ph)
             self._last_n_triggers = tot
             sp = _SparsePeaks(shape, np.frombuffer(fl, np.int64), np.frombuffer(ix, np.int64),
                               np.frombuffer(vl, np.complex64))
@@ -1219,7 +1238,8 @@ class MatchedFilter:
                                    np.empty(nblk * nt, dtype=np.int32))
             _, idx, val, mag, cnt = sb
             tot = self._execution_plan().run_series(cser, st, ws, we, t0, nt, binsize,
-                                                    float(threshold), idx, val, mag, cnt)
+                                                    float(threshold), idx, val, mag, cnt,
+                                                    None, ph)
             self._last_n_triggers = tot
             if tot == 0 and layout.order is not None:
                 return (idx.reshape(shape), val.reshape(shape))
@@ -1235,7 +1255,8 @@ class MatchedFilter:
                                    np.empty(nblk * nt, dtype=np.int32))
         _, peaks, empty_idx, empty_val, mag, cnt = spbuf
         tot = self._execution_plan().run_series(cser, st, ws, we, t0, nt, binsize,
-                                                float(threshold), empty_idx, empty_val, mag, cnt, peaks)
+                                                float(threshold), empty_idx, empty_val, mag, cnt,
+                                                peaks, ph)
         self._last_n_triggers = tot
         return _format_result(None, None, raw=False, order=layout.order, out=peaks)
 
@@ -1252,7 +1273,7 @@ class MatchedFilter:
 
     def run_series_dif(self, series, starts, win_start, win_end,
                        binsize=None, threshold=0.0, templates=None, raw=False,
-                       decimated=False):
+                       decimated=False, bin_phase=None):
         """Filter a full-rate series using 2-channel decimation-in-frequency (DIF)."""
         _check_threshold(threshold)
         ser = np.ascontiguousarray(_from_any(series), dtype=np.complex64)
@@ -1277,7 +1298,14 @@ class MatchedFilter:
         ends = np.minimum(we, N)
         if np.any(ws >= ends):
             raise ValueError("invalid search window in DIF")
-        bin_counts = 1 + (ends - ws - 1) // bs
+        ph = None
+        if bin_phase is not None:
+            ph = np.ascontiguousarray(_from_any(bin_phase), dtype=np.uint32)
+            if ph.shape != st.shape or np.any(ph >= 1 << 24):
+                raise ValueError("bin_phase needs one entry per block, each below 2**24")
+            if not np.any(ph):
+                ph = None
+        bin_counts = (ends - ws + (0 if ph is None else ph.astype(ends.dtype)) + bs - 1) // bs
         if np.any(bin_counts != bin_counts[0]):
             raise ValueError("block windows must have equal bin counts")
         t0, nt = (0, self.ntemplates) if templates is None else (
@@ -1304,7 +1332,8 @@ class MatchedFilter:
                                        np.empty(nblk * nt, dtype=np.int32))
             _, idx, val, mag, cnt = sb
             self._execution_plan().run_series_dif(ser, st, ws, we, t0, nt, bs,
-                                                  float(threshold), idx, val, mag, cnt, None, decim)
+                                                  float(threshold), idx, val, mag, cnt, None, decim,
+                                                  ph)
             return _format_result(idx.reshape(shape), val.reshape(shape), raw=True)
         spbuf = getattr(self, '_spbuf_dif', None)
         if spbuf is None or spbuf[0] != shape:
@@ -1316,7 +1345,8 @@ class MatchedFilter:
                                        np.empty(nblk * nt, dtype=np.int32))
         _, peaks, empty_idx, empty_val, mag, cnt = spbuf
         self._execution_plan().run_series_dif(ser, st, ws, we, t0, nt, bs,
-                                              float(threshold), empty_idx, empty_val, mag, cnt, peaks, decim)
+                                              float(threshold), empty_idx, empty_val, mag, cnt, peaks,
+                                              decim, ph)
         return _format_result(None, None, raw=False, out=peaks)
 
     @property
@@ -1589,7 +1619,8 @@ class MatchedFilter:
         c.batch = batch
         self._last_series_batch = batch
         # A single group needs no aggregate buffers or scatter.
-        c.single = single = len(layout.groups) == 1 and nblk <= batch
+        c.single = single = (len(layout.groups) == 1 and nblk <= batch
+                             and layout.phase is None)
         # Sparse results (time_domain asks with _want_sparse): only the peaks come back.
         # At threshold 0 (follow-ups) every bin holds a peak: dense is cheaper there.
         sparse = bool(raw and threshold > 0 and getattr(self, "_want_sparse", False))
@@ -1597,7 +1628,15 @@ class MatchedFilter:
         c.is_hier = self._is_hierarchical
         # A declared capability, not a probe for one backend's internals.
         can_pipeline = getattr(self._gpu, "cache_limit_bytes", 10**9) > 1024 * 1024
-        grouped_flat = (len(layout.groups) > 1 and type(self) is MatchedFilter
+        # A phased call (bin_phase) reads every row's window and bin phase from a row table,
+        # which only the grouped dispatch has: it goes grouped even with one window group.
+        phased = layout.phase is not None
+        if phased and (nb > getattr(self._gpu, "max_grouped_bins", 0)
+                       or nt > self._gpu_pair_limit()):
+            raise ValueError("bin_phase needs the grouped dispatch: at most %d bins and %d "
+                             "templates a call here" % (getattr(self._gpu, "max_grouped_bins", 0),
+                                                         self._gpu_pair_limit()))
+        grouped_flat = ((len(layout.groups) > 1 or phased) and type(self) is MatchedFilter
                         and nb <= getattr(self._gpu, "max_grouped_bins", 0)
                         and nt <= self._gpu_pair_limit())
         # Deferred (TimeDomainFilterBank.filter_series_many): submit now, collect later, so the
@@ -1617,7 +1656,7 @@ class MatchedFilter:
         # hierarchical call became one submission per window group (3x the submissions and
         # launches of the synchronous call, measured 1.4x slower on CUDA).
         c.grouped = grouped_flat or (
-            len(layout.groups) > 1 and c.is_hier
+            (len(layout.groups) > 1 or phased) and c.is_hier
             and nb <= getattr(self._gpu, "max_grouped_bins", 0)
             and nt <= self._gpu_pair_limit())
         # A real series: the GPU forward reads its samples from complex64 storage, by float
@@ -1777,7 +1816,8 @@ class MatchedFilter:
                     (lo, hi, max(a, begin)-begin, min(b, end)-begin)
                     for lo, hi, a, b in layout.groups if a < end and b > begin),
                     (np.minimum(layout.starts[begin:end], ser.size).astype(np.int64)
-                     - base).astype(np.uint32)))
+                     - base).astype(np.uint32),
+                    None if layout.phase is None else layout.phase[begin:end]))
             plan_b = bc[ckey] = (layout, parts)
         # A deferred call reading a device allocation in place records its call plan
         # (_replay_call_plan): every batch's forward and hierarchical record handles.
@@ -1786,7 +1826,7 @@ class MatchedFilter:
         record = (c.defer and c.is_hier and c.raw and c.pipelined
                   and (c.contained is not None or (c.source_shared and not c.viewed)))
         recorded = []
-        for begin, end, count, groups, rebased in plan_b[1]:
+        for begin, end, count, groups, rebased, phase in plan_b[1]:
             fh, hh = [], []
             slot, spec = self._series_submit(c, slot_idx, begin, count, rebased,
                                              **({"handle_out": fh} if record else {}))
@@ -1796,7 +1836,8 @@ class MatchedFilter:
                     c.n, spec, c.H, groups, c.binsize, c.threshold,
                     slot=slot if c.pipelined else None, async_submit=c.pipelined,
                     **({"nbins": c.nb} if getattr(layout, "ragged", False) else {}), **c.skw,
-                    **({"handle_out": hh} if record else {}))
+                    **({"handle_out": hh} if record else {}),
+                    **({} if phase is None else {"phase": phase}))
                 self._tdirty = False
             except Exception:
                 self._gpu.cancel_forward(slot=slot if c.pipelined else None)

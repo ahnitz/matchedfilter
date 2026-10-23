@@ -119,6 +119,9 @@ def test_band_windows_map_as_one_window_does():
     hi = np.minimum(n, lo + rng.integers(1, n, 200))
     lo[:3], hi[:3] = (0, 0, n - 1), (n, 1, n)          # whole, first sample, last sample
     for band in (64, 128, 256, 512, 1024, 2048):
-        got = band_windows(np.stack([lo, hi], 1).astype(np.uint32), n, band)
-        for (a, b), (cs, ce) in zip(zip(lo, hi), got):
+        # (lo, hi, bin phase) rows; a coarse tier is one bin, so its rows' phase is 0.
+        rows = np.stack([lo, hi, np.full_like(lo, 7)], 1).astype(np.uint32)
+        got = band_windows(rows, n, band)
+        for (a, b), (cs, ce, ph) in zip(zip(lo, hi), got):
             assert (cs, ce) == coarse_span(n, band, int(a), int(b))[:2], (band, a, b)
+            assert ph == 0
