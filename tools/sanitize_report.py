@@ -5,7 +5,7 @@
 
 With pytest -v the log names each test as it starts, so a crash is placed even when no
 stack names it. The annotation leads with what matters when a shard fails: the crashing
-test; the failed tests (pytest -rfE); the sanitizer report (the AddressSanitizer ERROR
+test; the failed tests (pytest -rfE) and their messages (the "E" lines); the sanitizer report (the AddressSanitizer ERROR
 block, or UndefinedBehaviorSanitizer's "runtime error" lines with the stack that follows),
 interpreter frames dropped, or, for another abort, the lines before faulthandler's "Fatal
 Python error"; the test frames faulthandler shows; the gdb re-run's stack and registers and
@@ -46,6 +46,11 @@ def summary(text, limit=3800):
     failed = [l for l in lines if l.startswith(("FAILED ", "ERROR "))]
     if failed:
         parts.append("\n".join(failed[:12]))
+        # pytest's "E   " lines: the failures' messages, which the one-line summary cuts
+        # (a CI-only failure is diagnosed from what its assertion reports).
+        errs = [l for l in lines if l.startswith("E   ")]
+        if errs:
+            parts.append("failure messages:\n" + "\n".join(errs[:40]))
     for i, line in enumerate(lines):
         if "ERROR: AddressSanitizer" in line or "runtime error:" in line:
             block = [l for l in lines[max(0, i - 2): i + 60] if not INTERPRETER.search(l)]
