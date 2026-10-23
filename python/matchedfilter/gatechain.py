@@ -271,7 +271,8 @@ def noise_block_maxima(power, n, bands, nsim=20000, seed=29, chunk=2000, window=
     for b in bands:
         R = n // b
         c0 = max(win[0] // R - 1, 0) if win[0] > 0 else 0
-        c1 = min(-(-win[1] // R), b)
+        # the engine's coarse lags for the window: one sample past each end (hmf.c)
+        c1 = min(-(-win[1] // R) + 1, b)
         counts.append(max(c1 - c0, 1))
     counts = tuple(counts)
     key = _key(p, n, bands, int(nsim), int(seed), counts)
@@ -882,7 +883,7 @@ class _DirectDraws:
             R = n // b
             cs = w0 // R
             cs = cs - 1 if cs > 0 else cs
-            ce = min(-(-w1 // R), b)
+            ce = min(-(-w1 // R) + 1, b)               # one coarse sample past each end (hmf.c)
             self.tier[b] = (f, np.fft.ifft(q) * n / np.sqrt(f), R, cs, ce)
         self.fine_ok, self.fa = [], []
         self.cmax = {b: [] for b in self.bands}
@@ -996,7 +997,7 @@ def direct_halfwidth(power, n, chain, thresholds, snr, fd, window=None, nsim=200
         R = n // b
         cs = w0 // R
         cs = cs - 1 if cs > 0 else cs
-        ce = min(-(-w1 // R), b)
+        ce = min(-(-w1 // R) + 1, b)                   # one coarse sample past each end (hmf.c)
         tiers.append((b, R, cs, ce))
     lags = np.arange(w0, w1)
     sq = _SIG * np.sqrt(p)

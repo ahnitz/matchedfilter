@@ -920,7 +920,7 @@ static void reject_row(ap_hmf_plan *p,ap_peak *peaks,int *counts,size_t row,size
 static int run_gate_pairs(ap_hmf_plan *p,hmf_tier *tr,int d0,int t0,int nt,
                           const int *ds,const int *ts,int count,size_t start,size_t end){
   const size_t r=p->n/tr->m;
-  size_t lo=start/r, hi=(end+r-1)/r;
+  size_t lo=start/r, hi=(end+r-1)/r+1;      /* as ap_hmf_run: one coarse sample past each end */
   if(lo>0) lo--;
   if(hi>tr->m) hi=tr->m;
   for(int j=0;tr->npending && j<count;j++){
@@ -955,11 +955,12 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
   int nfire=0;
   for(int i=0;i<p->ntiers;i++){
     hmf_tier *tr=&p->tier[i];
-    /* Coarse sample j maps to full lag j*R. Widen by one coarse sample
-       so rounding the caller's window remains conservative. */
+    /* Coarse sample j maps to full lag j*R. Widen by one coarse sample at each end, so a
+       signal near either end of the caller's window has coarse samples on both sides: without
+       the far one, one up to R lags past the last coarse sample kept 0.47 of its SNR. */
     const size_t R=n/tr->m;
     size_t cstart = start/R;
-    size_t cend   = (end+R-1)/R; if(cend>tr->m) cend=tr->m;
+    size_t cend   = (end+R-1)/R+1; if(cend>tr->m) cend=tr->m;
     if(cstart>0) cstart--;
     const size_t cspan = cend>cstart ? cend-cstart : 1;
     const float thr=tr->thr;
