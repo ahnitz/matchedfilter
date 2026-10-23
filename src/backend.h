@@ -76,6 +76,16 @@ typedef struct {
      QW/T data blocks. */
   int (*q15_screen_tile)(size_t N, int T, const int16_t *, const int16_t *, const int16_t *,
                          size_t, size_t, const int16_t *, uint64_t *, int16_t *, void *);
+  /* Listed pairs: as q15_screen, lane l's data being lane dsel[l] of dr/di ([N][lanes] across
+     data blocks) and its template lane tsel[l] of the two template groups at tr/ti, tr/ti+TW. */
+  int (*q15_screen_perm)(size_t N, const int16_t *dr, const int16_t *di, const int16_t *tr,
+                         const int16_t *ti, long TW, const int16_t *dsel, const int16_t *tsel,
+                         size_t start, size_t end, const int16_t *lanethr, uint64_t *bits,
+                         int16_t *lanemax, void *scratch);
+  /* Eight data rows (float re, im; scales sc) into eight consecutive lanes of a [N][lanes]
+     int16 slab, rounded to nearest as the screen's data quantisation is. */
+  void (*q15_slab8)(size_t N, const float *const *rr, const float *const *ri, const float *sc,
+                    int16_t *xr, int16_t *xi);
 } ap_backend;
 
 /* The kernel for the target Highway's runtime dispatch selected, or NULL if

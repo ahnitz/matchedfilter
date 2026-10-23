@@ -154,12 +154,17 @@ class QGenClassic(SRGen):
         return o
 
 
-def build_q(n, name, tw=False, prod=False, fused=True, maxout=False, max_interior=None, tile=False):
+def build_q(n, name, tw=False, prod=False, fused=True, maxout=False, max_interior=None, tile=False,
+            perm=False):
     """maxout: instead of storing the n outputs, accumulate max(|z|^2) of those with index
     in [lo, hi) into mx[0] (even k) and mx[1] (odd k) -- the screen's window maximum fused
     into its last pass, so the outputs never go back to memory. Same Q_MUL squares as the
     separate maximum loop: bit-identical maxima. max_interior=(a,b) additionally
-    requires lo <= a and hi >= b, removing the output tests inside that interval."""
+    requires lo <= a and hi >= b, removing the output tests inside that interval.
+    perm: each lane's product operands are looked up in vectors of the element across blocks and
+    across templates instead of broadcast from one block: data from dr/di ([element][block],
+    the templates' layout and stride) through Q_DLOAD, templates from two template groups
+    (the second TW further) through Q_TLOAD, with index vectors dix/tix (q15-inl.h)."""
     g = (QGen if fused else QGenClassic)(n, name, tw, False, prod)
     X = g.rec(list(range(n)))
     for k in range(n):
@@ -179,8 +184,18 @@ def build_q(n, name, tw=False, prod=False, fused=True, maxout=False, max_interio
         body = re.sub(r"Q_LOADU\((t[ri]\+TS\*\d+)\)", r"q15_tile_template<T>(\1)", body)
         body = re.sub(r"Q_SET1\(dq\[(DS\*\d+(?:\+[12])?)\]\)",
                       r"q15_tile_data<T, B>(dq+\1)", body)
+    if perm:
+        body = re.sub(r"Q_SET1\(dq\[DS\*(\d+)\]\)", r"Q_DLOAD(dr+TS*\1)", body)
+        body = re.sub(r"Q_SET1\(dq\[DS\*(\d+)\+1\]\)", r"Q_DLOAD(di+TS*\1)", body)
+        body = re.sub(r"Q_SET1\(dq\[DS\*(\d+)\+2\]\)", r"Q_SUB(Z,Q_DLOAD(di+TS*\1))", body)
+        body = re.sub(r"Q_LOADU\((t[ri]\+TS\*\d+)\)", r"Q_TLOAD(\1)", body)
+        assert "dq[" not in body and "Q_LOADU(t" not in body
     cdefs = "\n".join("  const vq %s=Q_SET1(%s);" % (v, k) for k, v in g.consts.items())
-    if prod:
+    if prod and perm:
+        args = ("const int16_t*restrict dr,const int16_t*restrict di,const int16_t*restrict tr,"
+                "const int16_t*restrict ti,vq*restrict ar,vq*restrict ai,const long S,const long TS,"
+                "const long TW,const qidx dix,const qidx tix")
+    elif prod:
         args = ("const int16_t*restrict dq,const int16_t*restrict tr,const int16_t*restrict ti,"
                 "vq*restrict ar,vq*restrict ai,const long S,const long DS,const long TS")
     elif tw and maxout:
@@ -212,6 +227,7 @@ if __name__ == "__main__":
     out.append("#if AP_Q15_FUSED")
     for nn in (8, 16, 32):
         out.append(build_q(nn, "qsr%d_prod" % nn, prod=True))
+        out.append(build_q(nn, "qsr%d_prod_perm" % nn, prod=True, perm=True))
         out.append(build_q(nn, "qsr%d_tw" % nn, tw=True))
         out.append(build_q(nn, "qsr%d_twmax" % nn, tw=True, maxout=True))
         if nn == 16:
@@ -220,6 +236,7 @@ if __name__ == "__main__":
     out.append("#else")
     for nn in (8, 16, 32):
         out.append(build_q(nn, "qsr%d_prod" % nn, prod=True, fused=False))
+        out.append(build_q(nn, "qsr%d_prod_perm" % nn, prod=True, fused=False, perm=True))
         out.append(build_q(nn, "qsr%d_tw" % nn, tw=True, fused=False))
         out.append(build_q(nn, "qsr%d_twmax" % nn, tw=True, fused=False, maxout=True))
         if nn == 16:

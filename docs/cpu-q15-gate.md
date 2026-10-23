@@ -27,6 +27,17 @@ int16 maximum reaches the tier's threshold, with no margin and no float run of t
 tier behind it. Survivors' peaks are still refined exactly. What it answers to is
 the chain's false-dismissal budget against the flat filter, as every tier does.
 
+**The tiers between the first and the last gate the same way on their survivor lists**
+(`ap_mf_q15_pairs`, `q15_screen_perm`). A batch takes its lanes from one slab of QW data
+blocks and two adjacent groups of QW templates. Inside the product codelets (`*_prod_perm`),
+each lane's operands are looked up in vectors the screen already has: the templates' own
+prepacked groups, and each block's data laid out across its slab (built eight blocks at a
+time, `q15_slab8`). There is no gather pass, and a lane's maximum is bit-identical to the one
+the dense screen gives the same pair (`tests/test_q15_pairs.py`). The last tier stays FP32,
+because the direct refine reads its coarse lag. On the production replica (n = 2048,
+256/512/1024) tier 1 costs 509 ticks per input against 753 for FP32 (-32%), and the gated
+work drops 8.8%.
+
 Before that it was a **screen in front of the float tier**: a pair was rejected only
 if its int16 maximum plus the error margin stayed below the tier threshold, and
 every other pair was re-run by the float tier, so survivors, peaks and triggers were

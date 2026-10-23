@@ -119,6 +119,12 @@ int ap_mf_q15_lanes(const ap_mf_plan *p);
 /* With the margin (1, the default) the screen passes every pair whose float maximum can
    reach the threshold; without it (0) it decides on its own int16 maximum. */
 int ap_mf_set_q15_margin(ap_mf_plan *p, int on);
+/* The screen over a list of pairs (pair j: data d0+dsel[j], template t0+tsel[j]): pass[j]
+   set when it can reach threshold over [start, end); stat[j] (may be NULL) its maximum in the
+   float tier's units. Returns the passes, or -1. */
+int ap_mf_q15_pairs(ap_mf_plan *p, int d0, const int *dsel, const int *tsel, int npairs,
+                    int t0, float threshold, size_t start, size_t end, unsigned char *pass,
+                    float *stat);
 int ap_mf_q15_screen(ap_mf_plan *p, int d0, int nd, int t0, int nt, float threshold,
                      size_t start, size_t end, unsigned char *pass, float *stat);
 

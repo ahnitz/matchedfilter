@@ -101,6 +101,10 @@ struct ap_mf_plan {
   float *qds;                 /* [nd] data scale */
   unsigned char *qdok;        /* [nd] */
   void *qscr;                 /* kernel scratch */
+  int16_t *qdx;               /* [slab][2][n][qw] quantised data across each slab of qw blocks */
+  unsigned char *qdxok;       /* [nd] block's slab copy is current */
+  int *qord; int qordcap;     /* listed pairs' bucket order and keys (ap_mf_q15_pairs) */
+  float *qzero;               /* [n] zeros: a slab lane past the plan's blocks */
 };
 
 /* Two scratch buffers of `bytes` each, allocated together: both or neither. A guard on the
@@ -213,7 +217,7 @@ void ap_mf_destroy(ap_mf_plan *p){
   free(p->sfwd_2n);free(p->sspec_2n);
   free(p->sfwd_n);free(p->sspec_n);
   free(p->qtr);free(p->qti);free(p->qts);free(p->qtok);
-  free(p->qd);free(p->qds);free(p->qdok);free(p->qscr);
+  free(p->qd);free(p->qds);free(p->qdok);free(p->qscr);free(p->qdx);free(p->qdxok);free(p->qord);free(p->qzero);
   free(p);
 }
 
@@ -275,6 +279,7 @@ static void split_store(const float * restrict inter,float * restrict re,float *
 int ap_mf_set_data(ap_mf_plan *p, int d, const float *spec){
   if(!p||d<0||d>=p->nd) return -1;
   if(p->qdok) p->qdok[d]=0;
+  if(p->qdxok) p->qdxok[d]=0;
   split_store(spec, p->dre+(size_t)d*p->n, p->dim+(size_t)d*p->n, p->n, 0,
               p->gmajor?p->n1:0, p->n2, p->w);
   if(p->pair_alt){
@@ -1602,10 +1607,10 @@ static void q15_template(ap_mf_plan *p,int t){
    pair (the sqrt(n) is the rounding's worst growth of the norm). */
 /* Keep preparation in its consumer's loop even with the separate tail caller;
    outlining it changed the cost of ordinary series calls on narrow targets. */
-static inline __attribute__((always_inline)) void q15_data(ap_mf_plan *p,int d){
+/* Block d's quantisation scale: |d_q|_2 = D (below), from the plan's float copy. */
+static inline __attribute__((always_inline)) double q15_data_scale(const ap_mf_plan *p,int d){
   const size_t n=p->n;
   const float *re=p->dre+(size_t)d*n, *im=p->dim+(size_t)d*n;
-  int16_t *q=p->qd+(size_t)d*n*3;
   double ss=0;
   if(p->gmajor){
     for(size_t k=0;k<n;k++){ const size_t j=q15_nat(p,k); ss+=(double)re[j]*re[j]+(double)im[j]*im[j]; }
@@ -1619,7 +1624,14 @@ static inline __attribute__((always_inline)) void q15_data(ap_mf_plan *p,int d){
   const double D=(AP_Q15_L1-1.5*(double)n)*32768.0/AP_Q15_TNORM(n)-sqrt((double)n);
   /* float rounding of the sum can overstate or understate it by ~1e-7
      relative; the 0.999 keeps the bound on the side that matters. */
-  const double sc=(isfinite(ss) && ss>0) ? 0.999*D/sqrt(ss) : 0.0;
+  return (isfinite(ss) && ss>0) ? 0.999*D/sqrt(ss) : 0.0;
+}
+
+static inline __attribute__((always_inline)) void q15_data(ap_mf_plan *p,int d){
+  const size_t n=p->n;
+  const float *re=p->dre+(size_t)d*n, *im=p->dim+(size_t)d*n;
+  int16_t *q=p->qd+(size_t)d*n*3;
+  const double sc=q15_data_scale(p,d);
   const float scf=(float)sc;
   if(!(sc>0)){ memset(q,0,n*3*sizeof(int16_t)); }
   else if(p->gmajor){
@@ -1763,6 +1775,129 @@ int ap_mf_set_q15_margin(ap_mf_plan *p,int on){
   if(!p) return -1;
   p->qnomargin=!on;
   return 0;
+}
+
+/* The screen over a list of pairs: pair j is data d0+dsel[j] against template t0+tsel[j].
+   pass[j] is set when its int16 maximum over [start, end) can reach `threshold` (with the
+   margin, as ap_mf_q15_screen decides; without it, on the maximum itself); stat, when not
+   NULL, gets the maximum in the float tier's units.  Returns the passes, or -1.
+   A batch takes its QW lanes from one slab of QW data blocks and two adjacent template
+   groups, so each lane's operands are looked up in vectors the screen already has: the
+   templates' own groups (qtr/qti) and each block's data laid out across its slab (qdx, made
+   once per block).  The pairs are bucketed by (slab, group pair) to fill the lanes. */
+/* Block d's data into its slab (qdx), with its scale (qds): the eight lanes of d's group are
+   quantised together (ap_q15_slab8), each from its own block's float copy and scale, the same
+   values q15_data gives them; lanes past the plan's blocks hold zeros. Group-major plans keep
+   their rows in element order, so they are read through q15_nat one element at a time. */
+static int q15_slab_lanes(ap_mf_plan *p,int d){
+  const size_t n=p->n; const int qw=p->qw;
+  const int slab=d/qw, g=(d%qw)/8;
+  int16_t *xr=p->qdx+(size_t)slab*2*n*qw, *xi=xr+n*qw;
+  if(p->gmajor){
+    const float *re=p->dre+(size_t)d*n, *im=p->dim+(size_t)d*n;
+    const double sc=q15_data_scale(p,d);
+    for(size_t k=0;k<n;k++){
+      const size_t j=q15_nat(p,k);
+      xr[k*qw+d%qw]=sc>0?q15_q(re[j],sc):0;
+      xi[k*qw+d%qw]=sc>0?q15_q(im[j],sc):0;
+    }
+    p->qds[d]=(float)sc;
+    p->qdxok[d]=1;
+    return 0;
+  }
+  if(!p->qzero){
+    p->qzero=calloc(n,sizeof(float));
+    if(!p->qzero) return -1;
+  }
+  const float *rr[8], *ri[8]; float sc[8];
+  for(int b=0;b<8;b++){
+    const int e=slab*qw+g*8+b;
+    if(e<p->nd){
+      const double s=q15_data_scale(p,e);
+      rr[b]=p->dre+(size_t)e*n; ri[b]=p->dim+(size_t)e*n;
+      sc[b]=(float)s; p->qds[e]=(float)s;
+    } else { rr[b]=ri[b]=p->qzero; sc[b]=0.f; }
+  }
+  if(ap_q15_slab8(p->fft,rr,ri,sc,xr+g*8,xi+g*8)) return -1;
+  for(int b=0;b<8;b++){ const int e=slab*qw+g*8+b; if(e<p->nd) p->qdxok[e]=1; }
+  return 0;
+}
+
+int ap_mf_q15_pairs(ap_mf_plan *p,int d0,const int *dsel,const int *tsel,int npairs,int t0,
+                    float threshold,size_t start,size_t end,unsigned char *pass,float *stat){
+  if(!p||npairs<1) return 0;
+  if(!pass) return -1;
+  if(end>p->n) end=p->n;
+  if(start>=end) return 0;
+  for(int j=0;j<npairs;j++)
+    if(d0+dsel[j]<0||d0+dsel[j]>=p->nd||t0+tsel[j]<0||t0+tsel[j]>=p->nt) return -1;
+  if(q15_prepare(p)) return -1;
+  const size_t n=p->n; const int qw=p->qw;
+  const int nslab=(p->nd+qw-1)/qw, ngroup=(p->nt+qw-1)/qw, npair=(ngroup+1)/2;
+  if(!p->qdx){
+    p->qdx=ap_alloc64((size_t)nslab*2*n*qw*sizeof(int16_t));
+    p->qdxok=calloc((size_t)p->nd,1);
+    if(!p->qdx||!p->qdxok){ free(p->qdx); free(p->qdxok); p->qdx=NULL; p->qdxok=NULL; return -1; }
+    memset(p->qdx,0,(size_t)nslab*2*n*qw*sizeof(int16_t));
+  }
+  if(p->qordcap<npairs){
+    int *o=realloc(p->qord,2*(size_t)npairs*sizeof(int));
+    if(!o) return -1;
+    p->qord=o; p->qordcap=npairs;
+  }
+  /* counting sort of the pairs by bucket */
+  const int nbucket=nslab*npair;
+  int *order=p->qord, *key=p->qord+npairs;
+  int cstack[256], *cnt=nbucket+1<=256 ? cstack : calloc((size_t)nbucket+1,sizeof(int));
+  if(!cnt) return -1;
+  memset(cnt,0,((size_t)nbucket+1)*sizeof(int));
+  for(int j=0;j<npairs;j++){
+    key[j]=((d0+dsel[j])/qw)*npair+(t0+tsel[j])/(2*qw);
+    cnt[key[j]+1]++;
+  }
+  for(int b=0;b<nbucket;b++) cnt[b+1]+=cnt[b];
+  for(int j=0;j<npairs;j++) order[cnt[key[j]]++]=j;
+  if(cnt!=cstack) free(cnt);
+  const float EQ=p->qnomargin ? 0.0f : (float)ap_q15_margin(n);
+  int16_t lanethr[64], lanemax[64], ld[64], lt[64];
+  int jj[64];
+  int total=0;
+  for(int i0=0;i0<npairs;){
+    const int b=key[order[i0]];
+    int cnt1=0;
+    while(cnt1<qw && i0+cnt1<npairs && key[order[i0+cnt1]]==b) cnt1++;
+    const int slab=b/npair, gp=b%npair;
+    for(int l=0;l<qw;l++){
+      const int j=order[i0+(l<cnt1 ? l : 0)];
+      const int d=d0+dsel[j], t=t0+tsel[j];
+      if(!p->qdxok[d] && q15_slab_lanes(p,d)) return -1;
+      if(!p->qtok[t]) q15_template(p,t);
+      jj[l]=j; ld[l]=(int16_t)(d%qw); lt[l]=(int16_t)(t-gp*2*qw);
+      /* as ap_mf_q15_screen */
+      const float a=threshold*p->qds[d]*(float)(1.0/32768.0)*(1.0f-1e-4f);
+      const float qq=a*p->qts[t]-EQ;
+      const float T=qq*qq*(float)(1.0/32768.0)-1.0f;
+      lanethr[l]=!(qq>0.f) ? (int16_t)-32768 : T>=32767.f ? (int16_t)32767 : (int16_t)ceilf(T);
+    }
+    const int16_t *dr=p->qdx+(size_t)slab*2*n*qw, *di=dr+n*qw;
+    const size_t g0=(size_t)gp*2;
+    const long tw=(long)(g0+1<(size_t)ngroup ? n*qw : 0);
+    uint64_t bits=0;
+    if(ap_q15_screen_perm(p->fft,dr,di,p->qtr+g0*n*qw,p->qti+g0*n*qw,tw,ld,lt,start,end,
+                          lanethr,&bits,stat?lanemax:NULL,p->qscr)) return -1;
+    for(int l=0;l<cnt1;l++){
+      const int ok=(int)((bits>>l)&1u), j=jj[l];
+      pass[j]=(unsigned char)ok;
+      total+=ok;
+      if(stat){
+        const int d=d0+dsel[j], t=t0+tsel[j];
+        const double sdt=(double)p->qds[d]*p->qts[t]/32768.0;
+        stat[j]=sdt>0 ? (float)(sqrt((double)lanemax[l]*32768.0)/sdt) : -1.0f;
+      }
+    }
+    i0+=cnt1;
+  }
+  return total;
 }
 
 /* Debug accessor: how many data slots the plan actually has. */

@@ -1491,10 +1491,11 @@ const ap_backend *Backend(void){
     pairbatch, binmax_prod_batch, binmax_prod_batch_lanes, corr_prod_batch, create_small, broadcast_data, (AP_W==8 || AP_W==16) ? binmax_prod_threshold : nullptr,
     q15_lanes, q15_screen, td_corr, real_split, root_merge,
 #if AP_Q15_TAIL
-    q15_screen_tile
+    q15_screen_tile,
 #else
-    nullptr
+    nullptr,
 #endif
+    q15_screen_perm, q15_slab8
   };
   return &be;
 }

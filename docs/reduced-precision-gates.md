@@ -17,6 +17,9 @@ with the FP32 first tier. On 221,607 captured production pairs the gate passes 1
 pairs as the FP32 tier would, where the screen with its 5 sqrt(N) margin passed 1.37x at band
 256 (1.62x and 2.35x had it run at 512 and 1024).
 
+The tiers between the first and the last gate the same way, on their survivor lists
+(`ap_mf_q15_pairs`; [cpu-q15-gate.md](cpu-q15-gate.md)).
+
 The FP16 gates below still report an upper bound of the FP32 maximum and so pass a superset of
 its pairs; they could be calibrated the same way. This page states their bounds and the Q15
 screen's error side by side; each kernel's own page has the derivation and the measurements.
