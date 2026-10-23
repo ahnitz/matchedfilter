@@ -5,10 +5,11 @@
 
 With pytest -v the log names each test as it starts, so a crash is placed even when no
 stack names it. The annotation leads with what matters when a shard fails: the crashing
-test; the sanitizer report (the AddressSanitizer ERROR block, or UndefinedBehaviorSanitizer's
-"runtime error" lines with the stack that follows), interpreter frames dropped, or, for
-another abort, the lines before faulthandler's "Fatal Python error"; the test frames
-faulthandler shows; the gdb re-run's stack and registers; then the end of the log.
+test; the failed tests (pytest -rfE); the sanitizer report (the AddressSanitizer ERROR
+block, or UndefinedBehaviorSanitizer's "runtime error" lines with the stack that follows),
+interpreter frames dropped, or, for another abort, the lines before faulthandler's "Fatal
+Python error"; the test frames faulthandler shows; the gdb re-run's stack and registers and
+the re-run without the fake stack; then the end of the log.
 The public API shows annotations; the job log needs a token.
 """
 import re
@@ -42,6 +43,9 @@ def summary(text, limit=3800):
     node = crashing_test(text)
     if node:
         parts.append("crashing test: " + node)
+    failed = [l for l in lines if l.startswith(("FAILED ", "ERROR "))]
+    if failed:
+        parts.append("\n".join(failed[:12]))
     for i, line in enumerate(lines):
         if "ERROR: AddressSanitizer" in line or "runtime error:" in line:
             block = [l for l in lines[max(0, i - 2): i + 60] if not INTERPRETER.search(l)]
