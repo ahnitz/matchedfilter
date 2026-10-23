@@ -127,3 +127,32 @@ def test_two_excursions_in_a_block(monkeypatch):
     assert (i1[5] >= 0).all() and (i0[5] >= 0).all()       # every template reports a trigger
     near = lambda i, k: np.abs(i - k) < 30
     assert (near(i1[5], w0 + 100) | near(i1[5], w1 - 100)).all()   # one of the two
+
+
+def test_padded_one_bin_rows_refine_directly(monkeypatch):
+    """A bin phase pads a row with empty bins so a call's rows share one bin count. A padded
+    row whose window still lies in one bin is a one-bin pair: it takes the direct refine and
+    reports exactly what its unpadded call reports, in its touched bin. Until 2026-10-23 the
+    padded row took the transform (nb > 1), so a merged filter_series call and the separate
+    calls of its windows differed by fp32 rounding wherever the direct refine is priced
+    cheaper (arm64 CI: test_merged_equals_separate_calls[256-hier])."""
+    data = _bank(nblocks=60)
+    n, taps, counts, spec, series, layout, ref, window = data
+    monkeypatch.setenv("MF_DIRECT_REFINE", "1")
+
+    def run(phase):
+        hf = mf.HierarchicalFilter(n, 1, spec.shape[0], snr=6.0, fd=1e-3, chain=(256, 512),
+                                   search_window=window)
+        hf.set_reference(ref); hf.set_templates(spec); hf.set_taps(taps, counts)
+        kw = {} if phase is None else {"bin_phase": np.full(layout[0].size, phase, np.uint32)}
+        idx, val = hf.run_series(series, *layout, binsize=n, threshold=6.0, raw=True, **kw)
+        return idx.copy(), val.copy(), hf.direct_stats()
+
+    i0, v0, s0 = run(None)
+    i1, v1, s1 = run(n)                   # one empty bin first: nb = 2, the window in bin 1
+    assert (i0 >= 0).sum() > 20 and s0["pairs"] > 0, s0
+    assert i1.shape[-1] == 2 and i0.shape[-1] == 1
+    assert s1["pairs"] == s0["pairs"], (s0, s1)
+    assert np.all(i1[..., 0] < 0)
+    np.testing.assert_array_equal(i1[..., 1], i0[..., 0])
+    np.testing.assert_array_equal(v1[..., 1], v0[..., 0])
