@@ -1053,8 +1053,8 @@ class TimeDomainFilterBank:
             engine=self.engine,
             device=self.device,
         )
-        # Block size by cost. A stated peak granularity bounds each peak bin's
-        # width, though block boundaries still change bin alignment. The first
+        # Block size by cost. A stated peak granularity fixes the peak bins on each
+        # window's grid, whatever the block size (bin phases). The first
         # fine-grid reference prices every candidate per length batch (gate model,
         # calibrated tier costs) and the groups are built at the cheapest. Without
         # one, or with lengths or a chain pinned, the valid-fraction rule stands.
