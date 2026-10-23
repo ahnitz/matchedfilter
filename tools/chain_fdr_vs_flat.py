@@ -3,12 +3,15 @@
 
 Signals at intrinsic SNR `--snr` in unit Gaussian noise, at random lags; a flat detection
 is |z| >= snr at full resolution, and the chain misses one when its reported peak for that
-block is absent or below snr. Two chains run on the same data with the gate model's
+block is absent or below snr. With --window START,END both filters search only lags in
+[START, END) (as pycbc's per-block windows do), the signals' lags are uniform there, and the
+gate model is told the window. Two chains run on the same data with the gate model's
 thresholds (gatechain.chain_thresholds): FP32 tiers, and the Q15 screen as the first tier
 and every tier before the last (where this back end has one). Each must stay within the budget; every
 detection both report must carry the flat filter's value.
 
   python tools/chain_fdr_vs_flat.py --n 2048 --chain 256,512,1024 --inj 400000
+  python tools/chain_fdr_vs_flat.py --window 192,1856
 """
 import argparse
 import os
@@ -35,10 +38,14 @@ def main():
     ap.add_argument("--inj", type=int, default=200000)
     ap.add_argument("--shape", default="aligo_o4_inspiral", choices=SHAPE_NAMES)
     ap.add_argument("--seed", type=int, default=1)
+    ap.add_argument("--window", default=None, help="START,END: search lags [START, END) only")
     a = ap.parse_args()
     n, chain, B = a.n, tuple(int(x) for x in a.chain.split(",")), 64
     power = make_spectral_profile(a.shape, n)
-    thr = [float(x) for x in mf._gatechain.chain_thresholds(power, n, a.snr, a.fd, chain)["thresholds"]]
+    win = None if a.window is None else tuple(int(x) for x in a.window.split(","))
+    ws, we = (0, n) if win is None else win
+    thr = [float(x) for x in mf._gatechain.chain_thresholds(power, n, a.snr, a.fd, chain,
+                                                            window=win)["thresholds"]]
     h = np.sqrt(power).astype(np.complex64)
     h /= np.sqrt((np.abs(h) ** 2).sum())
     hc = np.conj(h)
@@ -66,17 +73,20 @@ def main():
     mismatch = dict.fromkeys(engines, 0)
     t0 = time.time()
     for it in range(a.inj // B):
-        lag = rng.uniform(n // 4, 3 * n // 4, B)
+        lag = rng.uniform(n // 4, 3 * n // 4, B) if win is None else rng.uniform(ws, we, B)
         D = (a.snr * h[None, :] * np.exp(2j * np.pi * lag[:, None] * k[None, :] / n)
              + (rng.standard_normal((B, n)) + 1j * rng.standard_normal((B, n)))).astype(np.complex64)
         flat.set_data(D)
-        zf = np.abs(flat.run(binsize=n, threshold=0.0)["value"][:, 0, 0])
+        if win is None:
+            zf = np.abs(flat.run(binsize=n, threshold=0.0)["value"][:, 0, 0])
+        else:
+            zf = np.abs(flat.run(binsize=we - ws, threshold=0.0, window=win)["value"][:, 0, 0])
         hit = zf >= a.snr
         det += int(hit.sum())
         for name, e in engines.items():
             for d in range(B):
                 e.set_data(d, D[d])
-            e.run(0, B, 0, 1, n, a.snr, 0, n, ei, ev, em, cnt, peaks[name])
+            e.run(0, B, 0, 1, we - ws, a.snr, ws, we, ei, ev, em, cnt, peaks[name])
             p = peaks[name][:, 0]
             got = (p["index"] >= 0) & (np.abs(p["value"]) >= a.snr)
             miss[name] += int((hit & ~got).sum())
@@ -84,8 +94,8 @@ def main():
             mismatch[name] += int((np.abs(np.abs(p["value"][both]) - zf[both]) > 1e-3 * zf[both]).sum())
         if (it + 1) % 1000 == 0:
             print("  %d injections, %d flat detections, %.0f s" % ((it + 1) * B, det, time.time() - t0), flush=True)
-    print("n=%d chain=%s shape=%s snr=%.1f budget=%.0e thresholds=%s"
-          % (n, chain, a.shape, a.snr, a.fd, ["%.3f" % x for x in thr]))
+    print("n=%d chain=%s shape=%s snr=%.1f budget=%.0e window=%s thresholds=%s"
+          % (n, chain, a.shape, a.snr, a.fd, (ws, we), ["%.3f" % x for x in thr]))
     print("flat detections: %d of %d injections" % (det, a.inj // B * B))
     ok = True
     for name in engines:

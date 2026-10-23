@@ -23,12 +23,13 @@ def bin_shift(binsize):
 
 def coarse_span(n, band, lo, hi):
     """A gate tier's window in band samples, (start, end, span, shift): the caller's window
-    [lo, hi) at n, widened by one band sample at the start so rounding stays conservative.
+    [lo, hi) at n, widened by one band sample at each end (as hmf.c), so a signal near either
+    end has coarse samples on both sides.
     The tier reduces it to ONE bin, so the reported peak is the window's maximum -- all a
     gate needs. shift is bin_shift(span) (-1 when span is not a power of two)."""
     r = n // band
     cstart = lo // r
-    cend = min(band, (hi + r - 1) // r)
+    cend = min(band, (hi + r - 1) // r + 1)
     if cstart > 0:
         cstart -= 1
     cend = max(cstart + 1, cend)
@@ -216,7 +217,7 @@ def refine_block_fraction(survivors, nt, nd):
 
 def band_windows(rowwin, n, band):
     """Per-row windows [lo, hi) in samples of an n-point transform, mapped onto a coarse band
-    as coarse_span maps one window: band samples [lo // R - 1, ceil(hi / R)) with R = n // band,
+    as coarse_span maps one window: band samples [lo // R - 1, ceil(hi / R) + 1) with R = n // band,
     clamped to the band, at least one sample. The coarse and listed tiers read these as they
     are. Mapped in the kernel instead, the same arithmetic made the band-256 coarse kernel
     1.47x slower at SIMD16 on an Iris Xe. Memoised per table (grouped_row_windows' tables
@@ -229,7 +230,7 @@ def band_windows(rowwin, n, band):
     rr = n // band
     w = np.asarray(rowwin, np.uint32).reshape(-1, 3)[:, :2].astype(np.int64)
     cs = w[:, 0] // rr
-    ce = np.minimum(band, (w[:, 1] + rr - 1) // rr)
+    ce = np.minimum(band, (w[:, 1] + rr - 1) // rr + 1)
     cs = np.where(cs > 0, cs - 1, cs)
     ce = np.maximum(cs + 1, ce)
     # A coarse tier is one bin: its rows' bin phase is 0.

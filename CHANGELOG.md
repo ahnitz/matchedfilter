@@ -6,6 +6,13 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ### Fixed
 
+- A coarse tier's window now reaches one coarse sample past the end of the caller's window,
+  as it already did before the start, on the CPU (hmf.c), the GPUs (`_gpuhost.coarse_span`,
+  `band_windows`) and in the gate model. Without it, a signal in a search window's last R lags
+  had a coarse sample on one side only and kept as little as 0.47 of its SNR. With pycbc's
+  per-block windows the production chain dismissed 1.40-1.44x its false-dismissal budget
+  against the flat filter, and 0.75-0.85x with the fix. `tools/chain_fdr_vs_flat.py --window`
+  measures it.
 - The gate model no longer hands one profile another's plan. Its exact cache key was a 24-bin,
   1%-quantised signature, and its reuse took any profile within cosine 0.985. An A+ reference
   planned after an O4 one (cosine 0.995) took O4's thresholds and dismissed 2.3-4.6x its
