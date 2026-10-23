@@ -108,12 +108,16 @@ def test_screen_window_maximum_matches_individual_samples():
 
 
 @pytest.mark.parametrize("chain", [(256,), (512,), (128, 512)])
-def test_hierarchical_results_identical_with_screen(chain, monkeypatch):
-    # The screen is the first tier's gate on its own int16 maximum: it decides as the FP32
-    # tier would except for pairs within its rounding of a threshold, and these inputs have
-    # none, so results and counters agree exactly. (The FP16 first gate on ARM reports a
-    # bound and admits a superset, so it is off here.)
+def test_hierarchical_results_with_screen_are_flat_peaks(chain, monkeypatch):
+    # The screen is the first tier's gate on its own int16 maximum, so with it on the chain
+    # may refine a few different pairs than with the FP32 first tier: pairs within its
+    # rounding of the threshold go either way (here, on x86, chain (256,) passes two pairs
+    # the FP32 tier rejects; one of them holds a peak above 4 that the FP32 tier dismissed).
+    # What holds either way is that every reported peak is the flat filter's own.
+    # MF_AUTOTUNE=0 keeps the Q15 trial from overriding set_q15; the FP16 first gate on ARM
+    # reports a bound instead and is off here.
     monkeypatch.setenv("MF_GATE16", "0")
+    monkeypatch.setenv("MF_AUTOTUNE", "0")
     n, nd, nt = 4096, 8, 40
     power = _inspiral_power(n)
     h = np.sqrt(power).astype(np.complex64)
@@ -121,7 +125,11 @@ def test_hierarchical_results_identical_with_screen(chain, monkeypatch):
     tm = (h * np.exp(2j * np.pi * rng.random((nt, n)) * 0.05)).astype(np.complex64)
     data = (rng.standard_normal((nd, n)) + 1j * rng.standard_normal((nd, n))).astype(np.complex64)
     data[0] += 9.0 * np.conj(tm[3]) / np.linalg.norm(tm[3]) * np.sqrt(n)
-    out = []
+    flat = mf.MatchedFilter(n, nd, nt)
+    flat.set_templates(np.conj(tm))
+    flat.set_data(data)
+    ref = flat.run(binsize=n // 4, threshold=4.0)
+    found = []
     for q in (False, True):
         hf = mf.HierarchicalFilter(n, nd, nt, chain=chain, snr=5.5, fd=1e-3)
         hf.set_reference(power)
@@ -132,10 +140,16 @@ def test_hierarchical_results_identical_with_screen(chain, monkeypatch):
         if q and not hf._mf.q15_stats()[0]:
             pytest.skip("no Q15 screen for this band")
         res = hf.run(binsize=n // 4, threshold=4.0)
-        out.append((res, hf.stats))
-    np.testing.assert_array_equal(out[0][0]["index"], out[1][0]["index"])
-    np.testing.assert_array_equal(out[0][0]["value"], out[1][0]["value"])
-    assert out[0][1] == out[1][1]
+        if q:
+            assert hf._mf.q15_stats()[1] > 0          # the screen ran and passed pairs
+        got = res["index"] >= 0
+        assert got.any()
+        np.testing.assert_array_equal(res["index"][got], ref["index"][got])
+        np.testing.assert_allclose(res["value"][got], ref["value"][got], rtol=1e-5, atol=1e-5)
+        found.append(got)
+    # The injection's loudest bin is found either way.
+    loud = int(np.argmax(np.abs(ref["value"][0, 3])))
+    assert found[0][0, 3, loud] and found[1][0, 3, loud]
 
 
 def test_cost_model_prices_the_screen():
