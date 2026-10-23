@@ -123,7 +123,7 @@ jobs:
           set +e
           timeout 65m tools/sanitize.sh --python python --prebuilt "$RUNNER_TEMP/san" \
             --asan-options "${{ matrix.asan }}" -- \
-            tests -v -rs --durations=15 --shard ${{ matrix.shard }}/${{ matrix.of }} \
+            tests -v -rfEs --durations=15 --shard ${{ matrix.shard }}/${{ matrix.of }} \
             > "$RUNNER_TEMP/san.log" 2>&1
           rc=$?
           set -e

@@ -92,3 +92,14 @@ def test_annotation_carries_the_rerun_without_the_fake_stack(tmp_path):
                          text=True)
     head = out.stdout.replace("%0A", "\n").split("-- end of log --")[0]
     assert "=== without use-after-return detection: rc=0 ===" in head
+
+
+def test_annotation_lists_failed_tests(tmp_path):
+    log = tmp_path / "san.log"
+    log.write_text("tests/test_a.py::test_one PASSED\n" + "SKIPPED [1] tests/x.py:1: no GPU\n" * 200
+                   + "FAILED tests/test_q.py::test_same[chain0] - AssertionError: Mismatch\n"
+                   "sanitize: pytest rc=1 (FAILED)\n")
+    out = subprocess.run([sys.executable, str(TOOL), str(log), "1"], capture_output=True,
+                         text=True)
+    head = out.stdout.replace("%0A", "\n").split("-- end of log --")[0]
+    assert "FAILED tests/test_q.py::test_same[chain0] - AssertionError: Mismatch" in head
