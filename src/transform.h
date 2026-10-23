@@ -135,6 +135,17 @@ int ap_q15_has_tile(const ap_plan *p);
 int ap_q15_screen(const ap_plan *p, const int16_t *dq, const int16_t *tr, const int16_t *ti,
                   size_t start, size_t end, const int16_t *lanethr, uint64_t *bits,
                   int16_t *lanemax, void *scratch);
+/* Listed pairs: as ap_q15_screen, but lane l's data element is lane dsel[l] of dr/di (one
+   element across up to `lanes` data blocks, laid out [N][lanes] as tr/ti are), and its template
+   is lane tsel[l] (< 2 lanes) of the two template groups at tr/ti and tr/ti + tw. */
+/* Eight data rows quantised (x = nearest(row * sc), re and im) into eight consecutive lanes of
+   an [N][lanes] slab at xr/xi. */
+int ap_q15_slab8(const ap_plan *p, const float *const *rr, const float *const *ri,
+                 const float *sc, int16_t *xr, int16_t *xi);
+int ap_q15_screen_perm(const ap_plan *p, const int16_t *dr, const int16_t *di,
+                       const int16_t *tr, const int16_t *ti, long tw, const int16_t *dsel,
+                       const int16_t *tsel, size_t start, size_t end, const int16_t *lanethr,
+                       uint64_t *bits, int16_t *lanemax, void *scratch);
 /* A partial lane group's tile, at any N ap_q15_screen takes (ap_q15_has_tile). dq has QW/T
    consecutive [N][3] blocks; tr/ti retain stride QW and contain at least T lanes from the
    selected offset. Output lane b*T+l is data block b, template l. */

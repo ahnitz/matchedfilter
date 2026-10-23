@@ -4,8 +4,8 @@
 Signals at intrinsic SNR `--snr` in unit Gaussian noise, at random lags; a flat detection
 is |z| >= snr at full resolution, and the chain misses one when its reported peak for that
 block is absent or below snr. Two chains run on the same data with the gate model's
-thresholds (gatechain.chain_thresholds): the float first tier, and the Q15 screen as the
-first tier (where this back end has one). Each must stay within the budget; every
+thresholds (gatechain.chain_thresholds): FP32 tiers, and the Q15 screen as the first tier
+and every tier before the last (where this back end has one). Each must stay within the budget; every
 detection both report must carry the flat filter's value.
 
   python tools/chain_fdr_vs_flat.py --n 2048 --chain 256,512,1024 --inj 400000
@@ -54,7 +54,7 @@ def main():
             return None
         return e
 
-    engines = {"float first tier": chain_filter(False), "Q15 first tier": chain_filter(True)}
+    engines = {"FP32 tiers": chain_filter(False), "Q15 tiers": chain_filter(True)}
     engines = {k: e for k, e in engines.items() if e is not None}
     peaks = {k: np.empty((B, 1), mf.PEAK_DTYPE) for k in engines}
     cnt = np.empty(B, np.int32)

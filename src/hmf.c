@@ -40,6 +40,8 @@ typedef struct {
   void *g16;                      /* FP16 gate for this tier (tier 0 only), or NULL */
   int lagged;                     /* this call's cebuf index is the pair's largest coarse lag
                                      (not under the FP16 gate, whose index has no reader) */
+  int q15;                        /* a later tier gating on the listed Q15 screen
+                                     (ap_mf_q15_pairs), with the screen on */
 } hmf_tier;
 
 struct ap_hmf_plan {
@@ -320,7 +322,11 @@ int ap_hmf_set_platform_fft(ap_hmf_plan *p,int on){
 
 int ap_hmf_set_q15(ap_hmf_plan *p,int on){
   if(!p) return -1;
-  if(!on){ p->q15=0; return 0; }
+  if(!on){
+    p->q15=0;
+    for(int i=0;i<p->ntiers;i++) p->tier[i].q15=0;
+    return 0;
+  }
   if(ap_mf_q15_lanes(p->tier[0].mf)<=0) return -1;
   if(!p->qpass){
     const size_t np=(size_t)p->nd*p->nt;
@@ -331,8 +337,15 @@ int ap_hmf_set_q15(ap_hmf_plan *p,int on){
       p->qpass=NULL; p->qd=p->qt=NULL; p->qstat=NULL; return -1;
     }
   }
-  /* The screen decides on its own int16 maximum: no margin (ap_mf_set_q15_margin). */
+  /* The screen decides on its own int16 maximum: no margin (ap_mf_set_q15_margin). The tiers
+     between the first and the last gate the same way on their survivor lists, where their
+     band has a screen; the last stays FP32, whose coarse lag the direct refine reads. */
   ap_mf_set_q15_margin(p->tier[0].mf,0);
+  for(int i=1;i+1<p->ntiers;i++){
+    hmf_tier *tr=&p->tier[i];
+    tr->q15=ap_mf_q15_lanes(tr->mf)>0;
+    if(tr->q15) ap_mf_set_q15_margin(tr->mf,0);
+  }
   p->q15=1;
   return 0;
 }
@@ -889,6 +902,10 @@ static int run_gate_pairs(ap_hmf_plan *p,hmf_tier *tr,int d0,int t0,int nt,
       tr->pending[d]=0; tr->npending--;
     }
   }
+  /* A Q15 tier's decision per listed pair goes to p->qpass[j] (free once the first tier's
+     survivors are compacted); an FP32 tier's maximum to its cebuf. */
+  if(tr->q15)
+    return ap_mf_q15_pairs(tr->mf,d0,ds,ts,count,t0,tr->thr,lo,hi,p->qpass,NULL);
   return ap_mf_run_pairs_pooled(tr->mf,d0,ds,ts,count,t0,hi-lo,tr->thr,
                                 tr->cebuf,NULL,lo,hi,nt);
 }
@@ -956,6 +973,7 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
       } else if(ap_mf_run(tr->mf,d0,nd,t0,nt,cspan,thr,tr->cebuf,NULL,cstart,cend)<0) return -1;
     } else {
       if(run_gate_pairs(p,tr,d0,t0,nt,fire_d,fire_t,nfire,start,end)<0) return -1;
+      if(tr->q15) tr->lagged=0;
     }
     tr->ticks += ap_ticks()-t_0;
     int nnext=0;
@@ -967,7 +985,7 @@ int ap_hmf_run(ap_hmf_plan *p,int d0,int nd,int t0,int nt,
       const size_t row=(size_t)d*nt+t;
       ap_peak ce = qstat ? (ap_peak){.index=0, .magnitude=(p->dump||p->trace) ? qstat[row] : 0.0f}
                          : tr->cebuf[row];
-      int fire = qstat || (ce.index>=0 && ce.magnitude>=thr);
+      int fire = qstat || (tr->q15 ? p->qpass[j]!=0 : (ce.index>=0 && ce.magnitude>=thr));
       if(i==0 && fire){
         /* rec[2] repeats the maximum, except under the FP16 gate, where it carries what
            MF_GATE16_DEBUG puts in im: the pair's all-lag rms (tools/gate16_error.py). */

@@ -15,6 +15,10 @@ Alpha releases may change the API. Pin a version for reproducible work.
   recheck order (`set_q15_recheck_late`, `gatechain.q15_recheck_order`) and the FP16
   tier 0 behind the screen (`set_q15_tier0`, `price_q15_tier0`) are removed: there is no
   recheck left to order or price.
+- The tiers between the first and the last also gate on the Q15 screen, over their survivor
+  lists (`ap_mf_q15_pairs`): each lane's data and template are looked up in prepacked vectors
+  inside the transform, with no gather pass. On the production replica tier 1 costs 32% less
+  and the gated stages 8.8% less. The last tier stays FP32 for the direct refine's lag.
 
 - Every `MF_*` environment variable follows one rule (`docs/environment.md`, generated
   from `matchedfilter/_config.py`): unset or empty gives the default; a switch takes

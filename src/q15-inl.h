@@ -44,6 +44,12 @@ using ap_qtag = hn::CappedTag<int16_t, 2 * AP_W>;
 constexpr ap_qtag AP_DQ{};
 constexpr int AP_QW = (int)HWY_MAX_LANES_D(ap_qtag);
 typedef hn::Vec<ap_qtag> vq;
+/* Listed pairs (q15_screen_perm): each lane's operands are looked up in a vector of one element
+   across QW data blocks (dix) and across two groups of QW templates (tix, the second group TW
+   further on). Names in scope inside the *_prod_perm codelets. */
+typedef hn::IndicesFromD<ap_qtag> qidx;
+#define Q_DLOAD(p) hn::TableLookupLanes(Q_LOADU(p), dix)
+#define Q_TLOAD(p) hn::TwoTablesLookupLanes(AP_DQ, Q_LOADU(p), Q_LOADU((p) + TW), tix)
 
 #define Q_ZERO()       hn::Zero(AP_DQ)
 #define Q_SET1(x)      hn::Set(AP_DQ, (int16_t)(x))
@@ -128,6 +134,17 @@ static HWY_INLINE void qcodelet_prod(int m, const int16_t *restrict dq, const in
     case  8: qsr8_prod (dq,tr,ti,ar,ai,S,DS,TS); return;
     case 16: qsr16_prod(dq,tr,ti,ar,ai,S,DS,TS); return;
     default: qsr32_prod(dq,tr,ti,ar,ai,S,DS,TS); return;
+  }
+}
+static HWY_INLINE void qcodelet_prod_perm(int m, const int16_t *restrict dr,
+                                          const int16_t *restrict di, const int16_t *restrict tr,
+                                          const int16_t *restrict ti, vq *restrict ar,
+                                          vq *restrict ai, long S, long TS, long TW,
+                                          const qidx dix, const qidx tix){
+  switch(m){
+    case  8: qsr8_prod_perm (dr,di,tr,ti,ar,ai,S,TS,TW,dix,tix); return;
+    case 16: qsr16_prod_perm(dr,di,tr,ti,ar,ai,S,TS,TW,dix,tix); return;
+    default: qsr32_prod_perm(dr,di,tr,ti,ar,ai,S,TS,TW,dix,tix); return;
   }
 }
 static HWY_INLINE void qcodelet_tw(int m, vq *restrict ar, vq *restrict ai, long S,
@@ -279,6 +296,42 @@ static int q15_screen(size_t N, const int16_t *dq, const int16_t *tr, const int1
   return q15_finish(N,M1,M2,tw,X,Xi,ws,we,lanethr,bits,lanemax);
 }
 
+/* QW listed pairs: as q15_screen, but lane l's data element is lane dsel[l] of dr/di (QW data
+   blocks laid out [N][QW], as the templates are) and its template is lane tsel[l] of the two
+   template groups at tr/ti and tr/ti + TW (tsel < 2 QW; TW 0 repeats the first group). Same
+   arithmetic per lane as q15_screen: a lane's maximum is bit-identical to the one it gets
+   there. */
+template<int M1, int M2>
+static HWY_INLINE void q15_prod_perm_n(const int16_t *dr, const int16_t *di, const int16_t *tr,
+                                       const int16_t *ti, long TW, const qidx dix,
+                                       const qidx tix, vq *X, vq *Xi){
+  for(int e1 = 0; e1 < M1; e1++)
+    qcodelet_prod_perm(M2, dr + (size_t)e1 * AP_QW, di + (size_t)e1 * AP_QW,
+                       tr + (size_t)e1 * AP_QW, ti + (size_t)e1 * AP_QW,
+                       X + e1, Xi + e1, M1 + 1, (long)M1 * AP_QW, TW, dix, tix);
+}
+
+static int q15_screen_perm(size_t N, const int16_t *dr, const int16_t *di, const int16_t *tr,
+                           const int16_t *ti, long TW, const int16_t *dsel, const int16_t *tsel,
+                           size_t ws, size_t we, const int16_t *lanethr, uint64_t *bits,
+                           int16_t *lanemax, void *scratch){
+  int M1, M2;
+  if(ap_q15_factor(N, &M1, &M2)) return -1;
+  const ap_q15_twiddles *tw = ap_q15_twiddle_table(N);
+  if(!tw) return -1;
+  const qidx dix = hn::SetTableIndices(AP_DQ, dsel), tix = hn::SetTableIndices(AP_DQ, tsel);
+  vq *X = (vq *)scratch, *Xi = X + (size_t)(M1 + 1) * M2;
+  switch(N){
+    case   64: q15_prod_perm_n< 8,  8>(dr, di, tr, ti, TW, dix, tix, X, Xi); break;
+    case  128: q15_prod_perm_n<16,  8>(dr, di, tr, ti, TW, dix, tix, X, Xi); break;
+    case  256: q15_prod_perm_n<16, 16>(dr, di, tr, ti, TW, dix, tix, X, Xi); break;
+    case  512: q15_prod_perm_n<32, 16>(dr, di, tr, ti, TW, dix, tix, X, Xi); break;
+    case 1024: q15_prod_perm_n<32, 32>(dr, di, tr, ti, TW, dix, tix, X, Xi); break;
+    default: return -1;
+  }
+  return q15_finish(N,M1,M2,tw,X,Xi,ws,we,lanethr,bits,lanemax);
+}
+
 #if AP_Q15_TAIL
 template<int T, int M1, int M2>
 static int q15_screen_tile_n(const int16_t *dq, const int16_t *tr, const int16_t *ti,
@@ -321,6 +374,48 @@ static int q15_screen_tile(size_t N, int T, const int16_t *dq, const int16_t *tr
   return -1;
 }
 #endif
+
+/* Eight data blocks' rows quantised into eight consecutive lanes of a slab (q15_screen_perm's
+   data layout, [N][QW]): x = nearest(row[k] * sc) for each of re and im, as matchfilt.c's
+   q15_data rounds them, then an 8 x 8 int16 transpose in 128-bit registers so each element's
+   eight lanes go out in one store. */
+static void q15_slab8(size_t N, const float *const *rr, const float *const *ri, const float *sc,
+                      int16_t *xr, int16_t *xi){
+  const hn::FixedTag<float, 4> df;
+  const hn::FixedTag<int32_t, 4> di;
+  const hn::FixedTag<int16_t, 8> dh;
+  const hn::FixedTag<int64_t, 2> dl;
+  using V16 = hn::Vec<decltype(dh)>;
+  for(int part = 0; part < 2; part++){
+    const float *const *rows = part ? ri : rr;
+    int16_t *out = part ? xi : xr;
+    for(size_t k = 0; k < N; k += 8){
+      V16 r[8];
+      for(int b = 0; b < 8; b++){
+        const auto s = hn::Set(df, sc[b]);
+        const auto a = hn::NearestInt(hn::Mul(hn::LoadU(df, rows[b] + k), s));
+        const auto c = hn::NearestInt(hn::Mul(hn::LoadU(df, rows[b] + k + 4), s));
+        r[b] = hn::OrderedDemote2To(dh, a, c);
+      }
+      V16 t[8], u[8];
+      for(int j = 0; j < 4; j++){
+        t[2 * j] = hn::InterleaveLower(dh, r[2 * j], r[2 * j + 1]);
+        t[2 * j + 1] = hn::InterleaveUpper(dh, r[2 * j], r[2 * j + 1]);
+      }
+      for(int h = 0; h < 2; h++)
+        for(int j = 0; j < 2; j++){
+          const auto a = hn::BitCast(di, t[4 * h + j]), c = hn::BitCast(di, t[4 * h + j + 2]);
+          u[4 * h + 2 * j] = hn::BitCast(dh, hn::InterleaveLower(di, a, c));
+          u[4 * h + 2 * j + 1] = hn::BitCast(dh, hn::InterleaveUpper(di, a, c));
+        }
+      for(int j = 0; j < 4; j++){
+        const auto a = hn::BitCast(dl, u[j]), c = hn::BitCast(dl, u[4 + j]);
+        hn::StoreU(hn::BitCast(dh, hn::InterleaveLower(dl, a, c)), dh, out + (k + 2 * j) * AP_QW);
+        hn::StoreU(hn::BitCast(dh, hn::InterleaveUpper(dl, a, c)), dh, out + (k + 2 * j + 1) * AP_QW);
+      }
+    }
+  }
+}
 
 static int q15_lanes(void){ return AP_QW; }
 
