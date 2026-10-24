@@ -922,9 +922,7 @@ static int series_spectra(ap_mf_plan *p,const float *series,size_t nseries,
       size_t have=start<nseries?nseries-start:0;
       if(have>n) have=n;
       float * restrict z=p->sfwd;           /* n reals = n/2 complex */
-      const float * restrict src=series+start;
-      for(size_t k=0;k<have;k++) z[k]=src[k]*inv;
-      if(have<n) memset(z+have,0,(n-have)*sizeof(float));
+      ap_scale_load_on(p->fft,z,series+start,have,n,1,inv);
       ap_fft(p->half_fft,z,p->sfwd+n,AP_FORWARD);
       ap_real_split_on(p->fft,p->sfwd+n,p->rtw,n,p->sspec);
       if(ap_mf_set_data(p,j,p->sspec)) return -1;
@@ -935,19 +933,7 @@ static int series_spectra(ap_mf_plan *p,const float *series,size_t nseries,
     size_t start=starts[j];
     size_t have=start<nseries?nseries-start:0;
     if(have>n) have=n;
-    if(have){
-      const float * restrict src=series+2*start;
-      float * restrict dst=p->sfwd;
-      size_t k=0, len=2*have;
-      for(;k+3<len;k+=4){
-        dst[k]   = src[k]   * inv;
-        dst[k+1] = src[k+1] * inv;
-        dst[k+2] = src[k+2] * inv;
-        dst[k+3] = src[k+3] * inv;
-      }
-      for(;k<len;k++) dst[k]=src[k]*inv;
-    }
-    if(have<n) memset(p->sfwd+2*have,0,2*(n-have)*sizeof(float));
+    ap_scale_load_on(p->fft,p->sfwd,have ? series+2*start : series,2*have,2*n,1,inv);
     ap_fft(p->fft,p->sfwd,p->sspec,AP_FORWARD);
     if(ap_mf_set_data(p,j,p->sspec)) return -1;
   }
@@ -1193,11 +1179,7 @@ int ap_mf_run_series(ap_mf_plan *p,
          kept, and applied on the way IN so it folds into a copy that has to
          happen anyway. n is a power of two, so 1/n is exact and the transform
          is linear: scaling before is bit-for-bit scaling after. */
-      { const float inv=1.0f/(float)n;
-        const float * restrict src=series+2*s0;
-        float * restrict dst=p->sfwd;
-        for(size_t k=0;k<2*have;k++) dst[k]=src[k]*inv; }
-      if(have<n) memset(p->sfwd+2*have,0,2*(n-have)*sizeof(float));
+      ap_scale_load_on(p->fft,p->sfwd,have ? series+2*s0 : series,2*have,2*n,1,1.0f/(float)n);
       ap_fft(p->fft,p->sfwd,p->sspec,AP_FORWARD);
       if(ap_mf_set_data(p,j,p->sspec)) return -1;
     }
@@ -1376,10 +1358,7 @@ int ap_mf_run_series_dif(ap_mf_plan *p,
       size_t have = s0 < nseries ? nseries - s0 : 0;
       if(have > n) have = n;
       const float inv = 1.0f / (float)n;
-      const float * restrict src = series + 2 * s0;
-      float * restrict dst = p->sfwd_n;
-      for(size_t k = 0; k < 2 * have; k++) dst[k] = src[k] * inv;
-      if(have < n) memset(dst + 2 * have, 0, 2 * (n - have) * sizeof(float));
+      ap_scale_load_on(p->fft, p->sfwd_n, have ? series + 2 * s0 : series, 2 * have, 2 * n, 1, inv);
 
       ap_fft(p->fft_fwd_n, p->sfwd_n, p->sspec_n, AP_FORWARD);
       d0_ptr = p->sspec_n;
@@ -1388,10 +1367,7 @@ int ap_mf_run_series_dif(ap_mf_plan *p,
       size_t have = s0 < nseries ? nseries - s0 : 0;
       if(have > N) have = N;
       const float inv = 1.0f / (float)N;
-      const float * restrict src = series + 2 * s0;
-      float * restrict dst = p->sfwd_2n;
-      for(size_t k = 0; k < 2 * have; k++) dst[k] = src[k] * inv;
-      if(have < N) memset(dst + 2 * have, 0, 2 * (N - have) * sizeof(float));
+      ap_scale_load_on(p->fft, p->sfwd_2n, have ? series + 2 * s0 : series, 2 * have, 2 * N, 1, inv);
 
       ap_fft(p->fft_fwd, p->sfwd_2n, p->sspec_2n, AP_FORWARD);
       d0_ptr = p->sspec_2n;

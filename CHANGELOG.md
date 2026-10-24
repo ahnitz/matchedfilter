@@ -11,6 +11,10 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ### Performance
 
+- Stage B transforms a column of the intermediate where stage A left it, when the column
+  is one codelet, instead of copying it to a staging buffer first. The flat engine's
+  block loads (series, real series, the DIF loads) take the backend's full-width
+  scale_load too. Results are bit-identical.
 - The copy of each block's spectrum into the plan's layout (set_data, set_template) and the
   hierarchical engine's scale-and-load of each block's samples run at the machine's vector
   width (backend kernels split_store and scale_load). They were loops in matchfilt.c and
