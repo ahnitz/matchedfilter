@@ -105,8 +105,14 @@ DEFS = [("HWY_DISABLED_TARGETS", "(%s)" % "|".join(DISABLED))]
 # branch in that loop it measured itself. See balanced-inl.h.
 if os.environ.get("AP_NOXPOSE"):
     DEFS = DEFS + [("AP_NOXPOSE", os.environ["AP_NOXPOSE"])]
+# The AVX1 back end (kernel_avx1.cc, simd-avx1.h): x86 builds only. Without the no-split
+# flags: on Ivy Bridge GCC's splitting of unaligned 256-bit accesses into 128-bit halves was
+# -2..-19% (n = 1024-4096, 2026-10-24); -mtune=ivybridge on top was worse.
+AVX1 = [("AP_HAVE_AVX1", "1")] if ARCH else []
+AVX1_ARCH = [f for f in ARCH if "split-unaligned" not in f] + ["-mavx"]
 SOURCES = (
-    [("src/kernel.cc", CXX + ARCH, DEFS), ("src/gate16.cc", CXX + ARCH, DEFS)]
+    [("src/kernel.cc", CXX + ARCH, DEFS + AVX1), ("src/gate16.cc", CXX + ARCH, DEFS)]
+    + ([("src/kernel_avx1.cc", CXX + AVX1_ARCH, DEFS + AVX1)] if AVX1 else [])
     + [(s, CXX + ARCH, DEFS) for s in HWY_SRC]   # same baseline, or the
                                                  # dispatch tables disagree
     + [(s, BASE + ARCH, []) for s in ("src/matchfilt.c", "src/hmf.c", "src/dispatch.c",

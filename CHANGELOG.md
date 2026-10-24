@@ -6,6 +6,14 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ### Added
 
+- An AVX back end for CPUs with AVX but not AVX2 (Sandy and Ivy Bridge), which ran the
+  4-lane SSE4 kernels because Highway has no AVX1 target. The float kernels (transforms,
+  products, peak scans) run at 8 lanes on 256-bit AVX without FMA (src/simd-avx1.h,
+  src/kernel_avx1.cc). The Q15 screen and the integer helpers stay SSE4's. It is
+  selected automatically, `targets()` lists it as `AVX`, and `MF_ISA=SSE4` keeps the
+  4-lane kernels. Results match the other ISAs to fp32 rounding (peaks identical, |snr|
+  within 5e-7). Fine-stage call on an Ivy Bridge E5-2660 v2: x1.59 at n=1024, x1.32 at
+  2048, x1.40 at 4096, x1.25 at 16384.
 - CPython 3.15: release wheels (Linux x86-64 manylinux and musllinux, macOS arm64) and CI
   test jobs. Wheels build with cibuildwheel 4.3.4.
 

@@ -11,6 +11,10 @@
  * holds, capped at 16 lanes -- the kernel keeps AP_W vectors live in a
  * transpose, and 32 of them would spill on every machine that exists.
  */
+#if defined(AP_SIMD_AVX1)
+/* kernel_avx1.cc: the float kernels at 8 lanes on AVX1, without Highway (simd-avx1.h). */
+#include "simd-avx1.h"
+#else
 #include <stdint.h>
 #include <string.h>
 #include "hwy/highway.h"
@@ -258,3 +262,4 @@ static HWY_ATTR HWY_INLINE void v_transpose_store(const vf *in, float *out) {
 HWY_AFTER_NAMESPACE();
 
 #endif  // toggle guard
+#endif  // AP_SIMD_AVX1
