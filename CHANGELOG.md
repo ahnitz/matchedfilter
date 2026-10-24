@@ -11,6 +11,11 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ### Performance
 
+- Stage A loads its twiddles from a full table when the table (8N bytes) fits the L1D,
+  instead of forming each from two smaller tables (four multiplies and two broadcasts an
+  element). Results are bit-identical. Fine-stage call at n = 2048 and 4096: -1 to -5% on Zen 5,
+  -3 to -5% on Haswell, -2 to -9% on Ivy Bridge. Past the L1D the table lost (Ivy Bridge
+  +18% at 16384, +55% at 65536), so larger transforms keep the factored form.
 - Stage B transforms a column of the intermediate where stage A left it, when the column
   is one codelet, instead of copying it to a staging buffer first. The flat engine's
   block loads (series, real series, the DIF loads) take the backend's full-width
