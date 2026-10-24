@@ -32,7 +32,8 @@ jobs:
     # One suite per job. Python never reaches the C kernels, and MF_ISA restricts the
     # process to one Highway target (B3), so the targets are spread across the Python
     # versions instead of crossed with them: the forced SSE4 and AVX2 jobs, and the
-    # widest target (AVX3 on an AVX-512 runner) on every Python. Each job's session
+    # widest target (AVX3 on an AVX-512 runner) on every Python, and AVX (SSE4 with its float
+    # kernels at 8 lanes, for AVX-without-AVX2 CPUs) on one. Each job's session
     # names its backend in a notice and fails if it is not the one asked for.
     name: test (${{ matrix.python }}, ${{ matrix.isa || 'widest' }}${{ matrix.sdist && ', sdist' || '' }})
     runs-on: ubuntu-24.04
@@ -45,6 +46,7 @@ jobs:
           - {python: "3.11"}
           - {python: "3.12", sdist: true}
           - {python: "3.13"}
+          - {python: "3.13", isa: AVX}                       # the AVX1 back end (kernel_avx1.cc)
           - {python: "3.14"}
           - {python: "3.15", isa: AVX2}
           - {python: "3.15"}

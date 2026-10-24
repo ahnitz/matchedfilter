@@ -17,9 +17,15 @@
  */
 #include <time.h>
 #include "elemfft-inl.h"
+#if defined(AP_SIMD_AVX1)
+/* The AVX1 build (kernel_avx1.cc) takes the Q15 screen, the direct refine's correlation and
+   the real-series kernels from the SSE4 back end; it needs only the L1D query here. */
+#include "q15.h"
+#else
 #include "q15-inl.h"
 #include "td-inl.h"
 #include "rsplit-inl.h"
+#endif
 
 #if defined(AP_BALANCED_INL_H_) == defined(HWY_TARGET_TOGGLE)
 #ifdef AP_BALANCED_INL_H_
@@ -169,6 +175,12 @@ int supported(size_t N){
   if(m==9) { n1=16;   n2=32;  }
   if(m==11){ n1=128;  n2=16;  }
   if(m==12){ n1=128;  n2=32;  }
+#if defined(AP_SIMD_AVX1)
+  /* AVX1 (16 ymm registers, 128-bit load and store paths): the 32-point codelet spills and
+     each 256-bit spill costs two cycles. 256x16, Ivy Bridge 2026-10-24: -10..-13% at
+     2^12; 128x32 stays best on AVX2 (Haswell), SSE4 and the 2^11 split. */
+  if(m==12){ n1=256;  n2=16;  }
+#endif
   if(m==18){ n1=1024; n2=256; }
   return n1>=AP_W && n2>=AP_W;
 }
@@ -224,6 +236,12 @@ void *create(size_t N){
   if(m==9) { n1=16;   n2=32;  }
   if(m==11){ n1=128;  n2=16;  }
   if(m==12){ n1=128;  n2=32;  }
+#if defined(AP_SIMD_AVX1)
+  /* AVX1 (16 ymm registers, 128-bit load and store paths): the 32-point codelet spills and
+     each 256-bit spill costs two cycles. 256x16, Ivy Bridge 2026-10-24: -10..-13% at
+     2^12; 128x32 stays best on AVX2 (Haswell), SSE4 and the 2^11 split. */
+  if(m==12){ n1=256;  n2=16;  }
+#endif
   if(m==18){ n1=1024; n2=256; }
   /* The element transform only handles the sizes efactor knows.  A split it
      cannot compute used to be accepted and produce silently wrong answers - an
@@ -1730,6 +1748,7 @@ int binmax_split(void *vp,const float*inr,const float*ini,size_t binsize,
 /* The back end for this target.  foreach_target.h compiles this file once per
    ISA and HWY_EXPORT/HWY_DYNAMIC_DISPATCH in kernel.cc picks one at run time,
    so nothing here needs a name that says which width it was built at. */
+#if !defined(AP_SIMD_AVX1)
 const ap_backend *Backend(void){
   static const ap_backend be = {
     hwy::TargetName(HWY_TARGET), AP_W,
@@ -1746,6 +1765,7 @@ const ap_backend *Backend(void){
   };
   return &be;
 }
+#endif
 
 }  // namespace HWY_NAMESPACE
 }  // namespace ap

@@ -45,9 +45,36 @@ static bool isa_failed = false;
 static int64_t baseline = 0;   /* the MF_ISA target, or 0: the hardware's choice */
 static int64_t current = 0;    /* what is selected now (0: the baseline's choice) */
 
+#if AP_HAVE_AVX1
+/* AVX (kernel_avx1.cc) is not a Highway target: it is the SSE4 back end with its float
+   kernels at 8 lanes, for CPUs that have AVX and not AVX2. It is chosen wherever Highway's
+   choice is SSE4 and the CPU and OS support AVX, and it is a name MF_ISA and set_target
+   accept. MF_ISA=SSE4 keeps the plain SSE4 kernels. */
+extern "C" const ap_backend *ap_avx1_backend(const ap_backend *base);
+static bool avx1_cpu(void) {
+  static const int ok = __builtin_cpu_supports("avx") ? 1 : 0;   /* checks OS YMM state too */
+  return ok;
+}
+static int avx1_base = 1, avx1_now = 1;   /* AVX allowed over SSE4: baseline and now */
+static bool sse4_built(void) {
+  for (int64_t t : hwy::SupportedAndGeneratedTargets())
+    if (t == HWY_SSE4) return true;
+  return false;
+}
+#endif
+
 static void apply_env(void) {
   const char *e = getenv("MF_ISA");
   if (!e || !*e) return;
+#if AP_HAVE_AVX1
+  if (!strcasecmp(e, "AVX") && avx1_cpu() && sse4_built()) {
+    baseline = current = HWY_SSE4;
+    hwy::SetSupportedTargetsForTest(HWY_SSE4);
+    avx1_base = avx1_now = 1;
+    return;
+  }
+  if (!strcasecmp(e, "SSE4")) avx1_base = avx1_now = 0;
+#endif
   for (int64_t t : hwy::SupportedAndGeneratedTargets()) {
     if (!strcasecmp(e, hwy::TargetName(t))) {
       baseline = current = t;
@@ -74,7 +101,13 @@ static bool env_applied(void) {
    HWY_DYNAMIC_DISPATCH(ap::Backend) becomes N_NEON::ap::Backend where the
    function is ap::N_NEON::Backend, and the build fails on an undeclared
    N_NEON.  Calling it unqualified from in here resolves both ways. */
-static const ap_backend *active(void) { return HWY_DYNAMIC_DISPATCH(Backend)(); }
+static const ap_backend *active(void) {
+  const ap_backend *b = HWY_DYNAMIC_DISPATCH(Backend)();
+#if AP_HAVE_AVX1
+  if (avx1_now && b && avx1_cpu() && !strcmp(b->name, "SSE4")) return ap_avx1_backend(b);
+#endif
+  return b;
+}
 
 }  // namespace ap
 
@@ -88,16 +121,30 @@ extern "C" int ap_isa_init(void) {
 /* The targets this build contains that this CPU can also run, widest first -- only
    MF_ISA's when it is set.  Highway owns both halves of that question, so the list
    is asked for rather than kept. */
+/* The names, widest first: Highway's targets, with AVX ahead of SSE4 where it applies. */
+static int target_names(const char **out, int cap) {
+  int k = 0;
+  for (int64_t t : hwy::SupportedAndGeneratedTargets()) {
+#if AP_HAVE_AVX1
+    if (t == HWY_SSE4 && ap::avx1_cpu() && ap::avx1_base && k < cap) out[k++] = "AVX";
+#endif
+    if (k < cap) out[k++] = hwy::TargetName(t);
+  }
+  return k;
+}
+
 extern "C" int ap_target_count(void) {
   ap::env_applied();
-  return (int)hwy::SupportedAndGeneratedTargets().size();
+  const char *n[64];
+  return target_names(n, 64);
 }
 
 extern "C" const char *ap_target_name(int i) {
   ap::env_applied();
-  const auto ts = hwy::SupportedAndGeneratedTargets();
-  if (i < 0 || (size_t)i >= ts.size()) return NULL;
-  return hwy::TargetName(ts[(size_t)i]);
+  const char *n[64];
+  const int k = target_names(n, 64);
+  if (i < 0 || i >= k) return NULL;
+  return n[i];
 }
 
 /* Narrow the runtime choice to one target, by name, or restore the baseline (MF_ISA's
@@ -112,8 +159,26 @@ extern "C" int ap_set_target(const char *name) {
   if (!name) {
     ap::current = ap::baseline;
     hwy::SetSupportedTargetsForTest(ap::baseline);
+#if AP_HAVE_AVX1
+    ap::avx1_now = ap::avx1_base;
+#endif
     return 0;
   }
+#if AP_HAVE_AVX1
+  /* AVX: SSE4 with its float kernels widened; SSE4 by name: the plain SSE4 kernels. */
+  if (!strcasecmp(name, "AVX")) {
+    if (!ap::avx1_cpu() || !ap::avx1_base) return -1;
+    hwy::SetSupportedTargetsForTest(ap::baseline);
+    for (int64_t t : hwy::SupportedAndGeneratedTargets())
+      if (t == HWY_SSE4) {
+        ap::current = t; ap::avx1_now = 1;
+        hwy::SetSupportedTargetsForTest(t);
+        return 0;
+      }
+    hwy::SetSupportedTargetsForTest(ap::current);
+    return -1;
+  }
+#endif
   /* Search the baseline's targets: while a target is forced, SupportedAndGenerated-
      Targets reports only that one, so the search starts from the baseline and the
      previous selection is restored on a miss. */
@@ -122,6 +187,9 @@ extern "C" int ap_set_target(const char *name) {
     if (!strcasecmp(name, hwy::TargetName(t))) {
       ap::current = t;
       hwy::SetSupportedTargetsForTest(t);
+#if AP_HAVE_AVX1
+      ap::avx1_now = t == HWY_SSE4 ? 0 : ap::avx1_base;
+#endif
       return 0;
     }
   }

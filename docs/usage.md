@@ -306,4 +306,7 @@ design notes. macOS x86-64 is not currently tested.
 
 `matchedfilter.targets()` lists the available CPU targets,
 `matchedfilter.backend()` reports the selected target, and `set_target()` or
-`MF_ISA` selects a specific target for testing.
+`MF_ISA` selects a specific target for testing. On x86 the targets are Highway's
+(AVX3, AVX2, SSE4) plus `AVX`: the SSE4 back end with its float kernels at 8 lanes,
+chosen automatically on CPUs with AVX but not AVX2 (Sandy and Ivy Bridge).
+`MF_ISA=SSE4` keeps the 4-lane kernels there.
