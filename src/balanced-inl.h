@@ -1698,7 +1698,7 @@ const ap_backend *Backend(void){
 #else
     nullptr,
 #endif
-    q15_screen_perm, q15_slab8
+    q15_screen_perm, q15_slab8, split_store, scale_load
   };
   return &be;
 }

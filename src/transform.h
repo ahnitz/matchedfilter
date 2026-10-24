@@ -58,6 +58,14 @@ void ap_td_corr_on(const ap_plan *p, const float *x, const float *taps, int L, i
 
 /* A real block's full n-point spectrum X from Z, the n/2-point transform of its samples read
    as n/2 complex ones; tw: cos, sin of 2 pi k/n for k = 0 .. n/2 (rsplit-inl.h). */
+/* A spectrum into a plan's split, group-major layout: [n1/w groups][n2][w lanes] (natural
+   order when n1 = 0), conjugated if conj. */
+void ap_split_store_on(const ap_plan *p, const float *x, float *re, float *im, size_t n, int conj,
+                       int n1, int n2, int w);
+/* dst[k] = src[k * stride] * scale for k < have, zeros to n (stride 1, or 2 for one lane of
+   a complex series; others element by element). */
+void ap_scale_load_on(const ap_plan *p, float *dst, const float *src, size_t have, size_t n,
+                      size_t stride, float scale);
 void ap_real_split_on(const ap_plan *p, const float *Z, const float *tw, size_t n, float *X);
 
 /* The root stage's product scale * conj(T) D over bins [k0, k1) of two one-sided spectra of

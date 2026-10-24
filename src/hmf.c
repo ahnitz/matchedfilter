@@ -574,10 +574,7 @@ static void hmf_forward_real(ap_hmf_plan *p,const float *x,size_t s0,size_t have
   float * restrict z=p->fwd;                 /* n reals = h complex */
   float * restrict Z=p->fwd+n;               /* the h-point transform */
   { const size_t st=p->real_stride ? p->real_stride : 1;
-    const float * restrict src=x+s0*st;
-    if(st==1) for(size_t k=0;k<have;k++) z[k]=src[k]*inv;
-    else for(size_t k=0;k<have;k++) z[k]=src[k*st]*inv; }
-  if(have<n) memset(z+have,0,(n-have)*sizeof(float));
+    ap_scale_load_on(p->half_fft,z,x+s0*st,have,n,st,inv); }
   ap_fft(p->half_fft,z,Z,AP_FORWARD);
   ap_real_split_on(p->half_fft,Z,p->rtw,n,sp);
 }
@@ -626,11 +623,8 @@ int ap_hmf_run_series(ap_hmf_plan *p,
       if(p->use_accel){
         ap_accel_forward(p->accel,have ? series+2*s0 : series,have,1.0f/(float)n,sp);
       } else {
-      { const float inv=1.0f/(float)n;
-        const float * restrict src=have ? series+2*s0 : series;
-        float * restrict dst=p->fwd;
-        for(size_t k=0;k<2*have;k++) dst[k]=src[k]*inv; }
-      if(have<n) memset(p->fwd+2*have,0,2*(n-have)*sizeof(float));
+      ap_scale_load_on(p->full_fft,p->fwd,have ? series+2*s0 : series,2*have,2*n,1,
+                       1.0f/(float)n);
       ap_fft(p->full_fft,p->fwd,sp,AP_FORWARD);
       }
       if(set_data_tiers(p,j,sp,1)) return -1;
