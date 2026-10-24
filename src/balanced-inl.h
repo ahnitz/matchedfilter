@@ -1129,13 +1129,23 @@ static int bins_reserve(BP*p,size_t nb){
 #endif
 
 /* kb < AP_ONE_BIN: two bins split at kb (out[0] below kb, out[1] from it), a window bin edge
-   inside the block, as binmax_one's TWO; kb == AP_ONE_BIN: one bin, out[0] only. One function
-   rather than a template on the split: the transform and its 32 inlined sinks are ~15 KB of
-   straight-line code, and two copies alternating block by block thrashed the L1i and op cache. */
+   inside the block, as binmax_one's TWO; kb == AP_ONE_BIN: one bin, out[0] only. SPLIT=false
+   compiles the one-bin case alone. The transform with its 32 inlined sinks is 15-27 KB of
+   straight-line code, so at 16 lanes one SPLIT=true instance serves both cases: two copies
+   alternating block by block cost Cascade Lake and Zen 5 3.3% at n=1024 (the stage is
+   frontend-bound there). At 8 lanes the separate instances measured as fast (Haswell) or
+   faster (Ivy Bridge, +1..3% merged). */
 #define AP_ONE_BIN (~(size_t)0 >> 1)   /* the largest long, so (long)kb stays positive */
+#undef AP_SINK_INLINE
+#if !defined(AP_SIMD_AVX1) && HWY_ARCH_X86 && HWY_TARGET <= HWY_AVX3
+#define AP_SINK_INLINE AP_LAMBDA_INLINE
+#else
+#define AP_SINK_INLINE
+#endif
+template <bool SPLIT>
 static HWY_NOINLINE MF_PEAK_SECTION void binmax_fused32(BP*p,float thr,ap_peak*out,int conj,
                                                        size_t ws,size_t we,size_t kb){
-  const bool TWO = kb != AP_ONE_BIN;
+  const bool TWO = SPLIT && kb != AP_ONE_BIN;
   const float t2 = thr>0.f ? thr*thr : 0.f;
   vf am = V_SET1(t2), arr = V_ZERO(), aii = V_ZERO();
   vi axx = VI_SET1(-1);
@@ -1184,9 +1194,10 @@ static HWY_NOINLINE MF_PEAK_SECTION void binmax_fused32(BP*p,float thr,ap_peak*o
 
     const float *ar=p->ire+(size_t)b*32*AP_W;
     const float *ai=p->iim+(size_t)b*32*AP_W;
-    /* always_inline: with TWO the body is large enough that GCC called it once per output,
-       and every call spilled the transform's live vectors (all ymm/zmm are caller-saved). */
-    fftsr32_unit_sink(ar,ai,p->sR,p->sI,1,rowmask,[&](int k1,vf rr,vf ii) AP_LAMBDA_INLINE {
+    /* At 16 lanes always_inline: there the SPLIT body is large enough that GCC called it once
+       per output, and every call spilled the transform's live vectors (all zmm are
+       caller-saved). The 8-lane instances keep GCC's choice, as measured. */
+    fftsr32_unit_sink(ar,ai,p->sR,p->sI,1,rowmask,[&](int k1,vf rr,vf ii) AP_SINK_INLINE {
       vf m = V_FMADD(rr,rr,V_MUL(ii,ii));
       if(__builtin_expect(k1 == clo && need_mask_clo, 0)){
         m = V_SEL(vmask_clo, V_SET1(-1.f), m);
@@ -1691,7 +1702,9 @@ static HWY_NOINLINE MF_PEAK_SECTION int binmax_prod_threshold(void *vp,const flo
     if(__builtin_expect(thr>0.f && j1<=j0+1 && p->fuse==2 && p->ilay && p->gmajor, 1)) {
       stageA_prod_32(p,dr,di,tr,ti);
       for(size_t j=0;j<nbf;j++) if(j<j0 || j>j1){ out[j].index=-1; out[j].re=0.f; out[j].im=0.f; out[j].magnitude=0.f; }
-      binmax_fused32(p,thr,out+j0,conj,ws,we,j0==j1 ? AP_ONE_BIN : org+(j0+1)*binsize);
+      const size_t kb=j0==j1 ? AP_ONE_BIN : org+(j0+1)*binsize;
+      if(AP_W==16 || kb!=AP_ONE_BIN) binmax_fused32<true>(p,thr,out+j0,conj,ws,we,kb);
+      else binmax_fused32<false>(p,thr,out+j0,conj,ws,we,kb);
       return 0;
     }
   }
