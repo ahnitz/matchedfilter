@@ -92,10 +92,10 @@ typedef struct {
      int16 slab, rounded to nearest as the screen's data quantisation is. */
   void (*q15_slab8)(size_t N, const float *const *rr, const float *const *ri, const float *sc,
                     int16_t *xr, int16_t *xi);
-  /* A spectrum into a plan's split, group-major layout (rsplit-inl.h split_store). */
+  /* A spectrum into a plan's split, group-major layout (loads-inl.h split_store). */
   void (*split_store)(const float *x, float *re, float *im, size_t n, int conj, int n1, int n2,
                       int w);
-  /* dst = src[k*stride] * scale for k < have, zero to n (rsplit-inl.h scale_load). */
+  /* dst = src[k*stride] * scale for k < have, zero to n (loads-inl.h scale_load). */
   void (*scale_load)(float *dst, const float *src, size_t have, size_t n, size_t stride,
                      float scale);
 } ap_backend;

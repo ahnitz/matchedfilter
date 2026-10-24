@@ -19,6 +19,9 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ### Performance
 
+- The AVX back end (Sandy and Ivy Bridge) has its own block and spectrum loads (scale_load,
+  split_store, now in src/loads-inl.h). It had inherited SSE4's, and split_store's vector path
+  needs the plan's lane width, 8 for AVX, so it ran its scalar loop there. Identical results.
 - At 16 lanes (AVX-512), the fused peak scan at n=1024 runs one instance for blocks with one
   bin and with two, instead of one of each. Each carries the 32-point transform with its
   inlined scan (27 KB), and alternating the two block by block thrashed the instruction cache

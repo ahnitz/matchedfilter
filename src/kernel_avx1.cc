@@ -5,7 +5,9 @@
  * Highway targets use (balanced-inl.h and everything it includes for the float path). The
  * table starts as the SSE4 back end's and replaces its float entries: the Q15 screen (int16,
  * which AVX1 cannot widen), the direct refine's correlation and the real-series kernels stay
- * SSE4's. Results are the SSE4 path's bit for bit: both multiply then add (no FMA).
+ * SSE4's. Results are the SSE4 path's bit for bit: both multiply then add (no FMA). The block
+ * and spectrum loads (loads-inl.h) are AVX's too: split_store's vector path takes the plan's
+ * lane width, 8 here, so SSE4's copy ran its scalar loop.
  */
 #include <math.h>
 #include <stdio.h>
@@ -47,6 +49,8 @@ extern "C" const ap_backend *ap_avx1_backend(const ap_backend *base) {
     be.create_pairbatch = k::create_small;
     be.broadcast_data = k::broadcast_data;
     be.binmax_prod_threshold = k::binmax_prod_threshold;
+    be.split_store = k::split_store;     /* its vector path needs w == the plan's 8 lanes */
+    be.scale_load = k::scale_load;
     ready = 1;
   }
   return &be;
