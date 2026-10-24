@@ -64,39 +64,37 @@ def calibrate_costs(n, ntemplates, blocks=256, reps=5, seed=11, group=None):
     mag = np.zeros((blocks, nt, 1), np.float32); cnt = np.zeros((blocks, nt), np.int32)
     big = float(np.finfo(np.float32).max)
 
-    def run(chain, thr, reps=reps, q15=False, stats=False):
-        """Pairs per call and per-tier (band, passed, ticks) per call: medians over repetitions.
-        With stats, also the Q15 screen's (on, passed, ticks) per call."""
+    pairs = blocks * nt
+
+    def plan(chain, thr, q15=False):
+        """A plan of this chain at these thresholds, warmed by one call (whose passes it keeps)."""
         with _gc._internal_plans():
             p = _core.HMF(n, 1, nt, list(chain), group, n)
         p.set_reference(ref); p.set_template_batch(0, spec); p.set_thresholds(list(thr))
         if q15:
             p.set_q15(True)
-        p.run_series(ser, starts, ws, we, 0, nt, n, big, idx, val, mag, cnt)      # warm-up
-        prev = p.tier_stats(); rows = []
-        qprev = p.q15_stats(); qrows = []
-        for _ in range(reps):
-            p.run_series(ser, starts, ws, we, 0, nt, n, big, idx, val, mag, cnt)
-            cur = p.tier_stats()
-            rows.append([(c[1] - q[1], c[2] - q[2]) for c, q in zip(cur, prev)])
-            prev = cur
-            qcur = p.q15_stats()
-            qrows.append((qcur[1] - qprev[1], qcur[2] - qprev[2]))
-            qprev = qcur
-        med = [(prev[i][0], float(np.median([r[i][0] for r in rows])), float(np.median([r[i][1] for r in rows])))
-               for i in range(len(prev))]
-        if stats:
-            return blocks * nt, med, (qprev[0], float(np.median([r[0] for r in qrows])),
-                                      float(np.median([r[1] for r in qrows])))
-        return blocks * nt, med
+        p.run_series(ser, starts, ws, we, 0, nt, n, big, idx, val, mag, cnt)
+        return p
+
+    def sample(p):
+        """One timed call after an untimed one on the same plan (the caches as a run of calls
+        leaves them: timed straight after another plan's, the refine and later tiers read 25-30%
+        dearer): per tier (and the refine, last) (passed, ticks), the screen's (passed, ticks),
+        and the call's ticks outside its tiers and refine."""
+        p.run_series(ser, starts, ws, we, 0, nt, n, big, idx, val, mag, cnt)
+        t0, q0, s0 = p.tier_stats(), p.q15_stats(), p.series_ticks()
+        p.run_series(ser, starts, ws, we, 0, nt, n, big, idx, val, mag, cnt)
+        t1, q1, s1 = p.tier_stats(), p.q15_stats(), p.series_ticks()
+        tiers = [(c[1] - q[1], c[2] - q[2]) for c, q in zip(t1, t0)]
+        return tiers, (q1[1] - q0[1], q1[2] - q0[2]), s1 - s0 - sum(t[1] for t in tiers)
 
     def thr_for(b, density):
-        """Tier-0 threshold at band b passing about `density` of pairs (secant on log pass rate)."""
+        """Tier-0 threshold at band b passing about `density` of pairs (bisection on the pass
+        rate). Pass counts only: nothing here is timed."""
         lo, hi = 0.0, 16.0
         for _ in range(14):
             mid = 0.5 * (lo + hi)
-            pairs, st = run((b,), (mid,), reps=1)
-            frac = st[0][1] / pairs
+            frac = plan((b,), (mid,)).tier_stats()[0][1] / pairs
             if frac > density:
                 lo = mid
             else:
@@ -105,56 +103,69 @@ def calibrate_costs(n, ntemplates, blocks=256, reps=5, seed=11, group=None):
                 break
         return mid
 
-    dense, sparse, refine = {}, {}, []
-    block = []
-    for b in bands:
-        pairs, st = run((b,), (big,))
-        dense[b] = st[0][2] / pairs
-    # Per-block fixed work: a whole run_series call minus its tiers and refine (nothing passes), per block.
-    for b in bands[:2]:
-        with _gc._internal_plans():
-            p = _core.HMF(n, 1, nt, [b], group, n)
-        p.set_reference(ref); p.set_template_batch(0, spec); p.set_thresholds([big])
-        p.run_series(ser, starts, ws, we, 0, nt, n, big, idx, val, mag, cnt)
-        per = []
-        for _ in range(reps):
-            s0, t0 = p.series_ticks(), sum(x[2] for x in p.tier_stats())
-            p.run_series(ser, starts, ws, we, 0, nt, n, big, idx, val, mag, cnt)
-            per.append((p.series_ticks() - s0 - (sum(x[2] for x in p.tier_stats()) - t0)) / blocks)
-        block.append(float(np.median(per)))
+    # Every timed quantity is a job with its own warmed plan. The jobs run round-robin, `reps`
+    # rounds, each round starting one job later, and each quantity is the minimum over its
+    # rounds. Interference (another process on the core or its SMT sibling, a busy memory
+    # system) only ever adds time, and a round-robin gives every job the same mix of load
+    # states, so the minima keep the costs' ratios -- which are all the chain choice and the
+    # tiers' threshold split read -- under load that changes during the calibration. Timed in
+    # sequence with medians, one band's samples could fall in a busy spell and another's not:
+    # costs moved up to 4x between processes under dynamic load (dev2, 2026-10-24).
     b0 = bands[0]
+    g0 = {f: thr_for(b0, f) for f in _gc._CAL_DENSITIES}
+    qbands = [] if g16 else [b for b in bands if _gc._q15_band(b)]
+    gq = {(b, f): thr_for(b, f) for b in qbands for f in _gc._CAL_DENSITIES}
+    jobs = {("dense", b): plan((b,), (big,)) for b in bands}
     for f in _gc._CAL_DENSITIES:
-        g0 = thr_for(b0, f)
-        pairs, st = run((b0,), (g0,))
-        if st[-1][1]:
-            refine.append((st[0][1] / pairs, st[-1][2] / st[-1][1]))
+        jobs[("refine", f)] = plan((b0,), (g0[f],))
         for b in bands[1:]:
-            pairs, st = run((b0, b), (g0, big))
-            if st[0][1]:
-                sparse.setdefault(b, []).append((st[0][1] / pairs, st[1][2] / st[0][1]))
+            jobs[("sparse", b, f)] = plan((b0, b), (g0[f], big))
+    for b in qbands:
+        jobs[("screen", b)] = plan((b,), (big,), q15=True)
+        for f in _gc._CAL_DENSITIES:
+            jobs[("screen", b, f)] = plan((b,), (gq[(b, f)],), q15=True)
+    names = list(jobs)
+    got = {nm: [] for nm in names}
+    rounds = max(3, (reps + 1) // 2)      # a settle call per sample: about the calls reps took timed alone
+    for r in range(rounds):
+        k = (r * max(len(names) // rounds, 1)) % len(names)
+        for nm in names[k:] + names[:k]:
+            got[nm].append(sample(jobs[nm]))
+    del jobs
+
+    def least(nm, value):
+        return min(value(x) for x in got[nm])
+
+    dense = {b: least(("dense", b), lambda x: x[0][0][1]) / pairs for b in bands}
+    # Per-block fixed work: a whole run_series call minus its tiers and refine (nothing passes).
+    block = [least(("dense", b), lambda x: x[2]) / blocks for b in bands[:2]]
+    sparse, refine = {}, []
+    for f in _gc._CAL_DENSITIES:
+        t = got[("refine", f)][0][0]
+        if t[-1][0]:
+            refine.append((t[0][0] / pairs, least(("refine", f), lambda x: x[0][-1][1]) / t[-1][0]))
+        for b in bands[1:]:
+            t = got[("sparse", b, f)][0][0]
+            if t[0][0]:
+                sparse.setdefault(b, []).append((t[0][0] / pairs, least(("sparse", b, f), lambda x: x[0][1][1]) / t[0][0]))
     # the first band can only be a first tier; give it the next band's sparse curve for completeness
     if bands[1:]:
         sparse.setdefault(b0, list(sparse.get(bands[1], [])))
     screen = {}
-    if not g16:
-        for b in bands:
-            if not _gc._q15_band(b):
-                continue
-            # screen alone: at an unreachable threshold nothing passes, so the tier's ticks are
-            # the screen's; then at calibrated densities, how many pairs it passes and what
-            # each costs beyond the screen (compaction: the screen is the tier's gate)
-            pairs, st = run((b,), (big,), q15=True)
-            ent = {"dense": st[0][2] / pairs, "excess": [], "recheck": 0.0}
-            rc = []
-            for f in _gc._CAL_DENSITIES:
-                g = thr_for(b, f)
-                pairs, st, qs = run((b,), (g,), q15=True, stats=True)
-                if st[0][1] and qs[1]:
-                    ent["excess"].append((st[0][1] / pairs, qs[1] / pairs))
-                    rc.append((st[0][2] - qs[2]) / qs[1])
-            if ent["excess"]:
-                ent["recheck"] = float(np.median(rc))
-                screen[b] = ent
+    for b in qbands:
+        # screen alone: at an unreachable threshold nothing passes, so the tier's ticks are the
+        # screen's; then at calibrated densities, how many pairs it passes and what each costs
+        # beyond the screen (compaction: the screen is the tier's gate)
+        ent = {"dense": least(("screen", b), lambda x: x[0][0][1]) / pairs, "excess": [], "recheck": 0.0}
+        rc = []
+        for f in _gc._CAL_DENSITIES:
+            t, q, _ = got[("screen", b, f)][0]
+            if t[0][0] and q[0]:
+                ent["excess"].append((t[0][0] / pairs, q[0] / pairs))
+                rc.append(least(("screen", b, f), lambda x: x[0][0][1] - x[1][1]) / q[0])
+        if ent["excess"]:
+            ent["recheck"] = float(np.median(rc))
+            screen[b] = ent
     cm = _gc.CostModel(n, dense, sparse, refine, block=float(np.median(block)), screen=screen)
     if path is not None:          # another process's model, stored first, is the one used
         cm = _gc.CostModel.from_dict(_gc._store_first(path, skey, cm.to_dict(), _gc._cost_model_ok))

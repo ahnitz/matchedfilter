@@ -435,9 +435,13 @@ class HierarchicalFilter(MatchedFilter):
                                                  self.fd, (b,), cost=base, window=self.search_window)
                 if pl is None:
                     continue
-                # Pricing only ranks chains: a tenth of the draws. The chain that runs gets its
-                # window from the full draw count (_execution_plan).
-                hw = self._direct_halfwidth((b,), pl["thresholds"], nsim=2000)
+                # The window the chain will run with (_resolve: the full draw count), not a
+                # cheaper estimate: the half-width is a tail percentile, and at band 256 a tenth
+                # of the draws gave 2 coarse samples against 62 (33 lags against 993), so the
+                # model priced a direct refine the engine never ran and chose single-tier
+                # chains 50% slower than the best (test27 leaves, dev2, 2026-10-24). The draws
+                # are shared (gatechain._DIRECT_DRAWS), so pricing adds no simulation.
+                hw = self._direct_halfwidth((b,), pl["thresholds"])
                 lags = 2 * hw * (self.n // b) + 1
                 # the correlation, plus the per-lag binning around it (~4 ticks a lag)
                 prices[int(b)] = lagtap * L * lags + 4.0 * lags
