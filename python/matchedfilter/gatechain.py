@@ -425,7 +425,11 @@ class CostModel:
             return c, False
         passed = self.screen_reach(b, reach1)
         cq = sc["dense"] + passed * sc["recheck"]
-        return (cq, True) if cq < c else (c, False)
+        # A close call takes the screen, as pick_stable takes its canonical chain within TIE:
+        # calibration moves by about that much between processes, and a strict comparison
+        # flipped the screen between processes under load (dev2, 2026-10-24) -- which also
+        # moves where the pairs it passes are refined.
+        return (cq, True) if cq <= c * (1.0 + TIE) else (c, False)
 
     def chain_forward_delta(self, chain, reach, ntemplates, model_f=False):
         """Per-pair change from the full forward this chain's forward makes (<= 0), with the
@@ -471,7 +475,7 @@ class CostModel:
 
     def chain_cost(self, chain, reach):
         """reach[i] = P(a pair reaches tier i+1) for i = 0..k-1, reach[k] = P(reaches refine)."""
-        c = self.first_tier(chain[0], reach[1] if len(reach) > 1 else 1.0)[0]
+        c, screened = self.first_tier(chain[0], reach[1] if len(reach) > 1 else 1.0)
         if len(reach) > 1:
             # A bounding first tier's extra passes are the next stage's to pay for. Only the
             # first stage after it is scaled: those pairs sit just under the gate, so a later
@@ -480,7 +484,10 @@ class CostModel:
             reach[1] = min(1.0, reach[1] * self.pass_excess(chain[0], reach[1]))
         for i in range(1, len(chain)):
             c += reach[i] * self.sparse(chain[i], reach[i])
-        c += reach[len(chain)] * self.refine_for(chain, reach[len(chain)])
+        # A one-tier chain behind the Q15 screen has no coarse lag to refine around (hmf.c: the
+        # screen reports none), so its survivors refine by transform, as the engine runs them.
+        f = reach[len(chain)]
+        c += f * (self.refine(f) if screened and len(chain) == 1 else self.refine_for(chain, f))
         return c
 
 
