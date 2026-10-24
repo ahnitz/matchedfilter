@@ -67,14 +67,27 @@ def calibrate_costs(n, ntemplates, blocks=256, reps=5, seed=11, group=None):
     pairs = blocks * nt
 
     def plan(chain, thr, q15=False):
-        """A plan of this chain at these thresholds, warmed by one call (whose passes it keeps)."""
+        """A plan of this chain at these thresholds (sample() settles it before each timing)."""
         with _gc._internal_plans():
             p = _core.HMF(n, 1, nt, list(chain), group, n)
         p.set_reference(ref); p.set_template_batch(0, spec); p.set_thresholds(list(thr))
         if q15:
             p.set_q15(True)
-        p.run_series(ser, starts, ws, we, 0, nt, n, big, idx, val, mag, cnt)
         return p
+
+    # The threshold searches count passes on the first `cblocks` blocks only: a density is a
+    # target to within 25% (each cost's own density is read from the full call's counts), and
+    # 2048 pairs see ~20 passes at 1%. At the full 256 blocks the searches were 45% of the
+    # calibration.
+    cblocks = min(blocks, 32)
+    cs_, cws, cwe = starts[:cblocks], ws[:cblocks], we[:cblocks]
+    cidx, cval, cmag, ccnt = idx[:cblocks], val[:cblocks], mag[:cblocks], cnt[:cblocks]
+
+    def passes(chain, thr):
+        """Pairs the first tier passes on the counting blocks (nothing timed)."""
+        p = plan(chain, thr)
+        p.run_series(ser, cs_, cws, cwe, 0, nt, n, big, cidx, cval, cmag, ccnt)
+        return p.tier_stats()[0][1] / (cblocks * nt)
 
     def sample(p):
         """One timed call after an untimed one on the same plan (the caches as a run of calls
@@ -94,7 +107,7 @@ def calibrate_costs(n, ntemplates, blocks=256, reps=5, seed=11, group=None):
         lo, hi = 0.0, 16.0
         for _ in range(14):
             mid = 0.5 * (lo + hi)
-            frac = plan((b,), (mid,)).tier_stats()[0][1] / pairs
+            frac = passes((b,), (mid,))
             if frac > density:
                 lo = mid
             else:

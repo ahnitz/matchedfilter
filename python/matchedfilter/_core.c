@@ -1,3 +1,4 @@
+#include <string.h>
 /* matchedfilter Python extension: the matched filter.
  *
  * The whole D x T pair loop happens in one call into C, so no per-pair Python
@@ -1163,6 +1164,82 @@ static PyObject *M_series_group(PyObject *self,PyObject *args){
   if(n<1||req<1){ PyErr_SetString(PyExc_ValueError,"n and the requested group must be positive"); return NULL; }
   return PyLong_FromLong(ap_hmf_effective_group((size_t)n,req));
 }
+void ap_gauss_fill(float *out, size_t n, uint64_t seed, uint64_t offset);   /* src/gauss.cc */
+static PyObject *M_gauss_fill(PyObject *self,PyObject *args){
+  PyObject *o; unsigned long long seed, offset;
+  if(!PyArg_ParseTuple(args,"OKK",&o,&seed,&offset)) return NULL;
+  Py_buffer b;
+  if(PyObject_GetBuffer(o,&b,PyBUF_WRITABLE|PyBUF_C_CONTIGUOUS|PyBUF_FORMAT)<0) return NULL;
+  if(!b.format || strcmp(b.format,"f")!=0 || b.itemsize!=4){
+    PyBuffer_Release(&b); PyErr_SetString(PyExc_TypeError,"gauss_fill needs a C-contiguous float32 buffer"); return NULL;
+  }
+  Py_BEGIN_ALLOW_THREADS
+  ap_gauss_fill((float*)b.buf,(size_t)(b.len/4),(uint64_t)seed,(uint64_t)offset);
+  Py_END_ALLOW_THREADS
+  PyBuffer_Release(&b);
+  Py_RETURN_NONE;
+}
+/* row_peaks(z, scale, sig, start, step, amp, peak, at): into peak (float32[m]) and at (int32[m]),
+   per row i of a
+   complex64 (m, L) array (rows may be strided), the largest |scale z[i,j] + amp[i] sig[start[i] +
+   j step]| over j and its j; sig (complex64, long enough that start + (L-1) step stays inside) and
+   the signal term are optional (sig None). The gate model's simulations reduce every transformed
+   draw this way (gatechain: noise block maxima, direct-refine draws): one pass, where NumPy took
+   four or five over each block and its temporaries. |.| is sqrt(re^2 + im^2) of the largest. */
+static PyObject *M_row_peaks(PyObject *self,PyObject *args){
+  PyObject *zo,*sigo,*sto,*ampo,*pko,*ato; double scale; long long step;
+  if(!PyArg_ParseTuple(args,"OdOOLOOO",&zo,&scale,&sigo,&sto,&step,&ampo,&pko,&ato)) return NULL;
+  Py_buffer z,sg={0},st={0},am={0},pb,ab;
+  if(PyObject_GetBuffer(pko,&pb,PyBUF_WRITABLE|PyBUF_C_CONTIGUOUS|PyBUF_FORMAT)<0) return NULL;
+  if(PyObject_GetBuffer(ato,&ab,PyBUF_WRITABLE|PyBUF_C_CONTIGUOUS|PyBUF_FORMAT)<0){ PyBuffer_Release(&pb); return NULL; }
+  if(PyObject_GetBuffer(zo,&z,PyBUF_STRIDES|PyBUF_FORMAT)<0){ PyBuffer_Release(&pb); PyBuffer_Release(&ab); return NULL; }
+  int ok = z.ndim==2 && z.itemsize==8 && z.format && strcmp(z.format,"Zf")==0 && z.strides[1]==8;
+  const int has_sig = sigo!=Py_None;
+  if(ok && has_sig){
+    if(PyObject_GetBuffer(sigo,&sg,PyBUF_C_CONTIGUOUS|PyBUF_FORMAT)<0){ PyBuffer_Release(&z); return NULL; }
+    if(PyObject_GetBuffer(sto,&st,PyBUF_C_CONTIGUOUS|PyBUF_FORMAT)<0){ PyBuffer_Release(&z); PyBuffer_Release(&sg); return NULL; }
+    if(PyObject_GetBuffer(ampo,&am,PyBUF_C_CONTIGUOUS|PyBUF_FORMAT)<0){ PyBuffer_Release(&z); PyBuffer_Release(&sg); PyBuffer_Release(&st); return NULL; }
+    ok = sg.itemsize==8 && strcmp(sg.format,"Zf")==0 && st.itemsize==8 && (strcmp(st.format,"q")==0||strcmp(st.format,"l")==0)
+         && am.itemsize==8 && strcmp(am.format,"Zf")==0 && st.len/8==z.shape[0] && am.len/8==z.shape[0];
+  }
+  if(ok) ok = strcmp(pb.format,"f")==0 && pb.len/4==z.shape[0] && ab.itemsize==4 && (strcmp(ab.format,"i")==0||strcmp(ab.format,"l")==0) && ab.len/4==z.shape[0];
+  if(!ok){
+    PyBuffer_Release(&z); PyBuffer_Release(&pb); PyBuffer_Release(&ab);
+    if(has_sig){ PyBuffer_Release(&sg); PyBuffer_Release(&st); PyBuffer_Release(&am); }
+    PyErr_SetString(PyExc_TypeError,"row_peaks: z complex64 (m, L) with unit column stride; sig complex64, start int64 (m), amp complex64 (m); peak float32 (m), at int32 (m)");
+    return NULL;
+  }
+  const Py_ssize_t m=z.shape[0], L=z.shape[1];
+  float *pk=(float*)pb.buf; int *at=(int*)ab.buf;
+  const float sc=(float)scale; const Py_ssize_t slen = has_sig ? sg.len/8 : 0;
+  int bad=0;
+  Py_BEGIN_ALLOW_THREADS
+  for(Py_ssize_t i=0;i<m;i++){
+    const float *row=(const float*)((const char*)z.buf+i*z.strides[0]);
+    float best=-1.f; int bj=0;
+    if(has_sig){
+      const float *sv=(const float*)sg.buf; const long long s0=((const long long*)st.buf)[i];
+      const float ar=((const float*)am.buf)[2*i], ai=((const float*)am.buf)[2*i+1];
+      if(s0<0 || s0+(L-1)*step>=slen){ bad=1; break; }
+      for(Py_ssize_t j=0;j<L;j++){
+        const float *q=sv+2*(s0+j*step);
+        const float re=sc*row[2*j]+ar*q[0]-ai*q[1], im=sc*row[2*j+1]+ar*q[1]+ai*q[0];
+        const float a=re*re+im*im; if(a>best){ best=a; bj=(int)j; }
+      }
+    } else {
+      for(Py_ssize_t j=0;j<L;j++){
+        const float re=sc*row[2*j], im=sc*row[2*j+1], a=re*re+im*im;
+        if(a>best){ best=a; bj=(int)j; }
+      }
+    }
+    pk[i]=sqrtf(best); at[i]=bj;
+  }
+  Py_END_ALLOW_THREADS
+  PyBuffer_Release(&z); PyBuffer_Release(&pb); PyBuffer_Release(&ab);
+  if(has_sig){ PyBuffer_Release(&sg); PyBuffer_Release(&st); PyBuffer_Release(&am); }
+  if(bad){ PyErr_SetString(PyExc_IndexError,"row_peaks: a row's signal window leaves sig"); return NULL; }
+  Py_RETURN_NONE;
+}
 static PyObject *M_l1d_bytes(PyObject *self,PyObject *args){
   (void)self; (void)args;
   return PyLong_FromSize_t(ap_l1d_bytes());
@@ -1529,6 +1606,8 @@ static PyTypeObject RootType={
 
 static PyMethodDef methods[]={
   {"backend",M_backend,METH_NOARGS,"backend() -> name of the selected kernel"},
+  {"row_peaks",M_row_peaks,METH_VARARGS,"row_peaks(z, scale, sig, start, step, amp, peak, at): per row the largest |scale z + amp sig[start + j step]| and its j (gatechain simulations)"},
+  {"gauss_fill",M_gauss_fill,METH_VARARGS,"gauss_fill(out float32, seed, offset): out[i] = standard normal draw offset + i of stream seed (src/gauss.cc)"},
   {"l1d_bytes",M_l1d_bytes,METH_NOARGS,"l1d_bytes() -> the L1 data cache size the OS reports, or 0 if unknown"},
   {"series_group",M_series_group,METH_VARARGS,"series_group(n, requested) -> the series group a hierarchical plan of size n runs"},
   {"forward_cost",M_forward_cost,METH_VARARGS,"forward_cost(n, reps=9) -> (engine s, platform s or -1) per block forward"},
