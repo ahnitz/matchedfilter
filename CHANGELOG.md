@@ -11,6 +11,11 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ### Performance
 
+- AVX-512 transforms transpose their 16x16 corner turn in registers (in-lane unpacks, then
+  two rounds of 128-bit block shuffles) instead of the generic four-stage network, which the
+  compiler kept as rolled loops through memory: 35 cycles for the pair of 16x16
+  transposes against 195 on Zen 5. Results are bit-identical. pycbc's test27 flat fine stage
+  takes 22% less time (7.7 to 6.0 s on dev2) and the whole job about 5% less.
 - The gate model finds a result it reused for a similar profile again by that profile's own
   signature. Before, every lookup of a segment's reference took the similarity search
   (~1 ms, against ~0.03 ms), and a hierarchical filter looks its plan and chain choice up
