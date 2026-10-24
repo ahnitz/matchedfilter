@@ -59,6 +59,16 @@ _W = 3                       # fine integer lags either side
 _SIG = np.sqrt(2.0)
 
 
+#: Large profiles' signatures by the memory they hold ((data address, size, dtype) ->
+#: (weakref to the owning array, sum and end bins, signature)): a bank prices its block sizes
+#: on the full-resolution reference (2^19 bins), every leaf bank of a top is handed the same
+#: array, and hashing it per bank cost 14 s of a Haswell job's setup. Keyed by address, not by
+#: object: np.asarray(x, dtype) returns a new view of the same data. The sum and end bins guard
+#: against an array changed in place.
+_SIG_MEMO = {}
+_SIG_MEMO_MIN = 1 << 16
+
+
 def _profile_sig(power):
     """Signature of a profile's shape: its normalised bins to 2^-32 of the total, so only
     profiles equal to float rounding share it. (A 24-bin, 1%-quantised signature let profiles
@@ -67,6 +77,27 @@ def _profile_sig(power):
     which compares what the gates depend on (gatechain._similar_get)."""
     if power is None:
         return b""
+    if isinstance(power, np.ndarray) and power.size >= _SIG_MEMO_MIN and power.flags.c_contiguous:
+        import weakref
+        owner = power
+        while isinstance(owner.base, np.ndarray):
+            owner = owner.base
+        key = (power.__array_interface__["data"][0], power.size, power.dtype.str)
+        check = (float(np.sum(power)), float(power.flat[0]), float(power.flat[-1]))
+        hit = _SIG_MEMO.get(key)
+        if hit is not None and hit[0]() is owner and hit[1] == check:
+            return hit[2]
+        sig = _profile_sig_uncached(power)
+        try:
+            ref = weakref.ref(owner, lambda _r, k=key: _SIG_MEMO.pop(k, None))
+        except TypeError:
+            return sig
+        _SIG_MEMO[key] = (ref, check, sig)
+        return sig
+    return _profile_sig_uncached(power)
+
+
+def _profile_sig_uncached(power):
     p = np.asarray(power, dtype=np.float64)
     tot = float(np.sum(p))
     if tot <= 0:

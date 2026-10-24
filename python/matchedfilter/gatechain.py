@@ -164,6 +164,54 @@ def _similar_put(kind, u, params, value):
     del lst[:-_CACHE_MAX]
 
 
+class _Normals:
+    """Standard normal float32 draws from one counter-based stream (_core.gauss_fill,
+    src/gauss.cc): every draw depends only on the seed, the simulation's domain and its
+    position, so a simulation is reproducible however it is chunked. ~1-6 ns a draw against
+    NumPy's ~8-40; the draws were most of a job's setup simulation on Haswell."""
+
+    def __init__(self, seed, domain):
+        self.seed = ((int(domain) & 0xFFFFFFFF) << 32) | (int(seed) & 0xFFFFFFFF)
+        self.pos = 0
+
+    def take(self, shape):
+        from . import _core
+        out = np.empty(shape, np.float32)
+        _core.gauss_fill(out, self.seed, self.pos)
+        self.pos += out.size
+        return out
+
+    def complex(self, shape, scale=1.0):
+        """Complex draws, real and imaginary parts consecutive draws of the stream, times scale
+        (broadcast along the last axis): one fill, viewed in place."""
+        from . import _core
+        shape = tuple(shape) if np.ndim(shape) else (int(shape),)
+        z = np.empty(shape, np.complex64)
+        _core.gauss_fill(z.view(np.float32).reshape(-1), self.seed, self.pos)
+        self.pos += 2 * z.size
+        if np.ndim(scale) or scale != 1.0:
+            z *= np.asarray(scale, np.float32)
+        return z
+
+
+def _row_peaks(z, scale, sig=None, start=None, step=0, amp=None):
+    """Per row of z (complex64, rows may be strided): the largest |scale z + amp sig[start + j
+    step]| and its j, in one pass (_core.row_peaks)."""
+    from . import _core
+    m = z.shape[0]
+    pk, at = np.empty(m, np.float32), np.empty(m, np.int32)
+    if sig is None:
+        _core.row_peaks(z, float(scale), None, None, 0, None, pk, at)
+    else:
+        _core.row_peaks(z, float(scale), sig, np.ascontiguousarray(start, np.int64), int(step),
+                        np.ascontiguousarray(amp, np.complex64), pk, at)
+    return pk, at
+
+
+#: Stream domains, one per simulation, so their draws never coincide.
+_DOMAIN_SIGNAL, _DOMAIN_NOISE, _DOMAIN_DIRECT = 1, 2, 3
+
+
 def signal_draws(power, n, bands, snr, nsamp, seed=13):
     """Joint draws of every band's coarse maximum and local fine maximum under a signal of strength snr.
 
@@ -210,7 +258,7 @@ def signal_draws(power, n, bands, snr, nsamp, seed=13):
 
     steps = [n // b for b in bands]
     step0 = steps[0]
-    rng = np.random.default_rng(seed)
+    draws = _Normals(seed, _DOMAIN_SIGNAL)
     m = max(nsamp // step0, 256)
     C_out, F_out = [], []
     for off in range(step0):
@@ -227,8 +275,7 @@ def signal_draws(power, n, bands, snr, nsamp, seed=13):
             C = look(S, lag) / fr
             C = (C + C.conj().T) / 2 + eye
             L = np.linalg.cholesky(C).astype(np.complex64)
-            w = (rng.standard_normal((m, len(taus)), dtype=np.float32)
-                 + 1j * rng.standard_normal((m, len(taus)), dtype=np.float32)) / np.float32(np.sqrt(2))
+            w = draws.complex((m, len(taus)), 1.0 / np.sqrt(2))
             seg_noise.append((w @ L.T) * np.float32(_SIG * np.sqrt(fr)))      # unnormalised: variance fr
         nfull = sum(sn for sn in seg_noise if sn is not None)
         afull = np.abs(np.float32(snr) * look(full_corr, taus - off).astype(np.complex64)[None, :] + nfull)
@@ -289,15 +336,14 @@ def noise_block_maxima(power, n, bands, nsim=20000, seed=29, chunk=2000, window=
     bmax = bands[-1]
     sd = np.sqrt(p[:bmax]).astype(np.float32)
     F = np.array([p[:b].sum() for b in bands])
-    rng = np.random.default_rng(seed)
+    draws = _Normals(seed, _DOMAIN_NOISE)
     out = np.empty((nsim, len(bands)), np.float32)
     for s in range(0, nsim, chunk):
         m = min(chunk, nsim - s)
-        X = ((rng.standard_normal((m, bmax), dtype=np.float32)
-              + 1j * rng.standard_normal((m, bmax), dtype=np.float32)) / np.float32(np.sqrt(2))) * sd
+        X = draws.complex((m, bmax), sd / np.float32(np.sqrt(2)))
         for i, b in enumerate(bands):
-            z = np.fft.ifft(X[:, :b], axis=1) * np.float32(b)
-            out[s:s + m, i] = np.abs(z[:, :counts[i]]).max(1) * np.float32(_SIG / np.sqrt(F[i]))
+            z = np.fft.ifft(X[:, :b], axis=1)
+            out[s:s + m, i] = _row_peaks(z[:, :counts[i]], b * _SIG / np.sqrt(F[i]))[0]
     _cache_put(_NOISE_CACHE, key, out)
     _similar_put("noise", unit, sim_params, out)
     return out
@@ -879,7 +925,8 @@ class _DirectDraws:
 
     def __init__(self, p, n, win, snr, seed, bands):
         self.n, self.win, self.snr = n, win, float(snr)
-        self.rng = np.random.default_rng(seed)
+        self.rng = np.random.default_rng(seed)          # the lags and phases
+        self._draws = _Normals(seed, _DOMAIN_DIRECT)    # the noise
         self.bands = tuple(int(b) for b in bands)
         w0, w1 = win
         self.A = np.fft.ifft(p) * n
@@ -900,25 +947,32 @@ class _DirectDraws:
         self.cam = {b: [] for b in self.bands}
 
     def extend(self, nsim):
-        """Draw chunks until nsim draws are held."""
+        """Draw chunks until nsim draws are held.
+
+        The noise comes from the counter-based stream (_Normals), the lags and phases from
+        NumPy's generator, and everything runs in single precision, in place: in double
+        precision, from NumPy's generator, this was most of a Haswell job's setup simulation."""
         n, (w0, w1) = self.n, self.win
+        if not hasattr(self, "_A32"):
+            self._A32 = np.concatenate([self.A, self.A]).astype(np.complex64)
+            self._scale32 = (self.sq / np.sqrt(2)).astype(np.float32)
+            self._tier32 = {b: (np.float32(b / np.sqrt(t[0])), np.concatenate([t[1], t[1]]).astype(np.complex64))
+                            for b, t in self.tier.items()}
         while len(self.fine_ok) * _DIRECT_CHUNK < nsim:
             m = _DIRECT_CHUNK
-            N = (self.rng.standard_normal((m, n)) + 1j * self.rng.standard_normal((m, n))) \
-                * (self.sq / np.sqrt(2))
+            N = self._draws.complex((m, n), self._scale32)
             tau0 = self.rng.integers(w0, w1, m)
-            amp = self.snr * np.exp(2j * np.pi * self.rng.random(m))
-            fine = np.fft.ifft(N, axis=1)[:, w0:w1] * n
-            fine = np.abs(fine + amp[:, None] * self.A[(self.lags[None, :] - tau0[:, None]) % n])
-            self.fine_ok.append(fine.max(1) >= self.snr)
-            self.fa.append(fine.argmax(1) + w0)
+            amp = (self.snr * np.exp(2j * np.pi * self.rng.random(m))).astype(np.complex64)
+            # the signal's response at lags w0..w1-1 around tau0: a run of the doubled A
+            pk, at = _row_peaks(np.fft.ifft(N, axis=1)[:, w0:w1], n, self._A32, (w0 - tau0) % n, 1, amp)
+            self.fine_ok.append(pk >= self.snr)
+            self.fa.append(at + w0)
             for b in self.bands:
                 f, Abt, R, cs, ce = self.tier[b]
-                co = np.fft.ifft(N[:, :b], axis=1)[:, cs:ce] * b / np.sqrt(f)
-                cl = np.arange(cs, ce) * R
-                co = np.abs(co + amp[:, None] * Abt[(cl[None, :] - tau0[:, None]) % n])
-                self.cmax[b].append(co.max(1))
-                self.cam[b].append((co.argmax(1) + cs) * R)
+                sc, Ab32 = self._tier32[b]
+                pk, at = _row_peaks(np.fft.ifft(N[:, :b], axis=1)[:, cs:ce], sc, Ab32, (cs * R - tau0) % n, R, amp)
+                self.cmax[b].append(pk)
+                self.cam[b].append((at.astype(np.int64) + cs) * R)
 
     def distances(self, chain, thresholds, nsim):
         """direct_halfwidth's per-chunk kept distances for this chain, from the first nsim draws."""
