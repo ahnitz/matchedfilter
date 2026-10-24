@@ -16,6 +16,8 @@ N = 1 << 15                      # block length
 VALID = (4096, N - 4096)
 BAND = (60, N // 2 - 200)
 LEAF = dict(engine="flat", binsize=512)
+# The block sizes a GPU leaf chooses among (a CPU one may add 1024: _small_blocks_fit).
+GPU_NS = (2048, 4096, 8192, 16384, 32768, 65536)
 
 
 def _spec(rng, n=N):
@@ -414,8 +416,11 @@ def test_a_gpu_search_gives_the_cpu_search():
                 for a, b in ctx.support(ch):
                     off[a:b] = False
                 got[(ctx.leaf.node_id, ctx.chunk, ch)] = (ctx.peaks[ch], ser.copy(), off)
+        # Both devices on one candidate set. Left to choose, a CPU leaf may take smaller blocks
+        # than a GPU one (time_domain._small_blocks_fit), which changes which samples a chunk
+        # computes; this test is about device execution at one layout.
         search = HierarchicalSearch([root], threshold=thr, context=300,
-                                    leaf_options=dict(LEAF, device=device))
+                                    leaf_options=dict(LEAF, device=device, fft_lengths=GPU_NS))
         search.run(inputs, windows=windows, on_peaks=on_peaks)
         runs[device] = got
     assert runs["cpu"].keys() == runs["gpu:0"].keys()
