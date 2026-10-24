@@ -77,6 +77,14 @@ void ap_td_corr_on(const ap_plan *p,const float *x,const float *taps,int L,int n
   be_of(p)->td_corr(x,taps,L,nlag,out);
 }
 
+void ap_split_store_on(const ap_plan *p,const float *x,float *re,float *im,size_t n,int conj,
+                       int n1,int n2,int w){
+  be_of(p)->split_store(x,re,im,n,conj,n1,n2,w);
+}
+void ap_scale_load_on(const ap_plan *p,float *dst,const float *src,size_t have,size_t n,
+                      size_t stride,float scale){
+  be_of(p)->scale_load(dst,src,have,n,stride,scale);
+}
 void ap_real_split_on(const ap_plan *p,const float *Z,const float *tw,size_t n,float *X){
   be_of(p)->real_split(Z,tw,n,X);
 }

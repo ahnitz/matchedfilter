@@ -259,57 +259,15 @@ static size_t ap_mf_nbins_phased(const ap_mf_plan *p, size_t binsize, size_t sta
 /* Store a spectrum split AND group-major: [n1 block][n2][lane], n1 = g*W + l,
    from the natural x[n2*N1 + n1].  This is a transpose, paid once per segment at
    ingest, so that every one of the D*T pair transforms reads sequentially.  It is
-   the whole reason preprocessing being free matters. */
-static void split_store(const float * restrict inter,float * restrict re,float * restrict im,size_t n,int conj,
-                        int n1,int n2,int w){
-  if(n1<=0||n2<=0||w<=0||(size_t)n1*n2!=n){
-    if(conj){
-      for(size_t k=0;k<n;k++){ re[k]=inter[2*k]; im[k]=-inter[2*k+1]; }
-    } else {
-      for(size_t k=0;k<n;k++){ re[k]=inter[2*k]; im[k]=inter[2*k+1]; }
-    }
-    return;
-  }
-  const int ng=n1/w;
-  if(conj){
-    for(int g=0;g<ng;g++){
-      const float * restrict s_ptr = inter + 2*(size_t)g*w;
-      float * restrict r_ptr = re + (size_t)g*n2*w;
-      float * restrict i_ptr = im + (size_t)g*n2*w;
-      for(int b=0;b<n2;b++){
-        for(int l=0;l<w;l++){
-          r_ptr[l]=s_ptr[2*l];
-          i_ptr[l]=-s_ptr[2*l+1];
-        }
-        s_ptr += 2*n1;
-        r_ptr += w;
-        i_ptr += w;
-      }
-    }
-  } else {
-    for(int g=0;g<ng;g++){
-      const float * restrict s_ptr = inter + 2*(size_t)g*w;
-      float * restrict r_ptr = re + (size_t)g*n2*w;
-      float * restrict i_ptr = im + (size_t)g*n2*w;
-      for(int b=0;b<n2;b++){
-        for(int l=0;l<w;l++){
-          r_ptr[l]=s_ptr[2*l];
-          i_ptr[l]=s_ptr[2*l+1];
-        }
-        s_ptr += 2*n1;
-        r_ptr += w;
-        i_ptr += w;
-      }
-    }
-  }
-}
+   the whole reason preprocessing being free matters. The copy is the backend's
+   (ap_split_store_on), vectorised at the plan's own width. */
 
 int ap_mf_set_data(ap_mf_plan *p, int d, const float *spec){
   if(!p||d<0||d>=p->nd) return -1;
   if(p->qdok) p->qdok[d]=0;
   if(p->qdxok) p->qdxok[d]=0;
-  split_store(spec, p->dre+(size_t)d*p->n, p->dim+(size_t)d*p->n, p->n, 0,
-              p->gmajor?p->n1:0, p->n2, p->w);
+  ap_split_store_on(p->fft, spec, p->dre+(size_t)d*p->n, p->dim+(size_t)d*p->n, p->n, 0,
+                    p->gmajor?p->n1:0, p->n2, p->w);
   if(p->pair_alt){
     ap_mf_set_data(p->pair_alt,d,spec);
     p->alt_dready[d]=1;
@@ -380,8 +338,8 @@ int ap_mf_set_template(ap_mf_plan *p, int t, const float *spec){
     return 0;
   }
   /* conjugate at ingest, not per pair: this runs T times, the pair loop D*T */
-  split_store(spec, p->tre+(size_t)t*p->n, p->tim+(size_t)t*p->n, p->n, 1,
-              p->gmajor?p->n1:0, p->n2, p->w);
+  ap_split_store_on(p->fft, spec, p->tre+(size_t)t*p->n, p->tim+(size_t)t*p->n, p->n, 1,
+                    p->gmajor?p->n1:0, p->n2, p->w);
   if(p->pair_alt){
     ap_mf_set_template(p->pair_alt,t,spec);
     p->alt_tready[t]=1;

@@ -11,6 +11,12 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ### Performance
 
+- The copy of each block's spectrum into the plan's layout (set_data, set_template) and the
+  hierarchical engine's scale-and-load of each block's samples run at the machine's vector
+  width (backend kernels split_store and scale_load). They were loops in matchfilt.c and
+  hmf.c, which are compiled for the SSE4.2 baseline: the copy was scalar, the load 4 lanes.
+  Results are bit-identical. pycbc test27 hierarchical: the copy's cycles fall 70% and the
+  library's 4.7%.
 - AVX-512 transforms transpose their 16x16 corner turn in registers (in-lane unpacks, then
   two rounds of 128-bit block shuffles) instead of the generic four-stage network, which the
   compiler kept as rolled loops through memory: 35 cycles for the pair of 16x16
