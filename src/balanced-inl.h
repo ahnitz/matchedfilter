@@ -19,8 +19,9 @@
 #include "elemfft-inl.h"
 #if defined(AP_SIMD_AVX1)
 /* The AVX1 build (kernel_avx1.cc) takes the Q15 screen, the direct refine's correlation and
-   the real-series kernels from the SSE4 back end; it needs only the L1D query here. */
+   the real-series kernels from the SSE4 back end; it needs the L1D query and the loads here. */
 #include "q15.h"
+#include "loads-inl.h"
 #else
 #include "q15-inl.h"
 #include "td-inl.h"
