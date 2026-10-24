@@ -161,6 +161,27 @@ _BLOCK_TRIAL_RANKS = 3
 _BLOCK_TRIAL_SAMPLES = 2
 
 
+def _small_blocks_fit(device):
+    """Whether 1024-sample blocks are a candidate for a CPU bank above 1024 Hz: when a 2048
+    block's pair working set -- its data and template spectra and the intermediate, 3 x 8n
+    bytes, 48 KB -- fills the L1D. Then the valid-fraction rule takes 1024 wherever it keeps
+    half of each block valid. Flat banks only: the hierarchical engine prices its own block
+    sizes (_choose_layout). Measured 2026-10-24 on test27's fine banks (257-297 taps; 1024
+    against 2048): Haswell and Zen 3 (32 KB) -10% / -11%, Ivy Bridge (32 KB) -15%, Zen 5
+    (48 KB) -9%, an M2 (128 KB) +2.6%, which keeps 2048. Above 1024 Hz the candidates had started
+    at 2048 since a decimation scheme removed on 2026-10-05; no measurement chose that. GPU
+    banks keep it."""
+    from .device import parse as _parse_device
+    try:
+        if _parse_device(device).kind != "cpu":
+            return False
+    except (TypeError, ValueError):
+        return False
+    from . import _core
+    l1d = int(_core.l1d_bytes())
+    return bool(l1d) and 3 * 8 * 2048 >= l1d
+
+
 def _trial_key(bank):
     """The pooled trial a bank joins: device and its candidate block sizes. Ranks mean the
     same for every bank -- 0 its model layout, k its k-th proposed single size -- so all banks
@@ -1036,7 +1057,8 @@ class TimeDomainFilterBank:
         self.effective_data_counts = np.ceil(self.tap_counts / self.rate_ratio).astype(np.int64)
 
         if fft_lengths is None:
-            if self.data_sample_rate <= 1024.0 or self.analytic:
+            if (self.data_sample_rate <= 1024.0 or self.analytic
+                    or (self.engine == 'flat' and _small_blocks_fit(device))):
                 candidate_ns = (1024, 2048, 4096, 8192, 16384, 32768, 65536)
             else:
                 candidate_ns = (2048, 4096, 8192, 16384, 32768, 65536)
