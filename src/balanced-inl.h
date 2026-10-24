@@ -742,6 +742,14 @@ static HWY_NOINLINE void stageB_generic(BP*p,int b,vf**RR,vf**RI,int exact){
   const int M1=p->ea.single?N1:p->a1, M2=p->ea.single?1:p->a2, st=p->ea.st;
   const size_t step = p->ilay ? (size_t)AP_W : p->istr;
   const size_t base = p->ilay ? (size_t)b*N1*AP_W : (size_t)AP_W*b;
+  if(p->ilay && p->ea.single){
+    /* The column is already contiguous, in element order: transform it where stage A left
+       it (it is read once, by this), instead of copying it to the staging buffer first. */
+    vf *ar=(vf*)(p->ire+base), *ai=(vf*)(p->iim+base);
+    efft(N1,ar,ai,p->sR,p->sI,p->w1r,p->w1i);
+    *RR=ar; *RI=ai;
+    return;
+  }
   for(int e2=0;e2<M2;e2++){
     const float *sr=p->ire+base+(size_t)e2*M1*step;
     const float *si=p->iim+base+(size_t)e2*M1*step;
