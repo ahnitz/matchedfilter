@@ -14,6 +14,9 @@
 #include <stdint.h>
 #include <string.h>
 #include "hwy/highway.h"
+#if HWY_ARCH_X86
+#include <immintrin.h>
+#endif
 
 /* Not target-dependent, so outside the toggle guard. */
 #ifndef AP_SIMD_ONCE
@@ -130,9 +133,8 @@ static HWY_ATTR HWY_INLINE void v_inter(float *p, vf re, vf im) {
    interleaves plus a lane swap.  The generic network below is correct here
    too and costs 12% -- on AVX2 a whole-vector interleave crosses 128-bit
    lanes and needs vpermps, while InterleaveLower is one vunpcklps.  On
-   AVX-512 the whole interleave is a single vpermt2ps and the generic
-   network is the better of the two, so this is a property of the hardware
-   rather than a shortcut. */
+   AVX-512 the whole interleave is a single vpermt2ps, but the generic network
+   stays rolled and goes through memory; AVX-512 has its own network below. */
 static HWY_ATTR HWY_INLINE void v_transpose(const vf *in, vf *out) {
   const hn::Repartition<uint64_t, ap_tag> d64;
   vf t[8], u[8];
@@ -188,6 +190,43 @@ static HWY_ATTR HWY_INLINE void v_transpose_store(const vf *in, float *out) {
   const vf u7 = hn::BitCast(AP_D, hn::InterleaveUpper(d64, hn::BitCast(d64, t5), hn::BitCast(d64, t7)));
   V_STOREU(out + 3 * AP_W, hn::ConcatLowerLower(AP_D, u7, u3));
   V_STOREU(out + 7 * AP_W, hn::ConcatUpperUpper(AP_D, u7, u3));
+}
+#elif HWY_ARCH_X86 && HWY_TARGET <= HWY_AVX3 && HWY_MAX_BYTES == 64
+/* AVX-512, 16 lanes: in-lane unpacks (32- then 64-bit), then two rounds of 128-bit block
+   shuffles. Every step is a register op on all 16 rows, with no loop left for the compiler
+   to keep rolled. The generic network below was 195 cycles per re+im pair of 16x16 transposes on
+   Zen 5 (four rolled stages of vpermt2ps through memory, 863 instructions); this is 35
+   (179 instructions), and the transpose was ~20% of a flat n=2048 call (2026-10-23). */
+static HWY_ATTR HWY_INLINE void v_transpose(const vf *in, vf *out) {
+  __m512 r[16], t[16];
+  for (int i = 0; i < 16; i++) r[i] = in[i].raw;
+  for (int i = 0; i < 16; i += 2) {
+    t[i] = _mm512_unpacklo_ps(r[i], r[i + 1]);
+    t[i + 1] = _mm512_unpackhi_ps(r[i], r[i + 1]);
+  }
+  for (int i = 0; i < 16; i += 4) {
+    const __m512d a = _mm512_castps_pd(t[i]), b = _mm512_castps_pd(t[i + 2]);
+    const __m512d c = _mm512_castps_pd(t[i + 1]), d = _mm512_castps_pd(t[i + 3]);
+    r[i] = _mm512_castpd_ps(_mm512_unpacklo_pd(a, b));
+    r[i + 1] = _mm512_castpd_ps(_mm512_unpackhi_pd(a, b));
+    r[i + 2] = _mm512_castpd_ps(_mm512_unpacklo_pd(c, d));
+    r[i + 3] = _mm512_castpd_ps(_mm512_unpackhi_pd(c, d));
+  }
+  for (int h = 0; h < 16; h += 8)
+    for (int i = 0; i < 4; i++) {
+      t[h + i] = _mm512_shuffle_f32x4(r[h + i], r[h + i + 4], 0x88);
+      t[h + i + 4] = _mm512_shuffle_f32x4(r[h + i], r[h + i + 4], 0xdd);
+    }
+  for (int i = 0; i < 8; i++) {
+    out[i].raw = _mm512_shuffle_f32x4(t[i], t[i + 8], 0x88);
+    out[i + 8].raw = _mm512_shuffle_f32x4(t[i], t[i + 8], 0xdd);
+  }
+}
+
+static HWY_ATTR HWY_INLINE void v_transpose_store(const vf *in, float *out) {
+  vf tmp[AP_W];
+  v_transpose(in, tmp);
+  for (int i = 0; i < AP_W; i++) V_STOREU(out + (size_t)i * AP_W, tmp[i]);
 }
 #else
 static HWY_ATTR HWY_INLINE void v_transpose(const vf *in, vf *out) {
