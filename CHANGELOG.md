@@ -11,6 +11,13 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ### Performance
 
+- Flat CPU banks above 1024 Hz may take 1024-sample blocks when a 2048 block's working set
+  (data and template spectra and the intermediate, 48 KB) fills the L1D. The valid-fraction
+  rule then picks 1024 wherever it keeps half of each block valid. Since 2026-10-05 the
+  candidates had started at 2048, a leftover of a removed decimation scheme. pycbc's test27
+  fine banks (257-297 taps): Haswell -10%, Zen 3 -11%, Ivy Bridge -15%, Zen 5 -9%. An M2
+  (128 KB L1D) keeps 2048, where 1024 was 2.6% slower. GPU banks and the hierarchical
+  engine (which prices its own block sizes) are unchanged.
 - Stage A loads its twiddles from a full table when the table (8N bytes) fits the L1D,
   instead of forming each from two smaller tables (four multiplies and two broadcasts an
   element). Results are bit-identical. Fine-stage call at n = 2048 and 4096: -1 to -5% on Zen 5,
