@@ -11,6 +11,7 @@
 #include <limits.h>
 #include "matchedfilter.h"
 #include "transform.h"
+#include "q15.h"
 
 /* Whether a buffer of len bytes holds a x b elements of elem bytes, computed by division:
    the product of caller-supplied counts can overflow, and the check then passes. */
@@ -1162,6 +1163,10 @@ static PyObject *M_series_group(PyObject *self,PyObject *args){
   if(n<1||req<1){ PyErr_SetString(PyExc_ValueError,"n and the requested group must be positive"); return NULL; }
   return PyLong_FromLong(ap_hmf_effective_group((size_t)n,req));
 }
+static PyObject *M_l1d_bytes(PyObject *self,PyObject *args){
+  (void)self; (void)args;
+  return PyLong_FromSize_t(ap_l1d_bytes());
+}
 static PyObject *M_backend(PyObject *self,PyObject *args){
   (void)self;(void)args;
   return PyUnicode_FromString(ap_isa());
@@ -1524,6 +1529,7 @@ static PyTypeObject RootType={
 
 static PyMethodDef methods[]={
   {"backend",M_backend,METH_NOARGS,"backend() -> name of the selected kernel"},
+  {"l1d_bytes",M_l1d_bytes,METH_NOARGS,"l1d_bytes() -> the L1 data cache size the OS reports, or 0 if unknown"},
   {"series_group",M_series_group,METH_VARARGS,"series_group(n, requested) -> the series group a hierarchical plan of size n runs"},
   {"forward_cost",M_forward_cost,METH_VARARGS,"forward_cost(n, reps=9) -> (engine s, platform s or -1) per block forward"},
   {"gate16_bound",M_gate16_bound,METH_VARARGS,"gate16_bound(N, data, templates, nt) -> bytes of nt float32 bounds (-1: not fired), or None"},
