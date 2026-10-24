@@ -30,8 +30,10 @@
 #define restrict __restrict
 #if defined(__GNUC__) || defined(__clang__)
 #define AP_ALWAYS_INLINE inline __attribute__((always_inline))
+#define AP_LAMBDA_INLINE __attribute__((always_inline))
 #else
 #define AP_ALWAYS_INLINE inline
+#define AP_LAMBDA_INLINE
 #endif
 #endif
 

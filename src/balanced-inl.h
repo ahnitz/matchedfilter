@@ -1128,11 +1128,14 @@ static int bins_reserve(BP*p,size_t nb){
 #define MF_PEAK_SECTION
 #endif
 
-/* TWO: two bins split at kb (out[0] below kb, out[1] from it): a window bin edge inside the
-   block, as binmax_one's. */
-template <bool TWO=false>
+/* kb < AP_ONE_BIN: two bins split at kb (out[0] below kb, out[1] from it), a window bin edge
+   inside the block, as binmax_one's TWO; kb == AP_ONE_BIN: one bin, out[0] only. One function
+   rather than a template on the split: the transform and its 32 inlined sinks are ~15 KB of
+   straight-line code, and two copies alternating block by block thrashed the L1i and op cache. */
+#define AP_ONE_BIN (~(size_t)0 >> 1)   /* the largest long, so (long)kb stays positive */
 static HWY_NOINLINE MF_PEAK_SECTION void binmax_fused32(BP*p,float thr,ap_peak*out,int conj,
-                                                       size_t ws,size_t we,size_t kb=0){
+                                                       size_t ws,size_t we,size_t kb){
+  const bool TWO = kb != AP_ONE_BIN;
   const float t2 = thr>0.f ? thr*thr : 0.f;
   vf am = V_SET1(t2), arr = V_ZERO(), aii = V_ZERO();
   vi axx = VI_SET1(-1);
@@ -1142,7 +1145,7 @@ static HWY_NOINLINE MF_PEAK_SECTION void binmax_fused32(BP*p,float thr,ap_peak*o
 
   if (__builtin_expect(ws >= we || ws >= 1024 || we <= 0, 0)) {
     out->index = -1; out->re = 0.f; out->im = 0.f; out->magnitude = 0.f;
-    if constexpr (TWO) { out[1] = out[0]; }
+    if (TWO) { out[1] = out[0]; }
     return;
   }
 
@@ -1181,7 +1184,9 @@ static HWY_NOINLINE MF_PEAK_SECTION void binmax_fused32(BP*p,float thr,ap_peak*o
 
     const float *ar=p->ire+(size_t)b*32*AP_W;
     const float *ai=p->iim+(size_t)b*32*AP_W;
-    fftsr32_unit_sink(ar,ai,p->sR,p->sI,1,rowmask,[&](int k1,vf rr,vf ii){
+    /* always_inline: with TWO the body is large enough that GCC called it once per output,
+       and every call spilled the transform's live vectors (all ymm/zmm are caller-saved). */
+    fftsr32_unit_sink(ar,ai,p->sR,p->sI,1,rowmask,[&](int k1,vf rr,vf ii) AP_LAMBDA_INLINE {
       vf m = V_FMADD(rr,rr,V_MUL(ii,ii));
       if(__builtin_expect(k1 == clo && need_mask_clo, 0)){
         m = V_SEL(vmask_clo, V_SET1(-1.f), m);
@@ -1190,7 +1195,7 @@ static HWY_NOINLINE MF_PEAK_SECTION void binmax_fused32(BP*p,float thr,ap_peak*o
         m = V_SEL(vmask_chi, V_SET1(-1.f), m);
       }
       const int k = k1 * 32 + base;
-      if constexpr (TWO) {
+      if (TWO) {
         if (k >= (long)kb) {
           vm g1 = V_CMP_GT(m, am1);
           if(__builtin_expect(V_MASK_ANY(g1),0)){
@@ -1241,7 +1246,7 @@ static HWY_NOINLINE MF_PEAK_SECTION void binmax_fused32(BP*p,float thr,ap_peak*o
     }
   };
   emit(am, arr, aii, axx, out);
-  if constexpr (TWO) emit(am1, arr1, aii1, axx1, out + 1);
+  if (TWO) emit(am1, arr1, aii1, axx1, out + 1);
 }
 
 /* One bin over [ws, we); TWO: two, split at kb (samples below kb are bin 0, the rest bin 1,
@@ -1686,8 +1691,7 @@ static HWY_NOINLINE MF_PEAK_SECTION int binmax_prod_threshold(void *vp,const flo
     if(__builtin_expect(thr>0.f && j1<=j0+1 && p->fuse==2 && p->ilay && p->gmajor, 1)) {
       stageA_prod_32(p,dr,di,tr,ti);
       for(size_t j=0;j<nbf;j++) if(j<j0 || j>j1){ out[j].index=-1; out[j].re=0.f; out[j].im=0.f; out[j].magnitude=0.f; }
-      if(j0==j1) binmax_fused32(p,thr,out+j0,conj,ws,we);
-      else binmax_fused32<true>(p,thr,out+j0,conj,ws,we,org+(j0+1)*binsize);
+      binmax_fused32(p,thr,out+j0,conj,ws,we,j0==j1 ? AP_ONE_BIN : org+(j0+1)*binsize);
       return 0;
     }
   }
