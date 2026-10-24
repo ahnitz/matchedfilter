@@ -1132,7 +1132,7 @@ static int bins_reserve(BP*p,size_t nb){
    inside the block, as binmax_one's TWO; kb == AP_ONE_BIN: one bin, out[0] only. SPLIT=false
    compiles the one-bin case alone. The transform with its 32 inlined sinks is 15-27 KB of
    straight-line code, so at 16 lanes one SPLIT=true instance serves both cases: two copies
-   alternating block by block cost Cascade Lake and Zen 5 3.3% at n=1024 (the stage is
+   alternating block by block cost Cascade Lake and Zen 5 1-3% at n=1024 (the stage is
    frontend-bound there). At 8 lanes the separate instances measured as fast (Haswell) or
    faster (Ivy Bridge, +1..3% merged). */
 #define AP_ONE_BIN (~(size_t)0 >> 1)   /* the largest long, so (long)kb stays positive */

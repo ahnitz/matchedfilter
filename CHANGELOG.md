@@ -19,6 +19,12 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ### Performance
 
+- At 16 lanes (AVX-512), the fused peak scan at n=1024 runs one instance for blocks with one
+  bin and with two, instead of one of each. Each carries the 32-point transform with its
+  inlined scan (27 KB), and alternating the two block by block thrashed the instruction cache
+  of a stage that is frontend-bound: on Zen 5 26% of dispatch slots got no instructions.
+  Cascade Lake and Zen 5 -1..-3% at n=1024 (two sessions each; code layout alone moves this
+  stage by up to 8% on Zen 5). 8-lane paths are unchanged; results identical.
 - Flat CPU banks above 1024 Hz may take 1024-sample blocks when a 2048 block's working set
   (data and template spectra and the intermediate, 48 KB) fills the L1D. The valid-fraction
   rule then picks 1024 wherever it keeps half of each block valid. Since 2026-10-05 the
