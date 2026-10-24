@@ -71,6 +71,7 @@ typedef struct {
   float *hr,*hi,*lr,*li;
   float *scg;          /* [g][k2] scalar part of the stage-A twiddle, precomputed */
   vf *tw32r, *tw32i;   /* [g][k2] full vector twiddles for 32x32 path */
+  vf *twfr, *twfi;     /* [g][k2] full stage-A twiddles when they fit L1D (create), else NULL */
   int fuse;     /* 0 = staged, 1 = generic fused, 2 = unit-stride 32x32 product.
                    Resolved once at plan build,
                    never per transform -- getenv in stageA_prod_gm cost a
@@ -367,6 +368,25 @@ void *create(size_t N){
       p->scg[2*idx]=sr; p->scg[2*idx+1]=si;
     }
   }
+  /* The stage-A twiddle as full vectors, 8N bytes, when that fits the L1D: then each element
+     loads its twiddle instead of forming scg[g][k2] x TL[k2] (four mul-class ops, two
+     broadcasts). Formed with the same FMA expression, so results are bit-identical. Past the
+     L1D the table is extra traffic: measured 2026-10-23 (fine-stage call), the table at
+     n = 2048/4096 is -1..-5% on Zen 5, -3..-5% on Haswell, -2..-9% on Ivy Bridge; at
+     n = 16384 Ivy Bridge +18%, at 65536 Haswell +5% and Ivy Bridge +55%. */
+  { const size_t gn=(size_t)n1/AP_W, bytes=2*gn*(size_t)n2*sizeof(vf), l1d=ap_l1d_bytes();
+    if(l1d && bytes<=l1d){
+      p->twfr=(vf*)ap_alloc64(gn*(size_t)n2*sizeof(vf));
+      p->twfi=(vf*)ap_alloc64(gn*(size_t)n2*sizeof(vf));
+      if(p->twfr && p->twfi){
+        for(size_t g=0; g<gn; g++) for(int k2=0;k2<n2;k2++){
+          const size_t idx=g*(size_t)n2+k2;
+          const vf SR=V_SET1(p->scg[2*idx]), SI=V_SET1(p->scg[2*idx+1]);
+          p->twfr[idx]=V_FMSUB(SR,p->TLr[k2],V_MUL(SI,p->TLi[k2]));
+          p->twfi[idx]=V_FMADD(SR,p->TLi[k2],V_MUL(SI,p->TLr[k2]));
+        }
+      } else { free(p->twfr); free(p->twfi); p->twfr=p->twfi=NULL; }
+    } }
   if constexpr (AP_W==8) {
     if(n1==32 && n2==32){
       p->tw32r = (vf*)ap_alloc64(4 * 32 * sizeof(vf));
@@ -390,7 +410,7 @@ void destroy(void *vp){
   free(p->ire);free(p->iim);free(p->bR);free(p->bI);free(p->sR);free(p->sI);
   free(p->TLr);free(p->TLi);free(p->w1r);free(p->w1i);free(p->w2r);free(p->w2i);
   free(p->hr);free(p->hi);free(p->lr);free(p->li);
-  free(p->scg);free(p->tw32r);free(p->tw32i);free(p);
+  free(p->scg);free(p->tw32r);free(p->tw32i);free(p->twfr);free(p->twfi);free(p);
 }
 
 /* ---- the small sizes: lanes are PAIRS, not frequencies -------------------
@@ -445,8 +465,8 @@ static void *create_small(size_t N){
    C++/Highway build declined to, leaving a real call in the hot path: the
    stage functions fell from ~1000 instructions to ~250 with a shared 914
    instruction tail, and cost several percent.  `inline` is only a hint. */
-template<int FIXED=0>
-static AP_ALWAYS_INLINE void stageA_tail(BP*p,int g,vf*restrict TR,vf*restrict TI,
+template<int FIXED, bool TWF>
+static AP_ALWAYS_INLINE void stageA_tail_t(BP*p,int g,vf*restrict TR,vf*restrict TI,
                                vf*restrict OR,vf*restrict OI,
                                vf*restrict bR,vf*restrict bI){
   const int N2=FIXED ? FIXED : p->N2;
@@ -461,10 +481,16 @@ static AP_ALWAYS_INLINE void stageA_tail(BP*p,int g,vf*restrict TR,vf*restrict T
         int k2_1=AP_W*b+t+1;
         vf SR0=V_SET1(sc[2*t]), SI0=V_SET1(sc[2*t+1]);
         vf SR1=V_SET1(sc[2*t+2]), SI1=V_SET1(sc[2*t+3]);
-        vf tr0=V_FMSUB(SR0,p->TLr[k2_0],V_MUL(SI0,p->TLi[k2_0]));
-        vf ti0=V_FMADD(SR0,p->TLi[k2_0],V_MUL(SI0,p->TLr[k2_0]));
-        vf tr1=V_FMSUB(SR1,p->TLr[k2_1],V_MUL(SI1,p->TLi[k2_1]));
-        vf ti1=V_FMADD(SR1,p->TLi[k2_1],V_MUL(SI1,p->TLr[k2_1]));
+        vf tr0,ti0,tr1,ti1;
+        if constexpr (TWF) {
+          const size_t q=(size_t)g*N2;
+          tr0=p->twfr[q+k2_0]; ti0=p->twfi[q+k2_0]; tr1=p->twfr[q+k2_1]; ti1=p->twfi[q+k2_1];
+        } else {
+          tr0=V_FMSUB(SR0,p->TLr[k2_0],V_MUL(SI0,p->TLi[k2_0]));
+          ti0=V_FMADD(SR0,p->TLi[k2_0],V_MUL(SI0,p->TLr[k2_0]));
+          tr1=V_FMSUB(SR1,p->TLr[k2_1],V_MUL(SI1,p->TLi[k2_1]));
+          ti1=V_FMADD(SR1,p->TLi[k2_1],V_MUL(SI1,p->TLr[k2_1]));
+        }
         int eb0=FIXED ? k2_0 : eidx(&p->eb,k2_0);
         int eb1=FIXED ? k2_1 : eidx(&p->eb,k2_1);
         vf xr0=RR[eb0], xi0=RI[eb0];
@@ -517,6 +543,16 @@ static AP_ALWAYS_INLINE void stageA_tail(BP*p,int g,vf*restrict TR,vf*restrict T
       }
 
   }
+}
+
+/* The tail with or without the full twiddle table: chosen once per group, outside the
+   loops (a plan-field test inside them stops the compiler scheduling them, see AP_NOXPOSE). */
+template<int FIXED=0>
+static AP_ALWAYS_INLINE void stageA_tail(BP*p,int g,vf*restrict TR,vf*restrict TI,
+                               vf*restrict OR,vf*restrict OI,
+                               vf*restrict bR,vf*restrict bI){
+  if(p->twfr) stageA_tail_t<FIXED,true>(p,g,TR,TI,OR,OI,bR,bI);
+  else stageA_tail_t<FIXED,false>(p,g,TR,TI,OR,OI,bR,bI);
 }
 
 static inline void stageA_body(BP*p,int g,vf*restrict TR,vf*restrict TI,
