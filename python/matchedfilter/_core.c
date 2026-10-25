@@ -1046,6 +1046,15 @@ static PyObject *HMF_set_direct(HMFObject *self,PyObject *args){
   int on,hw=1; if(!PyArg_ParseTuple(args,"p|i",&on,&hw)) return NULL;
   return PyBool_FromLong(ap_hmf_set_direct(self->p,on,hw)==0);
 }
+static PyObject *HMF_price_direct_pair(HMFObject *self,PyObject *unused){
+  (void)unused; double lt=0,fp=0;
+  if(ap_hmf_price_direct_pair(self->p,&lt,&fp)) Py_RETURN_NONE;
+  return Py_BuildValue("(dd)",lt,fp);
+}
+static PyObject *HMF_set_direct_prices(HMFObject *self,PyObject *args){
+  double lt,fp; if(!PyArg_ParseTuple(args,"dd",&lt,&fp)) return NULL;
+  return PyBool_FromLong(ap_hmf_set_direct_prices(self->p,lt,fp)==0);
+}
 static PyObject *HMF_direct_stats(HMFObject *self,PyObject *unused){
   (void)unused; long pairs=0,lags=0,fft=0; double lt=0,fp=0;
   ap_hmf_direct_stats(self->p,&pairs,&lags,&fft,&lt,&fp);
@@ -1085,6 +1094,8 @@ GUARDED(HMFObject,HMF_set_taps)
 GUARDED(HMFObject,HMF_set_real_series)
 GUARDED(HMFObject,HMF_set_direct)
 GUARDED(HMFObject,HMF_direct_stats)
+GUARDED(HMFObject,HMF_price_direct_pair)
+GUARDED(HMFObject,HMF_set_direct_prices)
 GUARDED(HMFObject,HMF_set_q15)
 GUARDED(HMFObject,HMF_q15_stats)
 GUARDED(HMFObject,HMF_set_data)
@@ -1112,6 +1123,8 @@ static PyMethodDef HMF_methods[]={
   {"set_real_series",(PyCFunction)HMF_set_real_series_g,METH_VARARGS,"set_real_series(on, stride=1) -> True if run_series now reads real float32 series (half-size block transforms); stride 2 reads one lane of a complex series"},
   {"set_direct",(PyCFunction)HMF_set_direct_g,METH_VARARGS,"set_direct(on, halfwidth=1) -> True if survivors are now refined by direct correlation where cheaper"},
   {"direct_stats",(PyCFunction)HMF_direct_stats_g,METH_NOARGS,"direct refine counters and prices"},
+  {"price_direct_pair",(PyCFunction)HMF_price_direct_pair_g,METH_NOARGS,"price_direct_pair() -> (ticks per lag x tap, ticks per transform pair) timed on this plan's kernels, or None"},
+  {"set_direct_prices",(PyCFunction)HMF_set_direct_prices_g,METH_VARARGS,"set_direct_prices(lagtap, fftpair) -> True: the prices the direct-or-transform choice compares"},
   {"set_q15",(PyCFunction)HMF_set_q15_g,METH_VARARGS,"set_q15(on) -> True if the first tier now runs behind the Q15 screen"},
   {"q15_stats",(PyCFunction)HMF_q15_stats_g,METH_NOARGS,"q15_stats() -> (on, pairs passed to the float tier, screen ticks)"},
   {"set_data",(PyCFunction)HMF_set_data_g,METH_VARARGS,"set_data(i, buffer)"},

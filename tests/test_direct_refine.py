@@ -156,3 +156,28 @@ def test_padded_one_bin_rows_refine_directly(monkeypatch):
     assert np.all(i1[..., 0] < 0)
     np.testing.assert_array_equal(i1[..., 1], i0[..., 0])
     np.testing.assert_array_equal(v1[..., 1], v0[..., 0])
+
+
+def test_plans_of_one_size_compare_the_same_direct_prices(monkeypatch):
+    """Every plan of a size refines a survivor directly or by transform on prices timed once
+    per process (_prices._direct_pair_prices), not on its own timing: two plans otherwise
+    split the pairs near the boundary differently, and identical calls reported different
+    fp32 roundings (a padded layout against its unpadded call)."""
+    from matchedfilter import _prices
+    data = _bank(nblocks=60)
+    n, taps, counts, spec, series, layout, ref, window = data
+    monkeypatch.setenv("MF_DIRECT_REFINE", "1")
+    monkeypatch.setattr(_prices, "_DIRECT_PAIR", {})
+
+    def stats():
+        hf = mf.HierarchicalFilter(n, 1, spec.shape[0], snr=6.0, fd=1e-3, chain=(256, 512),
+                                   search_window=window)
+        hf.set_reference(ref); hf.set_templates(spec); hf.set_taps(taps, counts)
+        hf.run_series(series, *layout, binsize=n, threshold=6.0, raw=True)
+        s = hf.direct_stats()
+        return s["ticks_per_lag_tap"], s["ticks_per_fft_pair"]
+
+    a, b = stats(), stats()
+    assert a[0] > 0 and a[1] > 0, a
+    assert a == b, (a, b)
+    assert len(_prices._DIRECT_PAIR) == 1

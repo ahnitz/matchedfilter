@@ -297,6 +297,24 @@ static void price_direct(ap_hmf_plan *p){
   free(x); free(tp); free(spec);
 }
 
+int ap_hmf_price_direct_pair(ap_hmf_plan *p,double *lagtap,double *fftpair){
+  if(!p) return -1;
+  const double lt=p->dir_lagtap, fp=p->dir_fftpair;
+  p->dir_lagtap=0;
+  price_direct(p);
+  const int ok=p->dir_lagtap>0;
+  if(lagtap) *lagtap=p->dir_lagtap;
+  if(fftpair) *fftpair=p->dir_fftpair;
+  p->dir_lagtap=lt; p->dir_fftpair=fp;          /* measuring leaves the plan's own prices */
+  return ok ? 0 : -1;
+}
+
+int ap_hmf_set_direct_prices(ap_hmf_plan *p,double lagtap,double fftpair){
+  if(!p || !(lagtap>0) || !(fftpair>0)) return -1;
+  p->dir_lagtap=lagtap; p->dir_fftpair=fftpair;
+  return 0;
+}
+
 int ap_hmf_set_direct(ap_hmf_plan *p,int on,int halfwidth){
   if(!p) return -1;
   if(!on){ p->direct=0; return 0; }
