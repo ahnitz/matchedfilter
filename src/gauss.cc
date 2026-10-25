@@ -107,8 +107,14 @@ HWY_AFTER_NAMESPACE();
 #if HWY_ONCE
 namespace ap_gauss {
 HWY_EXPORT(GaussFill);
+/* Dispatched unqualified from inside the namespace: a single-target build (macOS arm64,
+   NEON only) falls back to HWY_STATIC_DISPATCH, which makes ap_gauss::GaussFill into
+   N_NEON::ap_gauss::GaussFill, undeclared (see kernel.cc's active()). */
+static void Fill(float *out, size_t n, uint64_t seed, uint64_t offset) {
+  HWY_DYNAMIC_DISPATCH(GaussFill)(out, n, seed, offset);
 }
+}  // namespace ap_gauss
 extern "C" void ap_gauss_fill(float *out, size_t n, uint64_t seed, uint64_t offset) {
-  if (n) HWY_DYNAMIC_DISPATCH(ap_gauss::GaussFill)(out, n, seed, offset);
+  if (n) ap_gauss::Fill(out, n, seed, offset);
 }
 #endif
