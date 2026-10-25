@@ -212,6 +212,8 @@ def _row_peaks(z, scale, sig=None, start=None, step=0, amp=None):
     """Per row of z (complex64, rows may be strided): the largest |scale z + amp sig[start + j
     step]| and its j, in one pass (_core.row_peaks)."""
     from . import _core
+    if z.dtype != np.complex64:
+        z = z.astype(np.complex64)      # NumPy < 2 transforms complex64 in double precision
     m = z.shape[0]
     pk, at = np.empty(m, np.float32), np.empty(m, np.int32)
     if sig is None:
