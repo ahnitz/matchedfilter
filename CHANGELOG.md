@@ -17,7 +17,37 @@ Alpha releases may change the API. Pin a version for reproducible work.
 - CPython 3.15: release wheels (Linux x86-64 manylinux and musllinux, macOS arm64) and CI
   test jobs. Wheels build with cibuildwheel 4.3.4.
 
+### Changed
+
+- Hierarchical CPU choices hold under changing machine load. The cost calibration times every
+  quantity round-robin (each timed call after an untimed one on the same plan) and keeps each
+  one's minimum: under a dynamic load the calibrated costs spread up to 4.7x between
+  processes, now under 1.2%, so block size, chain and tier thresholds stop moving with the
+  load. Two pricing errors that sent single-tier band-256 chains to the transform refine at
+  ~2x the best chain's cost are fixed: the direct refine's window is priced with the draws
+  the chain runs with (a tenth of them gave 2 coarse samples against 62), and a one-tier
+  chain behind the Q15 screen, which reports no lag, is priced with the transform refine.
+  A close call between the screen and the float first tier takes the screen (within TIE).
+  test27 full job, both variants together on one node: Haswell steady 0.84 -> 1.21 M
+  templates in real time (fine stage 1.01 -> 1.59 M, job 3331 -> 2565 s), Ivy Bridge
+  0.23 -> 0.31 M (job 11365 -> 9163 s); dev2 unchanged (its choices were already right).
+  Triggers move only near threshold (the tier thresholds follow the chosen chain, within
+  the false-dismissal budget): Haswell 5 of 27,501 H1 and 28-36 of 30,414 L1, max snr 6.13.
+- The gate model's simulations draw from a counter-based generator (src/gauss.cc:
+  Threefry-2x32 and Box-Muller, identical for any vector width; AVX2 and AVX-512 agree bit
+  for bit, SSE4 to the last ulp of its log and sincos), so their draws, and the thresholds
+  they place, differ from before within the simulation's own error (thresholds +-1.4%).
+
 ### Performance
+
+- Setup of a hierarchical search: test27's 614 leaf banks over 27 references in one process,
+  matchedfilter's share (beyond the banks' steady calls): dev2 22.9-29.9 -> 7.5 s,
+  Haswell 209 -> 63-94 s, Ivy Bridge 239-426 -> 157-170 s. The reference's signature is
+  memoised by memory (a full-resolution reference was hashed per bank); the calibration's
+  threshold searches count passes on 32 blocks and its calls are 128 blocks; the simulations
+  draw 7-39x faster (above), run in single precision, reduce each transformed block in one
+  pass (_core.row_peaks), and the plan search, gate features and kept draws are memoised or
+  linear where they were quadratic.
 
 - The AVX back end (Sandy and Ivy Bridge) has its own block and spectrum loads (scale_load,
   split_store, now in src/loads-inl.h). It had inherited SSE4's, and split_store's vector path

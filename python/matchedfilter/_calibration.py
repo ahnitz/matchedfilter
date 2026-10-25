@@ -10,14 +10,15 @@ import numpy as np
 from . import gatechain as _gc
 
 
-def calibrate_costs(n, ntemplates, blocks=256, reps=5, seed=11, group=None):
+def calibrate_costs(n, ntemplates, blocks=128, reps=5, seed=11, group=None):
     """Measure this machine's tier costs at transform size n through the engine itself.
 
     Synthetic analytic noise and whitened random templates; thresholds are
     placed so that the tier under test sees each target survivor density, and
     costs are read from the engine's per-tier counters (ap_hmf_tier_stats), so
     no wall-clock subtraction is involved. Calls are sized like a segment's
-    (hundreds of blocks), because a pooled tier's fixed per-call cost is only
+    (128 blocks: every cost within 2-5% of 256's, at 0.58 of the time, dev2 2026-10-24;
+    the calibration was half a slow machine's setup), because a pooled tier's fixed per-call cost is only
     representative when amortised over a realistic number of survivors.
     Under a second per (n, series group), once per process. Runs at _CAL_TEMPLATES
     templates whatever `ntemplates` is (kept for callers; see _CAL_TEMPLATES).

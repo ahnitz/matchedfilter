@@ -291,17 +291,23 @@ def signal_draws(power, n, bands, snr, nsamp, seed=13):
             L = np.linalg.cholesky(C).astype(np.complex64)
             w = draws.complex((m, len(taus)), 1.0 / np.sqrt(2))
             seg_noise.append((w @ L.T) * np.float32(_SIG * np.sqrt(fr)))      # unnormalised: variance fr
-        nfull = sum(sn for sn in seg_noise if sn is not None)
+        # running sums of the segments, in the order sum() took them: cum[i] is tiers i's noise
+        # (segments 0..i), cum[-1] the full band's (bit for bit what re-summing each prefix gave)
+        cum, acc = [], 0
+        for sn in seg_noise:
+            if sn is not None:
+                acc = sn if isinstance(acc, int) else acc + sn
+            cum.append(acc)
+        nfull = acc
         afull = np.abs(np.float32(snr) * look(full_corr, taus - off).astype(np.complex64)[None, :] + nfull)
         fidx = np.searchsorted(taus, fl)
         ffine = afull[:, fidx].max(1)
         cols, fcols = [], []
         for i, b in enumerate(bands):
             # tier i's noise is the sum of the segments below its band edge, j = 0..i
-            acc_b = sum(sn for sn in seg_noise[:i + 1] if sn is not None)
-            nb = acc_b / np.float32(np.sqrt(F[i]))
+            nb = cum[i] / np.float32(np.sqrt(F[i]))
             z = np.float32(snr * np.sqrt(F[i])) * look(band_corr[i], taus - off).astype(np.complex64)[None, :] + nb
-            cols.append(np.abs(z)[:, gidx[i]].max(1))
+            cols.append(np.abs(z[:, gidx[i]]).max(1))
             # the coarse lags are a subset of the fine grid, so they count toward the fine maximum
             fcols.append(np.maximum(ffine, afull[:, gidx[i]].max(1)))
         C_out.append(np.stack(cols, 1))
@@ -789,17 +795,23 @@ def _chain_candidates(sig, noise, bands, chain, fd, snr, prune):
     last_val = S[last_order, k - 1]
     out = []
 
-    def consider(prefix, dead, nalive):
-        """Given thresholds for tiers 0..k-2, the last uses the remaining budget."""
-        rem = K - dead.size
-        if rem < 0 or rem >= M - dead.size:
+    def consider(prefix, dead, ndead, nalive):
+        """Given thresholds for tiers 0..k-2, the last uses the remaining budget. dead: mask
+        over the M kept draws of those the earlier tiers dismissed, ndead of them."""
+        rem = K - ndead
+        if rem < 0 or rem >= M - ndead:
             return
         # the rem-th smallest last-tier value among draws not yet dismissed
-        alive = ~np.isin(last_order, dead, assume_unique=False) if dead.size else np.ones(last_order.size, bool)
-        pos = np.flatnonzero(np.cumsum(alive) == rem + 1)
-        if not pos.size:
-            return
-        g = float(last_val[pos[0]])
+        pos = np.flatnonzero(~dead[last_order]) if ndead else None
+        if pos is not None:
+            if pos.size <= rem:
+                return
+            at = pos[rem]
+        else:
+            if last_order.size <= rem:
+                return
+            at = rem
+        g = float(last_val[at])
         th = list(prefix) + [g]
         reach = [1.0] + [float(x) for x in nalive[1:]]
         reach.append(float((nalive[0] & (noise[:, cols[-1]] >= g)).mean()))
@@ -810,10 +822,10 @@ def _chain_candidates(sig, noise, bands, chain, fd, snr, prune):
             return
         out.append((tuple(th), tuple(reach)))
 
-    def rec(i, prefix, remaining, dead, alive_noise, fracs):
+    def rec(i, prefix, remaining, dead, ndead, alive_noise, fracs):
         # tier i takes a share of the budget still unallocated; the last tier gets what is left
         if i == k - 1:
-            consider(prefix, dead, [alive_noise] + fracs)
+            consider(prefix, dead, ndead, [alive_noise] + fracs)
             return
         for a in (_SPLIT if k <= 2 else _SPLIT_COARSE):
             share = a * remaining
@@ -823,11 +835,13 @@ def _chain_candidates(sig, noise, bands, chain, fd, snr, prune):
             g = float(low_val[i][idx])
             # draws this tier dismisses: its column strictly below g
             cut = int(np.searchsorted(low_val[i], g, side="left"))
-            d = np.union1d(dead, low[i][:cut])
+            d = dead.copy()
+            d[low[i][:cut]] = True
             an = alive_noise & (noise[:, cols[i]] >= g)
-            rec(i + 1, prefix + [g], remaining - share, d, an, fracs + [float(an.mean())])
+            rec(i + 1, prefix + [g], remaining - share, d, int(np.count_nonzero(d)), an,
+                fracs + [float(an.mean())])
 
-    rec(0, [], 1.0, np.empty(0, np.int64), np.ones(noise.shape[0], bool), [])
+    rec(0, [], 1.0, np.zeros(M, bool), 0, np.ones(noise.shape[0], bool), [])
     return out
 
 
