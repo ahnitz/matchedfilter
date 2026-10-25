@@ -68,3 +68,32 @@ def _direct_lagtap():
     return price_once(_DIRECT_LAGTAP, key, "choice|" + key, measure,
                       lambda r: float(r["value"]) if isinstance(r, dict)
                       and isinstance(r.get("value"), (int, float)) and r["value"] > 0 else None)
+
+
+#: (n, backend, gate kind) key -> (ticks per lag x tap, ticks per transform pair): the prices a
+#: survivor's direct-or-transform refine compares (_direct_pair_prices).
+_DIRECT_PAIR = {}
+
+
+def _direct_pair_prices(n, plan):
+    """The prices every CPU plan of size n compares, per survivor, to refine it directly or by
+    its whole-block transform: timed once on `plan`'s kernels and kept in MF_COST_FILE. A plan
+    timing its own made the choice depend on that plan's timing noise: two plans of one bank
+    layout, a merged call and its separate calls, refined the pairs near the boundary
+    differently and so reported them to different fp32 rounding."""
+    from . import gatechain
+    key = "direct-pair|%d|%s|%s" % (int(n), _core.backend() if hasattr(_core, "backend") else "",
+                                     gatechain.cpu_gate_kind())
+
+    def measure():
+        got = plan.price_direct_pair()
+        if not got or not (got[0] > 0 and got[1] > 0):
+            return None, None                  # a failed price is not stored; the plan times its own
+        return (float(got[0]), float(got[1])), {"lagtap": float(got[0]), "fftpair": float(got[1])}
+
+    def read(r):
+        if isinstance(r, dict) and all(isinstance(r.get(k), (int, float)) and r[k] > 0
+                                       for k in ("lagtap", "fftpair")):
+            return (float(r["lagtap"]), float(r["fftpair"]))
+        return None
+    return price_once(_DIRECT_PAIR, key, "choice|" + key, measure, read)

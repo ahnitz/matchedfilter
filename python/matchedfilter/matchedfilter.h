@@ -319,6 +319,13 @@ int ap_hmf_set_taps(ap_hmf_plan *p, const float *taps, size_t stride, const int6
 int ap_hmf_set_direct(ap_hmf_plan *p, int on, int halfwidth);
 /* Ticks per lag x tap of the direct correlation on this core (< 0 on failure). */
 double ap_hmf_price_direct(void);
+/* The two prices a survivor's direct-or-transform choice compares, timed on this plan's
+   kernels: ticks per lag x tap of the direct correlation and per pair of the whole-block
+   refine. ap_hmf_set_direct_prices gives a plan prices measured once (a plan otherwise
+   times its own when the direct refine is turned on): plans of one size and kernel then
+   decide every pair alike, whatever each would have timed. */
+int ap_hmf_price_direct_pair(ap_hmf_plan *p, double *ticks_per_lag_tap, double *ticks_per_fft_pair);
+int ap_hmf_set_direct_prices(ap_hmf_plan *p, double ticks_per_lag_tap, double ticks_per_fft_pair);
 int ap_hmf_direct_stats(const ap_hmf_plan *p, long *pairs, long *lags, long *fft,
                         double *ticks_per_lag_tap, double *ticks_per_fft_pair);
 

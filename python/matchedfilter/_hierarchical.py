@@ -372,6 +372,10 @@ class HierarchicalFilter(MatchedFilter):
         if d.get("_applied_plan") is not plan or d.get("_applied_res") is not r:
             plan.set_thresholds(list(r.thresholds))
             if getattr(self, "_taps", None) is not None:
+                if r.direct_hw is not None:
+                    prices = _prices._direct_pair_prices(self.n, plan)
+                    if prices is not None:
+                        plan.set_direct_prices(*prices)
                 plan.set_direct(r.direct_hw is not None, r.direct_hw or 1)
             self._applied_plan, self._applied_res = plan, r
         return plan
