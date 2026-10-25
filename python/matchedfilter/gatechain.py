@@ -178,31 +178,59 @@ def _similar_put(kind, u, params, value):
     del lst[:-_CACHE_MAX]
 
 
+#: Cached stream prefixes, per stream: float32 draws [0, len). Every profile's simulation of
+#: a kind reads the same stream from its start (the seed and domain are fixed) and only
+#: scales what it reads, so a prefix generated once serves every reference of the job.
+_STREAMS = {}
+#: Bytes a stream's cached prefix may reach; draws past it are generated as they are read.
+#: The signal simulation reads 24, 34 and 72 MB at n = 2048, 4096 and 8192 (test67).
+_STREAM_MAX_BYTES = 96 << 20
+
+
 class _Normals:
     """Standard normal float32 draws from one counter-based stream (_core.gauss_fill,
     src/gauss.cc): every draw depends only on the seed, the simulation's domain and its
     position, so a simulation is reproducible however it is chunked. ~1-6 ns a draw against
-    NumPy's ~8-40; the draws were most of a job's setup simulation on Haswell."""
+    NumPy's ~8-40; the draws were most of a job's setup simulation on Haswell. With
+    cache, reads come from the stream's cached prefix (_STREAMS), the same values."""
 
-    def __init__(self, seed, domain):
+    def __init__(self, seed, domain, cache=False):
         self.seed = ((int(domain) & 0xFFFFFFFF) << 32) | (int(seed) & 0xFFFFFFFF)
         self.pos = 0
+        self.cache = bool(cache)
+
+    def _fill(self, out):
+        """Draws [pos, pos + out.size) into out (float32, contiguous)."""
+        from . import _core
+        end = self.pos + out.size
+        if self.cache:
+            buf = _STREAMS.get(self.seed)
+            have = 0 if buf is None else buf.size
+            if end > have and end * 4 <= _STREAM_MAX_BYTES:
+                grown = np.empty(min(max(end, 2 * have), _STREAM_MAX_BYTES // 4), np.float32)
+                if have:
+                    grown[:have] = buf
+                _core.gauss_fill(grown[have:], self.seed, have)
+                buf = _STREAMS[self.seed] = grown
+                have = buf.size
+            if end <= have:
+                out[...] = buf[self.pos:end]
+                self.pos = end
+                return
+        _core.gauss_fill(out, self.seed, self.pos)
+        self.pos = end
 
     def take(self, shape):
-        from . import _core
         out = np.empty(shape, np.float32)
-        _core.gauss_fill(out, self.seed, self.pos)
-        self.pos += out.size
+        self._fill(out.reshape(-1))
         return out
 
     def complex(self, shape, scale=1.0):
         """Complex draws, real and imaginary parts consecutive draws of the stream, times scale
         (broadcast along the last axis): one fill, viewed in place."""
-        from . import _core
         shape = tuple(shape) if np.ndim(shape) else (int(shape),)
         z = np.empty(shape, np.complex64)
-        _core.gauss_fill(z.view(np.float32).reshape(-1), self.seed, self.pos)
-        self.pos += 2 * z.size
+        self._fill(z.view(np.float32).reshape(-1))
         if np.ndim(scale) or scale != 1.0:
             z *= np.asarray(scale, np.float32)
         return z
@@ -274,7 +302,7 @@ def signal_draws(power, n, bands, snr, nsamp, seed=13):
 
     steps = [n // b for b in bands]
     step0 = steps[0]
-    draws = _Normals(seed, _DOMAIN_SIGNAL)
+    draws = _Normals(seed, _DOMAIN_SIGNAL, cache=True)
     m = max(nsamp // step0, 256)
     C_out, F_out = [], []
     for off in range(step0):
