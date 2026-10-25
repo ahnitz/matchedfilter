@@ -1255,7 +1255,7 @@ static PyObject *M_row_peaks(PyObject *self,PyObject *args){
 }
 /* The gate model's noise simulation, whole (gatechain._noise_records): row r of nrows is a
    block's bins, complex draws r * 2 bmax .. of stream `seed` (ap_gauss_fill, as
-   _Normals.complex lays rows out) times scale[k]; band i's coarse statistic is the b_i-point
+   _Normals.complex lays rows out; rows row0 .. when given) times scale[k]; band i's coarse statistic is the b_i-point
    backward transform of bins [0, b_i) times bscale[i], and its running maximum's records go
    to pos[i], val[i], off[i]: every lag whose value exceeds all before it (the first always),
    as (lag, sqrt value), row r's at [off[r], off[r + 1]). The largest |z| over lags [0, c) is
@@ -1264,8 +1264,9 @@ static PyObject *M_row_peaks(PyObject *self,PyObject *args){
    count, -1 for a band whose pos/val were too short. */
 static PyObject *M_noise_records(PyObject *self,PyObject *args){
   (void)self;
-  PyObject *sco,*bo,*bso,*po,*vo,*oo; unsigned long long seed; long long nrows;
-  if(!PyArg_ParseTuple(args,"OKLOOOOO",&sco,&seed,&nrows,&bo,&bso,&po,&vo,&oo)) return NULL;
+  PyObject *sco,*bo,*bso,*po,*vo,*oo; unsigned long long seed; long long nrows, row0=0;
+  if(!PyArg_ParseTuple(args,"OKLOOOOO|L",&sco,&seed,&nrows,&bo,&bso,&po,&vo,&oo,&row0)) return NULL;
+  if(row0<0){ PyErr_SetString(PyExc_ValueError,"noise_records: row0 >= 0"); return NULL; }
   if(!PyTuple_Check(bo)||!PyTuple_Check(bso)||!PyTuple_Check(po)||!PyTuple_Check(vo)||!PyTuple_Check(oo)){
     PyErr_SetString(PyExc_TypeError,"noise_records: bands, bscale, pos, val, off must be tuples"); return NULL;
   }
@@ -1303,7 +1304,7 @@ static PyObject *M_noise_records(PyObject *self,PyObject *args){
     const float *scale=(const float*)sc.buf;
     Py_BEGIN_ALLOW_THREADS
     for(long long r=0;r<nrows;r++){
-      ap_gauss_fill(X,(size_t)(2*bmax),(uint64_t)seed,(uint64_t)(2*r*bmax));
+      ap_gauss_fill(X,(size_t)(2*bmax),(uint64_t)seed,(uint64_t)(2*(row0+r)*bmax));
       for(long long j=0;j<bmax;j++){ X[2*j]*=scale[j]; X[2*j+1]*=scale[j]; }
       for(Py_ssize_t i=0;i<nb;i++){
         int16_t *pos=(int16_t*)pb[i].buf; float *val=(float*)vb[i].buf; long long *off=(long long*)ob[i].buf;
@@ -1334,6 +1335,143 @@ static PyObject *M_noise_records(PyObject *self,PyObject *args){
   PyObject *t=PyTuple_New(nb);
   for(Py_ssize_t i=0;i<nb;i++) PyTuple_SET_ITEM(t,i,PyLong_FromLongLong(full[i] ? -1 : k[i]));
   return t;
+}
+/* gatechain._chain_candidates's search (see there): every (thresholds, reach) it considers,
+   in its depth-first order. S (M, k) float32: the kept draws' coarse maxima of the chain's
+   tiers; Nc (k, R) float32: the noise blocks the search can keep alive, by tier; low[i],
+   lowv[i] (i < k - 1): tier i's K + 1 smallest kept-draw indices and values, ascending;
+   lasto, lastv: the last tier's; splits: the budget shares tried per tier. A reach is the
+   alive count over Nn as a double, the same float as Python's int division. */
+typedef struct {
+  int k, K, M, R, nsplit, prune; long long Nn; double useless;
+  const float *S, *Nc; const long long *low[3]; const float *lowv[3];
+  const long long *lasto; const float *lastv; int nlast; const double *splits;
+  unsigned char *dead; int *alive[4]; int nalive[4]; PyObject *out; int err;
+} cc_state;
+
+/* Noise blocks of tier's column at or above g among alive (n of them; NULL: all R), written
+   to store when given; their count. Index lists: past the first tier few blocks are alive,
+   and a node then reads only those. */
+static int cc_filter(const cc_state *c, int tier, float g, const int *alive, int n, int *store){
+  const float *col=c->Nc+(size_t)tier*c->R; int m=0;
+  if(alive){
+    if(store){ for(int j=0;j<n;j++){ const int r=alive[j]; store[m]=r; m+=col[r]>=g; } }
+    else     { for(int j=0;j<n;j++) m+=col[alive[j]]>=g; }
+  } else {
+    const int R=c->R;
+    if(store){ for(int r=0;r<R;r++){ store[m]=r; m+=col[r]>=g; } }
+    else     { for(int r=0;r<R;r++) m+=col[r]>=g; }
+  }
+  return m;
+}
+
+static void cc_consider(cc_state *c, const double *prefix, int ndead, const int *alive, int nalive,
+                        const double *fracs){
+  const int rem=c->K-ndead;
+  if(rem<0 || rem>=c->M-ndead) return;
+  int at=-1;
+  if(ndead){
+    int seen=0;
+    for(int j=0;j<c->nlast;j++){
+      if(c->dead[c->lasto[j]]) continue;
+      if(seen==rem){ at=j; break; }
+      seen++;
+    }
+    if(at<0) return;
+  } else {
+    if(c->nlast<=rem) return;
+    at=rem;
+  }
+  const float g=c->lastv[at];
+  const double last=(double)cc_filter(c,c->k-1,g,alive,nalive,NULL)/(double)c->Nn;
+  if(c->prune) for(int i=0;i<c->k-1;i++) if(fracs[i]>c->useless) return;
+  PyObject *th=PyTuple_New(c->k), *re=PyTuple_New(c->k+1), *pair=NULL;
+  if(!th||!re){ Py_XDECREF(th); Py_XDECREF(re); c->err=1; return; }
+  for(int i=0;i<c->k-1;i++) PyTuple_SET_ITEM(th,i,PyFloat_FromDouble(prefix[i]));
+  PyTuple_SET_ITEM(th,c->k-1,PyFloat_FromDouble((double)g));
+  PyTuple_SET_ITEM(re,0,PyFloat_FromDouble(1.0));
+  for(int i=0;i<c->k-1;i++) PyTuple_SET_ITEM(re,i+1,PyFloat_FromDouble(fracs[i]));
+  PyTuple_SET_ITEM(re,c->k,PyFloat_FromDouble(last));
+  pair=PyTuple_Pack(2,th,re); Py_DECREF(th); Py_DECREF(re);
+  if(!pair || PyList_Append(c->out,pair)) c->err=1;
+  Py_XDECREF(pair);
+}
+
+static void cc_rec(cc_state *c, int i, double *prefix, double remaining, int ndead,
+                   const int *alive, int nalive, double *fracs){
+  if(c->err) return;
+  if(i==c->k-1){ cc_consider(c,prefix,ndead,alive,nalive,fracs); return; }
+  const long long *low=c->low[i]; const float *lowv=c->lowv[i];
+  for(int a=0;a<c->nsplit && !c->err;a++){
+    const double share=c->splits[a]*remaining;
+    const long long idx=(long long)floor(share*(double)c->K);
+    if(idx<1) continue;
+    const float g=lowv[idx];
+    int cut=0;                                   /* searchsorted(lowv, g, left) */
+    { int lo=0, hi=c->K+1; while(lo<hi){ int m=(lo+hi)/2; if(lowv[m]<g) lo=m+1; else hi=m; } cut=lo; }
+    /* this level's dismissals carry its own mark, so undoing them leaves the levels above */
+    const unsigned char mark=(unsigned char)(i+1);
+    int nnew=0;
+    for(int j=0;j<cut;j++) if(!c->dead[low[j]]){ c->dead[low[j]]=mark; nnew++; }
+    const int cnt=cc_filter(c,i,g,alive,nalive,c->alive[i+1]);
+    prefix[i]=(double)g; fracs[i]=(double)cnt/(double)c->Nn;
+    cc_rec(c,i+1,prefix,remaining-share,ndead+nnew,c->alive[i+1],cnt,fracs);
+    for(int j=0;j<cut;j++) if(c->dead[low[j]]==mark) c->dead[low[j]]=0;
+  }
+}
+
+static PyObject *M_chain_candidates(PyObject *self,PyObject *args){
+  (void)self;
+  PyObject *So,*Nco,*lowo,*lowvo,*lao,*lvo,*spo; int K,prune; long long Nn; double useless;
+  if(!PyArg_ParseTuple(args,"OOOOOOOiLpd",&So,&Nco,&lowo,&lowvo,&lao,&lvo,&spo,&K,&Nn,&prune,&useless)) return NULL;
+  Py_buffer S,N,la,lv,lb[3],lvb[3]; int nlb=0;
+  if(PyObject_GetBuffer(So,&S,PyBUF_C_CONTIGUOUS|PyBUF_FORMAT)<0) return NULL;
+  if(PyObject_GetBuffer(Nco,&N,PyBUF_C_CONTIGUOUS|PyBUF_FORMAT)<0){ PyBuffer_Release(&S); return NULL; }
+  if(PyObject_GetBuffer(lao,&la,PyBUF_C_CONTIGUOUS|PyBUF_FORMAT)<0){ PyBuffer_Release(&S); PyBuffer_Release(&N); return NULL; }
+  if(PyObject_GetBuffer(lvo,&lv,PyBUF_C_CONTIGUOUS|PyBUF_FORMAT)<0){ PyBuffer_Release(&S); PyBuffer_Release(&N); PyBuffer_Release(&la); return NULL; }
+  cc_state c; memset(&c,0,sizeof c);
+  int ok = S.ndim==2 && S.itemsize==4 && !strcmp(S.format,"f") && N.ndim==2 && N.itemsize==4 && !strcmp(N.format,"f")
+           && la.itemsize==8 && (!strcmp(la.format,"q")||!strcmp(la.format,"l")) && lv.itemsize==4 && !strcmp(lv.format,"f")
+           && la.len/8==lv.len/4 && PyTuple_Check(lowo) && PyTuple_Check(lowvo) && PyTuple_Check(spo) && Nn>0 && K>=1;
+  if(ok){
+    c.M=(int)S.shape[0]; c.k=(int)S.shape[1]; c.R=(int)N.shape[1];
+    ok = c.k>=1 && c.k<=4 && N.shape[0]==c.k && PyTuple_GET_SIZE(lowo)==c.k-1 && PyTuple_GET_SIZE(lowvo)==c.k-1 && c.k-1<=3;
+  }
+  for(int i=0;ok && i<c.k-1;i++){
+    if(PyObject_GetBuffer(PyTuple_GET_ITEM(lowo,i),&lb[i],PyBUF_C_CONTIGUOUS|PyBUF_FORMAT)<0){ ok=0; break; }
+    if(PyObject_GetBuffer(PyTuple_GET_ITEM(lowvo,i),&lvb[i],PyBUF_C_CONTIGUOUS|PyBUF_FORMAT)<0){ PyBuffer_Release(&lb[i]); ok=0; break; }
+    nlb=i+1;
+    ok = lb[i].itemsize==8 && lvb[i].itemsize==4 && !strcmp(lvb[i].format,"f") && lb[i].len/8==K+1 && lvb[i].len/4==K+1;
+    if(ok){ c.low[i]=(const long long*)lb[i].buf; c.lowv[i]=(const float*)lvb[i].buf;
+      for(int j=0;j<=K;j++) if(c.low[i][j]<0 || c.low[i][j]>=c.M){ ok=0; break; } }
+  }
+  double splits[64]; int nsplit=ok ? (int)PyTuple_GET_SIZE(spo) : 0;
+  if(nsplit>64) ok=0;
+  for(int a=0;ok && a<nsplit;a++){ splits[a]=PyFloat_AsDouble(PyTuple_GET_ITEM(spo,a)); if(PyErr_Occurred()) ok=0; }
+  if(ok){
+    c.lasto=(const long long*)la.buf; c.lastv=(const float*)lv.buf; c.nlast=(int)(la.len/8);
+    for(int j=0;j<c.nlast;j++) if(c.lasto[j]<0 || c.lasto[j]>=c.M){ ok=0; break; }
+  }
+  PyObject *out=NULL;
+  if(ok){
+    c.K=K; c.Nn=Nn; c.prune=prune; c.useless=useless; c.S=(const float*)S.buf; c.Nc=(const float*)N.buf;
+    c.splits=splits; c.nsplit=nsplit;
+    c.dead=(unsigned char*)calloc((size_t)c.M,1);
+    for(int i=1;i<=c.k;i++) c.alive[i]=(int*)malloc(((size_t)c.R+1)*sizeof(int));
+    out=PyList_New(0); c.out=out;
+    int mem = c.dead && out; for(int i=1;i<=c.k;i++) mem = mem && c.alive[i];
+    if(mem){
+      double prefix[4], fracs[4];
+      cc_rec(&c,0,prefix,1.0,0,NULL,0,fracs);
+    } else c.err=1;
+    free(c.dead); for(int i=1;i<=c.k;i++) free(c.alive[i]);
+    if(c.err){ Py_XDECREF(out); out=NULL; if(!PyErr_Occurred()) PyErr_NoMemory(); }
+  }
+  for(int i=0;i<nlb;i++){ PyBuffer_Release(&lb[i]); PyBuffer_Release(&lvb[i]); }
+  PyBuffer_Release(&S); PyBuffer_Release(&N); PyBuffer_Release(&la); PyBuffer_Release(&lv);
+  if(!ok && !PyErr_Occurred())
+    PyErr_SetString(PyExc_TypeError,"chain_candidates: S float32 (M, k <= 4), Nc float32 (k, R), per earlier tier int64 indices and float32 values of K + 1, the last tier's, splits a tuple of floats, Nn > 0");
+  return out;
 }
 static PyObject *M_l1d_bytes(PyObject *self,PyObject *args){
   (void)self; (void)args;
@@ -1701,7 +1839,8 @@ static PyTypeObject RootType={
 
 static PyMethodDef methods[]={
   {"backend",M_backend,METH_NOARGS,"backend() -> name of the selected kernel"},
-  {"noise_records",M_noise_records,METH_VARARGS,"noise_records(scale, seed, nrows, bands, bscale, pos, val, off) -> record counts: the gate model's noise simulation, per band the running maximum's records of each block's coarse statistic"},
+  {"chain_candidates",M_chain_candidates,METH_VARARGS,"chain_candidates(S, Nc, low, lowv, last_order, last_val, splits, K, Nn, prune, useless) -> [(thresholds, reach)]: gatechain._chain_candidates's search"},
+  {"noise_records",M_noise_records,METH_VARARGS,"noise_records(scale, seed, nrows, bands, bscale, pos, val, off, row0=0) -> record counts: the gate model's noise simulation, per band the running maximum's records of each block's coarse statistic"},
   {"row_peaks",M_row_peaks,METH_VARARGS,"row_peaks(z, scale, sig, start, step, amp, peak, at): per row the largest |scale z + amp sig[start + j step]| and its j (gatechain simulations)"},
   {"gauss_fill",M_gauss_fill,METH_VARARGS,"gauss_fill(out float32, seed, offset): out[i] = standard normal draw offset + i of stream seed (src/gauss.cc)"},
   {"l1d_bytes",M_l1d_bytes,METH_NOARGS,"l1d_bytes() -> the L1 data cache size the OS reports, or 0 if unknown"},

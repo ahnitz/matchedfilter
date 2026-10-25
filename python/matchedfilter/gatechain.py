@@ -68,12 +68,12 @@ _SPLIT_COARSE = np.linspace(0.05, 0.95, 9)
 
 _SIGNAL_CACHE = OrderedDict()
 
-#: Draws of a provisional model (provisional(): block-size pricing, and plans held for the
-#: block-size trial): a quarter of the signal and noise draws, the signal's floored where
-#: the false-dismissal quantile would rest on fewer than ~25 draws (50/fd; the full count,
-#: _nsamp_for, puts ~100 there). A provisional model only ranks: the block size it helps
-#: pick is planned again with every draw, and the budget's binomial margin (plan_chain's
-#: K) keeps a provisional plan's thresholds on the safe side of its fewer draws.
+#: Noise blocks of a provisional model (provisional(): block-size pricing, and plans held for
+#: the block-size trial): a quarter. The noise only prices a chain (its tiers' pass rates);
+#: the false-dismissal budget rests on the signal draws, which keep their full count -- they
+#: are shared with the plans of the size picked, and fewer would save little (signal_draws
+#: keeps at least 256 rows a lag offset). A full model of the same profile extends the
+#: provisional noise simulation (_noise_records), whose blocks are its first.
 _PROVISIONAL_FRACTION = 4
 _provisional_depth = [0]
 
@@ -89,14 +89,11 @@ def provisional(on=True):
 
 
 def model_draws(fd):
-    """(signal draws, noise blocks) the model runs with at budget fd: the full counts, or the
-    provisional ones inside provisional() where fd leaves room for fewer."""
+    """(signal draws, noise blocks) the model runs with at budget fd: the full counts, or with a
+    quarter of the noise blocks inside provisional()."""
     nsamp, nsim = _gm._nsamp_for(fd), 20000
     if _provisional_depth[0] > 0:
-        floor = int(math.ceil(50.0 / max(float(fd), 1e-6)))
-        fewer = max(nsamp // _PROVISIONAL_FRACTION, floor)
-        if fewer < nsamp:
-            nsamp, nsim = fewer, nsim // _PROVISIONAL_FRACTION
+        nsim //= _PROVISIONAL_FRACTION
     return nsamp, nsim
 
 _NOISE_CACHE = OrderedDict()
@@ -392,13 +389,21 @@ _RECORDS_MAX = 16
 def _noise_records(p, n, bands, nsim, seed):
     """Per band, the records (pos int16, val float32, off int64) of each simulated block's
     running maximum of the band's normalised coarse statistic over its b lags, rows in order:
-    row r's records are [off[r], off[r + 1])."""
+    row r's records are [off[r], off[r + 1]).
+
+    Block r's draws depend only on r, so a simulation of fewer blocks is a prefix of one of
+    more: a request reads the prefix of a larger simulation held, or extends a smaller one
+    (a provisional model's 5000 blocks are the first of its full model's 20000)."""
     from . import _core
-    key = _key(p, n, bands, nsim, seed)
+    key = _key(p, n, bands, seed)
     hit = _NOISE_RECORDS.get(key)
     if hit is not None:
         _NOISE_RECORDS.move_to_end(key)
-        return hit
+        have, recs = hit
+        if nsim <= have:
+            return tuple((pos[:off[nsim]], val[:off[nsim]], off[:nsim + 1]) for pos, val, off in recs)
+    else:
+        have, recs = 0, None
     # One pass in C (_core.noise_records): per block its draws (the stream positions
     # _Normals.complex gives a (nsim, bmax) array), each band's transform with the library's
     # FFT, and the running maximum's records. NumPy's transforms and a pass per band were 1.5x
@@ -409,20 +414,25 @@ def _noise_records(p, n, bands, nsim, seed):
     # the transform is unnormalised: 1/b of NumPy's ifft is folded into each band's scale
     bscale = tuple(float(np.float32(b * _SIG / np.sqrt(F[i])) / b) for i, b in enumerate(bands))
     stream = _Normals(seed, _DOMAIN_NOISE).seed
-    cap = 16 * nsim
+    rows = nsim - have
+    cap = 16 * rows
     while True:
         pos = tuple(np.empty(cap, np.int16) for _ in bands)
         val = tuple(np.empty(cap, np.float32) for _ in bands)
-        off = tuple(np.empty(nsim + 1, np.int64) for _ in bands)
-        k = _core.noise_records(scale, stream, nsim, tuple(int(b) for b in bands), bscale, pos, val, off)
+        off = tuple(np.empty(rows + 1, np.int64) for _ in bands)
+        k = _core.noise_records(scale, stream, rows, tuple(int(b) for b in bands), bscale, pos, val, off, have)
         if min(k) >= 0:
             break
         cap *= 2
-    out = tuple((pos[i][:k[i]].copy(), val[i][:k[i]].copy(), off[i]) for i in range(len(bands)))
-    _NOISE_RECORDS[key] = out
+    new = tuple((pos[i][:k[i]].copy(), val[i][:k[i]].copy(), off[i]) for i in range(len(bands)))
+    if recs is not None:      # the held blocks, then the new ones (their offsets after the held records)
+        new = tuple((np.concatenate([op, np_]), np.concatenate([ov, nv]),
+                     np.concatenate([oo[:-1], no + oo[-1]]))
+                    for (op, ov, oo), (np_, nv, no) in zip(recs, new))
+    _NOISE_RECORDS[key] = (nsim, new)
     while len(_NOISE_RECORDS) > _RECORDS_MAX:
         _NOISE_RECORDS.popitem(last=False)
-    return out
+    return new
 
 
 def noise_block_maxima(power, n, bands, nsim=20000, seed=29, chunk=2000, window=None):
@@ -472,6 +482,31 @@ def noise_block_maxima(power, n, bands, nsim=20000, seed=29, chunk=2000, window=
     return out
 
 
+#: CostModel's interpolation tables as arrays, per table (a model's rows do not change once
+#: made): every chain priced asked np.log of the same few rows again, 117k times a job.
+_LOG_TABLES = {}
+
+
+def _log_table(rows, kind):
+    """(log densities, values) of a CostModel table of (density, value) rows: the values as
+    given ("cost"), log of their ratio to the density floored at 1 ("excess"), or log of the
+    ratio ("ratio"), the arrays the interpolations read."""
+    hit = _LOG_TABLES.get((id(rows), kind))
+    if hit is not None and hit[0] is rows:
+        return hit[1], hit[2]
+    fs = np.log([r[0] for r in rows])
+    if kind == "cost":
+        vs = np.asarray([r[1] for r in rows], dtype=np.float64)
+    elif kind == "excess":
+        vs = np.log([max(r[1] / r[0], 1.0) for r in rows])
+    else:
+        vs = np.log([r[1] / r[0] for r in rows])
+    _LOG_TABLES[(id(rows), kind)] = (rows, fs, vs)     # rows held: the id cannot be reused
+    if len(_LOG_TABLES) > 4096:
+        _LOG_TABLES.pop(next(iter(_LOG_TABLES)))
+    return fs, vs
+
+
 class CostModel:
     """Per-tier costs for one transform size, in engine ticks.
 
@@ -512,7 +547,7 @@ class CostModel:
     @staticmethod
     def _interp(rows, f):
         """Cost per survivor at density f: linear in log f, clamped to the measured range."""
-        fs = np.log([r[0] for r in rows]); vs = [r[1] for r in rows]
+        fs, vs = _log_table(rows, "cost")
         return float(np.interp(math.log(max(f, 1e-12)), fs, vs))
 
     def refine(self, f):
@@ -570,7 +605,7 @@ class CostModel:
         rows = self.excess.get(int(b))
         if not rows:
             return 1.0
-        fs = np.log([r[0] for r in rows]); rs = np.log([max(r[1] / r[0], 1.0) for r in rows])
+        fs, rs = _log_table(rows, "excess")
         return float(np.exp(np.interp(math.log(max(f, 1e-12)), fs, rs)))
 
     def screen_reach(self, b, reach1):
@@ -578,8 +613,7 @@ class CostModel:
         sc = self.screen.get(int(b))
         if sc is None or not sc["excess"]:
             return None
-        fs = np.log([r[0] for r in sc["excess"]])
-        ratio = np.log([r[1] / r[0] for r in sc["excess"]])
+        fs, ratio = _log_table(sc["excess"], "ratio")
         return min(1.0, max(reach1, 1e-6) * float(np.exp(
             np.interp(math.log(max(reach1, 1e-6)), fs, ratio))))
 
@@ -966,8 +1000,19 @@ def _chain_candidates(sig, noise, bands, chain, fd, snr, prune):
                 fracs + [int(np.count_nonzero(an)) / Nn])
             dead[new] = False
 
+    if _C_SEARCH and all(len(o) == K + 1 for o in low) and len(last_order) == K + 1:
+        from . import _core
+        return _core.chain_candidates(np.ascontiguousarray(S, np.float32), Nc, tuple(low), tuple(np.ascontiguousarray(v, np.float32) for v in low_val),
+                            np.ascontiguousarray(last_order, np.int64), np.ascontiguousarray(last_val, np.float32),
+                            tuple(float(a) for a in splits), int(K), int(Nn), bool(prune), float(_USELESS_PASS))
     rec(0, [], 1.0, 0, None, [])
     return out
+
+
+#: _chain_candidates runs its search in C (_core.chain_candidates; the Python recursion above
+#: it is the reference, identical candidates in the same order, ~1.3 ms a call of Python and
+#: small array operations on dev2). False runs the Python one (tests compare them).
+_C_SEARCH = True
 
 
 #: A tier whose modelled noise pass rate exceeds this rejects too little to be worth running:
