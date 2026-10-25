@@ -44,6 +44,7 @@ from contextlib import contextmanager
 from collections import OrderedDict
 from itertools import combinations
 
+import hashlib
 import numpy as np
 
 from . import gatemodel as _gm
@@ -123,11 +124,24 @@ _REUSE_COS = 0.985
 _REUSE_RESPONSE = 3e-3
 
 
+_FEATURES = OrderedDict()
+
+
 def _gate_features(p, n, m=17):
     """Per candidate band b of n: sqrt(f_b) * g_b, f_b the band's share of the profile and g_b
     the smallest normalised in-band correlation over half a coarse step (the worst sub-grid
-    offset). Cheap (a band's bins times m offsets)."""
+    offset). Memoised per profile (every similarity lookup asks again: ~1000 a job)."""
     p = np.asarray(p, np.float64)
+    key = (hashlib.sha1(p.tobytes()).digest(), p.size, int(n), int(m))
+    hit = _FEATURES.get(key)
+    if hit is None:
+        hit = _FEATURES[key] = _gate_features_uncached(p, n, m)
+        while len(_FEATURES) > 4096:
+            _FEATURES.popitem(last=False)
+    return hit.copy()
+
+
+def _gate_features_uncached(p, n, m):
     tot = p.sum()
     out = []
     for b in candidate_bands(int(n)):
@@ -666,12 +680,27 @@ def _reach(N, cols, thresholds):
     return out
 
 
+_KEPT = OrderedDict()
+
+
 def kept_draws(sig, bands, chain, snr):
-    """Coarse maxima of `chain`'s tiers for the draws the fine stage keeps (fine max >= snr)."""
+    """Coarse maxima of `chain`'s tiers for the draws the fine stage keeps (fine max >= snr).
+    Memoised per draws (by identity, the draws held so it cannot be reused), chain and snr:
+    every template group pricing a profile asks again."""
     C, F = sig
     cols = [bands.index(b) for b in chain]
+    key = (id(C), id(F), tuple(cols), float(snr))
+    hit = _KEPT.get(key)
+    if hit is not None and hit[0] is C and hit[1] is F:
+        _KEPT.move_to_end(key)
+        return hit[2]
     keep = F[:, cols].max(1) >= snr
-    return C[keep][:, cols]
+    out = C[keep][:, cols]
+    out.setflags(write=False)
+    _KEPT[key] = (C, F, out)
+    while len(_KEPT) > 512:
+        _KEPT.popitem(last=False)
+    return out
 
 
 def _smallest(col, m):
