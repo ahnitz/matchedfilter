@@ -159,8 +159,12 @@ def test_cost_model_prices_the_screen():
     for b, ent in cm.screen.items():
         assert ent["dense"] > 0 and ent["recheck"] > 0
         assert all(q == f for f, q in ent["excess"])          # the screen is the tier: same passes
+        # The screen is taken unless it is dearer than the float tier by more than TIE (a close
+        # call takes the screen, as pick_stable takes the canonical chain).
+        cq = ent["dense"] + cm.screen_reach(b, 0.01) * ent["recheck"]
         c, on = cm.first_tier(b, 0.01)
-        assert on == (c < cm.dense[b])
+        assert on == (cq <= cm.dense[b] * (1.0 + mf._gatechain.TIE))
+        assert c == (cq if on else cm.dense[b])
     import json
     rt = mf._gatechain.CostModel.from_dict(json.loads(json.dumps(cm.to_dict())))
     assert rt.signature() == cm.signature()
