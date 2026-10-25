@@ -61,6 +61,17 @@ Alpha releases may change the API. Pin a version for reproducible work.
   reuses its plans and runs 32-block calls: a job's calibration (2048 and 4096) takes 0.8 s on
   Haswell and 1.5-2.5 s on Ivy Bridge, from 6.6-6.9 and 11-12 s (main: 26 and 45-59 s).
   Decisions under one cost file are identical to before on test27 and test67.
+- Setup of a hierarchical search, a third pass (test67 BBH job, matchedfilter's setup CPU,
+  interleaved with the previous main on one node, two sessions each): Ivy Bridge 309 -> 199 s
+  and 246 -> 115 s, Haswell 254 -> 167 s and 176 -> 103 s; dev2 13.4-16.1 -> 8.9-10.6 s.
+  Block-size ranking runs a provisional model with a quarter of the noise blocks (the signal
+  draws, on which the budget rests, keep their count), and a full model of the same profile
+  extends that simulation rather than redoing it. The simulations' generator draws from
+  xoshiro128++ within blocks seeded by Threefry (SSE4 4.5 -> 1.9 ns a draw; the stream
+  changes: test27 keeps every decision under one cost file, thresholds within 1.2%; test67
+  moves one reference's near-tie chain). The signal simulation reads the stream's cached
+  prefix for every reference, the plan search runs in C (identical candidates), and the cost
+  model's interpolation tables are kept as arrays.
 
 - The AVX back end (Sandy and Ivy Bridge) has its own block and spectrum loads (scale_load,
   split_store, now in src/loads-inl.h). It had inherited SSE4's, and split_store's vector path
@@ -103,6 +114,15 @@ Alpha releases may change the API. Pin a version for reproducible work.
   (~1 ms, against ~0.03 ms), and a hierarchical filter looks its plan and chain choice up
   several times per reference. On the O2 production replica (one core, dev2) the run takes
   5% less wall time (73.9 s to 70.2 s); its thresholds and triggers are unchanged.
+
+### Fixed
+
+- A survivor's direct-or-transform refine compared prices each plan timed for itself, so two
+  plans of one layout (a padded call and its unpadded call) refined pairs near the boundary
+  differently and reported them to different fp32 rounding. The prices are now timed once per
+  size and kernel and kept in MF_COST_FILE.
+- The macOS arm64 build: gauss.cc dispatched with a qualified name, which a single-target
+  build (NEON only) cannot resolve.
 
 ## 0.1.0a9
 
