@@ -67,6 +67,38 @@ _SPLIT = np.linspace(0.05, 0.95, 19)
 _SPLIT_COARSE = np.linspace(0.05, 0.95, 9)
 
 _SIGNAL_CACHE = OrderedDict()
+
+#: Draws of a provisional model (provisional(): block-size pricing, and plans held for the
+#: block-size trial): a quarter of the signal and noise draws, the signal's floored where
+#: the false-dismissal quantile would rest on fewer than ~25 draws (50/fd; the full count,
+#: _nsamp_for, puts ~100 there). A provisional model only ranks: the block size it helps
+#: pick is planned again with every draw, and the budget's binomial margin (plan_chain's
+#: K) keeps a provisional plan's thresholds on the safe side of its fewer draws.
+_PROVISIONAL_FRACTION = 4
+_provisional_depth = [0]
+
+
+@contextmanager
+def provisional(on=True):
+    """While on, choose_chain and chain_thresholds default to the provisional draw counts."""
+    _provisional_depth[0] += 1 if on else 0
+    try:
+        yield
+    finally:
+        _provisional_depth[0] -= 1 if on else 0
+
+
+def model_draws(fd):
+    """(signal draws, noise blocks) the model runs with at budget fd: the full counts, or the
+    provisional ones inside provisional() where fd leaves room for fewer."""
+    nsamp, nsim = _gm._nsamp_for(fd), 20000
+    if _provisional_depth[0] > 0:
+        floor = int(math.ceil(50.0 / max(float(fd), 1e-6)))
+        fewer = max(nsamp // _PROVISIONAL_FRACTION, floor)
+        if fewer < nsamp:
+            nsamp, nsim = fewer, nsim // _PROVISIONAL_FRACTION
+    return nsamp, nsim
+
 _NOISE_CACHE = OrderedDict()
 _CACHE_MAX = 64
 
@@ -987,8 +1019,8 @@ def _flop_cost(chain, reach, n):
 _CHOICE_CACHE = OrderedDict()
 
 
-def choose_chain(power, n, snr, fd, cost=None, max_tiers=3, floor=_MIN_BAND, nsim=20000, window=None,
-                 ntemplates=None, model_f=False):
+def choose_chain(power, n, snr, fd, cost=None, max_tiers=3, floor=_MIN_BAND, nsim=None, window=None,
+                 ntemplates=None, model_f=False, nsamp=None):
     """Price every chain and return (best, all_plans sorted by cost).
 
     Cached like the draws it is built from: by profile signature, and reused for
@@ -996,7 +1028,10 @@ def choose_chain(power, n, snr, fd, cost=None, max_tiers=3, floor=_MIN_BAND, nsi
     """
     p = _norm_profile(power, n)
     win = None if window is None else (int(window[0]), int(window[1]))
-    params = (n, float(snr), float(fd), int(max_tiers), int(floor), int(nsim), win, _cost_sig(cost),
+    dsamp, dsim = model_draws(fd)
+    nsamp = dsamp if nsamp is None else int(nsamp)
+    nsim = dsim if nsim is None else int(nsim)
+    params = (n, float(snr), float(fd), int(max_tiers), int(floor), int(nsim), int(nsamp), win, _cost_sig(cost),
               # ntemplates prices the forward; measured refine-block fractions are left out of
               # the key on purpose, so a choice made once stays made in this process instead
               # of drifting with each call's measurement.
@@ -1010,23 +1045,24 @@ def choose_chain(power, n, snr, fd, cost=None, max_tiers=3, floor=_MIN_BAND, nsi
     if hit is not None:
         _cache_put(_CHOICE_CACHE, key, hit)
         return hit
-    out = _choose_chain(p, n, snr, fd, cost, max_tiers, floor, nsim, win, ntemplates, model_f)
+    out = _choose_chain(p, n, snr, fd, cost, max_tiers, floor, nsim, win, ntemplates, model_f, nsamp)
     _cache_put(_CHOICE_CACHE, key, out)
     _similar_put("choice", unit, params, out)
     return out
 
 
 def _choose_chain(power, n, snr, fd, cost, max_tiers, floor, nsim, window, ntemplates=None,
-                  model_f=False):
+                  model_f=False, nsamp=None):
     bands = usable_bands(power, n, floor)
     if not bands:
         return None, []
-    sig = signal_draws(power, n, bands, snr, _gm._nsamp_for(fd))
+    nsamp = _gm._nsamp_for(fd) if nsamp is None else int(nsamp)
+    sig = signal_draws(power, n, bands, snr, nsamp)
     if sig is None:
         return None, []
     noise = noise_block_maxima(power, n, bands, nsim=nsim, window=window)
     memo = ("choose", _gm._profile_sig(power), n, float(snr), float(fd), tuple(bands), window,
-            int(nsim), _gm._nsamp_for(fd))
+            int(nsim), int(nsamp))
     plans = []
     for chain in enumerate_chains(n, max_tiers, floor, bands=bands):
         pl = plan_chain(sig, noise, bands, list(chain), fd, cost, n, snr, prune=True,
@@ -1243,7 +1279,8 @@ def calibrate_costs(n, ntemplates, blocks=256, reps=5, seed=11, group=None):
     return _CALIBRATE(n, ntemplates, blocks=blocks, reps=reps, seed=seed, group=group)
 
 
-def chain_thresholds(power, n, snr, fd, chain, cost=None, floor=_MIN_BAND, nsim=20000, window=None):
+def chain_thresholds(power, n, snr, fd, chain, cost=None, floor=_MIN_BAND, nsim=None, window=None,
+                     nsamp=None):
     """Thresholds (and modelled reach/cost) for one given chain under `power`.
 
     Called whenever a plan's reference changes, inside the caller's filtering,
@@ -1253,12 +1290,15 @@ def chain_thresholds(power, n, snr, fd, chain, cost=None, floor=_MIN_BAND, nsim=
     p = _norm_profile(power, n)
     chain = tuple(int(b) for b in chain)
     win = None if window is None else (int(window[0]), int(window[1]))
-    key = _key(p, n, chain, float(snr), float(fd), win, int(nsim), _cost_sig(cost))
+    dsamp, dsim = model_draws(fd)
+    nsamp = dsamp if nsamp is None else int(nsamp)
+    nsim = dsim if nsim is None else int(nsim)
+    key = _key(p, n, chain, float(snr), float(fd), win, int(nsim), int(nsamp), _cost_sig(cost))
     hit = _PLAN_CACHE.get(key)
     if hit is not None:
         _PLAN_CACHE.move_to_end(key)
         return hit
-    sim_params = (n, chain, float(snr), float(fd), win, int(nsim), _cost_sig(cost))
+    sim_params = (n, chain, float(snr), float(fd), win, int(nsim), int(nsamp), _cost_sig(cost))
     unit, hit = _similar_get("plan", p, sim_params)
     if hit is not None:
         _cache_put(_PLAN_CACHE, key, hit)
@@ -1266,7 +1306,7 @@ def chain_thresholds(power, n, snr, fd, chain, cost=None, floor=_MIN_BAND, nsim=
     bands = usable_bands(p, n, floor)
     if not set(chain) <= set(bands):
         return None
-    sig = signal_draws(p, n, bands, snr, _gm._nsamp_for(fd))
+    sig = signal_draws(p, n, bands, snr, nsamp)
     if sig is None:
         return None
     noise = noise_block_maxima(p, n, bands, nsim=nsim, window=window)
