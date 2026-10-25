@@ -68,8 +68,8 @@ _SPLIT_COARSE = np.linspace(0.05, 0.95, 9)
 
 _SIGNAL_CACHE = OrderedDict()
 
-#: Noise blocks of a provisional model (provisional(): block-size pricing, and plans held for
-#: the block-size trial): a quarter. The noise only prices a chain (its tiers' pass rates);
+#: Noise blocks of a provisional model (provisional(): block-size pricing, which compares
+#: sizes of which a bank keeps one): a quarter. The noise only prices a chain (its tiers' pass rates);
 #: the false-dismissal budget rests on the signal draws, which keep their full count -- they
 #: are shared with the plans of the size picked, and fewer would save little (signal_draws
 #: keeps at least 256 rows a lag offset). A full model of the same profile extends the
@@ -435,7 +435,7 @@ def _noise_records(p, n, bands, nsim, seed):
     return new
 
 
-def noise_block_maxima(power, n, bands, nsim=20000, seed=29, chunk=2000, window=None):
+def noise_block_maxima(power, n, bands, nsim=20000, seed=29, window=None):
     """Noise-only block maxima of every band's coarse statistic, (nsim, len(bands)).
 
     Exact for stationary Gaussian noise with output profile `power`: bins are
