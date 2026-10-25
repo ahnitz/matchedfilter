@@ -307,9 +307,11 @@ def signal_draws(power, n, bands, snr, nsamp, seed=13):
         cols, fcols = [], []
         for i, b in enumerate(bands):
             # tier i's noise is the sum of the segments below its band edge, j = 0..i
-            nb = cum[i] / np.float32(np.sqrt(F[i]))
-            z = np.float32(snr * np.sqrt(F[i])) * look(band_corr[i], taus - off).astype(np.complex64)[None, :] + nb
-            cols.append(np.abs(z[:, gidx[i]]).max(1))
+            # only its grid lags are read: the same arithmetic as over every lag, on those
+            g = gidx[i]
+            nb = cum[i][:, g] / np.float32(np.sqrt(F[i]))
+            z = np.float32(snr * np.sqrt(F[i])) * look(band_corr[i], taus[g] - off).astype(np.complex64)[None, :] + nb
+            cols.append(np.abs(z).max(1))
             # the coarse lags are a subset of the fine grid, so they count toward the fine maximum
             fcols.append(np.maximum(ffine, afull[:, gidx[i]].max(1)))
         C_out.append(np.stack(cols, 1))
@@ -317,6 +319,49 @@ def signal_draws(power, n, bands, snr, nsamp, seed=13):
     out = (np.concatenate(C_out).astype(np.float32), np.concatenate(F_out).astype(np.float32))
     _cache_put(_SIGNAL_CACHE, key, out)
     _similar_put("signal", unit, sim_params, out)
+    return out
+
+
+#: The noise simulation's running-maximum records per (profile, n, bands, nsim, seed): every
+#: window's block maxima come from them (noise_block_maxima), so the windows of a profile's
+#: template groups share one simulation. ~6 MB each at n = 4096.
+_NOISE_RECORDS = OrderedDict()
+_RECORDS_MAX = 16
+
+
+def _noise_records(p, n, bands, nsim, seed):
+    """Per band, the records (pos int16, val float32, off int64) of each simulated block's
+    running maximum of the band's normalised coarse statistic over its b lags, rows in order:
+    row r's records are [off[r], off[r + 1])."""
+    from . import _core
+    key = _key(p, n, bands, nsim, seed)
+    hit = _NOISE_RECORDS.get(key)
+    if hit is not None:
+        _NOISE_RECORDS.move_to_end(key)
+        return hit
+    # One pass in C (_core.noise_records): per block its draws (the stream positions
+    # _Normals.complex gives a (nsim, bmax) array), each band's transform with the library's
+    # FFT, and the running maximum's records. NumPy's transforms and a pass per band were 1.5x
+    # the time (dev2); the draws are the same, the transforms agree to float32 rounding.
+    bmax = bands[-1]
+    scale = np.sqrt(p[:bmax]).astype(np.float32) / np.float32(np.sqrt(2))
+    F = np.array([p[:b].sum() for b in bands])
+    # the transform is unnormalised: 1/b of NumPy's ifft is folded into each band's scale
+    bscale = tuple(float(np.float32(b * _SIG / np.sqrt(F[i])) / b) for i, b in enumerate(bands))
+    stream = _Normals(seed, _DOMAIN_NOISE).seed
+    cap = 16 * nsim
+    while True:
+        pos = tuple(np.empty(cap, np.int16) for _ in bands)
+        val = tuple(np.empty(cap, np.float32) for _ in bands)
+        off = tuple(np.empty(nsim + 1, np.int64) for _ in bands)
+        k = _core.noise_records(scale, stream, nsim, tuple(int(b) for b in bands), bscale, pos, val, off)
+        if min(k) >= 0:
+            break
+        cap *= 2
+    out = tuple((pos[i][:k[i]].copy(), val[i][:k[i]].copy(), off[i]) for i in range(len(bands)))
+    _NOISE_RECORDS[key] = out
+    while len(_NOISE_RECORDS) > _RECORDS_MAX:
+        _NOISE_RECORDS.popitem(last=False)
     return out
 
 
@@ -355,17 +400,13 @@ def noise_block_maxima(power, n, bands, nsim=20000, seed=29, chunk=2000, window=
     if hit is not None:
         _cache_put(_NOISE_CACHE, key, hit)
         return hit
-    bmax = bands[-1]
-    sd = np.sqrt(p[:bmax]).astype(np.float32)
-    F = np.array([p[:b].sum() for b in bands])
-    draws = _Normals(seed, _DOMAIN_NOISE)
+    recs = _noise_records(p, n, bands, int(nsim), int(seed))
     out = np.empty((nsim, len(bands)), np.float32)
-    for s in range(0, nsim, chunk):
-        m = min(chunk, nsim - s)
-        X = draws.complex((m, bmax), sd / np.float32(np.sqrt(2)))
-        for i, b in enumerate(bands):
-            z = np.fft.ifft(X[:, :b], axis=1)
-            out[s:s + m, i] = _row_peaks(z[:, :counts[i]], b * _SIG / np.sqrt(F[i]))[0]
+    for i, (pos, val, off) in enumerate(recs):
+        # row r's maximum over lags [0, c) is its last record below c (records rise in lag)
+        below = np.cumsum(pos < counts[i])
+        last = below[off[1:] - 1] - np.concatenate(([0], below[off[1:-1] - 1]))
+        out[:, i] = val[off[:-1] + last - 1]
     _cache_put(_NOISE_CACHE, key, out)
     _similar_put("noise", unit, sim_params, out)
     return out
@@ -796,10 +837,26 @@ def _chain_candidates(sig, noise, bands, chain, fd, snr, prune):
     last_order = _smallest(S[:, k - 1], K + 1)
     last_val = S[last_order, k - 1]
     out = []
+    Nn = noise.shape[0]
+    # The draws the earlier tiers dismiss, set and unset as the search descends and returns
+    # (a copy per node was much of a search). Noise blocks below the lowest first-tier
+    # threshold the search tries are dismissed on every branch: the search runs on the others
+    # only, their chain columns contiguous, with alive masks over them. A reach is the alive
+    # count over all Nn blocks, the same float as the mean of a full-length mask.
+    dead = np.zeros(M, bool)
+    splits = _SPLIT if k <= 2 else _SPLIT_COARSE
+    if k > 1:
+        firsts = [int(math.floor(a * K)) for a in splits]
+        g0 = min((float(low_val[0][i]) for i in firsts if i >= 1), default=None)
+        rows = noise[:, cols[0]] >= g0 if g0 is not None else np.zeros(Nn, bool)
+        Nc = np.ascontiguousarray(noise[rows][:, cols].T)
+    else:
+        Nc = np.ascontiguousarray(noise[:, cols].T)
 
-    def consider(prefix, dead, ndead, nalive):
-        """Given thresholds for tiers 0..k-2, the last uses the remaining budget. dead: mask
-        over the M kept draws of those the earlier tiers dismissed, ndead of them."""
+    def consider(prefix, ndead, alive, fracs):
+        """Given thresholds for tiers 0..k-2, the last uses the remaining budget: ndead draws
+        are dismissed (marked in dead), alive the noise blocks passing every earlier tier
+        (None: all of them), fracs those tiers' pass rates."""
         rem = K - ndead
         if rem < 0 or rem >= M - ndead:
             return
@@ -815,8 +872,10 @@ def _chain_candidates(sig, noise, bands, chain, fd, snr, prune):
             at = rem
         g = float(last_val[at])
         th = list(prefix) + [g]
-        reach = [1.0] + [float(x) for x in nalive[1:]]
-        reach.append(float((nalive[0] & (noise[:, cols[-1]] >= g)).mean()))
+        hit = Nc[-1] >= g
+        if alive is not None:
+            hit &= alive
+        reach = [1.0] + fracs + [int(np.count_nonzero(hit)) / Nn]
         if prune and any(r > _USELESS_PASS for r in reach[1:len(chain)]):
             # choosing: a tier that passes most of its pairs on to ANOTHER TIER only adds its
             # own cost. (The last tier's pass rate into the refine is not judged here: at a
@@ -824,12 +883,12 @@ def _chain_candidates(sig, noise, bands, chain, fd, snr, prune):
             return
         out.append((tuple(th), tuple(reach)))
 
-    def rec(i, prefix, remaining, dead, ndead, alive_noise, fracs):
+    def rec(i, prefix, remaining, ndead, alive, fracs):
         # tier i takes a share of the budget still unallocated; the last tier gets what is left
         if i == k - 1:
-            consider(prefix, dead, ndead, [alive_noise] + fracs)
+            consider(prefix, ndead, alive, fracs)
             return
-        for a in (_SPLIT if k <= 2 else _SPLIT_COARSE):
+        for a in splits:
             share = a * remaining
             idx = int(math.floor(share * K))
             if idx < 1:
@@ -837,13 +896,17 @@ def _chain_candidates(sig, noise, bands, chain, fd, snr, prune):
             g = float(low_val[i][idx])
             # draws this tier dismisses: its column strictly below g
             cut = int(np.searchsorted(low_val[i], g, side="left"))
-            d = dead.copy()
-            d[low[i][:cut]] = True
-            an = alive_noise & (noise[:, cols[i]] >= g)
-            rec(i + 1, prefix + [g], remaining - share, d, int(np.count_nonzero(d)), an,
-                fracs + [float(an.mean())])
+            cand = low[i][:cut]
+            new = cand[~dead[cand]]
+            dead[new] = True
+            an = Nc[i] >= g
+            if alive is not None:
+                an &= alive
+            rec(i + 1, prefix + [g], remaining - share, ndead + int(new.size), an,
+                fracs + [int(np.count_nonzero(an)) / Nn])
+            dead[new] = False
 
-    rec(0, [], 1.0, np.zeros(M, bool), 0, np.ones(noise.shape[0], bool), [])
+    rec(0, [], 1.0, 0, None, [])
     return out
 
 

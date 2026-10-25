@@ -10,17 +10,20 @@ import numpy as np
 from . import gatechain as _gc
 
 
-def calibrate_costs(n, ntemplates, blocks=128, reps=5, seed=11, group=None):
+def calibrate_costs(n, ntemplates, blocks=32, reps=5, seed=11, group=None):
     """Measure this machine's tier costs at transform size n through the engine itself.
 
     Synthetic analytic noise and whitened random templates; thresholds are
     placed so that the tier under test sees each target survivor density, and
     costs are read from the engine's per-tier counters (ap_hmf_tier_stats), so
-    no wall-clock subtraction is involved. Calls are sized like a segment's
-    (128 blocks: every cost within 2-5% of 256's, at 0.58 of the time, dev2 2026-10-24;
-    the calibration was half a slow machine's setup), because a pooled tier's fixed per-call cost is only
-    representative when amortised over a realistic number of survivors.
-    Under a second per (n, series group), once per process. Runs at _CAL_TEMPLATES
+    no wall-clock subtraction is involved. Calls are 32 blocks of 64 templates: a full series
+    group at n <= 2048, as production calls run, while fewer templates move the screen and
+    later tiers (the first tier batches over templates). The size decides the block-size
+    choice's noise more than the cost's: under load (dev2, 2026-10-24) the modelled 4096/2048
+    cost ratio scattered with sd 0.06 at 16 blocks, 0.02-0.03 at 32 and 64, 0.014 at 128,
+    for 0.06, 0.09-0.10, 0.18 and 0.35 s of calibration for both sizes.
+    The band costs are shared by every n on the same series group, so a second n measures
+    only its refine and per-block work. About 0.05 s per n on dev2; once per process. Runs at _CAL_TEMPLATES
     templates whatever `ntemplates` is (kept for callers; see _CAL_TEMPLATES).
     """
     from . import _core
@@ -67,58 +70,81 @@ def calibrate_costs(n, ntemplates, blocks=128, reps=5, seed=11, group=None):
 
     pairs = blocks * nt
 
+    # One plan per chain shape, its thresholds and screen set per use: a plan's construction
+    # loads the 64 templates, and building one per measurement and per bisection step was a
+    # fifth of the calibration.
+    plans = {}
+
     def plan(chain, thr, q15=False):
-        """A plan of this chain at these thresholds (sample() settles it before each timing)."""
-        with _gc._internal_plans():
-            p = _core.HMF(n, 1, nt, list(chain), group, n)
-        p.set_reference(ref); p.set_template_batch(0, spec); p.set_thresholds(list(thr))
-        if q15:
-            p.set_q15(True)
+        p = plans.get(tuple(chain))
+        if p is None:
+            with _gc._internal_plans():
+                p = plans[tuple(chain)] = _core.HMF(n, 1, nt, list(chain), group, n)
+            p.set_reference(ref); p.set_template_batch(0, spec)
+        p.set_thresholds(list(thr))
+        p.set_q15(bool(q15))
         return p
 
-    # The threshold searches count passes on the first `cblocks` blocks only: a density is a
-    # target to within 25% (each cost's own density is read from the full call's counts), and
-    # 2048 pairs see ~20 passes at 1%. At the full 256 blocks the searches were 45% of the
-    # calibration.
-    cblocks = min(blocks, 32)
-    cs_, cws, cwe = starts[:cblocks], ws[:cblocks], we[:cblocks]
-    cidx, cval, cmag, ccnt = idx[:cblocks], val[:cblocks], mag[:cblocks], cnt[:cblocks]
-
-    def passes(chain, thr):
-        """Pairs the first tier passes on the counting blocks (nothing timed)."""
-        p = plan(chain, thr)
-        p.run_series(ser, cs_, cws, cwe, 0, nt, n, big, cidx, cval, cmag, ccnt)
-        return p.tier_stats()[0][1] / (cblocks * nt)
-
-    def sample(p):
-        """One timed call after an untimed one on the same plan (the caches as a run of calls
-        leaves them: timed straight after another plan's, the refine and later tiers read 25-30%
-        dearer): per tier (and the refine, last) (passed, ticks), the screen's (passed, ticks),
-        and the call's ticks outside its tiers and refine."""
+    def count(chain, thr, q15=False):
+        """(pairs the first tier passes, pairs the screen passes) per pair, untimed. A one-tier
+        chain is counted behind a second tier nothing passes, so its passes are not refined."""
+        if len(chain) == 1 and chain[0] != bands[-1]:
+            chain, thr = (chain[0], bands[-1]), (thr[0], big)
+        p = plan(chain, thr, q15)
+        t0, q0 = p.tier_stats()[0][1], p.q15_stats()[1]
         p.run_series(ser, starts, ws, we, 0, nt, n, big, idx, val, mag, cnt)
+        return (p.tier_stats()[0][1] - t0) / pairs, (p.q15_stats()[1] - q0) / pairs
+
+    def settle(chain):
+        """An untimed call on the plan, so its timed calls see the caches a run of calls leaves
+        (timed straight after another plan's, the refine and later tiers read 25-30% dearer);
+        jobs on one plan differ only in thresholds and the screen, so one settles them all."""
+        p = plans[tuple(chain)]
+        p.run_series(ser, starts, ws, we, 0, nt, n, big, idx, val, mag, cnt)
+
+    def sample(job):
+        """One timed call: per tier (and the refine, last) (passed, ticks), the screen's
+        (passed, ticks), and the call's ticks outside its tiers and refine."""
+        p = plan(*job)
         t0, q0, s0 = p.tier_stats(), p.q15_stats(), p.series_ticks()
         p.run_series(ser, starts, ws, we, 0, nt, n, big, idx, val, mag, cnt)
         t1, q1, s1 = p.tier_stats(), p.q15_stats(), p.series_ticks()
         tiers = [(c[1] - q[1], c[2] - q[2]) for c, q in zip(t1, t0)]
         return tiers, (q1[1] - q0[1], q1[2] - q0[2]), s1 - s0 - sum(t[1] for t in tiers)
 
-    def thr_for(b, density):
-        """Tier-0 threshold at band b passing about `density` of pairs (bisection on the pass
-        rate). Pass counts only: nothing here is timed."""
+    def thr_for(b, density, start=None):
+        """Tier-0 threshold at band b passing about `density` of pairs: secant steps on the log
+        pass rate (a noise tail is near linear in it), bisection where a step leaves its
+        bracket. Pass counts only: nothing here is timed. A density is a target to within 25%
+        (each cost's own density is read from its call's counts)."""
         lo, hi = 0.0, 16.0
-        for _ in range(14):
-            mid = 0.5 * (lo + hi)
-            frac = passes((b,), (mid,))
-            if frac > density:
-                lo = mid
-            else:
-                hi = mid
+        if start is None:
+            # a block's maximum over its L coarse lags passes t with probability ~ L e^(-t^2/2)
+            L = max(int(b * (n - taps) / n), 1)
+            start = np.sqrt(2.0 * np.log(max(L / density, 1.5)))
+        t = float(start)
+        prev = None
+        for _ in range(12):
+            frac = count((b,), (t,))[0]
             if abs(frac - density) < 0.25 * density:
-                break
-        return mid
+                return t
+            if frac > density:
+                lo = max(lo, t)
+            else:
+                hi = min(hi, t)
+            nxt = None
+            if prev is not None and frac > 0 and prev[1] > 0 and frac != prev[1]:
+                slope = (np.log(frac) - np.log(prev[1])) / (t - prev[0])
+                if slope < 0:
+                    nxt = t + (np.log(density) - np.log(frac)) / slope
+            prev = (t, frac)
+            if nxt is None or not (lo < nxt < hi):
+                nxt = t + 0.5 if frac > density and hi >= 16.0 else 0.5 * (lo + hi)
+            t = float(nxt)
+        return t
 
-    # Every timed quantity is a job with its own warmed plan. The jobs run round-robin, `reps`
-    # rounds, each round starting one job later, and each quantity is the minimum over its
+    # Every timed quantity is a job (a plan and its settings). The jobs run round-robin, `reps`
+    # rounds, each round starting at another job, and each quantity is the minimum over its
     # rounds. Interference (another process on the core or its SMT sibling, a busy memory
     # system) only ever adds time, and a round-robin gives every job the same mix of load
     # states, so the minima keep the costs' ratios -- which are all the chain choice and the
@@ -126,60 +152,90 @@ def calibrate_costs(n, ntemplates, blocks=128, reps=5, seed=11, group=None):
     # sequence with medians, one band's samples could fall in a busy spell and another's not:
     # costs moved up to 4x between processes under dynamic load (dev2, 2026-10-24).
     b0 = bands[0]
-    g0 = {f: thr_for(b0, f) for f in _gc._CAL_DENSITIES}
+    dens = _gc._CAL_DENSITIES
+    g0, t = {}, None
+    for f in dens:
+        g0[f] = t = thr_for(b0, f, t)
     qbands = [] if g16 else [b for b in bands if _gc._q15_band(b)]
-    gq = {(b, f): thr_for(b, f) for b in qbands for f in _gc._CAL_DENSITIES}
-    jobs = {("dense", b): plan((b,), (big,)) for b in bands}
-    for f in _gc._CAL_DENSITIES:
-        jobs[("refine", f)] = plan((b0,), (g0[f],))
+    # The band costs (first tier, screen, later tiers) do not depend on n, only on the series
+    # group the first tier batches over: measured once per group and shared by every n that
+    # uses it. The refine and the per-block work are n's own.
+    # Kept with the models (gatechain._COSTS), so whatever forgets those forgets these.
+    bkey = ("bands", nt, group, bool(g16), tuple(qbands) != ())
+    shared = _gc._COSTS.get(bkey)
+    need = [b for b in bands if shared is None or b not in shared["dense"]]
+    jobs = {("dense", b): ((b,), (big,), False) for b in need}
+    jobs[("dense", b0)] = ((b0,), (big,), False)       # its call also gives the per-block work
+    for f in dens:
+        jobs[("refine", f)] = ((b0,), (g0[f],), False)
         for b in bands[1:]:
-            jobs[("sparse", b, f)] = plan((b0, b), (g0[f], big))
+            if b in need:
+                jobs[("sparse", b, f)] = ((b0, b), (g0[f], big), False)
     for b in qbands:
-        jobs[("screen", b)] = plan((b,), (big,), q15=True)
-        for f in _gc._CAL_DENSITIES:
-            jobs[("screen", b, f)] = plan((b,), (gq[(b, f)],), q15=True)
-    names = list(jobs)
-    got = {nm: [] for nm in names}
-    rounds = max(3, (reps + 1) // 2)      # a settle call per sample: about the calls reps took timed alone
+        if b in need:
+            jobs[("screen", b)] = ((b,), (big,), True)
+    if qbands and qbands[0] in need:
+        # what a pass costs beyond the screen (compaction), per pass and the same at every band:
+        # under a tick (against ~100 a pair for the screen itself), timed once, at the first
+        # band and its first density
+        jobs[("recheck",)] = ((qbands[0],), (g0[dens[0]],), True)
+    # rounds of the plans in turn (each round starting at another), every plan settled and then
+    # its jobs timed. Settled per plan and screen setting: a screen call timed straight after
+    # the same plan without the screen read up to 20% dearer at 16 blocks a call.
+    byplan = {}
+    for nm, job in jobs.items():
+        byplan.setdefault((tuple(job[0]), job[2]), []).append(nm)
+    order = list(byplan)
+    got = {nm: [] for nm in jobs}
+    rounds = max(3, (reps + 1) // 2)
     for r in range(rounds):
-        k = (r * max(len(names) // rounds, 1)) % len(names)
-        for nm in names[k:] + names[:k]:
-            got[nm].append(sample(jobs[nm]))
-    del jobs
-
+        k = r % len(order)
+        for ch in order[k:] + order[:k]:
+            plan(*jobs[byplan[ch][0]])
+            settle(ch[0])
+            for nm in byplan[ch]:
+                got[nm].append(sample(jobs[nm]))
     def least(nm, value):
         return min(value(x) for x in got[nm])
 
-    dense = {b: least(("dense", b), lambda x: x[0][0][1]) / pairs for b in bands}
+    dense = dict(shared["dense"]) if shared else {}
+    dense.update({b: least(("dense", b), lambda x: x[0][0][1]) / pairs for b in need})
+    dense = {b: dense[b] for b in bands}
     # Per-block fixed work: a whole run_series call minus its tiers and refine (nothing passes).
-    block = [least(("dense", b), lambda x: x[2]) / blocks for b in bands[:2]]
-    sparse, refine = {}, []
-    for f in _gc._CAL_DENSITIES:
-        t = got[("refine", f)][0][0]
-        if t[-1][0]:
-            refine.append((t[0][0] / pairs, least(("refine", f), lambda x: x[0][-1][1]) / t[-1][0]))
+    block = [least(("dense", b0), lambda x: x[2]) / blocks]
+    sparse = {b: list(v) for b, v in (shared["sparse"].items() if shared else ()) if b in bands}
+    refine = []
+    for f in dens:
+        tt = got[("refine", f)][0][0]
+        if tt[-1][0]:
+            refine.append((tt[0][0] / pairs, least(("refine", f), lambda x: x[0][-1][1]) / tt[-1][0]))
         for b in bands[1:]:
-            t = got[("sparse", b, f)][0][0]
-            if t[0][0]:
-                sparse.setdefault(b, []).append((t[0][0] / pairs, least(("sparse", b, f), lambda x: x[0][1][1]) / t[0][0]))
+            if b not in need:
+                continue
+            tt = got[("sparse", b, f)][0][0]
+            if tt[0][0]:
+                sparse.setdefault(b, []).append((tt[0][0] / pairs, least(("sparse", b, f), lambda x: x[0][1][1]) / tt[0][0]))
     # the first band can only be a first tier; give it the next band's sparse curve for completeness
     if bands[1:]:
-        sparse.setdefault(b0, list(sparse.get(bands[1], [])))
-    screen = {}
+        sparse[b0] = list(sparse.get(bands[1], []))
+    screen = {b: dict(v) for b, v in (shared["screen"].items() if shared else ()) if b in bands}
     for b in qbands:
+        if b not in need:
+            continue
         # screen alone: at an unreachable threshold nothing passes, so the tier's ticks are the
-        # screen's; then at calibrated densities, how many pairs it passes and what each costs
-        # beyond the screen (compaction: the screen is the tier's gate)
-        ent = {"dense": least(("screen", b), lambda x: x[0][0][1]) / pairs, "excess": [], "recheck": 0.0}
-        rc = []
-        for f in _gc._CAL_DENSITIES:
-            t, q, _ = got[("screen", b, f)][0]
-            if t[0][0] and q[0]:
-                ent["excess"].append((t[0][0] / pairs, q[0] / pairs))
-                rc.append(least(("screen", b, f), lambda x: x[0][0][1] - x[1][1]) / q[0])
-        if ent["excess"]:
-            ent["recheck"] = float(np.median(rc))
-            screen[b] = ent
+        # screen's; how many pairs it passes at each density (counted: the screen is the tier's
+        # gate, so they are the tier's passes); what each costs beyond the screen
+        # the screen is the tier's gate: it passes the pairs the tier passes (excess 1)
+        tt, q, _ = got[("recheck",)][0]
+        if not q[0]:
+            continue
+        ent = {"dense": least(("screen", b), lambda x: x[0][0][1]) / pairs,
+               "excess": [(tt[0][0] / pairs, q[0] / pairs)],
+               "recheck": max(least(("recheck",), lambda x: x[0][0][1] - x[1][1]) / q[0], 0.0)}
+        screen[b] = ent
+    _gc._COSTS[bkey] = {"dense": dict(dense), "sparse": {b: list(v) for b, v in sparse.items()},
+                         "screen": {b: dict(v) for b, v in screen.items()}}
+    del plans
     cm = _gc.CostModel(n, dense, sparse, refine, block=float(np.median(block)), screen=screen)
     if path is not None:          # another process's model, stored first, is the one used
         cm = _gc.CostModel.from_dict(_gc._store_first(path, skey, cm.to_dict(), _gc._cost_model_ok))

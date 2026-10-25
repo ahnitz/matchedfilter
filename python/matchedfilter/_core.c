@@ -1240,6 +1240,88 @@ static PyObject *M_row_peaks(PyObject *self,PyObject *args){
   if(bad){ PyErr_SetString(PyExc_IndexError,"row_peaks: a row's signal window leaves sig"); return NULL; }
   Py_RETURN_NONE;
 }
+/* The gate model's noise simulation, whole (gatechain._noise_records): row r of nrows is a
+   block's bins, complex draws r * 2 bmax .. of stream `seed` (ap_gauss_fill, as
+   _Normals.complex lays rows out) times scale[k]; band i's coarse statistic is the b_i-point
+   backward transform of bins [0, b_i) times bscale[i], and its running maximum's records go
+   to pos[i], val[i], off[i]: every lag whose value exceeds all before it (the first always),
+   as (lag, sqrt value), row r's at [off[r], off[r + 1]). The largest |z| over lags [0, c) is
+   the value of row r's last record below c, so one simulation answers every window length;
+   a stationary row of L lags has about ln L + 0.58 records. Returns a tuple of each band's record
+   count, -1 for a band whose pos/val were too short. */
+static PyObject *M_noise_records(PyObject *self,PyObject *args){
+  (void)self;
+  PyObject *sco,*bo,*bso,*po,*vo,*oo; unsigned long long seed; long long nrows;
+  if(!PyArg_ParseTuple(args,"OKLOOOOO",&sco,&seed,&nrows,&bo,&bso,&po,&vo,&oo)) return NULL;
+  if(!PyTuple_Check(bo)||!PyTuple_Check(bso)||!PyTuple_Check(po)||!PyTuple_Check(vo)||!PyTuple_Check(oo)){
+    PyErr_SetString(PyExc_TypeError,"noise_records: bands, bscale, pos, val, off must be tuples"); return NULL;
+  }
+  const Py_ssize_t nb=PyTuple_GET_SIZE(bo);
+  if(nb<1||nb>32||PyTuple_GET_SIZE(bso)!=nb||PyTuple_GET_SIZE(po)!=nb||PyTuple_GET_SIZE(vo)!=nb||PyTuple_GET_SIZE(oo)!=nb||nrows<1){
+    PyErr_SetString(PyExc_ValueError,"noise_records: one bscale, pos, val and off per band, 1..32 bands, nrows >= 1"); return NULL;
+  }
+  Py_buffer sc; if(PyObject_GetBuffer(sco,&sc,PyBUF_C_CONTIGUOUS|PyBUF_FORMAT)<0) return NULL;
+  Py_buffer pb[32],vb[32],ob[32]; int got=0, ok=sc.itemsize==4 && strcmp(sc.format,"f")==0;
+  long long b[32]; float bs[32]; ap_plan *pl[32]={0};
+  for(Py_ssize_t i=0;i<nb && ok;i++){
+    b[i]=PyLong_AsLongLong(PyTuple_GET_ITEM(bo,i)); bs[i]=(float)PyFloat_AsDouble(PyTuple_GET_ITEM(bso,i));
+    if(PyErr_Occurred()){ ok=0; break; }
+    if(PyObject_GetBuffer(PyTuple_GET_ITEM(po,i),&pb[i],PyBUF_WRITABLE|PyBUF_C_CONTIGUOUS|PyBUF_FORMAT)<0){ ok=0; break; }
+    if(PyObject_GetBuffer(PyTuple_GET_ITEM(vo,i),&vb[i],PyBUF_WRITABLE|PyBUF_C_CONTIGUOUS|PyBUF_FORMAT)<0){ PyBuffer_Release(&pb[i]); ok=0; break; }
+    if(PyObject_GetBuffer(PyTuple_GET_ITEM(oo,i),&ob[i],PyBUF_WRITABLE|PyBUF_C_CONTIGUOUS|PyBUF_FORMAT)<0){ PyBuffer_Release(&pb[i]); PyBuffer_Release(&vb[i]); ok=0; break; }
+    got=(int)i+1;
+    ok = b[i]>=1 && b[i]<=32768 && (i==0 || b[i]>b[i-1]) && pb[i].itemsize==2 && strcmp(pb[i].format,"h")==0
+         && vb[i].itemsize==4 && strcmp(vb[i].format,"f")==0 && pb[i].len/2==vb[i].len/4
+         && ob[i].itemsize==8 && (strcmp(ob[i].format,"q")==0||strcmp(ob[i].format,"l")==0) && ob[i].len/8==nrows+1;
+  }
+  const long long bmax = ok ? b[nb-1] : 0;
+  if(ok && sc.len/4 < bmax) ok=0;
+  if(!ok){
+    for(int i=0;i<got;i++){ PyBuffer_Release(&pb[i]); PyBuffer_Release(&vb[i]); PyBuffer_Release(&ob[i]); }
+    PyBuffer_Release(&sc);
+    if(!PyErr_Occurred()) PyErr_SetString(PyExc_TypeError,"noise_records: scale float32 (>= bmax); bands ascending in 1..32768; pos int16 and val float32 of one length, off int64 (nrows + 1) per band");
+    return NULL;
+  }
+  for(Py_ssize_t i=0;i<nb && ok;i++) if(!(pl[i]=ap_create((size_t)b[i]))) ok=0;
+  float *X=(float*)aligned_alloc(64,((size_t)(2*bmax*4)+63)/64*64), *T=(float*)aligned_alloc(64,((size_t)(2*bmax*4)+63)/64*64),
+        *Y=(float*)aligned_alloc(64,((size_t)(2*bmax*4)+63)/64*64);
+  long long k[32]={0}; int full[32]={0};
+  if(ok && X && T && Y){
+    const float *scale=(const float*)sc.buf;
+    Py_BEGIN_ALLOW_THREADS
+    for(long long r=0;r<nrows;r++){
+      ap_gauss_fill(X,(size_t)(2*bmax),(uint64_t)seed,(uint64_t)(2*r*bmax));
+      for(long long j=0;j<bmax;j++){ X[2*j]*=scale[j]; X[2*j+1]*=scale[j]; }
+      for(Py_ssize_t i=0;i<nb;i++){
+        int16_t *pos=(int16_t*)pb[i].buf; float *val=(float*)vb[i].buf; long long *off=(long long*)ob[i].buf;
+        const long long cap=vb[i].len/4;
+        off[r]=k[i];
+        if(full[i]) continue;
+        memcpy(T,X,(size_t)(2*b[i])*sizeof(float));
+        ap_fft(pl[i],T,Y,AP_BACKWARD);
+        const float s=bs[i]; float best=-1.f;
+        for(long long j=0;j<b[i];j++){
+          const float re=s*Y[2*j], im=s*Y[2*j+1], a=re*re+im*im;
+          if(a>best){
+            best=a;
+            if(k[i]==cap){ full[i]=1; break; }
+            pos[k[i]]=(int16_t)j; val[k[i]]=sqrtf(a); k[i]++;
+          }
+        }
+      }
+    }
+    for(Py_ssize_t i=0;i<nb;i++) ((long long*)ob[i].buf)[nrows]=k[i];
+    Py_END_ALLOW_THREADS
+  }
+  free(X); free(T); free(Y);
+  for(Py_ssize_t i=0;i<nb;i++){ if(pl[i]) ap_destroy(pl[i]); }
+  for(int i=0;i<got;i++){ PyBuffer_Release(&pb[i]); PyBuffer_Release(&vb[i]); PyBuffer_Release(&ob[i]); }
+  PyBuffer_Release(&sc);
+  if(!ok || !X || !T || !Y){ PyErr_SetString(PyExc_MemoryError,"noise_records: no FFT plan or buffer"); return NULL; }
+  PyObject *t=PyTuple_New(nb);
+  for(Py_ssize_t i=0;i<nb;i++) PyTuple_SET_ITEM(t,i,PyLong_FromLongLong(full[i] ? -1 : k[i]));
+  return t;
+}
 static PyObject *M_l1d_bytes(PyObject *self,PyObject *args){
   (void)self; (void)args;
   return PyLong_FromSize_t(ap_l1d_bytes());
@@ -1606,6 +1688,7 @@ static PyTypeObject RootType={
 
 static PyMethodDef methods[]={
   {"backend",M_backend,METH_NOARGS,"backend() -> name of the selected kernel"},
+  {"noise_records",M_noise_records,METH_VARARGS,"noise_records(scale, seed, nrows, bands, bscale, pos, val, off) -> record counts: the gate model's noise simulation, per band the running maximum's records of each block's coarse statistic"},
   {"row_peaks",M_row_peaks,METH_VARARGS,"row_peaks(z, scale, sig, start, step, amp, peak, at): per row the largest |scale z + amp sig[start + j step]| and its j (gatechain simulations)"},
   {"gauss_fill",M_gauss_fill,METH_VARARGS,"gauss_fill(out float32, seed, offset): out[i] = standard normal draw offset + i of stream seed (src/gauss.cc)"},
   {"l1d_bytes",M_l1d_bytes,METH_NOARGS,"l1d_bytes() -> the L1 data cache size the OS reports, or 0 if unknown"},
