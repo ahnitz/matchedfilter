@@ -388,12 +388,6 @@ class HierarchicalFilter(MatchedFilter):
         r = self.__dict__.get("_resolved")
         if r is not None:
             return r
-        # held for the bank's block-size trial: modelled provisionally (gatechain.provisional),
-        # with every draw once the trial locks on this layout (release_trials)
-        with _gatechain.provisional(getattr(self, "_trial_hold", False)):
-            return self._resolve_now()
-
-    def _resolve_now(self):
         if self._chain is None:
             if self._pending_ref is None:
                 raise ValueError("set a reference first (set_reference), or pin a chain")
@@ -430,8 +424,7 @@ class HierarchicalFilter(MatchedFilter):
         taps = getattr(self, "_taps", None)
         if taps is None or not _direct_refine_enabled() or self._pending_ref is None:
             return {}
-        key = (float(self._fs_snr or self.snr), float(self.fd), self.search_window,
-               _gatechain.model_draws(self.fd))
+        key = (float(self._fs_snr or self.snr), float(self.fd), self.search_window)
         hit = getattr(self, "_dprice", None)
         if (hit is not None and hit[0] == key and hit[2] is self._pending_ref
                 and hit[3] is taps[0]):
@@ -468,8 +461,6 @@ class HierarchicalFilter(MatchedFilter):
         self._trial_hold = False
         if self._chain is None or self._pending_ref is None:
             return                              # chosen, unheld, at first use
-        # modelled provisionally while held: model again with every draw (the thresholds too)
-        self.__dict__.pop("_resolved", None)
         chain = self._choose_chain()
         if tuple(chain) != tuple(self._chain):
             self._switch_chain(chain)
@@ -644,15 +635,12 @@ class HierarchicalFilter(MatchedFilter):
         ref = np.asarray(self._pending_ref, np.float64)
         prof = _gatechain._gm._profile_sig(ref / ref.sum())
         direct = self._direct_key()
-        held = bool(getattr(self, "_trial_hold", False))
         key = (self.n, float(snr), float(self.fd), tiers, self.search_window, prof, str(self.device),
-               _gatechain.cpu_gate_kind() if self.device.kind == "cpu" else None, direct,
-               _gatechain.model_draws(self.fd) if held else None)
+               _gatechain.cpu_gate_kind() if self.device.kind == "cpu" else None, direct)
         with _AUTOTUNE_LOCK:
             hit = _chains._CHAIN_CHOICE.get(key)
         if hit is None:
-            with _gatechain.provisional(held):
-                best, plans = _gatechain.choose_chain(self._pending_ref, self.n, snr, self.fd, ntemplates=self.ntemplates,
+            best, plans = _gatechain.choose_chain(self._pending_ref, self.n, snr, self.fd, ntemplates=self.ntemplates,
                                                   cost=self._cost_model(), max_tiers=tiers,
                                                   window=self.search_window)
             if best is None:
