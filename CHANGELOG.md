@@ -48,6 +48,19 @@ Alpha releases may change the API. Pin a version for reproducible work.
   draw 7-39x faster (above), run in single precision, reduce each transformed block in one
   pass (_core.row_peaks), and the plan search, gate features and kept draws are memoised or
   linear where they were quadratic.
+- Setup of a hierarchical search, again: a test67 BBH full-data job (323 banks over 19
+  references; setup is per job, the same for 3x the data), matchedfilter's setup CPU against
+  the release candidate above, interleaved on one node: Haswell 276 -> 185 s, Ivy Bridge
+  401 -> 307 s, dev2 45.5 -> 16.7 s. The noise simulation keeps each block's running-maximum
+  records, so every template group's search window reads its block maxima from one
+  simulation per reference and block size, where each window simulated anew; it runs in one
+  C pass (_core.noise_records: draws, the library's transforms, records; within 2.6e-7 of
+  NumPy's). The plan search leaves out noise blocks below the lowest first-tier threshold it
+  tries (2.8x, candidates identical); the signal simulation evaluates each band on its own
+  lags (identical). The cost calibration shares band costs between sizes on one series group,
+  reuses its plans and runs 32-block calls: a job's calibration (2048 and 4096) takes 0.8 s on
+  Haswell and 1.5-2.5 s on Ivy Bridge, from 6.6-6.9 and 11-12 s (main: 26 and 45-59 s).
+  Decisions under one cost file are identical to before on test27 and test67.
 
 - The AVX back end (Sandy and Ivy Bridge) has its own block and spectrum loads (scale_load,
   split_store, now in src/loads-inl.h). It had inherited SSE4's, and split_store's vector path
