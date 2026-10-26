@@ -26,7 +26,7 @@ import pytest
 import matchedfilter as mf
 import matchedfilter._core as _core
 from matchedfilter import gatechain as gc, gatemodel as gm
-from tests.spectral_profiles import SHAPE_NAMES, binomtest, make_spectral_profile
+from spectral_profiles import SHAPE_NAMES, binomtest, make_spectral_profile
 
 SNR = 5.5
 #: Two-sided binomial p-value below which a count is off budget. With ~40 cases a run, a
@@ -160,21 +160,73 @@ def test_a_windowed_search_dismisses_its_budget(name):
                         % (name, [round(t, 3) for t in thr], miss, det, miss / det, fd))
 
 
-def test_window_noise_lifts_every_kept_draw_to_the_windows_maximum():
-    """Each kept draw's coarse maximum is at least its paired noise maximum over the rest of
-    the window, per tier (one noise row for all of a draw's tiers): the engine tests the
-    maximum over the window. The rest leaves out the draw's own lags, which hold the signal."""
+def _ks_p(a, b):
+    """Two-sample Kolmogorov-Smirnov p-value (asymptotic)."""
+    a, b = np.sort(a), np.sort(b)
+    x = np.concatenate([a, b])
+    d = np.abs(np.searchsorted(a, x, "right") / a.size - np.searchsorted(b, x, "right") / b.size).max()
+    en = np.sqrt(a.size * b.size / (a.size + b.size))
+    lam = (en + 0.12 + 0.11 / en) * d
+    if lam < 0.3:          # the series below does not converge; Q(0.3) = 1 - 1e-5
+        return 1.0
+    j = np.arange(1, 101)
+    return float(min(1.0, max(0.0, 2 * np.sum((-1.0) ** (j - 1) * np.exp(-2 * j * j * lam * lam)))))
+
+
+def _all_alike(ps, what):
+    """Every comparison's p-value above ALPHA, Bonferroni-corrected for their number."""
+    worst = min(ps, key=ps.get)
+    assert ps[worst] * len(ps) > ALPHA, (what, worst, ps[worst], len(ps))
+
+
+@pytest.mark.parametrize("window", [None, (192, 1856), (300, 900)])
+@pytest.mark.parametrize("name", ["f^0", "f^-1", "bimodal_resonance"])
+def test_signal_draws_noise_is_the_noise_simulation(name, window):
+    """The signal simulation's draws without a signal are noise_block_maxima's statistics: one
+    simulation, so over the whole block the same numbers (to rounding), and over a window (around a random
+    point, against lags from 0) the same distribution."""
     n = 2048
-    power = _profile("f^0", n)
+    power = _profile(name, n)
     bands = gc.usable_bands(power, n)
-    sig = gc.signal_draws(power, n, bands, SNR, 20000)
-    noise = gc.rest_noise(power, n, bands)
-    whole = gc.noise_block_maxima(power, n, bands)
-    assert (noise <= whole + 1e-6).all() and (noise < whole).any()   # fewer lags, smaller maxima
-    chain = (256, 1024)
-    S = gc.kept_draws(sig, bands, chain, SNR, noise)
-    cols = [bands.index(b) for b in chain]
-    keep = np.flatnonzero(sig[1][:, cols].max(1) >= SNR)
-    np.testing.assert_array_less(noise[keep % noise.shape[0]][:, cols] - 1e-6, S)
-    local = gc.kept_draws(sig, bands, chain, SNR)
-    assert (S >= local).all() and (S > local).any()
+    C, F = gc.signal_draws(power, n, bands, 0.0, 20000, window=window)
+    whole = gc.noise_block_maxima(power, n, bands, window=window)
+    if window is None:      # the same draws (the signal's path adds its zero response: rounding)
+        np.testing.assert_allclose(C, whole, rtol=1e-6)
+    _all_alike({b: _ks_p(C[:, i], whole[:, i]) for i, b in enumerate(bands)}, (name, window))
+    assert (C >= 0).all() and F.shape == C.shape
+
+
+@pytest.mark.parametrize("window", [(100, 900), (37, 1000), None])
+@pytest.mark.parametrize("name", ["f^0", "f^-1", "inspiral_canonical"])
+def test_signal_draws_match_a_direct_simulation(name, window):
+    """signal_draws' window maxima against the statistics computed directly in NumPy: per draw
+    a block's bins with variance p_k plus a signal at a uniformly random real-valued time in
+    the window, the fine maximum over the window's lags of the n-point correlation and each
+    band's over its coarse lags of the b-point correlation of bins [0, b); windows aligned
+    with the coarse grids or not, spans a multiple of their steps or not. Jointly, not only
+    each statistic alone: a gate acts on the coarse maxima of the draws the fine stage keeps,
+    and the fine and coarse statistics share their noise: drawn independently, every marginal
+    would still match. signal_draws holds only the draws whose fine statistic reaches snr
+    somewhere in the block (no window keeps the others): the direct draws are taken alike."""
+    n, M = 1024, 6000
+    w0, w1 = window or (0, n)
+    power = _profile(name, n)
+    p = power / power.sum()
+    bands = gc.usable_bands(power, n)
+    C, F = gc.signal_draws(power, n, bands, SNR, M, window=window)
+    rng = np.random.default_rng(zlib.crc32(("%s|%s" % (name, window)).encode()))
+    k = np.arange(n)
+    w = (rng.standard_normal((M, n)) + 1j * rng.standard_normal((M, n))) * np.sqrt(p)
+    t0 = rng.uniform(w0, w1, M)
+    x = w + SNR * p * np.exp(-2j * np.pi * np.outer(t0, k) / n)
+    corr = np.abs(np.fft.ifft(x, axis=1) * n)
+    some = corr.max(1) >= SNR
+    fine = corr[:, w0:w1].max(1)
+    ps = {"fine": _ks_p(F[:, 0], fine[some])}
+    for i, b in enumerate(bands):
+        R = n // b
+        c0, c1 = (w0 // R - 1 if w0 else 0), min(-(-w1 // R) + 1, b)
+        z = np.abs(np.fft.ifft(x[:, :b], axis=1) * b)[:, c0:c1].max(1) / np.sqrt(p[:b].sum())
+        ps[b] = _ks_p(C[:, i], z[some])
+        ps[(b, "kept")] = _ks_p(C[F[:, 0] >= SNR, i], z[fine >= SNR])
+    _all_alike(ps, (name, window))

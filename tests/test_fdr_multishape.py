@@ -23,7 +23,7 @@ if repo_root not in sys.path:
 
 import matchedfilter as mf
 import matchedfilter._core as _core
-from tests.spectral_profiles import make_spectral_profile, SHAPE_NAMES, binomtest
+from spectral_profiles import make_spectral_profile, SHAPE_NAMES, binomtest
 
 
 @pytest.mark.parametrize("shape_name", SHAPE_NAMES)

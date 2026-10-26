@@ -88,10 +88,9 @@ def _profile(n):
 @pytest.fixture
 def fresh(monkeypatch):
     from collections import OrderedDict
-    for c in ("_NOISE_CACHE", "_NOISE_RECORDS", "_SIGNAL_CACHE"):
+    for c in ("_NOISE_CACHE", "_NOISE_RECORDS", "_SIGNAL_CACHE", "_SIGNAL_RECORDS"):
         monkeypatch.setattr(gc, c, OrderedDict())
     monkeypatch.setattr(gc, "_SIMILAR", {})
-    monkeypatch.setattr(gc, "_STREAMS", {})
 
 
 @pytest.mark.parametrize("order", [(20000,), (5000, 20000), (20000, 5000), (5000, 7000, 20000)])
@@ -110,6 +109,20 @@ def test_fewer_noise_blocks_are_a_prefix_of_more(fresh, order):
         np.testing.assert_array_equal(v, full[:ns], err_msg=str(ns))
 
 
+def test_noise_maxima_do_not_depend_on_which_simulation_ran_first(fresh):
+    """noise_block_maxima reads the blocks of the one simulation signal_draws also runs: the
+    same numbers whether a signal simulation ran first (and recorded its noise) or not."""
+    n = 2048
+    p, bands, win = _profile(n), gc.candidate_bands(n), (128, 1920)
+    alone = gc.noise_block_maxima(p, n, bands, nsim=6000, window=win).copy()
+    for c in (gc._NOISE_CACHE, gc._NOISE_RECORDS, gc._SIGNAL_CACHE, gc._SIGNAL_RECORDS):
+        c.clear()
+    gc._SIMILAR.clear()
+    gc.signal_draws(p, n, bands, 6.0, 4000, window=win)
+    assert gc._NOISE_RECORDS, "the signal simulation recorded no noise"
+    np.testing.assert_array_equal(alone, gc.noise_block_maxima(p, n, bands, nsim=6000, window=win))
+
+
 def test_every_window_reads_one_noise_simulation(fresh):
     """Windows of one profile share its simulation's running-maximum records: one simulation,
     each window's maxima what a simulation of that window alone gives."""
@@ -125,21 +138,24 @@ def test_every_window_reads_one_noise_simulation(fresh):
         np.testing.assert_array_equal(v, gc.noise_block_maxima(p, n, bands, window=w), err_msg=str(w))
 
 
-def test_the_signal_stream_cache_changes_nothing(fresh, monkeypatch):
-    """The signal simulation reads its stream's cached prefix (every reference reads it from
-    the start): the draws equal those generated afresh, for a second profile too."""
+def test_signal_draws_depend_only_on_their_seed(fresh):
+    """The signal simulation is a function of the profile, window and seed: drawn afresh (no
+    cache) it gives the same numbers, a second seed others, and a window moved by whole steps
+    of the coarsest band is the same search."""
     n = 2048
-    p1, p2 = _profile(n), gc._norm_profile(np.exp(-np.arange(n) / 250.0) + 1e-4, n)
-    bands = gc.usable_bands(p1, n)
-    cached = [gc.signal_draws(p, n, bands, 6.0, 20000) for p in (p1, p2)]
-    assert gc._STREAMS, "the stream was not cached"
-    monkeypatch.setattr(gc, "_STREAM_MAX_BYTES", 0)       # nothing cached: generated on read
-    gc._STREAMS.clear(); gc._SIGNAL_CACHE.clear(); gc._SIMILAR.clear()
-    for p, (C, F) in zip((p1, p2), cached):
-        C2, F2 = gc.signal_draws(p, n, bands, 6.0, 20000)
-        np.testing.assert_array_equal(C, C2)
-        np.testing.assert_array_equal(F, F2)
-        gc._SIGNAL_CACHE.clear(); gc._SIMILAR.clear()
+    p = _profile(n)
+    bands = gc.usable_bands(p, n)
+    C, F = gc.signal_draws(p, n, bands, 6.0, 4000, window=(128, 1920))
+    gc._SIGNAL_CACHE.clear(); gc._SIMILAR.clear()
+    C2, F2 = gc.signal_draws(p, n, bands, 6.0, 4000, window=(128, 1920))
+    np.testing.assert_array_equal(C, C2)
+    np.testing.assert_array_equal(F, F2)
+    step = n // bands[0]
+    gc._SIGNAL_CACHE.clear(); gc._SIMILAR.clear()
+    C3, _ = gc.signal_draws(p, n, bands, 6.0, 4000, window=(128 + step, 1920 + step))
+    np.testing.assert_array_equal(C, C3)
+    C4, _ = gc.signal_draws(p, n, bands, 6.0, 4000, seed=14, window=(128, 1920))
+    assert not np.array_equal(C, C4)
 
 
 def test_the_c_plan_search_matches_the_python_one(fresh, monkeypatch):

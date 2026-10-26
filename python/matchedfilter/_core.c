@@ -1253,88 +1253,241 @@ static PyObject *M_row_peaks(PyObject *self,PyObject *args){
   if(bad){ PyErr_SetString(PyExc_IndexError,"row_peaks: a row's signal window leaves sig"); return NULL; }
   Py_RETURN_NONE;
 }
-/* The gate model's noise simulation, whole (gatechain._noise_records): row r of nrows is a
-   block's bins, complex draws r * 2 bmax .. of stream `seed` (ap_gauss_fill, as
-   _Normals.complex lays rows out; rows row0 .. when given) times scale[k]; band i's coarse statistic is the b_i-point
-   backward transform of bins [0, b_i) times bscale[i], and its running maximum's records go
-   to pos[i], val[i], off[i]: every lag whose value exceeds all before it (the first always),
-   as (lag, sqrt value), row r's at [off[r], off[r + 1]). The largest |z| over lags [0, c) is
-   the value of row r's last record below c, so one simulation answers every window length;
-   a stationary row of L lags has about ln L + 0.58 records. Returns a tuple of each band's record
-   count, -1 for a band whose pos/val were too short. */
-static PyObject *M_noise_records(PyObject *self,PyObject *args){
+/* A[e] = |g y[e] + d[e]|^2 for e < m (d NULL: |g y[e]|^2), y and d complex: simulate's
+   statistics. One pass the compiler vectorises; on x86-64 ELF builds also for AVX2 and
+   AVX-512, picked when loaded (the module is built for the baseline ISA). */
+#if defined(__x86_64__) && defined(__ELF__) && defined(__GNUC__)
+__attribute__((target_clones("avx512f","avx2","default")))
+#endif
+static void sr_power(const float *restrict y, const float *restrict d, float g, long long m, float *restrict A){
+  if(d){
+    for(long long e=0;e<m;e++){
+      const float re=g*y[2*e]+d[2*e], im=g*y[2*e+1]+d[2*e+1];
+      A[e]=re*re+im*im;
+    }
+  } else {
+    for(long long e=0;e<m;e++){
+      const float re=g*y[2*e], im=g*y[2*e+1];
+      A[e]=re*re+im*im;
+    }
+  }
+}
+/* One statistic's running-maximum records outward from the signal (simulate): the
+   values a[e0], a[e0 + dir], ... (L of them), each exceeding all before it (the first always)
+   as (distance, sqrt value), distance i + (e0 == 0 ? 0 : 1) for the i-th. Records are rare
+   (about ln L of noise; fewer with the signal at the start): a block of 16 below the running
+   maximum is passed over with one comparison. Returns 0, or -1 when the arrays are full. */
+static inline int sr_records(const float *a, long long e0, int dir, long long L, long long d0,
+                             int32_t *pos, float *val, long long *k, long long cap){
+  float best=-1.f; long long i=0;
+  while(i<L){
+    if(L-i>=16){
+      const float *q = dir>0 ? a+e0+i : a+e0-i-15;
+      float mx=q[0];
+      for(int j=1;j<16;j++) mx = q[j]>mx ? q[j] : mx;
+      if(mx<=best){ i+=16; continue; }
+    }
+    const long long stop = i+16<L ? i+16 : L;
+    for(;i<stop;i++){
+      const float v=a[e0+dir*i];
+      if(v>best){
+        best=v;
+        if(*k==cap) return -1;
+        pos[*k]=(int32_t)(i+d0); val[*k]=sqrtf(best); (*k)++;
+      }
+    }
+  }
+  return 0;
+}
+/* Buffers of a records output tuple (simulate): per entry pos int32, val float32 of one
+   length and off int64 (nrows + 1). Returns how many were taken
+   (all on success; the caller releases that many). */
+static int sr_take(PyObject *po,PyObject *vo,PyObject *oo,Py_ssize_t want,long long nrows,
+                   Py_buffer *pb,Py_buffer *vb,Py_buffer *ob,int *ok){
+  int got=0;
+  if(!PyTuple_Check(po)||!PyTuple_Check(vo)||!PyTuple_Check(oo)||PyTuple_GET_SIZE(po)!=want||PyTuple_GET_SIZE(vo)!=want||PyTuple_GET_SIZE(oo)!=want){ *ok=0; return 0; }
+  for(Py_ssize_t s=0;s<want;s++){
+    if(PyObject_GetBuffer(PyTuple_GET_ITEM(po,s),&pb[s],PyBUF_WRITABLE|PyBUF_C_CONTIGUOUS|PyBUF_FORMAT)<0){ *ok=0; break; }
+    if(PyObject_GetBuffer(PyTuple_GET_ITEM(vo,s),&vb[s],PyBUF_WRITABLE|PyBUF_C_CONTIGUOUS|PyBUF_FORMAT)<0){ PyBuffer_Release(&pb[s]); *ok=0; break; }
+    if(PyObject_GetBuffer(PyTuple_GET_ITEM(oo,s),&ob[s],PyBUF_WRITABLE|PyBUF_C_CONTIGUOUS|PyBUF_FORMAT)<0){ PyBuffer_Release(&pb[s]); PyBuffer_Release(&vb[s]); *ok=0; break; }
+    got=(int)s+1;
+    if(!(pb[s].itemsize==4 && (strcmp(pb[s].format,"i")==0||strcmp(pb[s].format,"l")==0) && vb[s].itemsize==4 && strcmp(vb[s].format,"f")==0
+         && pb[s].len==vb[s].len && ob[s].itemsize==8 && (strcmp(ob[s].format,"q")==0||strcmp(ob[s].format,"l")==0) && ob[s].len/8==nrows+1)){ *ok=0; break; }
+  }
+  return got;
+}
+/* The gate model's simulation, whole (gatechain._simulate): row r of nrows is a block's n
+   bins, bins [0, kmax) complex draws (row0 + r) * 2n .. of stream `seed` (ap_gauss_fill) times
+   scale[k], the rest empty. Band i's statistic is the b_i-point backward transform of bins
+   [0, b_i) times bscale[i]; the fine one the n-point transform of all n times fscale.
+
+   With noise outputs (npos, nval, noff: per band): each band's running maximum of
+   the noise alone over its lags from 0, row r's at [off[r], off[r + 1]). With a signal (tab, t, fi
+   and spos, sval, soff, pos int32): a signal arriving at t[r] + fi[r] / NF samples is added
+   through the transforms' linearity, its response read from tab (complex64 (NF, 1 + nb, n):
+   per arrival fraction the fine response, then each band's, in output units; statistic s of
+   m lags R = n / m apart at [rho m + e] its response at lag js + e for a signal rho samples
+   after coarse lag js), and statistic s (0 the fine, 1 + i band i) has its running maximum
+   outward from the signal both ways, as records at [2s + side]: to the right from the lag at
+   or before it (distance 0: lag t for the fine, coarse lag floor(t / R) for a band), to the
+   left from the lag before (distance 1). A window's maximum is then the larger of the two
+   sides' last records within its reach. A row whose fine statistic stays below keep_at at
+   every lag (no window's fine stage keeps it) has no signal records. Without a signal no
+   fine transform is made. Returns
+   (signal counts, noise counts), each a tuple per array or None, -1 for one too short. */
+static PyObject *M_simulate(PyObject *self,PyObject *args){
   (void)self;
-  PyObject *sco,*bo,*bso,*po,*vo,*oo; unsigned long long seed; long long nrows, row0=0;
-  if(!PyArg_ParseTuple(args,"OKLOOOOO|L",&sco,&seed,&nrows,&bo,&bso,&po,&vo,&oo,&row0)) return NULL;
-  if(row0<0){ PyErr_SetString(PyExc_ValueError,"noise_records: row0 >= 0"); return NULL; }
-  if(!PyTuple_Check(bo)||!PyTuple_Check(bso)||!PyTuple_Check(po)||!PyTuple_Check(vo)||!PyTuple_Check(oo)){
-    PyErr_SetString(PyExc_TypeError,"noise_records: bands, bscale, pos, val, off must be tuples"); return NULL;
+  PyObject *sco,*bo,*bso,*tbo,*to,*fio,*spo,*svo,*soo,*npo,*nvo,*noo; unsigned long long seed; long long row0,nrows,kmax; double fscale, keep_at=0.0;
+  if(!PyArg_ParseTuple(args,"OKLLLOOdOOOOOOOOO|d",&sco,&seed,&row0,&nrows,&kmax,&bo,&bso,&fscale,&tbo,&to,&fio,&spo,&svo,&soo,&npo,&nvo,&noo,&keep_at)) return NULL;
+  if(!PyTuple_Check(bo)||!PyTuple_Check(bso)){ PyErr_SetString(PyExc_TypeError,"simulate: bands and bscale must be tuples"); return NULL; }
+  const Py_ssize_t nb=PyTuple_GET_SIZE(bo), ns=2*(1+nb);
+  const int has_sig = tbo!=Py_None, has_noise = npo!=Py_None;
+  if(nb<1||nb>31||PyTuple_GET_SIZE(bso)!=nb||nrows<1||row0<0||!(has_sig||has_noise)){
+    PyErr_SetString(PyExc_ValueError,"simulate: one bscale per band, 1..31 bands, nrows >= 1, row0 >= 0, signal or noise outputs"); return NULL;
   }
-  const Py_ssize_t nb=PyTuple_GET_SIZE(bo);
-  if(nb<1||nb>32||PyTuple_GET_SIZE(bso)!=nb||PyTuple_GET_SIZE(po)!=nb||PyTuple_GET_SIZE(vo)!=nb||PyTuple_GET_SIZE(oo)!=nb||nrows<1){
-    PyErr_SetString(PyExc_ValueError,"noise_records: one bscale, pos, val and off per band, 1..32 bands, nrows >= 1"); return NULL;
+  long long b[32]; float bs[32];
+  for(Py_ssize_t i=0;i<nb;i++){ b[i]=PyLong_AsLongLong(PyTuple_GET_ITEM(bo,i)); bs[i]=(float)PyFloat_AsDouble(PyTuple_GET_ITEM(bso,i)); }
+  if(PyErr_Occurred()) return NULL;
+  Py_buffer sc,tb={0},tt={0},fib={0}; int gin=0, ok=1;
+  Py_buffer *in[4]={&sc,&tb,&tt,&fib}; PyObject *io[4]={sco,tbo,to,fio};
+  for(;gin<(has_sig?4:1);gin++) if(PyObject_GetBuffer(io[gin],in[gin],PyBUF_C_CONTIGUOUS|PyBUF_FORMAT)<0){ ok=0; break; }
+  Py_buffer spb[64],svb[64],sob[64],npb[32],nvb[32],nob[32]; int sgot=0, ngot=0;
+  if(ok && has_sig) sgot=sr_take(spo,svo,soo,ns,nrows,spb,svb,sob,&ok);
+  if(ok && has_noise) ngot=sr_take(npo,nvo,noo,nb,nrows,npb,nvb,nob,&ok);
+  const long long n = ok ? sc.len/4 : 0;
+  ok = ok && sc.itemsize==4 && strcmp(sc.format,"f")==0 && n>=2 && n<=(1<<24) && kmax>=1 && kmax<=n;
+  long long NF=0;
+  if(ok && has_sig){
+    ok = tb.itemsize==8 && strcmp(tb.format,"Zf")==0 && tb.len/8 % ((1+nb)*n)==0
+         && tt.itemsize==8 && (strcmp(tt.format,"q")==0||strcmp(tt.format,"l")==0) && tt.len/8==nrows
+         && fib.itemsize==4 && (strcmp(fib.format,"i")==0||strcmp(fib.format,"l")==0) && fib.len/4==nrows;
+    NF = ok ? tb.len/8/((1+nb)*n) : 0;
   }
-  Py_buffer sc; if(PyObject_GetBuffer(sco,&sc,PyBUF_C_CONTIGUOUS|PyBUF_FORMAT)<0) return NULL;
-  Py_buffer pb[32],vb[32],ob[32]; int got=0, ok=sc.itemsize==4 && strcmp(sc.format,"f")==0;
-  long long b[32]; float bs[32]; ap_plan *pl[32]={0};
-  for(Py_ssize_t i=0;i<nb && ok;i++){
-    b[i]=PyLong_AsLongLong(PyTuple_GET_ITEM(bo,i)); bs[i]=(float)PyFloat_AsDouble(PyTuple_GET_ITEM(bso,i));
-    if(PyErr_Occurred()){ ok=0; break; }
-    if(PyObject_GetBuffer(PyTuple_GET_ITEM(po,i),&pb[i],PyBUF_WRITABLE|PyBUF_C_CONTIGUOUS|PyBUF_FORMAT)<0){ ok=0; break; }
-    if(PyObject_GetBuffer(PyTuple_GET_ITEM(vo,i),&vb[i],PyBUF_WRITABLE|PyBUF_C_CONTIGUOUS|PyBUF_FORMAT)<0){ PyBuffer_Release(&pb[i]); ok=0; break; }
-    if(PyObject_GetBuffer(PyTuple_GET_ITEM(oo,i),&ob[i],PyBUF_WRITABLE|PyBUF_C_CONTIGUOUS|PyBUF_FORMAT)<0){ PyBuffer_Release(&pb[i]); PyBuffer_Release(&vb[i]); ok=0; break; }
-    got=(int)i+1;
-    ok = b[i]>=1 && b[i]<=32768 && (i==0 || b[i]>b[i-1]) && pb[i].itemsize==2 && strcmp(pb[i].format,"h")==0
-         && vb[i].itemsize==4 && strcmp(vb[i].format,"f")==0 && pb[i].len/2==vb[i].len/4
-         && ob[i].itemsize==8 && (strcmp(ob[i].format,"q")==0||strcmp(ob[i].format,"l")==0) && ob[i].len/8==nrows+1;
+  for(Py_ssize_t i=0;i<nb && ok;i++) ok = b[i]>=1 && b[i]<=n && n%b[i]==0 && (i==0||b[i]>b[i-1]) && b[i]<=32768;
+  if(ok && has_sig){
+    const int *fi=(const int*)fib.buf; const long long *t=(const long long*)tt.buf;
+    for(long long r=0;r<nrows;r++) if(fi[r]<0||fi[r]>=NF||t[r]<0||t[r]>=n){ ok=0; break; }
   }
-  const long long bmax = ok ? b[nb-1] : 0;
-  if(ok && sc.len/4 < bmax) ok=0;
+  #define SIM_RELEASE() do{ \
+    for(int s=0;s<sgot;s++){ PyBuffer_Release(&spb[s]); PyBuffer_Release(&svb[s]); PyBuffer_Release(&sob[s]); } \
+    for(int s=0;s<ngot;s++){ PyBuffer_Release(&npb[s]); PyBuffer_Release(&nvb[s]); PyBuffer_Release(&nob[s]); } \
+    for(int i=0;i<gin;i++) PyBuffer_Release(in[i]); }while(0)
   if(!ok){
-    for(int i=0;i<got;i++){ PyBuffer_Release(&pb[i]); PyBuffer_Release(&vb[i]); PyBuffer_Release(&ob[i]); }
-    PyBuffer_Release(&sc);
-    if(!PyErr_Occurred()) PyErr_SetString(PyExc_TypeError,"noise_records: scale float32 (>= bmax); bands ascending in 1..32768; pos int16 and val float32 of one length, off int64 (nrows + 1) per band");
+    SIM_RELEASE();
+    if(!PyErr_Occurred()) PyErr_SetString(PyExc_TypeError,"simulate: scale float32 (n), 1 <= kmax <= n; bands ascending, dividing n, <= 32768; with a signal tab complex64 (NF, 1 + bands, n), t int64 in [0, n), fi int32 in [0, NF) (nrows), pos int32 per statistic and side, and per band for the noise; val float32 of pos's length, off int64 (nrows + 1)");
     return NULL;
   }
+  /* the noise alone needs no bins past the widest band */
+  const long long kfill = has_sig ? kmax : (kmax < b[nb-1] ? kmax : b[nb-1]);
+  ap_plan *pf = has_sig ? ap_create((size_t)n) : NULL, *pl[32]={0}; ok = !has_sig || pf!=NULL;
   for(Py_ssize_t i=0;i<nb && ok;i++) if(!(pl[i]=ap_create((size_t)b[i]))) ok=0;
-  float *X=(float*)aligned_alloc(64,((size_t)(2*bmax*4)+63)/64*64), *T=(float*)aligned_alloc(64,((size_t)(2*bmax*4)+63)/64*64),
-        *Y=(float*)aligned_alloc(64,((size_t)(2*bmax*4)+63)/64*64);
-  long long k[32]={0}; int full[32]={0};
-  if(ok && X && T && Y){
-    const float *scale=(const float*)sc.buf;
+  const size_t bytes=((size_t)(2*n*4)+63)/64*64;
+  float *X=(float*)aligned_alloc(64,bytes), *Y=(float*)aligned_alloc(64,bytes), *T=(float*)aligned_alloc(64,bytes),
+        *A=(float*)aligned_alloc(64,bytes/2+64);
+  long long ks[64]={0}, kn[32]={0}; int sfull[64]={0}, nfull[32]={0};
+  if(ok && X && Y && T && A){
+    const float *scale=(const float*)sc.buf, *tab=has_sig ? (const float*)tb.buf : NULL;
+    const long long *tv=has_sig ? (const long long*)tt.buf : NULL; const int *fi=has_sig ? (const int*)fib.buf : NULL;
+    const float fs=(float)fscale, keep2=(float)(keep_at*keep_at);
     Py_BEGIN_ALLOW_THREADS
+    memset(X,0,(size_t)(2*n)*sizeof(float));
     for(long long r=0;r<nrows;r++){
-      ap_gauss_fill(X,(size_t)(2*bmax),(uint64_t)seed,(uint64_t)(2*(row0+r)*bmax));
-      for(long long j=0;j<bmax;j++){ X[2*j]*=scale[j]; X[2*j+1]*=scale[j]; }
-      for(Py_ssize_t i=0;i<nb;i++){
-        int16_t *pos=(int16_t*)pb[i].buf; float *val=(float*)vb[i].buf; long long *off=(long long*)ob[i].buf;
-        const long long cap=vb[i].len/4;
-        off[r]=k[i];
-        if(full[i]) continue;
-        memcpy(T,X,(size_t)(2*b[i])*sizeof(float));
-        ap_fft(pl[i],T,Y,AP_BACKWARD);
-        const float s=bs[i]; float best=-1.f;
-        for(long long j=0;j<b[i];j++){
-          const float re=s*Y[2*j], im=s*Y[2*j+1], a=re*re+im*im;
-          if(a>best){
-            best=a;
-            if(k[i]==cap){ full[i]=1; break; }
-            pos[k[i]]=(int16_t)j; val[k[i]]=sqrtf(a); k[i]++;
+      ap_gauss_fill(X,(size_t)(2*kfill),(uint64_t)seed,(uint64_t)(2*(row0+r)*n));
+      for(long long j=0;j<kfill;j++){ X[2*j]*=scale[j]; X[2*j+1]*=scale[j]; }
+      int kept = 1;             /* with a signal: the row's fine maximum somewhere reaches keep_at */
+      for(Py_ssize_t s = has_sig ? 0 : 1; s<=nb; s++){
+        const long long m = s==0 ? n : b[s-1];
+        const float g = s==0 ? fs : bs[s-1];
+        /* a backend may use its input as scratch: every transform reads a copy */
+        memcpy(T,X,(size_t)(2*m)*sizeof(float));
+        ap_fft(s==0 ? pf : pl[s-1],T,Y,AP_BACKWARD);
+        if(has_noise && s>0){
+          /* the noise alone, lags 0 .. m-1 */
+          const int q=(int)(s-1); long long *off=(long long*)nob[q].buf; off[r]=kn[q];
+          if(!nfull[q]){
+            sr_power(Y,NULL,g,m,A);
+            if(sr_records(A,0,1,m,0,(int32_t*)npb[q].buf,(float*)nvb[q].buf,&kn[q],nvb[q].len/4)<0) nfull[q]=1;
           }
+        }
+        if(!has_sig) continue;
+        if(!kept){
+          for(int side=0;side<2;side++){ const int q=(int)(2*s+side); ((long long*)sob[q].buf)[r]=ks[q]; }
+          continue;
+        }
+        /* |noise + response| at lag js + e (mod m), e = 0 .. m-1: the response's table holds,
+           per phase rho = t - js R, its values in that order (tab[f, s, rho m + e]) */
+        const long long R = n/m, t=tv[r], js = t/R;
+        const float *D = tab+(size_t)2*fi[r]*(1+nb)*n + (size_t)2*s*n + (size_t)2*(t - js*R)*m;
+        sr_power(Y+2*js,D,g,m-js,A);
+        sr_power(Y,D+2*(m-js),g,js,A+(m-js));
+        if(s==0 && keep2>0.f){
+          float mx=0.f;
+          for(long long e=0;e<m;e++) mx = A[e]>mx ? A[e] : mx;
+          if(mx<keep2){
+            /* no window keeps this draw: no records, and no band's signal pass */
+            kept=0;
+            for(Py_ssize_t q=0;q<ns;q++) ((long long*)sob[q].buf)[r]=ks[q];
+            if(!has_noise) break;
+            continue;
+          }
+        }
+        for(int side=0;side<2;side++){
+          const int q=(int)(2*s+side);
+          long long *off=(long long*)sob[q].buf; off[r]=ks[q];
+          if(sfull[q]) continue;
+          /* right: distances 0 .. m-1 forward; left: lag js - e is A[m - e], e = 1 .. m-1 */
+          if(sr_records(A, side ? m-1 : 0, side ? -1 : 1, side ? m-1 : m, side ? 1 : 0,
+                        (int32_t*)spb[q].buf, (float*)svb[q].buf, &ks[q], svb[q].len/4)<0) sfull[q]=1;
         }
       }
     }
-    for(Py_ssize_t i=0;i<nb;i++) ((long long*)ob[i].buf)[nrows]=k[i];
+    if(has_sig) for(Py_ssize_t q=0;q<ns;q++) ((long long*)sob[q].buf)[nrows]=ks[q];
+    if(has_noise) for(Py_ssize_t q=0;q<nb;q++) ((long long*)nob[q].buf)[nrows]=kn[q];
     Py_END_ALLOW_THREADS
   }
-  free(X); free(T); free(Y);
+  free(X); free(Y); free(T); free(A);
+  if(pf) ap_destroy(pf);
   for(Py_ssize_t i=0;i<nb;i++){ if(pl[i]) ap_destroy(pl[i]); }
-  for(int i=0;i<got;i++){ PyBuffer_Release(&pb[i]); PyBuffer_Release(&vb[i]); PyBuffer_Release(&ob[i]); }
-  PyBuffer_Release(&sc);
-  if(!ok || !X || !T || !Y){ PyErr_SetString(PyExc_MemoryError,"noise_records: no FFT plan or buffer"); return NULL; }
-  PyObject *t=PyTuple_New(nb);
-  for(Py_ssize_t i=0;i<nb;i++) PyTuple_SET_ITEM(t,i,PyLong_FromLongLong(full[i] ? -1 : k[i]));
-  return t;
+  SIM_RELEASE();
+  #undef SIM_RELEASE
+  if(!ok || !X || !Y || !T || !A){ PyErr_SetString(PyExc_MemoryError,"simulate: no FFT plan or buffer"); return NULL; }
+  PyObject *so=Py_None, *no=Py_None; Py_INCREF(Py_None); Py_INCREF(Py_None);
+  if(has_sig){ Py_DECREF(so); so=PyTuple_New(ns); for(Py_ssize_t q=0;q<ns;q++) PyTuple_SET_ITEM(so,q,PyLong_FromLongLong(sfull[q] ? -1 : ks[q])); }
+  if(has_noise){ Py_DECREF(no); no=PyTuple_New(nb); for(Py_ssize_t q=0;q<nb;q++) PyTuple_SET_ITEM(no,q,PyLong_FromLongLong(nfull[q] ? -1 : kn[q])); }
+  return Py_BuildValue("(NN)",so,no);
+}
+/* records_within(pos, val, off, reach, out): per row r of records (pos int32, val float32,
+   off int64 (rows + 1), row r's at [off[r], off[r + 1]), rising in pos and val), into out
+   (float32, rows) the value of its last record at pos <= reach[r] (int64), 0 where none is:
+   the largest statistic within reach of a running maximum's start (gatechain). */
+static PyObject *M_records_within(PyObject *self,PyObject *args){
+  (void)self; PyObject *po,*vo,*oo,*ro,*out;
+  if(!PyArg_ParseTuple(args,"OOOOO",&po,&vo,&oo,&ro,&out)) return NULL;
+  Py_buffer pb,vb,ob,rb,xb; Py_buffer *bs[5]={&pb,&vb,&ob,&rb,&xb}; PyObject *os[5]={po,vo,oo,ro,out}; int got=0;
+  for(;got<5;got++) if(PyObject_GetBuffer(os[got],bs[got],PyBUF_C_CONTIGUOUS|PyBUF_FORMAT|(got==4?PyBUF_WRITABLE:0))<0) break;
+  const long long rows = got==5 ? rb.len/8 : 0;
+  int ok = got==5 && pb.itemsize==4 && (strcmp(pb.format,"i")==0||strcmp(pb.format,"l")==0) && vb.itemsize==4 && strcmp(vb.format,"f")==0
+           && pb.len==vb.len && ob.itemsize==8 && (strcmp(ob.format,"q")==0||strcmp(ob.format,"l")==0) && ob.len/8==rows+1
+           && rb.itemsize==8 && (strcmp(rb.format,"q")==0||strcmp(rb.format,"l")==0) && xb.itemsize==4 && strcmp(xb.format,"f")==0 && xb.len/4==rows;
+  if(ok){
+    const long long *off=(const long long*)ob.buf, nrec=pb.len/4;
+    ok = off[0]>=0 && off[rows]<=nrec;
+    for(long long r=0;r<rows && ok;r++) ok = off[r]<=off[r+1];
+  }
+  if(ok){
+    const int32_t *pos=(const int32_t*)pb.buf; const float *val=(const float*)vb.buf;
+    const long long *off=(const long long*)ob.buf, *reach=(const long long*)rb.buf; float *o=(float*)xb.buf;
+    Py_BEGIN_ALLOW_THREADS
+    for(long long r=0;r<rows;r++){
+      float v=0.f;
+      for(long long i=off[r];i<off[r+1] && pos[i]<=reach[r];i++) v=val[i];
+      o[r]=v;
+    }
+    Py_END_ALLOW_THREADS
+  }
+  for(int i=0;i<got;i++) PyBuffer_Release(bs[i]);
+  if(!ok){ if(!PyErr_Occurred()) PyErr_SetString(PyExc_TypeError,"records_within: pos int32 and val float32 of one length, off int64 (rows + 1) ascending within them, reach int64 (rows), out float32 (rows)"); return NULL; }
+  Py_RETURN_NONE;
 }
 /* gatechain._chain_candidates's search (see there): every (thresholds, reach) it considers,
    in its depth-first order. S (M, k) float32: the kept draws' coarse maxima of the chain's
@@ -1840,7 +1993,8 @@ static PyTypeObject RootType={
 static PyMethodDef methods[]={
   {"backend",M_backend,METH_NOARGS,"backend() -> name of the selected kernel"},
   {"chain_candidates",M_chain_candidates,METH_VARARGS,"chain_candidates(S, Nc, low, lowv, last_order, last_val, splits, K, Nn, prune, useless) -> [(thresholds, reach)]: gatechain._chain_candidates's search"},
-  {"noise_records",M_noise_records,METH_VARARGS,"noise_records(scale, seed, nrows, bands, bscale, pos, val, off, row0=0) -> record counts: the gate model's noise simulation, per band the running maximum's records of each block's coarse statistic"},
+  {"simulate",M_simulate,METH_VARARGS,"simulate(scale, seed, row0, nrows, kmax, bands, bscale, fscale, tab, t, fi, spos, sval, soff, npos, nval, noff, keep_at=0) -> (signal counts, noise counts): the gate model's simulation, per statistic the running maximum's records of the noise alone and outward from a signal"},
+  {"records_within",M_records_within,METH_VARARGS,"records_within(pos, val, off, reach, out): per row the value of its last record within reach (gatechain's window maxima)"},
   {"row_peaks",M_row_peaks,METH_VARARGS,"row_peaks(z, scale, sig, start, step, amp, peak, at): per row the largest |scale z + amp sig[start + j step]| and its j (gatechain simulations)"},
   {"gauss_fill",M_gauss_fill,METH_VARARGS,"gauss_fill(out float32, seed, offset): out[i] = standard normal draw offset + i of stream seed (src/gauss.cc)"},
   {"l1d_bytes",M_l1d_bytes,METH_NOARGS,"l1d_bytes() -> the L1 data cache size the OS reports, or 0 if unknown"},
