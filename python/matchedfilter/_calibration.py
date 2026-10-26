@@ -174,11 +174,14 @@ def calibrate_costs(n, ntemplates, blocks=32, reps=5, seed=11, group=None):
     for b in qbands:
         if b in need:
             jobs[("screen", b)] = ((b,), (big,), True)
-    if qbands and qbands[0] in need:
+    qneed = [b for b in qbands if b in need]
+    if qneed:
         # what a pass costs beyond the screen (compaction), per pass and the same at every band:
         # under a tick (against ~100 a pair for the screen itself), timed once, at the first
-        # band and its first density
-        jobs[("recheck",)] = ((qbands[0],), (g0[dens[0]],), True)
+        # band measured here and the first density. Not the first screen band: band costs
+        # shared from a smaller n on this series group leave only the wider bands to measure
+        # (n = 1024 then 2048: band 1024 alone), and their screens need it too.
+        jobs[("recheck",)] = ((qneed[0],), (g0[dens[0]],), True)
     # rounds of the plans in turn (each round starting at another), every plan settled and then
     # its jobs timed. Settled per plan and screen setting: a screen call timed straight after
     # the same plan without the screen read up to 20% dearer at 16 blocks a call.

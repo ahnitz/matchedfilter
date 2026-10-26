@@ -869,3 +869,19 @@ def test_price_block_sizes_stops_at_the_first_dearer_size(monkeypatch):
     # 4096 is the first dearer size, 8192 the new best, 16384 the second dearer one
     assert priced == [2048, 4096, 8192, 16384] and out[0][1] == 8192
     gc._PRICE_CACHE.clear()
+
+
+@pytest.mark.parametrize("order", [(512, 2048), (1024, 2048), (2048, 1024), (4096, 8192), (1024, 4096, 8192)])
+def test_calibrations_sharing_band_costs_in_any_order(monkeypatch, order):
+    """Sizes on one series group share their band costs, so a later size measures only the
+    bands an earlier one did not. Every order calibrates, and every size gets a screen price
+    for each screen band (n = 1024 before 2048 left band 1024's screen without the recheck
+    job it reads: KeyError, in the nightly's reverse-order run)."""
+    gc = mf._gatechain
+    monkeypatch.setattr(gc, "_COSTS", {})
+    monkeypatch.delenv("MF_COST_FILE", raising=False)
+    for n in order:
+        cm = _calibration.calibrate_costs(n, 64)
+        for b in gc.candidate_bands(n):
+            if gc._q15_band(b) and gc.cpu_gate_kind() != "f16":
+                assert b in cm.screen and cm.screen[b]["recheck"] >= 0, (n, b)
