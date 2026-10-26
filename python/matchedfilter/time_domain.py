@@ -3,7 +3,6 @@ automatically select optimal FFT block sizes, and filter continuous series."""
 
 import math
 from collections import OrderedDict
-import collections
 import collections.abc as _abc
 import os
 import time
@@ -155,8 +154,9 @@ def _intersect_runs(x: np.ndarray, y: np.ndarray) -> np.ndarray:
 
 #: Joint trials (_trial) of banks. A bank's arms: DEFAULT (its smallest single block size); the
 #: whole bank at its next single size and at the model's priced layout ("n=4096", "n=model":
-#: _BLOCK_TRIAL_RANKS candidate layouts in all); its plans' other shortlisted
-#: chains ("chain=n:..."), the _CHAIN_ARMS most often shortlisted; the Q15 screen both ways. Block
+#: _BLOCK_TRIAL_RANKS candidate layouts in all); each plan's next shortlisted chains after its
+#: model chain ("chain=+1", ..., up to _CHAIN_ARMS: a chain per plan, not one for every plan --
+#: plans of different profiles want different chains); the Q15 screen both ways. Block
 #: sizes are absolute candidates, smallest first: on a loaded Haswell node the model priced 4096
 #: at 1.2x 2048 where it ran 1.6-1.95x, and fresh processes put 0-231 of test67's 323 banks on
 #: 4096 (2026-10-25); ranked by its price, the candidates were its errors.
@@ -209,11 +209,20 @@ def _built(banks):
 _REPLAYING = [False]
 
 
+#: Banks of a batch a joint round replays: a round needs comparable work, not the whole batch.
+#: Rounds pool as ratios, so a few banks per round, rotated from round to round over the
+#: batch's banks (other profiles in turn), sample the arms as well as all of them; the rest of
+#: the batch runs once, on the default. A test67 batch held 17 banks: replaying all of them
+#: for every configuration cost 11 s of a 74 s job (dev2, 2026-10-26).
+_ROUND_BANKS = 2
+
+
 def _joint_round(jobs):
-    """A round of the joint trial of every bank of this batch that is in one (_trial.run_round):
-    each distinct configuration of the trial's live arms runs the whole batch, settled then
-    timed, and the result is DEFAULT's. Banks whose trial has locked adopt the lock here. Returns
-    the batch's results, or None when no bank of the batch is in an open trial."""
+    """A round of the joint trial of the banks of this batch that are in one (_trial.run_round):
+    each distinct configuration of the trial's live arms runs a few of those banks' jobs
+    (_ROUND_BANKS, rotated), settled on its first run and timed, and their results are
+    DEFAULT's; the rest of the batch runs once. Banks whose trial has locked adopt the lock
+    here. Returns the batch's results, or None when no round ran."""
     from ._choice import _autotune_enabled
     from .device import parse as _parse_device
     if _REPLAYING[0] or not jobs or not _autotune_enabled():
@@ -230,38 +239,33 @@ def _joint_round(jobs):
         groups.setdefault(key, {})[id(bank)] = bank
     if not groups:
         return None
-    work = sum(len(b.filters_f) * int(np.asarray(x).size) for b, x, kw in jobs
-               if (kw or {}).get("template_index") is None)
-    if work <= 0:
-        return None
     gpu = any(_parse_device(b.device).kind == "gpu" for b, _, _ in jobs)
     import time
     from . import _record_cpu_trial
 
-    def replay():
-        return TimeDomainFilterBank.filter_series_many(jobs)
-
-    def settle():
-        # a GPU batch after a switch builds recordings and uploads: replayed until it builds
-        # nothing more (at most three times), so the timed batch is steady state
-        banks = [b for b, _, _ in jobs]
-        before = _built(banks)
-        replay()
-        for _ in range(2):
-            now = _built(banks)
-            if now == before:
-                break
-            before = now
-            replay()
+    def settle_for(sub):
+        def settle():
+            # a GPU batch after a switch builds recordings and uploads: replayed until it
+            # builds nothing more (at most three times), so the timed batch is steady state
+            banks = [b for b, _, _ in sub]
+            before = _built(banks)
+            TimeDomainFilterBank.filter_series_many(sub)
+            for _ in range(2):
+                now = _built(banks)
+                if now == before:
+                    break
+                before = now
+                TimeDomainFilterBank.filter_series_many(sub)
+        return settle
 
     begin = time.perf_counter()
-    result = None
+    out = [None] * len(jobs)
+    timed = set()
     _REPLAYING[0] = True
     try:
         for key, byid in groups.items():
             banks = list(byid.values())
-            for b in banks:
-                b._prepare_arms()
+            banks[0]._prepare_arms()                    # the trial's arms come from its plans
             tr = _trial.trial(key, banks[0]._joint_arms)
             if len(tr.live()) < 2:
                 with _AUTOTUNE_LOCK:
@@ -270,15 +274,40 @@ def _joint_round(jobs):
                 for b in banks:
                     b._lock_arm(tr.winner)
                 continue
-            result = _trial.run_round(tr, _BankArms.of(banks), replay, work,
-                                      settle=settle if gpu else None)
+            # this round's banks: _ROUND_BANKS of them, rotated by the trial's round count
+            k = tr.rounds % len(banks)
+            chosen = (banks[k:] + banks[:k])[:_ROUND_BANKS]
+            for b in chosen:
+                b._prepare_arms()
+            pick = {id(b) for b in chosen}
+            idx = [j for j, (b, _, kw) in enumerate(jobs) if id(b) in pick
+                   and (kw or {}).get("template_index") is None and j not in timed]
+            if not idx:
+                continue
+            sub = [jobs[j] for j in idx]
+            sub_work = sum(len(b.filters_f) * int(np.asarray(x).size) for b, x, _ in sub)
+            if sub_work <= 0:
+                continue
+
+            def replay(sub=sub):
+                return TimeDomainFilterBank.filter_series_many(sub)
+
+            res = _trial.run_round(tr, _BankArms.of([jobs[j][0] for j in idx]), replay, sub_work,
+                                   settle=settle_for(sub) if gpu else None)
+            for j, r in zip(idx, res):
+                out[j] = r
+            timed.update(idx)
+        rest = [j for j in range(len(jobs)) if j not in timed]
+        if timed and rest:
+            for j, r in zip(rest, TimeDomainFilterBank.filter_series_many([jobs[j] for j in rest])):
+                out[j] = r
     finally:
         _REPLAYING[0] = False
-    if result is None:
+    if not timed:
         return None
     if not gpu:
         _record_cpu_trial(begin)
-    return result
+    return out
 
 
 class _BankArms:
@@ -286,6 +315,8 @@ class _BankArms:
 
     def __init__(self, bank):
         self.bank = bank
+        # the configurations this bank has run (each settled once); forgotten at its lock
+        self.trial_ran = bank.__dict__.setdefault('_trial_ran', set())
 
     @classmethod
     def of(cls, banks):
@@ -1274,12 +1305,8 @@ class TimeDomainFilterBank:
         """The arms this bank proposes for its trial (_BLOCK_TRIAL_RANKS, _CHAIN_ARMS)."""
         arms = [_trial.DEFAULT] + [_trial.n_arm(n) for n in self._trial_cands[1:]]
         plans = self._layout_plans(self._arm_rank(_trial.DEFAULT))
-        seen = collections.Counter()
-        for p in plans:
-            for c in getattr(p, '_shortlist', ()):
-                if tuple(c) != p._model_chain:
-                    seen[(p.n, tuple(c))] += 1
-        arms += [_trial.chain_arm(n, c) for (n, c), _ in seen.most_common(_CHAIN_ARMS)]
+        most = max((len(p._other_chains()) for p in plans if p._model_chain is not None), default=0)
+        arms += [_trial.chain_arm(k) for k in range(1, min(most, _CHAIN_ARMS) + 1)]
         if any(p._q15_ok(p._model_chain) for p in plans if p._model_chain is not None):
             arms += [_trial.q15_arm(True), _trial.q15_arm(False)]
         return arms
@@ -1306,6 +1333,7 @@ class TimeDomainFilterBank:
         for p in self._layout_plans(self._layout_rank):
             p.lock_arm(label)
         self._bank_arm, self._in_trial = str(label), False
+        self._trial_ran = set()
 
     def _load_templates(self) -> None:
         for g in self._groups:

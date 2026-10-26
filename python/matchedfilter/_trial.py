@@ -9,10 +9,11 @@ complete configurations:
     candidate block size, each plan's model chain and the model's screen for it -- and it is
     the preference: it stands unless another arm is clearly faster. (The smallest size, not
     the model's priced layout: a tie keeps the layout that needs no pricing, and the model
-    misjudged block sizes under load, 2026-10-25.) Every other arm fixes one dimension to
-    another value -- a block size ("n=4096", or the model's priced layout, "n=model"), a chain
-    at a block size ("chain=2048:256,512"), the screen ("q15=0") -- and the instance's model
-    fills in the rest, conditional on it. An instance that cannot take an arm's value (a chain outside
+    misjudged block sizes under load, 2026-10-25.) Every other arm moves one dimension -- a
+    block size ("n=4096", or the model's priced layout, "n=model"), each plan's k-th other
+    shortlisted chain ("chain=+1": a chain per plan, not one for all of them -- one chain for
+    plans of every profile lost to their own model chains by 2-14%), the screen ("q15=0") --
+    and the instance's model fills in the rest, conditional on it. An instance that cannot take an arm's value (a chain outside
     a plan's feasible set, a screen its first band does not have) runs its model choice there.
   * instances resolve an arm to a configuration (arm_config) and run it (use_arm); arms an
     instance resolves alike are one configuration, timed once, so they can only tie.
@@ -20,9 +21,12 @@ complete configurations:
     work back to back, each after an untimed settling run, the order reversed every round.
     Rounds pool as ratios to DEFAULT (_choice.paired_choice), never as raw times, so instances
     of different cost -- banks of other profiles, plans of other shapes -- pool into one trial.
-  * an arm that can no longer win is dropped from later rounds (_choice.Choice.round), and a
-    trial ends at its cap of rounds, or at its budget of calls that could not be rounds, with
-    DEFAULT standing unless an arm was clearly faster.
+  * an arm that can no longer win is dropped from later rounds (_choice.Choice.round). An arm
+    the rule picks over DEFAULT must then win again, alone against DEFAULT in fresh rounds,
+    before it locks (Choice confirm): with seven challengers on a loaded node one passes the
+    rule on noise more often than one does. A trial ends at its cap of rounds, or at its
+    budget of calls that could not be rounds, with DEFAULT standing unless an arm was
+    clearly faster twice.
   * a lock is applied by each instance resolving the winning label (lock_arm), now and in
     instances made later; it is kept in MF_COST_FILE (store key "joint|" + key) when one is set.
 
@@ -57,9 +61,10 @@ def n_arm(n) -> str:
     return "n=model" if n == "model" else "n=%d" % int(n)
 
 
-def chain_arm(n: int, chain: Sequence[int]) -> str:
-    """The arm with every plan of block size n on chain (where it can run it)."""
-    return "chain=%d:%s" % (int(n), ",".join(str(int(b)) for b in chain))
+def chain_arm(k: int) -> str:
+    """The arm with every plan on the k-th chain of its shortlist after its model chain (in
+    modelled cost order; a plan with fewer runs its model chain)."""
+    return "chain=+%d" % int(k)
 
 
 def q15_arm(on: bool) -> str:
@@ -68,8 +73,8 @@ def q15_arm(on: bool) -> str:
 
 
 def parse_arm(label: str):
-    """(kind, value) of an arm label: ("default", None), ("n", n or "model"), ("chain", (n,
-    chain)) or ("q15", on). Raises ValueError for a label that names no arm."""
+    """(kind, value) of an arm label: ("default", None), ("n", n or "model"), ("chain", k) or
+    ("q15", on). Raises ValueError for a label that names no arm."""
     s = str(label)
     if s == DEFAULT:
         return DEFAULT, None
@@ -77,11 +82,9 @@ def parse_arm(label: str):
     if kind == "n":
         return "n", ("model" if v == "model" else int(v))
     if kind == "chain":
-        n, _, bands = v.partition(":")
-        chain = tuple(int(b) for b in bands.split(",") if b)
-        if not chain:
-            raise ValueError("no chain in arm %r" % s)
-        return "chain", (int(n), chain)
+        if not v.startswith("+") or int(v[1:]) < 1:
+            raise ValueError("not a chain arm: %r" % s)
+        return "chain", int(v[1:])
     if kind == "q15":
         return "q15", v == "1"
     raise ValueError("not a trial arm: %r" % s)
@@ -110,7 +113,8 @@ class Trial:
         self.choice = _choice.Choice(
             tuple(arms), store_key="joint|" + key, what="TRIAL %s" % key, warmup=0,
             minimum=base, cap=max(base, ROUND_CAP if base == ROUNDS else 2 * base),
-            budget=(0, UNROUNDED_BUDGET), paired=True, persist=True, label=str, parse=_valid)
+            budget=(0, UNROUNDED_BUDGET), paired=True, persist=True, label=str, parse=_valid,
+            confirm=True)
         self.replaying = False
 
     @property
@@ -168,8 +172,11 @@ def run_round(tr: Trial, subjects: Sequence, replay: Callable[[], object], work:
               settle: Optional[Callable[[], None]] = None,
               keep: Optional[Callable[[object], object]] = None):
     """One paired round of tr over subjects, all on the same work: each distinct configuration
-    of the live arms is put on every subject (use_arm), settled (settle(), else one untimed
-    replay()), and timed over one replay(); the round is recorded as seconds per unit of work.
+    of the live arms is put on every subject (use_arm), settled the first time a subject runs
+    it (settle(), else one untimed replay(): a configuration's first run builds plans, its
+    thresholds and templates), and timed over one replay(); the round is recorded as seconds
+    per unit of work. A subject without a `trial_ran` set (the configurations it has run) is
+    settled every time.
     Returns the result of DEFAULT's timed replay (passed through keep() as soon as it is taken,
     before another arm's replay can reuse its buffers). On a decision, every subject locks the winner
     (lock_arm); otherwise they are left on DEFAULT."""
@@ -187,7 +194,12 @@ def run_round(tr: Trial, subjects: Sequence, replay: Callable[[], object], work:
         for c in order:
             for s in subjects:
                 s.use_arm(rep[c])
-            (settle or replay)()
+            ran = [getattr(s, "trial_ran", None) for s in subjects]
+            if any(r is None or own not in r for r, own in zip(ran, c)):
+                (settle or replay)()
+                for r, own in zip(ran, c):
+                    if r is not None:
+                        r.add(own)
             t0 = time.perf_counter()
             res = replay()
             took[c] = (time.perf_counter() - t0) / work

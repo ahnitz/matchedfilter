@@ -241,9 +241,9 @@ class HierarchicalFilter(MatchedFilter):
     # A plan's measured dimensions are its chain and the Q15 screen in front of its first tier
     # (docs/cpu-q15-gate.md: the screen changes no result -- the float tier re-runs every pair
     # it passes -- so only time is at stake). An arm label resolves to one (chain, screen):
-    # DEFAULT is the model's chain and its screen setting; "chain=n:..." a chain this plan can
-    # run, with the model's screen for it; "q15=0/1" the model's chain with the screen set
-    # where its first band has one. A bank's arms (block sizes) leave a plan on its model.
+    # DEFAULT is the model's chain and its screen setting; "chain=+k" the k-th chain of this
+    # plan's shortlist after its model chain, with the model's screen for it; "q15=0/1" the
+    # model's chain with the screen set where its first band has one. A bank's arms (block sizes) leave a plan on its model.
     def _q15_model(self, chain):
         """The cost model's screen setting for chain (gatechain.CostModel.first_tier)."""
         with _AUTOTUNE_LOCK:
@@ -269,10 +269,16 @@ class HierarchicalFilter(MatchedFilter):
                 c = tuple(self._chain)
                 self._model_chain, self._feasible, self._shortlist = c, (c,), (c,)
         chain = self._model_chain
-        if not self._forced and kind == "chain" and v[0] == self.n and v[1] in self._feasible:
-            chain = v[1]
+        if not self._forced and kind == "chain":
+            others = self._other_chains()
+            if v <= len(others):
+                chain = others[v - 1]
         q = v if kind == "q15" else self._q15_model(chain)
         return chain, bool(q) and self._q15_ok(chain)
+
+    def _other_chains(self):
+        """This plan's shortlisted chains after its model chain, in modelled cost order."""
+        return [tuple(c) for c in self._shortlist if tuple(c) != self._model_chain]
 
     def _arm_q15(self, chain):
         """The screen setting this plan's arm gives chain."""
@@ -330,7 +336,7 @@ class HierarchicalFilter(MatchedFilter):
         own = tuple(self._chain) if self._pinned is not None else self._model_chain
         arms = [_trial.DEFAULT]
         if self._pinned is None:
-            arms += [_trial.chain_arm(self.n, c) for c in self._shortlist if tuple(c) != own]
+            arms += [_trial.chain_arm(k) for k in range(1, len(self._other_chains()) + 1)]
         if self._q15_ok(own):
             arms += [_trial.q15_arm(True), _trial.q15_arm(False)]
         return arms
@@ -701,8 +707,10 @@ class HierarchicalFilter(MatchedFilter):
         # The arm this plan runs (DEFAULT unless a trial or a lock says otherwise), resolved here.
         kind, v = _trial.parse_arm(self._arm)
         chain = self._model_chain
-        if not self._forced and kind == "chain" and v[0] == self.n and v[1] in self._feasible:
-            chain = v[1]
+        if not self._forced and kind == "chain":
+            others = self._other_chains()
+            if v <= len(others):
+                chain = others[v - 1]
         self.autotune_info = {"status": "forced" if self._forced else "model", "winner": chain,
                               "shortlist": self._shortlist, "model": self._model_chain,
                               "arm": self._arm}
