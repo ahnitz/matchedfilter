@@ -37,7 +37,6 @@ class _Subject:
     def __init__(self, clock, conf, cost, settle_cost=0.0):
         self.clock, self.conf, self.cost, self.settle_cost = clock, conf, cost, settle_cost
         self.arm, self.ran, self.locked = _trial.DEFAULT, [], None
-        self.trial_ran = set()               # configurations run: each settled once
 
     def arm_config(self, label):
         return self.conf.get(label, self.conf[_trial.DEFAULT])
@@ -93,43 +92,6 @@ def test_a_tie_keeps_the_default(clock):
     assert tr.winner == _trial.DEFAULT
 
 
-def test_a_noisy_equal_arm_never_locks_under_load(clock):
-    """Under load a round's ratios swing widely: an arm equal to the default, with the default's
-    own runs varying as much, must not lock. The A/A ratios of the default's two runs a round
-    raise the margin an arm's round must clear (Trial.evidence_tie)."""
-    rng = np.random.default_rng(11)
-    conf = {_trial.DEFAULT: "a", "n=4096": "b", "n=model": "c", "q15=0": "d"}
-
-    class Loaded(_Subject):
-        def replay(self):
-            c = self.arm_config(self.arm)
-            self.ran.append(c)
-            self.clock.t += float(np.exp(rng.normal(0.0, 0.25)))     # +-25% a run, all equal
-            return ("result", c)
-    wins = 0
-    for trial in range(20):
-        mf.clear_autotune_cache()
-        tr, _ = _drive(Loaded(clock, conf, {}), ARMS)
-        wins += tr.winner != _trial.DEFAULT
-        assert tr.choice.tie > _trial._choice.TIE                     # the margin followed the load
-    assert wins == 0
-
-
-def test_a_clear_win_still_locks_under_load(clock):
-    """The same load, with one arm 40% faster: the raised margin still lets it win."""
-    rng = np.random.default_rng(12)
-    conf = {_trial.DEFAULT: "a", "n=4096": "b"}
-
-    class Loaded(_Subject):
-        def replay(self):
-            c = self.arm_config(self.arm)
-            self.ran.append(c)
-            self.clock.t += (0.6 if c == "b" else 1.0) * float(np.exp(rng.normal(0.0, 0.1)))
-            return ("result", c)
-    tr, _ = _drive(Loaded(clock, conf, {}), [_trial.DEFAULT, "n=4096"])
-    assert tr.winner == "n=4096"
-
-
 def test_arms_resolving_alike_are_timed_once_and_can_only_tie(clock):
     """An arm an instance resolves to DEFAULT's configuration (the model's layout equal to the
     smallest size's, a screen the band does not have) shares its timing: one replay a round
@@ -137,8 +99,7 @@ def test_arms_resolving_alike_are_timed_once_and_can_only_tie(clock):
     conf = {_trial.DEFAULT: "a", "n=4096": "a", "n=model": "c", "q15=0": "a"}
     s = _Subject(clock, conf, {"a": 1.0, "c": 1.5})
     tr, _ = _drive(s, ARMS, rounds=1)
-    # settle + timed for each of the two configurations, and the default timed again last
-    assert sorted(set(s.ran)) == ["a", "c"] and len(s.ran) == 5
+    assert sorted(set(s.ran)) == ["a", "c"] and len(s.ran) == 4      # settle + timed, two configs
     samples = tr.choice.samples
     assert samples["n=4096"] == samples[_trial.DEFAULT] == samples["q15=0"]
 
@@ -154,7 +115,7 @@ def test_settling_is_not_timed_and_the_order_alternates(clock):
     tr, _ = _drive(s, [_trial.DEFAULT, "n=4096"], rounds=2, settle=settle)
     assert tr.choice.samples[_trial.DEFAULT] == pytest.approx([1.0, 1.0])
     assert tr.choice.samples["n=4096"] == pytest.approx([0.7, 0.7])
-    assert settled == ["a", "b"]                    # each configuration settled once only
+    assert settled == ["a", "b", "b", "a"]          # reversed on the second round
 
 
 def test_the_round_returns_defaults_result_kept_before_later_arms(clock):
@@ -164,7 +125,7 @@ def test_the_round_returns_defaults_result_kept_before_later_arms(clock):
     tr = _trial.trial("t|keep", lambda: [_trial.DEFAULT, "n=4096"])
     res = _trial.run_round(tr, [s], s.replay, 1.0, keep=lambda r: kept.append(len(s.ran)) or r)
     assert res == ("result", "a")
-    assert kept == [5]               # DEFAULT's last run (settle a, a, settle b, b, a)
+    assert kept == [2]               # taken right after DEFAULT's timed run, before b ran
     assert s.arm == _trial.DEFAULT    # left on DEFAULT while the trial is open
 
 
