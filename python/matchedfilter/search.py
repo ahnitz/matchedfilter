@@ -617,7 +617,7 @@ class HierarchicalSearch:
                     jobs.append((bank, series, dict(windows=slice(*w[0]) if len(w) == 1 else w)))
         deferred = any(getattr(b, "device", None) is not None for b, _, _ in jobs)
         # On the CPU too as one batch (filter_series_many runs it in order), where the leaves'
-        # block-size trials sample on real calls (time_domain._cpu_block_round).
+        # the joint trial takes its rounds on real calls (time_domain._joint_round).
         results = TimeDomainFilterBank.filter_series_many(jobs, wait=not deferred)
         self.timings["leaf"] += time.perf_counter() - t0
         return leaves, jobs, where, deferred, results
