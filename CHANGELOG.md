@@ -117,6 +117,10 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ### Fixed
 
+- The CPU cost calibration failed (KeyError 'recheck') for a size calibrated after a smaller
+  one on the same series group, e.g. a bank pricing 1024-sample blocks before 2048: the
+  sizes share band costs, and the screen's per-pass cost was timed only when the first
+  screen band was still to measure. It is now timed at the first screen band measured.
 - A survivor's direct-or-transform refine compared prices each plan timed for itself, so two
   plans of one layout (a padded call and its unpadded call) refined pairs near the boundary
   differently and reported them to different fp32 rounding. The prices are now timed once per
