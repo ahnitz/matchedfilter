@@ -195,7 +195,10 @@ class Choice:
     label(c) is how a candidate is kept on file (a str or int); parse(text) maps a label's
     text back to a candidate -- needed when candidates are added later (add) than a stored
     lock is read. budget = (per_candidate, slack): the contest ends after per_candidate x
-    candidates + slack attempts (tick)."""
+    candidates + slack attempts (tick). With `confirm` (paired rounds), a candidate other than
+    the preference that the rule picks is not locked at once: a fresh contest of the preference
+    against it alone (every other candidate dropped) must pick it again, or the preference
+    stands -- with many candidates one passes the rule on noise more often than one does."""
 
     def __init__(self, candidates: Sequence[Hashable] = (), store_key: Optional[str] = None,
                  what: Optional[str] = None, warmup: int = WARMUP, minimum: int = MINIMUM,
@@ -203,7 +206,7 @@ class Choice:
                  retrial: Optional[int] = None, label: Optional[Callable[[Any], Any]] = None,
                  parse: Optional[Callable[[str], Any]] = None, recheck_stored: bool = False,
                  persist: bool = False, budget: Optional[Tuple[int, int]] = None,
-                 paired: bool = False):
+                 paired: bool = False, confirm: bool = False):
         if len(set(candidates)) != len(candidates):
             raise ValueError("a choice needs distinct candidates: %r" % (candidates,))
         self.candidates: tuple = ()
@@ -218,6 +221,7 @@ class Choice:
         self.warmup, self.minimum, self.cap = int(warmup), int(minimum), int(cap)
         self.tie, self.z, self.retrial, self.calls = tie, z, retrial, 0
         self.persist, self.budget, self.paired = bool(persist), budget, bool(paired)
+        self.confirm, self.confirming = bool(confirm), None
         self.winner = None
         self.median: Optional[dict] = None
         self._warm: Dict[Hashable, int] = {}
@@ -225,6 +229,7 @@ class Choice:
         self._pool: dict = {}
         self._need_pool: dict = {}
         self._drop_pool: set = set()
+        self._confirm_pool = None
         self._replace = False
         # (attempts, samples) of the open record on file as this process last read or wrote
         # it; one further along was written by another process meanwhile (_write says so).
@@ -244,9 +249,12 @@ class Choice:
                 self._drop_pool = {str(k) for k in rec.get("dropped", ())}
                 self.attempts = int(rec.get("attempts", 0))
                 self._seen = _progress(rec)
+                self._confirm_pool = rec.get("confirming")
         self.candidates = ()
         for c in candidates:
             self.add(c)
+        if self._confirm_pool is not None:
+            self.confirming = self.parse(self._confirm_pool)
         if not recheck_stored:
             self.winner = self.held
 
@@ -438,6 +446,16 @@ class Choice:
                     _log_autotune("%s: %s cannot win, dropped", self.what, self.label(c))
             if len(self.live()) == 1:
                 w = self.preference
+        if w is not None and self.confirm and self.confirming is None and w != self.preference:
+            # the rule picked a challenger: it must win again, alone against the preference
+            self.confirming = w
+            for c in self.candidates:
+                if c not in (self.preference, w):
+                    self.dropped.add(c)
+            self.samples[self.preference], self.samples[w] = [], []
+            _log_autotune("%s: %s to be confirmed against %s", self.what, self.label(w),
+                          self.label(self.preference))
+            w = None
         if w is not None:
             self.lock(w)
         else:
@@ -528,6 +546,8 @@ class Choice:
                "need": {lbl(c): n for c, n in self.need.items()},
                "attempts": int(self.attempts),
                "dropped": sorted(lbl(c) for c in self.dropped)}
+        if self.confirming is not None:
+            rec["confirming"] = lbl(self.confirming)
         if self._method():
             rec["method"] = self._method()
         on_file = self._write(rec, check_writer=True)
