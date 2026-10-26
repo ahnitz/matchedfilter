@@ -154,14 +154,12 @@ def _intersect_runs(x: np.ndarray, y: np.ndarray) -> np.ndarray:
 
 #: Joint trials (_trial) of banks. A bank's arms: DEFAULT (its smallest single block size); the
 #: whole bank at its next single size and at the model's priced layout ("n=4096", "n=model":
-#: _BLOCK_TRIAL_RANKS candidate layouts in all); each plan's next shortlisted chains after its
-#: model chain ("chain=+1", ..., up to _CHAIN_ARMS: a chain per plan, not one for every plan --
-#: plans of different profiles want different chains); the Q15 screen both ways. Block
+#: _BLOCK_TRIAL_RANKS candidate layouts in all); the Q15 screen both ways. (Each plan's chain is
+#: its model's: see _trial.) Block
 #: sizes are absolute candidates, smallest first: on a loaded Haswell node the model priced 4096
 #: at 1.2x 2048 where it ran 1.6-1.95x, and fresh processes put 0-231 of test67's 323 banks on
 #: 4096 (2026-10-25); ranked by its price, the candidates were its errors.
 _BLOCK_TRIAL_RANKS = 3
-_CHAIN_ARMS = 3
 
 
 def _small_blocks_fit(device):
@@ -1302,12 +1300,10 @@ class TimeDomainFilterBank:
         self._arms_ready = True
 
     def _joint_arms(self):
-        """The arms this bank proposes for its trial (_BLOCK_TRIAL_RANKS, _CHAIN_ARMS)."""
+        """The arms this bank proposes for its trial (_BLOCK_TRIAL_RANKS block sizes, the screen)."""
         arms = [_trial.DEFAULT] + [_trial.n_arm(n) for n in self._trial_cands[1:]]
         plans = self._layout_plans(self._arm_rank(_trial.DEFAULT))
-        most = max((len(p._other_chains()) for p in plans if p._model_chain is not None), default=0)
-        arms += [_trial.chain_arm(k) for k in range(1, min(most, _CHAIN_ARMS) + 1)]
-        if any(p._q15_ok(p._model_chain) for p in plans if p._model_chain is not None):
+        if any(p._q15_ok(tuple(p._chain)) for p in plans if p._chain is not None):
             arms += [_trial.q15_arm(True), _trial.q15_arm(False)]
         return arms
 
