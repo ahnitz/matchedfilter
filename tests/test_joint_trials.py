@@ -92,6 +92,42 @@ def test_a_tie_keeps_the_default(clock):
     assert tr.winner == _trial.DEFAULT
 
 
+def _loaded(clock, conf, factor, sd, seed):
+    """A subject whose every run costs factor[config], times a lognormal load swing of sd."""
+    rng = np.random.default_rng(seed)
+
+    class Loaded(_Subject):
+        def replay(self):
+            c = self.arm_config(self.arm)
+            self.ran.append(c)
+            self.clock.t += factor[c] * float(np.exp(rng.normal(0.0, sd)))
+            return ("result", c)
+    return Loaded(clock, conf, {})
+
+
+def test_a_large_gain_locks_under_heavy_load(clock):
+    """Under +-25% a run, an arm 40% faster (the screen against no screen, 18-46% on the CPUs
+    measured) is found."""
+    conf = {_trial.DEFAULT: "a", "n=4096": "b", "q15=1": "c"}
+    found = 0
+    for seed in range(20):
+        mf.clear_autotune_cache()
+        tr, _ = _drive(_loaded(clock, conf, {"a": 1.0, "b": 1.6, "c": 0.6}, 0.25, seed),
+                       [_trial.DEFAULT, "n=4096", "q15=1"])
+        found += tr.winner == "q15=1"
+    assert found >= 19
+
+
+def test_a_worse_arm_never_locks_under_heavy_load(clock):
+    """Under the same load an arm 30% slower never locks."""
+    conf = {_trial.DEFAULT: "a", "n=4096": "b", "q15=0": "c"}
+    for seed in range(50):
+        mf.clear_autotune_cache()
+        tr, _ = _drive(_loaded(clock, conf, {"a": 1.0, "b": 1.3, "c": 1.3}, 0.25, seed),
+                       [_trial.DEFAULT, "n=4096", "q15=0"])
+        assert tr.winner == _trial.DEFAULT, seed
+
+
 def test_arms_resolving_alike_are_timed_once_and_can_only_tie(clock):
     """An arm an instance resolves to DEFAULT's configuration (the model's layout equal to the
     smallest size's, a screen the band does not have) shares its timing: one replay a round
