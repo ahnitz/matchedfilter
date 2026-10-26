@@ -183,41 +183,10 @@ def _small_blocks_fit(device):
 
 
 def _trial_key(bank):
-    """The pooled trial a bank joins: device and its candidate block sizes. Ranks mean the
-    same for every bank -- 0 its model layout, k its k-th proposed single size -- so all banks
-    of a search pool their samples into one trial and one lock."""
-    return "%s|%s" % (bank.device, ",".join(str(n) for n in bank._choice_ns))
-
-
-def _cands_key(bank):
-    """Where a bank's own proposal list is kept: its model layout, so a later process maps the
-    pooled lock's rank to this bank's block size without pricing proposals again."""
-    return "block-cands|%s|%s" % (bank.device, getattr(bank, '_model_sig', ''))
-
-
-#: Proposal lists this process made, by _cands_key: a lock reached in this process maps a
-#: later bank's rank to its size without pricing its proposals again, cost file or not.
-_CANDS = {}
-
-
-def _stored_cands(bank):
-    from . import gatechain
-    hit = _CANDS.get(_cands_key(bank))
-    if hit is not None:
-        return list(hit)
-    path = gatechain._cost_file()
-    if path is None:
-        return None
-    rec = gatechain._load_cost_file(path).get(_cands_key(bank))
-    return list(rec["cands"]) if isinstance(rec, dict) and "cands" in rec else None
-
-
-def _store_cands(bank, cands):
-    from . import gatechain
-    _CANDS[_cands_key(bank)] = list(cands)
-    path = gatechain._cost_file()
-    if path is not None:
-        gatechain._store_cost(path, _cands_key(bank), {"cands": list(cands)})
+    """The pooled trial a bank joins: its device and candidates (its smallest single block
+    sizes, then "model"). A rank is the same candidate for every bank of the key, so all
+    banks of a search offering the same sizes pool their samples into one trial and one lock."""
+    return "%s|%s" % (bank.device, ",".join(str(n) for n in bank._trial_cands))
 
 
 #: Ranks sampled at most this many times each when a contest is unclear (gatechain.measured_choice).
@@ -1244,17 +1213,21 @@ class TimeDomainFilterBank:
             return int(max(self._choice_ns + tuple(g[2] for g in self._legacy_layout[0])))
         return int(max((g.n for g in self._groups), default=0))
 
-    def _choose_layout(self, fine: np.ndarray, delta_f: float, single_n: Optional[int] = None,
-                       propose: bool = False):
+    def _choose_layout(self, fine: np.ndarray, delta_f: float, single_n: Optional[int] = None):
         """Partition with each length batch at its cheapest modelled block size -- or, with
-        single_n, every batch at that one size (a block-size trial candidate, _BlockTrials).
-        Also leaves self._single_ns: the sizes every batch can use, cheapest total first."""
+        single_n, every batch at that one size (a block-size trial candidate, _BlockTrials),
+        unpriced."""
         from . import gatechain
         from ._choice import _log_autotune
         groups, order = self._legacy_layout
         counts = self.effective_data_counts[order]
         n_sorted = np.empty(len(order), dtype=np.int64)
-        totals, first = {}, True
+        if single_n is not None:
+            # every batch at one given size (a trial candidate, or a locked size): nothing to
+            # price, the partition only
+            n_sorted[:] = int(single_n)
+            return _partition_templates(self.effective_data_counts, max_batch=self.max_batch_size,
+                                        candidate_ns=self._candidate_ns, n_sorted=n_sorted)
         for i, j, n0, _ in groups:
             longest = int(counts[j - 1])
             taps_max = int(np.max(self.tap_counts[order[i:j]]))
@@ -1263,25 +1236,19 @@ class TimeDomainFilterBank:
                 fine, delta_f, self.data_sample_rate, longest, margin, j - i,
                 self.threshold, self.false_dismissal, [n for n in self._choice_ns if n > longest],
                 max_tiers=_max_tiers(self.device), device=self.device)
-            if propose:
-                # Trial candidates are ranked with the band-forward credit at the model's
-                # refine-block fraction (gatechain.CostModel.chain_forward_delta(model_f)): a
-                # proposal only -- rank 0 stays the model's own choice, and the trial decides.
-                ranked = _calibration.price_block_sizes(
-                    fine, delta_f, self.data_sample_rate, longest, margin, j - i,
-                    self.threshold, self.false_dismissal, [n for n in self._choice_ns if n > longest],
-                    max_tiers=_max_tiers(self.device), device=self.device,
-                    ahead=_BLOCK_TRIAL_RANKS - 1, model_f=True) or ranked
-            priced = {n: c * (j - i) for c, n, _ in ranked}
-            totals = priced if first else {n: totals[n] + priced[n] for n in totals if n in priced}
-            first = False
-            n_sorted[i:j] = (single_n if single_n is not None else ranked[0][1]) if ranked else n0
-            if single_n is None and not propose:
-                _log_autotune("BLOCK templates=%d longest=%d legacy n=%d -> n=%d  %s", j - i, longest, n0,
-                              int(n_sorted[i]), " ".join("%d:%.3g" % (n, c) for c, n, _ in ranked))
-        self._single_ns = [n for _, n in sorted((v, n) for n, v in totals.items())]
+            n_sorted[i:j] = ranked[0][1] if ranked else n0
+            _log_autotune("BLOCK templates=%d longest=%d legacy n=%d -> n=%d  %s", j - i, longest, n0,
+                          int(n_sorted[i]), " ".join("%d:%.3g" % (n, c) for c, n, _ in ranked))
         return _partition_templates(self.effective_data_counts, max_batch=self.max_batch_size,
                                     candidate_ns=self._candidate_ns, n_sorted=n_sorted)
+
+    def _single_sizes(self):
+        """The block sizes every batch of the bank can run at (above its longest data count),
+        smallest first: what a block-size trial offers besides the model's layout."""
+        groups, order = self._legacy_layout
+        counts = self.effective_data_counts[order]
+        longest = max((int(counts[j - 1]) for i, j, _, _ in groups), default=0)
+        return sorted(int(n) for n in self._choice_ns if int(n) > longest)
 
     @property
     def filters_f(self) -> Sequence[np.ndarray]:
@@ -1339,48 +1306,44 @@ class TimeDomainFilterBank:
             # profile, else by the valid-fraction rule.
             if not isinstance(reference, dict) and delta_f is not None and float(delta_f) > 0:
                 fine_ref = np.asarray(reference, dtype=np.float64)
-                layout = self._choose_layout(fine_ref, float(delta_f))
-                self._model_sig = ";".join("%d:%d" % (int(e - b), int(n)) for b, e, n, _ in layout[0])
-                self._model_sig += "|" + ",".join(str(n) for n in self._choice_ns)
-                # Candidates (_BlockTrials): the model's layout, then the whole bank at each of
-                # its _BLOCK_TRIAL_RANKS - 1 cheapest single block sizes.
-                from . import gatechain as _gc
+                df = float(delta_f)
+                # Block-size trials (_BlockTrials) decide on real calls wherever trials run (the
+                # lock is the process's, and MF_COST_FILE's when one is set). The candidates, by
+                # rank: the whole bank at each of its smallest single sizes, smallest first, then
+                # the model's own layout. So a rank is the same size for every bank pooled into
+                # a trial (_trial_key), a tie keeps the smallest size, and the model's layout is
+                # kept only when it wins outright. The model alone misjudged sizes under
+                # production conditions: on a loaded Haswell node it priced 4096 at 1.2x 2048
+                # where it ran 1.6-1.95x, and fresh processes put 0-231 of test67's 323 banks on
+                # 4096 (2026-10-25); ranked by its price, the candidates were its errors.
                 from ._choice import _autotune_enabled
-                # Candidates wherever trials run: the lock is the process's (and MF_COST_FILE's,
-                # when one is set), pooled over every bank of the search (_trial_key), so the
-                # first reference's banks settle it and later ones build only the winner. The
-                # model alone misjudged sizes under production conditions: on a loaded Haswell
-                # node it priced 4096 at 1.2x 2048 where it ran 1.6-1.95x, and fresh processes
-                # put 0-231 of test67's 323 banks on 4096 (2026-10-25).
                 nr = _BLOCK_TRIAL_RANKS if _autotune_enabled() else 1
-                w = _BLOCK_TRIALS.winner(_trial_key(self)) if nr > 1 else None
-                cands = _stored_cands(self) if w else None
-                if w == 0 or (w and cands and w < len(cands)):
-                    # locked on this machine: build only the winner, no proposals priced
-                    if w:
-                        layout = self._choose_layout(fine_ref, float(delta_f), single_n=int(cands[w]))
-                    nr = 1
-                alts, sig = [layout], ["model"]
-                if nr > 1:
-                    # proposals: single sizes ranked WITH the model-f band-forward credit
-                    self._choose_layout(fine_ref, float(delta_f), propose=True)
-                    for n in list(self._single_ns):
-                        if len(alts) >= nr:
-                            break
-                        alt = self._choose_layout(fine_ref, float(delta_f), single_n=n)
-                        if alt[0] != layout[0]:      # a single size equal to the model's adds nothing
-                            alts.append(alt); sig.append(n)
-                    _store_cands(self, sig)
+                singles = self._single_sizes()[:nr - 1] if nr > 1 else []
+                self._trial_cands = tuple(singles) + ("model",)
+                w = _BLOCK_TRIALS.winner(_trial_key(self)) if singles else None
+                if w is not None and w < len(singles):
+                    # a size locked here: the whole bank at it, no block-size pricing at all
+                    alts, sig = [self._choose_layout(fine_ref, df, single_n=singles[w])], [singles[w]]
+                else:
+                    model = self._choose_layout(fine_ref, df)
+                    if w is not None or not singles:
+                        alts, sig = [model], ["model"]
+                    else:
+                        alts = [self._choose_layout(fine_ref, df, single_n=n) for n in singles] + [model]
+                        sig = list(singles) + ["model"]
+                layout = alts[0]
                 self._candidate_sig = tuple(sig)
                 if self._built is None or layout[0] != self._built_layout:
                     self._build(*layout)
                 self.chosen_layout = [(int(e - b), int(n)) for b, e, n, _ in layout[0]]
-                # Block-size trials (_BlockTrials): the model's alternatives within its margin are
-                # built now -- the taps are freed below -- and measured on real calls.
+                # Block-size trials (_BlockTrials): the other candidates are built now -- the
+                # taps are freed below -- and measured on real calls. A candidate with an earlier
+                # one's partition shares its built layout.
                 self._layouts = [self._snapshot()]
-                for alt in alts[1:]:
-                    if alt[0] == layout[0]:
-                        self._layouts.append(self._layouts[0])      # same partition: share it
+                for k, alt in enumerate(alts[1:], 1):
+                    same = next((i for i in range(k) if alts[i][0] == alt[0]), None)
+                    if same is not None:
+                        self._layouts.append(self._layouts[same])
                         continue
                     self._build(*alt)
                     self._layouts.append(self._snapshot())

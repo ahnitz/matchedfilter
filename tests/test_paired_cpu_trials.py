@@ -93,7 +93,7 @@ def test_block_pair_runner_reverses_and_settles_each_layout(monkeypatch, tmp_pat
     from matchedfilter import time_domain as td
     monkeypatch.setenv('MF_COST_FILE', str(tmp_path / 'costs.json'))
     monkeypatch.setattr(td, '_BLOCK_TRIALS', td._BlockTrials())
-    bank = types.SimpleNamespace(device='cpu', _choice_ns=(2048, 4096), _layouts=[{}, {}], rank=0, filters_f=[0, 1])
+    bank = types.SimpleNamespace(device='cpu', _choice_ns=(2048, 4096), _trial_cands=(2048, 'model'), _layouts=[{}, {}], rank=0, filters_f=[0, 1])
     bank._use_layout = lambda r: setattr(bank, 'rank', r)
     clock, calls = [0.0], []
     monkeypatch.setattr(mf.time, 'perf_counter', lambda: clock[0])
@@ -116,7 +116,7 @@ def test_block_replay_exception_releases_guard(monkeypatch, tmp_path):
     from matchedfilter import time_domain as td
     monkeypatch.setenv('MF_COST_FILE', str(tmp_path / 'costs.json'))
     monkeypatch.setattr(td, '_BLOCK_TRIALS', td._BlockTrials())
-    bank = types.SimpleNamespace(device='cpu', _choice_ns=(2048, 4096), _layouts=[{}, {}], filters_f=[0, 1])
+    bank = types.SimpleNamespace(device='cpu', _choice_ns=(2048, 4096), _trial_cands=(2048, 'model'), _layouts=[{}, {}], filters_f=[0, 1])
     bank._use_layout = lambda r: None
     def fail(jobs):
         raise RuntimeError('failure')

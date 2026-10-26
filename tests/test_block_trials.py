@@ -97,7 +97,9 @@ def test_switching_layouts_is_exact_and_locks(monkeypatch, tmp_path):
 
 
 def test_a_bank_adopts_a_persisted_lock(monkeypatch, tmp_path):
-    """A lock on file is applied at the bank's first reference: no trial, the same layout."""
+    """A lock on file is applied at the bank's first reference: no trial, no block-size pricing,
+    the whole bank at the locked rank's size (ranks are the bank's smallest sizes, then the
+    model's layout, so a rank maps to a size without anything stored beside the lock)."""
     monkeypatch.setenv("MF_COST_FILE", str(tmp_path / "costs.json"))
     monkeypatch.setattr(td, "_BLOCK_TRIALS", td._BlockTrials())
     bank, _ = _inspiral_bank()
@@ -107,15 +109,18 @@ def test_a_bank_adopts_a_persisted_lock(monkeypatch, tmp_path):
     cands = list(bank._candidate_sig)
     _costfile._store_cost(str(tmp_path / "costs.json"), "choice|block-trial|" + key, {"value": 1})
     monkeypatch.setattr(td, "_BLOCK_TRIALS", td._BlockTrials())       # a new process
+    from matchedfilter import _calibration
+    priced = []
+    orig = _calibration.price_block_sizes
+    monkeypatch.setattr(_calibration, "price_block_sizes", lambda *a, **k: priced.append(1) or orig(*a, **k))
     again, rng = _inspiral_bank()
     assert td._trial_key(again) == key
-    assert td._stored_cands(again) == cands                          # kept for the mapping
     assert again._layouts is None                                    # only the winner built
+    assert not priced                                                # and nothing priced
     assert {n for _, n in again.chosen_layout} == {int(cands[1])}     # the whole bank at it
     L = 1 << 15
     data = ((rng.standard_normal(L) + 1j * rng.standard_normal(L)) / np.sqrt(2)).astype(np.complex64)
     TimeDomainFilterBank.filter_series_many([(again, data, {})])      # runs, with templates loaded
-
 
 def test_a_trial_runs_and_its_lock_holds_without_a_cost_file(monkeypatch):
     """Without MF_COST_FILE a bank still offers its candidate layouts, its real calls settle
@@ -123,7 +128,6 @@ def test_a_trial_runs_and_its_lock_holds_without_a_cost_file(monkeypatch):
     winner. (Until 2026-10-26 trials needed a cost file, so production ran the model's block
     size, which under load put up to 231 of 323 banks on a size 1.6-1.95x slower.)"""
     monkeypatch.setattr(td, "_BLOCK_TRIALS", td._BlockTrials())
-    monkeypatch.setattr(td, "_CANDS", {})
     bank, rng = _inspiral_bank()
     layouts = getattr(bank, "_layouts", None) or []
     if len(layouts) < 2:
@@ -235,6 +239,7 @@ class _FakeBank:
         self._layout_rank, self._layout_warm = 0, True
         self.filters_f = [0]
         self._choice_ns, self.device = (2048, 4096), "fake"
+        self._trial_cands = (2048, "model")
         plan = type("P", (), {"calibrating": lambda s, c=calibrating: c})()
         self._groups = [type("G", (), {"is_hier": True, "_plan": plan})()]
 
@@ -333,3 +338,16 @@ def test_ranks_are_sampled_in_turn_not_one_after_another(monkeypatch, tmp_path):
         trials.record("k", r, 1.0 + 0.1 * r)
     assert order == [0, 1, 2, 0, 1, 2]
     assert trials.winner("k") == 0
+
+
+def test_ranks_are_sizes_smallest_first_then_the_model():
+    """A bank's candidates are its smallest single sizes, smallest first, then the model's
+    layout: rank 0 (the tie's preference) is the smallest size, and a rank is the same size
+    for every bank of its trial key."""
+    bank, _ = _inspiral_bank()
+    sig = list(bank._candidate_sig)
+    if len(sig) < 2:
+        pytest.skip("one candidate only")
+    sizes = [c for c in sig if c != "model"]
+    assert sig[-1] == "model" and sizes == sorted(sizes) == bank._single_sizes()[:len(sizes)]
+    assert {n for _, n in bank.chosen_layout} == {sizes[0]}          # rank 0 runs first
