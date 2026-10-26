@@ -41,10 +41,8 @@ bank = TimeDomainFilterBank(taps, tap_counts=counts, engine='hier', threshold=5.
 bank.set_reference(w, delta_f=df)
 L = 1 << 16
 out = []
-# Trials persist their samples in MF_COST_FILE and may span processes: a block-size trial
-# samples only once its plans' chain and Q15 trials have locked, and on a GPU the chain trial
-# takes candidates x (2 settle + samples) whole batches. The test runs processes until no
-# trial is left open on file.
+# The joint trial persists its rounds in MF_COST_FILE and may span processes. The test runs
+# processes until no trial is left open on file.
 for seg in range(20):
     r = np.random.default_rng(100 + seg)
     x = ((r.standard_normal(L) + 1j * r.standard_normal(L)) / np.sqrt(2)).astype(np.complex64)
@@ -58,15 +56,15 @@ print(json.dumps({"last": out[-4:], "layout": bank.chosen_layout,
 
 
 def _run(device, cost):
-    env = dict(os.environ, MF_COST_FILE=str(cost), MF_AUTOTUNE="1", MF_CHAIN_TRIALS="1",
-               MF_BLOCK_TRIALS="1", OMP_NUM_THREADS="1")
+    env = dict(os.environ, MF_COST_FILE=str(cost), MF_AUTOTUNE="1", MF_TRIAL_ROUNDS="2",
+               OMP_NUM_THREADS="1")
     p = subprocess.run([sys.executable, "-c", SCRIPT, str(PKG_PARENT), device], env=env,
                        capture_output=True, text=True, timeout=scaled(900))
     assert p.returncode == 0, p.stderr[-3000:]
     return json.loads(p.stdout.strip().splitlines()[-1])
 
 
-_TRIALS = ("choice|block-trial|", "choice|chain-trial|", "choice|q15-trial|")
+_TRIALS = ("choice|joint|",)
 
 
 def _trial_records(rec):
@@ -88,16 +86,10 @@ def test_two_processes_sharing_a_cost_file_agree(device, tmp_path):
         if not any(str(d) == device for d in mf.devices()):
             pytest.skip("no %s here" % device)
     cost = tmp_path / "costs.json"
-    # A block-size trial samples only once the chain and Q15 trials have locked, so it may
-    # span processes (its samples persist): run until its lock is on file. From then on
-    # every process reads the same choices back.
     # Run until the trial records reach a fixed point: no trial open, and a process changes
-    # none of them: a stored lock is final.
-    # The trials are bounded (an unclear contest samples further up to its budget, then the
-    # shared rule decides) and continue across processes from the file, but one process
-    # adds only a few batch samples: on CI's paravirtual M2 a chain trial's batches were
-    # still open after 10 processes. The loop ends at the fixed point, so the cap only
-    # costs time when a trial needs it.
+    # none of them (a stored lock is final). From then on every process reads the same
+    # choices back. A joint trial is bounded (its cap of rounds, one per batch) and continues
+    # across processes from the file; the loop ends at the fixed point.
     prev = None
     for _ in range(25):
         first = _run(device, cost)

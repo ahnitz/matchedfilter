@@ -184,7 +184,8 @@ def test_time_domain_filter_bank_narrow_slice_and_template_index():
 
 
 def test_chain_trial_work_normalization(monkeypatch):
-    """Chain trials time full-template series calls per (block x template) and ignore follow-up slices."""
+    """A plan's joint trial takes a round from a full-template series call, timed per (block x
+    template) pair, and none from a follow-up slice."""
     def inspiral_power(n, exponent=-7 / 3.0, knee_frac=0.0150):
         p = np.zeros(n, dtype=np.float32)
         k = np.arange(1, n // 2).astype(np.float64)
@@ -200,22 +201,22 @@ def test_chain_trial_work_normalization(monkeypatch):
     hf = mf.HierarchicalFilter(n, 1, nt, snr=5.5, fd=1e-3, valid=(0, n))
     hf.set_reference(power)
     hf.set_templates(np.repeat(h[None, :], nt, axis=0))
-    assert hf.autotune_info["status"] == "trial" and len(hf.autotune_info["shortlist"]) > 1
+    assert len(hf.autotune_info["shortlist"]) > 1
 
     rng = np.random.default_rng(77)
     series = (rng.standard_normal(n * 8) + 1j * rng.standard_normal(n * 8)).astype(np.complex64)
 
-    def samples():
+    def rounds():
         (trial,) = mf.get_autotune_state()["trials"].values()
-        return trial["samples"][hf.config]
+        return trial["samples"]["default"]
 
-    # A follow-up on one template over one block is not representative work: not recorded.
+    # A follow-up on one template over one block is not representative work: no round.
     hf.run_series(series, starts=np.array([0], dtype=np.uintp), win_start=np.array([0], dtype=np.uintp),
                   win_end=np.array([n], dtype=np.uintp), binsize=n, threshold=5.0, templates=(1, 1))
-    assert samples() == []
-    # A full call over 4 blocks is recorded once, per pair.
+    assert rounds() == []
+    # A full call over 4 blocks is one round, per pair.
     starts = np.array([0, n, 2 * n, 3 * n], dtype=np.uintp)
     hf.run_series(series, starts=starts, win_start=np.zeros(4, dtype=np.uintp),
                   win_end=np.full(4, n, dtype=np.uintp), binsize=n, threshold=5.0)
-    s = samples()
+    s = rounds()
     assert len(s) == 1 and 0 < s[0] < 1e-3          # seconds per (block x template) pair

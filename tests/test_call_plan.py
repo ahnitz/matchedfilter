@@ -350,27 +350,24 @@ def test_two_segments_in_flight_match_serial(monkeypatch):
 @pytest.mark.parametrize("band", ["0", "1"])
 @pytest.mark.parametrize("depth", [1, 2])
 def test_steady_segments_replay(monkeypatch, band, depth):
-    """With chain trials ON (the default), band mode forced either way, and one or two
+    """With joint trials ON (the default), band mode forced either way, and one or two
     segments in flight: after warm-up every fine call of a segment replays its call plan.
-    A trial that never locks (its calls bypassed the timed path), slot bases that never
-    settle, or a mode that flips every call all show up here as misses, not as host time."""
+    A trial that never locks (its calls bypassed the round), slot bases that never settle,
+    or a mode that flips every call all show up here as misses, not as host time."""
     import matchedfilter as mf
-    # Trials are process-wide per configuration: start from none, as a fresh search does
-    # (another test's dead plans hold candidates of the same configuration).
-    monkeypatch.setattr(mf._chains, "_CHAIN_TRIALS", {})
+    # Trials are process-wide per key: start from none, as a fresh search does.
+    monkeypatch.setattr(mf._trial, "_TRIALS", {})
     monkeypatch.setattr(mf._chains, "_CHAIN_CHOICE", {})
     monkeypatch.delenv("MF_AUTOTUNE", raising=False)      # trials on
     rng, banks = _setup(monkeypatch, nbanks=2, seed=79)
     monkeypatch.delenv("MF_AUTOTUNE", raising=False)
-    monkeypatch.setenv("MF_CHAIN_TRIALS", "2")
+    monkeypatch.setenv("MF_TRIAL_ROUNDS", "2")
     monkeypatch.setenv("MF_BAND_FORWARD", band)
     S = 1 << 17
     sets = [banks[0][0].empty_shared((len(banks), S)) for _ in range(depth + 1)]
     inflight, deltas = [], []
-    # A GPU chain trial runs each of its (up to 3) candidates for a run of batches -- 3 to
-    # settle after the switch, then MF_CHAIN_TRIALS samples, up to twice that when the
-    # contest is unclear (gatechain.measured_choice) -- before it locks: up to ~21 batches
-    # plus switches, so 48 segments leave the last 4 well clear of it under load.
+    # A joint trial takes one paired round per batch (every arm replays the batch), at most
+    # 2 x MF_TRIAL_ROUNDS rounds before it locks: 48 segments leave the last 4 well clear.
     for seg in range(48):
         rows = sets[seg % (depth + 1)]
         _fill(rng, rows, S)
@@ -384,11 +381,8 @@ def test_steady_segments_replay(monkeypatch, band, depth):
     for fs in inflight:
         [f.result() for f in fs]
     for b, _, _ in banks:
-        for g in b._groups:
-            tk = getattr(g.plan, "_chain_trial", None)
-            assert tk is None, ("a chain trial never locked", g.plan._chain,
-                                {c: len(v) for c, v in mf._chains._CHAIN_TRIALS[tk].samples.items()},
-                                mf._chains._CHAIN_TRIALS[tk].attempts)
+        assert not getattr(b, "_in_trial", False), ("a joint trial never locked",
+                                                     {k: (t.winner, t.rounds) for k, t in mf._trial._TRIALS.items()})
     assert all(d == want for d, want in deltas[-4:]), str(deltas)
 
 

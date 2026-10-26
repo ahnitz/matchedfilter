@@ -8,6 +8,9 @@ dismisses), and exist for measurement and tests.
 Generated from `python/matchedfilter/_config.py` by `tools/gen_environment_doc.py`; edit
 the table there.
 
+Removed 2026-10-26: block sizes, chains and the Q15 screen are one joint trial of paired
+rounds; MF_TRIAL_ROUNDS sets its rounds: MF_BLOCK_TRIALS, MF_CHAIN_TRIALS.
+
 Removed 2026-10-17: switches no tool, test or CI job used were removed (their defaults
 kept): MF_BLOCK_TRIAL_RANKS, MF_CUDA_BLOCKING_SYNC, MF_CUDA_GRAPHS, MF_CUDA_PREFETCH,
 MF_DIRECT_TRACE, MF_FUSE, MF_GATE16_ELECT, MF_GBLK, MF_GPU_FUSE, MF_GPU_FUSE_CACHE,
@@ -62,8 +65,8 @@ Older notes in docs/ that mention a removed variable describe past studies.
 |---|---|---|
 | `MF_AUTOTUNE=0` | on | No timed trials: the model's choices stand. |
 | `MF_CHAIN_FORCE=b1,b2` or `n:b1,b2;...` | unset | Pin the gate chain (cross-device comparisons; results depend on the chain). |
-| `MF_CHAIN_MARGIN`, `MF_CHAIN_TRIALS` | built-in | Chain shortlist margin; batches per chain trial. |
-| `MF_BLOCK_TRIALS` | built-in | Samples per block-size trial. |
+| `MF_CHAIN_MARGIN` | 0.3 | Modelled cost margin within which other chains become trial arms. |
+| `MF_TRIAL_ROUNDS` | 5 | Paired rounds before a joint trial decides (it takes up to twice as many). |
 | `MF_DIRECT_REFINE=0` | on | CPU refines by transform only (no direct correlation). |
 | `MF_GATE16=0` | on where built | No FP16 first gate on the CPU. |
 | `MF_DGROUP=<n>` | the plan's series group | Blocks per hierarchical series batch. |

@@ -3,6 +3,7 @@ automatically select optimal FFT block sizes, and filter continuous series."""
 
 import math
 from collections import OrderedDict
+import collections
 import collections.abc as _abc
 import os
 import time
@@ -12,7 +13,8 @@ import threading
 import weakref
 import numpy as np
 from . import _calibration, _config
-from ._chains import _CHAIN_WARM_BATCHES
+from . import _trial
+from ._choice import _AUTOTUNE_LOCK
 from ._results import FilterResults, _EMPTY_FILTER_RESULTS  # noqa: F401  (public here)
 from ._windows import _is_index, _normalize_windows, _window_layout  # noqa: F401
 from ._windows import _merge_window_bins, _window_bin_phases
@@ -151,14 +153,15 @@ def _intersect_runs(x: np.ndarray, y: np.ndarray) -> np.ndarray:
     return np.asarray(out, np.int64).reshape(-1, 2)
 
 
-#: Block-size trials. Candidates per bank: the model's layout (rank 0), then the whole bank at
-#: each of its cheapest single block sizes, _BLOCK_TRIAL_RANKS in all. A sample is one whole
-#: batch (fused, concurrent: as steady state runs) timed from submission to its last result,
-#: per template x series sample; a rank's first batch after a switch only settles (it uploads).
-#: _BLOCK_TRIAL_SAMPLES per rank. The lock is kept in MF_COST_FILE when one is set, so a
-#: machine pays for the trial once and every process then runs the same layout.
+#: Joint trials (_trial) of banks. A bank's arms: DEFAULT (its smallest single block size); the
+#: whole bank at its next single size and at the model's priced layout ("n=4096", "n=model":
+#: _BLOCK_TRIAL_RANKS candidate layouts in all); its plans' other shortlisted
+#: chains ("chain=n:..."), the _CHAIN_ARMS most often shortlisted; the Q15 screen both ways. Block
+#: sizes are absolute candidates, smallest first: on a loaded Haswell node the model priced 4096
+#: at 1.2x 2048 where it ran 1.6-1.95x, and fresh processes put 0-231 of test67's 323 banks on
+#: 4096 (2026-10-25); ranked by its price, the candidates were its errors.
 _BLOCK_TRIAL_RANKS = 3
-_BLOCK_TRIAL_SAMPLES = 2
+_CHAIN_ARMS = 3
 
 
 def _small_blocks_fit(device):
@@ -183,136 +186,11 @@ def _small_blocks_fit(device):
 
 
 def _trial_key(bank):
-    """The pooled trial a bank joins: its device and candidates (its smallest single block
-    sizes, then "model"). A rank is the same candidate for every bank of the key, so all
-    banks of a search offering the same sizes pool their samples into one trial and one lock."""
-    return "%s|%s" % (bank.device, ",".join(str(n) for n in bank._trial_cands))
-
-
-#: Ranks sampled at most this many times each when a contest is unclear (gatechain.measured_choice).
-_BLOCK_TRIAL_MAX = 6
-
-
-class _BlockTrials:
-    """Measure block-size candidates end to end and lock the fastest: one measured choice
-    (_choice.Choice) per trial key, its candidates the ranks, rank 0 (the model's layout)
-    the preference.
-
-    A layout's modelled cost is a sum of calibrated per-term costs, and on a latency-bound GPU
-    those terms are below a call's noise, so the model alone cannot separate block sizes that
-    differ by tens of percent, and it picks differently from process to process
-    (docs/gate-model.md, "Large-n pricing"). Ranks are interleaved, the fewest samples next:
-    taken in turn, every sample of rank 0 came first, in the process's coldest batches (on
-    the L40S a 2048 leaf sampled 3.5 where it runs ~2.2, and the trial locked a 4096 leaf that
-    ran 20% slower). Guards against locking on transients (M2: n=4096 locked 5.4% "faster"
-    on two samples taken while chain trials moved, and ran 34% slower in steady state):
-      * a batch is a sample only when no plan of the trialling banks is still calibrating
-        (chain or Q15 trial; _bank_calibrating), since those switch kernels between calls;
-      * a rank r > 0 wins only by more than gatechain.TIE AND by more than the samples' own
-        noise (gatechain.measured_choice: 2 standard errors); unclear contests sample further, up to
-        _BLOCK_TRIAL_MAX, then keep the model's layout;
-    On the CPU, layouts are timed in paired rounds on the same jobs (_cpu_block_round).
-    Samples persist in MF_COST_FILE, so a trial carries across short processes, and a trial
-    ends at its budget of batches that could sample. Trials are keyed by _trial_key, so
-    only banks offering the same candidates pool their samples. MF_AUTOTUNE=0 keeps rank 0
-    unless a lock is on file."""
-
-    def __init__(self):
-        self.state = {}
-        self.cpu_replaying = False
-
-    def _st(self, key):
-        st = self.state.get(key)
-        if st is None:
-            from . import _choice
-            base = self._base_need()
-            # CPU layouts are timed in paired rounds (_cpu_block_round). The key is
-            # device|sizes, the device as the bank was given it (None: the CPU).
-            from .device import parse as _parse_device
-            dev = key.split("|")[0]
-            try:
-                paired = _parse_device(None if dev == "None" else dev).kind == "cpu"
-            except (TypeError, ValueError):
-                paired = False
-            if paired:
-                base = max(5, base)
-            st = self.state[key] = _choice.Choice(
-                store_key="block-trial|" + key, what="BLOCK-TRIAL %s" % key, warmup=0,
-                minimum=base, cap=max(2 * base, _BLOCK_TRIAL_MAX) if paired else _BLOCK_TRIAL_MAX,
-                budget=(2 * (_BLOCK_TRIAL_MAX + 1), 6), paired=paired, persist=True,
-                label=int, parse=int)
-        return st
-
-    @staticmethod
-    def _base_need():
-        return _config.get("MF_BLOCK_TRIALS", _BLOCK_TRIAL_SAMPLES)
-
-    def rank_for(self, key, nranks):
-        """The rank the key's next batch runs (its winner once locked)."""
-        st = self._st(key)
-        if st.winner is not None:
-            return st.winner
-        for r in range(nranks):
-            st.add(r)
-        r = st.pick(among=range(nranks))
-        return 0 if r is None else r
-
-    def tick(self, key):
-        """A batch that could have been a sample (no plan calibrating): counts toward the
-        trial's budget."""
-        self._st(key).tick()
-
-    def record(self, key, rank, value):
-        self._st(key).record(rank, value)
-
-    def record_cpu_round(self, key, timings):
-        """CPU layouts measured on the same jobs, one complete interleaved round."""
-        self._st(key).round(timings)
-
-    def winner(self, key):
-        return self._st(key).winner
-
-    def open_keys(self):
-        """Every key this process has seen without a winner (sampled or not yet)."""
-        return sorted(k for k, st in self.state.items() if st.winner is None)
-
-    def unlocked(self):
-        """Keys this process trialled that have no winner yet (a measurement over such a
-        process includes layout switches, not one steady layout)."""
-        return sorted(k for k, st in self.state.items()
-                      if st.winner is None and st.sampled)
-
-
-_BLOCK_TRIALS = _BlockTrials()
-
-
-def _hold_trials(snap, on):
-    """Hold (on) or release the measured choices of every hierarchical plan of one candidate
-    layout (a _snapshot): see HierarchicalFilter.release_trials."""
-    for g in (snap or {}).get('_built') or ():
-        p = getattr(g, '_plan', None)
-        if p is None or not getattr(g, 'is_hier', False):
-            continue
-        if on:
-            p._trial_hold = True
-        elif hasattr(p, 'release_trials'):
-            p.release_trials()
-
-
-def _bank_calibrating(bank):
-    """Whether any plan of the bank's live layout is still settling a measured choice (chain
-    trial, Q15 trial, or a plan not built yet): such calls switch kernels between calls, so
-    their batch times say nothing about the block size."""
-    for g in getattr(bank, '_groups', ()) or ():
-        if not getattr(g, 'is_hier', False):
-            continue
-        plan = getattr(g, '_plan', None)
-        if plan is None:
-            continue                  # not built: its first batch is the rank's settle batch
-        cal = getattr(plan, 'calibrating', None)
-        if cal is not None and cal():
-            return True
-    return False
+    """The joint trial a bank joins: its device, its block-size candidates (smallest single
+    sizes, then "model"), its statistics. An arm means the same for every bank of the key, so
+    the banks of a search pool their rounds into one trial and one lock."""
+    return "bank|%s|%s|%g|%g" % (bank.device, ",".join(str(n) for n in bank._trial_cands),
+                                 float(bank.threshold), float(bank.false_dismissal))
 
 
 def _built(banks):
@@ -327,209 +205,100 @@ def _built(banks):
     return total
 
 
-def _same_layout_ranks(banks, r):
-    """The ranks whose built layout is rank r's own in every one of banks (r included): a
-    candidate whose partition another one has shares its layout (set_reference), and timing it
-    again measures nothing but noise -- which once locked the model's rank for a layout it
-    shared with the smallest size. They take r's samples instead, so they can only tie."""
-    n = min(len(b._layouts) for b in banks)
-    return [x for x in range(n) if all(b._layouts[x] is b._layouts[r] for b in banks)]
+#: Set while a joint round replays a batch: the replays run as calls, not as rounds.
+_REPLAYING = [False]
 
 
-def _cpu_block_round(jobs):
-    """Replay identical CPU jobs across every layout; return the final valid result.
-
-    Layout snapshots hold their inner chain/Q15 trials, so each timing measures a
-    fixed candidate. One warm batch per arm excludes switching and lazy setup.
-    The recursion guard only bypasses trial orchestration, not search execution.
-    """
-    from . import gatechain
+def _joint_round(jobs):
+    """A round of the joint trial of every bank of this batch that is in one (_trial.run_round):
+    each distinct configuration of the trial's live arms runs the whole batch, settled then
+    timed, and the result is DEFAULT's. Banks whose trial has locked adopt the lock here. Returns
+    the batch's results, or None when no bank of the batch is in an open trial."""
     from ._choice import _autotune_enabled
     from .device import parse as _parse_device
-    if (_BLOCK_TRIALS.cpu_replaying or not jobs or not _autotune_enabled()
-            or any(_parse_device(b.device).kind != "cpu" for b, _, _ in jobs)):
+    if _REPLAYING[0] or not jobs or not _autotune_enabled():
         return None
     groups = {}
     for bank, _, kw in jobs:
-        if (kw or {}).get("template_index") is not None:
-            return None
-        if getattr(bank, '_layouts', None):
-            key = _trial_key(bank)
-            if _BLOCK_TRIALS.winner(key) is None:
-                groups.setdefault(key, {})[id(bank)] = bank
+        if (kw or {}).get("template_index") is not None or not getattr(bank, '_in_trial', False):
+            continue
+        key = _trial_key(bank)
+        w = _trial.winner(key)
+        if w is not None:
+            bank._lock_arm(w)
+            continue
+        groups.setdefault(key, {})[id(bank)] = bank
     if not groups:
         return None
-    work = sum(len(b.filters_f) * int(np.asarray(x).size) for b, x, _ in jobs)
+    work = sum(len(b.filters_f) * int(np.asarray(x).size) for b, x, kw in jobs
+               if (kw or {}).get("template_index") is None)
     if work <= 0:
         return None
+    gpu = any(_parse_device(b.device).kind == "gpu" for b, _, _ in jobs)
     import time
     from . import _record_cpu_trial
+
+    def replay():
+        return TimeDomainFilterBank.filter_series_many(jobs)
+
+    def settle():
+        # a GPU batch after a switch builds recordings and uploads: replayed until it builds
+        # nothing more (at most three times), so the timed batch is steady state
+        banks = [b for b, _, _ in jobs]
+        before = _built(banks)
+        replay()
+        for _ in range(2):
+            now = _built(banks)
+            if now == before:
+                break
+            before = now
+            replay()
+
     begin = time.perf_counter()
     result = None
-    locked = []
-    _BLOCK_TRIALS.cpu_replaying = True
+    _REPLAYING[0] = True
     try:
         for key, byid in groups.items():
             banks = list(byid.values())
-            nr = min(len(b._layouts) for b in banks)
-            count = len(_BLOCK_TRIALS._st(key).samples.get(0, ()))
-            order = list(range(nr))
-            if count % 2:
-                order.reverse()
-            timings = {}
-            for rank in order:
-                if rank in timings:                 # shares an already timed rank's layout
-                    continue
-                for bank in banks:
-                    bank._use_layout(rank)
-                TimeDomainFilterBank.filter_series_many(jobs)
-                t0 = time.perf_counter()
-                result = TimeDomainFilterBank.filter_series_many(jobs)
-                dt = (time.perf_counter() - t0) / work
-                for same in _same_layout_ranks(banks, rank):
-                    timings[same] = dt
-            _BLOCK_TRIALS.record_cpu_round(key, timings)
-            winner = _BLOCK_TRIALS.winner(key)
-            if winner is not None:
-                locked.extend((bank, winner) for bank in banks)
+            for b in banks:
+                b._prepare_arms()
+            tr = _trial.trial(key, banks[0]._joint_arms)
+            if len(tr.live()) < 2:
+                with _AUTOTUNE_LOCK:
+                    tr.choice.lock(_trial.DEFAULT)
+            if tr.winner is not None:
+                for b in banks:
+                    b._lock_arm(tr.winner)
+                continue
+            result = _trial.run_round(tr, _BankArms.of(banks), replay, work,
+                                      settle=settle if gpu else None)
     finally:
-        _BLOCK_TRIALS.cpu_replaying = False
-    for bank, winner in locked:
-        bank._lock_layout(winner)
-    _record_cpu_trial(begin)
+        _REPLAYING[0] = False
+    if result is None:
+        return None
+    if not gpu:
+        _record_cpu_trial(begin)
     return result
 
 
-def _trial_begin(jobs):
-    """Put every trialling bank of the batch on its key's current rank (or lock it, once its key
-    has a winner). Returns [(key, rank, banks, settled, built)] for the banks still trialling."""
-    from . import gatechain
-    from ._choice import _autotune_enabled
-    if _BLOCK_TRIALS.cpu_replaying:
-        return None
-    groups = {}
-    for bank, _, kw in jobs:
-        if (kw or {}).get("template_index") is not None:
-            continue
-        if getattr(bank, '_layouts', None):
-            groups.setdefault(_trial_key(bank), []).append(bank)
-    plan = []
-    chains = _chain_trials_begin(jobs)
-    for key, bs in groups.items():
-        w = _BLOCK_TRIALS.winner(key)
-        if w is None and (not _autotune_enabled() or gatechain._cost_file() is None):
-            # A trial is paid for once per machine, so it runs only where its lock can be kept
-            # (MF_COST_FILE). Run every process, it costs that process its warm-up and more --
-            # 2-3 s of fine stage on dev3 -- and gains a few percent: never worth it.
-            w = 0
-        if w is not None:
-            for b in bs:
-                b._lock_layout(w)
-            continue
-        r = _BLOCK_TRIALS.rank_for(key, min(len(b._layouts) for b in bs))
-        settled = all(getattr(b, '_layout_rank', 0) == r and getattr(b, '_layout_warm', False)
-                      for b in bs)
-        for b in bs:
-            b._use_layout(r)
-            b.__dict__.setdefault('_ranks_run', set()).add(r)
-        if any(_bank_calibrating(b) for b in bs):
-            settled = False
-        else:
-            _BLOCK_TRIALS.tick(key)
-        plan.append((key, r, bs, settled, _built(bs)))
-    if not plan and not chains:
-        return None
-    import time
-    work = sum(len(b.filters_f) * int(np.asarray(x).size) for b, x, kw in jobs
-               if (kw or {}).get("template_index") is None)
-    return (time.perf_counter(), plan, work, chains)
+class _BankArms:
+    """A bank as a joint-trial subject (_trial.run_round)."""
 
+    def __init__(self, bank):
+        self.bank = bank
 
-def _chain_trials_begin(jobs):
-    """GPU chain trials judged per batch: every hierarchical GPU plan of the batch in a chain
-    trial is put on its trial's candidate for this batch (_chain_trial_next), so the batch's
-    time is that candidate's. Returns [(trial key, chain, plans, settled)]; settled when every
-    plan already ran that chain in an earlier batch (its first batch builds recordings and
-    calibrates: one-off costs, not the chain's)."""
-    from ._choice import _AUTOTUNE_LOCK
-    from ._chains import _chain_trial_next, _chain_trial_pending, _CHAIN_TRIALS
-    by = {}
-    for bank, _, kw in jobs:
-        if (kw or {}).get("template_index") is not None:
-            continue
-        for g in bank._groups:
-            p = getattr(g, "_plan", None)
-            if p is None or getattr(p, "_gpu", None) is None:
-                continue
-            tk = getattr(p, "_chain_trial", None)
-            if tk is not None:
-                by.setdefault(tk, {})[id(p)] = p
-    out = []
-    for tk, plans in by.items():
-        c = _chain_trial_next(tk)
-        if c is None:
-            # Locked (by samples, or by the budget inside _chain_trial_next): the plans adopt
-            # the winner now, not on a sample that will not come.
-            with _AUTOTUNE_LOCK:
-                tr = _CHAIN_TRIALS.get(tk)
-                w = tr.winner if tr is not None else None
-            if w is not None:
-                for p in plans.values():
-                    p._chain_trial = None
-                    p.autotune_info.update(status="locked", winner=tuple(w))
-                    if tuple(w) != tuple(p._chain):
-                        p._switch_chain(w)
-            continue
-        settled = True
-        for p in plans.values():
-            # A sample only once the plans have run this chain for _CHAIN_WARM_BATCHES batches
-            # in a row: after a switch, thresholds, uploads, recordings and call plans settle.
-            last, run = p.__dict__.get("_chain_last_batch", (None, 0))
-            if tuple(p._chain) != tuple(c):
-                p._switch_chain(c)
-            run = run + 1 if last == tuple(c) else 1
-            settled = settled and run > _CHAIN_WARM_BATCHES
-            p._chain_last_batch = (tuple(c), run)
-        if settled:
-            _chain_trial_pending(tk, c, +1)
-        out.append((tk, tuple(c), list(plans.values()), settled))
-    return out
+    @classmethod
+    def of(cls, banks):
+        return [cls(b) for b in banks]
 
+    def arm_config(self, label):
+        return self.bank._arm_config(label)
 
-def _trial_end(tok):
-    import time
-    if tok is None:
-        return
-    t0, plan, work, chains = tok
-    dt = time.perf_counter() - t0
-    from ._chains import _chain_trial_batch, _chain_trial_pending
-    for tk, c, plans, settled in chains:
-        if settled:
-            _chain_trial_pending(tk, c, -1)
-        from ._choice import _log_autotune
-        _log_autotune("CHAIN-TRIAL batch %s settled=%s dt=%.4f work=%d", c, settled, dt, work)
-        w = _chain_trial_batch(tk, c, dt / work) if (settled and work > 0) else None
-        if w is not None:
-            for p in plans:
-                p._chain_trial = None
-                p.autotune_info.update(status="locked", winner=tuple(w))
-                if tuple(w) != tuple(p._chain):
-                    p._switch_chain(w)
-    for key, r, bs, settled, built in plan:
-        # A batch that built recordings (new call shapes, graphs) timed setup: no sample.
-        # Trials took such batches for candidates that ran after the model's own, which had
-        # built its recordings during calibration: a 2048 leaf sampled 2.7x slower than it ran.
-        settled = settled and _built(bs) == built
-        if settled and work > 0:
-            for same in _same_layout_ranks(bs, r):
-                _BLOCK_TRIALS.record(key, same, dt / work)
-        for b in bs:
-            b._layout_warm = True
-        w = _BLOCK_TRIALS.winner(key)
-        if w is not None:
-            for b in bs:
-                if getattr(b, '_layouts', None) is not None:
-                    b._lock_layout(w)
+    def use_arm(self, label):
+        self.bank._use_arm(label)
+
+    def lock_arm(self, label):
+        self.bank._lock_arm(label)
 
 
 def _max_tiers(device) -> int:
@@ -571,7 +340,7 @@ def _fuse_begin(jobs, trial):
     close = fused() if side == "fused" else None
     work = sum(len(b.filters_f) * int(np.asarray(x).size) for b, x, kw in jobs
                if (kw or {}).get("template_index") is None)
-    trying = trial is not None and bool(trial[1] or trial[3])
+    trying = bool(trial)
     if record is None or trying or work <= 0:
         return close, None
     import time
@@ -1150,6 +919,8 @@ class TimeDomainFilterBank:
                     # and groups of similar filter length then share one chain choice.
                     search_window=self._priced_window(c_bad, chosen_N),
                 )
+                # the bank's joint trial governs the plan (_use_arm, _lock_arm)
+                plan._governed, plan._arm = True, getattr(self, '_bank_arm', _trial.DEFAULT)
                 if self.first_stage_snr > 0:
                     plan.set_first_stage(self.first_stage_snr)
                 if self.rate_ratio == 1.0 and hasattr(plan, "set_taps") and not self.complex_taps:
@@ -1321,56 +1092,47 @@ class TimeDomainFilterBank:
             if not isinstance(reference, dict) and delta_f is not None and float(delta_f) > 0:
                 fine_ref = np.asarray(reference, dtype=np.float64)
                 df = float(delta_f)
-                # Block-size trials (_BlockTrials) decide on real calls wherever trials run (the
-                # lock is the process's, and MF_COST_FILE's when one is set). The candidates, by
-                # rank: the whole bank at each of its smallest single sizes, smallest first, then
-                # the model's own layout. So a rank is the same size for every bank pooled into
-                # a trial (_trial_key), a tie keeps the smallest size, and the model's layout is
-                # kept only when it wins outright. The model alone misjudged sizes under
-                # production conditions: on a loaded Haswell node it priced 4096 at 1.2x 2048
-                # where it ran 1.6-1.95x, and fresh processes put 0-231 of test67's 323 banks on
-                # 4096 (2026-10-25); ranked by its price, the candidates were its errors.
+                # The bank's joint trial (_trial, _joint_round) decides block size, chains and
+                # screen together on real calls, its arms the same labels for every bank of the
+                # key (_trial_key). Its lock -- this process's or MF_COST_FILE's -- builds the
+                # winner's layout alone, with no block-size pricing for an "n=" lock.
                 from ._choice import _autotune_enabled
-                nr = _BLOCK_TRIAL_RANKS if _autotune_enabled() else 1
-                singles = self._single_sizes()[:nr - 1] if nr > 1 else []
+                on = _autotune_enabled()
+                singles = self._single_sizes()[:_BLOCK_TRIAL_RANKS - 1] if on else []
                 self._trial_cands = tuple(singles) + ("model",)
-                w = _BLOCK_TRIALS.winner(_trial_key(self)) if singles else None
-                if w is not None and w < len(singles):
-                    # a size locked here: the whole bank at it, no block-size pricing at all
-                    alts, sig = [self._choose_layout(fine_ref, df, single_n=singles[w])], [singles[w]]
+                w = _trial.winner(_trial_key(self)) if on else None
+                self._bank_arm = w or _trial.DEFAULT
+                self._in_trial = on and w is None
+                kind, v = _trial.parse_arm(self._bank_arm)
+                if w is not None:
+                    # the lock's layout alone: its "n=" size, else the default (smallest) size
+                    n = (None if v == "model" else v) if kind == "n" else (singles[0] if singles else None)
+                    alts, sig = [self._choose_layout(fine_ref, df, single_n=n)], [n or "model"]
                 else:
-                    model = self._choose_layout(fine_ref, df)
-                    if w is not None or not singles:
-                        alts, sig = [model], ["model"]
-                    else:
-                        alts = [self._choose_layout(fine_ref, df, single_n=n) for n in singles] + [model]
-                        sig = list(singles) + ["model"]
-                layout = alts[0]
+                    alts = [self._choose_layout(fine_ref, df, single_n=n) for n in singles]
+                    alts.append(self._choose_layout(fine_ref, df))
+                    sig = list(singles) + ["model"]
                 self._candidate_sig = tuple(sig)
-                if self._built is None or layout[0] != self._built_layout:
-                    self._build(*layout)
-                self.chosen_layout = [(int(e - b), int(n)) for b, e, n, _ in layout[0]]
-                # Block-size trials (_BlockTrials): the other candidates are built now -- the
-                # taps are freed below -- and measured on real calls. A candidate with an earlier
-                # one's partition shares its built layout.
-                self._layouts = [self._snapshot()]
-                for k, alt in enumerate(alts[1:], 1):
+                # The candidate layouts are built now -- the taps are freed below. One with an
+                # earlier one's partition shares its built layout. The bank starts on DEFAULT's,
+                # the first (its smallest size).
+                self._layouts = []
+                for k, alt in enumerate(alts):
                     same = next((i for i in range(k) if alts[i][0] == alt[0]), None)
                     if same is not None:
                         self._layouts.append(self._layouts[same])
                         continue
-                    self._build(*alt)
+                    if self._built is None or alt[0] != self._built_layout:
+                        self._build(*alt)
                     self._layouts.append(self._snapshot())
-                self._restore(self._layouts[0])
-                self._layout_rank = 0
+                start = 0
+                self._restore(self._layouts[start])
+                self._layout_rank = start
+                self.chosen_layout = [(int(e - b), int(n)) for b, e, n, _ in self._built_layout]
                 self._layout_ref = (reference, delta_f)
+                self._arms_ready = False
                 if len(self._layouts) < 2:
                     self._layouts = None
-                else:
-                    # Calibrations in order: the block size first, each candidate layout at its
-                    # model chain; the chain and Q15 trials then on the winner (_lock_layout).
-                    for snap in self._layouts:
-                        _hold_trials(snap, True)
             self._groups
             self._n_chosen = True
             self._taps_list = None
@@ -1447,11 +1209,10 @@ class TimeDomainFilterBank:
         layouts = getattr(self, '_layouts', None)
         if not layouts or rank == getattr(self, '_layout_rank', 0) or rank >= len(layouts):
             return
-        if layouts[rank] is layouts[self._layout_rank]:
+        if layouts[rank].get('_built') is layouts[self._layout_rank].get('_built'):
             self._layout_rank = rank                  # the same partition: nothing to switch
             return
         self._layouts[self._layout_rank] = self._snapshot()
-        self._layout_warm = False
         self._restore(layouts[rank])
         self._layout_rank = rank
         self.chosen_layout = [(int(e - b), int(n)) for b, e, n, _ in self._built_layout]
@@ -1465,11 +1226,10 @@ class TimeDomainFilterBank:
         layout's spectra and recordings sit in its GPU context's caches, which LRU evicts only
         under pressure -- on a small shared-memory GPU, after re-uploading live data."""
         self._use_layout(rank)
-        if self._layouts is not None:
-            _hold_trials(self._layouts[rank], False)
-        # only layouts this bank actually ran have anything on the device
-        ran = getattr(self, '_ranks_run', set())
-        dropped = [snap for i, snap in enumerate(self._layouts or []) if i != rank and i in ran]
+        # a layout another rank shares (the same partition) is the live one: compared by its
+        # groups, which every snapshot of the partition holds (a snapshot is retaken on leaving)
+        keep = self._layouts[rank].get('_built') if self._layouts else None
+        dropped = [snap for snap in (self._layouts or []) if snap.get('_built') is not keep]
         self._layouts = None
         ctxs = {}
         for snap in dropped:
@@ -1480,6 +1240,73 @@ class TimeDomainFilterBank:
         for ctx in ctxs.values():
             ctx._drain()
             ctx._evict_all()                 # live layouts re-upload once, on their next call
+
+    # ---- the bank's joint trial (_trial, _joint_round) ---------------------------------
+    def _arm_rank(self, label) -> int:
+        """The candidate layout an arm runs: its own for "n=" (a size, or the model's priced
+        layout), else the default -- the first candidate, the smallest size."""
+        sig = list(getattr(self, '_candidate_sig', ()) or ("model",))
+        kind, v = _trial.parse_arm(label)
+        want = v if kind == "n" else sig[0]
+        return sig.index(want) if want in sig else 0
+
+    def _layout_plans(self, rank):
+        """The hierarchical plans of the rank-th candidate layout."""
+        if self._layouts is None or rank == self._layout_rank:
+            groups = self._built or ()
+        else:
+            groups = self._layouts[rank].get('_built') or ()
+        return [g._plan for g in groups if g.is_hier and getattr(g, '_plan', None) is not None]
+
+    def _prepare_arms(self) -> None:
+        """Before the first round: every candidate layout given its reference and every plan
+        its model choice (arm_config resolves against it)."""
+        if getattr(self, '_arms_ready', True):
+            return
+        home = self._layout_rank
+        for r in dict.fromkeys(range(len(self._layouts or [None]))):
+            self._use_layout(r)
+            for p in self._layout_plans(r):
+                p.arm_config(_trial.DEFAULT)
+        self._use_layout(home)
+        self._arms_ready = True
+
+    def _joint_arms(self):
+        """The arms this bank proposes for its trial (_BLOCK_TRIAL_RANKS, _CHAIN_ARMS)."""
+        arms = [_trial.DEFAULT] + [_trial.n_arm(n) for n in self._trial_cands[1:]]
+        plans = self._layout_plans(self._arm_rank(_trial.DEFAULT))
+        seen = collections.Counter()
+        for p in plans:
+            for c in getattr(p, '_shortlist', ()):
+                if tuple(c) != p._model_chain:
+                    seen[(p.n, tuple(c))] += 1
+        arms += [_trial.chain_arm(n, c) for (n, c), _ in seen.most_common(_CHAIN_ARMS)]
+        if any(p._q15_ok(p._model_chain) for p in plans if p._model_chain is not None):
+            arms += [_trial.q15_arm(True), _trial.q15_arm(False)]
+        return arms
+
+    def _arm_config(self, label):
+        """The configuration this bank runs for an arm: its layout (by partition) and what each
+        of the layout's plans runs."""
+        r = self._arm_rank(label)
+        part = tuple((int(b), int(e), int(n)) for b, e, n, _ in
+                     (self._layouts[r].get('_built_layout') if self._layouts else self._built_layout))
+        return part, tuple(p.arm_config(label) for p in self._layout_plans(r))
+
+    def _use_arm(self, label) -> None:
+        """Run an arm from the next call on."""
+        self._use_layout(self._arm_rank(label))
+        for p in self._layout_plans(self._layout_rank):
+            p.use_arm(label)
+        self._bank_arm = str(label)
+
+    def _lock_arm(self, label) -> None:
+        """Run an arm from now on (the trial's lock): the other layouts and plans are freed."""
+        if self._layouts is not None:
+            self._lock_layout(self._arm_rank(label))
+        for p in self._layout_plans(self._layout_rank):
+            p.lock_arm(label)
+        self._bank_arm, self._in_trial = str(label), False
 
     def _load_templates(self) -> None:
         for g in self._groups:
@@ -1969,10 +1796,10 @@ class TimeDomainFilterBank:
         """
         from ._results import _Deferred
         global _BATCH_TOKEN
-        paired = _cpu_block_round(jobs)
+        paired = _joint_round(jobs)
         if paired is not None:
             return paired if wait else [_Deferred(lambda r=r: r) for r in paired]
-        trial = _trial_begin(jobs)
+        trial = _REPLAYING[0]           # a round's replay: the fused-batch choice does not sample
         _BATCH_TOKEN += 1
         # The deferred submissions may also be fused where a GPU driver batches them (Vulkan:
         # one command buffer runs every job's forward transforms, then every job's first
@@ -1996,7 +1823,7 @@ class TimeDomainFilterBank:
                 close()
         if not wait:
             res = [r if isinstance(r, _Deferred) else _Deferred(lambda r=r: r) for r in out]
-            if trial is not None or fuse is not None:
+            if fuse is not None:
                 # a trial sample runs from submission to the batch's last result
                 left = [len(res)]
                 def wrap(d):
@@ -2007,14 +1834,12 @@ class TimeDomainFilterBank:
                             seen[0] = True
                             left[0] -= 1
                             if left[0] == 0:
-                                _trial_end(trial)
                                 _fuse_end(fuse)
                         return v
                     return _Deferred(get)
                 res = [wrap(d) for d in res]
             return res
         res = [r.result() if isinstance(r, _Deferred) else r for r in out]
-        _trial_end(trial)
         _fuse_end(fuse)
         return res
 

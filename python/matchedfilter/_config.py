@@ -92,11 +92,10 @@ VARS: Tuple[Var, ...] = (
     Var("MF_CHAIN_FORCE", "override", "py", "unset",
         "Pin the gate chain (cross-device comparisons; results depend on the chain).",
         usage="MF_CHAIN_FORCE=b1,b2` or `n:b1,b2;...", kind="text"),
-    Var("MF_CHAIN_MARGIN", "override", "py", "built-in",
-        "Chain shortlist margin; batches per chain trial.",
-        usage="MF_CHAIN_MARGIN`, `MF_CHAIN_TRIALS", kind="float"),
-    Var("MF_CHAIN_TRIALS", "override", "py", row="MF_CHAIN_MARGIN", kind="int"),
-    Var("MF_BLOCK_TRIALS", "override", "py", "built-in", "Samples per block-size trial.", kind="int"),
+    Var("MF_CHAIN_MARGIN", "override", "py", "0.3",
+        "Modelled cost margin within which other chains become trial arms.", kind="float"),
+    Var("MF_TRIAL_ROUNDS", "override", "py", "5",
+        "Paired rounds before a joint trial decides (it takes up to twice as many).", kind="int"),
     Var("MF_DIRECT_REFINE", "override", "py", "on",
         "CPU refines by transform only (no direct correlation).", usage="MF_DIRECT_REFINE=0", kind="flag", value=True),
     Var("MF_GATE16", "override", "c", "on where built", "No FP16 first gate on the CPU.",
@@ -164,6 +163,8 @@ SHADER_MACROS = frozenset({"MF_C16_RAW", "MF_COARSE_TWT", "MF_DATA_SCALE_BITS",
 
 #: Removed variables and why (the document lists them; setting one changes nothing).
 REMOVED = (
+    ("2026-10-26", "block sizes, chains and the Q15 screen are one joint trial of paired "
+     "rounds; MF_TRIAL_ROUNDS sets its rounds", ("MF_BLOCK_TRIALS", "MF_CHAIN_TRIALS")),
     ("2026-10-17", "switches no tool, test or CI job used were removed (their defaults kept)",
      ("MF_BLOCK_TRIAL_RANKS", "MF_CUDA_BLOCKING_SYNC", "MF_CUDA_GRAPHS", "MF_CUDA_PREFETCH",
       "MF_DIRECT_TRACE", "MF_FUSE", "MF_GATE16_ELECT", "MF_GBLK", "MF_GPU_FUSE",

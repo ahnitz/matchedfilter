@@ -561,15 +561,17 @@ def test_autotune_off_keeps_the_model_choice(monkeypatch):
     hf = mf.HierarchicalFilter(n, 4, 8, snr=5.5, fd=1e-3)
     hf.set_reference(power); hf.set_templates(H); hf.set_data(D)
     hf.run(binsize=n, threshold=5.0)
-    assert hf.autotune_info["status"] == "locked"
+    assert hf.autotune_info["status"] == "model"
     assert hf.config == hf.autotune_info["model"]
 
 
 def test_trials_lock_one_winner_and_every_plan_switches(monkeypatch):
-    """Close calls are measured: plans run the shortlist round-robin, then all adopt the winner."""
+    """Close calls are measured: standalone plans of one key pool paired rounds into one joint
+    trial (every arm on the same call), which locks within its cap; every plan then runs the
+    winning arm, resolved against its own model choice."""
     monkeypatch.setenv("MF_AUTOTUNE", "1")
     monkeypatch.setenv("MF_CHAIN_MARGIN", "100")
-    monkeypatch.setenv("MF_CHAIN_TRIALS", "2")
+    monkeypatch.setenv("MF_TRIAL_ROUNDS", "2")
     mf.clear_autotune_cache()
     n, nt = 4096, 8
     power, H, _ = _bank_case(n, nt, 1, 11)
@@ -582,20 +584,15 @@ def test_trials_lock_one_winner_and_every_plan_switches(monkeypatch):
         hf = mf.HierarchicalFilter(n, 1, nt, snr=5.5, fd=1e-3)
         hf.set_reference(power); hf.set_templates(H)
         plans.append(hf)
-    assert len({p.config for p in plans}) > 1                # the shortlist is spread over the plans
-    shortlist = plans[0].autotune_info["shortlist"]
-    # Until the trial locks, at most its own limit (Choice.limit: its budget of calls, each
-    # plan's call one attempt), not a restated schedule.
-    trial_choice = mf._chains._CHAIN_TRIALS[plans[0]._chain_trial_key()]
-    for _ in range(trial_choice.limit // len(plans) + 1):
-        if trial_choice.winner is not None and all(p.autotune_info["status"] == "locked"
-                                                   for p in plans):
-            break
+    for _ in range(2 * 2 + 1):                      # at most the cap of rounds, one per call
         for p in plans:
             p.run_series(ser, starts, ws, we, binsize=n, threshold=6.0)
     (trial,) = mf.get_autotune_state()["trials"].values()
-    assert trial["winner"] in shortlist
-    assert all(p.autotune_info["status"] == "locked" and p.config == trial["winner"] for p in plans)
+    assert len(trial["arms"]) > 1 and trial["winner"] in trial["arms"]
+    for p in plans:
+        p.run_series(ser, starts, ws, we, binsize=n, threshold=6.0)     # adopts the lock
+        assert p.autotune_info["status"] == "locked" and p._arm == trial["winner"]
+        assert tuple(p.config) == p.arm_config(trial["winner"])[0]
 
 
 def _recorded_model():
@@ -829,14 +826,6 @@ def test_model_f_credit_is_proposal_only():
     f = 1 - (1 - 0.0005) ** 100
     d = cm.chain_forward_delta((256, 512), reach, 100, model_f=True)
     assert d == pytest.approx((cm.forward_cost((256, 512), f) - 300.0) / 100) and d < 0
-
-
-def test_chain_trial_lock_persists(monkeypatch, tmp_path):
-    monkeypatch.setenv("MF_COST_FILE", str(tmp_path / "c.json"))
-    tkey = (4096, 5.5, 1e-3, 3, "cpu:0")
-    mf._chains._store_chain_lock(tkey, (256, 512))
-    assert mf._chains._stored_chain_lock(tkey, ((256, 512), (256, 1024))) == (256, 512)
-    assert mf._chains._stored_chain_lock(tkey, ((512,), (256, 1024))) is None     # not on this shortlist
 
 
 def test_price_block_sizes_stops_at_the_first_dearer_size(monkeypatch):
