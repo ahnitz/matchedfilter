@@ -15,6 +15,7 @@ some calibration tools need separately captured data.
 | Survivor batching | `bench_survivor_batches.py` | Alternate two native builds over pooled pair lists and full two-tier hierarchical calls; verify peak and count digests |
 | Q15 template tails | `bench_q15_tails.py` | Alternate two builds over direct Q15 screens and grouped hierarchical series calls; verify masks, statistics, peaks, and survivor counts |
 | CPU ladder profile | `profile_cpu_ladder.py` | Fix chain and thresholds, compare Q15 off/on or separate builds, and record stage costs and result hashes; requires a real bank and matching profiles |
+| Job setup | `setup_capture.py`, `setup_replay.py`, `setup_breakdown.py`, `setup_decisions_diff.py` | Capture a job's banks and references, replay its matchedfilter setup, charge its time by part, and diff two replays' decisions |
 | Gate validation | `audit_gate_model.py`, `audit_threshold.py`, `chain_fdr_vs_flat.py`, `score_fdr.py`, `verify_cascade_fdr.py`, `make_psd_profiles.py` | Measure a gate chain's dismissal by injection against the flat filter; not part of normal installation |
 
 For a quick CPU/GPU overlap-save comparison with output validation:
@@ -132,6 +133,11 @@ annotations), `migrate_cost_file.py` (cost-file format migration).
 `perf_counters.py`, `cpu_trial_check.py`, `cold_decisions.py`, `cost_model_ablation.py`,
 `real_probe_study.py`, `replay_captured_groups.py`, `replay_partitions.py`,
 `audit_class_execution.py`, `audit_execution_contracts.py`, `audit_kernel_binaries.py`.
+
+**A job's setup**: `setup_capture.py` (record a job's banks, references and first calls),
+`setup_replay.py` (rebuild the setup in one process: time and a digest of the decisions),
+`setup_breakdown.py` (the setup's time by part), `setup_decisions_diff.py` (two replays'
+decisions compared).
 
 **Gate accuracy and bounds**: `gate_margin.py` (every narrow first tier), `c16_sigma.py`
 (GPU fp16 rounding, for its bound), `cuda_tc_sigma.py`, `gate16_error.py`, `gate16_check.py`,
