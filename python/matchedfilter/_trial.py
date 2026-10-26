@@ -20,6 +20,10 @@ sampled on a search's first banks picked one faster there and 5-10% slower over 
     work back to back, each after an untimed settling run, the order reversed every round.
     Rounds pool as ratios to DEFAULT (_choice.paired_choice), never as raw times, so instances
     of different cost -- banks of other profiles, plans of other shapes -- pool into one trial.
+  * DEFAULT runs first and last in each round; their ratio measures how much one
+    configuration varies against itself under the present load, and an arm's round counts
+    only beyond that (Trial.evidence_tie), never inside the shared 5% tie: under load a round's
+    ratios swing by +-30%, and a fixed margin let noise pick arms.
   * an arm that can no longer win is dropped from later rounds (_choice.Choice.round). An arm
     the rule picks over DEFAULT must then win again, alone against DEFAULT in fresh rounds,
     before it locks (Choice confirm): with seven challengers on a loaded node one passes the
@@ -36,6 +40,8 @@ none of its own.
 """
 import time
 from typing import Callable, Dict, Optional, Sequence
+
+import numpy as np
 
 from . import _choice, _config
 from ._choice import _AUTOTUNE_LOCK, _log_autotune
@@ -105,6 +111,21 @@ class Trial:
             budget=(0, UNROUNDED_BUDGET), paired=True, persist=True, label=str, parse=_valid,
             confirm=True)
         self.replaying = False
+        self.aa = []                       # each round's A/A ratio (run_round), this process
+
+    def evidence_tie(self) -> float:
+        """The margin a round's ratio must clear to count for an arm: the shared tie (TIE), or
+        more where DEFAULT's own A/A ratios say the load moves a run by more -- such that an arm
+        equal to DEFAULT clears it in about one round in ten. An arm is compared with DEFAULT's
+        bracketing mean, whose log spread is sqrt(3/4) of the A/A ratio's (one run against the
+        mean of two, against one run against one). Three rounds before it moves off TIE."""
+        if len(self.aa) < 3:
+            return _choice.TIE
+        r = np.log(np.asarray(self.aa, float))
+        sd = 1.4826 * float(np.median(np.abs(r - np.median(r))))
+        if sd == 0:
+            sd = float(np.std(r, ddof=1))
+        return max(_choice.TIE, 1.0 - float(np.exp(-1.2816 * np.sqrt(0.75) * sd)))
 
     @property
     def winner(self) -> Optional[str]:
@@ -160,27 +181,33 @@ def winner(key: str) -> Optional[str]:
 def run_round(tr: Trial, subjects: Sequence, replay: Callable[[], object], work: float,
               settle: Optional[Callable[[], None]] = None,
               keep: Optional[Callable[[object], object]] = None):
-    """One paired round of tr over subjects, all on the same work: each distinct configuration
-    of the live arms is put on every subject (use_arm), settled the first time a subject runs
-    it (settle(), else one untimed replay(): a configuration's first run builds plans, its
-    thresholds and templates), and timed over one replay(); the round is recorded as seconds
+    """One paired round of tr over subjects, all on the same work. DEFAULT's configuration runs
+    first and last, the other distinct configurations of the live arms between them (their
+    order reversed every round): each is put on every subject (use_arm), settled the first
+    time a subject runs it (settle(), else one untimed replay(): a configuration's first run
+    builds plans, thresholds and templates), and timed over one replay(). DEFAULT's sample is
+    the geometric mean of its two runs, which cancels a steady drift across the round, and
+    their ratio is the round's A/A ratio: how much one configuration varies against itself
+    under the machine's present load (Trial.evidence_tie). The round is recorded as seconds
     per unit of work. A subject without a `trial_ran` set (the configurations it has run) is
     settled every time.
-    Returns the result of DEFAULT's timed replay (passed through keep() as soon as it is taken,
-    before another arm's replay can reuse its buffers). On a decision, every subject locks the winner
-    (lock_arm); otherwise they are left on DEFAULT."""
+    Returns the result of DEFAULT's last timed replay (passed through keep() as soon as it is
+    taken, so a later replay cannot reuse its buffers). On a decision, every subject locks the
+    winner (lock_arm); otherwise they are left on DEFAULT."""
     live = tr.live()
     conf = {a: tuple(s.arm_config(a) for s in subjects) for a in live}
-    order = list(dict.fromkeys(conf[a] for a in live))      # DEFAULT's configuration first
+    d = conf[DEFAULT]
+    others = [c for c in dict.fromkeys(conf[a] for a in live) if c != d]
     if tr.rounds % 2:
-        order.reverse()
+        others.reverse()
+    seq = [d] + others + ([d] if others else [])
     rep = {}
     for a in live:
         rep.setdefault(conf[a], a)
-    took, kept = {}, None
+    timed, kept = {}, None
     tr.replaying = True
     try:
-        for c in order:
+        for i, c in enumerate(seq):
             for s in subjects:
                 s.use_arm(rep[c])
             ran = [getattr(s, "trial_ran", None) for s in subjects]
@@ -191,14 +218,21 @@ def run_round(tr: Trial, subjects: Sequence, replay: Callable[[], object], work:
                         r.add(own)
             t0 = time.perf_counter()
             res = replay()
-            took[c] = (time.perf_counter() - t0) / work
-            if c == conf[DEFAULT]:
+            timed.setdefault(c, []).append((time.perf_counter() - t0) / work)
+            if c == d and i == len(seq) - 1:
                 kept = keep(res) if keep is not None else res
     finally:
         tr.replaying = False
+    td = timed[d]
+    took = {c: v[0] for c, v in timed.items()}
+    if len(td) == 2:
+        took[d] = float(np.sqrt(td[0] * td[1]))
+        tr.aa.append(td[1] / td[0])
     with _AUTOTUNE_LOCK:
+        tr.choice.tie = tr.evidence_tie()
         w = tr.round({a: took[conf[a]] for a in live})
-    _log_autotune("TRIAL %s round %d: %s", tr.key, tr.rounds,
+    _log_autotune("TRIAL %s round %d (tie %.3f, A/A %s): %s", tr.key, tr.rounds, tr.choice.tie,
+                  "%.3f" % tr.aa[-1] if len(td) == 2 else "-",
                   {a: "%.3g" % took[conf[a]] for a in live})
     for s in subjects:
         if w is not None:
