@@ -598,8 +598,9 @@ class HierarchicalSearch:
 
         On a GPU the searches are one filter_series_many batch, submitted and left in flight
         (deferred): every call submitted before any is collected, so the device is not idle
-        while the host prepares the next leaf -- or the next chunk's root. On the CPU each
-        runs in turn, as filter_series. The results are the same either way."""
+        while the host prepares the next leaf -- or the next chunk's root. On the CPU the batch
+        runs each in turn, as filter_series, and its banks' block-size trials sample on it.
+        The results are the same either way."""
         leaves = [lf for lf in step.pending if any(step.win[(id(lf), c)] for c in step.active)]
         if not leaves:
             return None
@@ -615,10 +616,9 @@ class HierarchicalSearch:
                     where[(id(lf), c)] = len(jobs)
                     jobs.append((bank, series, dict(windows=slice(*w[0]) if len(w) == 1 else w)))
         deferred = any(getattr(b, "device", None) is not None for b, _, _ in jobs)
-        if deferred:
-            results = TimeDomainFilterBank.filter_series_many(jobs, wait=False)
-        else:
-            results = [b.filter_series(ser, **kw) for b, ser, kw in jobs]
+        # On the CPU too as one batch (filter_series_many runs it in order), where the leaves'
+        # block-size trials sample on real calls (time_domain._cpu_block_round).
+        results = TimeDomainFilterBank.filter_series_many(jobs, wait=not deferred)
         self.timings["leaf"] += time.perf_counter() - t0
         return leaves, jobs, where, deferred, results
 

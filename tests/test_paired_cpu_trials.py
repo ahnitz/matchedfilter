@@ -93,7 +93,7 @@ def test_block_pair_runner_reverses_and_settles_each_layout(monkeypatch, tmp_pat
     from matchedfilter import time_domain as td
     monkeypatch.setenv('MF_COST_FILE', str(tmp_path / 'costs.json'))
     monkeypatch.setattr(td, '_BLOCK_TRIALS', td._BlockTrials())
-    bank = types.SimpleNamespace(device='cpu', _choice_ns=(2048, 4096), _layouts=[{}, {}], rank=0, filters_f=[0, 1])
+    bank = types.SimpleNamespace(device='cpu', _choice_ns=(2048, 4096), _trial_cands=(2048, 'model'), _layouts=[{}, {}], rank=0, filters_f=[0, 1])
     bank._use_layout = lambda r: setattr(bank, 'rank', r)
     clock, calls = [0.0], []
     monkeypatch.setattr(mf.time, 'perf_counter', lambda: clock[0])
@@ -116,7 +116,7 @@ def test_block_replay_exception_releases_guard(monkeypatch, tmp_path):
     from matchedfilter import time_domain as td
     monkeypatch.setenv('MF_COST_FILE', str(tmp_path / 'costs.json'))
     monkeypatch.setattr(td, '_BLOCK_TRIALS', td._BlockTrials())
-    bank = types.SimpleNamespace(device='cpu', _choice_ns=(2048, 4096), _layouts=[{}, {}], filters_f=[0, 1])
+    bank = types.SimpleNamespace(device='cpu', _choice_ns=(2048, 4096), _trial_cands=(2048, 'model'), _layouts=[{}, {}], filters_f=[0, 1])
     bank._use_layout = lambda r: None
     def fail(jobs):
         raise RuntimeError('failure')
@@ -162,3 +162,37 @@ def test_noisy_fast_median_does_not_hide_a_consistent_challenger():
     # Rank 1 has the best median, but only rank 2 has consistent evidence of a win.
     assert np.median(samples[1]) < np.median(samples[2])
     assert gc.paired_choice(samples, 0, 6)[0] == 2
+
+
+def test_a_rank_sharing_a_layout_takes_its_samples(monkeypatch):
+    """Ranks whose built layout is the same object (the model's partition equal to the smallest
+    size's) are timed once per round and take the same sample, so the shared one can only tie
+    and the tie keeps rank 0."""
+    import types
+    import time
+    from matchedfilter import time_domain as td
+    monkeypatch.setenv("MF_AUTOTUNE", "1")
+    monkeypatch.setattr(td, "_BLOCK_TRIALS", td._BlockTrials())
+    shared = {}
+    bank = types.SimpleNamespace(device='cpu', _choice_ns=(2048, 4096), _trial_cands=(2048, 4096, 'model'),
+                                 _layouts=[shared, {}, shared], filters_f=[0, 1], rank=0)
+    bank._use_layout = lambda r: setattr(bank, "rank", r)
+    bank._lock_layout = lambda r: setattr(bank, "locked", r)
+    timed = []
+    orig = td.TimeDomainFilterBank.filter_series_many
+
+    def fake_many(jobs, wait=True):
+        if td._BLOCK_TRIALS.cpu_replaying:
+            timed.append(bank.rank)
+            time.sleep(0.002 if bank.rank != 1 else 0.004)
+            return [None]
+        return orig(jobs, wait)
+    monkeypatch.setattr(td.TimeDomainFilterBank, "filter_series_many", staticmethod(fake_many))
+    monkeypatch.setattr(td, "_record_cpu_trial", lambda begin: None, raising=False)
+    import matchedfilter
+    monkeypatch.setattr(matchedfilter, "_record_cpu_trial", lambda begin: None, raising=False)
+    x = np.zeros(8, np.complex64)
+    td._cpu_block_round([(bank, x, {})])
+    assert 2 not in timed                              # rank 2 shares rank 0's layout
+    st = td._BLOCK_TRIALS._st(td._trial_key(bank))
+    assert st.samples[0] == st.samples[2]
