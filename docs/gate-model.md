@@ -583,3 +583,20 @@ Production selection remains unchanged in this branch. Only the unused host
 calibration described above is removed. This preserves active cost arithmetic
 and avoids introducing another production tuning mode before the replacement
 has passed cold-start and settled full-search comparisons.
+
+### Block sizes decided on real calls, by absolute rank (2026-10-26)
+
+- **Why.** The CPU cost model is calibrated on hot-cache microbenchmarks (64 templates, 32 blocks).
+  On a loaded Haswell node real per-stage costs were 1.1-2.4x the calibrated ones, differently per
+  block size (later tiers 1.32x at 2048, 2.43x at 4096), so the model priced 4096 at 1.2x 2048
+  where it ran 1.6-1.95x, and fresh processes put 0-231 of test67's 323 banks on 4096. Correcting
+  the model from the running size's own calls cannot fix that (2048's factors applied to 4096
+  predicted 1.41x, against 1.95x on the same calls).
+- **What.** The block-size trial runs without MF_COST_FILE: its lock is the process's, pooled over
+  every bank of a search, so the first reference's banks settle it. CPU leaves of a search run as
+  one filter_series_many batch, where the CPU trial's paired rounds sample.
+- **Ranks.** A bank's candidates are the whole bank at its smallest single sizes, smallest first,
+  then the model's layout. A rank is the same size for every bank of a trial, a tie keeps the
+  smallest size, and the model's layout is kept only when it wins outright. Ranks whose built
+  layouts are the same object share their samples (they can only tie). A locked size is built
+  without any block-size pricing, so later banks skip the larger sizes' simulations.

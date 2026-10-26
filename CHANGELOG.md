@@ -19,6 +19,13 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ### Changed
 
+- Block sizes are chosen on real calls in every run, not only with MF_COST_FILE: the first
+  reference's banks run each candidate size in paired rounds and the search locks the fastest,
+  pooled over its banks. Candidates are the smallest single sizes, smallest first (a tie keeps
+  the smallest), then the model's layout. The model alone misjudged sizes under production load:
+  fresh processes on a loaded Haswell node put up to 231 of test67's 323 banks on 4096, which
+  ran 1.6-1.95x slower than 2048. Banks built after the lock skip block-size pricing. CPU leaves
+  of a search run as one filter_series_many batch (the results are the same).
 - Hierarchical CPU choices hold under changing machine load. The cost calibration times every
   quantity round-robin (each timed call after an untimed one on the same plan) and keeps each
   one's minimum: under a dynamic load the calibrated costs spread up to 4.7x between
