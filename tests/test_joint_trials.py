@@ -71,14 +71,14 @@ def clock(monkeypatch):
     return c
 
 
-ARMS = [_trial.DEFAULT, "n=4096", "chain=+1", "q15=0"]
+ARMS = [_trial.DEFAULT, "n=4096", "n=model", "q15=0"]
 
 
 def test_a_clearly_faster_arm_locks_and_a_slower_one_never_does(clock):
-    conf = {_trial.DEFAULT: "a", "n=4096": "b", "chain=+1": "c", "q15=0": "d"}
+    conf = {_trial.DEFAULT: "a", "n=4096": "b", "n=model": "c", "q15=0": "d"}
     s = _Subject(clock, conf, {"a": 1.0, "b": 2.0, "c": 0.8, "d": 1.3})
     tr, _ = _drive(s, ARMS)
-    assert tr.winner == "chain=+1" and s.locked == tr.winner
+    assert tr.winner == "n=model" and s.locked == tr.winner
     s = _Subject(clock, conf, {"a": 1.0, "b": 2.0, "c": 1.2, "d": 1.3})
     mf.clear_autotune_cache()
     tr, _ = _drive(s, ARMS)
@@ -86,7 +86,7 @@ def test_a_clearly_faster_arm_locks_and_a_slower_one_never_does(clock):
 
 
 def test_a_tie_keeps_the_default(clock):
-    conf = {_trial.DEFAULT: "a", "n=4096": "b", "chain=+1": "c", "q15=0": "d"}
+    conf = {_trial.DEFAULT: "a", "n=4096": "b", "n=model": "c", "q15=0": "d"}
     s = _Subject(clock, conf, {"a": 1.0, "b": 0.98, "c": 1.01, "d": 0.99})   # inside TIE
     tr, _ = _drive(s, ARMS)
     assert tr.winner == _trial.DEFAULT
@@ -96,7 +96,7 @@ def test_arms_resolving_alike_are_timed_once_and_can_only_tie(clock):
     """An arm an instance resolves to DEFAULT's configuration (the model's layout equal to the
     smallest size's, a screen the band does not have) shares its timing: one replay a round
     for both, and it cannot win."""
-    conf = {_trial.DEFAULT: "a", "n=4096": "a", "chain=+1": "c", "q15=0": "a"}
+    conf = {_trial.DEFAULT: "a", "n=4096": "a", "n=model": "c", "q15=0": "a"}
     s = _Subject(clock, conf, {"a": 1.0, "c": 1.5})
     tr, _ = _drive(s, ARMS, rounds=1)
     assert sorted(set(s.ran)) == ["a", "c"] and len(s.ran) == 4      # settle + timed, two configs
@@ -130,9 +130,9 @@ def test_the_round_returns_defaults_result_kept_before_later_arms(clock):
 
 
 def test_an_arm_that_cannot_win_leaves_the_rounds(clock):
-    conf = {_trial.DEFAULT: "a", "n=4096": "b", "chain=+1": "c"}
+    conf = {_trial.DEFAULT: "a", "n=4096": "b", "n=model": "c"}
     s = _Subject(clock, conf, {"a": 1.0, "b": 3.0, "c": 0.9})
-    tr = _trial.trial("t|drop", lambda: [_trial.DEFAULT, "n=4096", "chain=+1"])
+    tr = _trial.trial("t|drop", lambda: [_trial.DEFAULT, "n=4096", "n=model"])
     for _ in range(3):
         _trial.run_round(tr, [s], s.replay, 1.0)
     assert "n=4096" in tr.choice.dropped and "n=4096" not in tr.live()
@@ -191,12 +191,12 @@ def test_a_winner_on_noise_is_not_confirmed(clock):
 
 
 def test_labels_round_trip():
-    for label in (_trial.DEFAULT, "n=2048", "n=model", "chain=+1", "chain=+3", "q15=1", "q15=0"):
+    for label in (_trial.DEFAULT, "n=2048", "n=model", "q15=1", "q15=0"):
         kind, v = _trial.parse_arm(label)
         again = {"default": lambda: _trial.DEFAULT, "n": lambda: _trial.n_arm(v),
-                 "chain": lambda: _trial.chain_arm(v), "q15": lambda: _trial.q15_arm(v)}[kind]()
+                 "q15": lambda: _trial.q15_arm(v)}[kind]()
         assert again == label
-    for bad in ("chain=2048:256", "chain=+0", "blocks=2"):
+    for bad in ("chain=2048:256", "chain=+1", "blocks=2"):    # chains are never arms
         with pytest.raises(ValueError):
             _trial.parse_arm(bad)
 
@@ -352,19 +352,18 @@ def test_no_trial_with_autotune_off_or_inside_a_bank(monkeypatch):
     assert not mf.get_autotune_state()["trials"] and q.autotune_info["status"] == "model"
 
 
-def test_a_plan_switches_back_to_a_chain_it_built_without_rebuilding():
+def test_a_plan_runs_its_model_chain_whatever_the_arm():
+    """Arms move the screen (and a bank's block size), never a plan's chain: its model's."""
     p, series, starts = _plan()
     _run(p, series, starts)
-    others = p._other_chains()
-    if not others:
-        pytest.skip("one shortlisted chain only")
-    first = p._mf
-    p.use_arm(_trial.chain_arm(1))
-    assert tuple(p.config) == others[0] and p._mf is not first
-    p.use_arm(_trial.chain_arm(len(others) + 1))                     # past its shortlist
-    assert tuple(p.config) == p._model_chain
-    p.use_arm(_trial.chain_arm(1))
-    p.use_arm(_trial.DEFAULT)
-    assert p._mf is first                                # the model chain's plan, kept
-    p.lock_arm(_trial.DEFAULT)
-    assert p._cfg_cache == {}                            # a lock frees the others
+    chain = tuple(p.config)
+    assert chain == p.autotune_info["model"]
+    for arm in (_trial.DEFAULT, "q15=1", "q15=0", "n=4096", "n=model"):
+        p.use_arm(arm)
+        assert tuple(p.config) == chain
+        assert p.arm_config(arm)[0] == chain
+    if mf._q15_available(chain[0]):
+        p.use_arm("q15=1")
+        assert p._q15
+        p.use_arm("q15=0")
+        assert not p._q15

@@ -1,19 +1,18 @@
 """Joint trials: every coupled measured choice of a filter decided at once, on real calls.
 
-A filter's measured choices -- a bank's block size, each hierarchical plan's gate chain, the
-Q15 screen of its first tier -- are coupled: the best chain depends on the block size, the
-screen on the chain's first band. They are decided together, by one trial per key, over
-complete configurations:
+A filter's measured choices -- a bank's block size and the Q15 screen of its plans' first tiers
+-- are decided together, by one trial per key, over complete configurations (each plan's gate
+chain is the model's: a chain's merit depends on the profile, and a pooled chain decision
+sampled on a search's first banks picked one faster there and 5-10% slower over the rest):
 
   * an arm is a label. DEFAULT is every dimension at its default -- a bank's smallest
-    candidate block size, each plan's model chain and the model's screen for it -- and it is
-    the preference: it stands unless another arm is clearly faster. (The smallest size, not
+    candidate block size, and for each plan the model's screen setting for its chain -- and it
+    is the preference: it stands unless another arm is clearly faster. (The smallest size, not
     the model's priced layout: a tie keeps the layout that needs no pricing, and the model
     misjudged block sizes under load, 2026-10-25.) Every other arm moves one dimension -- a
-    block size ("n=4096", or the model's priced layout, "n=model"), each plan's k-th other
-    shortlisted chain ("chain=+1": a chain per plan, not one for all of them -- one chain for
-    plans of every profile lost to their own model chains by 2-14%), the screen ("q15=0") --
-    and the instance's model fills in the rest, conditional on it. An instance that cannot take an arm's value (a chain outside
+    block size ("n=4096", or the model's priced layout, "n=model"), the screen ("q15=0") --
+    and the instance's model fills in the rest, conditional on it. Both are properties of the
+    machine, the same for every profile, so the banks a trial samples first stand for the rest. An instance that cannot take an arm's value (a chain outside
     a plan's feasible set, a screen its first band does not have) runs its model choice there.
   * instances resolve an arm to a configuration (arm_config) and run it (use_arm); arms an
     instance resolves alike are one configuration, timed once, so they can only tie.
@@ -30,8 +29,8 @@ complete configurations:
   * a lock is applied by each instance resolving the winning label (lock_arm), now and in
     instances made later; it is kept in MF_COST_FILE (store key "joint|" + key) when one is set.
 
-Instances are TimeDomainFilterBanks (their block sizes and their plans' chains and screens;
-time_domain._joint_round) and HierarchicalFilters used on their own (their chain and screen;
+Instances are TimeDomainFilterBanks (their block sizes and their plans' screens;
+time_domain._joint_round) and HierarchicalFilters used on their own (their screen;
 HierarchicalFilter.run_series). A plan inside a bank is governed by the bank's trial and runs
 none of its own.
 """
@@ -61,30 +60,20 @@ def n_arm(n) -> str:
     return "n=model" if n == "model" else "n=%d" % int(n)
 
 
-def chain_arm(k: int) -> str:
-    """The arm with every plan on the k-th chain of its shortlist after its model chain (in
-    modelled cost order; a plan with fewer runs its model chain)."""
-    return "chain=+%d" % int(k)
-
-
 def q15_arm(on: bool) -> str:
     """The arm with the Q15 screen on (or off) wherever the first band has it."""
     return "q15=%d" % int(bool(on))
 
 
 def parse_arm(label: str):
-    """(kind, value) of an arm label: ("default", None), ("n", n or "model"), ("chain", k) or
-    ("q15", on). Raises ValueError for a label that names no arm."""
+    """(kind, value) of an arm label: ("default", None), ("n", n or "model") or ("q15", on).
+    Raises ValueError for a label that names no arm."""
     s = str(label)
     if s == DEFAULT:
         return DEFAULT, None
     kind, _, v = s.partition("=")
     if kind == "n":
         return "n", ("model" if v == "model" else int(v))
-    if kind == "chain":
-        if not v.startswith("+") or int(v[1:]) < 1:
-            raise ValueError("not a chain arm: %r" % s)
-        return "chain", int(v[1:])
     if kind == "q15":
         return "q15", v == "1"
     raise ValueError("not a trial arm: %r" % s)

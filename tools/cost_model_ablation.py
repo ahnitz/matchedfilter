@@ -170,10 +170,12 @@ def audit_case(case, args, gc, mf, cost, signals, noises):
             raise ValueError("no feasible chain at n=%d snr=%g fd=%g" % (n, snr, fd))
     best = {name: selected(rows, gc, n) for name, rows in plans.items()}
     order = {name: ranked(rows, best[name]) for name, rows in plans.items()}
-    margin = float(os.environ.get("MF_CHAIN_MARGIN", mf._chains._CHAIN_MARGIN))
+    # the shortlist the CPU chain trial ran until 2026-10-26: the model's chains within 30% of
+    # its best, at most four
+    margin, most = 0.30, 4
     shortlist = {
         name: [list(p["chain"]) for p in order[name]
-               if p["cost"] <= best[name]["cost"] * (1.0 + margin)][:mf._chains._CHAIN_SHORTLIST_MAX]
+               if p["cost"] <= best[name]["cost"] * (1.0 + margin)][:most]
         for name in plans
     }
     current = best["measured_cost"]

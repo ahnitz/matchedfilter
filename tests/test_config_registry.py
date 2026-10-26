@@ -95,20 +95,24 @@ def test_a_flag_follows_the_one_rule(raw, want):
     assert config.parse(config.BY_NAME["MF_AUTOTUNE"], raw) is want
 
 
+#: A float variable for the parsing rule (the registry has none at present).
+_FLOAT = config.Var("MF_TEST_FLOAT", "override", "py", kind="float")
+
+
 @pytest.mark.parametrize("name,raw", [("MF_AUTOTUNE", "2"), ("MF_AUTOTUNE", "enabled"),
-                                      ("MF_GPU_QUEUE_AHEAD", "8.5"), ("MF_CHAIN_MARGIN", "x"),
+                                      ("MF_GPU_QUEUE_AHEAD", "8.5"), ("MF_TEST_FLOAT", "x"),
                                       ("MF_METAL_IEEE", "fast")])
 def test_anything_else_is_refused_by_name(name, raw):
     with pytest.raises(ValueError, match="%s=%s" % (name, re.escape(raw))):
-        config.parse(config.BY_NAME[name], raw)
+        config.parse(_FLOAT if name == "MF_TEST_FLOAT" else config.BY_NAME[name], raw)
 
 
 def test_values_and_defaults_by_kind():
     v = config.BY_NAME
     assert config.parse(v["MF_GPU_QUEUE_AHEAD"], "") == 8
     assert config.parse(v["MF_GPU_QUEUE_AHEAD"], " 3 ") == 3
-    assert config.parse(v["MF_CHAIN_MARGIN"], "") is None
-    assert config.parse(v["MF_CHAIN_MARGIN"], "1.25") == 1.25
+    assert config.parse(_FLOAT, "") is None
+    assert config.parse(_FLOAT, "1.25") == 1.25
     assert config.parse(v["MF_BAND_FORWARD"], "") is None      # unset: measured
     assert config.parse(v["MF_METAL_IEEE"], "ALL") == "all"
     assert config.parse(v["MF_CHAIN_FORCE"], "256,512") == "256,512"
