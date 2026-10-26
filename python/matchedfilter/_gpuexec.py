@@ -235,7 +235,7 @@ class Executor(HierOps):
     def built(self):
         """How many recordings this context has built (records, and a driver's own, e.g.
         CUDA graphs): a call that built one ran setup, not steady-state work, and a timing
-        that is to stand for steady state (a block-size trial) leaves it out."""
+        that is to stand for steady state (a joint trial's round) leaves it out."""
         return self._exec_table().built + self.__dict__.get("_x_built", 0)
 
     def _exec_buffer(self, rec, name, view=None, nbytes=0, readback=False, upload=False):

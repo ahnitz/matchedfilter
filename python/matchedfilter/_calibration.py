@@ -588,7 +588,7 @@ def price_block_sizes(fine, delta_f, data_rate, longest, margin, ntemplates, snr
         c = (block / max(int(ntemplates), 1) + pair_cost) / nvalid
         # Stop at the first size dearer than the best so far (it is still listed, so a size
         # within TIE stays in the tie-break below), after `ahead` more dearer ones for
-        # block-size trial candidates. Continuing past a size merely within TIE priced the
+        # a joint trial's block-size arms. Continuing past a size merely within TIE priced the
         # next size too -- a timed calibration at that n (about 11 s at 8192 on Zen 3) for a
         # size that is dearer still.
         best = min((o[0] for o in out), default=None)

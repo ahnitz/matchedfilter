@@ -153,9 +153,10 @@ class HierarchicalFilter(MatchedFilter):
 
     The chain is chosen automatically from the reference: every chain of up to
     ``max_tiers`` bands is priced by a model (gate thresholds from the profile,
-    noise pass rates simulated from it, tier costs calibrated on this machine),
-    and the ones the model cannot separate are measured on the real workload
-    (``MF_AUTOTUNE=0`` keeps the model's choice). Pin a chain with
+    noise pass rates simulated from it, tier costs calibrated on this machine).
+    The model's best runs unless a joint trial on the real workload finds another
+    chain, or the Q15 screen setting, clearly faster (``MF_AUTOTUNE=0`` keeps the
+    model's choice). Inside a ``TimeDomainFilterBank`` the bank's trial decides. Pin a chain with
     ``chain=(b1, b2, ...)``; pass explicit thresholds with
     :meth:`set_coarse_threshold` to skip the model entirely.
     """
@@ -628,14 +629,13 @@ class HierarchicalFilter(MatchedFilter):
         return int(round(float(np.mean(taps[1])) / 32.0))
 
     def _choose_chain(self):
-        """Pick a gate chain: the model prices every chain, measurement settles the close ones.
+        """The chain this plan runs: the model's choice, or the chain its joint-trial arm
+        (_trial) names where it can run it.
 
-        The model need not be exact. It prunes: chains whose modelled cost is
-        more than the model's error margin above the best cannot win and are
-        never run. If more than one chain survives, plans sharing a shortlist
-        run it round-robin on real calls, and the chain with the lowest
-        measured time per pair is kept for all of them. MF_AUTOTUNE=0 keeps
-        the model's choice.
+        The model prices every chain. Its best is the plan's default; the others within the
+        model's error margin (MF_CHAIN_MARGIN; on a GPU its best three) are its shortlist,
+        which the trial's chain arms come from. MF_CHAIN_FORCE pins a chain for measurement.
+        Records the model's chain, shortlist and feasible chains for arm_config.
         """
         if _uncovered_reference(self._pending_ref, self.n):
             raise ValueError(
@@ -664,9 +664,7 @@ class HierarchicalFilter(MatchedFilter):
             if best is None:
                 raise ValueError(_uncovered_message(self.n, self.snr, self.fd))
             margin = _config.get("MF_CHAIN_MARGIN", _chains._CHAIN_MARGIN)
-            # On a GPU the trial runs on whole batches in the search's own mode, so its cost
-            # is a few segments: the model's best few are measured whatever their modelled
-            # gap. The model prices device work only, and missed the faster chain by 38%
+            # On a GPU the model's best few are trial arms whatever their modelled gap. The model prices device work only, and missed the faster chain by 38%
             # (n=2048: (256, 1024) priced 1.8 against 1.3, measured ~1.5 ms/segment faster).
             near = (lambda q: True) if self.device.kind == "gpu" else (
                 lambda q: q["cost"] <= best["cost"] * (1.0 + margin))

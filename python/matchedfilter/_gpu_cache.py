@@ -96,8 +96,8 @@ class InputUploads:
             self._uploaded["tmpl"][key] = uploads[3]
 
     cache_limit_bytes = 512 * 1024 * 1024
-    # Recordings are kept per pipelining slot (8 by default) and per chain, and chain trials
-    # run several chains: at 32 entries a trialling plan evicted and re-recorded every call
+    # Recordings are kept per pipelining slot (8 by default) and per chain, and a joint trial
+    # runs several chains: at 32 entries a trialling plan evicted and re-recorded every call
     # (63 buffer allocations per call at n=4096). Memory is bounded by the byte limit.
     cache_limit_entries = 256
 

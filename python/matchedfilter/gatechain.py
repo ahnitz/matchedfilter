@@ -642,15 +642,15 @@ class CostModel:
             return 0.0
         f = measured_refine_blocks(self.n, chain)
         if f is None and model_f:
-            # Proposals only (block-size trial candidates, time_domain._BlockTrials): the
-            # model's fraction may suggest a size, and the end-to-end trial decides.
+            # Proposals only (a joint trial's "n=model" arm, _trial): the model's fraction may
+            # suggest a size, and the end-to-end trial decides.
             f = 1.0 - (1.0 - min(max(reach[len(chain)], 0.0), 1.0)) ** int(ntemplates)
         if f is None:
             # No measurement: no credit. The model's refine-block fraction,
             # 1 - (1 - P(refine))^templates, is right per chain, but with it the credit tipped
             # near-ties between block sizes whose per-term GPU costs are noisier than the
             # credit: 1757 of 4249 ladder templates moved to n = 8192 and the fine stage got
-            # 1.4-1.7x slower (docs/gate-model.md). Model f waits for block-size trials.
+            # 1.4-1.7x slower (docs/gate-model.md). Model f waits for the joint trial.
             return 0.0
         return (self.forward_cost(chain, f) - self.forward) / float(ntemplates)
 

@@ -77,18 +77,17 @@ the margin still applies to `ap_mf_q15_screen` called on its own
 
 ## Selection
 
-`HierarchicalFilter` measures screen on/off on identical input calls, pooled per
-(n, snr, fd, chain, device). Each arm gets an untimed settling call, followed by
-one timed call; the arm order reverses on the next round. Decisions use paired
-ratios, so a large group is not compared with a small group's cost per pair.
-There are at least `max(5, MF_CHAIN_TRIALS)` complete rounds (six by default),
-and at most twice that many. A challenger needs at least 75% of the rounds to
-beat the model by more than the existing 5% tie margin. An unresolved contest
-at the cap keeps the model; this is an uncertainty fallback, not proof of a win.
+The screen is one dimension of the joint trial (`_trial`, docs/gate-model.md, "One joint
+trial"): its arms `q15=1` and `q15=0` run beside the block-size and chain arms, in the same
+paired rounds. Each arm gets an untimed settling run, followed by one timed run, on identical
+input; the arm order reverses on the next round. Decisions use paired ratios to the default
+(the cost model's screen setting for each plan's chain), so a large group is not compared
+with a small group's cost per pair. There are at least `MF_TRIAL_ROUNDS` complete rounds
+(five by default), and at most twice that many. A challenger needs at least 75% of the rounds
+to beat the default by more than the 5% tie margin. An unresolved contest at the cap keeps
+the default; this is an uncertainty fallback, not proof of a win.
 
-Complete rounds and the final lock persist in `MF_COST_FILE`. Existing locks
-remain authoritative, including locks written by earlier versions; a fresh
-cost file is needed to reassess an old wrong lock. `MF_AUTOTUNE=0` retains the
+Complete rounds and the final lock persist in `MF_COST_FILE`. `MF_AUTOTUNE=0` retains the
 cost-model screen choice. Availability follows the backend (`ap_q15_lanes`).
 Replayed calls count as calibration work, including in native work counters.
 

@@ -72,8 +72,8 @@ def _autotune_enabled():
 
 # ---- the one rule every measured choice follows ---------------------------------------
 #
-# Block-size trials (time_domain._BlockTrials), Q15 screen trials, and chain trials on the CPU
-# (per call) and GPU (per batch) all decide with measured_choice (through Choice).
+# Joint trials (_trial: block size, chains and the Q15 screen together, in paired rounds) decide
+# with paired_choice, the device and kernel choices with measured_choice (both through Choice).
 # History: M2 locked n=4096 on two samples 5.4% faster than n=2048 -- past
 # TIE, inside the noise -- and ran 34% slower in steady state; dev2 locked the Q15 screen off
 # on a 6% "win" and ran 5% slower without it.
