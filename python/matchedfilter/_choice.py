@@ -139,6 +139,17 @@ def paired_choice(samples, model, cap, minimum=5, tie=None):
     return model, {}
 
 
+def can_still_win(samples, model_samples, cap, tie=None):
+    """Whether a candidate of a paired contest can still be chosen over the model by
+    paired_choice: its rounds faster than the model's by `tie`, plus every round still to come
+    up to `cap`, reach the share of rounds a win needs at the cap. (The share a win needs
+    grows more slowly than the rounds, so the cap is where a late run of wins counts most.)"""
+    tie = TIE if tie is None else tie
+    r = np.asarray(samples, float) / np.asarray(model_samples, float)
+    wins = int(np.count_nonzero(r < 1.0 - tie))
+    return wins + max(0, cap - r.size) >= int(np.ceil(0.75 * max(cap, r.size)))
+
+
 def measured_choice(samples, model, cap, tie=None, z=None):
     """Decide a measured choice from samples {candidate: [cost, ...]} (lower is better).
 
@@ -411,11 +422,22 @@ class Choice:
             return self.winner
         for c in timings:
             self.add(c)
-        for c in self.candidates:
+        live = self.live()
+        for c in live:
             self.samples[c].append(float(timings[c]))
-        w, _ = paired_choice({c: self.samples[c] for c in self.candidates},
+        w, _ = paired_choice({c: self.samples[c] for c in live},
                              self.preference, self.cap, minimum=self.minimum,
                              tie=self.tie)
+        if w is None:
+            # A candidate that can no longer win leaves the rounds: past the minimum, one
+            # not faster than the preference by `tie` in the share of rounds a win needs.
+            for c in live[1:]:
+                if not can_still_win(self.samples[c], self.samples[self.preference],
+                                     self.cap, tie=self.tie):
+                    self.dropped.add(c)
+                    _log_autotune("%s: %s cannot win, dropped", self.what, self.label(c))
+            if len(self.live()) == 1:
+                w = self.preference
         if w is not None:
             self.lock(w)
         else:

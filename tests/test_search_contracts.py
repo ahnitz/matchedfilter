@@ -317,8 +317,9 @@ def test_autotune_environment_bypass():
         hf.run(binsize=N, threshold=6.0)
 
         info = hf.autotune_info
-        # When disabled, status should be disabled or disabled/default
-        assert info.get("status") in ("disabled", "off", "locked", None)
+        # disabled: the model's chain stands, untrialled
+        assert info.get("status") == "model" and hf.config == info["model"]
+        assert not mf.get_autotune_state()["trials"]
     finally:
         if old_env is None:
             os.environ.pop("MF_AUTOTUNE", None)

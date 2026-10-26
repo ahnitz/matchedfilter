@@ -18,10 +18,22 @@ from . import _calibration
 from . import _config
 from . import _core
 from . import gatechain as _gatechain
-from . import _chains, _choice, _prices
+from . import _chains, _prices, _trial
 from ._choice import _AUTOTUNE_LOCK, _autotune_enabled, _log_autotune  # noqa: F401
 from ._results import PEAK_DTYPE, _Deferred, _SparsePeaks  # noqa: F401
 from ._filter import MatchedFilter, _GPU_SIZES, _from_any, _valid_series_window  # noqa: F401
+
+
+def _detach(res):
+    """res with every array copied (raw CPU results reuse the plan's buffers)."""
+    if isinstance(res, np.ndarray):
+        return res.copy()
+    if isinstance(res, tuple):
+        parts = [_detach(x) for x in res]
+        return type(res)(*parts) if hasattr(res, "_fields") else tuple(parts)
+    if isinstance(res, list):
+        return [_detach(x) for x in res]
+    return res
 
 
 def _uncovered_message(n, snr, fd):
@@ -179,8 +191,12 @@ class HierarchicalFilter(MatchedFilter):
         self._fs_snr = None
         self._hermitian = False
         self._mf = None
-        self._chain_trial = None
         self._q15 = False
+        # The joint-trial arm this plan runs (_trial): DEFAULT, a lock, or a trial's arm. A plan
+        # inside a bank is governed by the bank's trial and runs none of its own.
+        self._arm, self._governed, self._forced = _trial.DEFAULT, False, False
+        self._model_chain = None
+        self._cfg_cache = {}            # chain -> (CPU plan, resolved plan, screen): cheap switches
         self._pinned = None if chain is None else _normalize_chain(chain, self.n)
         if self._pinned is not None and len(self._pinned) > self._MAX_TIERS[self.device.kind]:
             raise ValueError("this device executes chains of at most %d tiers"
@@ -220,106 +236,130 @@ class HierarchicalFilter(MatchedFilter):
             plan.set_taps(taps[0], taps[0].shape[1], taps[1])   # direct: with the thresholds
         return plan
 
-    # ---- Q15 screen: a measured candidate, never a default ---------------------
-    # The screen in front of the first tier (docs/cpu-q15-gate.md) changes no result -- the
-    # float tier re-runs every pair it passes -- so only time is at stake, and time is
-    # measured: plans whose chain's first band has a screen alternate it on and off over
-    # identical-input pairs, pooled per (n, snr, fd, chain). Complete rounds persist
-    # across processes; every plan adopts the paired trial's winner. MF_AUTOTUNE=0 keeps the cost model's choice
-    # (gatechain.CostModel.first_tier).
-    def _q15_trial_key(self):
-        return (self.n, float(self._fs_snr or self.snr), float(self.fd), tuple(self._chain), str(self.device))
-
-    @staticmethod
-    def _q15_lock_key(tkey):
-        n, snr, fd, chain, device = tkey
-        return "q15-trial|%d|%g|%g|%s|%s" % (n, snr, fd, ",".join(str(int(b)) for b in chain), device)
-
-    def _q15_trial(self):
-        """This plan's Q15 trial (caller holds _AUTOTUNE_LOCK): a paired measured choice
-        (_choice.Choice) per key, its preference the cost model's setting, adopting a winner
-        an earlier process kept in MF_COST_FILE: per machine, like chain and block-size locks,
-        so a process does not re-alternate the screen on its first calls -- which would also
-        keep every block-size trial from sampling (time_domain._bank_calibrating). Complete
-        rounds persist; calls that cannot be paired count toward its budget, so a trial whose
-        rounds do not come ends on the model's setting."""
-        tkey = self._q15_trial_key()
-        tr = _chains._Q15_TRIALS.get(tkey)
-        if tr is None:
-            base = max(5, _config.get("MF_CHAIN_TRIALS", _chains._CHAIN_TRIALS_PER_CAND))
-            pref = bool(getattr(self, "_q15_pref", False))
-            tr = _chains._Q15_TRIALS[tkey] = _choice.Choice(
-                (pref, not pref), store_key=self._q15_lock_key(tkey),
-                what="Q15-TRIAL %s" % (tkey,), warmup=0, minimum=base, cap=2 * base,
-                budget=(_chains._Q15_TRIAL_BUDGET * base, 0), paired=True, persist=True,
-                label=str, parse=lambda t: t == "True")
-        return tr
-
-    def _q15_before_call(self):
-        """Pick the screen setting for this call; True when the call is a timed sample."""
-        if (self.device.kind != "cpu" or self._mf is None or self._chain is None
-                or not _autotune_enabled() or not _q15_available(self._chain[0])
-                or getattr(self, "_trial_hold", False)):
-            return False
+    # ---- joint-trial arms (_trial) ----------------------------------------------
+    # A plan's measured dimensions are its chain and the Q15 screen in front of its first tier
+    # (docs/cpu-q15-gate.md: the screen changes no result -- the float tier re-runs every pair
+    # it passes -- so only time is at stake). An arm label resolves to one (chain, screen):
+    # DEFAULT is the model's chain and its screen setting; "chain=n:..." a chain this plan can
+    # run, with the model's screen for it; "q15=0/1" the model's chain with the screen set
+    # where its first band has one. A bank's arms (block sizes) leave a plan on its model.
+    def _q15_model(self, chain):
+        """The cost model's screen setting for chain (gatechain.CostModel.first_tier)."""
         with _AUTOTUNE_LOCK:
-            tr = self._q15_trial()
-            win = tr.tick()
-            want = win if win is not None else len(tr.samples[True]) < len(tr.samples[False])
-        if bool(want) != bool(self._q15):
-            self._q15 = bool(want) and self._mf.set_q15(True)
-            if not want:
-                self._mf.set_q15(False)
-        return win is None
+            return bool(_chains._Q15_MODEL.get((getattr(self, "_choice_key", None), tuple(chain)), False))
 
-    def calibrating(self):
-        """Whether this plan is still settling a measured choice -- its chain trial, or the Q15
-        screen trial of its chain -- so that its calls alternate kernels. A block-size trial
-        does not sample batches while any of its plans is (time_domain._bank_calibrating).
-        A plan not built yet is not calibrating (its first batch is the trial's settle batch),
-        and a held plan (block-size trial open) runs no trial at all."""
-        if self._chain is None or getattr(self, "_trial_hold", False):
-            return False
-        if self._chain_trial is not None:
-            return True
-        if (self.device.kind == "cpu" and self._mf is not None and _autotune_enabled()
-                and _q15_available(self._chain[0])):
-            with _AUTOTUNE_LOCK:
-                tr = self._q15_trial()
-            return tr.winner is None
-        return False
+    def _q15_ok(self, chain):
+        return self.device.kind == "cpu" and _q15_available(chain[0])
 
-    def _q15_record_pair(self, timings, pairs):
-        """Keep only complete same-input rounds, never unrelated per-call samples."""
-        with _AUTOTUNE_LOCK:
-            tr = self._q15_trial()
-            if tr.winner is not None or pairs <= 0:
-                return
-            if not all(np.isfinite(timings[c]) and timings[c] > 0 for c in (False, True)):
-                return
-            tr.round({c: timings[c] / pairs for c in (False, True)})
-            _log_autotune("Q15-TRIAL paired chain=%s round=%d winner=%s timings=%s", self._chain,
-                          len(tr.samples[False]), tr.winner, timings)
+    def arm_config(self, label):
+        """(chain, screen on) this plan runs for a joint-trial arm: a pinned or forced chain
+        whatever the arm, else the arm resolved against this plan's model choice."""
+        kind, v = _trial.parse_arm(label)
+        if self._pinned is not None:
+            # a pinned chain stands; only its screen is an arm (the model's setting: off)
+            chain = tuple(self._pinned)
+            q = v if kind == "q15" else False
+            return chain, bool(q) and self._q15_ok(chain)
+        if self._model_chain is None:
+            if self._chain is None:
+                self._chain = self._choose_chain()      # first use: the model's choice
+                self._q15 = False
+            if self._model_chain is None:               # a chain set without the model's
+                c = tuple(self._chain)
+                self._model_chain, self._feasible, self._shortlist = c, (c,), (c,)
+        chain = self._model_chain
+        if not self._forced and kind == "chain" and v[0] == self.n and v[1] in self._feasible:
+            chain = v[1]
+        q = v if kind == "q15" else self._q15_model(chain)
+        return chain, bool(q) and self._q15_ok(chain)
 
-    def _q15_run_pair(self, run, pairs):
-        """Two settled timings on identical input; alternate which setting runs first.
+    def _arm_q15(self, chain):
+        """The screen setting this plan's arm gives chain."""
+        kind, v = _trial.parse_arm(self._arm)
+        q = v if kind == "q15" else (False if self._pinned is not None else self._q15_model(chain))
+        return bool(q) and self._q15_ok(tuple(chain))
 
-        Replays are calibration work, included in native work counters. Return only
-        the final call's result, whose buffers have not been overwritten by a replay.
-        """
-        begin = time.perf_counter()
-        with _AUTOTUNE_LOCK:
-            count = len(self._q15_trial().samples[False])
-        timings = {}
-        for on in ((False, True) if count % 2 == 0 else (True, False)):
-            self._q15 = on
-            self._mf.set_q15(on)
-            run()                           # settle switching and lazy ingestion
-            t0 = time.perf_counter()
-            result = run()
-            timings[on] = time.perf_counter() - t0
-        self._q15_record_pair(timings, pairs)
-        _record_cpu_trial(begin)
-        return result
+    def use_arm(self, label):
+        """Run arm label from the next call on."""
+        self._arm = str(label)
+        if self._chain is not None:
+            self._set_config(*self.arm_config(label))
+
+    def lock_arm(self, label):
+        """Run arm label from now on (a trial's lock): the other arms' plans are freed."""
+        self.use_arm(label)
+        self._cfg_cache = {}
+        self.autotune_info.update(status="locked", winner=tuple(self._chain), arm=self._arm)
+
+    def _set_config(self, chain, q15):
+        """Run (chain, screen) from the next call on. A CPU plan keeps the plans it leaves, so
+        a trial alternating arms does not rebuild them."""
+        chain = tuple(chain)
+        if chain != tuple(self._chain):
+            if self._gpu is None and self._mf is not None:
+                self._cfg_cache[tuple(self._chain)] = (self._mf, self._resolved, self._q15)
+                hit = self._cfg_cache.pop(chain, None)
+                if hit is not None:
+                    self._chain = chain
+                    self._mf, self._resolved, self._q15 = hit
+                else:
+                    self._switch_chain(chain)
+            else:
+                self._switch_chain(chain)
+        if self._mf is not None and self._gpu is None:
+            if bool(q15) != bool(self._q15):
+                self._q15 = bool(q15) and bool(self._mf.set_q15(True))
+                if not q15:
+                    self._mf.set_q15(False)
+        else:
+            self._q15 = bool(q15)
+
+    def _plan_trial_key(self):
+        """A standalone plan's trial key: what its arms mean (block size, statistics, tiers,
+        device; whether the direct refine is priced in)."""
+        tiers = min(self.max_tiers, self._MAX_TIERS[self.device.kind])
+        pin = "" if self._pinned is None else "|pin=" + ",".join(str(int(b)) for b in self._pinned)
+        return "plan|%d|%g|%g|%d|%s%s%s" % (self.n, float(self._fs_snr or self.snr), float(self.fd),
+                                            tiers, self.device,
+                                            "" if self._direct_key() is None else "|direct", pin)
+
+    def _trial_arms(self):
+        """DEFAULT, then the model's other shortlisted chains (none for a pinned chain), then the
+        screen both ways."""
+        own = tuple(self._chain) if self._pinned is not None else self._model_chain
+        arms = [_trial.DEFAULT]
+        if self._pinned is None:
+            arms += [_trial.chain_arm(self.n, c) for c in self._shortlist if tuple(c) != own]
+        if self._q15_ok(own):
+            arms += [_trial.q15_arm(True), _trial.q15_arm(False)]
+        return arms
+
+    def _plan_trial(self):
+        """This standalone plan's open joint trial, or None: none for a plan a bank governs, a
+        pinned or forced chain, MF_AUTOTUNE=0, or a plan with one arm. A lock (this process's
+        or MF_COST_FILE's) is adopted here."""
+        if self._governed or not _autotune_enabled():
+            return None
+        if self._chain is None:
+            if self._pending_ref is None:
+                return None
+            self._chain = self._choose_chain()
+            self._q15 = self._arm_q15(self._chain)
+        if self._forced:
+            return None
+        key = self._plan_trial_key()
+        w = _trial.winner(key)
+        if w is None:
+            arms = self._trial_arms()
+            if len(arms) < 2:
+                return None
+            tr = _trial.trial(key, lambda: arms)
+            w = tr.winner
+            if w is None:
+                return tr
+        if self._arm != w or self.autotune_info.get("status") != "locked":
+            self.lock_arm(w)
+        return None
 
     def _load_held_templates(self, plan):
         """Load into plan the templates this filter was given: from its template source, or
@@ -357,7 +397,7 @@ class HierarchicalFilter(MatchedFilter):
         if self._chain is None:
             if self._pending_ref is None:
                 raise ValueError("set a reference first (set_reference), or pin a chain")
-            self._chain = self._choose_chain(); self._q15 = getattr(self, "_q15_pref", False)
+            self._chain = self._choose_chain(); self._q15 = self._arm_q15(self._chain)
         self._mf = self._new_cpu_plan(self._chain)
         self._resolved = None
         self._restore_into(self._mf, templates)
@@ -391,7 +431,7 @@ class HierarchicalFilter(MatchedFilter):
         if self._chain is None:
             if self._pending_ref is None:
                 raise ValueError("set a reference first (set_reference), or pin a chain")
-            self._chain = self._choose_chain(); self._q15 = getattr(self, "_q15_pref", False)
+            self._chain = self._choose_chain(); self._q15 = self._arm_q15(self._chain)
         chain = tuple(self._chain)
         thr = tuple(self._thresholds(required=True))
         f = hw = None
@@ -452,21 +492,6 @@ class HierarchicalFilter(MatchedFilter):
         self._dprice = (key, prices, self._pending_ref, taps[0])   # held: identity is the key
         return prices
 
-
-    def release_trials(self):
-        """The bank's block-size trial locked on this plan's layout: start the measured choices
-        it held back (chain trial, then Q15) by choosing the chain again."""
-        if not getattr(self, "_trial_hold", False):
-            return
-        self._trial_hold = False
-        if self._chain is None or self._pending_ref is None:
-            return                              # chosen, unheld, at first use
-        chain = self._choose_chain()
-        if tuple(chain) != tuple(self._chain):
-            self._switch_chain(chain)
-        else:
-            self._q15 = bool(getattr(self, "_q15_pref", False)) and (
-                self._mf is None or bool(self._mf.set_q15(bool(getattr(self, "_q15_pref", False)))))
 
     def _switch_chain(self, chain):
         """Run a different configuration from now on, keeping loaded data and templates."""
@@ -569,6 +594,7 @@ class HierarchicalFilter(MatchedFilter):
                 self._reload_templates()
             return
         self._pending_ref = p.copy()
+        self._cfg_cache = {}            # the other chains' plans hold the old reference
         if self._mf is not None:
             self._mf.set_reference(p)
             self._reload_templates()
@@ -600,14 +626,6 @@ class HierarchicalFilter(MatchedFilter):
         if taps is None or not _direct_refine_enabled() or self.device.kind != "cpu":
             return None
         return int(round(float(np.mean(taps[1])) / 32.0))
-
-    def _chain_trial_key(self):
-        """The key this plan's chain trial and its stored lock are filed under."""
-        tiers = min(self.max_tiers, self._MAX_TIERS[self.device.kind])
-        tkey = (self.n, float(self._fs_snr or self.snr), float(self.fd), tiers, str(self.device))
-        # Whether the direct refine is priced in, not at which tap length: groups of every
-        # shape share one trial and its lock (each still prices its own taps in the model).
-        return tkey if self._direct_key() is None else tkey + (1,)
 
     def _choose_chain(self):
         """Pick a gate chain: the model prices every chain, measurement settles the close ones.
@@ -659,169 +677,70 @@ class HierarchicalFilter(MatchedFilter):
                                                    else _chains._CHAIN_SHORTLIST_GPU],
                    tuple(tuple(q["chain"]) for q in plans))
             with _AUTOTUNE_LOCK:
-                _chains._Q15_MODEL[(key, tuple(best["chain"]))] = bool(best.get("q15", False))
+                for q in plans:
+                    _chains._Q15_MODEL[(key, tuple(q["chain"]))] = bool(q.get("q15", False))
             with _AUTOTUNE_LOCK:
                 _chains._CHAIN_CHOICE[key] = hit
             _log_autotune("CHAIN n=%d model=%s shortlist=%s ranking=%s", self.n, hit[0], hit[1],
                           [(q["chain"], round(q["cost"], 1)) for q in plans[:6]])
         model_best, shortlist, feasible = hit
         forced = _config.get("MF_CHAIN_FORCE")
-        pinned = False
+        self._forced = False
         if forced:
             # Measurement only (chain studies): every hierarchical plan of this n runs the
-            # given bands, outside any trial. "n:b1,b2;n2:b1" or "b1,b2" for every n.
+            # given bands, whatever its arm. "n:b1,b2;n2:b1" or "b1,b2" for every n.
             for part in forced.split(";"):
                 pn, _, bands = part.rpartition(":")
                 if not pn or int(pn) == self.n:
                     want = tuple(int(b) for b in bands.split(",") if b)
                     if want and len(want) <= tiers and all(b < self.n for b in want):
                         model_best, shortlist, feasible = want, (want,), (want,)
-                        pinned = True
-        if not _autotune_enabled():
-            shortlist = shortlist[:1]
-
-        chain = model_best
-        self._chain_trial = None
-        tkey = self._chain_trial_key()
-        # The key's lock -- reached in this process or read from MF_COST_FILE -- decides
-        # the chain of EVERY plan of the key: the plan runs it if it can (its feasible set),
-        # else its model's chain, and a locked key never opens a trial. The in-process
-        # record holds the file's lock unfiltered: filtered by the first plan's feasible set,
-        # a plan that could not run it cached "no lock" and every later plan of the key
-        # ignored the file and re-trialled (two processes on one file ended on different
-        # chains, L40S).
-        w = None
-        if not pinned and _autotune_enabled():
-            with _AUTOTUNE_LOCK:
-                w = _chains._chain_trial(tkey).winner
-            if w is not None:
-                if tuple(w) in feasible:
-                    chain = tuple(w)
-        # While the bank's block-size trial is open (time_domain: _trial_hold), the plan runs
-        # the model's chain: chain and Q15 trials wait for the winning layout (release_trials).
-        held = getattr(self, "_trial_hold", False)
-        if w is None and len(shortlist) > 1 and not held and not pinned and _autotune_enabled():
-            # One trial per configuration: plans whose references differ slightly (another
-            # segment's PSD, another template group) have slightly different short lists, and
-            # their union is what gets measured. Candidates arriving before the lock join it;
-            # after the lock every plan adopts the winner.
-            with _AUTOTUNE_LOCK:
-                tr = _chains._chain_trial(tkey)
-                if tr.winner is not None:
-                    if tuple(tr.winner) in feasible:
-                        chain = tuple(tr.winner)
-                else:
-                    placed = tr.placed
-                    for c in shortlist:
-                        tr.add(c)
-                    chain = tr.pick(among=shortlist, placed=placed) or shortlist[0]
-                    placed[chain] = placed.get(chain, 0) + 1
-                    self._chain_trial = tkey
-        self.autotune_info = {"status": "trial" if self._chain_trial else "locked",
-                              "winner": tuple(chain), "shortlist": shortlist, "model": model_best}
-        # The model's screen choice for this chain; with MF_AUTOTUNE on, trials override it.
-        with _AUTOTUNE_LOCK:
-            self._q15_pref = _chains._Q15_MODEL.get((key, tuple(chain)), False)
-        return tuple(chain)
-
-    def _first_tier_pass(self, pairs):
-        """Fraction of the last call's pairs the first tier passed, where the engine reports it."""
-        if len(self._chain) < 2:
-            return None          # a single tier's passes are refines; its cost already shows them
-        if self._gpu is not None:
-            n1 = getattr(self._gpu, "last_tier1_survivors", None)
-            return None if n1 is None else n1 / pairs
-        if self._mf is None:
-            return None
-        prev, self._tier0_seen = getattr(self, "_tier0_seen", None), (
-            self._mf.first_gate_passed(), self._mf.stats()[0])
-        if prev is None or self._tier0_seen[1] <= prev[1]:
-            return None
-        return (self._tier0_seen[0] - prev[0]) / (self._tier0_seen[1] - prev[1])
-
-    def _chain_trial_record(self, dt, pairs):
-        """Record one measured call for this plan's trial chain (s/pair); the trial locks
-        once every candidate has its samples and the shared rule is clear, or at its budget."""
-        with _AUTOTUNE_LOCK:
-            tr = _chains._CHAIN_TRIALS.get(self._chain_trial)
-            if tr is None:
-                return
-            mine = tuple(self._chain)
-            if tr.winner is None and pairs > 0 and tr.tick() is None:
-                # A chain whose first tier passed most pairs on this call gates nothing: it
-                # is priced at infinity, so it can never be locked in whatever its time.
-                frac = self._first_tier_pass(pairs)
-                tr.record(mine, float("inf") if frac is not None
-                          and frac > _gatechain._USELESS_PASS else dt / pairs)
-            winner = tr.winner
-            move = None
-            if winner is None:
-                # Candidates that joined later (another plan's shortlist, another reference)
-                # may never be run by any live plan: a plan whose own shortlist is fully
-                # sampled settles on its own -- it moves to an unsampled candidate of ITS
-                # shortlist, or adopts the best of it (the trial stays open for the others).
-                own = [tuple(c) for c in self.autotune_info.get("shortlist", ())
-                       if tuple(c) in tr.samples]
-                if own and len(tr.samples.get(mine, ())) >= tr.needs(mine):
-                    lacking = [c for c in own if len(tr.samples[c]) < tr.needs(c)]
-                    if not lacking:
-                        winner = tr.judge(own)
-                        if winner is not None:
-                            _log_autotune("CHAIN-TRIAL plan locked %s on its own shortlist", winner)
-                        lacking = [c for c in own if len(tr.samples[c]) < tr.needs(c)]
-                    if winner is None and lacking:
-                        placed = tr.placed
-                        move = tr.pick(among=lacking, placed=placed)
-                        placed[move] = placed.get(move, 0) + 1
-                        placed[mine] = max(0, placed.get(mine, 1) - 1)
-        if winner is not None:
-            self._chain_trial = None
-            self.autotune_info.update(status="locked", winner=tuple(winner))
-            if tuple(winner) != tuple(self._chain):
-                self._switch_chain(winner)
-        elif move is not None:
-            self._switch_chain(move)
+                        self._forced = True
+        self._choice_key = key
+        self._model_chain = tuple(model_best)
+        self._shortlist = tuple(tuple(c) for c in shortlist) if _autotune_enabled() else shortlist[:1]
+        self._feasible = tuple(tuple(c) for c in feasible)
+        # The arm this plan runs (DEFAULT unless a trial or a lock says otherwise), resolved here.
+        kind, v = _trial.parse_arm(self._arm)
+        chain = self._model_chain
+        if not self._forced and kind == "chain" and v[0] == self.n and v[1] in self._feasible:
+            chain = v[1]
+        self.autotune_info = {"status": "forced" if self._forced else "model", "winner": chain,
+                              "shortlist": self._shortlist, "model": self._model_chain,
+                              "arm": self._arm}
+        return chain
 
     # ---- run ----------------------------------------------------------------
     def run_series(self, series, starts=None, win_start=None, win_end=None,
                    binsize=None, threshold=0.0, templates=None, raw=False,
                    decimated=None, bin_phase=None):
-        if self._chain_trial is None and self.device.kind == "cpu" and self._mf is not None:
-            q15_timed = self._q15_before_call()
-            full = templates is None or templates[1] >= self.ntemplates
-            try:
-                nblk = len(starts) if starts is not None else 1
-            except TypeError:
-                nblk = 0
-            if q15_timed and full and nblk >= 2:
-                # Resolve thresholds before timing either arm, then replay exactly the
-                # same workload. Pool complete ratios across groups, not their raw costs.
-                self._execution_plan()
-                parent_run = super().run_series
-                def run():
-                    return parent_run(series, starts=starts, win_start=win_start, win_end=win_end,
-                                      binsize=binsize, threshold=threshold, templates=templates,
-                                      raw=raw, decimated=decimated, bin_phase=bin_phase)
-                return self._q15_run_pair(run, nblk * self.ntemplates * self.ndata)
-        if self._chain_trial is None:
-            return super().run_series(series, starts=starts, win_start=win_start, win_end=win_end,
-                                      binsize=binsize, threshold=threshold, templates=templates,
-                                      raw=raw, decimated=decimated, bin_phase=bin_phase)
-        # One-off work (building the plan, calibrating its thresholds) is not the chain's cost.
-        trial_begin = time.perf_counter()
-        self._execution_plan()
-        t0 = time.perf_counter()
-        res = super().run_series(series, starts=starts, win_start=win_start, win_end=win_end,
-                                 binsize=binsize, threshold=threshold, templates=templates,
-                                 raw=raw, decimated=decimated, bin_phase=bin_phase)
-        dt = time.perf_counter() - t0
+        parent_run = super().run_series
+
+        def run():
+            return parent_run(series, starts=starts, win_start=win_start, win_end=win_end,
+                              binsize=binsize, threshold=threshold, templates=templates,
+                              raw=raw, decimated=decimated, bin_phase=bin_phase)
+        tr = self._plan_trial()
+        if tr is None or tr.replaying:
+            return run()
         full = templates is None or templates[1] >= self.ntemplates
-        nblk = len(starts) if starts is not None else 1
-        if full and nblk >= 2 and self._chain_trial is not None and self._gpu is None:
-            # (GPU plans are judged per batch instead: time_domain._trial_begin/_trial_end.)
-            self._chain_trial_record(dt, nblk * self.ntemplates * self.ndata)
+        try:
+            nblk = len(starts) if starts is not None else 1
+        except TypeError:
+            nblk = 0
+        if not (full and nblk >= 2):
+            # not the work the trial decides (a follow-up, one block): run as it stands
+            with _AUTOTUNE_LOCK:
+                w = tr.tick()
+            if w is not None:
+                self.lock_arm(w)
+            return run()
+        # A round of this plan's joint trial: every arm on this same call (_trial.run_round).
+        # Raw CPU results reuse buffers, so DEFAULT's is copied before later arms run.
+        begin = time.perf_counter()
+        res = _trial.run_round(tr, [self], run, nblk * self.ntemplates * self.ndata, keep=_detach)
         if self._gpu is None:
-            _record_cpu_trial(trial_begin)
+            _record_cpu_trial(begin)
         return res
 
     def set_templates(self, spectra, index=None):
@@ -840,6 +759,7 @@ class HierarchicalFilter(MatchedFilter):
             raise ValueError(f"expected shape ({self.ntemplates}, {self.n}) or ({self.ntemplates}, {self.n // 2}), got {a.shape}")
         rebuild = self._mf is None or getattr(self._mf, 'k', self.n) != k
         self.k = k
+        self._cfg_cache = {}            # the other chains' plans hold the old templates
         self._held_templates = self._hold(a)
         if rebuild:
             self._mf = None
@@ -868,6 +788,7 @@ class HierarchicalFilter(MatchedFilter):
             raise ValueError("counts must be (ntemplates,) in [1, min(m, n)]")
         self._taps = (taps, counts)
         self._dprice = None
+        self._cfg_cache = {}
         if self._pinned is None and self._chain is not None and self.device.kind == "cpu":
             # The model priced the chain without the direct refine: choose again (the plan is
             # rebuilt on next use and replays reference, templates and data).
