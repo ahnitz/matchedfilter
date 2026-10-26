@@ -634,11 +634,11 @@ def test_cost_file_reproduces_the_measured_models(monkeypatch, tmp_path):
 
 def _plan_chain_bruteforce(sig, noise, bands, chain, fd, cost, n, snr):
     """The split search done the plain way: mask and sort every kept draw for each candidate
-    (each draw's coarse maxima with the window noise paired with it, as plan_chain)."""
+    (each draw's coarse maxima over the window, as plan_chain)."""
     import math
     gc = mf._gatechain
     cols = [bands.index(b) for b in chain]
-    S = gc.kept_draws(sig, bands, chain, snr, noise)
+    S = gc.kept_draws(sig, bands, chain, snr)
     M, k = S.shape[0], len(chain)
     K = int(math.floor(fd * M)) if k == 1 else int(math.floor(fd * M - 1.645 * math.sqrt(M * fd * (1 - fd))))
     if K < 8:
@@ -677,7 +677,7 @@ def test_plan_chain_matches_the_plain_split_search():
     n = 2048
     cm = _calibration.calibrate_costs(n, 32)
     bands = gc.usable_bands(prof, n)
-    sig = gc.signal_draws(prof, n, bands, 6.0, gc._gm._nsamp_for(1e-3))
+    sig = gc.signal_draws(prof, n, bands, 6.0, gc._gm._nsamp_for(1e-3), window=(192, n - 192))
     noise = gc.noise_block_maxima(prof, n, bands, window=(192, n - 192))
     for chain in gc.enumerate_chains(n, 3, bands=bands):
         fast = gc.plan_chain(sig, noise, bands, list(chain), 1e-3, cm, n, 6.0)
