@@ -287,7 +287,7 @@ candidate is faster beyond the measurement noise.
 
 | Variable | Default | Effect |
 |---|---|---|
-| `MF_COST_FILE` | unset | A JSON file that keeps measured costs and every locked choice. A machine then measures each once, and later processes reuse it, so repeated runs make the same choices. The block-size trial runs either way, on the search's first real calls; with a file its lock is kept and later processes skip it. |
+| `MF_COST_FILE` | unset | A JSON file that keeps measured costs and every locked choice. A machine then measures each once, and later processes reuse it, so repeated runs make the same choices. The joint trial (block size, chains and the Q15 screen together) runs either way, on the search's first real calls; with a file its lock is kept and later processes skip it. |
 | `MF_AUTOTUNE` | `1` | `0` skips timed trials and keeps the cost model's choices (deterministic given a populated `MF_COST_FILE`). |
 | `MF_AUTOTUNE_LOG` | `0` | `1` prints each trial's samples and decisions to stderr. |
 | `MF_GPU_TIMING` | `0` | `1` records device time per kernel (for profiling; it adds overhead). |

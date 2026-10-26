@@ -1000,8 +1000,7 @@ class TimeDomainFilterBank:
 
     def _choose_layout(self, fine: np.ndarray, delta_f: float, single_n: Optional[int] = None):
         """Partition with each length batch at its cheapest modelled block size -- or, with
-        single_n, every batch at that one size (a block-size trial candidate, _BlockTrials),
-        unpriced."""
+        single_n, every batch at that one size (a joint trial's "n=" arm, _trial), unpriced."""
         from . import gatechain
         from ._choice import _log_autotune
         groups, order = self._legacy_layout
@@ -1029,7 +1028,7 @@ class TimeDomainFilterBank:
 
     def _single_sizes(self):
         """The block sizes every batch of the bank can run at (above its longest data count),
-        smallest first: what a block-size trial offers besides the model's layout."""
+        smallest first: the joint trial's block-size arms besides the model's layout."""
         groups, order = self._legacy_layout
         counts = self.effective_data_counts[order]
         longest = max((int(counts[j - 1]) for i, j, _, _ in groups), default=0)

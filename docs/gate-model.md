@@ -584,7 +584,7 @@ calibration described above is removed. This preserves active cost arithmetic
 and avoids introducing another production tuning mode before the replacement
 has passed cold-start and settled full-search comparisons.
 
-### Block sizes decided on real calls, by absolute rank (2026-10-26)
+### Block sizes decided on real calls, by absolute rank (2026-10-26; superseded below)
 
 - **Why.** The CPU cost model is calibrated on hot-cache microbenchmarks (64 templates, 32 blocks).
   On a loaded Haswell node real per-stage costs were 1.1-2.4x the calibrated ones, differently per
@@ -600,3 +600,106 @@ has passed cold-start and settled full-search comparisons.
   smallest size, and the model's layout is kept only when it wins outright. Ranks whose built
   layouts are the same object share their samples (they can only tie). A locked size is built
   without any block-size pricing, so later banks skip the larger sizes' simulations.
+
+## One joint trial for block size, chains and the screen (2026-10-26)
+
+Supersedes the block-size, chain and Q15 trials described above. They were three mechanisms
+for one decision. They differed in what a candidate was (model-relative ranks; one chain for
+every plan; a screen setting per full chain), in what a sample was (paired rounds; single
+unpaired calls; batches; replays inside one call), and in what they pooled. Each of those
+differences caused an error that has been measured:
+
+* Candidates relative to the model chose among the model's errors. The block trial's rank 1
+  could mean 4096.
+* The chain trial pooled plans of every profile into one lock, one chain for all of them.
+  Paired on the same input, each plan's own model chain was faster than that lock per steady
+  call: dev2 -7%, dev1 -10%, Haswell -11% to -14%, Ivy -2% (test67 leaves).
+* The Q15 trial was keyed by the full chain, although the screen concerns only the first
+  band. With plans on four chains, four paired Q15 trials opened for what is one decision.
+
+### The mechanism (`_trial`)
+
+One trial per key decides every coupled dimension at once, over complete configurations:
+
+* **Arms.** `default` puts every dimension at its default: the bank's smallest candidate block
+  size, each plan's model chain, and the model's screen setting for that chain. It is the
+  preference. Every other arm fixes one dimension, and the model fills in the rest
+  conditional on it:
+  * `n=4096`: the next single block size;
+  * `n=model`: the model's own priced layout;
+  * `chain=2048:256,512`: one of the plans' other shortlisted chains, at its block size;
+  * `q15=0` and `q15=1`: the screen off or on.
+
+  An instance that cannot take an arm's value runs its default there, for example a chain
+  outside a plan's feasible set, or a screen its first band does not have.
+* **Resolution.** Each instance (a bank, or a plan used on its own) resolves an arm to its own
+  configuration. Arms an instance resolves alike are one configuration, timed once, so they
+  can only tie.
+* **Rounds.** A sample is a paired round. Every distinct configuration of the live arms runs
+  the same batch back to back. Each run is settled (an untimed replay; on a GPU, replays until
+  no recording is built) and then timed. The order reverses each round. Rounds pool as
+  ratios to `default` (`paired_choice`), so banks and plans of different cost pool into one
+  trial.
+* **Elimination.** An arm is dropped from later rounds once it can no longer win, that is,
+  once its wins plus every round still to come cannot reach the share `paired_choice` needs
+  at the cap (`_choice.can_still_win`). The rule is exact: a test enumerates every win/loss
+  history against `paired_choice`. Arms that only tie with `default` leave after three
+  rounds, and so does a clearly slower arm.
+* **End.** A trial locks at its first clear winner, keeps `default` on a tie, and stops at
+  its cap (`2 x MF_TRIAL_ROUNDS` rounds) or its budget of calls that could not be rounds.
+* **Locks.** A lock is applied by each instance resolving the winning label, including
+  instances made later. A bank made after a lock builds only the winner's layout. For any
+  lock but `n=model`, no block size is priced at all. The lock is kept in `MF_COST_FILE`
+  (`choice|joint|<key>`) when one is set.
+
+Banks run their rounds in `filter_series_many` (`time_domain._joint_round`), on the CPU and
+GPU alike. A plan inside a bank is governed by the bank's trial. A plan used on its own runs
+its rounds in `run_series`.
+
+### Why `default` is the smallest size, not the model's layout
+
+The first version made the model's layout the preference. On the test67 replay at 12 calls
+per bank (the job's mean) it was 19% slower than main. A tie kept the model's layout, which
+put some banks on 4096, and every bank built after the lock paid for block-size pricing.
+With the smallest size as the default, a tie keeps the layout that needs no pricing. That is
+the rule step 1 of this work had already measured for block sizes.
+
+### Coupling
+
+Before building it, I checked that deciding jointly was needed. Each bank (every fourth bank
+of test67) ran 8 complete configurations, paired: {2048, 4096} x {each plan's model chain, one
+chain for all} x {Q15 on, off}. On dev2, dev1, Haswell and Ivy no dimension's ranking depended
+on another:
+
+* 2048 with per-plan chains and Q15 on was best everywhere.
+* The single chain cost +2% to +8.5%.
+* Q15 off cost +18% to +46%.
+* 4096 cost +50% to +84%.
+
+The one interaction was at 4096 on Haswell, where the single chain beat per-plan chains by
+6%. 4096 lost by 50% there, so it changes no decision. The joint form is still the one
+mechanism, and it would catch a coupling on a machine where one exists.
+
+### Calls per bank
+
+A test67 job (2048 s of data, dev2) calls each of its 319 leaf banks 12.6 times on average
+(median 10, max 66), plus 5 single-template follow-ups. Bank calls took 22.3 s of the 73 s
+job, against 4.2 s in `set_reference`. The setup replay tools capture only a bank's first call
+per reference; replay at `K = 12` for the production regime.
+
+### Results
+
+test67 replay, all 323 banks, 12 calls each, interleaved with main (5fbcc4fc):
+
+| machine | main | joint | |
+|---|---|---|---|
+| dev2 (Zen 5) | 21.6, 21.9 s | 20.8, 20.7 s | -4.6% |
+| dev1 (Zen 3) | 47.1, 47.3, 47.4 s | 44.4, 44.2, 44.8 s | -6.0% |
+| Haswell | RESULTS | | |
+| Ivy Bridge | RESULTS | | |
+
+Every bank ends on 2048 with the screen on for every plan (main left two plans' screens off),
+and each plan runs its own model chain.
+
+`MF_TRIAL_ROUNDS` replaces `MF_BLOCK_TRIALS` and `MF_CHAIN_TRIALS`. `tools/migrate_cost_file.py`
+removes the superseded trial records from a cost file.

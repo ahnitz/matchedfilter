@@ -75,7 +75,7 @@ def stored_choice(key, field="value"):
     field names another part of its record (store_choice's extra fields).
 
     Measured choices -- a coarse kernel variant timed at first use, a fused batch's
-    interleave depth, a chain or block-size trial -- are each valid, but made afresh per
+    interleave depth, a joint trial's configuration -- are each valid, but made afresh per
     process they differ on noise, and borderline pairs then gate differently from run to
     run. Kept with the cost models, a machine makes each once and every later process
     reproduces it."""

@@ -599,7 +599,7 @@ class HierarchicalSearch:
         On a GPU the searches are one filter_series_many batch, submitted and left in flight
         (deferred): every call submitted before any is collected, so the device is not idle
         while the host prepares the next leaf -- or the next chunk's root. On the CPU the batch
-        runs each in turn, as filter_series, and its banks' block-size trials sample on it.
+        runs each in turn, as filter_series, and its banks' joint trial takes its rounds on it.
         The results are the same either way."""
         leaves = [lf for lf in step.pending if any(step.win[(id(lf), c)] for c in step.active)]
         if not leaves:

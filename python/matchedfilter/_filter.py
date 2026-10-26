@@ -1062,8 +1062,8 @@ class MatchedFilter:
         """
         if self._gpu is None:
             return None
-        # (A GPU plan under a chain trial is judged per batch, not per call: it takes the
-        # same paths as any other -- ragged, deferred, replayed.)
+        # (A GPU plan in a joint trial is judged per batch, not per call: it takes the same
+        # paths as any other -- ragged, deferred, replayed.)
         if not self._is_hierarchical and type(self) is not MatchedFilter:
             return None
         # Cached per layout bytes (as run_series), so a repeated call keeps its layout and
@@ -1640,8 +1640,8 @@ class MatchedFilter:
                         and nb <= getattr(self._gpu, "max_grouped_bins", 0)
                         and nt <= self._gpu_pair_limit())
         # Deferred (TimeDomainFilterBank.filter_series_many): submit now, collect later, so the
-        # GPU works on this call while the host prepares the next bank's. (A chain trial on the
-        # GPU is judged per batch, in the mode the search runs: deferred too.)
+        # GPU works on this call while the host prepares the next bank's. (A joint trial's
+        # round replays whole batches in the mode the search runs: deferred too.)
         # A grouped flat call defers too when it is one batch (a follow-up's window: one
         # submission for every bin count).
         c.defer = defer = (getattr(self, "_defer_series", False) and can_pipeline
