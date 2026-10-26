@@ -423,7 +423,10 @@ class TestBoundaryAndNegativeConditions:
         v_start = 2048
         v_stop = 8192
         noise = np.zeros(S_len, dtype=np.complex64)
-        noise[3000:3000 + len(t_tap)] = t_tap * 10.0
+        # Noise-free data: the pinned 256 Hz band holds 1/8 of a flat reference's power, and its
+        # gate is set for noisy data, where the window's own noise maximum is ~3.3. Amplitude 30
+        # puts the coarse statistic (~10) well past it; at 10 (coarse ~3.5) the gate dismissed it.
+        noise[3000:3000 + len(t_tap)] = t_tap * 30.0
 
         res = bank.filter_series(noise, windows=slice(v_start, v_stop), threshold=5.0)
         assert len(res.sample_indices) > 0

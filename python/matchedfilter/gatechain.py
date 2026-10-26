@@ -59,6 +59,48 @@ from ._costfile import (_COST_WARNED, _LEGACY_PREFIXES, _cost_file, _cost_file_l
 
 _SIG = _gm._SIG
 _NB, _W = _gm._NB, _gm._W
+#: signal_draws' grids reach this many half-widths of the profile's correlation peak around a
+#: signal (_half_width): converged on an f^-1 profile, whose broad peak needs +-42 samples.
+_REACH = 3
+
+
+def _neighbourhood(p, n, bands):
+    """(W, [NB_b]): the fine lags either side of a simulated signal, and each band's coarse lags
+    either side (signal_draws). Both reach _REACH half-widths of the profile's correlation
+    peak, at least _W and _NB lags, at most n/4 samples. The fine lags too: a gate near snr
+    dismisses on the difference between the fine and coarse maxima, and a broad peak's fine
+    maximum lies anywhere along it (f^-2 at n = 1024: at +-_W lags the model's 5% gate
+    dismissed 8% of true detections, at +-64 5.2%)."""
+    reach = min(_REACH * _half_width(p, n), n // 4)
+    return (max(_W, int(math.ceil(reach))),
+            [max(_NB, int(math.ceil(reach / (n // b)))) for b in sorted(int(b) for b in bands)])
+
+
+def rest_noise(power, n, bands, nsim=20000, window=None):
+    """noise_block_maxima over the window's coarse lags outside a simulated signal's own
+    (_neighbourhood): what the engine's window maximum adds to the signal's local one. The
+    signal's lags are already in its draw, with the signal; the whole window's noise would
+    count them twice (a flat profile's 5% gate at band n/8 dismissed 6.6%, 2026-10-26)."""
+    p = _norm_profile(power, n)
+    _, nbs = _neighbourhood(p, n, bands)
+    return noise_block_maxima(p, n, bands, nsim=nsim, window=window,
+                              exclude=tuple(2 * nb + 1 for nb in nbs))
+
+
+def _half_width(p, n):
+    """The largest lag, in samples, at which the profile's normalised correlation is still at
+    least half its peak."""
+    c = np.abs(np.fft.ifft(np.asarray(p, np.float64))) * n
+    above = np.flatnonzero(c[: n // 2] >= 0.5 * c[0])
+    return int(above.max()) if above.size else 0
+
+
+#: Sub-sample arrival times signal_draws places each simulated signal at, within a sample: four
+#: equally spaced, so a draw stands for a signal arriving at a uniformly random time (the loss
+#: between samples is symmetric about half a sample). They include the sample itself: at a high
+#: snr only a signal arriving on a sample reaches it on the sampled grid, and strata midpoints
+#: left no draw detected at snr = 1000 (no gate could be placed).
+_FRACS = (0.0, 0.25, 0.5, 0.75)
 _MIN_BAND = 64
 
 #: Grid of per-tier budget shares searched when splitting fd across a chain. Chains of three or
@@ -301,12 +343,12 @@ def signal_draws(power, n, bands, snr, nsamp, seed=13):
     """
     p = _norm_profile(power, n)
     bands = sorted(int(b) for b in bands)
-    key = _key(p, n, bands, float(snr), int(nsamp), int(seed))
+    key = _key(p, n, bands, float(snr), int(nsamp), int(seed), _FRACS, _REACH)
     hit = _SIGNAL_CACHE.get(key)
     if hit is not None:
         _SIGNAL_CACHE.move_to_end(key)
         return hit
-    sim_params = (n, tuple(bands), float(snr), int(nsamp), int(seed))
+    sim_params = (n, tuple(bands), float(snr), int(nsamp), int(seed), _FRACS, _REACH)
     unit, hit = _similar_get("signal", p, sim_params)
     if hit is not None:
         _cache_put(_SIGNAL_CACHE, key, hit)
@@ -322,57 +364,79 @@ def signal_draws(power, n, bands, snr, nsamp, seed=13):
         fr = float(q.sum())
         seg_frac.append(fr)
         seg_corr.append(np.fft.ifft(q) * n if fr > 1e-12 else None)
-    band_corr = []           # normalised in-band correlation A_b(d)
-    for b, fb in zip(bands, F):
-        q = np.zeros(n); q[:b] = p[:b] / fb
-        band_corr.append(np.fft.ifft(q) * n)
-    full_corr = np.fft.ifft(p) * n
+    # The signal's correlation at a real-valued lag x: sum_k q_k e^{2 i pi k x / n}. A signal
+    # arrives at any time, not on a sample: its peak falls between the fine lags as well as
+    # between the coarse ones, which lowers the fine maximum a detection is conditioned on
+    # and the coarse maxima together. Drawn at integer lags only, the model put an f^-1
+    # profile's single-tier dismissal at 4x what the engine measured (n = 4096, 2026-10-26).
     look = lambda tab, d: tab[np.asarray(d) % n]
+    # A shift by frac samples is a phase ramp on the bins: one table per (frac, band), read at
+    # integer lags as before.
+    kk = np.arange(n)
+    ramps = {f: np.exp(-2j * np.pi * kk * f / n) for f in _FRACS}
+    full_tab = {f: np.fft.ifft(p * ramps[f]) * n for f in _FRACS}
+    band_tab = [{f: np.fft.ifft(np.where(kk < b, p, 0.0) / fb * ramps[f]) * n for f in _FRACS}
+                for b, fb in zip(bands, F)]
 
     steps = [n // b for b in bands]
     step0 = steps[0]
+    # Each band's grid around the signal, and the fine lags, reach _REACH half-widths of the
+    # profile's correlation peak (at least _NB and _W lags, at most n/4 samples): noise moves a
+    # detected signal's fine peak along a broad peak,
+    # and a peak found outside the simulated lags is a detection the model drops. Its coarse
+    # partners are high, so the dropped ones are those a tier cannot dismiss: at +-_NB lags an
+    # f^-1 profile's single-tier dismissal came out 1.5x the engine's (n = 4096, band n/2,
+    # 2026-10-26); inspiral and recorded profiles were already within the draws' noise.
+    W, nbs = _neighbourhood(p, n, bands)
     draws = _Normals(seed, _DOMAIN_SIGNAL, cache=True)
-    m = max(nsamp // step0, 256)
+    m = max(nsamp // (step0 * len(_FRACS)), 64)
     C_out, F_out = [], []
     for off in range(step0):
-        fl = np.arange(-_W, _W + 1) + off
-        grids = [(off // s) * s + np.arange(-_NB, _NB + 1) * s for s in steps]
+        fl = np.arange(-W, W + 1) + off
+        grids = [(off // s) * s + np.arange(-nb, nb + 1) * s for s, nb in zip(steps, nbs)]
         taus = np.unique(np.concatenate([fl] + grids))
         gidx = [np.searchsorted(taus, gr) for gr in grids]
+        fidx = np.searchsorted(taus, fl)
         lag = taus[:, None] - taus[None, :]
         eye = 1e-9 * np.eye(len(taus))
-        seg_noise = []
+        chol = []
         for S, fr in zip(seg_corr, seg_frac):
             if S is None:
-                seg_noise.append(None); continue
+                chol.append(None); continue
             C = look(S, lag) / fr
             C = (C + C.conj().T) / 2 + eye
-            L = np.linalg.cholesky(C).astype(np.complex64)
-            w = draws.complex((m, len(taus)), 1.0 / np.sqrt(2))
-            seg_noise.append((w @ L.T) * np.float32(_SIG * np.sqrt(fr)))      # unnormalised: variance fr
-        # running sums of the segments, in the order sum() took them: cum[i] is tiers i's noise
-        # (segments 0..i), cum[-1] the full band's (bit for bit what re-summing each prefix gave)
-        cum, acc = [], 0
-        for sn in seg_noise:
-            if sn is not None:
-                acc = sn if isinstance(acc, int) else acc + sn
-            cum.append(acc)
-        nfull = acc
-        afull = np.abs(np.float32(snr) * look(full_corr, taus - off).astype(np.complex64)[None, :] + nfull)
-        fidx = np.searchsorted(taus, fl)
-        ffine = afull[:, fidx].max(1)
-        cols, fcols = [], []
-        for i, b in enumerate(bands):
-            # tier i's noise is the sum of the segments below its band edge, j = 0..i
-            # only its grid lags are read: the same arithmetic as over every lag, on those
-            g = gidx[i]
-            nb = cum[i][:, g] / np.float32(np.sqrt(F[i]))
-            z = np.float32(snr * np.sqrt(F[i])) * look(band_corr[i], taus[g] - off).astype(np.complex64)[None, :] + nb
-            cols.append(np.abs(z).max(1))
-            # the coarse lags are a subset of the fine grid, so they count toward the fine maximum
-            fcols.append(np.maximum(ffine, afull[:, gidx[i]].max(1)))
-        C_out.append(np.stack(cols, 1))
-        F_out.append(np.stack(fcols, 1))
+            chol.append(np.linalg.cholesky(C).astype(np.complex64))
+        for frac in _FRACS:
+            # the signal arrives at off + frac samples
+            seg_noise = []
+            for L, fr in zip(chol, seg_frac):
+                if L is None:
+                    seg_noise.append(None); continue
+                w = draws.complex((m, len(taus)), 1.0 / np.sqrt(2))
+                seg_noise.append((w @ L.T) * np.float32(_SIG * np.sqrt(fr)))  # unnormalised: variance fr
+            # running sums of the segments: cum[i] is tier i's noise (segments 0..i), cum[-1]
+            # the full band's
+            cum, acc = [], 0
+            for sn in seg_noise:
+                if sn is not None:
+                    acc = sn if isinstance(acc, int) else acc + sn
+                cum.append(acc)
+            nfull = acc
+            afull = np.abs(np.float32(snr) * look(full_tab[frac], taus - off).astype(np.complex64)[None, :] + nfull)
+            ffine = afull[:, fidx].max(1)
+            cols, fcols = [], []
+            for i, b in enumerate(bands):
+                # tier i's noise is the sum of the segments below its band edge, j = 0..i;
+                # only its grid lags are read
+                g = gidx[i]
+                nb = cum[i][:, g] / np.float32(np.sqrt(F[i]))
+                z = (np.float32(snr * np.sqrt(F[i])) * look(band_tab[i][frac], taus[g] - off).astype(np.complex64)[None, :]
+                     + nb)
+                cols.append(np.abs(z).max(1))
+                # the coarse lags are a subset of the fine grid, so they count toward the fine maximum
+                fcols.append(np.maximum(ffine, afull[:, gidx[i]].max(1)))
+            C_out.append(np.stack(cols, 1))
+            F_out.append(np.stack(fcols, 1))
     out = (np.concatenate(C_out).astype(np.float32), np.concatenate(F_out).astype(np.float32))
     _cache_put(_SIGNAL_CACHE, key, out)
     _similar_put("signal", unit, sim_params, out)
@@ -435,7 +499,7 @@ def _noise_records(p, n, bands, nsim, seed):
     return new
 
 
-def noise_block_maxima(power, n, bands, nsim=20000, seed=29, window=None):
+def noise_block_maxima(power, n, bands, nsim=20000, seed=29, window=None, exclude=None):
     """Noise-only block maxima of every band's coarse statistic, (nsim, len(bands)).
 
     Exact for stationary Gaussian noise with output profile `power`: bins are
@@ -444,7 +508,8 @@ def noise_block_maxima(power, n, bands, nsim=20000, seed=29, window=None):
     `window` = (start, end) in samples is the lag range each block's search
     covers; every tier takes its maximum over the coarse lags the engine
     visits for it (hmf.c: cstart = start/R - 1, cend = ceil(end/R)), so a
-    chain's noise passes are joint passes of whole-window maxima.
+    chain's noise passes are joint passes of whole-window maxima. `exclude`: per band, that
+    many of the window's coarse lags left out (rest_noise: a signal's own).
     """
     p = _norm_profile(power, n)
     bands = sorted(int(b) for b in bands)
@@ -458,7 +523,7 @@ def noise_block_maxima(power, n, bands, nsim=20000, seed=29, window=None):
         c0 = max(win[0] // R - 1, 0) if win[0] > 0 else 0
         # the engine's coarse lags for the window: one sample past each end (hmf.c)
         c1 = min(-(-win[1] // R) + 1, b)
-        counts.append(max(c1 - c0, 1))
+        counts.append(max(c1 - c0 - (int(exclude[len(counts)]) if exclude else 0), 1))
     counts = tuple(counts)
     key = _key(p, n, bands, int(nsim), int(seed), counts)
     hit = _NOISE_CACHE.get(key)
@@ -826,21 +891,34 @@ def _reach(N, cols, thresholds):
 _KEPT = OrderedDict()
 
 
-def kept_draws(sig, bands, chain, snr):
+def kept_draws(sig, bands, chain, snr, noise=None):
     """Coarse maxima of `chain`'s tiers for the draws the fine stage keeps (fine max >= snr).
-    Memoised per draws (by identity, the draws held so it cannot be reused), chain and snr:
-    every template group pricing a profile asks again."""
+
+    The engine tests each tier's maximum over every coarse lag of the searched window
+    (hmf.c), but signal_draws simulates only the lags around the signal. With `noise`
+    (rest_noise over the same bands and window: the window's lags outside the draw's own) each
+    draw's maximum is taken with that noise maximum as well, max(local, rest of window), one
+    noise row per draw for all its tiers so their noise stays joint. Without it, a tier whose gate falls below the window's
+    noise floor was modelled as dismissing draws that a noise peak elsewhere in the block
+    always passes: on a flat profile at n = 4096 the gates dismissed none of 2000 detections
+    against a 1% budget (2026-10-26).
+
+    Memoised per draws and noise (by identity, both held so neither can be reused), chain
+    and snr: every template group pricing a profile asks again."""
     C, F = sig
     cols = [bands.index(b) for b in chain]
-    key = (id(C), id(F), tuple(cols), float(snr))
+    key = (id(C), id(F), id(noise), tuple(cols), float(snr))
     hit = _KEPT.get(key)
-    if hit is not None and hit[0] is C and hit[1] is F:
+    if hit is not None and hit[0] is C and hit[1] is F and hit[3] is noise:
         _KEPT.move_to_end(key)
         return hit[2]
     keep = F[:, cols].max(1) >= snr
     out = C[keep][:, cols]
+    if noise is not None:
+        rows = np.flatnonzero(keep) % noise.shape[0]
+        out = np.maximum(out, noise[rows][:, cols])
     out.setflags(write=False)
-    _KEPT[key] = (C, F, out)
+    _KEPT[key] = (C, F, out, noise)
     while len(_KEPT) > 512:
         _KEPT.popitem(last=False)
     return out
@@ -862,10 +940,11 @@ _CAND_CACHE_MAX = 4096
 
 
 def plan_chain(sig, noise, bands, chain, fd, cost, n, snr, prune=False, ntemplates=None,
-               model_f=False, memo=None):
+               model_f=False, memo=None, rest=None):
     """Thresholds for `chain` meeting compound dismissal <= fd at minimum modelled cost.
 
-    sig, noise: signal_draws / noise_block_maxima over `bands`.
+    sig, noise: signal_draws / noise_block_maxima over `bands`; rest: rest_noise over them, the
+    window's noise around each draw's own lags (None: noise, the whole window's).
     Returns dict(chain, thresholds, reach, cost) or None when fd cannot be resolved.
 
     Every threshold here dismisses at most the budget K of the M kept draws, so only
@@ -883,7 +962,7 @@ def plan_chain(sig, noise, bands, chain, fd, cost, n, snr, prune=False, ntemplat
     key = None if memo is None else tuple(memo) + (tuple(int(b) for b in chain), bool(prune))
     cands = _CAND_CACHE.get(key) if key is not None else None
     if cands is None:
-        cands = _chain_candidates(sig, noise, bands, chain, fd, snr, prune)
+        cands = _chain_candidates(sig, noise, bands, chain, fd, snr, prune, rest)
         if key is not None:
             _CAND_CACHE[key] = cands
             while len(_CAND_CACHE) > _CAND_CACHE_MAX:
@@ -908,11 +987,11 @@ def plan_chain(sig, noise, bands, chain, fd, cost, n, snr, prune=False, ntemplat
     return best
 
 
-def _chain_candidates(sig, noise, bands, chain, fd, snr, prune):
+def _chain_candidates(sig, noise, bands, chain, fd, snr, prune, rest=None):
     """plan_chain's search: every (thresholds, reach) it considers for `chain`, in its order,
     or None when fd cannot be resolved."""
     cols = [bands.index(b) for b in chain]
-    S = kept_draws(sig, bands, chain, snr)
+    S = kept_draws(sig, bands, chain, snr, noise if rest is None else rest)
     M = S.shape[0]
     k = len(chain)
     if k == 1:
@@ -1106,12 +1185,13 @@ def _choose_chain(power, n, snr, fd, cost, max_tiers, floor, nsim, window, ntemp
     if sig is None:
         return None, []
     noise = noise_block_maxima(power, n, bands, nsim=nsim, window=window)
+    rest = rest_noise(power, n, bands, nsim=nsim, window=window)
     memo = ("choose", _gm._profile_sig(power), n, float(snr), float(fd), tuple(bands), window,
             int(nsim), int(nsamp))
     plans = []
     for chain in enumerate_chains(n, max_tiers, floor, bands=bands):
         pl = plan_chain(sig, noise, bands, list(chain), fd, cost, n, snr, prune=True,
-                        ntemplates=ntemplates, model_f=model_f, memo=memo)
+                        ntemplates=ntemplates, model_f=model_f, memo=memo, rest=rest)
         if pl is not None:
             plans.append(pl)
     plans.sort(key=lambda d: d["cost"])
@@ -1355,7 +1435,8 @@ def chain_thresholds(power, n, snr, fd, chain, cost=None, floor=_MIN_BAND, nsim=
     if sig is None:
         return None
     noise = noise_block_maxima(p, n, bands, nsim=nsim, window=window)
-    out = plan_chain(sig, noise, bands, list(chain), fd, cost, n, snr)
+    out = plan_chain(sig, noise, bands, list(chain), fd, cost, n, snr,
+                     rest=rest_noise(p, n, bands, nsim=nsim, window=window))
     _cache_put(_PLAN_CACHE, key, out)
     _similar_put("plan", unit, sim_params, out)
     return out

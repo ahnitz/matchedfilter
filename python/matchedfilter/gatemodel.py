@@ -144,7 +144,9 @@ def _check_power(power, n):
 
 
 def _kept(power, n, band, snr, fd):
-    """Sorted coarse maxima at `band` for draws the fine stage keeps, or None."""
+    """Sorted coarse maxima at `band` for draws the fine stage keeps, or None: each the
+    larger of the signal's local maximum and the noise maximum over the rest of the block
+    (gatechain.rest_noise), as the engine searches the whole block (gatechain.kept_draws)."""
     from . import gatechain
     bands = gatechain.usable_bands(power, n)
     if band not in bands:
@@ -152,7 +154,8 @@ def _kept(power, n, band, snr, fd):
     sig = gatechain.signal_draws(power, n, bands, snr, _nsamp_for(fd))
     if sig is None:
         return None
-    return np.sort(gatechain.kept_draws(sig, bands, (band,), snr)[:, 0])
+    noise = gatechain.rest_noise(power, n, bands)
+    return np.sort(gatechain.kept_draws(sig, bands, (band,), snr, noise)[:, 0])
 
 
 def dismissal(power, n, band, snr, gate, fd_hint=1e-3):
