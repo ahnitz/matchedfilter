@@ -23,9 +23,10 @@ Alpha releases may change the API. Pin a version for reproducible work.
   on the CPU and GPU alike, in place of three separate trials. Its arms are complete
   configurations: the default (the smallest block size, each plan's model chain and the
   model's screen setting) and one-step deviations from it (another block size, the model's
-  priced layout, a shortlisted chain, the screen off or on), timed in paired rounds on the
-  same batch and pooled as ratios to the default. Arms that can no longer win leave the
-  rounds. Each plan now runs its own model chain unless a chain wins outright. The old chain
+  priced layout, each plan's next shortlisted chain, the screen off or on). They are timed in
+  paired rounds on the same jobs of two of a batch's banks and pooled as ratios to the
+  default. Arms that can no longer win leave the rounds, and a winner other than the default
+  must win again alone against it before it locks. Each plan now runs its own model chain unless a chain wins outright. The old chain
   trial locked one chain for plans of every profile, which ran 2-14% slower per call (dev1,
   dev2, Haswell, Ivy Bridge). On the test67 leaves at their mean of 12 calls per bank, total
   CPU is 4.6% lower on dev2 and 6.0% lower on dev1. `MF_TRIAL_ROUNDS` replaces

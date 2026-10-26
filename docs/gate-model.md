@@ -623,11 +623,14 @@ One trial per key decides every coupled dimension at once, over complete configu
 
 * **Arms.** `default` puts every dimension at its default: the bank's smallest candidate block
   size, each plan's model chain, and the model's screen setting for that chain. It is the
-  preference. Every other arm fixes one dimension, and the model fills in the rest
+  preference. Every other arm moves one dimension, and the model fills in the rest
   conditional on it:
   * `n=4096`: the next single block size;
   * `n=model`: the model's own priced layout;
-  * `chain=2048:256,512`: one of the plans' other shortlisted chains, at its block size;
+  * `chain=+1`, `chain=+2`: each plan's next shortlisted chain after its own model chain,
+    in modelled cost order. This is a chain per plan, not one chain for every plan: plans of
+    different profiles want different chains, and one chain for all of them lost on every
+    machine;
   * `q15=0` and `q15=1`: the screen off or on.
 
   An instance that cannot take an arm's value runs its default there, for example a chain
@@ -636,16 +639,26 @@ One trial per key decides every coupled dimension at once, over complete configu
   configuration. Arms an instance resolves alike are one configuration, timed once, so they
   can only tie.
 * **Rounds.** A sample is a paired round. Every distinct configuration of the live arms runs
-  the same batch back to back. Each run is settled (an untimed replay; on a GPU, replays until
-  no recording is built) and then timed. The order reverses each round. Rounds pool as
-  ratios to `default` (`paired_choice`), so banks and plans of different cost pool into one
-  trial.
+  the same work back to back. Settling happens only on a configuration's first run on a bank
+  (an untimed replay; on a GPU, replays until no recording is built), and every run is then
+  timed. The order reverses each round. Rounds pool as ratios to `default` (`paired_choice`),
+  so banks and plans of different cost pool into one trial. That pooling is also why a round
+  needs only a few banks: it replays two of the batch's trial banks (`_ROUND_BANKS`, rotated
+  from round to round over the batch), and the rest of the batch runs once on `default`. A
+  test67 batch holds 17 leaf banks. Replaying all of them twice per configuration cost 11 s of
+  a 74 s job; two banks per round, settled once, cost 2.6 s.
 * **Elimination.** An arm is dropped from later rounds once it can no longer win, that is,
   once its wins plus every round still to come cannot reach the share `paired_choice` needs
   at the cap (`_choice.can_still_win`). The rule is exact: a test enumerates every win/loss
   history against `paired_choice`. Arms that only tie with `default` leave after three
   rounds, and so does a clearly slower arm.
-* **End.** A trial locks at its first clear winner, keeps `default` on a tie, and stops at
+* **Confirmation.** An arm the rule picks over `default` is not locked at once. A fresh
+  contest of `default` against it alone must pick it again, or `default` stands. On a loaded
+  node a round's ratios swing by +-30% (Haswell at load 55: one arm read 0.65, 1.07, 0.84,
+  1.08 and 0.98 of `default`, its true ratio about 1). With seven challengers, one passes the
+  75% rule on noise more often than one alone does: an unconfirmed trial on a loaded Ivy
+  Bridge locked a fixed chain with the screen off, and ran 18% slower.
+* **End.** A trial locks at its first confirmed winner, keeps `default` on a tie, and stops at
   its cap (`2 x MF_TRIAL_ROUNDS` rounds) or its budget of calls that could not be rounds.
 * **Locks.** A lock is applied by each instance resolving the winning label, including
   instances made later. A bank made after a lock builds only the winner's layout. For any
