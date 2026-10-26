@@ -117,13 +117,30 @@ def test_a_bank_adopts_a_persisted_lock(monkeypatch, tmp_path):
     TimeDomainFilterBank.filter_series_many([(again, data, {})])      # runs, with templates loaded
 
 
-def test_no_trial_without_a_cost_file(monkeypatch):
-    """Without MF_COST_FILE the lock cannot be kept: no candidates are built, the model's layout
-    runs, exactly as before trials existed."""
+def test_a_trial_runs_and_its_lock_holds_without_a_cost_file(monkeypatch):
+    """Without MF_COST_FILE a bank still offers its candidate layouts, its real calls settle
+    the trial, and the lock is the process's: a later bank of the same layout builds only the
+    winner. (Until 2026-10-26 trials needed a cost file, so production ran the model's block
+    size, which under load put up to 231 of 323 banks on a size 1.6-1.95x slower.)"""
     monkeypatch.setattr(td, "_BLOCK_TRIALS", td._BlockTrials())
-    bank, _ = _inspiral_bank()
-    assert getattr(bank, "_layouts", None) is None
-    assert getattr(bank, "_layout_rank", 0) == 0
+    monkeypatch.setattr(td, "_CANDS", {})
+    bank, rng = _inspiral_bank()
+    layouts = getattr(bank, "_layouts", None) or []
+    if len(layouts) < 2:
+        pytest.skip("the model offered one block size only")
+    L = 1 << 16
+    data = ((rng.standard_normal(L) + 1j * rng.standard_normal(L)) / np.sqrt(2)).astype(np.complex64)
+    for _ in range(240):
+        TimeDomainFilterBank.filter_series_many([(bank, data, {})])
+        if bank._layouts is None:
+            break
+    assert bank._layouts is None                             # locked after the trial
+    key = td._trial_key(bank)
+    w = td._BLOCK_TRIALS.winner(key)
+    assert w is not None
+    later, _ = _inspiral_bank()
+    assert later._layouts is None                            # only the winner built
+    assert later.chosen_layout == bank.chosen_layout
 
 
 def test_a_trial_continues_across_short_processes(monkeypatch, tmp_path):

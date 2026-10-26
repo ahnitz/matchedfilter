@@ -195,8 +195,16 @@ def _cands_key(bank):
     return "block-cands|%s|%s" % (bank.device, getattr(bank, '_model_sig', ''))
 
 
+#: Proposal lists this process made, by _cands_key: a lock reached in this process maps a
+#: later bank's rank to its size without pricing its proposals again, cost file or not.
+_CANDS = {}
+
+
 def _stored_cands(bank):
     from . import gatechain
+    hit = _CANDS.get(_cands_key(bank))
+    if hit is not None:
+        return list(hit)
     path = gatechain._cost_file()
     if path is None:
         return None
@@ -206,6 +214,7 @@ def _stored_cands(bank):
 
 def _store_cands(bank, cands):
     from . import gatechain
+    _CANDS[_cands_key(bank)] = list(cands)
     path = gatechain._cost_file()
     if path is not None:
         gatechain._store_cost(path, _cands_key(bank), {"cands": list(cands)})
@@ -360,7 +369,6 @@ def _cpu_block_round(jobs):
     from ._choice import _autotune_enabled
     from .device import parse as _parse_device
     if (_BLOCK_TRIALS.cpu_replaying or not jobs or not _autotune_enabled()
-            or gatechain._cost_file() is None
             or any(_parse_device(b.device).kind != "cpu" for b, _, _ in jobs)):
         return None
     groups = {}
@@ -1338,10 +1346,13 @@ class TimeDomainFilterBank:
                 # its _BLOCK_TRIAL_RANKS - 1 cheapest single block sizes.
                 from . import gatechain as _gc
                 from ._choice import _autotune_enabled
-                # Candidates only where a trial's lock can be kept (see _trial_begin); otherwise
-                # none are built, so the bank is the model's layout at no extra cost.
-                nr = (_BLOCK_TRIAL_RANKS
-                      if _gc._cost_file() is not None and _autotune_enabled() else 1)
+                # Candidates wherever trials run: the lock is the process's (and MF_COST_FILE's,
+                # when one is set), pooled over every bank of the search (_trial_key), so the
+                # first reference's banks settle it and later ones build only the winner. The
+                # model alone misjudged sizes under production conditions: on a loaded Haswell
+                # node it priced 4096 at 1.2x 2048 where it ran 1.6-1.95x, and fresh processes
+                # put 0-231 of test67's 323 banks on 4096 (2026-10-25).
+                nr = _BLOCK_TRIAL_RANKS if _autotune_enabled() else 1
                 w = _BLOCK_TRIALS.winner(_trial_key(self)) if nr > 1 else None
                 cands = _stored_cands(self) if w else None
                 if w == 0 or (w and cands and w < len(cands)):

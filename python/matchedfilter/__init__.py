@@ -195,6 +195,7 @@ def clear_autotune_cache():
         _prices._DIRECT_LAGTAP.clear()
         _prices._DIRECT_PAIR.clear()
     _td._BLOCK_TRIALS.state.clear()
+    _td._CANDS.clear()
     _choice.reset(scope="workload")
 
 
