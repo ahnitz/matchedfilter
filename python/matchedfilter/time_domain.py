@@ -327,6 +327,15 @@ def _built(banks):
     return total
 
 
+def _same_layout_ranks(banks, r):
+    """The ranks whose built layout is rank r's own in every one of banks (r included): a
+    candidate whose partition another one has shares its layout (set_reference), and timing it
+    again measures nothing but noise -- which once locked the model's rank for a layout it
+    shared with the smallest size. They take r's samples instead, so they can only tie."""
+    n = min(len(b._layouts) for b in banks)
+    return [x for x in range(n) if all(b._layouts[x] is b._layouts[r] for b in banks)]
+
+
 def _cpu_block_round(jobs):
     """Replay identical CPU jobs across every layout; return the final valid result.
 
@@ -369,12 +378,16 @@ def _cpu_block_round(jobs):
                 order.reverse()
             timings = {}
             for rank in order:
+                if rank in timings:                 # shares an already timed rank's layout
+                    continue
                 for bank in banks:
                     bank._use_layout(rank)
                 TimeDomainFilterBank.filter_series_many(jobs)
                 t0 = time.perf_counter()
                 result = TimeDomainFilterBank.filter_series_many(jobs)
-                timings[rank] = (time.perf_counter() - t0) / work
+                dt = (time.perf_counter() - t0) / work
+                for same in _same_layout_ranks(banks, rank):
+                    timings[same] = dt
             _BLOCK_TRIALS.record_cpu_round(key, timings)
             winner = _BLOCK_TRIALS.winner(key)
             if winner is not None:
@@ -508,7 +521,8 @@ def _trial_end(tok):
         # built its recordings during calibration: a 2048 leaf sampled 2.7x slower than it ran.
         settled = settled and _built(bs) == built
         if settled and work > 0:
-            _BLOCK_TRIALS.record(key, r, dt / work)
+            for same in _same_layout_ranks(bs, r):
+                _BLOCK_TRIALS.record(key, same, dt / work)
         for b in bs:
             b._layout_warm = True
         w = _BLOCK_TRIALS.winner(key)
