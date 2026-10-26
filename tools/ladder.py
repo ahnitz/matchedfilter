@@ -244,17 +244,22 @@ def _timing():
     return os.environ.get("MF_GPU_TIMING", "0") not in ("", "0")
 
 
-#: Block-size trials open when the steady segments began (tools report: a trial that locks
-#: during them still means the steady timings span layout switches).
+#: Joint trials (block size, chains, screen) open when the steady segments began (tools
+#: report: a trial that locks during them still means the steady timings span its rounds).
 _STEADY_OPEN_TRIALS = set()
 _STEADY_CPU_TRIAL_START = None
+
+
+def _open_trials():
+    """Keys of this process's joint trials without a lock."""
+    from matchedfilter import _trial
+    return sorted(k for k, t in _trial._TRIALS.items() if t.winner is None)
 
 
 def _note_open_trials():
     global _STEADY_CPU_TRIAL_START
     from matchedfilter import _CPU_TRIAL_WORK
-    from matchedfilter import time_domain as _td
-    _STEADY_OPEN_TRIALS.update(_td._BLOCK_TRIALS.open_keys())
+    _STEADY_OPEN_TRIALS.update(_open_trials())
     if _STEADY_CPU_TRIAL_START is None:
         _STEADY_CPU_TRIAL_START = dict(_CPU_TRIAL_WORK)
 
@@ -831,17 +836,17 @@ def main():
         dev = sum(v[1] for v in d.values())
         print(f"  {stage}: device {dev / 1e3:.3f}s of wall {report['steady_s'][stage]:.3f}s; " +
               ", ".join(f"{l} {v[0]}x {v[1]:.1f}ms" for l, v in sorted(d.items(), key=lambda x: -x[1][1])))
-    from matchedfilter import time_domain as _td
-    for key in sorted(set(_STEADY_OPEN_TRIALS) - set(_td._BLOCK_TRIALS.unlocked())):
-        print(f"  WARNING: block-size trial {key} locked during the steady segments; these "
-              "timings span layout switches -- rerun with the same MF_COST_FILE")
-    for key in _td._BLOCK_TRIALS.unlocked():
-        # The steady segments ran inside a block-size trial: layouts switched between them,
-        # so times and roofline counts are not one layout's. The samples are kept in
-        # MF_COST_FILE; rerun (or run more segments) until the trial locks.
-        print(f"  WARNING: block-size trial {key} not locked yet (samples per rank "
-              f"{ {r: len(v) for r, v in _td._BLOCK_TRIALS.state[key].samples.items()} }); "
-              "these timings span layout switches -- rerun with the same MF_COST_FILE")
+    from matchedfilter import _trial
+    for key in sorted(set(_STEADY_OPEN_TRIALS) - set(_open_trials())):
+        print(f"  WARNING: joint trial {key} locked during the steady segments; these "
+              "timings include its rounds -- rerun with the same MF_COST_FILE")
+    for key in _open_trials():
+        # The steady segments ran inside a joint trial: each of its rounds replays a batch on
+        # every live arm, so times and roofline counts are not one configuration's. Its rounds
+        # are kept in MF_COST_FILE; rerun (or run more segments) until it locks.
+        t = _trial._TRIALS[key]
+        print(f"  WARNING: joint trial {key} not locked yet ({t.rounds} rounds, live arms "
+              f"{t.live()}); these timings include its rounds -- rerun with the same MF_COST_FILE")
     if "roofline" in report:
         print(_roofline.format_report(report["roofline"]))
         if args.roofline_out:

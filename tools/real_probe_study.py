@@ -189,25 +189,25 @@ def prepare(file, args, mf, td, np, seed_path, seed):
         p = bank._groups[0].plan
         if not isinstance(p, mf.HierarchicalFilter) or p.device.kind != "cpu":
             raise ValueError("expected a native CPU hierarchical plan")
-        if warm >= 2 and not p.calibrating() and not getattr(p, "_trial_hold", False):
+        if warm >= 2 and not getattr(bank, "_in_trial", False):
             break
     else:
         raise RuntimeError(f"{file}: seeded adaptive choices did not settle")
     baseline_result = bank.filter_series(series, windows=window_arg)  # adopt settled choice
     unchanged_seed(seed_path, seed)
-    if p.n != 2048 or tuple(p.config) != (256, 512, 1024) or p._chain_trial is not None:
+    if p.n != 2048 or tuple(p.config) != (256, 512, 1024) or getattr(bank, "_in_trial", False):
         raise RuntimeError("fixed scientific chain/block was not preserved")
     ep = p._execution_plan()                       # resolve thresholds BEFORE flags
     baseline = "q15" if p._q15 else "float"
-    lock = mf._chains._Q15_TRIALS.get(p._q15_trial_key())
-    if lock is None or lock.winner is None or bool(lock.winner) != bool(p._q15):
+    from matchedfilter import _trial, time_domain as _td
+    lock = _trial.winner(_td._trial_key(bank))
+    if lock is None or bool(p.arm_config(lock)[1]) != bool(p._q15):
         raise RuntimeError("baseline Q15 choice is not a settled seeded lock")
     thresholds = tuple(ep.thresholds())
     if thresholds != tuple(p._thresholds()):
         # Native thresholds are float32; compare after rounding Python values.
         if thresholds != tuple(float(x) for x in np.asarray(p._thresholds(), np.float32)):
             raise RuntimeError("native and scientific gate thresholds disagree")
-    p._trial_hold = True
     p._want_sparse = True
     group = bank._groups[0]
     layout = tuple(group._cached_layout[1:])
@@ -227,6 +227,7 @@ def prepare(file, args, mf, td, np, seed_path, seed):
 class Race:
     def __init__(self, p, ep, series, layout, threshold, baseline, mf, np):
         self.p, self.ep, self.series, self.layout = p, ep, series, layout
+        self.arm = p._arm                     # the bank's lock, resolved: fixed for the race
         self.threshold, self.baseline, self.mf, self.np = threshold, baseline, mf, np
         self.thresholds = tuple(ep.thresholds())
         self.reference = {}           # per arm: the two arms gate on different statistics
@@ -271,8 +272,8 @@ class Race:
         elif not np.array_equal(counts, self.reference_counts[arm]):
             raise AssertionError("native final row counts changed across same-input repeats")
         if (p._execution_plan() is not self.ep or tuple(self.ep.thresholds()) != self.thresholds
-                or not p._trial_hold or p._chain_trial is not None):
-            raise AssertionError("native plan, thresholds or adaptive hold changed during race")
+                or p._arm != self.arm):
+            raise AssertionError("native plan, thresholds or the plan's arm changed during race")
         self.validation_ns += time.perf_counter_ns() - begin
 
     def sample(self, arm, round_index, position, repeats):
