@@ -291,7 +291,6 @@ def _signal_records(p, n, bands, Fb, snr, M, seed):
     # at snr = 1000), so the simulation continues until half its draws' worth are kept, to at
     # most _GROW times the draws.
     nkey = _key(p, n, bands, seed)
-    lags = [n] + bands
     ts, us, parts = [], [], []
     rows = kept = 0
     step = M
@@ -302,24 +301,12 @@ def _signal_records(p, n, bands, Fb, snr, M, seed):
         fi = ((rows + np.arange(step)) % _NF).astype(np.int32)
         held = _NOISE_RECORDS.get(nkey)
         noise = (held[0] if held is not None else 0) == rows
-        # a side's running maximum over L lags has about ln L + 0.58 records of noise (fewer
-        # with the signal at its start): room for ln L + 3 a draw, so a chunk runs once
-        cap = [int(step * (math.log(m) + 3)) + 64 for m in lags for _ in (0, 1)]
-        while True:
-            pos = tuple(np.empty(c, np.int32) for c in cap)
-            val = tuple(np.empty(c, np.float32) for c in cap)
-            off = tuple(np.empty(step + 1, np.int64) for _ in cap)
-            got, nrec = _simulate(p, n, bands, step, rows, seed, (tab, t, fi, pos, val, off), noise,
-                                  keep_at=snr)
-            if min(got) >= 0:
-                break
-            cap = [2 * c for c in cap]
+        recs, nrec = _simulate(p, n, bands, step, rows, seed, (tab, t, fi), noise, keep_at=snr)
         if nrec is not None:
             _add_noise_records(nkey, rows, step, nrec)
-        recs = tuple((pos[q][:got[q]], val[q][:got[q]], off[q]) for q in range(len(cap)))
         keep = np.diff(recs[0][2]) > 0          # a kept draw's fine maximum has a record
         ts.append(t[keep]); us.append(u[keep])
-        parts.append(tuple(tuple(x.copy() for x in _rows(r, keep)) for r in recs))
+        parts.append(tuple(_rows(r, keep) for r in recs))
         rows += step
         kept += int(keep.sum())
         if 2 * kept >= M or rows >= _GROW * M:
@@ -405,38 +392,52 @@ def _rows(rec, keep):
 #: template groups share one simulation. ~6 MB each at n = 4096.
 _NOISE_RECORDS = OrderedDict()
 _RECORDS_MAX = 16
+#: Records a row the simulation's arrays first have room for, in units of ln L + 3 for a
+#: running maximum over L lags (_simulate).
+_ROOM = 1.0
 
 
 def _simulate(p, n, bands, rows, row0, seed, signal=None, noise=True, keep_at=0.0):
     """Rows row0 .. row0 + rows of the gate model's one simulation (_core.simulate): with
-    signal = (tab, t, fi, pos, val, off) its records outward from the signal (none for a draw
-    whose fine statistic is below keep_at at every lag), and with noise each band's records of
-    the noise alone. A block's draws depend only on its row, so its
-    noise alone is the same whichever call simulates it. Returns (signal counts, noise
-    records or None)."""
+    signal = (tab, t, fi) its records outward from the signal (none for a draw whose fine
+    statistic is below keep_at at every lag), and with noise each band's records of the noise
+    alone. A block's draws depend only on its row, so its noise alone is the same whichever
+    call simulates it. Returns (signal records or None, noise records or None): per statistic
+    and side (fine first, right then left), and per band, the records (pos, val, off)."""
     from . import _core
     scale = (np.sqrt(p) / np.sqrt(2)).astype(np.float32)
     kmax = int(np.flatnonzero(p)[-1]) + 1
     bscale = tuple(float(_SIG / np.sqrt(p[:b].sum())) for b in bands)
     stream = (_DOMAIN_SIGNAL << 32) | (int(seed) & 0xFFFFFFFF)
-    tab, t, fi, spos, sval, soff = signal if signal is not None else (None,) * 6
-    cap = int(rows * (math.log(bands[-1]) + 3)) + 64
-    while True:
-        if noise:
-            npos = tuple(np.empty(cap, np.int32) for _ in bands)
-            nval = tuple(np.empty(cap, np.float32) for _ in bands)
-            noff = tuple(np.empty(rows + 1, np.int64) for _ in bands)
-        else:
-            npos = nval = noff = None
-        sk, nk = _core.simulate(scale, stream, int(row0), int(rows), kmax, tuple(int(b) for b in bands),
-                                bscale, float(_SIG), tab, t, fi, spos, sval, soff, npos, nval, noff,
-                                float(keep_at))
-        if nk is None or min(nk) >= 0:
-            break
-        cap *= 2
-    nrec = None if nk is None else tuple((npos[i][:nk[i]].copy(), nval[i][:nk[i]].copy(), noff[i])
-                                         for i in range(len(bands)))
-    return sk, nrec
+    tab, t, fi = signal if signal is not None else (None,) * 3
+    # Room a row: a side's running maximum over L lags has about ln L + 0.58 records of white
+    # noise (fewer with the signal at its start, two to three times that where the profile makes
+    # neighbouring lags alike). A call that runs out stops at the row that did not fit, and the
+    # rest continue from there with room for the rate the rows before it had, and a quarter more.
+    ns = 2 * (1 + len(bands)) if signal is not None else 0
+    room = [math.log(m) + 3 for m in [n] + list(bands) for _ in (0, 1)] if signal is not None else []
+    room = [_ROOM * c for c in room + ([math.log(bands[-1]) + 3] * len(bands) if noise else [])]
+    parts, done = [], 0
+    while done < rows:
+        todo = rows - done
+        pos = [np.empty(int(c * todo) + 64, np.int32) for c in room]
+        val = [np.empty(x.size, np.float32) for x in pos]
+        off = [np.empty(todo + 1, np.int64) for _ in room]
+        sig = [tuple(x[:ns]) if signal is not None else None for x in (pos, val, off)]
+        noi = [tuple(x[ns:]) if noise else None for x in (pos, val, off)]
+        sk, nk, got = _core.simulate(scale, stream, int(row0 + done), int(todo), kmax,
+                                     tuple(int(b) for b in bands), bscale, float(_SIG), tab,
+                                     None if t is None else t[done:], None if fi is None else fi[done:],
+                                     *sig, *noi, float(keep_at))
+        counts = list(sk or ()) + list(nk or ())
+        parts.append([(pos[q][:counts[q]].copy(), val[q][:counts[q]].copy(), off[q][:got + 1])
+                      for q in range(len(room))])
+        if got < todo:
+            room = [max(c, 1.25 * k / got) if got else 2 * c for c, k in zip(room, counts)]
+        done += got
+    recs = [_join_records([pt[q] for pt in parts]) for q in range(len(room))]
+    return (tuple(recs[:ns]) if signal is not None else None,
+            tuple(recs[ns:]) if noise else None)
 
 
 def _join_records(parts):
