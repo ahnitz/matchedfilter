@@ -317,17 +317,40 @@ def _play(ch, clock, monkeypatch, calls, ran):
     return [ch.play(clock.run, ran) for _ in range(calls)]
 
 
-def test_play_returns_the_preference_and_settles_each_candidate_once(monkeypatch):
+def test_play_returns_the_preference_and_times_second_runs(monkeypatch):
     """Every open play runs each live candidate on the call, the preference's result is the
-    call's, and a candidate's first run is an untimed settling run, once per state."""
+    call's, and each timed run follows an untimed run of the same candidate: running second
+    gains from the run before (a GPU batch 20-30%), so every timed run is a second run."""
     ch = _choice.Choice(("a", "b"), paired=True, minimum=5, cap=10)
     clock, ran = _Clock(lambda c, i: 1.0), set()
     out = _play(ch, clock, monkeypatch, 3, ran)
     assert out == ["result of a"] * 3
     assert ran == {"a", "b"}
-    assert clock.runs[:4] == ["a", "a", "b", "b"]          # settle, then timed, per candidate
-    assert len(clock.runs) == 4 + 2 * 2                    # later plays: one timed run each
-    assert clock.runs[4:6] == ["b", "a"]                   # the order reverses every round
+    assert clock.runs[:4] == ["a", "a", "b", "b"]          # untimed, then timed, per candidate
+    assert clock.runs[4:8] == ["b", "b", "a", "a"]         # the order reverses every round
+    assert len(clock.runs) == 3 * 4
+
+
+def test_running_second_does_not_decide_a_play(monkeypatch):
+    """Equal candidates where a call's first run is cold and its later runs 30% faster (a GPU
+    batch: inputs uploaded, caches warm): neither wins. Timed without a run of its own
+    before it, the candidate run second would win every round it ran second, and lose
+    every other: the 75% rule then never lets a real gain past either."""
+    import time
+    ch = _choice.Choice(("a", "b"), paired=True, minimum=5, cap=10)
+    clock, first = [0.0], [True]
+    monkeypatch.setattr(time, "perf_counter", lambda: clock[0])
+
+    def run(c):
+        clock[0] += 1.0 if first[0] else 0.7
+        first[0] = False
+        return c
+    for _ in range(30):
+        first[0] = True                                  # a new call: its first run is cold
+        ch.play(run, set())
+    assert ch.winner == "a"
+    r = [x / y for x, y in zip(ch.samples["b"], ch.samples["a"])]
+    assert max(r) / min(r) < 1.01, r                     # every round timed two warm runs
 
 
 def test_play_locks_a_clearly_faster_candidate_after_its_confirmation(monkeypatch):
@@ -370,4 +393,4 @@ def test_play_retrials_a_lock(monkeypatch):
     _play(ch, clock, monkeypatch, 3, {"a", "b"})
     assert clock.runs == ["b"] * 3
     _play(ch, clock, monkeypatch, 1, {"a", "b"})            # the 4th call: a new trial
-    assert ch.winner is None and clock.runs[3:] == ["a", "b"]
+    assert ch.winner is None and clock.runs[3:] == ["a", "a", "b", "b"]

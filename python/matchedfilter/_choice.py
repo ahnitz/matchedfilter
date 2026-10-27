@@ -470,15 +470,19 @@ class Choice:
             self._save()
         return self.winner
 
-    def play(self, run: Callable[[Hashable], Any], ran: Optional[set] = None):
+    def play(self, run: Callable[[Hashable], Any], ran: Optional[set] = None,
+             config: Optional[Callable[[Hashable], Hashable]] = None):
         """One call of a paired choice, on its real input: the result of run(candidate).
 
         Locked, the winner runs once. Open, every live candidate runs the same call back to
-        back, each after an untimed settling run the first time it runs (`ran`: the
-        candidates settled so far, kept by the caller with the call's state), the order
-        reversing every round; the timings are a round (round), and the preference's result
-        is returned. While a play runs, every other choice it meets takes its preference
-        untimed (playing()), so trials never nest."""
+        back, each timed run right after an untimed run of the same candidate (it settles a
+        first run's recordings and uploads, and makes every timed run a second run of the
+        call: running second gains from the run before), the order reversing every round;
+        the timings are a round (round), and the preference's result is returned. `ran`
+        collects the configurations that have run (the caller's record of its state). While a play runs, every other choice it meets takes its preference
+        untimed (playing()), so trials never nest. config(candidate) names what a candidate
+        runs on this call: candidates that run alike are run once and share its timing (they
+        can only tie), and `ran` holds configurations."""
         if self.winner is not None and self.retrial and not _PLAYING[0]:
             self.calls += 1
             if self.calls % self.retrial == 0:
@@ -487,20 +491,25 @@ class Choice:
             return run(self.winner if self.winner is not None else self.preference)
         import time
         ran = set() if ran is None else ran
+        config = config or (lambda c: c)
         live = self.live()
         order = live if len(self.samples[live[0]]) % 2 == 0 else live[::-1]
-        out, times = None, {}
+        out, times, by_config, results = None, {}, {}, {}
         _PLAYING[0] = True
         try:
             for c in order:
-                if c not in ran:
+                k = config(c)
+                if k not in by_config:
+                    # an untimed run of the same call first, every time: a call run second
+                    # gains from the first (caches, inputs on the device: a GPU batch ran
+                    # 20-30% faster), so each timed run is a second run, whatever the order
                     run(c)
-                    ran.add(c)
-                t0 = time.perf_counter()
-                res = run(c)
-                times[c] = time.perf_counter() - t0
-                if c == self.preference:
-                    out = res
+                    ran.add(k)
+                    t0 = time.perf_counter()
+                    results[k] = run(c)
+                    by_config[k] = time.perf_counter() - t0
+                times[c] = by_config[k]
+            out = results[config(self.preference)]
         finally:
             _PLAYING[0] = False
         if all(t > 0 for t in times.values()):     # a clock that did not move times nothing
@@ -685,9 +694,8 @@ _CHOICES: Dict[Tuple[str, Hashable], Choice] = {}
 #: calls, on which device) and clear_autotune_cache forgets them; "machine" choices are a
 #: property of the hardware and outlive it. A kind must be declared here before use.
 SCOPES: Dict[str, str] = {
-    "single-device": "workload", "single-batch": "workload", "fused-batch": "workload",
+    "single-device": "workload", "gpu-batch": "workload", "gpu-single": "workload",
     "sparse-way": "machine", "vk-subgroup": "machine", "coarse": "machine", "gateway": "machine",
-    "interleave": "machine",
 }
 
 

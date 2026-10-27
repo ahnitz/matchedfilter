@@ -184,9 +184,9 @@ def get_autotune_state():
 
 def clear_autotune_cache():
     """Forget every workload choice and trial this process made: chain choices, the model's
-    Q15 settings, joint trials (block sizes, chains and screens), the single-device,
-    single-batch and fused-batch device choices, and the CPU forward, Q15 tier-0 and
-    direct-refine prices.
+    Q15 settings, joint trials (block sizes, chains and screens), the single-device choices
+    and the device trials of GPU batches (fusion, follow-ups, interleave), and the CPU forward,
+    Q15 tier-0 and direct-refine prices.
     The next use starts afresh from MF_COST_FILE. Machine state is kept: cost models
     (gatechain._COSTS), correlation prices and the kernel choices a GPU device holds."""
     from . import _trial
@@ -198,6 +198,9 @@ def clear_autotune_cache():
         _prices._DIRECT_PAIR.clear()
     _trial.clear()
     _choice.reset(scope="workload")
+    from . import time_domain
+    time_domain._GPU_LOCKS.clear()
+    time_domain._GPU_RAN.clear()
 
 
 def __getattr__(name):
