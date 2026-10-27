@@ -885,7 +885,7 @@ def test_single_template_calls_choose_the_faster_device_and_agree(monkeypatch):
                                false_dismissal=1e-3, fft_lengths=[2048], binsize=2048)
     for b in (gpu, cpu):
         b.set_reference(w, delta_f=df)
-    from matchedfilter import _choice
+    from matchedfilter import _choice, _settings
     monkeypatch.setattr(_choice, "_CHOICES", {})
     for k, c in enumerate(range(20000, 110000, 7000)):
         kw = dict(windows=slice(c - 9000, c + 9000), binsize=61, threshold=0.0, template_index=k % 5)
@@ -894,7 +894,7 @@ def test_single_template_calls_choose_the_faster_device_and_agree(monkeypatch):
         scale = np.maximum(np.abs(r_c.snr), 1.0)
         assert np.max(np.abs(r_g.snr - r_c.snr) / scale) < 1e-4
     (state,) = _choice.of_kind("single-device").values()
-    assert state.winner in ("gpu", "cpu")
+    assert state.winner in (_settings.DEFAULT, _settings.arm("side", "cpu"))
     assert all(len(v) >= state.minimum for v in state.samples.values())
 
 
