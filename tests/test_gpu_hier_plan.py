@@ -396,9 +396,9 @@ def test_no_phase_orders_work_inside_itself(monkeypatch, feed, way, cascade):
     shared the refine's phase and read its output half-written)."""
     from matchedfilter import _choice
     monkeypatch.setattr(_gpuhier, "shared_view", lambda array, ctx: array)
-    orig = _choice.Choice.next
-    monkeypatch.setattr(_choice.Choice, "next", lambda self: (way, None)
-                        if way in self.candidates else orig(self))       # the sparse way only
+    orig = _choice.Choice.play
+    monkeypatch.setattr(_choice.Choice, "play", lambda self, run, ran=None: run(way)
+                        if way in self.candidates else orig(self, run, ran))   # the sparse way only
     monkeypatch.setenv("MF_BAND_FORWARD", "1" if feed in ("bands", "tier0") else "0")
     ctx = Driver(inplace_feed=feed != "pack", c16=feed in ("tier0", "pack", "inplace"))
     n = 4096

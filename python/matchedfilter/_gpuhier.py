@@ -431,44 +431,62 @@ class HierOps:
             et = held[storage_key]
             ed = c16_data_exp(bands[0], tiers[0][2], et)
         self._last_c16_scale = 2.0 ** (et + ed)         # tier-0 values / this = unscaled
-        way, trial = (self._sparse_way(("hier", n, bands, nd, nt, nbins)) if sparse
-                      else ("dense", None))
-        key = ("hier", n, bands, nd, nt, nbins, layout, feed, way, rw_key is not None, ed,
-               storage_key)
-        table = self._exec_table()
-        rec = table.get(key)
-        fresh = rec is None
-        if fresh:
-            rec = self._hier_record(key, n, tiers, nd, nt, nbins, layout, half, feed, way, rw,
-                                    ed, dv, tv, data, tmpl, claim)
-            table[key] = rec
-        self._cache_touch(key)
-        self._claim(rec.buffers["idx"])          # an earlier result still reading these outputs
-        if fresh:
-            uploads = (True, True, *uploads[2:])
-        self._hier_upload(rec, storage_key, uploads, data, tmpl, tiers, half, et, slot)
-        if rw is not None:
-            # Every row-window table in one upload, each at its section (_hier_record).
-            span = (self._section_offset(rec.buffers, "rw0")
-                    - self._section_offset(rec.buffers, "rw"))
-            tables = [np.ascontiguousarray(rw, np.uint32)] + [band_windows(rw, n, b)
-                                                              for b in bands]
-            packed = np.zeros((len(tables), span // 4), np.uint32)
-            for j, t in enumerate(tables):
-                packed[j, :t.size] = t.reshape(-1)
-            self._x_upload(rec.buffers["rws"], packed, slot)
+        # How a sparse result is read (_sparse_way): a paired choice per call shape, played on
+        # this call (Choice.play) when the call is waited on; each way has its own record.
+        handles = {}
 
-        binds = self._hier_binds(n, tiers, nd, nt, nbins, lo, hi, binsize, shift, t2, half, ed,
-                                 et, rw is not None, layout, claim, data)
-        shape = (nd, nt, nbins)
-        mode = (frac_key, feed in ("tier0", "bands") or banded) if dv is not None else None
-        if handle_out is not None:
-            handle_out.append(HierHandle(
-                key=key, rec=rec, binds=binds, dsig=self._uploaded["data"].get(storage_key),
-                tsig=self._uploaded["tmpl"].get(storage_key), storage=storage_key, shape=shape,
-                sparse=sparse, way=way, claim=claim is not None, mode=mode))
-        return self._hier_run(rec, binds, shape, sparse, way, len(tiers) > 1,
-                              frac_key if dv is not None else None, slot, async_submit, trial)
+        def run(way):
+            key = ("hier", n, bands, nd, nt, nbins, layout, feed, way, rw_key is not None, ed,
+                   storage_key)
+            table = self._exec_table()
+            rec = table.get(key)
+            fresh = rec is None
+            if fresh:
+                rec = self._hier_record(key, n, tiers, nd, nt, nbins, layout, half, feed, way, rw,
+                                        ed, dv, tv, data, tmpl, claim)
+                table[key] = rec
+            self._cache_touch(key)
+            self._claim(rec.buffers["idx"])          # an earlier result still reading these outputs
+            # every way's record takes the call's inputs (a play runs each on this call)
+            up = (True, True, *uploads[2:]) if fresh else uploads
+            self._hier_upload(rec, storage_key, up, data, tmpl, tiers, half, et, slot)
+            if rw is not None:
+                # Every row-window table in one upload, each at its section (_hier_record).
+                span = (self._section_offset(rec.buffers, "rw0")
+                        - self._section_offset(rec.buffers, "rw"))
+                tables = [np.ascontiguousarray(rw, np.uint32)] + [band_windows(rw, n, b)
+                                                                  for b in bands]
+                packed = np.zeros((len(tables), span // 4), np.uint32)
+                for j, t in enumerate(tables):
+                    packed[j, :t.size] = t.reshape(-1)
+                self._x_upload(rec.buffers["rws"], packed, slot)
+
+            binds = self._hier_binds(n, tiers, nd, nt, nbins, lo, hi, binsize, shift, t2, half, ed,
+                                     et, rw is not None, layout, claim, data)
+            shape = (nd, nt, nbins)
+            mode = (frac_key, feed in ("tier0", "bands") or banded) if dv is not None else None
+            if handle_out is not None:
+                handles[way] = (HierHandle(
+                    key=key, rec=rec, binds=binds, dsig=self._uploaded["data"].get(storage_key),
+                    tsig=self._uploaded["tmpl"].get(storage_key), storage=storage_key, shape=shape,
+                    sparse=sparse, way=way, claim=claim is not None, mode=mode))
+            return self._hier_run(rec, binds, shape, sparse, way, len(tiers) > 1,
+                                  frac_key if dv is not None else None, slot, async_submit)
+
+        if not sparse:
+            res, way = run("dense"), "dense"
+        else:
+            ch = self._sparse_way(("hier", n, bands, nd, nt, nbins))
+            way = ch.winner or ch.preference
+            if async_submit:                # a call in flight cannot be timed: no round
+                res = run(way)
+            else:
+                ran = self.__dict__.setdefault("_sparse_ran", {}).setdefault(
+                    ("hier", n, bands, nd, nt, nbins), set())
+                res = ch.play(run, ran)
+        if handle_out is not None and way in handles:
+            handle_out.append(handles[way])
+        return res
 
     def _hier_upload(self, rec, storage_key, uploads, data, tmpl, tiers, half, et, slot):
         """Inputs found stale (_input_uploads): the spectra and templates where the record owns
@@ -699,23 +717,19 @@ class HierOps:
         return binds
 
     def _sparse_way(self, shape):
-        """(way, record or None): how this shape reads a sparse result -- its survivors'
-        rows gathered on the host, or the hits compacted on the device -- an online
-        _choice.Choice per shape, as for flat peaks (_gpuexec.SPARSE_WAYS)."""
+        """How this shape reads a sparse result -- its survivors' rows gathered on the host,
+        or the hits compacted on the device: a paired _choice.Choice per shape, as for flat
+        peaks (_gpuexec.SPARSE_WAYS)."""
         from . import _choice
         from ._gpuexec import SPARSE_WAYS, _SPARSE_SCHEDULE
         return _choice.choice("sparse-way", ("hier",) + tuple(shape), SPARSE_WAYS["hier"],
-                              scope=self.__dict__, **_SPARSE_SCHEDULE).next()
+                              scope=self.__dict__, **_SPARSE_SCHEDULE)
 
     def _hier_run(self, rec, binds, shape, sparse, way, cascade, frac_key, slot,
-                  async_submit, trial=None):
+                  async_submit):
         """Run a recorded call and return its result (a tracked collector when async).
         frac_key: where the call notes its refine-block fraction (a call on shared spectra,
-        banded or not: the next call's band/full choice reads it), or None.
-        trial: the sparse-way choice's record for this call (a synchronous call only)."""
-        import time
-        timed = trial is not None and not async_submit
-        t0 = time.perf_counter()
+        banded or not: the next call's band/full choice reads it), or None."""
         wait = self._exec_submit(rec.native, binds, slot, rec) if async_submit else None
         if wait is None:
             self._exec_run(rec.native, True, binds, slot, rec)
@@ -723,10 +737,7 @@ class HierOps:
         def result():
             if wait is not None:
                 wait()
-            res = self._hier_result(rec, shape, sparse, way, cascade, frac_key)
-            if timed:
-                trial(time.perf_counter() - t0)
-            return res
+            return self._hier_result(rec, shape, sparse, way, cascade, frac_key)
         return self._track(result, owner=rec.buffers["idx"]) if async_submit else result()
 
     def _hier_result(self, rec, shape, sparse, way, cascade, frac_key):

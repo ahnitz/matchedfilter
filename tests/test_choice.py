@@ -297,3 +297,77 @@ def test_a_kind_declares_its_reset_scope(monkeypatch):
     assert _choice.of_kind("x") == {} and _choice.of_kind("hw") == {1: m}
     _choice.reset("hw")
     assert w is not _choice.choice("x", 1, ("p", "q"))
+
+
+class _Clock:
+    """time.perf_counter for Choice.play: each run advances it by its candidate's cost."""
+
+    def __init__(self, cost):
+        self.t, self.cost, self.runs = 0.0, cost, []
+
+    def run(self, c):
+        self.runs.append(c)
+        self.t += self.cost(c, len(self.runs))
+        return "result of %s" % c
+
+
+def _play(ch, clock, monkeypatch, calls, ran):
+    import time
+    monkeypatch.setattr(time, "perf_counter", lambda: clock.t)
+    return [ch.play(clock.run, ran) for _ in range(calls)]
+
+
+def test_play_returns_the_preference_and_settles_each_candidate_once(monkeypatch):
+    """Every open play runs each live candidate on the call, the preference's result is the
+    call's, and a candidate's first run is an untimed settling run, once per state."""
+    ch = _choice.Choice(("a", "b"), paired=True, minimum=5, cap=10)
+    clock, ran = _Clock(lambda c, i: 1.0), set()
+    out = _play(ch, clock, monkeypatch, 3, ran)
+    assert out == ["result of a"] * 3
+    assert ran == {"a", "b"}
+    assert clock.runs[:4] == ["a", "a", "b", "b"]          # settle, then timed, per candidate
+    assert len(clock.runs) == 4 + 2 * 2                    # later plays: one timed run each
+    assert clock.runs[4:6] == ["b", "a"]                   # the order reverses every round
+
+
+def test_play_locks_a_clearly_faster_candidate_after_its_confirmation(monkeypatch):
+    ch = _choice.Choice(("a", "b"), paired=True, minimum=5, cap=10, confirm=True)
+    clock = _Clock(lambda c, i: 1.0 if c == "a" else 0.6)
+    _play(ch, clock, monkeypatch, 30, set())
+    assert ch.winner == "b"
+    n = len(clock.runs)
+    assert _play(ch, clock, monkeypatch, 1, set()) == ["result of b"]
+    assert clock.runs[n:] == ["b"]                         # locked: the winner runs once
+
+
+def test_play_keeps_the_preference_between_equal_candidates(monkeypatch):
+    ch = _choice.Choice(("a", "b"), paired=True, minimum=5, cap=10)
+    clock = _Clock(lambda c, i: 1.0 + 0.01 * (i % 3))
+    _play(ch, clock, monkeypatch, 30, set())
+    assert ch.winner == "a"
+
+
+def test_a_choice_met_inside_a_play_takes_its_preference_untimed(monkeypatch):
+    outer = _choice.Choice(("a", "b"), paired=True, minimum=5, cap=10)
+    inner = _choice.Choice(("x", "y"), paired=True, minimum=5, cap=10)
+    seen = []
+
+    clock = _Clock(lambda c, i: 1.0)
+
+    def run(c):
+        seen.append(inner.play(lambda d: d))
+        return clock.run(c)
+    _play(outer, clock, monkeypatch, 0, set())
+    outer.play(run, set())
+    assert set(seen) == {"x"} and not any(inner.samples.values())
+    assert all(len(v) == 1 for v in outer.samples.values())
+
+
+def test_play_retrials_a_lock(monkeypatch):
+    ch = _choice.Choice(("a", "b"), paired=True, minimum=5, cap=10, retrial=4)
+    ch.lock("b")
+    clock = _Clock(lambda c, i: 1.0)
+    _play(ch, clock, monkeypatch, 3, {"a", "b"})
+    assert clock.runs == ["b"] * 3
+    _play(ch, clock, monkeypatch, 1, {"a", "b"})            # the 4th call: a new trial
+    assert ch.winner is None and clock.runs[3:] == ["a", "b"]
