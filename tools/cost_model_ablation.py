@@ -121,14 +121,16 @@ def audit_case(case, args, gc, mf, cost, signals, noises):
     timing = dict(signal_draws_seconds=0.0, noise_block_maxima_seconds=0.0,
                   candidate_enumeration_seconds=0.0, measured_cost_pricing_seconds=0.0,
                   flop_pricing_seconds=0.0)
-    skey = (identity, snr, fd)
+    skey = (identity, snr, fd, window)
     if skey not in signals:
         # Production allows nearby profiles to share draws. Isolate distinct
         # profiles here so the audit reports sensitivity of each actual input.
         gc._SIGNAL_CACHE.clear()
+        gc._SIGNAL_RECORDS.clear()
+        gc._NOISE_RECORDS.clear()
         gc._SIMILAR.clear()
         start = time.perf_counter()
-        signals[skey] = gc.signal_draws(power, n, bands, snr, nsamp)
+        signals[skey] = gc.signal_draws(power, n, bands, snr, nsamp, window=window)
         timing["signal_draws_seconds"] = time.perf_counter() - start
     sig = signals[skey]
     nkey = (identity, window, args.noise_draws)

@@ -571,11 +571,8 @@ def price_block_sizes(fine, delta_f, data_rate, longest, margin, ntemplates, snr
             hit = (None, None, None)
             if ref is not None:
                 cm = device_costs(n, device, ntemplates)
-                # ranking only: the provisional model (a quarter of the draws, gatechain.
-                # provisional); the plans of the size picked are modelled with every draw
-                with _gc.provisional():
-                    best, _ = _gc.choose_chain(ref, n, snr, fd, cost=cm, max_tiers=max_tiers, window=(lo, n - lo),
-                                               ntemplates=ntemplates, model_f=model_f)
+                best, _ = _gc.choose_chain(ref, n, snr, fd, cost=cm, max_tiers=max_tiers, window=(lo, n - lo),
+                                           ntemplates=ntemplates, model_f=model_f)
                 if best is not None:
                     hit = (cm.block, best["cost"], best["chain"])
             _gc._cache_put(_gc._PRICE_CACHE, key, hit)

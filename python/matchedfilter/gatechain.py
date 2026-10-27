@@ -72,33 +72,10 @@ _SPLIT_COARSE = np.linspace(0.05, 0.95, 9)
 
 _SIGNAL_CACHE = OrderedDict()
 
-#: Noise blocks of a provisional model (provisional(): block-size pricing, which compares
-#: sizes of which a bank keeps one): a quarter. The noise only prices a chain (its tiers' pass rates);
-#: the false-dismissal budget rests on the signal draws, which keep their full count -- they
-#: are shared with the plans of the size picked. Both are one simulation's blocks (_simulate):
-#: a full model of the same profile reads or extends the provisional one's, whose blocks are
-#: its first.
-_PROVISIONAL_FRACTION = 4
-_provisional_depth = [0]
-
-
-@contextmanager
-def provisional(on=True):
-    """While on, choose_chain and chain_thresholds default to the provisional draw counts."""
-    _provisional_depth[0] += 1 if on else 0
-    try:
-        yield
-    finally:
-        _provisional_depth[0] -= 1 if on else 0
-
-
 def model_draws(fd):
-    """(signal draws, noise blocks) the model runs with at budget fd: the full counts, or with a
-    quarter of the noise blocks inside provisional()."""
-    nsamp, nsim = _gm._nsamp_for(fd), 20000
-    if _provisional_depth[0] > 0:
-        nsim //= _PROVISIONAL_FRACTION
-    return nsamp, nsim
+    """(signal draws, noise blocks) the model runs with at budget fd. The noise blocks are the
+    first of the signal simulation's draws (_simulate), so they cost nothing more."""
+    return _gm._nsamp_for(fd), 20000
 
 _NOISE_CACHE = OrderedDict()
 _CACHE_MAX = 64
@@ -531,8 +508,7 @@ def _noise_records(p, n, bands, nsim, seed):
 
     The blocks are signal_draws' (_simulate), so a simulation of fewer blocks is a prefix of
     one of more: a request reads the prefix of a larger simulation held (a signal
-    simulation's included), or extends a smaller one (a provisional model's 5000 blocks are
-    the first of its full model's 20000)."""
+    simulation's included), or extends a smaller one."""
     key = _key(p, n, bands, seed)
     hit = _NOISE_RECORDS.get(key)
     if hit is not None:

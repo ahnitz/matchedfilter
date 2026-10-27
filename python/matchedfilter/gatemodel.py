@@ -47,13 +47,6 @@ gate_for and dismissal, the quantities the validation above is stated in.
 """
 import numpy as np
 
-#: Lag half-widths. The in-band correlation decays over ~n/B_eff samples,
-#: a few coarse steps in the validated broad-band cases: nb=12/w=6 and
-#: nb=4/w=3 agreed to 0.6% there. This is a local approximation, not a
-#: convergence guarantee for arbitrary narrow bands; see docs/gate-model.md.
-_NB = 4                      # coarse grid lags either side
-_W = 3                       # fine integer lags either side
-
 #: Per-component variance is 1, so a complex draw normalised to E|z|^2 = 1
 #: is scaled by this. See the noise-convention note above.
 _SIG = np.sqrt(2.0)
