@@ -126,7 +126,9 @@ class Trial:
 
     @property
     def arms(self):
-        return self.choice.candidates
+        """Every arm the trial has offered, pass by pass (the first pass's first)."""
+        self.choice                                         # the passes reached so far
+        return tuple(dict.fromkeys(a for ch in self._passes.values() for a in ch.candidates))
 
     def live(self):
         return self.choice.live()
