@@ -1423,7 +1423,7 @@ class MatchedFilter:
         objs = (layout, self._gpu, self._gtmpl, self.__dict__.get("_resolved"),
                 self.__dict__.get("_ct"), self.__dict__.get("_ckey"),
                 None if ws is None else ws[2], None if ws is None else ws[3])
-        from ._gpusettings import fingerprint
+        from ._settings import fingerprint
         vals = (int(binsize), float(threshold), t0, nt, self.__dict__.get("_series_batch_bytes"),
                 _config.get("MF_GPU_QUEUE_AHEAD"),
                 bool(self.__dict__.get("_want_sparse", False)), fingerprint())
@@ -1449,7 +1449,7 @@ class MatchedFilter:
         if (not plans or not raw or self._tdirty or not getattr(self, "_defer_series", False)):
             return None
         d = self.__dict__
-        from ._gpusettings import fingerprint
+        from ._settings import fingerprint
         vals = (int(binsize), float(threshold), t0, nt, d.get("_series_batch_bytes"),
                 _config.get("MF_GPU_QUEUE_AHEAD"), bool(d.get("_want_sparse", False)),
                 fingerprint())

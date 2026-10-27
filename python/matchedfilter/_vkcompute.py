@@ -500,7 +500,7 @@ def _fused_valid(ctx, cmds, serials):
             and all(phases.get(h, {}).get("_serial") == k for h, k in zip(cmds, serials)))
 
 
-#: Interleave depths of a fused batch the device trial plays (time_domain.gpu_setting): 0 is
+#: Interleave depths of a fused batch the device trial plays (_settings.setting): 0 is
 #: lockstep; 3 puts the second half's forward (DRAM-bound) beside the first half's coarse0
 #: (VALU-bound).
 _INTERLEAVE_CANDIDATES = (0, 3)
@@ -588,14 +588,14 @@ class _FusedBatch:
         # The same jobs recur every segment: reuse their fused recording while every
         # constituent recording is still cached (eviction drops its phases).
         base = _fused_key(self.items)
-        # The interleave depth is the device trial's (time_domain.gpu_setting "interleave":
+        # The interleave depth is the device trial's (_settings.setting "interleave":
         # played on real batches with the batch's other GPU settings), lockstep (0) unless a
         # deeper interleave was clearly faster; MF_GPU_FUSE_INTERLEAVE forces one.
         forced = _fuse_interleave()
         if forced is not None or len(self.items) < 2:
             k = forced or 0
         else:
-            from ._gpusettings import gpu_setting
+            from ._settings import setting as gpu_setting
             k = int(gpu_setting("interleave"))
         key = (base, k)
         cache = dev.__dict__.setdefault("fused_cache", OrderedDict())

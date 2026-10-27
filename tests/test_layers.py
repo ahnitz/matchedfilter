@@ -18,7 +18,7 @@ EXTENSIONS = {"_core"}
 LAYERS = (
     ("foundation", {"_config", "_errors", "_kernel_dirs", "_kernel_id", "_series", "_gpu_cache",
                     "_gputime", "_coarse", "_shared", "_execution_policy", "_choice",
-                    "_costfile", "_results", "_windows", "_peaks", "_gpusettings"}),
+                    "_costfile", "_results", "_windows", "_peaks", "_settings"}),
     ("platform", {"_cuda", "_metal", "_vulkan", "device", "_vksubgroup"}),
     ("models", {"gatemodel", "gatechain", "_chains", "_prices", "_trial"}),
     ("gpu host", {"_gpuhost", "_gpuhier", "_gpuexec"}),

@@ -149,9 +149,9 @@ def test_batched_follow_ups_choose_their_device_by_batch(device, monkeypatch, tm
     for r in rows:
         r[:] = (rng.standard_normal(S) + 1j * rng.standard_normal(S)).astype(np.complex64)
     sides = []
-    orig = td.gpu_setting
-    monkeypatch.setattr(td, "gpu_setting", lambda name, device=None: (lambda r: (
-        sides.append(r) if name == "single" else None) or r)(orig(name, device)))
+    orig = td._settings.setting
+    monkeypatch.setattr(td._settings, "setting", lambda name, device=None, default=None: (lambda r: (
+        sides.append(r) if name == "single" else None) or r)(orig(name, device, default)))
     # Batches until the device trial locks, at most its own limit (Choice.limit: its rounds'
     # cap) and a confirmation, however noisy the timings.
     batches = 0

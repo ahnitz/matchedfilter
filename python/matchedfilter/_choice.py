@@ -24,7 +24,7 @@ it are what unpaired comparisons mistook for a difference.
 
 The offline decide remains where a real call cannot carry a candidate: the screens that
 time kernel layouts on synthetic dispatches and keep pathological ones off the device (their
-fastest two are played on real batches, time_domain.kernel_slot), and the Vulkan subgroup
+fastest two are played on real batches, _settings.slot), and the Vulkan subgroup
 size, fixed when the device's pipelines are built (measured in subprocesses, one size each).
 
 The state lives in a scope: the process registry by default, or the dict a caller passes
@@ -34,16 +34,23 @@ On file, a choice is one record "choice|<store_key>": {"value": label, "median":
 """
 import sys
 import threading
+from contextlib import contextmanager
 from typing import Any, Callable, Dict, Hashable, Optional, Sequence, Tuple
 
 import numpy as np
 
 from . import _config
 
-#: Rounds before a first decision, and the most an unclear contest takes (the joint trial's,
-#: _trial.ROUNDS and ROUND_CAP).
+#: Rounds before a first decision, and the most an unclear contest takes: every choice's
+#: schedule (MF_TRIAL_ROUNDS sets the first, the cap following at twice it; rounds()).
 MINIMUM = 5
 CAP = 10
+
+
+def rounds() -> Tuple[int, int]:
+    """(minimum, cap) of rounds: MINIMUM and CAP, or MF_TRIAL_ROUNDS and twice it."""
+    base = max(2, int(_config.get("MF_TRIAL_ROUNDS", MINIMUM)))
+    return base, (CAP if base == MINIMUM else 2 * base)
 
 
 _AUTOTUNE_LOCK = threading.Lock()
@@ -53,8 +60,20 @@ _PLAYING = [False]
 
 
 def playing() -> bool:
-    """Whether a paired play is running its candidates (Choice.play)."""
+    """Whether a trial is running its candidates (Choice.play, a joint round's replays):
+    every choice met meanwhile takes its preference untimed, and no trial nests in it."""
     return _PLAYING[0]
+
+
+@contextmanager
+def held():
+    """A trial runs its candidates (playing() is True inside)."""
+    was = _PLAYING[0]
+    _PLAYING[0] = True
+    try:
+        yield
+    finally:
+        _PLAYING[0] = was
 
 
 def _log_autotune(msg, *args):
@@ -199,7 +218,8 @@ class Choice:
     with many candidates one passes the rule on noise more often than one does."""
 
     def __init__(self, candidates: Sequence[Hashable] = (), store_key: Optional[str] = None,
-                 what: Optional[str] = None, minimum: int = MINIMUM, cap: int = CAP,
+                 what: Optional[str] = None, minimum: Optional[int] = None,
+                 cap: Optional[int] = None,
                  tie: Optional[float] = None, z: Optional[float] = None,
                  retrial: Optional[int] = None, label: Optional[Callable[[Any], Any]] = None,
                  parse: Optional[Callable[[str], Any]] = None, recheck_stored: bool = False,
@@ -214,7 +234,9 @@ class Choice:
         self.store_key, self.what = store_key, what or store_key or "choice"
         self.label = label if label is not None else (lambda c: c)
         self._parse = parse
-        self.minimum, self.cap = int(minimum), int(cap)
+        base, top = rounds()
+        self.minimum = int(base if minimum is None else minimum)
+        self.cap = int(top if cap is None else cap)
         self.tie, self.z, self.retrial, self.calls = tie, z, retrial, 0
         self.budget, self.paired = budget, bool(paired)
         self.confirm, self.confirming = bool(confirm), None
@@ -376,8 +398,7 @@ class Choice:
         live = self.live()
         order = live if len(self.samples[live[0]]) % 2 == 0 else live[::-1]
         out, times, by_config, results = None, {}, {}, {}
-        _PLAYING[0] = True
-        try:
+        with held():
             for c in order:
                 k = config(c)
                 if k not in by_config:
@@ -391,8 +412,6 @@ class Choice:
                     by_config[k] = time.perf_counter() - t0
                 times[c] = by_config[k]
             out = results[config(self.preference)]
-        finally:
-            _PLAYING[0] = False
         if all(t > 0 for t in times.values()):     # a clock that did not move times nothing
             self.round(times)
         return out

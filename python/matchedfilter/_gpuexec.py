@@ -859,8 +859,8 @@ class Executor(HierOps):
         # and the records) or read dense and scanned on the host. Which is cheaper depends on
         # how many bins clear the threshold and on what a byte of readback costs here (a
         # bus, or nothing on unified memory): measured per call shape.
-        # A kernel slot of the device trial, played on whole batches (time_domain.kernel_slot).
-        from ._gpusettings import kernel_slot
+        # A kernel slot of the device trial, played on whole batches (_settings.slot).
+        from ._settings import slot as kernel_slot
         holder = getattr(self, "_device_state", None) or self
         name = (getattr(holder, "device_name", "") or getattr(self, "device_name", "")
                 or getattr(self, "name", ""))

@@ -394,10 +394,10 @@ def test_no_phase_orders_work_inside_itself(monkeypatch, feed, way, cascade):
     """A fused batch runs a phase's commands unordered, its barriers at the phase's end: a
     barrier between two pieces of one phase's work would be dropped (device compaction once
     shared the refine's phase and read its output half-written)."""
-    from matchedfilter import _gpusettings as td
+    from matchedfilter import _settings
     monkeypatch.setattr(_gpuhier, "shared_view", lambda array, ctx: array)
-    orig = td.kernel_slot
-    monkeypatch.setattr(td, "kernel_slot", lambda dev, what, band, d, alt: way
+    orig = _settings.slot
+    monkeypatch.setattr(_settings, "slot", lambda dev, what, band, d, alt: way
                         if what == "sparse" and way in (d, alt) else orig(dev, what, band, d, alt))
     monkeypatch.setenv("MF_BAND_FORWARD", "1" if feed in ("bands", "tier0") else "0")
     ctx = Driver(inplace_feed=feed != "pack", c16=feed in ("tier0", "pack", "inplace"))
