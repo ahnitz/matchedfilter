@@ -165,7 +165,7 @@ class Choice:
                  what: Optional[str] = None, minimum: Optional[int] = None,
                  cap: Optional[int] = None,
                  tie: Optional[float] = None,
-                 retrial: Optional[int] = None, label: Optional[Callable[[Any], Any]] = None,
+                 label: Optional[Callable[[Any], Any]] = None,
                  parse: Optional[Callable[[str], Any]] = None,
                  budget: Optional[Tuple[int, int]] = None, confirm: bool = False):
         if len(set(candidates)) != len(candidates):
@@ -180,7 +180,7 @@ class Choice:
         base, top = rounds()
         self.minimum = int(base if minimum is None else minimum)
         self.cap = int(top if cap is None else cap)
-        self.tie, self.retrial, self.calls = tie, retrial, 0
+        self.tie = tie
         self.budget = budget
         self.confirm, self.confirming = bool(confirm), None
         self.winner = None
@@ -240,13 +240,6 @@ class Choice:
 
     def live(self):
         return [c for c in self.candidates if c not in self.dropped]
-
-    def restart(self) -> None:
-        """A re-trial: the contest starts afresh, and its lock replaces the stored one."""
-        self.winner, self.median, self.attempts, self.confirming = None, None, 0, None
-        self.samples = {c: [] for c in self.candidates}
-        self.dropped = set()
-        self._replace = True
 
     def tick(self):
         """One attempt at a round (a call run for the contest that could not be one): once
@@ -324,14 +317,11 @@ class Choice:
         first run's recordings and uploads, and makes every timed run a second run of the
         call: running second gains from the run before), the order reversing every round;
         the timings are a round (round), and the preference's result is returned. `ran`
-        collects the configurations that have run (the caller's record of its state). While a play runs, every other choice it meets takes its preference
-        untimed (playing()), so trials never nest. config(candidate) names what a candidate
+        collects the configurations that have run (the caller's record of its state). While a
+        play runs, every other choice it meets takes its preference untimed (playing()), so
+        trials never nest. config(candidate) names what a candidate
         runs on this call: candidates that run alike are run once and share its timing (they
         can only tie), and `ran` holds configurations."""
-        if self.winner is not None and self.retrial and not _PLAYING[0]:
-            self.calls += 1
-            if self.calls % self.retrial == 0:
-                self.restart()
         if self.winner is not None or _PLAYING[0]:
             return run(self.winner if self.winner is not None else self.preference)
         import time

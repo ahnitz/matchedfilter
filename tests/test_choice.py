@@ -119,30 +119,6 @@ def test_a_dropped_candidate_leaves_the_contest():
     assert _rounds(ch, lambda c, i: {"a": 1.0, "b": 0.5, "c": 0.1}[c]) == "b"
 
 
-def test_a_retrial_starts_the_contest_again(monkeypatch):
-    """A lock made under passing load does not stick: `retrial` plays after a lock the
-    candidates are timed again, and the new contest can lock the other one."""
-    ch = _choice.Choice(("a", "b"), retrial=4)
-    ch.lock("a")
-    import time
-    clock = [0.0]
-    monkeypatch.setattr(time, "perf_counter", lambda: clock[0])
-    cost = {"a": 3.0, "b": 2.0}
-
-    def run(c):
-        clock[0] += cost[c]
-        return c
-    for _ in range(3):
-        assert ch.play(run, set()) == "a" and ch.winner == "a"
-    ch.play(run, set())                                  # the 4th call: a new contest
-    assert ch.winner is None
-    for _ in range(40):
-        if ch.winner is not None:
-            break
-        ch.play(run, set())
-    assert ch.winner == "b"
-
-
 @pytest.mark.parametrize("kw", [dict(), dict(cap=7), dict(budget=(2, 1)), dict(minimum=3, cap=4)])
 def test_a_contest_that_never_resolves_locks_within_its_limit(kw):
     """Choice.limit bounds the calls a contest takes, whatever its timings: rounds that never
@@ -256,13 +232,3 @@ def test_a_choice_met_inside_a_play_takes_its_preference_untimed(monkeypatch):
     outer.play(run, set())
     assert set(seen) == {"x"} and not any(inner.samples.values())
     assert all(len(v) == 1 for v in outer.samples.values())
-
-
-def test_play_retrials_a_lock(monkeypatch):
-    ch = _choice.Choice(("a", "b"), minimum=5, cap=10, retrial=4)
-    ch.lock("b")
-    clock = _Clock(lambda c, i: 1.0)
-    _play(ch, clock, monkeypatch, 3, {"a", "b"})
-    assert clock.runs == ["b"] * 3
-    _play(ch, clock, monkeypatch, 1, {"a", "b"})            # the 4th call: a new trial
-    assert ch.winner is None and clock.runs[3:] == ["a", "a", "b", "b"]
