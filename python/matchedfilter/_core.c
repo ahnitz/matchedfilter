@@ -1198,18 +1198,24 @@ static PyObject *M_gauss_fill(PyObject *self,PyObject *args){
 #if defined(__x86_64__) && defined(__ELF__) && defined(__GNUC__)
 __attribute__((target_clones("avx512f","avx2","default")))
 #endif
-static void sr_power(const float *restrict y, const float *restrict d, float g, long long m, float *restrict A){
+static float sr_power(const float *restrict y, const float *restrict d, float g, long long m, float *restrict A){
+  /* the largest A, as a maximum of bit patterns: for non-negative floats they order as the
+     values do, and an integer maximum vectorises where a float one (NaN rules) does not */
+  uint32_t mx=0;
   if(d){
     for(long long e=0;e<m;e++){
       const float re=g*y[2*e]+d[2*e], im=g*y[2*e+1]+d[2*e+1];
-      A[e]=re*re+im*im;
+      const float v=re*re+im*im; uint32_t u; memcpy(&u,&v,4);
+      A[e]=v; mx = u>mx ? u : mx;
     }
   } else {
     for(long long e=0;e<m;e++){
       const float re=g*y[2*e], im=g*y[2*e+1];
-      A[e]=re*re+im*im;
+      const float v=re*re+im*im; uint32_t u; memcpy(&u,&v,4);
+      A[e]=v; mx = u>mx ? u : mx;
     }
   }
+  float r; memcpy(&r,&mx,4); return r;
 }
 /* One statistic's running-maximum records outward from the signal (simulate): the
    values a[e0], a[e0 + dir], ... (L of them), each exceeding all before it (the first always)
@@ -1220,11 +1226,12 @@ static inline int sr_records(const float *a, long long e0, int dir, long long L,
                              int32_t *pos, float *val, long long *k, long long cap){
   float best=-1.f; long long i=0;
   while(i<L){
-    if(L-i>=16){
+    if(L-i>=16 && best>=0.f){
+      /* the block's maximum as a bit maximum (the values are squares: non-negative) */
       const float *q = dir>0 ? a+e0+i : a+e0-i-15;
-      float mx=q[0];
-      for(int j=1;j<16;j++) mx = q[j]>mx ? q[j] : mx;
-      if(mx<=best){ i+=16; continue; }
+      uint32_t mx=0, bb; memcpy(&bb,&best,4);
+      for(int j=0;j<16;j++){ uint32_t u; memcpy(&u,&q[j],4); mx = u>mx ? u : mx; }
+      if(mx<=bb){ i+=16; continue; }
     }
     const long long stop = i+16<L ? i+16 : L;
     for(;i<stop;i++){
@@ -1357,11 +1364,9 @@ static PyObject *M_simulate(PyObject *self,PyObject *args){
            per phase rho = t - js R, its values in that order (tab[f, s, rho m + e]) */
         const long long R = n/m, t=tv[r], js = t/R;
         const float *D = tab+(size_t)2*fi[r]*(1+nb)*n + (size_t)2*s*n + (size_t)2*(t - js*R)*m;
-        sr_power(Y+2*js,D,g,m-js,A);
-        sr_power(Y,D+2*(m-js),g,js,A+(m-js));
+        const float m1=sr_power(Y+2*js,D,g,m-js,A), m2=sr_power(Y,D+2*(m-js),g,js,A+(m-js));
         if(s==0 && keep2>0.f){
-          float mx=0.f;
-          for(long long e=0;e<m;e++) mx = A[e]>mx ? A[e] : mx;
+          const float mx = m1>m2 ? m1 : m2;
           if(mx<keep2){
             /* no window keeps this draw: no records, and no band's signal pass */
             kept=0;
