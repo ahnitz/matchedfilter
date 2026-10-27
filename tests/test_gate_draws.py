@@ -107,6 +107,49 @@ def test_every_isa_draws_the_same_integers():
         np.testing.assert_array_equal(got["AVX3"], got["AVX2"])
 
 
+def _records_one_at_a_time(a, e0, step, L, d0):
+    best, pos, val = -1.0, [], []
+    for i in range(L):
+        x = a[e0 + step * i]
+        if x > best:
+            best = x
+            pos.append(i + d0)
+            val.append(np.sqrt(np.float32(x)))
+    return np.array(pos, np.int32), np.array(val, np.float32)
+
+
+def test_the_records_are_those_of_a_scan_one_value_at_a_time():
+    """simulate's running-maximum records (src/records.cc: 16 values at a time, every record of
+    a block at once) are exactly a scan of one value at a time's, both ways, on white noise,
+    on a rising run (every value a record), with ties, zeros and NaNs (never records), at any
+    length; and arrays one entry too short report it."""
+    rng = np.random.default_rng(3)
+    smooth = np.convolve(rng.exponential(size=700), np.ones(40), "same")
+    ties = np.round(rng.exponential(size=700) * 4) / 4
+    rising = np.cumsum(rng.exponential(size=700))
+    nan = rng.exponential(size=700)
+    nan[rng.integers(0, 700, 60)] = np.nan
+    zeros = np.where(rng.random(700) < 0.5, 0.0, rng.exponential(size=700))
+    zeros[:20] = 0.0
+    cases = [rng.exponential(size=700), smooth, ties, rising, nan, zeros, np.zeros(700)]
+    for c, a in enumerate(cases):
+        a = np.ascontiguousarray(a, np.float32)
+        for L in (0, 1, 15, 16, 17, 31, 32, 33, 100, 511, 699):
+            for e0, step, d0 in ((0, 1, 0), (3, 1, 5), (699, -1, 1), (L - 1, -1, 0)):
+                if L == 0 or e0 < 0 or (step > 0 and e0 + L > a.size) or (step < 0 and e0 - L < -1):
+                    continue
+                pos, val = _records_one_at_a_time(a, e0, step, L, d0)
+                gp, gv = np.empty(L + 1, np.int32), np.empty(L + 1, np.float32)
+                k = _core.running_records(a, e0, step, L, d0, gp, gv)
+                where = "case %d L %d e0 %d dir %d" % (c, L, e0, step)
+                assert k == pos.size, where
+                np.testing.assert_array_equal(gp[:k], pos, err_msg=where)
+                np.testing.assert_array_equal(gv[:k].view(np.uint32), val.view(np.uint32), err_msg=where)
+                if k:
+                    short = k - 1
+                    assert _core.running_records(a, e0, step, L, d0, gp[:short], gv[:short]) == -1, where
+
+
 def _profile(n):
     p = np.exp(-np.arange(n) / (n / 7.0)) + 1e-4
     p[: n // 100] = 0
