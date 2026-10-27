@@ -106,6 +106,8 @@ far below the dismissal budget's 1e-3.
 
 ### Paired false-dismissal audit (tools/verify_cascade_fdr.py)
 
+(The tool has since been folded into `tools/fdr_audit.py`.)
+
 Run with `--shapes all --injections 20000 --seed 42` in each mode. The figures are misses among
 about 11.5k ground-truth fine detections per shape; the budget is 0.1%, about 11.5 misses.
 
