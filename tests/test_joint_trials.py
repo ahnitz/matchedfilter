@@ -227,16 +227,56 @@ def test_a_winner_on_noise_is_not_confirmed(clock):
 
 
 def test_labels_round_trip():
-    """Every dimension's arms read back to themselves (_settings: one grammar for every trial);
-    a label that names no dimension or no value is not an arm."""
-    from matchedfilter import _settings
+    """Every dimension's arms read back to themselves (_settings: one grammar for every trial),
+    one move or several in DIMS order; a label that names no dimension or no value, or spells
+    an arm out of order, is not an arm."""
     for label in (_settings.DEFAULT, "n=2048", "n=model", "q15=1", "q15=0", "fuse=0",
-                  "interleave=3", "single=cpu", "side=cpu", "kern:coarse:256=tierb_256_c16w@64"):
-        d, v = _settings.parse_arm(label)
-        assert (d == _settings.DEFAULT and label == d) or _settings.arm(d, v) == label
-    for bad in ("chain=2048:256", "chain=+1", "blocks=2", "q15=2", "single=tpu", "n=", "fuse"):
+                  "interleave=3", "single=cpu", "side=cpu", "kern:coarse:256=tierb_256_c16w@64",
+                  "n=4096,q15=0", "fuse=0,interleave=3,kern:coarse:256=tierb_256_c16w@64"):
+        assert _settings.compose(_settings.moves(label)) == label
+    assert _settings.moves("n=4096,q15=0") == {"n": 4096, "q15": False}
+    for bad in ("chain=2048:256", "chain=+1", "blocks=2", "q15=2", "single=tpu", "n=", "fuse",
+                "q15=0,n=4096", "n=4096,n=2048", "n=4096,"):
         with pytest.raises(ValueError):                    # chains are never arms
-            _settings.parse_arm(bad)
+            _settings.moves(bad)
+
+
+def test_a_pass_offers_the_winner_with_each_undecided_dimension_moved():
+    proposals = ["n=4096", "n=model", "q15=1", "q15=0"]
+    assert _settings.around(_trial.DEFAULT, proposals) == [_trial.DEFAULT] + proposals
+    assert _settings.around("n=4096", proposals) == ["n=4096", "n=4096,q15=1", "n=4096,q15=0"]
+    assert _settings.around("n=4096,q15=0", proposals) == ["n=4096,q15=0"]
+
+
+def test_a_move_that_wins_only_after_another_is_found_by_the_next_pass(clock):
+    """The screen off loses at the default size and wins at n=4096: the first pass locks
+    n=4096, the pass around it locks the screen off there, and the search ends on both."""
+    conf = {_trial.DEFAULT: "a", "n=4096": "b", "q15=0": "c", "n=4096,q15=0": "d"}
+    s = _Subject(clock, conf, {"a": 1.0, "b": 0.8, "c": 1.2, "d": 0.6})
+    tr, _ = _drive(s, ["n=4096", "q15=0"])
+    assert tr.winner == "n=4096,q15=0" and s.locked == tr.winner
+    s = _Subject(clock, conf, {"a": 1.0, "b": 0.8, "c": 1.2, "d": 0.82})
+    mf.clear_autotune_cache()
+    tr, _ = _drive(s, ["n=4096", "q15=0"])                 # a tie around n=4096 keeps it
+    assert tr.winner == "n=4096" and s.locked == "n=4096"
+
+
+def test_each_pass_is_kept_and_an_open_pass_is_resumed(clock, monkeypatch, tmp_path):
+    monkeypatch.setenv("MF_COST_FILE", str(tmp_path / "c.json"))
+    conf = {_trial.DEFAULT: "a", "n=4096": "b", "n=4096,q15=0": "d"}
+    s = _Subject(clock, conf, {"a": 1.0, "b": 0.8, "d": 0.6})
+    tr = _trial.trial("t|unit", lambda: ["n=4096", "q15=0"])
+    while tr.base == _trial.DEFAULT:
+        _trial.run_round(tr, [s], s.replay, 1.0)
+    assert tr.winner is None and tr.base == "n=4096"
+    _trial.clear()
+    assert _trial.winner("t|unit") is None                 # the pass around n=4096 is open
+    tr = _trial.trial("t|unit", lambda: ["n=4096", "q15=0"])
+    assert tr.base == "n=4096"                             # resumed there, not from DEFAULT
+    while tr.winner is None:
+        _trial.run_round(tr, [s], s.replay, 1.0)
+    _trial.clear()
+    assert _trial.winner("t|unit") == "n=4096,q15=0"
 
 
 # ---- banks ------------------------------------------------------------------------------------
@@ -311,7 +351,8 @@ def test_a_bank_adopts_a_persisted_lock_without_pricing(monkeypatch, tmp_path):
         pytest.skip("the model offered one block size only")
     key = td._trial_key(bank)
     smallest = bank._trial_cands[0]
-    _costfile._store_cost(str(tmp_path / "costs.json"), "choice|joint|" + key, {"value": "q15=0"})
+    for k in ("choice|joint|" + key, "choice|joint|%s|q15=0" % key):          # a finished search
+        _costfile._store_cost(str(tmp_path / "costs.json"), k, {"value": "q15=0"})
     mf.clear_autotune_cache()                                          # a new process
     from matchedfilter import _calibration
     priced = []
@@ -332,6 +373,8 @@ def test_a_banks_size_lock_builds_that_size():
     other = bank._trial_cands[1]
     tr = _trial.trial(td._trial_key(bank), bank._joint_arms)
     tr.choice.lock(_settings.arm("n", other))
+    tr.choice.lock(tr.base)                               # the pass around it keeps it
+    assert tr.winner == _settings.arm("n", other)
     again, _ = _inspiral_bank()
     assert {n for _, n in again.chosen_layout} == {other} and again._layouts is None
 

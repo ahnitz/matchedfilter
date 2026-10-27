@@ -1,8 +1,11 @@
 """Every tunable dimension the library measures, and the settings in force.
 
 A dimension is declared once (DIMS): its name, how its values read and print, its default and
-its scope. An arm of a trial is a label: DEFAULT, every dimension at its default, or one
-dimension moved, "<dim>=<value>" (arm, parse_arm). One grammar for every trial:
+its scope. An arm of a trial is a label: DEFAULT, every dimension at its default, or the dimensions it
+moves, "<dim>=<value>[,<dim>=<value>...]" in DIMS order (compose, moves). A trial's first
+pass offers DEFAULT and arms that move one dimension; when it locks another arm, the next
+pass offers that arm and the arm with each remaining dimension moved (around), until a pass
+keeps its base (_trial.current_pass). One grammar for every trial:
 
   * "subject" dimensions are resolved by each instance a trial runs on -- a bank's block size
     "n" (its layouts), a plan's screen "q15" -- through its arm_config / use_arm / lock_arm;
@@ -18,7 +21,7 @@ layer and the backends, which read it; the trials that decide it are above (time
 _trial).
 """
 from contextlib import contextmanager
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional
 
 #: The arm with every dimension at its default: a trial's preference.
 DEFAULT = "default"
@@ -80,39 +83,65 @@ def dim(name) -> Dim:
     raise ValueError("not a tunable dimension: %r" % (name,))
 
 
+def _order(name):
+    # declared dimensions in DIMS order, then kernel slots by name: one spelling per arm
+    names = list(DIMS)
+    return (0, names.index(name), "") if name in DIMS else (1, 0, str(name))
+
+
+def compose(moved: Dict[str, object]) -> str:
+    """The arm moving each dimension in `moved` to its value (DEFAULT when none)."""
+    if not moved:
+        return DEFAULT
+    return ",".join("%s=%s" % (d, dim(d).show(moved[d])) for d in sorted(moved, key=_order))
+
+
 def arm(name, value) -> str:
     """The arm moving one dimension to value."""
-    return "%s=%s" % (name, dim(name).show(value))
+    return compose({name: value})
 
 
-def parse_arm(label) -> Tuple[str, object]:
-    """(dimension, value) of an arm label, or (DEFAULT, None). Raises ValueError for a label
+def moves(label) -> Dict[str, object]:
+    """{dimension: value} the arm moves (empty for DEFAULT). Raises ValueError for a label
     that names no arm."""
     s = str(label)
     if s == DEFAULT:
-        return DEFAULT, None
-    name, eq, v = s.partition("=")
-    if not eq:
-        raise ValueError("not a trial arm: %r" % s)
-    try:
-        return name, dim(name).parse(v)
-    except (TypeError, ValueError):
-        raise ValueError("not a trial arm: %r" % s)
+        return {}
+    out = {}
+    for part in s.split(","):
+        name, eq, v = part.partition("=")
+        if not eq or name in out:
+            raise ValueError("not a trial arm: %r" % s)
+        try:
+            out[name] = dim(name).parse(v)
+        except (TypeError, ValueError):
+            raise ValueError("not a trial arm: %r" % s)
+    if compose(out) != s:
+        raise ValueError("not a trial arm (not in canonical order): %r" % s)
+    return out
 
 
 def valid(label) -> Optional[str]:
     """label when it names an arm, else None (a stored value of another build)."""
     try:
-        parse_arm(label)
+        moves(label)
     except ValueError:
         return None
     return str(label)
 
 
-def moves(label) -> Dict[str, object]:
-    """{dimension: value} the arm moves (empty for DEFAULT)."""
-    name, value = parse_arm(label)
-    return {} if name == DEFAULT else {name: value}
+def around(base, proposals) -> list:
+    """A coordinate pass's arms: base, then base with each proposal (an arm) applied whose
+    dimensions base has not moved -- the dimensions a previous pass decided stay put."""
+    held = moves(base)
+    out = [str(base)]
+    for p in proposals:
+        mv = moves(p)
+        if mv and not set(mv) & set(held):
+            a = compose(dict(held, **mv))
+            if a not in out:
+                out.append(a)
+    return out
 
 
 # ---- the store ------------------------------------------------------------------------------

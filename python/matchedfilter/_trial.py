@@ -9,8 +9,8 @@ sampled on a search's first banks picked one faster there and 5-10% slower over 
     candidate block size, and for each plan the model's screen setting for its chain -- and it
     is the preference: it stands unless another arm is clearly faster. (The smallest size, not
     the model's priced layout: a tie keeps the layout that needs no pricing, and the model
-    misjudged block sizes under load, 2026-10-25.) Every other arm moves one dimension -- a
-    block size ("n=4096", or the model's priced layout, "n=model"), the screen ("q15=0") --
+    misjudged block sizes under load, 2026-10-25.) In a first pass every other arm moves one
+    dimension -- a block size ("n=4096", or the model's priced layout, "n=model"), the screen ("q15=0") --
     and the instance's model fills in the rest, conditional on it. Both are properties of the
     machine, the same for every profile, so the banks a trial samples first stand for the rest. An instance that cannot take an arm's value (a chain outside
     a plan's feasible set, a screen its first band does not have) runs its model choice there.
@@ -23,11 +23,17 @@ sampled on a search's first banks picked one faster there and 5-10% slower over 
   * an arm that can no longer win is dropped from later rounds (_choice.Choice.round). An arm
     the rule picks over DEFAULT must then win again, alone against DEFAULT in fresh rounds,
     before it locks (Choice confirm): with seven challengers on a loaded node one passes the
-    rule on noise more often than one does. A trial ends at its cap of rounds, or at its
-    budget of calls that could not be rounds, with DEFAULT standing unless an arm was
+    rule on noise more often than one does. A pass ends at its cap of rounds, or at its
+    budget of calls that could not be rounds, with its base standing unless an arm was
     clearly faster twice.
-  * a lock is applied by each instance resolving the winning label (lock_arm), now and in
-    instances made later; it is kept in MF_COST_FILE (store key "joint|" + key) when one is set.
+  * a trial is a coordinate search (current_pass): when a pass locks an arm other than its
+    base, the next pass starts from that arm and offers it with each dimension it has not
+    moved moved too ("n=4096,q15=0"), so a move that only pays after another is found; the
+    search ends at a pass that keeps its base. A first pass that keeps DEFAULT ends it, so a
+    trial costs a second pass only when something moved.
+  * the search's end is applied by each instance resolving the winning label (lock_arm), now
+    and in instances made later; every pass is kept in MF_COST_FILE (store key "joint|" + key,
+    then pass_key's) when one is set, and an open pass resumes in the next process.
 
 Instances are TimeDomainFilterBanks (their block sizes and their plans' screens;
 time_domain._joint_round) and HierarchicalFilters used on their own (their screen;
@@ -50,21 +56,73 @@ DEFAULT = _settings.DEFAULT
 UNROUNDED_BUDGET = 64
 
 
+def pass_key(key: str, base) -> str:
+    """The store key of a coordinate pass around base (the first pass's, around DEFAULT, is key)."""
+    return key if base == DEFAULT else "%s|%s" % (key, base)
+
+
+def current_pass(make: Callable[[object, list], "_choice.Choice"], proposals: Sequence[str]):
+    """A coordinate search's pass now: the first open one, or the last when the search is over
+    (its winner is the search's). make(base, arms) gives the pass around base (its arms
+    _settings.around(base, proposals), base first: base is its preference); a pass that locks
+    an arm other than its base opens the pass around that arm. A pass with nothing left to
+    move locks its base at once, so the search's end is on file like any pass."""
+    base = DEFAULT
+    while True:
+        arms = _settings.around(base, proposals)
+        ch = make(base, arms)
+        if ch.winner is None and len(arms) < 2:
+            with _AUTOTUNE_LOCK:
+                ch.lock(base)
+        if ch.winner is None or ch.winner == base:
+            return ch
+        _log_autotune("%s: pass around %s locked %s", ch.what, base, ch.winner)
+        base = ch.winner
+
+
+def stored_search(key: str):
+    """The end of a coordinate search kept in MF_COST_FILE under key (pass_key), or None
+    while a pass is open."""
+    base = DEFAULT
+    while True:
+        w = _choice.stored_lock(pass_key(key, base), _settings.valid)
+        if w is None or w == base:
+            return w
+        base = w
+
+
 class Trial:
-    """One key's joint trial: a paired measured choice (_choice.Choice) over arm labels,
-    DEFAULT first."""
+    """One key's joint trial: a coordinate search (current_pass) of paired measured choices
+    (_choice.Choice) over arm labels, DEFAULT first."""
 
     def __init__(self, key: str, arms: Sequence[str]):
-        arms = [DEFAULT] + [a for a in dict.fromkeys(arms) if a != DEFAULT]
         self.key = key
-        self.choice = _choice.Choice(
-            tuple(arms), store_key="joint|" + key, what="TRIAL %s" % key,
-            budget=(0, UNROUNDED_BUDGET), label=str, parse=_settings.valid,
-            confirm=True)
+        self.proposals = [a for a in dict.fromkeys(arms) if a != DEFAULT]
+        self._passes: Dict[str, _choice.Choice] = {}
+
+    def _make(self, base, arms):
+        ch = self._passes.get(base)
+        if ch is None:
+            what = "TRIAL %s" % self.key + ("" if base == DEFAULT else " around %s" % base)
+            ch = self._passes[base] = _choice.Choice(
+                tuple(arms), store_key=pass_key("joint|" + self.key, base), what=what,
+                budget=(0, UNROUNDED_BUDGET), label=str, parse=_settings.valid, confirm=True)
+        return ch
+
+    @property
+    def choice(self) -> "_choice.Choice":
+        """The pass now (current_pass)."""
+        return current_pass(self._make, self.proposals)
+
+    @property
+    def base(self):
+        """What the subjects run while the trial is open: the current pass's base."""
+        return self.choice.preference
 
     @property
     def winner(self) -> Optional[str]:
-        return self.choice.winner
+        ch = self.choice
+        return ch.winner
 
     @property
     def arms(self):
@@ -75,14 +133,17 @@ class Trial:
 
     @property
     def rounds(self) -> int:
-        return len(self.choice.samples.get(DEFAULT, ()))
+        """Rounds of every pass so far."""
+        return sum(len(ch.samples.get(ch.preference, ())) for ch in self._passes.values())
 
     def round(self, timings: Dict[str, float]) -> Optional[str]:
-        return self.choice.round(timings)
+        self.choice.round(timings)
+        return self.winner
 
     def tick(self) -> Optional[str]:
         """A call of the trial's instances that could not be a round."""
-        return self.choice.tick()
+        self.choice.tick()
+        return self.winner
 
 
 #: key -> Trial, for the process (forgotten by clear_autotune_cache).
@@ -110,7 +171,7 @@ def winner(key: str) -> Optional[str]:
         tr = _TRIALS.get(key)
     if tr is not None:
         return tr.winner
-    return _choice.stored_lock("joint|" + key, _settings.valid)
+    return stored_search("joint|" + key)
 
 
 def run_round(tr: Trial, subjects: Sequence, replay: Callable[[], object], work: float,
@@ -120,9 +181,10 @@ def run_round(tr: Trial, subjects: Sequence, replay: Callable[[], object], work:
     engine): each distinct configuration of the live arms is put on every subject (use_arm),
     run untimed (settle(), else replay(): a GPU batch settles by replaying until it builds no
     more recordings) and then timed over one replay(), the order reversing every round.
-    Returns the result of DEFAULT's timed replay (passed through keep() as soon as it is
-    taken, before another arm's replay can reuse its buffers). On a decision, every subject
-    locks the winner (lock_arm); otherwise they are left on DEFAULT. `work` (the round's
+    The round belongs to the trial's current pass (current_pass). Returns the result of the
+    pass's base's timed replay (passed through keep() as soon as it is taken, before another
+    arm's replay can reuse its buffers). When the search ends, every subject locks its winner
+    (lock_arm); otherwise they are left on the base of the pass now open. `work` (the round's
     pairs) only scales the log: rounds are judged as ratios to DEFAULT."""
     def use(label):
         for s in subjects:
@@ -136,20 +198,21 @@ def run_round(tr: Trial, subjects: Sequence, replay: Callable[[], object], work:
         use(label)
         (settle or replay)()
 
+    ch = tr.choice
     try:
-        res = tr.choice.play(run, set(), config=lambda a: tuple(s.arm_config(a) for s in subjects),
-                             warm=warm, keep=keep)
+        res = ch.play(run, set(), config=lambda a: tuple(s.arm_config(a) for s in subjects),
+                      warm=warm, keep=keep)
     except BaseException:
-        use(DEFAULT)
+        use(ch.preference)
         raise
-    w = tr.choice.winner
-    _log_autotune("TRIAL %s round %d: %s", tr.key, tr.rounds,
-                  {a: "%.3g" % (v[-1] / max(work, 1e-30)) for a, v in tr.choice.samples.items() if v})
+    _log_autotune("%s round %d: %s", ch.what, tr.rounds,
+                  {a: "%.3g" % (v[-1] / max(work, 1e-30)) for a, v in ch.samples.items() if v})
+    w = tr.winner
     for s in subjects:
         if w is not None:
             s.lock_arm(w)
         else:
-            s.use_arm(DEFAULT)
+            s.use_arm(tr.base)
     return res
 
 
