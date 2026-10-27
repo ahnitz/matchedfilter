@@ -12,8 +12,8 @@ value.
 A case's misses are tested two-sided against the budget (binomial). A model that dismisses
 too much fails, and so does one that dismisses far too little: such gates pass work the
 budget would have dismissed, and a 100x too conservative model once hid two model errors. A
-multi-tier chain aims a little under fd (gatechain: a one-sided 95% tolerance on the model's
-draws), so it is also tested against 0.85 fd and passes if either test does. With
+multi-tier chain's budget is cut by the selection bias of its split search
+(gatechain._SPLIT_TOLERANCE_Z): it aims at fd, as a single tier does. With
 --q15 the same chains also run with the Q15 screen as every tier but the last, where this
 back end has one. The gate model leaves the Q15 statistic's rounding out (about 0.01 in
 snr: it lifts a tier's maxima a little), so a Q15 chain may dismiss less than its budget
@@ -49,8 +49,6 @@ for _d in (os.path.join(ROOT, "tests"), ROOT):
 
 #: Batch of blocks per engine call.
 _B = 64
-#: Below this share of fd a multi-tier chain's expected misses may sit (gatechain).
-_TOLERANCE = 0.85
 
 
 def law(n, e):
@@ -178,8 +176,6 @@ def run_case(job):
     row["engines"] = {}
     for key in engines:
         pv = binom_two_sided(miss[key], det, a["fd"])
-        if len(chain) > 1:
-            pv = max(pv, binom_two_sided(miss[key], det, _TOLERANCE * a["fd"]))
         row["engines"][key] = dict(misses=miss[key], ratio=miss[key] / max(det, 1) / a["fd"],
                                    p=pv, mismatches=mismatch[key])
     return row
