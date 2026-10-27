@@ -1178,6 +1178,8 @@ static PyObject *M_series_group(PyObject *self,PyObject *args){
   return PyLong_FromLong(ap_hmf_effective_group((size_t)n,req));
 }
 void ap_gauss_fill(float *out, size_t n, uint64_t seed, uint64_t offset);   /* src/gauss.cc */
+void ap_gauss_fill_rows(float *out, size_t ostride, size_t rows, size_t len, uint64_t seed,
+                        uint64_t offset, uint64_t step, const float *scale);
 static PyObject *M_gauss_fill(PyObject *self,PyObject *args){
   PyObject *o; unsigned long long seed, offset;
   if(!PyArg_ParseTuple(args,"OKK",&o,&seed,&offset)) return NULL;
@@ -1190,6 +1192,29 @@ static PyObject *M_gauss_fill(PyObject *self,PyObject *args){
   ap_gauss_fill((float*)b.buf,(size_t)(b.len/4),(uint64_t)seed,(uint64_t)offset);
   Py_END_ALLOW_THREADS
   PyBuffer_Release(&b);
+  Py_RETURN_NONE;
+}
+/* gauss_fill_rows(out, seed, offset, step, scale=None): out float32 (rows, len) C-contiguous,
+   out[r, i] = draw offset + r * step + i of stream seed, times scale[i // 2] (float32, at least
+   (len + 1) // 2 of them) when given: simulate's fill (ap_gauss_fill_rows). */
+static PyObject *M_gauss_fill_rows(PyObject *self,PyObject *args){
+  (void)self; PyObject *o, *so=Py_None; unsigned long long seed, offset, step;
+  if(!PyArg_ParseTuple(args,"OKKK|O",&o,&seed,&offset,&step,&so)) return NULL;
+  Py_buffer b, sb={0}; int has_scale = so!=Py_None;
+  if(PyObject_GetBuffer(o,&b,PyBUF_WRITABLE|PyBUF_C_CONTIGUOUS|PyBUF_FORMAT|PyBUF_ND)<0) return NULL;
+  if(has_scale && PyObject_GetBuffer(so,&sb,PyBUF_C_CONTIGUOUS|PyBUF_FORMAT)<0){ PyBuffer_Release(&b); return NULL; }
+  const Py_ssize_t rows = b.ndim==2 ? b.shape[0] : 0, len = b.ndim==2 ? b.shape[1] : 0;
+  if(!b.format || strcmp(b.format,"f")!=0 || b.itemsize!=4 || b.ndim!=2
+     || (has_scale && (!sb.format || strcmp(sb.format,"f")!=0 || sb.itemsize!=4 || sb.len/4 < (len+1)/2))){
+    PyBuffer_Release(&b); if(has_scale) PyBuffer_Release(&sb);
+    PyErr_SetString(PyExc_TypeError,"gauss_fill_rows needs a C-contiguous float32 (rows, len) buffer and a float32 scale of (len + 1) // 2 or more");
+    return NULL;
+  }
+  Py_BEGIN_ALLOW_THREADS
+  ap_gauss_fill_rows((float*)b.buf,(size_t)len,(size_t)rows,(size_t)len,(uint64_t)seed,(uint64_t)offset,
+                     (uint64_t)step,has_scale ? (const float*)sb.buf : NULL);
+  Py_END_ALLOW_THREADS
+  PyBuffer_Release(&b); if(has_scale) PyBuffer_Release(&sb);
   Py_RETURN_NONE;
 }
 /* A[e] = |g y[e] + d[e]|^2 for e < m (d NULL: |g y[e]|^2), y and d complex: simulate's
@@ -1327,26 +1352,32 @@ static PyObject *M_simulate(PyObject *self,PyObject *args){
   const long long kfill = has_sig ? kmax : (kmax < b[nb-1] ? kmax : b[nb-1]);
   ap_plan *pf = has_sig ? ap_create((size_t)n) : NULL, *pl[32]={0}; ok = !has_sig || pf!=NULL;
   for(Py_ssize_t i=0;i<nb && ok;i++) if(!(pl[i]=ap_create((size_t)b[i]))) ok=0;
+  /* rows are drawn SIM_ROWS at a time (ap_gauss_fill_rows: two blocks share a vector on
+     AVX-512, and a row of n = 2048 reads one block) */
+  enum { SIM_ROWS = 2 };
   const size_t bytes=((size_t)(2*n*4)+63)/64*64;
-  float *X=(float*)aligned_alloc(64,bytes), *Y=(float*)aligned_alloc(64,bytes), *T=(float*)aligned_alloc(64,bytes),
+  float *X=(float*)aligned_alloc(64,SIM_ROWS*bytes), *Y=(float*)aligned_alloc(64,bytes),
         *A=(float*)aligned_alloc(64,bytes/2+64);
   long long ks[64]={0}, kn[32]={0}; int sfull[64]={0}, nfull[32]={0};
-  if(ok && X && Y && T && A){
+  if(ok && X && Y && A){
     const float *scale=(const float*)sc.buf, *tab=has_sig ? (const float*)tb.buf : NULL;
     const long long *tv=has_sig ? (const long long*)tt.buf : NULL; const int *fi=has_sig ? (const int*)fib.buf : NULL;
     const float fs=(float)fscale, keep2=(float)(keep_at*keep_at);
     Py_BEGIN_ALLOW_THREADS
-    memset(X,0,(size_t)(2*n)*sizeof(float));
+    memset(X,0,SIM_ROWS*bytes);   /* bins past kfill stay empty */
     for(long long r=0;r<nrows;r++){
-      ap_gauss_fill(X,(size_t)(2*kfill),(uint64_t)seed,(uint64_t)(2*(row0+r)*n));
-      for(long long j=0;j<kfill;j++){ X[2*j]*=scale[j]; X[2*j+1]*=scale[j]; }
+      const float *Xr = X + (r % SIM_ROWS) * (bytes/4);
+      if(r % SIM_ROWS == 0){
+        const long long rows = nrows-r < SIM_ROWS ? nrows-r : SIM_ROWS;
+        ap_gauss_fill_rows(X,bytes/4,(size_t)rows,(size_t)(2*kfill),(uint64_t)seed,(uint64_t)(2*(row0+r)*n),
+                           (uint64_t)(2*n),scale);
+      }
       int kept = 1;             /* with a signal: the row's fine maximum somewhere reaches keep_at */
       for(Py_ssize_t s = has_sig ? 0 : 1; s<=nb; s++){
         const long long m = s==0 ? n : b[s-1];
         const float g = s==0 ? fs : bs[s-1];
-        /* a backend may use its input as scratch: every transform reads a copy */
-        memcpy(T,X,(size_t)(2*m)*sizeof(float));
-        ap_fft(s==0 ? pf : pl[s-1],T,Y,AP_BACKWARD);
+        /* a transform only reads its input (backend.h), so the row's transforms all read Xr */
+        ap_fft(s==0 ? pf : pl[s-1],Xr,Y,AP_BACKWARD);
         if(has_noise && s>0){
           /* the noise alone, lags 0 .. m-1 */
           const int q=(int)(s-1); long long *off=(long long*)nob[q].buf; off[r]=kn[q];
@@ -1389,12 +1420,12 @@ static PyObject *M_simulate(PyObject *self,PyObject *args){
     if(has_noise) for(Py_ssize_t q=0;q<nb;q++) ((long long*)nob[q].buf)[nrows]=kn[q];
     Py_END_ALLOW_THREADS
   }
-  free(X); free(Y); free(T); free(A);
+  free(X); free(Y); free(A);
   if(pf) ap_destroy(pf);
   for(Py_ssize_t i=0;i<nb;i++){ if(pl[i]) ap_destroy(pl[i]); }
   SIM_RELEASE();
   #undef SIM_RELEASE
-  if(!ok || !X || !Y || !T || !A){ PyErr_SetString(PyExc_MemoryError,"simulate: no FFT plan or buffer"); return NULL; }
+  if(!ok || !X || !Y || !A){ PyErr_SetString(PyExc_MemoryError,"simulate: no FFT plan or buffer"); return NULL; }
   PyObject *so=Py_None, *no=Py_None; Py_INCREF(Py_None); Py_INCREF(Py_None);
   if(has_sig){ Py_DECREF(so); so=PyTuple_New(ns); for(Py_ssize_t q=0;q<ns;q++) PyTuple_SET_ITEM(so,q,PyLong_FromLongLong(sfull[q] ? -1 : ks[q])); }
   if(has_noise){ Py_DECREF(no); no=PyTuple_New(nb); for(Py_ssize_t q=0;q<nb;q++) PyTuple_SET_ITEM(no,q,PyLong_FromLongLong(nfull[q] ? -1 : kn[q])); }
@@ -1949,6 +1980,7 @@ static PyMethodDef methods[]={
   {"simulate",M_simulate,METH_VARARGS,"simulate(scale, seed, row0, nrows, kmax, bands, bscale, fscale, tab, t, fi, spos, sval, soff, npos, nval, noff, keep_at=0) -> (signal counts, noise counts): the gate model's simulation, per statistic the running maximum's records of the noise alone and outward from a signal"},
   {"records_within",M_records_within,METH_VARARGS,"records_within(pos, val, off, reach, out, at=None): per row the value (and pos) of its last record within reach (gatechain's window maxima)"},
   {"gauss_fill",M_gauss_fill,METH_VARARGS,"gauss_fill(out float32, seed, offset): out[i] = standard normal draw offset + i of stream seed (src/gauss.cc)"},
+  {"gauss_fill_rows",M_gauss_fill_rows,METH_VARARGS,"gauss_fill_rows(out float32 (rows, len), seed, offset, step, scale=None): out[r, i] = draw offset + r * step + i of stream seed, times scale[i // 2] when given (simulate's fill, src/gauss.cc)"},
   {"l1d_bytes",M_l1d_bytes,METH_NOARGS,"l1d_bytes() -> the L1 data cache size the OS reports, or 0 if unknown"},
   {"series_group",M_series_group,METH_VARARGS,"series_group(n, requested) -> the series group a hierarchical plan of size n runs"},
   {"forward_cost",M_forward_cost,METH_VARARGS,"forward_cost(n, reps=9) -> (engine s, platform s or -1) per block forward"},
