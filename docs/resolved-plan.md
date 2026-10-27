@@ -3,8 +3,8 @@
 Before a hierarchical filter runs, it settles everything that decides which pairs are
 refined. That settled set is the **resolved plan**. This note says what it holds, where it
 is resolved today, what it guarantees with and without a shared cost file, and what of it
-is public. It is the design that robustness-plan E6 (one `resolve()` per filter)
-implements.
+is public. Robustness-plan E6 (one `resolve()` per filter) implemented it on
+2026-10-22.
 
 ## What it holds
 
@@ -21,27 +21,33 @@ It is a function of the filter's inputs (n, block and template counts, SNR and f
 SNR, false-dismissal budget, search window, reference, taps, device) and of two
 machine-level facts: the measured cost models and the locks of the measured choices.
 
-## Where it is resolved today
+## Where it is resolved
+
+`HierarchicalFilter._resolve` computes the chain, one threshold per tier, the model's
+refine reach, each tier's share of the reference's power and, on the CPU with taps, the
+direct refine's half-width, once, as an immutable `_Resolved`. Every setter that changes an
+input drops it (`set_reference`, `set_first_stage`, `set_coarse_threshold`, `set_taps`), as
+does building a new CPU plan. The CPU plan applies it once per plan and resolution
+(`_execution_plan`); the GPU path reads it (`_gpu_calibration`).
 
 | Item | Where |
 |---|---|
-| chain | `_choose_chain`: model ranking, chain trial, a stored lock, `MF_CHAIN_FORCE` |
-| thresholds | `_thresholds` (via `gatechain.chain_thresholds`) |
-| Q15 | the Q15 trial (`_q15_trial`) |
-| direct refine | `_execution_plan` (`_direct_halfwidth`) |
-| GPU calibration | `_gpu_calibration` |
-| bank layout | `time_domain` (block-size trial) |
+| chain | `_choose_chain`: the model's ranking (cached per profile in `_chains._CHAIN_CHOICE`), or `MF_CHAIN_FORCE` for measurement; a pinned chain as given |
+| thresholds | `_thresholds` (via `gatechain.chain_thresholds`), or explicit |
+| Q15 | the plan's joint-trial arm (`_arm_q15`): the arm's setting, else the cost model's (`_chains._Q15_MODEL`); off for a pinned chain |
+| direct refine | `_resolve` (`_direct_halfwidth`, from `gatechain.direct_halfwidth`) |
+| GPU kernels | the device's kernel choices: the coarse layout and gate way per band (`_gpuhier`) |
+| bank layout | the bank's joint trial (`TimeDomainFilterBank.set_reference`, `time_domain._joint_round`) |
 
-These sites run lazily, are invalidated by separate flags (`_thr_applied`, `_gcal`), and
-each re-reads the cost model. E6 replaces them with one `resolve()` that returns an
-immutable record, invalidated by the setters that change an input: `set_reference`,
-`set_first_stage`, `set_coarse_threshold`, `set_taps`, and a chain switch at a trial's end.
+The Q15 setting and the bank layout are joint-trial arms: they are applied by each
+instance's `use_arm` and `lock_arm`, outside the `_Resolved` record.
 
 ## What it guarantees
 
-**With a shared `MF_COST_FILE`** (one writer per open contest):
+**With a shared `MF_COST_FILE`:**
 - **Measurements are shared:** cost models are measured once and stored, and a stored lock
-  is final.
+  is final. Only locks are stored, not the rounds of an open contest; when two processes
+  run the same open contest, the first lock written stands and the other adopts it.
 - **Every process resolves the same plan:** each item is a deterministic function of the
   inputs, the stored models and the locks. The direct refine's window comes from a seeded
   simulation.
@@ -56,11 +62,12 @@ immutable record, invalidated by the setters that change an input: `set_referenc
   pairs near a threshold can be refined in one process and not in another.
 
 **Known caveat:**
-- `chain_thresholds` reuses a cached result for a profile within its cosine-similarity
-  tolerance of an earlier one. A process's thresholds can therefore depend on which
-  profiles it saw first.
-- `resolve()` keys on the profile it is given. If a divergence remains after that, a
-  persisted record of the resolved plan is the fix (E6), not before.
+- `chain_thresholds` reuses a cached result for a profile that agrees with an earlier one
+  in shape (cosine) and in every band's signal response (`gatechain._similar_get`). A
+  process's thresholds can therefore depend on which profiles it saw first.
+- `_resolve` keys on the profile it is given. E6 added no persisted record of the resolved
+  plan, since no divergence remained to need one; one would be the fix if a divergence
+  appears.
 
 ## What is public
 

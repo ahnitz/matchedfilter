@@ -27,13 +27,20 @@ With one bin per pair (the consumer's mode: `binsize = n`), direct refinement re
 largest |z| within its local refinement window. It does not establish the maximum over the
 whole requested output bin. The refine evaluates `halfwidth` coarse samples either side of the pair's
 largest last-tier coarse lag (the tier already reports it). `halfwidth` comes from the gate
-model itself (`gatechain.direct_halfwidth`): the same signal and noise the thresholds are
-calibrated on (`signal_draws`: output spectrum `snr * p`, noise `_SIG^2 p`), drawn over
-whole blocks, every tier applied with its threshold, and the largest distance between the
-fine peak and the last tier's argmax among the draws every tier passes -- plus one coarse
-sample. So the window is a property of the reference profile and the chain, in samples,
-not a constant: on an inspiral profile at n = 2048 it is 4-5 coarse samples for a last band
-of 512 or 1024, and ~125 for 256, where the refine prices itself back to the transform.
+model itself (`gatechain.direct_halfwidth`), on the draws the thresholds are set from
+(`signal_draws(..., lags_too=True)`: the same simulation, search window and draw count),
+every tier applied with its threshold. Among the draws every tier passes and the fine stage
+keeps, it takes the distance from the last tier's coarse maximum to the fine peak; the
+half-width is the smallest whole number of coarse samples (at least 1) beyond which at most
+`_LOCALISE_SHARE` (5%) of fd of those draws lie. The window therefore adds at most that
+share to the chain's dismissals, on top of the gates' budget. It is a property of the
+reference profile and the chain, in samples, not a constant. Some draws always lie far out:
+a noise peak elsewhere in the window can be the last tier's maximum while the signal is the
+fine one. Where they exceed the share, the half-width grows to reach them, up to the whole
+window, and the per-pair pricing (below) then takes the transform. When the rule was
+introduced (b1519cf9, 2026-10-26), every chain checked at fd 1e-2 stayed within 8 coarse
+samples, and at fd 1e-3 a chain ending in band 512 on the inspiral profile at n = 2048
+lost 5% of its budget at any half-width.
 
 Checked on captured `pycbc_inspiral_fir` calls (12 groups, 1.08M pairs, n = 2048, threshold
 6): every above-threshold fine peak -- 34 noise triggers and 25,487 signals drawn as the
@@ -70,7 +77,8 @@ bit-identical.
 
 The cost model charges a chain the cheaper of the measured transform refine and the direct
 refine priced for its last band (`CostModel.with_direct`), so the chain choice sees the
-cheaper confirmation, and the chain-choice and chain-trial keys say whether it is priced in.
+cheaper confirmation, and the chain-choice key and a standalone plan's trial key say whether
+it is priced in (`HierarchicalFilter._direct_key`, `_plan_trial_key`).
 On the captured calls (Zen 5, chains locked by their own trials, interleaved in one
 process and cost file): 13.7% less wall, identical peaks. The larger part is the chain:
 with confirmation cheap, half the groups lock a 128-point first tier, (128, 256, 512), where

@@ -68,7 +68,7 @@ by its coarse gate.
 | Flat and hierarchical filtering | yes | yes |
 | Time-series input with `run_series()` | yes | yes |
 | Input spectra and returned values | `complex64` | `complex64` |
-| Execution | one CPU thread | Vulkan or Metal |
+| Execution | one CPU thread | Vulkan, CUDA or Metal |
 
 Flat filtering and refinement use single precision. GPU hierarchical
 screening can use reduced-precision kernels. There is no float64 filtering API.
@@ -80,7 +80,8 @@ print(mf.devices())
 gpu_filter = mf.MatchedFilter(4096, device="gpu")
 ```
 
-Linux and Windows use Vulkan; macOS uses Metal. A compatible driver is
+NVIDIA GPUs run through the CUDA driver where it is installed; other GPUs on
+Linux and Windows use Vulkan, and macOS uses Metal. A compatible driver is
 required. Unsupported GPU requests raise an error. See the
 [usage guide](https://ahnitz.github.io/matchedfilter/using-it.html)
 for platform and device limits.
@@ -92,10 +93,11 @@ the full filter on candidates. It is useful when most pairs can be dismissed
 and enough signal power lies in that band. Otherwise the screening stage can
 add work without a useful saving.
 
-Automatic selection uses your expected output-power spectrum and measured
-calibration files. `snr` specifies the signal strength and `fd` the requested
-false-dismissal budget for that calibration. Validate the calibration against
-your template population before relying on it.
+Automatic selection uses your expected output-power spectrum and tier costs
+measured on the machine at hand. `snr` specifies the signal strength and `fd`
+the requested false-dismissal budget, a mean target under the gate model's
+assumptions. Validate the gates against your template population before relying
+on them.
 
 For example, with spectra and an output-power reference prepared as described
 in the usage guide:
@@ -108,10 +110,11 @@ hf.set_data(data_spectra)
 peaks = hf.run(binsize=4096, threshold=5.5)
 ```
 
-The coarse gate is computed from the full reference profile and requested
-false-dismissal budget; measured cost files select the band. Alternatively,
-set an explicit band and coarse threshold. See the [gate model](docs/gate-model.md)
-for profile assumptions, sampling precision and validation.
+The coarse gates are computed from the full reference profile and requested
+false-dismissal budget; the measured tier costs select the chain of bands.
+Alternatively, pin a chain and set its coarse thresholds. See the
+[gate model](docs/gate-model.md) for profile assumptions, sampling precision
+and validation.
 
 ## Performance
 
@@ -169,6 +172,7 @@ matchedfilter timing also includes the product and peak scan.
 ## Documentation
 
 - [Documentation index](https://github.com/ahnitz/matchedfilter/blob/main/docs/README.md): current guides, development tools, and research history.
+- [Architecture](https://github.com/ahnitz/matchedfilter/blob/main/docs/architecture.md): the API, the layers, the gate model and the measured choices, for developers.
 - [Usage guide](https://ahnitz.github.io/matchedfilter/using-it.html): inputs, normalization, devices and API behavior.
 - [Examples](https://ahnitz.github.io/matchedfilter/demo.html): noise and injected signals.
 - [Numerical accuracy](https://ahnitz.github.io/matchedfilter/precision.html): comparison with a float64 reference.
@@ -177,8 +181,9 @@ matchedfilter timing also includes the product and peak scan.
 ## Status
 
 This is an alpha release. Pin a version when reproducibility matters.
-Hierarchical calibration covers a subset of input conditions; unsupported
-requests require additional measurements or explicit coarse parameters.
+The hierarchical gate model refuses budgets it cannot resolve and references
+without a localised correlation peak; such requests need a pinned chain with
+explicit coarse thresholds.
 
 Wheels target CPython 3.11–3.15 on Linux x86-64 and macOS arm64. Other platforms
 build from source and need NumPy and a C compiler. CPU filtering uses one

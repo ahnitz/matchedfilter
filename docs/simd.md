@@ -18,6 +18,9 @@ convention: a plain include guard would let only the first pass define
 anything.
 
 On a current x86-64 build that gives AVX3 (16 lanes), AVX2 (8) and SSE4 (4).
+One more x86 back end is built outside Highway's targets: `AVX`
+(`src/kernel_avx1.cc` with `src/simd-avx1.h`), SSE4's kernels with the float paths at
+8 lanes, which CPUs with AVX but not AVX2 (Sandy and Ivy Bridge) run instead of SSE4.
 `setup.py` disables the rest -- SVE and RVV because sizeless vectors cannot be
 array members and the kernel holds `vf TR[AP_W]`, SCALAR because one lane is
 below what the layout assumes, and the AVX-512 variants past AVX3 because
@@ -25,7 +28,7 @@ nothing has measured a reason for them.
 
 ```python
 import matchedfilter as mf
-mf.targets()       # ('AVX3', 'AVX2', 'SSE4') -- in this build, on this CPU
+mf.targets()       # ('AVX3', 'AVX2', 'AVX', 'SSE4') -- in this build, on this CPU
 mf.backend()       # 'AVX3'
 mf.set_target('AVX2')   # for comparing; None restores the default
 ```
