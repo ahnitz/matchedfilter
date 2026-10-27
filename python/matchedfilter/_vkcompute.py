@@ -308,6 +308,22 @@ def _check(rc, what):
         raise VulkanError("%s failed with VkResult %d" % (what, rc))
 
 
+def _profile_forget(cmd):
+    """Drop the phase marks (MF_GPU_PROFILE) any context holds for a command buffer just
+    allocated: its handle may be a freed one's, and the marks of that one are queries this
+    buffer never writes. A trig probe's forward, freed with its cache, handed its handle to
+    a correlation that had no stamps; its submission then waited on the probe's reset
+    queries until RADV reported VK_ERROR_DEVICE_LOST. Read first if still unread."""
+    h = getattr(cmd, "value", cmd)
+    for ctx in list(_gputime._CONTEXTS):
+        pr = getattr(ctx, "_prof", None)
+        if pr is None or h not in pr["marks"]:
+            continue
+        if h in pr["pending"]:
+            ctx._profile_resolve()          # the freed buffer's run has finished: read it
+        pr["marks"].pop(h, None)
+
+
 class _Recording:
     """A primary command buffer being recorded: allocated from the context's pool and begun
     with `flags` (a VkCommandBufferUsageFlags), with the steps every recording repeats.
@@ -321,6 +337,8 @@ class _Recording:
             what + " allocate")
         _check(self.vk.vkBeginCommandBuffer(self.cmd, ctypes.byref(
             _CmdBufBegin(42, None, flags, None))), what + " begin")
+        if getattr(ctx, "_profile", False):
+            _profile_forget(self.cmd)
 
     def bind(self, pipe, ds, words=(), size=None):
         """Bind pipe, a (pipeline, layout, set layout) triple, with descriptor set ds, and
@@ -615,6 +633,7 @@ class _FusedBatch:
                "begin fused")
         prof = next((ctx for ctx, _ in self.items if getattr(ctx, "_profile", False)), None)
         if prof is not None:
+            _profile_forget(cmd)
             prof._stamp(cmd, "start")
         # Phases run in lockstep across the batch's items, one global barrier per phase.
         # With an interleave offset k the batch's second half runs k phases behind its
@@ -1728,11 +1747,15 @@ class Context(Executor, InputUploads):
         pr = self._prof
         if pr is None:
             return
-        for c in commands:
-            h = getattr(c, "value", c)
-            if h in pr["marks"]:
-                if h in pr["pending"]:                 # its queries are about to be rewritten
-                    self._profile_resolve()
+        marked = [h for h in (getattr(c, "value", c) for c in commands) if h in pr["marks"]]
+        # A recording submitted again has its queries rewritten: read the earlier run's first,
+        # before any of this submission is listed -- a listed one is not yet submitted, and a
+        # wait on its reset queries never returned (RADV: VK_ERROR_DEVICE_LOST, a deferred
+        # forward ahead of one submitted again in the same submission).
+        if any(h in pr["pending"] for h in marked):
+            self._profile_resolve()
+        for h in marked:
+            if h not in pr["pending"]:
                 pr["pending"].append(h)
                 # As for timestamp pairs: unavailable until this submission writes them.
                 if getattr(self, "_reset_query", None) is not None:
