@@ -70,19 +70,11 @@ def parse_label(label):
     return int(band), int(ppg or 1), int(tile or 1), int(bool(twt)), int(sg or 0)
 
 
-#: Interleaved rounds the contenders of a coarse layout choice are re-timed in.
-CONFIRM_ROUNDS = 5
-#: The smallest paired difference a choice acts on. A contender within this of the fastest,
-#: or within CLOSE_MADS median absolute deviations of its per-round ratios, is a close call:
-#: the backend's fixed preference decides it, not the noise (stored_measured_choice).
-CLOSE_FLOOR = 0.005
-CLOSE_MADS = 3.0
-
-
-class Timings(dict):
-    """{candidate: time} with `close`: the contenders a paired confirmation could not tell
-    from the fastest (confirm_fastest)."""
-    close = frozenset()
+#: Interleaved rounds the fastest few of a screen are re-timed in together (screen).
+RETIME_ROUNDS = 5
+#: How many of a screen's fastest are re-timed together; the two fastest of those are the
+#: shortlist the device trial plays on real batches.
+RETIME = 3
 
 
 def interleaved_min(cands, time_one, rounds):
@@ -102,51 +94,21 @@ def interleaved_min(cands, time_one, rounds):
     return out
 
 
-def confirm_fastest(times, time_one, rivals=(), rounds=CONFIRM_ROUNDS, near=1.5):
-    """`times` with the contenders re-timed against the fastest, interleaved: the fastest's
-    value stands and each contender's becomes it times the median of the per-round ratios,
-    so the choice rests on paired comparisons rather than on minima taken at different
-    moments. Contenders: every candidate within `near` of the fastest, and `rivals` (the
-    fastest of each separately timed stage, which a burst during one stage could have put
-    anywhere). None when time_one is."""
-    import statistics
-    ref = min(times, key=times.get)
-    cont = [c for c in times if c != ref and (times[c] <= near * times[ref] or c in rivals)]
-    if not cont:
-        return Timings(times)
-    order = [ref] + cont
-    samples = {c: [] for c in order}
-    for r in range(rounds):
-        for c in (order if r % 2 == 0 else order[::-1]):
-            t = time_one(c)
-            if t is None:
-                return None
-            samples[c].append(t)
-    out = Timings(times)
-    close = set()
-    for c in cont:
-        ratios = [a / b for a, b in zip(samples[c], samples[ref])]
-        med = statistics.median(ratios)
-        mad = statistics.median(abs(r - med) for r in ratios)
-        out[c] = times[ref] * med
-        if abs(med - 1.0) <= max(CLOSE_FLOOR, CLOSE_MADS * mad):
-            close.add(c)
-    out.close = frozenset(close)
-    return out
-
-
-def time_staged(stages, time_full, time_screen=None, rounds=3, screen_cut=4.0):
-    """{candidate: time} over staged candidate sets, every backend's coarse timing rule.
+def screen(stages, time_full, time_screen=None, rounds=3, screen_cut=4.0):
+    """{candidate: time} over staged candidate sets: every backend's coarse screen, which
+    ranks candidates on synthetic dispatches for a shortlist (the device trial then plays the
+    two fastest on real batches: shortlist, _settings.slot).
 
     stages: candidate lists, or callables given the times so far that return the next list
     (the Vulkan tiles are offered at the two fastest untiled layouts only: building a
     pipeline is most of the cost). Within a stage, candidates are screened with time_screen
     (a short dispatch) and only those within screen_cut of the fastest get time_full, both
-    in interleaved rounds (interleaved_min); some layouts are pathological on some devices
-    (band 256 at subgroup 32 on an Iris Xe) and a full dispatch of one can run long enough
-    for a driver to reset the device. The fastest of each stage is then confirmed against
-    the overall fastest, paired (confirm_fastest). None when a timer is (no timestamps)."""
-    out, rivals = {}, []
+    in interleaved rounds (interleaved_min): some layouts are pathological on some devices
+    (band 256 at subgroup 32 on an Iris Xe), and a full dispatch of one can run long enough
+    for a driver to reset the device -- they never reach a real call. The RETIME fastest
+    overall are then timed again together in interleaved rounds, so a burst that covered one
+    stage cannot order them. None when a timer is (no timestamps)."""
+    out = {}
     for st in stages:
         cs = list(st(out) if callable(st) else st)
         if not cs:
@@ -160,33 +122,54 @@ def time_staged(stages, time_full, time_screen=None, rounds=3, screen_cut=4.0):
             return None
         times.update(full)
         out.update(times)
-        rivals.append(min(times, key=times.get))
-    return confirm_fastest(out, time_full, rivals=rivals) if out else out
+    lead = sorted(out, key=out.get)[:RETIME]
+    if len(lead) > 1:
+        again = interleaved_min(lead, time_full, RETIME_ROUNDS)
+        if again is None:
+            return None
+        out.update(again)
+    return out
 
 
-def stored_measured_choice(memo, kind, device, band, cands, label, kernel_id, measure,
-                           tiebreak=None, forced=None):
-    """The fastest of cands, measured once and kept in MF_COST_FILE under
-    kind|device|band|labels|k<kernel_id>, so every process sharing the file reproduces it
-    and a build with other kernels measures afresh (gatechain.gpu_kernel_id). An offline
-    _choice.Choice kept in `memo` (the device's): label(c) names a candidate in the file;
-    measure(cands) returns {candidate: time} (a Timings, whose close calls go to the
-    preference: tiebreak(c), then the candidates' order), or None when the device cannot be
-    timed (the first candidate is then used, unstored). A stored choice is first timed
-    against the two runners-up stored with it (Choice.decide).
-
-    forced (a label, forced_layout's) is taken as it is, neither measured nor stored; a label
-    that is not a candidate here raises ValueError naming the candidates."""
+def shortlist(memo, kind, device, band, cands, label, kernel_id, measure, tiebreak=None,
+              forced=None):
+    """(first, second or None) of cands: the screen's fastest two (measure(cands) -> {candidate:
+    time}, screen), kept in MF_COST_FILE under kind|device|band|labels|k<kernel_id> so every
+    process sharing the file reproduces them and a build with other kernels screens afresh
+    (gatechain.gpu_kernel_id). The first is the default, the second the alternative the
+    device trial plays on real batches (_settings.slot). Ties go by tiebreak(c), then the
+    candidates' order. Held in memo (the device's) for the process. forced (a label,
+    forced_layout's) is taken as it is, unscreened and unstored; a label that is not a
+    candidate here raises ValueError naming the candidates. A device that cannot be timed
+    runs the first candidate, unstored."""
+    from . import _costfile
     labels = [label(c) for c in cands]
     if forced is not None:
         if forced not in labels:
             raise ValueError("%s: no candidate %r at band %d on this device; candidates: %s"
                              % (kind, forced, band, ", ".join(labels)))
-        return cands[labels.index(forced)]
+        return cands[labels.index(forced)], None
     if len(cands) == 1:
-        return cands[0]
-    from . import _choice
-    ckey = "%s|%s|%d|%s|k%s" % (kind, device, band, ";".join(labels), kernel_id)
-    ch = _choice.choice(kind, (band, tuple(labels)), list(cands), scope=memo, store_key=ckey,
-                        label=label, recheck_stored=True, what="%s %s band %d" % (kind, device, band))
-    return ch.decide(measure, tiebreak)
+        return cands[0], None
+    key = "%s|%s|%d|%s|k%s" % (kind, device, band, ";".join(labels), kernel_id)
+    hit = memo.get(key)
+    if hit is not None:
+        return hit
+    by_label = dict(zip(labels, cands))
+    first, second = _costfile.stored_choice(key), _costfile.stored_choice(key, "alt")
+    if first in by_label:
+        hit = memo[key] = (by_label[first], by_label.get(second))
+        return hit
+    times = measure(list(cands)) or {}
+    times = {c: t for c, t in times.items() if c in cands}     # only the candidates offered
+    if not times:
+        return cands[0], None
+    rank = {c: i for i, c in enumerate(cands)}
+    order = sorted(times, key=lambda c: (times[c], tuple(tiebreak(c)) if tiebreak else (), rank.get(c, 0)))
+    hit = memo[key] = (order[0], order[1] if len(order) > 1 else None)
+    _costfile.store_choice(key, label(hit[0]), **({"alt": label(hit[1])} if hit[1] is not None else {}))
+    from ._choice import _log_autotune
+    _log_autotune("%s %s band %d -> %s (then %s)  %s", kind, device, band, label(hit[0]),
+                  None if hit[1] is None else label(hit[1]),
+                  {label(c): "%.3g" % t for c, t in sorted(times.items(), key=lambda kv: kv[1])[:4]})
+    return hit

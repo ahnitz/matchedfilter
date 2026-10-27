@@ -29,12 +29,12 @@ def _rounds(ch, cost, n=100):
 
 
 def test_a_clear_win_locks_and_the_preference_holds_a_tie():
-    assert _rounds(_choice.Choice(("a", "b"), paired=True), lambda c, i: 1.0 if c == "a" else 0.5) == "b"
-    assert _rounds(_choice.Choice(("a", "b"), paired=True), lambda c, i: 1.0 if c == "a" else 0.98) == "a"
+    assert _rounds(_choice.Choice(("a", "b")), lambda c, i: 1.0 if c == "a" else 0.5) == "b"
+    assert _rounds(_choice.Choice(("a", "b")), lambda c, i: 1.0 if c == "a" else 0.98) == "a"
 
 
 def test_an_unclear_contest_runs_to_the_cap_then_keeps_the_preference():
-    ch = _choice.Choice(("a", "b"), paired=True)
+    ch = _choice.Choice(("a", "b"))
     seq = [0.8, 1.2] * 10                    # b alternately faster and slower: never 75%
     assert _rounds(ch, lambda c, i: 1.0 if c == "a" else seq[i]) == "a"
     assert len(ch.samples["a"]) <= ch.cap
@@ -43,10 +43,10 @@ def test_an_unclear_contest_runs_to_the_cap_then_keeps_the_preference():
 def test_the_lock_is_stored_and_a_later_process_reuses_it_untimed(monkeypatch, tmp_path):
     cost = tmp_path / "costs.json"
     monkeypatch.setenv("MF_COST_FILE", str(cost))
-    ch = _choice.Choice(("gpu", "cpu"), store_key="k", paired=True)
+    ch = _choice.Choice(("gpu", "cpu"), store_key="k")
     assert _rounds(ch, lambda c, i: 1.0 if c == "gpu" else 0.4) == "cpu"
     assert json.loads(cost.read_text())["choice|k"]["value"] == "cpu"
-    again = _choice.Choice(("gpu", "cpu"), store_key="k", paired=True)
+    again = _choice.Choice(("gpu", "cpu"), store_key="k")
     assert again.winner == "cpu" and not any(again.samples.values())
 
 
@@ -54,13 +54,13 @@ def test_a_stored_value_that_is_not_a_candidate_is_ignored(monkeypatch, tmp_path
     cost = tmp_path / "costs.json"
     cost.write_text(json.dumps({"choice|k": {"value": "tpu"}}))
     monkeypatch.setenv("MF_COST_FILE", str(cost))
-    ch = _choice.Choice(("gpu", "cpu"), store_key="k", paired=True)
+    ch = _choice.Choice(("gpu", "cpu"), store_key="k")
     assert ch.winner is None
 
 
 def test_without_a_cost_file_the_choice_is_still_measured_and_kept_for_the_process(monkeypatch):
     monkeypatch.delenv("MF_COST_FILE", raising=False)
-    ch = _choice.Choice(("gpu", "cpu"), store_key="k", paired=True)
+    ch = _choice.Choice(("gpu", "cpu"), store_key="k")
     assert _rounds(ch, lambda c, i: 1.0 if c == "gpu" else 0.4) == "cpu"
 
 
@@ -78,35 +78,15 @@ def test_a_choice_needs_distinct_candidates():
         _choice.Choice(("a", "a"))
 
 
-def test_offline_seconds_pick_the_fastest_and_store_runners_up(monkeypatch, tmp_path):
-    cost = tmp_path / "costs.json"
-    monkeypatch.setenv("MF_COST_FILE", str(cost))
-    ch = _choice.Choice(("a", "b", "c", "d"), store_key="k", recheck_stored=True)
-    assert ch.decide(lambda cs: {"a": 3.0, "b": 1.0, "c": 2.0, "d": 4.0}) == "b"
-    rec = json.loads(cost.read_text())["choice|k"]
-    assert rec["value"] == "b" and rec["rivals"] == "c;a"
-    # A later process times the stored choice against its rivals: a rival now clearly
-    # faster (a spoiled first measurement) is remeasured and stored.
-    again = _choice.Choice(("a", "b", "c", "d"), store_key="k", recheck_stored=True)
-    assert again.decide(lambda cs: {c: {"a": 0.5, "b": 1.0, "c": 2.0, "d": 4.0}[c] for c in cs}) == "a"
-
-
-def test_offline_samples_decide_by_the_shared_rule():
-    ch = _choice.Choice((32, 16, 8))
-    assert ch.decide(lambda cs: {32: [5.0] * 5, 16: [2.0] * 5, 8: [0.6] * 5}) == 8
-    close = _choice.Choice((32, 8))                      # inside the tie: the preference
-    assert close.decide(lambda cs: {32: [1.0] * 5, 8: [0.98] * 5}) == 32
-
-
 def test_the_budget_ends_a_contest_whose_rounds_never_come(monkeypatch, tmp_path):
-    ch = _choice.Choice(("a", "b"), paired=True, budget=(2, 1))
+    ch = _choice.Choice(("a", "b"), budget=(2, 1))
     for _ in range(ch.limit):
         ch.tick()
     assert ch.winner == "a"
 
 
 def test_at_the_budget_a_clearly_faster_candidate_still_wins_by_the_paired_rule():
-    ch = _choice.Choice(("a", "b"), paired=True, budget=(0, 3))
+    ch = _choice.Choice(("a", "b"), budget=(0, 3))
     for _ in range(3):
         ch.round({"a": 1.0, "b": 0.5})                    # short of the minimum
     while ch.winner is None:
@@ -115,7 +95,7 @@ def test_at_the_budget_a_clearly_faster_candidate_still_wins_by_the_paired_rule(
 
 
 def test_at_the_budget_the_preference_stands_with_too_few_rounds():
-    ch = _choice.Choice(("a", "b"), paired=True, budget=(0, 3))
+    ch = _choice.Choice(("a", "b"), budget=(0, 3))
     ch.round({"a": 1.0, "b": 0.5})
     while ch.winner is None:
         ch.tick()
@@ -125,15 +105,15 @@ def test_at_the_budget_the_preference_stands_with_too_few_rounds():
 def test_a_lock_another_process_stored_first_is_adopted(monkeypatch, tmp_path):
     cost = tmp_path / "costs.json"
     monkeypatch.setenv("MF_COST_FILE", str(cost))
-    mine = _choice.Choice(("gpu", "cpu"), store_key="k", paired=True)
-    other = _choice.Choice(("gpu", "cpu"), store_key="k", paired=True)
+    mine = _choice.Choice(("gpu", "cpu"), store_key="k")
+    other = _choice.Choice(("gpu", "cpu"), store_key="k")
     assert _rounds(other, lambda c, i: 1.0 if c == "gpu" else 0.4) == "cpu"
     _rounds(mine, lambda c, i: 1.0 if c == "cpu" else 0.4)   # would pick the GPU
     assert mine.winner == "cpu"
 
 
 def test_a_dropped_candidate_leaves_the_contest():
-    ch = _choice.Choice(("a", "b", "c"), paired=True)
+    ch = _choice.Choice(("a", "b", "c"))
     ch.drop("c")
     assert ch.live() == ["a", "b"]
     assert _rounds(ch, lambda c, i: {"a": 1.0, "b": 0.5, "c": 0.1}[c]) == "b"
@@ -142,7 +122,7 @@ def test_a_dropped_candidate_leaves_the_contest():
 def test_a_retrial_starts_the_contest_again(monkeypatch):
     """A lock made under passing load does not stick: `retrial` plays after a lock the
     candidates are timed again, and the new contest can lock the other one."""
-    ch = _choice.Choice(("a", "b"), paired=True, retrial=4)
+    ch = _choice.Choice(("a", "b"), retrial=4)
     ch.lock("a")
     import time
     clock = [0.0]
@@ -167,7 +147,7 @@ def test_a_retrial_starts_the_contest_again(monkeypatch):
 def test_a_contest_that_never_resolves_locks_within_its_limit(kw):
     """Choice.limit bounds the calls a contest takes, whatever its timings: rounds that never
     agree end at the cap, and calls that are never rounds at the budget."""
-    ch = _choice.Choice(("a", "b"), paired=True, **kw)
+    ch = _choice.Choice(("a", "b"), **kw)
     seq = [0.8, 1.2]
     for i in range(ch.limit):
         if ch.winner is not None:
@@ -213,7 +193,7 @@ def test_play_returns_the_preference_and_times_second_runs(monkeypatch):
     """Every open play runs each live candidate on the call, the preference's result is the
     call's, and each timed run follows an untimed run of the same candidate: running second
     gains from the run before (a GPU batch 20-30%), so every timed run is a second run."""
-    ch = _choice.Choice(("a", "b"), paired=True, minimum=5, cap=10)
+    ch = _choice.Choice(("a", "b"), minimum=5, cap=10)
     clock, ran = _Clock(lambda c, i: 1.0), set()
     out = _play(ch, clock, monkeypatch, 3, ran)
     assert out == ["result of a"] * 3
@@ -229,7 +209,7 @@ def test_running_second_does_not_decide_a_play(monkeypatch):
     before it, the candidate run second would win every round it ran second, and lose
     every other: the 75% rule then never lets a real gain past either."""
     import time
-    ch = _choice.Choice(("a", "b"), paired=True, minimum=5, cap=10)
+    ch = _choice.Choice(("a", "b"), minimum=5, cap=10)
     clock, first = [0.0], [True]
     monkeypatch.setattr(time, "perf_counter", lambda: clock[0])
 
@@ -246,7 +226,7 @@ def test_running_second_does_not_decide_a_play(monkeypatch):
 
 
 def test_play_locks_a_clearly_faster_candidate_after_its_confirmation(monkeypatch):
-    ch = _choice.Choice(("a", "b"), paired=True, minimum=5, cap=10, confirm=True)
+    ch = _choice.Choice(("a", "b"), minimum=5, cap=10, confirm=True)
     clock = _Clock(lambda c, i: 1.0 if c == "a" else 0.6)
     _play(ch, clock, monkeypatch, 30, set())
     assert ch.winner == "b"
@@ -256,15 +236,15 @@ def test_play_locks_a_clearly_faster_candidate_after_its_confirmation(monkeypatc
 
 
 def test_play_keeps_the_preference_between_equal_candidates(monkeypatch):
-    ch = _choice.Choice(("a", "b"), paired=True, minimum=5, cap=10)
+    ch = _choice.Choice(("a", "b"), minimum=5, cap=10)
     clock = _Clock(lambda c, i: 1.0 + 0.01 * (i % 3))
     _play(ch, clock, monkeypatch, 30, set())
     assert ch.winner == "a"
 
 
 def test_a_choice_met_inside_a_play_takes_its_preference_untimed(monkeypatch):
-    outer = _choice.Choice(("a", "b"), paired=True, minimum=5, cap=10)
-    inner = _choice.Choice(("x", "y"), paired=True, minimum=5, cap=10)
+    outer = _choice.Choice(("a", "b"), minimum=5, cap=10)
+    inner = _choice.Choice(("x", "y"), minimum=5, cap=10)
     seen = []
 
     clock = _Clock(lambda c, i: 1.0)
@@ -279,7 +259,7 @@ def test_a_choice_met_inside_a_play_takes_its_preference_untimed(monkeypatch):
 
 
 def test_play_retrials_a_lock(monkeypatch):
-    ch = _choice.Choice(("a", "b"), paired=True, minimum=5, cap=10, retrial=4)
+    ch = _choice.Choice(("a", "b"), minimum=5, cap=10, retrial=4)
     ch.lock("b")
     clock = _Clock(lambda c, i: 1.0)
     _play(ch, clock, monkeypatch, 3, {"a", "b"})

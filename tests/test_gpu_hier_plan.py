@@ -95,11 +95,8 @@ class Driver(Executor, InputUploads):
     def _x_coarse_candidates(self, band):
         return [(32, 2, 1, False)]
 
-    def _coarse_layout(self, band):
-        return (32, 2, 1, False)
-
-    def _gate_way(self, band):
-        return "gate"
+    def _kernel_pair(self, what, band):
+        return ((32, 2, 1, False) if what == "coarse" else "gate"), None
 
     def _x_alloc(self, nbytes, readback=False, upload=False):
         return _Buf(nbytes)

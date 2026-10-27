@@ -153,45 +153,55 @@ class HierOps:
                                          else self._x_has_kernel(what, n))
         return got
 
-    # ---- the coarse layout ---------------------------------------------------------------
-    def _coarse_layout(self, band):
-        """(subgroup, pairs per group, templates per tile, twiddle table) of the fp16 coarse
-        kernel at this band: the fastest of the device's candidates (_x_coarse_candidates),
-        timed once on synthetic data and kept in MF_COST_FILE (_coarse.stored_measured_choice).
-        Made once per band and MF_COARSE_LAYOUT value: every call asks."""
+    # ---- the coarse layout and gate way: shortlists the device trial plays ----------------
+    def _kernel_pair(self, what, band):
+        """(first, second or None) of a kernel decision at this band (what: "coarse", the fp16
+        coarse layout of tier 0 -- (subgroup, pairs per group, templates per tile, twiddle
+        table); "gateway", how a later tier reports): the device's offline screen's fastest
+        two on synthetic dispatches (_coarse.shortlist, kept in MF_COST_FILE). The device
+        trial plays them on real batches (kernel slots, _settings.slot). MF_COARSE_LAYOUT
+        forces a layout, unplayed. Made once per band and setting: every call asks."""
         from . import gatechain
-        from ._coarse import forced_layout, stored_measured_choice
+        from ._coarse import forced_layout, shortlist
         holder = getattr(self, "_device_state", None) or self
-        forced = forced_layout(band)
-        made = holder.__dict__.setdefault("coarse_layout", {})
-        layout = made.get((band, forced))
-        if layout is not None:
-            return layout
-        memo = holder.__dict__.setdefault("coarse_choice", {})
-        cands = self._x_coarse_candidates(band)
-        layout = made[(band, forced)] = stored_measured_choice(
-            memo, "coarse", getattr(self, "device_name", "") or getattr(self, "name", ""),
-            band, cands, lambda c: self._layout_label(band, c),
-            gatechain.gpu_kernel_id(self.kernel_family),
-            lambda cs: self._time_coarse_layouts(band, cs),
-            tiebreak=lambda c: (c[2], c[1], c[0]), forced=forced)
-        return layout
+        forced = forced_layout(band) if what == "coarse" else None
+        made = holder.__dict__.setdefault("kernel_pairs", {})
+        pair = made.get((what, band, forced))
+        if pair is not None:
+            return pair
+        memo = holder.__dict__.setdefault("screens", {})
+        device = getattr(self, "device_name", "") or getattr(self, "name", "")
+        kid = gatechain.gpu_kernel_id(self.kernel_family)
+        if what == "coarse":
+            pair = shortlist(memo, "coarse", device, band, self._x_coarse_candidates(band),
+                             lambda c: self._layout_label(band, c), kid,
+                             lambda cs: self._time_coarse_layouts(band, cs),
+                             tiebreak=lambda c: (c[2], c[1], c[0]), forced=forced)
+        else:
+            pair = shortlist(memo, "gateway", device, band, ("elect", "gate"), str, kid,
+                             lambda cs: self._time_gate_ways(band, cs))
+        made[(what, band, forced)] = pair
+        return pair
 
-    def _played_layout(self, band):
-        """The coarse layout a call runs at this band: the offline screen's choice
-        (_coarse_layout), or its runner-up where the device trial plays or locked it on real
-        batches (_settings.slot "coarse"). MF_COARSE_LAYOUT forces one."""
-        from ._coarse import forced_layout
-        first = self._coarse_layout(band)
-        if forced_layout(band) is not None:
-            return first
-        pair = self._kernel_shortlist("coarse", band, first)
-        if pair is None:
+    def _played(self, what, band):
+        """The kernel decision a call runs at this band: the screen's fastest, or its
+        runner-up where the device trial plays or locked it (_settings.slot)."""
+        first, second = self._kernel_pair(what, band)
+        if second is None:
             return first
         from ._settings import slot as kernel_slot
-        label = kernel_slot(self._dev_name(), "coarse", band, *pair)
-        return next((c for c in self._x_coarse_candidates(band)
-                     if self._layout_label(band, c) == label), first)
+        a, b = self._slot_labels(what, band, (first, second))
+        return second if kernel_slot(self._dev_name(), what, band, a, b) == b else first
+
+    def _slot_labels(self, what, band, pair):
+        """A kernel pair's labels as its slot names them."""
+        if what == "coarse":
+            return tuple(self._layout_label(band, c) for c in pair)
+        return tuple(str(c) for c in pair)
+
+    def _coarse_layout(self, band):
+        """The fp16 coarse layout a call runs at this band (_played "coarse")."""
+        return self._played("coarse", band)
 
     def _dev_name(self):
         holder = getattr(self, "_device_state", None) or self
@@ -200,55 +210,14 @@ class HierOps:
 
     def _gate_use(self, band):
         """Whether a later gate tier at this band runs the one-bin refine's gate-only build,
-        reporting the window's maximum alone (nbins word 0), rather than the one-bin
-        election."""
+        reporting the window's maximum alone (nbins word 0), rather than the one-bin election
+        (tierb.slang MF_GATE_ONLY) -- the gate is its own build: compiled into the one-bin
+        refine it cost that kernel registers (102 -> 127 at n = 512 on the L40S) and its tier
+        15%. Measured per pair: gate 10-13% faster on the 8060S, 12-18% on the M2, the tier
+        halved on a RENOIR; within 1% on the L40S (_played "gateway")."""
         if not (self._shipped("tier1", band) and self._shipped("tier1gate", band)):
             return False
-        way = self._gate_way(band)
-        pair = self._kernel_shortlist("gateway", band, way)
-        if pair is not None:
-            from ._settings import slot as kernel_slot
-            way = kernel_slot(self._dev_name(), "gateway", band, *pair)
-        return way == "gate"
-
-    def _gate_way(self, band):
-        """How a later gate tier reports at this band (tierb.slang MF_GATE_ONLY): "gate", the
-        window's maximum alone from its own build, or "elect", the one-bin election --
-        whichever this device runs faster, timed once on synthetic data and kept in
-        MF_COST_FILE (stored_measured_choice). Measured per pair: gate 10-13% faster on the
-        8060S, 12-18% on the M2, the tier halved on a RENOIR; within 1% on the L40S. The
-        gate is its own build: compiled into the one-bin refine it cost that kernel
-        registers (102 -> 127 at n = 512 on the L40S) and its tier 15%."""
-        from . import gatechain
-        from ._coarse import stored_measured_choice
-        holder = getattr(self, "_device_state", None) or self
-        made = holder.__dict__.setdefault("gate_way", {})
-        way = made.get(band)
-        if way is None:
-            memo = holder.__dict__.setdefault("gate_choice", {})
-            way = made[band] = stored_measured_choice(
-                memo, "gateway", getattr(self, "device_name", "") or getattr(self, "name", ""),
-                band, ("elect", "gate"), str, gatechain.gpu_kernel_id(self.kernel_family),
-                lambda cs: self._time_gate_ways(band, cs))
-        return way
-
-    def _kernel_shortlist(self, what, band, first):
-        """(default, alternative) labels of a kernel slot at this band (what: "coarse", the
-        fp16 coarse layout of tier 0; "gateway", how a later tier reports), or None: the
-        offline screen's fastest and its runner-up. The screen times every candidate on
-        synthetic data and leaves the pathological ones out (a full dispatch of some can
-        outlast a driver's watchdog); the device trial plays the two on real batches
-        (_settings.slot). A choice read back from MF_COST_FILE, untimed here, has
-        no runner-up and is kept."""
-        holder = getattr(self, "_device_state", None) or self
-        if what == "coarse":
-            times = holder.__dict__.get("coarse_times", {}).get(band, {})
-            first = self._layout_label(band, first)
-        else:
-            times = holder.__dict__.get("gate_times", {}).get(band, {})
-            first = str(first)
-        rest = sorted((t, k) for k, t in times.items() if k != first)
-        return (first, rest[0][1]) if rest else None
+        return self._played("gateway", band) == "gate"
 
     #: Tier-0 survivors per pair in the gate-way timing: a later tier runs over a sparse
     #: list with its grid sized for every pair, as a call dispatches it. Every pair listed
@@ -259,8 +228,8 @@ class HierOps:
     def _time_gate_ways(self, band, ways):
         """Device seconds of the one-bin tier at this band in each way, over a synthetic
         batch whose survivors are one pair in _GATE_SURVIVORS, dispatched for every pair
-        (_coarse.time_staged)."""
-        from ._coarse import time_staged
+        (_coarse.screen)."""
+        from ._coarse import screen
         ntm, pairs = self._COARSE_NT, self._COARSE_PAIRS
         rng = np.random.default_rng(1)
         x = ((rng.standard_normal((pairs // ntm, band))
@@ -286,11 +255,7 @@ class HierOps:
             natives.append(native)
             return self._x_time(native, {}, 2)
         try:
-            out = time_staged([list(ways)], time_way, rounds=3)
-            if out:
-                holder = getattr(self, "_device_state", None) or self
-                holder.__dict__.setdefault("gate_times", {})[band] = dict(out)
-            return out
+            return screen([list(ways)], time_way, rounds=3)
         finally:
             for native in natives:
                 self._x_release(native)
@@ -311,8 +276,8 @@ class HierOps:
 
     def _time_coarse_layouts(self, band, cands):
         """Device seconds per pair of each coarse layout on synthetic data (screened, then
-        timed in interleaved rounds and confirmed: _coarse.time_staged)."""
-        from ._coarse import time_staged
+        timed in interleaved rounds, the fastest few again together: _coarse.screen)."""
+        from ._coarse import screen
         ntm = self._COARSE_NT
         rng = np.random.default_rng(0)
         x = ((rng.standard_normal((self._COARSE_PAIRS // ntm, band))
@@ -351,7 +316,7 @@ class HierOps:
             return [c for c in cands if c[2] > 1 and (c[:2] in lead or c[:2] not in timed)]
         try:
             untiled = [c for c in cands if c[2] == 1]
-            out = time_staged([untiled or cands] + ([tiles] if untiled and len(untiled) < len(cands)
+            out = screen([untiled or cands] + ([tiles] if untiled and len(untiled) < len(cands)
                                                      else []),
                               lambda c: time_at(c, self._COARSE_PAIRS),
                               time_screen=lambda c: time_at(c, self._COARSE_SCREEN), rounds=3)
@@ -360,9 +325,6 @@ class HierOps:
                 self._x_release(native)
             for b in (data, tmpl, cidx, cval):
                 b.destroy()
-        holder = getattr(self, "_device_state", None) or self
-        holder.__dict__.setdefault("coarse_times", {}).setdefault(band, {}).update(
-            {self._layout_label(band, c): v for c, v in out.items()})
         return out
 
     def _coarse_kernel(self, band, layout, stride, scale, rowwin):
@@ -440,7 +402,7 @@ class HierOps:
                                  % (i, nt, b, ct.shape))
         bands = tuple(b for b, _, _ in tiers)
         half = self._shipped("c16", bands[0])          # the fp16 coarse role at tier 0
-        layout0 = self._played_layout(bands[0]) if half else None
+        layout0 = self._coarse_layout(bands[0]) if half else None
         shift = bin_shift(binsize)
         t2 = float(threshold) ** 2 if threshold > 0 else 0.0
         top = max(bands)
@@ -862,13 +824,13 @@ class HierOps:
         from ._gpuexec import SPARSE_WAYS
         out = []
         if half:
-            pair = self._kernel_shortlist("coarse", bands[0], self._coarse_layout(bands[0]))
-            if pair is not None:
-                out.append(("coarse", bands[0], pair))
+            pair = self._kernel_pair("coarse", bands[0])
+            if pair[1] is not None:
+                out.append(("coarse", bands[0], self._slot_labels("coarse", bands[0], pair)))
         if len(bands) > 1 and self._shipped("tier1", bands[1]) and self._shipped("tier1gate", bands[1]):
-            pair = self._kernel_shortlist("gateway", bands[1], self._gate_way(bands[1]))
-            if pair is not None:
-                out.append(("gateway", bands[1], pair))
+            pair = self._kernel_pair("gateway", bands[1])
+            if pair[1] is not None:
+                out.append(("gateway", bands[1], self._slot_labels("gateway", bands[1], pair)))
         if sparse:
             out.append(("sparse", "hier", SPARSE_WAYS["hier"]))
         return tuple(out)

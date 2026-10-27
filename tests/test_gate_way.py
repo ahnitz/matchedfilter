@@ -1,6 +1,6 @@
 """A cascade's later gate tier reports either the window's maximum alone or the full one-bin
-election (HierOps._gate_way, measured per device): both ways must give the same peaks, so
-the measured choice can only change speed. Each way is forced here."""
+election (HierOps._played "gateway", measured per device): both ways must give the same
+peaks, so the measured choice can only change speed. Each way is forced here."""
 import numpy as np
 import pytest
 from conftest import usable_gpu_reason
@@ -31,8 +31,9 @@ def test_both_gate_ways_give_the_same_peaks(way, monkeypatch):
     asked = []
 
     def run(choice):
-        monkeypatch.setattr(_gpuhier.HierOps, "_gate_way",
-                            lambda self, band: asked.append(choice) or choice)
+        orig = _gpuhier.HierOps._played
+        monkeypatch.setattr(_gpuhier.HierOps, "_played", lambda self, what, band: (
+            asked.append(choice) or choice) if what == "gateway" else orig(self, what, band))
         bank = TimeDomainFilterBank(taps, tap_counts=counts, engine="hier", threshold=4.5,
                                     false_dismissal=1e-3, device=dev, fft_lengths=[2048])
         bank.set_reference(w, delta_f=df)

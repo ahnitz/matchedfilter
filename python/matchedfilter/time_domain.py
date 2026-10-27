@@ -416,7 +416,7 @@ def _gpu_batch(jobs, run):
             continue
         arms = [_settings.DEFAULT] + [_settings.arm(d, v) for d in sorted(dims) for v in dims[d]]
         ch = _choice.choice(name, devs, arms, store_key="%s|%s" % (name, "+".join(devs)),
-                            paired=True, confirm=True, parse=_settings.valid,
+                            confirm=True, parse=_settings.valid,
                             what="%s %s" % (name.upper(), devs))
         if ch.winner is None:
             def config(label, dims=dims, exercised=exercised):
@@ -453,7 +453,7 @@ def _single_choice(device, n, nblocks):
     from . import _choice
     key = (str(device), int(n), 1 << max(0, int(nblocks) - 1).bit_length())
     return _choice.choice("single-device", key, (_settings.DEFAULT, _settings.arm("side", "cpu")),
-                          paired=True, confirm=True, parse=_settings.valid,
+                          confirm=True, parse=_settings.valid,
                           store_key="single-device|%s|%d|%d" % key,
                           what="SINGLE %s n=%d blocks~%d" % key)
 
