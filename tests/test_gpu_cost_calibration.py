@@ -12,8 +12,9 @@ from matchedfilter import _calibration
 from matchedfilter import gatechain as gc
 
 
-def _probe_calibration(monkeypatch, kind="f32"):
-    """Exercise the real calibration with deterministic device times and survivor counts."""
+def _probe_calibration(monkeypatch, kind="f32", step=0.0):
+    """Exercise the real calibration with deterministic device times and survivor counts.
+    step: device time a two-tier call adds whenever anything passes its first tier."""
     n, blocks, nt = 256, 16, 64
     inputs = _calibration._gpu_cal_inputs(n, blocks, nt, 11)
     calls, raw_calls = [], []
@@ -41,7 +42,7 @@ def _probe_calibration(monkeypatch, kind="f32"):
             refined = first
             ns = len(starts) * 100.0 + pairs * dense[self.chain[0]]
             if len(self.chain) > 1:
-                ns += first * 10.0
+                ns += first * 10.0 + (step if first else 0.0)
                 refined = int(first * math.exp(-self.thresholds[1]))
             ns += refined * 80.0
             self._gpu.last_tier1_survivors = first
@@ -93,3 +94,13 @@ def test_calibration_recovers_active_costs(monkeypatch, kind):
                            int(2048 * math.exp(-g)) / 1024) for g in (2.0, 4.0))
         np.testing.assert_array_equal(cm.excess[64], expected)
         np.testing.assert_array_equal(cm.excess[128], expected)
+
+
+def test_a_second_tiers_price_is_its_slope_not_a_fixed_cost_on_few_survivors(monkeypatch):
+    """A cost a two-tier call pays whenever anything passes (a launch, a process's state) is
+    not a per-survivor price: spread over the 1% point's few survivors it once made a second
+    tier look 3-20x dearer than it ran (_calibration._sparse_rows)."""
+    cm, _ = _probe_calibration(monkeypatch, step=5000.0)
+    for density in (0.01, 0.1):
+        assert cm.sparse(128, density) == pytest.approx(10.0)
+    assert _calibration._sparse_rows([(100, 1000.0)], 500.0, 1000) == [(0.1, 5.0)]
