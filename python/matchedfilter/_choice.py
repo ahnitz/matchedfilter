@@ -57,6 +57,14 @@ BUDGET_MINIMUM = 2
 
 
 _AUTOTUNE_LOCK = threading.Lock()
+#: Whether a paired play (Choice.play) is running its candidates: choices met meanwhile take
+#: their preference untimed.
+_PLAYING = [False]
+
+
+def playing() -> bool:
+    """Whether a paired play is running its candidates (Choice.play)."""
+    return _PLAYING[0]
 
 
 def _log_autotune(msg, *args):
@@ -461,6 +469,43 @@ class Choice:
         else:
             self._save()
         return self.winner
+
+    def play(self, run: Callable[[Hashable], Any], ran: Optional[set] = None):
+        """One call of a paired choice, on its real input: the result of run(candidate).
+
+        Locked, the winner runs once. Open, every live candidate runs the same call back to
+        back, each after an untimed settling run the first time it runs (`ran`: the
+        candidates settled so far, kept by the caller with the call's state), the order
+        reversing every round; the timings are a round (round), and the preference's result
+        is returned. While a play runs, every other choice it meets takes its preference
+        untimed (playing()), so trials never nest."""
+        if self.winner is not None and self.retrial and not _PLAYING[0]:
+            self.calls += 1
+            if self.calls % self.retrial == 0:
+                self.restart()
+        if self.winner is not None or _PLAYING[0]:
+            return run(self.winner if self.winner is not None else self.preference)
+        import time
+        ran = set() if ran is None else ran
+        live = self.live()
+        order = live if len(self.samples[live[0]]) % 2 == 0 else live[::-1]
+        out, times = None, {}
+        _PLAYING[0] = True
+        try:
+            for c in order:
+                if c not in ran:
+                    run(c)
+                    ran.add(c)
+                t0 = time.perf_counter()
+                res = run(c)
+                times[c] = time.perf_counter() - t0
+                if c == self.preference:
+                    out = res
+        finally:
+            _PLAYING[0] = False
+        if all(t > 0 for t in times.values()):     # a clock that did not move times nothing
+            self.round(times)
+        return out
 
     # ---- offline ------------------------------------------------------------------------
     def decide(self, measure: Callable[[list], Any],

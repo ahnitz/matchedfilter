@@ -194,11 +194,11 @@ _OUT, _STARTS, _SERIES, _SPECTRA = Arg("out"), Arg("starts"), Arg("series"), Arg
 #: scanned on the host; hierarchical: the survivors' rows gathered on the host, or the hits
 #: compacted on the device), the first the preference.
 SPARSE_WAYS = {"flat": ("compact", "dense"), "hier": ("rows", "compact")}
-#: The sparse-way choice (_choice.Choice, online, per call shape): after one dropped call
-#: (it may build the record), three timed calls of each way; the lower median is used
-#: (tie 0: the effect is the whole call's), and the trial repeats every 256 calls, so a
+#: The sparse-way choice (_choice.Choice, paired rounds on real calls, per call shape: play):
+#: each way settled once (it may build the record), then five rounds to a first decision, ten
+#: at most (tie 0: the effect is the whole call's); the trial repeats every 256 calls, so a
 #: choice made under other load does not stick.
-_SPARSE_SCHEDULE = dict(warmup=1, minimum=3, tie=0.0, z=0.0, retrial=256)
+_SPARSE_SCHEDULE = dict(paired=True, minimum=5, cap=10, tie=0.0, retrial=256)
 
 
 class _Records(dict):
@@ -865,18 +865,19 @@ class Executor(HierOps):
         # bus, or nothing on unified memory): measured per call shape.
         from . import _choice
         shape = (n, data.shape[0], tmpl.shape[0], nbins, binsize, len(groups))
-        way, record = _choice.choice("sparse-way", ("flat",) + shape, SPARSE_WAYS["flat"],
-                                     scope=self.__dict__, **_SPARSE_SCHEDULE).next()
-        timed = record is not None and not async_submit
-        t0 = time.perf_counter()
-        res = self._flat_run(n, data, tmpl, groups, nbins, binsize, threshold, upload_data,
-                             upload_tmpl, slot, async_submit, way == "compact", rowtab)
-        if way == "dense":
-            from ._shared import sparsified
-            res = sparsified(res, True)
-        if timed:
-            record(time.perf_counter() - t0)
-        return res
+        ch = _choice.choice("sparse-way", ("flat",) + shape, SPARSE_WAYS["flat"],
+                            scope=self.__dict__, **_SPARSE_SCHEDULE)
+
+        def run(way):
+            res = self._flat_run(n, data, tmpl, groups, nbins, binsize, threshold, upload_data,
+                                 upload_tmpl, slot, async_submit, way == "compact", rowtab)
+            if way == "dense":
+                from ._shared import sparsified
+                res = sparsified(res, True)
+            return res
+        if async_submit:                    # a call in flight cannot be timed: no round
+            return run(ch.winner or ch.preference)
+        return ch.play(run, self.__dict__.setdefault("_sparse_ran", {}).setdefault(shape, set()))
 
     def _flat_run(self, n, data, tmpl, groups, nbins, binsize, threshold, upload_data,
                   upload_tmpl, slot, async_submit, sparse, rowtab=None):

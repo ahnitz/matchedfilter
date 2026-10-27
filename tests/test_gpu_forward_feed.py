@@ -118,12 +118,12 @@ def test_every_sparse_way_gives_the_same_peaks(monkeypatch):
     from matchedfilter import _choice
     from matchedfilter._gpuexec import SPARSE_WAYS
     out = {}
-    orig = _choice.Choice.next
+    orig = _choice.Choice.play
     for way in ("rows", "compact"):
         # The sparse ways only (flat peaks take this way where they have it, else theirs).
-        monkeypatch.setattr(_choice.Choice, "next", lambda self, w=way: (
-            (w if w in self.candidates else self.candidates[0]), None)
-            if self.candidates in SPARSE_WAYS.values() else orig(self))
+        monkeypatch.setattr(_choice.Choice, "play", lambda self, run, ran=None, w=way: run(
+            w if w in self.candidates else self.candidates[0])
+            if self.candidates in SPARSE_WAYS.values() else orig(self, run, ran))
         out[way] = _run(monkeypatch, False)
     for a, b in zip(out["rows"], out["compact"]):
         assert a == b
