@@ -42,9 +42,10 @@ def _gpu_arm(label) -> dict:
 #: screens' fastest and runner-up, _gpuhier._kernel_shortlist), and how sparse results are
 #: read ("sparse", "hier" / "flat"). Registered by the calls that consult them (kernel_slot).
 _KERNEL_SLOTS = {}
-#: The slots each device's last batch consulted: an arm counts as running a batch differently
-#: only where its slot was used (a batch's banks recur).
-_KERNEL_SEEN = {}
+#: (device, slot) consulted since the running batch began (time_domain._gpu_batch keeps them
+#: per batch composition: an arm counts as running a batch differently only where its slot
+#: was used the last time that batch ran -- a batch's banks recur).
+_KERNEL_SEEN = set()
 
 
 def kernel_slot(device, what, band, default, alternative):
@@ -53,7 +54,7 @@ def kernel_slot(device, what, band, default, alternative):
     default."""
     slot = (str(what), str(band))
     _KERNEL_SLOTS.setdefault(device, {})[slot] = (default, alternative)
-    _KERNEL_SEEN.setdefault(device, set()).add(slot)
+    _KERNEL_SEEN.add((device, slot))
     over = _GPU_ARM.get("kernels", {})
     if slot in over:
         return over[slot]
@@ -72,3 +73,10 @@ def gpu_setting(name, device=None):
         if name in arm and (device is None or any(d.startswith(str(device) + " ") for d in devs)):
             return arm[name]
     return _GPU_DEFAULT[name]
+
+
+def fingerprint():
+    """The settings in force, as a key: a recorded call plan is kept per configuration, so the
+    arms a device trial plays do not overwrite one another's (and the default's) plans."""
+    return (tuple(sorted((k, v) for k, v in _GPU_ARM.items() if k != "kernels")),
+            tuple(sorted(_GPU_ARM.get("kernels", {}).items())))

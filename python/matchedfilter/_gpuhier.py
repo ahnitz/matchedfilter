@@ -112,9 +112,10 @@ def _bits(x):
 
 class HierHandle:
     """A replay handle for one hier_peaks call (handle_out): the record, its bindings and
-    words, and the input signatures it was valid for."""
+    words, the input signatures it was valid for, and the kernel slots the call consulted
+    with the values it ran (slots: ((what, band, (default, alternative)), ...); values)."""
     __slots__ = ("key", "rec", "binds", "dsig", "tsig", "storage", "shape", "sparse", "way",
-                 "claim", "mode")
+                 "claim", "mode", "slots", "values")
 
     def __init__(self, **kw):
         for k, v in kw.items():
@@ -517,10 +518,12 @@ class HierOps:
             shape = (nd, nt, nbins)
             mode = (frac_key, feed in ("tier0", "bands") or banded) if dv is not None else None
             if handle_out is not None:
+                slots = self._call_slots(bands, half, sparse)
                 handles[way] = (HierHandle(
                     key=key, rec=rec, binds=binds, dsig=self._uploaded["data"].get(storage_key),
                     tsig=self._uploaded["tmpl"].get(storage_key), storage=storage_key, shape=shape,
-                    sparse=sparse, way=way, claim=claim is not None, mode=mode))
+                    sparse=sparse, way=way, claim=claim is not None, mode=mode,
+                    slots=slots, values=self._slot_values(slots)))
             return self._hier_run(rec, binds, shape, sparse, way, len(tiers) > 1,
                                   frac_key if dv is not None else None, slot, async_submit)
 
@@ -843,12 +846,37 @@ class HierOps:
 
     # ---- replay --------------------------------------------------------------------------
     def hier_valid(self, h):
-        """Whether hier_replay(h) would submit: the record is the one the handle saw and both
-        inputs are still resident under the signatures it saw. (The band/full feed is a
-        function of the call, so a replay of the same call takes the same one.)"""
+        """Whether hier_replay(h) would submit: the record is the one the handle saw, both
+        inputs are still resident under the signatures it saw, and its kernel slots still say
+        what it ran (a device trial's arm that moves one makes the call record afresh; the
+        slots are consulted, so a replayed call counts as using them). (The band/full feed
+        is a function of the call, so a replay of the same call takes the same one.)"""
         return (self._exec_table().get(h.key) is h.rec
                 and self._uploaded["data"].get(h.storage) == h.dsig
-                and self._uploaded["tmpl"].get(h.storage) == h.tsig)
+                and self._uploaded["tmpl"].get(h.storage) == h.tsig
+                and self._slot_values(h.slots) == h.values)
+
+    def _call_slots(self, bands, half, sparse):
+        """The kernel slots a hier_peaks call over these bands consults: ((what, band,
+        (default, alternative)), ...) (time_domain's device trial plays them)."""
+        from ._gpuexec import SPARSE_WAYS
+        out = []
+        if half:
+            pair = self._kernel_shortlist("coarse", bands[0], self._coarse_layout(bands[0]))
+            if pair is not None:
+                out.append(("coarse", bands[0], pair))
+        if len(bands) > 1 and self._shipped("tier1", bands[1]) and self._shipped("tier1gate", bands[1]):
+            pair = self._kernel_shortlist("gateway", bands[1], self._gate_way(bands[1]))
+            if pair is not None:
+                out.append(("gateway", bands[1], pair))
+        if sparse:
+            out.append(("sparse", "hier", SPARSE_WAYS["hier"]))
+        return tuple(out)
+
+    def _slot_values(self, slots):
+        from ._gpusettings import kernel_slot
+        name = self._dev_name()
+        return tuple(kernel_slot(name, w, b, *pair) for w, b, pair in slots)
 
     def hier_replay(self, h, slot, async_submit, validated=False):
         """Submit a hier_peaks call again from its handle, or None if the handle is stale.

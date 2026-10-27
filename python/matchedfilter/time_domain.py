@@ -344,6 +344,9 @@ from ._gpusettings import (_GPU_ARM, _GPU_DEFAULT, _GPU_LOCKS, _KERNEL_SEEN,  # 
                            _KERNEL_SLOTS, _gpu_arm, gpu_setting, kernel_slot)
 #: The configurations each device set's trial has settled (Choice.play's `ran`).
 _GPU_RAN = {}
+#: The kernel slots each batch composition (devices, banks, follow-ups or not) consulted the
+#: last time it ran (_gpu_batch).
+_SEEN_BY_BATCH = {}
 
 
 #: The device trials (_gpu_batch): each decides the settings it names, played only on
@@ -402,8 +405,23 @@ def _gpu_batch(jobs, run):
     from . import _choice
     vulkan = any(getattr(d, "backend", "") == "vulkan" for d in gpus)
     names = {d.name for d in gpus}
-    # the slots the previous batch consulted; this batch's calls register theirs afresh
-    seen = set().union(*(_KERNEL_SEEN.pop(nm, set()) for nm in names))
+    # the slots this batch's composition consulted when it last ran (seen_run records them)
+    comp = (devs, tuple(sorted({id(b) for b, _, _ in jobs})),
+            any((kw or {}).get("template_index") is not None for _, _, kw in jobs))
+    seen = _SEEN_BY_BATCH.get(comp, set())
+
+    def seen_run(over):
+        _KERNEL_SEEN.clear()
+        try:
+            return _with_gpu_arm(settings(over), run)
+        finally:
+            # a pipelined batch (wait=False) submits its calls after run() returns: it records
+            # nothing here, and must not erase what a waited run (a play) recorded
+            got = {sl for dev, sl in _KERNEL_SEEN if dev in names}
+            if got:
+                _SEEN_BY_BATCH[comp] = got
+                while len(_SEEN_BY_BATCH) > 256:
+                    _SEEN_BY_BATCH.pop(next(iter(_SEEN_BY_BATCH)))
     for name, (dims, arms, plays) in _GPU_TRIALS.items():
         if name == "gpu-kernels":
             slots = sorted({(slot, alt) for nm in names
@@ -436,15 +454,17 @@ def _gpu_batch(jobs, run):
             def config(arm, dims=dims, many=many):
                 a = _gpu_arm(arm)
                 return tuple(a[d] if d != "interleave" or (a["fuse"] and many) else 0 for d in dims)
+        if len({config(arm) for arm in ch.live()}) < 2:
+            continue                # every live arm runs this batch alike: nothing to play
         ran = _GPU_RAN.setdefault((name, devs), set())
-        res = ch.play(lambda arm: _with_gpu_arm(settings(_gpu_arm(arm)), run), ran, config=config)
+        res = ch.play(lambda arm: seen_run(_gpu_arm(arm)), ran, config=config)
         if ch.winner is not None:
             if name == "gpu-kernels":
                 _lock_kernels(locked, ch, names)
             else:
                 locked.update({d: _gpu_arm(ch.winner)[d] for d in dims})
         return res
-    return _with_gpu_arm(settings(), run)
+    return seen_run(None)
 
 
 def _lock_kernels(locked, ch, names):
