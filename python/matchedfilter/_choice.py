@@ -309,7 +309,9 @@ class Choice:
         return self.winner
 
     def play(self, run: Callable[[Hashable], Any], ran: Optional[set] = None,
-             config: Optional[Callable[[Hashable], Hashable]] = None):
+             config: Optional[Callable[[Hashable], Hashable]] = None,
+             warm: Optional[Callable[[Hashable], Any]] = None,
+             keep: Optional[Callable[[Any], Any]] = None):
         """One call of a paired choice, on its real input: the result of run(candidate).
 
         Locked, the winner runs once. Open, every live candidate runs the same call back to
@@ -319,9 +321,12 @@ class Choice:
         the timings are a round (round), and the preference's result is returned. `ran`
         collects the configurations that have run (the caller's record of its state). While a
         play runs, every other choice it meets takes its preference untimed (playing()), so
-        trials never nest. config(candidate) names what a candidate
-        runs on this call: candidates that run alike are run once and share its timing (they
-        can only tie), and `ran` holds configurations."""
+        trials never nest. config(candidate) names what a candidate runs on this call:
+        candidates that run alike are run once and share its timing (they can only tie), and
+        `ran` holds configurations. warm(candidate) is the untimed run (default run: a GPU
+        batch settles by replaying until it builds no more recordings); keep(result) takes the
+        preference's result as soon as it is run, before another candidate's run can reuse
+        its buffers."""
         if self.winner is not None or _PLAYING[0]:
             return run(self.winner if self.winner is not None else self.preference)
         import time
@@ -337,15 +342,17 @@ class Choice:
                     # an untimed run of the same call first, every time: a call run second
                     # gains from the first (caches, inputs on the device: a GPU batch ran
                     # 20-30% faster), so each timed run is a second run, whatever the order
-                    run(c)
+                    (warm or run)(c)
                     ran.add(k)
                     t0 = time.perf_counter()
-                    results[k] = run(c)
+                    res = run(c)
                     by_config[k] = time.perf_counter() - t0
+                    if k == config(self.preference):
+                        out = keep(res) if keep is not None else res
                 times[c] = by_config[k]
-            out = results[config(self.preference)]
         if all(t > 0 for t in times.values()):     # a clock that did not move times nothing
-            self.round(times)
+            with _AUTOTUNE_LOCK:
+                self.round(times)
         return out
 
     # ---- the record on file -------------------------------------------------------------

@@ -185,7 +185,7 @@ def test_a_replay_error_releases_the_guard(clock):
     tr = _trial.trial("t|boom", lambda: [_trial.DEFAULT, "n=4096"])
     with pytest.raises(RuntimeError):
         _trial.run_round(tr, [s], s.replay, 1.0)
-    assert not tr.replaying
+    assert not _choice.playing()
 
 
 def test_a_lock_persists_across_processes_and_an_open_trial_does_not(clock, monkeypatch, tmp_path):

@@ -61,7 +61,6 @@ class Trial:
             tuple(arms), store_key="joint|" + key, what="TRIAL %s" % key,
             budget=(0, UNROUNDED_BUDGET), label=str, parse=_settings.valid,
             confirm=True)
-        self.replaying = False
 
     @property
     def winner(self) -> Optional[str]:
@@ -117,52 +116,41 @@ def winner(key: str) -> Optional[str]:
 def run_round(tr: Trial, subjects: Sequence, replay: Callable[[], object], work: float,
               settle: Optional[Callable[[], None]] = None,
               keep: Optional[Callable[[object], object]] = None):
-    """One paired round of tr over subjects, all on the same work: each distinct configuration
-    of the live arms is put on every subject (use_arm), settled the first time a subject runs
-    it (settle(), else one untimed replay(): a configuration's first run builds plans, its
-    thresholds and templates), and timed over one replay(); the round is recorded as seconds
-    per unit of work. A subject without a `trial_ran` set (the configurations it has run) is
-    settled every time.
-    Returns the result of DEFAULT's timed replay (passed through keep() as soon as it is taken,
-    before another arm's replay can reuse its buffers). On a decision, every subject locks the winner
-    (lock_arm); otherwise they are left on DEFAULT."""
-    live = tr.live()
-    conf = {a: tuple(s.arm_config(a) for s in subjects) for a in live}
-    order = list(dict.fromkeys(conf[a] for a in live))      # DEFAULT's configuration first
-    if tr.rounds % 2:
-        order.reverse()
-    rep = {}
-    for a in live:
-        rep.setdefault(conf[a], a)
-    took, kept = {}, None
-    tr.replaying = True
+    """One paired round of tr over subjects, all on the same work (Choice.play: the one round
+    engine): each distinct configuration of the live arms is put on every subject (use_arm),
+    run untimed (settle(), else replay(): a GPU batch settles by replaying until it builds no
+    more recordings) and then timed over one replay(), the order reversing every round.
+    Returns the result of DEFAULT's timed replay (passed through keep() as soon as it is
+    taken, before another arm's replay can reuse its buffers). On a decision, every subject
+    locks the winner (lock_arm); otherwise they are left on DEFAULT. `work` (the round's
+    pairs) only scales the log: rounds are judged as ratios to DEFAULT."""
+    def use(label):
+        for s in subjects:
+            s.use_arm(label)
+
+    def run(label):
+        use(label)
+        return replay()
+
+    def warm(label):
+        use(label)
+        (settle or replay)()
+
     try:
-        for c in order:
-            for s in subjects:
-                s.use_arm(rep[c])
-            ran = [getattr(s, "trial_ran", None) for s in subjects]
-            if any(r is None or own not in r for r, own in zip(ran, c)):
-                (settle or replay)()
-                for r, own in zip(ran, c):
-                    if r is not None:
-                        r.add(own)
-            t0 = time.perf_counter()
-            res = replay()
-            took[c] = (time.perf_counter() - t0) / work
-            if c == conf[DEFAULT]:
-                kept = keep(res) if keep is not None else res
-    finally:
-        tr.replaying = False
-    with _AUTOTUNE_LOCK:
-        w = tr.round({a: took[conf[a]] for a in live})
+        res = tr.choice.play(run, set(), config=lambda a: tuple(s.arm_config(a) for s in subjects),
+                             warm=warm, keep=keep)
+    except BaseException:
+        use(DEFAULT)
+        raise
+    w = tr.choice.winner
     _log_autotune("TRIAL %s round %d: %s", tr.key, tr.rounds,
-                  {a: "%.3g" % took[conf[a]] for a in live})
+                  {a: "%.3g" % (v[-1] / max(work, 1e-30)) for a, v in tr.choice.samples.items() if v})
     for s in subjects:
         if w is not None:
             s.lock_arm(w)
         else:
             s.use_arm(DEFAULT)
-    return kept
+    return res
 
 
 def clear() -> None:
