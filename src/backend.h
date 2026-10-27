@@ -9,6 +9,8 @@ typedef struct {
   int lanes;                 /* floats per vector, which the caller's layout needs */
   void *(*create)(size_t N);
   void  (*destroy)(void *);
+  /* Out of place: in is read, never written (one input can feed several plans' transforms,
+     as the gate model's simulation does). */
   void  (*fft)(void *, const float *in, float *out, int conj);
   int   (*supported)(size_t N);
   /* Binned maximum; writes exactly nbins dense entries. Every scan takes ph: NULL numbers

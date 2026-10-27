@@ -57,14 +57,41 @@ def test_the_draws_are_normal_into_the_tails():
     assert a.max() < 5.8                 # u1 >= 2^-24: at most 5.77 sigma
 
 
+@pytest.mark.parametrize("offset, step, length, rows", [
+    (0, 4096, 2048, 7),            # simulate's rows at n = 2048: one block each
+    (0, 8192, 4096, 5),            # two blocks a row
+    (0, 4096, 1024, 6),            # the start of each row's block
+    (2048 * 3, 1024, 1000, 9),     # rows inside blocks, ends off the 16-draw steps
+    (17, 4096, 2048, 4),           # odd starts: every block read from inside
+    (5, 300, 301, 11),             # rows overlapping in the stream
+    (2 ** 40 + 4096, 4096, 2048, 3),
+])
+def test_rows_of_draws_are_spans_of_the_stream(offset, step, length, rows):
+    """gauss_fill_rows (simulate's fill: rows in one call, blocks of different rows generated
+    together, each pair of draws times its bin's scale) gives each row's span of one long read,
+    times the scale, exactly."""
+    span = (rows - 1) * step + length
+    whole = _fill(span, offset)
+    want = np.stack([whole[r * step:r * step + length] for r in range(rows)])
+    got = np.full((rows, length), np.nan, np.float32)
+    _core.gauss_fill_rows(got, SEED, offset, step)
+    np.testing.assert_array_equal(got, want)
+    scale = np.linspace(0.25, 3.0, (length + 1) // 2, dtype=np.float32)
+    _core.gauss_fill_rows(got, SEED, offset, step, scale)
+    np.testing.assert_array_equal(got, want * np.repeat(scale, 2)[:length])
+
+
 @pytest.mark.skipif(len(_core.targets()) < 2 if hasattr(_core, "targets") else True,
                     reason="one SIMD target in this build")
 def test_every_isa_draws_the_same_integers():
     """The generators' integers are identical on every target; the float part (log, sincos)
-    differs in the last ulp at most."""
+    differs in the last ulp at most. AVX2 and AVX-512 share that arithmetic (FMA, the same
+    polynomials), so AVX-512's two blocks a 16-lane vector give bit for bit what AVX2's one
+    block an 8-lane vector gives."""
     code = ("import sys, numpy as np; from matchedfilter import _core; "
             "o = np.empty(100000, np.float32); _core.gauss_fill(o, %d, 12345); "
-            "np.save(sys.argv[1], o)" % SEED)
+            "w = np.empty((5, 2048), np.float32); _core.gauss_fill_rows(w, %d, 4096, 4096); "
+            "np.save(sys.argv[1], np.concatenate([o, w.ravel()]))" % (SEED, SEED))
     got = {}
     for isa in _core.targets():
         path = os.path.join(os.environ.get("TMPDIR", "/tmp"), "gauss_%s_%d.npy" % (isa, os.getpid()))
@@ -76,6 +103,8 @@ def test_every_isa_draws_the_same_integers():
     ref = next(iter(got.values()))
     for isa, v in got.items():
         np.testing.assert_allclose(v, ref, rtol=0, atol=1e-6, err_msg=isa)
+    if "AVX3" in got and "AVX2" in got:
+        np.testing.assert_array_equal(got["AVX3"], got["AVX2"])
 
 
 def _profile(n):
@@ -134,6 +163,27 @@ def test_every_window_reads_one_noise_simulation(fresh):
             c.clear()
         gc._SIMILAR.clear()
         np.testing.assert_array_equal(v, gc.noise_block_maxima(p, n, bands, window=w), err_msg=str(w))
+
+
+def test_the_noise_statistics_are_the_transforms_of_the_stream(fresh):
+    """Each band's noise statistic in the simulation (rows of the stream times the profile's
+    scale, one block's draws shared by all of a row's transforms) is the b-point transform of
+    the row's first b bins, |.|^2's running-maximum records as NumPy finds them in float64."""
+    n, rows = 2048, 24
+    p = _profile(n)
+    bands = gc.usable_bands(p, n)
+    recs = gc._noise_records(p, n, bands, rows, 13)
+    scale = (np.sqrt(p) / np.sqrt(2)).astype(np.float32)
+    kfill = min(int(np.flatnonzero(p)[-1]) + 1, bands[-1])
+    for r in range(rows):
+        d = _fill(2 * kfill, 2 * r * n, seed=(gc._DOMAIN_SIGNAL << 32) | 13) * np.repeat(scale[:kfill], 2)
+        x = d[0::2].astype(np.float64) + 1j * d[1::2]
+        for b, (pos, val, off) in zip(bands, recs):
+            a = np.abs(np.fft.ifft(x[:b]) * b * (gc._SIG / np.sqrt(p[:b].sum()))) ** 2
+            want = np.flatnonzero(a > np.maximum.accumulate(np.concatenate(([-1.0], a[:-1]))))
+            got = slice(off[r], off[r + 1])
+            np.testing.assert_array_equal(pos[got], want, err_msg="row %d band %d" % (r, b))
+            np.testing.assert_allclose(val[got], np.sqrt(a[want]), rtol=2e-5, err_msg="row %d band %d" % (r, b))
 
 
 def test_signal_draws_depend_only_on_their_seed(fresh):
