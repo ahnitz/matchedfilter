@@ -198,8 +198,10 @@ def clear_autotune_cache():
         _prices._DIRECT_PAIR.clear()
     _trial.clear()
     _choice.reset(scope="workload")
-    from . import time_domain
-    time_domain._GPU_LOCKS.clear()
+    from . import _gpusettings, time_domain
+    _gpusettings._GPU_LOCKS.clear()
+    _gpusettings._KERNEL_SLOTS.clear()
+    _gpusettings._KERNEL_SEEN.clear()
     time_domain._GPU_RAN.clear()
 
 

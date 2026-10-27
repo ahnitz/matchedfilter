@@ -394,7 +394,7 @@ def test_no_phase_orders_work_inside_itself(monkeypatch, feed, way, cascade):
     """A fused batch runs a phase's commands unordered, its barriers at the phase's end: a
     barrier between two pieces of one phase's work would be dropped (device compaction once
     shared the refine's phase and read its output half-written)."""
-    from matchedfilter import time_domain as td
+    from matchedfilter import _gpusettings as td
     monkeypatch.setattr(_gpuhier, "shared_view", lambda array, ctx: array)
     orig = td.kernel_slot
     monkeypatch.setattr(td, "kernel_slot", lambda dev, what, band, d, alt: way

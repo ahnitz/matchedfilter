@@ -595,7 +595,7 @@ class _FusedBatch:
         if forced is not None or len(self.items) < 2:
             k = forced or 0
         else:
-            from .time_domain import gpu_setting
+            from ._gpusettings import gpu_setting
             k = int(gpu_setting("interleave"))
         key = (base, k)
         cache = dev.__dict__.setdefault("fused_cache", OrderedDict())
