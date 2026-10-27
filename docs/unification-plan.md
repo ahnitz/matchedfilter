@@ -838,3 +838,28 @@ main only when everything is done, gated and benchmarked.
   - Removed: `_trial_budget_choice`, `_chain_lock`, `_chain_lock_state`,
     `_store_batch_trial`, the per-trial dicts and their own need/budget/persistence code.
 
+- 2026-10-27: **Stage C finished: every measured choice is paired rounds on real work
+  (19c2e2f8).**
+  - **GPU batch settings.** Fusion, the Vulkan interleave depth and where follow-ups run
+    were online choices sampled on unpaired batches (the depth on device timers of single
+    submissions). They are now device trials played on the batches (`time_domain._gpu_batch`,
+    `Choice.play`): "gpu-batch" decides fusion and depth, "gpu-single" where follow-ups run.
+  - **Kernel slots.** The coarse layout, gate way and sparse read form "gpu-kernels": the
+    offline screen's fastest against its runner-up, played on real batches. The screen still
+    keeps pathological layouts off the device.
+  - **Choice** keeps paired rounds with exact elimination and confirmation, the budget, the
+    offline decide (screens, Vulkan subgroup size) and stored locks. The online sampler and
+    open-contest persistence are gone.
+  - **Traps found on the way:**
+    - a GPU batch run second ran 20-30% faster, so every timed run now follows an untimed
+      run of the same config;
+    - batch calls are submitted in flight, so call-level plays never ran in production;
+    - deferred calls replay recorded call plans, so handles now carry the slot values they
+      ran, and plans are kept per GPU config;
+    - an arm a batch does not exercise times ties, so a trial plays only where two of its
+      live arms differ.
+  - **Measured on the 8060S.** The trial phase costs about 0.9 s once per process. Locked,
+    the steady wall matches main and fine is 6% faster. The model's per-plan chains tie the
+    best forced chain (0.986 against 0.975 s, three alternations), so the 38% chain
+    mispricing seen on another device does not reproduce here and needs an L40S or M2
+    measurement.
