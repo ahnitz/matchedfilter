@@ -34,7 +34,7 @@ def test_batches_play_every_setting_then_keep_one(monkeypatch, tmp_path):
     S = 1 << 17
     sides = []
     orig = td._fuse_close
-    monkeypatch.setattr(td, "_fuse_close", lambda jobs: sides.append(td.gpu_setting("fuse")) or orig(jobs))
+    monkeypatch.setattr(td, "_fuse_close", lambda jobs: sides.append(td._settings.setting("fuse")) or orig(jobs))
     # Batches until the trial locks, at most its rounds' cap (with a confirmation): the
     # joint trial of the banks' block sizes plays its rounds first, each batch it plays a
     # round of not a round of this trial.

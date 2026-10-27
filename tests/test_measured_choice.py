@@ -91,7 +91,8 @@ def _single_contest(monkeypatch, tmp_path, cost, calls=40):
     clock, k = [0.0], {"gpu": 0, "cpu": 0}
     monkeypatch.setattr(time, "perf_counter", lambda: clock[0])
 
-    def run(side):
+    def run(label):
+        side = td._side_of(label)
         clock[0] += cost(side, k[side])
         k[side] += 1
         return side
@@ -111,7 +112,7 @@ def test_single_template_device_choice_follows_the_shared_rule_and_persists(monk
     confirmation), and the next process reuses it untimed."""
     td, bank, g, state = _single_contest(
         monkeypatch, tmp_path, lambda side, i: (1.0 if side == "gpu" else 0.4) * (1 + 0.01 * (i % 3)))
-    assert state.winner == "cpu"
+    assert state.winner == "side=cpu"
     from matchedfilter import _choice
     _choice.reset()                                # a new process: the stored side, no trial
     assert td.TimeDomainFilterBank._single_device(bank, g, 24) == (True, False)
@@ -123,7 +124,7 @@ def test_single_template_device_unclear_contest_keeps_the_banks_device(monkeypat
     rng = __import__("numpy").random.default_rng(3)
     td, _, _, state = _single_contest(monkeypatch, tmp_path,
                                       lambda side, i: float(rng.uniform(0.7, 1.3)))
-    assert state.winner == "gpu"
+    assert state.winner == "default"
 
 
 def test_gpu_kernel_choices_carry_their_backend_artifacts():

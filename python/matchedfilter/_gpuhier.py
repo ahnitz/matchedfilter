@@ -180,7 +180,7 @@ class HierOps:
     def _played_layout(self, band):
         """The coarse layout a call runs at this band: the offline screen's choice
         (_coarse_layout), or its runner-up where the device trial plays or locked it on real
-        batches (time_domain.kernel_slot "coarse"). MF_COARSE_LAYOUT forces one."""
+        batches (_settings.slot "coarse"). MF_COARSE_LAYOUT forces one."""
         from ._coarse import forced_layout
         first = self._coarse_layout(band)
         if forced_layout(band) is not None:
@@ -188,7 +188,7 @@ class HierOps:
         pair = self._kernel_shortlist("coarse", band, first)
         if pair is None:
             return first
-        from ._gpusettings import kernel_slot
+        from ._settings import slot as kernel_slot
         label = kernel_slot(self._dev_name(), "coarse", band, *pair)
         return next((c for c in self._x_coarse_candidates(band)
                      if self._layout_label(band, c) == label), first)
@@ -207,7 +207,7 @@ class HierOps:
         way = self._gate_way(band)
         pair = self._kernel_shortlist("gateway", band, way)
         if pair is not None:
-            from ._gpusettings import kernel_slot
+            from ._settings import slot as kernel_slot
             way = kernel_slot(self._dev_name(), "gateway", band, *pair)
         return way == "gate"
 
@@ -238,7 +238,7 @@ class HierOps:
         offline screen's fastest and its runner-up. The screen times every candidate on
         synthetic data and leaves the pathological ones out (a full dispatch of some can
         outlast a driver's watchdog); the device trial plays the two on real batches
-        (time_domain.kernel_slot). A choice read back from MF_COST_FILE, untimed here, has
+        (_settings.slot). A choice read back from MF_COST_FILE, untimed here, has
         no runner-up and is kept."""
         holder = getattr(self, "_device_state", None) or self
         if what == "coarse":
@@ -528,7 +528,7 @@ class HierOps:
                                   frac_key if dv is not None else None, slot, async_submit)
 
         # The sparse read, the coarse layout and the gate way are kernel slots the device
-        # trial plays on whole batches (time_domain.kernel_slot): a call here runs what they say.
+        # trial plays on whole batches (_settings.slot): a call here runs what they say.
         way = self._sparse_way() if sparse else "dense"
         res = run(way)
         if handle_out is not None and way in handles:
@@ -767,7 +767,7 @@ class HierOps:
         """How a sparse result is read -- its survivors' rows gathered on the host, or the hits
         compacted on the device: a kernel slot of the device trial (_gpuexec.SPARSE_WAYS)."""
         from ._gpuexec import SPARSE_WAYS
-        from ._gpusettings import kernel_slot
+        from ._settings import slot as kernel_slot
         return kernel_slot(self._dev_name(), "sparse", "hier", *SPARSE_WAYS["hier"])
 
     def _hier_run(self, rec, binds, shape, sparse, way, cascade, frac_key, slot,
@@ -874,7 +874,7 @@ class HierOps:
         return tuple(out)
 
     def _slot_values(self, slots):
-        from ._gpusettings import kernel_slot
+        from ._settings import slot as kernel_slot
         name = self._dev_name()
         return tuple(kernel_slot(name, w, b, *pair) for w, b, pair in slots)
 

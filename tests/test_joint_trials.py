@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 
 import matchedfilter as mf
-from matchedfilter import TimeDomainFilterBank, _costfile, _trial
+from matchedfilter import TimeDomainFilterBank, _choice, _costfile, _settings, _trial
 from matchedfilter import time_domain as td
 
 
@@ -200,7 +200,7 @@ def test_a_lock_persists_across_processes_and_an_open_trial_does_not(clock, monk
     mf.clear_autotune_cache()                                       # a new process
     tr = _trial.trial("t|persist", lambda: arms)
     assert tr.rounds == 0 and tr.winner is None
-    for _ in range(4 * _trial.ROUND_CAP):
+    for _ in range(4 * _choice.rounds()[1]):
         if tr.winner is not None:
             break
         _trial.run_round(tr, [s], s.replay, 1.0)
@@ -213,7 +213,7 @@ def test_a_winner_on_noise_is_not_confirmed(clock):
     """An arm the rule picks must win again, alone against the default: a burst of wins that
     does not repeat leaves the default standing."""
     conf = {_trial.DEFAULT: "a", "n=4096": "b"}
-    seq = iter([0.8] * _trial.rounds_wanted() + [1.0] * 40)        # fast at first only
+    seq = iter([0.8] * _choice.rounds()[0] + [1.0] * 40)        # fast at first only
 
     class Burst(_Subject):
         def replay(self):
@@ -227,14 +227,16 @@ def test_a_winner_on_noise_is_not_confirmed(clock):
 
 
 def test_labels_round_trip():
-    for label in (_trial.DEFAULT, "n=2048", "n=model", "q15=1", "q15=0"):
-        kind, v = _trial.parse_arm(label)
-        again = {"default": lambda: _trial.DEFAULT, "n": lambda: _trial.n_arm(v),
-                 "q15": lambda: _trial.q15_arm(v)}[kind]()
-        assert again == label
-    for bad in ("chain=2048:256", "chain=+1", "blocks=2"):    # chains are never arms
-        with pytest.raises(ValueError):
-            _trial.parse_arm(bad)
+    """Every dimension's arms read back to themselves (_settings: one grammar for every trial);
+    a label that names no dimension or no value is not an arm."""
+    from matchedfilter import _settings
+    for label in (_settings.DEFAULT, "n=2048", "n=model", "q15=1", "q15=0", "fuse=0",
+                  "interleave=3", "single=cpu", "side=cpu", "kern:coarse:256=tierb_256_c16w@64"):
+        d, v = _settings.parse_arm(label)
+        assert (d == _settings.DEFAULT and label == d) or _settings.arm(d, v) == label
+    for bad in ("chain=2048:256", "chain=+1", "blocks=2", "q15=2", "single=tpu", "n=", "fuse"):
+        with pytest.raises(ValueError):                    # chains are never arms
+            _settings.parse_arm(bad)
 
 
 # ---- banks ------------------------------------------------------------------------------------
@@ -270,7 +272,7 @@ def test_a_bank_proposes_sizes_chains_and_the_screen_and_starts_on_the_default()
     bank._prepare_arms()
     arms = bank._joint_arms()
     assert arms[0] == _trial.DEFAULT
-    assert [a for a in arms if a.startswith("n=")] == [_trial.n_arm(n) for n in bank._trial_cands[1:]]
+    assert [a for a in arms if a.startswith("n=")] == [_settings.arm("n", n) for n in bank._trial_cands[1:]]
     assert bank._layout_rank == bank._arm_rank(_trial.DEFAULT) == 0     # the smallest size
     assert {n for _, n in bank.chosen_layout} == {bank._trial_cands[0]}
     assert all(p._governed for p in bank._layout_plans(0))              # the bank's trial governs
@@ -287,7 +289,7 @@ def test_a_banks_trial_runs_without_a_cost_file_switches_exactly_and_locks():
     plain._in_trial = False
     data = _data(rng)
     ref = set(np.unique(plain.filter_series(data).template_indices))
-    for _ in range(2 * _trial.ROUND_CAP + 1):
+    for _ in range(2 * _choice.rounds()[1] + 1):
         out = TimeDomainFilterBank.filter_series_many([(bank, data, {})])[0]
         assert set(np.unique(out.template_indices)) == ref
         if not bank._in_trial:
@@ -329,7 +331,7 @@ def test_a_banks_size_lock_builds_that_size():
         pytest.skip("one single size only")
     other = bank._trial_cands[1]
     tr = _trial.trial(td._trial_key(bank), bank._joint_arms)
-    tr.choice.lock(_trial.n_arm(other))
+    tr.choice.lock(_settings.arm("n", other))
     again, _ = _inspiral_bank()
     assert {n for _, n in again.chosen_layout} == {other} and again._layouts is None
 

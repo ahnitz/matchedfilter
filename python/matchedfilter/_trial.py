@@ -37,58 +37,17 @@ none of its own.
 import time
 from typing import Callable, Dict, Optional, Sequence
 
-from . import _choice, _config
+from . import _choice, _settings
 from ._choice import _AUTOTUNE_LOCK, _log_autotune
 
 
 #: The arm with every dimension at its default (see the module docstring): the preference.
-DEFAULT = "default"
-
-
-#: Paired rounds before a first decision, and the most an unclear trial takes.
-ROUNDS = 5
-ROUND_CAP = 10
+DEFAULT = _settings.DEFAULT
 
 
 #: A trial ends after this many calls of its instances that could not be a round (follow-ups,
 #: calls too small to stand for the work) without a decision; DEFAULT then stands.
 UNROUNDED_BUDGET = 64
-
-
-def n_arm(n) -> str:
-    """The arm with every block at size n, or the model's priced layout (n = "model")."""
-    return "n=model" if n == "model" else "n=%d" % int(n)
-
-
-def q15_arm(on: bool) -> str:
-    """The arm with the Q15 screen on (or off) wherever the first band has it."""
-    return "q15=%d" % int(bool(on))
-
-
-def parse_arm(label: str):
-    """(kind, value) of an arm label: ("default", None), ("n", n or "model") or ("q15", on).
-    Raises ValueError for a label that names no arm."""
-    s = str(label)
-    if s == DEFAULT:
-        return DEFAULT, None
-    kind, _, v = s.partition("=")
-    if kind == "n":
-        return "n", ("model" if v == "model" else int(v))
-    if kind == "q15":
-        return "q15", v == "1"
-    raise ValueError("not a trial arm: %r" % s)
-
-
-def _valid(label) -> Optional[str]:
-    try:
-        parse_arm(label)
-    except (TypeError, ValueError):
-        return None
-    return str(label)
-
-
-def rounds_wanted() -> int:
-    return max(2, int(_config.get("MF_TRIAL_ROUNDS", ROUNDS)))
 
 
 class Trial:
@@ -97,12 +56,11 @@ class Trial:
 
     def __init__(self, key: str, arms: Sequence[str]):
         arms = [DEFAULT] + [a for a in dict.fromkeys(arms) if a != DEFAULT]
-        base = rounds_wanted()
         self.key = key
         self.choice = _choice.Choice(
             tuple(arms), store_key="joint|" + key, what="TRIAL %s" % key,
-            minimum=base, cap=max(base, ROUND_CAP if base == ROUNDS else 2 * base),
-            budget=(0, UNROUNDED_BUDGET), paired=True, label=str, parse=_valid, confirm=True)
+            budget=(0, UNROUNDED_BUDGET), paired=True, label=str, parse=_settings.valid,
+            confirm=True)
         self.replaying = False
 
     @property
@@ -153,7 +111,7 @@ def winner(key: str) -> Optional[str]:
         tr = _TRIALS.get(key)
     if tr is not None:
         return tr.winner
-    return _choice.stored_lock("joint|" + key, _valid)
+    return _choice.stored_lock("joint|" + key, _settings.valid)
 
 
 def run_round(tr: Trial, subjects: Sequence, replay: Callable[[], object], work: float,
