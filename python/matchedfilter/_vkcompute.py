@@ -500,39 +500,14 @@ def _fused_valid(ctx, cmds, serials):
             and all(phases.get(h, {}).get("_serial") == k for h, k in zip(cmds, serials)))
 
 
-#: Interleave depths a fused batch is timed at: 0 is lockstep; 3 puts the second half's
-#: forward (DRAM-bound) beside the first half's coarse0 (VALU-bound).
+#: Interleave depths of a fused batch the device trial plays (time_domain.gpu_setting): 0 is
+#: lockstep; 3 puts the second half's forward (DRAM-bound) beside the first half's coarse0
+#: (VALU-bound).
 _INTERLEAVE_CANDIDATES = (0, 3)
-#: Timed submissions per candidate before a batch shape's depth is first judged, and the most
-#: an unclear contest takes before lockstep (the model's depth) stands
-#: (gatechain.measured_choice).
-_INTERLEAVE_TRIALS = 5
-_INTERLEAVE_TRIALS_MAX = 10
-
-
-def _interleave_key(dev, shape):
-    from . import gatechain
-    return "vk-interleave|%s|%r|k%s" % (getattr(dev, "index", 0), shape, gatechain.gpu_kernel_id())
-
-
-def _batch_shape(items):
-    """(shape, work) of a fused batch: the multiset of phase sets its items carry, and its
-    coarse work (workgroups dispatched in coarse0, at least 1) to normalise a timing."""
-    sig, work = [], 1
-    for ctx, cmds in items:
-        names = []
-        for h in cmds:
-            ph = ctx._phases[h]
-            names.extend(n for n in _FUSED_PHASES if n in ph)
-            for name, args in (ph.get("coarse0") or ((), ()))[0]:
-                if name == "vkCmdDispatch":
-                    work += int(getattr(args[1], "value", args[1]))
-        sig.append(tuple(names))
-    return (len(items) > 1, tuple(sorted(set(sig)))), work
 
 
 def _fuse_interleave():
-    """A forced interleave depth (MF_GPU_FUSE_INTERLEAVE), or None: measured per batch."""
+    """A forced interleave depth (MF_GPU_FUSE_INTERLEAVE), or None: the device trial's."""
     v = _config.get("MF_GPU_FUSE_INTERLEAVE")
     return None if v is None else max(0, v)
 
@@ -586,7 +561,6 @@ class _FusedBatch:
 
     def __init__(self, dev):
         self.dev, self.items, self.state = dev, [], "open"
-        self.trial = None
 
     #: Submissions per fused command buffer. The device starts on a chunk while the host
     #: prepares the next: fusing a whole segment into one buffer left the GPU idle through
@@ -614,30 +588,15 @@ class _FusedBatch:
         # The same jobs recur every segment: reuse their fused recording while every
         # constituent recording is still cached (eviction drops its phases).
         base = _fused_key(self.items)
-        # The interleave depth is a MEASURED choice, per device and batch SHAPE (the
-        # phases its items carry): the first batches of a shape take the candidates in a
-        # random order under device timestamps, each time normalised by the batch's
-        # coarse work, and the lower median is kept from then on. So it turns on where the
-        # forward is DRAM-bound (full clock, other GPUs) and stays off where it is not.
-        # Batches rarely recur exactly (a chunk's composition varies), so a per-batch
-        # trial would seldom finish; the shape is what decides whether overlap can pay.
+        # The interleave depth is the device trial's (time_domain.gpu_setting "interleave":
+        # played on real batches with the batch's other GPU settings), lockstep (0) unless a
+        # deeper interleave was clearly faster; MF_GPU_FUSE_INTERLEAVE forces one.
         forced = _fuse_interleave()
         if forced is not None or len(self.items) < 2:
             k = forced or 0
         else:
-            # An online _choice.Choice per batch shape, on this device: lockstep (0) stands
-            # unless a deeper interleave is faster past TIE and the noise -- the timings
-            # carry clock and content noise, and a coin flip between two equal choices only
-            # adds a barrier per phase. A depth this machine stored is reused untimed.
-            from . import _choice
-            shape, work = _batch_shape(self.items)
-            k, record = _choice.choice(
-                "interleave", shape, _INTERLEAVE_CANDIDATES, scope=dev.__dict__,
-                store_key=_interleave_key(dev, shape), label=int, warmup=0,
-                minimum=_INTERLEAVE_TRIALS, cap=_INTERLEAVE_TRIALS_MAX,
-                what="INTERLEAVE %s" % (shape,)).next()
-            if record is not None:
-                self.trial = (work, record)
+            from .time_domain import gpu_setting
+            k = int(gpu_setting("interleave"))
         key = (base, k)
         cache = dev.__dict__.setdefault("fused_cache", OrderedDict())
         hit = cache.get(key)
@@ -723,15 +682,7 @@ class _FusedBatch:
                "vkCreateFence")
         self.cmd = cmd
         timed = next((ctx for ctx, _ in self.items if ctx._timing), None)
-        if self.trial is not None:
-            timer = dev.__dict__.get("fuse_timer")
-            if timer is None:
-                timer = dev.fuse_timer = _DeviceTimer(dev)
-            slot, begin, end = timer.pair()
-            self.trial = self.trial + (slot,)
-            cmds = (_vp * 3)(begin, cmd, end)
-            submit = _SubmitInfo(4, None, 0, None, None, 3, cmds, 0, None)
-        elif timed is not None:
+        if timed is not None:
             begin, end = timed._timestamp_pair("fused")
             cmds = (_vp * 3)(begin, cmd, end)
             submit = _SubmitInfo(4, None, 0, None, None, 3, cmds, 0, None)
@@ -750,11 +701,6 @@ class _FusedBatch:
         fences = (_vp * 1)(self.fence)
         _check(vk.vkWaitForFences(dev.device, 1, fences, 1, 0xFFFFFFFFFFFFFFFF), "vkWaitForFences")
         vk.vkDestroyFence(dev.device, self.fence, None)
-        if self.trial is not None and len(self.trial) == 3:
-            # The losers' recordings are never submitted again once the choice locks; the
-            # cache's LRU retires them (another batch may still be executing one now).
-            work, record, slot = self.trial
-            record(dev.fuse_timer.ns(slot, dev._ts_period) / work)
 
 
 def fused():

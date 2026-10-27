@@ -73,9 +73,11 @@ def _test_kinds(monkeypatch):
         monkeypatch.setitem(_choice.SCOPES, kind, "machine")
 
 
-def _single_contest(monkeypatch, tmp_path, timer, calls=40):
-    """Drive TimeDomainFilterBank._single_device (the GPU-or-CPU choice of single-template
-    calls) on fake banks with a deterministic timer; returns the shape's state."""
+def _single_contest(monkeypatch, tmp_path, cost, calls=40):
+    """Play the GPU-or-CPU choice of single-template calls (TimeDomainFilterBank._single_choice,
+    paired: Choice.play) on a fake bank with a deterministic clock, cost(side, i) seconds for
+    a side's i-th run; returns the shape's state."""
+    import time
     from types import SimpleNamespace
     from matchedfilter import device as _device
     from matchedfilter import time_domain as td
@@ -86,37 +88,42 @@ def _single_contest(monkeypatch, tmp_path, timer, calls=40):
     from matchedfilter import _choice
     monkeypatch.setattr(_choice, "_CHOICES", {})
     bank, g = SimpleNamespace(device="gpu:0"), SimpleNamespace(n=2048)
-    k = {"gpu": 0, "cpu": 0}
-    for _ in range(calls):
-        on_cpu, rec = td.TimeDomainFilterBank._single_device(bank, g, 24)
-        if rec is None:
-            break
-        side = "cpu" if on_cpu else "gpu"
-        rec(timer(side, k[side]))
+    clock, k = [0.0], {"gpu": 0, "cpu": 0}
+    monkeypatch.setattr(time, "perf_counter", lambda: clock[0])
+
+    def run(side):
+        clock[0] += cost(side, k[side])
         k[side] += 1
+        return side
+    ch = td._single_choice(bank.device, g.n, 24)
+    ran = set()
+    for _ in range(calls):
+        if ch.winner is not None:
+            break
+        assert ch.play(run, ran) == "gpu"          # the call's result is the preference's
     (state,) = _choice.of_kind("single-device").values()
     return td, bank, g, state
 
 
 def test_single_template_device_choice_follows_the_shared_rule_and_persists(monkeypatch, tmp_path):
-    """The GPU-or-CPU choice of single-template calls decides by measured_choice and keeps its
-    lock in MF_COST_FILE: a clear CPU win locks the CPU, and the next process reuses it untimed."""
+    """The GPU-or-CPU choice of single-template calls is a paired contest played on the call
+    and keeps its lock in MF_COST_FILE: a clear CPU win locks the CPU (after its
+    confirmation), and the next process reuses it untimed."""
     td, bank, g, state = _single_contest(
         monkeypatch, tmp_path, lambda side, i: (1.0 if side == "gpu" else 0.4) * (1 + 0.01 * (i % 3)))
     assert state.winner == "cpu"
     from matchedfilter import _choice
     _choice.reset()                                # a new process: the stored side, no trial
-    assert td.TimeDomainFilterBank._single_device(bank, g, 24) == (True, None)
+    assert td.TimeDomainFilterBank._single_device(bank, g, 24) == (True, False)
 
 
 def test_single_template_device_unclear_contest_keeps_the_banks_device(monkeypatch, tmp_path):
-    """A CPU 'win' inside the noise samples further, up to the cap, then the bank's own device
-    (the GPU) stands -- a bare median rule picked whichever side the noise favoured."""
-    seq = {"gpu": [5.0, 1.0, 1.3, 0.8, 1.25, 0.85, 1.0, 1.1],     # first: warm-up, dropped
-           "cpu": [5.0, 0.8, 1.2, 0.85, 1.3, 0.75, 1.15, 0.9]}
-    td, _, _, state = _single_contest(monkeypatch, tmp_path, lambda side, i: seq[side][i])
+    """A CPU 'win' inside the noise plays further rounds, up to the cap, then the bank's own
+    device (the GPU) stands."""
+    rng = __import__("numpy").random.default_rng(3)
+    td, _, _, state = _single_contest(monkeypatch, tmp_path,
+                                      lambda side, i: float(rng.uniform(0.7, 1.3)))
     assert state.winner == "gpu"
-    assert len(state.samples["gpu"]) == state.cap        # (warm-up samples are not kept)
 
 
 def test_gpu_kernel_choices_carry_their_backend_artifacts():

@@ -129,10 +129,11 @@ def test_device_followups_read_a_real_series_in_place(device, layout, monkeypatc
 
 @pytest.mark.parametrize("device", _device_followup_backends() or ["none"])
 def test_batched_follow_ups_choose_their_device_by_batch(device, monkeypatch, tmp_path):
-    """With autotuning, where a batch's single-template jobs run is measured per batch: the
-    first batches alternate between the device (batched follow-ups) and per-call CPU plans,
-    and one side is kept. The per-call choice times a lone call, which a batch never makes,
-    and consulted a shape it never recorded, so it kept every batch off the device."""
+    """With autotuning, where a batch's single-template jobs run is a dimension of the device
+    trial (time_domain._gpu_batch), played on the batches: both the device (batched
+    follow-ups) and per-call CPU plans run the first batches, and one is kept. The per-call
+    choice times a lone call, which a batch never makes, and consulted a shape it never
+    recorded, so it once kept every batch off the device."""
     if device == "none":
         pytest.skip("no GPU backend")
     from matchedfilter import time_domain as td
@@ -148,18 +149,17 @@ def test_batched_follow_ups_choose_their_device_by_batch(device, monkeypatch, tm
     for r in rows:
         r[:] = (rng.standard_normal(S) + 1j * rng.standard_normal(S)).astype(np.complex64)
     sides = []
-    orig = TimeDomainFilterBank._batch_device
-    monkeypatch.setattr(TimeDomainFilterBank, "_batch_device",
-                        lambda self: (lambda r: sides.append(r[0]) or r)(orig(self)))
-    # Batches until the trial locks, at most its own limit (Choice.limit: every candidate
-    # sampled to the cap after its warm-up), however noisy the timings: a fixed count
-    # restated the schedule, and CI's paravirtual M2 once outlasted 2 * 4 + 2 batches.
+    orig = td.gpu_setting
+    monkeypatch.setattr(td, "gpu_setting", lambda name, device=None: (lambda r: (
+        sides.append(r) if name == "single" else None) or r)(orig(name, device)))
+    # Batches until the device trial locks, at most its own limit (Choice.limit: its rounds'
+    # cap) and a confirmation, however noisy the timings.
     batches = 0
     while True:
-        trial = _choice.of_kind("single-batch").get((str(bank.device),))
-        if trial is not None and (trial.winner is not None or batches > trial.limit):
+        trial = next(iter(_choice.of_kind("gpu-single").values()), None)
+        if trial is not None and (trial.winner is not None or batches > 2 * trial.limit + 4):
             break
-        assert batches < 100, "the single-batch choice was never made"
+        assert batches < 100, "the device trial was never made"
         batches += 1
         jobs = []
         for k in range(6):
@@ -173,6 +173,6 @@ def test_batched_follow_ups_choose_their_device_by_batch(device, monkeypatch, tm
             np.testing.assert_array_equal(want.sample_indices, r.sample_indices)
             np.testing.assert_allclose(r.snr, want.snr, rtol=1e-4,
                                        atol=1e-4 * np.abs(want.snr).max())
-    assert sides[:4] == ["gpu", "cpu", "gpu", "cpu"], sides
-    assert trial.winner in ("gpu", "cpu")
-    assert len(trial.samples["gpu"]) >= trial.minimum            # kept samples, after the warm-up
+    assert {"gpu", "cpu"} <= set(sides), sides                  # both played
+    assert trial.winner in trial.candidates and "single=cpu" in trial.candidates
+    assert len(trial.samples["default"]) >= trial.minimum or trial.winner == "default"

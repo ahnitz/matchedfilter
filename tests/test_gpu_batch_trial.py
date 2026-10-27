@@ -1,6 +1,7 @@
-"""Whether filter_series_many fuses a batch's submissions is measured per set of GPU devices
-(time_domain._fuse_begin): the first batches alternate fused and unfused, one side is kept,
-and every batch equals its direct calls either way."""
+"""A batch's GPU settings -- its submissions fused or not, where its follow-ups run, a fused
+Vulkan batch's interleave depth -- are one paired trial per set of GPU devices
+(time_domain._gpu_batch), played on the batches themselves: the first batches run every arm,
+one is kept, and every batch equals its direct calls whichever ran."""
 import numpy as np
 import pytest
 from conftest import usable_gpu_reason
@@ -8,7 +9,7 @@ from conftest import usable_gpu_reason
 from matchedfilter import TimeDomainFilterBank
 
 
-def test_batches_alternate_fused_and_unfused_then_keep_one(monkeypatch, tmp_path):
+def test_batches_play_every_setting_then_keep_one(monkeypatch, tmp_path):
     from conftest import usable_gpu
     from test_time_domain import _whitened_inspiral_bank
     from matchedfilter import time_domain as td
@@ -32,15 +33,13 @@ def test_batches_alternate_fused_and_unfused_then_keep_one(monkeypatch, tmp_path
         banks.append(b)
     S = 1 << 17
     sides = []
-    orig = _choice.Choice.next
-    monkeypatch.setattr(_choice.Choice, "next", lambda self: (lambda r: (
-        sides.append(r[0]) if self.candidates == ("fused", "unfused") else None) or r)(orig(self)))
-    # Batches until the trial locks: a batch is a sample only when no chain trial is trying
-    # candidates in it and it builds no recording, and an unclear contest samples both
-    # sides further (up to _SINGLE_TRIALS_MAX each), so the count needed is not fixed --
-    # 2 * _SINGLE_TRIALS + 4 batches left CI's paravirtual M2 undecided. Bounded.
-    for _ in range(40):
-        if sides and all(t.winner is not None for t in _choice.of_kind("fused-batch").values()):
+    orig = td._fuse_close
+    monkeypatch.setattr(td, "_fuse_close", lambda jobs: sides.append(td.gpu_setting("fuse")) or orig(jobs))
+    # Batches until the trial locks, at most its rounds' cap (with a confirmation): the
+    # joint trial of the banks' block sizes plays its rounds first, each batch it plays a
+    # round of not a round of this trial.
+    for _ in range(80):
+        if sides and all(t.winner is not None for t in _choice.of_kind("gpu-batch").values()):
             break
         xs = []
         for _ in banks:
@@ -53,6 +52,6 @@ def test_batches_alternate_fused_and_unfused_then_keep_one(monkeypatch, tmp_path
             want = b.filter_series(x, **kw)
             for f in want._fields:
                 np.testing.assert_array_equal(getattr(want, f), getattr(r, f))
-    assert {"fused", "unfused"} <= set(sides), sides
-    trial = next(iter(_choice.of_kind("fused-batch").values()))
-    assert trial.winner in ("fused", "unfused"), trial.samples
+    assert {True, False} <= set(sides), sides             # both settings played
+    trial = next(iter(_choice.of_kind("gpu-batch").values()))
+    assert trial.winner in trial.candidates and "fuse=0" in trial.candidates, trial.samples

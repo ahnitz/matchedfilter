@@ -340,51 +340,146 @@ def _max_tiers(device) -> int:
 #: Identifies one filter_series_many batch to the plans it defers.
 _BATCH_TOKEN = 0
 
-def _single_key(key):
-    """MF_COST_FILE key of a single-template device choice (device, n, block-count bucket)."""
-    return "single-device|%s|%d|%d" % key
+#: The device trial's dimensions (_gpu_batch): every batch-wide GPU setting a batch of GPU
+#: banks runs with, at its default. fuse: the batch's submissions fused into shared command
+#: buffers (_gpuexec.fused: every job's phases interleaved, one barrier per phase) -- +16% on
+#: an M2, -3 to -6% on an 8060S, nothing on a RENOIR (paired ladders, 2026-10-19).
+#: single: where a batch's single-template (follow-up) jobs run, batched on the device or each
+#: on a CPU plan. interleave: a fused Vulkan batch's interleave depth, 0 lockstep or 3, the
+#: second half's forward (DRAM-bound) beside the first half's coarse0 (VALU-bound).
+_GPU_DEFAULT = dict(fuse=True, single="gpu", interleave=0)
+#: The settings in force while a batch runs (_gpu_batch); empty between batches.
+_GPU_ARM = {}
+#: Each device set's locked settings, for calls outside a batch (gpu_setting).
+_GPU_LOCKS = {}
+#: The configurations each device set's trial has settled (Choice.play's `ran`).
+_GPU_RAN = {}
 
 
-def _fuse_begin(jobs, trial):
-    """Fuse this batch's submissions (_gpuexec.fused) or not, measured per set of GPU
-    devices: (close or None, sample token or None for _fuse_end). Fusing interleaves every
-    job's phases in shared command buffers -- worth +16% on an M2, -3 to -6% on an 8060S,
-    nothing on a RENOIR (paired ladders, 2026-10-19) -- so neither is assumed. A batch is a
-    sample only when no other trial is trying candidates in it and it builds no
-    recording."""
-    from ._choice import _autotune_enabled
+def _gpu_arm(label) -> dict:
+    """The settings an arm of the device trial runs: DEFAULT, or one dimension moved
+    ("fuse=0", "single=cpu", "interleave=3")."""
+    out = dict(_GPU_DEFAULT)
+    if label != "default":
+        k, _, v = str(label).partition("=")
+        if k not in out:
+            raise ValueError("not a device-trial arm: %r" % (label,))
+        out[k] = (v == "1") if k == "fuse" else (int(v) if k == "interleave" else v)
+    return out
+
+
+def gpu_setting(name, device=None):
+    """A batch-wide GPU setting (_GPU_DEFAULT) now: the running batch's arm, else the locked
+    choice of a device set holding `device`, else the default."""
+    if name in _GPU_ARM:
+        return _GPU_ARM[name]
+    for devs, arm in _GPU_LOCKS.items():
+        if name in arm and (device is None or any(d.startswith(str(device) + " ") for d in devs)):
+            return arm[name]
+    return _GPU_DEFAULT[name]
+
+
+#: The device trials (_gpu_batch): each decides the settings it names, played only on
+#: batches its arms run differently -- a trial whose dimension a batch does not exercise
+#: (follow-ups on a batch without any) would time ties there and drop the arm unseen.
+#: name -> (settings, arms(vulkan), the batches it plays: test(jobs)).
+_GPU_TRIALS = {
+    "gpu-batch": (("fuse", "interleave"),
+                  lambda vulkan: ["default", "fuse=0"] + (
+                      ["interleave=%d" % k for k in _interleave_depths() if k] if vulkan else []),
+                  lambda jobs: sum((kw or {}).get("template_index") is None for _, _, kw in jobs) > 1),
+    "gpu-single": (("single",),
+                   lambda vulkan: ["default", "single=cpu"],
+                   lambda jobs: _config.get("MF_GPU_ITEMS")
+                   and any((kw or {}).get("template_index") is not None for _, _, kw in jobs)),
+}
+
+
+def _interleave_depths():
+    from ._vkcompute import _INTERLEAVE_CANDIDATES
+    return _INTERLEAVE_CANDIDATES
+
+
+def _gpu_batch(jobs, run):
+    """Run a batch (run() -> its results) with the device trials' settings: per set of GPU
+    devices, a paired _choice.Choice for each group of batch-wide settings (_GPU_TRIALS: the
+    submissions fused or not and a fused batch's interleave depth; where follow-ups run),
+    played on the batch itself where the batch exercises it (Choice.play: every arm that runs
+    the batch differently runs it, waited, back to back), its lock then used for every
+    batch. Batch-wide settings are decided on real batches: they were online choices sampled
+    on unpaired batches of other content, and the interleave depth on device timers of single
+    submissions. One trial plays a batch; the others take their lock or default. Returns
+    run()'s results under the settings."""
+    from ._choice import _autotune_enabled, playing
     from .device import parse as _parse_device
-    devs = tuple(sorted({"%s %s" % (d, d.name) for d in (
-        _parse_device(b.device) for b, _, _ in jobs if getattr(b, "device", None) is not None)
-        if d.kind == "gpu"}))
-    if not devs:
-        return None, None
-    side, record = ("fused", None)
-    if _autotune_enabled():
-        from . import _choice
-        side, record = _choice.choice("fused-batch", devs, ("fused", "unfused"),
-                                      store_key="fused-batch|%s" % "+".join(devs),
-                                      what="FUSE %s" % (devs,)).next()
+    parsed = [_parse_device(b.device) for b, _, _ in jobs if getattr(b, "device", None) is not None]
+    gpus = [d for d in parsed if d.kind == "gpu"]
+    devs = _gpu_devs(gpus) if gpus else None
+    locked = _GPU_LOCKS.setdefault(devs, {}) if devs else {}
+    if not gpus or _REPLAYING[0] or playing() or not _autotune_enabled():
+        return _with_gpu_arm(dict(_GPU_DEFAULT, **locked), run)
+    from . import _choice
+    vulkan = any(getattr(d, "backend", "") == "vulkan" for d in gpus)
+    for name, (dims, arms, plays) in _GPU_TRIALS.items():
+        if all(d in locked for d in dims) or not plays(jobs):
+            continue
+        ch = _choice.choice(name, devs, arms(vulkan), store_key="%s|%s" % (name, "+".join(devs)),
+                            paired=True, confirm=True, minimum=_trial.ROUNDS, cap=_trial.ROUND_CAP,
+                            what="%s %s" % (name.upper(), devs))
+        if ch.winner is not None:
+            locked.update({d: _gpu_arm(ch.winner)[d] for d in dims})
+            continue
+        many = sum((kw or {}).get("template_index") is None for _, _, kw in jobs) > 1
+
+        def config(arm):
+            a = _gpu_arm(arm)
+            return tuple(a[d] if d != "interleave" or (a["fuse"] and many) else 0 for d in dims)
+        ran = _GPU_RAN.setdefault((name, devs), set())
+        base = dict(_GPU_DEFAULT, **locked)
+        res = ch.play(lambda arm: _with_gpu_arm(
+            dict(base, **{d: _gpu_arm(arm)[d] for d in dims}), run), ran, config=config)
+        if ch.winner is not None:
+            locked.update({d: _gpu_arm(ch.winner)[d] for d in dims})
+        return res
+    return _with_gpu_arm(dict(_GPU_DEFAULT, **locked), run)
+
+
+def _gpu_devs(gpus):
+    return tuple(sorted({"%s %s" % (d, d.name) for d in gpus}))
+
+
+def _with_gpu_arm(arm, run):
+    saved = dict(_GPU_ARM)
+    _GPU_ARM.clear()
+    _GPU_ARM.update(arm)
+    try:
+        return run()
+    finally:
+        _GPU_ARM.clear()
+        _GPU_ARM.update(saved)
+
+
+def _single_choice(device, n, nblocks):
+    """The GPU-or-CPU choice of single-template calls of this shape (device, block size, block
+    count's power of two): paired, played on the calls (TimeDomainFilterBank._single_play)."""
+    from . import _choice
+    key = (str(device), int(n), 1 << max(0, int(nblocks) - 1).bit_length())
+    return _choice.choice("single-device", key, ("gpu", "cpu"), paired=True, confirm=True,
+                          store_key="single-device|%s|%d|%d" % key,
+                          what="SINGLE %s n=%d blocks~%d" % key)
+
+
+def _fuse_close(jobs):
+    """Fuse this batch's submissions (_gpuexec.fused) where it has GPU banks and the device
+    trial's setting says so (gpu_setting "fuse"): the batch's close, or None."""
+    from .device import parse as _parse_device
+    if not any(_parse_device(b.device).kind == "gpu" for b, _, _ in jobs
+               if getattr(b, "device", None) is not None):
+        return None
+    if not gpu_setting("fuse"):
+        return None
     from ._gpuexec import fused
-    close = fused() if side == "fused" else None
-    work = sum(len(b.filters_f) * int(np.asarray(x).size) for b, x, kw in jobs
-               if (kw or {}).get("template_index") is None)
-    trying = bool(trial)
-    if record is None or trying or work <= 0:
-        return close, None
-    import time
-    banks = [b for b, _, _ in jobs]
-    return close, (record, time.perf_counter(), work, banks, _built(banks))
-
-
-def _fuse_end(tok):
-    """Record a fusion sample (_fuse_begin), from the batch's submission to its last result."""
-    if tok is None:
-        return
-    import time
-    record, t0, work, banks, built = tok
-    if _built(banks) == built:
-        record((time.perf_counter() - t0) / work)
+    return fused()
 
 
 class _ReferenceCache:
@@ -1420,6 +1515,9 @@ class TimeDomainFilterBank:
         if template_index is not None:
             if template_index < 0 or template_index >= self.n_templates:
                 raise IndexError(f"template_index {template_index} out of range [0, {self.n_templates})")
+            played = self._single_play(series, windows, binsize, threshold, template_index, W)
+            if played is not None:
+                return played
 
         eff_threshold = self.threshold if threshold is None else float(threshold)
 
@@ -1504,7 +1602,7 @@ class TimeDomainFilterBank:
         pending = []
         for g, tmpl_arg in work_items:
             plan_templates = tmpl_arg
-            trial = None
+            timed = False
             if self.engine == 'hier' and tmpl_arg is not None:
                 # one template ungated: a plan holding just it, not the group's whole ungated
                 # bank -- on whichever device runs this call shape faster
@@ -1512,7 +1610,7 @@ class TimeDomainFilterBank:
                 if layout is None or layout[0] != cache_key:
                     bstarts, bws, bwe = self._window_layout(g, W, S)
                     g._cached_layout = (cache_key, bstarts, bws, bwe)
-                on_cpu, trial = self._single_device(g, g._cached_layout[1].size)
+                on_cpu, timed = self._single_device(g, g._cached_layout[1].size)
                 active_plan = g.get_single_plan(tmpl_arg[0], on_cpu=on_cpu)
                 plan_templates = None
             elif self.engine == 'hier' and (eff_threshold < self.threshold or eff_threshold <= 0.0):
@@ -1567,7 +1665,7 @@ class TimeDomainFilterBank:
             # plan validates everything (layout identity, state, series memory, records);
             # on a miss the full call below runs and records again.
             fast_key = None
-            if (self.engine == 'hier' and tmpl_arg is None and defer and trial is None
+            if (self.engine == 'hier' and tmpl_arg is None and defer and not timed
                     and active_plan is g.plan and getattr(active_plan, '_gpu', None) is not None
                     and hasattr(active_plan, '_fast_series')):
                 fast_key = (cache_key, bs, eff_threshold)
@@ -1618,7 +1716,7 @@ class TimeDomainFilterBank:
             if (len(groups_bins) > 1 and getattr(active_plan, '_gpu', None) is not None
                     and not getattr(active_plan, '_bandlimited', False)
                     and hasattr(active_plan, '_run_series_ragged')):
-                if defer and trial is None:
+                if defer and not timed:
                     active_plan._defer_series = defer
                     active_plan._gpu._queue_offset = getattr(self, '_queue_offset', 0)
                 # A hierarchical ragged call reads back sparse, as its per-count calls would.
@@ -1631,7 +1729,7 @@ class TimeDomainFilterBank:
                         threshold=eff_threshold, templates=plan_templates,
                         **({} if bph is None else {'bin_phase': bph}))
                 finally:
-                    if defer and trial is None:
+                    if defer and not timed:
                         active_plan._defer_series = False
                     if sparse_ragged:
                         active_plan._want_sparse = False
@@ -1650,10 +1748,9 @@ class TimeDomainFilterBank:
                     parts = (split.deferred(res) if isinstance(res, _Deferred)
                              else split.parts(res))
                     work = list(zip(subs, parts))
-            t_trial = time.perf_counter()
             for (sub_starts, sub_bws, sub_bwe, sub_ph), res in work:
                 if res is None:
-                    if defer and trial is None:
+                    if defer and not timed:
                         active_plan._defer_series = defer       # the batch's token
                         if getattr(active_plan, '_gpu', None) is not None:
                             active_plan._gpu._queue_offset = getattr(self, '_queue_offset', 0)
@@ -1675,7 +1772,7 @@ class TimeDomainFilterBank:
                         )
                     finally:
                         active_plan._want_sparse = False
-                        if defer and trial is None:
+                        if defer and not timed:
                             active_plan._defer_series = False
                 if isinstance(res, _Deferred):
                     pending.append((res, sub_starts, g, tmpl_arg, N))
@@ -1698,8 +1795,6 @@ class TimeDomainFilterBank:
                                     tmpl_arg, N))
                     continue
                 consume(aidx, aval, sub_starts, g, tmpl_arg, N)
-            if trial is not None:
-                trial(time.perf_counter() - t_trial)
 
         def build():
             for d, sub_starts, g, tmpl_arg, N in pending:
@@ -1755,52 +1850,51 @@ class TimeDomainFilterBank:
                 return gpu.empty_shared(tuple(shape), dtype, readback=True)
         return _page_aligned_empty(tuple(shape), dtype)
 
-    def _single_device(self, g, nblocks):
-        """(on_cpu, trial recorder or None) for a single-template call on group g.
+    def _single_play(self, series, windows, binsize, threshold, template_index, W):
+        """A single-template call on a GPU bank, played on both sides (the result), or None
+        where it is not: the call runs as decided (_single_device).
 
         A follow-up filters one template over a few dozen blocks: a GPU call is then all
         fixed cost (submission, recording for its window, readback, the wake from idle),
-        which a CPU core undercuts by far. Neither side is assumed: the first calls of a
-        shape (device, block size, block count) alternate between the GPU plan and a CPU
-        plan, timed synchronously, and the shared rule (gatechain.measured_choice) keeps one
-        for every bank, and for later processes through MF_COST_FILE.
-        MF_AUTOTUNE=0 keeps the bank's device.
-        """
+        which a CPU core undercuts by far. Neither side is assumed: per call shape (device,
+        block size, block count) a paired _choice.Choice plays the call on the GPU plan and on
+        a CPU plan (Choice.play), synchronously, and its lock holds for every bank, and for
+        later processes through MF_COST_FILE. A batch's single-template jobs follow the device
+        trial instead (gpu_setting "single", _items_batch): batched, the GPU call is another
+        dispatch. MF_AUTOTUNE=0 or MF_SINGLE_DEVICE=bank keeps the bank's device."""
         from .device import parse as _parse_device
-        from ._choice import _autotune_enabled
-        import os
-        force = self.__dict__.get("_single_force")
-        if force is not None:                # a batch's measured side (_batch_device)
-            return force == "cpu", None
-        # MF_SINGLE_DEVICE=bank keeps every call on the bank's device: the pure-GPU path is a
-        # product in its own right and is benchmarked as one (tools/ladder.py --pure).
-        if (_parse_device(self.device).kind != 'gpu' or not _autotune_enabled()
-                or _config.get("MF_SINGLE_DEVICE") == "bank"):
-            return False, None
-        from . import _choice
-        key = (str(self.device), int(g.n), 1 << max(0, int(nblocks) - 1).bit_length())
-        side, record = _choice.choice("single-device", key, ("gpu", "cpu"),
-                                      store_key=_single_key(key),
-                                      what="SINGLE %s n=%d blocks~%d" % key).next()
-        return side == "cpu", record
+        from ._choice import _autotune_enabled, playing
+        if (self.engine != 'hier' or _parse_device(self.device).kind != 'gpu'
+                or not _autotune_enabled() or _config.get("MF_SINGLE_DEVICE") == "bank"
+                or "_single_force" in self.__dict__ or playing() or _REPLAYING[0]):
+            return None
+        g, _ = self._template_map[template_index]
+        nblocks = int(self._window_layout(g, W, len(series))[0].size)
+        ch = _single_choice(self.device, g.n, nblocks)
+        if ch.winner is not None:
+            return None
 
-    def _batch_device(self):
-        """(side, record or None) for a batch's single-template jobs on this bank's GPU
-        (filter_series_many): "gpu" runs them batched on the device (device follow-ups, one
-        items submission per template group), "cpu" each call on a CPU plan. Measured per
-        device (_choice), each batch timed from submission to its last result per
-        block. The per-call choice (_single_device) times one call on its own, a dispatch a
-        batch never makes: it once kept every batch off the device."""
+        def run(side):
+            self._single_force, self._single_timed = side, True
+            try:
+                return self.filter_series(series, windows=windows, binsize=binsize,
+                                          threshold=threshold, template_index=template_index)
+            finally:
+                del self._single_force, self._single_timed
+        ran = self.__dict__.setdefault("_single_ran", {}).setdefault(ch.store_key, set())
+        return ch.play(run, ran)
+
+    def _single_device(self, g, nblocks):
+        """(on_cpu, timed) for a single-template call on group g: the side a play runs
+        (_single_play), else the locked choice for this call shape, else the bank's device;
+        timed while a play runs it (the call is then waited on, not deferred)."""
         from .device import parse as _parse_device
-        from ._choice import _autotune_enabled
-        import os
-        if (_parse_device(self.device).kind != 'gpu' or not _autotune_enabled()
-                or _config.get("MF_SINGLE_DEVICE") == "bank"):
-            return "gpu", None
-        from . import _choice
-        key = (str(self.device),)
-        return _choice.choice("single-batch", key, ("gpu", "cpu"),
-                              store_key="single-batch|%s" % key, what="BATCH %s" % key).next()
+        force = self.__dict__.get("_single_force")
+        if force is not None:
+            return force == "cpu", bool(self.__dict__.get("_single_timed"))
+        if _parse_device(self.device).kind != 'gpu' or _config.get("MF_SINGLE_DEVICE") == "bank":
+            return False, False
+        return _single_choice(self.device, g.n, nblocks).winner == "cpu", False
 
     @staticmethod
     def filter_series_many(jobs, wait=True):
@@ -1818,16 +1912,26 @@ class TimeDomainFilterBank:
         batch on the same banks first finishes whatever of this one it would overwrite.
         """
         from ._results import _Deferred
-        global _BATCH_TOKEN
         paired = _joint_round(jobs)
         if paired is not None:
             return paired if wait else [_Deferred(lambda r=r: r) for r in paired]
-        trial = _REPLAYING[0]           # a round's replay: the fused-batch choice does not sample
+        from ._choice import playing
+        res = _gpu_batch(jobs, lambda: TimeDomainFilterBank._run_batch(jobs, wait or playing()))
+        if not wait:
+            # a played batch ran waited (its arms are timed to their last result)
+            res = [r if isinstance(r, _Deferred) else _Deferred(lambda r=r: r) for r in res]
+        return res
+
+    @staticmethod
+    def _run_batch(jobs, wait):
+        """filter_series_many's batch, once, with the GPU settings in force (gpu_setting)."""
+        from ._results import _Deferred
+        global _BATCH_TOKEN
         _BATCH_TOKEN += 1
         # The deferred submissions may also be fused where a GPU driver batches them (Vulkan:
         # one command buffer runs every job's forward transforms, then every job's first
-        # tier, ..., one barrier per phase; _gpuexec.fused): a measured choice.
-        close, fuse = _fuse_begin(jobs, trial)
+        # tier, ..., one barrier per phase; _gpuexec.fused): the device trial's setting.
+        close = _fuse_close(jobs)
         out = [None] * len(jobs)
         # Single-template (follow-up) calls on a GPU bank, per template group: one forward
         # dispatch and one submission for all of them instead of a few submissions each.
@@ -1845,26 +1949,8 @@ class TimeDomainFilterBank:
             if close is not None:
                 close()
         if not wait:
-            res = [r if isinstance(r, _Deferred) else _Deferred(lambda r=r: r) for r in out]
-            if fuse is not None:
-                # a trial sample runs from submission to the batch's last result
-                left = [len(res)]
-                def wrap(d):
-                    seen = [False]
-                    def get(d=d):
-                        v = d.result()
-                        if not seen[0]:
-                            seen[0] = True
-                            left[0] -= 1
-                            if left[0] == 0:
-                                _fuse_end(fuse)
-                        return v
-                    return _Deferred(get)
-                res = [wrap(d) for d in res]
-            return res
-        res = [r.result() if isinstance(r, _Deferred) else r for r in out]
-        _fuse_end(fuse)
-        return res
+            return [r if isinstance(r, _Deferred) else _Deferred(lambda r=r: r) for r in out]
+        return [r.result() if isinstance(r, _Deferred) else r for r in out]
 
     @staticmethod
     def _items_batch(jobs, out):
@@ -1874,7 +1960,7 @@ class TimeDomainFilterBank:
         if not _config.get("MF_GPU_ITEMS"):
             return set()
         groups = {}
-        side = record = device = None
+        side = device = None
         for j, (bank, series, kw) in enumerate(jobs):
             kw = kw or {}
             ti = kw.get("template_index")
@@ -1889,11 +1975,11 @@ class TimeDomainFilterBank:
             bs = int(kw["binsize"]) if kw.get("binsize") is not None else (bank.binsize or g.n)
             if bs >= g.n or W.shape[0] == 0:
                 continue
-            # Where the batch runs: one measured side per device (_batch_device); a batch's
+            # Where the batch runs: the device trial's side (gpu_setting "single"); a batch's
             # jobs on another device run per call.
             if side is None:
                 device = str(bank.device)
-                side, record = bank._batch_device()
+                side = gpu_setting("single", device)
             elif str(bank.device) != device:
                 continue
             thr = bank.threshold if kw.get("threshold") is None else float(kw["threshold"])
@@ -1907,10 +1993,6 @@ class TimeDomainFilterBank:
         done = set()
         if not groups:
             return done
-        import time
-        blocks = max(1, sum(m[4].size for members in groups.values() for m in members))
-        eligible = {m[0] for members in groups.values() for m in members}
-        t0 = time.perf_counter()
         if side == "cpu":
             for members in groups.values():
                 for j, bank, *_ in members:
@@ -1920,8 +2002,6 @@ class TimeDomainFilterBank:
                     finally:
                         del bank._single_force
                     done.add(j)
-            if record is not None:
-                record((time.perf_counter() - t0) / blocks)
             return done
         # Threshold-0 follow-ups: every group's items as listed entries, all in one
         # submission (_gpuhost.submit_followups). None (past what the device path takes):
@@ -1940,8 +2020,6 @@ class TimeDomainFilterBank:
                         out[j] = _Deferred(lambda c=collect, i=i: c()[i])
                         done.add(j)
                     groups = {k: v for k, v in groups.items() if k[3] != 0.0}
-                    if record is not None:
-                        collect()             # a trial sample runs to the batch's last result
         # Submit every template group's items, then collect: a backend that can leaves each
         # submission in flight (wait=False), so the device runs them back to back.
         submitted = []
@@ -1974,8 +2052,6 @@ class TimeDomainFilterBank:
                     res_j = FilterResults(*_merge_window_bins(W, bs, *res_j))
                 out[j] = res_j
                 done.add(j)
-        if record is not None and eligible <= done:
-            record((time.perf_counter() - t0) / blocks)   # all on the device: a sample
         return done
 
     @staticmethod
