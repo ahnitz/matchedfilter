@@ -202,7 +202,7 @@ automatically when the tap and data sample rates match.
 
 The output has the same format as `run()`; screening can omit detections.
 `snr` and `fd` specify the signal strength and requested false-dismissal budget
-used for calibration. See [CPU direct refinement](cpu-direct-refine.md) for its
+used for calibration. See [CPU direct refinement](https://github.com/ahnitz/matchedfilter/blob/main/docs/cpu-direct-refine.md) for its
 selection rules and limits.
 
 `set_reference(power)` supplies the expected output-power spectrum, one value
@@ -237,9 +237,10 @@ filt = mf.MatchedFilter(4096, ndata=16, ntemplates=64, device="gpu")
 ```
 
 The default is CPU unless `MF_DEVICE` is set. `device="cpu"`, `"gpu"`,
-`"gpu:1"`, `"cuda"` and `"auto"` are supported. NVIDIA GPUs run through the CUDA
-driver where it is installed; other GPUs on Linux and Windows use Vulkan, and
-macOS uses Metal. GPU execution requires a compatible driver.
+`"gpu:1"`, `"cuda"` and `"auto"` are supported. `"cuda"` and `"cuda:<n>"` are
+aliases of `"gpu"` and `"gpu:<n>"`: they pick a GPU of any backend, not only a
+CUDA one. NVIDIA GPUs run through the CUDA driver where it is installed; other
+GPUs on Linux and Windows use Vulkan, and macOS uses Metal. GPU execution requires a compatible driver.
 
 | Capability | CPU | GPU |
 |---|---|---|

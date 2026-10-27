@@ -9,7 +9,8 @@ survivors of the last tier run the full matched filter. A single coarse gate
 is the one-tier chain. CPU and GPU follow
 this algorithm; arithmetic precision can move decisions near the gate.
 Every reported survivor agrees with the flat filter within the backend's
-floating-point accuracy, except that the [CPU direct refine](cpu-direct-refine.md)
+floating-point accuracy, except that the
+[CPU direct refine](https://github.com/ahnitz/matchedfilter/blob/main/docs/cpu-direct-refine.md)
 searches only near the last tier's coarse maximum. The hierarchy can omit triggers.
 
 ## Choosing the gate
@@ -27,8 +28,9 @@ requested conditional false-dismissal quantile at the constructor's `snr`
 `fd` is a mean target for matching signals under Gaussian noise, not a
 bound on every plan, population or finite realization. Each plan's budget
 rests on about a hundred dismissed draws, so individual plans scatter about
-it; see [what `fd` means](architecture.md#what-fd-means) and the
-[dated model log](gate-model.md).
+it; see
+[what `fd` means](https://github.com/ahnitz/matchedfilter/blob/main/docs/architecture.md#what-fd-means)
+and the [dated model log](https://github.com/ahnitz/matchedfilter/blob/main/docs/gate-model.md).
 
 ```python
 hf = matchedfilter.HierarchicalFilter(n, ndata=16, ntemplates=32,
@@ -49,8 +51,8 @@ With a reference set, the filter chooses its own chain. Every chain of up to
 * **noise pass rates** -- simulated from the reference over the block's
   searched lags, jointly across tiers (nested tiers share their noise);
 * **tier costs** -- measured once per process on the machine itself, through
-  the engine's per-tier counters on the CPU (`gatechain.calibrate_costs`, well
-  under a second) and device timers on a GPU
+  the engine's per-tier counters on the CPU (`_calibration.calibrate_costs`, about
+  0.1 s for two block sizes on a loaded Zen 5 machine) and device timers on a GPU
   (`_calibration.calibrate_costs_gpu`). Nothing is tabulated or shipped.
 
 The plan runs the model's cheapest chain; chains within 5% of it are tied
@@ -59,8 +61,8 @@ and go to the cheaper one on a calibration-free operation count
 merit depends on the profile. What is measured on the real calls is the Q15
 screen as the first tier (on CPU back ends that have one) and, in a
 `TimeDomainFilterBank`, the block size, in one joint trial
-([measured choices](architecture.md#measured-choices)). `MF_AUTOTUNE=0` keeps
-the model's settings instead, and `MF_CHAIN_FORCE` forces a chain for
+([measured choices](https://github.com/ahnitz/matchedfilter/blob/main/docs/architecture.md#measured-choices)).
+`MF_AUTOTUNE=0` keeps the model's settings instead, and `MF_CHAIN_FORCE` forces a chain for
 measurement.
 
 Tier costs are timed, so under varying machine load two runs can calibrate
