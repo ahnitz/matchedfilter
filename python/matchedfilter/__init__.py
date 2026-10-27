@@ -203,6 +203,7 @@ def clear_autotune_cache():
     _gpusettings._KERNEL_SLOTS.clear()
     _gpusettings._KERNEL_SEEN.clear()
     time_domain._GPU_RAN.clear()
+    time_domain._SEEN_BY_BATCH.clear()
 
 
 def __getattr__(name):
