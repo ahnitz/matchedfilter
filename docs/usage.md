@@ -279,11 +279,19 @@ describes buffer ownership, cache lifetime and interoperability limits.
 
 ## Measured choices and reproducibility
 
-Some choices are made by timing on the machine at hand: the block size of a
-filter bank, the hierarchical gate chain, the CPU narrow screen, the fused
-GPU batch shape, and whether single-template calls run on the GPU or a CPU
-core. Each follows one rule: the cost model's choice stands unless another
-candidate is faster beyond the measurement noise.
+Some choices are made by timing on the machine at hand, on the search's own calls:
+
+- a filter bank's block size and its plans' CPU narrow screen;
+- on a GPU, whether a batch's submissions are fused and how they interleave;
+- where a batch's follow-ups run (the GPU, or a CPU core);
+- the coarse kernel layout and gate way at each band, and how sparse results are read;
+- where a lone single-template call runs.
+
+Each is decided by one rule. Every candidate runs the same call, back to back, in rounds
+whose order reverses. The default stands unless another candidate is faster beyond the
+measurement noise in three quarters of the rounds, and again in a confirmation. The gate
+chain is the cost model's (its merit depends on the profile, so a trial on the first calls
+misjudges it).
 
 | Variable | Default | Effect |
 |---|---|---|

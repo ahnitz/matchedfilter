@@ -640,7 +640,8 @@ def _plan_chain_bruteforce(sig, noise, bands, chain, fd, cost, n, snr):
     cols = [bands.index(b) for b in chain]
     S = gc.kept_draws(sig, bands, chain, snr)
     M, k = S.shape[0], len(chain)
-    K = int(math.floor(fd * M)) if k == 1 else int(math.floor(fd * M - 1.645 * math.sqrt(M * fd * (1 - fd))))
+    K = int(math.floor(fd * M)) if k == 1 else int(math.floor(
+        fd * M - gc._SPLIT_TOLERANCE_Z * math.sqrt(M * fd * (1 - fd))))
     if K < 8:
         return None
     sorted_cols = [np.sort(S[:, i]) for i in range(k - 1)]
