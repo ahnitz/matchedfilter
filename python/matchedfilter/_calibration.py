@@ -323,6 +323,32 @@ def _clock_ref(device):
     return ref
 
 
+#: How calibrate_costs_gpu prices a second tier (_sparse_rows), in its models' store key: a
+#: model stored with another method is measured afresh.
+_GPU_SPARSE_FIT = "slope"
+
+
+def _sparse_rows(points, head, pairs):
+    """A second tier's [(density, device ns per first-tier survivor)] from runs of one chain
+    at thresholds placed at _CAL_DENSITIES: points [(survivors, time)], head the modelled
+    time of the chain's first tier and blocks alone.
+
+    With two or more points, the price is the slope of time against survivors, the same at
+    every density. The runs differ only in their threshold, so what a run costs whatever
+    passes -- a launch, or a process's state (in a ladder process, 30-40k of a 380k call
+    appeared as soon as anything passed) -- cancels. The old price, (time - head) /
+    survivors per point, put that and the head's error on the few survivors of the 1%
+    point: 31-81 per survivor for band 512 at n=2048 on an 8060S, against a slope of 4.0-4.4
+    in every process, which tied a one-tier chain with a two-tier one that ran in half its
+    device time (2026-10-27). With one point, that point's old price."""
+    pts = sorted((float(s1), float(t)) for s1, t in points if s1 > 0)
+    if len(pts) >= 2:
+        s1 = np.array([p[0] for p in pts]); t = np.array([p[1] for p in pts])
+        slope = float(np.polyfit(s1, t, 1)[0])
+        return [(a / pairs, max(1e-3, slope)) for a, _ in pts]
+    return [(a / pairs, max(1e-3, (b - head) / a)) for a, b in pts]
+
+
 def calibrate_costs_gpu(n, device, blocks=None, reps=5, seed=11, nt=256):
     """This GPU's tier costs at transform size n, in device nanoseconds, as a CostModel.
 
@@ -334,7 +360,8 @@ def calibrate_costs_gpu(n, device, blocks=None, reps=5, seed=11, nt=256):
                  counts at a threshold nothing passes
       dense[b]   a first tier at band b, per pair
       refine     per refined pair, at survivor densities _CAL_DENSITIES
-      sparse[b]  a second tier at band b, per first-tier survivor
+      sparse[b]  a second tier at band b, per first-tier survivor (_sparse_rows: the slope
+                 of time against survivors over the densities)
     Sized like a segment's call: a fixed span of series (2^21 samples: 1024 blocks at
     n=2048, 128 at 16384) against 256 templates, so every n is measured at the call size
     it serves and above the few thousand pairs where a GPU call is fixed latency. Sized
@@ -355,7 +382,8 @@ def calibrate_costs_gpu(n, device, blocks=None, reps=5, seed=11, nt=256):
     path = _gc._cost_file()
     # Keyed by gate kind: a model measured with the bound off (or before it existed) prices a
     # different first tier, and must not be reused for this one.
-    skey = "gpu,%d,%s" % (int(n), str(device)) + ("" if kind == "f32" else "," + kind)
+    skey = ("gpu,%d,%s" % (int(n), str(device)) + ("" if kind == "f32" else "," + kind)
+            + "," + _GPU_SPARSE_FIT)
     if path is not None:
         cm = _gc._stored_cost_model(path, skey)
         if cm is not None:
@@ -431,7 +459,7 @@ def calibrate_costs_gpu(n, device, blocks=None, reps=5, seed=11, nt=256):
     for b in bands:
         t, _, _ = run((b,), (big,))
         dense[b] = max(1e-3, (t / blocks - block) / nt)
-    refine, sparse = [], {}
+    refine, sparse, tier2 = [], {}, {}
     for f in _gc._CAL_DENSITIES:
         g0 = thr_for(b0, f)
         t, _, refined = run((b0,), (g0,))
@@ -440,8 +468,9 @@ def calibrate_costs_gpu(n, device, blocks=None, reps=5, seed=11, nt=256):
         for b in bands[1:]:
             t2, s1, _ = run((b0, b), (g0, big))
             if s1:
-                sparse.setdefault(b, []).append(
-                    (s1 / (blocks * nt), max(1e-3, (t2 - blocks * (block + nt * dense[b0])) / s1)))
+                tier2.setdefault(b, []).append((s1, t2))
+    for b, pts in tier2.items():
+        sparse[b] = _sparse_rows(pts, blocks * (block + nt * dense[b0]), blocks * nt)
     if bands[1:]:
         sparse.setdefault(b0, list(sparse.get(bands[1], [])))
     # The first tier's pass excess over its own statistic, per band: the same threshold,
