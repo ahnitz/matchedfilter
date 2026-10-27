@@ -74,7 +74,7 @@ def test_refinement_stats_count_work_not_detections(device):
 
 def test_threshold_reset_and_reference_change(device,monkeypatch):
     def lookup(power,n,snr,fd,chain,**kw): return {"thresholds":(float(power[0])+snr,)}
-    monkeypatch.setattr(mf._gatechain,'chain_thresholds',lookup)
+    monkeypatch.setattr(mf.gatechain,'chain_thresholds',lookup)
     f=mf.HierarchicalFilter(1024, 1, 1, chain=256, snr=5.5, device=device)
     ref=np.ones(1024,np.float32); f.set_reference(ref)
     def threshold():

@@ -14,14 +14,13 @@ development machine, so every line here is exercised only by the macOS CI
 job. It is written to fail loudly rather than plausibly.
 """
 import ctypes
-import os
 import pathlib
 import sys
 from contextlib import contextmanager
 from functools import lru_cache, wraps
 
 import numpy as np
-from ._shared import empty_shared, shared_buffer
+from ._shared import empty_shared
 from ._gpuhost import MAX_BINS
 
 _HERE = pathlib.Path(__file__).resolve().parent
@@ -1276,7 +1275,6 @@ class Context(Executor, InputUploads):
             return
         # Left in flight: it signals this context's event, which other contexts' command
         # buffers wait on (_new_cmd), and settle_writes() waits on the host.
-        dev = self._device_state
         if getattr(self, "_signal_event", None) is None:
             self._signal_event = self.o.call(self.device, b"newSharedEvent")
             self._signal_value = 0

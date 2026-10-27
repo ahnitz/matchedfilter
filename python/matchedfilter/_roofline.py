@@ -89,15 +89,13 @@ Judgement calls (stated so that nobody tunes them to flatter a platform):
      credited with it; the ladder's report shows the counts so that choice stays visible.
 """
 import math
-import os
 import platform
-import re
 import time
 
 import numpy as np
 
 from .time_domain import _stored_bins
-from ._peaks import _AMD_MEM, _APPLE_GPU, _MEASURED, _read  # noqa: F401
+from ._peaks import _MEASURED, _read
 
 #: Bytes per complex value at each precision.
 CBYTES = {"fp32": 8, "fp16": 4, "int16": 4}
@@ -197,7 +195,7 @@ def _backend_c16(device):
     d = parse(device)
     if d.kind != "gpu":
         return None
-    from . import _compute_module
+    from ._filter import _compute_module
     return _compute_module(d).Context._x_has_c16
 
 

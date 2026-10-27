@@ -145,7 +145,7 @@ def test_ragged_split_sparse_matches_dense():
     """_RaggedSplit.parts on a sparse result is the sparse form of the dense per-count split,
     and _SparsePeaks.blocks of one part."""
     from matchedfilter.time_domain import _RaggedSplit
-    from matchedfilter import _SparsePeaks
+    from matchedfilter._results import _SparsePeaks
     rng = np.random.default_rng(5)
     idx = np.where(rng.random((7, 3, 4)) < 0.3, rng.integers(0, 99, (7, 3, 4)), -1)
     val = (rng.standard_normal(idx.shape) + 1j).astype(np.complex64) * (idx >= 0)

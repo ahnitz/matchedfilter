@@ -30,7 +30,7 @@ MSL = ROOT / "python" / "matchedfilter" / "metal"
 #: Sizes the Tier-B kernel covers.  One source specialised by NLEN rather
 #: than a blob per hand-written kernel.
 #:
-#: Keep in step with matchedfilter._GPU_SIZES, which is what device="gpu"
+#: Keep in step with matchedfilter._filter._GPU_SIZES, which is what device="gpu"
 #: checks before it builds a plan.
 TIER_B = (64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536)
 

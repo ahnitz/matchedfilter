@@ -4,7 +4,6 @@ The contract every backend follows: with MF_GPU_TIMING=1 a Context registers its
 records the device time of each submission as (label, device_ms) in ``timing_log``; its
 ``timings()`` settles outstanding measurements and returns that log. Off, nothing registers.
 """
-import os
 import weakref
 
 _CONTEXTS = weakref.WeakSet()

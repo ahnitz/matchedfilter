@@ -60,7 +60,7 @@ def test_gpu_sizes_match_the_build():
     kernel is sitting in the wheel, or accepts one that is not there and
     fails at pipeline creation instead of at the call.
     """
-    assert set(mf._GPU_SIZES) == set(build_spirv.TIER_B)
+    assert set(mf._filter._GPU_SIZES) == set(build_spirv.TIER_B)
 
 
 @pytest.mark.parametrize("n", sorted(set(build_spirv.TIER_B)))
@@ -100,7 +100,7 @@ def test_tierc_decomposition_is_correct_before_it_is_written():
     for n in gpu_tierc_model.CASES:
         n1, n2 = gpu_tierc_model.split(n)
         assert n1 * n2 == n
-        assert n1 in mf._GPU_SIZES and n2 in mf._GPU_SIZES, (
+        assert n1 in mf._filter._GPU_SIZES and n2 in mf._filter._GPU_SIZES, (
             "n=%d splits into %d x %d, and a factor Tier B cannot carry "
             "means the split is not usable" % (n, n1, n2))
         x = rng.standard_normal(n) + 1j * rng.standard_normal(n)
@@ -137,6 +137,6 @@ def test_tierc_covers_exactly_the_parity_gap():
     """What the CPU takes and the GPU does not, with nothing left over."""
     cpu_max = 1048576
     cpu = {1 << k for k in range(6, 21) if (1 << k) <= cpu_max}
-    assert set(mf._GPU_SIZES) | set(gpu_tierc_model.CASES) == cpu, (
+    assert set(mf._filter._GPU_SIZES) | set(gpu_tierc_model.CASES) == cpu, (
         "Tier B and the Tier C plan do not add up to the CPU's range: "
-        "missing %s" % sorted(cpu - set(mf._GPU_SIZES) - set(gpu_tierc_model.CASES)))
+        "missing %s" % sorted(cpu - set(mf._filter._GPU_SIZES) - set(gpu_tierc_model.CASES)))

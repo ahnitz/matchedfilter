@@ -14,7 +14,6 @@ Defects (docs/gpu-parity-plan.md A3/A4, F):
 - kernels with more than 48 KB of static shared memory failed to load;
 - ``except TypeError`` probing re-dispatched work that had already run.
 """
-import ctypes
 import os
 import subprocess
 import sys
@@ -457,7 +456,6 @@ def test_gpu_cost_calibration_measures_on_cuda():
     CUDA kept its own flag, so every measurement was 0 ns: the bank priced every chain at
     zero and picked n=8192 banks with 1024-4096 bins of coarse band (2x slower fine stage,
     and loud peaks dismissed). The model must carry real, positive, ordered costs."""
-    from matchedfilter import gatechain
     cm = _calibration.calibrate_costs_gpu(2048, DEV, blocks=256, reps=2, nt=64)
     assert cm.block > 0
     assert all(v > 0 for v in cm.dense.values()), cm.dense
@@ -470,7 +468,7 @@ def test_gpu_cost_calibration_measures_on_cuda():
 @pytest.mark.parametrize("kind", ["peaks", "peaks_grouped", "hier", "hier_grouped"])
 @pytest.mark.parametrize("thr", [4.5, 0.0])        # 0: every bin a peak, past _SPARSE_HOST
 def test_sparse_readback_equals_dense(ctx, kind, thr):
-    from matchedfilter import _SparsePeaks
+    from matchedfilter._results import _SparsePeaks
     n, nd, nt, bs = 2048, 24, 9, 512
     rng = np.random.default_rng(17)
     spec = ctx.empty_shared((nd, n))
@@ -506,7 +504,6 @@ def test_clock_reference_reads_the_sm_clock(ctx):
     if mhz is None:
         pytest.skip("NVML unavailable")
     assert 100.0 < mhz < 10000.0
-    from matchedfilter import gatechain
     ref = _calibration._clock_ref("gpu:0")
     assert ref._mhz is not None
     # At an unchanged clock the reference is the anchor; it scales inversely with the clock.

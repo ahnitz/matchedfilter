@@ -61,7 +61,7 @@ def test_cascade_noise_rejection():
     empty_val = np.empty(0, dtype=np.complex64)
     mag = np.empty(0, dtype=np.float32)
 
-    total_crossings = hmf.run(0, nd, 0, nt, n, 6.0, 0, n, empty_idx, empty_val, mag, cnts, peaks)
+    hmf.run(0, nd, 0, nt, n, 6.0, 0, n, empty_idx, empty_val, mag, cnts, peaks)
     pairs, triggers = hmf.stats()
     assert pairs == nd * nt
     # In pure noise at threshold 6.0, triggers escalating to fine should be very small
@@ -119,7 +119,7 @@ def test_cascade_fdr_guarantee():
     snr_target = 5.5
     fdr_budget = 0.0020  # 0.20% budget for fast unit test
     power = inspiral_power(n)
-    plan = mf._gatechain.chain_thresholds(power, n, snr_target, fdr_budget, (m0, m1))
+    plan = mf.gatechain.chain_thresholds(power, n, snr_target, fdr_budget, (m0, m1))
     assert plan is not None
     gate_t0, gate_t1 = plan["thresholds"]
 
@@ -289,10 +289,10 @@ def test_chain_thresholds_per_tier():
     n = 4096
     power = inspiral_power(n)
     for chain in ((1024,), (256, 1024), (128, 512, 1024)):
-        plan = mf._gatechain.chain_thresholds(power, n, 5.5, 1e-3, chain)
+        plan = mf.gatechain.chain_thresholds(power, n, 5.5, 1e-3, chain)
         assert plan is not None and len(plan["thresholds"]) == len(chain)
         assert all(1.0 <= g <= 5.5 for g in plan["thresholds"])
-    g0, g1 = mf._gatechain.chain_thresholds(power, n, 5.5, 1e-3, (256, 1024))["thresholds"]
+    g0, g1 = mf.gatechain.chain_thresholds(power, n, 5.5, 1e-3, (256, 1024))["thresholds"]
     assert 2.5 <= g0 <= 4.5 and 4.0 <= g1 <= 5.5
     for bad in ((1024, 256), (512, 512), (32,), (4096,), (300,), ()):
         with pytest.raises(ValueError):
@@ -357,7 +357,7 @@ def test_cascade_signal_retention_and_scalloping():
     h_conj = np.conj(h_freq)
 
     # Dynamically derive calibrated gates with tolerance bound
-    plan = mf._gatechain.chain_thresholds(power, n, 5.5, 0.001, (m0, m1))
+    plan = mf.gatechain.chain_thresholds(power, n, 5.5, 0.001, (m0, m1))
     assert plan is not None
     g0, g1 = plan["thresholds"]
 
@@ -445,9 +445,8 @@ def test_a_cascades_first_gate_is_looser_than_the_single_tier_gate():
     snr_target = 5.5
     fd_target = 0.001
     power = inspiral_power(n)
-    h_freq = np.sqrt(power).astype(np.complex64)
 
-    plan = mf._gatechain.chain_thresholds(power, n, snr_target, fd_target, (m0, m1))
+    plan = mf.gatechain.chain_thresholds(power, n, snr_target, fd_target, (m0, m1))
     assert plan is not None
     g0, g1 = plan["thresholds"]
     g_single = float(mf.choose_threshold(power, n, snr_target, fd_target, band=m1))
@@ -546,7 +545,7 @@ def test_o2_noise_curve_prefers_a_multi_tier_chain():
     gate, and the model ranks two-tier chains first -- the case the cascade lock used to hide."""
     from pathlib import Path
     p = np.load(Path(__file__).parent / "data" / "reference_profile_o2_h1l1_2048.npy")
-    gc = mf._gatechain
+    gc = mf.gatechain
     best, plans = gc.choose_chain(p, 2048, 6.0, 1e-3, cost=_recorded_model(), max_tiers=2,
                                   window=(150, 1898))
     assert best is not None and len(best["chain"]) == 2, [(q["chain"], round(q["cost"])) for q in plans[:5]]
@@ -602,7 +601,7 @@ def _recorded_model():
     import json
     from pathlib import Path
     rec = json.loads((Path(__file__).parent / "data" / "cost_model_2048_zen5.json").read_text())
-    return mf._gatechain.CostModel.from_dict(rec["model"])
+    return mf.gatechain.CostModel.from_dict(rec["model"])
 
 
 def test_cost_calibration_is_sane():
@@ -618,7 +617,7 @@ def test_cost_calibration_is_sane():
 
 
 def test_cost_file_reproduces_the_measured_models(monkeypatch, tmp_path):
-    gc = mf._gatechain
+    gc = mf.gatechain
     path = tmp_path / "costs.json"
     monkeypatch.setenv("MF_COST_FILE", str(path))
     monkeypatch.setattr(gc, "_COSTS", {})
@@ -636,7 +635,7 @@ def _plan_chain_bruteforce(sig, noise, bands, chain, fd, cost, n, snr):
     """The split search done the plain way: mask and sort every kept draw for each candidate
     (each draw's coarse maxima over the window, as plan_chain)."""
     import math
-    gc = mf._gatechain
+    gc = mf.gatechain
     cols = [bands.index(b) for b in chain]
     S = gc.kept_draws(sig, bands, chain, snr)
     M, k = S.shape[0], len(chain)
@@ -673,7 +672,7 @@ def _plan_chain_bruteforce(sig, noise, bands, chain, fd, cost, n, snr):
 
 
 def test_plan_chain_matches_the_plain_split_search():
-    gc = mf._gatechain
+    gc = mf.gatechain
     prof = np.load(os.path.join(os.path.dirname(__file__), "data", "reference_profile_o2_h1l1_2048.npy"))
     n = 2048
     cm = _calibration.calibrate_costs(n, 32)
@@ -691,7 +690,7 @@ def test_plan_chain_matches_the_plain_split_search():
 
 def test_choice_cache_keys_on_cost_content_not_identity(monkeypatch):
     """A new cost model must not inherit cached choices of an old one that happened to share its id."""
-    gc = mf._gatechain
+    gc = mf.gatechain
     prof = np.load(os.path.join(os.path.dirname(__file__), "data", "reference_profile_o2_h1l1_2048.npy"))
     cm = _calibration.calibrate_costs(2048, 32)
     d = cm.to_dict()
@@ -706,7 +705,7 @@ def test_choice_cache_keys_on_cost_content_not_identity(monkeypatch):
 
 def test_bounding_first_tier_excess_is_priced():
     """A first tier that reports a bound passes extra pairs; the model charges the next stage."""
-    gc = mf._gatechain
+    gc = mf.gatechain
     dense = {256: 10.0, 512: 30.0}
     sparse = {256: [(0.01, 40.0), (0.1, 35.0)], 512: [(0.01, 60.0), (0.1, 50.0)]}
     refine = [(0.01, 1000.0), (0.1, 900.0)]
@@ -727,7 +726,7 @@ def test_bounding_first_tier_excess_is_priced():
 
 
 def test_gpu_gate_kind_keys(monkeypatch):
-    gc = mf._gatechain
+    gc = mf.gatechain
     monkeypatch.setattr(gc, "_is_gpu", lambda d: d.startswith("gpu"))
     monkeypatch.delenv("MF_COARSE_RAW", raising=False)
     assert gc.gpu_gate_kind("gpu:0") == "c16b"
@@ -739,13 +738,13 @@ def test_gpu_gate_kind_keys(monkeypatch):
 def test_the_band_forward_is_priced_on_gpus_only():
     """Every GPU backend can claim its forward; a CPU never does (its device has a backend
     name too, AVX2/AVX3, which the pricing once took for a GPU's)."""
-    gc = mf._gatechain
+    gc = mf.gatechain
     assert gc._is_gpu("cpu") is False
 
 
 def test_a_tier_that_passes_most_pairs_is_never_chosen():
     """A first tier with almost none of the profile's power cannot gate; choice must skip it."""
-    gc = mf._gatechain
+    gc = mf.gatechain
     n = 2048
     f = np.arange(n, dtype=float)
     power = np.where((f >= 60) & (f < 900), np.maximum(f, 1.0) ** (-7.0 / 3), 0.0)
@@ -757,7 +756,7 @@ def test_a_tier_that_passes_most_pairs_is_never_chosen():
 
 
 def test_ties_break_deterministically():
-    gc = mf._gatechain
+    gc = mf.gatechain
     items = [((256, 1024), 100.0), ((256, 512), 101.0), ((512,), 120.0)]
     for perm in (items, items[::-1], items[1:] + items[:1]):
         got = gc.pick_stable(perm, lambda x: x[1], lambda x: gc.canonical_order(x[0]))
@@ -768,7 +767,7 @@ def test_ties_break_deterministically():
 
 def test_legacy_host_costs_do_not_change_chain_ranking():
     import json
-    gc = mf._gatechain
+    gc = mf.gatechain
     cm = gc.CostModel(
         2048, {256: 10.0, 512: 18.0}, {512: [(0.01, 20.0), (0.1, 18.0)]},
         [(0.001, 100.0), (0.01, 80.0)], block=300.0, forward=250.0, band_forward=True,
@@ -791,7 +790,7 @@ def test_legacy_host_costs_do_not_change_chain_ranking():
 def test_forward_priced_per_chain():
     """Band forwards credit chains that refine few blocks; the backend's own byte rule decides."""
     import json
-    gc = mf._gatechain
+    gc = mf.gatechain
     gc._REFINE_BLOCKS.clear()                 # earlier GPU calls in this process may have noted some
     kw = dict(block=300.0, forward=300.0)
     cm = gc.CostModel(2048, {256: 1.0, 512: 2.0, 1024: 4.0}, {}, [(0.01, 9.0)], band_forward=True, **kw)
@@ -820,7 +819,7 @@ def test_forward_priced_per_chain():
 def test_model_f_credit_is_proposal_only():
     """The model's refine-block fraction credits the band forward only when asked to (block-size
     trial proposals); priced normally a chain without a measurement gets no credit."""
-    gc = mf._gatechain
+    gc = mf.gatechain
     gc._REFINE_BLOCKS.clear()
     cm = gc.CostModel(2048, {256: 1.0, 512: 2.0}, {}, [(0.01, 9.0)], block=300.0, forward=300.0,
                       band_forward=True)
@@ -869,7 +868,7 @@ def test_calibrations_sharing_band_costs_in_any_order(monkeypatch, order):
     bands an earlier one did not. Every order calibrates, and every size gets a screen price
     for each screen band (n = 1024 before 2048 left band 1024's screen without the recheck
     job it reads: KeyError, in the nightly's reverse-order run)."""
-    gc = mf._gatechain
+    gc = mf.gatechain
     monkeypatch.setattr(gc, "_COSTS", {})
     monkeypatch.delenv("MF_COST_FILE", raising=False)
     for n in order:

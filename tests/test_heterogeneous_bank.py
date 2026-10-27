@@ -77,7 +77,7 @@ def test_a_mismatched_bank_loses_signals_in_order_of_their_own_f():
     det, om = dismissal_by_template(N, H, ref, 512, SNR, FD)
     assert det.sum() > 300, "too few detections: %d" % det.sum()
 
-    fs = np.array([mf._band_features(inspiral_power(N, exponent=e), 512)[0]
+    fs = np.array([mf._hierarchical._band_features(inspiral_power(N, exponent=e), 512)[0]
                    for e in exps])
     assert fs[0] > fs[-1], "expected the bank to span a range of f"
 
@@ -86,7 +86,7 @@ def test_a_mismatched_bank_loses_signals_in_order_of_their_own_f():
         "a bank spanning f %.3f to %.3f against a reference at %.3f now "
         "dismisses only %.2e. If refresh_template() started using fpow[t], "
         "that is the fix -- this test should then assert the loss is GONE."
-        % (fs[-1], fs[0], mf._band_features(ref, 512)[0], rate))
+        % (fs[-1], fs[0], mf._hierarchical._band_features(ref, 512)[0], rate))
 
     # The shape: templates whose own f is closest to the reference must do
     # better than those furthest from it.

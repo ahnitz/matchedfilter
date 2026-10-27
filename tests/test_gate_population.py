@@ -4,7 +4,6 @@ Keeping all spectral power still decimates the lag grid. Full-band
 scalloping depends on the profile, so f=1 does not imply zero dismissal.
 """
 import numpy as np
-import pytest
 import matchedfilter as mf
 from matchedfilter import gatemodel
 from test_api import inspiral_power, template_with_power
@@ -24,8 +23,8 @@ def test_a_heterogeneous_bank_needs_more_than_one_reference():
     n, band = 4096, 2048
     narrow = inspiral_power(n)
     broad = inspiral_power(n, exponent=-4/3)
-    assert mf._band_features(narrow, band)[0] > .999999
-    assert mf._band_features(broad, band)[0] > .999999
+    assert mf._hierarchical._band_features(narrow, band)[0] > .999999
+    assert mf._hierarchical._band_features(broad, band)[0] > .999999
     gate = gatemodel.gate_for(narrow, n, band, 5., .001)
     broad_gate = gatemodel.gate_for(broad, n, band, 5., .001)
     assert broad_gate < .85 * gate

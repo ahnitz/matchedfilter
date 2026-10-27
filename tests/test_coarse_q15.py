@@ -163,8 +163,8 @@ def test_cost_model_prices_the_screen():
         # call takes the screen, as pick_stable takes the canonical chain).
         cq = ent["dense"] + cm.screen_reach(b, 0.01) * ent["recheck"]
         c, on = cm.first_tier(b, 0.01)
-        assert on == (cq <= cm.dense[b] * (1.0 + mf._gatechain.TIE))
+        assert on == (cq <= cm.dense[b] * (1.0 + mf.gatechain.TIE))
         assert c == (cq if on else cm.dense[b])
     import json
-    rt = mf._gatechain.CostModel.from_dict(json.loads(json.dumps(cm.to_dict())))
+    rt = mf.gatechain.CostModel.from_dict(json.loads(json.dumps(cm.to_dict())))
     assert rt.signature() == cm.signature()

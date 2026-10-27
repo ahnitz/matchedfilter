@@ -16,8 +16,6 @@ correctly and roughly a thousand times slower than the CPU backend the caller
 just bypassed, which reads as a performance bug and is really a selection bug.
 It is reachable, but only by naming it.
 """
-import os
-
 from . import _cuda
 from . import _metal
 from . import _vulkan

@@ -29,7 +29,6 @@ the current key, -0.93 for g, and -0.96 for snr*sqrt(f)*g.
 import pathlib
 
 import numpy as np
-import pytest
 
 import matchedfilter as mf
 
@@ -62,7 +61,7 @@ def test_the_real_profile_is_what_it_claims():
     assert int(p.argmax()) == 78
     # recovery factors quoted in the handoff, which selection reads
     for band, want in ((256, 0.7876), (512, 0.9306), (1024, 0.9870)):
-        f, _ = mf._band_features(p, band)
+        f, _ = mf._hierarchical._band_features(p, band)
         assert abs(f - want) < 1e-3, "band %d recovery %.4f, expected %.4f" % (band, f, want)
 
 
@@ -75,12 +74,12 @@ def test_band_and_beff_do_not_determine_the_gate_behaviour():
     """
     p = real_profile()
     n, band = 4096, 1024
-    f, be = mf._band_features(p, band)
+    f, be = mf._hierarchical._band_features(p, band)
     import sys
     sys.path.insert(0, str(pathlib.Path(__file__).parents[1] / "tools"))
     import _gatelib as t
     synth = t.make_ref(n, band, f, be)
-    fs, bes = mf._band_features(synth, band)
+    fs, bes = mf._hierarchical._band_features(synth, band)
     assert abs(fs - f) < 5e-3 and abs(bes - be) / be < 0.05, "not matched on the key"
     g_real, g_syn = scallop(p, band, n), scallop(synth, band, n)
     assert abs(g_real - g_syn) > 0.02, (

@@ -377,7 +377,6 @@ def demo_page(require=False):
     cases = demo.run()
     ok = sum(1 for c in cases if c["agrees"])
     found = [c for c in cases if c["lag"] is not None]
-    quiet = [c for c in cases if c["lag"] is None]
     o = ['<p>Every figure below was produced by running the library while this '
          'page was built. The code that produced them is at the bottom, taken '
          'from the module that ran -- not transcribed, so the two cannot '
@@ -1083,7 +1082,7 @@ def reference_note(runs):
     for m in (256, 512, 1024):
         if m >= n:
             continue
-        f, be = _mf._band_features(p, m)
+        f, be = _mf._hierarchical._band_features(p, m)
         c = captured.get(m)
         rows.append([str(m), "%.4f" % f, "%.0f" % be,
                      "%.4f" % c[0] if c else "-", "%.0f" % c[1] if c else "-"])

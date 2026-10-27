@@ -30,7 +30,7 @@ def gpu():
     return device
 
 
-@pytest.mark.parametrize('n', sorted(mf._GPU_SIZES))
+@pytest.mark.parametrize('n', sorted(mf._filter._GPU_SIZES))
 def test_gpu_forward_matches_reference(gpu, n):
     plan = mf.MatchedFilter(n, device=gpu)
     rng = np.random.default_rng(948)
@@ -52,7 +52,7 @@ def test_gpu_forward_matches_reference(gpu, n):
     np.testing.assert_array_equal(spectra, 0)
 
 
-@pytest.mark.parametrize('n', sorted(mf._GPU_SIZES))
+@pytest.mark.parametrize('n', sorted(mf._filter._GPU_SIZES))
 def test_gpu_forward_fused_matches_reference(gpu, n):
     plan = mf.MatchedFilter(n, device=gpu)
     rng = np.random.default_rng(948)

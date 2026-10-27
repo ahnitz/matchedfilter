@@ -17,7 +17,6 @@ synchronization that completes it, ``(label, device_ms)`` is appended to
 """
 import ctypes
 import struct
-import os
 import pathlib
 import threading
 
@@ -29,7 +28,7 @@ from ._cuda import check_cuda
 from ._errors import UnsupportedSize
 from ._gpu_cache import InputUploads
 from ._gpuexec import Arg, Executor, settle as _settle
-from ._shared import empty_shared, shared_buffer, _Borrowed
+from ._shared import empty_shared, _Borrowed
 from ._gpuhost import MAX_BINS, bin_shift
 
 

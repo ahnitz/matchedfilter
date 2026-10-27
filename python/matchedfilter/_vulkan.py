@@ -13,7 +13,6 @@ fail with ``VK_ERROR_INCOMPATIBLE_DRIVER``.  The loader's own discovery works.
 See ``_shadowing_hint`` for what the failures actually were.
 """
 import ctypes
-import os
 
 _VK_SUCCESS = 0
 

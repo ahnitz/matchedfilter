@@ -138,7 +138,7 @@ def coverage(paths):
                 for band in (128, 256, 512, 1024, 2048):
                     if band >= n:
                         continue
-                    f, be = mf._band_features(power, band)
+                    f, be = mf._hierarchical._band_features(power, band)
                     if be > 0:
                         q.append((f, be, band / be))
     lim = {"f": (min(x[0] for x in q), max(x[0] for x in q)),
@@ -227,7 +227,7 @@ def main():
           % ("band", "f", "B_eff", "ratio", "measured", "model", "model is"))
     worst = None
     for band in a.band:
-        f, be = mf._band_features(power, band)
+        f, be = mf._hierarchical._band_features(power, band)
         if be <= 0:
             continue
         t0 = time.time()

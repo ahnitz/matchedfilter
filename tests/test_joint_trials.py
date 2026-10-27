@@ -1,6 +1,8 @@
 """Joint trials (_trial): block sizes, chains and the Q15 screen decided together by paired
 rounds of complete configurations, for banks (time_domain._joint_round) and for plans used on
 their own (HierarchicalFilter.run_series)."""
+import time
+
 import numpy as np
 import pytest
 
@@ -67,7 +69,7 @@ def _drive(subject, arms, rounds=40, settle=None):
 @pytest.fixture
 def clock(monkeypatch):
     c = _Clock()
-    monkeypatch.setattr(_trial.time, "perf_counter", c)
+    monkeypatch.setattr(time, "perf_counter", c)
     return c
 
 
@@ -405,7 +407,7 @@ def _run(p, series, starts, raw=False):
 def test_a_plans_rounds_return_the_defaults_results(raw):
     """The screen changes no result, so a pinned plan's rounds (its only arms: the screen) give
     the same peaks as an untrialled run; raw results, which reuse buffers, are copies."""
-    if not mf._q15_available(256):
+    if not mf._hierarchical._q15_available(256):
         pytest.skip("backend has no Q15 screen")
     p, series, starts = _plan(chain=(256, 512))
     p._governed = True                                  # no trial: the reference result
@@ -443,7 +445,7 @@ def test_a_plan_runs_its_model_chain_whatever_the_arm():
         p.use_arm(arm)
         assert tuple(p.config) == chain
         assert p.arm_config(arm)[0] == chain
-    if mf._q15_available(chain[0]):
+    if mf._hierarchical._q15_available(chain[0]):
         p.use_arm("q15=1")
         assert p._q15
         p.use_arm("q15=0")

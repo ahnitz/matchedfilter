@@ -6,10 +6,10 @@ using positive-frequency response bins directly from the real 2048 Hz taps:
 2. Requires exactly 50% buffer memory.
 3. Yields > 2x speedup on Zen 5 (dev2).
 """
-import os
 import numpy as np
 import pytest
-from matchedfilter import _automatic_series_layout, CorrelationFilter
+from matchedfilter import CorrelationFilter
+from matchedfilter._filter import _automatic_series_layout
 
 
 
@@ -31,7 +31,6 @@ def bank_data():
 def test_middle_critical_rate_exact_parity(bank_data):
     """Verify sample-by-sample equivalence of critical rate vs full rate convolution."""
     taps, counts, middle_ids, scales = bank_data
-    n_templates = len(counts)
 
     N_full = 1048576
     N_crit = N_full // 2

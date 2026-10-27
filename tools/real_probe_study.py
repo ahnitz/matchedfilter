@@ -246,11 +246,11 @@ class Race:
         begin = time.perf_counter_ns()
         np, p = self.np, self.p
         last = results[-1]
-        if not all(isinstance(r, self.mf._SparsePeaks) for r in results):
+        if not all(isinstance(r, self.mf._results._SparsePeaks) for r in results):
             raise AssertionError("public plan did not return owned sparse results")
         shape = (len(self.layout[0]), p.ntemplates, 1)
         _, layout, _, _, _ = p._grouped_layout(self.series, *self.layout, 2048, None)
-        counts = self.mf._scratch_counts(shape[0] * shape[1]).copy().reshape(shape[:2])
+        counts = self.mf._filter._scratch_counts(shape[0] * shape[1]).copy().reshape(shape[:2])
         if layout.order is not None:
             restored = np.empty_like(counts)
             restored[layout.order] = counts

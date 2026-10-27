@@ -4,10 +4,8 @@ What every backend dispatches is pinned once, on a recording driver
 (test_gpu_hier_plan); the hardware tests here run where a Metal device exists and compare
 against the CPU.
 """
-import os
 import re
 import pathlib
-import subprocess
 import sys
 
 import numpy as np
@@ -403,7 +401,7 @@ def test_metal_single_template_follow_up_matches_cpu():
 def test_metal_sparse_readback_equals_dense(ctx, kind, level, gate):
     """sparse=True gives the dense result's peaks exactly; the hierarchical paths read only
     the refined pairs back and skip the dense fill, relying on the refine writing every bin."""
-    from matchedfilter import _SparsePeaks
+    from matchedfilter._results import _SparsePeaks
     n, nd, nt, bs = 2048, 24, 9, 512
     rng = np.random.default_rng(17)
     spec = ctx.empty_shared((nd, n))

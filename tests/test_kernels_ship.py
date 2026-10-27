@@ -40,7 +40,7 @@ def _manifest():
 def test_every_supported_length_has_a_kernel():
     """_GPU_SIZES is the promise; the manifest has to keep it."""
     man = _manifest()
-    for n in sorted(mf._GPU_SIZES):
+    for n in sorted(mf._filter._GPU_SIZES):
         assert str(n) in man["modules"], (
             "device='gpu' accepts n=%d but no kernel was built for it" % n)
 
@@ -89,7 +89,7 @@ def test_forward_and_packing_kernels_ship():
     spirv, metal = _dirs()
     manifest = _manifest()
     with_metal = "metal" in _kernel_dirs.shipped()
-    for n in mf._GPU_SIZES:
+    for n in mf._filter._GPU_SIZES:
         entry = manifest['forward'][str(n)]
         assert (spirv / entry['file']).is_file()
         assert not with_metal or (metal / entry['metal']).is_file()

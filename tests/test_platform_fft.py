@@ -50,7 +50,8 @@ def test_platform_fft_refused_where_absent():
 def test_continuous_correlation_platform_fft_matches_engine():
     """The middle stage's continuous correlation through the platform FFT (a cost-model
     candidate, _CORR_PFFT) equals the engine's to fp32 rounding."""
-    from matchedfilter import CorrelationFilter, _automatic_series_layout
+    from matchedfilter import CorrelationFilter
+    from matchedfilter._filter import _automatic_series_layout
     n, nt, taps = 8192, 4, 2048
     rng = np.random.default_rng(1)
     h = np.zeros((nt, n), np.complex64)

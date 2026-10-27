@@ -1,13 +1,9 @@
 """TimeDomainFilterBank: Ingest raw time-domain filters, dynamically partition by length,
 automatically select optimal FFT block sizes, and filter continuous series."""
 
-import math
 from collections import OrderedDict
 import collections.abc as _abc
-import os
-import time
-from typing import Any, NamedTuple, Optional, Sequence, Union, Tuple, List, Dict
-import sys
+from typing import Any, Optional, Sequence, Union, Tuple, List, Dict
 import threading
 import weakref
 import numpy as np
@@ -15,12 +11,10 @@ from . import _calibration, _config
 from . import _settings, _trial
 from ._choice import _AUTOTUNE_LOCK
 from ._results import FilterResults, _EMPTY_FILTER_RESULTS  # noqa: F401  (public here)
-from ._windows import _is_index, _normalize_windows, _window_layout  # noqa: F401
+from ._windows import _normalize_windows, _window_layout
 from ._windows import _merge_window_bins, _window_bin_phases
-# The bank's layout planning lives in _layout; these names stay importable from here.
-from ._layout import (_CORR_COSTS, _batch_target, _corr_block_cost,  # noqa: F401
-                      _corr_block_costs, _corr_layout, _corr_measure, _corr_partition,
-                      _partition_templates)
+# The bank's layout planning lives in _layout.
+from ._layout import _corr_partition, _partition_templates
 try:
     from . import _core
 except ImportError:
@@ -235,7 +229,7 @@ def _joint_round(jobs):
         return None
     gpu = any(_parse_device(b.device).kind == "gpu" for b, _, _ in jobs)
     import time
-    from . import _record_cpu_trial
+    from ._hierarchical import _record_cpu_trial
 
     def settle_for(sub):
         def settle():
@@ -1122,7 +1116,6 @@ class TimeDomainFilterBank:
     def _choose_layout(self, fine: np.ndarray, delta_f: float, single_n: Optional[int] = None):
         """Partition with each length batch at its cheapest modelled block size -- or, with
         single_n, every batch at that one size (a joint trial's "n=" arm, _trial), unpriced."""
-        from . import gatechain
         from ._choice import _log_autotune
         groups, order = self._legacy_layout
         counts = self.effective_data_counts[order]
@@ -1951,7 +1944,6 @@ class TimeDomainFilterBank:
     @staticmethod
     def _items_batch(jobs, out):
         """Run eligible single-template GPU jobs of a batch together; returns their indices."""
-        import os
         from .device import parse as _parse_device
         if not _config.get("MF_GPU_ITEMS"):
             return set()
@@ -2104,11 +2096,14 @@ class TimeDomainFilterBank:
         view = getattr(cplan._gpu, 'host_view', None)
         out_owner = view(dest) if view is not None else None
         if out_owner is not None:
-            ser_owner = view(ser) if ser.flags.writeable else None
+            # The views' owners: shared_buffer() recognises an array only while its owner
+            # lives, so both are held until the call returns, and dropped before the arrays.
+            owners = [out_owner, view(ser) if ser.flags.writeable else None]
+            del out_owner
             try:
                 cplan._continuous_gpu(ser, st, t0, nt, dest)
             finally:
-                del ser_owner, out_owner
+                owners.clear()
             return
         # A destination in device memory on this device (a caller's reused buffer) is
         # written in place: no workspace, no copy-out.
@@ -2159,7 +2154,7 @@ class TimeDomainFilterBank:
         if hit_ is not None:
             cache.move_to_end(key)
             return hit_
-        from . import _automatic_series_layout
+        from ._filter import _automatic_series_layout
         st = np.empty(0, dtype=np.uintp)
         bounds = None
         keep = written = np.empty((0, 2), np.int64)
@@ -2308,7 +2303,7 @@ class TimeDomainFilterBank:
             If `template_index` is None: 2D complex64 array of shape `(n_templates, len(series))`.
             If `template_index` is specified: 1D complex64 array of shape `(len(series),)`.
         """
-        from . import _from_any
+        from ._filter import _from_any
         from .device import parse as _parse_device
 
         a = _from_any(series)
@@ -2442,7 +2437,6 @@ class TimeDomainFilterBank:
         if all((containing_samples(ser, gpu) if ser.dtype == np.float32
                 else shared_buffer(ser, gpu)) is not None for gpu in gpus):
             return ser                       # read in place (a real series by its layout)
-        devs = {id(x): x for x in gpus}.values()
         bufs = self.__dict__.setdefault('_ser_stagings', [])
         k = self.__dict__.get('_ser_staging_next', 0) % 2
         self._ser_staging_next = k + 1
@@ -2495,7 +2489,7 @@ class TimeDomainFilterBank:
 
     def _correlate_selected(self, ser, W, templates, scales, out, support=None, wait=True):
         """correlate_series(templates=...): row j of the result is template templates[j]."""
-        from . import _from_any
+        from ._filter import _from_any
         S = ser.size
         sel = np.asarray(templates, dtype=np.int64).ravel()
         if sel.size and (sel.min() < 0 or sel.max() >= self.n_templates):

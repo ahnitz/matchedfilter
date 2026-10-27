@@ -21,8 +21,6 @@ from contextlib import redirect_stdout
 
 import numpy as np
 
-import matchedfilter as mf
-
 
 def basic():
     """Correlate a batch of data against a batch of templates."""
@@ -284,7 +282,7 @@ def refuses():
     print("declines. Pinning a chain (chain=...) and its thresholds yourself always works.")
 
 
-def teaser():
+def teaser(data, bank):
     """The six lines the Overview page shows. Short on purpose."""
     import numpy as np
     import matchedfilter as mf
@@ -318,17 +316,7 @@ def _teaser_inputs():
 def run_teaser():
     """(source, output) for the Overview snippet."""
     data, bank = _teaser_inputs()
-    g = teaser.__globals__
-    old = {k: g.get(k) for k in ("data", "bank")}
-    g["data"], g["bank"] = data, bank
-    try:
-        return run_one(teaser)
-    finally:
-        for k, v in old.items():
-            if v is None:
-                g.pop(k, None)
-            else:
-                g[k] = v
+    return run_one(teaser, data, bank)
 
 
 #: (function, heading) in the order the page presents them.
@@ -351,11 +339,11 @@ def source_of(fn):
     return textwrap.dedent(body).strip("\n")
 
 
-def run_one(fn):
-    """Return (source, captured stdout) for one example."""
+def run_one(fn, *args):
+    """Return (source, captured stdout) for one example, called with `args`."""
     buf = io.StringIO()
     with redirect_stdout(buf):
-        fn()
+        fn(*args)
     return source_of(fn), buf.getvalue().rstrip("\n")
 
 

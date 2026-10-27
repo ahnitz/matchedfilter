@@ -27,7 +27,6 @@ a device with indirect dispatch sizes them by the count, one without strides a f
 (the driver's `listed` op).
 """
 import math
-import os
 
 from . import _config
 import struct
