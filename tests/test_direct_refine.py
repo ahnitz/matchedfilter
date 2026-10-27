@@ -157,7 +157,9 @@ def test_padded_one_bin_rows_refine_directly(monkeypatch):
     monkeypatch.setenv("MF_DIRECT_REFINE", "1")
 
     def run(phase):
-        hf = mf.HierarchicalFilter(n, 1, spec.shape[0], snr=6.0, fd=1e-3, chain=(256, 512),
+        # fd 1% (as _run): at 1e-3 a chain ending at band 512 refines a wide window, which a
+        # back end pricing the direct refine dearer (AVX: 4x the ticks per lag) does by transform
+        hf = mf.HierarchicalFilter(n, 1, spec.shape[0], snr=6.0, fd=1e-2, chain=(256, 512),
                                    search_window=window)
         hf.set_reference(ref); hf.set_templates(spec); hf.set_taps(taps, counts)
         kw = {} if phase is None else {"bin_phase": np.full(layout[0].size, phase, np.uint32)}
