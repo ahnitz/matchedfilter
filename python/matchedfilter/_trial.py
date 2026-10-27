@@ -76,7 +76,6 @@ def current_pass(make: Callable[[object, list], "_choice.Choice"], proposals: Se
                 ch.lock(base)
         if ch.winner is None or ch.winner == base:
             return ch
-        _log_autotune("%s: pass around %s locked %s", ch.what, base, ch.winner)
         base = ch.winner
 
 
@@ -104,6 +103,8 @@ class Trial:
         ch = self._passes.get(base)
         if ch is None:
             what = "TRIAL %s" % self.key + ("" if base == DEFAULT else " around %s" % base)
+            if base != DEFAULT:
+                _log_autotune("%s: arms %s", what, list(arms))
             ch = self._passes[base] = _choice.Choice(
                 tuple(arms), store_key=pass_key("joint|" + self.key, base), what=what,
                 budget=(0, UNROUNDED_BUDGET), label=str, parse=_settings.valid, confirm=True)
