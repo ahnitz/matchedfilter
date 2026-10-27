@@ -115,7 +115,7 @@ def test_every_sparse_way_gives_the_same_peaks(monkeypatch):
     measured choice) is the same result, through the fused batches of filter_series_many:
     the device compaction once read the refine's output before it was written, losing peaks
     only when its timing made it the choice."""
-    from matchedfilter import time_domain as td
+    from matchedfilter import _gpusettings as td
     out = {}
     orig = td.kernel_slot
     for way in ("rows", "compact"):

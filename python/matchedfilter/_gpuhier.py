@@ -187,7 +187,7 @@ class HierOps:
         pair = self._kernel_shortlist("coarse", band, first)
         if pair is None:
             return first
-        from .time_domain import kernel_slot
+        from ._gpusettings import kernel_slot
         label = kernel_slot(self._dev_name(), "coarse", band, *pair)
         return next((c for c in self._x_coarse_candidates(band)
                      if self._layout_label(band, c) == label), first)
@@ -206,7 +206,7 @@ class HierOps:
         way = self._gate_way(band)
         pair = self._kernel_shortlist("gateway", band, way)
         if pair is not None:
-            from .time_domain import kernel_slot
+            from ._gpusettings import kernel_slot
             way = kernel_slot(self._dev_name(), "gateway", band, *pair)
         return way == "gate"
 
@@ -764,7 +764,7 @@ class HierOps:
         """How a sparse result is read -- its survivors' rows gathered on the host, or the hits
         compacted on the device: a kernel slot of the device trial (_gpuexec.SPARSE_WAYS)."""
         from ._gpuexec import SPARSE_WAYS
-        from .time_domain import kernel_slot
+        from ._gpusettings import kernel_slot
         return kernel_slot(self._dev_name(), "sparse", "hier", *SPARSE_WAYS["hier"])
 
     def _hier_run(self, rec, binds, shape, sparse, way, cascade, frac_key, slot,
