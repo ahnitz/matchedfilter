@@ -38,7 +38,7 @@ def _cpu_forward_platform(n):
     few repetitions) and the cheaper is kept ("cpu-fft|n|cpu" in MF_COST_FILE). Their
     results differ by fp32 rounding only, so this is a price, not a contest: a trial over
     whole calls dilutes a transform that is ~11% of a call below the shared tie margin
-    (gatechain.measured_choice), which kept the slower transform in half of fresh files."""
+    (_choice.TIE), which kept the slower transform in half of fresh files."""
     n = int(n)
 
     def measure():

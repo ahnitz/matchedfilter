@@ -644,7 +644,7 @@ def _build(argv=None):
             one = compile_one(slangc, n, OUT, "refineListed", suffix="_onebin", single_bin=1)
             info["refine"]["one_bin"] = dict(file=one.name)
             # A later gate tier's decision alone (tierb.slang MF_GATE_ONLY), its own build:
-            # measured against the election per device (_gpuhier._gate_way).
+            # measured against the election per device (_gpuhier._played "gateway").
             if n <= 1024:
                 gate = compile_one(slangc, n, OUT, "refineListed", suffix="_onebin_gate",
                                    single_bin=1, gate_only=1)

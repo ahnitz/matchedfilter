@@ -49,7 +49,7 @@ import numpy as np
 
 from . import gatemodel as _gm
 # The decision rules live in _choice; gatechain's callers keep them by these names.
-from ._choice import CHOICE_Z, TIE, measured_choice, paired_choice, sample_spread  # noqa: F401
+from ._choice import TIE, paired_choice  # noqa: F401
 # The cost file lives in _costfile; these names stay importable from here for the callers
 # that use them through gatechain.
 from ._costfile import (_COST_WARNED, _LEGACY_PREFIXES, _cost_file, _cost_file_lock,  # noqa: F401

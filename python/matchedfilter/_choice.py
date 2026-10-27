@@ -89,8 +89,7 @@ def _autotune_enabled():
 
 # ---- the one rule every measured choice follows ---------------------------------------
 #
-# Joint trials (_trial: block size, chains and the Q15 screen together, in paired rounds) decide
-# with paired_choice, the device and kernel choices with measured_choice (both through Choice).
+# Every choice decides with paired_choice over complete rounds (through Choice).
 # History: M2 locked n=4096 on two samples 5.4% faster than n=2048 -- past
 # TIE, inside the noise -- and ran 34% slower in steady state; dev2 locked the Q15 screen off
 # on a 6% "win" and ran 5% slower without it.
@@ -101,22 +100,6 @@ def _autotune_enabled():
 #: and a choice that flips with them makes runs incomparable.
 TIE = 0.05
 
-
-#: A candidate beats the model's choice only by more than TIE and by more than Z standard
-#: errors of the difference of the two medians.
-CHOICE_Z = 2.0
-
-
-def sample_spread(v):
-    """Standard deviation of samples: MAD-based (robust to the outliers a batch after a
-    switch or a host hiccup produces -- the plain estimate let one such spike keep a 26% gap
-    "unclear" until the model's slower chain stood), falling back to the plain estimate
-    when MAD reads 0 (half the samples tie: timer quantisation, a repeated cache state)."""
-    v = np.asarray(v, float)
-    if v.size < 2:
-        return float("inf")
-    mad = 1.4826 * float(np.median(np.abs(v - np.median(v))))
-    return mad if mad > 0 else float(np.std(v, ddof=1))
 
 
 def paired_choice(samples, model, cap, minimum=5, tie=None):
@@ -167,45 +150,6 @@ def can_still_win(samples, model_samples, cap, tie=None):
     return wins + max(0, cap - r.size) >= int(np.ceil(0.75 * max(cap, r.size)))
 
 
-def measured_choice(samples, model, cap, tie=None, z=None):
-    """Decide a measured choice from samples {candidate: [cost, ...]} (lower is better).
-
-    For choices that change results or whose effect is a large share of what a sample
-    times. A choice whose effect on a whole call is under the tie margin -- a kernel that is
-    a small part of the call, with results equal to rounding -- is PRICED instead (timed
-    once on its own, the cheaper kept in MF_COST_FILE: _cpu_forward_platform, the corr-pfft
-    price in time_domain._corr_block_costs). Trialled over whole calls it sits at the tie
-    and the model's choice wins about half the time (cpu-fft on the M2: 4.6-5.2% per call
-    for a transform 30% faster).
-
-    Returns (winner, more): winner is the candidate to lock, or None while more samples are
-    needed, in which case `more` maps the candidates to measure further to the sample count
-    each needs. The fastest median wins only if it is more than `tie` (TIE) below the model's
-    candidate's AND the gap exceeds `z` (CHOICE_Z) standard errors of the two medians'
-    difference; an unclear contest asks for one more sample of both, up to `cap` each, then
-    the model's choice stands. A candidate missing from samples is the model's when model is
-    None (the first key)."""
-    tie = TIE if tie is None else tie
-    z = CHOICE_Z if z is None else z
-    if model not in samples:
-        model = next(iter(samples))
-    med = {c: float(np.median(v)) for c, v in samples.items() if len(v)}
-    if model not in med:
-        return None, {model: 1}
-    best = min(med, key=lambda c: (med[c], c != model))
-    if not np.isfinite(med[model]) and np.isfinite(med[best]):
-        return best, {}                 # the model's candidate is unusable (priced at inf)
-    if best == model or not med[best] < med[model] * (1.0 - tie):
-        return model, {}
-    a, b = samples[model], samples[best]
-    se = float(np.sqrt(sample_spread(a) ** 2 / len(a) + sample_spread(b) ** 2 / len(b)))
-    if med[model] - med[best] > z * se:
-        return best, {}
-    if min(len(a), len(b)) < cap:
-        return None, {model: len(a) + 1, best: len(b) + 1}
-    return model, {}
-
-
 class Choice:
     """One measured choice between candidates (see the module docstring).
 
@@ -220,11 +164,10 @@ class Choice:
     def __init__(self, candidates: Sequence[Hashable] = (), store_key: Optional[str] = None,
                  what: Optional[str] = None, minimum: Optional[int] = None,
                  cap: Optional[int] = None,
-                 tie: Optional[float] = None, z: Optional[float] = None,
+                 tie: Optional[float] = None,
                  retrial: Optional[int] = None, label: Optional[Callable[[Any], Any]] = None,
-                 parse: Optional[Callable[[str], Any]] = None, recheck_stored: bool = False,
-                 budget: Optional[Tuple[int, int]] = None, paired: bool = False,
-                 confirm: bool = False):
+                 parse: Optional[Callable[[str], Any]] = None,
+                 budget: Optional[Tuple[int, int]] = None, confirm: bool = False):
         if len(set(candidates)) != len(candidates):
             raise ValueError("a choice needs distinct candidates: %r" % (candidates,))
         self.candidates: tuple = ()
@@ -237,8 +180,8 @@ class Choice:
         base, top = rounds()
         self.minimum = int(base if minimum is None else minimum)
         self.cap = int(top if cap is None else cap)
-        self.tie, self.z, self.retrial, self.calls = tie, z, retrial, 0
-        self.budget, self.paired = budget, bool(paired)
+        self.tie, self.retrial, self.calls = tie, retrial, 0
+        self.budget = budget
         self.confirm, self.confirming = bool(confirm), None
         self.winner = None
         self.median: Optional[dict] = None
@@ -253,8 +196,7 @@ class Choice:
         self.candidates = ()
         for c in candidates:
             self.add(c)
-        if not recheck_stored:
-            self.winner = self.held
+        self.winner = self.held
 
     @property
     def preference(self):
@@ -416,53 +358,6 @@ class Choice:
             self.round(times)
         return out
 
-    # ---- offline ------------------------------------------------------------------------
-    def decide(self, measure: Callable[[list], Any],
-               tiebreak: Optional[Callable[[Any], tuple]] = None):
-        """The winner, measured now if need be: measure(candidates) returns {candidate:
-        seconds} (optionally a Timings, whose `close` holds the contenders its paired
-        confirmation could not tell from the fastest) or {candidate: [seconds, ...]}, or
-        None when the device cannot be timed (the preference is then used, not stored).
-        Seconds per candidate: the fastest wins, close contenders go to the preference
-        (tiebreak(c), then candidate order), and the two runners-up are stored with it.
-        Samples per candidate: the shared rule decides."""
-        if self.winner is not None:
-            return self.winner
-        if self.held is not None:
-            rivals = [c for c in self.candidates
-                      if c != self.held and str(self.label(c)) in self._stored_rivals()]
-            if not rivals or _still_fastest(self.held, rivals, measure):
-                self.winner = self.held
-                return self.winner
-        times = measure(list(self.candidates))
-        if not times:
-            self.winner = self.preference
-            return self.winner
-        # Another process may have measured meanwhile: its choice stands (first writer
-        # wins), so processes sharing a cost file make one choice.
-        other = self._stored()
-        if other is not None and other != self.held:
-            self.winner = other
-            return other
-        self._replace = self.held is not None          # the stale lock is replaced
-        rank = {c: i for i, c in enumerate(self.candidates)}
-        if all(isinstance(v, (list, tuple)) for v in times.values()):
-            w, _ = measured_choice(
-                times, self.preference, min(len(v) for v in times.values()), tie=self.tie, z=self.z)
-            self.lock(w if w is not None else self.preference, times)
-            return self.winner
-        fastest = min(times, key=lambda c: (times[c], rank.get(c, 0)))
-        near = {c for c in times if times[c] == times[fastest]} | set(getattr(times, "close", ()))
-        w = min(near, key=lambda c: (tuple(tiebreak(c)) if tiebreak else ()) + (rank.get(c, 0),))
-        runners = [c for c in sorted(times, key=lambda c: (times[c], rank.get(c, 0))) if c != w]
-        self.lock(w, times, rivals=";".join(str(self.label(c)) for c in runners[:2]))
-        return self.winner
-
-    def _stored_rivals(self):
-        rec = self._record()
-        rivals = rec.get("rivals") if isinstance(rec, dict) else None
-        return set((rivals or "").split(";")) - {""}
-
     # ---- the record on file -------------------------------------------------------------
     def lock(self, winner, kept=None, **extra) -> None:
         """Lock `winner` for this process and store it (with `extra` fields) for later ones.
@@ -521,21 +416,6 @@ class Choice:
                 return None                                  # a lock on file stands
             return rec
         return _costfile._update_cost(path, "choice|" + self.store_key, merge)
-
-
-def _still_fastest(choice, rivals, measure):
-    """True unless a rival times faster than choice beyond the noise (measure over the
-    three; Timings.close holds the contenders within it of the fastest), or choice was not
-    timed at all. A device that cannot be timed keeps the choice."""
-    t = measure([choice] + list(rivals))
-    if not t:
-        return True
-    if choice not in t:
-        return False
-    if all(isinstance(v, (list, tuple)) for v in t.values()):
-        t = {c: float(np.median(v)) for c, v in t.items()}
-    fastest = min(t, key=t.get)
-    return fastest == choice or t[choice] == t[fastest] or choice in getattr(t, "close", ())
 
 
 def stored_lock(store_key: str, parse: Callable[[str], Any]):

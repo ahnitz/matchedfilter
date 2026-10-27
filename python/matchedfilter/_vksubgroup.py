@@ -8,7 +8,8 @@ a Radeon 8060S (32-64, reports 64) no size is clearly faster. So the size is mea
 per device and kept in MF_COST_FILE: each candidate runs a representative workload in a
 SUBPROCESS (a size can make the driver lose the device -- 8 did on the Iris Xe -- and that
 must not take the caller with it), its results are compared with the reported size's, and
-the shared rule (gatechain.measured_choice) keeps the reported size unless another is
+the paired rule (_choice.paired_choice: every size runs the same calls, paired by call)
+keeps the reported size unless another is
 faster past the tie margin. Pipelines that choose their own size (the coarse layout,
 _fit_subgroup) are unaffected.
 
@@ -134,9 +135,11 @@ def measure(index, reported, rng):
 
 
 def choose(ctx):
-    """The size this device's pipelines are built at when they do not choose their own: an
-    offline _choice.Choice over the sizes the device can require, the reported size first
-    (the preference), kept in MF_COST_FILE when there is one and for the process otherwise.
+    """The size this device's pipelines are built at when they do not choose their own: a
+    _choice.Choice over the sizes the device can require, the reported size first (the
+    preference), decided by the paired rule over the sizes' timings of the same calls (each
+    size needs a device of its own, so a call cannot carry an arm: subprocesses run it), kept
+    in MF_COST_FILE when there is one and for the process otherwise.
     Measured with or without a cost file (MF_AUTOTUNE=0 keeps the reported size): without
     one the Iris Xe built at its reported 32 and ran full and peak calls 5-30x slower than
     at the measured 8 (7.6 s of measuring, once per process)."""
@@ -153,5 +156,13 @@ def choose(ctx):
     ch = _choice.choice("vk-subgroup", name, sizes, label=int,
                         store_key="vk-subgroup|%s|k%s" % (name, _kernel_id.gpu_kernel_id("vulkan")),
                         what="VK-SUBGROUP %s" % name)
-    measured = lambda cands: measure(getattr(ctx, "index", 0), reported, rng) or None
-    return int(ch.decide(measured))
+    if ch.winner is not None:
+        return int(ch.winner)
+    times = measure(getattr(ctx, "index", 0), reported, rng)
+    m = min((len(v) for v in times.values()), default=0)
+    w = reported
+    if len(times) > 1 and m >= 2:
+        w = _choice.paired_choice({s: list(v[:m]) for s, v in times.items()}, reported, m,
+                                  minimum=m)[0] or reported
+    ch.lock(w)
+    return int(ch.winner)

@@ -59,7 +59,7 @@ class Trial:
         self.key = key
         self.choice = _choice.Choice(
             tuple(arms), store_key="joint|" + key, what="TRIAL %s" % key,
-            budget=(0, UNROUNDED_BUDGET), paired=True, label=str, parse=_settings.valid,
+            budget=(0, UNROUNDED_BUDGET), label=str, parse=_settings.valid,
             confirm=True)
         self.replaying = False
 
