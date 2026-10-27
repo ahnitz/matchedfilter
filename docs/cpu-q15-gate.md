@@ -78,17 +78,19 @@ the margin still applies to `ap_mf_q15_screen` called on its own
 ## Selection
 
 The screen is one dimension of the joint trial (`_trial`, docs/gate-model.md, "One joint
-trial"): its arms `q15=1` and `q15=0` run beside the block-size and chain arms, in the same
-paired rounds. Each arm gets an untimed settling run, followed by one timed run, on identical
-input; the arm order reverses on the next round. Decisions use paired ratios to the default
+trial"): its arms `q15=1` and `q15=0` run beside the block-size arms, in the same paired
+rounds. Each plan's chain is the cost model's under every arm; the chain is not an arm.
+Each arm gets an untimed settling run, followed by one timed run, on identical input; the
+arm order reverses on the next round. Decisions use paired ratios to the default
 (the cost model's screen setting for each plan's chain), so a large group is not compared
 with a small group's cost per pair. There are at least `MF_TRIAL_ROUNDS` complete rounds
 (five by default), and at most twice that many. A challenger needs at least 75% of the rounds
-to beat the default by more than the 5% tie margin. An unresolved contest at the cap keeps
-the default; this is an uncertainty fallback, not proof of a win.
+to beat the default by more than the 5% tie margin, and must then win again in fresh rounds
+alone against the default. An unresolved contest at the cap keeps the default; this is an
+uncertainty fallback, not proof of a win.
 
-Complete rounds and the final lock persist in `MF_COST_FILE`. `MF_AUTOTUNE=0` retains the
-cost-model screen choice. Availability follows the backend (`ap_q15_lanes`).
+Each pass's lock, with its arms' medians, persists in `MF_COST_FILE`; the rounds of an open
+pass do not. `MF_AUTOTUNE=0` retains the cost-model screen choice. Availability follows the backend (`ap_q15_lanes`).
 Replayed calls count as calibration work, including in native work counters.
 
 ## Measured (ladder, test27 bank + H1 profiles, 1 top x 6 segments, steady, pinned)
@@ -116,11 +118,12 @@ read from MF_COST_FILE).
 ### Pricing (MF_AUTOTUNE=0)
 
 `calibrate_costs` also measures, per band with a screen: the screen alone (threshold
-unreachable), its pass excess over the float tier at the calibration densities, and
-the per-pair cost of re-running its survivors. `CostModel.first_tier` picks the
-cheaper first tier; `choose_chain` records the choice and a plan built with
-autotune off uses it. With autotune on, the on/off trial still decides. Cost files
-written by a build without the screen are keyed apart (`,q15`).
+unreachable), the pairs it passes at a calibration density (as the tier's gate it passes
+the tier's pairs, an excess of 1), and what each pass costs beyond the screen itself
+(compaction). `CostModel.first_tier` picks the cheaper first tier; `choose_chain` records
+the choice and a plan built with autotune off uses it. With autotune on, the joint trial's
+on/off arms still decide. Cost files written by a build without the screen are keyed apart
+(`,q15`).
 
 ### In-situ gap: none on AVX2
 
@@ -227,6 +230,12 @@ Load stayed high most of the day; one window at load ~8: base 1.71 s -> 1.49 s (
 A second rep was invalidated by load rising to 18.
 
 ## Pricing a bounding first tier on the GPU (gatechain, 2026-10-09)
+
+Since then: from 2026-10-19 every GPU backend's coarse tier reports the bound and one
+switch covers them all (`gatechain._RAW_GATE_SWITCH`); from 2026-10-22 that switch is
+`MF_COARSE_RAW=1` (what `MF_VK_C16_BOUND=0` did); from 2026-10-27 GPU cost-model keys also
+name the sparse fit (`_calibration.calibrate_costs_gpu`). The record below is as written
+on 2026-10-09.
 
 A first tier that reports an upper bound of the FP32 statistic (Vulkan fp16 coarse with
 `MF_VK_C16_BOUND`, docs/vulkan-8060s-roofline.md section 10) passes a superset of the pairs

@@ -170,13 +170,15 @@ size per group. Pass `fft_lengths=` to pin the sizes; otherwise the bank decides
   transform size chosen, to minimise the calibrated cost per output sample
   (per-block forward cost plus per-template cost, measured once per process).
 * A hierarchical bank given `binsize=` (samples per reported peak) chooses at its
-  first fine-grid reference (`set_reference(profile, delta_f=...)`): each length
-  batch is priced at every candidate size with the gate model and calibrated
-  tier costs, and the groups are built at the cheapest. `max_block_length`
-  (default 8192) bounds the candidates and is available before the choice, for
-  callers that pad their series by the longest block. Without `binsize` the
-  bank uses the valid-fraction rule (the smallest size with at least half its
-  samples valid), keeping one peak per block by default.
+  first fine-grid reference (`set_reference(profile, delta_f=...)`). It starts at
+  its smallest candidate block size, and its joint trial times that against the
+  next single size and against the layout the gate model and calibrated tier
+  costs price cheapest, on the bank's own calls (see "Measured choices and
+  reproducibility" below). With `MF_AUTOTUNE=0` it builds the priced layout.
+  `max_block_length` (default 8192) bounds the candidates and is available
+  before the choice, for callers that pad their series by the longest block.
+  Without `binsize` the bank uses the valid-fraction rule (the smallest size with
+  at least half its samples valid), keeping one peak per block by default.
 * Other engines use the valid-fraction rule.
 
 `filter_series` uses the bank's `binsize` unless the call passes its own.
@@ -209,11 +211,15 @@ power alone is generally insufficient for colored noise.
 
 [[example:The hierarchical mode]]
 
-Automatic configuration requires a covering measured calibration file. Missing
-coverage raises an error. Alternatively, supply `band` when constructing the
-filter and call `set_coarse_threshold(value)` before execution. Both explicit
-parameters are required; no model or default threshold substitutes for them.
-An explicit threshold carries no measured false-dismissal guarantee.
+Automatic configuration computes the gate thresholds from the reference with the
+gate model, and measures the tier costs that rank the chains on this machine; no
+calibration file is needed. It raises an error when the model cannot resolve the
+budget (an `fd` too small for the model's draws) or the reference has no localised
+correlation peak. Alternatively, pin a chain when constructing the filter
+(`chain=(b1, ...)`) and call `set_coarse_threshold(value)`, one value per tier,
+before execution. Both explicit parameters are required; no model or default
+threshold substitutes for them. An explicit threshold carries no modelled
+false-dismissal guarantee.
 
 [[example:When it refuses]]
 
@@ -231,8 +237,9 @@ filt = mf.MatchedFilter(4096, ndata=16, ntemplates=64, device="gpu")
 ```
 
 The default is CPU unless `MF_DEVICE` is set. `device="cpu"`, `"gpu"`,
-`"gpu:1"` and `"auto"` are supported. Linux and Windows use Vulkan; macOS
-uses Metal. GPU execution requires a compatible driver.
+`"gpu:1"`, `"cuda"` and `"auto"` are supported. NVIDIA GPUs run through the CUDA
+driver where it is installed; other GPUs on Linux and Windows use Vulkan, and
+macOS uses Metal. GPU execution requires a compatible driver.
 
 | Capability | CPU | GPU |
 |---|---|---|
@@ -274,8 +281,8 @@ are not imported through this interface. Finish producer writes before
 filtering; cross-library GPU stream synchronization is not provided. Returned
 peaks use ordinary NumPy storage.
 
-The [CPU/GPU contract](https://github.com/ahnitz/matchedfilter/blob/main/docs/cpu-gpu-parity.md)
-describes buffer ownership, cache lifetime and interoperability limits.
+The [CPU/GPU parity audit of 2026-09-26](https://github.com/ahnitz/matchedfilter/blob/main/docs/cpu-gpu-parity.md)
+records buffer ownership, cache lifetime and interoperability limits as they were then.
 
 ## Measured choices and reproducibility
 

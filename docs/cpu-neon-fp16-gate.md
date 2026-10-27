@@ -22,7 +22,8 @@ a gate only has to decide "maybe": every survivor is still refined exactly, in F
   gate in `refresh_template` and `set_data`, and calls `ap_gate16_run` instead of `ap_mf_run`
   for tier 0. Later tiers and the refine are unchanged.
 - **Switches.**
-  - `MF_GATE16=0` keeps the FP32 path, which remains a measured candidate.
+  - `MF_GATE16=0` keeps the FP32 path, for measurement. The two are not a measured choice:
+    wherever the gate is built and the switch is not set, plans use it.
   - `cpu_gate_kind()` puts the gate kind in the CPU cost-cache keys (`calibrate_costs`,
     `price_block_sizes`, the chain choice), so cached costs of one gate never price the other.
 - **Scan.**
