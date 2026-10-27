@@ -1,3 +1,31 @@
+# One simulation for signal and noise, 2026-10-26
+
+The gate model is one simulation (`gatechain._simulate`, `_core.simulate`). Each
+draw is a block's n bins with variance p_k. The fine statistic is their n-point
+transform, and band b's statistic is the b-point transform of bins [0, b). A
+signal arriving at a uniformly random time (16 sub-sample phases) is added
+through linearity. Every maximum is taken over the whole searched window, as the
+engine takes it.
+
+- `signal_draws` reads each statistic's running-maximum records outward from
+  the signal, so any window is two lookups, with the engine's coarse alignment.
+- `noise_block_maxima` reads the same draws without the signal.
+
+The two are one model of one noise, and the tests check that they agree.
+
+This replaces the local lag window, the Cholesky neighbourhood draws and the
+pairing with noise from elsewhere in the window. The local window missed remote
+coarse maxima: in the 1% sweeps the flat profile's gates dismissed nothing, and a
+bimodal profile's side lobes reached 1.74x its budget.
+
+The sweeps through the C engine (fd 1%, 14 profiles x 4 chains, n = 2048 and
+4096) are on budget. The one flagged case (inspiral, single tier, n = 2048) is
+the model's own ±10% sampling: its gate is +1.4 sd over model seeds.
+
+Only draws whose fine statistic reaches snr somewhere in the block hold records.
+Where few do, as at snr = 1000, the simulation runs longer, up to 4x, until
+half its draws' worth are kept.
+
 # Retiring the accuracy table, 2026-09-26
 
 `choose_threshold` now calls `gatemodel.gate_for` directly. The model uses
@@ -55,6 +83,7 @@ seed. This fixes the previous omitted-seed and rounded-SNR cache aliases.
 The recovered fraction is clamped against floating-point overshoot at one,
 preventing a negative out-of-band variance at full coverage.
 
+(Superseded 2026-10-26: the model now takes whole-window maxima; see the top.)
 The model samples a local lag window. It is validated closely for the
 recorded profiles and bands, not universally exact for every spectrum or
 noise population. At band 128, n=4096, fd=.001, the inspiral-profile gate

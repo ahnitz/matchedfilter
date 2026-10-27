@@ -96,8 +96,7 @@ def fresh(monkeypatch):
 @pytest.mark.parametrize("order", [(20000,), (5000, 20000), (20000, 5000), (5000, 7000, 20000)])
 def test_fewer_noise_blocks_are_a_prefix_of_more(fresh, order):
     """A noise simulation extended from a smaller one, or read as the prefix of a larger one,
-    gives exactly the blocks a single full simulation gives (a provisional model's blocks are
-    its full model's first)."""
+    gives exactly the blocks a single full simulation gives."""
     n = 2048
     p, bands, win = _profile(n), gc.candidate_bands(n), (128, 1920)
     got = {ns: gc.noise_block_maxima(p, n, bands, nsim=ns, window=win).copy() for ns in order}
@@ -175,22 +174,9 @@ def test_the_c_plan_search_matches_the_python_one(fresh, monkeypatch):
                 assert c == py, (chain, prune, win)
 
 
-def test_provisional_models_keep_the_signal_and_quarter_the_noise():
-    """Inside provisional(), only the noise blocks drop (to a quarter); the signal draws the
-    budget rests on keep their count; outside, both are the full counts."""
-    full = gc.model_draws(0.01)
-    with gc.provisional():
-        prov = gc.model_draws(0.01)
-    assert prov[0] == full[0] and prov[1] == full[1] // gc._PROVISIONAL_FRACTION
-    with gc.provisional(False):
-        assert gc.model_draws(0.01) == full
-    assert gc.model_draws(0.01) == full
-
-
-
-def test_block_size_ranking_models_provisionally(fresh, monkeypatch):
-    """price_block_sizes ranks sizes on a quarter of the noise blocks; the plans of a bank
-    model with all of them (a plan's own chain choice is not inside provisional())."""
+def test_block_size_ranking_models_with_every_draw(fresh, monkeypatch):
+    """price_block_sizes models each size with the plans' own draw counts: the noise blocks are
+    the signal simulation's first, so ranking on fewer would save nothing."""
     from matchedfilter import _calibration as cal
     monkeypatch.setattr(gc, "_PRICE_CACHE", type(gc._PRICE_CACHE)())
     monkeypatch.setattr(gc, "_CHOICE_CACHE", type(gc._CHOICE_CACHE)())
@@ -199,4 +185,4 @@ def test_block_size_ranking_models_provisionally(fresh, monkeypatch):
     monkeypatch.setattr(gc, "_noise_records", lambda p, n, b, nsim, seed: seen.append(nsim) or orig(p, n, b, nsim, seed))
     fine = np.exp(-np.arange(4097) / 600.0); fine[:30] = 0
     cal.price_block_sizes(fine, 0.25, 2048.0, 300, 150, 64, 6.0, 0.01, [2048, 4096])
-    assert seen and set(seen) == {20000 // gc._PROVISIONAL_FRACTION}, seen
+    assert seen and set(seen) == {gc.model_draws(0.01)[1]}, seen
