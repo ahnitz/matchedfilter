@@ -1242,33 +1242,35 @@ static float sr_power(const float *restrict y, const float *restrict d, float g,
   }
   float r; memcpy(&r,&mx,4); return r;
 }
-/* One statistic's running-maximum records outward from the signal (simulate): the
+/* One statistic's running-maximum records outward from the signal (simulate): of the
    values a[e0], a[e0 + dir], ... (L of them), each exceeding all before it (the first always)
-   as (distance, sqrt value), distance i + (e0 == 0 ? 0 : 1) for the i-th. Records are rare
-   (about ln L of noise; fewer with the signal at the start): a block of 16 below the running
-   maximum is passed over with one comparison. Returns 0, or -1 when the arrays are full. */
-static inline int sr_records(const float *a, long long e0, int dir, long long L, long long d0,
-                             int32_t *pos, float *val, long long *k, long long cap){
-  float best=-1.f; long long i=0;
-  while(i<L){
-    if(L-i>=16 && best>=0.f){
-      /* the block's maximum as a bit maximum (the values are squares: non-negative) */
-      const float *q = dir>0 ? a+e0+i : a+e0-i-15;
-      uint32_t mx=0, bb; memcpy(&bb,&best,4);
-      for(int j=0;j<16;j++){ uint32_t u; memcpy(&u,&q[j],4); mx = u>mx ? u : mx; }
-      if(mx<=bb){ i+=16; continue; }
-    }
-    const long long stop = i+16<L ? i+16 : L;
-    for(;i<stop;i++){
-      const float v=a[e0+dir*i];
-      if(v>best){
-        best=v;
-        if(*k==cap) return -1;
-        pos[*k]=(int32_t)(i+d0); val[*k]=sqrtf(best); (*k)++;
-      }
-    }
+   as (distance i + d0 for the i-th, sqrt value), appended at pos[*k], val[*k] and *k advanced
+   (src/records.cc). Returns 0, or -1 when the arrays (cap entries) are full. */
+int ap_sim_records(const float *a, long long e0, int dir, long long L, long long d0,
+                   int32_t *pos, float *val, long long *k, long long cap);
+/* running_records(a, e0, dir, L, d0, pos, val): ap_sim_records over a (float32, non-negative)
+   into pos (int32) and val (float32, pos's length) from their start: the record count, or -1
+   when they are too short (simulate's records, for the tests). */
+static PyObject *M_running_records(PyObject *self,PyObject *args){
+  (void)self; PyObject *ao,*po,*vo; long long e0,L,d0; int dir;
+  if(!PyArg_ParseTuple(args,"OLiLLOO",&ao,&e0,&dir,&L,&d0,&po,&vo)) return NULL;
+  Py_buffer ab,pb,vb;
+  if(PyObject_GetBuffer(ao,&ab,PyBUF_C_CONTIGUOUS|PyBUF_FORMAT)<0) return NULL;
+  if(PyObject_GetBuffer(po,&pb,PyBUF_WRITABLE|PyBUF_C_CONTIGUOUS|PyBUF_FORMAT)<0){ PyBuffer_Release(&ab); return NULL; }
+  if(PyObject_GetBuffer(vo,&vb,PyBUF_WRITABLE|PyBUF_C_CONTIGUOUS|PyBUF_FORMAT)<0){ PyBuffer_Release(&ab); PyBuffer_Release(&pb); return NULL; }
+  const long long na=ab.len/4;
+  const int ok = ab.itemsize==4 && strcmp(ab.format,"f")==0 && pb.itemsize==4 && (strcmp(pb.format,"i")==0||strcmp(pb.format,"l")==0)
+                 && vb.itemsize==4 && strcmp(vb.format,"f")==0 && pb.len==vb.len && (dir==1||dir==-1) && L>=0
+                 && e0>=0 && e0<na+(L==0) && (L==0 || (dir>0 ? e0+L<=na : e0-L>=-1));
+  long long k=0; int r=0;
+  if(ok){
+    Py_BEGIN_ALLOW_THREADS
+    r=ap_sim_records((const float*)ab.buf,e0,dir,L,d0,(int32_t*)pb.buf,(float*)vb.buf,&k,pb.len/4);
+    Py_END_ALLOW_THREADS
   }
-  return 0;
+  PyBuffer_Release(&ab); PyBuffer_Release(&pb); PyBuffer_Release(&vb);
+  if(!ok){ PyErr_SetString(PyExc_ValueError,"running_records: a float32, dir +-1, the L values from e0 inside a; pos int32 and val float32 of one length"); return NULL; }
+  return PyLong_FromLongLong(r<0 ? -1 : k);
 }
 /* Buffers of a records output tuple (simulate): per entry pos int32, val float32 of one
    length and off int64 (nrows + 1). Returns how many were taken
@@ -1383,7 +1385,7 @@ static PyObject *M_simulate(PyObject *self,PyObject *args){
           const int q=(int)(s-1); long long *off=(long long*)nob[q].buf; off[r]=kn[q];
           if(!nfull[q]){
             sr_power(Y,NULL,g,m,A);
-            if(sr_records(A,0,1,m,0,(int32_t*)npb[q].buf,(float*)nvb[q].buf,&kn[q],nvb[q].len/4)<0) nfull[q]=1;
+            if(ap_sim_records(A,0,1,m,0,(int32_t*)npb[q].buf,(float*)nvb[q].buf,&kn[q],nvb[q].len/4)<0) nfull[q]=1;
           }
         }
         if(!has_sig) continue;
@@ -1411,8 +1413,8 @@ static PyObject *M_simulate(PyObject *self,PyObject *args){
           long long *off=(long long*)sob[q].buf; off[r]=ks[q];
           if(sfull[q]) continue;
           /* right: distances 0 .. m-1 forward; left: lag js - e is A[m - e], e = 1 .. m-1 */
-          if(sr_records(A, side ? m-1 : 0, side ? -1 : 1, side ? m-1 : m, side ? 1 : 0,
-                        (int32_t*)spb[q].buf, (float*)svb[q].buf, &ks[q], svb[q].len/4)<0) sfull[q]=1;
+          if(ap_sim_records(A, side ? m-1 : 0, side ? -1 : 1, side ? m-1 : m, side ? 1 : 0,
+                            (int32_t*)spb[q].buf, (float*)svb[q].buf, &ks[q], svb[q].len/4)<0) sfull[q]=1;
         }
       }
     }
@@ -1978,6 +1980,7 @@ static PyMethodDef methods[]={
   {"backend",M_backend,METH_NOARGS,"backend() -> name of the selected kernel"},
   {"chain_candidates",M_chain_candidates,METH_VARARGS,"chain_candidates(S, Nc, low, lowv, last_order, last_val, splits, K, Nn, prune, useless) -> [(thresholds, reach)]: gatechain._chain_candidates's search"},
   {"simulate",M_simulate,METH_VARARGS,"simulate(scale, seed, row0, nrows, kmax, bands, bscale, fscale, tab, t, fi, spos, sval, soff, npos, nval, noff, keep_at=0) -> (signal counts, noise counts): the gate model's simulation, per statistic the running maximum's records of the noise alone and outward from a signal"},
+  {"running_records",M_running_records,METH_VARARGS,"running_records(a, e0, dir, L, d0, pos, val) -> count or -1: the running maximum's records of a[e0], a[e0 + dir], ... (L values) as (distance i + d0, sqrt value), simulate's (src/records.cc)"},
   {"records_within",M_records_within,METH_VARARGS,"records_within(pos, val, off, reach, out, at=None): per row the value (and pos) of its last record within reach (gatechain's window maxima)"},
   {"gauss_fill",M_gauss_fill,METH_VARARGS,"gauss_fill(out float32, seed, offset): out[i] = standard normal draw offset + i of stream seed (src/gauss.cc)"},
   {"gauss_fill_rows",M_gauss_fill_rows,METH_VARARGS,"gauss_fill_rows(out float32 (rows, len), seed, offset, step, scale=None): out[r, i] = draw offset + r * step + i of stream seed, times scale[i // 2] when given (simulate's fill, src/gauss.cc)"},
