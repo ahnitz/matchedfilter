@@ -229,6 +229,34 @@ def test_the_noise_statistics_are_the_transforms_of_the_stream(fresh):
             np.testing.assert_allclose(val[got], np.sqrt(a[want]), rtol=2e-5, err_msg="row %d band %d" % (r, b))
 
 
+def test_a_simulation_out_of_room_continues_where_it_stopped(fresh, monkeypatch):
+    """A simulation whose records outgrow their arrays stops at the row that did not fit and
+    continues from there (_simulate): with room for a fiftieth of the records a row it gives
+    exactly the records of one call with room."""
+    n = 2048
+    p = _profile(n)
+    bands = gc.usable_bands(p, n)
+    Fb = [p[:b].sum() for b in bands]
+    calls = []
+    orig = _core.simulate
+    monkeypatch.setattr(_core, "simulate", lambda *a: calls.append(a[3]) or orig(*a))
+    t, u, sig = gc._signal_records(p, n, bands, Fb, 6.0, 3000, 13)
+    noise = gc._NOISE_RECORDS[gc._key(p, n, bands, 13)][1]
+    roomy = len(calls)
+    for c in (gc._NOISE_RECORDS, gc._SIGNAL_RECORDS):
+        c.clear()
+    gc._SIMILAR.clear()
+    monkeypatch.setattr(gc, "_ROOM", 0.02)
+    t2, u2, sig2 = gc._signal_records(p, n, bands, Fb, 6.0, 3000, 13)
+    noise2 = gc._NOISE_RECORDS[gc._key(p, n, bands, 13)][1]
+    assert roomy == 1 and len(calls) - roomy >= 2, calls      # it did run out, and continued
+    np.testing.assert_array_equal(t, t2)
+    np.testing.assert_array_equal(u, u2)
+    for a, b in zip(sig + noise, sig2 + noise2):
+        for x, y in zip(a, b):
+            np.testing.assert_array_equal(x, y)
+
+
 def test_signal_draws_depend_only_on_their_seed(fresh):
     """The signal simulation is a function of the profile, window and seed: drawn afresh (no
     cache) it gives the same numbers, a second seed others, and a window moved by whole steps
