@@ -417,7 +417,7 @@ class HierarchicalFilter(MatchedFilter):
                                        hw)
         return r
 
-    def _direct_halfwidth(self, chain, thresholds, nsim=20000):
+    def _direct_halfwidth(self, chain, thresholds):
         """The direct refine's window half-width for this chain (gatechain.direct_halfwidth,
         plus one coarse sample), or None where it does not apply: off (MF_DIRECT_REFINE=0),
         or no reference to model it on."""
@@ -425,7 +425,7 @@ class HierarchicalFilter(MatchedFilter):
             return None
         hw, _, _ = _gatechain.direct_halfwidth(self._pending_ref, self.n, chain, thresholds,
                                                self._fs_snr or self.snr, self.fd,
-                                               window=self.search_window, nsim=nsim)
+                                               window=self.search_window)
         return hw + 1
 
     def _direct_prices(self, base):
