@@ -275,7 +275,6 @@ def test_chain_choice_is_shared_across_groups():
 def test_autotune_threshold_contract_during_tuning():
     """Verify that during active tuning (candidate switching), noise threshold contract is never violated."""
     mf.clear_autotune_cache()
-    N = 2048
     N_ser = 131072
     rng = np.random.default_rng(777)
     noise_ser = (rng.standard_normal(N_ser) + 1j * rng.standard_normal(N_ser)).astype(np.complex64) / np.float32(np.sqrt(2.0))

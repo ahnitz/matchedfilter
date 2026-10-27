@@ -67,8 +67,6 @@ def main():
             r = b.filter_series(ref[row], windows=slice(a0, a1))
             res[dev] = dict(zip(zip(r.template_indices.tolist(), r.sample_indices.tolist()),
                                 np.abs(r.snr).tolist()))
-            if dev != "cpu":
-                chains = [g.get("chain") for g in b.groups] if hasattr(b, "groups") else None
         A, B = res["cpu"], res[a.device]
         common = set(A) & set(B)
         worst = max((abs(A[k] - B[k]) / A[k] for k in common), default=0.0)

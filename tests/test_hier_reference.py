@@ -11,7 +11,7 @@ import pytest
 
 import matchedfilter as mf
 
-import sys, pathlib
+import sys
 _TOOLS = None
 
 def _tools_dir():

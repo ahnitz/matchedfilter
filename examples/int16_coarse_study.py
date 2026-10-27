@@ -10,7 +10,6 @@ This script evaluates:
 6. The net end-to-end throughput trade-off under Amdahl's law.
 """
 import time
-from pathlib import Path
 import numpy as np
 import matchedfilter as mf
 

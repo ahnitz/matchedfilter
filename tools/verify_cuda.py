@@ -4,7 +4,6 @@ import time
 import numpy as np
 
 import matchedfilter
-from matchedfilter import _cuda
 
 
 def main():
@@ -94,7 +93,7 @@ def main():
 
     best_ms = min(timings) * 1000.0
     gpu_compute_ms = hf_gpu._gpu.last_gpu_time * 1000.0
-    print(f"HierarchicalFilter 512x512 pairs (n=4096, threshold=5.5):")
+    print("HierarchicalFilter 512x512 pairs (n=4096, threshold=5.5):")
     print(f"  Wall time:   {best_ms:.3f} ms")
     print(f"  GPU compute: {gpu_compute_ms:.3f} ms")
     print(f"  Pairs/sec:   {nd * nt / (best_ms * 1e-3):,.0f} pairs/s")
@@ -112,7 +111,7 @@ def main():
         flat_timings.append(t1 - t0)
     best_flat_ms = min(flat_timings) * 1000.0
     gpu_flat_ms = mf_gpu._gpu.last_gpu_time * 1000.0
-    print(f"\nFlat MatchedFilter 512x512 pairs (n=4096):")
+    print("\nFlat MatchedFilter 512x512 pairs (n=4096):")
     print(f"  Wall time:   {best_flat_ms:.3f} ms")
     print(f"  GPU compute: {gpu_flat_ms:.3f} ms")
     print(f"  Pairs/sec:   {nd * nt / (best_flat_ms * 1e-3):,.0f} pairs/s")

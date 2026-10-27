@@ -616,7 +616,6 @@ def _ratio_filter_shaped_trial(pin=True, seed=22):
     # same configuration on the same reference measures 1.3e-3.
     amp = ref.astype(np.float64)
     unit = np.zeros(n, np.complex64)
-    nz = np.abs(H[0]) > 0
     for b in range(len(starts)):
         for t in (b % nt, (b + 3) % nt):
             lag = int(ws[b]) + 101 * (b % 7) + 3 + 37 * t

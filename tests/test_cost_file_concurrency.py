@@ -9,7 +9,6 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from matchedfilter import gatechain
 from matchedfilter import _costfile
 
 #: Seconds a spawned writer may take to start: it imports numpy and the package afresh,

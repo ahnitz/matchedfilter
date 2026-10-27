@@ -1,5 +1,4 @@
 """The computed gate repairs the old table's optimistic low-ratio corner."""
-import numpy as np
 import pytest
 import matchedfilter as mf
 from test_api import inspiral_power

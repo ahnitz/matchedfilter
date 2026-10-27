@@ -16,7 +16,6 @@ from matchedfilter import _core
 
 def _tsc_rate():
     """TSC ticks per second, from the clock the engine's counters use."""
-    import ctypes, ctypes.util
     # rdtsc is not reachable from Python directly; time a known interval against the
     # engine's own counter by running an empty-threshold tier for a measured duration.
     t0 = time.perf_counter_ns(); c0 = _rdtsc(); time.sleep(0.2); c1 = _rdtsc(); t1 = time.perf_counter_ns()
@@ -98,9 +97,7 @@ def main():
         thr = gatechain.chain_thresholds(ref.astype(np.float64), n, 6.0, 1e-3, chain,
                                          window=(n // 4, n))["thresholds"]
         p = make(n, nt, chain, spec, ref, thr); run(p)
-        # TSC rate, to put the tier counters and wall time on one scale
-        import ctypes
-        t0w = time.perf_counter(); s0 = p.tier_stats(); run(p); t1w = time.perf_counter()
+        run(p)
         walls, rows = [], []
         prev = p.tier_stats()
         for _ in range(a.reps):

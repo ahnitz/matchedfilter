@@ -80,7 +80,6 @@ def test_grouped_equals_per_group(ctx, cascade, bs, sparse, builds):
 def test_untiled_coarse_matches_tiled_under_a_real_gate(ctx, band, monkeypatch):
     """Every pairs-per-group geometry of the untiled builds, with a gate that dismisses
     pairs, gives the tiled builds' result exactly -- grouped and per group."""
-    from matchedfilter import _vkcompute
     n, nd, nt = 2048, 23, 32
     rng = np.random.default_rng(9)
     spec = ctx.empty_shared((nd, n))

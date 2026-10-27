@@ -15,7 +15,6 @@ import sys
 import numpy as np
 import pytest
 
-import matchedfilter as mf
 from matchedfilter import _core
 from matchedfilter import gatechain as gc
 

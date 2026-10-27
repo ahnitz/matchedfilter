@@ -8,7 +8,6 @@ bound it.
 The same sweep drives the plot on the documentation site, so a regression
 shows up here as a failure and there as a visibly worse curve.
 """
-import numpy as np
 import pytest
 
 from matchedfilter import precision
