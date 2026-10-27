@@ -188,24 +188,24 @@ def test_a_replay_error_releases_the_guard(clock):
     assert not tr.replaying
 
 
-def test_rounds_and_locks_persist_across_processes(clock, monkeypatch, tmp_path):
-    """Complete rounds are kept in MF_COST_FILE as they come, so a trial longer than one
-    process continues in the next; the lock is read back without a trial."""
+def test_a_lock_persists_across_processes_and_an_open_trial_does_not(clock, monkeypatch, tmp_path):
+    """A trial's lock is kept in MF_COST_FILE and read back without a trial; an open trial's
+    rounds are the process's own (a new process starts it afresh)."""
     monkeypatch.setenv("MF_COST_FILE", str(tmp_path / "costs.json"))
     conf = {_trial.DEFAULT: "a", "n=4096": "b"}
     arms = [_trial.DEFAULT, "n=4096"]
-    n = _trial.rounds_wanted()
-    for proc in range(40):
-        mf.clear_autotune_cache()                                   # a new process
-        if _trial.winner("t|persist") is not None:
+    s = _Subject(clock, conf, {"a": 1.0, "b": 0.7})
+    tr = _trial.trial("t|persist", lambda: arms)
+    _trial.run_round(tr, [s], s.replay, 1.0)
+    mf.clear_autotune_cache()                                       # a new process
+    tr = _trial.trial("t|persist", lambda: arms)
+    assert tr.rounds == 0 and tr.winner is None
+    for _ in range(4 * _trial.ROUND_CAP):
+        if tr.winner is not None:
             break
-        s = _Subject(clock, conf, {"a": 1.0, "b": 0.7})
-        tr = _trial.trial("t|persist", lambda: arms)
-        # resumed from the file: the contest's rounds, then the confirmation's
-        assert tr.rounds == (proc if proc < n else proc - n)
-        assert tr.choice.confirming == (None if proc < n else "n=4096")
-        _trial.run_round(tr, [s], s.replay, 1.0)                    # one round, then exit
-    assert proc == 2 * n                       # the contest, then its confirmation
+        _trial.run_round(tr, [s], s.replay, 1.0)
+    assert tr.winner == "n=4096"
+    mf.clear_autotune_cache()
     assert _trial.winner("t|persist") == "n=4096"
 
 
