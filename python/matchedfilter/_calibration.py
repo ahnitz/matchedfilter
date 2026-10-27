@@ -1,9 +1,7 @@
 """Measuring this machine's tier costs through the engine itself: the CPU and GPU cost-model
 calibrations, the per-device block costs and the block-size pricing that uses them. They run
 hierarchical plans, so they sit above the model (gatechain), which they feed."""
-import math
 import os
-import time
 
 import numpy as np
 
@@ -238,7 +236,7 @@ def calibrate_costs(n, ntemplates, blocks=32, reps=5, seed=11, group=None):
         screen[b] = ent
     _gc._COSTS[bkey] = {"dense": dict(dense), "sparse": {b: list(v) for b, v in sparse.items()},
                          "screen": {b: dict(v) for b, v in screen.items()}}
-    del plans
+    plans.clear()
     cm = _gc.CostModel(n, dense, sparse, refine, block=float(np.median(block)), screen=screen)
     if path is not None:          # another process's model, stored first, is the one used
         cm = _gc.CostModel.from_dict(_gc._store_first(path, skey, cm.to_dict(), _gc._cost_model_ok))

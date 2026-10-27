@@ -24,7 +24,7 @@ def inputs(n=1024):
 
 @pytest.mark.parametrize('series', [False, True])
 def test_missing_calibration_refuses_execution(device, monkeypatch, series):
-    monkeypatch.setattr(mf._gatechain, 'chain_thresholds', lambda *a, **kw: None)
+    monkeypatch.setattr(mf.gatechain, 'chain_thresholds', lambda *a, **kw: None)
     f = mf.HierarchicalFilter(1024, 2, 2, chain=256, device=device)
     f.set_reference(np.ones(1024))
     d, h = inputs()
@@ -41,8 +41,8 @@ def test_missing_calibration_refuses_execution(device, monkeypatch, series):
 def test_explicit_configuration_needs_no_model_or_reference(device, monkeypatch):
     def forbidden(*a, **kw):
         raise AssertionError('explicit configuration consulted the gate model')
-    monkeypatch.setattr(mf._gatechain, 'chain_thresholds', forbidden)
-    monkeypatch.setattr(mf._gatechain, 'choose_chain', forbidden)
+    monkeypatch.setattr(mf.gatechain, 'chain_thresholds', forbidden)
+    monkeypatch.setattr(mf.gatechain, 'choose_chain', forbidden)
     monkeypatch.setattr(_calibration, 'calibrate_costs', forbidden)
     d, h = inputs()
     flat = mf.MatchedFilter(1024, 2, 2, device=device)
@@ -88,7 +88,7 @@ def test_reference_change_rescales_existing_templates(device):
 
 @pytest.mark.parametrize('value', [float('nan'), -1., float('inf'), 1e100])
 def test_invalid_file_threshold_is_rejected_on_both_devices(device, monkeypatch, value):
-    monkeypatch.setattr(mf._gatechain, 'chain_thresholds', lambda *a, **kw: {"thresholds": (value,)})
+    monkeypatch.setattr(mf.gatechain, 'chain_thresholds', lambda *a, **kw: {"thresholds": (value,)})
     f = mf.HierarchicalFilter(1024, chain=256, device=device)
     f.set_reference(np.ones(1024))
     with pytest.raises(ValueError, match='coarse threshold'):

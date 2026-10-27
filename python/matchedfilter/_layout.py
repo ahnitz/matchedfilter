@@ -129,7 +129,7 @@ def _corr_block_costs(n: int, device: Optional[Any] = None) -> Tuple[float, floa
     from ._prices import price_once
     path = gatechain._cost_file()
     key = "corr3,%d" % n if dkey == "cpu" else "corr3,%d,%s" % (n, dkey)
-    from . import _CORR_PFFT
+    from ._filter import _CORR_PFFT
     if (n, dkey) in _CORR_COSTS:
         return _CORR_COSTS[(n, dkey)]
     measured = []
@@ -178,7 +178,8 @@ def _corr_measure(n, device, dkey, rng, taps, nblocks, L, ser):
     """(fixed, per template, per template per output sample) seconds per block through the
     bank's continuous path: 2 and 16 templates with `taps`-tap filters, and 16 with filters
     leaving half the valid span."""
-    from . import CorrelationFilter, _automatic_series_layout
+    from . import CorrelationFilter
+    from ._filter import _automatic_series_layout
     per_block, valid = [], []
     short = n - (n - taps) // 2
     for nt, tp in ((2, taps), (16, taps), (16, short)):

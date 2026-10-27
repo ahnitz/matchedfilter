@@ -35,11 +35,8 @@ short list; the autotuner measures the short list on the real workload.
 The budget is split between the tiers by minimising that cost subject to the
 compound dismissal bound; the split is part of the chain's plan.
 """
-import json
-import warnings
 import math
 import os
-import tempfile
 from contextlib import contextmanager
 from collections import OrderedDict
 from itertools import combinations
@@ -48,14 +45,14 @@ import hashlib
 import numpy as np
 
 from . import gatemodel as _gm
+from . import _costfile
 # The decision rules live in _choice; gatechain's callers keep them by these names.
-from ._choice import TIE, paired_choice  # noqa: F401
-# The cost file lives in _costfile; these names stay importable from here for the callers
-# that use them through gatechain.
-from ._costfile import (_COST_WARNED, _LEGACY_PREFIXES, _cost_file, _cost_file_lock,  # noqa: F401
-                        _cost_warn, _load_cost_file, _read_cost_file, _store_cost,
-                        _store_first, _update_cost, _write_cost_file, store_choice,
-                        stored_choice)
+from ._choice import TIE
+# The cost file lives in _costfile. The calibration, the bank's layout and the Vulkan back end
+# reach these through gatechain (and tests patch _cost_file here), so they stay bound here.
+from ._costfile import _cost_warn, _load_cost_file
+_cost_file, _store_first = _costfile._cost_file, _costfile._store_first
+store_choice, stored_choice = _costfile.store_choice, _costfile.stored_choice
 
 _SIG = _gm._SIG
 #: Sub-sample arrival fractions signal_draws spreads its signals over, 1/_NF apart, the sample

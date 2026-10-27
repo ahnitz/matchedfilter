@@ -230,7 +230,7 @@ def test_scalloping_not_beff_is_what_predicts_dismissal():
     must differ in dismissal, or the old key was sufficient after all."""
     import _gatelib as t
     p = profile()
-    f, be = mf._band_features(p, BAND)
+    f, be = mf._hierarchical._band_features(p, BAND)
     synth = t.make_ref(N, BAND, f, be)
     gp, gs = loss_curve(p).min(), loss_curve(synth).min()
     assert abs(gp - gs) > 0.02, "profiles not distinguishable in kappa"

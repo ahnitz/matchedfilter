@@ -180,7 +180,7 @@ def test_gpu_series_pipelined():
 def test_vk_sparse_readback_equals_dense(ctx, kind, level, gate):
     """sparse=True gives the dense result's peaks exactly; the hierarchical paths read only
     the refined pairs (survivor list) back, relying on the refine writing every bin of them."""
-    from matchedfilter import _SparsePeaks
+    from matchedfilter._results import _SparsePeaks
     n, nd, nt, bs = 2048, 24, 9, 512
     rng = np.random.default_rng(17)
     spec = ctx.empty_shared((nd, n))

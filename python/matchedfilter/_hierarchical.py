@@ -1,14 +1,6 @@
 """The hierarchical filter (HierarchicalFilter): a gate chain of cheap coarse correlations
 that refines on demand, and its resolved plan. Re-exported by the package."""
-import hashlib
-import math
-import operator
-import os
-import sys
-import threading
 import time
-import warnings
-from types import SimpleNamespace
 from typing import NamedTuple, Optional
 
 import numpy as np
@@ -19,9 +11,9 @@ from . import _config
 from . import _core
 from . import gatechain as _gatechain
 from . import _chains, _choice, _prices, _settings, _trial
-from ._choice import _AUTOTUNE_LOCK, _autotune_enabled, _log_autotune  # noqa: F401
-from ._results import PEAK_DTYPE, _Deferred, _SparsePeaks  # noqa: F401
-from ._filter import MatchedFilter, _GPU_SIZES, _from_any, _valid_series_window  # noqa: F401
+from ._choice import _AUTOTUNE_LOCK, _autotune_enabled, _log_autotune
+from ._results import _SparsePeaks
+from ._filter import MatchedFilter, _GPU_SIZES, _from_any, _valid_series_window
 
 
 def _detach(res):

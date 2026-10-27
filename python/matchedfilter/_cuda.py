@@ -8,8 +8,6 @@ Every NVIDIA driver installation provides libcuda.so.1 (Linux) or nvcuda.dll
 and headless compute clusters.
 """
 import ctypes
-import os
-import platform
 import sys
 
 _CUDA_SUCCESS = 0

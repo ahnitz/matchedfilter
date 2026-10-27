@@ -11,16 +11,14 @@ pipeline, one queue, one descriptor set.
 """
 import ctypes
 import itertools
-import os
 from collections import OrderedDict
 import pathlib
-import sys
 import time
 
 import numpy as np
 
 from . import _config, _gputime, _vulkan
-from ._shared import empty_shared, shared_view
+from ._shared import empty_shared
 from ._gpuhost import MAX_BINS
 
 _SPIRV = pathlib.Path(__file__).resolve().parent / "spirv"

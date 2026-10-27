@@ -119,7 +119,6 @@ a kernel will read are prefetched), inplace_feed (kernels are specialized when c
 the hierarchical tiers read the spectra in place at a stride and scale; else packed bands),
 subgroup_size, kernel_family (whose kernel identity stored measured choices belong to).
 """
-import time
 import weakref
 
 import numpy as np

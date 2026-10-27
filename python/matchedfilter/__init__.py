@@ -23,25 +23,13 @@ Peak-only lengths are powers of two from 64 to 1048576 on CPU and 64 to 65536
 on GPU. Full-output lengths are 1024 to 4194304 on either device, subject to
 device limits. Hierarchical calibration coverage is separate from transform support.
 """
-import hashlib
-import math
-from types import SimpleNamespace
-from typing import NamedTuple, Optional
-import operator
-import os
-import sys
-import threading
-import time
-import warnings
-
 import numpy as np
 from . import _config
 _config.check_environment()   # before _core reads any of it
 from . import _core
-from . import gatechain as _gatechain
 from . import _chains, _choice, _prices
-from ._choice import _AUTOTUNE_LOCK, _autotune_enabled, _log_autotune  # noqa: F401
-from ._results import PEAK_DTYPE, _Deferred, _SparsePeaks  # noqa: F401  (public, and root names)
+from ._choice import _AUTOTUNE_LOCK
+from ._results import PEAK_DTYPE
 
 try:
     from importlib.metadata import version as _version, PackageNotFoundError
@@ -59,16 +47,9 @@ __all__ = ["MatchedFilter", "CorrelationFilter", "HierarchicalFilter", "PEAK_DTY
 from .time_domain import TimeDomainFilterBank, FilterResults, template_spectra, template_valid
 
 # The filters live in _filter and _hierarchical; the package is their public home. Their
-# private names stay importable from here for the modules and tools that reach them so.
-from ._filter import (MatchedFilter, CorrelationFilter, _GPU_SIZES, _CORR_PFFT,  # noqa: F401
-                      _DLPACK_HOST, _DLPACK_NAMES, _from_any, _check_threshold, _as_c64,
-                      _unpack_half, _compute_module, _SeriesOutput, _format_result,
-                      _valid_series_window, _automatic_series_layout, _absolute_peak_indices,
-                      _SCRATCH, _scratch_counts, _host_copy)
-from ._hierarchical import (HierarchicalFilter, _Resolved, _uncovered_message,  # noqa: F401
-                            _band_features, _BEFF_MIN, _uncovered_reference, _normalize_chain,
-                            _Q15_BANDS, _q15_available, _CPU_TRIAL_WORK, _record_cpu_trial,
-                            _direct_refine_enabled)
+# private names are imported from those modules, not from here.
+from ._filter import MatchedFilter, CorrelationFilter
+from ._hierarchical import HierarchicalFilter
 for _cls in (MatchedFilter, CorrelationFilter, HierarchicalFilter):
     _cls.__module__ = __name__       # public names, reprs and pickle paths stay matchedfilter.*
 del _cls

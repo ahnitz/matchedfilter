@@ -23,7 +23,8 @@ def test_continuous_correlation_streaming_stores_are_bit_identical(monkeypatch):
     """A continuous correlation whose output exceeds the LLC copies it with streaming stores
     (6b15bb83); MF_CORR_NO_STREAM=1 keeps ordinary stores. The bytes written must be the
     same, including rows that start off a 16-byte boundary (odd lo)."""
-    from matchedfilter import CorrelationFilter, _automatic_series_layout
+    from matchedfilter import CorrelationFilter
+    from matchedfilter._filter import _automatic_series_layout
     llc = _llc_bytes()
     if not llc or llc > (64 << 20):
         pytest.skip("LLC size unknown or too large for a quick test")
@@ -61,7 +62,8 @@ def test_per_block_bounds_narrow_only_the_copy_out(real):
     """bounds (one [lo, hi) per block inside the valid span) writes exactly those samples of
     each block, bit-identical to the unbounded call there, and leaves every other sample as it
     was; a bound outside the valid span is refused."""
-    from matchedfilter import CorrelationFilter, _automatic_series_layout
+    from matchedfilter import CorrelationFilter
+    from matchedfilter._filter import _automatic_series_layout
     n, nt, taps = 4096, 5, 301
     rng = np.random.default_rng(4)
     h = np.zeros((nt, n), np.complex64)

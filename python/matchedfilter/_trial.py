@@ -40,7 +40,6 @@ time_domain._joint_round) and HierarchicalFilters used on their own (their scree
 HierarchicalFilter.run_series). A plan inside a bank is governed by the bank's trial and runs
 none of its own.
 """
-import time
 from typing import Callable, Dict, Optional, Sequence
 
 from . import _choice, _settings

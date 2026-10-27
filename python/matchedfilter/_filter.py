@@ -1,24 +1,16 @@
 """The flat filters: MatchedFilter (peak output) and CorrelationFilter (full output), and
 the input and output helpers they share. Re-exported by the package as matchedfilter.*."""
-import hashlib
 import math
 import operator
-import os
-import sys
 import threading
 import time
-import warnings
 from types import SimpleNamespace
-from typing import NamedTuple, Optional
 
 import numpy as np
 
 from . import _config
 from . import _core
-from . import gatechain as _gatechain
-from . import _chains, _choice, _prices
-from ._choice import _AUTOTUNE_LOCK, _autotune_enabled, _log_autotune  # noqa: F401
-from ._results import PEAK_DTYPE, _Deferred, _SparsePeaks  # noqa: F401
+from ._results import PEAK_DTYPE, _Deferred, _SparsePeaks
 
 
 #: Transform lengths the GPU kernel covers. One workgroup carries a whole
@@ -1492,7 +1484,6 @@ class MatchedFilter:
             prev = owners.pop(lo + (slot0 + k - lo) % span, None)
             if prev is not None:
                 prev.result()
-        n = self.n
         shape = (layout.starts.size, nt, layout.nbins)
         self._last_series_batch = entry["batch"]
         starts_pool = entry["starts_pool"]
@@ -2210,5 +2201,5 @@ class CorrelationFilter(MatchedFilter):
 
 
 #: n -> whether continuous correlation at n runs through the platform FFT (vDSP on macOS):
-#: set by time_domain._corr_block_costs, which prices both and keeps the cheaper.
+#: set by _layout._corr_block_costs, which prices both and keeps the cheaper.
 _CORR_PFFT = {}

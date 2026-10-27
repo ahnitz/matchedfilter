@@ -546,7 +546,7 @@ def test_filter_series_computes_only_intersecting_blocks(engine, monkeypatch):
 
 @pytest.mark.parametrize("layout", ["contiguous", "interleaved"])
 def test_correlate_series_computes_only_intersecting_blocks(layout, monkeypatch):
-    from matchedfilter import _automatic_series_layout
+    from matchedfilter._filter import _automatic_series_layout
     bank = _corr_bank(layout)
     calls = []
     orig = TimeDomainFilterBank._correlate_group

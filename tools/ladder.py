@@ -258,7 +258,7 @@ def _open_trials():
 
 def _note_open_trials():
     global _STEADY_CPU_TRIAL_START
-    from matchedfilter import _CPU_TRIAL_WORK
+    from matchedfilter._hierarchical import _CPU_TRIAL_WORK
     _STEADY_OPEN_TRIALS.update(_open_trials())
     if _STEADY_CPU_TRIAL_START is None:
         _STEADY_CPU_TRIAL_START = dict(_CPU_TRIAL_WORK)
@@ -626,7 +626,7 @@ def run_device(device, tops, args, seed, fine_engine="hier"):
         steady_samples={k: list(v) for k, v in steady.samples.items()},
         steady_calls=dict(steady.n), counts=dict(counts),
     )
-    from matchedfilter import _CPU_TRIAL_WORK
+    from matchedfilter._hierarchical import _CPU_TRIAL_WORK
     if _STEADY_CPU_TRIAL_START is not None:
         report["cpu_trial_work_in_steady"] = {
             k: _CPU_TRIAL_WORK[k] - v for k, v in _STEADY_CPU_TRIAL_START.items()}

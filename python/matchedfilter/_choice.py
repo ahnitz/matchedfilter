@@ -334,7 +334,7 @@ class Choice:
         config = config or (lambda c: c)
         live = self.live()
         order = live if len(self.samples[live[0]]) % 2 == 0 else live[::-1]
-        out, times, by_config, results = None, {}, {}, {}
+        out, times, by_config = None, {}, {}
         with held():
             for c in order:
                 k = config(c)

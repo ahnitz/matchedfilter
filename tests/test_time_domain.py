@@ -93,7 +93,6 @@ def test_multirate_conversion():
 def test_trigger_accuracy_flat():
     rng = np.random.default_rng(42)
     counts = [100, 250, 600, 1500, 2200]
-    M = len(counts)
     taps_list = [rng.standard_normal(c).astype(np.float32) for c in counts]
 
     bank = TimeDomainFilterBank(
@@ -637,7 +636,7 @@ def test_correlation_layout_is_priced_and_exact():
     """engine='corr' picks its partition by calibrated cost: every template in exactly one group,
     each group's transform longer than its longest filter, no costlier than the valid-fraction
     rule under the same costs, and the output still the direct correlation."""
-    from matchedfilter import time_domain as td
+    from matchedfilter import _layout, time_domain as td
     rng = np.random.default_rng(11)
     counts = np.sort(rng.integers(15, 5000, 25))
     taps = np.zeros((len(counts), counts.max()), np.float32)
@@ -650,10 +649,10 @@ def test_correlation_layout_is_priced_and_exact():
         assert g['n'] > counts[g['template_indices']].max()
 
     def modelled(groups):
-        return sum(td._corr_block_cost(n, j - i, n - L + 1) / (n - L + 1) for i, j, n, L in groups)
+        return sum(_layout._corr_block_cost(n, j - i, n - L + 1) / (n - L + 1) for i, j, n, L in groups)
     legacy, _ = td._partition_templates(counts, candidate_ns=(2048, 4096, 8192, 16384, 32768, 65536))
     legacy_eff = [(i, j, n, int(np.sort(counts)[j - 1])) for i, j, n, _ in legacy]
-    assert modelled(td._corr_layout(counts, (2048, 4096, 8192, 16384, 32768, 65536), None)[0]) <= modelled(legacy_eff) * (1 + 1e-12)
+    assert modelled(_layout._corr_layout(counts, (2048, 4096, 8192, 16384, 32768, 65536), None)[0]) <= modelled(legacy_eff) * (1 + 1e-12)
 
     L = 1 << 16
     data = (rng.standard_normal(L) + 1j * rng.standard_normal(L)).astype(np.complex64)
@@ -868,7 +867,6 @@ def test_single_template_calls_choose_the_faster_device_and_agree(monkeypatch):
     """A GPU bank's single-template calls are timed on the GPU and on a CPU plan for their
     first calls, then run on the faster; either way they give the GPU's answers to ~1e-5."""
     from conftest import usable_gpu
-    from matchedfilter import time_domain as td
     dev = usable_gpu()
     if dev is None:
         pytest.skip(usable_gpu_reason())
