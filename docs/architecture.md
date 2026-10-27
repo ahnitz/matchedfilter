@@ -25,7 +25,7 @@ are `matchedfilter.*`.
 | `HierarchicalFilter` | `_hierarchical` | A `MatchedFilter` subclass that gates pairs with a chain of coarse tiers and refines the survivors. |
 | `TimeDomainFilterBank`, `FilterResults`, `template_spectra`, `template_valid` | `time_domain` (`FilterResults` in `_results`) | A bank built from time-domain FIR taps: it partitions templates by length, chooses block sizes and filters continuous series. |
 | `taps_to_spectra` | `__init__` | FIR taps to frequency-domain spectra, in C. |
-| `devices`, `Device` | `device` | Device enumeration and the `"cpu"`, `"gpu"`, `"gpu:<n>"`, `"cuda"`, `"auto"` spellings (`device.parse`). |
+| `devices`, `Device` | `device` | Device enumeration and the `"cpu"`, `"gpu"`, `"gpu:<n>"`, `"cuda"`, `"auto"` spellings (`device.parse`; `"cuda"` is an alias of `"gpu"`, whatever the backend). |
 | `backend`, `targets`, `set_target` | `__init__` over `_core` | The CPU SIMD target in use, the targets the build and CPU support, and a way to narrow them. |
 | `get_autotune_state`, `clear_autotune_cache` | `__init__` | A snapshot of the process's chain choices and joint trials, and a reset of every workload choice (see [Measured choices](#measured-choices)). |
 | `PEAK_DTYPE` | `_results` | The structured `(index, value)` peak record. |
@@ -63,8 +63,10 @@ import; its allowlist (`UPWARD`) has been empty since 2026-10-22. From the botto
 | applications | `benchmark`, `tutorial`, `demo`, `precision` |
 
 The cost calibrations run hierarchical plans, so they live in `_calibration` (workloads),
-above the model they feed; `gatechain.calibrate_costs` is the documented entry point, and
-`_calibration` registers itself behind it when the package loads.
+above the model they feed. `_calibration` registers itself as `gatechain._CALIBRATE` when the
+package loads, behind the wrapper `gatechain.calibrate_costs`; plans, tools and tests call
+`_calibration.calibrate_costs` directly (the wrapper's default is 256 blocks, the direct
+call's 32, and the cost cache key leaves the block count out).
 
 ### The C engine (`src/`)
 
@@ -204,8 +206,9 @@ Two readers take their statistics from the same simulation:
 
 Draw counts scale with the budget (`gatemodel._nsamp_for`: 200/fd signal draws, at least
 20,000 and at most 3,000,000; `gatechain.model_draws` uses 20,000 noise blocks). About half
-the draws are kept, so a chain's budget rests on about 100 dismissed draws at fd up to
-1e-2. A budget that leaves fewer than 8 dismissed draws is refused
+the draws are kept, so a chain's budget rests on about 100 dismissed draws for fd between
+about 7e-5 and 1e-2. Above 1e-2 the 20,000-draw floor gives more; below 7e-5 the cap gives
+fewer. A budget that leaves fewer than 8 dismissed draws is refused
 (`gatechain._chain_candidates`, `gatemodel.gate_for`).
 
 Profiles that agree in shape and in every band's signal response share cached simulations
@@ -245,12 +248,15 @@ population or noise.
   measurement is in the comment at `gatechain._SPLIT_TOLERANCE_Z`). If the split grids
   change, the bias must be measured again.
 - Individual plans scatter about the mean. With about 100 dismissed draws per plan, a
-  plan's realised dismissal has a standard deviation of roughly 0.08 to 0.11 of fd, about
-  what counting 100 draws gives (measured on independent draws at n = 2048 on 2026-10-27,
-  for one-, two- and three-tier plans alike). The spread comes from the finite draws, not
-  from the split search, so more draws, not a larger cut, would narrow it.
+  plan's realised dismissal has a standard deviation of roughly 0.07 to 0.11 of fd, about
+  what counting 100 draws gives, for one-, two- and three-tier plans alike; the worst of
+  60 plans was 1.28 of the budget at fd 1e-2 and 1.13 at 1e-3 (independent draws, n = 2048,
+  [the 2026-10-27 log entry](gate-model.md#the-budget-splits-selection-bias-and-per-plan-scatter-2026-10-27)
+  gives the method and the numbers). The spread comes from the finite draws, not from the
+  split search, so more draws, not a larger cut, would narrow it.
 - The CPU direct refine's window may lose a further `gatechain._LOCALISE_SHARE` (5%) of fd
-  (`gatechain.direct_halfwidth`).
+  (`gatechain.direct_halfwidth`; the plan runs its half-width plus one coarse sample,
+  `HierarchicalFilter._direct_halfwidth`).
 
 Reduced-precision tiers (the Q15 screen, the FP16 gates) answer to the same budget against
 the flat filter; [reduced-precision gates](reduced-precision-gates.md) gives their error
@@ -399,9 +405,10 @@ print, its default and its scope:
 
 `_settings.setting` answers a batch dimension: the arm a running trial plays, else the lock
 of a device set holding the device, else the default. The GPU device trials that decide
-them (`gpu-batch`, `gpu-single`, `gpu-kernels`; `time_domain._gpu_trials`) and the
-single-template side (`single-device`, `time_domain._single_choice`) use the same paired
-`Choice` and coordinate passes.
+them (`gpu-batch`, `gpu-single`, `gpu-kernels`; `time_domain._gpu_trials`) use the same
+paired `Choice` and coordinate passes (`_trial.current_pass`). The single-template side
+(`single-device`, `time_domain._single_choice`) is one paired `Choice` between two
+candidates, the default and the CPU, with confirmation.
 
 ### What `MF_COST_FILE` holds
 

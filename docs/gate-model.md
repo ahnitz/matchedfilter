@@ -1,3 +1,90 @@
+# The budget split's selection bias and per-plan scatter, 2026-10-27
+
+A multi-tier chain searches threshold splits on the draws it is judged on and keeps
+the cheapest, so its dismissal on fresh draws exceeds the budget. 3390d4f3 cut each
+multi-tier budget by `gatechain._SPLIT_TOLERANCE_Z = 0.75` standard errors of the
+dismissed count, the measured size of that bias, in place of the one-sided 95% cut
+(1.645), which left multi-tier plans at 0.92 of the budget. The comment at
+`_SPLIT_TOLERANCE_Z` and the commit message hold the measurement (200k independent
+draws, n = 2048, fd 1%, 10 profiles, 30 plans).
+
+The mean is then on budget, but each plan's realised dismissal scatters about it.
+Measured at 33e22fa7 on dev2 (one pinned core, GPU hidden, load 5-7; 28 s at fd 1e-2 and
+4 min 54 s at 1e-3):
+
+- Profiles: `tools/fdr_audit.default_profiles()` (10), each at n = 2048, snr 5.5,
+  window 192..1856.
+- Chains: (256), (512), (256, 512), (256, 1024), (128, 512) and (256, 512, 1024),
+  where every band is usable.
+- Thresholds from `gatechain.chain_thresholds` on the model's own draws (seed 13), with
+  no cost model, so the split is chosen on the operation count (the commit found flop and
+  calibrated costs give the same bias).
+- Each plan judged on N independent `signal_draws` (seed 977): the fraction of the kept
+  draws (fine maximum at least snr) that some tier dismisses, over fd.
+
+| fd | N | tiers | plans | mean | median | p90 | max | sd | check noise sd |
+|---|---|---|---|---|---|---|---|---|---|
+| 1e-2 | 200,000 | 1 | 20 | 1.032 | 1.049 | 1.150 | 1.207 | 0.106 | 0.029 |
+| 1e-2 | 200,000 | 2 | 30 | 0.991 | 0.993 | 1.097 | 1.283 | 0.101 | 0.029 |
+| 1e-2 | 200,000 | 3 | 10 | 1.012 | 1.002 | 1.109 | 1.131 | 0.077 | 0.029 |
+| 1e-3 | 2,000,000 | 1 | 20 | 0.997 | 1.012 | 1.115 | 1.134 | 0.086 | 0.029 |
+| 1e-3 | 2,000,000 | 2 | 30 | 0.950 | 0.943 | 1.050 | 1.133 | 0.078 | 0.029 |
+| 1e-3 | 2,000,000 | 3 | 10 | 0.959 | 0.943 | 1.068 | 1.077 | 0.074 | 0.029 |
+
+The check's own counting noise (last column) is small beside the spread, so the spread
+is the plans'. It is the same for one tier, which has no split search, as for two and
+three, and about what counting the ~100 dismissed draws a budget rests on gives
+(`gatemodel._nsamp_for`; 1/sqrt(100) = 0.1). So it comes from the finite model draws,
+not from the split search: a larger multi-tier cut would move those plans' mean below
+the budget without narrowing the spread, and more model draws would narrow it.
+
+Two observations are not settled by this run. The worst plan is 1.28 of the budget at fd
+1e-2 and 1.13 at 1e-3, and no plan exceeds 1.3. At fd 1e-3 the multi-tier plans average
+0.95 and 0.96 of the budget, where at 1e-2 they average 0.99 and 1.01; the cut was
+measured at 1e-2 only. The plans of one profile share its model draws and its check
+draws, so the 40 multi-tier plans are not independent, and one model seed and one check
+seed cannot say whether that difference is real.
+
+The script, for re-running it (from the repository root, `PYTHONPATH=python`):
+
+```python
+# split_spread.py FD NDRAWS: per-plan realised dismissal / fd on independent draws, at the shipped
+# z, for 1-, 2- and 3-tier chains; with the binomial noise of the check itself.
+import sys, numpy as np
+sys.path.insert(0, "tools")
+from fdr_audit import profile, default_profiles
+from matchedfilter import gatechain as gc
+n, snr, win = 2048, 5.5, (192, 1856)
+fd, N = float(sys.argv[1]), int(sys.argv[2])
+chains = [(256,), (512,), (256, 512), (256, 1024), (128, 512), (256, 512, 1024)]
+res = {1: [], 2: [], 3: []}; noise = {1: [], 2: [], 3: []}
+for name in default_profiles():
+    p = gc._norm_profile(profile(name, n), n)
+    bands = gc.usable_bands(p, n)
+    ev = gc.signal_draws(p, n, bands, snr, N, seed=977, window=win)
+    keep = ev[1][:, 0] >= snr
+    for chain in chains:
+        if not set(chain) <= set(bands):
+            continue
+        pl = gc.chain_thresholds(p, n, snr, fd, chain, window=win)
+        if pl is None:
+            continue
+        ok = keep.copy()
+        for b, t in zip(chain, pl["thresholds"]):
+            ok &= ev[0][:, bands.index(b)] >= t
+        lost = keep.sum() - ok.sum()
+        res[len(chain)].append(lost / keep.sum() / fd)
+        noise[len(chain)].append(np.sqrt(fd * keep.sum()) / (fd * keep.sum()))
+print("z=%.2f fd=%g draws=%d" % (gc._SPLIT_TOLERANCE_Z, fd, N))
+for k in (1, 2, 3):
+    r = np.sort(np.array(res[k]))
+    if not r.size:
+        continue
+    print("tiers %d: %3d plans  mean %.3f  median %.3f  p90 %.3f  max %.3f  share>1.25 %.2f  share>1.5 %.2f  | check noise sd ~%.3f  observed sd %.3f"
+          % (k, r.size, r.mean(), np.median(r), np.quantile(r, 0.9), r.max(), np.mean(r > 1.25), np.mean(r > 1.5),
+             np.median(noise[k]), r.std()))
+```
+
 # One simulation for signal and noise, 2026-10-26
 
 The gate model is one simulation (`gatechain._simulate`, `_core.simulate`). Each

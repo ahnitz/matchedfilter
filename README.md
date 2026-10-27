@@ -112,9 +112,11 @@ peaks = hf.run(binsize=4096, threshold=5.5)
 
 The coarse gates are computed from the full reference profile and requested
 false-dismissal budget; the measured tier costs select the chain of bands.
-Alternatively, pin a chain and set its coarse thresholds. See the
-[gate model](docs/gate-model.md) for profile assumptions, sampling precision
-and validation.
+Alternatively, pin a chain and set its coarse thresholds. See
+[the gate model](https://github.com/ahnitz/matchedfilter/blob/main/docs/architecture.md#the-gate-model)
+for how the gates are set, what `fd` means and when a plan is refused, and the
+[dated model log](https://github.com/ahnitz/matchedfilter/blob/main/docs/gate-model.md)
+for its validation.
 
 ## Performance
 

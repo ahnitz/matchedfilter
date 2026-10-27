@@ -31,9 +31,10 @@ model itself (`gatechain.direct_halfwidth`), on the draws the thresholds are set
 (`signal_draws(..., lags_too=True)`: the same simulation, search window and draw count),
 every tier applied with its threshold. Among the draws every tier passes and the fine stage
 keeps, it takes the distance from the last tier's coarse maximum to the fine peak; the
-half-width is the smallest whole number of coarse samples (at least 1) beyond which at most
-`_LOCALISE_SHARE` (5%) of fd of those draws lie. The window therefore adds at most that
-share to the chain's dismissals, on top of the gates' budget. It is a property of the
+model's half-width is the smallest whole number of coarse samples (at least 1) beyond which
+at most `_LOCALISE_SHARE` (5%) of fd of those draws lie, and the plan runs that plus one
+coarse sample (`HierarchicalFilter._direct_halfwidth`). The window therefore adds at most
+that share to the chain's dismissals, on top of the gates' budget. It is a property of the
 reference profile and the chain, in samples, not a constant. Some draws always lie far out:
 a noise peak elsewhere in the window can be the last tier's maximum while the signal is the
 fine one. Where they exceed the share, the half-width grows to reach them, up to the whole

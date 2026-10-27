@@ -67,13 +67,14 @@ that and that every link resolves.
 
 ### Plans and their logs
 
-- [Gate model and measured choices log](gate-model.md) (2026-09-26 to 2026-10-26, newest
-  first): the one simulation, the retired tables, chain and block-size trials, and the joint
-  trial.
+- [Gate model and measured choices log](gate-model.md) (2026-09-26 to 2026-10-27; the
+  newest sections lead, the rest run in date order from 2026-09-26): the one simulation, the
+  budget split's selection bias and per-plan scatter, the retired tables, chain and
+  block-size trials, and the joint trial.
 - [Cleanup, robustness and CI plan](robustness-plan.md) (adopted 2026-10-21, with its log).
 - [Unification plan](unification-plan.md) (started 2026-10-15, with its log): the shared GPU
   host layer, accounting instead of cost tables, knobs instead of variants.
-- [Converging the CPU and GPU paths](convergence-plan.md) (2026-10-17).
+- [Converging the CPU and GPU paths](convergence-plan.md) (2026-10-16).
 - [Hierarchical search memory and interface plan](search-memory-plan.md) (2026-10-17).
 - [GPU coarse stage: what was done and what next](gpu-coarse-plan.md) (2026-09-25 to
   2026-10-16).
