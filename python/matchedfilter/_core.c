@@ -1192,67 +1192,6 @@ static PyObject *M_gauss_fill(PyObject *self,PyObject *args){
   PyBuffer_Release(&b);
   Py_RETURN_NONE;
 }
-/* row_peaks(z, scale, sig, start, step, amp, peak, at): into peak (float32[m]) and at (int32[m]),
-   per row i of a
-   complex64 (m, L) array (rows may be strided), the largest |scale z[i,j] + amp[i] sig[start[i] +
-   j step]| over j and its j; sig (complex64, long enough that start + (L-1) step stays inside) and
-   the signal term are optional (sig None). The gate model's simulations reduce every transformed
-   draw this way (gatechain: noise block maxima, direct-refine draws): one pass, where NumPy took
-   four or five over each block and its temporaries. |.| is sqrt(re^2 + im^2) of the largest. */
-static PyObject *M_row_peaks(PyObject *self,PyObject *args){
-  PyObject *zo,*sigo,*sto,*ampo,*pko,*ato; double scale; long long step;
-  if(!PyArg_ParseTuple(args,"OdOOLOOO",&zo,&scale,&sigo,&sto,&step,&ampo,&pko,&ato)) return NULL;
-  Py_buffer z,sg={0},st={0},am={0},pb,ab;
-  if(PyObject_GetBuffer(pko,&pb,PyBUF_WRITABLE|PyBUF_C_CONTIGUOUS|PyBUF_FORMAT)<0) return NULL;
-  if(PyObject_GetBuffer(ato,&ab,PyBUF_WRITABLE|PyBUF_C_CONTIGUOUS|PyBUF_FORMAT)<0){ PyBuffer_Release(&pb); return NULL; }
-  if(PyObject_GetBuffer(zo,&z,PyBUF_STRIDES|PyBUF_FORMAT)<0){ PyBuffer_Release(&pb); PyBuffer_Release(&ab); return NULL; }
-  int ok = z.ndim==2 && z.itemsize==8 && z.format && strcmp(z.format,"Zf")==0 && z.strides[1]==8;
-  const int has_sig = sigo!=Py_None;
-  if(ok && has_sig){
-    if(PyObject_GetBuffer(sigo,&sg,PyBUF_C_CONTIGUOUS|PyBUF_FORMAT)<0){ PyBuffer_Release(&z); return NULL; }
-    if(PyObject_GetBuffer(sto,&st,PyBUF_C_CONTIGUOUS|PyBUF_FORMAT)<0){ PyBuffer_Release(&z); PyBuffer_Release(&sg); return NULL; }
-    if(PyObject_GetBuffer(ampo,&am,PyBUF_C_CONTIGUOUS|PyBUF_FORMAT)<0){ PyBuffer_Release(&z); PyBuffer_Release(&sg); PyBuffer_Release(&st); return NULL; }
-    ok = sg.itemsize==8 && strcmp(sg.format,"Zf")==0 && st.itemsize==8 && (strcmp(st.format,"q")==0||strcmp(st.format,"l")==0)
-         && am.itemsize==8 && strcmp(am.format,"Zf")==0 && st.len/8==z.shape[0] && am.len/8==z.shape[0];
-  }
-  if(ok) ok = strcmp(pb.format,"f")==0 && pb.len/4==z.shape[0] && ab.itemsize==4 && (strcmp(ab.format,"i")==0||strcmp(ab.format,"l")==0) && ab.len/4==z.shape[0];
-  if(!ok){
-    PyBuffer_Release(&z); PyBuffer_Release(&pb); PyBuffer_Release(&ab);
-    if(has_sig){ PyBuffer_Release(&sg); PyBuffer_Release(&st); PyBuffer_Release(&am); }
-    PyErr_SetString(PyExc_TypeError,"row_peaks: z complex64 (m, L) with unit column stride; sig complex64, start int64 (m), amp complex64 (m); peak float32 (m), at int32 (m)");
-    return NULL;
-  }
-  const Py_ssize_t m=z.shape[0], L=z.shape[1];
-  float *pk=(float*)pb.buf; int *at=(int*)ab.buf;
-  const float sc=(float)scale; const Py_ssize_t slen = has_sig ? sg.len/8 : 0;
-  int bad=0;
-  Py_BEGIN_ALLOW_THREADS
-  for(Py_ssize_t i=0;i<m;i++){
-    const float *row=(const float*)((const char*)z.buf+i*z.strides[0]);
-    float best=-1.f; int bj=0;
-    if(has_sig){
-      const float *sv=(const float*)sg.buf; const long long s0=((const long long*)st.buf)[i];
-      const float ar=((const float*)am.buf)[2*i], ai=((const float*)am.buf)[2*i+1];
-      if(s0<0 || s0+(L-1)*step>=slen){ bad=1; break; }
-      for(Py_ssize_t j=0;j<L;j++){
-        const float *q=sv+2*(s0+j*step);
-        const float re=sc*row[2*j]+ar*q[0]-ai*q[1], im=sc*row[2*j+1]+ar*q[1]+ai*q[0];
-        const float a=re*re+im*im; if(a>best){ best=a; bj=(int)j; }
-      }
-    } else {
-      for(Py_ssize_t j=0;j<L;j++){
-        const float re=sc*row[2*j], im=sc*row[2*j+1], a=re*re+im*im;
-        if(a>best){ best=a; bj=(int)j; }
-      }
-    }
-    pk[i]=sqrtf(best); at[i]=bj;
-  }
-  Py_END_ALLOW_THREADS
-  PyBuffer_Release(&z); PyBuffer_Release(&pb); PyBuffer_Release(&ab);
-  if(has_sig){ PyBuffer_Release(&sg); PyBuffer_Release(&st); PyBuffer_Release(&am); }
-  if(bad){ PyErr_SetString(PyExc_IndexError,"row_peaks: a row's signal window leaves sig"); return NULL; }
-  Py_RETURN_NONE;
-}
 /* A[e] = |g y[e] + d[e]|^2 for e < m (d NULL: |g y[e]|^2), y and d complex: simulate's
    statistics. One pass the compiler vectorises; on x86-64 ELF builds also for AVX2 and
    AVX-512, picked when loaded (the module is built for the baseline ISA). */
@@ -1456,19 +1395,25 @@ static PyObject *M_simulate(PyObject *self,PyObject *args){
   if(has_noise){ Py_DECREF(no); no=PyTuple_New(nb); for(Py_ssize_t q=0;q<nb;q++) PyTuple_SET_ITEM(no,q,PyLong_FromLongLong(nfull[q] ? -1 : kn[q])); }
   return Py_BuildValue("(NN)",so,no);
 }
-/* records_within(pos, val, off, reach, out): per row r of records (pos int32, val float32,
-   off int64 (rows + 1), row r's at [off[r], off[r + 1]), rising in pos and val), into out
-   (float32, rows) the value of its last record at pos <= reach[r] (int64), 0 where none is:
-   the largest statistic within reach of a running maximum's start (gatechain). */
+/* records_within(pos, val, off, reach, out, at=None): per row r of records (pos int32, val
+   float32, off int64 (rows + 1), row r's at [off[r], off[r + 1]), rising in pos and val), into
+   out (float32, rows) the value of its last record at pos <= reach[r] (int64), 0 where none is,
+   and into at (int32, rows) when given that record's pos, -1 where none is: the largest
+   statistic within reach of a running maximum's start and where it lies (gatechain). */
 static PyObject *M_records_within(PyObject *self,PyObject *args){
-  (void)self; PyObject *po,*vo,*oo,*ro,*out;
-  if(!PyArg_ParseTuple(args,"OOOOO",&po,&vo,&oo,&ro,&out)) return NULL;
+  (void)self; PyObject *po,*vo,*oo,*ro,*out,*ato=Py_None;
+  if(!PyArg_ParseTuple(args,"OOOOO|O",&po,&vo,&oo,&ro,&out,&ato)) return NULL;
+  Py_buffer abuf={0}; int has_at = ato!=Py_None;
+  if(has_at){
+    if(PyObject_GetBuffer(ato,&abuf,PyBUF_WRITABLE|PyBUF_C_CONTIGUOUS|PyBUF_FORMAT)<0) return NULL;
+  }
   Py_buffer pb,vb,ob,rb,xb; Py_buffer *bs[5]={&pb,&vb,&ob,&rb,&xb}; PyObject *os[5]={po,vo,oo,ro,out}; int got=0;
   for(;got<5;got++) if(PyObject_GetBuffer(os[got],bs[got],PyBUF_C_CONTIGUOUS|PyBUF_FORMAT|(got==4?PyBUF_WRITABLE:0))<0) break;
   const long long rows = got==5 ? rb.len/8 : 0;
   int ok = got==5 && pb.itemsize==4 && (strcmp(pb.format,"i")==0||strcmp(pb.format,"l")==0) && vb.itemsize==4 && strcmp(vb.format,"f")==0
            && pb.len==vb.len && ob.itemsize==8 && (strcmp(ob.format,"q")==0||strcmp(ob.format,"l")==0) && ob.len/8==rows+1
-           && rb.itemsize==8 && (strcmp(rb.format,"q")==0||strcmp(rb.format,"l")==0) && xb.itemsize==4 && strcmp(xb.format,"f")==0 && xb.len/4==rows;
+           && rb.itemsize==8 && (strcmp(rb.format,"q")==0||strcmp(rb.format,"l")==0) && xb.itemsize==4 && strcmp(xb.format,"f")==0 && xb.len/4==rows
+           && (!has_at || (abuf.itemsize==4 && (strcmp(abuf.format,"i")==0||strcmp(abuf.format,"l")==0) && abuf.len/4==rows));
   if(ok){
     const long long *off=(const long long*)ob.buf, nrec=pb.len/4;
     ok = off[0]>=0 && off[rows]<=nrec;
@@ -1477,15 +1422,18 @@ static PyObject *M_records_within(PyObject *self,PyObject *args){
   if(ok){
     const int32_t *pos=(const int32_t*)pb.buf; const float *val=(const float*)vb.buf;
     const long long *off=(const long long*)ob.buf, *reach=(const long long*)rb.buf; float *o=(float*)xb.buf;
+    int32_t *at = has_at ? (int32_t*)abuf.buf : NULL;
     Py_BEGIN_ALLOW_THREADS
     for(long long r=0;r<rows;r++){
-      float v=0.f;
-      for(long long i=off[r];i<off[r+1] && pos[i]<=reach[r];i++) v=val[i];
+      float v=0.f; int32_t a=-1;
+      for(long long i=off[r];i<off[r+1] && pos[i]<=reach[r];i++){ v=val[i]; a=pos[i]; }
       o[r]=v;
+      if(at) at[r]=a;
     }
     Py_END_ALLOW_THREADS
   }
   for(int i=0;i<got;i++) PyBuffer_Release(bs[i]);
+  if(has_at) PyBuffer_Release(&abuf);
   if(!ok){ if(!PyErr_Occurred()) PyErr_SetString(PyExc_TypeError,"records_within: pos int32 and val float32 of one length, off int64 (rows + 1) ascending within them, reach int64 (rows), out float32 (rows)"); return NULL; }
   Py_RETURN_NONE;
 }
@@ -1994,8 +1942,7 @@ static PyMethodDef methods[]={
   {"backend",M_backend,METH_NOARGS,"backend() -> name of the selected kernel"},
   {"chain_candidates",M_chain_candidates,METH_VARARGS,"chain_candidates(S, Nc, low, lowv, last_order, last_val, splits, K, Nn, prune, useless) -> [(thresholds, reach)]: gatechain._chain_candidates's search"},
   {"simulate",M_simulate,METH_VARARGS,"simulate(scale, seed, row0, nrows, kmax, bands, bscale, fscale, tab, t, fi, spos, sval, soff, npos, nval, noff, keep_at=0) -> (signal counts, noise counts): the gate model's simulation, per statistic the running maximum's records of the noise alone and outward from a signal"},
-  {"records_within",M_records_within,METH_VARARGS,"records_within(pos, val, off, reach, out): per row the value of its last record within reach (gatechain's window maxima)"},
-  {"row_peaks",M_row_peaks,METH_VARARGS,"row_peaks(z, scale, sig, start, step, amp, peak, at): per row the largest |scale z + amp sig[start + j step]| and its j (gatechain simulations)"},
+  {"records_within",M_records_within,METH_VARARGS,"records_within(pos, val, off, reach, out, at=None): per row the value (and pos) of its last record within reach (gatechain's window maxima)"},
   {"gauss_fill",M_gauss_fill,METH_VARARGS,"gauss_fill(out float32, seed, offset): out[i] = standard normal draw offset + i of stream seed (src/gauss.cc)"},
   {"l1d_bytes",M_l1d_bytes,METH_NOARGS,"l1d_bytes() -> the L1 data cache size the OS reports, or 0 if unknown"},
   {"series_group",M_series_group,METH_VARARGS,"series_group(n, requested) -> the series group a hierarchical plan of size n runs"},

@@ -50,10 +50,13 @@ def _bank(n=2048, T=48, nblocks=120, nsig=60, seed=3):
     return n, taps, counts, spec, series, layout, _inspiral_power(n), window
 
 
-def _run(direct, chain, data, binsize=None, monkeypatch=None):
+def _run(direct, chain, data, binsize=None, monkeypatch=None, fd=1e-2):
     n, taps, counts, spec, series, layout, ref, window = data
     monkeypatch.setenv("MF_DIRECT_REFINE", "1" if direct else "0")
-    hf = mf.HierarchicalFilter(n, 1, spec.shape[0], snr=6.0, fd=1e-3, chain=chain,
+    # fd 1%, production's: at 1e-3 a noise peak elsewhere in the window is the last tier's
+    # coarse maximum for more than the direct refine's share of the budget at any half-width
+    # for chains ending at band 512, and those plans refine by transform
+    hf = mf.HierarchicalFilter(n, 1, spec.shape[0], snr=6.0, fd=fd, chain=chain,
                                search_window=window)
     hf.set_reference(ref); hf.set_templates(spec); hf.set_taps(taps, counts)
     idx, val = hf.run_series(series, *layout, binsize=binsize or n, threshold=6.0, raw=True)
@@ -77,8 +80,8 @@ def test_direct_refine_matches_transform(chain, monkeypatch):
 def test_several_bins_refine_by_transform(monkeypatch):
     """A window cannot promise every bin's maximum: several bins per pair take the transform."""
     data = _bank(nblocks=40)
-    i1, v1, st = _run(True, (256, 512), data, binsize=64, monkeypatch=monkeypatch)
-    i0, v0, _ = _run(False, (256, 512), data, binsize=64, monkeypatch=monkeypatch)
+    i1, v1, st = _run(True, (256, 512), data, binsize=64, monkeypatch=monkeypatch, fd=1e-3)
+    i0, v0, _ = _run(False, (256, 512), data, binsize=64, monkeypatch=monkeypatch, fd=1e-3)
     assert (i0 >= 0).sum() > 20
     assert st["pairs"] == 0
     np.testing.assert_array_equal(i1, i0)
@@ -92,19 +95,32 @@ def test_taps_are_checked():
         hf.set_taps(np.zeros((4, 10), np.float32), counts=[10, 10, 11, 10])
 
 
-def test_halfwidth_from_the_model():
-    """Small where the last band localises the peak (512 at n = 2048 on an inspiral profile);
-    never below the distances it was drawn from."""
+@pytest.mark.parametrize("fd", [1e-2, 1e-3])
+def test_halfwidth_from_the_model(fd):
+    """The half-width is the smallest that leaves at most the direct refine's share of the
+    budget outside it, among the gate model's own kept draws; small at fd 1% where the last
+    band localises the peak (512 at n = 2048 on an inspiral profile)."""
     from matchedfilter.benchmark import _inspiral_power
     n = 2048
     ref, win = _inspiral_power(n), (192, 1856)
+    p = gatechain._norm_profile(ref, n)
+    bands = gatechain.usable_bands(p, n)
     for chain in [(512,), (256, 512), (256, 512, 1024)]:
-        pl = gatechain.chain_thresholds(ref, n, 6.0, 1e-3, chain, window=win)
-        hw, q, kept = gatechain.direct_halfwidth(ref, n, chain, pl["thresholds"], 6.0, 1e-3,
-                                                 window=win, nsim=4000)
-        assert kept > 1000
-        assert 1 <= hw and q <= hw, (chain, hw, q)
-        assert hw <= 16, (chain, hw)
+        pl = gatechain.chain_thresholds(ref, n, 6.0, fd, chain, window=win)
+        hw, q, kept = gatechain.direct_halfwidth(ref, n, chain, pl["thresholds"], 6.0, fd, window=win)
+        (C, F), (fat, cat) = gatechain.signal_draws(p, n, bands, 6.0, gatechain._gm._nsamp_for(fd),
+                                                    window=win, lags_too=True)
+        ok = F[:, 0] >= 6.0
+        for b, t in zip(chain, pl["thresholds"]):
+            ok &= C[:, bands.index(b)] >= t
+        d = np.abs(fat - cat[:, bands.index(chain[-1])])[ok]
+        d = np.minimum(d, n - d) / (n // chain[-1])
+        allow = gatechain._LOCALISE_SHARE * fd * kept
+        assert kept == ok.sum() > 5000
+        assert (d > hw).sum() <= allow, (chain, hw)
+        assert hw == 1 or (d > hw - 1).sum() > allow, (chain, hw)
+        if fd == 1e-2:
+            assert hw <= 16, (chain, hw)
 
 
 def test_two_excursions_in_a_block(monkeypatch):

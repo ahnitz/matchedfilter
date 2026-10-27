@@ -188,57 +188,9 @@ def _similar_put(kind, u, params, value, keep=None):
     del lst[:-(keep or _CACHE_MAX)]
 
 
-class _Normals:
-    """Standard normal float32 draws from one counter-based stream (_core.gauss_fill,
-    src/gauss.cc): every draw depends only on the seed, the simulation's domain and its
-    position, so a simulation is reproducible however it is chunked. ~1-6 ns a draw against
-    NumPy's ~8-40; the draws were most of a job's setup simulation on Haswell."""
-
-    def __init__(self, seed, domain):
-        self.seed = ((int(domain) & 0xFFFFFFFF) << 32) | (int(seed) & 0xFFFFFFFF)
-        self.pos = 0
-
-    def _fill(self, out):
-        """Draws [pos, pos + out.size) into out (float32, contiguous)."""
-        from . import _core
-        end = self.pos + out.size
-        _core.gauss_fill(out, self.seed, self.pos)
-        self.pos = end
-
-    def take(self, shape):
-        out = np.empty(shape, np.float32)
-        self._fill(out.reshape(-1))
-        return out
-
-    def complex(self, shape, scale=1.0):
-        """Complex draws, real and imaginary parts consecutive draws of the stream, times scale
-        (broadcast along the last axis): one fill, viewed in place."""
-        shape = tuple(shape) if np.ndim(shape) else (int(shape),)
-        z = np.empty(shape, np.complex64)
-        self._fill(z.view(np.float32).reshape(-1))
-        if np.ndim(scale) or scale != 1.0:
-            z *= np.asarray(scale, np.float32)
-        return z
-
-
-def _row_peaks(z, scale, sig=None, start=None, step=0, amp=None):
-    """Per row of z (complex64, rows may be strided): the largest |scale z + amp sig[start + j
-    step]| and its j, in one pass (_core.row_peaks)."""
-    from . import _core
-    if z.dtype != np.complex64:
-        z = z.astype(np.complex64)      # NumPy < 2 transforms complex64 in double precision
-    m = z.shape[0]
-    pk, at = np.empty(m, np.float32), np.empty(m, np.int32)
-    if sig is None:
-        _core.row_peaks(z, float(scale), None, None, 0, None, pk, at)
-    else:
-        _core.row_peaks(z, float(scale), sig, np.ascontiguousarray(start, np.int64), int(step),
-                        np.ascontiguousarray(amp, np.complex64), pk, at)
-    return pk, at
-
-
-#: Stream domains, one per simulation, so their draws never coincide.
-_DOMAIN_SIGNAL, _DOMAIN_DIRECT = 1, 3
+#: The gate model's stream domain: its draws are _core.gauss_fill's (src/gauss.cc) at this
+#: domain and the seed, counter-based, so any block's draws depend only on its position.
+_DOMAIN_SIGNAL = 1
 #: The gate model's simulation seed: signal_draws and noise_block_maxima read one simulation.
 _SEED = 13
 
@@ -259,7 +211,7 @@ _GROW = 4
 _SIGNAL_RECORDS = OrderedDict()
 
 
-def signal_draws(power, n, bands, snr, nsamp, seed=_SEED, window=None):
+def signal_draws(power, n, bands, snr, nsamp, seed=_SEED, window=None, lags_too=False):
     """Joint draws of every band's coarse window maximum and the fine window maximum under a
     signal of strength snr arriving at a uniformly random time in the window.
 
@@ -283,7 +235,10 @@ def signal_draws(power, n, bands, snr, nsamp, seed=_SEED, window=None):
     window around it is two lookups: draw r's signal lies a_r + frac samples into the window,
     a_r uniform, and the window starts where the engine's would relative to the coarse grids
     (a_r = (t_r - w0) mod R_max + m R_max, m uniform; a draw whose a_r falls past the span
-    is dropped, which keeps a_r exactly uniform)."""
+    is dropped, which keeps a_r exactly uniform).
+
+    With lags_too, returns ((C, F), (fine_at, coarse_at)): where each draw's fine maximum and
+    each band's coarse maximum lie, in samples after the signal's arrival."""
     p = _norm_profile(power, n)
     bands = sorted(int(b) for b in bands)
     Fb = np.array([p[:b].sum() for b in bands])
@@ -294,12 +249,12 @@ def signal_draws(power, n, bands, snr, nsamp, seed=_SEED, window=None):
     hit = _SIGNAL_CACHE.get(key)
     if hit is not None:
         _SIGNAL_CACHE.move_to_end(key)
-        return hit
-    C, F = _signal_window(_signal_records(p, n, bands, Fb, float(snr), int(nsamp), int(seed)),
-                          n, bands, lags)
-    hit = (C, np.broadcast_to(F[:, None], C.shape))
+        return hit[0] if not lags_too else hit
+    C, F, at = _signal_window(_signal_records(p, n, bands, Fb, float(snr), int(nsamp), int(seed)),
+                              n, bands, lags)
+    hit = ((C, np.broadcast_to(F[:, None], C.shape)), at)
     _cache_put(_SIGNAL_CACHE, key, hit)
-    return hit
+    return hit[0] if not lags_too else hit
 
 
 def _signal_records(p, n, bands, Fb, snr, M, seed):
@@ -385,17 +340,29 @@ def _signal_records(p, n, bands, Fb, snr, M, seed):
 
 def _last_within(rec, reach):
     """Per row of records (pos, val, off): the value of its last record at distance <= reach[r]
-    (records rise with distance), 0 where none is (_core.records_within)."""
+    (records rise with distance) and that distance, 0 and -1 where none is
+    (_core.records_within)."""
     from . import _core
     pos, val, off = rec
     out = np.empty(off.size - 1, np.float32)
-    _core.records_within(pos, val, off, np.ascontiguousarray(reach, np.int64), out)
-    return out
+    at = np.empty(off.size - 1, np.int32)
+    _core.records_within(pos, val, off, np.ascontiguousarray(reach, np.int64), out, at)
+    return out, at
+
+
+def _both_sides(right, left, reach_right, reach_left):
+    """The larger of a statistic's two sides' maxima within their reach, and its lag relative
+    to the signal's (positive to the right), in the statistic's own lags."""
+    vr, er = _last_within(right, reach_right)
+    vl, el = _last_within(left, reach_left)
+    take_r = vr >= vl
+    return np.where(take_r, vr, vl), np.where(take_r, er, -el).astype(np.int64)
 
 
 def _signal_window(sim, n, bands, lags):
-    """(C, F) of signal_draws for the engine's lags `lags` (_engine_lags) from the simulation's
-    records."""
+    """(C, F, at) of signal_draws for the engine's lags `lags` (_engine_lags) from the
+    simulation's records: at = (fine lag, coarse lags per band) of each maximum, in samples
+    after the signal's arrival (its integer part)."""
     t, u, recs = sim
     w0, w1, c0, c1 = lags
     span, step = w1 - w0, n // bands[0]
@@ -406,9 +373,11 @@ def _signal_window(sim, n, bands, lags):
     t, a = t[ok], a[ok]
     shift = t - a - w0                       # a multiple of every band's step
     whole = span >= n
-    F = np.maximum(_last_within(_rows(recs[0], ok), np.full(t.size, n - 1) if whole else span - 1 - a),
-                   _last_within(_rows(recs[1], ok), np.zeros(t.size, np.int64) if whole else a))
+    F, fat = _both_sides(_rows(recs[0], ok), _rows(recs[1], ok),
+                         np.full(t.size, n - 1) if whole else span - 1 - a,
+                         np.zeros(t.size, np.int64) if whole else a)
     C = np.empty((t.size, len(bands)), np.float32)
+    cat = np.empty((t.size, len(bands)), np.int64)
     for i, b in enumerate(bands):
         R = n // b
         js = t // R
@@ -416,11 +385,11 @@ def _signal_window(sim, n, bands, lags):
             right, left = np.full(t.size, b - 1), np.zeros(t.size, np.int64)
         else:
             right, left = c1[i] + shift // R - 1 - js, js - (c0[i] + shift // R)
-        C[:, i] = np.maximum(_last_within(_rows(recs[2 + 2 * i], ok), right),
-                             _last_within(_rows(recs[3 + 2 * i], ok), left))
-    C.setflags(write=False)
-    F.setflags(write=False)
-    return C, F
+        C[:, i], e = _both_sides(_rows(recs[2 + 2 * i], ok), _rows(recs[3 + 2 * i], ok), right, left)
+        cat[:, i] = (js + e) * R - t
+    for x in (C, F, fat, cat):
+        x.setflags(write=False)
+    return C, F, (fat, cat)
 
 
 def _rows(rec, keep):
@@ -452,7 +421,7 @@ def _simulate(p, n, bands, rows, row0, seed, signal=None, noise=True, keep_at=0.
     scale = (np.sqrt(p) / np.sqrt(2)).astype(np.float32)
     kmax = int(np.flatnonzero(p)[-1]) + 1
     bscale = tuple(float(_SIG / np.sqrt(p[:b].sum())) for b in bands)
-    stream = _Normals(seed, _DOMAIN_SIGNAL).seed
+    stream = (_DOMAIN_SIGNAL << 32) | (int(seed) & 0xFFFFFFFF)
     tab, t, fi, spos, sval, soff = signal if signal is not None else (None,) * 6
     cap = int(rows * (math.log(bands[-1]) + 3)) + 64
     while True:
@@ -1216,190 +1185,50 @@ _PLAN_CACHE = OrderedDict()
 
 
 _DIRECT_CACHE = OrderedDict()
-#: Per-draw statistics of direct_halfwidth's model, shared by every chain and threshold set
-#: on one (profile, n, window, snr, seed): (sig, n, window, snr, seed) -> _DirectDraws.
-_DIRECT_DRAWS = OrderedDict()
-_DIRECT_DRAWS_MAX = 8
-_DIRECT_CHUNK = 1000
+#: The share of the budget the direct refine's window may lose: detections whose fine peak
+#: lies further from the last tier's coarse maximum than the half-width. Some always do: a
+#: noise peak elsewhere in the window can be the coarse maximum while the signal is the fine
+#: one (at fd 1e-3, n = 2048, a chain ending in band 512 loses 5% of its budget so at any
+#: half-width; a maximum over the draws then meant refining the whole block).
+_LOCALISE_SHARE = 0.05
 
 
-class _DirectDraws:
-    """direct_halfwidth's draws, reduced to what any chain needs: per draw, whether the fine
-    maximum reaches snr and its lag, and per band the coarse maximum over the window and its
-    lag. A chain and its thresholds then select draws with masks. The draws are generated
-    chunk by chunk from one seeded generator, exactly as direct_halfwidth always drew them,
-    so the first k chunks are the same for any draw count: a call wanting fewer draws reads
-    a prefix, one wanting more continues the generator."""
-
-    def __init__(self, p, n, win, snr, seed, bands):
-        self.n, self.win, self.snr = n, win, float(snr)
-        self.rng = np.random.default_rng(seed)          # the lags and phases
-        self._draws = _Normals(seed, _DOMAIN_DIRECT)    # the noise
-        self.bands = tuple(int(b) for b in bands)
-        w0, w1 = win
-        self.A = np.fft.ifft(p) * n
-        self.lags = np.arange(w0, w1)
-        self.sq = _SIG * np.sqrt(p)
-        self.tier = {}
-        for b in self.bands:
-            f = float(p[:b].sum())
-            q = np.zeros(n)
-            q[:b] = p[:b]
-            R = n // b
-            cs = w0 // R
-            cs = cs - 1 if cs > 0 else cs
-            ce = min(-(-w1 // R) + 1, b)               # one coarse sample past each end (hmf.c)
-            self.tier[b] = (f, np.fft.ifft(q) * n / np.sqrt(f), R, cs, ce)
-        self.fine_ok, self.fa = [], []
-        self.cmax = {b: [] for b in self.bands}
-        self.cam = {b: [] for b in self.bands}
-
-    def extend(self, nsim):
-        """Draw chunks until nsim draws are held.
-
-        The noise comes from the counter-based stream (_Normals), the lags and phases from
-        NumPy's generator, and everything runs in single precision, in place: in double
-        precision, from NumPy's generator, this was most of a Haswell job's setup simulation."""
-        n, (w0, w1) = self.n, self.win
-        if not hasattr(self, "_A32"):
-            self._A32 = np.concatenate([self.A, self.A]).astype(np.complex64)
-            self._scale32 = (self.sq / np.sqrt(2)).astype(np.float32)
-            self._tier32 = {b: (np.float32(b / np.sqrt(t[0])), np.concatenate([t[1], t[1]]).astype(np.complex64))
-                            for b, t in self.tier.items()}
-        while len(self.fine_ok) * _DIRECT_CHUNK < nsim:
-            m = _DIRECT_CHUNK
-            N = self._draws.complex((m, n), self._scale32)
-            tau0 = self.rng.integers(w0, w1, m)
-            amp = (self.snr * np.exp(2j * np.pi * self.rng.random(m))).astype(np.complex64)
-            # the signal's response at lags w0..w1-1 around tau0: a run of the doubled A
-            pk, at = _row_peaks(np.fft.ifft(N, axis=1)[:, w0:w1], n, self._A32, (w0 - tau0) % n, 1, amp)
-            self.fine_ok.append(pk >= self.snr)
-            self.fa.append(at + w0)
-            for b in self.bands:
-                f, Abt, R, cs, ce = self.tier[b]
-                sc, Ab32 = self._tier32[b]
-                pk, at = _row_peaks(np.fft.ifft(N[:, :b], axis=1)[:, cs:ce], sc, Ab32, (cs * R - tau0) % n, R, amp)
-                self.cmax[b].append(pk)
-                self.cam[b].append((at.astype(np.int64) + cs) * R)
-
-    def distances(self, chain, thresholds, nsim):
-        """direct_halfwidth's per-chunk kept distances for this chain, from the first nsim draws."""
-        self.extend(nsim)
-        n, out = self.n, []
-        for c in range(nsim // _DIRECT_CHUNK):
-            ok = self.fine_ok[c].copy()
-            for b, thr in zip(chain, thresholds):
-                ok &= self.cmax[b][c] >= float(thr)
-            d = np.abs(self.fa[c] - self.cam[chain[-1]][c])
-            d = np.minimum(d, n - d) / (n // chain[-1])
-            out.append(d[ok])
-        return out
-
-
-def _direct_draws(p, n, chain, win, snr, nsim, seed):
-    """The shared draws for this question, or None where they cannot answer it exactly (a
-    draw count that is not whole chunks, or a band outside the profile's usable bands)."""
-    if nsim % _DIRECT_CHUNK:
-        return None
-    bands = usable_bands(p, n)
-    if not set(chain) <= set(bands):
-        return None
-    key = (_gm._profile_sig(p), n, win, float(snr), int(seed))
-    hit = _DIRECT_DRAWS.get(key)
-    if hit is None:
-        hit = _DirectDraws(p, n, win, snr, seed, bands)
-        _DIRECT_DRAWS[key] = hit
-        while len(_DIRECT_DRAWS) > _DIRECT_DRAWS_MAX:
-            _DIRECT_DRAWS.popitem(last=False)
-    else:
-        _DIRECT_DRAWS.move_to_end(key)
-    return hit
-
-
-def direct_halfwidth(power, n, chain, thresholds, snr, fd, window=None, nsim=20000, seed=31):
+def direct_halfwidth(power, n, chain, thresholds, snr, fd, window=None):
     """Half-width, in last-tier coarse samples, of the direct refine's window around a pair's
-    largest last-tier coarse lag: the largest distance to the fine peak seen in nsim draws
-    the gate passes, rounded up (at least 1).
+    largest last-tier coarse lag. Over the gate model's draws (signal_draws) that every tier
+    passes and the fine stage keeps, the distance from that lag to the fine peak: the
+    half-width is the smallest whole number (at least 1) beyond which at most
+    _LOCALISE_SHARE of fd of the kept draws lie, so the refine's window adds at most that to
+    the chain's dismissals. The draws are the gates' own (the same simulation, window and
+    count).
 
-    The draws are signal_draws' model over whole blocks: noise with spectrum _SIG^2 p, a
-    signal of strength snr whose output spectrum is snr p at a uniform lag in the window,
-    every tier's coarse statistic (its band of the product over sqrt(F_b)), kept when every
-    tier passes and the fine maximum reaches snr. Returns (halfwidth, distances' 99.99th
-    percentile, draws kept)."""
+    Returns (halfwidth, distances' 99.99th percentile, draws kept)."""
     p = _norm_profile(power, n)
     chain = tuple(int(b) for b in chain)
-    win = (0, n) if window is None else (int(window[0]), int(window[1]))
-    key = _key(p, n, chain, tuple(float(t) for t in thresholds), float(snr), float(fd), win,
-               int(nsim), int(seed))
+    win = None if window is None else (int(window[0]), int(window[1]))
+    key = _key(p, n, chain, tuple(float(t) for t in thresholds), float(snr), float(fd), win)
     hit = _DIRECT_CACHE.get(key)
     if hit is not None:
         return hit
-    # Thresholds are rounded for the similarity key: plans of similar profiles (another
-    # segment's PSD, another template group) have thresholds equal to ~1e-3 and share draws.
-    sim_params = (n, chain, tuple(round(float(t), 2) for t in thresholds), float(snr),
-                  float(fd), win, int(nsim), int(seed))
-    unit, hit = _similar_get("direct", p, sim_params)
-    if hit is not None:
-        _cache_put(_DIRECT_CACHE, key, hit)
-        return hit
-    shared = _direct_draws(p, n, chain, win, snr, int(nsim), seed)
-    if shared is not None:
-        dist = shared.distances(chain, thresholds, int(nsim))
-        kept = int(sum(len(d) for d in dist))
-        d = np.concatenate(dist) if dist else np.zeros(0)
-        hw = max(1, int(np.ceil(d.max()))) if len(d) else 1     # the caller adds its margin
-        out = (hw, float(np.percentile(d, 99.99)) if len(d) else 0.0, kept)
-        _cache_put(_DIRECT_CACHE, key, out)
-        _similar_put("direct", unit, sim_params, out)
-        return out
-    rng = np.random.default_rng(seed)
-    F = [float(p[:b].sum()) for b in chain]
-    w0, w1 = win
-    # The signal in the lag domain: the fine output's is snr * A(tau - tau0), A the reference's
-    # correlation (peak 1), and tier b's at coarse lag j is snr * A_b(jR - tau0), A_b the
-    # correlation of its band over sqrt(F_b) -- tabulated once, so a draw costs one n-point
-    # transform of its noise plus one per tier.
-    A = np.fft.ifft(p) * n
-    Ab = []
-    for b, f in zip(chain, F):
-        q = np.zeros(n); q[:b] = p[:b]
-        Ab.append(np.fft.ifft(q) * n / np.sqrt(f))
-    tiers = []
-    for b in chain:
-        R = n // b
-        cs = w0 // R
-        cs = cs - 1 if cs > 0 else cs
-        ce = min(-(-w1 // R) + 1, b)                   # one coarse sample past each end (hmf.c)
-        tiers.append((b, R, cs, ce))
-    lags = np.arange(w0, w1)
-    sq = _SIG * np.sqrt(p)
-    kept, dist = 0, []
-    chunk = 1000
-    for c0 in range(0, nsim, chunk):
-        m = min(chunk, nsim - c0)
-        N = (rng.standard_normal((m, n)) + 1j * rng.standard_normal((m, n))) * (sq / np.sqrt(2))
-        tau0 = rng.integers(w0, w1, m)
-        amp = float(snr) * np.exp(2j * np.pi * rng.random(m))
-        fine = np.fft.ifft(N, axis=1)[:, w0:w1] * n
-        fine = np.abs(fine + amp[:, None] * A[(lags[None, :] - tau0[:, None]) % n])
-        ok = fine.max(1) >= float(snr)
-        am = None
-        for (b, R, cs, ce), Abt, thr, f in zip(tiers, Ab, thresholds, F):
-            co = np.fft.ifft(N[:, :b], axis=1)[:, cs:ce] * b / np.sqrt(f)
-            cl = np.arange(cs, ce) * R
-            co = np.abs(co + amp[:, None] * Abt[(cl[None, :] - tau0[:, None]) % n])
-            ok &= co.max(1) >= float(thr)
-            am = (co.argmax(1) + cs) * R
-        fa = fine.argmax(1) + w0
-        d = np.abs(fa - am)
+    bands = usable_bands(p, n)
+    out = (1, 0.0, 0)
+    sig = signal_draws(p, n, bands, snr, _gm._nsamp_for(fd), window=win, lags_too=True) \
+        if set(chain) <= set(bands) else None
+    if sig is not None:
+        (C, F), (fat, cat) = sig
+        ok = F[:, 0] >= snr
+        for b, thr in zip(chain, thresholds):
+            ok &= C[:, bands.index(b)] >= float(thr)
+        d = np.abs(fat - cat[:, bands.index(chain[-1])])[ok]
         d = np.minimum(d, n - d) / (n // chain[-1])      # lags are circular in a block
-        dist.append(d[ok])
-        kept += int(ok.sum())
-    d = np.concatenate(dist) if dist else np.zeros(0)
-    hw = max(1, int(np.ceil(d.max()))) if len(d) else 1     # the caller adds its margin
-    out = (hw, float(np.percentile(d, 99.99)) if len(d) else 0.0, kept)
+        if d.size:
+            # the fewest kept draws past the half-width: the largest distance with at most
+            # that many beyond it, rounded up
+            allow = int(math.floor(_LOCALISE_SHARE * float(fd) * d.size))
+            ds = np.sort(d)
+            hw = ds[ds.size - 1 - allow] if allow < ds.size else 0.0
+            out = (max(1, int(np.ceil(hw))), float(np.percentile(d, 99.99)), int(d.size))
     _cache_put(_DIRECT_CACHE, key, out)
-    _similar_put("direct", unit, sim_params, out)
     return out
 
 

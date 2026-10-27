@@ -50,12 +50,12 @@ def wrap(owner, name, part):
 def main():
     if os.environ.get("CSEARCH") == "0" and hasattr(gc, "_C_SEARCH"):
         gc._C_SEARCH = False                    # the plan search's Python reference
-    H, TD, DD = hi.HierarchicalFilter, td.TimeDomainFilterBank, gc._DirectDraws
+    H, TD = hi.HierarchicalFilter, td.TimeDomainFilterBank
     for owner, name, part in [
             (cal, "calibrate_costs", "cost calibration"),
             (gc, "noise_block_maxima", "MC noise maxima"),
             (gc, "signal_draws", "MC signal draws"),
-            (DD, "extend", "MC direct draws"), (DD, "distances", "MC direct draws"),
+            (gc, "_simulate", "MC simulation"),
             (gc, "direct_halfwidth", "direct halfwidth (rest)"),
             (gc, "kept_draws", "plan search"), (gc, "_chain_candidates", "plan search"),
             (gc, "plan_chain", "plan search"), (gc, "_choose_chain", "plan search"),
