@@ -123,7 +123,7 @@ def fixed_ifft(re, im, bits=16, tw_bits=15):
 def modelB(P, lo, hi, bits, group):
     m = len(P)
     top = 2 ** (bits - 1) - 1
-    q = np.empty(m); Q = np.empty(m, complex)
+    q = np.empty(m)
     for a in range(0, m, group):
         b = P[a:a + group]
         s = max(np.abs(b.real).max(), np.abs(b.imag).max())

@@ -1,8 +1,6 @@
 """Measured choices outside a filter's joint trial: the GPU-or-CPU side of lone single-template
 calls (a paired choice played on the calls) and the offline screens that give the device trial
 its kernel shortlists (_coarse.screen, shortlist). Deterministic fake timers, no real timing."""
-import numpy as np
-
 from matchedfilter import gatechain as gc
 
 

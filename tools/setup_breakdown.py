@@ -11,7 +11,6 @@ first call's time beyond it is setup done inside the call. Prints CPU and wall s
 part and per reference. CSEARCH=0 runs the plan search's Python reference.
 """
 import sys, os, glob, pickle, time, json, collections
-import numpy as np
 import matchedfilter.time_domain as td
 from matchedfilter import gatechain as gc, gatemodel as gm, _calibration as cal, _hierarchical as hi
 from matchedfilter import _layout as lay, _prices as pr

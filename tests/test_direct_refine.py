@@ -1,8 +1,6 @@
 """The CPU direct refine: a survivor refined by direct correlation with its real taps at the
 lags around its last tier's largest coarse lag must report exactly what the whole-block
 transform reports (HierarchicalFilter.set_taps, hmf.c refine_direct_pair)."""
-import os
-
 import numpy as np
 import pytest
 

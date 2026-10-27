@@ -13,7 +13,6 @@ import json
 import math
 
 import numpy as np
-import matchedfilter as mf
 from matchedfilter import _calibration
 import os
 import sys

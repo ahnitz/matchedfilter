@@ -1,8 +1,6 @@
 """The FP16 first gate (src/gate16.cc, ARM with FP16 vectors): an upper bound on the FP32
 gate's coarse maximum for every pair, so it passes every pair the FP32 gate passes, and the
 hierarchical results are those of the FP32 gate."""
-import os
-
 import numpy as np
 import pytest
 

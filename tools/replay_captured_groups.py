@@ -48,8 +48,6 @@ def main():
     a = ap.parse_args()
     tps = tsc_rate()
     tot = {}
-    tot_pairs = 0
-    tot_wall = 0.0
     for f in sorted(glob.glob(f"{a.dir}/cap*.npz")):
         for ser, g in groups(f):
             n = int(g["n"]); spec = g["spectra"]; nt = spec.shape[0]

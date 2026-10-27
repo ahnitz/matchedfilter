@@ -135,9 +135,7 @@ def main():
         return build_ceilings()
     os.environ["MF_GPU_TIMING"] = "1"
     os.environ["MF_GPU_PROFILE"] = "1"                   # per-kernel entries, "k:<kernel>"
-    import numpy as np
     import ladder
-    import matchedfilter as mf
     from matchedfilter import _cudacompute as cc, _gputime
 
     launches = defaultdict(list)       # label -> [[grid, threads, survivors, function]]

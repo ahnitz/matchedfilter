@@ -16,7 +16,6 @@ All detection thresholds are computed using matchedfilter's analytical gate mode
 Microbenchmarks are measured on the active CPU using MatchedFilter.
 """
 import time
-from pathlib import Path
 import numpy as np
 import matchedfilter as mf
 from matchedfilter.gatemodel import gate_for

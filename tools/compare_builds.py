@@ -14,11 +14,9 @@ compared before any timing is reported.
 """
 import argparse
 import json
-import os
 import statistics
 import subprocess
 import sys
-import tempfile
 
 # Runs inside each interpreter.  Kept in one string so the two builds execute
 # byte-identical code and any difference is the library, not the harness.

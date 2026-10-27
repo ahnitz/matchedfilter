@@ -83,7 +83,7 @@ def main():
     from test_gpu_c16_bound import _families
     ctx = cc.Context(0)
     for band in args.bands:
-        fn, wg = tc_kernel(ctx, band, 4), 128
+        fn = tc_kernel(ctx, band, 4)
         errs, lagbad, n, fam_sig = [], 0, 0, {}
         for rep in range(args.reps):
             rng = np.random.default_rng(99 + 7 * rep + band)

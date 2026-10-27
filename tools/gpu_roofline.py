@@ -16,8 +16,6 @@ import sys
 import time
 from pathlib import Path
 
-import numpy as np
-
 # The installed package first: putting the source tree ahead of it hides
 # the compiled _core that an editable install keeps elsewhere.
 try:
@@ -201,7 +199,7 @@ def sweep(p, out, groups, threads, iters, op, widths):
         # chains, which is not a measurement.
         try:
             t = p.run(p.pipeline(chain_src(w, op)), groups, threads, [out, iters])
-        except Exception as e:
+        except Exception:
             rows.append((w, None)); continue
         r = lanes * w * per / t
         if r > 1e13:            # no consumer GPU does 10 TFLOP/s of this

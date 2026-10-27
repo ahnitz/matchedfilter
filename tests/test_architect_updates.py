@@ -3,13 +3,11 @@
 - TimeDomainFilterBank memory management and raw_taps
 - chain trials: what is measured and how it is normalised
 """
-import os
-import tempfile
 import numpy as np
 import pytest
 
 import matchedfilter as mf
-from matchedfilter import _core, CorrelationFilter
+from matchedfilter import _core
 from matchedfilter.time_domain import TimeDomainFilterBank
 
 

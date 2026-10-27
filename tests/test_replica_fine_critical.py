@@ -7,7 +7,6 @@ storage [0, K_max) and 2-data DIF on critical-rate (1024 Hz) input:
 3. Preserves exact unit noise variance (no false alarms at threshold >= 6.0).
 4. Demonstrates 50% template memory reduction and cache efficiency.
 """
-import time
 import numpy as np
 import pytest
 from matchedfilter import MatchedFilter

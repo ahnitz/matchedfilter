@@ -405,7 +405,7 @@ def test_a_gpu_search_gives_the_cpu_search():
             return [(a - extra, b + extra) for a, b in narrow]
         return []
     thr = 0.5 * _median_peak(root, inputs)
-    runs, outside = {}, {}
+    runs = {}
     for device in ("cpu", "gpu:0"):
         got = {}
 

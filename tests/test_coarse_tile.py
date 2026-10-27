@@ -12,7 +12,6 @@ So this compares against numpy directly rather than against another path
 of the same library.
 """
 import ctypes
-import json
 import pathlib
 
 import numpy as np

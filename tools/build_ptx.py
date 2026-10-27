@@ -4,7 +4,6 @@
 Generates PTX blobs in python/matchedfilter/ptx/ alongside spirv/ and metal/.
 """
 import argparse
-import hashlib
 import json
 import os
 import pathlib

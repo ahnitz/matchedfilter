@@ -4,13 +4,9 @@ against standard full-rate filter on dev2.
 Verifies exact numerical parity (< 1e-6 relative difference), peak triggers,
 and microbenchmark timing.
 """
-import os
-import time
 import numpy as np
-import pytest
 
 import matchedfilter as mf
-from matchedfilter import MatchedFilter
 
 def test_bandlimited_dif_exact_parity():
     """Verify that DIF zero-extended IFFT matches full-rate N=2048 IFFT bit-for-bit / < 1e-6."""

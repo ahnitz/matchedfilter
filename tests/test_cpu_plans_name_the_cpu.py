@@ -7,7 +7,6 @@ device that does not exist, made them fail)."""
 import numpy as np
 
 from matchedfilter import TimeDomainFilterBank
-from matchedfilter import time_domain as td
 
 
 def test_a_single_template_cpu_plan_ignores_mf_device(monkeypatch):

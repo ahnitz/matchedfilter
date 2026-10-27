@@ -1,13 +1,10 @@
 """Comprehensive unit tests for the 2-data DIF bandlimited path in TimeDomainFilterBank."""
 import numpy as np
-import pytest
 import matchedfilter as mf
 
 
 def test_time_domain_filter_bank_dif_exact_parity():
     """Verify that TimeDomainFilterBank with engine='dif' matches full-rate FFT output."""
-    N = 2048
-    K = 1024
     n_templates = 16
 
     rng = np.random.default_rng(100)

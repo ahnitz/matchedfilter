@@ -1,9 +1,7 @@
 """The register -> output index map, pinned against the GPU that produced it."""
 import pytest
 
-from matchedfilter import _vulkan
-
-import sys, pathlib
+import sys
 _TOOLS = None
 
 def _tools_dir():

@@ -2,7 +2,6 @@
 and Decimation-in-Frequency (DIF) refinement engine integration.
 """
 import numpy as np
-import pytest
 import matchedfilter as mf
 
 
@@ -12,7 +11,6 @@ def test_hierarchical_filter_bandlimited_dif_direct():
     K = N // 2
     n_templates = 16
     band = 256
-    taps = 8
 
     rng = np.random.default_rng(42)
 
@@ -76,7 +74,6 @@ def test_hierarchical_filter_bandlimited_dif_direct():
 def test_time_domain_filter_bank_hier_template_memory_halved():
     """With pack_templates=True, engine='hier' stores K = N // 2 bins per template;
     the default keeps full spectra (the faster fused refine)."""
-    N = 2048
     n_templates = 8
     rng = np.random.default_rng(123)
 

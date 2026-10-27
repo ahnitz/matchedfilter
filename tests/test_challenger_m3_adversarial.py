@@ -8,8 +8,6 @@ Empirically challenges:
 5. Timing invariance (zero sub-sample drift) and phase linearity.
 6. Boundary conditions (window edges, binsize sweeps, calling order semantics).
 """
-import os
-import math
 import numpy as np
 import pytest
 import matchedfilter as mf

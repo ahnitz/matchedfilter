@@ -150,7 +150,7 @@ def goertzel_seed(S, consts):
     This is the correlation at one lag, which the search should be able to
     reach and improve on rather than having to invent."""
     c = consts.index(0.9987954562051724); s = consts.index(0.049067674327418015)
-    one = CH.index("one"); re = CH.index("re"); im = CH.index("im")
+    re = CH.index("re"); im = CH.index("im")
     return [(4, 2, 0, 0, 2, c),      # R4 = R0*cos
             (5, 2, 0, 1, 2, s),      # R5 = R1*sin
             (0, 1, 0, 4, 0, 5),      # R0 = R4 - R5

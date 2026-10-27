@@ -18,7 +18,6 @@ def test_survivor_pooling_fidelity(n, cascade):
     nd, nt = 4, 16
     band0 = 128 if cascade else 0
     band = 256
-    snr_target = 6.0
     threshold = 5.5
 
     if cascade:
