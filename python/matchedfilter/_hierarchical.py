@@ -18,7 +18,7 @@ from . import _calibration
 from . import _config
 from . import _core
 from . import gatechain as _gatechain
-from . import _chains, _prices, _settings, _trial
+from . import _chains, _choice, _prices, _settings, _trial
 from ._choice import _AUTOTUNE_LOCK, _autotune_enabled, _log_autotune  # noqa: F401
 from ._results import PEAK_DTYPE, _Deferred, _SparsePeaks  # noqa: F401
 from ._filter import MatchedFilter, _GPU_SIZES, _from_any, _valid_series_window  # noqa: F401
@@ -667,7 +667,7 @@ class HierarchicalFilter(MatchedFilter):
                               binsize=binsize, threshold=threshold, templates=templates,
                               raw=raw, decimated=decimated, bin_phase=bin_phase)
         tr = self._plan_trial()
-        if tr is None or tr.replaying:
+        if tr is None or _choice.playing():
             return run()
         full = templates is None or templates[1] >= self.ntemplates
         try:

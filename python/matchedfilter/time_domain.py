@@ -255,43 +255,43 @@ def _joint_round(jobs):
     begin = time.perf_counter()
     out = [None] * len(jobs)
     timed = set()
-    with held():
-        for key, byid in groups.items():
-            banks = list(byid.values())
-            banks[0]._prepare_arms()                    # the trial's arms come from its plans
-            tr = _trial.trial(key, banks[0]._joint_arms)
-            if len(tr.live()) < 2:
-                with _AUTOTUNE_LOCK:
-                    tr.choice.lock(_trial.DEFAULT)
-            if tr.winner is not None:
-                for b in banks:
-                    b._lock_arm(tr.winner)
-                continue
-            # this round's banks: _ROUND_BANKS of them, rotated by the trial's round count
-            k = tr.rounds % len(banks)
-            chosen = (banks[k:] + banks[:k])[:_ROUND_BANKS]
-            for b in chosen:
-                b._prepare_arms()
-            pick = {id(b) for b in chosen}
-            idx = [j for j, (b, _, kw) in enumerate(jobs) if id(b) in pick
-                   and (kw or {}).get("template_index") is None and j not in timed]
-            if not idx:
-                continue
-            sub = [jobs[j] for j in idx]
-            sub_work = sum(len(b.filters_f) * int(np.asarray(x).size) for b, x, _ in sub)
-            if sub_work <= 0:
-                continue
+    for key, byid in groups.items():
+        banks = list(byid.values())
+        banks[0]._prepare_arms()                    # the trial's arms come from its plans
+        tr = _trial.trial(key, banks[0]._joint_arms)
+        if len(tr.live()) < 2:
+            with _AUTOTUNE_LOCK:
+                tr.choice.lock(_trial.DEFAULT)
+        if tr.winner is not None:
+            for b in banks:
+                b._lock_arm(tr.winner)
+            continue
+        # this round's banks: _ROUND_BANKS of them, rotated by the trial's round count
+        k = tr.rounds % len(banks)
+        chosen = (banks[k:] + banks[:k])[:_ROUND_BANKS]
+        for b in chosen:
+            b._prepare_arms()
+        pick = {id(b) for b in chosen}
+        idx = [j for j, (b, _, kw) in enumerate(jobs) if id(b) in pick
+               and (kw or {}).get("template_index") is None and j not in timed]
+        if not idx:
+            continue
+        sub = [jobs[j] for j in idx]
+        sub_work = sum(len(b.filters_f) * int(np.asarray(x).size) for b, x, _ in sub)
+        if sub_work <= 0:
+            continue
 
-            def replay(sub=sub):
-                return TimeDomainFilterBank.filter_series_many(sub)
+        def replay(sub=sub):
+            return TimeDomainFilterBank.filter_series_many(sub)
 
-            res = _trial.run_round(tr, _BankArms.of([jobs[j][0] for j in idx]), replay, sub_work,
-                                   settle=settle_for(sub) if gpu else None)
-            for j, r in zip(idx, res):
-                out[j] = r
-            timed.update(idx)
-        rest = [j for j in range(len(jobs)) if j not in timed]
-        if timed and rest:
+        res = _trial.run_round(tr, _BankArms.of([jobs[j][0] for j in idx]), replay, sub_work,
+                               settle=settle_for(sub) if gpu else None)
+        for j, r in zip(idx, res):
+            out[j] = r
+        timed.update(idx)
+    rest = [j for j in range(len(jobs)) if j not in timed]
+    if timed and rest:
+        with held():                                    # the rest runs once, untimed
             for j, r in zip(rest, TimeDomainFilterBank.filter_series_many([jobs[j] for j in rest])):
                 out[j] = r
     if not timed:
@@ -306,8 +306,6 @@ class _BankArms:
 
     def __init__(self, bank):
         self.bank = bank
-        # the configurations this bank has run (each settled once); forgotten at its lock
-        self.trial_ran = bank.__dict__.setdefault('_trial_ran', set())
 
     @classmethod
     def of(cls, banks):
@@ -1417,7 +1415,6 @@ class TimeDomainFilterBank:
         for p in self._layout_plans(self._layout_rank):
             p.lock_arm(label)
         self._bank_arm, self._in_trial = str(label), False
-        self._trial_ran = set()
 
     def _load_templates(self) -> None:
         for g in self._groups:
