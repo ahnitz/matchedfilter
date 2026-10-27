@@ -135,16 +135,15 @@ def _engine_misses(power, n, chain, fd, inj, window=None, seed=11):
 @pytest.mark.parametrize("chain", [(1024,), (256, 1024), (128, 512, 1024)])
 def test_the_engine_dismisses_its_budget(name, chain):
     """End to end through the C engine: misses among detections are the chain's budget, two-
-    sided. (A multi-tier chain's budget is cut by a one-sided 95% binomial tolerance on the
-    draws, so its expected share sits a little under fd; the test allows for that.)"""
+    sided, multi-tier chains included (their split search's selection bias is removed,
+    gatechain._SPLIT_TOLERANCE_Z)."""
     n, fd = 2048, 0.05
     power = _profile(name, n)
     if not set(chain) <= set(gc.usable_bands(power, n)):
         pytest.skip("a band of %s holds none of %s's power" % (chain, name))
     thr, det, miss = _engine_misses(power, n, chain, fd, 2500)
     p = binomtest(miss, det, p=fd, alternative="two-sided").pvalue
-    p_tol = binomtest(miss, det, p=0.85 * fd, alternative="two-sided").pvalue if len(chain) > 1 else 0.0
-    assert max(p, p_tol) >= ALPHA, ("%s %s: thresholds %s miss %d of %d detections (%.4f), budget %.3f"
+    assert p >= ALPHA, ("%s %s: thresholds %s miss %d of %d detections (%.4f), budget %.3f"
                                     % (name, chain, [round(t, 3) for t in thr], miss, det, miss / det, fd))
 
 
@@ -155,7 +154,7 @@ def test_a_windowed_search_dismisses_its_budget(name):
     n, fd = 2048, 0.05
     power = _profile(name, n)
     thr, det, miss = _engine_misses(power, n, (256, 1024), fd, 2500, window=(512, 1536))
-    p = max(binomtest(miss, det, p=f, alternative="two-sided").pvalue for f in (fd, 0.85 * fd))
+    p = binomtest(miss, det, p=fd, alternative="two-sided").pvalue
     assert p >= ALPHA, ("%s windowed: thresholds %s miss %d of %d detections (%.4f), budget %.3f"
                         % (name, [round(t, 3) for t in thr], miss, det, miss / det, fd))
 

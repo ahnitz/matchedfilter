@@ -968,6 +968,17 @@ def plan_chain(sig, noise, bands, chain, fd, cost, n, snr, prune=False, ntemplat
     return best
 
 
+#: Standard errors of the kept draws' dismissal count a multi-tier chain's budget is cut by
+#: (_chain_candidates): the selection bias of searching splits on the draws they are judged
+#: on. Measured on independent draws (200k, n = 2048, fd 1%, 10 profiles, 30 plans; K is about
+#: 100 at every fd, as _gm._nsamp_for scales the draws): with no cut two-tier plans dismissed
+#: 1.050 +- 0.024 of the budget and three-tier ones (a wider search) 1.085 +- 0.029; at 0.75,
+#: 0.985 +- 0.022 and 1.008 +- 0.025 -- the budget on average, as a single tier's is. The
+#: one-sided 95% cut it replaces (1.645) left 0.92: gates passing work the budget allowed
+#: them to dismiss.
+_SPLIT_TOLERANCE_Z = 0.75
+
+
 def _chain_candidates(sig, noise, bands, chain, fd, snr, prune):
     """plan_chain's search: every (thresholds, reach) it considers for `chain`, in its order,
     or None when fd cannot be resolved."""
@@ -979,9 +990,10 @@ def _chain_candidates(sig, noise, bands, chain, fd, snr, prune):
         K = int(math.floor(float(fd) * M))   # the single-tier contract of gatemodel.gate_for
     else:
         # Splitting the budget searches many threshold combinations on the same draws and keeps
-        # the cheapest, which favours combinations whose dismissal those draws understate. A
-        # one-sided 95% binomial tolerance on the budget removes that selection bias.
-        K = int(math.floor(float(fd) * M - 1.645 * math.sqrt(M * float(fd) * (1.0 - float(fd)))))
+        # the cheapest, which favours combinations whose dismissal those draws understate. A cut
+        # of the budget by its measured size removes that selection bias (_SPLIT_TOLERANCE_Z).
+        K = int(math.floor(float(fd) * M - _SPLIT_TOLERANCE_Z
+                           * math.sqrt(M * float(fd) * (1.0 - float(fd)))))
     if K < 8:
         return None
     # The earlier tiers' thresholds sit at index <= K of their sorted columns; the last
