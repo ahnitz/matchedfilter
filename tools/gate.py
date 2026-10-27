@@ -14,6 +14,9 @@ Checks, in order (each reports ok / FAIL / skip, and the gate fails on any FAIL)
                segments) so the trials have locked: the steady state a search runs in
   margin       `tools/gate_margin.py --loud`: narrow gates have no false dismissals and a
                loud injection fails open
+  fdr          `tools/fdr_audit.py`: every profile and chain at n = 2048 and 4096, over the
+               whole block and a window, FP32 and Q15 tiers, dismisses its budget against
+               the flat filter, two-sided (`--fdr-inj` injections a case)
   repro        tests/test_reproducible_choices.py, `--loops` times: processes sharing a
                cost file make the same choices
   followups    test_call_plan + test_followup_batch, `--loops` times (a past race)
@@ -147,6 +150,21 @@ def margin(g, args, device):
     g.record("margin", "ok" if rc == 0 else "FAIL", "%s: %s (%.0fs)" % (" ".join(gates), last, dt))
 
 
+def fdr(g, args):
+    """The gate model's budget end to end, whole block and windowed."""
+    jobs = str(max(1, min(8, (os.cpu_count() or 2) - 2)))
+    parts, rc_all, t_all = [], 0, 0.0
+    for tag, extra in (("block", []), ("window", ["--window", "192,1856"])):
+        cmd = [sys.executable, "tools/fdr_audit.py", "--n", "2048", "4096", "--q15", "--inj",
+               str(args.fdr_inj), "--jobs", jobs] + extra
+        rc, out, dt = _run(cmd, log=g.logdir / ("fdr_%s.log" % tag))
+        last = out.strip().splitlines()[-1] if out.strip() else "no output"
+        parts.append("%s: %s" % (tag, last))
+        rc_all |= rc
+        t_all += dt
+    g.record("fdr", "ok" if rc_all == 0 else "FAIL", "; ".join(parts) + " (%.0fs)" % t_all)
+
+
 def loop(g, name, tests, n):
     fails = 0
     for i in range(n):
@@ -192,16 +210,18 @@ def main(argv=None):
     ap.add_argument("--prime", type=int, default=40,
                     help="segments that prime the settled check's fresh cost file (default 40)")
     ap.add_argument("--cpu-g16", action="store_true", help="also gate the CPU fp16 tier (ARM)")
+    ap.add_argument("--fdr-inj", type=int, default=20000,
+                    help="injections a case in the fdr check (default 20000; --quick 4000)")
     ap.add_argument("--quick", action="store_true", help="one suite run, 2 loops, no settled check")
     ap.add_argument("--only", nargs="+",
-                    choices=["suite", "check", "settled", "margin", "repro", "followups", "ci"])
+                    choices=["suite", "check", "settled", "margin", "fdr", "repro", "followups", "ci"])
     ap.add_argument("--logdir", default=None)
     ap.add_argument("--lock", default="/tmp/mf-gate-%d.lock" % os.getuid(),
                     help="per-machine lock file (fixed, not TMPDIR, so every session shares "
                          "it); a gate waits for any other holding it")
     args = ap.parse_args(argv)
     if args.quick:
-        args.runs, args.loops = 1, 2
+        args.runs, args.loops, args.fdr_inj = 1, 2, 4000
     args.logdir = args.logdir or tempfile.mkdtemp(prefix="mf-gate-")
     lock = _machine_lock(args.lock)
     g = Gate(args.logdir)
@@ -210,7 +230,7 @@ def main(argv=None):
     rc, out, _ = _run(["git", "rev-parse", "--short", "HEAD"])
     print("gate: %s on %s, device %s, logs %s" % (out.strip(), os.uname().nodename, device or "cpu only",
                                                   args.logdir), flush=True)
-    want = set(args.only or ["suite", "check", "settled", "margin", "repro", "followups", "ci"])
+    want = set(args.only or ["suite", "check", "settled", "margin", "fdr", "repro", "followups", "ci"])
     if args.quick and not args.only:
         want.discard("settled")
 
@@ -228,6 +248,8 @@ def main(argv=None):
             fn(g, args, device)
     if "margin" in want:
         margin(g, args, device)
+    if "fdr" in want:
+        fdr(g, args)
     if "repro" in want:
         loop(g, "repro", ["tests/test_reproducible_choices.py"], args.loops)
     if "followups" in want:

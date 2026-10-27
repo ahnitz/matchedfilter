@@ -10,7 +10,7 @@ what the budget governs.
 maximum, with no margin and no FP32 run of the tier behind it, at the threshold the gate model
 sets for the tier. Its rounding (rms 0.46 sqrt(N) LSB, about 0.2% of the threshold at the
 production bands) is small beside the band's own loss. Measured against the flat filter by
-injection (`tools/chain_fdr_vs_flat.py`: n = 2048, chain 256/512/1024, SNR 6, fd 1e-3, 400k
+injection (`tools/chain_fdr_vs_flat.py`, since folded into `tools/fdr_audit.py`: n = 2048, chain 256/512/1024, SNR 6, fd 1e-3, 400k
 injections per profile), the
 chain dismisses 168 and 184 of ~228,600 flat detections with the gate, against 171 and 185
 with the FP32 first tier. On 221,607 captured production pairs the gate passes 1.00x as many
@@ -64,9 +64,9 @@ u = 2^-11 throughout; rms(y) is the pair's output rms over all lags (Parseval).
 
 - **`tools/gate_margin.py --loud`** (every merge, in `tools/gate.py`): margin use and the
   loud-injection fail-open, per gate.
-- **The chain against the flat filter, by injection** (`tools/chain_fdr_vs_flat.py`, and
-  `tools/verify_cascade_fdr.py` across spectral shapes): the acceptance test for any first
-  tier, Q15 included.
+- **The chain against the flat filter, by injection** (`tools/fdr_audit.py --q15`, every
+  merge in `tools/gate.py`): every profile and chain, FP32 and Q15 tiers, two-sided against
+  the budget. This is the acceptance test for any first tier, Q15 included.
 - **`tests/test_tier_conformance.py`:** each CPU tier kind (FP32, Q15, FP16 on ARM) and the
   machine's GPU, at thresholds in wide gaps of the exact maxima, refines exactly the pairs
   above them and reports the same peaks.

@@ -284,7 +284,7 @@ A step that changes C or workflows is first pushed to a `ci/<topic>` branch and 
   - The rest of that file is tests/test_search_contracts.py.
   - Timing turned into counts: Python calls per run() (sys.setprofile) are equal at 1, 16 and 64 pairs; an equal set_reference reloads nothing. Chain ranking and cost relations use a committed cost model (tests/data/cost_model_2048_zen5.json), and the live calibration keeps structural checks.
   - The tautological half of the cascade subset test is gone.
-  - The fdr-verification CI job is gone; it duplicated test_fdr_multishape at low power. tools/verify_cascade_fdr.py stays as the large-sample audit tool.
+  - The fdr-verification CI job is gone; it duplicated test_fdr_multishape at low power. tools/verify_cascade_fdr.py stays as the large-sample audit tool (2026-10-26: it, chain_fdr_vs_flat.py and score_fdr.py became tools/fdr_audit.py, run by the gate; test_fdr_multishape.py retired, covered two-sided by test_fdr_calibration.py).
 - 2026-10-22: **C5: nightly workflow.** .github/workflows/nightly.yml runs at 03:17 UTC, and on ci/nightly/** pushes and dispatch:
   - the suite under ASan and UBSan with tools/sanitize.sh, on x86_64 and arm64;
   - the suite in reverse module order;
