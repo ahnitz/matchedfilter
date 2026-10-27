@@ -176,12 +176,39 @@ class HierOps:
             tiebreak=lambda c: (c[2], c[1], c[0]), forced=forced)
         return layout
 
+    def _played_layout(self, band):
+        """The coarse layout a call runs at this band: the offline screen's choice
+        (_coarse_layout), or its runner-up where the device trial plays or locked it on real
+        batches (time_domain.kernel_slot "coarse"). MF_COARSE_LAYOUT forces one."""
+        from ._coarse import forced_layout
+        first = self._coarse_layout(band)
+        if forced_layout(band) is not None:
+            return first
+        pair = self._kernel_shortlist("coarse", band, first)
+        if pair is None:
+            return first
+        from .time_domain import kernel_slot
+        label = kernel_slot(self._dev_name(), "coarse", band, *pair)
+        return next((c for c in self._x_coarse_candidates(band)
+                     if self._layout_label(band, c) == label), first)
+
+    def _dev_name(self):
+        holder = getattr(self, "_device_state", None) or self
+        return (getattr(holder, "device_name", "") or getattr(self, "device_name", "")
+                or getattr(self, "name", ""))
+
     def _gate_use(self, band):
         """Whether a later gate tier at this band runs the one-bin refine's gate-only build,
         reporting the window's maximum alone (nbins word 0), rather than the one-bin
         election."""
-        return (self._shipped("tier1", band) and self._shipped("tier1gate", band)
-                and self._gate_way(band) == "gate")
+        if not (self._shipped("tier1", band) and self._shipped("tier1gate", band)):
+            return False
+        way = self._gate_way(band)
+        pair = self._kernel_shortlist("gateway", band, way)
+        if pair is not None:
+            from .time_domain import kernel_slot
+            way = kernel_slot(self._dev_name(), "gateway", band, *pair)
+        return way == "gate"
 
     def _gate_way(self, band):
         """How a later gate tier reports at this band (tierb.slang MF_GATE_ONLY): "gate", the
@@ -203,6 +230,24 @@ class HierOps:
                 band, ("elect", "gate"), str, gatechain.gpu_kernel_id(self.kernel_family),
                 lambda cs: self._time_gate_ways(band, cs))
         return way
+
+    def _kernel_shortlist(self, what, band, first):
+        """(default, alternative) labels of a kernel slot at this band (what: "coarse", the
+        fp16 coarse layout of tier 0; "gateway", how a later tier reports), or None: the
+        offline screen's fastest and its runner-up. The screen times every candidate on
+        synthetic data and leaves the pathological ones out (a full dispatch of some can
+        outlast a driver's watchdog); the device trial plays the two on real batches
+        (time_domain.kernel_slot). A choice read back from MF_COST_FILE, untimed here, has
+        no runner-up and is kept."""
+        holder = getattr(self, "_device_state", None) or self
+        if what == "coarse":
+            times = holder.__dict__.get("coarse_times", {}).get(band, {})
+            first = self._layout_label(band, first)
+        else:
+            times = holder.__dict__.get("gate_times", {}).get(band, {})
+            first = str(first)
+        rest = sorted((t, k) for k, t in times.items() if k != first)
+        return (first, rest[0][1]) if rest else None
 
     #: Tier-0 survivors per pair in the gate-way timing: a later tier runs over a sparse
     #: list with its grid sized for every pair, as a call dispatches it. Every pair listed
@@ -240,7 +285,11 @@ class HierOps:
             natives.append(native)
             return self._x_time(native, {}, 2)
         try:
-            return time_staged([list(ways)], time_way, rounds=3)
+            out = time_staged([list(ways)], time_way, rounds=3)
+            if out:
+                holder = getattr(self, "_device_state", None) or self
+                holder.__dict__.setdefault("gate_times", {})[band] = dict(out)
+            return out
         finally:
             for native in natives:
                 self._x_release(native)
@@ -310,7 +359,8 @@ class HierOps:
                 self._x_release(native)
             for b in (data, tmpl, cidx, cval):
                 b.destroy()
-        self.__dict__.setdefault("coarse_times", {}).setdefault(band, {}).update(
+        holder = getattr(self, "_device_state", None) or self
+        holder.__dict__.setdefault("coarse_times", {}).setdefault(band, {}).update(
             {self._layout_label(band, c): v for c, v in out.items()})
         return out
 
@@ -389,7 +439,7 @@ class HierOps:
                                  % (i, nt, b, ct.shape))
         bands = tuple(b for b, _, _ in tiers)
         half = self._shipped("c16", bands[0])          # the fp16 coarse role at tier 0
-        layout = self._coarse_layout(bands[0]) if half else None
+        layout0 = self._played_layout(bands[0]) if half else None
         shift = bin_shift(binsize)
         t2 = float(threshold) ** 2 if threshold > 0 else 0.0
         top = max(bands)
@@ -435,9 +485,10 @@ class HierOps:
         # this call (Choice.play) when the call is waited on; each way has its own record.
         handles = {}
 
-        def run(way):
-            key = ("hier", n, bands, nd, nt, nbins, layout, feed, way, rw_key is not None, ed,
-                   storage_key)
+        def run(way, layout=layout0):
+            gate = self._gate_use(bands[1]) if len(bands) > 1 else None
+            key = ("hier", n, bands, nd, nt, nbins, layout, gate, feed, way, rw_key is not None,
+                   ed, storage_key)
             table = self._exec_table()
             rec = table.get(key)
             fresh = rec is None
@@ -473,17 +524,10 @@ class HierOps:
             return self._hier_run(rec, binds, shape, sparse, way, len(tiers) > 1,
                                   frac_key if dv is not None else None, slot, async_submit)
 
-        if not sparse:
-            res, way = run("dense"), "dense"
-        else:
-            ch = self._sparse_way(("hier", n, bands, nd, nt, nbins))
-            way = ch.winner or ch.preference
-            if async_submit:                # a call in flight cannot be timed: no round
-                res = run(way)
-            else:
-                ran = self.__dict__.setdefault("_sparse_ran", {}).setdefault(
-                    ("hier", n, bands, nd, nt, nbins), set())
-                res = ch.play(run, ran)
+        # The sparse read, the coarse layout and the gate way are kernel slots the device
+        # trial plays on whole batches (time_domain.kernel_slot): a call here runs what they say.
+        way = self._sparse_way() if sparse else "dense"
+        res = run(way)
         if handle_out is not None and way in handles:
             handle_out.append(handles[way])
         return res
@@ -716,14 +760,12 @@ class HierOps:
             binds["bands"] = (nser, max(b for b, _, _ in tiers), code)
         return binds
 
-    def _sparse_way(self, shape):
-        """How this shape reads a sparse result -- its survivors' rows gathered on the host,
-        or the hits compacted on the device: a paired _choice.Choice per shape, as for flat
-        peaks (_gpuexec.SPARSE_WAYS)."""
-        from . import _choice
-        from ._gpuexec import SPARSE_WAYS, _SPARSE_SCHEDULE
-        return _choice.choice("sparse-way", ("hier",) + tuple(shape), SPARSE_WAYS["hier"],
-                              scope=self.__dict__, **_SPARSE_SCHEDULE)
+    def _sparse_way(self):
+        """How a sparse result is read -- its survivors' rows gathered on the host, or the hits
+        compacted on the device: a kernel slot of the device trial (_gpuexec.SPARSE_WAYS)."""
+        from ._gpuexec import SPARSE_WAYS
+        from .time_domain import kernel_slot
+        return kernel_slot(self._dev_name(), "sparse", "hier", *SPARSE_WAYS["hier"])
 
     def _hier_run(self, rec, binds, shape, sparse, way, cascade, frac_key, slot,
                   async_submit):

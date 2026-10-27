@@ -358,14 +358,46 @@ _GPU_RAN = {}
 
 def _gpu_arm(label) -> dict:
     """The settings an arm of the device trial runs: DEFAULT, or one dimension moved
-    ("fuse=0", "single=cpu", "interleave=3")."""
+    ("fuse=0", "single=cpu", "interleave=3", or a kernel slot's alternative,
+    "kern:coarse:256=<layout label>": kernel_slot)."""
     out = dict(_GPU_DEFAULT)
     if label != "default":
         k, _, v = str(label).partition("=")
+        if k.startswith("kern:"):
+            _, what, band = k.split(":")
+            out["kernels"] = {(what, band): v}
+            return out
         if k not in out:
             raise ValueError("not a device-trial arm: %r" % (label,))
         out[k] = (v == "1") if k == "fuse" else (int(v) if k == "interleave" else v)
     return out
+
+
+#: Kernel slots per GPU device name: every decision a call's kernels take that the device
+#: trial "gpu-kernels" plays on batches -- (what, band) -> (default, alternative) labels:
+#: the fp16 coarse layout of tier 0 and the gate way of a later tier at a band (offline
+#: screens' fastest and runner-up, _gpuhier._kernel_shortlist), and how sparse results are
+#: read ("sparse", "hier" / "flat"). Registered by the calls that consult them (kernel_slot).
+_KERNEL_SLOTS = {}
+#: The slots each device's last batch consulted: an arm counts as running a batch differently
+#: only where its slot was used (a batch's banks recur).
+_KERNEL_SEEN = {}
+
+
+def kernel_slot(device, what, band, default, alternative):
+    """A call consults kernel slot (what, band) on device (its name) with these two labels;
+    returns the label to run: the running batch's arm, else the device trial's lock, else the
+    default."""
+    slot = (str(what), str(band))
+    _KERNEL_SLOTS.setdefault(device, {})[slot] = (default, alternative)
+    _KERNEL_SEEN.setdefault(device, set()).add(slot)
+    over = _GPU_ARM.get("kernels", {})
+    if slot in over:
+        return over[slot]
+    for devs, arm in _GPU_LOCKS.items():
+        if any(d.endswith(" " + device) for d in devs) and slot in arm.get("kernels", {}):
+            return arm["kernels"][slot]
+    return default
 
 
 def gpu_setting(name, device=None):
@@ -392,6 +424,9 @@ _GPU_TRIALS = {
                    lambda vulkan: ["default", "single=cpu"],
                    lambda jobs: _config.get("MF_GPU_ITEMS")
                    and any((kw or {}).get("template_index") is not None for _, _, kw in jobs)),
+    # kernel slots: its arms are the slots the device set's calls registered (a first batch
+    # registers them; trial arms are fixed, so slots first seen later keep their default)
+    "gpu-kernels": (("kernels",), None, lambda jobs: True),
 }
 
 
@@ -403,45 +438,91 @@ def _interleave_depths():
 def _gpu_batch(jobs, run):
     """Run a batch (run() -> its results) with the device trials' settings: per set of GPU
     devices, a paired _choice.Choice for each group of batch-wide settings (_GPU_TRIALS: the
-    submissions fused or not and a fused batch's interleave depth; where follow-ups run),
-    played on the batch itself where the batch exercises it (Choice.play: every arm that runs
-    the batch differently runs it, waited, back to back), its lock then used for every
-    batch. Batch-wide settings are decided on real batches: they were online choices sampled
-    on unpaired batches of other content, and the interleave depth on device timers of single
-    submissions. One trial plays a batch; the others take their lock or default. Returns
-    run()'s results under the settings."""
+    submissions fused or not and a fused batch's interleave depth; where follow-ups run; the
+    kernels' slots -- coarse layouts, gate ways, sparse reads), played on the batch itself
+    where the batch exercises it (Choice.play: every arm that runs the batch differently runs
+    it, waited, back to back), its lock then used for every batch. These were online choices
+    sampled on unpaired batches of other content, the interleave depth on device timers of
+    single submissions, and the kernel slots on synthetic dispatches or single calls a batch
+    never makes (its calls are submitted in flight). One trial plays a batch; the others take
+    their lock or default. Returns run()'s results under the settings."""
     from ._choice import _autotune_enabled, playing
     from .device import parse as _parse_device
     parsed = [_parse_device(b.device) for b, _, _ in jobs if getattr(b, "device", None) is not None]
     gpus = [d for d in parsed if d.kind == "gpu"]
     devs = _gpu_devs(gpus) if gpus else None
-    locked = _GPU_LOCKS.setdefault(devs, {}) if devs else {}
+    locked = _GPU_LOCKS.setdefault(devs, {"kernels": {}}) if devs else {}
+
+    def settings(over=None):
+        out = dict(_GPU_DEFAULT, **{k: v for k, v in locked.items() if k != "kernels"})
+        out["kernels"] = dict(locked.get("kernels", {}))
+        for k, v in (over or {}).items():
+            if k == "kernels":
+                out["kernels"].update(v)
+            else:
+                out[k] = v
+        return out
     if not gpus or _REPLAYING[0] or playing() or not _autotune_enabled():
-        return _with_gpu_arm(dict(_GPU_DEFAULT, **locked), run)
+        return _with_gpu_arm(settings(), run)
     from . import _choice
     vulkan = any(getattr(d, "backend", "") == "vulkan" for d in gpus)
+    names = {d.name for d in gpus}
+    # the slots the previous batch consulted; this batch's calls register theirs afresh
+    seen = set().union(*(_KERNEL_SEEN.pop(nm, set()) for nm in names))
     for name, (dims, arms, plays) in _GPU_TRIALS.items():
-        if all(d in locked for d in dims) or not plays(jobs):
-            continue
-        ch = _choice.choice(name, devs, arms(vulkan), store_key="%s|%s" % (name, "+".join(devs)),
-                            paired=True, confirm=True, minimum=_trial.ROUNDS, cap=_trial.ROUND_CAP,
-                            what="%s %s" % (name.upper(), devs))
-        if ch.winner is not None:
-            locked.update({d: _gpu_arm(ch.winner)[d] for d in dims})
-            continue
-        many = sum((kw or {}).get("template_index") is None for _, _, kw in jobs) > 1
+        if name == "gpu-kernels":
+            slots = sorted({(slot, alt) for nm in names
+                            for slot, (_, alt) in _KERNEL_SLOTS.get(nm, {}).items()
+                            if slot not in locked.get("kernels", {})})
+            if not slots:
+                continue
+            labels = ["default"] + ["kern:%s:%s=%s" % (w, b, alt) for (w, b), alt in slots]
+            ch = _choice.choice(name, devs, labels, store_key="%s|%s" % (name, "+".join(devs)),
+                                paired=True, confirm=True, minimum=_trial.ROUNDS,
+                                cap=_trial.ROUND_CAP, what="%s %s" % (name.upper(), devs))
+            if ch.winner is not None:
+                _lock_kernels(locked, ch, names)
+                continue
 
-        def config(arm):
-            a = _gpu_arm(arm)
-            return tuple(a[d] if d != "interleave" or (a["fuse"] and many) else 0 for d in dims)
+            def config(arm, seen=seen):
+                k = _gpu_arm(arm).get("kernels", {})
+                return tuple(sorted((s, v) for s, v in k.items() if s in seen))
+        else:
+            if all(d in locked for d in dims) or not plays(jobs):
+                continue
+            ch = _choice.choice(name, devs, arms(vulkan), store_key="%s|%s" % (name, "+".join(devs)),
+                                paired=True, confirm=True, minimum=_trial.ROUNDS,
+                                cap=_trial.ROUND_CAP, what="%s %s" % (name.upper(), devs))
+            if ch.winner is not None:
+                locked.update({d: _gpu_arm(ch.winner)[d] for d in dims})
+                continue
+            many = sum((kw or {}).get("template_index") is None for _, _, kw in jobs) > 1
+
+            def config(arm, dims=dims, many=many):
+                a = _gpu_arm(arm)
+                return tuple(a[d] if d != "interleave" or (a["fuse"] and many) else 0 for d in dims)
         ran = _GPU_RAN.setdefault((name, devs), set())
-        base = dict(_GPU_DEFAULT, **locked)
-        res = ch.play(lambda arm: _with_gpu_arm(
-            dict(base, **{d: _gpu_arm(arm)[d] for d in dims}), run), ran, config=config)
+        res = ch.play(lambda arm: _with_gpu_arm(settings(_gpu_arm(arm)), run), ran, config=config)
         if ch.winner is not None:
-            locked.update({d: _gpu_arm(ch.winner)[d] for d in dims})
+            if name == "gpu-kernels":
+                _lock_kernels(locked, ch, names)
+            else:
+                locked.update({d: _gpu_arm(ch.winner)[d] for d in dims})
         return res
-    return _with_gpu_arm(dict(_GPU_DEFAULT, **locked), run)
+    return _with_gpu_arm(settings(), run)
+
+
+def _lock_kernels(locked, ch, names):
+    """The kernel trial's lock into the device set's settings: the winning arm's slot at its
+    alternative, every other slot the trial played at its default."""
+    win = _gpu_arm(ch.winner).get("kernels", {})
+    for lab in ch.candidates:
+        for slot in _gpu_arm(lab).get("kernels", {}):
+            default = next((_KERNEL_SLOTS[nm][slot][0] for nm in names
+                            if slot in _KERNEL_SLOTS.get(nm, {})), None)
+            value = win.get(slot, default)
+            if value is not None:
+                locked["kernels"][slot] = value
 
 
 def _gpu_devs(gpus):

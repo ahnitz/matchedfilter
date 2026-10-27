@@ -115,15 +115,13 @@ def test_every_sparse_way_gives_the_same_peaks(monkeypatch):
     measured choice) is the same result, through the fused batches of filter_series_many:
     the device compaction once read the refine's output before it was written, losing peaks
     only when its timing made it the choice."""
-    from matchedfilter import _choice
-    from matchedfilter._gpuexec import SPARSE_WAYS
+    from matchedfilter import time_domain as td
     out = {}
-    orig = _choice.Choice.play
+    orig = td.kernel_slot
     for way in ("rows", "compact"):
         # The sparse ways only (flat peaks take this way where they have it, else theirs).
-        monkeypatch.setattr(_choice.Choice, "play", lambda self, run, ran=None, w=way: run(
-            w if w in self.candidates else self.candidates[0])
-            if self.candidates in SPARSE_WAYS.values() else orig(self, run, ran))
+        monkeypatch.setattr(td, "kernel_slot", lambda dev, what, band, d, alt, w=way: (
+            w if w in (d, alt) else d) if what == "sparse" else orig(dev, what, band, d, alt))
         out[way] = _run(monkeypatch, False)
     for a, b in zip(out["rows"], out["compact"]):
         assert a == b

@@ -41,8 +41,8 @@ bank = TimeDomainFilterBank(taps, tap_counts=counts, engine='hier', threshold=5.
 bank.set_reference(w, delta_f=df)
 L = 1 << 16
 out = []
-# The joint trial persists its rounds in MF_COST_FILE and may span processes. The test runs
-# processes until no trial is left open on file.
+# Each process runs its trials to their locks; the first lock written to MF_COST_FILE stands
+# and later processes adopt it. The test runs processes until every choice is locked on file.
 for seg in range(20):
     r = np.random.default_rng(100 + seg)
     x = ((r.standard_normal(L) + 1j * r.standard_normal(L)) / np.sqrt(2)).astype(np.complex64)

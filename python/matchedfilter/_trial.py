@@ -100,10 +100,9 @@ class Trial:
         base = rounds_wanted()
         self.key = key
         self.choice = _choice.Choice(
-            tuple(arms), store_key="joint|" + key, what="TRIAL %s" % key, warmup=0,
+            tuple(arms), store_key="joint|" + key, what="TRIAL %s" % key,
             minimum=base, cap=max(base, ROUND_CAP if base == ROUNDS else 2 * base),
-            budget=(0, UNROUNDED_BUDGET), paired=True, persist=True, label=str, parse=_valid,
-            confirm=True)
+            budget=(0, UNROUNDED_BUDGET), paired=True, label=str, parse=_valid, confirm=True)
         self.replaying = False
 
     @property
