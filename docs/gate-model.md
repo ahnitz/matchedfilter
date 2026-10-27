@@ -652,25 +652,26 @@ One trial per key decides every coupled dimension at once, over complete configu
 
 * **Arms.** `default` puts every dimension at its default: the bank's smallest candidate block
   size, each plan's model chain, and the model's screen setting for that chain. It is the
-  preference. Every other arm moves one dimension, and the model fills in the rest
-  conditional on it:
+  preference. In the first pass every other arm moves one dimension, and the model fills in
+  the rest conditional on it:
   * `n=4096`: the next single block size;
   * `n=model`: the model's own priced layout;
-  * `chain=+1`, `chain=+2`: each plan's next shortlisted chain after its own model chain,
-    in modelled cost order. This is a chain per plan, not one chain for every plan: plans of
-    different profiles want different chains, and one chain for all of them lost on every
-    machine;
   * `q15=0` and `q15=1`: the screen off or on.
+
+  Chains are not arms: each plan runs its model chain. A pooled chain decision, sampled on a
+  search's first banks, picked a chain faster there and 5-10% slower over the rest.
 
   An instance that cannot take an arm's value runs its default there, for example a chain
   outside a plan's feasible set, or a screen its first band does not have.
 * **Resolution.** Each instance (a bank, or a plan used on its own) resolves an arm to its own
   configuration. Arms an instance resolves alike are one configuration, timed once, so they
   can only tie.
-* **Rounds.** A sample is a paired round. Every distinct configuration of the live arms runs
-  the same work back to back. Settling happens only on a configuration's first run on a bank
-  (an untimed replay; on a GPU, replays until no recording is built), and every run is then
-  timed. The order reverses each round. Rounds pool as ratios to `default` (`paired_choice`),
+* **Rounds.** A sample is a paired round (`Choice.play`, the engine every trial uses). Every
+  distinct configuration of the live arms runs the same work back to back, each timed run
+  right after an untimed run of the same configuration (on a GPU, replays until no recording
+  is built): a GPU batch run second ran 20-30% faster, so every timed run is a second run.
+  The order reverses each round. On the CPU the untimed runs cost the cap67 replay at most
+  0.35 s more than settling each configuration once (under 0.5% of the job). Rounds pool as ratios to `default` (`paired_choice`),
   so banks and plans of different cost pool into one trial. That pooling is also why a round
   needs only a few banks: it replays two of the batch's trial banks (`_ROUND_BANKS`, rotated
   from round to round over the batch), and the rest of the batch runs once on `default`. A
@@ -687,12 +688,18 @@ One trial per key decides every coupled dimension at once, over complete configu
   1.08 and 0.98 of `default`, its true ratio about 1). With seven challengers, one passes the
   75% rule on noise more often than one alone does: an unconfirmed trial on a loaded Ivy
   Bridge locked a fixed chain with the screen off, and ran 18% slower.
-* **End.** A trial locks at its first confirmed winner, keeps `default` on a tie, and stops at
-  its cap (`2 x MF_TRIAL_ROUNDS` rounds) or its budget of calls that could not be rounds.
-* **Locks.** A lock is applied by each instance resolving the winning label, including
-  instances made later. A bank made after a lock builds only the winner's layout. For any
-  lock but `n=model`, no block size is priced at all. The lock is kept in `MF_COST_FILE`
-  (`choice|joint|<key>`) when one is set.
+* **Passes.** A pass locks at its first confirmed winner, keeps its base on a tie, and stops
+  at its cap (`2 x MF_TRIAL_ROUNDS` rounds) or its budget of calls that could not be rounds.
+  A pass that locks an arm other than its base opens the next pass around that arm: the arm,
+  and the arm with each dimension it has not moved moved too (`n=4096,q15=0`;
+  `_trial.current_pass`, `_settings.around`). The trial ends at a pass that keeps its base.
+  A first pass that keeps `default` ends it, so only a trial that moved pays a second pass.
+  The GPU device trials (`gpu-batch`, `gpu-kernels`) search the same way.
+* **Locks.** The trial's end is applied by each instance resolving the winning label,
+  including instances made later. A bank made after a lock builds only the winner's layout.
+  For a lock that moves no block size, or moves it to a single size, no block size is priced
+  at all. Each pass is kept in `MF_COST_FILE` (`choice|joint|<key>`, then
+  `choice|joint|<key>|<base>`) when one is set, and an open pass resumes in the next process.
 
 Banks run their rounds in `filter_series_many` (`time_domain._joint_round`), on the CPU and
 GPU alike. A plan inside a bank is governed by the bank's trial. A plan used on its own runs

@@ -256,8 +256,8 @@ class HierarchicalFilter(MatchedFilter):
     def _arm_q15(self, chain):
         """The screen setting this plan's arm gives chain: the arm's, else the model's (off for a
         pinned chain, which the model did not price)."""
-        kind, v = _settings.parse_arm(self._arm)
-        q = v if kind == "q15" else (False if self._pinned is not None else self._q15_model(chain))
+        q = _settings.moves(self._arm).get("q15")
+        q = q if q is not None else (False if self._pinned is not None else self._q15_model(chain))
         return bool(q) and self._q15_ok(tuple(chain))
 
     def arm_config(self, label):
@@ -266,8 +266,8 @@ class HierarchicalFilter(MatchedFilter):
             self._chain = self._choose_chain()          # first use: the model's choice
             self._q15 = False
         chain = tuple(self._chain)
-        kind, v = _settings.parse_arm(label)
-        q = v if kind == "q15" else (False if self._pinned is not None else self._q15_model(chain))
+        q = _settings.moves(label).get("q15")
+        q = q if q is not None else (False if self._pinned is not None else self._q15_model(chain))
         return chain, bool(q) and self._q15_ok(chain)
 
     def use_arm(self, label):

@@ -345,7 +345,8 @@ def _interleave_depths():
 
 def _gpu_trials(gpus, jobs, seen):
     """The device trials of a batch: (name, {dimension: alternatives}, exercised(dimension)).
-    Each decides its dimensions (_settings.DIMS) together; an arm moves one. exercised says
+    Each decides its dimensions (_settings.DIMS) together, in coordinate passes
+    (_trial.current_pass): the first pass's arms move one. exercised says
     whether this batch runs a dimension at all: an arm counts as running the batch
     differently only through dimensions it exercises (_gpu_batch), so a trial is played
     only on batches that can tell its arms apart."""
@@ -412,10 +413,15 @@ def _gpu_batch(jobs, run):
     for name, dims, exercised in _gpu_trials(gpus, jobs, seen):
         if not dims or all(d in locked for d in dims):
             continue
-        arms = [_settings.DEFAULT] + [_settings.arm(d, v) for d in sorted(dims) for v in dims[d]]
-        ch = _choice.choice(name, devs, arms, store_key="%s|%s" % (name, "+".join(devs)),
-                            confirm=True, parse=_settings.valid,
-                            what="%s %s" % (name.upper(), devs))
+        proposals = [_settings.arm(d, v) for d in sorted(dims) for v in dims[d]]
+
+        def make(base, arms, name=name):
+            what = "%s %s" % (name.upper(), devs) + ("" if base == _settings.DEFAULT
+                                                      else " around %s" % base)
+            return _choice.choice(name, (devs, base), arms, confirm=True, parse=_settings.valid,
+                                  store_key=_trial.pass_key("%s|%s" % (name, "+".join(devs)), base),
+                                  what=what)
+        ch = _trial.current_pass(make, proposals)
         if ch.winner is None:
             def config(label, dims=dims, exercised=exercised):
                 mv = _settings.moves(label)
@@ -425,20 +431,20 @@ def _gpu_batch(jobs, run):
                 continue            # every live arm runs this batch alike: nothing to play
             ran = _GPU_RAN.setdefault((name, devs), set())
             res = ch.play(lambda label: seen_run(_settings.moves(label)), ran, config=config)
+            ch = _trial.current_pass(make, proposals)
             if ch.winner is not None:
-                _lock_trial(locked, ch, registered)
+                _lock_trial(locked, ch.winner, dims, registered)
             return res
-        _lock_trial(locked, ch, registered)
+        _lock_trial(locked, ch.winner, dims, registered)
     return seen_run({})
 
 
-def _lock_trial(locked, ch, registered):
-    """A device trial's lock into its device set's settings: the winning arm's dimension at
-    its value, every other dimension the trial played at its default."""
-    win = _settings.moves(ch.winner)
-    for label in ch.candidates:
-        for d in _settings.moves(label):
-            locked[d] = win.get(d, _gpu_default(d, registered))
+def _lock_trial(locked, winner, dims, registered):
+    """A device trial's end into its device set's settings: each of its dimensions at the
+    winning arm's value, or at its default."""
+    win = _settings.moves(winner)
+    for d in dims:
+        locked[d] = win.get(d, _gpu_default(d, registered))
 
 
 def _gpu_devs(gpus):
@@ -1217,10 +1223,10 @@ class TimeDomainFilterBank:
                 w = _trial.winner(_trial_key(self)) if on else None
                 self._bank_arm = w or _trial.DEFAULT
                 self._in_trial = on and w is None
-                kind, v = _settings.parse_arm(self._bank_arm)
+                v = _settings.moves(self._bank_arm).get("n")
                 if w is not None:
                     # the lock's layout alone: its "n=" size, else the default (smallest) size
-                    n = (None if v == "model" else v) if kind == "n" else (singles[0] if singles else None)
+                    n = (None if v == "model" else v) if v is not None else (singles[0] if singles else None)
                     alts, sig = [self._choose_layout(fine_ref, df, single_n=n)], [n or "model"]
                 else:
                     alts = [self._choose_layout(fine_ref, df, single_n=n) for n in singles]
@@ -1360,8 +1366,7 @@ class TimeDomainFilterBank:
         """The candidate layout an arm runs: its own for "n=" (a size, or the model's priced
         layout), else the default -- the first candidate, the smallest size."""
         sig = list(getattr(self, '_candidate_sig', ()) or ("model",))
-        kind, v = _settings.parse_arm(label)
-        want = v if kind == "n" else sig[0]
+        want = _settings.moves(label).get("n", sig[0])
         return sig.index(want) if want in sig else 0
 
     def _layout_plans(self, rank):
