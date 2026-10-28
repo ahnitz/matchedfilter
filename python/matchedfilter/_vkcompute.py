@@ -1188,7 +1188,6 @@ class Context(Executor, InputUploads):
                                              ctypes.c_uint64]
         self._fences = {}
         self._uploaded = {"data": {}, "tmpl": {}}
-        self._queue_offset = 0
 
         self._attach_device(index)
         _CONTEXTS_BY_ID[id(self)] = self
