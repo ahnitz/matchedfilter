@@ -139,7 +139,9 @@ def include_dir():
 
         cc myprog.c $(python -c "import matchedfilter; print('-I'+matchedfilter.include_dir())") ...
 
-    The C interface is the same ten functions the class wraps; see matchedfilter.h.
+    matchedfilter.h declares the C interface the Python classes are built on -- the flat
+    plans (ap_mf_*), the hierarchical plans (ap_hmf_*) and their helpers -- and documents
+    each function.
     """
     import os
     return os.path.dirname(os.path.abspath(__file__))

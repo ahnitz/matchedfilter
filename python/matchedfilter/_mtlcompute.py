@@ -975,7 +975,7 @@ class Context(Executor, InputUploads):
     def _commit(self, cmd, label, *, async_submit=False, finish=None, owner=None):
         """Commit an owned command buffer; ``finish()`` reads its outputs.
 
-        Synchronous unless async_submit, in which case a _Pending is returned
+        Synchronous unless async_submit, in which case a Pending (_gpu_cache) is returned
         and the wait happens when it is called. Each in-flight result owns
         its buffers (callers key their storage by slot), so the host never
         writes a buffer a running command still reads.

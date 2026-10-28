@@ -57,9 +57,10 @@ VARS: Tuple[Var, ...] = (
     Var("MF_DEVICE", "config", "py", "`cpu`",
         "Device for plans built without one (`device.parse(None)`).", kind="text", value="cpu"),
     Var("MF_COST_FILE", "config", "py", "unset",
-        "JSON file of measured cost models and trial locks, kept between processes. Unset: "
-        "cold start, no trials kept. One writer per open contest: processes sharing a file "
-        "while a trial is open overwrite each other's samples (said once per contest).", kind="text"),
+        "JSON file of measured cost models, prices, trial locks and kernel choices, kept "
+        "between processes. Unset: cold start, nothing kept. Records on file are used and only "
+        "missing ones measured; a model, price or lock another process stored first is used "
+        "in place of this one's.", kind="text"),
     Var("MF_EXECUTION_POLICY", "config", "py", "the shipped `execution-policy.json`",
         "Another execution-policy table.", kind="text"),
     Var("MF_ISA", "config", "both", "best the CPU supports",
@@ -165,15 +166,9 @@ REMOVED = (
      "survivor compaction, which is IEEE because it must list a NaN coarse value",
      ("MF_METAL_IEEE",)),
     ("2026-10-26", "block sizes and the Q15 screen are one joint trial of paired rounds, "
-     "and the chain is the model's; MF_TRIAL_ROUNDS sets its rounds",
-     ("MF_BLOCK_TRIALS", "MF_CHAIN_TRIALS")),
-    ("2026-10-26", "the gate chain is the cost model's, never a trial arm (MF_CHAIN_FORCE "
-     "pins one for measurement)", ("MF_CHAIN_MARGIN",)),
-    ("2026-10-17", "switches no tool, test or CI job used were removed (their defaults kept)",
-     ("MF_BLOCK_TRIAL_RANKS", "MF_CUDA_BLOCKING_SYNC", "MF_CUDA_GRAPHS", "MF_CUDA_PREFETCH",
-      "MF_DIRECT_TRACE", "MF_FUSE", "MF_GATE16_ELECT", "MF_GBLK", "MF_GPU_FUSE",
-      "MF_GPU_FUSE_CACHE", "MF_GPU_FUSE_CHUNK", "MF_MFTILE", "MF_N1", "MF_NOSTORE",
-      "MF_SERPAD", "MF_SRPROD", "MF_VK_NO_SUBGROUP_PIN")),
+     "whose rounds MF_TRIAL_ROUNDS sets; the gate chain is the cost model's, never a trial "
+     "arm (MF_CHAIN_FORCE pins one for measurement)",
+     ("MF_BLOCK_TRIALS", "MF_CHAIN_TRIALS", "MF_CHAIN_MARGIN")),
     ("2026-10-22", "a stored trial lock is final; the steady re-check it switched on could "
      "make processes sharing a cost file choose differently", ("MF_TRIAL_RECHECK",)),
     ("2026-10-22", "stage-B blocking measured slower at every length on Zen 3, Zen 5 and "
@@ -187,6 +182,11 @@ REMOVED = (
                                         "MF_METAL_COARSE_TWT")),
     ("2026-10-22", "renamed MF_COARSE_RAW (MF_COARSE_RAW=1 is what MF_VK_C16_BOUND=0 did, "
      "on every GPU backend)", ("MF_VK_C16_BOUND",)),
+    ("2026-10-17", "switches no tool, test or CI job used were removed (their defaults kept)",
+     ("MF_BLOCK_TRIAL_RANKS", "MF_CUDA_BLOCKING_SYNC", "MF_CUDA_GRAPHS", "MF_CUDA_PREFETCH",
+      "MF_DIRECT_TRACE", "MF_FUSE", "MF_GATE16_ELECT", "MF_GBLK", "MF_GPU_FUSE",
+      "MF_GPU_FUSE_CACHE", "MF_GPU_FUSE_CHUNK", "MF_MFTILE", "MF_N1", "MF_NOSTORE",
+      "MF_SERPAD", "MF_SRPROD", "MF_VK_NO_SUBGROUP_PIN")),
     ("2026-10-07", "the gate-model simulation cache it located went with the cost tables; "
      "chain thresholds are drawn in each process, and MF_COST_FILE keeps measured costs",
      ("MF_GATE_CACHE_FILE",)),
