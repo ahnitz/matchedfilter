@@ -531,3 +531,10 @@ Metal (M2): the fine stage is device-bound (94% busy), ~85-100 ms per segment, ~
 - **Calibration:** the clock-reference ranking (`_ClockRef`) needs verifying under CPU load on the
   APU. Chain choice still differs between processes: (256,) vs (256, 512) here, 88 vs 137 ms on
   the M2.
+  - 2026-10-27, 8060S: verified, and it did not hold. Under load the clock changes between one
+    call and the next, so a reference timed just before a call scaled it to a quarter in 40%
+    of pairs; with the series copied from the host before each call and a median of five,
+    the terms spread 0.25-4x between processes. The calibration now times calls on a
+    resident series, keeps each configuration's fastest of 15 rounds of 3 calls taken in turn,
+    and scales by the reference once per calibration (`_calibration.calibrate_costs_gpu`,
+    CHANGELOG). The n=2048 chain then held at (256, 512) in 31 of 32 ladder processes.
