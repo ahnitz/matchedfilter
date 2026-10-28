@@ -12,9 +12,16 @@ from matchedfilter import _calibration
 from matchedfilter import gatechain as gc
 
 
-def _probe_calibration(monkeypatch, kind="f32", step=0.0):
+class _Resident(np.ndarray):
+    """A series in the probe's device memory (Plan.empty_shared)."""
+
+
+def _probe_calibration(monkeypatch, kind="f32", step=0.0, host=1.0, spell=None, reps=2):
     """Exercise the real calibration with deterministic device times and survivor counts.
-    step: device time a two-tier call adds whenever anything passes its first tier."""
+    step: device time a two-tier call adds whenever anything passes its first tier.
+    host: how much slower a call runs on a series copied from the host than on one resident
+    in device memory (the device idles through the copy). spell(i): how much slower the
+    i-th device call runs (a slow spell spans consecutive calls, whatever they run)."""
     n, blocks, nt = 256, 16, 64
     inputs = _calibration._gpu_cal_inputs(n, blocks, nt, 11)
     calls, raw_calls = [], []
@@ -30,6 +37,9 @@ def _probe_calibration(monkeypatch, kind="f32", step=0.0):
 
         def set_templates(self, spectra):
             assert spectra.shape == (self.nt, n)
+
+        def empty_shared(self, shape, dtype=np.complex64):
+            return np.empty(shape, dtype).view(_Resident)
 
         def set_coarse_threshold(self, thresholds):
             self.thresholds = thresholds
@@ -47,6 +57,8 @@ def _probe_calibration(monkeypatch, kind="f32", step=0.0):
             ns += refined * 80.0
             self._gpu.last_tier1_survivors = first
             self._gpu.last_refinements = refined
+            ns *= (1.0 if isinstance(series, _Resident) else host)
+            ns *= spell(len(calls) - 1) if spell is not None else 1.0
             if self._gpu._timing:
                 # The reference says the device currently runs twice as slowly.
                 self.log.extend([("run", 2 * ns / 1e6), ("k:coarse", 999.0)])
@@ -67,7 +79,7 @@ def _probe_calibration(monkeypatch, kind="f32", step=0.0):
     # Skip the wall-clock warm-up wait; this probe has no physical device to warm.
     with monkeypatch.context() as clock_patch:
         clock_patch.setattr(time, "perf_counter", itertools.count().__next__)
-        cm = _calibration.calibrate_costs_gpu(n, "probe", blocks=blocks, reps=2, nt=nt)
+        cm = _calibration.calibrate_costs_gpu(n, "probe", blocks=blocks, reps=reps, nt=nt)
     expected_shape = (len(inputs[1]), blocks)
     metrics = {"device_calls": len(calls),
                "host_only_calls": sum(shape != expected_shape for shape in calls),
@@ -104,3 +116,31 @@ def test_a_second_tiers_price_is_its_slope_not_a_fixed_cost_on_few_survivors(mon
     for density in (0.01, 0.1):
         assert cm.sparse(128, density) == pytest.approx(10.0)
     assert _calibration._sparse_rows([(100, 1000.0)], 500.0, 1000) == [(0.1, 5.0)]
+
+
+def _assert_probe_prices(cm):
+    assert cm.block == pytest.approx(100.0)
+    assert cm.dense == pytest.approx({64: 2.0, 128: 4.0})
+    for density in (0.01, 0.1):
+        assert cm.refine(density) == pytest.approx(80.0)
+        assert cm.sparse(128, density) == pytest.approx(10.0)
+
+
+def test_calibration_times_calls_on_a_series_resident_in_device_memory(monkeypatch):
+    """The fine stage reads its middle series where it lies in device memory. A series
+    copied from the host on every call (16 MB at n=2048) left an 8060S idle long enough to
+    run the timed call up to 1.8x slower, by a varying amount: the calibration must time
+    calls as the fine stage makes them."""
+    cm, _ = _probe_calibration(monkeypatch, host=1.8)
+    _assert_probe_prices(cm)
+
+
+def test_a_slow_spell_moves_no_price(monkeypatch):
+    """A spell of slow calls (here 6 in a row at 2x, every 24 calls) spans whatever runs
+    then: with a configuration's repetitions back to back it covered a whole run and its
+    median, and moved a second tier's slope 2.3x on an 8060S. Repetitions are taken in
+    turn across configurations and each price is its fastest, so a spell slows one
+    repetition of several configurations, never all of one."""
+    cm, _ = _probe_calibration(monkeypatch, spell=lambda i: 2.0 if (i // 6) % 4 == 1 else 1.0,
+                               reps=5)
+    _assert_probe_prices(cm)
