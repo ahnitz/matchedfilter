@@ -16,7 +16,7 @@ some calibration tools need separately captured data.
 | Q15 template tails | `bench_q15_tails.py` | Alternate two builds over direct Q15 screens and grouped hierarchical series calls; verify masks, statistics, peaks, and survivor counts |
 | CPU ladder profile | `profile_cpu_ladder.py` | Fix chain and thresholds, compare Q15 off/on or separate builds, and record stage costs and result hashes; requires a real bank and matching profiles |
 | Job setup | `setup_capture.py`, `setup_replay.py`, `setup_breakdown.py`, `setup_decisions_diff.py` | Capture a job's banks and references, replay its matchedfilter setup, charge its time by part, and diff two replays' decisions |
-| Gate validation | `fdr_audit.py`, `audit_gate_model.py`, `audit_threshold.py`, `make_psd_profiles.py` | Measure gate chains' dismissal by injection against the flat filter, two-sided (`fdr_audit.py`, run by the gate); not part of normal installation |
+| Gate validation | `fdr_audit.py`, `split_bias.py`, `audit_gate_model.py`, `audit_threshold.py`, `make_psd_profiles.py` | Measure gate chains' dismissal by injection against the flat filter, two-sided (`fdr_audit.py`, run by the gate), and the budget split's selection bias on independent model draws (`split_bias.py`); not part of normal installation |
 
 For a quick CPU/GPU overlap-save comparison with output validation:
 
@@ -142,7 +142,9 @@ decisions compared).
 **Gate accuracy and bounds**: `gate_margin.py` (every narrow first tier), `c16_sigma.py`
 (GPU fp16 rounding, for its bound), `cuda_tc_sigma.py`, `gate16_error.py`, `gate16_check.py`,
 `coarse_precision.py`, `coarse_fixed.py`, `fdr_audit.py` (every profile and chain against
-the flat filter, two-sided), `audit_gate_model.py`, `audit_threshold.py`, `audit_gpu_bands.py`;
+the flat filter, two-sided), `split_bias.py` (each plan's dismissal on model draws it was
+not chosen on: the measurement behind `gatechain._SPLIT_TOLERANCE_Z`), `audit_gate_model.py`,
+`audit_threshold.py`, `audit_gpu_bands.py`;
 `make_psd_profiles.py` writes the pycbc noise-curve test profiles (`tests/data/psd_model_profiles.npz`).
 
 **GPU devices**: `gpu_features.py`, `gpu_roofline.py`, `cuda_roofline.py`,

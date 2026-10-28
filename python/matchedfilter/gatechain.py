@@ -1006,13 +1006,17 @@ def plan_chain(sig, noise, bands, chain, fd, cost, n, snr, prune=False, ntemplat
 
 
 #: Standard errors of the kept draws' dismissal count a multi-tier chain's budget is cut by
-#: (_chain_candidates): the selection bias of searching splits on the draws they are judged
-#: on. Measured on independent draws (200k, n = 2048, fd 1%, 10 profiles, 30 plans; K is about
-#: 100 at every fd, as _gm._nsamp_for scales the draws): with no cut two-tier plans dismissed
-#: 1.050 +- 0.024 of the budget and three-tier ones (a wider search) 1.085 +- 0.029; at 0.75,
-#: 0.985 +- 0.022 and 1.008 +- 0.025 -- the budget on average, as a single tier's is. The
-#: one-sided 95% cut it replaces (1.645) left 0.92: gates passing work the budget allowed
-#: them to dismiss.
+#: (_chain_candidates), for the selection bias of searching splits on the draws they are
+#: judged on. The bias does not depend on fd or n. On independent draws (tools/split_bias.py:
+#: 10 profiles x 30 model seeds, every chain of one to three bands, fd 1e-2 and 1e-3, n = 2048
+#: and 4096, where K, the dismissed count, is about 115), with no cut two-tier plans dismiss
+#: 1.024-1.028 of the budget and three-tier ones (a wider search) 1.034-1.042, +- 0.005; one
+#: tier, 1.003-1.007. At 0.75 they dismiss 0.954-0.972, and the chain choose_chain picks
+#: 0.963-0.983: the cut is about twice the bias (the mean is the budget at z 0.26-0.30 for two
+#: tiers, 0.37-0.44 for three, 0.37-0.55 for the pick; docs/gate-model.md, 2026-10-27). 0.75
+#: was measured at the model's own seed, which every profile shares, so its mean over
+#: profiles was one draw's, and that draw sat high. The one-sided 95% cut before it (1.645)
+#: left 0.92: gates passing work the budget allowed them to dismiss.
 _SPLIT_TOLERANCE_Z = 0.75
 
 

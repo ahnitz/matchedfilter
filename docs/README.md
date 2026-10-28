@@ -69,8 +69,8 @@ that and that every link resolves.
 
 - [Gate model and measured choices log](gate-model.md) (2026-09-26 to 2026-10-27; the
   newest sections lead, the rest run in date order from 2026-09-26): the one simulation, the
-  budget split's selection bias and per-plan scatter, the retired tables, chain and
-  block-size trials, and the joint trial.
+  budget split's selection bias (the same at every fd, and half the cut) and per-plan
+  scatter, the retired tables, chain and block-size trials, and the joint trial.
 - [Cleanup, robustness and CI plan](robustness-plan.md) (adopted 2026-10-21, with its log).
 - [Unification plan](unification-plan.md) (started 2026-10-15, with its log): the shared GPU
   host layer, accounting instead of cost tables, knobs instead of variants.

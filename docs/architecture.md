@@ -246,18 +246,24 @@ population or noise.
   dismissal on fresh draws averages fd.
 - A multi-tier chain searches threshold splits on the same draws it is judged on and keeps
   the cheapest, which favours splits whose dismissal those draws understate. Its budget is
-  therefore cut by `_SPLIT_TOLERANCE_Z = 0.75` standard errors of the dismissed count. That
-  is the measured size of the selection bias, not a confidence margin: on independent
-  draws, two- and three-tier plans dismiss the budget on average with the cut (the
-  measurement is in the comment at `gatechain._SPLIT_TOLERANCE_Z`). If the split grids
-  change, the bias must be measured again.
-- Individual plans scatter about the mean. With about 100 dismissed draws per plan, a
-  plan's realised dismissal has a standard deviation of roughly 0.07 to 0.11 of fd, about
-  what counting 100 draws gives, for one-, two- and three-tier plans alike; the worst of
-  60 plans was 1.28 of the budget at fd 1e-2 and 1.13 at 1e-3 (independent draws, n = 2048,
-  [the 2026-10-27 log entry](gate-model.md#the-budget-splits-selection-bias-and-per-plan-scatter-2026-10-27)
-  gives the method and the numbers). The spread comes from the finite draws, not from the
-  split search, so more draws, not a larger cut, would narrow it.
+  therefore cut by `_SPLIT_TOLERANCE_Z = 0.75` standard errors of the dismissed count. The
+  bias does not depend on fd or n: on independent draws (`tools/split_bias.py`, 10
+  profiles x 30 model seeds, fd 1e-2 and 1e-3, n = 2048 and 4096), with no cut two-tier
+  plans dismiss 1.02-1.03 of the budget and three-tier plans 1.03-1.04. The cut is about
+  twice that, so with it the plans made for a given chain dismiss 0.95-0.97 of the
+  budget, and the chain `choose_chain` picks, whose choice among chains adds a selection
+  bias of its own, 0.96-0.98. The value 0.75 came from one model seed shared by every profile, which sat
+  high; which value z should target is open
+  ([the 2026-10-27 log entry](gate-model.md#the-split-bias-does-not-depend-on-fd-and-the-cut-is-twice-its-size-2026-10-27)).
+  If the split grids change, measure the bias again with `tools/split_bias.py`.
+- Individual plans scatter about the mean. With K of about 115 dismissed draws per plan
+  (fd 7e-5 to 1e-2, where `gatemodel._nsamp_for` scales the draws with 1/fd), a plan's
+  realised dismissal has a standard deviation of 0.09 of fd, 1/sqrt(K + 1), for one-, two-
+  and three-tier plans alike. Of 1500-6000 plans per tier count the worst was 1.26-1.41 of
+  the budget, but averaged over 30 model seeds no (profile, chain) dismisses more than
+  1.071. The spread comes from the finite draws, not from the split search, so more
+  draws, not a larger cut, would narrow it. The gate model's one seed gives every profile
+  the same underlying noise, so a job's plans share one draw's luck.
 - The CPU direct refine's window may lose a further `gatechain._LOCALISE_SHARE` (5%) of fd
   (`gatechain.direct_halfwidth`; the plan runs its half-width plus one coarse sample,
   `HierarchicalFilter._direct_halfwidth`).
