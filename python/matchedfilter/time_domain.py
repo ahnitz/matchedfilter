@@ -1502,11 +1502,8 @@ class TimeDomainFilterBank:
 
         eff_threshold = self.threshold if threshold is None else float(threshold)
 
-        out_template_indices = []
-        out_sample_indices = []
-        out_snrs = []
-        out_tstarts = []
-        out_block_lens = []
+        # The peaks' columns, filled by _consume_into and read by _results_from.
+        lists = ([], [], [], [], [])
         # A bin size the caller (or the bank) gives is each window's: its bins start at the
         # window's start, wherever the blocks fall (_window_bin_phases). A bin a block edge
         # cuts comes back as two partial bins, merged in build(). Without one, a bin is the
@@ -1514,69 +1511,12 @@ class TimeDomainFilterBank:
         aligned = binsize is not None or self.binsize is not None
         merge_bs = []
 
-
         if template_index is not None:
-            if template_index < 0 or template_index >= self.n_templates:
-                raise IndexError(f"template_index {template_index} out of range [0, {self.n_templates})")
             self._groups
             target_g, ti_local = self._template_map[template_index]
             work_items = [(target_g, (ti_local, 1))]
         else:
             work_items = [(g, None) for g in self._groups]
-
-        def consume(aidx, aval, sub_starts, g, tmpl_arg, N):
-            # aidx has shape (nblocks, ntemplates, nbins), or is a sparse result (aval None)
-            if aval is None:
-                sp = aidx
-                if sp.flat.size == 0:
-                    return
-                nt_, nb_ = sp.shape[1], sp.shape[2]
-                bi, rest = np.divmod(sp.flat, nt_ * nb_)
-                ti = rest // nb_
-                out_template_indices.append(np.full(bi.size, template_index, dtype=np.int64)
-                                            if tmpl_arg is not None else g.template_indices[ti])
-                out_sample_indices.append(sub_starts[bi] + sp.idx)
-                out_snrs.append(sp.val)
-                out_tstarts.append(sub_starts[bi])
-                out_block_lens.append(np.full(bi.size, N, dtype=np.int64))
-                return
-            if tmpl_arg is not None:
-                # Single template filtered (ntemplates == 1)
-                if aidx.ndim == 3 and aidx.shape[2] == 1:
-                    ii = aidx[:, 0, 0]
-                    bi = np.nonzero(ii >= 0)[0]
-                    if bi.size:
-                        out_template_indices.append(np.full(bi.size, template_index, dtype=np.int64))
-                        out_sample_indices.append(sub_starts[bi] + ii[bi])
-                        out_snrs.append(aval[:, 0, 0][bi])
-                        out_tstarts.append(sub_starts[bi])
-                        out_block_lens.append(np.full(bi.size, N, dtype=np.int64))
-                else:
-                    bi, _, bini = np.nonzero(aidx >= 0)
-                    if bi.size:
-                        out_template_indices.append(np.full(bi.size, template_index, dtype=np.int64))
-                        out_sample_indices.append(sub_starts[bi] + aidx[bi, 0, bini])
-                        out_snrs.append(aval[bi, 0, bini])
-                        out_tstarts.append(sub_starts[bi])
-                        out_block_lens.append(np.full(bi.size, N, dtype=np.int64))
-            else:
-                if aidx.ndim == 3 and aidx.shape[2] == 1:
-                    ii = aidx[:, :, 0]
-                    bi, ti = np.nonzero(ii >= 0)
-                    if bi.size:
-                        out_template_indices.append(g.template_indices[ti])
-                        out_sample_indices.append(sub_starts[bi] + ii[bi, ti])
-                        out_snrs.append(aval[:, :, 0][bi, ti])
-                        out_tstarts.append(sub_starts[bi])
-                        out_block_lens.append(np.full(bi.size, N, dtype=np.int64))
-                else:
-                    bi, ti, bini = np.nonzero(aidx >= 0)
-                    if bi.size:
-                        out_template_indices.append(g.template_indices[ti])
-                        out_sample_indices.append(sub_starts[bi] + aidx[bi, ti, bini])
-                        out_snrs.append(aval[bi, ti, bini])
-                        out_tstarts.append(sub_starts[bi])
-                        out_block_lens.append(np.full(bi.size, N, dtype=np.int64))
 
         from ._results import _Deferred, _SparsePeaks
         defer = getattr(self, '_defer', False)
@@ -1672,25 +1612,13 @@ class TimeDomainFilterBank:
                 wk_s = (bws // 2).astype(np.int64)
                 w_end = np.minimum(bwe, N)
                 wk_e = ((w_end + 1) // 2).astype(np.int64)
-                bin_counts = np.maximum(1, (wk_e - wk_s + bs_k - 1) // bs_k)
-                if len(bstarts) <= 1 or np.all(bin_counts == bin_counts[0]):
-                    groups_bins = [(bstarts, bws, bwe, None)]
-                else:
-                    groups_bins = []
-                    for u_cnt in np.unique(bin_counts):
-                        mask = (bin_counts == u_cnt)
-                        groups_bins.append((bstarts[mask], bws[mask], bwe[mask], None))
+                groups_bins = _bin_count_groups(
+                    bstarts, bws, bwe, np.maximum(1, (wk_e - wk_s + bs_k - 1) // bs_k))
             elif bs >= N:
                 groups_bins = [(bstarts, bws, bwe, None)]
             else:
-                bin_counts = ((bwe - bws + bs - 1) // bs).astype(np.int64)
-                if len(bstarts) <= 1 or np.all(bin_counts == bin_counts[0]):
-                    groups_bins = [(bstarts, bws, bwe, None)]
-                else:
-                    groups_bins = []
-                    for u_cnt in np.unique(bin_counts):
-                        mask = (bin_counts == u_cnt)
-                        groups_bins.append((bstarts[mask], bws[mask], bwe[mask], None))
+                groups_bins = _bin_count_groups(
+                    bstarts, bws, bwe, ((bwe - bws + bs - 1) // bs).astype(np.int64))
 
             # Every bin count in one GPU submission where the backend can, instead of a
             # submission and a wait per count (see MatchedFilter._run_series_ragged).
@@ -1776,41 +1704,22 @@ class TimeDomainFilterBank:
                     pending.append((_Deferred(lambda r=(aidx, aval): r), sub_starts, g,
                                     tmpl_arg, N))
                     continue
-                consume(aidx, aval, sub_starts, g, tmpl_arg, N)
+                _consume_into(lists, aidx, aval, sub_starts, g, tmpl_arg, N, template_index)
 
         def build():
             for d, sub_starts, g, tmpl_arg, N in pending:
                 res = d.result()
                 if not d.empty:
-                    consume(*((res, None) if isinstance(res, _SparsePeaks) else res),
-                            sub_starts, g, tmpl_arg, N)
-            if merge_bs and out_template_indices:
+                    _consume_into(lists, *((res, None) if isinstance(res, _SparsePeaks) else res),
+                                  sub_starts, g, tmpl_arg, N, template_index)
+            if merge_bs and lists[0]:
                 # Partial bins (a block edge inside a window bin) into their window bins.
-                cols = [np.concatenate(c) for c in (out_template_indices, out_sample_indices,
-                                                    out_snrs, out_tstarts, out_block_lens)]
+                cols = [np.concatenate(c) for c in lists]
                 for bs_m in merge_bs:
                     cols = list(_merge_window_bins(W, bs_m, *cols))
-                for lst, c in zip((out_template_indices, out_sample_indices, out_snrs,
-                                   out_tstarts, out_block_lens), cols):
+                for lst, c in zip(lists, cols):
                     lst[:] = [c]
-            if out_template_indices:
-                if len(out_template_indices) == 1:
-                    return FilterResults(
-                        template_indices=out_template_indices[0].astype(np.int64, copy=False),
-                        sample_indices=out_sample_indices[0].astype(np.int64, copy=False),
-                        snr=out_snrs[0].astype(np.complex64, copy=False),
-                        block_starts=out_tstarts[0].astype(np.int64, copy=False),
-                        block_lengths=out_block_lens[0].astype(np.int64, copy=False),
-                    )
-                return FilterResults(
-                    template_indices=np.concatenate(out_template_indices).astype(np.int64),
-                    sample_indices=np.concatenate(out_sample_indices).astype(np.int64),
-                    snr=np.concatenate(out_snrs).astype(np.complex64),
-                    block_starts=np.concatenate(out_tstarts).astype(np.int64),
-                    block_lengths=np.concatenate(out_block_lens).astype(np.int64),
-                )
-            else:
-                return _EMPTY_FILTER_RESULTS
+            return _results_from(lists)
 
         return _Deferred(build) if pending else build()
 
@@ -2565,35 +2474,62 @@ def _stored_bins(g):
     return g._stored_bins
 
 
+def _bin_count_groups(bstarts, bws, bwe, bin_counts):
+    """Returns the blocks split into run_series calls of one bin count each: a list of
+    (starts, window starts, window ends, None), one per bin count in increasing order, or
+    one entry holding every block when they all have the same count."""
+    if len(bstarts) <= 1 or np.all(bin_counts == bin_counts[0]):
+        return [(bstarts, bws, bwe, None)]
+    groups = []
+    for u in np.unique(bin_counts):
+        m = bin_counts == u
+        groups.append((bstarts[m], bws[m], bwe[m], None))
+    return groups
+
+
 def _consume_into(lists, aidx, aval, sub_starts, g, tmpl_arg, N, template_index):
-    """Append the peaks of one run_series result (nblocks, ntemplates, nbins) to lists."""
+    """Append the peaks of one run_series result of shape (nblocks, ntemplates, nbins) to
+    lists, the five columns of a FilterResults, in the result's C order (block, template,
+    bin). Returns nothing.
+
+    The result is dense, aidx and aval arrays of that shape (aidx -1 in an empty bin), or
+    sparse, a _SparsePeaks as aidx and aval None. Blocks start at sub_starts and are N long.
+    With tmpl_arg given the call filtered one template, whose peaks are template_index's;
+    otherwise template t of the result is group g's template g.template_indices[t]."""
     ti_out, si_out, snr_out, ts_out, bl_out = lists
-    if tmpl_arg is not None:
-        bi, _, bini = np.nonzero(aidx >= 0)
-        if bi.size:
-            ti_out.append(np.full(bi.size, template_index, dtype=np.int64))
-            si_out.append(sub_starts[bi] + aidx[bi, 0, bini])
-            snr_out.append(aval[bi, 0, bini])
-            ts_out.append(sub_starts[bi])
-            bl_out.append(np.full(bi.size, N, dtype=np.int64))
+    if aval is None:
+        if aidx.flat.size == 0:
+            return
+        nt, nb = aidx.shape[1], aidx.shape[2]
+        bi, rest = np.divmod(aidx.flat, nt * nb)
+        ti = rest // nb
+        si, snr = sub_starts[bi] + aidx.idx, aidx.val
     else:
         bi, ti, bini = np.nonzero(aidx >= 0)
-        if bi.size:
-            ti_out.append(g.template_indices[ti])
-            si_out.append(sub_starts[bi] + aidx[bi, ti, bini])
-            snr_out.append(aval[bi, ti, bini])
-            ts_out.append(sub_starts[bi])
-            bl_out.append(np.full(bi.size, N, dtype=np.int64))
+        if not bi.size:
+            return
+        t = 0 if tmpl_arg is not None else ti
+        si, snr = sub_starts[bi] + aidx[bi, t, bini], aval[bi, t, bini]
+    ti_out.append(np.full(bi.size, template_index, dtype=np.int64) if tmpl_arg is not None
+                  else g.template_indices[ti])
+    si_out.append(si)
+    snr_out.append(snr)
+    ts_out.append(sub_starts[bi])
+    bl_out.append(np.full(bi.size, N, dtype=np.int64))
 
 
 def _results_from(lists):
+    """Returns the FilterResults of the columns _consume_into filled, or the empty result
+    when they hold no peaks. A column of one chunk is that chunk itself where its dtype
+    already matches, not a copy; a column of several chunks is their concatenation."""
     ti, si, snr, ts, bl = lists
     if not ti:
         return _EMPTY_FILTER_RESULTS
+    join = (lambda c: c[0]) if len(ti) == 1 else np.concatenate
     return FilterResults(
-        template_indices=np.concatenate(ti).astype(np.int64),
-        sample_indices=np.concatenate(si).astype(np.int64),
-        snr=np.concatenate(snr).astype(np.complex64),
-        block_starts=np.concatenate(ts).astype(np.int64),
-        block_lengths=np.concatenate(bl).astype(np.int64),
+        template_indices=join(ti).astype(np.int64, copy=False),
+        sample_indices=join(si).astype(np.int64, copy=False),
+        snr=join(snr).astype(np.complex64, copy=False),
+        block_starts=join(ts).astype(np.int64, copy=False),
+        block_lengths=join(bl).astype(np.int64, copy=False),
     )
