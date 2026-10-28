@@ -392,9 +392,21 @@ def _rows(rec, keep):
 #: template groups share one simulation. ~6 MB each at n = 4096.
 _NOISE_RECORDS = OrderedDict()
 _RECORDS_MAX = 16
-#: Records a row the simulation's arrays first have room for, in units of ln L + 3 for a
-#: running maximum over L lags (_simulate).
-_ROOM = 1.0
+#: Records a row the simulation's first call has room for, in units of ln L + 3 for a running
+#: maximum over L lags (_simulate); every later call's room is measured.
+_ROOM = 2.0
+#: Rows the simulation's first call runs (_simulate): enough to measure each statistic's records
+#: a row to a few percent, few enough that room for twice the usual is a few MB.
+_PILOT = 2048
+#: Standard errors past the measured records a row that a call has room for (_simulate).
+_ROOM_Z = 4.0
+
+
+def _grown(a, keep, size):
+    """A new array of `size` elements of a's type holding a's first `keep`."""
+    out = np.empty(size, a.dtype)
+    out[:keep] = a[:keep]
+    return out
 
 
 def _simulate(p, n, bands, rows, row0, seed, signal=None, noise=True, keep_at=0.0):
@@ -403,39 +415,66 @@ def _simulate(p, n, bands, rows, row0, seed, signal=None, noise=True, keep_at=0.
     statistic is below keep_at at every lag), and with noise each band's records of the noise
     alone. A block's draws depend only on its row, so its noise alone is the same whichever
     call simulates it. Returns (signal records or None, noise records or None): per statistic
-    and side (fine first, right then left), and per band, the records (pos, val, off)."""
+    and side (fine first, right then left), and per band, the records (pos, val, off); pos and
+    val may be views of arrays a few percent longer."""
     from . import _core
     scale = (np.sqrt(p) / np.sqrt(2)).astype(np.float32)
     kmax = int(np.flatnonzero(p)[-1]) + 1
     bscale = tuple(float(_SIG / np.sqrt(p[:b].sum())) for b in bands)
     stream = (_DOMAIN_SIGNAL << 32) | (int(seed) & 0xFFFFFFFF)
     tab, t, fi = signal if signal is not None else (None,) * 3
-    # Room a row: a side's running maximum over L lags has about ln L + 0.58 records of white
-    # noise (fewer with the signal at its start, two to three times that where the profile makes
-    # neighbouring lags alike). A call that runs out stops at the row that did not fit, and the
-    # rest continue from there with room for the rate the rows before it had, and a quarter more.
+    # Room: a side's running maximum over L lags has about ln L + 0.58 records of white noise,
+    # far fewer with the signal at its start (and none in a draw not kept), more where the
+    # profile makes neighbouring lags alike (the widest band's noise up to ~1.1 (ln L + 3)), so
+    # the records a row are measured, not guessed. The first call runs _PILOT rows with room for
+    # _ROOM (ln L + 3) a row; each later one, the rest, with room for the mean records a row so
+    # far and _ROOM_Z standard errors of the total (the mean's error over the rows to come and
+    # their own spread). A call that runs out stops at the row that did not fit, and the next
+    # continues from there; one that fits no row at all doubles its successor's room. Each
+    # statistic's records go into one array, grown (its records so far copied) only when a call
+    # needs more room than is left.
     ns = 2 * (1 + len(bands)) if signal is not None else 0
-    room = [math.log(m) + 3 for m in [n] + list(bands) for _ in (0, 1)] if signal is not None else []
-    room = [_ROOM * c for c in room + ([math.log(bands[-1]) + 3] * len(bands) if noise else [])]
-    parts, done = [], 0
+    first = [math.log(m) + 3 for m in [n] + list(bands) for _ in (0, 1)] if signal is not None else []
+    first = [_ROOM * c for c in first + ([math.log(b) + 3 for b in bands] if noise else [])]
+    nq = len(first)
+    off = [np.empty(rows + 1, np.int64) for _ in range(nq)]
+    pos = [np.empty(0, np.int32) for _ in range(nq)]
+    val = [np.empty(0, np.float32) for _ in range(nq)]
+    have = [0] * nq                         # each statistic's records so far
+    done, boost = 0, 1
     while done < rows:
-        todo = rows - done
-        pos = [np.empty(int(c * todo) + 64, np.int32) for c in room]
-        val = [np.empty(x.size, np.float32) for x in pos]
-        off = [np.empty(todo + 1, np.int64) for _ in room]
-        sig = [tuple(x[:ns]) if signal is not None else None for x in (pos, val, off)]
-        noi = [tuple(x[ns:]) if noise else None for x in (pos, val, off)]
+        todo = rows - done if done else min(rows, _PILOT)
+        if done:
+            need = []
+            for o in off:
+                c = np.diff(o[:done + 1])
+                spread = float(c.std()) * math.sqrt(todo * todo / done + todo)
+                need.append(todo * float(c.mean()) + _ROOM_Z * spread)
+        else:
+            need = [c * todo for c in first]
+        for q in range(nq):
+            want = have[q] + int(math.ceil(boost * need[q])) + 64
+            if pos[q].size < want:
+                pos[q], val[q] = _grown(pos[q], have[q], want), _grown(val[q], have[q], want)
+        # the call writes from the start of its arrays: records after those so far, offsets
+        # from its first row on, made absolute below
+        cp = [pos[q][have[q]:] for q in range(nq)]
+        cv = [val[q][have[q]:] for q in range(nq)]
+        co = [off[q][done:done + todo + 1] for q in range(nq)]
+        sig = [tuple(x[:ns]) if signal is not None else None for x in (cp, cv, co)]
+        noi = [tuple(x[ns:]) if noise else None for x in (cp, cv, co)]
         sk, nk, got = _core.simulate(scale, stream, int(row0 + done), int(todo), kmax,
                                      tuple(int(b) for b in bands), bscale, float(_SIG), tab,
-                                     None if t is None else t[done:], None if fi is None else fi[done:],
+                                     None if t is None else t[done:done + todo],
+                                     None if fi is None else fi[done:done + todo],
                                      *sig, *noi, float(keep_at))
         counts = list(sk or ()) + list(nk or ())
-        parts.append([(pos[q][:counts[q]].copy(), val[q][:counts[q]].copy(), off[q][:got + 1])
-                      for q in range(len(room))])
-        if got < todo:
-            room = [max(c, 1.25 * k / got) if got else 2 * c for c, k in zip(room, counts)]
+        for q in range(nq):
+            co[q][:got + 1] += have[q]
+            have[q] += counts[q]
+        boost = 2 * boost if got == 0 else 1
         done += got
-    recs = [_join_records([pt[q] for pt in parts]) for q in range(len(room))]
+    recs = [(pos[q][:have[q]], val[q][:have[q]], off[q]) for q in range(nq)]
     return (tuple(recs[:ns]) if signal is not None else None,
             tuple(recs[ns:]) if noise else None)
 
