@@ -1997,8 +1997,16 @@ class Context(Executor, InputUploads):
             raise UnsupportedSize('no two-stage full-correlation kernel for n=%d' % n)
         return info['n1'], info['n2']
 
+    #: Usage of every buffer the executor allocates. A listed op dispatches indirectly from
+    #: a count in one (a hierarchical call's counts, a follow-up group's table), which Vulkan
+    #: requires to have INDIRECT usage. RADV dispatches without it, so its loss (8fd9f471,
+    #: 2026-10-19) changed no result there (tests/test_vk_indirect_usage.py). The flag
+    #: changes no memory requirement on RADV (gfx1151) or lavapipe: the same size, alignment
+    #: and memory types from 4 B to 256 MB.
+    _ALLOC_USAGE = _BUF_STORAGE | _BUF_INDIRECT | _BUF_TRANSFER_DST
+
     def _x_alloc(self, nbytes, readback=False, upload=False):
-        return _Buffer(self, nbytes, readback=readback)
+        return _Buffer(self, nbytes, readback=readback, usage=self._ALLOC_USAGE)
 
     def _x_list(self, label, once=False):
         return _VkList(self, label, once)

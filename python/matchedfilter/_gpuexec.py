@@ -36,7 +36,8 @@ Driver primitives (a Context provides each):
   _x_alloc(nbytes, readback=False, upload=False)
                             a device buffer the context owns (write(array), read_into(out),
                             destroy(), nbytes). readback: the host reads it; upload: the host
-                            writes it before every run, through _x_upload.
+                            writes it before every run, through _x_upload. Any of them, or a
+                            section of one, may be a listed op's count.
   _x_section(buf, offset, nbytes)
                             a view of bytes [offset, offset + nbytes) of an _x_alloc buffer,
                             bound, filled, updated and counted like a buffer (offset: a
