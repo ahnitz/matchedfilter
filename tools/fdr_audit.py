@@ -12,8 +12,9 @@ value.
 A case's misses are tested two-sided against the budget (binomial). A model that dismisses
 too much fails, and so does one that dismisses far too little: such gates pass work the
 budget would have dismissed, and a 100x too conservative model once hid two model errors. A
-multi-tier chain's budget is cut by the selection bias of its split search
-(gatechain._SPLIT_TOLERANCE_Z): it aims at fd, as a single tier does. With
+multi-tier chain's budget is cut for the selection bias of its split search
+(gatechain._SPLIT_TOLERANCE_Z; tools/split_bias.py measures the bias): the cut is about
+twice the bias, so in the model such a chain dismisses 0.95-0.97 of fd on average. With
 --q15 the same chains also run with the Q15 screen as every tier but the last, where this
 back end has one. The gate model leaves the Q15 statistic's rounding out (about 0.01 in
 snr: it lifts a tier's maxima a little), so a Q15 chain may dismiss less than its budget

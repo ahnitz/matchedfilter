@@ -1,3 +1,120 @@
+# The split bias does not depend on fd, and the cut is twice its size, 2026-10-27
+
+The entry below left one question open: at fd 1e-3 multi-tier plans dismissed 0.95 and
+0.96 of the budget, at 1e-2 0.99 and 1.01, from one model seed and one check seed.
+Measured again with 30 independent model seeds per profile and large independent
+checks, the selection bias is the same at fd 1e-2 and 1e-3, at n = 2048 and 4096. The
+difference was one seed's luck.
+
+The bias is about half the size 3390d4f3 measured, though. With no cut, two-tier plans
+dismiss 1.02-1.03 of the budget and three-tier plans 1.03-1.04, not 1.050 and 1.085. At
+`_SPLIT_TOLERANCE_Z = 0.75` they dismiss 0.95-0.97 of the budget, not 1.0. The 3390d4f3
+no-cut numbers reproduce exactly at its seeds, and its model seed (13, the gate model's
+own) sat about one standard deviation high (below). z stays 0.75 here: the value is a
+separate decision (the last paragraph).
+
+Method (`tools/split_bias.py`, at d285f692 on dev2, one process per core on cores 24-31,
+GPU hidden, load 4-14; fd 1e-2 and 1e-3 ran as its scratch predecessor, whose rows the
+tool reproduces exactly: 3120 of 3120 for f^0 at fd 1e-2, n = 2048):
+
+- Profiles: `tools/fdr_audit.default_profiles()` (10), snr 5.5, window 3n/32..n - 3n/32
+  (192..1856 at n = 2048, 384..3712 at 4096).
+- Plans: every chain of one to three usable bands (25 at n = 2048, 41 at 4096), with
+  thresholds from `gatechain.plan_chain` as `chain_thresholds` makes them with no cost
+  model, at z = 0, 0.5, 0.75 and 1. Also the chain `choose_chain` picks with no cost
+  model (the operation count): its own selection among chains adds to the bias.
+- Model draws: 30 simulations per profile, each with its own seed, at the model's draw
+  counts (`gatechain.model_draws`). K, the dismissed count, is 100-131 at fd 1e-2 and
+  1e-3 (mean 115) and 526-646 at 0.05, where the 20k-draw floor of
+  `gatemodel._nsamp_for` holds.
+- Check draws: per profile, its own independent `signal_draws`. 4M draws at fd 1e-2 and
+  0.05 (2.1-2.6M kept) and 16M at 1e-3 (8.4-10.4M kept, about 9,000 dismissed).
+- Standard errors of a mean: the model's part from the seed-to-seed scatter of each
+  profile's mean; the check's part bounded as if every plan of a profile shared one
+  check error.
+
+Mean realised dismissal over fd, every chain's plan:
+
+| n | fd | 1 tier | 2 tiers, no cut | 3 tiers, no cut | 2 tiers, z 0.75 | 3 tiers, z 0.75 | mean on budget at z (2 / 3 tiers) |
+|---|---|---|---|---|---|---|---|
+| 2048 | 1e-2 | 1.007 ± 0.003 | 1.025 ± 0.004 | 1.037 ± 0.004 | 0.957 ± 0.004 | 0.967 ± 0.004 | 0.28 / 0.40 |
+| 2048 | 1e-3 | 1.003 ± 0.004 | 1.024 ± 0.004 | 1.035 ± 0.005 | 0.954 ± 0.004 | 0.966 ± 0.005 | 0.26 / 0.38 |
+| 4096 | 1e-2 | 1.006 ± 0.003 | 1.028 ± 0.004 | 1.042 ± 0.004 | 0.959 ± 0.004 | 0.972 ± 0.004 | 0.30 / 0.44 |
+| 4096 | 1e-3 | 1.006 ± 0.004 | 1.025 ± 0.004 | 1.034 ± 0.005 | 0.955 ± 0.004 | 0.964 ± 0.004 | 0.27 / 0.37 |
+| 2048 | 5e-2 | 1.002 ± 0.002 | 1.008 ± 0.002 | 1.011 ± 0.002 | 0.977 ± 0.002 | 0.981 ± 0.002 | 0.20 / 0.27 |
+
+The z columns are interpolated between the measured z values, ± 0.04-0.05. The
+difference between fd 1e-3 and 1e-2 at z 0.75 is -0.003 ± 0.006 (two tiers) and
+-0.002 ± 0.006 (three) at n = 2048, and -0.004 ± 0.005 and -0.008 ± 0.006 at 4096. Every
+subset of chains gives the same picture: at fd 1e-2 and n = 2048 the 20 multi-tier chains
+range from 0.945 to 0.980 at z 0.75. At fd 0.05, where K is five times larger, the bias
+in standard errors may be a little smaller (0.20 and 0.27 against 0.26-0.30 and
+0.37-0.44). That is 1 to 2.5 standard errors of the difference, and below 1% of the
+budget.
+
+The chain `choose_chain` picks, multi-tier picks only (the single-tier picks dismiss
+0.99-1.02 of the budget):
+
+| n | fd | multi-tier picks | no cut | z 0.5 | z 0.75 | all picks, z 0.75 | mean on budget at z |
+|---|---|---|---|---|---|---|---|
+| 2048 | 1e-2 | 214 of 300 | 1.050 ± 0.007 | 1.005 ± 0.007 | 0.979 ± 0.007 | 0.988 ± 0.006 | 0.54 |
+| 2048 | 1e-3 | 231 of 300 | 1.042 ± 0.006 | 0.997 ± 0.006 | 0.975 ± 0.006 | 0.983 ± 0.005 | 0.47 |
+| 4096 | 1e-2 | 214 of 300 | 1.049 ± 0.007 | 1.004 ± 0.006 | 0.983 ± 0.006 | 0.993 ± 0.005 | 0.55 |
+| 4096 | 1e-3 | 230 of 300 | 1.034 ± 0.006 | 0.988 ± 0.005 | 0.963 ± 0.005 | 0.969 ± 0.005 | 0.37 |
+| 2048 | 5e-2 | 205 of 300 | 1.013 ± 0.003 | 0.992 ± 0.003 | 0.981 ± 0.003 | 0.990 ± 0.002 | 0.30 |
+
+Per-plan scatter at z 0.75 (the worst plan carries its check's binomial sd; "one seed's
+worst" is the mean over seeds of the worst plan made from one seed per profile; the
+worst pair is the (profile, chain) with the largest mean over its 30 seeds):
+
+| n | fd | tiers | plans | sd ± se | check sd | worst plan | one seed's worst (of) | worst pair |
+|---|---|---|---|---|---|---|---|---|
+| 2048 | 1e-2 | 1 | 1500 | 0.093 ± 0.002 | 0.007 | 1.335 ± 0.008 | 1.224 ± 0.008 (50) | 1.051 ± 0.017 |
+| 2048 | 1e-2 | 2 | 3000 | 0.091 ± 0.002 | 0.006 | 1.279 ± 0.007 | 1.188 ± 0.008 (100) | 1.007 ± 0.014 |
+| 2048 | 1e-2 | 3 | 3000 | 0.092 ± 0.003 | 0.006 | 1.348 ± 0.008 | 1.191 ± 0.010 (100) | 1.039 ± 0.019 |
+| 2048 | 1e-3 | 1 | 1500 | 0.090 ± 0.002 | 0.010 | 1.329 ± 0.012 | 1.217 ± 0.009 (50) | 1.042 ± 0.014 |
+| 2048 | 1e-3 | 2 | 3000 | 0.088 ± 0.002 | 0.010 | 1.258 ± 0.012 | 1.173 ± 0.008 (100) | 0.997 ± 0.017 |
+| 2048 | 1e-3 | 3 | 3000 | 0.088 ± 0.002 | 0.010 | 1.278 ± 0.012 | 1.172 ± 0.009 (100) | 1.022 ± 0.017 |
+| 4096 | 1e-2 | 1 | 1800 | 0.092 ± 0.002 | 0.007 | 1.322 ± 0.007 | 1.235 ± 0.009 (60) | 1.057 ± 0.017 |
+| 4096 | 1e-2 | 2 | 4500 | 0.092 ± 0.002 | 0.006 | 1.315 ± 0.007 | 1.193 ± 0.010 (150) | 1.037 ± 0.015 |
+| 4096 | 1e-2 | 3 | 6000 | 0.092 ± 0.002 | 0.006 | 1.321 ± 0.007 | 1.213 ± 0.009 (200) | 1.071 ± 0.015 |
+| 4096 | 1e-3 | 1 | 1800 | 0.092 ± 0.001 | 0.010 | 1.410 ± 0.012 | 1.231 ± 0.010 (60) | 1.054 ± 0.017 |
+| 4096 | 1e-3 | 2 | 4500 | 0.090 ± 0.002 | 0.010 | 1.365 ± 0.012 | 1.196 ± 0.009 (150) | 1.003 ± 0.016 |
+| 4096 | 1e-3 | 3 | 6000 | 0.090 ± 0.002 | 0.010 | 1.314 ± 0.012 | 1.204 ± 0.008 (200) | 1.019 ± 0.016 |
+
+The sd is 0.09 at every n, fd and tier count, the single tier's included. That is
+1/sqrt(K + 1) for K = 115 (0.093): the counting noise of the draws a budget rests on.
+Averaged over its 30 seeds no (profile, chain) dismisses more than 1.071 of the budget,
+so the tail is the model's finite draws, not plans that are systematically off. At fd
+0.05 (K about 580) the sd is 0.040 and the worst plan of 1500-3000 is 1.10-1.13.
+
+Why 3390d4f3 measured a larger bias: it used the gate model's own seed for every
+profile, and one seed gives every profile the same underlying noise (`_simulate` draws
+the same normals, scaled by each profile's power), so a mean over the profiles is close
+to one draw. At model seed 13 and its check (200k draws at seed 977, fd 1e-2),
+3390d4f3's three chains give its numbers: 1.050 ± 0.024 and 1.085 ± 0.029 with no cut,
+exactly, and 0.985 and 1.012 at z 0.75 (1.008 at 3390d4f3); that ± (the sd over plans /
+sqrt(plans)) treats the plans as independent. The previous entry's six chains give its
+numbers exactly: 1.032, 0.991 and 1.012 for one, two and three tiers at z 0.75. Over
+seeds 14 to 29, each also shared by every profile, the six chains' means with no cut are
+1.004, 1.029 and 1.045 (seed 13: 1.032, 1.060 and 1.085), with sds over seeds of 0.026,
+0.025 and 0.037. A one-seed measurement of the bias is uncertain by 0.3 to 0.4 in z, and
+seed 13 sat about one sd high. Over every chain, on the independent checks, seed 13 is
+not high: its multi-tier plans dismiss 0.953 and 0.959 of the budget at fd 1e-2 and
+0.950 and 0.966 at 1e-3, at z 0.75. Every job uses seed 13, so its plans share that one
+draw's luck.
+
+The value of z is left at 0.75. No function of fd or K is called for: in standard errors
+of the count the bias is the same at fd 1e-2 and 1e-3, where K is the same, and at most
+slightly smaller at 0.05, where K is five times larger. At 0.75 the plans
+`chain_thresholds` makes for a given chain dismiss 3-5% less than the budget (2% at fd
+0.05), and the chain `choose_chain` picks 2-4% less. The two want different values:
+about 0.3 (two tiers) and 0.4 (three) for a given chain, and about 0.5 for the pick. At
+z 0.5 the multi-tier picks average 0.988-1.005 of the budget and given chains
+0.978-0.995; the worst plan rises by up to 0.04, and one seed's worst by 0.023-0.030 at
+fd 1e-2 and 1e-3 (1.214 against 1.188 for two tiers at n = 2048, fd 1e-2). Which of them
+z should target is not decided.
+
 # The budget split's selection bias and per-plan scatter, 2026-10-27
 
 A multi-tier chain searches threshold splits on the draws it is judged on and keeps
@@ -6,7 +123,9 @@ multi-tier budget by `gatechain._SPLIT_TOLERANCE_Z = 0.75` standard errors of th
 dismissed count, the measured size of that bias, in place of the one-sided 95% cut
 (1.645), which left multi-tier plans at 0.92 of the budget. The comment at
 `_SPLIT_TOLERANCE_Z` and the commit message hold the measurement (200k independent
-draws, n = 2048, fd 1%, 10 profiles, 30 plans).
+draws, n = 2048, fd 1%, 10 profiles, 30 plans). That measurement used one model seed
+for every profile; over 30 independent seeds the bias is half as large, and at 0.75
+multi-tier plans dismiss 0.95-0.97 of the budget (the entry above).
 
 The mean is then on budget, but each plan's realised dismissal scatters about it.
 Measured at 33e22fa7 on dev2 (one pinned core, GPU hidden, load 5-7; 28 s at fd 1e-2 and
@@ -43,7 +162,8 @@ Two observations are not settled by this run. The worst plan is 1.28 of the budg
 0.95 and 0.96 of the budget, where at 1e-2 they average 0.99 and 1.01; the cut was
 measured at 1e-2 only. The plans of one profile share its model draws and its check
 draws, so the 40 multi-tier plans are not independent, and one model seed and one check
-seed cannot say whether that difference is real.
+seed cannot say whether that difference is real. (Settled in the entry above: it was one
+seed's luck, and the bias does not depend on fd.)
 
 The script, for re-running it (from the repository root, `PYTHONPATH=python`):
 
