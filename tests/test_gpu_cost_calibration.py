@@ -160,3 +160,39 @@ def test_a_call_whose_timer_recorded_nothing_moves_no_price(monkeypatch):
     cannot be a configuration's fastest (as a time of zero it made a price zero)."""
     cm, _ = _probe_calibration(monkeypatch, lost=lambda i: i % 7 == 3, reps=3)
     _assert_probe_prices(cm)
+
+
+def test_the_clock_anchor_is_timed_on_a_warmed_device_however_long_the_first_call_takes(monkeypatch):
+    """The anchor every calibration in a process is scaled to is the reference's fastest call
+    on a warmed device. The first call records the plan's commands: 0.06 s on an idle 8060S,
+    0.4-0.5 s with eight other processes on its four cores, longer than the 0.25 s warm-up.
+    Timed from before that call, the warm-up had already run out, and the anchor was taken
+    on a device still at its idle clock in 17 of 178 loaded processes (0.105-0.134 ms against
+    0.028-0.031), which scaled every price of their models 2.8-4.3x. Here the first call
+    takes 0.4 s and the device runs 4x slow for its first 20 calls."""
+    now, calls = [0.0], []
+
+    class Plan:
+        def __init__(self, size, ndata, ntemplates, chain, device):
+            self.log = []
+            self._gpu = SimpleNamespace(_timing=False, timings=lambda: self.log)
+
+        def set_templates(self, spectra):
+            pass
+
+        def set_coarse_threshold(self, thresholds):
+            pass
+
+        def empty_shared(self, shape, dtype=np.complex64):
+            return np.empty(shape, dtype)
+
+        def run_series(self, series, starts, ws, we, threshold):
+            calls.append(len(calls))
+            now[0] += 0.4 if len(calls) == 1 else 1e-3
+            self.log.append(("run", 0.12 if len(calls) <= 20 else 0.03))
+
+    monkeypatch.setattr(mf, "HierarchicalFilter", Plan)
+    monkeypatch.setattr(time, "perf_counter", lambda: now[0])
+    ref = _calibration._ClockRef("probe")
+    assert len(calls) > 200                         # 0.25 s of calls after the first
+    assert ref.anchor == pytest.approx(0.03e6)
