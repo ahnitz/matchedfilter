@@ -246,7 +246,7 @@ def calibrate_costs(n, ntemplates, blocks=32, reps=5, seed=11, group=None):
 
 #: Per device: the fixed reference call and its first warmed device time (see _ClockRef).
 class _ClockRef:
-    """A fixed reference call, timed next to every calibration measurement.
+    """A fixed reference call, timed once in every round of a calibration's measurements.
 
     A GPU's clock moves with load and power state (an idle M2 reads slow for its first
     calls; an APU's GPU drops to a fifth of its clock under CPU load), so a device time is
@@ -337,8 +337,9 @@ _BURST = 3
 
 def _sparse_rows(points, head, pairs):
     """A second tier's [(density, device ns per first-tier survivor)] from runs of one chain
-    at thresholds placed at _CAL_DENSITIES: points [(survivors, time)], head the modelled
-    time of the chain's first tier and blocks alone.
+    at thresholds placed at _CAL_DENSITIES: points [(survivors, time)], head the measured
+    time of the chain's first tier and blocks alone (the same rounds' run with nothing
+    passing).
 
     With two or more points, the price is the slope of time against survivors, the same at
     every density. The runs differ only in their threshold, so what a run costs whatever
@@ -471,7 +472,9 @@ def calibrate_costs_gpu(n, device, blocks=None, reps=15, seed=11, nt=256):
                     t[i].append(ti)
                     s1[i].append(si)
                     r[i].append(ri)
-        return [(float(min(t[i])), float(np.median(s1[i])), float(np.median(r[i])))
+        # a call whose timer recorded nothing (a rejected timestamp pair) is not a time
+        return [(float(min((x for x in t[i] if x > 0), default=0.0)),
+                 float(np.median(s1[i])), float(np.median(r[i])))
                 for i in range(len(ps))]
 
     def refined_pairs(chain, thr):

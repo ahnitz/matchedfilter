@@ -16,12 +16,13 @@ class _Resident(np.ndarray):
     """A series in the probe's device memory (Plan.empty_shared)."""
 
 
-def _probe_calibration(monkeypatch, kind="f32", step=0.0, host=1.0, spell=None, reps=2):
+def _probe_calibration(monkeypatch, kind="f32", step=0.0, host=1.0, spell=None, reps=2, lost=None):
     """Exercise the real calibration with deterministic device times and survivor counts.
     step: device time a two-tier call adds whenever anything passes its first tier.
     host: how much slower a call runs on a series copied from the host than on one resident
     in device memory (the device idles through the copy). spell(i): how much slower the
-    i-th device call runs (a slow spell spans consecutive calls, whatever they run)."""
+    i-th device call runs (a slow spell spans consecutive calls, whatever they run).
+    lost(i): whether the i-th call's timer records nothing (a rejected timestamp pair)."""
     n, blocks, nt = 256, 16, 64
     inputs = _calibration._gpu_cal_inputs(n, blocks, nt, 11)
     calls, raw_calls = [], []
@@ -59,7 +60,7 @@ def _probe_calibration(monkeypatch, kind="f32", step=0.0, host=1.0, spell=None, 
             self._gpu.last_refinements = refined
             ns *= (1.0 if isinstance(series, _Resident) else host)
             ns *= spell(len(calls) - 1) if spell is not None else 1.0
-            if self._gpu._timing:
+            if self._gpu._timing and not (lost is not None and lost(len(calls) - 1)):
                 # The reference says the device currently runs twice as slowly.
                 self.log.extend([("run", 2 * ns / 1e6), ("k:coarse", 999.0)])
 
@@ -143,4 +144,19 @@ def test_a_slow_spell_moves_no_price(monkeypatch):
     repetition of several configurations, never all of one."""
     cm, _ = _probe_calibration(monkeypatch, spell=lambda i: 2.0 if (i // 6) % 4 == 1 else 1.0,
                                reps=5)
+    _assert_probe_prices(cm)
+
+
+def test_a_price_is_its_configurations_fastest_call_not_its_median(monkeypatch):
+    """What moves a call only adds time, so a price is its configuration's fastest call:
+    here two of every three back-to-back calls run 1.5x slow, so every configuration's
+    median is slow and only its fastest call is its time."""
+    cm, _ = _probe_calibration(monkeypatch, spell=lambda i: 1.0 if i % 3 == 0 else 1.5, reps=3)
+    _assert_probe_prices(cm)
+
+
+def test_a_call_whose_timer_recorded_nothing_moves_no_price(monkeypatch):
+    """A call whose timestamps were rejected logs no time: it is not a measurement, so it
+    cannot be a configuration's fastest (as a time of zero it made a price zero)."""
+    cm, _ = _probe_calibration(monkeypatch, lost=lambda i: i % 7 == 3, reps=3)
     _assert_probe_prices(cm)
