@@ -265,6 +265,9 @@ measurement relative to `gatechain._ClockRef` for any GPU device. Measured here:
 - Three calibrations in one process with 3 s idle between agree within about 20% per tier
   (dense[512] 3.86 / 4.59 / 4.39 ns), against the 5x raw swing.
 - No change needed. The review's note predates 70cb1e2.
+- Superseded (2026-10-27): across processes, and under CPU load, the pairing did not hold;
+  the calibration now keeps each configuration's fastest call and scales by the reference
+  once per calibration (CHANGELOG; `docs/gpu-parity-plan.md`, Calibration).
 
 ## 9. Fifth pass: the untiled-builds hazard explained; wave32 for small refine groups
 

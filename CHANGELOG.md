@@ -146,6 +146,21 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ### Fixed
 
+- The GPU cost calibration priced the same work 0.25-4x differently from one process to the
+  next on a Radeon 8060S, enough to rank the n=2048 gate chains (256, 1024) and (256, 512)
+  either way round (0.67-1.45x where the first runs 1.06-1.08x the second): 5 production
+  ladder processes of 22 picked (256, 1024) or the one-tier (256,). It copied its series
+  from the host before every timed call, which left the GPU idle long enough to slow the
+  call by a varying amount; took the median of five calls in a row, which slow spells and,
+  under CPU load, a power-limited GPU moved; and scaled each call by a reference timed just
+  before it, whose clock under load was not the call's. Now, as the CPU calibration already
+  does, each configuration's time is its fastest, of 15 rounds of 3 calls taken in turn; the
+  series is resident in device memory, as the fine stage's is; and the reference scales the
+  calibration as a whole. In 31 of 32 ladder processes since, the model ranked (256, 1024)
+  at 1.04-1.10x (256, 512). Calibration at n=2048 takes about 5-8 s (15-26 s under CPU
+  load); models stored by the old method are measured again.
+- MF_GPU_PROFILE=1 could lose the Vulkan device (VK_ERROR_DEVICE_LOST) on the first call of a
+  profiled run: phase marks were read from queries no submitted run would write.
 - The CPU cost calibration failed (KeyError 'recheck') for a size calibrated after a smaller
   one on the same series group, e.g. a bank pricing 1024-sample blocks before 2048: the
   sizes share band costs, and the screen's per-pass cost was timed only when the first
