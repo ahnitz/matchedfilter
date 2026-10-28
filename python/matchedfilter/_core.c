@@ -986,9 +986,6 @@ static PyObject *HMF_tier_inputs(HMFObject *self,PyObject *unused){
   for(int i=0;i<n;i++) PyTuple_SET_ITEM(out,i,PyLong_FromLong(checked[i]));
   return out;
 }
-static PyObject *HMF_first_gate_passed(HMFObject *self,PyObject *unused){
-  (void)unused; return PyLong_FromLong(ap_hmf_first_gate_passed(self->p));
-}
 static PyObject *HMF_series_ticks(HMFObject *self,PyObject *a){
   (void)a; return PyLong_FromUnsignedLongLong(ap_hmf_series_ticks(self->p));
 }
@@ -1115,7 +1112,6 @@ GUARDED(HMFObject,HMF_thresholds)
 GUARDED(HMFObject,HMF_series_ticks)
 GUARDED(HMFObject,HMF_tier_stats)
 GUARDED(HMFObject,HMF_tier_inputs)
-GUARDED(HMFObject,HMF_first_gate_passed)
 static PyMethodDef HMF_methods[]={
   {"series_group",(PyCFunction)HMF_series_group_g,METH_NOARGS,"actual series block group"},
   {"set_platform_fft",(PyCFunction)HMF_set_platform_fft_g,METH_VARARGS,"set_platform_fft(on) -> True if block forwards now run through the platform FFT"},
@@ -1145,7 +1141,6 @@ static PyMethodDef HMF_methods[]={
   {"series_ticks",(PyCFunction)HMF_series_ticks_g,METH_NOARGS,"series_ticks() -> ticks spent in run_series calls"},
   {"tier_stats",(PyCFunction)HMF_tier_stats_g,METH_NOARGS,"[(band, passed, ticks) per tier] + [(n, refined, ticks)]"},
   {"tier_inputs",(PyCFunction)HMF_tier_inputs_g,METH_NOARGS,"Actual input counts per logical gate"},
-  {"first_gate_passed",(PyCFunction)HMF_first_gate_passed_g,METH_NOARGS,"Cumulative passes of the first executed float gate"},
   {NULL}
 };
 static PyObject *HMF_get_n(HMFObject *self, void *closure){

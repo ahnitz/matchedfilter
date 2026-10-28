@@ -29,7 +29,7 @@ from ._errors import UnsupportedSize
 from ._gpu_cache import InputUploads
 from ._gpuexec import Arg, Executor, settle as _settle
 from ._shared import empty_shared, _Borrowed
-from ._gpuhost import MAX_BINS, bin_shift
+from ._gpuhost import MAX_BINS
 
 
 def _borrowed_dptr(self):
@@ -116,8 +116,6 @@ def _manifest():
 
 
 _MAX_BINS = MAX_BINS          # _gpuhost.MAX_BINS: one limit for every backend
-# Sparse readback: peak records copied back with the count, before a second round trip.
-_SPARSE_HOST = 4096
 # The primary context this thread last made current (handles are stable: _DeviceShared retains
 # each device's primary context for the process lifetime). cuCtxSetCurrent per call measured
 # ~75 us of host time per fine-stage forward on the L40S.
@@ -134,11 +132,7 @@ _PREFETCH = True
 # CUDA graphs for the hierarchical launch sequences.
 _GRAPHS = True
 
-# cuFuncGetAttribute / cuMemAdvise / cuDeviceGetAttribute enums
-_FUNC_ATTR_MAX_THREADS = 0
-_FUNC_ATTR_SHARED = 1
-_FUNC_ATTR_LOCAL = 3
-_FUNC_ATTR_NUM_REGS = 4
+# cuMemAdvise enums
 _ADVISE_PREFERRED_LOCATION = 3
 _ADVISE_ACCESSED_BY = 5
 _CPU_DEVICE = -1
@@ -169,9 +163,6 @@ def _radix(n):
     return {32768: 32, 65536: 64}.get(n, 16)
 
 
-_shift = bin_shift
-
-
 #: The per-row window table argument every fusedTierB and refineListedBounded launch ends with
 #: (tierb.slang ROWWIN_PARAM): read only under a window start of ROWWIN_ON, so null otherwise.
 _NOROW = ctypes.c_void_p(0)
@@ -183,14 +174,6 @@ def _u32(x):
 
 def _i32(x):
     return ctypes.c_int32(int(x))
-
-
-def _f32bits(x):
-    return ctypes.c_uint32(int(np.float32(x).view(np.uint32)))
-
-
-def _ptr(v):
-    return ctypes.c_uint64(int(v))
 
 
 def _param_ptrs(params):
@@ -209,11 +192,6 @@ def _pack_words(k):
     if f is None:
         f = _WORDS[k] = struct.Struct("%dI" % k).pack_into
     return f
-
-
-def _uint4(*v):
-    """A Slang ``uniform uint4``: ONE 16-byte kernel parameter, not four u32s."""
-    return (ctypes.c_uint32 * 4)(*(int(x) & 0xFFFFFFFF for x in v))
 
 
 def _size_class(nbytes):
@@ -1044,21 +1022,6 @@ class Context(Executor, InputUploads):
             fn = self._load(f["file"][:-4], _PTX_DIR / f["file"], self._TC_ENTRY[role], wg)
             self._pipelines[key] = (fn, wg, int(info["n1"]), int(info["n2"]))
         return self._pipelines[key]
-
-    def kernel_info(self, n, entry="fusedTierB", **kw):
-        """Registers, static shared memory, local (spill) bytes and occupancy of one kernel."""
-        fn, wg = self.pipeline(n, entry, **kw)
-        out = {"stem": self._labels[fn.value], "threads": wg}
-        if hasattr(self.cuda, "cuFuncGetAttribute"):
-            for name, attr in (("registers", _FUNC_ATTR_NUM_REGS),
-                               ("shared_bytes", _FUNC_ATTR_SHARED),
-                               ("local_bytes", _FUNC_ATTR_LOCAL),
-                               ("max_threads", _FUNC_ATTR_MAX_THREADS)):
-                v = ctypes.c_int(0)
-                self.cuda.cuFuncGetAttribute(ctypes.byref(v), attr, fn)
-                out[name] = v.value
-        out["blocks_per_sm"] = self._blocks_per_sm(fn, wg)
-        return out
 
     def _blocks_per_sm(self, fn, wg):
         key = fn.value

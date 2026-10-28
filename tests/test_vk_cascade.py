@@ -229,13 +229,10 @@ def test_fused_cache_key_is_not_a_command_buffer_handle():
     resubmitted commands naming the evicted recording's freed buffers (GPU page faults)."""
     from types import SimpleNamespace
     from matchedfilter import _vkcompute as V
-    ctx = SimpleNamespace(device=object(), _phases={0xabc: {"_serial": next(V._RECORDING_SERIAL)}})
+    ctx = SimpleNamespace(_phases={0xabc: {"_serial": next(V._RECORDING_SERIAL)}})
     before = V._fused_key([(ctx, [0xabc])])
-    serial = before[0][1]
-    assert V._fused_valid(ctx, [0xabc], serial)
+    # The same recording keys the same entry, so a repeated batch reuses its fused buffer.
+    assert V._fused_key([(ctx, [0xabc])]) == before
     # Evicted, and the same handle value registered again for a new recording.
     ctx._phases[0xabc] = {"_serial": next(V._RECORDING_SERIAL)}
     assert V._fused_key([(ctx, [0xabc])]) != before
-    assert not V._fused_valid(ctx, [0xabc], serial)
-    del ctx._phases[0xabc]
-    assert not V._fused_valid(ctx, [0xabc], serial)

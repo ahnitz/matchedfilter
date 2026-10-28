@@ -2,7 +2,16 @@
 import numpy as np
 import pytest
 
-from matchedfilter.time_domain import _intersect_runs, _interval_mask, _interval_runs
+from matchedfilter.time_domain import _intersect_runs, _interval_runs
+
+
+def _interval_mask(S, starts, stops):
+    """The reference: a boolean mask of length S that is True on the union of
+    [starts, stops) clipped to [0, S)."""
+    edge = np.zeros(S + 1, dtype=np.int32)
+    np.add.at(edge, np.clip(starts, 0, S), 1)
+    np.add.at(edge, np.clip(stops, 0, S), -1)
+    return np.cumsum(edge[:-1]) > 0
 
 
 def _mask(S, runs):

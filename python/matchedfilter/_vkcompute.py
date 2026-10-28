@@ -509,13 +509,6 @@ def _fused_key(items):
     return tuple((id(ctx), tuple(ctx._phases[h]["_serial"] for h in cmds)) for ctx, cmds in items)
 
 
-def _fused_valid(ctx, cmds, serials):
-    """Every recording of cmds is still the one the serials name."""
-    phases = getattr(ctx, "_phases", {})
-    return (ctx is not None and ctx.device is not None and len(cmds) == len(serials)
-            and all(phases.get(h, {}).get("_serial") == k for h, k in zip(cmds, serials)))
-
-
 #: Interleave depths of a fused batch the device trial plays (_settings.setting): 0 is
 #: lockstep; 3 puts the second half's forward (DRAM-bound) beside the first half's coarse0
 #: (VALU-bound).
@@ -622,9 +615,6 @@ class _FusedBatch:
             cache.move_to_end(key)
             self._submit_fused(hit[0])
             return
-        if hit is not None:
-            cache.pop(key)
-            self._free(hit[0])
         cmd = _vp()
         info = _CmdBufAlloc(40, None, dev.command_pool, 0, 1)
         _check(vk.vkAllocateCommandBuffers(dev.device, ctypes.byref(info), ctypes.byref(cmd)),
