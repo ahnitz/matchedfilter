@@ -251,11 +251,14 @@ class _ClockRef:
     A GPU's clock moves with load and power state (an idle M2 reads slow for its first
     calls; an APU's GPU drops to a fifth of its clock under CPU load), so a device time is
     the work divided by a clock that is not constant across a calibration, let alone
-    across n. Each measurement is therefore taken as the ratio to this reference timed
-    just before it, and reported in reference units scaled by the reference's first warmed
-    time in this process: chains and block sizes are ranked by those ratios, which the
-    clock cancels out of. One small, fixed workload for every n, so models at different n
-    stay comparable. Backend-neutral: it only needs device timers (ctx.timings()).
+    across n. A calibration times this reference once in every round of its measurements
+    and scales its times by the ratio of the reference's first warmed time in this process
+    (the anchor) to its fastest during the calibration: chains and block sizes are ranked
+    by those ratios, which the clock cancels out of. One small, fixed workload for every
+    n, so models at different n stay comparable. (It was the ratio to a reference timed
+    just before each measurement; under CPU load the 8060S's clock changes between one
+    call and the next, and that pairing scaled a call by a quarter as often as not.)
+    Backend-neutral: it only needs device timers (ctx.timings()).
 
     A backend that can read its clock (``ctx.clock_mhz()``, CUDA through NVML) is scaled by
     the clock itself instead: the reference call is small, and its own launch latency after
@@ -274,7 +277,9 @@ class _ClockRef:
         self.plan.set_coarse_threshold((float(np.finfo(np.float32).max),))
         step = n - n // 4
         S = (blocks + 1) * step + n
-        self.ser = ((rng.standard_normal(S) + 1j * rng.standard_normal(S)) / 2).astype(np.complex64)
+        # Resident in device memory, as calibrate_costs_gpu's series: no host copy before it.
+        self.ser = self.plan.empty_shared((S,))
+        self.ser[:] = ((rng.standard_normal(S) + 1j * rng.standard_normal(S)) / 2).astype(np.complex64)
         self.args = ((np.arange(blocks) * step).astype(np.int64),
                      np.full(blocks, n // 4, np.int64), np.full(blocks, n, np.int64))
         import time as _time
@@ -321,9 +326,13 @@ def _clock_ref(device):
     return ref
 
 
-#: How calibrate_costs_gpu prices a second tier (_sparse_rows), in its models' store key: a
-#: model stored with another method is measured afresh.
-_GPU_SPARSE_FIT = "slope"
+#: How calibrate_costs_gpu measures -- its series resident in device memory, each time the
+#: fastest of its repetitions (runs) -- and prices a second tier (_sparse_rows, the slope), in its
+#: models' store key: a model stored with another method is measured afresh.
+_GPU_CAL_METHOD = "slope,resident"
+
+#: Calls of a configuration back to back within each round of calibrate_costs_gpu (runs).
+_BURST = 3
 
 
 def _sparse_rows(points, head, pairs):
@@ -347,7 +356,7 @@ def _sparse_rows(points, head, pairs):
     return [(a / pairs, max(1e-3, (b - head) / a)) for a, b in pts]
 
 
-def calibrate_costs_gpu(n, device, blocks=None, reps=5, seed=11, nt=256):
+def calibrate_costs_gpu(n, device, blocks=None, reps=15, seed=11, nt=256):
     """This GPU's tier costs at transform size n, in device nanoseconds, as a CostModel.
 
     The CPU calibration's construction (synthetic analytic noise, whitened random templates,
@@ -366,9 +375,17 @@ def calibrate_costs_gpu(n, device, blocks=None, reps=5, seed=11, nt=256):
     in blocks instead, the work grew as n log n: 139 s at n=16384 and 814 s at 32768 on
     an M2. The device is warmed first: a GPU idle at a low clock reads slow for its first
     calls (one process of three priced band 128 at 2x the others). Every time is then
-    taken relative to a fixed reference call timed alongside it (_ClockRef), so the model
-    ranks configurations by ratios the clock cancels out of.
-    About a second per n on an M2, once per process, or read from MF_COST_FILE.
+    scaled by a fixed reference call timed once a round (_ClockRef), so the model ranks
+    configurations by ratios the clock cancels out of.
+    The series is resident in device memory, as the fine stage reads its middle series in
+    place. Copied from the host on every call (16 MB at n=2048, ~1.5 ms of host time), it
+    left the device idle for that long before each timed call, and a device idle for 2 ms
+    ran the next call 1.8x slower on the 8060S, by an amount that varied from call to call:
+    the terms of one ladder process were 0.25-4x another's (second tier at band 512: 0.8 to
+    18 per survivor, against 3.9-4.4 resident), enough to rank (256, 1024) at 0.7-1.5x
+    (256, 512) where it ran 1.06x (2026-10-27).
+    About a second per n on an M2, 5-8 s on the 8060S (15-26 s under CPU load 57), once per
+    process, or read from MF_COST_FILE.
     """
     from . import HierarchicalFilter
     if blocks is None:
@@ -381,7 +398,7 @@ def calibrate_costs_gpu(n, device, blocks=None, reps=5, seed=11, nt=256):
     # Keyed by gate kind: a model measured with the bound off (or before it existed) prices a
     # different first tier, and must not be reused for this one.
     skey = ("gpu,%d,%s" % (int(n), str(device)) + ("" if kind == "f32" else "," + kind)
-            + "," + _GPU_SPARSE_FIT)
+            + "," + _GPU_CAL_METHOD)
     if path is not None:
         cm = _gc._stored_cost_model(path, skey)
         if cm is not None:
@@ -391,45 +408,81 @@ def calibrate_costs_gpu(n, device, blocks=None, reps=5, seed=11, nt=256):
     spec, ser, starts, ws, we = _gpu_cal_inputs(n, blocks, nt, seed)
     big = float(np.finfo(np.float32).max)
     plans = {}
+    resident = []
+    clock_refs = []
     import time as _time
 
-    def run(chain, thr, ntm=nt, reps=reps):
-        """(device ns per call, first-tier survivors, refined pairs). The time is the median
-        over repetitions of its ratio to the clock reference timed just before it, in the
-        reference's anchor units (see _ClockRef): the median, because a ratio of two noisy
-        times has outliers on both sides and the minimum picks one."""
+    def plan(chain, ntm):
         k = (tuple(chain), ntm)
         p = plans.get(k)
         if p is None:
             p = plans[k] = HierarchicalFilter(n, 1, ntm, chain=tuple(chain), device=device)
             p.set_templates(spec[:ntm])
+        if not resident:
+            resident.append(p.empty_shared(ser.shape))
+            resident[0][:] = ser
+        return p
+
+    def call(p, thr):
+        """One timed run of plan p at thresholds thr: (device ns, first-tier survivors,
+        refined pairs)."""
         p.set_coarse_threshold(tuple(thr))
         ctx = p._gpu
         ctx._timing = True
-        p.run_series(ser, starts, ws, we, threshold=1e6)                 # warm-up, recording
-        ctx.timings().clear()
-        t, s1, r = [], [], []
-        for _ in range(reps):
-            ctx._timing = False
-            ref_t = clock.time()             # the reference, just before: same clock state
-            ctx._timing = True
+        try:
             ctx.timings().clear()
-            p.run_series(ser, starts, ws, we, threshold=1e6)
+            p.run_series(resident[0], starts, ws, we, threshold=1e6)
             log = ctx.timings()
-            dev = _gc._run_ms(log) * 1e6
-            t.append(dev * (clock.anchor / ref_t if ref_t > 0 else 1.0))
+            t = _gc._run_ms(log) * 1e6
             log.clear()
-            s1.append(getattr(ctx, "last_tier1_survivors", 0))
-            r.append(getattr(ctx, "last_refinements", 0))
-        ctx._timing = False
-        return float(np.median(t)), float(np.median(s1)), float(np.median(r))
+        finally:
+            ctx._timing = False
+        return t, getattr(ctx, "last_tier1_survivors", 0), getattr(ctx, "last_refinements", 0)
+
+    def runs(configs, reps=reps):
+        """[(device ns per call, first-tier survivors, refined pairs)] for configs [(chain,
+        thresholds[, templates])]: `reps` rounds, each timing the clock reference once
+        (clock_refs) and every configuration in turn, _BURST times back to back. A time is
+        its configuration's fastest, in device ns (the calibration scales them all to the
+        reference's anchor by its fastest reference at the end).
+        The fastest, not the median: what moves a call only adds time, and on the 8060S it
+        moved them by 1.5-4x -- a device idle between calls (above); a slow spell of several
+        milliseconds (a second tier at band 1024 read 0.75, 0.63, 0.58, 0.59, 0.52, 0.53 ms
+        for a call that ran 0.35 before and after, and the median of five, even the minimum
+        of five in a row, moved its slope 2.3x); and under CPU load (load 57, other users'
+        jobs) a power-limited GPU throttled through sustained work, where a band-512 first
+        tier ran 0.62 ms at best and 0.9-1.5 ms in the median. In turn, so that a spell
+        slows a burst of several configurations and never every call of one; in bursts,
+        because under load the fast state came in runs of calls: 15 rounds of 1 left a
+        configuration without a fast call in two calibrations of six, 15 rounds of 3 in
+        none of twelve.
+        A reference timed just before each call (the earlier pairing) no longer stood for
+        that call's clock: under load it ran at 0.13 ms in place of 0.03 for 40% of calls
+        whose own state was the fast one, and scaled them to a quarter."""
+        ps = [(plan(c[0], c[2] if len(c) > 2 else nt), c[1]) for c in configs]
+        for p, thr in ps:
+            call(p, thr)                                              # warm-up, recording
+        t, s1, r = ([[] for _ in ps] for _ in range(3))
+        for _ in range(reps):
+            clock_refs.append(clock.time())
+            for i, (p, thr) in enumerate(ps):
+                for _ in range(_BURST):
+                    ti, si, ri = call(p, thr)
+                    t[i].append(ti)
+                    s1[i].append(si)
+                    r[i].append(ri)
+        return [(float(min(t[i])), float(np.median(s1[i])), float(np.median(r[i])))
+                for i in range(len(ps))]
+
+    def refined_pairs(chain, thr):
+        """Refined pairs of one run (its time unused): thresholds are placed by counts."""
+        return call(plan(chain, nt), thr)[2]
 
     def thr_for(b, density):
         lo, hi = 0.0, 16.0
         for _ in range(14):
             mid = 0.5 * (lo + hi)
-            _, _, refined = run((b,), (mid,), reps=1)
-            frac = refined / (blocks * nt)
+            frac = refined_pairs((b,), (mid,)) / (blocks * nt)
             if frac > density:
                 lo = mid
             else:
@@ -441,11 +494,10 @@ def calibrate_costs_gpu(n, device, blocks=None, reps=5, seed=11, nt=256):
     b0 = bands[0]
     clock = _clock_ref(device)
     warm_until = _time.perf_counter() + 0.25
-    run((b0,), (big,), reps=1)
+    call(plan((b0,), nt), (big,))
     while _time.perf_counter() < warm_until:
-        run((b0,), (big,), reps=1)
-    t_small, _, _ = run((b0,), (big,), ntm=nt // 4)
-    t_full, _, _ = run((b0,), (big,))
+        call(plan((b0,), nt), (big,))
+    (t_small, _, _), (t_full, _, _) = runs([((b0,), (big,), nt // 4), ((b0,), (big,))])
     if not (t_full > 0 and t_small > 0):
         # A backend that ignored the timer switch reports nothing, and a model priced at zero
         # picks the largest blocks and widest gates (seen on CUDA): refuse rather than guess.
@@ -454,21 +506,30 @@ def calibrate_costs_gpu(n, device, blocks=None, reps=5, seed=11, nt=256):
     per_pair0 = (t_full - t_small) / (blocks * (nt - nt // 4))
     block = max(0.0, t_full / blocks - nt * per_pair0)
     dense = {}
-    for b in bands:
-        t, _, _ = run((b,), (big,))
+    for b, (t, _, _) in zip(bands, runs([((b,), (big,)) for b in bands])):
         dense[b] = max(1e-3, (t / blocks - block) / nt)
     refine, sparse, tier2 = [], {}, {}
-    for f in _gc._CAL_DENSITIES:
-        g0 = thr_for(b0, f)
-        t, _, refined = run((b0,), (g0,))
+    thr0 = [thr_for(b0, f) for f in _gc._CAL_DENSITIES]
+    # The first tier and blocks alone (the modelled head, blocks * (block + nt * dense[b0]),
+    # is this same run's time) timed in the same rounds as the runs it is subtracted from:
+    # a run's time depends on what ran before it (a device cache warm with its own data or
+    # another configuration's), and the refine at 1%, ~30% of its run, came out at zero
+    # against the head of another round in one calibration of nine.
+    configs = ([((b0,), (big,))] + [((b0,), (g0,)) for g0 in thr0]
+               + [((b0, b), (g0, big)) for g0 in thr0 for b in bands[1:]])
+    timed = iter(runs(configs))
+    head = next(timed)[0]
+    for _ in thr0:
+        t, _, refined = next(timed)
         if refined:
-            refine.append((refined / (blocks * nt), max(1e-3, (t - blocks * (block + nt * dense[b0])) / refined)))
+            refine.append((refined / (blocks * nt), max(1e-3, (t - head) / refined)))
+    for _ in thr0:
         for b in bands[1:]:
-            t2, s1, _ = run((b0, b), (g0, big))
+            t2, s1, _ = next(timed)
             if s1:
                 tier2.setdefault(b, []).append((s1, t2))
     for b, pts in tier2.items():
-        sparse[b] = _sparse_rows(pts, blocks * (block + nt * dense[b0]), blocks * nt)
+        sparse[b] = _sparse_rows(pts, head, blocks * nt)
     if bands[1:]:
         sparse.setdefault(b0, list(sparse.get(bands[1], [])))
     # The first tier's pass excess over its own statistic, per band: the same threshold,
@@ -478,8 +539,17 @@ def calibrate_costs_gpu(n, device, blocks=None, reps=5, seed=11, nt=256):
     excess = {}
     if kind != "f32":
         for b, g, r_raw in _raw_gate_survivors(n, device, bands, blocks, nt, seed):
-            _, _, r_bnd = run((b,), (g,))
+            r_bnd = refined_pairs((b,), (g,))
             excess.setdefault(b, []).append((r_raw / (blocks * nt), r_bnd / (blocks * nt)))
+    # Every time to the reference's anchor units: the fastest reference of the calibration
+    # against its fastest in this process (see _ClockRef), so models at different n, made at
+    # different times, stay comparable.
+    fast = min(clock_refs) if clock_refs else 0.0
+    k = clock.anchor / fast if fast > 0 else 1.0
+    block *= k
+    dense = {b: v * k for b, v in dense.items()}
+    refine = [(f, v * k) for f, v in refine]
+    sparse = {b: [(f, v * k) for f, v in rows] for b, rows in sparse.items()}
     # The forward's share of the per-block work: the calibration cannot time it apart (one
     # submission), and per-block fixed work on the GPU is the forward transform plus small
     # bookkeeping, so `block` stands for it (an upper estimate of what a band forward saves).
