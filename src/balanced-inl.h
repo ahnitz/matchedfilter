@@ -63,15 +63,13 @@ typedef struct {
   short *q;            /* [2*(n1*N2 + W*b) + l] = re, +W = im */
   signed char *r8;     /* same indexing, low 8 bits                */
   float *scl;          /* [n1*(N2/W) + b] dequant scale            */
-  float *ire,*iim;     /* fp32 intermediate, used when quantising would not pay */
+  float *ire,*iim;     /* fp32 intermediate, [k2 block][n1][lane] (create)      */
   int gblk;            /* stage-A groups loaded per pass over the input          */
   int gmajor;          /* 1 = fused-product inputs are stored group-major     */
-  int ilay;            /* 1 = intermediate as [k2 block][n1][lane]           */
   vf *bmx,*bre,*bim;   /* per-bin running max, and the winner's value            */
   vi *bix;             /* per-bin block index of the current winner              */
   size_t nbcap;
   size_t bstride;      /* vf elements between group buffers                      */
-  size_t istr;         /* intermediate row stride, padded off a power of two      */
   vf *bR,*bI,*sR,*sI;
   vf *TLr,*TLi;
   float *w1r,*w1i,*w2r,*w2i;
@@ -271,36 +269,20 @@ void *create(size_t N){
      saves.  The quantised path and its switch were removed on 2026-09-20 (3164551e);
      the balance moves with the access pattern and this was the second time it
      flipped, so re-measure before reviving it. */
-  /* Intermediate row stride.  Padding it off the power of two was tried - the
-     element buffers needed exactly that, and ablating the store shows it costing
-     13% at 2^12 and 20% at 2^14 - but isolated on one build it measures as noise
-     at every size.  The store is simply the cost of writing the intermediate
-     (128 KiB at 2^14, ~63 GB/s, which is L2 bandwidth), not set aliasing. */
-  p->istr = (size_t)n2;
-  /* ilay picks the [k2 block][n1][lane] intermediate layout, which makes
-     stage A's stores CONTIGUOUS instead of strided by istr, and lets stage
-     B read them back the same way.
-     Both stages implemented it and the buffer was already sized for it --
-     but nothing ever assigned p->ilay, and create() memsets the plan, so
-     the strided path was the only one that had ever run. Enabling it also
-     removes an imul against a struct field per stored vector: the strided
-     offset is (AP_W*g+i)*p->istr, which the contiguous form does not need.
-     Interleaved A/B, paired ratios old/new:
-       coarse band  512   1.056, faster in 4 of 6
-       coarse band 1024   1.049, faster in 4 of 6
-       coarse band 2048   1.051, faster in 6 of 6
-       flat  n=4096       1.089, faster in 5 of 6
-       flat  n=16384      1.085, faster in 5 of 6
-     19 of 24 pairs, every size faster on the mean. MF_ILAY=0 restores the
-     old layout for comparison. */
-  p->ilay = ap_env_flag("MF_ILAY",1);
-  {
-    { size_t sz=(size_t)n1*p->istr;
-      size_t alt=(size_t)(n2/AP_W)*n1*AP_W;        /* [k2 block][n1][lane] */
-      if(alt>sz) sz=alt;
-      p->ire=ap_alloc64(sz*sizeof(float));
-      p->iim=ap_alloc64(sz*sizeof(float)); }
-  }
+  /* The intermediate is [k2 block][n1][lane]: stage A stores each group's corner
+     turn as one contiguous run, and stage B reads a column block back as one
+     contiguous run (or transforms it in place). The row-major [n1][k2] layout it
+     replaced, with stores and reads strided by a row, measured 1.05-1.09x slower
+     when this one was first enabled. It stayed behind MF_ILAY=0 until 2026-10-27.
+     Paired rounds on Zen 5 then found it slower at the median on every ISA (AVX3,
+     AVX2, AVX, SSE4: 5-7%, up to 1.36x at 2^20), over n = 256 to 2^20 and the peak,
+     full-output and continuous correlation calls. Its best case was 4.8% faster
+     (2^12, SSE4), which a 16-round re-measure put at 1.00, never the 5% a measured
+     choice needs. Zen 3 had it slower at every length (2026-10-22), so it was
+     removed. The one recorded exception is an Apple M2, where it was 4-9% faster
+     at n >= 2^18 (2026-10-22). */
+  p->ire=ap_alloc64(N*sizeof(float));
+  p->iim=ap_alloc64(N*sizeof(float));
   /* Stage A walks the input with stride N1*8 bytes and, one group at a time, uses
      only 2*AP_W floats of each row.  Measured on this machine, touching 128 bytes
      per 8 KiB row sustains 7.6 GB/s where a sequential read gets 43.9.  Loading G
@@ -549,19 +531,11 @@ static AP_ALWAYS_INLINE void stageA_tail_t(BP*p,int g,vf*restrict TR,vf*restrict
          until stage B reads it back, so the read-for-ownership is wasted DRAM
          traffic.  Measured, it is 1.22x to 1.62x SLOWER (0/32 rounds); stage B
          wants the line and the store buffer is not the constraint. */
-      if(p->ilay){
-        float *er=p->ire+(size_t)b*N1*AP_W+(size_t)AP_W*g*AP_W;
-        float *ei=p->iim+(size_t)b*N1*AP_W+(size_t)AP_W*g*AP_W;
-        for(int i=0;i<AP_W;i++){                    /* one contiguous run */
-          V_STOREU(er+(size_t)i*AP_W,OR[i]); V_STOREU(ei+(size_t)i*AP_W,OI[i]);
-        }
-      } else {
-        for(int i=0;i<AP_W;i++){
-          size_t off=(size_t)(AP_W*g+i)*p->istr+AP_W*b;
-          V_STOREU(p->ire+off,OR[i]); V_STOREU(p->iim+off,OI[i]);
-        }
+      float *er=p->ire+(size_t)b*N1*AP_W+(size_t)AP_W*g*AP_W;
+      float *ei=p->iim+(size_t)b*N1*AP_W+(size_t)AP_W*g*AP_W;
+      for(int i=0;i<AP_W;i++){                      /* one contiguous run */
+        V_STOREU(er+(size_t)i*AP_W,OR[i]); V_STOREU(ei+(size_t)i*AP_W,OI[i]);
       }
-
   }
 }
 
@@ -623,20 +597,13 @@ static void stageA_split(BP*p,const float*inr,const float*ini,int conj){
  * Layout: spec[g*N2*AP_W + n2*AP_W + l], n1 = g*AP_W + l. */
 /* The measured 32x32 path fixes the twiddle and corner-turn addresses as well
    as the codelet strides. Other shapes retain the generic stage below. */
+static HWY_NOINLINE void stageA_prod_32_untabled(BP*p,const float*dr,const float*di,
+                                                 const float*tr,const float*ti);
 static void stageA_prod_32(BP*p,const float*dr,const float*di,
                             const float*tr,const float*ti){
-  /* The precomputed-vector path assumes the unit-stride intermediate.  The
-     alternate layout uses eidx() in stageA_tail to permute its input. */
+  /* The 8-lane path below stores the corner turn straight from its own transform's
+     output; other widths share stageA_tail. */
   if constexpr (AP_W != 8) {
-    vf TR[AP_W],TI[AP_W],OR[AP_W],OI[AP_W];
-    for(int g=0;g<32/AP_W;g++){
-      const size_t gb=(size_t)g*32*AP_W;
-      fftsr32_prod_unit(dr+gb,di+gb,tr+gb,ti+gb,p->bR,p->bI,p->sR,p->sI,1,AP_W);
-      stageA_tail<32>(p,g,TR,TI,OR,OI,p->bR,p->bI);
-    }
-    return;
-  }
-  if(!p->ilay){
     vf TR[AP_W],TI[AP_W],OR[AP_W],OI[AP_W];
     for(int g=0;g<32/AP_W;g++){
       const size_t gb=(size_t)g*32*AP_W;
@@ -660,6 +627,15 @@ static void stageA_prod_32(BP*p,const float*dr,const float*di,
     }
     return;
   }
+  stageA_prod_32_untabled(p,dr,di,tr,ti);
+}
+
+/* stageA_prod_32 without the precomputed twiddle table (p->tw32r unset): out of line, so
+   its codelet is not inlined into the tabled path every plan takes. Inlined, it grew
+   stageA_prod_32 from 12.2 to 15.2 KB (AVX2) and 13.5 to 16.9 KB (AVX), and the AVX
+   n=1024 one-bin call ran 1.14x slower (op-cache misses, docs: fine-stage-is-frontend-bound). */
+static HWY_NOINLINE void stageA_prod_32_untabled(BP*p,const float*dr,const float*di,
+                                                 const float*tr,const float*ti){
   vf TR[8],TI[8];
   vf *restrict RR=p->bR, *restrict RI=p->bI;
   for(int g=0;g<4;g++){
@@ -796,24 +772,21 @@ static HWY_NOINLINE void stageB_inplace32(BP*p,int b,vf**RR,vf**RI){
 static HWY_NOINLINE void stageB_generic(BP*p,int b,vf**RR,vf**RI,int exact){
   const int N1=p->N1; (void)p->N2; (void)exact;
   const int M1=p->ea.single?N1:p->a1, M2=p->ea.single?1:p->a2, st=p->ea.st;
-  const size_t step = p->ilay ? (size_t)AP_W : p->istr;
-  const size_t base = p->ilay ? (size_t)b*N1*AP_W : (size_t)AP_W*b;
-  if(p->ilay && p->ea.single){
-    /* The column is already contiguous, in element order: transform it where stage A left
-       it (it is read once, by this), instead of copying it to the staging buffer first. */
-    vf *ar=(vf*)(p->ire+base), *ai=(vf*)(p->iim+base);
+  /* Column block b is contiguous, in element order. */
+  const vf *cr=(const vf*)(p->ire+(size_t)b*N1*AP_W), *ci=(const vf*)(p->iim+(size_t)b*N1*AP_W);
+  if(p->ea.single){
+    /* Transform it where stage A left it (it is read once, by this), instead of copying
+       it to the staging buffer first. */
+    vf *ar=(vf*)cr, *ai=(vf*)ci;
     efft(N1,ar,ai,p->sR,p->sI,p->w1r,p->w1i);
     *RR=ar; *RI=ai;
     return;
   }
+  /* Two-level element split: the staging buffer pads each of the M2 runs (ESTRIDE). */
   for(int e2=0;e2<M2;e2++){
-    const float *sr=p->ire+base+(size_t)e2*M1*step;
-    const float *si=p->iim+base+(size_t)e2*M1*step;
+    const vf *sr=cr+(size_t)e2*M1, *si=ci+(size_t)e2*M1;
     vf *dR=p->bR+(size_t)e2*st, *dI=p->bI+(size_t)e2*st;
-    for(int e1=0;e1<M1;e1++){
-      dR[e1]=V_LOADU(sr); dI[e1]=V_LOADU(si);
-      sr+=step; si+=step;
-    }
+    for(int e1=0;e1<M1;e1++){ dR[e1]=sr[e1]; dI[e1]=si[e1]; }
   }
   efft(N1,p->bR,p->bI,p->sR,p->sI,p->w1r,p->w1i);
   *RR=p->bR; *RI=p->bI;
@@ -824,7 +797,7 @@ template <bool INPLACE=true>
 static inline void stageB(BP*p,int b,vf**RR,vf**RI,int exact){
   if constexpr (AP_W==8 && INPLACE) {
     /* Stage A refills these independent contiguous blocks before every FFT. */
-    if(p->fuse==2 && p->ilay) return stageB_inplace32(p,b,RR,RI);
+    if(p->fuse==2) return stageB_inplace32(p,b,RR,RI);
   }
   stageB_generic(p,b,RR,RI,exact);
 }
@@ -1455,7 +1428,7 @@ static void binmax_core(BP*p,size_t binsize,float thr,ap_peak*out,int conj,
     ap_peak *o=out+j0;
     if(j0==j1){
       if constexpr (AP_W==8) {
-        if(p->fuse==2 && p->ilay) { binmax_one<true>(p,thr,o,conj,ws,we); return; }
+        if(p->fuse==2) { binmax_one<true>(p,thr,o,conj,ws,we); return; }
       }
       binmax_one(p,thr,o,conj,ws,we);
       return;
@@ -1463,7 +1436,7 @@ static void binmax_core(BP*p,size_t binsize,float thr,ap_peak*out,int conj,
     /* A window bin edge inside the block (bin phases): still in registers. */
     const size_t kb=org+(j0+1)*binsize;
     if constexpr (AP_W==8) {
-      if(p->fuse==2 && p->ilay) { binmax_two<true>(p,thr,o,conj,ws,we,kb); return; }
+      if(p->fuse==2) { binmax_two<true>(p,thr,o,conj,ws,we,kb); return; }
     }
     binmax_two<false>(p,thr,o,conj,ws,we,kb);
     return;
@@ -1701,7 +1674,7 @@ static HWY_NOINLINE MF_PEAK_SECTION int binmax_prod_threshold(void *vp,const flo
     /* Padding phases leave empty bins, so the call's bin count overstates the bins the
        samples touch: j0..j1. One touched bin takes the one-bin kernel. */
     const size_t j0=ws<we ? (ws-org)/binsize : 0, j1=ws<we ? (we-1-org)/binsize : 0;
-    if(__builtin_expect(thr>0.f && j1<=j0+1 && p->fuse==2 && p->ilay && p->gmajor, 1)) {
+    if(__builtin_expect(thr>0.f && j1<=j0+1 && p->fuse==2 && p->gmajor, 1)) {
       stageA_prod_32(p,dr,di,tr,ti);
       for(size_t j=0;j<nbf;j++) if(j<j0 || j>j1){ out[j].index=-1; out[j].re=0.f; out[j].im=0.f; out[j].magnitude=0.f; }
       const size_t kb=j0==j1 ? AP_ONE_BIN : org+(j0+1)*binsize;

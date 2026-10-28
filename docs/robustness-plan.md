@@ -446,3 +446,27 @@ A step that changes C or workflows is first pushed to a `ci/<topic>` branch and 
   - Cost: a call per bin count doubled the calls and cost 5.6% on the paired CPU stage breakdown, almost all of it per-call overhead (C time unchanged). Every entry is now padded to its call's bin count (whole-bin phases, empty bins first), so a bank is one call again: within ~1% of main. The direct refine was measured and plays no part (MF_DIRECT_REFINE=0 changes nothing here). Follow-up merges are sort-free for one template.
   - Flat CPU after padding: the paired pycbc test27 A/B still showed fine -10% and follow-up -6%. Four causes, all fixed: padded blocks lost the one-bin register and fused 1024 kernels (they now dispatch on the bins the samples touch); the two-bin scan tested the bin edge on every row (rows now split at the edge, one straddling row); inlining that scan grew binmax_core by a third (now out of line); and the numpy partial-bin merge cost 0.56 s per job, 4772 calls with float64 samples that missed the fast path (now one C pass, _core.window_bin_keep). After the fixes the follow-up is level with main (5.03 s on both). Fine is +1.5% (7.75 against 7.52 s, with a ~1% core-placement bias in that pair): half its 2048-sample blocks really do scan and report two window bins.
   - Gated: tests/test_window_bins.py (every engine, block size, bin size and device, batched follow-ups, the GPU refine, 256-sample blocks, the merge against a brute-force rule) and the full suites on dev2 Vulkan (2331), the M2 Metal (2226) and an L40S (all but five tool-import tests that need pytest on the node). CI was red once, on 339f50a5, in test_merged_equals_separate_calls[256-hier] (snr off by 2e-6 on x86 widest and arm64) and green on cd6029ab. It did not reproduce on dev2 under any chain, ISA or load, so the test now reports the plans' state, a repeat call and the differing peaks if it fails again.
+- 2026-10-27: **D1 finished: MF_ILAY deleted.** The strided intermediate layout was re-measured on Zen 5 (dev2, one pinned core, load average 3.5-10) against the contiguous one in one build: paired in-process rounds, order alternating, each candidate settled by an untimed call; per cell the geometric mean over AB/BA pairs, three repeats. The cells are the AVX3, AVX2, AVX and SSE4 kernels at n = 256 to 2^20, for MatchedFilter.run (one bin, many bins, unthresholded) and CorrelationFilter.run and run_series: 216 cells, 36 of them a 16-round re-measure at n = 2048-8192. Ratios are strided/contiguous:
+
+  | ISA | median | best case | worst case |
+  |---|---|---|---|
+  | AVX3 | 1.071 | 1.013 | 1.301 (n = 1024, one bin: the fused 32x32 kernels need the contiguous layout) |
+  | AVX2 | 1.072 | 0.965 (4096) | 1.289 (2^20) |
+  | AVX | 1.055 | 0.974 (8192) | 1.266 (2^20) |
+  | SSE4 | 1.069 | 0.952 (4096) | 1.363 (2^20) |
+
+  No cell reaches the 5% a measured choice needs. The 4096 cells that favoured the strided layout came out at 1.00-1.10 in a 16-round re-measure. Outputs were bit-identical in every cell.
+
+  One apparent win was the output buffer, not the layout. With a separate output array per candidate, CorrelationFilter.run at n = 65536 (AVX) favoured the strided layout by 7-12% in every process. With one shared array it was 2-5% slower. The sweep uses one array.
+
+  On the CPU ladder (tools/ladder.py, test27 bank and profiles, --pure --tops 2 --segments 8, settled seed, four alternating rounds) the strided layout's throughput ratio per round was 0.984, 0.956, 0.936 and 0.995 on AVX3, and 1.005, 0.977, 1.010 and 0.974 on AVX2. Per the rule it is deleted, with istr and the plan's ilay field, and tests/test_full_correlation.py drops its layout parameter.
+
+  The build without it is bit-identical to the old default on every ISA: 180 cells, four rounds, sha256 of every output. tools/ab_ladder.py (four rounds, batched and pipelined) gave new/old medians of 0.999 and 1.017 on AVX3, 0.994 and 0.983 on AVX2, and 0.982 and 0.977 with the AVX kernels. In the n = 512 and 1024 cells (6-8 process rounds) the new build was:
+  - AVX3: 1-6% faster;
+  - SSE4: up to 4% faster;
+  - AVX2: 5% faster at 1024 one-bin, 5-10% slower at 512 (one bin and many bins);
+  - AVX: 1-16% slower, worst at 1024 one-bin.
+
+  A control build (base plus 24 nops in create(), so only the layout of the code moved) shifted the same cells by at most 4%. perf puts the AVX loss in stageA_prod_32. With the strided branch gone, GCC inlines the cold no-table fallback's 32-point transform there. Moving that fallback out of line restored the old hot-instruction mix (1434 sampled instructions against 1439) but not the speed. Aligning the function to 64 bytes and keeping the old stage-B copy loop did not recover it either, so the cause is code placement, not work.
+
+  Open: the 2026-10-22 M2 measurement (strided 9% faster at 2^18, 4% at 2^20) was not re-measured. If it holds, the candidate belongs in the flat filter's plan construction (a per-n price like _prices._cpu_forward_platform; the C plan would need a layout argument again). The AVX2 and AVX code-generation shifts also need checking on dev1, Haswell and Ivy Bridge, where those kernels actually run.

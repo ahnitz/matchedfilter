@@ -155,6 +155,23 @@ Alpha releases may change the API. Pin a version for reproducible work.
   timing the band-8192 coarse layouts raised `UnsupportedSize`; it now times the two
   layouts that load. Devices with tensor cores also lose the two `tc` coarse candidates
   at bands 256 and 512 (the deleted gate).
+- `MF_ILAY` and the strided ([n1][k2]) intermediate layout of the CPU transform that
+  `MF_ILAY=0` selected. Paired rounds on Zen 5 (2026-10-27) covered the AVX3, AVX2, AVX
+  and SSE4 kernels, n = 256 to 2^20, and the peak (one bin, many bins, unthresholded),
+  full-output and continuous correlation calls. The strided layout was 5-7% slower than
+  the contiguous one at the median on every ISA and up to 1.36x slower (2^20). It was never
+  faster by the 5% a measured choice needs: its best case was 4.8% (n = 4096, SSE4), which a
+  16-round re-measure put at 1.00. Outputs were bit-identical. On the CPU ladder (test27
+  bank, AVX3) it was 0.5-6.4% slower per round. Zen 3 had it slower at every length
+  (2026-10-22). An Apple M2 measured it 4-9% faster at n >= 2^18 (2026-10-22), which was not
+  re-measured. Without it, results are bit-identical on every ISA.
+  Removing the branch changed GCC's inlining: stage A's untabled 32-point path, which no
+  plan with its twiddle table takes, was inlined into the tabled one (12.2 -> 15.2 KB on
+  AVX2, 13.5 -> 16.9 KB on AVX) and the AVX n = 1024 one-bin call ran 1.14x slower. That
+  path is now its own out-of-line function, and the hot one is 7.8 and 8.5 KB. Paired on
+  Zen 5, the AVX and AVX2 calls at n = 1024 are 1.03-1.04x the old build's and level
+  elsewhere (n = 512, 4096), and AVX3 is unchanged: the remainder is code placement, as the
+  fine stage's frontend bound makes it (the old ladder ratios were measured before this fix).
 - `MF_METAL_IEEE` (no tool, test or CI job set it, and `=none` let the survivor compaction
   drop a NaN coarse value), `MF_TC_KAPPA` (a hand-set tensor-core bound constant in place
   of the one built from the measured sigma) and `MF_CAPTURE` (nothing read it). Setting
