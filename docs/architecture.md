@@ -100,7 +100,10 @@ the target controls (`targets`, `set_target`, `backend`), the gate model's inner
 here: `simulate` (the one simulation, below), `records_within`, `chain_candidates` (the
 threshold-split search; the Python recursion in `gatechain._chain_candidates` is its
 reference, selected by `gatechain._C_SEARCH`), and `gauss_fill`. Buffers are checked at
-the boundary independently of the Python API.
+the boundary independently of the Python API. `MF` and `HMF` share one implementation of
+ingest, `run` and `run_series` (`bind_set`, `bind_set_batch`, `bind_run`,
+`bind_run_series`, reading a `filter_view` of the object); every buffer a binding takes is
+released on every path, which `tests/test_native_buffers.py` checks by reference count.
 
 ### GPU kernels
 
