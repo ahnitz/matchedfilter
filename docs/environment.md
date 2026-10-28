@@ -12,6 +12,12 @@ Removed 2026-10-30: a GPU batch is always fused, in lockstep: pinned at producti
 length, unfused was 3-17% slower and the interleave of depth 3 no faster on the 8060S,
 RENOIR and Iris Xe (the device trial that chose them is gone): MF_GPU_FUSE_INTERLEAVE.
 
+Removed 2026-10-27: the strided intermediate layout it selected was never faster than
+the contiguous one by the 5% a measured choice needs: at most 4.8%, and 5-7% slower at
+the median, over n = 256 to 2^20 on Zen 5 (AVX3, AVX2, AVX, SSE4; peak, full and
+continuous correlation calls), and slower at every length on Zen 3. An Apple M2 measured
+it 4-9% faster at n >= 2^18 (2026-10-22): MF_ILAY.
+
 Removed 2026-10-27: the pycbc capture hook that read it, writing tools/hier_bench.py
 fixtures, is gone; tools/setup_capture.py captures a job's calls: MF_CAPTURE.
 
@@ -92,7 +98,6 @@ Older notes in docs/ that mention a removed variable describe past studies.
 | `MF_GATE16=0` | on where built | No FP16 first gate on the CPU. |
 | `MF_DGROUP=<n>` | the plan's series group | Blocks per hierarchical series batch. |
 | `MF_PBMAX=<n>` | built-in | Largest n run as pair-batched transforms. |
-| `MF_ILAY=0` | 1 | Strided intermediate layout. Slower on Zen 3 and Zen 5, faster on the M2 at n >= 2^18 (4-9%); to become a measured candidate. |
 | `MF_CORR_NO_STREAM=1` | off | No non-temporal stores in continuous correlation. |
 | `MF_BAND_FORWARD=0/1` | measured | GPU band forward off/on. |
 | `MF_COARSE_LAYOUT=<labels>` | measured | Force GPU coarse layouts by label. |

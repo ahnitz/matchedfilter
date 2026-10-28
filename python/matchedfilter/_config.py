@@ -110,9 +110,6 @@ VARS: Tuple[Var, ...] = (
         "Blocks per hierarchical series batch.", usage="MF_DGROUP=<n>", kind="int"),
     Var("MF_PBMAX", "override", "c", "built-in",
         "Largest n run as pair-batched transforms.", usage="MF_PBMAX=<n>", kind="int"),
-    Var("MF_ILAY", "override", "c", "1",
-        "Strided intermediate layout. Slower on Zen 3 and Zen 5, faster on the M2 at "
-        "n >= 2^18 (4-9%); to become a measured candidate.", usage="MF_ILAY=0", kind="flag", value=True),
     Var("MF_CORR_NO_STREAM", "override", "c", "off",
         "No non-temporal stores in continuous correlation.", usage="MF_CORR_NO_STREAM=1", kind="flag", value=False),
     Var("MF_BAND_FORWARD", "override", "py", "measured", "GPU band forward off/on.",
@@ -164,6 +161,11 @@ REMOVED = (
     ("2026-10-30", "a GPU batch is always fused, in lockstep: pinned at production length, "
      "unfused was 3-17% slower and the interleave of depth 3 no faster on the 8060S, RENOIR "
      "and Iris Xe (the device trial that chose them is gone)", ("MF_GPU_FUSE_INTERLEAVE",)),
+    ("2026-10-27", "the strided intermediate layout it selected was never faster than the "
+     "contiguous one by the 5% a measured choice needs: at most 4.8%, and 5-7% slower at the "
+     "median, over n = 256 to 2^20 on Zen 5 (AVX3, AVX2, AVX, SSE4; peak, full and "
+     "continuous correlation calls), and slower at every length on Zen 3. An Apple M2 "
+     "measured it 4-9% faster at n >= 2^18 (2026-10-22)", ("MF_ILAY",)),
     ("2026-10-27", "the pycbc capture hook that read it, writing tools/hier_bench.py "
      "fixtures, is gone; tools/setup_capture.py captures a job's calls", ("MF_CAPTURE",)),
     ("2026-10-27", "the tensor-core coarse bound was built from the sigma measured by "
