@@ -19,20 +19,21 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ### Changed
 
-- Block size, gate chains and the Q15 screen are decided by one joint trial on real calls,
-  on the CPU and GPU alike, in place of three separate trials. Its arms are complete
-  configurations: the default (the smallest block size, each plan's model chain and the
-  model's screen setting) and one-step deviations from it (another block size, the model's
-  priced layout, each plan's next shortlisted chain, the screen off or on). They are timed in
-  paired rounds on the same jobs of two of a batch's banks and pooled as ratios to the
-  default. Arms that can no longer win leave the rounds, and a winner other than the default
-  must win again alone against it before it locks. Each plan now runs its own model chain unless a chain wins outright. The old chain
-  trial locked one chain for plans of every profile, which ran 2-14% slower per call (dev1,
-  dev2, Haswell, Ivy Bridge). On the test67 leaves at their mean of 12 calls per bank, total
-  CPU is 4.6% lower on dev2 and 6.0% lower on dev1. `MF_TRIAL_ROUNDS` replaces
-  `MF_BLOCK_TRIALS` and `MF_CHAIN_TRIALS` (both now warn), and `tools/migrate_cost_file.py`
-  removes the superseded trial records from a cost file. `HierarchicalFilter.autotune_info`
-  reports status `model` when no trial ran.
+- Block size and the Q15 screen are decided by one joint trial on real calls, on the CPU
+  and GPU alike, in place of three separate trials, and the gate chain is no longer timed:
+  each plan runs its model chain (`MF_CHAIN_FORCE` pins one for measurement). The trial's
+  arms are complete configurations: the default (the smallest block size, each plan's model
+  chain and the model's screen setting) and one-step deviations from it (another block size,
+  the model's priced layout, the screen off or on). They are timed in paired rounds on the
+  same jobs of two of a batch's banks and pooled as ratios to the default. Arms that can no
+  longer win leave the rounds, and a winner other than the default must win again alone
+  against it before it locks. The old chain trial locked one chain for plans of every
+  profile, which ran 2-14% slower per call (dev1, dev2, Haswell, Ivy Bridge). On the test67
+  leaves at their mean of 12 calls per bank, total CPU is 4.6% lower on dev2 and 6.0% lower
+  on dev1. `MF_TRIAL_ROUNDS` replaces `MF_BLOCK_TRIALS` and `MF_CHAIN_TRIALS`, and
+  `MF_CHAIN_MARGIN` is gone (all three now warn); `tools/migrate_cost_file.py` removes the
+  superseded trial records from a cost file. `HierarchicalFilter.autotune_info` reports
+  status `model` when no trial ran.
 - Block sizes are chosen on real calls in every run, not only with MF_COST_FILE: the first
   reference's banks run each candidate size in paired rounds and the search locks the fastest,
   pooled over its banks. Candidates are the smallest single sizes, smallest first (a tie keeps
@@ -58,6 +59,13 @@ Alpha releases may change the API. Pin a version for reproducible work.
   Threefry-2x32 and Box-Muller, identical for any vector width; AVX2 and AVX-512 agree bit
   for bit, SSE4 to the last ulp of its log and sincos), so their draws, and the thresholds
   they place, differ from before within the simulation's own error (thresholds +-1.4%).
+
+### Removed
+
+- `MF_METAL_IEEE` (no tool, test or CI job set it, and `=none` let the survivor compaction
+  drop a NaN coarse value), `MF_TC_KAPPA` (a hand-set tensor-core bound constant in place
+  of the one built from the measured sigma) and `MF_CAPTURE` (nothing read it). Setting
+  any of them, or `MF_GATE_CACHE_FILE`, now warns that it was removed and why.
 
 ### Performance
 

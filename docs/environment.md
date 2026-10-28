@@ -8,8 +8,20 @@ dismisses), and exist for measurement and tests.
 Generated from `python/matchedfilter/_config.py` by `tools/gen_environment_doc.py`; edit
 the table there.
 
-Removed 2026-10-26: block sizes, chains and the Q15 screen are one joint trial of paired
-rounds; MF_TRIAL_ROUNDS sets its rounds: MF_BLOCK_TRIALS, MF_CHAIN_TRIALS.
+Removed 2026-10-27: the pycbc capture hook that read it, writing tools/hier_bench.py
+fixtures, is gone; tools/setup_capture.py captures a job's calls: MF_CAPTURE.
+
+Removed 2026-10-27: the tensor-core coarse bound is built from the sigma measured by
+tools/cuda_tc_sigma.py; a hand-set constant is not a bound, and nothing set it:
+MF_TC_KAPPA.
+
+Removed 2026-10-27: no tool, test or CI job set it; Metal keeps fast math except in the
+survivor compaction, which is IEEE because it must list a NaN coarse value:
+MF_METAL_IEEE.
+
+Removed 2026-10-26: block sizes and the Q15 screen are one joint trial of paired rounds,
+and the chain is the model's; MF_TRIAL_ROUNDS sets its rounds: MF_BLOCK_TRIALS,
+MF_CHAIN_TRIALS.
 
 Removed 2026-10-26: the gate chain is the cost model's, never a trial arm
 (MF_CHAIN_FORCE pins one for measurement): MF_CHAIN_MARGIN.
@@ -37,6 +49,10 @@ MF_METAL_COARSE_TWT.
 Removed 2026-10-22: renamed MF_COARSE_RAW (MF_COARSE_RAW=1 is what MF_VK_C16_BOUND=0
 did, on every GPU backend): MF_VK_C16_BOUND.
 
+Removed 2026-10-07: the gate-model simulation cache it located went with the cost
+tables; chain thresholds are drawn in each process, and MF_COST_FILE keeps measured
+costs: MF_GATE_CACHE_FILE.
+
 Older notes in docs/ that mention a removed variable describe past studies.
 
 ## Configuration
@@ -47,6 +63,7 @@ Older notes in docs/ that mention a removed variable describe past studies.
 | `MF_COST_FILE` | unset | JSON file of measured cost models and trial locks, kept between processes. Unset: cold start, no trials kept. One writer per open contest: processes sharing a file while a trial is open overwrite each other's samples (said once per contest). |
 | `MF_EXECUTION_POLICY` | the shipped `execution-policy.json` | Another execution-policy table. |
 | `MF_ISA` | best the CPU supports | SIMD target (also `matchedfilter.set_target`). |
+| `MF_DIRECT_REFINE=0` | on | CPU refines by transform only (no direct correlation): exact bin maxima for the pairs that pass the gates. |
 
 ## Diagnostics (output only)
 
@@ -69,7 +86,6 @@ Older notes in docs/ that mention a removed variable describe past studies.
 | `MF_AUTOTUNE=0` | on | No timed trials: the model's choices stand. |
 | `MF_CHAIN_FORCE=b1,b2` or `n:b1,b2;...` | unset | Pin the gate chain (cross-device comparisons; results depend on the chain). |
 | `MF_TRIAL_ROUNDS` | 5 | Paired rounds before a joint trial decides (it takes up to twice as many). |
-| `MF_DIRECT_REFINE=0` | on | CPU refines by transform only (no direct correlation). |
 | `MF_GATE16=0` | on where built | No FP16 first gate on the CPU. |
 | `MF_DGROUP=<n>` | the plan's series group | Blocks per hierarchical series batch. |
 | `MF_PBMAX=<n>` | built-in | Largest n run as pair-batched transforms. |
@@ -79,7 +95,6 @@ Older notes in docs/ that mention a removed variable describe past studies.
 | `MF_COARSE_LAYOUT=<labels>` | measured | Force GPU coarse layouts by label. |
 | `MF_VK_SUBGROUP=<size>` | measured | Force a Vulkan subgroup size. |
 | `MF_COARSE_RAW=1` | 0 | The fp16 coarse tier reports its raw maximum instead of an upper bound (every GPU backend; the physics tests and tools/c16_sigma.py). |
-| `MF_METAL_IEEE=all/none` | per kernel | IEEE math for all or no Metal kernels. |
 | `MF_GPU_FUSE_INTERLEAVE=<n>` | measured | Fixed Vulkan fusion interleave depth. |
 | `MF_GPU_ITEMS=0` | on | Single-template GPU jobs of a batch run one by one. |
 | `MF_GPU_QUEUE_AHEAD=<n>` | 8 | GPU submissions in flight. |
@@ -94,7 +109,5 @@ Older notes in docs/ that mention a removed variable describe past studies.
 | `MF_SLANGC_ANY_VERSION=1` | 0 | Build with a slangc other than the pinned version (experiments only). |
 | `MF_NVRTC` | `libnvrtc.so.12` | NVRTC library for the PTX build. |
 | `MF_CUDA_PATH` | found | CUDA installation for the PTX build. |
-| `MF_TC_KAPPA` | from the measured sigma | Tensor-core coarse bound constant for tools/build_ptx.py. |
 | `MF_GATE_BANK`, `MF_GATE_PROFILES` | unset | Template bank for tools/gate.py's end-to-end checks (also `--bank`). |
-| `MF_CAPTURE` | unset | Directory a pycbc run captures filter calls into, for tools/hier_bench.py replays. |
 | `MF_TEASER_N`, `MF_TEASER_NDATA`, `MF_TEASER_NTMPL` | 4096, 16, 512 | Shape of tools/teaser_figure.py's run. |

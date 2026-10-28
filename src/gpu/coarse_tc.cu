@@ -39,7 +39,7 @@
 #define U 4.8828125e-4f
 
 extern "C" {
-__constant__ unsigned int mf_c16_raw = 0;   // the host's raw switch (MF_VK_C16_BOUND=0)
+__constant__ unsigned int mf_c16_raw = 0;   // the host's raw switch (MF_COARSE_RAW=1)
 }
 
 __device__ __forceinline__ void mma16816(float c[4], unsigned a0, unsigned a1, unsigned a2,

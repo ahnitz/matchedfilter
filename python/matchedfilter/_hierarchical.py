@@ -146,10 +146,10 @@ class HierarchicalFilter(MatchedFilter):
     The chain is chosen automatically from the reference: every chain of up to
     ``max_tiers`` bands is priced by a model (gate thresholds from the profile,
     noise pass rates simulated from it, tier costs calibrated on this machine).
-    The model's best runs unless a joint trial on the real workload finds another
-    chain, or the Q15 screen setting, clearly faster (``MF_AUTOTUNE=0`` keeps the
-    model's choice). Inside a ``TimeDomainFilterBank`` the bank's trial decides. Pin a chain with
-    ``chain=(b1, b2, ...)``; pass explicit thresholds with
+    The model's best runs; the chain is not timed on the workload. A joint trial on
+    the real workload can find another Q15 screen setting clearly faster
+    (``MF_AUTOTUNE=0`` keeps the model's). Inside a ``TimeDomainFilterBank`` the bank's
+    trial decides. Pin a chain with ``chain=(b1, b2, ...)``; pass explicit thresholds with
     :meth:`set_coarse_threshold` to skip the model entirely.
     """
     _is_hierarchical = True

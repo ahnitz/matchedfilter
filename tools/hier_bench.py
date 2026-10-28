@@ -27,9 +27,9 @@ It reports three things together, because none of them means much alone:
 A fixture is the better test by a wide margin: it is the exact input
 pycbc_inspiral_fir handed the library, together with the output it got back,
 so nothing about the data, the bank or the normalisation has to be guessed --
-and every one of those guesses has been wrong here at least once.  Capture one
-with MF_CAPTURE=<dir> on a pycbc_inspiral_fir run using
---ratio-filter-engine matchedfilter-hierarchical.
+and every one of those guesses has been wrong here at least once.  The pycbc
+capture hook that wrote these fixtures is gone; tools/setup_capture.py captures
+a job's calls in its own format.
 """
 import argparse
 import os

@@ -268,8 +268,9 @@ void *create(size_t N){
                                                  0/48 and 0/16 rounds)
 
      The pack/unpack arithmetic costs more than the 25% of intermediate bytes it
-     saves.  Kept behind MF_USEQ because the balance moves with the access
-     pattern and this is the second time it has flipped. */
+     saves.  The quantised path and its switch were removed on 2026-09-20 (3164551e);
+     the balance moves with the access pattern and this was the second time it
+     flipped, so re-measure before reviving it. */
   /* Intermediate row stride.  Padding it off the power of two was tried - the
      element buffers needed exactly that, and ablating the store shows it costing
      13% at 2^12 and 20% at 2^14 - but isolated on one build it measures as noise
