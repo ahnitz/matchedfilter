@@ -90,8 +90,13 @@ class _Watch:
 @pytest.fixture
 def watch(monkeypatch):
     """A _Watch on the Vulkan GPU, with a context made under it (watch.ctx)."""
+    import gc
     from matchedfilter import _vkcompute
     index = int(_vulkan_gpu().split(":")[1])
+    # An earlier test's contexts, garbage not yet collected, still hold device-wide state:
+    # the follow-up records' owner (Executor.submit_followups) was one, and this test's
+    # follow-ups ran on its records, made before the watch began.
+    gc.collect()
     table = _vkcompute.Context(index)        # reaches the device's function table
     w = _Watch(monkeypatch, table)
     w.ctx = _vkcompute.Context(index)
