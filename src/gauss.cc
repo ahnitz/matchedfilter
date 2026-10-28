@@ -19,8 +19,8 @@
  * Draws reach 5.77 sigma at most (u1 = 2^-24), far past what a simulation of block maxima of
  * transformed noise resolves. The float part (log, sincos) differs between ISAs in the last
  * ulp; within one it is lane by lane the same arithmetic at 8 lanes and at 16. A read
- * starting inside a block generates the block and skips its first draws; one ending inside
- * it generates only the steps it reads. */
+ * starting inside a block runs the block's generators through the steps before it without
+ * storing them, and one ending inside it generates only the steps it reads. */
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
@@ -63,13 +63,16 @@ static inline void seed_block(uint32_t *st, size_t ws, uint64_t b, uint32_t k0, 
   for (int j = 0; j < 8; j++) st[j] |= 1u;         // never the all-zero state
 }
 
-/* One block's share of a fill: steps [0, q1) of block b, the draws 16 q .. 16 q + 15 of step
-   q at out + 16 q, each pair (the draws at 16 q + 2 j and 16 q + 2 j + 1) times sc[8 q + j]
-   when sc is given. */
+/* One block's share of a row of a fill: block b's draws [lo, hi) (0 <= lo < hi <= kBlock),
+   draw d at row[at + d] -- at is where the block starts relative to the row, negative when
+   the row starts inside it -- times sc[(at + d) / 2] when sc (the row's scale, one a pair of
+   draws) is given. */
 struct Piece {
-  float *out;
+  float *row;
   const float *sc;
-  uint64_t b, q1;
+  int64_t at;
+  uint64_t b;
+  uint32_t lo, hi;
 };
 }  // namespace ap_gauss
 #endif
@@ -86,44 +89,71 @@ HWY_INLINE V Rotl(V x) { return hn::Or(hn::ShiftLeft<R>(x), hn::ShiftRight<32 - 
    else one. */
 static constexpr size_t kGroup = HWY_LANES(uint32_t) >= 16 ? 2 : 1;
 
-/* G pieces (Piece) of distinct blocks, block g's generators in lanes 8 g .. 8 g + 7 of one
-   vector (G = 1: the eight in 8 / L vectors of L lanes); each piece's steps past its q1 are
-   left out of its output. */
-template <size_t G, bool kScaled>
-static void FillPieces(const Piece *pc, uint32_t k0, uint32_t k1) {
-  const hn::CappedTag<uint32_t, 8 * G> du;
-  const hn::Rebind<float, decltype(du)> df;
-  constexpr size_t kMax = 8;
-  const size_t L = hn::Lanes(du);
-  const size_t NV = G == 1 ? 8 / L : 1;            // vectors holding the generators
-  using VU = decltype(hn::Zero(du));
-  HWY_ALIGN uint32_t st[32 * G];
-  uint64_t qmax = 0;
-  for (size_t g = 0; g < G; g++) {
-    seed_block(st + 8 * g, 8 * G, pc[g].b, k0, k1);
-    qmax = pc[g].q1 > qmax ? pc[g].q1 : qmax;
+/* G blocks' generators, block g's in lanes 8 g .. 8 g + 7 of one vector (G = 1: the eight in
+   8 / L vectors of L lanes), their word w at st + 8 G w (seed_block's layout). */
+template <size_t G>
+struct GenLanes {
+  using DU = hn::CappedTag<uint32_t, 8 * G>;
+  using DF = hn::Rebind<float, DU>;
+  using VU = hn::Vec<DU>;
+  static constexpr size_t kMax = 8;
+  static size_t L() { return hn::Lanes(DU()); }
+  static size_t NV() { return G == 1 ? 8 / L() : 1; }   // vectors holding the generators
+};
+
+/* One xoshiro128++ step of the generators in s0 .. s3: their output. */
+template <class VU>
+HWY_INLINE VU Next(VU &s0, VU &s1, VU &s2, VU &s3) {
+  const VU r = hn::Add(Rotl<7>(hn::Add(s0, s3)), s0);
+  const VU t = hn::ShiftLeft<9>(s1);
+  s2 = hn::Xor(s2, s0); s3 = hn::Xor(s3, s1);
+  s1 = hn::Xor(s1, s2); s0 = hn::Xor(s0, s3);
+  s2 = hn::Xor(s2, t); s3 = Rotl<11>(s3);
+  return r;
+}
+
+/* n steps of the generators at st, and nothing more: steps before any piece's draws. */
+template <size_t G>
+static HWY_NOINLINE void Skip(uint32_t *st, uint64_t n) {
+  using T = GenLanes<G>;
+  const typename T::DU du;
+  const size_t L = T::L(), NV = T::NV();
+  for (size_t v = 0; v < NV; v++) {
+    auto s0 = hn::Load(du, st + 0 * 8 * G + v * L), s1 = hn::Load(du, st + 1 * 8 * G + v * L);
+    auto s2 = hn::Load(du, st + 2 * 8 * G + v * L), s3 = hn::Load(du, st + 3 * 8 * G + v * L);
+    for (uint64_t i = 0; i < 2 * n; i++) (void)Next(s0, s1, s2, s3);
+    hn::Store(s0, du, st + 0 * 8 * G + v * L); hn::Store(s1, du, st + 1 * 8 * G + v * L);
+    hn::Store(s2, du, st + 2 * 8 * G + v * L); hn::Store(s3, du, st + 3 * 8 * G + v * L);
   }
+}
+
+/* n steps of the generators at st into draws: step i's sixteen draws of block g at
+   dst[g] + 16 i (none: not stored), each pair (the draws at 2 j and 2 j + 1) times
+   kp[g][8 i + j] when scaled (a piece not stored reads any 8 n floats). */
+template <size_t G, bool kScaled>
+static HWY_NOINLINE void Steps(uint32_t *st, uint64_t n, float *const *dst0, const float *const *kp0) {
+  using T = GenLanes<G>;
+  const typename T::DU du;
+  const typename T::DF df;
+  using VU = typename T::VU;
+  constexpr size_t kMax = T::kMax;
+  const size_t L = T::L(), NV = T::NV();
   VU s0[kMax], s1[kMax], s2[kMax], s3[kMax];
   for (size_t v = 0; v < NV; v++) {
     s0[v] = hn::Load(du, st + 0 * 8 * G + v * L); s1[v] = hn::Load(du, st + 1 * 8 * G + v * L);
     s2[v] = hn::Load(du, st + 2 * 8 * G + v * L); s3[v] = hn::Load(du, st + 3 * 8 * G + v * L);
   }
+  float *dst[G];                                   // local: the stores cannot move them
+  const float *kp[G];
+  for (size_t g = 0; g < G; g++) { dst[g] = dst0[g]; kp[g] = kp0[g]; }
   const auto tiny = hn::Set(df, 1.0f / 16777216.0f);
   const auto one = hn::Set(du, 1u);
   const auto m2 = hn::Set(df, -2.0f);
   const auto twopi = hn::Set(df, 6.283185307179586f);
-  for (uint64_t q = 0; q < qmax; q++) {
+  for (uint64_t i = 0; i < n; i++) {
     VU A[kMax], B[kMax];
-    for (int half = 0; half < 2; half++) {
-      for (size_t v = 0; v < NV; v++) {          // xoshiro128++ step
-        const VU r = hn::Add(Rotl<7>(hn::Add(s0[v], s3[v])), s0[v]);
-        const VU t = hn::ShiftLeft<9>(s1[v]);
-        s2[v] = hn::Xor(s2[v], s0[v]); s3[v] = hn::Xor(s3[v], s1[v]);
-        s1[v] = hn::Xor(s1[v], s2[v]); s0[v] = hn::Xor(s0[v], s3[v]);
-        s2[v] = hn::Xor(s2[v], t); s3[v] = Rotl<11>(s3[v]);
-        (half ? B : A)[v] = r;
-      }
-    }
+    for (size_t v = 0; v < NV; v++) A[v] = Next(s0[v], s1[v], s2[v], s3[v]);
+    for (size_t v = 0; v < NV; v++) B[v] = Next(s0[v], s1[v], s2[v], s3[v]);
     for (size_t v = 0; v < NV; v++) {
       const auto u1 = hn::Mul(hn::ConvertTo(df, hn::Add(hn::ShiftRight<8>(A[v]), one)), tiny);
       const auto u2 = hn::Mul(hn::ConvertTo(df, hn::ShiftRight<8>(B[v])), tiny);
@@ -133,23 +163,94 @@ static void FillPieces(const Piece *pc, uint32_t k0, uint32_t k1) {
       auto x = hn::Mul(r, c), y = hn::Mul(r, s);
       if constexpr (G == 1) {
         if constexpr (kScaled) {
-          const auto k = hn::LoadU(df, pc[0].sc + 8 * q + v * L);
+          const auto k = hn::LoadU(df, kp[0] + 8 * i + v * L);
           x = hn::Mul(x, k); y = hn::Mul(y, k);
         }
-        hn::StoreInterleaved2(x, y, df, pc[0].out + 16 * q + 2 * v * L);
+        hn::StoreInterleaved2(x, y, df, dst[0] + 16 * i + 2 * v * L);
       } else {
         static_assert(G == 2, "two blocks a vector at most");
         if constexpr (kScaled) {
-          /* a piece past its last step reads ones (its output is not stored) */
-          static const float ones[8] = {1, 1, 1, 1, 1, 1, 1, 1};
           const hn::Half<decltype(df)> dh;
-          const float *k0p = q < pc[0].q1 ? pc[0].sc + 8 * q : ones;
-          const float *k1p = q < pc[1].q1 ? pc[1].sc + 8 * q : ones;
-          const auto k = hn::Combine(df, hn::LoadU(dh, k1p), hn::LoadU(dh, k0p));
+          const auto k = hn::Combine(df, hn::LoadU(dh, kp[1] + 8 * i), hn::LoadU(dh, kp[0] + 8 * i));
           x = hn::Mul(x, k); y = hn::Mul(y, k);
         }
-        if (q < pc[0].q1) hn::StoreU(hn::InterleaveWholeLower(df, x, y), df, pc[0].out + 16 * q);
-        if (q < pc[1].q1) hn::StoreU(hn::InterleaveWholeUpper(df, x, y), df, pc[1].out + 16 * q);
+        if (dst[0]) hn::StoreU(hn::InterleaveWholeLower(df, x, y), df, dst[0] + 16 * i);
+        if (dst[1]) hn::StoreU(hn::InterleaveWholeUpper(df, x, y), df, dst[1] + 16 * i);
+      }
+    }
+  }
+  for (size_t v = 0; v < NV; v++) {
+    hn::Store(s0[v], du, st + 0 * 8 * G + v * L); hn::Store(s1[v], du, st + 1 * 8 * G + v * L);
+    hn::Store(s2[v], du, st + 2 * 8 * G + v * L); hn::Store(s3[v], du, st + 3 * 8 * G + v * L);
+  }
+}
+
+/* G pieces (Piece), piece g's block's generators in lanes 8 g .. 8 g + 7 (GenLanes), run from
+   the block's start. Of a piece's steps [q0, q1), those whose sixteen draws are all its own go
+   straight into its row (scaled, when its pairs are the row's: at even), the others through
+   buf, only its draws copied out; steps before q0 are not stored. The steps run in spans in
+   which no piece changes how it stores them: the long ones, where every piece stores straight
+   into its row, in one Steps call, the few a piece stores in part one at a time, and where no
+   piece stores, only the generators move (Skip). */
+template <size_t G, bool kScaled>
+static void FillPieces(const Piece *pc, uint32_t k0, uint32_t k1) {
+  HWY_ALIGN uint32_t st[32 * G];
+  HWY_ALIGN float buf[16 * G];                     // a step a piece stores only in part
+  static const float ones[8] = {1, 1, 1, 1, 1, 1, 1, 1};   // the scale of a step not scaled in place
+  /* piece g's steps [q0, q1) hold its draws, of which [f0, f1) go straight into its row */
+  uint64_t q0[G], q1[G], f0[G], f1[G], qmax = 0;
+  for (size_t g = 0; g < G; g++) {
+    const Piece &p = pc[g];
+    seed_block(st + 8 * g, 8 * G, p.b, k0, k1);
+    q0[g] = p.lo / 16; q1[g] = (p.hi + 15) / 16;
+    const bool straight = !kScaled || (p.at & 1) == 0;
+    f0[g] = straight ? (p.lo + 15) / 16 : q1[g];
+    f1[g] = straight ? p.hi / 16 : q1[g];
+    if (f1[g] < f0[g]) f1[g] = f0[g];
+    qmax = q1[g] > qmax ? q1[g] : qmax;
+  }
+  for (uint64_t q = 0; q < qmax;) {
+    /* the span [q, qe) and how each piece stores its steps there: 0 not at all, 1 straight
+       into its row, 2 through buf */
+    uint64_t qe = qmax;
+    int mode[G];
+    bool any = false, part = false;
+    float *dst[G];
+    const float *kp[G];
+    for (size_t g = 0; g < G; g++) {
+      if (q < q0[g]) { mode[g] = 0; qe = q0[g] < qe ? q0[g] : qe; }
+      else if (q >= q1[g]) mode[g] = 0;
+      else if (q >= f0[g] && q < f1[g]) { mode[g] = 1; qe = f1[g] < qe ? f1[g] : qe; }
+      else { mode[g] = 2; const uint64_t e = q < f0[g] ? f0[g] : q1[g]; qe = e < qe ? e : qe; }
+      const Piece &p = pc[g];
+      dst[g] = mode[g] == 1 ? p.row + (p.at + (int64_t)(16 * q)) : mode[g] == 2 ? buf + 16 * g : nullptr;
+      kp[g] = kScaled && mode[g] == 1 ? p.sc + (p.at + (int64_t)(16 * q)) / 2 : ones;
+      any = any || mode[g] != 0;
+      part = part || mode[g] == 2;
+    }
+    if (!any) { Skip<G>(st, qe - q); q = qe; continue; }
+    if (!part) {
+      /* a piece not stored reads the scale of one that is (ones holds a step's) */
+      for (size_t g = 0; g < G; g++) if (mode[g] == 0) kp[g] = kp[G - 1 - g];
+      Steps<G, kScaled>(st, qe - q, dst, kp);
+      q = qe;
+      continue;
+    }
+    for (; q < qe; q++) {
+      Steps<G, kScaled>(st, 1, dst, kp);
+      for (size_t g = 0; g < G; g++) {
+        if (mode[g] == 1) { dst[g] += 16; if (kScaled) kp[g] += 8; }
+        if (mode[g] != 2) continue;
+        /* the piece's draws [d0, d1) of the step, scaled one at a time */
+        const Piece &p = pc[g];
+        const uint64_t a = 16 * q, d0 = a > p.lo ? a : p.lo, d1 = a + 16 < p.hi ? a + 16 : p.hi;
+        float *o = p.row + (p.at + (int64_t)d0);
+        const float *src = buf + 16 * g + (d0 - a);
+        if (!kScaled) {
+          memcpy(o, src, (d1 - d0) * sizeof(float));
+        } else {
+          for (uint64_t d = d0; d < d1; d++) o[d - d0] = src[d - d0] * p.sc[(p.at + (int64_t)d) / 2];
+        }
       }
     }
   }
@@ -164,14 +265,11 @@ static void Fill(const Piece *pc, uint32_t k0, uint32_t k1) {
 
 /* Rows of draws (ap_gauss_fill_rows): out[r * ostride + i] = draw offset + r * step + i of
    stream seed, times scale[i / 2] when scale is given, for r < rows and i < len; rows do not
-   overlap (ostride >= len). A row's whole blocks, and the starts of blocks it ends inside
-   (a multiple of 16 draws), go straight into out, kGroup blocks at a time across rows; the
-   rest is copied out of a block generated alone. */
+   overlap (ostride >= len), and nothing of a row past len is written. Each block a row reads
+   is a piece (Piece), kGroup pieces generated together across blocks and rows. */
 void GaussFillRows(float *out, size_t ostride, size_t rows, size_t len, uint64_t seed,
                    uint64_t offset, uint64_t step, const float *scale) {
   const uint32_t k0 = (uint32_t)seed, k1 = (uint32_t)(seed >> 32);
-  HWY_ALIGN float tmp[kBlock];
-  uint64_t tmp_b = ~(uint64_t)0, tmp_q1 = 0;      // the block tmp holds, and its steps
   Piece pend[kGroup];
   size_t np = 0;
   for (size_t r = 0; r < rows; r++) {
@@ -180,28 +278,8 @@ void GaussFillRows(float *out, size_t ostride, size_t rows, size_t len, uint64_t
     for (uint64_t pos = s; pos < end;) {
       const uint64_t b = pos / kBlock, b0 = b * kBlock;
       const uint64_t hi = end < b0 + kBlock ? end : b0 + kBlock;
-      if (pos == b0 && (hi - b0) % 16 == 0 && (!scale || (b0 - s) % 2 == 0)) {
-        /* the block's first steps straight into out, scaled there */
-        pend[np++] = Piece{row + (b0 - s), scale ? scale + (b0 - s) / 2 : nullptr, b,
-                           (hi - b0) / 16};
-        if (np == kGroup) { Fill<kGroup>(pend, k0, k1); np = 0; }
-      } else {
-        const uint64_t q1 = (hi - b0 + 15) / 16;
-        if (tmp_b != b || tmp_q1 < q1) {
-          const Piece p{tmp, nullptr, b, q1};
-          FillPieces<1, false>(&p, k0, k1);
-          tmp_b = b; tmp_q1 = q1;
-        }
-        float *dst = row + (pos - s);
-        const float *src = tmp + (pos - b0);
-        const uint64_t take = hi - pos;
-        if (!scale) {
-          memcpy(dst, src, take * sizeof(float));
-        } else {
-          const uint64_t i0 = pos - s;
-          for (uint64_t i = 0; i < take; i++) dst[i] = src[i] * scale[(i0 + i) / 2];
-        }
-      }
+      pend[np++] = Piece{row, scale, (int64_t)(b0 - s), b, (uint32_t)(pos - b0), (uint32_t)(hi - b0)};
+      if (np == kGroup) { Fill<kGroup>(pend, k0, k1); np = 0; }
       pos = hi;
     }
   }
