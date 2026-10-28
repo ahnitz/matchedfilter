@@ -219,6 +219,10 @@ class Executor(HierOps):
     _SPARSE_FIRST = 4096
     #: See the module docstring (a driver feature).
     stage_host_inputs = False
+    #: The compute queue offset a plan's deferred calls set (MatchedFilter._series_flags):
+    #: a driver with several compute queues (Vulkan) submits slot s to queue s + offset
+    #: (modulo their count).
+    _queue_offset = 0
 
     # ---- records ------------------------------------------------------------------------
     def _exec_table(self):

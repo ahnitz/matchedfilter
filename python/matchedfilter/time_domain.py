@@ -1519,7 +1519,8 @@ class TimeDomainFilterBank:
             work_items = [(g, None) for g in self._groups]
 
         from ._results import _Deferred, _SparsePeaks
-        defer = getattr(self, '_defer', False)
+        # In a batch (filter_series_many): its token, and this job's compute queue offset.
+        defer, queue_offset = getattr(self, '_defer', False), getattr(self, '_queue_offset', 0)
         pending = []
         for g, tmpl_arg in work_items:
             plan_templates = tmpl_arg
@@ -1538,6 +1539,8 @@ class TimeDomainFilterBank:
                 active_plan = g.get_flat_plan()
             else:
                 active_plan = g.plan
+            # The plan's calls defer in a batch (_series_flags), except a timed one (a play's).
+            call_defer = False if timed else defer
             if getattr(active_plan, '_gpu', None) is None:
                 # A host plan reads the series on the host: device writes left in flight
                 # to it (correlate_series(wait=False)) must land first.
@@ -1593,8 +1596,9 @@ class TimeDomainFilterBank:
                 fast = g.__dict__.get('_fast_calls')
                 hit = fast.get(fast_key) if fast else None
                 if hit is not None and hit[0] is active_plan:
-                    res = active_plan._fast_series(data_in, hit[1], bs, eff_threshold, defer,
-                                                                   getattr(self, '_queue_offset', 0), True)
+                    with active_plan._series_flags(defer=call_defer, sparse=True,
+                                                   queue_offset=queue_offset):
+                        res = active_plan._fast_series(data_in, hit[1], bs, eff_threshold)
                     if res is not None:
                         if hit[2] is None:
                             pending.append((res, bstarts, g, tmpl_arg, N))
@@ -1626,23 +1630,14 @@ class TimeDomainFilterBank:
             if (len(groups_bins) > 1 and getattr(active_plan, '_gpu', None) is not None
                     and not getattr(active_plan, '_bandlimited', False)
                     and hasattr(active_plan, '_run_series_ragged')):
-                if defer and not timed:
-                    active_plan._defer_series = defer
-                    active_plan._gpu._queue_offset = getattr(self, '_queue_offset', 0)
                 # A hierarchical ragged call reads back sparse, as its per-count calls would.
-                sparse_ragged = getattr(active_plan, '_is_hierarchical', False)
-                if sparse_ragged:
-                    active_plan._want_sparse = True
-                try:
+                with active_plan._series_flags(
+                        defer=call_defer, sparse=getattr(active_plan, '_is_hierarchical', False),
+                        queue_offset=queue_offset):
                     res = active_plan._run_series_ragged(
                         data_in, bstarts, bws, bwe, binsize=bs,
                         threshold=eff_threshold, templates=plan_templates,
                         **({} if bph is None else {'bin_phase': bph}))
-                finally:
-                    if defer and not timed:
-                        active_plan._defer_series = False
-                    if sparse_ragged:
-                        active_plan._want_sparse = False
                 if res is not None:
                     # Split back into the per-count groups, in their order, so the result
                     # is the one per-count calls give (peak order included).
@@ -1660,11 +1655,6 @@ class TimeDomainFilterBank:
                     work = list(zip(subs, parts))
             for (sub_starts, sub_bws, sub_bwe, sub_ph), res in work:
                 if res is None:
-                    if defer and not timed:
-                        active_plan._defer_series = defer       # the batch's token
-                        if getattr(active_plan, '_gpu', None) is not None:
-                            active_plan._gpu._queue_offset = getattr(self, '_queue_offset', 0)
-                    active_plan._want_sparse = True
                     run_in, run_starts = data_in, sub_starts
                     if data_in.dtype == np.float32 and not _reads_real(active_plan):
                         # A plan without a real-series path (the ungated single-template plan
@@ -1674,16 +1664,13 @@ class TimeDomainFilterBank:
                         hi = min(S, int(sub_starts.max()) + N)
                         run_in = _host_copy(data_in[lo:hi], np.complex64)
                         run_starts = (sub_starts - lo).astype(sub_starts.dtype)
-                    try:
+                    with active_plan._series_flags(defer=call_defer, sparse=True,
+                                                   queue_offset=queue_offset):
                         res = active_plan.run_series(
                             run_in, run_starts, sub_bws, sub_bwe, binsize=bs,
                             threshold=eff_threshold, templates=plan_templates, raw=True,
                             **({} if sub_ph is None else {'bin_phase': sub_ph})
                         )
-                    finally:
-                        active_plan._want_sparse = False
-                        if defer and not timed:
-                            active_plan._defer_series = False
                 if isinstance(res, _Deferred):
                     pending.append((res, sub_starts, g, tmpl_arg, N))
                     if fast_key is not None and len(work) == 1:

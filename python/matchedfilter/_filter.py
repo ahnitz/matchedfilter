@@ -4,6 +4,7 @@ import math
 import operator
 import threading
 import time
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 import numpy as np
@@ -308,6 +309,12 @@ class MatchedFilter:
     #: Whether this is a HierarchicalFilter, for the shared code paths that differ for one
     #: (a class attribute, not isinstance: _filter does not import _hierarchical).
     _is_hierarchical = False
+
+    #: The series-call flags, set only around a call by _series_flags: the batch's token
+    #: when the call is to be deferred (TimeDomainFilterBank.filter_series_many), and whether
+    #: it is to return sparse peaks (_SparsePeaks) where it can.
+    _defer_series = False
+    _want_sparse = False
 
     #: Class-level so subclasses with their own __init__ -- HierarchicalFilter
     #: -- inherit the CPU default instead of raising on first use.
@@ -1207,7 +1214,7 @@ class MatchedFilter:
         if stride == 2:
             # The contiguous floats the lane lies in: the C plan reads every second one.
             cser = np.lib.stride_tricks.as_strided(ser, shape=(2 * ser.size - 1,), strides=(4,))
-        if (raw and threshold > 0 and getattr(self, "_want_sparse", False)
+        if (raw and threshold > 0 and self._want_sparse
                 and hasattr(ep, "run_series_sparse")):
             # Sparse (time_domain asks with _want_sparse): the engine writes peaks only for
             # rows a tier passed, and only those come back -- no dense table written,
@@ -1418,7 +1425,7 @@ class MatchedFilter:
         from ._settings import fingerprint
         vals = (int(binsize), float(threshold), t0, nt, self.__dict__.get("_series_batch_bytes"),
                 _config.get("MF_GPU_QUEUE_AHEAD"),
-                bool(self.__dict__.get("_want_sparse", False)), fingerprint())
+                bool(self._want_sparse), fingerprint())
         return objs, vals
 
     @staticmethod
@@ -1438,12 +1445,12 @@ class MatchedFilter:
         identity, resident input signatures) before anything is submitted; any stale handle
         falls back to the full path, which records afresh."""
         plans = self.__dict__.get("_call_plans")
-        if (not plans or not raw or self._tdirty or not getattr(self, "_defer_series", False)):
+        if not plans or not raw or self._tdirty or not self._defer_series:
             return None
         d = self.__dict__
         from ._settings import fingerprint
         vals = (int(binsize), float(threshold), t0, nt, d.get("_series_batch_bytes"),
-                _config.get("MF_GPU_QUEUE_AHEAD"), bool(d.get("_want_sparse", False)),
+                _config.get("MF_GPU_QUEUE_AHEAD"), bool(self._want_sparse),
                 fingerprint())
         addr = ser.ctypes.data
         entry = plans.get((addr, ser.size, vals, id(layout)))
@@ -1543,18 +1550,34 @@ class MatchedFilter:
                                       starts_pool=starts_pool)
         entry["slots"][slot0] = parts
 
-    def _fast_series(self, ser, layout, binsize, threshold, defer, queue_offset, sparse):
-        """A repeated deferred series call straight from its call plan (_replay_call_plan),
-        with the flags run_series would set around it; None when the plan does not hold
-        (the caller then makes the full call). layout is the one this plan's full call
-        used (_last_layout): the plan checks its identity."""
-        self._defer_series, self._want_sparse = defer, sparse
-        self._gpu._queue_offset = queue_offset
+    @contextmanager
+    def _series_flags(self, defer=False, sparse=False, queue_offset=0):
+        """Set the series-call flags for the calls made inside the block and clear them (to
+        False) when the block ends, however it ends. defer, the batch's token
+        (TimeDomainFilterBank.filter_series_many), asks for deferred results, with the GPU
+        context's compute queues offset by queue_offset (the offset stays set until the next
+        deferred call); sparse asks for sparse peaks where the call can return them. A false
+        flag is left as it is. Yields nothing."""
+        if defer:
+            self._defer_series = defer
+            if self._gpu is not None:
+                self._gpu._queue_offset = queue_offset
+        if sparse:
+            self._want_sparse = True
         try:
-            res = self._replay_call_plan(ser, layout, binsize, threshold, 0, self.ntemplates,
-                                         True)
+            yield
         finally:
-            self._defer_series, self._want_sparse = False, False
+            if defer:
+                self._defer_series = False
+            if sparse:
+                self._want_sparse = False
+
+    def _fast_series(self, ser, layout, binsize, threshold):
+        """A repeated deferred series call straight from its call plan (_replay_call_plan),
+        made under the flags the full call is made under (_series_flags); None when the
+        plan does not hold (the caller then makes the full call). layout is the one this
+        plan's full call used (_last_layout): the plan checks its identity."""
+        res = self._replay_call_plan(ser, layout, binsize, threshold, 0, self.ntemplates, True)
         if res is not None:
             self._dataset = False
             self._data_ready = set()
@@ -1617,7 +1640,7 @@ class MatchedFilter:
                              and layout.phase is None)
         # Sparse results (time_domain asks with _want_sparse): only the peaks come back.
         # At threshold 0 (follow-ups) every bin holds a peak: dense is cheaper there.
-        sparse = bool(raw and threshold > 0 and getattr(self, "_want_sparse", False))
+        sparse = bool(raw and threshold > 0 and self._want_sparse)
         c.skw = {"sparse": True} if sparse else {}
         c.is_hier = self._is_hierarchical
         # A declared capability, not a probe for one backend's internals.
@@ -1638,7 +1661,7 @@ class MatchedFilter:
         # round replays whole batches in the mode the search runs: deferred too.)
         # A grouped flat call defers too when it is one batch (a follow-up's window: one
         # submission for every bin count).
-        c.defer = defer = (getattr(self, "_defer_series", False) and can_pipeline
+        c.defer = defer = (self._defer_series and can_pipeline
                            and (not grouped_flat or nblk <= batch))
         c.pipelined = can_pipeline and (not single or defer)
         queue_ahead = _config.get("MF_GPU_QUEUE_AHEAD")
