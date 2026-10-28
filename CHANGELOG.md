@@ -159,6 +159,18 @@ Alpha releases may change the API. Pin a version for reproducible work.
   calibration as a whole. In 31 of 32 ladder processes since, the model ranked (256, 1024)
   at 1.04-1.10x (256, 512). Calibration at n=2048 takes about 5-8 s (15-26 s under CPU
   load); models stored by the old method are measured again.
+- The GPU cost calibration scales every price of a process to a reference call's time on a
+  warmed device (the anchor), but under CPU load it timed the anchor on a device still at
+  its idle clock. The 0.25 s warm-up was timed from before the reference's first call, which
+  records its commands: 0.06 s on an idle Radeon 8060S, 0.4-0.5 s with eight other processes
+  on its four cores. In each of 178 processes with 6-12 others on their cores the warm-up had
+  run out before it began, and in 17 the anchor read 0.105-0.134 ms against 0.028-0.031,
+  which scaled every price of their models 2.8-4.3x, so models at different n no longer
+  compared. The warm-up now starts after the first call (the calibration's own warm-up
+  too), and the anchor is the warmed device's fastest call: 137-308 warm calls before it in
+  42 loaded processes, none cold. Calibration time is unchanged when idle (8.0 s at
+  n=2048) and up to 0.6 s longer under that load (21-27 s). Models stored by the old method
+  are measured again.
 - MF_GPU_PROFILE=1 could lose the Vulkan device (VK_ERROR_DEVICE_LOST) on the first call of a
   profiled run: phase marks were read from queries no submitted run would write.
 - The CPU cost calibration failed (KeyError 'recheck') for a size calibrated after a smaller

@@ -2,6 +2,7 @@
 calibrations, the per-device block costs and the block-size pricing that uses them. They run
 hierarchical plans, so they sit above the model (gatechain), which they feed."""
 import os
+import time
 
 import numpy as np
 
@@ -244,7 +245,22 @@ def calibrate_costs(n, ntemplates, blocks=32, reps=5, seed=11, group=None):
     return cm
 
 
-#: Per device: the fixed reference call and its first warmed device time (see _ClockRef).
+def _warm(run, seconds=0.25):
+    """The results of run() called repeatedly until `seconds` after its first call returned,
+    without that first call's: the device is warmed past the low clock it idles at, which
+    reads slow for its first calls. The time starts after the first call because that call
+    records the plan's commands, 0.06 s on an idle 8060S and 0.4-0.5 s when eight other
+    processes share its four cores (dev2, 2026-10-28): timed from before it, the warm-up had
+    run out before it began in each of 178 processes with 6-12 others on their cores."""
+    run()
+    until = time.perf_counter() + seconds
+    out = [run()]
+    while time.perf_counter() < until:
+        out.append(run())
+    return out
+
+
+#: Per device: the fixed reference call and its fastest warmed device time (see _ClockRef).
 class _ClockRef:
     """A fixed reference call, timed once in every round of a calibration's measurements.
 
@@ -252,13 +268,13 @@ class _ClockRef:
     calls; an APU's GPU drops to a fifth of its clock under CPU load), so a device time is
     the work divided by a clock that is not constant across a calibration, let alone
     across n. A calibration times this reference once in every round of its measurements
-    and scales its times by the ratio of the reference's first warmed time in this process
-    (the anchor) to its fastest during the calibration: chains and block sizes are ranked
-    by those ratios, which the clock cancels out of. One small, fixed workload for every
-    n, so models at different n stay comparable. (It was the ratio to a reference timed
-    just before each measurement; under CPU load the 8060S's clock changes between one
-    call and the next, and that pairing scaled a call by a quarter as often as not.)
-    Backend-neutral: it only needs device timers (ctx.timings()).
+    and scales its times by the ratio of the reference's fastest time on the warmed device
+    in this process (the anchor, _warm) to its fastest during the calibration: chains and
+    block sizes are ranked by those ratios, which the clock cancels out of. One small, fixed
+    workload for every n, so models at different n stay comparable. (It was the ratio to a
+    reference timed just before each measurement; under CPU load the 8060S's clock changes
+    between one call and the next, and that pairing scaled a call by a quarter as often as
+    not.) Backend-neutral: it only needs device timers (ctx.timings()).
 
     A backend that can read its clock (``ctx.clock_mhz()``, CUDA through NVML) is scaled by
     the clock itself instead: the reference call is small, and its own launch latency after
@@ -282,12 +298,9 @@ class _ClockRef:
         self.ser[:] = ((rng.standard_normal(S) + 1j * rng.standard_normal(S)) / 2).astype(np.complex64)
         self.args = ((np.arange(blocks) * step).astype(np.int64),
                      np.full(blocks, n // 4, np.int64), np.full(blocks, n, np.int64))
-        import time as _time
-        until = _time.perf_counter() + 0.25          # warm the device before the anchor
-        self._timed()
-        while _time.perf_counter() < until:
-            self._timed()
-        self.anchor = min(self._timed() for _ in range(5))
+        # The anchor is the fastest call of the warmed device; a call whose timer recorded
+        # nothing (a rejected timestamp pair) is not a time.
+        self.anchor = min((t for t in _warm(self._timed) if t > 0), default=0.0)
         reader = getattr(self.plan._gpu, "clock_mhz", None)
         mhz = reader() if reader is not None else None
         self._mhz = (reader, mhz) if mhz else None
@@ -327,9 +340,10 @@ def _clock_ref(device):
 
 
 #: How calibrate_costs_gpu measures -- its series resident in device memory, each time the
-#: fastest of its repetitions (runs) -- and prices a second tier (_sparse_rows, the slope), in its
-#: models' store key: a model stored with another method is measured afresh.
-_GPU_CAL_METHOD = "slope,resident"
+#: fastest of its repetitions (runs), scaled to an anchor timed on a warmed device (_warm) --
+#: and prices a second tier (_sparse_rows, the slope), in its models' store key: a model
+#: stored with another method is measured afresh.
+_GPU_CAL_METHOD = "slope,resident,warm"
 
 #: Calls of a configuration back to back within each round of calibrate_costs_gpu (runs).
 _BURST = 3
@@ -411,7 +425,6 @@ def calibrate_costs_gpu(n, device, blocks=None, reps=15, seed=11, nt=256):
     plans = {}
     resident = []
     clock_refs = []
-    import time as _time
 
     def plan(chain, ntm):
         k = (tuple(chain), ntm)
@@ -496,10 +509,7 @@ def calibrate_costs_gpu(n, device, blocks=None, reps=15, seed=11, nt=256):
 
     b0 = bands[0]
     clock = _clock_ref(device)
-    warm_until = _time.perf_counter() + 0.25
-    call(plan((b0,), nt), (big,))
-    while _time.perf_counter() < warm_until:
-        call(plan((b0,), nt), (big,))
+    _warm(lambda: call(plan((b0,), nt), (big,)))
     (t_small, _, _), (t_full, _, _) = runs([((b0,), (big,), nt // 4), ((b0,), (big,))])
     if not (t_full > 0 and t_small > 0):
         # A backend that ignored the timer switch reports nothing, and a model priced at zero
