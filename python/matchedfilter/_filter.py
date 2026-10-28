@@ -578,7 +578,7 @@ class MatchedFilter:
         elif a.shape[1] == self.n // 2:
             self._bandlimited = True
             self.k = self.n // 2
-            if self._gpu is None and type(self).__name__ != 'HierarchicalFilter' and (not hasattr(self, '_mf') or self._mf is None or getattr(self._mf, 'n', None) != self.k):
+            if self._gpu is None and not self._is_hierarchical and (not hasattr(self, '_mf') or self._mf is None or getattr(self._mf, 'n', None) != self.k):
                 self._mf = _core.MF(self.k, 2, self.ntemplates)
         else:
             raise ValueError(f"expected shape ({self.ntemplates}, {self.n}) or ({self.ntemplates}, {self.n // 2}), got {a.shape}")

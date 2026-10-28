@@ -547,7 +547,7 @@ class _TemplateGroup:
         # spectra and layout alone costs no plan memory.
         self._plan = plan
         self._plan_factory = plan_factory
-        self.is_hier = plan_factory is None and type(plan).__name__ == 'HierarchicalFilter'
+        self.is_hier = plan_factory is None and getattr(plan, '_is_hierarchical', False)
         self.kind = kind
         self._spectra_source = spectra_source
         self._row_source = row_source
@@ -1632,7 +1632,7 @@ class TimeDomainFilterBank:
                         # setup and the Q15 screen's preparation again.
                         w_end = (np.minimum(bwe, N)
                                  if getattr(active_plan, '_bandlimited', False)
-                                 and type(active_plan).__name__ != 'HierarchicalFilter'
+                                 and not getattr(active_plan, '_is_hierarchical', False)
                                  else bwe).astype(np.int64)
                         counts = (w_end - bws.astype(np.int64) + ph.astype(np.int64)
                                   + bs - 1) // bs
@@ -1666,7 +1666,8 @@ class TimeDomainFilterBank:
             if bph is not None:
                 # One call: the phases pad every entry to the same bin count (above).
                 groups_bins = [(bstarts, bws, bwe, bph)]
-            elif getattr(active_plan, '_bandlimited', False) and type(active_plan).__name__ != 'HierarchicalFilter':
+            elif (getattr(active_plan, '_bandlimited', False)
+                  and not getattr(active_plan, '_is_hierarchical', False)):
                 bs_k = max(1, bs // 2) if bs < N else g.n // 2
                 wk_s = (bws // 2).astype(np.int64)
                 w_end = np.minimum(bwe, N)
@@ -1701,7 +1702,7 @@ class TimeDomainFilterBank:
                     active_plan._defer_series = defer
                     active_plan._gpu._queue_offset = getattr(self, '_queue_offset', 0)
                 # A hierarchical ragged call reads back sparse, as its per-count calls would.
-                sparse_ragged = type(active_plan).__name__ == 'HierarchicalFilter'
+                sparse_ragged = getattr(active_plan, '_is_hierarchical', False)
                 if sparse_ragged:
                     active_plan._want_sparse = True
                 try:
