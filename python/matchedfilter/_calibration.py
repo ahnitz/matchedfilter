@@ -9,7 +9,14 @@ import numpy as np
 from . import gatechain as _gc
 
 
-def calibrate_costs(n, ntemplates, blocks=32, reps=5, seed=11, group=None):
+#: calibrate_costs' calls (blocks a call, `reps` for its rounds, the seed of its series and
+#: templates) when the caller names none. A model measured with any other is kept apart, in
+#: the process and in MF_COST_FILE: under one key, whichever call ran first set the model
+#: every later one used.
+_CAL_BLOCKS, _CAL_REPS, _CAL_SEED = 32, 5, 11
+
+
+def calibrate_costs(n, ntemplates, blocks=_CAL_BLOCKS, reps=_CAL_REPS, seed=_CAL_SEED, group=None):
     """Measure this machine's tier costs at transform size n through the engine itself.
 
     Synthetic analytic noise and whitened random templates; thresholds are
@@ -37,13 +44,16 @@ def calibrate_costs(n, ntemplates, blocks=32, reps=5, seed=11, group=None):
     # The FP16 first gate (ARM, gate16.cc) changes what tier 0 costs: priced and cached
     # apart from the FP32 gate, so neither is ranked with the other's numbers.
     g16 = _gc.cpu_gate_kind() == "f16"
-    key = (int(n), nt, group) + (("g16",) if g16 else ())
+    how = (int(blocks), int(reps), int(seed))
+    key = (int(n), nt, group) + how + (("g16",) if g16 else ())
     if key in _gc._COSTS:
         return _gc._COSTS[key]
     path = _gc._cost_file()
     # A model made without the Q15 screen's prices (an older build, or a back end without
-    # it) must not be reused by one that has it, or the screen is never priced.
-    skey = "%d,%d,%d" % key[:3] + (",g16" if g16 else "") + (",q15" if not g16 and _gc._q15_band(64) else "")
+    # it) must not be reused by one that has it, or the screen is never priced. The default
+    # calls' key is the one their models have always been stored under.
+    skey = ("%d,%d,%d" % key[:3] + (",g16" if g16 else "") + (",q15" if not g16 and _gc._q15_band(64) else "")
+            + ("" if how == (_CAL_BLOCKS, _CAL_REPS, _CAL_SEED) else ",b%d,r%d,s%d" % how))
     if path is not None:
         cm = _gc._stored_cost_model(path, skey)
         if cm is not None:
@@ -160,7 +170,7 @@ def calibrate_costs(n, ntemplates, blocks=32, reps=5, seed=11, group=None):
     # group the first tier batches over: measured once per group and shared by every n that
     # uses it. The refine and the per-block work are n's own.
     # Kept with the models (gatechain._COSTS), so whatever forgets those forgets these.
-    bkey = ("bands", nt, group, bool(g16), tuple(qbands) != ())
+    bkey = ("bands", nt, group, bool(g16), tuple(qbands) != ()) + how
     shared = _gc._COSTS.get(bkey)
     need = [b for b in bands if shared is None or b not in shared["dense"]]
     jobs = {("dense", b): ((b,), (big,), False) for b in need}
@@ -348,6 +358,10 @@ _GPU_CAL_METHOD = "slope,resident,warm"
 #: Calls of a configuration back to back within each round of calibrate_costs_gpu (runs).
 _BURST = 3
 
+#: calibrate_costs_gpu's rounds, seed and template count when the caller names none (its
+#: blocks default to a fixed span of series); a model measured otherwise is kept apart.
+_GPU_CAL_REPS, _GPU_CAL_SEED, _GPU_CAL_TEMPLATES = 15, 11, 256
+
 
 def _sparse_rows(points, head, pairs):
     """A second tier's [(density, device ns per first-tier survivor)] from runs of one chain
@@ -371,7 +385,8 @@ def _sparse_rows(points, head, pairs):
     return [(a / pairs, max(1e-3, (b - head) / a)) for a, b in pts]
 
 
-def calibrate_costs_gpu(n, device, blocks=None, reps=15, seed=11, nt=256):
+def calibrate_costs_gpu(n, device, blocks=None, reps=_GPU_CAL_REPS, seed=_GPU_CAL_SEED,
+                        nt=_GPU_CAL_TEMPLATES):
     """This GPU's tier costs at transform size n, in device nanoseconds, as a CostModel.
 
     The CPU calibration's construction (synthetic analytic noise, whitened random templates,
@@ -403,17 +418,20 @@ def calibrate_costs_gpu(n, device, blocks=None, reps=15, seed=11, nt=256):
     process, or read from MF_COST_FILE.
     """
     from . import HierarchicalFilter
-    if blocks is None:
-        blocks = max(64, (1024 * 2048) // int(n))
+    span = max(64, (1024 * 2048) // int(n))
+    blocks = span if blocks is None else int(blocks)
     kind = _gc.gpu_gate_kind(device)
-    key = ("gpu", int(n), str(device), kind)
+    # Kept apart by the calls measured, as calibrate_costs' models are.
+    how = (blocks, int(reps), int(seed), int(nt))
+    key = ("gpu", int(n), str(device), kind) + how
     if key in _gc._COSTS:
         return _gc._COSTS[key]
     path = _gc._cost_file()
     # Keyed by gate kind: a model measured with the bound off (or before it existed) prices a
     # different first tier, and must not be reused for this one.
     skey = ("gpu,%d,%s" % (int(n), str(device)) + ("" if kind == "f32" else "," + kind)
-            + "," + _GPU_CAL_METHOD)
+            + "," + _GPU_CAL_METHOD
+            + ("" if how == (span, _GPU_CAL_REPS, _GPU_CAL_SEED, _GPU_CAL_TEMPLATES) else ",b%d,r%d,s%d,t%d" % how))
     if path is not None:
         cm = _gc._stored_cost_model(path, skey)
         if cm is not None:
@@ -714,4 +732,4 @@ def price_block_sizes(fine, delta_f, data_rate, longest, margin, ntemplates, snr
     return out
 
 
-_gc._CALIBRATE = calibrate_costs         # gatechain.calibrate_costs, the public name
+_gc.calibrate_costs = calibrate_costs    # gatechain.calibrate_costs, the public name

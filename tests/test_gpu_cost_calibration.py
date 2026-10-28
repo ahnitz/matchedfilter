@@ -109,6 +109,18 @@ def test_calibration_recovers_active_costs(monkeypatch, kind):
         np.testing.assert_array_equal(cm.excess[128], expected)
 
 
+def test_a_model_measured_with_other_calls_is_kept_apart(monkeypatch):
+    """A model is kept under the calls it measured (blocks, rounds, seed, templates): under
+    (n, device, gate kind) alone, whichever calibration ran first was every later one's."""
+    cm, _ = _probe_calibration(monkeypatch, reps=2)
+    assert _calibration.calibrate_costs_gpu(256, "probe", blocks=16, reps=2, nt=64) is cm
+    with monkeypatch.context() as clock_patch:
+        clock_patch.setattr(time, "perf_counter", itertools.count().__next__)
+        other = _calibration.calibrate_costs_gpu(256, "probe", blocks=16, reps=3, nt=64)
+    assert other is not cm
+    _assert_probe_prices(other)
+
+
 def test_a_second_tiers_price_is_its_slope_not_a_fixed_cost_on_few_survivors(monkeypatch):
     """A cost a two-tier call pays whenever anything passes (a launch, a process's state) is
     not a per-survivor price: spread over the 1% point's few survivors it once made a second

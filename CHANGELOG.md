@@ -146,6 +146,13 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ### Fixed
 
+- `gatechain.calibrate_costs` was a wrapper that measured 256-block calls, where plans, tools
+  and tests (through `_calibration.calibrate_costs`) measured 32, and cost models were cached
+  and stored under n, template count and series group alone: whichever calibration ran first
+  in a process, or first into an MF_COST_FILE, set the model every later one returned. The
+  public name is now the calibration itself, with its defaults, and a model measured with
+  other calls (blocks, rounds, seed, and on a GPU templates) is kept under its own key. Models
+  of the default calls keep the key they are stored under.
 - The GPU cost calibration priced the same work 0.25-4x differently from one process to the
   next on a Radeon 8060S, enough to rank the n=2048 gate chains (256, 1024) and (256, 512)
   either way round (0.67-1.45x where the first runs 1.06-1.08x the second): 5 production

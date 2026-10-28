@@ -1242,16 +1242,13 @@ def direct_halfwidth(power, n, chain, thresholds, snr, fd, window=None):
     return out
 
 
-#: The cost calibration runs hierarchical plans, which sit above this module, so it lives in
-#: matchedfilter._calibration and registers itself here when it loads (the package loads it).
-_CALIBRATE = None
-
-
-def calibrate_costs(n, ntemplates, blocks=256, reps=5, seed=11, group=None):
-    """Measure this machine's tier costs at transform size n through the engine itself: the
-    CostModel the chain choice prices with (matchedfilter._calibration.calibrate_costs,
-    which documents the measurement). Kept in MF_COST_FILE when it is set."""
-    return _CALIBRATE(n, ntemplates, blocks=blocks, reps=reps, seed=seed, group=group)
+#: calibrate_costs(n, ntemplates, ...) measures this machine's tier costs at transform size n
+#: through the engine itself and returns the CostModel the chain choice prices with, kept in
+#: MF_COST_FILE when it is set. It runs hierarchical plans, which sit above this module, so
+#: it is matchedfilter._calibration.calibrate_costs (which documents the measurement), bound
+#: to this name when that module loads (the package loads it): one function, one set of
+#: defaults, wherever it is called from.
+calibrate_costs = None
 
 
 def chain_thresholds(power, n, snr, fd, chain, cost=None, floor=_MIN_BAND, nsim=None, window=None,

@@ -63,10 +63,11 @@ import; its allowlist (`UPWARD`) has been empty since 2026-10-22. From the botto
 | applications | `benchmark`, `tutorial`, `demo`, `precision` |
 
 The cost calibrations run hierarchical plans, so they live in `_calibration` (workloads),
-above the model they feed. `_calibration` registers itself as `gatechain._CALIBRATE` when the
-package loads, behind the wrapper `gatechain.calibrate_costs`; plans, tools and tests call
-`_calibration.calibrate_costs` directly (the wrapper's default is 256 blocks, the direct
-call's 32, and the cost cache key leaves the block count out).
+above the model they feed. When the package loads, `_calibration` binds its `calibrate_costs`
+to the public name `gatechain.calibrate_costs`: one function, whichever name plans, tools and
+tests call. A model is cached and stored under the calls it was measured with (blocks,
+rounds, seed) as well as n, templates and series group, so a calibration with other calls
+never hands its model to a default one.
 
 ### The C engine (`src/`)
 
@@ -420,8 +421,8 @@ then an atomic replace, so unlocked readers never see a partial file. Its record
 prefix:
 
 - cost models, keyed by n, template count, series group and gate kind on the CPU, and by
-  n, device, gate kind and fit on a GPU (`_calibration.calibrate_costs`,
-  `calibrate_costs_gpu`);
+  n, device, gate kind and fit on a GPU, with the calls measured appended when they are not
+  the defaults (`_calibration.calibrate_costs`, `calibrate_costs_gpu`);
 - prices: `cpu-fft`, `corr3`, `corr-pfft`, `choice` + `direct-lagtap` and `direct-pair`
   (`_prices`, `_layout`);
 - joint-trial passes: `choice` + `joint` + `bank` or `plan` (`_trial.Trial`);
