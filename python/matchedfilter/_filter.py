@@ -253,6 +253,34 @@ def _valid_series_window(n, valid):
     return lo, hi
 
 
+def _block_arrays(ser, starts, win_start, win_end, what):
+    """The blocks' starts and window bounds as contiguous uintp arrays, checked with the
+    series ser: all four one-dimensional, the three block arrays of one length, and at
+    least one block (what names the call in that error). Returns (starts, win_start,
+    win_end)."""
+    st = np.ascontiguousarray(_from_any(starts), dtype=np.uintp)
+    ws = np.ascontiguousarray(_from_any(win_start), dtype=np.uintp)
+    we = np.ascontiguousarray(_from_any(win_end), dtype=np.uintp)
+    if any(a.ndim != 1 for a in (ser, st, ws, we)):
+        raise ValueError("series, starts, win_start and win_end must be one-dimensional")
+    if not (st.size == ws.size == we.size):
+        raise ValueError("starts, win_start and win_end must be the same length")
+    if st.size < 1:
+        raise ValueError("%s needs at least one block" % what)
+    return st, ws, we
+
+
+def _apply_scales(result, scales, nt):
+    """Multiply result in place along its template axis (the second last) by scales, one
+    factor per template of the nt; nothing when scales is None. Returns nothing."""
+    if scales is None:
+        return
+    sc = np.ascontiguousarray(_from_any(scales), dtype=np.float32)
+    if sc.ndim != 1 or sc.size != nt:
+        raise ValueError(f"scales must be a 1D array of length {nt}, got shape {sc.shape}")
+    np.multiply(result, sc[:, None], out=result)
+
+
 def _automatic_series_layout(length, valid):
     if valid is None:
         raise ValueError('automatic run_series requires valid=(start, end) on the filter')
@@ -324,6 +352,18 @@ class MatchedFilter:
 
 
     def __init__(self, n, ndata=1, ntemplates=1, device=None, *, valid=None):
+        self._init_common(n, ndata, ntemplates, device, valid)
+        self._init_state()
+        if self.device.kind == "gpu":
+            self._start_gpu()
+            return
+        self._mf = _core.MF(self.n, self.ndata, self.ntemplates)
+
+    def _init_common(self, n, ndata, ntemplates, device, valid):
+        """Set and check the arguments every filter's constructor takes: the device, the
+        transform length n, the valid lag window and the data and template counts. Raises
+        ValueError for an invalid window, a count below one or, on the CPU, an n above this
+        filter's limit. Returns nothing."""
         from .device import parse as _parse_device
         self.device = _parse_device(device)
         self.n = int(n)
@@ -335,11 +375,6 @@ class MatchedFilter:
         if self.device.kind == 'cpu' and self.n > self._cpu_max_n:
             raise ValueError("CPU transform size %d exceeds this filter's limit of %d"
                              % (self.n, self._cpu_max_n))
-        self._init_state()
-        if self.device.kind == "gpu":
-            self._start_gpu()
-            return
-        self._mf = _core.MF(self.n, self.ndata, self.ntemplates)
 
     def _init_state(self):
         self._buf = None
@@ -407,6 +442,8 @@ class MatchedFilter:
         # with its own copy of the tail, the hierarchical version's early
         # return skipped the calibration it was supposed to set, and every Metal
         # call died in _gpu_calibration on a missing attribute.
+        #
+        # HierarchicalFilter starts its context here too, with the sizes it inherits.
         if self.n not in self._gpu_sizes:
             raise ValueError(
                 "device='gpu' supports n in %s for this filter; got %d."
@@ -450,6 +487,16 @@ class MatchedFilter:
     def _require_templates(self, start, count):
         if self._missing("template", start, count):
             raise ValueError("no templates for requested rows: call set_templates() first")
+
+    def _template_range(self, templates):
+        """(first template, count) of a call's templates=(start, count), every template for
+        None, after checking that the range lies in this plan and its templates are set."""
+        t0, nt = (0, self.ntemplates) if templates is None else (
+            int(templates[0]), int(templates[1]))
+        if nt < 1 or t0 < 0 or t0 + nt > self.ntemplates:
+            raise ValueError("templates sub-range out of bounds")
+        self._require_templates(t0, nt)
+        return t0, nt
 
     def _pair_range(self, data, templates):
         d0, nd = (0, self.ndata) if data is None else (int(data[0]), int(data[1]))
@@ -646,6 +693,16 @@ class MatchedFilter:
         self._ddirty = self._tdirty = False
         return res
 
+    def _account(self, r):
+        """Add a collected hierarchical GPU result r to this plan's work counters: its
+        (block, template) pairs, and the refinements and tier-0 survivors the backend counted
+        for the call (HierarchicalFilter.stats, work_counts). Returns r."""
+        shp = r.shape if isinstance(r, _SparsePeaks) else r[0].shape
+        self._gpairs += shp[0] * shp[1]
+        self._gtrig += self._gpu.last_refinements
+        self._gt1 += getattr(self._gpu, "last_tier1_survivors", 0) or 0
+        return r
+
     # ---- run ----------------------------------------------------------------
     def _execution_plan(self):
         return self._ensure()
@@ -749,36 +806,43 @@ class MatchedFilter:
             _, peaks = pbuf
             return _format_result(idx, val, raw=False, counts=bool(counts), out=peaks)
         nb = self._ensure().nbins(binsize, start, end)
-        rows = nd * nt
         shape = (nd, nt, nb)
-        need = rows * nb
         if raw:
-            buf = self._buf
-            if buf is None or buf[0] != (rows, nb):
-                idx = np.empty(need, dtype=np.int64)
-                val = np.empty(need, dtype=np.complex64)
-                mag = np.empty(0, dtype=np.float32)
-                cnt = np.empty(rows, dtype=np.int32)
-                buf = self._buf = ((rows, nb), idx, val, mag, cnt)
-            _, idx, val, mag, cnt = buf
+            idx, val, mag, cnt = self._raw_buffers("_buf", (nd * nt, nb))
             self._execution_plan().run(d0, nd, t0, nt, binsize, float(threshold), start, end,
                                        idx, val, mag, cnt)
             return _format_result(idx.reshape(shape), val.reshape(shape),
                                   raw=True, counts=cnt.reshape(nd, nt) if counts else None)
-        pbuf = getattr(self, '_pbuf', None)
-        if pbuf is None or pbuf[0] != shape:
-            peaks = np.empty(shape, dtype=PEAK_DTYPE)
-            cnt = np.empty(rows, dtype=np.int32)
-            mag = np.empty(0, dtype=np.float32)
-            empty_idx = np.empty(0, dtype=np.int64)
-            empty_val = np.empty(0, dtype=np.complex64)
-            pbuf = self._pbuf = (shape, peaks, cnt, mag, empty_idx, empty_val)
-        _, peaks, cnt, mag, empty_idx, empty_val = pbuf
+        peaks, empty_idx, empty_val, mag, cnt = self._peak_buffers("_pbuf", shape)
         self._execution_plan().run(d0, nd, t0, nt, binsize, float(threshold), start, end,
                                    empty_idx, empty_val, mag, cnt, peaks)
         return _format_result(None, None, raw=False, counts=cnt.reshape(nd, nt) if counts else None,
                               out=peaks)
 
+    def _raw_buffers(self, attr, shape):
+        """The flat arrays a CPU call writes a raw result of shape (rows..., bins) into:
+        (index, value, an empty magnitude, an int32 count per row). They are kept on this
+        plan as attr and reused while the shape repeats."""
+        buf = getattr(self, attr, None)
+        if buf is None or buf[0] != shape:
+            need = math.prod(shape)
+            buf = (shape, np.empty(need, dtype=np.int64), np.empty(need, dtype=np.complex64),
+                   np.empty(0, dtype=np.float32),
+                   np.empty(math.prod(shape[:-1]), dtype=np.int32))
+            setattr(self, attr, buf)
+        return buf[1:]
+
+    def _peak_buffers(self, attr, shape):
+        """The arrays a CPU call writes a structured peak table of shape (rows..., bins)
+        through: (peaks, an empty index, an empty value, an empty magnitude, an int32 count
+        per row). They are kept on this plan as attr and reused while the shape repeats."""
+        buf = getattr(self, attr, None)
+        if buf is None or buf[0] != shape:
+            buf = (shape, np.empty(shape, dtype=PEAK_DTYPE), np.empty(0, dtype=np.int64),
+                   np.empty(0, dtype=np.complex64), np.empty(0, dtype=np.float32),
+                   np.empty(math.prod(shape[:-1]), dtype=np.int32))
+            setattr(self, attr, buf)
+        return buf[1:]
 
     def _series_array(self, series):
         """The series as the engine reads it: complex64, or -- for a hierarchical plan that
@@ -799,15 +863,7 @@ class MatchedFilter:
                        ragged=False, bin_phase=None):
         """Validate the shared series contract before either native backend."""
         ser = self._series_array(series)
-        st = np.ascontiguousarray(_from_any(starts), dtype=np.uintp)
-        ws = np.ascontiguousarray(_from_any(win_start), dtype=np.uintp)
-        we = np.ascontiguousarray(_from_any(win_end), dtype=np.uintp)
-        if any(a.ndim != 1 for a in (ser, st, ws, we)):
-            raise ValueError("series, starts, win_start and win_end must be one-dimensional")
-        if not (st.size == ws.size == we.size):
-            raise ValueError("starts, win_start and win_end must be the same length")
-        if st.size < 1:
-            raise ValueError("run_series needs at least one block")
+        st, ws, we = _block_arrays(ser, starts, win_start, win_end, "run_series")
         # Negative signed offsets wrap on conversion to uintp. Also reserve
         # room for the block's sample offsets in the GPU's signed gather.
         if np.any(st > np.iinfo(np.intp).max - self.n):
@@ -815,11 +871,7 @@ class MatchedFilter:
         binsize = self.n if binsize is None else int(binsize)
         if binsize < 1:
             raise ValueError("binsize must be >= 1")
-        t0, nt = (0, self.ntemplates) if templates is None else (
-            int(templates[0]), int(templates[1]))
-        if nt < 1 or t0 < 0 or t0 + nt > self.ntemplates:
-            raise ValueError("templates sub-range out of bounds")
-        self._require_templates(t0, nt)
+        t0, nt = self._template_range(templates)
         from ._series import SeriesLayout
         layout = SeriesLayout(self.n, st, ws, we, binsize, ragged=ragged,
                               phase=None if bin_phase is None else _from_any(bin_phase))
@@ -1196,7 +1248,6 @@ class MatchedFilter:
             return self._run_series_gpu(ser, layout, binsize, threshold, t0, nt, raw)
         nb = layout.nbins
         ph = layout.phase
-        need = nblk * nt * nb
         shape = (nblk, nt, nb)
         ep = self._execution_plan()
         real = ser.dtype == np.float32
@@ -1228,14 +1279,7 @@ class MatchedFilter:
             return sp if layout.order is None else _SparsePeaks.combine([(0, sp)], shape,
                                                                         layout.order)
         if raw:
-            sb = self._sbuf
-            if sb is None or sb[0] != shape:
-                sb = self._sbuf = (shape,
-                                   np.empty(need, dtype=np.int64),
-                                   np.empty(need, dtype=np.complex64),
-                                   np.empty(0, dtype=np.float32),
-                                   np.empty(nblk * nt, dtype=np.int32))
-            _, idx, val, mag, cnt = sb
+            idx, val, mag, cnt = self._raw_buffers("_sbuf", shape)
             tot = self._execution_plan().run_series(cser, st, ws, we, t0, nt, binsize,
                                                     float(threshold), idx, val, mag, cnt,
                                                     None, ph)
@@ -1244,15 +1288,7 @@ class MatchedFilter:
                 return (idx.reshape(shape), val.reshape(shape))
             return _format_result(idx.reshape(shape), val.reshape(shape),
                                   raw=True, order=layout.order)
-        spbuf = getattr(self, '_spbuf', None)
-        if spbuf is None or spbuf[0] != shape:
-            spbuf = self._spbuf = (shape,
-                                   np.empty(shape, dtype=PEAK_DTYPE),
-                                   np.empty(0, dtype=np.int64),
-                                   np.empty(0, dtype=np.complex64),
-                                   np.empty(0, dtype=np.float32),
-                                   np.empty(nblk * nt, dtype=np.int32))
-        _, peaks, empty_idx, empty_val, mag, cnt = spbuf
+        peaks, empty_idx, empty_val, mag, cnt = self._peak_buffers("_spbuf", shape)
         tot = self._execution_plan().run_series(cser, st, ws, we, t0, nt, binsize,
                                                 float(threshold), empty_idx, empty_val, mag, cnt,
                                                 peaks, ph)
@@ -1276,15 +1312,7 @@ class MatchedFilter:
         """Filter a full-rate series using 2-channel decimation-in-frequency (DIF)."""
         _check_threshold(threshold)
         ser = np.ascontiguousarray(_from_any(series), dtype=np.complex64)
-        st = np.ascontiguousarray(_from_any(starts), dtype=np.uintp)
-        ws = np.ascontiguousarray(_from_any(win_start), dtype=np.uintp)
-        we = np.ascontiguousarray(_from_any(win_end), dtype=np.uintp)
-        if any(a.ndim != 1 for a in (ser, st, ws, we)):
-            raise ValueError("series, starts, win_start and win_end must be one-dimensional")
-        if not (st.size == ws.size == we.size):
-            raise ValueError("starts, win_start and win_end must be the same length")
-        if st.size < 1:
-            raise ValueError("run_series_dif needs at least one block")
+        st, ws, we = _block_arrays(ser, starts, win_start, win_end, "run_series_dif")
         decim = int(bool(decimated))
         k_val = getattr(self, 'k', self.n)
         if decim:
@@ -1307,42 +1335,22 @@ class MatchedFilter:
         bin_counts = (ends - ws + (0 if ph is None else ph.astype(ends.dtype)) + bs - 1) // bs
         if np.any(bin_counts != bin_counts[0]):
             raise ValueError("block windows must have equal bin counts")
-        t0, nt = (0, self.ntemplates) if templates is None else (
-            int(templates[0]), int(templates[1]))
-        if nt < 1 or t0 < 0 or t0 + nt > self.ntemplates:
-            raise ValueError("templates sub-range out of bounds")
-        self._require_templates(t0, nt)
+        t0, nt = self._template_range(templates)
 
         nblk = st.size
         nb = int(bin_counts[0])
-        need = nblk * nt * nb
         shape = (nblk, nt, nb)
 
         self._dataset = False
         self._data_ready = set()
 
         if raw:
-            sb = getattr(self, '_sbuf_dif', None)
-            if sb is None or sb[0] != shape:
-                sb = self._sbuf_dif = (shape,
-                                       np.empty(need, dtype=np.int64),
-                                       np.empty(need, dtype=np.complex64),
-                                       np.empty(0, dtype=np.float32),
-                                       np.empty(nblk * nt, dtype=np.int32))
-            _, idx, val, mag, cnt = sb
+            idx, val, mag, cnt = self._raw_buffers("_sbuf_dif", shape)
             self._execution_plan().run_series_dif(ser, st, ws, we, t0, nt, bs,
                                                   float(threshold), idx, val, mag, cnt, None, decim,
                                                   ph)
             return _format_result(idx.reshape(shape), val.reshape(shape), raw=True)
-        spbuf = getattr(self, '_spbuf_dif', None)
-        if spbuf is None or spbuf[0] != shape:
-            spbuf = self._spbuf_dif = (shape,
-                                       np.empty(shape, dtype=PEAK_DTYPE),
-                                       np.empty(0, dtype=np.int64),
-                                       np.empty(0, dtype=np.complex64),
-                                       np.empty(0, dtype=np.float32),
-                                       np.empty(nblk * nt, dtype=np.int32))
-        _, peaks, empty_idx, empty_val, mag, cnt = spbuf
+        peaks, empty_idx, empty_val, mag, cnt = self._peak_buffers("_spbuf_dif", shape)
         self._execution_plan().run_series_dif(ser, st, ws, we, t0, nt, bs,
                                               float(threshold), empty_idx, empty_val, mag, cnt, peaks,
                                               decim, ph)
@@ -1512,11 +1520,7 @@ class MatchedFilter:
         def finish_grouped():
             # As the full path's finish_grouped/take_dense/finish_raw for a grouped call.
             for b_start, b_end, item in in_flight:
-                r = item()
-                shp = r.shape if isinstance(r, _SparsePeaks) else r[0].shape
-                self._gpairs += shp[0] * shp[1]
-                self._gtrig += gpu.last_refinements
-                self._gt1 += getattr(gpu, "last_tier1_survivors", 0) or 0
+                r = self._account(item())
                 if isinstance(r, _SparsePeaks):
                     sparse_parts.append((b_start, r))
                 else:
@@ -2121,11 +2125,7 @@ class CorrelationFilter(MatchedFilter):
                                 upload_data=self._ddirty,
                                 upload_tmpl=self._tdirty, **kw)
             self._ddirty = self._tdirty = False
-        if scales is not None:
-            sc = np.ascontiguousarray(_from_any(scales), dtype=np.float32)
-            if sc.ndim != 1 or sc.size != nt:
-                raise ValueError(f"scales must be a 1D array of length {nt}, got shape {sc.shape}")
-            np.multiply(result, sc[None, :, None], out=result)
+        _apply_scales(result, scales, nt)
         return result
 
     def run_series(self, series, starts=None, templates=None, out=None, scales=None):
@@ -2140,11 +2140,7 @@ class CorrelationFilter(MatchedFilter):
             if out is not None:
                 raise ValueError('automatic run_series owns its output; omit out')
             st, _, _ = _automatic_series_layout(ser.size, self.valid)
-            t0, nt = (0, self.ntemplates) if templates is None else (
-                int(templates[0]), int(templates[1]))
-            if nt < 1 or t0 < 0 or t0 + nt > self.ntemplates:
-                raise ValueError("templates sub-range out of bounds")
-            self._require_templates(t0, nt)
+            t0, nt = self._template_range(templates)
             shape = (nt, ser.size)
             result = getattr(self, '_continuous_output', None)
             if result is None or result.shape != shape:
@@ -2163,21 +2159,14 @@ class CorrelationFilter(MatchedFilter):
             else:
                 self._continuous_plan().correlate_series_continuous(
                     ser, st, self.valid[0], self.valid[1], t0, nt, result)
-            if scales is not None:
-                sc = np.ascontiguousarray(_from_any(scales), dtype=np.float32)
-                if sc.ndim != 1 or sc.size != nt:
-                    raise ValueError(f"scales must be a 1D array of length {nt}, got shape {sc.shape}")
-                np.multiply(result, sc[:, None], out=result)
+            _apply_scales(result, scales, nt)
             return result
         st = np.ascontiguousarray(_from_any(starts), dtype=np.uintp)
         if st.ndim != 1 or st.size < 1:
             raise ValueError("starts must be a nonempty one-dimensional array")
         if np.any(st > np.iinfo(np.intp).max - self.n):
             raise ValueError("starts must be nonnegative and fit the sample index range")
-        t0, nt = (0, self.ntemplates) if templates is None else (int(templates[0]), int(templates[1]))
-        if nt < 1 or t0 < 0 or t0 + nt > self.ntemplates:
-            raise ValueError("templates sub-range out of bounds")
-        self._require_templates(t0, nt)
+        t0, nt = self._template_range(templates)
         if self._gpu is not None and ser.size > np.iinfo(np.uint32).max:
             raise ValueError("GPU series exceeds the 32-bit sample address range")
         result = self._full_output((st.size, nt, self.n), out)
@@ -2207,11 +2196,7 @@ class CorrelationFilter(MatchedFilter):
                 finally:
                     self._gpu.cancel_forward()
                 self._tdirty = False
-        if scales is not None:
-            sc = np.ascontiguousarray(_from_any(scales), dtype=np.float32)
-            if sc.ndim != 1 or sc.size != nt:
-                raise ValueError(f"scales must be a 1D array of length {nt}, got shape {sc.shape}")
-            np.multiply(result, sc[None, :, None], out=result)
+        _apply_scales(result, scales, nt)
         return result
 
     def run_blocks(self, series, starts, templates=None, out=None):

@@ -116,6 +116,42 @@ def test_invalid_series_layout_fails_clearly(plan, case, monkeypatch):
         plan.run_series(**kw)
 
 
+def test_series_calls_check_blocks_and_template_rows_alike():
+    """run_series, run_series_dif and CorrelationFilter.run_series (automatic and explicit
+    blocks) refuse, before any engine runs: block starts and windows of different lengths, a
+    call with no blocks (named in the message), and template rows that were never set. The
+    rows that were set still run (run_series_dif's engine needs a band-limited plan, whose
+    templates are set as one bank)."""
+    n = 1024
+    h = np.ones((2, n), np.complex64)
+    flat = mf.MatchedFilter(n, 1, 2)
+    flat.set_templates(h[0], index=0)
+    corr = mf.CorrelationFilter(n, 1, 2, valid=(100, 900))
+    corr.set_templates(h[1], index=1)
+    series = np.ones(4 * n, np.complex64)
+    one, two = np.array([0], np.uintp), np.array([0, n], np.uintp)
+    for call in (flat.run_series, flat.run_series_dif):
+        with pytest.raises(ValueError, match="must be the same length"):
+            call(series, two, two, one + n)
+        with pytest.raises(ValueError, match="^%s needs at least one block" % call.__name__):
+            call(series, one[:0], one[:0], one[:0])
+        with pytest.raises(ValueError, match="no templates for requested rows"):
+            call(series, one, one, one + n)
+    assert flat.run_series(series, one, one, one + n, templates=(0, 1)).shape[:2] == (1, 1)
+    for starts in (None, one):
+        with pytest.raises(ValueError, match="no templates for requested rows"):
+            corr.run_series(series, starts)
+        assert corr.run_series(series, starts, templates=(1, 1)).shape[-2] == 1
+
+
+@pytest.mark.parametrize("cls, limit", [(mf.MatchedFilter, 1 << 20),
+                                        (mf.HierarchicalFilter, 1 << 20),
+                                        (mf.CorrelationFilter, 1 << 22)])
+def test_each_filter_refuses_a_cpu_transform_past_its_limit(cls, limit):
+    with pytest.raises(ValueError, match="exceeds this filter's limit of %d" % limit):
+        cls(2 * limit)
+
+
 def test_reference_update_recalibrates_a_reused_gpu_filter():
     device = usable_gpu()
     if device is None:

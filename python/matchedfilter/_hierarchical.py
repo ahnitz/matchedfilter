@@ -12,8 +12,7 @@ from . import _core
 from . import gatechain as _gatechain
 from . import _chains, _choice, _prices, _settings, _trial
 from ._choice import _AUTOTUNE_LOCK, _autotune_enabled, _log_autotune
-from ._results import _SparsePeaks
-from ._filter import MatchedFilter, _GPU_SIZES, _from_any, _valid_series_window
+from ._filter import MatchedFilter, _from_any
 
 
 def _detach(res):
@@ -159,17 +158,7 @@ class HierarchicalFilter(MatchedFilter):
 
     def __init__(self, n, ndata=1, ntemplates=1, snr=5.5, fd=1e-2, chain=None,
                  device=None, *, valid=None, max_tiers=3, search_window=None):
-        from .device import parse as _parse_device
-        self.device = _parse_device(device)
-        self.n = int(n)
-        self.valid = _valid_series_window(self.n, valid)
-        self.ndata = int(ndata)
-        self.ntemplates = int(ntemplates)
-        if self.ndata < 1 or self.ntemplates < 1:
-            raise ValueError("ndata and ntemplates must be >= 1")
-        if self.device.kind == 'cpu' and self.n > self._cpu_max_n:
-            raise ValueError("CPU transform size %d exceeds this filter's limit of %d"
-                             % (self.n, self._cpu_max_n))
+        self._init_common(n, ndata, ntemplates, device, valid)
         self.snr = float(snr)
         self.fd = float(fd)
         self.max_tiers = int(max_tiers)
@@ -760,16 +749,6 @@ class HierarchicalFilter(MatchedFilter):
     # filter at length `band`, on templates truncated to that band and scaled
     # by 1/sqrt(f). A supplied reference gives a common power fraction;
     # otherwise each coarse template is normalized by its own.
-    def _start_gpu(self):
-        if self.n not in _GPU_SIZES:
-            raise ValueError(
-                "device='gpu' supports n in %s; got %d"
-                % (sorted(_GPU_SIZES), self.n))
-        self._gpu = self._backend().Context(self.device.index)
-        self._gdata = None  # series execution uses its own workspace
-        self._gtmpl = None
-        self._resolved = None
-
     def _gpu_calibration(self, threshold):
         """(chain, per-tier reference band fractions or None, per-tier thresholds), from the
         resolved plan (_resolve)."""
@@ -791,65 +770,49 @@ class HierarchicalFilter(MatchedFilter):
             out.append(H[:, :b] * sc)
         return out
 
-    def _grouped_dispatch(self, n, spec, H, groups, binsize, threshold, **kw):
-        """The gate chain over every window group of one spectra batch, one submission."""
+    def _gate_args(self, H, threshold):
+        """What a dispatch of templates H passes the backend's gate chain: (chain, coarse
+        templates per tier, per-tier thresholds, and the keywords of a second tier, empty for a
+        one-tier chain). The coarse templates are cut again only when H, the chain or its band
+        fractions change, or the templates were set again."""
         chain, f, thr = self._gpu_calibration(threshold)
+        if len(chain) > 2:
+            # The kernels take a first (cascade) band and a last band; every chain a GPU plan
+            # is given is bounded by _MAX_TIERS["gpu"].
+            raise RuntimeError("a GPU chain has at most two tiers; got %s" % (chain,))
         ck = (chain, f, H.ctypes.data, H.shape)
         if getattr(self, "_ckey", None) != ck or self._tdirty:
             self._ct = self._coarse_templates(H, chain, f)
             self._ckey = ck
         ct = self._ct
         extra = {} if len(chain) == 1 else dict(cascade_band=chain[0], ct1=ct[1], raw_thr1=thr[1])
+        return chain, ct, thr, extra
+
+    def _grouped_dispatch(self, n, spec, H, groups, binsize, threshold, **kw):
+        """The gate chain over every window group of one spectra batch, one submission."""
+        chain, ct, thr, extra = self._gate_args(H, threshold)
         res = self._gpu.hier_peaks_grouped(n, chain[-1], spec, H, ct[0], thr[0], groups, binsize,
                                            threshold, upload_tmpl=self._tdirty,
                                            refine_reach=getattr(self, "_refine_reach", None),
                                            **extra, **kw)
-
-        def account(r):
-            shp = r.shape if isinstance(r, _SparsePeaks) else r[0].shape
-            self._gpairs += shp[0] * shp[1]
-            self._gtrig += self._gpu.last_refinements
-            self._gt1 += getattr(self._gpu, "last_tier1_survivors", 0) or 0
-            return r
         if kw.get("async_submit"):
-            return lambda: account(res())
-        return account(res)
+            return lambda: self._account(res())
+        return self._account(res)
 
     def _gpu_dispatch(self, D, H, binsize, threshold, start, end, slot=None, async_submit=False,
                       **kw):
         """Run the gate chain and refinement without host survivor readback."""
-        chain, f, thr = self._gpu_calibration(threshold)
-        ck = (chain, f, H.ctypes.data, H.shape)
-        if getattr(self, "_ckey", None) != ck or self._tdirty:
-            self._ct = self._coarse_templates(H, chain, f)
-            self._ckey = ck
-        ct = self._ct
-        if len(chain) == 1:
-            res = self._gpu.hier_peaks(
-                self.n, chain[0], D, H, ct[0], thr[0],
-                binsize=binsize, threshold=threshold, window=(start, end),
-                upload_data=self._ddirty, upload_tmpl=self._tdirty,
-                slot=slot, async_submit=async_submit,
-                refine_reach=getattr(self, "_refine_reach", None), **kw)
-        else:
-            res = self._gpu.hier_peaks(
-                self.n, chain[1], D, H, ct[0], thr[0],
-                binsize=binsize, threshold=threshold, window=(start, end),
-                upload_data=self._ddirty, upload_tmpl=self._tdirty,
-                cascade_band=chain[0], ct1=ct[1], raw_thr1=thr[1],
-                slot=slot, async_submit=async_submit,
-                refine_reach=getattr(self, "_refine_reach", None), **kw)
+        chain, ct, thr, extra = self._gate_args(H, threshold)
+        res = self._gpu.hier_peaks(
+            self.n, chain[-1], D, H, ct[0], thr[0],
+            binsize=binsize, threshold=threshold, window=(start, end),
+            upload_data=self._ddirty, upload_tmpl=self._tdirty,
+            slot=slot, async_submit=async_submit,
+            refine_reach=getattr(self, "_refine_reach", None), **extra, **kw)
         self._ddirty = self._tdirty = False
-
-        def account(r):
-            shp = r.shape if isinstance(r, _SparsePeaks) else r[0].shape
-            self._gpairs += shp[0] * shp[1]
-            self._gtrig += self._gpu.last_refinements
-            self._gt1 += getattr(self._gpu, "last_tier1_survivors", 0) or 0
-            return r
         if async_submit:
-            return lambda: account(res())
-        return account(res)
+            return lambda: self._account(res())
+        return self._account(res)
 
     # ---- reporting -----------------------------------------------------------
     @property

@@ -191,6 +191,32 @@ def test_lag_order_scale_complex_conjugation(device):
     _agrees(got, expected)
 
 
+@pytest.mark.parametrize('device', ['cpu', 'gpu'])
+def test_scales_multiply_each_template_on_every_path(device):
+    """scales multiplies template t's output by scales[t] on every path that takes them: run,
+    run_series with explicit blocks and run_series with automatic ones. The data, block and
+    template counts are equal, so a factor applied along the data or block axis would
+    broadcast without error; the values catch it."""
+    n, T = 1024, 3
+    sc = np.array([0.5, 2.0, -1.5], np.float32)
+    f = CorrelationFilter(n, T, T, device=_device(device), valid=(100, 900))
+    f.set_templates(_spectra((T, n), 62))
+    series = _spectra((3 * n,), 63)
+
+    def check(call):
+        plain = call(None).copy()
+        expected = plain.copy()
+        for t in range(T):
+            expected[..., t, :] *= sc[t]
+        _agrees(call(sc), expected)
+    f.set_data(_spectra((T, n), 61))
+    check(lambda s: f.run(scales=s))
+    check(lambda s: f.run_series(series, np.array([0, 700, 1500]), scales=s))
+    check(lambda s: f.run_series(series, scales=s))
+    with pytest.raises(ValueError, match='scales must be'):
+        f.run_series(series, scales=sc[:2])
+
+
 def test_out_validation_guard_and_memmap(tmp_path):
     n = 1024
     f = CorrelationFilter(n, 2, 2)
