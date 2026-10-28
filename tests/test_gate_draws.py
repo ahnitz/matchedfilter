@@ -61,7 +61,10 @@ def test_the_draws_are_normal_into_the_tails():
     (0, 4096, 2048, 7),            # simulate's rows at n = 2048: one block each
     (0, 8192, 4096, 5),            # two blocks a row
     (0, 4096, 1024, 6),            # the start of each row's block
+    (0, 4096, 1602, 7),            # n = 2048, kmax = 801 (a captured profile's): ends off a step
+    (0, 8192, 3202, 5),            # n = 4096, kmax = 1601: a whole block, then one ending off a step
     (2048 * 3, 1024, 1000, 9),     # rows inside blocks, ends off the 16-draw steps
+    (3072, 1024, 402, 9),          # n = 512, kmax = 201: two rows a block, ends off a step
     (17, 4096, 2048, 4),           # odd starts: every block read from inside
     (5, 300, 301, 11),             # rows overlapping in the stream
     (2 ** 40 + 4096, 4096, 2048, 3),
@@ -208,12 +211,19 @@ def test_every_window_reads_one_noise_simulation(fresh):
         np.testing.assert_array_equal(v, gc.noise_block_maxima(p, n, bands, window=w), err_msg=str(w))
 
 
-def test_the_noise_statistics_are_the_transforms_of_the_stream(fresh):
+@pytest.mark.parametrize("cut", [None, 801])
+def test_the_noise_statistics_are_the_transforms_of_the_stream(fresh, cut):
     """Each band's noise statistic in the simulation (rows of the stream times the profile's
     scale, one block's draws shared by all of a row's transforms) is the b-point transform of
-    the row's first b bins, |.|^2's running-maximum records as NumPy finds them in float64."""
+    the row's first b bins, |.|^2's running-maximum records as NumPy finds them in float64:
+    also where the profile ends at bin 800 (the captured references' kmax = 801), the rows'
+    draws ending inside a 16-draw step and the bins past them empty."""
     n, rows = 2048, 24
     p = _profile(n)
+    if cut is not None:
+        p = p.copy()
+        p[cut:] = 0
+        p = gc._norm_profile(p, n)
     bands = gc.usable_bands(p, n)
     recs = gc._noise_records(p, n, bands, rows, 13)
     scale = (np.sqrt(p) / np.sqrt(2)).astype(np.float32)
@@ -222,7 +232,8 @@ def test_the_noise_statistics_are_the_transforms_of_the_stream(fresh):
         d = _fill(2 * kfill, 2 * r * n, seed=(gc._DOMAIN_SIGNAL << 32) | 13) * np.repeat(scale[:kfill], 2)
         x = d[0::2].astype(np.float64) + 1j * d[1::2]
         for b, (pos, val, off) in zip(bands, recs):
-            a = np.abs(np.fft.ifft(x[:b]) * b * (gc._SIG / np.sqrt(p[:b].sum()))) ** 2
+            # bins past kfill empty: x zero-padded to the band's b
+            a = np.abs(np.fft.ifft(x[:b], b) * b * (gc._SIG / np.sqrt(p[:b].sum()))) ** 2
             want = np.flatnonzero(a > np.maximum.accumulate(np.concatenate(([-1.0], a[:-1]))))
             got = slice(off[r], off[r + 1])
             np.testing.assert_array_equal(pos[got], want, err_msg="row %d band %d" % (r, b))
