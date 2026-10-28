@@ -90,14 +90,6 @@ class _RaggedSplit:
         return [_Deferred(lambda i=i: part(i)) for i in range(len(self.us))]
 
 
-def _interval_mask(S: int, starts: np.ndarray, stops: np.ndarray) -> np.ndarray:
-    """Boolean mask of length S that is True on the union of [starts, stops)."""
-    edge = np.zeros(S + 1, dtype=np.int32)
-    np.add.at(edge, np.clip(starts, 0, S), 1)
-    np.add.at(edge, np.clip(stops, 0, S), -1)
-    return np.cumsum(edge[:-1]) > 0
-
-
 def _page_aligned_empty(shape, dtype=np.complex64, page: int = 16384) -> np.ndarray:
     """np.empty, starting on a page boundary: unified-memory GPUs can then write into it
     in place (see _correlate_group). Costs at most one page."""
@@ -111,8 +103,9 @@ def _page_aligned_empty(shape, dtype=np.complex64, page: int = 16384) -> np.ndar
 def _interval_runs(S: int, starts: np.ndarray, stops: np.ndarray) -> np.ndarray:
     """The union of [starts, stops) clipped to [0, S), as sorted disjoint (K, 2) runs.
 
-    What _interval_mask describes, without an S-long array: a 2^20-sample mask costs a
-    cumsum and a pass per use, and the middle stage needed three per group per call.
+    The set a boolean mask of length S would describe, without the S-long array: a
+    2^20-sample mask costs a cumsum and a pass per use, and the middle stage needed three
+    per group per call.
     """
     a = np.clip(np.asarray(starts, np.int64), 0, S)
     b = np.clip(np.asarray(stops, np.int64), 0, S)

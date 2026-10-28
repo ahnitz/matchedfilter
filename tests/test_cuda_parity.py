@@ -466,7 +466,7 @@ def test_gpu_cost_calibration_measures_on_cuda():
 
 # ---- sparse readback ---------------------------------------------------------------------
 @pytest.mark.parametrize("kind", ["peaks", "peaks_grouped", "hier", "hier_grouped"])
-@pytest.mark.parametrize("thr", [4.5, 0.0])        # 0: every bin a peak, past _SPARSE_HOST
+@pytest.mark.parametrize("thr", [4.5, 0.0])        # 0: every bin a peak, past _SPARSE_FIRST
 def test_sparse_readback_equals_dense(ctx, kind, thr):
     from matchedfilter._results import _SparsePeaks
     n, nd, nt, bs = 2048, 24, 9, 512

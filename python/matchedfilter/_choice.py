@@ -391,12 +391,6 @@ class Choice:
             return None
         return _costfile._load_cost_file(path).get("choice|" + self.store_key)
 
-    def _stored(self):
-        """The candidate a lock on file names, or None (no file, no lock, or a value that
-        names no candidate here)."""
-        rec = self._record()
-        return self.parse(rec.get("value")) if isinstance(rec, dict) else None
-
     def _write(self, rec, replace=False):
         """Store rec unless a valid lock is on file (and replace is off); returns the record
         on file afterwards (rec itself when it was written)."""
