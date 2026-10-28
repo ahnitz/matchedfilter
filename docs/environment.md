@@ -20,17 +20,9 @@ survivor compaction, which is IEEE because it must list a NaN coarse value:
 MF_METAL_IEEE.
 
 Removed 2026-10-26: block sizes and the Q15 screen are one joint trial of paired rounds,
-and the chain is the model's; MF_TRIAL_ROUNDS sets its rounds: MF_BLOCK_TRIALS,
-MF_CHAIN_TRIALS.
-
-Removed 2026-10-26: the gate chain is the cost model's, never a trial arm
-(MF_CHAIN_FORCE pins one for measurement): MF_CHAIN_MARGIN.
-
-Removed 2026-10-17: switches no tool, test or CI job used were removed (their defaults
-kept): MF_BLOCK_TRIAL_RANKS, MF_CUDA_BLOCKING_SYNC, MF_CUDA_GRAPHS, MF_CUDA_PREFETCH,
-MF_DIRECT_TRACE, MF_FUSE, MF_GATE16_ELECT, MF_GBLK, MF_GPU_FUSE, MF_GPU_FUSE_CACHE,
-MF_GPU_FUSE_CHUNK, MF_MFTILE, MF_N1, MF_NOSTORE, MF_SERPAD, MF_SRPROD,
-MF_VK_NO_SUBGROUP_PIN.
+whose rounds MF_TRIAL_ROUNDS sets; the gate chain is the cost model's, never a trial arm
+(MF_CHAIN_FORCE pins one for measurement): MF_BLOCK_TRIALS, MF_CHAIN_TRIALS,
+MF_CHAIN_MARGIN.
 
 Removed 2026-10-22: a stored trial lock is final; the steady re-check it switched on
 could make processes sharing a cost file choose differently: MF_TRIAL_RECHECK.
@@ -49,6 +41,12 @@ MF_METAL_COARSE_TWT.
 Removed 2026-10-22: renamed MF_COARSE_RAW (MF_COARSE_RAW=1 is what MF_VK_C16_BOUND=0
 did, on every GPU backend): MF_VK_C16_BOUND.
 
+Removed 2026-10-17: switches no tool, test or CI job used were removed (their defaults
+kept): MF_BLOCK_TRIAL_RANKS, MF_CUDA_BLOCKING_SYNC, MF_CUDA_GRAPHS, MF_CUDA_PREFETCH,
+MF_DIRECT_TRACE, MF_FUSE, MF_GATE16_ELECT, MF_GBLK, MF_GPU_FUSE, MF_GPU_FUSE_CACHE,
+MF_GPU_FUSE_CHUNK, MF_MFTILE, MF_N1, MF_NOSTORE, MF_SERPAD, MF_SRPROD,
+MF_VK_NO_SUBGROUP_PIN.
+
 Removed 2026-10-07: the gate-model simulation cache it located went with the cost
 tables; chain thresholds are drawn in each process, and MF_COST_FILE keeps measured
 costs: MF_GATE_CACHE_FILE.
@@ -60,7 +58,7 @@ Older notes in docs/ that mention a removed variable describe past studies.
 | Variable | Default | Effect |
 |---|---|---|
 | `MF_DEVICE` | `cpu` | Device for plans built without one (`device.parse(None)`). |
-| `MF_COST_FILE` | unset | JSON file of measured cost models and trial locks, kept between processes. Unset: cold start, no trials kept. One writer per open contest: processes sharing a file while a trial is open overwrite each other's samples (said once per contest). |
+| `MF_COST_FILE` | unset | JSON file of measured cost models, prices, trial locks and kernel choices, kept between processes. Unset: cold start, nothing kept. Records on file are used and only missing ones measured; a model, price or lock another process stored first is used in place of this one's. |
 | `MF_EXECUTION_POLICY` | the shipped `execution-policy.json` | Another execution-policy table. |
 | `MF_ISA` | best the CPU supports | SIMD target (also `matchedfilter.set_target`). |
 | `MF_DIRECT_REFINE=0` | on | CPU refines by transform only (no direct correlation): exact bin maxima for the pairs that pass the gates. |

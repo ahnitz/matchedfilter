@@ -12,8 +12,10 @@ sampled on a search's first banks picked one faster there and 5-10% slower over 
     misjudged block sizes under load, 2026-10-25.) In a first pass every other arm moves one
     dimension -- a block size ("n=4096", or the model's priced layout, "n=model"), the screen ("q15=0") --
     and the instance's model fills in the rest, conditional on it. Both are properties of the
-    machine, the same for every profile, so the banks a trial samples first stand for the rest. An instance that cannot take an arm's value (a chain outside
-    a plan's feasible set, a screen its first band does not have) runs its model choice there.
+    machine, the same for every profile, so the banks a trial samples first stand for the rest.
+    An instance that cannot take an arm's value (a block size that is not among its candidates,
+    a screen its first band does not have) runs its default there: its smallest candidate size,
+    no screen.
   * instances resolve an arm to a configuration (arm_config) and run it (use_arm); arms an
     instance resolves alike are one configuration, timed once, so they can only tie.
   * a sample is a paired round: every distinct configuration of the live arms run on the same
@@ -32,8 +34,9 @@ sampled on a search's first banks picked one faster there and 5-10% slower over 
     search ends at a pass that keeps its base. A first pass that keeps DEFAULT ends it, so a
     trial costs a second pass only when something moved.
   * the search's end is applied by each instance resolving the winning label (lock_arm), now
-    and in instances made later; every pass is kept in MF_COST_FILE (store key "joint|" + key,
-    then pass_key's) when one is set, and an open pass resumes in the next process.
+    and in instances made later; every pass's lock is kept in MF_COST_FILE (store key
+    "joint|" + key, then pass_key's) when one is set. A later process takes the locked passes
+    and runs the first open one afresh: rounds are not kept between processes.
 
 Instances are TimeDomainFilterBanks (their block sizes and their plans' screens;
 time_domain._joint_round) and HierarchicalFilters used on their own (their screen;

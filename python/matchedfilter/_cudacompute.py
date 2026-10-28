@@ -693,7 +693,7 @@ class Context(Executor, InputUploads):
     @property
     def timing(self):
         """Device timers on. ``_timing`` is the attribute shared with the Vulkan backend:
-        gatechain.calibrate_costs_gpu switches it on around its measurement runs."""
+        _calibration.calibrate_costs_gpu switches it on around its measurement runs."""
         return self._timing
 
     def __init__(self, index=0):

@@ -1,4 +1,5 @@
-"""Input residency shared by the Vulkan and Metal dispatch caches."""
+"""Input residency and in-flight results (Pending) shared by the Vulkan, CUDA and Metal
+dispatch caches."""
 
 
 class Pending:

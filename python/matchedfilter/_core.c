@@ -1090,9 +1090,9 @@ static int sr_take(PyObject *po,PyObject *vo,PyObject *oo,Py_ssize_t want,long l
   return got;
 }
 /* The gate model's simulation, whole (gatechain._simulate): row r of nrows is a block's n
-   bins, bins [0, kmax) complex draws (row0 + r) * 2n .. of stream `seed` (ap_gauss_fill) times
-   scale[k], the rest empty. Band i's statistic is the b_i-point backward transform of bins
-   [0, b_i) times bscale[i]; the fine one the n-point transform of all n times fscale.
+   bins, bins [0, kmax) complex draws (row0 + r) * 2n .. of stream `seed` (ap_gauss_fill_rows)
+   times scale[k], the rest empty. Band i's statistic is the b_i-point backward transform of
+   bins [0, b_i) times bscale[i]; the fine one the n-point transform of all n times fscale.
 
    With noise outputs (npos, nval, noff: per band): each band's running maximum of
    the noise alone over its lags from 0, row r's at [off[r], off[r + 1]). With a signal (tab, t, fi
