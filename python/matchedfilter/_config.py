@@ -64,6 +64,9 @@ VARS: Tuple[Var, ...] = (
         "Another execution-policy table.", kind="text"),
     Var("MF_ISA", "config", "both", "best the CPU supports",
         "SIMD target (also `matchedfilter.set_target`).", kind="text"),
+    Var("MF_DIRECT_REFINE", "config", "py", "on",
+        "CPU refines by transform only (no direct correlation): exact bin maxima for the "
+        "pairs that pass the gates.", usage="MF_DIRECT_REFINE=0", kind="flag", value=True),
     # Diagnostics
     Var("MF_AUTOTUNE_LOG", "diagnostic", "py", "", "Log block-size, chain and trial decisions.",
         usage="MF_AUTOTUNE_LOG=1", kind="flag", value=False),
@@ -94,8 +97,6 @@ VARS: Tuple[Var, ...] = (
         usage="MF_CHAIN_FORCE=b1,b2` or `n:b1,b2;...", kind="text"),
     Var("MF_TRIAL_ROUNDS", "override", "py", "5",
         "Paired rounds before a joint trial decides (it takes up to twice as many).", kind="int"),
-    Var("MF_DIRECT_REFINE", "override", "py", "on",
-        "CPU refines by transform only (no direct correlation).", usage="MF_DIRECT_REFINE=0", kind="flag", value=True),
     Var("MF_GATE16", "override", "c", "on where built", "No FP16 first gate on the CPU.",
         usage="MF_GATE16=0", kind="flag", value=True),
     Var("MF_DGROUP", "override", "c", "the plan's series group",
@@ -117,8 +118,6 @@ VARS: Tuple[Var, ...] = (
         "The fp16 coarse tier reports its raw maximum instead of an upper bound (every GPU "
         "backend; the physics tests and tools/c16_sigma.py).",
         usage="MF_COARSE_RAW=1", kind="flag", value=False),
-    Var("MF_METAL_IEEE", "override", "py", "per kernel",
-        "IEEE math for all or no Metal kernels.", usage="MF_METAL_IEEE=all/none", kind="choice", choices=("default", "all", "none")),
     Var("MF_GPU_FUSE_INTERLEAVE", "override", "py", "measured",
         "Fixed Vulkan fusion interleave depth.", usage="MF_GPU_FUSE_INTERLEAVE=<n>", kind="int"),
     Var("MF_GPU_ITEMS", "override", "py", "on",
@@ -139,14 +138,10 @@ VARS: Tuple[Var, ...] = (
         usage="MF_SLANGC_ANY_VERSION=1"),
     Var("MF_NVRTC", "tools", "tools", "`libnvrtc.so.12`", "NVRTC library for the PTX build."),
     Var("MF_CUDA_PATH", "tools", "tools", "found", "CUDA installation for the PTX build."),
-    Var("MF_TC_KAPPA", "tools", "tools", "from the measured sigma",
-        "Tensor-core coarse bound constant for tools/build_ptx.py."),
     Var("MF_GATE_BANK", "tools", "tools", "unset",
         "Template bank for tools/gate.py's end-to-end checks (also `--bank`).",
         usage="MF_GATE_BANK`, `MF_GATE_PROFILES"),
     Var("MF_GATE_PROFILES", "tools", "tools", row="MF_GATE_BANK"),
-    Var("MF_CAPTURE", "tools", "tools", "unset",
-        "Directory a pycbc run captures filter calls into, for tools/hier_bench.py replays."),
     Var("MF_TEASER_N", "tools", "tools", "4096, 16, 512",
         "Shape of tools/teaser_figure.py's run.",
         usage="MF_TEASER_N`, `MF_TEASER_NDATA`, `MF_TEASER_NTMPL"),
@@ -161,8 +156,17 @@ SHADER_MACROS = frozenset({"MF_C16_RAW", "MF_COARSE_TWT", "MF_DATA_SCALE_BITS",
 
 #: Removed variables and why (the document lists them; setting one changes nothing).
 REMOVED = (
-    ("2026-10-26", "block sizes, chains and the Q15 screen are one joint trial of paired "
-     "rounds; MF_TRIAL_ROUNDS sets its rounds", ("MF_BLOCK_TRIALS", "MF_CHAIN_TRIALS")),
+    ("2026-10-27", "the pycbc capture hook that read it, writing tools/hier_bench.py "
+     "fixtures, is gone; tools/setup_capture.py captures a job's calls", ("MF_CAPTURE",)),
+    ("2026-10-27", "the tensor-core coarse bound is built from the sigma measured by "
+     "tools/cuda_tc_sigma.py; a hand-set constant is not a bound, and nothing set it",
+     ("MF_TC_KAPPA",)),
+    ("2026-10-27", "no tool, test or CI job set it; Metal keeps fast math except in the "
+     "survivor compaction, which is IEEE because it must list a NaN coarse value",
+     ("MF_METAL_IEEE",)),
+    ("2026-10-26", "block sizes and the Q15 screen are one joint trial of paired rounds, "
+     "and the chain is the model's; MF_TRIAL_ROUNDS sets its rounds",
+     ("MF_BLOCK_TRIALS", "MF_CHAIN_TRIALS")),
     ("2026-10-26", "the gate chain is the cost model's, never a trial arm (MF_CHAIN_FORCE "
      "pins one for measurement)", ("MF_CHAIN_MARGIN",)),
     ("2026-10-17", "switches no tool, test or CI job used were removed (their defaults kept)",
@@ -183,6 +187,9 @@ REMOVED = (
                                         "MF_METAL_COARSE_TWT")),
     ("2026-10-22", "renamed MF_COARSE_RAW (MF_COARSE_RAW=1 is what MF_VK_C16_BOUND=0 did, "
      "on every GPU backend)", ("MF_VK_C16_BOUND",)),
+    ("2026-10-07", "the gate-model simulation cache it located went with the cost tables; "
+     "chain thresholds are drawn in each process, and MF_COST_FILE keeps measured costs",
+     ("MF_GATE_CACHE_FILE",)),
 )
 
 BY_NAME = {v.name: v for v in VARS}

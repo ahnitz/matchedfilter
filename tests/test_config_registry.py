@@ -1,6 +1,7 @@
 """The environment-variable registry (_config.VARS), the code and docs/environment.md agree:
-every MF_* name the package or its C reads is registered, everything registered is read
-by the side it says, and the document is the one the registry renders."""
+every MF_* name the package, its C or the tools read is registered, everything registered is
+read by the side it says, the test session keeps only the variables it should, and the
+document is the one the registry renders."""
 import re
 from pathlib import Path
 
@@ -39,8 +40,12 @@ def _c():
             + [ROOT / "python" / "matchedfilter" / "_core.c"])
 
 
+def _tools():
+    return sorted((ROOT / "tools").glob("*.py"))
+
+
 def test_every_name_the_code_reads_is_registered():
-    seen = {**_names(_python()), **_names(_c())}
+    seen = {**_names(_python()), **_names(_c()), **_names(_tools())}
     unknown = {k: v for k, v in seen.items()
                if k not in config.BY_NAME and k not in config.SHADER_MACROS}
     assert not unknown, "unregistered MF_* names (add them to _config.VARS): %r" % unknown
@@ -84,6 +89,25 @@ def test_the_registry_is_well_formed():
             assert owner.row is None and owner.section == v.section, v.name
 
 
+def test_the_session_keeps_only_the_target_and_the_tools_variables(monkeypatch):
+    """tests/conftest.py removes every registered variable from the session's environment
+    but MF_ISA and the tools section, so no test inherits a setting that changes what the
+    library does, and everything it keeps is registered."""
+    import os
+    import conftest
+    assert conftest._KEPT_MF <= set(config.BY_NAME), "conftest keeps an unregistered name"
+    for v in config.VARS:
+        monkeypatch.setenv(v.name, os.environ.get(v.name, "1"))
+    monkeypatch.setattr(conftest, "_SCRUBBED", {"removed": [], "kept": []})
+
+    class _Options:
+        def getoption(self, name):
+            return None
+    conftest.pytest_configure(_Options())
+    kept = {v.name for v in config.VARS if v.name in os.environ}
+    assert kept == {"MF_ISA"} | {v.name for v in config.VARS if v.section == "tools"}
+
+
 def test_the_document_is_generated_from_the_registry():
     assert gen.main(["--check"]) == 0, "docs/environment.md is stale"
 
@@ -101,7 +125,7 @@ _FLOAT = config.Var("MF_TEST_FLOAT", "override", "py", kind="float")
 
 @pytest.mark.parametrize("name,raw", [("MF_AUTOTUNE", "2"), ("MF_AUTOTUNE", "enabled"),
                                       ("MF_GPU_QUEUE_AHEAD", "8.5"), ("MF_TEST_FLOAT", "x"),
-                                      ("MF_METAL_IEEE", "fast")])
+                                      ("MF_SINGLE_DEVICE", "gpu")])
 def test_anything_else_is_refused_by_name(name, raw):
     with pytest.raises(ValueError, match="%s=%s" % (name, re.escape(raw))):
         config.parse(_FLOAT if name == "MF_TEST_FLOAT" else config.BY_NAME[name], raw)
@@ -114,7 +138,7 @@ def test_values_and_defaults_by_kind():
     assert config.parse(_FLOAT, "") is None
     assert config.parse(_FLOAT, "1.25") == 1.25
     assert config.parse(v["MF_BAND_FORWARD"], "") is None      # unset: measured
-    assert config.parse(v["MF_METAL_IEEE"], "ALL") == "all"
+    assert config.parse(v["MF_SINGLE_DEVICE"], "BANK") == "bank"
     assert config.parse(v["MF_CHAIN_FORCE"], "256,512") == "256,512"
 
 

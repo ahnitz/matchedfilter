@@ -97,7 +97,7 @@ def build_coarse_tc(nvrtc, outdir):
     for band in COARSE_TC_BANDS:
         for wpb in COARSE_TC_WPB:
             out = outdir / ("coarse_tc_%d_w%d.ptx" % (band, wpb))
-            kappa = os.environ.get("MF_TC_KAPPA") or "%.4ff" % (z * COARSE_TC_SIGMA[band])
+            kappa = "%.4ff" % (z * COARSE_TC_SIGMA[band])
             out.write_bytes(nvrtc_ptx(nvrtc, cuda_path, src, "coarse_tc.cu",
                                       dict(BAND=band, WPB=wpb, KAPPA=kappa)))
             print("  coarse_tc band=%d wpb=%d kappa=%s" % (band, wpb, kappa), flush=True)

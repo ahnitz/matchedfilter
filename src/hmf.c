@@ -108,7 +108,7 @@ struct ap_hmf_plan {
 int ap_hmf_series_group(const ap_hmf_plan *p){ return p ? p->dgroup : 0; }
 
 /* The series group a plan of size n runs when asked for `requested`: MF_DGROUP overrides
-   it (a diagnostic), and it is halved until the held spectra fit 4 MB. Calibrations key
+   it (for measurement), and it is halved until the held spectra fit 4 MB. Calibrations key
    their models by this, the group that ran, not the one asked for. */
 int ap_hmf_effective_group(size_t n,int requested){
   int grp = requested;

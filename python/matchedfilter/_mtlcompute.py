@@ -84,12 +84,9 @@ def _shipped(stem):
 
 def _ieee_kernel(stem):
     """Whether a kernel library compiles with IEEE (not fast) math: the survivor compaction,
-    which must list a NaN coarse value (see Context._library). MF_METAL_IEEE=all|none
-    overrides, for measurement."""
-    mode = _config.get("MF_METAL_IEEE")
-    if mode in ("all", "none"):
-        return mode == "all"
-    # The coarse kernels keep fast math (IEEE cost the band-256 tiled kernel 1.00 -> 1.23 ms)
+    which must list a NaN coarse value (see Context._library)."""
+    # The coarse kernels keep fast math (IEEE cost the band-256 tiled kernel 1.00 -> 1.23 ms
+    # on an M2, 2026-10-09, timed with this function returning True for every library)
     # and fail open by an integer test of the fp16 exponent instead (tierb.slang, MF_METAL);
     # the compaction is cheap and compares the possibly-NaN coarse value, so it is IEEE.
     return stem.startswith("compact_")
