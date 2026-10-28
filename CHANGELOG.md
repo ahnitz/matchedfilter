@@ -16,6 +16,12 @@ Alpha releases may change the API. Pin a version for reproducible work.
   2048, x1.40 at 4096, x1.25 at 16384.
 - CPython 3.15: release wheels (Linux x86-64 manylinux and musllinux, macOS arm64) and CI
   test jobs. Wheels build with cibuildwheel 4.3.4.
+- tests/test_lint.py: the library is pyflakes-clean, and stays so. pyflakes reported 143
+  warnings in python/matchedfilter (imports left behind when code moved between modules,
+  re-exports of private names, locals computed and dropped; none was a live bug), now 0,
+  and the test fails on any new one. It skips where pyflakes is not installed; CI installs
+  it with the test extra. tools/, tests/ and examples/ lost their dead imports and locals
+  too.
 
 ### Changed
 
@@ -66,6 +72,11 @@ Alpha releases may change the API. Pin a version for reproducible work.
   drop a NaN coarse value), `MF_TC_KAPPA` (a hand-set tensor-core bound constant in place
   of the one built from the measured sigma) and `MF_CAPTURE` (nothing read it). Setting
   any of them, or `MF_GATE_CACHE_FILE`, now warns that it was removed and why.
+- The package root's re-exports of private names (33, from `_filter`, `_hierarchical`,
+  `_choice` and `_results`, and the `_gatechain` alias) and `time_domain`'s re-exports from
+  `_layout` and `_windows`. Private names are reached in their own modules and may move
+  (docs/robustness-plan.md, decision 5); the public names are unchanged
+  (tests/test_public_api.py).
 
 ### Performance
 
@@ -101,6 +112,23 @@ Alpha releases may change the API. Pin a version for reproducible work.
   moves one reference's near-tie chain). The signal simulation reads the stream's cached
   prefix for every reference, the plan search runs in C (identical candidates), and the cost
   model's interpolation tables are kept as arrays.
+- The gate model's simulation, which places every chain's thresholds, runs about 2.5x
+  faster with bit-identical records and draws. On dev2 (one core, load ~60, medians of 5
+  interleaved runs), for the inspiral reference at n = 2048 and fd 1e-3: choose_chain 4.91 ->
+  1.98 s, the signal simulation (200k draws) 4.81 -> 1.90 s and 38.9 -> 14.6 G
+  instructions. That follows a first 14.5% (signal simulation at n = 2048 and 4096, 6.67 ->
+  5.70 s, idle core): the keep check's and the records skip's maxima, of non-negative
+  squares, are taken as integer maxima of their bit patterns, which order alike and
+  vectorise. The noise records were sized for white noise's count of running-maximum
+  records, and the inspiral profile's smooth statistics have two to three times as many,
+  so the simulation overflowed and ran again with twice the room: two full simulations at
+  n = 2048, three at 4096. It now keeps the rows that fit and continues from the first that
+  did not. The records scan runs in Highway, a block of 16 values with one comparison
+  (src/records.cc). On AVX-512 the Gaussian fill draws two blocks in one 16-lane vector
+  (0.68 -> 0.36 ns a draw), rows are filled together with their scale, and the transforms
+  read the draws in place. The first step is exact by construction (and matched on 25M
+  records); the later ones match its build bit for bit under AVX-512, AVX2, AVX and SSE4
+  (499 arrays each).
 
 - The AVX back end (Sandy and Ivy Bridge) has its own block and spectrum loads (scale_load,
   split_store, now in src/loads-inl.h). It had inherited SSE4's, and split_store's vector path
@@ -190,6 +218,16 @@ Alpha releases may change the API. Pin a version for reproducible work.
   size and kernel and kept in MF_COST_FILE.
 - The macOS arm64 build: gauss.cc dispatched with a qualified name, which a single-target
   build (NEON only) cannot resolve.
+
+### Documentation
+
+- docs/architecture.md, a reference for the library as it is: the public API, the module
+  layers, the C engine and the `_core` boundary, the GPU host layer and backends, a
+  hierarchical call end to end, the gate model, the cost models, measured choices and what
+  MF_COST_FILE holds. docs/README.md classifies every document as reference or dated log.
+  Reference pages that still described retired mechanisms (calibration files deciding the
+  gates, chain trials, trial samples kept between processes) are corrected; dated logs are
+  kept as written.
 
 ## 0.1.0a9
 
