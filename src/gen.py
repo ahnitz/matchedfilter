@@ -170,6 +170,13 @@ def fold_negations(body):
     return body
 
 
+def zero_decl(body):
+    """The declaration of Z, the zero the unfolded negations V_SUB(Z,x) read, when the body
+    still has one; else nothing (folding removes every negation from most codelets)."""
+    import re
+    return "  const vf Z=V_ZERO();\n" if re.search(r"\bZ\b", body) else ""
+
+
 def build(n,radices,name,tw=False,preload=False,prod=False):
     g=Gen(n,name,tw,preload,prod); flip=g.run(radices)
     if (preload or tw or prod) and len(radices)==1: flip=0
@@ -187,7 +194,7 @@ def build(n,radices,name,tw=False,preload=False,prod=False):
     else:
         args="vf*restrict ar,vf*restrict ai,vf*restrict br,vf*restrict bi,const long S"
     sig=("static inline int %s(%s){\n"
-         "  const vf Z=V_ZERO();\n%s\n%s\n  return %d;\n}\n")%(name,args,cdefs,body,flip)
+         "%s%s\n%s\n  return %d;\n}\n")%(name,args,zero_decl(body),cdefs,body,flip)
     return sig
 
 
@@ -343,10 +350,9 @@ def build_sr(n,name,tw=False,prod=False,unit=False,inplace=False,sink=False,out_
         body=("  (void)unused_S; const long S=1;\n" +
               ("  (void)S;\n" if inplace else "") +
               ("  (void)unused_DS; const long DS=AP_W;\n" if prod else "") + body)
-    zero_decl = "" if unit else "  const vf Z=V_ZERO();\n"
     prefix = "template <class Sink>\n" if sink else ""
     return prefix + ("static inline int %s(%s){\n  (void)br;(void)bi;\n%s%s\n%s\n  return 0;\n}\n"
-                     )%(name,args,zero_decl,cdefs,body)
+                     )%(name,args,zero_decl(body),cdefs,body)
 
 
 def broadcast_codelet(source):

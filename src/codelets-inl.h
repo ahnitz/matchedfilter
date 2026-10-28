@@ -14,7 +14,6 @@ namespace ap {
 namespace HWY_NAMESPACE {
 
 static inline int fft8_42(vf*restrict ar,vf*restrict ai,vf*restrict br,vf*restrict bi,const long S){
-  const vf Z=V_ZERO();
   const vf c0=V_SET1(0.707106769f);
   vf p0_r=ar[S*0], p0_i=ai[S*0];
   vf p1_r=ar[S*1], p1_i=ai[S*1];
@@ -912,7 +911,6 @@ static inline int fft64_88(vf*restrict ar,vf*restrict ai,vf*restrict br,vf*restr
 }
 
 static inline int fft8_prod(const float*restrict dr,const float*restrict di,const float*restrict tr,const float*restrict ti,vf*restrict ar,vf*restrict ai,vf*restrict br,vf*restrict bi,const long S,const long DS){
-  const vf Z=V_ZERO();
   const vf c0=V_SET1(0.707106769f);
   vf dR0=V_LOADU(dr+DS*0), dI0=V_LOADU(di+DS*0);
   vf tR0=V_LOADU(tr+DS*0), tI0=V_LOADU(ti+DS*0);
@@ -2801,7 +2799,6 @@ static inline int fft64_prod(const float*restrict dr,const float*restrict di,con
 
 static inline int fftsr16(vf*restrict ar,vf*restrict ai,vf*restrict br,vf*restrict bi,const long S){
   (void)br;(void)bi;
-  const vf Z=V_ZERO();
   const vf c0=V_SET1(0.707106769f);
   const vf c1=V_SET1(0.923879504f);
   const vf c2=V_SET1(0.382683426f);
@@ -2941,7 +2938,6 @@ static inline int fftsr16(vf*restrict ar,vf*restrict ai,vf*restrict br,vf*restri
 
 static inline int fftsr16_tw(vf*restrict ar,vf*restrict ai,vf*restrict br,vf*restrict bi,const long S,const float*restrict twr,const float*restrict twi){
   (void)br;(void)bi;
-  const vf Z=V_ZERO();
   const vf c0=V_SET1(0.707106769f);
   const vf c1=V_SET1(0.923879504f);
   const vf c2=V_SET1(0.382683426f);
@@ -3111,7 +3107,6 @@ static inline int fftsr16_tw(vf*restrict ar,vf*restrict ai,vf*restrict br,vf*res
 
 static inline int fftsr32(vf*restrict ar,vf*restrict ai,vf*restrict br,vf*restrict bi,const long S){
   (void)br;(void)bi;
-  const vf Z=V_ZERO();
   const vf c0=V_SET1(0.707106769f);
   const vf c1=V_SET1(0.923879504f);
   const vf c2=V_SET1(0.382683426f);
@@ -3443,7 +3438,6 @@ static inline int fftsr32(vf*restrict ar,vf*restrict ai,vf*restrict br,vf*restri
 
 static inline int fftsr32_tw(vf*restrict ar,vf*restrict ai,vf*restrict br,vf*restrict bi,const long S,const float*restrict twr,const float*restrict twi){
   (void)br;(void)bi;
-  const vf Z=V_ZERO();
   const vf c0=V_SET1(0.707106769f);
   const vf c1=V_SET1(0.923879504f);
   const vf c2=V_SET1(0.382683426f);
@@ -3837,7 +3831,6 @@ static inline int fftsr32_tw(vf*restrict ar,vf*restrict ai,vf*restrict br,vf*res
 
 static inline int fftsr64(vf*restrict ar,vf*restrict ai,vf*restrict br,vf*restrict bi,const long S){
   (void)br;(void)bi;
-  const vf Z=V_ZERO();
   const vf c0=V_SET1(0.707106769f);
   const vf c1=V_SET1(0.923879504f);
   const vf c2=V_SET1(0.382683426f);
@@ -4613,7 +4606,6 @@ static inline int fftsr64(vf*restrict ar,vf*restrict ai,vf*restrict br,vf*restri
 
 static inline int fftsr64_tw(vf*restrict ar,vf*restrict ai,vf*restrict br,vf*restrict bi,const long S,const float*restrict twr,const float*restrict twi){
   (void)br;(void)bi;
-  const vf Z=V_ZERO();
   const vf c0=V_SET1(0.707106769f);
   const vf c1=V_SET1(0.923879504f);
   const vf c2=V_SET1(0.382683426f);
@@ -5515,7 +5507,6 @@ static inline int fftsr64_tw(vf*restrict ar,vf*restrict ai,vf*restrict br,vf*res
 
 static inline int fftsr16_prod(const float*restrict dr,const float*restrict di,const float*restrict tr,const float*restrict ti,vf*restrict ar,vf*restrict ai,vf*restrict br,vf*restrict bi,const long S,const long DS){
   (void)br;(void)bi;
-  const vf Z=V_ZERO();
   const vf c0=V_SET1(0.707106769f);
   const vf c1=V_SET1(0.923879504f);
   const vf c2=V_SET1(0.382683426f);
@@ -5703,7 +5694,6 @@ static inline int fftsr16_prod(const float*restrict dr,const float*restrict di,c
 
 static inline int fftsr32_prod(const float*restrict dr,const float*restrict di,const float*restrict tr,const float*restrict ti,vf*restrict ar,vf*restrict ai,vf*restrict br,vf*restrict bi,const long S,const long DS){
   (void)br;(void)bi;
-  const vf Z=V_ZERO();
   const vf c0=V_SET1(0.707106769f);
   const vf c1=V_SET1(0.923879504f);
   const vf c2=V_SET1(0.382683426f);
@@ -6131,7 +6121,6 @@ static inline int fftsr32_prod(const float*restrict dr,const float*restrict di,c
 
 static inline int fftsr64_prod(const float*restrict dr,const float*restrict di,const float*restrict tr,const float*restrict ti,vf*restrict ar,vf*restrict ai,vf*restrict br,vf*restrict bi,const long S,const long DS){
   (void)br;(void)bi;
-  const vf Z=V_ZERO();
   const vf c0=V_SET1(0.707106769f);
   const vf c1=V_SET1(0.923879504f);
   const vf c2=V_SET1(0.382683426f);
@@ -7098,7 +7087,6 @@ static inline int fftsr64_prod(const float*restrict dr,const float*restrict di,c
 }
 
 static inline int fft8_tw(vf*restrict ar,vf*restrict ai,vf*restrict br,vf*restrict bi,const long S,const float*restrict twr,const float*restrict twi){
-  const vf Z=V_ZERO();
   const vf c0=V_SET1(0.707106769f);
   vf p0_r=ar[0], p0_i=ai[0];
   const vf W1r=V_SET1(twr[1]), W1i=V_SET1(twi[1]);
@@ -8654,7 +8642,6 @@ static inline int fft64_tw(vf*restrict ar,vf*restrict ai,vf*restrict br,vf*restr
 }
 
 static inline int fft8_prod_broadcast(const float*restrict dr,const float*restrict di,const float*restrict tr,const float*restrict ti,vf*restrict ar,vf*restrict ai,vf*restrict br,vf*restrict bi,const long S,const long DS){
-  const vf Z=V_ZERO();
   const vf c0=V_SET1(0.707106769f);
   vf dR0=V_SET1(dr[(DS/AP_W)*0]), dI0=V_SET1(di[(DS/AP_W)*0]);
   vf tR0=V_LOADU(tr+DS*0), tI0=V_LOADU(ti+DS*0);
@@ -10543,7 +10530,6 @@ static inline int fft64_prod_broadcast(const float*restrict dr,const float*restr
 
 static inline int fftsr16_prod_broadcast(const float*restrict dr,const float*restrict di,const float*restrict tr,const float*restrict ti,vf*restrict ar,vf*restrict ai,vf*restrict br,vf*restrict bi,const long S,const long DS){
   (void)br;(void)bi;
-  const vf Z=V_ZERO();
   const vf c0=V_SET1(0.707106769f);
   const vf c1=V_SET1(0.923879504f);
   const vf c2=V_SET1(0.382683426f);
@@ -10731,7 +10717,6 @@ static inline int fftsr16_prod_broadcast(const float*restrict dr,const float*res
 
 static inline int fftsr32_prod_broadcast(const float*restrict dr,const float*restrict di,const float*restrict tr,const float*restrict ti,vf*restrict ar,vf*restrict ai,vf*restrict br,vf*restrict bi,const long S,const long DS){
   (void)br;(void)bi;
-  const vf Z=V_ZERO();
   const vf c0=V_SET1(0.707106769f);
   const vf c1=V_SET1(0.923879504f);
   const vf c2=V_SET1(0.382683426f);
@@ -11159,7 +11144,6 @@ static inline int fftsr32_prod_broadcast(const float*restrict dr,const float*res
 
 static inline int fftsr64_prod_broadcast(const float*restrict dr,const float*restrict di,const float*restrict tr,const float*restrict ti,vf*restrict ar,vf*restrict ai,vf*restrict br,vf*restrict bi,const long S,const long DS){
   (void)br;(void)bi;
-  const vf Z=V_ZERO();
   const vf c0=V_SET1(0.707106769f);
   const vf c1=V_SET1(0.923879504f);
   const vf c2=V_SET1(0.382683426f);
