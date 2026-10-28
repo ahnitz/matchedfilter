@@ -1,4 +1,6 @@
 """The native boundary must reject malformed buffers before any writes."""
+import sys
+
 import numpy as np
 import pytest
 from matchedfilter import _core
@@ -59,3 +61,61 @@ def test_scratch_reuse_and_optional_magnitude(native):
         f.run(0,1,0,1,bs,0.,0,128,*out)
         assert out[0][0]==0
         assert out[1][0]==pytest.approx(128+0j)
+
+
+PEAK=np.dtype([('index',np.int64),('re',np.float32),('im',np.float32)])
+
+
+def buffer_calls(f,data,flat):
+    """(name, method, args) for each binding that takes buffers: a valid call, a call refused
+    after every buffer is taken, and calls with an invalid optional peaks or phase argument."""
+    n=data.size
+    st,ws,we=np.array([0],np.uintp),np.array([0],np.uintp),np.array([n],np.uintp)
+    out,pk,ph=buffers(),np.zeros(n,PEAK),np.zeros(1,np.uint32)
+    yield 'set_data',f.set_data,(0,data)
+    yield 'set_data short',f.set_data,(0,data[:-1])
+    yield 'set_template',f.set_template,(0,data)
+    yield 'set_template row',f.set_template,(1,data)
+    yield 'set_data_batch',f.set_data_batch,(0,data)
+    yield 'set_data_batch range',f.set_data_batch,(1,data)
+    yield 'set_template_batch',f.set_template_batch,(0,data)
+    yield 'set_template_batch partial',f.set_template_batch,(0,data[:-1])
+    yield 'run',f.run,(0,1,0,1,1,0.,0,n,*out)
+    yield 'run peaks',f.run,(0,1,0,1,1,0.,0,n,*out,pk)
+    yield 'run refused',f.run,(0,1,0,1,0,0.,0,n,*out,pk)
+    head=(data,st,ws,we,0,1)
+    yield 'run_series',f.run_series,(*head,1,0.,*out,pk,ph)
+    yield 'run_series refused',f.run_series,(*head,0,0.,*out,pk,ph)
+    yield 'run_series bad phase',f.run_series,(*head,1,0.,*out,pk,ph[:0])
+    yield 'run_series read-only peaks',f.run_series,(*head,1,0.,*out,bytes(16*n),ph)
+    yield 'run_series phase not a buffer',f.run_series,(*head,1,0.,*out,pk,1)
+    if not flat: return
+    # run_series_dif needs two data rows; on this plan's one the engine fails after the checks.
+    yield 'run_series_dif engine fails',f.run_series_dif,(*head,2,0.,*out,pk,0,ph)
+    g=_core.MF(n,2,1)
+    g.set_template(0,data)
+    for d in (0,1):
+        bs=1 if d else 2
+        yield 'run_series_dif %d'%d,g.run_series_dif,(*head,bs,0.,*out,pk,d,ph)
+        yield 'run_series_dif %d refused'%d,g.run_series_dif,(*head,0,0.,*out,pk,d,ph)
+        yield 'run_series_dif %d bad phase'%d,g.run_series_dif,(*head,bs,0.,*out,pk,d,ph[:0])
+        yield 'run_series_dif %d read-only peaks'%d,g.run_series_dif,(*head,bs,0.,*out,
+                                                                     bytes(16*n),d,ph)
+        yield 'run_series_dif %d phase not a buffer'%d,g.run_series_dif,(*head,bs,0.,*out,pk,d,1)
+
+
+def test_every_call_releases_the_buffers_it_takes(native,request):
+    """A buffer taken and not released keeps a reference to its array. Each call, whether
+    it returns or raises, must leave every array argument's reference count where it was."""
+    f,data=native
+    flat=request.node.callspec.params['native']=='flat'
+    outcomes=set()
+    for name,method,args in buffer_calls(f,data,flat):
+        arrays=[a for a in args if isinstance(a,(np.ndarray,bytes))]
+        before=[sys.getrefcount(a) for a in arrays]
+        try:
+            method(*args); outcomes.add('returned')
+        except (ValueError,IndexError,TypeError,BufferError,RuntimeError):
+            outcomes.add('raised')
+        assert [sys.getrefcount(a) for a in arrays]==before,name
+    assert outcomes=={'returned','raised'}
