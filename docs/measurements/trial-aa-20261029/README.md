@@ -12,7 +12,7 @@ G=(); for m in dev2 dev1; do
   [ $m = dev2 ] && G+=("dev2-ladder-lowload=$E@machine=dev2&set=qlad|qladshort"
                        "dev2-replay-solo-lowload=$E@machine=dev2&set=qsolo")
 done
-python tools/trial_power.py "${G[@]}" --nsim 100000 --out report.md
+python tools/trial_power.py "${G[@]}" --nsim 100000 --seed 1 --out docs/measurements/trial-aa-20261029/report.md
 ```
 
 The exact computations (the current rule and the sign tests, by DP) are deterministic. The

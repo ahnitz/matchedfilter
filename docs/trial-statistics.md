@@ -36,32 +36,34 @@ covered; they come in wave 2.
   rounds: on most banks the CPU's challengers are 1.1-2.2x slower, so elimination ends the
   contest at round 3.
 - **The current rule's false-switch rate follows the noise.** With its confirmation, for
-  the two distinct challengers a CPU bank trial has, the rate per contest was:
+  the two distinct challengers a CPU bank trial has, the rate per contest was
+  ([report](measurements/trial-aa-20261029/report.md), "The current rule's false-switch
+  rate"):
 
-  | condition | rate per contest |
-  |---|---|
-  | loaded dev2 | 1.2e-3 to 3.5e-3 |
-  | dev2 at load 3-8 | 2.9e-5 to 5.7e-5 |
-  | the loaded ladders | 1.3e-3 (dev2), 4.1e-4 (dev1) |
-  | dev1 replay | 1.9e-10 |
-  | dev1 with one process | below 1e-12 |
+  | condition | rate per contest | with the contest effect |
+  |---|---|---|
+  | loaded dev2 replay | 2.7e-4 to 9.1e-4 | 0.044-0.057 |
+  | loaded dev2 ladder | 4.7e-4 | 0.018 |
+  | dev2 at load 3-8 | 6.4e-7 to 2.7e-5 | up to 3.4e-4 |
+  | dev1 ladder | 5.0e-4 | 5.0e-4 |
+  | dev1 replay | 4.7e-11 | 1.8e-8 |
+  | dev1 with one process | below 1e-12 | below 1e-12 |
 
-  Its power is 0.06-0.14 for a 5% gain and 0.60-1.0 for a 10% gain. On the logged A/A
+  Its power is 0.02-0.07 for a 5% gain and 0.57-1.0 for a 10% gain. On the logged A/A
   sequences, one contest (before confirmation) switched in 4 of 232 ten-round windows on
-  the dev2 replay, where the model of later rounds gives 0.018 per contest.
+  the dev2 replay, where the model expects 5.0.
 - **An exact sign test has an error rate that does not depend on the noise's spread.** It
   is a group-sequential test of "at least delta faster", computed by DP for the cap, with
   Holm over the live arms. Re-testing a fixed-n sign test every round gives 0.051, 0.099
   and 0.145 at caps 10, 20 and 40 for a nominal 0.05, reproducing the critique; the
   group-sequential boundary holds 0.05.
-- **D8 can be read two ways, and the data separate them.** Measured against the current
-  rule's worst rate (3.5e-3), the sign test of "at least 2% faster" at alpha 1e-2 and cap 20
-  is no looser (9.5e-4 at most), and its power at 5% and 10% is at least the current rule's
-  under every measured null. Measured against the current rule condition by condition, the
-  smallest delta that is no looser everywhere at cap 20 is 3% (alpha 3e-3), and it loses
-  power the current rule has: a 10% gain on the dev1 ladder is found 0.55 of the time
-  against 0.76. No rule tried meets the second reading and keeps the 5% power. The
-  recommendation at the end gives the details.
+- **D8 keeps the current rule.** D8 admits a replacement only if it is no looser than the
+  current rule's measured false-switch rate. No sign test tried (delta 0-5%, alpha 1e-4 to
+  5e-2, caps 20-40) is no looser than it under every group's null and also keeps its power
+  at 5% and 10%; none is no looser under every group once the contest effect is added; and
+  the ones that keep its power cost 10-18 rounds at gain 0 against its 4.4. The current
+  rule's numbers (TIE 5%, the 75% share, minimum 5 and cap 10, confirmation) therefore stay,
+  now with their measured error and power above, instead of standing without a measurement.
 - **A larger error is outside this test's reach.** The pooled bank trial lets the first
   bank it plays decide for the whole job. Replays started at other banks locked q15=0 or
   q15=1 in 28 of 323 (dev2) and 15 of 323 (dev1) runs, and in 8, 7 (dev2 at low load) and 4
@@ -195,14 +197,14 @@ own samples and later rounds by parity. The confirmation draws from later rounds
 
 | group | one contest, m=1 | confirmed, m=1 | confirmed, m=2 | at the CI's upper end | with the contest effect |
 |---|---|---|---|---|---|
-| dev2 replay | 0.026 | 6.2e-4 | 1.2e-3 | 1.8e-3 | 0.044 |
-| dev2 ladder | 0.032 | 6.6e-4 | 1.3e-3 | 5.0e-3 | 0.019 |
-| dev2 replay solo | 0.030 | 1.8e-3 | 3.5e-3 | 0.011 | 0.076 |
-| dev2 ladder, low load | 5.2e-3 | 2.9e-5 | 5.7e-5 | 6.5e-4 | 5.0e-4 |
-| dev2 replay solo, low load | 2.0e-3 | 1.4e-5 | 2.9e-5 | 2.8e-4 | 2.9e-5 |
-| dev1 replay | 1.1e-5 | 9.5e-11 | 1.9e-10 | 7.3e-10 | 3.7e-8 |
-| dev1 ladder | 0.013 | 2.0e-4 | 4.1e-4 | 1.3e-3 | 4.1e-4 |
-| dev1 replay solo | <1e-12 | <1e-12 | <1e-12 | <1e-12 | <1e-12 |
+| dev2 replay | 0.026 | 4.6e-4 | 9.1e-4 | 2.0e-3 | 0.044 |
+| dev2 ladder | 0.032 | 2.4e-4 | 4.7e-4 | 8.2e-3 | 0.018 |
+| dev2 replay solo | 0.030 | 1.4e-4 | 2.7e-4 | 0.015 | 0.057 |
+| dev2 ladder, low load | 5.2e-3 | 1.3e-5 | 2.7e-5 | 3.7e-3 | 3.4e-4 |
+| dev2 replay solo, low load | 2.0e-3 | 3.2e-7 | 6.4e-7 | 1.1e-3 | 6.4e-7 |
+| dev1 replay | 1.1e-5 | 2.3e-11 | 4.7e-11 | 9.0e-10 | 1.8e-8 |
+| dev1 ladder | 0.013 | 2.5e-4 | 5.0e-4 | 4.7e-3 | 5.0e-4 |
+| dev1 replay solo | <1e-12 | <1e-12 | <1e-12 | 2.2e-7 | <1e-12 |
 
 m = 2 is the most common number of distinct challengers in a CPU bank round: n=4096 and
 q15=0. n=model and q15=1 usually run the default's configuration.
@@ -221,8 +223,8 @@ Power with confirmation, cap 10:
 
 | gain | 2% | 5% | 10% |
 |---|---|---|---|
-| worst group | 0.000 | 0.064 | 0.60 |
-| best group | 0.007 | 0.142 | 1.000 |
+| worst group | 0.000 | 0.023 | 0.57 |
+| best group | 0.003 | 0.074 | 0.998 |
 
 A 5% gain sits on the tie, so the rule finds it about one time in ten. Raising the cap to 40
 lifts the 10% power under the dev2 ladder null from 0.67 to 0.92 (dev1 ladder: 0.76 to
@@ -252,39 +254,12 @@ that rejects, at the cap, or when no later boundary can be reached (exact futili
   Without a futility boundary both run every contest to the cap, a clear loser's too (20
   rounds against 3-4), and their rates far below 1e-3 cannot be verified by simulation.
 
-The D8 table puts each sign test against the current rule's measured rate under every
-group's null ("every") and against the worst group's rate, 3.5e-3 ("worst"). "Keeps power"
-means its power at 5% and 10% is at least the current rule's under every group's null, to
-within 0.002. Power is given as worst group / best group. "Lost" is the number of rounds a
-challenger runs when it loses every round, which is the usual case on the CPU. The report
-lists every rule that meets "every", and those that meet "worst" and keep the power; a
-selection:
-
-| rule | every | worst | keeps power | power 2% | power 5% | power 10% | rounds at 0 / 5% | lost |
-|---|---|---|---|---|---|---|---|---|
-| current (with confirmation) | - | - | - | 0.000 / 0.007 | 0.064 / 0.142 | 0.60 / 1.00 | 4.4 / 5.4 | 3 |
-| sign, delta 1.5%, alpha 1e-2, cap 20 | no | yes | yes | 0.001 / 0.39 | 0.160 / 1.00 | 0.71 / 1.00 | 7.1 / 13.6 | 4 |
-| sign, delta 2%, alpha 1e-2, cap 20 | no | yes | yes | 0.001 / 0.008 | 0.087 / 1.00 | 0.68 / 1.00 | 6.8 / 13.2 | 4 |
-| sign, delta 2%, alpha 3e-3, cap 30 | no | yes | yes | 0.000 / 0.002 | 0.063 / 1.00 | 0.78 / 1.00 | 10.1 / 20.1 | 6 |
-| sign, delta 2%, alpha 1e-4, cap 20 | yes | yes | no | 0.000 / 0.000 | 0.004 / 0.88 | 0.18 / 0.99 | 3.7 / 16.1 | 2 |
-| sign, delta 3%, alpha 3e-3, cap 20 | yes | yes | no | 0.000 / 0.000 | 0.014 / 0.99 | 0.43 / 1.00 | 4.8 / 13.4 | 3 |
-| sign, delta 3%, alpha 3e-3, cap 30 | yes | yes | no | 0.000 / 0.000 | 0.018 / 1.00 | 0.70 / 1.00 | 9.2 / 20.8 | 6 |
-| sign, delta 3%, alpha 5e-3, cap 30 | yes | yes | no | 0.000 / 0.001 | 0.030 / 1.00 | 0.80 / 1.00 | 10.7 / 21.2 | 7 |
-| sign, delta 5%, alpha 3e-3, cap 20 | yes | yes | no | 0.000 / 0.000 | 0.000 / 0.003 | 0.15 / 0.99 | 4.5 / 6.6 | 3 |
-
-Group by group, the current rule against the two rules of the recommendation (rate at gain
-0 for two equal challengers; power at 5% and 10%):
-
-| group | current | 5% | 10% | delta 2%, alpha 1e-2 | 5% | 10% | delta 3%, alpha 3e-3 | 5% | 10% |
-|---|---|---|---|---|---|---|---|---|---|
-| dev2 replay | 1.2e-3 | 0.071 | 0.635 | 9.5e-4 | 0.142 | 0.681 | 2.7e-5 | 0.032 | 0.427 |
-| dev2 ladder | 1.3e-3 | 0.066 | 0.666 | 2.6e-4 | 0.183 | 0.812 | 5.2e-6 | 0.018 | 0.609 |
-| dev2 replay solo | 3.5e-3 | 0.064 | 0.601 | 2.6e-4 | 0.087 | 0.909 | 1.8e-6 | 0.014 | 0.647 |
-| dev2 ladder, low load | 5.7e-5 | 0.066 | 0.983 | 6.7e-5 | 0.287 | 1.000 | 7.8e-7 | 0.059 | 0.960 |
-| dev2 replay solo, low load | 2.9e-5 | 0.142 | 0.959 | 8.7e-7 | 0.910 | 1.000 | 4.6e-10 | 0.765 | 0.982 |
-| dev1 replay | 1.9e-10 | 0.065 | 0.998 | 1.9e-6 | 0.871 | 1.000 | 9.6e-11 | 0.352 | 0.999 |
-| dev1 ladder | 4.1e-4 | 0.084 | 0.760 | 2.8e-4 | 0.140 | 0.827 | 1.1e-5 | 0.034 | 0.550 |
-| dev1 replay solo | <1e-12 | 0.112 | 1.000 | <1e-12 | 0.998 | 0.998 | <1e-12 | 0.985 | 0.986 |
+The D8 table in the [report](measurements/trial-aa-20261029/report.md) puts each sign test
+against the current rule's measured rate under every group's null ("every") and against the
+worst group's rate ("worst"), both also with the contest effect added. "Keeps power" means its
+power at 5% and 10% is at least the current rule's under every group's null, with no
+tolerance. Its verdict is summarised in the decision below: no rule both meets "every" and
+keeps the power, and none meets "every" with the contest effect.
 
 The full table, and the sign, t and Wilcoxon tables per group, are in the report that
 `tools/trial_power.py` writes.
@@ -304,57 +279,23 @@ dev1 a round costs twice as much; its test27 job length was not measured here. A
 boundary on "slower than the preference" would decouple a loser's rounds from the cap. No
 candidate here has one.
 
-## Recommendation (for the user's decision under D8)
+## Decision under D8: the current rule stays
 
-Replace the 75% share and the confirmation with the exact group-sequential sign test of "at
-least delta faster", with Holm over the live arms, minimum 5 as now. The choice of delta and
-alpha depends on how D8's "the current measured false-switch rate" is read, because the
-current rule has no single rate: its rate follows the noise, from below 1e-12 on a quiet
-dev1 to 3.5e-3 on a loaded dev2.
+The tables in the [report](measurements/trial-aa-20261029/report.md) were regenerated after
+two corrections from review: a confirmation's null draws from the later rounds only (it had
+mixed a process's first rounds, the noisiest, back in), and a rule keeps the current rule's
+power only if it is short nowhere (a 0.002 tolerance with no origin was removed). With them:
 
-**Recommended: delta 2%, alpha 1e-2 per contest, cap 20.** This reads D8 as the current
-rule's measured worst rate.
+- Every exact sign test that keeps the current rule's power at 5% and 10% is looser than the
+  current rule under at least one group's null.
+- Every test that is no looser under every group loses power the current rule has (for
+  example delta 3%, alpha 3e-3, cap 30: 0.034 short at 5% on the dev2 ladder).
+- None is no looser under every group with the contest effect added.
+- The candidates that keep power need 10-18 rounds at gain 0, against 4.4.
 
-- Its largest rate under any measured null is 9.5e-4 (dev2 replay), below the current
-  rule's 3.5e-3, and below the current rule's own rate in that group (1.2e-3).
-- Its power at 5% and 10% is at least the current rule's under every measured null (to
-  within 0.002): 5% 0.087-1.0 against 0.064-0.142, 10% 0.68-1.0 against 0.60-1.0. On the
-  ladders, the production-like consumer, a 5% gain is found 0.14-0.29 of the time against
-  0.07-0.08, and a 10% gain 0.81-1.0 against 0.67-0.98.
-- A clear loser runs 4 rounds against 3: about 0.2 s more on a loaded dev2 ladder job.
-- Where it is looser than the current rule, both rates are far below 1e-3: the low-load
-  dev2 ladder (6.7e-5 against 5.7e-5) and the dev1 replay (1.9e-6 against 1.9e-10).
-- delta 1.5% at the same alpha has more power (5%: 0.16-1.0) at a larger worst rate
-  (2.0e-3).
-
-**If D8 is read condition by condition: delta 3%, alpha 3e-3, cap 20.** alpha 3e-3 is just
-below the current rule's worst rate. At that alpha and cap, 3% is the smallest delta tried
-(0 to 5% in steps of 0.5-1%) whose rate at gain 0 is no larger than the current rule's under
-every measured null; smaller deltas meet it only at alpha 1e-4 (delta 2%, 2.5%), with less
-power still (delta 2%: a 10% gain found 0.18-0.99 of the time). On the dev1 replay the
-test's rate is 9.6e-11 against 1.9e-10, though not with the contest effect added (5.4e-7
-against 3.7e-8). It costs what the current rule costs (3 rounds for a clear loser; 4.8 at
-gain 0, against 4.4). But it gives up power the current rule has:
-
-- a 5% gain is found 0.014-0.059 of the time on the loaded groups and the ladders, against
-  0.064-0.084;
-- a 10% gain is found 0.43 and 0.61 of the time on the loaded dev2 replay and ladder,
-  against 0.64 and 0.67, and 0.55 on the dev1 ladder, against 0.76.
-
-No rule tried meets this reading and keeps the current rule's 5% power. Keeping its 10%
-power needs cap 30, 6-7 rounds for a clear loser (delta 3% at alpha 5e-3: 10% power
-0.80-1.0), about 1.2-1.4 s of a loaded dev2 ladder job.
-
-Under either reading, a delta below about 2% is not resolvable on a loaded node:
-
-- the order and first-round leans are 1-3% on dev2, and the A/A arm was up to 8% faster in
-  a ladder's first round;
-- the A/A spread alone puts an equal arm below 0.98 in 33-48% of dev2's rounds (22% on the
-  dev1 replay).
-
-Either way, the relevance problem above, where the first bank decides for the job, is
-larger than the statistical errors measured here. It belongs to the step 7 design (which
-work a trial samples) or to step 3, not to alpha.
+So the current rule is kept. What this step changes is that its factors now have a measured
+basis: the false-switch rate and power under every measured null, from the A/A arm, and the
+tool that regenerates them (`tools/trial_power.py`) for any new collection.
 
 ## Not covered
 
