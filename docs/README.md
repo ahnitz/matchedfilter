@@ -71,6 +71,10 @@ that and that every link resolves.
   newest sections lead, the rest run in date order from 2026-09-26): the one simulation, the
   budget split's selection bias (the same at every fd, and half the cut) and per-plan
   scatter, the retired tables, chain and block-size trials, and the joint trial.
+- [A/A rounds: the paired rule's error and power on the CPU](trial-statistics.md)
+  (2026-10-29): the null of a paired round measured with an A/A arm (`MF_TRIAL_AA_LOG`) on
+  dev2 and dev1, the current rule's false-switch rate, and the error and power of
+  group-sequential sign, t and Wilcoxon rules, as support for the D8 decision.
 - [Cleanup, robustness and CI plan](robustness-plan.md) (adopted 2026-10-21, with its log).
 - [Unification plan](unification-plan.md) (started 2026-10-15, with its log): the shared GPU
   host layer, accounting instead of cost tables, knobs instead of variants.
@@ -171,6 +175,7 @@ that and that every link resolves.
 - Measurement directories, each with its README: [gate execution order](measurements/cpu-gate-order-20261015/README.md),
   [Q15 tail packing](measurements/cpu-q15-tail-20261014/README.md),
   [CPU trial reliability](measurements/cpu-trial-reliability-20261015/README.md),
+  [A/A rounds of the CPU joint trial](measurements/trial-aa-20261029/README.md),
   [shared-subspace screening](measurements/cpu-work-avoidance-20261014/README.md),
   and the PyCBC fleet benchmarks of 2026-09-27 and 09-28:
   [alpha6](measurements/pycbc-alpha6-fleet-20260927/README.md),

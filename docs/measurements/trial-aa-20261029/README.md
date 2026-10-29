@@ -1,0 +1,57 @@
+# A/A rounds of the CPU joint trial, 2026-10-29
+
+`rounds.jsonl.gz` holds every round and lock that `MF_TRIAL_AA_LOG` logged in the collection
+that [the trial statistics log](../../trial-statistics.md) analyses. It has 9005 rounds, 1247
+locks and 1216 job records. The page's tables are regenerated from it with:
+
+```bash
+E=docs/measurements/trial-aa-20261029/rounds.jsonl.gz
+G=(); for m in dev2 dev1; do
+  G+=("$m-replay=$E@machine=$m&set=eq|full|offs|long" "$m-ladder=$E@machine=$m&set=lad|ladshort"
+      "$m-replay-solo=$E@machine=$m&set=solo")
+done
+python tools/trial_power.py "${G[@]}" --nsim 100000 --out report.md
+```
+
+The exact computations (the current rule and the sign tests, by DP) are deterministic. The
+paired t and Wilcoxon rows are simulated with `--seed 1`.
+
+## Provenance
+
+The library was at f634aeae, the A/A diagnostic's commit on a7df139e. dev1 runs used the
+tree shipped by the fleet helper and built there. GPUs were hidden
+(`VK_ICD_FILENAMES=/nonexistent/icd.json`). Every process was single-threaded
+(`OMP_NUM_THREADS=1`), ran without `MF_COST_FILE` unless the set says otherwise, and was
+pinned to one core.
+
+- **dev2** is the Ryzen AI MAX+ 395 (Zen 5, AVX-512), cores 28-31, with 4 jobs at a time.
+  Those cores are the SMT siblings of cores 12-15. Another workstream was assigned those
+  cores, and other processes ran on them during the collection. The 1-minute load was 11-38 in the rounds (10.5-36 at job starts and ends).
+- **dev1** is the Ryzen 9 5950X (Zen 3, AVX2), cores 8-15, with 8 jobs at a time. Its load
+  was 1-8 in the rounds (0.8-9 at job starts and ends), and nearly all of it was these jobs.
+
+| set | what ran | per host |
+|---|---|---|
+| `eq` | the full cap67 replay (`replay_calls2.py`, 12 calls per bank) from copies of one seeded cost file without locks, A/A on; the A/A-off twins logged nothing | 12 |
+| `full` | the full cap67 replay, no cost file | 24 |
+| `offs` | the replay started at bank offset 0..322 (the order rotated), 2 banks | 323 |
+| `long` | as `offs` at every third offset, 4 banks, `MF_TRIAL_ROUNDS=40` (contests of about 21 rounds) | 108 |
+| `solo` | as `offs` at every fourth offset, one job at a time on one core (the control for the collection's own load) | 81 |
+| `lad` | the test27 CPU ladder at production length (`tools/ladder.py --device cpu --tops 27 --segments 28 --pipeline --pure`, the production bank and H1 profiles): 4 (dev2) or 8 (dev1) at the default schedule, then as many at `MF_TRIAL_ROUNDS=100` (51-round contests) | 8 / 16 |
+| `ladshort` | the same ladder cut to `--tops 1 --segments 4`: the same first fine batches, so the same trial rounds | 24 / 48 |
+
+The `offs`/`long`/`solo` harness is `replay_calls2.py` with a starting offset. The capture is
+the test67 job's banks, references and series (`tools/setup_capture.py`).
+
+## Fields
+
+Round and lock records are as `_choice` writes them (see `docs/environment.md`,
+`MF_TRIAL_AA_LOG`), with three changes:
+
+- `ratios`, `aa_ratio` and `what` are dropped, because they can be derived;
+  `tools/trial_power.py` derives the ratios from `times` and `A/A`.
+- `machine` and `set` are added.
+- `_file` (`<machine>/<set>/<job>`) is added, naming the process's own log.
+
+Job records (`event: job`) carry each process's core, wall time, load at its start and end,
+and exit status. All 1216 jobs exited with status 0.
