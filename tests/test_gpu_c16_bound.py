@@ -94,7 +94,7 @@ def _layout_values(ctx, layout, B, D, T, thr=8.0):
                                     scale=ed if ctx.inplace_feed else 0, rowwin=False)
         slot, groups = coarse_launch(1, nt, layout[1], layout[2], B)
         lst = ctx._x_list("c16 bound", once=True)
-        lst.dispatch(kernel, ctx._x_coarse_groups(kernel, groups), bufs,
+        lst.dispatch(kernel, groups, bufs,
                      (nt, 0, B, slot, B.bit_length() - 1, 1, 0))
         lst.barrier()
         lst.readback(bufs[3], nt * 8)
@@ -113,8 +113,8 @@ def _layout_values(ctx, layout, B, D, T, thr=8.0):
 @pytest.mark.parametrize("B", [64, 256, 1024, 2048])
 def test_every_coarse_layout_bounds_the_exact_maximum(B, monkeypatch):
     """The bound holds, within half its margin, on every layout the measured choice may
-    pick on this GPU (_x_coarse_candidates: subgroup, pairs per group, tiles, twiddle table;
-    CUDA's tensor-core gate with its own kappa), not only the one it picked."""
+    pick on this GPU (_x_coarse_candidates: subgroup, pairs per group, tiles, twiddle table),
+    not only the one it picked."""
     from conftest import gpu_backend, gpu_context
     backend = gpu_backend()
     nt = 128

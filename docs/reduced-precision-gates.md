@@ -29,9 +29,10 @@ screen's error side by side; each kernel's own page has the derivation and the m
 | Q15 screen | CPU, x86 (the first tier) | the int16 transform's maximum | none in the chain; `ap_mf_q15_screen` alone keeps a 5 sqrt(N) LSB margin by default (`ap_mf_set_q15_margin`) | [cpu-q15-gate.md](cpu-q15-gate.md), `src/q15.h` |
 | FP16 gate | CPU, ARM with FP16 vectors (replaces the FP32 tier) | B = \|y16(k')\| (1 + 3u) + κ u rms(y) | κ = 16 (`GATE16_KAPPA`) | [cpu-neon-fp16-gate.md](cpu-neon-fp16-gate.md), `src/gate16.cc` |
 | fp16 coarse tier | GPU (Vulkan, CUDA, Metal; Slang) | B = \|c16\| (1 + 3u) + κ u rms(y) | κ per band, 12.7 / 15.5 at bands 256 / 512 (`C16_KAPPA`, `tools/coarse_layout.py`; Apple builds use their own σ table) | `src/gpu/tierb.slang` (c16Bound) |
-| tensor-core gate | GPU, CUDA (sm_80+) | as the fp16 tier | κ 7.0 / 10.5 at bands 256 / 512 (`COARSE_TC_SIGMA`, `tools/build_ptx.py`) | `src/gpu/coarse_tc.cu` |
 
-u = 2^-11 throughout; rms(y) is the pair's output rms over all lags (Parseval).
+u = 2^-11 throughout; rms(y) is the pair's output rms over all lags (Parseval). CUDA's
+tensor-core gate, a fifth row until 2026-10-29, was never chosen and is deleted
+([cuda-l40s-roofline.md](cuda-l40s-roofline.md), Phase 7).
 
 ## The two forms
 
@@ -57,7 +58,6 @@ u = 2^-11 throughout; rms(y) is the pair's output rms over all lags (Parseval).
 - **Measurement tools:**
   - `tools/gate16_error.py` for the CPU fp16 gate;
   - `tools/c16_sigma.py` and `tools/coarse_layout.py` for the GPU fp16 tier;
-  - `tools/cuda_tc_sigma.py` for the tensor-core gate;
   - `tools/gate_margin.py` for all of them (`--gate q15 gpu-c16 cpu-g16`).
 
 ## What checks it

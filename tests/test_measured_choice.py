@@ -158,9 +158,9 @@ def test_a_forced_layout_is_taken_untimed_unstored_and_must_exist(monkeypatch, t
     raises."""
     from matchedfilter import _coarse
     monkeypatch.setenv("MF_COST_FILE", str(tmp_path / "c.json"))
-    monkeypatch.setenv("MF_COARSE_LAYOUT", "tierb_256_c16p2t2w@16, coarse_tc_512_w4")
+    monkeypatch.setenv("MF_COARSE_LAYOUT", "tierb_256_c16p2t2w@16, tierb_512_c16p2t4")
     assert _coarse.forced_layout(256) == "tierb_256_c16p2t2w@16"
-    assert _coarse.forced_layout(512) == "coarse_tc_512_w4"
+    assert _coarse.forced_layout(512) == "tierb_512_c16p2t4"
     assert _coarse.forced_layout(1024) is None
     assert _coarse.layout_label(256, 2, 2, 1, 16) == "tierb_256_c16p2t2w@16"
     assert _coarse.layout_label(512, 1, 1, 0) == "tierb_512_c16"

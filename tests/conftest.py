@@ -258,8 +258,7 @@ def forced_coarse_layouts(ctx, bands, keep):
     from matchedfilter._coarse import parse_label
     names = []
     for band in bands:
-        hit = [s for s in ctx.coarse_layouts(band)
-               if parse_label(s) is not None and keep(parse_label(s))]
+        hit = [s for s in ctx.coarse_layouts(band) if keep(parse_label(s))]
         if hit:
             names.append(hit[0])
     return ",".join(names)

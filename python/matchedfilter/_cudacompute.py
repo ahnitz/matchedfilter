@@ -61,7 +61,6 @@ class _DeviceShared:
         self.occupancy = {}
         self.labels = {}
         self.c16_flags = {}         # coarse module stem -> [mf_c16_raw address, value]
-        self.tc_persistent = {}     # persistent coarse kernel -> grid cap (blocks)
 
 
 _DEVICE_SHARED = {}
@@ -121,12 +120,6 @@ _MAX_BINS = MAX_BINS          # _gpuhost.MAX_BINS: one limit for every backend
 # ~75 us of host time per fine-stage forward on the L40S.
 _BOUND = threading.local()
 
-
-
-#: Blocks per SM for the persistent tensor-core coarse gate: its block setup (DFT matrices)
-#: amortises over the slots each warp loops through. Measured on the L40S at 131k pairs:
-#: 4-8 best; 16 within 5%.
-_TC_BLOCKS_PER_SM = 8
 
 _PREFETCH = True
 # CUDA graphs for the hierarchical launch sequences.
@@ -749,12 +742,10 @@ class Context(Executor, InputUploads):
             self._modules, self._pipelines = shared.modules, shared.pipelines
             self._occupancy, self._labels = shared.occupancy, shared.labels
             self._c16_flags = shared.c16_flags
-            self._tc_persistent = shared.tc_persistent
             self._shared_modules = True
         else:
             self._modules, self._pipelines, self._occupancy, self._labels = {}, {}, {}, {}
             self._c16_flags = {}
-            self._tc_persistent = {}
             self._shared_modules = False
         self._uploaded = {"data": {}, "tmpl": {}}
 
@@ -1074,11 +1065,8 @@ class Context(Executor, InputUploads):
             fn, wg = self.pipeline(n, "fusedTierB", one_bin=(name == "peaks1"))
             return fn, wg, 4, 1
         if name == "coarse":
-            if len(c.get("layout", ())) > 4:                 # the tensor-core gate
-                fn, wg = self._tc_kernel(n, c["ppg"])
-            else:
-                fn, wg = self.pipeline(n, "fusedTierB", c16=True, ppg=c["ppg"], tile=c["tile"],
-                                       twt=bool(c.get("twt")))
+            fn, wg = self.pipeline(n, "fusedTierB", c16=True, ppg=c["ppg"], tile=c["tile"],
+                                   twt=bool(c.get("twt")))
             self._c16_bound_flag(fn)
             return fn, wg, 4, 1
         if name in ("tier", "tier1", "refine", "refine1"):
@@ -1099,19 +1087,6 @@ class Context(Executor, InputUploads):
         fn, wg, _, _ = self._tierc(n, role)
         return fn, wg
 
-    def _tc_kernel(self, band, wpb):
-        """The tensor-core coarse gate (src/gpu/coarse_tc.cu): one warp per 2-template ragged
-        slot, wpb warps per block, persistent (its grid capped, _x_coarse_groups)."""
-        f = _PTX_DIR / ("coarse_tc_%d_w%d.ptx" % (band, wpb))
-        fn = self._load(f.stem, f, "fusedTierB", 32 * wpb)
-        self._tc_persistent[fn.value] = self.sm_count * _TC_BLOCKS_PER_SM
-        return fn, 32 * wpb
-
-    def _x_coarse_groups(self, kernel, groups):
-        """A persistent kernel's grid is capped: its warps loop over slots."""
-        cap = self._tc_persistent.get(kernel[0].value)
-        return min(groups, cap) if cap else groups
-
     @staticmethod
     def _x_has_c16(band):
         return _shipped(f"tierb_{band}_c16") is not None
@@ -1129,9 +1104,8 @@ class Context(Executor, InputUploads):
         raise ValueError(name)
 
     def _x_coarse_candidates(self, band):
-        """Every coarse layout (subgroup 0: the warp, ppg, tile, twt) shipped at this band --
-        a missing build is skipped -- then the tensor-core gate, a fifth field marking it
-        ("tc"), on devices with tensor cores (compute capability 8.0 or later)."""
+        """Every coarse layout (subgroup 0: the warp, ppg, tile, twt) shipped at this band; a
+        missing build is skipped."""
         cands = []
         for tile in (1,) + TILE_PROBE:
             for ppg in (1, 2, 4, 8, 16):
@@ -1141,9 +1115,6 @@ class Context(Executor, InputUploads):
                     if _shipped(self._stem(band, "fusedTierB", c16=True, ppg=ppg, tile=tile,
                                            twt=bool(twt))):
                         cands.append((0, ppg, tile, twt))
-        for wpb in (2, 4):
-            if (_PTX_DIR / ("coarse_tc_%d_w%d.ptx" % (band, wpb))).is_file() and self.cc >= (8, 0):
-                cands.append((0, wpb, 2, 0, "tc"))
         return cands
 
     def _x_time(self, native, binds, reps):

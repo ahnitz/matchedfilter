@@ -16,7 +16,7 @@ def package(tmp_path, monkeypatch):
         (tmp_path / folder / "manifest.json").write_text('{"source_hashes": {"unchanged": "1"}}')
     (tmp_path / "spirv" / "tierb.spv").write_bytes(b"spirv")
     (tmp_path / "ptx" / "tierb.ptx").write_bytes(b"ptx")
-    (tmp_path / "ptx" / "coarse_tc_256_w2.ptx").write_bytes(b"tensor core")
+    (tmp_path / "ptx" / "compact_peaks.ptx").write_bytes(b"cuda only")
     (tmp_path / "metal" / "tierb.metal").write_bytes(b"source")
     monkeypatch.setattr(_kernel_id, "__file__", str(tmp_path / "_kernel_id.py"))
     _kernel_id.gpu_kernel_id.cache_clear()
@@ -33,7 +33,7 @@ def stamp(monkeypatch):
 def test_cuda_only_rebuild_changes_only_cuda_identity(package, stamp):
     stamp(package)
     before = {b: _kernel_id.gpu_kernel_id(b) for b in _kernel_id.BACKENDS}
-    (package / "ptx" / "coarse_tc_256_w2.ptx").write_bytes(b"new compiler or generated constants")
+    (package / "ptx" / "compact_peaks.ptx").write_bytes(b"new compiler or generated constants")
     stamp(package, ("cuda",))
     _kernel_id.gpu_kernel_id.cache_clear()       # a later process reads the rebuilt install
     after = {b: _kernel_id.gpu_kernel_id(b) for b in _kernel_id.BACKENDS}
@@ -67,7 +67,7 @@ def test_normal_startup_does_not_read_kernel_bank(package, stamp, monkeypatch):
 
 def test_legacy_manifest_uses_actual_programs(package):
     before = _kernel_id.gpu_kernel_id("cuda")
-    (package / "ptx" / "coarse_tc_256_w2.ptx").write_bytes(b"changed")
+    (package / "ptx" / "compact_peaks.ptx").write_bytes(b"changed")
     _kernel_id.gpu_kernel_id.cache_clear()
     assert _kernel_id.gpu_kernel_id("cuda") != before
 

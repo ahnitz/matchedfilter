@@ -221,7 +221,8 @@ with one compiler, so that a rebuild of unchanged source reproduces them byte fo
   `tools/build_ptx.py` refuse any other version (`build_spirv.SLANGC_VERSION`;
   `MF_SLANGC_ANY_VERSION=1` overrides, for experiments only).
 - **NVRTC 12.8.93** (pip `nvidia-cuda-nvrtc-cu12==12.8.93`; `MF_NVRTC`), with the CUDA 12
-  headers on `MF_CUDA_PATH`/include (`cuda_fp16.h` for `src/gpu/coarse_tc.cu`).
+  headers on `MF_CUDA_PATH`/include (`cuda_fp16.h`, which Slang's CUDA prelude includes for the
+  fp16 kernels).
 
     MF_SLANGC=.../slang-2026.18.2/bin/slangc MF_CUDA_PATH=<dir with include/cuda_fp16.h> \
         python tools/build_ptx.py && python tools/build_spirv.py
