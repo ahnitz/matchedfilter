@@ -63,8 +63,9 @@ def context(fail=None, limits=(1024, 1024)):
     (None, (1024, 1024)), (None, (32, 1024)),
     ('function', (1024, 1024)), ('pipeline', (1024, 1024)),
     ('fallback', (32, 1024)), (None, (32, 32))])
-def test_pipeline_ownership(fail, limits):
+def test_pipeline_ownership(fail, limits, monkeypatch):
     c = context(fail, limits)
+    monkeypatch.setattr(M, "_threads", lambda stem: 64)   # the kernel's recorded group
     if fail or limits == (32, 32):
         with pytest.raises((M.MetalError, M.UnsupportedSize)):
             c.pipeline(1024)

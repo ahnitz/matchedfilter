@@ -2,16 +2,16 @@
 
 n = WG * R: a workgroup of WG threads each holding R points.  R is 16 up to
 n=16384 and then 32 and 64, because a workgroup is capped at 1024 threads.
-R is not one number in one place -- it is compiled into the SPIR-V, mirrored
-by the Metal host (which dispatches an explicit threadgroup size), and
-assumed by the index mapping.  Three copies that must agree.
+R is set in one place, tools/kernel_variants.py, compiled into every
+backend's kernels, and read back from each built kernel into its manifest,
+which the Metal and CUDA hosts dispatch their explicit group sizes from.
+The index mapping assumes it too.
 
 None of that fails loudly when it drifts.  A wrong threadgroup size launches
 the wrong shape rather than refusing to launch, and a wrong index mapping
 reports a real peak at the wrong sample -- both survive a benchmark and a
 "does it run" test.  So they are pinned here.
 """
-import json
 import pathlib
 import sys
 
@@ -20,12 +20,10 @@ import pytest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "tools"))
 
 import matchedfilter as mf                                  # noqa: E402
-import build_spirv                                          # noqa: E402
+import kernel_variants                                      # noqa: E402
 import gpu_regmodel                                         # noqa: E402
 import gpu_tierc_model                                      # noqa: E402
-from matchedfilter import _mtlcompute                       # noqa: E402
-
-MANIFEST = (pathlib.Path(mf.__file__).parent / "spirv" / "manifest.json")
+from matchedfilter import _kernels                          # noqa: E402
 
 
 def test_regmodel_reproduces_every_built_length():
@@ -50,44 +48,49 @@ def test_regmodel_reproduces_every_built_length():
 
 def test_the_model_covers_exactly_what_is_built():
     """A length that ships without a modelled case is unchecked above."""
-    assert {n for n, _ in gpu_regmodel.CASES} == set(build_spirv.TIER_B)
+    assert {n for n, _ in gpu_regmodel.CASES} == set(kernel_variants.TIER_B)
 
 
 def test_gpu_sizes_match_the_build():
     """_GPU_SIZES is what device="gpu" checks before building a plan.
 
-    If it disagrees with TIER_B, the library either refuses a length whose
+    If it disagrees with kernel_variants.TIER_B, the library either refuses a length whose
     kernel is sitting in the wheel, or accepts one that is not there and
     fails at pipeline creation instead of at the call.
     """
-    assert set(mf._filter._GPU_SIZES) == set(build_spirv.TIER_B)
+    assert set(mf._filter._GPU_SIZES) == set(kernel_variants.TIER_B)
 
 
-@pytest.mark.parametrize("n", sorted(set(build_spirv.TIER_B)))
+@pytest.mark.parametrize("n", sorted(set(kernel_variants.TIER_B)))
 def test_compiled_workgroup_is_n_over_radix(n):
     """What the SPIR-V actually declares, not what the source intended."""
-    mods = json.loads(MANIFEST.read_text())["modules"]
-    if str(n) not in mods:
+    rec = _kernels.record("vulkan", "tierb_%d" % n) or _kernels.record("vulkan", "tierb_%d_lds32" % n)
+    if rec is None:
         pytest.skip("no module for n=%d" % n)
-    radix = build_spirv.RADIX.get(n, 16)
-    assert mods[str(n)]["local_size"][0] == n // radix
+    radix = kernel_variants.radix(n)
+    assert rec["local_size"][0] == n // radix
     assert n // radix <= 1024, (
         "n=%d at R=%d wants %d threads; a workgroup is capped at 1024"
         % (n, radix, n // radix))
 
 
-@pytest.mark.parametrize("n", sorted(set(build_spirv.TIER_B)))
-def test_metal_host_agrees_with_the_compiled_threadgroup(n):
-    """Metal dispatches the threadgroup size from the host.
+@pytest.mark.parametrize("n", sorted(set(kernel_variants.TIER_B)))
+def test_every_backend_builds_the_same_threadgroup(n):
+    """Metal and CUDA dispatch the group size their manifest records for a kernel.
 
-    Vulkan reads it out of the module, so a mismatch there is impossible;
-    Metal does not, so this is the only thing standing between a wrong
-    RADIX entry and a wrongly shaped launch on Apple hardware.
+    Vulkan reads it out of the module, so a mismatch there is impossible; Metal and CUDA
+    launch whatever the host passes, so a manifest that disagreed with the SPIR-V build
+    would be a wrongly shaped launch on that hardware.
     """
-    mods = json.loads(MANIFEST.read_text())["modules"]
-    if str(n) not in mods:
+    sizes = {}
+    for backend in ("vulkan", "metal", "cuda"):
+        rec = (_kernels.record(backend, "tierb_%d" % n)
+               or _kernels.record(backend, "tierb_%d_lds32" % n))
+        if rec is not None:
+            sizes[backend] = rec["local_size"][0]
+    if not sizes:
         pytest.skip("no module for n=%d" % n)
-    assert n // _mtlcompute._radix(n) == mods[str(n)]["local_size"][0]
+    assert set(sizes.values()) == {n // kernel_variants.radix(n)}, sizes
 
 
 #: Tier C is not implemented. The decomposition it will be built from is,

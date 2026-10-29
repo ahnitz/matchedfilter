@@ -16,7 +16,7 @@ EXTENSIONS = {"_core"}
 
 #: Lowest first. A module not listed fails the test (place it when adding it).
 LAYERS = (
-    ("foundation", {"_config", "_errors", "_kernel_dirs", "_kernel_id", "_series", "_gpu_cache",
+    ("foundation", {"_config", "_errors", "_kernel_dirs", "_kernel_id", "_kernels", "_series", "_gpu_cache",
                     "_gputime", "_coarse", "_shared", "_execution_policy", "_choice",
                     "_costfile", "_results", "_windows", "_peaks", "_settings"}),
     ("platform", {"_cuda", "_metal", "_vulkan", "device", "_vksubgroup"}),

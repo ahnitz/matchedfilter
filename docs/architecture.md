@@ -109,11 +109,15 @@ released on every path, which `tests/test_native_buffers.py` checks by reference
 ### GPU kernels
 
 GPU kernels are written in Slang (`src/gpu/*.slang`). They are compiled ahead of time and shipped:
-SPIR-V and Metal sources by `tools/build_spirv.py`, PTX by `tools/build_ptx.py`, into
-`python/matchedfilter/spirv/`, `metal/` and `ptx/`. No PTX module declares more than the 48 KB
-of static shared memory CUDA allows a block (such a module launches on no NVIDIA GPU, so
-`build_ptx` does not ship it); where a kernel's staging is the reason, its 32 KB staging build
-(`_lds32`) serves that length. `_kernel_dirs.shipped` decides which
+SPIR-V, Metal sources and PTX by one generator, `tools/kernel_variants.py`, into
+`python/matchedfilter/spirv/`, `metal/` and `ptx/`, each with a manifest of the same schema: per
+kernel stem, its file, entry point, build facts and the facts read back from the artifact (local
+size, workgroup memory; for SPIR-V its descriptors and push-constant bytes) and its digest. The
+hosts read every kernel fact from it through `_kernels` and restate none; CI checks that the
+shipped files and manifests are exactly what the generator makes. No PTX module declares more
+than the 48 KB of static shared memory CUDA allows a block (such a module launches on no NVIDIA
+GPU, so the build does not ship it); where a kernel's staging is the reason, its 32 KB staging
+build (`_lds32`) serves that length. `_kernel_dirs.shipped` decides which
 directories a platform's wheel carries (SPIR-V everywhere, PTX off macOS, Metal on macOS).
 `_kernel_id` gives each backend's shipped programs an identity, which the stored kernel
 choices include in their keys, so a build with other kernels measures afresh.

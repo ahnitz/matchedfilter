@@ -17,13 +17,12 @@ synchronization that completes it, ``(label, device_ms)`` is appended to
 """
 import ctypes
 import struct
-import pathlib
 import threading
 
 import numpy as np
 
 from ._coarse import TILE_PROBE
-from . import _config, _cuda, _gputime
+from . import _config, _cuda, _gputime, _kernels
 from ._cuda import check_cuda
 from ._errors import UnsupportedSize
 from ._gpu_cache import InputUploads
@@ -96,22 +95,7 @@ class _Write:
             self.event = None
 
 
-_HERE = pathlib.Path(__file__).resolve().parent
-_PTX_DIR = _HERE / "ptx"
-_MANIFEST = _PTX_DIR / "manifest.json"
-
-_manifest_cache = None
-
-
-def _manifest():
-    """Build manifest for the PTX kernels."""
-    global _manifest_cache
-    if _manifest_cache is None:
-        import json
-        _manifest_cache = (
-            json.loads(_MANIFEST.read_text()) if _MANIFEST.is_file() else {}
-        )
-    return _manifest_cache
+_PTX_DIR = _kernels.folder("cuda")
 
 
 _MAX_BINS = MAX_BINS          # _gpuhost.MAX_BINS: one limit for every backend
@@ -132,23 +116,15 @@ _CPU_DEVICE = -1
 
 
 def _shipped(stem):
-    """The path of the PTX module that serves `stem`, or None when none ships.
+    """The manifest record of the PTX module that serves `stem`, or None when none ships.
 
     That is the stem's own build or, where its staging needs more than the 48 KB of static
-    shared memory CUDA allows a block (tools/build_ptx.py ships no module past it), the same
+    shared memory CUDA allows a block (tools/kernel_variants.py builds no module past it), the same
     kernel built with 32 KB staging (`<stem>_lds32`), which computes the same transform in
     more exchange passes. The limit is checked where modules are built and by
     tests/test_cuda.py, not here: a module past it put in ptx/ by hand is served, and fails
     in cuModuleLoadData rather than falling back to its _lds32 build."""
-    for name in (stem, stem + "_lds32"):
-        path = _PTX_DIR / f"{name}.ptx"
-        if path.is_file():
-            return path
-    return None
-
-
-def _radix(n):
-    return {32768: 32, 65536: 64}.get(n, 16)
+    return _kernels.record("cuda", stem) or _kernels.record("cuda", stem + "_lds32")
 
 
 #: The per-row window table argument every fusedTierB and refineListedBounded launch ends with
@@ -909,38 +885,34 @@ class Context(Executor, InputUploads):
             return f"full_{n}"
         if entry == "fullCorrelationSeries":
             return f"full_series_{n}"
-        if one_bin and n >= 4096:
-            return f"tierb_{n}_onebin"
-        return f"tierb_{n}"
+        one = f"tierb_{n}_onebin"
+        return one if (one_bin and _shipped(one)) else f"tierb_{n}"
 
     def pipeline(self, n, entry="fusedTierB", one_bin=False, c16=False, ppg=1, tile=1, twt=False,
                  gate=False):
         """Retrieve or load the compiled PTX kernel function: (function, threads per block).
-        twt: the coarse build with the fp16 twiddle table (tools/build_ptx.py)."""
+        twt: the coarse build with the fp16 twiddle table (tools/kernel_variants.py)."""
         key = (n, entry, one_bin, c16, ppg, tile, twt, gate)
         if key in self._pipelines:
             return self._pipelines[key]
 
-        r = _radix(n)
-        wg = (n // r) * ppg if entry in ("fusedTierB", "refineListed") else (
-            256 if entry in ("compactPairs", "compactListed", "markBlocks", "packCoarse") else (n // r)
-        )
-
         stem = self._stem(n, entry, one_bin=one_bin, c16=c16, ppg=ppg, tile=tile, twt=twt)
         if gate:                                 # the one-bin build's gate-only variant
             stem += "_gate"
-        ptx_file = _shipped(stem)
-        if ptx_file is None:
+        rec = _shipped(stem)
+        if rec is None:
             # A missing variant is not silently replaced by a different one: the
             # PPG/TILE_T are compiled in and the launch geometry depends on them.
             raise UnsupportedSize(f"no PTX kernel for {stem} (n={n}, entry={entry})")
-        stem = ptx_file.stem
-        fn_name = "fusedTierB" if (c16 and entry != "refineListed") else entry
-        if entry == "refineListed":
-            fn_name = "refineListedBounded"      # src/gpu/refine_bounded.slang
-        res = (self._load(stem, ptx_file, fn_name, wg), wg)
+        res = self._load_record(rec)
         self._pipelines[key] = res
         return res
+
+    def _load_record(self, rec):
+        """(function, threads per block) of a manifest record: its entry point at the block
+        size it was built for."""
+        wg = int(rec["local_size"][0])
+        return self._load(rec["file"][:-len(".ptx")], _PTX_DIR / rec["file"], rec["entry"], wg), wg
 
     def _load(self, stem, ptx_file, fn_name, wg):
         """Load (once) a PTX module and return one of its functions."""
@@ -979,21 +951,15 @@ class Context(Executor, InputUploads):
         self._labels[hfunc.value] = stem          # its module, for every Context on the device
         return hfunc
 
-    _TC_ENTRY = {"corr1": "tcStage1", "corr2": "tcFullStage3",
-                 "corr_series2": "tcFullSeriesStage3",
-                 "fwd1": "tcForwardStage1", "fwd2": "tcForwardStage3"}
-
     def _tierc(self, n, role):
-        """A two-stage (Tier C) kernel past 65536: (function, threads, n1, n2)."""
+        """A two-stage (Tier C) kernel past 65536 (role corr1, corr2, corr_series2, fwd1 or
+        fwd2): (function, threads, n1, n2)."""
         key = ("tierc", n, role)
         if key not in self._pipelines:
-            info = _manifest().get("full_tierc", {}).get(str(n))
-            if info is None or role not in info:
+            rec, split = _shipped(f"tc_{role}_{n}"), _kernels.two_stage("cuda", n)
+            if rec is None or split is None:
                 raise UnsupportedSize(f"no two-stage CUDA kernel for n={n}")
-            f = info[role]
-            wg = int(f["local_size"][0])
-            fn = self._load(f["file"][:-4], _PTX_DIR / f["file"], self._TC_ENTRY[role], wg)
-            self._pipelines[key] = (fn, wg, int(info["n1"]), int(info["n2"]))
+            self._pipelines[key] = self._load_record(rec) + split
         return self._pipelines[key]
 
     def _blocks_per_sm(self, fn, wg):
@@ -1033,10 +999,10 @@ class Context(Executor, InputUploads):
     def _compact_peaks(self):
         key = ("compactPeaks",)
         if key not in self._pipelines:
-            f = _PTX_DIR / "compact_peaks.ptx"
-            if not f.is_file():
+            rec = _shipped("compact_peaks")
+            if rec is None:
                 raise UnsupportedSize("compact_peaks.ptx not built")
-            self._pipelines[key] = (self._load("compact_peaks", f, "compactPeaks", 256), 256)
+            self._pipelines[key] = self._load_record(rec)
         return self._pipelines[key]
 
     # ---- flat ------------------------------------------------------------------
@@ -1111,11 +1077,11 @@ class Context(Executor, InputUploads):
         cands = []
         for tile in (1,) + TILE_PROBE:
             for ppg in (1, 2, 4, 8, 16):
-                if ppg > 1 and band // 16 * ppg > 1024:
-                    continue
                 for twt in (0, 1):
-                    if _shipped(self._stem(band, "fusedTierB", c16=True, ppg=ppg, tile=tile,
-                                           twt=bool(twt))):
+                    rec = _shipped(self._stem(band, "fusedTierB", c16=True, ppg=ppg, tile=tile,
+                                              twt=bool(twt)))
+                    # 1024 threads: the most a CUDA block holds on every compute capability.
+                    if rec is not None and rec["local_size"][0] <= 1024:
                         cands.append((0, ppg, tile, twt))
         return cands
 

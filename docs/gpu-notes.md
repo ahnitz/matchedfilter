@@ -22,7 +22,7 @@ been replaced -- what survives is the reasoning and the numbers.
 | | |
 |---|---|
 | `src/gpu/tierb.slang` | the kernel, one source specialised by transform length |
-| `tools/build_spirv.py` | compiles it, reflects the binding contract, writes the manifest |
+| `tools/kernel_variants.py` | compiles it, reflects the binding contract, writes the manifest |
 | `python/matchedfilter/_vkcompute.py` | the Vulkan dispatch, ctypes, no dependencies |
 | `python/matchedfilter/_vulkan.py` | device enumeration, and why a machine reports none |
 | `tools/gpu_decomposition.py` | the transform decomposition, verified before any kernel was written |
@@ -31,7 +31,7 @@ been replaced -- what survives is the reasoning and the numbers.
 ## Shared memory is a portability limit, not a performance dial
 
 The exchange staging is the single biggest performance lever -- see the
-measured table in `tools/build_spirv.py` -- and the fastest setting at
+measured table in `tools/kernel_variants.py` (LDS_CAP) -- and the fastest setting at
 n >= 8192 asks a workgroup for 64 KB. Apple allows 32 KB.
 
 So every size whose preferred staging exceeds 32 KB is built twice, and the

@@ -139,7 +139,7 @@ VARS: Tuple[Var, ...] = (
         usage="MF_SINGLE_DEVICE=bank", kind="choice", choices=("auto", "bank")),
     # Tools, builds and tests
     Var("MF_SLANGC", "tools", "tools", "`slangc` on PATH",
-        "The Slang compiler tools/build_spirv.py and build_ptx.py use."),
+        "The Slang compiler tools/kernel_variants.py uses."),
     Var("MF_SLANGC_ANY_VERSION", "tools", "tools", "0",
         "Build with a slangc other than the pinned version (experiments only).",
         usage="MF_SLANGC_ANY_VERSION=1"),

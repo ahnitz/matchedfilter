@@ -1,36 +1,22 @@
 #!/usr/bin/env python3
-"""Stamp per-backend artifact identities after a full or partial GPU build.
+"""Restamp the kernel identities in the GPU manifests after an external compile (a release
+wheel's Metal libraries): every record's digest fields from the artifacts on disk
+(matchedfilter._kernel_id.stamp).
 
-The runtime reads these small fields instead of hashing tens of MB of PTX. This command
-also handles externally compiled artifacts, such as a release wheel's Metal libraries.
+Run:  python tools/kernel_build_id.py [--backend vulkan|metal|cuda ...]
 """
 import argparse
-import json
 import pathlib
 import runpy
-
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 PACKAGE = ROOT / "python" / "matchedfilter"
 _helper = runpy.run_path(str(PACKAGE / "_kernel_id.py"))
-BACKENDS, artifact_digest = _helper["BACKENDS"], _helper["artifact_digest"]
-
-
-def stamp(package=PACKAGE, backends=tuple(BACKENDS)):
-    package = pathlib.Path(package)
-    manifests = {}
-    for backend in backends:
-        _, _, manifest_dir, field = BACKENDS[backend]
-        path = package / manifest_dir / "manifest.json"
-        if path not in manifests:
-            manifests[path] = json.loads(path.read_text())
-        manifests[path][field] = artifact_digest(package, backend)
-    for path, manifest in manifests.items():
-        path.write_text(json.dumps(manifest, indent=2) + "\n")
+BACKENDS, stamp = _helper["BACKENDS"], _helper["stamp"]
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--backend", action="append", choices=tuple(BACKENDS))
     args = parser.parse_args()
-    stamp(backends=args.backend or tuple(BACKENDS))
+    stamp(PACKAGE, backends=args.backend or tuple(BACKENDS))

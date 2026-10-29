@@ -21,8 +21,7 @@ from matchedfilter._shared import pack_half2
 METAL_DIR = pathlib.Path(matchedfilter.__file__).resolve().parent / "metal"
 if not METAL_DIR.is_dir():
     METAL_DIR = pathlib.Path(__file__).resolve().parents[1] / "python" / "matchedfilter" / "metal"
-MANIFEST = (pathlib.Path(matchedfilter.__file__).resolve().parent
-            / "spirv" / "manifest.json")
+MANIFEST = METAL_DIR / "manifest.json"
 
 pytestmark = pytest.mark.skipif(not METAL_DIR.is_dir(),
                                 reason="no Metal kernels in this install or a checkout beside it")
@@ -30,17 +29,25 @@ pytestmark = pytest.mark.skipif(not METAL_DIR.is_dir(),
 
 @pytest.fixture(scope="module")
 def manifest():
-    return json.loads(MANIFEST.read_text())
+    """The Metal manifest's kernels."""
+    return json.loads(MANIFEST.read_text())["kernels"]
+
+
+def _flat(manifest, n):
+    return manifest.get("tierb_%d" % n) or manifest["tierb_%d_lds32" % n]
 
 
 def test_every_size_has_metal(manifest):
-    """A macOS wheel must carry the same coverage as a Linux one."""
-    for key, info in manifest["modules"].items():
-        assert "metal" in info, "n=%s has no Metal output" % key
-        for entry, files in info["metal"].items():
-            src = METAL_DIR / files["msl"]
-            assert src.is_file(), "%s missing" % src
-            assert src.stat().st_size > 1000, "%s looks empty" % src
+    """A macOS wheel must carry the same coverage as a Linux one: the flat filter and the
+    listed refine at every length the SPIR-V build has, and every kernel its manifest names."""
+    for n in matchedfilter._filter._GPU_SIZES:
+        for role in ("tierb", "refine"):
+            stem = "%s_%d" % (role, n)
+            assert stem in manifest or stem + "_lds32" in manifest, "n=%d has no %s" % (n, role)
+    for stem, rec in manifest.items():
+        src = METAL_DIR / rec["file"]
+        assert src.is_file(), "%s missing" % src
+        assert src.stat().st_size > 1000, "%s looks empty" % src
 
 
 @pytest.mark.parametrize("n", [1024, 4096, 16384])
@@ -52,14 +59,14 @@ def test_the_wave_reduction_is_native(manifest, n):
     source -- so it is worth asserting rather than assuming it stays true
     across upgrades.
     """
-    src = (METAL_DIR / manifest["modules"][str(n)]["metal"]["fusedTierB"]["msl"]).read_text()
+    src = (METAL_DIR / _flat(manifest, n)["file"]).read_text()
     assert "simd_max" in src, "the wave reduction stopped lowering to simd_max"
     assert "simd_is_first" in src
 
 
 @pytest.mark.parametrize("n", [1024, 4096, 16384])
 def test_shared_memory_and_atomics_are_native(manifest, n):
-    src = (METAL_DIR / manifest["modules"][str(n)]["metal"]["fusedTierB"]["msl"]).read_text()
+    src = (METAL_DIR / _flat(manifest, n)["file"]).read_text()
     assert "threadgroup" in src, "no threadgroup storage"
     assert "threadgroup_barrier" in src
     assert "atomic_fetch_max_explicit" in src, \
@@ -69,12 +76,14 @@ def test_shared_memory_and_atomics_are_native(manifest, n):
 @pytest.mark.parametrize("band", [64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384])
 def test_the_fp16_coarse_and_compact_kernels_have_metal(band):
     assert (METAL_DIR / f"tierb_{band}_c16.metal").is_file()
-    assert (METAL_DIR / f"compact_{band}.metal").is_file()
 
 
-@pytest.mark.parametrize("band", [8192, 16384, 32768, 65536])
-def test_compact_portable_kernels_have_metal(band):
-    assert (METAL_DIR / f"compact_{band}_lds32.metal").is_file()
+def test_the_compactions_are_one_kernel_each(manifest):
+    """The survivor compactions use no threadgroup memory and read no length: one build each,
+    as on Vulkan and CUDA (a build per length differed only in its #line file names)."""
+    assert {s for s, r in manifest.items() if r["entry"] in ("compactPairs", "compactListed")} \
+        == {"compact", "compactl"}
+    assert manifest["compact"]["lds_bytes"] == manifest["compactl"]["lds_bytes"] == 0
 
 
 def test_metal_fp16_helpers():
@@ -106,20 +115,21 @@ def test_metal_stem_resolution():
     ctx.name = "Apple M2"
     for band in (64, 128, 256, 512, 1024, 2048, 4096):
         assert ctx._stem(band, "coarse16") == f"tierb_{band}_c16"
-        assert ctx._stem(band, "compactPairs") == f"compact_{band}"
-    # Bands exceeding 32KB on M2 select portable lds32 for compactPairs
-    for band in (8192, 16384, 32768, 65536):
-        assert ctx._stem(band, "compactPairs") == f"compact_{band}_lds32"
+    for band in (64, 4096, 65536):
+        assert ctx._stem(band, "compactPairs") == "compact"
+        assert ctx._stem(band, "compactListed") == "compactl"
+    # Lengths whose flat filter asks for more than 32 KB take its 32 KB build on an M2
+    for n in (8192, 16384, 32768, 65536):
+        assert ctx._stem(n, "fusedTierB") == f"tierb_{n}_lds32"
+        assert ctx._stem(n, "refineListed") == f"refine_{n}_lds32"
 
 
 @pytest.mark.parametrize("n", [2048, 4096, 8192])
 def test_single_bin_artifacts(manifest, n):
-    for entry in ("fusedTierB", "refineListed"):
-        info = manifest["modules"][str(n)]["metal"][entry]["one_bin"]
-        assert info["lds_bytes"] <= 32768
-        assert (METAL_DIR / info["msl"]).stat().st_size > 1000
-        if info["metallib"] is not None:
-            assert (METAL_DIR / info["metallib"]).is_file()
+    for role in ("tierb", "refine"):
+        rec = manifest["%s_%d_onebin" % (role, n)]
+        assert rec["lds_bytes"] <= 32768
+        assert (METAL_DIR / rec["file"]).stat().st_size > 1000
 
 
 @pytest.mark.parametrize("n", [2048, 4096, 8192])
@@ -160,12 +170,10 @@ def test_metallib_presence_is_recorded(manifest):
     manifest claiming one that is not there -- the runtime would then load
     nothing and fail on the user's machine.
     """
-    for info in manifest["modules"].values():
-        for files in info["metal"].values():
-            lib = files.get("metallib")
-            if lib is not None:
-                assert (METAL_DIR / lib).is_file(), \
-                    "manifest claims %s but it is not in the package" % lib
+    for stem, rec in manifest.items():
+        lib = METAL_DIR / (stem + ".metallib")
+        assert ("metallib_sha256" in rec) == lib.is_file(), (
+            "the manifest and the package disagree on %s" % lib.name)
 
 
 def _metal_or_skip():
@@ -189,22 +197,19 @@ def test_the_chosen_metal_kernel_fits_the_device(manifest):
     choose" -- which stopped being true when the portable 32 KB Metal builds
     were added. Metal has two variants at the top sizes and _stem picks
     between them, so there is very much a question here to answer, and the
-    selection reads a manifest field (metal_lds_bytes) that is distinct from
-    the Vulkan one. Getting it wrong does not return a wrong answer, it
+    selection reads the Metal manifest, which is distinct from the Vulkan
+    one. Getting it wrong does not return a wrong answer, it
     fails to create a pipeline at all, and Metal reports that as
     "Compilation failed" naming nothing.
     """
     M = _metal_or_skip()
     ctx = M.Context(0)
     try:
-        for key, info in manifest["modules"].items():
-            n = int(key)
+        for n in sorted(matchedfilter._filter._GPU_SIZES):
             if n < 1024:
                 continue
             stem = ctx._stem(n, "fusedTierB")
-            need = (info.get("metal_lds_bytes", info["lds_bytes"])
-                    if not stem.endswith("_lds32")
-                    else info["metal"]["fusedTierB"]["portable"]["lds_bytes"])
+            need = manifest[stem]["lds_bytes"]
             assert need <= ctx.max_shared_memory, (
                 "n=%d picked %s needing %d KB with %d KB available"
                 % (n, stem, need // 1024, ctx.max_shared_memory // 1024))
@@ -225,9 +230,8 @@ def test_apple_takes_the_full_32kb_staging_where_it_fits(manifest):
     """
     _metal_or_skip()
     for n in (1024, 2048, 4096):
-        info = manifest["modules"][str(n)]
-        assert info["metal_lds_bytes"] <= 32768
-        assert "portable" not in info["metal"]["fusedTierB"], (
+        assert manifest["tierb_%d" % n]["lds_bytes"] <= 32768
+        assert "tierb_%d_lds32" % n not in manifest, (
             "n=%d gained a portable Metal variant; the base build no longer "
             "fits Apple and the CH=16 win is silently gone" % n)
-    assert manifest["modules"]["4096"]["metal_lds_bytes"] == 32768
+    assert manifest["tierb_4096"]["lds_bytes"] == 32768

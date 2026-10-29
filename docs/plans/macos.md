@@ -53,7 +53,7 @@ a loader and the existing SPIR-V runs unchanged.
 3. Measure a cost table for Apple and ship it as `cost-apple.txt`. The
    `gfx11` table does not apply, and falling back to the CPU's would choose
    badly rather than incorrectly.
-4. Re-measure the staging table. `tools/build_spirv.py` holds one measured
+4. Re-measure the staging table. `tools/kernel_variants.py` holds one measured
    on a Radeon; the tradeoff it encodes -- barriers against occupancy -- has
    no reason to land in the same place on Apple hardware.
 

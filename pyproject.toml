@@ -65,7 +65,7 @@ packages = ["matchedfilter"]
 #                  than refuse.
 matchedfilter = ["*.h", "*.txt", "execution-policy.json", "spirv/*.spv", "spirv/manifest.json",
                  "ptx/*.ptx", "ptx/manifest.json",
-                 "metal/*.metal", "metal/*.metallib"]
+                 "metal/*.metal", "metal/*.metallib", "metal/manifest.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

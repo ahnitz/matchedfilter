@@ -141,7 +141,7 @@ jobs:
           python -m pytest -q "$GITHUB_WORKSPACE/tests" -rs --durations=15
 
   generated-files:
-    # Generated CPU codelets are committed and must match their generator.
+    # Generated CPU codelets and GPU kernels are committed and must match their generators.
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -164,6 +164,13 @@ jobs:
           (cd src && python3 gen_q15.py)
           diff -u /tmp/committed-q15.h src/codelets-q15-inl.h \
             || { echo "::error::src/codelets-q15-inl.h is stale; re-run 'python3 src/gen_q15.py'"; exit 1; }
+
+      - name: The GPU kernels and their manifests must be what tools/kernel_variants.py builds
+        # No compiler: every shipped artifact is one the generator makes (none missing, none
+        # extra) and each backend's manifest is the one it writes from them.
+        run: |
+          python3 tools/kernel_variants.py check \
+            || { echo "::error::GPU kernels or manifests are stale; rebuild with 'python3 tools/kernel_variants.py build'"; exit 1; }
 
   wheel:
     # The newest supported interpreter on both release platforms, smoke-tested: the

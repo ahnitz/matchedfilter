@@ -150,7 +150,7 @@ def twiddle_table_source(n):
 if __name__ == "__main__":
     import sys, pathlib
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-    import build_spirv as B
+    import kernel_variants as B
     for n in (64, 128, 256, 512, 1024):
         wg, ch, _ = _geometry(n, B.LDS_CAP[n])
         for ppg in (1, 2, 4, 8, 16):
