@@ -775,7 +775,7 @@ def test_legacy_host_costs_do_not_change_chain_ranking():
     gc = mf.gatechain
     cm = gc.CostModel(
         2048, {256: 10.0, 512: 18.0}, {512: [(0.01, 20.0), (0.1, 18.0)]},
-        [(0.001, 100.0), (0.01, 80.0)], block=300.0, forward=250.0, band_forward=True,
+        [(0.001, 100.0), (0.01, 80.0)], block=300.0, feed={"band": {256: 0.0, 512: 4.0}, "full": 60.0},
         screen={256: {"dense": 6.0, "recheck": 10.0, "excess": [(0.01, 0.02), (0.1, 0.15)]}},
         excess={256: [(0.01, 0.02), (0.1, 0.15)]})
     legacy = dict(cm.to_dict(), host_call=1e20, host_block=1e15)
@@ -792,47 +792,27 @@ def test_legacy_host_costs_do_not_change_chain_ranking():
     assert rank(rt)[0][1] == (256,)
 
 
-def test_forward_priced_per_chain():
-    """Band forwards credit chains that refine few blocks; the backend's own byte rule decides."""
+def test_the_feed_is_priced_by_the_backends_own_rule():
+    """A chain's feed costs its measured per-block change from `block`, spread over the
+    templates: the band forward at its widest band where the backend takes it -- its byte rule
+    on the chain's modelled refine probability, as a call decides -- else the full forward."""
     import json
+    from matchedfilter.gatechain import band_forward_wanted
     gc = mf.gatechain
-    gc._REFINE_BLOCKS.clear()                 # earlier GPU calls in this process may have noted some
-    kw = dict(block=300.0, forward=300.0)
-    cm = gc.CostModel(2048, {256: 1.0, 512: 2.0, 1024: 4.0}, {}, [(0.01, 9.0)], band_forward=True, **kw)
-    # B = 512: bands pay iff f < (2048 - 512) / 4096 = 0.375
-    assert cm.forward_cost((256, 512), 0.087) == pytest.approx(300 * (0.5 + 0.125) + 0.087 * 300)
-    assert cm.forward_cost((256, 512), 0.40) == 300.0
-    assert cm.forward_cost((512, 1024), 0.20) == pytest.approx(300 * 0.75 + 0.2 * 300)
-    assert cm.forward_cost((512, 1024), 0.30) == 300.0          # past 0.25 for B = n/2
-    off = gc.CostModel(2048, {256: 1.0}, {}, [(0.01, 9.0)], **kw)
-    assert off.forward_cost((256, 512), 0.0) == 300.0              # no capability: full
-    # per pair: no credit without a measured refine-block fraction
-    assert cm.chain_forward_delta((256, 512), [1.0, 0.01, 0.0005], 100) == 0.0
-    try:
-        gc.note_refine_blocks(2048, 512, 0.087)                     # measured: bands win
-        d = cm.chain_forward_delta((256, 512), [1.0, 0.01, 0.0005], 100)
-        assert d == pytest.approx((cm.forward_cost((256, 512), 0.087) - 300.0) / 100) and d < 0
-        gc._REFINE_BLOCKS.clear()
-        gc.note_refine_blocks(2048, 512, 0.5)                       # measured: bands lose
-        assert cm.chain_forward_delta((256, 512), [1.0, 0.01, 0.0005], 100) == 0.0
-    finally:
-        gc._REFINE_BLOCKS.clear()
+    feed = {"band": {256: 0.0, 512: 4.0, 1024: 9.0}, "full": 60.0}
+    cm = gc.CostModel(2048, {256: 1.0, 512: 2.0, 1024: 4.0}, {}, [(0.01, 9.0)], block=300.0,
+                      feed=feed)
+    # B = 512: bands iff the refine probability is below (2048 - 512) / 4096 = 0.375
+    assert band_forward_wanted(2048, 512, 0.0005) and not band_forward_wanted(2048, 512, 0.4)
+    assert cm.feed_delta((256, 512), [1.0, 0.01, 0.0005], 100) == pytest.approx(4.0 / 100)
+    assert cm.feed_delta((256, 512), [1.0, 0.5, 0.4], 100) == pytest.approx(60.0 / 100)
+    assert cm.feed_delta((256,), [1.0, 0.001], 100) == 0.0
+    assert cm.feed_delta((512, 1024), [1.0, 0.01, 0.3], 100) == pytest.approx(60.0 / 100)
+    cpu = gc.CostModel(2048, {256: 1.0}, {}, [(0.01, 9.0)], block=300.0)
+    assert cpu.feed_delta((256, 512), [1.0, 0.01, 0.0005], 100) == 0.0     # one feed
     rt = gc.CostModel.from_dict(json.loads(json.dumps(cm.to_dict())))
-    assert (rt.forward, rt.band_forward) == (300.0, True)
-
-
-def test_model_f_credit_is_proposal_only():
-    """The model's refine-block fraction credits the band forward only when asked to (block-size
-    trial proposals); priced normally a chain without a measurement gets no credit."""
-    gc = mf.gatechain
-    gc._REFINE_BLOCKS.clear()
-    cm = gc.CostModel(2048, {256: 1.0, 512: 2.0}, {}, [(0.01, 9.0)], block=300.0, forward=300.0,
-                      band_forward=True)
-    reach = [1.0, 0.01, 0.0005]
-    assert cm.chain_forward_delta((256, 512), reach, 100) == 0.0
-    f = 1 - (1 - 0.0005) ** 100
-    d = cm.chain_forward_delta((256, 512), reach, 100, model_f=True)
-    assert d == pytest.approx((cm.forward_cost((256, 512), f) - 300.0) / 100) and d < 0
+    assert rt.feed == feed and rt.signature() == cm.signature()
+    assert gc.CostModel.from_dict(json.loads(json.dumps(cpu.to_dict()))).feed is None
 
 
 def test_price_block_sizes_stops_at_the_first_dearer_size(monkeypatch):

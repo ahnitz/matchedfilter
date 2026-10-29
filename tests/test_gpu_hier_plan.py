@@ -362,10 +362,9 @@ def test_follow_up_items_pass_scalar_words(monkeypatch):
 def test_the_band_feed_follows_the_calls_modelled_refine_fraction(monkeypatch):
     """A call on shared spectra claims its deferred forward and writes only the bands when
     its modelled refine-block fraction (its lower bound, refine_reach) makes that the fewer
-    bytes, or with no model; a large modelled fraction takes the full forward. The
-    fraction an earlier call measured never decides it: the feeds round differently, and a
-    feed chosen from history made a batch disagree with the same calls made one by one."""
-    from matchedfilter import gatechain
+    bytes, or with no model; a large modelled fraction takes the full forward. Nothing an
+    earlier call measured decides it: the feeds round differently, and a feed chosen from
+    history made a batch disagree with the same calls made one by one."""
     monkeypatch.setattr(_gpuhier, "shared_view", lambda array, ctx: array)
     ctx = Driver()
     n = 4096
@@ -373,7 +372,6 @@ def test_the_band_feed_follows_the_calls_modelled_refine_fraction(monkeypatch):
     h = np.ones((3, n), np.complex64)
     claimed = []
     for reach in (None, 0.9, 0.0, None):
-        gatechain.note_refine_blocks(n, 128, 1.0)        # a measured fraction: ignored
         source = (n, None, None, 0, 2, 8 * n, 0, d, d.ctypes.data)
         ctx._defer("forward", {}, 0, source)
         claims = _gpuhier.CLAIMS[0]

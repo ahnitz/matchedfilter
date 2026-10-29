@@ -27,6 +27,8 @@ def _probe_calibration(monkeypatch, kind="f32", step=0.0, host=1.0, spell=None, 
     inputs = _calibration._gpu_cal_inputs(n, blocks, nt, 11)
     calls, raw_calls = [], []
     dense = {64: 2.0, 128: 4.0}
+    # per block: the band forward at the widest band (the backend's feed), or the full forward
+    band_feed, full_feed = {64: 0.0, 128: 3.0}, 20.0
     bound = 2.0 if kind != "f32" else 1.0
 
     class Plan:
@@ -34,7 +36,7 @@ def _probe_calibration(monkeypatch, kind="f32", step=0.0, host=1.0, spell=None, 
             assert size == n and ndata == 1
             self.nt, self.chain = ntemplates, chain
             self.log = []
-            self._gpu = SimpleNamespace(_timing=False, timings=lambda: self.log)
+            self._gpu = SimpleNamespace(_timing=False, timings=lambda: self.log, feed_forced=None)
 
         def set_templates(self, spectra):
             assert spectra.shape == (self.nt, n)
@@ -52,6 +54,8 @@ def _probe_calibration(monkeypatch, kind="f32", step=0.0, host=1.0, spell=None, 
             first = int(pairs * min(1.0, bound * math.exp(-self.thresholds[0])))
             refined = first
             ns = len(starts) * 100.0 + pairs * dense[self.chain[0]]
+            ns += len(starts) * (full_feed if self._gpu.feed_forced is False
+                                 else band_feed[max(self.chain)])
             if len(self.chain) > 1:
                 ns += first * 10.0 + (step if first else 0.0)
                 refined = int(first * math.exp(-self.thresholds[1]))
@@ -93,7 +97,7 @@ def test_calibration_recovers_active_costs(monkeypatch, kind):
     """Removing unused batches preserves clock correction, tier prices, and gate excess."""
     cm, metrics = _probe_calibration(monkeypatch, kind)
     assert cm.block == pytest.approx(100.0)
-    assert cm.forward == cm.block and cm.band_forward
+    assert cm.feed == {"band": pytest.approx({64: 0.0, 128: 3.0}), "full": pytest.approx(20.0)}
     assert cm.dense == pytest.approx({64: 2.0, 128: 4.0})
     for density in (0.01, 0.1):
         assert cm.refine(density) == pytest.approx(80.0)
@@ -187,7 +191,7 @@ def test_the_clock_anchor_is_timed_on_a_warmed_device_however_long_the_first_cal
     class Plan:
         def __init__(self, size, ndata, ntemplates, chain, device):
             self.log = []
-            self._gpu = SimpleNamespace(_timing=False, timings=lambda: self.log)
+            self._gpu = SimpleNamespace(_timing=False, timings=lambda: self.log, feed_forced=None)
 
         def set_templates(self, spectra):
             pass

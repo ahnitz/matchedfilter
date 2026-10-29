@@ -1,3 +1,34 @@
+# The forward a chain's calls take, measured per device (2026-10-29)
+
+The cost model priced a GPU chain's forward from a fit: the band forward at widest band B as
+`forward * (1/2 + B/2n)` (one point, 0.74 measured against 0.75 on the 8060S), plus `f *
+forward` of recompute at a refine-block fraction f measured by earlier calls and averaged with
+weight 1/2 (`note_refine_blocks`). `forward` was `block`, the per-block cost the calibration
+measured with the band forward of the first tier's band. All three were wrong in the same
+direction. Timed on the 8060S at n = 2048, the full forward costs 58.7 per block more than
+that head (`block` 48.7), the band forward 3.4 to 10.9 more from B = 128 to 1024. And the
+calibration's refine term, measured on band-fed calls, already holds the recompute it then
+added a second time.
+
+Now the GPU calibration times the feeds in the same rounds as the head: the chain (b0, B) at
+a threshold nothing passes runs what the head runs but for its forward, the band forward at B;
+the head with the full forward forced (a context's `feed_forced`) is the full feed. A first
+tier priced alone (`dense[b]`) no longer carries the band forward at b. The model takes, per
+chain, the feed the backend takes (`gatechain.band_forward_wanted` on the chain's modelled refine
+probability, what the call itself reads), so nothing a call measured enters a choice. Deleted:
+`forward_cost`, `note_refine_blocks`, `measured_refine_blocks` and its running mean,
+`refine_block_fraction`, and `model_f` (the proposal-only credit at the model's fraction).
+
+| test27 ladder, 8060S, 27 tops x 28 segments, fresh cost files | steady wall (s), 3 runs | mean |
+|---|---|---|
+| before (05e96062) | 10.53, 9.89, 9.74 | 10.05 |
+| measured feeds | 10.12, 9.18, 9.63 | 9.64 (0.96x; fine stage 0.94x) |
+
+Paired by run, the new pricing was faster in each (0.961, 0.928, 0.989; load 2-4). The chain
+choices moved in 4 of 174 n = 2048 plans, to (256,). The calibration takes 0.0-0.35 s longer
+per transform size (8.3 against 8.2 s at n = 2048, 6.1 against 5.7 at 4096, two runs each
+under load).
+
 # One false-dismissal budget per plan, 2026-10-29
 
 Every number that steered a plan's dismissal now traces to fd and one stated per-plan

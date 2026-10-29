@@ -186,35 +186,6 @@ ROWWIN_ON = 0xFFFFFFFF
 _BAND_WINDOWS = {}
 
 
-def band_forward_wanted(n, band, f):
-    """Whether a hierarchical call should forward only its tiers' bands (and then recompute
-    the full spectra of the blocks its refine reads) rather than every block in full.
-    Chosen from bytes: per block the full forward writes n samples and the band forward
-    `band` (the widest band a tier reads), while the recompute reads and writes n for each
-    block with a refined pair, so bands move fewer bytes iff that fraction f < (n - band) / 2n.
-    f is the gate model's fraction for the call (_gpuhier._hier_peaks: from the chain's
-    modelled refine probability), so the choice depends on the call alone; with none
-    (thresholds set by hand, no reference), the bands. MF_BAND_FORWARD=0/1 forces it off or on."""
-    from . import _config
-    forced = _config.get("MF_BAND_FORWARD")
-    if forced is False or n > 65536 or band >= n:
-        return False
-    if forced:
-        return True
-    return f is None or f < (n - band) / (2.0 * n)
-
-
-def refine_block_fraction(survivors, nt, nd):
-    """The fraction of a call's nd blocks with a refined pair, from its survivor list (pair
-    indices block * nt + template): what band_forward_wanted prices the recompute by."""
-    import numpy as np
-    if nd <= 0 or len(survivors) == 0:
-        return 0.0
-    seen = np.zeros(nd, np.bool_)
-    seen[np.asarray(survivors, np.int64) // nt] = True
-    return int(np.count_nonzero(seen)) / float(nd)
-
-
 def band_windows(rowwin, n, band):
     """Per-row windows [lo, hi) in samples of an n-point transform, mapped onto a coarse band
     as coarse_span maps one window: band samples [lo // R - 1, ceil(hi / R) + 1) with R = n // band,

@@ -132,8 +132,8 @@ GPU operations are written once, above a thin per-API driver:
 - `_gpuhier.HierOps`, a base of `Executor`, is the hierarchical search: one recording per
   call shape runs the feed, tier 0, a second tier, the refine and the readback on the
   device, with no counts read back between stages.
-- `_gpuhost` is pure host logic shared by every backend (windows, bin shifts, the band
-  forward rule `band_forward_wanted`); `_gpu_cache` holds input residency and in-flight
+- `_gpuhost` is pure host logic shared by every backend (windows, bin shifts; the band
+  forward rule `band_forward_wanted` is the gate model's, which prices it); `_gpu_cache` holds input residency and in-flight
   results; `_shared` provides host-visible allocations with DLPack lifetimes; `_gputime`
   collects device time under `MF_GPU_TIMING=1`.
 - Each backend's `Context` (`_vkcompute.Context`, `_cudacompute.Context`,
@@ -315,8 +315,10 @@ measured on the machine the job runs on. A `CostModel` holds, per transform size
 (a first tier per pair, per band), `sparse` (a later tier per survivor, as a function of
 survivor density), `refine` (per refined pair, as a function of density), `block` (fixed
 work per block), `screen` (the Q15 screen as the first tier, where the back end has one),
-`excess` (a bounding first tier's extra passes), and `forward` with `band_forward` (the
-forward's share of `block`, and whether the device can write only the widest band). The
+`excess` (a bounding first tier's extra passes), and on a GPU `feed` (the per-block change
+from `block`'s feed of the band forward at each widest band and of the full forward, timed
+by the calibration; the model takes the one the backend's own rule takes for the chain,
+`gatechain.band_forward_wanted` on its modelled refine probability). The
 model ranks chains. It cannot change a single tier's gate; for a multi-tier chain it picks
 among budget splits that all meet the budget, so different costs can move the thresholds.
 
