@@ -17,7 +17,7 @@ some calibration tools need separately captured data.
 | CPU ladder profile | `profile_cpu_ladder.py` | Fix chain and thresholds, compare Q15 off/on or separate builds, and record stage costs and result hashes; requires a real bank and matching profiles |
 | Job setup | `setup_capture.py`, `setup_replay.py`, `setup_breakdown.py`, `setup_decisions_diff.py` | Capture a job's banks and references, replay its matchedfilter setup, charge its time by part, and diff two replays' decisions |
 | Gate validation | `fdr_audit.py`, `split_bias.py`, `audit_gate_model.py`, `audit_threshold.py`, `make_psd_profiles.py` | Measure gate chains' dismissal by injection against the flat filter, two-sided (`fdr_audit.py`, run by the gate), and the budget split's selection bias on independent model draws (`split_bias.py`); not part of normal installation |
-| Measured choices at production length | `prodlen.py` | Fresh ladder processes of two trees in ABBA order, with no MF_COST_FILE, as production runs: each trial's lock, the fine batch it locked at and how long it was open; steady, total, user and system time; run before merging a change to how choices are measured |
+| Measured choices at production length | `prodlen.py` | Fresh ladder processes of two trees in ABBA order, with no MF_COST_FILE, as production runs: each measured decision's lock (a coordinate search counted once), the fine batch it locked at and how long it was open; steady, total, user and system time; run before merging a change to how choices are measured |
 
 For a quick CPU/GPU overlap-save comparison with output validation:
 
@@ -34,16 +34,23 @@ python tools/prodlen.py run --base ../main --new . --processes 4 --out .local/pr
 python tools/prodlen.py summarise .local/prodlen
 ```
 
-Each process runs its own tree's `ladder.py` (`--pipeline --pure`) through the tool's hook,
-which logs every batch and every measured choice's creation, rounds and lock. Per process the
-summary lists every trial's lock and the fine batch it locked at, the fine batches it was open
-in and the batches it played; the steady wall and its per-top series; total, user and system
-time; and the load. Pooled, it gives the median ratios (also per ABBA pair), each tree's
-non-default locks and each offline kernel screen's picks. Its CHECK lines confirm that each
-process completed, ran its own tree and every fine batch, and that the hook and the library's
+Each process runs its own tree's `ladder.py` (`--pipeline --pure`), pinned to `--cores`
+(required), through the tool's hook, which logs every batch and every measured choice's
+creation, rounds (with their timings) and lock. Per process the summary lists every decision:
+a measured choice, with a coordinate search's passes (`... around <arm>`) counted as one
+decision, its last pass's lock. For each it gives the lock and the fine batch it locked at,
+the fine batches it was open in, the batches it played and how many of them ran a non-default
+configuration; then the model-priced chain and block-size picks, the steady wall and its
+per-top series, total, user and system time, and the load. Pooled, it gives the median ratios
+(also per ABBA pair), each tree's non-default decisions (one per search, however many passes
+locked it) and the processes they were in, searches left open, and each offline kernel
+screen's picks. Its CHECK lines confirm that each process completed, ran its own tree and one
+fine batch and one follow-up batch per segment, and that the hook and the library's
 MF_AUTOTUNE log saw the same locks. The tool exits 1 if a check fails. Read the times with the
 load range: in a main-against-main run on dev2 (2026-10-29) the load rose from 8 to 20 and one
-tree's two processes took 402 s and 898 s.
+tree's two processes took 402 s and 898 s. Read the decisions per process: in a second such
+run, of four processes of one library one locked GPU-BATCH fuse=0 (in fine batch 16 of 756)
+and another VK-SUBGROUP 32.
 
 To compare survivor processing in two saved builds (each directory contains its own
 `matchedfilter` package and native extension):

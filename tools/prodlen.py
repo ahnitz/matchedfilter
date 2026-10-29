@@ -23,23 +23,27 @@ MF_COST_FILE, MF_AUTOTUNE_LOG=1.
     tree's python/, and a tree whose extension is older than its C sources is refused.
   * Each process runs its tree's ladder through this file's hook (`prodlen.py hook`), the
     same for both trees: it marks every filter_series_many batch and every measured
-    choice's creation, rounds and lock on stderr as JSON lines ("[prodlen] {...}"), beside
-    the library's own MF_AUTOTUNE lines, in one log per process.
+    choice's creation, rounds (with their timings) and lock on stderr as JSON lines
+    ("[prodlen] {...}"), beside the library's own MF_AUTOTUNE lines, in one log per process.
 
-Per process the summary gives every trial (one Choice; a coordinate search's passes are
-separate choices, "... around <arm>"): its lock, the fine batch it locked at (k of
+Per process the summary gives every decision: a measured choice (_choice.Choice), with a
+coordinate search counted once. A search's passes are separate choices (the later ones
+described as the first plus " around <arm>"); its decision is its last pass's lock, and its
+passes are listed under it. For each decision: the lock, the fine batch it locked at (k of
 tops x segments, and its top and segment; the ladder's own batches, not the calls a joint
 trial's round makes inside one), the fine batches it was open in, the batches it played
-(ran every live arm on: its non-default arms ran there), the arms it dropped or picked for
-confirmation, and the fine batches after a non-default lock; then the steady wall
-(steady_s) and its per-top series, the process's total, user and system time, prep and
-warmup, the load (1-minute average) at start and end and its range over the run, and the
-GPU clock the ladder sampled. Pooled: each metric's median per tree and the new/base ratio
-(also per ABBA pair), and per trial how many processes of each tree locked which arm and
-how many locked a non-default one, and each offline kernel screen's picks (which can differ
-between processes too). CHECK lines verify what the numbers rest on (exit
-status, the hook, the batch count, every lock seen twice: by the hook and in the library's
-log); the exit status is 1 when one fails.
+(had a round in) and how many of them ran a non-default configuration, the arms it dropped
+or picked for confirmation, and the fine batches after a non-default decision. Then the
+model-priced chain and block-size picks (made afresh in each process, without rounds), the
+steady wall (steady_s) and its per-top series, the process's total, user and system time,
+prep and warmup, the load (1-minute average) at start and end and its range over the run,
+and the GPU clock the ladder sampled. Pooled: each metric's median per tree and the new/base
+ratio (also per ABBA pair); per search how many processes of each tree reached which
+decision; each tree's non-default decisions (one per search, however many passes reached
+it) and the processes they were in; and the offline kernel screens' and the model-priced
+picks (both can differ between processes too). CHECK lines verify what the numbers rest on
+(exit status, the hook, the batch counts, every lock seen twice: by the hook and in the
+library's log); the exit status is 1 when one fails.
 """
 import argparse
 import json
@@ -63,6 +67,13 @@ SCREEN = re.compile(r"^(?P<kind>\S+) (?P<device>.+) band (?P<band>\d+) -> (?P<la
 LOCK_LINE = re.compile(r"^(?P<what>.+) -> (?P<label>\S+)  \{.*\}$")
 DROP_LINE = re.compile(r"^(?P<what>.+): (?P<label>\S+) cannot win, dropped$")
 CONFIRM_LINE = re.compile(r"^(?P<what>.+): (?P<label>\S+) to be confirmed against \S+$")
+#: A coordinate search's later pass: the first pass's description, then " around <arm>"
+#: (_trial.current_pass: the GPU device trials and the banks' joint trials).
+AROUND = re.compile(r"^(?P<root>.+) around (?P<base>\S+)$")
+#: The model-priced decisions each process makes afresh, without rounds: a fine bank's
+#: chain (_hierarchical) and a bank's block-size partition (time_domain), prices left out.
+MODEL_LINES = {"CHAIN": re.compile(r"^CHAIN (?P<pick>n=\d+ model=.+?) ranking="),
+               "BLOCK": re.compile(r"^BLOCK (?P<pick>.+? -> n=\d+)(?:  |$)")}
 METRICS = ("total", "user", "sys", "prep", "warm", "steady")
 SOURCES = (".c", ".cc", ".cpp", ".h", ".hpp")
 
@@ -118,7 +129,12 @@ def hook(argv):
 
     def round_(self, timings, *a, **k):
         if getattr(self, "winner", None) is None:
-            emit("round", id=uid(self), arms=[label(self, c) for c in timings])
+            arms = list(timings)
+            try:                                            # Choice.play shares one timing
+                times = [float(timings[c]) for c in arms]   # among arms that run alike
+            except (TypeError, ValueError):
+                times = None
+            emit("round", id=uid(self), arms=[label(self, c) for c in arms], times=times)
         return rnd(self, timings, *a, **k)
 
     def lock_(self, winner, *a, **k):
@@ -164,19 +180,24 @@ def parse_log(lines):
                 ladder's: kind fine, follow or empty); fine is a fine batch's 1-based index,
                 else None; nested counts the calls made inside it (a joint trial's
                 round replays its sub-batches through filter_series_many)
-      choices   {id: {what, pref, cands, held, at, rounds: [at], lock, asked, lock_at,
-                expired, drops: [(label, at)], confirms: [(label, at)]}}
+      choices   {id: {what, pref, cands, held, at, rounds: [{at..., arms, times, b}], lock,
+                asked, lock_at, expired, drops: [(label, at)], confirms: [(label, at)]}};
+                a round's times are its arms' timings (None from an older hook), b the
+                index (i) of the outermost batch it was in (None between batches)
       screens   [{kind, device, band, label, alt, at}] offline screens (_coarse.shortlist)
+      models    [(kind, pick)] the model-priced CHAIN and BLOCK picks (MODEL_LINES), in order
       lock_lines [(what, label)] Choice.lock's lines in the library's own log
       start     the hook's start record (None if absent); exit: whether the ladder returned
 
-    An `at` is {"fine": k, "in": kind or None}: k fine batches had begun, and the event
-    happened inside an outermost batch of that kind (None: between batches)."""
-    out = dict(batches=[], choices={}, screens=[], lock_lines=[], start=None, exit=False)
-    fine, stack, by_what = 0, [], defaultdict(list)
+    An `at` is {"fine": k, "in": kind or None, "follow": j}: k fine batches and j follow-up
+    batches (kind follow or empty: the ladder makes one per segment, in segment order) had
+    begun, and the event happened inside an outermost batch of that kind (None: between
+    batches)."""
+    out = dict(batches=[], choices={}, screens=[], models=[], lock_lines=[], start=None, exit=False)
+    fine, follow, stack, by_what = 0, 0, [], defaultdict(list)
 
     def at():
-        return {"fine": fine, "in": stack[0]["kind"] if stack else None}
+        return {"fine": fine, "in": stack[0]["kind"] if stack else None, "follow": follow}
 
     def latest(what):
         # the most recent choice of that description still open (else the most recent)
@@ -201,6 +222,8 @@ def parse_log(lines):
                     continue
                 if e["kind"] == "fine":
                     fine += 1
+                else:
+                    follow += 1
                 b = dict(i=e["i"], kind=e["kind"], n=e["n"], fine=fine if e["kind"] == "fine" else None,
                          nested=0)
                 out["batches"].append(b)
@@ -221,7 +244,8 @@ def parse_log(lines):
                 if c is None:
                     continue
                 if ev == "round":
-                    c["rounds"].append(dict(at(), arms=e["arms"]))
+                    c["rounds"].append(dict(at(), arms=e["arms"], times=e.get("times"),
+                                            b=stack[0]["i"] if stack else None))
                 elif ev == "lock":
                     c.update(lock=e["label"], asked=e["asked"], lock_at=at())
                 else:
@@ -240,6 +264,11 @@ def parse_log(lines):
             if m:
                 out["lock_lines"].append((m.group("what"), m.group("label")))
                 continue
+            kind = text.split(" ", 1)[0]
+            m = MODEL_LINES[kind].match(text) if kind in MODEL_LINES else None
+            if m:
+                out["models"].append((kind, m.group("pick")))
+                continue
             for pat, key in ((DROP_LINE, "drops"), (CONFIRM_LINE, "confirms")):
                 m = pat.match(text)
                 if m:
@@ -251,9 +280,10 @@ def parse_log(lines):
 
 
 def nondefault(choice, label):
-    """Whether `label` is a non-default arm of `choice`: any arm but DEFAULT where the
-    choice's arms are labelled against it (a trial's first pass; every arm of a pass around
-    another arm is non-default), else any candidate but the preference."""
+    """Whether `label` is a non-default arm of `choice` (a parsed choice, or a trials() row):
+    any arm but DEFAULT where the choice's arms are labelled against it (a search's first
+    pass, and a pass around another arm, all of whose arms are non-default), else any
+    candidate but the preference."""
     if label is None:
         return False
     if choice["pref"] == DEFAULT or " around " in choice["what"]:
@@ -261,44 +291,117 @@ def nondefault(choice, label):
     return label != choice["pref"]
 
 
+def ran_nondefault(choice, rnd):
+    """Whether a round of `choice` ran a non-default configuration: the choice's preference
+    is a non-default arm (a pass around another arm), or a non-default arm was timed apart
+    from the preference. Choice.play runs the arms that run alike (its config) once and gives
+    each of them that one timing, so an arm with the preference's timing ran the
+    preference's configuration (two separate runs timed to the same float would be taken
+    for one). A round without timings (an older hook's log) counts any non-default arm."""
+    pref, arms, times = choice["pref"], rnd["arms"], rnd.get("times")
+    if nondefault(choice, pref):
+        return True
+    if times is None or pref not in arms:
+        return any(nondefault(choice, a) for a in arms)
+    own = times[arms.index(pref)]
+    return any(nondefault(choice, a) and t != own for a, t in zip(arms, times))
+
+
 def trials(parsed, total_fine):
-    """Per choice of a parsed log, its derived record (a list, in creation order): the
-    lock and where, the fine batches it was open in (from the first fine batch it existed in
-    unlocked to the one that had begun when it locked, or the last), the batches it played
-    by kind, how many of those ran a non-default arm, and the fine batches after its lock."""
+    """Per measured choice of a parsed log (one Choice: each pass of a coordinate search is
+    one), its derived record, in creation order: a list of dicts with its lock and where
+    (lock_at), whether that is a non-default arm, the fine batches it was open in (from the
+    first fine batch it existed in unlocked to the one that had begun when it locked, or the
+    last), its rounds (Choice.round calls), the batches they were in by kind (played) and how
+    many of those ran a non-default configuration (ran_nondefault), the fine batches after
+    its lock, and its search (the first pass's description) and base (the arm a pass around
+    another moves from; None for a first pass)."""
     rows = []
     for cid, c in parsed["choices"].items():
         first = c["at"]["fine"] if c["at"]["in"] == "fine" else c["at"]["fine"] + 1
         if c["held"] is not None and c["lock"] is None:
             first = total_fine + 1                       # held from a cost file: never open
         last = c["lock_at"]["fine"] if c["lock_at"] is not None else total_fine
-        played = Counter(r["in"] or "between" for r in c["rounds"])
+        batches = {}                                     # the batches its rounds were in
+        for j, r in enumerate(c["rounds"]):
+            g = batches.setdefault(r["b"] if r.get("b") is not None else ("between", j),
+                                   dict(kind=r["in"] or "between", ran=False))
+            g["ran"] = g["ran"] or ran_nondefault(c, r)
+        m = AROUND.match(c["what"])
+        lock = c["lock"] if c["lock"] is not None else c["held"]
         rows.append(dict(
             id=cid, what=c["what"], pref=c["pref"], arms=len(c["cands"]), held=c["held"],
-            lock=c["lock"] if c["lock"] is not None else c["held"], lock_at=c["lock_at"],
-            nondefault=nondefault(c, c["lock"] if c["lock"] is not None else c["held"]),
+            search=m.group("root") if m else c["what"], base=m.group("base") if m else None,
+            lock=lock, lock_at=c["lock_at"], nondefault=nondefault(c, lock),
             open_fine=max(0, last - first + 1), first_open=first, last_open=last,
-            played=dict(played), played_nondefault=sum(any(nondefault(c, a) for a in r["arms"])
-                                                       for r in c["rounds"]),
+            rounds=len(c["rounds"]), played=dict(Counter(g["kind"] for g in batches.values())),
+            ran_nondefault=sum(g["ran"] for g in batches.values()),
             after_fine=(total_fine - c["lock_at"]["fine"]) if c["lock_at"] is not None else 0,
             expired=c["expired"], drops=c["drops"], confirms=c["confirms"]))
     return rows
 
 
+def searches(rows):
+    """The decisions of a process: its choices (trials() rows) grouped by coordinate search,
+    each pass around an arm joining the latest search of its first pass's description. A
+    list, in creation order, of dicts with what (the first pass's description), passes (its
+    rows), lock (the last pass's lock: the search's decision; None while that pass is open),
+    base (what runs between an open search's rounds: its last pass's preference) and
+    base_nondefault, lock_at, nondefault (the decision is a non-default arm: counted once,
+    however many passes reached it), first_nondefault_at (where a pass first locked a
+    non-default arm), open_fine (the fine batches any of its passes was open in), rounds,
+    played and ran_nondefault summed over its passes, and after_fine (the fine batches after
+    the decision)."""
+    out, latest = [], {}
+    for r in rows:
+        s = latest.get(r["search"]) if r["base"] is not None else None
+        if s is None:
+            s = latest[r["search"]] = dict(what=r["search"], passes=[])
+            out.append(s)
+        s["passes"].append(r)
+    for s in out:
+        ps = s["passes"]
+        first, last = ps[0], ps[-1]
+        played = Counter()
+        for p in ps:
+            played.update(p["played"])
+        span = set().union(*[range(p["first_open"], p["last_open"] + 1) for p in ps])
+        s.update(
+            lock=last["lock"], base=last["pref"], base_nondefault=nondefault(first, last["pref"]),
+            lock_at=last["lock_at"] if last["lock"] is not None else None,
+            nondefault=nondefault(first, last["lock"]),
+            first_nondefault_at=next((p["lock_at"] for p in ps if p["lock_at"] is not None
+                                      and nondefault(first, p["lock"])), None),
+            open_fine=len(span), first_open=min(span, default=None), last_open=max(span, default=None),
+            rounds=sum(p["rounds"] for p in ps), played=dict(played),
+            ran_nondefault=sum(p["ran_nondefault"] for p in ps),
+            after_fine=last["after_fine"] if last["lock"] is not None else 0,
+            arms=first["arms"] if len(ps) == 1 else None, held=last["held"], expired=last["expired"],
+            drops=first["drops"] if len(ps) == 1 else [], confirms=first["confirms"] if len(ps) == 1 else [])
+    return out
+
+
 def where(at, segments, warmup=None):
     """A location (parse_log's `at`) in words: 'setup' before the first fine batch, else
-    'fine k', then ' follow-ups' (the follow-up batch after it: that segment's follow-ups) or
-    ' +between' (outside every batch), then '(top t seg s)', with ', steady' when the segment
+    'fine k' (k fine batches had begun), then ' follow-ups' inside segment k's follow-up
+    batch (', follow-ups of fine j' inside segment j's: with --depth 2 or more the ladder
+    collects a segment after later fine batches) or ' +between' outside every batch; then
+    '(top t seg s)' of the segment the event belongs to, with ', steady' when that segment
     is past the ladder's warmup segments."""
     if at is None:
         return "-"
-    k = at["fine"]
+    k = j = at["fine"]
     if k == 0:
         return "setup"
-    top, seg = (k - 1) // segments + 1, (k - 1) % segments + 1
+    text = " +between"
+    if at["in"] == "fine":
+        text = ""
+    elif at["in"] in ("follow", "empty"):
+        j = at.get("follow") or k
+        text = " follow-ups" if j == k else ", follow-ups of fine %d" % j
+    top, seg = (j - 1) // segments + 1, (j - 1) % segments + 1
     return "fine %d%s (top %d seg %d%s)" % (
-        k, {"fine": "", "follow": " follow-ups"}.get(at["in"], " +between"), top, seg,
-        ", steady" if warmup is not None and seg > warmup else "")
+        k, text, top, seg, ", steady" if warmup is not None and seg > warmup else "")
 
 
 def lock_check(parsed):
@@ -323,7 +426,8 @@ def short(what):
 
 def process_summary(run_dir, tag):
     """The summary of one recorded process (tag.meta.json, tag.log, tag.json in run_dir):
-    a dict of its metrics, per-top steady series, trials, screens and checks."""
+    a dict of its metrics, per-top steady series, trials (one row per choice), searches (one
+    per decision), screens, model-priced picks ({kind: [pick]}) and checks."""
     d = Path(run_dir)
     meta = json.loads((d / (tag + ".meta.json")).read_text())
     with open(d / (tag + ".log"), errors="replace") as f:
@@ -335,6 +439,7 @@ def process_summary(run_dir, tag):
     segments = int(args.get("segments", meta["segments"]))
     warmup = int(args.get("warmup", 2))
     fine = [b for b in parsed["batches"] if b["kind"] == "fine"]
+    follow = [b for b in parsed["batches"] if b["kind"] in ("follow", "empty")]
     first = (report or {}).get("first_segment_s", {})
     steady = (report or {}).get("steady_s", {})
     wall = ((report or {}).get("steady_samples") or {}).get("wall") or []
@@ -345,6 +450,10 @@ def process_summary(run_dir, tag):
         if str((report or {}).get("device", "")).startswith("gpu") else {}
     counts = (report or {}).get("counts") or {}
     rows = trials(parsed, len(fine))
+    models = defaultdict(list)
+    for kind, pick in parsed["models"]:
+        models[kind].append(pick)
+    models = dict(models)
     lk_ok, lk_text = lock_check(parsed)
     start = parsed["start"] or {}
     pkg = os.path.join(meta["tree"], "python") + os.sep
@@ -357,6 +466,10 @@ def process_summary(run_dir, tag):
          "matchedfilter %s" % start.get("matchedfilter")),
         ("fine batches", len(fine) == tops * segments,
          "%d fine batches for %d tops x %d segments" % (len(fine), tops, segments)),
+        # where() reads the j-th follow-up batch as segment j's: one per segment
+        ("follow-up batches", len(follow) == tops * segments,
+         "%d follow-up batches (%d empty) for %d tops x %d segments"
+         % (len(follow), sum(b["kind"] == "empty" for b in follow), tops, segments)),
         ("steady series", per_top is not None,
          "%d steady samples over %d tops" % (len(wall), tops)),
         ("locks", lk_ok, lk_text),
@@ -375,7 +488,7 @@ def process_summary(run_dir, tag):
         follow_batches=sum(b["kind"] == "follow" for b in parsed["batches"]),
         nested=sum(b["nested"] for b in parsed["batches"]),
         triggers=counts.get("fine_triggers"), asym_calls=counts.get("asym_calls"),
-        trials=rows, screens=parsed["screens"],
+        trials=rows, searches=searches(rows), screens=parsed["screens"], models=models,
         open_any=len(set().union(*[range(r["first_open"], r["last_open"] + 1) for r in rows])) if rows else 0,
         last_open=max([r["last_open"] for r in rows if r["open_fine"]], default=0),
         checks=checks)
@@ -396,35 +509,63 @@ def format_process(s):
             _num(s["sclk"], "%.0f"), s["fine_batches"], s["nested"], s["follow_batches"], s["triggers"])]
     if s["per_top"]:
         L.append("    steady per top (s): " + " ".join("%.3f" % v for v in s["per_top"]))
-    L.append("    trials: %d; a trial open in %d of %d fine batches (last open: %s)"
-             % (len(s["trials"]), s["open_any"], s["fine_batches"],
+    L.append("    decisions: %d (%d choices: a search's passes are one decision); a trial open in "
+             "%d of %d fine batches (last open: %s)"
+             % (len(s["searches"]), len(s["trials"]), s["open_any"], s["fine_batches"],
                 where({"fine": s["last_open"], "in": "fine"}, s["segments"], s["warmup"])
                 if s["last_open"] else "none"))
-    for r in s["trials"]:
-        lock = "OPEN" if r["lock"] is None else r["lock"] + (" (non-default)" if r["nondefault"] else "")
-        extra = []
-        if r["held"] is not None:
-            extra.append("held from file")
-        if r["expired"] is not None:
-            extra.append("budget spent (%s attempts)" % r["expired"])
-        if r["confirms"]:
-            extra.append("picked for confirmation: " + ", ".join(
-                "%s at %s" % (l, where(a, s["segments"])) for l, a in r["confirms"]))
-        if r["drops"]:
-            names = [l for l, _ in r["drops"]]
-            extra.append("dropped %s" % (", ".join(names) if len(names) <= 3 else
-                                         "%d arms (%s, ...)" % (len(names), ", ".join(names[:2]))))
-        if r["nondefault"] and r["after_fine"]:
-            extra.append("%d fine batches after the lock" % r["after_fine"])
-        L.append("      %-50s -> %-18s at %-38s open %3d fine, played %s (%d with non-default arms)%s"
-                 % (short(r["what"])[:50], lock, where(r["lock_at"], s["segments"], s["warmup"]),
-                    r["open_fine"], "/".join("%s %d" % kv for kv in sorted(r["played"].items())) or "0",
-                    r["played_nondefault"], "; " + "; ".join(extra) if extra else ""))
+    for d in s["searches"]:
+        L.append(_decision_line("      %-50s" % short(d["what"])[:50], d, s))
+        if len(d["passes"]) > 1:
+            for p in d["passes"]:
+                L.append(_decision_line("        %-48s" % ("pass around %s" % p["base"] if p["base"]
+                                                           else "first pass"), p, s))
     if s["screens"]:
         L.append("    screens (first, then the alternative a kernel trial plays): " + "; ".join(
             "%s %d %s then %s at %s" % (x["kind"], x["band"], x["label"], x["alt"], where(x["at"], s["segments"]))
             for x in s["screens"]))
+    for kind, picks in sorted(s["models"].items()):
+        L.append("    model-priced %s picks: %d (%s)" % (kind, len(picks), _picks(picks)))
     return L
+
+
+def _picks(picks):
+    """Model-priced picks counted by what they chose (a BLOCK pick's subject left out)."""
+    return ", ".join("%s x%d" % kv for kv in sorted(Counter(p.split(" -> ")[-1] for p in picks).items()))
+
+
+def _decision_line(name, r, s):
+    """One text line for a decision (a searches() row) or one of its passes (a trials() row)."""
+    if r["lock"] is None:
+        lock = "OPEN" + (" at %s" % r["base"] if r.get("base_nondefault") else "")
+    else:
+        lock = r["lock"] + (" (non-default)" if r["nondefault"] else "")
+    extra = []
+    if r["held"] is not None:
+        extra.append("held from file")
+    if r["expired"] is not None:
+        extra.append("budget spent (%s attempts)" % r["expired"])
+    if r["lock"] is not None and not r["rounds"] and r["held"] is None and r["expired"] is None \
+            and r["arms"] is not None:
+        extra.append("its arms timed outside Choice.round" if r["arms"] > 1 else "one arm, locked at once")
+    if r["confirms"]:
+        extra.append("picked for confirmation: " + ", ".join(
+            "%s at %s" % (l, where(a, s["segments"])) for l, a in r["confirms"]))
+    if r["drops"]:
+        names = [l for l, _ in r["drops"]]
+        extra.append("dropped %s" % (", ".join(names) if len(names) <= 3 else
+                                     "%d arms (%s, ...)" % (len(names), ", ".join(names[:2]))))
+    first_nd = r.get("first_nondefault_at")
+    if first_nd is not None and first_nd != r["lock_at"]:
+        extra.append("a pass first locked a non-default arm at %s" % where(first_nd, s["segments"]))
+    if r["nondefault"] and r["after_fine"]:
+        extra.append("%d fine batches after the lock" % r["after_fine"])
+    played = sum(r["played"].values())
+    return "%s -> %-18s at %-38s open %3d fine, played %d batches (%s%s), %d ran a non-default arm%s" % (
+        name, lock, where(r["lock_at"], s["segments"], s["warmup"]), r["open_fine"], played,
+        "/".join("%s %d" % kv for kv in sorted(r["played"].items())) or "none",
+        "; %d rounds" % r["rounds"] if r["rounds"] != played else "", r["ran_nondefault"],
+        "; " + "; ".join(extra) if extra else "")
 
 
 # ---- pooled ----------------------------------------------------------------------------------
@@ -441,11 +582,15 @@ def _ratio(a, b):
 def pooled(procs):
     """The comparison of the base and new processes: per metric (METRICS, tirt) each tree's
     values and median, the ratio of medians new/base and the ratio within each ABBA pair;
-    the per-top steady medians; per trial (by description) each tree's locks counted by arm,
-    how many were non-default, and the median fine batch they locked at; per offline screen
-    (kind and band) each tree's picks counted; and each tree's library digests and revisions."""
+    the per-top steady medians; per decision (a search, by its first pass's description)
+    each tree's decisions counted by arm, how many were non-default, the most passes one
+    took, and the median fine batch they were made at; each tree's non-default decisions
+    (one per search) and the processes they were in, and its searches open at the end; per
+    offline screen (kind and band) each tree's picks counted; per model-priced kind each
+    process's count of picks and how many distinct sets of picks the processes made; and
+    each tree's library digests and revisions."""
     by = {n: [p for p in procs if p["tree_name"] == n] for n in ("base", "new")}
-    out = dict(n={k: len(v) for k, v in by.items()}, metrics={}, trials={}, nondefault={},
+    out = dict(n={k: len(v) for k, v in by.items()}, metrics={}, trials={}, nondefault={}, models={},
                digests={k: sorted({str(p["digest"]) for p in v}) for k, v in by.items()},
                revs={k: sorted({str(p["rev"]) for p in v}) for k, v in by.items()})
     pairs = [procs[i:i + 2] for i in range(0, len(procs) - 1, 2)]
@@ -464,27 +609,44 @@ def pooled(procs):
         med = {k: [_median([p["per_top"][j] for p in v if p["per_top"]]) for j in range(t)]
                for k, v in by.items()}
         out["per_top"] = dict(median=med, ratio=[_ratio(a, b) for a, b in zip(med["new"], med["base"])])
-    whats = list(dict.fromkeys(r["what"] for p in procs for r in p["trials"]))
+    whats = list(dict.fromkeys(d["what"] for p in procs for d in p["searches"]))
     for w in whats:
         e = {}
         for k, v in by.items():
-            locks = [r for p in v for r in p["trials"] if r["what"] == w]
-            e[k] = dict(locks=dict(Counter(r["lock"] or "OPEN" for r in locks)),
-                        nondefault=sum(r["nondefault"] for r in locks),
-                        processes=sum(any(r["what"] == w for r in p["trials"]) for p in v),
-                        lock_fine=_median([r["lock_at"]["fine"] for r in locks if r["lock_at"]]),
-                        open_fine=_median([r["open_fine"] for r in locks]))
+            ds = [d for p in v for d in p["searches"] if d["what"] == w]
+            e[k] = dict(locks=dict(Counter(_decision(d) for d in ds)),
+                        nondefault=sum(d["nondefault"] for d in ds),
+                        processes=sum(any(d["what"] == w for d in p["searches"]) for p in v),
+                        passes=max([len(d["passes"]) for d in ds], default=0),
+                        lock_fine=_median([d["lock_at"]["fine"] for d in ds if d["lock_at"]]),
+                        open_fine=_median([d["open_fine"] for d in ds]))
         out["trials"][w] = e
     out["screens"] = {}
     for x in sorted({(x["kind"], x["band"]) for p in procs for x in p["screens"]}):
         out["screens"]["%s %d" % x] = {k: dict(Counter("%s then %s" % (y["label"], y["alt"]) for p in v
                                                        for y in p["screens"] if (y["kind"], y["band"]) == x))
                                        for k, v in by.items()}
+    for kind in sorted({kind for p in procs for kind in p["models"]}):
+        sets = {p["tag"]: tuple(sorted(Counter(p["models"].get(kind, [])).items())) for p in procs}
+        out["models"][kind] = dict(
+            count={p["tag"]: len(p["models"].get(kind, [])) for p in procs},
+            distinct=dict({k: len({sets[p["tag"]] for p in v}) for k, v in by.items()},
+                          all=len(set(sets.values()))),
+            picks={k: _picks([x for p in v for x in p["models"].get(kind, [])]) for k, v in by.items()})
     for k, v in by.items():
-        out["nondefault"][k] = dict(locks=sum(r["nondefault"] for p in v for r in p["trials"]),
-                                    processes=sum(any(r["nondefault"] for r in p["trials"]) for p in v),
-                                    open_at_end=sum(r["lock"] is None for p in v for r in p["trials"]))
+        ds = [d for p in v for d in p["searches"]]
+        out["nondefault"][k] = dict(decisions=sum(d["nondefault"] for d in ds),
+                                    processes=sum(any(d["nondefault"] for d in p["searches"]) for p in v),
+                                    open_at_end=sum(d["lock"] is None for d in ds),
+                                    open_nondefault=sum(d["lock"] is None and d["base_nondefault"] for d in ds))
     return out
+
+
+def _decision(d):
+    """A decision's label for counting: its lock, or OPEN (at its base when that is non-default)."""
+    if d["lock"] is not None:
+        return d["lock"]
+    return "OPEN at %s" % d["base"] if d["base_nondefault"] else "OPEN"
 
 
 def format_pooled(P):
@@ -506,10 +668,18 @@ def format_pooled(P):
         L.append("  steady per top, new median (s):  " + " ".join(_num(x, "%.3f") for x in P["per_top"]["median"]["new"]))
         L.append("  steady per top, new/base:        " + " ".join(_num(x, "%.2f") for x in P["per_top"]["ratio"]))
     for k, e in P["nondefault"].items():
-        L.append("  %-4s non-default locks %d (in %d of %d processes); trials open at the end %d"
-                 % (k, e["locks"], e["processes"], P["n"][k], e["open_at_end"]))
+        L.append("  %-4s non-default decisions %d (one per search; in %d of %d processes); "
+                 "open at the end %d (%d at a non-default base)"
+                 % (k, e["decisions"], e["processes"], P["n"][k], e["open_at_end"], e["open_nondefault"]))
     for w, e in P["trials"].items():
         L.append("  %-50s base %-40s new %s" % (short(w)[:50], _trial_cell(e["base"]), _trial_cell(e["new"])))
+    for kind, e in P["models"].items():
+        L.append("  model-priced %s picks per process %s; %s; base %s; new %s" % (
+            kind, " ".join("%d" % n for n in e["count"].values()),
+            "the same in every process" if e["distinct"]["all"] == 1 else
+            "%d distinct sets (base %d, new %d)" % (e["distinct"]["all"], e["distinct"]["base"],
+                                                    e["distinct"]["new"]),
+            e["picks"]["base"] or "-", e["picks"]["new"] or "-"))
     for b, e in P["screens"].items():
         picks = set(e["base"]) | set(e["new"])
         firsts = {x.split(" then ")[0] for x in picks}
@@ -523,8 +693,9 @@ def format_pooled(P):
 def _trial_cell(e):
     if not e["processes"]:
         return "-"
-    return "%s; lock fine %s; open %s" % (", ".join("%s %d" % kv for kv in sorted(e["locks"].items())),
-                                          _num(e["lock_fine"], "%.0f"), _num(e["open_fine"], "%.0f"))
+    return "%s; lock fine %s; open %s%s" % (", ".join("%s %d" % kv for kv in sorted(e["locks"].items())),
+                                            _num(e["lock_fine"], "%.0f"), _num(e["open_fine"], "%.0f"),
+                                            "; up to %d passes" % e["passes"] if e["passes"] > 1 else "")
 
 
 def summarise(run_dir):
@@ -628,7 +799,7 @@ def run_one(out, tag, name, order, tree, ladder_args, a, tops, segments, digest=
     import resource
     env, dropped = child_env(tree, a.env)
     log, report = out / (tag + ".log"), out / (tag + ".json")
-    cmd = (["taskset", "-c", a.cores] if a.cores else []) + (["nice", "-n", str(a.nice)] if a.nice else [])
+    cmd = ["taskset", "-c", a.cores] + (["nice", "-n", str(a.nice)] if a.nice else [])
     cmd += [a.python, str(Path(__file__).resolve()), "hook", os.path.join(tree, "tools", "ladder.py")]
     cmd += ladder_args + ["--out", str(report)]
     trace, stop = [], threading.Event()
@@ -700,9 +871,12 @@ def cmd_run(a):
         return 0
     for name in ("base", "new"):
         for w in range(a.warm):
-            m = run_one(out, "warm%d_%s" % (w + 1, name), name, None, trees[name],
+            tag = "warm%d_%s" % (w + 1, name)
+            m = run_one(out, tag, name, None, trees[name],
                         common + ["--tops", "1", "--segments", "3"], a, 1, 3, plan["digests"][name])
             print("warm %-4s rc=%s %.1f s" % (name, m["rc"], m["wall"]), flush=True)
+            if m["rc"] != 0 and not a.keep_going:      # the recorded runs would fail alike
+                sys.exit("%s failed (rc=%s): see %s" % (tag, m["rc"], out / (tag + ".log")))
     for i, name in enumerate(seq):
         tag = "%02d_%s" % (i + 1, name)
         m = run_one(out, tag, name, i, trees[name],
@@ -745,7 +919,9 @@ def main(argv=None):
     r.add_argument("--device", default="gpu:0")
     r.add_argument("--tops", type=int, default=27)
     r.add_argument("--segments", type=int, default=28)
-    r.add_argument("--cores", default=None, help="taskset core list for every process, e.g. 12-15")
+    r.add_argument("--cores", required=True,
+                   help="taskset core list for every process, e.g. 12-15 (required: an unpinned "
+                        "process moves between cores the machine's other jobs load)")
     r.add_argument("--nice", type=int, default=0)
     r.add_argument("--warm", type=int, default=1,
                    help="unrecorded short runs (1 top x 3 segments) of each tree first (default 1)")
