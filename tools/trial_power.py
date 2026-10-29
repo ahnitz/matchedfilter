@@ -42,6 +42,7 @@ Rates far below one over the number of logged rounds rest on the model's tails, 
 observation; the report gives both. The table for D8 (docs/trial-statistics.md) leads.
 """
 import argparse
+import copy
 import glob
 import gzip
 import json
@@ -54,6 +55,8 @@ import numpy as np
 #: The current rule's parameters (_choice: TIE, the share in paired_choice, MINIMUM, CAP).
 TIE, SHARE, MINIMUM, CAP = 0.05, 0.75, 5, 10
 GAINS = (0.02, 0.05, 0.10)
+#: The fewest rounds a sample of its own is taken from (Null; the logged confirmations).
+MIN_SAMPLE = 20
 
 
 # ---- the log ---------------------------------------------------------------------------------
@@ -477,23 +480,27 @@ def simulate(stat_name, draws, test, minimum):
 # ---- the null by position, as a model ----------------------------------------------------------
 
 class Null:
-    """A group's measured null of a round's A/A log ratio x. A process's first EARLY rounds of
-    a contest are its first timed runs, and each has its own sample (the contest rounds of
-    that number, where at least 20 were logged); later rounds and confirmations are split by
-    where the A/A arm ran -- after the preference (the order of the candidates: odd rounds)
-    or before it (reversed: even rounds) -- since a challenger alternates the same way (the
-    pooled later rounds where either side has fewer than 20). p() and draws() give round n
-    its sample; later() is the null of a contest that starts later in the process (a
-    confirmation)."""
+    """A group's measured null of a round's A/A log ratio x. The first EARLY rounds of a
+    contest are the noisiest, and each has its own sample (the contest rounds of that
+    number, where at least MIN_SAMPLE were logged). Later rounds -- the contest rounds after
+    those, and every confirmation round -- are split by where the A/A arm ran: after the
+    preference (the order of the candidates: odd rounds) or before it (reversed: even
+    rounds), since a challenger alternates the same way (the pooled later rounds where either
+    side has fewer than MIN_SAMPLE). p() and draws() give round n its sample. later() is the
+    null of a contest that starts after the first rounds (a confirmation): every round from
+    the later rounds' samples. `confirm` holds the logged confirmation rounds' x, a direct
+    sample of that null."""
 
     EARLY = 3
 
-    def __init__(self, rounds, early=True):
+    def __init__(self, rounds):
         self.x = log_ratios(rounds)
-        after, before, first = [], [], defaultdict(list)
+        after, before, first, confirm = [], [], defaultdict(list), []
         for r in rounds:
             x = math.log(float(r["aa_ratio"]))
-            if early and r.get("phase") == "contest" and int(r["round"]) <= self.EARLY:
+            if r.get("phase") == "confirm":
+                confirm.append(x)
+            if r.get("phase") == "contest" and int(r["round"]) <= self.EARLY:
                 first[int(r["round"])].append(x)
                 continue
             o = r.get("order", [])
@@ -501,29 +508,42 @@ class Null:
             if "A/A" in o and pref in o:
                 (after if o.index("A/A") > o.index(pref) else before).append(x)
         self.after, self.before = np.asarray(after), np.asarray(before)
-        if min(self.after.size, self.before.size) < 20:
+        if min(self.after.size, self.before.size) < MIN_SAMPLE:
             late = np.concatenate([self.after, self.before])
-            self.after = self.before = late if late.size >= 20 else self.x
-        self.first = {n: np.asarray(v) for n, v in first.items() if len(v) >= 20}
-        self._rounds = rounds
+            self.after = self.before = late if late.size >= MIN_SAMPLE else self.x
+        self.first = {n: np.asarray(v) for n, v in first.items() if len(v) >= MIN_SAMPLE}
+        self.confirm = np.asarray(confirm)
 
     def later(self):
-        """The null of a contest that starts after the process's first rounds."""
-        if getattr(self, "_later", None) is None:
-            self._later = self if not self.first else Null(self._rounds, early=False)
-        return self._later
+        """The null of a contest that starts after the first rounds (a confirmation): this
+        null with no first-round samples, so that every round draws from the later rounds'
+        sample of its parity."""
+        if not self.first:
+            return self
+        late = copy.copy(self)
+        late.first = {}
+        return late
 
     def _sample(self, n):
         return self.first.get(n, self.after if n % 2 else self.before)
 
     def p(self, below, shift=0.0):
         """Round n -> P(shift + x < below), x from round n's sample (a callable for _pn)."""
+        return self._p(below, shift, lambda k, n: k / n)
+
+    def p_upper(self, below, shift=0.0, level=0.95):
+        """As p, with each sample's share at the upper end of its Clopper-Pearson interval
+        (every sample at once: a bound, not an interval of the rate)."""
+        return self._p(below, shift, lambda k, n: clopper_pearson(k, n, level)[1])
+
+    def _p(self, below, shift, share):
         cache = {}
 
         def pn(n):
             key = n if n in self.first else ("odd" if n % 2 else "even")
             if key not in cache:
-                cache[key] = float(np.mean(self._sample(n) + shift < below))
+                s = self._sample(n)
+                cache[key] = float(share(int(np.count_nonzero(s + shift < below)), s.size))
             return cache[key]
         return pn
 
@@ -608,35 +628,50 @@ def dependence_section(rounds, out):
 def current_rows(name, null, m, tau=0.0):
     """The current rule's measured false-switch rate in a group: per-round win probability
     (pooled, with its interval; rounds 1-3 and later odd / even rounds), one contest, with
-    confirmation for 1 and m equal challengers, at the interval's upper end (every round's
-    probability raised by the interval's excess), and with a contest effect of sd tau."""
+    confirmation for 1 and m equal challengers, the same with every sample's probability at
+    the upper end of its 95% interval (Null.p_upper), with a contest effect of sd tau, and,
+    where at least MIN_SAMPLE confirmation rounds were logged, with the confirmation's
+    rounds drawn from those (one pooled probability, with its interval; "confirm": rate, low,
+    high, rounds, else None)."""
     d = describe(null.x)
     below = math.log(1 - TIE)
     pp = null.p(below)
-    up = d["p_win_ci"][1] - d["p_win"]
-
-    def raised(nl):
-        f = nl.p(below)
-        return lambda n: min(1.0, f(n) + up)
-    q_hi1 = current_dp(raised(null))[0]
-    q_hi2 = current_dp(raised(null.later()))[0]
+    q_hi1 = current_dp(null.p_upper(below))[0]
+    q_hi2 = current_dp(null.later().p_upper(below))[0]
+    first = 1 - (1 - current_dp(pp)[0]) ** m
+    confirm = None
+    if null.confirm.size >= MIN_SAMPLE:
+        k, n = int(np.count_nonzero(null.confirm < below)), int(null.confirm.size)
+        confirm = (first * current_dp(k / n)[0],) + tuple(
+            first * current_dp(v)[0] for v in clopper_pearson(k, n)) + (n,)
     return dict(name=name, p=d["p_win"], ci=d["p_win_ci"], m=m, tau=tau,
                 per_round=[pp(n) for n in (1, 2, 3, 11, 12)],
                 contest=current_dp(pp)[0], one=current_under(null, 1)[0], many=current_under(null, m)[0],
-                many_hi=(1 - (1 - q_hi1) ** m) * q_hi2,
+                many_hi=(1 - (1 - q_hi1) ** m) * q_hi2, confirm=confirm,
                 many_tau=with_contest_effect(lambda u: current_under(null, m, -u)[0], tau),
                 rounds=current_dp(pp)[1])
 
 
 def windows(cons, cap):
     """Consecutive non-overlapping windows of cap A/A log ratios from every contest at least
-    that long, each starting at an odd round (the order's parity kept), in round order."""
+    that long, in round order: (its first round, its contest's phase, the log ratios). The
+    first window of a contest starts at its round 1, so it holds the contest's first rounds;
+    each starts at an odd round (the order's parity kept)."""
     out = []
     for c in cons:
         x = np.log([float(r["aa_ratio"]) for r in c])
         for i in range(0, x.size - cap + 1, cap):
-            out.append(x[i:i + cap])
+            out.append((int(c[i]["round"]), c[i]["phase"], x[i:i + cap]))
     return out
+
+
+def window_p(null, start, phase, below):
+    """The model's round-win probability (P(x < below)) for the rounds of a window that
+    starts at round `start` of a contest of the given phase, as a callable for _pn: a
+    contest's own rounds from `start` on (the first rounds' samples where they fall in the
+    window), a confirmation's from the later rounds."""
+    f = (null if phase == "contest" else null.later()).p(below)
+    return lambda n: f(start + n - 1)
 
 
 def run_current(seq, tie=TIE, minimum=MINIMUM, share=SHARE):
@@ -663,20 +698,26 @@ def run_sign(seq, crit, delta=0.0):
     return False
 
 
-def empirical_rows(cons, alphas):
-    """Rules run on the logged A/A sequences in their order: (rule, windows, switches) for
-    windows of 10 and of 20 rounds."""
+def empirical_rows(cons, alphas, null):
+    """Rules run on the logged A/A sequences in their order: (cap, rule, windows, switches,
+    the switches the model expects) for windows of 10 and of 20 rounds; the expectation sums
+    each window's switch probability for independent rounds from the null at that window's
+    place (window_p)."""
     rows = []
     for cap in (10, 20):
         ws = windows(cons, cap)
-        rules = [("current rule, one contest (no confirmation)", lambda s: run_current(s))]
+        rules = [("current rule, one contest (no confirmation)", lambda s: run_current(s),
+                  lambda st, ph: current_dp(window_p(null, st, ph, math.log(1 - TIE)), MINIMUM, cap)[0])]
         for delta in (0.0, 0.02):
             for a in alphas:
                 crit = sign_boundary(a, MINIMUM, cap)[0]
                 rules.append(("sign test, delta %g, alpha %g" % (delta, a),
-                              lambda s, crit=crit, d=delta: run_sign(s, crit, d)))
-        for lab, f in rules:
-            rows.append((cap, lab, len(ws), sum(bool(f(w)) for w in ws)))
+                              lambda s, crit=crit, d=delta: run_sign(s, crit, d),
+                              lambda st, ph, crit=crit, d=delta: sign_dp(
+                                  crit, window_p(null, st, ph, math.log(1 - d)), cap)[0]))
+        for lab, f, model in rules:
+            rows.append((cap, lab, len(ws), sum(bool(f(x)) for _, _, x in ws),
+                         sum(model(st, ph) for st, ph, _ in ws)))
     return rows
 
 
@@ -763,11 +804,9 @@ def d8_rows(nulls, cur, deltas, alphas, caps):
                     def fs(u, crit=crit, null=null, m=m, below=below):
                         return 1 - (1 - sign_dp(crit, null.p(below - u), cap)[0]) ** m
 
-                    def fs_cur(u, null=null, m=m):
-                        return current_under(null, m, -u)[0]
                     row["groups"][name] = dict(
                         fs=fs(0.0), cur=cur[name]["many"], rounds_lost=sign_dp(crit, 0.0, cap)[1],
-                        fs_tau=with_contest_effect(fs, tau), cur_tau=with_contest_effect(fs_cur, tau),
+                        fs_tau=with_contest_effect(fs, tau), cur_tau=cur[name]["many_tau"],
                         power=[sign_dp(crit, null.p(below, math.log(1 - g)), cap)[0] for g in GAINS],
                         rounds0=sign_dp(crit, null.p(below), cap)[1],
                         rounds5=sign_dp(crit, null.p(below, math.log(0.95)), cap)[1])
@@ -788,65 +827,85 @@ def round_cost(rounds):
     return float(np.mean(cost)) if cost else float("nan")
 
 
-#: Power within this of the current rule's counts as kept (the table prints three decimals).
-KEPT = 0.002
+def power_deficit(groups, cp):
+    """(deficit, group, gain): the largest amount by which a rule's power at a gain of 5% or
+    more falls short of the current rule's under any group's null, and where; (0.0, None,
+    None) when it is short nowhere, i.e. when the rule keeps the current rule's power
+    (groups: d8_rows' per-group results; cp: the current rule's powers per group)."""
+    worst = (0.0, None, None)
+    for n, v in groups.items():
+        for i, g in enumerate(GAINS):
+            if g >= 0.05 and cp[n][0][i] - v["power"][i] > worst[0]:
+                worst = (cp[n][0][i] - v["power"][i], n, g)
+    return worst
 
 
-def keeps_power(groups, cp):
-    """Whether a rule's power at every gain of 5% or more is at least the current rule's, to
-    within KEPT, under every group's null (groups: d8_rows' per-group results; cp: the
-    current rule's powers per group)."""
-    return all(v["power"][i] >= cp[n][0][i] - KEPT for n, v in groups.items()
-               for i, g in enumerate(GAINS) if g >= 0.05)
+def d8_verdicts(groups, worst_cur, worst_cur_tau):
+    """(every, worst, every with the contest effect, worst with it) for one rule's per-group
+    results (d8_rows): whether its false-switch rate is no larger than the current rule's
+    under each group's null, and whether its largest is no larger than the current rule's
+    largest; then the same with each group's contest effect added to both."""
+    v = list(groups.values())
+    return (all(g["fs"] <= g["cur"] for g in v), max(g["fs"] for g in v) <= worst_cur,
+            all(g["fs_tau"] <= g["cur_tau"] for g in v), max(g["fs_tau"] for g in v) <= worst_cur_tau)
 
 
 def d8_section(nulls, cur, out, caps, compare=()):
     """The table D8 asks for: which exact sign tests are no looser than the current rule's
-    measured false-switch rate, under every group's null and under the worst group's, whether
-    they keep the current rule's power, and their power and rounds; the current rule first,
-    for reference. Then, per group, the current rule against the rules in `compare`
-    ((delta, alpha, cap) triples)."""
+    measured false-switch rate, under every group's null and under the worst group's (and
+    both with the contest effect), whether they keep the current rule's power, and their
+    power and rounds; the current rule first, for reference. Then, per group, the current
+    rule against the rules in `compare` ((delta, alpha, cap) triples)."""
     names = [n for n, _, _ in nulls]
     deltas = (0.0, 0.01, 0.015, 0.02, 0.025, 0.03, 0.04, 0.05)
     alphas = (0.05, 0.02, 0.01, 5e-3, 3e-3, 2e-3, 1e-3, 1e-4)
     rows = d8_rows(nulls, cur, deltas, alphas, caps)
+    want = {(float(d), float(a), int(c)) for d, a, c in compare}
+    have = {(r["delta"], r["alpha"], r["cap"]) for r in rows}
+    rows += [d8_rows(nulls, cur, k[:1], k[1:2], k[2:])[0] for k in sorted(want - have)]
     worst_cur = max(cur[n]["many"] for n in names)
+    worst_cur_tau = max(cur[n]["many_tau"] for n in names)
+    worst_name = max(names, key=lambda n: cur[n]["many"])
     out += ["## Candidate rules against D8 (no looser than the current measured false-switch rate)", "",
             "False-switch rates are per contest at gain 0 for each group's m equal challengers (Holm: "
             "alpha / m per arm; the current rule with its confirmation). \"Every group\": the test's rate "
             "is no larger than the current rule's under each group's null; \"worst\": its largest rate "
-            "is no larger than the current rule's largest (%s); \"keeps power\": its power at 5%% and 10%% "
-            "is at least the current rule's under every group's null (to within %g). Listed: every rule "
-            "that meets \"every group\", and those that meet \"worst\" and keep the power (the per-group "
-            "rates of all are below). Power for one challenger of the gain, "
-            "worst group / best group; rounds: the largest expected count at gain 0 and at 5%%, and the "
-            "rounds a challenger that loses every round runs (the usual case: on most banks the CPU's challengers are "
-            "1.1-2.2x slower), which with each group's cost of a round (below) is the trial's overhead."
-            % (_rate(worst_cur), KEPT), "",
-            "| rule | every group | worst | keeps power | %s | rounds at 0 / 5%% | rounds, all lost |"
-            % _gains_head().replace("power", "power (worst / best)"),
-            "|---|---|---|---|" + "---|" * len(GAINS) + "---|---|"]
+            "is no larger than the current rule's largest (%s, %s). \"With the contest effect\": the same "
+            "two with each group's contest effect added to both rules (an upper bound for each; the "
+            "current rule's largest is then %s). \"Keeps power\": its power at 5%% and 10%% is at least "
+            "the current rule's under every group's null, exactly; where it is not, the largest "
+            "shortfall and where. Listed: every rule that meets \"every group\", those that meet "
+            "\"worst\" and keep the power, and the rules compared below (the per-group rates of all are "
+            "below). Power for one challenger of the gain, worst group / best group; rounds: the largest "
+            "expected count at gain 0 and at 5%%, and the rounds a challenger that loses every round runs "
+            "(the usual case: on most banks the CPU's challengers are 1.1-2.2x slower), which with each "
+            "group's cost of a round (below) is the trial's overhead."
+            % (_rate(worst_cur), worst_name, _rate(worst_cur_tau)), "",
+            "| rule | every group | worst | with the contest effect: every / worst | keeps power | %s "
+            "| rounds at 0 / 5%% | rounds, all lost |" % _gains_head().replace("power", "power (worst / best)"),
+            "|---|---|---|---|---|" + "---|" * len(GAINS) + "---|---|"]
     cp = {}
     for name, _, null in nulls:
         below = math.log(1 - TIE)
         cp[name] = ([current_under(null, 1, math.log(1 - g))[0] for g in GAINS],
                     current_dp(null.p(below))[1], current_dp(null.p(below, math.log(0.95)))[1])
-    out.append("| current (TIE 5%%, 75%%, 5/10, confirm) | (reference) | (reference) | (reference) | %s | %.1f / %.1f | %.0f |" % (
-        " | ".join("%.3f / %.3f" % (min(cp[n][0][i] for n in names), max(cp[n][0][i] for n in names))
-                   for i in range(len(GAINS))),
-        max(cp[n][1] for n in names), max(cp[n][2] for n in names), current_dp(0.0)[1]))
+    out.append("| current (TIE 5%%, 75%%, 5/10, confirm) | (reference) | (reference) | (reference) | (reference) "
+               "| %s | %.1f / %.1f | %.0f |" % (
+                   " | ".join("%.3f / %.3f" % (min(cp[n][0][i] for n in names), max(cp[n][0][i] for n in names))
+                              for i in range(len(GAINS))),
+                   max(cp[n][1] for n in names), max(cp[n][2] for n in names), current_dp(0.0)[1]))
+    yn = lambda b: "yes" if b else "no"         # noqa: E731
     for r in rows:
         g = r["groups"]
         if any(v is None for v in g.values()):
             continue
-        every = all(v["fs"] <= v["cur"] for v in g.values())
-        worst = max(v["fs"] for v in g.values()) <= worst_cur
-        kept = keeps_power(g, cp)
-        if not (every or (worst and kept)):
+        every, worst, every_tau, worst_tau = d8_verdicts(g, worst_cur, worst_cur_tau)
+        short, where, gain = power_deficit(g, cp)
+        if not (every or (worst and not short) or (r["delta"], r["alpha"], r["cap"]) in want):
             continue
-        out.append("| sign, delta %g, alpha %g, cap %d | %s | %s | %s | %s | %.1f / %.1f | %.0f |" % (
-            r["delta"], r["alpha"], r["cap"], "yes" if every else "no", "yes" if worst else "no",
-            "yes" if kept else "no",
+        out.append("| sign, delta %g, alpha %g, cap %d | %s | %s | %s / %s | %s | %s | %.1f / %.1f | %.0f |" % (
+            r["delta"], r["alpha"], r["cap"], yn(every), yn(worst), yn(every_tau), yn(worst_tau),
+            "yes" if not short else "no: %.2g short at %d%% (%s)" % (short, round(100 * gain), where),
             " | ".join("%.3f / %.3f" % (min(v["power"][i] for v in g.values()), max(v["power"][i] for v in g.values()))
                        for i in range(len(GAINS))),
             max(v["rounds0"] for v in g.values()), max(v["rounds5"] for v in g.values()),
@@ -866,25 +925,24 @@ def d8_section(nulls, cur, out, caps, compare=()):
             for n in names)))
     out.append("")
     if compare:
-        have = {(r["delta"], r["alpha"], r["cap"]): r for r in rows}
-        chosen = []
-        for d, a, c in compare:
-            key = (float(d), float(a), int(c))
-            r = have.get(key) or d8_rows(nulls, cur, key[:1], key[1:2], key[2:])[0]
-            if all(v is not None for v in r["groups"].values()):
-                chosen.append(r)
+        by = {(r["delta"], r["alpha"], r["cap"]): r for r in rows}
+        chosen = [by[k] for k in ((float(d), float(a), int(c)) for d, a, c in compare)
+                  if all(v is not None for v in by[k]["groups"].values())]
         out += ["Per group, the current rule against %s: the false-switch rate at gain 0 (m equal "
-                "challengers), and the power at 5%% and 10%%:" % ", ".join(
+                "challengers; in brackets, with the group's contest effect added), and the power at 5%% "
+                "and 10%%:" % ", ".join(
                     "delta %g, alpha %g, cap %d" % (r["delta"], r["alpha"], r["cap"]) for r in chosen), "",
-                "| group | current: rate | 5% | 10% | " + " | ".join(
-                    "d %g a %g c %d: rate | 5%% | 10%%" % (r["delta"], r["alpha"], r["cap"]) for r in chosen) + " |",
+                "| group | current: rate (contest effect) | 5% | 10% | " + " | ".join(
+                    "d %g a %g c %d: rate (contest effect) | 5%% | 10%%" % (r["delta"], r["alpha"], r["cap"])
+                    for r in chosen) + " |",
                 "|---|---|---|---|" + "---|---|---|" * len(chosen)]
         i5, i10 = GAINS.index(0.05), GAINS.index(0.10)
         for n in names:
-            out.append("| %s | %s | %.3f | %.3f | %s |" % (
-                n, _rate(cur[n]["many"]), cp[n][0][i5], cp[n][0][i10], " | ".join(
-                    "%s | %.3f | %.3f" % (_rate(r["groups"][n]["fs"]), r["groups"][n]["power"][i5],
-                                          r["groups"][n]["power"][i10]) for r in chosen)))
+            out.append("| %s | %s (%s) | %.3f | %.3f | %s |" % (
+                n, _rate(cur[n]["many"]), _rate(cur[n]["many_tau"]), cp[n][0][i5], cp[n][0][i10], " | ".join(
+                    "%s (%s) | %.3f | %.3f" % (_rate(r["groups"][n]["fs"]), _rate(r["groups"][n]["fs_tau"]),
+                                               r["groups"][n]["power"][i5], r["groups"][n]["power"][i10])
+                    for r in chosen)))
         out.append("")
     return rows
 
@@ -915,22 +973,32 @@ def report(groups, alphas, caps, nsim, seed, compare=()):
         out += ["### %s" % name, ""]
         dependence_section(rounds, out)
     out += ["## The current rule's false-switch rate (TIE 5%, 75% share, minimum 5, cap 10)", "",
+            "The first contest draws rounds 1-3 from their own samples and later rounds by parity; the "
+            "confirmation, a contest that starts later, draws every round from the later rounds (contest "
+            "rounds after the third, and confirmation rounds), by parity. The last but one column draws the "
+            "confirmation from the logged confirmation rounds alone (pooled; with the range its 95%% "
+            "interval gives), where at least %d were logged." % MIN_SAMPLE, "",
             "| group | P(round win) [95% CI] | rounds 1 / 2 / 3, later odd / even | contest, m=1 | confirmed, m=1 "
-            "| confirmed, m | m | confirmed, m, at the CI's upper end | with the contest effect (tau) "
+            "| confirmed, m | m | confirmed, m, every sample at its 95% CI's upper end "
+            "| with the contest effect (tau) | confirmed, m, from the logged confirmations [95% CI] (rounds) "
             "| rounds (equal arms) |",
-            "|---|---|---|---|---|---|---|---|---|---|"]
+            "|---|---|---|---|---|---|---|---|---|---|---|"]
     for name, rounds, null in nulls:
         r = cur[name]
-        out.append("| %s | %s [%s, %s] | %s | %s | %s | %s | %d | %s | %s (%.3f) | %.2f |" % (
+        c = r["confirm"]
+        out.append("| %s | %s [%s, %s] | %s | %s | %s | %s | %d | %s | %s (%.3f) | %s | %.2f |" % (
             name, _f(r["p"]), _f(r["ci"][0]), _f(r["ci"][1]), " / ".join("%.3f" % v for v in r["per_round"]),
             _rate(r["contest"]), _rate(r["one"]), _rate(r["many"]), r["m"], _rate(r["many_hi"]),
-            _rate(r["many_tau"]), r["tau"], r["rounds"]))
+            _rate(r["many_tau"]), r["tau"],
+            "%s [%s, %s] (%d)" % (_rate(c[0]), _rate(c[1]), _rate(c[2]), c[3]) if c else "-", r["rounds"]))
     out += ["", "On the logged A/A sequences in their order (contests of at least 10 or 20 rounds, cut "
-            "into windows):", "", "| group | window | rule | windows | switches |", "|---|---|---|---|---|"]
-    for name, rounds, _ in nulls:
-        for cap, lab, nw, ns in empirical_rows(contests(rounds), (1e-2, 1e-3)):
+            "into windows from round 1, so a contest's first window holds its first rounds), against "
+            "the switches the model expects at each window's place:", "",
+            "| group | window | rule | windows | switches | expected (model) |", "|---|---|---|---|---|---|"]
+    for name, rounds, null in nulls:
+        for cap, lab, nw, ns, ex in empirical_rows(contests(rounds), (1e-2, 1e-3), null):
             if nw:
-                out.append("| %s | %d | %s | %d | %d |" % (name, cap, lab, nw, ns))
+                out.append("| %s | %d | %s | %d | %d | %s |" % (name, cap, lab, nw, ns, _f(ex)))
     out.append("")
     for name, rounds, null in nulls:
         m = cur[name]["m"]

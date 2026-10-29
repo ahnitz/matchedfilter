@@ -179,14 +179,24 @@ def test_a_rounds_cost_counts_every_run_but_the_calls_own():
     assert tp.round_cost([r]) == pytest.approx(2 * (1.0 + 3.0) - 1.0)
 
 
-def test_keeping_power_counts_gains_of_five_percent_and_more_within_the_tolerance():
-    """A rule keeps the current rule's power when its power at 5% and 10% is no more than
-    KEPT below the current rule's in every group; the 2% gain does not count."""
-    cp = {"a": ([0.5, 0.10, 0.60], 0.0, 0.0), "b": ([0.0, 0.05, 0.90], 0.0, 0.0)}
-    ok = {"a": {"power": [0.0, 0.10 - tp.KEPT, 0.60]}, "b": {"power": [0.0, 0.05, 0.95]}}
-    assert tp.keeps_power(ok, cp)
-    assert not tp.keeps_power(dict(ok, b={"power": [0.0, 0.05, 0.90 - 2 * tp.KEPT]}), cp)
-    assert not tp.keeps_power(dict(ok, a={"power": [0.0, 0.09, 0.60]}), cp)
+def test_the_power_deficit_counts_gains_of_five_percent_and_more_with_no_tolerance():
+    """A rule's power deficit is the largest shortfall against the current rule's power at a
+    gain of 5% or more in any group, with no tolerance; a shortfall at 2% does not count."""
+    i5, i10 = tp.GAINS.index(0.05), tp.GAINS.index(0.10)
+    n = len(tp.GAINS)
+    cur = [0.9] * n
+    cp = {"a": (list(cur), 0.0, 0.0), "b": (list(cur), 0.0, 0.0)}
+    same = {"a": {"power": list(cur)}, "b": {"power": list(cur)}}
+    assert tp.power_deficit(same, cp) == (0.0, None, None)
+    short = {"a": {"power": list(cur)}, "b": {"power": list(cur)}}
+    short["b"]["power"][i10] = 0.9 - 1e-6
+    d, g, gain = tp.power_deficit(short, cp)
+    assert g == "b" and gain == 0.10 and d == pytest.approx(1e-6)
+    if 0.02 in tp.GAINS:
+        low = {"a": {"power": list(cur)}, "b": {"power": list(cur)}}
+        low["a"]["power"][tp.GAINS.index(0.02)] = 0.0
+        assert tp.power_deficit(low, cp) == (0.0, None, None)
+    assert i5 < i10
 
 
 def test_the_interval_brackets_the_rate():
