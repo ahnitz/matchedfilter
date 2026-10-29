@@ -545,6 +545,8 @@ and third gives a trivial conflict there: keep both sides.
   `_COARSE_TILE` dead dict: still open (§3).
 - One Slang source for CUDA: `forward_tier0`, `refineItems` and the series kernels are shared;
   the CUDA coarse gate is still its own (`coarse_tc.cu`, tensor cores, CUDA-only by nature).
+  (Deleted 2026-10-29, decision D5: never chosen, 25-40% slower on the L40S; CUDA's coarse
+  kernels are now all built from `tierb.slang`. See docs/cuda-l40s-roofline.md, Phase 7.)
 
 
 ## 10. Cleanup and hardening pass (branch `cleanup/alpha-hardening`, on beff0a71)
@@ -682,3 +684,7 @@ to 16 for the large transforms) 1.15-1.32e7, the measured choice (8) 1.17-1.32e7
 size for measurement. Still frozen: `LDS_CAP`, `COARSE_BANDS`,
 `METAL_C16_PPG` / `TARGET_THREADS`, `COARSE_TC_WPB`, `_TC_BLOCKS_PER_SM`, `_TILE_BYTES`,
 `_STATIC_SHARED_MAX`, `_SPARSE_HOST`; a roofline bandwidth source for GPUs not in its table.
+(2026-10-29: `COARSE_BANDS`, `COARSE_TC_WPB` and `_TC_BLOCKS_PER_SM` were deleted with the
+kernels they sized, the fp32 tiled coarse kernel and the tensor-core gate. `_STATIC_SHARED_MAX`
+became `tools/build_ptx.py`'s `STATIC_SHARED_MAX`, CUDA's 48 KB per-block limit on static
+shared memory, a hardware limit rather than a tuned value.)

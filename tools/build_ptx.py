@@ -34,7 +34,7 @@ def _coarse_prelude(n, cap, ppg, table=True):
 
     table=False leaves out the fp16 twiddle table (the kernel then runs the twiddle
     recurrence). Both are built, the table variant with a "w" suffix, and the measured
-    coarse choice (_cudacompute._coarse_kernel) picks: on the L40S the table cost band 1024's
+    coarse choice (_gpuhier._time_coarse_layouts) picks: on the L40S the table cost band 1024's
     tiled build ~40% and band 512's ~10%, and was even at 64-256."""
     import sys as _sys
     _sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
@@ -58,7 +58,7 @@ LDS_CAP = {
 }
 
 #: Every coarse tile, as for SPIR-V and Metal (build_spirv.COARSE_TILES): the host times the
-#: shipped builds per device (_cudacompute._time_coarse).
+#: shipped builds per device (_gpuhier._time_coarse_layouts).
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from build_spirv import COARSE_TILES, MAX_TILED_BAND  # noqa: E402
 
