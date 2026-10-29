@@ -7,12 +7,14 @@ footing. Each tier runs on the previous tier's survivors.
 
 Two questions decide a chain, and they are kept separate:
 
-  ACCURACY  For a signal of strength `snr`, the thresholds g1..gk must dismiss
-            at most `fd` of the pairs the full filter would keep. Taken from
-            joint draws of every tier's coarse maximum and the fine maximum
-            under signal (the same construction as gatemodel, generalised from
-            two tiers to any set of bands; all candidate bands are drawn
-            jointly, so every chain is evaluated on the same draws).
+  ACCURACY  For a signal of strength `snr`, the thresholds g1..gk (and on the
+            CPU the direct refine's window) must dismiss `fd` of the pairs the
+            full filter would keep, on average, with the per-plan tail
+            gatemodel.fit_order states. Taken from joint draws of every tier's
+            coarse maximum and the fine maximum under signal (the same
+            construction as gatemodel, generalised from two tiers to any set of
+            bands; all candidate bands are drawn jointly, so every chain is
+            evaluated on the same draws).
 
   COST      Expected cost per (block, template) pair:
                 dense(b1) + sum_i P(reach tier i) sparse(b_i | density)
@@ -32,8 +34,9 @@ Two questions decide a chain, and they are kept separate:
 The model does not have to be exact. Its job is to keep the cheapest chain on a
 short list; the autotuner measures the short list on the real workload.
 
-The budget is split between the tiers by minimising that cost subject to the
-compound dismissal bound; the split is part of the chain's plan.
+The budget is split between the tiers by minimising that cost on half the draws, and
+the thresholds are fitted on the other half (plan_chain), so that no choice is judged on
+the draws it was made on; the split is part of the chain's plan.
 """
 import math
 import os
@@ -62,17 +65,27 @@ _SIG = _gm._SIG
 _NF = 16
 _MIN_BAND = 64
 
-#: Grid of per-tier budget shares searched when splitting fd across a chain. Chains of three or
-#: more tiers search a product of these grids, so they use the coarser one.
-_SPLIT = np.linspace(0.05, 0.95, 19)
-_SPLIT_COARSE = np.linspace(0.05, 0.95, 9)
+#: The per-tier budget shares the split search tries (plan_chain; three tiers search their
+#: product). MEASURED: the fitted plans of a search on 19 shares instead (19 x 19 for three
+#: tiers) cost within 0.05% of these on average over every given chain, and within 0.4 +- 0.3%
+#: for the pick, where a few of 50 picks change chain either way (5 profiles x 10 model seeds,
+#: n = 2048 and 4096, fd 1e-3, Zen 5 costs, with and without a direct refine; 2026-10-29). The
+#: fit moves every tier's threshold, so the split's fine structure matters little.
+_SPLIT = np.linspace(0.05, 0.95, 9)
 
 _SIGNAL_CACHE = OrderedDict()
 
+#: The noise blocks the model's pass rates rest on (model_draws), the signal simulation's
+#: first rows (_extend_signal): about 20 blocks pass a tier at a pass rate of 1e-3.
+_NOISE_BLOCKS = 20000
+
+
 def model_draws(fd):
-    """(signal draws, noise blocks) the model runs with at budget fd. The noise blocks are the
-    first of the signal simulation's draws (_simulate), so they cost nothing more."""
-    return _gm._nsamp_for(fd), 20000
+    """(detections, noise blocks) the model runs with at budget fd: the signal simulation's
+    detections (gatemodel._nsamp_for; None when the budget needs more than the model holds)
+    and the noise blocks, the first of the same simulation's draws (_simulate), so where it
+    runs as many they cost nothing more."""
+    return _gm._nsamp_for(fd), _NOISE_BLOCKS
 
 _NOISE_CACHE = OrderedDict()
 _CACHE_MAX = 64
@@ -201,24 +214,25 @@ def _engine_lags(n, bands, window):
     return w0, w1, c0, c1
 
 
-#: How many times its draws the signal simulation may run to keep half of them (_signal_records).
-_GROW = 4
-#: The signal simulation's records per (profile, n, bands, snr, draws, seed): every window's
-#: draws come from them (signal_draws), so a profile's windows share one simulation.
+#: Rows per block of the signal simulation's arrival draws (_arrivals): a row's arrival depends
+#: only on its row, so a simulation extended in steps draws what one run at once draws.
+_ARRIVAL_ROWS = 1 << 14
+#: The signal simulation per (profile, n, bands, snr, seed): every window's draws come from it
+#: (signal_draws), so a profile's windows share one simulation, extended when one needs more.
 _SIGNAL_RECORDS = OrderedDict()
 
 
-def signal_draws(power, n, bands, snr, nsamp, seed=_SEED, window=None, lags_too=False):
+def signal_draws(power, n, bands, snr, ndet, seed=_SEED, window=None, lags_too=False):
     """Joint draws of every band's coarse window maximum and the fine window maximum under a
     signal of strength snr arriving at a uniformly random time in the window.
 
     Returns (C, F), both (M, len(bands)) float32: C[:, i] band i's largest coarse statistic
     over the coarse lags the engine searches for `window` (None: the whole block); F every
     column the largest fine statistic over the window's lags (a broadcast view: every chain
-    conditions on the same fine maximum). The rows are the draws whose fine statistic reaches
-    snr somewhere in the block (only they can be kept; at least nsamp / 2 of them where
-    _GROW times nsamp draws find them), less the few a window whose span is not a multiple
-    of the coarsest band's step cannot place (below).
+    conditions on the same fine maximum). The rows hold exactly `ndet` detections, draws
+    whose fine window maximum reaches snr (kept_draws: only they can be kept), the last row
+    the ndet-th, and before them the few draws that reach snr elsewhere in the block only.
+    The simulation runs until it has them, however few of its draws a large snr keeps.
 
     One simulation, exact for stationary Gaussian noise: per draw a block's n bins with
     variance p_k, the fine statistic their n-point transform and band b's the b-point
@@ -235,91 +249,129 @@ def signal_draws(power, n, bands, snr, nsamp, seed=_SEED, window=None, lags_too=
     is dropped, which keeps a_r exactly uniform).
 
     With lags_too, returns ((C, F), (fine_at, coarse_at)): where each draw's fine maximum and
-    each band's coarse maximum lie, in samples after the signal's arrival."""
+    each band's coarse maximum lie, as block lags (coarse lags times the band's step), as the
+    engine's direct refine compares them (hmf.c refine_direct_pair)."""
     p = _norm_profile(power, n)
     bands = sorted(int(b) for b in bands)
     Fb = np.array([p[:b].sum() for b in bands])
     if Fb[0] <= 0:
         return None          # a band holding no power cannot gate; callers drop such bands (usable_bands)
     lags = _engine_lags(n, bands, window)
-    key = _key(p, n, bands, float(snr), int(nsamp), int(seed), lags, _NF)
+    ndet = int(ndet)
+    key = _key(p, n, bands, float(snr), ndet, int(seed), lags, _NF)
     hit = _SIGNAL_CACHE.get(key)
     if hit is not None:
         _SIGNAL_CACHE.move_to_end(key)
         return hit[0] if not lags_too else hit
-    C, F, at = _signal_window(_signal_records(p, n, bands, Fb, float(snr), int(nsamp), int(seed)),
-                              n, bands, lags)
+    sim = _signal_records(p, n, bands, Fb, float(snr), ndet, int(seed))
+    while True:
+        C, F, at = _signal_window(sim, n, bands, lags)
+        det = np.flatnonzero(F >= snr)
+        if det.size >= ndet:
+            break
+        # the window misses some of the block's detections: more, in proportion
+        kept = sim["t"].size
+        sim = _signal_records(p, n, bands, Fb, float(snr),
+                              kept + int(math.ceil((ndet - det.size) * kept / max(det.size, 1))) + 1,
+                              int(seed))
+    end = int(det[ndet - 1]) + 1 if ndet > 0 else 0
+    C, F, at = C[:end], F[:end], (at[0][:end], at[1][:end])
     hit = ((C, np.broadcast_to(F[:, None], C.shape)), at)
     _cache_put(_SIGNAL_CACHE, key, hit)
     return hit[0] if not lags_too else hit
 
 
-def _signal_records(p, n, bands, Fb, snr, M, seed):
-    """signal_draws' simulation: (t, u, records), per draw the signal's integer arrival t in
-    [0, R_max), a uniform u in [0, 1) placing it in a window, and per statistic (fine, then each
-    band) and side (right, left) the records (pos, val, off) of its running maximum outward
-    from the signal."""
-    key = _key(p, n, bands, snr, M, seed, _NF)
-    hit = _SIGNAL_RECORDS.get(key)
-    if hit is not None:
+def _arrivals(seed, R, row0, rows):
+    """(t, u) of the signal simulation's rows row0 .. row0 + rows: t its integer arrival,
+    uniform in [0, R), and u uniform in [0, 1), each row's from the block of _ARRIVAL_ROWS
+    holding it (its own generator)."""
+    ts, us = [], []
+    for blk in range(row0 // _ARRIVAL_ROWS, (row0 + rows - 1) // _ARRIVAL_ROWS + 1):
+        rng = np.random.default_rng([int(seed), _DOMAIN_SIGNAL, blk])
+        ts.append(rng.integers(0, R, _ARRIVAL_ROWS))
+        us.append(rng.random(_ARRIVAL_ROWS))
+    s = row0 % _ARRIVAL_ROWS
+    return (np.concatenate(ts)[s:s + rows].astype(np.int64), np.concatenate(us)[s:s + rows])
+
+
+def _signal_records(p, n, bands, Fb, snr, kept, seed):
+    """signal_draws' simulation, with at least `kept` draws kept: a dict holding the profile
+    it simulates and, per kept draw, the signal's integer arrival t in [0, R_max), a uniform u
+    in [0, 1) placing it in a window, and per statistic (fine, then each band) and side
+    (right, left) the records (pos, val, off) of its running maximum outward from the signal.
+    Extended in place when a request needs more kept draws: a row's draws depend only on its
+    row, so the draws are those of one simulation run at once."""
+    key = _key(p, n, bands, snr, seed, _NF)
+    sim = _SIGNAL_RECORDS.get(key)
+    if sim is not None:
         _SIGNAL_RECORDS.move_to_end(key)
-        return hit
-    # profiles alike in the gates' response share a simulation (_similar_get), whatever window
-    # each searches: a job's banks have nearly one reference profile
-    params = (n, tuple(bands), snr, M, seed, _NF)
-    unit, hit = _similar_get("signal-records", p, params)
-    if hit is not None:
-        _SIGNAL_RECORDS[key] = hit
+    else:
+        # profiles alike in the gates' response share a simulation (_similar_get), whatever
+        # window each searches: a job's banks have nearly one reference profile. It is
+        # extended with its own profile, so it stays one simulation.
+        params = (n, tuple(bands), snr, seed, _NF)
+        unit, sim = _similar_get("signal-records", p, params)
+        if sim is None:
+            sim = dict(p=p, Fb=Fb, rows=0, t=np.empty(0, np.int64), u=np.empty(0), recs=None,
+                       tab=None)
+            _similar_put("signal-records", unit, params, sim, keep=_RECORDS_MAX)
+        _SIGNAL_RECORDS[key] = sim
         while len(_SIGNAL_RECORDS) > _RECORDS_MAX:
             _SIGNAL_RECORDS.popitem(last=False)
-        return hit
-    k = np.arange(n)
-    # the signal's response, per arrival fraction, for the fine statistic then each band (bins
-    # [0, b), normalised as the band is): a band of b lags R apart at [rho b + e] holds it at
-    # its lag e after the one rho samples before the signal, d = e R - rho samples after it
-    tab = np.empty((_NF, 1 + len(bands), n), np.complex64)
-    for j in range(_NF):
-        q = p * np.exp(-2j * np.pi * k * (j / _NF) / n)
-        for s, (m, f) in enumerate([(n, 1.0)] + list(zip(bands, Fb))):
-            resp = np.fft.ifft(np.where(k < m, q, 0.0) if m < n else q) * (n * snr / np.sqrt(f))
-            R = n // m
-            d = (np.arange(m)[None, :] * R - np.arange(R)[:, None]) % n
-            tab[j, s] = resp[d].reshape(-1)
+    if sim["t"].size < kept:
+        _extend_signal(sim, n, bands, snr, kept, seed)
+    return sim
+
+
+def _extend_signal(sim, n, bands, snr, kept, seed):
+    """Simulate further rows of `sim` until it holds `kept` kept draws."""
+    p, Fb = sim["p"], sim["Fb"]
+    if sim["tab"] is None:
+        k = np.arange(n)
+        # the signal's response, per arrival fraction, for the fine statistic then each band
+        # (bins [0, b), normalised as the band is): a band of b lags R apart at [rho b + e]
+        # holds it at its lag e after the one rho samples before the signal, d = e R - rho
+        # samples after it
+        tab = np.empty((_NF, 1 + len(bands), n), np.complex64)
+        for j in range(_NF):
+            q = p * np.exp(-2j * np.pi * k * (j / _NF) / n)
+            for s, (m, f) in enumerate([(n, 1.0)] + list(zip(bands, Fb))):
+                resp = np.fft.ifft(np.where(k < m, q, 0.0) if m < n else q) * (n * snr / np.sqrt(f))
+                R = n // m
+                d = (np.arange(m)[None, :] * R - np.arange(R)[:, None]) % n
+                tab[j, s] = resp[d].reshape(-1)
+        sim["tab"] = tab
     # Draws whose fine statistic stays below snr at every lag cannot be kept by any window and
-    # hold no records. About half are kept at a usual snr (_gm._nsamp_for counts on it); far
-    # fewer at a large one, where only signals arriving close to a sample reach snr (about 3%
-    # at snr = 1000), so the simulation continues until half its draws' worth are kept, to at
-    # most _GROW times the draws.
+    # hold no records. About 0.6 are kept at a usual snr, far fewer at a large one, where only
+    # signals arriving close to a sample reach snr (about 3% at snr = 1000): each step runs the
+    # rows the kept share so far says are still needed (the first assumes all are kept), and
+    # three standard deviations of their count more, so that a third step is rare; what it
+    # overshoots stays for a later request. The model's noise blocks (_NOISE_BLOCKS) are the
+    # first rows' noise alone, recorded as they run (a third of a row's work): later rows'
+    # are left to noise_block_maxima, which simulates them should a request read that far.
     nkey = _key(p, n, bands, seed)
-    ts, us, parts = [], [], []
-    rows = kept = 0
-    step = M
-    while True:
-        rng = np.random.default_rng([int(seed), _DOMAIN_SIGNAL, len(parts)])
-        t = rng.integers(0, n // bands[0], step).astype(np.int64)
-        u = rng.random(step)
-        fi = ((rows + np.arange(step)) % _NF).astype(np.int32)
+    ts, us, parts = [sim["t"]], [sim["u"]], [] if sim["recs"] is None else [sim["recs"]]
+    rows, have = sim["rows"], sim["t"].size
+    while have < kept:
+        need = kept - have
+        step = need if not rows else int(math.ceil((need + 3 * math.sqrt(need)) * rows / max(have, 1)))
         held = _NOISE_RECORDS.get(nkey)
-        noise = (held[0] if held is not None else 0) == rows
-        recs, nrec = _simulate(p, n, bands, step, rows, seed, (tab, t, fi), noise, keep_at=snr)
+        noise = (held[0] if held is not None else 0) == rows < _NOISE_BLOCKS
+        if noise:
+            step = min(step, _NOISE_BLOCKS - rows)
+        t, u = _arrivals(seed, n // bands[0], rows, step)
+        fi = ((rows + np.arange(step)) % _NF).astype(np.int32)
+        recs, nrec = _simulate(p, n, bands, step, rows, seed, (sim["tab"], t, fi), noise, keep_at=snr)
         if nrec is not None:
             _add_noise_records(nkey, rows, step, nrec)
         keep = np.diff(recs[0][2]) > 0          # a kept draw's fine maximum has a record
         ts.append(t[keep]); us.append(u[keep])
         parts.append(tuple(_rows(r, keep) for r in recs))
         rows += step
-        kept += int(keep.sum())
-        if 2 * kept >= M or rows >= _GROW * M:
-            break
-        step = min(_GROW * M - rows, max(M // 4, int(math.ceil((M / 2 - kept) * rows / max(kept, 1) * 1.1))))
-    t, u = np.concatenate(ts), np.concatenate(us)
-    recs = tuple(_join_records([pt[q] for pt in parts]) for q in range(len(parts[0])))
-    out = (t, u, recs)
-    _SIGNAL_RECORDS[key] = out
-    while len(_SIGNAL_RECORDS) > _RECORDS_MAX:
-        _SIGNAL_RECORDS.popitem(last=False)
-    _similar_put("signal-records", unit, params, out, keep=_RECORDS_MAX)
-    return out
+        have += int(keep.sum())
+    sim["t"], sim["u"] = np.concatenate(ts), np.concatenate(us)
+    sim["recs"] = tuple(_join_records([pt[q] for pt in parts]) for q in range(len(parts[0])))
+    sim["rows"] = rows
 
 
 def _last_within(rec, reach):
@@ -345,9 +397,10 @@ def _both_sides(right, left, reach_right, reach_left):
 
 def _signal_window(sim, n, bands, lags):
     """(C, F, at) of signal_draws for the engine's lags `lags` (_engine_lags) from the
-    simulation's records: at = (fine lag, coarse lags per band) of each maximum, in samples
-    after the signal's arrival (its integer part)."""
-    t, u, recs = sim
+    simulation `sim` (_signal_records): at = (fine lag, coarse lags per band) of each maximum,
+    as block lags (a coarse lag times its band's step; a statistic searched over the whole
+    block wraps into it)."""
+    t, u, recs = sim["t"], sim["u"], sim["recs"]
     w0, w1, c0, c1 = lags
     span, step = w1 - w0, n // bands[0]
     # the window starts w0 (mod step) before the signal's grid, so its coarse lags are the
@@ -370,7 +423,13 @@ def _signal_window(sim, n, bands, lags):
         else:
             right, left = c1[i] + shift // R - 1 - js, js - (c0[i] + shift // R)
         C[:, i], e = _both_sides(_rows(recs[2 + 2 * i], ok), _rows(recs[3 + 2 * i], ok), right, left)
-        cat[:, i] = (js + e) * R - t
+        # (js + e) R - t samples after the signal, which lies w0 + a into the block
+        cat[:, i] = (js + e) * R - t + w0 + a
+        if c1[i] - c0[i] >= b:
+            cat[:, i] %= n
+    fat = fat + w0 + a
+    if whole:
+        fat %= n
     for x in (C, F, fat, cat):
         x.setflags(write=False)
     return C, F, (fat, cat)
@@ -529,7 +588,7 @@ def _noise_records(p, n, bands, nsim, seed):
     return _NOISE_RECORDS[key][1]
 
 
-def noise_block_maxima(power, n, bands, nsim=20000, seed=_SEED, window=None):
+def noise_block_maxima(power, n, bands, nsim=_NOISE_BLOCKS, seed=_SEED, window=None):
     """Noise-only block maxima of every band's coarse statistic, (nsim, len(bands)).
 
     Exact for stationary Gaussian noise with output profile `power`: bins are
@@ -661,8 +720,7 @@ class CostModel:
                                tuple((b, v["dense"], v["recheck"], tuple(v["excess"]))
                                      for b, v in sorted(self.screen.items())),
                                tuple((b, tuple(r)) for b, r in sorted(self.excess.items())),
-                               tuple(sorted((getattr(self, "direct", None) or {}).items())),
-                               getattr(self, "direct_single", True))
+                               getattr(self, "direct_lag", None), getattr(self, "direct_single", True))
         return sig
 
     def to_dict(self):
@@ -748,30 +806,46 @@ class CostModel:
             return 0.0
         return (self.forward_cost(chain, f) - self.forward) / float(ntemplates)
 
-    def with_direct(self, prices, single_tier=True):
-        """A copy whose refine is the cheaper of the measured whole-block refine and a direct
-        refine priced at prices[b] ticks per refined pair for a chain whose last tier is band
-        b (HierarchicalFilter._direct_prices: the direct refine's window scales with
-        n / b, so it favours chains ending in a wider band)."""
+    def with_direct(self, lag_price, single_tier=True):
+        """A copy that also prices a direct refine at lag_price ticks per lag of its window
+        (HierarchicalFilter._direct_price): a chain whose last tier reports its coarse lag
+        then refines a pair, with a window of half-width h coarse samples, at the cheaper of
+        the measured whole-block refine and 2 h n / b + 1 lags, b its last band (refine_for;
+        the window scales with n / b, so it favours chains ending in a wider band)."""
         import copy
         cm = copy.copy(self)
-        cm.direct = {int(b): float(v) for b, v in prices.items()}
+        cm.direct_lag = float(lag_price)
         # single_tier False: a one-tier chain's tier runs on the CPU's FP16 gate, which reports
         # no lag, so its survivors refine by transform (hmf.c hmf_tier.lagged).
         cm.direct_single = bool(single_tier)
         cm._sig = None
         return cm
 
-    def refine_for(self, chain, f):
-        """Ticks per refined pair for this chain at refine density f."""
+    def unscreened(self):
+        """A copy that prices no Q15 screen: the costs of a plan whose first tier runs without
+        one (a pinned chain's, HierarchicalFilter._arm_q15)."""
+        import copy
+        cm = copy.copy(self)
+        cm.screen = {}
+        cm._sig = None
+        return cm
+
+    def prices_direct(self, chain):
+        """Whether this model prices a direct refine for chain (with_direct)."""
+        return (getattr(self, "direct_lag", None) is not None
+                and (len(chain) > 1 or getattr(self, "direct_single", True)))
+
+    def refine_for(self, chain, f, hw=None):
+        """Ticks per refined pair for this chain at refine density f, with the direct refine's
+        window half-width hw (None: the whole-block refine)."""
         r = self.refine(f)
-        d = getattr(self, "direct", None)
-        if d and int(chain[-1]) in d and (len(chain) > 1 or getattr(self, "direct_single", True)):
-            r = min(r, d[int(chain[-1])])
+        if hw is not None and self.prices_direct(chain):
+            r = min(r, self.direct_lag * (2 * int(hw) * (self.n // int(chain[-1])) + 1))
         return r
 
-    def chain_cost(self, chain, reach):
-        """reach[i] = P(a pair reaches tier i+1) for i = 0..k-1, reach[k] = P(reaches refine)."""
+    def chain_cost(self, chain, reach, hw=None):
+        """reach[i] = P(a pair reaches tier i+1) for i = 0..k-1, reach[k] = P(reaches refine);
+        hw the direct refine's half-width (refine_for)."""
         c, screened = self.first_tier(chain[0], reach[1] if len(reach) > 1 else 1.0)
         if len(reach) > 1:
             # A bounding first tier's extra passes are the next stage's to pay for. Only the
@@ -784,7 +858,7 @@ class CostModel:
         # A one-tier chain behind the Q15 screen has no coarse lag to refine around (hmf.c: the
         # screen reports none), so its survivors refine by transform, as the engine runs them.
         f = reach[len(chain)]
-        c += f * (self.refine(f) if screened and len(chain) == 1 else self.refine_for(chain, f))
+        c += f * (self.refine(f) if screened and len(chain) == 1 else self.refine_for(chain, f, hw))
         return c
 
 
@@ -952,91 +1026,182 @@ def _smallest(col, m):
     return idx[np.argsort(col[idx], kind="stable")]
 
 
-#: plan_chain's candidate thresholds per (draws, chain): they do not depend on the cost model,
-#: so every template group pricing the same profile and window reuses them.
+#: plan_chain's candidates per (draws, chain, prune, half-widths): they do not depend on the
+#: cost model, so every template group pricing the same profile and window reuses them.
 _CAND_CACHE = OrderedDict()
 _CAND_CACHE_MAX = 4096
 
 
+def _halves(x):
+    """(search half, fit half) of the detections x: its even rows and its odd rows, each
+    contiguous. The detections are independent draws in simulation order, so the halves are
+    independent of each other."""
+    return np.ascontiguousarray(x[0::2]), np.ascontiguousarray(x[1::2])
+
+
+def _distances(sig, lags, bands, chain, snr, n):
+    """Per detection (kept_draws' rows), how far the fine maximum lies from the chain's last
+    tier's coarse maximum, in that tier's coarse samples: the direct refine's window of
+    half-width h around the coarse maximum holds the fine peak iff this is at most h
+    (hmf.c refine_direct_pair)."""
+    fat, cat = lags
+    keep = sig[1][:, 0] >= snr
+    return np.abs(fat[keep] - cat[keep, bands.index(chain[-1])]) / (n // int(chain[-1]))
+
+
+def _halfwidths(dist, allow, cost, chain, n):
+    """The direct refine's candidate half-widths for `chain` on the search half (dist its
+    detections' _distances): None, the whole-block refine, which loses no detection; and,
+    where the cost model prices a direct refine for the chain (CostModel.prices_direct), each
+    whole number of coarse samples at which a different set of the detections lies beyond
+    it, from the smallest leaving at most `allow` of them beyond it (gatemodel.
+    window_allowance; -1: none may be missed) to the largest whose window the model prices
+    below its dearest whole-block refine. Each is the smallest half-width with its set, so the
+    cheapest window losing those detections."""
+    if dist is None or cost is None or allow < 0 or not cost.prices_direct(chain):
+        return (None,)
+    R = n // int(chain[-1])
+    top = max(v for _, v in cost._refine)
+    hmax = int((top / cost.direct_lag - 1.0) // (2 * R))      # 2 h R + 1 lags priced below top
+    srt = np.sort(dist)[::-1]
+    hmin = max(1, int(math.ceil(srt[allow]))) if srt.size > allow else 1
+    if hmax < hmin:
+        return (None,)
+    up = np.ceil(dist[dist > hmin]).astype(np.int64)
+    return (None,) + tuple(sorted({hmin} | {int(h) for h in up[up <= hmax]}))
+
+
 def plan_chain(sig, noise, bands, chain, fd, cost, n, snr, prune=False, ntemplates=None,
-               model_f=False, memo=None):
-    """Thresholds for `chain` meeting compound dismissal <= fd at minimum modelled cost.
+               model_f=False, memo=None, lags=None):
+    """The thresholds and direct-refine half-width for `chain` that meet the false-dismissal
+    budget fd at minimum modelled cost.
 
-    sig, noise: signal_draws / noise_block_maxima over `bands` and the same window.
-    Returns dict(chain, thresholds, reach, cost) or None when fd cannot be resolved.
+    sig, noise: signal_draws / noise_block_maxima over `bands` and the same window; lags: the
+    draws' lags (signal_draws(..., lags_too=True)), for the direct refine's window where the
+    cost model prices one. Returns dict(chain, thresholds, reach, halfwidth, cost, q15,
+    search), or None when fd cannot be resolved: the thresholds and the half-width (None:
+    the whole-block refine) the filter runs with and the noise share reaching each tier and
+    the refine under them; the modelled cost, q15 and `search` (its thresholds, reach,
+    half-width and the search half's detections its window misses, of a budget of K) of the
+    plan as searched, which every choice ranks plans by.
 
-    Every threshold here dismisses at most the budget K of the M kept draws, so only
-    each column's K-or-so smallest values ever matter: the search works on those (a
-    selection, not a sort, per column) and on the few dismissed draws' indices, instead
-    of masking and sorting all M draws for every candidate split. Noise passes are
-    carried down the split search, so candidates sharing a prefix share its work.
+    The detections fall into two independent halves (_halves), and the plan's dismissal is
+    a fraction of the detections: those some tier dismisses or the direct refine's window
+    misses, together.
 
-    The search yields candidate (thresholds, reach) pairs that do not depend on the cost
-    model; only their pricing does. memo, a key naming the draws (_choose_chain passes the
-    profile, n, window and draw parameters), caches the candidates, so another template
-    group or cost model prices them without searching again. The cheapest candidate wins,
-    the earliest on a tie, as without the cache.
+    The SEARCH half decides the plan's structure. Every split of its budget of K dismissed
+    detections between the tiers (over the shares _SPLIT) and every candidate half-width
+    (_halfwidths: windows missing at most gatemodel.window_allowance of the detections, which
+    count against the same K) gives candidate thresholds, and the one the cost model prices
+    cheapest wins, the earliest on a tie. A search keeps the candidate those draws flatter,
+    so its dismissal on them is not its dismissal: nothing it chooses is judged on them.
+
+    The FIT half sets the thresholds: the search's, every tier moved by one shift fitted to
+    the fit half (_fit). Given the search half, the fit half is independent of the plan's
+    structure, so the plan's dismissal has mean fd and the tail gatemodel.fit_order sets,
+    whatever the search and every choice made from it (choose_chain's among chains included).
+
+    The search's candidates do not depend on the cost model; only their pricing does. Its
+    selection works on each column's K-or-so smallest values (a selection, not a sort) and
+    on the few dismissed draws' indices, and carries noise passes down the split search, so
+    candidates sharing a prefix share its work. memo, a key naming the draws (_choose_chain
+    passes the profile, n, window and draw parameters), caches the candidates, so another
+    template group or cost model prices them without searching again.
     """
-    key = None if memo is None else tuple(memo) + (tuple(int(b) for b in chain), bool(prune))
+    cols = [bands.index(b) for b in chain]
+    A, B = _halves(kept_draws(sig, bands, chain, snr))
+    K = int(round(float(fd) * (A.shape[0] + 1))) - 1      # the search half's budget, as the fit's
+    if K < 0 or B.shape[0] < 1:
+        return None
+    dA = dB = None
+    if lags is not None and cost is not None and cost.prices_direct(chain):
+        dA, dB = _halves(_distances(sig, lags, bands, chain, snr, n))
+    hws = _halfwidths(dA, _gm.window_allowance(float(fd), A.shape[0], B.shape[0]) if dA is not None
+                      else -1, cost, chain, n)
+    key = None if memo is None else tuple(memo) + (tuple(int(b) for b in chain), bool(prune), hws)
     cands = _CAND_CACHE.get(key) if key is not None else None
     if cands is None:
-        cands = _chain_candidates(sig, noise, bands, chain, fd, snr, prune)
+        dead = tuple(np.empty(0, np.int64) if h is None else np.flatnonzero(dA > h) for h in hws)
+        cands = _chain_candidates(A, noise, cols, K, prune, dead)
         if key is not None:
             _CAND_CACHE[key] = cands
             while len(_CAND_CACHE) > _CAND_CACHE_MAX:
                 _CAND_CACHE.popitem(last=False)
     else:
         _CAND_CACHE.move_to_end(key)
-    if cands is None:
-        return None
     best = None
-    for th, reach in cands:
-        c = cost.chain_cost(chain, list(reach)) if cost is not None else _flop_cost(chain, list(reach), n)
-        if ntemplates and getattr(cost, "band_forward", False):
-            # only the change from the full forward (already in `block`), so a chain without
-            # a measured credit is priced exactly as before; pick_stable's tie window is
-            # absolute-valued, so a credit that takes a total below zero still compares
-            c += cost.chain_forward_delta(chain, list(reach), ntemplates, model_f=model_f)
-        if best is None or c < best["cost"]:
-            best = dict(chain=tuple(chain), thresholds=th, reach=reach, cost=float(c))
-    if best is not None:
-        best["q15"] = (bool(cost.first_tier(chain[0], best["reach"][1])[1])
-                       if hasattr(cost, "first_tier") else False)
-    return best
-
-
-#: Standard errors of the kept draws' dismissal count a multi-tier chain's budget is cut by
-#: (_chain_candidates), for the selection bias of searching splits on the draws they are
-#: judged on. The bias does not depend on fd or n. On independent draws (tools/split_bias.py:
-#: 10 profiles x 30 model seeds, every chain of one to three bands, fd 1e-2 and 1e-3, n = 2048
-#: and 4096, where K, the dismissed count, is about 115), with no cut two-tier plans dismiss
-#: 1.024-1.028 of the budget and three-tier ones (a wider search) 1.034-1.042, +- 0.005; one
-#: tier, 1.003-1.007. At 0.75 they dismiss 0.954-0.972, and the chain choose_chain picks
-#: 0.963-0.983: the cut is about twice the bias (the mean is the budget at z 0.26-0.30 for two
-#: tiers, 0.37-0.44 for three, 0.37-0.55 for the pick; docs/gate-model.md, 2026-10-27). 0.75
-#: was measured at the model's own seed, which every profile shares, so its mean over
-#: profiles was one draw's, and that draw sat high. The one-sided 95% cut before it (1.645)
-#: left 0.92: gates passing work the budget allowed them to dismiss.
-_SPLIT_TOLERANCE_Z = 0.75
-
-
-def _chain_candidates(sig, noise, bands, chain, fd, snr, prune):
-    """plan_chain's search: every (thresholds, reach) it considers for `chain`, in its order,
-    or None when fd cannot be resolved."""
-    cols = [bands.index(b) for b in chain]
-    S = kept_draws(sig, bands, chain, snr)
-    M = S.shape[0]
-    k = len(chain)
-    if k == 1:
-        K = int(math.floor(float(fd) * M))   # the single-tier contract of gatemodel.gate_for
-    else:
-        # Splitting the budget searches many threshold combinations on the same draws and keeps
-        # the cheapest, which favours combinations whose dismissal those draws understate. A cut
-        # of the budget by its measured size removes that selection bias (_SPLIT_TOLERANCE_Z).
-        K = int(math.floor(float(fd) * M - _SPLIT_TOLERANCE_Z
-                           * math.sqrt(M * float(fd) * (1.0 - float(fd)))))
-    if K < 8:
+    for pth, preach, lasts in cands:
+        for hw, last in zip(hws, lasts):
+            if last is None:
+                continue
+            th, reach = pth + (last[0],), preach + (last[1],)
+            c = cost.chain_cost(chain, list(reach), hw) if cost is not None else _flop_cost(chain, list(reach), n)
+            if ntemplates and getattr(cost, "band_forward", False):
+                # only the change from the full forward (already in `block`), so a chain without
+                # a measured credit is priced exactly as before; pick_stable's tie window is
+                # absolute-valued, so a credit that takes a total below zero still compares
+                c += cost.chain_forward_delta(chain, list(reach), ntemplates, model_f=model_f)
+            if best is None or c < best[0]:
+                best = (float(c), th, reach, hw)
+    if best is None:
         return None
+    c, th, reach, hw = best
+    fit = _fit(B, dB, th, hw, fd)
+    if fit is None:
+        return None
+    thresholds, halfwidth = fit
+    q15 = bool(cost.first_tier(chain[0], reach[1])[1]) if hasattr(cost, "first_tier") else False
+    missed = 0 if hw is None else int(np.count_nonzero(dA > hw))
+    return dict(chain=tuple(chain), thresholds=thresholds,
+                reach=tuple(_reach(noise, cols, thresholds)), halfwidth=halfwidth, cost=c,
+                q15=q15, search=dict(thresholds=th, reach=reach, halfwidth=hw, missed=missed, K=K))
+
+
+def _fit(B, dist, thresholds, hw, fd):
+    """The plan's (thresholds, half-width) from the fit half B (M, k) of the detections, dist
+    their _distances (None without a direct refine): the search's `thresholds` and half-width
+    `hw`, every tier moved by one shift s, or None when M draws cannot place the budget.
+
+    A detection passes every tier at shift s iff s <= its score, the smallest of its coarse
+    maxima less their thresholds; one the window misses (dist > hw) is dismissed at any s. s
+    is the j-th smallest score, j = round(fd (M + 1)) (gatemodel.fit_order), so j - 1 of B
+    are dismissed, and on fresh draws the plan's dismissal is the j-th smallest of M uniforms
+    (gatemodel.fit_order): its mean is fd whatever the search chose.
+
+    Where the window alone misses j of B, the plan refines by transform instead (half-width
+    None), which misses none, and the tiers take the whole budget. That branch is taken on B,
+    so the plan is then not the j-th smallest uniform (fitted on the detections that showed
+    the window failing, 17 such plans dismissed 1.14 fd on average; tools/split_bias.py,
+    2026-10-29): the search offers only windows for which the branch has at most the
+    probability the fit's tail leaves (gatemodel.window_allowance, at most 0.002), so a plan
+    exceeds 1.25 fd with probability at most gatemodel._TAIL_SHARE with the branch included,
+    and its mean moves by at most that probability times the branch's dismissal."""
+    M = B.shape[0]
+    j = int(round(float(fd) * (M + 1)))
+    if j < 1 or j > M:
+        return None
+    th = np.asarray(thresholds, np.float64)
+    score = (B - th).min(axis=1)
+    if hw is not None:
+        out = dist > hw
+        if np.count_nonzero(out) >= j:
+            hw = None
+        else:
+            score[out] = -np.inf
+    s = float(np.partition(score, j - 1)[j - 1])
+    return tuple(max(float(g) + s, 0.0) for g in th), hw
+
+
+def _chain_candidates(S, noise, cols, K, prune, dead):
+    """plan_chain's search on the search half's detections S (M, k), each tier's coarse
+    maxima, with noise the noise blocks' maxima and cols the chain's columns of them: every
+    split of the budget of K dismissed detections it considers, in its order, as (earlier
+    thresholds, earlier reach, lasts). The earlier tiers' thresholds and the noise shares
+    reaching each tier; and per set in `dead`, detections dismissed whatever the tiers (the
+    direct refine's window's misses at one half-width), the last tier's threshold, the K-th
+    from the budget, and the noise share it passes on, or None where the set leaves it no
+    budget. A split the last tier has budget for under no set is left out."""
+    M, k = S.shape
     # The earlier tiers' thresholds sit at index <= K of their sorted columns; the last
     # tier's is the rem-th smallest alive value with rem + dismissed <= K.
     low = [_smallest(S[:, i], K + 1) for i in range(k - 1)]
@@ -1050,8 +1215,8 @@ def _chain_candidates(sig, noise, bands, chain, fd, snr, prune):
     # threshold the search tries are dismissed on every branch: the search runs on the others
     # only, their chain columns contiguous, with alive masks over them. A reach is the alive
     # count over all Nn blocks, the same float as the mean of a full-length mask.
-    dead = np.zeros(M, bool)
-    splits = _SPLIT if k <= 2 else _SPLIT_COARSE
+    marks = np.zeros(M, np.uint8)
+    splits = _SPLIT
     if k > 1:
         firsts = [int(math.floor(a * K)) for a in splits]
         g0 = min((float(low_val[0][i]) for i in firsts if i >= 1), default=None)
@@ -1062,33 +1227,35 @@ def _chain_candidates(sig, noise, bands, chain, fd, snr, prune):
 
     def consider(prefix, ndead, alive, fracs):
         """Given thresholds for tiers 0..k-2, the last uses the remaining budget: ndead draws
-        are dismissed (marked in dead), alive the noise blocks passing every earlier tier
-        (None: all of them), fracs those tiers' pass rates."""
-        rem = K - ndead
-        if rem < 0 or rem >= M - ndead:
-            return
-        # the rem-th smallest last-tier value among draws not yet dismissed
-        pos = np.flatnonzero(~dead[last_order]) if ndead else None
-        if pos is not None:
-            if pos.size <= rem:
-                return
-            at = pos[rem]
-        else:
-            if last_order.size <= rem:
-                return
-            at = rem
-        g = float(last_val[at])
-        th = list(prefix) + [g]
-        hit = Nc[-1] >= g
-        if alive is not None:
-            hit &= alive
-        reach = [1.0] + fracs + [int(np.count_nonzero(hit)) / Nn]
-        if prune and any(r > _USELESS_PASS for r in reach[1:len(chain)]):
+        are dismissed (marked), alive the noise blocks passing every earlier tier (None: all
+        of them), fracs those tiers' pass rates."""
+        if prune and any(r > _USELESS_PASS for r in fracs):
             # choosing: a tier that passes most of its pairs on to ANOTHER TIER only adds its
             # own cost. (The last tier's pass rate into the refine is not judged here: at a
             # low snr every chain refines most pairs, and the cost already says so.)
             return
-        out.append((tuple(th), tuple(reach)))
+        lasts = []
+        for D in dead:
+            extra = D[marks[D] == 0]
+            nd = ndead + int(extra.size)
+            rem = K - nd
+            at = None
+            if 0 <= rem < M - nd:
+                # the rem-th smallest last-tier value among draws not yet dismissed
+                marks[extra] = 255
+                pos = np.flatnonzero(marks[last_order] == 0)
+                marks[extra] = 0
+                at = int(pos[rem]) if pos.size > rem else None
+            if at is None:
+                lasts.append(None)
+                continue
+            g = float(last_val[at])
+            hit = Nc[-1] >= g
+            if alive is not None:
+                hit &= alive
+            lasts.append((g, int(np.count_nonzero(hit)) / Nn))
+        if any(x is not None for x in lasts):
+            out.append((tuple(prefix), (1.0,) + tuple(fracs), tuple(lasts)))
 
     def rec(i, prefix, remaining, ndead, alive, fracs):
         # tier i takes a share of the budget still unallocated; the last tier gets what is left
@@ -1104,20 +1271,24 @@ def _chain_candidates(sig, noise, bands, chain, fd, snr, prune):
             # draws this tier dismisses: its column strictly below g
             cut = int(np.searchsorted(low_val[i], g, side="left"))
             cand = low[i][:cut]
-            new = cand[~dead[cand]]
-            dead[new] = True
+            new = cand[marks[cand] == 0]
+            marks[new] = i + 1
             an = Nc[i] >= g
             if alive is not None:
                 an &= alive
             rec(i + 1, prefix + [g], remaining - share, ndead + int(new.size), an,
                 fracs + [int(np.count_nonzero(an)) / Nn])
-            dead[new] = False
+            marks[new] = 0
 
     if _C_SEARCH and all(len(o) == K + 1 for o in low) and len(last_order) == K + 1:
         from . import _core
-        return _core.chain_candidates(np.ascontiguousarray(S, np.float32), Nc, tuple(low), tuple(np.ascontiguousarray(v, np.float32) for v in low_val),
-                            np.ascontiguousarray(last_order, np.int64), np.ascontiguousarray(last_val, np.float32),
-                            tuple(float(a) for a in splits), int(K), int(Nn), bool(prune), float(_USELESS_PASS))
+        return _core.chain_candidates(np.ascontiguousarray(S, np.float32), Nc, tuple(low),
+                                      tuple(np.ascontiguousarray(v, np.float32) for v in low_val),
+                                      np.ascontiguousarray(last_order, np.int64),
+                                      np.ascontiguousarray(last_val, np.float32),
+                                      tuple(float(a) for a in splits), int(K), int(Nn), bool(prune),
+                                      float(_USELESS_PASS),
+                                      tuple(np.ascontiguousarray(d, np.int64) for d in dead))
     rec(0, [], 1.0, 0, None, [])
     return out
 
@@ -1179,7 +1350,9 @@ _CHOICE_CACHE = OrderedDict()
 
 def choose_chain(power, n, snr, fd, cost=None, max_tiers=3, floor=_MIN_BAND, nsim=None, window=None,
                  ntemplates=None, model_f=False, nsamp=None):
-    """Price every chain and return (best, all_plans sorted by cost).
+    """Price every chain and return (best, all plans sorted by cost): plan_chain's plans,
+    ranked by their searched cost, (None, []) when none can be planned. nsamp: the
+    detections to draw (default: model_draws').
 
     Cached like the draws it is built from: by profile signature, and reused for
     profiles within the cosine similarity gatemodel applies to them.
@@ -1189,6 +1362,8 @@ def choose_chain(power, n, snr, fd, cost=None, max_tiers=3, floor=_MIN_BAND, nsi
     dsamp, dsim = model_draws(fd)
     nsamp = dsamp if nsamp is None else int(nsamp)
     nsim = dsim if nsim is None else int(nsim)
+    if nsamp is None:
+        return None, []          # the tail bound needs more detections than the model holds
     params = (n, float(snr), float(fd), int(max_tiers), int(floor), int(nsim), int(nsamp), win, _cost_sig(cost),
               # ntemplates prices the forward; measured refine-block fractions are left out of
               # the key on purpose, so a choice made once stays made in this process instead
@@ -1215,74 +1390,29 @@ def _choose_chain(power, n, snr, fd, cost, max_tiers, floor, nsim, window, ntemp
     if not bands:
         return None, []
     nsamp = _gm._nsamp_for(fd) if nsamp is None else int(nsamp)
-    sig = signal_draws(power, n, bands, snr, nsamp, window=window)
-    if sig is None:
+    drawn = signal_draws(power, n, bands, snr, nsamp, window=window, lags_too=True)
+    if drawn is None:
         return None, []
+    sig, lags = drawn
     noise = noise_block_maxima(power, n, bands, nsim=nsim, window=window)
     memo = ("choose", _gm._profile_sig(power), n, float(snr), float(fd), tuple(bands), window,
             int(nsim), int(nsamp))
     plans = []
     for chain in enumerate_chains(n, max_tiers, floor, bands=bands):
         pl = plan_chain(sig, noise, bands, list(chain), fd, cost, n, snr, prune=True,
-                        ntemplates=ntemplates, model_f=model_f, memo=memo)
+                        ntemplates=ntemplates, model_f=model_f, memo=memo, lags=lags)
         if pl is not None:
             plans.append(pl)
     plans.sort(key=lambda d: d["cost"])
     # Ties (within the calibration's process-to-process noise) go to the cheaper chain on the
-    # calibration-free flop proxy: deterministic for a given profile, and still a cost.
-    best = pick_stable(plans, lambda d: d["cost"], lambda d: (_flop_cost(d["chain"], d["reach"], n), d["chain"]))
+    # calibration-free flop proxy: deterministic for a given profile, and still a cost. Both
+    # are the searched plans' (plan_chain), so the choice is made on the search half only.
+    best = pick_stable(plans, lambda d: d["cost"],
+                       lambda d: (_flop_cost(d["chain"], d["search"]["reach"], n), d["chain"]))
     return best, plans
 
 
 _PLAN_CACHE = OrderedDict()
-
-
-_DIRECT_CACHE = OrderedDict()
-#: The share of the budget the direct refine's window may lose: detections whose fine peak
-#: lies further from the last tier's coarse maximum than the half-width. Some always do: a
-#: noise peak elsewhere in the window can be the coarse maximum while the signal is the fine
-#: one (at fd 1e-3, n = 2048, a chain ending in band 512 loses 5% of its budget so at any
-#: half-width; a maximum over the draws then meant refining the whole block).
-_LOCALISE_SHARE = 0.05
-
-
-def direct_halfwidth(power, n, chain, thresholds, snr, fd, window=None):
-    """Half-width, in last-tier coarse samples, of the direct refine's window around a pair's
-    largest last-tier coarse lag. Over the gate model's draws (signal_draws) that every tier
-    passes and the fine stage keeps, the distance from that lag to the fine peak: the
-    half-width is the smallest whole number (at least 1) beyond which at most
-    _LOCALISE_SHARE of fd of the kept draws lie, so the refine's window adds at most that to
-    the chain's dismissals. The draws are the gates' own (the same simulation, window and
-    count).
-
-    Returns (halfwidth, distances' 99.99th percentile, draws kept)."""
-    p = _norm_profile(power, n)
-    chain = tuple(int(b) for b in chain)
-    win = None if window is None else (int(window[0]), int(window[1]))
-    key = _key(p, n, chain, tuple(float(t) for t in thresholds), float(snr), float(fd), win)
-    hit = _DIRECT_CACHE.get(key)
-    if hit is not None:
-        return hit
-    bands = usable_bands(p, n)
-    out = (1, 0.0, 0)
-    sig = signal_draws(p, n, bands, snr, _gm._nsamp_for(fd), window=win, lags_too=True) \
-        if set(chain) <= set(bands) else None
-    if sig is not None:
-        (C, F), (fat, cat) = sig
-        ok = F[:, 0] >= snr
-        for b, thr in zip(chain, thresholds):
-            ok &= C[:, bands.index(b)] >= float(thr)
-        d = np.abs(fat - cat[:, bands.index(chain[-1])])[ok]
-        d = np.minimum(d, n - d) / (n // chain[-1])      # lags are circular in a block
-        if d.size:
-            # the fewest kept draws past the half-width: the largest distance with at most
-            # that many beyond it, rounded up
-            allow = int(math.floor(_LOCALISE_SHARE * float(fd) * d.size))
-            ds = np.sort(d)
-            hw = ds[ds.size - 1 - allow] if allow < ds.size else 0.0
-            out = (max(1, int(np.ceil(hw))), float(np.percentile(d, 99.99)), int(d.size))
-    _cache_put(_DIRECT_CACHE, key, out)
-    return out
 
 
 #: calibrate_costs(n, ntemplates, ...) measures this machine's tier costs at transform size n
@@ -1296,7 +1426,9 @@ calibrate_costs = None
 
 def chain_thresholds(power, n, snr, fd, chain, cost=None, floor=_MIN_BAND, nsim=None, window=None,
                      nsamp=None):
-    """Thresholds (and modelled reach/cost) for one given chain under `power`.
+    """The plan (plan_chain's: thresholds, reach, the direct refine's half-width where the
+    cost model prices one, cost) for one given chain under `power`, or None where it cannot
+    be planned. nsamp: the detections to draw (default: model_draws').
 
     Called whenever a plan's reference changes, inside the caller's filtering,
     so results are cached -- by profile signature, and reused for profiles
@@ -1308,6 +1440,8 @@ def chain_thresholds(power, n, snr, fd, chain, cost=None, floor=_MIN_BAND, nsim=
     dsamp, dsim = model_draws(fd)
     nsamp = dsamp if nsamp is None else int(nsamp)
     nsim = dsim if nsim is None else int(nsim)
+    if nsamp is None:
+        return None              # the tail bound needs more detections than the model holds
     key = _key(p, n, chain, float(snr), float(fd), win, int(nsim), int(nsamp), _cost_sig(cost))
     hit = _PLAN_CACHE.get(key)
     if hit is not None:
@@ -1321,11 +1455,11 @@ def chain_thresholds(power, n, snr, fd, chain, cost=None, floor=_MIN_BAND, nsim=
     bands = usable_bands(p, n, floor)
     if not set(chain) <= set(bands):
         return None
-    sig = signal_draws(p, n, bands, snr, nsamp, window=window)
-    if sig is None:
+    drawn = signal_draws(p, n, bands, snr, nsamp, window=window, lags_too=True)
+    if drawn is None:
         return None
     noise = noise_block_maxima(p, n, bands, nsim=nsim, window=window)
-    out = plan_chain(sig, noise, bands, list(chain), fd, cost, n, snr)
+    out = plan_chain(drawn[0], noise, bands, list(chain), fd, cost, n, snr, lags=drawn[1])
     _cache_put(_PLAN_CACHE, key, out)
     _similar_put("plan", unit, sim_params, out)
     return out

@@ -203,7 +203,7 @@ A step that changes C or workflows is first pushed to a `ci/<topic>` branch and 
 2. **Hierarchical `set_data` copies in C** (B5).
 3. **`MF_TRIAL_RECHECK` is deleted,** with `Choice.observe` and the steady re-check.
 4. **One PyPI release after milestone D,** with the behaviour changes batched in CHANGELOG.
-5. **The public surface** is the package root, `time_domain`, `search`, `device`, `precision`, and gatechain's documented `chain_thresholds`, `calibrate_costs`, `choose_chain` and `direct_halfwidth`. Private names may move without re-exports.
+5. **The public surface** is the package root, `time_domain`, `search`, `device`, `precision`, and gatechain's documented `chain_thresholds`, `calibrate_costs`, `choose_chain` and `direct_halfwidth`. Private names may move without re-exports. (2026-10-29: `direct_halfwidth` is removed; a plan carries its half-width, `chain_thresholds(...)["halfwidth"]`.)
 6. **E7 is adopted:** `HierarchicalSearch` uses the bank's window parser.
 7. **Concurrent writers to one `MF_COST_FILE` are not supported;** C7's warning is enough. Production does not set `MF_COST_FILE`. The long-term goal is to need no cost file at all, with no performance loss (unification stage 2's direction). New persisted state therefore needs a strong reason.
 8. **A read-only GitHub token** is set up on the dev hosts for `ci_status`.

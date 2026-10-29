@@ -105,10 +105,11 @@ list is required; do not use `f=1` as a zero-dismissal guarantee.
 The model runs at plan preparation, not in the filtering loop. Its
 simulations, draws and plans are cached by entry count (least recently used
 first) and shared by profiles that agree in shape and in each band's signal
-response (`gatechain._similar_get`). Tighter budgets need more signal draws
-(20,000 at .01, 200,000 at .001, 2,000,000 at .0001; `gatemodel._nsamp_for`).
-Requests below the available resolution refuse rather than falling back to
-an obsolete table. Kernel execution is unchanged.
+response (`gatechain._similar_get`). Tighter budgets need more signal draws:
+2 (round(j / fd) - 1) detections, j about 48 set by the per-plan tail bound
+(`gatemodel._nsamp_for`, `fit_order`): 9,398 at .01, 95,998 at .001, 959,998 at
+.0001. Requests below the available resolution (fd under 5.5e-5) refuse rather
+than falling back to an obsolete table. Kernel execution is unchanged.
 
 Cost is approximately first-tier work, plus each later tier's work on its
 survivors, plus the refined fraction times full-filter work. `refine_rate`

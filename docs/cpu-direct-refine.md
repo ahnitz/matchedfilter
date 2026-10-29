@@ -25,23 +25,34 @@ lag x tap on a Zen 5 core; a 33-lag window of a 215-tap filter is ~600 ticks aga
 
 With one bin per pair (the consumer's mode: `binsize = n`), direct refinement returns the
 largest |z| within its local refinement window. It does not establish the maximum over the
-whole requested output bin. The refine evaluates `halfwidth` coarse samples either side of the pair's
-largest last-tier coarse lag (the tier already reports it). `halfwidth` comes from the gate
-model itself (`gatechain.direct_halfwidth`), on the draws the thresholds are set from
-(`signal_draws(..., lags_too=True)`: the same simulation, search window and draw count),
-every tier applied with its threshold. Among the draws every tier passes and the fine stage
-keeps, it takes the distance from the last tier's coarse maximum to the fine peak; the
-model's half-width is the smallest whole number of coarse samples (at least 1) beyond which
-at most `_LOCALISE_SHARE` (5%) of fd of those draws lie, and the plan runs that plus one
-coarse sample (`HierarchicalFilter._direct_halfwidth`). The window therefore adds at most
-that share to the chain's dismissals, on top of the gates' budget. It is a property of the
-reference profile and the chain, in samples, not a constant. Some draws always lie far out:
-a noise peak elsewhere in the window can be the last tier's maximum while the signal is the
-fine one. Where they exceed the share, the half-width grows to reach them, up to the whole
-window, and the per-pair pricing (below) then takes the transform. When the rule was
-introduced (b1519cf9, 2026-10-26), every chain checked at fd 1e-2 stayed within 8 coarse
-samples, and at fd 1e-3 a chain ending in band 512 on the inspiral profile at n = 2048
-lost 5% of its budget at any half-width.
+whole requested output bin. The refine evaluates `halfwidth` coarse samples either side of
+the pair's largest last-tier coarse lag (the tier already reports it). `halfwidth` is part of
+the chain's plan (`gatechain.plan_chain`), chosen with its thresholds against one budget.
+The gate model's draws say, per detection, how far the fine peak lies from the last tier's
+coarse maximum (`signal_draws(..., lags_too=True)`); a window of half-width h misses those
+further than h, and they count as dismissed. The split search tries every half-width at
+which a different set of the detections lies outside it, each window's misses taken from
+the same budget as the tiers' dismissals and its lags priced per lag
+(`HierarchicalFilter._direct_price`, `CostModel.with_direct`), beside the whole-block
+refine, which misses nothing; the thresholds are then fitted with the misses counted. So
+the window adds nothing to fd: a cheaper refine buys a smaller tier share of the budget,
+and the plan runs the half-width the model counted (no extra coarse sample). Some draws
+always lie far out: a noise peak elsewhere in the window can be the last tier's maximum
+while the signal is the fine one, so a narrow window always misses a few, and where their
+share costs the tiers more than the window saves, the plan refines by transform
+(`halfwidth` None). On the model's independent draws (`tools/split_bias.py --taps 256`, Zen
+5 costs, n = 2048, fd 1e-3) 45% of all chains' plans and 58% of the picks take a window,
+whose misses are 8% and 5% of their dismissals, and the plans' total dismissal averages
+1.005 and 1.006 of fd. A window cannot move with the fit (it is a whole number of coarse
+samples), so where its own misses reach the fit's count the plan refines by transform.
+That branch is taken on the fit half, so it is not covered by the fit's exactness: the
+search offers only windows whose predictive probability of it is within what the tail
+bound leaves (`gatemodel.window_allowance`, docs/gate-model.md, 2026-10-29).
+
+A pinned chain's first tier runs without the Q15 screen, so its plan is priced that way
+(`HierarchicalFilter._thresholds`): a one-tier chain's tier then reports its lag, and its
+window is priced. Explicit thresholds (`set_coarse_threshold`) carry their own guarantee,
+which a window would add to, so they refine by transform.
 
 Checked on captured `pycbc_inspiral_fir` calls (12 groups, 1.08M pairs, n = 2048, threshold
 6): every above-threshold fine peak -- 34 noise triggers and 25,487 signals drawn as the

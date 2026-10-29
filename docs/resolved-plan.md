@@ -35,7 +35,7 @@ does building a new CPU plan. The CPU plan applies it once per plan and resoluti
 | chain | `_choose_chain`: the model's ranking (cached per profile in `_chains._CHAIN_CHOICE`), or `MF_CHAIN_FORCE` for measurement; a pinned chain as given |
 | thresholds | `_thresholds` (via `gatechain.chain_thresholds`), or explicit |
 | Q15 | the plan's joint-trial arm (`_arm_q15`): the arm's setting, else the cost model's (`_chains._Q15_MODEL`); off for a pinned chain |
-| direct refine | `_resolve` (`_direct_halfwidth`, from `gatechain.direct_halfwidth`) |
+| direct refine | `_resolve`: the half-width of the thresholds' plan (`gatechain.plan_chain`, through `_thresholds`); none with explicit thresholds |
 | GPU kernels | the device's kernel choices: the coarse layout and gate way per band (`_gpuhier`) |
 | bank layout | the bank's joint trial (`TimeDomainFilterBank.set_reference`, `time_domain._joint_round`) |
 

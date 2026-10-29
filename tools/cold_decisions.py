@@ -5,7 +5,8 @@
     tools/cold_decisions.py --compare A.json B.json
 
 Runs tools/ladder.py in this process with the gate and cost models wrapped: every call to
-price_block_sizes, choose_chain, chain_thresholds and direct_halfwidth is recorded with a
+price_block_sizes, choose_chain and chain_thresholds (whose plans carry the direct refine's
+half-width) is recorded with a
 digest of its arguments and its full result, in call order, with its own time. Comparing
 two records (an old and a new tree on the same inputs) shows whether a change to how the
 models compute moved any decision.
@@ -29,8 +30,7 @@ from pathlib import Path
 import numpy as np
 
 ROOT = Path(__file__).resolve().parent.parent
-WRAPPED = ("price_block_sizes", "choose_chain", "chain_thresholds", "direct_halfwidth",
-           "device_costs")
+WRAPPED = ("price_block_sizes", "choose_chain", "chain_thresholds", "device_costs")
 
 
 def _digest(x):

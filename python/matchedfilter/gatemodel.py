@@ -45,6 +45,9 @@ band at once so that a chain of tiers (and a single tier, its length-1 case)
 is calibrated from one sample set. This module keeps the single-band view:
 gate_for and dismissal, the quantities the validation above is stated in.
 """
+import functools
+import math
+
 import numpy as np
 
 #: Per-component variance is 1, so a complex draw normalised to E|z|^2 = 1
@@ -100,21 +103,103 @@ def _profile_sig_uncached(power):
     return hashlib.sha1(quant.tobytes()).digest() + len(p).to_bytes(4, "little")
 
 
+#: The per-plan tolerance of the false-dismissal budget (POLICY: roadmap decision D1, "fd is a
+#: target and no plan is much worse"): at most _TAIL_SHARE of plans may dismiss more than
+#: _TAIL_RATIO times fd. It sets how many draws the model takes (fit_order).
+_TAIL_RATIO = 1.25
+_TAIL_SHARE = 0.05
+
+#: The most detections the model holds (RESOURCE): each holds its statistics' running-maximum
+#: records, about 0.4 KB at n = 2048 (five bands) and 0.53 KB at 4096, so this is 0.7-0.9 GB.
+#: It is the detections the 3,000,000-draw cap held before (about 0.58 of the draws are
+#: detections at snr 5.5), and it reaches the tail bound down to fd = 5.5e-5. A budget
+#: needing more refuses.
+_MAX_DETECTIONS = 1750000
+
+
+def _binom_cdf(k, m, q):
+    """P(X <= k) for X ~ Binomial(m, q), summed from its terms."""
+    if q <= 0.0:
+        return 1.0
+    if q >= 1.0:
+        return 1.0 if k >= m else 0.0
+    lq, lp = math.log(q), math.log1p(-q)
+    lm = math.lgamma(m + 1)
+    return min(1.0, sum(math.exp(lm - math.lgamma(i + 1) - math.lgamma(m - i + 1) + i * lq + (m - i) * lp)
+                        for i in range(0, min(int(k), int(m)) + 1)))
+
+
+def plan_tail(fd, m):
+    """The probability that a plan fitted on m detections dismisses more than _TAIL_RATIO fd:
+    its dismissal is the j-th smallest of m uniforms, j = round(fd (m + 1)) (fit_order), so
+    this is P(Binomial(m, _TAIL_RATIO fd) <= j - 1)."""
+    fd = float(fd)
+    return _binom_cdf(int(round(fd * (m + 1))) - 1, int(m), min(1.0, _TAIL_RATIO * fd))
+
+
+@functools.lru_cache(maxsize=None)
+def fit_order(fd):
+    """The order statistic j a plan's thresholds are fitted at: the smallest whose plans meet
+    the tail bound (_TAIL_RATIO, _TAIL_SHARE).
+
+    A plan's thresholds are fitted on M draws it was not chosen on (gatechain.plan_chain): the
+    j-th smallest of their scores, M + 1 = round(j / fd). Given everything else in the plan,
+    those draws are independent of it and the score is continuous, so the plan's dismissal is
+    the j-th smallest of M uniforms: mean j / (M + 1) = fd, and above r fd with probability
+    P(Binomial(M, r fd) <= j - 1) (plan_tail). For a small fd its sd is about fd / sqrt(j).
+    Returns j."""
+    fd = float(fd)
+    j = 1
+    while plan_tail(fd, int(round(j / fd)) - 1) > _TAIL_SHARE:
+        j += 1
+    return j
+
+
+def _betabinom_sf(k, m, a, b):
+    """P(X > k) for X ~ BetaBinomial(m, a, b), from its terms up to k."""
+    lb = math.lgamma(a) + math.lgamma(b) - math.lgamma(a + b)
+    lm = math.lgamma(m + 1) - math.lgamma(m + a + b)
+    below = sum(math.exp(lm - math.lgamma(x + 1) - math.lgamma(m - x + 1) + math.lgamma(x + a)
+                         + math.lgamma(m - x + b) - lb) for x in range(0, min(int(k), int(m)) + 1))
+    return max(0.0, 1.0 - below)
+
+
+@functools.lru_cache(maxsize=None)
+def window_allowance(fd, ma, mb):
+    """The most of ma search-half detections the direct refine's window may miss, or -1 for
+    none (gatechain._halfwidths).
+
+    The fit (gatechain._fit) counts the window's misses among its mb detections as dismissed;
+    where they alone reach j = round(fd (mb + 1)) the plan cannot be fitted with that window and
+    refines by transform instead, a choice made on the fit half, which the fit's tail
+    (plan_tail) does not cover. So a window is offered only where the predictive probability
+    of that, given the m it misses on the search half, is at most the share of the tail bound
+    the fit leaves, _TAIL_SHARE - plan_tail(fd, mb): then the plan exceeds _TAIL_RATIO fd with
+    probability at most _TAIL_SHARE in all. The predictive count of misses among mb fresh
+    detections is BetaBinomial(mb, m + 1/2, ma - m + 1/2), the binomial under the Jeffreys
+    posterior of the miss rate. Returns the largest such m."""
+    fd = float(fd)
+    j = int(round(fd * (mb + 1)))
+    room = _TAIL_SHARE - plan_tail(fd, mb)
+    m = -1
+    while m + 1 < min(j, ma + 1) and _betabinom_sf(j - 1, mb, m + 1.5, ma - m - 0.5) <= room:
+        m += 1
+    return m
+
+
 def _nsamp_for(fd):
-    """Enough draws that the fd-quantile rests on a usable number of them.
+    """The detections the model draws at budget fd (draws the fine stage keeps; gatechain
+    simulates until it has them), or None when the tail bound needs more than _MAX_DETECTIONS.
 
-    Scaled to the BUDGET, which the caller gives us. Roughly half the draws
-    survive the detection cut, so 200/fd puts ~100 samples below the
-    quantile -- about +-10%, inside the +-20% the budget is itself quoted
-    to. A common fd=1e-2 costs 20k draws where a 1e-4 request needs 2M;
-    flooring every gate at the tightest case made them all pay for the
-    rarest one.
-
-    Below the floor the quantile is not a measurement and gate_for returns
-    None, so the caller refuses rather than guesses.
+    Two halves, each of round(j / fd) - 1 detections, j = fit_order(fd): a plan's structure is
+    searched on one and its thresholds fitted on the other (gatechain.plan_chain), so each
+    half rests on about j dismissed draws. A pure function of fd and the tail bound: at fd
+    1e-3, 2 x 47,999, about 167,000 draws at snr 5.5 (149,000-194,000 over the fdr_audit
+    profiles), where 200/fd drew 200,000.
     """
-    fd = max(float(fd), 1e-6)
-    return int(min(max(2.0e4, 200.0 / fd), 3.0e6))
+    fd = float(fd)
+    half = int(round(fit_order(fd) / fd)) - 1
+    return 2 * half if 2 * half <= _MAX_DETECTIONS else None
 
 
 def _validate(n, band, snr, fd):
@@ -137,20 +222,23 @@ def _check_power(power, n):
 
 
 def _kept(power, n, band, snr, fd):
-    """Sorted coarse maxima at `band` for draws the fine stage keeps, or None: each the
-    maximum over the whole block, as the engine searches it (gatechain.signal_draws)."""
+    """Sorted coarse maxima at `band` of the model's detections (draws the fine stage keeps)
+    at budget fd, or None: each the maximum over the whole block, as the engine searches it
+    (gatechain.signal_draws)."""
     from . import gatechain
     bands = gatechain.usable_bands(power, n)
-    if band not in bands:
+    ndet = _nsamp_for(fd)
+    if band not in bands or ndet is None:
         return None
-    sig = gatechain.signal_draws(power, n, bands, snr, _nsamp_for(fd))
+    sig = gatechain.signal_draws(power, n, bands, snr, ndet)
     if sig is None:
         return None
     return np.sort(gatechain.kept_draws(sig, bands, (band,), snr)[:, 0])
 
 
 def dismissal(power, n, band, snr, gate, fd_hint=1e-3):
-    """Modelled false-dismissal rate of a single tier at `band` with threshold `gate`."""
+    """Modelled false-dismissal rate of a single tier at `band` with threshold `gate`: the
+    share of the model's detections at budget fd_hint below it, or None where it has none."""
     _validate(n, band, snr, fd_hint)
     if not np.isfinite(gate) or gate < 0:
         raise ValueError("gate must be finite and nonnegative")
@@ -161,20 +249,17 @@ def dismissal(power, n, band, snr, gate, fd_hint=1e-3):
 
 
 def gate_for(power, n, band, snr, fd):
-    """The largest single-tier gate at `band` whose modelled dismissal still meets `fd`.
-
-    The length-1 chain of gatechain.chain_thresholds, from the same draws.
-    Returns None when the budget is below what this many draws can place,
-    so the caller refuses rather than guessing.
+    """The single-tier gate at `band` whose modelled dismissal is `fd`: the threshold of the
+    length-1 chain (gatechain.chain_thresholds, fitted on half the model's detections).
+    Returns None when the budget needs more detections than the model holds, so the caller
+    refuses rather than guessing.
     """
     _validate(n, band, snr, fd)
     p = _check_power(power, n)
-    if fd * _nsamp_for(fd) < 8:
+    if _nsamp_for(fd) is None:
         return None
-    kept = _kept(p, n, band, snr, fd)
-    if kept is None or not len(kept):
+    from . import gatechain
+    if band not in gatechain.usable_bands(p, n):
         return None
-    idx = int(np.floor(float(fd) * len(kept)))
-    if idx < 8:
-        return None                      # too few draws below the budget
-    return float(kept[idx])
+    plan = gatechain.chain_thresholds(p, n, snr, fd, (band,))
+    return None if plan is None else float(plan["thresholds"][0])

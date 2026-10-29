@@ -1,3 +1,314 @@
+# One false-dismissal budget per plan, 2026-10-29
+
+Every number that steered a plan's dismissal now traces to fd and one stated per-plan
+tolerance, roadmap decision D1: plans dismiss fd on average (pooled within 2% on 16M
+check draws), at most 5% of plans dismiss more than 1.25 fd, and no more draws than
+before. Gone:
+
+- `_SPLIT_TOLERANCE_Z`, the 0.75 cut for the split search's selection bias. It left
+  multi-tier plans at 0.95-0.98 of fd when priced by the operation count. Priced by a
+  machine's costs, the bias it was cut for is larger (below: the CPU plans dismissed 1.04
+  of fd by their tiers at n = 2048).
+- `_LOCALISE_SHARE`, 5% of fd the direct refine's window could miss on top of the
+  budget, and the plan's extra coarse sample of window.
+- The draw count 200/fd with its 20,000 floor and 3,000,000 cap, `_GROW` (the 4x cap on
+  the simulation at a large snr), and the `K < 8` refusals.
+- The finer split grid, `gatechain.direct_halfwidth`, and the per-band direct prices built
+  from single-tier plans.
+
+## The construction
+
+The model's detections (draws whose fine window maximum reaches snr) fall into two
+independent halves, the even and the odd ones (`gatechain._halves`).
+
+- **The search half decides the structure** (`plan_chain`, `_chain_candidates`). It tries
+  every split of its budget of K = round(fd (M + 1)) - 1 dismissed detections between the
+  tiers. Where the cost model prices a direct refine, it also tries every half-width at
+  which a different set of the detections falls outside the window (`_halfwidths`), the
+  window's misses counted against the same K. The cheapest candidate wins. Every choice
+  among plans ranks the searched plans: the chain `choose_chain` picks, its tie-break, the
+  block size `price_block_sizes` picks and the model's screen setting.
+- **The fit half sets the thresholds** (`_fit`). It moves every tier of the searched
+  thresholds by one shift s, the j-th smallest over the fit half of the shift at which
+  each detection is first dismissed. A detection the window misses is dismissed at any
+  shift. So j - 1 of the fit half are dismissed.
+
+Given the search half, the fit half is independent of everything chosen from it, and the
+shift's score is continuous. So a plan's dismissal on fresh draws is the j-th smallest of
+M uniforms: mean j / (M + 1), and above r fd with probability P(Binomial(M, r fd) <= j - 1)
+(`gatemodel.plan_tail`). The draw count follows: M + 1 = round(j / fd) per half, j the
+smallest with P(plan > 1.25 fd) <= 5% (`gatemodel.fit_order`). The model draws
+2 (round(j / fd) - 1) detections (`gatemodel._nsamp_for`), and the simulation runs until it
+holds them. It is extended in place for a larger request: a row's draws, its arrival
+included, depend only on its row.
+
+| fd | j | P(plan > 1.25 fd) | detections | draws at snr 5.5 (fdr_audit profiles) | before (200/fd, floor 20,000) |
+|---|---|---|---|---|---|
+| 5e-2 | 45 | 0.0498 | 1,798 | about 3,100 | 20,000 |
+| 1e-2 | 47 | 0.0500 | 9,398 | 14,700-19,200, median 16,500 | 20,000 |
+| 1e-3 | 48 | 0.0491 | 95,998 | 149,000-194,000, median 167,000 | 200,000 |
+| 1e-4 | 48 | 0.0492 | 959,998 | about 1.67M | 2,000,000 |
+
+A budget whose tail bound needs more than `_MAX_DETECTIONS` refuses: 1.75M, the
+detections the old 3M-draw cap held, about 0.7-0.9 GB of records. That is fd below 5.5e-5.
+Before, fd from 4.6e-6 to 5.5e-5 ran on 8-96 dismissed draws (a per-plan sd of 0.10-0.33
+of fd).
+
+The cost is the per-plan spread. Each plan rests on half the draws, so its sd is about
+fd / sqrt(j) = 0.14 fd. Before, it was 0.09 at fd 1e-2 and 1e-3, and 0.04 at 5e-2, where
+the floor gave K about 580, about a mean that was off target. Now 5% of plans exceed
+1.25 fd, as D1 allows. Keeping the old spread at fd 1e-3 would take j about 115 per half:
+2.4 times today's detections, twice the old draw count. D1 does not ask for it.
+
+The split grid is `_SPLIT`, 9 shares. A search on 19 shares (19 x 19 for three tiers) gave
+fitted plans whose modelled cost is within 0.05% of the 9-share grid's on average over
+every given chain, and within 0.4 ± 0.3% for the pick. That was 5 profiles x 10 model
+seeds, n = 2048 and 4096, fd 1e-3, Zen 5 costs, with and without a direct refine. The fit
+moves every tier's threshold, so the split's fine structure matters little.
+
+### The direct refine's window
+
+The direct refine finds a detection's fine peak iff the peak lies within the half-width of
+the last tier's coarse maximum (`_distances`). The positions come from `signal_draws(...,
+lags_too=True)`, which now reports them as block lags, as `hmf.c` compares them. Its
+misses are dismissals, so a cheaper refine buys a smaller tier share of the budget. The
+cost model prices the window per lag (`CostModel.with_direct(ticks per lag)`,
+`HierarchicalFilter._direct_price`). The model counts a fine peak outside the window as
+missed. The engine is never worse: a window whose maximum lies on its edge takes the
+transform (`refine_direct_pair`), so its misses are a subset of the model's.
+
+The fit cannot move a whole-number window, so the window's misses are fixed by the search.
+Where they alone reach j on the fit half, the plan refines by transform and the tiers take
+the whole budget. That branch is chosen on the fit half, so it is not covered by the fit's
+exactness. Nor was it rare where it mattered: the search could spend the whole budget on a
+window, chosen where its misses on the search half just fit. Run once without a limit
+(n = 2048, fd 1e-2, Zen 5 costs, 256 taps), every one of the 17 plans (of 7,500) whose
+window took over 0.9 of the search half's budget fell back, and they dismissed 1.14 fd on
+average (18% of them above 1.25 fd).
+
+`gatemodel.window_allowance` closes it. A window is offered only where the predictive
+probability of the branch is at most the share of the tail bound the fit leaves,
+`_TAIL_SHARE - plan_tail(fd, M)`. The predictive probability is the BetaBinomial(M,
+m + 1/2, M - m + 1/2) chance that the window misses j of M fresh detections, given that
+it misses m of the search half: the binomial under the Jeffreys posterior of its miss
+rate. A plan then exceeds 1.25 fd with probability at most 5%, the branch included, and
+its mean moves by at most that probability (at most 0.002) times the branch's dismissal.
+
+| fd | the fit's tail | room | allowance (of K) |
+|---|---|---|---|
+| 1e-1 | 0.0487 | 0.0013 | 19 of 42 |
+| 5e-2 | 0.0498 | 0.0002 | 17 of 44 |
+| 1e-2 | 0.0500 | 0.00003 | 15 of 46 |
+| 1e-3 | 0.0491 | 0.0009 | 21 of 47 |
+| 1e-4 | 0.0492 | 0.0008 | 21 of 47 |
+
+The room depends on how close fit_order's whole j lands to 5%, so the allowance moves a
+little with fd. The chosen chains' windows never come near it. Their windows take at most
+0.11-0.30 of the search half's budget, and 3-7% of their realised dismissals. Of every
+chain's plans, 45-48% take a window, missing 5-11% of their dismissals. After the change,
+no plan in the measurement below fell back.
+
+The noise blocks are the simulation's first 20,000 rows' noise (`_NOISE_BLOCKS`), and the
+search's costs read them. So where those rows hold the fit half's detections, the fit half
+is not strictly independent of the structure. At fd 1e-2 that is every detection. Measured
+with noise blocks from an independent simulation instead (n = 4096, fd 1e-2, Zen 5 costs,
+256 taps), every chain's plans dismissed 1.000 ± 0.005 of fd (shared noise: 0.999) and
+the picks 1.006 ± 0.008 (1.013 ± 0.008). The difference is within its error, so the
+noise blocks stay free.
+
+A pinned chain runs without the Q15 screen (`_arm_q15`), and its thresholds are now priced
+that way (`CostModel.unscreened`). A pinned one-tier chain's tier then reports its lag, so
+its window is priced; before, the model priced a screen that never ran.
+
+## Measured
+
+`tools/split_bias.py` at 5f8fcd84, dev2, cores 22-27, GPU hidden, load 5-15. The setup:
+
+- the 10 `fdr_audit` profiles, snr 5.5, window 3n/32..n - 3n/32;
+- 30 model seeds per profile;
+- per profile, 4M independent check detections at fd 1e-2 and 16M at 1e-3;
+- every chain of one to three usable bands, plus the pick (choose_chain's rule, run with
+  that chain's chain_thresholds plan);
+- priced by the operation count, or by the Zen 5 cost file with a 256-tap direct refine
+  (`--cost`, `--taps`).
+
+"se" is the standard error of the mean: the model's part from the seed-to-seed scatter of
+each profile's mean, and the check's part. D1's tail is the share of plans above 1.25 fd;
+fit_order's own is 0.050 at 1e-2 and 0.049 at 1e-3.
+
+| n | fd | priced by | every chain's plans | mean ± se | sd | > 1.25 fd | worst | picks: mean ± se | > 1.25 fd |
+|---|---|---|---|---|---|---|---|---|---|
+| 2048 | 1e-2 | operation count | 7500 | 0.999 ± 0.005 | 0.140 | 0.041 | 1.53 | 0.998 ± 0.008 | 0.043 |
+| 2048 | 1e-3 | operation count | 7500 | 1.005 ± 0.005 | 0.143 | 0.053 | 1.59 | 1.006 ± 0.008 | 0.057 |
+| 4096 | 1e-2 | operation count | 12300 | 1.000 ± 0.005 | 0.147 | 0.050 | 1.66 | 1.006 ± 0.008 | 0.037 |
+| 4096 | 1e-3 | operation count | 12300 | 0.998 ± 0.005 | 0.144 | 0.050 | 1.65 | 0.996 ± 0.009 | 0.047 |
+| 2048 | 1e-2 | Zen 5, 256-tap direct refine | 7500 | 1.000 ± 0.005 | 0.139 | 0.043 | 1.53 | 1.001 ± 0.008 | 0.043 |
+| 2048 | 1e-3 | Zen 5, 256-tap direct refine | 7500 | 1.005 ± 0.005 | 0.144 | 0.055 | 1.64 | 1.006 ± 0.009 | 0.057 |
+| 4096 | 1e-2 | Zen 5, 256-tap direct refine | 12300 | 0.999 ± 0.005 | 0.146 | 0.050 | 1.66 | 1.013 ± 0.008 | 0.037 |
+| 4096 | 1e-3 | Zen 5, 256-tap direct refine | 12300 | 0.997 ± 0.005 | 0.143 | 0.048 | 1.65 | 1.000 ± 0.009 | 0.050 |
+
+By tier count, every chain's plans average 0.996-1.006 of fd. The picks, 47-167 plans per
+tier count, average 0.969-1.025, within 1.8 of their standard errors (0.011-0.025). The
+operation-count rows reproduce b892cf60's run (before the window allowance) row for row,
+15,600 of 15,600 at n = 2048 and 25,200 of 25,200 at 4096: a plan without a window does
+not change.
+
+The tail shares are 0.037-0.057. Plans made from one simulation share its fit half, so the
+share's error is that of about 300 independent plans, ± 0.013. Grouped by the window's
+share of the search half's budget, a grouping made before the fit, every group's mean lies
+within 2.3% of fd:
+
+| n | fd | window's share | plans (tiers) | mean ± se (plans as independent) | > 1.25 fd | refined by transform |
+|---|---|---|---|---|---|---|
+| 2048 | 1e-2 | none | 4015 (tiers 1,2,3) | 1.008 ± 0.002 | 0.048 | 0 |
+| 2048 | 1e-2 | (0.00, 0.25] | 2050 (tiers 2,3) | 0.997 ± 0.003 | 0.038 | 0 |
+| 2048 | 1e-2 | (0.25, 0.50] | 163 (tiers 2,3) | 0.994 ± 0.010 | 0.049 | 0 |
+| 2048 | 1e-3 | none | 4268 (tiers 1,2,3) | 1.007 ± 0.002 | 0.049 | 0 |
+| 2048 | 1e-3 | (0.00, 0.25] | 2292 (tiers 2,3) | 1.002 ± 0.003 | 0.061 | 0 |
+| 2048 | 1e-3 | (0.25, 0.50] | 206 (tiers 2,3) | 0.996 ± 0.010 | 0.053 | 0 |
+| 4096 | 1e-2 | none | 6549 (tiers 1,2,3) | 0.995 ± 0.002 | 0.045 | 0 |
+| 4096 | 1e-2 | (0.00, 0.25] | 3531 (tiers 1,2,3) | 1.008 ± 0.002 | 0.056 | 0 |
+| 4096 | 1e-2 | (0.25, 0.50] | 149 (tiers 1,2,3) | 1.023 ± 0.013 | 0.101 | 0 |
+| 4096 | 1e-3 | none | 6825 (tiers 1,2,3) | 0.995 ± 0.002 | 0.043 | 0 |
+| 4096 | 1e-3 | (0.00, 0.25] | 3680 (tiers 1,2,3) | 0.996 ± 0.002 | 0.051 | 0 |
+| 4096 | 1e-3 | (0.25, 0.50] | 674 (tiers 1,2,3) | 1.007 ± 0.005 | 0.049 | 0 |
+
+One group stands out: windows taking 0.25-0.50 of the budget at n = 4096 and fd 1e-2, with
+10% of 149 plans above 1.25 fd. Its plans come from 67 simulations. Over those, the mean is
+1.018 ± 0.018 and the share above 1.25 fd 0.080 ± 0.027, which agrees with 0.05. With
+independent noise blocks (above) the same group gave 1.023 and 0.088.
+
+## End to end
+
+`tools/fdr_audit.py --n 2048 4096 --q15 --inj 20000` (fd 1e-2, snr 5.5, 10 profiles x 4
+chains, each against the plan's own modelled dismissal on independent model detections,
+two-sided):
+
+- Whole block: 0 of 150 cases off their plan. Pooled, fp32 chains miss 1.036 ± 0.011 of
+  the budget and Q15 chains 0.965; 1 Q15 case is under its plan, reported and not failed.
+- Window 192..1856: 0 of 150 off their plan. Pooled, fp32 0.998 ± 0.011 and Q15 0.920; 3
+  Q15 cases are under their plans.
+
+The binomial error leaves out the plans' own scatter, 0.14 fd each. All of fdr_audit's
+plans come from the gate model's one seed, so the pooled means carry that seed's luck.
+
+## What the production plans dismissed, and what meeting fd costs
+
+Before, the CPU's plans exceeded the budget. HierarchicalFilter's own flow was run at the
+model seeds 1001-1030 (bench_setup's hier mode): FIR taps, the direct refine, dev2 costs,
+fd 1e-3, snr 5.5, the O2 reference at n = 2048 and the inspiral profile at 4096. Each plan
+was judged on 2M independent detections, and costed with one cost model on one 200,000-
+block noise sample:
+
+| n | before: dismissal (tiers) | after | modelled cost, after / before |
+|---|---|---|---|
+| 2048 | 1.079 ± 0.012 (1.044) | 1.017 ± 0.022 (0.943) | 1.022 ± 0.007 |
+| 4096 | 1.021 ± 0.015 (0.971) | 0.983 ± 0.032 (0.782) | 0.920 ± 0.009 |
+
+Before, the tiers alone dismissed 1.044 fd at n = 2048 (0.971 at 4096), and the window
+added 3.5-5%. z 0.75 was measured on plans priced by the operation count. Priced by a
+machine's costs, the split search selected more here than z cut.
+
+The ladder (`tools/ladder.py`, test27's `fir_three_level_modern_v1_bottomup_cap401` bank,
+`--tops 1 --segments 8`, CPU), throughput after / before:
+
+- dev1 (Zen 3), paired `ab_ladder.py`, 6 rounds at the production model seed, load 1:
+  0.983 batched and 0.981 pipelined. Every batched round was lower, by 0.2-2.4%.
+- dev1, 8 model seeds (seed injected into the simulations), two runs per tree per seed in
+  ABBA order on two cores, load 3-12: median 0.976, mean 0.986 ± 0.021, range
+  0.919-1.116. The 0.919 is a seed whose plan for one window took chain (256, 512) at a
+  refine reach of 0.0085. Both trees rank (256, 512) first at every seed, within the 5%
+  tie that otherwise keeps (256, 512, 1024): a cost-model question, not this change's.
+- dev2 (Zen 5), paired `ab_ladder.py` under load 14-52 (at b892cf60): 0.922 batched and
+  1.018 pipelined, rounds spreading 5.7e6-1.0e7.
+- dev1, the 8 seeds run concurrently, both trees side by side on 8 cores: 0.705-0.994,
+  median 0.878. Confounded, not a measurement of this change. The middle stage, which
+  the change does not touch, ran 8-57% slower in the new tree too (median 30%). Its
+  shorter setup put its steady segments under the old tree's setup on the neighbouring
+  cores.
+- dev2 (Zen 5), production seed, sequential runs, load 8: 1.064e7 and 1.039e7 before,
+  1.008e7 and 0.995e7 after. The fine stage took 1.63-1.66 s and 1.73-1.75 s.
+  Accounting: the n = 2048 window 192..1856 plan's tier-2 and tier-3 thresholds fell from
+  4.81 and 5.49 to 4.68 and 5.35, and its refine reach rose from 2.0e-4 to 4.5e-4. The
+  direct refine took 956 pairs and 12,428 lags in place of 580 and 9,860. That is one
+  plan's draw from its 0.14 spread.
+- The ladder's plans, judged on 2M independent detections of their captured reference
+  profiles (8 seeds): window 192..1856 before 1.029 ± 0.034, after 0.997 ± 0.041; window
+  128..1920 before 1.032 ± 0.032, after 0.972 ± 0.040.
+
+Meeting the budget where the plans exceeded it costs about 1.5-2.5% of the CPU ladder's
+throughput on this bank. A caller who wants the old throughput can set a larger fd.
+
+## Setup
+
+The model's decision setup in a fresh process at fd 1e-3 (bench_setup.py: choose_chain
+with a cost file; HierarchicalFilter._resolve with FIR taps), paired by repeat, 5 repeats,
+after / before:
+
+| host | load | choose_chain 2048 | 4096 | HierarchicalFilter 2048 | 4096 |
+|---|---|---|---|---|---|
+| dev2, core 21 | 6-8 | 1.147 -> 0.785 s (0.685) | 2.136 -> 1.491 s (0.697) | 1.173 -> 0.833 s (0.710) | 2.182 -> 1.588 s (0.725) |
+| dev2, core 21 (at b892cf60) | 15-17 | 2.008 -> 1.047 s (0.506) | 3.440 -> 1.942 s (0.568) | 1.965 -> 1.101 s (0.564) | 3.371 -> 2.086 s (0.619) |
+| dev1, core 4 (at b892cf60) | 1-2 | 2.169 -> 1.482 s (0.693) | 4.121 -> 2.954 s (0.709) | 2.253 -> 1.555 s (0.708) | 4.200 -> 2.975 s (0.699) |
+
+The changes that remove work:
+
+- fewer draws;
+- the noise alone recorded only for the model's 20,000 noise blocks (a third of a row's
+  simulation);
+- one split grid;
+- no single-tier plans per band to price the direct refine.
+
+## Tests
+
+What changed in the tests, and why none is a fitted margin:
+
+- `test_gate_model.test_quantile_placement_uses_the_conditional_distribution`: the gate
+  is the fit half's j-th smallest coarse maximum, exactly. It was the floor(fd M)-th of
+  all kept draws.
+- `test_gate_model.test_the_tail_and_the_window_allowance_are_their_distributions`
+  (new): plan_tail and window_allowance against scipy's binomial and beta-binomial,
+  including that one more miss would break the room.
+- `test_gate_chain.test_plan_chain_matches_the_plain_split_search`: the plain search,
+  now on the search half, plus the shift fit on the other. Thresholds, reach and cost
+  are equal exactly.
+- `test_direct_refine.test_halfwidth_shares_the_budget` (was
+  `test_halfwidth_from_the_model`). On the fit half, tier dismissals and window misses
+  together are exactly j - 1. The window's misses on the search half are its plan's and
+  within the allowance. A plan with a window dismisses less by its tiers than the same
+  chain without one.
+- `test_direct_refine.test_a_plans_window_misses_no_more_than_the_allowance` and
+  `test_windows_miss_no_more_than_the_allowance` (new). On an f^-1 profile, a one-tier
+  chain at band 1024 searched against the whole budget takes a window missing 31 of
+  4,699; the test fails on that break (allowance 15). `_halfwidths` starts at the
+  smallest window within the allowance.
+- `test_gate_draws`: the C search equals the Python one with window sets. `signal_draws`
+  holds exactly the detections asked for, a smaller request is a larger one's prefix in
+  any order, and its maxima lie where the engine searches.
+- `test_fdr_calibration`: the engine and the true coarse statistic are tested two-sided
+  against the plan's own modelled dismissal on 200,000 independent model detections
+  (seed 977), not against fd. The plan's own scatter (0.14 fd) would otherwise dominate
+  the binomial counts. The budget claim is a new test,
+  `test_plans_dismiss_the_budget_on_average`: 100 model seeds per profile, every chain's
+  plan and the pick judged on 1M independent detections. Their means are within 3.5
+  standard errors of fd, and the share above 1.25 fd within 3.5 of fit_order's, both
+  over simulations, since one simulation's plans share a fit half. It fails on the
+  deliberate break of fitting on the search half: multi-tier plans then dismiss 1.087
+  and 1.055 of fd, 8.3 and 4.8 standard errors.
+- `tools/fdr_audit.py` tests each case against its plan's modelled dismissal: a
+  two-sample binomial against max(1M, 10 x injections) model detections. It reports the
+  pooled misses over the budget.
+
+No threshold, tolerance or seed was chosen to make a test pass:
+
+- every exact test compares two computations of one order statistic or distribution;
+- the statistical tests use the binomial counts and standard errors the construction
+  states.
+
+Thresholds change everywhere: the new fit, the new draw count, and the window inside the
+budget. No golden in the repository stores thresholds. A recorded `tools/unify_golden.py`
+directory does, so re-record it.
+
 # The split bias does not depend on fd, and the cut is twice its size, 2026-10-27
 
 The entry below left one question open: at fd 1e-3 multi-tier plans dismissed 0.95 and

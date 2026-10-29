@@ -67,10 +67,11 @@ that and that every link resolves.
 
 ### Plans and their logs
 
-- [Gate model and measured choices log](gate-model.md) (2026-09-26 to 2026-10-27; the
-  newest sections lead, the rest run in date order from 2026-09-26): the one simulation, the
-  budget split's selection bias (the same at every fd, and half the cut) and per-plan
-  scatter, the retired tables, chain and block-size trials, and the joint trial.
+- [Gate model and measured choices log](gate-model.md) (2026-09-26 to 2026-10-29; the
+  newest sections lead, the rest run in date order from 2026-09-26): one false-dismissal
+  budget per plan (search on half the draws, fit on the other), the one simulation, the
+  budget split's selection bias and per-plan scatter, the retired tables, chain and
+  block-size trials, and the joint trial.
 - [A/A rounds: the paired rule's error and power on the CPU](trial-statistics.md)
   (2026-10-29): the null of a paired round measured with an A/A arm (`MF_TRIAL_AA_LOG`) on
   dev2 and dev1, the current rule's false-switch rate, and the error and power of
