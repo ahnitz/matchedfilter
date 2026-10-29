@@ -660,6 +660,27 @@ def _log_table(rows, kind):
     return fs, vs
 
 
+def band_forward_wanted(n, band, f, forced=None):
+    """Whether a hierarchical call should forward only its tiers' bands (and then recompute
+    the full spectra of the blocks its refine reads) rather than every block in full.
+    Chosen from bytes: per block the full forward writes n samples and the band forward
+    `band` (the widest band a tier reads), while the recompute reads and writes n for each
+    block with a refined pair, so bands move fewer bytes iff that fraction f < (n - band) / 2n.
+    f is the gate model's fraction for the call (_gpuhier._hier_peaks: from the chain's
+    modelled refine probability), so the choice depends on the call alone; with none
+    (thresholds set by hand, no reference), the bands. MF_BAND_FORWARD=0/1 forces it off or on,
+    as does `forced` (a context's feed_forced: the GPU calibration times both feeds); the cost
+    model prices a chain's feed by this same rule (CostModel.feed_delta)."""
+    from . import _config
+    if forced is None:
+        forced = _config.get("MF_BAND_FORWARD")
+    if forced is False or n > 65536 or band >= n:
+        return False
+    if forced:
+        return True
+    return f is None or f < (n - band) / (2.0 * n)
+
+
 class CostModel:
     """Per-tier costs for one transform size, in engine ticks.
 
@@ -673,15 +694,17 @@ class CostModel:
     """
 
     def __init__(self, n, dense, sparse, refine, block=0.0, screen=None, excess=None,
-                 forward=0.0, band_forward=False):
+                 feed=None):
         self.n = int(n)
-        # forward: the full forward transform's share of `block`, per block. band_forward: the
-        # backend can instead write only the widest tier's band and recompute the full
-        # spectra of blocks with a refined pair (Vulkan, docs/vulkan-8060s-roofline.md
-        # section 13), so a chain's forward cost depends on its band and refine-block
-        # fraction (forward_cost).
-        self.forward = float(forward)
-        self.band_forward = bool(band_forward)
+        # feed: a GPU backend's per-block change from the feed `block` was measured with (the
+        # band forward of the first tier's band), {"band": {B: change at widest band B},
+        # "full": change with the full forward}, measured (calibrate_costs_gpu); None where
+        # there is one feed (the CPU). A call takes the band forward or the full one by the
+        # backend's own rule (band_forward_wanted), and so does the model
+        # (feed_delta).
+        self.feed = None if not feed else {
+            "band": {int(b): float(v) for b, v in feed["band"].items()},
+            "full": float(feed["full"])}
         # excess[b]: [(modelled density, measured density)] for a first tier at band b whose
         # gate reports an upper bound of the FP32 statistic instead of the statistic itself
         # (GPU fp16 coarse with its error bound): it passes a superset of the pairs the gate
@@ -720,12 +743,16 @@ class CostModel:
                                tuple((b, v["dense"], v["recheck"], tuple(v["excess"]))
                                      for b, v in sorted(self.screen.items())),
                                tuple((b, tuple(r)) for b, r in sorted(self.excess.items())),
-                               getattr(self, "direct_lag", None), getattr(self, "direct_single", True))
+                               getattr(self, "direct_lag", None), getattr(self, "direct_single", True),
+                               None if self.feed is None else (tuple(sorted(self.feed["band"].items())),
+                                                               self.feed["full"]))
         return sig
 
     def to_dict(self):
         return {"n": self.n, "block": self.block, "dense": self.dense,
-                "forward": self.forward, "band_forward": self.band_forward,
+                "feed": None if self.feed is None else {
+                    "band": {str(b): v for b, v in self.feed["band"].items()},
+                    "full": self.feed["full"]},
                 "sparse": self._sparse, "refine": self._refine, "screen": self.screen,
                 "excess": self.excess}
 
@@ -733,23 +760,7 @@ class CostModel:
     def from_dict(cls, d):
         return cls(d["n"], d["dense"], d["sparse"], d["refine"], block=d.get("block", 0.0),
                    screen=d.get("screen"), excess=d.get("excess"),
-                   forward=d.get("forward", 0.0), band_forward=d.get("band_forward", False))
-
-    def forward_cost(self, chain, f):
-        """Per-block forward cost for this chain: the full forward, or -- where the backend
-        has band forwards and chooses them (f < (n - B)/2n, its own byte rule, B the widest
-        band) -- the band write plus recomputing the f blocks that have a refined pair.
-        Costs scale the measured full forward: a band forward reads the same series and
-        writes B of n samples (half the full forward's time is the write); a recompute is a
-        full forward of one block. On the 8060S at (1024, 512), n=2048 this gives 0.75 of the
-        full forward for the band write, against 2.8/3.8 = 0.74 measured."""
-        full = self.forward
-        if not self.band_forward or full <= 0:
-            return full
-        n, B = self.n, int(max(chain))
-        if B >= n or not f < (n - B) / (2.0 * n):
-            return full
-        return full * (0.5 + 0.5 * B / n) + float(f) * full
+                   feed=d.get("feed"))
 
     def pass_excess(self, b, f):
         """Measured / modelled first-tier pass rate at band b and modelled density f (>= 1):
@@ -786,25 +797,21 @@ class CostModel:
         # moves where the pairs it passes are refined.
         return (cq, True) if cq <= c * (1.0 + TIE) else (c, False)
 
-    def chain_forward_delta(self, chain, reach, ntemplates, model_f=False):
-        """Per-pair change from the full forward this chain's forward makes (<= 0), with the
-        refine-block fraction from the model: a block has a refined pair with probability
-        1 - (1 - P(refine))^templates, unless a measured fraction is registered."""
-        if not self.band_forward or not ntemplates or self.forward <= 0:
+    def feed_delta(self, chain, reach, ntemplates):
+        """Per-pair change from `block` of the forward this chain's calls take: the band
+        forward at its widest band, or the full forward, as the backend decides from the
+        chain's modelled refine probability reach[len(chain)] (band_forward_wanted,
+        the call's own rule), each measured per block and spread over the templates. 0 where
+        the backend has one feed."""
+        if self.feed is None or not ntemplates:
             return 0.0
-        f = measured_refine_blocks(self.n, chain)
-        if f is None and model_f:
-            # Proposals only (a joint trial's "n=model" arm, _trial): the model's fraction may
-            # suggest a size, and the end-to-end trial decides.
-            f = 1.0 - (1.0 - min(max(reach[len(chain)], 0.0), 1.0)) ** int(ntemplates)
-        if f is None:
-            # No measurement: no credit. The model's refine-block fraction,
-            # 1 - (1 - P(refine))^templates, is right per chain, but with it the credit tipped
-            # near-ties between block sizes whose per-term GPU costs are noisier than the
-            # credit: 1757 of 4249 ladder templates moved to n = 8192 and the fine stage got
-            # 1.4-1.7x slower (docs/gate-model.md). Model f waits for the joint trial.
-            return 0.0
-        return (self.forward_cost(chain, f) - self.forward) / float(ntemplates)
+        top = int(max(chain))
+        r = min(max(float(reach[len(chain)]), 0.0), 1.0)
+        if band_forward_wanted(self.n, top, r) and top in self.feed["band"]:
+            per = self.feed["band"][top]
+        else:
+            per = self.feed["full"]
+        return per / float(ntemplates)
 
     def with_direct(self, lag_price, single_tier=True):
         """A copy that also prices a direct refine at lag_price ticks per lag of its window
@@ -1072,7 +1079,7 @@ def _halfwidths(dist, allow, cost, chain, n):
 
 
 def plan_chain(sig, noise, bands, chain, fd, cost, n, snr, prune=False, ntemplates=None,
-               model_f=False, memo=None, lags=None):
+               memo=None, lags=None):
     """The thresholds and direct-refine half-width for `chain` that meet the false-dismissal
     budget fd at minimum modelled cost.
 
@@ -1136,11 +1143,10 @@ def plan_chain(sig, noise, bands, chain, fd, cost, n, snr, prune=False, ntemplat
                 continue
             th, reach = pth + (last[0],), preach + (last[1],)
             c = cost.chain_cost(chain, list(reach), hw) if cost is not None else _flop_cost(chain, list(reach), n)
-            if ntemplates and getattr(cost, "band_forward", False):
-                # only the change from the full forward (already in `block`), so a chain without
-                # a measured credit is priced exactly as before; pick_stable's tie window is
-                # absolute-valued, so a credit that takes a total below zero still compares
-                c += cost.chain_forward_delta(chain, list(reach), ntemplates, model_f=model_f)
+            if ntemplates and getattr(cost, "feed", None):
+                # the change from the feed `block` was measured with; pick_stable's tie window
+                # is absolute-valued, so a change that takes a total below zero still compares
+                c += cost.feed_delta(chain, list(reach), ntemplates)
             if best is None or c < best[0]:
                 best = (float(c), th, reach, hw)
     if best is None:
@@ -1320,23 +1326,6 @@ def pick_stable(items, cost, key):
     return min((x for x in items if cost(x) <= lo + TIE * abs(lo)), key=key)
 
 
-_REFINE_BLOCKS = {}
-
-
-def note_refine_blocks(n, band, f):
-    """Record a measured refine-block fraction for transform size n and widest band `band`
-    (a backend that measures it -- Vulkan's band/full choice -- calls this after each call),
-    used by forward pricing in place of the model's. Keyed by the widest band, which is what
-    the backend sees; chains sharing it share the measurement (a running mean)."""
-    key = (int(n), int(band))
-    old = _REFINE_BLOCKS.get(key)
-    _REFINE_BLOCKS[key] = float(f) if old is None else 0.5 * (old + float(f))
-
-
-def measured_refine_blocks(n, chain):
-    return _REFINE_BLOCKS.get((int(n), int(max(chain))))
-
-
 def _flop_cost(chain, reach, n):
     """Fallback when no measured table exists: transform-size proxy b log b per tier, n log n per refine."""
     c = chain[0] * math.log2(chain[0])
@@ -1349,7 +1338,7 @@ _CHOICE_CACHE = OrderedDict()
 
 
 def choose_chain(power, n, snr, fd, cost=None, max_tiers=3, floor=_MIN_BAND, nsim=None, window=None,
-                 ntemplates=None, model_f=False, nsamp=None):
+                 ntemplates=None, nsamp=None):
     """Price every chain and return (best, all plans sorted by cost): plan_chain's plans,
     ranked by their searched cost, (None, []) when none can be planned. nsamp: the
     detections to draw (default: model_draws').
@@ -1365,10 +1354,8 @@ def choose_chain(power, n, snr, fd, cost=None, max_tiers=3, floor=_MIN_BAND, nsi
     if nsamp is None:
         return None, []          # the tail bound needs more detections than the model holds
     params = (n, float(snr), float(fd), int(max_tiers), int(floor), int(nsim), int(nsamp), win, _cost_sig(cost),
-              # ntemplates prices the forward; measured refine-block fractions are left out of
-              # the key on purpose, so a choice made once stays made in this process instead
-              # of drifting with each call's measurement.
-              None if not getattr(cost, "band_forward", False) else (int(ntemplates or 0), bool(model_f)))
+              # ntemplates prices the feed
+              None if not getattr(cost, "feed", None) else int(ntemplates or 0))
     key = (_gm._profile_sig(p),) + params
     hit = _CHOICE_CACHE.get(key)
     if hit is not None:
@@ -1378,14 +1365,14 @@ def choose_chain(power, n, snr, fd, cost=None, max_tiers=3, floor=_MIN_BAND, nsi
     if hit is not None:
         _cache_put(_CHOICE_CACHE, key, hit)
         return hit
-    out = _choose_chain(p, n, snr, fd, cost, max_tiers, floor, nsim, win, ntemplates, model_f, nsamp)
+    out = _choose_chain(p, n, snr, fd, cost, max_tiers, floor, nsim, win, ntemplates, nsamp)
     _cache_put(_CHOICE_CACHE, key, out)
     _similar_put("choice", unit, params, out)
     return out
 
 
 def _choose_chain(power, n, snr, fd, cost, max_tiers, floor, nsim, window, ntemplates=None,
-                  model_f=False, nsamp=None):
+                  nsamp=None):
     bands = usable_bands(power, n, floor)
     if not bands:
         return None, []
@@ -1400,7 +1387,7 @@ def _choose_chain(power, n, snr, fd, cost, max_tiers, floor, nsim, window, ntemp
     plans = []
     for chain in enumerate_chains(n, max_tiers, floor, bands=bands):
         pl = plan_chain(sig, noise, bands, list(chain), fd, cost, n, snr, prune=True,
-                        ntemplates=ntemplates, model_f=model_f, memo=memo, lags=lags)
+                        ntemplates=ntemplates, memo=memo, lags=lags)
         if pl is not None:
             plans.append(pl)
     plans.sort(key=lambda d: d["cost"])

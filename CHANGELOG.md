@@ -38,6 +38,13 @@ Alpha releases may change the API. Pin a version for reproducible work.
   per-length builds that differed only in their `#line` names. Vulkan's and CUDA's kernel
   identities are unchanged; Metal's moves once. CI checks the kernels and manifests against
   the generator.
+- A GPU chain's forward is priced from the feeds the calibration times -- the band forward
+  at each widest band and the full forward, per block -- taking the feed the backend's own
+  rule takes for the chain, in place of a one-point fit of the band forward
+  (`forward * (1/2 + B/2n)`) plus a recompute at a running mean of earlier calls'
+  refine-block fractions, which the refine term already held. test27 ladder on the 8060S:
+  0.96x the steady time (fine stage 0.94x, three runs each). A stored GPU cost model is
+  measured afresh once.
 - A GPU batch is always fused, in lockstep, and the `gpu-batch` device trial that chose
   fusion and the fused interleave depth is gone. Pinned at production length (test27 ladder,
   2-3 runs an arm), unfused batches were 3-17% slower on the 8060S, RENOIR and Iris Xe and

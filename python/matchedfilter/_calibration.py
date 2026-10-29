@@ -351,9 +351,10 @@ def _clock_ref(device):
 
 #: How calibrate_costs_gpu measures -- its series resident in device memory, each time the
 #: fastest of its repetitions (runs), scaled to an anchor timed on a warmed device (_warm) --
-#: and prices a second tier (_sparse_rows, the slope), in its models' store key: a model
+#: and prices a second tier (_sparse_rows, the slope) and the feeds (the band forward at each
+#: widest band and the full forward, against the head's), in its models' store key: a model
 #: stored with another method is measured afresh.
-_GPU_CAL_METHOD = "slope,resident,warm"
+_GPU_CAL_METHOD = "slope,resident,warm,feed"
 
 #: Calls of a configuration back to back within each round of calibrate_costs_gpu (runs).
 _BURST = 3
@@ -455,12 +456,13 @@ def calibrate_costs_gpu(n, device, blocks=None, reps=_GPU_CAL_REPS, seed=_GPU_CA
             resident[0][:] = ser
         return p
 
-    def call(p, thr):
-        """One timed run of plan p at thresholds thr: (device ns, first-tier survivors,
-        refined pairs)."""
+    def call(p, thr, feed=None):
+        """One timed run of plan p at thresholds thr, with the backend's own feed (None) or
+        the full forward ("full"): (device ns, first-tier survivors, refined pairs)."""
         p.set_coarse_threshold(tuple(thr))
         ctx = p._gpu
         ctx._timing = True
+        ctx.feed_forced = False if feed == "full" else None
         try:
             ctx.timings().clear()
             p.run_series(resident[0], starts, ws, we, threshold=1e6)
@@ -469,11 +471,12 @@ def calibrate_costs_gpu(n, device, blocks=None, reps=_GPU_CAL_REPS, seed=_GPU_CA
             log.clear()
         finally:
             ctx._timing = False
+            ctx.feed_forced = None
         return t, getattr(ctx, "last_tier1_survivors", 0), getattr(ctx, "last_refinements", 0)
 
     def runs(configs, reps=reps):
         """[(device ns per call, first-tier survivors, refined pairs)] for configs [(chain,
-        thresholds[, templates])]: `reps` rounds, each timing the clock reference once
+        thresholds[, templates[, feed]])] (templates None: nt): `reps` rounds, each timing the clock reference once
         (clock_refs) and every configuration in turn, _BURST times back to back. A time is
         its configuration's fastest, in device ns (the calibration scales them all to the
         reference's anchor by its fastest reference at the end).
@@ -491,15 +494,16 @@ def calibrate_costs_gpu(n, device, blocks=None, reps=_GPU_CAL_REPS, seed=_GPU_CA
         A reference timed just before each call (the earlier pairing) no longer stood for
         that call's clock: under load it ran at 0.13 ms in place of 0.03 for 40% of calls
         whose own state was the fast one, and scaled them to a quarter."""
-        ps = [(plan(c[0], c[2] if len(c) > 2 else nt), c[1]) for c in configs]
-        for p, thr in ps:
-            call(p, thr)                                              # warm-up, recording
+        ps = [(plan(c[0], c[2] if len(c) > 2 and c[2] else nt), c[1], c[3] if len(c) > 3 else None)
+              for c in configs]
+        for p, thr, feed in ps:
+            call(p, thr, feed)                                        # warm-up, recording
         t, s1, r = ([[] for _ in ps] for _ in range(3))
         for _ in range(reps):
             clock_refs.append(clock.time())
-            for i, (p, thr) in enumerate(ps):
+            for i, (p, thr, feed) in enumerate(ps):
                 for _ in range(_BURST):
-                    ti, si, ri = call(p, thr)
+                    ti, si, ri = call(p, thr, feed)
                     t[i].append(ti)
                     s1[i].append(si)
                     r[i].append(ri)
@@ -546,8 +550,12 @@ def calibrate_costs_gpu(n, device, blocks=None, reps=_GPU_CAL_REPS, seed=_GPU_CA
     # a run's time depends on what ran before it (a device cache warm with its own data or
     # another configuration's), and the refine at 1%, ~30% of its run, came out at zero
     # against the head of another round in one calibration of nine.
+    # The feeds, in the same rounds: at a threshold nothing passes, the chain (b0, B) runs
+    # what the head runs but for its forward, the band forward at widest band B (where the
+    # backend takes it); and the head with the full forward forced.
     configs = ([((b0,), (big,))] + [((b0,), (g0,)) for g0 in thr0]
-               + [((b0, b), (g0, big)) for g0 in thr0 for b in bands[1:]])
+               + [((b0, b), (g0, big)) for g0 in thr0 for b in bands[1:]]
+               + [((b0, b), (big, big)) for b in bands[1:]] + [((b0,), (big,), None, "full")])
     timed = iter(runs(configs))
     head = next(timed)[0]
     for _ in thr0:
@@ -559,6 +567,13 @@ def calibrate_costs_gpu(n, device, blocks=None, reps=_GPU_CAL_REPS, seed=_GPU_CA
             t2, s1, _ = next(timed)
             if s1:
                 tier2.setdefault(b, []).append((s1, t2))
+    feed_band = {b0: 0.0}
+    for b in bands[1:]:
+        feed_band[b] = (next(timed)[0] - head) / blocks
+    feed = {"band": feed_band, "full": (next(timed)[0] - head) / blocks}
+    # A first tier at band b was timed alone, its feed the band forward at b: that is the
+    # feed's (feed_delta prices it by the chain's widest band), not the tier's.
+    dense = {b: max(1e-3, v - feed_band.get(b, 0.0) / nt) for b, v in dense.items()}
     for b, pts in tier2.items():
         sparse[b] = _sparse_rows(pts, head, blocks * nt)
     if bands[1:]:
@@ -581,12 +596,8 @@ def calibrate_costs_gpu(n, device, blocks=None, reps=_GPU_CAL_REPS, seed=_GPU_CA
     dense = {b: v * k for b, v in dense.items()}
     refine = [(f, v * k) for f, v in refine]
     sparse = {b: [(f, v * k) for f, v in rows] for b, rows in sparse.items()}
-    # The forward's share of the per-block work: the calibration cannot time it apart (one
-    # submission), and per-block fixed work on the GPU is the forward transform plus small
-    # bookkeeping, so `block` stands for it (an upper estimate of what a band forward saves).
-    forward = block
-    cm = _gc.CostModel(n, dense, sparse, refine, block=block, excess=excess,
-                   forward=forward, band_forward=_gc._is_gpu(device))
+    feed = {"band": {b: v * k for b, v in feed["band"].items()}, "full": feed["full"] * k}
+    cm = _gc.CostModel(n, dense, sparse, refine, block=block, excess=excess, feed=feed)
     if path is not None:          # another process's model, stored first, is the one used
         cm = _gc.CostModel.from_dict(_gc._store_first(path, skey, cm.to_dict(), _gc._cost_model_ok))
     _gc._COSTS[key] = cm
@@ -669,7 +680,7 @@ def device_costs(n, device=None, ntemplates=_gc._CAL_TEMPLATES, group=None):
 
 
 def price_block_sizes(fine, delta_f, data_rate, longest, margin, ntemplates, snr, fd, candidates,
-                      max_tiers=3, device=None, ahead=0, model_f=False):
+                      max_tiers=3, device=None, ahead=0):
     """Rank block sizes for one bank by modelled cost per valid output sample and template.
 
     For each n the bank would run one plan over blocks advancing n - longest + 1 samples; a
@@ -692,7 +703,7 @@ def price_block_sizes(fine, delta_f, data_rate, longest, margin, ntemplates, snr
         q = max(n // 32, 1)                  # the bank prices its windows on this grid
         lo = (int(margin) // q) * q
         key = (sig, float(delta_f), float(data_rate), n, lo, float(snr), float(fd), int(max_tiers), str(device),
-               _gc.cpu_gate_kind(), bool(model_f), int(ntemplates))
+               _gc.cpu_gate_kind(), int(ntemplates))
         hit = _gc._PRICE_CACHE.get(key)
         if hit is None:
             ref = _gc.rebin_profile(fine, delta_f, data_rate, n)
@@ -700,7 +711,7 @@ def price_block_sizes(fine, delta_f, data_rate, longest, margin, ntemplates, snr
             if ref is not None:
                 cm = device_costs(n, device, ntemplates)
                 best, _ = _gc.choose_chain(ref, n, snr, fd, cost=cm, max_tiers=max_tiers, window=(lo, n - lo),
-                                           ntemplates=ntemplates, model_f=model_f)
+                                           ntemplates=ntemplates)
                 if best is not None:
                     hit = (cm.block, best["cost"], best["chain"])
             _gc._cache_put(_gc._PRICE_CACHE, key, hit)

@@ -33,8 +33,9 @@ import struct
 
 import numpy as np
 
-from ._gpuhost import (MAX_BINS, ROWWIN_ON, band_forward_wanted, band_windows, bin_shift,
-                       coarse_span, hier_tiers, hier_window, refine_block_fraction, split_bins)
+from ._gpuhost import (MAX_BINS, ROWWIN_ON, band_windows, bin_shift,
+                       coarse_span, hier_tiers, hier_window, split_bins)
+from .gatechain import band_forward_wanted
 from ._shared import pack_half2, shared_view
 
 #: Where the fp16 coarse tier's operands are put (_c16_scales): the packed templates' largest
@@ -114,7 +115,7 @@ class HierHandle:
     words, the input signatures it was valid for, and the kernel slots the call consulted
     with the values it ran (slots: ((what, band, (default, alternative)), ...); values)."""
     __slots__ = ("key", "rec", "binds", "dsig", "tsig", "storage", "shape", "sparse", "way",
-                 "claim", "mode", "slots", "values")
+                 "claim", "slots", "values")
 
     def __init__(self, **kw):
         for k, v in kw.items():
@@ -410,9 +411,9 @@ class HierOps:
         # together, and lost 3.8% on the 8060S ladder.
         feed = "inplace" if self.inplace_feed else "pack"
         claim = None
-        frac_key = (n, top, nd, nt)
         banded = band_forward_wanted(
-            n, top, None if refine_reach is None else min(max(float(refine_reach), 0.0), 1.0))
+            n, top, None if refine_reach is None else min(max(float(refine_reach), 0.0), 1.0),
+            forced=self.__dict__.get("feed_forced"))
         tier0_ok = half and self._shipped("fwd_tier0", n)
         if dv is not None and (tier0_ok or self.inplace_feed) and banded:
             claim = self._exec_claim(slot, data, nd)
@@ -467,16 +468,15 @@ class HierOps:
             binds = self._hier_binds(n, tiers, nd, nt, nbins, lo, hi, binsize, shift, t2, half, ed,
                                      et, rw is not None, layout, claim, data)
             shape = (nd, nt, nbins)
-            mode = (frac_key, feed in ("tier0", "bands") or banded) if dv is not None else None
             if handle_out is not None:
                 slots = self._call_slots(bands, half, sparse)
                 handles[way] = (HierHandle(
                     key=key, rec=rec, binds=binds, dsig=self._uploaded["data"].get(storage_key),
                     tsig=self._uploaded["tmpl"].get(storage_key), storage=storage_key, shape=shape,
-                    sparse=sparse, way=way, claim=claim is not None, mode=mode,
+                    sparse=sparse, way=way, claim=claim is not None,
                     slots=slots, values=self._slot_values(slots)))
-            return self._hier_run(rec, binds, shape, sparse, way, len(tiers) > 1,
-                                  frac_key if dv is not None else None, slot, async_submit)
+            return self._hier_run(rec, binds, shape, sparse, way, len(tiers) > 1, slot,
+                                  async_submit)
 
         # The sparse read, the coarse layout and the gate way are kernel slots the device
         # trial plays on whole batches (_settings.slot): a call here runs what they say.
@@ -720,11 +720,8 @@ class HierOps:
         from ._settings import slot as kernel_slot
         return kernel_slot(self._dev_name(), "sparse", "hier", *SPARSE_WAYS["hier"])
 
-    def _hier_run(self, rec, binds, shape, sparse, way, cascade, frac_key, slot,
-                  async_submit):
-        """Run a recorded call and return its result (a tracked collector when async).
-        frac_key: where the call notes its refine-block fraction (a call on shared spectra,
-        banded or not: the next call's band/full choice reads it), or None."""
+    def _hier_run(self, rec, binds, shape, sparse, way, cascade, slot, async_submit):
+        """Run a recorded call and return its result (a tracked collector when async)."""
         wait = self._exec_submit(rec.native, binds, slot, rec) if async_submit else None
         if wait is None:
             self._exec_run(rec.native, True, binds, slot, rec)
@@ -732,10 +729,10 @@ class HierOps:
         def result():
             if wait is not None:
                 wait()
-            return self._hier_result(rec, shape, sparse, way, cascade, frac_key)
+            return self._hier_result(rec, shape, sparse, way, cascade)
         return self._track(result, owner=rec.buffers["idx"]) if async_submit else result()
 
-    def _hier_result(self, rec, shape, sparse, way, cascade, frac_key):
+    def _hier_result(self, rec, shape, sparse, way, cascade):
         """The call's peaks from its readback buffers. Counts, survivors and the rows a
         sparse result gathers are read in place where the host sees the buffers (_x_view):
         only a dense result copies its outputs whole."""
@@ -751,14 +748,8 @@ class HierOps:
         if cascade:
             self.last_tier1_survivors = at("args0")
         rows = None
-        if frac_key is not None or (sparse and way == "rows"):
+        if sparse and way == "rows":
             rows = self._x_view(B["surv%d" % last], np.uint32, count)
-        if frac_key is not None:
-            from . import gatechain
-            # Measured for the cost model's forward pricing (not for the feed: see
-            # _hier_peaks).
-            gatechain.note_refine_blocks(frac_key[0], frac_key[1],
-                                         refine_block_fraction(rows, nt, nd))
         if not sparse:
             if count == 0:
                 return (np.full(shape, -1, np.int32), np.zeros(shape, np.complex64))
@@ -838,4 +829,4 @@ class HierOps:
             CLAIMS[0] += 1
             self._exec_claim(slot, None, h.shape[0])      # the replayed forward it replaces
         return self._hier_run(h.rec, h.binds, h.shape, h.sparse, h.way, "args1" in h.rec.buffers,
-                              h.mode[0] if h.mode is not None else None, slot, async_submit)
+                              slot, async_submit)
