@@ -106,7 +106,7 @@ def test_production_shader_sources_match_built_manifest():
     if not source.is_dir():
         pytest.skip('source tree not available in this installation')
     recorded = _manifest()['source_hashes']
-    assert set(recorded) == {'tierb.slang', 'fft_transform.slang', 'coarse_tile.slang',
+    assert set(recorded) == {'tierb.slang', 'fft_transform.slang',
                              'series_forward.slang', 'series_bands.slang', 'forward_tier0.slang',
                              'pack_coarse.slang',
                              'twiddle.slang', 'refine_bounded.slang', 'compact_peaks.slang'}

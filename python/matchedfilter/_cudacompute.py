@@ -912,8 +912,6 @@ class Context(Executor, InputUploads):
             return f"forward_{n}"
         if entry == "refineItems":
             return f"items_{n}"
-        if entry == "coarseTile":
-            return f"coarse_{n}"
         if c16:
             p_s = f"p{ppg}" if ppg > 1 else ""
             t_s = f"t{tile}" if tile > 1 else ""
@@ -939,9 +937,7 @@ class Context(Executor, InputUploads):
 
         r = _radix(n)
         wg = (n // r) * ppg if entry in ("fusedTierB", "refineListed") else (
-            256 if entry in ("compactPairs", "compactListed", "markBlocks", "packCoarse") else (
-                64 if entry == "coarseTile" else (n // r)
-            )
+            256 if entry in ("compactPairs", "compactListed", "markBlocks", "packCoarse") else (n // r)
         )
 
         stem = self._stem(n, entry, one_bin=one_bin, c16=c16, ppg=ppg, tile=tile, twt=twt)
@@ -962,7 +958,7 @@ class Context(Executor, InputUploads):
             # A missing variant is not silently replaced by a different one: the
             # PPG/TILE_T are compiled in and the launch geometry depends on them.
             raise UnsupportedSize(f"no PTX kernel for {stem} (n={n}, entry={entry})")
-        fn_name = "fusedTierB" if (c16 and entry not in ("coarseTile", "refineListed")) else entry
+        fn_name = "fusedTierB" if (c16 and entry != "refineListed") else entry
         if entry == "refineListed":
             fn_name = "refineListedBounded"      # src/gpu/refine_bounded.slang
         res = (self._load(stem, ptx_file, fn_name, wg), wg)

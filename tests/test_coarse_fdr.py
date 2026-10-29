@@ -26,13 +26,11 @@ class VulkanCoarse:
         from matchedfilter import _vkcompute as V
         self.v = V
         self.ctx = c = V.Context(0)
-        self.tiled = filename.startswith('coarse_')
         self.half = '_c16' in filename
         m = re.search(r'_c16(?:p(\d+))?(?:t(\d+))?', filename)
         ppg, tile = (int(m[1] or 1), int(m[2] or 1)) if m else (1, 1)
         # BATCH data rows x 4 templates; the same launch rule the host uses.
-        slot, groups = ((band, BATCH) if self.tiled
-                        else coarse_launch(BATCH, 4, ppg, tile, band))
+        slot, groups = coarse_launch(BATCH, 4, ppg, tile, band)
         self.buffers = []
         try:
             size = 4 if self.half else 8
@@ -40,11 +38,8 @@ class VulkanCoarse:
                                      (4*band*size, False),
                                      (BATCH*4*4, True), (BATCH*4*8, True)]:
                 self.buffers.append(V._Buffer(c, length, readback=readback))
-            bd, bt, bi, bv = self.buffers
-            pipe, layout, setl = c._build_pipeline(
-                ('fdr', filename), filename, 3 if self.tiled else 4,
-                8 if self.tiled else 28)
-            ds = c._descriptor_set(setl, [bd, bt, bv] if self.tiled else self.buffers)
+            pipe, layout, setl = c._build_pipeline(('fdr', filename), filename, 4, 28)
+            ds = c._descriptor_set(setl, self.buffers)
             self.cmd = cmd = V._vp()
             V._check(c.vk.vkAllocateCommandBuffers(c.device, ctypes.byref(
                 V._CmdBufAlloc(40, None, c.command_pool, 0, 1)), ctypes.byref(cmd)),
@@ -54,8 +49,7 @@ class VulkanCoarse:
             c.vk.vkCmdBindPipeline(cmd, V._BIND_POINT_COMPUTE, pipe)
             c.vk.vkCmdBindDescriptorSets(cmd, V._BIND_POINT_COMPUTE, layout,
                                         0, 1, (V._vp*1)(ds), 0, None)
-            pc = ((ctypes.c_uint32*2)(4, BATCH*4) if self.tiled else
-                  (ctypes.c_uint32*7)(4, 0, band, slot, band.bit_length()-1, 1, 0))
+            pc = (ctypes.c_uint32*7)(4, 0, band, slot, band.bit_length()-1, 1, 0)
             c.vk.vkCmdPushConstants(cmd, layout, V._STAGE_COMPUTE, 0,
                                     ctypes.sizeof(pc), ctypes.byref(pc))
             c.vk.vkCmdDispatch(cmd, groups, 1, 1)
@@ -70,7 +64,7 @@ class VulkanCoarse:
         self.buffers[1].write(convert(templates))
         self.ctx._submit(self.cmd)
         value = self.buffers[3].read(np.float32, BATCH*4*2).view(np.complex64)
-        return (value.real if self.tiled else np.abs(value)).reshape(BATCH, 4)
+        return np.abs(value).reshape(BATCH, 4)
 
     def close(self):
         for buf in self.buffers:
@@ -150,8 +144,6 @@ def test_coarse_kernel_fdr_transfer(band, backend, record_property, request, mon
             root = pathlib.Path(mf.__file__).parent / 'spirv'
             names = [f'tierb_{band}.spv']
             names += sorted(p.name for p in root.glob(f'tierb_{band}_c16*.spv'))
-            if (root / f'coarse_{band}.spv').exists():
-                names.append(f'coarse_{band}.spv')
             for name in names:
                 kernels.append((name, VulkanCoarse(band, name)))
         else:
