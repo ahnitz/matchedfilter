@@ -1,0 +1,223 @@
+[prodlen] {"ev": "start", "t": 0.0, "matchedfilter": "/tree/python/matchedfilter/__init__.py", "pid": 4047656, "argv": ["--bank", "/data/fir_three_level_modern_v1_bottomup_cap401.hdf", "--device", "gpu:0", "--pipeline", "--pure", "--profiles", "/data/ladder_profiles_H1.npz", "--tops", "2", "--segments", "10", "--out", "/runs/01_base.json"]}
+[prodlen] {"ev": "choice", "t": 1.2307, "id": 1, "what": "VK-SUBGROUP AMD Radeon 8060S Graphics (RADV GFX1151)", "pref": "64", "cands": ["64", "32"], "held": null}
+[MF_AUTOTUNE] VK-SUBGROUP AMD Radeon 8060S Graphics (RADV GFX1151) -> 32  {}
+[prodlen] {"ev": "lock", "t": 4.3763, "id": 1, "asked": "32", "label": "32"}
+[MF_AUTOTUNE] coarse AMD Radeon 8060S Graphics (RADV GFX1151) band 64 -> tierb_64_c16p8t4w@32 (then tierb_64_c16p16t4w@64)  {'tierb_64_c16p8t4w@32': '4.16e-10', 'tierb_64_c16p16t4w@64': '4.45e-10', 'tierb_64_c16p8t2w@32': '4.65e-10', 'tierb_64_c16p16t2w@64': '4.82e-10'}
+[MF_AUTOTUNE] coarse AMD Radeon 8060S Graphics (RADV GFX1151) band 128 -> tierb_128_c16p8t2w@64 (then tierb_128_c16p8t4w@64)  {'tierb_128_c16p8t2w@64': '6.58e-10', 'tierb_128_c16p8t4w@64': '7.39e-10', 'tierb_128_c16p8w@64': '8.49e-10', 'tierb_128_c16p8@64': '8.83e-10'}
+[MF_AUTOTUNE] coarse AMD Radeon 8060S Graphics (RADV GFX1151) band 256 -> tierb_256_c16p4t2w@64 (then tierb_256_c16p8t4w@64)  {'tierb_256_c16p4t2w@64': '1.11e-09', 'tierb_256_c16p8t4w@64': '1.13e-09', 'tierb_256_c16p8t2w@64': '1.13e-09', 'tierb_256_c16p4t4w@64': '1.16e-09'}
+[MF_AUTOTUNE] coarse AMD Radeon 8060S Graphics (RADV GFX1151) band 512 -> tierb_512_c16t4w@32 (then tierb_512_c16t2w@32)  {'tierb_512_c16t4w@32': '2.46e-09', 'tierb_512_c16t2w@32': '2.48e-09', 'tierb_512_c16t2w@64': '2.48e-09', 'tierb_512_c16p8t4w@64': '2.59e-09'}
+[MF_AUTOTUNE] coarse AMD Radeon 8060S Graphics (RADV GFX1151) band 1024 -> tierb_1024_c16t2w@64 (then tierb_1024_c16t4w@64)  {'tierb_1024_c16t2w@64': '4.94e-09', 'tierb_1024_c16t4w@64': '4.97e-09', 'tierb_1024_c16p2t2w@64': '5.28e-09', 'tierb_1024_c16t8w@64': '5.31e-09'}
+[MF_AUTOTUNE] gateway AMD Radeon 8060S Graphics (RADV GFX1151) band 256 -> gate (then elect)  {'gate': '4.65e-06', 'elect': '4.73e-06'}
+[MF_AUTOTUNE] gateway AMD Radeon 8060S Graphics (RADV GFX1151) band 512 -> gate (then elect)  {'gate': '7.81e-06', 'elect': '8.06e-06'}
+[MF_AUTOTUNE] gateway AMD Radeon 8060S Graphics (RADV GFX1151) band 1024 -> gate (then elect)  {'gate': '1.12e-05', 'elect': '1.2e-05'}
+[MF_AUTOTUNE] coarse AMD Radeon 8060S Graphics (RADV GFX1151) band 2048 -> tierb_2048_c16w@64 (then tierb_2048_c16p2w@64)  {'tierb_2048_c16w@64': '3.86e-08', 'tierb_2048_c16p2w@64': '4.11e-08', 'tierb_2048_c16p2w@32': '4.15e-08', 'tierb_2048_c16p2@64': '4.16e-08'}
+[MF_AUTOTUNE] BLOCK templates=214 longest=391 legacy n=2048 -> n=2048  2048:0.000844 4096:0.0011
+[MF_AUTOTUNE] BLOCK templates=183 longest=343 legacy n=2048 -> n=2048  2048:0.000861 4096:0.00112
+[MF_AUTOTUNE] BLOCK templates=169 longest=343 legacy n=2048 -> n=2048  2048:0.000876 4096:0.00113
+[MF_AUTOTUNE] BLOCK templates=179 longest=391 legacy n=2048 -> n=2048  2048:0.000875 4096:0.00113
+[MF_AUTOTUNE] BLOCK templates=178 longest=375 legacy n=2048 -> n=2048  2048:0.000882 4096:0.00113
+[MF_AUTOTUNE] BLOCK templates=224 longest=391 legacy n=2048 -> n=2048  2048:0.000837 4096:0.0011
+[MF_AUTOTUNE] BLOCK templates=131 longest=315 legacy n=2048 -> n=2048  2048:0.000917 4096:0.00118
+[MF_AUTOTUNE] BLOCK templates=121 longest=343 legacy n=2048 -> n=2048  2048:0.000953 4096:0.0012
+[MF_AUTOTUNE] BLOCK templates=210 longest=399 legacy n=2048 -> n=2048  2048:0.000851 4096:0.00111
+[MF_AUTOTUNE] BLOCK templates=194 longest=375 legacy n=2048 -> n=2048  2048:0.000867 4096:0.00112
+[MF_AUTOTUNE] BLOCK templates=215 longest=399 legacy n=2048 -> n=2048  2048:0.000847 4096:0.00111
+[MF_AUTOTUNE] BLOCK templates=103 longest=351 legacy n=2048 -> n=2048  2048:0.001 4096:0.00125
+[MF_AUTOTUNE] BLOCK templates=187 longest=391 legacy n=2048 -> n=2048  2048:0.000867 4096:0.00113
+[MF_AUTOTUNE] BLOCK templates=219 longest=399 legacy n=2048 -> n=2048  2048:0.000845 4096:0.0011
+[MF_AUTOTUNE] BLOCK templates=187 longest=399 legacy n=2048 -> n=2048  2048:0.000871 4096:0.00113
+[MF_AUTOTUNE] BLOCK templates=159 longest=375 legacy n=2048 -> n=2048  2048:0.000905 4096:0.00115
+[MF_AUTOTUNE] BLOCK templates=196 longest=391 legacy n=2048 -> n=2048  2048:0.000859 4096:0.00112
+[MF_AUTOTUNE] BLOCK templates=159 longest=399 legacy n=2048 -> n=2048  2048:0.000903 4096:0.00116
+[MF_AUTOTUNE] BLOCK templates=254 longest=399 legacy n=2048 -> n=2048  2048:0.000823 4096:0.00108
+[MF_AUTOTUNE] BLOCK templates=140 longest=351 legacy n=2048 -> n=2048  2048:0.00092 4096:0.00117
+[MF_AUTOTUNE] BLOCK templates=156 longest=399 legacy n=2048 -> n=2048  2048:0.000907 4096:0.00116
+[MF_AUTOTUNE] BLOCK templates=156 longest=335 legacy n=2048 -> n=2048  2048:0.000888 4096:0.00114
+[MF_AUTOTUNE] BLOCK templates=173 longest=323 legacy n=2048 -> n=2048  2048:0.000861 4096:0.00112
+[MF_AUTOTUNE] BLOCK templates=156 longest=391 legacy n=2048 -> n=2048  2048:0.000903 4096:0.00116
+[MF_AUTOTUNE] BLOCK templates=193 longest=391 legacy n=2048 -> n=2048  2048:0.000861 4096:0.00112
+[MF_AUTOTUNE] BLOCK templates=80 longest=295 legacy n=2048 -> n=2048  2048:0.00106 4096:0.00132
+[MF_AUTOTUNE] BLOCK templates=162 longest=399 legacy n=2048 -> n=2048  2048:0.000899 4096:0.00116
+[prodlen] {"ev": "batch", "t": 26.4198, "i": 0, "kind": "fine", "n": 54}
+[MF_AUTOTUNE] CHAIN n=2048 model=(256, 512) ranking=[((256, 512), 1.1), ((256, 1024), 1.2), ((512, 1024), 1.9), ((512,), 2.0), ((256,), 2.3), ((1024,), 4.2)]
+[MF_AUTOTUNE] CHAIN n=4096 model=(512, 1024) ranking=[((512, 1024), 3.5), ((512, 2048), 4.1), ((1024, 2048), 4.6), ((1024,), 4.9), ((512,), 7.8), ((2048,), 30.3)]
+[prodlen] {"ev": "choice", "t": 26.425, "id": 2, "what": "TRIAL bank|gpu:0|2048,4096,model|6|0.001", "pref": "default", "cands": ["default", "n=4096", "n=model"], "held": null}
+[MF_AUTOTUNE] TRIAL bank|gpu:0|2048,4096,model|6|0.001 arms ['default', 'n=4096', 'n=model']
+[MF_AUTOTUNE] CHAIN n=2048 model=(256, 512) ranking=[((256, 512), 1.2), ((256, 1024), 1.3), ((512, 1024), 1.9), ((512,), 2.0), ((256,), 2.3), ((1024,), 4.2)]
+[prodlen] {"ev": "batch", "t": 26.4267, "i": 1, "kind": "fine", "n": 4}
+[prodlen] {"ev": "done", "t": 26.4758, "i": 1}
+[prodlen] {"ev": "batch", "t": 26.4758, "i": 2, "kind": "fine", "n": 4}
+[prodlen] {"ev": "done", "t": 26.4771, "i": 2}
+[prodlen] {"ev": "batch", "t": 26.4772, "i": 3, "kind": "fine", "n": 4}
+[prodlen] {"ev": "done", "t": 26.4784, "i": 3}
+[prodlen] {"ev": "batch", "t": 26.4785, "i": 4, "kind": "fine", "n": 4}
+[prodlen] {"ev": "done", "t": 26.5248, "i": 4}
+[prodlen] {"ev": "batch", "t": 26.5249, "i": 5, "kind": "fine", "n": 4}
+[prodlen] {"ev": "done", "t": 26.5264, "i": 5}
+[prodlen] {"ev": "batch", "t": 26.5264, "i": 6, "kind": "fine", "n": 4}
+[prodlen] {"ev": "done", "t": 26.5279, "i": 6}
+[prodlen] {"ev": "round", "t": 26.528, "id": 2, "arms": ["default", "n=4096", "n=model"]}
+[MF_AUTOTUNE] TRIAL bank|gpu:0|2048,4096,model|6|0.001 round 1: {'default': '1.45e-12', 'n=4096': '1.8e-12', 'n=model': '1.45e-12'}
+[prodlen] {"ev": "batch", "t": 26.5283, "i": 7, "kind": "fine", "n": 50}
+[prodlen] {"ev": "done", "t": 26.8331, "i": 7}
+[prodlen] {"ev": "done", "t": 26.8332, "i": 0}
+[prodlen] {"ev": "batch", "t": 26.8364, "i": 8, "kind": "follow", "n": 5}
+[prodlen] {"ev": "choice", "t": 26.8366, "id": 3, "what": "GPU-BATCH ('gpu:0 AMD Radeon 8060S Graphics (RADV GFX1151)',)", "pref": "default", "cands": ["default", "fuse=0", "interleave=3"], "held": null}
+[prodlen] {"ev": "choice", "t": 26.8367, "id": 4, "what": "GPU-SINGLE ('gpu:0 AMD Radeon 8060S Graphics (RADV GFX1151)',)", "pref": "default", "cands": ["default", "single=cpu"], "held": null}
+[prodlen] {"ev": "round", "t": 26.8544, "id": 4, "arms": ["default", "single=cpu"]}
+[prodlen] {"ev": "done", "t": 26.8545, "i": 8}
+[prodlen] {"ev": "batch", "t": 26.8545, "i": 9, "kind": "fine", "n": 54}
+[prodlen] {"ev": "batch", "t": 26.8579, "i": 10, "kind": "fine", "n": 4}
+[prodlen] {"ev": "done", "t": 26.8624, "i": 10}
+[prodlen] {"ev": "batch", "t": 26.8625, "i": 11, "kind": "fine", "n": 4}
+[prodlen] {"ev": "done", "t": 26.8637, "i": 11}
+[prodlen] {"ev": "batch", "t": 26.8639, "i": 12, "kind": "fine", "n": 4}
+[prodlen] {"ev": "done", "t": 26.8815, "i": 12}
+[prodlen] {"ev": "batch", "t": 26.8815, "i": 13, "kind": "fine", "n": 4}
+[prodlen] {"ev": "done", "t": 26.883, "i": 13}
+[prodlen] {"ev": "batch", "t": 26.8831, "i": 14, "kind": "fine", "n": 4}
+[prodlen] {"ev": "done", "t": 26.8845, "i": 14}
+[prodlen] {"ev": "round", "t": 26.8846, "id": 2, "arms": ["n=model", "n=4096", "default"]}
+[MF_AUTOTUNE] TRIAL bank|gpu:0|2048,4096,model|6|0.001 round 2: {'default': '1.74e-12', 'n=4096': '1.95e-12', 'n=model': '1.74e-12'}
+[prodlen] {"ev": "batch", "t": 26.8848, "i": 15, "kind": "fine", "n": 50}
+[prodlen] {"ev": "done", "t": 26.9239, "i": 15}
+[prodlen] {"ev": "done", "t": 26.9239, "i": 9}
+[prodlen] {"ev": "batch", "t": 26.9261, "i": 16, "kind": "follow", "n": 13}
+[prodlen] {"ev": "round", "t": 26.9547, "id": 4, "arms": ["single=cpu", "default"]}
+[prodlen] {"ev": "done", "t": 26.9548, "i": 16}
+[prodlen] {"ev": "batch", "t": 26.9549, "i": 17, "kind": "fine", "n": 54}
+[prodlen] {"ev": "batch", "t": 26.9575, "i": 18, "kind": "fine", "n": 4}
+[prodlen] {"ev": "done", "t": 26.9595, "i": 18}
+[prodlen] {"ev": "batch", "t": 26.9596, "i": 19, "kind": "fine", "n": 4}
+[prodlen] {"ev": "done", "t": 26.9608, "i": 19}
+[prodlen] {"ev": "batch", "t": 26.961, "i": 20, "kind": "fine", "n": 4}
+[prodlen] {"ev": "done", "t": 26.9763, "i": 20}
+[prodlen] {"ev": "batch", "t": 26.9763, "i": 21, "kind": "fine", "n": 4}
+[prodlen] {"ev": "done", "t": 26.9779, "i": 21}
+[prodlen] {"ev": "batch", "t": 26.978, "i": 22, "kind": "fine", "n": 4}
+[prodlen] {"ev": "done", "t": 26.9794, "i": 22}
+[prodlen] {"ev": "round", "t": 26.9794, "id": 2, "arms": ["default", "n=4096", "n=model"]}
+[MF_AUTOTUNE] TRIAL bank|gpu:0|2048,4096,model|6|0.001: n=4096 cannot win, dropped
+[MF_AUTOTUNE] TRIAL bank|gpu:0|2048,4096,model|6|0.001: n=model cannot win, dropped
+[MF_AUTOTUNE] TRIAL bank|gpu:0|2048,4096,model|6|0.001 -> default  {'default': '0.00129', 'n=4096': '0.00144', 'n=model': '0.00129'}
+[prodlen] {"ev": "lock", "t": 26.9796, "id": 2, "asked": "default", "label": "default"}
+[MF_AUTOTUNE] TRIAL bank|gpu:0|2048,4096,model|6|0.001 round 3: {'default': '1.8e-12', 'n=4096': '1.97e-12', 'n=model': '1.8e-12'}
+[prodlen] {"ev": "batch", "t": 26.9822, "i": 23, "kind": "fine", "n": 50}
+[prodlen] {"ev": "done", "t": 26.9929, "i": 23}
+[prodlen] {"ev": "done", "t": 26.993, "i": 17}
+[prodlen] {"ev": "batch", "t": 26.9955, "i": 24, "kind": "follow", "n": 3}
+[prodlen] {"ev": "round", "t": 27.0042, "id": 4, "arms": ["default", "single=cpu"]}
+[MF_AUTOTUNE] GPU-SINGLE ('gpu:0 AMD Radeon 8060S Graphics (RADV GFX1151)',): single=cpu cannot win, dropped
+[MF_AUTOTUNE] GPU-SINGLE ('gpu:0 AMD Radeon 8060S Graphics (RADV GFX1151)',) -> default  {'default': '0.000931', 'single=cpu': '0.00177'}
+[prodlen] {"ev": "lock", "t": 27.0043, "id": 4, "asked": "default", "label": "default"}
+[prodlen] {"ev": "done", "t": 27.0044, "i": 24}
+[prodlen] {"ev": "batch", "t": 27.0045, "i": 25, "kind": "fine", "n": 54}
+[prodlen] {"ev": "round", "t": 27.0968, "id": 3, "arms": ["default", "fuse=0", "interleave=3"]}
+[prodlen] {"ev": "done", "t": 27.0969, "i": 25}
+[prodlen] {"ev": "batch", "t": 27.0993, "i": 26, "kind": "follow", "n": 27}
+[prodlen] {"ev": "choice", "t": 27.0995, "id": 5, "what": "GPU-KERNELS ('gpu:0 AMD Radeon 8060S Graphics (RADV GFX1151)',)", "pref": "default", "cands": ["default", "kern:coarse:1024=tierb_1024_c16t4w@64", "kern:coarse:128=tierb_128_c16p8t4w@64", "kern:coarse:2048=tierb_2048_c16p2w@64", "kern:coarse:256=tierb_256_c16p8t4w@64", "kern:coarse:512=tierb_512_c16t2w@32", "kern:coarse:64=tierb_64_c16p16t4w@64", "kern:gateway:1024=elect", "kern:gateway:256=elect", "kern:gateway:512=elect", "kern:sparse:hier=compact"], "held": null}
+[prodlen] {"ev": "done", "t": 27.113, "i": 26}
+[prodlen] {"ev": "batch", "t": 27.1131, "i": 27, "kind": "fine", "n": 54}
+[prodlen] {"ev": "round", "t": 27.1982, "id": 3, "arms": ["interleave=3", "fuse=0", "default"]}
+[prodlen] {"ev": "done", "t": 27.1983, "i": 27}
+[prodlen] {"ev": "batch", "t": 27.2027, "i": 28, "kind": "follow", "n": 11}
+[prodlen] {"ev": "done", "t": 27.2083, "i": 28}
+[prodlen] {"ev": "batch", "t": 27.2084, "i": 29, "kind": "fine", "n": 54}
+[prodlen] {"ev": "round", "t": 27.2707, "id": 3, "arms": ["default", "fuse=0", "interleave=3"]}
+[MF_AUTOTUNE] GPU-BATCH ('gpu:0 AMD Radeon 8060S Graphics (RADV GFX1151)',): interleave=3 cannot win, dropped
+[prodlen] {"ev": "done", "t": 27.2708, "i": 29}
+[prodlen] {"ev": "batch", "t": 27.2741, "i": 30, "kind": "follow", "n": 36}
+[prodlen] {"ev": "done", "t": 27.2834, "i": 30}
+[prodlen] {"ev": "batch", "t": 27.2835, "i": 31, "kind": "fine", "n": 54}
+[prodlen] {"ev": "round", "t": 27.3224, "id": 3, "arms": ["fuse=0", "default"]}
+[prodlen] {"ev": "done", "t": 27.3225, "i": 31}
+[prodlen] {"ev": "batch", "t": 27.3264, "i": 32, "kind": "follow", "n": 14}
+[prodlen] {"ev": "done", "t": 27.331, "i": 32}
+[prodlen] {"ev": "batch", "t": 27.331, "i": 33, "kind": "fine", "n": 54}
+[prodlen] {"ev": "round", "t": 27.3714, "id": 3, "arms": ["default", "fuse=0"]}
+[MF_AUTOTUNE] GPU-BATCH ('gpu:0 AMD Radeon 8060S Graphics (RADV GFX1151)',): fuse=0 to be confirmed against default
+[prodlen] {"ev": "done", "t": 27.3716, "i": 33}
+[prodlen] {"ev": "batch", "t": 27.3748, "i": 34, "kind": "follow", "n": 17}
+[prodlen] {"ev": "done", "t": 27.3793, "i": 34}
+[prodlen] {"ev": "batch", "t": 27.3794, "i": 35, "kind": "fine", "n": 54}
+[prodlen] {"ev": "round", "t": 27.4198, "id": 3, "arms": ["default", "fuse=0"]}
+[prodlen] {"ev": "done", "t": 27.4199, "i": 35}
+[prodlen] {"ev": "batch", "t": 27.4231, "i": 36, "kind": "follow", "n": 27}
+[prodlen] {"ev": "done", "t": 27.4275, "i": 36}
+[prodlen] {"ev": "batch", "t": 27.4276, "i": 37, "kind": "fine", "n": 54}
+[prodlen] {"ev": "round", "t": 27.4686, "id": 3, "arms": ["fuse=0", "default"]}
+[prodlen] {"ev": "done", "t": 27.4687, "i": 37}
+[prodlen] {"ev": "batch", "t": 27.4704, "i": 38, "kind": "follow", "n": 28}
+[prodlen] {"ev": "done", "t": 27.4767, "i": 38}
+[prodlen] {"ev": "batch", "t": 31.6452, "i": 39, "kind": "fine", "n": 70}
+[MF_AUTOTUNE] CHAIN n=2048 model=(256, 512) ranking=[((256, 512), 1.2), ((256, 1024), 1.3), ((512, 1024), 1.9), ((512,), 2.0), ((256,), 2.3), ((1024,), 4.2)]
+[MF_AUTOTUNE] CHAIN n=2048 model=(256, 512) ranking=[((256, 512), 1.1), ((256, 1024), 1.2), ((512, 1024), 1.9), ((512,), 2.0), ((256,), 2.3), ((1024,), 4.2)]
+[prodlen] {"ev": "round", "t": 32.2094, "id": 3, "arms": ["default", "fuse=0"]}
+[prodlen] {"ev": "done", "t": 32.2096, "i": 39}
+[prodlen] {"ev": "batch", "t": 32.213, "i": 40, "kind": "follow", "n": 12}
+[prodlen] {"ev": "done", "t": 32.2238, "i": 40}
+[prodlen] {"ev": "batch", "t": 32.224, "i": 41, "kind": "fine", "n": 70}
+[prodlen] {"ev": "round", "t": 32.3179, "id": 3, "arms": ["fuse=0", "default"]}
+[prodlen] {"ev": "done", "t": 32.318, "i": 41}
+[prodlen] {"ev": "batch", "t": 32.3218, "i": 42, "kind": "follow", "n": 16}
+[prodlen] {"ev": "done", "t": 32.3308, "i": 42}
+[prodlen] {"ev": "batch", "t": 32.3309, "i": 43, "kind": "fine", "n": 70}
+[prodlen] {"ev": "round", "t": 32.373, "id": 3, "arms": ["default", "fuse=0"]}
+[MF_AUTOTUNE] GPU-BATCH ('gpu:0 AMD Radeon 8060S Graphics (RADV GFX1151)',): fuse=0 cannot win, dropped
+[MF_AUTOTUNE] GPU-BATCH ('gpu:0 AMD Radeon 8060S Graphics (RADV GFX1151)',) -> default  {'default': '0.0106', 'fuse=0': '0.0102', 'interleave=3': '0.0111'}
+[prodlen] {"ev": "lock", "t": 32.3732, "id": 3, "asked": "default", "label": "default"}
+[prodlen] {"ev": "done", "t": 32.3733, "i": 43}
+[prodlen] {"ev": "batch", "t": 32.3774, "i": 44, "kind": "follow", "n": 26}
+[prodlen] {"ev": "done", "t": 32.3913, "i": 44}
+[prodlen] {"ev": "batch", "t": 32.3915, "i": 45, "kind": "fine", "n": 70}
+[prodlen] {"ev": "round", "t": 32.9652, "id": 5, "arms": ["default", "kern:coarse:1024=tierb_1024_c16t4w@64", "kern:coarse:128=tierb_128_c16p8t4w@64", "kern:coarse:2048=tierb_2048_c16p2w@64", "kern:coarse:256=tierb_256_c16p8t4w@64", "kern:coarse:512=tierb_512_c16t2w@32", "kern:coarse:64=tierb_64_c16p16t4w@64", "kern:gateway:1024=elect", "kern:gateway:256=elect", "kern:gateway:512=elect", "kern:sparse:hier=compact"]}
+[prodlen] {"ev": "done", "t": 32.9654, "i": 45}
+[prodlen] {"ev": "batch", "t": 32.9696, "i": 46, "kind": "follow", "n": 6}
+[prodlen] {"ev": "done", "t": 32.9713, "i": 46}
+[prodlen] {"ev": "batch", "t": 32.9714, "i": 47, "kind": "fine", "n": 70}
+[prodlen] {"ev": "round", "t": 33.1826, "id": 5, "arms": ["kern:sparse:hier=compact", "kern:gateway:512=elect", "kern:gateway:256=elect", "kern:gateway:1024=elect", "kern:coarse:64=tierb_64_c16p16t4w@64", "kern:coarse:512=tierb_512_c16t2w@32", "kern:coarse:256=tierb_256_c16p8t4w@64", "kern:coarse:2048=tierb_2048_c16p2w@64", "kern:coarse:128=tierb_128_c16p8t4w@64", "kern:coarse:1024=tierb_1024_c16t4w@64", "default"]}
+[prodlen] {"ev": "done", "t": 33.1828, "i": 47}
+[prodlen] {"ev": "batch", "t": 33.1866, "i": 48, "kind": "follow", "n": 9}
+[prodlen] {"ev": "done", "t": 33.1915, "i": 48}
+[prodlen] {"ev": "batch", "t": 33.1916, "i": 49, "kind": "fine", "n": 70}
+[prodlen] {"ev": "round", "t": 33.2781, "id": 5, "arms": ["default", "kern:coarse:1024=tierb_1024_c16t4w@64", "kern:coarse:128=tierb_128_c16p8t4w@64", "kern:coarse:2048=tierb_2048_c16p2w@64", "kern:coarse:256=tierb_256_c16p8t4w@64", "kern:coarse:512=tierb_512_c16t2w@32", "kern:coarse:64=tierb_64_c16p16t4w@64", "kern:gateway:1024=elect", "kern:gateway:256=elect", "kern:gateway:512=elect", "kern:sparse:hier=compact"]}
+[MF_AUTOTUNE] GPU-KERNELS ('gpu:0 AMD Radeon 8060S Graphics (RADV GFX1151)',): kern:coarse:1024=tierb_1024_c16t4w@64 cannot win, dropped
+[MF_AUTOTUNE] GPU-KERNELS ('gpu:0 AMD Radeon 8060S Graphics (RADV GFX1151)',): kern:coarse:128=tierb_128_c16p8t4w@64 cannot win, dropped
+[MF_AUTOTUNE] GPU-KERNELS ('gpu:0 AMD Radeon 8060S Graphics (RADV GFX1151)',): kern:coarse:2048=tierb_2048_c16p2w@64 cannot win, dropped
+[MF_AUTOTUNE] GPU-KERNELS ('gpu:0 AMD Radeon 8060S Graphics (RADV GFX1151)',): kern:coarse:256=tierb_256_c16p8t4w@64 cannot win, dropped
+[MF_AUTOTUNE] GPU-KERNELS ('gpu:0 AMD Radeon 8060S Graphics (RADV GFX1151)',): kern:coarse:512=tierb_512_c16t2w@32 cannot win, dropped
+[MF_AUTOTUNE] GPU-KERNELS ('gpu:0 AMD Radeon 8060S Graphics (RADV GFX1151)',): kern:coarse:64=tierb_64_c16p16t4w@64 cannot win, dropped
+[MF_AUTOTUNE] GPU-KERNELS ('gpu:0 AMD Radeon 8060S Graphics (RADV GFX1151)',): kern:gateway:1024=elect cannot win, dropped
+[MF_AUTOTUNE] GPU-KERNELS ('gpu:0 AMD Radeon 8060S Graphics (RADV GFX1151)',): kern:gateway:256=elect cannot win, dropped
+[MF_AUTOTUNE] GPU-KERNELS ('gpu:0 AMD Radeon 8060S Graphics (RADV GFX1151)',): kern:gateway:512=elect cannot win, dropped
+[MF_AUTOTUNE] GPU-KERNELS ('gpu:0 AMD Radeon 8060S Graphics (RADV GFX1151)',): kern:sparse:hier=compact cannot win, dropped
+[MF_AUTOTUNE] GPU-KERNELS ('gpu:0 AMD Radeon 8060S Graphics (RADV GFX1151)',) -> default  {'default': '0.0104', 'kern:coarse:1024=tierb_1024_c16t4w@64': '0.0104', 'kern:coarse:128=tierb_128_c16p8t4w@64': '0.0104', 'kern:coarse:2048=tierb_2048_c16p2w@64': '0.0104', 'kern:coarse:256=tierb_256_c16p8t4w@64': '0.0106', 'kern:coarse:512=tierb_512_c16t2w@32': '0.0104', 'kern:coarse:64=tierb_64_c16p16t4w@64': '0.0104', 'kern:gateway:1024=elect': '0.0104', 'kern:gateway:256=elect': '0.0104', 'kern:gateway:512=elect': '0.0105', 'kern:sparse:hier=compact': '0.0108'}
+[prodlen] {"ev": "lock", "t": 33.2785, "id": 5, "asked": "default", "label": "default"}
+[prodlen] {"ev": "done", "t": 33.2786, "i": 49}
+[prodlen] {"ev": "batch", "t": 33.2824, "i": 50, "kind": "follow", "n": 5}
+[prodlen] {"ev": "done", "t": 33.2867, "i": 50}
+[prodlen] {"ev": "batch", "t": 33.2868, "i": 51, "kind": "fine", "n": 70}
+[prodlen] {"ev": "done", "t": 33.3027, "i": 51}
+[prodlen] {"ev": "batch", "t": 33.3098, "i": 52, "kind": "follow", "n": 11}
+[prodlen] {"ev": "done", "t": 33.312, "i": 52}
+[prodlen] {"ev": "batch", "t": 33.3121, "i": 53, "kind": "fine", "n": 70}
+[prodlen] {"ev": "done", "t": 33.3265, "i": 53}
+[prodlen] {"ev": "batch", "t": 33.3339, "i": 54, "kind": "follow", "n": 7}
+[prodlen] {"ev": "done", "t": 33.3354, "i": 54}
+[prodlen] {"ev": "batch", "t": 33.3355, "i": 55, "kind": "fine", "n": 70}
+[prodlen] {"ev": "done", "t": 33.34, "i": 55}
+[prodlen] {"ev": "batch", "t": 33.3464, "i": 56, "kind": "follow", "n": 16}
+[prodlen] {"ev": "done", "t": 33.3512, "i": 56}
+[prodlen] {"ev": "batch", "t": 33.3513, "i": 57, "kind": "fine", "n": 70}
+[prodlen] {"ev": "done", "t": 33.4602, "i": 57}
+[prodlen] {"ev": "batch", "t": 33.4662, "i": 58, "kind": "follow", "n": 22}
+[prodlen] {"ev": "done", "t": 33.4704, "i": 58}
+throughput: 3.152e+07 templates in real time on gpu:0 (fine templates x analysed seconds x 2 detectors / steady wall)
+gpu:0: 8947 fine templates, 2 tops x 10 segments; steady middle 0.03s, fine 1.51s, segment 1.71s, wall 1.71s, cpu 1.49s, asym 0.11s; warmup (2 segments) 32.3s
+  per steady segment: middle median 0.002s max 0.003s, fine median 0.004s max 0.574s, segment median 0.054s max 0.593s, asym median 0.002s max 0.014s
+  templates-in-real-time: middle 1.7e+09, fine 3.56e+07, segment 3.15e+07, wall 3.15e+07, cpu 3.6e+07, asym 4.7e+08, total 3.15e+07
+  calls: middle 16, fine 32, segment 18, wall 0, cpu 0, asym 16; fine_triggers 1413, asym_calls 311
+  gpu (sysfs, steady): busy 23%, sclk mean 1914 MHz (min 1407, max 2249), 50 samples
+  host: cpu 1.495s of steady wall 1.708s (88%)
+  WARNING: joint trial bank|gpu:0|2048,4096,model|6|0.001 locked during the steady segments; these timings include its rounds -- rerun with the same MF_COST_FILE
+[prodlen] {"ev": "exit", "t": 33.4911}
