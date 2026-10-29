@@ -7,7 +7,7 @@ recursive-include src *.c *.cc *.h *.py
 recursive-include python *.c *.h
 recursive-include tests *.c *.h *.py
 # Reference spectra used by the tests shipped in the source archive.
-recursive-include tests/data *.npy *.npz *.json
+recursive-include tests/data *.npy *.npz *.json *.log *.log.gz
 recursive-include tools *.py *.sh *.cpp *.cu README.md
 recursive-include docs *.md
 # Highway is vendored as a submodule, and the build needs it: an sdist without
