@@ -137,7 +137,9 @@ def _shipped(stem):
     That is the stem's own build or, where its staging needs more than the 48 KB of static
     shared memory CUDA allows a block (tools/build_ptx.py ships no module past it), the same
     kernel built with 32 KB staging (`<stem>_lds32`), which computes the same transform in
-    more exchange passes."""
+    more exchange passes. The limit is checked where modules are built and by
+    tests/test_cuda.py, not here: a module past it put in ptx/ by hand is served, and fails
+    in cuModuleLoadData rather than falling back to its _lds32 build."""
     for name in (stem, stem + "_lds32"):
         path = _PTX_DIR / f"{name}.ptx"
         if path.is_file():
