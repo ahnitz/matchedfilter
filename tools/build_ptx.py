@@ -15,7 +15,6 @@ ROOT = HERE.parent
 OUT = ROOT / "python" / "matchedfilter" / "ptx"
 
 KERNEL = ROOT / "src" / "gpu" / "tierb.slang"
-COARSE_KERNEL = ROOT / "src" / "gpu" / "coarse_tile.slang"
 PACK_KERNEL = ROOT / "src" / "gpu" / "pack_coarse.slang"
 SERIES_KERNEL = ROOT / "src" / "gpu" / "series_forward.slang"
 # CUDA's refine: a grid-stride entry reading the survivor count on the device
@@ -115,7 +114,6 @@ LDS_CAP = {
     32768: 8192, 65536: 8192,
 }
 
-COARSE_BANDS = {256: 16, 512: 16, 1024: 16}
 #: Every coarse tile, as for SPIR-V and Metal (build_spirv.COARSE_TILES): the host times the
 #: shipped builds per device (_cudacompute._time_coarse).
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
@@ -341,27 +339,20 @@ def _build():
         return 0
     manifest = dict(entry=ENTRY, kernel=KERNEL.name, modules={})
 
-    # 1. Coarse tile kernels
-    for band, rpt in COARSE_BANDS.items():
-        src_text = "#define NBAND %d\n#define RPT %d\n#define SLANG_CUDA_STRUCTURED_BUFFER_NO_COUNT 1\n" % (band, rpt) + COARSE_KERNEL.read_text()
-        ptx = OUT / ("coarse_%d.ptx" % band)
-        compile_ptx(slangc, nvrtc, env, src_text, ptx, "coarseTile")
-        print("  coarse band=%-4d %-16s %5d bytes" % (band, ptx.name, ptx.stat().st_size))
-
-    # 2. Pack coarse
+    # 1. Pack coarse
     pack_ptx = OUT / "pack_coarse.ptx"
     pack_text = "#define SLANG_CUDA_STRUCTURED_BUFFER_NO_COUNT 1\n" + PACK_KERNEL.read_text()
     compile_ptx(slangc, nvrtc, env, pack_text, pack_ptx, "packCoarse")
     print("  pack_coarse %5d bytes" % pack_ptx.stat().st_size)
 
-    # 3. Compact pairs and the listed compaction (band-independent: one kernel each, n=64)
+    # 2. Compact pairs and the listed compaction (band-independent: one kernel each, n=64)
     comp_ptx = OUT / "compact.ptx"
     compile_tierb(slangc, nvrtc, env, 64, OUT, "compactPairs")
     (OUT / "compact_64.ptx").replace(comp_ptx)
     compile_tierb(slangc, nvrtc, env, 64, OUT, "compactListed")
     (OUT / "compactl_64.ptx").replace(OUT / "compactl.ptx")
 
-    # 4. Loop over lengths
+    # 3. Loop over lengths
     for n in TIER_B:
         info = {}
         ptx = compile_tierb(slangc, nvrtc, env, n, OUT)

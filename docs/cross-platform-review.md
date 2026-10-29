@@ -553,6 +553,8 @@ Behaviour-neutral commits, one per item:
 1. Vulkan: the empty `_COARSE_TILE` dict and the fp32 tiled-coarse branch it guarded in
    `_make_hier` (unreachable since the fp16 coarse), with the test that looped over the empty
    dict. The `coarse_<band>` builds and `test_coarse_tile.py` stay until the next regeneration.
+   (Deleted 2026-10-29 with `coarse_tile.slang` and its SPIR-V, Metal and PTX builds: no host
+   loaded them.)
 2. Roofline: dual-issue fp32 lanes for every RDNA generation from gfx11 (gfx12 was reported at
    half its peak). Reporting only.
 3. One `MAX_BINS` (`_gpuhost`) for the three GPU modules (each had its own 2048).

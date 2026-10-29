@@ -50,10 +50,7 @@ def test_ptx_targets_sm75_and_64bit_pointers(manifest, n):
     assert "fusedTierB_param_1[8]" in text
 
 
-def test_coarse_and_pack_kernels_shipped(manifest):
-    for band in (256, 512, 1024):
-        ptx = PTX_DIR / f"coarse_{band}.ptx"
-        assert ptx.is_file(), f"{ptx} missing"
+def test_pack_and_compact_kernels_shipped(manifest):
     assert (PTX_DIR / "pack_coarse.ptx").is_file()
     assert (PTX_DIR / "compact.ptx").is_file()
 

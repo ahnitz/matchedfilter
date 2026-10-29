@@ -131,17 +131,6 @@ def metal_cap(n):
 
 KERNEL = ROOT / "src" / "gpu" / "tierb.slang"
 
-#: The tiled coarse kernel, and the only band it is correct for. See the
-#: comment at the top of the file: it is a single 16x16 four-step, so the
-#: second stage is 16 points, which is right only at band=256.
-COARSE_KERNEL = ROOT / "src" / "gpu" / "coarse_tile.slang"
-#: Bands that get the tiled coarse kernel, and the registers per lane it
-#: uses there. R and BAND/R are the two transform lengths, and the kernel
-#: implements 16 and 32 -- so these are the bands where both land on one of
-#: those. They are also exactly the bands that need tiling: the untiled
-#: kernel's workgroup is BAND/16 threads, which is 16, 32 and 64 here, and
-#: is already 128 at band 2048.
-COARSE_BANDS = {256: 16, 512: 32, 1024: 32}
 #: Production entry points from one source. fusedTierB is the flat/coarse filter.
 #: compactPairs turns the coarse results into a survivor list and the X
 #: group count an indirect dispatch reads; refineListed is the refine over
@@ -520,7 +509,7 @@ def build_metal_items(slangc, n):
 
 def source_hashes():
     """Fingerprint all production shader dependencies for freshness checks."""
-    names = ('tierb.slang', 'fft_transform.slang', 'coarse_tile.slang',
+    names = ('tierb.slang', 'fft_transform.slang',
              'series_forward.slang', 'series_bands.slang', 'forward_tier0.slang',
              'pack_coarse.slang', 'twiddle.slang',
              'refine_bounded.slang', 'compact_peaks.slang')
@@ -558,34 +547,6 @@ def _build(argv=None):
         manifest["source_hashes"] = source_hashes()
         (OUT / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
         return 0
-    for band, rpt in COARSE_BANDS.items():
-        src = OUT / ("ct_%d.slang" % band)
-        src.write_text("#define NBAND %d\n#define RPT %d\n" % (band, rpt)
-                       + COARSE_KERNEL.read_text())
-        spv = OUT / ("coarse_%d.spv" % band)
-        proc = subprocess.run(
-            [slangc, str(src), "-I", str(KERNEL.parent), "-target", "spirv", "-entry", "coarseTile",
-             "-stage", "compute", "-O3", "-DMF_VULKAN=1", "-o", str(spv)],
-            capture_output=True, text=True)
-        if proc.returncode != 0:
-            raise RuntimeError("slangc failed for coarse band=%d:\n%s"
-                               % (band, proc.stderr))
-        src.unlink()
-        # the same kernel in Metal
-        csrc = OUT / ("ct_%d_m.slang" % band)
-        csrc.write_text("#define NBAND %d\n#define RPT %d\n" % (band, rpt)
-                        + COARSE_KERNEL.read_text())
-        cm = MSL / ("coarse_%d.metal" % band)
-        r = subprocess.run([slangc, str(csrc), "-I", str(KERNEL.parent), "-target", "metal",
-                            "-entry", "coarseTile", "-stage", "compute",
-                            "-O3", "-o", str(cm)],
-                           capture_output=True, text=True)
-        csrc.unlink()
-        if r.returncode != 0:
-            raise RuntimeError("coarse metal band=%d:\n%s" % (band, r.stderr))
-        write_msl(cm)
-        print("  coarse band=%-4d %-16s %5d bytes  tiled R=%d TP=%d (+ %s)"
-              % (band, spv.name, spv.stat().st_size, rpt, band // rpt, cm.name))
     manifest = dict(entry=ENTRY, kernel=KERNEL.name, modules={})
     for n in TIER_B:
         if lds_bytes(n, LDS_CAP[n]) > lds_bytes(n, PORTABLE_CAP):

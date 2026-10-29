@@ -66,10 +66,6 @@ def test_shared_memory_and_atomics_are_native(manifest, n):
         "the per-bin maximum stopped using a native atomic"
 
 
-def test_the_coarse_kernel_has_metal():
-    assert (METAL_DIR / "coarse_256.metal").is_file()
-
-
 @pytest.mark.parametrize("band", [64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384])
 def test_the_fp16_coarse_and_compact_kernels_have_metal(band):
     assert (METAL_DIR / f"tierb_{band}_c16.metal").is_file()
