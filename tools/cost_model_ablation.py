@@ -117,7 +117,7 @@ def audit_case(case, args, gc, mf, cost, signals, noises):
     snr, fd, window = case["snr"], case["false_dismissal"], tuple(case["window"])
     identity = case["profile_sha256"]
     bands = gc.usable_bands(power, n)
-    nsamp = gc._gm._nsamp_for(fd)
+    nsamp = gc.model_draws(fd)[0]
     timing = dict(signal_draws_seconds=0.0, noise_block_maxima_seconds=0.0,
                   candidate_enumeration_seconds=0.0, measured_cost_pricing_seconds=0.0,
                   flop_pricing_seconds=0.0)
@@ -149,10 +149,14 @@ def audit_case(case, args, gc, mf, cost, signals, noises):
     candidate_counts = {}
 
     def cache_candidates(chain, prune):
-        key = memo + (tuple(chain), prune)
+        # plan_chain's search, as it keys it (no direct refine priced: one half-width, None)
+        key = memo + (tuple(int(b) for b in chain), bool(prune), (None,))
         if key not in gc._CAND_CACHE:
             start = time.perf_counter()
-            gc._CAND_CACHE[key] = gc._chain_candidates(sig, noise, bands, chain, fd, snr, prune)
+            search, _ = gc._halves(gc.kept_draws(sig, bands, chain, snr))
+            K = int(round(fd * (search.shape[0] + 1))) - 1
+            gc._CAND_CACHE[key] = gc._chain_candidates(search, noise, [bands.index(b) for b in chain], K,
+                                                       prune, (np.empty(0, np.int64),))
             timing["candidate_enumeration_seconds"] += time.perf_counter() - start
         return gc._CAND_CACHE[key]
 

@@ -322,15 +322,39 @@ def test_the_library_model_matches_this_one():
 
 @pytest.mark.parametrize("fd", [.01, .001, .0001])
 def test_quantile_placement_uses_the_conditional_distribution(fd):
-    from matchedfilter import gatemodel as gm
+    """The gate is an order statistic of the detections' coarse maxima (draws the fine stage
+    keeps), on the fit half the plan was not searched on: the j-th smallest of M with
+    M + 1 = round(j / fd), whose dismissal on fresh draws averages j / (M + 1) = fd."""
+    from matchedfilter import gatechain as gc, gatemodel as gm
     p = profile()
     gate = gm.gate_for(p, N, BAND, SNR, fd)
-    kept = gm._kept(p, N, BAND, SNR, fd)
-    idx = int(np.floor(fd * len(kept)))
-    assert gate == float(kept[idx])
-    assert gm.dismissal(p, N, BAND, SNR, gate, fd_hint=fd) <= fd
-    # Adjacent order statistics, not arbitrary gate tolerances.
-    assert (idx + 1) / len(kept) > fd
+    bands = gc.usable_bands(p, N)
+    sig = gc.signal_draws(p, N, bands, SNR, gc.model_draws(fd)[0])
+    fit = np.sort(gc._halves(gc.kept_draws(sig, bands, (BAND,), SNR))[1][:, 0])
+    j = gm.fit_order(fd)
+    assert fit.size + 1 == round(j / fd)
+    assert gate == float(fit[j - 1])
+    assert np.count_nonzero(fit < gate) == j - 1
+
+
+@pytest.mark.parametrize("fd", [.1, .05, .01, .001, .0001])
+def test_the_tail_and_the_window_allowance_are_their_distributions(fd):
+    """gatemodel's tail arithmetic against scipy's distributions: plan_tail is
+    P(Binomial(M, 1.25 fd) <= j - 1), and window_allowance the largest miss count m whose
+    BetaBinomial(M, m + 1/2, M - m + 1/2) chance of reaching j is within what the tail leaves
+    of 5%, so one more miss would not be."""
+    st = pytest.importorskip("scipy.stats")
+    from matchedfilter import gatemodel as gm
+    j = gm.fit_order(fd)
+    M = int(round(j / fd)) - 1
+    tail = st.binom.cdf(j - 1, M, gm._TAIL_RATIO * fd)
+    assert gm.plan_tail(fd, M) == pytest.approx(tail, rel=1e-9)
+    assert tail <= gm._TAIL_SHARE < st.binom.cdf(j - 2, int(round((j - 1) / fd)) - 1, gm._TAIL_RATIO * fd)
+    a = gm.window_allowance(fd, M, M)
+    room = gm._TAIL_SHARE - tail
+    reach = lambda m: st.betabinom.sf(j - 1, M, m + 0.5, M - m + 0.5)
+    assert 0 <= a < j - 1
+    assert reach(a) <= room < reach(a + 1), (a, reach(a), room, reach(a + 1))
 
 
 def test_coarse_never_exceeds_its_local_fine_maximum():

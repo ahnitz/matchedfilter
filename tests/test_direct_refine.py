@@ -14,7 +14,7 @@ def _bank(n=2048, T=48, nblocks=120, nsig=60, seed=3):
     series -- noise coloured by the inspiral SNR profile p, |z|^2 averaging 2, and signals as
     pulses with spectrum p -- and the fine filters are near-flat over the band (a centre tap
     plus a small smooth correction), so every template's output spectrum follows p. Then
-    the coarse tiers localise a peak as the model's draws do (gatechain.direct_halfwidth)."""
+    the coarse tiers localise a peak as the model's draws do (gatechain._distances)."""
     from matchedfilter.benchmark import _inspiral_power
     rng = np.random.default_rng(seed)
     counts = (2 * rng.integers(50, 200, T) + 1).astype(np.int64)
@@ -94,31 +94,100 @@ def test_taps_are_checked():
 
 
 @pytest.mark.parametrize("fd", [1e-2, 1e-3])
-def test_halfwidth_from_the_model(fd):
-    """The half-width is the smallest that leaves at most the direct refine's share of the
-    budget outside it, among the gate model's own kept draws; small at fd 1% where the last
-    band localises the peak (512 at n = 2048 on an inspiral profile)."""
+def test_halfwidth_shares_the_budget(fd):
+    """The direct refine's window and the tiers share one budget (gatechain.plan_chain): on the
+    fit half of the model's detections, those some tier dismisses or the window misses (the
+    fine maximum further than the half-width from the last tier's coarse maximum) number
+    exactly j - 1 (gatemodel.fit_order), so the window's misses come out of the tiers' share
+    instead of adding to it. The half-width is a whole number of coarse samples, and the same
+    chain priced without the direct refine refines by transform and gives the tiers it all."""
+    import json
+    from pathlib import Path
     from matchedfilter.benchmark import _inspiral_power
     n = 2048
     ref, win = _inspiral_power(n), (192, 1856)
     p = gatechain._norm_profile(ref, n)
     bands = gatechain.usable_bands(p, n)
+    rec = json.loads((Path(__file__).parent / "data" / "cost_model_2048_zen5.json").read_text())
+    cm = gatechain.CostModel.from_dict(rec["model"]).unscreened()
+    direct = cm.with_direct(0.09 * 256 + 4.0)      # ticks per lag of a 256-tap window on Zen 5
+    (C, F), (fat, cat) = gatechain.signal_draws(p, n, bands, 6.0, gatechain.model_draws(fd)[0],
+                                                window=win, lags_too=True)
+    det = F[:, 0] >= 6.0
+    fit = np.zeros(det.sum(), bool)
+    fit[1::2] = True                                  # the fit half: every other detection
+    j = gatechain._gm.fit_order(fd)
+    windows = 0
     for chain in [(512,), (256, 512), (256, 512, 1024)]:
-        pl = gatechain.chain_thresholds(ref, n, 6.0, fd, chain, window=win)
-        hw, q, kept = gatechain.direct_halfwidth(ref, n, chain, pl["thresholds"], 6.0, fd, window=win)
-        (C, F), (fat, cat) = gatechain.signal_draws(p, n, bands, 6.0, gatechain._gm._nsamp_for(fd),
-                                                    window=win, lags_too=True)
-        ok = F[:, 0] >= 6.0
+        pl = gatechain.chain_thresholds(ref, n, 6.0, fd, chain, cost=direct, window=win)
+        plain = gatechain.chain_thresholds(ref, n, 6.0, fd, chain, cost=cm, window=win)
+        assert plain["halfwidth"] is None and plain["search"]["halfwidth"] is None
+        hw = pl["halfwidth"]
+        lost = np.zeros(det.sum(), bool)
         for b, t in zip(chain, pl["thresholds"]):
-            ok &= C[:, bands.index(b)] >= t
-        d = np.abs(fat - cat[:, bands.index(chain[-1])])[ok]
-        d = np.minimum(d, n - d) / (n // chain[-1])
-        allow = gatechain._LOCALISE_SHARE * fd * kept
-        assert kept == ok.sum() > 5000
-        assert (d > hw).sum() <= allow, (chain, hw)
-        assert hw == 1 or (d > hw - 1).sum() > allow, (chain, hw)
-        if fd == 1e-2:
-            assert hw <= 16, (chain, hw)
+            lost |= C[det, bands.index(b)] < t
+        tiers = int(np.count_nonzero(lost[fit]))
+        if hw is not None:
+            assert isinstance(hw, int) and hw >= 1, (chain, hw)
+            far = np.abs(fat[det] - cat[det, bands.index(chain[-1])]) / (n // chain[-1]) > hw
+            assert (np.count_nonzero(far[~fit]) == pl["search"]["missed"]
+                    <= gatechain._gm.window_allowance(fd, int((~fit).sum()), int(fit.sum()))), chain
+            lost |= far
+            windows += 1
+        assert np.count_nonzero(lost[fit]) == j - 1, (chain, hw)
+        if hw is not None and np.count_nonzero(lost[fit]) > tiers:
+            # the window's misses came out of the tiers' share: they dismiss less than alone
+            alone = np.zeros(det.sum(), bool)
+            for b, t in zip(chain, plain["thresholds"]):
+                alone |= C[det, bands.index(b)] < t
+            assert tiers < np.count_nonzero(alone[fit]) == j - 1, chain
+    assert windows >= 2, windows          # the direct refine is priced in, and chosen
+
+
+def test_a_plans_window_misses_no_more_than_the_allowance():
+    """A plan's window misses at most gatemodel.window_allowance of the search half (here 15 of
+    4,699 at fd 1%), though the budget (46) would pay for a cheaper window: on an f^-1 profile a
+    one-tier chain at band 1024 searched against the whole budget takes a window missing 31,
+    which the fit half then fails to hold often enough to break the tail bound."""
+    import json
+    from pathlib import Path
+    rec = json.loads((Path(__file__).parent / "data" / "cost_model_2048_zen5.json").read_text())
+    cm = gatechain.CostModel.from_dict(rec["model"]).unscreened().with_direct(0.09 * 256 + 4.0)
+    n, fd, win = 2048, 1e-2, (192, 1856)
+    p = np.zeros(n)
+    p[1:n // 2] = 1.0 / np.arange(1, n // 2)
+    pl = gatechain.chain_thresholds(p, n, 6.0, fd, (1024,), cost=cm, window=win)
+    m = gatechain.model_draws(fd)[0] // 2
+    allow = gatechain._gm.window_allowance(fd, m, m)
+    assert allow == 15
+    assert pl["search"]["halfwidth"] is not None and pl["search"]["missed"] <= allow, pl["search"]
+
+
+def test_windows_miss_no_more_than_the_allowance():
+    """The candidate half-widths (gatechain._halfwidths) start at the smallest whose window
+    misses at most the allowance of the search half's detections (gatemodel.window_allowance),
+    each the smallest with its set of misses; where only a window priced above the transform
+    would miss so few, or the allowance is -1, the transform is the only candidate."""
+    import json
+    from pathlib import Path
+    rec = json.loads((Path(__file__).parent / "data" / "cost_model_2048_zen5.json").read_text())
+    cm = gatechain.CostModel.from_dict(rec["model"]).unscreened().with_direct(0.09 * 256 + 4.0)
+    n, chain = 2048, (256, 512)
+    rng = np.random.default_rng(5)
+    # near misses a few coarse samples out, and three far ones no window priced below the
+    # transform reaches (a noise peak elsewhere in the block was the coarse maximum)
+    dist = np.concatenate([np.abs(rng.normal(0, 1.2, 4000)), rng.uniform(300, 400, 3)])
+    for allow in (0, 2):
+        assert gatechain._halfwidths(dist, allow, cm, chain, n) == (None,), allow
+    for allow in (3, 5, 21, 29):
+        hws = gatechain._halfwidths(dist, allow, cm, chain, n)
+        assert hws[0] is None and len(hws) > 1, (allow, hws)
+        h0 = hws[1]
+        assert np.count_nonzero(dist > h0) <= allow
+        assert h0 == 1 or np.count_nonzero(dist > h0 - 1) > allow, (allow, h0)
+        for h in hws[2:]:
+            assert np.count_nonzero(dist > h) < np.count_nonzero(dist > h - 1), (allow, h)
+    assert gatechain._halfwidths(dist, -1, cm, chain, n) == (None,)
 
 
 def test_two_excursions_in_a_block(monkeypatch):

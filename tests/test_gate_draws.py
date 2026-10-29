@@ -263,7 +263,8 @@ def test_a_simulation_out_of_room_continues_where_it_stopped(fresh, monkeypatch)
     bands = gc.usable_bands(p, n)
     Fb = [p[:b].sum() for b in bands]
     calls = _counting_calls(monkeypatch)
-    t, u, sig = gc._signal_records(p, n, bands, Fb, 6.0, 3000, 13)
+    sim = gc._signal_records(p, n, bands, Fb, 6.0, 3000, 13)
+    t, u, sig = sim["t"], sim["u"], sim["recs"]
     noise = gc._NOISE_RECORDS[gc._key(p, n, bands, 13)][1]
     roomy, calls[:] = list(calls), []
     for c in (gc._NOISE_RECORDS, gc._SIGNAL_RECORDS):
@@ -272,7 +273,8 @@ def test_a_simulation_out_of_room_continues_where_it_stopped(fresh, monkeypatch)
     monkeypatch.setattr(gc, "_ROOM", 0.02)
     monkeypatch.setattr(gc, "_PILOT", 500)
     monkeypatch.setattr(gc, "_ROOM_Z", 0.0)
-    t2, u2, sig2 = gc._signal_records(p, n, bands, Fb, 6.0, 3000, 13)
+    sim2 = gc._signal_records(p, n, bands, Fb, 6.0, 3000, 13)
+    t2, u2, sig2 = sim2["t"], sim2["u"], sim2["recs"]
     noise2 = gc._NOISE_RECORDS[gc._key(p, n, bands, 13)][1]
     assert all(got == todo for todo, got in roomy), roomy
     assert sum(got < todo for todo, got in calls) >= 2, calls     # it did run out, and continued
@@ -327,20 +329,75 @@ def test_signal_draws_depend_only_on_their_seed(fresh):
 
 
 def test_the_c_plan_search_matches_the_python_one(fresh, monkeypatch):
-    """_chain_candidates' C search returns the Python recursion's candidates, in order."""
+    """_chain_candidates' C search returns the Python recursion's candidates, in order, with
+    and without draws the direct refine's window misses (at several half-widths)."""
+    n, fd = 2048, 0.01
+    p = _profile(n)
+    bands = gc.usable_bands(p, n)
+    tried = 0
+    for win in ((128, 1920), None):
+        sig, lags = gc.signal_draws(p, n, bands, 6.0, gc.model_draws(fd)[0], window=win, lags_too=True)
+        noise = gc.noise_block_maxima(p, n, bands, window=win)
+        for chain in gc.enumerate_chains(n, 3, bands=bands):
+            cols = [bands.index(b) for b in chain]
+            S, _ = gc._halves(gc.kept_draws(sig, bands, chain, 6.0))
+            dist, _ = gc._halves(gc._distances(sig, lags, bands, chain, 6.0, n))
+            K = int(round(fd * (S.shape[0] + 1))) - 1
+            dead = (np.empty(0, np.int64),) + tuple(np.flatnonzero(dist > h) for h in (1, 2, 4, 8))
+            # windows missing a few detections, within the budget (a chain ending at band 64
+            # localises too poorly for any of these)
+            tried += any(0 < d.size <= K for d in dead[1:])
+            for prune in (False, True):
+                monkeypatch.setattr(gc, "_C_SEARCH", True)
+                c = gc._chain_candidates(S, noise, cols, K, prune, dead)
+                monkeypatch.setattr(gc, "_C_SEARCH", False)
+                py = gc._chain_candidates(S, noise, cols, K, prune, dead)
+                assert c == py and (c or prune), (chain, prune, win)
+    assert tried >= 20, tried
+
+
+def test_signal_draws_hold_exactly_the_detections_asked_for(fresh):
+    """signal_draws' rows end at its ndet-th detection (a draw whose fine window maximum
+    reaches snr), and a simulation extended in steps for a larger request draws what one run
+    at once draws: a smaller request is the larger one's prefix, in any order of requests."""
+    n, win = 2048, (192, 1856)
+    p = _profile(n)
+    bands = gc.usable_bands(p, n)
+    small = gc.signal_draws(p, n, bands, 6.0, 3001, window=win, lags_too=True)
+    big = gc.signal_draws(p, n, bands, 6.0, 20000, window=win, lags_too=True)
+    for (C, F), at in (small, big):
+        det = F[:, 0] >= 6.0
+        assert det[-1] and C.shape[0] == F.shape[0] == at[0].shape[0] == at[1].shape[0]
+    assert int((small[0][1][:, 0] >= 6.0).sum()) == 3001
+    assert int((big[0][1][:, 0] >= 6.0).sum()) == 20000
+    for c in (gc._SIGNAL_CACHE, gc._SIGNAL_RECORDS, gc._NOISE_RECORDS):
+        c.clear()
+    gc._SIMILAR.clear()
+    once = gc.signal_draws(p, n, bands, 6.0, 20000, window=win, lags_too=True)
+    m = small[0][0].shape[0]
+    for a, b in zip(big[0] + big[1], once[0] + once[1]):
+        np.testing.assert_array_equal(a, b)
+    for a, b in zip(small[0] + small[1], once[0] + once[1]):
+        np.testing.assert_array_equal(a, b[:m])
+
+
+def test_signal_draws_place_their_maxima_as_the_engine_does(fresh):
+    """lags_too's positions are block lags: every fine maximum lies in the searched window and
+    every coarse one on its band's grid within the engine's coarse search (hmf.c: one coarse
+    sample past each end); over the whole block both wrap into [0, n)."""
     n = 2048
     p = _profile(n)
     bands = gc.usable_bands(p, n)
-    sig = gc.signal_draws(p, n, bands, 6.0, 20000)
-    for win in ((128, 1920), None):
-        noise = gc.noise_block_maxima(p, n, bands, window=win)
-        for chain in gc.enumerate_chains(n, 3, bands=bands):
-            for prune in (False, True):
-                monkeypatch.setattr(gc, "_C_SEARCH", True)
-                c = gc._chain_candidates(sig, noise, bands, chain, 0.01, 6.0, prune)
-                monkeypatch.setattr(gc, "_C_SEARCH", False)
-                py = gc._chain_candidates(sig, noise, bands, chain, 0.01, 6.0, prune)
-                assert c == py, (chain, prune, win)
+    for win in ((192, 1856), None):
+        (C, F), (fat, cat) = gc.signal_draws(p, n, bands, 6.0, 4000, window=win, lags_too=True)
+        w0, w1 = win or (0, n)
+        assert fat.min() >= w0 and fat.max() < w1, (win, fat.min(), fat.max())
+        for i, b in enumerate(bands):
+            R = n // b
+            assert np.all(cat[:, i] % R == 0), b
+            lo = max(w0 // R - 1, 0) * R if w0 > 0 else 0
+            hi = min(-(-w1 // R) + 1, b) * R
+            assert cat[:, i].min() >= lo and cat[:, i].max() < hi, (win, b)
 
 
 def test_block_size_ranking_models_with_every_draw(fresh, monkeypatch):

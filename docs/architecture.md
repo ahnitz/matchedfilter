@@ -200,9 +200,11 @@ Two readers take their statistics from the same simulation:
 
 - `gatechain.signal_draws` adds a signal of strength `snr` arriving at a uniformly random
   time (16 sub-sample phases, `_NF`) through the transforms' linearity, and returns each
-  band's coarse window maximum with the fine window maximum. Only draws whose fine
-  statistic reaches `snr` somewhere in the block hold records, and the simulation runs
-  longer where few do (at a very large `snr`).
+  band's coarse window maximum with the fine window maximum, and where each lies. Only
+  draws whose fine statistic reaches `snr` somewhere in the block hold records. The
+  simulation runs until it holds the detections asked for (draws whose fine window
+  maximum reaches `snr`), however few of its draws a large `snr` keeps, and is extended
+  in place for a larger request: a row's draws depend only on its row.
 - `gatechain.noise_block_maxima` reads the same draws without the signal: each band's
   noise-only window maximum per block, from which a chain's joint pass rates follow
   (`gatechain._reach`).
@@ -210,12 +212,16 @@ Two readers take their statistics from the same simulation:
 `gatechain.kept_draws` selects the draws the fine stage keeps (fine maximum at least
 `snr`): the false-dismissal budget is a fraction of those.
 
-Draw counts scale with the budget (`gatemodel._nsamp_for`: 200/fd signal draws, at least
-20,000 and at most 3,000,000; `gatechain.model_draws` uses 20,000 noise blocks). About half
-the draws are kept, so a chain's budget rests on about 100 dismissed draws for fd between
-about 7e-5 and 1e-2. Above 1e-2 the 20,000-draw floor gives more; below 7e-5 the cap gives
-fewer. A budget that leaves fewer than 8 dismissed draws is refused
-(`gatechain._chain_candidates`, `gatemodel.gate_for`).
+The draw count is a function of fd and the per-plan tolerance only
+(`gatemodel._nsamp_for`): 2 (round(j / fd) - 1) detections, where j
+(`gatemodel.fit_order`) is the smallest order statistic whose plans exceed 1.25 fd with
+probability at most 5% (decision D1; `_TAIL_RATIO`, `_TAIL_SHARE`). j is 47 at fd 1e-2 and
+48 at 1e-3 and 1e-4: 9,398 and 95,998 detections, a median of 16,500 and 167,000 draws at
+snr 5.5 over the `fdr_audit` profiles (200/fd drew 20,000 and 200,000). The noise blocks are
+the simulation's first 20,000 rows (`_NOISE_BLOCKS`). A budget whose tail bound needs more
+than `_MAX_DETECTIONS` (1.75M, 0.7-0.9 GB of records; fd below 5.5e-5) is refused
+(`gatemodel.gate_for`,
+`gatechain.chain_thresholds`, `gatechain.choose_chain`).
 
 Profiles that agree in shape and in every band's signal response share cached simulations
 and plans (`gatechain._similar_get`: a cosine of at least `_REUSE_COS` and a gate response
@@ -225,10 +231,20 @@ within `_REUSE_RESPONSE`), because a search's banks have nearly one reference.
 
 `gatechain.enumerate_chains` lists every increasing tuple of up to `max_tiers` power-of-two
 bands from 64 to n/2 that hold some of the reference's power (`usable_bands`).
-`gatechain.plan_chain` gives each chain the thresholds that meet the budget at the lowest
-modelled cost (`_chain_candidates` searches the budget's split between tiers over the
-grids `_SPLIT` and `_SPLIT_COARSE`), and `gatechain.choose_chain` prices them all and
-returns the best with the list.
+`gatechain.plan_chain` gives each chain the thresholds, and on the CPU the direct refine's
+half-width, that meet the budget at the lowest modelled cost, and `gatechain.choose_chain`
+prices them all and returns the best with the list. The detections fall into two
+independent halves:
+
+- the search half decides the plan's structure: `_chain_candidates` searches the budget's
+  split between tiers (over the shares `_SPLIT`) and, where the cost model prices a direct
+  refine (`CostModel.with_direct`), every half-width at which a different set of the
+  detections falls outside the window (`_halfwidths`, up to `gatemodel.window_allowance`
+  misses), its misses counted against the same budget; the cheapest candidate wins, and
+  every choice among plans (`choose_chain`'s, the block size's) ranks their searched costs;
+- the fit half sets the thresholds (`_fit`): the search's, every tier moved by one shift,
+  the j-th smallest over the fit half of the shift at which each detection is first
+  dismissed (a detection the window misses is dismissed at any shift).
 
 - A split in which a tier passes more than `_USELESS_PASS` (half) of its pairs on to
   another tier is skipped when choosing.
@@ -243,37 +259,35 @@ strength `snr` (fine maximum at least `snr`) that the chain dismisses, for signa
 strength in Gaussian noise with the reference's spectrum. It is not a bound for every plan,
 population or noise.
 
-- A single tier's gate is the kept coarse maximum with floor(fd M) of the M kept draws
-  below it (`gatemodel.gate_for`; the one-tier branch of `_chain_candidates`), so its
-  dismissal on fresh draws averages fd.
-- A multi-tier chain searches threshold splits on the same draws it is judged on and keeps
-  the cheapest, which favours splits whose dismissal those draws understate. Its budget is
-  therefore cut by `_SPLIT_TOLERANCE_Z = 0.75` standard errors of the dismissed count. The
-  bias does not depend on fd or n: on independent draws (`tools/split_bias.py`, 10
-  profiles x 30 model seeds, fd 1e-2 and 1e-3, n = 2048 and 4096), with no cut two-tier
-  plans dismiss 1.02-1.03 of the budget and three-tier plans 1.03-1.04. The cut is about
-  twice that, so with it the plans made for a given chain dismiss 0.95-0.97 of the
-  budget, and the chain `choose_chain` picks, whose choice among chains adds a selection
-  bias of its own, 0.96-0.98. The value 0.75 came from one model seed shared by every profile, which sat
-  high; which value z should target is open
-  ([the 2026-10-27 log entry](gate-model.md#the-split-bias-does-not-depend-on-fd-and-the-cut-is-twice-its-size-2026-10-27)).
-  If the split grids change, measure the bias again with `tools/split_bias.py`.
-- Individual plans scatter about the mean. With K of about 115 dismissed draws per plan
-  (fd 7e-5 to 1e-2, where `gatemodel._nsamp_for` scales the draws with 1/fd), a plan's
-  realised dismissal has a standard deviation of 0.09 of fd, 1/sqrt(K + 1), for one-, two-
-  and three-tier plans alike. Of 1500-6000 plans per tier count the worst was 1.26-1.41 of
-  the budget, but averaged over 30 model seeds no (profile, chain) dismisses more than
-  1.071. The spread comes from the finite draws, not from the split search, so more
-  draws, not a larger cut, would narrow it. The gate model's one seed gives every profile
-  the same underlying noise, so a job's plans share one draw's luck.
-- The CPU direct refine's window may lose a further `gatechain._LOCALISE_SHARE` (5%) of fd
-  (`gatechain.direct_halfwidth`; the plan runs its half-width plus one coarse sample,
-  `HierarchicalFilter._direct_halfwidth`).
+- A plan's dismissal counts the detections some tier dismisses and those the CPU direct
+  refine's window misses (the fine maximum further from the last tier's coarse maximum
+  than the half-width), together: the window's misses come out of the budget, not on top
+  of it, and the plan runs the half-width the model counted.
+- Given the search half, the fit half is independent of the plan's structure and the
+  shift's score is continuous, so the plan's dismissal on fresh draws is the j-th smallest
+  of M uniforms, M + 1 = round(j / fd): its mean is fd, whatever the search chose and
+  whichever chain or block size was chosen from it, with no correction for the search.
+  Where the window alone misses j of the fit half, the plan refines by transform instead
+  and the tiers take the whole budget. A whole-number window cannot move with the fit, and
+  that branch is taken on the fit half, so the search offers a window only where the
+  branch's predictive probability (from the window's misses on the search half) is at most
+  the share of the tail bound the fit leaves (`gatemodel.window_allowance`: a window may
+  miss at most 15-22 of the about 47 dismissals the budget allows). A single tier is the
+  same with no search (`gatemodel.gate_for`).
+- Individual plans scatter about the mean with an sd of about fd / sqrt(j), 0.14 fd, and
+  P(plan > 1.25 fd) is 5% by construction. On independent draws (`tools/split_bias.py`: 10
+  profiles x 30 model seeds, 16M check detections at fd 1e-3, n = 2048 and 4096, one to
+  three tiers, every chain's plan and the pick, with and without a direct refine) the
+  pooled mean is 0.996-1.006 of fd and 4-6% of plans exceed 1.25 fd
+  ([the 2026-10-29 log entry](gate-model.md#one-false-dismissal-budget-per-plan-2026-10-29)).
+  The gate model's one seed gives every profile the same underlying noise, so a job's
+  plans share one draw's luck.
 
 Reduced-precision tiers (the Q15 screen, the FP16 gates) answer to the same budget against
 the flat filter; [reduced-precision gates](reduced-precision-gates.md) gives their error
 models. `tools/fdr_audit.py` measures a chain's dismissal against the flat filter by
-injection, two-sided, and `tools/gate.py` runs it before every merge.
+injection, two-sided against what the model says the plan dismisses (and pooled over the
+cases against the budget), and `tools/gate.py` runs it before every merge.
 
 ### Refusals
 

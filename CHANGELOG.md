@@ -65,9 +65,58 @@ Alpha releases may change the API. Pin a version for reproducible work.
   Threefry-2x32 and Box-Muller, identical for any vector width; AVX2 and AVX-512 agree bit
   for bit, SSE4 to the last ulp of its log and sincos), so their draws, and the thresholds
   they place, differ from before within the simulation's own error (thresholds +-1.4%).
+- One false-dismissal budget per plan, met by construction (docs/gate-model.md,
+  2026-10-29). A plan's structure is searched on half of the gate model's detections:
+  the split of fd between its tiers and, on the CPU, the direct refine's window. Its
+  thresholds are fitted on the other half, every tier moved by one shift that leaves
+  j - 1 of that half dismissed (`gatechain.plan_chain`). The fit half is independent of
+  everything the search chose, so every plan dismisses fd on average, with no correction
+  for the search, the chain `choose_chain` picks included.
+  - `_SPLIT_TOLERANCE_Z` is gone. It was the 0.75 cut, and with costs from a real machine
+    the bias it cut was larger: the CPU's plans dismissed 1.02-1.08 of fd, tiers and
+    window together.
+  - On independent draws (`tools/split_bias.py`: 10 profiles x 30 model seeds, fd 1e-2
+    and 1e-3, n = 2048 and 4096, priced by operation count and by Zen 5 costs with a
+    direct refine) every chain's plans average 0.997-1.005 of fd and the picks
+    0.998-1.013.
+  - Each plan rests on half the draws, so its sd is 0.14 fd (0.09 before), and 5% of
+    plans dismiss more than 1.25 fd, the tolerance decision D1 sets
+    (`gatemodel.fit_order`).
+  - Thresholds change everywhere.
+  - Meeting fd where the plans exceeded it costs CPU throughput: on test27's bank
+    (`tools/ladder.py`), 0.98 on dev1 at the production model seed (paired), and a median
+    of 0.976 over 8 model seeds.
+- The CPU direct refine's window is inside the budget. The detections it misses count as
+  dismissals, and the split search tries every half-width that misses a different set,
+  priced per lag, beside the whole-block refine.
+  - `CostModel.with_direct` takes ticks per lag.
+  - A window may miss at most `gatemodel.window_allowance` of the search half's
+    detections (15-21 of the about 47 dismissals the budget allows). Within that, the
+    chance that the fit half leaves the window no room, and the plan refines by
+    transform, is at most what D1's tail leaves.
+  - `_LOCALISE_SHARE` (up to 5% of fd on top of the budget) and the window's extra
+    coarse sample are gone.
+  - A pinned chain's thresholds are priced without the Q15 screen it runs without.
+  - Explicit thresholds refine by transform.
+- The gate model's draw count is a function of fd and D1's tolerance only: 2 (round(j / fd) - 1)
+  detections, j = 47 at fd 1e-2 and 48 at 1e-3, simulated until reached at any snr.
+  - At fd 1e-3 that is a median of 167,000 draws (200,000 before), at 1e-2 16,500
+    (20,000).
+  - 200/fd with its 20,000 floor, the 3,000,000 cap, `_GROW` and the K < 8 refusals are
+    gone.
+  - A budget below fd 5.5e-5 now refuses. Before, such budgets ran on 8-96 dismissed
+    draws.
+  - `choose_chain` and `chain_thresholds` take `nsamp` as detections.
+  - `tools/fdr_audit.py` tests each case against its plan's modelled dismissal
+    (two-sided, against independent model draws) and reports the pooled misses over the
+    budget.
+  - `tools/split_bias.py` has no z and counts the direct refine's misses (`--cost`,
+    `--taps`).
 
 ### Removed
 
+- `gatechain.direct_halfwidth`: a plan carries its direct refine's half-width
+  (`chain_thresholds(...)["halfwidth"]`), chosen with its thresholds against one budget.
 - 52 shipped GPU kernels that nothing could run or nothing chose, 14.7 MB of 115 MB: CUDA's
   tensor-core coarse gate (`src/gpu/coarse_tc.cu`, four PTX builds; the measured coarse
   choice never picked it on the L40S, where it ran 25-40% slower than the Slang layouts),
@@ -183,6 +232,14 @@ Alpha releases may change the API. Pin a version for reproducible work.
   (~1 ms, against ~0.03 ms), and a hierarchical filter looks its plan and chain choice up
   several times per reference. On the O2 production replica (one core, dev2) the run takes
   5% less wall time (73.9 s to 70.2 s); its thresholds and triggers are unchanged.
+- The gate model's decision setup in a fresh process at fd 1e-3 takes 0.69-0.73x the
+  time. On dev2 at load 6-8, `choose_chain` takes 1.15 -> 0.79 s at n = 2048 and
+  2.14 -> 1.49 s at 4096, and a CPU FIR plan's whole decision 1.17 -> 0.83 s and
+  2.18 -> 1.59 s. dev1 is 0.69-0.71x. The work removed:
+  - fewer draws;
+  - the noise alone recorded only for the model's 20,000 noise blocks;
+  - one split grid (`_SPLIT`, 9 shares; 19 gave the same plans' costs to 0.05%);
+  - no per-band single-tier plans to price the direct refine.
 
 ### Fixed
 

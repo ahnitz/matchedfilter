@@ -24,7 +24,7 @@ def _psd(name):
 @pytest.fixture
 def empty_model(monkeypatch):
     for c in ("_SIGNAL_CACHE", "_NOISE_CACHE", "_CAND_CACHE", "_CHOICE_CACHE", "_PLAN_CACHE",
-              "_DIRECT_CACHE", "_SIGNAL_RECORDS", "_NOISE_RECORDS"):
+              "_SIGNAL_RECORDS", "_NOISE_RECORDS"):
         monkeypatch.setattr(gc, c, OrderedDict())
     monkeypatch.setattr(gc, "_SIMILAR", {})
 

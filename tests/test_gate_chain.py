@@ -632,31 +632,31 @@ def test_cost_file_reproduces_the_measured_models(monkeypatch, tmp_path):
 
 
 def _plan_chain_bruteforce(sig, noise, bands, chain, fd, cost, n, snr):
-    """The split search done the plain way: mask and sort every kept draw for each candidate
-    (each draw's coarse maxima over the window, as plan_chain)."""
+    """plan_chain done the plain way: the split search on the search half (every other
+    detection from the first), masking and sorting every one of its detections for each
+    candidate; then the fit on the other half, every tier moved by the shift that leaves j - 1
+    of it dismissed (each draw's coarse maxima over the window, as plan_chain)."""
     import math
     gc = mf.gatechain
     cols = [bands.index(b) for b in chain]
     S = gc.kept_draws(sig, bands, chain, snr)
-    M, k = S.shape[0], len(chain)
-    K = int(math.floor(fd * M)) if k == 1 else int(math.floor(
-        fd * M - gc._SPLIT_TOLERANCE_Z * math.sqrt(M * fd * (1 - fd))))
-    if K < 8:
-        return None
-    sorted_cols = [np.sort(S[:, i]) for i in range(k - 1)]
+    A, B = S[0::2], S[1::2]
+    M, k = A.shape[0], len(chain)
+    K = int(round(fd * (M + 1))) - 1
+    sorted_cols = [np.sort(A[:, i]) for i in range(k - 1)]
     cands = []
 
     def rec(i, prefix, remaining):
         if i == k - 1:
             alive = np.ones(M, bool)
             for j, g in enumerate(prefix):
-                alive &= S[:, j] >= g
+                alive &= A[:, j] >= g
             rem = K - (M - int(alive.sum()))
-            last = np.sort(S[alive, k - 1])
+            last = np.sort(A[alive, k - 1])
             if 0 <= rem < len(last):
                 cands.append(list(prefix) + [float(last[rem])])
             return
-        for a in (gc._SPLIT if k <= 2 else gc._SPLIT_COARSE):
+        for a in gc._SPLIT:
             share = a * remaining
             idx = int(math.floor(share * K))
             if idx >= 1:
@@ -666,9 +666,14 @@ def _plan_chain_bruteforce(sig, noise, bands, chain, fd, cost, n, snr):
     for th in cands:
         reach = gc._reach(noise, cols, th)
         c = cost.chain_cost(chain, reach)
-        if best is None or c < best["cost"]:
-            best = dict(thresholds=tuple(th), reach=tuple(reach), cost=float(c))
-    return best
+        if best is None or c < best[0]:
+            best = (float(c), th)
+    if best is None:
+        return None
+    j = int(round(fd * (B.shape[0] + 1)))
+    shift = np.sort((B - np.array(best[1])).min(axis=1))[j - 1]
+    th = tuple(max(g + float(shift), 0.0) for g in best[1])
+    return dict(thresholds=th, reach=tuple(gc._reach(noise, cols, th)), cost=best[0])
 
 
 def test_plan_chain_matches_the_plain_split_search():
@@ -677,7 +682,7 @@ def test_plan_chain_matches_the_plain_split_search():
     n = 2048
     cm = _calibration.calibrate_costs(n, 32)
     bands = gc.usable_bands(prof, n)
-    sig = gc.signal_draws(prof, n, bands, 6.0, gc._gm._nsamp_for(1e-3), window=(192, n - 192))
+    sig = gc.signal_draws(prof, n, bands, 6.0, gc.model_draws(1e-3)[0], window=(192, n - 192))
     noise = gc.noise_block_maxima(prof, n, bands, window=(192, n - 192))
     for chain in gc.enumerate_chains(n, 3, bands=bands):
         fast = gc.plan_chain(sig, noise, bands, list(chain), 1e-3, cm, n, 6.0)

@@ -16,7 +16,7 @@ SUBMODULES = {
     "search": {"HierarchicalSearch", "Root", "Inner", "Leaf", "BlockInput"},
     "device": {"Device", "parse", "devices"},
     "precision": {"sweep"},
-    "gatechain": {"chain_thresholds", "calibrate_costs", "choose_chain", "direct_halfwidth"},
+    "gatechain": {"chain_thresholds", "calibrate_costs", "choose_chain"},
 }
 
 

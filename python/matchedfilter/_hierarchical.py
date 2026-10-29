@@ -391,58 +391,29 @@ class HierarchicalFilter(MatchedFilter):
             ref = np.asarray(self._pending_ref, dtype=np.float64)
             tot = ref.sum()
             f = tuple(float(ref[:b].sum() / tot) if tot > 0 else 0.0 for b in chain)
-        if self.device.kind == 'cpu':
-            if getattr(self, "_taps", None) is not None:
-                hw = self._direct_halfwidth(chain, list(thr))
+        if (self.device.kind == 'cpu' and getattr(self, "_taps", None) is not None
+                and _direct_refine_enabled() and self._cal_thr is None):
+            # the model's plan: its thresholds and half-width share the budget. Explicit
+            # thresholds carry their own guarantee, which a window would add to: transform.
+            hw = getattr(self, "_plan_halfwidth", None)
         r = self._resolved = _Resolved(chain, thr, getattr(self, "_refine_reach", None), f,
                                        hw)
         return r
 
-    def _direct_halfwidth(self, chain, thresholds):
-        """The direct refine's window half-width for this chain (gatechain.direct_halfwidth,
-        plus one coarse sample), or None where it does not apply: off (MF_DIRECT_REFINE=0),
-        or no reference to model it on."""
-        if not _direct_refine_enabled() or self._pending_ref is None:
-            return None
-        hw, _, _ = _gatechain.direct_halfwidth(self._pending_ref, self.n, chain, thresholds,
-                                               self._fs_snr or self.snr, self.fd,
-                                               window=self.search_window)
-        return hw + 1
-
-    def _direct_prices(self, base):
-        """{band: ticks per refined pair} of the direct refine with this plan's taps, for a
-        chain whose last tier is that band (window from the single-tier model at the band);
-        empty where the direct refine does not apply. Cached per reference and taps."""
+    def _direct_price(self):
+        """Ticks per lag of the direct refine's window with this plan's taps, which the chain
+        choice prices every chain's window by (gatechain.CostModel.with_direct), or None where
+        the direct refine does not apply: off (MF_DIRECT_REFINE=0), no taps, or no reference
+        to model it on."""
         taps = getattr(self, "_taps", None)
         if taps is None or not _direct_refine_enabled() or self._pending_ref is None:
-            return {}
-        key = (float(self._fs_snr or self.snr), float(self.fd), self.search_window)
-        hit = getattr(self, "_dprice", None)
-        if (hit is not None and hit[0] == key and hit[2] is self._pending_ref
-                and hit[3] is taps[0]):
-            return hit[1]
+            return None
         lagtap = _prices._direct_lagtap()
+        if not lagtap > 0:
+            return None
         L = 32.0 * max(1, int(round(float(np.mean(taps[1])) / 32.0)))   # as the chain key rounds it
-        prices = {}
-        if lagtap > 0:
-            p = np.asarray(self._pending_ref, dtype=np.float64)
-            for b in _gatechain.usable_bands(p / p.sum(), self.n):
-                pl = _gatechain.chain_thresholds(self._pending_ref, self.n, self._fs_snr or self.snr,
-                                                 self.fd, (b,), cost=base, window=self.search_window)
-                if pl is None:
-                    continue
-                # The window the chain will run with (_resolve: the full draw count), not a
-                # cheaper estimate: the half-width is a tail percentile, and at band 256 a tenth
-                # of the draws gave 2 coarse samples against 62 (33 lags against 993), so the
-                # model priced a direct refine the engine never ran and chose single-tier
-                # chains 50% slower than the best (test27 leaves, dev2, 2026-10-24). The draws
-                # are shared (gatechain._DIRECT_DRAWS), so pricing adds no simulation.
-                hw = self._direct_halfwidth((b,), pl["thresholds"])
-                lags = 2 * hw * (self.n // b) + 1
-                # the correlation, plus the per-lag binning around it (~4 ticks a lag)
-                prices[int(b)] = lagtap * L * lags + 4.0 * lags
-        self._dprice = (key, prices, self._pending_ref, taps[0])   # held: identity is the key
-        return prices
+        # the correlation, plus the per-lag binning around it (~4 ticks a lag)
+        return lagtap * L + 4.0
 
 
     def _switch_chain(self, chain):
@@ -463,14 +434,19 @@ class HierarchicalFilter(MatchedFilter):
     def _thresholds(self, *, required=True):
         """One threshold per tier: explicit, or from the reference model."""
         self._refine_reach = None    # the model's per-pair refine probability (hier_peaks)
+        self._plan_halfwidth = None  # the model's direct-refine half-width (_resolve)
         if self._cal_thr is not None:
             if len(self._cal_thr) != len(self._chain):
                 raise ValueError("explicit thresholds %s do not match chain %s" % (self._cal_thr, self._chain))
             return self._cal_thr
         if self._pending_ref is not None:
+            cost = self._cost_model()
+            if self._pinned is not None:
+                # priced as it runs: a pinned chain's first tier has no screen (_arm_q15), so a
+                # one-tier chain's tier reports its lag for the direct refine's window
+                cost = cost.unscreened()
             pl = _gatechain.chain_thresholds(self._pending_ref, self.n, self._fs_snr or self.snr, self.fd,
-                                             self._chain, cost=self._cost_model(),
-                                             window=self.search_window)
+                                             self._chain, cost=cost, window=self.search_window)
             if pl is not None:
                 th = tuple(float(x) for x in pl["thresholds"])
                 for v in th:
@@ -479,6 +455,7 @@ class HierarchicalFilter(MatchedFilter):
                 reach = pl.get("reach")
                 if reach is not None and len(reach) > len(self._chain):
                     self._refine_reach = float(reach[len(self._chain)])
+                self._plan_halfwidth = pl.get("halfwidth")
                 return th
         if required:
             raise ValueError(
@@ -565,13 +542,13 @@ class HierarchicalFilter(MatchedFilter):
         policy = self._series_policy('hierarchical_series', 0, self.ntemplates) or {}
         cm = _calibration.calibrate_costs(self.n, self.ntemplates,
                                         group=policy.get('series_group', _gatechain.default_series_group(self.n)))
-        prices = self._direct_prices(cm)
-        return (cm.with_direct(prices, single_tier=_gatechain.cpu_gate_kind() != "f16")
-                if prices else cm)
+        price = self._direct_price()
+        return (cm.with_direct(price, single_tier=_gatechain.cpu_gate_kind() != "f16")
+                if price is not None else cm)
 
     def _direct_key(self):
         """The direct refine's rounded tap length when it is priced into this plan's chain
-        choice (HierarchicalFilter._direct_prices), else None: chain choices and locks are
+        choice (HierarchicalFilter._direct_price), else None: chain choices and locks are
         kept apart by it, since a cheaper refine changes which chain wins."""
         taps = getattr(self, "_taps", None)
         if taps is None or not _direct_refine_enabled() or self.device.kind != "cpu":
@@ -713,7 +690,6 @@ class HierarchicalFilter(MatchedFilter):
         if counts.shape != (self.ntemplates,) or counts.min() < 1 or counts.max() > min(taps.shape[1], self.n):
             raise ValueError("counts must be (ntemplates,) in [1, min(m, n)]")
         self._taps = (taps, counts)
-        self._dprice = None
         if self._pinned is None and self._chain is not None and self.device.kind == "cpu":
             # The model priced the chain without the direct refine: choose again (the plan is
             # rebuilt on next use and replays reference, templates and data).

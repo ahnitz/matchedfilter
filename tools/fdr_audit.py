@@ -9,17 +9,21 @@ thresholds (gatechain.chain_thresholds), misses a detection when it reports no p
 block or one below snr. Every detection both filters report must carry the flat filter's
 value.
 
-A case's misses are tested two-sided against the budget (binomial). A model that dismisses
-too much fails, and so does one that dismisses far too little: such gates pass work the
-budget would have dismissed, and a 100x too conservative model once hid two model errors. A
-multi-tier chain's budget is cut for the selection bias of its split search
-(gatechain._SPLIT_TOLERANCE_Z; tools/split_bias.py measures the bias): the cut is about
-twice the bias, so in the model such a chain dismisses 0.95-0.97 of fd on average. With
---q15 the same chains also run with the Q15 screen as every tier but the last, where this
-back end has one. The gate model leaves the Q15 statistic's rounding out (about 0.01 in
-snr: it lifts a tier's maxima a little), so a Q15 chain may dismiss less than its budget
-where a gate sits within that of snr: such a case is reported ("under") but fails only with
---strict-q15. Dismissing more than the budget always fails.
+A plan's own dismissal scatters about fd by construction (its thresholds are fitted on
+gatemodel.fit_order's j-th of the model's draws: sd about fd / sqrt(j), with j about 47),
+so a case is tested against what the model says its plan dismisses: the share of --check
+detections of an independent model simulation that the plan's tiers dismiss. The two counts
+are compared two-sided (the engine's misses among all the misses, binomial at the engine's
+share of the detections). A model that dismisses too much fails, and so does one that
+dismisses far too little: such gates pass work the budget would have dismissed, and a 100x
+too conservative model once hid two model errors. That the plans dismiss fd on average is
+the model's own claim, measured by tools/split_bias.py; the summary adds the pooled misses
+of every case over their budget, which shows it end to end to the scatter of a few dozen
+plans. With --q15 the same chains also run with the Q15 screen as every tier but the last,
+where this back end has one. The gate model leaves the Q15 statistic's rounding out (about
+0.01 in snr: it lifts a tier's maxima a little), so a Q15 chain may dismiss less than its
+plan where a gate sits within that of snr: such a case is reported ("under") but fails only
+with --strict-q15. Dismissing more than the plan always fails.
 
   python tools/fdr_audit.py                                  # the default sweep
   python tools/fdr_audit.py --n 4096 --fd 1e-3 --inj 200000 --profiles aligo_o4_inspiral
@@ -30,7 +34,7 @@ Profiles: power laws "f^E" (power k^E in bins 1 .. n/2 - 1), "inspiral" (k^-7/3 
 low-frequency knee), and the shapes of tests/spectral_profiles.py. Chains: comma-separated
 bands, ";" between chains, "default" for n/2; n/8,n/2; n/8,n/4,n/2; n/16,n/4, or "auto" for
 gatechain.choose_chain's pick under this machine's calibrated costs. Exit status 1 when any
-case is off budget (p < --alpha after a Bonferroni correction over the cases) or a value
+case is off its plan (p < --alpha after a Bonferroni correction over the cases) or a value
 disagrees.
 """
 import argparse
@@ -102,6 +106,32 @@ def binom_two_sided(x, n, p):
     return float(min(1.0, pm[pm <= pm[x] * (1 + 1e-9)].sum()))
 
 
+def modelled(power, n, chain, thresholds, snr, window, count, seed=9770):
+    """(dismissed, detections): of `count` detections of a model simulation independent of
+    the plans' (seeds seed, seed + 1, ...: 2M detections each), those some tier of chain at
+    these thresholds dismisses."""
+    from matchedfilter import gatechain as gc
+    bands = gc.usable_bands(power, n)
+    lost = total = 0
+    step = 2000000
+    for c in range(-(-int(count) // step)):
+        C, F = gc.signal_draws(power, n, bands, snr, min(step, int(count) - c * step), seed=seed + c,
+                               window=window)
+        det = F[:, 0] >= snr
+        bad = np.zeros(int(det.sum()), bool)
+        for b, t in zip(chain, thresholds):
+            bad |= C[det, bands.index(b)] < t
+        lost += int(bad.sum())
+        total += int(det.sum())
+    return lost, total
+
+
+def run_profile(job):
+    """Every case of one (profile, n): (profile, n, chains, args) -> their rows."""
+    name, n, chains, a = job
+    return [run_case((name, n, chain, a)) for chain in chains]
+
+
 def run_case(job):
     """One case: (profile, n, chain, args) -> its row."""
     name, n, chain, a = job
@@ -125,6 +155,9 @@ def run_case(job):
         return dict(row, error="no plan")
     thr = [float(x) for x in plan["thresholds"]]
     row["thresholds"] = thr
+    row["model_lost"], row["model_detections"] = modelled(power, n, chain, thr, a["snr"], win,
+                                                          a["check"] or max(1000000, 10 * a["inj"]))
+    qm = row["model_lost"] / row["model_detections"]
     h = np.sqrt(power).astype(np.complex64)
     hc = np.conj(h)
     flat = mf.MatchedFilter(n, ndata=_B, ntemplates=1)
@@ -174,10 +207,16 @@ def run_case(job):
             both = hit & got
             mismatch[key] += int((np.abs(np.abs(p["value"][both]) - zf[both]) > 1e-3 * zf[both]).sum())
     row["detections"] = det
+    row["model"] = qm / a["fd"]
     row["engines"] = {}
     for key in engines:
-        pv = binom_two_sided(miss[key], det, a["fd"])
+        # the engine's misses among both counts' misses, at its share of the detections: the
+        # two-sample comparison of a binomial rate with one counted on the model's draws
+        both = miss[key] + row["model_lost"]
+        share = det / float(det + row["model_detections"])
+        pv = binom_two_sided(miss[key], both, share) if both else 1.0
         row["engines"][key] = dict(misses=miss[key], ratio=miss[key] / max(det, 1) / a["fd"],
+                                   to_model=miss[key] / max(det, 1) / qm if qm > 0 else float("nan"),
                                    p=pv, mismatches=mismatch[key])
     return row
 
@@ -195,6 +234,8 @@ def main(argv=None):
     ap.add_argument("--q15", action="store_true", help="also run the Q15-screened chains")
     ap.add_argument("--strict-q15", action="store_true",
                     help="a Q15 chain dismissing less than its budget fails too")
+    ap.add_argument("--check", type=int, default=0,
+                    help="model detections a plan's dismissal is counted on (default max(1M, 10 x --inj))")
     ap.add_argument("--seed", type=int, default=11)
     ap.add_argument("--alpha", type=float, default=1e-3, help="family-wise level over the cases")
     ap.add_argument("--jobs", type=int, default=1)
@@ -202,19 +243,21 @@ def main(argv=None):
     a = ap.parse_args(argv)
     names = a.profiles.split(",") if a.profiles else default_profiles()
     win = None if a.window is None else [int(x) for x in a.window.split(",")]
-    opts = dict(snr=a.snr, fd=a.fd, inj=a.inj, window=win, q15=a.q15, seed=a.seed)
-    jobs = [(nm, n, ch, opts) for n in a.n for nm in names for ch in chains_for(a.chains, n)]
+    opts = dict(snr=a.snr, fd=a.fd, inj=a.inj, window=win, q15=a.q15, seed=a.seed, check=a.check)
+    # one job per (profile, n): its chains share the model's check draws
+    jobs = [(nm, n, chains_for(a.chains, n), opts) for n in a.n for nm in names]
     t0 = time.time()
     if a.jobs > 1:
         with mp.get_context("spawn").Pool(a.jobs) as pool:
-            rows = pool.map(run_case, jobs)
+            rows = [r for part in pool.map(run_profile, jobs, chunksize=1) for r in part]
     else:
-        rows = [run_case(j) for j in jobs]
+        rows = [r for j in jobs for r in run_profile(j)]
     tests = sum(len(r.get("engines", {})) for r in rows)
     level = a.alpha / max(tests, 1)
     bad = under = 0
-    print("snr %.2f fd %g, %d injections a case, window %s; off budget at p < %.1e (%g over %d tests)"
-          % (a.snr, a.fd, a.inj, win or "whole block", level, a.alpha, tests))
+    print("snr %.2f fd %g, %d injections a case, window %s; off the plan's modelled dismissal at "
+          "p < %.1e (%g over %d tests)" % (a.snr, a.fd, a.inj, win or "whole block", level, a.alpha, tests))
+    print("per case: misses / budget, and / the plan's modelled dismissal (plan: that over the budget)")
     for r in rows:
         head = "  n=%-5d %-18s %-20s" % (r["n"], r["profile"], ",".join(map(str, r["chain"] or ["?"])))
         if "error" in r:
@@ -226,11 +269,20 @@ def main(argv=None):
             fail = (off and not low) or e["mismatches"]
             bad += bool(fail)
             under += bool(low)
-            print("%s %-4s thr [%s] det %6d miss %5d  %.2fx  p %.3g%s%s" % (
+            print("%s %-4s thr [%s] det %6d miss %5d  %.2fx budget  %.2fx plan (plan %.2fx)  p %.3g%s%s" % (
                 head, key, ",".join("%.2f" % t for t in r["thresholds"]), r["detections"], e["misses"],
-                e["ratio"], e["p"], "  mismatches %d" % e["mismatches"] if e["mismatches"] else "",
+                e["ratio"], e["to_model"], r["model"], e["p"],
+                "  mismatches %d" % e["mismatches"] if e["mismatches"] else "",
                 "  <-- OFF" if fail else "  (under: Q15 rounding)" if low else ""), flush=True)
-    print("%d of %d off budget or mismatched, %d Q15 under budget (%.0f s)"
+    for key in ("fp32", "q15"):
+        ok = [r for r in rows if key in r.get("engines", {})]
+        if ok:
+            m = sum(r["engines"][key]["misses"] for r in ok)
+            d = sum(r["detections"] for r in ok)
+            print("pooled %s: %d misses of %d detections over %d cases: %.3fx the budget "
+                  "(+- %.3f binomial; plans scatter about fd / sqrt(47) each)"
+                  % (key, m, d, len(ok), m / d / a.fd, math.sqrt(max(m, 1)) / d / a.fd))
+    print("%d of %d off the plan or mismatched, %d Q15 under it (%.0f s)"
           % (bad, tests, under, time.time() - t0))
     if a.json:
         with open(a.json, "w") as f:

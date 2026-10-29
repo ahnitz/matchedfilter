@@ -172,7 +172,8 @@ decisions compared).
 (GPU fp16 rounding, for its bound), `gate16_error.py`, `gate16_check.py`,
 `coarse_precision.py`, `coarse_fixed.py`, `fdr_audit.py` (every profile and chain against
 the flat filter, two-sided), `split_bias.py` (each plan's dismissal on model draws it was
-not chosen on: the measurement behind `gatechain._SPLIT_TOLERANCE_Z`), `audit_gate_model.py`,
+not made from: the check that plans dismiss fd on average with gatemodel.fit_order's tail,
+direct refine windows included), `audit_gate_model.py`,
 `audit_threshold.py`, `audit_gpu_bands.py`;
 `make_psd_profiles.py` writes the pycbc noise-curve test profiles (`tests/data/psd_model_profiles.npz`).
 
