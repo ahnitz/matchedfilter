@@ -35,15 +35,15 @@ def _flat(info):
     return info.get("file") or info["portable"]["file"]
 
 
-def _build_ptx():
+@pytest.fixture
+def build_ptx(monkeypatch):
     """tools/build_ptx.py of the checkout beside the tests (skips for an installed package)."""
-    import sys
+    import importlib
     tools = pathlib.Path(__file__).resolve().parents[1] / "tools"
     if not (tools / "build_ptx.py").is_file():
         pytest.skip("tools/ is not beside the tests (installed package?)")
-    sys.path.insert(0, str(tools))
-    import build_ptx
-    return build_ptx
+    monkeypatch.syspath_prepend(str(tools))
+    return importlib.import_module("build_ptx")
 
 
 def test_every_size_has_ptx(manifest):
@@ -55,13 +55,12 @@ def test_every_size_has_ptx(manifest):
         assert ptx.stat().st_size > 1000, f"{ptx} looks empty"
 
 
-def test_no_shipped_module_declares_more_static_shared_memory_than_cuda_allows(manifest):
+def test_no_shipped_module_declares_more_static_shared_memory_than_cuda_allows(manifest, build_ptx):
     """CUDA allows a block 48 KB of static shared memory on every architecture and its JIT
     rejects a module past it, so such a module could launch on no NVIDIA GPU
     (build_ptx.STATIC_SHARED_MAX). The bytes are read from each module's .shared declarations,
     and the reading is checked against the staging the manifest records for the 32 KB builds,
     so a parse that found nothing could not pass."""
-    build_ptx = _build_ptx()
     shared = {p.name: build_ptx.static_shared(p.read_text()) for p in sorted(PTX_DIR.glob("*.ptx"))}
     portable = [info["portable"] for info in manifest["modules"].values() if "portable" in info]
     assert portable and all(shared[p["file"]] == p["lds_bytes"] for p in portable)
@@ -69,7 +68,7 @@ def test_no_shipped_module_declares_more_static_shared_memory_than_cuda_allows(m
     assert not over, "modules no NVIDIA GPU can launch: %s" % over
 
 
-def test_every_kernel_the_host_asks_for_is_a_shipped_module():
+def test_every_kernel_the_host_asks_for_is_a_shipped_module(build_ptx):
     """Context.pipeline serves the flat, one-bin flat, refine, one-bin refine, follow-up,
     forward and full-correlation kernels at every length from a module that ships: its own
     build, or the _lds32 build where its own staging is past CUDA's static shared limit and
@@ -78,7 +77,6 @@ def test_every_kernel_the_host_asks_for_is_a_shipped_module():
     skipping (conftest turns an UnsupportedSize into a skip)."""
     from matchedfilter import UnsupportedSize
     from matchedfilter import _cudacompute as C
-    build_ptx = _build_ptx()
     ctx = C.Context.__new__(C.Context)
     ctx._pipelines = {}
     ctx._load = lambda stem, path, fn_name, wg: (stem, path)
