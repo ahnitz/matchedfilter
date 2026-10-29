@@ -367,7 +367,7 @@ void *create(size_t N){
     p->scg=ap_alloc64(g_n*(size_t)n2*2*sizeof(float)+64);
     p->fuse = eprod_ok(p->N2);
     if constexpr (AP_W == 8 || AP_W == 16) {
-      if(p->fuse && n1==32 && n2==32 && ap_srprod()) p->fuse=2;
+      if(p->fuse && n1==32 && n2==32) p->fuse=2;
     }
   }
   { size_t nhi=(N/AP_W)/256; if(nhi<1) nhi=1; double Nq=(double)(N/AP_W);

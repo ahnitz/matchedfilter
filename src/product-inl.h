@@ -6,7 +6,10 @@ static inline int AP_PROD_FN(codelet_prod)(int m,const float*restrict dr,const f
                                const float*restrict tr,const float*restrict ti,
                                vf*restrict ar,vf*restrict ai,vf*restrict br,vf*restrict bi,
                                long S,long DS){
-  if(ap_srprod()) switch(m){
+  /* Split-radix wherever it fits the register file: it measured faster than the Stockham
+     fft%d_prod forms (compared in one build; see docs). Those remain for 8, which has no
+     split-radix form, and for 32 and 64 below 16 lanes. */
+  switch(m){
     /* 8 has no split-radix form and needs no scratch either: one radix-8 pass
        writes straight to ar. */
     case  8: return AP_PROD_FN(fft8_prod)(dr,di,tr,ti,ar,ai,br,bi,S,DS);
@@ -29,12 +32,6 @@ static inline int AP_PROD_FN(codelet_prod)(int m,const float*restrict dr,const f
         if(m==32) return AP_PROD_FN(fft32_prod)(dr,di,tr,ti,ar,ai,br,bi,S,DS);
         return AP_PROD_FN(fft64_prod)(dr,di,tr,ti,ar,ai,br,bi,S,DS);
       }
-  }
-  switch(m){
-    case  8: return AP_PROD_FN(fft8_prod)(dr,di,tr,ti,ar,ai,br,bi,S,DS);
-    case 16: return AP_PROD_FN(fft16_prod)(dr,di,tr,ti,ar,ai,br,bi,S,DS);
-    case 32: return AP_PROD_FN(fft32_prod)(dr,di,tr,ti,ar,ai,br,bi,S,DS);
-    default: return AP_PROD_FN(fft64_prod)(dr,di,tr,ti,ar,ai,br,bi,S,DS);
   }
 }
 
