@@ -788,30 +788,50 @@ def round_cost(rounds):
     return float(np.mean(cost)) if cost else float("nan")
 
 
-def d8_section(nulls, cur, out, caps):
+#: Power within this of the current rule's counts as kept (the table prints three decimals).
+KEPT = 0.002
+
+
+def keeps_power(groups, cp):
+    """Whether a rule's power at every gain of 5% or more is at least the current rule's, to
+    within KEPT, under every group's null (groups: d8_rows' per-group results; cp: the
+    current rule's powers per group)."""
+    return all(v["power"][i] >= cp[n][0][i] - KEPT for n, v in groups.items()
+               for i, g in enumerate(GAINS) if g >= 0.05)
+
+
+def d8_section(nulls, cur, out, caps, compare=()):
     """The table D8 asks for: which exact sign tests are no looser than the current rule's
-    measured false-switch rate, under every group's null and under the worst group's, and
-    their power and rounds; the current rule first, for reference."""
+    measured false-switch rate, under every group's null and under the worst group's, whether
+    they keep the current rule's power, and their power and rounds; the current rule first,
+    for reference. Then, per group, the current rule against the rules in `compare`
+    ((delta, alpha, cap) triples)."""
     names = [n for n, _, _ in nulls]
-    deltas, alphas = (0.0, 0.01, 0.02, 0.03, 0.05), (0.05, 0.01, 3e-3, 1e-3, 1e-4)
+    deltas = (0.0, 0.01, 0.015, 0.02, 0.025, 0.03, 0.04, 0.05)
+    alphas = (0.05, 0.02, 0.01, 5e-3, 3e-3, 2e-3, 1e-3, 1e-4)
     rows = d8_rows(nulls, cur, deltas, alphas, caps)
     worst_cur = max(cur[n]["many"] for n in names)
     out += ["## Candidate rules against D8 (no looser than the current measured false-switch rate)", "",
             "False-switch rates are per contest at gain 0 for each group's m equal challengers (Holm: "
             "alpha / m per arm; the current rule with its confirmation). \"Every group\": the test's rate "
             "is no larger than the current rule's under each group's null; \"worst\": its largest rate "
-            "is no larger than the current rule's largest (%s). Power for one challenger of the gain, "
+            "is no larger than the current rule's largest (%s); \"keeps power\": its power at 5%% and 10%% "
+            "is at least the current rule's under every group's null (to within %g). Listed: every rule "
+            "that meets \"every group\", and those that meet \"worst\" and keep the power (the per-group "
+            "rates of all are below). Power for one challenger of the gain, "
             "worst group / best group; rounds: the largest expected count at gain 0 and at 5%%, and the "
             "rounds a challenger that loses every round runs (the usual case: on most banks the CPU's challengers are "
-            "1.1-2.2x slower), which with each group's cost of a round (below) is the trial's overhead." % _rate(worst_cur), "",
-            "| rule | every group | worst | %s | rounds at 0 / 5%% | rounds, all lost |" % _gains_head().replace("power", "power (worst / best)"),
-            "|---|---|---|" + "---|" * len(GAINS) + "---|---|"]
+            "1.1-2.2x slower), which with each group's cost of a round (below) is the trial's overhead."
+            % (_rate(worst_cur), KEPT), "",
+            "| rule | every group | worst | keeps power | %s | rounds at 0 / 5%% | rounds, all lost |"
+            % _gains_head().replace("power", "power (worst / best)"),
+            "|---|---|---|---|" + "---|" * len(GAINS) + "---|---|"]
     cp = {}
     for name, _, null in nulls:
         below = math.log(1 - TIE)
         cp[name] = ([current_under(null, 1, math.log(1 - g))[0] for g in GAINS],
                     current_dp(null.p(below))[1], current_dp(null.p(below, math.log(0.95)))[1])
-    out.append("| current (TIE 5%%, 75%%, 5/10, confirm) | (reference) | (reference) | %s | %.1f / %.1f | %.0f |" % (
+    out.append("| current (TIE 5%%, 75%%, 5/10, confirm) | (reference) | (reference) | (reference) | %s | %.1f / %.1f | %.0f |" % (
         " | ".join("%.3f / %.3f" % (min(cp[n][0][i] for n in names), max(cp[n][0][i] for n in names))
                    for i in range(len(GAINS))),
         max(cp[n][1] for n in names), max(cp[n][2] for n in names), current_dp(0.0)[1]))
@@ -821,10 +841,12 @@ def d8_section(nulls, cur, out, caps):
             continue
         every = all(v["fs"] <= v["cur"] for v in g.values())
         worst = max(v["fs"] for v in g.values()) <= worst_cur
-        if not (every or worst):
+        kept = keeps_power(g, cp)
+        if not (every or (worst and kept)):
             continue
-        out.append("| sign, delta %g, alpha %g, cap %d | %s | %s | %s | %.1f / %.1f | %.0f |" % (
+        out.append("| sign, delta %g, alpha %g, cap %d | %s | %s | %s | %s | %.1f / %.1f | %.0f |" % (
             r["delta"], r["alpha"], r["cap"], "yes" if every else "no", "yes" if worst else "no",
+            "yes" if kept else "no",
             " | ".join("%.3f / %.3f" % (min(v["power"][i] for v in g.values()), max(v["power"][i] for v in g.values()))
                        for i in range(len(GAINS))),
             max(v["rounds0"] for v in g.values()), max(v["rounds5"] for v in g.values()),
@@ -843,6 +865,27 @@ def d8_section(nulls, cur, out, caps):
             "%s vs %s (%s vs %s)" % (_rate(g[n]["fs"]), _rate(g[n]["cur"]), _rate(g[n]["fs_tau"]), _rate(g[n]["cur_tau"]))
             for n in names)))
     out.append("")
+    if compare:
+        have = {(r["delta"], r["alpha"], r["cap"]): r for r in rows}
+        chosen = []
+        for d, a, c in compare:
+            key = (float(d), float(a), int(c))
+            r = have.get(key) or d8_rows(nulls, cur, key[:1], key[1:2], key[2:])[0]
+            if all(v is not None for v in r["groups"].values()):
+                chosen.append(r)
+        out += ["Per group, the current rule against %s: the false-switch rate at gain 0 (m equal "
+                "challengers), and the power at 5%% and 10%%:" % ", ".join(
+                    "delta %g, alpha %g, cap %d" % (r["delta"], r["alpha"], r["cap"]) for r in chosen), "",
+                "| group | current: rate | 5% | 10% | " + " | ".join(
+                    "d %g a %g c %d: rate | 5%% | 10%%" % (r["delta"], r["alpha"], r["cap"]) for r in chosen) + " |",
+                "|---|---|---|---|" + "---|---|---|" * len(chosen)]
+        i5, i10 = GAINS.index(0.05), GAINS.index(0.10)
+        for n in names:
+            out.append("| %s | %s | %.3f | %.3f | %s |" % (
+                n, _rate(cur[n]["many"]), cp[n][0][i5], cp[n][0][i10], " | ".join(
+                    "%s | %.3f | %.3f" % (_rate(r["groups"][n]["fs"]), r["groups"][n]["power"][i5],
+                                          r["groups"][n]["power"][i10]) for r in chosen)))
+        out.append("")
     return rows
 
 
@@ -850,7 +893,7 @@ def _gains_head():
     return " | ".join("power %d%%" % round(100 * g) for g in GAINS)
 
 
-def report(groups, alphas, caps, nsim, seed):
+def report(groups, alphas, caps, nsim, seed, compare=()):
     """The Markdown report of named groups of rounds ([(name, rounds)])."""
     rng = np.random.default_rng(seed)
     out = ["# A/A rounds of paired trials: the null, the current rule, candidate rules", "",
@@ -863,7 +906,7 @@ def report(groups, alphas, caps, nsim, seed):
     nulls = [(name, rounds, Null(rounds)) for name, rounds in groups]
     cur = {name: current_rows(name, null, _challengers(rounds), serial(contests(rounds))["tau"])
            for name, rounds, null in nulls}
-    d8_section(nulls, cur, out, caps)
+    d8_section(nulls, cur, out, caps, compare)
     out += ["## The null", ""]
     for name, rounds, null in nulls:
         null_section(name, rounds, null, out)
@@ -937,7 +980,10 @@ def main(argv=None):
                          "have one of the values)")
     ap.add_argument("--out", help="write the Markdown report here (default: stdout)")
     ap.add_argument("--alphas", default="1e-2,1e-3,1e-4", help="error rates for the candidate rules")
-    ap.add_argument("--caps", default="10,20,40", help="caps of rounds for the candidate rules")
+    ap.add_argument("--caps", default="10,20,30,40", help="caps of rounds for the candidate rules")
+    ap.add_argument("--compare", default="0.02:0.01:20,0.03:0.003:20",
+                    help="sign tests (DELTA:ALPHA:CAP, comma-separated) compared with the current rule "
+                         "group by group after the D8 table")
     ap.add_argument("--nsim", type=int, default=100000, help="contests per simulated test")
     ap.add_argument("--seed", type=int, default=1)
     a = ap.parse_args(argv)
@@ -950,8 +996,9 @@ def main(argv=None):
         if conds:                       # @f=v1|v2&g=w: records whose fields have those values
             where = (lambda rec, conds=conds: all(str(rec.get(f)) in vs for f, vs in conds))
         groups.append((name, load(pats.split(","), where)[0]))
+    compare = [tuple(c.split(":")) for c in a.compare.split(",") if c]
     text = report(groups, [float(v) for v in a.alphas.split(",")], [int(v) for v in a.caps.split(",")],
-                  a.nsim, a.seed)
+                  a.nsim, a.seed, compare)
     if a.out:
         with open(a.out, "w") as f:
             f.write(text)

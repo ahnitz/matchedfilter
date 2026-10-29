@@ -179,6 +179,16 @@ def test_a_rounds_cost_counts_every_run_but_the_calls_own():
     assert tp.round_cost([r]) == pytest.approx(2 * (1.0 + 3.0) - 1.0)
 
 
+def test_keeping_power_counts_gains_of_five_percent_and_more_within_the_tolerance():
+    """A rule keeps the current rule's power when its power at 5% and 10% is no more than
+    KEPT below the current rule's in every group; the 2% gain does not count."""
+    cp = {"a": ([0.5, 0.10, 0.60], 0.0, 0.0), "b": ([0.0, 0.05, 0.90], 0.0, 0.0)}
+    ok = {"a": {"power": [0.0, 0.10 - tp.KEPT, 0.60]}, "b": {"power": [0.0, 0.05, 0.95]}}
+    assert tp.keeps_power(ok, cp)
+    assert not tp.keeps_power(dict(ok, b={"power": [0.0, 0.05, 0.90 - 2 * tp.KEPT]}), cp)
+    assert not tp.keeps_power(dict(ok, a={"power": [0.0, 0.09, 0.60]}), cp)
+
+
 def test_the_interval_brackets_the_rate():
     lo, hi = tp.clopper_pearson(3, 100)
     assert lo == pytest.approx(0.0062299715, rel=1e-6) and hi == pytest.approx(0.0851760530, rel=1e-6)
