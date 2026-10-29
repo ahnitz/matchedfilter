@@ -22,6 +22,11 @@ elimination of a candidate that can no longer win, can_still_win). Rounds, not u
 samples: calls of other content, a burst of other work, or a run gaining from the one before
 it are what unpaired comparisons mistook for a difference.
 
+The A/A diagnostic (MF_TRIAL_AA_LOG=<file>) measures the rule's null: every play also runs the
+preference a second time, as one more arm (AA) settled and timed like the others, whose timing
+is logged and never a sample, so no decision changes (tests/test_choice.py). Each round's
+times and ratios to the preference, and each lock, are appended to the file as JSON lines.
+
 The offline decide remains where a real call cannot carry a candidate: the screens that
 time kernel layouts on synthetic dispatches and keep pathological ones off the device (their
 fastest two are played on real batches, _settings.slot), and the Vulkan subgroup
@@ -32,8 +37,12 @@ The state lives in a scope: the process registry by default, or the dict a calle
 
 On file, a choice is one record "choice|<store_key>": {"value": label, "median": ...}.
 """
+import json
+import os
+import platform
 import sys
 import threading
+import time
 from contextlib import contextmanager
 from typing import Any, Callable, Dict, Hashable, Optional, Sequence, Tuple
 
@@ -85,6 +94,26 @@ def _log_autotune(msg, *args):
 def _autotune_enabled():
     """MF_AUTOTUNE=0 keeps the model's choice (deterministic); otherwise close calls are measured."""
     return _config.get("MF_AUTOTUNE")
+
+
+#: The label of the A/A arm in the A/A log (the preference's second run; MF_TRIAL_AA_LOG).
+AA = "A/A"
+_AA_ARM = object()          # the A/A arm in a play's order (no candidate can be it)
+_AA_WRITE = threading.Lock()
+
+
+def _aa_log() -> Optional[str]:
+    """The A/A log's path (MF_TRIAL_AA_LOG), or None when the diagnostic is off."""
+    return _config.get("MF_TRIAL_AA_LOG") or None
+
+
+def _aa_write(path: str, rec: dict) -> None:
+    """Append one record to the A/A log, as one JSON line."""
+    rec = {"t": time.time(), "host": platform.node(), "pid": os.getpid(),
+           "load": list(os.getloadavg()), **rec}
+    line = json.dumps(rec) + "\n"
+    with _AA_WRITE, open(path, "a") as f:
+        f.write(line)
 
 
 # ---- the one rule every measured choice follows ---------------------------------------
@@ -159,7 +188,8 @@ class Choice:
     candidates + slack attempts (tick). With `confirm`, a candidate other than the preference
     that the rule picks is not locked at once: a fresh contest of the preference against it
     alone (every other candidate dropped) must pick it again, or the preference stands --
-    with many candidates one passes the rule on noise more often than one does."""
+    with many candidates one passes the rule on noise more often than one does. `kind` names
+    the choice's kind in the A/A log (choice() passes its registry kind)."""
 
     def __init__(self, candidates: Sequence[Hashable] = (), store_key: Optional[str] = None,
                  what: Optional[str] = None, minimum: Optional[int] = None,
@@ -167,13 +197,15 @@ class Choice:
                  tie: Optional[float] = None,
                  label: Optional[Callable[[Any], Any]] = None,
                  parse: Optional[Callable[[str], Any]] = None,
-                 budget: Optional[Tuple[int, int]] = None, confirm: bool = False):
+                 budget: Optional[Tuple[int, int]] = None, confirm: bool = False,
+                 kind: Optional[str] = None):
         if len(set(candidates)) != len(candidates):
             raise ValueError("a choice needs distinct candidates: %r" % (candidates,))
         self.candidates: tuple = ()
         self.samples: Dict[Hashable, list] = {}
         self.dropped: set = set()
         self.attempts = 0
+        self.kind = kind
         self.store_key, self.what = store_key, what or store_key or "choice"
         self.label = label if label is not None else (lambda c: c)
         self._parse = parse
@@ -311,7 +343,8 @@ class Choice:
     def play(self, run: Callable[[Hashable], Any], ran: Optional[set] = None,
              config: Optional[Callable[[Hashable], Hashable]] = None,
              warm: Optional[Callable[[Hashable], Any]] = None,
-             keep: Optional[Callable[[Any], Any]] = None):
+             keep: Optional[Callable[[Any], Any]] = None,
+             work: Optional[float] = None):
         """One call of a paired choice, on its real input: the result of run(candidate).
 
         Locked, the winner runs once. Open, every live candidate runs the same call back to
@@ -326,17 +359,30 @@ class Choice:
         `ran` holds configurations. warm(candidate) is the untimed run (default run: a GPU
         batch settles by replaying until it builds no more recordings); keep(result) takes the
         preference's result as soon as it is run, before another candidate's run can reuse
-        its buffers."""
+        its buffers.
+
+        With the A/A diagnostic (MF_TRIAL_AA_LOG), the preference also runs as the A/A arm,
+        last in the order before it reverses (so first after): settled and timed like every
+        candidate, its result dropped, its timing logged with the round's (and `work`, the
+        round's size in the caller's units) and never a sample."""
         if self.winner is not None or _PLAYING[0]:
             return run(self.winner if self.winner is not None else self.preference)
-        import time
         ran = set() if ran is None else ran
         config = config or (lambda c: c)
         live = self.live()
-        order = live if len(self.samples[live[0]]) % 2 == 0 else live[::-1]
-        out, times, by_config = None, {}, {}
+        log = _aa_log() if live and live[0] == self.preference else None
+        arms = live + [_AA_ARM] if log else live
+        order = arms if len(self.samples[live[0]]) % 2 == 0 else arms[::-1]
+        out, times, by_config, aa, runs, owner = None, {}, {}, None, [], {}
         with held():
             for c in order:
+                if c is _AA_ARM:
+                    (warm or run)(self.preference)
+                    t0 = time.perf_counter()
+                    run(self.preference)
+                    aa = time.perf_counter() - t0
+                    runs.append(c)
+                    continue
                 k = config(c)
                 if k not in by_config:
                     # an untimed run of the same call first, every time: a call run second
@@ -346,14 +392,37 @@ class Choice:
                     ran.add(k)
                     t0 = time.perf_counter()
                     res = run(c)
-                    by_config[k] = time.perf_counter() - t0
+                    by_config[k] = (time.perf_counter() - t0, c)
+                    runs.append(c)
                     if k == config(self.preference):
                         out = keep(res) if keep is not None else res
-                times[c] = by_config[k]
+                times[c], owner[c] = by_config[k]
         if all(t > 0 for t in times.values()):     # a clock that did not move times nothing
             with _AUTOTUNE_LOCK:
+                before = (len(self.samples[self.preference]), self.confirming)
                 self.round(times)
+                if log:
+                    self._log_round(log, runs, owner, times, aa, before, work)
         return out
+
+    def _log_round(self, path, runs, shared, times, aa, before, work) -> None:
+        """A round of a play into the A/A log: the runs in their order, every candidate's
+        timing and ratio to the preference (and the candidate whose run it shares, where it
+        ran alike), the A/A arm's, and the contest's state after the round."""
+        name = lambda c: AA if c is _AA_ARM else str(self.label(c))      # noqa: E731
+        base = times[self.preference]
+        _aa_write(path, {
+            "event": "round", "kind": self.kind, "what": self.what, "key": self.store_key,
+            "phase": "contest" if before[1] is None else "confirm", "round": before[0] + 1,
+            "minimum": self.minimum, "cap": self.cap,
+            "tie": TIE if self.tie is None else self.tie, "work": work,
+            "preference": name(self.preference), "order": [name(c) for c in runs],
+            "shared": {name(c): name(o) for c, o in shared.items() if o != c},
+            "times": {name(c): t for c, t in times.items()}, AA: aa,
+            "ratios": {name(c): t / base for c, t in times.items()}, "aa_ratio": aa / base,
+            "dropped": sorted(name(c) for c in self.dropped),
+            "confirming": None if self.confirming is None else name(self.confirming),
+            "winner": None if self.winner is None else name(self.winner)})
 
     # ---- the record on file -------------------------------------------------------------
     def lock(self, winner, kept=None, **extra) -> None:
@@ -370,6 +439,14 @@ class Choice:
         self._replace = False
         if on_file is not rec:
             self._adopt(on_file)
+        log = _aa_log()
+        if log:
+            _aa_write(log, {"event": "lock", "kind": self.kind, "what": self.what,
+                            "key": self.store_key, "value": str(self.label(winner)),
+                            "adopted": str(self.label(self.winner)),
+                            "phase": "contest" if self.confirming is None else "confirm",
+                            "rounds": len(self.samples.get(self.preference, ())),
+                            "attempts": self.attempts})
         if kept is None:
             kept = self.samples
         _log_autotune("%s -> %s  %s", self.what, self.label(self.winner),
@@ -443,7 +520,7 @@ def choice(kind: str, key: Hashable, candidates: Sequence[Hashable] = (),
     table = _CHOICES if scope is None else scope.setdefault("_choices", {})
     ch = table.get((kind, key))
     if ch is None:
-        ch = table[(kind, key)] = Choice(candidates, **kw)
+        ch = table[(kind, key)] = Choice(candidates, kind=kind, **kw)
     return ch
 
 

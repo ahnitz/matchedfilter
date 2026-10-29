@@ -361,6 +361,13 @@ measures them on the job's own calls. One lifecycle serves every such choice:
   (`Choice.lock`, `Choice._write`). Samples of an open contest are not stored.
 - **Scope.** `_choice.SCOPES` declares each kind of choice as `workload` (forgotten by
   `clear_autotune_cache`) or `machine` (a hardware property that outlives it).
+- **A/A diagnostic.** With `MF_TRIAL_AA_LOG=<file>`, every play also runs the preference a
+  second time as one more arm (the A/A arm), settled and timed like the others and placed
+  after them (before them when the order reverses). Its timing is logged and is never a
+  sample, so no decision changes (`tests/test_choice.py` plays the same contests with and
+  without it). Each round's runs, times and ratios to the preference, the A/A arm's, and
+  the contest's state, and each lock, are appended to the file as JSON lines: the null
+  distribution of the rule's per-round ratios on the job's own calls.
 
 Two kinds of choice are first decided offline, because a real call cannot carry their
 candidates. The GPU coarse kernel layouts and gate ways per band are ranked on synthetic

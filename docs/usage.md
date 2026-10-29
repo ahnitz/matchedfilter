@@ -306,6 +306,7 @@ misjudges it).
 | `MF_COST_FILE` | unset | A JSON file that keeps measured costs and every locked choice. A machine then measures each once, and later processes reuse it, so repeated runs make the same choices. The joint trial (block size and the Q15 screen together) runs either way, on the search's first real calls; with a file its lock is kept and later processes skip it. |
 | `MF_AUTOTUNE` | `1` | `0` skips timed trials and keeps the cost model's choices (deterministic given a populated `MF_COST_FILE`). |
 | `MF_AUTOTUNE_LOG` | `0` | `1` prints each trial's samples and decisions to stderr. |
+| `MF_TRIAL_AA_LOG` | unset | A file: every trial also times its preference a second time (an A/A arm that decides nothing) and appends each round and lock to the file as JSON lines. |
 | `MF_GPU_TIMING` | `0` | `1` records device time per kernel (for profiling; it adds overhead). |
 
 Other `MF_*` variables force a single candidate for measurement (for example

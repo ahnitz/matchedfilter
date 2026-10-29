@@ -1,6 +1,7 @@
 """Joint trials (_trial): block sizes, chains and the Q15 screen decided together by paired
 rounds of complete configurations, for banks (time_domain._joint_round) and for plans used on
 their own (HierarchicalFilter.run_series)."""
+import json
 import time
 
 import numpy as np
@@ -41,6 +42,9 @@ class _Subject:
         self.arm, self.ran, self.locked = _trial.DEFAULT, [], None
 
     def arm_config(self, label):
+        # a plan's arm_config takes the trial lock (its model's screen setting): a round must
+        # never resolve an arm while it holds the lock
+        assert not _choice._AUTOTUNE_LOCK.locked()
         return self.conf.get(label, self.conf[_trial.DEFAULT])
 
     def use_arm(self, label):
@@ -165,6 +169,50 @@ def test_the_round_returns_defaults_result_kept_before_later_arms(clock):
     assert res == ("result", "a")
     assert kept == [2]               # taken right after DEFAULT's timed run, before b ran
     assert s.arm == _trial.DEFAULT    # left on DEFAULT while the trial is open
+
+
+def test_the_aa_arm_settles_its_round_and_logs_the_joint_trial(clock, monkeypatch, tmp_path):
+    """With MF_TRIAL_AA_LOG a round also runs DEFAULT's configuration as the A/A arm, settled
+    like every arm; the round returns DEFAULT's own timed run, kept as soon as it is taken
+    (before the A/A arm runs when that comes after), the samples are the arms' own runs, and
+    the round's record names the joint trial and its work."""
+    log = tmp_path / "aa.jsonl"
+    monkeypatch.setenv("MF_TRIAL_AA_LOG", str(log))
+    conf = {_trial.DEFAULT: "a", "n=4096": "b"}
+    s = _Subject(clock, conf, {"a": 1.0, "b": 1.5})
+    settled, kept = [], []
+
+    def settle():
+        clock.t += 100.0
+        settled.append(s.arm_config(s.arm))
+    tr = _trial.trial("t|aa", lambda: [_trial.DEFAULT, "n=4096"])
+    for _ in range(2):
+        res = _trial.run_round(tr, [s], s.replay, 7.0, settle=settle,
+                               keep=lambda r: kept.append(len(s.ran)) or r)
+        assert res == ("result", "a")
+    assert settled == ["a", "b", "a", "a", "b", "a"]    # the A/A arm last, then first
+    assert kept == [1, 6]                # DEFAULT's own timed run: first, then last
+    assert tr.choice.samples[_trial.DEFAULT] == pytest.approx([1.0, 1.0])
+    recs = [json.loads(x) for x in log.read_text().splitlines()]
+    assert [(r["kind"], r["key"], r["work"], r["order"]) for r in recs] == [
+        ("joint", "joint|t|aa", 7.0, ["default", "n=4096", "A/A"]),
+        ("joint", "joint|t|aa", 7.0, ["A/A", "n=4096", "default"])]
+    assert [r["A/A"] for r in recs] == pytest.approx([1.0, 1.0])
+
+
+def test_the_aa_log_names_the_arms_that_ran_alike(clock, monkeypatch, tmp_path):
+    """Arms an instance resolves alike run once: the log's order holds the runs made, and
+    each arm that shared another's run names it."""
+    log = tmp_path / "aa.jsonl"
+    monkeypatch.setenv("MF_TRIAL_AA_LOG", str(log))
+    conf = {_trial.DEFAULT: "a", "n=4096": "a", "n=model": "c", "q15=0": "a"}
+    s = _Subject(clock, conf, {"a": 1.0, "c": 1.5})
+    _drive(s, ARMS, rounds=1)
+    rec = json.loads(log.read_text().splitlines()[0])
+    assert rec["order"] == ["default", "n=model", "A/A"]
+    assert rec["shared"] == {"n=4096": "default", "q15=0": "default"}
+    assert rec["ratios"] == pytest.approx({"default": 1.0, "n=4096": 1.0, "n=model": 1.5,
+                                           "q15=0": 1.0})
 
 
 def test_an_arm_that_cannot_win_leaves_the_rounds(clock):
@@ -320,10 +368,16 @@ def test_a_bank_proposes_sizes_chains_and_the_screen_and_starts_on_the_default()
     assert all(p._governed for p in bank._layout_plans(0))              # the bank's trial governs
 
 
-def test_a_banks_trial_runs_without_a_cost_file_switches_exactly_and_locks():
+@pytest.mark.parametrize("aa", [False, True])
+def test_a_banks_trial_runs_without_a_cost_file_switches_exactly_and_locks(aa, monkeypatch,
+                                                                           tmp_path):
     """Without MF_COST_FILE a bank's real calls are the trial's rounds; every arm reports the
     same triggering templates as an untrialled bank; the trial locks, and a later bank
-    builds only the winner's layout."""
+    builds only the winner's layout. With the A/A diagnostic too, which logs every round
+    and the lock."""
+    log = tmp_path / "aa.jsonl"
+    if aa:
+        monkeypatch.setenv("MF_TRIAL_AA_LOG", str(log))
     bank, rng = _inspiral_bank()
     if not getattr(bank, "_layouts", None):
         pytest.skip("the model offered one block size only")
@@ -342,6 +396,12 @@ def test_a_banks_trial_runs_without_a_cost_file_switches_exactly_and_locks():
     later, _ = _inspiral_bank()
     assert later._layouts is None and not later._in_trial              # only the winner built
     assert later.chosen_layout == bank.chosen_layout
+    if aa:
+        recs = [json.loads(x) for x in log.read_text().splitlines()]
+        rounds = [r for r in recs if r["event"] == "round"]
+        assert rounds and all(r["A/A"] > 0 and r["kind"] == "joint" for r in rounds)
+        assert rounds[-1]["winner"] == w
+        assert [r["value"] for r in recs if r["event"] == "lock"][-1] == w
 
 
 def test_a_bank_adopts_a_persisted_lock_without_pricing(monkeypatch, tmp_path):
