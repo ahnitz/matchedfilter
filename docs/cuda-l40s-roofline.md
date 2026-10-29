@@ -434,10 +434,10 @@ migrates them back, and a kernel then faults them in at the 2.7x cost above. Not
 
 ## Phase 7 (2026-10-10): tensor-core coarse gate
 
-**Deleted 2026-10-29** (roadmap step 1, decision D5): the measured coarse choice never picked
-it on the only device we have with tensor cores, where it lost by 25-40% to the Slang
-layouts (the table below), and no reachable device has a higher tensor:SIMT ratio than
-the L40S (the property that would decide it; docs/unification-plan.md, 2026-10-19). Gone
+**Deleted 2026-10-29.** The measured coarse choice never picked it on the only device we have
+with tensor cores, where it lost by 25-40% to the Slang layouts (the table below), and no
+device we can measure on has a higher tensor:SIMT ratio than the L40S, the property that
+would decide it (docs/unification-plan.md, 2026-10-19). Gone
 with it: `src/gpu/coarse_tc.cu`, the four `coarse_tc_<band>_w<warps>.ptx` builds,
 `COARSE_TC_SIGMA` and its bands and warps tables (`tools/build_ptx.py`), `tools/cuda_tc_sigma.py`,
 `_TC_BLOCKS_PER_SM` and the persistent-grid cap (`_x_coarse_groups`), and its candidate in
