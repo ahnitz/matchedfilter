@@ -269,3 +269,21 @@ def test_base_coarse_kernels_are_untiled():
             blobs.add(blob)
             checked += 1
     assert checked, "no band with a tile was checked"
+
+
+def test_no_shipped_module_asks_for_more_than_1024_invocations():
+    """Every shipped module's workgroup is at most 1024 invocations, where the build stops
+    (tools/build_spirv.py: RADIX, and the coarse packings skip (n/16) * ppg > 1024). A module
+    past it is a blob an older build left behind: tierb_8192_c16p4 and tierb_16384_c16p2/p4
+    (2048-4096 invocations, built 2026-10-03 without the row-window binding the host now
+    binds) shipped until 2026-10-29."""
+    import sys
+    tools = _tools_dir()
+    if tools is None:
+        pytest.skip("tools/ is not beside the tests (installed package?)")
+    sys.path.insert(0, str(tools))
+    from build_spirv import reflect
+    sizes = {p.name: reflect(p.read_bytes())["local_size"] for p in sorted(SPIRV_DIR.glob("*.spv"))}
+    assert sizes and None not in sizes.values()
+    over = {name: s for name, s in sizes.items() if s[0] * s[1] * s[2] > 1024}
+    assert not over, "modules no build makes: %s" % over
