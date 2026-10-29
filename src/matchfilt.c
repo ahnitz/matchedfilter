@@ -16,7 +16,6 @@
 #include "matchedfilter.h"
 #include "transform.h"
 #include "q15.h"
-#define AP_MF_MAXCAND 64
 
 /* Unfused product, for a plan whose geometry the fused stage-A loader cannot take
    (p->gmajor 0: see where it is set). It had hand-written AVX-512 and AVX2 variants;
