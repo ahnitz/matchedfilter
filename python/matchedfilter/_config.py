@@ -71,6 +71,12 @@ VARS: Tuple[Var, ...] = (
     # Diagnostics
     Var("MF_AUTOTUNE_LOG", "diagnostic", "py", "", "Log block-size, chain and trial decisions.",
         usage="MF_AUTOTUNE_LOG=1", kind="flag", value=False),
+    Var("MF_TRIAL_AA_LOG", "diagnostic", "py", "",
+        "Every paired trial also runs its preference a second time, settled and timed like "
+        "an arm and never a sample (an A/A arm: no decision changes), and appends each "
+        "round's times and ratios, and each lock, to this file as JSON lines. Each round "
+        "costs one more settled and timed run.",
+        usage="MF_TRIAL_AA_LOG=<file>", kind="text"),
     Var("MF_HMF_PROF", "diagnostic", "c", "", "Per-tier CPU tick counters in hierarchical plans.",
         usage="MF_HMF_PROF=1", kind="flag", value=False),
     Var("MF_HMF_TRACE", "diagnostic", "c", "", "Trace hierarchical plan runs to stderr.",

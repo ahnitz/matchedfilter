@@ -2,6 +2,7 @@
 clock, so every branch is exact and none can flake."""
 import json
 
+import numpy as np
 import pytest
 
 from matchedfilter import _choice
@@ -232,3 +233,133 @@ def test_a_choice_met_inside_a_play_takes_its_preference_untimed(monkeypatch):
     outer.play(run, set())
     assert set(seen) == {"x"} and not any(inner.samples.values())
     assert all(len(v) == 1 for v in outer.samples.values())
+
+
+# ---- the A/A diagnostic (MF_TRIAL_AA_LOG) ----------------------------------------------------
+
+class _Plays:
+    """A fake clock for plays that knows each run's arm: at a call's start (begin) it lays
+    out the runs the call makes -- every live candidate, and with the diagnostic the A/A arm
+    after them, in the order of the round (reversed every round), each a settling run (k 0)
+    and a timed run (k 1) -- and each run costs cost(arm, call, k) seconds. A candidate's
+    runs then cost the same whether or not the A/A arm runs, and the A/A arm's its own."""
+
+    def __init__(self, cost):
+        self.t, self.cost, self.play, self.expect, self.runs = 0.0, cost, 0, [], []
+
+    def begin(self, ch, aa):
+        assert not self.expect, "the last call did not make the runs laid out for it"
+        live = ch.live()
+        arms = live + ["A/A"] if aa else live
+        order = arms if len(ch.samples[live[0]]) % 2 == 0 else arms[::-1]
+        self.play, self.pref = self.play + 1, ch.preference
+        self.expect = [(arm, k) for arm in order for k in (0, 1)]
+
+    def run(self, c):
+        arm, k = self.expect.pop(0)
+        assert c == (self.pref if arm == "A/A" else arm)
+        self.runs.append((self.play, arm, k))
+        self.t += self.cost(arm, self.play, k)
+        return "result of %s" % c
+
+
+def _contest(make, cost, monkeypatch, aa, plays=80):
+    """Play make()'s choice until it locks (at most `plays` calls). Returns its trace -- per
+    call the result, the live candidates, the candidate being confirmed, the winner and every
+    sample so far -- and the clock."""
+    import time
+    clock, ch, trace = _Plays(cost), make(), []
+    monkeypatch.setattr(time, "perf_counter", lambda: clock.t)
+    while ch.winner is None and clock.play < plays:
+        clock.begin(ch, aa)
+        res = ch.play(clock.run, set())
+        assert not clock.expect
+        trace.append((res, tuple(ch.live()), ch.confirming, ch.winner,
+                      {c: list(v) for c, v in ch.samples.items()}))
+    return trace, clock
+
+
+def _noise(seed, gains, sd):
+    """cost(arm, call, k): an arm's cost (1 - its gain, in units of 1e6 ticks; the A/A
+    arm's is the preference's, 1) with log-normal noise of sd `sd` drawn per run, from
+    (seed, arm, call, k). Whole ticks: the clock's sums and differences are then exact,
+    whatever ran before."""
+    names = sorted(gains) + ["A/A"]
+
+    def cost(arm, play, k):
+        z = np.random.default_rng([seed, names.index(arm), play, k]).standard_normal()
+        return float(round(1e6 * (1.0 - gains.get(arm, 0.0)) * np.exp(sd * z)))
+    return cost
+
+
+def _contests():
+    """(candidates, Choice keywords, cost) covering every branch the rule takes: a clear win
+    and its confirmation, equal candidates, elimination, the cap, a winner not confirmed,
+    and 60 random contests."""
+    out = [(("a", "b"), dict(confirm=True), _noise(1, {"a": 0.0, "b": 0.4}, 0.02)),
+           (("a", "b", "c"), dict(confirm=True), _noise(2, {"a": 0.0, "b": 0.0, "c": 0.0}, 0.06)),
+           (("a", "b", "c", "d"), dict(confirm=True),
+            _noise(3, {"a": 0.0, "b": 0.15, "c": -0.3, "d": -0.5}, 0.03)),
+           (("a", "b"), dict(), _noise(4, {"a": 0.0, "b": 0.06}, 0.04)),
+           (("a", "b", "c"), dict(confirm=True, budget=(0, 3)),
+            _noise(5, {"a": 0.0, "b": 0.08, "c": 0.07}, 0.05))]
+    rng = np.random.default_rng(11)
+    for seed in range(60):
+        names = tuple("abcde"[:int(rng.integers(2, 6))])
+        gains = {c: 0.0 if c == "a" else float(rng.uniform(-0.2, 0.2)) for c in names}
+        out.append((names, dict(confirm=bool(seed % 2)),
+                    _noise(100 + seed, gains, float(rng.uniform(0.01, 0.1)))))
+    return out
+
+
+@pytest.mark.parametrize("cands,kw,cost", _contests())
+def test_the_aa_arm_changes_no_decision(cands, kw, cost, monkeypatch, tmp_path):
+    """The same contest, each candidate's runs timed alike, with and without the A/A
+    diagnostic: every call's result, live candidates, confirmation, winner and samples are
+    identical, and the A/A arm's timing, which differs from the preference's, is logged."""
+    monkeypatch.delenv("MF_TRIAL_AA_LOG", raising=False)
+    plain, _ = _contest(lambda: _choice.Choice(cands, **kw), cost, monkeypatch, aa=False)
+    log = tmp_path / "aa.jsonl"
+    monkeypatch.setenv("MF_TRIAL_AA_LOG", str(log))
+    with_aa, clock = _contest(lambda: _choice.Choice(cands, **kw), cost, monkeypatch, aa=True)
+    assert with_aa == plain
+    rounds = [r for r in map(json.loads, log.read_text().splitlines()) if r["event"] == "round"]
+    assert len(rounds) == len(plain) == clock.play
+    for play, r in enumerate(rounds, 1):
+        assert r["A/A"] == cost("A/A", play, 1) != r["times"]["a"] == cost("a", play, 1)
+        assert r["aa_ratio"] == pytest.approx(r["A/A"] / r["times"]["a"])
+
+
+def test_the_aa_log_holds_every_round_and_the_lock(monkeypatch, tmp_path):
+    """One record per round: the order run (the A/A arm last, then first as the order
+    reverses), each candidate's timing and ratio to the preference, the A/A arm's, the
+    contest's state after the round; and a record of the lock."""
+    log = tmp_path / "aa.jsonl"
+    monkeypatch.setenv("MF_TRIAL_AA_LOG", str(log))
+    cost = _noise(7, {"a": 0.0, "b": 0.4, "c": -0.4}, 0.01)
+    trace, _ = _contest(lambda: _choice.choice("demo", 1, ("a", "b", "c"), confirm=True,
+                                                store_key="demo|1"), cost, monkeypatch, aa=True)
+    recs = [json.loads(x) for x in log.read_text().splitlines()]
+    rounds = [r for r in recs if r["event"] == "round"]
+    assert len(rounds) == len(trace) and trace[-1][3] == "b"
+    assert rounds[0]["order"] == ["a", "b", "c", "A/A"]
+    assert rounds[1]["order"] == ["A/A", "c", "b", "a"]
+    for r, (_, live, confirming, winner, samples) in zip(rounds, trace):
+        assert r["kind"] == "demo" and r["key"] == "demo|1" and r["preference"] == "a"
+        assert set(r["times"]) <= set("abc") and len(r["load"]) == 3
+        assert r["ratios"] == pytest.approx({c: t / r["times"]["a"] for c, t in r["times"].items()})
+        assert r["winner"] == winner and r["confirming"] == confirming
+    assert {r["phase"] for r in rounds} == {"contest", "confirm"}
+    assert rounds[-1]["phase"] == "confirm" and rounds[-1]["times"].keys() == {"a", "b"}
+    locks = [r for r in recs if r["event"] == "lock"]
+    assert [(r["value"], r["phase"]) for r in locks] == [("b", "confirm")]
+
+
+def test_without_the_diagnostic_nothing_is_logged_and_the_preference_runs_once(monkeypatch,
+                                                                            tmp_path):
+    monkeypatch.delenv("MF_TRIAL_AA_LOG", raising=False)
+    monkeypatch.chdir(tmp_path)
+    _, clock = _contest(lambda: _choice.Choice(("a", "b")), _noise(8, {"a": 0, "b": 0}, 0.02),
+                        monkeypatch, aa=False)
+    assert [arm for p, arm, k in clock.runs if p == 1] == ["a", "a", "b", "b"]
+    assert list(tmp_path.iterdir()) == []

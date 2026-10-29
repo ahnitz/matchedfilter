@@ -68,6 +68,7 @@ Older notes in docs/ that mention a removed variable describe past studies.
 | Variable | Effect |
 |---|---|
 | `MF_AUTOTUNE_LOG=1` | Log block-size, chain and trial decisions. |
+| `MF_TRIAL_AA_LOG=<file>` | Every paired trial also runs its preference a second time, settled and timed like an arm and never a sample (an A/A arm: no decision changes), and appends each round's times and ratios, and each lock, to this file as JSON lines. Each round costs one more settled and timed run. |
 | `MF_HMF_PROF=1` | Per-tier CPU tick counters in hierarchical plans. |
 | `MF_HMF_TRACE=1` | Trace hierarchical plan runs to stderr. |
 | `MF_HMF_DUMP=<file>` | Dump coarse-pass data for the GPU mirror tests. |
