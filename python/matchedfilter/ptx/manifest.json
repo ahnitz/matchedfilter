@@ -132,8 +132,6 @@
       }
     },
     "8192": {
-      "file": "tierb_8192.ptx",
-      "bytes": 173225,
       "local_size": [
         512,
         1,
@@ -144,40 +142,33 @@
         "lds_bytes": 32768
       },
       "full": {
-        "file": "full_8192.ptx",
         "portable": {
           "file": "full_8192_lds32.ptx"
         }
       },
       "full_series": {
-        "file": "full_series_8192.ptx",
         "portable": {
           "file": "full_series_8192_lds32.ptx"
         }
       },
       "refine": {
-        "file": "refine_8192.ptx",
         "portable": {
           "file": "refine_8192_lds32.ptx",
           "lds_bytes": 32768
         },
         "one_bin": {
-          "file": "refine_8192_onebin.ptx",
           "portable": {
             "file": "refine_8192_onebin_lds32.ptx"
           }
         }
       },
       "one_bin": {
-        "file": "tierb_8192_onebin.ptx",
         "portable": {
           "file": "tierb_8192_onebin_lds32.ptx"
         }
       }
     },
     "16384": {
-      "file": "tierb_16384.ptx",
-      "bytes": 210561,
       "local_size": [
         1024,
         1,
@@ -188,40 +179,33 @@
         "lds_bytes": 32768
       },
       "full": {
-        "file": "full_16384.ptx",
         "portable": {
           "file": "full_16384_lds32.ptx"
         }
       },
       "full_series": {
-        "file": "full_series_16384.ptx",
         "portable": {
           "file": "full_series_16384_lds32.ptx"
         }
       },
       "refine": {
-        "file": "refine_16384.ptx",
         "portable": {
           "file": "refine_16384_lds32.ptx",
           "lds_bytes": 32768
         },
         "one_bin": {
-          "file": "refine_16384_onebin.ptx",
           "portable": {
             "file": "refine_16384_onebin_lds32.ptx"
           }
         }
       },
       "one_bin": {
-        "file": "tierb_16384_onebin.ptx",
         "portable": {
           "file": "tierb_16384_onebin_lds32.ptx"
         }
       }
     },
     "32768": {
-      "file": "tierb_32768.ptx",
-      "bytes": 414632,
       "local_size": [
         1024,
         1,
@@ -232,40 +216,33 @@
         "lds_bytes": 32768
       },
       "full": {
-        "file": "full_32768.ptx",
         "portable": {
           "file": "full_32768_lds32.ptx"
         }
       },
       "full_series": {
-        "file": "full_series_32768.ptx",
         "portable": {
           "file": "full_series_32768_lds32.ptx"
         }
       },
       "refine": {
-        "file": "refine_32768.ptx",
         "portable": {
           "file": "refine_32768_lds32.ptx",
           "lds_bytes": 32768
         },
         "one_bin": {
-          "file": "refine_32768_onebin.ptx",
           "portable": {
             "file": "refine_32768_onebin_lds32.ptx"
           }
         }
       },
       "one_bin": {
-        "file": "tierb_32768_onebin.ptx",
         "portable": {
           "file": "tierb_32768_onebin_lds32.ptx"
         }
       }
     },
     "65536": {
-      "file": "tierb_65536.ptx",
-      "bytes": 1301708,
       "local_size": [
         1024,
         1,
@@ -276,32 +253,27 @@
         "lds_bytes": 32768
       },
       "full": {
-        "file": "full_65536.ptx",
         "portable": {
           "file": "full_65536_lds32.ptx"
         }
       },
       "full_series": {
-        "file": "full_series_65536.ptx",
         "portable": {
           "file": "full_series_65536_lds32.ptx"
         }
       },
       "refine": {
-        "file": "refine_65536.ptx",
         "portable": {
           "file": "refine_65536_lds32.ptx",
           "lds_bytes": 32768
         },
         "one_bin": {
-          "file": "refine_65536_onebin.ptx",
           "portable": {
             "file": "refine_65536_onebin_lds32.ptx"
           }
         }
       },
       "one_bin": {
-        "file": "tierb_65536_onebin.ptx",
         "portable": {
           "file": "tierb_65536_onebin_lds32.ptx"
         }
@@ -574,5 +546,5 @@
       }
     }
   },
-  "build_id": "77f575132687058ec5b610d95aa08d0ae46d2318421becbd9726bbb4cba25cb0"
+  "build_id": "a37f148f02ba6c730261d66140b5272b535e8291bfe809c820a8b5c5924da54e"
 }

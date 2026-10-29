@@ -29,20 +29,84 @@ def manifest():
     return json.loads(MANIFEST.read_text())
 
 
+def _flat(info):
+    """The module serving a length's flat filter: its own build, or the 32 KB staging build where
+    its own would need more static shared memory than CUDA allows (tools/build_ptx.py)."""
+    return info.get("file") or info["portable"]["file"]
+
+
+def _build_ptx():
+    """tools/build_ptx.py of the checkout beside the tests (skips for an installed package)."""
+    import sys
+    tools = pathlib.Path(__file__).resolve().parents[1] / "tools"
+    if not (tools / "build_ptx.py").is_file():
+        pytest.skip("tools/ is not beside the tests (installed package?)")
+    sys.path.insert(0, str(tools))
+    import build_ptx
+    return build_ptx
+
+
 def test_every_size_has_ptx(manifest):
     """Every supported transform size must have PTX blobs shipped."""
     for key, info in manifest["modules"].items():
-        assert "file" in info, f"n={key} has no main PTX output"
-        ptx = PTX_DIR / info["file"]
+        assert "file" in info or "portable" in info, f"n={key} has no main PTX output"
+        ptx = PTX_DIR / _flat(info)
         assert ptx.is_file(), f"{ptx} missing"
         assert ptx.stat().st_size > 1000, f"{ptx} looks empty"
+
+
+def test_no_shipped_module_declares_more_static_shared_memory_than_cuda_allows(manifest):
+    """CUDA allows a block 48 KB of static shared memory on every architecture and its JIT
+    rejects a module past it, so such a module could launch on no NVIDIA GPU
+    (build_ptx.STATIC_SHARED_MAX). The bytes are read from each module's .shared declarations,
+    and the reading is checked against the staging the manifest records for the 32 KB builds,
+    so a parse that found nothing could not pass."""
+    build_ptx = _build_ptx()
+    shared = {p.name: build_ptx.static_shared(p.read_text()) for p in sorted(PTX_DIR.glob("*.ptx"))}
+    portable = [info["portable"] for info in manifest["modules"].values() if "portable" in info]
+    assert portable and all(shared[p["file"]] == p["lds_bytes"] for p in portable)
+    over = {name: size for name, size in shared.items() if size > build_ptx.STATIC_SHARED_MAX}
+    assert not over, "modules no NVIDIA GPU can launch: %s" % over
+
+
+def test_every_kernel_the_host_asks_for_is_a_shipped_module():
+    """Context.pipeline serves the flat, one-bin flat, refine, one-bin refine, follow-up,
+    forward and full-correlation kernels at every length from a module that ships: its own
+    build, or the _lds32 build where its own staging is past CUDA's static shared limit and
+    so did not ship. A one-bin request gets a one-bin build wherever one is built (from 256).
+    Needs no device: the module load is stubbed. A missing module fails here rather than
+    skipping (conftest turns an UnsupportedSize into a skip)."""
+    from matchedfilter import UnsupportedSize
+    from matchedfilter import _cudacompute as C
+    build_ptx = _build_ptx()
+    ctx = C.Context.__new__(C.Context)
+    ctx._pipelines = {}
+    ctx._load = lambda stem, path, fn_name, wg: (stem, path)
+    served = {}
+    for n in build_ptx.TIER_B:
+        asks = [("fusedTierB", False), ("refineListed", False), ("refineListed", True),
+                ("refineItems", False), ("seriesForward", False)]
+        asks += [("fullCorrelation", False), ("fullCorrelationSeries", False)] if n >= 1024 else []
+        asks += [("fusedTierB", True)] if n >= 4096 else []
+        for entry, one_bin in asks:
+            try:
+                (stem, path), _ = ctx.pipeline(n, entry, one_bin=one_bin)
+            except UnsupportedSize as e:
+                pytest.fail("n=%d %s one_bin=%s: %s" % (n, entry, one_bin, e))
+            assert path.is_file() and stem == path.stem, (n, entry, stem)
+            assert build_ptx.static_shared(path.read_text()) <= build_ptx.STATIC_SHARED_MAX
+            assert not one_bin or n < 256 or "_onebin" in stem, (n, entry, stem)
+            served[(n, entry, one_bin)] = stem
+    assert served[(8192, "fusedTierB", False)] == "tierb_8192_lds32"
+    assert served[(65536, "refineListed", True)] == "refine_65536_onebin_lds32"
+    assert C.Context._x_has_kernel("items", 16384) and C.Context._x_has_kernel("tier1", 16384)
 
 
 @pytest.mark.parametrize("n", [1024, 4096, 16384])
 def test_ptx_targets_sm75_and_64bit_pointers(manifest, n):
     """Verify PTX code declares .target sm_75 and 64-bit device pointers."""
     info = manifest["modules"][str(n)]
-    text = (PTX_DIR / info["file"]).read_text()
+    text = (PTX_DIR / _flat(info)).read_text()
     assert ".target sm_75" in text or ".target sm_" in text
     assert ".address_size 64" in text
     # fusedTierB buffer params must be 8 bytes (.b8 ...[8]), not 16 bytes

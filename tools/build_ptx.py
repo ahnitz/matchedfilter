@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import pathlib
+import re
 import subprocess
 import sys
 
@@ -140,6 +141,26 @@ def lds_bytes(n, cap):
     return ch * wg * 8
 
 
+#: CUDA allows a block at most 48 KB of STATIC shared memory, on every architecture: more must be
+#: dynamic shared memory with a per-kernel opt-in (cudaFuncAttributeMaxDynamicSharedMemorySize),
+#: which these kernels do not use, and the JIT rejects a module past it (CUDA_ERROR_INVALID_PTX).
+#: A build past it cannot launch on any NVIDIA GPU, so it is not shipped; where its staging is
+#: the reason, the _lds32 build of the same kernel serves (_cudacompute._shipped).
+STATIC_SHARED_MAX = 48 * 1024
+_SHARED_DECL = re.compile(r"^\s*\.shared\s+(?:\.align\s+\d+\s+)?\.(?:b|u|s|f)(\d+)\s+[\w$]+\[(\d+)\]",
+                          re.M)
+
+
+def static_shared(ptx_text):
+    """Bytes of static shared memory a PTX module declares: the sum of its .shared arrays."""
+    return sum(int(bits) // 8 * int(count) for bits, count in _SHARED_DECL.findall(ptx_text))
+
+
+def _entry(ptx):
+    """The manifest entry of a build: its file name, or nothing for a build not shipped."""
+    return dict(file=ptx.name) if ptx else {}
+
+
 def find_slangc(explicit=None):
     candidates = [
         explicit,
@@ -177,6 +198,9 @@ def find_cuda_path():
 
 
 def compile_ptx(slangc, nvrtc, env, src_text, out_path, entry, extra_flags=()):
+    """Compile one entry point to PTX at out_path. Returns out_path, or None for a module that
+    declares more static shared memory than CUDA allows a block (STATIC_SHARED_MAX), which is
+    then removed rather than shipped."""
     src_file = out_path.with_suffix(".temp.slang")
     src_file.write_text(src_text)
     cmd = [
@@ -193,6 +217,12 @@ def compile_ptx(slangc, nvrtc, env, src_text, out_path, entry, extra_flags=()):
     src_file.unlink(missing_ok=True)
     if proc.returncode != 0:
         raise RuntimeError("slangc failed for %s (%s):\n%s" % (out_path.name, entry, proc.stderr))
+    shared = static_shared(out_path.read_text())
+    if shared > STATIC_SHARED_MAX:
+        out_path.unlink()
+        print("  %s not shipped: %d bytes of static shared memory, past CUDA's %d"
+              % (out_path.name, shared, STATIC_SHARED_MAX), flush=True)
+        return None
     return out_path
 
 
@@ -356,8 +386,9 @@ def _build():
     for n in TIER_B:
         info = {}
         ptx = compile_tierb(slangc, nvrtc, env, n, OUT)
-        info["file"] = ptx.name
-        info["bytes"] = ptx.stat().st_size
+        if ptx:
+            info["file"] = ptx.name
+            info["bytes"] = ptx.stat().st_size
         r = RADIX.get(n, 16)
         wg = n // r
         info["local_size"] = [wg, 1, 1]
@@ -369,8 +400,8 @@ def _build():
         if n >= 1024:
             full = compile_tierb(slangc, nvrtc, env, n, OUT, "fullCorrelation")
             full_series = compile_tierb(slangc, nvrtc, env, n, OUT, "fullCorrelationSeries")
-            info["full"] = dict(file=full.name)
-            info["full_series"] = dict(file=full_series.name)
+            info["full"] = _entry(full)
+            info["full_series"] = _entry(full_series)
             if lds_bytes(n, LDS_CAP[n]) > lds_bytes(n, PORTABLE_CAP):
                 portable = compile_tierb(slangc, nvrtc, env, n, OUT, "fullCorrelation",
                                          cap=PORTABLE_CAP, suffix="_lds32")
@@ -380,7 +411,7 @@ def _build():
                 info["full_series"]["portable"] = dict(file=portable_series.name)
 
         ref = compile_tierb(slangc, nvrtc, env, n, OUT, "refineListed")
-        info["refine"] = dict(file=ref.name)
+        info["refine"] = _entry(ref)
         compile_tierb(slangc, nvrtc, env, n, OUT, "refineItems")       # device follow-ups
         if lds_bytes(n, LDS_CAP[n]) > lds_bytes(n, PORTABLE_CAP):
             compile_tierb(slangc, nvrtc, env, n, OUT, "refineItems", cap=PORTABLE_CAP,
@@ -395,15 +426,15 @@ def _build():
         if 256 <= n < 4096:
             one = compile_tierb(slangc, nvrtc, env, n, OUT, "refineListed", suffix="_onebin",
                                 single_bin=1)
-            info["refine"]["one_bin"] = dict(file=one.name)
+            info["refine"]["one_bin"] = _entry(one)
             if n <= 1024:                           # the gate-only build (build_spirv.py)
                 gate = compile_tierb(slangc, nvrtc, env, n, OUT, "refineListed",
                                      suffix="_onebin_gate", single_bin=1, gate_only=1)
-                info["refine"]["one_bin"]["gate"] = dict(file=gate.name)
+                info["refine"]["one_bin"]["gate"] = _entry(gate)
         if n >= 4096:
             for entry, target in (("fusedTierB", info), ("refineListed", info["refine"])):
                 one = compile_tierb(slangc, nvrtc, env, n, OUT, entry, suffix="_onebin", single_bin=1)
-                target["one_bin"] = dict(file=one.name)
+                target["one_bin"] = _entry(one)
                 if lds_bytes(n, LDS_CAP[n]) > lds_bytes(n, PORTABLE_CAP):
                     small = compile_tierb(slangc, nvrtc, env, n, OUT, entry, cap=PORTABLE_CAP,
                                           suffix="_onebin_lds32", single_bin=1)
@@ -444,7 +475,8 @@ def _build():
             compile_ptx(slangc, nvrtc, env, bands_text, out, entry, extra_flags=extra)
 
         manifest["modules"][str(n)] = info
-        print("  n=%-6d %-16s %5d bytes  wg=%-4d" % (n, ptx.name, info["bytes"], wg))
+        flat = info.get("file") or info["portable"]["file"]     # what serves the flat filter
+        print("  n=%-6d %-16s %5d bytes  wg=%-4d" % (n, flat, (OUT / flat).stat().st_size, wg))
 
     manifest["full_tierc"] = build_full_tierc(slangc, nvrtc, env, OUT)
     build_compact_peaks(slangc, nvrtc, env, OUT)
