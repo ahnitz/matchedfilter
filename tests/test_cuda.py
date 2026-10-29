@@ -68,15 +68,19 @@ def test_no_shipped_module_declares_more_static_shared_memory_than_cuda_allows(m
     assert not over, "modules no NVIDIA GPU can launch: %s" % over
 
 
-def test_every_kernel_the_host_asks_for_is_a_shipped_module(build_ptx):
+def test_every_kernel_the_host_asks_for_is_a_shipped_module(build_ptx, monkeypatch):
     """Context.pipeline serves the flat, one-bin flat, refine, one-bin refine, follow-up,
     forward and full-correlation kernels at every length from a module that ships: its own
     build, or the _lds32 build where its own staging is past CUDA's static shared limit and
     so did not ship. A one-bin request gets a one-bin build wherever one is built (from 256).
     Needs no device: the module load is stubbed. A missing module fails here rather than
-    skipping (conftest turns an UnsupportedSize into a skip)."""
+    skipping (conftest turns an UnsupportedSize into a skip).
+
+    The host resolves against PTX_DIR, the PTX these tests check: a macOS install carries no
+    ptx/ of its own, so there the installed host is checked against the checkout's PTX."""
     from matchedfilter import UnsupportedSize
     from matchedfilter import _cudacompute as C
+    monkeypatch.setattr(C, "_PTX_DIR", PTX_DIR)
     ctx = C.Context.__new__(C.Context)
     ctx._pipelines = {}
     ctx._load = lambda stem, path, fn_name, wg: (stem, path)
