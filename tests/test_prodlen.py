@@ -386,7 +386,11 @@ def test_the_hook_reads_a_trees_choices(tmp_path):
     tree = tmp_path / "tree"
     (tree / "tools").mkdir(parents=True)
     (tree / "tools" / "ladder.py").write_text(LADDER)
-    (tree / "python").symlink_to(ROOT / "python")
+    # The package the tests import (an install's in CI, where the checkout's has no built
+    # extension), at the tree's path.
+    import matchedfilter
+    (tree / "python").mkdir()
+    (tree / "python" / "matchedfilter").symlink_to(Path(matchedfilter.__file__).resolve().parent)
     cost = tmp_path / "cost.json"
     parsed = _hook_run(tree, cost)
     kinds = [b["kind"] for b in parsed["batches"]]
