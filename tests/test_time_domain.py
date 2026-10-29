@@ -893,7 +893,13 @@ def test_single_template_calls_choose_the_faster_device_and_agree(monkeypatch):
         assert np.max(np.abs(r_g.snr - r_c.snr) / scale) < 1e-4
     (state,) = _choice.of_kind("single-device").values()
     assert state.winner in (_settings.DEFAULT, _settings.arm("side", "cpu"))
-    assert all(len(v) >= state.minimum for v in state.samples.values())
+    # Locked by the rule: each arm has the minimum of rounds, or left before it because it
+    # could no longer win (losing the first three of the cap's ten, for one).
+    pref = state.samples[state.preference]
+    for c, v in state.samples.items():
+        assert len(v) >= state.minimum or (
+            c in state.dropped and not _choice.can_still_win(v, pref[:len(v)], state.cap,
+                                                             tie=state.tie)), (c, v, pref)
 
 
 def test_filter_series_many_without_wait_overlaps_and_matches(monkeypatch):
