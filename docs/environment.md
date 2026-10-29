@@ -8,6 +8,10 @@ dismisses), and exist for measurement and tests.
 Generated from `python/matchedfilter/_config.py` by `tools/gen_environment_doc.py`; edit
 the table there.
 
+Removed 2026-10-30: a GPU batch is always fused, in lockstep: pinned at production
+length, unfused was 3-17% slower and the interleave of depth 3 no faster on the 8060S,
+RENOIR and Iris Xe (the device trial that chose them is gone): MF_GPU_FUSE_INTERLEAVE.
+
 Removed 2026-10-27: the pycbc capture hook that read it, writing tools/hier_bench.py
 fixtures, is gone; tools/setup_capture.py captures a job's calls: MF_CAPTURE.
 
@@ -94,7 +98,6 @@ Older notes in docs/ that mention a removed variable describe past studies.
 | `MF_COARSE_LAYOUT=<labels>` | measured | Force GPU coarse layouts by label. |
 | `MF_VK_SUBGROUP=<size>` | measured | Force a Vulkan subgroup size. |
 | `MF_COARSE_RAW=1` | 0 | The fp16 coarse tier reports its raw maximum instead of an upper bound (every GPU backend; the physics tests and tools/c16_sigma.py). |
-| `MF_GPU_FUSE_INTERLEAVE=<n>` | measured | Fixed Vulkan fusion interleave depth. |
 | `MF_GPU_ITEMS=0` | on | Single-template GPU jobs of a batch run one by one. |
 | `MF_GPU_QUEUE_AHEAD=<n>` | 8 | GPU submissions in flight. |
 | `MF_DEVICE_FOLLOWUPS=0` | on | Threshold-0 follow-ups per group rather than in one device submission. |

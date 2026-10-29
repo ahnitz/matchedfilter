@@ -505,7 +505,7 @@ _CHOICES: Dict[Tuple[str, Hashable], Choice] = {}
 #: calls, on which device) and clear_autotune_cache forgets them; "machine" choices are a
 #: property of the hardware and outlive it. A kind must be declared here before use.
 SCOPES: Dict[str, str] = {
-    "single-device": "workload", "gpu-batch": "workload", "gpu-single": "workload",
+    "single-device": "workload", "gpu-single": "workload",
     "gpu-kernels": "machine", "vk-subgroup": "machine", "coarse": "machine", "gateway": "machine",
 }
 

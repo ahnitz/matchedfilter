@@ -1,7 +1,6 @@
-"""A batch's GPU settings -- its submissions fused or not, where its follow-ups run, a fused
-Vulkan batch's interleave depth -- are one paired trial per set of GPU devices
-(time_domain._gpu_batch), played on the batches themselves: the first batches run every arm,
-one is kept, and every batch equals its direct calls whichever ran."""
+"""A batch of GPU banks is always fused (time_domain._fuse_close) and equals its direct calls;
+the device trials that remain (where follow-ups run, the kernels' slots) play on the batches
+themselves, and no trial chooses whether to fuse."""
 import numpy as np
 import pytest
 from conftest import usable_gpu_reason
@@ -9,7 +8,7 @@ from conftest import usable_gpu_reason
 from matchedfilter import TimeDomainFilterBank
 
 
-def test_batches_play_every_setting_then_keep_one(monkeypatch, tmp_path):
+def test_batches_are_fused_and_equal_their_direct_calls(monkeypatch, tmp_path):
     from conftest import usable_gpu
     from test_time_domain import _whitened_inspiral_bank
     from matchedfilter import time_domain as td
@@ -32,15 +31,10 @@ def test_batches_play_every_setting_then_keep_one(monkeypatch, tmp_path):
         b.set_reference(w, delta_f=df)
         banks.append(b)
     S = 1 << 17
-    sides = []
+    closes = []
     orig = td._fuse_close
-    monkeypatch.setattr(td, "_fuse_close", lambda jobs: sides.append(td._settings.setting("fuse")) or orig(jobs))
-    # Batches until the trial locks, at most its rounds' cap (with a confirmation): the
-    # joint trial of the banks' block sizes plays its rounds first, each batch it plays a
-    # round of not a round of this trial.
-    for _ in range(80):
-        if sides and all(t.winner is not None for t in _choice.of_kind("gpu-batch").values()):
-            break
+    monkeypatch.setattr(td, "_fuse_close", lambda jobs: closes.append(orig(jobs)) or closes[-1])
+    for _ in range(6):
         xs = []
         for _ in banks:
             X = np.fft.fft(rng.standard_normal(S))
@@ -52,6 +46,5 @@ def test_batches_play_every_setting_then_keep_one(monkeypatch, tmp_path):
             want = b.filter_series(x, **kw)
             for f in want._fields:
                 np.testing.assert_array_equal(getattr(want, f), getattr(r, f))
-    assert {True, False} <= set(sides), sides             # both settings played
-    trial = next(iter(_choice.of_kind("gpu-batch").values()))
-    assert trial.winner in trial.candidates and "fuse=0" in trial.candidates, trial.samples
+    assert closes and all(c is not None for c in closes), closes
+    assert not _choice.of_kind("gpu-batch")

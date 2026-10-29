@@ -125,8 +125,6 @@ VARS: Tuple[Var, ...] = (
         "The fp16 coarse tier reports its raw maximum instead of an upper bound (every GPU "
         "backend; the physics tests and tools/c16_sigma.py).",
         usage="MF_COARSE_RAW=1", kind="flag", value=False),
-    Var("MF_GPU_FUSE_INTERLEAVE", "override", "py", "measured",
-        "Fixed Vulkan fusion interleave depth.", usage="MF_GPU_FUSE_INTERLEAVE=<n>", kind="int"),
     Var("MF_GPU_ITEMS", "override", "py", "on",
         "Single-template GPU jobs of a batch run one by one.", usage="MF_GPU_ITEMS=0", kind="flag", value=True),
     Var("MF_GPU_QUEUE_AHEAD", "override", "py", "8", "GPU submissions in flight.",
@@ -163,6 +161,9 @@ SHADER_MACROS = frozenset({"MF_C16_RAW", "MF_COARSE_TWT", "MF_DATA_SCALE_BITS",
 
 #: Removed variables and why (the document lists them; setting one changes nothing).
 REMOVED = (
+    ("2026-10-30", "a GPU batch is always fused, in lockstep: pinned at production length, "
+     "unfused was 3-17% slower and the interleave of depth 3 no faster on the 8060S, RENOIR "
+     "and Iris Xe (the device trial that chose them is gone)", ("MF_GPU_FUSE_INTERLEAVE",)),
     ("2026-10-27", "the pycbc capture hook that read it, writing tools/hier_bench.py "
      "fixtures, is gone; tools/setup_capture.py captures a job's calls", ("MF_CAPTURE",)),
     ("2026-10-27", "the tensor-core coarse bound was built from the sigma measured by "

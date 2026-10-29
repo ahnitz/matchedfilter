@@ -501,15 +501,6 @@ def _fused_key(items):
 #: Interleave depths of a fused batch the device trial plays (_settings.setting): 0 is
 #: lockstep; 3 puts the second half's forward (DRAM-bound) beside the first half's coarse0
 #: (VALU-bound).
-_INTERLEAVE_CANDIDATES = (0, 3)
-
-
-def _fuse_interleave():
-    """A forced interleave depth (MF_GPU_FUSE_INTERLEAVE), or None: the device trial's."""
-    v = _config.get("MF_GPU_FUSE_INTERLEAVE")
-    return None if v is None else max(0, v)
-
-
 class _DeviceTimer:
     """Timestamps around whole submissions on one device, independent of MF_GPU_TIMING:
     used to choose a fused batch's interleave depth by measurement."""
@@ -585,17 +576,7 @@ class _FusedBatch:
         dev, vk = self.dev, self.dev.vk
         # The same jobs recur every segment: reuse their fused recording while every
         # constituent recording is still cached (eviction drops its phases).
-        base = _fused_key(self.items)
-        # The interleave depth is the device trial's (_settings.setting "interleave":
-        # played on real batches with the batch's other GPU settings), lockstep (0) unless a
-        # deeper interleave was clearly faster; MF_GPU_FUSE_INTERLEAVE forces one.
-        forced = _fuse_interleave()
-        if forced is not None or len(self.items) < 2:
-            k = forced or 0
-        else:
-            from ._settings import setting as gpu_setting
-            k = int(gpu_setting("interleave"))
-        key = (base, k)
+        key = _fused_key(self.items)
         cache = dev.__dict__.setdefault("fused_cache", OrderedDict())
         hit = cache.get(key)
         if hit is not None:
@@ -614,32 +595,19 @@ class _FusedBatch:
         if prof is not None:
             _profile_forget(cmd)
             prof._stamp(cmd, "start")
-        # Phases run in lockstep across the batch's items, one global barrier per phase.
-        # With an interleave offset k the batch's second half runs k phases behind its
-        # first: forward (DRAM-bound) of one half then shares a barrier interval with
-        # coarse0 (VALU-bound) of the other, so the two overlap on the device. Every item
-        # still sees its own phases in order, each behind its own recorded barriers.
-        P = _FUSED_PHASES
-        half = (len(self.items) + 1) // 2
-        groups = ((self.items[:half], 0), (self.items[half:], k)) if k else ((self.items, 0),)
-        for step in range(len(P) + k):
+        # Phases run in lockstep across the batch's items, one global barrier per phase:
+        # every item sees its own phases in order, each behind its own recorded barriers.
+        for phase in _FUSED_PHASES:
             barriers = []
-            labels = []
-            for items, lag in groups:
-                i = step - lag
-                if not 0 <= i < len(P):
-                    continue
-                phase = P[i]
-                labels.append(phase)
-                for ctx, cmds in items:
-                    for h in cmds:
-                        work_bar = ctx._phases[h].get(phase)
-                        if work_bar is None:
-                            continue
-                        work, bar = work_bar
-                        for name, args in work:
-                            getattr(vk, name)(cmd, *args[1:])
-                        barriers.extend(bar)
+            for ctx, cmds in self.items:
+                for h in cmds:
+                    work_bar = ctx._phases[h].get(phase)
+                    if work_bar is None:
+                        continue
+                    work, bar = work_bar
+                    for name, args in work:
+                        getattr(vk, name)(cmd, *args[1:])
+                    barriers.extend(bar)
             # One global barrier per distinct (stages, access) is enough for the step;
             # buffer barriers are kept as recorded.
             seen = set()
@@ -653,7 +621,7 @@ class _FusedBatch:
                     seen.add(sig)
                 getattr(vk, name)(cmd, *args[1:])
             if prof is not None:
-                prof._stamp(cmd, "fused " + ("+".join(labels) if k else labels[0]))
+                prof._stamp(cmd, "fused " + phase)
         _check(vk.vkEndCommandBuffer(cmd), "end fused")
         self.prof = prof
         cache[key] = (cmd, [list(cmds) for _, cmds in self.items])

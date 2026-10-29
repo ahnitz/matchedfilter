@@ -25,6 +25,24 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ### Changed
 
+- One generator for every GPU kernel, `tools/kernel_variants.py`: the table of every Vulkan,
+  Metal and CUDA artifact, the facts each is built with and the one way each is compiled
+  (`build_spirv.py` and `build_ptx.py` run it; `build_forward.py` is gone). A rebuild
+  reproduces all 275 SPIR-V, 290 Metal and 309 PTX artifacts byte for byte. Each backend's
+  manifest has one schema (Metal has its own instead of columns in the SPIR-V one), and the
+  hosts read every kernel fact from it through `matchedfilter._kernels`: the 32 KB builds,
+  Vulkan's bindings and push-constant bytes, Metal's and CUDA's group sizes and the coarse
+  candidates' memory. That last was a formula overstating the fp16 builds' memory about
+  twice, so a 64 KB device now also tries the coarse packings that fit (band 1024 at 16
+  pairs). Metal ships one survivor compaction each, as Vulkan and CUDA do, in place of 30
+  per-length builds that differed only in their `#line` names. Vulkan's and CUDA's kernel
+  identities are unchanged; Metal's moves once. CI checks the kernels and manifests against
+  the generator.
+- A GPU batch is always fused, in lockstep, and the `gpu-batch` device trial that chose
+  fusion and the fused interleave depth is gone. Pinned at production length (test27 ladder,
+  2-3 runs an arm), unfused batches were 3-17% slower on the 8060S, RENOIR and Iris Xe and
+  the depth-3 interleave no faster; the trial had locked unfused on replays of short runs
+  on an idle device, where it timed 6-15% faster.
 - Block size and the Q15 screen are decided by one joint trial on real calls, on the CPU
   and GPU alike, in place of three separate trials, and the gate chain is no longer timed:
   each plan runs its model chain (`MF_CHAIN_FORCE` pins one for measurement). The trial's
@@ -115,6 +133,7 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ### Removed
 
+- `MF_GPU_FUSE_INTERLEAVE` (the fused interleave depth is gone).
 - `gatechain.direct_halfwidth`: a plan carries its direct refine's half-width
   (`chain_thresholds(...)["halfwidth"]`), chosen with its thresholds against one budget.
 - 52 shipped GPU kernels that nothing could run or nothing chose, 14.7 MB of 115 MB: CUDA's
