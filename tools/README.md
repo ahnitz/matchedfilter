@@ -17,12 +17,33 @@ some calibration tools need separately captured data.
 | CPU ladder profile | `profile_cpu_ladder.py` | Fix chain and thresholds, compare Q15 off/on or separate builds, and record stage costs and result hashes; requires a real bank and matching profiles |
 | Job setup | `setup_capture.py`, `setup_replay.py`, `setup_breakdown.py`, `setup_decisions_diff.py` | Capture a job's banks and references, replay its matchedfilter setup, charge its time by part, and diff two replays' decisions |
 | Gate validation | `fdr_audit.py`, `split_bias.py`, `audit_gate_model.py`, `audit_threshold.py`, `make_psd_profiles.py` | Measure gate chains' dismissal by injection against the flat filter, two-sided (`fdr_audit.py`, run by the gate), and the budget split's selection bias on independent model draws (`split_bias.py`); not part of normal installation |
+| Measured choices at production length | `prodlen.py` | Fresh ladder processes of two trees in ABBA order, with no MF_COST_FILE, as production runs: each trial's lock, the fine batch it locked at and how long it was open; steady, total, user and system time; run before merging a change to how choices are measured |
 
 For a quick CPU/GPU overlap-save comparison with output validation:
 
 ```bash
 python tools/bench_series_workloads.py --quick --reps 5 --json series.json
 ```
+
+To vet a change to the measured choices at production length (27 tops x 28 segments, each
+process fresh with no MF_COST_FILE, as a production job starts), against a baseline tree:
+
+```bash
+python tools/prodlen.py run --base ../main --new . --processes 4 --out .local/prodlen \
+    --bank BANK.hdf --profiles PROFILES.npz --device gpu:0 --cores 12-15
+python tools/prodlen.py summarise .local/prodlen
+```
+
+Each process runs its own tree's `ladder.py` (`--pipeline --pure`) through the tool's hook,
+which logs every batch and every measured choice's creation, rounds and lock. Per process the
+summary lists every trial's lock and the fine batch it locked at, the fine batches it was open
+in and the batches it played; the steady wall and its per-top series; total, user and system
+time; and the load. Pooled, it gives the median ratios (also per ABBA pair), each tree's
+non-default locks and each offline kernel screen's picks. Its CHECK lines confirm that each
+process completed, ran its own tree and every fine batch, and that the hook and the library's
+MF_AUTOTUNE log saw the same locks. The tool exits 1 if a check fails. Read the times with the
+load range: in a main-against-main run on dev2 (2026-10-29) the load rose from 8 to 20 and one
+tree's two processes took 402 s and 898 s.
 
 To compare survivor processing in two saved builds (each directory contains its own
 `matchedfilter` package and native extension):
@@ -117,7 +138,7 @@ identities); `coarse_layout.py` (the fp16 coarse kernel's build-time layout);
 verdicts), `sanitize.sh` and `sanitize_report.py` (ASan/UBSan runs and their
 annotations), `migrate_cost_file.py` (cost-file format migration).
 
-**Production-like benchmarks**: `ladder.py`, `ab_ladder.py`, `ladder_diff.py`,
+**Production-like benchmarks**: `ladder.py`, `ab_ladder.py`, `prodlen.py`, `ladder_diff.py`,
 `ladder_coverage.py`, `ladder_profiles.py`, `profile_cpu_ladder.py`, `hier_bench.py`,
 `hier_all.sh`, `search_bench.py`, `scoreboard.py`, `health.py`.
 
