@@ -280,12 +280,12 @@ def test_labels_round_trip():
     """Every dimension's arms read back to themselves (_settings: one grammar for every trial),
     one move or several in DIMS order; a label that names no dimension or no value, or spells
     an arm out of order, is not an arm."""
-    for label in (_settings.DEFAULT, "n=2048", "n=model", "q15=1", "q15=0", "fuse=0",
-                  "interleave=3", "single=cpu", "side=cpu", "kern:coarse:256=tierb_256_c16w@64",
-                  "n=4096,q15=0", "fuse=0,interleave=3,kern:coarse:256=tierb_256_c16w@64"):
+    for label in (_settings.DEFAULT, "n=2048", "n=model", "q15=1", "q15=0",
+                  "single=cpu", "side=cpu", "kern:coarse:256=tierb_256_c16w@64",
+                  "n=4096,q15=0", "single=cpu,kern:coarse:256=tierb_256_c16w@64"):
         assert _settings.compose(_settings.moves(label)) == label
     assert _settings.moves("n=4096,q15=0") == {"n": 4096, "q15": False}
-    for bad in ("chain=2048:256", "chain=+1", "blocks=2", "q15=2", "single=tpu", "n=", "fuse",
+    for bad in ("chain=2048:256", "chain=+1", "blocks=2", "q15=2", "single=tpu", "n=", "fuse=0",
                 "q15=0,n=4096", "n=4096,n=2048", "n=4096,"):
         with pytest.raises(ValueError):                    # chains are never arms
             _settings.moves(bad)

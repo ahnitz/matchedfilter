@@ -9,9 +9,8 @@ keeps its base (_trial.current_pass). One grammar for every trial:
 
   * "subject" dimensions are resolved by each instance a trial runs on -- a bank's block size
     "n" (its layouts), a plan's screen "q15" -- through its arm_config / use_arm / lock_arm;
-  * "batch" dimensions are in force for a run, read here by the code they steer: a GPU
-    batch's fusion "fuse", its interleave depth "interleave", where its follow-ups run
-    "single", where a lone single-template call runs "side", and the kernels' slots
+  * "batch" dimensions are in force for a run, read here by the code they steer: where a GPU
+    batch's follow-ups run "single", where a lone single-template call runs "side", and the kernels' slots
     "kern:<what>:<band>" (coarse layout, gate way, sparse read: their values are labels, the
     default and alternative each call registers, slot).
 
@@ -58,12 +57,6 @@ DIMS: Dict[str, Dim] = {d.name: d for d in (
         doc="a bank's block size: every block at n, or the model's priced layout"),
     Dim("q15", _flag, _show_flag, scope="subject",
         doc="the Q15 screen as a plan's first tier, where its first band has one"),
-    Dim("fuse", _flag, _show_flag, default=True,
-        doc="a GPU batch's submissions fused into shared command buffers (_gpuexec.fused): "
-            "+16% on an M2, -3 to -6% on an 8060S, nothing on a RENOIR (2026-10-19)"),
-    Dim("interleave", int, default=0,
-        doc="a fused Vulkan batch's interleave depth: 0 lockstep, 3 the second half's "
-            "forward beside the first half's coarse0"),
     Dim("single", _side, default="gpu",
         doc="where a GPU batch's single-template (follow-up) jobs run"),
     Dim("side", _side, default="gpu",

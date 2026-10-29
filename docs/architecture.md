@@ -442,7 +442,7 @@ print, its default and its scope:
 
 `_settings.setting` answers a batch dimension: the arm a running trial plays, else the lock
 of a device set holding the device, else the default. The GPU device trials that decide
-them (`gpu-batch`, `gpu-single`, `gpu-kernels`; `time_domain._gpu_trials`) use the same
+them (`gpu-single`, `gpu-kernels`; `time_domain._gpu_trials`) use the same
 paired `Choice` and coordinate passes (`_trial.current_pass`). The single-template side
 (`single-device`, `time_domain._single_choice`) is one paired `Choice` between two
 candidates, the default and the CPU, with confirmation.
@@ -459,7 +459,7 @@ prefix:
 - prices: `cpu-fft`, `corr3`, `corr-pfft`, `choice` + `direct-lagtap` and `direct-pair`
   (`_prices`, `_layout`);
 - joint-trial passes: `choice` + `joint` + `bank` or `plan` (`_trial.Trial`);
-- GPU device trials and the single-template side: `choice` + `gpu-batch`, `gpu-single`,
+- GPU device trials and the single-template side: `choice` + `gpu-single`,
   `gpu-kernels` and `single-device` (`time_domain`);
 - kernel shortlists and the Vulkan subgroup size: `choice` + `coarse`, `gateway` and
   `vk-subgroup` (`_coarse.shortlist`, `_vksubgroup`).

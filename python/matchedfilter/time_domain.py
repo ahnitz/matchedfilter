@@ -325,11 +325,6 @@ _GPU_RAN = {}
 _SEEN_BY_BATCH = {}
 
 
-def _interleave_depths():
-    from ._vkcompute import _INTERLEAVE_CANDIDATES
-    return _INTERLEAVE_CANDIDATES
-
-
 def _gpu_trials(gpus, jobs, seen):
     """The device trials of a batch: (name, {dimension: alternatives}, exercised(dimension)).
     Each decides its dimensions (_settings.DIMS) together, in coordinate passes
@@ -337,14 +332,8 @@ def _gpu_trials(gpus, jobs, seen):
     whether this batch runs a dimension at all: an arm counts as running the batch
     differently only through dimensions it exercises (_gpu_batch), so a trial is played
     only on batches that can tell its arms apart."""
-    many = sum((kw or {}).get("template_index") is None for _, _, kw in jobs) > 1
     follow = bool(_config.get("MF_GPU_ITEMS")) and any(
         (kw or {}).get("template_index") is not None for _, _, kw in jobs)
-    vulkan = any(getattr(d, "backend", "") == "vulkan" for d in gpus)
-    batch = {"fuse": [False]}
-    if vulkan:
-        batch["interleave"] = [k for k in _interleave_depths() if k]
-    yield "gpu-batch", batch, lambda d: many
     yield "gpu-single", {"single": ["cpu"]}, lambda d: follow
     registered = _settings.slots({g.name for g in gpus})
     yield "gpu-kernels", {d: [alt] for d, (_, alt) in registered.items()}, lambda d: d in seen
@@ -454,13 +443,13 @@ def _side_of(label):
 
 
 def _fuse_close(jobs):
-    """Fuse this batch's submissions (_gpuexec.fused) where it has GPU banks and the device
-    trial's setting says so (_settings "fuse"): the batch's close, or None."""
+    """Fuse this batch's submissions (_gpuexec.fused) where it has GPU banks: the batch's
+    close, or None. Always: pinned at production length, unfused batches were 3-17% slower on
+    the 8060S, RENOIR and Iris Xe (2026-10-30; replays of a short run on an idle device had
+    timed unfused faster, which the device trial that chose it locked)."""
     from .device import parse as _parse_device
     if not any(_parse_device(b.device).kind == "gpu" for b, _, _ in jobs
                if getattr(b, "device", None) is not None):
-        return None
-    if not _settings.setting("fuse"):
         return None
     from ._gpuexec import fused
     return fused()
