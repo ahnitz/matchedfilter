@@ -116,9 +116,6 @@ static inline int codelet_tw(int m,vf*restrict ar,vf*restrict ai,vf*restrict br,
  * not read.  fft8_prod was the one exception; nothing asked for an 8-point
  * product codelet until the small-N path did, and band 128 came back as
  * noise.  If a new codelet is added here, check that it returns 0. */
-/* The split-radix product codelets (measured faster against the plain form, compared in
-   one build; see docs). */
-static inline int ap_srprod(void){ return 1; }
 /* Can the product be fused into this element size's first pass?
  *
  * Only when the transform is single-level.  Two-level means the first codelet

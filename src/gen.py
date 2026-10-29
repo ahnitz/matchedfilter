@@ -375,8 +375,9 @@ if __name__=="__main__":
     out.append(build(64,[8,8],"fft64_88"))
     # product-loading variants: the matched filter's first stage reads two
     # spectra and forms conj(d*t) inside the codelet, so the product never
-    # reaches memory.  One per element size the four-step can ask for.
-    for nn,rr in ((8,[8]),(16,[8,2]),(32,[8,4]),(64,[8,8])):
+    # reaches memory.  The element sizes product-inl.h serves with the Stockham
+    # form: 16 always goes to fftsr16_prod, so fft16_prod was dead.
+    for nn,rr in ((8,[8]),(32,[8,4]),(64,[8,8])):
         out.append(build(nn,rr,"fft%d_prod"%nn,prod=True))
     # Split-radix at the sizes elemfft.h actually selects.  8 is served by
     # fft8_42 and fft8_tw, so fftsr8 was generated and never called.
@@ -396,7 +397,7 @@ if __name__=="__main__":
     # go to the split-radix variants, so fft16_tw and fft32_tw were dead.
     for (nn,rr) in ((8,[8]),(32,[8,4]),(64,[8,8])):
         out.append(build(nn,rr,"fft%d_tw"%nn,tw=True))
-    for nn,rr in ((8,[8]),(16,[8,2]),(32,[8,4]),(64,[8,8])):
+    for nn,rr in ((8,[8]),(32,[8,4]),(64,[8,8])):
         out.append(broadcast_codelet(build(nn,rr,"fft%d_prod_broadcast"%nn,prod=True)))
     for nn in (16,32,64):
         out.append(broadcast_codelet(build_sr(nn,"fftsr%d_prod_broadcast"%nn,prod=True)))
