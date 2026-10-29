@@ -138,25 +138,18 @@ _ADVISE_ACCESSED_BY = 5
 _CPU_DEVICE = -1
 
 
-_STATIC_SHARED_MAX = 48 * 1024
-_SHARED_DECL = None
-_shared_cache = {}
+def _shipped(stem):
+    """The path of the PTX module that serves `stem`, or None when none ships.
 
-
-def _static_shared(path):
-    """Bytes of static .shared memory a PTX module declares."""
-    global _SHARED_DECL
-    key = str(path)
-    if key not in _shared_cache:
-        import re
-        if _SHARED_DECL is None:
-            _SHARED_DECL = re.compile(rb"^\s*\.shared\s+(?:\.align\s+\d+\s+)?\.(?:b|u|s|f)(\d+)\s+[\w$]+\[(\d+)\]",
-                                      re.M)
-        total = 0
-        for bits, count in _SHARED_DECL.findall(pathlib.Path(path).read_bytes()):
-            total += int(bits) // 8 * int(count)
-        _shared_cache[key] = total
-    return _shared_cache[key]
+    That is the stem's own build or, where its staging needs more than the 48 KB of static
+    shared memory CUDA allows a block (tools/build_ptx.py ships no module past it), the same
+    kernel built with 32 KB staging (`<stem>_lds32`), which computes the same transform in
+    more exchange passes."""
+    for name in (stem, stem + "_lds32"):
+        path = _PTX_DIR / f"{name}.ptx"
+        if path.is_file():
+            return path
+    return None
 
 
 def _radix(n):
@@ -918,7 +911,7 @@ class Context(Executor, InputUploads):
             return f"tierb_{n}_c16{p_s}{t_s}{'w' if twt else ''}"
         if entry == "refineListed":
             one = f"refine_{n}_onebin"
-            return one if (one_bin and (_PTX_DIR / f"{one}.ptx").is_file()) else f"refine_{n}"
+            return one if (one_bin and _shipped(one)) else f"refine_{n}"
         if entry == "fullCorrelation":
             return f"full_{n}"
         if entry == "fullCorrelationSeries":
@@ -943,21 +936,12 @@ class Context(Executor, InputUploads):
         stem = self._stem(n, entry, one_bin=one_bin, c16=c16, ppg=ppg, tile=tile, twt=twt)
         if gate:                                 # the one-bin build's gate-only variant
             stem += "_gate"
-        ptx_file = _PTX_DIR / f"{stem}.ptx"
-        if ptx_file.is_file() and _static_shared(ptx_file) > _STATIC_SHARED_MAX:
-            # CUDA caps STATIC shared memory at 48 KB per block on every
-            # architecture (more needs dynamic shared memory and an opt-in);
-            # the JIT rejects the module outright (CUDA_ERROR_INVALID_PTX). The
-            # 32 KB staging build computes the same transform in more passes.
-            small = _PTX_DIR / f"{stem}_lds32.ptx"
-            if not small.is_file():
-                raise UnsupportedSize(f"{stem} needs more than 48 KB static shared memory "
-                                      f"and has no _lds32 build")
-            stem, ptx_file = f"{stem}_lds32", small
-        if not ptx_file.is_file():
+        ptx_file = _shipped(stem)
+        if ptx_file is None:
             # A missing variant is not silently replaced by a different one: the
             # PPG/TILE_T are compiled in and the launch geometry depends on them.
             raise UnsupportedSize(f"no PTX kernel for {stem} (n={n}, entry={entry})")
+        stem = ptx_file.stem
         fn_name = "fusedTierB" if (c16 and entry != "refineListed") else entry
         if entry == "refineListed":
             fn_name = "refineListedBounded"      # src/gpu/refine_bounded.slang
@@ -1130,18 +1114,18 @@ class Context(Executor, InputUploads):
 
     @staticmethod
     def _x_has_c16(band):
-        return (_PTX_DIR / f"tierb_{band}_c16.ptx").is_file()
+        return _shipped(f"tierb_{band}_c16") is not None
 
     @staticmethod
     def _x_has_kernel(name, n):
         if name == "tier1":
-            return (_PTX_DIR / f"refine_{n}_onebin.ptx").is_file()
+            return _shipped(f"refine_{n}_onebin") is not None
         if name == "fwd_tier0":
-            return (_PTX_DIR / f"forward_tier0_{n}.ptx").is_file()
+            return _shipped(f"forward_tier0_{n}") is not None
         if name == "items":
-            return (_PTX_DIR / f"items_{n}.ptx").is_file()
+            return _shipped(f"items_{n}") is not None
         if name == "tier1gate":
-            return (_PTX_DIR / f"refine_{n}_onebin_gate.ptx").is_file()
+            return _shipped(f"refine_{n}_onebin_gate") is not None
         raise ValueError(name)
 
     def _x_coarse_candidates(self, band):
@@ -1154,8 +1138,8 @@ class Context(Executor, InputUploads):
                 if ppg > 1 and band // 16 * ppg > 1024:
                     continue
                 for twt in (0, 1):
-                    if (_PTX_DIR / (self._stem(band, "fusedTierB", c16=True, ppg=ppg, tile=tile,
-                                               twt=bool(twt)) + ".ptx")).is_file():
+                    if _shipped(self._stem(band, "fusedTierB", c16=True, ppg=ppg, tile=tile,
+                                           twt=bool(twt))):
                         cands.append((0, ppg, tile, twt))
         for wpb in (2, 4):
             if (_PTX_DIR / ("coarse_tc_%d_w%d.ptx" % (band, wpb))).is_file() and self.cc >= (8, 0):
