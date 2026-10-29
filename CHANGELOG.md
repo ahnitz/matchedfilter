@@ -74,7 +74,11 @@ Alpha releases may change the API. Pin a version for reproducible work.
   the fp32 tiled coarse kernel (`coarse_tile.slang`, nine builds no host loaded), three
   SPIR-V modules no build makes (over 1024 invocations), and 36 PTX modules over the 48 KB
   of static shared memory CUDA allows a block, which no NVIDIA GPU can launch (their
-  lengths run the 32 KB staging builds, as they did). Results are unchanged.
+  lengths run the 32 KB staging builds, as they did). Results are unchanged. One choice
+  changes on CUDA: the band-8192 coarse candidates no longer include `tierb_8192_c16p2`
+  and `tierb_8192_c16p2w`. Those 64 KB modules could not load and had no 32 KB build, so
+  timing the band-8192 coarse layouts raised `UnsupportedSize`; it now times the two
+  layouts that load.
 - `MF_METAL_IEEE` (no tool, test or CI job set it, and `=none` let the survivor compaction
   drop a NaN coarse value), `MF_TC_KAPPA` (a hand-set tensor-core bound constant in place
   of the one built from the measured sigma) and `MF_CAPTURE` (nothing read it). Setting
