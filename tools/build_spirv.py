@@ -145,8 +145,8 @@ ENTRY = ENTRIES[0]
 #: that is affordable depends on the band AND the device. A per-band table tuned on RDNA
 #: (2 everywhere, 4 at 512) was 11% slow in the fine stage on GCN at band 256 and 4% slow
 #: on the RDNA part itself; band 1024 measured 2.1x worse tiled there. So every tile is
-#: built and the host times the shipped builds on its device (_vkcompute._coarse_tile,
-#: _mtlcompute, _cudacompute._time_coarse). Spelled by _coarse.coarse_stem.
+#: built and the host times the shipped builds on its device (_gpuhier._time_coarse_layouts,
+#: over each backend's _x_coarse_candidates). Spelled by _coarse.coarse_stem.
 COARSE_TILES = (2, 4, 8)
 #: Tiled builds stop here: these are the bands tiles always shipped at. Above it a tiled pair
 #: spans several subgroups on every device, and the CUDA builds alone would add ~48 MB.
