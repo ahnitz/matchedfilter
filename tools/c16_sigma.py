@@ -58,7 +58,7 @@ def raw_values(ctx, band, layout, D, T):
                                     scale=0, rowwin=False)
         slot, groups = coarse_launch(1, nt, layout[1], layout[2], band)
         lst = ctx._x_list("c16 sigma")
-        lst.dispatch(kernel, ctx._x_coarse_groups(kernel, groups), [data, tmpl, cidx, cval],
+        lst.dispatch(kernel, groups, [data, tmpl, cidx, cval],
                      (nt, 0, band, slot, band.bit_length() - 1, 1,
                       ctx._gate_bits(0.0, band, layout)))
         native = lst.end()
@@ -101,14 +101,11 @@ def main(argv=None):
     ap.add_argument("--reps", type=int, default=8)
     ap.add_argument("--nt", type=int, default=64)
     a = ap.parse_args(argv)
-    from matchedfilter._coarse import parse_label
     ctx = _context(a.backend)
     try:
         for band in a.n:
             res = {}
             for label, layout in zip(ctx.coarse_layouts(band), ctx._x_coarse_candidates(band)):
-                if parse_label(label) is None:
-                    continue                     # a driver's own gate (CUDA tensor cores)
                 res[label] = measure(ctx, band, layout, a.reps, a.nt)
             if not res:
                 print("band %5d  no fp16 coarse layout on this device" % band)

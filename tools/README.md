@@ -140,7 +140,7 @@ annotations), `migrate_cost_file.py` (cost-file format migration).
 decisions compared).
 
 **Gate accuracy and bounds**: `gate_margin.py` (every narrow first tier), `c16_sigma.py`
-(GPU fp16 rounding, for its bound), `cuda_tc_sigma.py`, `gate16_error.py`, `gate16_check.py`,
+(GPU fp16 rounding, for its bound), `gate16_error.py`, `gate16_check.py`,
 `coarse_precision.py`, `coarse_fixed.py`, `fdr_audit.py` (every profile and chain against
 the flat filter, two-sided), `split_bias.py` (each plan's dismissal on model draws it was
 not chosen on: the measurement behind `gatechain._SPLIT_TOLERANCE_Z`), `audit_gate_model.py`,

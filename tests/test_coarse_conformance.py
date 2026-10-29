@@ -2,8 +2,8 @@
 (hier_peaks) on whichever GPU backend this machine has, must make the gate decisions the
 exact coarse statistic makes, and fail open.
 
-The layout -- packing, tile, twiddle source, subgroup size, and on CUDA the tensor-core
-gate -- is a per-device measured choice (_coarse.shortlist, then the device trial), so any of them
+The layout -- packing, tile, twiddle source, subgroup size -- is a per-device measured
+choice (_coarse.shortlist, then the device trial), so any of them
 can run in production. Each backend lists them by one name (coarse_layouts,
 _coarse.layout_label) and MF_COARSE_LAYOUT forces one, so one test covers all three
 backends and a rule cannot drift on one of them again. This replaces the per-backend tile,

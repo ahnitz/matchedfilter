@@ -108,8 +108,7 @@ released on every path, which `tests/test_native_buffers.py` checks by reference
 
 ### GPU kernels
 
-GPU kernels are written in Slang (`src/gpu/*.slang`) plus one CUDA source
-(`src/gpu/coarse_tc.cu`, the tensor-core gate). They are compiled ahead of time and shipped:
+GPU kernels are written in Slang (`src/gpu/*.slang`). They are compiled ahead of time and shipped:
 SPIR-V and Metal sources by `tools/build_spirv.py`, PTX by `tools/build_ptx.py`, into
 `python/matchedfilter/spirv/`, `metal/` and `ptx/`. No PTX module declares more than the 48 KB
 of static shared memory CUDA allows a block (such a module launches on no NVIDIA GPU, so

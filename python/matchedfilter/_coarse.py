@@ -60,8 +60,7 @@ def shipped_tiles(band, ppg, shipped):
 
 def parse_label(label):
     """(band, ppg, tile, twt, subgroup) of a coarse layout's name (layout_label's inverse),
-    or None for a name that is not a packed fp16 build (a driver's own gate, such as CUDA's
-    coarse_tc_512_w4)."""
+    or None for a name that is not a packed fp16 build."""
     import re
     m = re.fullmatch(r"tierb_(\d+)_c16(?:p(\d+))?(?:t(\d+))?(w?)(?:@(\d+))?", label)
     if m is None:

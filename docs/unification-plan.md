@@ -164,7 +164,8 @@ unchanged to SPIR-V, PTX and Metal. About 315 lines sit in backend-specific bloc
 - **CUDA (about 35):** constants declared as statics, and dispatch details.
 
 There are 4 raw target intrinsics. The one native CUDA kernel outside Slang is
-`coarse_tc.cu` (the tensor-core gate, 285 lines), kept as an explicit exception.
+`coarse_tc.cu` (the tensor-core gate, 285 lines), kept as an explicit exception (deleted
+2026-10-29: never chosen; docs/cuda-l40s-roofline.md, Phase 7).
 
 The duplication is in the hosts: about 8.6k lines across `_vkcompute`, `_cudacompute` and
 `_mtlcompute`, which stage 1 addresses. The kernel-side cleanup lands in stages 3 and 5:

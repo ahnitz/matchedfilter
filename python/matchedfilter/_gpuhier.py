@@ -269,8 +269,6 @@ class HierOps:
     @staticmethod
     def _layout_label(band, c):
         from ._coarse import layout_label
-        if len(c) > 4:                        # a driver's own gate (CUDA's tensor-core one)
-            return "coarse_%s_%d_w%d" % (c[4], band, c[1])
         return layout_label(band, c[1], c[2], c[3], c[0])
 
     def _time_coarse_layouts(self, band, cands):
@@ -298,7 +296,6 @@ class HierOps:
             kernel = self._coarse_kernel(band, layout, stride=band if self.inplace_feed else 0,
                                          scale=0, rowwin=False)
             slot_val, groups = coarse_launch(nd, ntm, layout[1], layout[2], band)
-            groups = self._x_coarse_groups(kernel, groups)
             lst = self._x_list("coarse timing")
             lst.dispatch(kernel, groups, [data, tmpl, cidx, cval],
                          (ntm, 0, band, slot_val, band.bit_length() - 1, 1,
@@ -329,21 +326,14 @@ class HierOps:
     def _coarse_kernel(self, band, layout, stride, scale, rowwin):
         sg, ppg, tile, twt = layout[:4]
         return self._x_kernel("coarse", band, dict(sg=sg, ppg=ppg, tile=tile, twt=twt,
-                                                   stride=stride, scale=scale, rowwin=rowwin,
-                                                   layout=layout))
-
-    @staticmethod
-    def _x_coarse_groups(kernel, groups):
-        """The groups a coarse dispatch launches: all of them (a driver whose kernel is
-        persistent caps its grid)."""
-        return groups
+                                                   stride=stride, scale=scale, rowwin=rowwin))
 
     def _gate_bits(self, thr, band, layout):
         """The coarse kernel's last word: for a tiled build whose pair fits one subgroup, the
         gate threshold as magnitude bits (tierb.slang peakTwoGate: only the pass and its
         bound, no election -- nothing reads tier 0's index); 0 elects (peakTwoWave)."""
         sg, _, tile, _ = layout[:4]
-        if len(layout) > 4 or tile <= 1 or _config.get("MF_COARSE_RAW"):
+        if tile <= 1 or _config.get("MF_COARSE_RAW"):
             return 0
         if band // 16 > (sg or self.subgroup_size):
             return 0
@@ -623,7 +613,6 @@ class HierOps:
                 if half:
                     kern = self._coarse_kernel(b, layout, stride, scale, rowwin)
                     _, groups = coarse_launch(nd, nt, layout[1], layout[2], 0)
-                    groups = self._x_coarse_groups(kern, groups)
                 else:
                     kern = self._x_kernel("gate", b, dict(stride=stride, rowwin=rowwin))
                     groups = pairs

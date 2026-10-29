@@ -68,6 +68,13 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ### Removed
 
+- 52 shipped GPU kernels that nothing could run or nothing chose, 14.7 MB of 115 MB: CUDA's
+  tensor-core coarse gate (`src/gpu/coarse_tc.cu`, four PTX builds; the measured coarse
+  choice never picked it on the L40S, where it ran 25-40% slower than the Slang layouts),
+  the fp32 tiled coarse kernel (`coarse_tile.slang`, nine builds no host loaded), three
+  SPIR-V modules no build makes (over 1024 invocations), and 36 PTX modules over the 48 KB
+  of static shared memory CUDA allows a block, which no NVIDIA GPU can launch (their
+  lengths run the 32 KB staging builds, as they did). Results are unchanged.
 - `MF_METAL_IEEE` (no tool, test or CI job set it, and `=none` let the survivor compaction
   drop a NaN coarse value), `MF_TC_KAPPA` (a hand-set tensor-core bound constant in place
   of the one built from the measured sigma) and `MF_CAPTURE` (nothing read it). Setting

@@ -159,9 +159,9 @@ SHADER_MACROS = frozenset({"MF_C16_RAW", "MF_COARSE_TWT", "MF_DATA_SCALE_BITS",
 REMOVED = (
     ("2026-10-27", "the pycbc capture hook that read it, writing tools/hier_bench.py "
      "fixtures, is gone; tools/setup_capture.py captures a job's calls", ("MF_CAPTURE",)),
-    ("2026-10-27", "the tensor-core coarse bound is built from the sigma measured by "
-     "tools/cuda_tc_sigma.py; a hand-set constant is not a bound, and nothing set it",
-     ("MF_TC_KAPPA",)),
+    ("2026-10-27", "the tensor-core coarse bound was built from the sigma measured by "
+     "tools/cuda_tc_sigma.py; a hand-set constant is not a bound, and nothing set it (the "
+     "gate itself was deleted on 2026-10-29: never chosen)", ("MF_TC_KAPPA",)),
     ("2026-10-27", "no tool, test or CI job set it; Metal keeps fast math except in the "
      "survivor compaction, which is IEEE because it must list a NaN coarse value",
      ("MF_METAL_IEEE",)),
