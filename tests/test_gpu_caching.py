@@ -286,18 +286,17 @@ def test_the_chosen_kernel_fits_the_device():
     Apple in particular -- would fail to create the pipeline.
     """
     V = _vulkan_or_skip()
-    import json, pathlib
-    man = json.loads((pathlib.Path(V.__file__).parent / "spirv"
-                      / "manifest.json").read_text())
+    from matchedfilter import _kernels
+    kernels = _kernels.manifest("vulkan")["kernels"]
+    by_file = {rec["file"]: rec for rec in kernels.values()}
     for i, dev in enumerate(mf.devices()):
         if dev.kind != "gpu":
             continue
         ctx = V.Context(dev.index)
         try:
-            for key, info in man["modules"].items():
-                chosen = ctx._kernel_file(int(key))
-                need = (info["lds_bytes"] if chosen == info["file"]
-                        else info["portable"]["lds_bytes"])
+            for n in mf._filter._GPU_SIZES:
+                chosen = ctx._kernel_file(n)
+                need = by_file[chosen]["lds_bytes"]
                 assert need <= ctx.max_shared_memory, (
                     "%s picked %s needing %d KB with %d KB available"
                     % (dev, chosen, need // 1024, ctx.max_shared_memory // 1024))
@@ -333,20 +332,19 @@ def test_the_chosen_kernel_fits_the_invocation_limit():
     a pipeline on the user's machine.
     """
     V = _vulkan_or_skip()
-    import json, pathlib
-    man = json.loads((pathlib.Path(V.__file__).parent / "spirv"
-                      / "manifest.json").read_text())
+    from matchedfilter import _kernels
     for dev in mf.devices():
         if dev.kind != "gpu":
             continue
         ctx = V.Context(dev.index)
         try:
-            for key, info in man["modules"].items():
-                if info["local_size"][0] <= ctx.max_invocations:
-                    ctx._kernel_file(int(key))          # must not raise
+            for n in mf._filter._GPU_SIZES:
+                rec = _kernels.record("vulkan", "tierb_%d" % n)
+                if rec["local_size"][0] <= ctx.max_invocations:
+                    ctx._kernel_file(n)          # must not raise
                 else:
-                    with pytest.raises(V.VulkanError, match="thread workgroup"):
-                        ctx._kernel_file(int(key))
+                    with pytest.raises(V.UnsupportedSize, match="thread workgroup"):
+                        ctx._kernel_file(n)
         finally:
             ctx.destroy()
 

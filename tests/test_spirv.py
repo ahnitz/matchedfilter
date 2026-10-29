@@ -29,13 +29,26 @@ def _tools_dir():
     here = pathlib.Path(__file__).resolve().parent
     for base in (here.parent, here.parent.parent):
         cand = base / "tools"
-        if (cand / "build_spirv.py").is_file():
+        if (cand / "kernel_variants.py").is_file():
             return cand
     return None
 
 
+def _generator():
+    """tools/kernel_variants.py of the checkout beside the tests (skips for an installed
+    package)."""
+    import sys
+    tools = _tools_dir()
+    if tools is None:
+        pytest.skip("tools/ is not beside the tests (installed package?)")
+    sys.path.insert(0, str(tools))
+    import kernel_variants
+    return kernel_variants
+
+
 SPIRV_DIR = pathlib.Path(matchedfilter.__file__).resolve().parent / "spirv"
 MANIFEST = SPIRV_DIR / "manifest.json"
+
 
 def test_the_kernels_are_present_in_the_installed_package():
     """The GPU blobs must travel with the package, and this must FAIL loudly.
@@ -46,15 +59,15 @@ def test_the_kernels_are_present_in_the_installed_package():
     succeeded, the install succeeded, and only device="gpu" would have found
     out -- on the user's machine.
     """
+    import hashlib
     assert MANIFEST.is_file(), (
-        "%s is missing. Run tools/build_spirv.py, and if this is an installed "
+        "%s is missing. Run tools/kernel_variants.py build, and if this is an installed "
         "package check [tool.setuptools.package-data] in pyproject.toml."
         % MANIFEST)
-    import json
-    for info in json.loads(MANIFEST.read_text())["modules"].values():
-        blob = SPIRV_DIR / info["file"]
+    for rec in json.loads(MANIFEST.read_text())["kernels"].values():
+        blob = SPIRV_DIR / rec["file"]
         assert blob.is_file(), "%s missing from the package" % blob
-        assert blob.stat().st_size == info["bytes"]
+        assert hashlib.sha256(blob.read_bytes()).hexdigest() == rec["sha256"]
 
 
 @pytest.fixture(scope="module")
@@ -62,58 +75,51 @@ def manifest():
     return json.loads(MANIFEST.read_text())
 
 
+def _flat(kernels, n):
+    """The flat kernel's record at n: its own build, or its 32 KB one."""
+    return kernels.get("tierb_%d" % n) or kernels["tierb_%d_lds32" % n]
+
+
 def test_every_tier_b_size_is_present(manifest):
-    import sys
-    tools = _tools_dir()
-    if tools is None:
-        pytest.skip("tools/ is not beside the tests (installed package?)")
-    sys.path.insert(0, str(tools))
-    from build_spirv import TIER_B
-    assert sorted(int(k) for k in manifest["modules"]) == sorted(TIER_B)
+    kv = _generator()
+    built = {rec["n"] for stem, rec in manifest["kernels"].items()
+             if stem in ("tierb_%d" % rec["n"], "tierb_%d_lds32" % rec["n"])}
+    assert sorted(built) == sorted(kv.TIER_B)
 
 
 def test_full_output_artifacts_cover_the_public_sizes(manifest):
     from conftest import kernel_dir
-    metal_dir = kernel_dir('metal')
+    from matchedfilter import _kernels
+    metal = json.loads((kernel_dir('metal') / "manifest.json").read_text())["kernels"]
     for n in sorted(matchedfilter.CorrelationFilter._gpu_sizes):
         if n <= 65536:
-            info = manifest['modules'][str(n)]
-            assert (SPIRV_DIR / info['full']['file']).is_file()
-            assert (SPIRV_DIR / info['full_series']['file']).is_file()
-            files = info['metal']['fullCorrelation']
-            assert (metal_dir / files['msl']).is_file()
-            series_files = info['metal']['fullCorrelationSeries']
-            assert (metal_dir / series_files['msl']).is_file()
-            if info['metal_lds_bytes'] > 32768:
-                assert (metal_dir / files['portable']['msl']).is_file()
-                assert (metal_dir / series_files['portable']['msl']).is_file()
+            for kernels in (manifest["kernels"], metal):
+                for role in ("full", "full_series"):
+                    stem = "%s_%d" % (role, n)
+                    assert stem in kernels or stem + "_lds32" in kernels, stem
+                    for name in (stem, stem + "_lds32"):
+                        assert name not in kernels or kernels[name]["lds_bytes"] <= 65536
+                    assert (stem in kernels and kernels[stem]["lds_bytes"] <= 32768
+                            or stem + "_lds32" in kernels), (
+                        "%s has no build Apple's 32 KB holds" % stem)
         else:
-            info = manifest['full_tierc'][str(n)]
-            assert info['n1'] * info['n2'] == n
+            n1, n2 = _kernels.two_stage("vulkan", n)
+            assert n1 * n2 == n
             for role in ('corr1', 'corr2', 'corr_series2', 'fwd1', 'fwd2'):
-                assert (SPIRV_DIR / info[role]['file']).is_file()
-                assert (metal_dir / info[role]['metal']).is_file()
+                assert "tc_%s_%d" % (role, n) in manifest["kernels"]
+                assert "tc_%s_%d" % (role, n) in metal
 
 
 def test_continuous_output_gpu_binding_contract(manifest):
-    import sys
-    tools = _tools_dir()
-    if tools is None:
-        pytest.skip('tools/ is not beside the tests')
-    sys.path.insert(0, str(tools))
-    from build_spirv import reflect
-    for filename, bindings in (
-        (manifest['modules']['4096']['full_series']['file'], 4),
-        (manifest['full_tierc']['131072']['corr_series2']['file'], 3),
-    ):
-        info = reflect((SPIRV_DIR / filename).read_bytes())
-        assert [d['binding'] for d in info['descriptors']] == list(range(bindings))
-        assert info['push_constant'] is True
+    for stem, bindings in (("full_series_4096", 4), ("tc_corr_series2_131072", 3)):
+        rec = manifest["kernels"][stem]
+        assert [d['binding'] for d in rec['descriptors']] == list(range(bindings))
+        assert rec['push_bytes'] > 0
 
 
 @pytest.mark.parametrize("n", [1024, 2048, 4096, 8192, 16384])
 def test_blob_is_valid_spirv(manifest, n):
-    blob = (SPIRV_DIR / manifest["modules"][str(n)]["file"]).read_bytes()
+    blob = (SPIRV_DIR / _flat(manifest["kernels"], n)["file"]).read_bytes()
     assert len(blob) % 4 == 0, "SPIR-V is a word stream"
     assert struct.unpack("<I", blob[:4])[0] == 0x07230203
 
@@ -125,7 +131,7 @@ def test_workgroup_is_one_sixteenth_of_the_transform(manifest, n):
     Each thread owns one of the 16 rows' worth of work, so a mismatch here
     means the host would dispatch a grid that does not cover the transform.
     """
-    assert manifest["modules"][str(n)]["local_size"][0] == n // 16
+    assert _flat(manifest["kernels"], n)["local_size"][0] == n // 16
 
 
 @pytest.mark.parametrize("n", [1024, 4096, 16384])
@@ -136,94 +142,76 @@ def test_host_binding_contract(manifest, n):
     further descriptors. A host written from the Slang source would bind
     buffers the module never reads, so this is pinned where it can be seen.
     """
-    info = manifest["modules"][str(n)]
+    rec = _flat(manifest["kernels"], n)
     # data, tmpl, peakIdx, peakVal, then the row-window table (gRowWin: each row's window and
     # bin phase, read when specialization constant 76 is set; a dummy is bound otherwise).
-    assert [(d["set"], d["binding"]) for d in info["descriptors"]] == [
+    assert [(d["set"], d["binding"]) for d in rec["descriptors"]] == [
         (0, 0), (0, 1), (0, 2), (0, 3), (0, 4)]
-    assert all(d["kind"] == "StorageBuffer" for d in info["descriptors"])
-    assert info["push_constant"] is True
+    assert all(d["kind"] == "StorageBuffer" for d in rec["descriptors"])
+    assert rec["push_bytes"] == 28
 
 
 def test_blobs_match_the_current_kernel_source(manifest, tmp_path):
     """Recompile and compare, so edited source cannot ship as an old blob."""
-    import sys
-    tools = _tools_dir()
-    if tools is None:
-        pytest.skip("tools/ is not beside the tests (installed package?)")
-    sys.path.insert(0, str(tools))
-    import build_spirv
-
-    slangc = build_spirv.find_slangc()
+    kv = _generator()
+    slangc = kv.find_slangc()
     if slangc is None:
         pytest.skip("slangc not installed (build-time dependency only)")
+    kv.check_slangc_version(slangc)
+    flat = {"tierb_%d" % n for n in kv.TIER_B}
+    for v in kv.variants("vulkan"):
+        if v.stem not in flat:
+            continue
+        fresh = kv.compile_variant(slangc, v, tmp_path).read_bytes()
+        assert fresh == (SPIRV_DIR / v.file).read_bytes(), (
+            "%s is stale: src/gpu has changed since it was built. "
+            "Re-run tools/kernel_variants.py build." % v.file)
 
-    for n_str, info in manifest["modules"].items():
-        fresh = build_spirv.compile_one(slangc, int(n_str), tmp_path).read_bytes()
-        shipped = (SPIRV_DIR / info["file"]).read_bytes()
-        assert fresh == shipped, (
-            "%s is stale: src/gpu/%s has changed since it was built. "
-            "Re-run tools/build_spirv.py." % (info["file"], manifest["kernel"]))
+
+#: The kernels a host picks by the device's workgroup memory (_kernels.runnable): each needs
+#: a 32 KB build where its own asks for more. The coarse layouts are a measured choice among
+#: the builds a device holds instead.
+_RUNNABLE = ("tierb_", "refine_", "items_", "full_")
 
 
-def test_every_kernel_has_a_portable_variant_when_it_needs_one(manifest):
+@pytest.mark.parametrize("backend", ["vulkan", "metal"])
+def test_every_kernel_has_a_portable_variant_when_it_needs_one(backend):
     """Anything over 32 KB of workgroup memory must have a fallback.
 
     Apple allows a threadgroup 32 KB and several kernels are built at 64 KB
     because that is fastest on the development device. Without a smaller
-    build those sizes cannot create a pipeline at all there.
+    build those sizes cannot create a pipeline at all there. Metal is built
+    against its own staging cap (Apple and the Radeon want opposite answers),
+    so its manifest is checked on its own.
     """
-    for key, info in manifest["modules"].items():
-        if info.get("lds_bytes", 0) > 32768:
-            assert "portable" in info, (
-                "n=%s asks for %d KB and has no portable variant"
-                % (key, info["lds_bytes"] // 1024))
-            assert info["portable"]["lds_bytes"] <= 32768
-            assert (SPIRV_DIR / info["portable"]["file"]).is_file()
+    from conftest import kernel_dir
+    folder = SPIRV_DIR if backend == "vulkan" else kernel_dir("metal")
+    kernels = json.loads((folder / "manifest.json").read_text())["kernels"]
+    for stem, rec in kernels.items():
+        if not stem.startswith(_RUNNABLE) or "_c16" in stem or stem.endswith("_lds32"):
+            continue
+        if rec["lds_bytes"] > 32768:
+            small = kernels.get(stem + "_lds32")
+            assert small is not None, (
+                "%s %s asks for %d KB and has no portable variant"
+                % (backend, stem, rec["lds_bytes"] // 1024))
+            assert small["lds_bytes"] <= 32768
 
 
 def test_declared_shared_memory_matches_the_kernels_own_arithmetic(manifest):
-    """The manifest must not claim a size the shader does not ask for."""
-    import sys
-    tools = _tools_dir()
-    if tools is None:
-        pytest.skip("tools/ is not beside the tests (installed package?)")
-    sys.path.insert(0, str(tools))
-    from build_spirv import lds_bytes, LDS_CAP
-    for key, info in manifest["modules"].items():
-        n = int(key)
-        assert info["lds_bytes"] == lds_bytes(n, LDS_CAP[n])
-
-
-def test_the_metal_column_is_recorded_and_fits_apple(manifest):
-    """Metal is built against its own staging cap, so it must say so.
-
-    The two backends want opposite answers -- CH=16 is a 2.01x win at n=4096
-    on an M2 and a 31% loss on a Radeon 8060S -- so the Metal build no longer
-    shares LDS_CAP. If metal_lds_bytes went missing, _stem would fall back to
-    the Vulkan figure and compare this device's limit against a number no
-    Metal kernel was built with: at n=4096 that reads 16 KB where the kernel
-    actually asks for 32, which is under Apple's limit by luck rather than by
-    check. The direction that bites is a size whose Metal cap is larger than
-    its Vulkan one and over 32 KB -- silently no portable variant, and no Mac
-    can create the pipeline.
-    """
-    import sys
-    tools = _tools_dir()
-    if tools is None:
-        pytest.skip("tools/ is not beside the tests (installed package?)")
-    sys.path.insert(0, str(tools))
-    from build_spirv import lds_bytes, metal_cap
-    for key, info in manifest["modules"].items():
-        n = int(key)
-        assert "metal_lds_bytes" in info, "n=%s has no Metal column" % key
-        assert info["metal_lds_bytes"] == lds_bytes(n, metal_cap(n))
-        if info["metal_lds_bytes"] > 32768:
-            for entry, files in info["metal"].items():
-                assert "portable" in files, (
-                    "n=%s %s asks Apple for %d KB with no portable build"
-                    % (key, entry, info["metal_lds_bytes"] // 1024))
-                assert files["portable"]["lds_bytes"] <= 32768
+    """The manifest must not claim a size the shader does not ask for: every tierb.slang build's
+    workgroup memory, read from its artifact on each backend, is the staging its defines give
+    (kernel_variants.staging_bytes)."""
+    from conftest import kernel_dir
+    kv = _generator()
+    for backend, folder in (("vulkan", SPIRV_DIR), ("metal", kernel_dir("metal"))):
+        kernels = json.loads((folder / "manifest.json").read_text())["kernels"]
+        checked = 0
+        for v in kv.variants(backend):
+            if v.stem.startswith("tierb_") and "cap" in v.facts:
+                assert kernels[v.stem]["lds_bytes"] == kv._staging(v), (backend, v.stem)
+                checked += 1
+        assert checked > 50, backend
 
 
 def test_base_coarse_kernels_are_untiled():
@@ -240,25 +228,21 @@ def test_base_coarse_kernels_are_untiled():
     Traced at band 512, nt=2: 4 groups at p0 = 0, 4, 8, 12 with only pairs
     0 and 1 reachable, so half the injections vanished.
 
-    Every tile in build_spirv.COARSE_TILES must exist alongside it at every band, and
+    Every tile in kernel_variants.COARSE_TILES must exist alongside it at every band, and
     each must be a DIFFERENT kernel -- if they compile identical the tile is not reaching
     the source.
     """
-    import matchedfilter as mf
-    spv = pathlib.Path(mf.__file__).parent / "spirv"
+    spv = SPIRV_DIR
     if not any(spv.glob("tierb_*_c16.spv")):
         pytest.skip("no coarse kernels in this build")
-
-    import sys
-    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "tools"))
-    from build_spirv import COARSE_TILES
+    kv = _generator()
     checked = 0
     for band in (64, 128, 256, 512, 1024):
         base = spv / ("tierb_%d_c16.spv" % band)
         if not base.exists():
             continue
         blobs = {base.read_bytes()}
-        for tile in COARSE_TILES:
+        for tile in kv.COARSE_TILES:
             tiled = spv / ("tierb_%d_c16t%d.spv" % (band, tile))
             assert tiled.exists(), (
                 "band %d has no %s: the host could not offer tile %d" % (band, tiled.name, tile))
@@ -273,17 +257,12 @@ def test_base_coarse_kernels_are_untiled():
 
 def test_no_shipped_module_asks_for_more_than_1024_invocations():
     """Every shipped module's workgroup is at most 1024 invocations, where the build stops
-    (tools/build_spirv.py: RADIX, and the coarse packings skip (n/16) * ppg > 1024). A module
-    past it is a blob an older build left behind: tierb_8192_c16p4 and tierb_16384_c16p2/p4
-    (2048-4096 invocations, built 2026-10-03 without the row-window binding the host now
-    binds) shipped until 2026-10-29."""
-    import sys
-    tools = _tools_dir()
-    if tools is None:
-        pytest.skip("tools/ is not beside the tests (installed package?)")
-    sys.path.insert(0, str(tools))
-    from build_spirv import reflect
-    sizes = {p.name: reflect(p.read_bytes())["local_size"] for p in sorted(SPIRV_DIR.glob("*.spv"))}
+    (tools/kernel_variants.py: RADIX, and the coarse packings skip (n/16) * ppg > 1024). A
+    module past it is a blob an older build left behind: tierb_8192_c16p4 and
+    tierb_16384_c16p2/p4 (2048-4096 invocations, built 2026-10-03 without the row-window
+    binding the host now binds) shipped until 2026-10-29."""
+    kv = _generator()
+    sizes = {p.name: kv.reflect(p.read_bytes())["local_size"] for p in sorted(SPIRV_DIR.glob("*.spv"))}
     assert sizes and None not in sizes.values()
     over = {name: s for name, s in sizes.items() if s[0] * s[1] * s[2] > 1024}
     assert not over, "modules no build makes: %s" % over

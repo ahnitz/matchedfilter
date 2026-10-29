@@ -51,32 +51,32 @@ def test_every_selectable_metal_kernel_fits_32k_of_threadgroup_memory(n):
         entries += ["fullCorrelation", "fullCorrelationSeries"]
     if (_mtlcompute._METAL_DIR / ("tierb_%d_c16.metal" % n)).is_file():
         entries.append("coarse16")
-    info = _mtlcompute._manifest()["modules"][str(n)]
+    from matchedfilter import _kernels
     for entry in entries:
         stem = c._stem(n, entry)
         src = (_mtlcompute._METAL_DIR / (stem + ".metal")).read_text()
         assert _threadgroup_bytes(src) <= 32768, (stem, _threadgroup_bytes(src))
-    for entry, one in ((e, info.get("metal", {}).get(e, {}).get("one_bin")) for e in
-                       ("fusedTierB", "refineListed")):
+    for role in ("tierb", "refine"):
+        one = _kernels.record("metal", "%s_%d_onebin" % (role, n))
         if one:
-            src = (_mtlcompute._METAL_DIR / one["msl"]).read_text()
-            assert (_threadgroup_bytes(src) <= 32768) == (one["lds_bytes"] <= 32768)
+            src = (_mtlcompute._METAL_DIR / one["file"]).read_text()
             assert _threadgroup_bytes(src) == one["lds_bytes"]
 
 
 def test_every_shipped_metal_library_declares_the_function_its_pipeline_asks_for():
     """pipeline() looks a function up by name (_mtlcompute._function): a build that renames
     an entry point fails only on a Mac, at the first call."""
-    manifest = _mtlcompute._manifest()
+    from matchedfilter import _kernels
     checked = 0
-    for n, info in manifest["modules"].items():
-        for entry, files in (info.get("metal") or {}).items():
-            for f in [files] + [files[k] for k in ("one_bin", "portable") if k in files]:
-                src = (_mtlcompute._METAL_DIR / f["msl"]).read_text()
-                want = _mtlcompute._function(entry)
-                assert re.search(r"\bvoid %s\(" % want, src), (n, entry, f["msl"], want)
-                checked += 1
+    for stem, rec in _kernels.manifest("metal")["kernels"].items():
+        src = (_mtlcompute._METAL_DIR / rec["file"]).read_text()
+        assert re.search(r"\bvoid %s\(" % rec["entry"], src), (stem, rec["entry"])
+        checked += 1
     assert checked > 50
+    # and the function each entry's pipeline asks for is the one its library was built with
+    for entry, stem in (("fusedTierB", "tierb_4096"), ("refineListed", "refine_4096"),
+                        ("coarse16p4", "tierb_256_c16p4"), ("compactPairs", "compact")):
+        assert _mtlcompute._function(entry) == _kernels.record("metal", stem)["entry"], entry
 
 
 def test_every_entry_the_shared_layer_asks_for_has_a_metal_library():
@@ -84,8 +84,9 @@ def test_every_entry_the_shared_layer_asks_for_has_a_metal_library():
     source at every length the build covers: a missing mapping fails only on a Mac."""
     c = _mtlcompute.Context.__new__(_mtlcompute.Context)
     c.max_shared_memory, c.name = 32768, "32 KB device"
-    manifest = _mtlcompute._manifest()
-    for n in map(int, manifest["modules"]):
+    from matchedfilter import _kernels
+    for n in sorted({rec["n"] for stem, rec in _kernels.manifest("metal")["kernels"].items()
+                     if stem.startswith("tierb_") and rec.get("n")}):
         entries = ["fusedTierB", "compactPairs", "compactListed", "refineListed"]
         if (_mtlcompute._METAL_DIR / ("forward_%d.metal" % n)).is_file():
             entries += ["seriesForward", "seriesForwardBands", "seriesForwardListed"]

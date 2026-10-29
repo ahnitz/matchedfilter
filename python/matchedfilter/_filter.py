@@ -21,7 +21,8 @@ from ._results import PEAK_DTYPE, _Deferred, _SparsePeaks
 #: no longer fits the register file and the four-step has to be split across
 #: dispatches -- a different kernel, so 65536 is where this one ends.
 #:
-#: Keep in step with tools/build_spirv.py TIER_B, which is what emits them.
+#: Keep in step with tools/kernel_variants.py TIER_B, which is what emits them
+#: (tests/test_kernels_ship.py checks every backend's manifest keeps it).
 #: The short lengths were built as coarse bands before they were offered as
 #: transform lengths -- the kernel generalises down without change, so they
 #: cost nothing to expose and close the bottom of the CPU's range.

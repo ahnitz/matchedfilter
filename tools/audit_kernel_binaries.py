@@ -42,7 +42,10 @@ def cpu_inventory(library):
 
 
 def gpu_inventory(text, folder):
-    import build_spirv
+    from matchedfilter import _kernels
+
+    def local_size(filename):
+        return _kernels.record("vulkan", filename[:-len(".spv")])["local_size"]
     rows = []
     for part in text.split('AUDIT_KERNEL ')[1:]:
         filename = part.splitlines()[0]
@@ -53,7 +56,7 @@ def gpu_inventory(text, folder):
         blob = (folder / filename).read_bytes()
         ops = Counter(re.findall(r'^\t([a-z][\w.]*)\s', part, re.M))
         rows.append(dict(file=filename, sha256=hashlib.sha256(blob).hexdigest(),
-                         local_size=build_spirv.reflect(blob)['local_size'],
+                         local_size=local_size(filename),
                          stats=stats, opcodes=dict(ops)))
     captured = {row['file'] for row in rows}
     for filename, reason in re.findall(r'^AUDIT_SKIP (\S+) (.+)$', text, re.M):
@@ -61,29 +64,26 @@ def gpu_inventory(text, folder):
             continue
         blob = (folder / filename).read_bytes()
         rows.append(dict(file=filename, sha256=hashlib.sha256(blob).hexdigest(),
-                         local_size=build_spirv.reflect(blob)['local_size'],
+                         local_size=local_size(filename),
                          skipped=reason, stats={}, opcodes={}))
         captured.add(filename)
     return rows
 
 
 def capture_gpu():
-    import build_spirv
+    from matchedfilter import _kernels
     from matchedfilter import _vkcompute as v
     context = v.Context(0)
     try:
-        for path in sorted(v._SPIRV.glob('*.spv')):
-            info = build_spirv.reflect(path.read_bytes())
+        for stem, info in sorted(_kernels.manifest("vulkan")["kernels"].items()):
             if info['local_size'][0] > context.max_invocations:
-                print('AUDIT_SKIP %s exceeds workgroup limit' % path.name,
+                print('AUDIT_SKIP %s exceeds workgroup limit' % info['file'],
                       file=sys.stderr, flush=True)
                 continue
-            push_bytes = (12 if path.stem.startswith('compact') else
-                          16 if path.stem == 'pack_coarse' else
-                          4 if path.stem.startswith('forward_') else 28)
-            print('AUDIT_KERNEL ' + path.name, file=sys.stderr, flush=True)
-            context._build_pipeline(path.name, path.name,
-                                    len(info['descriptors']), push_bytes)
+            print('AUDIT_KERNEL ' + info['file'], file=sys.stderr, flush=True)
+            # bindings and push-constant bytes as the module declares them (the manifest)
+            context._build_pipeline(info['file'], info['file'],
+                                    len(info['descriptors']), info['push_bytes'])
     finally:
         context.destroy()
 

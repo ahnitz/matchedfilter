@@ -73,17 +73,17 @@ def test_single_template_device_unclear_contest_keeps_the_banks_device(monkeypat
 
 def test_gpu_kernel_choices_carry_their_backend_artifacts():
     """CUDA-only kernels and compiled Metal libraries have their own build identity, for
-    each backend this install carries (_kernel_dirs: no PTX on macOS, no Metal elsewhere)."""
-    import json, pathlib
-    from matchedfilter import _kernel_dirs
-    package = pathlib.Path(gc.__file__).parent
-    for backend, files, folder, field in (("vulkan", "spirv", "spirv", "build_id"),
-                                          ("cuda", "ptx", "ptx", "build_id"),
-                                          ("metal", "metal", "spirv", "metal_build_id")):
-        if files not in _kernel_dirs.shipped():
+    each backend this install carries (_kernel_dirs: no PTX on macOS, no Metal elsewhere):
+    the identity of the programs its manifest records, which a change to any one moves."""
+    from matchedfilter import _kernel_dirs, _kernel_id
+    ids = {}
+    for backend, (folder, _, _) in _kernel_id.BACKENDS.items():
+        if folder not in _kernel_dirs.shipped():
             continue
-        manifest = json.loads((package / folder / "manifest.json").read_text())
-        assert gc.gpu_kernel_id(backend) == manifest[field][:16]
+        ids[backend] = gc.gpu_kernel_id(backend)
+        assert ids[backend] == _kernel_id._digest(backend, _kernel_id._ids(backend))
+        assert len(_kernel_id._ids(backend)) > 100
+    assert len(set(ids.values())) == len(ids)
 
 
 def test_a_burst_during_one_stage_does_not_order_the_shortlist():

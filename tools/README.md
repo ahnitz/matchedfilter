@@ -8,7 +8,7 @@ some calibration tools need separately captured data.
 
 | Purpose | Maintained entry points | Where they run |
 |---|---|---|
-| Shipped kernels | `build_spirv.py`, `build_forward.py`, `metal_probe.py` | CI checks generated SPIR-V/Metal sources and probes Metal binaries |
+| Shipped kernels | `kernel_variants.py`, `metal_probe.py` | CI checks every shipped kernel and manifest against the generator and probes Metal binaries |
 | Website and figure | `build_report.py`, `teaser_figure.py`, `teaser_fleet.py` | Benchmark workflow builds the site; figure is regenerated deliberately |
 | Public performance | `python -m matchedfilter.benchmark`, `bench_series_workloads.py`, `bench_device_paths.py` | Spectral and series benchmarks; `bench_series_workloads.py --quick` runs in benchmark CI |
 | Targeted diagnosis | `audit_class_execution.py`, `bench_class_changes.py`, `bench_pairbatch.py`, `bench_stages.py`, `audit_kernel_binaries.py` | Run when investigating a specific scheduling or kernel cost |
@@ -136,9 +136,10 @@ Each program here, by what it is for; its docstring has the detail. `tests/test_
 checks that this list names every tool, and `tests/test_repository_tools.py` that each one
 imports and resolves its names.
 
-**Builds and shipped artifacts**: `build_spirv.py`, `build_ptx.py`, `build_forward.py`
-(GPU kernels); `precompile_metal.sh` (Metal libraries); `kernel_build_id.py` (artifact
-identities); `coarse_layout.py` (the fp16 coarse kernel's build-time layout);
+**Builds and shipped artifacts**: `kernel_variants.py` (every GPU kernel variant of every
+backend, its build and its manifest; `build_spirv.py` and `build_ptx.py` run it for Vulkan and
+Metal, and for CUDA); `precompile_metal.sh` (Metal libraries); `kernel_build_id.py` (restamps
+the kernel identities after an external compile); `coarse_layout.py` (the fp16 coarse kernel's build-time layout);
 `gen_environment_doc.py` (docs/environment.md); `check_wheels.py` (release wheels);
 `make_bank_subset.py` (the test bank slice).
 

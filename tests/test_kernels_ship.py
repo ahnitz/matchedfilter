@@ -1,7 +1,7 @@
 """Every kernel the library can ask for is present in the install.
 
-A missing kernel is not a build error. build_spirv.py writes what it is
-told to write, the package-data globs copy whatever matches, and nothing
+A missing kernel is not a build error. tools/kernel_variants.py writes what
+it is told to write, the package-data globs copy whatever matches, and nothing
 compares the two -- so a kernel that stopped being generated, or a new
 variant that no glob matched, ships as a wheel that works on the developer's
 machine and fails on a device that selects the missing one.
@@ -24,95 +24,94 @@ import matchedfilter as mf
 from matchedfilter import _kernel_dirs
 
 
-def _dirs():
-    root = pathlib.Path(mf.__file__).resolve().parent
-    return root / "spirv", root / "metal"
+#: The kernel directory each backend's manifest is in.
+_FOLDER = {"vulkan": "spirv", "metal": "metal", "cuda": "ptx"}
 
 
-def _manifest():
-    spirv, _ = _dirs()
-    p = spirv / "manifest.json"
+def _shipped_backends():
+    """The backends whose kernels this install carries."""
+    return [b for b, d in _FOLDER.items() if d in _kernel_dirs.shipped()]
+
+
+def _manifest(backend="vulkan"):
+    p = pathlib.Path(mf.__file__).resolve().parent / _FOLDER[backend] / "manifest.json"
     if not p.is_file():
-        pytest.skip("no SPIR-V manifest in this install")
+        pytest.skip("no %s manifest in this install" % backend)
     return json.loads(p.read_text())
 
 
-def test_every_supported_length_has_a_kernel():
-    """_GPU_SIZES is the promise; the manifest has to keep it."""
-    man = _manifest()
+@pytest.mark.parametrize("backend", sorted(_FOLDER))
+def test_every_supported_length_has_a_kernel(backend):
+    """_GPU_SIZES is the promise; every backend's manifest has to keep it, with the filter
+    and the listed refine (or their 32 KB builds) at each length."""
+    if backend not in _shipped_backends():
+        pytest.skip("%s does not ship on this platform" % backend)
+    kernels = _manifest(backend)["kernels"]
     for n in sorted(mf._filter._GPU_SIZES):
-        assert str(n) in man["modules"], (
-            "device='gpu' accepts n=%d but no kernel was built for it" % n)
+        for role in ("tierb", "refine"):
+            stem = "%s_%d" % (role, n)
+            assert stem in kernels or stem + "_lds32" in kernels, (
+                "device='gpu' accepts n=%d but no %s kernel was built for it on %s"
+                % (n, role, backend))
 
 
-def test_every_file_the_manifest_names_exists():
-    """Including the portable variants, which is where the gap was."""
-    spirv, metal = _dirs()
-    man = _manifest()
-    missing = []
-    for n, info in sorted(man["modules"].items(), key=lambda kv: int(kv[0])):
-        refine = info.get("refine") or {}
-        for f, why in ((info.get("file"), "flat"),
-                       ((info.get("portable") or {}).get("file"), "flat 32 KB"),
-                       (refine.get("file"), "refine"),
-                       ((refine.get("portable") or {}).get("file"), "refine 32 KB")):
-            if f and not (spirv / f).is_file():
-                missing.append("n=%s %s: %s" % (n, why, f))
-        if "metal" not in _kernel_dirs.shipped():
-            continue                      # an install off macOS carries no Metal
-        for entry, m in (info.get("metal") or {}).items():
-            for f, why in ((m.get("msl"), entry),
-                           ((m.get("portable") or {}).get("msl"),
-                            entry + " 32 KB")):
-                if f and not (metal / f).is_file():
-                    missing.append("n=%s metal %s: %s" % (n, why, f))
-    assert not missing, "the manifest names kernels that did not ship:\n  " \
-        + "\n  ".join(missing)
+@pytest.mark.parametrize("backend", sorted(_FOLDER))
+def test_every_file_the_manifest_names_exists(backend):
+    """Including the 32 KB builds, which is where the gap was."""
+    if backend not in _shipped_backends():
+        pytest.skip("%s does not ship on this platform" % backend)
+    folder = pathlib.Path(mf.__file__).resolve().parent / _FOLDER[backend]
+    missing = ["%s: %s" % (stem, rec["file"]) for stem, rec in
+               sorted(_manifest(backend)["kernels"].items()) if not (folder / rec["file"]).is_file()]
+    assert not missing, "the manifest names kernels that did not ship:\n  " + "\n  ".join(missing)
 
 
-def test_both_entry_points_have_the_same_variants():
+@pytest.mark.parametrize("backend", sorted(_FOLDER))
+def test_both_entry_points_have_the_same_variants(backend):
     """The flat and refine kernels run on the same devices, so they need the
     same fallbacks. Having one without the other is the bug this catches."""
-    man = _manifest()
-    for n, info in sorted(man["modules"].items(), key=lambda kv: int(kv[0])):
-        flat_small = bool((info.get("portable") or {}).get("file"))
-        refine_small = bool(((info.get("refine") or {}).get("portable") or {})
-                           .get("file"))
+    if backend not in _shipped_backends():
+        pytest.skip("%s does not ship on this platform" % backend)
+    kernels = _manifest(backend)["kernels"]
+    for n in sorted(mf._filter._GPU_SIZES):
+        flat_small = "tierb_%d_lds32" % n in kernels
+        refine_small = "refine_%d_lds32" % n in kernels
         assert flat_small == refine_small, (
-            "n=%s ships a 32 KB variant for %s only -- a device that needs "
+            "n=%s ships a 32 KB variant for %s only on %s -- a device that needs "
             "one needs both, and will run the flat path and fail to build a "
             "hierarchical pipeline"
-            % (n, "the flat kernel" if flat_small else "the refine kernel"))
+            % (n, "the flat kernel" if flat_small else "the refine kernel", backend))
 
 
-def test_forward_and_packing_kernels_ship():
-    spirv, metal = _dirs()
-    manifest = _manifest()
-    with_metal = "metal" in _kernel_dirs.shipped()
+@pytest.mark.parametrize("backend", sorted(_FOLDER))
+def test_forward_and_packing_kernels_ship(backend):
+    if backend not in _shipped_backends():
+        pytest.skip("%s does not ship on this platform" % backend)
+    kernels = _manifest(backend)["kernels"]
     for n in mf._filter._GPU_SIZES:
-        entry = manifest['forward'][str(n)]
-        assert (spirv / entry['file']).is_file()
-        assert not with_metal or (metal / entry['metal']).is_file()
-        assert entry['local_size'] == manifest['modules'][str(n)]['local_size']
-    for kernel in ('pack_coarse', 'compact_peaks'):
-        entry = manifest[kernel]
-        assert (spirv / entry['file']).is_file()
-        assert not with_metal or (metal / entry['metal']).is_file()
+        forward = kernels["forward_%d" % n]
+        flat = kernels.get("tierb_%d" % n) or kernels["tierb_%d_lds32" % n]
+        assert forward["local_size"] == flat["local_size"]
+    for kernel in ("pack_coarse", "compact_peaks"):
+        assert kernel in kernels
 
 
-def test_production_shader_sources_match_built_manifest():
+@pytest.mark.parametrize("backend", sorted(_FOLDER))
+def test_production_shader_sources_match_built_manifest(backend):
     import hashlib
     source = pathlib.Path(__file__).resolve().parents[1] / 'src/gpu'
     if not source.is_dir():
         pytest.skip('source tree not available in this installation')
-    recorded = _manifest()['source_hashes']
+    if backend not in _shipped_backends():
+        pytest.skip("%s does not ship on this platform" % backend)
+    recorded = _manifest(backend)['source_hashes']
     assert set(recorded) == {'tierb.slang', 'fft_transform.slang',
                              'series_forward.slang', 'series_bands.slang', 'forward_tier0.slang',
                              'pack_coarse.slang',
                              'twiddle.slang', 'refine_bounded.slang', 'compact_peaks.slang'}
     for name, digest in recorded.items():
         assert hashlib.sha256((source / name).read_bytes()).hexdigest() == digest, (
-            '%s changed: rebuild all kernels with tools/build_spirv.py' % name)
+            '%s changed: rebuild the kernels with tools/kernel_variants.py build' % name)
 
 
 def test_shipped_kernels_carry_no_build_paths_or_stray_files():

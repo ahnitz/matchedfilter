@@ -104,7 +104,7 @@ Older notes in docs/ that mention a removed variable describe past studies.
 
 | Variable | Default | Effect |
 |---|---|---|
-| `MF_SLANGC` | `slangc` on PATH | The Slang compiler tools/build_spirv.py and build_ptx.py use. |
+| `MF_SLANGC` | `slangc` on PATH | The Slang compiler tools/kernel_variants.py uses. |
 | `MF_SLANGC_ANY_VERSION=1` | 0 | Build with a slangc other than the pinned version (experiments only). |
 | `MF_NVRTC` | `libnvrtc.so.12` | NVRTC library for the PTX build. |
 | `MF_CUDA_PATH` | found | CUDA installation for the PTX build. |

@@ -25,7 +25,9 @@ def test_onebin_artifacts_and_selection(n, shared):
 
 
 def test_compaction_has_one_canonical_artifact():
-    files = {info['compact']['file'] for info in V._manifest()['modules'].values()}
+    from matchedfilter import _kernels
+    files = {rec['file'] for rec in _kernels.manifest('vulkan')['kernels'].values()
+             if rec['entry'] == 'compactPairs'}
     assert files == {'compact.spv'}
     assert (V._SPIRV / 'compact.spv').is_file()
     assert not list(V._SPIRV.glob('compact_[0-9]*.spv'))     # compact_peaks is another kernel

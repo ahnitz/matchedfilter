@@ -29,28 +29,29 @@ def manifest():
     return json.loads(MANIFEST.read_text())
 
 
-def _flat(info):
+def _flat(manifest, n):
     """The module serving a length's flat filter: its own build, or the 32 KB staging build where
-    its own would need more static shared memory than CUDA allows (tools/build_ptx.py)."""
-    return info.get("file") or info["portable"]["file"]
+    its own would need more static shared memory than CUDA allows (tools/kernel_variants.py)."""
+    kernels = manifest["kernels"]
+    return (kernels.get("tierb_%d" % n) or kernels["tierb_%d_lds32" % n])["file"]
 
 
 @pytest.fixture
 def build_ptx(monkeypatch):
-    """tools/build_ptx.py of the checkout beside the tests (skips for an installed package)."""
+    """tools/kernel_variants.py of the checkout beside the tests (skips for an installed
+    package)."""
     import importlib
     tools = pathlib.Path(__file__).resolve().parents[1] / "tools"
-    if not (tools / "build_ptx.py").is_file():
+    if not (tools / "kernel_variants.py").is_file():
         pytest.skip("tools/ is not beside the tests (installed package?)")
     monkeypatch.syspath_prepend(str(tools))
-    return importlib.import_module("build_ptx")
+    return importlib.import_module("kernel_variants")
 
 
-def test_every_size_has_ptx(manifest):
+def test_every_size_has_ptx(manifest, build_ptx):
     """Every supported transform size must have PTX blobs shipped."""
-    for key, info in manifest["modules"].items():
-        assert "file" in info or "portable" in info, f"n={key} has no main PTX output"
-        ptx = PTX_DIR / _flat(info)
+    for n in build_ptx.TIER_B:
+        ptx = PTX_DIR / _flat(manifest, n)
         assert ptx.is_file(), f"{ptx} missing"
         assert ptx.stat().st_size > 1000, f"{ptx} looks empty"
 
@@ -59,11 +60,13 @@ def test_no_shipped_module_declares_more_static_shared_memory_than_cuda_allows(m
     """CUDA allows a block 48 KB of static shared memory on every architecture and its JIT
     rejects a module past it, so such a module could launch on no NVIDIA GPU
     (build_ptx.STATIC_SHARED_MAX). The bytes are read from each module's .shared declarations,
-    and the reading is checked against the staging the manifest records for the 32 KB builds,
-    so a parse that found nothing could not pass."""
+    and the reading is checked against the staging the 32 KB builds were made with, so a parse
+    that found nothing could not pass."""
     shared = {p.name: build_ptx.static_shared(p.read_text()) for p in sorted(PTX_DIR.glob("*.ptx"))}
-    portable = [info["portable"] for info in manifest["modules"].values() if "portable" in info]
-    assert portable and all(shared[p["file"]] == p["lds_bytes"] for p in portable)
+    portable = [rec for stem, rec in manifest["kernels"].items()
+                if stem.startswith("tierb_") and stem.endswith("_lds32") and "_c16" not in stem]
+    assert portable and all(shared[r["file"]] == build_ptx.lds_bytes(r["n"], build_ptx.PORTABLE_CAP)
+                            for r in portable)
     over = {name: size for name, size in shared.items() if size > build_ptx.STATIC_SHARED_MAX}
     assert not over, "modules no NVIDIA GPU can launch: %s" % over
 
@@ -78,9 +81,12 @@ def test_every_kernel_the_host_asks_for_is_a_shipped_module(build_ptx, monkeypat
 
     The host resolves against PTX_DIR, the PTX these tests check: a macOS install carries no
     ptx/ of its own, so there the installed host is checked against the checkout's PTX."""
-    from matchedfilter import UnsupportedSize
+    from matchedfilter import UnsupportedSize, _kernels
     from matchedfilter import _cudacompute as C
     monkeypatch.setattr(C, "_PTX_DIR", PTX_DIR)
+    folder = _kernels.folder
+    monkeypatch.setattr(_kernels, "folder", lambda b: PTX_DIR if b == "cuda" else folder(b))
+    _kernels.clear()
     ctx = C.Context.__new__(C.Context)
     ctx._pipelines = {}
     ctx._load = lambda stem, path, fn_name, wg: (stem, path)
@@ -102,13 +108,13 @@ def test_every_kernel_the_host_asks_for_is_a_shipped_module(build_ptx, monkeypat
     assert served[(8192, "fusedTierB", False)] == "tierb_8192_lds32"
     assert served[(65536, "refineListed", True)] == "refine_65536_onebin_lds32"
     assert C.Context._x_has_kernel("items", 16384) and C.Context._x_has_kernel("tier1", 16384)
+    _kernels.clear()
 
 
 @pytest.mark.parametrize("n", [1024, 4096, 16384])
 def test_ptx_targets_sm75_and_64bit_pointers(manifest, n):
     """Verify PTX code declares .target sm_75 and 64-bit device pointers."""
-    info = manifest["modules"][str(n)]
-    text = (PTX_DIR / _flat(info)).read_text()
+    text = (PTX_DIR / _flat(manifest, n)).read_text()
     assert ".target sm_75" in text or ".target sm_" in text
     assert ".address_size 64" in text
     # fusedTierB buffer params must be 8 bytes (.b8 ...[8]), not 16 bytes

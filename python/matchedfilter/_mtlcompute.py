@@ -14,34 +14,16 @@ development machine, so every line here is exercised only by the macOS CI
 job. It is written to fail loudly rather than plausibly.
 """
 import ctypes
-import pathlib
 import sys
 from contextlib import contextmanager
-from functools import lru_cache, wraps
+from functools import wraps
 
 import numpy as np
 from ._shared import empty_shared
 from ._gpuhost import MAX_BINS
+from . import _kernels
 
-_HERE = pathlib.Path(__file__).resolve().parent
-_METAL_DIR = _HERE / "metal"
-_MANIFEST = _HERE / "spirv" / "manifest.json"
-
-_manifest_cache = None
-
-
-def _manifest():
-    """The build manifest, shared with the SPIR-V backend.
-
-    Both backends are generated from the same Slang source. The manifest
-    records the Metal staging cap separately from Vulkan's.
-    """
-    global _manifest_cache
-    if _manifest_cache is None:
-        import json
-        _manifest_cache = (json.loads(_MANIFEST.read_text())
-                           if _MANIFEST.is_file() else {})
-    return _manifest_cache
+_METAL_DIR = _kernels.folder("metal")
 
 #: MTLResourceStorageModeShared: one allocation both CPU and GPU can see.
 #: Apple silicon is unified memory, so this is the natural mode rather than
@@ -61,25 +43,18 @@ from ._gpu_cache import InputUploads
 from ._gpuexec import Arg, Executor, register_fusion, settle as _settle
 
 
-#: Points per thread, which is also how many threads carry a transform:
-#: WG = n / R. Vulkan bakes this into the SPIR-V and the host never needs
-#: it; Metal is dispatched with an explicit threadgroup size, so the host
-#: has to agree with the kernel. Getting it wrong here does not fail to
-#: launch -- it launches the wrong shape.
-#:
-#: Mirrors tools/build_spirv.py RADIX, which is what compiled them.
-_RADIX = {32768: 32, 65536: 64}
-
-
-def _radix(n):
-    return _RADIX.get(n, 16)
-
-
-@lru_cache(maxsize=None)
 def _shipped(stem):
-    """Whether a kernel shipped (source or library). Asked per dispatch, so cached:
-    the stat calls were ~18 per fine-stage call."""
-    return any((_METAL_DIR / (stem + ext)).is_file() for ext in (".metal", ".metallib"))
+    """Whether a kernel shipped (its manifest record, _kernels.record)."""
+    return _kernels.shipped("metal", stem)
+
+
+def _threads(stem):
+    """The threadgroup a kernel was built for (its manifest record's local size; 0 where it
+    did not ship). Metal is dispatched with an explicit threadgroup size, so the host has to
+    agree with the kernel: getting it wrong does not fail to launch, it launches the wrong
+    shape."""
+    rec = _kernels.record("metal", stem)
+    return 0 if rec is None else int(rec["local_size"][0])
 
 
 def _ieee_kernel(stem):
@@ -89,15 +64,7 @@ def _ieee_kernel(stem):
     # on an M2, 2026-10-09, timed with this function returning True for every library)
     # and fail open by an integer test of the fp16 exponent instead (tierb.slang, MF_METAL);
     # the compaction is cheap and compares the possibly-NaN coarse value, so it is IEEE.
-    return stem.startswith("compact_")
-
-
-def _ppg_of(entry):
-    """Pairs per threadgroup an entry name carries: coarse16p8 -> 8, coarse16p8t2w -> 8 (a
-    trailing "w" asks for the twiddle table, _twt_entry)."""
-    if not entry.startswith("coarse16p"):
-        return 1
-    return int(entry[len("coarse16p"):].rstrip("w").split("t")[0])
+    return stem.startswith("compact")
 
 
 def _twt_entry(entry):
@@ -124,7 +91,7 @@ def coarse_ppg(band, pairs, override=None, simd_width=None):
         want = int(want)
         return want if want == 1 or want in shipped else 1
     target = simd_width or TARGET_THREADS
-    wg = band // _radix(band)
+    wg = _threads("tierb_%d_c16" % band)
     for p in sorted(shipped):
         if wg * p >= target:
             return p
@@ -575,7 +542,7 @@ class _MtlList:
 
 def _function(entry):
     """The function an entry's library declares: the coarse builds are fusedTierB's, and the
-    listed refine is refine_bounded.slang's on every target (tools/build_spirv.py)."""
+    listed refine is refine_bounded.slang's on every target (tools/kernel_variants.py)."""
     if entry.startswith("coarse16"):
         return "fusedTierB"
     return "refineListedBounded" if entry == "refineListed" else entry
@@ -665,7 +632,7 @@ class Context(Executor, InputUploads):
         raw = (stem.startswith("tierb_") and "_c16" in stem
                and _config.get("MF_COARSE_RAW"))
         lib_path = _METAL_DIR / (stem + ".metallib")
-        # A shipped .metallib is built with the compiler's defaults (tools/build_spirv.py):
+        # A shipped .metallib is built with the compiler's defaults (tools/precompile_metal.sh):
         # fast math, no macros. A kernel that needs other options -- the raw fp16 maximum
         # (MF_C16_RAW) or IEEE math for the fail-open compaction -- compiles from source, or
         # the library silently runs the default build instead (on the macOS runner the
@@ -768,31 +735,31 @@ class Context(Executor, InputUploads):
                  "tcForwardStage1": "fwd1", "tcForwardStage3": "fwd2"}
         if entry in tierc:
             return "tc_%s_%d" % (tierc[entry], n)
+        if entry in ("compactPairs", "compactListed"):
+            # One compaction each, at every length: they use no threadgroup memory.
+            return "compact" if entry == "compactPairs" else "compactl"
         base = "%s_%d" % ({"fusedTierB": "tierb",
-                           "compactPairs": "compact",
-                           "compactListed": "compactl",
                            "refineListed": "refine",
                            "refineItems": "items",
                            "fullCorrelation": "full",
                            "fullCorrelationSeries": "full_series"}[entry], n)
-        info = _manifest().get("modules", {}).get(str(n), {})
-        # The Metal column. Metal is built against its own staging cap
-        # -- Apple and the Radeon want opposite answers -- so reading
-        # the Vulkan "lds_bytes" here would compare this device's limit
-        # against a number no Metal kernel was built with, and pick the
-        # portable variant at sizes that do not need it.
-        need = info.get("metal_lds_bytes", info.get("lds_bytes", 0))
-        if need <= self.max_shared_memory:
-            return base
-        alt = base + "_lds32"
-        if not any((_METAL_DIR / (alt + ext)).is_file()
-                   for ext in (".metallib", ".metal")):
-            raise UnsupportedSize(
-                "n=%d needs %d KB of threadgroup memory, %s offers %d KB, "
-                "and no portable build was shipped for it"
-                % (n, need // 1024, self.name,
-                   self.max_shared_memory // 1024))
-        return alt
+        return self._runnable(base, n)
+
+    def _runnable(self, stem, n):
+        """The build of `stem` this device's threadgroup memory holds (_kernels.runnable: its
+        own or its 32 KB build), from the Metal manifest: Metal is built against its own
+        staging cap (Apple and the Radeon want opposite answers). A stem that did not ship
+        is returned as it is (the library load then names it)."""
+        rec = _kernels.runnable("metal", stem, self.max_shared_memory)
+        if rec is not None:
+            return rec["file"][:-len(".metal")]
+        need = _kernels.record("metal", stem)
+        if need is None:
+            return stem
+        raise UnsupportedSize(
+            "n=%d needs %d KB of threadgroup memory, %s offers %d KB, "
+            "and no portable build was shipped for it"
+            % (n, need["lds_bytes"] // 1024, self.name, self.max_shared_memory // 1024))
 
     def _pipeline_sized(self, stem, fn, want):
         """Rebuild the pipeline having told the compiler the group size.
@@ -854,12 +821,14 @@ class Context(Executor, InputUploads):
         else:
             entry_name = entry
         fn_name = _function(entry_name)
-        single = (_manifest().get("modules", {}).get(str(n), {}).get("metal", {})
-                  .get(entry_name, {}).get("one_bin")) if (one_bin and not entry_name.startswith("coarse16")) else None
-        if single and gate:
-            single = single.get("gate")
-        if single and single["lds_bytes"] > self.max_shared_memory:
-            single = None
+        single = None
+        if one_bin and not entry_name.startswith("coarse16"):
+            # The one-bin build of the entry's kernel (and its gate-only variant), where it
+            # shipped and this device holds it.
+            one = "%s_%d_onebin%s" % ({"fusedTierB": "tierb", "refineListed": "refine"}
+                                      .get(entry_name, entry_name), n, "_gate" if gate else "")
+            rec = _kernels.runnable("metal", one, self.max_shared_memory)
+            single = None if rec is None else rec["file"][:-len(".metal")]
         key = ((n, entry_name, "gate" if gate else True) if single else (n, entry_name)) + (
             (macros,) if macros else ())
         if entry_name.startswith("coarse16") and _config.get("MF_COARSE_RAW"):
@@ -869,7 +838,7 @@ class Context(Executor, InputUploads):
         if key in self._pipelines:
             return self._pipelines[key]
         base, twt = _twt_entry(entry_name)
-        stem = pathlib.Path(single["msl"]).stem if single else self._stem(n, base)
+        stem = single or self._stem(n, base)
         lib = self._library(stem, twt=twt, macros=macros)
         fn = pso = None
         try:
@@ -878,15 +847,7 @@ class Context(Executor, InputUploads):
                              argtypes=(ctypes.c_void_p,))
             if not fn:
                 raise MetalError("no function %r in %s" % (fn_name, stem))
-            roles = {"tcStage1": "corr1", "tcFullStage3": "corr2",
-                     "tcFullSeriesStage3": "corr_series2",
-                     "tcForwardStage1": "fwd1", "tcForwardStage3": "fwd2"}
-            if entry_name in roles:
-                want = (_manifest()['full_tierc'][str(n)][roles[entry_name]]['local_size'][0])
-            elif entry_name in ("compactPairs", "compactListed", "markBlocks", "compactPeaks"):
-                want = 256
-            else:
-                want = n // _radix(n) * _ppg_of(entry_name)
+            want = _threads(stem)
             err = ctypes.c_void_p()
             pso = self.o.call(self.device,
                               b"newComputePipelineStateWithFunction:error:",
@@ -1117,37 +1078,29 @@ class Context(Executor, InputUploads):
         c = consts or {}
         macros = self._macros(c)
         if name in ("peaks", "peaks1", "gate"):
-            return (self.pipeline(n, "fusedTierB", name == "peaks1", macros=macros),
-                    n // _radix(n))
-        if name == "coarse":
+            pso = self.pipeline(n, "fusedTierB", name == "peaks1", macros=macros)
+        elif name == "coarse":
             from ._coarse import coarse_stem
             entry = ("coarse16" + coarse_stem(n, c["ppg"], c["tile"])[len("tierb_%d_c16" % n):]
                      + ("w" if c.get("twt") else ""))
-            return self.pipeline(n, entry, macros=macros), n // _radix(n) * c["ppg"]
-        if name in ("tier", "tier1", "refine", "refine1"):
-            return (self.pipeline(n, "refineListed", name.endswith("1"), macros=macros,
-                                  gate=bool(c.get("gate"))), n // _radix(n))
-        if name == "compact_peaks":
-            return self.pipeline(0, "compactPeaks"), 256
-        fixed = {"compact": ("compactPairs", 256), "compactl": ("compactListed", 256),
-                 "mark": ("markBlocks", 256), "pack": ("packCoarse", 256)}
-        if name in fixed:
-            entry, tg = fixed[name]
-            return self.pipeline(4096 if name == "pack" else n, entry), tg
-        entries = {"fwd_tier0": "forwardTier0", "fwd_bands": "seriesForwardBands",
-                   "fwd_listed": "seriesForwardListed", "forward": "seriesForward",
-                   "items": "refineItems",
-                   "full": "fullCorrelation", "series": "fullCorrelationSeries"}
-        if name in entries:
-            return self.pipeline(n, entries[name]), n // _radix(n)
-        geometry = _manifest().get('full_tierc', {}).get(str(n))
-        if geometry is None:
-            raise UnsupportedSize('no two-stage full-correlation kernel for n=%d' % n)
-        role, entry = {"tc1": ('corr1', 'tcStage1'), "tc2": ('corr2', 'tcFullStage3'),
-                       "tcs2": ('corr_series2', 'tcFullSeriesStage3'),
-                       "tf1": ('fwd1', 'tcForwardStage1'),
-                       "tf2": ('fwd2', 'tcForwardStage3')}[name]
-        return self.pipeline(n, entry), geometry[role]['local_size'][0]
+            pso = self.pipeline(n, entry, macros=macros)
+        elif name in ("tier", "tier1", "refine", "refine1"):
+            pso = self.pipeline(n, "refineListed", name.endswith("1"), macros=macros,
+                                gate=bool(c.get("gate")))
+        else:
+            if name in ("tc1", "tc2", "tcs2", "tf1", "tf2") and _kernels.two_stage("metal", n) is None:
+                raise UnsupportedSize('no two-stage full-correlation kernel for n=%d' % n)
+            entry = {"compact_peaks": "compactPeaks", "compact": "compactPairs",
+                     "compactl": "compactListed", "mark": "markBlocks", "pack": "packCoarse",
+                     "fwd_tier0": "forwardTier0", "fwd_bands": "seriesForwardBands",
+                     "fwd_listed": "seriesForwardListed", "forward": "seriesForward",
+                     "items": "refineItems", "full": "fullCorrelation",
+                     "series": "fullCorrelationSeries", "tc1": "tcStage1", "tc2": "tcFullStage3",
+                     "tcs2": "tcFullSeriesStage3", "tf1": "tcForwardStage1",
+                     "tf2": "tcForwardStage3"}[name]
+            pso = self.pipeline(n, entry)
+        # The threadgroup each pipeline is dispatched at: its kernel's, as it was built.
+        return pso, _threads(self.pipeline_names[pso][0])
 
     @staticmethod
     def _x_has_c16(band):
@@ -1156,16 +1109,13 @@ class Context(Executor, InputUploads):
     @staticmethod
     def _x_has_kernel(name, n):
         if name == "tier1":
-            info = ((_manifest().get("modules", {}).get(str(n)) or {}).get("metal") or {})
-            return bool((info.get("refineListed") or {}).get("one_bin"))
+            return _shipped("refine_%d_onebin" % n)
         if name == "fwd_tier0":
             return _shipped("forward_tier0_%d" % n)
         if name == "items":
-            info = ((_manifest().get("modules", {}).get(str(n)) or {}).get("metal") or {})
-            return "refineItems" in info
+            return _shipped("items_%d" % n) or _shipped("items_%d_lds32" % n)
         if name == "tier1gate":
-            info = ((_manifest().get("modules", {}).get(str(n)) or {}).get("metal") or {})
-            return bool(((info.get("refineListed") or {}).get("one_bin") or {}).get("gate"))
+            return _shipped("refine_%d_onebin_gate" % n)
         raise ValueError(name)
 
     def _x_coarse_candidates(self, band):
@@ -1175,12 +1125,13 @@ class Context(Executor, InputUploads):
         default without a measurement."""
         from ._coarse import coarse_stem, shipped_tiles
         w = self._simd_width(band)
-        wg = band // _radix(band)
         built = [p for p in (1, 2, 4, 8, 16, 32) if shipped_tiles(band, p, _shipped)]
-        tp = next((p for p in built if wg * p >= w), built[-1]) if built else None
+        tp = next((p for p in built if _threads(coarse_stem(band, p, 1)) >= w),
+                  built[-1]) if built else None
         tiles = shipped_tiles(band, tp, _shipped) if tp else ()
+        # 1024 threads: the most an Apple threadgroup holds.
         untiled = [(0, p, 1, t) for p in (1, 2, 4, 8, 16, 32)
-                   if (p == 1 or _shipped(coarse_stem(band, p, 1))) and wg * p <= 1024
+                   if 0 < _threads(coarse_stem(band, p, 1)) <= 1024
                    for t in (0, 1)]
         tiled = [(0, tp, t, x) for t in tiles for x in (0, 1)]
         first = tiled[:1] or [(0, coarse_ppg(band, 1 << 20, simd_width=w), 1, 0)]
@@ -1203,10 +1154,10 @@ class Context(Executor, InputUploads):
         return min(times) if times else float("inf")
 
     def _x_tierc(self, n):
-        geometry = _manifest().get('full_tierc', {}).get(str(n))
-        if geometry is None:
+        split = _kernels.two_stage("metal", n)
+        if split is None:
             raise UnsupportedSize('no two-stage full-correlation kernel for n=%d' % n)
-        return geometry['n1'], geometry['n2']
+        return split
 
     def _x_alloc(self, nbytes, readback=False, upload=False):
         return _Buffer(self, nbytes)

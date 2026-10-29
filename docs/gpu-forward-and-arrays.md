@@ -86,11 +86,9 @@ The limits are explicit:
   large input/intermediate copies, not the compact result readback.
 
 Rebuild all production artifacts with
-`python tools/build_spirv.py --slangc /path/to/slangc`. This includes forward,
-packing and correlation SPIR-V and Metal sources; `tools/build_forward.py`
-now delegates to the same complete build. The manifest lists forward/packing
-artifacts and fingerprints shared shader dependencies, checked by shipping
-tests. On Apple hosts the build also compiles all Metal sources into metallibs.
+`python tools/kernel_variants.py build --slangc /path/to/slangc`. This includes forward,
+packing and correlation kernels on every backend. Each backend's manifest lists every
+artifact and fingerprints shared shader dependencies, checked by shipping tests. On Apple hosts the build also compiles all Metal sources into metallibs.
 
 ## Validation
 
