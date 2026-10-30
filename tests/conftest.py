@@ -90,14 +90,15 @@ def kernel_dir(name):
 
 @pytest.fixture(autouse=True, scope="session")
 def _metal_sources_off_macos():
-    """Metal's static checks read _mtlcompute._METAL_DIR; off macOS an install carries no
-    Metal, so they read the checkout's (kernel_dir)."""
-    from matchedfilter import _mtlcompute
+    """Metal's static checks read _mtlcompute._METAL_DIR and the Metal manifest
+    (_kernels); off macOS an install carries no Metal, so they read the checkout's."""
+    from matchedfilter import _kernels, _mtlcompute
     if not _mtlcompute._METAL_DIR.is_dir():
         from pathlib import Path
         repo = Path(__file__).resolve().parents[1] / "python" / "matchedfilter" / "metal"
         if repo.is_dir():
             _mtlcompute._METAL_DIR = repo
+            _kernels.set_folder("metal", repo)
     yield
 
 
