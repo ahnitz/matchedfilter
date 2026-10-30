@@ -14,17 +14,15 @@
  * below 1: products are then bounded by 1 and an m-point transform by m <= 2048, inside
  * FP16's range, and the scale is exact to undo.
  *
- * Error and the dismissal budget: the gate must never dismiss a pair the FP32 gate would
- * pass. Rounding error of the transform at any lag is bounded, to the stated confidence,
- * by GATE16_KAPPA x u x rms(y) where rms(y) is the pair's output rms over ALL m lags
- * (Parseval: an out-of-window glitch raises the error everywhere, so the bound must see
- * it) and u = 2^-11. The gate therefore reports, per pair, an UPPER BOUND on the FP32
- * magnitude, |y16|max (1 + 3u) + kappa*u*rms(y) (the first factor is the proven cost of
- * choosing the lag on FP16 powers, see run()), and the hierarchical filter compares that bound
- * with the tier threshold: every pair the FP32 gate passes also passes here, so the false
- * dismissal budget the thresholds were set for is unchanged; the price is a few more
- * refinements. kappa comes from measurement (tools/gate16_error.py), not from a sweep of
- * the tests: see docs/cpu-neon-fp16-gate.md.
+ * The gate's statistic: each pair's FP16 maximum magnitude over the searched window, its
+ * own statistic, which the hierarchical filter compares with the tier threshold, as the
+ * GPU's fp16 tier and the x86 Q15 screen do theirs. It tracks the FP32 maximum to FP16
+ * precision (u = 2^-11 relative to the pair's output rms); what that rounding does to the
+ * search is accepted by the chain's false dismissal against the flat filter
+ * (tools/fdr_audit.py on the ARM runner), not bounded here. It once reported an upper
+ * bound, |y16|max (1 + 3u) + kappa u rms(y) with kappa 16: that passed pairs no plan priced,
+ * and single-tier chains at bands 1024 and 2048 dismissed 0.15-0.22x their plan on Apple
+ * silicon (CI macOS arm64, 2026-10-30). See docs/cpu-neon-fp16-gate.md.
  *
  * Elsewhere (x86, ARM without FP16 vectors) this file compiles to stubs that report the
  * gate unavailable, and the FP32 path runs unchanged.
@@ -40,11 +38,6 @@
 
 #if HWY_HAVE_FLOAT16 && HWY_ARCH_ARM_A64 && !defined(AP_NO_GATE16)
 #define AP_GATE16 1
-#endif
-
-/* Measured bound multiplier on u*rms(y); see the header comment. */
-#ifndef GATE16_KAPPA
-#define GATE16_KAPPA 16.0
 #endif
 
 #ifdef AP_GATE16
@@ -385,8 +378,6 @@ static void pair_group_max_t(Gate *g, int d, const h16 *tre, const h16 *tim, con
 static int run_pairs_max(Gate *g, int d0, int t0, const int *dsel, const int *tsel, int n,
                          int nt_row, size_t ws, size_t we, ap_peak *out) {
   if (we > g->m) we = g->m;
-  const float u = 1.0f / 2048.0f;
-  const float kappa = (float)GATE16_KAPPA;
   const size_t m = g->m;
   live_list(g, ws, we);
   if (!g->gtre) {
@@ -421,10 +412,9 @@ static int run_pairs_max(Gate *g, int d0, int t0, const int *dsel, const int *ts
         o->index = -1; o->re = o->im = o->magnitude = 0.f;
         continue;
       }
-      const float rms = sqrtf(pw[l] / (float)m);
       o->index = 0;
       o->re = o->im = 0.f;
-      o->magnitude = (sqrtf(m2[l]) * (1.f + 2.f * u) * 1.0001f + kappa * u * rms) * sc;
+      o->magnitude = sqrtf(m2[l]) * sc;
     }
     i += k;
   }
@@ -434,11 +424,9 @@ static int run_pairs_max(Gate *g, int d0, int t0, const int *dsel, const int *ts
 static int run_max(Gate *g, int d0, int nd, int t0, int nt, size_t ws, size_t we, ap_peak *out) {
   if (d0 < 0 || d0 + nd > g->nd || t0 < 0 || t0 + nt > g->nt) return -1;
   if (we > g->m) we = g->m;
-  const float u = 1.0f / 2048.0f;
-  /* MF_GATE16_DEBUG_MAX (measurement only, tools/gate16_error.py --scan max): kappa 0, and
-     im carries the pair's all-lag rms, as MF_GATE16_DEBUG does for the electing scan. */
+  /* MF_GATE16_DEBUG_MAX (measurement only, tools/gate16_error.py --scan max): im carries the
+     pair's all-lag rms, as MF_GATE16_DEBUG does for the electing scan. */
   static const int debug = ap_env_flag("MF_GATE16_DEBUG_MAX", 0);
-  const float kappa = debug ? 0.f : (float)GATE16_KAPPA;
   const size_t m = g->m;
   live_list(g, ws, we);
   alignas(16) float m2[AP_W], pw[AP_W];
@@ -456,28 +444,25 @@ static int run_max(Gate *g, int d0, int nd, int t0, int nt, size_t ws, size_t we
           o->index = -1; o->re = o->im = o->magnitude = 0.f;
           continue;
         }
-        const float rms = sqrtf(pw[l] / (float)m);
         o->index = 0;                               /* fires; the lag has no reader */
         o->re = o->im = 0.f;
-        o->magnitude = (sqrtf(m2[l]) * (1.f + 2.f * u) * 1.0001f + kappa * u * rms) * sc;
-        if (debug) o->im = rms * sc;
+        o->magnitude = sqrtf(m2[l]) * sc;           /* the pair's own statistic */
+        if (debug) o->im = sqrtf(pw[l] / (float)m) * sc;
       }
     }
   }
   return 0;
 }
 
-/* Upper bound on the FP32 gate's peak magnitude for each pair (see the header), one bin
-   over [ws, we): out[d*nt + t] for d in [0,nd), t in [t0, t0+nt). index is the FP16
-   argmax (or -1 for an empty window); magnitude is the BOUND; re/im the FP16 value. */
+/* The FP16 gate with its elected lag (tools/gate16_error.py), one bin over [ws, we):
+   out[d*nt + t] for d in [0,nd), t in [t0, t0+nt). index is the FP16 argmax (or -1 for an
+   empty window); magnitude the FP16 maximum, as run_max reports it; re/im the FP16 value. */
 static int run(Gate *g, int d0, int nd, int t0, int nt, size_t ws, size_t we, ap_peak *out) {
   if (d0 < 0 || d0 + nd > g->nd || t0 < 0 || t0 + nt > g->nt) return -1;
   if (we > g->m) we = g->m;
-  const float u = 1.0f / 2048.0f;
-  /* MF_GATE16_DEBUG (measurement only, tools/gate16_error.py): kappa 0, so the magnitude
-     is the FP16 maximum with only its proven lag-selection factor, and im carries the pair's all-lag rms instead of a value. */
+  /* MF_GATE16_DEBUG (measurement only, tools/gate16_error.py): im carries the pair's
+     all-lag rms instead of a value. */
   static const int debug = ap_env_flag("MF_GATE16_DEBUG", 0);
-  const float kappa = debug ? 0.f : (float)GATE16_KAPPA;
   const size_t m = g->m;
   alignas(16) float m2[AP_W], re[AP_W], im[AP_W], pw[AP_W];
   alignas(16) int ix[AP_W];
@@ -496,17 +481,11 @@ static int run(Gate *g, int d0, int nd, int t0, int nt, size_t ws, size_t we, ap
           o->index = -1; o->re = o->im = o->magnitude = 0.f;
           continue;
         }
-        const float rms = sqrtf(pw[l] / (float)m);
         o->index = ix[l];
         o->re = re[l] * sc;
         o->im = -im[l] * sc;                     /* AP_BACKWARD, as the FP32 scan reports */
-        /* (1 + 3u): the lag was chosen on FP16 powers, each within a factor (1 +- u)^2 of
-           the FP16 transform's |y|^2 (one exact power-of-two scale, one product, one FMA),
-           so the true maximum of the FP16 transform is at most |y(chosen)| (1+u)/(1-u)
-           < |y(chosen)| (1 + 3u). A proof, not a fit, and it grows with the peak, which
-           the rms term does not; kappa then covers the transform's own error only. */
-        o->magnitude = (sqrtf(m2[l]) * (1.f + 3.f * u) + kappa * u * rms) * sc;
-        if (debug) o->im = rms * sc;
+        o->magnitude = sqrtf(m2[l]) * sc;
+        if (debug) o->im = sqrtf(pw[l] / (float)m) * sc;
       }
     }
   }
@@ -526,7 +505,6 @@ int ap_gate16_available(void) {
 #endif
 }
 
-double ap_gate16_kappa_u(void) { return GATE16_KAPPA / 2048.0; }
 
 void *ap_gate16_create(size_t m, int nd, int nt) {
 #ifdef AP_GATE16

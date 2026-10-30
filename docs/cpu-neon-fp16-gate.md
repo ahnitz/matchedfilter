@@ -34,28 +34,29 @@ a gate only has to decide "maybe": every survivor is still refined exactly, in F
     chains.
   - **Value.** The chosen lag's value is re-read in FP32.
 
-## The bound, and why the dismissal budget is unchanged
+## The gate's statistic, and the dismissal budget
 
-For every pair the gate reports an UPPER BOUND on the FP32 gate's coarse maximum:
+The gate reports each pair's FP16 maximum over the searched window, its own statistic, and the
+hierarchical filter compares it with the tier threshold, as the GPU's fp16 tier and the x86
+Q15 screen do theirs. It tracks the FP32 maximum to a few u rms(y) (u = 2^-11; below). What
+that does to the search is the chain's false dismissal against the flat filter, measured by
+injection on Apple silicon (CI's macOS arm64 runner, 2026-10-30; `tools/fdr_audit.py --n 2048
+4096 --inj 20000`, 10 profiles x 4 chains, fd 1e-2): no case was off its plan, and the pooled
+dismissal was 1.041x the budget (+- 0.011 binomial), as the FP32 path's 1.036x on dev2 in the
+same audit.
 
-    B = |y16(k')| (1 + 3u) + kappa u rms(y),     u = 2^-11,  kappa = 16
+Until then it reported an upper bound on the FP32 maximum, B = |y16(k')| (1 + 3u) + kappa u
+rms(y) with kappa = 16, so that it passed every pair the FP32 gate passed. The same audit put
+single-tier chains at bands 1024 and 2048 at 0.15-0.22x their plans: the bound passed pairs
+the plan never priced, and the refine did their work. The parts of that bound are still the
+gate's error model:
 
-The hierarchical filter compares B with the tier threshold. Every pair the FP32 gate passes
-then passes here, so the survivors of the FP16 gate are a superset of the FP32 gate's. The
-false-dismissal rate is therefore at most that of the FP32 gate plus the probability that the
-bound fails, which is the measured tail below. The price is a few more refinements.
-
-- **(1 + 3u): choosing the lag on FP16 powers. This is proven, not fitted.**
-  - Each FP16 power is within a factor (1 ± u)^2 of the FP16 transform's |y|^2: one exact
-    power-of-two scale, one product, one FMA.
-  - So the chosen lag k' satisfies |y16|max <= |y16(k')| (1+u)/(1-u) < |y16(k')| (1+3u).
-  - This term grows with the peak, which the rms term does not.
-  - Without it, a build that chose the lag in FP16 measured e = -15.1 on loud transients,
-    close to kappa: the lag-choice error scales with peak/rms, so no fixed kappa would bound it.
-- **kappa u rms(y): the transform's own rounding error.**
-  - rms is taken over ALL m lags, so an out-of-window glitch, which raises the error
-    everywhere, raises the bound with it.
-  - kappa is set from measurement. It was not swept until the tests passed.
+- **(1 + 3u): choosing the lag on FP16 powers.** Each FP16 power is within a factor (1 ± u)^2
+  of the FP16 transform's |y|^2 (one exact power-of-two scale, one product, one FMA), so the
+  chosen lag's value is below the FP16 maximum by at most (1+u)/(1-u) < 1 + 3u. This grows
+  with the peak.
+- **u rms(y): the transform's own rounding.** rms is taken over ALL m lags, so an
+  out-of-window glitch, which raises the error everywhere, shows in it.
 
 ### Measured error (tools/gate16_error.py)
 
@@ -63,9 +64,10 @@ The fine bank is the ladder's largest, with H1 profiles and the chain pinned. Ev
 template) pair is dumped through `MF_HMF_DUMP` with tier thresholds 0, and the error is
 normalised as
 
-    e = (B with kappa=0  -  |y32|max) / (u rms)
+    e = (|y16|max  -  |y32|max) / (u rms)
 
-The bound fails only where e < -kappa.
+(measured 2026-10-09, when the gate added the bound's terms to this; e below is without
+kappa).
 
 **Transform error alone.** The earlier build scanned in FP32, so the lag choice was exact and
 B with kappa=0 was the plain |y16|max.
@@ -77,7 +79,7 @@ B with kappa=0 was the plain |y16|max.
 | chain (64,256) | 479k | 8.16 | |
 | chain (1024) | 479k | 9.82 | |
 
-**Shipped build.** FP16 lag choice plus the (1+3u) factor; 638k pairs per case.
+**The bound's build.** FP16 lag choice plus the (1+3u) factor; 638k pairs per case.
 
 | case | most negative e | mean e | 99.99% \|e\| |
 |---|---|---|---|
@@ -89,23 +91,24 @@ B with kappa=0 was the plain |y16|max.
 
 Positive e is slack: the bound sits above the FP32 maximum.
 
-**How much headroom kappa = 16 has**
+**How much headroom kappa = 16 had** (the bound, until 2026-10-30)
 
 - The transform error alone never went beyond 12.9 u rms in about 2.9M pairs. The worst case
   had loud transients and sat 7.1 standard deviations out.
-- With the shipped factor, the bound's worst slack is -2 u rms, which is 14 units inside kappa.
+- With the (1+3u) factor, the bound's worst slack was -2 u rms, 14 units inside kappa.
 
-**What the margin costs**
+**What the bound's margin cost**
 
-- (1+3u) adds 0.15% of the peak.
-- kappa u rms adds 0.8% of rms, about 0.3% of a typical coarse maximum.
-- Neither moves the pass rate noticeably: the ladder's fine_triggers count is the same in both
-  modes (588).
+- (1+3u) added 0.15% of the peak.
+- kappa u rms added 0.8% of rms, about 0.3% of a typical coarse maximum.
+- On the ladder neither moved the pass rate noticeably (fine_triggers 588 in both modes); the
+  audit by injection found the single-tier chains at bands 1024 and 2048 far below their
+  plans (above).
 
-The probability that the bound fails is below the measured resolution (0 in about 3.2M pairs),
-far below the dismissal budget's 1e-3.
+The probability that the bound failed was below the measured resolution (0 in about 3.2M
+pairs).
 
-### Paired false-dismissal audit (tools/verify_cascade_fdr.py)
+### Paired false-dismissal audit with the bound, 2026-10-09 (tools/verify_cascade_fdr.py)
 
 (The tool has since been folded into `tools/fdr_audit.py`.)
 
@@ -127,7 +130,7 @@ about 11.5k ground-truth fine detections per shape; the budget is 0.1%, about 11
   bimodal_resonance's single tier and cascade miss more than about 11.5. The FP32 gate has
   identical counts there, so this is a property of the thresholds and was not introduced here.
 
-### End-to-end check (tools/gate16_check.py, ladder `--check`)
+### End-to-end check with the bound, 2026-10-09 (tools/gate16_check.py, ladder `--check`)
 
 - **Setup.** The realistic ladder ran on the CPU in one process, FP16 gate then FP32 gate, with
   the same seed: bank3, H1 profiles, 1 top, 8 segments, warm-up 2.

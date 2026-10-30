@@ -111,9 +111,11 @@ class Q15:
 
 
 class CpuG16:
-    """The CPU FP16 first gate (src/gate16.cc, run_max) through _core.gate16_bound: the bound
-    it reports, compared with the tier threshold as hmf.c does (fires when >= thr)."""
+    """The CPU FP16 first gate (src/gate16.cc, run_max) through _core.gate16_max: the pair's
+    FP16 maximum it reports, compared with the tier threshold as hmf.c does (fires when
+    >= thr). It gates on its own statistic."""
     name = "cpu-g16"
+    own_statistic = True
 
     def __init__(self, N, nt):
         from matchedfilter import _core
@@ -126,7 +128,7 @@ class CpuG16:
         # set_template conjugates at ingest; the tier correlates D against conj(T), as Q15.
         self.d = D.astype(np.complex64).tobytes()
         self.t = T.astype(np.complex64).tobytes()
-        b = self.core.gate16_bound(self.N, self.d, self.t, self.nt)
+        b = self.core.gate16_max(self.N, self.d, self.t, self.nt)
         if b is None:
             raise RuntimeError("no FP16 gate on this back end")
         self.b = np.frombuffer(b, np.float32)
