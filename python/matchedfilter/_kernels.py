@@ -17,11 +17,23 @@ from functools import lru_cache
 from ._kernel_id import BACKENDS
 
 _PACKAGE = pathlib.Path(__file__).resolve().parent
+#: A backend's folder where it is not the package's (set_folder): the tests' static checks
+#: of a backend an install leaves out read the checkout's.
+_FOLDERS = {}
 
 
 def folder(backend):
     """The package folder holding a backend's artifacts and manifest."""
-    return _PACKAGE / BACKENDS[backend][0]
+    return _FOLDERS.get(backend) or _PACKAGE / BACKENDS[backend][0]
+
+
+def set_folder(backend, path):
+    """Read a backend's artifacts and manifest from `path` (None: the package's own)."""
+    if path is None:
+        _FOLDERS.pop(backend, None)
+    else:
+        _FOLDERS[backend] = pathlib.Path(path)
+    manifest.cache_clear()
 
 
 @lru_cache(maxsize=None)
