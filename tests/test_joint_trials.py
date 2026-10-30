@@ -510,3 +510,33 @@ def test_a_plan_runs_its_model_chain_whatever_the_arm():
         assert p._q15
         p.use_arm("q15=0")
         assert not p._q15
+
+
+def _settle_run(times, builds):
+    """_settle over replays taking times[i] and building builds[i] recordings."""
+    from matchedfilter import time_domain
+    now, made, i = [0.0], [0], [0]
+
+    def replay():
+        now[0] += times[i[0]]
+        made[0] += builds[i[0]]
+        i[0] += 1
+    return time_domain._settle(replay, lambda: made[0], clock=lambda: now[0])
+
+
+def test_a_gpu_batch_settles_to_a_steady_time_not_only_to_no_builds():
+    """A joint round's settle on a GPU replays until a replay builds nothing AND runs within
+    half the tie of the one before: a batch that has built everything can still run 10-25%
+    slower for a replay or two (dev3), and settled by builds alone the arm played first in a
+    round read 14-21% slower than the same configuration played later."""
+    # builds on the first replay, then runs slower for two more before it is steady
+    assert _settle_run([10.0, 8.0, 6.5, 5.0, 5.05], [3, 0, 0, 0, 0]) == 5
+    # steady at once after the build: two replays
+    assert _settle_run([10.0, 5.0, 5.0], [3, 0, 0]) == 3
+    assert _settle_run([5.0, 5.0], [0, 0]) == 2
+    # a replay within the tolerance that built something is not steady state
+    assert _settle_run([5.0, 5.0, 5.0], [0, 1, 0]) == 3
+    # never steady: bounded
+    from matchedfilter import time_domain
+    assert _settle_run([10.0, 5.0, 10.0, 5.0, 10.0, 5.0], [0] * 6) == time_domain._SETTLE_REPLAYS
+    assert time_domain._SETTLE_TOL == pytest.approx(0.025)
