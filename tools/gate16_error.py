@@ -1,23 +1,24 @@
 #!/usr/bin/env python3
 """Measure the FP16 first gate's error against the FP32 gate, pair by pair (gate16.cc).
 
-The FP16 gate reports |y16|max (1 + 3u) + kappa*u*rms(y) as an upper bound on the FP32
-tier's |y32|max (u = 2^-11, rms over all m lags of the pair's coarse output; the factor
-is the proven cost of choosing the lag on FP16 powers). This measures, for every (block,
-template) pair of realistic fine-bank calls, the normalised error
+The FP16 gate reports its own statistic, each pair's |y16|max, where the FP32 tier
+reports |y32|max (u = 2^-11, rms over all m lags of the pair's coarse output). This
+measures, for every (block, template) pair of realistic fine-bank calls, the normalised
+error
 
-    e = (|y16|max (1 + 3u) - |y32|max) / (u * rms)
+    e = (|y16|max - |y32|max) / (u * rms)
 
-and reports its distribution and its extreme on the low side, which kappa must exceed. Both gates see the
-same plans (chain pinned, tier-0 threshold 0 so every pair is recorded through
-MF_HMF_DUMP), and MF_GATE16_DEBUG makes the FP16 gate report kappa = 0 and the rms.
+and reports its distribution and its extremes. What the error does to the search is the
+chain's false dismissal against the flat filter (tools/fdr_audit.py), not this. Both gates
+see the same plans (chain pinned, tier-0 threshold 0 so every pair is recorded through
+MF_HMF_DUMP), and MF_GATE16_DEBUG makes the FP16 gate report the rms with its value.
 
     python tools/gate16_error.py --bank BANK.hdf --profiles PROFILES.npz [--series 8]
 
 Coarse output for realistic data: the ladder's largest fine bank of its largest top, the
 top's own output profile as the reference, middle-filtered analytic noise as input; and
-the same with a loud chirp-like transient added out of the search window (the bound must
-hold when out-of-window power raises the error everywhere).
+the same with a loud chirp-like transient added out of the search window (out-of-window
+power raises the error everywhere).
 """
 import argparse
 import os
@@ -79,8 +80,8 @@ def main():
     ap.add_argument("--seed", type=int, default=3)
     ap.add_argument("--transient", action="store_true")
     ap.add_argument("--scan", choices=("elect", "max"), default="max",
-                    help="the FP16 gate's scan: max (run_max, the gate's own: bound "
-                         "sqrt(Pmax)(1+2u)) or elect (run: the elected lag's |y|(1+3u))")
+                    help="the FP16 gate's scan: max (run_max, the gate's own: sqrt(Pmax)) "
+                         "or elect (run: the elected lag's |y|)")
     ap.add_argument("--worker", action="store_true")
     a = ap.parse_args()
     if a.worker:
@@ -108,12 +109,12 @@ def main():
     rel = np.abs(m16 - m32) / np.maximum(m32, 1e-30)
     q = np.quantile(np.abs(e), [0.5, 0.9, 0.99, 0.999, 0.9999, 1.0])
     print("pairs %d  rms(y) median %.3f  max|y32| median %.3f" % (n, np.median(rms), np.median(m32)))
-    print("scan %s; normalised error e = (B(kappa=0)-|y32|)/(u*rms): mean %.3f std %.3f"
+    print("scan %s; normalised error e = (|y16|-|y32|)/(u*rms): mean %.3f std %.3f"
           % (a.scan, e.mean(), e.std()))
     print("|e| quantiles 50/90/99/99.9/99.99/max: " + " ".join("%.2f" % v for v in q))
     print("relative error of the maximum: median %.2e  max %.2e" % (np.median(rel), rel.max()))
     print("max |e| / std(e) = %.1f" % (np.abs(e).max() / e.std()))
-    print("most negative e (kappa must exceed its size): %.2f" % e.min())
+    print("most negative e: %.2f  most positive e: %.2f" % (e.min(), e.max()))
 
 
 if __name__ == "__main__":

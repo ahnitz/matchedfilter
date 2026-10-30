@@ -25,6 +25,15 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ### Changed
 
+- The CPU FP16 first gate on ARM gates on its own statistic, each pair's FP16 maximum, as the
+  GPU's fp16 tier and the x86 Q15 screen do, in place of an upper bound on the FP32 maximum
+  (|y16|max (1 + 3u) + kappa u rms, kappa 16). Against the flat filter by injection on Apple
+  silicon (CI macOS arm64; `tools/fdr_audit.py --n 2048 4096`, 80 cases), no case was off its
+  plan and the pooled dismissal was 1.041x the budget, as the FP32 path's 1.036x; with the
+  bound, single-tier chains at bands 1024 and 2048 dismissed 0.15-0.22x their plans. Gone
+  with it: `GATE16_KAPPA` and `ap_gate16_kappa_u`. `_core.gate16_bound` is
+  `_core.gate16_max`, and `tools/gate_margin.py --gate cpu-g16` judges the gate on its own
+  statistic.
 - A GPU joint trial's round settles each configuration until a replay builds nothing and
   runs within half the tie (2.5%) of the replay before, at most five replays. It used to
   stop as soon as nothing more was built. Vulkan fused batches now count as built recordings.

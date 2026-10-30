@@ -30,15 +30,19 @@ refine did their work. The same held at fd 1e-3 and at n = 4096 over a window (r
 the plan; bound: 3 and 4). Its rounding moves a pair's decision by at most 0.14% of the
 threshold (`tools/gate_margin.py`, every family at bands 128-1024).
 
-The CPU FP16 gate below still reports an upper bound of the FP32 maximum and so passes a
-superset of its pairs; it can be calibrated the same way once its false dismissal is measured
-on ARM. This page states its bound and the own-statistic gates' errors side by side; each
-kernel's own page has the derivation and the measurements.
+**The CPU FP16 gate on ARM gates on its own statistic as well** (since 2026-10-30): each pair's
+FP16 maximum. Against the flat filter by injection on Apple silicon (CI's macOS arm64 runner,
+`tools/fdr_audit.py --n 2048 4096`, 10 profiles x 4 chains, fd 1e-2, 20000 injections a case),
+no case was off its plan and the pooled dismissal was 1.041x the budget (+- 0.011), as the
+FP32 path's 1.036x on dev2 in the same audit. With its bound, |y16|max (1 + 3u) + kappa u
+rms(y) with kappa 16, single-tier chains at bands 1024 and 2048 dismissed 0.15-0.22x their
+plans. This page states the gates' errors side by side; each kernel's own page has the
+measurements.
 
 | Gate | Where | Estimate the gate compares | Margin | Page |
 |---|---|---|---|---|
 | Q15 screen | CPU, x86 (the first tier) | the int16 transform's maximum | none in the chain; `ap_mf_q15_screen` alone keeps a 5 sqrt(N) LSB margin by default (`ap_mf_set_q15_margin`) | [cpu-q15-gate.md](cpu-q15-gate.md), `src/q15.h` |
-| FP16 gate | CPU, ARM with FP16 vectors (replaces the FP32 tier) | B = \|y16(k')\| (1 + 3u) + κ u rms(y) | κ = 16 (`GATE16_KAPPA`) | [cpu-neon-fp16-gate.md](cpu-neon-fp16-gate.md), `src/gate16.cc` |
+| FP16 gate | CPU, ARM with FP16 vectors (replaces the FP32 tier) | the fp16 transform's maximum | none | [cpu-neon-fp16-gate.md](cpu-neon-fp16-gate.md), `src/gate16.cc` |
 | fp16 coarse tier | GPU (Vulkan, CUDA, Metal; Slang; the first tier) | the fp16 transform's maximum | none | `src/gpu/tierb.slang` |
 
 u = 2^-11 throughout; rms(y) is the pair's output rms over all lags (Parseval). CUDA's
@@ -47,12 +51,10 @@ tensor-core gate, a fifth row until 2026-10-29, was never chosen and is deleted
 
 ## The two forms
 
-- **Relative (fp16).** fp16 rounding is relative to the values, so the CPU FP16 gate's bound has
-  two parts:
-  - (1 + 3u) is proven, not fitted. Choosing the lag on fp16 powers can pick a lag whose
-    value is below the true maximum by at most that factor.
-  - κ u rms(y) covers the transform's own rounding. It scales with the pair's energy, not
-    with its peak.
+- **Relative (fp16).** fp16 rounding is relative to the values. Both fp16 gates' errors are a
+  few u rms(y): the transform's own rounding scales with the pair's energy, not with its
+  peak, and choosing the lag on fp16 powers can pick a value below the true maximum by at
+  most a factor (1 + 3u). Both are part of each gate's statistic.
 - **Absolute (Q15).** int16 rounding is absolute. The screen's error is a sum of independent
   roundings with rms 0.44-0.47 sqrt(N) LSB, the same for noise and loud injections. Where the
   screen must pass every pair the FP32 maximum could pass (`ap_mf_q15_screen` with its margin
@@ -63,10 +65,10 @@ tensor-core gate, a fifth row until 2026-10-29, was never chosen and is deleted
 
 ## How each constant was set
 
-- **From measurement, never swept until tests pass.** Each κ (and the Q15 margin) is set so
-  the margin is at least twice the worst error measured over the `tools/gate_margin.py`
-  families: noise, profile, injection, loud transient, full scale. That is the merge gate's
-  criterion: margin use < 0.5.
+- **From measurement, never swept until tests pass.** The one margin left, the Q15 screen's
+  when `ap_mf_q15_screen` runs alone, is set to at least twice the worst error measured over
+  the `tools/gate_margin.py` families: noise, profile, injection, loud transient, full scale.
+  That is the merge gate's criterion for a gate with a margin: margin use < 0.5.
 - **Measurement tools:**
   - `tools/gate16_error.py` for the CPU fp16 gate;
   - `tools/gate_margin.py` for all of them (`--gate q15 gpu-c16 cpu-g16`).

@@ -3,7 +3,8 @@
 
 Runs tools/ladder.py's device loop twice on the CPU in one process -- MF_GATE16=1, then
 MF_GATE16=0 -- with the same seed, and compares every call's peaks with ladder.compare:
-a peak only one gate finds is a dismissal (or an extra pass) the bound did not prevent.
+a peak only one gate finds is a gate decision the FP16 statistic took otherwise (a pair
+within its rounding of a threshold, unless the gate is wrong).
 Steady-segment times of both are reported (warm-up segments excluded, as --warmup).
 
     python tools/gate16_check.py --bank BANK.hdf --profiles PROFILES.npz [--segments 5]

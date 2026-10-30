@@ -1720,8 +1720,8 @@ static PyObject *M_forward_cost(PyObject *self, PyObject *args){
 }
 
 
-/* gate16_bound(N, data, templates, nt) -> float32 array of nt: the FP16 first gate's
-   reported bound (ap_gate16_run, one data row, window [0, N)), or None where there is no
+/* gate16_max(N, data, templates, nt) -> float32 array of nt: the FP16 first gate's
+   statistic, each pair's FP16 maximum (ap_gate16_run, one data row, window [0, N)), or None where there is no
    FP16 gate. Measurement only (tools/gate_margin.py --gate cpu-g16). data: N complex64,
    templates: nt x N complex64, correlated as the tier does (templates conjugated at ingest). */
 void *ap_gate16_create(size_t m, int nd, int nt);
@@ -1729,7 +1729,7 @@ void ap_gate16_destroy(void *g);
 int ap_gate16_set_template(void *g, int t, const float *spec);
 int ap_gate16_set_data(void *g, int d, const float *spec);
 int ap_gate16_run(void *g, int d0, int nd, int t0, int nt, size_t ws, size_t we, ap_peak *out);
-static PyObject *M_gate16_bound(PyObject *self, PyObject *args){
+static PyObject *M_gate16_max(PyObject *self, PyObject *args){
   (void)self; Py_ssize_t N; Py_buffer bd, bt; int nt;
   if(!PyArg_ParseTuple(args,"ny*y*i",&N,&bd,&bt,&nt)) return NULL;
   PyObject *res=NULL;
@@ -1747,7 +1747,7 @@ static PyObject *M_gate16_bound(PyObject *self, PyObject *args){
     if(b){ float *f=(float*)PyBytes_AS_STRING(b);
       for(int t=0;t<nt;t++) f[t]= pk[t].index>=0 ? pk[t].magnitude : -1.0f;
       res=b; }
-  } else { PyErr_SetString(PyExc_ValueError,"gate16_bound failed"); }
+  } else { PyErr_SetString(PyExc_ValueError,"gate16_max failed"); }
   free(pk); ap_gate16_destroy(g); PyBuffer_Release(&bd); PyBuffer_Release(&bt);
   return res;
 }
@@ -1833,7 +1833,7 @@ static PyMethodDef methods[]={
   {"l1d_bytes",M_l1d_bytes,METH_NOARGS,"l1d_bytes() -> the L1 data cache size the OS reports, or 0 if unknown"},
   {"series_group",M_series_group,METH_VARARGS,"series_group(n, requested) -> the series group a hierarchical plan of size n runs"},
   {"forward_cost",M_forward_cost,METH_VARARGS,"forward_cost(n, reps=9) -> (engine s, platform s or -1) per block forward"},
-  {"gate16_bound",M_gate16_bound,METH_VARARGS,"gate16_bound(N, data, templates, nt) -> bytes of nt float32 bounds (-1: not fired), or None"},
+  {"gate16_max",M_gate16_max,METH_VARARGS,"gate16_max(N, data, templates, nt) -> bytes of nt float32 FP16 maxima (-1: not fired), or None"},
   {"price_direct",M_price_direct,METH_NOARGS,"price_direct() -> ticks per lag x tap of the direct refine's correlation"},
   {"gate16",M_gate16,METH_NOARGS,"gate16() -> whether new hierarchical plans run the FP16 first gate"},
   {"targets",M_targets,METH_NOARGS,"targets() -> names this build can run here"},

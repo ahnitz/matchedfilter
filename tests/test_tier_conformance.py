@@ -2,9 +2,9 @@
 peaks, at tier thresholds that no rounding can decide.
 
 The kinds: the CPU's FP32 gate, its Q15 screen in front of it (x86), its FP16 gate (ARM,
-src/gate16.cc), and the machine's GPU (an fp16 tier with its own bound, tierb.slang). Each
-gates on its own estimate of a pair's coarse maximum: exact, or an upper bound of it within
-about 1% (tools/gate_margin.py). So a threshold in a wide gap of the pairs' exact maxima --
+src/gate16.cc), and the machine's GPU (an fp16 tier, tierb.slang). Each gates on its own
+statistic of a pair's coarse maximum: exact, or within about 1% of it in reduced precision
+(tools/gate_margin.py). So a threshold in a wide gap of the pairs' exact maxima --
 taken from the FP32 gate's own dump (MF_HMF_DUMP) -- must pass exactly the pairs above it on
 every kind. The final threshold is 0, so every refined pair reports a peak: the peak indices
 are the gate decisions. tests/test_coarse_conformance.py does the same for every GPU coarse
