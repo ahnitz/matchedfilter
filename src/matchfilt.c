@@ -166,13 +166,20 @@ static ap_mf_plan *create_mf(size_t n, int ndata, int ntmpl, int pair, const ap_
   p->tile = 8;
   p->pb = ap_plan_pairbatch(p->fft);
   const int broadcast_data = ap_plan_broadcast_data(p->fft);
-  /* Only the measured x86 targets opt in. MF_PBMAX remains a way to force
-     either implementation in one build, without changing process state here. */
-  const char *isa=ap_plan_backend(p->fft);
-  const size_t alt_max_n = (!strcmp(isa,"AVX3") && ap_plan_lanes(p->fft) >= 16) ? 1024u : 512u;
+  /* The pair-batched alternate (run_pairs), where it was measured: every x86 target, up to
+     n = 1024 at 16 lanes and 512 at 8 or 4. Zen 5, 8 x 64 pairs, one bin, alternate/base:
+     16 lanes (AVX3) 0.35 0.58 0.74 at n = 256 512 1024; 8 lanes 0.62 0.74 (AVX2), 0.73 0.81
+     (AVX); 4 lanes (SSE4) 0.84 0.93. Past the cap it lost or tied in places (AVX 1.08 at 1024,
+     SSE4 1.01) and won in others (AVX3 0.72 at 2048), which a rule cannot follow: a measured
+     choice per size would. NEON is unmeasured, so it keeps the base path. MF_PBMAX remains a
+     way to force either implementation in one build, without changing process state here. */
+#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__)
+  const size_t alt_max_n = ap_plan_lanes(p->fft) >= 16 ? 1024u : 512u;
   p->allow_pair_alt = !pair && !p->pb && n>=256 && n<=alt_max_n && p->w>0 && ntmpl>=(size_t)p->w
-    && ap_env_int("MF_PBMAX",-1) < 0
-    && (!strcmp(isa,"AVX3") || !strcmp(isa,"AVX2") || !strcmp(isa,"SSE4"));
+    && ap_env_int("MF_PBMAX",-1) < 0;
+#else
+  p->allow_pair_alt = 0;
+#endif
   p->ntpad = p->pb ? ((ntmpl + p->pb - 1)/p->pb)*p->pb : ntmpl;
   p->dre=ap_alloc64((size_t)ndata*n*sizeof(float));
   p->dim=ap_alloc64((size_t)ndata*n*sizeof(float));
