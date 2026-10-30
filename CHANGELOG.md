@@ -25,6 +25,17 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ### Changed
 
+- One coarse-candidate enumerator for every GPU backend (`_coarse.candidates`): each shipped
+  coarse build whose recorded group and workgroup memory fit the device, at each twiddle
+  source and subgroup size the backend gives it. Metal now offers its tiles at every packing
+  and no longer offers builds past its 32 KB threadgroup memory; CUDA holds its builds to the
+  device's queried block limits. One timing rule for every offline measurement (the coarse
+  and gate-way screens, the GPU cost calibration, the continuous correlation's block-size
+  prices: `_choice.fastest_of_rounds`), and one threshold search for every calibration.
+- CPU: the survivor gathers' lane transposes run under the back end's own dispatch (`MF_ISA`
+  reaches them), one copy for every target; SSE4 takes a vector transpose where it took a
+  scalar loop. The AVX back end (Sandy and Ivy Bridge) takes the pair-batched alternate at
+  n = 256 and 512, 0.73x and 0.81x the time it took (one bin, 8 x 64 pairs).
 - One generator for every GPU kernel, `tools/kernel_variants.py`: the table of every Vulkan,
   Metal and CUDA artifact, the facts each is built with and the one way each is compiled
   (`build_spirv.py` and `build_ptx.py` run it; `build_forward.py` is gone). A rebuild
