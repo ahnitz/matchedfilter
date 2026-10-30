@@ -417,111 +417,6 @@ static ap_mf_plan *pair_alternate(ap_mf_plan *p,int d0,int nd,int t0,int nt){
  *
  * Results come back dense [lane][nbins] and are placed by the caller's row
  * index, because a scattered template selection has no single stride. */
-/* dst[k*W + l] = src[l][k] for l < cnt (zero for cnt <= l < W), k < n: W rows of spectra
-   transposed into the lane-interleaved layout the pair-batch kernels read. Survivor
-   batches are gathered this way for every later tier and the refine; done one scalar at
-   a time it cost as much as the batch's correlation itself (~250 ticks per pair each
-   for data and templates at n=512). In registers it is W loads, a WxW transpose and W
-   stores per W elements. n is a multiple of W (power-of-two transforms >= 64). */
-#if (defined(__x86_64__) || defined(_M_X64)) && (defined(__GNUC__) || defined(__clang__))
-#include <immintrin.h>
-#define AP_HAVE_LANE_TRANSPOSE 1
-__attribute__((target("avx512f")))
-static void lanes_transpose16(float * restrict dst, const float *const *src, int cnt, size_t n){
-  for(size_t k = 0; k < n; k += 16){
-    __m512 r[16], t[16], u[16];
-    for(int l = 0; l < 16; l++) r[l] = l < cnt ? _mm512_loadu_ps(src[l] + k) : _mm512_setzero_ps();
-    for(int i = 0; i < 8; i++){
-      t[2*i]   = _mm512_unpacklo_ps(r[2*i], r[2*i+1]);
-      t[2*i+1] = _mm512_unpackhi_ps(r[2*i], r[2*i+1]);
-    }
-    for(int j = 0; j < 4; j++){
-      u[4*j+0] = _mm512_shuffle_ps(t[4*j],   t[4*j+2], 0x44);
-      u[4*j+1] = _mm512_shuffle_ps(t[4*j],   t[4*j+2], 0xEE);
-      u[4*j+2] = _mm512_shuffle_ps(t[4*j+1], t[4*j+3], 0x44);
-      u[4*j+3] = _mm512_shuffle_ps(t[4*j+1], t[4*j+3], 0xEE);
-    }
-    float *d = dst + k * 16;
-    for(int m = 0; m < 4; m++){
-      const __m512 w0 = _mm512_shuffle_f32x4(u[m],     u[4+m],  0x88);
-      const __m512 w1 = _mm512_shuffle_f32x4(u[m],     u[4+m],  0xDD);
-      const __m512 x0 = _mm512_shuffle_f32x4(u[8+m],   u[12+m], 0x88);
-      const __m512 x1 = _mm512_shuffle_f32x4(u[8+m],   u[12+m], 0xDD);
-      _mm512_storeu_ps(d + (m + 0)  * 16, _mm512_shuffle_f32x4(w0, x0, 0x88));
-      _mm512_storeu_ps(d + (m + 8)  * 16, _mm512_shuffle_f32x4(w0, x0, 0xDD));
-      _mm512_storeu_ps(d + (m + 4)  * 16, _mm512_shuffle_f32x4(w1, x1, 0x88));
-      _mm512_storeu_ps(d + (m + 12) * 16, _mm512_shuffle_f32x4(w1, x1, 0xDD));
-    }
-  }
-}
-__attribute__((target("avx")))
-static void lanes_transpose8(float * restrict dst, const float *const *src, int cnt, size_t n){
-  for(size_t k = 0; k < n; k += 8){
-    __m256 r[8];
-    for(int l = 0; l < 8; l++) r[l] = l < cnt ? _mm256_loadu_ps(src[l] + k) : _mm256_setzero_ps();
-    const __m256 t0 = _mm256_unpacklo_ps(r[0], r[1]), t1 = _mm256_unpackhi_ps(r[0], r[1]);
-    const __m256 t2 = _mm256_unpacklo_ps(r[2], r[3]), t3 = _mm256_unpackhi_ps(r[2], r[3]);
-    const __m256 t4 = _mm256_unpacklo_ps(r[4], r[5]), t5 = _mm256_unpackhi_ps(r[4], r[5]);
-    const __m256 t6 = _mm256_unpacklo_ps(r[6], r[7]), t7 = _mm256_unpackhi_ps(r[6], r[7]);
-    const __m256 u0 = _mm256_shuffle_ps(t0, t2, 0x44), u1 = _mm256_shuffle_ps(t0, t2, 0xEE);
-    const __m256 u2 = _mm256_shuffle_ps(t1, t3, 0x44), u3 = _mm256_shuffle_ps(t1, t3, 0xEE);
-    const __m256 u4 = _mm256_shuffle_ps(t4, t6, 0x44), u5 = _mm256_shuffle_ps(t4, t6, 0xEE);
-    const __m256 u6 = _mm256_shuffle_ps(t5, t7, 0x44), u7 = _mm256_shuffle_ps(t5, t7, 0xEE);
-    float *d = dst + k * 8;
-    _mm256_storeu_ps(d + 0 * 8, _mm256_permute2f128_ps(u0, u4, 0x20));
-    _mm256_storeu_ps(d + 1 * 8, _mm256_permute2f128_ps(u1, u5, 0x20));
-    _mm256_storeu_ps(d + 2 * 8, _mm256_permute2f128_ps(u2, u6, 0x20));
-    _mm256_storeu_ps(d + 3 * 8, _mm256_permute2f128_ps(u3, u7, 0x20));
-    _mm256_storeu_ps(d + 4 * 8, _mm256_permute2f128_ps(u0, u4, 0x31));
-    _mm256_storeu_ps(d + 5 * 8, _mm256_permute2f128_ps(u1, u5, 0x31));
-    _mm256_storeu_ps(d + 6 * 8, _mm256_permute2f128_ps(u2, u6, 0x31));
-    _mm256_storeu_ps(d + 7 * 8, _mm256_permute2f128_ps(u3, u7, 0x31));
-  }
-}
-#endif
-
-#if defined(__aarch64__) && (defined(__GNUC__) || defined(__clang__))
-#include <arm_neon.h>
-#define AP_HAVE_LANE_TRANSPOSE_NEON 1
-/* NEON (W = 4, the pair batch of 128-bit lanes): four loads, a 4x4 transpose in registers
-   and four stores per four elements. The scalar loop below measured ~16% of the M2 CPU's
-   fine stage (gather_template_batch + gather_data_batch around the pooled tiers). */
-static void lanes_transpose4(float * restrict dst, const float *const *src, int cnt, size_t n){
-  const float zero[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-  const float *s0 = cnt > 0 ? src[0] : zero, *s1 = cnt > 1 ? src[1] : zero;
-  const float *s2 = cnt > 2 ? src[2] : zero, *s3 = cnt > 3 ? src[3] : zero;
-  const size_t i0 = cnt > 0 ? 4 : 0, i1 = cnt > 1 ? 4 : 0, i2 = cnt > 2 ? 4 : 0, i3 = cnt > 3 ? 4 : 0;
-  for(size_t k = 0; k < n; k += 4){
-    float32x4_t a = vld1q_f32(s0), b = vld1q_f32(s1), c = vld1q_f32(s2), d = vld1q_f32(s3);
-    s0 += i0; s1 += i1; s2 += i2; s3 += i3;
-    float32x4_t ab0 = vtrn1q_f32(a, b), ab1 = vtrn2q_f32(a, b);
-    float32x4_t cd0 = vtrn1q_f32(c, d), cd1 = vtrn2q_f32(c, d);
-    float * restrict o = dst + k * 4;
-    vst1q_f32(o,      vreinterpretq_f32_f64(vtrn1q_f64(vreinterpretq_f64_f32(ab0), vreinterpretq_f64_f32(cd0))));
-    vst1q_f32(o + 4,  vreinterpretq_f32_f64(vtrn1q_f64(vreinterpretq_f64_f32(ab1), vreinterpretq_f64_f32(cd1))));
-    vst1q_f32(o + 8,  vreinterpretq_f32_f64(vtrn2q_f64(vreinterpretq_f64_f32(ab0), vreinterpretq_f64_f32(cd0))));
-    vst1q_f32(o + 12, vreinterpretq_f32_f64(vtrn2q_f64(vreinterpretq_f64_f32(ab1), vreinterpretq_f64_f32(cd1))));
-  }
-}
-#endif
-
-static void lanes_transpose(float * restrict dst, const float *const *src, int cnt, int W, size_t n){
-#ifdef AP_HAVE_LANE_TRANSPOSE_NEON
-  if(W == 4 && n % 4 == 0){ lanes_transpose4(dst, src, cnt, n); return; }
-#endif
-#ifdef AP_HAVE_LANE_TRANSPOSE
-  static int have512 = -1, have256 = -1;
-  if(have512 < 0){ have512 = __builtin_cpu_supports("avx512f"); have256 = __builtin_cpu_supports("avx"); }
-  if(W == 16 && have512 && n % 16 == 0){ lanes_transpose16(dst, src, cnt, n); return; }
-  if(W == 8 && have256 && n % 8 == 0){ lanes_transpose8(dst, src, cnt, n); return; }
-#endif
-  for(size_t k = 0; k < n; k++){
-    float * restrict d = dst + k * W;
-    for(int l = 0; l < cnt; l++) d[l] = src[l][k];
-    for(int l = cnt; l < W; l++) d[l] = 0.0f;
-  }
-}
-
 static inline void gather_template_batch(float * restrict tsr, float * restrict tsi,
                                          const ap_mf_plan *p,
                                          int t0, const int *tsel, int tt, int cnt){
@@ -543,8 +438,8 @@ static inline void gather_template_batch(float * restrict tsr, float * restrict 
   }
 
   if(stride1){
-    lanes_transpose(tsr, srp, cnt, W, n);
-    lanes_transpose(tsi, sip, cnt, W, n);
+    ap_lanes_transpose_on(p->fft, tsr, srp, cnt, n, W);
+    ap_lanes_transpose_on(p->fft, tsi, sip, cnt, n, W);
   } else {
     if(cnt == W){
       if(W == 8){
@@ -614,8 +509,8 @@ static inline void gather_data_batch(float * restrict dsr, float * restrict dsi,
     dip[l] = p->dim + (size_t)d * n;
   }
 
-  lanes_transpose(dsr, drp, cnt, W, n);
-  lanes_transpose(dsi, dip, cnt, W, n);
+  ap_lanes_transpose_on(p->fft, dsr, drp, cnt, n, W);
+  ap_lanes_transpose_on(p->fft, dsi, dip, cnt, n, W);
 }
 
 static int run_pairs_pb(ap_mf_plan *p, int d0, int nd, int t0, int nt,

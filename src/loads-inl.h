@@ -71,6 +71,30 @@ static void split_store(const float *HWY_RESTRICT x, float *HWY_RESTRICT re, flo
   for (size_t k = 0; k < n; k++) { re[k] = x[2 * k]; im[k] = conj ? -x[2 * k + 1] : x[2 * k + 1]; }
 }
 
+/* dst[k*w + l] = src[l][k] for l < cnt (zero for cnt <= l < w), k < n: w rows of spectra into
+ * the lane-interleaved layout the pair-batch kernels read (matchfilt.c's survivor gathers).
+ * At this target's width, w loads, a w x w transpose in registers (v_transpose_store) and w
+ * stores per w elements; any other width, or n not a multiple of it, the scalar copy. One
+ * copy for every target: matchfilt.c had its own AVX-512, AVX and NEON intrinsics, chosen by
+ * CPU feature checks that MF_ISA did not reach. */
+static void lanes_transpose(float *HWY_RESTRICT dst, const float *const *src, int cnt, size_t n,
+                            int w) {
+  if (w == AP_W && n % AP_W == 0) {
+    const vf z = V_ZERO();
+    for (size_t k = 0; k < n; k += AP_W) {
+      vf r[AP_W];
+      for (int l = 0; l < AP_W; l++) r[l] = l < cnt ? V_LOADU(src[l] + k) : z;
+      v_transpose_store(r, dst + k * AP_W);
+    }
+    return;
+  }
+  for (size_t k = 0; k < n; k++) {
+    float *HWY_RESTRICT d = dst + k * w;
+    for (int l = 0; l < cnt; l++) d[l] = src[l][k];
+    for (int l = cnt; l < w; l++) d[l] = 0.0f;
+  }
+}
+
 }  // namespace HWY_NAMESPACE
 }  // namespace ap
 HWY_AFTER_NAMESPACE();

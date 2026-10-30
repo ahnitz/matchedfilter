@@ -51,6 +51,7 @@ extern "C" const ap_backend *ap_avx1_backend(const ap_backend *base) {
     be.binmax_prod_threshold = k::binmax_prod_threshold;
     be.split_store = k::split_store;     /* its vector path needs w == the plan's 8 lanes */
     be.scale_load = k::scale_load;
+    be.lanes_transpose = k::lanes_transpose;
     ready = 1;
   }
   return &be;
