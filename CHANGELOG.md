@@ -170,8 +170,9 @@ Alpha releases may change the API. Pin a version for reproducible work.
   AVX2, 13.5 -> 16.9 KB on AVX) and the AVX n = 1024 one-bin call ran 1.14x slower. That
   path is now its own out-of-line function, and the hot one is 7.8 and 8.5 KB. Paired on
   Zen 5, the AVX and AVX2 calls at n = 1024 are 1.03-1.04x the old build's and level
-  elsewhere (n = 512, 4096), and AVX3 is unchanged: the remainder is code placement, as the
-  fine stage's frontend bound makes it (the old ladder ratios were measured before this fix).
+  elsewhere (n = 512, 4096), and AVX3 is unchanged; on Zen 3 (AVX2) 1.00x, 0.97x and 1.04x
+  at n = 512, 1024 and 4096. The remainder is code placement, as the fine stage's frontend
+  bound makes it (the old ladder ratios were measured before this fix).
 - `MF_METAL_IEEE` (no tool, test or CI job set it, and `=none` let the survivor compaction
   drop a NaN coarse value), `MF_TC_KAPPA` (a hand-set tensor-core bound constant in place
   of the one built from the measured sigma) and `MF_CAPTURE` (nothing read it). Setting
