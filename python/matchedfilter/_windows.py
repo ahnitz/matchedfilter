@@ -5,6 +5,22 @@ import numpy as np
 from . import _core
 
 
+def coarse_lags(n, band, lo, hi):
+    """(c0, c1): the coarse lags [c0, c1) a tier at `band` searches for the window [lo, hi)
+    of an n-point block -- one band sample past each end (a signal near an end has coarse
+    samples on both sides), inside the band, at least one. The engine's rule (hmf.c), and
+    every host's and the gate model's: lo and hi are ints or integer arrays alike."""
+    r = n // band
+    if np.ndim(lo) == 0 and np.ndim(hi) == 0:
+        c0 = int(lo) // r
+        c0 = c0 - 1 if c0 > 0 else c0
+        return c0, max(c0 + 1, min(band, -(-int(hi) // r) + 1))
+    lo, hi = np.asarray(lo, np.int64), np.asarray(hi, np.int64)
+    c0 = lo // r
+    c0 = np.where(c0 > 0, c0 - 1, c0)
+    return c0, np.maximum(c0 + 1, np.minimum(band, -(-hi // r) + 1))
+
+
 def _is_index(x) -> bool:
     return isinstance(x, (int, np.integer)) and not isinstance(x, (bool, np.bool_))
 

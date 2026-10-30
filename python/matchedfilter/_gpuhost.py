@@ -27,13 +27,9 @@ def coarse_span(n, band, lo, hi):
     end has coarse samples on both sides.
     The tier reduces it to ONE bin, so the reported peak is the window's maximum -- all a
     gate needs. shift is bin_shift(span) (-1 when span is not a power of two)."""
-    r = n // band
-    cstart = lo // r
-    cend = min(band, (hi + r - 1) // r + 1)
-    if cstart > 0:
-        cstart -= 1
-    cend = max(cstart + 1, cend)
-    cspan = max(1, cend - cstart)
+    from ._windows import coarse_lags
+    cstart, cend = coarse_lags(n, band, lo, hi)
+    cspan = cend - cstart
     return cstart, cend, cspan, bin_shift(cspan)
 
 
@@ -198,12 +194,9 @@ def band_windows(rowwin, n, band):
     hit = _BAND_WINDOWS.get(key)
     if hit is not None and hit[0] is rowwin:
         return hit[1]
-    rr = n // band
+    from ._windows import coarse_lags
     w = np.asarray(rowwin, np.uint32).reshape(-1, 3)[:, :2].astype(np.int64)
-    cs = w[:, 0] // rr
-    ce = np.minimum(band, (w[:, 1] + rr - 1) // rr + 1)
-    cs = np.where(cs > 0, cs - 1, cs)
-    ce = np.maximum(cs + 1, ce)
+    cs, ce = coarse_lags(n, band, w[:, 0], w[:, 1])
     # A coarse tier is one bin: its rows' bin phase is 0.
     out = np.ascontiguousarray(np.stack([cs, ce, np.zeros_like(cs)], 1).astype(np.uint32))
     if len(_BAND_WINDOWS) > 4096:

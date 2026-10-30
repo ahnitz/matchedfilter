@@ -225,3 +225,27 @@ def test_merge_keeps_each_window_bins_first_largest_peak():
         np.testing.assert_array_equal(gs, s[want])
         np.testing.assert_array_equal(gt, t[want])
         np.testing.assert_array_equal(gv, v[want])
+
+
+def test_one_coarse_lag_rule_is_the_engines():
+    """_windows.coarse_lags, which every host and the gate model read, is hmf.c's rule
+    exactly (cstart = start/R, less one when above 0; cend = ceil(end/R) + 1 clamped to the
+    band; at least one lag), for scalars and arrays."""
+    import numpy as np
+    from matchedfilter._windows import coarse_lags
+    rng = np.random.default_rng(3)
+    for n in (64, 256, 2048, 65536):
+        for band in [b for b in (16, 64, 256, 1024) if b <= n]:
+            r = n // band
+            lo = rng.integers(0, n, 400)
+            hi = np.minimum(n, lo + rng.integers(1, n + 1, 400))
+            lo = np.concatenate([lo, [0, 0, r, r - 1, n - 1]])
+            hi = np.concatenate([hi, [n, 1, r + 1, r, n]])
+            c0, c1 = coarse_lags(n, band, lo, hi)
+            for i in range(lo.size):
+                cs = lo[i] // r
+                ce = min((hi[i] + r - 1) // r + 1, band)
+                if cs > 0:
+                    cs -= 1
+                ce = max(ce, cs + 1)
+                assert (c0[i], c1[i]) == (cs, ce) == coarse_lags(n, band, int(lo[i]), int(hi[i]))
