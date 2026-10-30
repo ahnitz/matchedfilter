@@ -35,6 +35,9 @@ _STORAGE_SHARED = 0
 #: same Slang source, same limit -- and the split below is how both stay
 #: correct past it rather than quietly writing off the end of the table.
 _MAX_BINS = MAX_BINS          # _gpuhost.MAX_BINS: one limit for every backend
+#: Threads per threadgroup: 1024 on every Metal 3 GPU (the Metal feature set tables; the
+#: device reports it as an MTLSize, which the ctypes bridge does not return).
+_MAX_THREADS = 1024
 
 
 from ._errors import UnsupportedSize      # noqa: F401  (re-export)
@@ -73,29 +76,6 @@ def _twt_entry(entry):
     if entry.startswith("coarse16") and entry.endswith("w"):
         return entry[:-1], True
     return entry, False
-
-
-def coarse_ppg(band, pairs, override=None, simd_width=None):
-    """Pairs per threadgroup for the half-width coarse pass at this band.
-
-    One pair is band/16 threads; an Apple SIMD group is 32 lanes. Pick the
-    smallest packing that fills at least simd_width lanes (the pipeline's
-    threadExecutionWidth; TARGET_THREADS when not given), from the
-    variants shipped. A partial last group is ragged: its spare slots compute
-    and write nothing (_coarse.coarse_launch). ``override`` asks for one packing (1, or
-    any shipped one; anything else is unpacked); MF_COARSE_LAYOUT forces a whole layout.
-    """
-    want = override
-    shipped = [p for p in (32, 16, 8, 4, 2) if _shipped("tierb_%d_c16p%d" % (band, p))]
-    if want is not None:
-        want = int(want)
-        return want if want == 1 or want in shipped else 1
-    target = simd_width or TARGET_THREADS
-    wg = _threads("tierb_%d_c16" % band)
-    for p in sorted(shipped):
-        if wg * p >= target:
-            return p
-    return max(shipped, default=1) if wg < target else 1
 
 
 
@@ -1119,23 +1099,14 @@ class Context(Executor, InputUploads):
         raise ValueError(name)
 
     def _x_coarse_candidates(self, band):
-        """Every coarse layout (subgroup 0, ppg, tile, twt) the choice may take at this band:
-        the untiled build at every shipped packing that fits a threadgroup, with each twiddle
-        source, then the tiles at the packing that fills the SIMD width. The first is the
-        default without a measurement."""
-        from ._coarse import coarse_stem, shipped_tiles
-        w = self._simd_width(band)
-        built = [p for p in (1, 2, 4, 8, 16, 32) if shipped_tiles(band, p, _shipped)]
-        tp = next((p for p in built if _threads(coarse_stem(band, p, 1)) >= w),
-                  built[-1]) if built else None
-        tiles = shipped_tiles(band, tp, _shipped) if tp else ()
-        # 1024 threads: the most an Apple threadgroup holds.
-        untiled = [(0, p, 1, t) for p in (1, 2, 4, 8, 16, 32)
-                   if 0 < _threads(coarse_stem(band, p, 1)) <= 1024
-                   for t in (0, 1)]
-        tiled = [(0, tp, t, x) for t in tiles for x in (0, 1)]
-        first = tiled[:1] or [(0, coarse_ppg(band, 1 << 20, simd_width=w), 1, 0)]
-        return first + [c for c in untiled + tiled if c not in first]
+        """Every coarse layout (subgroup 0, ppg, tile, twt) the choice may take at this band
+        (_coarse.candidates): each shipped build Apple's threadgroup limits hold (1024
+        threads on every Metal 3 GPU; maxThreadgroupMemoryLength), its twiddles computed or
+        from the fp16 table (MF_COARSE_TWT, a library macro)."""
+        from ._coarse import candidates, coarse_stem
+        return candidates(band, lambda ppg, tile, twt: _kernels.record(
+                              "metal", coarse_stem(band, ppg, tile)),
+                          lambda tile: (0, 1), _MAX_THREADS, self.max_shared_memory)
 
     @_autoreleased
     def _x_time(self, native, binds, reps):

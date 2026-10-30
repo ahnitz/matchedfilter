@@ -6,6 +6,7 @@ import time
 
 import numpy as np
 
+from . import _choice
 from . import gatechain as _gc
 
 
@@ -14,6 +15,38 @@ from . import gatechain as _gc
 #: the process and in MF_COST_FILE: under one key, whichever call ran first set the model
 #: every later one used.
 _CAL_BLOCKS, _CAL_REPS, _CAL_SEED = 32, 5, 11
+
+
+def _pass_threshold(rate, density, lags, start=None):
+    """A first-tier threshold passing about `density` of pairs, rate(t) the pass fraction at
+    threshold t (counts only: nothing is timed): secant steps on the log pass rate (a noise
+    tail is near linear in it), bisection where a step leaves its bracket, from where a
+    block's maximum over its `lags` coarse lags passes t with probability ~ lags e^(-t^2/2)
+    (or `start`). A density is a target to within 25%: each cost's own density is read from
+    its call's counts. Every calibration places its thresholds with it."""
+    lo, hi = 0.0, 16.0
+    if start is None:
+        start = np.sqrt(2.0 * np.log(max(max(int(lags), 1) / density, 1.5)))
+    t = float(start)
+    prev = None
+    for _ in range(12):
+        frac = rate(t)
+        if abs(frac - density) < 0.25 * density:
+            return t
+        if frac > density:
+            lo = max(lo, t)
+        else:
+            hi = min(hi, t)
+        nxt = None
+        if prev is not None and frac > 0 and prev[1] > 0 and frac != prev[1]:
+            slope = (np.log(frac) - np.log(prev[1])) / (t - prev[0])
+            if slope < 0:
+                nxt = t + (np.log(density) - np.log(frac)) / slope
+        prev = (t, frac)
+        if nxt is None or not (lo < nxt < hi):
+            nxt = t + 0.5 if frac > density and hi >= 16.0 else 0.5 * (lo + hi)
+        t = float(nxt)
+    return t
 
 
 def calibrate_costs(n, ntemplates, blocks=_CAL_BLOCKS, reps=_CAL_REPS, seed=_CAL_SEED, group=None):
@@ -122,35 +155,9 @@ def calibrate_costs(n, ntemplates, blocks=_CAL_BLOCKS, reps=_CAL_REPS, seed=_CAL
         return tiers, (q1[1] - q0[1], q1[2] - q0[2]), s1 - s0 - sum(t[1] for t in tiers)
 
     def thr_for(b, density, start=None):
-        """Tier-0 threshold at band b passing about `density` of pairs: secant steps on the log
-        pass rate (a noise tail is near linear in it), bisection where a step leaves its
-        bracket. Pass counts only: nothing here is timed. A density is a target to within 25%
-        (each cost's own density is read from its call's counts)."""
-        lo, hi = 0.0, 16.0
-        if start is None:
-            # a block's maximum over its L coarse lags passes t with probability ~ L e^(-t^2/2)
-            L = max(int(b * (n - taps) / n), 1)
-            start = np.sqrt(2.0 * np.log(max(L / density, 1.5)))
-        t = float(start)
-        prev = None
-        for _ in range(12):
-            frac = count((b,), (t,))[0]
-            if abs(frac - density) < 0.25 * density:
-                return t
-            if frac > density:
-                lo = max(lo, t)
-            else:
-                hi = min(hi, t)
-            nxt = None
-            if prev is not None and frac > 0 and prev[1] > 0 and frac != prev[1]:
-                slope = (np.log(frac) - np.log(prev[1])) / (t - prev[0])
-                if slope < 0:
-                    nxt = t + (np.log(density) - np.log(frac)) / slope
-            prev = (t, frac)
-            if nxt is None or not (lo < nxt < hi):
-                nxt = t + 0.5 if frac > density and hi >= 16.0 else 0.5 * (lo + hi)
-            t = float(nxt)
-        return t
+        """Tier-0 threshold at band b passing about `density` of pairs (_pass_threshold)."""
+        return _pass_threshold(lambda t: count((b,), (t,))[0], density,
+                               b * (n - taps) // n, start)
 
     # Every timed quantity is a job (a plan and its settings). The jobs run round-robin, `reps`
     # rounds, each round starting at another job, and each quantity is the minimum over its
@@ -486,7 +493,8 @@ def calibrate_costs_gpu(n, device, blocks=None, reps=_GPU_CAL_REPS, seed=_GPU_CA
         for a call that ran 0.35 before and after, and the median of five, even the minimum
         of five in a row, moved its slope 2.3x); and under CPU load (load 57, other users'
         jobs) a power-limited GPU throttled through sustained work, where a band-512 first
-        tier ran 0.62 ms at best and 0.9-1.5 ms in the median. In turn, so that a spell
+        tier ran 0.62 ms at best and 0.9-1.5 ms in the median. In turn (_choice.fastest_of_rounds,
+        each round timing the clock reference first), so that a spell
         slows a burst of several configurations and never every call of one; in bursts,
         because under load the fast state came in runs of calls: 15 rounds of 1 left a
         configuration without a fast call in two calibrations of six, 15 rounds of 3 in
@@ -498,36 +506,27 @@ def calibrate_costs_gpu(n, device, blocks=None, reps=_GPU_CAL_REPS, seed=_GPU_CA
               for c in configs]
         for p, thr, feed in ps:
             call(p, thr, feed)                                        # warm-up, recording
-        t, s1, r = ([[] for _ in ps] for _ in range(3))
-        for _ in range(reps):
-            clock_refs.append(clock.time())
-            for i, (p, thr, feed) in enumerate(ps):
-                for _ in range(_BURST):
-                    ti, si, ri = call(p, thr, feed)
-                    t[i].append(ti)
-                    s1[i].append(si)
-                    r[i].append(ri)
+        s1, r = ([[] for _ in ps] for _ in range(2))
+
+        def time_one(i):
+            p, thr, feed = ps[i]
+            ti, si, ri = call(p, thr, feed)
+            s1[i].append(si)
+            r[i].append(ri)
+            return ti
         # a call whose timer recorded nothing (a rejected timestamp pair) is not a time
-        return [(float(min((x for x in t[i] if x > 0), default=0.0)),
-                 float(np.median(s1[i])), float(np.median(r[i])))
-                for i in range(len(ps))]
+        t = _choice.fastest_of_rounds(range(len(ps)), time_one, reps, burst=_BURST,
+                                      each_round=lambda: clock_refs.append(clock.time()))
+        return [(t[i], float(np.median(s1[i])), float(np.median(r[i]))) for i in range(len(ps))]
 
     def refined_pairs(chain, thr):
         """Refined pairs of one run (its time unused): thresholds are placed by counts."""
         return call(plan(chain, nt), thr)[2]
 
     def thr_for(b, density):
-        lo, hi = 0.0, 16.0
-        for _ in range(14):
-            mid = 0.5 * (lo + hi)
-            frac = refined_pairs((b,), (mid,)) / (blocks * nt)
-            if frac > density:
-                lo = mid
-            else:
-                hi = mid
-            if abs(frac - density) < 0.25 * density:
-                break
-        return mid
+        """Tier-0 threshold at band b passing about `density` of pairs (_pass_threshold)."""
+        return _pass_threshold(lambda t: refined_pairs((b,), (t,)) / (blocks * nt), density,
+                               b * (n - n // 4) // n)
 
     b0 = bands[0]
     clock = _clock_ref(device)
@@ -637,17 +636,8 @@ def _raw_survivors_here(n, device, bands, blocks, nt, seed):
             return p._gpu.last_refinements
 
         for f in _gc._CAL_DENSITIES:
-            lo, hi = 0.0, 16.0
-            for _ in range(14):
-                mid = 0.5 * (lo + hi)
-                r = refined(mid)
-                if r / (blocks * nt) > f:
-                    lo = mid
-                else:
-                    hi = mid
-                if abs(r / (blocks * nt) - f) < 0.25 * f:
-                    break
-            out.append((int(b), float(mid), int(refined(mid))))
+            g = _pass_threshold(lambda t: refined(t) / (blocks * nt), f, b * (n - n // 4) // n)
+            out.append((int(b), float(g), int(refined(g))))
     return out
 
 

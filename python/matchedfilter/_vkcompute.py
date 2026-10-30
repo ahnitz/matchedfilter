@@ -82,7 +82,7 @@ def _fit_workgroup(sg, invocations, rng, max_subgroups):
     return sg
 
 
-from ._coarse import coarse_stem, shipped_tiles   # noqa: E402
+from ._coarse import coarse_stem   # noqa: E402
 
 
 #: Byte offsets into VkPhysicalDeviceProperties. The 5 leading uint32s, the
@@ -1859,33 +1859,26 @@ class Context(Executor, InputUploads):
         raise ValueError(name)
 
     def _x_coarse_candidates(self, band):
-        """Every coarse layout (subgroup, ppg, tile, twt) this device can run at this band: the
-        shipped builds whose group fits the device's invocation and shared-memory limits, at
-        each subgroup size it can require (VK_EXT_subgroup_size_control; the default size
-        only, 0, without it). MF_COARSE_LAYOUT forces one of them by name, on every backend."""
+        """Every coarse layout (subgroup, ppg, tile, twt) this device can run at this band
+        (_coarse.candidates): each shipped build its invocation and shared-memory limits
+        hold, its twiddles from the fp16 table or computed where the build is untiled
+        (specialization constant 80), at each subgroup size it can require
+        (VK_EXT_subgroup_size_control; the default size only, 0, without it) that does not
+        split the group past maxComputeWorkgroupSubgroups (_build_pipeline would bump it
+        to the next size anyway). MF_COARSE_LAYOUT forces one of them by name, on every
+        backend."""
+        from ._coarse import candidates, coarse_stem
         rng = getattr(self, "subgroup_range", None)
         sizes = [0]
         if rng:
             sizes = [s for s in (4, 8, 16, 32, 64, 128) if rng[0] <= s <= rng[1]]
-        out = []
-        for ppg in (1, 2, 4, 8, 16, 32):
-            for tile in (1,) + shipped_tiles(band, ppg, _spv_shipped):
-                # A build whose group exceeds the device's invocations or workgroup memory
-                # (as the build recorded them) is out.
-                rec = _kernel(coarse_stem(band, ppg, tile))
-                if (rec is None or rec["local_size"][0] > self.max_invocations
-                        or rec["lds_bytes"] > self.max_shared_memory):
-                    continue
-                wg = rec["local_size"][0]
-                # Sizes that would split the group past maxComputeWorkgroupSubgroups are
-                # out (_build_pipeline would bump them to the next size anyway).
-                lim = getattr(self, "max_workgroup_subgroups", 0)
-                out.extend((sg, ppg, tile, twt) for sg in sizes
-                           for twt in ((1, 0) if tile == 1 else (1,))
-                           if not (lim and sg and -(-wg // sg) > lim))
-        if not out:
-            out = [(sizes[0], 1, 1, 0)]
-        return out
+        lim = getattr(self, "max_workgroup_subgroups", 0)
+        out = candidates(band, lambda ppg, tile, twt: _kernel(coarse_stem(band, ppg, tile)),
+                         lambda tile: (1, 0) if tile == 1 else (1,),
+                         self.max_invocations, self.max_shared_memory,
+                         lambda group: [sg for sg in sizes
+                                        if not (lim and sg and -(-group // sg) > lim)])
+        return out or [(sizes[0], 1, 1, 0)]
 
     def _x_time(self, native, binds, reps):
         """The least device time of `reps` runs of a recorded list (device timestamps)."""

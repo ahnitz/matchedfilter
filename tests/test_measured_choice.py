@@ -104,17 +104,25 @@ def test_a_burst_during_one_stage_does_not_order_the_shortlist():
 
 
 def test_interleaved_rounds_take_each_candidates_best_round():
-    from matchedfilter import _coarse
+    from matchedfilter import _choice
     seq, calls = iter([5.0, 2.0, 1.0, 3.0, 4.0, 4.0]), []
 
     def time_one(c):
         calls.append(c)
         return next(seq)
 
-    t = _coarse.interleaved_min(["a", "b"], time_one, 3)
+    t = _choice.fastest_of_rounds(["a", "b"], time_one, 3)
     assert calls == ["a", "b", "b", "a", "a", "b"]          # the order reverses each round
     assert t == {"a": 3.0, "b": 1.0}
-    assert _coarse.interleaved_min(["a"], lambda c: None, 2) is None
+    assert _choice.fastest_of_rounds(["a"], lambda c: None, 2) is None
+    # a timer that recorded nothing (0) is no sample; bursts and a hook per round
+    hooks, seq = [], iter([0.0, 2.0, 1.5, 0.0, 0.0, 0.0])
+    t = _choice.fastest_of_rounds(["a", "b"], lambda c: next(seq), 2, burst=1,
+                                  each_round=lambda: hooks.append(1))
+    assert t == {"a": 0.0, "b": 1.5}              # a's two timers recorded nothing
+    assert hooks == [1, 1]
+    seq = iter([3.0, 1.0, 0.0, 0.0])
+    assert _choice.fastest_of_rounds(["a", "b"], lambda c: next(seq), 1, burst=2) == {"a": 1.0, "b": 0.0}
 
 
 def test_the_screen_offers_later_stages_the_earlier_times():

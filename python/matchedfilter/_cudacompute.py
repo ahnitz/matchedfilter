@@ -21,7 +21,6 @@ import threading
 
 import numpy as np
 
-from ._coarse import TILE_PROBE
 from . import _config, _cuda, _gputime, _kernels
 from ._cuda import check_cuda
 from ._errors import UnsupportedSize
@@ -677,6 +676,10 @@ class Context(Executor, InputUploads):
         self.sm_count = self._attr(_cuda._CUDA_DEVICE_ATTR_MULTIPROCESSOR_COUNT) or 1
         self.cc = (self._attr(_cuda._CUDA_DEVICE_ATTR_COMPUTE_CAPABILITY_MAJOR),
                    self._attr(_cuda._CUDA_DEVICE_ATTR_COMPUTE_CAPABILITY_MINOR))
+        # A block's limits, what the coarse candidates are held to (_coarse.candidates).
+        self.max_invocations = self._attr(_cuda._CUDA_DEVICE_ATTR_MAX_THREADS_PER_BLOCK) or 1024
+        self.max_shared_memory = (self._attr(_cuda._CUDA_DEVICE_ATTR_MAX_SHARED_MEMORY_PER_BLOCK)
+                                  or 48 * 1024)
 
         if hasattr(self.cuda, "cuDevicePrimaryCtxRetain"):
             check_cuda(
@@ -1072,18 +1075,14 @@ class Context(Executor, InputUploads):
         raise ValueError(name)
 
     def _x_coarse_candidates(self, band):
-        """Every coarse layout (subgroup 0: the warp, ppg, tile, twt) shipped at this band; a
-        missing build is skipped."""
-        cands = []
-        for tile in (1,) + TILE_PROBE:
-            for ppg in (1, 2, 4, 8, 16):
-                for twt in (0, 1):
-                    rec = _shipped(self._stem(band, "fusedTierB", c16=True, ppg=ppg, tile=tile,
-                                              twt=bool(twt)))
-                    # 1024 threads: the most a CUDA block holds on every compute capability.
-                    if rec is not None and rec["local_size"][0] <= 1024:
-                        cands.append((0, ppg, tile, twt))
-        return cands
+        """Every coarse layout (subgroup 0: the warp, ppg, tile, twt) at this band
+        (_coarse.candidates): each shipped build this device's block limits hold
+        (MAX_THREADS_PER_BLOCK, MAX_SHARED_MEMORY_PER_BLOCK), its twiddles computed or from
+        the fp16 table (the "w" builds)."""
+        from ._coarse import candidates
+        return candidates(band, lambda ppg, tile, twt: _shipped(self._stem(
+                              band, "fusedTierB", c16=True, ppg=ppg, tile=tile, twt=bool(twt))),
+                          lambda tile: (0, 1), self.max_invocations, self.max_shared_memory)
 
     def _x_time(self, native, binds, reps):
         """The least device time of `reps` runs (stream events), after one warm-up run."""
