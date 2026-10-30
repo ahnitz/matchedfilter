@@ -208,10 +208,10 @@ _SEED = 13
 def _engine_lags(n, bands, window):
     """(w0, w1, c0, c1): the fine lags [w0, w1) and each band's coarse lags [c0, c1) the engine
     searches for `window` (hmf.c: one coarse sample past each end inside the block)."""
+    from ._windows import coarse_lags
     w0, w1 = (0, n) if window is None else (int(window[0]), int(window[1]))
-    c0 = tuple(max(w0 // (n // b) - 1, 0) if w0 > 0 else 0 for b in bands)
-    c1 = tuple(min(-(-w1 // (n // b)) + 1, b) for b in bands)
-    return w0, w1, c0, c1
+    lags = [coarse_lags(n, b, w0, w1) for b in bands]
+    return w0, w1, tuple(c[0] for c in lags), tuple(c[1] for c in lags)
 
 
 #: Rows per block of the signal simulation's arrival draws (_arrivals): a row's arrival depends
@@ -605,14 +605,9 @@ def noise_block_maxima(power, n, bands, nsim=_NOISE_BLOCKS, seed=_SEED, window=N
     # Each band's coarse statistic is circularly stationary over its lags (independent
     # bins), so a window's maximum depends only on how many lags it covers, not where:
     # simulate lags [0, count) per band, and windows of equal span share one simulation.
-    counts = []
-    for b in bands:
-        R = n // b
-        c0 = max(win[0] // R - 1, 0) if win[0] > 0 else 0
-        # the engine's coarse lags for the window: one sample past each end (hmf.c)
-        c1 = min(-(-win[1] // R) + 1, b)
-        counts.append(max(c1 - c0, 1))
-    counts = tuple(counts)
+    from ._windows import coarse_lags
+    # the engine's coarse lags for the window (one sample past each end)
+    counts = tuple(int(c1 - c0) for c0, c1 in (coarse_lags(n, b, win[0], win[1]) for b in bands))
     key = _key(p, n, bands, int(nsim), int(seed), counts)
     hit = _NOISE_CACHE.get(key)
     if hit is not None:
