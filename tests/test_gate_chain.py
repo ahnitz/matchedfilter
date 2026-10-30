@@ -708,38 +708,6 @@ def test_choice_cache_keys_on_cost_content_not_identity(monkeypatch):
     assert gc.choose_chain(prof, 2048, 6.0, 1e-3, cost=same, window=(192, 1856))[0] is b   # content hit
 
 
-def test_bounding_first_tier_excess_is_priced():
-    """A first tier that reports a bound passes extra pairs; the model charges the next stage."""
-    gc = mf.gatechain
-    dense = {256: 10.0, 512: 30.0}
-    sparse = {256: [(0.01, 40.0), (0.1, 35.0)], 512: [(0.01, 60.0), (0.1, 50.0)]}
-    refine = [(0.01, 1000.0), (0.1, 900.0)]
-    plain = gc.CostModel(2048, dense, sparse, refine)
-    bound = gc.CostModel(2048, dense, sparse, refine,
-                         excess={256: [(0.01, 0.0108), (0.1, 0.105)]})
-    assert plain.pass_excess(256, 0.02) == 1.0
-    assert 1.05 < bound.pass_excess(256, 0.02) < 1.08
-    assert bound.pass_excess(512, 0.02) == 1.0          # no row for this band
-    reach = [1.0, 0.02, 0.002]
-    extra = bound.chain_cost((256, 512), reach) - plain.chain_cost((256, 512), reach)
-    r1 = 0.02 * bound.pass_excess(256, 0.02)
-    assert extra == pytest.approx(r1 * plain.sparse(512, r1) - 0.02 * plain.sparse(512, 0.02))
-    assert extra > 0
-    import json
-    rt = gc.CostModel.from_dict(json.loads(json.dumps(bound.to_dict())))
-    assert rt.signature() == bound.signature()
-
-
-def test_gpu_gate_kind_keys(monkeypatch):
-    gc = mf.gatechain
-    monkeypatch.setattr(gc, "_is_gpu", lambda d: d.startswith("gpu"))
-    monkeypatch.delenv("MF_COARSE_RAW", raising=False)
-    assert gc.gpu_gate_kind("gpu:0") == "c16b"
-    assert gc.gpu_gate_kind("cpu") == "f32"
-    monkeypatch.setenv("MF_COARSE_RAW", "1")
-    assert gc.gpu_gate_kind("gpu:0") == "f32"
-
-
 def test_the_band_forward_is_priced_on_gpus_only():
     """Every GPU backend can claim its forward; a CPU never does (its device has a backend
     name too, AVX2/AVX3, which the pricing once took for a GPU's)."""
@@ -776,9 +744,11 @@ def test_legacy_host_costs_do_not_change_chain_ranking():
     cm = gc.CostModel(
         2048, {256: 10.0, 512: 18.0}, {512: [(0.01, 20.0), (0.1, 18.0)]},
         [(0.001, 100.0), (0.01, 80.0)], block=300.0, feed={"band": {256: 0.0, 512: 4.0}, "full": 60.0},
-        screen={256: {"dense": 6.0, "recheck": 10.0, "excess": [(0.01, 0.02), (0.1, 0.15)]}},
-        excess={256: [(0.01, 0.02), (0.1, 0.15)]})
-    legacy = dict(cm.to_dict(), host_call=1e20, host_block=1e15)
+        screen={256: {"dense": 6.0, "recheck": 10.0, "excess": [(0.01, 0.02), (0.1, 0.15)]}})
+    # a stored model's obsolete entries load and are ignored: host costs, and the excess of
+    # the fp16 coarse bound the GPU tier no longer reports
+    legacy = dict(cm.to_dict(), host_call=1e20, host_block=1e15,
+                  excess={"256": [[0.01, 0.02], [0.1, 0.15]]})
     rt = gc.CostModel.from_dict(json.loads(json.dumps(legacy)))
     assert rt.to_dict() == cm.to_dict()
     assert rt.signature() == cm.signature()

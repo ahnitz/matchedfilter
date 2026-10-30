@@ -16,7 +16,7 @@ class _Resident(np.ndarray):
     """A series in the probe's device memory (Plan.empty_shared)."""
 
 
-def _probe_calibration(monkeypatch, kind="f32", step=0.0, host=1.0, spell=None, reps=2, lost=None):
+def _probe_calibration(monkeypatch, step=0.0, host=1.0, spell=None, reps=2, lost=None):
     """Exercise the real calibration with deterministic device times and survivor counts.
     step: device time a two-tier call adds whenever anything passes its first tier.
     host: how much slower a call runs on a series copied from the host than on one resident
@@ -25,11 +25,10 @@ def _probe_calibration(monkeypatch, kind="f32", step=0.0, host=1.0, spell=None, 
     lost(i): whether the i-th call's timer records nothing (a rejected timestamp pair)."""
     n, blocks, nt = 256, 16, 64
     inputs = _calibration._gpu_cal_inputs(n, blocks, nt, 11)
-    calls, raw_calls = [], []
+    calls = []
     dense = {64: 2.0, 128: 4.0}
     # per block: the band forward at the widest band (the backend's feed), or the full forward
     band_feed, full_feed = {64: 0.0, 128: 3.0}, 20.0
-    bound = 2.0 if kind != "f32" else 1.0
 
     class Plan:
         def __init__(self, size, ndata, ntemplates, chain, device):
@@ -51,7 +50,7 @@ def _probe_calibration(monkeypatch, kind="f32", step=0.0, host=1.0, spell=None, 
             calls.append((len(series), len(starts)))
             assert len(ws) == len(we) == len(starts)
             pairs = len(starts) * self.nt
-            first = int(pairs * min(1.0, bound * math.exp(-self.thresholds[0])))
+            first = int(pairs * min(1.0, math.exp(-self.thresholds[0])))
             refined = first
             ns = len(starts) * 100.0 + pairs * dense[self.chain[0]]
             ns += len(starts) * (full_feed if self._gpu.feed_forced is False
@@ -68,18 +67,11 @@ def _probe_calibration(monkeypatch, kind="f32", step=0.0, host=1.0, spell=None, 
                 # The reference says the device currently runs twice as slowly.
                 self.log.extend([("run", 2 * ns / 1e6), ("k:coarse", 999.0)])
 
-    def raw_survivors(*args):
-        raw_calls.append(args)
-        return [(b, g, int(blocks * nt * math.exp(-g)))
-                for b in dense for g in (2.0, 4.0)]
-
     monkeypatch.setattr(mf, "HierarchicalFilter", Plan)
     monkeypatch.setattr(gc, "_COSTS", {})
     monkeypatch.setattr(gc, "_cost_file", lambda: None)
     monkeypatch.setattr(_calibration, "_gpu_cal_inputs", lambda *args: inputs)
-    monkeypatch.setattr(gc, "gpu_gate_kind", lambda device: kind)
     monkeypatch.setattr(gc, "_is_gpu", lambda device: True)
-    monkeypatch.setattr(_calibration, "_raw_gate_survivors", raw_survivors)
     monkeypatch.setattr(_calibration, "_clock_ref", lambda device: SimpleNamespace(anchor=2.0, time=lambda: 4.0))
     # Skip the wall-clock warm-up wait; this probe has no physical device to warm.
     with monkeypatch.context() as clock_patch:
@@ -87,15 +79,13 @@ def _probe_calibration(monkeypatch, kind="f32", step=0.0, host=1.0, spell=None, 
         cm = _calibration.calibrate_costs_gpu(n, "probe", blocks=blocks, reps=reps, nt=nt)
     expected_shape = (len(inputs[1]), blocks)
     metrics = {"device_calls": len(calls),
-               "host_only_calls": sum(shape != expected_shape for shape in calls),
-               "raw_gate_calls": len(raw_calls)}
+               "host_only_calls": sum(shape != expected_shape for shape in calls)}
     return cm, metrics
 
 
-@pytest.mark.parametrize("kind", ["f32", "c16b"])
-def test_calibration_recovers_active_costs(monkeypatch, kind):
-    """Removing unused batches preserves clock correction, tier prices, and gate excess."""
-    cm, metrics = _probe_calibration(monkeypatch, kind)
+def test_calibration_recovers_active_costs(monkeypatch):
+    """Removing unused batches preserves clock correction and tier prices."""
+    cm, metrics = _probe_calibration(monkeypatch)
     assert cm.block == pytest.approx(100.0)
     assert cm.feed == {"band": pytest.approx({64: 0.0, 128: 3.0}), "full": pytest.approx(20.0)}
     assert cm.dense == pytest.approx({64: 2.0, 128: 4.0})
@@ -103,19 +93,11 @@ def test_calibration_recovers_active_costs(monkeypatch, kind):
         assert cm.refine(density) == pytest.approx(80.0)
         assert cm.sparse(128, density) == pytest.approx(10.0)
     assert metrics["host_only_calls"] == 0
-    assert metrics["raw_gate_calls"] == (kind != "f32")
-    if kind == "f32":
-        assert cm.excess == {}
-    else:
-        expected = sorted((int(1024 * math.exp(-g)) / 1024,
-                           int(2048 * math.exp(-g)) / 1024) for g in (2.0, 4.0))
-        np.testing.assert_array_equal(cm.excess[64], expected)
-        np.testing.assert_array_equal(cm.excess[128], expected)
 
 
 def test_a_model_measured_with_other_calls_is_kept_apart(monkeypatch):
     """A model is kept under the calls it measured (blocks, rounds, seed, templates): under
-    (n, device, gate kind) alone, whichever calibration ran first was every later one's."""
+    (n, device) alone, whichever calibration ran first was every later one's."""
     cm, _ = _probe_calibration(monkeypatch, reps=2)
     assert _calibration.calibrate_costs_gpu(256, "probe", blocks=16, reps=2, nt=64) is cm
     with monkeypatch.context() as clock_patch:

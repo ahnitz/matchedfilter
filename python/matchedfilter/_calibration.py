@@ -1,7 +1,6 @@
 """Measuring this machine's tier costs through the engine itself: the CPU and GPU cost-model
 calibrations, the per-device block costs and the block-size pricing that uses them. They run
 hierarchical plans, so they sit above the model (gatechain), which they feed."""
-import os
 import time
 
 import numpy as np
@@ -361,7 +360,7 @@ def _clock_ref(device):
 #: and prices a second tier (_sparse_rows, the slope) and the feeds (the band forward at each
 #: widest band and the full forward, against the head's), in its models' store key: a model
 #: stored with another method is measured afresh.
-_GPU_CAL_METHOD = "slope,resident,warm,feed"
+_GPU_CAL_METHOD = "slope,resident,warm,feed,own"
 
 #: Calls of a configuration back to back within each round of calibrate_costs_gpu (runs).
 _BURST = 3
@@ -428,16 +427,13 @@ def calibrate_costs_gpu(n, device, blocks=None, reps=_GPU_CAL_REPS, seed=_GPU_CA
     from . import HierarchicalFilter
     span = max(64, (1024 * 2048) // int(n))
     blocks = span if blocks is None else int(blocks)
-    kind = _gc.gpu_gate_kind(device)
     # Kept apart by the calls measured, as calibrate_costs' models are.
     how = (blocks, int(reps), int(seed), int(nt))
-    key = ("gpu", int(n), str(device), kind) + how
+    key = ("gpu", int(n), str(device)) + how
     if key in _gc._COSTS:
         return _gc._COSTS[key]
     path = _gc._cost_file()
-    # Keyed by gate kind: a model measured with the bound off (or before it existed) prices a
-    # different first tier, and must not be reused for this one.
-    skey = ("gpu,%d,%s" % (int(n), str(device)) + ("" if kind == "f32" else "," + kind)
+    skey = ("gpu,%d,%s" % (int(n), str(device))
             + "," + _GPU_CAL_METHOD
             + ("" if how == (span, _GPU_CAL_REPS, _GPU_CAL_SEED, _GPU_CAL_TEMPLATES) else ",b%d,r%d,s%d,t%d" % how))
     if path is not None:
@@ -577,15 +573,6 @@ def calibrate_costs_gpu(n, device, blocks=None, reps=_GPU_CAL_REPS, seed=_GPU_CA
         sparse[b] = _sparse_rows(pts, head, blocks * nt)
     if bands[1:]:
         sparse.setdefault(b0, list(sparse.get(bands[1], [])))
-    # The first tier's pass excess over its own statistic, per band: the same threshold,
-    # refined pairs with the gate's bound on against off. Only where the backend has a bound.
-    # The raw gate runs in a child process: the switch is read where pipelines are built
-    # and baked into recorded command buffers, so it cannot be flipped inside one context.
-    excess = {}
-    if kind != "f32":
-        for b, g, r_raw in _raw_gate_survivors(n, device, bands, blocks, nt, seed):
-            r_bnd = refined_pairs((b,), (g,))
-            excess.setdefault(b, []).append((r_raw / (blocks * nt), r_bnd / (blocks * nt)))
     # Every time to the reference's anchor units: the fastest reference of the calibration
     # against its fastest in this process (see _ClockRef), so models at different n, made at
     # different times, stay comparable.
@@ -596,7 +583,7 @@ def calibrate_costs_gpu(n, device, blocks=None, reps=_GPU_CAL_REPS, seed=_GPU_CA
     refine = [(f, v * k) for f, v in refine]
     sparse = {b: [(f, v * k) for f, v in rows] for b, rows in sparse.items()}
     feed = {"band": {b: v * k for b, v in feed["band"].items()}, "full": feed["full"] * k}
-    cm = _gc.CostModel(n, dense, sparse, refine, block=block, excess=excess, feed=feed)
+    cm = _gc.CostModel(n, dense, sparse, refine, block=block, feed=feed)
     if path is not None:          # another process's model, stored first, is the one used
         cm = _gc.CostModel.from_dict(_gc._store_first(path, skey, cm.to_dict(), _gc._cost_model_ok))
     _gc._COSTS[key] = cm
@@ -618,46 +605,6 @@ def _gpu_cal_inputs(n, blocks, nt, seed):
     starts = (np.arange(blocks) * step).astype(np.int64)
     ws = np.full(blocks, taps, np.int64); we = np.full(blocks, n, np.int64)
     return spec, ser, starts, ws, we
-
-
-def _raw_survivors_here(n, device, bands, blocks, nt, seed):
-    """[(band, threshold, refined pairs)] with this process's gate, at thresholds placed at
-    _CAL_DENSITIES: run by _raw_gate_survivors in a child with the raw switch set."""
-    from . import HierarchicalFilter
-    spec, ser, starts, ws, we = _gpu_cal_inputs(n, blocks, nt, seed)
-    out = []
-    for b in bands:
-        p = HierarchicalFilter(n, 1, nt, chain=(int(b),), device=device)
-        p.set_templates(spec)
-
-        def refined(g):
-            p.set_coarse_threshold((g,))
-            p.run_series(ser, starts, ws, we, threshold=1e6)
-            return p._gpu.last_refinements
-
-        for f in _gc._CAL_DENSITIES:
-            g = _pass_threshold(lambda t: refined(t) / (blocks * nt), f, b * (n - n // 4) // n)
-            out.append((int(b), float(g), int(refined(g))))
-    return out
-
-
-def _raw_gate_survivors(n, device, bands, blocks, nt, seed):
-    row = _gc._RAW_GATE_SWITCH
-    if not _gc._is_gpu(device):
-        return []
-    import json, subprocess, sys
-    env = dict(os.environ)
-    env[row[0]] = row[1]
-    env.pop("MF_COST_FILE", None)
-    code = ("import json,sys; from matchedfilter import _calibration as g; "
-            "print(json.dumps(g._raw_survivors_here(%d, %r, %r, %d, %d, %d)))"
-            % (int(n), str(device), [int(b) for b in bands], int(blocks), int(nt), int(seed)))
-    pkg = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    env["PYTHONPATH"] = pkg + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
-    res = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True)
-    if res.returncode != 0:
-        raise RuntimeError("raw-gate calibration failed: %s" % res.stderr[-2000:])
-    return [tuple(r) for r in json.loads(res.stdout.strip().splitlines()[-1])]
 
 
 def device_costs(n, device=None, ntemplates=_gc._CAL_TEMPLATES, group=None):

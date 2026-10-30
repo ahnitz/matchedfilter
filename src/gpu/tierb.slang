@@ -324,43 +324,14 @@ typedef half2 H;
 //: A pair index that writes nothing: the clamped tail of a ragged tile.
 static const uint NOPAIR = 0xFFFFFFFFu;
 
-//: The coarse tier's ERROR BOUND (docs/vulkan-8060s-roofline.md section 10). The
-//: value a pair reports is an upper bound on its exact coarse maximum, not the fp16
-//: maximum itself:
-//:
-//:     B = |c16| (1 + 3u) + C16_KAPPA u rms(y),   u = 2^-11,  rms(y)^2 = sum_j |x_j|^2
-//:
-//: (1 + 3u) is proven: the lag is chosen on fp16 |v|^2 (two roundings, within
-//: (1 +- u)^2 of the fp16 transform's power), so the fp16 maximum is at most
-//: |c16| (1+u)/(1-u). C16_KAPPA u rms covers the transform's own rounding error at
-//: that lag: z sigma_B with sigma_B the band's measured error rms (in u rms units)
-//: and z the one-sided normal quantile of the per-pair failure target, both set at
-//: build time (tools/coarse_layout.py). rms is over all lags (Parseval: the inputs'
-//: energy), so a loud out-of-window glitch raises the bound with it.
-#ifndef C16_KAPPA
-#define C16_KAPPA 0.0
-#endif
-static const float C16_U = 4.8828125e-4f;          // 2^-11
-float2 c16Bound(float2 v, float energy)
-{
-    if (mfC16Bound == 0u) return v;
-    float m = length(v);
-    float b = m * (1.0f + 3.0f * C16_U) + float(C16_KAPPA) * C16_U * sqrt(energy);
-    return (m > 0.0f) ? v * (b / m) : float2(b, 0.0f);
-}
-
-//: Sum of one float per thread over a pair's WG threads through the stage, the
-//: result on every thread. Uniform control flow; leaves the stage free again.
-float pairSum(uint tid, float v)
-{
-    GroupMemoryBarrierWithGroupSync();
-    stg[_stgBase + tid] = asuint(v);
-    GroupMemoryBarrierWithGroupSync();
-    float t = 0.0f;
-    for (uint k = 0; k < WG; ++k) t += asfloat(stg[_stgBase + k]);
-    GroupMemoryBarrierWithGroupSync();
-    return t;
-}
+//: The coarse tier reports ITS OWN STATISTIC: the fp16 transform's value at the lag its
+//: fp16 power elects, which a pair passes on as any tier passes on its maximum. Its
+//: rounding error moves pairs near the threshold either way, and what that does to the
+//: search is accepted by the chain's false dismissal against the flat filter
+//: (tools/fdr_audit.py --device), as for every narrow first tier (the CPU's Q15 screen).
+//: An error bound in its place (|c16| (1 + 3u) + kappa u rms, kappa from a measured
+//: error table) passed so much more than the plan priced that single-tier chains
+//: dismissed 0.2-0.3x their budget, and the raw maximum dismissed it (2026-10-29).
 
 //: Complex multiply by a twiddle that is the SAME for both transforms, so
 //: wr/wi broadcast to both lanes. Four v_pk_* and nothing else.
@@ -923,16 +894,6 @@ void filterPair(uint pair, uint tid,
     // clears it, often nothing at all in a given bin. Seeding at zero rather
     // than -1 also means a bin whose every |v|^2 underflowed reports index
     // -1 instead of naming the first sample, matching the CPU.
-#if COARSE16
-    // The pair's energy over all lags, for the coarse error bound (c16Bound),
-    // before the peak tables take the stage over.
-    float energy = 0.0f;
-    MF_UNROLL for (uint i = 0; i < R; ++i) {
-        float _ex = float(r[i].x), _ey = float(r[i].y);
-        energy += _ex * _ex + _ey * _ey;
-    }
-    energy = pairSum(tid, energy) / float(N);
-#endif
     GroupMemoryBarrierWithGroupSync();          // transform is done with stg
 #if SINGLE_BIN
 #if MF_GATE_ONLY && !COARSE16 && NLEN <= 1024
@@ -1097,7 +1058,7 @@ void filterPair(uint pair, uint tid,
         // NOPAIR: a ragged group's spare slot (filterPair), computed for its barriers only.
         if (pair != NOPAIR && winner != 0xffffffffu && winner == wslot) {
             peakIdx[pair] = int(slotToIndex(wslot));
-            peakVal[pair] = c16Bound(float2(float(bestV.x), float(bestV.y)), energy);
+            peakVal[pair] = float2(float(bestV.x), float(bestV.y));
         }
         if (pair != NOPAIR && tid == 0 && wslot == 0xffffffffu) {
             peakIdx[pair] = -1;
@@ -1205,11 +1166,7 @@ void filterPair(uint pair, uint tid,
         MF_UNROLL for (uint i = 0; i < R; ++i) {
             if (tid * R + i == stg[_stgBase+1]) {
                 peakIdx[pair] = int(slotToIndex(tid * R + i));
-#if COARSE16
-                peakVal[pair] = c16Bound(float2(float(r[i].x), float(r[i].y)), energy);
-#else
                 peakVal[pair] = float2(float(r[i].x), float(r[i].y));
-#endif
             }
         }
         if (tid == 0 && stg[_stgBase+1] == 0xffffffffu) {
@@ -1271,7 +1228,7 @@ void filterPair(uint pair, uint tid,
 //: is what catches it.
 void peakLane(uint pair, uint tid, uint lane, H magv[16], H re[16], H im[16],
               RWStructuredBuffer<int> peakIdx, RWStructuredBuffer<float2> peakVal,
-              uint winStart, uint winEnd, uint thrBits, float energy)
+              uint winStart, uint winEnd, uint thrBits)
 {
     GroupMemoryBarrierWithGroupSync();
     if (tid == 0) { stg[_stgBase] = thrBits; stg[_stgBase+1] = 0xffffffffu; }
@@ -1313,8 +1270,8 @@ void peakLane(uint pair, uint tid, uint lane, H magv[16], H re[16], H im[16],
     MF_UNROLL for (uint i = 0; i < R; ++i) {
         if (pair != NOPAIR && stg[_stgBase+1] == tid*R+i) {
             peakIdx[pair] = int(slotToIndex(tid*R+i));
-            peakVal[pair] = c16Bound(float2(float(lane == 0u ? re[i].x : re[i].y),
-                                            float(lane == 0u ? im[i].x : im[i].y)), energy);
+            peakVal[pair] = float2(float(lane == 0u ? re[i].x : re[i].y),
+                                   float(lane == 0u ? im[i].x : im[i].y));
         }
     }
     if (pair != NOPAIR && tid == 0 && stg[_stgBase+1] == 0xffffffffu) {
@@ -1365,21 +1322,12 @@ void peakTwoWave(uint pairA, uint pairB, uint tid, H re[16], H im[16],
     uint u0 = slotToIndex(tid * R) - winStart;      // idx - winStart, wrapping
     uint span = winEnd - winStart;
     uint kA = 0u, kB = 0u;
-    // Energy, both pairs, all lags, from values scaled by 2^-6 (exact): |v|^2
-    // overflows fp16 past |v| = 256, which out-of-window lags of an ordinary
-    // pair reach, and an inf energy would pass every pair. Scaled, a lag reaches
-    // 16384 and the band's sum (x 2^-12) fits; only a value that overflowed
-    // the transform itself makes it inf, and then the pair passes, as it must.
-    H en = H(0.0f);
-    const H esc = H(0.015625f);
 #if defined(MF_METAL)
     uint ovAcc = 0u;
 #endif
     MF_UNROLL for (uint i = 0; i < R; ++i) {
         bool live = (u0 + slotToIndex(i)) < span;  // winStart <= idx < winEnd
         H mg = mag2s(re[i], im[i]);
-        H sr = re[i] * esc, si = im[i] * esc;
-        en += sr * sr + si * si;
         uint m = live ? bit_cast<uint>(mg) : 0u;
 #if defined(MF_METAL)
         // FAIL OPEN on fp16 overflow, per lane (A low half, B high half): an exponent
@@ -1403,11 +1351,7 @@ void peakTwoWave(uint pairA, uint pairB, uint tid, H re[16], H im[16],
     [ForceUnroll] for (uint s = 1; s < WG; s <<= 1) {
         kA = max(kA, mfShflXor(kA, s));
         kB = max(kB, mfShflXor(kB, s));
-        en += bit_cast<H>(mfShflXor(bit_cast<uint>(en), s));
     }
-    // The transform's energy over all lags is N times the inputs' (Parseval), so
-    // the per-lag rms the bound needs is energy / N.
-    float enA = float(en.x) * (4096.0f / float(N)), enB = float(en.y) * (4096.0f / float(N));
     uint slotA = 0xFFFFu - (kA & 0xFFFFu), slotB = 0xFFFFu - (kB & 0xFFFFu);
     // FAIL OPEN on overflow. Keys compare as unsigned, so a NaN or inf |v|^2
     // (bits >= 0x7C00: a loud pair overflowing fp16) outranks every finite one and
@@ -1447,12 +1391,12 @@ void peakTwoWave(uint pairA, uint pairB, uint tid, H re[16], H im[16],
     if (tid == 0 && pairA != NOPAIR) {
         peakIdx[pairA] = hitA ? int(slotToIndex(slotA)) : -1;
         peakVal[pairA] = infA ? float2(3.402823e38f, 0.0f)
-                       : (hitA ? c16Bound(float2(vA[0], vA[1]), enA) : float2(0.0f, 0.0f));
+                       : (hitA ? float2(vA[0], vA[1]) : float2(0.0f, 0.0f));
     }
     if (tid == 0 && pairB != NOPAIR) {
         peakIdx[pairB] = hitB ? int(slotToIndex(slotB)) : -1;
         peakVal[pairB] = infB ? float2(3.402823e38f, 0.0f)
-                       : (hitB ? c16Bound(float2(vB[0], vB[1]), enB) : float2(0.0f, 0.0f));
+                       : (hitB ? float2(vB[0], vB[1]) : float2(0.0f, 0.0f));
     }
 }
 
@@ -1463,16 +1407,10 @@ void peakTwoWave(uint pairA, uint pairB, uint tid, H re[16], H im[16],
 //: threshold, and nothing reads tier 0's index. peakTwoWave elects the winning slot
 //: (packed keys), reads its (re, im) back through threadgroup memory and tests every
 //: register for overflow; on the M2 those cost ~25% of the band-256 gate beyond what this
-//: needs. Here every pair reports its bound straight from packed half2 reductions:
-//:
-//:     B = sqrt(P16max) (1 + 2u) + C16_KAPPA u rms(y)
-//:
-//: P16max is the largest fp16 |v|^2 in the window. Every fp16 power (one to three
-//: roundings) is within (1 +- u)^2 of the fp16 transform's |y16|^2, so |y16|max <=
-//: sqrt(P16max) / (1 - u) < sqrt(P16max) (1 + 2u): the same guarantee peakTwoWave's
-//: |y16(k')| (1 + 3u) gives, from the maximum itself rather than from the element at the
-//: lag it names. rms(y) is peakTwoWave's energy term, bit for bit. Index: 0 for a passing
-//: pair (a lag in the band), -1 otherwise.
+//: needs. Here every pair reports sqrt(P16max), P16max the largest fp16 |v|^2 in the
+//: window, straight from packed half2 reductions: the tier's own statistic, as
+//: peakTwoWave's elected element is. The all-lag energy is kept for failing open only.
+//: Index: 0 for a passing pair (a lag in the band), -1 otherwise.
 //:
 //: Taken when the host passes the gate threshold (magnitude bits) in thrBits; with 0,
 //: peakTwoWave runs and reports its elected element.
@@ -1495,22 +1433,16 @@ void peakTwoGate(uint pairA, uint pairB, uint tid, H re[16], H im[16],
         en += bit_cast<H>(mfShflXor(bit_cast<uint>(en), s));
     }
     // FAIL OPEN. An inf or NaN anywhere in the transform makes the all-lag energy inf or
-    // NaN (sums propagate them), and so does |v| >= 2^14 anywhere, which peakTwoWave's own
-    // energy turns into an inf bound; an in-window power past fp16 range elects as +inf in
-    // peakTwoWave's keys. Each is an exponent field of all ones, tested as bits (exact
-    // under fast math), and passes with +inf.
+    // NaN (sums propagate them, where the packed max may drop a NaN), and so does
+    // |v| >= 2^14 anywhere; an in-window power past fp16 range is +inf in best. Each is an
+    // exponent field of all ones, tested as bits (exact under fast math), and passes with
+    // +inf.
     uint eb = bit_cast<uint>(en), bb = bit_cast<uint>(best);
     bool infA = (eb & 0x7C00u) == 0x7C00u || (bb & 0x7C00u) == 0x7C00u;
     bool infB = (eb & 0x7C000000u) == 0x7C000000u || (bb & 0x7C000000u) == 0x7C000000u;
-    // fp32 from here; the 1.0001 covers this arithmetic's own rounding.
-    const float k1 = (1.0f + 2.0f * C16_U) * 1.0001f;
-    const float k2 = (mfC16Bound != 0u ? float(C16_KAPPA) : 0.0f) * C16_U * 1.0001f;
-    float mA = sqrt(float(best.x)), mB = sqrt(float(best.y));
-    // Parseval: the per-lag mean power is energy / N (x 2^12 for the 2^-6 scaling).
-    float bA = mA * k1 + k2 * sqrt(float(en.x) * (4096.0f / float(N)));
-    float bB = mB * k1 + k2 * sqrt(float(en.y) * (4096.0f / float(N)));
-    bool hitA = infA || (mA > 0.0f && bA >= thr);
-    bool hitB = infB || (mB > 0.0f && bB >= thr);
+    float bA = sqrt(float(best.x)), bB = sqrt(float(best.y));
+    bool hitA = infA || (bA > 0.0f && bA >= thr);
+    bool hitB = infB || (bB > 0.0f && bB >= thr);
     if (tid == 0 && pairA != NOPAIR) {
         peakIdx[pairA] = hitA ? 0 : -1;
         peakVal[pairA] = infA ? float2(3.402823e38f, 0.0f) : (hitA ? float2(bA, 0.0f) : float2(0.0f, 0.0f));
@@ -1607,17 +1539,10 @@ void filterTwo(uint pairA, uint pairB, uint tA, uint tB, uint tid,
         peakTwoWave(pairA, pairB, tid, re, im, peakIdx, peakVal, winStart, winEnd, thrBits);
     } else {
         H magv[16];
-        // Energy from values scaled by 2^-6 (exact), as in peakTwoWave: the fp16 |v|^2
-        // overflows past |v| = 256, which ordinary pairs reach at bands >= 1024, and an
-        // inf energy made c16Bound report every such pair as +-inf -- passing it.
-        H en = H(0.0f);
-        const H esc = H(0.015625f);
         MF_UNROLL for (uint i = 0; i < R; ++i) {
             uint idx = slotToIndex(tid * R + i);
             bool live = (idx >= winStart && idx < winEnd);
             H mg = mag2s(re[i], im[i]);
-            H sr = re[i] * esc, si = im[i] * esc;
-            en += sr * sr + si * si;
             magv[i] = live ? mg : H(0.0f);
             // FAIL OPEN on fp16 overflow, per lane (see filterOne): an exponent field of
             // all ones in re or im makes that lane's magnitude +inf, which peakLane elects
@@ -1633,11 +1558,8 @@ void filterTwo(uint pairA, uint pairB, uint tA, uint tB, uint tid,
                 magv[i] = bit_cast<H>(mb);
             }
         }
-        float eA = float(en.x) * 4096.0f, eB = float(en.y) * 4096.0f;
-        eA = pairSum(tid, eA) / float(N);
-        eB = pairSum(tid, eB) / float(N);
-        peakLane(pairA, tid, 0u, magv, re, im, peakIdx, peakVal, winStart, winEnd, thrBits, eA);
-        peakLane(pairB, tid, 1u, magv, re, im, peakIdx, peakVal, winStart, winEnd, thrBits, eB);
+        peakLane(pairA, tid, 0u, magv, re, im, peakIdx, peakVal, winStart, winEnd, thrBits);
+        peakLane(pairB, tid, 1u, magv, re, im, peakIdx, peakVal, winStart, winEnd, thrBits);
     }
 }
 #endif

@@ -12,9 +12,6 @@
 // the gRowWin buffer, in this kernel's own samples (a coarse tier's mapped onto its band
 // by the host).
 [[vk::constant_id(76)]] const uint mfRowWindows = 0;
-// The fp16 coarse tier's error bound (C16_KAPPA): 1 applies it (the default the host
-// uses), 0 reports the raw fp16 maximum -- for measuring the bound's margin use only.
-[[vk::constant_id(77)]] const uint mfC16Bound = 1;
 // The fp16 coarse tier's data scale, as float bits (1.0 by default): an exact power of
 // two applied to each data element before it is rounded to half (tierb.slang dload), so
 // the tier's values sit where fp16 holds them whatever the caller's units. The host
@@ -40,17 +37,6 @@ static const uint mfAccurateTrig = 0;
 // Per-row windows: CUDA takes the table as the entry's last argument and a window start of
 // ROWWIN_ON switches it on (tierb.slang rowWindow), so no constant is needed.
 static const uint mfRowWindows = 0;
-// The fp16 bound switch (constant 77 on Vulkan) as a module __constant__ the host writes
-// (cuModuleGetGlobal "mf_c16_raw"): zero-initialized, so the bound applies unless the host
-// asks for the raw maximum (MF_VK_C16_BOUND=0, for measuring the bound's margin).
-__target_intrinsic(cuda, "(mf_c16_raw)")
-uint mfC16RawValue();
-uint mfC16RawFlag()
-{
-    __requirePrelude("extern \"C\" __constant__ unsigned int mf_c16_raw;");
-    return mfC16RawValue();
-}
-#define mfC16Bound (1u - mfC16RawFlag())
 static const uint mfSubgroupSize = 32;
 #elif defined(MF_METAL)
 // The coarse transform's twiddle source (constant 80 on Vulkan) as an MSL preprocessor macro
@@ -102,24 +88,12 @@ uint mfRowWindowsFlag()
     return mfRowWindowsValue();
 }
 #define mfRowWindows mfRowWindowsFlag()
-// The fp16 bound switch (constant 77 on Vulkan) as an MSL preprocessor macro the host sets
-// when it compiles the library (MTLCompileOptions.preprocessorMacros, MF_C16_RAW=1 when
-// MF_VK_C16_BOUND=0): the bound applies unless the raw maximum is asked for.
-__target_intrinsic(metal, "(MF_C16_RAW)")
-uint mfC16RawValue();
-uint mfC16RawFlag()
-{
-    __requirePrelude("#ifndef MF_C16_RAW\n#define MF_C16_RAW 0u\n#endif");
-    return mfC16RawValue();
-}
-#define mfC16Bound (1u - mfC16RawFlag())
 static const uint mfSubgroupSize = 32;
 #else
 static const uint mfCoarseTwt = 0;
 static const uint mfDataStride = 0;
 static const uint mfRowWindows = 0;
 static const uint mfDataScaleBits = 0x3f800000u;
-static const uint mfC16Bound = 1;
 static const uint mfAccurateTrig = 0;
 static const uint mfSubgroupSize = 32;
 #endif

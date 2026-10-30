@@ -637,16 +637,14 @@ _LOG_TABLES = {}
 
 def _log_table(rows, kind):
     """(log densities, values) of a CostModel table of (density, value) rows: the values as
-    given ("cost"), log of their ratio to the density floored at 1 ("excess"), or log of the
-    ratio ("ratio"), the arrays the interpolations read."""
+    given ("cost") or log of their ratio to the density ("ratio"), the arrays the
+    interpolations read."""
     hit = _LOG_TABLES.get((id(rows), kind))
     if hit is not None and hit[0] is rows:
         return hit[1], hit[2]
     fs = np.log([r[0] for r in rows])
     if kind == "cost":
         vs = np.asarray([r[1] for r in rows], dtype=np.float64)
-    elif kind == "excess":
-        vs = np.log([max(r[1] / r[0], 1.0) for r in rows])
     else:
         vs = np.log([r[1] / r[0] for r in rows])
     _LOG_TABLES[(id(rows), kind)] = (rows, fs, vs)     # rows held: the id cannot be reused
@@ -688,8 +686,7 @@ class CostModel:
                       pair it passes beyond the screen itself (compaction)}
     """
 
-    def __init__(self, n, dense, sparse, refine, block=0.0, screen=None, excess=None,
-                 feed=None):
+    def __init__(self, n, dense, sparse, refine, block=0.0, screen=None, feed=None):
         self.n = int(n)
         # feed: a GPU backend's per-block change from the feed `block` was measured with (the
         # band forward of the first tier's band), {"band": {B: change at widest band B},
@@ -700,13 +697,6 @@ class CostModel:
         self.feed = None if not feed else {
             "band": {int(b): float(v) for b, v in feed["band"].items()},
             "full": float(feed["full"])}
-        # excess[b]: [(modelled density, measured density)] for a first tier at band b whose
-        # gate reports an upper bound of the FP32 statistic instead of the statistic itself
-        # (GPU fp16 coarse with its error bound): it passes a superset of the pairs the gate
-        # model assumes, and those extra pairs reach the next stage. Measured, per band,
-        # against the same gate with the bound off (calibrate_costs_gpu).
-        self.excess = {int(b): sorted((float(a), float(c)) for a, c in rows)
-                       for b, rows in (excess or {}).items()}
         self.screen = {int(b): {"dense": float(v["dense"]), "recheck": float(v["recheck"]),
                                 "excess": sorted((float(a), float(c)) for a, c in v["excess"])}
                        for b, v in (screen or {}).items()}
@@ -737,7 +727,6 @@ class CostModel:
                                tuple(self._refine),
                                tuple((b, v["dense"], v["recheck"], tuple(v["excess"]))
                                      for b, v in sorted(self.screen.items())),
-                               tuple((b, tuple(r)) for b, r in sorted(self.excess.items())),
                                getattr(self, "direct_lag", None), getattr(self, "direct_single", True),
                                None if self.feed is None else (tuple(sorted(self.feed["band"].items())),
                                                                self.feed["full"]))
@@ -748,23 +737,12 @@ class CostModel:
                 "feed": None if self.feed is None else {
                     "band": {str(b): v for b, v in self.feed["band"].items()},
                     "full": self.feed["full"]},
-                "sparse": self._sparse, "refine": self._refine, "screen": self.screen,
-                "excess": self.excess}
+                "sparse": self._sparse, "refine": self._refine, "screen": self.screen}
 
     @classmethod
     def from_dict(cls, d):
         return cls(d["n"], d["dense"], d["sparse"], d["refine"], block=d.get("block", 0.0),
-                   screen=d.get("screen"), excess=d.get("excess"),
-                   feed=d.get("feed"))
-
-    def pass_excess(self, b, f):
-        """Measured / modelled first-tier pass rate at band b and modelled density f (>= 1):
-        1 for a gate that reports its statistic, larger for one that reports a bound."""
-        rows = self.excess.get(int(b))
-        if not rows:
-            return 1.0
-        fs, rs = _log_table(rows, "excess")
-        return float(np.exp(np.interp(math.log(max(f, 1e-12)), fs, rs)))
+                   screen=d.get("screen"), feed=d.get("feed"))
 
     def screen_reach(self, b, reach1):
         """Modelled Q15 pass fraction from measured screen/float excess."""
@@ -849,12 +827,6 @@ class CostModel:
         """reach[i] = P(a pair reaches tier i+1) for i = 0..k-1, reach[k] = P(reaches refine);
         hw the direct refine's half-width (refine_for)."""
         c, screened = self.first_tier(chain[0], reach[1] if len(reach) > 1 else 1.0)
-        if len(reach) > 1:
-            # A bounding first tier's extra passes are the next stage's to pay for. Only the
-            # first stage after it is scaled: those pairs sit just under the gate, so a later
-            # tier (same signal, more band) rejects them at its modelled rate or better.
-            reach = list(reach)
-            reach[1] = min(1.0, reach[1] * self.pass_excess(chain[0], reach[1]))
         for i in range(1, len(chain)):
             c += reach[i] * self.sparse(chain[i], reach[i])
         # A one-tier chain behind the Q15 screen has no coarse lag to refine around (hmf.c: the
@@ -951,13 +923,6 @@ def default_series_group(n):
     return 32 if n <= 2048 else 16
 
 
-#: The environment switch that makes a GPU's first tier report the raw coarse statistic
-#: instead of an upper bound of it (read when its kernels are built: Vulkan's constant 77,
-#: CUDA's mf_c16_raw, Metal's MF_C16_RAW), its raw value, and the gate kind named in
-#: cost-file keys. Every GPU's coarse tier reports the bound.
-_RAW_GATE_SWITCH = ("MF_COARSE_RAW", "1", "c16b")   # (variable, its raw setting, gate kind)
-
-
 def _run_ms(log):
     """Device milliseconds of the runs in a timing log (Executor.timings), without the
     MF_GPU_PROFILE entries ("k:...") that lie inside them."""
@@ -971,16 +936,6 @@ def _is_gpu(device):
         return _parse(device).kind == "gpu"
     except Exception:
         return False
-
-
-def gpu_gate_kind(device):
-    """'f32' unless the device's first tier reports a bound (a GPU whose raw switch,
-    _RAW_GATE_SWITCH, is not set); then 'c16b'."""
-    row = _RAW_GATE_SWITCH
-    from . import _config
-    if not _is_gpu(device) or _config.get(row[0]):
-        return "f32"
-    return row[2]
 
 
 def _reach(N, cols, thresholds):

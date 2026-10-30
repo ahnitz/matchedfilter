@@ -354,8 +354,8 @@ def tierb_prelude(backend, n, cap, entry, coarse16=0, ppg=1, tile=1, single_bin=
 
     Vulkan: binding-layout macros (MF_TIERB_PEAKS, MF_REFINE_BOUNDED, MF_PAIR_OUT for the
     listed refines), then the shape, then the fp32 stage padding or the coarse prelude
-    (bank-conflict-free exchange layout, the fp16 bound's C16_KAPPA, the fp16 twiddle table).
-    Metal: MF_METAL, the shape with SPLIT_STAGE, Apple's C16_KAPPA and the twiddle table for a
+    (bank-conflict-free exchange layout, the fp16 twiddle table).
+    Metal: MF_METAL, the shape with SPLIT_STAGE, and the twiddle table for a
     coarse build (MF_COARSE_TWT picks it at library compile time), MF_PAIR_OUT for the listed
     refines, MF_GATE_ONLY. CUDA: the shape with SLANG_CUDA_STRUCTURED_BUFFER_NO_COUNT, then
     MF_GATE_ONLY, then the coarse prelude with or without the twiddle table (table: the "w"
@@ -382,11 +382,8 @@ def tierb_prelude(backend, n, cap, entry, coarse16=0, ppg=1, tile=1, single_bin=
     if backend == "metal":
         cl = _coarse_layout() if coarse16 else None
         return ("#define MF_METAL 1\n" + shape + "#define SPLIT_STAGE %d\n" % split
-                # The derived fp16 bound's kappa from Apple's measured error table
-                # (tools/coarse_layout.py C16_SIGMA_APPLE; tools/c16_sigma.py), and the fp16
-                # twiddle table for a "w" entry's MF_COARSE_TWT=1 (twiddle.slang).
-                + ("#define C16_KAPPA %.4f\n" % cl.c16_kappa(n, cl.C16_SIGMA_APPLE)
-                   + cl.twiddle_table_source(n) if coarse16 else "")
+                # The fp16 twiddle table for a "w" entry's MF_COARSE_TWT=1 (twiddle.slang).
+                + (cl.twiddle_table_source(n) if coarse16 else "")
                 + ("#define MF_PAIR_OUT 1\n" if listed else "")
                 + ("#define MF_GATE_ONLY 1\n" if gate_only else ""))
     text = (shape + "#define SLANG_CUDA_STRUCTURED_BUFFER_NO_COUNT 1\n#define TARGET_CUDA 1\n"
@@ -399,12 +396,11 @@ def tierb_prelude(backend, n, cap, entry, coarse16=0, ppg=1, tile=1, single_bin=
 
 def coarse_prelude(n, cap, ppg):
     """Build-time inputs of the packed coarse kernel (see tools/coarse_layout.py): the
-    bank-conflict-free exchange padding for (band, PPG), the fp16 bound's C16_KAPPA (the
-    Radeon's measured error table) and the fp16 twiddle table."""
+    bank-conflict-free exchange padding for (band, PPG) and the fp16 twiddle table."""
     cl = _coarse_layout()
     xs, slot = exchange_layout(n, ppg, cap)
-    return ("#define XSTRIDE %d\n#define XSLOT %d\n#define C16_KAPPA %.4f\n"
-            % (xs, slot, cl.c16_kappa(n)) + cl.twiddle_table_source(n))
+    return ("#define XSTRIDE %d\n#define XSLOT %d\n" % (xs, slot)
+            + cl.twiddle_table_source(n))
 
 
 def command(slangc, v, src, out, nvrtc=None):
