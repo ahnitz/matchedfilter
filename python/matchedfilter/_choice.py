@@ -131,6 +131,33 @@ TIE = 0.05
 
 
 
+def fastest_of_rounds(cands, time_one, rounds, burst=1, each_round=None):
+    """{candidate: the least of time_one(candidate) over `rounds` rounds}, the one way an
+    offline measurement times its configurations (the coarse and gate-way screens, the GPU
+    cost calibration, the continuous correlation's block-size prices). Each round times
+    every candidate `burst` times back to back, the order reversing between rounds, after
+    each_round() (a clock reference, say): a burst of other work, or a slow spell on a
+    shared device, then slows one round of every candidate rather than every repetition of a
+    few. A time <= 0 (a timer that recorded nothing) is no sample; a candidate with none
+    gets 0.0. None as soon as time_one returns None (no timer at all).
+
+    The fastest, not the median: what moves a call only adds time. Timed back to back, the
+    Iris Xe stored a tiled band-256 layout 4.3x slower than the untiled one."""
+    out = {c: float("inf") for c in cands}
+    order = list(cands)
+    for r in range(int(rounds)):
+        if each_round is not None:
+            each_round()
+        for c in (order if r % 2 == 0 else order[::-1]):
+            for _ in range(int(burst)):
+                t = time_one(c)
+                if t is None:
+                    return None
+                if t > 0:
+                    out[c] = min(out[c], float(t))
+    return {c: (t if t < float("inf") else 0.0) for c, t in out.items()}
+
+
 def paired_choice(samples, model, cap, minimum=5, tie=None):
     """Choose from complete, comparable rounds, using median ratios to the model.
 

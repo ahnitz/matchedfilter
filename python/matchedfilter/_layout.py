@@ -177,10 +177,12 @@ def _corr_block_costs(n: int, device: Optional[Any] = None) -> Tuple[float, floa
 def _corr_measure(n, device, dkey, rng, taps, nblocks, L, ser):
     """(fixed, per template, per template per output sample) seconds per block through the
     bank's continuous path: 2 and 16 templates with `taps`-tap filters, and 16 with filters
-    leaving half the valid span."""
+    leaving half the valid span, each the fastest of 5 interleaved rounds
+    (_choice.fastest_of_rounds)."""
     from . import CorrelationFilter
+    from ._choice import fastest_of_rounds as _fastest_of_rounds
     from ._filter import _automatic_series_layout
-    per_block, valid = [], []
+    runs, blocks, valid = [], [], []
     short = n - (n - taps) // 2
     for nt, tp in ((2, taps), (16, taps), (16, short)):
         h = np.zeros((nt, n), np.complex64)
@@ -195,19 +197,23 @@ def _corr_measure(n, device, dkey, rng, taps, nblocks, L, ser):
             # swamped the kernel and priced n=32768 (whose CUDA kernel spills) as cheapest.
             # There, price the kernel into device-resident output (the resident path).
             dest = cf.empty_shared((nt, L), readback=not getattr(cf._gpu, 'discrete', False))
-            run = lambda: cf._continuous_gpu(ser, st, 0, nt, dest)
+            run = lambda cf=cf, st=st, nt=nt, dest=dest: cf._continuous_gpu(ser, st, 0, nt, dest)
         else:
             dest = np.zeros((nt, L), np.complex64)
             ep = cf._continuous_plan()
-            run = lambda: ep.correlate_series_continuous(ser, st, lo, hi, 0, nt, dest)
-        run()
-        best = np.inf
-        for _ in range(5):
-            t0 = time.perf_counter()
-            run()
-            best = min(best, time.perf_counter() - t0)
-        per_block.append(best / len(st))
+            run = (lambda ep=ep, st=st, lo=lo, hi=hi, nt=nt, dest=dest:
+                   ep.correlate_series_continuous(ser, st, lo, hi, 0, nt, dest))
+        run()                                   # warm-up
+        runs.append(run)
+        blocks.append(len(st))
         valid.append(hi - lo)
+
+    def time_one(i):
+        t0 = time.perf_counter()
+        runs[i]()
+        return time.perf_counter() - t0
+    best = _fastest_of_rounds(range(len(runs)), time_one, 5)
+    per_block = [best[i] / blocks[i] for i in range(len(runs))]
     s1 = max((per_block[1] - per_block[0]) / 14.0, 0.0)        # per template at valid[0]
     w = max((per_block[1] - per_block[2]) / (16.0 * (valid[1] - valid[2])), 0.0)
     b = max(s1 - w * valid[0], 0.0)

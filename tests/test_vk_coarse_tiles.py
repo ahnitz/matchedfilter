@@ -112,3 +112,37 @@ def test_untiled_groups_are_ragged(ctx, band):
             np.testing.assert_allclose(val, ref_val, rtol=1e-6, atol=0, err_msg=where)
             for part in tail:
                 assert (part == _SENTINEL).all(), "%s: wrote past the last pair" % where
+
+
+@pytest.mark.parametrize("backend", ["vulkan", "metal", "cuda"])
+def test_every_backend_offers_the_coarse_builds_its_device_holds(backend):
+    """One enumerator (_coarse.candidates) for every backend: each shipped coarse build at the
+    band whose recorded group and workgroup memory fit the device, and nothing else. Read off
+    each backend's own manifest with a fake device's limits; no GPU needed."""
+    import re
+    from types import SimpleNamespace
+    from matchedfilter import _kernels
+    from matchedfilter import _cudacompute, _mtlcompute, _vkcompute
+    kernels = _kernels.manifest(backend).get("kernels", {})
+    if not kernels:
+        pytest.skip("no %s manifest in this install" % backend)
+    band = 1024
+    cls = {"vulkan": _vkcompute.Context, "metal": _mtlcompute.Context,
+           "cuda": _cudacompute.Context}[backend]
+    for shared in (32768, 65536):
+        ctx = SimpleNamespace(max_invocations=1024, max_shared_memory=shared,
+                              subgroup_range=None, max_workgroup_subgroups=0)
+        if backend == "cuda":
+            ctx._stem = lambda *a, **k: cls._stem(ctx, *a, **k)
+        got = {(p, t, w) for _, p, t, w in cls._x_coarse_candidates(ctx, band)}
+        want = set()
+        for stem, rec in kernels.items():
+            m = re.fullmatch(r"tierb_%d_c16(?:p(\d+))?(?:t(\d+))?(w?)" % band, stem)
+            if not m or rec["local_size"][0] > 1024 or rec["lds_bytes"] > shared:
+                continue
+            p, t = int(m.group(1) or 1), int(m.group(2) or 1)
+            twts = ({1} if m.group(3) else {0}) if backend == "cuda" else (
+                {0, 1} if backend == "metal" or t == 1 else {1})
+            want |= {(p, t, w) for w in twts}
+        assert got == want, (backend, shared, sorted(got ^ want))
+        assert sorted(got)[0][:2] == (1, 1)

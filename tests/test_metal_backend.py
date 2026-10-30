@@ -282,14 +282,6 @@ def test_metal_one_bin_and_general_kernels_agree(n, hierarchical, monkeypatch):
             np.testing.assert_array_equal(a, b)
 
 
-def test_coarse_packing_fills_a_simd_group():
-    for band in (64, 128, 256, 512):
-        p = _mtlcompute.coarse_ppg(band, 1000)
-        assert band // 16 * p >= _mtlcompute.TARGET_THREADS
-        assert (_mtlcompute._METAL_DIR / ("tierb_%d_c16p%d.metal" % (band, p))).is_file()
-    assert _mtlcompute.coarse_ppg(64, 10, override=3) == 1     # not shipped: unpacked
-
-
 @metal
 @pytest.mark.parametrize("band", [64, 128])
 def test_metal_packed_coarse_handles_partial_groups(ctx, band, monkeypatch):

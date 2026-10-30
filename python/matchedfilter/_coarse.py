@@ -53,9 +53,30 @@ def forced_layout(band):
     return None
 
 
-def shipped_tiles(band, ppg, shipped):
-    """The tiles (> 1) built for this band and pairs per group; shipped(stem) -> bool."""
-    return tuple(t for t in TILE_PROBE if shipped(coarse_stem(band, ppg, t)))
+#: Pairs per group a packed build may carry (the builds shipped decide which exist).
+PPG_PROBE = (1, 2, 4, 8, 16, 32)
+
+
+def candidates(band, build, twt_options, max_invocations, max_shared, subgroup_sizes=None):
+    """Every coarse layout (subgroup, ppg, tile, twt) a device may run at this band, on every
+    backend: each shipped build (build(ppg, tile, twt) -> its manifest record, or None)
+    whose recorded group fits the device's max_invocations and whose recorded workgroup
+    memory fits its max_shared, at each twiddle source the backend gives it (twt_options(tile)),
+    at each subgroup size it can require for that group (subgroup_sizes(group) -> sizes; 0:
+    the device's own). Untiled first, by packing; the first is the layout a device that
+    cannot be timed runs. The measured choice (shortlist) decides among them all."""
+    out = []
+    for tile in (1,) + TILE_PROBE:
+        for ppg in PPG_PROBE:
+            for twt in twt_options(tile):
+                rec = build(ppg, tile, twt)
+                if (rec is None or rec["local_size"][0] > max_invocations
+                        or rec["lds_bytes"] > max_shared):
+                    continue
+                group = rec["local_size"][0]
+                out.extend((sg, ppg, tile, twt) for sg in
+                           (subgroup_sizes(group) if subgroup_sizes is not None else (0,)))
+    return out
 
 
 def parse_label(label):
@@ -76,23 +97,6 @@ RETIME_ROUNDS = 5
 RETIME = 3
 
 
-def interleaved_min(cands, time_one, rounds):
-    """{candidate: min over `rounds` rounds of time_one(candidate)}: each round times every
-    candidate once, the order reversing between rounds; None as soon as time_one does (no
-    device timestamps). A burst of other work on a shared GPU then slows one round of every
-    candidate rather than every rep of a few: timed back to back, the Iris Xe stored a tiled
-    band-256 layout 4.3x slower than the untiled one, and MF_COST_FILE kept it."""
-    out = {c: float("inf") for c in cands}
-    order = list(cands)
-    for r in range(rounds):
-        for c in (order if r % 2 == 0 else order[::-1]):
-            t = time_one(c)
-            if t is None:
-                return None
-            out[c] = min(out[c], t)
-    return out
-
-
 def screen(stages, time_full, time_screen=None, rounds=3, screen_cut=4.0):
     """{candidate: time} over staged candidate sets: every backend's coarse screen, which
     ranks candidates on synthetic dispatches for a shortlist (the device trial then plays the
@@ -102,28 +106,29 @@ def screen(stages, time_full, time_screen=None, rounds=3, screen_cut=4.0):
     (the Vulkan tiles are offered at the two fastest untiled layouts only: building a
     pipeline is most of the cost). Within a stage, candidates are screened with time_screen
     (a short dispatch) and only those within screen_cut of the fastest get time_full, both
-    in interleaved rounds (interleaved_min): some layouts are pathological on some devices
+    in interleaved rounds (_choice.fastest_of_rounds): some layouts are pathological on some devices
     (band 256 at subgroup 32 on an Iris Xe), and a full dispatch of one can run long enough
     for a driver to reset the device -- they never reach a real call. The RETIME fastest
     overall are then timed again together in interleaved rounds, so a burst that covered one
     stage cannot order them. None when a timer is (no timestamps)."""
+    from ._choice import fastest_of_rounds
     out = {}
     for st in stages:
         cs = list(st(out) if callable(st) else st)
         if not cs:
             continue
-        times = interleaved_min(cs, time_screen, rounds) if time_screen else {}
+        times = fastest_of_rounds(cs, time_screen, rounds) if time_screen else {}
         if times is None:
             return None
         keep = [c for c in cs if not times or times[c] <= screen_cut * min(times.values())]
-        full = interleaved_min(keep, time_full, rounds)
+        full = fastest_of_rounds(keep, time_full, rounds)
         if full is None:
             return None
         times.update(full)
         out.update(times)
     lead = sorted(out, key=out.get)[:RETIME]
     if len(lead) > 1:
-        again = interleaved_min(lead, time_full, RETIME_ROUNDS)
+        again = fastest_of_rounds(lead, time_full, RETIME_ROUNDS)
         if again is None:
             return None
         out.update(again)
