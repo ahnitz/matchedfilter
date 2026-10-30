@@ -144,8 +144,10 @@ def run_case(job):
     row = dict(profile=name, n=n, snr=a["snr"], fd=a["fd"], window=[ws, we])
     if chain is None:
         from matchedfilter import _calibration
+        # a device's chains as the library plans them there (a GPU records two tiers)
+        tiers = mf.HierarchicalFilter._MAX_TIERS.get("gpu", 3) if a.get("device") else 3
         best, _ = gc.choose_chain(power, n, a["snr"], a["fd"], cost=_calibration.calibrate_costs(n, 64),
-                                  window=win)
+                                  window=win, max_tiers=tiers)
         if best is None:
             return dict(row, chain=None, error="no chain")
         chain = tuple(best["chain"])
@@ -177,6 +179,16 @@ def run_case(job):
         q = engine(True)
         if q is not None:
             engines["q15"] = q
+    gpu = None
+    if a.get("device") and len(chain) <= mf.HierarchicalFilter._MAX_TIERS.get("gpu", 3):
+        # The device's own hierarchical filter at the same chain and thresholds: on a GPU its
+        # first tier is the fp16 coarse gate (its bound, or the raw maximum with
+        # MF_COARSE_RAW=1), so its misses are that gate's dismissal against the flat filter.
+        gpu = mf.HierarchicalFilter(n, _B, 1, chain=tuple(chain), device=a["device"])
+        gpu.set_reference(power.astype(np.float32))
+        gpu.set_templates(hc[None, :])
+        gpu.set_coarse_threshold(tuple(thr))
+        engines["device"] = gpu
     peaks = {k: np.empty((_B, 1), mf.PEAK_DTYPE) for k in engines}
     cnt = np.empty(_B, np.int32)
     ei, ev, em = np.empty(0, np.int64), np.empty(0, np.complex64), np.empty(0, np.float32)
@@ -198,10 +210,14 @@ def run_case(job):
         hit = zf >= a["snr"]
         det += int(hit.sum())
         for key, e in engines.items():
-            for d in range(_B):
-                e.set_data(d, D[d])
-            e.run(0, _B, 0, 1, we - ws, a["snr"], ws, we, ei, ev, em, cnt, peaks[key])
-            p = peaks[key][:, 0]
+            if e is gpu:
+                gpu.set_data(D)
+                p = gpu.run(window=(ws, we), binsize=we - ws, threshold=a["snr"])[:, 0, 0]
+            else:
+                for d in range(_B):
+                    e.set_data(d, D[d])
+                e.run(0, _B, 0, 1, we - ws, a["snr"], ws, we, ei, ev, em, cnt, peaks[key])
+                p = peaks[key][:, 0]
             got = (p["index"] >= 0) & (np.abs(p["value"]) >= a["snr"])
             miss[key] += int((hit & ~got).sum())
             both = hit & got
@@ -237,13 +253,16 @@ def main(argv=None):
     ap.add_argument("--check", type=int, default=0,
                     help="model detections a plan's dismissal is counted on (default max(1M, 10 x --inj))")
     ap.add_argument("--seed", type=int, default=11)
+    ap.add_argument("--device", default=None,
+                    help="also run the device's hierarchical filter (gpu:0: the fp16 coarse gate)")
     ap.add_argument("--alpha", type=float, default=1e-3, help="family-wise level over the cases")
     ap.add_argument("--jobs", type=int, default=1)
     ap.add_argument("--json", default=None, help="write every row here")
     a = ap.parse_args(argv)
     names = a.profiles.split(",") if a.profiles else default_profiles()
     win = None if a.window is None else [int(x) for x in a.window.split(",")]
-    opts = dict(snr=a.snr, fd=a.fd, inj=a.inj, window=win, q15=a.q15, seed=a.seed, check=a.check)
+    opts = dict(snr=a.snr, fd=a.fd, inj=a.inj, window=win, q15=a.q15, seed=a.seed, check=a.check,
+                device=a.device)
     # one job per (profile, n): its chains share the model's check draws
     jobs = [(nm, n, chains_for(a.chains, n), opts) for n in a.n for nm in names]
     t0 = time.time()
