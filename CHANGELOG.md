@@ -25,6 +25,21 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ### Changed
 
+- The GPU fp16 coarse tier gates on its own statistic, each pair's fp16 maximum, as the CPU's
+  Q15 screen does, in place of an error bound (|c16| (1 + 3u) + kappa u rms, kappa from a
+  measured error table per backend). Against the flat filter by injection on the 8060S
+  (`tools/fdr_audit.py --device gpu:0`), its chains dismissed 1.02x their budget, every case
+  on its plan; with the bound 0.85x, and single-tier chains at band 1024 0.20-0.28x (the bound
+  passed pairs no plan priced, which the refine then did). Gone with it: `C16_KAPPA` and the
+  sigma tables (`tools/coarse_layout.py`), `tools/c16_sigma.py`, the raw-gate pass of the GPU
+  cost calibration (a child process per transform size), the cost model's `excess`, and the
+  bound's energy reduction in most coarse kernels. Every fp16 coarse kernel is rebuilt; the
+  GPU kernel identities and stored GPU cost models are new. `tools/gate_margin.py` judges a
+  gate on its own statistic by its accuracy (every pair within 0.14% of the exact maximum)
+  and uploads its operands at every threshold (a skipped upload left the fp16 tier's verdicts
+  stale), and the merge gate's fdr stage runs the device's filter too. Throughput is
+  unchanged (the test27 ladder on the 8060S chose the same chains; steady time 1.00-1.04x
+  over three paired runs under load).
 - One coarse-candidate enumerator for every GPU backend (`_coarse.candidates`): each shipped
   coarse build whose recorded group and workgroup memory fit the device, at each twiddle
   source and subgroup size the backend gives it. Metal now offers its tiles at every packing
@@ -151,6 +166,7 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ### Removed
 
+- `MF_COARSE_RAW` (the GPU fp16 tier always reports its own statistic).
 - `MF_GPU_FUSE_INTERLEAVE` (the fused interleave depth is gone).
 - `gatechain.direct_halfwidth`: a plan carries its direct refine's half-width
   (`chain_thresholds(...)["halfwidth"]`), chosen with its thresholds against one budget.

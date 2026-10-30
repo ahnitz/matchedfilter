@@ -41,7 +41,7 @@ _MAX_THREADS = 1024
 
 
 from ._errors import UnsupportedSize      # noqa: F401  (re-export)
-from . import _config, _gputime
+from . import _gputime
 from ._gpu_cache import InputUploads
 from ._gpuexec import Arg, Executor, register_fusion, settle as _settle
 
@@ -609,15 +609,12 @@ class Context(Executor, InputUploads):
         built elsewhere -- or one whose library is stale -- still runs,
         paying a compile on first use rather than refusing.
         """
-        raw = (stem.startswith("tierb_") and "_c16" in stem
-               and _config.get("MF_COARSE_RAW"))
         lib_path = _METAL_DIR / (stem + ".metallib")
         # A shipped .metallib is built with the compiler's defaults (tools/precompile_metal.sh):
-        # fast math, no macros. A kernel that needs other options -- the raw fp16 maximum
-        # (MF_C16_RAW) or IEEE math for the fail-open compaction -- compiles from source, or
-        # the library silently runs the default build instead (on the macOS runner the
-        # physics tests then measured the fp16 BOUND as if it were the raw statistic).
-        if lib_path.is_file() and not raw and not twt and not macros and not _ieee_kernel(stem):
+        # fast math, no macros. A kernel that needs other options -- macros, or IEEE math for
+        # the fail-open compaction -- compiles from source, or the library silently runs the
+        # default build instead.
+        if lib_path.is_file() and not twt and not macros and not _ieee_kernel(stem):
             url_cls = self.o.objc.objc_getClass(b"NSURL")
             url = self.o.call(url_cls, b"fileURLWithPath:",
                               args=(self.o.nsstring(str(lib_path)),),
@@ -634,17 +631,13 @@ class Context(Executor, InputUploads):
                              % (stem, lib_path.name, src_path.name))
         err = ctypes.c_void_p()
         opts = None
-        # Library macros (twiddle.slang): MF_C16_RAW=1 is the fp16 bound switch
-        # (gatechain._RAW_GATE_SWITCH; Vulkan's constant 77), the raw fp16 maximum, for
-        # measuring the bound's margin only; MF_COARSE_TWT=1 takes the coarse twiddles from
-        # the build's fp16 table (Vulkan's constant 80), a measured choice (_coarse_layout).
+        # Library macros (twiddle.slang): MF_COARSE_TWT=1 takes the coarse twiddles from the
+        # build's fp16 table (Vulkan's constant 80), a measured choice (_coarse_layout).
         # The build-time constants (twiddle.slang), Vulkan's specialization constants:
         # MF_DATA_STRIDE, MF_DATA_SCALE_BITS and MF_ACCURATE_TRIG from the caller.
         values = dict(macros)
         if twt:
             values["MF_COARSE_TWT"] = 1
-        if raw:
-            values["MF_C16_RAW"] = 1
         o = self.o
         if values or _ieee_kernel(stem):
             opts = o.call(o.call(o.objc.objc_getClass(b"MTLCompileOptions"), b"alloc"), b"init")
@@ -811,10 +804,6 @@ class Context(Executor, InputUploads):
             single = None if rec is None else rec["file"][:-len(".metal")]
         key = ((n, entry_name, "gate" if gate else True) if single else (n, entry_name)) + (
             (macros,) if macros else ())
-        if entry_name.startswith("coarse16") and _config.get("MF_COARSE_RAW"):
-            # The raw-maximum build (_library's MF_C16_RAW) is a different library: a process
-            # that switches it (the physics tests) must not reuse the bound pipeline.
-            key = key + ("raw",)
         if key in self._pipelines:
             return self._pipelines[key]
         base, twt = _twt_entry(entry_name)

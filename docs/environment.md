@@ -8,6 +8,10 @@ dismisses), and exist for measurement and tests.
 Generated from `python/matchedfilter/_config.py` by `tools/gen_environment_doc.py`; edit
 the table there.
 
+Removed 2026-10-30: the GPU fp16 coarse tier reports its own statistic, the raw fp16
+maximum, as every narrow first tier does: its error bound passed so many more pairs than
+planned that single-tier chains dismissed a fifth of their budget: MF_COARSE_RAW.
+
 Removed 2026-10-30: a GPU batch is always fused, in lockstep: pinned at production
 length, unfused was 3-17% slower and the interleave of depth 3 no faster on the 8060S,
 RENOIR and Iris Xe (the device trial that chose them is gone): MF_GPU_FUSE_INTERLEAVE.
@@ -102,7 +106,6 @@ Older notes in docs/ that mention a removed variable describe past studies.
 | `MF_BAND_FORWARD=0/1` | measured | GPU band forward off/on. |
 | `MF_COARSE_LAYOUT=<labels>` | measured | Force GPU coarse layouts by label. |
 | `MF_VK_SUBGROUP=<size>` | measured | Force a Vulkan subgroup size. |
-| `MF_COARSE_RAW=1` | 0 | The fp16 coarse tier reports its raw maximum instead of an upper bound (every GPU backend; the physics tests and tools/c16_sigma.py). |
 | `MF_GPU_ITEMS=0` | on | Single-template GPU jobs of a batch run one by one. |
 | `MF_GPU_QUEUE_AHEAD=<n>` | 8 | GPU submissions in flight. |
 | `MF_DEVICE_FOLLOWUPS=0` | on | Threshold-0 follow-ups per group rather than in one device submission. |

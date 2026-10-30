@@ -1344,9 +1344,6 @@ class Context(Executor, InputUploads):
             key = (key, "dscale", int(data_scale))
         if coarse_twt is not None:
             key = (key, "twt", int(coarse_twt))
-        raw_c16 = _config.get("MF_COARSE_RAW")
-        if raw_c16:
-            key = (key, "raw-c16")
         # subgroup: a size within the device's required-size range to build this pipeline
         # at instead of the default (specialization constant 74 follows it).
         rng = getattr(self, "subgroup_range", None)
@@ -1442,11 +1439,6 @@ class Context(Executor, InputUploads):
             # The untiled coarse transform's twiddles: table (1) or recurrence (0), constant 80.
             entries.append(_SpecializationEntry(80, offset, 4))
             data_vals.append(int(coarse_twt))
-            offset += 4
-        if raw_c16:
-            # Raw fp16 coarse maxima, for measuring the error bound's margin use only.
-            entries.append(_SpecializationEntry(77, offset, 4))
-            data_vals.append(0)
             offset += 4
 
         # Intel accurate trig (constant ID 73)

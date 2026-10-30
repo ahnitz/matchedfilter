@@ -169,10 +169,10 @@ annotations), `migrate_cost_file.py` (cost-file format migration).
 `setup_breakdown.py` (the setup's time by part), `setup_decisions_diff.py` (two replays'
 decisions compared).
 
-**Gate accuracy and bounds**: `gate_margin.py` (every narrow first tier), `c16_sigma.py`
-(GPU fp16 rounding, for its bound), `gate16_error.py`, `gate16_check.py`,
-`coarse_precision.py`, `coarse_fixed.py`, `fdr_audit.py` (every profile and chain against
-the flat filter, two-sided), `split_bias.py` (each plan's dismissal on model draws it was
+**Gate accuracy and bounds**: `gate_margin.py` (every narrow first tier), `gate16_error.py`,
+`gate16_check.py`, `coarse_precision.py`, `coarse_fixed.py`, `fdr_audit.py` (every profile
+and chain against the flat filter, two-sided; `--device` adds the device's own filter, the
+GPU fp16 tier), `split_bias.py` (each plan's dismissal on model draws it was
 not made from: the check that plans dismiss fd on average with gatemodel.fit_order's tail,
 direct refine windows included), `audit_gate_model.py`,
 `audit_threshold.py`, `audit_gpu_bands.py`;

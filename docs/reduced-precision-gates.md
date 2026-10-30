@@ -20,15 +20,26 @@ pairs as the FP32 tier would, where the screen with its 5 sqrt(N) margin passed 
 The tiers between the first and the last gate the same way, on their survivor lists
 (`ap_mf_q15_pairs`; [cpu-q15-gate.md](cpu-q15-gate.md)).
 
-The FP16 gates below still report an upper bound of the FP32 maximum and so pass a superset of
-its pairs; they could be calibrated the same way. This page states their bounds and the Q15
-screen's error side by side; each kernel's own page has the derivation and the measurements.
+**The GPU fp16 coarse tier gates on its own statistic too** (since 2026-10-30): each pair's fp16
+maximum, with no bound. Against the flat filter by injection (`tools/fdr_audit.py --device
+gpu:0`, the 8060S, 10 profiles x the 2-tier chains at n = 2048, fd 1e-2, 8000 injections a
+case), its chains dismissed 1.02x the budget pooled and every case was on its plan; with the
+bound they dismissed 0.85x pooled, and three single-tier chains at band 1024 dismissed 0.20-0.28x
+(off their plans at p < 1e-6): the bound passed so many pairs the plan never priced that the
+refine did their work. The same held at fd 1e-3 and at n = 4096 over a window (raw: 0 cases off
+the plan; bound: 3 and 4). Its rounding moves a pair's decision by at most 0.14% of the
+threshold (`tools/gate_margin.py`, every family at bands 128-1024).
+
+The CPU FP16 gate below still reports an upper bound of the FP32 maximum and so passes a
+superset of its pairs; it can be calibrated the same way once its false dismissal is measured
+on ARM. This page states its bound and the own-statistic gates' errors side by side; each
+kernel's own page has the derivation and the measurements.
 
 | Gate | Where | Estimate the gate compares | Margin | Page |
 |---|---|---|---|---|
 | Q15 screen | CPU, x86 (the first tier) | the int16 transform's maximum | none in the chain; `ap_mf_q15_screen` alone keeps a 5 sqrt(N) LSB margin by default (`ap_mf_set_q15_margin`) | [cpu-q15-gate.md](cpu-q15-gate.md), `src/q15.h` |
 | FP16 gate | CPU, ARM with FP16 vectors (replaces the FP32 tier) | B = \|y16(k')\| (1 + 3u) + κ u rms(y) | κ = 16 (`GATE16_KAPPA`) | [cpu-neon-fp16-gate.md](cpu-neon-fp16-gate.md), `src/gate16.cc` |
-| fp16 coarse tier | GPU (Vulkan, CUDA, Metal; Slang) | B = \|c16\| (1 + 3u) + κ u rms(y) | κ per band, 12.7 / 15.5 at bands 256 / 512 (`C16_KAPPA`, `tools/coarse_layout.py`; Apple builds use their own σ table) | `src/gpu/tierb.slang` (c16Bound) |
+| fp16 coarse tier | GPU (Vulkan, CUDA, Metal; Slang; the first tier) | the fp16 transform's maximum | none | `src/gpu/tierb.slang` |
 
 u = 2^-11 throughout; rms(y) is the pair's output rms over all lags (Parseval). CUDA's
 tensor-core gate, a fifth row until 2026-10-29, was never chosen and is deleted
@@ -36,7 +47,8 @@ tensor-core gate, a fifth row until 2026-10-29, was never chosen and is deleted
 
 ## The two forms
 
-- **Relative (fp16).** fp16 rounding is relative to the values, so the bound has two parts:
+- **Relative (fp16).** fp16 rounding is relative to the values, so the CPU FP16 gate's bound has
+  two parts:
   - (1 + 3u) is proven, not fitted. Choosing the lag on fp16 powers can pick a lag whose
     value is below the true maximum by at most that factor.
   - κ u rms(y) covers the transform's own rounding. It scales with the pair's energy, not
@@ -57,16 +69,17 @@ tensor-core gate, a fifth row until 2026-10-29, was never chosen and is deleted
   criterion: margin use < 0.5.
 - **Measurement tools:**
   - `tools/gate16_error.py` for the CPU fp16 gate;
-  - `tools/c16_sigma.py` and `tools/coarse_layout.py` for the GPU fp16 tier;
   - `tools/gate_margin.py` for all of them (`--gate q15 gpu-c16 cpu-g16`).
 
 ## What checks it
 
-- **`tools/gate_margin.py --loud`** (every merge, in `tools/gate.py`): margin use and the
+- **`tools/gate_margin.py --loud`** (every merge, in `tools/gate.py`): margin use for a gate
+  with a bound, the accuracy of one on its own statistic (|slack| < 2^-6), and the
   loud-injection fail-open, per gate.
 - **The chain against the flat filter, by injection** (`tools/fdr_audit.py --q15`, every
-  merge in `tools/gate.py`): every profile and chain, FP32 and Q15 tiers, two-sided against
-  the budget. This is the acceptance test for any first tier, Q15 included.
+  merge in `tools/gate.py`, with `--device` on a GPU): every profile and chain, FP32 and Q15
+  tiers and the device's own, two-sided against the budget. This is the acceptance test for
+  any first tier, Q15 and the GPU fp16 tier included.
 - **`tests/test_tier_conformance.py`:** each CPU tier kind (FP32, Q15, FP16 on ARM) and the
   machine's GPU, at thresholds in wide gaps of the exact maxima, refines exactly the pairs
   above them and reports the same peaks.

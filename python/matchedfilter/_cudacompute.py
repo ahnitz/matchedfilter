@@ -58,7 +58,6 @@ class _DeviceShared:
         self.pending_writes = []
         self.occupancy = {}
         self.labels = {}
-        self.c16_flags = {}         # coarse module stem -> [mf_c16_raw address, value]
 
 
 _DEVICE_SHARED = {}
@@ -722,11 +721,9 @@ class Context(Executor, InputUploads):
         if shared is not None:
             self._modules, self._pipelines = shared.modules, shared.pipelines
             self._occupancy, self._labels = shared.occupancy, shared.labels
-            self._c16_flags = shared.c16_flags
             self._shared_modules = True
         else:
             self._modules, self._pipelines, self._occupancy, self._labels = {}, {}, {}, {}
-            self._c16_flags = {}
             self._shared_modules = False
         self._uploaded = {"data": {}, "tmpl": {}}
 
@@ -941,10 +938,6 @@ class Context(Executor, InputUploads):
                     f"cuModuleLoadData({stem})",
                 )
             self._modules[mkey] = mod
-            g, size = ctypes.c_uint64(), ctypes.c_size_t()
-            if self.cuda.cuModuleGetGlobal_v2(ctypes.byref(g), ctypes.byref(size), mod,
-                                              b"mf_c16_raw") == 0:
-                self._c16_flags[mkey] = [g.value, 0]          # zero-initialized: bound on
         hfunc = ctypes.c_void_p()
         check_cuda(
             self.cuda.cuModuleGetFunction(ctypes.byref(hfunc), self._modules[mkey],
@@ -1038,7 +1031,6 @@ class Context(Executor, InputUploads):
         if name == "coarse":
             fn, wg = self.pipeline(n, "fusedTierB", c16=True, ppg=c["ppg"], tile=c["tile"],
                                    twt=bool(c.get("twt")))
-            self._c16_bound_flag(fn)
             return fn, wg, 4, 1
         if name in ("tier", "tier1", "refine", "refine1"):
             fn, wg = self.pipeline(n, "refineListed", one_bin=name.endswith("1"),
@@ -1276,21 +1268,6 @@ class Context(Executor, InputUploads):
 
 
     # ---- hierarchical ---------------------------------------------------------------
-
-    def _c16_bound_flag(self, fn):
-        """Set the coarse module's fp16 bound switch (mf_c16_raw, Vulkan's constant 77):
-        the bound applies unless MF_COARSE_RAW=1 asks for the raw fp16 maximum, which
-        only the bound's own margin measurements and the physics checks use."""
-        ent = self._c16_flags.get(self._labels.get(fn.value))
-        if ent is None:
-            return
-        raw = 1 if _config.get("MF_COARSE_RAW") else 0
-        if ent[1] != raw:
-            self._bind()
-            check_cuda(self.cuda.cuCtxSynchronize(), "cuCtxSynchronize")
-            v = ctypes.c_uint32(raw)
-            check_cuda(self.cuda.cuMemcpyHtoD_v2(ent[0], ctypes.byref(v), 4), "cuMemcpyHtoD")
-            ent[1] = raw
 
     def _new_event_timed(self):
         e = ctypes.c_void_p()

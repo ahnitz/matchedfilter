@@ -12,7 +12,11 @@ any implementation (CPU screen, GPU kernel) without access to its internals:
     global threshold grid thr = K (1 + delta) probes every pair at once.
   * thr_max = the largest grid threshold at which the gate still passes the pair.
   * slack = thr_max / ref - 1. slack < 0 means a rejected exact pass: a false dismissal the
-    gate added. The pass criterion is min slack > 0 over every family.
+    gate added. For a gate that promises an upper bound the criterion is min slack > 0 over
+    every family. A gate on its own statistic (the GPU fp16 coarse tier) moves pairs near
+    its threshold either way, which the chain's false dismissal against the flat filter
+    accepts (tools/fdr_audit.py --device); here its criterion is accuracy, |slack| < 2^-6 for
+    every pair (a wrong lag, scale or overflow, not its rounding).
   * For a gate that exposes its statistic s (Q15: q15_screen's stat), margin use
     u = (ref - s) / (thr_max - s): the fraction of the gate's own margin its error used.
     The criterion is max u < 0.5 (2x headroom); a margin fitted until tests pass shows u ~ 1.
@@ -181,12 +185,17 @@ def gpu_backend(device):
     return mod, dev.index
 
 
+#: An own-statistic gate's accuracy limit, |slack| (see the module docstring).
+_GROSS = 2.0 ** -6
+
+
 class GpuC16:
     """The GPU first tier at band N (fp16 coarse where shipped) through hier_peaks, on any
     backend (Vulkan, CUDA, Metal: the contract is the same): every pair the tier passes is
-    refined with threshold 0, so idx >= 0 marks the pass."""
+    refined with threshold 0, so idx >= 0 marks the pass. It gates on its own statistic."""
     name = "gpu-c16"
     n = 4096
+    own_statistic = True
 
     def __init__(self, N, nt, device="gpu:0"):
         mod, index = gpu_backend(device)
@@ -201,17 +210,20 @@ class GpuC16:
         self.tmpl = np.zeros((self.nt, self.n), np.complex64)
         self.tmpl[:, :self.N] = T                  # the tier correlates D with conj(ct0)
         self.ct0 = np.ascontiguousarray(self.tmpl[:, :self.N])
-        self.fresh = True
 
     def decide(self, thr):
+        # Both operands are uploaded at every threshold: the tier places them for the
+        # threshold (powers of two, _gpuhier.c16_data_exp), so data uploaded for another
+        # octave of it are on another scale (every pair then passed or failed), and an upload
+        # skipped across families followed the arrays' addresses, not their contents.
         idx, _ = self.ctx.hier_peaks(self.n, self.N, self.data, self.tmpl, self.ct0, float(thr),
-                                     binsize=self.n, threshold=0.0, upload_data=self.fresh,
-                                     upload_tmpl=self.fresh)
-        self.fresh = False
+                                     binsize=self.n, threshold=0.0, upload_data=True,
+                                     upload_tmpl=True)
         return idx.reshape(self.nt) >= 0, None
 
 
 def measure(gate, cases):
+    own = getattr(gate, "own_statistic", False)
     rows = {}
     for name, D, T, K in cases:
         gate.load(D, T)
@@ -240,7 +252,9 @@ def measure(gate, cases):
                          slack_median=float(np.median(s)),
                          use_max=None if u is None else float(u.max()),
                          use_p999=None if u is None else float(np.quantile(u, 0.999)))
-        out[name]["ok"] = out[name]["dismissals"] == 0 and (u is None or out[name]["use_max"] < 0.5)
+        out[name]["slack_absmax"] = float(np.abs(s).max())
+        out[name]["ok"] = (out[name]["slack_absmax"] < _GROSS if own else
+                           out[name]["dismissals"] == 0 and (u is None or out[name]["use_max"] < 0.5))
     return out
 
 
@@ -313,9 +327,10 @@ def main():
             report["%s/%d" % (gate.name, N)] = res
             for fam, r in res.items():
                 print("%-12s N=%-5d %-10s pairs %5d  dismissals %3d  slack min %+.4f p0.1%% %+.4f "
-                      "median %+.4f  margin use max %s  %s"
+                      "median %+.4f |max| %.4f  margin use max %s  %s"
                       % (gate.name, N, fam, r["pairs"], r["dismissals"], r["slack_min"], r["slack_p001"],
-                         r["slack_median"], "-" if r["use_max"] is None else "%.3f" % r["use_max"],
+                         r["slack_median"], r["slack_absmax"],
+                         "-" if r["use_max"] is None else "%.3f" % r["use_max"],
                          "ok" if r["ok"] else "FAIL"))
                 if not r["ok"]:
                     failures.append("%s N=%d %s" % (gate.name, N, fam))

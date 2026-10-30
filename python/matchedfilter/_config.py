@@ -118,10 +118,6 @@ VARS: Tuple[Var, ...] = (
         usage="MF_COARSE_LAYOUT=<labels>", kind="text"),
     Var("MF_VK_SUBGROUP", "override", "py", "measured", "Force a Vulkan subgroup size.",
         usage="MF_VK_SUBGROUP=<size>", kind="text"),
-    Var("MF_COARSE_RAW", "override", "py", "0",
-        "The fp16 coarse tier reports its raw maximum instead of an upper bound (every GPU "
-        "backend; the physics tests and tools/c16_sigma.py).",
-        usage="MF_COARSE_RAW=1", kind="flag", value=False),
     Var("MF_GPU_ITEMS", "override", "py", "on",
         "Single-template GPU jobs of a batch run one by one.", usage="MF_GPU_ITEMS=0", kind="flag", value=True),
     Var("MF_GPU_QUEUE_AHEAD", "override", "py", "8", "GPU submissions in flight.",
@@ -153,11 +149,14 @@ VARS: Tuple[Var, ...] = (
 
 #: Names in the code that are not environment variables: Metal shader macros the package
 #: defines when it compiles a kernel.
-SHADER_MACROS = frozenset({"MF_C16_RAW", "MF_COARSE_TWT", "MF_DATA_SCALE_BITS",
+SHADER_MACROS = frozenset({"MF_COARSE_TWT", "MF_DATA_SCALE_BITS",
                            "MF_DATA_STRIDE", "MF_ROW_WINDOWS"})
 
 #: Removed variables and why (the document lists them; setting one changes nothing).
 REMOVED = (
+    ("2026-10-30", "the GPU fp16 coarse tier reports its own statistic, the raw fp16 maximum, "
+     "as every narrow first tier does: its error bound passed so many more pairs than planned "
+     "that single-tier chains dismissed a fifth of their budget", ("MF_COARSE_RAW",)),
     ("2026-10-30", "a GPU batch is always fused, in lockstep: pinned at production length, "
      "unfused was 3-17% slower and the interleave of depth 3 no faster on the 8060S, RENOIR "
      "and Iris Xe (the device trial that chose them is gone)", ("MF_GPU_FUSE_INTERLEAVE",)),

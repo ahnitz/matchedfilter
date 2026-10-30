@@ -28,7 +28,6 @@ a device with indirect dispatch sizes them by the count, one without strides a f
 """
 import math
 
-from . import _config
 import struct
 
 import numpy as np
@@ -332,9 +331,9 @@ class HierOps:
     def _gate_bits(self, thr, band, layout):
         """The coarse kernel's last word: for a tiled build whose pair fits one subgroup, the
         gate threshold as magnitude bits (tierb.slang peakTwoGate: only the pass and its
-        bound, no election -- nothing reads tier 0's index); 0 elects (peakTwoWave)."""
+        value, no election -- nothing reads tier 0's index); 0 elects (peakTwoWave)."""
         sg, _, tile, _ = layout[:4]
-        if tile <= 1 or _config.get("MF_COARSE_RAW"):
+        if tile <= 1:
             return 0
         if band // 16 > (sg or self.subgroup_size):
             return 0
