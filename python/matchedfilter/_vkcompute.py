@@ -585,6 +585,10 @@ class _FusedBatch:
             cache.move_to_end(key)
             self._submit_fused(hit[0])
             return
+        # A fused recording is a recording each constituent context built (Executor.built):
+        # a batch that built one ran setup, which a joint round's settle replays past.
+        for ctx in {id(c): c for c, _ in self.items}.values():
+            ctx._x_built = ctx.__dict__.get("_x_built", 0) + 1
         cmd = _vp()
         info = _CmdBufAlloc(40, None, dev.command_pool, 0, 1)
         _check(vk.vkAllocateCommandBuffers(dev.device, ctypes.byref(info), ctypes.byref(cmd)),

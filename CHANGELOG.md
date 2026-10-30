@@ -25,6 +25,16 @@ Alpha releases may change the API. Pin a version for reproducible work.
 
 ### Changed
 
+- A GPU joint trial's round settles each configuration until a replay builds nothing and
+  runs within half the tie (2.5%) of the replay before, at most five replays. It used to
+  stop as soon as nothing more was built. Vulkan fused batches now count as built recordings.
+  A batch that has built everything can still run 10-25% slower for a replay or two, so the
+  arm played first in a round read 14-21% slower than the same configuration played later
+  (docs/trial-statistics-gpu.md). Short test27 ladders, 24 per GPU, equal arm's sd per
+  round before and after: dev2 (8060S) 0.31 to 0.15, dev3 (Renoir) 0.24 to 0.10, dev4 (Iris
+  Xe) 0.024 to 0.022; the order effect is gone on dev3. The current rule's power for a 10%
+  gain went from 0.013 to 0.98 on dev2 and from 0.41 to 0.73 on dev3, its false-switch rate
+  fell on every device, and job times did not move.
 - The GPU fp16 coarse tier gates on its own statistic, each pair's fp16 maximum, as the CPU's
   Q15 screen does, in place of an error bound (|c16| (1 + 3u) + kappa u rms, kappa from a
   measured error table per backend). Against the flat filter by injection on the 8060S

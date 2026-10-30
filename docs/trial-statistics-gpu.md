@@ -112,14 +112,47 @@ What would raise the power is a better measurement, not a different rule. The ne
 are open:
 
 - Find what makes a round's first timed run slow on dev3 and dev4, and remove it or cancel
-  it. One way to cancel it is a palindromic order (each arm timed in mirrored positions
-  within a round); the cost is one more timed run per arm.
+  it. For the joint trial this is done (see the follow-up below); `gpu-single` is open.
 - Make dev2's plays long enough to time, or time them by the device's own timestamps: a
   play of 1-3 ms by the host clock carries noise of the same size as the gains it is meant
-  to find.
+  to find. For the joint trial the settle halved it (below).
 - Measured GPU choices that move only a few percent are not trustworthy until then. The
   GPU chains of any length (roadmap step I) wait on this: there a model choice that is
   1-2% wrong cost 4-5% of the fine stage, and a trial would not resolve it.
+
+## Follow-up: the joint trial's settle
+
+The joint trial's position effect had a cause the library could remove. Every timed run
+already followed an untimed one, but a GPU joint round's untimed run (its settle) replayed
+the batch only until it built no more recordings. That was one replay, since Vulkan's fused
+batches were not counted as built. Each round replays other banks than the round before
+(two of the batch's, rotated), so a round's first use of a configuration rebuilt its
+recordings, and the batch then ran 10-25% slower for a replay or two after it had built
+everything. Logged run by run on dev3, a configuration's second use in a round was 9-11%
+faster than its first. The A/A arm, always a second use, looked fast after the preference
+and slow before it. Neither a lead-in run per round nor a palindromic order removed it; a
+settle to a steady time did.
+
+The settle now replays until a replay builds nothing and runs within half the tie (2.5%)
+of the replay before, at most five replays, and fused batches count as built. Short
+ladders, 24 per GPU, before (the `gshort` set above) and after
+([settle](measurements/trial-aa-gpu-20261030/settle/README.md)), joint trial only:
+
+| | equal arm's sd | A/A after / before the preference | false switch per contest | power, 10% gain | job wall (s) |
+|---|---|---|---|---|---|
+| dev2 before | 0.309 | -0.044 / -0.150 | 3.5e-6 | 0.013 | 14.2 |
+| dev2 after | 0.154 | -0.042 / +0.004 | 3.2e-9 | 0.980 | 14.1 |
+| dev3 before | 0.236 | -0.210 / +0.206 | 0.15 | 0.407 | 41.2 |
+| dev3 after | 0.097 | -0.027 / -0.028 | 4.5e-3 | 0.728 | 41.0 |
+| dev4 before | 0.024 | -0.012 / -0.018 | 7.4e-10 | 1.000 | 50.8 |
+| dev4 after | 0.022 | +0.001 / +0.016 | below 1e-12 | 0.991 | 50.8 |
+
+These are the first contests of a process only, which is why dev3's rate before (0.15) is
+far above the whole collection's (4.1e-3). The A/A arm is still a configuration's second use
+in its round, so on dev3 it still reads 3% fast either way; real arms are both first uses.
+`gpu-single` is not changed. Its call is a single-template follow-up, which in production
+pays the device's wake from idle, so what it should time is a policy question; its order
+effect stands (dev4: the CPU arm +0.46-0.51 played first, +0.03-0.18 played second).
 
 ## Not covered
 

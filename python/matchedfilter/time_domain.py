@@ -9,7 +9,7 @@ import weakref
 import numpy as np
 from . import _calibration, _config
 from . import _settings, _trial
-from ._choice import _AUTOTUNE_LOCK
+from ._choice import _AUTOTUNE_LOCK, TIE as _TIE
 from ._results import FilterResults, _EMPTY_FILTER_RESULTS  # noqa: F401  (public here)
 from ._windows import _normalize_windows, _window_layout
 from ._windows import _merge_window_bins, _window_bin_phases
@@ -197,6 +197,36 @@ def _built(banks):
 #: for every configuration cost 11 s of a 74 s job (dev2, 2026-10-26).
 _ROUND_BANKS = 2
 
+#: A joint round's settle on a GPU (_joint_round): replays until one builds nothing and runs
+#: within this fraction of the one before -- half the paired rule's tie, so what is left of
+#: the drift cannot by itself carry an arm past the tie -- and at most this many replays.
+_SETTLE_TOL = _TIE / 2
+_SETTLE_REPLAYS = 5
+
+
+def _settle(replay, built, clock=None):
+    """Replay a GPU batch until it is in steady state, for a joint round's timed replay;
+    returns the replays run. A batch after a switch builds recordings and uploads, and runs
+    slower for a replay or two after it has built everything (the driver settling the
+    buffers it just allocated). So it is replayed until a replay builds nothing (built(),
+    the batch's contexts' recordings) and runs within _SETTLE_TOL of the replay before, at
+    most _SETTLE_REPLAYS times. Settled by builds alone, a round's first configuration timed
+    10-25% slower than its second use (dev3, Renoir RADV), and the arm played first in a
+    round read 14-21% slower than the same configuration played later
+    (docs/trial-statistics-gpu.md); settled to time, the order made no difference."""
+    import time
+    clock = clock or time.perf_counter
+    prev = None
+    for n in range(1, _SETTLE_REPLAYS + 1):
+        before = built()
+        t0 = clock()
+        replay()
+        t = clock() - t0
+        if built() == before and prev is not None and abs(t - prev) <= _SETTLE_TOL * prev:
+            return n
+        prev = t
+    return _SETTLE_REPLAYS
+
 
 def _joint_round(jobs):
     """A round of the joint trial of the banks of this batch that are in one (_trial.run_round):
@@ -225,19 +255,9 @@ def _joint_round(jobs):
     from ._hierarchical import _record_cpu_trial
 
     def settle_for(sub):
-        def settle():
-            # a GPU batch after a switch builds recordings and uploads: replayed until it
-            # builds nothing more (at most three times), so the timed batch is steady state
-            banks = [b for b, _, _ in sub]
-            before = _built(banks)
-            TimeDomainFilterBank.filter_series_many(sub)
-            for _ in range(2):
-                now = _built(banks)
-                if now == before:
-                    break
-                before = now
-                TimeDomainFilterBank.filter_series_many(sub)
-        return settle
+        banks = [b for b, _, _ in sub]
+        return lambda: _settle(lambda: TimeDomainFilterBank.filter_series_many(sub),
+                               lambda: _built(banks))
 
     begin = time.perf_counter()
     out = [None] * len(jobs)
