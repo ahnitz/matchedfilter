@@ -100,6 +100,8 @@ typedef struct {
   /* dst = src[k*stride] * scale for k < have, zero to n (loads-inl.h scale_load). */
   void (*scale_load)(float *dst, const float *src, size_t have, size_t n, size_t stride,
                      float scale);
+  /* dst[k*w + l] = src[l][k] (zero past cnt) for k < n (loads-inl.h lanes_transpose). */
+  void (*lanes_transpose)(float *dst, const float *const *src, int cnt, size_t n, int w);
 } ap_backend;
 
 /* The kernel for the target Highway's runtime dispatch selected, or NULL if

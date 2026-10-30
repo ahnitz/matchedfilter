@@ -66,6 +66,10 @@ void ap_split_store_on(const ap_plan *p, const float *x, float *re, float *im, s
    a complex series; others element by element). */
 void ap_scale_load_on(const ap_plan *p, float *dst, const float *src, size_t have, size_t n,
                       size_t stride, float scale);
+/* dst[k*w + l] = src[l][k] for l < cnt (zero for cnt <= l < w), k < n: rows into the
+   lane-interleaved layout of the pair-batch kernels. */
+void ap_lanes_transpose_on(const ap_plan *p, float *dst, const float *const *src, int cnt,
+                           size_t n, int w);
 void ap_real_split_on(const ap_plan *p, const float *Z, const float *tw, size_t n, float *X);
 
 /* The root stage's product scale * conj(T) D over bins [k0, k1) of two one-sided spectra of
