@@ -13,8 +13,8 @@ measured false-switch rate". This page supports that decision and decides nothin
 
 The library was at f634aeae: a7df139e plus the A/A diagnostic. The evidence and its
 provenance are in [measurements/trial-aa-20261029](measurements/trial-aa-20261029/README.md),
-and `tools/trial_power.py` regenerates every number here from it. GPU trials are not
-covered; they come in wave 2.
+and `tools/trial_power.py` regenerates every number here from it. GPU trials are on
+[their own page](trial-statistics-gpu.md).
 
 ## Summary
 
@@ -299,10 +299,9 @@ tool that regenerates them (`tools/trial_power.py`) for any new collection.
 
 ## Not covered
 
-- GPU trial kinds (the device and single-template trials, and the Vulkan subgroup size,
-  which is decided from subprocess timings and has no play) are not covered. They come in
-  wave 2, when the GPU is free. The diagnostic runs on them, but its GPU path is untested
-  here: GPU tests skip with the GPU hidden.
+- GPU trial kinds are not covered here; [the GPU page](trial-statistics-gpu.md) covers the
+  three that play rounds (the bank trial on a GPU, the single-template trial and the kernel
+  trial). The Vulkan subgroup size is decided from subprocess timings and has no play.
 - Standalone `HierarchicalFilter` plan trials run in neither consumer, so none were logged.
 - The independent-rounds model's rates below about 1e-3 rest on its tails. The logged
   sequences resolve only about 1/200 per contest. The dev2 contest effect could raise the

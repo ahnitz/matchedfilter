@@ -73,6 +73,7 @@ that and that every link resolves.
   budget split's selection bias and per-plan scatter, the retired tables, chain and
   block-size trials, and the joint trial.
 - [A/A rounds: the paired rule's error and power on the CPU](trial-statistics.md)
+- [A/A rounds on the GPU: the paired rule's error and power](trial-statistics-gpu.md)
   (2026-10-29): the null of a paired round measured with an A/A arm (`MF_TRIAL_AA_LOG`) on
   dev2 and dev1, the current rule's false-switch rate, and the error and power of
   group-sequential sign, t and Wilcoxon rules, as support for the D8 decision.
