@@ -868,6 +868,8 @@ class Context(Executor, InputUploads):
             return "compactl"
         if entry == "markBlocks":
             return "markblocks"
+        if entry == "refineDirect":
+            return "refine_td"
         if entry in ("seriesForwardBands", "seriesForwardListed", "forwardTier0"):
             return {"seriesForwardBands": "forward_bands", "seriesForwardListed": "forward_listed",
                     "forwardTier0": "forward_tier0"}[entry] + f"_{n}"
@@ -1042,6 +1044,9 @@ class Context(Executor, InputUploads):
             fn, wg = self.pipeline(n, "refineListed", one_bin=name.endswith("1"),
                                    gate=bool(c.get("gate")))
             return fn, wg, 6, 1
+        if name == "refine_td":
+            fn, wg = self.pipeline(n, "refineDirect")
+            return fn, wg, 11, 1
         if name == "compact_peaks":
             return self._compact_peaks()
         entries = {"compact": "compactPairs", "compactl": "compactListed", "mark": "markBlocks",
@@ -1070,6 +1075,8 @@ class Context(Executor, InputUploads):
             return _shipped(f"items_{n}") is not None
         if name == "tier1gate":
             return _shipped(f"refine_{n}_onebin_gate") is not None
+        if name == "refine_td":
+            return _shipped("refine_td") is not None
         raise ValueError(name)
 
     def _x_coarse_candidates(self, band):

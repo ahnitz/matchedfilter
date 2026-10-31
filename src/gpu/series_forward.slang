@@ -1,3 +1,4 @@
+[ForceInline]
 void forwardTransform(inout C r[RADIX], uint tid)
 {
 #include "fft_transform.slang"

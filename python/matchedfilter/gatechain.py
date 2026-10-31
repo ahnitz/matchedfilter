@@ -899,16 +899,17 @@ class CostModel:
         # moves where the pairs it passes are refined.
         return (cq, True) if cq <= c * (1.0 + TIE) else (c, False)
 
-    def feed_delta(self, chain, reach, ntemplates):
+    def feed_delta(self, chain, reach, ntemplates, hw=None):
         """Per-pair change from `block` of the forward this chain's calls take: the band
         forward at its widest band, or the full forward, as the backend decides from the
         chain's modelled refine probability reach[len(chain)] (band_forward_wanted,
-        the call's own rule), each measured per block and spread over the templates. 0 where
-        the backend has one feed."""
+        the call's own rule; 0 when direct refine claims the band forward), each measured
+        per block and spread over the templates. 0 where the backend has one feed."""
         if self.feed is None or not ntemplates:
             return 0.0
         top = int(max(chain))
-        r = min(max(float(reach[len(chain)]), 0.0), 1.0)
+        r = (0.0 if (hw is not None and self.prices_direct(chain))
+             else min(max(float(reach[len(chain)]), 0.0), 1.0))
         if band_forward_wanted(self.n, top, r) and top in self.feed["band"]:
             per = self.feed["band"][top]
         else:
@@ -1416,7 +1417,7 @@ def plan_chain(sig, noise, bands, chain, fd, cost, n, snr, prune=False, ntemplat
                 if has_feed:
                     # the change from the feed `block` was measured with; pick_stable's tie window
                     # is absolute-valued, so a change that takes a total below zero still compares
-                    c += cost.feed_delta(chain, list(reach), ntemplates)
+                    c += cost.feed_delta(chain, list(reach), ntemplates, hw)
                 if best is None or c < best[0]:
                     best = (float(c), th, reach, hw)
     if best is None:

@@ -428,8 +428,11 @@ class HierarchicalFilter(MatchedFilter):
             tot = ref.sum()
             f = tuple(float(ref[slice(*_gatechain._band_slice(self.n, b, k0))].sum() / tot)
                       if tot > 0 else 0.0 for b, k0 in zip(chain, offsets))
-        if (self.device.kind == 'cpu' and getattr(self, "_taps", None) is not None
-                and _direct_refine_enabled() and self._cal_thr is None):
+        if (getattr(self, "_taps", None) is not None
+                and _direct_refine_enabled() and self._cal_thr is None
+                and (self.device.kind == 'cpu'
+                     or (self._gpu is not None and self.n <= 65536
+                         and self._gpu._shipped("refine_td", self.n)))):
             # the model's plan: its thresholds and half-width share the budget. Explicit
             # thresholds carry their own guarantee, which a window would add to: transform.
             hw = getattr(self, "_plan_halfwidth", None)
@@ -437,11 +440,11 @@ class HierarchicalFilter(MatchedFilter):
                                        hw, offsets)
         return r
 
-    def _direct_price(self):
-        """Ticks per lag of the direct refine's window with this plan's taps, which the chain
-        choice prices every chain's window by (gatechain.CostModel.with_direct), or None where
-        the direct refine does not apply: off (MF_DIRECT_REFINE=0), no taps, or no reference
-        to model it on."""
+    def _direct_price(self, cm=None):
+        """Ticks (or GPU anchor ns) per lag of the direct refine's window with this plan's
+        taps, which the chain choice prices every chain's window by
+        (gatechain.CostModel.with_direct), or None where the direct refine does not apply:
+        off (MF_DIRECT_REFINE=0), no taps, or no reference to model it on."""
         taps = getattr(self, "_taps", None)
         if (taps is None or not _direct_refine_enabled() or self._pending_ref is None
                 or getattr(self, "_one_bin_frac", 1.0) <= 0.0):
@@ -449,10 +452,19 @@ class HierarchicalFilter(MatchedFilter):
         cplx = bool(taps[2])
         want_real = self.__dict__.get("_want_real")
         rs = bool(cplx) if want_real is None else bool(want_real)
+        L = 32.0 * max(1, int(round(float(np.mean(taps[1])) / 32.0)))   # as the chain key rounds it
+        if self.device.kind == "gpu":
+            if (self._gpu is None or self.n > 65536
+                    or not self._gpu._shipped("refine_td", self.n) or cm is None
+                    or not cm._refine):
+                return None
+            ratio = _prices._gpu_direct_ratio(self.n, self._gpu, real_series=rs, complex_taps=cplx)
+            if not ratio > 0:
+                return None
+            return ratio * min(v for _, v in cm._refine) * L
         lagtap = _prices._direct_lagtap(real_series=rs, complex_taps=cplx)
         if not lagtap > 0:
             return None
-        L = 32.0 * max(1, int(round(float(np.mean(taps[1])) / 32.0)))   # as the chain key rounds it
         # the correlation, plus the per-lag binning around it (~4 ticks a lag)
         return lagtap * L + 4.0
 
@@ -583,7 +595,11 @@ class HierarchicalFilter(MatchedFilter):
         """The costs of the device this plan runs on: chains rank differently on a GPU (a refined
         pair costs ~30 coarse pairs there against ~100 on a CPU core)."""
         if self.device.kind == "gpu":
-            return _calibration.calibrate_costs_gpu(self.n, str(self.device))
+            cm = _calibration.calibrate_costs_gpu(self.n, str(self.device))
+            price = self._direct_price(cm)
+            return (cm.with_direct(price, single_tier=True,
+                                   fraction=getattr(self, "_one_bin_frac", 1.0))
+                    if price is not None else cm)
         policy = self._series_policy('hierarchical_series', 0, self.ntemplates) or {}
         cm = _calibration.calibrate_costs(self.n, self.ntemplates,
                                         group=policy.get('series_group', _gatechain.default_series_group(self.n)))
@@ -597,7 +613,12 @@ class HierarchicalFilter(MatchedFilter):
         choice (HierarchicalFilter._direct_price), else None: chain choices and locks are
         kept apart by it, since a cheaper refine changes which chain wins."""
         taps = getattr(self, "_taps", None)
-        if taps is None or not _direct_refine_enabled() or self.device.kind != "cpu":
+        if taps is None or not _direct_refine_enabled():
+            return None
+        if self.device.kind == "gpu":
+            if self._gpu is None or self.n > 65536 or not self._gpu._shipped("refine_td", self.n):
+                return None
+        elif self.device.kind != "cpu":
             return None
         frac = round(float(getattr(self, "_one_bin_frac", 1.0)), 2)
         if frac <= 0.0:
@@ -725,7 +746,7 @@ class HierarchicalFilter(MatchedFilter):
         self._mark_ready("template", None)
 
     def set_taps(self, taps, counts=None):
-        """Each template's real or complex FIR taps, for the direct refine on the CPU.
+        """Each template's real or complex FIR taps, for the direct refine on CPU and GPU.
 
         taps (ntemplates, m) float32 or complex64, row t's first counts[t] taps valid (all m
         when counts is None), the centre tap counts[t] // 2 at lag 0 -- the filter whose
@@ -743,16 +764,22 @@ class HierarchicalFilter(MatchedFilter):
         if counts.shape != (self.ntemplates,) or counts.min() < 1 or counts.max() > min(taps.shape[1], self.n):
             raise ValueError("counts must be (ntemplates,) in [1, min(m, n)]")
         self._taps = (taps, counts, cplx)
-        if self._pinned is None and self._chain is not None and self.device.kind == "cpu":
+        self._gtaps_info = None
+        self.__dict__.pop("_call_plans", None)
+        if self._pinned is None and self._chain is not None:
             # The model priced the chain without the direct refine: choose again (the plan is
             # rebuilt on next use and replays reference, templates and data).
             self._chain, self._mf, self._resolved = None, None, None
         elif self._mf is not None:
             self._mf.set_taps(taps, taps.shape[1], counts, cplx)
             self._resolved = None               # the direct window is part of the resolved plan
+        else:
+            self._resolved = None
 
     def direct_stats(self):
-        """Direct-refine counters of the CPU plan ({} before one exists)."""
+        """Direct-refine counters of the plan ({} on CPU before one exists)."""
+        if self._gpu is not None:
+            return dict(pairs=int(self._gdirect), fft=int(self._gfft))
         return self._mf.direct_stats() if self._mf is not None else {}
 
     def set_hermitian(self, hermitian: bool):
@@ -837,12 +864,76 @@ class HierarchicalFilter(MatchedFilter):
             extra["band_offsets"] = offsets
         return chain, ct, thr, extra
 
+    def _gpu_direct_arg(self, H):
+        """The GPU direct-refine descriptor (taps_view, tap_meta, tmpl_offset, direct_hw,
+        max_lag_tap) for template slice H, or None when direct refine is inactive."""
+        r = self._resolve()
+        if r.direct_hw is None:
+            return None
+        taps = getattr(self, "_taps", None)
+        if (taps is None or not _direct_refine_enabled() or self._gpu is None
+                or self.n > 65536 or not self._gpu._shipped("refine_td", self.n)):
+            return None
+        gtmpl = self._gtmpl
+        if gtmpl is None or gtmpl.strides[0] <= 0:
+            return None
+        byte_off = H.ctypes.data - gtmpl.ctypes.data
+        row_bytes = gtmpl.strides[0]
+        if (byte_off < 0 or byte_off % row_bytes != 0
+                or byte_off // row_bytes + H.shape[0] > self.ntemplates):
+            return None
+        tmpl_offset = int(byte_off // row_bytes)
+        # Pack and upload the conjugated/zero-masked tap table lazily on first active dispatch.
+        info = self.__dict__.get("_gtaps_info")
+        if info is None or info[0] is not self._gpu:
+            arr_taps, counts, cplx = taps
+            tap_stride = (int(counts.max()) + 3) & ~3
+            row_words = 4 + (2 * tap_stride if cplx else tap_stride)
+            packed = np.zeros((self.ntemplates, row_words), dtype=np.uint32)
+            packed[:, 0] = counts.astype(np.uint32)
+            m = min(arr_taps.shape[1], tap_stride)
+            mask = np.arange(m)[None, :] < counts[:, None]
+            if cplx:
+                masked = np.ascontiguousarray(
+                    np.where(mask, np.conj(arr_taps[:, :m]), np.complex64(0)),
+                    dtype=np.complex64)
+                packed[:, 4:4 + 2 * m] = masked.view(np.uint32)
+            else:
+                masked = np.ascontiguousarray(
+                    np.where(mask, arr_taps[:, :m], np.float32(0)),
+                    dtype=np.float32)
+                packed[:, 4:4 + m] = masked.view(np.uint32)
+            buf = self._gpu.empty_shared((self.ntemplates, row_words), dtype=np.uint32)
+            buf[:] = packed
+            from ._shared import shared_view
+            view = shared_view(buf, self._gpu)
+            if self._gpu.stage_host_inputs and view is not None:
+                self._gpu._x_prefetch(view, 0, buf.nbytes, None)
+            tap_meta = (tap_stride << 1) | int(bool(cplx))
+            info = self._gtaps_info = (self._gpu, buf, view, tap_meta, {})
+        if info[2] is None:
+            return None
+        rs = bool(self.__dict__.get("_want_real", False))
+        max_lag_tap = info[4].get(rs)
+        if max_lag_tap is None:
+            ratio = _prices._gpu_direct_ratio(self.n, self._gpu, real_series=rs,
+                                              complex_taps=bool(taps[2]))
+            if not ratio > 0:
+                return None
+            cm = _calibration.calibrate_costs_gpu(self.n, str(self.device))
+            ref_vals = [v for _, v in cm._refine] if cm._refine else [1.0]
+            scale = max(ref_vals) / max(min(ref_vals), 1e-12)
+            max_lag_tap = max(1, min(0xFFFFFFFF, int(round(scale / ratio))))
+            info[4][rs] = max_lag_tap
+        return (info[2], info[3], tmpl_offset, int(r.direct_hw), max_lag_tap)
+
     def _grouped_dispatch(self, n, spec, H, groups, binsize, threshold, **kw):
         """The gate chain over every window group of one spectra batch, one submission."""
         chain, ct, thr, extra = self._gate_args(H, threshold)
         res = self._gpu.hier_peaks_grouped(n, chain[-1], spec, H, ct[0], thr[0], groups, binsize,
                                            threshold, upload_tmpl=self._tdirty,
                                            refine_reach=getattr(self, "_refine_reach", None),
+                                           direct=self._gpu_direct_arg(H),
                                            **extra, **kw)
         if kw.get("async_submit"):
             return lambda: self._account(res())
@@ -857,7 +948,8 @@ class HierarchicalFilter(MatchedFilter):
             binsize=binsize, threshold=threshold, window=(start, end),
             upload_data=self._ddirty, upload_tmpl=self._tdirty,
             slot=slot, async_submit=async_submit,
-            refine_reach=getattr(self, "_refine_reach", None), **extra, **kw)
+            refine_reach=getattr(self, "_refine_reach", None),
+            direct=self._gpu_direct_arg(H), **extra, **kw)
         self._ddirty = self._tdirty = False
         if async_submit:
             return lambda: self._account(res())

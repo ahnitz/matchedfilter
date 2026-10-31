@@ -705,6 +705,8 @@ class Context(Executor, InputUploads):
             return "forward_bands_%d" % n
         if entry == "markBlocks":
             return "markblocks"
+        if entry == "refineDirect":
+            return "refine_td"
         if entry.startswith("coarse16"):
             return "tierb_%d_c16%s" % (n, entry[len("coarse16"):])
         tierc = {"tcStage1": "corr1", "tcFullStage3": "corr2",
@@ -1060,6 +1062,8 @@ class Context(Executor, InputUploads):
         elif name in ("tier", "tier1", "refine", "refine1"):
             pso = self.pipeline(n, "refineListed", name.endswith("1"), macros=macros,
                                 gate=bool(c.get("gate")))
+        elif name == "refine_td":
+            pso = self.pipeline(n, "refineDirect", macros=macros)
         else:
             if name in ("tc1", "tc2", "tcs2", "tf1", "tf2") and _kernels.two_stage("metal", n) is None:
                 raise UnsupportedSize('no two-stage full-correlation kernel for n=%d' % n)
@@ -1089,6 +1093,8 @@ class Context(Executor, InputUploads):
             return _shipped("items_%d" % n) or _shipped("items_%d_lds32" % n)
         if name == "tier1gate":
             return _shipped("refine_%d_onebin_gate" % n)
+        if name == "refine_td":
+            return _shipped("refine_td")
         raise ValueError(name)
 
     def _x_coarse_candidates(self, band):

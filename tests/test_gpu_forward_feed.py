@@ -85,7 +85,11 @@ def test_fused_forward_matches_separate(monkeypatch):
     dozen pairs gate differently for that reason alone, not for the feed's numerics."""
     import matchedfilter as mf
     from matchedfilter import _gpuhier
-    cpu = _run(monkeypatch, False, device="cpu")
+    # Compare against the float CPU gate path (the Q15 screen gates in int16 with ~0.2%
+    # quantization on both tiers, which flips several additional marginal pairs on its own).
+    with monkeypatch.context() as mp_cpu:
+        mp_cpu.setattr(mf.HierarchicalFilter, "_q15_ok", lambda self, chain: False)
+        cpu = _run(mp_cpu, False, device="cpu")
     pinned = {chain: thr for chain, thr in _GATES[("cpu", "hier", False)]}
     model = mf.HierarchicalFilter._thresholds    # the library's own calibration plans keep it
     monkeypatch.setattr(mf.HierarchicalFilter, "_thresholds",

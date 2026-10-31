@@ -482,7 +482,7 @@ class _CaptureVK:
 #: depend on each other within a call (marking survivor blocks, then recomputing them) are
 #: therefore separate phases.
 _FUSED_PHASES = ("forward", "fill", "pack", "coarse0", "compact0", "coarse1", "compact1",
-                 "mark", "recompute", "refine", "peaks")
+                 "refine_td", "mark", "recompute", "refine", "peaks")
 
 #: A unique number per captured recording. Fused recordings are cached by their constituents,
 #: and a command-buffer handle is no identity: once a recording is evicted the driver hands
@@ -1822,6 +1822,13 @@ class Context(Executor, InputUploads):
                 raise UnsupportedSize("no refineItems module for n=%d" % n)
             return self._build_pipeline(("items", filename), filename, 6, 24,
                                         subgroup=self._fit_subgroup(n))
+        if name == "refine_td":
+            rec = _kernels.runnable("vulkan", "refine_td", self.max_shared_memory)
+            if rec is None:
+                raise UnsupportedSize("no refine_td GPU kernel this device can run")
+            return self._build_pipeline(("refine_td", rec["file"]), rec["file"],
+                                        len(rec["descriptors"]), rec["push_bytes"],
+                                        row_windows=rowwin)
         # The other kernels: bindings and push-constant bytes as the module declares them
         # (the manifest's reflection of it).
         stems = {"compact": "compact", "compactl": "compactl", "mark": "markblocks",
@@ -1854,6 +1861,8 @@ class Context(Executor, InputUploads):
             return _spv_shipped("items_%d" % n) or _spv_shipped("items_%d_lds32" % n)
         if name == "tier1gate":
             return Context._gate_file(n) is not None
+        if name == "refine_td":
+            return _spv_shipped("refine_td")
         raise ValueError(name)
 
     def _x_coarse_candidates(self, band):

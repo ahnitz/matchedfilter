@@ -92,7 +92,7 @@ def test_forward_and_packing_kernels_ship(backend):
         forward = kernels["forward_%d" % n]
         flat = kernels.get("tierb_%d" % n) or kernels["tierb_%d_lds32" % n]
         assert forward["local_size"] == flat["local_size"]
-    for kernel in ("pack_coarse", "compact_peaks"):
+    for kernel in ("pack_coarse", "compact_peaks", "refine_td"):
         assert kernel in kernels
 
 
@@ -108,7 +108,8 @@ def test_production_shader_sources_match_built_manifest(backend):
     assert set(recorded) == {'tierb.slang', 'fft_transform.slang',
                              'series_forward.slang', 'series_bands.slang', 'forward_tier0.slang',
                              'pack_coarse.slang',
-                             'twiddle.slang', 'refine_bounded.slang', 'compact_peaks.slang'}
+                             'twiddle.slang', 'refine_bounded.slang', 'compact_peaks.slang',
+                             'refine_td.slang'}
     for name, digest in recorded.items():
         assert hashlib.sha256((source / name).read_bytes()).hexdigest() == digest, (
             '%s changed: rebuild the kernels with tools/kernel_variants.py build' % name)

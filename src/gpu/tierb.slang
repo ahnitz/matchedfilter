@@ -319,6 +319,20 @@ inline uint computeWant(uint d, uint TB, uint len, uint blk, uint lane, uint per
                          : (blk2 * len2 + lane2 + TB2 * d);
 }
 
+// Subgroup lane-xor exchange for a pair whose WG threads sit inside one subgroup.
+// On CUDA, __shfl_xor_sync uses the exact active CTA mask when WG*PPG < 32.
+#if defined(MF_CUDA)
+__target_intrinsic(cuda, "__shfl_xor_sync($0, $1, $2)")
+uint mfCudaShflXor(uint mask, uint v, uint s);
+static const uint MF_SHFL_MASK = (WG * PPG >= 32u) ? 0xffffffffu : ((1u << min(WG * PPG, 31u)) - 1u);
+[ForceInline] uint mfShflXor(uint v, uint s) { return mfCudaShflXor(MF_SHFL_MASK, v, s); }
+#elif defined(MF_METAL)
+__target_intrinsic(metal, "simd_shuffle_xor($0, ushort($1))")
+uint mfShflXor(uint v, uint s);
+#else
+[ForceInline] uint mfShflXor(uint v, uint s) { return WaveReadLaneAt(v, WaveGetLaneIndex() ^ s); }
+#endif
+
 #if COARSE16
 typedef half2 H;
 //: A pair index that writes nothing: the clamped tail of a ragged tile.
@@ -433,22 +447,91 @@ void dft16s(inout H re[16], inout H im[16])
 //: magnitude per lane.
 H mag2s(H re, H im) { return re * re + im * im; }
 
+// In-register subgroup-shuffle transpose for one SoA component of COARSE16 when WG <= mfSubgroupSize.
+[ForceInline]
+void shuffleTranspose16(inout H v[16], uint tid, uint lgSpan, uint TB)
+{
+    uint t[16];
+    if (TB == 2u) {
+        MF_UNROLL for (uint r = 0u; r < 2u; ++r)
+            MF_UNROLL for (uint j = 0u; j < 8u; ++j)
+                t[j * 2u + r] = bit_cast<uint>(v[r * 8u + j]);
+        bool hi = (tid & 1u) != 0u;
+        [ForceUnroll] for (uint p = 0u; p < 8u; ++p) {
+            uint k = p << 1;
+            uint partner = mfShflXor(hi ? t[k] : t[k | 1u], 1u);
+            if (hi) t[k] = partner; else t[k | 1u] = partner;
+        }
+    } else if (TB == 4u) {
+        MF_UNROLL for (uint r = 0u; r < 4u; ++r)
+            MF_UNROLL for (uint j = 0u; j < 4u; ++j)
+                t[j * 4u + r] = bit_cast<uint>(v[r * 4u + j]);
+        uint lane = tid & 3u;
+        [ForceUnroll] for (uint s = 1u; s < 4u; s <<= 1) {
+            bool hi = (lane & s) != 0u;
+            uint lowMask = s - 1u;
+            [ForceUnroll] for (uint p = 0u; p < 8u; ++p) {
+                uint k = ((p & ~lowMask) << 1) | (p & lowMask);
+                uint partner = mfShflXor(hi ? t[k] : t[k | s], s);
+                if (hi) t[k] = partner; else t[k | s] = partner;
+            }
+        }
+    } else if (TB == 8u) {
+        MF_UNROLL for (uint r = 0u; r < 8u; ++r)
+            MF_UNROLL for (uint j = 0u; j < 2u; ++j)
+                t[j * 8u + r] = bit_cast<uint>(v[r * 2u + j]);
+        uint lane = tid & 7u;
+        [ForceUnroll] for (uint s = 1u; s < 8u; s <<= 1) {
+            bool hi = (lane & s) != 0u;
+            uint lowMask = s - 1u;
+            [ForceUnroll] for (uint p = 0u; p < 8u; ++p) {
+                uint k = ((p & ~lowMask) << 1) | (p & lowMask);
+                uint partner = mfShflXor(hi ? t[k] : t[k | s], s);
+                if (hi) t[k] = partner; else t[k | s] = partner;
+            }
+        }
+    } else {
+        MF_UNROLL for (uint i = 0u; i < 16u; ++i)
+            t[i] = bit_cast<uint>(v[i]);
+        uint shift = lgSpan - 4u;
+        uint blk2 = (tid >> shift) & 15u;
+        [ForceUnroll] for (uint s = 1u; s < 16u; s <<= 1) {
+            bool hi = (blk2 & s) != 0u;
+            uint lowMask = s - 1u;
+            [ForceUnroll] for (uint p = 0u; p < 8u; ++p) {
+                uint k = ((p & ~lowMask) << 1) | (p & lowMask);
+                uint partner = mfShflXor(hi ? t[k] : t[k | s], s << shift);
+                if (hi) t[k] = partner; else t[k | s] = partner;
+            }
+        }
+    }
+    MF_UNROLL for (uint i = 0u; i < 16u; ++i)
+        v[i] = bit_cast<H>(t[i]);
+}
 
-//: Dual exchange. Two passes over the same stage -- re then im -- so the
-//: LDS sizing is untouched. Each stgPut stores one half2, which is the
-//: same element of BOTH transforms, so one pass moves both.
-//:
-//: The source of register d is (row i, column col) of the stage, and both
-//: are AFFINE-SEPARABLE in (tid, d): i(tid,d) = i(tid,0) + i(0,d), and the
-//: same for col. So each thread works its base out once and every register
-//: reads at a compile-time offset from it -- an LDS immediate, no address
-//: arithmetic. Recomputing computeWant per register cost ~4 VALU each, 128
-//: per exchange at band 256. tools/lds_layout.py checks the separation for
-//: every band and level the build emits.
+
+//: Dual exchange. On CUDA and Metal, transposes re and im in registers via subgroup
+//: butterfly shuffles whenever TB <= mfSubgroupSize (zero barriers, zero shared memory for
+//: WG <= 32). On Vulkan, uses subgroup shuffles for quad-local stages (TB <= 4, pure DPP
+//: quad_perm without ds_bpermute VALU/DS overhead) and conflict-free LDS staging for wider TB.
+[ForceInline]
 void exchangeS(inout H re[16], inout H im[16],
                uint lgLen, uint lgSpan,
                uint TB, uint len, uint blk, uint lane, uint per, uint TB2, uint len2, uint blk2, uint lane2)
 {
+#if defined(MF_CUDA) || defined(MF_METAL)
+    if (TB <= mfSubgroupSize) {
+        shuffleTranspose16(re, _tid, lgSpan, TB);
+        shuffleTranspose16(im, _tid, lgSpan, TB);
+        return;
+    }
+#elif defined(MF_VULKAN)
+    if (TB <= 4u && TB <= mfSubgroupSize) {
+        shuffleTranspose16(re, _tid, lgSpan, TB);
+        shuffleTranspose16(im, _tid, lgSpan, TB);
+        return;
+    }
+#endif
     H outr[16], outi[16];
     MF_UNROLL for (uint z = 0; z < R; ++z) { outr[z] = H(0.0f); outi[z] = H(0.0f); }
     uint spanMask = (1u << lgSpan) - 1u;
@@ -672,6 +755,7 @@ static const uint FFT_LGR_EX = (RADIX == 16) ? 4u : ((RADIX == 32) ? 5u : 6u);
 #if (2 * LDS_CAP) < (NLEN)
 #error "SPLIT_STAGE needs staging for R*WG floats"
 #endif
+[ForceInline]
 void exchange(inout C r[RADIX], uint lgLen, uint lgSpan,
               uint TB, uint len, uint blk, uint lane, uint per, uint TB2, uint len2, uint blk2, uint lane2)
 {
@@ -712,6 +796,7 @@ void exchange(inout C r[RADIX], uint lgLen, uint lgSpan,
 #endif
 }
 #else
+[ForceInline]
 void exchange(inout C r[RADIX], uint lgLen, uint lgSpan,
               uint TB, uint len, uint blk, uint lane, uint per, uint TB2, uint len2, uint blk2, uint lane2)
 {
@@ -817,6 +902,7 @@ uint c16Mag(C v, uint slot, uint ws, uint we, bool ov)
 //: value checks, not on the artefact being unchanged. What it buys is that
 //: the Tier C stages cannot drift from the transform eleven lengths are
 //: already verified against.
+[ForceInline]
 void transform(inout C r[RADIX], uint tid)
 {
 #include "fft_transform.slang"
@@ -826,6 +912,7 @@ void transform(inout C r[RADIX], uint tid)
 // register array through the coarse tiling wrapper doubled flat/refine
 // execution time on the Radeon 8060S, even when its loads were disabled.
 #if COARSE16
+[ForceInline]
 void filterOne(uint pair, uint d, uint t, uint tid, C dreg[RADIX],
                StructuredBuffer<CVal> data, StructuredBuffer<CVal> tmpl,
                RWStructuredBuffer<int> peakIdx, RWStructuredBuffer<float2> peakVal,
@@ -834,12 +921,14 @@ void filterOne(uint pair, uint d, uint t, uint tid, C dreg[RADIX],
 #elif defined(MF_PAIR_OUT)
 //: CUDA: the output slot is a parameter (filterPairOut), so a listed entry can place a
 //: pair's peaks compactly (refineItems, refine_bounded.slang); filterPair passes pair.
+[ForceInline]
 void filterPairOut(uint pair, uint opair, uint tid,
                    StructuredBuffer<CVal> data, StructuredBuffer<CVal> tmpl,
                    RWStructuredBuffer<int> peakIdx, RWStructuredBuffer<float2> peakVal,
                    uint ntmpl, uint winStart, uint winEnd,
                    uint binsize, int binShift, uint nbins, uint thrBits)
 #else
+[ForceInline]
 void filterPair(uint pair, uint tid,
                 StructuredBuffer<CVal> data, StructuredBuffer<CVal> tmpl,
                 RWStructuredBuffer<int> peakIdx, RWStructuredBuffer<float2> peakVal,
@@ -899,57 +988,21 @@ void filterPair(uint pair, uint tid,
     // -1 instead of naming the first sample, matching the CPU.
     GroupMemoryBarrierWithGroupSync();          // transform is done with stg
 #if SINGLE_BIN
-#if MF_GATE_ONLY && !COARSE16 && NLEN <= 1024
-    // GATE ONLY (a tier between the first and the refine). What follows such a tier is the
-    // compaction, which lists a pair when |peakVal| reaches the tier threshold; the index
-    // has no reader. So: the largest in-window |v|^2 per thread, a SIMD-group maximum, and
-    // across SIMD groups (WG > the SIMD width) one slot of the stage per group -- instead
-    // of the election's threadgroup atomics and three barriers. The value is the same
-    // fp32 |v| the election would report (to the rounding of its own sqrt).
-    if (gateOnly) {
-        // As uint bits, as the election compares them: non-negative floats order like
-        // their bits, and a NaN (an overflowed transform) outranks everything and is
-        // listed by the compaction (!(NaN < thr)), whatever fast math does to a float max.
-        uint m = 0u;
-        if (winStart == 0u && winEnd >= N) {
-            MF_UNROLL for (uint i = 0; i < R; ++i)
-                m = max(m, asuint(r[i].x * r[i].x + r[i].y * r[i].y));
-        } else {
-            MF_UNROLL for (uint i = 0; i < R; ++i) {
-                uint idx = slotToIndex(tid * R + i);
-                bool live = (idx >= winStart && idx < winEnd);
-                uint b = asuint(r[i].x * r[i].x + r[i].y * r[i].y);
-                m = live ? max(m, b) : m;
-            }
-        }
-        m = WaveActiveMax(m);
-        if (WG > mfSubgroupSize) {
-            uint nsg = (WG + mfSubgroupSize - 1u) / mfSubgroupSize;
-            if (WaveIsFirstLane()) stg[_stgBase + tid / mfSubgroupSize] = m;
-            GroupMemoryBarrierWithGroupSync();
-            m = 0u;
-            for (uint k = 0; k < nsg; ++k) m = max(m, stg[_stgBase + k]);
-        }
-        if (tid == 0) {
-            peakIdx[pair] = m > 0u ? 0 : -1;
-            peakVal[pair] = float2(sqrt(asfloat(m)), 0.0f);
-        }
-        return;
-    }
-#endif
-    // ONE BIN by construction:
-    // Eliminate myMag[RADIX] and myBin[RADIX] arrays entirely and free r[RADIX]
-    // immediately after the unrolled reduction loop to eliminate register spilling.
-    if (tid == 0) { stg[_stgBase] = thrBits; stg[_stgBase+1] = 0xffffffffu; }
-
+    // ONE BIN by construction: reduce r[0..R-1] in a single unrolled pass so r[] dies
+    // immediately with one reader (including when MF_GATE_ONLY adds the gateOnly exit).
     uint threadBestBits = thrBits;
     uint threadBestSlot = 0xffffffffu;
     float2 threadBestVal = float2(0.0f, 0.0f);
-
+#if MF_GATE_ONLY && !COARSE16 && NLEN <= 1024
+    uint gateMaxBits = 0u;
+#endif
     if (winStart == 0u && winEnd >= N) {
         MF_UNROLL for (uint i = 0; i < R; ++i) {
             float _rx = float(r[i].x), _ry = float(r[i].y);
             uint magBits = asuint(_rx*_rx + _ry*_ry);
+#if MF_GATE_ONLY && !COARSE16 && NLEN <= 1024
+            gateMaxBits = max(gateMaxBits, magBits);
+#endif
             if (magBits > threadBestBits) {
                 threadBestBits = magBits;
                 threadBestSlot = tid * R + i;
@@ -962,6 +1015,9 @@ void filterPair(uint pair, uint tid,
             bool live = (idx >= winStart && idx < winEnd);
             float _rx = float(r[i].x), _ry = float(r[i].y);
             uint magBits = live ? asuint(_rx*_rx + _ry*_ry) : 0u;
+#if MF_GATE_ONLY && !COARSE16 && NLEN <= 1024
+            gateMaxBits = max(gateMaxBits, magBits);
+#endif
             if (magBits > threadBestBits) {
                 threadBestBits = magBits;
                 threadBestSlot = tid * R + i;
@@ -969,7 +1025,42 @@ void filterPair(uint pair, uint tid,
             }
         }
     }
-
+#if MF_GATE_ONLY && !COARSE16 && NLEN <= 1024
+    // GATE ONLY (a tier between the first and the refine): report only the window's largest
+    // |v|, without the election's atomics and three barriers.
+    if (gateOnly) {
+        uint m = gateMaxBits;
+#if defined(MF_CUDA)
+        if (WG >= 2u)  m = max(m, mfShflXor(m, 1u));
+        if (WG >= 4u)  m = max(m, mfShflXor(m, 2u));
+        if (WG >= 8u)  m = max(m, mfShflXor(m, 4u));
+        if (WG >= 16u) m = max(m, mfShflXor(m, 8u));
+        if (WG >= 32u) m = max(m, mfShflXor(m, 16u));
+        if (WG > mfSubgroupSize) {
+            uint nsg = (WG + mfSubgroupSize - 1u) / mfSubgroupSize;
+            if ((tid & 31u) == 0u) stg[_stgBase + tid / mfSubgroupSize] = m;
+            GroupMemoryBarrierWithGroupSync();
+            m = 0u;
+            for (uint k = 0; k < nsg; ++k) m = max(m, stg[_stgBase + k]);
+        }
+#else
+        m = WaveActiveMax(m);
+        if (WG > mfSubgroupSize) {
+            uint nsg = (WG + mfSubgroupSize - 1u) / mfSubgroupSize;
+            if (WaveIsFirstLane()) stg[_stgBase + tid / mfSubgroupSize] = m;
+            GroupMemoryBarrierWithGroupSync();
+            m = 0u;
+            for (uint k = 0; k < nsg; ++k) m = max(m, stg[_stgBase + k]);
+        }
+#endif
+        if (tid == 0) {
+            peakIdx[pair] = m > 0u ? 0 : -1;
+            peakVal[pair] = float2(sqrt(asfloat(m)), 0.0f);
+        }
+        return;
+    }
+#endif
+    if (tid == 0) { stg[_stgBase] = thrBits; stg[_stgBase+1] = 0xffffffffu; }
     GroupMemoryBarrierWithGroupSync();          // ensure tid 0 stg initialized before atomics
 
 #if PPG == 1 && !TARGET_CUDA
@@ -1008,13 +1099,8 @@ void filterPair(uint pair, uint tid,
     // per-bin table. Binning is the FINE stage's job and is unaffected.
     // The window is KEPT -- winStart/winEnd still bound the search.
     if (tid == 0) { stg[_stgBase] = thrBits; stg[_stgBase+1] = 0xffffffffu; }
-#else
-    for (uint b = tid; b < nbins; b += WG) stg[_stgBase+b] = thrBits;
-    if (nbins == 1 && tid == 0) stg[_stgBase+1] = 0xffffffffu;
-#endif
     GroupMemoryBarrierWithGroupSync();
 
-#if COARSE16
     // The fp16 coarse role's election, one bin, in ONE pass over the registers: each
     // thread keeps its in-window maximum, that maximum's lowest slot (strict >, and slots
     // ascend with i) and the register itself, so r[] is dead once the loop ends. Holding
@@ -1039,7 +1125,7 @@ void filterPair(uint pair, uint tid,
             uint m = c16Mag(r[i], tid * R + i, winStart, winEnd, ovRow);
             if (m > bestBits) { bestBits = m; bestSlot = tid * R + i; bestV = r[i]; }
         }
-#if PPG == 1
+#if PPG == 1 && !TARGET_CUDA
         uint wm = WaveActiveMax(bestBits);
         if (WaveIsFirstLane() && wm > thrBits) InterlockedMax(stg[_stgBase], wm);
 #else
@@ -1049,7 +1135,7 @@ void filterPair(uint pair, uint tid,
         // A thread whose maximum is the pair's offers its lowest slot; the smallest wins.
         const uint best = stg[_stgBase];
         const uint winner = (bestSlot != 0xffffffffu && bestBits == best) ? bestSlot : 0xffffffffu;
-#if PPG == 1
+#if PPG == 1 && !TARGET_CUDA
         uint waveWinner = WaveActiveMin(winner);
         if (WaveIsFirstLane() && waveWinner != 0xffffffffu)
             InterlockedMin(stg[_stgBase+1], waveWinner);
@@ -1071,158 +1157,195 @@ void filterPair(uint pair, uint tid,
         }
     }
 #else
-    uint myMag[RADIX];
-    uint myBin[RADIX];
-#if defined(MF_METAL) && COARSE16
-    uint ovAcc = 0u;
-#endif
-    MF_UNROLL for (uint i = 0; i < R; ++i) {
-        uint idx = slotToIndex(tid * R + i);
-        bool live = (idx >= winStart && idx < winEnd);
-        // Out-of-window samples are set to zero rather than branched around:
-        // zero can never beat a seed of >= 0, so the window costs a select
-        // and no divergence.
-        float _rx = float(r[i].x), _ry = float(r[i].y);
-#if COARSE16
-        uint _nf = ((bit_cast<uint>(r[i]) & 0x7C007C00u) + 0x04000400u) & 0x80008000u;
-        myMag[i] = live ? (_nf != 0u ? 0x7F800000u : min(asuint(_rx*_rx + _ry*_ry), 0x7F800000u)) : 0u;
-#else
-        myMag[i] = live ? asuint(_rx*_rx + _ry*_ry) : 0u;
-#endif
-#if defined(MF_METAL) && COARSE16
-        // FAIL OPEN on fp16 overflow. Metal compiles with fast math, under which an inf
-        // or NaN magnitude compares unpredictably. An fp16 exponent field of all ones
-        // (inf or NaN) carries into its sign bit when 0x0400 is added to the masked
-        // field: two integer ops per register, exact under any math mode.
-        ovAcc |= (bit_cast<uint>(r[i]) & 0x7C007C00u) + 0x04000400u;
-#endif
-        uint off = idx - winStart + _binPhase;   // bins from the row's origin (rowWindow)
-        // Shift when the binsize is a power of two, divide when it is not --
-        // the same split the CPU makes, and the reason no restriction on
-        // binsize is needed. A real division here is ~20 cycles.
-#if COARSE16
-        myBin[i] = 0u;            // one bin; `off` is unused here
-#else
-        myBin[i] = live ? (binShift >= 0 ? (off >> uint(binShift)) : (off / binsize))
-                        : 0u;
-#endif
-#if !COARSE16
-        if (nbins > 1 && myMag[i] > thrBits)
-            InterlockedMax(stg[_stgBase+myBin[i]], myMag[i]);
-#endif
-    }
-#if defined(MF_METAL) && COARSE16
-    // An overflow anywhere in this thread's registers (the transform has blown up; a NaN
-    // spreads): every in-window register reports +inf, which passes every gate, and the
-    // exact refine decides. Rare, so the branch costs nothing on quiet data.
-    if ((ovAcc & 0x80008000u) != 0u) {
-        MF_UNROLL for (uint i = 0; i < R; ++i)
-            if (myMag[i] != 0u || (slotToIndex(tid * R + i) >= winStart
-                                   && slotToIndex(tid * R + i) < winEnd))
-                myMag[i] = 0x7F800000u;
-    }
-#endif
-
-    // One bin over the whole window is the common case at the small sizes --
-    // the CPU has a dedicated binmax_one for it. Every register shares the
-    // bin, so they combine in REGISTERS first and the wave reduces once.
-    // Reducing per register spends 16 wave operations where 1 will do, and
-    // that single change was worth 2.48 -> 2.28 ms at n=4096.
-#if COARSE16
-    {                              // one bin: always this path
-#else
-    if (nbins == 1) {
-#endif
-        uint bestBits = thrBits;
-        MF_UNROLL for (uint i = 0; i < R; ++i) bestBits = max(bestBits, myMag[i]);
-#if PPG == 1
-        uint wm = WaveActiveMax(bestBits);
-        if (WaveIsFirstLane() && wm > thrBits) InterlockedMax(stg[_stgBase], wm);
-#else
-        // Several pairs share this wave, so a wave-wide reduction mixes
-        // them: each pair receives the loudest of the group, only that one
-        // matches its own value in the writeback, and the rest report -1.
-        // Measured 16 of 64 survivors at band 128, PPG 4.
-        //
-        // No mask needed. Each lane maxes into ITS OWN pair's slot, which
-        // _stgBase already scopes, so a tile cannot leak into its neighbour
-        // by construction rather than by getting a lane mask right. Nearly
-        // free: bestBits starts at the threshold and clears it only on a
-        // real peak, so on noise the atomic almost never fires.
-        if (bestBits > thrBits) InterlockedMax(stg[_stgBase], bestBits);
-#endif
-    }
-    GroupMemoryBarrierWithGroupSync();
-
-    // Elect ONE register slot before writing either output. Tied samples
-    // can have different phases; independent index/value stores race.
-#if COARSE16
-    {
-#else
-    if (nbins == 1) {
-#endif
-        uint winner = 0xffffffffu;
-        MF_UNROLL for (uint i = 0; i < R; ++i)
-            if (myMag[i] > thrBits && myMag[i] == stg[_stgBase])
-                winner = min(winner, tid * R + i);
-#if PPG == 1
-        uint waveWinner = WaveActiveMin(winner);
-        if (WaveIsFirstLane() && waveWinner != 0xffffffffu)
-            InterlockedMin(stg[_stgBase+1], waveWinner);
-#else
-        if (winner != 0xffffffffu) InterlockedMin(stg[_stgBase+1], winner);
-#endif
-        GroupMemoryBarrierWithGroupSync();
-        MF_UNROLL for (uint i = 0; i < R; ++i) {
-            if (tid * R + i == stg[_stgBase+1]) {
-                peakIdx[pair] = int(slotToIndex(tid * R + i));
-#if COARSE16
-                peakVal[pair] = (stg[_stgBase] >= 0x7F800000u)
-                              ? float2(3.402823e38f, 0.0f)
-                              : float2(float(r[i].x), float(r[i].y));
-#else
-                peakVal[pair] = float2(float(r[i].x), float(r[i].y));
-#endif
+    // Multi-bin peak reduction without holding myMag[RADIX] or myBin[RADIX] arrays across
+    // barriers. For nbins <= 4 (the common 1..4-bin cases), reduce r[] into scalar registers
+    // before the first barrier so r[] dies immediately, then elect winners via wave + LDS ops.
+    if (nbins <= 4u) {
+        if (tid < 4u) {
+            stg[_stgBase + tid] = thrBits;
+            stg[_stgBase + 4u + tid] = 0xffffffffu;
+        }
+        uint m0 = thrBits, m1 = thrBits, m2 = thrBits, m3 = thrBits;
+        uint s0 = 0xffffffffu, s1 = 0xffffffffu, s2 = 0xffffffffu, s3 = 0xffffffffu;
+        float2 v0 = float2(0.0f, 0.0f), v1 = float2(0.0f, 0.0f),
+               v2 = float2(0.0f, 0.0f), v3 = float2(0.0f, 0.0f);
+        MF_UNROLL for (uint i = 0u; i < R; ++i) {
+            uint slot = tid * R + i;
+            uint idx = slotToIndex(slot);
+            if (idx >= winStart && idx < winEnd) {
+                float rx = float(r[i].x), ry = float(r[i].y);
+                uint mag = asuint(rx * rx + ry * ry);
+                uint off = idx - winStart + _binPhase;
+                uint b = (nbins == 1u) ? 0u
+                       : (binShift >= 0 ? (off >> uint(binShift)) : (off / binsize));
+                if (b == 0u && mag > m0) { m0 = mag; s0 = slot; v0 = float2(rx, ry); }
+                if (nbins >= 2u && b == 1u && mag > m1) { m1 = mag; s1 = slot; v1 = float2(rx, ry); }
+                if (nbins >= 3u && b == 2u && mag > m2) { m2 = mag; s2 = slot; v2 = float2(rx, ry); }
+                if (nbins >= 4u && b == 3u && mag > m3) { m3 = mag; s3 = slot; v3 = float2(rx, ry); }
             }
         }
-        if (tid == 0 && stg[_stgBase+1] == 0xffffffffu) {
-            peakIdx[pair] = -1;
-            peakVal[pair] = float2(0, 0);
+        GroupMemoryBarrierWithGroupSync();
+
+#if PPG == 1 && !TARGET_CUDA
+        uint wm0 = WaveActiveMax(m0);
+        if (WaveIsFirstLane() && wm0 > thrBits) InterlockedMax(stg[_stgBase + 0u], wm0);
+        if (nbins >= 2u) {
+            uint wm1 = WaveActiveMax(m1);
+            if (WaveIsFirstLane() && wm1 > thrBits) InterlockedMax(stg[_stgBase + 1u], wm1);
         }
-    }
-#if !COARSE16
-    else {
-        // Reuse the magnitude table for winner slots, retaining candidates
-        // in registers. A separate bin array would increase LDS occupancy.
-        MF_UNROLL for (uint i = 0; i < R; ++i)
-            myMag[i] = uint(myMag[i] > thrBits &&
-                           myMag[i] == stg[_stgBase+myBin[i]]);
+        if (nbins >= 3u) {
+            uint wm2 = WaveActiveMax(m2);
+            if (WaveIsFirstLane() && wm2 > thrBits) InterlockedMax(stg[_stgBase + 2u], wm2);
+        }
+        if (nbins >= 4u) {
+            uint wm3 = WaveActiveMax(m3);
+            if (WaveIsFirstLane() && wm3 > thrBits) InterlockedMax(stg[_stgBase + 3u], wm3);
+        }
+#else
+        if (m0 > thrBits) InterlockedMax(stg[_stgBase + 0u], m0);
+        if (nbins >= 2u && m1 > thrBits) InterlockedMax(stg[_stgBase + 1u], m1);
+        if (nbins >= 3u && m2 > thrBits) InterlockedMax(stg[_stgBase + 2u], m2);
+        if (nbins >= 4u && m3 > thrBits) InterlockedMax(stg[_stgBase + 3u], m3);
+#endif
         GroupMemoryBarrierWithGroupSync();
-        for (uint b = tid; b < nbins; b += WG) stg[_stgBase+b] = 0xffffffffu;
+
+        uint w0 = (s0 != 0xffffffffu && m0 == stg[_stgBase + 0u]) ? s0 : 0xffffffffu;
+        uint w1 = (nbins >= 2u && s1 != 0xffffffffu && m1 == stg[_stgBase + 1u]) ? s1 : 0xffffffffu;
+        uint w2 = (nbins >= 3u && s2 != 0xffffffffu && m2 == stg[_stgBase + 2u]) ? s2 : 0xffffffffu;
+        uint w3 = (nbins >= 4u && s3 != 0xffffffffu && m3 == stg[_stgBase + 3u]) ? s3 : 0xffffffffu;
+#if PPG == 1 && !TARGET_CUDA
+        uint ww0 = WaveActiveMin(w0);
+        if (WaveIsFirstLane() && ww0 != 0xffffffffu) InterlockedMin(stg[_stgBase + 4u], ww0);
+        if (nbins >= 2u) {
+            uint ww1 = WaveActiveMin(w1);
+            if (WaveIsFirstLane() && ww1 != 0xffffffffu) InterlockedMin(stg[_stgBase + 5u], ww1);
+        }
+        if (nbins >= 3u) {
+            uint ww2 = WaveActiveMin(w2);
+            if (WaveIsFirstLane() && ww2 != 0xffffffffu) InterlockedMin(stg[_stgBase + 6u], ww2);
+        }
+        if (nbins >= 4u) {
+            uint ww3 = WaveActiveMin(w3);
+            if (WaveIsFirstLane() && ww3 != 0xffffffffu) InterlockedMin(stg[_stgBase + 7u], ww3);
+        }
+#else
+        if (w0 != 0xffffffffu) InterlockedMin(stg[_stgBase + 4u], w0);
+        if (nbins >= 2u && w1 != 0xffffffffu) InterlockedMin(stg[_stgBase + 5u], w1);
+        if (nbins >= 3u && w2 != 0xffffffffu) InterlockedMin(stg[_stgBase + 6u], w2);
+        if (nbins >= 4u && w3 != 0xffffffffu) InterlockedMin(stg[_stgBase + 7u], w3);
+#endif
         GroupMemoryBarrierWithGroupSync();
-        MF_UNROLL for (uint i = 0; i < R; ++i)
-            if (myMag[i] != 0u) InterlockedMin(stg[_stgBase+myBin[i]], tid*R+i);
+
+        uint baseOut = pair * nbins;
+        if (w0 != 0xffffffffu && w0 == stg[_stgBase + 4u]) {
+            peakIdx[baseOut + 0u] = int(slotToIndex(w0));
+            peakVal[baseOut + 0u] = v0;
+        }
+        if (nbins >= 2u && w1 != 0xffffffffu && w1 == stg[_stgBase + 5u]) {
+            peakIdx[baseOut + 1u] = int(slotToIndex(w1));
+            peakVal[baseOut + 1u] = v1;
+        }
+        if (nbins >= 3u && w2 != 0xffffffffu && w2 == stg[_stgBase + 6u]) {
+            peakIdx[baseOut + 2u] = int(slotToIndex(w2));
+            peakVal[baseOut + 2u] = v2;
+        }
+        if (nbins >= 4u && w3 != 0xffffffffu && w3 == stg[_stgBase + 7u]) {
+            peakIdx[baseOut + 3u] = int(slotToIndex(w3));
+            peakVal[baseOut + 3u] = v3;
+        }
+        if (tid < nbins && stg[_stgBase + 4u + tid] == 0xffffffffu) {
+            peakIdx[baseOut + tid] = -1;
+            peakVal[baseOut + tid] = float2(0.0f, 0.0f);
+        }
+    } else {
+        // General nbins > 4 path: track above-threshold and tied-max registers via a 64-bit
+        // scalar bitmask (aboveLo/aboveHi, candLo/candHi) instead of myMag[R]/myBin[R] arrays.
+        for (uint b = tid; b < nbins; b += WG) stg[_stgBase + b] = thrBits;
         GroupMemoryBarrierWithGroupSync();
-        MF_UNROLL for (uint i = 0; i < R; ++i) {
-            if (myMag[i] != 0u && stg[_stgBase+myBin[i]] == tid*R+i) {
-                uint o = pair * nbins + myBin[i];
-                peakIdx[o] = int(slotToIndex(tid*R+i));
-                peakVal[o] = float2(float(r[i].x), float(r[i].y));
+
+        uint aboveLo = 0u, aboveHi = 0u;
+        MF_UNROLL for (uint i = 0u; i < R; ++i) {
+            uint idx = slotToIndex(tid * R + i);
+            if (idx >= winStart && idx < winEnd) {
+                float rx = float(r[i].x), ry = float(r[i].y);
+                uint mag = asuint(rx * rx + ry * ry);
+                if (mag > thrBits) {
+                    uint off = idx - winStart + _binPhase;
+                    uint b = binShift >= 0 ? (off >> uint(binShift)) : (off / binsize);
+                    InterlockedMax(stg[_stgBase + b], mag);
+                    uint bit = 1u << (i & 31u);
+                    if (i < 32u) aboveLo |= bit;
+                    else aboveHi |= bit;
+                }
+            }
+        }
+        GroupMemoryBarrierWithGroupSync();
+
+        uint candLo = 0u, candHi = 0u;
+        if ((aboveLo | aboveHi) != 0u) {
+            MF_UNROLL for (uint i = 0u; i < R; ++i) {
+                uint bit = 1u << (i & 31u);
+                bool wasAbove = (i < 32u) ? ((aboveLo & bit) != 0u) : ((aboveHi & bit) != 0u);
+                if (wasAbove) {
+                    uint idx = slotToIndex(tid * R + i);
+                    uint off = idx - winStart + _binPhase;
+                    uint b = binShift >= 0 ? (off >> uint(binShift)) : (off / binsize);
+                    float rx = float(r[i].x), ry = float(r[i].y);
+                    uint mag = asuint(rx * rx + ry * ry);
+                    if (mag == stg[_stgBase + b]) {
+                        if (i < 32u) candLo |= bit;
+                        else candHi |= bit;
+                    }
+                }
+            }
+        }
+        GroupMemoryBarrierWithGroupSync();
+        for (uint b = tid; b < nbins; b += WG) stg[_stgBase + b] = 0xffffffffu;
+        GroupMemoryBarrierWithGroupSync();
+
+        if ((candLo | candHi) != 0u) {
+            MF_UNROLL for (uint i = 0u; i < R; ++i) {
+                uint bit = 1u << (i & 31u);
+                bool isCand = (i < 32u) ? ((candLo & bit) != 0u) : ((candHi & bit) != 0u);
+                if (isCand) {
+                    uint idx = slotToIndex(tid * R + i);
+                    uint off = idx - winStart + _binPhase;
+                    uint b = binShift >= 0 ? (off >> uint(binShift)) : (off / binsize);
+                    InterlockedMin(stg[_stgBase + b], tid * R + i);
+                }
+            }
+        }
+        GroupMemoryBarrierWithGroupSync();
+
+        if ((candLo | candHi) != 0u) {
+            MF_UNROLL for (uint i = 0u; i < R; ++i) {
+                uint bit = 1u << (i & 31u);
+                bool isCand = (i < 32u) ? ((candLo & bit) != 0u) : ((candHi & bit) != 0u);
+                if (isCand) {
+                    uint idx = slotToIndex(tid * R + i);
+                    uint off = idx - winStart + _binPhase;
+                    uint b = binShift >= 0 ? (off >> uint(binShift)) : (off / binsize);
+                    if (stg[_stgBase + b] == tid * R + i) {
+                        uint o = pair * nbins + b;
+                        peakIdx[o] = int(idx);
+                        peakVal[o] = float2(float(r[i].x), float(r[i].y));
+                    }
+                }
             }
         }
         for (uint b = tid; b < nbins; b += WG) {
-            if (stg[_stgBase+b] == 0xffffffffu) {
-                peakIdx[pair*nbins+b] = -1;
-                peakVal[pair*nbins+b] = float2(0, 0);
+            if (stg[_stgBase + b] == 0xffffffffu) {
+                peakIdx[pair * nbins + b] = -1;
+                peakVal[pair * nbins + b] = float2(0.0f, 0.0f);
             }
         }
     }
-#endif
 #endif
 #endif
 }
 
 #if !COARSE16 && defined(MF_PAIR_OUT)
+[ForceInline]
 void filterPair(uint pair, uint tid,
                 StructuredBuffer<CVal> data, StructuredBuffer<CVal> tmpl,
                 RWStructuredBuffer<int> peakIdx, RWStructuredBuffer<float2> peakVal,
@@ -1242,6 +1365,7 @@ void filterPair(uint pair, uint tid,
 //: different pair, so the reduction must stay per lane -- a wave-wide max
 //: across lanes is the PPG bug again, and the flat-vs-hierarchical guard
 //: is what catches it.
+[ForceInline]
 void peakLane(uint pair, uint tid, uint lane, H magv[16], H re[16], H im[16],
               RWStructuredBuffer<int> peakIdx, RWStructuredBuffer<float2> peakVal,
               uint winStart, uint winEnd, uint thrBits)
@@ -1300,39 +1424,8 @@ void peakLane(uint pair, uint tid, uint lane, H magv[16], H re[16], H im[16],
 
 //: The same election as two peakLane calls -- the largest fp16 |v|^2 in the
 //: window, ties to the LOWEST slot, its (re, im) reported -- for a pair whose
-//: WG threads sit inside one subgroup, without LDS atomics or a dependent LDS
-//: round trip per register.
-//:
-//: peakLane re-read the elected maximum from LDS inside every register's
-//: comparison, so each of its 32 iterations (16 registers x 2 lanes) waited
-//: out an LDS latency behind a branch: 30% of the band-256 coarse kernel,
-//: measured by deleting it. Here the election is a max over 32-bit KEYS,
-//:
-//:     key = (fp16 |v|^2 bits << 16) | (0xFFFF - slot),
-//:
-//: so the larger magnitude wins and, among equal magnitudes, the lower slot.
-//: Non-negative fp16 values order like their bit patterns, and like the
-//: float32 bits peakLane compared, so the elected element is the same one.
-//: The cross-thread max is a shuffle-xor butterfly over the pair's WG lanes,
-//: which ACO emits as DPP max instructions (no LDS). The elected register is
-//: then fetched through the stage by one lane.
-//:
-//: The window test uses that slotToIndex is a bit permutation: the register
-//: index and tid*R occupy disjoint bits, so idx = slotToIndex(tid*R) |
-//: slotToIndex(i), the second term a compile-time constant.
-// The butterfly's lane exchange. The partner lane (lane ^ s, s < WG) is always in the
-// same pair and so the same workgroup, and every lane of the group reaches this call.
-// CUDA: a FULL-warp shuffle. Slang lowers WaveReadLaneAt to shfl.sync with a
-// ballot-derived member mask, which under independent thread scheduling can name a
-// partial warp after the barriers above (wrong peaks, measured on the L40S by the CUDA
-// fold). Vulkan/Metal: subgroup read, which RADV emits as DPP with every lane active.
-#if defined(MF_CUDA)
-__target_intrinsic(cuda, "__shfl_xor_sync(0xffffffffu, $0, $1)")
-uint mfShflXor(uint v, uint s);
-#else
-uint mfShflXor(uint v, uint s) { return WaveReadLaneAt(v, WaveGetLaneIndex() ^ s); }
-#endif
-
+//: WG threads sit inside one subgroup, without LDS atomics or any barriers.
+[ForceInline]
 void peakTwoWave(uint pairA, uint pairB, uint tid, H re[16], H im[16],
                  RWStructuredBuffer<int> peakIdx, RWStructuredBuffer<float2> peakVal,
                  uint winStart, uint winEnd, uint thrBits)
@@ -1387,51 +1480,31 @@ void peakTwoWave(uint pairA, uint pairB, uint tid, H re[16], H im[16],
     bool hitB = infB || asuint(f16tof32(kB >> 16)) > thrBits;
 #endif
 
-    // Fetch the elected registers through the stage, one component at a
-    // time and CH registers per chunk -- the stage holds CH*WG values.
+    // Fetch each lane's elected complex half2 directly from the winning thread via mfShflXor,
+    // avoiding 4 barriers and LDS round trips. On tid == 0, lane ^ w == lane + w since WG
+    // divides subgroup size and pairs occupy WG-aligned subgroup slices.
     uint wA = slotA >> 4, iA = slotA & 15u, wB = slotB >> 4, iB = slotB & 15u;
-    float vA[2], vB[2];
-    vA[0] = vA[1] = vB[0] = vB[1] = 0.0f;
-    [ForceUnroll] for (uint comp = 0; comp < 2; ++comp) {
-        [ForceUnroll] for (uint c = 0; c < R / CH; ++c) {
-            GroupMemoryBarrierWithGroupSync();
-            MF_UNROLL for (uint j = 0; j < CH; ++j)
-                stg[_stgBase + j * XS + tid] = bit_cast<uint>(comp == 0 ? re[c * CH + j] : im[c * CH + j]);
-            GroupMemoryBarrierWithGroupSync();
-            if (tid == 0) {
-                if (iA >= c * CH && iA < (c + 1) * CH)
-                    vA[comp] = f16tof32(stg[_stgBase + (iA - c * CH) * XS + wA]);
-                if (iB >= c * CH && iB < (c + 1) * CH)
-                    vB[comp] = f16tof32(stg[_stgBase + (iB - c * CH) * XS + wB] >> 16);
-            }
-        }
+    H selA = H(0.0f), selB = H(0.0f);
+    MF_UNROLL for (uint j = 0u; j < R; ++j) {
+        if (j == iA) selA = H(re[j].x, im[j].x);
+        if (j == iB) selB = H(re[j].y, im[j].y);
     }
+    H gotA = bit_cast<H>(mfShflXor(bit_cast<uint>(selA), wA));
+    H gotB = bit_cast<H>(mfShflXor(bit_cast<uint>(selB), wB));
     if (tid == 0 && pairA != NOPAIR) {
         peakIdx[pairA] = hitA ? int(slotToIndex(slotA)) : -1;
         peakVal[pairA] = infA ? float2(3.402823e38f, 0.0f)
-                       : (hitA ? float2(vA[0], vA[1]) : float2(0.0f, 0.0f));
+                       : (hitA ? float2(float(gotA.x), float(gotA.y)) : float2(0.0f, 0.0f));
     }
     if (tid == 0 && pairB != NOPAIR) {
         peakIdx[pairB] = hitB ? int(slotToIndex(slotB)) : -1;
         peakVal[pairB] = infB ? float2(3.402823e38f, 0.0f)
-                       : (hitB ? float2(vB[0], vB[1]) : float2(0.0f, 0.0f));
+                       : (hitB ? float2(float(gotB.x), float(gotB.y)) : float2(0.0f, 0.0f));
     }
 }
 
 //: The gate decision alone, for a pair whose WG lanes sit in one SIMD group (every backend).
-//:
-//: What the hierarchical gate consumes from tier 0 is whether a pair passes: the
-//: compaction lists a pair when the magnitude of its reported value reaches the gate
-//: threshold, and nothing reads tier 0's index. peakTwoWave elects the winning slot
-//: (packed keys), reads its (re, im) back through threadgroup memory and tests every
-//: register for overflow; on the M2 those cost ~25% of the band-256 gate beyond what this
-//: needs. Here every pair reports sqrt(P16max), P16max the largest fp16 |v|^2 in the
-//: window, straight from packed half2 reductions: the tier's own statistic, as
-//: peakTwoWave's elected element is. The all-lag energy is kept for failing open only.
-//: Index: 0 for a passing pair (a lag in the band), -1 otherwise.
-//:
-//: Taken when the host passes the gate threshold (magnitude bits) in thrBits; with 0,
-//: peakTwoWave runs and reports its elected element.
+[ForceInline]
 void peakTwoGate(uint pairA, uint pairB, uint tid, H re[16], H im[16],
                  RWStructuredBuffer<int> peakIdx, RWStructuredBuffer<float2> peakVal,
                  uint winStart, uint winEnd, float thr)
@@ -1475,6 +1548,7 @@ void peakTwoGate(uint pairA, uint pairB, uint tid, H re[16], H im[16],
 //: only in template, so the data broadcasts to both lanes and the templates
 //: fill one lane each. Every operation from here to the magnitude is
 //: elementwise and packs.
+[ForceInline]
 void filterTwo(uint pairA, uint pairB, uint tA, uint tB, uint tid,
                C dreg[RADIX], StructuredBuffer<CVal> tmpl,
                RWStructuredBuffer<int> peakIdx, RWStructuredBuffer<float2> peakVal,
@@ -1554,7 +1628,7 @@ void filterTwo(uint pairA, uint pairB, uint tA, uint tB, uint tid,
         if (thrBits != 0u)
             peakTwoGate(pairA, pairB, tid, re, im, peakIdx, peakVal, winStart, winEnd, asfloat(thrBits));
         else
-        peakTwoWave(pairA, pairB, tid, re, im, peakIdx, peakVal, winStart, winEnd, thrBits);
+            peakTwoWave(pairA, pairB, tid, re, im, peakIdx, peakVal, winStart, winEnd, thrBits);
     } else {
         H magv[16];
         MF_UNROLL for (uint i = 0; i < R; ++i) {
@@ -1583,6 +1657,7 @@ void filterTwo(uint pairA, uint pairB, uint tA, uint tB, uint tid,
 #endif
 
 #if COARSE16
+[ForceInline]
 void filterPair(uint pair, uint tid,
                 StructuredBuffer<CVal> data, StructuredBuffer<CVal> tmpl,
                 RWStructuredBuffer<int> peakIdx, RWStructuredBuffer<float2> peakVal,
