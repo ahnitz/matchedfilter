@@ -604,9 +604,12 @@ class HierarchicalFilter(MatchedFilter):
         cm = _calibration.calibrate_costs(self.n, self.ntemplates,
                                         group=policy.get('series_group', _gatechain.default_series_group(self.n)))
         price = self._direct_price()
-        return (cm.with_direct(price, single_tier=_gatechain.cpu_gate_kind() != "f16",
-                               fraction=getattr(self, "_one_bin_frac", 1.0))
-                if price is not None else cm)
+        if price is None:
+            return cm
+        mfrac = max(0.0, 1.0 - float(getattr(self, "_unsplit_bin_frac", 1.0)))
+        return cm.with_direct(price, single_tier=_gatechain.cpu_gate_kind() != "f16",
+                              fraction=getattr(self, "_one_bin_frac", 1.0),
+                              base=0.25 * cm.refine(0.1), multi_frac=mfrac)
 
     def _direct_key(self):
         """The direct refine's rounded tap length when it is priced into this plan's chain

@@ -1459,7 +1459,6 @@ int ap_mf_run_pairs_packed(ap_mf_plan *p, int d0,
                            int t0, size_t binsize, float threshold,
                            ap_peak *peaks, size_t start, size_t end){
   if(!p || npairs < 1 || !binsize) return 0;
-  if(!(p->pb && p->dsr && p->tsr)) return 0;
   if(d0 < 0 || d0 >= p->nd) return -1;
   for(int j = 0; j < npairs; j++){
     if(dsel[j] < 0 || d0 + dsel[j] >= p->nd) return -1;
@@ -1468,6 +1467,19 @@ int ap_mf_run_pairs_packed(ap_mf_plan *p, int d0,
   if(end > p->n) end = p->n;
   if(start >= end) return 0;
   const size_t n = p->n, nb = ap_bin_count(binsize, start, end, 0u);
+  if(!(p->pb && p->dsr && p->tsr)){
+    const unsigned *saved = p->bph;
+    p->bph = NULL;
+    for(int j = 0; j < npairs; j++){
+      if(ap_mf_run(p, d0 + dsel[j], 1, t0 + tsel[j], 1, binsize, threshold,
+                   peaks + (size_t)j * nb, NULL, start, end) < 0){
+        p->bph = saved;
+        return -1;
+      }
+    }
+    p->bph = saved;
+    return 1;
+  }
   const int W = p->pb;
   if(p->pkcap < (size_t)W * nb){
     free(p->pkbuf);
